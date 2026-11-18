@@ -222,6 +222,18 @@ impl<K: SlotKey, V> IdTab<K, V> {
         }
         self.get_mut(&k).expect("just stored")
     }
+    /// Drop the entry of `k`. The page stays: a test for an empty page reads the whole page, so `retain(|_, _| true)` frees the empty
+    /// pages after a batch of removes.
+    pub fn remove(&mut self, k: &K) -> Option<V> {
+        let s = k.slot();
+        let p = self.pages.get_mut(s >> PAGE_BITS)?.as_mut()?;
+        let e = &mut p[s & ((1 << PAGE_BITS) - 1)];
+        if !e.as_ref().is_some_and(|(kk, _)| kk == k) {
+            return None;
+        }
+        self.len -= 1;
+        e.take().map(|(_, v)| v)
+    }
     pub fn retain(&mut self, mut keep: impl FnMut(&K, &mut V) -> bool) {
         for slot in &mut self.pages {
             let Some(p) = slot else { continue };
@@ -344,29 +356,54 @@ impl Dom {
     /// Make the object of `t` the owner of its listeners, once. Call it where a function goes into a listener.
     pub(crate) fn own_listeners(&self, st: &mut State, it: &mut Interp<'_>, t: Target) {
         if let Some(l) = st.listeners.get_mut(&t) {
-            self.own(&mut st.owners, &st.by_node, it, t, l);
+            self.own(&mut st.owners, it, t, l);
         }
     }
 
     /// `own_listeners` for the list `l` of `t`. The key in the list is checked against the owner table, so a freed key that another
-    /// owner took is not trusted. A node without a wrapper is skipped: its listeners hold the global object until a wrapper exists
-    /// (`browser_handlers.rs`).
+    /// owner took is not trusted. A node needs nothing: the key of its wrapper (`set_wrapper`) covers its listeners. A node without a
+    /// wrapper has listeners that hold the global object until a wrapper exists (`browser_handlers.rs`).
     #[inline]
-    pub(crate) fn own(&self, owners: &mut Owners, by_node: &IdTab<NodeId, ObjId>, it: &mut Interp<'_>, t: Target, l: &mut Listeners) {
+    pub(crate) fn own(&self, owners: &mut Owners, it: &mut Interp<'_>, t: Target, l: &mut Listeners) {
         if l.key != NO_KEY && matches!(owners.slots.get(l.key as usize), Some(Some(Owner::Target(x))) if *x == t) {
             return;
         }
-        // The object whose life the listeners follow: the global object, the wrapper of a node, or the target object.
+        // The object whose life the listeners follow: the global object or the target object.
         let o = match t {
             Target::Window => *self.global.get().expect("installed"),
-            Target::Node(n) => match by_node.get(&n) {
-                Some(&o) => o,
-                None => return,
-            },
+            Target::Node(_) => return,
             Target::Obj(o) => o,
         };
         l.key = owners.key(Owner::Target(t));
         it.set_host_owner_obj(o, l.key);
+    }
+
+    /// Make `o` the wrapper of `n`. The wrapper is the owner of its node target: its trace visits the wrappers next to it in the tree
+    /// and the listeners of the node.
+    pub(crate) fn set_wrapper(&self, st: &mut State, it: &mut Interp<'_>, n: NodeId, o: ObjId) {
+        let key = st.owners.key(Owner::Target(Target::Node(n)));
+        st.by_node.insert(n, it.trace_value(Value::Object(o)));
+        st.by_obj.insert(o, Target::Node(n));
+        it.set_host_owner_obj(o, key);
+    }
+}
+
+impl State {
+    /// The wrapper object of `n`. Transitional: it reads the raw value, for code that still keeps `ObjId`s.
+    #[inline]
+    pub(crate) fn wrapper(&self, n: NodeId) -> Option<ObjId> {
+        match self.by_node.get(&n)?.raw() {
+            Value::Object(o) => Some(*o),
+            _ => None,
+        }
+    }
+
+    /// Each node with a wrapper, and the wrapper object. Transitional, as `wrapper`.
+    pub(crate) fn wrappers(&self) -> impl Iterator<Item = (NodeId, ObjId)> + '_ {
+        self.by_node.iter().filter_map(|(&n, w)| match *w.raw() {
+            Value::Object(o) => Some((n, o)),
+            _ => None,
+        })
     }
 }
 
@@ -526,7 +563,9 @@ pub(crate) struct State {
     /// The state override of a caret (`browser_editing.rs`): where the caret was and what bold, italic and underline are to be.
     #[allow(clippy::type_complexity)] // A one-off tuple: a named alias would add nothing.
     pub style_override: Option<((NodeId, u32), [Option<bool>; 3])>,
-    pub by_node: IdTab<NodeId, ObjId>,
+    /// The wrapper of each node that has one. The wrapper is the owner of its node target (`set_wrapper`). The table is not
+    /// visited as a whole, so its entries are weak.
+    pub by_node: IdTab<NodeId, bare_js_api::Traced<Value>>,
     pub by_obj: IdTab<ObjId, Target>,
     pub listeners: IdMap<Target, Listeners>,
     pub n_listeners: usize,
@@ -743,8 +782,26 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
         let st = self.st.borrow();
         match st.owners.slots.get(key as usize).copied().flatten() {
             Some(Owner::Target(tg)) => {
-                for l in st.listeners.get(&tg).into_iter().flatten() {
-                    t.visit(&l.cb);
+                if st.n_listeners != 0 {
+                    for l in st.listeners.get(&tg).into_iter().flatten() {
+                        t.visit(&l.cb);
+                    }
+                }
+                // A wrapper keeps the wrappers of its parent, its children, its shadow host or root and its template content. So the wrappers
+                // of a tree are one cycle: a detached tree lives while a script holds one of its wrappers, and an expando is not lost.
+                if let Target::Node(n) = tg {
+                    let doc = self.doc.borrow();
+                    // Separate loops: a chain checks its state for each child.
+                    for x in doc.children(n) {
+                        if let Some(w) = st.by_node.get(&x) {
+                            t.visit(w);
+                        }
+                    }
+                    for x in [doc.parent(n), doc.shadow_host(n), doc.shadow_root(n), doc.template_content(n)].into_iter().flatten() {
+                        if let Some(w) = st.by_node.get(&x) {
+                            t.visit(w);
+                        }
+                    }
                 }
             }
             Some(Owner::Event(o)) => {
@@ -752,16 +809,12 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
                 for v in [&e.target, &e.current, &e.detail, &e.related] {
                     t.visit(v);
                 }
-                // The path lives only during a dispatch. Its wrappers become traced references with the DOM wrapper step of S0.4.
-                for &p in &e.path {
-                    match p {
-                        Target::Node(n) => {
-                            if let Some(&w) = st.by_node.get(&n) {
-                                t.visit_raw(Value::Object(w));
-                            }
-                        }
-                        Target::Obj(x) => t.visit_raw(Value::Object(x)),
-                        Target::Window => {}
+                // The path lives only during a dispatch. An object target can only be first, and `target` holds it.
+                for p in &e.path {
+                    if let Target::Node(n) = p
+                        && let Some(w) = st.by_node.get(n)
+                    {
+                        t.visit(w);
                     }
                 }
             }
@@ -772,9 +825,25 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
     fn prune(&self, dead: &[u32]) {
         let mut guard = self.st.borrow_mut();
         let st = &mut *guard;
+        let n = st.by_node.len();
         for &k in dead {
-            // The listeners of a dead target went with the old host's prune.
+            // A dead wrapper takes its identity entries and the listeners of its node. Other targets lost theirs in the old host's prune.
+            if let Some(Owner::Target(t @ Target::Node(n))) = st.owners.slots[k as usize]
+                && let Some(w) = st.by_node.remove(&n)
+            {
+                if let Value::Object(o) = *w.raw() {
+                    st.by_obj.remove(&o);
+                }
+                if !st.listeners.is_empty()
+                    && let Some(l) = st.listeners.remove(&t)
+                {
+                    st.n_listeners -= l.len();
+                }
+            }
             st.owners.release(k);
+        }
+        if st.by_node.len() != n {
+            st.by_node.retain(|_, _| true);
         }
     }
 }
@@ -854,16 +923,6 @@ impl Host for Dom {
         if self.web.active.get() {
             crate::browser_web::trace(self, owner, out);
         }
-        let st = self.st.borrow();
-        if let Some(&t) = st.by_obj.get(&owner) {
-            if let Target::Node(n) = t {
-                let doc = self.doc.borrow();
-                out.extend(doc.parent(n).and_then(|p| st.by_node.get(&p)).map(|&o| Value::Object(o)));
-                out.extend(doc.children(n).filter_map(|c| st.by_node.get(&c)).map(|&o| Value::Object(o)));
-                // A host and its root (either mode) keep each other's wrapper alive, so a detached pair is one cycle and an expando is not lost.
-                out.extend(doc.shadow_host(n).into_iter().chain(doc.shadow_root(n)).chain(doc.template_content(n)).filter_map(|x| st.by_node.get(&x)).map(|&o| Value::Object(o)));
-            }
-        }
         self.fetch.trace(owner, out);
         self.streams.trace(owner, out);
     }
@@ -889,8 +948,8 @@ impl Host for Dom {
         crate::browser_controls::prune(self, live);
         let mut guard = self.st.borrow_mut();
         let st = &mut *guard;
-        st.by_obj.retain(|&o, t| matches!(t, Target::Window) || live(o));
-        st.by_node.retain(|_, &mut o| live(o));
+        // Node wrappers go in the interface prune, by their keys.
+        st.by_obj.retain(|&o, t| matches!(t, Target::Window | Target::Node(_)) || live(o));
         let (by_node, by_obj) = (&st.by_node, &st.by_obj);
         st.listeners.retain(|t, _| match t {
             Target::Window => true,
@@ -1170,7 +1229,7 @@ impl Dom {
 
     /// The wrapper of `node`. It is made with the wrappers of all its ancestors (see the header).
     pub(crate) fn wrap(&self, it: &mut Interp<'_>, node: NodeId) -> R<Value> {
-        if let Some(&o) = self.st.borrow().by_node.get(&node) {
+        if let Some(o) = self.st.borrow().wrapper(node) {
             return Ok(Value::Object(o));
         }
         let mut chain = Vec::new();
@@ -1225,9 +1284,7 @@ impl Dom {
                 if self.ce.on.get() { self.ce_proto(&doc, n, proto) } else { proto }
             };
             let o = self.obj(it, proto)?;
-            let mut st = self.st.borrow_mut();
-            st.by_node.insert(n, o);
-            st.by_obj.insert(o, Target::Node(n));
+            self.set_wrapper(&mut self.st.borrow_mut(), it, n, o);
             first.get_or_insert(o);
         }
         Ok(Value::Object(first.expect("chain has the node")))

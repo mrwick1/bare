@@ -398,7 +398,7 @@ pub(crate) fn value(d: &Dom, owner: ObjId, key: &[u16]) -> Option<Value> {
     if window {
         s.contexts.get(&n).copied().map(Value::Object)
     } else {
-        d.st.borrow().by_node.get(&n).copied().map(Value::Object)
+        d.st.borrow().wrapper(n).map(Value::Object)
     }
 }
 pub(crate) fn len(d: &Dom, owner: ObjId) -> Result<Option<usize>, HeapError> {
@@ -644,12 +644,12 @@ pub(crate) fn note_owner(d: &Dom, it: &mut Interp<'_>, this: Value, made: Value)
 pub(crate) fn trace(d: &Dom, owner: ObjId, out: &mut Vec<Value>) {
     if let Some(s) = d.frames.state().as_ref() {
         for (&n, &o) in &s.contexts {
-            if d.st.borrow().by_node.get(&n) == Some(&owner) {
+            if d.st.borrow().wrapper(n) == Some(owner) {
                 out.push(Value::Object(o));
             }
         }
         for (&n, &o) in &s.docs {
-            if d.st.borrow().by_node.get(&n) == Some(&owner) {
+            if d.st.borrow().wrapper(n) == Some(owner) {
                 out.push(Value::Object(o));
             }
         }

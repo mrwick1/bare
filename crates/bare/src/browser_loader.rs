@@ -346,7 +346,7 @@ impl Dom {
         let s = &self.scripts;
         out.extend(s.fixed.borrow().iter().map(|&o| Value::Object(o)));
         let st = self.st.borrow();
-        let mut keep = |n: &NodeId| out.extend(st.by_node.get(n).map(|&o| Value::Object(o)));
+        let mut keep = |n: &NodeId| out.extend(st.wrapper(*n).map(Value::Object));
         s.inline.borrow().iter().for_each(|(n, _)| keep(n));
         s.external.borrow().iter().for_each(|e| match e {
             Ext::Fetch(n, _) | Ext::Fail(n) | Ext::Text(n, _) => keep(n),

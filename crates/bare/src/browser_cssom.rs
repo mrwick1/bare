@@ -349,7 +349,7 @@ pub(crate) fn define(d: &Dom, it: &mut Interp<'_>, name: &str) -> R<bool> {
             if it.heap.peek_own_property(d.p().link, key).map_err(|e| it.heap_error(e))?.is_none() {
                 d.def_get(it, d.p().link, name, sheet_get, None)?;
             }
-            let nodes: Vec<_> = d.st.borrow().by_node.iter().map(|(&n, &o)| (n, o)).collect();
+            let nodes: Vec<_> = d.st.borrow().wrappers().collect();
             it.charge(nodes.len() as u64)?;
             for (n, o) in nodes {
                 if d.doc.borrow().is_html(n, "style") {

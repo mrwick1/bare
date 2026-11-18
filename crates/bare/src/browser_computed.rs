@@ -1336,7 +1336,7 @@ pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
 /// A computed declaration keeps its element's wrapper alive (and so the element's tree, attached or not).
 pub(crate) fn trace(d: &Dom, owner: ObjId, out: &mut Vec<Value>) {
     if let Some(&el) = d.computed.objs.borrow().get(&owner) {
-        out.extend(d.st.borrow().by_node.get(&el).map(|&o| Value::Object(o)));
+        out.extend(d.st.borrow().wrapper(el).map(Value::Object));
     }
 }
 

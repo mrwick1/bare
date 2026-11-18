@@ -259,14 +259,23 @@ type FxSet<K> = HashSet<K, BuildHasherDefault<Fx>>;
 
 /// The objects a collect pass has reached: for each heap slot, the generation of the handle that reached it, plus one (0 is unreached).
 /// A set of handles cost a hash for each insert and each test of the prune pass; this costs one load. A handle of an older generation
-/// of the slot is not in the set.
+/// of the slot is not in the set. Before marking, the entry of an owner holds its host key plus one, shifted by 33 bits
+/// (`api_owners`), so marking an object tells if it is an owner with no other lookup. Marking clears the key.
 pub(crate) struct Seen(Vec<u64>);
 impl Seen {
-    fn insert(&mut self, o: ObjId) -> bool {
-        std::mem::replace(&mut self.0[o.slot()], o.gn as u64 + 1) != o.gn as u64 + 1
+    /// Mark `o`. `None` when it was marked before; else the owner bits (0: not an owner).
+    #[inline]
+    fn mark(&mut self, o: ObjId) -> Option<u64> {
+        let v = o.gn as u64 + 1;
+        let old = std::mem::replace(&mut self.0[o.slot()], v);
+        (old != v).then_some(old >> 33)
     }
-    fn contains(&self, o: &ObjId) -> bool {
+    pub(crate) fn contains(&self, o: &ObjId) -> bool {
         self.0[o.slot()] == o.gn as u64 + 1
+    }
+    /// Note that `o` is an owner with host key `key`. Call it before marking.
+    pub(crate) fn set_owner(&mut self, o: ObjId, key: u32) {
+        self.0[o.slot()] = (key as u64 + 1) << 33;
     }
 }
 
@@ -1003,7 +1012,7 @@ impl<'p> Interp<'p> {
             return Err(unsupported("collect during a call", Span::default()));
         }
         let mut seen = Seen(vec![0; self.heap.object_slots()]);
-        let mut owners_done = 0;
+        self.api_owners(&mut seen);
         let mut env_seen = vec![false; self.envs.len()];
         env_seen[FRAME_ENV as usize] = true;
         let mut work: Vec<Value> = vec![Value::Object(self.global), Value::Object(self.object_proto), Value::Object(self.function_proto), Value::Object(self.array_proto), self.ret, self.completion];
@@ -1052,14 +1061,12 @@ impl<'p> Interp<'p> {
                 if !self.promise.caps.is_empty() && self.caps_trace(&seen, &mut work) {
                     continue;
                 }
-                if owners_done < self.api.owners.len() && self.api_trace(&seen, &mut owners_done, &mut host_vals, &mut work) {
-                    continue;
-                }
                 break;
             };
             let Value::Object(o) = v else { continue };
-            if !seen.insert(o) {
-                continue;
+            let Some(owner) = seen.mark(o) else { continue };
+            if owner != 0 {
+                self.api_trace(owner as u32 - 1, &mut host_vals, &mut work);
             }
             // A plain array has no function entry, promise, host wrapper, iterator or class state, and no private fields unless an instance of a subclass
             // (`cls.privs`). It can be the key of a weak collection: `pending` holds the values of keys that were not reached yet. Without these the

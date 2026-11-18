@@ -15,8 +15,8 @@ pub(crate) struct ApiState<'p> {
     host: Option<Rc<dyn bare_js_api::Host<Interp<'p>>>>,
     abort: Option<Error>,
     /// The objects with a host key (`set_host_owner`), in no order. `collect` calls the interface host's `trace` for the reached
-    /// ones, and its `prune` with the keys of the dead ones. A list, not a map: a new owner is one push, and `collect` reads the
-    /// list only when its work list is empty, so a marked object pays nothing for it.
+    /// ones, and its `prune` with the keys of the dead ones. A list, not a map: a new owner is one push. `collect` writes the keys
+    /// into its mark table first, so marking an object finds its key with no extra lookup.
     owners: Vec<(ObjId, u32)>,
 }
 
@@ -28,22 +28,22 @@ impl ApiState<'_> {
 }
 
 impl<'p> Interp<'p> {
-    /// Trace the owners that `collect` reached since the last call. `collect` calls it when its work list is empty, and goes on
-    /// when it gives new work. The traced owners move to the front of the list: `done` of them are traced. A pass reads only the
-    /// owners not traced yet. The heap marks its objects again from roots, so the values also go to `roots` (as the old host's
-    /// values do).
-    pub(crate) fn api_trace(&mut self, seen: &Seen, done: &mut usize, roots: &mut Vec<Value>, work: &mut Vec<Value>) -> bool {
-        let Some(h) = self.api.host.clone() else { return false };
-        let (from, owners) = (roots.len(), &mut self.api.owners);
-        for i in *done..owners.len() {
-            if seen.contains(&owners[i].0) {
-                owners.swap(*done, i);
-                h.trace(owners[*done].1, &mut bare_js_api::Tracer::new(roots));
-                *done += 1;
-            }
+    /// Note the owners in `seen` before a collection marks, so that marking an owner finds its key.
+    pub(crate) fn api_owners(&self, seen: &mut Seen) {
+        for &(o, k) in &self.api.owners {
+            seen.set_owner(o, k);
         }
-        work.extend_from_slice(&roots[from..]);
-        roots.len() > from
+    }
+
+    /// The interface host's references of the owner with host key `key`. `collect` calls it when it marks the owner. The heap marks
+    /// its objects again from roots, so the values also go to `roots` (as the old host's values do).
+    #[cold]
+    pub(crate) fn api_trace(&self, key: u32, roots: &mut Vec<Value>, work: &mut Vec<Value>) {
+        if let Some(h) = &self.api.host {
+            let from = roots.len();
+            h.trace(key, &mut bare_js_api::Tracer::new(roots));
+            work.extend_from_slice(&roots[from..]);
+        }
     }
 
     /// Drop the owners that `collect` did not reach, and give their keys to the interface host.

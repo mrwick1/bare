@@ -156,7 +156,7 @@ pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
 pub(crate) fn trace(d: &Dom, owner: ObjId, out: &mut Vec<Value>) {
     let s = d.plat.s.borrow();
     if let Some(&el) = s.lists.get(&owner) {
-        out.extend(d.st.borrow().by_node.get(&el.0).map(|&o| Value::Object(o)));
+        out.extend(d.st.borrow().wrapper(el.0).map(Value::Object));
         out.extend(s.toks.get(&owner).into_iter().flat_map(|t| t.vals.iter().map(|&v| Value::String(v))));
     } else if let Some(i) = s.iters.get(&owner) {
         out.push(Value::Object(i.list));

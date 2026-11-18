@@ -378,11 +378,7 @@ fn enable_classes(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     }
     d.els.tagged.set(d.els.tagged.get() | 4);
     let nodes: Vec<_> =
-        d.st.borrow()
-            .by_node
-            .iter()
-            .map(|(&n, &o)| (n, o))
-            .collect();
+        d.st.borrow().wrappers().collect();
     it.charge(nodes.len() as u64)?;
     for (n, o) in nodes {
         let tag = {
