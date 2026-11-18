@@ -34,9 +34,9 @@ struct Compiled {
     /// For each constant: its global cell. `GetGlobal` and `SetGlobal` read it. Constants that are not names hold a key that is
     /// never read.
     cells: Box<[GCell]>,
-    /// Operations run and entries at word 0 (`bc-hist`).
+    /// Operations run, entries at word 0, and whether `rfc_analyze` stopped at a lazy inner function (`bc-hist`).
     #[cfg(feature = "bc-hist")]
-    hist: (std::cell::Cell<u64>, std::cell::Cell<u64>),
+    hist: (std::cell::Cell<u64>, std::cell::Cell<u64>, bool),
 }
 
 /// A global name of compiled code and what the loop learned about it (`GetGlobal`, `SetGlobal`). Both hits are what the full path
@@ -117,6 +117,9 @@ struct BcState {
     why: &'static str,
     #[cfg(feature = "bc-hist")]
     hist: bc_hist::Hist,
+    /// The last `rf_start` stopped at a lazy inner function (`bc-hist`).
+    #[cfg(feature = "bc-hist")]
+    lazy_env: bool,
     /// Poison mode (tests and the feature `bc-poison`): the empty program that `prog` holds while the script is parked.
     #[cfg(any(test, feature = "bc-poison"))]
     poison: Option<Rc<crate::ast::Program<'static>>>,
