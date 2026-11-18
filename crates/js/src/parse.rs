@@ -248,6 +248,8 @@ fn parse_counted<'a>(source: &'a str, mut limits: Limits, used: &mut u32, module
     let r = if module { p.parse_module_body() } else { p.parse_program() };
     *used = p.used;
     r?;
+    #[cfg(feature = "census")]
+    crate::census::program(&p.p, false);
     Ok(p.p)
 }
 
@@ -301,6 +303,8 @@ pub(crate) fn parse_lazy_function(src: &Rc<str>, marks: &crate::ast::Marks, modu
     }
     p.parse_function_rest(lz.start, lz.name, lz.kind, false, false)?;
     let used = p.used;
+    #[cfg(feature = "census")]
+    crate::census::program(&p.p, true);
     let mut prog = p.p.with_shared_source(src.clone());
     prog.share_marks(marks);
     prog.lz_mut().tree = true;
