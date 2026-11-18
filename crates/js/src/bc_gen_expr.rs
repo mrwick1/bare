@@ -180,7 +180,11 @@ impl Gen<'_, '_> {
                 self.free(t);
                 Ok(())
             }
-            ExprKind::Seq(l) => prog.list(l).try_for_each(|x| self.expr(x, dst)),
+            // The parts before the last keep no value (`expr_void`).
+            ExprKind::Seq(l) => {
+                let n = l.len();
+                prog.list(l).enumerate().try_for_each(|(i, x)| if i + 1 < n as usize { self.expr_void(x) } else { self.expr(x, dst) })
+            }
             ExprKind::Super => Err("super"),
             ExprKind::Class(_) => Err("class"),
             ExprKind::Tagged { .. } => Err("tagged template"),

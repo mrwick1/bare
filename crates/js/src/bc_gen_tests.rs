@@ -638,6 +638,27 @@ fn fused_compare_jumps_agree_with_the_tree_walker() {
     });
 }
 
+/// `&&`, `||` and `?:` whose value nobody reads, and the parts of a comma expression before the last, are tests and jumps: each compare is
+/// one fused op, with no value kept. The results and the order of side effects agree with the tree walker.
+#[test]
+fn an_expression_whose_value_is_not_read_keeps_no_value() {
+    big(|| {
+        let src = "var log = []; function f(x) { log.push(x); return x; } \
+                   function t(a, b) { a === 1 && f(1); a !== b || f(2); a === 2 ? f(3) : f(4); a == null && b != 0 && f(5); \
+                   (a === 3 && f(6), a === b || f(7), a < 2 ? f(8) : 0); return (a === 4 ? f(9) : f(10), f(11), b); } \
+                   [[1, 1], [2, 2], [3, 3], [null, 0], [undefined, 1], [4, 'x'], [NaN, NaN]].map(p => t(p[0], p[1])).join() + '|' + log.join()";
+        let text = listing(src);
+        let ops: Vec<&str> = text.lines().filter_map(|l| l.split_whitespace().nth(1)).collect();
+        let bad: Vec<String> = ops.windows(2).filter(|w| matches!(w[0], "StrictEq" | "StrictNe" | "Eq" | "Ne" | "Lt") && matches!(w[1], "JmpIf" | "JmpIfNot")).map(|w| format!("{} then {}", w[0], w[1])).collect();
+        assert!(bad.is_empty(), "{}\n{text}", bad.join("\n"));
+        let want = show(src, Exec::Tree);
+        for mode in [Exec::Auto, Exec::Byte] {
+            assert_eq!(show(src, mode), want, "{mode:?}");
+        }
+        assert!(refused_in(src, Exec::Byte).is_empty());
+    });
+}
+
 /// Run `src` in `mode`: the completion value (an error shows its name and message) and the reasons the generator refused.
 fn run_in(src: &str, mode: Exec) -> (String, Vec<&'static str>) {
     let mut it = Interp::realm(Heap::default(), EvalLimits { max_steps: 50_000_000, ..Default::default() }).unwrap();

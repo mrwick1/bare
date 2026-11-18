@@ -342,17 +342,34 @@ impl Gen<'_, '_> {
     }
 
     /// An expression whose value nobody reads. A register function skips the copy of an assignment and the temporary of `i++`.
+    /// `a && b`, `a || b` and `c ? x : y` are a test and jumps (`jump_cond`), and the parts that run keep no value either.
     pub(super) fn expr_void(&mut self, e: ExprId) -> G<()> {
         let mark = self.top;
         let x = e;
+        match self.prog.expr(x).kind {
+            ExprKind::Seq(l) => {
+                let prog = self.prog.clone();
+                return prog.list(l).try_for_each(|y| self.expr_void(y));
+            }
+            ExprKind::Logical { op: op @ (LogicalOp::And | LogicalOp::Or), left, right } => {
+                let mut skip = Vec::new();
+                self.jump_cond(left, op == LogicalOp::Or, &mut skip)?;
+                self.expr_void(right)?;
+                return self.patch_all(skip);
+            }
+            ExprKind::Cond { test, cons, alt } => {
+                let j = self.jump_if_false(test)?;
+                self.expr_void(cons)?;
+                let end = self.jump(Op::Jmp, 0)?;
+                self.patch_all(j)?;
+                self.expr_void(alt)?;
+                return self.patch(end);
+            }
+            _ => {}
+        }
         if self.rf.is_some() {
             let saved = std::mem::replace(&mut self.pos, self.prog.expr(x).span.start);
             let done = match self.prog.expr(x).kind {
-                ExprKind::Seq(l) => {
-                    let prog = self.prog.clone();
-                    prog.list(l).try_for_each(|y| self.expr_void(y))?;
-                    true
-                }
                 ExprKind::Update { op, arg, .. } => match self.reg_of(arg, true)? {
                     Some(r) => {
                         self.emit(if op == UpdateOp::Inc { Op::Inc } else { Op::Dec }, r, r, 0)?;
