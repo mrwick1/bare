@@ -409,3 +409,83 @@ fn a_sheet_added_later_matches_the_classes_that_the_page_had_before() {
         assert!(got == want, "case {i}: a later sheet gives other styles\n{html}\n{first}\n{later}");
     }
 }
+
+/// A page with a host `x-a` (and a nested host `x-b` in its light children) whose shadow trees have slots, and rules for both trees.
+fn shadow_page(r: &mut Rng) -> (Document, RuleSet) {
+    let (light, inner) = (page(r), page(r));
+    let shadow = format!("{}<slot></slot><div class=c><slot name=s1>{}</slot></div>", page(r), page(r));
+    let mut doc = parse(&format!("<body><x-a class=a>{light}<x-b class=b slot=s1>{inner}</x-b><span slot=s1 class=d>s</span></x-a><p id=out>out</p></body>"));
+    let mut rules = RuleSet::new(VIEW);
+    rules.add(&mut doc, UA_CSS, Origin::UserAgent);
+    let n = 1 + r.next(30);
+    rules.add(&mut doc, &sheet(r, n, false), Origin::Author);
+    let extra = ":host(.a) .b { padding-left: 3px } :host-context(.e) div { padding-left: 4px } ::slotted(.a) { padding-left: 5px } \
+                 slot[name=s1]::slotted(*) { margin-top: 2px } .c > slot { color: red } :host(.c) { margin-right: 6px } slot > .b { padding-left: 7px }";
+    for name in ["x-a", "x-b"] {
+        let host = all(&doc).into_iter().find(|&n| doc.atom_str(match doc.data(n) { NodeData::Element { name, .. } => *name, _ => unreachable!() }) == name).unwrap();
+        let root = doc.attach_shadow(host, true);
+        let frag = parse(&format!("<body>{shadow}</body>"));
+        let body = frag.children(frag.children(frag.root()).next().unwrap()).last().unwrap();
+        let mut stack = vec![(body, root)];
+        while let Some((from_node, to)) = stack.pop() {
+            for c in frag.children(from_node).collect::<Vec<_>>() {
+                let n = doc.import_node(&frag, c).unwrap();
+                doc.move_to(n, to, None);
+                stack.push((c, n));
+            }
+        }
+        let n = 1 + r.next(20);
+        let css = format!("{}{extra}", sheet(r, n, true));
+        rules.add_scoped(&mut doc, &css, Origin::Author, None, root);
+    }
+    (doc, rules)
+}
+
+#[test]
+fn a_restyle_from_the_marks_of_a_page_with_shadow_trees_gives_the_styles_of_a_new_compute() {
+    let mut r = Rng(0x5eed_0f5a_d0e5_1234);
+    let (mut restyled, mut cases) = (0, 0);
+    for i in 0..300 {
+        let (mut doc, rules) = shadow_page(&mut r);
+        let mut styles = rules.compute_kept(&doc);
+        doc.track_damage(bare_html::dom::DAMAGE_STYLE);
+        let elements = all(&doc);
+        let mut did = Vec::new();
+        for _ in 0..1 + r.next(4) {
+            let el = elements[r.next(elements.len())];
+            match r.next(6) {
+                0 | 1 => doc.set_attr(el, "class", &format!("{} {}", r.pick(&CLASSES), r.pick(&CLASSES))),
+                2 => doc.set_attr(el, "slot", r.pick(&["", "s1", "s2"])),
+                3 => doc.set_attr(el, "name", r.pick(&["", "s1", "s2"])),
+                4 => {
+                    // Move it under another element, or into a shadow root, unless that is inside it.
+                    let to = elements[r.next(elements.len())];
+                    let to = if r.chance(20) { doc.shadow_root(to).unwrap_or(to) } else { to };
+                    if std::iter::successors(Some(to), |&n| doc.parent_or_host(n)).any(|n| n == el) {
+                        continue;
+                    }
+                    doc.move_to(el, to, None);
+                }
+                _ => doc.set_attr(el, "title", r.pick(&["x", "y"])),
+            }
+            did.push(format!("{:?}", doc.data(el)));
+        }
+        let Some(marks) = doc.take_damage(bare_html::dom::DAMAGE_STYLE) else { continue };
+        let mut roots = Vec::new();
+        if !marks.iter().all(|&m| rules.roots(&doc, m, &mut roots)) {
+            continue;
+        }
+        cases += 1;
+        let fresh = rules.compute(&doc);
+        let now = all(&doc);
+        let want: Vec<Option<ComputedStyle>> = now.iter().map(|&n| fresh.style(n).cloned()).collect();
+        if rules.restyle(&doc, &mut styles, &roots, &mut Vec::new()) {
+            restyled += 1;
+            let got: Vec<Option<ComputedStyle>> = now.iter().map(|&n| styles.style(n).cloned()).collect();
+            for (k, (g, w)) in got.iter().zip(&want).enumerate() {
+                assert!(g == w, "case {i}: element {k} {:?} differs after {did:?}\nroots {roots:?}\ngot {:?}\nwant {:?}", doc.data(now[k]), g.as_ref().map(|s| s.get(Property::MarginLeft)), w.as_ref().map(|s| s.get(Property::MarginLeft)));
+            }
+        }
+    }
+    assert!(restyled * 10 >= cases * 9, "a restyle ran in {restyled} of {cases} cases");
+}
