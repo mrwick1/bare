@@ -416,12 +416,13 @@ impl Dom {
         Ok(true)
     }
 
-    /// An iframe in the tree got a `src` (an insertion or a change). bare loads no child document, but a page may save a file through a
-    /// hidden iframe whose `src` replies with a download (Gmail does). So a same-origin http(s) `src` is asked for, and the session
-    /// saves the reply only when it is a download; it drops any other reply unread. A cross-origin frame is never asked for: half of a
-    /// third-party frame (a sign-in cookie rotation, an ad) could do harm, and no script of it would run.
-    pub(crate) fn frame_src(&self, n: bare_html::dom::NodeId) {
-        if !self.nav.s.borrow().downloads_on {
+    /// An iframe in the tree got a `src` (an insertion or a change). An http(s) `src` other than `about:blank` makes a child page
+    /// (`browser_child.rs`). Without the child driver (a `Browser` that `run_page` never ran), a same-origin http(s) `src` is asked for
+    /// only to catch a download: the session saves the reply when it is one and drops any other reply unread (Gmail saves a file
+    /// through a hidden iframe). A `src` that was removed or made blank drops the child page.
+    pub(crate) fn frame_src(&self, it: &mut Interp<'_>, n: bare_html::dom::NodeId) {
+        let kids = self.kids.configured();
+        if !kids && !self.nav.s.borrow().downloads_on {
             return;
         }
         let src = {
@@ -433,15 +434,28 @@ impl Dom {
             while let Some(p) = doc.parent(up) {
                 up = p;
             }
-            match (up == doc.root()).then(|| doc.find_atom("src").and_then(|k| doc.attr(n, k))).flatten() {
+            if up != doc.root() {
+                return;
+            }
+            let src = doc.find_atom("src").and_then(|k| doc.attr(n, k));
+            match src {
                 Some(s) => s.trim_matches(|c: char| c <= ' ').to_string(),
+                None if kids => String::new(),
                 None => return,
             }
         };
         let Ok(cur) = self.cur_rec() else { return };
-        let Ok(r) = nu::parse(&src, Some(&cur)) else { return };
-        let url = r.href();
-        if src.is_empty() || r.origin() != cur.origin() || !(url.starts_with("http://") || url.starts_with("https://")) {
+        let resolved = if src.is_empty() { None } else { nu::parse(&src, Some(&cur)).ok() };
+        let url = resolved.as_ref().map(|r| r.href()).filter(|u| (u.starts_with("http://") || u.starts_with("https://")) && !u.starts_with("about:"));
+        // `srcdoc` wins over `src`: such a frame stays blank.
+        let srcdoc = { let doc = self.doc.borrow(); doc.find_atom("srcdoc").is_some_and(|k| doc.attr(n, k).is_some()) };
+        let url = url.filter(|_| !srcdoc);
+        if kids {
+            self.kids.request(self, it, n, url);
+            return;
+        }
+        let (Some(url), Some(r)) = (url, resolved) else { return };
+        if r.origin() != cur.origin() {
             return;
         }
         let mut s = self.nav.s.borrow_mut();

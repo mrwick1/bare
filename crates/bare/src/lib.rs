@@ -286,6 +286,10 @@ mod browser_cssom;
 mod browser_cssom_tests;
 
 mod browser_frames;
+mod browser_child;
+#[cfg(test)]
+mod browser_child_tests;
+mod browser_remote_window;
 
 #[cfg(test)]
 mod browser_steps_tests;

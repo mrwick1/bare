@@ -1419,13 +1419,21 @@ impl Browser {
 
     /// Due time of the earliest queued task.
     pub fn next_scheduled_due(&self) -> Option<f64> {
-        self.dom.next_due()
+        let own = self.dom.next_due();
+        if !self.dom.kids.any() {
+            return own;
+        }
+        // The tasks of the child pages count too (`browser_child.rs`), on this page's clock.
+        match (own, self.dom.kids.next_due()) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// Does a queued task due at `limit` ms or before keep the page from being settled? See "Settled" in the header.
     pub fn blocks_settle(&self, limit: f64) -> bool {
         let s = self.dom.sched.borrow();
-        s.tasks.iter().take_while(|(k, _)| f64::from_bits(k.0) <= limit).any(|(_, t)| !s.skips(t))
+        s.tasks.iter().take_while(|(k, _)| f64::from_bits(k.0) <= limit).any(|(_, t)| !s.skips(t)) || self.dom.kids.blocks(&self.dom, limit)
     }
 
     /// For `BARE_NET_TRACE`: the first queued task due at `limit` ms or before that blocks the settle, and its due time.

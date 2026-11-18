@@ -259,7 +259,7 @@ enum Msg {
 /// The text of a document that a worker still downloads. The worker pushes, the page thread takes. The page polls the network every few
 /// milliseconds already, so there is no wake-up: a queue behind a lock is enough. JS: an async iterator that the other side fills.
 #[derive(Default)]
-struct Feed {
+pub(crate) struct Feed {
     q: Mutex<VecDeque<Msg>>,
     /// A `Head` went out: the end of the load is `End` or `Err`, not `Whole`.
     streamed: AtomicBool,
@@ -517,7 +517,7 @@ pub(crate) fn redirect_allowed(from: &Url, to: &Url) -> bool {
 /// `keep_errors`: a status outside 200 to 299 still gives the document (a live page shows it), with that status as the last value.
 // Each argument is a separate input of one load; a bundle struct would add a copy.
 #[allow(clippy::too_many_arguments)]
-fn load_document(client: &mut Client, url: &str, from: Option<&str>, body: Option<&Body>, lim: &SessionLimits, deadline: Instant, grab: Option<&Grab>, keep_errors: bool, feed: Option<&Arc<Feed>>) -> Result<(String, String, u16), String> {
+pub(crate) fn load_document(client: &mut Client, url: &str, from: Option<&str>, body: Option<&Body>, lim: &SessionLimits, deadline: Instant, grab: Option<&Grab>, keep_errors: bool, feed: Option<&Arc<Feed>>, frame: bool) -> Result<(String, String, u16), String> {
     let max_url = NavLimits::default().max_url_bytes;
     if url.len() > max_url { return Err("the document URL is too big".into()); }
     let (bare, fragment) = match url.split_once('#') {
@@ -546,14 +546,15 @@ fn load_document(client: &mut Client, url: &str, from: Option<&str>, body: Optio
         if Instant::now() >= deadline {
             return Err("the time limit passed".into());
         }
-        let cookies = Cookies { on: true, ctx: Ctx::Navigation(from) };
+        // A frame load is an embedded request of the top page's site (`browser_child.rs`); a top-level load is a navigation.
+        let cookies = Cookies { on: true, ctx: if frame { Ctx::Embedded } else { Ctx::Navigation(from) } };
         let accept = ("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
         if let Some(doc) = &doc {
             site = metadata_site(doc, &cur, site);
         }
         // Chrome sends `Upgrade-Insecure-Requests` on every navigation, the Fetch Metadata only to a trustworthy target, and `Sec-Fetch-User` for a
         // navigation that the user started.
-        let t = [("Upgrade-Insecure-Requests", "1"), ("Sec-Fetch-Dest", "document"), ("Sec-Fetch-Mode", "navigate"), ("Sec-Fetch-Site", site), ("Sec-Fetch-User", "?1")];
+        let t = [("Upgrade-Insecure-Requests", "1"), ("Sec-Fetch-Dest", if frame { "iframe" } else { "document" }), ("Sec-Fetch-Mode", "navigate"), ("Sec-Fetch-Site", site), ("Sec-Fetch-User", "?1")];
         let n = if !potentially_trustworthy(&cur) { 1 } else if site == "none" { 5 } else { 4 };
         let get_headers = [accept, t[0], t[1], t[2], t[3], t[4]];
         let post_headers = [accept, ("Content-Type", body.map_or("", |b| b.content_type.as_str())), t[0], t[1], t[2], t[3], t[4]];
@@ -695,7 +696,7 @@ impl Session {
         let worker = feed.clone();
         let task = self.fork().spawn(move |c| {
             let mut lost = worker.as_deref().map(|f| Lost(f, false));
-            let res = load_document(c, &url, from.as_deref(), body.as_ref(), &lim, deadline, grab.as_ref(), true, worker.as_ref());
+            let res = load_document(c, &url, from.as_deref(), body.as_ref(), &lim, deadline, grab.as_ref(), true, worker.as_ref(), false);
             if let (Some(lost), Some(f)) = (&mut lost, &worker) {
                 lost.1 = true;
                 f.finish(res);
@@ -768,7 +769,7 @@ impl Session {
                 let deadline = deadline_after(lim.max_time.saturating_sub(self.used.time));
                 let grab = Grab { dl: dl.clone(), force: false, name: None, id: None, only: true };
                 self.fork().spawn(move |c| {
-                    let _ = load_document(c, &url, from.as_deref(), None, &lim, deadline, Some(&grab), false, None);
+                    let _ = load_document(c, &url, from.as_deref(), None, &lim, deadline, Some(&grab), false, None, false);
                 });
                 continue;
             }
@@ -782,7 +783,7 @@ impl Session {
             let deadline = deadline_after(lim.max_time.saturating_sub(self.used.time));
             let grab = Grab { dl: dl.clone(), force: true, name, id: Some(id), only: false };
             self.fork().spawn(move |c| {
-                if let Err(why) = load_document(c, &url, from.as_deref(), None, &lim, deadline, Some(&grab), false, None) && why != SAVED {
+                if let Err(why) = load_document(c, &url, from.as_deref(), None, &lim, deadline, Some(&grab), false, None, false) && why != SAVED {
                     grab.dl.fail(id, why);
                 }
             });
@@ -921,7 +922,7 @@ impl Session {
                     let mut base = self.fork();
                     let doc = match fetched.take() {
                         Some(d) => d,
-                        None => load_document(&mut base, &url, from.as_deref(), body.as_ref(), &lim, deadline, None, false, None).map(|(url, html, _)| (url, tree::parse(&html))),
+                        None => load_document(&mut base, &url, from.as_deref(), body.as_ref(), &lim, deadline, None, false, None, false).map(|(url, html, _)| (url, tree::parse(&html))),
                     };
                     let (url, dom) = match doc {
                         Ok(d) => d,
@@ -966,6 +967,7 @@ impl Session {
                         b.enable_downloads();
                     }
                     b.start_refresh();
+                    b.set_child_env(crate::browser_child::KidEnv { eval: self.cfg.eval, heap: self.cfg.heap, session: lim.clone(), downloads: self.cfg.downloads.clone() });
                     if scroll != (0.0, 0.0) {
                         b.set_scroll(bare_paint::Scroll { x: scroll.0, y: scroll.1, ..Default::default() });
                     }
