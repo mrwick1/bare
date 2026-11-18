@@ -22,8 +22,8 @@ The current engine spends its time and memory on its own bookkeeping, not on the
 Recommendation (section 7): build a new engine crate, `bare-js2`, next to the old one, and switch it on per session with `BARE_JS_EXEC=new`. Its core is:
 
 1. Values in 64 bits (NaN-boxing) with direct pointers into the GC heap. No slot table, no generation check.
-2. A compiler that goes from the parse straight to register bytecode, with scope analysis. Locals and arguments live in registers. Only captured variables go to a small context object.
-3. Objects as a shape pointer and inline slots. Inline caches start with one shape and grow to at most 4 when a site sees more (polymorphic caches).
+2. A compiler that goes from the parse straight to register bytecode, with scope analysis. The pre-parser records which variables each inner function captures, so a lazy inner function no longer forces all variables of its parent into an environment. Locals and arguments live in registers. Only captured variables go to a small context object. Moves are removed with direct register operands and copy coalescing.
+3. Objects as a shape pointer and inline slots: a plain object has an 8-byte header; element and overflow pointers exist only in layouts that need them. Object literals with fixed keys get their final shape at once. Inline caches are allocated on the second use, start with one shape and grow to a small polymorphic cache only where the shape keeps changing.
 4. A mark-region heap (Immix): bump allocation in 32 KiB blocks of 128-byte lines, non-moving, with sticky mark bits for a young generation. S1 compares it against a plain non-generational mark-sweep with the same roots before it is chosen.
 5. One interpreter (no tree walker). Then a baseline JIT that keeps the interpreter's frame layout (the Sparkplug model), on `dynasm-rs` for x64 and arm64.
 6. The syntax tree is dropped after compile. Bytecode of a function that has not run for a while is dropped and compiled again on the next call (bytecode flushing).
@@ -178,7 +178,7 @@ Notes on option A:
 
 | Option                                              | How                                                                                                                                                                                        | Effect                                                                                                      |
 | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
-| **A. Scope analysis at compile time** (recommended) | The compiler knows each name: a register (local, not captured), a context slot (captured by a closure), or a global (cached by shape). A call pushes one frame of registers on a JS stack. | `GetEnv` becomes `Mov` or nothing. No heap environment per call. Closures keep only the captured variables. |
+| **A. Scope analysis at compile time** (recommended) | The pre-parser records the captures of each inner function. The compiler knows each name: a register (local, not captured), a context slot (captured by a closure), or a global (cached by shape). A call pushes one frame of registers on a JS stack. | `GetEnv` becomes `Mov` or nothing. No heap environment per call. Closures keep only the captured variables. |
 | B. Keep environments, cache lookups                 | Environments as today, with (hops, index) cached per site                                                                                                                                  | Removes the search, keeps the allocation and the hop chain.                                                 |
 
 What option A must also design (in S2, before the compiler is built):
@@ -190,7 +190,7 @@ What option A must also design (in S2, before the compiler is built):
 
 | Option                                                                                    | How                                                                                                                                                                                                                           | Effect                                                                                                                                                                                                       |
 | ----------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **A. Shape pointer + inline slots + out-of-line slots; polymorphic caches** (recommended) | Header: shape pointer, prototype in the shape, elements pointer. A fixed number of inline slots chosen per allocation site from the shape's observed size (slack tracking). Caches of up to 4 (shape, offset) pairs per site. | An object `{a, b}` is about 32 bytes (hypothesis: 8 header + 8 elements + 2 × 8 slots). A cache hit is a compare and a load. The 11.8% misses fall, because most React sites see 2 to 4 shapes (hypothesis). |
+| **A. Shape-only header + inline slots; overflow and elements only when needed; caches that grow on demand** (recommended) | Plain object: one 8-byte shape pointer (the prototype lives in the shape), then inline slots. The elements pointer and the out-of-line slots pointer exist only in layouts that need them, and inline slots stay when overflow is added. Inline slot count per allocation site from the observed shape (slack tracking). Literals with fixed keys allocate their final shape. A cache site gets its first entry on the second use and grows to at most 4 (shape, offset) pairs where the shape keeps changing; past that it uses a global (shape, key) table. | An object `{a, b}` is about 24 bytes before allocator metadata (hypothesis: 8 header + 2 × 8 slots). A cache hit is a compare and a load. Fewer leaves from the inline path (hypothesis; S1 measures miss reasons per site). |
 | B. Keep today's 104-byte object, add polymorphic caches                                   | as today, plus 4-entry caches                                                                                                                                                                                                 | Fixes the misses, not the memory.                                                                                                                                                                            |
 
 Cache rules: a site starts with one entry and grows to at most 4 when it sees new shapes; past 4 it becomes megamorphic and uses a global (shape, key) table. A hit on a prototype property is guarded by a validity cell that the prototype clears when its keys change. Dictionary-mode and exotic objects (proxies, host objects with named properties, typed arrays) always take the slow path. S1 measures miss reasons per site before the size 4 is fixed.
@@ -201,7 +201,7 @@ Arrays: a dense elements store of 8-byte values with kinds (integers, doubles, a
 
 | Option                                                                              | How                                                                                                                                                                                        | Effect                                                                                                                                             |
 | ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **A. Parse to a temporary tree per function, compile, drop the tree** (recommended) | Lazy pre-parse (syntax check, no tree) for inner functions. At the first call: parse that function, compile to bytecode, drop its tree. Flush bytecode that has not run for N collections. | The 12.9 MiB of trees goes away (hypothesis: the source text stays, about 4 to 6 MiB on this app, not measured). Simple compiler passes on a tree. |
+| **A. Parse to a temporary tree per function, compile, drop the tree** (recommended) | Lazy pre-parse (syntax check and capture facts, no tree) for inner functions, with today's nested skip ranges. Source and compiled code are shared by all realms of a session (key: verified source identity and parse mode); atoms, constants and cache data stay per realm. At the first call: parse that function, compile to bytecode, drop its tree. Flush bytecode that has not run for N collections. | The 12.9 MiB of trees goes away (hypothesis: the source text stays, about 4 to 6 MiB on this app, not measured). Simple compiler passes on a tree. |
 | B. Single pass, parse straight to bytecode (QuickJS)                                | No tree at all                                                                                                                                                                             | Least memory, but scope analysis and some optimizations need a second pass over the bytecode. Harder to read.                                      |
 
 The lexer, the parse cache and parse-ahead on a worker thread stay as ideas. The code is rewritten to emit the new format.
@@ -259,18 +259,20 @@ Kept from today, because it is already better than a generic design: the streami
 source text
   │  lexer (new tokens, same rules)
   ▼
-pre-parse (syntax check, scope facts)  ── inner functions stay lazy
+pre-parse (syntax check, capture facts)  ── inner functions stay lazy
   │  first call
   ▼
 function tree (temporary) ─► compiler with scope analysis ─► register bytecode   (tree dropped)
                                                                │
-                                     interpreter (one loop) ◄──┤  feedback: call counts, cache shapes
+                                     interpreter (one loop) ◄──┤  feedback on second use: call counts, cache shapes
                                                                │  hot
                                                                ▼
                                                   baseline JIT (prepass + one emit pass, same frames)
 
-values: 64-bit NaN-boxed      objects: shape* | elements* | inline slots
-heap: Immix blocks/lines, bump allocation, sticky-mark young generation, write barrier
+values: 64-bit NaN-boxed      objects: shape* | inline slots   (elements*, overflow* only when needed)
+code: source + bytecode shared by all realms of a session
+heap: size-class pages or Immix (S1 decides), one typed graph walk per collection;
+      sticky-mark young generation and write barrier only if they win
 ```
 
 Steps, each behind `BARE_JS_EXEC=new`, each with a gate before the next:
