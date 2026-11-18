@@ -236,6 +236,23 @@ Today the collector refuses to run during a call (`eval.rs:983`), and host code 
 - Barriers: host stores of JS values into old objects, and JIT stores, run the same write barrier as the interpreter.
 - Gates: a stress mode that collects at every allowed safepoint runs the journeys in S0 (old engine, to prove the contract) and in S1 and later (new engine). A test shows that a detached subtree with listeners in a cycle is reclaimed.
 
+### 6.9 Changes from the data-structure review
+
+A second review (GPT-6.2 Sol, 2026-11-18) looked at each module for data structures and algorithms. I checked its main points against the code. The design takes these changes, ranked by expected gain for the effort (every gain is a hypothesis):
+
+1. Calls across scripts stay in the interpreter loop. Today a compiled function of another script already runs in the caller's loop (`bc_target`, `bc_vm.rs:466`). The earlier measurement: -7.31% instructions at 50 keys, -3.7% at load (`design-lane-calls.md`). The new frame carries the code and realm, and reuses the caller's argument window.
+2. Object literals with fixed keys allocate their final shape at once and fill the slots in order. Today the lane emits `NewObject` and then one `DefField` per key (`bc_gen_expr.rs:254`); the tree walker already uses a per-site shape. This removes the key lookup, the transition and the descriptor check per field.
+3. One graph walk per collection. Each cell has a trace kind in its layout and visits its own edges. No side-table probe for plain cells. Target: the 4.9 MiB of collector work memory and the collect time. To verify: how much of today's walk is done twice (`eval.rs:983` collects roots, then `Heap::collect` marks).
+4. The pre-parser records which variables each inner function captures. Today, when a function has any lazy inner function, all its variables stay in the environment (`bc_gen_rf.rs:51`, `lazy_inner`). With capture facts, the parent keeps the other variables in registers. The code generator also removes moves with direct register operands and copy coalescing in a block. Target: the top pair `GetEnv` then `GetField` (2.7 M) and `Mov` (12.8%). S2 first counts reads by kind (captured, dynamic, local).
+5. A plain object has a header of one shape pointer (8 bytes). The elements pointer and the out-of-line slots pointer exist only in layouts that need them. Inline slots stay when an overflow store is added. Target: the 23.6 MiB of objects.
+6. Source and compiled code are shared by all realms of a session. The key is the verified source identity and the parse mode. Atoms, constant objects and cache data stay per realm. HTTP and JS share one source buffer. This removes repeated compiles of the same Next.js chunks.
+7. Feedback is allocated on the second use, as the tree walker does today. A cache site starts empty, gets one entry, and grows to a small polymorphic cache only where the shape keeps changing.
+8. Arrays start with one tagged elements layout, dense or sparse. Numeric or pointer-free stores are added only if an element census shows the work they remove.
+9. The lexer keeps borrowed spans and its lexical goals. The grammar gets a check-only mode that records scope facts without tree nodes. The nested skip ranges stay (`parse.rs:3329`), so a first-call compile jumps over checked children.
+10. Before the young generation, S1 compares size-class pages with Immix, with the same collector and layouts. This separates allocation and fragmentation from barrier cost.
+
+Kept from today, because it is already better than a generic design: the streaming lexer with borrowed spans, 32-bit bytecode words, the script-neutral call path, lazy prototypes of built-ins, data literals and `JSON.parse` that build heap values straight from the text, and native-byte accounting in the collector trigger.
+
 ## 7. Recommended architecture
 
 ```
@@ -261,11 +278,11 @@ Steps, each behind `BARE_JS_EXEC=new`, each with a gate before the next:
 | Stage | Builds                                                                                                                                                         | Gate                                                                                               |
 | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
 | S0 | Host interface trait with the GC contract of section 6.8; the old engine behind it with no change | All journeys pass; instruction delta under 0.5%; journeys pass with collection forced at every allowed safepoint |
-| S1 | Values, heap, collector (plain mark-sweep, then sticky Immix), strings, shapes and objects; unit tests and a stress test | Allocation and collection micro rows; the generational heap kept only if it wins; barrier cost, fragmentation (live vs committed bytes) and page release measured; no leaks under the stress test; Miri on the value and heap modules |
+| S1 | Values, heap, collector (plain mark-sweep, then sticky Immix), strings, shapes and objects; unit tests and a stress test. First: record today's `auto` peak bytes by layout (objects, shapes, elements, strings, bytecode, feedback) | The layout census exists before the allocator and the cache width are chosen; allocation and collection micro rows; size-class pages against Immix; the generational heap kept only if it wins; barrier cost, fragmentation (live vs committed bytes) and page release measured; no leaks under the stress test; Miri on the value and heap modules |
 | S2 | Lexer, pre-parser, compiler with scope analysis (incl. dynamic scopes and resumable frames by design), interpreter for the core language, and the built-ins that core tests need (Object, Function, Array, Error) | test262 core subset at a pinned revision with a skip list; `eval_load` rows at least 2x faster than today's `byte` (hypothesis target) |
 | S3 | All the language: classes, generators, async, modules, `eval`, `with`, destructuring, spread, private names; with Promise and the iterator built-ins that they need. A DOM vertical slice: one public journey runs on the new engine | Per-test test262 outcome compared with the old engine (no test that passes today fails); resource-limit tests kept; the vertical-slice journey passes |
 | S4 | The other built-ins, ported group by group (String, Number, Math, JSON, RegExp, Map and Set, typed arrays, Date, Intl, Proxy, Reflect) | test262 per group, per test against the old engine; built-in rows of the cost matrix |
-| S5 | Browser on the new engine; a JIT platform spike in parallel (signed macOS arm64 with `MAP_JIT` and instruction-cache flush; Windows x64 calling convention, unwind registration and `FlushInstructionCache`) | Every public journey and the staging journey pass; instructions, peak RSS and cold readiness (definition: owner question 1) below `auto` of today, over repeated runs; the spike runs one compiled function on all three platforms |
+| S5 | Browser on the new engine; a JIT platform spike in parallel (signed macOS arm64 with `MAP_JIT` and instruction-cache flush; Windows x64 calling convention, unwind registration and `FlushInstructionCache`) | Every public journey and the staging journey pass; on the staging journey and the typing page (`type_load` load and 50-key rows), instructions, CPU, peak RSS and time to ready are lower than both today's engine (`auto`) and Chrome, over repeated runs (section 10, answer 1); the spike runs one compiled function on all three platforms |
 | S6 | Baseline JIT, x64 first, then arm64; interpreter-only when executable memory is not available | Differential fuzz against the interpreter is clean; JIT-on against JIT-off: journey instructions at least 5% lower and RSS within +2%, compile time, code and metadata included |
 | S7 | Remove the old engine | All gates passed on Linux x64, Windows x64 and macOS arm64; owner decision |
 
@@ -294,11 +311,15 @@ Each stage records its numbers in `docs/progress.md` and gets a learning page.
 
 ## 10. Questions for the owner
 
-1. Which event defines cold readiness (first paint, first interactive step, or the end of the login step), and what regression budget applies on each platform?
-2. Is an interpreter-only engine acceptable where executable memory is not available (for example a locked-down macOS or Windows setup)?
-3. NaN-boxing (recommended) or compressed 32-bit pointers for the first heap?
-4. Approve the new crate next to the old one (section 6.7, option A)?
+1. Answered (2026-11-18): the new engine must use less CPU and fewer resources than the others: today's engine and Chrome. Proposed default for time to ready, until the owner names another event: the time from start until the first step of the journey can act (the login form accepts input).
+2. Is an interpreter-only engine acceptable where executable memory is not available (for example a locked-down macOS or Windows setup)? (Open.)
+3. NaN-boxing (recommended) or compressed 32-bit pointers for the first heap? (Open.)
+4. Approve the new crate next to the old one (section 6.7, option A)? (Open.)
+
+5. Answered (2026-11-18): yes, S1 records the `auto` peak bytes by layout first. Answered: yes, S5 keeps the typing-page rows next to the staging journey.
 
 ## 11. Review
 
 A reviewer (GPT-6.2 Sol, 2026-11-18) read this design. Its findings changed: sections 1, 3.2 and 3.3 (estimates labeled, the cache count and the memory labels corrected), 6.1 (address, provenance and NaN rules), 6.2 (evacuation, barrier, a mark-sweep baseline), 6.3 (dynamic scopes, resumable frames), 6.4 (cache rules), 6.8 (new: GC safety at the host boundary), 7 (gates) and 8.
+
+A second review (GPT-6.2 Sol, 2026-11-18) on data structures and algorithms added section 6.9 and changed the S1 and S5 gates.
