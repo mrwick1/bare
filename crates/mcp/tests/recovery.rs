@@ -126,6 +126,23 @@ fn bad_arguments_and_unknown_names_fail_before_dispatch() {
 }
 
 #[test]
+fn a_locator_syntax_error_is_a_bad_argument() {
+    let mut s = Server::start();
+    open(&mut s);
+    // A quote inside an unquoted value: the agent's own mistake, so `correct_arguments`, not `diagnose`.
+    for (name, args) in [
+        ("act", json!({"op": "click", "loc": "css=g.node[aria-label^=\"X\"] rect", "snapshot": false})),
+        ("step", json!({"steps": "click css=g.node[aria-label^=\"X\"] rect"})),
+        ("run_steps", json!({"steps": "open http://127.0.0.1:1/\nclick css=g.node[aria-label^=\"X\"] rect"})),
+    ] {
+        let r = s.call(name, args);
+        let f = failure(&r);
+        assert_eq!((&f["code"], &f["next_action"], &f["input_dispatched"]), (&json!("invalid_arguments"), &json!("correct_arguments"), &json!("no")), "{name}: {r}");
+        assert!(f["message"].as_str().unwrap().contains("quote the whole value"), "{name}: {r}");
+    }
+}
+
+#[test]
 fn an_untyped_internal_error_gets_the_documented_fallback() {
     let mut s = Server::start();
     // `storage` has no typed source for a bad area: the fallback, and the text is still there.

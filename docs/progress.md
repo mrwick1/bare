@@ -13119,3 +13119,12 @@ Fixture: one input, an `input` handler that rebuilds 250 rows of 4 spans (1250 n
 - Profile of `type` (instructions:u, 3 runs): JS engine 51%, DOM and browser glue 20%, allocator 11-12%, number and string formatting 6-7%, style 0.5%, layout 1.7%, paint 0%. Hottest symbol: `Heap::intern_slice` 9.4%. So per-key cost is the page script rebuilding the tree, not style or layout. Hypothesis: the same split holds on the Next.js form of the ticket.
 - Change: the `type` text of the browser_act and step descriptions now says to use `fill` for long text.
 - Not done: a faster `type`. The cost is the page handler running once for each key. A change in design would be needed, so it is out of scope.
+
+## OFS-19: choose one of several matches, and locator syntax errors (2026-11-17)
+
+Addresses beta ticket OFS-19.
+- `nth=N` after a locator (`css="input[name='search']" nth=1`) picks the match at index N, from 0, in tree order. Past the last match the step fails as `not_found` with "only K element(s) match ...". `nth` does not go with `ref=`.
+- With several matches and exactly one rendered (`Page::visible_box`), the step uses it. Two or more rendered matches with no `nth` stay `duplicate`.
+- A step syntax error (`run_steps`, `step`, and the line that `act` builds) is `invalid_arguments` with next_action `correct_arguments`, not `internal`/`diagnose`.
+- Tests: `crates/drive/tests/nth.rs` (5), `steps::tests::steps_parse`, `crates/mcp/tests/recovery.rs::a_locator_syntax_error_is_a_bad_argument`.
+- Not tested: the Wikipedia page itself; `nth` with a scoped `find` tool call.

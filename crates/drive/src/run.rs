@@ -5,7 +5,7 @@
 //! `open`, `goto` and `reload` return at once, as a link click does: the old document ends, and the ticks of the next steps download,
 //! parse and run the new one. Until it is in, the page has no document, so a locator or an `expect` waits.
 //!
-//! Failure kinds: `not_found`, `duplicate` (a locator must match one element), `hidden`, `disabled`, `covered`, `detached` (it matched,
+//! Failure kinds: `not_found`, `duplicate` (a locator must match one element, or one of the matches must be the only one rendered; `nth=N` picks one), `hidden`, `disabled`, `covered`, `detached` (it matched,
 //! then left the document), `not_editable`, `no_focus`, `expect` (a check was false), `page` (a load failed, the page stopped or has no
 //! layout). `duplicate`, `not_editable`, `no_focus` and a failed load fail at once; the others wait. `covered` waits at most `COVER_WAIT`, and
 //! names the cover by its role and name.
@@ -1006,6 +1006,12 @@ fn one(p: &mut Page, m: &mut Memo, loc: &Locator) -> Result<Handle, Try> {
             },
         }),
         many => {
+            // A hidden twin does not make the target ambiguous: with exactly one rendered match, that one is meant.
+            let seen: Vec<Handle> = many.iter().copied().filter(|&h| p.visible_box(h).is_ok()).collect();
+            if let [h] = seen[..] {
+                m.seen.insert(key, h);
+                return Ok(h);
+            }
             let list: Vec<String> = many.iter().take(5).map(|&h| p.describe(h)).collect();
             Err(Try::Stop(fail("duplicate", format!("{loc} matches {} elements: {}{}", many.len(), list.join(", "), if many.len() > 5 { ", …" } else { "" }))))
         }
