@@ -358,6 +358,15 @@ impl Kids {
         })
     }
 
+    /// Does a live child still load its document?
+    pub(crate) fn loading(&self, d: &Dom) -> bool {
+        let slots = self.slots.borrow();
+        let (kids, doc) = (self.kids.borrow(), d.doc.borrow());
+        kids.iter().enumerate().any(|(i, k)| {
+            matches!(k.as_ref().map(|k| &k.state), Some(State::Loading(_))) && slots.get(i).and_then(|s| s.as_ref()).is_some_and(|s| connected(&doc, s.node))
+        })
+    }
+
     /// The earliest due time of a task of a child, on the page clock.
     pub(crate) fn next_due(&self) -> Option<f64> {
         self.kids.borrow().iter().flatten().filter_map(|k| match &k.state {
@@ -430,13 +439,14 @@ impl Browser {
     }
 
     /// One turn for each child page, in slot order. The page calls it when it has no task of its own to run. `advance`: the virtual
-    /// clock of the children moves to the clock of this page first.
-    pub(crate) fn kids_turn(&mut self, advance: bool) -> Turn {
+    /// clock of the children moves to the clock of this page first. `wait`: a child that loads is waited for (this page has nothing else
+    /// to do), else only when the page is not live.
+    pub(crate) fn kids_turn(&mut self, advance: bool, wait: bool) -> Turn {
         let mut t = Turn::default();
         let Some(cfg) = self.dom.kids.cfg() else { return t };
         self.dom.kids.sync(&self.dom, &cfg);
         let n = self.dom.kids.kids.borrow().len();
-        let block = !self.live();
+        let block = wait || !self.live();
         for i in 0..n {
             let Some(mut ch) = self.dom.kids.kids.borrow_mut().get_mut(i).and_then(|k| k.take()) else { continue };
             let Some(node) = self.dom.kids.slots.borrow().get(i).and_then(|s| s.as_ref()).map(|s| s.node) else { continue };
@@ -470,7 +480,13 @@ impl Browser {
                     let url = b.document_url().unwrap_or_default();
                     let ready = b.ready_level();
                     if advance && self.uses_virtual_clock() {
-                        b.dom.kids.poll_to.set(Some(self.now() - ch.delta));
+                        // The due time of the child, moved to the page clock and back, can differ by one ulp. A task that this page
+                        // sees as due must be due for the child too, or the page waits for it for ever.
+                        let (now, mut to) = (self.now(), self.now() - ch.delta);
+                        if let Some(due) = b.next_scheduled_due().filter(|due| due + ch.delta <= now) {
+                            to = to.max(due);
+                        }
+                        b.dom.kids.poll_to.set(Some(to));
                     }
                     let r = if ch.started {
                         let mut c = cfg.client.fork();

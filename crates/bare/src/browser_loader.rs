@@ -1614,9 +1614,9 @@ impl Run<'_> {
     /// Live, after `load`: start the downloads of the queued dynamic scripts, and say whether the first one is still on its way. Then it
     /// waits in the queue for a later turn, and the scripts after it too (they run in the order of the queue).
     /// One turn for each child page. Its tasks count in the budget of this page, its `load` events go to the iframe elements.
-    fn kids_round(&mut self, advance: bool) -> Result<usize, Stop> {
+    fn kids_round(&mut self, advance: bool, wait: bool) -> Result<usize, Stop> {
         self.budget()?;
-        let t = self.b.kids_turn(advance);
+        let t = self.b.kids_turn(advance, wait);
         self.res.tasks += t.tasks;
         for line in t.diags {
             self.diag(line);
@@ -1986,7 +1986,7 @@ impl Run<'_> {
             }
             // The child pages run when this page has no task of its own in the round (`browser_child.rs`).
             if did == 0 && self.dom.kids.any() {
-                did += self.kids_round(false)?;
+                did += self.kids_round(false, false)?;
             }
             // A child page: one pass, no wait. The page that holds it waits and moves the clock.
             if self.dom.kids.poll.get() {
@@ -2021,6 +2021,11 @@ impl Run<'_> {
                 bare_net::trace::mark(|| "settled".into(), 0);
                 return Err(Stop::Settled);
             }
+            // A child that still loads: this page has nothing else to do, so it waits for the document (no spin on the round budget).
+            if self.dom.kids.loading(&self.dom) {
+                self.kids_round(false, true)?;
+                continue;
+            }
             let due = self.b.next_scheduled_due().unwrap_or(now);
             let gap = due - now;
             if bare_net::trace::on() {
@@ -2036,7 +2041,7 @@ impl Run<'_> {
                 self.after_js()?;
                 // One clock: the children go to the time of this page (`browser_child.rs`).
                 if self.dom.kids.any() {
-                    self.kids_round(true)?;
+                    self.kids_round(true, false)?;
                 }
             } else {
                 let wait = Duration::from_secs_f64(gap.max(0.0) / 1000.0);
