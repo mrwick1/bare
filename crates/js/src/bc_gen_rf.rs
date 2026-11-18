@@ -257,6 +257,33 @@ impl Gen<'_, '_> {
         (k < 256).then_some(k)
     }
 
+    /// Whether `e` is a constant operand: a number literal or a negated one (the forms of `num_konst`), and for an equality (`eq`)
+    /// also a string, `null` or `void` of a number (the forms of `eq_konst`). None has a side effect.
+    fn is_konst(&self, e: ExprId, eq: bool) -> bool {
+        match self.prog.expr(e).kind {
+            ExprKind::Number(_) => true,
+            ExprKind::Unary { op: UnaryOp::Neg, arg } => matches!(self.prog.expr(arg).kind, ExprKind::Number(_)),
+            ExprKind::String | ExprKind::Null => eq,
+            ExprKind::Unary { op: UnaryOp::Void, arg } => eq && matches!(self.prog.expr(arg).kind, ExprKind::Number(_)),
+            _ => false,
+        }
+    }
+
+    /// The constant operand of an equality: a number as `num_konst`, a string, `null`, or `undefined` for `void` of a number.
+    fn eq_konst(&mut self, e: ExprId) -> G<Option<u32>> {
+        let k = match self.prog.expr(e).kind {
+            ExprKind::String => {
+                let mut u = Vec::new();
+                self.prog.string(self.prog.expr(e).span, &mut u).map_err(|_| "string")?;
+                self.konst(KeyOf::String(u.into()))
+            }
+            ExprKind::Null => self.konst(KeyOf::Null),
+            ExprKind::Unary { op: UnaryOp::Void, arg } if matches!(self.prog.expr(arg).kind, ExprKind::Number(_)) => self.konst(KeyOf::Undefined),
+            _ => return Ok(self.num_konst(e)),
+        };
+        Ok((k < 256).then_some(k))
+    }
+
     /// A fused compare and jump with the offset still open: the word of the instruction.
     pub(super) fn jump_cmp(&mut self, op: Op, a: u32, b: u32) -> G<usize> {
         let at = self.here();
@@ -294,6 +321,21 @@ impl Gen<'_, '_> {
             }
             ExprKind::Unary { op: UnaryOp::Not, arg } => return self.jump_cond(arg, !when, out),
             ExprKind::Binary { op, left, right } => {
+                // A constant on the left: `1 < n` is `n > 1` and `null !== e` is `e !== null`, so it takes the constant operand too.
+                // The constant has no side effect, so the order of the operands does not matter.
+                let eq = matches!(op, BinaryOp::Eq | BinaryOp::Ne | BinaryOp::StrictEq | BinaryOp::StrictNe);
+                let (op, left, right) = if self.is_konst(left, eq) && !self.is_konst(right, eq) {
+                    let m = match op {
+                        BinaryOp::Lt => BinaryOp::Gt,
+                        BinaryOp::Gt => BinaryOp::Lt,
+                        BinaryOp::Le => BinaryOp::Ge,
+                        BinaryOp::Ge => BinaryOp::Le,
+                        o => o,
+                    };
+                    (m, right, left)
+                } else {
+                    (op, left, right)
+                };
                 let ops = match (op, when) {
                     (BinaryOp::Lt, false) => Some((Op::JnLt, Op::JnLtK)),
                     (BinaryOp::Le, false) => Some((Op::JnLe, Op::JnLeK)),
@@ -308,7 +350,7 @@ impl Gen<'_, '_> {
                 if let Some((plain, konst)) = ops {
                     let saved = std::mem::replace(&mut self.pos, self.prog.expr(t).span.start);
                     let l = self.operand(left, self.pure(right))?;
-                    let at = match self.num_konst(right) {
+                    let at = match if eq { self.eq_konst(right)? } else { self.num_konst(right) } {
                         Some(k) => self.jump_cmp(konst, l, k)?,
                         None => {
                             let r = self.operand(right, true)?;

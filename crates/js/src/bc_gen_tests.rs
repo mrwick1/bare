@@ -638,6 +638,50 @@ fn fused_compare_jumps_agree_with_the_tree_walker() {
     });
 }
 
+/// A number on the left of a compare takes the constant operand too: `1 < n` runs as `n > 1` (`JnGtK`), with no load of the constant.
+/// Both tests of `f` must be one jump with a constant operand. An equality also takes a string, `null` or `void 0`.
+/// The results agree with the tree walker on every value, `NaN` and objects with `valueOf` included.
+#[test]
+fn a_constant_on_either_side_of_a_compare_is_an_operand() {
+    big(|| {
+        let mut bad = Vec::new();
+        for op in ["===", "!==", "==", "!=", "<", "<=", ">", ">="] {
+            let src = format!("function f(n) {{ if (1 {op} n) return 1; if (-2 {op} n) return 2; return 0; }} f(0);");
+            let text = listing(&src);
+            let jumps: Vec<&str> = text.lines().filter_map(|l| l.split_whitespace().nth(1)).filter(|o| o.starts_with("Jn")).collect();
+            if jumps.len() != 2 || jumps.iter().any(|o| !o.ends_with('K')) {
+                bad.push(format!("{op}:\n{text}"));
+            }
+            let run = format!("var n = 0, o = {{ valueOf() {{ n++; return 1; }} }}; function f(a) {{ var r = ''; if (1 {op} a) r += 'a'; if (!(-2 {op} a)) r += 'b'; if (0.5 {op} a || 1 {op} a) r += 'c'; return r; }} [NaN, undefined, null, 0, -0, 1, 2, -2, '1', 'x', true, [], o, 1n].map(f).join() + n");
+            let want = show(&run, Exec::Tree);
+            for mode in [Exec::Auto, Exec::Byte] {
+                let got = show(&run, mode);
+                if got != want {
+                    bad.push(format!("{op} {mode:?}: {got} (tree {want})"));
+                }
+            }
+        }
+        // An equality also takes a string, `null` or `void 0` as its constant, on either side.
+        for op in ["===", "!==", "==", "!="] {
+            let src = format!("function f(n) {{ if ('x' {op} n) return 1; if (n {op} null) return 2; if (void 0 {op} n) return 3; if (n {op} '') return 4; return 0; }} f(0);");
+            let text = listing(&src);
+            let jumps: Vec<&str> = text.lines().filter_map(|l| l.split_whitespace().nth(1)).filter(|o| o.starts_with("Jn")).collect();
+            if jumps.len() != 4 || jumps.iter().any(|o| !o.ends_with('K')) || text.contains("LoadNull") || text.contains("LoadUndef") {
+                bad.push(format!("{op}:\n{text}"));
+            }
+            let run = format!("var o = {{ toString() {{ return 'x'; }} }}; function f(a) {{ var r = ''; if ('x' {op} a) r += 'a'; if (a {op} null) r += 'b'; if (!(void 0 {op} a)) r += 'c'; if (null {op} a || '' {op} a) r += 'd'; return r; }} [NaN, undefined, null, 0, -0, 1, '', 'x', 'y', true, false, [], [''], o, 0n].map(f).join()");
+            let want = show(&run, Exec::Tree);
+            for mode in [Exec::Auto, Exec::Byte] {
+                let got = show(&run, mode);
+                if got != want {
+                    bad.push(format!("{op} {mode:?}: {got} (tree {want})"));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+    });
+}
+
 /// Run `src` in `mode`: the completion value (an error shows its name and message) and the reasons the generator refused.
 fn run_in(src: &str, mode: Exec) -> (String, Vec<&'static str>) {
     let mut it = Interp::realm(Heap::default(), EvalLimits { max_steps: 50_000_000, ..Default::default() }).unwrap();

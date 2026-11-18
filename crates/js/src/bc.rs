@@ -308,6 +308,9 @@ pub enum Const {
     String(Box<[u16]>),
     /// An interned name of the interpreter (a property name or a global name).
     Name(u32),
+    /// Operands of `JnEqK`, `JnNeK`, `JnSEqK` and `JnSNeK` only.
+    Null,
+    Undefined,
 }
 
 /// A range of words with a handler. When an exception is thrown at a word in `start..end`, the exception goes into register `reg`
@@ -452,6 +455,8 @@ impl Code {
             Some(Const::Number(n)) => format!("{n}"),
             Some(Const::String(u)) => format!("{:?}", String::from_utf16_lossy(u)),
             Some(Const::Name(n)) => format!("name#{n}"),
+            Some(Const::Null) => "null".to_string(),
+            Some(Const::Undefined) => "undefined".to_string(),
             None => "<no such constant>".to_string(),
         }
     }

@@ -253,7 +253,8 @@ impl<'p> Interp<'p> {
                         return None;
                     }
                 },
-                Const::Name(_) => Value::Undefined,
+                Const::Name(_) | Const::Undefined => Value::Undefined,
+                Const::Null => Value::Null,
             });
         }
         self.bc.stats.compiled += 1;
