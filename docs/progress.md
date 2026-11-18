@@ -13316,3 +13316,9 @@ Not tested: windowed runs (paint), the RSS cost of `auto` by part, the mode A/B 
 - `docs/plan-engine-rewrite.md` splits the design into PR-sized tasks: measurement tools (M1 to M5), changes in today's engine first (P0.1 to P0.5), then stages S0 to S8 with files, checks and sizes.
 - First PRs: the engine comparison tool (M1), the feature census (P0.1), the collector counters (P0.2), the `GetEnv` hop histogram (P0.3), then constants on either side of a compare (P0.4) and the effect context (P0.5).
 - S0 is the largest early stage: 184 files of `crates/bare` use `bare_js` directly; they move to a host interface crate one subsystem per PR.
+## Engine comparison tool: Bare, QuickJS and Node on the eval_load cases (2026-11-18)
+
+- `tools/js/engine_compare.py` runs the `eval_load` cases on Bare (`tree`, `auto`, later `new`), QuickJS 2026-06-04 and Node, with and without its JIT. Instructions: minimum of 3 `perf stat` runs. Peak RSS: median of 3 runs through `tools/js/rss_peak.c`. It downloads QuickJS once, checks its SHA-256 and builds it in `$BARE_TMP`.
+- `eval_load CASE SCALE --source` prints the program and its expected result, so every engine runs the same program and every run is checked.
+- Check: on archMachine, 80 rows against the scratch run of the same day (`docs/research-quickjs-reference.md`): all Bare rows within 0.1%; QuickJS and Node within 2.5%, except one effect below.
+- Found: on QuickJS, `throws` moved from 85 M to 99 M instructions with the length of the script path (each `Error` stack holds the file name; 8 path lengths from 34 to 73 characters gave 85.3 M to 98.9 M). The tool runs QuickJS and Node in the script's directory with a relative name, so the count does not depend on `$BARE_TMP`. With it, `throws` 10 is 871.7 M, as in the reference.

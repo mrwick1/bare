@@ -298,6 +298,7 @@ impl<'p> Interp<'p> {
                 }
             })),
             Nat::BooleanFn => Ok(Value::Bool(self.truthy(a0)?)),
+            Nat::Eval => self.eval_global(a0),
             Nat::IsNaN => Ok(Value::Bool(self.coerce_number(a0)?.is_nan())),
             Nat::ParseInt => {
                 let s = self.coerce_string(a0)?;
