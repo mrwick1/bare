@@ -56,6 +56,10 @@
 //!   items go in a `Transfer` list beside it. A port in the message but not in the list is `DataCloneError`.
 //! - `MessageEvent` has `data`, `origin` (empty), `lastEventId` (empty), `source` (null) and `ports` (a frozen array of the new ports
 //!   of the transfer list). It is not constructible. `isTrusted` is false (the Event getter), which differs from a browser.
+//! - A port can move to another page (`Dom::export_ports`; `browser_port_hub.rs`). Then the pair is split: each port has an end in the hub
+//!   (`Port::me`, and `Port::remote` for the peer). A post goes to the hub as a wire, and the page that owns the peer takes it
+//!   (`Dom::take_wires`). `close()` removes the end: later posts to it are dropped. A message that waited in a port when it moved goes with
+//!   it, in order. If that message carried ports, it is dropped with one console warning.
 //! - Deviations: `port1` and `port2` are own read-only properties of the channel, not
 //!   prototype getters. A handler set with `onmessage` and an `addEventListener` with the same function count as one
 //!   listener. `onmessageerror`, the `close` event and `BroadcastChannel` are absent. `window.postMessage` is in `browser_basics.rs`.
@@ -65,7 +69,8 @@
 //! deadline is `min(50 ms, next task)`. `Task::IdleTimeout` runs a callback whose `timeout` passed. Not here: `setImmediate`, an `error` event or `onerror` for
 //! reported exceptions, `ErrorEvent`.
 //!
-//! GC: timers keep their callbacks and arguments (they are roots). A port that has queued delivery tasks is a root.
+//! GC: timers keep their callbacks and arguments (they are roots). A port that has queued delivery tasks is a root. So is an enabled port
+//! with a peer in another page (a message can come at any time). `sched_prune` removes the end of a port that the GC drops.
 //! A port keeps its peer, its queued payloads (and the new ports in them) and its listeners alive. So an unreachable channel (a cycle) is pruned,
 //! with its queued messages, at the next `collect`. A parked port (`park_port`) lives only between the walk and `make_ports` of one call. Ids of ports are generation checked, so a reused slot never
 //! finds the state of an old port. Events are pruned by `collect` only: collect between pumps in a long run.
