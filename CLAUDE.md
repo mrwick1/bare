@@ -4,6 +4,14 @@
 
 Performance and resource use come first: CPU instructions, peak memory and time to ready. Weigh every change against them.
 
+## Bug fixes and small changes
+
+The design process below is for performance work. A bug fix or a small change skips it:
+
+1. Write a failing test for the bug.
+2. Make the shortest fix.
+3. Run the tests of the crates you touched: `cargo test --locked -p <crate>`. CI runs `cargo test --workspace`.
+4. Open the PR and run `gh pr merge --auto --merge`. GitHub merges it when the checks pass. Do not wait for CI in the session.
 ## How to improve a part
 
 Do not patch hot spots one by one. A 10% gain on one benchmark row is not the goal. Look for a change in design that removes a whole kind of work.
