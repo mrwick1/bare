@@ -13322,3 +13322,7 @@ Not tested: windowed runs (paint), the RSS cost of `auto` by part, the mode A/B 
 - `eval_load CASE SCALE --source` prints the program and its expected result, so every engine runs the same program and every run is checked.
 - Check: on archMachine, 80 rows against the scratch run of the same day (`docs/research-quickjs-reference.md`): all Bare rows within 0.1%; QuickJS and Node within 2.5%, except one effect below.
 - Found: on QuickJS, `throws` moved from 85 M to 99 M instructions with the length of the script path (each `Error` stack holds the file name; 8 path lengths from 34 to 73 characters gave 85.3 M to 98.9 M). The tool runs QuickJS and Node in the script's directory with a relative name, so the count does not depend on `$BARE_TMP`. With it, `throws` 10 is 871.7 M, as in the reference.
+
+## 2026-11-18: host interface inventory (plan step S0.1)
+
+`docs/design-host-interface.md` lists what the browser uses of `bare-js`, grouped by kind: values, the realm, objects and properties, host functions, lazy wrappers, promises and microtasks, modules, binary data and clone, the collector contract, and limits. 219 files of `crates/bare` name `bare_js` (91 of them tests); `drive` uses 5 items; `mcp` none. The browser calls `it.heap` directly at 221 sites through 63 `Heap` methods. The page ends with six questions for S0.2. It waits for the owner's review.
