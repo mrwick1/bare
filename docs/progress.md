@@ -13651,3 +13651,29 @@ Cost matrix against `origin/main` 37df5bd1 (803 rows, 3 runs each): mean change 
 Checks: Linux `cargo test --locked -p bare --lib loader` 115 passed. Windows 11 VM: the release example built with cargo xwin; `modules 1` and `modules 10` print `checksum=ok` (22 and 202 scripts, 9 fetches).
 
 Not tested: the other two crates' tests, scale 100, the network path of module scripts.
+
+## 2026-11-19: base handler methods (plan step S0.4)
+
+The base set of handler methods of `docs/design-host-forms.md`, with `has_own` from `docs/design-host-cssom.md` and `own_keys`, `own_enumerable_data` and `is_callable` from `docs/design-host-navigation.md`. The owner decided that the base set is a PR of its own, with adapter tests and no browser change.
+
+Changes:
+
+- `bare-js-api`: `Engine` and `Scope` get `type_error`, `range_error`, `charge`, `to_number`, `to_string`, `to_boolean`, `new_array`, `is_array`, `intrinsic` (with the new `Intrinsic` enum: `ObjectPrototype`, `ArrayPrototype`, `IteratorPrototype`, `ErrorPrototype`, `SymbolIterator`), `get_prototype_of`, `set_prototype_of`, `define_accessor`, `proto_from_new_target`, `string_utf16`, `wall_now_ms`, `has_own`, `own_keys`, `own_enumerable_data` and `is_callable`. None of them existed under another name. The toy engine of the crate tests gets stubs.
+- `bare-js`: the adapter in `eval_api.rs` calls the existing `Interp` helpers (`type_error`, `charge`, `to_js_*`, `array_from`, `host_proto_from_new_target`, `wall_now_ms`) and the proxy-aware `o_*` internal methods.
+- Nothing in the browser calls the new methods.
+- Choices where the docs gave no signature or differ: `is_array` and `get_prototype_of` return `Result` (a revoked proxy throws, a proxy runs its trap). `set_prototype_of` returns `Result<bool>`: `false` for a non-extensible object or a cycle, as `Reflect.setPrototypeOf`. `define_accessor` ignores `attrs.writable` and throws a `TypeError` for a getter or setter that is not callable and for a property that cannot be defined. `has_own` reads the property as stored, so it runs no getter and no trap, and a proxy answers `false`. `own_keys` gives all own keys as `Reflect.ownKeys` does (index keys as strings, then strings, then symbols), not only string keys as the navigation page says: the task asked for a symbol-order test, and a caller that wants strings skips symbols with `type_of`. It charges one step for each key.
+- The interface has no way to make a host constructor yet. The `proto_from_new_target` test makes one with `Interp::host_ctor_with_new_target`.
+
+Tests (`eval_api_tests.rs`, 14 new): host errors reach the script with the right constructor; `charge` hits `Limit(Steps)` and a script cannot catch it; `to_number`, `to_string` and `to_boolean` match `+v`, a template string and `Boolean(v)` on 27 edge values (NaN, -0, objects with `valueOf` and `toString`, a throwing `valueOf`, a symbol, a BigInt); arrays and `is_array` on a proxy and a revoked proxy; prototypes, cycle and non-extensible; accessors called with the receiver as `this`; `proto_from_new_target` with `class extends`, `Reflect.construct` and a throwing `prototype` getter; lone surrogates; the virtual wall clock; `has_own` with a getter and a trap that must not run; `own_keys` order; `own_enumerable_data` with a getter; `is_callable` on functions, classes, bound functions and proxies; the five intrinsics.
+
+Measurements (cost matrix, archMachine, base = origin/main `37df5bd1`, 3 runs per row, 805 rows; the base counts came from the cache of the shared base build): mean change glibc +0.004%, jemalloc +0.373% (jemalloc measured only for the 4 rows that were over under glibc). Rows over +0.5% under both allocators: `gen_load delegate 1` +0.817% / +0.622% and `gen_load delegate 10` +0.922% / +0.887% (measured again alone: the same). The 2 rows `parse_load deep 1` and `deep 10` do not run on either tree (the known stack size issue of the example). Rows over under glibc only: `form_load gates 1` +0.586% and `gates 10` +0.624%, with -0.007% and -0.003% under jemalloc.
+
+The cause of the `gen_load delegate` rows is not known. Callgrind (symbols, one run each) gives 23,167,882 Ir at the base and 23,358,176 Ir here. The extra 190 k Ir are in `Interp::deleg_step` (+196 k) and `Interp::iter_step` (+208 k, inclusive counts); the new methods are never called. Marking every new adapter method `#[inline(never)]` did not change it (`perf stat`: 22,825,444 at the base, 23,014,553 with it). Hypothesis: a change of code layout or of the compiler's choices in the one large compilation unit of the evaluator. Not proven.
+
+Checks:
+
+- Linux: `cargo check -p bare -p bare-js -p bare-js-api` exits 0. `bare-js-api` 5 tests and 6 doc tests; `bare-js` lib 1060 passed (23 `api` tests); `bare` lib 1647 passed.
+- Windows 11 VM: `bare-js-api` 5 tests and `bare-js` `api` 23 tests pass.
+- `cargo clippy -p bare-js -p bare-js-api --all-targets -- -D warnings` stops on `crates/os/src/pages.rs:19` (`manual_is_multiple_of`), which this change does not touch. Clippy on the changed crates was not checked past that point.
+
+Not done: a check of the exception for the 2 `gen_load delegate` rows; the sets of M1 (promise, microtask and iteration) and of the owners; the `CloneOps` sub-trait; `iter_close`; a measurement of the new methods in a calling browser path (none calls them).

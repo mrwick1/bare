@@ -320,3 +320,312 @@ fn lazy_members_are_asked_through_the_interface_once_per_name() {
         assert_eq!(out(&mut it, "try { Object.getOwnPropertyDescriptor(a, 'onboom'); 'no' } catch (e) { e }"), "boom");
     });
 }
+
+// ---- The base set of handler methods (plan step S0.4). One host function for each method; a script calls it and compares with the
+// script's own operation.
+
+const BASE_FNS: [&str; 19] = [
+    "typeErr", "rangeErr", "charge", "num", "str", "bool", "arr", "isArr", "getProto", "setProto", "accessor", "ntProbe", "utf16", "now", "hasOwn", "ownKeys", "ownEnum", "isCallable", "intr",
+];
+
+/// A host written only against the interface: function `i` of `BASE_FNS` calls one base method.
+struct Base;
+
+impl<E: Engine> bare_js_api::Host<E> for Base {
+    fn call<'s>(&self, s: &mut Scope<'s, E>, id: u32, _this: Local<'s>, args: Args<'s>, _is_new: bool) -> Result<Local<'s>, bare_js_api::Error<'s>> {
+        let arg = |s: &mut Scope<'s, E>, i| match args.get(i) {
+            Some(v) => v,
+            None => s.undefined(),
+        };
+        let (a, b, c, d) = (arg(s, 0), arg(s, 1), arg(s, 2), arg(s, 3));
+        match id {
+            0 | 1 => {
+                let msg = s.as_str(a).map(|t| t.to_string_lossy()).unwrap_or_default();
+                Err(if id == 0 { s.type_error(&msg) } else { s.range_error(&msg) })
+            }
+            2 => {
+                let n = s.as_number(a).unwrap_or(0.0) as u64;
+                s.charge(n)?;
+                Ok(s.undefined())
+            }
+            3 => {
+                let n = s.to_number(a)?;
+                Ok(s.number(n))
+            }
+            4 => s.to_string(a),
+            5 => {
+                let t = s.to_boolean(a);
+                Ok(s.boolean(t))
+            }
+            6 => {
+                let items: Vec<_> = args.iter().collect();
+                s.new_array(&items)
+            }
+            7 => {
+                let t = s.is_array(a)?;
+                Ok(s.boolean(t))
+            }
+            8 => match s.get_prototype_of(a)? {
+                Some(p) => Ok(p),
+                None => Ok(s.null()),
+            },
+            9 => {
+                let p = if s.type_of(b) == Type::Null { None } else { Some(b) };
+                let t = s.set_prototype_of(a, p)?;
+                Ok(s.boolean(t))
+            }
+            10 => {
+                let opt = |s: &Scope<'s, E>, v| if s.type_of(v) == Type::Undefined { None } else { Some(v) };
+                let (g, st) = (opt(s, c), opt(s, d));
+                s.define_accessor(a, b, g, st, Attrs { writable: false, enumerable: false, configurable: true })?;
+                Ok(s.undefined())
+            }
+            // The constructor: the default prototype is Array.prototype.
+            11 => {
+                let default = s.intrinsic(bare_js_api::Intrinsic::ArrayPrototype);
+                let proto = s.proto_from_new_target(default)?;
+                let o = s.new_object()?;
+                s.set_prototype_of(o, Some(proto))?;
+                Ok(o)
+            }
+            // utf16(): "\ud800a"
+            12 => s.string_utf16(&[0xD800, u16::from(b'a')]),
+            13 => {
+                let t = s.wall_now_ms();
+                Ok(s.number(t))
+            }
+            14 => {
+                let t = s.has_own(a, b)?;
+                Ok(s.boolean(t))
+            }
+            15 => {
+                let keys = s.own_keys(a)?;
+                s.new_array(&keys)
+            }
+            16 => match s.own_enumerable_data(a, b)? {
+                Some(v) => Ok(v),
+                None => s.string("<none>"),
+            },
+            17 => {
+                let t = s.is_callable(a);
+                Ok(s.boolean(t))
+            }
+            _ => {
+                use bare_js_api::Intrinsic as I;
+                let which = [I::ObjectPrototype, I::ArrayPrototype, I::IteratorPrototype, I::ErrorPrototype, I::SymbolIterator][s.as_number(a).unwrap_or(0.0) as usize];
+                Ok(s.intrinsic(which))
+            }
+        }
+    }
+}
+
+fn base_setup() -> Interp<'static> {
+    let mut it = Interp::realm(Heap::default(), EvalLimits { max_steps: 1_000_000, ..Default::default() }).unwrap();
+    it.set_wall_clock(crate::eval::WallClock::Virtual(1234.0)).unwrap();
+    enter(&mut it, |s| {
+        s.set_host(Rc::new(Base));
+        let g = s.global();
+        for (i, name) in BASE_FNS.into_iter().enumerate() {
+            let f = s.host_function(name, i as u32, 1).unwrap();
+            let k = s.string(name).unwrap();
+            s.define(g, k, f, Attrs::METHOD).unwrap();
+        }
+    });
+    // A constructor that accepts a `new.target` of a subclass: the interface makes no constructors yet, so the test makes it directly.
+    let f = it.host_ctor_with_new_target(11, "NtCtor", 0).unwrap();
+    let g = it.global_object();
+    let k = it.heap.key_from_str("NtCtor").unwrap();
+    it.define_data(g, k, Value::Object(f), true, false, true).unwrap();
+    // The owner of a host constructor defines its `prototype`.
+    let proto = it.heap.new_object(Some(it.object_prototype())).unwrap();
+    let kp = it.heap.key_from_str("prototype").unwrap();
+    it.define_data(f, kp, Value::Object(proto), false, false, false).unwrap();
+    it
+}
+
+#[test]
+fn errors_made_by_the_host_reach_the_script_with_their_constructor() {
+    big(|| {
+        let mut it = base_setup();
+        assert_eq!(out(&mut it, "try { typeErr('bad') } catch (e) { [e instanceof TypeError, e instanceof RangeError, e.name, e.message, typeof e.stack].join() }"), "true,false,TypeError,bad,string");
+        assert_eq!(out(&mut it, "try { rangeErr('far') } catch (e) { [e instanceof RangeError, e instanceof TypeError, e.name, e.message].join() }"), "true,false,RangeError,far");
+        assert_eq!(out(&mut it, "try { typeErr('uncaught') } catch (e) { String(e) }"), "TypeError: uncaught");
+        assert_eq!(it.stack_len(), 0);
+    });
+}
+
+#[test]
+fn charge_adds_to_the_step_budget_and_stops_at_the_limit() {
+    big(|| {
+        let mut it = base_setup();
+        assert_eq!(out(&mut it, "charge(10); 'ok'"), "ok");
+        assert_eq!(out(&mut it, "charge(1e9)"), "limit:Steps");
+        assert_eq!(out(&mut it, "try { charge(1e9) } catch (e) { 'caught' }"), "limit:Steps", "a script cannot catch the limit");
+        assert_eq!(out(&mut it, "charge(5); 'again'"), "again", "the next run has a new budget");
+        assert_eq!(it.stack_len(), 0);
+    });
+}
+
+#[test]
+fn conversions_match_the_script() {
+    big(|| {
+        let mut it = base_setup();
+        // `+v` and a template string are ToNumber and ToString; `Number(v)` and `String(v)` differ on a BigInt and a symbol.
+        // `same`: the same value, or the same kind of error. `Object.is` tells NaN and -0 apart.
+        let prelude = "function t(f, v) { try { return f(v) } catch (e) { return 'E:' + e.constructor.name } } \
+                       function same(a, b) { return Object.is(a, b) } \
+                       var n = 0; var vals = [NaN, -0, 0, 1.5, -1/0, '', ' 12 ', '0x10', '1e3', 'abc', '\\n', null, undefined, true, false, [], [5], [1, 2], {}, \
+                         { valueOf() { return 7 } }, { toString() { return '8' } }, { valueOf() { return {} }, toString() { return '9' } }, \
+                         { valueOf() { throw new RangeError('v') } }, Symbol('s'), 10n, new Date(5), function () {}];";
+        assert_eq!(out(&mut it, &format!("{prelude} vals.filter(v => !same(t(num, v), t(v => +v, v))).length")), "0");
+        assert_eq!(out(&mut it, &format!("{prelude} vals.filter(v => !same(t(str, v), t(v => `${{v}}`, v))).length")), "0");
+        assert_eq!(out(&mut it, &format!("{prelude} vals.filter(v => !same(bool(v), Boolean(v))).length")), "0");
+        assert_eq!(out(&mut it, "[num(NaN), 1/num(-0), str(-0), str(null), str([1, [2]]), bool(''), bool('0'), bool(0n), bool(-0)].join()"), "NaN,-Infinity,0,null,1,2,false,true,false,false");
+        assert_eq!(out(&mut it, "var calls = 0; num({ valueOf() { calls++; return 1 } }); str({ toString() { calls++; return 'x' } }); calls"), "2", "a conversion runs the script once");
+        assert_eq!(out(&mut it, "bool({ valueOf() { throw 1 } })"), "true", "ToBoolean runs no script");
+        assert_eq!(it.stack_len(), 0);
+    });
+}
+
+#[test]
+fn arrays_are_made_and_tested() {
+    big(|| {
+        let mut it = base_setup();
+        assert_eq!(out(&mut it, "var a = arr(1, 'x', {}, null); [Array.isArray(a), a.length, a[0], a[1], typeof a[2], String(a[3]), Object.getPrototypeOf(a) === Array.prototype].join()"), "true,4,1,x,object,null,true");
+        assert_eq!(out(&mut it, "arr().length"), "0");
+        assert_eq!(out(&mut it, "[isArr([]), isArr(arr()), isArr({}), isArr(1), isArr('s'), isArr(null), isArr(new Proxy([], {})), isArr(new Proxy({}, {})), isArr({ length: 0 })].join()"), "true,true,false,false,false,false,true,false,false");
+        assert_eq!(out(&mut it, "var r = Proxy.revocable([], {}); r.revoke(); try { isArr(r.proxy) } catch (e) { e.constructor.name }"), "TypeError");
+        assert_eq!(it.stack_len(), 0);
+    });
+}
+
+#[test]
+fn prototypes_are_read_and_set() {
+    big(|| {
+        let mut it = base_setup();
+        assert_eq!(out(&mut it, "[getProto([]) === Array.prototype, getProto(Object.create(null)), getProto(Object.prototype), getProto(function () {}) === Function.prototype].map(String).join()"), "true,null,null,true");
+        assert_eq!(out(&mut it, "var p = {}, o = {}; [setProto(o, p), Object.getPrototypeOf(o) === p, setProto(o, null), Object.getPrototypeOf(o)].map(String).join()"), "true,true,true,null");
+        assert_eq!(out(&mut it, "var a = {}, b = Object.create(a); setProto(a, b)"), "false", "a cycle is refused");
+        assert_eq!(out(&mut it, "setProto(Object.preventExtensions({}), {})"), "false", "a non-extensible object keeps its prototype");
+        assert_eq!(out(&mut it, "try { setProto({}, 5) } catch (e) { e.constructor.name }"), "TypeError");
+        assert_eq!(out(&mut it, "try { getProto(5) } catch (e) { e.constructor.name }"), "TypeError");
+        // A proxy runs its trap.
+        assert_eq!(out(&mut it, "var hit = 0, base = {}; getProto(new Proxy({}, { getPrototypeOf() { hit++; return base } })) === base && hit === 1"), "true");
+        assert_eq!(it.stack_len(), 0);
+    });
+}
+
+#[test]
+fn an_accessor_is_called_with_the_receiver_as_this() {
+    big(|| {
+        let mut it = base_setup();
+        assert_eq!(out(&mut it, "var o = {}; accessor(o, 'g', function () { return this }, function (v) { this.seen = v }); var c = Object.create(o); c.g = 5; [o.g === o, c.g === c, c.seen, 'seen' in o].join()"), "true,true,5,false");
+        let d = "var o = {}; accessor(o, 'g', function () { return 1 }); var d = Object.getOwnPropertyDescriptor(o, 'g');";
+        assert_eq!(out(&mut it, &format!("{d} [typeof d.get, d.set, d.enumerable, d.configurable, 'writable' in d].join()")), "function,,false,true,false");
+        assert_eq!(out(&mut it, "var o = {}; accessor(o, 'g', undefined, function () {}); o.g"), "undefined", "no getter reads undefined");
+        assert_eq!(out(&mut it, "try { accessor({}, 'g', 5) } catch (e) { e.constructor.name }"), "TypeError", "a getter must be callable");
+        assert_eq!(out(&mut it, "var o = {}; Object.defineProperty(o, 'g', { value: 1 }); try { accessor(o, 'g', function () {}) } catch (e) { e.constructor.name }"), "TypeError", "a fixed property stays");
+        assert_eq!(out(&mut it, "var o = {}; accessor(o, Symbol.iterator, function () { return 3 }); o[Symbol.iterator]"), "3");
+        assert_eq!(it.stack_len(), 0);
+    });
+}
+
+#[test]
+fn a_constructor_takes_its_prototype_from_new_target() {
+    big(|| {
+        let mut it = base_setup();
+        assert_eq!(out(&mut it, "Object.getPrototypeOf(new NtCtor()) === Array.prototype"), "true", "a plain new gets the default");
+        assert_eq!(out(&mut it, "class B extends NtCtor {} var b = new B(); Object.getPrototypeOf(b) === B.prototype && b instanceof B"), "true");
+        assert_eq!(out(&mut it, "class C extends B {} Object.getPrototypeOf(new C()) === C.prototype"), "true");
+        assert_eq!(out(&mut it, "var T = function () {}; T.prototype = { tag: 1 }; Reflect.construct(NtCtor, [], T).tag"), "1");
+        assert_eq!(out(&mut it, "var T = function () {}; T.prototype = 5; Object.getPrototypeOf(Reflect.construct(NtCtor, [], T)) === Object.prototype"), "true", "a new.target without an object prototype gives Object.prototype");
+        assert_eq!(out(&mut it, "var T = new Proxy(function () {}, { get(t, k) { if (k === 'prototype') throw new RangeError('p'); return t[k] } }); try { Reflect.construct(NtCtor, [], T) } catch (e) { e.constructor.name }"), "RangeError", "a getter error comes out");
+        assert_eq!(it.stack_len(), 0);
+    });
+}
+
+#[test]
+fn strings_from_code_units_keep_lone_surrogates() {
+    big(|| {
+        let mut it = base_setup();
+        assert_eq!(out(&mut it, "var s = utf16(); [s.length, s.charCodeAt(0), s.charCodeAt(1), typeof s].join()"), "2,55296,97,string");
+        assert_eq!(out(&mut it, "utf16() === utf16()"), "true");
+        assert_eq!(it.stack_len(), 0);
+    });
+}
+
+#[test]
+fn the_wall_clock_is_the_one_of_date_now() {
+    big(|| {
+        let mut it = base_setup();
+        assert_eq!(out(&mut it, "[now(), Date.now()].join()"), "1234,1234");
+        it.set_wall_clock(crate::eval::WallClock::Virtual(99.0)).unwrap();
+        assert_eq!(out(&mut it, "now() === Date.now() && now()"), "99");
+    });
+}
+
+#[test]
+fn own_property_tests_run_no_getter_and_no_trap() {
+    big(|| {
+        let mut it = base_setup();
+        assert_eq!(out(&mut it, "[hasOwn({ a: 1 }, 'a'), hasOwn({}, 'a'), hasOwn(Object.create({ a: 1 }), 'a'), hasOwn([7], 0), hasOwn([7], 1), hasOwn([], 'length'), hasOwn({ [Symbol.iterator]: 1 }, Symbol.iterator)].join()"), "true,false,false,true,false,true,true");
+        assert_eq!(out(&mut it, "var n = 0; var o = { get a() { n++ } }; [hasOwn(o, 'a'), n].join()"), "true,0");
+        assert_eq!(out(&mut it, "var n = 0; var h = { has() { n++ }, getOwnPropertyDescriptor() { n++ } }; [hasOwn(new Proxy({ a: 1 }, h), 'a'), n].join()"), "false,0");
+        assert_eq!(out(&mut it, "try { hasOwn(1, 'a') } catch (e) { e.constructor.name }"), "TypeError");
+        assert_eq!(it.stack_len(), 0);
+    });
+}
+
+#[test]
+fn own_keys_come_in_the_order_of_reflect_own_keys() {
+    big(|| {
+        let mut it = base_setup();
+        let show = "function show(o) { return ownKeys(o).map(k => typeof k === 'symbol' ? 'sym' : typeof k + ':' + k).join() } ";
+        assert_eq!(out(&mut it, &format!("{show} var s = Symbol('s'); var o = {{ b: 1, 2: 1, a: 1, [s]: 1, 1: 1 }}; show(o)")), "string:1,string:2,string:b,string:a,sym");
+        assert_eq!(out(&mut it, &format!("{show} show([10, 20])")), "string:0,string:1,string:length");
+        assert_eq!(out(&mut it, &format!("{show} var o = {{}}; Object.defineProperty(o, 'hid', {{ value: 1 }}); show(o)")), "string:hid", "a hidden key is a key");
+        assert_eq!(out(&mut it, "var s = Symbol('x'), o = { [s]: 1 }; ownKeys(o)[0] === s"), "true");
+        assert_eq!(out(&mut it, "JSON.stringify(ownKeys(Object.create({ inherited: 1 })))"), "[]");
+        assert_eq!(out(&mut it, "var log = []; var p = new Proxy({}, { ownKeys() { log.push('trap'); return ['z'] }, getOwnPropertyDescriptor() { return { value: 1, configurable: true } } }); ownKeys(p).join() + log"), "ztrap");
+        assert_eq!(out(&mut it, "try { ownKeys(1) } catch (e) { e.constructor.name }"), "TypeError");
+        assert_eq!(it.stack_len(), 0);
+    });
+}
+
+#[test]
+fn an_own_enumerable_property_is_read_with_its_getter() {
+    big(|| {
+        let mut it = base_setup();
+        assert_eq!(out(&mut it, "[ownEnum({ a: 1 }, 'a'), ownEnum({ a: undefined }, 'a'), ownEnum([5], 0), ownEnum({ a: 1 }, 'b')].join()"), "1,,5,<none>");
+        assert_eq!(out(&mut it, "ownEnum(Object.create({ a: 1 }), 'a')"), "<none>", "an inherited property is not own");
+        assert_eq!(out(&mut it, "var o = {}; Object.defineProperty(o, 'h', { value: 1 }); ownEnum(o, 'h')"), "<none>", "a hidden property is skipped");
+        assert_eq!(out(&mut it, "var n = 0; var o = { get x() { n++; return 'got' } }; [ownEnum(o, 'x'), n].join()"), "got,1");
+        assert_eq!(out(&mut it, "try { ownEnum({ get x() { throw new RangeError('g') } }, 'x') } catch (e) { e.constructor.name }"), "RangeError");
+        assert_eq!(out(&mut it, "var s = Symbol(); ownEnum({ [s]: 'sym' }, s)"), "sym");
+        assert_eq!(it.stack_len(), 0);
+    });
+}
+
+#[test]
+fn callable_values_are_told_from_the_rest() {
+    big(|| {
+        let mut it = base_setup();
+        assert_eq!(out(&mut it, "[function () {}, () => 1, class A {}, async function () {}, function* () {}, Math.max, isCallable, (function () {}).bind(null), new Proxy(function () {}, {}), new Proxy(class {}, {})].map(isCallable).join()"), "true,true,true,true,true,true,true,true,true,true");
+        assert_eq!(out(&mut it, "[{}, [], null, undefined, 1, 's', true, Symbol(), new Proxy({}, {}), { call() {} }, Math, new (class {})()].map(isCallable).join()"), "false,false,false,false,false,false,false,false,false,false,false,false");
+        assert_eq!(it.stack_len(), 0);
+    });
+}
+
+#[test]
+fn the_intrinsics_are_the_ones_of_the_realm() {
+    big(|| {
+        let mut it = base_setup();
+        assert_eq!(out(&mut it, "intr(0) === Object.prototype"), "true");
+        assert_eq!(out(&mut it, "intr(1) === Array.prototype"), "true");
+        assert_eq!(out(&mut it, "intr(2) === Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()))"), "true");
+        assert_eq!(out(&mut it, "intr(3) === Error.prototype"), "true");
+        assert_eq!(out(&mut it, "intr(4) === Symbol.iterator"), "true");
+        assert_eq!(out(&mut it, "var s = Symbol; Symbol = undefined; var r = intr(4) === s.iterator; Symbol = s; r"), "true", "a script cannot change it");
+        assert_eq!(it.stack_len(), 0);
+    });
+}

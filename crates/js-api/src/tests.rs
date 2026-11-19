@@ -133,6 +133,65 @@ impl Engine for Toy {
         Ok(())
     }
     fn safepoint(&mut self) {}
+
+    // The base set of handler methods: the toy engine has none of them. The adapter tests of each real engine run them.
+    fn type_error<'s>(&mut self, _msg: &str) -> Error<'s> {
+        Error::Abort(Abort::Unsupported("toy"))
+    }
+    fn range_error<'s>(&mut self, _msg: &str) -> Error<'s> {
+        Error::Abort(Abort::Unsupported("toy"))
+    }
+    fn charge<'s>(&mut self, _n: u64) -> Result<(), Error<'s>> {
+        Ok(())
+    }
+    fn to_number<'s>(&mut self, _v: Local<'_>) -> Result<f64, Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("toy")))
+    }
+    fn to_string<'s>(&mut self, _v: Local<'_>) -> Result<Local<'s>, Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("toy")))
+    }
+    fn to_boolean(&self, _v: Local<'_>) -> bool {
+        false
+    }
+    fn new_array<'s>(&mut self, _items: &[Local<'_>]) -> Result<Local<'s>, Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("toy")))
+    }
+    fn is_array<'s>(&mut self, _v: Local<'_>) -> Result<bool, Error<'s>> {
+        Ok(false)
+    }
+    fn intrinsic<'s>(&mut self, _which: Intrinsic) -> Local<'s> {
+        self.push(V::Undefined)
+    }
+    fn get_prototype_of<'s>(&mut self, _obj: Local<'_>) -> Result<Option<Local<'s>>, Error<'s>> {
+        Ok(None)
+    }
+    fn set_prototype_of<'s>(&mut self, _obj: Local<'_>, _proto: Option<Local<'_>>) -> Result<bool, Error<'s>> {
+        Ok(false)
+    }
+    fn define_accessor<'s>(&mut self, _obj: Local<'_>, _key: Local<'_>, _get: Option<Local<'_>>, _set: Option<Local<'_>>, _attrs: Attrs) -> Result<(), Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("toy")))
+    }
+    fn proto_from_new_target<'s>(&mut self, _default: Local<'_>) -> Result<Local<'s>, Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("toy")))
+    }
+    fn string_utf16<'s>(&mut self, units: &[u16]) -> Result<Local<'s>, Error<'s>> {
+        Ok(self.push(V::Str(units.to_vec())))
+    }
+    fn wall_now_ms(&self) -> f64 {
+        0.0
+    }
+    fn has_own<'s>(&mut self, _obj: Local<'_>, _key: Local<'_>) -> Result<bool, Error<'s>> {
+        Ok(false)
+    }
+    fn own_keys<'s>(&mut self, _obj: Local<'_>) -> Result<Vec<Local<'s>>, Error<'s>> {
+        Ok(Vec::new())
+    }
+    fn own_enumerable_data<'s>(&mut self, _obj: Local<'_>, _key: Local<'_>) -> Result<Option<Local<'s>>, Error<'s>> {
+        Ok(None)
+    }
+    fn is_callable(&self, _v: Local<'_>) -> bool {
+        false
+    }
 }
 
 fn toy() -> Toy {
