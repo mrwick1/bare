@@ -172,6 +172,34 @@ impl Engine for Toy {
     fn iter_fail<'s>(&mut self, _it: &mut Iter<'s>, err: Error<'s>) -> Error<'s> {
         err
     }
+    fn module_parse<'s>(&mut self, _source: &str, _url: &str) -> Result<u32, Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("modules")))
+    }
+    fn module_requests(&self, _m: u32) -> Vec<String> {
+        Vec::new()
+    }
+    fn module_set_requested(&mut self, _m: u32, _deps: &[u32]) {}
+    fn module_url(&self, _m: u32) -> &str {
+        ""
+    }
+    fn module_link<'s>(&mut self, _root: u32) -> Result<(), Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("modules")))
+    }
+    fn module_evaluate<'s>(&mut self, _m: u32) -> Result<Local<'s>, Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("modules")))
+    }
+    fn take_dynamic_imports(&mut self) -> Vec<ImportRequest> {
+        Vec::new()
+    }
+    fn finish_dynamic_import<'s>(&mut self, _p: &Persistent, _m: u32) -> Result<(), Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("modules")))
+    }
+    fn reject_dynamic_import<'s>(&mut self, _p: &Persistent, _reason: Local<'_>) -> Result<(), Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("modules")))
+    }
+    fn fail_dynamic_import<'s>(&mut self, _p: &Persistent, _message: &str) -> Result<(), Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("modules")))
+    }
     fn safepoint(&mut self) {}
 
     // The base set of handler methods: the toy engine has none of them. The adapter tests of each real engine run them.

@@ -534,6 +534,58 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
         self.api_err(err)
     }
 
+    // Modules (plan step S0.4). Over the `module_*` methods of this engine; a module is its index.
+
+    fn module_parse<'s>(&mut self, source: &str, url: &str) -> Result<u32, bare_js_api::Error<'s>> {
+        Interp::module_parse(self, source, url).map_err(|e| self.api_err(e))
+    }
+
+    fn module_requests(&self, m: u32) -> Vec<String> {
+        Interp::module_requests(self, m)
+    }
+
+    fn module_set_requested(&mut self, m: u32, deps: &[u32]) {
+        Interp::module_set_requested(self, m, deps);
+    }
+
+    fn module_url(&self, m: u32) -> &str {
+        Interp::module_url(self, m)
+    }
+
+    fn module_link<'s>(&mut self, root: u32) -> Result<(), bare_js_api::Error<'s>> {
+        Interp::module_link(self, root).map_err(|e| self.api_err(e))
+    }
+
+    fn module_evaluate<'s>(&mut self, m: u32) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
+        match Interp::module_evaluate(self, m) {
+            Ok(p) => Ok(self.api_push(Value::Object(p))),
+            Err(e) => Err(self.api_err(e)),
+        }
+    }
+
+    fn take_dynamic_imports(&mut self) -> Vec<bare_js_api::ImportRequest> {
+        Interp::take_dynamic_imports(self)
+            .into_iter()
+            .map(|r| bare_js_api::ImportRequest { promise: self.persist_value(Value::Object(r.promise)), specifier: r.specifier, referrer: r.referrer })
+            .collect()
+    }
+
+    fn finish_dynamic_import<'s>(&mut self, p: &bare_js_api::Persistent, m: u32) -> Result<(), bare_js_api::Error<'s>> {
+        let Value::Object(p) = self.persistent_value(p) else { unreachable!("an import promise is an object") };
+        Interp::finish_dynamic_import(self, p, m).map_err(|e| self.api_err(e))
+    }
+
+    fn reject_dynamic_import<'s>(&mut self, p: &bare_js_api::Persistent, reason: bare_js_api::Local<'_>) -> Result<(), bare_js_api::Error<'s>> {
+        let Value::Object(p) = self.persistent_value(p) else { unreachable!("an import promise is an object") };
+        let reason = self.api_at(reason);
+        Interp::reject_dynamic_import(self, p, Error::Throw(reason)).map_err(|e| self.api_err(e))
+    }
+
+    fn fail_dynamic_import<'s>(&mut self, p: &bare_js_api::Persistent, message: &str) -> Result<(), bare_js_api::Error<'s>> {
+        let Value::Object(p) = self.persistent_value(p) else { unreachable!("an import promise is an object") };
+        Interp::fail_dynamic_import(self, p, message).map_err(|e| self.api_err(e))
+    }
+
     fn safepoint(&mut self) {}
 
     // The base set of handler methods (plan step S0.4).
