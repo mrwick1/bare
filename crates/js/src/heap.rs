@@ -73,6 +73,8 @@ const LAZY_ONS: u8 = 2;
 const LAZY_CHAIN: u8 = 4;
 /// Set on the global object while `call_scoped` runs: the position hints of `own_data_at` and `set_own_data_at` fail, so a name takes the slow path.
 const LAZY_HS: u8 = 8;
+/// A host named object of `Heap::new_named_open`: its names do not hide its prototype chain. Set once, when the object is made.
+pub(super) const NAMED_OPEN: u8 = 16;
 
 /// `HeapError::NeedsHost::index` of a name of a `set_lazy_on` object, and of all its names.
 pub const LAZY_ON: u32 = u32::MAX - 1;

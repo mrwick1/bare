@@ -447,7 +447,7 @@ fn style_of(d: &Dom, it: &mut Interp<'_>, el: NodeId) -> V {
     if d.style.s.borrow().objs.len() >= d.style_lim().max_objects {
         return Err(d.lim("style-objects"));
     }
-    let o = it.heap.new_indexed(Some(*d.style.proto.get().expect("installed"))).map_err(|e| it.heap_error(e))?;
+    let o = d.new_source(it, crate::browser_sources::Source::Style, Some(*d.style.proto.get().expect("installed")))?;
     let mut s = d.style.s.borrow_mut();
     s.objs.insert(o, el);
     s.by_el.insert(el, o);

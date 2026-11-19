@@ -60,6 +60,7 @@ mod browser_controls_tests;
 #[cfg(test)]
 mod browser_idtab_tests;
 mod browser_dataset;
+mod browser_sources;
 mod browser_abort;
 mod browser_editing;
 mod browser_xhr;

@@ -194,7 +194,7 @@ fn token_list(d: &Dom, it: &mut Interp<'_>, this: Value, attr: &'static str) -> 
         return Err(d.lim("token-lists"));
     }
     let proto = d.plat.p.get().expect("installed").list;
-    let o = it.heap.new_indexed(Some(proto)).map_err(|e| it.heap_error(e))?;
+    let o = d.new_source(it, crate::browser_sources::Source::TokenList, Some(proto))?;
     let mut s = d.plat.s.borrow_mut();
     s.lists.insert(o, el);
     s.by_el.insert(el, o);

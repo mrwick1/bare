@@ -213,3 +213,55 @@ fn an_owner_keeps_its_traced_values_while_it_lives() {
         assert!(it.api.owners.is_empty());
     });
 }
+
+/// A host that answers host-filled properties by key: an indexed object has `key` items, each the string `text`; a named
+/// object has the one name `k`, whose value is its key. Key 9 is busy.
+#[derive(Default)]
+struct Filled {
+    text: std::cell::Cell<Option<Value>>,
+}
+
+impl<'p> bare_js_api::Host<Interp<'p>> for Filled {
+    fn call<'s>(&self, s: &mut Scope<'s, Interp<'p>>, _id: u32, _this: Local<'s>, _args: Args<'s>, _is_new: bool) -> Result<Local<'s>, bare_js_api::Error<'s>> {
+        Ok(s.undefined())
+    }
+    fn indexed_len(&self, _object: &Value, key: u32) -> Result<usize, bare_js_api::Pending> {
+        if key == 9 { Err(bare_js_api::Pending::Busy) } else { Ok(key as usize) }
+    }
+    fn indexed_item(&self, _object: &Value, key: u32, index: usize) -> Result<bare_js_api::Item<Value>, bare_js_api::Pending> {
+        Ok(if index < key as usize { bare_js_api::Item::Value(self.text.get().unwrap()) } else { bare_js_api::Item::Absent })
+    }
+    fn named_has(&self, _object: &Value, _key: u32, name: &[u16]) -> Result<bool, bare_js_api::Pending> {
+        Ok(name == [u16::from(b'k')])
+    }
+    fn named_get(&self, _object: &Value, key: u32, _name: &[u16]) -> Result<Option<bare_js_api::Named<Value>>, bare_js_api::Pending> {
+        Ok(Some(bare_js_api::Named::Text(key.to_string().encode_utf16().collect())))
+    }
+    fn named_len(&self, _object: &Value, _key: u32) -> Result<usize, bare_js_api::Pending> {
+        Ok(1)
+    }
+    fn named_keys(&self, _object: &Value, _key: u32) -> Result<Vec<Vec<u16>>, bare_js_api::Pending> {
+        Ok(vec![vec![u16::from(b'k')]])
+    }
+}
+
+#[test]
+fn host_filled_properties_are_answered_by_the_key_of_each_object() {
+    big(|| {
+        let mut it = Interp::realm(Heap::default(), EvalLimits { max_steps: 100_000, ..Default::default() }).unwrap();
+        let h = Rc::new(Filled::default());
+        h.text.set(Some(Value::String(it.heap.intern_str("x").unwrap())));
+        it.set_api_sources(h.clone());
+        let objs = [("two", it.heap.new_indexed(None, 2).unwrap()), ("three", it.heap.new_indexed(None, 3).unwrap()), ("busy", it.heap.new_indexed(None, 9).unwrap()), ("five", it.heap.new_named(None, 5).unwrap()), ("seven", it.heap.new_named(None, 7).unwrap())];
+        enter(&mut it, |s| {
+            let g = s.global();
+            for (name, o) in objs {
+                let (k, v) = (s.string(name).unwrap(), s.traced(&bare_js_api::Traced::from_raw(Value::Object(o))));
+                s.define(g, k, v, Attrs::METHOD).unwrap();
+            }
+        });
+        assert_eq!(out(&mut it, "Object.keys(two).length + ',' + Object.keys(three).length + ',' + three[2] + ',' + three[3]"), "2,3,x,undefined");
+        assert_eq!(out(&mut it, "five.k + ',' + seven.k + ',' + ('k' in five) + ',' + ('j' in five) + ',' + Object.keys(seven)"), "5,7,true,false,k");
+        assert!(out(&mut it, "Object.keys(busy)").starts_with("other:"), "a busy host stops the script");
+    });
+}

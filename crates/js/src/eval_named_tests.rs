@@ -17,7 +17,7 @@ struct X {
     pairs: RefCell<Vec<(String, String)>>,
     /// Calls of `named_write` (a repeat that does not call the host again must not count).
     writes: Cell<usize>,
-    /// `named_masking` is `false` (the `Storage` rules: the prototype chain wins).
+    /// The object is made with `new_named_open` (the `Storage` rules: the prototype chain wins).
     open: Cell<bool>,
 }
 
@@ -26,28 +26,25 @@ fn text(units: &[u16]) -> String {
 }
 
 impl NamedSource for X {
-    fn named_has(&self, owner: ObjId, key: &[u16]) -> Result<bool, HeapError> {
+    fn named_has(&self, owner: ObjId, _: u32, key: &[u16]) -> Result<bool, HeapError> {
         let k = text(key);
         Ok(self.owner.get() == Some(owner) && self.pairs.try_borrow().map_err(|_| HeapError::HostUnavailable)?.iter().any(|(n, _)| *n == k))
     }
-    fn named_get(&self, owner: ObjId, key: &[u16]) -> Result<Option<crate::heap::NamedValue>, HeapError> {
+    fn named_get(&self, owner: ObjId, _: u32, key: &[u16]) -> Result<Option<crate::heap::NamedValue>, HeapError> {
         let k = text(key);
         if self.owner.get() != Some(owner) {
             return Ok(None);
         }
         Ok(self.pairs.try_borrow().map_err(|_| HeapError::HostUnavailable)?.iter().find(|(n, _)| *n == k).map(|(_, v)| crate::heap::NamedValue::Text(v.encode_utf16().collect())))
     }
-    fn named_len(&self, owner: ObjId) -> Result<usize, HeapError> {
+    fn named_len(&self, owner: ObjId, _: u32) -> Result<usize, HeapError> {
         Ok(if self.owner.get() == Some(owner) { self.pairs.try_borrow().map_err(|_| HeapError::HostUnavailable)?.len() } else { 0 })
     }
-    fn named_keys(&self, owner: ObjId) -> Result<Vec<Vec<u16>>, HeapError> {
+    fn named_keys(&self, owner: ObjId, _: u32) -> Result<Vec<Vec<u16>>, HeapError> {
         if self.owner.get() != Some(owner) {
             return Ok(Vec::new());
         }
         Ok(self.pairs.try_borrow().map_err(|_| HeapError::HostUnavailable)?.iter().map(|(n, _)| n.encode_utf16().collect()).collect())
-    }
-    fn named_masking(&self, _: ObjId) -> bool {
-        !self.open.get()
     }
 }
 
@@ -58,7 +55,7 @@ impl Host for X {
             // make(proto?): the named object
             0 => {
                 let proto = match n(0) { Value::Object(o) => o, _ => it.object_prototype() };
-                let o = if self.open.get() { it.heap.new_named_open(Some(proto)) } else { it.heap.new_named(Some(proto)) }.unwrap();
+                let o = if self.open.get() { it.heap.new_named_open(Some(proto), 0) } else { it.heap.new_named(Some(proto), 0) }.unwrap();
                 self.owner.set(Some(o));
                 Ok(Value::Object(o))
             }
@@ -303,7 +300,7 @@ fn a_borrowed_host_is_an_error_not_an_empty_answer() {
 #[test]
 fn heap_without_a_source_and_host_without_named_write_fail_loudly() {
     let mut h = Heap::default();
-    let o = h.new_named(None).unwrap();
+    let o = h.new_named(None, 0).unwrap();
     let k = h.key_from_str("a").unwrap();
     assert_eq!(h.virtual_len(o), Err(HeapError::HostUnavailable));
     assert_eq!(h.own_keys(o), Err(HeapError::HostUnavailable));
@@ -316,14 +313,14 @@ fn heap_without_a_source_and_host_without_named_write_fail_loudly() {
     big(|| {
         struct Bare;
         impl NamedSource for Bare {
-            fn named_has(&self, _: ObjId, _: &[u16]) -> Result<bool, HeapError> { Ok(false) }
-            fn named_get(&self, _: ObjId, _: &[u16]) -> Result<Option<crate::heap::NamedValue>, HeapError> { Ok(None) }
-            fn named_len(&self, _: ObjId) -> Result<usize, HeapError> { Ok(0) }
-            fn named_keys(&self, _: ObjId) -> Result<Vec<Vec<u16>>, HeapError> { Ok(Vec::new()) }
+            fn named_has(&self, _: ObjId, _: u32, _: &[u16]) -> Result<bool, HeapError> { Ok(false) }
+            fn named_get(&self, _: ObjId, _: u32, _: &[u16]) -> Result<Option<crate::heap::NamedValue>, HeapError> { Ok(None) }
+            fn named_len(&self, _: ObjId, _: u32) -> Result<usize, HeapError> { Ok(0) }
+            fn named_keys(&self, _: ObjId, _: u32) -> Result<Vec<Vec<u16>>, HeapError> { Ok(Vec::new()) }
         }
         impl Host for Bare {
             fn call(&self, it: &mut Interp<'_>, _: u32, _: Value, _: &[Value], _: bool) -> Result<Value, Error> {
-                Ok(Value::Object(it.heap.new_named(Some(it.object_prototype())).unwrap()))
+                Ok(Value::Object(it.heap.new_named(Some(it.object_prototype()), 0).unwrap()))
             }
         }
         let mut it = Interp::realm(Heap::default(), EvalLimits { max_steps: 100_000, ..Default::default() }).unwrap();

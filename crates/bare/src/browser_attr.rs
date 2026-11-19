@@ -47,7 +47,7 @@ use crate::browser_dom::{arg, valid_name};
 use crate::browser_namespace as ns;
 use bare_html::dom::{Atom, NodeData, NodeId, RemovedAttr, Span};
 use bare_js::eval::{Error, Interp};
-use bare_js::heap::{HeapError, IndexedSource, Slot};
+use bare_js::heap::{HeapError, Slot};
 use bare_js::value::{ObjId, Value};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -143,66 +143,58 @@ pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
     }
 }
 
-impl IndexedSource for Dom {
-    fn indexed_name(&self, owner: ObjId, key: &[u16]) -> Result<Option<u32>, HeapError> {
-        let t = self.attr.s.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
-        let Some(&el) = t.maps.get(&owner) else { return Ok(None) };
-        let doc = self.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
-        let NodeData::Element { attrs, .. } = *doc.data(el) else { return Ok(None) };
-        if doc.element_ns(el) == bare_html::dom::Ns::Html && key.iter().any(|u| (65..=90).contains(u)) {
-            return Ok(None);
-        }
-        self.attr.scan(owner, doc.attr_count(el))?;
-        Ok(doc.attrs(attrs).iter().position(|a| doc.atom_str(a.name).encode_utf16().eq(key.iter().copied())).map(|i| i as u32))
+/// The index of the attribute named `key` of the map `owner` (a non-enumerable alias). `browser_sources.rs` calls these by key.
+pub(crate) fn name(d: &Dom, owner: ObjId, key: &[u16]) -> Result<Option<u32>, HeapError> {
+    let t = d.attr.s.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
+    let Some(&el) = t.maps.get(&owner) else { return Ok(None) };
+    let doc = d.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
+    let NodeData::Element { attrs, .. } = *doc.data(el) else { return Ok(None) };
+    if doc.element_ns(el) == bare_html::dom::Ns::Html && key.iter().any(|u| (65..=90).contains(u)) {
+        return Ok(None);
     }
+    d.attr.scan(owner, doc.attr_count(el))?;
+    Ok(doc.attrs(attrs).iter().position(|a| doc.atom_str(a.name).encode_utf16().eq(key.iter().copied())).map(|i| i as u32))
+}
 
-    fn indexed_names(&self, owner: ObjId) -> Result<Vec<Vec<u16>>, HeapError> {
-        let t = self.attr.s.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
-        let Some(&el) = t.maps.get(&owner) else { return Ok(Vec::new()) };
-        let doc = self.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
-        let NodeData::Element { attrs, .. } = *doc.data(el) else { return Ok(Vec::new()) };
-        self.attr.scan(owner, doc.attr_count(el))?;
-        let html = doc.element_ns(el) == bare_html::dom::Ns::Html;
-        let mut seen = HashSet::new();
-        Ok(doc.attrs(attrs).iter().filter_map(|a| {
-            let name = doc.atom_str(a.name);
-            (!html || !name.bytes().any(|b| b.is_ascii_uppercase())).then_some(name)
-                .filter(|name| seen.insert(*name)).map(|name| name.encode_utf16().collect())
-        }).collect())
-    }
+/// The names of the map `owner`.
+pub(crate) fn names(d: &Dom, owner: ObjId) -> Result<Vec<Vec<u16>>, HeapError> {
+    let t = d.attr.s.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
+    let Some(&el) = t.maps.get(&owner) else { return Ok(Vec::new()) };
+    let doc = d.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
+    let NodeData::Element { attrs, .. } = *doc.data(el) else { return Ok(Vec::new()) };
+    d.attr.scan(owner, doc.attr_count(el))?;
+    let html = doc.element_ns(el) == bare_html::dom::Ns::Html;
+    let mut seen = HashSet::new();
+    Ok(doc.attrs(attrs).iter().filter_map(|a| {
+        let name = doc.atom_str(a.name);
+        (!html || !name.bytes().any(|b| b.is_ascii_uppercase())).then_some(name)
+            .filter(|name| seen.insert(*name)).map(|name| name.encode_utf16().collect())
+    }).collect())
+}
 
-    fn indexed_len(&self, owner: ObjId) -> Result<usize, HeapError> {
-        if let Some(r) = crate::browser_nodelist::len(self, owner).or_else(|| crate::browser_platform_class::indexed_len(self, owner)).or_else(|| crate::browser_style::indexed_len(self, owner)) {
-            return r;
-        }
-        let t = self.attr.s.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
-        let Some(&el) = t.maps.get(&owner) else {
-            return crate::browser_media::caption_len(self, owner).unwrap_or_else(|| crate::browser_cssom::len(self, owner).unwrap_or(Ok(0)));
-        };
-        Ok(self.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?.attr_count(el))
-    }
+/// The number of attributes of the map `owner`.
+pub(crate) fn len(d: &Dom, owner: ObjId) -> Result<usize, HeapError> {
+    let t = d.attr.s.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
+    let Some(&el) = t.maps.get(&owner) else { return Ok(0) };
+    Ok(d.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?.attr_count(el))
+}
 
-    fn indexed_item(&self, owner: ObjId, index: usize) -> Result<Slot, HeapError> {
-        if let Some(r) = crate::browser_nodelist::item(self, owner, index).or_else(|| crate::browser_platform_class::indexed_item(self, owner, index)).or_else(|| crate::browser_style::indexed_item(self, owner, index)) {
-            return r;
-        }
-        let t = self.attr.s.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
-        let Some(&el) = t.maps.get(&owner) else {
-            return crate::browser_media::caption_item(self, owner, index).unwrap_or_else(|| crate::browser_cssom::item(self, owner, index).unwrap_or(Ok(Slot::Absent)));
-        };
-        let doc = self.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
-        let NodeData::Element { attrs, .. } = *doc.data(el) else { return Ok(Slot::Absent) };
-        let Some(a) = doc.attrs(attrs).get(index) else { return Ok(Slot::Absent) };
-        // A removal is waiting in the log: the table can still hold the `Attr` of an attribute that was removed and added back.
-        // `fill_indexed` drains the log, then the read repeats.
-        if doc.has_removed_attrs() {
-            return Ok(Slot::Missing);
-        }
-        Ok(match t.by_el.get(&el).and_then(|l| l.iter().find(|(x, _)| *x == a.name)) {
-            Some(&(_, o)) => Slot::Ready(o),
-            None => Slot::Missing,
-        })
+/// The `Attr` of attribute `index` of the map `owner`.
+pub(crate) fn item(d: &Dom, owner: ObjId, index: usize) -> Result<Slot, HeapError> {
+    let t = d.attr.s.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
+    let Some(&el) = t.maps.get(&owner) else { return Ok(Slot::Absent) };
+    let doc = d.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
+    let NodeData::Element { attrs, .. } = *doc.data(el) else { return Ok(Slot::Absent) };
+    let Some(a) = doc.attrs(attrs).get(index) else { return Ok(Slot::Absent) };
+    // A removal is waiting in the log: the table can still hold the `Attr` of an attribute that was removed and added back.
+    // `fill_indexed` drains the log, then the read repeats.
+    if doc.has_removed_attrs() {
+        return Ok(Slot::Missing);
     }
+    Ok(match t.by_el.get(&el).and_then(|l| l.iter().find(|(x, _)| *x == a.name)) {
+        Some(&(_, o)) => Slot::Ready(o),
+        None => Slot::Missing,
+    })
 }
 
 /// `Host::fill_indexed`: make the `Attr` of attribute `index` of the map `owner`.
@@ -351,7 +343,7 @@ pub(crate) fn attributes(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value])
         return Ok(Value::Object(o));
     }
     room(d)?;
-    let o = it.heap.new_indexed(Some(protos(d).1)).map_err(|e| it.heap_error(e))?;
+    let o = d.new_source(it, crate::browser_sources::Source::AttrMap, Some(protos(d).1))?;
     let mut t = d.attr.s.borrow_mut();
     t.maps.insert(o, el);
     t.map_of.insert(el, o);
