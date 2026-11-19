@@ -280,3 +280,20 @@ fn the_location_of_a_dead_frame_window_leaves_the_owner_table() {
         assert_eq!(js(&mut b, "l.href + ',' + (l === g.contentWindow.location)"), "about:blank,true");
     });
 }
+
+#[test]
+fn dead_keys_of_every_owner_kind_in_one_collection_are_pruned() {
+    big(|| {
+        let mut b = browser("<!doctype html><body><p id=p></p></body>");
+        // Node wrappers stay while their node is in the tree or held; the other kinds must all go.
+        let count = |b: &Browser| b.dom.st.borrow().owners.slots.iter().flatten().filter(|o| !matches!(o, Owner::Target(_))).count();
+        b.collect(&[]).unwrap();
+        let base = count(&b);
+        js(&mut b, "(function () { var f = document.body.appendChild(document.createElement('iframe')); f.contentWindow.location.href; f.remove(); new XMLHttpRequest(); new Event('e'); getComputedStyle(document.body); new URL('http://a/'); new Headers({ a: 'b' }); new Request('http://a/', { method: 'POST', body: 'x' }); new Response('y').body; var d = document.createElement('div'); d.addEventListener('e', function () {}); d.className = 'z'; })(); 0");
+        assert!(count(&b) > base);
+        b.collect(&[]).unwrap();
+        assert_eq!(count(&b), base);
+        assert_eq!(b.dom.frames.locations(), 0);
+        assert_eq!(js(&mut b, "document.getElementById('p').id + new Headers({ a: 'b' }).get('a')"), "pb");
+    });
+}

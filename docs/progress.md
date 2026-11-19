@@ -14125,3 +14125,37 @@ Callgrind (release with symbols, one run each, instruction counts): `form_load v
 Checks: new tests in `browser_controls_tests.rs` (a `ValidityState` of a dead element frees its key and its map entries; the same `validity` and `labels` object while a script holds it, and a new one after the collector freed it; a reused key answers for the new `ValidityState` only; the shared objects work after collections that no script reaches) and in `browser_select_tests.rs` (a collected `options` list frees its cache entry and a held one keeps it; a reused key answers for the new collection only; the select interfaces work after collections). Linux: `cargo test --locked -p bare --lib` with filters `controls select validity form label`: 167 passed, also with `BARE_GC_STRESS=1`. Crate tests before the rebase onto `c77f6247`: `bare` lib 1660 passed, `bare-js` lib 1061 passed, `bare-js-api` 5 passed. Windows 11 VM (cargo xwin debug test exe): same filters, 167 passed.
 
 Not tested: the matrix on `c77f6247` (the base build is the commit before the rebase; main added the stress flag and CI changes only); the full `bare` lib suite on Windows; peak memory of the persistent handles and owner entries (about 16 bytes for each `ValidityState`); the staging journeys.
+## 2026-11-20: fetch objects as owners (plan step S0.4, F3)
+
+COMPLETE with an owner exception on `fetch_load objects 1` and `10`. PR is open and not merged. This entry replaces the first one, which said STOPPED at the cost gate.
+
+Changes:
+
+- `Owner::Fetch(ObjId)` in `browser.rs`: Headers, Request, Response, body stream, reader and headers iterator objects get a host key in `add_obj_in`. Their edges are `Traced` values. `Dom::trace` calls `browser_fetch::trace` for the key.
+- The entries are `Ent { key, f }`. `browser_fetch::prune` runs once after the keys are released, in one pass over the entries. A dead owner takes its entry, and its bytes and reader leave `retained` and `readers`. The old `Fetch::trace` and `Fetch::prune` hooks are gone.
+- Owner decision 2026-11-20: the dead-key loop in `Dom::prune` looks up each key once and dispatches with one `match` on the owner variant. Before, it called `owners.get(k)` up to six times for each key. Every per-variant action stays (Xhr and Event forget, node wrapper identity and listeners, Computed `drop_owner`, Source prune, navigation `prune_owner`, `Loc` to `prune_loc`). The arms exclude each other, so the order between them does not matter. `owners.release(k)` and the passes after the loop are unchanged. Fetch and Abort keys need no per-key action there.
+- Rebased on origin/main `71273c8b` (frames, `Owner::Loc`). Both variants stay in `Owner` and in `Owner::target`.
+
+History of the first attempt (base `7203937a`, before the one-lookup loop): per-key `forget` cost +2.5% on `fetch_load objects`. The one-pass `prune` gave `objects 1` +1.47% and `iterate 1` +0.51%. Callgrind on `objects 1` (10000 objects) showed about 135 extra instructions per object: key take and owner push in `add_obj_in` about 0.59M, and the dead-key loop plus the entry pass about 0.67M.
+
+Tests: a detached response with a stream and a reader goes with its totals; a request keeps its signal and headers and loses them with itself. New in `browser_iframe_tests.rs`: `dead_keys_of_every_owner_kind_in_one_collection_are_pruned` makes a dead frame `Location`, XHR, Event, computed style, URL, Headers, Request and a response body in one script. One collection removes every owner except node wrappers, and `frames.locations()` is 0. The existing zero-entries checks of `fetch_load` pass.
+
+Cost matrix (archMachine, base = origin/main `71273c8b` built fresh, new = this branch; 3 runs per row, minimum; `-j4`; 817 rows; jemalloc for rows over the limit under glibc): mean change glibc -0.044%. Rows over +0.5% under both allocators: 2, both `fetch_load objects`. `parse_load deep 1` and `10` fail to run on both trees (stack overflow, known).
+
+| Row | glibc base | glibc new | change | jemalloc change | codegen-units=1 glibc | codegen-units=1 jemalloc |
+|---|---|---|---|---|---|---|
+| `fetch_load objects 1` | 92,514,545 | 93,591,659 | +1.164% | +1.055% | +1.554% | +1.411% |
+| `fetch_load objects 10` | 858,164,693 | 867,915,177 | +1.136% | +1.107% | +1.565% | +1.493% |
+| `fetch_load iterate 1` | 216,041,157 | 216,923,095 | +0.408% (under the limit) | not run | +0.547% | +0.530% |
+| `fetch_load iterate 10` | 2,083,855,212 | 2,092,566,506 | +0.418% (under the limit) | not run | +0.559% | +0.553% |
+
+The codegen-unit check does not clear `objects`: the cost is work for each object (a key, an owner and an entry), not the codegen-unit split. The one-lookup loop took `objects 1` from +1.47% to +1.16%. `iterate` is under the limit in the default build. It is over at codegen-units=1 only, so it is listed here for completeness.
+
+Owner exception (2026-11-20): `fetch_load objects 1` and `objects 10` (numbers above). The exception covers `fetch_load objects *` and `fetch_load iterate *` as the owner decided. No other row is over +0.5% under both allocators.
+
+Checks:
+
+- Linux: `cargo check -p bare -p bare-js -p bare-js-api` exits 0. `cargo test --locked -p bare --lib` filtered `fetch` 95, `abort` 19, `stream` 48, `frame` 50, `owner` 8 passed, also with `BARE_GC_STRESS=1`. `cargo test --locked -p bare-js-api -p bare-js -p bare --lib` ran once: `bare` 1686, `bare-js` 1069, `bare-js-api` 6 passed.
+- Windows 11 VM: `fetch` 95, `abort` 19, `stream` 48, `frame` 50, `owner` 8 passed.
+
+Not tested: the crate tests of `bare-js-api` and `bare-js` on Windows; wall time; a collection with 100,000 owners of mixed kinds; the full cost matrix at codegen-units=1 (only the `fetch_load objects` and `iterate` rows).
