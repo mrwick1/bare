@@ -1165,7 +1165,7 @@ fn nav_owner_check(b: &Browser) -> (usize, usize) {
             _ => n.iters.get(&o).map(|_| 1),
         };
         let mut out = Vec::new();
-        <Dom as bare_js_api::Host<bare_js::eval::Interp<'_>>>::trace(&b.dom, k as u32, &mut bare_js_api::Tracer::new(&mut out));
+        <Dom as bare_js_api::Host<bare_js::eval::Interp<'_>>>::trace(&b.dom, (k as u32) << crate::browser::KIND_BITS, &mut bare_js_api::Tracer::new(&mut out));
         assert_eq!(Some(out.len()), want, "owner {k} {w:?}");
         owners += 1;
         edges += out.len();
