@@ -324,6 +324,23 @@ pub(crate) enum Owner {
     Event(ObjId),
     /// A `getComputedStyle` object (`browser_computed.rs`).
     Computed(ObjId),
+    /// An `XMLHttpRequest` or its upload object: an event target with an entry in `browser_xhr.rs`.
+    Xhr(ObjId),
+    /// An `AbortSignal` (an event target), with an entry in `browser_abort.rs`.
+    Abort(ObjId),
+    /// An `AbortController`, with an entry in `browser_abort.rs`.
+    Ctl(ObjId),
+}
+
+impl Owner {
+    /// The listener target that the owner stands for.
+    fn target(self) -> Option<Target> {
+        match self {
+            Owner::Target(t) => Some(t),
+            Owner::Xhr(o) | Owner::Abort(o) => Some(Target::Obj(o)),
+            Owner::Event(_) | Owner::Ctl(_) | Owner::Computed(_) => None,
+        }
+    }
 }
 
 /// The owners of traced values, by host key (`docs/design-host-tracing.md`). A free key holds `None`.
@@ -367,14 +384,21 @@ impl Dom {
     /// wrapper has listeners that hold the global object until a wrapper exists (`browser_handlers.rs`).
     #[inline]
     pub(crate) fn own(&self, owners: &mut Owners, it: &mut Interp<'_>, t: Target, l: &mut Listeners) {
-        if l.key != NO_KEY && matches!(owners.slots.get(l.key as usize), Some(Some(Owner::Target(x))) if *x == t) {
+        if l.key != NO_KEY && matches!(owners.slots.get(l.key as usize), Some(Some(x)) if x.target() == Some(t)) {
             return;
         }
         // The object whose life the listeners follow: the global object or the target object.
         let o = match t {
             Target::Window => *self.global.get().expect("installed"),
             Target::Node(_) => return,
-            Target::Obj(o) => o,
+            // An XHR object, an upload object or a signal has its key from its making.
+            Target::Obj(o) => match crate::browser_xhr::key_of(self, o).or_else(|| crate::browser_abort::key_of(self, o)) {
+                Some(k) => {
+                    l.key = k;
+                    return;
+                }
+                None => o,
+            },
         };
         l.key = owners.key(Owner::Target(t));
         it.set_host_owner_obj(o, l.key);
@@ -782,8 +806,10 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
 
     fn trace(&self, key: u32, t: &mut bare_js_api::Tracer<'_, Value>) {
         let st = self.st.borrow();
-        match st.owners.slots.get(key as usize).copied().flatten() {
-            Some(Owner::Target(tg)) => {
+        let owner = st.owners.slots.get(key as usize).copied().flatten();
+        match owner {
+            Some(owner @ (Owner::Target(_) | Owner::Xhr(_) | Owner::Abort(_))) => {
+                let Some(tg) = owner.target() else { return };
                 if st.n_listeners != 0 {
                     for l in st.listeners.get(&tg).into_iter().flatten() {
                         t.visit(&l.cb);
@@ -805,7 +831,13 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
                         }
                     }
                 }
+                match owner {
+                    Owner::Xhr(o) => crate::browser_xhr::trace(self, o, t),
+                    Owner::Abort(o) => crate::browser_abort::trace(self, o, t),
+                    _ => {}
+                }
             }
+            Some(Owner::Ctl(o)) => crate::browser_abort::trace_ctl(self, o, t),
             Some(Owner::Event(o)) => {
                 let Some(e) = st.events.get(&o) else { return };
                 for v in [&e.target, &e.current, &e.detail, &e.related] {
@@ -831,6 +863,11 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
         let n = st.by_node.len();
         for &k in dead {
             // A dead wrapper takes its identity entries and the listeners of its node. Other targets lost theirs in the old host's prune.
+            match st.owners.slots[k as usize] {
+                Some(Owner::Xhr(o)) => crate::browser_xhr::forget(self, o),
+                Some(Owner::Event(o)) => crate::browser_xhr::forget_event(self, o),
+                _ => {}
+            }
             if let Some(Owner::Target(t @ Target::Node(n))) = st.owners.slots[k as usize]
                 && let Some(w) = st.by_node.remove(&n)
             {
@@ -851,6 +888,8 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
         if st.by_node.len() != n {
             st.by_node.retain(|_, _| true);
         }
+        // After the keys are released, and after the old host's prune of the listener table.
+        crate::browser_abort::prune(self, st);
     }
 
     #[inline]
@@ -916,8 +955,6 @@ impl Host for Dom {
         out.extend(self.fixed.borrow().iter().map(|&o| Value::Object(o)));
         out.extend(self.doc_wrapper.get().map(|&o| Value::Object(o)));
         self.sched_roots(out);
-        self.fetch.roots(out);
-        self.streams.roots(out);
         self.console.roots(out);
         crate::browser_navigation::roots(self, out);
         self.scripts_roots(out);
@@ -929,8 +966,6 @@ impl Host for Dom {
         crate::browser_nodelist::roots(self, out);
         crate::browser_select::roots(self, out);
         crate::browser_dataset::roots(self, out);
-        crate::browser_abort::roots(self, out);
-        crate::browser_xhr::roots(self, out);
         crate::browser_web::roots(self, out);
         crate::browser_elements::roots(self, out);
         crate::browser_media::roots(self, out);
@@ -965,10 +1000,6 @@ impl Host for Dom {
         at::trace(self, owner, out);
         crate::browser_nodelist::trace(self, owner, out);
         crate::browser_dataset::trace(self, owner, out);
-        crate::browser_abort::trace(self, owner, out);
-        if self.xhr.active.get() {
-            crate::browser_xhr::trace(self, owner, out);
-        }
         if self.web.active.get() {
             crate::browser_web::trace(self, owner, out);
         }
@@ -1011,8 +1042,6 @@ impl Host for Dom {
         self.idle_prune(live);
         self.fetch.prune(live);
         self.streams.prune(live);
-        crate::browser_abort::prune(self, live);
-        crate::browser_xhr::prune(self, live);
         crate::browser_worker::prune(self, live);
         self.reclaim_wanted();
     }

@@ -13780,3 +13780,48 @@ Not tested: Windows with `BARE_GC_STRESS`; Windows cost; the full matrix after t
 - Documents: `docs/design-host-forms.md`, `docs/design-host-cssom.md`, `docs/design-host-navigation.md` (PR #709). Callgrind, archMachine, base `37df5bd1`, one run per row. New-owner costs are hypotheses.
 - Measured: lazy CSSOM accessors would remove about 2.2 M instructions per page start; the navigation owners gain about 1.7% on `url 1`; forms gain nothing measurable.
 - Owner decisions (2026-11-19): every proposed answer. Navigation first, CSSOM next, forms last. Each area gets its cost rows first. The 65,536 object caps stay until the new engine collects in a task. M1 defines the iteration methods.
+## 2026-11-19: fetch roots in persistent handles (plan step S0.4, F1)
+
+Step F1 of `docs/design-host-fetch.md`. The four `roots` calls of fetch, streams, abort and XHR leave the old hook (`Dom::roots`). A `Persistent` of `bare-js-api` roots each value that they gave.
+
+Changes:
+
+- `Pending` holds one `Persistent` (`root`): the promise of a `fetch`, or the `XMLHttpRequest` object of an XHR. The design names two fields (`promise`, `xhr`); one handle covers both, because the XHR object id is already in `xhr`. `OpenStream` holds one for its XHR object. A request that settles, is aborted or is dequeued drops its handle. `run_network_tasks` reads the promise from the handle inside the scope, so the promise stays rooted while `finish` allocates. `queue_xhr`, `queue_xhr_blob` and `queue_xhr_stream` take `it` for this.
+- `Fetch::{fixed, json_parse, json_stringify, drain}`, `AbortHost::held` and `XhrHost::held` hold the prototypes, constructors, templates and intrinsic functions as `Persistent`. The six reaction templates of the streams moved from `Streams::roots` into `fixed`. The id fields (`protos`, `Fns`, `AbortHost::objs`, `Made`) stay: handler bodies still use `ObjId` and move in one later PR (owner decision).
+- `browser.rs`: the four `roots` calls are gone. The old `trace` and `prune` calls are not changed.
+- No change to `bare-js-api` or `bare-js`.
+
+Cost matrix (archMachine, base = origin/main `37df5bd1`, new = this branch, 3 runs per row, 805 rows, `-j4`, glibc; jemalloc for rows over the limit): rows over +0.5% under both allocators: 0. Mean change +0.007% (glibc). Two rows were over under glibc only (`preload_load style 10` +0.592%, `resources_load small 10` +1.466%). On a second run with jemalloc on every row they were not over: glibc and jemalloc mean +0.046% and -0.728% for the two rows. Rows of this change (glibc): `fetch_load post 1` +0.04%, `post 10` +0.07%, `bytes 1` +0.03%, `bytes 10` +0.11%, `objects 1` -0.00%, `objects 10` -0.00%, `iterate 1` +0.01%, `iterate 10` +0.01%; `streams_load flow 1` -0.00%, `many 1` +0.01%, `pending 1` +0.04%, `churn 1` +0.00%, `pending 10` +0.03%; `xhr_load 1` +0.07%, `xhr_load 100` +0.09%; `web_apis_load abort 1` +0.03%, `abort 10` +0.07%. `parse_load deep 1` and `deep 10` fail to run (stack overflow) on the base too.
+
+Checks:
+
+- New tests (`browser_fetch_tests`): a fetch whose promise the script dropped settles after two collections and its handle slot is reused (this test failed before the change: 0 slots); a collection between `send()` and the reply keeps the XHR object; the constants (`Response`, `Response.json`, the `drain` shim, `ReadableStream` pull, `Headers`, `Request`, `XMLHttpRequest`, `fetch`, `AbortController`) work after 3 collections. The last two passed before the change too (they pin the behavior).
+- `a_cleared_or_finished_timer_frees_its_callback_at_the_next_collect` counted all persistent slots. It now counts from the slots that exist before its loop, because the constants add handles.
+- Linux: `bare` lib 1650 passed (filters `fetch` 90, `xhr` 13, `stream` 47, `abort` 16, `scheduler` 42); `bare-js` lib 1047 passed; `bare-js-api` 5 passed.
+- Windows 11 VM, filters `fetch` 90, `xhr` 13, `abort` 16, `scheduler` 42 pass. Filter `stream`: 46 of 47 with 4 test threads; `a_preload_link_that_no_script_takes_does_not_delay_load_or_hold_the_page` failed once ("the preload did not start"), and it passed alone 3 of 3 times and in a run with 1 test thread (47 of 47). Hypothesis: a timing flake under load; not run against a base build on the VM.
+
+Not tested: `BARE_GC_STRESS` (not on main yet); a collection inside a task (S1.6); the staging journey A/B; wall time; a full `bare` run on the VM. `run_streams` drops the handle of a closed stream before it delivers the last messages, so that XHR object is unrooted for that delivery (the same as before this change; a task cannot collect today).
+
+## 2026-11-19: XHR and abort objects as owners (plan step S0.4, F2)
+
+Step F2 of `docs/design-host-fetch.md`. An `XMLHttpRequest` object, its upload object, an `AbortSignal` and an `AbortController` are owners of their entries. The `xhr` and `abort` lines of the old `trace` and `prune` hooks leave `Dom`.
+
+Changes:
+
+- `Owner::Xhr(o)` (an XHR object or its upload object), `Owner::Abort(o)` (a signal) and `Owner::Ctl(o)` (a controller). Each object gets its key when it is made and registers with `set_host_owner_obj`. The key is in the entry (`Xhr::key`, `Sig::key`, the value of `ups` and `ctls`). `Dom::own` takes that key for the first listener of such an object, so an object has one key (an XHR object and a signal are also event targets). `Owner::target` maps the three variants to the listener target; `Host::trace` visits the listeners and then the entry.
+- Edges are `Traced`: `Xhr::{upload, cache}`, `Sig::{reason, Algo::Fetch}`, the signal of a controller. `Sig::sources` and `Sig::deps` are weak lists of host keys. A key resolves through the owner table (`Owner::Abort(o)`).
+- `prune(dead)`: an XHR or upload object goes with its key (`xhr::forget`); a dead event drops its progress numbers (`xhr::forget_event`, `prog` is keyed by the `ProgressEvent` object). Signals and controllers go in one pass over the tables after the keys are released (`browser_abort::prune`): an entry whose key is free goes, a live signal drops the free keys from its weak lists and the abort algorithms of listeners that are gone. The pass runs after the old host's prune of the listener table, as the old order rule asks. A per-key `remove` of each signal cost +1.05% on `web_apis_load abort 1` (a hash remove for each dead signal); the single pass has the complexity of the old `retain`.
+- `XhrHost::active` is gone, with its four stores. `Dom::trace` and `Dom::prune` have no `xhr` or `abort` line.
+- Test-only: `Dom::xhr_entries` and `Dom::abort_entries` count the entries.
+- No change to `bare-js-api` or `bare-js`.
+
+Cost matrix (archMachine, base = F1 head `fabd5458` built in `/data/bare-tmp/s0/base-f2`, 807 rows, 3 runs per row, `-j4`; jemalloc for the rows over the limit under glibc): rows over +0.5% under both allocators: 0. Mean change -0.043% (glibc). Over under glibc only: `resources_load small 1` +0.75% (jemalloc +0.28%; known noise). `parse_load deep 1` and `10` fail to run on both trees. Rows of this change (glibc): `web_apis_load abort 1` +0.340% (jemalloc +0.320%), `abort 10` +0.476% (jemalloc +0.441%); `xhr_load 1` -0.700%, `100` -0.448%; `fetch_load post 1` -0.207%, `post 10` -0.224%, `bytes 1` -0.117%, `bytes 10` -0.440%, `objects 1` -0.257%, `objects 10` -0.276%, `iterate 1` -0.111%, `iterate 10` -0.114%. A first version that removed each dead signal by key was +1.049% and +1.199% on the abort rows under glibc and +0.972% and +1.181% under jemalloc. Callgrind of `abort 1` (symbols, one run for each tree) showed `abort::forget` at 1.14 M against 0.54 M for the old `abort::prune`; that led to the single pass. The abort rows keep a small cost: each of the 7 objects of a round makes an owner key and a `set_host_owner_obj` push (about 70 instructions, 0.5 M for 1 000 rounds), and the interface `prune` is a second hook.
+
+Checks:
+
+- New tests: `xhr`: an XHR that the script dropped after `send()` keeps its entries while the request is pending and loses them (with its upload object) after it ends; an upload object that the script holds outlives its XHR and keeps its listener; the cached `response` survives collections and goes with the object. `abort`: the sources and dependents of `AbortSignal.any` after collections (counts of entries and weak keys); keys that were freed answer for their new objects only. `fetch`: a signal keeps the promise of its queued fetch through collections, and aborting rejects it; a fetch whose signal was collected still settles.
+- Linux: `cargo test --locked -p bare-js-api -p bare-js -p bare --lib`: 5, 1047 and 1658 passed. Filters `xhr` 16, `abort` 19, `fetch` 93.
+- Windows 11 VM, same filters: `xhr` 16, `abort` 19, `fetch` 93 pass.
+- After the rebase on `origin/main` (with `BARE_GC_STRESS`, #712): `cargo check` and the three filters pass; the three filters pass with `BARE_GC_STRESS=1` (16, 19, 93). The cost matrix and the VM run are from before the rebase.
+
+Not tested: the whole `bare` lib with `BARE_GC_STRESS=1`; a collection inside a task (S1.6); the `bare` suite on the VM (only the three filters); wall time; scale 100 of the abort row. The old order rule "call after the listener table is pruned" still holds by call order (`Interp::collect` calls the old prune first); no test pins the order. Not changed, noticed: `Dom::event_object` checks `xhr.s.objs.len() >= MAX_OBJECTS` but not the upload entries.

@@ -174,12 +174,6 @@ impl Streams {
         st.readers.retain(|&o, _| live(o));
         st.queued_bytes = st.ctls.values().map(|c| c.qbytes).sum();
     }
-
-    pub(crate) fn roots(&self, out: &mut Vec<Value>) {
-        if let Some(f) = self.fns.get() {
-            out.extend([f.start_ok, f.start_err, f.pull_ok, f.pull_err, f.cancel_ok, f.cancel_err, f.ctl_proto].map(Value::Object));
-        }
-    }
 }
 
 fn lim(d: &Dom) -> StreamLimits {
@@ -929,7 +923,7 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>, stream_proto: ObjId, reader_
     let global = it.global_object();
     let k = d.key(it, "ReadableStreamDefaultController")?;
     it.define_data(global, k, Value::Object(ctor), true, false, true)?;
-    fixed.extend([ctl_proto, ctor]);
+    fixed.extend([ctl_proto, ctor, start_ok_f, start_err, pull_ok_f, pull_err, cancel_ok_f, cancel_err_f]);
     let _ = d.streams.fns.set(Fns { start_ok: start_ok_f, start_err, pull_ok: pull_ok_f, pull_err, cancel_ok: cancel_ok_f, cancel_err: cancel_err_f, stream_proto, reader_proto, ctl_proto });
     Ok(())
 }
