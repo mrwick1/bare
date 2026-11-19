@@ -8,8 +8,8 @@
 //! - The document origin comes from [`Browser::configure_fetch`] and [`Browser::update_fetch_base_url`]. Another part of the
 //!   browser owns the real document URL and calls the hook. Without it nothing leaves the process.
 //! - State of every `Headers`, `Request`, `Response`, stream and reader lives in Rust (`FetchState`), keyed by the JS object.
-//!   `Host::trace` reports the JS objects each one keeps, `Host::prune` drops the entries of dead objects, and the queue roots
-//!   its promises. No `RefCell` borrow is held while JS runs (getters, `toString`, callbacks).
+//!   `Host::trace` reports the JS objects each one keeps, `Host::prune` drops the entries of dead objects, and each pending request holds a
+//!   persistent handle of its promise (or its `XMLHttpRequest` object). The constants of the realm are persistent handles too. No `RefCell` borrow is held while JS runs (getters, `toString`, callbacks).
 //!
 //! Policy: same origin, and CORS for another origin
 //! - A request to the document origin (one origin compare at queue time) runs as before: no `Origin`, no check, no preflight.
@@ -86,6 +86,7 @@ use crate::browser_navigation_url::form_serialize;
 use crate::browser_streams as streams;
 use bare_js::eval::{Error, Interp, LimitKind};
 use bare_js::value::{ObjId, Value};
+use bare_js_api::Persistent;
 use bare_net::http::{Client, Cookies, Ctx, Method, Request as NetRequest};
 use bare_net::parallel::Task;
 use bare_url::{Scheme, Url};
@@ -421,16 +422,17 @@ enum F {
     HeadersIter { headers: ObjId, idx: usize, kind: u8 },
 }
 
-/// A request that waits for `run_network_tasks`. Plain Rust data: the only JS value is the promise, and it is a root.
+/// A request that waits for `run_network_tasks`. Plain Rust data and one persistent handle, which is a root until the request ends.
 struct Pending {
-    promise: Value,
+    /// The promise of a `fetch`, or the `XMLHttpRequest` object of `xhr`.
+    root: Persistent,
     method: Method,
     url: Url,
     headers: Vec<(String, String)>,
     body: Option<Rc<Vec<u8>>>,
     redirect: Redirect,
     cors: Cors,
-    /// An `XMLHttpRequest` and its request generation (`browser_xhr.rs`). Then `promise` is `undefined`.
+    /// An `XMLHttpRequest` and its request generation (`browser_xhr.rs`). Then `root` holds the object.
     xhr: Option<(ObjId, u64)>,
     /// When it was queued: its age for `Page::pending`, and its queue wait for the trace. `None` for a `blob:` reply (no I/O).
     queued: Option<std::time::Instant>,
@@ -517,6 +519,8 @@ pub(crate) enum StreamMsg {
 /// the receiver, so the thread ends at its next chunk (or at the read timeout of the connection).
 struct OpenStream {
     x: (ObjId, u64),
+    /// Keeps the `XMLHttpRequest` object alive while the stream is open.
+    _root: Persistent,
     url: Url,
     rx: std::sync::mpsc::Receiver<StreamMsg>,
     /// Messages taken from `rx` and not delivered yet.
@@ -554,11 +558,12 @@ pub(crate) struct Fetch {
     lim: Cell<FetchLimits>,
     pub(crate) client: RefCell<Client>,
     protos: OnceCell<[ObjId; 6]>,
-    fixed: RefCell<Vec<ObjId>>,
-    pub(crate) json_parse: Cell<Option<Value>>,
-    json_stringify: Cell<Option<Value>>,
+    /// The prototypes, constructors and templates of this realm. Handles keep them alive; `protos` and the other fields hold their ids.
+    fixed: RefCell<Vec<Persistent>>,
+    pub(crate) json_parse: OnceCell<Persistent>,
+    json_stringify: OnceCell<Persistent>,
     /// The function of `shims/drain.js`, made at the first read of a stream body.
-    drain: Cell<Option<Value>>,
+    drain: OnceCell<Persistent>,
     /// Live (the window and the control interface): each request starts on a worker at once, and `run_network_tasks` takes only the
     /// replies that are in. Off: a request that is not in is waited for (a test or a headless run settles the page).
     pub(crate) live: Cell<bool>,
@@ -568,7 +573,7 @@ impl Default for Fetch {
     fn default() -> Fetch {
         let mut client = Client::new();
         client.set_identity(crate::browser_web::wire_identity());
-        Fetch { st: RefCell::default(), lim: Cell::new(FetchLimits::default()), client: RefCell::new(client), protos: OnceCell::new(), fixed: RefCell::default(), json_parse: Cell::new(None), json_stringify: Cell::new(None), drain: Cell::new(None), live: Cell::new(false) }
+        Fetch { st: RefCell::default(), lim: Cell::new(FetchLimits::default()), client: RefCell::new(client), protos: OnceCell::new(), fixed: RefCell::default(), json_parse: OnceCell::new(), json_stringify: OnceCell::new(), drain: OnceCell::new(), live: Cell::new(false) }
     }
 }
 
@@ -583,15 +588,6 @@ impl Drop for Fetch {
 const AHEAD: usize = 32;
 
 impl Fetch {
-    pub(crate) fn roots(&self, out: &mut Vec<Value>) {
-        out.extend(self.fixed.borrow().iter().map(|&o| Value::Object(o)));
-        out.extend(self.json_parse.get());
-        out.extend(self.json_stringify.get());
-        out.extend(self.drain.get());
-        out.extend(self.st.borrow().queue.iter().flat_map(|p| [p.promise].into_iter().chain(p.xhr.map(|x| Value::Object(x.0)))));
-        out.extend(self.st.borrow().streams.iter().map(|s| Value::Object(s.x.0)));
-    }
-
     pub(crate) fn trace(&self, owner: ObjId, out: &mut Vec<Value>) {
         let st = self.st.borrow();
         match st.objs.get(&owner) {
@@ -1241,7 +1237,7 @@ pub(crate) fn settle(it: &mut Interp<'_>, p: Value, r: R<Value>) -> R<Value> {
 pub(crate) fn abort_queued(d: &Dom, it: &mut Interp<'_>, promise: Value, reason: Value) -> R<()> {
     let found = {
         let mut st = d.fetch.st.borrow_mut();
-        match st.queue.iter().position(|t| matches!((t.promise, promise), (Value::Object(a), Value::Object(b)) if a == b)) {
+        match st.queue.iter().position(|t| matches!((it.persistent_value(&t.root), promise), (Value::Object(a), Value::Object(b)) if a == b)) {
             Some(i) => {
                 let t = st.queue.remove(i).expect("position");
                 st.queued_bytes -= t.body.as_ref().map_or(0, |b| b.len());
@@ -1427,7 +1423,7 @@ fn response_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value
 /// `Response.json(data, init)`: the body is `data` as JSON text, typed `application/json` unless `init` sets a Content-Type.
 /// It uses the intrinsic `JSON.stringify`, as `json()` uses the intrinsic `JSON.parse`.
 fn response_json(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    let Some(stringify) = d.fetch.json_stringify.get() else { return Err(Error::Unsupported(unsupported("Response.json without JSON.stringify"))) };
+    let Some(stringify) = d.fetch.json_stringify.get().map(|p| it.persistent_value(p)) else { return Err(Error::Unsupported(unsupported("Response.json without JSON.stringify"))) };
     let text = it.call(stringify, Value::Undefined, &[arg(a, 0)])?;
     if !matches!(text, Value::String(_)) {
         return Err(it.type_error("Failed to execute 'json' on 'Response': Value is not JSON serializable"));
@@ -1537,12 +1533,12 @@ fn drain_stream(d: &Dom, it: &mut Interp<'_>, this: ObjId, src: ObjId, kind: &st
         return settle(it, p, Err(e));
     }
     let f = match d.fetch.drain.get() {
-        Some(f) => f,
+        Some(p) => it.persistent_value(p),
         None => {
             // Not `js_str`: the source is part of the host, not script data.
             let s = it.heap.intern_str(include_str!("shims/drain.js")).map_err(|e| it.heap_error(e))?;
             let f = it.eval_global(Value::String(s))?;
-            d.fetch.drain.set(Some(f));
+            let _ = d.fetch.drain.set(it.persist_value(f));
             f
         }
     };
@@ -1739,7 +1735,7 @@ fn consume(d: &Dom, it: &mut Interp<'_>, this: Value, how: As) -> R<Value> {
                 if let As::Text = how {
                     return Ok(s);
                 }
-                let Some(parse) = d.fetch.json_parse.get() else { return Err(Error::Unsupported(unsupported("Body.json without JSON.parse"))) };
+                let Some(parse) = d.fetch.json_parse.get().map(|p| it.persistent_value(p)) else { return Err(Error::Unsupported(unsupported("Body.json without JSON.parse"))) };
                 it.charge((n / 16) as u64)?;
                 it.call(parse, Value::Undefined, &[s])
             }
@@ -1999,7 +1995,7 @@ fn prepare(d: &Dom, it: &mut Interp<'_>, promise: Value, a: &[Value]) -> R<()> {
         }
         if let Some(s) = core.signal {
             drop(st);
-            d.signal_add_algo(s, crate::browser_abort::Algo::Fetch(promise))?;
+            d.signal_add_algo(s, crate::browser_abort::Algo::Fetch(it.trace_value(promise)))?;
             st = d.fetch.st.borrow_mut();
         }
         st.queued_bytes += n;
@@ -2017,7 +2013,7 @@ fn prepare(d: &Dom, it: &mut Interp<'_>, promise: Value, a: &[Value]) -> R<()> {
         if !pending_fits(&st, &lim, meta_bytes(&core.url, &headers)) {
             return Err(d.lim("fetch-queue"));
         }
-        st.queue.push_back(Pending { promise, method, url: core.url, headers, body: core.body, redirect: core.redirect, cors, xhr: None, queued: Some(std::time::Instant::now()), started: None });
+        st.queue.push_back(Pending { root: it.persist_value(promise), method, url: core.url, headers, body: core.body, redirect: core.redirect, cors, xhr: None, queued: Some(std::time::Instant::now()), started: None });
     }
     d.queue_now();
     Ok(())
@@ -2055,7 +2051,8 @@ pub(crate) fn potentially_trustworthy(u: &Url) -> bool {
 }
 
 /// Queue the request of an `XMLHttpRequest` with the policy, the caps and the queue of `fetch`. `headers` are combined by name.
-pub(crate) fn queue_xhr(d: &Dom, x: (ObjId, u64), method: &str, url: Url, mut headers: Vec<(String, String)>, body: Option<Rc<Vec<u8>>>, with_credentials: bool) -> R<()> {
+#[allow(clippy::too_many_arguments)] // The request parts; `it` makes the handle of the XHR object.
+pub(crate) fn queue_xhr(d: &Dom, it: &mut Interp<'_>, x: (ObjId, u64), method: &str, url: Url, mut headers: Vec<(String, String)>, body: Option<Rc<Vec<u8>>>, with_credentials: bool) -> R<()> {
     let lim = d.fl();
     {
         let st = d.fetch.st.borrow();
@@ -2082,7 +2079,7 @@ pub(crate) fn queue_xhr(d: &Dom, x: (ObjId, u64), method: &str, url: Url, mut he
     if !pending_fits(&st, &lim, meta_bytes(&url, &headers)) {
         return Err(d.lim("fetch-queue"));
     }
-    st.queue.push_back(Pending { promise: Value::Undefined, method, url, headers, body, redirect: Redirect::Follow, cors, xhr: Some(x), queued: Some(std::time::Instant::now()), started: None });
+    st.queue.push_back(Pending { root: it.persist_value(Value::Object(x.0)), method, url, headers, body, redirect: Redirect::Follow, cors, xhr: Some(x), queued: Some(std::time::Instant::now()), started: None });
     drop(st);
     d.queue_now();
     Ok(())
@@ -2092,7 +2089,7 @@ pub(crate) fn queue_xhr(d: &Dom, x: (ObjId, u64), method: &str, url: Url, mut he
 /// the store (a network error). `url` is a stand-in for `responseURL` (the document URL). The reply settles in its turn, as any other.
 #[cold]
 #[inline(never)]
-pub(crate) fn queue_xhr_blob(d: &Dom, x: (ObjId, u64), url: Url, found: Option<(Vec<u8>, String)>) -> R<()> {
+pub(crate) fn queue_xhr_blob(d: &Dom, it: &mut Interp<'_>, x: (ObjId, u64), url: Url, found: Option<(Vec<u8>, String)>) -> R<()> {
     let lim = d.fl();
     let mut st = d.fetch.st.borrow_mut();
     if st.queue.len() >= lim.max_pending {
@@ -2118,14 +2115,14 @@ pub(crate) fn queue_xhr_blob(d: &Dom, x: (ObjId, u64), url: Url, found: Option<(
     };
     st.started += 1;
     let started = Some(d.fetch.client.borrow().spawn(move |_| Some((out, Vec::new(), std::time::Instant::now()))));
-    st.queue.push_back(Pending { promise: Value::Undefined, method: Method::Get, url, headers: Vec::new(), body: None, redirect: Redirect::Follow, cors: Cors::same("XMLHttpRequest"), xhr: Some(x), queued: None, started });
+    st.queue.push_back(Pending { root: it.persist_value(Value::Object(x.0)), method: Method::Get, url, headers: Vec::new(), body: None, redirect: Redirect::Follow, cors: Cors::same("XMLHttpRequest"), xhr: Some(x), queued: None, started });
     Ok(())
 }
 
 /// Start an `XMLHttpRequest` GET as an event stream: its own thread reads the body and the page gets each chunk as it comes
 /// (`Browser::run_streams`). The request is not in the queue, so a stream that never ends does not hold back the requests after it.
 /// The same policy, CORS and cookies as `queue_xhr`.
-pub(crate) fn queue_xhr_stream(d: &Dom, x: (ObjId, u64), url: Url, headers: Vec<(String, String)>, with_credentials: bool) -> R<()> {
+pub(crate) fn queue_xhr_stream(d: &Dom, it: &mut Interp<'_>, x: (ObjId, u64), url: Url, headers: Vec<(String, String)>, with_credentials: bool) -> R<()> {
     let lim = d.fl();
     let mut cors = policy(d, &lim, &url, Mode::Cors, "XMLHttpRequest")?;
     cors.include = with_credentials;
@@ -2145,7 +2142,7 @@ pub(crate) fn queue_xhr_stream(d: &Dom, x: (ObjId, u64), url: Url, headers: Vec<
             let _ = fail.send(StreamMsg::Head(Outcome::Failed("no thread for the event stream")));
         }
     }
-    st.streams.push(OpenStream { x, url, rx, got: VecDeque::new(), since: std::time::Instant::now() });
+    st.streams.push(OpenStream { x, _root: it.persist_value(Value::Object(x.0)), url, rx, got: VecDeque::new(), since: std::time::Instant::now() });
     Ok(())
 }
 
@@ -2789,8 +2786,8 @@ impl Browser {
                 self.xhr_deliver(x, seq, outcome, arrived)?;
                 continue;
             }
-            let promise = task.promise;
             self.it.host_scope(|it| {
+                let promise = it.persistent_value(&task.root);
                 finish(&dom, it, promise, outcome)?;
                 it.host_checkpoint().map(|_| ())
             })?;
@@ -2825,7 +2822,7 @@ impl Browser {
                 }
                 let e = dom.dom_err(it, "AbortError", "The operation was aborted.");
                 let v = thrown_value(e)?;
-                it.host_reject_promise(t.promise, v)?;
+                it.host_reject_promise(it.persistent_value(&t.root), v)?;
             }
             it.host_checkpoint().map(|_| ())
         })?;
@@ -2970,17 +2967,17 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     it.define_data(g, k, Value::Object(f), true, false, true)?;
     fixed.push(f);
     streams::install(d, it, protos[Stream as usize], protos[Reader as usize], &mut fixed)?;
-    *d.fetch.fixed.borrow_mut() = fixed;
+    *d.fetch.fixed.borrow_mut() = fixed.into_iter().map(|o| it.persist_value(Value::Object(o))).collect();
     // The intrinsic JSON.parse and JSON.stringify, so a script that replaces them does not change what `json()` and `Response.json()` run.
     let json = d.prop(it, Value::Object(g), "JSON")?;
     if let Value::Object(_) = json {
         let parse = d.prop(it, json, "parse")?;
         if it.is_callable_value(parse) {
-            d.fetch.json_parse.set(Some(parse));
+            let _ = d.fetch.json_parse.set(it.persist_value(parse));
         }
         let stringify = d.prop(it, json, "stringify")?;
         if it.is_callable_value(stringify) {
-            d.fetch.json_stringify.set(Some(stringify));
+            let _ = d.fetch.json_stringify.set(it.persist_value(stringify));
         }
     }
     Ok(())

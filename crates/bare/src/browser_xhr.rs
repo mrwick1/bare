@@ -26,7 +26,8 @@
 //! enumerable, as everywhere in this host. Subclassing is not supported.
 //!
 //! GC: the globals are accessors until the first read (like `AbortSignal`). A queued request roots its object. An `XMLHttpRequest`
-//! keeps its upload object and its cached response alive. Side tables are pruned at `collect`.
+//! keeps its upload object and its cached response alive (`Traced`). An `XMLHttpRequest` and its upload object are owners (`Owner::Xhr`):
+//! their entries go with their keys in the interface `prune`.
 
 use crate::browser::*;
 use crate::browser_fetch::{Outcome, StreamMsg, dequeue_xhr, forbidden_request, queue_xhr, queue_xhr_blob, queue_xhr_stream};
@@ -35,8 +36,7 @@ use bare_js::eval::{Error, Interp};
 use bare_js::heap::PropertyDescriptor;
 use bare_js::value::{ObjId, PropertyKey, Value};
 use bare_url::Url;
-use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::cell::RefCell;
 use std::rc::Rc;
 
 type V = R<Value>;
@@ -99,8 +99,10 @@ struct Xhr {
     started: f64,
     body_len: usize,
     resp: Option<Resp>,
-    cache: Option<Value>,
-    upload: ObjId,
+    cache: Option<bare_js_api::Traced<Value>>,
+    upload: bare_js_api::Traced<Value>,
+    /// The host key of the owner (`Owner::Xhr`).
+    key: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -115,7 +117,8 @@ struct Made {
 struct Tables {
     made: Option<Made>,
     objs: IdMap<ObjId, Xhr>,
-    ups: HashSet<ObjId>,
+    /// The upload objects, with their host keys.
+    ups: IdMap<ObjId, u32>,
     /// `(loaded, total, lengthComputable)` of a `ProgressEvent`.
     prog: IdMap<ObjId, (f64, f64, bool)>,
 }
@@ -123,31 +126,42 @@ struct Tables {
 #[derive(Default)]
 pub(crate) struct XhrHost {
     s: RefCell<Tables>,
-    /// An object was made and not pruned: `Dom::trace` skips `trace` below while this is false.
-    pub(crate) active: Cell<bool>,
+    /// Keep the prototypes and constructors of `Made` alive for the life of the realm.
+    held: RefCell<Vec<bare_js_api::Persistent>>,
 }
 
 // ------------------------------------------------------------------------------------ GC hooks
 
-pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
-    if let Some(m) = d.xhr.s.borrow().made {
-        out.extend(m.protos.into_iter().chain(m.ctors).map(Value::Object));
-    }
-}
-
-pub(crate) fn trace(d: &Dom, owner: ObjId, out: &mut Vec<Value>) {
+/// The references of the owner `Owner::Xhr(owner)`: an upload object keeps none.
+pub(crate) fn trace(d: &Dom, owner: ObjId, t: &mut bare_js_api::Tracer<'_, Value>) {
     if let Some(x) = d.xhr.s.borrow().objs.get(&owner) {
-        out.push(Value::Object(x.upload));
-        out.extend(x.cache);
+        t.visit(&x.upload);
+        if let Some(c) = &x.cache {
+            t.visit(c);
+        }
     }
 }
 
-pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
+/// The owner `Owner::Xhr(o)` is dead: drop its entry.
+pub(crate) fn forget(d: &Dom, o: ObjId) {
     let mut t = d.xhr.s.borrow_mut();
-    t.objs.retain(|&o, _| live(o));
-    t.ups.retain(|&o| live(o));
-    t.prog.retain(|&o, _| live(o));
-    d.xhr.active.set(!t.objs.is_empty() || !t.prog.is_empty());
+    if t.objs.remove(&o).is_none() {
+        t.ups.remove(&o);
+    }
+}
+
+/// The event `o` is dead: drop its progress numbers.
+pub(crate) fn forget_event(d: &Dom, o: ObjId) {
+    let mut t = d.xhr.s.borrow_mut();
+    if !t.prog.is_empty() {
+        t.prog.remove(&o);
+    }
+}
+
+/// The host key of `o` when it is an `XMLHttpRequest` or an upload object (`Dom::own`).
+pub(crate) fn key_of(d: &Dom, o: ObjId) -> Option<u32> {
+    let t = d.xhr.s.borrow();
+    t.objs.get(&o).map(|x| x.key).or_else(|| t.ups.get(&o).copied())
 }
 
 // ------------------------------------------------------------------------------------ helpers
@@ -190,6 +204,20 @@ fn reason(status: u16) -> &'static str {
 }
 
 impl Dom {
+    /// The entries of `XMLHttpRequest` objects, upload objects and progress numbers.
+    #[cfg(test)]
+    pub(crate) fn xhr_entries(&self) -> (usize, usize, usize) {
+        let t = self.xhr.s.borrow();
+        (t.objs.len(), t.ups.len(), t.prog.len())
+    }
+
+    /// Make `o` an owner with a new key.
+    fn xhr_owner(&self, it: &mut Interp<'_>, o: ObjId) -> u32 {
+        let k = self.st.borrow_mut().owners.key(Owner::Xhr(o));
+        it.set_host_owner_obj(o, k);
+        k
+    }
+
     fn xo(&self, it: &mut Interp<'_>, this: Value) -> R<ObjId> {
         match this {
             Value::Object(o) if self.xhr.s.borrow().objs.contains_key(&o) => Ok(o),
@@ -225,14 +253,16 @@ impl Dom {
         let ev = self.new_event_proto(it, ty, false, false, false, proto)?;
         if let Some((loaded, total)) = p {
             self.xhr.s.borrow_mut().prog.insert(ev, (loaded, total, total != 0.0));
-            self.xhr.active.set(true);
         }
         self.st.borrow_mut().events.get_mut(&ev).expect("just made").trusted = true;
         self.dispatch(it, Target::Obj(t), ev).map(|_| ())
     }
 
     fn upload_of(&self, x: ObjId) -> ObjId {
-        self.xs(x, |x| x.upload)
+        self.xs(x, |x| match *x.upload.raw() {
+            Value::Object(o) => o,
+            _ => unreachable!("an upload object"),
+        })
     }
 
     /// Is the request `(x, seq)` still the one in flight?
@@ -281,7 +311,7 @@ impl Dom {
 
     fn xhr_target(&self, it: &mut Interp<'_>, this: Value) -> R<Target> {
         match this {
-            Value::Object(o) if { let t = self.xhr.s.borrow(); t.objs.contains_key(&o) || t.ups.contains(&o) } => Ok(Target::Obj(o)),
+            Value::Object(o) if { let t = self.xhr.s.borrow(); t.objs.contains_key(&o) || t.ups.contains_key(&o) } => Ok(Target::Obj(o)),
             _ => Err(it.type_error("Illegal invocation")),
         }
     }
@@ -315,12 +345,13 @@ fn xhr_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
         body_len: 0,
         resp: None,
         cache: None,
-        upload,
+        upload: it.trace_value(Value::Object(upload)),
+        key: d.xhr_owner(it, o),
     };
+    let up_key = d.xhr_owner(it, upload);
     let mut t = d.xhr.s.borrow_mut();
     t.objs.insert(o, x);
-    t.ups.insert(upload);
-    d.xhr.active.set(true);
+    t.ups.insert(upload, up_key);
     Ok(Value::Object(o))
 }
 
@@ -349,7 +380,6 @@ fn progress_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
     let proto = d.xhr.s.borrow().made.expect("made").protos[3];
     let ev = d.new_event_proto(it, &ty, flags[0], flags[1], flags[2], proto)?;
     d.xhr.s.borrow_mut().prog.insert(ev, (nums[0], nums[1], flags[3]));
-    d.xhr.active.set(true);
     Ok(Value::Object(ev))
 }
 
@@ -480,12 +510,12 @@ fn send(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     if let Some(blob) = d.xs(x, |x| x.blob.clone()) {
         // A Blob URL is read from the store, with no body and no network. Only GET reads it.
         let found = (method == "GET").then(|| crate::browser_web::blob_url_read(d, &blob)).flatten();
-        queue_xhr_blob(d, (x, seq), url, found)?;
+        queue_xhr_blob(d, it, (x, seq), url, found)?;
         return send_started(d, it, x, seq, 0);
     }
     // A GET that asks for `text/event-stream` (as `EventSource` does) is read as it comes: see `queue_xhr_stream`.
     if method == "GET" && headers.iter().any(|(n, v)| n == "accept" && v.trim().eq_ignore_ascii_case("text/event-stream")) {
-        queue_xhr_stream(d, (x, seq), url, headers, creds)?;
+        queue_xhr_stream(d, it, (x, seq), url, headers, creds)?;
         return send_started(d, it, x, seq, 0);
     }
     let mut body = None;
@@ -506,7 +536,7 @@ fn send(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
         }
     }
     let body_len = body.as_ref().map_or(0, |b| b.len());
-    queue_xhr(d, (x, seq), &method, url, headers, body, creds)?;
+    queue_xhr(d, it, (x, seq), &method, url, headers, body, creds)?;
     send_started(d, it, x, seq, body_len)
 }
 
@@ -701,7 +731,7 @@ fn response_text(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
 
 fn response(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let x = d.xo(it, this)?;
-    let (rt, state, cache) = d.xs(x, |x| (x.rt, x.state, x.cache));
+    let (rt, state, cache) = d.xs(x, |x| (x.rt, x.state, x.cache.as_ref().map(|c| *c.raw())));
     match rt {
         Rt::Empty | Rt::Text => d.response_text_of(it, x),
         _ if state != DONE => Ok(Value::Null),
@@ -714,7 +744,7 @@ fn response(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
                 Rt::Blob => crate::browser_web::blob_from_bytes(d, it, body.to_vec(), essence(&d.final_mime(x)))?,
                 _ => {
                     let text = d.response_text_of(it, x)?;
-                    let Some(parse) = d.fetch.json_parse.get() else { return Err(Error::Unsupported(unsupported("XMLHttpRequest json without JSON.parse"))) };
+                    let Some(parse) = d.fetch.json_parse.get().map(|p| it.persistent_value(p)) else { return Err(Error::Unsupported(unsupported("XMLHttpRequest json without JSON.parse"))) };
                     it.charge((body.len() / 16) as u64)?;
                     return match it.call(parse, Value::Undefined, &[text]) {
                         Err(Error::Throw(_)) => Ok(Value::Null),
@@ -722,7 +752,8 @@ fn response(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
                     };
                 }
             };
-            d.xs(x, |x| x.cache = Some(v));
+            let c = it.trace_value(v);
+            d.xs(x, |x| x.cache = Some(c));
             Ok(v)
         }
     }
@@ -799,7 +830,8 @@ impl Browser {
     /// Step 1 of a delivery: the end of the upload, then the headers.
     fn xhr_headers(&mut self, dom: &Rc<Dom>, x: ObjId, seq: u64, resp: Resp) -> R<()> {
         self.step(|it| {
-            let (pending, listening, len, up) = dom.xs(x, |x| (!x.upload_done, x.up_listener, x.body_len as f64, x.upload));
+            let (pending, listening, len) = dom.xs(x, |x| (!x.upload_done, x.up_listener, x.body_len as f64));
+            let up = dom.upload_of(x);
             if pending {
                 dom.xs(x, |x| x.upload_done = true);
                 if listening {
@@ -970,6 +1002,7 @@ fn make(d: &Dom, it: &mut Interp<'_>) -> R<Made> {
         d.def_get(it, pp, name, get, None)?;
     }
     let m = Made { protos, ctors };
+    *d.xhr.held.borrow_mut() = protos.into_iter().chain(ctors).map(|o| it.persist_value(Value::Object(o))).collect();
     d.xhr.s.borrow_mut().made = Some(m);
     Ok(m)
 }

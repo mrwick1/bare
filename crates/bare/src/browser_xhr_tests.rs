@@ -283,3 +283,63 @@ fn a_reply_that_came_in_time_but_waited_for_a_busy_page_is_a_load() {
         assert_eq!(js(&mut b, "x.status + ' ' + out.filter(function (e) { return /^(load|timeout)\\(/.test(e) }).join('|')"), "200 load(5/5!)");
     });
 }
+
+#[test]
+fn an_xhr_that_the_script_dropped_after_send_is_collected_after_it_ends() {
+    big(|| {
+        let srv = server();
+        let mut b = browser(srv.port);
+        js(&mut b, "XMLHttpRequest; var n = 0;");
+        b.collect(&[]).unwrap();
+        assert_eq!(b.dom.xhr_entries(), (0, 0, 0));
+        js(&mut b, "(function () { var x = new XMLHttpRequest(); x.upload.onprogress = function () {}; x.onload = function () { n++; }; x.open('GET', '/text'); x.send(); })();");
+        // The request is pending and nobody holds the object: the persistent handle keeps it, and so its entries.
+        b.collect(&[]).unwrap();
+        assert_eq!(b.dom.xhr_entries(), (1, 1, 0));
+        while b.pending_fetches() > 0 {
+            b.run_network_tasks(10).unwrap();
+        }
+        b.drain().unwrap();
+        assert_eq!(js(&mut b, "n"), "1");
+        b.collect(&[]).unwrap();
+        assert_eq!(b.dom.xhr_entries(), (0, 0, 0), "the object, its upload object and the progress numbers of its events are gone");
+    });
+}
+
+#[test]
+fn an_upload_object_that_the_script_holds_outlives_its_xhr() {
+    big(|| {
+        let srv = server();
+        let mut b = browser(srv.port);
+        js(&mut b, "var up, hit = 0; (function () { var x = new XMLHttpRequest(); up = x.upload; })();");
+        b.collect(&[]).unwrap();
+        assert_eq!(b.dom.xhr_entries(), (0, 1, 0), "the XHR object is gone, its upload object is not");
+        assert_eq!(js(&mut b, "up.addEventListener('x', function () { hit++; }); up.dispatchEvent(new Event('x')); hit"), "1");
+        b.collect(&[]).unwrap();
+        assert_eq!(js(&mut b, "up.dispatchEvent(new Event('x')); hit"), "2", "the listener of the upload object survives a collection");
+        js(&mut b, "up = null;");
+        b.collect(&[]).unwrap();
+        assert_eq!(b.dom.xhr_entries(), (0, 0, 0));
+    });
+}
+
+#[test]
+fn an_xhr_keeps_its_cached_response_and_progress_events_free_their_numbers() {
+    big(|| {
+        let srv = server();
+        let mut b = browser(srv.port);
+        js(&mut b, "var x = new XMLHttpRequest(), got = []; x.onprogress = function (e) { got.push(e.loaded); }; x.responseType = 'arraybuffer'; x.open('GET', '/text'); x.send();");
+        while b.pending_fetches() > 0 {
+            b.run_network_tasks(10).unwrap();
+        }
+        b.drain().unwrap();
+        assert_eq!(js(&mut b, "var r = x.response; r === x.response && r.byteLength > 0"), "true");
+        js(&mut b, "r = null; 0");
+        b.collect(&[]).unwrap();
+        b.collect(&[]).unwrap();
+        assert_eq!(js(&mut b, "x.response.byteLength > 0 && x.response === x.response"), "true", "the cache is an edge of the object: it survives");
+        js(&mut b, "x = null; 0");
+        b.collect(&[]).unwrap();
+        assert_eq!(b.dom.xhr_entries(), (0, 0, 0));
+    });
+}

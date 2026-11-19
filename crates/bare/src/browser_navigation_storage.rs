@@ -289,7 +289,7 @@ pub(crate) fn area_get(d: &Dom, it: &mut Interp<'_>, session: bool) -> R<Value> 
             let proto = d.nav.p.get().map(|p| p.storage_proto);
             let o = d.new_source(it, crate::browser_sources::Source::Storage, proto)?;
             cell.set(Some(o));
-            d.fixed.borrow_mut().push(o);
+            d.nav.area_held.borrow_mut().push(it.persist_value(Value::Object(o)));
             o
         }
     };

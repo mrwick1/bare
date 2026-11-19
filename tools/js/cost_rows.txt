@@ -813,3 +813,16 @@ bare-stress run table-nested 1500
 bare-stress run table-collapse 100000
 bare-stress run table-percent-columns 100000
 bare-stress run text-uppercase 1000000
+# S0.4 PR 1: rows for CSSOM, frames and form validity (design-host-cssom/navigation/forms.md). 2 rows for each case.
+examples/cssom_load rules 1
+examples/cssom_load rules 10
+examples/cssom_load sheets 1
+examples/cssom_load sheets 10
+examples/cssom_load adopted 1
+examples/cssom_load adopted 10
+examples/cssom_load computed 1
+examples/cssom_load computed 10
+examples/navigation_load frames 1
+examples/navigation_load frames 10
+FORM_LOAD_STACK_MIB=8 examples/form_load validity 1
+FORM_LOAD_STACK_MIB=8 examples/form_load validity 10

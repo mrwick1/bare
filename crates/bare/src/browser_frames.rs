@@ -62,6 +62,11 @@ impl Frames {
     pub(crate) fn counts(&self) -> (u32, u64) {
         self.state().map_or((0, 0), |s| (s.builds.get(), s.visited.get()))
     }
+    /// The `Location` objects of frame windows that the state still holds.
+    #[cfg(test)]
+    pub(crate) fn locations(&self) -> usize {
+        self.state().map_or(0, |s| s.locs.len())
+    }
 }
 struct State {
     owner: ObjId,
@@ -486,6 +491,7 @@ fn context(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> R<Value> {
         let w = d.child_window(it, id)?;
         if let (Value::Object(o), Some(mut s)) = (w, d.frames.state_mut()) {
             s.contexts.insert(n, o);
+            d.wrapper_edges.set(true);
         }
         return Ok(w);
     }
@@ -534,11 +540,16 @@ fn context(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> R<Value> {
         it.heap.set_prototype_of(o, Some(it.global_object())).map_err(|e| it.heap_error(e))?;
         let mut s = d.frames.state_mut().expect("activated");
         s.docs.insert(dn, o);
+        d.wrapper_edges.set(true);
         s.locs.insert(loc);
+        drop(s);
+        let k = d.st.borrow_mut().owners.key(crate::browser::Owner::Loc(loc));
+        it.set_host_owner_obj(loc, k);
     } else {
         // The parent global must not answer for a frame with a child document that is never loaded.
         it.define_data(o, k, Value::Undefined, false, true, true)?;
     }
+    d.wrapper_edges.set(true);
     d.frames
         .state_mut()
         .as_mut()
@@ -630,18 +641,12 @@ pub(crate) fn note_owner(d: &Dom, it: &mut Interp<'_>, this: Value, made: Value)
         s.owned.insert(m, t);
     }
 }
+/// The references of the wrapper of the node `n`: the window and the document of its frame.
 #[cold]
-pub(crate) fn trace(d: &Dom, owner: ObjId, out: &mut Vec<Value>) {
+pub(crate) fn trace_node(d: &Dom, n: NodeId, t: &mut bare_js_api::Tracer<'_, Value>) {
     if let Some(s) = d.frames.state().as_ref() {
-        for (&n, &o) in &s.contexts {
-            if d.st.borrow().wrapper(n) == Some(owner) {
-                out.push(Value::Object(o));
-            }
-        }
-        for (&n, &o) in &s.docs {
-            if d.st.borrow().wrapper(n) == Some(owner) {
-                out.push(Value::Object(o));
-            }
+        for &o in s.contexts.get(&n).into_iter().chain(s.docs.get(&n)) {
+            crate::browser_sources::visit(t, Value::Object(o));
         }
     }
 }
@@ -649,8 +654,12 @@ pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
     if let Some(s) = d.frames.state_mut().as_mut() {
         s.contexts.retain(|_, o| live(*o));
         s.docs.retain(|_, o| live(*o));
-        let locs = std::mem::take(&mut s.locs);
-        s.locs = locs.into_iter().filter(|o| live(*o)).collect();
+    }
+}
+/// The `Location` object `o` of a frame window is dead: drop its entry.
+pub(crate) fn prune_loc(d: &Dom, o: ObjId) {
+    if let Some(s) = d.frames.state_mut().as_mut() {
+        s.locs.remove(&o);
     }
 }
 

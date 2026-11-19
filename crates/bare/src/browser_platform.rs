@@ -153,19 +153,48 @@ pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
     out.extend(s.mql.keys().filter(|&&o| st.listeners.get(&Target::Obj(o)).is_some_and(|l| !l.is_empty())).map(|&o| Value::Object(o)));
 }
 
+/// The references of an iterator of a token list. The token lists have owner entries (`trace_list`).
 pub(crate) fn trace(d: &Dom, owner: ObjId, out: &mut Vec<Value>) {
     let s = d.plat.s.borrow();
-    if let Some(&el) = s.lists.get(&owner) {
-        out.extend(d.st.borrow().wrapper(el.0).map(Value::Object));
-        out.extend(s.toks.get(&owner).into_iter().flat_map(|t| t.vals.iter().map(|&v| Value::String(v))));
-    } else if let Some(i) = s.iters.get(&owner) {
+    if let Some(i) = s.iters.get(&owner) {
         out.push(Value::Object(i.list));
-    } else if !s.by_el.is_empty()
-        && let Some(&Target::Node(n)) = d.st.borrow().by_obj.get(&owner)
-    {
-        for attr in ["class", "rel"] {
-            if let Some(&l) = s.by_el.get(&(n, attr)) { out.push(Value::Object(l)); }
+    }
+}
+
+/// The references of the token list `o` (its owner entry, `browser_sources.rs`): the wrapper of its element and its strings.
+pub(crate) fn trace_list(d: &Dom, o: ObjId, t: &mut bare_js_api::Tracer<'_, Value>) {
+    let s = d.plat.s.borrow();
+    if let Some(&(el, _)) = s.lists.get(&o) {
+        if let Some(w) = d.st.borrow().by_node.get(&el) {
+            t.visit(w);
         }
+        for &v in s.toks.get(&o).into_iter().flat_map(|t| &t.vals) {
+            crate::browser_sources::visit(t, Value::String(v));
+        }
+    }
+}
+
+/// The references of the wrapper of the element `n`: its token lists.
+pub(crate) fn trace_node(d: &Dom, n: NodeId, t: &mut bare_js_api::Tracer<'_, Value>) {
+    let s = d.plat.s.borrow();
+    if s.by_el.is_empty() {
+        return;
+    }
+    for attr in ["class", "rel"] {
+        if let Some(&l) = s.by_el.get(&(n, attr)) {
+            crate::browser_sources::visit(t, Value::Object(l));
+        }
+    }
+}
+
+/// Drop the entries of the token list `o`, which the collector freed.
+pub(crate) fn prune_list(d: &Dom, o: ObjId) {
+    let mut s = d.plat.s.borrow_mut();
+    s.toks.remove(&o);
+    if let Some(key) = s.lists.remove(&o)
+        && s.by_el.get(&key) == Some(&o)
+    {
+        s.by_el.remove(&key);
     }
 }
 
@@ -173,11 +202,7 @@ pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
     let mut s = d.plat.s.borrow_mut();
     let s = &mut *s;
     s.mql.retain(|&o, _| live(o));
-    s.lists.retain(|&o, _| live(o));
-    s.toks.retain(|&o, _| live(o));
     s.iters.retain(|&o, _| live(o));
-    let lists = &s.lists;
-    s.by_el.retain(|_, o| lists.contains_key(o));
 }
 
 impl Dom {

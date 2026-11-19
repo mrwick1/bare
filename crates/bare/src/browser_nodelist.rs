@@ -89,32 +89,20 @@ pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
     out.extend(d.nl.fixed.borrow().iter().map(|&o| Value::Object(o)));
 }
 
-pub(crate) fn trace(d: &Dom, owner: ObjId, out: &mut Vec<Value>) {
-    if d.nl.s.borrow().lists.contains_key(&owner) {
-        out.extend(d.doc_wrapper.get().map(|&o| Value::Object(o)));
-    }
-}
-
-pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
+/// Drop the entries of the list `o`, which the collector freed. A list holds no reference: the one it had, the wrapper of the
+/// document, is a root.
+pub(crate) fn prune_list(d: &Dom, o: ObjId) {
     let mut t = d.nl.s.borrow_mut();
-    if t.lists.is_empty() {
-        return;
+    let Some(l) = t.lists.remove(&o) else { return };
+    if let Src::Name(n) = &l.src {
+        t.name_bytes = t.name_bytes.saturating_sub(n.len());
     }
-    let t = &mut *t;
-    let (mut names, mut ids) = (0, 0);
-    t.lists.retain(|&o, l| {
-        let keep = live(o);
-        if keep {
-            if let Src::Name(n) = &l.src {
-                names += n.len();
-            }
-            ids += l.ids.len();
-        }
-        keep
-    });
-    (t.name_bytes, t.cached_ids) = (names, ids);
-    let lists = &t.lists;
-    t.of.retain(|_, o| lists.contains_key(o));
+    t.cached_ids = t.cached_ids.saturating_sub(l.ids.len());
+    if let Src::Of(n, kind) = l.src
+        && t.of.get(&(n, kind)) == Some(&o)
+    {
+        t.of.remove(&(n, kind));
+    }
 }
 
 /// `IndexedSource::indexed_len` for a list. `None`: `owner` is not a list.

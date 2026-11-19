@@ -648,17 +648,98 @@ fn dead_wrappers_free_their_keys_and_identity_entries() {
 }
 
 #[test]
-fn host_filled_objects_take_no_owner_slot_and_each_kind_answers_after_a_collection() {
+fn host_filled_objects_are_owners_and_each_kind_answers_after_a_collection() {
     big(|| {
         let mut b = browser();
         js(&mut b, "var held = document.createElement('p'); held.className = 'a b c'; held.dataset.x = '1'; document.body.appendChild(held); var t = held.classList, d = held.dataset, n = document.getElementsByTagName('p'); t.length + d.x + n.length;");
         let live = |b: &Browser| b.dom.st.borrow().owners.slots.iter().filter(|o| o.is_some()).count();
         let keys = live(&b);
-        // Short-lived lists of three kinds. Only the wrappers of their elements take owner slots.
-        js(&mut b, "(function () { for (var i = 0; i < 100; i++) { var e = document.createElement('div'); e.className = 'x'; e.classList.length; e.dataset.k; e.style.length; } })();");
+        // Short-lived objects of four kinds: each takes an owner slot, and the collection gives it back.
+        js(&mut b, "(function () { for (var i = 0; i < 100; i++) { var e = document.createElement('div'); e.className = 'x'; e.classList.length; e.dataset.k; e.style.length; e.attributes.length; document.getElementsByName('z' + i).length; } })();");
+        assert!(live(&b) > keys + 100);
         gc(&mut b, &[]);
         assert_eq!(live(&b), keys);
         assert_eq!(js(&mut b, "t.length + t[2] + d.x + (n[n.length - 1] === held)"), "3c1true");
+    });
+}
+
+#[test]
+fn a_list_collected_while_its_element_lives_frees_its_key() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "var held = document.createElement('p'); document.body.appendChild(held); held.id = 'h';");
+        let live = |b: &Browser| b.dom.st.borrow().owners.slots.iter().filter(|o| o.is_some()).count();
+        let (keys, lists) = (live(&b), b.nodelist_stats().lists);
+        js(&mut b, "(function () { for (var i = 0; i < 50; i++) document.getElementsByName('q').length; })();");
+        assert_eq!(b.nodelist_stats().lists, lists + 50);
+        gc(&mut b, &[]);
+        // The element lives, and its lists are gone with their keys.
+        assert_eq!((live(&b), b.nodelist_stats().lists), (keys, lists));
+        assert_eq!(js(&mut b, "held.id"), "h");
+    });
+}
+
+#[test]
+fn a_key_reused_after_a_collection_answers_for_the_new_object_only() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "var named = document.createElement('i'); named.setAttribute('name', 'one'); document.body.appendChild(named);");
+        js(&mut b, "(function () { var l = document.getElementsByName('none'); l.length; })();");
+        gc(&mut b, &[]);
+        let slots = b.dom.st.borrow().owners.slots.len();
+        // The freed slot goes to one of three new owners (a wrapper, a dataset and a token list), of other kinds: the table grows by two.
+        js(&mut b, "var holder = document.createElement('div'); holder.setAttribute('data-k', 'v'); var ds = holder.dataset, cl = holder.classList;");
+        assert_eq!(js(&mut b, "ds.k + cl.length"), "v0");
+        assert_eq!(b.dom.st.borrow().owners.slots.len(), slots + 2, "one of the three new owners took the freed slot");
+        gc(&mut b, &[]);
+        assert_eq!(b.nodelist_stats().lists, 0);
+        // The new list of the old name answers for itself.
+        assert_eq!(js(&mut b, "var l2 = document.getElementsByName('one'); l2.length + ':' + (l2[0] === named)"), "1:true");
+        assert_eq!(js(&mut b, "ds.k + cl.length"), "v0");
+    });
+}
+
+#[test]
+fn a_detached_node_list_with_an_expando_is_collected_and_a_live_one_keeps_it() {
+    big(|| {
+        let mut b = browser();
+        let make = "(function () { for (var i = 0; i < 50; i++) { var l = document.getElementsByName('q'); l.me = l; l.f = function () { return l; }; } })();";
+        js(&mut b, make);
+        gc(&mut b, &[]);
+        assert_eq!(b.nodelist_stats().lists, 0);
+        js(&mut b, "var keep = document.getElementsByName('q'); keep.mark = 'm'; keep.me = keep;");
+        gc(&mut b, &[]);
+        gc(&mut b, &[]);
+        assert_eq!(b.nodelist_stats().lists, 1);
+        assert_eq!(js(&mut b, "keep.mark + (keep.me === keep)"), "mtrue");
+    });
+}
+
+#[test]
+fn the_wrapper_of_an_element_keeps_its_host_filled_objects_and_their_expandos() {
+    big(|| {
+        let mut b = browser();
+        // Only the wrapper holds the objects of its detached element.
+        js(&mut b, "var e = document.createElement('div'); e.className = 'a b'; e.classList.mark = 'c'; e.style.mark = 's'; e.attributes.mark = 'a'; e.dataset.k = 'v';");
+        gc(&mut b, &[]);
+        gc(&mut b, &[]);
+        assert_eq!(js(&mut b, "e.classList.mark + e.style.mark + e.attributes.mark + e.dataset.k + (e.classList === e.classList)"), "csavtrue");
+        js(&mut b, "e = null;");
+        gc(&mut b, &[]);
+        let st = b.dom.st.borrow();
+        assert_eq!(st.owners.slots.iter().filter(|o| matches!(o, Some(crate::browser::Owner::Source(_)))).count(), 0);
+    });
+}
+
+#[test]
+fn a_wrapper_alone_keeps_its_attr_object_and_its_frame_window() {
+    big(|| {
+        let mut b = browser();
+        // A page that makes no other host-filled object: only the `Attr` and the frame window set the flag of `trace_node`.
+        js(&mut b, "var e = document.createElement('div'); e.setAttribute('k', 'v'); e.getAttributeNode('k').mark = 'a'; var f = document.createElement('iframe'); document.body.appendChild(f); f.contentWindow.mark = 'w';");
+        gc(&mut b, &[]);
+        gc(&mut b, &[]);
+        assert_eq!(js(&mut b, "e.getAttributeNode('k').mark + f.contentWindow.mark"), "aw");
     });
 }
 

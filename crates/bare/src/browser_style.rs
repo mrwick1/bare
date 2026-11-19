@@ -719,28 +719,39 @@ pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
     out.extend(d.style.fixed.borrow().iter().map(|&o| Value::Object(o)));
 }
 
-pub(crate) fn trace(d: &Dom, owner: ObjId, out: &mut Vec<Value>) {
+/// The references of the style object `o` (its owner entry, `browser_sources.rs`): the wrapper of its element and its strings.
+pub(crate) fn trace_obj(d: &Dom, o: ObjId, t: &mut bare_js_api::Tracer<'_, Value>) {
     let s = d.style.s.borrow();
-    if let Some(&el) = s.objs.get(&owner) {
-        out.extend(d.st.borrow().wrapper(el).map(Value::Object));
-        out.extend(s.names.get(&owner).into_iter().flat_map(|n| n.vals.iter().map(|&v| Value::String(v))));
-    } else if !s.by_el.is_empty()
-        && let Some(&Target::Node(n)) = d.st.borrow().by_obj.get(&owner)
-        && let Some(&o) = s.by_el.get(&n)
-    {
-        out.push(Value::Object(o));
+    if let Some(&el) = s.objs.get(&o) {
+        if let Some(w) = d.st.borrow().by_node.get(&el) {
+            t.visit(w);
+        }
+        for &v in s.names.get(&o).into_iter().flat_map(|n| &n.vals) {
+            crate::browser_sources::visit(t, Value::String(v));
+        }
     }
 }
 
-pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
+/// The references of the wrapper of the element `n`: its style object.
+pub(crate) fn trace_node(d: &Dom, n: NodeId, t: &mut bare_js_api::Tracer<'_, Value>) {
+    let s = d.style.s.borrow();
+    if !s.by_el.is_empty()
+        && let Some(&o) = s.by_el.get(&n)
+    {
+        crate::browser_sources::visit(t, Value::Object(o));
+    }
+}
+
+/// Drop the entries of the style object `o`, which the collector freed, and the kept block of its element.
+pub(crate) fn prune_obj(d: &Dom, o: ObjId) {
     let mut s = d.style.s.borrow_mut();
-    let s = &mut *s;
-    s.objs.retain(|&o, _| live(o));
-    s.names.retain(|&o, _| live(o));
-    let objs = &s.objs;
-    s.by_el.retain(|_, o| objs.contains_key(o));
-    let by_el = &s.by_el;
-    s.blocks.retain(|el, _| by_el.contains_key(el));
+    s.names.remove(&o);
+    if let Some(el) = s.objs.remove(&o)
+        && s.by_el.get(&el) == Some(&o)
+    {
+        s.by_el.remove(&el);
+        s.blocks.remove(&el);
+    }
 }
 
 impl Browser {

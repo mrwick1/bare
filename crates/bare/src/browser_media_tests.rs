@@ -280,3 +280,14 @@ fn caption_source_replacement_discards_the_old_task() {
     b.advance_time(100.0, 10_000).unwrap();
     assert_eq!(js(&mut b, "[log.join(),e.readyState,e.track.cues===null].join('|')"), "error|3|true");
 }
+
+#[test]
+fn a_dropped_play_promise_settles_after_collections() {
+    let mut b = browser("");
+    js(&mut b, "var out = []; (function () { var a = new Audio('http://127.0.0.1:1/x.mp3'); a.play().then(null, function (e) { out.push(e.name) }); })(); 1");
+    js(&mut b, "var junk = []; for (var i = 0; i < 100; i++) junk.push({ k: i }, 'x' + i); junk = null; 1");
+    b.collect(&[]).expect("collect");
+    b.collect(&[]).expect("collect");
+    b.advance_time(400.0, 10_000).unwrap();
+    assert_eq!(js(&mut b, "out.join()"), "NotSupportedError");
+}
