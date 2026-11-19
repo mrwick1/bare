@@ -1,7 +1,10 @@
 //! Load test for form controls and the driver's click activation. One case at one scale per process.
 //!
-//!   form_load CASE SCALE      CASE: submit | gc | gates      SCALE: 1, 10, 100
+//!   form_load CASE SCALE      CASE: submit | gc | gates | validity      SCALE: 1, 10, 100
 //!
+//! validity: SCALE*1000 rounds that build a form with a `required` input and a `<label for>`, and read `validity` (`valueMissing`, `valid`,
+//! `customError`), `checkValidity()`, `validationMessage` and `labels` (length and identity), then remove the form. A collect runs
+//! between blocks. The checksum is 11 for each round, from the HTML Standard's rules for a required empty input.
 //! The stack of the VM thread is 8 MiB (release) or `FORM_LOAD_STACK_MIB` (64 for a debug build).
 //! submit: SCALE*1000 driver clicks over 20 forms with a small repeating pattern of state (enabled, disabled, `type=button`,
 //! owner by `form` attribute, a click listener that cancels), changed between blocks by script. A Rust model of the same rules
@@ -195,6 +198,20 @@ fn exec(name: &str, scale: usize) {
                 die(format!("events retained: {:?}", b.stats()));
             }
         }
+        "validity" => {
+            run(&mut b, "var w = document.getElementById('w'), sum = 0; function round(i) { var f = document.createElement('form'), x = document.createElement('input'), l = document.createElement('label');
+                x.required = true; x.id = 'vx' + i; l.htmlFor = x.id; f.appendChild(l); f.appendChild(x); w.appendChild(f); var v = x.validity;
+                sum += (v.valueMissing ? 1 : 0) + (v.valid ? 0 : 1) + (x.checkValidity() ? 0 : 1);
+                sum += x.labels.length + (x.labels[0] === l ? 1 : 0) + (v === x.validity ? 1 : 0);
+                x.setCustomValidity('bad'); sum += (v.customError ? 1 : 0) + x.validationMessage.length;
+                x.setCustomValidity(''); x.value = 'a'; sum += v.valid ? 1 : 0;
+                w.removeChild(f) }");
+            for start in (0..n).step_by(CHUNK) {
+                run(&mut b, &format!("for (var i = {start}; i < {}; i++) round(i)", start + CHUNK));
+                collect(&mut b);
+            }
+            expect("validity", run(&mut b, "sum"), (n * 11).to_string());
+        }
         _ => die(format!("unknown case {name}")),
     }
     let (run_ms, cpu) = (t.elapsed().as_secs_f64() * 1e3, cpu_ms() - cpu0);
@@ -212,7 +229,7 @@ fn exec(name: &str, scale: usize) {
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     if a.len() != 3 {
-        die("usage: form_load submit|gc|gates 1|10|100".into());
+        die("usage: form_load submit|gc|gates|validity 1|10|100".into());
     }
     let scale: usize = a[2].parse().unwrap_or_else(|_| die("scale".into()));
     let name = a[1].clone();
