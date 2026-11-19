@@ -79,6 +79,13 @@ impl<'p> Interp<'p> {
         t.set_raw(v);
     }
 
+    /// Let `host` answer for the indexed and named objects of this realm (`Heap::new_indexed`, `Heap::new_named`) by their host
+    /// keys: the interface host's `indexed_*` and `named_*` methods.
+    pub fn set_api_sources<H: for<'q> bare_js_api::Host<Interp<'q>> + 'static>(&mut self, host: Rc<H>) {
+        self.heap.set_indexed_source(Rc::new(ApiSource(host.clone())));
+        self.heap.set_named_source(Rc::new(ApiSource(host)));
+    }
+
     /// `set_host_owner` for host code that still holds values (plan step S0.4).
     pub fn set_host_owner_obj(&mut self, o: ObjId, key: u32) {
         self.api.owners.push((o, key));
@@ -337,4 +344,65 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
     }
 
     fn safepoint(&mut self) {}
+}
+
+/// The heap's sources, answered by an interface host (`Interp::set_api_sources`). The heap gives the asked object and its host key;
+/// the host gets only the key.
+struct ApiSource<H>(Rc<H>);
+
+impl<H: for<'q> bare_js_api::Host<Interp<'q>>> ApiSource<H> {
+    /// The host as its own type: the calls are static, so the compiler can inline the host's answer here.
+    fn host(&self) -> &impl bare_js_api::Host<Interp<'static>> {
+        &*self.0
+    }
+}
+
+use bare_js_api::Host as _;
+
+fn pending(owner: ObjId, p: bare_js_api::Pending) -> HeapError {
+    match p {
+        bare_js_api::Pending::Busy => HeapError::HostUnavailable,
+        bare_js_api::Pending::Fill(index) => HeapError::NeedsHost { owner, index },
+    }
+}
+
+impl<H: for<'q> bare_js_api::Host<Interp<'q>>> crate::heap::IndexedSource for ApiSource<H> {
+    fn indexed_len(&self, owner: ObjId, key: u32) -> Result<usize, HeapError> {
+        self.host().indexed_len(&Value::Object(owner), key).map_err(|p| pending(owner, p))
+    }
+    fn indexed_item(&self, owner: ObjId, key: u32, index: usize) -> Result<crate::heap::Slot, HeapError> {
+        use crate::heap::Slot;
+        Ok(match self.host().indexed_item(&Value::Object(owner), key, index).map_err(|p| pending(owner, p))? {
+            bare_js_api::Item::Absent => Slot::Absent,
+            bare_js_api::Item::Missing => Slot::Missing,
+            bare_js_api::Item::Value(Value::Object(o)) => Slot::Ready(o),
+            bare_js_api::Item::Value(Value::String(s)) => Slot::Str(s),
+            // An indexed property is an object or a string; the host gives no other value.
+            bare_js_api::Item::Value(_) => Slot::Absent,
+        })
+    }
+    fn indexed_name(&self, owner: ObjId, key: u32, name: &[u16]) -> Result<Option<u32>, HeapError> {
+        self.host().indexed_name(&Value::Object(owner), key, name).map_err(|p| pending(owner, p))
+    }
+    fn indexed_names(&self, owner: ObjId, key: u32) -> Result<Vec<Vec<u16>>, HeapError> {
+        self.host().indexed_names(&Value::Object(owner), key).map_err(|p| pending(owner, p))
+    }
+}
+
+impl<H: for<'q> bare_js_api::Host<Interp<'q>>> crate::heap::NamedSource for ApiSource<H> {
+    fn named_has(&self, owner: ObjId, hk: u32, key: &[u16]) -> Result<bool, HeapError> {
+        self.host().named_has(&Value::Object(owner), hk, key).map_err(|p| pending(owner, p))
+    }
+    fn named_get(&self, owner: ObjId, hk: u32, key: &[u16]) -> Result<Option<crate::heap::NamedValue>, HeapError> {
+        Ok(self.host().named_get(&Value::Object(owner), hk, key).map_err(|p| pending(owner, p))?.map(|v| match v {
+            bare_js_api::Named::Text(t) => crate::heap::NamedValue::Text(t),
+            bare_js_api::Named::Value(v) => crate::heap::NamedValue::Value(v),
+        }))
+    }
+    fn named_len(&self, owner: ObjId, hk: u32) -> Result<usize, HeapError> {
+        self.host().named_len(&Value::Object(owner), hk).map_err(|p| pending(owner, p))
+    }
+    fn named_keys(&self, owner: ObjId, hk: u32) -> Result<Vec<Vec<u16>>, HeapError> {
+        self.host().named_keys(&Value::Object(owner), hk).map_err(|p| pending(owner, p))
+    }
 }

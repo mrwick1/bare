@@ -846,6 +846,39 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
             st.by_node.retain(|_, _| true);
         }
     }
+
+    #[inline]
+    fn indexed_len(&self, object: &Value, key: u32) -> Result<usize, bare_js_api::Pending> {
+        crate::browser_sources::indexed_len(self, object, key)
+    }
+    #[inline]
+    fn indexed_item(&self, object: &Value, key: u32, index: usize) -> Result<bare_js_api::Item<Value>, bare_js_api::Pending> {
+        crate::browser_sources::indexed_item(self, object, key, index)
+    }
+    #[inline]
+    fn indexed_name(&self, object: &Value, key: u32, name: &[u16]) -> Result<Option<u32>, bare_js_api::Pending> {
+        crate::browser_sources::indexed_name(self, object, key, name)
+    }
+    #[inline]
+    fn indexed_names(&self, object: &Value, key: u32) -> Result<Vec<Vec<u16>>, bare_js_api::Pending> {
+        crate::browser_sources::indexed_names(self, object, key)
+    }
+    #[inline]
+    fn named_has(&self, object: &Value, key: u32, name: &[u16]) -> Result<bool, bare_js_api::Pending> {
+        crate::browser_sources::named_has(self, object, key, name)
+    }
+    #[inline]
+    fn named_get(&self, object: &Value, key: u32, name: &[u16]) -> Result<Option<bare_js_api::Named<Value>>, bare_js_api::Pending> {
+        crate::browser_sources::named_get(self, object, key, name)
+    }
+    #[inline]
+    fn named_len(&self, object: &Value, key: u32) -> Result<usize, bare_js_api::Pending> {
+        crate::browser_sources::named_len(self, object, key)
+    }
+    #[inline]
+    fn named_keys(&self, object: &Value, key: u32) -> Result<Vec<Vec<u16>>, bare_js_api::Pending> {
+        crate::browser_sources::named_keys(self, object, key)
+    }
 }
 
 impl Host for Dom {
@@ -987,7 +1020,7 @@ impl Host for Dom {
         if (bare_js::heap::LAZY_ALL..u32::MAX).contains(&index) {
             return crate::browser_handlers::lazy(self, it, owner, index == bare_js::heap::LAZY_ALL);
         }
-        if crate::browser_nodelist::fill(self, it, owner, index)? || crate::browser_platform_class::indexed_fill(self, it, owner)? || crate::browser_style::fill(self, it, owner)? || crate::browser_dataset::fill(self, it, owner)? || crate::browser_cssom::fill(self, it, owner, index)? || crate::browser_media::caption_fill(self, it, owner, index)? {
+        if crate::browser_sources::fill(self, it, owner, index)? {
             return Ok(());
         }
         at::fill(self, it, owner, index)
@@ -1944,8 +1977,7 @@ impl Browser {
         });
         it.set_host(dom.clone())?;
         bare_js_api::Engine::set_host(&mut it, dom.clone());
-        it.heap.set_indexed_source(dom.clone());
-        it.heap.set_named_source(dom.clone());
+        it.set_api_sources(dom.clone());
         it.host_scope(|it| {
             dom.install(it)?;
             dom.install_scheduler(it)?;

@@ -648,6 +648,21 @@ fn dead_wrappers_free_their_keys_and_identity_entries() {
 }
 
 #[test]
+fn host_filled_objects_take_no_owner_slot_and_each_kind_answers_after_a_collection() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "var held = document.createElement('p'); held.className = 'a b c'; held.dataset.x = '1'; document.body.appendChild(held); var t = held.classList, d = held.dataset, n = document.getElementsByTagName('p'); t.length + d.x + n.length;");
+        let live = |b: &Browser| b.dom.st.borrow().owners.slots.iter().filter(|o| o.is_some()).count();
+        let keys = live(&b);
+        // Short-lived lists of three kinds. Only the wrappers of their elements take owner slots.
+        js(&mut b, "(function () { for (var i = 0; i < 100; i++) { var e = document.createElement('div'); e.className = 'x'; e.classList.length; e.dataset.k; e.style.length; } })();");
+        gc(&mut b, &[]);
+        assert_eq!(live(&b), keys);
+        assert_eq!(js(&mut b, "t.length + t[2] + d.x + (n[n.length - 1] === held)"), "3c1true");
+    });
+}
+
+#[test]
 fn a_moved_subtree_keeps_its_expandos() {
     big(|| {
         let mut b = browser();

@@ -386,7 +386,7 @@ fn new_list(d: &Dom, it: &mut Interp<'_>, sheet: Option<ObjId>) -> R<ObjId> {
         let s = state(d).borrow();
         if sheet.is_some() { s.rule_list_p } else { s.list_p }
     };
-    let o = it.heap.new_indexed(Some(p)).map_err(|e| it.heap_error(e))?;
+    let o = d.new_source(it, crate::browser_sources::Source::RuleList, Some(p))?;
     state(d).borrow_mut().lists.insert(
         o,
         List {
@@ -741,7 +741,7 @@ fn rule_from_chunk(d: &Dom, it: &mut Interp<'_>, sheet: ObjId, parent: Option<Ob
 }
 fn new_rule_list(d: &Dom, it: &mut Interp<'_>, owner: ObjId, depth: usize) -> R<ObjId> {
     let p = state(d).borrow().rule_list_p;
-    let o = it.heap.new_indexed(Some(p)).map_err(|e| it.heap_error(e))?;
+    let o = d.new_source(it, crate::browser_sources::Source::RuleList, Some(p))?;
     state(d).borrow_mut().lists.insert(
         o,
         List {

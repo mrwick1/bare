@@ -313,7 +313,7 @@ pub(crate) fn make_list(d: &Dom, it: &mut Interp<'_>, proto: ObjId, src: Src) ->
             return Err(d.lim("dom-nodelist-names"));
         }
     }
-    let o = it.heap.new_indexed(Some(proto)).map_err(|e| it.heap_error(e))?;
+    let o = d.new_source(it, crate::browser_sources::Source::NodeList, Some(proto))?;
     let mut t = d.nl.s.borrow_mut();
     t.name_bytes += n;
     t.lists.insert(o, List { src, rev: None, ids: Vec::new() });

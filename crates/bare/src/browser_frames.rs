@@ -302,14 +302,8 @@ pub(crate) fn activate(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     Ok(())
 }
 fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    let owner = it
-        .heap
-        .new_named_open(Some(d.p().et))
-        .map_err(|e| it.heap_error(e))?;
-    let document_owner = it
-        .heap
-        .new_named_open(Some(d.p().document))
-        .map_err(|e| it.heap_error(e))?;
+    let owner = d.new_source(it, crate::browser_sources::Source::Frames, Some(d.p().et))?;
+    let document_owner = d.new_source(it, crate::browser_sources::Source::Frames, Some(d.p().document))?;
     // The chain is `window -> Window.prototype -> owner -> EventTarget.prototype`, as in the standard.
     let g = it.global_object();
     let win = it.heap.get_prototype_of(g).map_err(|e| it.heap_error(e))?.expect("Window.prototype");
@@ -346,10 +340,6 @@ fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     Ok(())
 }
 
-/// Is `owner` one of the two named objects? Their names do not hide the properties of their chains.
-pub(crate) fn is_owner(d: &Dom, owner: ObjId) -> bool {
-    d.frames.state().is_some_and(|s| owner == s.owner || owner == s.document_owner)
-}
 pub(crate) fn has(d: &Dom, owner: ObjId, key: &[u16]) -> Result<Option<bool>, HeapError> {
     let state = d.frames.state();
     let Some(s) = state

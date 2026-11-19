@@ -268,6 +268,35 @@ impl<'a, R: Clone> Tracer<'a, R> {
     }
 }
 
+/// Why a host cannot answer a read of a host-filled property now. The engine stops the read; it is never an empty answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pending {
+    /// The host's state is in use (for example borrowed by the call that runs).
+    Busy,
+    /// The host must do work first: the engine calls the host's fill step with this index, then reads again. `u32::MAX` asks
+    /// the host to charge a long scan.
+    Fill(u32),
+}
+
+/// A property at an index of a host-indexed object.
+#[derive(Clone, Debug)]
+pub enum Item<R> {
+    /// No property at this index.
+    Absent,
+    /// The property exists, but its object does not exist yet. The engine asks the host's fill step for it, then reads again.
+    Missing,
+    /// The value: an object or a string.
+    Value(R),
+}
+
+/// The value of a named property of a host named object.
+#[derive(Clone, Debug)]
+pub enum Named<R> {
+    /// A string, as UTF-16 code units.
+    Text(Vec<u16>),
+    Value(R),
+}
+
 /// The arguments of a host call: consecutive slots of the handle stack.
 #[derive(Clone, Copy, Debug)]
 pub struct Args<'s> {
@@ -384,6 +413,46 @@ pub trait Host<E: Engine> {
     fn trace(&self, _key: u32, _t: &mut Tracer<'_, E::Raw>) {}
     /// The owners with these keys died in the last collection. Their `Traced` values are dangling: drop them.
     fn prune(&self, _dead: &[u32]) {}
+
+    // Host-filled properties. An object that the engine made with a host key (an indexed or a named object) has
+    // properties that the host gives when the engine reads them, so they are always live. These methods get the object that was
+    // asked (which can be a prototype of the object that the script touched) and its key, as a V8 interceptor gets its receiver.
+    // A host can put what it needs for the dispatch in the key, for example the kind of the object. The methods must be cheap,
+    // must not run script and must not allocate engine objects.
+
+    /// How many indices are properties of the object `key` now.
+    fn indexed_len(&self, _object: &E::Raw, _key: u32) -> Result<usize, Pending> {
+        Ok(0)
+    }
+    /// The property at `index` of the object `key` now.
+    fn indexed_item(&self, _object: &E::Raw, _key: u32, _index: usize) -> Result<Item<E::Raw>, Pending> {
+        Ok(Item::Absent)
+    }
+    /// The index that the string `name` is a non-enumerable alias of, if any.
+    fn indexed_name(&self, _object: &E::Raw, _key: u32, _name: &[u16]) -> Result<Option<u32>, Pending> {
+        Ok(None)
+    }
+    /// The aliases of [`Host::indexed_name`], in the host's order.
+    fn indexed_names(&self, _object: &E::Raw, _key: u32) -> Result<Vec<Vec<u16>>, Pending> {
+        Ok(Vec::new())
+    }
+    /// Is `name` a named property of the object `key` now?
+    fn named_has(&self, _object: &E::Raw, _key: u32, _name: &[u16]) -> Result<bool, Pending> {
+        Ok(false)
+    }
+    /// The value of the named property `name`. The engine calls it only right after [`Host::named_has`] answered `true` for
+    /// the same name.
+    fn named_get(&self, _object: &E::Raw, _key: u32, _name: &[u16]) -> Result<Option<Named<E::Raw>>, Pending> {
+        Ok(None)
+    }
+    /// How many names the object `key` has now. The engine calls it before [`Host::named_keys`].
+    fn named_len(&self, _object: &E::Raw, _key: u32) -> Result<usize, Pending> {
+        Ok(0)
+    }
+    /// The names of the object `key` now, in the host's order.
+    fn named_keys(&self, _object: &E::Raw, _key: u32) -> Result<Vec<Vec<u16>>, Pending> {
+        Ok(Vec::new())
+    }
 }
 
 /// A JavaScript realm. The host calls these methods only through [`Scope`]; each value that a method returns is pushed onto the

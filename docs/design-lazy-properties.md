@@ -106,3 +106,18 @@ Steps 1 and 2 can be one PR. Step 3 can be a second PR.
 1. Option A: the host key is in the exotic object, and the engine asks the host by key.
 2. Lazy `on*` members get their own interface method in a PR after A.
 3. Tracing of these objects by key comes in a second PR, after the dispatch by key.
+
+## Build of the first PR (2026-11-19)
+
+The first build followed the plan: an owner slot per object, and a read that found the kind in the owner table. It failed the cost rule on 18 rows. Node lists and the dataset map were first in the old probe chains, so their old read was one lookup. The new read added a borrow of the browser state, a table read, a jump and two result conversions (about 26 instructions per call). The heap added an `exotics` lookup to get the key.
+
+Owner decision (2026-11-19): the kind goes in the key, and the host methods also get the object, as a V8 interceptor gets its receiver.
+
+What the first PR builds:
+
+- The key of a host-filled object is its kind (`browser_sources::Source`, 1 to 9). A read is one jump on the key. The subsystem finds its state by the object, as before. There is no table read and no owner slot.
+- The objects are not owners yet: no key slot, no engine owner entry, no prune step. Their references still go through the old per-object hook. When they become owners (step 3), the key gets a slot in the bits above the kind.
+- `named_masking` is gone from the interface. An open named object (`new_named_open`) gets a flag in its object header when it is made. Before, each name read asked the host.
+- The heap keeps the last named object and its key, so `realize` after `named_exists` does not look up `exotics` again.
+
+Result: 2 rows of 805 stay over +0.5% under both allocators. They are `dataset_load keys 10000 1` and `dataset_load read 10000 1`. The cause is about 60 instructions per dataset operation: one `exotics` lookup for the key of an object that was not asked just before, and the interface layer. The object header (104 bytes) has no room for the key. The owner granted an exception for these 2 rows. Check them again after step 3.

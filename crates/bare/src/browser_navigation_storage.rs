@@ -287,7 +287,7 @@ pub(crate) fn area_get(d: &Dom, it: &mut Interp<'_>, session: bool) -> R<Value> 
         Some(o) => o,
         None => {
             let proto = d.nav.p.get().map(|p| p.storage_proto);
-            let o = it.heap.new_named_open(proto).map_err(|e| it.heap_error(e))?;
+            let o = d.new_source(it, crate::browser_sources::Source::Storage, proto)?;
             cell.set(Some(o));
             d.fixed.borrow_mut().push(o);
             o

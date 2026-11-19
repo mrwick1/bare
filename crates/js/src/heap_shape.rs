@@ -1515,7 +1515,7 @@ impl Heap {
         }
         let on = matches!(key, PropertyKey::String(s) if self.on_name(s));
         let first = recv.proto;
-        let mut indexed = recv.exotic == EXOTIC && matches!(self.exotic(o), Some(super::binary::Exotic::Indexed));
+        let mut indexed = recv.exotic == EXOTIC && matches!(self.exotic(o), Some(super::binary::Exotic::Indexed(_)));
         let (mut cur, mut depth, mut found) = (first, 0u8, None);
         while let Some(c) = cur {
             if self.obj(c)?.fast_on_use {
@@ -1528,7 +1528,7 @@ impl Heap {
                 return Ok(None);
             }
             indexed |= open;
-            indexed |= ob.exotic == EXOTIC && matches!(self.exotic(c), Some(super::binary::Exotic::Indexed));
+            indexed |= ob.exotic == EXOTIC && matches!(self.exotic(c), Some(super::binary::Exotic::Indexed(_)));
             depth += 1;
             if let Some(p) = self.own(ob, key) {
                 // A dictionary holder (a prototype with more than `MAX_PROPS` keys, or one that changed attributes) is read at its entry
@@ -2735,12 +2735,12 @@ mod tests {
         let target = h.new_object(None).unwrap();
         let handler = h.new_object(None).unwrap();
         let px = h.new_proxy(target, handler).unwrap();
-        let named = h.new_named(None).unwrap();
+        let named = h.new_named(None, 0).unwrap();
         let text = h.intern_str("ab").unwrap();
         let sw = h.new_primitive(None, Value::String(text)).unwrap();
         let w = h.new_primitive(None, Value::Number(1.0)).unwrap();
         let buf = h.new_buffer(None, 4).unwrap();
-        let idx = h.new_indexed(None).unwrap();
+        let idx = h.new_indexed(None, 0).unwrap();
         for o in [px, named, sw] {
             assert_eq!(shape_of(&h, o), ROOT_EXOTIC);
         }

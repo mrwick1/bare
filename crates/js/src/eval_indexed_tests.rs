@@ -21,10 +21,10 @@ struct X {
 }
 
 impl IndexedSource for X {
-    fn indexed_len(&self, owner: ObjId) -> Result<usize, HeapError> {
+    fn indexed_len(&self, owner: ObjId, _: u32) -> Result<usize, HeapError> {
         Ok(if self.owner.get() == Some(owner) { self.items.try_borrow().map_err(|_| HeapError::HostUnavailable)?.len() } else { 0 })
     }
-    fn indexed_item(&self, owner: ObjId, i: usize) -> Result<Slot, HeapError> {
+    fn indexed_item(&self, owner: ObjId, _: u32, i: usize) -> Result<Slot, HeapError> {
         if self.owner.get() != Some(owner) {
             return Ok(Slot::Absent);
         }
@@ -43,7 +43,7 @@ impl Host for X {
             // make(proto?): the indexed object
             0 => {
                 let proto = match n(0) { Value::Object(o) => o, _ => it.object_prototype() };
-                let o = it.heap.new_indexed(Some(proto)).unwrap();
+                let o = it.heap.new_indexed(Some(proto), 0).unwrap();
                 self.owner.set(Some(o));
                 Ok(Value::Object(o))
             }
@@ -245,7 +245,7 @@ fn the_heap_owns_its_source_and_drops_it_with_the_heap() {
 fn a_new_source_releases_the_old_one_and_two_heaps_do_not_alias() {
     let (mut h1, mut h2) = (Heap::default(), Heap::default());
     let (a, b) = (Rc::new(X::default()), Rc::new(X::default()));
-    let (o1, o2) = (h1.new_indexed(None).unwrap(), h2.new_indexed(None).unwrap());
+    let (o1, o2) = (h1.new_indexed(None, 0).unwrap(), h2.new_indexed(None, 0).unwrap());
     a.owner.set(Some(o1));
     b.owner.set(Some(o2));
     a.items.borrow_mut().extend([None, None, None]);
@@ -268,7 +268,7 @@ fn a_new_source_releases_the_old_one_and_two_heaps_do_not_alias() {
 fn a_host_that_cannot_answer_is_an_error_never_an_empty_list() {
     // No source at all.
     let mut h = Heap::default();
-    let o = h.new_indexed(None).unwrap();
+    let o = h.new_indexed(None, 0).unwrap();
     assert_eq!(h.virtual_len(o), Err(HeapError::HostUnavailable));
     assert_eq!(h.own_keys(o), Err(HeapError::HostUnavailable));
     assert_eq!(h.own_key_slots(o), Err(HeapError::HostUnavailable));

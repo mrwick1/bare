@@ -34,10 +34,10 @@ pub(super) enum Exotic {
     View { buffer: ObjId, offset: usize, len: usize, ty: Elem },
     Encoder,
     Decoder(Decoder),
-    /// An object whose array-index properties are read from the host each time (see `IndexedSource`). It holds no data.
-    Indexed,
-    /// An object whose string-keyed properties come from the host (see `heap_named.rs`). It holds no data.
-    Named,
+    /// An object whose array-index properties are read from the host each time (see `IndexedSource`). It holds only its host key.
+    Indexed(u32),
+    /// An object whose string-keyed properties come from the host (see `heap_named.rs`). It holds only its host key.
+    Named(u32),
     /// A primitive wrapper object: its string, number, boolean or symbol (see `heap_prim.rs`).
     Prim(Value),
     /// A `Proxy` (see `heap_proxy.rs`): `(target, handler)`, or `None` after `revoke`.
@@ -216,18 +216,18 @@ impl PartialEq for Slot {
 /// The read side of a host-indexed object (`Heap::new_indexed`). The host keeps the truth; the heap keeps no copy of the
 /// length or of the elements, so the answers are live. Both methods must be cheap, must not allocate JavaScript objects,
 /// and must not run JavaScript. They get `&self`: an answer cannot change anything. `owner` is the object that was asked,
-/// which can be a prototype of the object that the page touched.
+/// which can be a prototype of the object that the page touched; `key` is its host key (`new_indexed`).
 pub trait IndexedSource {
     /// How many indices are properties of `owner` now. `Ok(0)`: `owner` is not a live object of this host. `Err`: the host
     /// cannot answer now (for example its state is borrowed). The error stops the script; it is never an empty answer.
-    fn indexed_len(&self, owner: ObjId) -> Result<usize, HeapError>;
+    fn indexed_len(&self, owner: ObjId, key: u32) -> Result<usize, HeapError>;
     /// The property at `index` of `owner` now. `Err` as for `indexed_len`.
-    fn indexed_item(&self, owner: ObjId, index: usize) -> Result<Slot, HeapError>;
+    fn indexed_item(&self, owner: ObjId, key: u32, index: usize) -> Result<Slot, HeapError>;
     /// Optional non-enumerable named aliases of the indexed objects.
-    fn indexed_name(&self, _owner: ObjId, _key: &[u16]) -> Result<Option<u32>, HeapError> {
+    fn indexed_name(&self, _owner: ObjId, _key: u32, _name: &[u16]) -> Result<Option<u32>, HeapError> {
         Ok(None)
     }
-    fn indexed_names(&self, _owner: ObjId) -> Result<Vec<Vec<u16>>, HeapError> {
+    fn indexed_names(&self, _owner: ObjId, _key: u32) -> Result<Vec<Vec<u16>>, HeapError> {
         Ok(Vec::new())
     }
 }
@@ -317,8 +317,8 @@ impl Heap {
             Exotic::View { .. } => ExoticKind::View,
             Exotic::Encoder => ExoticKind::Encoder,
             Exotic::Decoder(_) => ExoticKind::Decoder,
-            Exotic::Indexed => ExoticKind::Indexed,
-            Exotic::Named => ExoticKind::Named,
+            Exotic::Indexed(_) => ExoticKind::Indexed,
+            Exotic::Named(_) => ExoticKind::Named,
             Exotic::Prim(_) => ExoticKind::Primitive,
             Exotic::Proxy(_) => ExoticKind::Proxy,
         })
@@ -345,7 +345,7 @@ impl Heap {
         let ex = ex();
         let ob = self.objects.get_mut(id.index, id.gn).expect("fresh object");
         ob.exotic = EXOTIC;
-        ob.shape = if matches!(ex, Exotic::Named | Exotic::Proxy(_) | Exotic::Prim(Value::String(_))) { shape::ROOT_EXOTIC } else { shape::ROOT_PLAIN };
+        ob.shape = if matches!(ex, Exotic::Named(_) | Exotic::Proxy(_) | Exotic::Prim(Value::String(_))) { shape::ROOT_EXOTIC } else { shape::ROOT_PLAIN };
         if let Exotic::Buffer(v) = &ex {
             self.bytes += v.len();
             self.buffer_bytes += v.len();
@@ -458,9 +458,18 @@ impl Heap {
     /// Properties follow the WebIDL legacy platform object rules for an indexed getter without a setter: an index below the
     /// length is an own, enumerable, configurable, non-writable data property; it cannot be written, defined or deleted
     /// (`false`), and a write or define at any index is rejected. An index at or after the length is no property, and the
-    /// prototype chain goes on. Keys that are not array indices are ordinary.
-    pub fn new_indexed(&mut self, proto: Option<ObjId>) -> R<ObjId> {
-        self.make_exotic(proto, || Exotic::Indexed)
+    /// prototype chain goes on. Keys that are not array indices are ordinary. The source gets `key` (the host key of the object)
+    /// with each question.
+    pub fn new_indexed(&mut self, proto: Option<ObjId>, key: u32) -> R<ObjId> {
+        self.make_exotic(proto, || Exotic::Indexed(key))
+    }
+
+    /// The host key of an indexed or named object (`new_indexed`, `new_named`). `None` for other objects.
+    pub fn host_key(&self, o: ObjId) -> Option<u32> {
+        match self.exotic(o)? {
+            Exotic::Indexed(k) | Exotic::Named(k) => Some(*k),
+            _ => None,
+        }
     }
 
     /// Install the host that answers for every `new_indexed` object of this heap.
@@ -485,8 +494,8 @@ impl Heap {
     pub fn virtual_len(&self, o: ObjId) -> R<usize> {
         match self.exotic(o) {
             Some(Exotic::View { buffer, len, ty, .. }) if *ty != Elem::Data => Ok(if matches!(self.exotics.get(&buffer.index), Some(Exotic::Buffer(_))) { *len } else { 0 }),
-            Some(Exotic::Indexed) => self.source()?.indexed_len(o),
-            Some(Exotic::Named) => self.named_len(o),
+            Some(&Exotic::Indexed(k)) => self.source()?.indexed_len(o, k),
+            Some(&Exotic::Named(k)) => self.named_source()?.named_len(o, k),
             Some(Exotic::Prim(Value::String(s))) => self.str_len(*s),
             _ => Ok(0),
         }
@@ -840,19 +849,19 @@ impl Heap {
             return Ok(Some(r));
         }
         let mut enumerable = true;
-        let i = match (self.exotic(o), key) {
-            (Some(Exotic::Indexed), PropertyKey::Index(i)) => i,
-            (Some(Exotic::Indexed), PropertyKey::String(_)) => {
+        let (i, k) = match (self.exotic(o), key) {
+            (Some(&Exotic::Indexed(k)), PropertyKey::Index(i)) => (i, k),
+            (Some(&Exotic::Indexed(k)), PropertyKey::String(_)) => {
                 let Some(i) = self.indexed_alias(o, key)? else { return Ok(None) };
                 enumerable = false;
-                i
+                (i, k)
             },
-            (Some(Exotic::Named), _) => return self.named_exists(o, key),
+            (Some(&Exotic::Named(k)), _) => return self.named_exists(o, k, key),
             (Some(Exotic::Prim(Value::String(s))), _) => return self.prim_str_own(*s, key),
             (Some(Exotic::Proxy(_)), _) => return Err(HeapError::Proxy(o)),
             _ => return Ok(None),
         };
-        let value = match self.source()?.indexed_item(o, i as usize)? {
+        let value = match self.source()?.indexed_item(o, k, i as usize)? {
             Slot::Absent => return Ok(None),
             Slot::Ready(v) => Value::Object(v),
             Slot::Str(s) => Value::String(s),
@@ -863,14 +872,12 @@ impl Heap {
     }
 
     pub(super) fn indexed_alias(&self, o: ObjId, key: PropertyKey) -> R<Option<u32>> {
-        if !matches!(self.exotic(o), Some(Exotic::Indexed)) {
-            return Ok(None);
-        }
+        let Some(&Exotic::Indexed(k)) = self.exotic(o) else { return Ok(None) };
         let PropertyKey::String(s) = key else { return Ok(None) };
         if !self.indexed_alias_visible(o, key)? {
             return Ok(None);
         }
-        self.source()?.indexed_name(o, self.str_units(s)?)
+        self.source()?.indexed_name(o, k, self.str_units(s)?)
     }
 
     pub(super) fn indexed_alias_visible(&self, o: ObjId, key: PropertyKey) -> R<bool> {
@@ -880,8 +887,8 @@ impl Heap {
     }
 
     pub(super) fn indexed_names(&self, o: ObjId) -> R<Vec<Vec<u16>>> {
-        if matches!(self.exotic(o), Some(Exotic::Indexed)) {
-            self.source()?.indexed_names(o)
+        if let Some(&Exotic::Indexed(k)) = self.exotic(o) {
+            self.source()?.indexed_names(o, k)
         } else {
             Ok(Vec::new())
         }
@@ -947,9 +954,9 @@ impl Heap {
 
     /// `[[DefineOwnProperty]]` of an integer-indexed key on a typed array. `None`: ordinary rules.
     pub(super) fn view_define(&mut self, o: ObjId, key: PropertyKey, d: &PropertyDescriptor) -> R<Option<bool>> {
-        if matches!(self.exotic(o), Some(Exotic::Indexed)) {
+        if let Some(&Exotic::Indexed(k)) = self.exotic(o) {
             let named = match key {
-                PropertyKey::String(s) if self.own(self.obj(o)?, key).is_none() => self.source()?.indexed_name(o, self.str_units(s)?)?.is_some(),
+                PropertyKey::String(s) if self.own(self.obj(o)?, key).is_none() => self.source()?.indexed_name(o, k, self.str_units(s)?)?.is_some(),
                 _ => false,
             };
             if matches!(key, PropertyKey::Index(_)) || named {

@@ -1087,7 +1087,7 @@ fn text_tracks(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let p = d.obj(it, it.object_prototype())?;
     crate::browser_lazy::tag(d, it, p, "TextTrackList")?;
     d.def_get(it, p, "length", caption_list_length, None)?;
-    let o = it.heap.new_indexed(Some(p)).map_err(|e| it.heap_error(e))?;
+    let o = d.new_source(it, crate::browser_sources::Source::Captions, Some(p))?;
     d.media.lists.borrow_mut().insert(o, CaptionList { node: n, revision: None, ids: Vec::new() });
     Ok(Value::Object(o))
 }

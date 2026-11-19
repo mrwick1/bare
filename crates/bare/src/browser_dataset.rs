@@ -38,7 +38,7 @@ use crate::browser::*;
 use crate::browser_dom::attr_set;
 use bare_html::dom::{NodeData, NodeId, Ns};
 use bare_js::eval::Interp;
-use bare_js::heap::{HeapError, NamedOp, NamedRequest, NamedSource, NamedValue};
+use bare_js::heap::{HeapError, NamedOp, NamedRequest};
 use bare_js::value::{ObjId, PropertyKey, Value};
 use std::cell::{Cell, OnceCell, RefCell};
 
@@ -197,61 +197,48 @@ fn units(cs: impl Iterator<Item = char>, cap: usize) -> Vec<u16> {
     v
 }
 
-impl NamedSource for Dom {
-    fn named_has(&self, owner: ObjId, key: &[u16]) -> Result<bool, HeapError> {
-        if let Some(session) = self.storage_area(owner) {
-            return self.storage_get(session, key).map(|v| v.is_some());
-        }
-        let Some(el) = self.dataset_el(owner)? else { return crate::browser_frames::has(self, owner, key).map(|v| v.unwrap_or(false)); };
-        let doc = self.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
-        self.dataset_gate(owner, doc.attr_count(el))?;
-        let NodeData::Element { attrs, .. } = *doc.data(el) else { return Ok(false) };
-        Ok(doc.attrs(attrs).iter().any(|a| matches(doc.atom_str(a.name), key)))
-    }
+/// Is `key` a name of the map `owner` now? `browser_sources.rs` calls these for the kind `Dataset`.
+#[inline]
+pub(crate) fn has(d: &Dom, owner: ObjId, key: &[u16]) -> Result<bool, HeapError> {
+    let Some(el) = d.dataset_el(owner)? else { return Ok(false) };
+    let doc = d.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
+    d.dataset_gate(owner, doc.attr_count(el))?;
+    let NodeData::Element { attrs, .. } = *doc.data(el) else { return Ok(false) };
+    Ok(doc.attrs(attrs).iter().any(|a| matches(doc.atom_str(a.name), key)))
+}
 
-    fn named_get(&self, owner: ObjId, key: &[u16]) -> Result<Option<NamedValue>, HeapError> {
-        if let Some(session) = self.storage_area(owner) {
-            return self.storage_get(session, key).map(|v| v.map(NamedValue::Text));
-        }
-        let Some(el) = self.dataset_el(owner)? else { return Ok(crate::browser_frames::value(self, owner, key).map(NamedValue::Value)); };
-        let doc = self.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
-        // No gate: the heap calls this right after `named_has`, and that call paid for the scan.
-        let NodeData::Element { attrs, .. } = *doc.data(el) else { return Ok(None) };
-        Ok(doc.attrs(attrs).iter().find(|a| matches(doc.atom_str(a.name), key)).map(|a| {
-            let t = doc.text(a.value);
-            NamedValue::Text(units(t.chars(), t.len()))
-        }))
-    }
+/// The value of name `key` of the map `owner`. No gate: the heap calls this right after `has`, and that call paid for the scan.
+#[inline]
+pub(crate) fn get(d: &Dom, owner: ObjId, key: &[u16]) -> Result<Option<bare_js_api::Named<Value>>, HeapError> {
+    let Some(el) = d.dataset_el(owner)? else { return Ok(None) };
+    let doc = d.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
+    let NodeData::Element { attrs, .. } = *doc.data(el) else { return Ok(None) };
+    Ok(doc.attrs(attrs).iter().find(|a| matches(doc.atom_str(a.name), key)).map(|a| {
+        let t = doc.text(a.value);
+        bare_js_api::Named::Text(units(t.chars(), t.len()))
+    }))
+}
 
-    fn named_len(&self, owner: ObjId) -> Result<usize, HeapError> {
-        if let Some(session) = self.storage_area(owner) {
-            return self.storage_len(session);
-        }
-        let Some(el) = self.dataset_el(owner)? else { return crate::browser_frames::len(self, owner).map(|v| v.unwrap_or(0)); };
-        let doc = self.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
-        self.dataset_gate(owner, doc.attr_count(el))?;
-        let NodeData::Element { attrs, .. } = *doc.data(el) else { return Ok(0) };
-        Ok(doc.attrs(attrs).iter().filter(|a| is_data(doc.atom_str(a.name))).count())
-    }
+/// The number of names of the map `owner`.
+#[inline]
+pub(crate) fn len(d: &Dom, owner: ObjId) -> Result<usize, HeapError> {
+    let Some(el) = d.dataset_el(owner)? else { return Ok(0) };
+    let doc = d.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
+    d.dataset_gate(owner, doc.attr_count(el))?;
+    let NodeData::Element { attrs, .. } = *doc.data(el) else { return Ok(0) };
+    Ok(doc.attrs(attrs).iter().filter(|a| is_data(doc.atom_str(a.name))).count())
+}
 
-    /// No gate here: the heap calls `named_len` first, and that call paid for the scan.
-    fn named_keys(&self, owner: ObjId) -> Result<Vec<Vec<u16>>, HeapError> {
-        if let Some(session) = self.storage_area(owner) {
-            return self.storage_keys(session);
-        }
-        let Some(el) = self.dataset_el(owner)? else { return Ok(crate::browser_frames::keys(self, owner).unwrap_or_default()); };
-        let doc = self.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
-        let NodeData::Element { attrs, .. } = *doc.data(el) else { return Ok(Vec::new()) };
-        Ok(doc.attrs(attrs).iter().filter_map(|a| {
-            let n = doc.atom_str(a.name);
-            prop_chars(n).map(|cs| units(cs, n.len()))
-        }).collect())
-    }
-
-    /// `Storage` names and window and document names do not hide the prototype chain: its methods win.
-    fn named_masking(&self, owner: ObjId) -> bool {
-        self.storage_area(owner).is_none() && !crate::browser_frames::is_owner(self, owner)
-    }
+/// The names of the map `owner`. No gate here: the heap calls `len` first, and that call paid for the scan.
+#[inline]
+pub(crate) fn keys(d: &Dom, owner: ObjId) -> Result<Vec<Vec<u16>>, HeapError> {
+    let Some(el) = d.dataset_el(owner)? else { return Ok(Vec::new()) };
+    let doc = d.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
+    let NodeData::Element { attrs, .. } = *doc.data(el) else { return Ok(Vec::new()) };
+    Ok(doc.attrs(attrs).iter().filter_map(|a| {
+        let n = doc.atom_str(a.name);
+        prop_chars(n).map(|cs| units(cs, n.len()))
+    }).collect())
 }
 
 /// `Host::fill_indexed` for a map: charge the long scan that the heap announced. `Ok(false)`: `owner` is not a map.
@@ -333,7 +320,7 @@ fn dataset_of(d: &Dom, it: &mut Interp<'_>, this: Value, svg: bool) -> V {
         return Err(d.lim("dom-wrappers"));
     }
     let proto = *d.dataset.proto.get().expect("installed");
-    let o = it.heap.new_named(Some(proto)).map_err(|e| it.heap_error(e))?;
+    let o = d.new_source(it, crate::browser_sources::Source::Dataset, Some(proto))?;
     let mut s = d.dataset.s.borrow_mut();
     s.objs.insert(o, el);
     s.by_el.insert(el, o);

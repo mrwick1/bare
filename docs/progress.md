@@ -13577,3 +13577,36 @@ Not done: the staging journey A/B. Lazy and virtual properties (`Host::get_index
 - On `browser_load mutation 1`, the `trace` functions of the six subsystems with such objects cost about 1.1 M of 72.6 M (1.5%) in the old per-object hook.
 
 Owner decisions (2026-11-19): option A (the host key in the exotic object, one dispatch by key); lazy `on*` members in a later PR; tracing of these objects by key in a second PR.
+
+## 2026-11-19: host-filled properties by kind key (plan step S0.4, first PR)
+
+Option A of `docs/design-lazy-properties.md`, with a change from the owner after the first build. See "Build of the first PR" in that document.
+
+Changes:
+
+- Engine: `Exotic::Indexed(key)` and `Exotic::Named(key)` hold a host key. `new_indexed`, `new_named` and `new_named_open` take it. The heap gives the object and its key to the source. `IndexedSource` and `NamedSource` take the key. `Heap::host_key(o)` gives it.
+- `bare-js-api`: `Host` gets `indexed_len`, `indexed_item`, `indexed_name`, `indexed_names`, `named_has`, `named_get`, `named_len` and `named_keys`. Each gets the object and its key. New types: `Pending` (`Busy`, `Fill(index)`), `Item` and `Named`. `Interp::set_api_sources(host)` installs one adapter for both heap sources.
+- `named_masking` is gone. An object of `new_named_open` gets a flag (`NAMED_OPEN`) in its header when it is made. The heap keeps the last named object and its key, so `realize` does not look up `exotics` again.
+- Browser: `browser_sources.rs`. The key of a host-filled object is its kind (`Source`, 1 to 9). Ten creation sites use `Dom::new_source`. A read is one jump on the key, then the subsystem's own lookup by the object. The probe chains of the old `IndexedSource` and `NamedSource` impls of `Dom` are gone. `browser_frames::is_owner` is gone (only masking used it).
+- The objects are not owners yet: no owner slot, no engine owner entry, no prune step.
+
+Versions (cost matrix, archMachine, base = origin/main `52613c99`, 3 runs per row, 805 rows; rows over +0.5% under both allocators):
+
+| Version | Rows over | Worst row |
+| --- | ---: | --- |
+| Owner slot per object, kind read from the owner table, `named_masking` through the host | 18 | `dataset_load keys 10000 50` +4.38% |
+| Masking as a header flag; static calls into the browser; dispatch inlined | 9 | `dataset_load keys 10000 1` +2.06% |
+| Kind in the key; the host gets the object | 4 | `dataset_load keys 10000 1` +1.26% |
+| No owner slot for these objects; last-key cache; dataset reads inlined (kept) | 2 | `dataset_load read 10000 1` +0.75% |
+
+Final matrix (`-J`, jemalloc on every row): mean change -0.004% (glibc), -0.010% (jemalloc). Rows over under both: `dataset_load keys 10000 1` +0.652% / +0.613% and `dataset_load read 10000 1` +0.752% / +0.674%. The owner granted an exception for these 2 rows (2026-11-19). Cause: about 60 instructions per dataset operation. One part is an `exotics` lookup for the key of an object that was not asked just before; the 104-byte object header has no room for the key. The other part is the interface layer. Check them again after the objects become owners. `parse_load deep 1` and `deep 10` abort on the base too.
+
+Other rows: `attr_load react 1` -0.927% (glibc) / -0.881% (jemalloc), `attr_load react 10` -0.977% / -0.955%, `browser_load mutation 1` -0.060%, `select_load react 1000` +0.193%, `nodelist_load churn 10` -0.103%, `dataset_load read 1000 1` +0.370%.
+
+Checks:
+
+- New tests: the engine answers host-filled properties by the key of each object (`eval_api_tests`); host-filled objects take no owner slot, and a token list, a dataset map and a node list answer after 100 short-lived ones are collected (this test fails when `new_source` registers an owner).
+- Linux: `bare` lib 1641 passed; `bare-js` lib 1046 passed; `bare-js-api` 5 passed and 1 doc test.
+- Windows 11 VM: 1575 `bare` tests (filters `browser_`, `storage`, `nodelist`, `attr`, `dataset`, `cssom`, `style`, `frames`, `media`), 30 indexed, named and interface tests of `bare-js`, and 5 tests of `bare-js-api` pass. Three `bare` tests fail on the VM. Their code does not touch this change: two `browser_session` tests read fixture folders by the Linux path of the checkout, and the time zone test fails to load `Asia/Kolkata` (hypothesis: the VM has no zone data for it). Not run on the VM for the base.
+
+Not done: the staging journey A/B. Next: the objects become owners (step 3 of the plan), then the lazy `on*` members.
