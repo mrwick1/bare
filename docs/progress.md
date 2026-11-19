@@ -13568,3 +13568,12 @@ Versions measured (callgrind, archMachine, one run per row, change of all instru
 | `IdTab::remove` without the page test; no listener lookup when there are none (kept) | | | | | +0.49% |
 
 Not done: the staging journey A/B. Lazy and virtual properties (`Host::get_indexed`, `get_named`) are the next PR. The other subsystems still use the old per-object hook.
+
+## 2026-11-19: host-filled property design (plan step S0.4)
+
+`docs/design-lazy-properties.md`. Measured on origin/main `46b95a42` (callgrind, archMachine, one run per row):
+
+- On `attr_load react 1`, each read probes the maps of node lists, token lists and style before it reaches the attribute map. The missed probes cost about 1.9 M of 225.1 M (0.8%).
+- On `browser_load mutation 1`, the `trace` functions of the six subsystems with such objects cost about 1.1 M of 72.6 M (1.5%) in the old per-object hook.
+
+Proposed: option A, the host key in the exotic object, with one dispatch by key; the objects also become owners for tracing. It waits for the owner's review.
