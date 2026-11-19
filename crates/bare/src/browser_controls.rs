@@ -327,10 +327,10 @@ struct St {
     /// The `setCustomValidity` messages (not empty).
     custom: HashMap<NodeId, String>,
     /// The `ValidityState` of each element, and the element of each `ValidityState`.
-    state: HashMap<NodeId, ObjId>,
-    owner: HashMap<ObjId, NodeId>,
+    state: IdMap<NodeId, ObjId>,
+    owner: IdMap<ObjId, NodeId>,
     /// The `labels` list of each control.
-    labels: HashMap<NodeId, ObjId>,
+    labels: IdMap<NodeId, ObjId>,
     /// The forms in `reset()` now.
     locked: HashSet<NodeId>,
 }
