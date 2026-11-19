@@ -13998,3 +13998,29 @@ Checks:
 - Windows 11 VM: the same three filters passed (29, 8, 27).
 
 Not tested: `BARE_GC_STRESS` (not on main); a full `bare` run on the Windows VM; wall time; the matrix after the final rebase.
+
+## 2026-11-19: URL objects as owners (plan step S0.4, navigation)
+
+Plan step 3 of `docs/design-host-navigation.md`: option A for the `URL` family and option D (persistent handles) for `Entry.cache`, `NavObjs` and the two `Storage` areas. Frames, structured clone and child pages are not in this PR. Handler bodies stay on the old `Interp`. The cap `max_objects` stays.
+
+Changes:
+
+- A `URL`, a `URLSearchParams` and an iterator object are owners (`Owner::Url`, `Owner::Params`, `Owner::Iter` in `browser.rs`). Each gets a host key when it is made, after its table entry is final.
+- `UrlObj.sp`, `ParamsObj.url` and `IterObj.sp` are `Traced<Value>`. `Host::trace(key)` visits the one edge of the owner (`browser_navigation::trace_owner`). `Host::prune(dead)` removes the entry of each dead owner and takes its bytes off `param_bytes` (`prune_owner`).
+- The old hook calls `browser_navigation::roots`, `trace` and `prune` are gone. The three `retain` loops and the sum over all lists are gone.
+- `Entry.cache` is an `Option<Persistent>`: it lives as long as its entry, and a dropped entry frees its slot at once. `NavObjs` holds 6 handles (`url`, `params`, `iter`, `location`, `history`, `storage_proto`); the `ObjId` copies stay for reads and are valid while the handles live. `area_get` holds each area with a handle in `Nav.area_held`. `Dom::fixed` keeps only `loc_proto`, `hist_proto` and the constructors.
+- The 6 `NavObjs` handles and the areas are in the persistent table now, so the bound of `a_cleared_or_finished_timer_frees_its_callback_at_the_next_collect` is 209 instead of 203 (observed 207).
+
+Tests (5 new in `browser_navigation_tests.rs`): a dropped `URL`, its `searchParams` and its iterators are collected together and their keys are used again (the key table does not grow over 3 rounds); a held `searchParams` keeps its `URL` and a held `URL` keeps its `searchParams`; a reused key answers for the new object only (every owner points at a live entry and its trace gives exactly the edges of that entry); `history.state === history.state` after a collection; an evicted entry frees its handle (a `WeakRef` to its state is empty, and the persistent table does not grow over 3 rounds of 6 pushes).
+
+Measurements (cost matrix, archMachine, 3 runs per row, 805 rows run; base = `98e7d328`, the head of #714, built fresh into `/data/bare-tmp/s0/base-nav`): mean change glibc -0.046%. No row over +0.5% under both allocators; no row over +0.5% under glibc. `navigation_load`: `url 1` -0.05%, `url 10` -0.04%, `iterate 1` +0.42%, `iterate 10` +0.39%, `subclass 1` -0.03%, `subclass 10` -0.10%, `history 1` -0.26%, `history 10` -0.31%, `storage 1` -0.58%, `storage 10` -0.50%, `route 1` -0.11%, `route 10` -0.18%. `session_load`: -0.02% to -0.15%. Other rows with a collection fell by up to 1.2% (`range_load iter 10` -1.21%, `streams_load pending 1` -0.89%). The design expected about -1.7% on `url 1`; the measure is -0.05%. Hypothesis: the 3,000 owners of the row cost about as much as the prune and trace work that went (the design's own estimate was -1.3% net). `iterate` is the row with the most objects for each unit; it is +0.4%, under the limit. Instruction counts only; no wall time.
+
+`parse_load deep 1` and `deep 10` fail to run on every tree that was tried (the base of this PR, the new tree and `37df5bd1`): stack overflow in the example. This change does not cause it.
+
+Checks:
+
+- Linux: `cargo check -p bare` exits 0. `cargo test --locked -p bare --lib` filtered `navigation` 89, `url` 47, `history` 17, `scheduler` 42 passed. `cargo test --locked -p bare-js-api -p bare-js -p bare --lib` ran once: 1651 passed in `bare` and 1 failed (the scheduler bound above, fixed and run again).
+- Windows 11 VM: the same filters pass (`navigation` 89, `url` 47, `history` 17, `scheduler` 42).
+- `BARE_GC_STRESS` is not on main, so the new tests did not run under it.
+
+Not done: `is_host_object` still tests the 7 tables (it has no key for the object; the design guessed a small gain); frames, structured clone and child pages (steps 4 to 6); a callgrind profile of `url 1`; scale 100; the crate tests of `bare-js-api` and `bare-js` on Windows.

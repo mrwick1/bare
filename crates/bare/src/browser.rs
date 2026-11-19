@@ -334,6 +334,10 @@ pub(crate) enum Owner {
     /// A host-filled object. Its kind is in the low bits of its key. `Reserved` is the entry between the key and the object.
     Source(ObjId),
     Reserved,
+    /// A `URL`, `URLSearchParams` or iterator object of the navigation module (`browser_navigation_params.rs`).
+    Url(ObjId),
+    Params(ObjId),
+    Iter(ObjId),
 }
 
 impl Owner {
@@ -342,7 +346,7 @@ impl Owner {
         match self {
             Owner::Target(t) => Some(t),
             Owner::Xhr(o) | Owner::Abort(o) => Some(Target::Obj(o)),
-            Owner::Event(_) | Owner::Ctl(_) | Owner::Computed(_) | Owner::Source(_) | Owner::Reserved => None,
+            Owner::Event(_) | Owner::Ctl(_) | Owner::Computed(_) | Owner::Source(_) | Owner::Reserved | Owner::Url(_) | Owner::Params(_) | Owner::Iter(_) => None,
         }
     }
 }
@@ -882,6 +886,7 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
                 }
             }
             Some(Owner::Computed(o)) => crate::browser_computed::trace_owner(self, &st, o, t),
+            Some(w @ (Owner::Url(_) | Owner::Params(_) | Owner::Iter(_))) => crate::browser_navigation::trace_owner(self, w, t),
             Some(Owner::Reserved) | None => {}
         }
     }
@@ -915,6 +920,9 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
             }
             if let Some(Owner::Source(o)) = st.owners.get(k) {
                 crate::browser_sources::prune(self, k, o);
+            }
+            if let Some(w @ (Owner::Url(_) | Owner::Params(_) | Owner::Iter(_))) = st.owners.get(k) {
+                crate::browser_navigation::prune_owner(self, w);
             }
             st.owners.release(k);
         }
@@ -990,7 +998,6 @@ impl Host for Dom {
         out.extend(self.doc_wrapper.get().map(|&o| Value::Object(o)));
         self.sched_roots(out);
         self.console.roots(out);
-        crate::browser_navigation::roots(self, out);
         self.scripts_roots(out);
         crate::browser_platform::roots(self, out);
         crate::browser_style::roots(self, out);
@@ -1021,7 +1028,6 @@ impl Host for Dom {
 
     fn trace(&self, owner: ObjId, out: &mut Vec<Value>) {
         self.sched_trace(owner, out);
-        crate::browser_navigation::trace(self, owner, out);
         crate::browser_platform::trace(self, owner, out);
         self.resize_trace(owner, out);
         self.mo_trace(owner, out);
@@ -1037,7 +1043,6 @@ impl Host for Dom {
     }
 
     fn prune(&self, live: &dyn Fn(ObjId) -> bool) {
-        crate::browser_navigation::prune(self, live);
         crate::browser_frames::prune(self, live);
         crate::browser_platform::prune(self, live);
         crate::browser_geom::prune(self, live);
