@@ -125,15 +125,11 @@ pub(crate) struct XhrHost {
     s: RefCell<Tables>,
     /// An object was made and not pruned: `Dom::trace` skips `trace` below while this is false.
     pub(crate) active: Cell<bool>,
+    /// Keep the prototypes and constructors of `Made` alive for the life of the realm.
+    held: RefCell<Vec<bare_js_api::Persistent>>,
 }
 
 // ------------------------------------------------------------------------------------ GC hooks
-
-pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
-    if let Some(m) = d.xhr.s.borrow().made {
-        out.extend(m.protos.into_iter().chain(m.ctors).map(Value::Object));
-    }
-}
 
 pub(crate) fn trace(d: &Dom, owner: ObjId, out: &mut Vec<Value>) {
     if let Some(x) = d.xhr.s.borrow().objs.get(&owner) {
@@ -480,12 +476,12 @@ fn send(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     if let Some(blob) = d.xs(x, |x| x.blob.clone()) {
         // A Blob URL is read from the store, with no body and no network. Only GET reads it.
         let found = (method == "GET").then(|| crate::browser_web::blob_url_read(d, &blob)).flatten();
-        queue_xhr_blob(d, (x, seq), url, found)?;
+        queue_xhr_blob(d, it, (x, seq), url, found)?;
         return send_started(d, it, x, seq, 0);
     }
     // A GET that asks for `text/event-stream` (as `EventSource` does) is read as it comes: see `queue_xhr_stream`.
     if method == "GET" && headers.iter().any(|(n, v)| n == "accept" && v.trim().eq_ignore_ascii_case("text/event-stream")) {
-        queue_xhr_stream(d, (x, seq), url, headers, creds)?;
+        queue_xhr_stream(d, it, (x, seq), url, headers, creds)?;
         return send_started(d, it, x, seq, 0);
     }
     let mut body = None;
@@ -506,7 +502,7 @@ fn send(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
         }
     }
     let body_len = body.as_ref().map_or(0, |b| b.len());
-    queue_xhr(d, (x, seq), &method, url, headers, body, creds)?;
+    queue_xhr(d, it, (x, seq), &method, url, headers, body, creds)?;
     send_started(d, it, x, seq, body_len)
 }
 
@@ -714,7 +710,7 @@ fn response(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
                 Rt::Blob => crate::browser_web::blob_from_bytes(d, it, body.to_vec(), essence(&d.final_mime(x)))?,
                 _ => {
                     let text = d.response_text_of(it, x)?;
-                    let Some(parse) = d.fetch.json_parse.get() else { return Err(Error::Unsupported(unsupported("XMLHttpRequest json without JSON.parse"))) };
+                    let Some(parse) = d.fetch.json_parse.get().map(|p| it.persistent_value(p)) else { return Err(Error::Unsupported(unsupported("XMLHttpRequest json without JSON.parse"))) };
                     it.charge((body.len() / 16) as u64)?;
                     return match it.call(parse, Value::Undefined, &[text]) {
                         Err(Error::Throw(_)) => Ok(Value::Null),
@@ -970,6 +966,7 @@ fn make(d: &Dom, it: &mut Interp<'_>) -> R<Made> {
         d.def_get(it, pp, name, get, None)?;
     }
     let m = Made { protos, ctors };
+    *d.xhr.held.borrow_mut() = protos.into_iter().chain(ctors).map(|o| it.persist_value(Value::Object(o))).collect();
     d.xhr.s.borrow_mut().made = Some(m);
     Ok(m)
 }

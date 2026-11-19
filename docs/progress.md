@@ -13719,3 +13719,24 @@ Cost matrix (archMachine, base `37df5bd1`, 805 rows, `-j4`, minimum of 3 runs, g
 Checks: Linux `bare` lib 1648, `bare-js` lib 1047, `bare-js-api` 5 passed. Windows 11 VM: the two new tests pass.
 
 Not tested: the full `bare` and `bare-js` suites on Windows; the stress mode on Windows; live-site journeys and the staging journey (not allowed in this task); `bare-mcp` tests; the stress mode with the GUI window. Collection counts are a lower bound. The stress mode cannot find a missing edge in a path that no journey runs. Noticed, not changed: `btn.click()` gives an event whose `detail` is `undefined` (to verify against the HTML spec: a `MouseEvent` with `detail` 0).
+## 2026-11-19: fetch roots in persistent handles (plan step S0.4, F1)
+
+Step F1 of `docs/design-host-fetch.md`. The four `roots` calls of fetch, streams, abort and XHR leave the old hook (`Dom::roots`). A `Persistent` of `bare-js-api` roots each value that they gave.
+
+Changes:
+
+- `Pending` holds one `Persistent` (`root`): the promise of a `fetch`, or the `XMLHttpRequest` object of an XHR. The design names two fields (`promise`, `xhr`); one handle covers both, because the XHR object id is already in `xhr`. `OpenStream` holds one for its XHR object. A request that settles, is aborted or is dequeued drops its handle. `run_network_tasks` reads the promise from the handle inside the scope, so the promise stays rooted while `finish` allocates. `queue_xhr`, `queue_xhr_blob` and `queue_xhr_stream` take `it` for this.
+- `Fetch::{fixed, json_parse, json_stringify, drain}`, `AbortHost::held` and `XhrHost::held` hold the prototypes, constructors, templates and intrinsic functions as `Persistent`. The six reaction templates of the streams moved from `Streams::roots` into `fixed`. The id fields (`protos`, `Fns`, `AbortHost::objs`, `Made`) stay: handler bodies still use `ObjId` and move in one later PR (owner decision).
+- `browser.rs`: the four `roots` calls are gone. The old `trace` and `prune` calls are not changed.
+- No change to `bare-js-api` or `bare-js`.
+
+Cost matrix (archMachine, base = origin/main `37df5bd1`, new = this branch, 3 runs per row, 805 rows, `-j4`, glibc; jemalloc for rows over the limit): rows over +0.5% under both allocators: 0. Mean change +0.007% (glibc). Two rows were over under glibc only (`preload_load style 10` +0.592%, `resources_load small 10` +1.466%). On a second run with jemalloc on every row they were not over: glibc and jemalloc mean +0.046% and -0.728% for the two rows. Rows of this change (glibc): `fetch_load post 1` +0.04%, `post 10` +0.07%, `bytes 1` +0.03%, `bytes 10` +0.11%, `objects 1` -0.00%, `objects 10` -0.00%, `iterate 1` +0.01%, `iterate 10` +0.01%; `streams_load flow 1` -0.00%, `many 1` +0.01%, `pending 1` +0.04%, `churn 1` +0.00%, `pending 10` +0.03%; `xhr_load 1` +0.07%, `xhr_load 100` +0.09%; `web_apis_load abort 1` +0.03%, `abort 10` +0.07%. `parse_load deep 1` and `deep 10` fail to run (stack overflow) on the base too.
+
+Checks:
+
+- New tests (`browser_fetch_tests`): a fetch whose promise the script dropped settles after two collections and its handle slot is reused (this test failed before the change: 0 slots); a collection between `send()` and the reply keeps the XHR object; the constants (`Response`, `Response.json`, the `drain` shim, `ReadableStream` pull, `Headers`, `Request`, `XMLHttpRequest`, `fetch`, `AbortController`) work after 3 collections. The last two passed before the change too (they pin the behavior).
+- `a_cleared_or_finished_timer_frees_its_callback_at_the_next_collect` counted all persistent slots. It now counts from the slots that exist before its loop, because the constants add handles.
+- Linux: `bare` lib 1650 passed (filters `fetch` 90, `xhr` 13, `stream` 47, `abort` 16, `scheduler` 42); `bare-js` lib 1047 passed; `bare-js-api` 5 passed.
+- Windows 11 VM, filters `fetch` 90, `xhr` 13, `abort` 16, `scheduler` 42 pass. Filter `stream`: 46 of 47 with 4 test threads; `a_preload_link_that_no_script_takes_does_not_delay_load_or_hold_the_page` failed once ("the preload did not start"), and it passed alone 3 of 3 times and in a run with 1 test thread (47 of 47). Hypothesis: a timing flake under load; not run against a base build on the VM.
+
+Not tested: `BARE_GC_STRESS` (not on main yet); a collection inside a task (S1.6); the staging journey A/B; wall time; a full `bare` run on the VM. `run_streams` drops the handle of a closed stream before it delivers the last messages, so that XHR object is unrooted for that delivery (the same as before this change; a task cannot collect today).

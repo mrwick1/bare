@@ -63,15 +63,11 @@ pub(crate) struct AbortHost {
     made: Cell<bool>,
     /// `(signal prototype, controller prototype, signal constructor, controller constructor)`.
     objs: RefCell<Option<[ObjId; 4]>>,
+    /// Keep those objects alive for the life of the realm.
+    held: RefCell<Vec<bare_js_api::Persistent>>,
 }
 
 // ------------------------------------------------------------------------------------ GC hooks
-
-pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
-    if let Some(o) = *d.abort.objs.borrow() {
-        out.extend(o.map(Value::Object));
-    }
-}
 
 pub(crate) fn trace(d: &Dom, owner: ObjId, out: &mut Vec<Value>) {
     let t = d.abort.s.borrow();
@@ -409,6 +405,7 @@ fn make(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     d.def_method(it, sc, "any", 1, static_any)?;
     d.def_get(it, cp, "signal", controller_signal, None)?;
     d.def_method(it, cp, "abort", 0, controller_abort)?;
+    *d.abort.held.borrow_mut() = [sp, cp, sc, cc].map(|o| it.persist_value(Value::Object(o))).into();
     *d.abort.objs.borrow_mut() = Some([sp, cp, sc, cc]);
     d.abort.made.set(true);
     Ok(())

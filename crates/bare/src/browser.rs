@@ -910,8 +910,6 @@ impl Host for Dom {
         out.extend(self.fixed.borrow().iter().map(|&o| Value::Object(o)));
         out.extend(self.doc_wrapper.get().map(|&o| Value::Object(o)));
         self.sched_roots(out);
-        self.fetch.roots(out);
-        self.streams.roots(out);
         self.console.roots(out);
         crate::browser_navigation::roots(self, out);
         self.scripts_roots(out);
@@ -923,8 +921,6 @@ impl Host for Dom {
         crate::browser_nodelist::roots(self, out);
         crate::browser_select::roots(self, out);
         crate::browser_dataset::roots(self, out);
-        crate::browser_abort::roots(self, out);
-        crate::browser_xhr::roots(self, out);
         crate::browser_web::roots(self, out);
         crate::browser_elements::roots(self, out);
         crate::browser_media::roots(self, out);

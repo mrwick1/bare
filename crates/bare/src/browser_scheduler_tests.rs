@@ -458,14 +458,14 @@ fn a_cleared_or_finished_timer_frees_its_callback_at_the_next_collect() {
         b.collect(&[]).unwrap();
         assert_eq!(js(&mut b, "['cleared', 'done', 'waiting'].map(t => w[t].deref() === undefined).join()"), "true,true,false");
         // The freed slots are used again: many short timers do not grow the table of persistent handles past one round.
-        let mut sizes = Vec::new();
+        let (base, mut sizes) = (b.it.persistent_slots(), Vec::new());
         for _ in 0..3 {
             js(&mut b, "for (var i = 0; i < 200; i++) setTimeout(function () {}, 0)");
             adv(&mut b, 1.0);
             b.collect(&[]).unwrap();
             sizes.push(b.it.persistent_slots());
         }
-        assert!(sizes[0] <= 203 && sizes[1] == sizes[0] && sizes[2] == sizes[0], "{sizes:?}");
+        assert!(sizes[0] <= base + 203 && sizes[1] == sizes[0] && sizes[2] == sizes[0], "{sizes:?}");
         assert_eq!(js(&mut b, "typeof w.waiting.deref()"), "function");
     });
 }
