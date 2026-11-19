@@ -327,10 +327,10 @@ struct St {
     /// The `setCustomValidity` messages (not empty).
     custom: HashMap<NodeId, String>,
     /// The `ValidityState` of each element, and the element of each `ValidityState`.
-    state: HashMap<NodeId, ObjId>,
-    owner: HashMap<ObjId, NodeId>,
+    state: IdMap<NodeId, ObjId>,
+    owner: IdMap<ObjId, NodeId>,
     /// The `labels` list of each control.
-    labels: HashMap<NodeId, ObjId>,
+    labels: IdMap<NodeId, ObjId>,
     /// The forms in `reset()` now.
     locked: HashSet<NodeId>,
 }
@@ -338,6 +338,8 @@ struct St {
 #[derive(Default)]
 pub(crate) struct CtlHost {
     st: RefCell<St>,
+    /// The shared objects below, in persistent handles: the engine roots them. The `ObjId`s in the cells are for lookups.
+    keep: RefCell<Vec<bare_js_api::Persistent>>,
     /// `willValidate`, `validationMessage`, `validity`, `setCustomValidity`, `labels`, `checkValidity`, `reportValidity`.
     shared: OnceCell<[ObjId; 7]>,
     /// `input.required`: getter and setter.
@@ -350,19 +352,27 @@ pub(crate) struct CtlHost {
     done: Cell<u8>,
 }
 
-pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
-    let c = &d.ctl;
-    let all = c.shared.get().into_iter().flatten().chain(c.required.get().into_iter().flatten()).chain(c.validity.get().into_iter().flatten()).chain(c.label.get().into_iter().flatten());
-    out.extend(all.map(|&o| Value::Object(o)));
+/// Keep the shared objects `objs` alive for the life of the page, in persistent handles of `keep`.
+pub(crate) fn hold(it: &mut Interp<'_>, keep: &RefCell<Vec<bare_js_api::Persistent>>, objs: &[ObjId]) {
+    keep.borrow_mut().extend(objs.iter().map(|&o| it.persist_value(Value::Object(o))));
 }
 
-/// Forget the objects that the collector freed.
-pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
+/// Forget the `ValidityState` `o`, which the collector freed. The entry of its element may name a newer one.
+pub(crate) fn prune_validity(d: &Dom, o: ObjId) {
     let mut st = d.ctl.st.borrow_mut();
-    st.state.retain(|_, &mut o| live(o));
-    st.labels.retain(|_, &mut o| live(o));
-    let st = &mut *st;
-    st.owner.retain(|o, _| live(*o));
+    if let Some(n) = st.owner.remove(&o)
+        && st.state.get(&n) == Some(&o)
+    {
+        st.state.remove(&n);
+    }
+}
+
+/// Forget the `labels` list `o` of the control `n`, which the collector freed.
+pub(crate) fn forget_labels(d: &Dom, n: NodeId, o: ObjId) {
+    let mut st = d.ctl.st.borrow_mut();
+    if st.labels.get(&n) == Some(&o) {
+        st.labels.remove(&n);
+    }
 }
 
 fn illegal(it: &mut Interp<'_>) -> Error {
@@ -609,6 +619,9 @@ pub(crate) fn validity_of(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> V {
     }
     let [proto, _] = made_validity(d, it)?;
     let o = d.obj(it, proto)?;
+    // An owner: the collector prunes the two entries when `o` dies.
+    let key = d.st.borrow_mut().owners.key(Owner::Source(o)) | crate::browser_sources::Source::Validity as u32;
+    it.set_host_owner_obj(o, key);
     let mut st = d.ctl.st.borrow_mut();
     st.state.insert(n, o);
     st.owner.insert(o, n);
@@ -648,6 +661,7 @@ fn made_validity(d: &Dom, it: &mut Interp<'_>) -> R<[ObjId; 2]> {
         d.def_get(it, proto, name, g, None)?;
     }
     let ctor = interface(d, it, proto, "ValidityState")?;
+    hold(it, &d.ctl.keep, &[proto, ctor]);
     let _ = d.ctl.validity.set([proto, ctor]);
     Ok([proto, ctor])
 }
@@ -710,6 +724,7 @@ fn shared(d: &Dom, it: &mut Interp<'_>) -> R<[ObjId; 7]> {
         v.push(d.add_fn(it, h, name, len, false)?);
     }
     let out: [ObjId; 7] = v.try_into().expect("seven");
+    hold(it, &d.ctl.keep, &out);
     let _ = d.ctl.shared.set(out);
     Ok(out)
 }
@@ -784,6 +799,7 @@ pub(crate) fn proto_for(d: &Dom, it: &mut Interp<'_>, tag: &str) -> R<ObjId> {
                 let k = d.key(it, "required")?;
                 let g = d.add_fn(it, input_required, "get required", 0, false)?;
                 let s = d.add_fn(it, set_input_required, "set required", 1, false)?;
+                hold(it, &d.ctl.keep, &[g, s]);
                 let _ = d.ctl.required.set([g, s]);
                 d.define_accessor(it, proto, k, g, Some(s))?;
             }
@@ -900,6 +916,7 @@ fn made_label(d: &Dom, it: &mut Interp<'_>) -> R<[ObjId; 2]> {
     d.def_get(it, proto, "htmlFor", html_for, Some(set_html_for))?;
     d.def_get(it, proto, "form", label_form, None)?;
     let ctor = interface(d, it, proto, "HTMLLabelElement")?;
+    hold(it, &d.ctl.keep, &[proto, ctor]);
     let _ = d.ctl.label.set([proto, ctor]);
     Ok([proto, ctor])
 }
@@ -1058,6 +1075,15 @@ mod tests {
         assert_eq!(step_message("-0.05", None, None, Some("0.1"), None).as_deref(), Some("Please enter a valid value. The two nearest valid values are -0.1 and 0."));
         assert_eq!(step_message("10", Some("0"), Some("10"), Some("3"), None).as_deref(), Some("Please enter a valid value. The nearest valid value is 9."));
         assert_eq!(step_message("1.5", None, None, Some("any"), None), None);
+    }
+}
+
+#[cfg(test)]
+impl Dom {
+    /// The entries of the `ValidityState` maps (element to object, object to element) and of `labels`. (Tests.)
+    pub(crate) fn ctl_entries(&self) -> (usize, usize, usize) {
+        let st = self.ctl.st.borrow();
+        (st.state.len(), st.owner.len(), st.labels.len())
     }
 }
 

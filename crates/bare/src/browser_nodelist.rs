@@ -98,10 +98,13 @@ pub(crate) fn prune_list(d: &Dom, o: ObjId) {
         t.name_bytes = t.name_bytes.saturating_sub(n.len());
     }
     t.cached_ids = t.cached_ids.saturating_sub(l.ids.len());
-    if let Src::Of(n, kind) = l.src
-        && t.of.get(&(n, kind)) == Some(&o)
-    {
-        t.of.remove(&(n, kind));
+    match l.src {
+        Src::Of(n, kind) if t.of.get(&(n, kind)) == Some(&o) => {
+            t.of.remove(&(n, kind));
+        }
+        Src::Labels(n) => crate::browser_controls::forget_labels(d, n, o),
+        Src::Options(n) | Src::Selected(n) => crate::browser_select::forget_collection(d, n, o),
+        _ => {}
     }
 }
 

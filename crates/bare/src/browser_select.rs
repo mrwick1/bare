@@ -99,6 +99,8 @@ struct Made {
 pub(crate) struct SelHost {
     st: RefCell<State>,
     made: OnceCell<Made>,
+    /// The objects of `made`, in persistent handles: the engine roots them.
+    keep: RefCell<Vec<bare_js_api::Persistent>>,
     /// The members of `HTMLTextAreaElement.prototype` are made at the first textarea wrapper or the first read of the global.
     area: Cell<bool>,
     /// The atoms of `value`, `selected` and `disabled`, with the size of the name table (plus one) when the name was last missing.
@@ -1094,6 +1096,8 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<Made> {
     d.def_get(it, optgroup, "label", group_label, Some(set_group_label))?;
 
     let m = Made { select, option, optgroup, collection, options, textarea, ctors };
+    crate::browser_controls::hold(it, &d.sel.keep, &[select, option, optgroup, collection, options, textarea]);
+    crate::browser_controls::hold(it, &d.sel.keep, &ctors);
     let _ = d.sel.made.set(m);
     Ok(m)
 }
@@ -1136,18 +1140,11 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     )
 }
 
-pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
-    if let Some(m) = d.sel.made.get() {
-        out.extend([m.select, m.option, m.optgroup, m.collection, m.options, m.textarea].into_iter().chain(m.ctors).map(Value::Object));
-    }
-}
-
-/// Forget the cached collections that the collector freed.
-pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
-    let mut st = d.sel.st.borrow_mut();
-    for c in st.cache.values_mut() {
-        c.options = c.options.filter(|&o| live(o));
-        c.chosen = c.chosen.filter(|&o| live(o));
+/// Forget the `options` or `selectedOptions` collection `o` of the select `s`, which the collector freed.
+pub(crate) fn forget_collection(d: &Dom, s: NodeId, o: ObjId) {
+    if let Some(c) = d.sel.st.borrow_mut().cache.get_mut(&s) {
+        c.options = c.options.filter(|&x| x != o);
+        c.chosen = c.chosen.filter(|&x| x != o);
     }
 }
 
@@ -1168,6 +1165,11 @@ impl Dom {
     /// Has any select, option or list interface been made? (Tests: a page without selects pays nothing.)
     pub(crate) fn sel_made(&self) -> bool {
         self.sel.made.get().is_some()
+    }
+
+    /// How many collections (`options`, `selectedOptions`) the selects keep for `===`. (Tests.)
+    pub(crate) fn sel_cached(&self) -> usize {
+        self.sel.st.borrow().cache.values().map(|c| usize::from(c.options.is_some()) + usize::from(c.chosen.is_some())).sum()
     }
 }
 
