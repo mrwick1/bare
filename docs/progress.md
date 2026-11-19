@@ -13631,3 +13631,23 @@ Checks:
 - Windows 11 VM: `bare-js-api` 5 passed; `bare-js` `api_tests` 7 passed; `bare` filters `handler` (30) and `events` (28) passed.
 
 Not tested: the staging journey A/B; a full `bare` run on the Windows VM; wall time.
+## 2026-11-19: module cost row (plan step S0.4, MD0)
+
+Added the `loader_load modules` case and its rows (`tools/js/cost_rows.txt`, scales 1 and 10; `tools/js/loader_load.sh` runs it too). No engine or browser code changed.
+
+Case: `SCALE*20` inline module scripts. Each imports one of 4 mid modules. A mid module imports 2 of 4 leaf modules. A leaf imports `shared` through an import map entry. `shared` has a top-level await. A classic script makes `SCALE*10` `import()` calls of the mid modules. The checks compare `sum`, `sq`, the call counts, the `import()` sums and the single top-level await effect with the same computation in Rust. A mid module changed to `v * 3 + w` fails: `FAIL: checksum 870,0,20 != 700,0,20`, exit 1.
+
+First design had 20*SCALE external root files. Its spread was 0.40% at scale 1 and 0.60% at scale 10: parallel loopback fetches change the count. Roots are inline now, and `import()` loads modules that are cached. Only 9 files are fetched, so the case is a cost row for parse, link, evaluate, import map and `import()`, and not for network.
+
+Instruction counts (archMachine, `tools/js/instr.sh`, 5 runs of its min-of-3, glibc, release):
+
+| Row | min | max | spread |
+| --- | ---: | ---: | ---: |
+| `loader_load modules 1` | 12,075,554 | 12,102,146 | 0.220% |
+| `loader_load modules 10` | 29,165,849 | 29,186,772 | 0.072% |
+
+Cost matrix against `origin/main` 37df5bd1 (803 rows, 3 runs each): mean change +0.010% (glibc), no row over +0.5% under both allocators. Under glibc only: `resources_load small 1` and `10`, `preload_load style 10` (jemalloc flat; they do not use the changed example). Failed to run: the two new rows (the base has no case) and `parse_load deep 1` and `10` (they overflow the stack on the base too; not changed).
+
+Checks: Linux `cargo test --locked -p bare --lib loader` 115 passed. Windows 11 VM: the release example built with cargo xwin; `modules 1` and `modules 10` print `checksum=ok` (22 and 202 scripts, 9 fetches).
+
+Not tested: the other two crates' tests, scale 100, the network path of module scripts.
