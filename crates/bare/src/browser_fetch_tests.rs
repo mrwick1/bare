@@ -319,6 +319,23 @@ fn response_metadata_redirects_and_cookies() {
 }
 
 #[test]
+fn manual_redirect_gives_an_opaque_redirect_response() {
+    big(|| {
+        let srv = serve(|r| if r.path == "/agree" { reply(302, &[("Location", "/next"), ("Set-Cookie", "ok=1; Path=/"), ("X-A", "b")], b"moved") } else { ok("{}") });
+        let mut b = at(srv.port);
+        let src = "var out = [new Request('/x', {redirect:'manual'}).redirect, new Request(new Request('/x', {redirect:'manual'})).redirect];
+          fetch('/agree', {method:'POST', body:'a=1', redirect:'manual'}).then(function (r) {
+            out.push(r.type, r.status, r.ok, r.redirected, r.url.slice(r.url.indexOf('/agree')), JSON.stringify(r.statusText), String(r.headers.get('location')), String(r.headers.get('x-a')), String(r.body));
+            return r.text(); }).then(function (t) { out.push('[' + t + ']'); return fetch('/check'); });";
+        assert_eq!(go(&mut b, src), "manual|manual|opaqueredirect|0|false|false|/agree|\"\"|null|null|null|[]");
+        // The redirect is not followed, and the cookie of the redirect reply is kept.
+        let recs = srv.recs();
+        assert_eq!(recs.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(), ["/agree", "/check"]);
+        assert_eq!(recs[1].header("cookie"), ["ok=1"]);
+    });
+}
+
+#[test]
 fn a_307_keeps_post_and_body_on_the_same_origin() {
     big(|| {
         let srv = serve(|r| if r.path == "/old" { reply(307, &[("Location", "/new")], b"") } else { ok("{}") });
@@ -370,7 +387,6 @@ fn response_constructor_request_and_clone() {
         for (src, what) in [
             ("new Request('/x', {method:'FOO'}); fetch(new Request('/x', {method:'FOO'}))", "fetch method other than GET, POST, PUT, PATCH, DELETE, HEAD and OPTIONS"),
             ("fetch('/x', {method:'patch'})", "fetch method other than GET, POST, PUT, PATCH, DELETE, HEAD and OPTIONS"),
-            ("new Request('/x', {redirect:'manual'})", "fetch redirect: manual (opaque redirect responses)"),
             ("new Request('/x', {integrity:'sha256-x'})", "fetch option integrity"),
             ("new Request('/x').body", "Request.body (a request body stream)"),
             ("new Response('x').body.tee()", "ReadableStream tee and async iteration"),
