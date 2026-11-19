@@ -13871,3 +13871,110 @@ Checks:
 - Windows 11 VM: `bare` filters `browser_ nodelist attr dataset cssom style frames media storage`: 1586 passed, 3 failed (the two `browser_session` fixture-path tests and the `Asia/Kolkata` time zone test, `browser_date_tests::local_time_uses_the_zone_of_the_realm_in_the_browser`). `bare-js-api` 5 passed. `bare-js` (not changed by this PR): 1039 passed, 8 failed. Three read fixture folders by the Linux path (`golden_disassembly`, `corpus_status_matches_acorn`, `parser_corpus_never_panics_or_faults`), and five need the system time zone table (`date_tests` 2, `intl_tests` 3: `Asia/Kolkata`, `Asia/Kathmandu`). Not fixed.
 
 Not tested: the staging journey A/B; peak memory (RSS) of these objects; a run of the cost matrix under jemalloc on every row (`-J`); the sum of both PRs against `52613c99`; a rebase onto main after `d5dac645` (`be110f78` and later) with a new matrix.
+## 2026-11-19: CSSOM, frames and form cost rows (plan step S0.4)
+
+Changes: a new example `crates/bare/examples/cssom_load.rs` (cases `rules`, `sheets`, `adopted`, `computed`), a `frames` case in `navigation_load` and a `validity` case in `form_load`. `tools/js/cost_rows.txt` has 2 rows (scale 1 and 10) for each of the 6 cases, in their own block at the end. No engine or browser change. The designs `design-host-cssom.md`, `design-host-navigation.md` and `design-host-forms.md` ask for these rows as PR 1, because no old row reads rule lists, sheets, a frame window, `validity` or `labels`.
+
+Each case checks one sum that a model in Rust gives. A wrong expected sum fails each of the 3 files (tried, then reverted): `FAIL: rules: 21200 != 21300`, `validity: 11000 != 11001`, `frames: 63000 != 64000`.
+
+Base instruction counts (user mode, `perf stat -e instructions:u`, archMachine, release build of this tree, which has the engine of origin/main `37df5bd1`; 5 runs, `GLIBC_TUNABLES=glibc.malloc.tcache_count=65535`):
+
+| Row | min | max | spread |
+| --- | ---: | ---: | ---: |
+| `cssom_load rules 1` | 170,184,880 | 170,195,369 | 0.006% |
+| `cssom_load rules 10` | 1,586,493,585 | 1,586,668,498 | 0.011% |
+| `cssom_load sheets 1` | 109,964,030 | 109,973,486 | 0.009% |
+| `cssom_load sheets 10` | 1,013,088,236 | 1,013,164,243 | 0.008% |
+| `cssom_load adopted 1` | 98,454,790 | 98,456,514 | 0.002% |
+| `cssom_load adopted 10` | 899,911,712 | 899,914,183 | 0.000% |
+| `cssom_load computed 1` | 275,194,857 | 275,196,631 | 0.001% |
+| `cssom_load computed 10` | 2,656,084,503 | 2,656,091,630 | 0.000% |
+| `navigation_load frames 1` | 176,206,892 | 176,208,179 | 0.001% |
+| `navigation_load frames 10` | 1,695,131,087 | 1,695,134,456 | 0.000% |
+| `form_load validity 1` | 117,965,459 | 117,976,428 | 0.009% |
+| `form_load validity 10` | 1,144,454,526 | 1,144,774,659 | 0.028% |
+
+All spreads are under 0.25%. Scale 10 of each case runs in under 1 s.
+
+Cost matrix against the base build of `37df5bd1` (817 rows, 803 measured): mean change +0.004% (glibc). The 12 new rows and `parse_load deep 1`/`10` did not run on the base: the base has no such case, and `parse_load deep` overflows its stack on the base and on this tree. One row is over +0.5% under glibc only: `resources_load small 1` +1.967% and `10` +1.423% (jemalloc +0.021% and +0.001%). It is a loopback-server row and this PR changes none of its code. `preload_load style 10` was +0.528% under glibc in the first run only. No row is over +0.5% under both allocators.
+
+Checks: Linux `cargo test --locked -p bare --lib` with filters `cssom` (21 passed), `frame` (45), `controls` (13) and `validity` (1). Windows 11 VM: the 3 examples built with cargo xwin (release) and each new case ran at scale 1 with `checksum=ok`.
+
+Not tested: Windows at scale 10; the old `*_load` cases on Windows; callgrind profile of the new rows; Node/Chrome comparison of the checksums (they follow the HTML and CSSOM standards by hand, and the engine agreed).
+## 2026-11-19: collector stress mode (plan step S0.x)
+
+`BARE_GC_STRESS=1` makes `Interp::gc_due` true at every safe point of the old engine. The depth and statement-frame conditions stay: a collect still never runs inside a call. `Interp::set_gc_stress(bool)` sets the mode for one interpreter (tests). The environment is read once for the process (`OnceLock`); an `Interp` copies it into a `bool` field when it is made. Off, `gc_due` reads one more `bool`. The old engine's `Scope::safepoint` is an empty function and no code calls it, so the browser safe points are the callers of `Browser::collect_due` (the loader rounds, `browser_ui` after a key or click). The collector itself is unchanged.
+
+Tests:
+
+- `bare-js`: `gc_stress_is_due_at_every_safe_point_and_live_values_survive`. 20 collects at safe points, a global object and its array survive, a call after each collect works.
+- `bare`: `a_page_gives_the_same_results_when_a_collect_runs_between_all_tasks`. One page with an interval, a timeout, a promise job, a click listener on a node that only the document holds, a node list and a dataset map. It runs twice, without and with stress. The log of both runs is equal, and the stress run makes at least 50 collects (the plain run makes none).
+
+Journeys under stress (archMachine, debug test binaries of `crates/drive/tests`, each file run once plain and once with `BARE_GC_STRESS=1` in the environment of the test and of the `bare-drive` it starts). Collections are a lower bound: the sum over processes of the last `collections` of the `browser_stats` event (`BARE_OBSERVE=metrics`); 0 can mean that no event came. Wall time is from a machine that ran other builds; do not compare it.
+
+| Journey file | Plain | Stress | Stress time (s) | Collections |
+| --- | --- | --- | ---: | ---: |
+| background, cache, cookies, goto_hash, goto_spa_route, held_post, idle, longpoll, monitoring, net_failures, nonblocking, open_memory, page_hide, settle_stopped, sheet_failures, stale_wait, state, suite, wait_load_limit, window_wait, busy_fetch, chunked | pass | pass | 0.0 to 13.0 | 0 to 2 |
+| fill (6 tests) | pass | pass | 0.1 | 25 |
+| fixture_app (4) | pass | pass | 5.1 | 159 |
+| fixture_journey (6, the staging login journey on the local app) | pass | pass | 2.8 | 165 |
+| inline_links (4) | pass | pass | 0.1 | 24 |
+| images (8) | pass | pass | 0.1 | 4 |
+| replay (4) | pass | pass | 11.3 | 9 |
+| shot_ready (2) | pass | pass | 1.5 | 4 |
+| storage_full | pass | pass | 0.6 | 10 |
+| swapped_input (3) | pass | pass | 0.2 | 4 |
+| live_budget | pass | pass | 56.6 (plain 3.6) | not counted |
+| task_budget | pass | pass | 60.8 (plain 92.4) | not counted |
+| window_arenas | pass | pass | 71.6 (plain 14.7) | not counted |
+| survive_limit (2) | FAIL (debug) | FAIL (debug) | 150.1 | not counted |
+| survive_limit, release build | pass | pass | 55.7 (plain 49.6) | not counted |
+
+`survive_limit` fails in the debug build with and without stress: a runaway-script step budget takes about 90 s of CPU there, over the 60 s step limit of the test. It passes in the release build both ways. All 35 files were run: no journey failed because of the stress mode. No missing trace edge was found.
+
+Local suite (`tools/suite/run.py`, 40 generated tests, release `bare-drive`, 1 run each): V0 40 of 40 pass both ways, instructions 15,444 M plain and 53,625 M under stress; V2 40 of 40 pass both ways, 10,324 M plain and 22,084 M under stress.
+
+`bare` lib tests under stress (`BARE_GC_STRESS=1`, debug): 1646 pass, 2 fail. Both assert that a collect is not due (`parsed_documents_ask_for_a_collect_by_their_native_bytes`, and my new test before it set the mode itself). They fail by design when the environment forces the mode; my test now sets the mode explicitly. No other test failed, so no missing edge shows in them either.
+
+Cost matrix (archMachine, base `37df5bd1`, 805 rows, `-j4`, minimum of 3 runs, glibc; jemalloc for rows over the limit): no row over +0.5% under both allocators. Mean change -0.000% (glibc), +0.051% (jemalloc, 5 rows). Five rows over under glibc only: `resources_load small 1` +1.27%, `resources_load small 10` +1.63%, `form_load gates 1` +0.58%, `form_load gates 10` +0.62%, `preload_load style 10` +0.50%; their jemalloc counts are -0.15% to +0.26%. A second run of three of them gave the same counts. Hypothesis: an allocator size class shifts because `Interp` has one more `bool`. `parse_load deep 1` and `deep 10` abort on the base too.
+
+Checks: Linux `bare` lib 1648, `bare-js` lib 1047, `bare-js-api` 5 passed. Windows 11 VM: the two new tests pass.
+
+Not tested: the full `bare` and `bare-js` suites on Windows; the stress mode on Windows; live-site journeys and the staging journey (not allowed in this task); `bare-mcp` tests; the stress mode with the GUI window. Collection counts are a lower bound. The stress mode cannot find a missing edge in a path that no journey runs. Noticed, not changed: `btn.click()` gives an event whose `detail` is `undefined` (to verify against the HTML spec: a `MouseEvent` with `detail` 0).
+
+## 2026-11-19: CSS rule and sheet objects as owners (plan step S0.4, CSSOM)
+
+`docs/design-host-cssom.md`, plan step 4, option A. Built on the branch of #716 (host-filled objects as owners) with the branch of #713 (the `cssom_load` rows) merged in, and `main` at `913abd26`.
+
+Changes (`browser_cssom.rs`, `browser_sources.rs`, `browser.rs`):
+
+- Rule, sheet and media list objects get a host key when they are made (`Dom::new_owned`, kinds `Rule`, `Sheet`, `Media` in `browser_sources::Source`) and are owners. `trace_rule` visits the sheet, the declaration, the nested list, the media list and the parent. `trace_sheet` visits its list. `trace_media` visits its rule. The tables (`rules`, `sheets`, `medias`) keep their `ObjId` keys.
+- The declaration object of a rule is a `Source::Style` owner already. Its trace and prune now also call `trace_decl` and `prune_decl`, which handle the `style_rules` entry (declaration to rule). A page with no CSSOM object pays one `OnceCell` test for each style object.
+- Rule lists were owners in #716 (items, sheet, rule).
+- The wrapper of an element visits the sheet of that element (`by_node`). The wrapper of a document or shadow root visits the sheets that it adopted (`adopted`). Both go through `browser_cssom::trace_node`, behind the existing `wrapper_edges` flag, and test `is_empty()` first.
+- `browser_cssom::trace`, `browser_cssom::prune` and the `by_node` and `adopted` loops of `browser_cssom::roots` (with `in_tree`) are gone from the old hook. `roots` still returns the prototypes and the constructors (`State::roots`, `style_p`); no persistent handles exist for them yet. The `style-objects` cap stays.
+- A sheet that the collector frees also leaves its place in an `adopted` list. Without this, a detached shadow root that adopted a sheet and that no script holds lost its sheet and `adopted()` panicked on the missing entry (found by a new test; the old hook kept every adopted sheet as a root).
+- Behaviour that changes: a sheet of an element in the tree stays while the wrapper of that element stays. `Dom::wrap` makes the wrappers of all ancestors and the document wrapper reaches them, so an element in the tree keeps its sheet as before. A removed element that no script holds loses its wrapper and its sheet. This was the old rule too, now through the wrapper instead of `in_tree`. A rule declaration with pending inputs (`has_pending`) belongs to its sheet and goes with it; the published sheet text is unchanged.
+
+Tests (`browser_cssom_tests.rs`, 5 new): a sheet that a script holds keeps its identity after a collect, and `el.sheet === el.sheet`; a sheet of an element in the tree stays with no script variable; a removed element that no script holds loses its sheet; a held rule keeps its sheet, and a media list keeps its rule; an adopted sheet lives with its document and with a shadow root; a reused key answers for the new object only; a shadow root that no script holds in the tree keeps its adopted sheet and styles; a detached shadow root that no script holds leaves no `adopted` entry.
+
+Results (archMachine):
+
+- Linux debug, `bare` lib, filters `cssom` 27, `style` 96, `sheet` 67, all pass. Full run of `bare-js-api` 5, `bare-js` 1062, `bare` 1660 pass. With `BARE_GC_STRESS=1` the three filters together pass (153 tests).
+- Windows 11 VM (`cargo xwin`, MSVC): `cssom` 27, `style` 96, `sheet` 67 pass.
+- Cost matrix, 819 rows, `-j4`, minimum of 3 runs, glibc and jemalloc for rows over the limit. Base: `26b92100` (the commit this change started from), built in its own target dir. New: this change before the merge of `main`. No row over +0.5% under both allocators. Mean change -0.003% (glibc), +0.000% (jemalloc, 0 rows measured). The largest rise is `preload_load style 10` +0.28% (a known glibc-only noise row); the next are `cssom_load sheets 10` +0.20% and `cssom_load sheets 1` +0.19%. Two rows failed to run on both trees: `parse_load deep 1` and `parse_load deep 10` abort with a stack overflow (stack limit 8 MiB here); they are not caused by this change.
+
+| Row | Base (instr.) | New | Change |
+| --- | ---: | ---: | ---: |
+| `cssom_load rules 1` | 171,091,655 | 171,247,890 | +0.09% |
+| `cssom_load sheets 1` | 109,349,679 | 109,559,280 | +0.19% |
+| `cssom_load adopted 1` | 98,067,926 | 98,028,432 | -0.04% |
+| `cssom_load computed 1` | 274,101,007 | 273,824,296 | -0.10% |
+| `sheets_load linked 1` | 9,138,621 | 9,131,456 | -0.08% |
+| `sheets_load dynamic 1` | 9,273,756 | 9,273,797 | 0.00% |
+| `style_load churn 1` | 42,541,508 | 42,507,236 | -0.08% |
+| `style_load setget 1` | 55,832,564 | 55,810,852 | -0.04% |
+
+The `cssom_load` rows make rules and sheets but collect little, so the gain from the removed 5-probe `trace` and the 5 `retain` loops is not visible on them.
+
+Not tested: the full `bare` suite on Windows; the stress mode on Windows; journeys under stress; the cost matrix after the merge of `main`; a page with styled-components or emotion (many `insertRule` and `deleteRule` calls through a real library); a rule declaration with pending inputs on a sheet that the collector frees.
