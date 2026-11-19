@@ -13795,3 +13795,40 @@ Cost matrix (archMachine, base `37df5bd1`, 805 rows, `-j4`, minimum of 3 runs, g
 Checks: Linux `bare` lib 1648, `bare-js` lib 1047, `bare-js-api` 5 passed. Windows 11 VM: the two new tests pass.
 
 Not tested: the full `bare` and `bare-js` suites on Windows; the stress mode on Windows; live-site journeys and the staging journey (not allowed in this task); `bare-mcp` tests; the stress mode with the GUI window. Collection counts are a lower bound. The stress mode cannot find a missing edge in a path that no journey runs. Noticed, not changed: `btn.click()` gives an event whose `detail` is `undefined` (to verify against the HTML spec: a `MouseEvent` with `detail` 0).
+
+## 2026-11-19: CSS rule and sheet objects as owners (plan step S0.4, CSSOM)
+
+`docs/design-host-cssom.md`, plan step 4, option A. Built on the branch of #716 (host-filled objects as owners) with the branch of #713 (the `cssom_load` rows) merged in, and `main` at `913abd26`.
+
+Changes (`browser_cssom.rs`, `browser_sources.rs`, `browser.rs`):
+
+- Rule, sheet and media list objects get a host key when they are made (`Dom::new_owned`, kinds `Rule`, `Sheet`, `Media` in `browser_sources::Source`) and are owners. `trace_rule` visits the sheet, the declaration, the nested list, the media list and the parent. `trace_sheet` visits its list. `trace_media` visits its rule. The tables (`rules`, `sheets`, `medias`) keep their `ObjId` keys.
+- The declaration object of a rule is a `Source::Style` owner already. Its trace and prune now also call `trace_decl` and `prune_decl`, which handle the `style_rules` entry (declaration to rule). A page with no CSSOM object pays one `OnceCell` test for each style object.
+- Rule lists were owners in #716 (items, sheet, rule).
+- The wrapper of an element visits the sheet of that element (`by_node`). The wrapper of a document or shadow root visits the sheets that it adopted (`adopted`). Both go through `browser_cssom::trace_node`, behind the existing `wrapper_edges` flag, and test `is_empty()` first.
+- `browser_cssom::trace`, `browser_cssom::prune` and the `by_node` and `adopted` loops of `browser_cssom::roots` (with `in_tree`) are gone from the old hook. `roots` still returns the prototypes and the constructors (`State::roots`, `style_p`); no persistent handles exist for them yet. The `style-objects` cap stays.
+- A sheet that the collector frees also leaves its place in an `adopted` list. Without this, a detached shadow root that adopted a sheet and that no script holds lost its sheet and `adopted()` panicked on the missing entry (found by a new test; the old hook kept every adopted sheet as a root).
+- Behaviour that changes: a sheet of an element in the tree stays while the wrapper of that element stays. `Dom::wrap` makes the wrappers of all ancestors and the document wrapper reaches them, so an element in the tree keeps its sheet as before. A removed element that no script holds loses its wrapper and its sheet. This was the old rule too, now through the wrapper instead of `in_tree`. A rule declaration with pending inputs (`has_pending`) belongs to its sheet and goes with it; the published sheet text is unchanged.
+
+Tests (`browser_cssom_tests.rs`, 5 new): a sheet that a script holds keeps its identity after a collect, and `el.sheet === el.sheet`; a sheet of an element in the tree stays with no script variable; a removed element that no script holds loses its sheet; a held rule keeps its sheet, and a media list keeps its rule; an adopted sheet lives with its document and with a shadow root; a reused key answers for the new object only; a shadow root that no script holds in the tree keeps its adopted sheet and styles; a detached shadow root that no script holds leaves no `adopted` entry.
+
+Results (archMachine):
+
+- Linux debug, `bare` lib, filters `cssom` 27, `style` 96, `sheet` 67, all pass. Full run of `bare-js-api` 5, `bare-js` 1062, `bare` 1660 pass. With `BARE_GC_STRESS=1` the three filters together pass (153 tests).
+- Windows 11 VM (`cargo xwin`, MSVC): `cssom` 27, `style` 96, `sheet` 67 pass.
+- Cost matrix, 819 rows, `-j4`, minimum of 3 runs, glibc and jemalloc for rows over the limit. Base: `26b92100` (the commit this change started from), built in its own target dir. New: this change before the merge of `main`. No row over +0.5% under both allocators. Mean change -0.003% (glibc), +0.000% (jemalloc, 0 rows measured). The largest rise is `preload_load style 10` +0.28% (a known glibc-only noise row); the next are `cssom_load sheets 10` +0.20% and `cssom_load sheets 1` +0.19%. Two rows failed to run on both trees: `parse_load deep 1` and `parse_load deep 10` abort with a stack overflow (stack limit 8 MiB here); they are not caused by this change.
+
+| Row | Base (instr.) | New | Change |
+| --- | ---: | ---: | ---: |
+| `cssom_load rules 1` | 171,091,655 | 171,247,890 | +0.09% |
+| `cssom_load sheets 1` | 109,349,679 | 109,559,280 | +0.19% |
+| `cssom_load adopted 1` | 98,067,926 | 98,028,432 | -0.04% |
+| `cssom_load computed 1` | 274,101,007 | 273,824,296 | -0.10% |
+| `sheets_load linked 1` | 9,138,621 | 9,131,456 | -0.08% |
+| `sheets_load dynamic 1` | 9,273,756 | 9,273,797 | 0.00% |
+| `style_load churn 1` | 42,541,508 | 42,507,236 | -0.08% |
+| `style_load setget 1` | 55,832,564 | 55,810,852 | -0.04% |
+
+The `cssom_load` rows make rules and sheets but collect little, so the gain from the removed 5-probe `trace` and the 5 `retain` loops is not visible on them.
+
+Not tested: the full `bare` suite on Windows; the stress mode on Windows; journeys under stress; the cost matrix after the merge of `main`; a page with styled-components or emotion (many `insertRule` and `deleteRule` calls through a real library); a rule declaration with pending inputs on a sheet that the collector frees.
