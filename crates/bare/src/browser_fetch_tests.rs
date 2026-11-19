@@ -1268,3 +1268,70 @@ fn equal_response_texts_share_one_string_buffer() {
         assert!(grew < 8_000, "two more reads of an equal body added {grew} bytes (one copy is {} bytes)", want * 2);
     });
 }
+
+#[test]
+fn a_fetch_whose_promise_the_script_dropped_settles_after_a_collection() {
+    big(|| {
+        let srv = serve(|_| ok("reply"));
+        let mut b = at(srv.port);
+        js(&mut b, "var out = []; fetch('/a').then(function (r) { return r.text(); }).then(function (t) { out.push(t); }); fetch('/b').catch(function () {}); 0");
+        let slots = b.it.persistent_slots();
+        assert!(slots >= 2, "the two pending requests are persistent handles ({slots} slots)");
+        b.collect(&[]).unwrap();
+        b.collect(&[]).unwrap();
+        assert_eq!(go(&mut b, "0"), "reply");
+        // A settled request drops its handle: the next round uses the same slots.
+        for _ in 0..3 {
+            go(&mut b, "fetch('/a').then(function (r) { return r.text(); }); fetch('/b'); 0");
+            b.collect(&[]).unwrap();
+        }
+        assert_eq!(b.it.persistent_slots(), slots);
+    });
+}
+
+#[test]
+fn a_collection_between_send_and_the_reply_keeps_the_xhr_object() {
+    big(|| {
+        let srv = serve(|_| ok("reply"));
+        let mut b = at(srv.port);
+        js(&mut b, "var out = []; (function () { var x = new XMLHttpRequest(); x.onload = function () { out.push(x.status + x.responseText); }; x.open('GET', '/a'); x.send(); })(); 0");
+        b.collect(&[]).unwrap();
+        b.collect(&[]).unwrap();
+        assert_eq!(go(&mut b, "0"), "200reply");
+        b.collect(&[]).unwrap();
+        assert_eq!(js(&mut b, "out.length"), "1");
+    });
+}
+
+#[test]
+fn the_constants_of_fetch_xhr_streams_and_abort_survive_collections() {
+    big(|| {
+        let srv = serve(|_| ok(r#"{"a":1}"#));
+        let mut b = at(srv.port);
+        for _ in 0..3 {
+            b.collect(&[]).unwrap();
+        }
+        // Each line reaches a prototype, a constructor, a template or an intrinsic function that only the host holds.
+        let src = "var out = []; \
+            new Response('x').text().then(function (t) { out.push('text:' + t); }); \
+            Response.json({ k: 1 }).json().then(function (j) { out.push('json:' + j.k); }); \
+            new Response(new ReadableStream({ start: function (c) { c.enqueue(new TextEncoder().encode('drained')); c.close(); } })).text().then(function (t) { out.push(t); }); \
+            var rs = new ReadableStream({ pull: function (c) { c.enqueue(1); c.close(); } }); rs.getReader().read().then(function (r) { out.push('read:' + r.value); }); \
+            var h = new Headers({ a: 'b' }); out.push([...h].join(), h instanceof Headers, new Request('/x') instanceof Request); \
+            var x = new XMLHttpRequest(); x.onload = function () { out.push('xhr:' + x.status); }; x.open('GET', '/a'); x.send(); \
+            fetch('/a').then(function (r) { return r.json(); }).then(function (j) { out.push('fetch:' + j.a); }); \
+            var ac = new AbortController(); ac.abort(); out.push(ac.signal.aborted, AbortSignal.abort() instanceof AbortSignal); 0";
+        assert_eq!(js(&mut b, src), "0");
+        for _ in 0..3 {
+            b.collect(&[]).unwrap();
+        }
+        b.drain().unwrap();
+        while b.pending_fetches() > 0 {
+            b.run_network_tasks(100).unwrap();
+        }
+        let got = js(&mut b, "out.slice().sort().join('|')");
+        for want in ["text:x", "json:1", "drained", "read:1", "a,b", "xhr:200", "fetch:1"] {
+            assert!(got.contains(want), "{want} missing in {got}");
+        }
+    });
+}
