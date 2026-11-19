@@ -13719,3 +13719,8 @@ Cost matrix (archMachine, base `37df5bd1`, 805 rows, `-j4`, minimum of 3 runs, g
 Checks: Linux `bare` lib 1648, `bare-js` lib 1047, `bare-js-api` 5 passed. Windows 11 VM: the two new tests pass.
 
 Not tested: the full `bare` and `bare-js` suites on Windows; the stress mode on Windows; live-site journeys and the staging journey (not allowed in this task); `bare-mcp` tests; the stress mode with the GUI window. Collection counts are a lower bound. The stress mode cannot find a missing edge in a path that no journey runs. Noticed, not changed: `btn.click()` gives an event whose `detail` is `undefined` (to verify against the HTML spec: a `MouseEvent` with `detail` 0).
+## 2026-11-19: design of promises, fetch and modules on the host interface (plan step S0.4)
+
+- Documents: `docs/design-host-microtasks.md`, `docs/design-host-fetch.md`, `docs/design-host-modules.md` (PR #708). Static design; module costs and `Persistent` costs are hypotheses.
+- Owner decisions (2026-11-19): option A in all three, and every proposed answer. The handler bodies move to `Scope` and `Local` in one later PR. Module ids stay `u32`. Headers objects register as owners.
+- Build order: M1 (promise interface), M2, M3; F1 to F4 (F4 after M1); MD0 (module cost row), MD1 (after M1), MD2. M1 and MD0 started.
