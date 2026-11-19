@@ -1863,7 +1863,7 @@ impl Heap {
             Some(108) => named!("length") || named!("lastModified"),
             Some(110) => named!("name"),
             Some(115) => named!("screen") || named!("sheet") || named!("styleSheets") || named!("screenX") || named!("screenY"),
-            Some(67) => named!("CompressionStream") || named!("CSSStyleSheet") || named!("CSSGroupingRule") || named!("CSSImportRule") || named!("CSSFontFaceRule") || named!("CSSKeyframesRule") || named!("CSSKeyframeRule") || named!("CSSConditionRule") || named!("CSSMediaRule") || named!("CSSSupportsRule") || named!("CSSRule") || named!("CSSStyleRule") || named!("CSSRuleList"),
+            Some(67) => named!("CompressionStream") || named!("CloseEvent") || named!("CSSStyleSheet") || named!("CSSGroupingRule") || named!("CSSImportRule") || named!("CSSFontFaceRule") || named!("CSSKeyframesRule") || named!("CSSKeyframeRule") || named!("CSSConditionRule") || named!("CSSMediaRule") || named!("CSSSupportsRule") || named!("CSSRule") || named!("CSSStyleRule") || named!("CSSRuleList"),
             Some(77) => named!("MediaList"),
             Some(83) => named!("StyleSheetList") || named!("SVGAnimatedString") || (u.starts_with(&[83,86,71]) && u.ends_with(&[69,108,101,109,101,110,116])),
             Some(68) => named!("DocumentType") || named!("DOMException") || named!("DecompressionStream"),
@@ -1872,7 +1872,7 @@ impl Heap {
             Some(69) => named!("EventSource"),
             Some(70) => named!("FontFace") || named!("FileReader"),
             Some(84) => named!("TransformStream") || named!("TransformStreamDefaultController") || named!("TextDecoderStream") || named!("TextEncoderStream"),
-            Some(87) => named!("WritableStream") || named!("WritableStreamDefaultWriter") || named!("WritableStreamDefaultController"),
+            Some(87) => named!("WebSocket") || named!("WritableStream") || named!("WritableStreamDefaultWriter") || named!("WritableStreamDefaultController"),
             Some(114) => named!("referrer"),
             _ => false,
         }
