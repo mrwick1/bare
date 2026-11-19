@@ -200,7 +200,7 @@ pub(crate) struct CeSt {
     /// Some definition is form-associated: a tree change can move a form owner.
     has_face: bool,
     /// The promise of `whenDefined` for each name that is not defined yet.
-    when: HashMap<Box<str>, Value>,
+    when: HashMap<Box<str>, bare_js_api::Persistent>,
     flush: Option<ObjId>,
     /// The prototype, the constructor and the one registry object, once made.
     reg: Option<[ObjId; 3]>,
@@ -821,7 +821,6 @@ impl Dom {
             out.extend([Value::Object(d.ctor), Value::Object(d.proto)]);
             out.extend(d.cb.iter().copied().filter(|v| !matches!(v, Value::Undefined)));
         }
-        out.extend(s.when.values().copied());
         out.extend(s.flush.map(Value::Object));
         out.extend(s.reg.iter().flatten().copied().map(Value::Object));
         out.extend(s.ints.keys().copied().map(Value::Object));
@@ -1166,6 +1165,7 @@ fn define_in(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     }
     let waiting = st(d).borrow_mut().when.remove(&*name);
     if let Some(p) = waiting {
+        let p = it.persistent_value(&p);
         it.host_resolve_promise(p, ctor)?;
     }
     Ok(Value::Undefined)
@@ -1276,7 +1276,7 @@ fn when_defined(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let invalid = !valid_custom_name(&name);
     let (done, existing, n) = {
         let s = st(d).borrow();
-        (s.by_name.get(&*name).map(|&i| Value::Object(s.defs[i as usize].ctor)), s.when.get(&*name).copied(), s.when.len())
+        (s.by_name.get(&*name).map(|&i| Value::Object(s.defs[i as usize].ctor)), s.when.get(&*name).map(|p| it.persistent_value(p)), s.when.len())
     };
     // One promise for a name that is not defined yet: a second call gets the same one.
     if let (Some(e), false) = (existing, invalid) {
@@ -1292,7 +1292,7 @@ fn when_defined(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     } else if let Some(c) = done {
         it.host_resolve_promise(p, c)?;
     } else {
-        st(d).borrow_mut().when.insert(name.into(), p);
+        st(d).borrow_mut().when.insert(name.into(), it.persist_value(p));
     }
     Ok(p)
 }

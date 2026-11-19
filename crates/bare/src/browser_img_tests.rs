@@ -92,3 +92,16 @@ fn a_page_without_images_does_not_make_the_interface() {
     js(&mut b, "document.querySelector('p').textContent");
     assert!(b.dom.img.made.get().is_none());
 }
+
+#[test]
+fn a_dropped_decode_promise_settles_after_collections() {
+    let mut b = browser("");
+    js(&mut b, "var out = []; (function () { var i = new Image(); i.src = 'data:image/png;base64,AA=='; i.decode().then(function () { out.push('ok'); }); globalThis.keep = i; })(); 1");
+    js(&mut b, "var junk = []; for (var i = 0; i < 100; i++) junk.push({ k: i }, 'x' + i); junk = null; 1");
+    b.collect(&[]).unwrap();
+    b.collect(&[]).unwrap();
+    let n = b.img_requests()[0];
+    b.img_settled(n, true);
+    b.advance_time(10.0, 100).unwrap();
+    assert_eq!(js(&mut b, "out.join()"), "ok");
+}

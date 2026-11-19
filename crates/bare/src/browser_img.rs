@@ -42,12 +42,11 @@ pub(crate) struct Img {
     /// Elements with a download on the way (asked for, not settled), so `complete` is false.
     pub(crate) pending: RefCell<std::collections::HashSet<NodeId>>,
     /// The promises of `decode()` for each element.
-    decodes: RefCell<HashMap<NodeId, Vec<Value>>>,
+    decodes: RefCell<HashMap<NodeId, Vec<bare_js_api::Persistent>>>,
 }
 
 pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
     out.extend(d.img.made.get().map(Value::Object));
-    out.extend(d.img.decodes.borrow().values().flatten());
 }
 
 fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
@@ -112,7 +111,7 @@ fn decode(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     };
     let p = it.host_new_promise()?;
     if d.img.pending.borrow().contains(&n) {
-        d.img.decodes.borrow_mut().entry(n).or_default().push(p);
+        d.img.decodes.borrow_mut().entry(n).or_default().push(it.persist_value(p));
     } else if d.doc.borrow().image(n).is_some() {
         it.host_resolve_promise(p, Value::Undefined)?;
     } else {
@@ -173,6 +172,7 @@ impl Dom {
     pub(crate) fn img_task(&self, it: &mut Interp<'_>, n: NodeId, step: u8) -> R<()> {
         let list = self.img.decodes.borrow_mut().remove(&n).unwrap_or_default();
         for p in list {
+            let p = it.persistent_value(&p);
             if step == LOADED {
                 it.host_resolve_promise(p, Value::Undefined)?;
             } else if let Error::Throw(v) = self.dom_err(it, "EncodingError", "The source image cannot be decoded.") {
