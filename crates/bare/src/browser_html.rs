@@ -247,7 +247,7 @@ fn switch_on(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         return Ok(());
     }
     let html = d.p().html;
-    let nodes: Vec<(NodeId, ObjId)> = d.st.borrow().by_node.iter().map(|(&n, &o)| (n, o)).collect();
+    let nodes: Vec<(NodeId, ObjId)> = d.st.borrow().wrappers().collect();
     it.charge(nodes.len() as u64)?;
     for (n, o) in nodes {
         let i = {

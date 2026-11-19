@@ -266,13 +266,6 @@ impl<'a, R: Clone> Tracer<'a, R> {
     pub fn visit(&mut self, t: &Traced<R>) {
         self.out.push(t.raw.clone());
     }
-
-    /// For host code that still holds raw engine values (plan step S0.4). It goes away when the last of them is a `Traced`.
-    #[doc(hidden)]
-    #[inline]
-    pub fn visit_raw(&mut self, r: R) {
-        self.out.push(r);
-    }
 }
 
 /// The arguments of a host call: consecutive slots of the handle stack.

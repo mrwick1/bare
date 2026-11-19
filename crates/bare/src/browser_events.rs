@@ -520,7 +520,7 @@ pub(crate) fn add_event_listener(d: &Dom, it: &mut Interp<'_>, this: Value, a: &
     let id = st.next_id;
     list.push(Listener { id, ty: Rc::from(ty.as_str()), cb: it.trace_value(Value::Object(cb)), capture, once, passive, handler: false });
     st.n_listeners += 1;
-    d.own(&mut st.owners, &st.by_node, it, t, list);
+    d.own(&mut st.owners, it, t, list);
     drop(guard);
     if let Some(s) = signal
         && let Err(e) = d.signal_add_algo(s, crate::browser_abort::Algo::Remove(t, id))

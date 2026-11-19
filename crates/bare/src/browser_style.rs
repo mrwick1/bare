@@ -722,7 +722,7 @@ pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
 pub(crate) fn trace(d: &Dom, owner: ObjId, out: &mut Vec<Value>) {
     let s = d.style.s.borrow();
     if let Some(&el) = s.objs.get(&owner) {
-        out.extend(d.st.borrow().by_node.get(&el).map(|&o| Value::Object(o)));
+        out.extend(d.st.borrow().wrapper(el).map(Value::Object));
         out.extend(s.names.get(&owner).into_iter().flat_map(|n| n.vals.iter().map(|&v| Value::String(v))));
     } else if !s.by_el.is_empty()
         && let Some(&Target::Node(n)) = d.st.borrow().by_obj.get(&owner)

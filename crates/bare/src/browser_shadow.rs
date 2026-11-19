@@ -147,9 +147,7 @@ pub(crate) fn attach_shadow(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Valu
         doc.set_shadow_flags(root, u8::from(delegates_focus) | u8::from(clonable) << 1 | u8::from(serializable) << 2);
         root
     };
-    let mut st = d.st.borrow_mut();
-    st.by_node.insert(root, wrapper);
-    st.by_obj.insert(wrapper, Target::Node(root));
+    d.set_wrapper(&mut d.st.borrow_mut(), it, root, wrapper);
     Ok(Value::Object(wrapper))
 }
 

@@ -13533,3 +13533,38 @@ Versions measured (rows over +0.5% under both allocators):
 `callgrind` on `focus_load focus 1` showed where the first version spent: +627K instructions in the per-object probe, +286K in map inserts for each event, +249K in the map retain at each collection.
 
 Not done: the staging journey A/B. The DOM wrappers (`by_node`) are the next step of S0.4; then `visit_raw` goes.
+
+## 2026-11-19: DOM wrapper design (plan step S0.4)
+
+`docs/design-dom-wrappers.md`. Measured on origin/main `32e6d597` (callgrind, archMachine, one run per row): the old per-object `Host::trace` hook is 8.9% of `browser_load mutation 1`, 2.7% of `browser_load lookup 1`, 0.5% of `fragment_load parse 1` and 0.3% of `attr_load react 1`. On `mutation 1`, 11 subsystem `trace` functions cost 0.22 M to 0.40 M each: one probe for each marked object.
+
+Owner decisions (2026-11-19): option A (a wrapper is the owner of its target, and its trace visits its neighbours); lazy properties in a separate PR; the children walk is accepted until a row shows it.
+
+## 2026-11-19: node wrappers as owners (plan step S0.4, DOM wrappers)
+
+Option A of `docs/design-dom-wrappers.md`. A node wrapper is the owner of its node target. Its host key is set when the wrapper is made.
+
+Changes:
+
+- `by_node` holds `Traced` values. `Host::trace(key)` for a node visits the wrappers of its parent, children, shadow host or root and template content, then the listeners of the node.
+- `Host::prune(dead)` drops the `by_node` and `by_obj` entries and the listeners of a dead wrapper. The `Dom` branch of the old per-object hook and the `by_node` retain of the old prune are gone. `visit_raw` is gone.
+- Engine: before marking, `collect` writes the host key of each owner into its mark table (`Seen`, the bits above 33). Marking an object returns the key, so an owner is traced as soon as it is marked. The first version scanned the owner list each time the work list was empty. That took one pass for each level of the tree.
+- `IdTab::remove` no longer tests the page for emptiness (the test reads the whole page). The prune frees the empty pages once with `retain`.
+
+Checks:
+
+- New tests: a dead wrapper frees its key and its identity entries (this check fails when the `by_node` entry stays); a moved subtree keeps its expandos.
+- Linux: `bare` lib 1640 passed; `bare-js` lib 1045 passed; `bare-js-api` 5 passed and 1 doc test. Windows 11 VM: 301 collect, wrapper, listener, event, shadow, template and select tests of `bare`, 141 owner, collect, host and weak tests of `bare-js`, and 5 tests of `bare-js-api` pass.
+- Cost matrix (`tools/js/cost_matrix.sh -j 4`, archMachine, base = origin/main `32e6d597`, 3 runs per row, 805 rows): no row over +0.5% under both allocators. Mean change -0.031% (glibc). Closest row: `select_load churn 1000` +0.485% (glibc) and +0.498% (jemalloc). It makes and frees 20 021 wrappers; each one now costs a key, an owner entry and a prune step. `parse_load deep 1` and `deep 10` abort on the base too.
+- The first matrix run of this build showed a glibc mean of -7.5% with jemalloc near 0. The cached base counts were wrong (hypothesis: they came from another base build with the same mtime). A run with an empty cache gave the numbers above.
+
+Versions measured (callgrind, archMachine, one run per row, change of all instructions against `32e6d597`):
+
+| Version | `browser_load mutation 1` | `browser_load lookup 1` | `fragment_load parse 1` | `attr_load react 1` | `select_load churn 1000` |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Owner list scanned when the work list is empty | +0.37% | | | | |
+| Key in the mark table | +0.53% | +0.09% | +0.17% | +0.01% | |
+| Separate loop for the children (a `Chain` checks its state for each child) | -0.04% | -0.04% | +0.17% | +0.01% | +0.96% |
+| `IdTab::remove` without the page test; no listener lookup when there are none (kept) | | | | | +0.49% |
+
+Not done: the staging journey A/B. Lazy and virtual properties (`Host::get_indexed`, `get_named`) are the next PR. The other subsystems still use the old per-object hook.

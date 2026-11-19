@@ -144,8 +144,8 @@ pub(crate) fn item(d: &Dom, owner: ObjId, index: usize) -> Option<Result<Slot, H
         }
         let Some(&id) = l.ids.get(index) else { return Ok(Slot::Absent) };
         let st = d.st.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
-        Ok(match st.by_node.get(&id) {
-            Some(&o) => Slot::Ready(o),
+        Ok(match st.wrapper(id) {
+            Some(o) => Slot::Ready(o),
             None => Slot::Missing,
         })
     })())

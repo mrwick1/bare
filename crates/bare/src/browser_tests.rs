@@ -630,6 +630,37 @@ fn a_chain_of_owners_reached_only_through_listeners_survives_collect() {
 }
 
 #[test]
+fn dead_wrappers_free_their_keys_and_identity_entries() {
+    big(|| {
+        let mut b = browser();
+        let make = "(function () { var r = document.createElement('div'); for (var i = 0; i < 100; i++) r.appendChild(document.createElement('p')).x = i; })();";
+        js(&mut b, make);
+        gc(&mut b, &[]);
+        let (keys, by_node, by_obj) = { let st = b.dom.st.borrow(); (st.owners.slots.len(), st.by_node.len(), st.by_obj.len()) };
+        // A second round takes the freed keys, and the identity tables do not keep the dead wrappers.
+        js(&mut b, make);
+        gc(&mut b, &[]);
+        let st = b.dom.st.borrow();
+        assert_eq!(st.owners.slots.len(), keys);
+        assert_eq!((st.by_node.len(), st.by_obj.len()), (by_node, by_obj));
+        assert!(by_node < 20, "by_node {by_node}");
+    });
+}
+
+#[test]
+fn a_moved_subtree_keeps_its_expandos() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "var holder = document.createElement('section'); (function () { var a = document.createElement('div'); a.appendChild(document.createElement('b')).mark = 'kid'; holder.appendChild(a); })();");
+        gc(&mut b, &[]);
+        // The subtree moves into the document; only the document holds it then.
+        js(&mut b, "document.body.appendChild(holder.firstChild); holder = null;");
+        gc(&mut b, &[]);
+        assert_eq!(js(&mut b, "document.body.lastChild.firstChild.mark"), "kid");
+    });
+}
+
+#[test]
 fn window_listeners_and_a_kept_event_survive_collect() {
     big(|| {
         let mut b = browser();

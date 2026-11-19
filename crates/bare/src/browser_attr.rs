@@ -104,9 +104,9 @@ pub(crate) fn trace(d: &Dom, owner: ObjId, out: &mut Vec<Value>) {
     }
     let st = d.st.borrow();
     if let Some(&el) = t.maps.get(&owner) {
-        out.extend(st.by_node.get(&el).map(|&o| Value::Object(o)));
+        out.extend(st.wrapper(el).map(Value::Object));
     } else if let Some(a) = t.attrs.get(&owner) {
-        out.extend(a.owner.and_then(|el| st.by_node.get(&el)).map(|&o| Value::Object(o)));
+        out.extend(a.owner.and_then(|el| st.wrapper(el)).map(Value::Object));
     } else if let Some(&Target::Node(n)) = st.by_obj.get(&owner) {
         out.extend(t.map_of.get(&n).map(|&o| Value::Object(o)));
         out.extend(t.by_el.get(&n).into_iter().flatten().map(|&(_, o)| Value::Object(o)));
