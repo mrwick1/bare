@@ -1361,3 +1361,39 @@ fn a_fetch_that_the_signal_does_not_abort_survives_the_collection_of_its_signal(
         assert_eq!(go(&mut b, "0"), "reply");
     });
 }
+
+#[test]
+fn a_detached_response_with_a_stream_and_a_reader_goes_with_its_totals() {
+    big(|| {
+        let mut b = mk(None, FetchLimits::default());
+        js(&mut b, "var rd = (function () { var r = new Response('abcdef'); r.headers.get('x'); return r.body.getReader(); })(); 0");
+        b.collect(&[]).unwrap();
+        let s = b.fetch_stats();
+        assert_eq!((s.objects, s.retained_bytes, s.readers), (4, 6, 1), "only the reader is held: it keeps the stream, the response and its headers; {s:?}");
+        js(&mut b, "rd = null; 0");
+        b.collect(&[]).unwrap();
+        let s = b.fetch_stats();
+        assert_eq!((s.objects, s.retained_bytes, s.readers), (0, 0, 0), "{s:?}");
+    });
+}
+
+#[test]
+fn a_request_keeps_its_signal_and_headers_and_loses_them_with_itself() {
+    big(|| {
+        let mut b = at(1);
+        js(&mut b, "var req = (function () { var c = new AbortController(); return new Request('/x', { method: 'POST', body: 'abc', headers: { a: 'b' }, signal: c.signal }); })(); 0");
+        b.collect(&[]).unwrap();
+        b.collect(&[]).unwrap();
+        // The request, its headers, and the signal that follows `init.signal`. The controller and its signal are gone.
+        assert_eq!(b.fetch_stats().objects, 2);
+        assert_eq!(b.fetch_stats().retained_bytes, 3);
+        let (sigs, ctls, _) = b.dom.abort_entries();
+        assert_eq!((sigs, ctls), (1, 0));
+        assert_eq!(js(&mut b, "req.signal.aborted + ',' + req.headers.get('a')"), "false,b");
+        js(&mut b, "req = null; 0");
+        b.collect(&[]).unwrap();
+        let s = b.fetch_stats();
+        assert_eq!((s.objects, s.retained_bytes), (0, 0), "{s:?}");
+        assert_eq!(b.dom.abort_entries().0, 0);
+    });
+}
