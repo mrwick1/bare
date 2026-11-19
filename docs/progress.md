@@ -14122,3 +14122,26 @@ Checks:
 - Windows 11 VM: `bare-js-api` 6 passed; `bare-js` filter `api` 37 passed and `module` 34 passed.
 
 Not tested: a browser use of the methods (MD2 changes the loader); a collection that runs inside `module_link` or `module_evaluate` (the old engine collects only between tasks); a full `bare` run on the Windows VM; wall time.
+
+## 2026-11-19: form companions as owners (plan step S0.4, forms)
+
+Changes (`docs/design-host-forms.md`, option A, plan step 3): the `ValidityState` is an owner with its own kind (`Source::Validity`). Its key has an owner slot, and `Host::prune` removes its two map entries (`state`, `owner`) when it dies. The `labels` list and the `select.options` and `selectedOptions` collections were owners already (node lists, PR #716). `prune_list` now also clears the `labels` entry of the control and the cache entry of the select, each only when it names the dead list, so a reused key answers for the new object only. The 26 shared objects (13 in `browser_controls.rs`: 7 methods and accessors, `required` getter and setter, `ValidityState` and `HTMLLabelElement` prototype and constructor; 13 in `browser_select.rs`: 6 prototypes and 7 constructors) are in persistent handles. The 4 calls leave the old hook: `browser_select::roots`, `browser_controls::roots`, `browser_select::prune`, `browser_controls::prune`. The `ObjId` cells stay for lookups; the handles are the roots. The three `ValidityState` and `labels` maps use `IdMap` (identity hash) instead of the std `HashMap`: the first build of this change cost +0.85% on `form_load validity 1` from 5 SipHash lookups for each round in the new prunes.
+
+Cost matrix: base = the commit this work started from (`bde69f04`, #716 and #713 merged on `e37f02e0`), built in its own tree and target dir; new = this change. archMachine, release, 817 rows measured, 3 runs for each row (`tools/js/cost_matrix.sh -j4`). No row over +0.5% under both allocators. Mean change: glibc -0.007%. `parse_load deep 1` and `10` did not run: they overflow the stack on the base too. The first run of the matrix (before the `IdMap` change) had 2 rows over the limit under both allocators: `form_load validity 1` +0.848% (jemalloc +0.892%) and `10` +0.887% (+0.984%).
+
+| Row (glibc) | Base | New | Change |
+| --- | ---: | ---: | ---: |
+| `form_load validity 1` | 117,451,168 | 116,205,268 | -1.061% |
+| `form_load validity 10` | 1,137,147,060 | 1,125,378,999 | -1.035% |
+| `form_load gc 1` | 119,019,471 | 119,015,614 | -0.003% |
+| `form_load gates 1` | 135,247,536 | 135,226,025 | -0.016% |
+| `form_load submit 1` | 42,532,488 | 42,525,528 | -0.016% |
+| `select_load churn 1000` | 336,897,158 | 337,096,684 | +0.059% |
+| `select_load react 1000` | 1,152,850,842 | 1,152,865,547 | +0.001% |
+| `select_load value 1000` | 88,125,333 | 88,177,601 | +0.059% |
+
+Callgrind (release with symbols, one run each, instruction counts): `form_load validity 1` 120,247,794 to 118,778,280 (-1.22%); `select_load churn 1000` 357,949,194 to 358,153,142 (+0.057%). The first build of `validity 1` was 120,270,557 to 121,150,421 (+0.73%); `hash_one` was +441k and `HashMap::remove_entry` +152k.
+
+Checks: new tests in `browser_controls_tests.rs` (a `ValidityState` of a dead element frees its key and its map entries; the same `validity` and `labels` object while a script holds it, and a new one after the collector freed it; a reused key answers for the new `ValidityState` only; the shared objects work after collections that no script reaches) and in `browser_select_tests.rs` (a collected `options` list frees its cache entry and a held one keeps it; a reused key answers for the new collection only; the select interfaces work after collections). Linux: `cargo test --locked -p bare --lib` with filters `controls select validity form label`: 167 passed, also with `BARE_GC_STRESS=1`. Crate tests before the rebase onto `c77f6247`: `bare` lib 1660 passed, `bare-js` lib 1061 passed, `bare-js-api` 5 passed. Windows 11 VM (cargo xwin debug test exe): same filters, 167 passed.
+
+Not tested: the matrix on `c77f6247` (the base build is the commit before the rebase; main added the stress flag and CI changes only); the full `bare` lib suite on Windows; peak memory of the persistent handles and owner entries (about 16 bytes for each `ValidityState`); the staging journeys.

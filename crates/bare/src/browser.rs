@@ -1028,14 +1028,12 @@ impl Host for Dom {
         crate::browser_computed::roots(self, out);
         at::roots(self, out);
         crate::browser_nodelist::roots(self, out);
-        crate::browser_select::roots(self, out);
         crate::browser_dataset::roots(self, out);
         crate::browser_web::roots(self, out);
         crate::browser_elements::roots(self, out);
         crate::browser_media::roots(self, out);
         crate::browser_img::roots(self, out);
         crate::browser_handlers::roots(self, out);
-        crate::browser_controls::roots(self, out);
         self.resize_roots(out);
         self.frame_roots(out);
         self.idle_roots(out);
@@ -1075,9 +1073,7 @@ impl Host for Dom {
         self.walk_prune(live);
         self.range_prune(live);
         at::prune(self, live);
-        crate::browser_select::prune(self, live);
         crate::browser_web::prune(self, live);
-        crate::browser_controls::prune(self, live);
         let mut guard = self.st.borrow_mut();
         let st = &mut *guard;
         // Node wrappers go in the interface prune, by their keys.

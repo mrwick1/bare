@@ -32,6 +32,8 @@ pub(crate) enum Source {
     Rule,
     Sheet,
     Media,
+    /// A `ValidityState` (`browser_controls.rs`): a plain object that is an owner for its table entries only.
+    Validity,
 }
 
 impl Source {
@@ -51,6 +53,7 @@ impl Source {
             10 => Source::Rule,
             11 => Source::Sheet,
             12 => Source::Media,
+            13 => Source::Validity,
             _ => return None,
         })
     }
@@ -172,6 +175,7 @@ pub(crate) fn prune(d: &Dom, key: u32, o: ObjId) {
         Some(Source::Sheet) => crate::browser_cssom::prune_sheet(d, o),
         Some(Source::Media) => crate::browser_cssom::prune_media(d, o),
         Some(Source::Dataset) => crate::browser_dataset::prune_obj(d, o),
+        Some(Source::Validity) => crate::browser_controls::prune_validity(d, o),
         _ => {}
     }
 }
@@ -214,7 +218,7 @@ pub(crate) fn indexed_len(d: &Dom, object: &Value, key: u32) -> Result<usize, Pe
         Source::AttrMap => Some(crate::browser_attr::len(d, o)),
         Source::Captions => crate::browser_media::caption_len(d, o),
         Source::RuleList => crate::browser_cssom::len(d, o),
-        Source::Dataset | Source::Storage | Source::Frames | Source::Rule | Source::Sheet | Source::Media => None,
+        Source::Dataset | Source::Storage | Source::Frames | Source::Rule | Source::Sheet | Source::Media | Source::Validity => None,
     };
     r.unwrap_or(Ok(0)).map_err(pending)
 }
@@ -229,7 +233,7 @@ pub(crate) fn indexed_item(d: &Dom, object: &Value, key: u32, index: usize) -> R
         Source::AttrMap => Some(crate::browser_attr::item(d, o, index)),
         Source::Captions => crate::browser_media::caption_item(d, o, index),
         Source::RuleList => crate::browser_cssom::item(d, o, index),
-        Source::Dataset | Source::Storage | Source::Frames | Source::Rule | Source::Sheet | Source::Media => None,
+        Source::Dataset | Source::Storage | Source::Frames | Source::Rule | Source::Sheet | Source::Media | Source::Validity => None,
     };
     r.unwrap_or(Ok(Slot::Absent)).map(item).map_err(pending)
 }
@@ -303,6 +307,6 @@ pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<
         Some(Source::Dataset) => crate::browser_dataset::fill(d, it, owner),
         Some(Source::RuleList) => crate::browser_cssom::fill(d, it, owner, index),
         Some(Source::Captions) => crate::browser_media::caption_fill(d, it, owner, index),
-        Some(Source::AttrMap | Source::Storage | Source::Frames | Source::Rule | Source::Sheet | Source::Media) | None => Ok(false),
+        Some(Source::AttrMap | Source::Storage | Source::Frames | Source::Rule | Source::Sheet | Source::Media | Source::Validity) | None => Ok(false),
     }
 }

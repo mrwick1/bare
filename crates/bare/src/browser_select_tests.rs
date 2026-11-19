@@ -74,3 +74,42 @@ fn bounds_and_the_collector_keep_the_lists_right() {
     let mut small = Browser::new(tree::parse("<body><select id=s></select>"), BrowserLimits { max_results: 4, ..Default::default() }, EvalLimits::default(), HeapLimits::default()).expect("browser");
     assert!(js(&mut small, "var s = document.getElementById('s'); s.options.length = 9; s.options.length").contains("dom-results"));
 }
+
+#[test]
+fn a_collected_options_list_frees_its_cache_entry_and_a_held_one_keeps_it() {
+    let mut b = page("<select id=s><option>a<option>b</select>");
+    js(&mut b, "var s = document.getElementById('s'), o = s.options, c = s.selectedOptions; (function () { s.options.length; s.selectedOptions.length; })();");
+    b.it.collect(&[]).expect("gc");
+    b.it.collect(&[]).expect("gc");
+    assert_eq!(b.dom.sel_cached(), 2);
+    assert_eq!(js(&mut b, "(s.options === o) + ',' + (s.selectedOptions === c) + ',' + o.length + ',' + c.length + ',' + o[1].text"), "true,true,2,1,b");
+    // The script drops both: the collector frees them, and the next read makes new ones that answer for the select.
+    js(&mut b, "o = null; c = null;");
+    b.it.collect(&[]).expect("gc");
+    assert_eq!(b.dom.sel_cached(), 0);
+    assert_eq!(js(&mut b, "var n = s.options; (n === s.options) + ',' + n.length + ',' + n[0].text + ',' + s.selectedOptions[0].text"), "true,2,a,a");
+    assert_eq!(b.dom.sel_cached(), 2);
+}
+
+#[test]
+fn a_key_reused_after_a_collection_answers_for_the_new_collection_only() {
+    let mut b = page("<select id=a><option>a1</select><select id=b><option>b1<option>b2</select>");
+    js(&mut b, "var a = document.getElementById('a'), bb = document.getElementById('b'); (function () { a.options.length; })();");
+    b.it.collect(&[]).expect("gc");
+    assert_eq!(b.dom.sel_cached(), 0);
+    let slots = b.dom.st.borrow().owners.slots.len();
+    assert_eq!(js(&mut b, "var ob = bb.options; ob.length"), "2");
+    assert_eq!(b.dom.st.borrow().owners.slots.len(), slots);
+    assert_eq!(js(&mut b, "ob[1].text"), "b2");
+    assert_eq!(js(&mut b, "var oa = a.options; (oa === ob) + ',' + oa.length + ',' + oa[0].text + ',' + ob.length"), "false,1,a1,2");
+}
+
+#[test]
+fn the_select_interfaces_survive_a_collection_that_no_script_reaches() {
+    let mut b = page("<select id=s><option>a</select><textarea id=t>x</textarea>");
+    js(&mut b, "document.getElementById('s').options.length");
+    for _ in 0..3 {
+        b.it.collect(&[]).expect("gc");
+    }
+    assert_eq!(js(&mut b, "var s = document.getElementById('s'); [s instanceof HTMLSelectElement, s.options instanceof HTMLOptionsCollection, s.options[0] instanceof HTMLOptionElement, new Option('x') instanceof HTMLOptionElement, document.getElementById('t') instanceof HTMLTextAreaElement, s.selectedOptions instanceof HTMLCollection].join()"), "true,true,true,true,true,true");
+}
