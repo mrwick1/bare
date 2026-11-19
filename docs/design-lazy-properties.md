@@ -121,3 +121,13 @@ What the first PR builds:
 - The heap keeps the last named object and its key, so `realize` after `named_exists` does not look up `exotics` again.
 
 Result: 2 rows of 805 stay over +0.5% under both allocators. They are `dataset_load keys 10000 1` and `dataset_load read 10000 1`. The cause is about 60 instructions per dataset operation: one `exotics` lookup for the key of an object that was not asked just before, and the interface layer. The object header (104 bytes) has no room for the key. The owner granted an exception for these 2 rows. Check them again after step 3.
+
+## Build of the lazy `on*` PR (2026-11-19)
+
+Owner decision 2 is built: the lazy members have their own interface method, and the reserved indices leave the browser's `fill_indexed`.
+
+- `bare-js-api`: `Host::lazy_member(&self, scope, object, what)`. `what` is `Lazy::Name(&str)` (one name missed), `Lazy::All` (a listing of own names) or `Lazy::Symbols` (a symbol key missed; the interface tags). One method with an enum covers the three asks: the object is the same in all of them, and the engine already told them apart by index. The default answers `Ok(())`.
+- The method is not a host-filled property method. The host defines real properties on the object (`Scope::define`) and may allocate and run code. So it takes a `Scope`, as `call` does. Its error crosses back unchanged (a throw keeps its value).
+- Old engine (`eval_api.rs`, `eval_host.rs`): `host_fill` sends `LAZY_ON`, `LAZY_ALL` and `LAZY_TAG` to `Host::lazy_member` when the realm has an interface host. A realm with only the old host still gets them in `fill_indexed`. A `LAZY_ON` ask whose key is not a string (a symbol) is no ask, as before. The heap keeps the reserved values, `LAZY_ONS` and `LAZY_CHAIN`; they are not changed.
+- Browser: `Dom::lazy_member` calls `browser_handlers::lazy_key` (name), `lazy_all` (all names) and `tags` (symbols). The three reserved-index branches left `fill_indexed`. `lazy_key` takes `&str`, so the name is not copied again.
+- `browser_frames::FILL` stays in `fill_indexed`. It is not a lazy member. It is the fill of the frames object, which is a host-filled object on the chain of `window` and `document`. It belongs to the step that makes host-filled objects owners.

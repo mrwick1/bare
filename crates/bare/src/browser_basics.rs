@@ -65,7 +65,7 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 const WINDOW: [&str; 20] = ["DOMException", "FontFace", "devicePixelRatio", "screenX", "screenY", "crossOriginIsolated", "closed", "opener", "frameElement", "postMessage", "alert", "print", "focus", "blur", "confirm", "prompt", "open", "isSecureContext", "outerWidth", "outerHeight"];
 const DOCUMENT: [&str; 12] = ["hidden", "referrer", "visibilityState", "contentType", "compatMode", "characterSet", "charset", "inputEncoding", "lastModified", "designMode", "dir", "fonts"];
 
-/// The ask of the heap for `key` (`browser_handlers::lazy`): define it when it is one of the names above. The name `open` is also a
+/// The ask of the heap for `key` (`browser_handlers::lazy_key`): define it when it is one of the names above. The name `open` is also a
 /// method of `document` (`browser_loader.rs`), so it is defined here and the caller goes on.
 pub(crate) fn define(d: &Dom, it: &mut Interp<'_>, key: &str) -> R<()> {
     let (g, doc) = (*d.global.get().expect("installed"), d.p().document);

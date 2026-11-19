@@ -461,7 +461,7 @@ pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<
         want
     });
     if let Some(key) = lazy {
-        crate::browser_handlers::lazy_key(d, it, d.p().et, String::from_utf16_lossy(&key))?;
+        crate::browser_handlers::lazy_key(d, it, d.p().et, &String::from_utf16_lossy(&key))?;
         return Ok(true);
     }
     let n = d.frames.state().and_then(|s| {

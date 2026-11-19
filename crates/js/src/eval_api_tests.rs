@@ -265,3 +265,58 @@ fn host_filled_properties_are_answered_by_the_key_of_each_object() {
         assert!(out(&mut it, "Object.keys(busy)").starts_with("other:"), "a busy host stops the script");
     });
 }
+
+/// A host with lazy members: it logs what the engine asks, and defines a data property for each ask on the object that was asked.
+#[derive(Default)]
+struct Lazies {
+    asked: RefCell<Vec<String>>,
+}
+
+impl<'p> bare_js_api::Host<Interp<'p>> for Lazies {
+    fn call<'s>(&self, s: &mut Scope<'s, Interp<'p>>, _id: u32, _this: Local<'s>, _args: Args<'s>, _is_new: bool) -> Result<Local<'s>, bare_js_api::Error<'s>> {
+        Ok(s.undefined())
+    }
+    fn lazy_member<'s>(&self, s: &mut Scope<'s, Interp<'p>>, object: Local<'s>, what: bare_js_api::Lazy<'_>) -> Result<(), bare_js_api::Error<'s>> {
+        use bare_js_api::Lazy;
+        let (log, name) = match what {
+            Lazy::Name(n) if n == "onboom" => return Err(bare_js_api::Error::Throw(s.string("boom")?)),
+            Lazy::Name(n) => (format!("name {n}"), n),
+            Lazy::All => ("all".to_string(), "onall"),
+            Lazy::Symbols => ("symbols".to_string(), "ontags"),
+        };
+        self.asked.borrow_mut().push(log);
+        let (k, v) = (s.string(name)?, s.number(1.0));
+        s.define(object, k, v, Attrs::METHOD)
+    }
+}
+
+#[test]
+fn lazy_members_are_asked_through_the_interface_once_per_name() {
+    big(|| {
+        let mut it = Interp::realm(Heap::default(), EvalLimits { max_steps: 100_000, ..Default::default() }).unwrap();
+        let h = Rc::new(Lazies::default());
+        let (a, b) = (it.heap.new_object(None).unwrap(), it.heap.new_object(None).unwrap());
+        it.heap.set_lazy_on(a).unwrap();
+        it.heap.set_lazy_on(b).unwrap();
+        enter(&mut it, |s| {
+            s.set_host(h.clone());
+            let g = s.global();
+            for (name, o) in [("a", a), ("b", b)] {
+                let (k, v) = (s.string(name).unwrap(), s.traced(&bare_js_api::Traced::from_raw(Value::Object(o))));
+                s.define(g, k, v, Attrs::METHOD).unwrap();
+            }
+        });
+        // A name: the host defines it on the asked object, and the engine finds it. A second read and a name that the host did not
+        // define ask no more. `b` has its own ask.
+        assert_eq!(out(&mut it, "Object.getOwnPropertyDescriptor(a, 'onclick').value + ',' + (Object.getOwnPropertyDescriptor(a, 'onclick') !== undefined) + ',' + Object.getOwnPropertyDescriptor(b, 'onclick').value"), "1,true,1");
+        assert_eq!(*h.asked.borrow(), ["name onclick", "name onclick"]);
+        // All names: once, however often the keys are listed.
+        assert_eq!(out(&mut it, "Object.getOwnPropertyNames(a).join() + '|' + Object.getOwnPropertyNames(a).join()"), "onclick,onall|onclick,onall");
+        assert_eq!(h.asked.borrow().iter().filter(|l| *l == "all").count(), 1);
+        // A symbol key asks for the symbol members once.
+        assert_eq!(out(&mut it, "Object.getOwnPropertyDescriptor(a, Symbol.toStringTag) === undefined"), "true");
+        assert_eq!(h.asked.borrow().iter().filter(|l| *l == "symbols").count(), 1);
+        // A throw of the host reaches the script with its value.
+        assert_eq!(out(&mut it, "try { Object.getOwnPropertyDescriptor(a, 'onboom'); 'no' } catch (e) { e }"), "boom");
+    });
+}
