@@ -2,16 +2,19 @@
 //!
 //! An indexed or named object (`NodeList`, `DOMTokenList`, `CSSStyleDeclaration`, `NamedNodeMap`, `TextTrackList`, `CSSRuleList`,
 //! `DOMStringMap`, `Storage`, the named properties of the window and the document) gets a host key when it is made (`Dom::new_source`).
-//! The key is its kind, and the engine gives the object with the key, as V8 gives the receiver to an interceptor. So a read goes
-//! to its subsystem with one jump, and the subsystem finds its state by the object as before: no probe of each subsystem's map
-//! and no table read. The object is not an owner for the collector yet: its references still go through the old per-object hook.
-//! When it becomes an owner (a later PR), its key gets an owner slot in the bits above the kind.
+//! The key is its kind in the low `KIND_BITS` bits, and the engine gives the object with the key, as V8 gives the receiver to an
+//! interceptor. So a read goes to its subsystem with one jump, and the subsystem finds its state by the object.
+//!
+//! The objects that hold references or table entries are owners for the collector (`docs/design-host-tracing.md`). Their key has an
+//! owner slot (`Owners`) in the bits above the kind. The collector calls `Host::trace(key)` for a reached owner and `Host::prune`
+//! with the keys of dead ones. The kind in the key picks the subsystem, so no other subsystem is asked. `Captions`, `Storage` and
+//! `Frames` are not owners: they hold no reference and no entry that a collection frees (the page keeps them for its whole life).
 
-use crate::browser::{Dom, R};
+use crate::browser::{Dom, KIND_BITS, Owner, R};
 use bare_js::heap::{HeapError, Slot};
 use bare_js::eval::Interp;
 use bare_js::value::{ObjId, Value};
-use bare_js_api::{Item, Named, Pending};
+use bare_js_api::{Item, Named, Pending, Tracer};
 
 /// The kind of a host-filled object: its host key. 0 is no kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,7 +35,7 @@ impl Source {
     /// The kind of host key `key`.
     #[inline]
     fn of(key: u32) -> Option<Source> {
-        Some(match key {
+        Some(match key & ((1 << KIND_BITS) - 1) {
             1 => Source::NodeList,
             2 => Source::TokenList,
             3 => Source::Style,
@@ -45,19 +48,94 @@ impl Source {
             _ => return None,
         })
     }
+
+    /// Is an object of this kind an owner: does it hold references, or entries that a collection frees?
+    #[inline]
+    fn owns(self) -> bool {
+        !matches!(self, Source::Captions | Source::Storage | Source::Frames)
+    }
 }
 
 impl Dom {
     /// A new object of kind `k` with prototype `proto`: indexed, or named for `Dataset`, `Storage` and `Frames` (the last two are
-    /// open: a property of the chain wins over a name).
+    /// open: a property of the chain wins over a name). An object that is an owner gets its key slot here, and it is registered
+    /// with the engine.
     pub(crate) fn new_source(&self, it: &mut Interp<'_>, k: Source, proto: Option<ObjId>) -> R<ObjId> {
-        let key = k as u32;
-        match k {
+        if k.owns() {
+            self.wrapper_edges.set(true);
+        }
+        let key = if k.owns() { self.st.borrow_mut().owners.key(Owner::Reserved) | k as u32 } else { k as u32 };
+        let made = match k {
             Source::Dataset => it.heap.new_named(proto, key),
             Source::Storage | Source::Frames => it.heap.new_named_open(proto, key),
             _ => it.heap.new_indexed(proto, key),
+        };
+        match made {
+            Ok(o) => {
+                if k.owns() {
+                    self.st.borrow_mut().owners.set(key, Owner::Source(o));
+                    it.set_host_owner_obj(o, key);
+                }
+                Ok(o)
+            }
+            Err(e) => {
+                if k.owns() {
+                    self.st.borrow_mut().owners.release(key);
+                }
+                Err(it.heap_error(e))
+            }
         }
-        .map_err(|e| it.heap_error(e))
+    }
+}
+
+/// Keep the raw value `v` alive. For the tables of the subsystems, which still hold raw `ObjId`s and strings.
+#[inline]
+pub(crate) fn visit(t: &mut Tracer<'_, Value>, v: Value) {
+    t.visit(&bare_js_api::Traced::from_raw(v));
+}
+
+/// `Host::trace` for the host-filled object `o` with host key `key`.
+pub(crate) fn trace(d: &Dom, key: u32, o: ObjId, t: &mut Tracer<'_, Value>) {
+    match Source::of(key) {
+        Some(Source::TokenList) => crate::browser_platform::trace_list(d, o, t),
+        Some(Source::Style) => crate::browser_style::trace_obj(d, o, t),
+        Some(Source::AttrMap) => crate::browser_attr::trace_map(d, o, t),
+        Some(Source::RuleList) => crate::browser_cssom::trace_list(d, o, t),
+        Some(Source::Dataset) => crate::browser_dataset::trace_obj(d, o, t),
+        // A node list holds no reference. Captions, storage and frames are not owners.
+        _ => {}
+    }
+}
+
+/// The references that the wrapper of the node `n` keeps to its host-filled objects.
+#[inline]
+pub(crate) fn trace_node(d: &Dom, n: bare_html::dom::NodeId, t: &mut Tracer<'_, Value>) {
+    if d.wrapper_edges.get() {
+        trace_node_edges(d, n, t);
+    }
+}
+
+#[inline(never)]
+fn trace_node_edges(d: &Dom, n: bare_html::dom::NodeId, t: &mut Tracer<'_, Value>) {
+    crate::browser_dataset::trace_node(d, n, t);
+    crate::browser_platform::trace_node(d, n, t);
+    crate::browser_style::trace_node(d, n, t);
+    crate::browser_attr::trace_node(d, n, t);
+    if d.frames.active() {
+        crate::browser_frames::trace_node(d, n, t);
+    }
+}
+
+/// `Host::prune` for the host-filled object `o` with host key `key`, which the collector freed.
+pub(crate) fn prune(d: &Dom, key: u32, o: ObjId) {
+    match Source::of(key) {
+        Some(Source::NodeList) => crate::browser_nodelist::prune_list(d, o),
+        Some(Source::TokenList) => crate::browser_platform::prune_list(d, o),
+        Some(Source::Style) => crate::browser_style::prune_obj(d, o),
+        Some(Source::AttrMap) => crate::browser_attr::prune_map(d, o),
+        Some(Source::RuleList) => crate::browser_cssom::prune_list(d, o),
+        Some(Source::Dataset) => crate::browser_dataset::prune_obj(d, o),
+        _ => {}
     }
 }
 

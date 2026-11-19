@@ -366,25 +366,47 @@ pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
     out.extend(d.dataset.fixed.borrow().iter().map(|&o| Value::Object(o)));
 }
 
-pub(crate) fn trace(d: &Dom, owner: ObjId, out: &mut Vec<Value>) {
-    let s = d.dataset.s.borrow();
-    if s.objs.is_empty() {
-        return;
-    }
-    let st = d.st.borrow();
-    if let Some(&el) = s.objs.get(&owner) {
-        out.extend(st.wrapper(el).map(Value::Object));
-    } else if let Some(&Target::Node(n)) = st.by_obj.get(&owner) {
-        out.extend(s.by_el.get(&n).map(|&o| Value::Object(o)));
+/// The references of the dataset object `o` (its owner entry, `browser_sources.rs`): the wrapper of its element.
+pub(crate) fn trace_obj(d: &Dom, o: ObjId, t: &mut bare_js_api::Tracer<'_, Value>) {
+    if let Some(&el) = d.dataset.s.borrow().objs.get(&o)
+        && let Some(w) = d.st.borrow().by_node.get(&el)
+    {
+        t.visit(w);
     }
 }
 
-pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
+/// The references of the wrapper of the element `n`: its dataset object.
+pub(crate) fn trace_node(d: &Dom, n: NodeId, t: &mut bare_js_api::Tracer<'_, Value>) {
+    let s = d.dataset.s.borrow();
+    if !s.by_el.is_empty()
+        && let Some(&o) = s.by_el.get(&n)
+    {
+        crate::browser_sources::visit(t, Value::Object(o));
+    }
+}
+
+/// How many dataset objects there are.
+pub(crate) fn count(d: &Dom) -> usize {
+    d.dataset.s.borrow().objs.len()
+}
+
+/// After a batch of `prune_obj` that dropped entries: free the empty pages of the tables (`IdTab::remove`).
+pub(crate) fn compact(d: &Dom, before: usize) {
     let mut s = d.dataset.s.borrow_mut();
-    let s = &mut *s;
-    s.objs.retain(|&o, _| live(o));
-    let objs = &s.objs;
-    s.by_el.retain(|_, o| objs.contains_key(o));
+    if s.objs.len() != before {
+        s.objs.retain(|_, _| true);
+        s.by_el.retain(|_, _| true);
+    }
+}
+
+/// Drop the entries of the dataset object `o`, which the collector freed.
+pub(crate) fn prune_obj(d: &Dom, o: ObjId) {
+    let mut s = d.dataset.s.borrow_mut();
+    if let Some(el) = s.objs.remove(&o)
+        && s.by_el.get(&el) == Some(&o)
+    {
+        s.by_el.remove(&el);
+    }
 }
 
 impl Dom {
