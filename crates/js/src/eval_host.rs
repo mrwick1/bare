@@ -121,6 +121,9 @@ impl<'p> Interp<'p> {
     }
 
     fn host_fill(&mut self, owner: ObjId, index: u32) -> Result<(), Error> {
+        if (crate::heap::LAZY_TAG..u32::MAX).contains(&index) && let Some(h) = self.api.host.clone() {
+            return self.api_lazy(&*h, owner, index);
+        }
         let Some(host) = self.host.clone() else { return Err(unsupported("indexed host object without a host", Span::default())) };
         host.fill_indexed(self, owner, index)
     }

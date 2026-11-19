@@ -297,6 +297,18 @@ pub enum Named<R> {
     Value(R),
 }
 
+/// What the engine asks of [`Host::lazy_member`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lazy<'a> {
+    /// A lookup, a write or an own-property query of this string name missed on the object. Define it on the object (or on the
+    /// objects that share it), if the host has it.
+    Name(&'a str),
+    /// A listing of the object's own names (`Object.keys` and the like): define every lazy member of the object.
+    All,
+    /// A lookup of a symbol key missed on the object: define the symbol members (the `Symbol.toStringTag` of the interface prototypes).
+    Symbols,
+}
+
 /// The arguments of a host call: consecutive slots of the handle stack.
 #[derive(Clone, Copy, Debug)]
 pub struct Args<'s> {
@@ -452,6 +464,14 @@ pub trait Host<E: Engine> {
     /// The names of the object `key` now, in the host's order.
     fn named_keys(&self, _object: &E::Raw, _key: u32) -> Result<Vec<Vec<u16>>, Pending> {
         Ok(Vec::new())
+    }
+
+    /// A lazy member of `object`. The engine marks a prototype or a global object as lazy (`on*` accessors, interface tags) and asks
+    /// here, once per name and once for all names, before it answers a miss. The host defines what it has (`Scope::define`), so
+    /// the engine then finds it as a normal property. These are real properties made late, not host-filled ones: the host may run
+    /// script and allocate here. Defining nothing is a valid answer.
+    fn lazy_member<'s>(&self, _s: &mut Scope<'s, E>, _object: Local<'s>, _what: Lazy<'_>) -> Result<(), Error<'s>> {
+        Ok(())
     }
 }
 

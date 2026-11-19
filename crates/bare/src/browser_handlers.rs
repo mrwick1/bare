@@ -566,30 +566,23 @@ fn kind_of(d: &Dom, owner: ObjId) -> Option<u8> {
     }
 }
 
-/// `Dom::fill_indexed` for `LAZY_ON` (the name `it.heap.lazy_on_key()`) and `LAZY_ALL` (every name) of `owner`.
-pub(crate) fn lazy(d: &Dom, it: &mut Interp<'_>, owner: ObjId, all: bool) -> R<()> {
-    let Some(key) = (!all).then(|| it.heap.lazy_on_key()).flatten() else {
-        return match kind_of(d, owner) {
-            Some(k) if all => {
-                crate::browser_basics::define_all(d, it, owner)?;
-                it.heap.clear_lazy_on(owner);
-                for n in names(k) {
-                    define(d, it, owner, k, n)?;
-                }
-                Ok(())
-            }
-            _ => Ok(()),
-        };
-    };
-    lazy_key(d, it, owner, key)
+/// `Host::lazy_member` for `Lazy::All`: every lazy name of `owner`.
+pub(crate) fn lazy_all(d: &Dom, it: &mut Interp<'_>, owner: ObjId) -> R<()> {
+    let Some(k) = kind_of(d, owner) else { return Ok(()) };
+    crate::browser_basics::define_all(d, it, owner)?;
+    it.heap.clear_lazy_on(owner);
+    for n in names(k) {
+        define(d, it, owner, k, n)?;
+    }
+    Ok(())
 }
 
-/// `lazy` for the name `key` that a chain through `owner` missed.
-pub(crate) fn lazy_key(d: &Dom, it: &mut Interp<'_>, owner: ObjId, key: String) -> R<()> {
-    crate::browser_basics::define(d, it, &key)?;
-    if crate::browser::define_window(d,it,&key)? || crate::browser_cssom::define(d,it,&key)? { return Ok(()); }
-    if crate::browser_svg::define(d,it,&key)? || crate::browser_shims::define(d,it,&key)? { return Ok(()); }
-    match key.as_str() {
+/// `Host::lazy_member` for `Lazy::Name`: the name `key` that a chain through `owner` missed.
+pub(crate) fn lazy_key(d: &Dom, it: &mut Interp<'_>, owner: ObjId, key: &str) -> R<()> {
+    crate::browser_basics::define(d, it, key)?;
+    if crate::browser::define_window(d,it,key)? || crate::browser_cssom::define(d,it,key)? { return Ok(()); }
+    if crate::browser_svg::define(d,it,key)? || crate::browser_shims::define(d,it,key)? { return Ok(()); }
+    match key {
         "write" => {d.def_method(it,d.p().document,"write",1,crate::browser_loader::document_write)?; return Ok(());},
         "writeln" => {d.def_method(it,d.p().document,"writeln",1,crate::browser_loader::document_writeln)?; return Ok(());},
         "hasFocus" => {d.def_method(it,d.p().document,"hasFocus",0,crate::browser_gaps::has_focus)?; return Ok(());},
@@ -597,11 +590,11 @@ pub(crate) fn lazy_key(d: &Dom, it: &mut Interp<'_>, owner: ObjId, key: String) 
         "close" => {d.def_method(it,d.p().document,"close",0,crate::browser_loader::document_close)?; return Ok(());},
         _=>{}
     }
-    if matches!(key.as_str(), "getContext" | "toDataURL") {
+    if matches!(key, "getContext" | "toDataURL") {
         crate::browser_html::define_global(d, it, "HTMLCanvasElement")?;
         return Ok(());
     }
-    if key.starts_with("HTML") && crate::browser_html::define_global(d, it, &key)? {
+    if key.starts_with("HTML") && crate::browser_html::define_global(d, it, key)? {
         return Ok(());
     }
     let Some(n) = key.strip_prefix("on").and_then(|n| find_in(ELEMENT, n).or_else(|| find_in(DOC_EXTRA, n)).or_else(|| find_in(WIN_EXTRA, n))) else { return Ok(()) };

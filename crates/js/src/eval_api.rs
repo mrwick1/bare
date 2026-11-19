@@ -141,7 +141,7 @@ impl<'p> Interp<'p> {
     }
 
     /// An error of this engine as an error of the interface.
-    fn api_err<'s>(&mut self, e: Error) -> bare_js_api::Error<'s> {
+    pub fn api_err<'s>(&mut self, e: Error) -> bare_js_api::Error<'s> {
         use bare_js_api::Abort;
         let a = match e {
             Error::Throw(v) => return bare_js_api::Error::Throw(self.api_push(v)),
@@ -150,6 +150,34 @@ impl<'p> Interp<'p> {
         };
         self.api.abort = Some(e);
         bare_js_api::Error::Abort(a)
+    }
+
+    /// The heap asked for a lazy member (`Heap::set_lazy_on`, `set_lazy_chain`) with the reserved `index` of `NeedsHost`: ask the
+    /// interface host `h` (`Host::lazy_member`). A name that is not a string key (a symbol) is no ask, as before.
+    #[cold]
+    fn api_lazy(&mut self, h: &dyn bare_js_api::Host<Interp<'p>>, owner: ObjId, index: u32) -> Result<(), Error> {
+        use bare_js_api::Lazy;
+        let key;
+        let what = match index {
+            crate::heap::LAZY_ALL => Lazy::All,
+            crate::heap::LAZY_TAG => Lazy::Symbols,
+            _ => {
+                let Some(k) = self.heap.lazy_on_key() else { return Ok(()) };
+                key = k;
+                Lazy::Name(&key)
+            }
+        };
+        let base = self.api.stack.len();
+        self.api.stack.push(Value::Object(owner));
+        let r = bare_js_api::enter(self, |s| match h.lazy_member(s, bare_js_api::Local::from_slot(base as u32), what) {
+            Ok(()) => Ok(()),
+            Err(bare_js_api::Error::Throw(v)) => Err(Error::Throw(s.engine().api_at(v))),
+            Err(bare_js_api::Error::Abort(a)) => Err(s.engine().api.abort.take().unwrap_or(match a {
+                bare_js_api::Abort::Limit(w) | bare_js_api::Abort::Unsupported(w) => unsupported(w, Span::default()),
+            })),
+        });
+        self.api.stack.truncate(base);
+        r
     }
 
     /// `call_host` for a realm whose host came through the interface. Kept apart, so the old host path does not change.

@@ -879,6 +879,17 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
     fn named_keys(&self, object: &Value, key: u32) -> Result<Vec<Vec<u16>>, bare_js_api::Pending> {
         crate::browser_sources::named_keys(self, object, key)
     }
+
+    fn lazy_member<'s>(&self, s: &mut bare_js_api::Scope<'s, Interp<'p>>, object: bare_js_api::Local<'s>, what: bare_js_api::Lazy<'_>) -> Result<(), bare_js_api::Error<'s>> {
+        let it = s.engine();
+        let Value::Object(owner) = bare_js_api::Engine::raw(it, object) else { return Ok(()) };
+        let r = match what {
+            bare_js_api::Lazy::Name(n) => crate::browser_handlers::lazy_key(self, it, owner, n),
+            bare_js_api::Lazy::All => crate::browser_handlers::lazy_all(self, it, owner),
+            bare_js_api::Lazy::Symbols => crate::browser_handlers::tags(self, it),
+        };
+        r.map_err(|e| it.api_err(e))
+    }
 }
 
 impl Host for Dom {
@@ -1015,11 +1026,7 @@ impl Host for Dom {
     }
 
     fn fill_indexed(&self, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<()> {
-        if index == bare_js::heap::LAZY_TAG { return crate::browser_handlers::tags(self,it); }
         if index == crate::browser_frames::FILL { crate::browser_frames::fill(self, it, owner, index)?; return Ok(()); }
-        if (bare_js::heap::LAZY_ALL..u32::MAX).contains(&index) {
-            return crate::browser_handlers::lazy(self, it, owner, index == bare_js::heap::LAZY_ALL);
-        }
         if crate::browser_sources::fill(self, it, owner, index)? {
             return Ok(());
         }

@@ -5,7 +5,7 @@
 //! `WritableStream`, `TransformStream`, `TextDecoderStream`, `TextEncoderStream` and `ReadableStream.prototype.pipeTo` and `pipeThrough`
 //! (`shims/streams.js`), `CompressionStream` and `DecompressionStream` (`shims/compression.js`, with the native `codec` here).
 //!
-//! A read of the name finds nothing, so the heap asks the host once (`Heap::browser_name`, `browser_handlers::lazy`). The host runs the
+//! A read of the name finds nothing, so the heap asks the host once (`Heap::browser_name`, `browser_handlers::lazy_key`). The host runs the
 //! source as an indirect eval; the source defines the globals itself. A realm that never reads the names pays nothing: no object, no
 //! function, no script. The source of a shim defines its own sentinel global, so it runs once.
 //!
