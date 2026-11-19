@@ -13775,3 +13775,8 @@ Not tested: Windows with `BARE_GC_STRESS`; Windows cost; the full matrix after t
 - Documents: `docs/design-host-microtasks.md`, `docs/design-host-fetch.md`, `docs/design-host-modules.md` (PR #708). Static design; module costs and `Persistent` costs are hypotheses.
 - Owner decisions (2026-11-19): option A in all three, and every proposed answer. The handler bodies move to `Scope` and `Local` in one later PR. Module ids stay `u32`. Headers objects register as owners.
 - Build order: M1 (promise interface), M2, M3; F1 to F4 (F4 after M1); MD0 (module cost row), MD1 (after M1), MD2. M1 and MD0 started.
+## 2026-11-19: design of forms, CSSOM and navigation on the host interface (plan step S0.4)
+
+- Documents: `docs/design-host-forms.md`, `docs/design-host-cssom.md`, `docs/design-host-navigation.md` (PR #709). Callgrind, archMachine, base `37df5bd1`, one run per row. New-owner costs are hypotheses.
+- Measured: lazy CSSOM accessors would remove about 2.2 M instructions per page start; the navigation owners gain about 1.7% on `url 1`; forms gain nothing measurable.
+- Owner decisions (2026-11-19): every proposed answer. Navigation first, CSSOM next, forms last. Each area gets its cost rows first. The 65,536 object caps stay until the new engine collects in a task. M1 defines the iteration methods.
