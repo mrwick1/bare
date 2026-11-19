@@ -13742,3 +13742,5 @@ Checks:
 - Windows 11 VM: `bare-js-api` 6 passed; `bare-js` filter `api` 17 passed.
 
 Not tested: the hooks with a real call from the engine (M3); the wrapper cost in a browser row (nothing calls it); a full `bare` run on the Windows VM; wall time; `iter_next` over a Map (the `Coll` path is tested with a Set, and Map uses the same cursor code).
+
+Owner decision (2026-11-19): exception granted for the 12 other rows above, and a standing rule from now on. A row that is over +0.5% under both allocators passes when both trees, built with `RUSTFLAGS="-C codegen-units=1"`, show it within +0.5%. The cause is then the codegen-unit split, not new work. The PR records both numbers.
