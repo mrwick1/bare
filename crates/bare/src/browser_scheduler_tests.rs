@@ -465,7 +465,7 @@ fn a_cleared_or_finished_timer_frees_its_callback_at_the_next_collect() {
             b.collect(&[]).unwrap();
             sizes.push(b.it.persistent_slots());
         }
-        assert!(sizes[0] <= 203 && sizes[1] == sizes[0] && sizes[2] == sizes[0], "{sizes:?}");
+        assert!(sizes[0] <= 209 && sizes[1] == sizes[0] && sizes[2] == sizes[0], "{sizes:?}");
         assert_eq!(js(&mut b, "typeof w.waiting.deref()"), "function");
     });
 }

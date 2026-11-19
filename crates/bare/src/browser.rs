@@ -322,6 +322,10 @@ pub(crate) const SEL_CACHE_BYTES: usize = 128 << 10;
 pub(crate) enum Owner {
     Target(Target),
     Event(ObjId),
+    /// A `URL`, `URLSearchParams` or iterator object of the navigation module (`browser_navigation_params.rs`).
+    Url(ObjId),
+    Params(ObjId),
+    Iter(ObjId),
 }
 
 /// The owners of traced values, by host key (`docs/design-host-tracing.md`). A free key holds `None`.
@@ -818,6 +822,7 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
                     }
                 }
             }
+            Some(w @ (Owner::Url(_) | Owner::Params(_) | Owner::Iter(_))) => crate::browser_navigation::trace_owner(self, w, t),
             None => {}
         }
     }
@@ -839,6 +844,9 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
                 {
                     st.n_listeners -= l.len();
                 }
+            }
+            if let Some(w @ (Owner::Url(_) | Owner::Params(_) | Owner::Iter(_))) = st.owners.slots[k as usize] {
+                crate::browser_navigation::prune_owner(self, w);
             }
             st.owners.release(k);
         }
@@ -913,7 +921,6 @@ impl Host for Dom {
         self.fetch.roots(out);
         self.streams.roots(out);
         self.console.roots(out);
-        crate::browser_navigation::roots(self, out);
         self.scripts_roots(out);
         crate::browser_platform::roots(self, out);
         crate::browser_style::roots(self, out);
@@ -947,7 +954,6 @@ impl Host for Dom {
     fn trace(&self, owner: ObjId, out: &mut Vec<Value>) {
         if self.frames.active() { crate::browser_frames::trace(self, owner, out); }
         self.sched_trace(owner, out);
-        crate::browser_navigation::trace(self, owner, out);
         crate::browser_platform::trace(self, owner, out);
         crate::browser_style::trace(self, owner, out);
         crate::browser_cssom::trace(self, owner, out);
@@ -972,7 +978,6 @@ impl Host for Dom {
     }
 
     fn prune(&self, live: &dyn Fn(ObjId) -> bool) {
-        crate::browser_navigation::prune(self, live);
         crate::browser_frames::prune(self, live);
         crate::browser_platform::prune(self, live);
         crate::browser_geom::prune(self, live);

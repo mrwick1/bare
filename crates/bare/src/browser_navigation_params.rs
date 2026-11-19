@@ -26,23 +26,40 @@ use crate::browser::*;
 use crate::browser_navigation_url::{self as nu, Part, Rec, UErr, form_parse, form_serialize};
 use bare_js::eval::{Error, HostIter, Interp};
 use bare_js::value::{ObjId, PropertyKey, Value};
+use bare_js_api::Traced;
 
+/// The three kinds are owners (`Owner::Url`, `Owner::Params`, `Owner::Iter`): `Host::trace(key)` visits their edges and `Host::prune`
+/// drops their entries (`browser_navigation::trace_owner`, `prune_owner`).
 pub(crate) struct UrlObj {
     pub rec: Rec,
-    pub sp: Option<ObjId>,
+    pub sp: Option<Traced<Value>>,
 }
 
 pub(crate) struct ParamsObj {
     pub list: Vec<(String, String)>,
-    pub url: Option<ObjId>,
+    pub url: Option<Traced<Value>>,
     pub bytes: usize,
 }
 
 pub(crate) struct IterObj {
-    pub sp: ObjId,
+    pub sp: Traced<Value>,
     pub idx: usize,
     /// 0 keys, 1 values, 2 entries.
     pub kind: u8,
+}
+
+/// The object that an edge holds. An edge is made from an object only.
+pub(crate) fn edge(t: &Traced<Value>) -> ObjId {
+    match *t.raw() {
+        Value::Object(o) => o,
+        _ => unreachable!("an edge holds an object"),
+    }
+}
+
+/// Make `o` the owner of its edges. Call it once the entry is in its table and nothing can fail any more.
+fn own(d: &Dom, it: &mut Interp<'_>, o: ObjId, w: Owner) {
+    let k = d.st.borrow_mut().owners.key(w);
+    it.set_host_owner_obj(o, k);
 }
 
 fn arg(a: &[Value], i: usize) -> Value {
@@ -120,8 +137,8 @@ fn commit_params(d: &Dom, sp: ObjId) -> R<()> {
     let (url, ser) = {
         let n = d.nav.s.borrow();
         let p = &n.params[&sp];
-        match p.url {
-            Some(u) => (u, form_serialize(&p.list)),
+        match &p.url {
+            Some(u) => (edge(u), form_serialize(&p.list)),
             None => return Ok(()),
         }
     };
@@ -139,6 +156,7 @@ fn new_url(d: &Dom, it: &mut Interp<'_>, rec: Rec, proto: ObjId) -> R<ObjId> {
     fit(d, &rec)?;
     let o = d.obj(it, proto)?;
     d.nav.s.borrow_mut().urls.insert(o, UrlObj { rec, sp: None });
+    own(d, it, o, Owner::Url(o));
     Ok(o)
 }
 
@@ -149,11 +167,13 @@ fn new_params(d: &Dom, it: &mut Interp<'_>, list: Vec<(String, String)>, url: Op
 fn new_params_in(d: &Dom, it: &mut Interp<'_>, list: Vec<(String, String)>, url: Option<ObjId>, proto: ObjId) -> R<ObjId> {
     room(d)?;
     let o = d.obj(it, proto)?;
+    let url = url.map(|u| it.trace_value(Value::Object(u)));
     d.nav.s.borrow_mut().params.insert(o, ParamsObj { list: Vec::new(), url, bytes: 0 });
     if let Err(e) = set_list(d, o, list) {
         d.nav.s.borrow_mut().params.remove(&o);
         return Err(e);
     }
+    own(d, it, o, Owner::Params(o));
     Ok(o)
 }
 
@@ -223,7 +243,7 @@ pub(crate) fn url_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], pa
     }
     fit(d, &cand)?;
     // The query may have changed: reload the live `searchParams` first (its caps may refuse), then keep the URL.
-    let sp = d.nav.s.borrow().urls[&id].sp;
+    let sp = d.nav.s.borrow().urls[&id].sp.as_ref().map(edge);
     if let (Some(sp), true) = (sp, matches!(part, Part::Href | Part::Search)) {
         set_list(d, sp, form_parse(cand.query().unwrap_or("")))?;
     }
@@ -242,13 +262,14 @@ pub(crate) fn url_search_params(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[
     let (sp, q) = {
         let n = d.nav.s.borrow();
         let u = &n.urls[&id];
-        (u.sp, u.rec.query().unwrap_or("").to_string())
+        (u.sp.as_ref().map(edge), u.rec.query().unwrap_or("").to_string())
     };
     if let Some(sp) = sp {
         return Ok(Value::Object(sp));
     }
     let sp = new_params(d, it, form_parse(&q), Some(id))?;
-    d.nav.s.borrow_mut().urls.get_mut(&id).expect("checked").sp = Some(sp);
+    let edge = it.trace_value(Value::Object(sp));
+    d.nav.s.borrow_mut().urls.get_mut(&id).expect("checked").sp = Some(edge);
     Ok(Value::Object(sp))
 }
 
@@ -577,7 +598,9 @@ fn make_iter(d: &Dom, it: &mut Interp<'_>, this: Value, kind: u8) -> R<Value> {
     let sp = params_id(d, it, this)?;
     room(d)?;
     let o = d.obj(it, d.nav.p.get().expect("installed").iter)?;
+    let sp = it.trace_value(Value::Object(sp));
     d.nav.s.borrow_mut().iters.insert(o, IterObj { sp, idx: 0, kind });
+    own(d, it, o, Owner::Iter(o));
     Ok(Value::Object(o))
 }
 
@@ -601,7 +624,7 @@ pub(crate) fn iter_next(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) 
         let mut n = d.nav.s.borrow_mut();
         let n = &mut *n;
         let i = n.iters.get_mut(&id).expect("checked");
-        let pair = n.params.get(&i.sp).and_then(|p| p.list.get(i.idx).cloned());
+        let pair = n.params.get(&edge(&i.sp)).and_then(|p| p.list.get(i.idx).cloned());
         match pair {
             Some(p) => {
                 i.idx += 1;

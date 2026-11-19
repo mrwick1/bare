@@ -1151,3 +1151,102 @@ fn credential_urls_keep_components_and_relative_credentials() {
         assert_eq!(js(&mut b, "c.username = 'a@b'; c.password = 'p:q'; [c.username, c.password, new URL('../b', c).href].join('|')"), "a%40b|p%3Aq|https://a%40b:p%3Aq@example.com/b");
     });
 }
+
+/// Every navigation owner points at a live table entry, and its trace visits exactly the edges that the entry has.
+fn nav_owner_check(b: &Browser) -> (usize, usize) {
+    let st = b.dom.st.borrow();
+    let n = b.dom.nav.s.borrow();
+    let (mut owners, mut edges) = (0, 0);
+    for (k, w) in st.owners.slots.iter().enumerate() {
+        let Some(w @ (Owner::Url(o) | Owner::Params(o) | Owner::Iter(o))) = *w else { continue };
+        let want = match w {
+            Owner::Url(_) => n.urls.get(&o).map(|u| u.sp.is_some() as usize),
+            Owner::Params(_) => n.params.get(&o).map(|p| p.url.is_some() as usize),
+            _ => n.iters.get(&o).map(|_| 1),
+        };
+        let mut out = Vec::new();
+        <Dom as bare_js_api::Host<bare_js::eval::Interp<'_>>>::trace(&b.dom, k as u32, &mut bare_js_api::Tracer::new(&mut out));
+        assert_eq!(Some(out.len()), want, "owner {k} {w:?}");
+        owners += 1;
+        edges += out.len();
+    }
+    assert_eq!(owners, n.urls.len() + n.params.len() + n.iters.len(), "an owner for each entry and an entry for each owner");
+    (owners, edges)
+}
+
+#[test]
+fn a_dropped_url_and_its_params_are_collected_together_and_their_keys_are_reused() {
+    big(|| {
+        let mut b = at(URL0);
+        js(&mut b, "function make(i) { var u = new URL('http://h.test/p?i=' + i); var it = u.searchParams.entries(); it.next(); return u; }");
+        let mut sizes = Vec::new();
+        for _ in 0..3 {
+            js(&mut b, "for (var i = 0; i < 100; i++) make(i); 1");
+            assert_eq!(nav_owner_check(&b).0, 300);
+            b.collect(&[]).unwrap();
+            let st = b.navigation_stats();
+            assert_eq!((st.urls, st.params, st.iterators, st.param_bytes), (0, 0, 0, 0));
+            assert_eq!(nav_owner_check(&b), (0, 0));
+            sizes.push(b.dom.st.borrow().owners.slots.len());
+        }
+        // The freed keys are used again: the key table does not grow after the first round.
+        assert!(sizes[1] == sizes[0] && sizes[2] == sizes[0], "{sizes:?}");
+    });
+}
+
+#[test]
+fn a_held_search_params_keeps_its_url_and_a_held_url_keeps_its_params() {
+    big(|| {
+        let mut b = at(URL0);
+        js(&mut b, "var held = (function () { var u = new URL('http://h.test/p?a=1'); u.hash = 'kept'; return u.searchParams; })(); var url = (function () { var v = new URL('http://h.test/q?b=2'); v.searchParams; return v; })(); 1");
+        b.collect(&[]).unwrap();
+        let st = b.navigation_stats();
+        assert_eq!((st.urls, st.params), (2, 2));
+        assert_eq!(nav_owner_check(&b), (4, 4));
+        // The URL that only `held` reaches still answers, and the params of `url` are the same object as before.
+        js(&mut b, "held.append('c', '3'); 1");
+        assert_eq!(js(&mut b, "url.searchParams.get('b') + (url.searchParams === url.searchParams)"), "2true");
+        js(&mut b, "url = null; 1");
+        b.collect(&[]).unwrap();
+        let st = b.navigation_stats();
+        assert_eq!((st.urls, st.params), (1, 1));
+        assert_eq!(nav_owner_check(&b), (2, 2));
+    });
+}
+
+#[test]
+fn a_reused_key_answers_for_the_new_object_only() {
+    big(|| {
+        let mut b = at(URL0);
+        js(&mut b, "var a = new URL('http://h.test/a'); a.searchParams; var keep = new URLSearchParams('k=v'); 1");
+        let keys = b.dom.st.borrow().owners.slots.len();
+        js(&mut b, "a = null; 1");
+        b.collect(&[]).unwrap();
+        // Two new objects take the two freed keys: an iterator (one edge) and a URL with no `searchParams` yet (no edge).
+        js(&mut b, "var it = keep.keys(); var z = new URL('http://z.test/'); 1");
+        assert_eq!(b.dom.st.borrow().owners.slots.len(), keys);
+        assert_eq!(nav_owner_check(&b), (3, 1));
+        assert_eq!(js(&mut b, "z.href + ',' + it.next().value + ',' + keep"), "http://z.test/,k,k=v");
+    });
+}
+
+#[test]
+fn history_state_is_one_object_after_a_collection_and_an_evicted_entry_frees_its_handle() {
+    big(|| {
+        let mut b = at("https://a.test/");
+        b.set_navigation_limits(NavLimits { max_history_entries: 4, ..Default::default() });
+        js(&mut b, "var w = {}; history.pushState({n: 0}, '', '/0'); history.state.mark = 'm'; w.first = new WeakRef(history.state); 1");
+        b.collect(&[]).unwrap();
+        assert_eq!(js(&mut b, "(history.state === history.state) + history.state.mark"), "truem");
+        // Entries 1 to 6 push entry 0 out. Each read of `history.state` makes a handle for its entry.
+        let mut sizes = Vec::new();
+        for _ in 0..3 {
+            js(&mut b, "for (var i = 1; i <= 6; i++) { history.pushState({n: i}, '', '/' + i); history.state; }");
+            b.collect(&[]).unwrap();
+            sizes.push(b.it.persistent_slots());
+        }
+        assert_eq!(js(&mut b, "typeof w.first.deref()"), "undefined");
+        assert!(sizes[1] == sizes[0] && sizes[2] == sizes[0], "{sizes:?}");
+        assert_eq!(js(&mut b, "history.state.n + ',' + (history.state === history.state)"), "6,true");
+    });
+}
