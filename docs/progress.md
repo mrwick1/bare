@@ -13755,3 +13755,43 @@ Cost matrix against the base build of `37df5bd1` (817 rows, 803 measured): mean 
 Checks: Linux `cargo test --locked -p bare --lib` with filters `cssom` (21 passed), `frame` (45), `controls` (13) and `validity` (1). Windows 11 VM: the 3 examples built with cargo xwin (release) and each new case ran at scale 1 with `checksum=ok`.
 
 Not tested: Windows at scale 10; the old `*_load` cases on Windows; callgrind profile of the new rows; Node/Chrome comparison of the checksums (they follow the HTML and CSSOM standards by hand, and the engine agreed).
+## 2026-11-19: collector stress mode (plan step S0.x)
+
+`BARE_GC_STRESS=1` makes `Interp::gc_due` true at every safe point of the old engine. The depth and statement-frame conditions stay: a collect still never runs inside a call. `Interp::set_gc_stress(bool)` sets the mode for one interpreter (tests). The environment is read once for the process (`OnceLock`); an `Interp` copies it into a `bool` field when it is made. Off, `gc_due` reads one more `bool`. The old engine's `Scope::safepoint` is an empty function and no code calls it, so the browser safe points are the callers of `Browser::collect_due` (the loader rounds, `browser_ui` after a key or click). The collector itself is unchanged.
+
+Tests:
+
+- `bare-js`: `gc_stress_is_due_at_every_safe_point_and_live_values_survive`. 20 collects at safe points, a global object and its array survive, a call after each collect works.
+- `bare`: `a_page_gives_the_same_results_when_a_collect_runs_between_all_tasks`. One page with an interval, a timeout, a promise job, a click listener on a node that only the document holds, a node list and a dataset map. It runs twice, without and with stress. The log of both runs is equal, and the stress run makes at least 50 collects (the plain run makes none).
+
+Journeys under stress (archMachine, debug test binaries of `crates/drive/tests`, each file run once plain and once with `BARE_GC_STRESS=1` in the environment of the test and of the `bare-drive` it starts). Collections are a lower bound: the sum over processes of the last `collections` of the `browser_stats` event (`BARE_OBSERVE=metrics`); 0 can mean that no event came. Wall time is from a machine that ran other builds; do not compare it.
+
+| Journey file | Plain | Stress | Stress time (s) | Collections |
+| --- | --- | --- | ---: | ---: |
+| background, cache, cookies, goto_hash, goto_spa_route, held_post, idle, longpoll, monitoring, net_failures, nonblocking, open_memory, page_hide, settle_stopped, sheet_failures, stale_wait, state, suite, wait_load_limit, window_wait, busy_fetch, chunked | pass | pass | 0.0 to 13.0 | 0 to 2 |
+| fill (6 tests) | pass | pass | 0.1 | 25 |
+| fixture_app (4) | pass | pass | 5.1 | 159 |
+| fixture_journey (6, the staging login journey on the local app) | pass | pass | 2.8 | 165 |
+| inline_links (4) | pass | pass | 0.1 | 24 |
+| images (8) | pass | pass | 0.1 | 4 |
+| replay (4) | pass | pass | 11.3 | 9 |
+| shot_ready (2) | pass | pass | 1.5 | 4 |
+| storage_full | pass | pass | 0.6 | 10 |
+| swapped_input (3) | pass | pass | 0.2 | 4 |
+| live_budget | pass | pass | 56.6 (plain 3.6) | not counted |
+| task_budget | pass | pass | 60.8 (plain 92.4) | not counted |
+| window_arenas | pass | pass | 71.6 (plain 14.7) | not counted |
+| survive_limit (2) | FAIL (debug) | FAIL (debug) | 150.1 | not counted |
+| survive_limit, release build | pass | pass | 55.7 (plain 49.6) | not counted |
+
+`survive_limit` fails in the debug build with and without stress: a runaway-script step budget takes about 90 s of CPU there, over the 60 s step limit of the test. It passes in the release build both ways. All 35 files were run: no journey failed because of the stress mode. No missing trace edge was found.
+
+Local suite (`tools/suite/run.py`, 40 generated tests, release `bare-drive`, 1 run each): V0 40 of 40 pass both ways, instructions 15,444 M plain and 53,625 M under stress; V2 40 of 40 pass both ways, 10,324 M plain and 22,084 M under stress.
+
+`bare` lib tests under stress (`BARE_GC_STRESS=1`, debug): 1646 pass, 2 fail. Both assert that a collect is not due (`parsed_documents_ask_for_a_collect_by_their_native_bytes`, and my new test before it set the mode itself). They fail by design when the environment forces the mode; my test now sets the mode explicitly. No other test failed, so no missing edge shows in them either.
+
+Cost matrix (archMachine, base `37df5bd1`, 805 rows, `-j4`, minimum of 3 runs, glibc; jemalloc for rows over the limit): no row over +0.5% under both allocators. Mean change -0.000% (glibc), +0.051% (jemalloc, 5 rows). Five rows over under glibc only: `resources_load small 1` +1.27%, `resources_load small 10` +1.63%, `form_load gates 1` +0.58%, `form_load gates 10` +0.62%, `preload_load style 10` +0.50%; their jemalloc counts are -0.15% to +0.26%. A second run of three of them gave the same counts. Hypothesis: an allocator size class shifts because `Interp` has one more `bool`. `parse_load deep 1` and `deep 10` abort on the base too.
+
+Checks: Linux `bare` lib 1648, `bare-js` lib 1047, `bare-js-api` 5 passed. Windows 11 VM: the two new tests pass.
+
+Not tested: the full `bare` and `bare-js` suites on Windows; the stress mode on Windows; live-site journeys and the staging journey (not allowed in this task); `bare-mcp` tests; the stress mode with the GUI window. Collection counts are a lower bound. The stress mode cannot find a missing edge in a path that no journey runs. Noticed, not changed: `btn.click()` gives an event whose `detail` is `undefined` (to verify against the HTML spec: a `MouseEvent` with `detail` 0).
