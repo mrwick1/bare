@@ -1,6 +1,6 @@
 //! Web APIs that are written in JavaScript and made at the first read of one of their names: `Element.prototype.animate` and `Animation`
 //! (`shims/animation.js`), `Path2D` (`shims/path2d.js`), `indexedDB` and the `IDB*` interfaces (`shims/idb.js`), `EventSource` (`shims/eventsource.js`),
-//! `FileReader` (`shims/filereader.js`),
+//! `WebSocket` and `CloseEvent` (`shims/websocket.js`, every connection fails), `FileReader` (`shims/filereader.js`),
 //! `WritableStream`, `TransformStream`, `TextDecoderStream`, `TextEncoderStream` and `ReadableStream.prototype.pipeTo` and `pipeThrough`
 //! (`shims/streams.js`), `CompressionStream` and `DecompressionStream` (`shims/compression.js`, with the native `codec` here).
 //!
@@ -17,10 +17,11 @@ use bare_js::eval::Interp;
 use bare_js::value::Value;
 
 /// `(names that ask for it, the global that the source defines first, source)`.
-const SHIMS: [(&[&str], &str, &str); 7] = [
+const SHIMS: [(&[&str], &str, &str); 8] = [
     (&["animate", "Animation"], "Animation", include_str!("shims/animation.js")),
     (&["Path2D"], "Path2D", include_str!("shims/path2d.js")),
     (&["EventSource"], "EventSource", include_str!("shims/eventsource.js")),
+    (&["WebSocket", "CloseEvent"], "WebSocket", include_str!("shims/websocket.js")),
     (&["FileReader"], "FileReader", include_str!("shims/filereader.js")),
     (&["indexedDB"], "indexedDB", include_str!("shims/idb.js")),
     (&STREAM_NAMES, "WritableStream", include_str!("shims/streams.js")),
