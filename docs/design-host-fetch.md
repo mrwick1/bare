@@ -1,6 +1,6 @@
 # Fetch, XHR, streams and abort through the host interface
 
-Status: proposal for the owner (plan step S0.4, fetch). Not decided. See "Open questions for the owner" at the end.
+Status: decided by the owner, 2026-11-19 (plan step S0.4, fetch). See "Decisions" at the end.
 
 ## Problem
 
@@ -173,3 +173,12 @@ Order: F1, then F2, F3, F4. F4 needs `bind` and PR M1 of the microtasks page.
 2. Fetch entries by key, or by object? Proposed: keep `IdMap<ObjId, F>` and give each entry an owner key; `trace(key)` goes through the owner table to the `ObjId`, then the map. Alternative: a slab indexed by key, plus `by_obj: IdMap<ObjId, u32>` for `this`. The slab makes trace and prune O(1) and adds one load to each handler call. Which first? (Proposed: the map, and the slab only if a row shows the extra lookup.)
 3. Headers objects (4 of 8 objects in a round of `fetch_load objects`) hold no edges. They need a key only so that their entry is freed. Accept the registration for them (proposed), or free them by another rule (for example with their `Request` or `Response`)?
 4. The handler bodies (about 150 functions in these four files): do they move to `Scope` and `Local` inside F1 to F4, or in a later PR? Same question as `design-host-microtasks.md`, question 1. This page assumes later.
+
+## Decisions (owner, 2026-11-19)
+
+The owner accepted every proposed answer.
+
+1. Option A: split by lifetime. Pending work and constants are `Persistent`; edges between objects are `Traced` with owner keys.
+2. Keep `IdMap<ObjId, F>` and give each entry an owner key. Build the slab only if a cost row shows the extra lookup.
+3. Headers objects register as owners, so that their entries are freed.
+4. The handler bodies move to `Scope` and `Local` in one later PR (see `design-host-microtasks.md`).

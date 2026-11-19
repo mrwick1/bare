@@ -1,6 +1,6 @@
 # Promises and microtasks through the host interface
 
-Status: proposal for the owner (plan step S0.4, promises and microtasks). Not decided. See "Open questions for the owner" at the end.
+Status: decided by the owner, 2026-11-19 (plan step S0.4, promises and microtasks). See "Decisions" at the end.
 
 ## Problem
 
@@ -200,3 +200,12 @@ Order: M1, M2, M3. The fetch PR (F1 in `design-host-fetch.md`) uses M1. The modu
 2. Option A, B or C? (Proposed: A; C only if a row passes +0.5%.)
 3. `iter_next` pushes one slot for each item (proposed). Or: `iter_next` writes into one reused slot, and a host that keeps an item copies it?
 4. `MAX_PENDING_REJECTIONS` in `bare-js-api` (proposed), or `promise_rejections` gets the bound as an argument?
+
+## Decisions (owner, 2026-11-19)
+
+The owner accepted every proposed answer.
+
+1. Option A: the engine keeps the promise state and the job queue; the interface adds methods; the three host hooks take `Scope` and `Local`.
+2. The handler bodies move to `Scope` and `Local` in one later PR, after all subsystems hold `Persistent` and `Traced`. The subsystem PRs change references and add methods only.
+3. `iter_next` pushes one slot for each item.
+4. `MAX_PENDING_REJECTIONS` is a constant in `bare-js-api`.

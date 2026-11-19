@@ -1,6 +1,6 @@
 # Modules through the host interface
 
-Status: proposal for the owner (plan step S0.4, modules). Not decided. See "Open questions for the owner" at the end.
+Status: decided by the owner, 2026-11-19 (plan step S0.4, modules). See "Decisions" at the end.
 
 ## Problem
 
@@ -171,3 +171,12 @@ Order: MD0, then MD1 (after M1), then MD2.
 2. Add the cost row first (proposed: MD0 as its own small PR), or in the same PR as MD1?
 3. `u32` for module ids (proposed: the browser stores `u32`), or a `ModuleId` type?
 4. The evaluation promise: a `Persistent` in `evals` (proposed), or a read-only method `module_promise(m)` so the host keeps only the id? The second needs one more method and no `Persistent`. It makes `module_evaluate` a pure call.
+
+## Decisions (owner, 2026-11-19)
+
+The owner accepted every proposed answer.
+
+1. Option A: keep the push model and the `u32` module ids; `evals`, `Load::Throw` and `ImportRequest::promise` become `Persistent`.
+2. Add the module cost row first, as its own small PR (MD0).
+3. Module ids stay `u32`.
+4. The evaluation promise is a `Persistent` in `evals`.
