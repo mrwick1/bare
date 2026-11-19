@@ -30,8 +30,8 @@
 //! - Every redirect is checked before the next hop opens a socket. A redirect from https to http ends the request. A redirect to another
 //!   origin is followed in `cors` and `no-cors` mode, with the CORS check of each reply (also the redirect reply) and a preflight
 //!   for each cross-origin hop that needs one. `Origin` is `null` once a redirect leaves a hop that is not the document origin.
-//!   `Authorization` is dropped when a redirect changes the origin. `redirect: "error"` is supported,
-//!   `"manual"` is `Unsupported`. 301/302 (POST) and 303 (all but GET and HEAD) turn the request into a GET without a body; 307/308 keep both.
+//!   `Authorization` is dropped when a redirect changes the origin. `redirect: "error"` is supported. `"manual"` stops at the
+//!   first redirect and gives an `opaqueredirect` response (status 0, no header, no body, the `url` of the hop), as Chrome does. 301/302 (POST) and 303 (all but GET and HEAD) turn the request into a GET without a body; 307/308 keep both.
 //! - JS cannot set `Host`, `Content-Length`, `Cookie`, `Origin`, `Referer`, `Connection`, `Transfer-Encoding`, `Accept-Encoding`,
 //!   `Sec-*`, `Proxy-*` and the other forbidden names of the Fetch Standard: they are dropped, as a browser does. `Host` and
 //!   `Content-Length` come from the client. `Set-Cookie` of a response is never put in `response.headers`. Cookies: the
@@ -336,6 +336,7 @@ impl Body {
 enum Redirect {
     Follow,
     Error,
+    Manual,
 }
 
 /// The request mode of the Fetch Standard.
@@ -1142,7 +1143,7 @@ fn make_core(d: &Dom, it: &mut Interp<'_>, input: Value, init: Value) -> R<Core>
             core.redirect = match r {
                 "follow" => Redirect::Follow,
                 "error" => Redirect::Error,
-                _ => return Err(Error::Unsupported(unsupported("fetch redirect: manual (opaque redirect responses)"))),
+                _ => Redirect::Manual,
             };
         }
         if let Some(c) = d.choice(it, init, "credentials", &["omit", "same-origin", "include"])? {
@@ -1583,7 +1584,7 @@ fn req_headers(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Valu
     Ok(Value::Object(with_req(d, it, this, |r| r.c.headers)?))
 }
 fn req_redirect(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    let s = with_req(d, it, this, |r| if r.redirect == Redirect::Follow { "follow" } else { "error" }.to_string())?;
+    let s = with_req(d, it, this, |r| match r.redirect { Redirect::Follow => "follow", Redirect::Error => "error", Redirect::Manual => "manual" }.to_string())?;
     str_val(d, it, s)
 }
 fn req_credentials(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
@@ -2202,6 +2203,8 @@ pub(crate) enum Taint {
     Cors,
     /// `no-cors` to another origin: status 0, no header, no body.
     Opaque,
+    /// `redirect: "manual"` met a redirect: status 0, no header, no body, but the URL of the hop.
+    OpaqueRedirect,
 }
 
 pub(crate) enum Outcome {
@@ -2311,6 +2314,9 @@ fn run_hops(client: &mut Client, lim: &FetchLimits, first: Parts<'_>, diag: &mut
             if first.redirect == Redirect::Error {
                 return Outcome::Failed("redirect refused (redirect: error)");
             }
+            if first.redirect == Redirect::Manual {
+                return Outcome::Done { status: 0, url, redirected: false, headers: Vec::new(), body: Vec::new(), taint: Taint::OpaqueRedirect };
+            }
             let Ok(target) = url.join(&location) else { return Outcome::Failed("redirect to an invalid URL") };
             // Checked before any DNS or socket for the target.
             if url.scheme == Scheme::Https && target.scheme == Scheme::Http {
@@ -2352,7 +2358,7 @@ fn run_hops(client: &mut Client, lim: &FetchLimits, first: Parts<'_>, diag: &mut
         return match taint {
             Taint::Basic => Outcome::Done { status: resp.status, url, redirected, headers: resp.headers, body: resp.body, taint },
             Taint::Cors => Outcome::Done { status: resp.status, url, redirected, headers: expose(resp.headers, cors.include), body: resp.body, taint },
-            Taint::Opaque => Outcome::Done { status: 0, url, redirected: false, headers: Vec::new(), body: Vec::new(), taint },
+            Taint::Opaque | Taint::OpaqueRedirect => Outcome::Done { status: 0, url, redirected: false, headers: Vec::new(), body: Vec::new(), taint },
         };
     }
     Outcome::Failed("too many redirects")
@@ -2578,10 +2584,10 @@ fn build_response(d: &Dom, it: &mut Interp<'_>, status: u16, url: Url, redirecte
         list.append(&lim, n.to_ascii_lowercase(), v).map_err(|e| d.herr(it, e))?;
     }
     list.guard = Guard::Immutable;
-    let body = (!status_null_body(status) && taint != Taint::Opaque).then(|| Rc::new(body));
+    let body = (!status_null_body(status) && !matches!(taint, Taint::Opaque | Taint::OpaqueRedirect)).then(|| Rc::new(body));
     d.reserve(it, 2, body.as_ref().map_or(0, |b| b.len()))?;
     let h = d.headers_obj(it, list)?;
-    let r = RespData { c: Common { headers: h, body: Body::new(body) }, status, status_text: String::new(), url: if taint == Taint::Opaque { String::new() } else { url.to_string() }, redirected, ty: ["basic", "cors", "opaque"][taint as usize], stream: None };
+    let r = RespData { c: Common { headers: h, body: Body::new(body) }, status, status_text: String::new(), url: if taint == Taint::Opaque { String::new() } else { url.to_string() }, redirected, ty: ["basic", "cors", "opaque", "opaqueredirect"][taint as usize], stream: None };
     Ok(Value::Object(d.add_obj(it, Pr::Response, F::Response(r))?))
 }
 
