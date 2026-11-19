@@ -147,18 +147,26 @@ fn trace_objects(cell: &RefCell<State>, owner: ObjId, out: &mut Vec<Value>) {
         for o in [Some(r.sheet), r.style, r.list, r.media, r.parent] {
             push(o);
         }
-    } else if let Some(l) = s.lists.get(&owner) {
-        push(l.sheet);
-        push(l.rule);
-        for e in &l.items {
-            if let &Entry::Obj(o) = e {
-                push(Some(o));
-            }
-        }
     } else if let Some(sh) = s.sheets.get(&owner) {
         push(Some(sh.list));
     } else if let Some(&r) = s.style_rules.get(&owner).or_else(|| s.medias.get(&owner)) {
         push(Some(r));
+    }
+}
+/// The references of the rule list `o` (its owner entry, `browser_sources.rs`): its sheet, its rule and its rule objects.
+pub(crate) fn trace_list(d: &Dom, o: ObjId, t: &mut bare_js_api::Tracer<'_, Value>) {
+    let Some(cell) = d.cssom.state.get() else { return };
+    let s = cell.borrow();
+    let Some(l) = s.lists.get(&o) else { return };
+    let items = l.items.iter().filter_map(|e| if let &Entry::Obj(o) = e { Some(o) } else { None });
+    for o in l.sheet.into_iter().chain(l.rule).chain(items) {
+        crate::browser_sources::visit(t, Value::Object(o));
+    }
+}
+/// Drop the entry of the rule list `o`, which the collector freed.
+pub(crate) fn prune_list(d: &Dom, o: ObjId) {
+    if let Some(cell) = d.cssom.state.get() {
+        cell.borrow_mut().lists.remove(&o);
     }
 }
 /// Drop the table entries of the objects that the collector freed.
@@ -167,7 +175,6 @@ pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
     let mut s = cell.borrow_mut();
     let s = &mut *s;
     s.rules.retain(|&o, _| live(o));
-    s.lists.retain(|&o, _| live(o));
     s.sheets.retain(|&o, _| live(o));
     s.style_rules.retain(|&o, _| live(o));
     s.medias.retain(|&o, _| live(o));

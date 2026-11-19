@@ -97,26 +97,54 @@ pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
     out.extend(d.attr.fixed.borrow().iter().map(|&o| Value::Object(o)));
 }
 
+/// The references of an `Attr` object. The maps have owner entries (`trace_map`).
 pub(crate) fn trace(d: &Dom, owner: ObjId, out: &mut Vec<Value>) {
     let t = d.attr.s.borrow();
-    if t.attrs.is_empty() && t.maps.is_empty() {
+    if t.attrs.is_empty() {
         return;
     }
-    let st = d.st.borrow();
-    if let Some(&el) = t.maps.get(&owner) {
-        out.extend(st.wrapper(el).map(Value::Object));
-    } else if let Some(a) = t.attrs.get(&owner) {
-        out.extend(a.owner.and_then(|el| st.wrapper(el)).map(Value::Object));
-    } else if let Some(&Target::Node(n)) = st.by_obj.get(&owner) {
-        out.extend(t.map_of.get(&n).map(|&o| Value::Object(o)));
-        out.extend(t.by_el.get(&n).into_iter().flatten().map(|&(_, o)| Value::Object(o)));
+    if let Some(a) = t.attrs.get(&owner) {
+        out.extend(a.owner.and_then(|el| d.st.borrow().wrapper(el)).map(Value::Object));
+    }
+}
+
+/// The references of the attribute map `o` (its owner entry, `browser_sources.rs`): the wrapper of its element.
+pub(crate) fn trace_map(d: &Dom, o: ObjId, t: &mut bare_js_api::Tracer<'_, Value>) {
+    if let Some(&el) = d.attr.s.borrow().maps.get(&o)
+        && let Some(w) = d.st.borrow().by_node.get(&el)
+    {
+        t.visit(w);
+    }
+}
+
+/// The references of the wrapper of the element `n`: its attribute map and its `Attr` objects.
+pub(crate) fn trace_node(d: &Dom, n: NodeId, t: &mut bare_js_api::Tracer<'_, Value>) {
+    let a = d.attr.s.borrow();
+    if a.map_of.is_empty() && a.by_el.is_empty() {
+        return;
+    }
+    if let Some(&o) = a.map_of.get(&n) {
+        crate::browser_sources::visit(t, Value::Object(o));
+    }
+    for &(_, o) in a.by_el.get(&n).into_iter().flatten() {
+        crate::browser_sources::visit(t, Value::Object(o));
+    }
+}
+
+/// Drop the entries of the attribute map `o`, which the collector freed.
+pub(crate) fn prune_map(d: &Dom, o: ObjId) {
+    let mut t = d.attr.s.borrow_mut();
+    if let Some(el) = t.maps.remove(&o)
+        && t.map_of.get(&el) == Some(&o)
+    {
+        t.map_of.remove(&el);
     }
 }
 
 pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
     let mut t = d.attr.s.borrow_mut();
     let t = &mut *t;
-    if t.attrs.is_empty() && t.maps.is_empty() {
+    if t.attrs.is_empty() {
         return;
     }
     let mut unwatch = Vec::new();
@@ -132,9 +160,6 @@ pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
         l.retain(|(_, o)| attrs.contains_key(o));
         !l.is_empty()
     });
-    t.maps.retain(|&o, _| live(o));
-    let maps = &t.maps;
-    t.map_of.retain(|_, o| maps.contains_key(o));
     if !unwatch.is_empty() {
         let mut doc = d.doc.borrow_mut();
         for (el, atom) in unwatch {
@@ -267,6 +292,7 @@ fn wrapper_for(d: &Dom, it: &mut Interp<'_>, el: NodeId, atom: Atom) -> R<ObjId>
         let mut t = d.attr.s.borrow_mut();
         t.attrs.insert(o, AttrObj { atom, owner: Some(el), value: None });
         t.by_el.entry(el).or_default().push((atom, o));
+        d.wrapper_edges.set(true);
     }
     d.doc.borrow_mut().watch_attr(el, atom);
     Ok(o)
@@ -461,6 +487,7 @@ fn set_node(d: &Dom, it: &mut Interp<'_>, el: NodeId, o: ObjId) -> V {
             a.value = None;
         }
         t.by_el.entry(el).or_default().push((atom, o));
+        d.wrapper_edges.set(true);
     }
     d.doc.borrow_mut().watch_attr(el, atom);
     if kind.is_none() && local == "src" {
