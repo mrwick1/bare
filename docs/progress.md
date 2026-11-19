@@ -13770,3 +13770,8 @@ Cost matrix: base is `4724ff24` (origin/main `e37f02e0` plus the cssom_load rows
 Checks: Linux `cargo test --locked -p bare --lib` filters `computed` (66 passed), `style` (96), `cssom` (21); `cargo test --locked -p bare-js-api -p bare-js -p bare --lib` all pass. Windows 11 VM (cargo xwin test binary): the same three filters, 66, 96 and 21 passed.
 
 Not tested: Windows with `BARE_GC_STRESS`; Windows cost; the full matrix after the fix; a callgrind split of the 130 instructions; the jemalloc count of `computed 1`.
+## 2026-11-19: design of promises, fetch and modules on the host interface (plan step S0.4)
+
+- Documents: `docs/design-host-microtasks.md`, `docs/design-host-fetch.md`, `docs/design-host-modules.md` (PR #708). Static design; module costs and `Persistent` costs are hypotheses.
+- Owner decisions (2026-11-19): option A in all three, and every proposed answer. The handler bodies move to `Scope` and `Local` in one later PR. Module ids stay `u32`. Headers objects register as owners.
+- Build order: M1 (promise interface), M2, M3; F1 to F4 (F4 after M1); MD0 (module cost row), MD1 (after M1), MD2. M1 and MD0 started.
