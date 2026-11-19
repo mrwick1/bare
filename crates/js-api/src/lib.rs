@@ -471,6 +471,16 @@ impl<'s> Iter<'s> {
     }
 }
 
+/// An `import()` call that waits for the host ([`Engine::take_dynamic_imports`]). The host holds `promise` until it settles it with
+/// [`Engine::finish_dynamic_import`], [`Engine::reject_dynamic_import`] or [`Engine::fail_dynamic_import`]. `referrer` is the module
+/// that asked (`None`: a classic script).
+#[derive(Debug)]
+pub struct ImportRequest {
+    pub promise: Persistent,
+    pub specifier: String,
+    pub referrer: Option<u32>,
+}
+
 /// The host side of the browser: the engine calls it for host functions.
 pub trait Host<E: Engine> {
     /// Run host function `id` (from [`Scope::host_function`]). `is_new` is true for `new f()`.
@@ -639,6 +649,34 @@ pub trait Engine: Sized {
     fn iter_next<'s>(&mut self, it: &mut Iter<'s>) -> Result<Option<Local<'s>>, Error<'s>>;
     /// Stop because of `err` (`IteratorClose`): calls `return` and keeps `err`, unless `err` is an abort. Gives the error to pass on.
     fn iter_fail<'s>(&mut self, it: &mut Iter<'s>, err: Error<'s>) -> Error<'s>;
+
+    // Modules. The host fetches, resolves and caches the files; the engine parses, links and evaluates. A module is a number (an index
+    // of the engine's module table) and lives as long as the realm: the host never releases one, and holds no reference to it.
+
+    /// Parse and keep a module. A syntax error is `Throw`. Refused inside a call (`Abort::Unsupported`). The module has no requested
+    /// modules yet.
+    fn module_parse<'s>(&mut self, source: &str, url: &str) -> Result<u32, Error<'s>>;
+    /// The specifiers that module `m` asks for, in order. The host answers with [`Engine::module_set_requested`], in the same order.
+    fn module_requests(&self, m: u32) -> Vec<String>;
+    /// Set the module for each request of `m`.
+    fn module_set_requested(&mut self, m: u32, deps: &[u32]);
+    /// The URL that module `m` was parsed with. The borrow ends before any call that may collect.
+    fn module_url(&self, m: u32) -> &str;
+    /// Check the imports and make the environments of the graph of `root`. A bad import is `Throw`, and nothing changes then.
+    fn module_link<'s>(&mut self, root: u32) -> Result<(), Error<'s>>;
+    /// Evaluate a linked graph. Gives the promise of the evaluation; a second call gives the same promise. Not linked:
+    /// `Abort::Unsupported`.
+    fn module_evaluate<'s>(&mut self, m: u32) -> Result<Local<'s>, Error<'s>>;
+    /// The `import()` calls since the last call, oldest first. The engine gives up its root: each promise is the host's
+    /// [`Persistent`].
+    fn take_dynamic_imports(&mut self) -> Vec<ImportRequest>;
+    /// The host loaded the graph of `m` for the `import()` of `p`: link and evaluate it, and settle `p` with the namespace. A link or
+    /// evaluation error rejects `p`.
+    fn finish_dynamic_import<'s>(&mut self, p: &Persistent, m: u32) -> Result<(), Error<'s>>;
+    /// Reject the `import()` of `p` with `reason`, the error of a parse.
+    fn reject_dynamic_import<'s>(&mut self, p: &Persistent, reason: Local<'_>) -> Result<(), Error<'s>>;
+    /// The host could not load the `import()` of `p`: reject it with a `TypeError` of `message`.
+    fn fail_dynamic_import<'s>(&mut self, p: &Persistent, message: &str) -> Result<(), Error<'s>>;
 
     /// A point where the collector may run.
     fn safepoint(&mut self);
@@ -898,6 +936,46 @@ impl<'s, E: Engine> Scope<'s, E> {
 
     pub fn iter_fail(&mut self, it: &mut Iter<'s>, err: Error<'s>) -> Error<'s> {
         self.e.iter_fail(it, err)
+    }
+
+    pub fn module_parse(&mut self, source: &str, url: &str) -> Result<u32, Error<'s>> {
+        self.e.module_parse(source, url)
+    }
+
+    pub fn module_requests(&self, m: u32) -> Vec<String> {
+        self.e.module_requests(m)
+    }
+
+    pub fn module_set_requested(&mut self, m: u32, deps: &[u32]) {
+        self.e.module_set_requested(m, deps);
+    }
+
+    pub fn module_url(&self, m: u32) -> &str {
+        self.e.module_url(m)
+    }
+
+    pub fn module_link(&mut self, root: u32) -> Result<(), Error<'s>> {
+        self.e.module_link(root)
+    }
+
+    pub fn module_evaluate(&mut self, m: u32) -> Result<Local<'s>, Error<'s>> {
+        self.e.module_evaluate(m)
+    }
+
+    pub fn take_dynamic_imports(&mut self) -> Vec<ImportRequest> {
+        self.e.take_dynamic_imports()
+    }
+
+    pub fn finish_dynamic_import(&mut self, p: &Persistent, m: u32) -> Result<(), Error<'s>> {
+        self.e.finish_dynamic_import(p, m)
+    }
+
+    pub fn reject_dynamic_import(&mut self, p: &Persistent, reason: Local<'_>) -> Result<(), Error<'s>> {
+        self.e.reject_dynamic_import(p, reason)
+    }
+
+    pub fn fail_dynamic_import(&mut self, p: &Persistent, message: &str) -> Result<(), Error<'s>> {
+        self.e.fail_dynamic_import(p, message)
     }
 
     pub fn safepoint(&mut self) {
