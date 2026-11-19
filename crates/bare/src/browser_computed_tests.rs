@@ -399,6 +399,60 @@ fn computed_objects_are_not_same_object_and_bound() {
     assert_eq!(js(&mut b, "1"), "1");
 }
 
+#[test]
+fn a_dropped_computed_object_is_collected_and_its_entry_freed() {
+    big(|| {
+        let mut b = at(PAGE);
+        js(&mut b, "(function () { for (var i = 0; i < 50; i++) getComputedStyle(document.getElementById('a'), i % 2 ? '::before' : null); })(); 0");
+        assert_eq!(b.computed_stats().objects, 50);
+        b.collect(&[]).unwrap();
+        assert_eq!(b.computed_stats().objects, 0);
+        assert_eq!(b.dom.computed.kinds.borrow().len(), 0);
+        // The freed keys are taken again: the owner table does not grow with the second round.
+        let keys = b.dom.st.borrow().owners.slots.len();
+        js(&mut b, "(function () { for (var i = 0; i < 50; i++) getComputedStyle(document.body); })(); 0");
+        b.collect(&[]).unwrap();
+        assert_eq!(b.computed_stats().objects, 0);
+        assert_eq!(b.dom.st.borrow().owners.slots.len(), keys);
+    });
+}
+
+#[test]
+fn a_held_computed_object_survives_collections_and_reads_live_values() {
+    big(|| {
+        let mut b = at(PAGE);
+        js(&mut b, "var cs = getComputedStyle(document.getElementById('c') || (function () { var e = document.createElement('div'); e.id = 'c'; document.body.appendChild(e); return e; })()); (function () { for (var i = 0; i < 20; i++) getComputedStyle(document.body); })(); 0");
+        b.collect(&[]).unwrap();
+        b.collect(&[]).unwrap();
+        assert_eq!(b.computed_stats().objects, 1);
+        assert_eq!(js(&mut b, "cs.color"), "rgb(255, 0, 0)");
+        assert_eq!(js(&mut b, "document.getElementById('c').style.color = 'blue'; cs.color"), "rgb(0, 0, 255)");
+        b.collect(&[]).unwrap();
+        assert_eq!(js(&mut b, "cs.color"), "rgb(0, 0, 255)");
+    });
+}
+
+#[test]
+fn a_computed_object_keeps_a_detached_element_and_a_reused_key_answers_for_its_new_object() {
+    big(|| {
+        let mut b = at(PAGE);
+        // Only the computed object holds the detached element.
+        js(&mut b, "var cs = getComputedStyle((function () { var e = document.createElement('p'); e.mark = 'kept'; return e; })(), '::before'); 0");
+        b.collect(&[]).unwrap();
+        assert_eq!(b.computed_stats().objects, 1);
+        // Drop it, collect, and make another one: it takes the freed key and answers for its own element and kind.
+        js(&mut b, "cs = null; 0");
+        b.collect(&[]).unwrap();
+        assert_eq!(b.computed_stats().objects, 0);
+        js(&mut b, "var cs2 = getComputedStyle(document.body); 0");
+        b.collect(&[]).unwrap();
+        assert_eq!(b.dom.computed.kinds.borrow().len(), 0);
+        assert_eq!(js(&mut b, "cs2.direction"), "ltr");
+        assert_eq!(js(&mut b, "cs2.getPropertyValue('display')"), "block");
+        assert_eq!(b.computed_stats().objects, 1);
+    });
+}
+
 use crate::browser_computed::{SheetPart, StyleAvailability};
 
 fn part(text: &str) -> SheetPart {

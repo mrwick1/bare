@@ -13719,3 +13719,54 @@ Cost matrix (archMachine, base `37df5bd1`, 805 rows, `-j4`, minimum of 3 runs, g
 Checks: Linux `bare` lib 1648, `bare-js` lib 1047, `bare-js-api` 5 passed. Windows 11 VM: the two new tests pass.
 
 Not tested: the full `bare` and `bare-js` suites on Windows; the stress mode on Windows; live-site journeys and the staging journey (not allowed in this task); `bare-mcp` tests; the stress mode with the GUI window. Collection counts are a lower bound. The stress mode cannot find a missing edge in a path that no journey runs. Noticed, not changed: `btn.click()` gives an event whose `detail` is `undefined` (to verify against the HTML spec: a `MouseEvent` with `detail` 0).
+## 2026-11-19: CSSOM, frames and form cost rows (plan step S0.4)
+
+Changes: a new example `crates/bare/examples/cssom_load.rs` (cases `rules`, `sheets`, `adopted`, `computed`), a `frames` case in `navigation_load` and a `validity` case in `form_load`. `tools/js/cost_rows.txt` has 2 rows (scale 1 and 10) for each of the 6 cases, in their own block at the end. No engine or browser change. The designs `design-host-cssom.md`, `design-host-navigation.md` and `design-host-forms.md` ask for these rows as PR 1, because no old row reads rule lists, sheets, a frame window, `validity` or `labels`.
+
+Each case checks one sum that a model in Rust gives. A wrong expected sum fails each of the 3 files (tried, then reverted): `FAIL: rules: 21200 != 21300`, `validity: 11000 != 11001`, `frames: 63000 != 64000`.
+
+Base instruction counts (user mode, `perf stat -e instructions:u`, archMachine, release build of this tree, which has the engine of origin/main `37df5bd1`; 5 runs, `GLIBC_TUNABLES=glibc.malloc.tcache_count=65535`):
+
+| Row | min | max | spread |
+| --- | ---: | ---: | ---: |
+| `cssom_load rules 1` | 170,184,880 | 170,195,369 | 0.006% |
+| `cssom_load rules 10` | 1,586,493,585 | 1,586,668,498 | 0.011% |
+| `cssom_load sheets 1` | 109,964,030 | 109,973,486 | 0.009% |
+| `cssom_load sheets 10` | 1,013,088,236 | 1,013,164,243 | 0.008% |
+| `cssom_load adopted 1` | 98,454,790 | 98,456,514 | 0.002% |
+| `cssom_load adopted 10` | 899,911,712 | 899,914,183 | 0.000% |
+| `cssom_load computed 1` | 275,194,857 | 275,196,631 | 0.001% |
+| `cssom_load computed 10` | 2,656,084,503 | 2,656,091,630 | 0.000% |
+| `navigation_load frames 1` | 176,206,892 | 176,208,179 | 0.001% |
+| `navigation_load frames 10` | 1,695,131,087 | 1,695,134,456 | 0.000% |
+| `form_load validity 1` | 117,965,459 | 117,976,428 | 0.009% |
+| `form_load validity 10` | 1,144,454,526 | 1,144,774,659 | 0.028% |
+
+All spreads are under 0.25%. Scale 10 of each case runs in under 1 s.
+
+Cost matrix against the base build of `37df5bd1` (817 rows, 803 measured): mean change +0.004% (glibc). The 12 new rows and `parse_load deep 1`/`10` did not run on the base: the base has no such case, and `parse_load deep` overflows its stack on the base and on this tree. One row is over +0.5% under glibc only: `resources_load small 1` +1.967% and `10` +1.423% (jemalloc +0.021% and +0.001%). It is a loopback-server row and this PR changes none of its code. `preload_load style 10` was +0.528% under glibc in the first run only. No row is over +0.5% under both allocators.
+
+Checks: Linux `cargo test --locked -p bare --lib` with filters `cssom` (21 passed), `frame` (45), `controls` (13) and `validity` (1). Windows 11 VM: the 3 examples built with cargo xwin (release) and each new case ran at scale 1 with `checksum=ok`.
+
+Not tested: Windows at scale 10; the old `*_load` cases on Windows; callgrind profile of the new rows; Node/Chrome comparison of the checksums (they follow the HTML and CSSOM standards by hand, and the engine agreed).
+
+## 2026-11-19: computed style objects as owners (plan step S0.4, CSSOM)
+
+Changes: step 3 of `docs/design-host-cssom.md`, Option D. A `getComputedStyle` object is now the owner of its entries: `Owner::Computed(ObjId)` in `browser.rs`. `get_computed_style` takes a host key and calls `set_host_owner_obj`. `Host::trace(key)` visits the wrapper of the element (`browser_computed::trace_owner`). `Host::prune(dead)` drops the `objs` and `kinds` entries and frees the key (`drop_owner`). `browser_computed::trace` and `prune` and their two calls in the old hook are gone. `roots` stays (the prototype and `getComputedStyle`). The cap `computed-objects` stays (owner decision). Rule, sheet, media and declaration objects (step 4) and lazy accessors (step 5) are not in this PR.
+
+Tests (`browser_computed_tests.rs`): a dropped object is collected, its `objs` and `kinds` entries are freed and the key is taken again (the owner table does not grow in a second round); a held object survives two collections and reads live values after a style change; a held object keeps a detached element alive, and a reused key answers only for its new object. With `BARE_GC_STRESS=1` (PR #712, rebased on it) the filters `computed` (66 passed), `style` and `cssom` pass too.
+
+Cost matrix: base is `4724ff24` (origin/main `e37f02e0` plus the cssom_load rows of PR #713), built without this change; new is this change on it. archMachine, 3 runs for each row, minimum.
+
+| Row | base | new | change glibc | change jemalloc |
+| --- | ---: | ---: | ---: | ---: |
+| `cssom_load computed 1` | 274,910,129 | 276,250,694 | +0.488% | not run (glibc under +0.5%) |
+| `cssom_load computed 10` | 2,651,149,401 | 2,664,433,789 | +0.501% | +0.492% |
+| `style_load hidden 1` | 24,376,068 | 24,331,227 | -0.18% | |
+| `style_load hidden 10` | 153,558,249 | 153,490,452 | -0.04% | |
+
+`cssom_load computed` costs about 130 instructions more for each `getComputedStyle` call (key, owner list entry, trace and prune call at the collection). A first run was +0.60% (glibc) and +0.58% (jemalloc) on both rows. The fix skips the `kinds` remove when no pseudo-element object exists. `computed 10` is at the limit: +0.501% glibc, +0.492% jemalloc, so no row is over +0.5% under both. `style_load hidden` has no row in `cost_rows.txt`; the numbers above come from `perf stat -e instructions:u` of the examples, `hidden 1` with 3 runs of each (spread under 0.003%), `hidden 10` with 1 run. Full matrix (first run, before the fix above, 819 rows): mean -0.033% glibc; over under both allocators only the two `computed` rows; `resources_load small 1` over under one allocator (glibc noise). `parse_load deep 1`/`10` do not run: stack overflow on the base and on this tree, as in the previous entry. I did not repeat the full matrix after the fix.
+
+Checks: Linux `cargo test --locked -p bare --lib` filters `computed` (66 passed), `style` (96), `cssom` (21); `cargo test --locked -p bare-js-api -p bare-js -p bare --lib` all pass. Windows 11 VM (cargo xwin test binary): the same three filters, 66, 96 and 21 passed.
+
+Not tested: Windows with `BARE_GC_STRESS`; Windows cost; the full matrix after the fix; a callgrind split of the 130 instructions; the jemalloc count of `computed 1`.
