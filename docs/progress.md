@@ -13677,3 +13677,5 @@ Checks:
 - `cargo clippy -p bare-js -p bare-js-api --all-targets -- -D warnings` stops on `crates/os/src/pages.rs:19` (`manual_is_multiple_of`), which this change does not touch. Clippy on the changed crates was not checked past that point.
 
 Not done: a check of the exception for the 2 `gen_load delegate` rows; the sets of M1 (promise, microtask and iteration) and of the owners; the `CloneOps` sub-trait; `iter_close`; a measurement of the new methods in a calling browser path (none calls them).
+
+Owner decision (2026-11-19): exception granted for `gen_load delegate 1` and `gen_load delegate 10`. Nothing calls the new code; the extra instructions are in `deleg_step` and `iter_step` (hypothesis: code layout). Measure both rows again at the S0 gate, after M1 and the owners PR.
