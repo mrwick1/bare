@@ -13719,3 +13719,26 @@ Cost matrix (archMachine, base `37df5bd1`, 805 rows, `-j4`, minimum of 3 runs, g
 Checks: Linux `bare` lib 1648, `bare-js` lib 1047, `bare-js-api` 5 passed. Windows 11 VM: the two new tests pass.
 
 Not tested: the full `bare` and `bare-js` suites on Windows; the stress mode on Windows; live-site journeys and the staging journey (not allowed in this task); `bare-mcp` tests; the stress mode with the GUI window. Collection counts are a lower bound. The stress mode cannot find a missing edge in a path that no journey runs. Noticed, not changed: `btn.click()` gives an event whose `detail` is `undefined` (to verify against the HTML spec: a `MouseEvent` with `detail` 0).
+
+## 2026-11-19: promise and microtask interface (plan step S0.4, M1)
+
+PR M1 of `docs/design-host-microtasks.md` (option A, decided 2026-11-19). No browser change, and the engine calls none of the new hooks (that is M3).
+
+Changes:
+
+- `bare-js-api`: the `Engine` methods `new_promise`, `resolve_promise`, `reject_promise`, `promise_then`, `promise_react`, `promise_status`, `queue_microtask`, `checkpoint`, `drain_microtasks`, `pending_jobs`, `clear_failed_job`, `iter_open`, `iter_next` and `iter_fail`, with thin `Scope` wrappers. New types `PromiseState<'s>` and `Iter<'s>`, and the constant `MAX_PENDING_REJECTIONS` (1024). The `Host` hooks `report_exception`, `between_jobs` and `promise_rejections` take `Scope` and `Local`. They have default bodies.
+- Old engine (`eval_api.rs`): each method calls the `host_*` method of the same job, with one `Local` push for each result (`promise_status` pushes the value of a settled promise). The bound of the old engine, `eval_promise::MAX_PENDING_REJECTIONS`, was 1024 already; a test keeps both equal.
+- `Iter<'s>` keeps the old engine's fast paths. The design says it holds two locals (the iterator and its `next`). The old engine has no iterator object for an array, a string, a Map or a Set (`It`: `Plain`, `Coll`, `Generic`), so `Iter` has two locals and a position of three words (`state`). The locals are roots. The old engine keeps its source or owner there, and the new engine can leave `state` at zero. The host reads none of it.
+- Old engine behavior kept: `host_checkpoint` does nothing only when `depth` is not 1. A host function that a script calls at the top level of the script runs at depth 1, so its checkpoint runs the jobs. Inside a script function (depth 2 or more) it does nothing. The test uses the second case.
+
+Cost matrix (archMachine, base = origin/main `d5dac645` rebuilt, because main moved by #707 after the brief; new = this branch; 3 runs per row, minimum; `-j4`; 805 rows; jemalloc for rows over the limit under glibc): mean change glibc +0.022%. 14 rows are over +0.5% under both allocators; all are `bare-js` rows that call none of the new code: `gen_load delegate 1` +1.72% and `10` +1.94%, `gen_load iterobj 1` +0.76% and `10` +0.82%, `intl_load cmp_opts 1` +0.81% and `10` +0.83%, `intl_load locale 1` +1.27% and `10` +1.29%, `intl_load make 1` +0.97% and `10` +1.30%, `intl_load nf_locale_opts 1` +1.46% and `10` +1.49%, `iterator_load generic 10` +0.57%, `sc_load custom_iter 10` +0.84%. Two more rows are over under one allocator only (`iterator_load generic 1`, `sc_load custom_iter 1`). `parse_load deep 1` and `deep 10` fail to run on the base too.
+
+Cause: the codegen-unit split of `bare-js`, as in the earlier exceptions. With `RUSTFLAGS="-C codegen-units=1"` on both trees (`gen_load`, `intl_load`, `iterator_load` and `sc_load` examples, 16 rows, minimum of 3, glibc), every row is lower in the new tree: -0.04% to -0.16%. Example: `intl_load locale 1` 151,960,128 base and 151,760,554 new. A callgrind diff of `intl_load make 1` (16 units) shows the extra instructions spread over `get_prop_nat`, `intl_opt_for`, `HashMap::insert` and `intl::lookup`, with other inlining in each. Not fixed. The owner decides on a cost exception for these 14 rows.
+
+Checks:
+
+- New tests in `eval_api_tests`: a promise settles and a `promise_then` reaction runs on the drain (fulfilled and rejected, `promise_react` of a plain value, `Unsupported` for a value that is not a promise); `queue_microtask` runs once and `pending_jobs` counts it; a checkpoint inside a script function does nothing, and one from a host scope runs the queue; `iter_open` and `iter_next` over an array, a string, a Set, a generator and a script iterator; `iter_fail` calls `return`, runs the `finally` of a generator, keeps the thrown value, and keeps an abort with no script; a `Local` promise and its value survive the collections that an old host starts in `between_jobs` during `drain_microtasks`; the two bounds are equal. New test in `bare-js-api`: a host with no hooks gets the default bodies.
+- Linux: `bare` lib 1647 passed, `bare-js` lib 1054 passed, `bare-js-api` 6 passed and 1 doc test (5 compile-fail doc tests pass).
+- Windows 11 VM: `bare-js-api` 6 passed; `bare-js` filter `api` 17 passed.
+
+Not tested: the hooks with a real call from the engine (M3); the wrapper cost in a browser row (nothing calls it); a full `bare` run on the Windows VM; wall time; `iter_next` over a Map (the `Coll` path is tested with a Set, and Map uses the same cursor code).
