@@ -14049,3 +14049,24 @@ Checks:
 Not tested: the hooks with a real call from the engine (M3); the wrapper cost in a browser row (nothing calls it); a full `bare` run on the Windows VM; wall time; `iter_next` over a Map (the `Coll` path is tested with a Set, and Map uses the same cursor code).
 
 Owner decision (2026-11-19): exception granted for the 12 other rows above, and a standing rule from now on. A row that is over +0.5% under both allocators passes when both trees, built with `RUSTFLAGS="-C codegen-units=1"`, show it within +0.5%. The cause is then the codegen-unit split, not new work. The PR records both numbers.
+
+## 2026-11-20: frames as owners (plan step S0.4, navigation)
+
+PR 4 of `docs/design-host-navigation.md`, option A for frames. A restart: an earlier agent built the change and was cut off. This entry covers the rebuild on origin/main `7203937a`.
+
+Changes:
+
+- #716 already moved the visit of `contexts[n]` and `docs[n]` into the wrapper trace (`browser_frames::trace_node`, called from `browser_sources::trace_node_edges`). No scan over all frames runs for a marked object any more. Nothing more was moved there.
+- New `Owner::Loc(ObjId)`. The `Location` object of a frame window gets a host key when `context` makes the window. It traces nothing. When the collector frees the object, `Host::prune` calls `browser_frames::prune_loc`, which removes its entry in `locs`. `frames::prune` no longer filters `locs` with a `retain`.
+- Not changed: `frames::prune` still runs `retain` over `contexts` and `docs`. To remove it, the window objects need an owner and a reverse map from the window to its two node keys. The design does not ask for this step.
+
+Tests (`browser_iframe_tests.rs`): an iframe window, its document and its `Location` live while only the element wrapper is held; a window that a script holds survives the removal of its iframe, with the same `Location`; the `Location` of a dead window leaves the owner table and `locs`, and the freed key is reused.
+
+Cost matrix (archMachine; base = origin/main `7203937a` built fresh, new = this branch; 3 runs per row, minimum; `-j4`; 819 rows): mean change glibc +0.002%, jemalloc +0.000%. Rows over +0.5% under one allocator: 0. Under both: 0. `navigation_load frames 1` 120,947,873 to 121,066,885 (+0.10%), `frames 10` 1,140,856,763 to 1,142,183,251 (+0.12%). No codegen-unit check was needed. `parse_load deep 1` and `deep 10` fail to run (stack overflow) on the base too; the same failure shows with `ulimit -s unlimited`.
+
+Checks:
+
+- Linux: `cargo check -p bare -p bare-js -p bare-js-api` exits 0. `cargo test --locked -p bare --lib` filtered `frame` 49 and `navigation` 89 passed, also with `BARE_GC_STRESS=1`. `cargo test --locked -p bare-js-api -p bare-js -p bare --lib` ran once: `bare` 1683, `bare-js` 1069, `bare-js-api` 6 passed.
+- Windows 11 VM: `frame` 49 and `navigation` 89 passed.
+
+Not tested: the crate tests of `bare-js-api` and `bare-js` on Windows; a collection with 100,000 marked objects and 50 iframes (the `frames` case has no such scale); wall time; structured clone and child pages (steps 5 and 6).
