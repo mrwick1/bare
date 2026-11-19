@@ -165,3 +165,42 @@ fn the_dom_caps_count_live_nodes_text_and_attributes() {
         assert!(r.is_err(), "40 documents that stay are over the caps");
     });
 }
+
+/// Stress mode of the collector (`Interp::set_gc_stress`, `BARE_GC_STRESS=1`): a collect runs at each safe point between tasks. Timers, listeners,
+/// a node list and a dataset map that the page keeps must give the same results as without it.
+#[test]
+fn a_page_gives_the_same_results_when_a_collect_runs_between_all_tasks() {
+    big(|| {
+        let run = |stress: bool| {
+            let mut b = browser();
+            b.it.set_gc_stress(false);
+            assert!(!b.collect_due(), "off: a small page is not due");
+            b.it.set_gc_stress(stress);
+            assert_eq!(b.collect_due(), stress);
+            js(
+                &mut b,
+                "var log = []; var list = document.querySelectorAll('#a *'); var d = document.getElementById('p').dataset; d.k = 'v0';
+                 var btn = document.createElement('button'); document.body.appendChild(btn);
+                 btn.addEventListener('click', function() { log.push('c' + d.k); });
+                 var n = 0; var id = setInterval(function() { d.k = 'v' + (++n); log.push('t' + n + list.length); if (n == 5) clearInterval(id); }, 10);
+                 setTimeout(function() { Promise.resolve(1).then(function() { log.push('p'); }); document.body.lastChild.click(); }, 25);
+                 btn = null;",
+            );
+            let before = b.it.heap.stats().collections;
+            for _ in 0..80 {
+                b.advance_time(1.0, 50).expect("advance");
+                if b.collect_due() {
+                    b.collect(&[]).expect("collect");
+                }
+            }
+            let collections = b.it.heap.stats().collections - before;
+            let out = js(&mut b, "log.join() + ';' + d.k + ',' + list.length + ',' + document.getElementById('p').dataset.k");
+            (out, collections)
+        };
+        let (plain, n0) = run(false);
+        let (stress, n1) = run(true);
+        assert_eq!(plain, "t12,t22,cv2,p,t32,t42,t52;v5,2,v5");
+        assert_eq!(stress, plain);
+        assert!(n0 == 0 && n1 >= 50, "collections: {n0} without stress, {n1} with it");
+    });
+}

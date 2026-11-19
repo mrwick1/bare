@@ -284,6 +284,39 @@ fn task_alloc_max_is_the_largest_heap_growth_between_two_safe_points() {
     });
 }
 
+/// Stress mode: `gc_due` is true at each safe point, and only there: a call in progress still says no. Live values survive the collects.
+#[test]
+fn gc_stress_is_due_at_every_safe_point_and_live_values_survive() {
+    big(|| {
+        let src = "var keep = { list: [1, 2, 3], s: 'kept' }; function mk(i) { return { i: i, t: [i, i + 1] }; } function inside() { return 1; }";
+        let prog = parse_script(src, Limits::default()).unwrap();
+        let mut it = setup(&prog, EvalLimits { max_steps: u64::MAX / 2, ..Default::default() });
+        it.run().unwrap();
+        it.set_gc_stress(false);
+        assert!(!it.gc_due(), "off: a small heap is not due");
+        it.set_gc_stress(true);
+        let mk = global_get(&mut it, "mk");
+        for i in 0..20 {
+            assert!(it.gc_due(), "round {i}: due at a safe point");
+            let before = it.heap.stats().collections;
+            it.collect(&[]).unwrap();
+            assert_eq!(it.heap.stats().collections, before + 1, "round {i}: the collect ran");
+            let r = it.call(mk, Value::Undefined, &[Value::Number(i as f64)]).unwrap();
+            let Value::Object(o) = r else { panic!() };
+            let k = it.heap.key_from_str("i").unwrap();
+            assert!(matches!(it.heap.get(o, k), Ok(Get::Value(Value::Number(n))) if n == i as f64));
+        }
+        let keep = global_get(&mut it, "keep");
+        let Value::Object(k) = keep else { panic!("keep was freed") };
+        let lk = it.heap.key_from_str("list").unwrap();
+        let Ok(Get::Value(Value::Object(l))) = it.heap.get(k, lk) else { panic!("keep.list was freed") };
+        assert!(matches!(it.heap.get(l, PropertyKey::Index(2)), Ok(Get::Value(Value::Number(n))) if n == 3.0));
+        it.set_gc_stress(false);
+        it.collect(&[]).unwrap();
+        assert!(!it.gc_due(), "off again");
+    });
+}
+
 /// Native memory that only a collect can release (the nodes of a parsed document) also asks for a collect: 4 MiB since the last one, or a
 /// fourth of the native bytes that were live after it. The collect resets the count.
 #[test]
