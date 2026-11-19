@@ -340,6 +340,8 @@ pub(crate) enum Owner {
     Iter(ObjId),
     /// The `Location` of a frame window (`browser_frames.rs`).
     Loc(ObjId),
+    /// A fetch object (`Headers`, `Request`, `Response`, a body stream, a reader or a headers iterator), with an entry in `browser_fetch.rs`.
+    Fetch(ObjId),
 }
 
 impl Owner {
@@ -348,7 +350,7 @@ impl Owner {
         match self {
             Owner::Target(t) => Some(t),
             Owner::Xhr(o) | Owner::Abort(o) => Some(Target::Obj(o)),
-            Owner::Event(_) | Owner::Ctl(_) | Owner::Computed(_) | Owner::Source(_) | Owner::Reserved | Owner::Url(_) | Owner::Params(_) | Owner::Iter(_) | Owner::Loc(_) => None,
+            Owner::Event(_) | Owner::Ctl(_) | Owner::Computed(_) | Owner::Source(_) | Owner::Reserved | Owner::Url(_) | Owner::Params(_) | Owner::Iter(_) | Owner::Loc(_) | Owner::Fetch(_) => None,
         }
     }
 }
@@ -873,6 +875,7 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
             }
             Some(Owner::Ctl(o)) => crate::browser_abort::trace_ctl(self, o, t),
             Some(Owner::Source(o)) => crate::browser_sources::trace(self, key, o, t),
+            Some(Owner::Fetch(o)) => crate::browser_fetch::trace(self, o, t),
             Some(Owner::Event(o)) => {
                 let Some(e) = st.events.get(&o) else { return };
                 for v in [&e.target, &e.current, &e.detail, &e.related] {
@@ -903,6 +906,7 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
             match st.owners.get(k) {
                 Some(Owner::Xhr(o)) => crate::browser_xhr::forget(self, o),
                 Some(Owner::Event(o)) => crate::browser_xhr::forget_event(self, o),
+                Some(Owner::Fetch(o)) => crate::browser_fetch::forget(self, o),
                 _ => {}
             }
             if let Some(Owner::Target(t @ Target::Node(n))) = st.owners.get(k)
@@ -1041,7 +1045,6 @@ impl Host for Dom {
         if self.web.active.get() {
             crate::browser_web::trace(self, owner, out);
         }
-        self.fetch.trace(owner, out);
         self.streams.trace(owner, out);
     }
 
@@ -1071,7 +1074,6 @@ impl Host for Dom {
         drop(guard);
         self.sched_prune(live);
         self.idle_prune(live);
-        self.fetch.prune(live);
         self.streams.prune(live);
         crate::browser_worker::prune(self, live);
         self.reclaim_wanted();
