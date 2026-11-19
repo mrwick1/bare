@@ -906,31 +906,23 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
             match st.owners.get(k) {
                 Some(Owner::Xhr(o)) => crate::browser_xhr::forget(self, o),
                 Some(Owner::Event(o)) => crate::browser_xhr::forget_event(self, o),
+                Some(Owner::Target(t @ Target::Node(n))) => {
+                    if let Some(w) = st.by_node.remove(&n) {
+                        if let Value::Object(o) = *w.raw() {
+                            st.by_obj.remove(&o);
+                        }
+                        if !st.listeners.is_empty()
+                            && let Some(l) = st.listeners.remove(&t)
+                        {
+                            st.n_listeners -= l.len();
+                        }
+                    }
+                }
+                Some(Owner::Computed(o)) => crate::browser_computed::drop_owner(self, o),
+                Some(Owner::Source(o)) => crate::browser_sources::prune(self, k, o),
+                Some(w @ (Owner::Url(_) | Owner::Params(_) | Owner::Iter(_))) => crate::browser_navigation::prune_owner(self, w),
+                Some(Owner::Loc(o)) => crate::browser_frames::prune_loc(self, o),
                 _ => {}
-            }
-            if let Some(Owner::Target(t @ Target::Node(n))) = st.owners.get(k)
-                && let Some(w) = st.by_node.remove(&n)
-            {
-                if let Value::Object(o) = *w.raw() {
-                    st.by_obj.remove(&o);
-                }
-                if !st.listeners.is_empty()
-                    && let Some(l) = st.listeners.remove(&t)
-                {
-                    st.n_listeners -= l.len();
-                }
-            }
-            if let Some(Owner::Computed(o)) = st.owners.get(k) {
-                crate::browser_computed::drop_owner(self, o);
-            }
-            if let Some(Owner::Source(o)) = st.owners.get(k) {
-                crate::browser_sources::prune(self, k, o);
-            }
-            if let Some(w @ (Owner::Url(_) | Owner::Params(_) | Owner::Iter(_))) = st.owners.get(k) {
-                crate::browser_navigation::prune_owner(self, w);
-            }
-            if let Some(Owner::Loc(o)) = st.owners.get(k) {
-                crate::browser_frames::prune_loc(self, o);
             }
             st.owners.release(k);
         }
