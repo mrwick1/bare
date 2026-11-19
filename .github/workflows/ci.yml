@@ -5,6 +5,10 @@ on:
     branches: [main]
 permissions:
   contents: read
+# A new push to a PR cancels the run of its older commit. Runs on main all finish.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   # Branch protection on main requires these jobs. Automatic fix runs merge
   # their own PRs, so these checks are the gate for every merge.
