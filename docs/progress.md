@@ -14102,3 +14102,23 @@ Checks:
 - Windows 11 VM: `frame` 49 and `navigation` 89 passed.
 
 Not tested: the crate tests of `bare-js-api` and `bare-js` on Windows; a collection with 100,000 marked objects and 50 iframes (the `frames` case has no such scale); wall time; structured clone and child pages (steps 5 and 6).
+## 2026-11-19: module interface (plan step S0.4, MD1)
+
+PR MD1 of `docs/design-host-modules.md` (option A, decided 2026-11-19), plan step 2. No browser change. The loader (MD2) is not in this PR.
+
+Changes:
+
+- `bare-js-api`: the `Engine` methods `module_parse`, `module_requests`, `module_set_requested`, `module_url`, `module_link`, `module_evaluate`, `take_dynamic_imports`, `finish_dynamic_import`, `reject_dynamic_import` and `fail_dynamic_import`, with thin `Scope` wrappers. New type `ImportRequest { promise: Persistent, specifier, referrer }`. Module ids stay `u32`. The three `*_dynamic_import` methods that settle take the promise as `&Persistent`; `reject_dynamic_import` takes the reason as a `Local`.
+- Old engine (`eval_api.rs`): each method calls the `module_*` or `*_dynamic_import` method of the same name. `module_evaluate` pushes the promise as a `Local`. `take_dynamic_imports` makes one `Persistent` for each request, so the host holds the root that the engine gave up at the take. The three settle methods read the `ObjId` from the `Persistent`.
+- The old methods have the semantics that the design lists. There is no difference to report.
+- The toy engine of `bare-js-api` answers `Abort::Unsupported` for the methods that run code, and nothing for the others.
+
+Cost matrix (archMachine, base = #720 head `f46b98c5` built fresh into `/data/bare-tmp/s0/base-md1`, new = this branch; 3 runs per row, minimum; `-j4`; 807 rows; jemalloc for rows over the limit under glibc): mean change glibc -0.001%. 0 rows are over +0.5% under both allocators, so the codegen-unit check was not needed. One row is over under glibc only, a known noise row: `resources_load small 1` +0.739% glibc, +0.140% jemalloc. `loader_load modules 1`: 12,325,762 base, 12,324,343 new. `loader_load modules 10`: 29,402,513 base, 29,388,556 new. `parse_load deep 1` and `deep 10` fail to run (stack overflow) on both trees. They fail the same way on the older 37df5bd1 build, so the cause is not this change. Not fixed.
+
+Checks:
+
+- New tests in `eval_api_tests`, all written against the interface: parse, link and evaluate a graph, and a second `module_evaluate` call; a cycle; a top-level `await` (pending, then settled by the drain); a syntax error, a bad import name and an error in a module; an `import()` that is taken, finished, rejected with a parse error, failed with a `TypeError`, and finished with a module that throws; the referrer of an `import()` inside a module; a `Persistent` promise that survives two collections between take and finish (and the table does not grow after the handles drop).
+- Linux: `bare` lib 1649 passed (6 ignored), `bare-js` lib 1075 passed (1 ignored), `bare-js-api` 6 passed and 1 doc test. `bare-js` `api` 37 and `module` 34 also pass with `BARE_GC_STRESS=1` (`api`).
+- Windows 11 VM: `bare-js-api` 6 passed; `bare-js` filter `api` 37 passed and `module` 34 passed.
+
+Not tested: a browser use of the methods (MD2 changes the loader); a collection that runs inside `module_link` or `module_evaluate` (the old engine collects only between tasks); a full `bare` run on the Windows VM; wall time.
