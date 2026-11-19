@@ -93,7 +93,7 @@ use bare_html::dom::{Document, NodeData, NodeId, Ns};
 use bare_js::eval::{Error, EvalLimits, Host, Interp, LimitKind};
 use bare_js::heap::{Heap, HeapLimits, PropertyDescriptor};
 use bare_js::value::{ObjId, PropertyKey, Value};
-use std::cell::{OnceCell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::hash::{BuildHasherDefault, Hasher};
 use std::rc::Rc;
@@ -317,7 +317,8 @@ impl Default for BrowserLimits {
 /// Bytes of selector text that `Dom::selectors` keeps parsed. A parsed selector is up to about 50 times its text.
 pub(crate) const SEL_CACHE_BYTES: usize = 128 << 10;
 
-/// What keeps traced values for a host key: the listeners of a target, or the state of an event object.
+/// What keeps traced values for a host key: the listeners of a target, the state of an event object, or a host-filled object
+/// (`browser_sources.rs`).
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Owner {
     Target(Target),
@@ -330,6 +331,9 @@ pub(crate) enum Owner {
     Abort(ObjId),
     /// An `AbortController`, with an entry in `browser_abort.rs`.
     Ctl(ObjId),
+    /// A host-filled object. Its kind is in the low bits of its key. `Reserved` is the entry between the key and the object.
+    Source(ObjId),
+    Reserved,
 }
 
 impl Owner {
@@ -338,22 +342,26 @@ impl Owner {
         match self {
             Owner::Target(t) => Some(t),
             Owner::Xhr(o) | Owner::Abort(o) => Some(Target::Obj(o)),
-            Owner::Event(_) | Owner::Ctl(_) | Owner::Computed(_) => None,
+            Owner::Event(_) | Owner::Ctl(_) | Owner::Computed(_) | Owner::Source(_) | Owner::Reserved => None,
         }
     }
 }
 
-/// The owners of traced values, by host key (`docs/design-host-tracing.md`). A free key holds `None`.
+/// The owners of traced values, by host key (`docs/design-host-tracing.md`). A key is a slot index above `KIND_BITS` bits. The low bits
+/// are the kind of a host-filled object (`browser_sources::Source`), and 0 for any other owner. A free slot holds `None`.
 #[derive(Default)]
 pub(crate) struct Owners {
     pub slots: Vec<Option<Owner>>,
     free: Vec<u32>,
 }
 
+/// The bits of a host key below the slot index: the kind of a host-filled object.
+pub(crate) const KIND_BITS: u32 = 4;
+
 impl Owners {
-    /// A free host key for `o`.
+    /// A free host key for `o`, with kind 0.
     pub(crate) fn key(&mut self, o: Owner) -> u32 {
-        match self.free.pop() {
+        let slot = match self.free.pop() {
             Some(k) => {
                 self.slots[k as usize] = Some(o);
                 k
@@ -362,10 +370,23 @@ impl Owners {
                 self.slots.push(Some(o));
                 self.slots.len() as u32 - 1
             }
-        }
+        };
+        slot << KIND_BITS
     }
 
-    pub(crate) fn release(&mut self, k: u32) {
+    /// The owner of `key`.
+    #[inline]
+    pub(crate) fn get(&self, key: u32) -> Option<Owner> {
+        self.slots.get((key >> KIND_BITS) as usize).copied().flatten()
+    }
+
+    /// Set the owner of a key that is in use.
+    pub(crate) fn set(&mut self, key: u32, o: Owner) {
+        self.slots[(key >> KIND_BITS) as usize] = Some(o);
+    }
+
+    pub(crate) fn release(&mut self, key: u32) {
+        let k = key >> KIND_BITS;
         self.slots[k as usize] = None;
         self.free.push(k);
     }
@@ -384,7 +405,7 @@ impl Dom {
     /// wrapper has listeners that hold the global object until a wrapper exists (`browser_handlers.rs`).
     #[inline]
     pub(crate) fn own(&self, owners: &mut Owners, it: &mut Interp<'_>, t: Target, l: &mut Listeners) {
-        if l.key != NO_KEY && matches!(owners.slots.get(l.key as usize), Some(Some(x)) if x.target() == Some(t)) {
+        if l.key != NO_KEY && matches!(owners.get(l.key), Some(x) if x.target() == Some(t)) {
             return;
         }
         // The object whose life the listeners follow: the global object or the target object.
@@ -694,6 +715,10 @@ pub struct Dom {
     pub(crate) global: OnceCell<ObjId>,
     selector_scope: Rc<std::cell::Cell<Option<NodeId>>>,
     pub(crate) doc_wrapper: OnceCell<ObjId>,
+    /// Some element has an object that its wrapper must keep (`browser_sources::trace_node`), or some frame has a window. It starts
+    /// `false` and is never reset, so the trace of a wrapper of a page without such objects tests one flag. Set it where such an
+    /// object is stored: `Dom::new_source`, the `Attr` tables and the frame tables.
+    pub(crate) wrapper_edges: Cell<bool>,
     /// `(handler, needs new)` for each host function id.
     pub(crate) handlers: RefCell<Vec<(H, bool)>>,
     /// Prototypes and interface objects: permanent roots.
@@ -806,7 +831,7 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
 
     fn trace(&self, key: u32, t: &mut bare_js_api::Tracer<'_, Value>) {
         let st = self.st.borrow();
-        let owner = st.owners.slots.get(key as usize).copied().flatten();
+        let owner = st.owners.get(key);
         match owner {
             Some(owner @ (Owner::Target(_) | Owner::Xhr(_) | Owner::Abort(_))) => {
                 let Some(tg) = owner.target() else { return };
@@ -830,6 +855,9 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
                             t.visit(w);
                         }
                     }
+                    drop(doc);
+                    // And the host-filled objects of its node (`dataset`, `style`, `classList`, `attributes`, a frame's window).
+                    crate::browser_sources::trace_node(self, n, t);
                 }
                 match owner {
                     Owner::Xhr(o) => crate::browser_xhr::trace(self, o, t),
@@ -838,6 +866,7 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
                 }
             }
             Some(Owner::Ctl(o)) => crate::browser_abort::trace_ctl(self, o, t),
+            Some(Owner::Source(o)) => crate::browser_sources::trace(self, key, o, t),
             Some(Owner::Event(o)) => {
                 let Some(e) = st.events.get(&o) else { return };
                 for v in [&e.target, &e.current, &e.detail, &e.related] {
@@ -853,7 +882,7 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
                 }
             }
             Some(Owner::Computed(o)) => crate::browser_computed::trace_owner(self, &st, o, t),
-            None => {}
+            Some(Owner::Reserved) | None => {}
         }
     }
 
@@ -861,14 +890,15 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
         let mut guard = self.st.borrow_mut();
         let st = &mut *guard;
         let n = st.by_node.len();
+        let datasets = crate::browser_dataset::count(self);
         for &k in dead {
             // A dead wrapper takes its identity entries and the listeners of its node. Other targets lost theirs in the old host's prune.
-            match st.owners.slots[k as usize] {
+            match st.owners.get(k) {
                 Some(Owner::Xhr(o)) => crate::browser_xhr::forget(self, o),
                 Some(Owner::Event(o)) => crate::browser_xhr::forget_event(self, o),
                 _ => {}
             }
-            if let Some(Owner::Target(t @ Target::Node(n))) = st.owners.slots[k as usize]
+            if let Some(Owner::Target(t @ Target::Node(n))) = st.owners.get(k)
                 && let Some(w) = st.by_node.remove(&n)
             {
                 if let Value::Object(o) = *w.raw() {
@@ -880,8 +910,11 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
                     st.n_listeners -= l.len();
                 }
             }
-            if let Some(Owner::Computed(o)) = st.owners.slots[k as usize] {
+            if let Some(Owner::Computed(o)) = st.owners.get(k) {
                 crate::browser_computed::drop_owner(self, o);
+            }
+            if let Some(Owner::Source(o)) = st.owners.get(k) {
+                crate::browser_sources::prune(self, k, o);
             }
             st.owners.release(k);
         }
@@ -890,6 +923,7 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
         }
         // After the keys are released, and after the old host's prune of the listener table.
         crate::browser_abort::prune(self, st);
+        crate::browser_dataset::compact(self, datasets);
     }
 
     #[inline]
@@ -986,11 +1020,9 @@ impl Host for Dom {
     }
 
     fn trace(&self, owner: ObjId, out: &mut Vec<Value>) {
-        if self.frames.active() { crate::browser_frames::trace(self, owner, out); }
         self.sched_trace(owner, out);
         crate::browser_navigation::trace(self, owner, out);
         crate::browser_platform::trace(self, owner, out);
-        crate::browser_style::trace(self, owner, out);
         crate::browser_cssom::trace(self, owner, out);
         self.resize_trace(owner, out);
         self.mo_trace(owner, out);
@@ -998,8 +1030,6 @@ impl Host for Dom {
         self.walk_trace(owner, out);
         self.range_trace(owner, out);
         at::trace(self, owner, out);
-        crate::browser_nodelist::trace(self, owner, out);
-        crate::browser_dataset::trace(self, owner, out);
         if self.web.active.get() {
             crate::browser_web::trace(self, owner, out);
         }
@@ -1012,7 +1042,6 @@ impl Host for Dom {
         crate::browser_frames::prune(self, live);
         crate::browser_platform::prune(self, live);
         crate::browser_geom::prune(self, live);
-        crate::browser_style::prune(self, live);
         crate::browser_cssom::prune(self, live);
         self.resize_prune(live);
         self.mo_prune(live);
@@ -1020,9 +1049,7 @@ impl Host for Dom {
         self.walk_prune(live);
         self.range_prune(live);
         at::prune(self, live);
-        crate::browser_nodelist::prune(self, live);
         crate::browser_select::prune(self, live);
-        crate::browser_dataset::prune(self, live);
         crate::browser_web::prune(self, live);
         crate::browser_controls::prune(self, live);
         let mut guard = self.st.borrow_mut();
@@ -1957,6 +1984,7 @@ impl Browser {
             global: OnceCell::new(),
             selector_scope: Default::default(),
             doc_wrapper: OnceCell::new(),
+            wrapper_edges: Cell::new(false),
             handlers: RefCell::default(),
             fixed: RefCell::default(),
             start: Instant::now(),

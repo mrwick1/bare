@@ -96,7 +96,7 @@ pub(crate) fn trace_ctl(d: &Dom, owner: ObjId, t: &mut bare_js_api::Tracer<'_, V
 /// listener that is gone.
 pub(crate) fn prune(d: &Dom, st: &State) {
     let mut t = d.abort.s.borrow_mut();
-    let alive = |k: u32| st.owners.slots.get(k as usize).is_some_and(|s| s.is_some());
+    let alive = |k: u32| st.owners.get(k).is_some();
     t.ctls.retain(|_, (k, _)| alive(*k));
     t.sigs.retain(|_, s| {
         if !alive(s.key) {
@@ -220,7 +220,7 @@ impl Dom {
             };
             let st = self.st.borrow();
             for dep in deps {
-                if let Some(Some(Owner::Abort(dep))) = st.owners.slots.get(dep as usize).copied()
+                if let Some(Owner::Abort(dep)) = st.owners.get(dep)
                     && let Some(s) = t.sigs.get_mut(&dep)
                     && !s.aborted
                 {
@@ -351,7 +351,7 @@ impl Dom {
         let st = self.st.borrow();
         let key = t.sigs[&result].key;
         for &src in &sources {
-            let Some(Owner::Abort(o)) = st.owners.slots[src as usize] else { unreachable!("a source is a signal") };
+            let Some(Owner::Abort(o)) = st.owners.get(src) else { unreachable!("a source is a signal") };
             t.sigs.get_mut(&o).expect("source is a signal").deps.push(key);
         }
         let s = t.sigs.get_mut(&result).expect("just made");

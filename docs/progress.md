@@ -13825,3 +13825,49 @@ Checks:
 - After the rebase on `origin/main` (with `BARE_GC_STRESS`, #712): `cargo check` and the three filters pass; the three filters pass with `BARE_GC_STRESS=1` (16, 19, 93). The cost matrix and the VM run are from before the rebase.
 
 Not tested: the whole `bare` lib with `BARE_GC_STRESS=1`; a collection inside a task (S1.6); the `bare` suite on the VM (only the three filters); wall time; scale 100 of the abort row. The old order rule "call after the listener table is pruned" still holds by call order (`Interp::collect` calls the old prune first); no test pins the order. Not changed, noticed: `Dom::event_object` checks `xhr.s.objs.len() >= MAX_OBJECTS` but not the upload entries.
+## 2026-11-19: host-filled objects as owners for tracing (plan step S0.4, host-filled properties step 3)
+
+Step 3 of `docs/design-lazy-properties.md` (see "Build of the second PR" there). Node lists, token lists, style declarations, attribute maps, CSS rule lists and dataset maps are owners now. The collector calls `Host::trace(key)` only for them, and `Host::prune(dead)` drops their entries.
+
+Changes:
+
+- The host key has two parts: the kind (`browser_sources::Source`) in the low `KIND_BITS` (4) bits and a slot of `Owners` above them. Other owners (wrappers, listeners, events) have kind 0. `Dom::new_source` reserves the slot, makes the object with the key, and registers the owner (`Owner::Source(ObjId)`).
+- `Host::trace` and `Host::prune` of the interface call one subsystem by the kind in the key. The subsystem finds its state by the object, as before. The `retain` over the tables of these kinds is gone.
+- The wrapper owner traces the edges from an element to its host-filled objects (`browser_sources::trace_node`: dataset, style, token lists, attribute map, `Attr` objects, a frame's window and document). A frame's edge is one lookup by node, not a scan of all frames. The call is behind one flag (`Dom::wrapper_edges`): it is set where such an object is stored (`new_source`, the `Attr` tables, the frame tables) and never reset.
+- The old hook lost the calls of `browser_nodelist`, `browser_dataset`, `browser_style` and `browser_frames`. `browser_platform`, `at::` and `browser_cssom` keep what is not host-filled (token list iterators, `Attr` objects, rules, sheets, style rules, media lists).
+- Captions, storage and the frame names are not owners: the page roots them and they hold no entry that a collection frees.
+- `Owners::key` gives `slot << KIND_BITS`. `Owners::get`, `set` and `release` take the key.
+
+Versions (cost matrix, glibc, instructions of `range_load iter 10`, a row with 10,000 wrappers and many collections; base = origin/main `d5dac645`):
+
+| Version | `range_load iter 10` |
+| --- | ---: |
+| `trace_node` asks each subsystem for each wrapper (no early return) | +0.795% (first matrix, against `37df5bd1`) |
+| An early return in each subsystem | +1.09% (against `d5dac645`; the row was +0.26% against `37df5bd1`) |
+| One flag for all (kept) | -6.41% |
+
+Callgrind of the second version showed `trace_node` at about 166 instructions per wrapper (frames 47, `at::` 30, the rest 42 and the inlined subsystems). The old hook paid about the same for each marked object, so the sum was not smaller. With the flag a wrapper of a page without such objects pays one load. A test (`a_wrapper_alone_keeps_its_attr_object_and_its_frame_window`) fails when the `Attr` or frame flag is not set.
+
+Cost matrix (archMachine, base = origin/main `d5dac645` built in `/data/bare-tmp/s0/host-owners-base-target`, `tools/js/cost_matrix.sh -j4`, 3 runs per row, 805 rows): no row over +0.5% under any allocator. Mean change -0.173% (glibc). 2 rows do not run on either tree (`parse_load deep 1` and `deep 10`, the known stack size issue). Jemalloc ran on no row (none was over under glibc).
+
+| Row (glibc, instructions) | Base | New | Change |
+| --- | ---: | ---: | ---: |
+| `browser_load mutation 1` | 70,566,963 | 68,993,834 | -2.23% |
+| `browser_load mutation 10` | 684,875,738 | 666,198,346 | -2.73% |
+| `browser_load lookup 1` | 92,482,220 | 91,812,056 | -0.72% |
+| `range_load iter 10` | 728,552,695 | 681,870,723 | -6.41% |
+| `attr_load react 1` | 220,834,768 | 220,829,177 | -0.00% |
+| `select_load churn 1000` | 338,721,842 | 336,894,428 | -0.54% |
+| `dataset_load keys 10000 1` | 117,279,828 | 117,135,290 | -0.12% |
+| `dataset_load read 10000 1` | 82,160,114 | 82,002,965 | -0.19% |
+| `dataset_load read 1000 1` | 17,127,909 | 17,045,106 | -0.48% |
+
+The two dataset exception rows are below the base now. The `exotics` lookup for the key stays: the engine's owner list has no index by object. The base here is the first PR, so the numbers do not show the sum of both PRs. `attr_load react 1` does not gain: the plan expected about 0.8% from the probe chains, and the first PR already took them.
+
+Checks:
+
+- New tests (`browser_tests`): a list collected while its element lives frees its key; a key reused after a collection answers for the new object only; a detached node list with an expando is collected, and a live one keeps its expando; the wrapper of an element keeps its token list, style, attribute map and dataset with their expandos, and the owners go when the wrapper goes; a wrapper alone keeps its `Attr` object and its frame window. The test "host-filled objects take no owner slot" of the first PR became "are owners": it asserts the reverse.
+- Linux: `bare` lib 1652 passed; `bare-js` lib 1047 passed; `bare-js-api` 5 passed.
+- Windows 11 VM: `bare` filters `browser_ nodelist attr dataset cssom style frames media storage`: 1586 passed, 3 failed (the two `browser_session` fixture-path tests and the `Asia/Kolkata` time zone test, `browser_date_tests::local_time_uses_the_zone_of_the_realm_in_the_browser`). `bare-js-api` 5 passed. `bare-js` (not changed by this PR): 1039 passed, 8 failed. Three read fixture folders by the Linux path (`golden_disassembly`, `corpus_status_matches_acorn`, `parser_corpus_never_panics_or_faults`), and five need the system time zone table (`date_tests` 2, `intl_tests` 3: `Asia/Kolkata`, `Asia/Kathmandu`). Not fixed.
+
+Not tested: the staging journey A/B; peak memory (RSS) of these objects; a run of the cost matrix under jemalloc on every row (`-J`); the sum of both PRs against `52613c99`; a rebase onto main after `d5dac645` (`be110f78` and later) with a new matrix.
