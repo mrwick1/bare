@@ -10,7 +10,7 @@
 //! - Abort algorithms are `Remove` (the `{ signal }` option of `addEventListener`: the listener is removed) and `Fetch` (a request
 //!   still queued is rejected with the reason). A request that already runs its blocking I/O cannot be interrupted.
 //! - `AbortSignal.timeout(ms)` queues a `Task::AbortTimeout` on the scheduler. A queued task roots its signal, so a timeout signal
-//!   that nobody references still fires. `AbortSignal.any` keeps the dependents and sources as weak lists, as the standard says.
+//!   that nobody references still fires. `AbortSignal.any` keeps the dependents and sources as weak lists of host keys, as the standard says. A signal and a controller are owners (`Owner::Abort`, `Owner::Ctl`): their edges are `Traced`, and `prune` drops the entries of dead keys.
 //! - The globals are accessors until the first read (`lazy`), so a realm that never reads them pays for two functions.
 //! - Gates: a response body that is being read is not aborted (bodies are buffered). `request.signal` is a new signal that follows `init.signal`.
 
@@ -30,31 +30,34 @@ fn arg(a: &[Value], i: usize) -> Value {
 pub(crate) enum Algo {
     /// Remove the listener `(target, id)`.
     Remove(Target, u64),
-    /// Reject the fetch promise if its request is still queued.
-    Fetch(Value),
+    /// Reject the fetch promise if its request is still queued. The signal holds the promise: it is an edge of the signal.
+    Fetch(bare_js_api::Traced<Value>),
 }
 
 pub(crate) struct Sig {
     aborted: bool,
-    reason: Value,
+    reason: bare_js_api::Traced<Value>,
     dependent: bool,
-    /// Weak: the non-dependent signals that a dependent signal follows.
-    sources: Vec<ObjId>,
-    /// Weak: the dependent signals of a source.
-    deps: Vec<ObjId>,
+    /// The host key of the owner (`Owner::Abort`).
+    key: u32,
+    /// Weak, by host key: the non-dependent signals that a dependent signal follows.
+    sources: Vec<u32>,
+    /// Weak, by host key: the dependent signals of a source.
+    deps: Vec<u32>,
     algos: Vec<Algo>,
 }
 
 impl Sig {
-    fn new() -> Self {
-        Sig { aborted: false, reason: Value::Undefined, dependent: false, sources: Vec::new(), deps: Vec::new(), algos: Vec::new() }
+    fn new(it: &Interp<'_>, key: u32) -> Self {
+        Sig { aborted: false, reason: it.trace_value(Value::Undefined), dependent: false, key, sources: Vec::new(), deps: Vec::new(), algos: Vec::new() }
     }
 }
 
 #[derive(Default)]
 pub(crate) struct Tables {
     pub(crate) sigs: IdMap<ObjId, Sig>,
-    ctls: IdMap<ObjId, ObjId>,
+    /// A controller: its host key (`Owner::Ctl`) and its signal (an edge of the controller).
+    ctls: IdMap<ObjId, (u32, bare_js_api::Traced<Value>)>,
 }
 
 #[derive(Default)]
@@ -69,38 +72,61 @@ pub(crate) struct AbortHost {
 
 // ------------------------------------------------------------------------------------ GC hooks
 
-pub(crate) fn trace(d: &Dom, owner: ObjId, out: &mut Vec<Value>) {
-    let t = d.abort.s.borrow();
-    if let Some(s) = t.sigs.get(&owner) {
-        out.push(s.reason);
-        out.extend(s.algos.iter().filter_map(|a| if let Algo::Fetch(p) = a { Some(*p) } else { None }));
-    } else if let Some(&s) = t.ctls.get(&owner) {
-        out.push(Value::Object(s));
+/// The references of the owner `Owner::Abort(owner)`, a signal.
+pub(crate) fn trace(d: &Dom, owner: ObjId, t: &mut bare_js_api::Tracer<'_, Value>) {
+    if let Some(s) = d.abort.s.borrow().sigs.get(&owner) {
+        t.visit(&s.reason);
+        for a in &s.algos {
+            if let Algo::Fetch(p) = a {
+                t.visit(p);
+            }
+        }
     }
 }
 
-/// Call after the listener table is pruned: an algorithm of a listener that is gone is dropped.
-pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
-    let mut t = d.abort.s.borrow_mut();
-    if t.sigs.is_empty() && t.ctls.is_empty() {
-        return;
+/// The references of the owner `Owner::Ctl(owner)`, a controller.
+pub(crate) fn trace_ctl(d: &Dom, owner: ObjId, t: &mut bare_js_api::Tracer<'_, Value>) {
+    if let Some((_, s)) = d.abort.s.borrow().ctls.get(&owner) {
+        t.visit(s);
     }
-    t.sigs.retain(|&o, _| live(o));
-    t.ctls.retain(|&o, _| live(o));
-    let st = d.st.borrow();
-    for s in t.sigs.values_mut() {
-        s.sources.retain(|&o| live(o));
-        s.deps.retain(|&o| live(o));
+}
+
+/// Call after the dead keys are released, and after the old host's prune of the listener table. One pass over the signals: the
+/// entries of dead owners go (their key is free), a live signal drops the dead keys of its weak lists and the algorithms of a
+/// listener that is gone.
+pub(crate) fn prune(d: &Dom, st: &State) {
+    let mut t = d.abort.s.borrow_mut();
+    let alive = |k: u32| st.owners.slots.get(k as usize).is_some_and(|s| s.is_some());
+    t.ctls.retain(|_, (k, _)| alive(*k));
+    t.sigs.retain(|_, s| {
+        if !alive(s.key) {
+            return false;
+        }
+        s.sources.retain(|&k| alive(k));
+        s.deps.retain(|&k| alive(k));
         s.algos.retain(|a| match a {
             Algo::Remove(t, id) => st.listeners.get(t).is_some_and(|v| v.iter().any(|l| l.id == *id)),
             Algo::Fetch(_) => true,
         });
-    }
+        true
+    });
+}
+
+/// The host key of `o` when it is a signal (`Dom::own`).
+pub(crate) fn key_of(d: &Dom, o: ObjId) -> Option<u32> {
+    d.abort.s.borrow().sigs.get(&o).map(|s| s.key)
 }
 
 // ------------------------------------------------------------------------------------ signals
 
 impl Dom {
+    /// The entries of signals and controllers, and the keys in the weak lists of all signals.
+    #[cfg(test)]
+    pub(crate) fn abort_entries(&self) -> (usize, usize, usize) {
+        let t = self.abort.s.borrow();
+        (t.sigs.len(), t.ctls.len(), t.sigs.values().map(|s| s.sources.len() + s.deps.len()).sum())
+    }
+
     pub(crate) fn is_signal(&self, o: ObjId) -> bool {
         self.abort.s.borrow().sigs.contains_key(&o)
     }
@@ -130,14 +156,23 @@ impl Dom {
             return Err(self.lim("dom-wrappers"));
         }
         let o = self.obj(it, proto)?;
-        self.st.borrow_mut().by_obj.insert(o, Target::Obj(o));
-        self.abort.s.borrow_mut().sigs.insert(o, Sig::new());
+        let mut st = self.st.borrow_mut();
+        st.by_obj.insert(o, Target::Obj(o));
+        let key = self.abort_owner(&mut st, it, o);
+        self.abort.s.borrow_mut().sigs.insert(o, Sig::new(it, key));
         Ok(o)
+    }
+
+    /// Make `o` an owner with a new key.
+    fn abort_owner(&self, st: &mut State, it: &mut Interp<'_>, o: ObjId) -> u32 {
+        let k = st.owners.key(Owner::Abort(o));
+        it.set_host_owner_obj(o, k);
+        k
     }
 
     /// `(aborted, reason)` of a signal.
     pub(crate) fn signal_state(&self, o: ObjId) -> Option<(bool, Value)> {
-        self.abort.s.borrow().sigs.get(&o).map(|s| (s.aborted, s.reason))
+        self.abort.s.borrow().sigs.get(&o).map(|s| (s.aborted, *s.reason.raw()))
     }
 
     /// Add an abort algorithm. The signal must not be aborted (the caller checked).
@@ -178,15 +213,19 @@ impl Dom {
             let mut t = self.abort.s.borrow_mut();
             let deps = {
                 let s = t.sigs.get_mut(&o).expect("checked");
-                (s.aborted, s.reason) = (true, reason);
+                s.aborted = true;
+                it.store_value(&mut s.reason, reason);
                 algos.extend(std::mem::take(&mut s.algos));
                 s.deps.clone()
             };
+            let st = self.st.borrow();
             for dep in deps {
-                if let Some(s) = t.sigs.get_mut(&dep)
+                if let Some(Some(Owner::Abort(dep))) = st.owners.slots.get(dep as usize).copied()
+                    && let Some(s) = t.sigs.get_mut(&dep)
                     && !s.aborted
                 {
-                    (s.aborted, s.reason) = (true, reason);
+                    s.aborted = true;
+                    it.store_value(&mut s.reason, reason);
                     fire.push(dep);
                 }
             }
@@ -198,7 +237,10 @@ impl Dom {
         for a in algos {
             match a {
                 Algo::Remove(t, id) => self.remove_listener(t, id),
-                Algo::Fetch(p) => crate::browser_fetch::abort_queued(self, it, p, reason)?,
+                Algo::Fetch(p) => {
+                    let p = it.traced_value(&p);
+                    crate::browser_fetch::abort_queued(self, it, p, reason)?
+                }
             }
         }
         for s in fire {
@@ -290,23 +332,27 @@ impl Dom {
         let result = self.new_signal(it)?;
         let mut t = self.abort.s.borrow_mut();
         if let Some(&first) = inputs.iter().find(|&&i| t.sigs[&i].aborted) {
-            let r = t.sigs[&first].reason;
+            let r = *t.sigs[&first].reason.raw();
             let s = t.sigs.get_mut(&result).expect("just made");
-            (s.aborted, s.reason) = (true, r);
+            s.aborted = true;
+            it.store_value(&mut s.reason, r);
             return Ok(result);
         }
-        let mut sources: Vec<ObjId> = Vec::new();
+        let mut sources: Vec<u32> = Vec::new();
         for i in inputs {
             let s = &t.sigs[&i];
-            let from: Vec<ObjId> = if s.dependent { s.sources.clone() } else { vec![i] };
+            let from: Vec<u32> = if s.dependent { s.sources.clone() } else { vec![s.key] };
             for src in from {
                 if !sources.contains(&src) {
                     sources.push(src);
                 }
             }
         }
+        let st = self.st.borrow();
+        let key = t.sigs[&result].key;
         for &src in &sources {
-            t.sigs.get_mut(&src).expect("source is a signal").deps.push(result);
+            let Some(Owner::Abort(o)) = st.owners.slots[src as usize] else { unreachable!("a source is a signal") };
+            t.sigs.get_mut(&o).expect("source is a signal").deps.push(key);
         }
         let s = t.sigs.get_mut(&result).expect("just made");
         (s.dependent, s.sources) = (true, sources);
@@ -337,14 +383,20 @@ fn controller_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
     let proto = it.host_proto_from_new_target(default)?;
     let sig = d.new_signal(it)?;
     let c = d.obj(it, proto)?;
-    d.abort.s.borrow_mut().ctls.insert(c, sig);
+    let k = d.st.borrow_mut().owners.key(Owner::Ctl(c));
+    it.set_host_owner_obj(c, k);
+    let sig = it.trace_value(Value::Object(sig));
+    d.abort.s.borrow_mut().ctls.insert(c, (k, sig));
     Ok(Value::Object(c))
 }
 
 fn controller_of(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<ObjId> {
     match this {
         Value::Object(o) => match d.abort.s.borrow().ctls.get(&o) {
-            Some(&s) => Ok(s),
+            Some((_, s)) => match *s.raw() {
+                Value::Object(s) => Ok(s),
+                _ => unreachable!("a signal"),
+            },
             None => Err(it.type_error("Illegal invocation")),
         },
         _ => Err(it.type_error("Illegal invocation")),

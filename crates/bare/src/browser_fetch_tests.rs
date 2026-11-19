@@ -1335,3 +1335,29 @@ fn the_constants_of_fetch_xhr_streams_and_abort_survive_collections() {
         }
     });
 }
+
+#[test]
+fn a_signal_keeps_the_promise_of_its_queued_fetch_through_collections() {
+    big(|| {
+        let srv = serve(|_| ok("reply"));
+        let mut b = at(srv.port);
+        js(&mut b, "var out = []; var c = new AbortController(); fetch('/a', { signal: c.signal }).catch(function (e) { out.push('rejected:' + e); }); fetch('/b', { signal: c.signal }).then(function () { out.push('b'); }, function () {}); 0");
+        // Nothing but the signal and the queue holds the promises of the requests.
+        b.collect(&[]).unwrap();
+        b.collect(&[]).unwrap();
+        assert_eq!(js(&mut b, "c.abort('why'); 0"), "0");
+        assert_eq!(go(&mut b, "0"), "rejected:why");
+        assert_eq!(b.pending_fetches(), 0);
+    });
+}
+
+#[test]
+fn a_fetch_that_the_signal_does_not_abort_survives_the_collection_of_its_signal() {
+    big(|| {
+        let srv = serve(|_| ok("reply"));
+        let mut b = at(srv.port);
+        js(&mut b, "var out = []; (function () { var c = new AbortController(); fetch('/a', { signal: c.signal }).then(function (r) { return r.text(); }).then(function (t) { out.push(t); }); })(); 0");
+        b.collect(&[]).unwrap();
+        assert_eq!(go(&mut b, "0"), "reply");
+    });
+}

@@ -1995,7 +1995,7 @@ fn prepare(d: &Dom, it: &mut Interp<'_>, promise: Value, a: &[Value]) -> R<()> {
         }
         if let Some(s) = core.signal {
             drop(st);
-            d.signal_add_algo(s, crate::browser_abort::Algo::Fetch(promise))?;
+            d.signal_add_algo(s, crate::browser_abort::Algo::Fetch(it.trace_value(promise)))?;
             st = d.fetch.st.borrow_mut();
         }
         st.queued_bytes += n;

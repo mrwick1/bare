@@ -109,3 +109,35 @@ fn base64_round_trips_every_byte_and_rejects_bad_text() {
         assert_eq!(js(&mut b, "atob('Z')"), "throw:InvalidCharacterError:Failed to execute 'atob' on 'Window': The string to be decoded is not correctly encoded.");
     });
 }
+
+#[test]
+fn the_sources_and_dependents_of_any_follow_the_signals_that_are_alive() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "var c = new AbortController(), keep = []; (function () { for (var i = 0; i < 50; i++) { var d = AbortSignal.any([c.signal]); if (i % 10 == 0) keep.push(d); } })(); 0");
+        b.collect(&[]).expect("collect");
+        assert_eq!(b.dom.abort_entries(), (6, 1, 10), "the source and 5 dependents; each pair is two keys");
+        // A dependent of a dependent follows the sources of the first, so `e` follows the source and not `keep[0]`.
+        js(&mut b, "var e = AbortSignal.any([keep[0]]); keep.length = 0; 0");
+        b.collect(&[]).expect("collect");
+        assert_eq!(b.dom.abort_entries(), (2, 1, 2), "the source and `e`");
+        assert_eq!(js(&mut b, "c.abort('r'); e.reason + ',' + e.aborted"), "r,true");
+    });
+}
+
+#[test]
+fn a_key_that_was_freed_answers_for_its_new_object_only() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "var c = new AbortController(); (function () { for (var i = 0; i < 20; i++) AbortSignal.any([c.signal]); new AbortController(); })(); 0");
+        b.collect(&[]).expect("collect");
+        // Only the controller and its signal live: the keys of the 20 dependents and of the other pair are free.
+        assert_eq!(b.dom.abort_entries(), (1, 1, 0));
+        // New signals take the free keys. The old lists must not answer for them.
+        js(&mut b, "var other = new AbortController(), d1 = AbortSignal.any([c.signal]), d2 = AbortSignal.any([other.signal]); var seen = []; d1.onabort = function () { seen.push('d1'); }; d2.onabort = function () { seen.push('d2'); }; 0");
+        assert_eq!(b.dom.abort_entries().2, 4);
+        assert_eq!(js(&mut b, "c.abort('a'); seen.join() + '|' + d1.aborted + d2.aborted + other.signal.aborted"), "d1|truefalsefalse");
+        b.collect(&[]).expect("collect");
+        assert_eq!(js(&mut b, "other.abort('b'); seen.join() + '|' + d2.reason"), "d1,d2|b");
+    });
+}
