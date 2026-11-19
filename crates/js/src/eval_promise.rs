@@ -134,7 +134,7 @@ enum Job {
     React { handler: Value, arg: Value, derived: ObjId, rejected: bool },
     Thenable { promise: ObjId, thenable: Value, then: Value },
     /// A host callback from `queueMicrotask`: called with no arguments. An ordinary throw goes to
-    /// [`Host::report_exception`] and the queue goes on.
+    /// [`bare_js_api::Host::report_exception`] and the queue goes on.
     Callback { cb: Value },
     /// Resume the suspended async function activation `act` (see `eval_async.rs`).
     Resume { act: ActRef, arg: Value, rejected: bool },
@@ -186,7 +186,7 @@ impl<'p> Interp<'p> {
 
     /// Queue `cb` as a microtask (`queueMicrotask`). It runs FIFO with the promise jobs, in the next checkpoint.
     /// A callback that is not callable is a `TypeError`. A full queue is `Limit(PromiseQueue)`.
-    /// If `cb` throws, the value goes to [`Host::report_exception`] and later jobs still run. A limit, `Unsupported`
+    /// If `cb` throws, the value goes to [`bare_js_api::Host::report_exception`] and later jobs still run. A limit, `Unsupported`
     /// or a heap fault inside it ends the drain like any job error (later drains repeat it).
     pub fn queue_microtask(&mut self, cb: Value) -> Result<(), Error> {
         if !self.is_callable(cb) {
@@ -267,7 +267,7 @@ impl<'p> Interp<'p> {
     #[cold]
     #[inline(never)]
     fn notify_rejections(&mut self) -> Res<()> {
-        let Some(host) = self.host.clone() else { return Ok(()) };
+        let Some(host) = self.api.host.clone() else { return Ok(()) };
         let map = &self.promise.map;
         let mut handled = Vec::new();
         self.promise.reported.retain(|o| {
@@ -284,7 +284,7 @@ impl<'p> Interp<'p> {
         }
         // The host runs listeners as a host call: one call level, the budget of this checkpoint.
         self.depth += 1;
-        let r = host.promise_rejections(self, &unhandled, &handled, dropped);
+        let r = self.api_rejections(&*host, &unhandled, &handled, dropped);
         self.depth -= 1;
         for v in unhandled {
             let Value::Object(o) = v else { continue };
@@ -741,7 +741,7 @@ impl<'p> Interp<'p> {
     #[inline(never)]
     fn track_rejection(&mut self, p: ObjId) {
         // Without a host nobody hears it: keep nothing alive.
-        if self.host.is_none() {
+        if self.api.host.is_none() {
             return;
         }
         if self.promise.rejections.len() < MAX_PENDING_REJECTIONS {
@@ -776,11 +776,11 @@ impl<'p> Interp<'p> {
         Ok(())
     }
 
-    /// `Host::between_jobs`, before each job and once when the queue is empty. A script that the host runs there gets its own step budget; the budget of the checkpoint comes back after.
+    /// `bare_js_api::Host::between_jobs`, before each job and once when the queue is empty. A script that the host runs there gets its own step budget; the budget of the checkpoint comes back after.
     fn between_jobs(&mut self) -> Res<()> {
-        let Some(host) = self.host.clone().filter(|_| self.depth == 0) else { return Ok(()) };
+        let Some(host) = self.api.host.clone().filter(|_| self.depth == 0) else { return Ok(()) };
         let limit = self.step_limit;
-        let r = host.between_jobs(self);
+        let r = self.api_between_jobs(&*host);
         self.step_limit = limit;
         r
     }
@@ -808,9 +808,7 @@ impl<'p> Interp<'p> {
                 Ok(_) => Ok(()),
                 Err(e) => {
                     let v = thrown(e)?;
-                    if let Some(h) = self.host.clone() {
-                        h.report_exception(self, v);
-                    }
+                    self.api_report(v);
                     Ok(())
                 }
             },

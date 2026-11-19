@@ -28,9 +28,17 @@ impl Host for R {
     fn call(&self, _: &mut Interp<'_>, _: u32, _: Value, _: &[Value], _: bool) -> Result<Value, Error> {
         unreachable!()
     }
-    fn promise_rejections(&self, it: &mut Interp<'_>, unhandled: &[Value], handled: &[Value], dropped: u32) -> Result<(), Error> {
-        self.unhandled.borrow_mut().extend(unhandled.iter().map(|&p| reason(it, p)));
-        self.handled.borrow_mut().extend(handled.iter().map(|&p| reason(it, p)));
+}
+
+impl<'p> bare_js_api::Host<Interp<'p>> for R {
+    fn call<'s>(&self, _: &mut bare_js_api::Scope<'s, Interp<'p>>, _: u32, _: bare_js_api::Local<'s>, _: bare_js_api::Args<'s>, _: bool) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
+        unreachable!()
+    }
+    fn promise_rejections<'s>(&self, s: &mut bare_js_api::Scope<'s, Interp<'p>>, unhandled: &[bare_js_api::Local<'s>], handled: &[bare_js_api::Local<'s>], dropped: u32) -> Result<(), bare_js_api::Error<'s>> {
+        let it = s.engine();
+        let raw = |l: &[bare_js_api::Local<'s>]| l.iter().map(|&p| reason(it, bare_js_api::Engine::raw(it, p))).collect::<Vec<_>>();
+        self.unhandled.borrow_mut().extend(raw(unhandled));
+        self.handled.borrow_mut().extend(raw(handled));
         *self.dropped.borrow_mut() += dropped;
         Ok(())
     }
@@ -39,7 +47,7 @@ impl Host for R {
 fn setup() -> (Interp<'static>, Rc<R>) {
     let mut it = Interp::realm(Heap::default(), EvalLimits { max_steps: 10_000_000, ..Default::default() }).unwrap();
     let r = Rc::new(R::default());
-    it.set_host(r.clone()).unwrap();
+    bare_js_api::Engine::set_host(&mut it, r.clone());
     (it, r)
 }
 
