@@ -132,6 +132,46 @@ impl Engine for Toy {
         self.owners.push((o, key));
         Ok(())
     }
+    fn new_promise<'s>(&mut self) -> Result<Local<'s>, Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("promises")))
+    }
+    fn resolve_promise<'s>(&mut self, _p: Local<'_>, _v: Local<'_>) -> Result<(), Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("promises")))
+    }
+    fn reject_promise<'s>(&mut self, _p: Local<'_>, _reason: Local<'_>) -> Result<(), Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("promises")))
+    }
+    fn promise_then<'s>(&mut self, _p: Local<'_>, _ok: Local<'_>, _err: Local<'_>) -> Result<(), Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("promises")))
+    }
+    fn promise_react<'s>(&mut self, _x: Local<'_>, _ok: Local<'_>, _err: Local<'_>) -> Result<(), Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("promises")))
+    }
+    fn promise_status<'s>(&mut self, _v: Local<'_>) -> Option<PromiseState<'s>> {
+        None
+    }
+    fn queue_microtask<'s>(&mut self, _cb: Local<'_>) -> Result<(), Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("microtasks")))
+    }
+    fn checkpoint<'s>(&mut self) -> Result<usize, Error<'s>> {
+        Ok(0)
+    }
+    fn drain_microtasks<'s>(&mut self) -> Result<usize, Error<'s>> {
+        Ok(0)
+    }
+    fn pending_jobs(&self) -> usize {
+        0
+    }
+    fn clear_failed_job(&mut self) {}
+    fn iter_open<'s>(&mut self, _v: Local<'_>) -> Result<Option<Iter<'s>>, Error<'s>> {
+        Ok(None)
+    }
+    fn iter_next<'s>(&mut self, _it: &mut Iter<'s>) -> Result<Option<Local<'s>>, Error<'s>> {
+        Ok(None)
+    }
+    fn iter_fail<'s>(&mut self, _it: &mut Iter<'s>, err: Error<'s>) -> Error<'s> {
+        err
+    }
     fn safepoint(&mut self) {}
 
     // The base set of handler methods: the toy engine has none of them. The adapter tests of each real engine run them.
@@ -317,4 +357,26 @@ fn a_traced_value_is_read_stored_and_visited_through_its_owner() {
     assert_eq!(e.owners, vec![(1, 8)], "a new key replaces the old one");
     Tracer::new(&mut work).visit(&t);
     assert_eq!(work, vec![V::Str("cb".encode_utf16().collect())]);
+}
+
+/// A host that gives no hook: the three microtask hooks have default bodies that do nothing and fail nothing.
+struct NoHooks;
+
+impl Host<Toy> for NoHooks {
+    fn call<'s>(&self, s: &mut Scope<'s, Toy>, _id: u32, _this: Local<'s>, _args: Args<'s>, _is_new: bool) -> Result<Local<'s>, Error<'s>> {
+        Ok(s.undefined())
+    }
+}
+
+#[test]
+fn the_microtask_hooks_of_a_host_default_to_doing_nothing() {
+    let mut e = toy();
+    enter(&mut e, |s| {
+        let (h, v) = (NoHooks, s.undefined());
+        h.report_exception(s, v);
+        assert_eq!(h.between_jobs(s), Ok(()));
+        assert_eq!(h.promise_rejections(s, &[v], &[], 3), Ok(()));
+        assert_eq!(s.promise_status(v), None);
+        assert_eq!(MAX_PENDING_REJECTIONS, 1024);
+    });
 }
