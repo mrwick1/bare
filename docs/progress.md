@@ -13576,4 +13576,4 @@ Not done: the staging journey A/B. Lazy and virtual properties (`Host::get_index
 - On `attr_load react 1`, each read probes the maps of node lists, token lists and style before it reaches the attribute map. The missed probes cost about 1.9 M of 225.1 M (0.8%).
 - On `browser_load mutation 1`, the `trace` functions of the six subsystems with such objects cost about 1.1 M of 72.6 M (1.5%) in the old per-object hook.
 
-Proposed: option A, the host key in the exotic object, with one dispatch by key; the objects also become owners for tracing. It waits for the owner's review.
+Owner decisions (2026-11-19): option A (the host key in the exotic object, one dispatch by key); lazy `on*` members in a later PR; tracing of these objects by key in a second PR.

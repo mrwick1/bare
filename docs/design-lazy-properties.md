@@ -1,6 +1,6 @@
 # Host-filled properties through the host interface
 
-Status: proposal, 2026-11-19 (plan step S0.4, lazy and virtual properties). It waits for the owner's review.
+Status: decided by the owner, 2026-11-19 (plan step S0.4, lazy and virtual properties). See "Decisions" at the end.
 
 ## Problem
 
@@ -100,3 +100,9 @@ Steps 1 and 2 can be one PR. Step 3 can be a second PR.
 1. Option A (proposed), B, C or D?
 2. Lazy `on*` members: in the same PR as A, or after it (proposed: after)?
 3. Tracing of these objects (step 3): in the same PR, or in a second PR (proposed: second)?
+
+## Decisions (owner, 2026-11-19)
+
+1. Option A: the host key is in the exotic object, and the engine asks the host by key.
+2. Lazy `on*` members get their own interface method in a PR after A.
+3. Tracing of these objects by key comes in a second PR, after the dispatch by key.
