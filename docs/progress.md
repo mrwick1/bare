@@ -13719,3 +13719,23 @@ Cost matrix (archMachine, base `37df5bd1`, 805 rows, `-j4`, minimum of 3 runs, g
 Checks: Linux `bare` lib 1648, `bare-js` lib 1047, `bare-js-api` 5 passed. Windows 11 VM: the two new tests pass.
 
 Not tested: the full `bare` and `bare-js` suites on Windows; the stress mode on Windows; live-site journeys and the staging journey (not allowed in this task); `bare-mcp` tests; the stress mode with the GUI window. Collection counts are a lower bound. The stress mode cannot find a missing edge in a path that no journey runs. Noticed, not changed: `btn.click()` gives an event whose `detail` is `undefined` (to verify against the HTML spec: a `MouseEvent` with `detail` 0).
+
+## 2026-11-19: media, image and custom-element promises in persistent handles (plan step S0.4, M2)
+
+Changes:
+
+- `browser_media.rs`: `pending` and `aborting` (the `play()` promises) are `Vec<bare_js_api::Persistent>`. `reject` reads each handle. The `pending`/`aborting` line left `media::roots`.
+- `browser_img.rs`: `decodes` holds persistent handles. The `decodes` line left `img::roots`.
+- `browser_custom.rs`: `Ce.when` (the `whenDefined` promises) holds persistent handles. The `s.when.values()` line left `ce_roots`. A second `whenDefined` call for the same name reads the handle.
+- The handlers still use the old `Interp`. No interface method is new. This follows `docs/design-host-microtasks.md`, plan step 2.
+
+New tests: `a_dropped_play_promise_settles_after_collections`, `a_dropped_whendefined_promise_settles_after_collections`, `a_dropped_decode_promise_settles_after_collections`. Each drops the script reference, makes garbage, collects twice, then checks the promise settles.
+
+Cost matrix (archMachine, base = origin/main `37df5bd1`, new = this branch before the last rebase, 3 runs per row, 805 rows, `-j4`, glibc): rows over +0.5% under both allocators: 0. No row over +0.5% under glibc, so no jemalloc run. Mean change +0.002% (glibc). `parse_load deep 1` and `deep 10` overflow the stack on the base too (checked by running both binaries).
+
+Checks:
+
+- Linux: filters `media` (29), `img` (8), `custom` (27) passed. `bare-js` lib 1047 and `bare-js-api` 5 passed. In one full `bare` lib run, `browser_stream_tests::a_preload_link_that_no_script_takes_does_not_delay_load_or_hold_the_page` failed; it passed alone in 2 reruns. Hypothesis: a timing flake. It is not in the code of this change.
+- Windows 11 VM: the same three filters passed (29, 8, 27).
+
+Not tested: `BARE_GC_STRESS` (not on main); a full `bare` run on the Windows VM; wall time; the matrix after the final rebase.
