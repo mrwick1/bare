@@ -13749,3 +13749,24 @@ Cost matrix against the base build of `37df5bd1` (817 rows, 803 measured): mean 
 Checks: Linux `cargo test --locked -p bare --lib` with filters `cssom` (21 passed), `frame` (45), `controls` (13) and `validity` (1). Windows 11 VM: the 3 examples built with cargo xwin (release) and each new case ran at scale 1 with `checksum=ok`.
 
 Not tested: Windows at scale 10; the old `*_load` cases on Windows; callgrind profile of the new rows; Node/Chrome comparison of the checksums (they follow the HTML and CSSOM standards by hand, and the engine agreed).
+
+## 2026-11-19: computed style objects as owners (plan step S0.4, CSSOM)
+
+Changes: step 3 of `docs/design-host-cssom.md`, Option D. A `getComputedStyle` object is now the owner of its entries: `Owner::Computed(ObjId)` in `browser.rs`. `get_computed_style` takes a host key and calls `set_host_owner_obj`. `Host::trace(key)` visits the wrapper of the element (`browser_computed::trace_owner`). `Host::prune(dead)` drops the `objs` and `kinds` entries and frees the key (`drop_owner`). `browser_computed::trace` and `prune` and their two calls in the old hook are gone. `roots` stays (the prototype and `getComputedStyle`). The cap `computed-objects` stays (owner decision). Rule, sheet, media and declaration objects (step 4) and lazy accessors (step 5) are not in this PR.
+
+Tests (`browser_computed_tests.rs`): a dropped object is collected, its `objs` and `kinds` entries are freed and the key is taken again (the owner table does not grow in a second round); a held object survives two collections and reads live values after a style change; a held object keeps a detached element alive, and a reused key answers only for its new object. With `BARE_GC_STRESS=1` (PR #712, rebased on it) the filters `computed` (66 passed), `style` and `cssom` pass too.
+
+Cost matrix: base is `4724ff24` (origin/main `e37f02e0` plus the cssom_load rows of PR #713), built without this change; new is this change on it. archMachine, 3 runs for each row, minimum.
+
+| Row | base | new | change glibc | change jemalloc |
+| --- | ---: | ---: | ---: | ---: |
+| `cssom_load computed 1` | 274,910,129 | 276,250,694 | +0.488% | not run (glibc under +0.5%) |
+| `cssom_load computed 10` | 2,651,149,401 | 2,664,433,789 | +0.501% | +0.492% |
+| `style_load hidden 1` | 24,376,068 | 24,331,227 | -0.18% | |
+| `style_load hidden 10` | 153,558,249 | 153,490,452 | -0.04% | |
+
+`cssom_load computed` costs about 130 instructions more for each `getComputedStyle` call (key, owner list entry, trace and prune call at the collection). A first run was +0.60% (glibc) and +0.58% (jemalloc) on both rows. The fix skips the `kinds` remove when no pseudo-element object exists. `computed 10` is at the limit: +0.501% glibc, +0.492% jemalloc, so no row is over +0.5% under both. `style_load hidden` has no row in `cost_rows.txt`; the numbers above come from `perf stat -e instructions:u` of the examples, `hidden 1` with 3 runs of each (spread under 0.003%), `hidden 10` with 1 run. Full matrix (first run, before the fix above, 819 rows): mean -0.033% glibc; over under both allocators only the two `computed` rows; `resources_load small 1` over under one allocator (glibc noise). `parse_load deep 1`/`10` do not run: stack overflow on the base and on this tree, as in the previous entry. I did not repeat the full matrix after the fix.
+
+Checks: Linux `cargo test --locked -p bare --lib` filters `computed` (66 passed), `style` (96), `cssom` (21); `cargo test --locked -p bare-js-api -p bare-js -p bare --lib` all pass. Windows 11 VM (cargo xwin test binary): the same three filters, 66, 96 and 21 passed.
+
+Not tested: Windows with `BARE_GC_STRESS`; Windows cost; the full matrix after the fix; a callgrind split of the 130 instructions; the jemalloc count of `computed 1`.

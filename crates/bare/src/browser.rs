@@ -322,6 +322,8 @@ pub(crate) const SEL_CACHE_BYTES: usize = 128 << 10;
 pub(crate) enum Owner {
     Target(Target),
     Event(ObjId),
+    /// A `getComputedStyle` object (`browser_computed.rs`).
+    Computed(ObjId),
 }
 
 /// The owners of traced values, by host key (`docs/design-host-tracing.md`). A free key holds `None`.
@@ -818,6 +820,7 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
                     }
                 }
             }
+            Some(Owner::Computed(o)) => crate::browser_computed::trace_owner(self, &st, o, t),
             None => {}
         }
     }
@@ -839,6 +842,9 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
                 {
                     st.n_listeners -= l.len();
                 }
+            }
+            if let Some(Owner::Computed(o)) = st.owners.slots[k as usize] {
+                crate::browser_computed::drop_owner(self, o);
             }
             st.owners.release(k);
         }
@@ -951,7 +957,6 @@ impl Host for Dom {
         crate::browser_platform::trace(self, owner, out);
         crate::browser_style::trace(self, owner, out);
         crate::browser_cssom::trace(self, owner, out);
-        crate::browser_computed::trace(self, owner, out);
         self.resize_trace(owner, out);
         self.mo_trace(owner, out);
         self.io_trace(owner, out);
@@ -978,7 +983,6 @@ impl Host for Dom {
         crate::browser_geom::prune(self, live);
         crate::browser_style::prune(self, live);
         crate::browser_cssom::prune(self, live);
-        crate::browser_computed::prune(self, live);
         self.resize_prune(live);
         self.mo_prune(live);
         self.io_prune(live);

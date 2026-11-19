@@ -205,7 +205,7 @@ pub(crate) struct Computed {
     lim: Cell<ComputedLimits>,
     objs: RefCell<IdMap<ObjId, NodeId>>,
     /// The declarations that are not of the element itself: `PSEUDO` (a pseudo-element) or `EMPTY` (a colon string that is no pseudo-element).
-    kinds: RefCell<IdMap<ObjId, u8>>,
+    pub(crate) kinds: RefCell<IdMap<ObjId, u8>>,
     proto: OnceCell<ObjId>,
     fixed: RefCell<Vec<ObjId>>,
     pub(crate) ext: RefCell<HashMap<String, Vec<SheetPart>>>,
@@ -1187,6 +1187,9 @@ fn get_computed_style(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V 
     if kind != 0 {
         d.computed.kinds.borrow_mut().insert(o, kind);
     }
+    // The object is the owner of its entries: its trace visits the element wrapper, and its prune drops the entries.
+    let key = d.st.borrow_mut().owners.key(crate::browser::Owner::Computed(o));
+    it.set_host_owner_obj(o, key);
     Ok(Value::Object(o))
 }
 
@@ -1333,16 +1336,22 @@ pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
     out.extend(d.computed.fixed.borrow().iter().map(|&o| Value::Object(o)));
 }
 
-/// A computed declaration keeps its element's wrapper alive (and so the element's tree, attached or not).
-pub(crate) fn trace(d: &Dom, owner: ObjId, out: &mut Vec<Value>) {
-    if let Some(&el) = d.computed.objs.borrow().get(&owner) {
-        out.extend(d.st.borrow().wrapper(el).map(Value::Object));
+/// The owner `o` (a computed declaration) keeps its element's wrapper alive, and so the element's tree, attached or not.
+pub(crate) fn trace_owner(d: &Dom, st: &crate::browser::State, o: ObjId, t: &mut bare_js_api::Tracer<'_, Value>) {
+    if let Some(&el) = d.computed.objs.borrow().get(&o)
+        && let Some(w) = st.by_node.get(&el)
+    {
+        t.visit(w);
     }
 }
 
-pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
-    d.computed.objs.borrow_mut().retain(|&o, _| live(o));
-    d.computed.kinds.borrow_mut().retain(|&o, _| live(o));
+/// The owner `o` is dead: drop its entries.
+pub(crate) fn drop_owner(d: &Dom, o: ObjId) {
+    d.computed.objs.borrow_mut().remove(&o);
+    let mut kinds = d.computed.kinds.borrow_mut();
+    if !kinds.is_empty() {
+        kinds.remove(&o);
+    }
 }
 
 // ------------------------------------------------------------------------------------------ Browser API
