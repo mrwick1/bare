@@ -1,12 +1,12 @@
 //! Load test for the navigation module. One case at one scale per process.
 //!
-//!   navigation_load CASE SCALE      CASE: url | iterate | subclass | history | storage | route      SCALE: 1, 10, 100
+//!   navigation_load CASE SCALE      CASE: url | iterate | subclass | history | storage | route | frames      SCALE: 1, 10, 100
 //!
 //! subclass: SCALE*1000 rounds that build derived-class and `Reflect.construct(.., newTarget)` `URLSearchParams` and check prototypes, native state and that only one kept instance survives a collect. iterate: SCALE*1000 rounds that build `URLSearchParams` from a Map, an iterator and a pair iterable and iterate them (for-of with a
 //! live append, spread, `Array.from`, an early break). url: SCALE*1000 `URL` objects with live `searchParams` (append, set, sort, get, hash change). history: SCALE*1000
 //! `pushState`/`replaceState` of cyclic state graphs, with traversal run by the driver (the history is capped at 50
 //! entries). storage: SCALE*1000 writes, reads and removals over 3 origins, with UTF-16 values. route: SCALE*500 rounds of
-//! fragment, search and reload navigation, with the driver draining requests and tasks. Each case runs in small scripts,
+//! fragment, search and reload navigation, with the driver draining requests and tasks. frames: SCALE*20 rounds that make 50 `<iframe>` elements (no `src`, so no child page), read `contentWindow`, `window.frames[i]`, `window.length`, the `location.href` and `parent` of each window, and remove the elements. Each case runs in small scripts,
 //! with a VM collect between them, and checks its result against the same computation in Rust. Prints time, CPU, peak
 //! RSS, allocations and what the realm holds. `tools/js/navigation_load.sh` runs the matrix under caps.
 
@@ -341,6 +341,24 @@ fn exec(name: &str, scale: usize) {
             expect("route queues", format!("{},{}", st.pending_tasks, st.pending_requests), "0,0".to_string());
             expect("route token", b.storage().get_item(false, "https://staging.example.test:8443", "token").unwrap_or_default(), format!("t{}", (n - 1) / 7 * 7));
         }
+        "frames" => {
+            // Each round: 50 frames in a `<div>`. Per frame: its window is `frames[i]`, its `parent` is this window, its `location.href`
+            // is `about:blank` (11 bytes), and `frames.length` is 50. The elements are removed at the end of the round.
+            let n = 20 * scale;
+            run(&mut b, "var host = document.createElement('div'); document.body.appendChild(host);
+                function round() { var s = 0, fs = [];
+                  for (var i = 0; i < 50; i++) { var f = document.createElement('iframe'); host.appendChild(f); fs.push(f) }
+                  for (var i = 0; i < 50; i++) { var w = fs[i].contentWindow; s += (w === window.frames[i] ? 1 : 0) + (w.parent === window ? 1 : 0) + w.location.href.length + window.length }
+                  while (host.firstChild) host.removeChild(host.firstChild);
+                  return s + window.length }");
+            let mut got = 0usize;
+            for _ in 0..n {
+                got += run(&mut b, "round()").parse::<usize>().unwrap_or_else(|_| die("round result".into()));
+                collect(&mut b);
+            }
+            // per frame 1 + 1 + 11 + 50, and 0 frames left at the end of a round
+            expect("frames", got.to_string(), (n * 50 * (1 + 1 + 11 + 50)).to_string());
+        }
         _ => die(format!("unknown case {name}")),
     }
     let run_ms = t.elapsed().as_secs_f64() * 1e3;
@@ -373,7 +391,7 @@ fn exec(name: &str, scale: usize) {
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     if a.len() != 3 {
-        die("usage: navigation_load url|iterate|subclass|history|storage|route 1|10|100".into());
+        die("usage: navigation_load url|iterate|subclass|history|storage|route|frames 1|10|100".into());
     }
     let scale: usize = a[2].parse().unwrap_or_else(|_| die("scale".into()));
     // the evaluator recurses: run on a big stack
