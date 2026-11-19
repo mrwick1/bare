@@ -13769,7 +13769,7 @@ The three row groups of the gate (glibc, instructions):
 | `fetch_load post 1` | 22,633,633 | 22,646,820 | +0.058% |
 | `fetch_load post 10` | 138,611,488 | 138,750,743 | +0.100% |
 
-The per-job hook costs about 28 more instructions than before (170,410 for 6,008 jobs in `scheduler_load mixed 1`). Every per-job row is under the limit, so option C (the gated hook) is not needed.
+The per-job hook costs about 28 more instructions than before (171,410 for 6,008 jobs in `scheduler_load mixed 1`). Every per-job row is under the limit, so option C (the gated hook) is not needed.
 
 Checks:
 
