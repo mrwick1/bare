@@ -372,6 +372,166 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
     }
 
     fn safepoint(&mut self) {}
+
+    // The base set of handler methods (plan step S0.4).
+
+    fn type_error<'s>(&mut self, msg: &str) -> bare_js_api::Error<'s> {
+        let e = Interp::type_error(self, msg);
+        self.api_err(e)
+    }
+
+    fn range_error<'s>(&mut self, msg: &str) -> bare_js_api::Error<'s> {
+        let e = Interp::range_error(self, msg);
+        self.api_err(e)
+    }
+
+    fn charge<'s>(&mut self, n: u64) -> Result<(), bare_js_api::Error<'s>> {
+        Interp::charge(self, n).map_err(|e| self.api_err(e))
+    }
+
+    fn to_number<'s>(&mut self, v: bare_js_api::Local<'_>) -> Result<f64, bare_js_api::Error<'s>> {
+        self.to_js_number(self.api_at(v)).map_err(|e| self.api_err(e))
+    }
+
+    fn to_string<'s>(&mut self, v: bare_js_api::Local<'_>) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
+        match self.to_js_string(self.api_at(v)) {
+            Ok(s) => Ok(self.api_push(Value::String(s))),
+            Err(e) => Err(self.api_err(e)),
+        }
+    }
+
+    fn to_boolean(&self, v: bare_js_api::Local<'_>) -> bool {
+        self.to_js_bool(self.api_at(v)).unwrap_or(false)
+    }
+
+    fn new_array<'s>(&mut self, items: &[bare_js_api::Local<'_>]) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
+        let items: Vec<Value> = items.iter().map(|&i| self.api_at(i)).collect();
+        match self.array_from(&items) {
+            Ok(a) => Ok(self.api_push(a)),
+            Err(e) => Err(self.api_err(e)),
+        }
+    }
+
+    fn is_array<'s>(&mut self, v: bare_js_api::Local<'_>) -> Result<bool, bare_js_api::Error<'s>> {
+        match self.api_at(v) {
+            Value::Object(o) => self.o_is_array(o).map_err(|e| self.api_err(e)),
+            _ => Ok(false),
+        }
+    }
+
+    fn intrinsic<'s>(&mut self, which: bare_js_api::Intrinsic) -> bare_js_api::Local<'s> {
+        use bare_js_api::Intrinsic as I;
+        let v = match which {
+            I::ObjectPrototype => Value::Object(self.object_proto),
+            I::ArrayPrototype => Value::Object(self.array_proto),
+            I::IteratorPrototype => Value::Object(self.sc.iter_proto),
+            I::ErrorPrototype => Value::Object(self.error_protos[0]),
+            I::SymbolIterator => match self.sc.k_iterator {
+                PropertyKey::Symbol(s) => Value::Symbol(s),
+                // The realm keeps `Symbol.iterator` as a symbol key.
+                _ => unreachable!("Symbol.iterator is a symbol"),
+            },
+        };
+        self.api_push(v)
+    }
+
+    fn get_prototype_of<'s>(&mut self, obj: bare_js_api::Local<'_>) -> Result<Option<bare_js_api::Local<'s>>, bare_js_api::Error<'s>> {
+        let r = self.api_obj(obj).and_then(|o| self.o_get_prototype_of(o));
+        match r {
+            Ok(p) => Ok(p.map(|p| self.api_push(Value::Object(p)))),
+            Err(e) => Err(self.api_err(e)),
+        }
+    }
+
+    fn set_prototype_of<'s>(&mut self, obj: bare_js_api::Local<'_>, proto: Option<bare_js_api::Local<'_>>) -> Result<bool, bare_js_api::Error<'s>> {
+        let r = self.api_obj(obj).and_then(|o| {
+            let p = proto.map(|p| self.api_obj(p)).transpose()?;
+            self.o_set_prototype_of(o, p)
+        });
+        r.map_err(|e| self.api_err(e))
+    }
+
+    fn define_accessor<'s>(&mut self, obj: bare_js_api::Local<'_>, key: bare_js_api::Local<'_>, get: Option<bare_js_api::Local<'_>>, set: Option<bare_js_api::Local<'_>>, a: bare_js_api::Attrs) -> Result<(), bare_js_api::Error<'s>> {
+        let r = self.api_obj(obj).and_then(|o| {
+            let k = self.api_key(key)?;
+            let fun = |it: &mut Self, f: Option<bare_js_api::Local<'_>>| match f {
+                None => Ok(None),
+                Some(f) if it.is_callable(it.api_at(f)) => it.api_obj(f).map(Some),
+                Some(_) => Err(it.type_error("accessor is not a function")),
+            };
+            let d = PropertyDescriptor { get: Some(fun(self, get)?), set: Some(fun(self, set)?), enumerable: Some(a.enumerable), configurable: Some(a.configurable), ..Default::default() };
+            if self.o_define_own_property(o, k, &d)? { Ok(()) } else { Err(self.type_error("Cannot redefine property")) }
+        });
+        r.map_err(|e| self.api_err(e))
+    }
+
+    fn proto_from_new_target<'s>(&mut self, default: bare_js_api::Local<'_>) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
+        let r = self.api_obj(default).and_then(|d| self.host_proto_from_new_target(d));
+        match r {
+            Ok(p) => Ok(self.api_push(Value::Object(p))),
+            Err(e) => Err(self.api_err(e)),
+        }
+    }
+
+    fn string_utf16<'s>(&mut self, units: &[u16]) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
+        match self.heap.intern_units(units) {
+            Ok(s) => Ok(self.api_push(Value::String(s))),
+            Err(e) => {
+                let e = self.herr(e);
+                Err(self.api_err(e))
+            }
+        }
+    }
+
+    fn wall_now_ms(&self) -> f64 {
+        Interp::wall_now_ms(self)
+    }
+
+    fn has_own<'s>(&mut self, obj: bare_js_api::Local<'_>, key: bare_js_api::Local<'_>) -> Result<bool, bare_js_api::Error<'s>> {
+        let r = self.api_obj(obj).and_then(|o| {
+            let k = self.api_key(key)?;
+            match self.heap.peek_own_property(o, k) {
+                Ok(p) => Ok(p.is_some()),
+                Err(HeapError::Proxy(_)) => Ok(false),
+                Err(e) => Err(self.herr(e)),
+            }
+        });
+        r.map_err(|e| self.api_err(e))
+    }
+
+    fn own_keys<'s>(&mut self, obj: bare_js_api::Local<'_>) -> Result<Vec<bare_js_api::Local<'s>>, bare_js_api::Error<'s>> {
+        let r = self.api_obj(obj).and_then(|o| {
+            let keys = self.o_own_keys(o)?;
+            self.charge(keys.len() as u64)?;
+            let mut out = Vec::with_capacity(keys.len());
+            for k in keys {
+                out.push(h!(self, self.heap.key_to_value(k)));
+            }
+            Ok(out)
+        });
+        match r {
+            Ok(vs) => Ok(vs.into_iter().map(|v| self.api_push(v)).collect()),
+            Err(e) => Err(self.api_err(e)),
+        }
+    }
+
+    fn own_enumerable_data<'s>(&mut self, obj: bare_js_api::Local<'_>, key: bare_js_api::Local<'_>) -> Result<Option<bare_js_api::Local<'s>>, bare_js_api::Error<'s>> {
+        let r = self.api_obj(obj).and_then(|o| {
+            let k = self.api_key(key)?;
+            match self.o_get_own_property(o, k)? {
+                Some(p) if p.enumerable() => self.get_value(Value::Object(o), k).map(Some),
+                _ => Ok(None),
+            }
+        });
+        match r {
+            Ok(v) => Ok(v.map(|v| self.api_push(v))),
+            Err(e) => Err(self.api_err(e)),
+        }
+    }
+
+    fn is_callable(&self, v: bare_js_api::Local<'_>) -> bool {
+        self.is_callable_value(self.api_at(v))
+    }
 }
 
 /// The heap's sources, answered by an interface host (`Interp::set_api_sources`). The heap gives the asked object and its host key;

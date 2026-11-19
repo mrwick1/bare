@@ -399,6 +399,19 @@ impl Attrs {
     pub const METHOD: Attrs = Attrs { writable: true, enumerable: false, configurable: true };
 }
 
+/// An object or a value that every realm has, for [`Scope::intrinsic`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Intrinsic {
+    ObjectPrototype,
+    ArrayPrototype,
+    /// `%IteratorPrototype%`: the prototype of a host iterator object.
+    IteratorPrototype,
+    /// `Error.prototype`.
+    ErrorPrototype,
+    /// The symbol `Symbol.iterator` of the realm. It does not depend on the global `Symbol`, which a script can replace.
+    SymbolIterator,
+}
+
 /// Why a call failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error<'s> {
@@ -531,6 +544,49 @@ pub trait Engine: Sized {
 
     /// A point where the collector may run.
     fn safepoint(&mut self);
+
+    // The base set of handler methods (plan step S0.4; `docs/design-host-forms.md`, `design-host-cssom.md`,
+    // `design-host-navigation.md`). Each method that can run script or allocate takes `&mut self`.
+
+    /// A `TypeError` object with this message. The caller returns it as `Err`.
+    fn type_error<'s>(&mut self, msg: &str) -> Error<'s>;
+    /// A `RangeError` object with this message.
+    fn range_error<'s>(&mut self, msg: &str) -> Error<'s>;
+    /// Add `n` to the step budget of the running script. `Abort::Limit` when the budget ends.
+    fn charge<'s>(&mut self, n: u64) -> Result<(), Error<'s>>;
+    /// `ToNumber(v)`. It can run script.
+    fn to_number<'s>(&mut self, v: Local<'_>) -> Result<f64, Error<'s>>;
+    /// `ToString(v)`. It can run script.
+    fn to_string<'s>(&mut self, v: Local<'_>) -> Result<Local<'s>, Error<'s>>;
+    /// `ToBoolean(v)`. It runs no script.
+    fn to_boolean(&self, v: Local<'_>) -> bool;
+    /// An array with these items.
+    fn new_array<'s>(&mut self, items: &[Local<'_>]) -> Result<Local<'s>, Error<'s>>;
+    /// `IsArray(v)`. A proxy answers for its target; a revoked proxy throws a `TypeError`.
+    fn is_array<'s>(&mut self, v: Local<'_>) -> Result<bool, Error<'s>>;
+    fn intrinsic<'s>(&mut self, which: Intrinsic) -> Local<'s>;
+    /// `obj.[[GetPrototypeOf]]()`: `None` for `null`. A proxy runs its trap.
+    fn get_prototype_of<'s>(&mut self, obj: Local<'_>) -> Result<Option<Local<'s>>, Error<'s>>;
+    /// `obj.[[SetPrototypeOf]](proto)`, with `None` for `null`. `false` when the object is not extensible or the change makes a cycle.
+    fn set_prototype_of<'s>(&mut self, obj: Local<'_>, proto: Option<Local<'_>>) -> Result<bool, Error<'s>>;
+    /// Define an accessor property. `None` is `undefined`. `attrs.writable` has no meaning for an accessor and is ignored. A getter or
+    /// setter that is not callable, or a property that cannot be defined, throws a `TypeError`.
+    fn define_accessor<'s>(&mut self, obj: Local<'_>, key: Local<'_>, get: Option<Local<'_>>, set: Option<Local<'_>>, attrs: Attrs) -> Result<(), Error<'s>>;
+    /// `GetPrototypeFromConstructor` of the host constructor that runs: `default` for a plain `new F`, else the `prototype` of the
+    /// `new.target` (`Object.prototype` when that is not an object). Call it first, as Chrome does. It can run a getter.
+    fn proto_from_new_target<'s>(&mut self, default: Local<'_>) -> Result<Local<'s>, Error<'s>>;
+    /// A string of these UTF-16 code units. Lone surrogates stay.
+    fn string_utf16<'s>(&mut self, units: &[u16]) -> Result<Local<'s>, Error<'s>>;
+    /// The wall clock of `Date.now()` (virtual in a test), in ms since 1970.
+    fn wall_now_ms(&self) -> f64;
+    /// Does the object have an own property with this key? It runs no getter and no proxy trap: a proxy has none of its own.
+    fn has_own<'s>(&mut self, obj: Local<'_>, key: Local<'_>) -> Result<bool, Error<'s>>;
+    /// The own keys, as `Reflect.ownKeys`: array indices ascending (as strings), then strings, then symbols, each in creation order.
+    fn own_keys<'s>(&mut self, obj: Local<'_>) -> Result<Vec<Local<'s>>, Error<'s>>;
+    /// The value of the own enumerable property `key`, or `None` when there is none. It runs a getter, as `[[Get]]`.
+    fn own_enumerable_data<'s>(&mut self, obj: Local<'_>, key: Local<'_>) -> Result<Option<Local<'s>>, Error<'s>>;
+    /// Can `v` be called? A class constructor and a proxy of a function can.
+    fn is_callable(&self, v: Local<'_>) -> bool;
 }
 
 /// Open the outermost scope of `e`.
@@ -696,6 +752,85 @@ impl<'s, E: Engine> Scope<'s, E> {
     #[doc(hidden)]
     pub fn engine(&mut self) -> &mut E {
         self.e
+    }
+}
+
+/// The base set of handler methods on a scope (plan step S0.4). See [`Engine`] for each one.
+impl<'s, E: Engine> Scope<'s, E> {
+    pub fn type_error(&mut self, msg: &str) -> Error<'s> {
+        self.e.type_error(msg)
+    }
+
+    pub fn range_error(&mut self, msg: &str) -> Error<'s> {
+        self.e.range_error(msg)
+    }
+
+    pub fn charge(&mut self, n: u64) -> Result<(), Error<'s>> {
+        self.e.charge(n)
+    }
+
+    pub fn to_number(&mut self, v: Local<'_>) -> Result<f64, Error<'s>> {
+        self.e.to_number(v)
+    }
+
+    pub fn to_string(&mut self, v: Local<'_>) -> Result<Local<'s>, Error<'s>> {
+        self.e.to_string(v)
+    }
+
+    pub fn to_boolean(&self, v: Local<'_>) -> bool {
+        self.e.to_boolean(v)
+    }
+
+    pub fn new_array(&mut self, items: &[Local<'_>]) -> Result<Local<'s>, Error<'s>> {
+        self.e.new_array(items)
+    }
+
+    pub fn is_array(&mut self, v: Local<'_>) -> Result<bool, Error<'s>> {
+        self.e.is_array(v)
+    }
+
+    pub fn intrinsic(&mut self, which: Intrinsic) -> Local<'s> {
+        self.e.intrinsic(which)
+    }
+
+    pub fn get_prototype_of(&mut self, obj: Local<'_>) -> Result<Option<Local<'s>>, Error<'s>> {
+        self.e.get_prototype_of(obj)
+    }
+
+    pub fn set_prototype_of(&mut self, obj: Local<'_>, proto: Option<Local<'_>>) -> Result<bool, Error<'s>> {
+        self.e.set_prototype_of(obj, proto)
+    }
+
+    pub fn define_accessor(&mut self, obj: Local<'_>, key: Local<'_>, get: Option<Local<'_>>, set: Option<Local<'_>>, attrs: Attrs) -> Result<(), Error<'s>> {
+        self.e.define_accessor(obj, key, get, set, attrs)
+    }
+
+    pub fn proto_from_new_target(&mut self, default: Local<'_>) -> Result<Local<'s>, Error<'s>> {
+        self.e.proto_from_new_target(default)
+    }
+
+    pub fn string_utf16(&mut self, units: &[u16]) -> Result<Local<'s>, Error<'s>> {
+        self.e.string_utf16(units)
+    }
+
+    pub fn wall_now_ms(&self) -> f64 {
+        self.e.wall_now_ms()
+    }
+
+    pub fn has_own(&mut self, obj: Local<'_>, key: Local<'_>) -> Result<bool, Error<'s>> {
+        self.e.has_own(obj, key)
+    }
+
+    pub fn own_keys(&mut self, obj: Local<'_>) -> Result<Vec<Local<'s>>, Error<'s>> {
+        self.e.own_keys(obj)
+    }
+
+    pub fn own_enumerable_data(&mut self, obj: Local<'_>, key: Local<'_>) -> Result<Option<Local<'s>>, Error<'s>> {
+        self.e.own_enumerable_data(obj, key)
+    }
+
+    pub fn is_callable(&self, v: Local<'_>) -> bool {
+        self.e.is_callable(v)
     }
 }
 
