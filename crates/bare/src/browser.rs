@@ -338,6 +338,8 @@ pub(crate) enum Owner {
     Url(ObjId),
     Params(ObjId),
     Iter(ObjId),
+    /// The `Location` of a frame window (`browser_frames.rs`).
+    Loc(ObjId),
 }
 
 impl Owner {
@@ -346,7 +348,7 @@ impl Owner {
         match self {
             Owner::Target(t) => Some(t),
             Owner::Xhr(o) | Owner::Abort(o) => Some(Target::Obj(o)),
-            Owner::Event(_) | Owner::Ctl(_) | Owner::Computed(_) | Owner::Source(_) | Owner::Reserved | Owner::Url(_) | Owner::Params(_) | Owner::Iter(_) => None,
+            Owner::Event(_) | Owner::Ctl(_) | Owner::Computed(_) | Owner::Source(_) | Owner::Reserved | Owner::Url(_) | Owner::Params(_) | Owner::Iter(_) | Owner::Loc(_) => None,
         }
     }
 }
@@ -887,7 +889,7 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
             }
             Some(Owner::Computed(o)) => crate::browser_computed::trace_owner(self, &st, o, t),
             Some(w @ (Owner::Url(_) | Owner::Params(_) | Owner::Iter(_))) => crate::browser_navigation::trace_owner(self, w, t),
-            Some(Owner::Reserved) | None => {}
+            Some(Owner::Loc(_) | Owner::Reserved) | None => {}
         }
     }
 
@@ -923,6 +925,9 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
             }
             if let Some(w @ (Owner::Url(_) | Owner::Params(_) | Owner::Iter(_))) = st.owners.get(k) {
                 crate::browser_navigation::prune_owner(self, w);
+            }
+            if let Some(Owner::Loc(o)) = st.owners.get(k) {
+                crate::browser_frames::prune_loc(self, o);
             }
             st.owners.release(k);
         }

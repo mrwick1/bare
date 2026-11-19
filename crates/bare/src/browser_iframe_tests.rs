@@ -236,3 +236,47 @@ fn blank_frame_document_knows_its_window_and_owns_its_nodes() {
         assert_eq!(js(&mut b, "var t = 0; w.setTimeout(function () { t = 1; }, 0); typeof w.getComputedStyle(d.body) + ',' + (w.document === d) + ',' + (w.window === w) + ',' + (w.parent === window)"), "object,true,true,true");
     });
 }
+
+#[test]
+fn a_frame_window_lives_while_its_element_wrapper_does() {
+    big(|| {
+        let mut b = browser("<!doctype html><body></body>");
+        // Only the element is held. The window and its `Location` are reached through the wrapper.
+        js(&mut b, "var f = document.body.appendChild(document.createElement('iframe')); f.contentWindow.mark = 'w'; f.contentDocument.mark = 'd';");
+        for _ in 0..3 {
+            b.collect(&[]).unwrap();
+        }
+        assert_eq!(js(&mut b, "var w = f.contentWindow; [w.mark, f.contentDocument.mark, w.document === f.contentDocument, w.location.href, w.parent === window, w.frameElement === f].join()"), "w,d,true,about:blank,true,true");
+        assert_eq!(b.dom.frames.locations(), 1);
+    });
+}
+
+#[test]
+fn a_window_that_a_script_holds_survives_the_removal_of_its_iframe() {
+    big(|| {
+        let mut b = browser("<!doctype html><body></body>");
+        js(&mut b, "var f = document.body.appendChild(document.createElement('iframe')); var w = f.contentWindow; w.mark = 'w'; w.document.mark = 'd'; var loc = w.location; f.remove(); f = null;");
+        for _ in 0..3 {
+            b.collect(&[]).unwrap();
+        }
+        assert_eq!(js(&mut b, "[w.mark, w.document.mark, w.window === w, loc === w.location, loc.href, loc.protocol, w.document.defaultView === w].join()"), "w,d,true,true,about:blank,about:,true");
+        assert_eq!(b.dom.frames.locations(), 1);
+    });
+}
+
+#[test]
+fn the_location_of_a_dead_frame_window_leaves_the_owner_table() {
+    big(|| {
+        let mut b = browser("<!doctype html><body></body>");
+        let locs = |b: &Browser| b.dom.st.borrow().owners.slots.iter().filter(|o| matches!(o, Some(crate::browser::Owner::Loc(_)))).count();
+        js(&mut b, "for (var i = 0; i < 20; i++) { var f = document.body.appendChild(document.createElement('iframe')); f.contentWindow.location.href; f.remove(); } f = null;");
+        assert_eq!((locs(&b), b.dom.frames.locations()), (20, 20));
+        b.collect(&[]).unwrap();
+        assert_eq!((locs(&b), b.dom.frames.locations()), (0, 0));
+        // The freed keys are reused: the next frame answers for its own `Location` only.
+        let slots = b.dom.st.borrow().owners.slots.len();
+        js(&mut b, "var g = document.body.appendChild(document.createElement('iframe')); var l = g.contentWindow.location;");
+        assert_eq!((locs(&b), b.dom.frames.locations(), b.dom.st.borrow().owners.slots.len() <= slots + 2), (1, 1, true));
+        assert_eq!(js(&mut b, "l.href + ',' + (l === g.contentWindow.location)"), "about:blank,true");
+    });
+}
