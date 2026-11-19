@@ -906,7 +906,6 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
             match st.owners.get(k) {
                 Some(Owner::Xhr(o)) => crate::browser_xhr::forget(self, o),
                 Some(Owner::Event(o)) => crate::browser_xhr::forget_event(self, o),
-                Some(Owner::Fetch(o)) => crate::browser_fetch::forget(self, o),
                 _ => {}
             }
             if let Some(Owner::Target(t @ Target::Node(n))) = st.owners.get(k)
@@ -940,6 +939,7 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
         }
         // After the keys are released, and after the old host's prune of the listener table.
         crate::browser_abort::prune(self, st);
+        crate::browser_fetch::prune(self, st);
         crate::browser_dataset::compact(self, datasets);
     }
 
