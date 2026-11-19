@@ -180,6 +180,67 @@ impl<'p> Interp<'p> {
         r
     }
 
+    /// An error of the interface as an error of this engine: the inverse of `api_err`.
+    fn api_unerr(&mut self, e: bare_js_api::Error<'_>) -> Error {
+        match e {
+            bare_js_api::Error::Throw(v) => Error::Throw(self.api_at(v)),
+            bare_js_api::Error::Abort(a) => self.api.abort.take().unwrap_or(match a {
+                bare_js_api::Abort::Limit(w) | bare_js_api::Abort::Unsupported(w) => unsupported(w, Span::default()),
+            }),
+        }
+    }
+
+    /// An iteration of the engine as an iteration of the interface. The source, owner, iterator and `next` go onto the handle stack
+    /// (roots); the position goes into `state`: word 0 the index (`Plain`) or the cursor sequence (`Coll`), word 1 the cursor epoch,
+    /// word 2 the kind in bits 0 and 1, `done` in bit 2, what in bits 3 and 4, the cursor position in bits 32 to 63.
+    fn api_iter<'s>(&mut self, it: It) -> bare_js_api::Iter<'s> {
+        let (a, b, kind, w0, w1, pos, what) = match it.kind {
+            ItKind::Plain => {
+                let a = self.api_push(it.src);
+                (a, a, 0, it.i as u64, 0, 0, 0)
+            }
+            ItKind::Coll { owner, what, cur } => {
+                let a = self.api_push(Value::Object(owner));
+                (a, a, 1, cur.next_seq, cur.epoch, cur.pos, what as u64)
+            }
+            ItKind::Generic { iter, next } => {
+                let (a, b) = (self.api_push(iter), self.api_push(next));
+                (a, b, 2, 0, 0, 0, 0)
+            }
+        };
+        bare_js_api::Iter::from_parts(a, b, [w0, w1, kind | (it.done as u64) << 2 | what << 3 | (pos as u64) << 32])
+    }
+
+    /// The engine's iteration of an iteration of the interface.
+    fn api_it(&self, it: &bare_js_api::Iter<'_>) -> It {
+        let (a, b, [w0, w1, w2]) = it.parts();
+        let (a, pos) = (self.api_at(a), (w2 >> 32) as u32);
+        let kind = match w2 & 3 {
+            0 => ItKind::Plain,
+            1 => {
+                let what = match w2 >> 3 & 3 {
+                    0 => IterWhat::Keys,
+                    1 => IterWhat::Values,
+                    _ => IterWhat::Entries,
+                };
+                let Value::Object(owner) = a else { unreachable!("a collection iteration keeps its owner") };
+                ItKind::Coll { owner, what, cur: Cursor { next_seq: w0, pos, epoch: w1 } }
+            }
+            _ => ItKind::Generic { iter: a, next: self.api_at(b) },
+        };
+        It { src: a, i: w0 as usize, kind, done: w2 >> 2 & 1 == 1 }
+    }
+
+    /// The position of `it` back into the iteration of the interface (the locals do not change).
+    fn api_iter_save(it: &It, out: &mut bare_js_api::Iter<'_>) {
+        let (w0, w1, pos, what, kind) = match it.kind {
+            ItKind::Plain => (it.i as u64, 0, 0, 0, 0),
+            ItKind::Coll { what, cur, .. } => (cur.next_seq, cur.epoch, cur.pos, what as u64, 1),
+            ItKind::Generic { .. } => (0, 0, 0, 0, 2),
+        };
+        out.set_state([w0, w1, kind | (it.done as u64) << 2 | what << 3 | (pos as u64) << 32]);
+    }
+
     /// `call_host` for a realm whose host came through the interface. Kept apart, so the old host path does not change.
     #[cold]
     fn call_api_host(&mut self, id: u32, this: Value, args: &[Value], is_new: bool, nt: Option<ObjId>) -> Result<Value, Error> {
@@ -369,6 +430,83 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
             }
             Err(e) => Err(self.api_err(e)),
         }
+    }
+
+    fn new_promise<'s>(&mut self) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
+        match Interp::host_new_promise(self) {
+            Ok(p) => Ok(self.api_push(p)),
+            Err(e) => Err(self.api_err(e)),
+        }
+    }
+
+    fn resolve_promise<'s>(&mut self, p: bare_js_api::Local<'_>, v: bare_js_api::Local<'_>) -> Result<(), bare_js_api::Error<'s>> {
+        Interp::host_resolve_promise(self, self.api_at(p), self.api_at(v)).map_err(|e| self.api_err(e))
+    }
+
+    fn reject_promise<'s>(&mut self, p: bare_js_api::Local<'_>, reason: bare_js_api::Local<'_>) -> Result<(), bare_js_api::Error<'s>> {
+        Interp::host_reject_promise(self, self.api_at(p), self.api_at(reason)).map_err(|e| self.api_err(e))
+    }
+
+    fn promise_then<'s>(&mut self, p: bare_js_api::Local<'_>, ok: bare_js_api::Local<'_>, err: bare_js_api::Local<'_>) -> Result<(), bare_js_api::Error<'s>> {
+        Interp::host_promise_then(self, self.api_at(p), self.api_at(ok), self.api_at(err)).map_err(|e| self.api_err(e))
+    }
+
+    fn promise_react<'s>(&mut self, x: bare_js_api::Local<'_>, ok: bare_js_api::Local<'_>, err: bare_js_api::Local<'_>) -> Result<(), bare_js_api::Error<'s>> {
+        Interp::host_promise_react(self, self.api_at(x), self.api_at(ok), self.api_at(err)).map_err(|e| self.api_err(e))
+    }
+
+    fn promise_status<'s>(&mut self, v: bare_js_api::Local<'_>) -> Option<bare_js_api::PromiseState<'s>> {
+        use bare_js_api::PromiseState;
+        Some(match Interp::promise_status(self, self.api_at(v))? {
+            PromiseStatus::Pending => PromiseState::Pending,
+            PromiseStatus::Fulfilled(x) => PromiseState::Fulfilled(self.api_push(x)),
+            PromiseStatus::Rejected(x) => PromiseState::Rejected(self.api_push(x)),
+        })
+    }
+
+    fn queue_microtask<'s>(&mut self, cb: bare_js_api::Local<'_>) -> Result<(), bare_js_api::Error<'s>> {
+        Interp::queue_microtask(self, self.api_at(cb)).map_err(|e| self.api_err(e))
+    }
+
+    fn checkpoint<'s>(&mut self) -> Result<usize, bare_js_api::Error<'s>> {
+        Interp::host_checkpoint(self).map_err(|e| self.api_err(e))
+    }
+
+    fn drain_microtasks<'s>(&mut self) -> Result<usize, bare_js_api::Error<'s>> {
+        Interp::drain_microtasks(self).map_err(|e| self.api_err(e))
+    }
+
+    fn pending_jobs(&self) -> usize {
+        Interp::pending_jobs(self)
+    }
+
+    fn clear_failed_job(&mut self) {
+        Interp::clear_failed_job(self);
+    }
+
+    fn iter_open<'s>(&mut self, v: bare_js_api::Local<'_>) -> Result<Option<bare_js_api::Iter<'s>>, bare_js_api::Error<'s>> {
+        match Interp::host_iter_open(self, self.api_at(v)) {
+            Ok(it) => Ok(it.map(|h| self.api_iter(h.0))),
+            Err(e) => Err(self.api_err(e)),
+        }
+    }
+
+    fn iter_next<'s>(&mut self, it: &mut bare_js_api::Iter<'s>) -> Result<Option<bare_js_api::Local<'s>>, bare_js_api::Error<'s>> {
+        let mut h = HostIter(self.api_it(it));
+        let r = Interp::host_iter_next(self, &mut h);
+        Self::api_iter_save(&h.0, it);
+        match r {
+            Ok(v) => Ok(v.map(|v| self.api_push(v))),
+            Err(e) => Err(self.api_err(e)),
+        }
+    }
+
+    fn iter_fail<'s>(&mut self, it: &mut bare_js_api::Iter<'s>, err: bare_js_api::Error<'s>) -> bare_js_api::Error<'s> {
+        let err = self.api_unerr(err);
+        let mut h = HostIter(self.api_it(it));
+        let err = Interp::host_iter_fail(self, &mut h, err);
+        Self::api_iter_save(&h.0, it);
+        self.api_err(err)
     }
 
     fn safepoint(&mut self) {}

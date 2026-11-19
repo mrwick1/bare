@@ -486,6 +486,7 @@ fn context(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> R<Value> {
         let w = d.child_window(it, id)?;
         if let (Value::Object(o), Some(mut s)) = (w, d.frames.state_mut()) {
             s.contexts.insert(n, o);
+            d.wrapper_edges.set(true);
         }
         return Ok(w);
     }
@@ -534,11 +535,13 @@ fn context(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> R<Value> {
         it.heap.set_prototype_of(o, Some(it.global_object())).map_err(|e| it.heap_error(e))?;
         let mut s = d.frames.state_mut().expect("activated");
         s.docs.insert(dn, o);
+        d.wrapper_edges.set(true);
         s.locs.insert(loc);
     } else {
         // The parent global must not answer for a frame with a child document that is never loaded.
         it.define_data(o, k, Value::Undefined, false, true, true)?;
     }
+    d.wrapper_edges.set(true);
     d.frames
         .state_mut()
         .as_mut()
@@ -630,18 +633,12 @@ pub(crate) fn note_owner(d: &Dom, it: &mut Interp<'_>, this: Value, made: Value)
         s.owned.insert(m, t);
     }
 }
+/// The references of the wrapper of the node `n`: the window and the document of its frame.
 #[cold]
-pub(crate) fn trace(d: &Dom, owner: ObjId, out: &mut Vec<Value>) {
+pub(crate) fn trace_node(d: &Dom, n: NodeId, t: &mut bare_js_api::Tracer<'_, Value>) {
     if let Some(s) = d.frames.state().as_ref() {
-        for (&n, &o) in &s.contexts {
-            if d.st.borrow().wrapper(n) == Some(owner) {
-                out.push(Value::Object(o));
-            }
-        }
-        for (&n, &o) in &s.docs {
-            if d.st.borrow().wrapper(n) == Some(owner) {
-                out.push(Value::Object(o));
-            }
+        for &o in s.contexts.get(&n).into_iter().chain(s.docs.get(&n)) {
+            crate::browser_sources::visit(t, Value::Object(o));
         }
     }
 }

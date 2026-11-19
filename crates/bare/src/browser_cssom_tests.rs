@@ -283,3 +283,114 @@ fn a_collect_between_creating_and_reading_leaves_no_stale_entry() {
         }
     });
 }
+
+#[test]
+fn a_sheet_that_a_script_holds_keeps_its_identity_after_a_collect() {
+    big(|| {
+        let mut b = browser("<style id=s>.a { color: red }</style><p>x</p>");
+        assert_eq!(js(&mut b, "var held = document.getElementById('s').sheet; held.mark = 3; 1"), "1");
+        // The wrapper of the element dies with the script variable that held it. The held sheet stays, and so does `el.sheet`.
+        collect(&mut b);
+        collect(&mut b);
+        assert_eq!(js(&mut b, "var el = document.getElementById('s'); [el.sheet === el.sheet, el.sheet === held, held.mark, held.ownerNode === el, held.cssRules[0].selectorText].join()"), "true,true,3,true,.a");
+        // The wrapper of an element in the tree stays (the document wrapper reaches it), so its sheet stays too, with no script variable.
+        assert_eq!(js(&mut b, "held = null; el = null; 1"), "1");
+        collect(&mut b);
+        collect(&mut b);
+        assert_eq!(crate::browser_cssom::table_sizes(&b.dom).2, 1);
+        // Removed from the tree and held by no script: the wrapper goes, and the sheet with it. A new read makes a new sheet.
+        assert_eq!(js(&mut b, "var e = document.getElementById('s'); e.remove(); e = null; 1"), "1");
+        collect(&mut b);
+        collect(&mut b);
+        assert_eq!(crate::browser_cssom::table_sizes(&b.dom).2, 0);
+        assert_eq!(js(&mut b, "document.head.appendChild(document.createElement('style')).textContent = '.a { color: red }'; 1"), "1");
+        assert_eq!(js(&mut b, "var e2 = document.querySelector('style'); [e2.sheet === e2.sheet, e2.sheet.mark === undefined, e2.sheet.cssRules[0].selectorText].join()"), "true,true,.a");
+    });
+}
+
+#[test]
+fn a_held_rule_keeps_its_sheet_and_a_dropped_rule_is_collected() {
+    big(|| {
+        let mut b = browser("<style>.a { color: red } .b { top: 1px } @media screen { .m { left: 2px } }</style>");
+        assert_eq!(js(&mut b, "var sh = document.styleSheets[0], r = sh.cssRules[0], st = r.style, md = sh.cssRules[2].media; sh.cssRules[1].selectorText + st.color + md.mediaText"), ".bredscreen");
+        assert_eq!(js(&mut b, "sh.deleteRule(1); 1"), "1");
+        assert_eq!(js(&mut b, "document.querySelector('style').remove(); document.styleSheets.length"), "0");
+        // Only `r`, `st` and `md` are held. `sh` is a variable too: drop it, so the rule must keep the sheet.
+        assert_eq!(js(&mut b, "sh = null; 1"), "1");
+        collect(&mut b);
+        collect(&mut b);
+        let (rules, _, sheets, decls, medias) = crate::browser_cssom::table_sizes(&b.dom);
+        assert_eq!((sheets, medias), (1, 1), "the held rule and media list keep the sheet");
+        assert!(rules >= 2 && decls == 1, "{rules} {decls}");
+        assert_eq!(js(&mut b, "[r.parentStyleSheet !== null, r.selectorText, st.color, md.mediaText].join()"), "true,.a,red,screen");
+        // A media list keeps its rule, the rule keeps its sheet, and the list of the sheet keeps the other rule and its declaration.
+        assert_eq!(js(&mut b, "r = null; st = null; 1"), "1");
+        collect(&mut b);
+        let (rules, _, sheets, decls, medias) = crate::browser_cssom::table_sizes(&b.dom);
+        assert_eq!((rules, sheets, decls, medias), (2, 1, 1, 1));
+        assert_eq!(js(&mut b, "md = null; 1"), "1");
+        collect(&mut b);
+        assert_eq!(crate::browser_cssom::table_sizes(&b.dom), (0, 1, 0, 0, 0));
+    });
+}
+
+#[test]
+fn an_adopted_sheet_lives_with_its_root() {
+    big(|| {
+        let mut b = browser("<div id=h></div><p id=p>x</p>");
+        assert_eq!(js(&mut b, "var sh = new CSSStyleSheet(); sh.replaceSync('#p { color: red }'); document.adoptedStyleSheets = [sh]; sh = null; 1"), "1");
+        collect(&mut b);
+        collect(&mut b);
+        assert_eq!(crate::browser_cssom::table_sizes(&b.dom).2, 1);
+        assert_eq!(js(&mut b, "[document.adoptedStyleSheets.length, document.adoptedStyleSheets[0].cssRules[0].selectorText, getComputedStyle(document.getElementById('p')).color].join()"), "1,#p,rgb(255, 0, 0)");
+        // A shadow root that a script holds keeps what it adopted. The host and the root are held by the script.
+        assert_eq!(js(&mut b, "var root = document.getElementById('h').attachShadow({ mode: 'open' }); var s2 = new CSSStyleSheet(); s2.replaceSync(':host { top: 1px }'); root.adoptedStyleSheets = [s2]; s2 = null; 1"), "1");
+        collect(&mut b);
+        collect(&mut b);
+        assert_eq!(crate::browser_cssom::table_sizes(&b.dom).2, 2);
+        assert_eq!(js(&mut b, "root.adoptedStyleSheets[0].cssRules[0].selectorText"), ":host");
+        // The adopted list is cleared: nothing reaches the sheet any more.
+        assert_eq!(js(&mut b, "root.adoptedStyleSheets = []; document.adoptedStyleSheets = []; 1"), "1");
+        collect(&mut b);
+        assert_eq!(crate::browser_cssom::table_sizes(&b.dom).2, 0);
+    });
+}
+
+#[test]
+fn a_reused_key_answers_for_the_new_object_only() {
+    big(|| {
+        let mut b = browser("<style>.a { color: red }</style>");
+        assert_eq!(js(&mut b, "var sh = document.styleSheets[0]; var rr = []; for (var i = 0; i < 20; i++) { sh.insertRule('.t' + i + ' { top: ' + i + 'px }', 0); rr.push(sh.cssRules[0]); } rr[0].style.top + rr[19].selectorText"), "0px.t19");
+        assert_eq!(js(&mut b, "rr = null; sh.cssRules.length"), "21");
+        // The 20 rules are dead. Their keys go to the objects made next.
+        collect(&mut b);
+        assert_eq!(js(&mut b, "for (var i = 0; i < 20; i++) { sh.deleteRule(0); } var n = []; for (var i = 0; i < 20; i++) { sh.insertRule('@media print { .u' + i + ' { top: 0 } }', 0); n.push(sh.cssRules[0]); } n[0].media.mediaText + n[19].cssRules[0].selectorText + n[5].cssRules[0].style.top"), "print.u190");
+        collect(&mut b);
+        collect(&mut b);
+        assert_eq!(js(&mut b, "[n[0].media.mediaText, n[19].cssRules[0].selectorText, n[7].parentStyleSheet === sh, sh.cssRules.length, sh.cssRules[0] === n[19]].join()"), "print,.u19,true,21,true");
+    });
+}
+
+#[test]
+fn a_shadow_root_that_no_script_holds_keeps_its_adopted_sheet() {
+    big(|| {
+        let mut b = browser("<div id=h></div>");
+        assert_eq!(js(&mut b, "var s = new CSSStyleSheet(); s.replaceSync('p { color: red }'); var r = document.getElementById('h').attachShadow({ mode: 'open' }); r.innerHTML = '<p>x</p>'; r.adoptedStyleSheets = [s]; s = null; r = null; 1"), "1");
+        collect(&mut b);
+        collect(&mut b);
+        assert_eq!(crate::browser_cssom::table_sizes(&b.dom).2, 1);
+        assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('h').shadowRoot.firstChild).color"), "rgb(255, 0, 0)");
+    });
+}
+
+#[test]
+fn a_detached_shadow_root_that_no_script_holds_leaves_no_adopted_entry() {
+    big(|| {
+        let mut b = browser("<div id=h></div><p id=p>x</p>");
+        assert_eq!(js(&mut b, "var s = new CSSStyleSheet(); s.replaceSync('p { color: red }'); var h = document.createElement('div'); var r = h.attachShadow({ mode: 'open' }); r.adoptedStyleSheets = [s]; s = h = r = null; 1"), "1");
+        collect(&mut b);
+        collect(&mut b);
+        assert_eq!(crate::browser_cssom::table_sizes(&b.dom).2, 0);
+        assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('p')).color"), "rgb(0, 0, 0)");
+    });
+}

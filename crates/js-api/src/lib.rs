@@ -429,6 +429,48 @@ pub enum Abort {
     Unsupported(&'static str),
 }
 
+/// Promises rejected with no handler that wait for the next checkpoint. Both engines keep at most this many and count the rest
+/// (the `dropped` argument of [`Host::promise_rejections`]).
+pub const MAX_PENDING_REJECTIONS: usize = 1024;
+
+/// The state of a promise ([`Scope::promise_status`]). The value is a local of the scope.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PromiseState<'s> {
+    Pending,
+    Fulfilled(Local<'s>),
+    Rejected(Local<'s>),
+}
+
+/// An open iteration over a script iterable ([`Scope::iter_open`]). The engine keeps the iterator and its `next` method in two locals
+/// of the scope, so they are roots. An engine that steps some iterables with no iterator object (an array by index) keeps the
+/// position in `state`; the host does not read it. Not `Clone`: one iteration, one place. Use it in the scope that opened it.
+#[derive(Debug)]
+pub struct Iter<'s> {
+    a: Local<'s>,
+    b: Local<'s>,
+    state: [u64; 3],
+}
+
+impl<'s> Iter<'s> {
+    /// For engines: an iteration of the locals `a` and `b` and the position `state`.
+    #[doc(hidden)]
+    pub fn from_parts(a: Local<'s>, b: Local<'s>, state: [u64; 3]) -> Self {
+        Iter { a, b, state }
+    }
+
+    /// For engines: the locals and the position.
+    #[doc(hidden)]
+    pub fn parts(&self) -> (Local<'s>, Local<'s>, [u64; 3]) {
+        (self.a, self.b, self.state)
+    }
+
+    /// For engines: store the position.
+    #[doc(hidden)]
+    pub fn set_state(&mut self, state: [u64; 3]) {
+        self.state = state;
+    }
+}
+
 /// The host side of the browser: the engine calls it for host functions.
 pub trait Host<E: Engine> {
     /// Run host function `id` (from [`Scope::host_function`]). `is_new` is true for `new f()`.
@@ -438,6 +480,24 @@ pub trait Host<E: Engine> {
     fn trace(&self, _key: u32, _t: &mut Tracer<'_, E::Raw>) {}
     /// The owners with these keys died in the last collection. Their `Traced` values are dangling: drop them.
     fn prune(&self, _dead: &[u32]) {}
+
+    // Microtasks. The engine will call these hooks with the handles of its own scope: it pushes the locals before the call and drops
+    // them after it. (The old engine does not call them yet; it keeps its own hooks.)
+
+    /// A `queueMicrotask` callback threw `thrown`. Record it without running script that can fail (read data properties only). The
+    /// queue goes on.
+    fn report_exception<'s>(&self, _s: &mut Scope<'s, E>, _thrown: Local<'s>) {}
+    /// Before each microtask job and once when the queue is empty, with an empty script stack, so the host can run a script before
+    /// the next job. An error ends the checkpoint like a failed job.
+    fn between_jobs<'s>(&self, _s: &mut Scope<'s, E>) -> Result<(), Error<'s>> {
+        Ok(())
+    }
+    /// The end of a microtask checkpoint. `unhandled`: promises rejected with no handler that still have none, oldest first.
+    /// `handled`: promises given here before that got a handler since. `dropped`: rejections over [`MAX_PENDING_REJECTIONS`] since
+    /// the last call. Script may run. An error ends the checkpoint.
+    fn promise_rejections<'s>(&self, _s: &mut Scope<'s, E>, _unhandled: &[Local<'s>], _handled: &[Local<'s>], _dropped: u32) -> Result<(), Error<'s>> {
+        Ok(())
+    }
 
     // Host-filled properties. An object that the engine made with a host key (an indexed or a named object) has
     // properties that the host gives when the engine reads them, so they are always live. These methods get the object that was
@@ -541,6 +601,44 @@ pub trait Engine: Sized {
     }
     /// Register `obj` as an owner with host key `key`. A key that the host gives again replaces the old one of this object.
     fn set_host_owner<'s>(&mut self, obj: Local<'_>, key: u32) -> Result<(), Error<'s>>;
+
+    // Promises and microtasks. The engine owns the promise state and the job queue. The host holds a promise as a `Local`
+    // (settled in the call that made it), a `Persistent` (settled later) or a `Traced` (an owner's pending promise).
+
+    /// A new pending promise, with no resolving functions: the host settles it once with [`Engine::resolve_promise`] or
+    /// [`Engine::reject_promise`].
+    fn new_promise<'s>(&mut self) -> Result<Local<'s>, Error<'s>>;
+    /// Resolve `p` with the promise resolve function rules (a thenable is assimilated in a job). Reactions run at the next
+    /// checkpoint, never here. Not a promise: `Abort::Unsupported`.
+    fn resolve_promise<'s>(&mut self, p: Local<'_>, v: Local<'_>) -> Result<(), Error<'s>>;
+    /// Reject `p` with `reason`. See [`Engine::resolve_promise`].
+    fn reject_promise<'s>(&mut self, p: Local<'_>, reason: Local<'_>) -> Result<(), Error<'s>>;
+    /// Attach reactions to the native promise `p`. Reads no `then` or `constructor`. Not a promise: `Abort::Unsupported`.
+    fn promise_then<'s>(&mut self, p: Local<'_>, ok: Local<'_>, err: Local<'_>) -> Result<(), Error<'s>>;
+    /// `PromiseResolve(%Promise%, x)`, then [`Engine::promise_then`]. A thenable is assimilated in a job. Reading `x.constructor` may
+    /// run script.
+    fn promise_react<'s>(&mut self, x: Local<'_>, ok: Local<'_>, err: Local<'_>) -> Result<(), Error<'s>>;
+    /// The state of `v`, or `None` when it is not a promise. The value of a settled promise is a new local.
+    fn promise_status<'s>(&mut self, v: Local<'_>) -> Option<PromiseState<'s>>;
+    /// Queue `cb` as a microtask. The engine keeps it alive until it ran. Not callable: a `TypeError`.
+    fn queue_microtask<'s>(&mut self, cb: Local<'_>) -> Result<(), Error<'s>>;
+    /// A microtask checkpoint from a host call with a script function on the stack below: it does nothing then (the HTML rule). Gives the
+    /// number of jobs that ran. It may collect; the locals of the scope stay valid.
+    fn checkpoint<'s>(&mut self) -> Result<usize, Error<'s>>;
+    /// The microtask checkpoint, with an empty stack: run the jobs until the queue is empty. Gives the number of jobs that ran. A
+    /// call with a script on the stack is `Abort::Unsupported`. It may collect; the locals of the scope stay valid.
+    fn drain_microtasks<'s>(&mut self) -> Result<usize, Error<'s>>;
+    /// The jobs in the queue.
+    fn pending_jobs(&self) -> usize;
+    /// Forget the error of a failed job, so that later drains work. The job that failed is lost.
+    fn clear_failed_job(&mut self);
+
+    /// `GetIterator(v)`. `None` when `v` is `undefined`, `null` or has no `Symbol.iterator`.
+    fn iter_open<'s>(&mut self, v: Local<'_>) -> Result<Option<Iter<'s>>, Error<'s>>;
+    /// The next value as a new local, or `None` at the end. After `None` or an error the iteration is done for good. Charges one step.
+    fn iter_next<'s>(&mut self, it: &mut Iter<'s>) -> Result<Option<Local<'s>>, Error<'s>>;
+    /// Stop because of `err` (`IteratorClose`): calls `return` and keeps `err`, unless `err` is an abort. Gives the error to pass on.
+    fn iter_fail<'s>(&mut self, it: &mut Iter<'s>, err: Error<'s>) -> Error<'s>;
 
     /// A point where the collector may run.
     fn safepoint(&mut self);
@@ -742,6 +840,64 @@ impl<'s, E: Engine> Scope<'s, E> {
 
     pub fn set_host(&mut self, host: Rc<dyn Host<E>>) {
         self.e.set_host(host);
+    }
+
+    pub fn new_promise(&mut self) -> Result<Local<'s>, Error<'s>> {
+        self.e.new_promise()
+    }
+
+    pub fn resolve_promise(&mut self, p: Local<'_>, v: Local<'_>) -> Result<(), Error<'s>> {
+        self.e.resolve_promise(p, v)
+    }
+
+    pub fn reject_promise(&mut self, p: Local<'_>, reason: Local<'_>) -> Result<(), Error<'s>> {
+        self.e.reject_promise(p, reason)
+    }
+
+    pub fn promise_then(&mut self, p: Local<'_>, ok: Local<'_>, err: Local<'_>) -> Result<(), Error<'s>> {
+        self.e.promise_then(p, ok, err)
+    }
+
+    pub fn promise_react(&mut self, x: Local<'_>, ok: Local<'_>, err: Local<'_>) -> Result<(), Error<'s>> {
+        self.e.promise_react(x, ok, err)
+    }
+
+    pub fn promise_status(&mut self, v: Local<'_>) -> Option<PromiseState<'s>> {
+        self.e.promise_status(v)
+    }
+
+    pub fn queue_microtask(&mut self, cb: Local<'_>) -> Result<(), Error<'s>> {
+        self.e.queue_microtask(cb)
+    }
+
+    pub fn checkpoint(&mut self) -> Result<usize, Error<'s>> {
+        self.e.checkpoint()
+    }
+
+    pub fn drain_microtasks(&mut self) -> Result<usize, Error<'s>> {
+        self.e.drain_microtasks()
+    }
+
+    pub fn pending_jobs(&self) -> usize {
+        self.e.pending_jobs()
+    }
+
+    pub fn clear_failed_job(&mut self) {
+        self.e.clear_failed_job();
+    }
+
+    pub fn iter_open(&mut self, v: Local<'_>) -> Result<Option<Iter<'s>>, Error<'s>> {
+        self.e.iter_open(v)
+    }
+
+    /// The next item as a new local. A loop over a large iterable runs each step in an inner scope and moves the item out with
+    /// [`Scope::escape_scope`], or keeps it in a [`Persistent`].
+    pub fn iter_next(&mut self, it: &mut Iter<'s>) -> Result<Option<Local<'s>>, Error<'s>> {
+        self.e.iter_next(it)
+    }
+
+    pub fn iter_fail(&mut self, it: &mut Iter<'s>, err: Error<'s>) -> Error<'s> {
+        self.e.iter_fail(it, err)
     }
 
     pub fn safepoint(&mut self) {

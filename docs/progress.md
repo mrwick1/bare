@@ -13770,3 +13770,282 @@ Cost matrix: base is `4724ff24` (origin/main `e37f02e0` plus the cssom_load rows
 Checks: Linux `cargo test --locked -p bare --lib` filters `computed` (66 passed), `style` (96), `cssom` (21); `cargo test --locked -p bare-js-api -p bare-js -p bare --lib` all pass. Windows 11 VM (cargo xwin test binary): the same three filters, 66, 96 and 21 passed.
 
 Not tested: Windows with `BARE_GC_STRESS`; Windows cost; the full matrix after the fix; a callgrind split of the 130 instructions; the jemalloc count of `computed 1`.
+## 2026-11-19: design of promises, fetch and modules on the host interface (plan step S0.4)
+
+- Documents: `docs/design-host-microtasks.md`, `docs/design-host-fetch.md`, `docs/design-host-modules.md` (PR #708). Static design; module costs and `Persistent` costs are hypotheses.
+- Owner decisions (2026-11-19): option A in all three, and every proposed answer. The handler bodies move to `Scope` and `Local` in one later PR. Module ids stay `u32`. Headers objects register as owners.
+- Build order: M1 (promise interface), M2, M3; F1 to F4 (F4 after M1); MD0 (module cost row), MD1 (after M1), MD2. M1 and MD0 started.
+## 2026-11-19: design of forms, CSSOM and navigation on the host interface (plan step S0.4)
+
+- Documents: `docs/design-host-forms.md`, `docs/design-host-cssom.md`, `docs/design-host-navigation.md` (PR #709). Callgrind, archMachine, base `37df5bd1`, one run per row. New-owner costs are hypotheses.
+- Measured: lazy CSSOM accessors would remove about 2.2 M instructions per page start; the navigation owners gain about 1.7% on `url 1`; forms gain nothing measurable.
+- Owner decisions (2026-11-19): every proposed answer. Navigation first, CSSOM next, forms last. Each area gets its cost rows first. The 65,536 object caps stay until the new engine collects in a task. M1 defines the iteration methods.
+## 2026-11-19: fetch roots in persistent handles (plan step S0.4, F1)
+
+Step F1 of `docs/design-host-fetch.md`. The four `roots` calls of fetch, streams, abort and XHR leave the old hook (`Dom::roots`). A `Persistent` of `bare-js-api` roots each value that they gave.
+
+Changes:
+
+- `Pending` holds one `Persistent` (`root`): the promise of a `fetch`, or the `XMLHttpRequest` object of an XHR. The design names two fields (`promise`, `xhr`); one handle covers both, because the XHR object id is already in `xhr`. `OpenStream` holds one for its XHR object. A request that settles, is aborted or is dequeued drops its handle. `run_network_tasks` reads the promise from the handle inside the scope, so the promise stays rooted while `finish` allocates. `queue_xhr`, `queue_xhr_blob` and `queue_xhr_stream` take `it` for this.
+- `Fetch::{fixed, json_parse, json_stringify, drain}`, `AbortHost::held` and `XhrHost::held` hold the prototypes, constructors, templates and intrinsic functions as `Persistent`. The six reaction templates of the streams moved from `Streams::roots` into `fixed`. The id fields (`protos`, `Fns`, `AbortHost::objs`, `Made`) stay: handler bodies still use `ObjId` and move in one later PR (owner decision).
+- `browser.rs`: the four `roots` calls are gone. The old `trace` and `prune` calls are not changed.
+- No change to `bare-js-api` or `bare-js`.
+
+Cost matrix (archMachine, base = origin/main `37df5bd1`, new = this branch, 3 runs per row, 805 rows, `-j4`, glibc; jemalloc for rows over the limit): rows over +0.5% under both allocators: 0. Mean change +0.007% (glibc). Two rows were over under glibc only (`preload_load style 10` +0.592%, `resources_load small 10` +1.466%). On a second run with jemalloc on every row they were not over: glibc and jemalloc mean +0.046% and -0.728% for the two rows. Rows of this change (glibc): `fetch_load post 1` +0.04%, `post 10` +0.07%, `bytes 1` +0.03%, `bytes 10` +0.11%, `objects 1` -0.00%, `objects 10` -0.00%, `iterate 1` +0.01%, `iterate 10` +0.01%; `streams_load flow 1` -0.00%, `many 1` +0.01%, `pending 1` +0.04%, `churn 1` +0.00%, `pending 10` +0.03%; `xhr_load 1` +0.07%, `xhr_load 100` +0.09%; `web_apis_load abort 1` +0.03%, `abort 10` +0.07%. `parse_load deep 1` and `deep 10` fail to run (stack overflow) on the base too.
+
+Checks:
+
+- New tests (`browser_fetch_tests`): a fetch whose promise the script dropped settles after two collections and its handle slot is reused (this test failed before the change: 0 slots); a collection between `send()` and the reply keeps the XHR object; the constants (`Response`, `Response.json`, the `drain` shim, `ReadableStream` pull, `Headers`, `Request`, `XMLHttpRequest`, `fetch`, `AbortController`) work after 3 collections. The last two passed before the change too (they pin the behavior).
+- `a_cleared_or_finished_timer_frees_its_callback_at_the_next_collect` counted all persistent slots. It now counts from the slots that exist before its loop, because the constants add handles.
+- Linux: `bare` lib 1650 passed (filters `fetch` 90, `xhr` 13, `stream` 47, `abort` 16, `scheduler` 42); `bare-js` lib 1047 passed; `bare-js-api` 5 passed.
+- Windows 11 VM, filters `fetch` 90, `xhr` 13, `abort` 16, `scheduler` 42 pass. Filter `stream`: 46 of 47 with 4 test threads; `a_preload_link_that_no_script_takes_does_not_delay_load_or_hold_the_page` failed once ("the preload did not start"), and it passed alone 3 of 3 times and in a run with 1 test thread (47 of 47). Hypothesis: a timing flake under load; not run against a base build on the VM.
+
+Not tested: `BARE_GC_STRESS` (not on main yet); a collection inside a task (S1.6); the staging journey A/B; wall time; a full `bare` run on the VM. `run_streams` drops the handle of a closed stream before it delivers the last messages, so that XHR object is unrooted for that delivery (the same as before this change; a task cannot collect today).
+
+## 2026-11-19: XHR and abort objects as owners (plan step S0.4, F2)
+
+Step F2 of `docs/design-host-fetch.md`. An `XMLHttpRequest` object, its upload object, an `AbortSignal` and an `AbortController` are owners of their entries. The `xhr` and `abort` lines of the old `trace` and `prune` hooks leave `Dom`.
+
+Changes:
+
+- `Owner::Xhr(o)` (an XHR object or its upload object), `Owner::Abort(o)` (a signal) and `Owner::Ctl(o)` (a controller). Each object gets its key when it is made and registers with `set_host_owner_obj`. The key is in the entry (`Xhr::key`, `Sig::key`, the value of `ups` and `ctls`). `Dom::own` takes that key for the first listener of such an object, so an object has one key (an XHR object and a signal are also event targets). `Owner::target` maps the three variants to the listener target; `Host::trace` visits the listeners and then the entry.
+- Edges are `Traced`: `Xhr::{upload, cache}`, `Sig::{reason, Algo::Fetch}`, the signal of a controller. `Sig::sources` and `Sig::deps` are weak lists of host keys. A key resolves through the owner table (`Owner::Abort(o)`).
+- `prune(dead)`: an XHR or upload object goes with its key (`xhr::forget`); a dead event drops its progress numbers (`xhr::forget_event`, `prog` is keyed by the `ProgressEvent` object). Signals and controllers go in one pass over the tables after the keys are released (`browser_abort::prune`): an entry whose key is free goes, a live signal drops the free keys from its weak lists and the abort algorithms of listeners that are gone. The pass runs after the old host's prune of the listener table, as the old order rule asks. A per-key `remove` of each signal cost +1.05% on `web_apis_load abort 1` (a hash remove for each dead signal); the single pass has the complexity of the old `retain`.
+- `XhrHost::active` is gone, with its four stores. `Dom::trace` and `Dom::prune` have no `xhr` or `abort` line.
+- Test-only: `Dom::xhr_entries` and `Dom::abort_entries` count the entries.
+- No change to `bare-js-api` or `bare-js`.
+
+Cost matrix (archMachine, base = F1 head `fabd5458` built in `/data/bare-tmp/s0/base-f2`, 807 rows, 3 runs per row, `-j4`; jemalloc for the rows over the limit under glibc): rows over +0.5% under both allocators: 0. Mean change -0.043% (glibc). Over under glibc only: `resources_load small 1` +0.75% (jemalloc +0.28%; known noise). `parse_load deep 1` and `10` fail to run on both trees. Rows of this change (glibc): `web_apis_load abort 1` +0.340% (jemalloc +0.320%), `abort 10` +0.476% (jemalloc +0.441%); `xhr_load 1` -0.700%, `100` -0.448%; `fetch_load post 1` -0.207%, `post 10` -0.224%, `bytes 1` -0.117%, `bytes 10` -0.440%, `objects 1` -0.257%, `objects 10` -0.276%, `iterate 1` -0.111%, `iterate 10` -0.114%. A first version that removed each dead signal by key was +1.049% and +1.199% on the abort rows under glibc and +0.972% and +1.181% under jemalloc. Callgrind of `abort 1` (symbols, one run for each tree) showed `abort::forget` at 1.14 M against 0.54 M for the old `abort::prune`; that led to the single pass. The abort rows keep a small cost: each of the 7 objects of a round makes an owner key and a `set_host_owner_obj` push (about 70 instructions, 0.5 M for 1 000 rounds), and the interface `prune` is a second hook.
+
+Checks:
+
+- New tests: `xhr`: an XHR that the script dropped after `send()` keeps its entries while the request is pending and loses them (with its upload object) after it ends; an upload object that the script holds outlives its XHR and keeps its listener; the cached `response` survives collections and goes with the object. `abort`: the sources and dependents of `AbortSignal.any` after collections (counts of entries and weak keys); keys that were freed answer for their new objects only. `fetch`: a signal keeps the promise of its queued fetch through collections, and aborting rejects it; a fetch whose signal was collected still settles.
+- Linux: `cargo test --locked -p bare-js-api -p bare-js -p bare --lib`: 5, 1047 and 1658 passed. Filters `xhr` 16, `abort` 19, `fetch` 93.
+- Windows 11 VM, same filters: `xhr` 16, `abort` 19, `fetch` 93 pass.
+- After the rebase on `origin/main` (with `BARE_GC_STRESS`, #712): `cargo check` and the three filters pass; the three filters pass with `BARE_GC_STRESS=1` (16, 19, 93). The cost matrix and the VM run are from before the rebase.
+
+Not tested: the whole `bare` lib with `BARE_GC_STRESS=1`; a collection inside a task (S1.6); the `bare` suite on the VM (only the three filters); wall time; scale 100 of the abort row. The old order rule "call after the listener table is pruned" still holds by call order (`Interp::collect` calls the old prune first); no test pins the order. Not changed, noticed: `Dom::event_object` checks `xhr.s.objs.len() >= MAX_OBJECTS` but not the upload entries.
+## 2026-11-19: host-filled objects as owners for tracing (plan step S0.4, host-filled properties step 3)
+
+Step 3 of `docs/design-lazy-properties.md` (see "Build of the second PR" there). Node lists, token lists, style declarations, attribute maps, CSS rule lists and dataset maps are owners now. The collector calls `Host::trace(key)` only for them, and `Host::prune(dead)` drops their entries.
+
+Changes:
+
+- The host key has two parts: the kind (`browser_sources::Source`) in the low `KIND_BITS` (4) bits and a slot of `Owners` above them. Other owners (wrappers, listeners, events) have kind 0. `Dom::new_source` reserves the slot, makes the object with the key, and registers the owner (`Owner::Source(ObjId)`).
+- `Host::trace` and `Host::prune` of the interface call one subsystem by the kind in the key. The subsystem finds its state by the object, as before. The `retain` over the tables of these kinds is gone.
+- The wrapper owner traces the edges from an element to its host-filled objects (`browser_sources::trace_node`: dataset, style, token lists, attribute map, `Attr` objects, a frame's window and document). A frame's edge is one lookup by node, not a scan of all frames. The call is behind one flag (`Dom::wrapper_edges`): it is set where such an object is stored (`new_source`, the `Attr` tables, the frame tables) and never reset.
+- The old hook lost the calls of `browser_nodelist`, `browser_dataset`, `browser_style` and `browser_frames`. `browser_platform`, `at::` and `browser_cssom` keep what is not host-filled (token list iterators, `Attr` objects, rules, sheets, style rules, media lists).
+- Captions, storage and the frame names are not owners: the page roots them and they hold no entry that a collection frees.
+- `Owners::key` gives `slot << KIND_BITS`. `Owners::get`, `set` and `release` take the key.
+
+Versions (cost matrix, glibc, instructions of `range_load iter 10`, a row with 10,000 wrappers and many collections; base = origin/main `d5dac645`):
+
+| Version | `range_load iter 10` |
+| --- | ---: |
+| `trace_node` asks each subsystem for each wrapper (no early return) | +0.795% (first matrix, against `37df5bd1`) |
+| An early return in each subsystem | +1.09% (against `d5dac645`; the row was +0.26% against `37df5bd1`) |
+| One flag for all (kept) | -6.41% |
+
+Callgrind of the second version showed `trace_node` at about 166 instructions per wrapper (frames 47, `at::` 30, the rest 42 and the inlined subsystems). The old hook paid about the same for each marked object, so the sum was not smaller. With the flag a wrapper of a page without such objects pays one load. A test (`a_wrapper_alone_keeps_its_attr_object_and_its_frame_window`) fails when the `Attr` or frame flag is not set.
+
+Cost matrix (archMachine, base = origin/main `d5dac645` built in `/data/bare-tmp/s0/host-owners-base-target`, `tools/js/cost_matrix.sh -j4`, 3 runs per row, 805 rows): no row over +0.5% under any allocator. Mean change -0.173% (glibc). 2 rows do not run on either tree (`parse_load deep 1` and `deep 10`, the known stack size issue). Jemalloc ran on no row (none was over under glibc).
+
+| Row (glibc, instructions) | Base | New | Change |
+| --- | ---: | ---: | ---: |
+| `browser_load mutation 1` | 70,566,963 | 68,993,834 | -2.23% |
+| `browser_load mutation 10` | 684,875,738 | 666,198,346 | -2.73% |
+| `browser_load lookup 1` | 92,482,220 | 91,812,056 | -0.72% |
+| `range_load iter 10` | 728,552,695 | 681,870,723 | -6.41% |
+| `attr_load react 1` | 220,834,768 | 220,829,177 | -0.00% |
+| `select_load churn 1000` | 338,721,842 | 336,894,428 | -0.54% |
+| `dataset_load keys 10000 1` | 117,279,828 | 117,135,290 | -0.12% |
+| `dataset_load read 10000 1` | 82,160,114 | 82,002,965 | -0.19% |
+| `dataset_load read 1000 1` | 17,127,909 | 17,045,106 | -0.48% |
+
+The two dataset exception rows are below the base now. The `exotics` lookup for the key stays: the engine's owner list has no index by object. The base here is the first PR, so the numbers do not show the sum of both PRs. `attr_load react 1` does not gain: the plan expected about 0.8% from the probe chains, and the first PR already took them.
+
+Checks:
+
+- New tests (`browser_tests`): a list collected while its element lives frees its key; a key reused after a collection answers for the new object only; a detached node list with an expando is collected, and a live one keeps its expando; the wrapper of an element keeps its token list, style, attribute map and dataset with their expandos, and the owners go when the wrapper goes; a wrapper alone keeps its `Attr` object and its frame window. The test "host-filled objects take no owner slot" of the first PR became "are owners": it asserts the reverse.
+- Linux: `bare` lib 1652 passed; `bare-js` lib 1047 passed; `bare-js-api` 5 passed.
+- Windows 11 VM: `bare` filters `browser_ nodelist attr dataset cssom style frames media storage`: 1586 passed, 3 failed (the two `browser_session` fixture-path tests and the `Asia/Kolkata` time zone test, `browser_date_tests::local_time_uses_the_zone_of_the_realm_in_the_browser`). `bare-js-api` 5 passed. `bare-js` (not changed by this PR): 1039 passed, 8 failed. Three read fixture folders by the Linux path (`golden_disassembly`, `corpus_status_matches_acorn`, `parser_corpus_never_panics_or_faults`), and five need the system time zone table (`date_tests` 2, `intl_tests` 3: `Asia/Kolkata`, `Asia/Kathmandu`). Not fixed.
+
+Not tested: the staging journey A/B; peak memory (RSS) of these objects; a run of the cost matrix under jemalloc on every row (`-J`); the sum of both PRs against `52613c99`; a rebase onto main after `d5dac645` (`be110f78` and later) with a new matrix.
+## 2026-11-19: CSSOM, frames and form cost rows (plan step S0.4)
+
+Changes: a new example `crates/bare/examples/cssom_load.rs` (cases `rules`, `sheets`, `adopted`, `computed`), a `frames` case in `navigation_load` and a `validity` case in `form_load`. `tools/js/cost_rows.txt` has 2 rows (scale 1 and 10) for each of the 6 cases, in their own block at the end. No engine or browser change. The designs `design-host-cssom.md`, `design-host-navigation.md` and `design-host-forms.md` ask for these rows as PR 1, because no old row reads rule lists, sheets, a frame window, `validity` or `labels`.
+
+Each case checks one sum that a model in Rust gives. A wrong expected sum fails each of the 3 files (tried, then reverted): `FAIL: rules: 21200 != 21300`, `validity: 11000 != 11001`, `frames: 63000 != 64000`.
+
+Base instruction counts (user mode, `perf stat -e instructions:u`, archMachine, release build of this tree, which has the engine of origin/main `37df5bd1`; 5 runs, `GLIBC_TUNABLES=glibc.malloc.tcache_count=65535`):
+
+| Row | min | max | spread |
+| --- | ---: | ---: | ---: |
+| `cssom_load rules 1` | 170,184,880 | 170,195,369 | 0.006% |
+| `cssom_load rules 10` | 1,586,493,585 | 1,586,668,498 | 0.011% |
+| `cssom_load sheets 1` | 109,964,030 | 109,973,486 | 0.009% |
+| `cssom_load sheets 10` | 1,013,088,236 | 1,013,164,243 | 0.008% |
+| `cssom_load adopted 1` | 98,454,790 | 98,456,514 | 0.002% |
+| `cssom_load adopted 10` | 899,911,712 | 899,914,183 | 0.000% |
+| `cssom_load computed 1` | 275,194,857 | 275,196,631 | 0.001% |
+| `cssom_load computed 10` | 2,656,084,503 | 2,656,091,630 | 0.000% |
+| `navigation_load frames 1` | 176,206,892 | 176,208,179 | 0.001% |
+| `navigation_load frames 10` | 1,695,131,087 | 1,695,134,456 | 0.000% |
+| `form_load validity 1` | 117,965,459 | 117,976,428 | 0.009% |
+| `form_load validity 10` | 1,144,454,526 | 1,144,774,659 | 0.028% |
+
+All spreads are under 0.25%. Scale 10 of each case runs in under 1 s.
+
+Cost matrix against the base build of `37df5bd1` (817 rows, 803 measured): mean change +0.004% (glibc). The 12 new rows and `parse_load deep 1`/`10` did not run on the base: the base has no such case, and `parse_load deep` overflows its stack on the base and on this tree. One row is over +0.5% under glibc only: `resources_load small 1` +1.967% and `10` +1.423% (jemalloc +0.021% and +0.001%). It is a loopback-server row and this PR changes none of its code. `preload_load style 10` was +0.528% under glibc in the first run only. No row is over +0.5% under both allocators.
+
+Checks: Linux `cargo test --locked -p bare --lib` with filters `cssom` (21 passed), `frame` (45), `controls` (13) and `validity` (1). Windows 11 VM: the 3 examples built with cargo xwin (release) and each new case ran at scale 1 with `checksum=ok`.
+
+Not tested: Windows at scale 10; the old `*_load` cases on Windows; callgrind profile of the new rows; Node/Chrome comparison of the checksums (they follow the HTML and CSSOM standards by hand, and the engine agreed).
+## 2026-11-19: collector stress mode (plan step S0.x)
+
+`BARE_GC_STRESS=1` makes `Interp::gc_due` true at every safe point of the old engine. The depth and statement-frame conditions stay: a collect still never runs inside a call. `Interp::set_gc_stress(bool)` sets the mode for one interpreter (tests). The environment is read once for the process (`OnceLock`); an `Interp` copies it into a `bool` field when it is made. Off, `gc_due` reads one more `bool`. The old engine's `Scope::safepoint` is an empty function and no code calls it, so the browser safe points are the callers of `Browser::collect_due` (the loader rounds, `browser_ui` after a key or click). The collector itself is unchanged.
+
+Tests:
+
+- `bare-js`: `gc_stress_is_due_at_every_safe_point_and_live_values_survive`. 20 collects at safe points, a global object and its array survive, a call after each collect works.
+- `bare`: `a_page_gives_the_same_results_when_a_collect_runs_between_all_tasks`. One page with an interval, a timeout, a promise job, a click listener on a node that only the document holds, a node list and a dataset map. It runs twice, without and with stress. The log of both runs is equal, and the stress run makes at least 50 collects (the plain run makes none).
+
+Journeys under stress (archMachine, debug test binaries of `crates/drive/tests`, each file run once plain and once with `BARE_GC_STRESS=1` in the environment of the test and of the `bare-drive` it starts). Collections are a lower bound: the sum over processes of the last `collections` of the `browser_stats` event (`BARE_OBSERVE=metrics`); 0 can mean that no event came. Wall time is from a machine that ran other builds; do not compare it.
+
+| Journey file | Plain | Stress | Stress time (s) | Collections |
+| --- | --- | --- | ---: | ---: |
+| background, cache, cookies, goto_hash, goto_spa_route, held_post, idle, longpoll, monitoring, net_failures, nonblocking, open_memory, page_hide, settle_stopped, sheet_failures, stale_wait, state, suite, wait_load_limit, window_wait, busy_fetch, chunked | pass | pass | 0.0 to 13.0 | 0 to 2 |
+| fill (6 tests) | pass | pass | 0.1 | 25 |
+| fixture_app (4) | pass | pass | 5.1 | 159 |
+| fixture_journey (6, the staging login journey on the local app) | pass | pass | 2.8 | 165 |
+| inline_links (4) | pass | pass | 0.1 | 24 |
+| images (8) | pass | pass | 0.1 | 4 |
+| replay (4) | pass | pass | 11.3 | 9 |
+| shot_ready (2) | pass | pass | 1.5 | 4 |
+| storage_full | pass | pass | 0.6 | 10 |
+| swapped_input (3) | pass | pass | 0.2 | 4 |
+| live_budget | pass | pass | 56.6 (plain 3.6) | not counted |
+| task_budget | pass | pass | 60.8 (plain 92.4) | not counted |
+| window_arenas | pass | pass | 71.6 (plain 14.7) | not counted |
+| survive_limit (2) | FAIL (debug) | FAIL (debug) | 150.1 | not counted |
+| survive_limit, release build | pass | pass | 55.7 (plain 49.6) | not counted |
+
+`survive_limit` fails in the debug build with and without stress: a runaway-script step budget takes about 90 s of CPU there, over the 60 s step limit of the test. It passes in the release build both ways. All 35 files were run: no journey failed because of the stress mode. No missing trace edge was found.
+
+Local suite (`tools/suite/run.py`, 40 generated tests, release `bare-drive`, 1 run each): V0 40 of 40 pass both ways, instructions 15,444 M plain and 53,625 M under stress; V2 40 of 40 pass both ways, 10,324 M plain and 22,084 M under stress.
+
+`bare` lib tests under stress (`BARE_GC_STRESS=1`, debug): 1646 pass, 2 fail. Both assert that a collect is not due (`parsed_documents_ask_for_a_collect_by_their_native_bytes`, and my new test before it set the mode itself). They fail by design when the environment forces the mode; my test now sets the mode explicitly. No other test failed, so no missing edge shows in them either.
+
+Cost matrix (archMachine, base `37df5bd1`, 805 rows, `-j4`, minimum of 3 runs, glibc; jemalloc for rows over the limit): no row over +0.5% under both allocators. Mean change -0.000% (glibc), +0.051% (jemalloc, 5 rows). Five rows over under glibc only: `resources_load small 1` +1.27%, `resources_load small 10` +1.63%, `form_load gates 1` +0.58%, `form_load gates 10` +0.62%, `preload_load style 10` +0.50%; their jemalloc counts are -0.15% to +0.26%. A second run of three of them gave the same counts. Hypothesis: an allocator size class shifts because `Interp` has one more `bool`. `parse_load deep 1` and `deep 10` abort on the base too.
+
+Checks: Linux `bare` lib 1648, `bare-js` lib 1047, `bare-js-api` 5 passed. Windows 11 VM: the two new tests pass.
+
+Not tested: the full `bare` and `bare-js` suites on Windows; the stress mode on Windows; live-site journeys and the staging journey (not allowed in this task); `bare-mcp` tests; the stress mode with the GUI window. Collection counts are a lower bound. The stress mode cannot find a missing edge in a path that no journey runs. Noticed, not changed: `btn.click()` gives an event whose `detail` is `undefined` (to verify against the HTML spec: a `MouseEvent` with `detail` 0).
+
+## 2026-11-19: CSS rule and sheet objects as owners (plan step S0.4, CSSOM)
+
+`docs/design-host-cssom.md`, plan step 4, option A. Built on the branch of #716 (host-filled objects as owners) with the branch of #713 (the `cssom_load` rows) merged in, and `main` at `913abd26`.
+
+Changes (`browser_cssom.rs`, `browser_sources.rs`, `browser.rs`):
+
+- Rule, sheet and media list objects get a host key when they are made (`Dom::new_owned`, kinds `Rule`, `Sheet`, `Media` in `browser_sources::Source`) and are owners. `trace_rule` visits the sheet, the declaration, the nested list, the media list and the parent. `trace_sheet` visits its list. `trace_media` visits its rule. The tables (`rules`, `sheets`, `medias`) keep their `ObjId` keys.
+- The declaration object of a rule is a `Source::Style` owner already. Its trace and prune now also call `trace_decl` and `prune_decl`, which handle the `style_rules` entry (declaration to rule). A page with no CSSOM object pays one `OnceCell` test for each style object.
+- Rule lists were owners in #716 (items, sheet, rule).
+- The wrapper of an element visits the sheet of that element (`by_node`). The wrapper of a document or shadow root visits the sheets that it adopted (`adopted`). Both go through `browser_cssom::trace_node`, behind the existing `wrapper_edges` flag, and test `is_empty()` first.
+- `browser_cssom::trace`, `browser_cssom::prune` and the `by_node` and `adopted` loops of `browser_cssom::roots` (with `in_tree`) are gone from the old hook. `roots` still returns the prototypes and the constructors (`State::roots`, `style_p`); no persistent handles exist for them yet. The `style-objects` cap stays.
+- A sheet that the collector frees also leaves its place in an `adopted` list. Without this, a detached shadow root that adopted a sheet and that no script holds lost its sheet and `adopted()` panicked on the missing entry (found by a new test; the old hook kept every adopted sheet as a root).
+- Behaviour that changes: a sheet of an element in the tree stays while the wrapper of that element stays. `Dom::wrap` makes the wrappers of all ancestors and the document wrapper reaches them, so an element in the tree keeps its sheet as before. A removed element that no script holds loses its wrapper and its sheet. This was the old rule too, now through the wrapper instead of `in_tree`. A rule declaration with pending inputs (`has_pending`) belongs to its sheet and goes with it; the published sheet text is unchanged.
+
+Tests (`browser_cssom_tests.rs`, 6 new): a sheet that a script holds keeps its identity after a collect, and `el.sheet === el.sheet`; a sheet of an element in the tree stays with no script variable; a removed element that no script holds loses its sheet; a held rule keeps its sheet, and a media list keeps its rule; an adopted sheet lives with its document and with a shadow root; a reused key answers for the new object only; a shadow root that no script holds in the tree keeps its adopted sheet and styles; a detached shadow root that no script holds leaves no `adopted` entry.
+
+Results (archMachine):
+
+- Linux debug, `bare` lib, filters `cssom` 27, `style` 96, `sheet` 67, all pass. Full run of `bare-js-api` 5, `bare-js` 1062, `bare` 1660 pass. With `BARE_GC_STRESS=1` the three filters together pass (153 tests).
+- Windows 11 VM (`cargo xwin`, MSVC): `cssom` 27, `style` 96, `sheet` 67 pass.
+- Cost matrix, 819 rows, `-j4`, minimum of 3 runs, glibc and jemalloc for rows over the limit. Base: `26b92100` (the commit this change started from), built in its own target dir. New: this change before the merge of `main`. No row over +0.5% under both allocators. Mean change -0.003% (glibc), +0.000% (jemalloc, 0 rows measured). The largest rise is `preload_load style 10` +0.28% (a known glibc-only noise row); the next are `cssom_load sheets 10` +0.20% and `cssom_load sheets 1` +0.19%. Two rows failed to run on both trees: `parse_load deep 1` and `parse_load deep 10` abort with a stack overflow (stack limit 8 MiB here); they are not caused by this change.
+
+| Row | Base (instr.) | New | Change |
+| --- | ---: | ---: | ---: |
+| `cssom_load rules 1` | 171,091,655 | 171,247,890 | +0.09% |
+| `cssom_load sheets 1` | 109,349,679 | 109,559,280 | +0.19% |
+| `cssom_load adopted 1` | 98,067,926 | 98,028,432 | -0.04% |
+| `cssom_load computed 1` | 274,101,007 | 273,824,296 | -0.10% |
+| `sheets_load linked 1` | 9,138,621 | 9,131,456 | -0.08% |
+| `sheets_load dynamic 1` | 9,273,756 | 9,273,797 | 0.00% |
+| `style_load churn 1` | 42,541,508 | 42,507,236 | -0.08% |
+| `style_load setget 1` | 55,832,564 | 55,810,852 | -0.04% |
+
+The `cssom_load` rows make rules and sheets but collect little, so the gain from the removed 5-probe `trace` and the 5 `retain` loops is not visible on them.
+
+Not tested: the full `bare` suite on Windows; the stress mode on Windows; journeys under stress; the cost matrix after the merge of `main`; a page with styled-components or emotion (many `insertRule` and `deleteRule` calls through a real library); a rule declaration with pending inputs on a sheet that the collector frees.
+
+## 2026-11-19: media, image and custom-element promises in persistent handles (plan step S0.4, M2)
+
+Changes:
+
+- `browser_media.rs`: `pending` and `aborting` (the `play()` promises) are `Vec<bare_js_api::Persistent>`. `reject` reads each handle. The `pending`/`aborting` line left `media::roots`.
+- `browser_img.rs`: `decodes` holds persistent handles. The `decodes` line left `img::roots`.
+- `browser_custom.rs`: `Ce.when` (the `whenDefined` promises) holds persistent handles. The `s.when.values()` line left `ce_roots`. A second `whenDefined` call for the same name reads the handle.
+- The handlers still use the old `Interp`. No interface method is new. This follows `docs/design-host-microtasks.md`, plan step 2.
+
+New tests: `a_dropped_play_promise_settles_after_collections`, `a_dropped_whendefined_promise_settles_after_collections`, `a_dropped_decode_promise_settles_after_collections`. Each drops the script reference, makes garbage, collects twice, then checks the promise settles.
+
+Cost matrix (archMachine, base = origin/main `37df5bd1`, new = this branch before the last rebase, 3 runs per row, 805 rows, `-j4`, glibc): rows over +0.5% under both allocators: 0. No row over +0.5% under glibc, so no jemalloc run. Mean change +0.002% (glibc). `parse_load deep 1` and `deep 10` overflow the stack on the base too (checked by running both binaries).
+
+Checks:
+
+- Linux: filters `media` (29), `img` (8), `custom` (27) passed. `bare-js` lib 1047 and `bare-js-api` 5 passed. In one full `bare` lib run, `browser_stream_tests::a_preload_link_that_no_script_takes_does_not_delay_load_or_hold_the_page` failed; it passed alone in 2 reruns. Hypothesis: a timing flake. It is not in the code of this change.
+- Windows 11 VM: the same three filters passed (29, 8, 27).
+
+Not tested: `BARE_GC_STRESS` (not on main); a full `bare` run on the Windows VM; wall time; the matrix after the final rebase.
+
+## 2026-11-19: URL objects as owners (plan step S0.4, navigation)
+
+Plan step 3 of `docs/design-host-navigation.md`: option A for the `URL` family and option D (persistent handles) for `Entry.cache`, `NavObjs` and the two `Storage` areas. Frames, structured clone and child pages are not in this PR. Handler bodies stay on the old `Interp`. The cap `max_objects` stays.
+
+Changes:
+
+- A `URL`, a `URLSearchParams` and an iterator object are owners (`Owner::Url`, `Owner::Params`, `Owner::Iter` in `browser.rs`). Each gets a host key when it is made, after its table entry is final.
+- `UrlObj.sp`, `ParamsObj.url` and `IterObj.sp` are `Traced<Value>`. `Host::trace(key)` visits the one edge of the owner (`browser_navigation::trace_owner`). `Host::prune(dead)` removes the entry of each dead owner and takes its bytes off `param_bytes` (`prune_owner`).
+- The old hook calls `browser_navigation::roots`, `trace` and `prune` are gone. The three `retain` loops and the sum over all lists are gone.
+- `Entry.cache` is an `Option<Persistent>`: it lives as long as its entry, and a dropped entry frees its slot at once. `NavObjs` holds 6 handles (`url`, `params`, `iter`, `location`, `history`, `storage_proto`); the `ObjId` copies stay for reads and are valid while the handles live. `area_get` holds each area with a handle in `Nav.area_held`. `Dom::fixed` keeps only `loc_proto`, `hist_proto` and the constructors.
+- The 6 `NavObjs` handles and the areas are in the persistent table now, so the bound of `a_cleared_or_finished_timer_frees_its_callback_at_the_next_collect` is 209 instead of 203 (observed 207).
+
+Tests (5 new in `browser_navigation_tests.rs`): a dropped `URL`, its `searchParams` and its iterators are collected together and their keys are used again (the key table does not grow over 3 rounds); a held `searchParams` keeps its `URL` and a held `URL` keeps its `searchParams`; a reused key answers for the new object only (every owner points at a live entry and its trace gives exactly the edges of that entry); `history.state === history.state` after a collection; an evicted entry frees its handle (a `WeakRef` to its state is empty, and the persistent table does not grow over 3 rounds of 6 pushes).
+
+Measurements (cost matrix, archMachine, 3 runs per row, 805 rows run; base = `98e7d328`, the head of #714, built fresh into `/data/bare-tmp/s0/base-nav`): mean change glibc -0.046%. No row over +0.5% under both allocators; no row over +0.5% under glibc. `navigation_load`: `url 1` -0.05%, `url 10` -0.04%, `iterate 1` +0.42%, `iterate 10` +0.39%, `subclass 1` -0.03%, `subclass 10` -0.10%, `history 1` -0.26%, `history 10` -0.31%, `storage 1` -0.58%, `storage 10` -0.50%, `route 1` -0.11%, `route 10` -0.18%. `session_load`: -0.02% to -0.15%. Other rows with a collection fell by up to 1.2% (`range_load iter 10` -1.21%, `streams_load pending 1` -0.89%). The design expected about -1.7% on `url 1`; the measure is -0.05%. Hypothesis: the 3,000 owners of the row cost about as much as the prune and trace work that went (the design's own estimate was -1.3% net). `iterate` is the row with the most objects for each unit; it is +0.4%, under the limit. Instruction counts only; no wall time.
+
+`parse_load deep 1` and `deep 10` fail to run on every tree that was tried (the base of this PR, the new tree and `37df5bd1`): stack overflow in the example. This change does not cause it.
+
+Checks:
+
+- Linux: `cargo check -p bare` exits 0. `cargo test --locked -p bare --lib` filtered `navigation` 89, `url` 47, `history` 17, `scheduler` 42 passed. `cargo test --locked -p bare-js-api -p bare-js -p bare --lib` ran once: 1651 passed in `bare` and 1 failed (the scheduler bound above, fixed and run again).
+- Windows 11 VM: the same filters pass (`navigation` 89, `url` 47, `history` 17, `scheduler` 42).
+- `BARE_GC_STRESS` is not on main, so the new tests did not run under it.
+
+Not done: `is_host_object` still tests the 7 tables (it has no key for the object; the design guessed a small gain); frames, structured clone and child pages (steps 4 to 6); a callgrind profile of `url 1`; scale 100; the crate tests of `bare-js-api` and `bare-js` on Windows.
+
+## 2026-11-19: promise and microtask interface (plan step S0.4, M1)
+
+PR M1 of `docs/design-host-microtasks.md` (option A, decided 2026-11-19). No browser change, and the engine calls none of the new hooks (that is M3).
+
+Changes:
+
+- `bare-js-api`: the `Engine` methods `new_promise`, `resolve_promise`, `reject_promise`, `promise_then`, `promise_react`, `promise_status`, `queue_microtask`, `checkpoint`, `drain_microtasks`, `pending_jobs`, `clear_failed_job`, `iter_open`, `iter_next` and `iter_fail`, with thin `Scope` wrappers. New types `PromiseState<'s>` and `Iter<'s>`, and the constant `MAX_PENDING_REJECTIONS` (1024). The `Host` hooks `report_exception`, `between_jobs` and `promise_rejections` take `Scope` and `Local`. They have default bodies.
+- Old engine (`eval_api.rs`): each method calls the `host_*` method of the same job, with one `Local` push for each result (`promise_status` pushes the value of a settled promise). The bound of the old engine, `eval_promise::MAX_PENDING_REJECTIONS`, was 1024 already; a test keeps both equal.
+- `Iter<'s>` keeps the old engine's fast paths. The design says it holds two locals (the iterator and its `next`). The old engine has no iterator object for an array, a string, a Map or a Set (`It`: `Plain`, `Coll`, `Generic`), so `Iter` has two locals and a position of three words (`state`). The locals are roots. The old engine keeps its source or owner there, and the new engine can leave `state` at zero. The host reads none of it.
+- Old engine behavior kept: `host_checkpoint` does nothing only when `depth` is not 1. A host function that a script calls at the top level of the script runs at depth 1, so its checkpoint runs the jobs. Inside a script function (depth 2 or more) it does nothing. The test uses the second case.
+
+Cost matrix (archMachine, base = origin/main `d5dac645` rebuilt, because main moved by #707 after the brief; new = this branch; 3 runs per row, minimum; `-j4`; 805 rows; jemalloc for rows over the limit under glibc): mean change glibc +0.022%. 14 rows are over +0.5% under both allocators; all are `bare-js` rows that call none of the new code: `gen_load delegate 1` +1.72% and `10` +1.94%, `gen_load iterobj 1` +0.76% and `10` +0.82%, `intl_load cmp_opts 1` +0.81% and `10` +0.83%, `intl_load locale 1` +1.27% and `10` +1.29%, `intl_load make 1` +0.97% and `10` +1.30%, `intl_load nf_locale_opts 1` +1.46% and `10` +1.49%, `iterator_load generic 10` +0.57%, `sc_load custom_iter 10` +0.84%. Two more rows are over under one allocator only (`iterator_load generic 1`, `sc_load custom_iter 1`). `parse_load deep 1` and `deep 10` fail to run on the base too.
+
+Cause: the codegen-unit split of `bare-js`, as in the earlier exceptions. With `RUSTFLAGS="-C codegen-units=1"` on both trees (`gen_load`, `intl_load`, `iterator_load` and `sc_load` examples, 16 rows, minimum of 3, glibc), every row is lower in the new tree: -0.04% to -0.16%. Example: `intl_load locale 1` 151,960,128 base and 151,760,554 new. A callgrind diff of `intl_load make 1` (16 units) shows the extra instructions spread over `get_prop_nat`, `intl_opt_for`, `HashMap::insert` and `intl::lookup`, with other inlining in each. Not fixed. The owner decides on a cost exception for these 14 rows.
+
+Checks:
+
+- New tests in `eval_api_tests`: a promise settles and a `promise_then` reaction runs on the drain (fulfilled and rejected, `promise_react` of a plain value, `Unsupported` for a value that is not a promise); `queue_microtask` runs once and `pending_jobs` counts it; a checkpoint inside a script function does nothing, and one from a host scope runs the queue; `iter_open` and `iter_next` over an array, a string, a Set, a generator and a script iterator; `iter_fail` calls `return`, runs the `finally` of a generator, keeps the thrown value, and keeps an abort with no script; a `Local` promise and its value survive the collections that an old host starts in `between_jobs` during `drain_microtasks`; the two bounds are equal. New test in `bare-js-api`: a host with no hooks gets the default bodies.
+- Linux: `bare` lib 1647 passed, `bare-js` lib 1054 passed, `bare-js-api` 6 passed and 1 doc test (5 compile-fail doc tests pass).
+- Windows 11 VM: `bare-js-api` 6 passed; `bare-js` filter `api` 17 passed.
+
+Not tested: the hooks with a real call from the engine (M3); the wrapper cost in a browser row (nothing calls it); a full `bare` run on the Windows VM; wall time; `iter_next` over a Map (the `Coll` path is tested with a Set, and Map uses the same cursor code).
+
+Owner decision (2026-11-19): exception granted for the 12 other rows above, and a standing rule from now on. A row that is over +0.5% under both allocators passes when both trees, built with `RUSTFLAGS="-C codegen-units=1"`, show it within +0.5%. The cause is then the codegen-unit split, not new work. The PR records both numbers.

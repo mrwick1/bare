@@ -42,7 +42,7 @@
 //!   `controlsList`, `disableRemotePlayback`, `webkit*`, `getVideoPlaybackQuality`, `requestVideoFrameCallback`, picture in picture.
 //!   `srcObject` takes `null` and `undefined` only (there is no `MediaStream`).
 //!
-//! GC: pending promises and `MediaError` objects are roots. A queued event holds a node id, a generation and a step, nothing else. The number of
+//! GC: pending promises are persistent handles (the engine roots them); `MediaError` objects are roots. A queued event holds a node id, a generation and a step, nothing else. The number of
 //! queued media events is capped (`max_media_tasks`, `media-tasks`).
 
 use crate::browser::*;
@@ -120,9 +120,9 @@ struct M {
     message: &'static str,
     error: Option<ObjId>,
     /// Promises of `play()` that nothing settled.
-    pending: Vec<Value>,
+    pending: Vec<bare_js_api::Persistent>,
     /// Promises that a `pause()` took and a task rejects.
-    aborting: Vec<Value>,
+    aborting: Vec<bare_js_api::Persistent>,
 }
 
 impl M {
@@ -153,7 +153,6 @@ pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
     if let Some(m) = d.media.made.get() {
         out.extend([m.media, m.audio, m.video, m.ranges, m.error].into_iter().chain(m.ctors).map(Value::Object));
         for s in d.media.st.borrow().values() {
-            out.extend(s.pending.iter().chain(&s.aborting));
             out.extend(s.error.map(Value::Object));
         }
     }
@@ -753,8 +752,9 @@ fn queue_event(d: &Dom, n: NodeId, ev: u8) -> R<()> {
 }
 
 /// Reject each promise of `list` with a `DOMException`.
-fn reject(d: &Dom, it: &mut Interp<'_>, list: Vec<Value>, name: &str, msg: &str) -> R<()> {
+fn reject(d: &Dom, it: &mut Interp<'_>, list: Vec<bare_js_api::Persistent>, name: &str, msg: &str) -> R<()> {
     for p in list {
+        let p = it.persistent_value(&p);
         match d.dom_err(it, name, msg) {
             Error::Throw(v) => it.host_reject_promise(p, v)?,
             e => return Err(e),
@@ -862,7 +862,8 @@ fn play(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
         if resume {
             queue(d, n, FAIL, 0.0)?;
         }
-        with(d, n, |m| m.pending.push(p));
+        let held = it.persist_value(p);
+        with(d, n, |m| m.pending.push(held));
         Ok(p)
     })();
     match r {

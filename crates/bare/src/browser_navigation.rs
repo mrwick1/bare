@@ -33,9 +33,11 @@
 //! no `document.referrer`/`domain`, no `storage` event. Not compared with Chrome except through Node's `URL` (see
 //! `tools/js/navigation_check.sh`): history, location and storage are checked against hand-written structural expectations.
 //!
-//! GC: URL wrappers, params wrappers and iterators are traced to each other (`trace`) and pruned when unreachable.
-//! The permanent objects (`location`, `history`, `localStorage`, `sessionStorage`, prototypes) are roots. The cloned state
-//! of an entry is native data; its materialized object is cached and rooted only while the entry lives.
+//! GC: URL wrappers, params wrappers and iterators are owners (`Owner::Url`, `Params`, `Iter`). Each keeps its edges in `Traced`
+//! fields, `trace_owner` visits them and `prune_owner` drops the entries of dead ones (`docs/design-host-tracing.md`).
+//! The permanent objects (`location`, `history`, `localStorage`, `sessionStorage`, their prototypes) are held by persistent handles.
+//! The cloned state of an entry is native data; its materialized object is cached in a persistent handle that the entry owns,
+//! so it is a root exactly while the entry lives.
 
 use crate::browser::*;
 use crate::browser_navigation_params as pr;
@@ -145,8 +147,8 @@ pub struct NavigationStats {
 pub(crate) struct Entry {
     pub url: Rec,
     pub state: Option<Rc<State>>,
-    /// The object that `history.state` returned. A root while the entry lives.
-    pub cache: Option<ObjId>,
+    /// The object that `history.state` returned. A root while the entry lives: the handle goes with the entry.
+    pub cache: Option<bare_js_api::Persistent>,
 }
 
 impl Entry {
@@ -186,7 +188,7 @@ pub(crate) struct NavState {
     pub halted: Option<Error>,
 }
 
-#[derive(Clone, Copy)]
+/// The permanent objects. The ids are valid while `held` holds the objects.
 pub(crate) struct NavObjs {
     pub url: ObjId,
     pub params: ObjId,
@@ -194,6 +196,7 @@ pub(crate) struct NavObjs {
     pub location: ObjId,
     pub history: ObjId,
     pub storage_proto: ObjId,
+    pub _held: [bare_js_api::Persistent; 6],
 }
 
 #[derive(Default)]
@@ -202,6 +205,8 @@ pub(crate) struct Nav {
     pub p: OnceCell<NavObjs>,
     /// `localStorage` and `sessionStorage`, made on the first read of each (`sto::area_get`).
     pub areas: [Cell<Option<ObjId>>; 2],
+    /// The handles that hold the two areas.
+    pub area_held: RefCell<Vec<bare_js_api::Persistent>>,
     pub lim: Cell<NavLimits>,
 }
 
@@ -213,29 +218,37 @@ fn arg(a: &[Value], i: usize) -> Value {
 
 // ------------------------------------------------------------------------------------------ Host hooks
 
-pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
+/// The edges of the owner `w`: the `searchParams` of a URL, the URL of a params object, the params object of an iterator.
+pub(crate) fn trace_owner(d: &Dom, w: Owner, t: &mut bare_js_api::Tracer<'_, Value>) {
     let n = d.nav.s.borrow();
-    out.extend(n.entries.iter().filter_map(|e| e.cache).map(Value::Object));
-}
-
-pub(crate) fn trace(d: &Dom, owner: ObjId, out: &mut Vec<Value>) {
-    let n = d.nav.s.borrow();
-    if let Some(u) = n.urls.get(&owner) {
-        out.extend(u.sp.map(Value::Object));
-    } else if let Some(p) = n.params.get(&owner) {
-        out.extend(p.url.map(Value::Object));
-    } else if let Some(i) = n.iters.get(&owner) {
-        out.push(Value::Object(i.sp));
+    let edge = match w {
+        Owner::Url(o) => n.urls.get(&o).and_then(|u| u.sp.as_ref()),
+        Owner::Params(o) => n.params.get(&o).and_then(|p| p.url.as_ref()),
+        Owner::Iter(o) => n.iters.get(&o).map(|i| &i.sp),
+        _ => None,
+    };
+    if let Some(e) = edge {
+        t.visit(e);
     }
 }
 
-pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
+/// The owner `w` is dead: drop its entry.
+pub(crate) fn prune_owner(d: &Dom, w: Owner) {
     let mut n = d.nav.s.borrow_mut();
-    let n = &mut *n;
-    n.urls.retain(|&o, _| live(o));
-    n.iters.retain(|&o, _| live(o));
-    n.params.retain(|&o, _| live(o));
-    n.param_bytes = n.params.values().map(|p| p.bytes).sum();
+    match w {
+        Owner::Url(o) => {
+            n.urls.remove(&o);
+        }
+        Owner::Params(o) => {
+            if let Some(p) = n.params.remove(&o) {
+                n.param_bytes -= p.bytes;
+            }
+        }
+        Owner::Iter(o) => {
+            n.iters.remove(&o);
+        }
+        _ => {}
+    }
 }
 
 impl Dom {
@@ -277,15 +290,16 @@ impl Dom {
         let (state, cache) = {
             let n = self.nav.s.borrow();
             let e = &n.entries[idx];
-            (e.state.clone(), e.cache)
+            (e.state.clone(), e.cache.as_ref().map(|p| it.persistent_value(p)))
         };
         if let Some(c) = cache {
-            return Ok(Value::Object(c));
+            return Ok(c);
         }
         let Some(state) = state else { return Ok(Value::Null) };
         let v = st::materialize(self, it, &state)?;
-        if let Value::Object(o) = v {
-            self.nav.s.borrow_mut().entries[idx].cache = Some(o);
+        if let Value::Object(_) = v {
+            let h = it.persist_value(v);
+            self.nav.s.borrow_mut().entries[idx].cache = Some(h);
         }
         Ok(v)
     }
@@ -796,7 +810,8 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     }
     let (url, params, iter, loc_proto, hist_proto, storage_proto) = (protos[0], protos[1], protos[2], protos[3], protos[4], protos[5]);
     let (location, history) = (d.obj(it, loc_proto)?, d.obj(it, hist_proto)?);
-    let _ = d.nav.p.set(NavObjs { url, params, iter, location, history, storage_proto });
+    let held = [url, params, iter, location, history, storage_proto].map(|o| it.persist_value(Value::Object(o)));
+    let _ = d.nav.p.set(NavObjs { url, params, iter, location, history, storage_proto, _held: held });
 
     // URL
     parts!(d, it, url, url_get_h, url_set_h, [
@@ -871,7 +886,7 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 
     // constructors and globals
     let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
-    let mut fixed = vec![url, params, iter, loc_proto, hist_proto, storage_proto, location, history];
+    let mut fixed = vec![loc_proto, hist_proto];
     let ifaces: [(&str, ObjId, H, bool); 5] = [
         ("URL", url, pr::url_ctor, true),
         ("URLSearchParams", params, pr::params_ctor, true),
