@@ -251,3 +251,15 @@ fn the_registry_is_branded_and_define_checks_its_arguments_before_state() {
     b.drain().unwrap();
     assert_eq!(js(&mut b, "w"), "SyntaxError");
 }
+
+#[test]
+fn a_dropped_whendefined_promise_settles_after_collections() {
+    let mut b = page("");
+    js(&mut b, "var got = []; (function () { customElements.whenDefined('x-b').then(function (c) { got.push(c.name) }) })(); 1");
+    js(&mut b, "var junk = []; for (var i = 0; i < 100; i++) junk.push({ k: i }, 'x' + i); junk = null; 1");
+    b.collect(&[]).unwrap();
+    b.collect(&[]).unwrap();
+    js(&mut b, "customElements.define('x-b', class XB extends HTMLElement {})");
+    b.drain().unwrap();
+    assert_eq!(js(&mut b, "got.join()"), "XB");
+}
