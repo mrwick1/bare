@@ -101,6 +101,8 @@ mod browser_eventsource_tests;
 #[cfg(test)]
 mod browser_websocket_tests;
 #[cfg(test)]
+mod browser_speech_tests;
+#[cfg(test)]
 mod browser_filereader_tests;
 #[cfg(test)]
 mod browser_cors_tests;
