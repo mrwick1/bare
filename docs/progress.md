@@ -13610,3 +13610,24 @@ Checks:
 - Windows 11 VM: 1575 `bare` tests (filters `browser_`, `storage`, `nodelist`, `attr`, `dataset`, `cssom`, `style`, `frames`, `media`), 30 indexed, named and interface tests of `bare-js`, and 5 tests of `bare-js-api` pass. Three `bare` tests fail on the VM. Their code does not touch this change: two `browser_session` tests read fixture folders by the Linux path of the checkout, and the time zone test fails to load `Asia/Kolkata` (hypothesis: the VM has no zone data for it). Not run on the VM for the base.
 
 Not done: the staging journey A/B. Next: the objects become owners (step 3 of the plan), then the lazy `on*` members.
+
+## 2026-11-19: lazy `on*` members get their own host method (plan step S0.4)
+
+Owner decision 2 of `docs/design-lazy-properties.md`. See "Build of the lazy `on*` PR" in that document.
+
+Changes:
+
+- `bare-js-api`: `Host::lazy_member(scope, object, what)` and the type `Lazy` (`Name(&str)`, `All`, `Symbols`). The default does nothing.
+- Old engine: `host_fill` sends the reserved indices `LAZY_ON`, `LAZY_ALL` and `LAZY_TAG` to `lazy_member` when the realm has an interface host (`Interp::api_lazy`). `Interp::api_err` is public so the browser can return an engine error through the interface. The heap, its reserved values and its lazy flags did not change.
+- Browser: `Dom::lazy_member` calls `lazy_key`, `lazy_all` and `tags` of `browser_handlers.rs`. `fill_indexed` lost its three reserved-index branches. `lazy_key` takes `&str`.
+- `browser_frames::FILL` stays in `fill_indexed`. It is the fill of the frames object (a host-filled object), not a lazy member.
+
+Cost matrix (archMachine, base = origin/main `37df5bd1`, new = this branch, 3 runs per row, 805 rows, `-j4`, glibc; jemalloc runs only for rows over the limit under glibc, and no row was): rows over +0.5% under both allocators: 0. No row is over +0.5% under glibc. Mean change +0.003% (glibc). Worst rows: `observer_load raf 10` +0.226%, `style_load churn 10` +0.193%, `style_load attrs 10` +0.190%. Rows of this change: `browser_load event 1` -0.003%, `event 10` +0.000%, `handler_load 1` +0.005%, `handler_load 10` +0.011%, `browser_load lookup 1` +0.010%, `rel 1` +0.057%. `parse_load deep 1` and `deep 10` fail to run on the base too.
+
+Checks:
+
+- New test: `lazy_members_are_asked_through_the_interface_once_per_name` (`eval_api_tests`): one ask per name and object, one for all names, one for the symbol members, and a throw of the host reaches the script with its value.
+- Linux: `bare` lib 1647 passed, `bare-js` lib 1047 passed, `bare-js-api` 5 passed.
+- Windows 11 VM: `bare-js-api` 5 passed; `bare-js` `api_tests` 7 passed; `bare` filters `handler` (30) and `events` (28) passed.
+
+Not tested: the staging journey A/B; a full `bare` run on the Windows VM; wall time.
