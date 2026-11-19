@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::heap::Heap;
-use bare_js_api::{Args, Attrs, Engine, Local, Persistent, Scope, Type, enter};
+use bare_js_api::{Args, Attrs, Engine, Local, Persistent, PromiseState, Scope, Type, enter};
 use std::cell::RefCell;
 
 fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
@@ -627,5 +627,222 @@ fn the_intrinsics_are_the_ones_of_the_realm() {
         assert_eq!(out(&mut it, "intr(4) === Symbol.iterator"), "true");
         assert_eq!(out(&mut it, "var s = Symbol; Symbol = undefined; var r = intr(4) === s.iterator; Symbol = s; r"), "true", "a script cannot change it");
         assert_eq!(it.stack_len(), 0);
+    });
+}
+
+// ---------------------------------------------------------------------------------------- promises, microtasks and iteration
+
+fn global<'s, E: Engine>(s: &mut Scope<'s, E>, name: &str) -> Local<'s> {
+    let g = s.global();
+    s.get_str(g, name).unwrap()
+}
+
+#[test]
+fn the_pending_rejection_bound_is_the_one_of_the_interface() {
+    assert_eq!(super::MAX_PENDING_REJECTIONS, bare_js_api::MAX_PENDING_REJECTIONS);
+}
+
+#[test]
+fn a_promise_of_the_interface_settles_and_its_reactions_run_on_the_drain() {
+    big(|| {
+        let (mut it, _) = setup();
+        out(&mut it, "var log = []; var ok = v => log.push('ok:' + v); var bad = v => log.push('bad:' + v); 0");
+        enter(&mut it, |s| {
+            let (ok, bad) = (global(s, "ok"), global(s, "bad"));
+            let p = s.new_promise().unwrap();
+            assert_eq!(s.promise_status(p), Some(PromiseState::Pending));
+            s.promise_then(p, ok, bad).unwrap();
+            let seven = s.number(7.0);
+            s.resolve_promise(p, seven).unwrap();
+            let Some(PromiseState::Fulfilled(v)) = s.promise_status(p) else { panic!("fulfilled") };
+            assert_eq!(s.as_number(v), Some(7.0));
+            assert_eq!(s.pending_jobs(), 1, "the reaction waits for the drain");
+            // A promise that is settled already: the reaction is queued by `promise_then`.
+            let q = s.new_promise().unwrap();
+            let why = s.string("no").unwrap();
+            s.reject_promise(q, why).unwrap();
+            s.promise_then(q, ok, bad).unwrap();
+            let Some(PromiseState::Rejected(r)) = s.promise_status(q) else { panic!("rejected") };
+            assert_eq!(s.as_str(r).unwrap().to_string_lossy(), "no");
+            // A value that is not a promise: `react` wraps it, `status` says no.
+            let n = s.number(3.0);
+            assert_eq!(s.promise_status(n), None);
+            s.promise_react(n, ok, bad).unwrap();
+            assert!(matches!(s.resolve_promise(n, n), Err(bare_js_api::Error::Abort(bare_js_api::Abort::Unsupported(_)))));
+            assert_eq!(s.drain_microtasks().unwrap(), 3);
+            assert_eq!(s.pending_jobs(), 0);
+        });
+        assert_eq!(out(&mut it, "log.join()"), "ok:7,bad:no,ok:3");
+        assert_eq!(it.stack_len(), 0);
+    });
+}
+
+#[test]
+fn a_microtask_runs_once_on_the_drain() {
+    big(|| {
+        let (mut it, _) = setup();
+        out(&mut it, "var n = 0; var tick = () => { n++ }; 0");
+        enter(&mut it, |s| {
+            let tick = global(s, "tick");
+            assert_eq!(s.pending_jobs(), 0);
+            s.queue_microtask(tick).unwrap();
+            assert_eq!(s.pending_jobs(), 1);
+            let not_a_function = s.number(1.0);
+            assert!(matches!(s.queue_microtask(not_a_function), Err(bare_js_api::Error::Throw(_))));
+            assert_eq!(s.drain_microtasks().unwrap(), 1);
+            assert_eq!(s.drain_microtasks().unwrap(), 0);
+            assert_eq!(s.pending_jobs(), 0);
+        });
+        assert_eq!(out(&mut it, "n"), "1");
+    });
+}
+
+/// `run(f)`: queue `f` as a microtask, then run a checkpoint from the host and give the number of jobs that ran.
+struct Checkpointer;
+
+impl<'p> bare_js_api::Host<Interp<'p>> for Checkpointer {
+    fn call<'s>(&self, s: &mut Scope<'s, Interp<'p>>, _id: u32, _this: Local<'s>, args: Args<'s>, _is_new: bool) -> Result<Local<'s>, bare_js_api::Error<'s>> {
+        s.queue_microtask(args.get(0).unwrap())?;
+        let n = s.checkpoint()?;
+        Ok(s.number(n as f64))
+    }
+}
+
+#[test]
+fn a_checkpoint_inside_a_script_function_does_nothing() {
+    big(|| {
+        let mut it = Interp::realm(Heap::default(), EvalLimits { max_steps: 100_000, ..Default::default() }).unwrap();
+        enter(&mut it, |s| {
+            s.set_host(Rc::new(Checkpointer));
+            let (g, f, k) = (s.global(), s.host_function("run", 0, 1).unwrap(), s.string("run").unwrap());
+            s.define(g, k, f, Attrs::METHOD).unwrap();
+        });
+        assert_eq!(out(&mut it, "var n = 0; function outer() { return run(() => { n++ }) } var ran = outer(); ran + ',' + n"), "0,0", "a script function is running: no job runs");
+        assert_eq!(it.pending_jobs(), 1);
+        // From a host scope with no script below (a driver dispatching an event) the same call runs the queue.
+        let ran = it.host_scope(|it| Ok(enter(it, |s| s.checkpoint().unwrap()))).unwrap();
+        assert_eq!(ran, 1);
+        assert_eq!(out(&mut it, "n"), "1");
+    });
+}
+
+const ITERABLES: &str = "var arr = [10, 20, 30]; var closed = 0, fin = 0;
+    function* g() { try { yield 1; yield 2; yield 3 } finally { fin++ } }
+    var custom = { [Symbol.iterator]() { return { i: 0, next() { return { value: this.i++, done: this.i > 5 } }, return() { closed++; return {} } } } };
+    var set = new Set([5, 6]); 0";
+
+fn items<'s, E: Engine>(s: &mut Scope<'s, E>, v: Local<'s>) -> Vec<String> {
+    let mut it = s.iter_open(v).unwrap().expect("iterable");
+    let mut out = Vec::new();
+    while let Some(x) = s.iter_next(&mut it).unwrap() {
+        out.push(match s.as_number(x) {
+            Some(n) => n.to_string(),
+            None => s.as_str(x).unwrap().to_string_lossy(),
+        });
+    }
+    assert!(s.iter_next(&mut it).unwrap().is_none(), "an ended iteration stays ended");
+    out
+}
+
+#[test]
+fn an_iteration_steps_an_array_a_string_a_set_and_a_generator() {
+    big(|| {
+        let (mut it, _) = setup();
+        out(&mut it, ITERABLES);
+        enter(&mut it, |s| {
+            let arr = global(s, "arr");
+            assert_eq!(items(s, arr), ["10", "20", "30"]);
+            let text = s.string("a😀").unwrap();
+            assert_eq!(items(s, text), ["a", "😀"]);
+            let set = global(s, "set");
+            assert_eq!(items(s, set), ["5", "6"]);
+            let (g, this) = (global(s, "g"), s.undefined());
+            let gen_ = s.call(g, this, &[]).unwrap();
+            assert_eq!(items(s, gen_), ["1", "2", "3"]);
+            let custom = global(s, "custom");
+            assert_eq!(items(s, custom), ["0", "1", "2", "3", "4"]);
+            let (u, n) = (s.undefined(), s.number(5.0));
+            assert!(s.iter_open(u).unwrap().is_none());
+            assert!(s.iter_open(n).unwrap().is_none(), "a number has no Symbol.iterator");
+        });
+        assert_eq!(out(&mut it, "closed + ',' + fin"), "0,1", "an iteration that ends calls no `return`");
+        assert_eq!(it.stack_len(), 0);
+    });
+}
+
+#[test]
+fn a_failed_iteration_calls_return_and_keeps_its_error() {
+    big(|| {
+        let (mut it, _) = setup();
+        out(&mut it, ITERABLES);
+        enter(&mut it, |s| {
+            let boom = s.string("boom").unwrap();
+            // A script iterator: `return` is called, and the error that comes back is the same value.
+            let custom = global(s, "custom");
+            let mut i = s.iter_open(custom).unwrap().unwrap();
+            let first = s.iter_next(&mut i).unwrap().unwrap();
+            assert_eq!(s.as_number(first), Some(0.0));
+            let back = s.iter_fail(&mut i, bare_js_api::Error::Throw(boom));
+            let bare_js_api::Error::Throw(v) = back else { panic!("the error stays a throw") };
+            assert_eq!(s.as_str(v).unwrap().to_string_lossy(), "boom");
+            assert!(s.iter_next(&mut i).unwrap().is_none(), "a closed iteration is done");
+            // A generator: closing it runs its `finally`.
+            let (g, this) = (global(s, "g"), s.undefined());
+            let gen_ = s.call(g, this, &[]).unwrap();
+            let mut i = s.iter_open(gen_).unwrap().unwrap();
+            s.iter_next(&mut i).unwrap().unwrap();
+            let back = s.iter_fail(&mut i, bare_js_api::Error::Throw(boom));
+            assert!(matches!(back, bare_js_api::Error::Throw(_)));
+            // An abort stays an abort and runs no script.
+            let custom = global(s, "custom");
+            let mut i = s.iter_open(custom).unwrap().unwrap();
+            s.iter_next(&mut i).unwrap().unwrap();
+            let back = s.iter_fail(&mut i, bare_js_api::Error::Abort(bare_js_api::Abort::Limit("steps")));
+            assert!(matches!(back, bare_js_api::Error::Abort(_)));
+        });
+        assert_eq!(out(&mut it, "closed + ',' + fin"), "1,1", "`return` ran for the throw only, and `finally` ran");
+        assert_eq!(it.stack_len(), 0);
+    });
+}
+
+/// An old-style host whose `between_jobs` collects, as a host with a collection inside a task would.
+#[derive(Default)]
+struct Collector {
+    collections: std::cell::Cell<usize>,
+}
+
+impl Host for Collector {
+    fn call(&self, _it: &mut Interp<'_>, _id: u32, _this: Value, _args: &[Value], _is_new: bool) -> Result<Value, Error> {
+        Ok(Value::Undefined)
+    }
+    fn between_jobs(&self, it: &mut Interp<'_>) -> Result<(), Error> {
+        self.collections.set(self.collections.get() + 1);
+        it.collect(&[]).map(|_| ())
+    }
+}
+
+#[test]
+fn a_local_promise_survives_a_collection_inside_the_drain() {
+    big(|| {
+        let (mut it, _) = setup();
+        let c = Rc::new(Collector::default());
+        it.set_host(c.clone()).unwrap();
+        out(&mut it, "var log = []; var ok = v => log.push('ok:' + v.tag); var bad = () => {}; var tick = () => log.push('tick'); var w = new WeakRef({ tag: 'junk' }); 0");
+        enter(&mut it, |s| {
+            let (ok, bad, tick) = (global(s, "ok"), global(s, "bad"), global(s, "tick"));
+            // The promise and its value are held by locals only: no script variable reaches them.
+            let p = s.new_promise().unwrap();
+            let (value, k, tag) = (s.new_object().unwrap(), s.string("tag").unwrap(), s.string("kept").unwrap());
+            s.set(value, k, tag).unwrap();
+            s.promise_then(p, ok, bad).unwrap();
+            s.resolve_promise(p, value).unwrap();
+            s.queue_microtask(tick).unwrap();
+            assert_eq!(s.drain_microtasks().unwrap(), 2);
+            let Some(PromiseState::Fulfilled(v)) = s.promise_status(p) else { panic!("fulfilled") };
+            let t = s.get(v, k).unwrap();
+            assert_eq!(s.as_str(t).unwrap().to_string_lossy(), "kept");
+        });
+        assert!(c.collections.get() >= 2, "the drain collected");
+        assert_eq!(out(&mut it, "log.join() + ',' + (w.deref() === undefined)"), "ok:kept,tick,true", "a collection ran, and it freed what no handle held");
     });
 }
