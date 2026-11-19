@@ -5,6 +5,7 @@
 //! External rules require a supplied sheet and a same-origin URL. `CSSRule` is the base interface of every rule object. The interface shape and the
 //! semantics follow Ladybird `LibWeb/CSS/CSSRule.cpp` (BSD-2).
 use crate::browser::*;
+use crate::browser_sources::Source;
 use crate::browser_dom::{arg, attr_set, next_in, set_text_content, text_content};
 use bare_html::dom::{Document, NodeData, NodeId};
 use bare_js::eval::{Error, Interp};
@@ -14,12 +15,14 @@ use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 
 type V = R<Value>;
-// The CSSOM objects of a page follow the collector. `State::roots` holds the prototypes and constructors only. A sheet in the tree is a root
-// (`roots`). Every other object is reached through `trace`: a sheet reaches its list, a list its sheet or rule and its rule objects, a rule
-// its sheet, parent, nested list, declaration and media list, and a declaration or media list its rule. A rule that leaves its list (deleted,
-// or a replaced text) is garbage unless a script holds it, and `prune` drops the host table entries of a collected object. So the number of
-// objects follows the live rules, and no fixed cap is needed. A rule object costs about 0.5 KB when only its selector is read (measured on a
-// 16 MiB sheet: 187,852 rules, 585 B each). The declaration of a rule counts for `style-objects` too (65,536, `browser_style`).
+// The CSSOM objects of a page follow the collector. `State::roots` holds the prototypes and constructors only. Every other object is an
+// owner (`browser_sources.rs`) and visits its references in `trace_*`: a sheet reaches its list, a list its sheet or rule and its rule
+// objects, a rule its sheet, parent, nested list, declaration and media list, and a declaration or media list its rule. The wrapper of
+// the owner element reaches the sheet of the element (`el.sheet === el.sheet`), and the wrapper of a document or shadow root reaches the
+// sheets that it adopted. A rule that leaves its list (deleted, or a replaced text) is garbage unless a script holds it, and `prune_*`
+// drops the host table entries of a collected object. So the number of objects follows the live rules, and no fixed cap is needed. A rule
+// object costs about 0.5 KB when only its selector is read (measured on a 16 MiB sheet: 187,852 rules, 585 B each). The declaration of a
+// rule counts for `style-objects` too (65,536, `browser_style`).
 const MAX_TEXT: usize = 32 << 20;
 // The rules of one list. A rule that no script has read is an `Entry` of 12 bytes, so this holds the list near 24 MiB.
 const MAX_RULES: usize = 1 << 21;
@@ -114,43 +117,53 @@ fn state(d: &Dom) -> &RefCell<State> {
 pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
     out.extend(d.cssom.style_p.get().copied().map(Value::Object));
     let Some(cell) = d.cssom.state.get() else { return };
+    out.extend(cell.borrow().roots.iter().copied().map(Value::Object));
+}
+/// The references of the rule `o` (its owner entry, `browser_sources.rs`): its sheet, declaration, list, media list and parent.
+pub(crate) fn trace_rule(d: &Dom, o: ObjId, t: &mut bare_js_api::Tracer<'_, Value>) {
+    let Some(cell) = d.cssom.state.get() else { return };
     let s = cell.borrow();
-    out.extend(s.roots.iter().copied().map(Value::Object));
-    out.extend(s.adopted.values().flatten().copied().map(Value::Object));
-    // The sheet of an element that is in a document or a shadow tree stays (`el.sheet === el.sheet`). A sheet of a removed element is
-    // garbage unless a script holds it.
-    let doc = d.doc.try_borrow().ok();
-    for (&n, &o) in &s.by_node {
-        if doc.as_ref().is_none_or(|doc| in_tree(doc, n)) {
-            out.push(Value::Object(o));
-        }
+    let Some(r) = s.rules.get(&o) else { return };
+    for o in [Some(r.sheet), r.style, r.list, r.media, r.parent].into_iter().flatten() {
+        crate::browser_sources::visit(t, Value::Object(o));
     }
 }
-fn in_tree(doc: &Document, mut n: NodeId) -> bool {
-    while let Some(p) = doc.parent(n) {
-        n = p;
+/// The reference of the sheet `o`: its rule list.
+pub(crate) fn trace_sheet(d: &Dom, o: ObjId, t: &mut bare_js_api::Tracer<'_, Value>) {
+    let Some(cell) = d.cssom.state.get() else { return };
+    if let Some(sh) = cell.borrow().sheets.get(&o) {
+        crate::browser_sources::visit(t, Value::Object(sh.list));
     }
-    matches!(doc.data(n), NodeData::Document | NodeData::ShadowRoot)
 }
-/// The objects that `owner` reaches (see the head of the file).
+/// The reference of the media list `o`: its rule.
+pub(crate) fn trace_media(d: &Dom, o: ObjId, t: &mut bare_js_api::Tracer<'_, Value>) {
+    let Some(cell) = d.cssom.state.get() else { return };
+    if let Some(&r) = cell.borrow().medias.get(&o) {
+        crate::browser_sources::visit(t, Value::Object(r));
+    }
+}
+/// The reference of the declaration object `o` of a rule, if it is one: its rule.
 #[inline]
-pub(crate) fn trace(d: &Dom, owner: ObjId, out: &mut Vec<Value>) {
-    // A page that made no CSSOM object pays this one test for each object that the collector visits.
-    if let Some(cell) = d.cssom.state.get() {
-        trace_objects(cell, owner, out);
+pub(crate) fn trace_decl(d: &Dom, o: ObjId, t: &mut bare_js_api::Tracer<'_, Value>) {
+    if let Some(cell) = d.cssom.state.get()
+        && let Some(&r) = cell.borrow().style_rules.get(&o)
+    {
+        crate::browser_sources::visit(t, Value::Object(r));
     }
 }
-fn trace_objects(cell: &RefCell<State>, owner: ObjId, out: &mut Vec<Value>) {
+/// The references of the wrapper of the node `n`: the sheet of its element, and the sheets that it adopted (a document or shadow root).
+pub(crate) fn trace_node(d: &Dom, n: NodeId, t: &mut bare_js_api::Tracer<'_, Value>) {
+    let Some(cell) = d.cssom.state.get() else { return };
     let s = cell.borrow();
-    let mut push = |o: Option<ObjId>| out.extend(o.map(Value::Object));
-    if let Some(r) = s.rules.get(&owner) {
-        for o in [Some(r.sheet), r.style, r.list, r.media, r.parent] {
-            push(o);
+    if !s.by_node.is_empty()
+        && let Some(&o) = s.by_node.get(&n)
+    {
+        crate::browser_sources::visit(t, Value::Object(o));
+    }
+    if !s.adopted.is_empty() {
+        for &o in s.adopted.get(&n).into_iter().flatten() {
+            crate::browser_sources::visit(t, Value::Object(o));
         }
-    } else if let Some(sh) = s.sheets.get(&owner) {
-        push(Some(sh.list));
-    } else if let Some(&r) = s.style_rules.get(&owner).or_else(|| s.medias.get(&owner)) {
-        push(Some(r));
     }
 }
 /// The references of the rule list `o` (its owner entry, `browser_sources.rs`): its sheet, its rule and its rule objects.
@@ -169,17 +182,40 @@ pub(crate) fn prune_list(d: &Dom, o: ObjId) {
         cell.borrow_mut().lists.remove(&o);
     }
 }
-/// Drop the table entries of the objects that the collector freed.
-pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
+/// Drop the entry of the rule `o`, which the collector freed.
+pub(crate) fn prune_rule(d: &Dom, o: ObjId) {
+    if let Some(cell) = d.cssom.state.get() {
+        cell.borrow_mut().rules.remove(&o);
+    }
+}
+/// Drop the entry of the sheet `o`, which the collector freed, the sheet of its element, and its place in an adopted list. A sheet is
+/// freed with the wrapper of its root only when that root is detached and no script holds it.
+pub(crate) fn prune_sheet(d: &Dom, o: ObjId) {
     let Some(cell) = d.cssom.state.get() else { return };
     let mut s = cell.borrow_mut();
-    let s = &mut *s;
-    s.rules.retain(|&o, _| live(o));
-    s.sheets.retain(|&o, _| live(o));
-    s.style_rules.retain(|&o, _| live(o));
-    s.medias.retain(|&o, _| live(o));
-    let sheets = &s.sheets;
-    s.by_node.retain(|_, o| sheets.contains_key(o));
+    if let Some(sh) = s.sheets.remove(&o)
+        && s.by_node.get(&sh.node) == Some(&o)
+    {
+        s.by_node.remove(&sh.node);
+    }
+    if !s.adopted.is_empty() {
+        s.adopted.retain(|_, v| {
+            v.retain(|&x| x != o);
+            !v.is_empty()
+        });
+    }
+}
+/// Drop the entry of the media list `o`, which the collector freed.
+pub(crate) fn prune_media(d: &Dom, o: ObjId) {
+    if let Some(cell) = d.cssom.state.get() {
+        cell.borrow_mut().medias.remove(&o);
+    }
+}
+/// Drop the entry of the declaration object `o`, which the collector freed, if it is the one of a rule.
+pub(crate) fn prune_decl(d: &Dom, o: ObjId) {
+    if let Some(cell) = d.cssom.state.get() {
+        cell.borrow_mut().style_rules.remove(&o);
+    }
 }
 // A prototype or a constructor: an object that stays as long as the page.
 fn keep(d: &Dom, o: ObjId) -> R<ObjId> {
@@ -429,7 +465,7 @@ fn sheet_of(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> R<ObjId> {
         return Ok(o);
     }
     let p = state(d).borrow().sheet_p;
-    let o = d.obj(it, p)?;
+    let o = d.new_owned(it, Source::Sheet, p)?;
     let list = new_list(d, it, Some(o))?;
     state(d).borrow_mut().sheets.insert(
         o,
@@ -443,6 +479,7 @@ fn sheet_of(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> R<ObjId> {
         },
     );
     state(d).borrow_mut().by_node.insert(n, o);
+    d.wrapper_edges.set(true);
     Ok(o)
 }
 fn sheet_get(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
@@ -614,7 +651,7 @@ fn declaration(d: &Dom, it: &mut Interp<'_>, text: &str) -> R<ObjId> {
 }
 fn new_rule(d: &Dom, it: &mut Interp<'_>, mut r: Rule, decl: Option<String>) -> R<ObjId> {
     let p = state(d).borrow().protos[r.kind as usize];
-    let o = d.obj(it, p)?;
+    let o = d.new_owned(it, Source::Rule, p)?;
     r.decl = decl;
     state(d).borrow_mut().rules.insert(o, r);
     Ok(o)
@@ -1094,7 +1131,7 @@ fn media_get(d: &Dom, it: &mut Interp<'_>, t: Value, _: &[Value]) -> V {
         return Ok(Value::Object(m));
     }
     let p = state(d).borrow().media_p;
-    let m = d.obj(it, p)?;
+    let m = d.new_owned(it, Source::Media, p)?;
     let mut s = state(d).borrow_mut();
     s.medias.insert(m, o);
     s.rules.get_mut(&o).unwrap().media = Some(m);
@@ -1169,7 +1206,7 @@ pub(crate) fn declaration_written(d: &Dom, it: &mut Interp<'_>, style: Value) ->
 fn sheet_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
     let sp = state(d).borrow().sheet_p;
     let proto = it.host_proto_from_new_target(sp)?;
-    let o = d.obj(it, proto)?;
+    let o = d.new_owned(it, Source::Sheet, proto)?;
     let list = new_list(d, it, Some(o))?;
     let node = d.doc.borrow().root();
     state(d).borrow_mut().sheets.insert(o, Sheet { node, list, source: String::new(), text_key: None, ctor: true, stale: false });
@@ -1266,6 +1303,7 @@ fn adopted_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
             st.adopted.remove(&n);
         } else {
             st.adopted.insert(n, next);
+            d.wrapper_edges.set(true);
         }
     }
     d.computed.sheet_gen.set(d.computed.sheet_gen.get() + 1);

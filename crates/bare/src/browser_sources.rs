@@ -29,6 +29,9 @@ pub(crate) enum Source {
     Dataset,
     Storage,
     Frames,
+    Rule,
+    Sheet,
+    Media,
 }
 
 impl Source {
@@ -45,6 +48,9 @@ impl Source {
             7 => Source::Dataset,
             8 => Source::Storage,
             9 => Source::Frames,
+            10 => Source::Rule,
+            11 => Source::Sheet,
+            12 => Source::Media,
             _ => return None,
         })
     }
@@ -88,6 +94,24 @@ impl Dom {
     }
 }
 
+impl Dom {
+    /// A new plain object of kind `k` (`Rule`, `Sheet` or `Media`) with prototype `proto`. It is an owner, as the objects of `new_source`.
+    pub(crate) fn new_owned(&self, it: &mut Interp<'_>, k: Source, proto: ObjId) -> R<ObjId> {
+        let key = self.st.borrow_mut().owners.key(Owner::Reserved) | k as u32;
+        match self.obj(it, proto) {
+            Ok(o) => {
+                self.st.borrow_mut().owners.set(key, Owner::Source(o));
+                it.set_host_owner_obj(o, key);
+                Ok(o)
+            }
+            Err(e) => {
+                self.st.borrow_mut().owners.release(key);
+                Err(e)
+            }
+        }
+    }
+}
+
 /// Keep the raw value `v` alive. For the tables of the subsystems, which still hold raw `ObjId`s and strings.
 #[inline]
 pub(crate) fn visit(t: &mut Tracer<'_, Value>, v: Value) {
@@ -98,9 +122,15 @@ pub(crate) fn visit(t: &mut Tracer<'_, Value>, v: Value) {
 pub(crate) fn trace(d: &Dom, key: u32, o: ObjId, t: &mut Tracer<'_, Value>) {
     match Source::of(key) {
         Some(Source::TokenList) => crate::browser_platform::trace_list(d, o, t),
-        Some(Source::Style) => crate::browser_style::trace_obj(d, o, t),
+        Some(Source::Style) => {
+            crate::browser_style::trace_obj(d, o, t);
+            crate::browser_cssom::trace_decl(d, o, t);
+        }
         Some(Source::AttrMap) => crate::browser_attr::trace_map(d, o, t),
         Some(Source::RuleList) => crate::browser_cssom::trace_list(d, o, t),
+        Some(Source::Rule) => crate::browser_cssom::trace_rule(d, o, t),
+        Some(Source::Sheet) => crate::browser_cssom::trace_sheet(d, o, t),
+        Some(Source::Media) => crate::browser_cssom::trace_media(d, o, t),
         Some(Source::Dataset) => crate::browser_dataset::trace_obj(d, o, t),
         // A node list holds no reference. Captions, storage and frames are not owners.
         _ => {}
@@ -121,6 +151,7 @@ fn trace_node_edges(d: &Dom, n: bare_html::dom::NodeId, t: &mut Tracer<'_, Value
     crate::browser_platform::trace_node(d, n, t);
     crate::browser_style::trace_node(d, n, t);
     crate::browser_attr::trace_node(d, n, t);
+    crate::browser_cssom::trace_node(d, n, t);
     if d.frames.active() {
         crate::browser_frames::trace_node(d, n, t);
     }
@@ -131,9 +162,15 @@ pub(crate) fn prune(d: &Dom, key: u32, o: ObjId) {
     match Source::of(key) {
         Some(Source::NodeList) => crate::browser_nodelist::prune_list(d, o),
         Some(Source::TokenList) => crate::browser_platform::prune_list(d, o),
-        Some(Source::Style) => crate::browser_style::prune_obj(d, o),
+        Some(Source::Style) => {
+            crate::browser_style::prune_obj(d, o);
+            crate::browser_cssom::prune_decl(d, o);
+        }
         Some(Source::AttrMap) => crate::browser_attr::prune_map(d, o),
         Some(Source::RuleList) => crate::browser_cssom::prune_list(d, o),
+        Some(Source::Rule) => crate::browser_cssom::prune_rule(d, o),
+        Some(Source::Sheet) => crate::browser_cssom::prune_sheet(d, o),
+        Some(Source::Media) => crate::browser_cssom::prune_media(d, o),
         Some(Source::Dataset) => crate::browser_dataset::prune_obj(d, o),
         _ => {}
     }
@@ -177,7 +214,7 @@ pub(crate) fn indexed_len(d: &Dom, object: &Value, key: u32) -> Result<usize, Pe
         Source::AttrMap => Some(crate::browser_attr::len(d, o)),
         Source::Captions => crate::browser_media::caption_len(d, o),
         Source::RuleList => crate::browser_cssom::len(d, o),
-        Source::Dataset | Source::Storage | Source::Frames => None,
+        Source::Dataset | Source::Storage | Source::Frames | Source::Rule | Source::Sheet | Source::Media => None,
     };
     r.unwrap_or(Ok(0)).map_err(pending)
 }
@@ -192,7 +229,7 @@ pub(crate) fn indexed_item(d: &Dom, object: &Value, key: u32, index: usize) -> R
         Source::AttrMap => Some(crate::browser_attr::item(d, o, index)),
         Source::Captions => crate::browser_media::caption_item(d, o, index),
         Source::RuleList => crate::browser_cssom::item(d, o, index),
-        Source::Dataset | Source::Storage | Source::Frames => None,
+        Source::Dataset | Source::Storage | Source::Frames | Source::Rule | Source::Sheet | Source::Media => None,
     };
     r.unwrap_or(Ok(Slot::Absent)).map(item).map_err(pending)
 }
@@ -266,6 +303,6 @@ pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<
         Some(Source::Dataset) => crate::browser_dataset::fill(d, it, owner),
         Some(Source::RuleList) => crate::browser_cssom::fill(d, it, owner, index),
         Some(Source::Captions) => crate::browser_media::caption_fill(d, it, owner, index),
-        Some(Source::AttrMap | Source::Storage | Source::Frames) | None => Ok(false),
+        Some(Source::AttrMap | Source::Storage | Source::Frames | Source::Rule | Source::Sheet | Source::Media) | None => Ok(false),
     }
 }
