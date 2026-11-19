@@ -225,6 +225,12 @@ const GC_MIN_BYTES: usize = 8 << 20;
 /// that were live after it (`set_external_live`). V8 (`UpdateExternalMemory`) and SpiderMonkey count malloc bytes with a second limit in the same way.
 const EXTERNAL_MIN_BYTES: usize = 4 << 20;
 
+/// Does the environment ask for the stress mode (`BARE_GC_STRESS=1`)? One read for the process.
+fn gc_stress_env() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("BARE_GC_STRESS").is_some_and(|v| v == "1"))
+}
+
 /// Capacity to keep in a table of `len` entries after a collect: twice the live entries, or the live entries plus
 /// `since` (what the program made since the previous collect), so steady churn does not shrink and regrow every
 /// round. `Some` only when that frees at least 1 MiB and at least half of the capacity, as `Slab::trim` does.
@@ -635,6 +641,8 @@ pub struct Interp<'p> {
     gc_allocs: u64,
     /// Accounted heap bytes at the end of the previous `collect` (see `gc_due`).
     gc_live: usize,
+    /// Stress mode: `gc_due` is true at every safe point (`BARE_GC_STRESS=1`, `gc_stress_env`).
+    gc_stress: bool,
     /// Native bytes that the host added since the previous `collect`, and the native bytes that it said were live after it (see `gc_due`).
     ext_since: usize,
     ext_live: usize,
@@ -832,6 +840,7 @@ impl<'p> Interp<'p> {
             free_envs: Vec::new(),
             gc_allocs: 0,
             gc_live: 0,
+            gc_stress: gc_stress_env(),
             ext_since: 0,
             ext_live: 0,
             gc_counters: GcCounters::default(),
@@ -1163,7 +1172,13 @@ impl<'p> Interp<'p> {
         c.task_from.set(used);
         self.depth == 0
             && self.stmt_frames == 0
-            && (self.heap.used_bytes() > GC_MIN_BYTES.max(self.gc_live / 4 * 7) || self.ext_since > EXTERNAL_MIN_BYTES.max(self.ext_live / 4))
+            && (self.gc_stress || self.heap.used_bytes() > GC_MIN_BYTES.max(self.gc_live / 4 * 7) || self.ext_since > EXTERNAL_MIN_BYTES.max(self.ext_live / 4))
+    }
+
+    /// Stress mode: while on, `gc_due` is true at each safe point, so a collect runs between all tasks. A reference that the host
+    /// keeps and no trace names is then freed at once, and the first read of it fails. The environment sets it (`BARE_GC_STRESS=1`).
+    pub fn set_gc_stress(&mut self, on: bool) {
+        self.gc_stress = on;
     }
 
     /// The largest growth of the heap between two safe points (`gc_due`): the most that one task allocated.
