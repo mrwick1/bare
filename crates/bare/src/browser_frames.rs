@@ -62,6 +62,11 @@ impl Frames {
     pub(crate) fn counts(&self) -> (u32, u64) {
         self.state().map_or((0, 0), |s| (s.builds.get(), s.visited.get()))
     }
+    /// The `Location` objects of frame windows that the state still holds.
+    #[cfg(test)]
+    pub(crate) fn locations(&self) -> usize {
+        self.state().map_or(0, |s| s.locs.len())
+    }
 }
 struct State {
     owner: ObjId,
@@ -537,6 +542,9 @@ fn context(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> R<Value> {
         s.docs.insert(dn, o);
         d.wrapper_edges.set(true);
         s.locs.insert(loc);
+        drop(s);
+        let k = d.st.borrow_mut().owners.key(crate::browser::Owner::Loc(loc));
+        it.set_host_owner_obj(loc, k);
     } else {
         // The parent global must not answer for a frame with a child document that is never loaded.
         it.define_data(o, k, Value::Undefined, false, true, true)?;
@@ -646,8 +654,12 @@ pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
     if let Some(s) = d.frames.state_mut().as_mut() {
         s.contexts.retain(|_, o| live(*o));
         s.docs.retain(|_, o| live(*o));
-        let locs = std::mem::take(&mut s.locs);
-        s.locs = locs.into_iter().filter(|o| live(*o)).collect();
+    }
+}
+/// The `Location` object `o` of a frame window is dead: drop its entry.
+pub(crate) fn prune_loc(d: &Dom, o: ObjId) {
+    if let Some(s) = d.frames.state_mut().as_mut() {
+        s.locs.remove(&o);
     }
 }
 
