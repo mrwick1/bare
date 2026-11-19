@@ -244,8 +244,11 @@ fn a_driver_click_step_returns_and_the_expect_waits_for_the_reply() {
     });
     assert!(rep.ok, "{:?}", rep.failure.as_ref().map(|f| &f.1.message));
     let ms: Vec<f64> = rep.steps.iter().map(|s| s.ms).collect();
-    assert!(ms[1] < 50.0 && ms[2] < 50.0 && ms[3] < 50.0, "step times {ms:?}");
-    assert!(ms[4] >= 400.0, "the expect waited for the reply: {ms:?}");
+    // The reply comes `SLOW` after the click. The three steps after `open` end well before it, on a busy machine too, and the last expect waits
+    // for the rest.
+    let quick = ms[1] + ms[2] + ms[3];
+    assert!(quick < SLOW.as_secs_f64() * 500.0, "step times {ms:?}");
+    assert!(quick + ms[4] >= 400.0, "the expect waited for the reply: {ms:?}");
 }
 
 fn color(p: &mut Page, id: &str) -> String {

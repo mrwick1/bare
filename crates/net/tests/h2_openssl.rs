@@ -46,6 +46,8 @@ const ACK: u8 = 1;
 struct Peer {
     srv: Server,
     dec: hpack::Decoder,
+    /// `next` skipped the ACK of our SETTINGS: the client may send it before a request that it wrote after it read our SETTINGS.
+    acked: bool,
 }
 
 struct Request2 {
@@ -65,7 +67,7 @@ fn setup(alpn: &str) -> (Pki, Peer, Client) {
     pki.leaf("good", "localhost", None);
     let srv = Server::start(&pki, "good", &["-alpn", alpn], true);
     let client = Client::with_roots(trust_store::decode_pem(&pki.root_pem()).unwrap());
-    (pki, Peer { srv, dec: hpack::Decoder::new(4096) }, client)
+    (pki, Peer { srv, dec: hpack::Decoder::new(4096), acked: false }, client)
 }
 
 fn url(p: &Peer, path: &str) -> Url {
@@ -131,6 +133,7 @@ impl Peer {
                 return (flags, id, p);
             }
             assert!(matches!(ty, SETTINGS | WINDOW_UPDATE | RST_STREAM), "waiting for type {want}, got type {ty} {p:?}");
+            self.acked |= ty == SETTINGS && flags == ACK;
         }
     }
 
@@ -138,6 +141,7 @@ impl Peer {
     fn open(&mut self, ours: &[(u16, u32)]) -> Vec<(u16, u32)> {
         // Bytes of an earlier connection (a frame sent just before it closed) may come first.
         self.srv.expect(PREFACE);
+        self.acked = false;
         let (ty, _, id, p) = self.read_frame();
         assert_eq!((ty, id), (SETTINGS, 0));
         self.send(&settings(ours));
@@ -147,6 +151,9 @@ impl Peer {
     /// The client has applied our SETTINGS: it sends the ACK only after it did. A request that starts earlier may use the old limits.
     #[track_caller]
     fn acked(&mut self) {
+        if std::mem::take(&mut self.acked) {
+            return;
+        }
         let (flags, ..) = self.next(SETTINGS);
         assert_eq!(flags, ACK, "not the ACK of our SETTINGS");
     }

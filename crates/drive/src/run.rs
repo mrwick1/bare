@@ -805,12 +805,15 @@ impl Session {
         self.settle_pictures();
         let _ = self.host.run(|p| p.hide(Duration::from_secs(2)));
         self.report();
-        drop(self.host);
-        self.rep.ms = self.start.elapsed().as_secs_f64() * 1000.0;
         // A recording or a replay (`bare_net::replay`) is a benchmark: let the pictures that still load and decode finish, so that each run does the same work.
+        // The page stays until then: a request that waits for a worker is not sent once its page is gone, and a busy machine would drop it at random.
+        let drained = Instant::now();
         if bare_net::replay::Tape::from_env().is_some() {
             self.net.drain(Duration::from_secs(30));
         }
+        let drained = drained.elapsed();
+        drop(self.host);
+        self.rep.ms = (self.start.elapsed() - drained).as_secs_f64() * 1000.0;
         self.rep
     }
 }
