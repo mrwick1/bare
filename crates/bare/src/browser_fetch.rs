@@ -411,6 +411,12 @@ struct RespData {
     stream: Option<Traced<Value>>,
 }
 
+/// An entry of a fetch object: the object's host key (`Owner::Fetch`) and its data.
+struct Ent {
+    key: u32,
+    f: F,
+}
+
 enum F {
     Headers(HeaderList),
     Request(ReqData),
@@ -486,7 +492,7 @@ impl Pending {
 
 #[derive(Default)]
 struct FetchState {
-    objs: IdMap<ObjId, F>,
+    objs: IdMap<ObjId, Ent>,
     queue: VecDeque<Pending>,
     base: Option<Url>,
     retained: usize,
@@ -604,7 +610,7 @@ fn oid(t: &Traced<Value>) -> ObjId {
 
 /// The references of the owner `Owner::Fetch(owner)`.
 pub(crate) fn trace(d: &Dom, owner: ObjId, t: &mut bare_js_api::Tracer<'_, Value>) {
-    match d.fetch.st.borrow().objs.get(&owner) {
+    match d.fetch.st.borrow().f_get(&owner) {
         Some(F::Request(r)) => {
             t.visit(&r.c.headers);
             if let Some(s) = &r.signal {
@@ -622,18 +628,35 @@ pub(crate) fn trace(d: &Dom, owner: ObjId, t: &mut bare_js_api::Tracer<'_, Value
     }
 }
 
-/// The owner `Owner::Fetch(o)` is dead: drop its entry and take its bytes and reader out of the totals.
-pub(crate) fn forget(d: &Dom, o: ObjId) {
-    let mut st = d.fetch.st.borrow_mut();
-    match st.objs.remove(&o) {
-        Some(F::Request(r)) => st.retained -= r.c.body.len(),
-        Some(F::Response(r)) => st.retained -= r.c.body.len(),
-        Some(F::Reader { .. }) => st.readers -= 1,
-        _ => {}
-    }
+/// Call after the dead keys are released. One pass over the entries: the entries of dead owners go, and their bytes and readers
+/// leave the totals.
+pub(crate) fn prune(d: &Dom, st: &crate::browser::State) {
+    let mut f = d.fetch.st.borrow_mut();
+    let f = &mut *f;
+    let (retained, readers) = (&mut f.retained, &mut f.readers);
+    f.objs.retain(|_, e| {
+        if st.owners.get(e.key).is_some() {
+            return true;
+        }
+        match &e.f {
+            F::Request(r) => *retained -= r.c.body.len(),
+            F::Response(r) => *retained -= r.c.body.len(),
+            F::Reader { .. } => *readers -= 1,
+            _ => {}
+        }
+        false
+    });
 }
 
 impl FetchState {
+    fn f_get(&self, o: &ObjId) -> Option<&F> {
+        self.objs.get(o).map(|e| &e.f)
+    }
+
+    fn f_get_mut(&mut self, o: &ObjId) -> Option<&mut F> {
+        self.objs.get_mut(o).map(|e| &mut e.f)
+    }
+
     fn diag(&mut self, lim: &FetchLimits, text: String) {
         if lim.max_diag == 0 {
             self.dropped_diag = self.dropped_diag.saturating_add(1);
@@ -800,7 +823,7 @@ impl Dom {
             F::Reader { .. } => st.readers += 1,
             _ => {}
         }
-        st.objs.insert(o, f);
+        st.objs.insert(o, Ent { key: k, f });
         Ok(o)
     }
 
@@ -971,7 +994,7 @@ impl Dom {
     /// Run `f` on the header list of `this` (a Headers). `f` cannot run JS: it holds the borrow.
     fn on_headers<T>(&self, it: &mut Interp<'_>, this: Value, f: impl FnOnce(&mut HeaderList) -> Result<T, HErr>) -> R<T> {
         let o = self.brand(it, this)?;
-        let r = match self.fetch.st.borrow_mut().objs.get_mut(&o) {
+        let r = match self.fetch.st.borrow_mut().f_get_mut(&o) {
             Some(F::Headers(h)) => f(h),
             _ => return Err(it.type_error("Illegal invocation")),
         };
@@ -979,14 +1002,14 @@ impl Dom {
     }
 
     fn list_len(&self, o: ObjId) -> usize {
-        match self.fetch.st.borrow().objs.get(&o) {
+        match self.fetch.st.borrow().f_get(&o) {
             Some(F::Headers(h)) => h.list.len(),
             _ => 0,
         }
     }
 
     fn list_of(&self, o: ObjId) -> HeaderList {
-        match self.fetch.st.borrow().objs.get(&o) {
+        match self.fetch.st.borrow().f_get(&o) {
             Some(F::Headers(h)) => h.clone(),
             _ => HeaderList::new(Guard::None),
         }
@@ -1118,8 +1141,8 @@ fn make_core(d: &Dom, it: &mut Interp<'_>, input: Value, init: Value) -> R<Core>
     let lim = d.fl();
     let mut transfer: Option<ObjId> = None;
     let mut core = match input {
-        Value::Object(o) if matches!(d.fetch.st.borrow().objs.get(&o), Some(F::Request(_))) => {
-            let (method, url, redirect, credentials, mode, hdr, body, used, signal) = match d.fetch.st.borrow().objs.get(&o) {
+        Value::Object(o) if matches!(d.fetch.st.borrow().f_get(&o), Some(F::Request(_))) => {
+            let (method, url, redirect, credentials, mode, hdr, body, used, signal) = match d.fetch.st.borrow().f_get(&o) {
                 Some(F::Request(r)) => (r.method.clone(), dup(&r.url), r.redirect, r.credentials, r.mode, oid(&r.c.headers), r.c.body.bytes.clone(), r.c.body.used || r.c.body.locked, r.signal.as_ref().map(oid)),
                 _ => unreachable!(),
             };
@@ -1209,7 +1232,7 @@ fn make_core(d: &Dom, it: &mut Interp<'_>, input: Value, init: Value) -> R<Core>
     if let Some(o) = transfer {
         // The body moves to the new request: the old one is used up.
         let mut st = d.fetch.st.borrow_mut();
-        if let Some(F::Request(r)) = st.objs.get_mut(&o) {
+        if let Some(F::Request(r)) = st.f_get_mut(&o) {
             r.c.body.used = true;
             let n = r.c.body.len();
             r.c.body.bytes = None;
@@ -1366,19 +1389,19 @@ fn headers_entries(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<
 
 fn headers_iter_next(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
     let o = d.brand(it, this)?;
-    let (headers, idx, kind) = match d.fetch.st.borrow().objs.get(&o) {
+    let (headers, idx, kind) = match d.fetch.st.borrow().f_get(&o) {
         Some(F::HeadersIter { headers, idx, kind }) => (oid(headers), *idx, *kind),
         _ => return Err(it.type_error("Illegal invocation")),
     };
     it.charge(1 + d.list_len(headers) as u64)?;
-    let item = match d.fetch.st.borrow().objs.get(&headers) {
+    let item = match d.fetch.st.borrow().f_get(&headers) {
         Some(F::Headers(h)) => h.nth_sorted(idx),
         _ => None,
     };
     let (value, done) = match item {
         None => (Value::Undefined, true),
         Some((n, v)) => {
-            if let Some(F::HeadersIter { idx, .. }) = d.fetch.st.borrow_mut().objs.get_mut(&o) {
+            if let Some(F::HeadersIter { idx, .. }) = d.fetch.st.borrow_mut().f_get_mut(&o) {
                 *idx += 1;
             }
             match kind {
@@ -1401,7 +1424,7 @@ fn headers_iter_next(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> 
 // ---------------------------------------------------------------------------------------------- Request and Response
 
 fn common(st: &mut FetchState, o: ObjId) -> Option<&mut Common> {
-    match st.objs.get_mut(&o)? {
+    match st.f_get_mut(&o)? {
         F::Request(r) => Some(&mut r.c),
         F::Response(r) => Some(&mut r.c),
         _ => None,
@@ -1522,8 +1545,8 @@ fn lock_state(d: &Dom, o: ObjId) -> Option<(bool, bool)> {
         return Some(ld);
     }
     let st = d.fetch.st.borrow();
-    match st.objs.get(&o) {
-        Some(F::Stream(r)) => match st.objs.get(&oid(r)) {
+    match st.f_get(&o) {
+        Some(F::Stream(r)) => match st.f_get(&oid(r)) {
             Some(F::Response(r)) => Some((r.c.body.locked, r.c.body.used)),
             _ => None,
         },
@@ -1534,8 +1557,8 @@ fn lock_state(d: &Dom, o: ObjId) -> Option<(bool, bool)> {
 /// The ReadableStream that `new Response(stream)` got, if `o` is such a response. Its own `body` stream holds `o`; this one does not.
 fn stream_src(d: &Dom, o: ObjId) -> Option<ObjId> {
     let st = d.fetch.st.borrow();
-    match st.objs.get(&o) {
-        Some(F::Response(r)) => r.stream.as_ref().map(oid).filter(|s| !matches!(st.objs.get(s), Some(F::Stream(owner)) if oid(owner) == o)),
+    match st.f_get(&o) {
+        Some(F::Response(r)) => r.stream.as_ref().map(oid).filter(|s| !matches!(st.f_get(s), Some(F::Stream(owner)) if oid(owner) == o)),
         _ => None,
     }
 }
@@ -1567,7 +1590,7 @@ fn drain_stream(d: &Dom, it: &mut Interp<'_>, this: ObjId, src: ObjId, kind: &st
 
 fn with_req<T>(d: &Dom, it: &mut Interp<'_>, this: Value, f: impl FnOnce(&ReqData) -> T) -> R<T> {
     let o = d.brand(it, this)?;
-    match d.fetch.st.borrow().objs.get(&o) {
+    match d.fetch.st.borrow().f_get(&o) {
         Some(F::Request(r)) => Ok(f(r)),
         _ => Err(it.type_error("Illegal invocation")),
     }
@@ -1575,7 +1598,7 @@ fn with_req<T>(d: &Dom, it: &mut Interp<'_>, this: Value, f: impl FnOnce(&ReqDat
 
 fn with_resp<T>(d: &Dom, it: &mut Interp<'_>, this: Value, f: impl FnOnce(&RespData) -> T) -> R<T> {
     let o = d.brand(it, this)?;
-    match d.fetch.st.borrow().objs.get(&o) {
+    match d.fetch.st.borrow().f_get(&o) {
         Some(F::Response(r)) => Ok(f(r)),
         _ => Err(it.type_error("Illegal invocation")),
     }
@@ -1622,11 +1645,11 @@ fn req_clone(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value>
 }
 fn req_signal(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
     let o = d.brand(it, this)?;
-    if let Some(F::Request(ReqData { signal: Some(s), .. })) = d.fetch.st.borrow().objs.get(&o) {
+    if let Some(F::Request(ReqData { signal: Some(s), .. })) = d.fetch.st.borrow().f_get(&o) {
         return Ok(Value::Object(oid(s)));
     }
     let s = d.fresh_signal(it)?;
-    if let Some(F::Request(r)) = d.fetch.st.borrow_mut().objs.get_mut(&o) {
+    if let Some(F::Request(r)) = d.fetch.st.borrow_mut().f_get_mut(&o) {
         r.signal = Some(edge(it, s));
     }
     Ok(Value::Object(s))
@@ -1781,7 +1804,7 @@ fn body_form_data(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<V
 
 fn resp_body(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
     let o = d.brand(it, this)?;
-    let (stream, has_body) = match d.fetch.st.borrow().objs.get(&o) {
+    let (stream, has_body) = match d.fetch.st.borrow().f_get(&o) {
         Some(F::Response(r)) => (r.stream.as_ref().map(oid), r.c.body.bytes.is_some() || r.c.body.used),
         _ => return Err(it.type_error("Illegal invocation")),
     };
@@ -1793,7 +1816,7 @@ fn resp_body(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value>
     }
     d.reserve(it, 1, 0)?;
     let s = d.add_obj(it, Pr::Stream, F::Stream(edge(it, o)))?;
-    if let Some(F::Response(r)) = d.fetch.st.borrow_mut().objs.get_mut(&o) {
+    if let Some(F::Response(r)) = d.fetch.st.borrow_mut().f_get_mut(&o) {
         r.stream = Some(edge(it, s));
     }
     Ok(Value::Object(s))
@@ -1805,7 +1828,7 @@ fn illegal(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
 
 fn stream_owner(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<(ObjId, ObjId)> {
     let o = d.brand(it, this)?;
-    match d.fetch.st.borrow().objs.get(&o) {
+    match d.fetch.st.borrow().f_get(&o) {
         Some(F::Stream(r)) => Ok((o, oid(r))),
         _ => Err(it.type_error("Illegal invocation")),
     }
@@ -1813,7 +1836,7 @@ fn stream_owner(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<(ObjId, ObjId)> 
 
 pub(crate) fn stream_locked(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
     let (_, r) = stream_owner(d, it, this)?;
-    let locked = match d.fetch.st.borrow().objs.get(&r) {
+    let locked = match d.fetch.st.borrow().f_get(&r) {
         Some(F::Response(r)) => r.c.body.locked,
         _ => false,
     };
@@ -1834,7 +1857,7 @@ pub(crate) fn stream_get_reader(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[
     d.reserve(it, 1, 0)?;
     {
         let mut st = d.fetch.st.borrow_mut();
-        match st.objs.get_mut(&r) {
+        match st.f_get_mut(&r) {
             Some(F::Response(resp)) if !resp.c.body.locked => resp.c.body.locked = true,
             _ => return Err(it.type_error("ReadableStream is locked")),
         }
@@ -1869,11 +1892,11 @@ fn drop_body(st: &mut FetchState, o: ObjId) {
 
 fn reader_parts(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<(ObjId, ObjId, bool)> {
     let o = d.brand(it, this)?;
-    let (stream, released) = match d.fetch.st.borrow().objs.get(&o) {
+    let (stream, released) = match d.fetch.st.borrow().f_get(&o) {
         Some(F::Reader { stream, released }) => (oid(stream), *released),
         _ => return Err(it.type_error("Illegal invocation")),
     };
-    let resp = match d.fetch.st.borrow().objs.get(&stream) {
+    let resp = match d.fetch.st.borrow().f_get(&stream) {
         Some(F::Stream(r)) => oid(r),
         _ => return Err(it.type_error("Illegal invocation")),
     };
@@ -1955,7 +1978,7 @@ pub(crate) fn reader_release(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Val
     let (o, resp, released) = reader_parts(d, it, this)?;
     if !released {
         let mut st = d.fetch.st.borrow_mut();
-        if let Some(F::Reader { released, .. }) = st.objs.get_mut(&o) {
+        if let Some(F::Reader { released, .. }) = st.f_get_mut(&o) {
             *released = true;
         }
         if let Some(c) = common(&mut st, resp) {

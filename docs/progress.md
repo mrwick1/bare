@@ -14049,3 +14049,28 @@ Checks:
 Not tested: the hooks with a real call from the engine (M3); the wrapper cost in a browser row (nothing calls it); a full `bare` run on the Windows VM; wall time; `iter_next` over a Map (the `Coll` path is tested with a Set, and Map uses the same cursor code).
 
 Owner decision (2026-11-19): exception granted for the 12 other rows above, and a standing rule from now on. A row that is over +0.5% under both allocators passes when both trees, built with `RUSTFLAGS="-C codegen-units=1"`, show it within +0.5%. The cause is then the codegen-unit split, not new work. The PR records both numbers.
+
+## 2026-11-20: fetch objects as owners (plan step S0.4, F3)
+
+STOPPED at the cost gate. The code is on branch `t3/fetch-objects-owners-1`. No PR is open.
+
+Changes:
+
+- `Owner::Fetch(ObjId)` in `browser.rs`: Headers, Request, Response, body stream, reader and headers iterator objects get a host key in `add_obj_in`. Their edges are `Traced` values. `Dom::trace` calls `browser_fetch::trace` for the key.
+- The entries are `Ent { key, f }`. `browser_fetch::prune` runs once after the keys are released, in one pass over the entries. A dead owner takes its entry, and its bytes and reader leave `retained` and `readers`. The old `Fetch::trace` and `Fetch::prune` hooks are gone.
+- Per-key removal (a `forget` call for each dead key) cost +2.5% on `fetch_load objects`. The one pass gives +1.4%.
+- New tests: a detached response with a stream and a reader goes with its totals; a request keeps its signal and headers and loses them with itself. The existing zero-entries checks of `fetch_load` pass.
+
+Cost matrix (archMachine, base = origin/main `7203937a` built fresh, 3 runs per row, minimum, `-j4`, 819 rows; instruction counts). First run, per-key `forget`: `fetch_load objects 1` +2.57% and `10` +2.67%, `iterate 1` +0.80% and `10` +0.82% (glibc; jemalloc is within 0.2 points). After the one-pass prune, the 12 rows of `fetch_load`, abort and xhr: `objects 1` +1.47% (92516375 to 93876015), `objects 10` +1.46%, `iterate 1` +0.51%, `iterate 10` +0.53%. The full matrix was not run again after the change.
+
+Codegen-unit check (both trees with `RUSTFLAGS="-C codegen-units=1"`, `fetch_load` only): `objects 1` +1.84%, `objects 10` +1.88%, `iterate 1` +0.65%, `iterate 10` +0.66%. The cause is not the codegen-unit split. It is work per object.
+
+Cause (callgrind, `objects 1`, 10000 objects, +1.35M instructions): about 135 instructions for each object. `add_obj_in` takes a key and pushes the owner (+0.59M). The dead-key loop of `Dom::prune` runs for each key, and it calls `owners.get` several times (+0.67M with the entry pass). Hypothesis: a single `owners.get(k)` for each key in that loop saves about 40 instructions per object. That is not enough for the +0.5% limit, and it changes lines of other agents.
+
+Not changed: `parse_load deep 1` and `10` fail with a stack overflow on both trees (base too).
+
+Checks:
+
+- Linux: `cargo check -p bare -p bare-js -p bare-js-api` exits 0. `cargo test --locked -p bare --lib` filtered `fetch` 95, `abort` 19, `stream` 48 passed, also with `BARE_GC_STRESS=1`.
+
+Not tested: the Windows VM; the crate tests of `bare-js-api` and `bare-js`; the full `bare --lib` run; a full cost matrix after the final change.
