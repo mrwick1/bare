@@ -406,6 +406,26 @@ fn imports_resolve_against_the_module_url_and_load_once_per_page() {
     });
 }
 
+/// A Vite dev server serves each source module as its own file, so a large app imports thousands. The default limits load them all.
+#[test]
+fn a_module_graph_of_thousands_of_files_loads() {
+    big(|| {
+        const N: usize = 2000;
+        let main: String = (0..N).map(|i| format!("import m{i} from '/m{i}.js';")).collect::<String>() + &format!("log.push('sum:' + [{}].reduce((a, b) => a + b))", (0..N).map(|i| format!("m{i}")).collect::<Vec<_>>().join(","));
+        let srv = serve(move |path| match path {
+            "/main.js" => Reply::new(200, Some("application/javascript"), main.as_bytes()),
+            p => match p.strip_prefix("/m").and_then(|s| s.strip_suffix(".js")) {
+                Some(i) => Reply::new(200, Some("application/javascript"), format!("export default {i}").as_bytes()),
+                None => Reply::new(404, Some("text/plain"), "no"),
+            },
+        });
+        let mut b = make(&format!("{PRE}<script type=module src='/main.js'></script>"), &srv, 50_000_000, true);
+        let r = load(&mut b, &srv, quick());
+        assert_eq!(eval(&mut b, "log.join('|')"), format!("sum:{}", N * (N - 1) / 2), "{:?} {:?} {}", r.stop, r.diagnostics, r.fetches);
+        assert_eq!((r.stop, r.script_throws, r.load_errors, r.fetches), (Stop::Settled, 0, 0, N + 1));
+    });
+}
+
 /// An import of a `data:` URL (HTML Standard, "resolve a module specifier": any URL with a fetch scheme) takes its text from the URL.
 /// old.reddit.com imports its page setup and its script loader this way.
 #[test]

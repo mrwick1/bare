@@ -43,8 +43,9 @@ use std::time::{Duration, Instant};
 
 /// Elements (scripts and style sheet links) in one page. More is an error: a page cannot make us hold a million nodes.
 pub const MAX_REFERENCES: usize = 4096;
-/// Distinct URLs to download. Public pages can exceed 128. Byte and time caps still bound the load.
-pub const MAX_FETCHES: usize = 1024;
+/// Distinct URLs to download. Public pages can exceed 128. A Vite dev server serves each source module as its own file, so a large
+/// app fetches thousands. Byte and time caps still bound the load.
+pub const MAX_FETCHES: usize = 16384;
 /// One resource, after decoding. The biggest staging file is 391 KB. The app bundle of bsky.app is 9.7 MB, so 16 MiB.
 pub const MAX_RESOURCE_BYTES: usize = 16 * 1024 * 1024;
 /// All the text that we keep. The 52 staging files have 1.86 MB.
