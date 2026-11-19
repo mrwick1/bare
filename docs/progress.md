@@ -13725,3 +13725,33 @@ Checks:
 - Windows 11 VM: `bare` filters `browser_ nodelist attr dataset cssom style frames media storage`: 1586 passed, 3 failed (the two `browser_session` fixture-path tests and the `Asia/Kolkata` time zone test, `browser_date_tests::local_time_uses_the_zone_of_the_realm_in_the_browser`). `bare-js-api` 5 passed. `bare-js` (not changed by this PR): 1039 passed, 8 failed. Three read fixture folders by the Linux path (`golden_disassembly`, `corpus_status_matches_acorn`, `parser_corpus_never_panics_or_faults`), and five need the system time zone table (`date_tests` 2, `intl_tests` 3: `Asia/Kolkata`, `Asia/Kathmandu`). Not fixed.
 
 Not tested: the staging journey A/B; peak memory (RSS) of these objects; a run of the cost matrix under jemalloc on every row (`-J`); the sum of both PRs against `52613c99`; a rebase onto main after `d5dac645` (`be110f78` and later) with a new matrix.
+## 2026-11-19: CSSOM, frames and form cost rows (plan step S0.4)
+
+Changes: a new example `crates/bare/examples/cssom_load.rs` (cases `rules`, `sheets`, `adopted`, `computed`), a `frames` case in `navigation_load` and a `validity` case in `form_load`. `tools/js/cost_rows.txt` has 2 rows (scale 1 and 10) for each of the 6 cases, in their own block at the end. No engine or browser change. The designs `design-host-cssom.md`, `design-host-navigation.md` and `design-host-forms.md` ask for these rows as PR 1, because no old row reads rule lists, sheets, a frame window, `validity` or `labels`.
+
+Each case checks one sum that a model in Rust gives. A wrong expected sum fails each of the 3 files (tried, then reverted): `FAIL: rules: 21200 != 21300`, `validity: 11000 != 11001`, `frames: 63000 != 64000`.
+
+Base instruction counts (user mode, `perf stat -e instructions:u`, archMachine, release build of this tree, which has the engine of origin/main `37df5bd1`; 5 runs, `GLIBC_TUNABLES=glibc.malloc.tcache_count=65535`):
+
+| Row | min | max | spread |
+| --- | ---: | ---: | ---: |
+| `cssom_load rules 1` | 170,184,880 | 170,195,369 | 0.006% |
+| `cssom_load rules 10` | 1,586,493,585 | 1,586,668,498 | 0.011% |
+| `cssom_load sheets 1` | 109,964,030 | 109,973,486 | 0.009% |
+| `cssom_load sheets 10` | 1,013,088,236 | 1,013,164,243 | 0.008% |
+| `cssom_load adopted 1` | 98,454,790 | 98,456,514 | 0.002% |
+| `cssom_load adopted 10` | 899,911,712 | 899,914,183 | 0.000% |
+| `cssom_load computed 1` | 275,194,857 | 275,196,631 | 0.001% |
+| `cssom_load computed 10` | 2,656,084,503 | 2,656,091,630 | 0.000% |
+| `navigation_load frames 1` | 176,206,892 | 176,208,179 | 0.001% |
+| `navigation_load frames 10` | 1,695,131,087 | 1,695,134,456 | 0.000% |
+| `form_load validity 1` | 117,965,459 | 117,976,428 | 0.009% |
+| `form_load validity 10` | 1,144,454,526 | 1,144,774,659 | 0.028% |
+
+All spreads are under 0.25%. Scale 10 of each case runs in under 1 s.
+
+Cost matrix against the base build of `37df5bd1` (817 rows, 803 measured): mean change +0.004% (glibc). The 12 new rows and `parse_load deep 1`/`10` did not run on the base: the base has no such case, and `parse_load deep` overflows its stack on the base and on this tree. One row is over +0.5% under glibc only: `resources_load small 1` +1.967% and `10` +1.423% (jemalloc +0.021% and +0.001%). It is a loopback-server row and this PR changes none of its code. `preload_load style 10` was +0.528% under glibc in the first run only. No row is over +0.5% under both allocators.
+
+Checks: Linux `cargo test --locked -p bare --lib` with filters `cssom` (21 passed), `frame` (45), `controls` (13) and `validity` (1). Windows 11 VM: the 3 examples built with cargo xwin (release) and each new case ran at scale 1 with `checksum=ok`.
+
+Not tested: Windows at scale 10; the old `*_load` cases on Windows; callgrind profile of the new rows; Node/Chrome comparison of the checksums (they follow the HTML and CSSOM standards by hand, and the engine agreed).
