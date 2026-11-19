@@ -278,6 +278,8 @@ examples/loader_load dynamic 1
 examples/loader_load dynamic 10
 examples/loader_load mixed 1
 examples/loader_load mixed 10
+examples/loader_load modules 1
+examples/loader_load modules 10
 examples/navigation_load url 1
 examples/navigation_load url 10
 examples/navigation_load iterate 1

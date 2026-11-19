@@ -1,11 +1,13 @@
 //! Load test for the page loader and driver over a loopback HTTP server inside this process. One case at one scale per
 //! process, on a virtual clock (nothing sleeps).
 //!
-//!   loader_load CASE SCALE      CASE: blocking | dynamic | mixed      SCALE: 1, 10, 100
+//!   loader_load CASE SCALE      CASE: blocking | dynamic | mixed | modules      SCALE: 1, 10, 100
 //!
 //! blocking: SCALE*20 external classic scripts (all different URLs) and SCALE*20 inline ones. Each adds its index to a sum
 //! and to a rolling hash. dynamic: SCALE*50 scripts, each added by the `load` handler of the one before (one pending at a time).
 //! mixed: SCALE*20 async scripts, each starts a `fetch` and a timer and a Promise chain; a replies counts its own bytes.
+//! modules: SCALE*20 module scripts (inline, each imports one of 4 mid modules, which import 2 of 4 shared leaves, which import
+//! `shared` through an import map entry; `shared` has a top-level await) and SCALE*10 `import()` calls from a classic script.
 //! Every case compares sum, hash and counters with the same computation in Rust, then collects and checks that nothing
 //! is left queued. Prints time, CPU, peak RSS and what the realm holds. `tools/js/loader_load.sh` runs the matrix under caps.
 //! Only throwaway synthetic data. No external network.
@@ -41,8 +43,13 @@ fn cpu_ms() -> u64 {
     (t(11) + t(12)) * 10
 }
 
+/// What mid module J exports: 2 * leaf J + leaf (J + 1) % 4, with leaf K = 7 + K.
+fn module_m(j: usize) -> u64 {
+    (2 * (7 + j) + 7 + (j + 1) % 4) as u64
+}
+
 fn exec(name: &str, scale: usize) {
-    let (n_ext, n_dyn, n_mix) = (20 * scale, 50 * scale, 20 * scale);
+    let (n_ext, n_dyn, n_mix, n_mod, n_imp) = (20 * scale, 50 * scale, 20 * scale, 20 * scale, 10 * scale);
     let body = |i: usize| format!("sum += {i}; h = (h * 31 + {i}) % 1000003;");
     let (html, kind) = match name {
         "blocking" => {
@@ -63,6 +70,14 @@ fn exec(name: &str, scale: usize) {
             }
             (h, 2)
         }
+        "modules" => {
+            let mut h = String::from("<script type=importmap>{\"imports\": {\"shared\": \"/shared.js\"}}</script><script>var sum = 0, h = 0, sq = 0, calls = 0, dsum = 0, dcalls = 0</script>");
+            for i in 0..n_mod {
+                h += &format!("<script type=module>import {{ m }} from '/mid{}.js'; sum += m + {i}; sq += {i} * {i}; calls++;</script>", i % 4);
+            }
+            h += &format!("<script>for (var k = 0; k < {n_imp}; k++) (function (k) {{ import('/mid' + (k % 4) + '.js').then(function (ns) {{ dsum += ns.m + k; dcalls++ }}) }})(k)</script>");
+            (h, 3)
+        }
         _ => die(format!("unknown case {name}")),
     };
     let server = serve(move |path| {
@@ -70,6 +85,18 @@ fn exec(name: &str, scale: usize) {
         match kind {
             0 => num("/b").map_or_else(|| Reply::new(404, None, ""), |i| Reply::js(format!("sum += {i}; h = (h * 31 + {i}) % 1000003; calls++"))),
             1 => num("/d").map_or_else(|| Reply::new(404, None, ""), |i| Reply::js(format!("sum += {i}; h = (h * 31 + {i}) % 1000003; calls++"))),
+            3 => {
+                let num = |p: &str| path.strip_prefix(p).and_then(|r| r.strip_suffix(".js")).and_then(|r| r.parse::<usize>().ok());
+                if path == "/shared.js" {
+                    Reply::js("export const base = 7; await Promise.resolve(); globalThis.tla = (globalThis.tla || 0) + 1;".to_string())
+                } else if let Some(k) = num("/leaf") {
+                    Reply::js(format!("import {{ base }} from 'shared'; export const v = base + {k};"))
+                } else if let Some(j) = num("/mid") {
+                    Reply::js(format!("import {{ v }} from '/leaf{j}.js'; import {{ v as w }} from '/leaf{}.js'; export const m = v * 2 + w;", (j + 1) % 4))
+                } else {
+                    Reply::new(404, None, "")
+                }
+            }
             _ if path == "/data" => Reply::new(200, Some("text/plain"), "0123456789"),
             _ => num("/m").map_or_else(
                 || Reply::new(404, None, ""),
@@ -108,6 +135,11 @@ fn exec(name: &str, scale: usize) {
                 calls += 1;
             }
         }
+        "modules" => {
+            // module sums do not depend on the order of the scripts, so the rolling hash stays 0
+            sum = (0..n_mod).map(|i| module_m(i % 4) + i as u64).sum();
+            calls = n_mod;
+        }
         _ => {
             // timers with delay i % 7 fire by (delay, order); scripts ran in document order, so ties keep index order
             let mut order: Vec<usize> = (0..n_mix).collect();
@@ -126,6 +158,15 @@ fn exec(name: &str, scale: usize) {
     let want = format!("{sum},{h},{calls}");
     if got != want {
         die(format!("checksum {got} != {want}"));
+    }
+    if name == "modules" {
+        let sq: u64 = (0..n_mod as u64).map(|i| i * i).sum();
+        let dsum: u64 = (0..n_imp).map(|k| module_m(k % 4) + k as u64).sum();
+        let v = b.run_script("[sq, dsum, dcalls, tla].join()").unwrap_or_else(|e| die(format!("read: {e:?}")));
+        let want = format!("{sq},{dsum},{n_imp},1");
+        if b.it.display(v) != want {
+            die(format!("module counters {} != {want}", b.it.display(v)));
+        }
     }
     if name == "mixed" {
         let v = b.run_script("[bytes, timers, pr].join()").unwrap();
