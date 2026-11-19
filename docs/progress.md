@@ -13719,3 +13719,8 @@ Cost matrix (archMachine, base `37df5bd1`, 805 rows, `-j4`, minimum of 3 runs, g
 Checks: Linux `bare` lib 1648, `bare-js` lib 1047, `bare-js-api` 5 passed. Windows 11 VM: the two new tests pass.
 
 Not tested: the full `bare` and `bare-js` suites on Windows; the stress mode on Windows; live-site journeys and the staging journey (not allowed in this task); `bare-mcp` tests; the stress mode with the GUI window. Collection counts are a lower bound. The stress mode cannot find a missing edge in a path that no journey runs. Noticed, not changed: `btn.click()` gives an event whose `detail` is `undefined` (to verify against the HTML spec: a `MouseEvent` with `detail` 0).
+## 2026-11-19: design of forms, CSSOM and navigation on the host interface (plan step S0.4)
+
+- Documents: `docs/design-host-forms.md`, `docs/design-host-cssom.md`, `docs/design-host-navigation.md` (PR #709). Callgrind, archMachine, base `37df5bd1`, one run per row. New-owner costs are hypotheses.
+- Measured: lazy CSSOM accessors would remove about 2.2 M instructions per page start; the navigation owners gain about 1.7% on `url 1`; forms gain nothing measurable.
+- Owner decisions (2026-11-19): every proposed answer. Navigation first, CSSOM next, forms last. Each area gets its cost rows first. The 65,536 object caps stay until the new engine collects in a task. M1 defines the iteration methods.

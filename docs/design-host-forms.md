@@ -1,6 +1,6 @@
 # Form controls and input through the host interface
 
-Status: proposal, for the owner (plan step S0.4, forms). Nothing is built. Base: origin/main `37df5bd1`.
+Status: decided by the owner, 2026-11-19 (plan step S0.4, forms). See "Decisions" at the end. Base: origin/main `37df5bd1`.
 
 ## Problem
 
@@ -163,3 +163,13 @@ No example script reads `validity`, `checkValidity`, `labels`, `setCustomValidit
 3. Is the base set of handler methods a PR of its own (proposed), or part of the first subsystem PR?
 4. May forms go last in S0.4 (proposed)? They gain nothing measurable, and they carry the unmeasured validity paths.
 5. A new `form_load` case for `validity` and `labels`: add it before the move (proposed)?
+
+## Decisions (owner, 2026-11-19)
+
+The owner accepted every proposed answer.
+
+1. One PR moves all handlers to `Scope`, `Local` and `Args` after the last subsystem.
+2. Option A for the companion objects.
+3. The base set of handler methods is a PR of its own.
+4. Forms go last in S0.4.
+5. Add a `form_load` case for `validity` and `labels` before the move.

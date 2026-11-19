@@ -1,6 +1,6 @@
 # Location, history, storage, frames and the session through the host interface
 
-Status: proposal, for the owner (plan step S0.4, navigation). Nothing is built. Base: origin/main `37df5bd1`.
+Status: decided by the owner, 2026-11-19 (plan step S0.4, navigation). See "Decisions" at the end. Base: origin/main `37df5bd1`.
 
 ## Problem
 
@@ -199,3 +199,14 @@ Rows that touch the subsystem: `navigation_load` (12 rows: url, iterate, subclas
 4. Who defines `iter_open`, `iter_next` and `iter_close`: this PR or the event-loop design?
 5. A `frames` case and rows before any change to the frames (proposed: yes, PR 1)?
 6. Order: the navigation PRs first, because the measured gain is the largest of the three subsystems (1.7% on `url 1`)?
+
+## Decisions (owner, 2026-11-19)
+
+The owner accepted every proposed answer.
+
+1. Option A for the `URL` family and the frames.
+2. Structured clone: option E. The walker stays in the browser behind the `CloneOps` sub-trait.
+3. Keep the cap `max_objects` in the old engine. Drop it when the engine can collect in a task.
+4. The event-loop design (M1 of `design-host-microtasks.md`) defines `iter_open`, `iter_next` and `iter_fail`. This page adds `iter_close` only if it has a call site.
+5. Add a `frames` case and rows before any change to the frames, as PR 1.
+6. The navigation PRs go first.

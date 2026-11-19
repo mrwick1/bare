@@ -1,6 +1,6 @@
 # CSSOM, inline style and computed style through the host interface
 
-Status: proposal, for the owner (plan step S0.4, CSSOM). Nothing is built. Base: origin/main `37df5bd1`.
+Status: decided by the owner, 2026-11-19 (plan step S0.4, CSSOM). See "Decisions" at the end. Base: origin/main `37df5bd1`.
 
 ## Problem
 
@@ -188,3 +188,14 @@ The matrix does not cover rule lists, sheets, media lists, adopted sheets or a `
 4. The caps `computed-objects` and `style-objects` (65,536 each): keep them in the old engine, and drop them when the new engine can collect in a task (proposed)?
 5. Add the `cssom_load` rows before any CSSOM change (proposed: yes, as PR 1)?
 6. Does step 3 include rule, sheet and media objects? If it does, this page shrinks to Options D and F.
+
+## Decisions (owner, 2026-11-19)
+
+The owner accepted every proposed answer.
+
+1. Option A for rule, sheet, media and declaration objects.
+2. Option D for `getComputedStyle` objects.
+3. Option F (lazy accessors through `Host::lazy_member`, PR #707) is part of S0.4, after the owner PRs.
+4. Keep the caps `computed-objects` and `style-objects` in the old engine. Drop them when the new engine can collect in a task.
+5. Add the `cssom_load` rows before any CSSOM change, as PR 1.
+6. No. Step 3 of `design-lazy-properties.md` covers only the host-filled style objects and `CSSRuleList`. Rule, sheet and media objects stay in this page.
