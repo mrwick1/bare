@@ -14050,6 +14050,38 @@ Not tested: the hooks with a real call from the engine (M3); the wrapper cost in
 
 Owner decision (2026-11-19): exception granted for the 12 other rows above, and a standing rule from now on. A row that is over +0.5% under both allocators passes when both trees, built with `RUSTFLAGS="-C codegen-units=1"`, show it within +0.5%. The cause is then the codegen-unit split, not new work. The PR records both numbers.
 
+## 2026-11-19: microtask hooks through the interface (plan step S0.4, M3)
+
+PR M3 of `docs/design-host-microtasks.md` (option A). It stacks on PR #720 (M1). The engine now calls the three microtask hooks of `bare_js_api::Host`, and the old `Host` no longer has them.
+
+Changes:
+
+- Old engine: `Host::report_exception`, `Host::between_jobs` and `Host::promise_rejections` are gone from `eval_host.rs`. The engine calls the interface host (`api.host`) in the same places: before each job and when the queue is empty (`between_jobs`), at the end of a checkpoint (`promise_rejections`), a `queueMicrotask` callback that throws, and a `FinalizationRegistry` callback that throws (`report_exception`). Three helpers in `eval_api.rs` (`api_between_jobs`, `api_report`, `api_rejections`) open a scope, push the values as locals, call the hook and turn its error back into an engine error. Rejections are tracked when an interface host is set (was: an old host).
+- Browser: `Dom` implements the three hooks on `bare_js_api::Host` (`browser.rs`). The bodies are the old ones. They reach the old `Interp` through `s.engine()` (owner decision: handler bodies move later).
+- `run_script` is not added to the interface. The body of `between_jobs` calls `Interp::run_script` through `s.engine()`, so it needs no new interface method. The loader PR adds it with its first real use.
+- Tests: the old-host tests of the hooks now use an interface host (`eval_host_tests`, `eval_rejection_tests`, and the collector test in `eval_api_tests`). New test: `between_jobs` runs before each of 3 jobs and once when the queue is empty, and an error of the hook ends the drain and repeats on the next drain.
+
+Cost matrix (archMachine, base = `f46b98c5` (the head of #720) rebuilt in `/data/bare-tmp/s0/base-m3`; new = this branch; 3 runs per row, minimum; `-j4`; 805 rows): mean change glibc +0.007%. No row is over +0.5% under both allocators. Two rows are over under glibc only (jemalloc +0.044% on both): `form_load gates 1` +0.647% and `gates 10` +0.688%. `parse_load deep 1` and `deep 10` fail to run (they failed on the base in M1 too). No codegen-unit check was needed.
+
+The three row groups of the gate (glibc, instructions):
+
+| Row | Base | New | Change |
+|---|---:|---:|---:|
+| `streams_load flow 1` | 212,874,632 | 213,410,359 | +0.252% |
+| `streams_load flow 10` | 2,001,425,500 | 2,006,776,764 | +0.267% |
+| `scheduler_load mixed 1` | 56,549,201 | 56,720,611 | +0.303% |
+| `scheduler_load mixed 10` | 478,587,480 | 480,285,568 | +0.355% |
+| `fetch_load post 1` | 22,633,633 | 22,646,820 | +0.058% |
+| `fetch_load post 10` | 138,611,488 | 138,750,743 | +0.100% |
+
+The per-job hook costs about 28 more instructions than before (171,410 for 6,008 jobs in `scheduler_load mixed 1`). Every per-job row is under the limit, so option C (the gated hook) is not needed.
+
+Checks:
+
+- Linux: `bare-js-api` 6, `bare-js` lib 1070 passed, `bare` lib 1649 passed. Filters `api` (32), `promise` (53), `microtask` (3), `rejection` (8) in `bare-js`; `rejection` (4), `scheduler` (42), `stream` (46), `fetch` (88), `error` (76) in `bare`. The new test and `rejection` also pass with `BARE_GC_STRESS=1`.
+- Windows 11 VM: the same nine filters pass with the same counts.
+
+Not tested: a full `bare` run on the Windows VM; wall time; the jemalloc numbers of the three row groups (they run only when glibc is over the limit); a hook that collects inside a browser task (the old engine collects only between tasks).
 ## 2026-11-20: frames as owners (plan step S0.4, navigation)
 
 PR 4 of `docs/design-host-navigation.md`, option A for frames. A restart: an earlier agent built the change and was cut off. This entry covers the rebuild on origin/main `7203937a`.

@@ -805,19 +805,20 @@ fn a_failed_iteration_calls_return_and_keeps_its_error() {
     });
 }
 
-/// An old-style host whose `between_jobs` collects, as a host with a collection inside a task would.
+/// A host whose `between_jobs` collects, as a host with a collection inside a task would.
 #[derive(Default)]
 struct Collector {
     collections: std::cell::Cell<usize>,
 }
 
-impl Host for Collector {
-    fn call(&self, _it: &mut Interp<'_>, _id: u32, _this: Value, _args: &[Value], _is_new: bool) -> Result<Value, Error> {
-        Ok(Value::Undefined)
+impl<'p> bare_js_api::Host<Interp<'p>> for Collector {
+    fn call<'s>(&self, s: &mut Scope<'s, Interp<'p>>, _id: u32, _this: Local<'s>, _args: Args<'s>, _is_new: bool) -> Result<Local<'s>, bare_js_api::Error<'s>> {
+        Ok(s.undefined())
     }
-    fn between_jobs(&self, it: &mut Interp<'_>) -> Result<(), Error> {
+    fn between_jobs<'s>(&self, s: &mut Scope<'s, Interp<'p>>) -> Result<(), bare_js_api::Error<'s>> {
         self.collections.set(self.collections.get() + 1);
-        it.collect(&[]).map(|_| ())
+        let it = s.engine();
+        it.collect(&[]).map(|_| ()).map_err(|e| it.api_err(e))
     }
 }
 
@@ -826,7 +827,7 @@ fn a_local_promise_survives_a_collection_inside_the_drain() {
     big(|| {
         let (mut it, _) = setup();
         let c = Rc::new(Collector::default());
-        it.set_host(c.clone()).unwrap();
+        Engine::set_host(&mut it, c.clone());
         out(&mut it, "var log = []; var ok = v => log.push('ok:' + v.tag); var bad = () => {}; var tick = () => log.push('tick'); var w = new WeakRef({ tag: 'junk' }); 0");
         enter(&mut it, |s| {
             let (ok, bad, tick) = (global(s, "ok"), global(s, "bad"), global(s, "tick"));
@@ -844,5 +845,57 @@ fn a_local_promise_survives_a_collection_inside_the_drain() {
         });
         assert!(c.collections.get() >= 2, "the drain collected");
         assert_eq!(out(&mut it, "log.join() + ',' + (w.deref() === undefined)"), "ok:kept,tick,true", "a collection ran, and it freed what no handle held");
+    });
+}
+
+/// A host that counts `between_jobs` and fails it on request, through the interface.
+#[derive(Default)]
+struct Between {
+    calls: std::cell::Cell<usize>,
+    fail_at: std::cell::Cell<usize>,
+}
+
+impl<'p> bare_js_api::Host<Interp<'p>> for Between {
+    fn call<'s>(&self, s: &mut Scope<'s, Interp<'p>>, _id: u32, _this: Local<'s>, _args: Args<'s>, _is_new: bool) -> Result<Local<'s>, bare_js_api::Error<'s>> {
+        Ok(s.undefined())
+    }
+    fn between_jobs<'s>(&self, s: &mut Scope<'s, Interp<'p>>) -> Result<(), bare_js_api::Error<'s>> {
+        self.calls.set(self.calls.get() + 1);
+        if self.calls.get() == self.fail_at.get() {
+            return Err(s.type_error("between"));
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn between_jobs_runs_before_each_job_and_once_when_the_queue_is_empty_and_an_error_ends_the_drain() {
+    big(|| {
+        let (mut it, _) = setup();
+        let b = Rc::new(Between::default());
+        Engine::set_host(&mut it, b.clone());
+        out(&mut it, "var n = 0; var f = () => { n++ }; 0");
+        enter(&mut it, |s| {
+            let f = global(s, "f");
+            for _ in 0..3 {
+                s.queue_microtask(f).unwrap();
+            }
+            assert_eq!(s.drain_microtasks().unwrap(), 3);
+        });
+        assert_eq!(b.calls.get(), 4, "one call before each of 3 jobs, one when the queue is empty");
+        assert_eq!(it.stack_len(), 0);
+        // An error of the hook ends the drain like a failed job: the next job does not run, and it is the same error again.
+        b.calls.set(0);
+        b.fail_at.set(2);
+        enter(&mut it, |s| {
+            let f = global(s, "f");
+            for _ in 0..3 {
+                s.queue_microtask(f).unwrap();
+            }
+            assert!(matches!(s.drain_microtasks(), Err(bare_js_api::Error::Throw(_))));
+            assert!(matches!(s.drain_microtasks(), Err(bare_js_api::Error::Throw(_))));
+        });
+        assert_eq!(out(&mut it, "n"), "4", "3 jobs, then 1 more before the hook failed");
+        assert_eq!(it.stack_len(), 0);
     });
 }

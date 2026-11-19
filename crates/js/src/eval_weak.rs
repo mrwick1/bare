@@ -499,7 +499,7 @@ impl<'p> Interp<'p> {
 
     /// Run the cleanup callbacks of the registry cells whose target a collection found dead. The host calls this as a
     /// task after [`Interp::collect`]. Each dead cell is removed and its callback runs once with the held value. A
-    /// throw goes to `Host::report_exception`. Returns the number of callbacks run. Refused while a call is active.
+    /// throw goes to `bare_js_api::Host::report_exception`. Returns the number of callbacks run. Refused while a call is active.
     pub fn run_finalizers(&mut self) -> Result<usize, Error> {
         if self.depth != 0 {
             return Err(unsupported("run_finalizers during a call", Span::default()));
@@ -524,9 +524,7 @@ impl<'p> Interp<'p> {
                 Ok(_) => Ok(()),
                 Err(e) => {
                     let v = thrown(e)?;
-                    if let Some(h) = it.host.clone() {
-                        h.report_exception(it, v);
-                    }
+                    it.api_report(v);
                     Ok(())
                 }
             })?;

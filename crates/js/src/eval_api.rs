@@ -241,6 +241,31 @@ impl<'p> Interp<'p> {
         out.set_state([w0, w1, kind | (it.done as u64) << 2 | what << 3 | (pos as u64) << 32]);
     }
 
+    /// `Host::between_jobs` of the interface host `h`. An error comes back as the error of this engine.
+    fn api_between_jobs(&mut self, h: &dyn bare_js_api::Host<Interp<'p>>) -> Result<(), Error> {
+        bare_js_api::enter(self, |s| h.between_jobs(s).map_err(|e| s.engine().api_unerr(e)))
+    }
+
+    /// `Host::report_exception` of the interface host, for the thrown value `v`. No host: the value is dropped.
+    fn api_report(&mut self, v: Value) {
+        let Some(h) = self.api.host.clone() else { return };
+        bare_js_api::enter(self, |s| {
+            let thrown = s.engine().api_push(v);
+            h.report_exception(s, thrown);
+        });
+    }
+
+    /// `Host::promise_rejections` of the interface host `h`. The promises go onto the handle stack for the call.
+    #[cold]
+    fn api_rejections(&mut self, h: &dyn bare_js_api::Host<Interp<'p>>, unhandled: &[Value], handled: &[Value], dropped: u32) -> Result<(), Error> {
+        bare_js_api::enter(self, |s| {
+            let it = s.engine();
+            let u: Vec<_> = unhandled.iter().map(|&v| it.api_push(v)).collect();
+            let hd: Vec<_> = handled.iter().map(|&v| it.api_push(v)).collect();
+            h.promise_rejections(s, &u, &hd, dropped).map_err(|e| s.engine().api_unerr(e))
+        })
+    }
+
     /// `call_host` for a realm whose host came through the interface. Kept apart, so the old host path does not change.
     #[cold]
     fn call_api_host(&mut self, id: u32, this: Value, args: &[Value], is_new: bool, nt: Option<ObjId>) -> Result<Value, Error> {

@@ -982,6 +982,24 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
         };
         r.map_err(|e| it.api_err(e))
     }
+
+    fn report_exception<'s>(&self, s: &mut bare_js_api::Scope<'s, Interp<'p>>, thrown: bare_js_api::Local<'s>) {
+        let it = s.engine();
+        let v = bare_js_api::Engine::raw(it, thrown);
+        self.report(it, v, "microtask", Target::Window);
+    }
+
+    fn between_jobs<'s>(&self, s: &mut bare_js_api::Scope<'s, Interp<'p>>) -> Result<(), bare_js_api::Error<'s>> {
+        let it = s.engine();
+        self.run_inline_scripts(it).map_err(|e| it.api_err(e))
+    }
+
+    fn promise_rejections<'s>(&self, s: &mut bare_js_api::Scope<'s, Interp<'p>>, unhandled: &[bare_js_api::Local<'s>], handled: &[bare_js_api::Local<'s>], dropped: u32) -> Result<(), bare_js_api::Error<'s>> {
+        let it = s.engine();
+        let raw = |it: &mut Interp<'p>, l: &[bare_js_api::Local<'s>]| l.iter().map(|&l| bare_js_api::Engine::raw(it, l)).collect::<Vec<_>>();
+        let (unhandled, handled) = (raw(it, unhandled), raw(it, handled));
+        crate::browser_rejection::notify(self, it, &unhandled, &handled, dropped).map_err(|e| it.api_err(e))
+    }
 }
 
 impl Host for Dom {
@@ -1075,18 +1093,6 @@ impl Host for Dom {
         self.streams.prune(live);
         crate::browser_worker::prune(self, live);
         self.reclaim_wanted();
-    }
-
-    fn report_exception(&self, it: &mut Interp<'_>, thrown: Value) {
-        self.report(it, thrown, "microtask", Target::Window);
-    }
-
-    fn between_jobs(&self, it: &mut Interp<'_>) -> R<()> {
-        self.run_inline_scripts(it)
-    }
-
-    fn promise_rejections(&self, it: &mut Interp<'_>, unhandled: &[Value], handled: &[Value], dropped: u32) -> R<()> {
-        crate::browser_rejection::notify(self, it, unhandled, handled, dropped)
     }
 
     fn fill_indexed(&self, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<()> {

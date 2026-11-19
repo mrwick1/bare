@@ -98,9 +98,6 @@ impl Host for T {
     fn trace(&self, owner: ObjId, out: &mut Vec<Value>) {
         out.extend(self.owned.borrow().get(&owner).copied());
     }
-    fn report_exception(&self, it: &mut Interp<'_>, thrown: Value) {
-        self.reported.borrow_mut().push(it.display(thrown));
-    }
     fn prune(&self, live: &dyn Fn(ObjId) -> bool) {
         let mut m = self.owned.borrow_mut();
         let before = m.len();
@@ -109,10 +106,23 @@ impl Host for T {
     }
 }
 
+/// The microtask hook of `T` comes through the interface host (the old `Host` has no hooks for it).
+impl<'p> bare_js_api::Host<Interp<'p>> for T {
+    fn call<'s>(&self, _: &mut bare_js_api::Scope<'s, Interp<'p>>, _: u32, _: bare_js_api::Local<'s>, _: bare_js_api::Args<'s>, _: bool) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
+        unreachable!()
+    }
+    fn report_exception<'s>(&self, s: &mut bare_js_api::Scope<'s, Interp<'p>>, thrown: bare_js_api::Local<'s>) {
+        let it = s.engine();
+        let v = bare_js_api::Engine::raw(it, thrown);
+        self.reported.borrow_mut().push(it.display(v));
+    }
+}
+
 fn setup() -> (Interp<'static>, Rc<T>) {
     let mut it = Interp::realm(Heap::default(), EvalLimits { max_steps: 100_000, ..Default::default() }).unwrap();
     let t = Rc::new(T::default());
     it.set_host(t.clone()).unwrap();
+    bare_js_api::Engine::set_host(&mut it, t.clone());
     let g = it.global_object();
     for (i, (name, ctor)) in [("echo", false), ("callback", false), ("charge", false), ("attach", false), ("perm", false), ("capped", false), ("Thing", true), ("owned", false), ("count", false), ("qm", false), ("drain", false), ("first", false), ("symiter", false)].iter().enumerate() {
         let f = it.host_function(i as u32, name, 0, *ctor).unwrap();
