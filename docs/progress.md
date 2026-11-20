@@ -14459,6 +14459,44 @@ Noticed, not changed:
 - Peak RSS of `history 1` went from 12.0 to 12.4 MiB in single runs. I did not analyse it.
 
 Not tested: the oracle (the old walk of main on the 65 cases) in a separate run; the frozen text is the oracle. The fast path and `clone_copy`. Real two-heap messages under Windows beyond the unit tests. A callgrind split (not needed: `history 1/10` is under the limit).
+## 2026-11-20: long-session row and ready time (plan steps M4 and M5)
+
+COMPLETE for M4. M5 is built and run, but its check (spread under 5% on 5 runs on an idle machine) is NOT met: the machine was never idle. Linux only. PR is not merged and has no auto-merge.
+
+Changes: `tools/bench/journeys.py` has two new modes, `journeys.sh session` (M4) and `journeys.sh ready` (M5). No change in `crates/*`. The existing `record`, `run` and `compare` are not changed.
+
+- `session [--rounds N] BARE_DRIVE`: one `bare-drive --repeat N` process for each journey (default N = 20). Each round opens a new page in the same process. It prints RSS and peak RSS (`VmHWM`) after each round, and the glibc heap in use. It fits a least-squares slope over rounds 2 to N (round 1 pays the one-time costs). The session total is the sum of the slopes over the journeys.
+- `ready [--runs N] BARE_DRIVE`: one cold replay for each run (default 5). `ready_ms` is the time from the start of the process to the stderr line of the first step after `open`. `open` itself ends at about 0 ms: the next step waits for the page. At that moment the tool reads the CPU (all threads, `schedstat`) and the RSS of the process and all its descendants, and counts them. It also prints `load1` and the spread of `ready_ms` and of the CPU.
+- A bare-drive run has one process (`procs` is 1 in every row), so "all processes" is one process today. The tool counts the whole tree, so a later multi-process browser is counted.
+
+Inputs: bare-drive built from this branch (origin/main `1aa1bc6a`), release. Machine archMachine, 16 cores. Corpus recorded live on 2026-11-20 with `journeys.sh record` into `/data/bare-tmp/s0/m4m5/corpus`, real clock (the old `/data/bare-tmp/corpus` does not exist any more). 45 public journeys recorded; 3 did not pass live (`curl-se-home`, `duckduckgo-html-search`, `nextjs-docs`) and are not measured. The staging journey and the typing page are not in `tools/drive/public` (login and local fixture), so they are not in these rows.
+
+### M4: long session, 20 rounds, today's engine
+
+Two full passes (`journeys.sh session --rounds 20`), machine busy with other agents (load 5 for the first pass, 20 for the second; memory does not depend on load as much as time does).
+
+| Pass | Journeys with 20 rounds | Sum RSS slope | Sum peak RSS slope | Sum heap slope | Sum of RSS, round 1 to round 20 |
+| ---- | ----------------------- | ------------- | ------------------ | -------------- | ------------------------------- |
+| 1    | 42                      | +17.9 MiB/round | +23.7 MiB/round  | +8.9 MiB/round | 1,437 to 2,105 MiB              |
+| 2    | 42                      | +12.7 MiB/round | +18.2 MiB/round  | +4.2 MiB/round | 1,366 to 1,938 MiB              |
+
+- Mean per journey: about +0.3 to +0.4 MiB/round of RSS (42 journeys). The two passes differ by 30%, so the slope has a spread of that size. Hypothesis: allocator slack and a timing change in what a page loads under different load. Not checked.
+- One journey, one pass: the slope is rough. Passes differ by more than 0.3 MiB/round (RSS or peak) for 12 of 42 journeys (largest: `python-docs-search` +3.86 then +1.33, `rust-book-search` RSS -2.41 then -0.25 with the peak +2.02 then +1.72). `example-page` and the three `httpbin-*` journeys stay under +0.06 MiB/round. Pages with large scripts grow most: `crates-io-home` +1.0 and +0.3, `nodejs-org-home` +1.0, `debian-org-home` +1.3 and +0.7.
+- The slope is not a proof of a leak. The process keeps its HTTP cache and style and script caches across rounds, and they grow with the first rounds. I did not split the slope into caches and leaks. A leak check needs rounds past the point where the caches are full.
+- Three journeys stop at round 2 in both passes: `python-docs-search-results`, `rust-book-chapters`, `rust-book-sidebar`. They pass in a single run. In round 2 of `rust-book-chapters` the style sheets come back as 304 with no body (the HTTP cache of the first round asks the replay again), the `click` fails with `hidden`. Hypothesis: the replay answers a conditional request with the recorded 304 and no body. Not checked, and I did not change the browser or the replay. The slopes of these three are `n/a`.
+- A round after the first sees the cache of the first round, so rounds 2 to 20 do less network work than round 1. The row measures what stays in memory, not the cost of a cold page.
+
+### M5: ready time, 5 runs, 45 journeys
+
+Best run (the only one with a lower load): load average 3.1 to 4.2 on 16 cores, so NOT idle. `ready_ms` has a median of 9.2 ms over the journeys (2.6 ms to 95.5 ms; the sum of the medians is 903.7 ms). Spread (max - min over the median of 5 runs): 23 of 45 journeys are under 5%, 31 under 10%, the median spread is 5.0%, the largest is 159% (`httpbin-cookies`, 2.7 ms). The slower journeys (median 20 ms or more, 16 journeys) have spreads of 2.1% to 16.6%; 6 of them are over 5%.
+
+Two later runs at load 10 to 27 and 17 to 11 gave sums of medians of 1,703 ms and 979 ms and 37 to 42 journeys over 5% spread. Load changes ready time by up to 2 times, so the check needs an idle machine. Other agents ran builds and `massif` on this machine for the whole task. Under load the CPU at ready time (all threads) has a spread above 5% for 41 to 45 of 45 journeys, so the CPU is not a stable gate here either.
+
+The 5% target is not verified. At 3 to 100 ms, 5% is 0.15 to 5 ms: hypothesis, the noise of the scheduler and the process start is of that size even on an idle machine. A run on an idle machine, or a gate on instructions at ready time, would settle it. The tool does not count instructions at ready time (`perf stat` counts the whole process).
+
+RSS at ready time: 15.6 MiB (`httpbin-cookies`) to 42.1 MiB (`substack-home`); the sum of the medians over 45 journeys is 959 MiB.
+
+Not tested: an idle machine, the staging journey and the typing page, the virtual-clock corpus (`--clock virtual`, whose wall time means nothing), Windows, a build of `bare-mcp` or a window run (their process trees), instructions at ready time, the cause of the three round-2 stops, a split of the slope into caches and leaks. Replay misses were not a gate: `go-dev-home` (6), `mdn-reference` (8), `wikipedia-search` (8) and 7 more journeys had 1 to 2 misses in some runs; the recording was filled until two runs in a row had none, and the timing of a real clock still moves a request or two.
 ## 2026-11-20: strings and atoms (plan step S1.7)
 
 `bare-js2` has strings and atoms (`crates/js2/src/string.rs`, `atoms.rs`, `cell.rs`; design 6.10 items 13 and 14).
@@ -14556,3 +14594,63 @@ Noticed, not changed:
 - `cargo clippy -p bare-js --all-targets -- -D warnings` stops on `crates/os/src/pages.rs:19` (`manual_is_multiple_of`), before it reaches this change. Clippy without `-D warnings` gives no warning in the files of this change.
 
 Not tested: `clone_copy` (step 5); a differential run under `BARE_GC_STRESS=1` (only the browser filters ran under it); getters on Map, Set, Error, wrappers and views as parents (they take the generic path, and the generator covers Map and Date as values only); a host that lists a transfer item in the differential test; the Windows release build and the Windows cost; the full jemalloc matrix (jemalloc ran only on the 6 rows above and on rows over the limit under glibc, which are none); peak RSS of `history 10`.
+## 2026-11-20: layout census of the old engine (plan step M3)
+
+COMPLETE for Linux. The PR is not merged and has no auto-merge. Base: origin/main `1aa1bc6a`.
+
+Changes (`bare-js`, no change to a hot path):
+- `layout_census.rs`: `LayoutCensus`, 18 buckets, and `stats_on()` (reads `BARE_JS_STATS` once per process).
+- `eval_census.rs`: `Interp::layout_census()` walks the realm. `Heap::census` (in `heap.rs`) does the heap part. A sample is taken at the start of `Interp::collect`, again just before the sweep (with the collector scratch), and when the `Interp` drops. The sample with the most bytes prints as a `layout total=... bucket=bytes ...` line after the `gcstats` line.
+- Every size is a capacity in bytes (what the engine asked of the allocator, no malloc headers). A shared tree, source text or compiled function counts once.
+- `Interp` now has a `Drop`, so `into_heap` takes the heap with `mem::take`. Nothing in the repo calls `into_heap`.
+- `tools/js/layout_census.sh` runs a command under massif (`--pages-as-heap=no`) and prints the census line and the engine bytes of the massif snapshot where they peak. `tools/js/massif_engine.py` does the second part: an allocation is the engine's when the nearest crate frame to the allocator is `bare_js`. With `--host-parse` it leaves out the tree that an example parses itself (`eval_load` keeps its copy after `Interp::new` clones it).
+- Tests: `eval_census_tests.rs`, 5 tests.
+- The `new` engine (`bare-js2`): no hook. Its heap has `mapped_bytes()` already, but no cell has a kind or a layout yet, so a census by layout has nothing to count. The hook belongs to S1.4 (cell header).
+
+Buckets: `objects` (records and slab tables), `slots` (inline and vector value slots), `dict`, `elements`, `shapes`, `strings` (records, units, interner, ropes), `binary`, `heap_other` (symbols, BigInt), `bytecode`, `feedback` (inline caches), `source`, `ast`, `tables` (per-script tables of the tree walker), `scopes`, `envs` (environments and the function table), `names`, `stacks` (pools kept for reuse), and `collector`.
+
+`collector` is a bucket the plan did not list. A collect holds the mark bits, the gray stack, the root vector and the work lists at the same time as the garbage. In `eval_load objects 10` it is 42% of the peak, because the 200 000 element array puts 200 000 values in the work list.
+
+Check (archMachine, release build with symbols, `--detailed-freq=1`, one run each; massif counts instructions, not time, so a run has no spread, and a second build gave the same numbers). Census total against the engine bytes of the massif peak snapshot:
+
+| Case | Census | Massif engine | Difference |
+|---|---:|---:|---:|
+| `eval_load objects 10`, auto | 8 240 509 | 8 179 616 | +0.74% |
+| `eval_load closures 10`, auto | 26 257 250 | 26 419 252 | -0.61% |
+| `eval_load webpack 10`, auto | 1 912 740 | 1 908 110 | +0.24% |
+| `eval_load objects 10`, tree | 8 238 969 | 8 179 616 | +0.73% |
+| `eval_load closures 10`, tree | 26 255 593 | 26 419 252 | -0.62% |
+| `eval_load webpack 10`, tree | 1 553 750 | 1 548 556 | +0.34% |
+| `browser_load event 1`, auto | 819 435 | 814 720 | +0.58% |
+| `browser_load lookup 1`, auto | 900 644 | 883 108 | +1.99% |
+| `browser_load mutation 1`, auto | 1 191 402 | 1 128 860 | +5.54% |
+| `browser_load rel 1`, auto | 1 203 008 | 1 138 012 | +5.71% |
+
+All three `eval_load` cases pass in both modes, and two of the four browser cases pass. `mutation` and `rel` are over 5%. Hypothesis: the census is right and massif does not attribute some engine bytes to the engine. Both cases make thousands of node wrappers, and the host code (`Dom::set_wrapper`, the `Host` impl, `def_method`) calls heap functions that the compiler inlined, so massif names `bare::` as the nearest crate. Those three sites hold 140 000 bytes in `mutation`. I did not prove it. The total massif heap of `mutation` is 1 459 849 bytes; 330 989 are the host's by this rule (the DOM nodes and the wrapper tables).
+
+Peak table, `auto` (bytes, share of the census total):
+
+| Bucket | objects 10 | closures 10 | webpack 10 | browser event 1 | browser lookup 1 |
+|---|---:|---:|---:|---:|---:|
+| objects | 69 632 (1%) | 4 456 448 (17%) | 278 528 (15%) | 141 749 (17%) | 143 002 (16%) |
+| slots | 50 176 (1%) | 3 146 752 (12%) | 205 120 (11%) | 117 216 (14%) | 117 216 (13%) |
+| dict | 144 760 (2%) | 65 072 (0%) | 67 666 (4%) | 78 184 (10%) | 78 184 (9%) |
+| elements | 4 194 304 (51%) | 1 048 576 (4%) | 56 576 (3%) | 0 | 32 000 (4%) |
+| shapes | 21 671 | 5 576 | 2 900 | 58 478 (7%) | 58 458 (6%) |
+| strings | 202 162 (2%) | 43 158 | 64 656 (3%) | 117 885 (14%) | 120 080 (13%) |
+| bytecode | 544 | 1 123 | 371 140 (19%) | 0 | 0 |
+| feedback | 87 088 (1%) | 87 088 | 123 304 (6%) | 87 232 (11%) | 87 424 (10%) |
+| ast + source | 2 850 | 2 719 | 368 862 (19%) | 3 345 | 5 560 |
+| tables + scopes + names | 3 521 | 2 897 | 204 556 (11%) | 20 329 | 20 883 |
+| envs | 34 088 | 12 631 568 (48%) | 67 840 (4%) | 128 640 (16%) | 128 032 (14%) |
+| collector | 3 428 529 (42%) | 4 765 057 (18%) | 99 320 (5%) | 65 183 (8%) | 108 411 (12%) |
+| binary + heap_other + stacks | 1 307 | 1 339 | 2 272 | 1 194 | 1 194 |
+| Total | 8 240 509 | 26 257 250 | 1 912 740 | 819 435 | 900 644 |
+
+What this says for S1.4 and the cell header (observations, not decisions): value slots are 11% to 14% of the peak in every case that has objects, and the object record is another 15% to 17%. In `closures`, environments are 48% of the peak, which a cell layout does not touch unless environments become cells. A browser realm at idle is mostly fixed cost: about 87 000 bytes of heap caches, 58 000 of shapes and 78 000 of dictionaries before any page script runs.
+
+Cost matrix (`tools/js/cost_matrix.sh -j4`, 819 rows, base `1aa1bc6a` against this branch, both with the default release profile): no row over +0.5% under both allocators. Mean change glibc +0.009%, jemalloc +0.131% (3 rows measured). Three rows are over under glibc only: `resources_load small 1` +1.78%, `resources_load small 10` +1.75% and `preload_load style 10` +0.98%; these are the known glibc noise rows, and their jemalloc numbers are +0.36%, +0.01% and +0.02%. All 16 `eval_load` rows move by at most +0.024%. `parse_load deep 1` and `deep 10` fail to run in the matrix; they overflow the stack the same way on the base tree (`parse_load deep 1` run by hand on both). The cost when `BARE_JS_STATS` is unset is two `OnceLock` reads per collect and one per `Interp` drop.
+
+Tests: Linux `cargo test --locked -p bare-js-api -p bare-js --lib` 31 and 1082 passed (1 ignored), `cargo test --locked -p bare --lib` 1707 passed (6 ignored). Windows (MSVC test executable, run on the VM): `census_tests` 5 passed, `heap::` 93 passed.
+
+Not tested: the full Windows suite, massif on Windows (valgrind has no Windows port, so the check ran on Linux only), a census of the `new` engine, `byte` exec mode, a page with a real framework bundle (the browser check used `browser_load`, which has little bytecode), a run with more than one realm, and codegen-units=1 runs (no row needed them). The census peak is the largest sample at a collect or at the end of the realm. A peak between two collects is not seen. `clippy -D warnings` fails in `bare-os` (`pages.rs:19`, `is_multiple_of`) before it reaches `bare-js`; the `bare-js` lints I ran without `-D warnings` show nothing in the new files.

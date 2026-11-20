@@ -931,6 +931,43 @@ impl Heap {
         f
     }
 
+    /// Add the capacity bytes of this heap to the buckets of `c` (`BARE_JS_STATS`, `layout_census.rs`). It walks every object and string.
+    pub fn census(&self, c: &mut crate::layout_census::LayoutCensus) {
+        use std::mem::size_of;
+        let o = &self.objects;
+        let inline = size_of::<[Value; INLINE]>();
+        c.objects += o.live.capacity() * (size_of::<Object>() - inline) + o.capacity_bytes() - o.live.capacity() * size_of::<Object>();
+        c.slots += o.live.capacity() * inline;
+        for ob in &o.live {
+            if let Repr::Heap(v) = &ob.repr {
+                c.slots += v.capacity() * SLOT_BYTES;
+            }
+            if let Some(d) = ob.dict() {
+                c.dict += size_of::<PropMap>() + d.entries.capacity() * ENTRY_BYTES + d.index.as_ref().map_or(0, |m| m.capacity() * (size_of::<(PropertyKey, u32)>() + 1) + size_of::<KeyMap>());
+            }
+            c.elements += ob.elems.capacity() * ELEM_BYTES;
+        }
+        c.shapes += self.shapes.bytes();
+        c.strings += self.strings.capacity_bytes() + self.ropes.capacity_bytes() + self.interner.table.capacity() * 4 + self.flat_bytes.get()
+            + self.shared.capacity() * (size_of::<((u64, usize), StrId)>() + 1)
+            + self.strings.live.iter().map(|s| s.units.len() * 2).sum::<usize>();
+        c.binary += self.exotics.capacity() * (size_of::<(u32, binary::Exotic)>() + 1)
+            + self.exotics.values().map(|e| if let binary::Exotic::Buffer(b) = e { b.capacity() } else { 0 }).sum::<usize>();
+        c.heap_other += self.symbols.capacity_bytes() + self.bigs.capacity_bytes() + self.big_table.bytes()
+            + self.bigs.live.iter().map(|b| b.bytes()).sum::<usize>();
+        c.feedback += size_of_val(&*self.stubs) + size_of_val(&*self.keyed) + self.shapes.cache_bytes();
+    }
+
+    /// Bytes that a collect needs on top of the retained capacity (`BARE_JS_STATS`): the mark bits that are not allocated yet, the gray stack and the
+    /// per-shape flags. The gray stack is the capacity of the last collect, so the first collect's stack is not counted.
+    pub fn collector_bytes(&self) -> usize {
+        let short = |len: usize, cap: usize| len.saturating_sub(cap);
+        short(self.objects.live.len(), self.objects.marks.capacity()) + short(self.strings.live.len(), self.strings.marks.capacity())
+            + short(self.ropes.live.len(), self.ropes.marks.capacity()) + short(self.symbols.live.len(), self.symbols.marks.capacity())
+            + short(self.bigs.live.len(), self.bigs.marks.capacity())
+            + self.gray.capacity() * 4 + self.shapes.len()
+    }
+
     /// Is at least one object in eight an array? `Interp::collect` then tests each object with `plain_array_edges`: the test costs about 10 instructions for
     /// an object that is not an array, and saves about 100 for an array, so it pays above that share.
     pub fn arrays_are_common(&self) -> bool {

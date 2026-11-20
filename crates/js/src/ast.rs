@@ -921,6 +921,16 @@ impl<'a> Program<'a> {
         if self.marks.get().is_some_and(|m| m.get().is_some()) { lex::MARK_STEP } else { self.source.len() }
     }
 
+    /// Capacity bytes of the node arenas (`BARE_JS_STATS`): what the parser asked of the allocator, with the spare room of vectors that grew.
+    pub(crate) fn capacity_bytes(&self) -> usize {
+        use std::mem::size_of;
+        self.exprs.capacity() * size_of::<Expr>() + self.stmts.capacity() * size_of::<Stmt>() + self.pats.capacity() * size_of::<Pat>()
+            + self.funcs.capacity() * size_of::<Func>() + self.classes.capacity() * size_of::<Class>() + self.props.capacity() * size_of::<Prop>()
+            + self.pat_props.capacity() * size_of::<PatProp>() + self.templates.capacity() * size_of::<Template>() + self.quasis.capacity() * size_of::<Quasi>()
+            + self.decls.capacity() * size_of::<Declarator>() + self.cases.capacity() * size_of::<Case>() + self.catches.capacity() * size_of::<Catch>()
+            + self.elems.capacity() * size_of::<ClassElem>() + self.lists.capacity() * 4 + std::mem::size_of_val(self.lazies())
+    }
+
     pub fn stats(&self) -> Stats {
         use std::mem::size_of_val;
         Stats {

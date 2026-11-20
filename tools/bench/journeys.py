@@ -6,6 +6,8 @@
   journeys.sh run     [--corpus DIR] [--only TEXT] [--runs N] [--pss] [--out TSV] BARE_DRIVE    replay each journey N times (cold: a new process each time)
   journeys.sh compare [--corpus DIR] [--only TEXT] [--runs N] [--pss] [--out TSV] BASE_DRIVE NEW_DRIVE    replay on both binaries, runs interleaved
                       (exit 1 when a journey has more replay misses on NEW than on BASE: that journey did not do the recorded work, whatever its pass column says)
+  journeys.sh session [--corpus DIR] [--only TEXT] [--rounds N] [--out TSV] BARE_DRIVE    long session: each journey N times (default 20) in ONE process (`bare-drive --repeat N`), memory after each round
+  journeys.sh ready   [--corpus DIR] [--only TEXT] [--runs N] [--out TSV] BARE_DRIVE    time until the first step of each journey is done and the page can act (default 5 runs), CPU and memory of all processes then
 
 `--clock virtual` sets `BARE_CLOCK=virtual` (a page clock that replies move, `crates/net/src/vclock.rs`): the same work in every run. It is a clock for a replay, so the recording of the
 journeys in a virtual corpus is a fill under that clock (a copy of `main`, then `journeys.sh fill --clock virtual`); with it, `--corpus` defaults to `virtual-load` (the journey ends at the `load` event of its last document). `--clock real` (the default) removes `BARE_CLOCK`.
@@ -16,6 +18,16 @@ live recording, `record` replays with BARE_NET_FILL (a missing reply goes to the
 when it was recorded is not measured, and `run` says so. `run` counts the misses of each replay (a request with no recorded reply): a replay with a miss did not do the recorded work. Each run is one `perf stat -e instructions:u`
 over one `bare-drive` process: columns journey, run, pass, instructions, cpu_ms (user+system), wall_ms, peak_rss_kib (`wait4`), pss_kib (peak of a sample every
 20 ms of `smaps_rollup`, only with --pss: reading it costs time), misses. Instruction counts hold under load. Wall time holds only on an idle machine.
+
+`session` (plan step M4): one `bare-drive --repeat N` process per journey, so every round starts a new page in the same process and what a round leaves behind shows in the next. The columns
+are journey, round, ok, ms, rss_kib (VmRSS after the round), peak_rss_kib (VmHWM after the round), heap_kib (glibc in-use bytes, empty elsewhere). The slope is a least-squares line (RSS, peak and heap) over rounds 2 to N
+(round 1 pays the one-time costs of the process), in KiB per round, for RSS, for the peak and for the glibc heap in use (what is live, without allocator slack); the session total is the sum over the journeys. A journey that fails stops its own rounds: the rounds that ran are
+used. A replay serves the Nth reply of one URL in order and then the last again, so a round after the first sees the last reply of a URL that the recording fetched once: the rounds repeat the work of the recording, not the live traffic.
+
+`ready` (plan step M5): the page of a journey can act when the first step after `open` is done (`open` ends at once, at about 0 ms; the next step waits for the page: a click or an `expect` that passes). `ready_ms` is the time
+from the start of the process to the stderr line of that step (the read of the line and the sample of /proc are inside it: about 1 ms). At that moment the tool also reads the CPU time (the run time of every thread, from `schedstat`) and the RSS of the process and all its descendants, and counts them (`procs`).
+`total_cpu_ms` is the CPU of the whole run (`wait4`: the process and the descendants that it waited for). `load1` is the load average before the run, and the tool prints it again at the end:
+the wall time holds only when the machine is idle (load1 near 0). The spread is (max - min) over the median of the runs of one journey.
 """
 
 import glob, json, os, re, shutil, statistics, subprocess, sys, tempfile, time
@@ -73,6 +85,27 @@ def drive(binary, path, url, env, perf=None, pss=False):
     return ok, instr, (usage.ru_utime + usage.ru_stime) * 1000, wall, usage.ru_maxrss, peak_pss, misses
 
 
+def tree(pid):
+    """The process and all its descendants."""
+    return [pid] + [d for c in children(pid) for d in tree(c)]
+
+
+def tree_use(pids):
+    """(CPU ms, RSS KiB) summed over the processes `pids` now. The CPU is the run time of every thread (`schedstat`, in ns). A process that has gone counts as 0."""
+    cpu = rss = 0
+    for pid in pids:
+        try:
+            for t in os.listdir(f"/proc/{pid}/task"):
+                try:
+                    cpu += int(open(f"/proc/{pid}/task/{t}/schedstat").read().split()[0])
+                except OSError:
+                    pass
+            rss += int(open(f"/proc/{pid}/statm").read().split()[1]) * os.sysconf("SC_PAGE_SIZE") // 1024
+        except (OSError, ValueError, IndexError):
+            pass
+    return cpu / 1e6, rss
+
+
 def pss_of(pid):
     """Peak PSS of the benchmark process: the one that `perf` started (a child of `perf`), or the process itself."""
     best = 0
@@ -94,7 +127,7 @@ def children(pid):
 
 
 def args(argv, flags):
-    opt = {"corpus": None, "only": "", "runs": 3, "tries": 4, "pss": False, "out": None, "clock": "real"}
+    opt = {"corpus": None, "only": "", "runs": 3, "tries": 4, "pss": False, "out": None, "clock": "real", "rounds": 20}
     while argv and argv[0].startswith("--"):
         k = argv.pop(0)[2:]
         if k not in flags:
@@ -175,6 +208,104 @@ def measure(opt, binaries):
     return rows
 
 
+def session_run(binary, path, url, env, rounds):
+    """One process, `rounds` rounds of one journey. Gives (the `runs` records of bare-drive, one for each round that ran, the exit code)."""
+    cmd = [binary, "--quiet", "--repeat", str(rounds), "--var", "URL=" + url, path]
+    r = subprocess.run(cmd, env={**os.environ, "BARE_SEED": "1", **env}, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        return json.loads(r.stdout)["runs"], r.returncode
+    except (ValueError, KeyError):
+        return [], r.returncode
+
+
+def slope(ys):
+    """Least-squares slope of ys over 0, 1, 2, ... (rounds 2 to N, so the caller passes the values from round 2). n/a below 2 points."""
+    return statistics.linear_regression(range(len(ys)), ys).slope if len(ys) >= 2 else None
+
+
+def session(opt, binary):
+    rows, tot = [], {"rss": 0.0, "peak": 0.0, "heap": 0.0}
+    print(f"{'journey':32} {'rounds':>6} {'MiB r1':>8} {'MiB last':>9} {'peak r1':>8} {'peak last':>9} {'rss MiB/round':>14} {'peak MiB/round':>15} {'heap MiB/round':>15}  pass")
+    for name, path, url in recorded(opt):
+        runs, code = session_run(binary, path, url, {"BARE_NET_REPLAY": os.path.join(opt["corpus"], name)}, opt["rounds"])
+        for i, r in enumerate(runs, 1):
+            rows.append((name, i, int(r["ok"]), r["ms"], r["rss_kib"], r["peak_rss_kib"], "" if r["heap_kib"] is None else r["heap_kib"]))
+        if not runs:
+            print(f"{name:32} no result (exit {code})", flush=True)
+            continue
+        s = {k: slope([r[k + "_kib"] for r in runs[1:]]) for k in ("rss", "peak_rss", "heap")}
+        if runs[0]["heap_kib"] is None:
+            s["heap"] = None
+        fmt = lambda v: "n/a" if v is None else f"{v / 1024:+.3f}"
+        for k, t in (("rss", "rss"), ("peak_rss", "peak"), ("heap", "heap")):
+            tot[t] += (s[k] or 0) / 1024
+        print(f"{name:32} {len(runs):6} {runs[0]['rss_kib'] / 1024:8.1f} {runs[-1]['rss_kib'] / 1024:9.1f} {runs[0]['peak_rss_kib'] / 1024:8.1f} {runs[-1]['peak_rss_kib'] / 1024:9.1f} {fmt(s['rss']):>14} {fmt(s['peak_rss']):>15} {fmt(s['heap']):>15}  {'ok' if len(runs) == opt['rounds'] and code == 0 else 'stopped at round ' + str(len(runs))}", flush=True)
+    print(f"{'SUM over the journeys':32} {'':6} {'':8} {'':9} {'':8} {'':9} {tot['rss']:+14.3f} {tot['peak']:+15.3f} {tot['heap']:+15.3f}  (MiB per round, rounds 2 to {opt['rounds']})")
+    if opt["out"]:
+        with open(opt["out"], "w") as f:
+            f.write("journey\tround\tok\tms\trss_kib\tpeak_rss_kib\theap_kib\n")
+            f.writelines("\t".join(map(str, r)) + "\n" for r in rows)
+
+
+def ready_run(binary, path, url, env):
+    """One cold run with the step lines on. Gives (ok, ready_ms, ready_cpu_ms, ready_rss_kib, procs, total_cpu_ms, total_wall_ms, misses)."""
+    out = tempfile.TemporaryFile()
+    start = time.monotonic()
+    p = subprocess.Popen([binary, "--var", "URL=" + url, path], env={**os.environ, "BARE_SEED": "1", **env}, stdout=out, stderr=subprocess.PIPE)
+    ready, misses, opened = None, 0, False
+    for line in p.stderr:
+        step = re.match(rb"L\d+ (\w+) ", line)
+        if step and ready is None and opened:  # the first step after `open`: `open` ends at once, and the next step waits for the page
+            at = time.monotonic()
+            pids = tree(p.pid)
+            ready = ((at - start) * 1000, *tree_use(pids), len(pids))
+        opened = opened or bool(step and step[1] == b"open")
+        misses += b"no recorded reply" in line
+    p.stderr.close()
+    _, status, usage = os.wait4(p.pid, 0)
+    p.returncode = os.waitstatus_to_exitcode(status)
+    wall = (time.monotonic() - start) * 1000
+    out.seek(0)
+    try:
+        ok = json.loads(out.read())["ok"] and p.returncode == 0
+    except ValueError:
+        ok = False
+    out.close()
+    return (ok, *(ready or (0, 0, 0, 0)), round((usage.ru_utime + usage.ru_stime) * 1000), wall, misses)
+
+
+def ready(opt, binary):
+    rows = []
+    print(f"load average before: {os.getloadavg()[0]:.2f} (1 min) on {os.cpu_count()} cores")
+    print(f"{'journey':32} {'ready_ms':>9} {'spread':>7} {'cpu_ms':>7} {'spread':>7} {'rss MiB':>8} {'procs':>5} {'total_cpu_ms':>12}  pass")
+    worst, tot = 0.0, {"ready": 0.0, "cpu": 0.0, "rss": 0.0}
+    worst_cpu = 0.0
+    for name, path, url in recorded(opt):
+        rs = []
+        for run in range(1, opt["runs"] + 1):
+            load = os.getloadavg()[0]
+            r = ready_run(binary, path, url, {"BARE_NET_REPLAY": os.path.join(opt["corpus"], name)})
+            rs.append(r)
+            rows.append((name, run, int(r[0]), round(r[1], 1), r[2], r[3], r[4], r[5], round(r[6]), r[7], f"{load:.2f}"))
+        med = lambda i: statistics.median(r[i] for r in rs)
+        sp = spread([r[1] for r in rs])
+        worst = max(worst, sp)
+        spc = spread([r[2] for r in rs])
+        worst_cpu = max(worst_cpu, spc)
+        tot["ready"] += med(1)
+        tot["cpu"] += med(2)
+        tot["rss"] += med(3) / 1024
+        print(f"{name:32} {med(1):9.1f} {sp:6.1f}% {med(2):7.1f} {spc:6.1f}% {med(3) / 1024:8.1f} {max(r[4] for r in rs):5} {med(5):12.0f}  {'ok' if all(r[0] for r in rs) else 'FAIL'}" + (f"  {max(r[7] for r in rs)} MISSES at most" if any(r[7] for r in rs) else ""), flush=True)
+    names = list(dict.fromkeys(r[0] for r in rows))
+    over = [sum(1 for n in names if spread([r[i] for r in rows if r[0] == n]) >= 5) for i in (3, 4)]
+    print(f"{'SUM of the medians':32} {tot['ready']:9.1f} {'max ' + format(worst, '.1f') + '%':>7} {tot['cpu']:7.1f} {'max ' + format(worst_cpu, '.1f') + '%':>7} {tot['rss']:8.1f}   of {len(names)} journeys, spread >= 5%: {over[0]} by ready_ms, {over[1]} by cpu_ms")
+    print(f"load average after: {os.getloadavg()[0]:.2f} (1 min) on {os.cpu_count()} cores")
+    if opt["out"]:
+        with open(opt["out"], "w") as f:
+            f.write("journey\trun\tpass\tready_ms\tready_cpu_ms\tready_rss_kib\tprocs\ttotal_cpu_ms\ttotal_wall_ms\tmisses\tload1\n")
+            f.writelines("\t".join(map(str, r)) + "\n" for r in rows)
+
+
 def write(rows, out):
     if out:
         with open(out, "w") as f:
@@ -249,7 +380,7 @@ def main():
     if len(sys.argv) < 3:
         sys.exit(__doc__)
     mode, argv = sys.argv[1], sys.argv[2:]
-    opt, argv = args(argv, ("corpus", "only", "runs", "tries", "pss", "out", "clock"))
+    opt, argv = args(argv, ("corpus", "only", "runs", "tries", "pss", "out", "clock", "rounds"))
     if mode in ("record", "fill") and len(argv) == 1:
         record(opt, argv[0], mode == "fill")
     elif mode == "run" and len(argv) == 1:
@@ -259,6 +390,11 @@ def main():
             xs = [r[4] for r in rows if r[1] == name]
             misses = max(r[9] for r in rows if r[1] == name)
             print(f"{name:32} median {statistics.median(xs) / 1e6:10.1f} Minstr  spread {spread(xs):5.1f}%" + (f"  {misses} MISSES at most" if misses else ""))
+    elif mode == "session" and len(argv) == 1:
+        session(opt, argv[0])
+    elif mode == "ready" and len(argv) == 1:
+        opt["runs"] = opt["runs"] if "--runs" in sys.argv else 5
+        ready(opt, argv[0])
     elif mode == "compare" and len(argv) == 2:
         rows = measure(opt, [("base", argv[0]), ("new", argv[1])])
         write(rows, opt["out"])
