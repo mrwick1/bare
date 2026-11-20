@@ -685,6 +685,9 @@ pub trait Engine: Sized {
     fn own_enumerable_data<'s>(&mut self, obj: Local<'_>, key: Local<'_>) -> Result<Option<Local<'s>>, Error<'s>>;
     /// Can `v` be called? A class constructor and a proxy of a function can.
     fn is_callable(&self, v: Local<'_>) -> bool;
+    /// A function that calls `target` with `this` fixed, with the arguments of its own call. It reads no `Function.prototype.bind`.
+    /// The engine traces both. `target` is a function, or a `TypeError`.
+    fn bind<'s>(&mut self, target: Local<'_>, this: Local<'_>) -> Result<Local<'s>, Error<'s>>;
 }
 
 /// Open the outermost scope of `e`.
@@ -987,6 +990,10 @@ impl<'s, E: Engine> Scope<'s, E> {
 
     pub fn is_callable(&self, v: Local<'_>) -> bool {
         self.e.is_callable(v)
+    }
+
+    pub fn bind(&mut self, target: Local<'_>, this: Local<'_>) -> Result<Local<'s>, Error<'s>> {
+        self.e.bind(target, this)
     }
 }
 

@@ -324,8 +324,8 @@ fn lazy_members_are_asked_through_the_interface_once_per_name() {
 // ---- The base set of handler methods (plan step S0.4). One host function for each method; a script calls it and compares with the
 // script's own operation.
 
-const BASE_FNS: [&str; 19] = [
-    "typeErr", "rangeErr", "charge", "num", "str", "bool", "arr", "isArr", "getProto", "setProto", "accessor", "ntProbe", "utf16", "now", "hasOwn", "ownKeys", "ownEnum", "isCallable", "intr",
+const BASE_FNS: [&str; 20] = [
+    "typeErr", "rangeErr", "charge", "num", "str", "bool", "arr", "isArr", "getProto", "setProto", "accessor", "ntProbe", "utf16", "now", "hasOwn", "ownKeys", "ownEnum", "isCallable", "intr", "bindFn",
 ];
 
 /// A host written only against the interface: function `i` of `BASE_FNS` calls one base method.
@@ -410,6 +410,7 @@ impl<E: Engine> bare_js_api::Host<E> for Base {
                 let t = s.is_callable(a);
                 Ok(s.boolean(t))
             }
+            19 => s.bind(a, b),
             _ => {
                 use bare_js_api::Intrinsic as I;
                 let which = [I::ObjectPrototype, I::ArrayPrototype, I::IteratorPrototype, I::ErrorPrototype, I::SymbolIterator][s.as_number(a).unwrap_or(0.0) as usize];
@@ -612,6 +613,17 @@ fn callable_values_are_told_from_the_rest() {
         let mut it = base_setup();
         assert_eq!(out(&mut it, "[function () {}, () => 1, class A {}, async function () {}, function* () {}, Math.max, isCallable, (function () {}).bind(null), new Proxy(function () {}, {}), new Proxy(class {}, {})].map(isCallable).join()"), "true,true,true,true,true,true,true,true,true,true");
         assert_eq!(out(&mut it, "[{}, [], null, undefined, 1, 's', true, Symbol(), new Proxy({}, {}), { call() {} }, Math, new (class {})()].map(isCallable).join()"), "false,false,false,false,false,false,false,false,false,false,false,false");
+        assert_eq!(it.stack_len(), 0);
+    });
+}
+
+#[test]
+fn bind_fixes_this_and_reads_no_script_bind() {
+    big(|| {
+        let mut it = base_setup();
+        assert_eq!(out(&mut it, "var o = { v: 7 }; var f = bindFn(function (x) { return this.v + x }, o); f(1) + ',' + isCallable(f)"), "8,true");
+        assert_eq!(out(&mut it, "Function.prototype.bind = function () { throw 'script bind' }; bindFn(function () { return this.v }, { v: 3 })()"), "3");
+        assert_eq!(out(&mut it, "try { bindFn({}, {}); 'no' } catch (e) { e instanceof TypeError }"), "true");
         assert_eq!(it.stack_len(), 0);
     });
 }

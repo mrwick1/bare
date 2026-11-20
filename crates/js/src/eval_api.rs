@@ -695,6 +695,14 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
     fn is_callable(&self, v: bare_js_api::Local<'_>) -> bool {
         self.is_callable_value(self.api_at(v))
     }
+
+    fn bind<'s>(&mut self, target: bare_js_api::Local<'_>, this: bare_js_api::Local<'_>) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
+        let r = self.api_obj(target).and_then(|t| Interp::host_bind(self, t, self.api_at(this)));
+        match r {
+            Ok(o) => Ok(self.api_push(Value::Object(o))),
+            Err(e) => Err(self.api_err(e)),
+        }
+    }
 }
 
 /// The heap's sources, answered by an interface host (`Interp::set_api_sources`). The heap gives the asked object and its host key;

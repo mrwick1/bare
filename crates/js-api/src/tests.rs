@@ -232,6 +232,9 @@ impl Engine for Toy {
     fn is_callable(&self, _v: Local<'_>) -> bool {
         false
     }
+    fn bind<'s>(&mut self, _target: Local<'_>, _this: Local<'_>) -> Result<Local<'s>, Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("bind")))
+    }
 }
 
 fn toy() -> Toy {
