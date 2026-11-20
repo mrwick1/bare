@@ -178,10 +178,6 @@ pub(crate) fn clone_tree(d: &Dom, it: &mut Interp<'_>, n: NodeId, deep: bool, im
     run(it, |s| clone_tree_s(d, s, n, deep, import))
 }
 
-pub(crate) fn wrap_all(d: &Dom, it: &mut Interp<'_>, ids: &[NodeId]) -> V {
-    run_v(it, |s| wrap_all_s(d, s, ids))
-}
-
 pub(crate) fn append_child(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     via(d, it, append_child_s, this, a)
 }
