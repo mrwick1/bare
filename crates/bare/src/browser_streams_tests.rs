@@ -116,6 +116,23 @@ fn collection_while_reads_are_pending_keeps_the_chain_and_the_chunks() {
 }
 
 #[test]
+fn the_names_the_constructor_reads_survive_collection() {
+    big(|| {
+        let mut b = mk();
+        // The first stream makes the table of names. Then collections run with nothing else that holds those strings.
+        assert_eq!(js(&mut b, "typeof new ReadableStream({ start() {}, pull() {}, cancel() {} }, { highWaterMark: 2 })"), "object");
+        for _ in 0..3 {
+            b.collect(&[]).unwrap();
+        }
+        js(&mut b, "var log = []; var rs = new ReadableStream({ start(c) { log.push('s'); c.enqueue(7); c.close(); }, cancel() {} }, { highWaterMark: 2 }); rs.getReader().read().then(function (x) { log.push(x.value); });");
+        b.drain().unwrap();
+        assert_eq!(js(&mut b, "log.join()"), "s,7");
+        assert_eq!(js(&mut b, "try { new ReadableStream({ pull: 1 }) } catch (e) { e.message }"), "Failed to construct 'ReadableStream': The pull member is not a function");
+        assert_eq!(js(&mut b, "try { new ReadableStream({}, { highWaterMark: -1 }) } catch (e) { e.name }"), "RangeError");
+    });
+}
+
+#[test]
 fn a_queue_of_chunks_survives_collection_and_unreachable_streams_are_dropped() {
     big(|| {
         let mut b = mk();

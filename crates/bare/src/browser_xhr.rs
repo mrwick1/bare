@@ -32,18 +32,13 @@
 use crate::browser::*;
 use crate::browser_fetch::{Outcome, StreamMsg, dequeue_xhr, forbidden_request, queue_xhr, queue_xhr_blob, queue_xhr_stream};
 use crate::browser_handlers::{handler_get, handler_set};
-use bare_js::eval::{Error, Interp};
-use bare_js::heap::PropertyDescriptor;
-use bare_js::value::{ObjId, PropertyKey, Value};
+use crate::browser_scoped::*;
+use bare_js::eval::Interp;
+use bare_js::value::{ObjId, Value};
+use bare_js_api::{Args, Attrs, Engine, HostFn, Intrinsic, Local, Type};
 use bare_url::Url;
 use std::cell::RefCell;
 use std::rc::Rc;
-
-type V = R<Value>;
-
-fn arg(a: &[Value], i: usize) -> Value {
-    a.get(i).copied().unwrap_or(Value::Undefined)
-}
 
 const UNSENT: u8 = 0;
 const OPENED: u8 = 1;
@@ -218,10 +213,10 @@ impl Dom {
         k
     }
 
-    fn xo(&self, it: &mut Interp<'_>, this: Value) -> R<ObjId> {
-        match this {
-            Value::Object(o) if self.xhr.s.borrow().objs.contains_key(&o) => Ok(o),
-            _ => Err(it.type_error("Illegal invocation")),
+    fn xo<'s>(&self, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, ObjId> {
+        match obj_id(s, this) {
+            Some(o) if self.xhr.s.borrow().objs.contains_key(&o) => Ok(o),
+            _ => Err(s.type_error("Illegal invocation")),
         }
     }
 
@@ -230,8 +225,8 @@ impl Dom {
         f(self.xhr.s.borrow_mut().objs.get_mut(&o).expect("an XMLHttpRequest"))
     }
 
-    fn xerr(&self, it: &mut Interp<'_>, name: &str, what: &str, msg: &str) -> Error {
-        self.dom_err(it, name, &format!("Failed to execute '{what}' on 'XMLHttpRequest': {msg}"))
+    fn xerr<'s>(&self, s: &mut Sc<'s, '_>, name: &str, what: &str, msg: &str) -> bare_js_api::Error<'s> {
+        self.dom_err_s(s, name, &format!("Failed to execute '{what}' on 'XMLHttpRequest': {msg}"))
     }
 
     fn event_object(&self, it: &mut Interp<'_>, proto: ObjId) -> R<ObjId> {
@@ -309,21 +304,22 @@ impl Dom {
         if self.xcurrent(x, seq) { self.xabort(it, x) } else { Ok(()) }
     }
 
-    fn xhr_target(&self, it: &mut Interp<'_>, this: Value) -> R<Target> {
-        match this {
-            Value::Object(o) if { let t = self.xhr.s.borrow(); t.objs.contains_key(&o) || t.ups.contains_key(&o) } => Ok(Target::Obj(o)),
-            _ => Err(it.type_error("Illegal invocation")),
+    fn xhr_target<'s>(&self, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, Target> {
+        match obj_id(s, this) {
+            Some(o) if { let t = self.xhr.s.borrow(); t.objs.contains_key(&o) || t.ups.contains_key(&o) } => Ok(Target::Obj(o)),
+            _ => Err(s.type_error("Illegal invocation")),
         }
     }
 }
 
 // ------------------------------------------------------------------------------------ constructors
 
-fn illegal(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
-    Err(it.type_error("Illegal constructor"))
+fn illegal<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    Err(s.type_error("Illegal constructor"))
 }
 
-fn xhr_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
+/// The objects and the entry of a new `XMLHttpRequest` (the tables and owners are keyed by `ObjId`).
+fn xhr_new(d: &Dom, it: &mut Interp<'_>) -> R<Value> {
     let m = d.xhr.s.borrow().made.expect("made");
     let o = d.event_object(it, m.protos[0])?;
     let upload = d.event_object(it, m.protos[2])?;
@@ -355,95 +351,100 @@ fn xhr_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
     Ok(Value::Object(o))
 }
 
-fn progress_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
-    if a.is_empty() {
-        return Err(it.type_error("Failed to construct 'ProgressEvent': 1 argument required, but only 0 present."));
-    }
-    let ty = d.string_arg(it, a[0])?;
-    let init = arg(a, 1);
+fn xhr_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    old_v(s, |it| xhr_new(d, it))
+}
+
+fn progress_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let Some(a0) = a.get(0) else {
+        return Err(s.type_error("Failed to construct 'ProgressEvent': 1 argument required, but only 0 present."));
+    };
+    let ty = d.string_arg_s(s, a0)?;
+    let init = arg_s(s, a, 1);
     let (mut flags, mut nums) = ([false; 4], [0.0f64; 2]);
-    match init {
-        Value::Undefined | Value::Null => {}
-        Value::Object(_) => {
+    match s.type_of(init) {
+        Type::Undefined | Type::Null => {}
+        Type::Object | Type::Function => {
             for (i, n) in ["bubbles", "cancelable", "composed", "lengthComputable"].into_iter().enumerate() {
-                flags[i] = crate::browser_events::init_flag(d, it, init, n)?;
+                let v = s.get_str(init, n)?;
+                flags[i] = s.to_boolean(v);
             }
             for (i, n) in ["loaded", "total"].into_iter().enumerate() {
-                let k = d.key(it, n)?;
-                let v = it.get_value(init, k)?;
-                let x = it.to_js_number(v)?;
+                let v = s.get_str(init, n)?;
+                let x = s.to_number(v)?;
                 nums[i] = if x.is_finite() && x > 0.0 { x.trunc() } else { 0.0 };
             }
         }
-        _ => return Err(it.type_error("The provided value is not of type 'ProgressEventInit'.")),
+        _ => return Err(s.type_error("The provided value is not of type 'ProgressEventInit'.")),
     }
     let proto = d.xhr.s.borrow().made.expect("made").protos[3];
-    let ev = d.new_event_proto(it, &ty, flags[0], flags[1], flags[2], proto)?;
+    let ev = old(s, |it| d.new_event_proto(it, &ty, flags[0], flags[1], flags[2], proto))?;
     d.xhr.s.borrow_mut().prog.insert(ev, (nums[0], nums[1], flags[3]));
-    Ok(Value::Object(ev))
+    Ok(d.obj_local(s, ev))
 }
 
-fn prog_field(d: &Dom, it: &mut Interp<'_>, this: Value, f: fn((f64, f64, bool)) -> Value) -> V {
-    match this {
-        Value::Object(o) => match d.xhr.s.borrow().prog.get(&o) {
-            Some(&p) => Ok(f(p)),
-            None => Err(it.type_error("Illegal invocation")),
-        },
-        _ => Err(it.type_error("Illegal invocation")),
-    }
+/// `(loaded, total, lengthComputable)` of the `ProgressEvent` in `this`.
+fn prog_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, (f64, f64, bool)> {
+    let p = obj_id(s, this).and_then(|o| d.xhr.s.borrow().prog.get(&o).copied());
+    p.ok_or_else(|| s.type_error("Illegal invocation"))
 }
 
-fn prog_loaded(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    prog_field(d, it, this, |p| Value::Number(p.0))
+fn prog_loaded<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let p = prog_of(d, s, this)?;
+    Ok(s.number(p.0))
 }
 
-fn prog_total(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    prog_field(d, it, this, |p| Value::Number(p.1))
+fn prog_total<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let p = prog_of(d, s, this)?;
+    Ok(s.number(p.1))
 }
 
-fn prog_computable(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    prog_field(d, it, this, |p| Value::Bool(p.2))
+fn prog_computable<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let p = prog_of(d, s, this)?;
+    Ok(s.boolean(p.2))
 }
 
 // ------------------------------------------------------------------------------------ methods
 
-fn open(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let x = d.xo(it, this)?;
+fn open<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let x = d.xo(s, this)?;
     if a.len() < 2 {
-        return Err(it.type_error(&format!("Failed to execute 'open' on 'XMLHttpRequest': 2 arguments required, but only {} present.", a.len())));
+        return Err(s.type_error(&format!("Failed to execute 'open' on 'XMLHttpRequest': 2 arguments required, but only {} present.", a.len())));
     }
-    let method = d.string_arg(it, a[0])?;
-    let url = d.string_arg(it, a[1])?;
-    let asynchronous = match arg(a, 2) {
-        Value::Undefined => true,
-        v => it.to_js_bool(v)?,
+    let (a0, a1) = (arg_s(s, a, 0), arg_s(s, a, 1));
+    let method = d.string_arg_s(s, a0)?;
+    let url = d.string_arg_s(s, a1)?;
+    let a2 = arg_s(s, a, 2);
+    let asynchronous = match s.type_of(a2) {
+        Type::Undefined => true,
+        _ => s.to_boolean(a2),
     };
-    for &v in a.iter().skip(3) {
-        if !matches!(v, Value::Undefined | Value::Null) {
-            return Err(Error::Unsupported(unsupported("XMLHttpRequest.open with a user name or a password")));
+    for v in a.iter().skip(3) {
+        if !matches!(s.type_of(v), Type::Undefined | Type::Null) {
+            return Err(unsupp("XMLHttpRequest.open with a user name or a password"));
         }
     }
     if !token(&method) {
-        return Err(d.xerr(it, "SyntaxError", "open", &format!("'{method}' is not a valid HTTP method.")));
+        return Err(d.xerr(s, "SyntaxError", "open", &format!("'{method}' is not a valid HTTP method.")));
     }
     if ["CONNECT", "TRACE", "TRACK"].iter().any(|m| m.eq_ignore_ascii_case(&method)) {
-        return Err(d.xerr(it, "SecurityError", "open", &format!("'{method}' HTTP method is unsupported.")));
+        return Err(d.xerr(s, "SecurityError", "open", &format!("'{method}' HTTP method is unsupported.")));
     }
     let method = if ["DELETE", "GET", "HEAD", "OPTIONS", "POST", "PUT"].iter().any(|m| m.eq_ignore_ascii_case(&method)) { method.to_ascii_uppercase() } else { method };
     if url.len() > d.fl().max_url_bytes {
-        return Err(d.lim("fetch-url"));
+        return Err(d.lim_s(s, "fetch-url"));
     }
-    let s = url.trim_matches(|c: char| c <= ' ');
-    let blob = crate::browser_web::is_blob_url(s).then(|| s.to_string());
+    let trimmed = url.trim_matches(|c: char| c <= ' ');
+    let blob = crate::browser_web::is_blob_url(trimmed).then(|| trimmed.to_string());
     let parsed = match d.fetch_base() {
         Some(b) if blob.is_some() => Ok(b),
-        Some(b) => b.join(s),
+        Some(b) => b.join(trimmed),
         None if blob.is_some() => Url::parse("http://blob.invalid/"),
-        None => Url::parse(s),
+        None => Url::parse(trimmed),
     };
-    let Ok(parsed) = parsed else { return Err(d.xerr(it, "SyntaxError", "open", &format!("Invalid URL '{url}'."))) };
+    let Ok(parsed) = parsed else { return Err(d.xerr(s, "SyntaxError", "open", &format!("Invalid URL '{url}'."))) };
     if !asynchronous {
-        return Err(Error::Unsupported(unsupported("synchronous XMLHttpRequest (async = false)")));
+        return Err(unsupp("synchronous XMLHttpRequest (async = false)"));
     }
     dequeue_xhr(d, x);
     let was = d.xs(x, |x| {
@@ -454,37 +455,38 @@ fn open(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
         was
     });
     if was != OPENED {
-        d.xfire(it, x, "readystatechange", None)?;
+        old(s, |it| d.xfire(it, x, "readystatechange", None))?;
     }
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-fn set_request_header(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let x = d.xo(it, this)?;
+fn set_request_header<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let x = d.xo(s, this)?;
     if a.len() < 2 {
-        return Err(it.type_error(&format!("Failed to execute 'setRequestHeader' on 'XMLHttpRequest': 2 arguments required, but only {} present.", a.len())));
+        return Err(s.type_error(&format!("Failed to execute 'setRequestHeader' on 'XMLHttpRequest': 2 arguments required, but only {} present.", a.len())));
     }
-    let name = d.string_arg(it, a[0])?;
-    let value = d.string_arg(it, a[1])?;
+    let (a0, a1) = (arg_s(s, a, 0), arg_s(s, a, 1));
+    let name = d.string_arg_s(s, a0)?;
+    let value = d.string_arg_s(s, a1)?;
     if d.xs(x, |x| x.state != OPENED || x.send) {
-        return Err(d.xerr(it, "InvalidStateError", "setRequestHeader", "The object's state must be OPENED."));
+        return Err(d.xerr(s, "InvalidStateError", "setRequestHeader", "The object's state must be OPENED."));
     }
     let value = value.trim_matches(['\t', '\n', '\r', ' ']);
     if !token(&name) {
-        return Err(d.xerr(it, "SyntaxError", "setRequestHeader", &format!("'{name}' is not a valid HTTP header field name.")));
+        return Err(d.xerr(s, "SyntaxError", "setRequestHeader", &format!("'{name}' is not a valid HTTP header field name.")));
     }
     if value.contains(['\0', '\r', '\n']) {
-        return Err(d.xerr(it, "SyntaxError", "setRequestHeader", &format!("'{value}' is not a valid HTTP header field value.")));
+        return Err(d.xerr(s, "SyntaxError", "setRequestHeader", &format!("'{value}' is not a valid HTTP header field value.")));
     }
     if !value.is_ascii() {
-        return Err(Error::Unsupported(unsupported("a non-ASCII XMLHttpRequest header value")));
+        return Err(unsupp("a non-ASCII XMLHttpRequest header value"));
     }
     let name = name.to_ascii_lowercase();
     if forbidden_request(&name) {
-        return Ok(Value::Undefined);
+        return Ok(s.undefined());
     }
     let lim = d.fl();
-    d.xs(x, |x| {
+    let r = d.xs(x, |x| {
         if x.headers.len() >= lim.max_headers && !x.headers.iter().any(|(n, _)| *n == name) {
             return Err(d.lim("fetch-headers"));
         }
@@ -496,37 +498,39 @@ fn set_request_header(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) ->
             None => x.headers.push((name, value.to_string())),
         }
         Ok(())
-    })?;
-    Ok(Value::Undefined)
+    });
+    lift(s, r)?;
+    Ok(s.undefined())
 }
 
-fn send(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let x = d.xo(it, this)?;
+fn send<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let x = d.xo(s, this)?;
     if d.xs(x, |x| x.state != OPENED || x.send) {
-        return Err(d.xerr(it, "InvalidStateError", "send", "The object's state must be OPENED."));
+        return Err(d.xerr(s, "InvalidStateError", "send", "The object's state must be OPENED."));
     }
     let (method, url, mut headers, seq, creds) = d.xs(x, |x| (x.method.clone(), x.url.as_ref().map(|u| Url::parse(&u.to_string()).expect("a parsed URL")), x.headers.clone(), x.seq, x.creds));
     let url = url.expect("opened");
     if let Some(blob) = d.xs(x, |x| x.blob.clone()) {
         // A Blob URL is read from the store, with no body and no network. Only GET reads it.
         let found = (method == "GET").then(|| crate::browser_web::blob_url_read(d, &blob)).flatten();
-        queue_xhr_blob(d, it, (x, seq), url, found)?;
-        return send_started(d, it, x, seq, 0);
+        old(s, |it| queue_xhr_blob(d, it, (x, seq), url, found))?;
+        return send_started(d, s, x, seq, 0);
     }
     // A GET that asks for `text/event-stream` (as `EventSource` does) is read as it comes: see `queue_xhr_stream`.
     if method == "GET" && headers.iter().any(|(n, v)| n == "accept" && v.trim().eq_ignore_ascii_case("text/event-stream")) {
-        queue_xhr_stream(d, it, (x, seq), url, headers, creds)?;
-        return send_started(d, it, x, seq, 0);
+        old(s, |it| queue_xhr_stream(d, it, (x, seq), url, headers, creds))?;
+        return send_started(d, s, x, seq, 0);
     }
     let mut body = None;
     if method != "GET" && method != "HEAD" {
-        let v = arg(a, 0);
-        if let Value::Object(o) = v
+        let v = arg_s(s, a, 0);
+        if let Some(o) = obj_id(s, v)
             && matches!(d.st.borrow().by_obj.get(&o), Some(Target::Node(_)))
         {
-            return Err(Error::Unsupported(unsupported("a Document as an XMLHttpRequest body")));
+            return Err(unsupp("a Document as an XMLHttpRequest body"));
         }
-        if let Some((bytes, ty)) = d.extract_body(it, v, "execute 'send' on 'XMLHttpRequest'")? {
+        let raw = s.engine().raw(v);
+        if let Some((bytes, ty)) = old(s, |it| d.extract_body(it, raw, "execute 'send' on 'XMLHttpRequest'"))? {
             if let Some(ty) = ty
                 && !headers.iter().any(|(n, _)| n == "content-type")
             {
@@ -536,78 +540,78 @@ fn send(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
         }
     }
     let body_len = body.as_ref().map_or(0, |b| b.len());
-    queue_xhr(d, it, (x, seq), &method, url, headers, body, creds)?;
-    send_started(d, it, x, seq, body_len)
+    old(s, |it| queue_xhr(d, it, (x, seq), &method, url, headers, body, creds))?;
+    send_started(d, s, x, seq, body_len)
 }
 
 /// After `send` queued the request: mark it sent and fire `loadstart`.
-fn send_started(d: &Dom, it: &mut Interp<'_>, x: ObjId, seq: u64, body_len: usize) -> V {
+fn send_started<'s>(d: &Dom, s: &mut Sc<'s, '_>, x: ObjId, seq: u64, body_len: usize) -> Res<'s, Local<'s>> {
     let up = d.upload_of(x);
     let listening = d.st.borrow().listeners.get(&Target::Obj(up)).is_some_and(|v| !v.is_empty());
     let now = d.now_ms();
     d.xs(x, |x| {
         (x.send, x.upload_done, x.up_listener, x.body_len, x.started) = (true, body_len == 0, listening, body_len, now);
     });
-    d.xfire(it, x, "loadstart", Some((0.0, 0.0)))?;
+    old(s, |it| d.xfire(it, x, "loadstart", Some((0.0, 0.0))))?;
     if body_len != 0 && listening && d.xcurrent(x, seq) {
-        d.xfire(it, up, "loadstart", Some((0.0, body_len as f64)))?;
+        old(s, |it| d.xfire(it, up, "loadstart", Some((0.0, body_len as f64))))?;
     }
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-fn abort(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let x = d.xo(it, this)?;
-    d.xabort(it, x)?;
-    Ok(Value::Undefined)
+fn abort<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let x = d.xo(s, this)?;
+    old(s, |it| d.xabort(it, x))?;
+    Ok(s.undefined())
 }
 
-fn ready_state(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let x = d.xo(it, this)?;
-    Ok(Value::Number(f64::from(d.xs(x, |x| x.state))))
+fn ready_state<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let x = d.xo(s, this)?;
+    Ok(s.number(f64::from(d.xs(x, |x| x.state))))
 }
 
-fn upload(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let x = d.xo(it, this)?;
-    Ok(Value::Object(d.upload_of(x)))
+fn upload<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let x = d.xo(s, this)?;
+    Ok(d.obj_local(s, d.upload_of(x)))
 }
 
-fn status(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let x = d.xo(it, this)?;
-    Ok(Value::Number(d.xs(x, |x| x.resp.as_ref().map_or(0, |r| r.status)).into()))
+fn status<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let x = d.xo(s, this)?;
+    Ok(s.number(d.xs(x, |x| x.resp.as_ref().map_or(0, |r| r.status)).into()))
 }
 
-fn status_text(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let x = d.xo(it, this)?;
-    let s = d.xs(x, |x| x.resp.as_ref().map_or("", |r| reason(r.status)));
-    d.js_str(it, s)
+fn status_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let x = d.xo(s, this)?;
+    let t = d.xs(x, |x| x.resp.as_ref().map_or("", |r| reason(r.status)));
+    d.js_str_s(s, t)
 }
 
-fn response_url(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let x = d.xo(it, this)?;
-    let s = d.xs(x, |x| x.resp.as_ref().map_or(String::new(), |r| r.url.split('#').next().unwrap_or("").to_string()));
-    d.js_str(it, &s)
+fn response_url<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let x = d.xo(s, this)?;
+    let t = d.xs(x, |x| x.resp.as_ref().map_or(String::new(), |r| r.url.split('#').next().unwrap_or("").to_string()));
+    d.js_str_s(s, &t)
 }
 
-fn get_response_header(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let x = d.xo(it, this)?;
-    if a.is_empty() {
-        return Err(it.type_error("Failed to execute 'getResponseHeader' on 'XMLHttpRequest': 1 argument required, but only 0 present."));
-    }
-    let name = d.string_arg(it, a[0])?.to_ascii_lowercase();
+fn get_response_header<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let x = d.xo(s, this)?;
+    let Some(a0) = a.get(0) else {
+        return Err(s.type_error("Failed to execute 'getResponseHeader' on 'XMLHttpRequest': 1 argument required, but only 0 present."));
+    };
+    let name = d.string_arg_s(s, a0)?.to_ascii_lowercase();
     let v = d.xs(x, |x| {
         let r = x.resp.as_ref()?;
         let all: Vec<&str> = r.headers.iter().filter(|(n, _)| *n == name).map(|(_, v)| v.as_str()).collect();
         (!all.is_empty()).then(|| all.join(", "))
     });
     match v {
-        Some(s) => d.js_str(it, &s),
-        None => Ok(Value::Null),
+        Some(t) => d.js_str_s(s, &t),
+        None => Ok(s.null()),
     }
 }
 
-fn get_all_response_headers(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let x = d.xo(it, this)?;
-    let s = d.xs(x, |x| {
+fn get_all_response_headers<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let x = d.xo(s, this)?;
+    let t = d.xs(x, |x| {
         let mut out = String::new();
         let Some(r) = x.resp.as_ref() else { return out };
         let mut names: Vec<&str> = r.headers.iter().map(|(n, _)| n.as_str()).collect();
@@ -619,73 +623,76 @@ fn get_all_response_headers(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Valu
         }
         out
     });
-    d.js_str(it, &s)
+    d.js_str_s(s, &t)
 }
 
-fn response_type(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let x = d.xo(it, this)?;
+fn response_type<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let x = d.xo(s, this)?;
     let n = d.xs(x, |x| x.rt.name());
-    d.js_str(it, n)
+    d.js_str_s(s, n)
 }
 
-fn set_response_type(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let x = d.xo(it, this)?;
-    let s = d.string_arg(it, arg(a, 0))?;
+fn set_response_type<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let x = d.xo(s, this)?;
+    let a0 = arg_s(s, a, 0);
+    let v = d.string_arg_s(s, a0)?;
     if d.xs(x, |x| x.state == LOADING || x.state == DONE) {
-        return Err(d.dom_err(it, "InvalidStateError", "Failed to set the 'responseType' property on 'XMLHttpRequest': The response type cannot be set if the object's state is LOADING or DONE."));
+        return Err(d.dom_err_s(s, "InvalidStateError", "Failed to set the 'responseType' property on 'XMLHttpRequest': The response type cannot be set if the object's state is LOADING or DONE."));
     }
-    let rt = match s.as_str() {
+    let rt = match v.as_str() {
         "" => Rt::Empty,
         "text" => Rt::Text,
         "arraybuffer" => Rt::Buffer,
         "blob" => Rt::Blob,
         "json" => Rt::Json,
-        "document" => return Err(Error::Unsupported(unsupported("XMLHttpRequest responseType document"))),
-        _ => return Ok(Value::Undefined),
+        "document" => return Err(unsupp("XMLHttpRequest responseType document")),
+        _ => return Ok(s.undefined()),
     };
     d.xs(x, |x| x.rt = rt);
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-fn timeout(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let x = d.xo(it, this)?;
-    Ok(Value::Number(f64::from(d.xs(x, |x| x.timeout))))
+fn timeout<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let x = d.xo(s, this)?;
+    Ok(s.number(f64::from(d.xs(x, |x| x.timeout))))
 }
 
-fn set_timeout(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let x = d.xo(it, this)?;
-    let n = it.to_js_number(arg(a, 0))?;
+fn set_timeout<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let x = d.xo(s, this)?;
+    let a0 = arg_s(s, a, 0);
+    let n = s.to_number(a0)?;
     let n = if n.is_finite() { n.trunc().rem_euclid(4294967296.0) as u32 } else { 0 };
     d.xs(x, |x| x.timeout = n);
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-fn with_credentials(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let x = d.xo(it, this)?;
-    Ok(Value::Bool(d.xs(x, |x| x.creds)))
+fn with_credentials<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let x = d.xo(s, this)?;
+    Ok(s.boolean(d.xs(x, |x| x.creds)))
 }
 
-fn set_with_credentials(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let x = d.xo(it, this)?;
-    let b = it.to_js_bool(arg(a, 0))?;
+fn set_with_credentials<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let x = d.xo(s, this)?;
+    let a0 = arg_s(s, a, 0);
+    let b = s.to_boolean(a0);
     if d.xs(x, |x| (x.state != UNSENT && x.state != OPENED) || x.send) {
-        return Err(d.dom_err(it, "InvalidStateError", "Failed to set the 'withCredentials' property on 'XMLHttpRequest': The value may only be set if the object's state is UNSENT or OPENED."));
+        return Err(d.dom_err_s(s, "InvalidStateError", "Failed to set the 'withCredentials' property on 'XMLHttpRequest': The value may only be set if the object's state is UNSENT or OPENED."));
     }
     d.xs(x, |x| x.creds = b);
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-fn override_mime_type(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let x = d.xo(it, this)?;
-    if a.is_empty() {
-        return Err(it.type_error("Failed to execute 'overrideMimeType' on 'XMLHttpRequest': 1 argument required, but only 0 present."));
-    }
-    let s = d.string_arg(it, a[0])?;
+fn override_mime_type<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let x = d.xo(s, this)?;
+    let Some(a0) = a.get(0) else {
+        return Err(s.type_error("Failed to execute 'overrideMimeType' on 'XMLHttpRequest': 1 argument required, but only 0 present."));
+    };
+    let m = d.string_arg_s(s, a0)?;
     if d.xs(x, |x| x.state == LOADING || x.state == DONE) {
-        return Err(d.xerr(it, "InvalidStateError", "overrideMimeType", "MimeType cannot be overridden when the state is LOADING or DONE."));
+        return Err(d.xerr(s, "InvalidStateError", "overrideMimeType", "MimeType cannot be overridden when the state is LOADING or DONE."));
     }
-    d.xs(x, |x| x.mime = Some(s));
-    Ok(Value::Undefined)
+    d.xs(x, |x| x.mime = Some(m));
+    Ok(s.undefined())
 }
 
 // ------------------------------------------------------------------------------------ response
@@ -706,53 +713,55 @@ impl Dom {
         self.xs(x, |x| x.mime.clone().or_else(|| x.resp.as_ref().and_then(|r| r.headers.iter().find(|(n, _)| n == "content-type").map(|(_, v)| v.clone()))).unwrap_or_default())
     }
 
-    fn response_text_of(&self, it: &mut Interp<'_>, x: ObjId) -> V {
-        let Some(body) = self.xs(x, |x| if x.state == LOADING || x.state == DONE { x.resp.as_ref().map(|r| r.body.clone()) } else { None }) else { return self.js_str(it, "") };
+    fn response_text_of<'s>(&self, s: &mut Sc<'s, '_>, x: ObjId) -> Res<'s, Local<'s>> {
+        let Some(body) = self.xs(x, |x| if x.state == LOADING || x.state == DONE { x.resp.as_ref().map(|r| r.body.clone()) } else { None }) else { return self.js_str_s(s, "") };
         if let Some(cs) = charset(&self.final_mime(x))
             && !matches!(cs.as_str(), "utf-8" | "utf8" | "unicode-1-1-utf-8")
             && (cs.starts_with("utf-16") || !body.is_ascii())
         {
-            return Err(Error::Unsupported(unsupported("an XMLHttpRequest response text in a charset other than UTF-8")));
+            return Err(unsupp("an XMLHttpRequest response text in a charset other than UTF-8"));
         }
-        it.charge((body.len() / 16) as u64)?;
+        s.charge((body.len() / 16) as u64)?;
         let text = String::from_utf8_lossy(body.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&body)).into_owned();
-        self.js_str(it, &text)
+        self.js_str_s(s, &text)
     }
 }
 
-fn response_text(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let x = d.xo(it, this)?;
+fn response_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let x = d.xo(s, this)?;
     let rt = d.xs(x, |x| x.rt);
     if !matches!(rt, Rt::Empty | Rt::Text) {
-        return Err(d.dom_err(it, "InvalidStateError", &format!("Failed to read the 'responseText' property from 'XMLHttpRequest': The value is only accessible if the object's 'responseType' is '' or 'text' (was '{}').", rt.name())));
+        return Err(d.dom_err_s(s, "InvalidStateError", &format!("Failed to read the 'responseText' property from 'XMLHttpRequest': The value is only accessible if the object's 'responseType' is '' or 'text' (was '{}').", rt.name())));
     }
-    d.response_text_of(it, x)
+    d.response_text_of(s, x)
 }
 
-fn response(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let x = d.xo(it, this)?;
+fn response<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let x = d.xo(s, this)?;
     let (rt, state, cache) = d.xs(x, |x| (x.rt, x.state, x.cache.as_ref().map(|c| *c.raw())));
     match rt {
-        Rt::Empty | Rt::Text => d.response_text_of(it, x),
-        _ if state != DONE => Ok(Value::Null),
-        _ if cache.is_some() => Ok(cache.expect("some")),
+        Rt::Empty | Rt::Text => d.response_text_of(s, x),
+        _ if state != DONE => Ok(s.null()),
+        _ if cache.is_some() => Ok(s.engine().raw_local(&cache.expect("some"))),
         _ => {
-            let Some(body) = d.xs(x, |x| x.resp.as_ref().map(|r| r.body.clone())) else { return Ok(Value::Null) };
-            it.charge((body.len() / 64) as u64)?;
+            let Some(body) = d.xs(x, |x| x.resp.as_ref().map(|r| r.body.clone())) else { return Ok(s.null()) };
+            s.charge((body.len() / 64) as u64)?;
             let v = match rt {
-                Rt::Buffer => it.new_array_buffer(body.to_vec())?,
-                Rt::Blob => crate::browser_web::blob_from_bytes(d, it, body.to_vec(), essence(&d.final_mime(x)))?,
+                Rt::Buffer => s.new_array_buffer(body.to_vec())?,
+                Rt::Blob => old_v(s, |it| crate::browser_web::blob_from_bytes(d, it, body.to_vec(), essence(&d.final_mime(x))))?,
                 _ => {
-                    let text = d.response_text_of(it, x)?;
-                    let Some(parse) = d.fetch.json_parse.get().map(|p| it.persistent_value(p)) else { return Err(Error::Unsupported(unsupported("XMLHttpRequest json without JSON.parse"))) };
-                    it.charge((body.len() / 16) as u64)?;
-                    return match it.call(parse, Value::Undefined, &[text]) {
-                        Err(Error::Throw(_)) => Ok(Value::Null),
+                    let text = d.response_text_of(s, x)?;
+                    let Some(parse) = d.fetch.json_parse.get() else { return Err(unsupp("XMLHttpRequest json without JSON.parse")) };
+                    let parse = s.local(parse);
+                    s.charge((body.len() / 16) as u64)?;
+                    let undef = s.undefined();
+                    return match s.call(parse, undef, &[text]) {
+                        Err(bare_js_api::Error::Throw(_)) => Ok(s.null()),
                         r => r,
                     };
                 }
             };
-            let c = it.trace_value(v);
+            let c = s.trace_ref(v);
             d.xs(x, |x| x.cache = Some(c));
             Ok(v)
         }
@@ -905,28 +914,30 @@ fn resp_of(status: u16, url: &Url, headers: Vec<(String, String)>, body: Vec<u8>
 
 // ------------------------------------------------------------------------------------ install
 
-fn xh_get<const N: usize>(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let t = d.xhr_target(it, this)?;
-    Ok(handler_get(d, it, t, TYPES[N]))
+fn xh_get<'s, const N: usize>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let t = d.xhr_target(s, this)?;
+    old_v(s, |it| Ok(handler_get(d, it, t, TYPES[N])))
 }
 
-fn xh_set<const N: usize>(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let t = d.xhr_target(it, this)?;
-    handler_set(d, it, t, TYPES[N], a.first().copied())?;
-    Ok(Value::Undefined)
+fn xh_set<'s, const N: usize>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let t = d.xhr_target(s, this)?;
+    let v = raw_arg(s, a, 0);
+    old(s, |it| handler_set(d, it, t, TYPES[N], v))?;
+    Ok(s.undefined())
 }
 
 /// The globals are accessors until one is read. A call with an argument is the setter.
-fn lazy<const I: usize>(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
-    let g = *d.global.get().expect("installed");
-    let k = d.key(it, NAMES[I])?;
-    if let Some(&v) = a.first() {
-        it.define_data(g, k, v, true, false, true)?;
-        return Ok(Value::Undefined);
+fn lazy<'s, const I: usize>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let g = s.global();
+    let attrs = Attrs { writable: true, enumerable: false, configurable: true };
+    if let Some(v) = a.get(0) {
+        s.define_str(g, NAMES[I], v, attrs)?;
+        return Ok(s.undefined());
     }
-    let m = made(d, it)?;
-    it.define_data(g, k, Value::Object(m.ctors[I]), true, false, true)?;
-    Ok(Value::Object(m.ctors[I]))
+    let m = old(s, |it| made(d, it))?;
+    let ctor = d.obj_local(s, m.ctors[I]);
+    s.define_str(g, NAMES[I], ctor, attrs)?;
+    Ok(ctor)
 }
 
 fn made(d: &Dom, it: &mut Interp<'_>) -> R<Made> {
@@ -940,41 +951,40 @@ fn made(d: &Dom, it: &mut Interp<'_>) -> R<Made> {
 #[cold]
 #[inline(never)]
 fn make(d: &Dom, it: &mut Interp<'_>) -> R<Made> {
-    let g = *d.global.get().expect("installed");
     let (et, ev) = (d.p().et, d.p().event);
     let xet = d.obj(it, et)?;
     // `XMLHttpRequest` and `XMLHttpRequestUpload` inherit from `XMLHttpRequestEventTarget`.
     let (xp, up, pp) = (d.obj(it, xet)?, d.obj(it, xet)?, d.obj(it, ev)?);
-    let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
-    let handlers: [H; 4] = [xhr_ctor, illegal, illegal, progress_ctor];
+    let handlers: [HS; 4] = [xhr_ctor, illegal, illegal, progress_ctor];
     let protos = [xp, xet, up, pp];
     let mut ctors = [xet; 4];
-    for (i, name) in NAMES.iter().enumerate() {
-        let p = protos[i];
-        let f = d.add_fn(it, handlers[i], name, u32::from(i == 3), true)?;
-        it.define_data(f, kp, Value::Object(p), false, false, false)?;
-        it.define_data(p, kc, Value::Object(f), true, false, true)?;
-        let (ks, kt) = (d.key(it, "Symbol")?, d.key(it, "toStringTag")?);
-        let sy = it.get_value(Value::Object(g), ks)?;
-        if let Value::Symbol(s) = it.get_value(sy, kt)? {
-            let t = d.js_str(it, name)?;
-            it.define_data(p, PropertyKey::Symbol(s), t, false, false, true)?;
+    run(it, |s| {
+        let tag = s.intrinsic(Intrinsic::SymbolToStringTag);
+        for (i, name) in NAMES.iter().enumerate() {
+            let f = d.add_fn_s(s, handlers[i], name, u32::from(i == 3), HostFn::Ctor)?;
+            let p = d.obj_local(s, protos[i]);
+            s.define_str(f, "prototype", p, Attrs { writable: false, enumerable: false, configurable: false })?;
+            s.define_str(p, "constructor", f, Attrs { writable: true, enumerable: false, configurable: true })?;
+            let t = s.string(name)?;
+            s.define(p, tag, t, Attrs { writable: false, enumerable: false, configurable: true })?;
+            ctors[i] = obj_id(s, f).expect("a function");
         }
-        ctors[i] = f;
-    }
-    for (n, v) in ["UNSENT", "OPENED", "HEADERS_RECEIVED", "LOADING", "DONE"].into_iter().enumerate() {
-        let k = d.key(it, v)?;
-        for o in [ctors[0], xp] {
-            it.define_data(o, k, Value::Number(n as f64), false, true, false)?;
+        for (n, v) in ["UNSENT", "OPENED", "HEADERS_RECEIVED", "LOADING", "DONE"].into_iter().enumerate() {
+            let num = s.number(n as f64);
+            for o in [ctors[0], xp] {
+                let o = d.obj_local(s, o);
+                s.define_str(o, v, num, Attrs { writable: false, enumerable: true, configurable: false })?;
+            }
         }
-    }
-    let gets: [H; 8] = [xh_get::<0>, xh_get::<1>, xh_get::<2>, xh_get::<3>, xh_get::<4>, xh_get::<5>, xh_get::<6>, xh_get::<7>];
-    let sets: [H; 8] = [xh_set::<0>, xh_set::<1>, xh_set::<2>, xh_set::<3>, xh_set::<4>, xh_set::<5>, xh_set::<6>, xh_set::<7>];
+        Ok(())
+    })?;
+    let gets: [HS; 8] = [xh_get::<0>, xh_get::<1>, xh_get::<2>, xh_get::<3>, xh_get::<4>, xh_get::<5>, xh_get::<6>, xh_get::<7>];
+    let sets: [HS; 8] = [xh_set::<0>, xh_set::<1>, xh_set::<2>, xh_set::<3>, xh_set::<4>, xh_set::<5>, xh_set::<6>, xh_set::<7>];
     for n in 0..8 {
-        d.def_get(it, if n == 0 { xp } else { xet }, &format!("on{}", TYPES[n]), gets[n], Some(sets[n]))?;
+        d.def_get_s(it, if n == 0 { xp } else { xet }, &format!("on{}", TYPES[n]), gets[n], Some(sets[n]))?;
     }
     for (name, len, h) in [
-        ("open", 2, open as H),
+        ("open", 2, open as HS),
         ("setRequestHeader", 2, set_request_header),
         ("send", 0, send),
         ("abort", 0, abort),
@@ -982,24 +992,24 @@ fn make(d: &Dom, it: &mut Interp<'_>) -> R<Made> {
         ("getAllResponseHeaders", 0, get_all_response_headers),
         ("overrideMimeType", 1, override_mime_type),
     ] {
-        d.def_method(it, xp, name, len, h)?;
+        d.def_method_s(it, xp, name, len, h)?;
     }
     for (name, get, set) in [
-        ("readyState", ready_state as H, None),
+        ("readyState", ready_state as HS, None),
         ("status", status, None),
         ("statusText", status_text, None),
         ("responseURL", response_url, None),
         ("responseText", response_text, None),
         ("response", response, None),
         ("upload", upload, None),
-        ("responseType", response_type, Some(set_response_type as H)),
-        ("timeout", timeout, Some(set_timeout as H)),
-        ("withCredentials", with_credentials, Some(set_with_credentials as H)),
+        ("responseType", response_type, Some(set_response_type as HS)),
+        ("timeout", timeout, Some(set_timeout as HS)),
+        ("withCredentials", with_credentials, Some(set_with_credentials as HS)),
     ] {
-        d.def_get(it, xp, name, get, set)?;
+        d.def_get_s(it, xp, name, get, set)?;
     }
-    for (name, get) in [("loaded", prog_loaded as H), ("total", prog_total), ("lengthComputable", prog_computable)] {
-        d.def_get(it, pp, name, get, None)?;
+    for (name, get) in [("loaded", prog_loaded as HS), ("total", prog_total), ("lengthComputable", prog_computable)] {
+        d.def_get_s(it, pp, name, get, None)?;
     }
     let m = Made { protos, ctors };
     *d.xhr.held.borrow_mut() = protos.into_iter().chain(ctors).map(|o| it.persist_value(Value::Object(o))).collect();
@@ -1008,15 +1018,13 @@ fn make(d: &Dom, it: &mut Interp<'_>) -> R<Made> {
 }
 
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    let g = *d.global.get().expect("installed");
-    let hs: [H; 4] = [lazy::<0>, lazy::<1>, lazy::<2>, lazy::<3>];
-    for (name, h) in NAMES.into_iter().zip(hs) {
-        let key = d.key(it, name)?;
-        let f = d.add_fn(it, h, name, 0, false)?;
-        let desc = PropertyDescriptor { get: Some(Some(f)), set: Some(Some(f)), enumerable: Some(false), configurable: Some(true), ..Default::default() };
-        if let Err(e) = it.heap.define_own_property(g, key, &desc) {
-            return Err(it.heap_error(e));
+    run(it, |s| {
+        let g = s.global();
+        let hs: [HS; 4] = [lazy::<0>, lazy::<1>, lazy::<2>, lazy::<3>];
+        for (name, h) in NAMES.into_iter().zip(hs) {
+            let f = d.add_fn_s(s, h, name, 0, HostFn::Method)?;
+            s.define_accessor_str(g, name, Some(f), Some(f), Attrs { writable: false, enumerable: false, configurable: true })?;
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
