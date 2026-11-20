@@ -1,5 +1,5 @@
 # JavaScript: the new engine (docs/design-engine-rewrite.md, docs/plan-engine-rewrite.md). It runs no scripts yet.
-# Only the `value`, `cell`, `heap`, `string`, `atoms`, `shapes` and `gc` modules may hold `unsafe` code; CI runs them under Miri.
+# Only the `cell`, `heap`, `string`, `atoms`, `shapes`, `object` and `gc` modules may hold `unsafe` code; CI runs them under Miri.
 [package]
 name = "bare-js2"
 version.workspace = true

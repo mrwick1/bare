@@ -1,8 +1,10 @@
-// Tests of `gc.rs`. Miri runs them in CI, so the counts shrink under it. The objects are the stub layout of the collector: a
-// header and N value slots. Their shape has the N keys `k0`, `k1`, ... as data properties, so it has N slots.
+// Tests of `gc.rs`. Miri runs them in CI, so the counts shrink under it. The objects are real (`object.rs`): the shape of an object of
+// N slots has the N keys `k0`, `k1`, ... as data properties and 8 inline slots, so up to 8 slots are in the cell and the rest in an
+// overflow record. `get` and `set` are for the inline slots (`i < 8`); `Realm::get` and `Realm::set` reach any slot.
 use super::*;
 use crate::atoms::SharedAtoms;
 use crate::heap::{BLOCK, POOL_KEEP};
+use crate::object::Obj;
 use crate::shapes::{A_C, A_E, A_W, MAX_PROPS, ShapeId};
 use crate::string::Chars;
 use crate::value::Kind;
@@ -82,7 +84,7 @@ impl Realm {
     /// dictionary shape of its own when `n` is over `MAX_PROPS`. `dict` asks for a dictionary shape in any case.
     fn new_shape(&mut self, n: usize, dict: bool) -> ShapeId {
         let keys = self.keys(n);
-        let root = self.shapes.root(Layout::Object, None, 4);
+        let root = self.shapes.root(Layout::Object, None, 8);
         if n > MAX_PROPS || dict {
             let d = self.shapes.to_dict(root);
             keys.iter().for_each(|&k| {
@@ -104,29 +106,29 @@ impl Realm {
         }
         let r = self.new_shape(n, false);
         self.by_slots[n] = Some(r);
-        let pin = self.make(r, n);
+        let pin = self.make(r);
         self.pins.push(ov(pin));
         r
     }
 
-    fn make(&mut self, r: ShapeId, n: usize) -> NonNull<u8> {
-        let p = self.heap.alloc((CellHeader::SIZE + 8 * n).max(16)).unwrap();
-        // SAFETY: a new cell with room for the header.
-        unsafe { p.cast::<CellHeader>().write(self.shapes.header(r)) };
-        (0..n).for_each(|i| set(p, i, Value::UNDEFINED));
-        p
+    fn make(&mut self, r: ShapeId) -> NonNull<u8> {
+        Obj::new(&mut self.heap, &self.shapes, r).unwrap().cell()
+    }
+
+    fn set(&self, p: NonNull<u8>, i: usize, v: Value) {
+        Obj::from_cell(p).set_slot(&self.shapes, i as u32, v)
     }
 
     /// An object with `n` slots, all `undefined`.
     fn obj(&mut self, n: usize) -> NonNull<u8> {
         let r = self.shape(n);
-        self.make(r, n)
+        self.make(r)
     }
 
     /// An object with `n` slots and a dictionary shape of its own (no other object has its shape).
     fn own(&mut self, n: usize) -> NonNull<u8> {
         let r = self.new_shape(n, true);
-        self.make(r, n)
+        self.make(r)
     }
 
     /// A weak table of `len` empty entries.
@@ -204,11 +206,12 @@ fn a_cycle_is_marked_once_and_dies_with_no_root() {
 }
 
 #[test]
-fn a_long_chain_needs_one_chunk_and_a_wide_object_needs_one_entry_for_each_edge() {
+fn a_long_chain_needs_one_chunk_and_a_wide_object_is_scanned_in_slices() {
     let mut r = Realm::new();
-    let w = if MIRI { 2 } else { 5 } * CHUNK + 10;
-    let chunks = w.div_ceil(CHUNK);
+    let w = if MIRI { 4 } else { 16 } * SLICE + 10;
+    // The pinned object of `w` slots has a long record too: one range waits (24 bytes) in every collection of this test.
     r.shape(w);
+    r.shape(SLICE / 2);
     let base = r.base();
     let n = if MIRI { 300 } else { 200_000 };
     let head = r.obj(1);
@@ -220,26 +223,40 @@ fn a_long_chain_needs_one_chunk_and_a_wide_object_needs_one_entry_for_each_edge(
     }
     let s = r.collect(&[ov(head)]);
     assert_eq!(s.marked, base.marked + n as u64);
-    assert_eq!(s.work_bytes, CHUNK * 8);
+    assert_eq!(s.work_bytes, CHUNK * 8 + 24);
 
+    // The wide object has an overflow record of `w - 8` values. The marker scans it `SLICE` values at a time, so the work list holds
+    // at most `SLICE` cells (4 chunks, and the spare chunk) and two ranges wait (48 bytes: this record and the pinned one), however
+    // many edges the record has. Without slices it would hold `w` entries.
+    let slice_peak = (SLICE / CHUNK + 1) * CHUNK * 8 + 48;
     let wide = r.obj(w);
     for i in 0..w {
         let c = r.obj(1);
-        set(wide, i, ov(c));
+        r.set(wide, i, ov(c));
     }
     let s = r.collect(&[ov(wide)]);
-    assert_eq!(s.marked, base.marked + w as u64 + 1);
-    assert_eq!(s.work_bytes, chunks * CHUNK * 8);
+    assert_eq!(s.marked, base.marked + w as u64 + 2);
+    assert!(s.work_bytes >= SLICE * 8 && s.work_bytes <= slice_peak && slice_peak < w * 8, "{} bytes", s.work_bytes);
 
-    // A leaf is marked and never pushed: the same object with strings in its slots needs the one chunk for the object itself.
+    // A leaf is marked and never pushed: with strings in its slots the object needs one entry for the record, and one range waits.
     let wide = r.obj(w);
     for i in 0..w {
         let s = Str::from_str(&mut r.heap, "a leaf string").unwrap();
-        set(wide, i, s.value());
+        r.set(wide, i, s.value());
     }
     let s = r.collect(&[ov(wide)]);
-    assert_eq!(s.marked, base.marked + w as u64 + 1);
-    assert_eq!(s.work_bytes, CHUNK * 8);
+    assert_eq!(s.marked, base.marked + w as u64 + 2);
+    assert_eq!(s.work_bytes, CHUNK * 8 + 48);
+
+    // A record of up to `SLICE` values waits for nothing.
+    let narrow = r.obj(SLICE / 2);
+    for i in 0..SLICE / 2 {
+        let c = r.obj(1);
+        r.set(narrow, i, ov(c));
+    }
+    let s = r.collect(&[ov(narrow)]);
+    assert_eq!(s.marked, base.marked + SLICE as u64 / 2 + 2);
+    assert!(s.work_bytes >= SLICE / 2 * 8 && s.work_bytes <= (SLICE / 2 / CHUNK + 1) * CHUNK * 8 + 24, "{} bytes", s.work_bytes);
 }
 
 #[test]
@@ -431,7 +448,7 @@ fn a_prototype_that_only_a_shape_holds_survives() {
     let k = r.keys(1);
     let root = r.shapes.root(Layout::Object, Some(proto), 4);
     let shape = r.shapes.add(root, k[0], WRITE).unwrap();
-    let o = r.make(shape, 1);
+    let o = r.make(shape);
     let s = r.collect(&[ov(o)]);
     // The object, its prototype, and what the prototype names.
     assert_eq!(s.marked, base.marked + 3);
@@ -439,7 +456,7 @@ fn a_prototype_that_only_a_shape_holds_survives() {
     assert!(!fresh.contains(&proto) && !fresh.contains(&child));
     assert_eq!(get(proto, 0), ov(child));
     // Many objects of one shape make the prototype one entry of the work list, and the shape stays after the collection.
-    let many: Vec<Value> = (0..20).map(|_| ov(r.make(shape, 1))).collect();
+    let many: Vec<Value> = (0..20).map(|_| ov(r.make(shape))).collect();
     assert_eq!(r.collect(&many).marked, base.marked + 22);
     assert_eq!(r.shapes.get(shape).proto(), Some(proto));
     // With no object, the shape goes and so does the prototype.
@@ -457,7 +474,7 @@ fn a_shape_that_no_marked_cell_uses_is_freed_and_its_id_is_reused() {
     let live = r.shapes.add(a, live_key, WRITE).unwrap();
     // A branch of the tree: its table is its own, and its key is in no other shape.
     let dead = r.shapes.add(root, dead_key, WRITE).unwrap();
-    let (kept, gone) = (r.make(live, 2), r.make(dead, 1));
+    let (kept, gone) = (r.make(live), r.make(dead));
     let (count, epoch) = (r.shapes.count(), r.shapes.epoch());
     let _ = gone;
     let s = r.collect(&[ov(kept)]);
@@ -472,7 +489,7 @@ fn a_shape_that_no_marked_cell_uses_is_freed_and_its_id_is_reused() {
     let next = r.shapes.add(root, k[0], A_W).unwrap();
     assert_eq!(next, dead);
     // A collection that frees nothing keeps the epoch.
-    let reuse = r.make(next, 1);
+    let reuse = r.make(next);
     let epoch = r.shapes.epoch();
     r.collect(&[ov(kept), ov(reuse)]);
     assert_eq!(r.shapes.epoch(), epoch);

@@ -1,7 +1,8 @@
 //! The header at the start of every heap cell (`docs/design-engine-rewrite.md` 6.11 item 12), 8 bytes.
 //!
 //! The header is two 32-bit words (plan step S1.4 chose this form over a raw 8-byte shape pointer; `docs/progress.md`, 2026-11-20):
-//! - `shape`: the id of the shape of an object, an index into [`crate::shapes::Shapes`]. A string has shape 0.
+//! - `shape`: the id of the shape of an object, an index into [`crate::shapes::Shapes`]. A string has shape 0. A record of
+//!   `object.rs` (`Slots`, `Elements`) has no shape: the word holds its capacity.
 //! - `bits`: the layout code in the low 8 bits and 24 flag bits above it. A cell can change its flags (an atom mark, a rope that
 //!   becomes `Indirect`) with no change of shape.
 //!
@@ -29,6 +30,12 @@ pub enum Layout {
     Object = 16,
     /// A weak table (a `WeakMap` or `WeakSet`): entries of a weak key and a value. The collector treats it as an ephemeron table.
     WeakTable = 17,
+    /// An object with an elements word after the header (an array, `arguments`): see `object.rs`.
+    Indexed = 18,
+    /// A record of values that holds the slots of an object past its inline slots (`object.rs`). The header holds its capacity.
+    Slots = 19,
+    /// A record of the indexed elements of an object (`object.rs`). The header holds its capacity.
+    Elements = 20,
 }
 
 impl Layout {
@@ -41,6 +48,9 @@ impl Layout {
             4 => Layout::Indirect,
             16 => Layout::Object,
             17 => Layout::WeakTable,
+            18 => Layout::Indexed,
+            19 => Layout::Slots,
+            20 => Layout::Elements,
             // A header of this crate never holds another code.
             _ => unreachable!(),
         }
@@ -96,6 +106,20 @@ impl CellHeader {
     pub(crate) fn object(shape: u32, layout: Layout, flags: u32) -> CellHeader {
         debug_assert!(flags <= FLAG_MAX);
         CellHeader { shape, bits: flags << 8 | layout as u32 }
+    }
+
+    /// The header of a record cell (`Slots`, `Elements`): it has no shape, so the shape word holds its capacity in values.
+    #[inline]
+    pub(crate) fn record(layout: Layout, flags: u32, cap: u32) -> CellHeader {
+        debug_assert!(flags <= FLAG_MAX && matches!(layout, Layout::Slots | Layout::Elements));
+        CellHeader { shape: cap, bits: flags << 8 | layout as u32 }
+    }
+
+    /// The capacity in values of a record header made by [`CellHeader::record`].
+    #[inline]
+    pub(crate) fn cap(self) -> u32 {
+        debug_assert!(matches!(self.layout(), Layout::Slots | Layout::Elements));
+        self.shape
     }
 
     /// The shape id of the cell: 0 for a string.
