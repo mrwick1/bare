@@ -1033,6 +1033,8 @@ fn a_frozen_global_object_stops_the_stores_of_the_sites() {
     let mut vm = load_with(&format!("'use strict'; {host}"), "'use strict'; var t; try { wf(9); } catch (e) { t = e.name; }").unwrap();
     // The `var t` of the script is not possible on a frozen object, so the script cannot report: the throw is the exit.
     assert!(vm.run_main(0).is_err() || vm.global_text("fz") == "3");
+}
+
 // ---- Lazy compile of the functions of a user script (`Lazy`, `Op::Lazy`): a function is compiled at its first call.
 
 #[test]
