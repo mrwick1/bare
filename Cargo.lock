@@ -157,6 +157,7 @@ name = "bare-js2"
 version = "0.1.0"
 dependencies = [
  "bare-os",
+ "icu_properties",
 ]
 
 [[package]]

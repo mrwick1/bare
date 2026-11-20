@@ -14939,3 +14939,34 @@ Cost of the trigger on the allocation fast path (`crates/js2/examples/heap_load.
 - `task` mode (new): 20,000,000 objects of 2 slots through `alloc_in_task`, the last 1,000 in a native frame, the trigger collects (38 collections): 67.2 instructions per allocation, of which the loop itself (shape header, 3 stores, the frame write) is most. `perf record` (1 run): `finish_mark`, `Marker::cell`, `alloc_slow` and `sweep` together are 0.9% of the samples. A collection costs little here because only 1,000 objects are live; this row does not size the root walk of a deep stack. `alloc_in_task` and `Frames::regs` are not inlined across crates without `#[inline]`: the first build of the row had 106 instructions per allocation for that reason; both are `#[inline]` now.
 
 Not tested: a real interpreter, compiler root maps or deep stacks (S2); a collection that a host function causes while JS frames are below it (the handle scopes of design 6.8 are one native frame here); the cost of a walk of a deep stack; the trigger on `eval_load throws` or on the journeys (the new engine runs no script, so the peak of 16 MiB there is arithmetic); a second realm; arm64; the cost matrix (js2 is not wired into the browser); wall time.
+
+## 2026-11-20: lexer in js2 (plan step S2.1)
+
+`bare-js2` has the lexer (`crates/js2/src/lex.rs`, tests in `lex_tests.rs`; design 6.9 item 9). It is the streaming lexer of `crates/js/src/lex.rs` with the same token type, goals, errors and decode helpers. A token is 12 bytes: a kind, a byte span into the source and two flags. The lexer borrows the source and never allocates while it scans. Base: origin/main `e36a8dd4`. `crates/js` is not changed.
+
+Decision: the lexer gives spans, and the S2.5 compiler makes atoms. Reasons: (1) The lexer has no heap and no `Atoms`. With `Atoms` it would need `&mut Heap` and a realm, and an allocation failure path (`R<Str>`), in a loop that is allocation-free today (`lex_load` checks 0 allocations). (2) The grammar will also run in check-only mode (design 6.9 item 9) and skip nested functions. Most identifiers in such a text are never used as names, so interning them in the lexer is work that nothing needs. The compiler knows which names it needs (and a token with no escape is already a `&str` slice, `ident_name`). (3) `SharedAtoms::intern` takes a mutex. The compiler can intern once for each distinct name of a function, not once for each token. (4) A string literal can hold lone surrogates, so its value is `Vec<u16>` (`decode_string`), not text. The compiler decides which of them are keys (atoms) and which are only values. Cost of the choice: the compiler hashes a name that the lexer has already scanned. `Chars::One` takes a `&[u8]`, so a name with no escape can be passed as a slice of the source (to verify in S2.5).
+
+What changed in the copy, and why:
+- `use crate::number` is gone: `crates/js2` must not depend on `crates/js`. The three functions the lexer uses (`decimal_value`, `separated_decimal_value`, `reduce` with its helpers, about 110 lines of `number.rs`) are copied into `lex.rs` as private items. `decimal_units_value` (used only by the JSON parser) is not copied. When S2 gets a `Number(string)` conversion, it can take these from `lex.rs`.
+- `icu_properties` (version, features and `compiled_data` as in `bare-js`) is a dependency of `bare-js2` for ID_Start and ID_Continue. Because of it the `license` field of `bare-js2` is now `(MIT OR Apache-2.0) AND Unicode-3.0` (the `bare-js` string without its `BSD-3-Clause` part; I did not check where that part comes from). `Cargo.lock` gets one line. `--locked` needs this line.
+- The 31 tests moved to `lex_tests.rs` (`#[path]` module, as `atoms_tests.rs`), with one level less indent. No test changed.
+- `crates/js2/examples/lex_load.rs` and `lex_check.rs` are copies with `bare_js2::lex`. `tools/js_lex_load.sh` and `tools/js_lex_check.sh` take `LEX_PKG=bare-js2` and honour `CARGO_TARGET_DIR`. Default is unchanged.
+- No `unsafe` in `lex.rs`: `#![deny(unsafe_code)]` of the crate holds, and the module has no `allow`. The old lexer has none either, so no measured gain was needed.
+
+Checks:
+- Tests: 31 of 31 lexer tests pass (the old module has 31). `bare-js2` has 113: Linux 113 pass; Windows 11 VM: 31 lexer tests pass (`cargo xwin test --no-run`, exe copied to the VM and run with the filter `lex`; the other 82 were not run there this time). `cargo clippy -p bare-js2 --all-targets` shows no finding in `lex.rs` or the two examples.
+- Oracle: `tools/js_lex_oracle.mjs` (Acorn from `/usr/share/cursor/resources/app/node_modules/acorn`, ecma2022 script) on 400 `.js` files (2 KiB to 3 MB; `next/dist/compiled` and the Cursor `node_modules`): the oracle parsed 388 (12 are module syntax or fail in Acorn script mode and were skipped). On those 388, `lex_check` of the old and the new lexer print identical lines (token count, FNV of the spans, `ok=true`), and neither fails.
+- `tools/js_lex_load.sh` rows, instructions:u (`perf stat`, one `lex_load` process per row with `runs=1`, 3 interleaved runs each, old then new, glibc `tcache_count=65535`, archMachine, AMD Ryzen 9 5900HX, release, the old and the new binaries from one target dir and one commit): the spread of both is under 0.00004% (about 1 to 3 thousand instructions) and the new row is lower by 1,800 to 2,900 instructions in each row (hypothesis: the smaller start of `bare-js2`; not checked). So the rows are equal. Medians, old | new:
+
+| Row | Scale 1 | Scale 10 | Scale 100 |
+| --- | ---: | ---: | ---: |
+| small | 111,404,426 \| 111,401,882 | 1,110,820,061 \| 1,110,817,320 | 11,105,338,821 \| 11,105,336,030 |
+| repeat | 51,857,801 \| 51,854,737 | 515,439,342 \| 515,436,943 | 5,151,814,030 \| 5,151,812,103 |
+| comments | 8,843,243 \| 8,840,292 | 85,748,032 \| 85,745,022 | 854,980,953 \| 854,977,884 |
+| strings | 17,313,306 \| 17,311,285 | 171,278,693 \| 171,275,928 | 1,711,492,077 \| 1,711,489,353 |
+| malformed | 82,186,612 \| 82,184,014 | 818,707,294 \| 818,704,775 | 8,185,094,456 \| 8,185,091,815 |
+| strings decode | 28,819,167 \| 28,816,380 | 287,217,220 \| 287,214,793 | 2,871,884,956 \| 2,871,882,626 |
+
+- Every row prints `allocs=0` and `ok=true`. Wall time at scale 1 `small`: 3.82 ms new, 3.85 ms old (1 run each, a loaded machine: not evidence).
+
+Not tested: wall time on an idle machine; the loader rows on Windows (only the unit tests ran there); the lexer under Miri; the cost matrix (js2 is not wired into the browser); a parser or compiler on top of it (S2.5); the size of the `bare-js2` binary with `icu_properties` (not measured); arm64.
