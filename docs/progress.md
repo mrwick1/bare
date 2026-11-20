@@ -16951,8 +16951,56 @@ Parse cost (instructions, `parse_load full|lazy file 1 PATH`, minimum of 3 runs,
 | `axios.js`      | 11,032,800 | 11,058,021 | 11,075,484 | +0.39% | +0.16% |
 | `prelude.js`    | 2,336,500 | 2,341,981 | 2,341,969 | +0.24% | 0.00% |
 
-(The minimum of the 3 runs; the spread is under 0.02%.) Lazy parse (the path of a compiled script): `lodash.js` +0.25% vs base, +0.01% vs #789; `reactdom.js` +0.09%, -0.12%; `clangd.js` +0.08%, -0.07%; `axios.js` +0.20%, +0.01%; `prelude.js` +0.08%, -0.13%. The check costs about 40 instructions for each byte of pattern (callgrind on the 44 patterns of `lodash.js` that a text search finds, 961 bytes: 905 instructions for a pattern). The full parse of `lodash.js` is +0.52% over the base, 0.02% over the limit of +0.5%, and the increase of this group alone is +0.22%. That row has the most regular expressions of the five. The lazy parse, which is the path of a compiled script, is +0.25% there. I did not lower the cost further.
+(The minimum of the 3 runs; the spread is under 0.02%.) Lazy parse (the path of a compiled script): `lodash.js` +0.25% vs base, +0.01% vs #789; `reactdom.js` +0.09%, -0.12%; `clangd.js` +0.08%, -0.07%; `axios.js` +0.20%, +0.01%; `prelude.js` +0.08%, -0.13%. The check costs about 40 instructions for each byte of pattern (callgrind on the 44 patterns of `lodash.js` that a text search finds, 961 bytes: 905 instructions for a pattern). The full parse of `lodash.js` is +0.52% over the base, 0.02% over the limit of +0.5%, and the increase of this group alone is +0.22%. That row has the most regular expressions of the five. The lazy parse, which is the path of a compiled script, is +0.25% there. The next paragraphs (cost round) lower the cost.
 
-Tests: `regexp_check_tests.rs` (10 tests: quantifiers, groups, ranges, escapes in `u` mode and without it, backreferences, named groups with duplicates in alternatives, modifiers, `u` with `v`); one test in `parse_tests.rs` checks that a bad literal fails in the full parse and in the pre-parse, also inside a function, an arrow and a class method. `cargo test --locked -p bare-js2 --lib`: 417 pass. `cargo test --locked -p bare-js-diff`: all pass. `tools/fixtures/js/test262-js2-baseline.txt` is regenerated.
+Tests: `regexp_check_tests.rs` (10 tests: quantifiers, groups, ranges, escapes in `u` mode and without it, backreferences, named groups with duplicates in alternatives, modifiers, `u` with `v`); one test in `parse_tests.rs` checks that a bad literal fails in the full parse and in the pre-parse, also inside a function, an arrow and a class method. `cargo test --locked -p bare-js2 --lib`: 417 pass (418 after the cost round). `cargo test --locked -p bare-js-diff`: all pass. `tools/fixtures/js/test262-js2-baseline.txt` is regenerated.
 
 Not tested: patterns with the `v` flag (accepted without a check), property names, a pattern with lone surrogates (the source is UTF-8), Windows and the browser.
+
+### Cost round of the regular expression check
+
+Task: `lodash.js` was +0.52% over the base at `codegen-units=1` (limit +0.5%). Make the check cheaper with a design that removes work. Trees: base `43b62b05`, #789 `ad895eae`, #790 `86ea9be3`, this change. Machine archMachine, rustc 1.96.0, instructions of `parse_load full|lazy file 1 PATH` by `tools/js/instr.sh` (minimum of 3 runs), each tree in its own `CARGO_TARGET_DIR`.
+
+Where the cost went (callgrind, `lodash.js`, `codegen-units=1`, symbols): the 39 literals hold 846 bytes of pattern. `check` cost 35,204 instructions (0.19% of the parse), 41 for each byte, and 900 for each pattern. There is no hot spot. The cost is the work for each term: a bounds-checked byte read, a `match` on the byte, an `Option`, a call or a return for each atom, group and class atom, and a `Path` for each alternative. `lex::regexp_parts` (one `memrchr` call to find the flags) added 4,400 (110 for each literal).
+
+Design: the checker is a recursive reader that has to keep state for names, groups and `\k`. A pattern with none of those needs none of that state. So `check` first runs `simple`: one pass over the bytes with a 256-entry table and three states (nothing to repeat, atom, quantifier), a depth counter for `(`, and no recursion, no stack and no allocation. It answers `true` only when it is sure that the pattern is valid, and `false` for an error or for a feature it does not read. Then the full check runs from the start, as before. `simple` reads: literals (also non-ASCII), `.`, `^`, `$`, `|`, groups `(`, `(?:`, `(?=`, `(?!`, quantifiers `* + ?` and `{n}`, `{n,}`, `{n,m}` with a lazy `?`, simple escapes, `\b`, `\B`, `\xHH`, `\uHHHH`, `\1` to `\9` and `\0` (without `u` a backreference is never an error: a number above the group count is an octal escape, so no count of groups is needed), and classes with literals, escapes and ranges of two characters (the value of each end is read, so `[\x00-\x2f]` is checked). It does not read: named groups, `(?<`, modifiers, `\k`, `\c`, `\p`, a `{` that is not a complete quantifier, a class escape at an end of a range, and any pattern with the flag `u` or `v`. The full check keeps three smaller fast paths for those patterns (a run of literals, a simple escape, and a run of class literals or a range of two literals), because `u` patterns still go there. `simple` has no error text: an error always comes from the full check, so the messages did not change.
+
+Correctness: the test `the_fast_path_accepts_only_what_the_full_check_accepts` makes 200,000 random patterns from 49 pieces (valid and invalid ones) and checks that whenever `simple` says yes the full check says yes (more than 5% of the patterns take the fast path). Against V8 (Deno 2.9.8) 450,000 new pairs (3 seeds, 150,000 each, 132 pieces, flags none, `u` and `i`; 31% accepted by both): 2 differences, both `\p{2}` with `u` (the property names are not checked; this is in "Not checked" above, and the full check gives the same answer on #790). 0 differences on all others. The five files parse without an error. In `lodash.js` all 39 literals take `simple` (checked with a print in a temporary build: 5 bailed with the first version).
+
+Result on `lodash.js`: `check` falls from 35,204 to 18,899 instructions (22 for each byte). With the first version of `simple` 5 of the 39 patterns bailed (they were the long ones: `\1`, `\xHH` and `\uHHHH` were not read); now none bails. I tried three more changes and dropped them because they gave under 2,000 instructions (0.01%): a run loop of literals inside `simple`, a byte loop from the end in `regexp_parts` instead of `rfind`, and checking the flags with a byte loop. Of these only the last stays (`flags.bytes().any`, replaces two `contains` calls). The rest of the cost is the fixed cost of each literal (about 200 instructions: `check_regexp`, `regexp_parts`, the flag scan and the call) and the table loop (about 13 for each byte); a lower cost needs the lexer to give the end of the pattern (a new field in `Token`, a hot type; not done).
+
+Ideas that I did not build, and why. (1) Dedupe by hash of the pattern: a hash reads each byte too (more than 5 instructions for each byte with any hash that is not trivial), and `lodash.js` has no repeated pattern; minified code repeats some, but the hash costs on all the others. (2) Check at the first evaluation of the literal: not correct for a script. `ParseScript` reports the early errors before any evaluation, so a script with `/(/` in a function that never runs must fail to parse. The negative `phase: parse` tests of `language/literals/regexp` check this, and they are the tests that this group moves from fail to pass. (3) A check outside the parser loop: `check_regexp` is already `#[inline(never)]`, so the codegen of `parse_primary` did not change.
+
+Parse cost, full parse (minimum of 3 runs; each row ran 3 times in this order and the spread is under 0.02%):
+
+| Row, `codegen-units=1` | Base | #789 | #790 | This change | vs base | vs #790 |
+| ---------------------- | ---: | ---: | ---: | ----------: | ------: | ------: |
+| `lodash.js`            | 18,054,358 | 18,110,914 | 18,148,441 | 18,134,439 | +0.44% | -0.08% |
+| `reactdom.js`          | 27,538,036 | 27,609,131 | 27,620,735 | 27,616,217 | +0.28% | -0.02% |
+| `clangd.js`            | 173,056,916 | 173,349,503 | 173,382,210 | 173,313,614 | +0.15% | -0.04% |
+| `axios.js`             | 11,032,810 | 11,057,646 | 11,075,186 | 11,068,441 | +0.32% | -0.06% |
+| `prelude.js`           | 2,335,535 | 2,341,386 | 2,341,155 | 2,341,421 | +0.25% | +0.01% |
+
+| Row, `codegen-units=1`, lazy | Base | #789 | #790 | This change | vs base | vs #790 |
+| ---------------------------- | ---: | ---: | ---: | ----------: | ------: | ------: |
+| `lodash.js`                  | 22,383,640 | 22,439,254 | 22,438,241 | 22,426,222 | +0.19% | -0.05% |
+| `reactdom.js`                | 33,753,638 | 33,825,003 | 33,786,655 | 33,780,388 | +0.08% | -0.02% |
+| `clangd.js`                  | 194,064,355 | 194,350,639 | 194,209,258 | 194,144,252 | +0.04% | -0.03% |
+| `axios.js`                   | 13,071,979 | 13,096,973 | 13,097,885 | 13,091,470 | +0.15% | -0.05% |
+| `prelude.js`                 | 2,716,710 | 2,722,344 | 2,718,813 | 2,718,640 | +0.07% | -0.01% |
+
+| Row, default build, full | Base | #789 | #790 | This change | vs base | vs #790 |
+| ------------------------ | ---: | ---: | ---: | ----------: | ------: | ------: |
+| `lodash.js`              | 17,800,238 | 17,842,925 | 18,039,015 | 18,024,741 | +1.26% | -0.08% |
+| `reactdom.js`            | 27,257,554 | 27,314,021 | 27,560,678 | 27,555,685 | +1.09% | -0.02% |
+| `clangd.js`              | 170,766,735 | 171,002,386 | 172,767,284 | 172,699,640 | +1.13% | -0.04% |
+| `axios.js`               | 10,919,713 | 10,939,571 | 11,052,447 | 11,045,724 | +1.15% | -0.06% |
+| `prelude.js`             | 2,317,483 | 2,322,053 | 2,338,614 | 2,338,379 | +0.90% | -0.01% |
+
+The lazy rows at the default build are +0.76% to +1.01% over the base (#790: +0.77% to +1.07%). By the standing rule (a row over +0.5% at the default build passes if it is within +0.5% at `codegen-units=1` on both trees) all rows pass: the worst is `lodash.js` full at +0.44%. The margin there is 0.06% (10,191 instructions). Of the +0.44%, #789 gives +0.31% (56,556 instructions) and this group +0.13% (23,525). The default build moves every row, also `prelude.js` which has no regular expression: the codegen split changed (see above).
+
+test262 (`TEST262=/data/claude-tmp/test262 tools/js/test262_js2.sh -j 4`, checkout at `e4fbf577`): this change passes 14,802, fails 2,982, skips 11,979, the same as `tools/fixtures/js/test262-js2-baseline.txt` (no directory differs). The per-test list (`new.txt`, 29,763 lines) is identical to the list of #790 built from `86ea9be3` (`diff` empty), so no passing test fails and no new test passes.
+
+Tests: `cargo test --locked -p bare-js2 --lib`: 418 pass (the new test above). `cargo test --locked -p bare-js-diff`: all pass.
+
+Not tested: Windows; the browser; the `v` flag; the `u` fast paths of the full check against real `u` patterns (only random pieces); the 3,744 npm files of #790 again (only the five files above); no V8 run of the patterns of the five files themselves (they take `simple`, which the random test covers by the rule "yes implies full yes"); a `Token` field for the end of the pattern (not built).

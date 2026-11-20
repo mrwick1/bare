@@ -139,3 +139,31 @@ fn flags_u_and_v_together_are_an_error_and_v_checks_only_the_brackets() {
     bad("(", "v");
     bad("\\a", "v");
 }
+
+/// The fast path may only accept what the full check accepts. Random patterns from a list of pieces: whenever `simple` says yes, `full` must too.
+#[test]
+fn the_fast_path_accepts_only_what_the_full_check_accepts() {
+    const PIECES: &[&str] = &[
+        "a", "b", "0", " ", ".", "^", "$", "|", "(", ")", "(?:", "(?=", "(?!", "(?<=", "(?<n>", "(?i:", "[", "]", "[^", "-", "a-z", "9-0", "*", "+", "?", "{", "}",
+        "{2}", "{2,}", "{2,1}", "{,2}", "\\", "\\d", "\\b", "\\B", "\\1", "\\k<n>", "\\k", "\\x41", "\\u0041", "\\c", "\\0", "\\-", "\\/", "\\]",
+        "\\p{L}", "\\.", "é", "\u{1F600}",
+    ];
+    let mut x = 0x9E37_79B9_7F4A_7C15u64;
+    let mut next = move || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x
+    };
+    let (mut fast, mut total) = (0, 0);
+    for _ in 0..200_000 {
+        let n = 1 + next() % 10;
+        let p: String = (0..n).map(|_| PIECES[(next() % PIECES.len() as u64) as usize]).collect();
+        total += 1;
+        if super::simple(p.as_bytes()) {
+            fast += 1;
+            assert_eq!(super::full(&p, false, false), Ok(()), "the fast path accepted /{p}/ and the full check did not");
+        }
+    }
+    assert!(fast > total / 20, "the fast path took only {fast} of {total}");
+}

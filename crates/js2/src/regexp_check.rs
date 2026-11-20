@@ -57,10 +57,18 @@ struct Checker<'a> {
 
 /// Check `pattern` (the text between the slashes) with `flags` (the text after them, already valid: no repeat, only `dgimsuvy`).
 pub fn check(pattern: &str, flags: &str) -> R<()> {
-    let (u, v) = (flags.contains('u'), flags.contains('v'));
+    let (u, v) = (flags.bytes().any(|c| c == b'u'), flags.bytes().any(|c| c == b'v'));
     if u && v {
         return Err("the regular expression flags 'u' and 'v' cannot be used together");
     }
+    if !(u || v) && simple(pattern.as_bytes()) {
+        return Ok(());
+    }
+    full(pattern, u, v)
+}
+
+/// The full check, with no fast path.
+fn full(pattern: &str, u: bool, v: bool) -> R<()> {
     let mut c = Checker {
         s: pattern, i: 0, uni: u || v, vsets: v, depth: 0, disjunctions: 0, groups: 0, max_backref: 0, named: false, bare_k: false,
         names: Vec::new(), refs: Vec::new(), trail: None,
@@ -83,6 +91,172 @@ pub fn check(pattern: &str, flags: &str) -> R<()> {
         }
     }
     Ok(())
+}
+
+/// Byte classes for the fast paths (bit 1: a literal outside a class; bit 2: a literal in a class; bit 4: `\\X` is a valid escape of one
+/// character in every mode, outside a class and in it; bit 8: the same, in a class only). A literal is ASCII and has no meaning of its own:
+/// reading it changes no state of the checker, and the only thing that can follow it is a quantifier.
+static CLASS: [u8; 256] = {
+    let mut t = [0u8; 256];
+    let mut i = 0;
+    while i < 128 {
+        let c = i as u8;
+        if !matches!(c, b'^' | b'$' | b'*' | b'+' | b'?' | b'{' | b'}' | b'[' | b']' | b'(' | b')' | b'\\' | b'|') {
+            t[i] |= 1;
+        }
+        if !matches!(c, b'\\' | b']' | b'-') {
+            t[i] |= 2;
+        }
+        i += 1;
+    }
+    let both = b"dDsSwWfnrtv^$\\.*+?()[]{}|/";
+    let mut k = 0;
+    while k < both.len() {
+        t[both[k] as usize] |= 4;
+        k += 1;
+    }
+    t[b'b' as usize] |= 8;
+    t[b'-' as usize] |= 8;
+    t
+};
+
+/// `n` hex digits at `i` (`\\xHH` and `\\uHHHH`): their value.
+fn hex_at(b: &[u8], i: usize, n: usize) -> Option<u32> {
+    b.get(i..i + n)?.iter().try_fold(0, |v, &d| Some(v * 16 + hex(d)?))
+}
+
+/// The fast path for the common pattern with `u` and `v` off: one pass with a table and three states, no recursion and no stack. It answers
+/// `true` only when the pattern is certainly valid (the same answer as the full check) and `false` when it is not sure: for an error or for a
+/// feature it does not read (named groups, modifiers, lookbehind, `\k`, `\c`, `\p`, a `{` that is not a complete quantifier, a class escape
+/// that starts or ends a range). Then the full check runs from the start. Without `u` a backreference is never an error (a number above the
+/// number of groups is an octal escape), so `\1` needs no count of groups.
+fn simple(b: &[u8]) -> bool {
+    // What the last item allows: nothing to repeat (the start, `(`, `|`, `^`, `$`, `\b`, a lazy quantifier), an atom, a quantifier (only `?`
+    // may follow, once).
+    const NONE: u8 = 0;
+    const ATOM: u8 = 1;
+    const QUANT: u8 = 2;
+    let (mut i, mut depth, mut st) = (0, 0u32, NONE);
+    while let Some(&c) = b.get(i) {
+        i += 1;
+        if CLASS[c as usize] & 1 != 0 || c >= 0x80 {
+            st = ATOM;
+            continue;
+        }
+        match c {
+            b'*' | b'+' | b'?' => {
+                st = match (st, c) {
+                    (ATOM, _) => QUANT,
+                    (QUANT, b'?') => NONE,
+                    _ => return false,
+                }
+            }
+            b'{' if st == ATOM => {
+                let num = |i: &mut usize| {
+                    let s = *i;
+                    let mut n = 0u64;
+                    while let Some(d) = b.get(*i).filter(|d| d.is_ascii_digit()) {
+                        n = n * 10 + (d - b'0') as u64;
+                        *i += 1;
+                    }
+                    (*i > s && *i - s < 19).then_some(n)
+                };
+                let Some(lo) = num(&mut i) else { return false };
+                let mut hi = lo;
+                if b.get(i) == Some(&b',') {
+                    i += 1;
+                    hi = if b.get(i) == Some(&b'}') { u64::MAX } else if let Some(h) = num(&mut i) { h } else { return false };
+                }
+                if b.get(i) != Some(&b'}') || lo > hi {
+                    return false;
+                }
+                (i, st) = (i + 1, QUANT);
+            }
+            b'^' | b'$' | b'|' => st = NONE,
+            b'(' => {
+                if b.get(i) == Some(&b'?') {
+                    if !matches!(b.get(i + 1), Some(b':' | b'=' | b'!')) {
+                        return false;
+                    }
+                    i += 2;
+                }
+                (depth, st) = (depth + 1, NONE);
+            }
+            b')' => {
+                if depth == 0 {
+                    return false;
+                }
+                (depth, st) = (depth - 1, ATOM);
+            }
+            b'[' => {
+                if !simple_class(b, &mut i) {
+                    return false;
+                }
+                st = ATOM;
+            }
+            b'\\' => match b.get(i) {
+                Some(&e) if CLASS[e as usize] & 4 != 0 || e.is_ascii_digit() => (i, st) = (i + 1, ATOM),
+                Some(b'b' | b'B') => (i, st) = (i + 1, NONE),
+                Some(b'x') if hex_at(b, i + 1, 2).is_some() => (i, st) = (i + 3, ATOM),
+                Some(b'u') if hex_at(b, i + 1, 4).is_some() => (i, st) = (i + 5, ATOM),
+                _ => return false,
+            },
+            _ => return false,
+        }
+    }
+    depth == 0
+}
+
+/// After `[`: a class of literals, escapes and ranges of two characters. False when unsure.
+fn simple_class(b: &[u8], i: &mut usize) -> bool {
+    // The value of a character; `Some(None)` for a class escape (`\d`, or `\1`), which cannot start or end a range.
+    let atom = |i: &mut usize| -> Option<Option<u32>> {
+        let c = *b.get(*i)?;
+        *i += 1;
+        if c != b'\\' {
+            return (CLASS[c as usize] & 2 != 0 || c == b'-').then_some(Some(c as u32));
+        }
+        let e = *b.get(*i)?;
+        *i += 1;
+        Some(match e {
+            b'd' | b'D' | b's' | b'S' | b'w' | b'W' | b'0'..=b'9' => None,
+            b'f' => Some(12),
+            b'n' => Some(10),
+            b'r' => Some(13),
+            b't' => Some(9),
+            b'v' => Some(11),
+            b'b' => Some(8),
+            b'x' => {
+                let v = hex_at(b, *i, 2)?;
+                *i += 2;
+                Some(v)
+            }
+            b'u' => {
+                let v = hex_at(b, *i, 4)?;
+                *i += 4;
+                Some(v)
+            }
+            _ if CLASS[e as usize] & 4 != 0 || e == b'-' => Some(e as u32),
+            _ => return None,
+        })
+    };
+    if b.get(*i) == Some(&b'^') {
+        *i += 1;
+    }
+    loop {
+        if b.get(*i) == Some(&b']') {
+            *i += 1;
+            return true;
+        }
+        let Some(a) = atom(i) else { return false };
+        if b.get(*i) == Some(&b'-') && b.get(*i + 1).is_some_and(|&n| n != b']') {
+            *i += 1;
+            match (a, atom(i)) {
+                (Some(x), Some(Some(y))) if x <= y => {}
+                _ => return false,
+            }
+        }
+    }
 }
 
 fn hex(b: u8) -> Option<u32> {
@@ -207,6 +381,10 @@ impl Checker<'_> {
                 self.class()?;
                 self.quantifier()?;
             }
+            b'\\' if self.byte(self.i + 1).is_some_and(|e| CLASS[e as usize] & 4 != 0) => {
+                self.i += 2;
+                self.quantifier()?;
+            }
             b'\\' => {
                 self.i += 1;
                 if self.atom_escape()? {
@@ -214,8 +392,21 @@ impl Checker<'_> {
                 }
             }
             _ => {
-                self.next();
-                self.quantifier()?;
+                // A run of literals: only the last one can take a quantifier, so it is left for the slow path.
+                let b = self.s.as_bytes();
+                let mut j = self.i;
+                while b.get(j).is_some_and(|&c| CLASS[c as usize] & 1 != 0) {
+                    j += 1;
+                }
+                if j > self.i && matches!(b.get(j), Some(b'*' | b'+' | b'?' | b'{')) {
+                    j -= 1;
+                }
+                if j > self.i {
+                    self.i = j;
+                } else {
+                    self.next();
+                    self.quantifier()?;
+                }
             }
         }
         Ok(())
@@ -514,8 +705,30 @@ impl Checker<'_> {
         }
         self.eat(b'^');
         loop {
-            if self.trail.is_none() && self.eat(b']') {
-                return Ok(());
+            if self.trail.is_none() {
+                if self.eat(b']') {
+                    return Ok(());
+                }
+                // A run of literals and simple escapes that start no range. The atom before a `-` is left for the slow path.
+                let b = self.s.as_bytes();
+                let (mut j, mut last) = (self.i, self.i);
+                loop {
+                    match b.get(j) {
+                        // `a-z`: a range of two literals in order.
+                        Some(&c) if CLASS[c as usize] & 2 != 0 && b.get(j + 1) == Some(&b'-')
+                            && b.get(j + 2).is_some_and(|&d| CLASS[d as usize] & 2 != 0 && d >= c) => (last, j) = (j + 3, j + 3),
+                        Some(&c) if CLASS[c as usize] & 2 != 0 => (last, j) = (j, j + 1),
+                        Some(b'\\') if b.get(j + 1).is_some_and(|&e| CLASS[e as usize] & 12 != 0) => (last, j) = (j, j + 2),
+                        _ => break,
+                    }
+                }
+                if b.get(j) == Some(&b'-') {
+                    j = last;
+                }
+                if j > self.i {
+                    self.i = j;
+                    continue;
+                }
             }
             let a = self.class_atom()?;
             if self.trail.is_none() && self.byte(self.i) == Some(b'-') && self.byte(self.i + 1) != Some(b']') {
