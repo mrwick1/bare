@@ -951,28 +951,30 @@ fn class_methods_fields_and_static_elements() {
         src,
         SCRIPT,
         r#"
-code nregs=5 nparams=0 words=21 sites=4
+code nregs=5 nparams=0 words=23 sites=4
 0000  PushCtx     1
 0001  DefaultCtor r1, 0
-0002  MakeClass   r1
-0003  GetField    r2, r1, s0
-0004  GetGlobal   r3, s1
-0005  ToKey       r4, r2, r3
-0006  InitCtx     r4, 0, 0
-0007  Closure     r3, f0
-0008  DefMethod   r2, r3, s2
-0009  Closure     r3, f1
-0010  SetFields   r1, r3
-0011  Closure     r3, f2
-0012  Mov         r4, r1
-0013  Call        r3, 3, 0
-0014  Closure     r3, f3
-0015  Mov         r4, r1
-0016  Call        r3, 3, 0
-0017  Mov         r0, r1
-0018  PopCtx
-0019  SetGlobal   r0, s3
-0020  RetUndef
+0002  LoadAtom    r2, a0
+0003  SetFnName   r1, r2, 0
+0004  MakeClass   r1
+0005  GetField    r2, r1, s0
+0006  GetGlobal   r3, s1
+0007  ToKey       r4, r2, r3
+0008  InitCtx     r4, 0, 0
+0009  Closure     r3, f0
+0010  DefMethod   r2, r3, s2
+0011  Closure     r3, f1
+0012  SetFields   r1, r3
+0013  Closure     r3, f2
+0014  Mov         r4, r1
+0015  Call        r3, 3, 0
+0016  Closure     r3, f3
+0017  Mov         r4, r1
+0018  Call        r3, 3, 0
+0019  Mov         r0, r1
+0020  PopCtx      
+0021  SetGlobal   r0, s3
+0022  RetUndef
 "#,
     );
     golden(
@@ -1069,17 +1071,19 @@ fn super_property_reads_and_writes() {
         src,
         SCRIPT,
         r#"
-code nregs=5 nparams=0 words=10 sites=4
+code nregs=5 nparams=0 words=12 sites=4
 0000  GetGlobal   r1, s0
 0001  DefaultCtor r2, 1
-0002  MakeDerived r2, r1
-0003  GetField    r3, r2, s1
-0004  Closure     r4, f0
-0005  SetHome     r4, r3
-0006  DefMethod   r3, r4, s2
-0007  Mov         r0, r2
-0008  SetGlobal   r0, s3
-0009  RetUndef
+0002  LoadAtom    r3, a1
+0003  SetFnName   r2, r3, 0
+0004  MakeDerived r2, r1
+0005  GetField    r3, r2, s1
+0006  Closure     r4, f0
+0007  SetHome     r4, r3
+0008  DefMethod   r3, r4, s2
+0009  Mov         r0, r2
+0010  SetGlobal   r0, s3
+0011  RetUndef
 "#,
     );
     golden(
@@ -1116,7 +1120,7 @@ fn private_names_methods_and_accessors() {
         src,
         SCRIPT,
         r#"
-code nregs=5 nparams=0 words=27 sites=3
+code nregs=5 nparams=0 words=29 sites=3
 0000  PushCtx     6
 0001  NewPrivateName r1, a0
 0002  InitCtx     r1, 0, 0
@@ -1127,23 +1131,25 @@ code nregs=5 nparams=0 words=27 sites=3
 0007  NewPrivateName r1, a3
 0008  InitCtx     r1, 0, 4
 0009  DefaultCtor r1, 0
-0010  MakeClass   r1
-0011  GetField    r2, r1, s0
-0012  Closure     r3, f0
-0013  GetCtx      r4, 0, 1
-0014  DefPrivateMethod r1, r4, r3
-0015  Closure     r3, f1
-0016  InitCtx     r3, 0, 3
-0017  Closure     r3, f2
-0018  InitCtx     r3, 0, 5
-0019  Closure     r3, f3
-0020  DefMethod   r2, r3, s1
-0021  Closure     r3, f4
-0022  SetFields   r1, r3
-0023  Mov         r0, r1
-0024  PopCtx
-0025  SetGlobal   r0, s2
-0026  RetUndef
+0010  LoadAtom    r2, a4
+0011  SetFnName   r1, r2, 0
+0012  MakeClass   r1
+0013  GetField    r2, r1, s0
+0014  Closure     r3, f0
+0015  GetCtx      r4, 0, 1
+0016  DefPrivateMethod r1, r4, r3
+0017  Closure     r3, f1
+0018  InitCtx     r3, 0, 3
+0019  Closure     r3, f2
+0020  InitCtx     r3, 0, 5
+0021  Closure     r3, f3
+0022  DefMethod   r2, r3, s1
+0023  Closure     r3, f4
+0024  SetFields   r1, r3
+0025  Mov         r0, r1
+0026  PopCtx      
+0027  SetGlobal   r0, s2
+0028  RetUndef
 "#,
     );
     golden(
@@ -1248,19 +1254,21 @@ fn a_class_expression_name_is_a_binding_of_the_class() {
         src,
         SCRIPT,
         r#"
-code nregs=4 nparams=0 words=12 sites=4
+code nregs=4 nparams=0 words=14 sites=4
 0000  DeclGlobal  s0
 0001  PushCtx     1
 0002  DefaultCtor r1, 0
-0003  MakeClass   r1
-0004  GetField    r2, r1, s1
-0005  Closure     r3, f0
-0006  DefMethod   r2, r3, s2
-0007  InitCtx     r1, 0, 0
-0008  Mov         r0, r1
-0009  PopCtx
-0010  SetGlobal   r0, s3
-0011  RetUndef
+0003  LoadAtom    r2, a1
+0004  SetFnName   r1, r2, 0
+0005  MakeClass   r1
+0006  GetField    r2, r1, s1
+0007  Closure     r3, f0
+0008  DefMethod   r2, r3, s2
+0009  InitCtx     r1, 0, 0
+0010  Mov         r0, r1
+0011  PopCtx      
+0012  SetGlobal   r0, s3
+0013  RetUndef
 "#,
     );
     golden(

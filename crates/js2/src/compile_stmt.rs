@@ -604,6 +604,7 @@ impl<'a> Fc<'a> {
             match (t.kind, d.init) {
                 (PatKind::Ident, Some(init)) => {
                     let name = prog.name(t.span);
+                    self.name_hint(init, &name);
                     match self.find_var(&name).map(|v| v.home) {
                         Some(Home::Reg(r)) => {
                             self.to(init, r)?;

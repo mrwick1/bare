@@ -288,6 +288,7 @@ ops! {
     GetTemplate Abc "w H S" "`a` = the template object of the tagged template at the site `c`: the same object each time. `recipes[b]` holds pairs of atoms: the cooked string and the raw string of each piece (`u32::MAX` as the cooked string: it is `undefined`).",
     MakeClass Abc "r" "`a` is the constructor of a class that has no `extends`: give it a new prototype object (its `constructor` is `a`, its home object is that object).",
     MakeDerived Abc "r r" "As `MakeClass` for a class with `extends`: `a` is the constructor, `b` the value of the `extends` clause. Throws a TypeError when it is no constructor and no `null`.",
+    SetFnName Abc "r r u" "Define the `name` of the function `a` from the key `b` (already a key, see `ToKey`; for a number key, its text): with the prefix `get ` for `c` 1, `set ` for `c` 2 (`SetFunctionName`).",
     DefaultCtor Abc "w u" "`a` = the default constructor of a class (`b` 1: a derived class, which calls `super(...args)`).",
     SetFields Abc "r r" "The function `b` makes the fields of an instance of the class `a`. The constructor calls it with `this` (when it has no `super()`, at its start; else right after `super()` returns).",
     NewPrivateName Abx "w A" "`a` = a new private name, whose description is `atoms[bx]` (one for each class evaluation).",
@@ -586,7 +587,14 @@ pub struct Code {
     pub lines: Vec<(u32, u32)>,
     /// Facts about the code that the interpreter finds when it loads a program (`CF_ARGS`, `CF_LINK`); the compiler leaves it 0.
     pub flags: u8,
+    /// The `name` of the function as an index of `atoms` ([`NO_NAME`]: the empty string) and its `length` (the parameters before the first
+    /// default or rest parameter). The realm defines both properties of a function cell at the first look at its own properties.
+    pub fn_name: u32,
+    pub fn_len: u16,
 }
+
+/// `Code::fn_name` of a function that has no name.
+pub const NO_NAME: u32 = u32::MAX;
 
 impl Code {
     pub fn new(nregs: u16, nparams: u16) -> Code {
@@ -605,6 +613,8 @@ impl Code {
             roots: RootMaps::new(nregs as usize),
             lines: Vec::new(),
             flags: 0,
+            fn_name: NO_NAME,
+            fn_len: 0,
         }
     }
 

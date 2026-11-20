@@ -214,7 +214,9 @@ impl Vm {
         prog.codes.extend(default_ctors());
         scan_flags(&mut prog.codes);
         let fbs = prog.codes.iter().map(|_| Feedback::default()).collect();
-        Vm { realm: Realm::new(shared), stack: Vec::new(), fbs, prog, dctor, fuel: u64::MAX }
+        let mut realm = Realm::new(shared);
+        realm.fn_info = prog.codes.iter().map(|c| (c.atoms.get(c.fn_name as usize).copied(), c.fn_len)).collect();
+        Vm { realm, stack: Vec::new(), fbs, prog, dctor, fuel: u64::MAX }
     }
 
     /// A function cell for code `code` with no context.
@@ -1368,6 +1370,12 @@ impl Vm {
                     Op::MakeDerived => {
                         gate!();
                         tri!(realm.make_class(r!(a!()), Some(r!(b!()))));
+                        pc = next;
+                    }
+                    Op::SetFnName => {
+                        gate!();
+                        let k = tri!(realm.key_of(r!(b!())));
+                        tri!(realm.name_function(r!(a!()), k, c!() as u32));
                         pc = next;
                     }
                     Op::DefaultCtor => {

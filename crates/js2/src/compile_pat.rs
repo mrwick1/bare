@@ -102,9 +102,13 @@ impl<'a> Fc<'a> {
                 self.emit_src(src, t)?;
                 let skip = self.label();
                 self.jmp_r(Op::JSNeUndef, t, skip);
+                let tp = *prog.pat(target);
+                if matches!(tp.kind, PatKind::Ident) {
+                    let name = prog.name(tp.span);
+                    self.name_hint(default, &name);
+                }
                 self.to(default, t)?;
                 self.bind(skip);
-                let tp = *prog.pat(target);
                 if matches!(tp.kind, PatKind::Ident) && self.target_reg(target, mode).is_some() {
                     // already in the variable
                 } else {

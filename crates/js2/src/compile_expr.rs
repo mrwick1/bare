@@ -690,6 +690,7 @@ impl<'a> Fc<'a> {
             let base = self.window(props.len() as u32);
             let mut keys = Vec::with_capacity(props.len());
             for (i, p) in props.iter().enumerate() {
+                self.name_hint(p.value, &names[i]);
                 self.to(p.value, base + i as u32)?;
                 keys.push(self.atom(&names[i])?);
             }
@@ -707,8 +708,10 @@ impl<'a> Fc<'a> {
                     }
                     PropKind::Get | PropKind::Set => {
                         let key = self.prop_key(d, p.key)?;
-                        let v = self.any(p.value)?;
                         let setter = (p.kind == PropKind::Set) as u32;
+                        self.name_for_key(p.value, &key, 1 + setter);
+                        let v = self.any(p.value)?;
+                        self.name_at_run(p.value, v, &key, 1 + setter);
                         self.set_home(v, d, p.value);
                         match key {
                             Ok(n) => {
@@ -724,7 +727,9 @@ impl<'a> Fc<'a> {
                     }
                     _ => {
                         let key = self.prop_key(d, p.key)?;
+                        self.name_for_key(p.value, &key, 0);
                         let v = self.any(p.value)?;
+                        self.name_at_run(p.value, v, &key, 0);
                         if p.kind == PropKind::Method {
                             self.set_home(v, d, p.value);
                         }
@@ -747,9 +752,72 @@ impl<'a> Fc<'a> {
         Ok(())
     }
 
+    /// The anonymous function or class `e` gets the name `name` when it is made (the spec's `NamedEvaluation`).
+    pub(crate) fn name_hint(&mut self, e: ExprId, name: &str) {
+        match self.prog.expr(e).kind {
+            ExprKind::Function(f) if self.prog.func(f).name.is_none() => self.hint = Some(Hint::Func(f, name.into())),
+            ExprKind::Class(c) if self.prog.class(c).name.is_none() => self.hint = Some(Hint::Class(c, name.into())),
+            _ => {}
+        }
+    }
+
+    /// Is `e` an anonymous function or class definition?
+    pub(crate) fn is_anon_def(&self, e: ExprId) -> bool {
+        match self.prog.expr(e).kind {
+            ExprKind::Function(f) => self.prog.func(f).name.is_none(),
+            ExprKind::Class(c) => self.prog.class(c).name.is_none(),
+            _ => false,
+        }
+    }
+
+    /// `name_hint` for a property key that the text gives (`prefix` 1: `get `, 2: `set `). A computed key names the function at run time
+    /// ([`Fc::name_at_run`]).
+    pub(crate) fn name_for_key(&mut self, e: ExprId, key: &Result<Cow<'a, str>, u32>, prefix: u32) {
+        if let Ok(n) = key {
+            match prefix {
+                0 => self.name_hint(e, n),
+                p => self.name_hint(e, &format!("{}{n}", if p == 1 { "get " } else { "set " })),
+            }
+        }
+    }
+
+    /// After the function in `v` was made for the computed key in a register: `SetFnName` when it is an anonymous definition.
+    pub(crate) fn name_at_run(&mut self, e: ExprId, v: u32, key: &Result<Cow<'a, str>, u32>, prefix: u32) {
+        if let Err(k) = key
+            && self.is_anon_def(e)
+        {
+            self.set_live(v);
+            self.op(Op::SetFnName, v, *k, prefix);
+        }
+    }
+
+    pub(crate) fn hint_for_func(&mut self, f: FuncId) -> Option<Box<str>> {
+        match self.hint.take() {
+            Some(Hint::Func(g, n)) if g == f => Some(n),
+            h => {
+                self.hint = h;
+                None
+            }
+        }
+    }
+
+    pub(crate) fn hint_for_class(&mut self, c: ClassId) -> Option<Box<str>> {
+        match self.hint.take() {
+            Some(Hint::Class(d, n)) if d == c => Some(n),
+            h => {
+                self.hint = h;
+                None
+            }
+        }
+    }
+
     /// A function value: a closure over the current context. `expr`: a function expression (a name that it uses is its own binding).
     pub(crate) fn function(&mut self, f: FuncId, dst: u32, expr: bool) -> CR {
         let func = *self.prog.func(f);
+        let name = match func.name {
+            Some(n) => Some(Box::from(&*self.prog.name(n))),
+            None => self.hint_for_func(f),
+        };
         if func.is_async() {
             self.unsup("an async function");
         }
@@ -757,7 +825,7 @@ impl<'a> Fc<'a> {
             self.unsup("a generator");
         }
         let self_name = expr && func.name.is_some() && func.kind == FuncKind::Normal;
-        let i = self.child(f, self_name)?;
+        let i = self.child(f, self_name, name)?;
         self.op(Op::Closure, dst, i, 0);
         Ok(())
     }
@@ -1105,6 +1173,9 @@ impl<'a> Fc<'a> {
 
     fn assign_ident(&mut self, op: AssignOp, name: &str, at: u32, value: ExprId, dst: Option<u32>) -> CR {
         let res = self.resolve(name, at);
+        if matches!(op, AssignOp::Assign | AssignOp::Logical(_)) {
+            self.name_hint(value, name);
+        }
         match op {
             AssignOp::Assign => {
                 if let Res::Reg { reg, tdz: false, konst: false } = res {
