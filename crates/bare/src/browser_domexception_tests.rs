@@ -59,14 +59,14 @@ fn domexception_is_created_only_on_first_use_and_rooted() {
         let g = b.it.global_object();
         let k = b.it.heap.key_from_str("DOMException").unwrap();
         assert!(b.it.heap.peek_own_property(g,k).unwrap().is_none());
-        let n = b.dom.handlers.borrow().len();
+        let n = b.dom.scoped.borrow().len();
         assert_eq!(js(&mut b,"1 + 1"),"2");
-        assert_eq!(b.dom.handlers.borrow().len(), n);
+        assert_eq!(b.dom.scoped.borrow().len(), n);
         assert_eq!(js(&mut b,"var ctor = DOMException; typeof ctor"),"function");
-        assert_eq!(b.dom.handlers.borrow().len(), n + 1);
+        assert_eq!(b.dom.scoped.borrow().len(), n + 1);
         b.collect(&[]).unwrap();
         assert_eq!(js(&mut b,"ctor === DOMException && new ctor() instanceof ctor"),"true");
-        assert_eq!(b.dom.handlers.borrow().len(), n + 1);
+        assert_eq!(b.dom.scoped.borrow().len(), n + 1);
     });
 }
 

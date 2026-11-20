@@ -709,7 +709,11 @@ pub(crate) enum Kind {
     /// A method of the new form, on the interface registry (`browser_scoped.rs`).
     MethodS(crate::browser_scoped::HS),
     Get(H),
+    /// A getter of the new form.
+    GetS(crate::browser_scoped::HS),
     Accessor(H, H),
+    /// A getter and a setter of the new form.
+    AccessorS(crate::browser_scoped::HS, crate::browser_scoped::HS),
 }
 
 pub(crate) struct Def {
@@ -1104,7 +1108,7 @@ impl Host for Dom {
     }
 }
 
-fn domexc_codes(name: &str) -> u32 {
+pub(crate) fn domexc_codes(name: &str) -> u32 {
     match name {
         "IndexSizeError" => 1,
         "HierarchyRequestError" => 3,
@@ -1138,7 +1142,7 @@ fn domexception_global(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     let key = d.key(it, "DOMException")?;
     if it.heap.peek_own_property(g, key).map_err(|e| it.heap_error(e))?.is_some() { return Ok(()); }
     let proto = d.p().domexc;
-    let f = d.add_ctor_nt(it, domexception_ctor, "DOMException", 0)?;
+    let f = d.add_fn_s_obj(it, domexception_ctor_s, "DOMException", 0, HostFn::CtorNewTarget)?;
     let kp = d.key(it, "prototype")?;
     it.define_data(f, kp, Value::Object(proto), false, false, false)?;
     let kc = d.key(it, "constructor")?;
@@ -1153,27 +1157,29 @@ fn domexception_global(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     Ok(())
 }
 
-fn domexception_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    let mut values = [Value::Undefined; 2];
+fn domexception_ctor_s<'s>(d: &Dom, s: &mut crate::browser_scoped::Sc<'s, '_>, _: bare_js_api::Local<'s>, a: bare_js_api::Args<'s>) -> crate::browser_scoped::Res<'s, bare_js_api::Local<'s>> {
+    let mut values = [s.undefined(); 2];
     for (i, default) in ["", "Error"].iter().enumerate() {
-        let v = a.get(i).copied().unwrap_or(Value::Undefined);
-        values[i] = if matches!(v, Value::Undefined) { d.js_str(it, default)? } else {
-            let s = it.to_js_string(v)?;
-            let n = it.heap.str_len(s).map_err(|e| it.heap_error(e))?;
-            if n > d.lim.max_string_bytes { return Err(d.lim("dom-string")); }
-            it.charge((n / 32) as u64)?;
-            Value::String(s)
+        let v = crate::browser_scoped::arg_s(s, a, i);
+        values[i] = if s.type_of(v) == bare_js_api::Type::Undefined { d.js_str_s(s, default)? } else {
+            let t = s.to_string(v)?;
+            let n = s.as_str(t).map_or(0, |x| x.len());
+            if n > d.lim.max_string_bytes { return Err(d.lim_s(s, "dom-string")); }
+            s.charge((n / 32) as u64)?;
+            t
         };
     }
-    let proto = it.host_proto_from_new_target(d.p().domexc)?;
-    let o = it.new_error(proto, "")?;
-    let Value::String(name) = values[1] else { unreachable!() };
-    let code = if it.heap.str_len(name).map_err(|e| it.heap_error(e))? <= 32 { domexc_codes(&it.display(values[1])) } else { 0 };
-    for (name, v) in [("message", values[0]), ("name", values[1]), ("code", Value::Number(code as f64))] {
-        let k = d.key(it, name)?;
-        it.define_data(o, k, v, true, false, true)?;
+    let default = d.obj_local(s, d.p().domexc);
+    let proto = s.proto_from_new_target(default)?;
+    let o = s.new_error(proto, "")?;
+    let name_len = s.as_str(values[1]).map_or(0, |x| x.len());
+    let code = if name_len <= 32 { domexc_codes(&s.display(values[1])) } else { 0 };
+    let code = s.number(code as f64);
+    let attrs = bare_js_api::Attrs { writable: true, enumerable: false, configurable: true };
+    for (name, v) in [("message", values[0]), ("name", values[1]), ("code", code)] {
+        s.define_str(o, name, v, attrs)?;
     }
-    Ok(Value::Object(o))
+    Ok(o)
 }
 
 #[cold]
@@ -1415,13 +1421,6 @@ impl Dom {
         }
     }
 
-    pub(crate) fn arg_node(&self, it: &mut Interp<'_>, args: &[Value], i: usize) -> R<NodeId> {
-        match self.node_of(args.get(i).copied().unwrap_or(Value::Undefined)) {
-            Some(n) => Ok(n),
-            None => Err(it.type_error(&format!("parameter {} is not of type 'Node'", i + 1))),
-        }
-    }
-
     pub(crate) fn data(&self, n: NodeId) -> NodeData {
         *self.doc.borrow().data(n)
     }
@@ -1577,11 +1576,21 @@ impl Dom {
                     named(&mut nm, "get ", d.name);
                     (self.add_fn(it, h, &nm, 0, false)?, None)
                 }
+                Kind::GetS(h) => {
+                    named(&mut nm, "get ", d.name);
+                    (self.add_fn_s_obj(it, h, &nm, 0, HostFn::Method)?, None)
+                }
                 Kind::Accessor(gh, sh) => {
                     named(&mut nm, "get ", d.name);
                     let f = self.add_fn(it, gh, &nm, 0, false)?;
                     named(&mut nm, "set ", d.name);
                     (f, Some(self.add_fn(it, sh, &nm, 1, false)?))
+                }
+                Kind::AccessorS(gh, sh) => {
+                    named(&mut nm, "get ", d.name);
+                    let f = self.add_fn_s_obj(it, gh, &nm, 0, HostFn::Method)?;
+                    named(&mut nm, "set ", d.name);
+                    (f, Some(self.add_fn_s_obj(it, sh, &nm, 1, HostFn::Method)?))
                 }
             };
             for &on in d.on {
@@ -1625,9 +1634,10 @@ impl Dom {
         let (kp, kc) = (self.key(it, "prototype")?, self.key(it, "constructor")?);
         let mut ctors = Vec::new();
         for (name, proto, ctor) in ifaces {
-            let f = match if name == "DocumentFragment" { Some(nd::fragment_ctor as H) } else { ctor } {
-                Some(h) => self.add_ctor_nt(it, h, name, u32::from(name != "EventTarget" && name != "DocumentFragment" && !name.starts_with("HTML")))?,
-                None => self.add_fn(it, illegal_constructor, name, 0, false)?,
+            let f = match (name == "DocumentFragment", ctor) {
+                (true, _) => self.add_fn_s_obj(it, nd::fragment_ctor_s, name, 0, HostFn::CtorNewTarget)?,
+                (_, Some(h)) => self.add_ctor_nt(it, h, name, u32::from(name != "EventTarget" && !name.starts_with("HTML")))?,
+                (_, None) => self.add_fn(it, illegal_constructor, name, 0, false)?,
             };
             it.define_data(f, kp, Value::Object(proto), false, false, false)?;
             it.define_data(proto, kc, Value::Object(f), true, false, true)?;
@@ -1723,7 +1733,7 @@ pub(crate) fn illegal_constructor(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[V
     Err(it.type_error("Illegal constructor"))
 }
 
-use Kind::{Accessor as A, Get as G, Method as M, MethodS as MS};
+use Kind::{Accessor as A, AccessorS as AS, Get as G, GetS as GS, Method as M, MethodS as MS};
 use P::*;
 
 const PARENT: &[P] = &[Element, Document, Fragment];
@@ -1734,24 +1744,24 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Et], name: "addEventListener", len: 2, kind: M(ev::add_event_listener) },
     Def { on: &[Et], name: "removeEventListener", len: 2, kind: M(ev::remove_event_listener) },
     Def { on: &[Et], name: "dispatchEvent", len: 1, kind: M(ev::dispatch_event) },
-    Def { on: &[Node], name: "nodeType", len: 0, kind: G(nd::node_type) },
-    Def { on: &[Node], name: "nodeName", len: 0, kind: G(nd::node_name) },
-    Def { on: &[Node], name: "nodeValue", len: 0, kind: A(nd::node_value, nd::set_node_value) },
-    Def { on: &[Node], name: "parentNode", len: 0, kind: G(nd::parent_node) },
-    Def { on: &[Node], name: "parentElement", len: 0, kind: G(nd::parent_element) },
-    Def { on: &[Node], name: "childNodes", len: 0, kind: G(nd::child_nodes) },
-    Def { on: &[Node], name: "firstChild", len: 0, kind: G(nd::first_child) },
-    Def { on: &[Node], name: "lastChild", len: 0, kind: G(nd::last_child) },
-    Def { on: &[Node], name: "previousSibling", len: 0, kind: G(nd::previous_sibling) },
-    Def { on: &[Node], name: "nextSibling", len: 0, kind: G(nd::next_sibling) },
-    Def { on: &[Node], name: "ownerDocument", len: 0, kind: G(nd::owner_document) },
-    Def { on: &[Node], name: "isConnected", len: 0, kind: G(nd::is_connected) },
-    Def { on: &[Node], name: "textContent", len: 0, kind: A(nd::text_content, nd::set_text_content) },
-    Def { on: &[Node], name: "appendChild", len: 1, kind: M(nd::append_child) },
-    Def { on: &[Node], name: "insertBefore", len: 2, kind: M(nd::insert_before) },
-    Def { on: &[Node], name: "removeChild", len: 1, kind: M(nd::remove_child) },
-    Def { on: &[Node], name: "replaceChild", len: 2, kind: M(nd::replace_child) },
-    Def { on: &[Node], name: "cloneNode", len: 0, kind: M(nd::clone_node) },
+    Def { on: &[Node], name: "nodeType", len: 0, kind: GS(nd::node_type) },
+    Def { on: &[Node], name: "nodeName", len: 0, kind: GS(nd::node_name) },
+    Def { on: &[Node], name: "nodeValue", len: 0, kind: AS(nd::node_value, nd::set_node_value) },
+    Def { on: &[Node], name: "parentNode", len: 0, kind: GS(nd::parent_node) },
+    Def { on: &[Node], name: "parentElement", len: 0, kind: GS(nd::parent_element) },
+    Def { on: &[Node], name: "childNodes", len: 0, kind: GS(nd::child_nodes) },
+    Def { on: &[Node], name: "firstChild", len: 0, kind: GS(nd::first_child) },
+    Def { on: &[Node], name: "lastChild", len: 0, kind: GS(nd::last_child) },
+    Def { on: &[Node], name: "previousSibling", len: 0, kind: GS(nd::previous_sibling) },
+    Def { on: &[Node], name: "nextSibling", len: 0, kind: GS(nd::next_sibling) },
+    Def { on: &[Node], name: "ownerDocument", len: 0, kind: GS(nd::owner_document) },
+    Def { on: &[Node], name: "isConnected", len: 0, kind: GS(nd::is_connected) },
+    Def { on: &[Node], name: "textContent", len: 0, kind: AS(nd::text_content_s, nd::set_text_content_s) },
+    Def { on: &[Node], name: "appendChild", len: 1, kind: MS(nd::append_child_s) },
+    Def { on: &[Node], name: "insertBefore", len: 2, kind: MS(nd::insert_before) },
+    Def { on: &[Node], name: "removeChild", len: 1, kind: MS(nd::remove_child) },
+    Def { on: &[Node], name: "replaceChild", len: 2, kind: MS(nd::replace_child) },
+    Def { on: &[Node], name: "cloneNode", len: 0, kind: MS(nd::clone_node) },
     Def { on: &[Node], name: "contains", len: 1, kind: M(crate::browser_nodecmp::contains) },
     Def { on: &[Node], name: "compareDocumentPosition", len: 1, kind: M(crate::browser_nodecmp::compare_document_position) },
     Def { on: &[Node], name: "isSameNode", len: 1, kind: M(crate::browser_nodecmp::is_same_node) },
@@ -1759,33 +1769,33 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Node], name: "lookupNamespaceURI", len: 1, kind: M(crate::browser_nodecmp::lookup_namespace_uri) },
     Def { on: &[Node], name: "lookupPrefix", len: 1, kind: M(crate::browser_nodecmp::lookup_prefix) },
     Def { on: &[Node], name: "isDefaultNamespace", len: 1, kind: M(crate::browser_nodecmp::is_default_namespace) },
-    Def { on: &[Node], name: "getRootNode", len: 0, kind: M(nd::get_root_node) },
-    Def { on: &[Node], name: "hasChildNodes", len: 0, kind: M(nd::has_child_nodes) },
-    Def { on: PARENT, name: "children", len: 0, kind: G(nd::children) },
-    Def { on: PARENT, name: "firstElementChild", len: 0, kind: G(nd::first_element_child) },
-    Def { on: PARENT, name: "lastElementChild", len: 0, kind: G(nd::last_element_child) },
-    Def { on: PARENT, name: "childElementCount", len: 0, kind: G(nd::child_element_count) },
-    Def { on: PARENT, name: "querySelector", len: 1, kind: M(nd::query_selector) },
-    Def { on: PARENT, name: "querySelectorAll", len: 1, kind: M(nd::query_selector_all) },
-    Def { on: PARENT, name: "append", len: 0, kind: M(nd::append) },
-    Def { on: PARENT, name: "prepend", len: 0, kind: M(nd::prepend) },
-    Def { on: &[Element], name: "tagName", len: 0, kind: G(nd::tag_name) },
-    Def { on: &[Element], name: "localName", len: 0, kind: G(nd::local_name) },
+    Def { on: &[Node], name: "getRootNode", len: 0, kind: MS(nd::get_root_node) },
+    Def { on: &[Node], name: "hasChildNodes", len: 0, kind: MS(nd::has_child_nodes) },
+    Def { on: PARENT, name: "children", len: 0, kind: GS(nd::children) },
+    Def { on: PARENT, name: "firstElementChild", len: 0, kind: GS(nd::first_element_child) },
+    Def { on: PARENT, name: "lastElementChild", len: 0, kind: GS(nd::last_element_child) },
+    Def { on: PARENT, name: "childElementCount", len: 0, kind: GS(nd::child_element_count) },
+    Def { on: PARENT, name: "querySelector", len: 1, kind: MS(nd::query_selector) },
+    Def { on: PARENT, name: "querySelectorAll", len: 1, kind: MS(nd::query_selector_all) },
+    Def { on: PARENT, name: "append", len: 0, kind: MS(nd::append) },
+    Def { on: PARENT, name: "prepend", len: 0, kind: MS(nd::prepend) },
+    Def { on: &[Element], name: "tagName", len: 0, kind: GS(nd::tag_name) },
+    Def { on: &[Element], name: "localName", len: 0, kind: GS(nd::local_name) },
     Def { on: &[Element], name: "namespaceURI", len: 0, kind: G(ns::namespace_uri) },
     Def { on: &[Element], name: "prefix", len: 0, kind: G(ns::prefix) },
-    Def { on: &[Element], name: "previousElementSibling", len: 0, kind: G(nd::previous_element_sibling) },
+    Def { on: &[Element], name: "previousElementSibling", len: 0, kind: GS(nd::previous_element_sibling) },
     Def { on: &[Element, Text], name: "assignedSlot", len: 0, kind: G(crate::browser_slot::assigned_slot) },
-    Def { on: &[Element], name: "nextElementSibling", len: 0, kind: G(nd::next_element_sibling) },
+    Def { on: &[Element], name: "nextElementSibling", len: 0, kind: GS(nd::next_element_sibling) },
     Def { on: &[Element, Shadow], name: "innerHTML", len: 0, kind: A(frag::inner_html, frag::set_inner_html) },
     Def { on: &[Element], name: "outerHTML", len: 0, kind: A(frag::outer_html, frag::set_outer_html) },
-    Def { on: &[Element], name: "id", len: 0, kind: A(nd::id, nd::set_id) },
-    Def { on: &[Element], name: "className", len: 0, kind: A(nd::class_name, nd::set_class_name) },
-    Def { on: &[Element], name: "lang", len: 0, kind: A(nd::lang, nd::set_lang) },
+    Def { on: &[Element], name: "id", len: 0, kind: AS(nd::id, nd::set_id) },
+    Def { on: &[Element], name: "className", len: 0, kind: AS(nd::class_name, nd::set_class_name) },
+    Def { on: &[Element], name: "lang", len: 0, kind: AS(nd::lang, nd::set_lang) },
     Def { on: &[Element], name: "getAttribute", len: 1, kind: MS(nd::get_attribute_s) },
-    Def { on: &[Element], name: "setAttribute", len: 2, kind: M(nd::set_attribute) },
-    Def { on: &[Element], name: "removeAttribute", len: 1, kind: M(nd::remove_attribute) },
+    Def { on: &[Element], name: "setAttribute", len: 2, kind: MS(nd::set_attribute) },
+    Def { on: &[Element], name: "removeAttribute", len: 1, kind: MS(nd::remove_attribute_s) },
     Def { on: &[Element], name: "hasAttribute", len: 1, kind: MS(nd::has_attribute_s) },
-    Def { on: &[Element], name: "getAttributeNames", len: 0, kind: M(nd::get_attribute_names) },
+    Def { on: &[Element], name: "getAttributeNames", len: 0, kind: MS(nd::get_attribute_names) },
     Def { on: &[Element], name: "attributes", len: 0, kind: G(at::attributes) },
     Def { on: &[Element], name: "hasAttributes", len: 0, kind: M(at::has_attributes) },
     Def { on: &[Element], name: "getAttributeNode", len: 1, kind: M(at::get_attribute_node) },
@@ -1806,10 +1816,10 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Shadow], name: "serializable", len: 0, kind: G(sh::flag_bit::<4>) },
     Def { on: &[Shadow], name: "host", len: 0, kind: G(sh::host) },
     Def { on: &[Element], name: "matches", len: 1, kind: MS(nd::matches_selector_s) },
-    Def { on: &[Element], name: "closest", len: 1, kind: M(nd::closest) },
-    Def { on: CHILD, name: "remove", len: 0, kind: M(nd::remove) },
-    Def { on: &[CharData], name: "data", len: 0, kind: A(nd::node_value_text, nd::set_node_value_text) },
-    Def { on: &[CharData], name: "length", len: 0, kind: G(nd::data_length) },
+    Def { on: &[Element], name: "closest", len: 1, kind: MS(nd::closest) },
+    Def { on: CHILD, name: "remove", len: 0, kind: MS(nd::remove) },
+    Def { on: &[CharData], name: "data", len: 0, kind: AS(nd::node_value_text, nd::set_node_value_text) },
+    Def { on: &[CharData], name: "length", len: 0, kind: GS(nd::data_length) },
     Def { on: &[CharData], name: "substringData", len: 2, kind: M(crate::browser_chardata::substring_data) },
     Def { on: &[CharData], name: "appendData", len: 1, kind: M(crate::browser_chardata::append_data) },
     Def { on: &[CharData], name: "insertData", len: 2, kind: M(crate::browser_chardata::insert_data) },
@@ -1817,41 +1827,41 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[CharData], name: "replaceData", len: 3, kind: M(crate::browser_chardata::replace_data) },
     Def { on: &[Text], name: "splitText", len: 1, kind: M(crate::browser_chardata::split_text) },
     Def { on: &[Node], name: "normalize", len: 0, kind: M(crate::browser_chardata::normalize) },
-    Def { on: &[Document], name: "createElement", len: 1, kind: M(nd::create_element) },
+    Def { on: &[Document], name: "createElement", len: 1, kind: MS(nd::create_element_s) },
     Def { on: &[Document], name: "createEvent", len: 1, kind: M(ev::create_event) },
     Def { on: &[Document], name: "createElementNS", len: 2, kind: M(ns::create_element_ns) },
     Def { on: &[Document], name: "getElementsByName", len: 1, kind: M(crate::browser_nodelist::get_elements_by_name) },
     Def { on: &[Document], name: "createAttribute", len: 1, kind: M(at::create_attribute) },
     Def { on: &[Document], name: "createAttributeNS", len: 2, kind: M(at::create_attribute_ns) },
-    Def { on: &[Document], name: "createTextNode", len: 1, kind: M(nd::create_text_node) },
-    Def { on: &[Document], name: "createComment", len: 1, kind: M(nd::create_comment) },
-    Def { on: &[Document, Fragment], name: "getElementById", len: 1, kind: M(nd::get_element_by_id) },
+    Def { on: &[Document], name: "createTextNode", len: 1, kind: MS(nd::create_text_node) },
+    Def { on: &[Document], name: "createComment", len: 1, kind: MS(nd::create_comment) },
+    Def { on: &[Document, Fragment], name: "getElementById", len: 1, kind: MS(nd::get_element_by_id) },
     Def { on: &[Document, Shadow], name: "elementFromPoint", len: 2, kind: M(crate::browser_point::element_from_point) },
     Def { on: &[Document], name: "caretRangeFromPoint", len: 2, kind: M(crate::browser_point::caret_range_from_point) },
     Def { on: &[Document, Shadow], name: "elementsFromPoint", len: 2, kind: M(crate::browser_point::elements_from_point) },
-    Def { on: &[Document], name: "documentElement", len: 0, kind: G(nd::document_element) },
-    Def { on: &[Document], name: "head", len: 0, kind: G(nd::head) },
-    Def { on: &[Document], name: "body", len: 0, kind: G(nd::body) },
-    Def { on: &[Document], name: "title", len: 0, kind: A(nd::document_title, nd::set_document_title) },
-    Def { on: &[Document], name: "doctype", len: 0, kind: G(nd::doctype) },
-    Def { on: &[Document], name: "defaultView", len: 0, kind: G(nd::default_view) },
-    Def { on: &[Input], name: "value", len: 0, kind: A(nd::input_value, nd::set_input_value) },
-    Def { on: &[Input], name: "files", len: 0, kind: G(nd::input_files) },
-    Def { on: &[Input], name: "checked", len: 0, kind: A(nd::input_checked, nd::set_input_checked) },
-    Def { on: &[Input], name: "indeterminate", len: 0, kind: A(nd::input_indeterminate, nd::set_input_indeterminate) },
+    Def { on: &[Document], name: "documentElement", len: 0, kind: GS(nd::document_element_s) },
+    Def { on: &[Document], name: "head", len: 0, kind: GS(nd::head) },
+    Def { on: &[Document], name: "body", len: 0, kind: GS(nd::body_s) },
+    Def { on: &[Document], name: "title", len: 0, kind: AS(nd::document_title, nd::set_document_title) },
+    Def { on: &[Document], name: "doctype", len: 0, kind: GS(nd::doctype) },
+    Def { on: &[Document], name: "defaultView", len: 0, kind: GS(nd::default_view) },
+    Def { on: &[Input], name: "value", len: 0, kind: AS(nd::input_value, nd::set_input_value) },
+    Def { on: &[Input], name: "files", len: 0, kind: GS(nd::input_files) },
+    Def { on: &[Input], name: "checked", len: 0, kind: AS(nd::input_checked, nd::set_input_checked) },
+    Def { on: &[Input], name: "indeterminate", len: 0, kind: AS(nd::input_indeterminate, nd::set_input_indeterminate) },
     Def { on: &[Input], name: "selectionStart", len: 0, kind: A(sel::selection_start, sel::set_selection_start) },
     Def { on: &[Input], name: "selectionEnd", len: 0, kind: A(sel::selection_end, sel::set_selection_end) },
     Def { on: &[Input], name: "selectionDirection", len: 0, kind: A(sel::selection_direction, sel::set_selection_direction) },
     Def { on: &[Input], name: "setSelectionRange", len: 2, kind: M(sel::set_selection_range_method) },
     Def { on: &[Input], name: "select", len: 0, kind: M(sel::select_method) },
     Def { on: &[Input], name: "setRangeText", len: 1, kind: M(sel::set_range_text_input) },
-    Def { on: &[Input], name: "type", len: 0, kind: A(nd::input_type, nd::set_input_type) },
-    Def { on: &[Input], name: "defaultValue", len: 0, kind: A(nd::default_value, nd::set_default_value) },
-    Def { on: &[Input], name: "defaultChecked", len: 0, kind: A(nd::default_checked, nd::set_default_checked) },
-    Def { on: &[Link], name: "rel", len: 0, kind: A(nd::link_rel, nd::set_link_rel) },
+    Def { on: &[Input], name: "type", len: 0, kind: AS(nd::input_type, nd::set_input_type) },
+    Def { on: &[Input], name: "defaultValue", len: 0, kind: AS(nd::default_value, nd::set_default_value) },
+    Def { on: &[Input], name: "defaultChecked", len: 0, kind: AS(nd::default_checked, nd::set_default_checked) },
+    Def { on: &[Link], name: "rel", len: 0, kind: AS(nd::link_rel, nd::set_link_rel) },
     Def { on: &[Link], name: "href", len: 0, kind: A(crate::browser_loader::link_href, crate::browser_loader::set_link_href) },
-    Def { on: &[Link], name: "as", len: 0, kind: A(nd::link_as, nd::set_link_as) },
-    Def { on: &[Link], name: "crossOrigin", len: 0, kind: A(nd::link_cross_origin, nd::set_link_cross_origin) },
+    Def { on: &[Link], name: "as", len: 0, kind: AS(nd::link_as, nd::set_link_as) },
+    Def { on: &[Link], name: "crossOrigin", len: 0, kind: AS(nd::link_cross_origin, nd::set_link_cross_origin) },
     Def { on: &[Document], name: "scripts", len: 0, kind: G(crate::browser_platform_query::scripts) },
     Def { on: &[Document], name: "forms", len: 0, kind: G(crate::browser_platform_query::forms) },
     Def { on: &[Document], name: "images", len: 0, kind: G(crate::browser_platform_query::images) },

@@ -7,8 +7,9 @@
 //!
 //! The host never holds a raw engine value. It holds handles, and the engine treats every handle as a root:
 //!
-//! - A [`Local`] is a slot in the handle stack of a [`Scope`]. It is `Copy` and costs 4 bytes. It lives until its scope ends, and the
-//!   borrow checker stops it from leaving the scope.
+//! - A [`Local`] names a value that the engine keeps for a [`Scope`]: a slot of its handle stack, or, in a host call, the `this` or an
+//!   argument where the engine already holds it ([`Host::call`]). It is `Copy` and costs 4 bytes. It lives until its scope ends, and
+//!   the borrow checker stops it from leaving the scope.
 //! - A [`Persistent`] lives in a table of the realm until it is dropped or the realm ends. Host structures that live longer than a
 //!   call (listeners, timers, wrappers) keep these. A drop needs no engine: it clears the bit of its slot in [`Slots`], so the slot
 //!   is free at once and is no root at the next collection.
@@ -107,9 +108,11 @@
 //!
 //! # For engines
 //!
-//! An engine implements [`Engine`] and makes handles with [`Local::from_slot`] and [`Args::from_slots`]. A slot is an index into its
-//! handle stack, and the engine checks the bounds (a host can forge a slot number, but not memory access). The values in the handle
-//! stack and in the persistent table are roots. Host stores of values go through [`Engine::set`] and [`Engine::define`], so the
+//! An engine implements [`Engine`] and makes handles with [`Local::from_slot`] and [`Args::from_slots`]. A slot number means what the
+//! engine says: an index into its handle stack, or a name for an argument slot of the running host call (so the call copies and pushes
+//! nothing), or a shared constant slot that no scope drops. [`Args`] holds consecutive slot numbers. The engine checks every slot it is
+//! given (a host can forge a slot number, but not memory access). A slot that names an argument is valid only while the call runs.
+//! The values in the handle stack, in the persistent table and in the arguments of a running host call are roots. Host stores of values go through [`Engine::set`] and [`Engine::define`], so the
 //! engine runs its write barrier there.
 #![forbid(unsafe_code)]
 
@@ -312,7 +315,7 @@ pub enum Lazy<'a> {
     Symbols,
 }
 
-/// The arguments of a host call: consecutive slots of the handle stack.
+/// The arguments of a host call: consecutive slot numbers (see [`Local::from_slot`]).
 #[derive(Clone, Copy, Debug)]
 pub struct Args<'s> {
     base: u32,
@@ -532,7 +535,9 @@ pub struct ImportRequest {
 
 /// The host side of the browser: the engine calls it for host functions.
 pub trait Host<E: Engine> {
-    /// Run host function `id` (from [`Scope::host_function`]). `is_new` is true for `new f()`.
+    /// Run host function `id` (from [`Scope::host_function`]). `is_new` is true for `new f()`. `s` is the one scope of the call. `this` and
+    /// `args` are handles: an engine may name its own argument slots with them (no copy, no push), so only the values that the host makes
+    /// are pushed. They are roots for the whole call.
     fn call<'s>(&self, s: &mut Scope<'s, E>, id: u32, this: Local<'s>, args: Args<'s>, is_new: bool) -> Result<Local<'s>, Error<'s>>;
     /// The collector reached the owner with host key `key` ([`Scope::set_host_owner`]): visit the [`Traced`] values it keeps. The
     /// engine runs no script and allocates nothing here. The host must not hold a borrow that this method needs.
@@ -607,8 +612,9 @@ pub trait Host<E: Engine> {
     }
 }
 
-/// A JavaScript realm. The host calls these methods only through [`Scope`]; each value that a method returns is pushed onto the
-/// handle stack. Methods that take `&self` must not collect.
+/// A JavaScript realm. The host calls these methods only through [`Scope`]; each value that a method returns is a handle that lives
+/// until the scope ends. The engine pushes a slot for it, except for `undefined`, `null` and `boolean`, which may give a shared
+/// slot. Methods that take `&self` must not collect.
 pub trait Engine: Sized {
     /// A value as the engine stores it, for [`Traced`].
     type Raw: Clone + 'static;
@@ -910,6 +916,7 @@ pub trait Engine: Sized {
 }
 
 /// Open the outermost scope of `e`.
+#[inline(always)]
 pub fn enter<E: Engine, R>(e: &mut E, f: impl for<'s> FnOnce(&mut Scope<'s, E>) -> R) -> R {
     let base = e.stack_len();
     f(&mut Scope { e, base })
@@ -936,7 +943,8 @@ impl<'s, E: Engine> Scope<'s, E> {
 
     /// A nested scope that gives one value (or the exception) to this one.
     pub fn escape_scope(&mut self, f: impl for<'i> FnOnce(&mut Scope<'i, E>) -> Result<Local<'i>, Error<'i>>) -> Result<Local<'s>, Error<'s>> {
-        let keep = self.e.undefined().slot;
+        // A number always pushes a new slot (`undefined`, `null` and `boolean` may give a shared one that no scope drops).
+        let keep = self.e.number(0.0).slot;
         let mut inner = Scope { e: &mut *self.e, base: keep + 1 };
         // Ok(true): a value; Ok(false): an exception. Either one is copied to `keep` before the inner slots are dropped.
         let r = match f(&mut inner) {

@@ -280,3 +280,4 @@ One change in the target design would reduce cost, not add it. With `Scope::host
 - Question 2: the bodies use one alias (`Eng`). The change to `Dom<E: Engine>` is its own mechanical PR, with the first `bare-js2` `Engine` (S2.8).
 - Questions 1 and 3 to 10: the proposed answers are accepted.
 - This replaces the 2026-11-19 decision to move all handler bodies in one PR.
+- Host call contract (2026-11-20): a converted host call must cost about the same as the old one (target: within 10 instructions per call of the old body). `Host::call` gets `this` and the arguments as handles that name the engine's own argument slots (no copy, no push), the call has one scope, and only values that the handler makes are pushed.
