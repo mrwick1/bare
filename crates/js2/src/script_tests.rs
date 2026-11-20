@@ -702,6 +702,66 @@ fn switch_in_loops_with_continue_break_labels_and_lexical_cases() {
     check(&[(src, "result", "1020tdznonenone")]);
 }
 
+#[test]
+fn built_in_properties_have_the_attributes_the_specification_gives() {
+    check_builtins(&[
+        ("var d = Object.getOwnPropertyDescriptor(Array.prototype, 'push'); var r = [d.writable, d.enumerable, d.configurable].join();", "r", "true,false,true"),
+        ("var d = Object.getOwnPropertyDescriptor(Array.prototype.push, 'length'); var r = [d.value, d.writable, d.enumerable, d.configurable].join();", "r", "1,false,false,true"),
+        ("var r = Object.getOwnPropertyNames(Array.prototype.push).join();", "r", "length,name"),
+        ("var r = Array.prototype.splice.length + ',' + Array.prototype.reduce.length + ',' + Array.prototype.forEach.name + ',' + Object.assign.length;", "r", "2,1,forEach,2"),
+        ("var d = Object.getOwnPropertyDescriptor(Array, 'prototype'); var r = [d.writable, d.enumerable, d.configurable].join();", "r", "false,false,false"),
+        ("var d = Object.getOwnPropertyDescriptor(Math, 'PI'); var r = [d.writable, d.enumerable, d.configurable].join();", "r", "false,false,false"),
+        ("var r = RangeError.length + ',' + Object.getPrototypeOf(RangeError).name + ',' + Object.prototype.toString.call(RangeError.prototype) + ',' + (new RangeError('x', {cause: 1}).cause);", "r", "1,Error,[object Object],1"),
+        ("var f = Array.prototype.map.bind(null, 1); var r = f.length + ',' + f.name;", "r", "0,bound map"),
+    ]);
+}
+
+#[test]
+fn accessors_in_descriptors_assign_spread_and_rest() {
+    check_builtins(&[
+        ("var o = {}; Object.defineProperty(o, 'x', {get: function () { return 7; }, configurable: true}); var d = Object.getOwnPropertyDescriptor(o, 'x'); var r = o.x + ',' + typeof d.get + ',' + d.set + ',' + d.enumerable;", "r", "7,function,undefined,false"),
+        ("var log = ''; var s = {get a() { log += 'a'; return 1; }, b: 2}; var t = Object.assign({}, s); var r = t.a + ',' + t.b + ',' + log + ',' + Object.getOwnPropertyDescriptor(t, 'a').writable;", "r", "1,2,a,true"),
+        ("var t = {set z(v) { this.w = v * 2; }}; Object.assign(t, {z: 4}); var r = t.w;", "r", "8"),
+        ("var s = {get a() { return 1; }, b: 2}; var c = {...s}; var r = Object.getOwnPropertyDescriptor(c, 'a').value + ',' + c.b;", "r", "1,2"),
+        ("var s = {get a() { return 1; }, b: 2, c: 3}; var {b, ...rest} = s; var r = b + ',' + Object.keys(rest).join();", "r", "2,a,c"),
+        ("var r = Object.entries({get a() { return 1; }, b: 2}).join('|');", "r", "a,1|b,2"),
+        ("var o = {a: 1}; var p = {b: 2}; o.__proto__ = p; var r = o.b + ',' + (o.__proto__ === p);", "r", "2,true"),
+        ("var r; try { var o = {}; Object.setPrototypeOf(Object.create(o), o); var c = Object.create(o); Object.setPrototypeOf(o, c); } catch (e) { r = e.name; }", "r", "TypeError"),
+        ("var o = Object.defineProperties({}, {a: {value: 1, enumerable: true}, b: {get: function () { return 2; }}}); var r = o.a + o.b + ',' + Object.keys(o).join();", "r", "3,a"),
+    ]);
+}
+
+#[test]
+fn frozen_sealed_and_non_extensible_objects() {
+    check_builtins(&[
+        ("var o = Object.preventExtensions({a: 1}); o.b = 2; var r = Object.isExtensible(o) + ',' + o.b + ',' + o.a;", "r", "false,undefined,1"),
+        ("var o = Object.freeze({a: 1}); o.a = 2; delete o.a; var r = o.a + ',' + Object.isFrozen(o) + ',' + Object.isSealed(o);", "r", "1,true,true"),
+        ("var o = Object.seal({a: 1}); o.a = 2; delete o.a; o.b = 1; var r = o.a + ',' + o.b + ',' + Object.isFrozen(o) + ',' + Object.isSealed(o);", "r", "2,undefined,false,true"),
+        ("var a = Object.freeze([1, 2]); a[0] = 9; var r = a[0] + ',' + a.length + ',' + Object.isFrozen(a);", "r", "1,2,true"),
+        ("var a = Object.freeze([1, 2]); var r; try { a.push(3); } catch (e) { r = e.name + a.length; }", "r", "TypeError2"),
+        ("var a = Object.preventExtensions([1]); a[1] = 2; a[0] = 5; var r = a.length + ',' + a[0];", "r", "1,5"),
+        ("var a = [1, 2, 3]; Object.defineProperty(a, 'length', {writable: false}); a[5] = 1; var r = a.length + ',' + a[5];", "r", "3,undefined"),
+    ]);
+}
+
+#[test]
+fn array_methods_work_on_array_likes_and_follow_the_specification() {
+    check_builtins(&[
+        ("var o = {length: 3, 0: 'a', 1: 'b', 2: 'c'}; var r = Array.prototype.join.call(o, '-') + ',' + Array.prototype.slice.call(o, 1).join() + ',' + Array.prototype.indexOf.call(o, 'c');", "r", "a-b-c,b,c,2"),
+        ("var o = {length: 2, 0: 1, 1: 2}; Array.prototype.push.call(o, 3); Array.prototype.reverse.call(o); var r = o.length + ',' + o[0] + o[1] + o[2];", "r", "3,321"),
+        ("var o = {length: 3, 0: 1, 1: 2, 2: 3}; var m = Array.prototype.map.call(o, function (x) { return x * 2; }); var r = m.join() + ',' + Array.prototype.every.call(o, function (x) { return x > 0; });", "r", "2,4,6,true"),
+        ("var r = Array.prototype.concat.call(1, [2], [3, [4]]).length;", "r", "4"),
+        ("var r = [1, 2, 3, 4].at(-1) + ',' + [1, 2, 3].with(1, 9).join() + ',' + [3, 1, 2].toSorted().join() + ',' + [1, 2, 3].toReversed().join() + ',' + [1, 2, 3, 4].toSpliced(1, 2, 'x').join();", "r", "4,1,9,3,1,2,3,3,2,1,1,x,4"),
+        ("var a = [1, 2, 3, 4, 5]; a.copyWithin(0, 3); a.fill(0, 3); var r = a.join();", "r", "4,5,3,0,0"),
+        ("var r = [1, [2, [3, [4]]]].flat(2).join() + ',' + [1, 2].flatMap(function (x) { return [x, x * 10]; }).join() + ',' + [1, 2, 3].findLast(function (x) { return x < 3; }) + ',' + [1, 2, 3].findLastIndex(function (x) { return x > 5; });", "r", "1,2,3,4,1,10,2,20,2,-1"),
+        ("var r = Array.of(7, 8).join() + ',' + Array.from({length: 2, 0: 'x', 1: 'y'}).join();", "r", "7,8,x,y"),
+        ("var r; try { new Array(-1); } catch (e) { r = e.name; }", "r", "RangeError"),
+        ("var a = [1, , 3]; var r = a.indexOf(undefined) + ',' + a.includes(undefined) + ',' + a.lastIndexOf(3) + ',' + [NaN].includes(NaN) + ',' + [NaN].indexOf(NaN);", "r", "-1,true,2,true,-1"),
+        ("var a = []; a[2] = 1; var r = a.slice().length + ',' + (0 in a.slice()) + ',' + a.splice(1, 2).length + ',' + a.length;", "r", "3,false,2,1"),
+        ("var r; try { Array.prototype.pop.call(''); } catch (e) { r = e.name; }", "r", "TypeError"),
+    ]);
+}
+
 /// `load` runs the prelude and then hides `__def`. It must not delete it: a delete of a property that is not the last one puts the global
 /// object in dictionary mode, and then no global access can be cached (`Shapes::cacheable`).
 #[test]
@@ -718,5 +778,41 @@ fn def_is_hidden_after_load() {
     check(&[
         ("var r = typeof __def + Object.keys(globalThis).indexOf('__def');", "r", "undefined-1"),
         ("var __def = 5; var r = __def;", "r", "5"),
+        ("var r = typeof __helper + typeof __set + Object.keys(globalThis).indexOf('__helper') + Object.keys(globalThis).indexOf('__set');", "r", "undefinedundefined-1-1"),
+    ]);
+}
+
+/// A write that a frozen, sealed or non-extensible object refuses is silent in sloppy code and a `TypeError` in strict code, for a
+/// named property, an index, the `length` of an array and a new property.
+#[test]
+fn a_refused_write_throws_in_strict_code_only() {
+    let strict = |body: &str| format!("'use strict'; var r; try {{ {body}; r = 'no throw'; }} catch (e) {{ r = e.name; }}");
+    check(&[
+        (&strict("var o = Object.freeze({a: 1}); o.a = 2"), "r", "TypeError"),
+        (&strict("var o = Object.preventExtensions({a: 1}); o.b = 2"), "r", "TypeError"),
+        (&strict("var o = Object.preventExtensions({a: 1}); o.a = 2"), "r", "no throw"),
+        (&strict("var a = Object.freeze([1, 2]); a[0] = 5"), "r", "TypeError"),
+        (&strict("var a = Object.freeze([1, 2]); a[5] = 5"), "r", "TypeError"),
+        (&strict("var a = Object.freeze([1, 2]); a.length = 0"), "r", "TypeError"),
+        (&strict("var a = Object.freeze([1, 2]); a.push(3)"), "r", "TypeError"),
+        (&strict("var o = {}; Object.defineProperty(o, 'x', {value: 1}); o.x = 2"), "r", "TypeError"),
+        (&strict("var p = Object.freeze({x: 1}); var o = Object.create(p); o.x = 2"), "r", "TypeError"),
+        (&strict("var o = {get g() { return 1; }}; o.g = 2"), "r", "TypeError"),
+        (&strict("var o = Object.seal({a: 1}); o.a = 2; delete o.a"), "r", "TypeError"),
+        ("var o = Object.freeze({a: 1}); o.a = 2; o.b = 3; var a = Object.freeze([1]); a[0] = 2; a[3] = 1; a.length = 0; var r = o.a + ',' + o.b + ',' + a.join() + ',' + a.length;", "r", "1,undefined,1,1"),
+    ]);
+}
+
+/// A script function has its `length` and `name` made at the first look at its own properties, a built-in at the first use of one of
+/// them: `freeze`, `isFrozen`, `defineProperty` and the descriptors must see both.
+#[test]
+fn freeze_and_define_see_the_lazy_length_and_name_of_functions() {
+    check(&[
+        ("function f(a, b) {} Object.freeze(f); var d = Object.getOwnPropertyDescriptor(f, 'name'); var r = d.value + ',' + d.writable + ',' + d.configurable + ',' + Object.isFrozen(f) + ',' + f.length;", "r", "f,false,false,true,2"),
+        ("var m = Math.max; Object.freeze(m); var d = Object.getOwnPropertyDescriptor(m, 'length'); var r = d.value + ',' + d.configurable + ',' + Object.isFrozen(m) + ',' + Object.isFrozen(Math.min);", "r", "2,false,true,false"),
+        ("var g = function () {}; var r = Object.isFrozen(g) + ',' + Object.isSealed(Object.seal(g)) + ',' + Object.getOwnPropertyNames(g).slice(0, 2).join();", "r", "false,true,length,name"),
+        ("function f() {} Object.defineProperty(f, 'x', {value: 1}); var n = Object.getOwnPropertyNames(f); var r = n.slice(0, 2).join() + ',' + (n.indexOf('x') > 1);", "r", "length,name,true"),
+        ("function f() {} Object.preventExtensions(f); var r = f.name + ',' + f.length + ',' + Object.getOwnPropertyNames(f).slice(0, 2).join();", "r", "f,0,length,name"),
+        ("var f = Array.prototype.push; Object.preventExtensions(f); var r = f.name + ',' + f.length;", "r", "push,1"),
     ]);
 }

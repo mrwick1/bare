@@ -18,6 +18,4 @@ script_tests:467	toFixed(2) of -0.0001: js2 loses the sign of "-0.00"
 script_tests:478	self: the old engine has no global self
 script_tests:480	self: the old engine has no global self
 script_tests:479	Symbol: js2 has none
-corpus:array_gaps	Array.of and Array.prototype.flat: js2 has neither
 corpus:error_gaps	new of a bound function, the strict assignment to an undeclared name, Error cause: js2 has none of them
-corpus:key_order	integer keys of a plain object keep the order of insertion in js2 (ownKeys order, S3)
