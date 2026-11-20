@@ -60,10 +60,6 @@ impl Dom {
         run(it, |s| self.depth_of_s(s, n))
     }
 
-    pub(crate) fn insert_checked(&self, it: &mut Interp<'_>, parent: NodeId, node: NodeId, before: Option<NodeId>, op: Op) -> R<()> {
-        run(it, |s| self.insert_checked_s(s, parent, node, before, op))
-    }
-
     /// `def_method` for a function of the new form.
     pub(crate) fn def_method_s(&self, it: &mut Interp<'_>, target: ObjId, name: &str, len: u32, h: HS) -> R<ObjId> {
         let key = self.key(it, name)?;

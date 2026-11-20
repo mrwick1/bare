@@ -19,7 +19,6 @@
 //! - A change of the text children of a textarea that is not dirty does not move a caret that was set before. `setRangeText` is absent.
 
 use crate::browser::*;
-use crate::browser_dom::arg;
 use crate::browser_reflect::this_of;
 use crate::browser_scoped::*;
 use crate::browser_select::{get, reflect};

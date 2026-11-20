@@ -15707,6 +15707,36 @@ Measurements. Machine archMachine. Instruction counts (`perf stat -e instruction
 Tests. Linux: `cargo test --locked -p bare-js-api -p bare-js -p bare --lib`: 32, 1104 (1 ignored) and 1714 (6 ignored) pass. The filters of the converted files and of `browser_scoped`, `custom`, `domexception`, `mutation`, `range`, `select`, `cookie`, `browser_tests` (436 tests, 1 ignored): pass plain, with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1`. Windows 11 VM (`cargo xwin test --no-run`, `winssh`): the same filters, 436 pass.
 
 Not tested: `BARE_GC_STRESS=1` and `BARE_ALL_API=1` with the whole `bare --lib`; the full `bare --lib` on Windows; the jemalloc run of the rows at `codegen-units=1` except the two noted; RSS and wall time; the files that are not converted.
+## 2026-11-20: host handlers on the interface, group C: the forms files (plan step S0.4 / C)
+
+Status: the handlers of the forms files run through the interface (`Scope`, `Local`, `Args`). Tests pass on Linux and Windows. The full matrix passes under the standing rule: no row is over +0.5% under both allocators. Base: PR #762 (A1c) merged with origin/main `ee8ba415`. The diff is 733 added and 685 removed lines in 9 files.
+
+Files converted: `browser_form.rs`, `browser_controls.rs`, `browser_select.rs`, `browser_submit.rs`, `browser_face.rs`. Registrations changed in `browser.rs` (the `DEFS` rows of the Input, Button, Form, Select and Submit interfaces, and the `SubmitEvent` constructor, which uses `add_fn_s_obj` with `HostFn::CtorNewTarget`), `browser_custom.rs` (`attachInternals` uses `def_method_s`) and `browser_nodelist.rs` (`members` reads a scope; `select_of` takes an `ObjId`).
+
+Not converted, and why:
+
+- Helpers that other files call stay in the old form: `form_owner`, `form_elements`, `is_connected_node`, `is_disabled_control`, `activation_target`, `user_click`, `activate`, `submit_form`, `button_state` (form); `will_validate`, `verdict`, `is_invalid`, `message_of`, `reset_form`, `reset_control` (controls); `owned_controls`, `entry_list`, `submit_with` (submit). Their callers are the event files (group B) and `browser_textarea.rs`. A new-form handler calls them through `old(...)`.
+- `reflect!` and `html_el` in `browser_select.rs` stay for `browser_textarea.rs`. The new macro `reflect_s!` serves the converted code. They go when the textarea moves.
+- Install code, the lazy definers, the tables keyed by `ObjId` (`made_validity`, `made_label`, `interface`, `link`, `held`, `forget`, `ints`, `face`) and `Host::fill_indexed` stay in the old form. They run once, or key tables by `ObjId`.
+- The calls of `new_event_proto`, `dispatch` and `focus_node` (group B files) go through `old(...)`. If group B changes their signatures, the second PR to merge needs a small fix.
+
+Changes.
+
+- Removed: `def_get_sh` (its only caller was `options.length`), `collection_*_index` and `collection_length_set` in `browser_select.rs`, the `V` aliases and the old `Error` import that became unused.
+- `browser_submit.rs`: `report_one` takes a scope (used by `browser_face.rs`). `browser_controls.rs`: `control`, `labels_of` and `validity_of` take a scope.
+
+Grep gate (`\bbare_js::(value|eval::Interp)|\bObjId\b|\bInterp\b|\.engine\(\)|\.heap\.`, lines for each file, before then now): form 28 to 9, controls 50 to 35, select 81 to 33, submit 17 to 8, face 40 to 7. The goal 0 is not met. What stays is the list above.
+
+Measurements. Machine archMachine. Instruction counts (`perf stat -e instructions:u`, minimum of 3 runs, `tools/js/cost_matrix.sh -j4`, 817 rows, base tree built from the base commit).
+
+- Full matrix at default flags: mean glibc +0.003%, jemalloc +0.495% (1 row measured). Over +0.5% under both allocators: none. Over under glibc only: `console_load format 10` +0.535% (three runs: +0.535%, +0.536%, +0.535%) with jemalloc +0.495%, +0.468%, +0.428%. This row does not call a forms handler (console, group B). Hypothesis: code layout.
+- `parse_load deep 1` and `10` do not run on either tree (known).
+- No row was over under both allocators, so the `codegen-units=1` rule and the callgrind per-call step were not needed.
+
+Tests. Linux: `cargo test --locked -p bare-js-api -p bare-js -p bare --lib`: 32, 1104 (1 ignored) and 1714 (6 ignored) pass. The filters `form control select submit face valid custom_ nodelist label internals reset browser_tests scoped` on `bare --lib` (345 tests, 1 ignored): pass plain, with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1`. The whole `bare --lib` with `BARE_ALL_API=1`: 1714 pass. The whole `bare --lib` with `BARE_GC_STRESS=1`: 1713 pass and 1 fails, `browser_reclaim_tests::parsed_documents_ask_for_a_collect_by_their_native_bytes` (line 137). It fails the same way on the base tree (`9f74a623`), so this change did not cause it. Windows 11 VM (`cargo xwin test --no-run`, exes through `winssh`): `bare-js-api` 32, `bare-js` filters `api_tests host_nt` 50, `bare` the same 345-test filters: pass.
+
+Not tested: the whole `bare --lib` on Windows; `BARE_GC_STRESS=1` and `BARE_ALL_API=1` on Windows; RSS and wall time; `codegen-units=1` and callgrind (no row needed them); a merge with the group B PR; the files that are not converted.
+
 ## 2026-11-20: core built-ins in js2 (plan step S2.7)
 
 Real scripts now run end to end on the js2 interpreter. This step adds `Object`, `Function.prototype`, `Error` and its subclasses, `ToPrimitive`, `Array`, `String.prototype`, `Number`, `Boolean`, `Math`, `parseInt`, `parseFloat`, `isNaN`, `isFinite`, `globalThis` and `self`. Base: PR #757 (`t3/js2-interpreter`), merged with the newest main.
