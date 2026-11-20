@@ -16893,3 +16893,34 @@ The `codegen-units=1` rule was not needed: no row is over under both allocators 
 Tests. Linux, debug: `cargo test --locked -p bare-js-api -p bare-js -p bare --lib`: 32, 1104 (1 ignored) and 1716 (6 ignored) pass (one new test). `a_panic_in_a_host_call_unlinks_its_window` passes. The filters `fetch xhr stream abort web_ encoding worker crypto blob form_data formdata navigator headers request response textencoder file_ subtle` on `bare --lib`: 254 tests (333 runs, one for each filter), pass plain, with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1`. Windows 11 VM (`cargo xwin test --no-run`, exe through `winssh`): the same filters, 254 tests, pass in the three modes. The whole `bare --lib` on Windows: 1712 pass and 4 fail. The same 4 tests fail on a Windows build of the base (`origin/main` with the `def_get_sh` fix): `browser_date_tests::local_time_uses_the_zone_of_the_realm_in_the_browser` (a JS `Throw` at line 140: the time zone of the realm on Windows), `browser_session::tests::a_page_fed_in_pieces_gives_the_tree_of_a_one_step_parse` and `a_page_parsed_in_slices_gives_the_tree_of_a_one_step_parse` (`NotFound` at `browser_session.rs:1068`, a fixture path) and `resources::tests::staging_login_fixture_discovery` (`NotFound` at `resources.rs:821`, a fixture path). So they are not caused by E. Cause for the three `NotFound` tests (hypothesis): the exe runs on the VM without the repository tree.
 
 Not tested: the whole `bare --lib` with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1` (the base fails one test under whole-crate `BARE_GC_STRESS=1`, as the entry before says); macOS; RSS and wall time; `-J` on the old head `2876c1e1`; the stress mode with a collect between a stream `read` and its reaction; the merge with the open PRs B (#779), A2 (#781) and G (#782).
+
+## 2026-11-20: js2 early errors, group 1 (parser rules)
+
+Task: raise the test262 pass rate of js2 on early errors (a script that must fail at parse time and is accepted, a valid script that is rejected). Base: `43b62b05` (`origin/main`). Method: `tools/js/test262_js2.sh -j 6` on the base, then a scan of every test of `test/language`, `test/annexB/language`, `test/built-ins`, `test/staging` and `test/annexB/built-ins` (module tests left out), whatever their features, with `negative: phase: parse|early` (must be a SyntaxError) or no `negative` (must not be a SyntaxError). The scan compiles each file in sloppy and strict mode with `script::compile` (a scratch example, not committed). A `not supported yet` error counts as accepted for a negative test: it comes after the parse.
+
+Result on the runner (`tools/js/test262_js2.sh`): js2 passes 14,718 before and 14,772 after (3,066 and 3,012 failures; 11,979 skipped on both). Test by test against the run of the base: 54 go from fail to pass, 0 from pass to fail. The new baseline file lists the gains. The committed baseline of the earlier entry was stale against `origin/main` (for example `language/statements/function` was 192 passes in the file and 172 on the base); this run regenerates it from the base plus this change.
+
+Causes fixed (all in `parse.rs`).
+
+1. `'use strict'` in the body of a function with non-simple parameters was an error only in sloppy code. In strict code (a strict script, a class body, an enclosing directive) the check was skipped by an early return in `on_directive`. The check now comes first. Fixes the `*-param-strict-body` and `use-strict-with-non-simple-param` tests of functions, arrows, async arrows, methods and class methods (49 tests of the runner).
+2. `arguments: ...` as a label in a class field initializer, an arrow in one, or a static block was rejected as a use of `arguments`. The expression statement now reads `NAME :` as a label first when `field_init` is set. The test is a flag test, so the other statements pay nothing. 2 tests of the runner.
+3. `(function await(await) {})` in a static block was rejected: the name of a function expression was checked with `static_block` still set. The function has its own context. 2 tests of the runner.
+4. `async(x = await) => {}`, `async(a = await => {}) => {}`, `async(await) => {}`, `async(a = (await) => {}) => {}` and `async(a = (...await) => {}) => {}` were accepted. `await` as a name is now recorded (`await_ident`, like `await_pos`) and an async arrow with one in its parameters is an error. A nested function has its own record, so `async(x = function () { var await }) => {}` is still valid. 1 test of the runner (the other forms are in `an_async_arrow_parameter_cannot_use_await_as_a_name`: their tests are skipped by feature).
+
+Parse cost (instructions, `parse_load MODE file 1 PATH`, minimum of 3 runs for each of 3 runs, machine archMachine, `--release`, base and branch built from source). The cost is the compare of each name with `await`.
+
+| File (modes full / lazy / fns)       | Base full | After | Change | lazy | fns |
+| ------------------------------------ | --------: | ----: | -----: | ---: | --: |
+| `lodash.js` (73 KB)                  | 17,800,786 | 17,846,008 | +0.25% | +0.21% | +0.21% |
+| `reactdom.js` (132 KB)               | 27,256,958 | 27,316,437 | +0.22% | +0.17% | +0.17% |
+| `clangd.js` (1 MB)                   | 170,770,401 | 171,005,544 | +0.14% | +0.12% | +0.12% |
+| `axios.js` (54 KB)                   | 10,920,645 | 10,940,827 | +0.18% | +0.16% | +0.16% |
+| `prelude.js` (14 KB)                 | 2,318,383 | 2,323,007 | +0.20% | +0.17% | +0.18% |
+
+The spread of the 3 runs is under 0.01% on each row. All rows are under +0.5%.
+
+Left (not fixed in group 1): the regular expression pattern errors (334 tests of `literals/regexp` and 384 of `built-ins/RegExp`; group 2); every test that checks an early error through `eval` or `new Function` (about 60 in the runner; `eval` belongs to S3); the Annex B `f() = 1` forms (7 valid sloppy tests of `annexB/language/expressions/assignmenttargettype`, js2 rejects them); `await` in the body of an arrow in a static block (js2 accepts it, to verify against the spec).
+
+Tests: 4 new tests in `parse_tests.rs` (each checks the full parse and the pre-parse): `use_strict_with_non_simple_parameters_fails_in_strict_code_too`, `a_label_named_arguments_is_allowed_in_a_field_initializer`, `a_function_in_a_static_block_may_bind_await`, `an_async_arrow_parameter_cannot_use_await_as_a_name`. `script_tests.rs` did not compile on the base (`compile_after` takes a sixth argument since #787): two calls got `None`. `cargo test --locked -p bare-js2 --lib`: 407 pass (including `a_scope_with_many_locals_compiles_in_linear_time`). `cargo test --locked -p bare-js-diff`: all pass (256 programs, no new difference, known list unchanged).
+
+Not tested: Windows; the browser (js2 is not wired in); the test262 `module` flag tests; `built-ins` tests beyond the scan.
