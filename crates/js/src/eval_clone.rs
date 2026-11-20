@@ -3,10 +3,40 @@
 // The engine walks plain data itself (`clone_out`) and writes a record with `bare_js_api::clone`. It builds the graph back from a record
 // (`clone_in`). The host sees only host objects, the transfer list and the error (`CloneHost`). The engine knows which object is a Date,
 // Map, Set, RegExp or Error: that state is in side tables the host cannot read. `clone_class` answers it, and the `clone_new_*`
-// functions make the new objects. This is the generic path: every property goes through `own_keys`, `get_own_property`, `get_value`
-// and `define_data`. An Error has no internal slot here: an ordinary object whose prototype chain holds an `Error.prototype` is an Error.
+// functions make the new objects. The generic path sends every property through `own_keys`, `get_own_property`, `get_value` and
+// `define_data`. The fast path (plan step 4) reads the keys and the values of a plain object or a dense array straight from its shape
+// and slots, and builds a new object with its final shape at once. It starts only for an object with plain data properties, where no
+// getter runs, and it goes back to the generic path as soon as a child (which can run a getter) has changed the object.
+// An Error has no internal slot here: an ordinary object whose prototype chain holds an `Error.prototype` is an Error.
 
 use bare_js_api::clone as cl;
+
+// Test only: send the walk (`GENERIC_OUT`) or the reader (`GENERIC_IN`) of this thread by the generic path, to compare it with the fast path.
+#[cfg(test)]
+thread_local! {
+    static CLONE_GENERIC: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+thread_local! {
+    // Test only: objects that the fast path started, and objects that it handed back to the generic path half way.
+    static CLONE_FAST_COUNT: std::cell::Cell<(u32, u32)> = const { std::cell::Cell::new((0, 0)) };
+}
+const GENERIC_OUT: u8 = 1;
+const GENERIC_IN: u8 = 2;
+
+/// Is the fast path off for `bit`? Always false outside the tests.
+#[inline(always)]
+fn clone_generic(bit: u8) -> bool {
+    #[cfg(test)]
+    {
+        CLONE_GENERIC.with(|c| c.get()) & bit != 0
+    }
+    #[cfg(not(test))]
+    {
+        let _ = bit;
+        false
+    }
+}
 
 /// What an object is for structured clone.
 #[derive(Clone, Copy, Debug)]
@@ -246,18 +276,28 @@ impl<'p> CloneWalk<'_, 'p> {
         self.done(it, r)?;
         match class {
             CloneClass::Plain => {
-                if it.heap.is_array(o).map_err(Error::Heap)? {
-                    let len = match it.heap.get_own_property(o, it.k_length) {
-                        Ok(Some(Property::Data { value: Value::Number(n), .. })) => n as u32,
-                        _ => 0,
-                    };
-                    let id = self.w.array_sparse(len);
+                if let Some(sh) = it.heap.clone_shape(o).filter(|_| !clone_generic(GENERIC_OUT)) {
+                    let id = if sh.array { self.w.array_dense(sh.elems) } else { self.w.object() };
                     self.ids.insert(key, id);
+                    self.props_fast(it, o, sh, depth)?;
                 } else {
-                    let id = self.w.object();
-                    self.ids.insert(key, id);
+                    if it.heap.is_array(o).map_err(Error::Heap)? {
+                        let len = match it.heap.get_own_property(o, it.k_length) {
+                            Ok(Some(Property::Data { value: Value::Number(n), .. })) => n as u32,
+                            _ => 0,
+                        };
+                        let id = self.w.array_sparse(len);
+                        self.ids.insert(key, id);
+                    } else {
+                        let id = self.w.object();
+                        self.ids.insert(key, id);
+                    }
+                    let keys = match it.heap.own_keys(o) {
+                        Ok(k) => k,
+                        Err(e) => return Err(it.heap_error(e)),
+                    };
+                    self.props(it, o, depth, keys, 0)?;
                 }
-                self.props(it, o, depth)?;
                 self.w.end();
             }
             CloneClass::Date(t) => {
@@ -352,12 +392,53 @@ impl<'p> CloneWalk<'_, 'p> {
         Ok(())
     }
 
-    /// The own enumerable string keys of a plain object or array, with their values.
-    fn props(&mut self, it: &mut Interp<'p>, o: ObjId, depth: usize) -> Result<(), Error> {
-        let keys = match it.heap.own_keys(o) {
-            Ok(k) => k,
-            Err(e) => return Err(it.heap_error(e)),
-        };
+    /// The fast path of a plain object or a dense array (`Heap::clone_shape`): the same steps, the same charges and the same record as `props`
+    /// gives for it (an array is written dense), with no getter at this object. Each key and value is read at its own turn. When the object
+    /// is not as it was (a child that is an object ran a getter, or a child changed it), the keys that are left go to `props`, which reads
+    /// them as the spec does.
+    fn props_fast(&mut self, it: &mut Interp<'p>, o: ObjId, sh: crate::heap::CloneShape, depth: usize) -> Result<(), Error> {
+        #[cfg(test)]
+        CLONE_FAST_COUNT.with(|c| c.set((c.get().0 + 1, c.get().1)));
+        let n = sh.elems;
+        for p in 0..n + sh.named {
+            if p < n {
+                let Some(v) = it.heap.clone_elem(o, sh, p) else { return self.props_back(it, o, sh, p, depth) };
+                self.m.step(1);
+                let r = self.m.key_index();
+                self.done(it, r)?;
+                self.val(it, v, depth + 1)?;
+            } else if sh.array && p == n {
+                // The `length` of an array is not enumerable: the old walk charged its step and left it out.
+                self.m.step(1);
+                self.flush(it)?;
+            } else {
+                let Some((PropertyKey::String(s), v)) = it.heap.clone_prop(o, sh, p - n) else { return self.props_back(it, o, sh, p, depth) };
+                self.m.step(1);
+                match it.heap.str_units(s) {
+                    Ok(u) => {
+                        let r = self.m.key_name(u.len());
+                        self.w.key(clone_str_key(s), u);
+                        self.done(it, r)?;
+                    }
+                    Err(e) => return Err(it.heap_error(e)),
+                }
+                self.val(it, v, depth + 1)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The keys from place `from` on go to `props`: the object is not as `props_fast` found it.
+    #[cold]
+    fn props_back(&mut self, it: &mut Interp<'p>, o: ObjId, sh: crate::heap::CloneShape, from: usize, depth: usize) -> Result<(), Error> {
+        #[cfg(test)]
+        CLONE_FAST_COUNT.with(|c| c.set((c.get().0, c.get().1 + 1)));
+        self.props(it, o, depth, it.heap.clone_keys(sh, from), sh.elems)
+    }
+
+    /// The own enumerable string keys of a plain object or array, with their values. `keys` is the snapshot of its own keys. The record of
+    /// an array that `props_fast` began is dense: an index below `dense` is written as a value with no key, and a key that is gone as `Hole`.
+    fn props(&mut self, it: &mut Interp<'p>, o: ObjId, depth: usize, keys: Vec<PropertyKey>, dense: usize) -> Result<(), Error> {
         for key in keys {
             self.m.step(1);
             self.flush(it)?;
@@ -367,13 +448,20 @@ impl<'p> CloneWalk<'_, 'p> {
             // Own and enumerable now, as the spec checks just before each `[[Get]]`.
             match it.heap.get_own_property(o, key) {
                 Ok(Some(p)) if p.enumerable() => {}
-                Ok(_) => continue,
+                Ok(_) => {
+                    if matches!(key, PropertyKey::Index(i) if (i as usize) < dense) {
+                        self.w.hole();
+                    }
+                    continue;
+                }
                 Err(e) => return Err(it.heap_error(e)),
             }
             let r = match key {
                 PropertyKey::Index(i) => {
                     let r = self.m.key_index();
-                    self.w.key_index(i);
+                    if i as usize >= dense {
+                        self.w.key_index(i);
+                    }
                     r
                 }
                 PropertyKey::String(s) => match it.heap.str_units(s) {
@@ -452,6 +540,13 @@ struct CloneRd<'r> {
     k_cause: PropertyKey,
     op: ObjId,
     ap: ObjId,
+    /// The keys and the values of the objects that are being read, one run for each object (the fast path installs them at once).
+    ks: Vec<PropertyKey>,
+    vs: Vec<Value>,
+    /// The units of the string that is being interned.
+    buf: Vec<u16>,
+    /// The shapes of the last key lists, for the objects that are new.
+    shapes: crate::heap::CloneShapes,
 }
 
 macro_rules! rd {
@@ -494,25 +589,18 @@ impl<'p> Interp<'p> {
         }
         let k_cause = h!(self, self.heap.key_from_str("cause"));
         let (op, ap) = (self.object_prototype(), self.array_prototype());
-        let mut st = CloneRd { r: cl::RecordReader::new(c.bytes()), objs: Vec::new(), keys: Vec::new(), items, k_cause, op, ap };
+        let mut st = CloneRd { r: cl::RecordReader::new(c.bytes()), objs: Vec::with_capacity(8), keys: Vec::with_capacity(8), items, k_cause, op, ap, ks: Vec::with_capacity(8), vs: Vec::with_capacity(8), buf: Vec::new(), shapes: Default::default() };
         let root = self.clone_rv(&mut st)?;
         rd!(st.r.finish());
         Ok((root, hosts))
     }
 
-    fn clone_str(&mut self, t: cl::Text<'_>) -> Result<StrId, Error> {
-        let n = t.len();
-        let mut small = [0u16; 64];
-        let mut big = Vec::new();
-        let buf: &mut [u16] = if n <= 64 {
-            &mut small[..n]
-        } else {
-            big.resize(n, 0);
-            &mut big
-        };
+    /// Intern the text. `buf` is a scratch vector of the reader.
+    fn clone_str(&mut self, buf: &mut Vec<u16>, t: cl::Text<'_>) -> Result<StrId, Error> {
+        buf.clear();
         match t {
-            cl::Text::Latin1(b) => buf.iter_mut().zip(b).for_each(|(d, &c)| *d = c as u16),
-            cl::Text::Utf16(b) => buf.iter_mut().zip(b.chunks_exact(2)).for_each(|(d, c)| *d = u16::from_le_bytes([c[0], c[1]])),
+            cl::Text::Latin1(b) => buf.extend(b.iter().map(|&c| c as u16)),
+            cl::Text::Utf16(b) => buf.extend(b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]]))),
         }
         Ok(h!(self, self.heap.intern_units(buf)))
     }
@@ -522,7 +610,7 @@ impl<'p> Interp<'p> {
             cl::Key::Index(i) => PropertyKey::Index(i),
             cl::Key::Ref(n) => st.keys[n as usize],
             cl::Key::New(t) => {
-                let s = self.clone_str(t)?;
+                let s = self.clone_str(&mut st.buf, t)?;
                 let k = h!(self, self.heap.key_from_string(s));
                 st.keys.push(k);
                 k
@@ -541,14 +629,28 @@ impl<'p> Interp<'p> {
         self.clone_rv_tag(st, tag)
     }
 
-    /// The properties of a plain object or an array, up to `End`.
-    fn clone_props(&mut self, st: &mut CloneRd<'_>, o: ObjId) -> Result<(), Error> {
+    /// The properties of a plain object or an array, up to `End`, on the stacks `ks` and `vs` (from where they were). They are not
+    /// defined yet: an object that has them all gets its shape at once (`Heap::clone_install`).
+    fn clone_props(&mut self, st: &mut CloneRd<'_>) -> Result<(), Error> {
         while let Some(k) = rd!(st.r.key()) {
             self.charge(1)?;
             let key = self.clone_key(st, k)?;
             let val = self.clone_rv(st)?;
-            self.define_data(o, key, val, true, true, true)?;
+            st.ks.push(key);
+            st.vs.push(val);
         }
+        Ok(())
+    }
+
+    /// Define the properties on the stacks above `from` on `o`, and drop them. An object that is new takes them at once.
+    fn clone_define(&mut self, st: &mut CloneRd<'_>, o: ObjId, from: usize, at_once: bool) -> Result<(), Error> {
+        if !(at_once && !clone_generic(GENERIC_IN) && h!(self, self.heap.clone_install(o, &st.ks[from..], &st.vs[from..], &mut st.shapes))) {
+            for i in from..st.ks.len() {
+                self.define_data(o, st.ks[i], st.vs[i], true, true, true)?;
+            }
+        }
+        st.ks.truncate(from);
+        st.vs.truncate(from);
         Ok(())
     }
 
@@ -563,7 +665,7 @@ impl<'p> Interp<'p> {
             Tag::Num => Value::Number(rd!(st.r.num())),
             Tag::Str8 | Tag::Str16 => {
                 let t = rd!(st.r.text(tag));
-                Value::String(self.clone_str(t)?)
+                Value::String(self.clone_str(&mut st.buf, t)?)
             }
             Tag::Big => {
                 let mut limbs = Vec::new();
@@ -577,29 +679,48 @@ impl<'p> Interp<'p> {
             Tag::Obj => {
                 let o = h!(self, self.heap.new_object(Some(st.op)));
                 let v = self.clone_obj(st, o)?;
-                self.clone_props(st, o)?;
+                let from = st.ks.len();
+                self.clone_props(st)?;
+                self.clone_define(st, o, from, true)?;
                 v
             }
             Tag::Arr | Tag::ArrD => {
                 let o = h!(self, self.heap.new_array(Some(st.ap)));
                 let v = self.clone_obj(st, o)?;
+                let from = st.ks.len();
                 let len = if tag == Tag::Arr {
                     rd!(st.r.sparse_len())
                 } else {
                     let n = rd!(st.r.dense_len());
+                    let generic = clone_generic(GENERIC_IN);
+                    let mut elems = Vec::with_capacity(if generic { 0 } else { n });
                     for i in 0..n {
                         let t = rd!(st.r.tag());
                         if t == Tag::Hole {
+                            if !generic {
+                                elems.push(None);
+                            }
                             continue;
                         }
                         self.charge(1)?;
                         let val = self.clone_rv_tag(st, t)?;
-                        self.define_data(o, PropertyKey::Index(i as u32), val, true, true, true)?;
+                        if generic {
+                            self.define_data(o, PropertyKey::Index(i as u32), val, true, true, true)?;
+                        } else {
+                            elems.push(Some(val));
+                        }
+                    }
+                    // The elements and the `length` of a new array go in at once. Nothing can have changed it since `new_array`.
+                    if !generic && !h!(self, self.heap.fill_array(o, elems, n as u32)) {
+                        return Err(unsupported("clone array", Span::default()));
                     }
                     n as u32
                 };
-                self.clone_props(st, o)?;
-                self.put_value(v, self.k_length, Value::Number(len as f64))?;
+                self.clone_props(st)?;
+                self.clone_define(st, o, from, false)?;
+                if tag == Tag::Arr || clone_generic(GENERIC_IN) {
+                    self.put_value(v, self.k_length, Value::Number(len as f64))?;
+                }
                 v
             }
             Tag::Date => {
@@ -608,7 +729,7 @@ impl<'p> Interp<'p> {
             }
             Tag::RegExp => {
                 let (s, f) = rd!(st.r.regexp());
-                let (s, f) = (self.clone_str(s)?, self.clone_str(f)?);
+                let (s, f) = (self.clone_str(&mut st.buf, s)?, self.clone_str(&mut st.buf, f)?);
                 let o = self.clone_new_regexp(s, f)?;
                 self.clone_obj(st, o)?
             }
@@ -658,6 +779,10 @@ impl<'p> Interp<'p> {
                     i if i < TYPED.len() => TYPED[i],
                     _ => return Err(unsupported("damaged clone record", Span::default())),
                 };
+                let end = len.checked_mul(ty.size()).and_then(|n| n.checked_add(off));
+                if end.is_none_or(|e| self.heap.buffer_len(buf).is_none_or(|b| e > b)) {
+                    return Err(unsupported("damaged clone record", Span::default()));
+                }
                 let o = self.clone_new_view(buf, off, len, ty)?;
                 self.clone_obj(st, o)?
             }

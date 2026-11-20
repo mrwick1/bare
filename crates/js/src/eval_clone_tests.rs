@@ -199,3 +199,220 @@ fn clone_damaged_record_is_an_error_and_not_a_panic() {
     let mut trailing = Cloned::new([&bytes[..], &[0]].concat().into(), Vec::new(), 0);
     assert!(matches!(clone_in(&mut it, &mut trailing, &mut h), Err(Error::Unsupported(_))));
 }
+
+#[test]
+fn clone_view_outside_its_buffer_is_a_damaged_record() {
+    let mut it = realm();
+    let mut h = Host::default();
+    script(&mut it, "0");
+    // `(type, byte offset, length)`: 11 is a `DataView`, 5 is an `Int32Array` (4 bytes each), 0 is an `Int8Array`.
+    for (ty, off, len) in [(0u8, 3usize, 2usize), (0, 5, 0), (0, 0, 5), (5, 0, 2), (5, 4, 1), (11, usize::MAX, 2), (5, 0, usize::MAX)] {
+        let mut w = RecordWriter::new();
+        w.view(ty, off, len);
+        w.buffer(&[1, 2, 3, 4]);
+        w.view_done();
+        let mut c = Cloned::new(w.finish(), Vec::new(), 0);
+        assert!(matches!(clone_in(&mut it, &mut c, &mut h), Err(Error::Unsupported(_))), "type {ty}, offset {off}, length {len}");
+    }
+    // A view that fits is read.
+    let mut w = RecordWriter::new();
+    w.view(0, 1, 3);
+    w.buffer(&[1, 2, 3, 4]);
+    w.view_done();
+    let mut c = Cloned::new(w.finish(), Vec::new(), 0);
+    let (r, _) = clone_in(&mut it, &mut c, &mut h).unwrap();
+    assert_eq!(show(&mut it, r, "[r.byteOffset, r.length, r[0]].join()"), "1,3,2");
+}
+
+// ---------- the fast path against the generic path (`docs/design-host-clone.md`, plan step 4) ----------
+
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+    fn below(&mut self, n: usize) -> usize {
+        (self.next() >> 11) as usize % n
+    }
+    fn chance(&mut self, percent: usize) -> bool {
+        self.below(100) < percent
+    }
+}
+
+/// A random graph of 2 to 5 objects and arrays as a script. Getters (and some plain functions they call) delete, add, redefine and
+/// overwrite keys of any object of the graph, also of the objects that the walk is inside of, and log their own run in `L`.
+/// The script gives the root.
+fn random_graph(seed: u64) -> String {
+    let mut r = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
+    let n = 2 + r.below(4);
+    let array: Vec<bool> = (0..n).map(|i| i > 0 && r.chance(35)).collect();
+    let mut getters = 0;
+    let value = |r: &mut Rng| -> String {
+        match r.below(20) {
+            0 => "1".into(),
+            1 => "2.5".into(),
+            2 => "-0".into(),
+            3 => "'s'".into(),
+            4 => "'\\u00e9'".into(),
+            5 => "'\\ud800'".into(),
+            6 => "true".into(),
+            7 => "null".into(),
+            8 => "undefined".into(),
+            9 => "3n".into(),
+            10 => "new Date(5)".into(),
+            11 => format!("new Map([[1, o{}]])", r.below(n)),
+            12 => format!("[o{}, {}]", r.below(n), r.below(9)),
+            13 if r.chance(10) => "function () {}".into(),
+            _ => format!("o{}", r.below(n)),
+        }
+    };
+    let mutation = |r: &mut Rng, v: &dyn Fn(&mut Rng) -> String| -> String {
+        // The root is the parent of most objects: a getter of a child changes it often.
+        let (a, k) = (if r.chance(40) { 0 } else { r.below(n) }, r.below(5));
+        match r.below(if array[a] { 12 } else { 7 }) {
+            0 => format!("delete o{a}.k{k};"),
+            1 | 2 => format!("o{a}.k{k} = {};", v(r)),
+            3 => format!("o{a}.f{} = {};", r.below(3), v(r)),
+            4 => format!("Object.defineProperty(o{a}, 'k{k}', {{value: {}, enumerable: {}, configurable: true, writable: true}});", v(r), r.chance(70)),
+            5 => format!("Object.defineProperty(o{a}, 'k{k}', {{get: function () {{ L.push('h'); return {}; }}, enumerable: true, configurable: true}});", v(r)),
+            6 => format!("o{a}.k{k} = o{};", r.below(n)),
+            7 => format!("o{a}.length = {};", r.below(3)),
+            8 => format!("o{a}.push({});", v(r)),
+            9 => format!("delete o{a}[{}];", r.below(3)),
+            10 => format!("o{a}.pop();"),
+            _ => format!("o{a}[{}] = {};", r.below(4), v(r)),
+        }
+    };
+    let mut src = String::from("L.length = 0;\n(function () {\nvar ");
+    src += &(0..n).map(|i| format!("o{i} = {}", if array[i] { "[]" } else { "{}" })).collect::<Vec<_>>().join(", ");
+    src += ";\n";
+    // Plain properties and getters, in a random order, so that a getter sits before, between and after plain keys.
+    for _ in 0..(n * 4) {
+        // The root keeps plain data most of the time, so that the walk starts on the fast path at it; its children carry the getters.
+        let i = if r.chance(35) { 0 } else { r.below(n) };
+        let k = r.below(5);
+        let line = match r.below(10) {
+            0..=3 if array[i] => format!("o{i}.push({});", value(&mut r)),
+            0..=5 => format!("o{i}.k{k} = {};", value(&mut r)),
+            6 if array[i] => format!("o{i}[{}] = {};", r.below(5), value(&mut r)),
+            6 | 7 => format!("o{i}.k{k} = {};", value(&mut r)),
+            _ if i == 0 && r.chance(75) => format!("o0.k{k} = o{};", 1 + r.below(n - 1)),
+            _ => {
+                getters += 1;
+                let body: String = (0..r.below(4)).map(|_| mutation(&mut r, &value)).collect::<Vec<_>>().join(" ");
+                let throws = if r.chance(3) { "throw new Error('boom');" } else { "" };
+                let ret = value(&mut r);
+                format!("Object.defineProperty(o{i}, 'k{k}', {{get: function () {{ L.push('g{getters}'); {body} {throws} return {ret}; }}, enumerable: {}, configurable: true}});", r.chance(85))
+            }
+        };
+        src += &line;
+        src += "\n";
+    }
+    src += "return o0;\n})()";
+    src
+}
+
+const DUMP: &str = "function dump(root) {
+  var seen = [];
+  function d(x) {
+    if (x === null) return 'null';
+    var t = typeof x;
+    if (t === 'number') return Object.is(x, -0) ? '-0' : String(x);
+    if (t === 'string') return JSON.stringify(x);
+    if (t === 'function') return 'fn';
+    if (t !== 'object') return String(x);
+    var i = seen.indexOf(x);
+    if (i >= 0) return '#' + i;
+    seen.push(x);
+    var out = (Array.isArray(x) ? 'A' + x.length : x instanceof Map ? 'M' : x instanceof Date ? 'D' + x.getTime() : 'O') + '{';
+    if (x instanceof Map) x.forEach(function (v, k) { out += d(k) + '=>' + d(v) + ','; });
+    var ks = Reflect.ownKeys(x);
+    for (var j = 0; j < ks.length; j++) {
+      var k = ks[j], p = Object.getOwnPropertyDescriptor(x, k);
+      if (Array.isArray(x) && k === 'length') continue;
+      out += String(k) + (p.enumerable ? ':' : '~') + ('get' in p || 'set' in p ? 'acc' : d(p.value)) + ',';
+    }
+    return out + '}';
+  }
+  return d(root);
+}
+globalThis.L = [];
+0";
+
+/// One case in one realm with the fast path off for the bits of `generic`: the answer as text (the copy, the graph after the walk, the
+/// log of the getters, the cost) and the counts of the fast path.
+fn run_graph(it: &mut Interp<'static>, src: &str, generic: u8, l: CloneLimits) -> (String, (u32, u32)) {
+    let mut h = Host::default();
+    CLONE_GENERIC.with(|c| c.set(generic));
+    CLONE_FAST_COUNT.with(|c| c.set((0, 0)));
+    let root = script(it, src);
+    set(it, "orig", root);
+    let copy = match clone_out(it, root, &[], l, &mut h) {
+        Ok(mut c) => {
+            let cost = c.cost();
+            clone_in(it, &mut c, &mut h).map(|(v, _)| (v, cost))
+        }
+        Err(e) => Err(e),
+    };
+    let count = CLONE_FAST_COUNT.with(|c| c.get());
+    CLONE_GENERIC.with(|c| c.set(0));
+    let head = match copy {
+        Ok((v, cost)) => {
+            set(it, "r", v);
+            let d = script(it, "dump(r)");
+            format!("{cost} {}", it.display(d))
+        }
+        Err(Error::Throw(v)) => format!("throw {}", it.display(v)),
+        Err(Error::Limit(_)) => "limit".into(),
+        Err(e) => format!("error {e:?}"),
+    };
+    let tail = script(it, "dump(orig) + ' ' + L.join()");
+    (format!("{head}\n{}", it.display(tail)), count)
+}
+
+#[test]
+fn clone_fast_path_gives_what_the_generic_path_gives() {
+    let big = EvalLimits { max_steps: u64::MAX / 4, ..Default::default() };
+    let mut realms: Vec<Interp<'static>> = Vec::new();
+    let (mut fast_objects, mut fell_back, mut thrown, mut limited) = (0, 0, 0, 0);
+    // `CLONE_FUZZ_SEEDS=20000` runs a longer search.
+    let seeds = std::env::var("CLONE_FUZZ_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(1000u64);
+    for seed in 0..seeds {
+        // A realm takes a limited number of scripts, so a new set of four every 400 cases.
+        if seed % 400 == 0 {
+            realms = (0..4).map(|_| Interp::realm(Heap::default(), big).unwrap()).collect();
+            realms.iter_mut().for_each(|it| {
+                script(it, DUMP);
+            });
+        }
+        let src = random_graph(seed);
+        // Some cases run under small limits, to compare the order of the errors.
+        let l = match seed % 5 {
+            0 => CloneLimits { bytes: 300, ..limits() },
+            1 => CloneLimits { depth: 2, ..limits() },
+            2 => CloneLimits { nodes: 3, ..limits() },
+            _ => limits(),
+        };
+        // Both off, fast write only, fast read only, both on.
+        let modes = [GENERIC_OUT | GENERIC_IN, GENERIC_IN, GENERIC_OUT, 0];
+        let answers: Vec<(String, (u32, u32))> = realms.iter_mut().zip(modes).map(|(it, m)| run_graph(it, &src, m, l)).collect();
+        for (i, (a, _)) in answers.iter().enumerate().skip(1) {
+            assert_eq!(a, &answers[0].0, "seed {seed}, mode {:?}\n{src}", modes[i]);
+        }
+        assert_eq!(answers[0].1, (0, 0), "the generic walk never starts the fast path");
+        fast_objects += answers[1].1.0;
+        fell_back += answers[1].1.1;
+        thrown += answers[0].0.starts_with("throw") as u32;
+        limited += (answers[0].0.starts_with("limit") || answers[0].0.starts_with("error")) as u32;
+    }
+    eprintln!("fast objects {fast_objects}, handed back {fell_back}, throws {thrown}, limits or errors {limited}");
+    // The cases must reach the paths that they are for.
+    assert!(fast_objects > 1000, "objects on the fast path: {fast_objects}");
+    assert!(fell_back > 40, "objects handed back to the generic path half way: {fell_back}");
+    assert!(thrown > 5, "cases where a getter throws: {thrown}");
+    assert!(limited > 100, "cases that stop at a limit: {limited}");
+}
