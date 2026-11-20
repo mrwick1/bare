@@ -15087,3 +15087,38 @@ What would change the answer: a measured lifetime of survivors (how many of the 
 Findings, not changed in main: (1) A block with no free cell is swept again in each cycle; a minor collection could keep such blocks aside. Not built. (2) `remember` for a long record can be about 3 instructions with the shift kept in the block header. Not built. (3) The division in `Heap::mark` (S1.5 finding) is on every mark, minor or full. Not built.
 
 Not tested: Windows (the experiment is not in main, so no VM run); a real interpreter or a JIT (the barrier in an inline cache, 3 to 5 instructions, is not measured); lifetimes of real survivors; the old-data size of the real journeys; arm64; wall time and cycles; weak tables in a minor collection beyond the stub (a table is traced when remembered; no test writes one after it is old); `Obj::add` under a shape cap with a remembered object; the cost matrix (js2 is not wired into the browser).
+
+## 2026-11-20: parse-ahead with a claim table (plan step S2.3)
+
+Change: new module `crates/js2/src/parse_ahead.rs` (tests in `parse_ahead_tests.rs`), one `pub mod` line in `lib.rs`. The module is generic over the parse step (`trait Job`: the mode, the result and `run`). It does not depend on the S2.2 parser. Std only. No `unsafe`.
+
+- Identity: `Identity::of(text)` is the hash (the hash of the old `parse_cache`) and the length. The caller computes it once and passes it to `Sender::submit(mode, id, text)`. The result carries it (`Published::id`), so the compile step and the shared-code lookup (design 6.10 item 19) do not hash the text again. `Published::is(text)` compares the bytes (hash collision).
+- Claim: the table is keyed by (identity, mode). A submit that finds the key only counts a waiter and returns a handle (`Pending`). It copies nothing and allocates nothing. A submit that finds no key claims it with a small slot, and copies the text after that, outside the lock. This fixes the review note about `parse_ahead.rs:151` (design 6.11): the old code copied the text and allocated a job before it looked for a queued duplicate.
+- States: `Claimed`, `Queued` (holds the one copy of the text), `Running`, `Done`. One worker thread runs jobs and publishes. It ends after `Job::PARK` (2 s) idle, and starts again at the next job.
+- Cancel: the last waiter that goes (drop of the last `Pending`, or `take` of queued work) removes a queued entry from the table and the queue. A running entry stays, and a new submit may join it. If no waiter is left when the job ends, the result is dropped (unpublished). `Ahead::cancel` (also on drop) empties the table and the queue, wakes every blocked waiter (`None`) and unpublishes the running job. A job that panics gives `None` and the worker goes on.
+- `Pending::take` (for the page thread) waits for a running job but not for queued work (it cancels it and the caller parses). `Pending::wait` also waits for queued work.
+- Results stay in the table while a handle is held. Later duplicates are for the cache of the caller: `Job::cached(mode, id)` is asked before the claim (the old `parse_cache::known`).
+- Differences from the old module: no thread-local `attach` or `take` by hash (the handle replaces them); the hand-over needs no `unsafe Send` wrapper because the result must be `Send + Sync`; the entries leave with the last waiter.
+
+Found by the flake loop: `take` on queued work removed the entry but did not wake a thread that blocked in `wait` on the same entry. That thread slept for ever (1 hang in about 50 runs of the stress test). Fixed with a `notify_all`, and a test for it (`a_take_of_queued_work_wakes_a_waiter_of_the_same_entry`). After the fix: 400 runs in a row, no failure.
+
+Checks (20 tests): duplicate submits (same mode while queued and while running, other mode, after publish, 10 handles of one entry), cancel while queued (last waiter, `take`), cancel while running (unpublished, and a waiter that comes back), cancel by the page (queued work, running job, blocked waiter, owner drop), a panic, idle end and restart, the limits and `cached`, 16 threads that submit one source in 2 modes (20 rounds: 2 parses and 2 claims each), a stress of 8 threads that submit, take, wait and drop at once on a 4 MiB text (the copy overlaps with joins and takes), and no entry left after any of these.
+
+| Where | Result |
+| --- | --- |
+| Linux, debug, `cargo test -p bare-js2 --lib parse_ahead` | 20 pass, 0.2 to 0.5 s |
+| Linux flake loop (script: test binary 50 times in a row, then 25 rounds of 8 binaries at once), debug | 0 failures in 50 and in 200 parallel runs |
+| Linux flake loop, release | 0 failures in 50 and in 200 parallel runs |
+| Windows 11 VM (`cargo xwin test`, exe through `winssh`) | 20 pass; 50 runs in a row and 10 rounds of 6 at once: 0 failures |
+
+Cost (archMachine, AMD Ryzen 9 5900HX, release, `perf stat -e instructions:u`, 3 runs each, the 3 runs agree within 0.01%; scratch crate `/data/bare-tmp/s0/ahead/bench` with both modules, not in the repo). Cost of one duplicate submit of a text that is already queued, running or done = (N duplicates minus N = 0) / N, minimum of 3. The old path is `bare_js::parse_ahead::Sender::submit`. It hashes the text, asks the cache, copies the text, allocates a slot, then finds the key.
+
+| Text | Old submit | New, hash at each call (same work) | New, identity carried |
+| --- | ---: | ---: | ---: |
+| 64 KiB (N = 2000) | 37,818 | 31,529 | 725 |
+| 1 MiB (N = 200) | 590,781 | 492,329 | 724 |
+
+- The hash is most of the cost of a duplicate when the caller computes it at each call: the new path saves the copy and the allocation (-17%). With the identity carried, a duplicate costs 725 instructions (a lock, a table lookup, an `Arc`-like handle, and the drop of the handle with a second lookup), 52 times fewer at 64 KiB and 816 times fewer at 1 MiB. The 725 are not a target: SipHash of the key is about a third of them. A pass-through hasher is possible if a profile ever asks.
+- Memory for a queued job (live bytes, counted on the submitting thread, 200 jobs of 64 KiB and of 20,000 bytes, worker blocked): old 65,731 (2 allocations, 195 bytes over the text); new 65,744 (1 allocation, 208 bytes over the text, and this includes the 40-byte handle that the new API gives to the caller). The same within 13 bytes. The slot sits in the table, so the new path has one allocation for each job.
+
+Not tested: the S2.2 parser as the job (the module takes any `Job`); wiring into the loader (`crates/bare`) or a cost matrix (js2 is not wired into the browser); a job that polls for cancel (the module cannot interrupt a running job; a job may later get a flag); Miri (the module has no `unsafe`; the crate's Miri run was not repeated); the body of a real page (many scripts, byte budget for held results: results stay until the handle goes or the page ends, without a cap); macOS.
