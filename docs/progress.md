@@ -14594,6 +14594,38 @@ Noticed, not changed:
 - `cargo clippy -p bare-js --all-targets -- -D warnings` stops on `crates/os/src/pages.rs:19` (`manual_is_multiple_of`), before it reaches this change. Clippy without `-D warnings` gives no warning in the files of this change.
 
 Not tested: `clone_copy` (step 5); a differential run under `BARE_GC_STRESS=1` (only the browser filters ran under it); getters on Map, Set, Error, wrappers and views as parents (they take the generic path, and the generator covers Map and Date as values only); a host that lists a transfer item in the differential test; the Windows release build and the Windows cost; the full jemalloc matrix (jemalloc ran only on the 6 rows above and on rows over the limit under glibc, which are none); peak RSS of `history 10`.
+## 2026-11-20: subsystem profile tool (plan step M2)
+
+Changes:
+- `tools/bench/subsystem_profile.sh`: `run` makes N cold `perf record` runs (4 kHz `cpu-clock`, `--call-graph fp`) of a journey on one `bare-drive`, then prints the tables. `report` prints the tables of existing `perf script` files. A run that does not pass stops the script. `--secrets FILE` goes to `bare-drive` as it is; the script reads no vault. `--replay DIR` sets `BARE_NET_REPLAY` and `BARE_SEED=1`, so a journey that `journeys.sh record` made runs on fixed network input. STEPS is a file or a name in `tools/drive/public`.
+- `tools/bench/classify.py` (the 2026-11-18 rules, moved from the scratch dir): a table of the plan's seven subsystems, the 2026-11-18 SELF, JS split and INCLUSIVE tables, a column for each run, then mean and range. The collector row counts any sample with `Interp::collect` or `Heap::collect` on its stack (design 3.1). Its JS and Parsing rows exclude those samples. Parsing is HTML parse plus JS lex, parse and compile; Style includes CSS parse.
+- `tools/bench/jscat.py`: the JS engine by kind of work, as a share of all samples, with the same collector row. The old "GC (mark, sweep)" kind is gone, because the stack rule replaces it.
+- `journeys.py` and `journeys.sh` are not changed. `perf record --call-graph fp` fails for a user on archMachine (`perf_event_paranoid=2`), so the script runs perf with `sudo -n`; `--no-sudo` is for a machine that allows it.
+- The profiling build: `CARGO_PROFILE_RELEASE_STRIP=false CARGO_PROFILE_RELEASE_DEBUG=1 RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release -p bare-drive`, with its own `CARGO_TARGET_DIR`.
+
+Check 1: the classifier on the 2026-11-18 data. The three `perf script` files of that run were still on disk. The new `classify.py` gives the same SELF, JS split and INCLUSIVE numbers as the published table, to 0.1 point in every row (for example JS engine self 77.95 to 78.70%, style 8.68 to 8.98%, HTML parse 1.78 to 2.01%, JS parse and compile 7.00 to 7.59%). The collector row on those files: 6.27 to 7.36% (any frame), against 5.97 to 6.99% for the old "garbage collect" row.
+
+Check 2: new runs of the staging journey (create and delete a client and an agent, live staging, default mode `tree`, 3 runs each, all passed, no test client left, archMachine, other builds ran at the same time). SELF table, percent of samples, range of 3 runs:
+
+| Row | 2026-11-18 (published) | `25126702` now | `09ddff85` (main) |
+|---|---:|---:|---:|
+| JS engine | 78.0 to 78.7 | 77.24 to 78.74 | 76.57 to 79.67 |
+| Style | 8.7 to 9.0 | 8.10 to 8.29 | 8.15 to 8.84 |
+| Network, TLS, HTTP | 3.1 to 3.3 | 3.10 to 3.70 | 2.97 to 3.87 |
+| DOM and Web APIs | 3.2 to 3.3 | 2.84 to 3.58 | 2.25 to 2.87 |
+| Layout and text | 2.6 to 2.9 | 2.46 to 2.71 | 2.36 to 3.35 |
+| HTML parse | 1.8 to 2.0 | 3.34 to 3.80 | 3.69 to 4.10 |
+| Driver | 1.4 to 1.6 | 0.80 to 1.18 | 0.71 to 1.37 |
+| JS: run the code | 63.9 to 65.1 | 65.35 to 67.18 | 65.42 to 68.53 |
+| JS: parse and compile | 7.0 to 7.6 | 5.11 to 6.11 | 5.14 to 5.31 |
+
+The new runs match the 2026-11-18 split for the JS engine, network, DOM, layout and (at `25126702`) style. They do not match for HTML parse (+1.6 points), the driver (-0.5), JS parse and compile (-1.7) and JS run (+1.5), also with the same commit `25126702`. So the difference is not a change in the code. The tool is not the cause either (check 1). Hypothesis: staging serves other pages than on 2026-11-18, or the toolchain changed the inlining of the builds. I did not check either.
+
+The plan's seven rows, `09ddff85`, mean of 3 runs: JS engine without parse and collector 67.08% (65.48 to 68.57), parsing 9.09% (8.83 to 9.25), style 8.52% (8.15 to 8.84), collector 5.87% (5.42 to 6.11), network 3.31% (2.97 to 3.86), layout 2.72% (2.36 to 3.35), paint 0.02%. DOM 2.31%, driver 0.95%. Headless runs do not paint. Reports: `/data/bare-tmp/s0/m2-reports/` (not in the repository).
+
+Check 3: a replayable journey. `journeys.sh record` of `hn-front` into a scratch corpus, then `subsystem_profile.sh run --replay CORPUS/hn-front ... hn-front`: 3 runs passed, about 150 samples each. The script warns about the small sample count. This only shows that the replay path works; the shares of so short a run are not data.
+
+Not tested: Windows (the tool is Linux `perf`), a windowed run (paint), `--no-sudo`, a profile of the `auto` mode, wall time on an idle machine. Only the staging journey was profiled in full.
 ## 2026-11-20: layout census of the old engine (plan step M3)
 
 COMPLETE for Linux. The PR is not merged and has no auto-merge. Base: origin/main `1aa1bc6a`.
@@ -14654,3 +14686,52 @@ Cost matrix (`tools/js/cost_matrix.sh -j4`, 819 rows, base `1aa1bc6a` against th
 Tests: Linux `cargo test --locked -p bare-js-api -p bare-js --lib` 31 and 1082 passed (1 ignored), `cargo test --locked -p bare --lib` 1707 passed (6 ignored). Windows (MSVC test executable, run on the VM): `census_tests` 5 passed, `heap::` 93 passed.
 
 Not tested: the full Windows suite, massif on Windows (valgrind has no Windows port, so the check ran on Linux only), a census of the `new` engine, `byte` exec mode, a page with a real framework bundle (the browser check used `browser_load`, which has little bytecode), a run with more than one realm, and codegen-units=1 runs (no row needed them). The census peak is the largest sample at a collect or at the end of the realm. A peak between two collects is not seen. `clippy -D warnings` fails in `bare-os` (`pages.rs:19`, `is_multiple_of`) before it reaches `bare-js`; the `bare-js` lints I ran without `-D warnings` show nothing in the new files.
+
+## 2026-11-20: cell header, shape id against shape pointer (plan step S1.4)
+
+Decision: the cell header is two 32-bit words, a shape id and a word of layout code plus 24 flag bits. A raw 8-byte shape pointer lost. `crates/js2/src/cell.rs` now holds only the id form, with a stub `Shape` and a `Shapes` table (S1.8 builds the real shapes). Both forms were built and measured at commit `f6d06f8e` (feature `shape-ptr` in `cell.rs`); the next commit removes the pointer form. The header stays 8 bytes in both forms. Only `cell.rs` changed for the header; `string.rs` got one arm for the new `Layout::Object`.
+
+The two forms:
+- Id (kept): `shape: u32` (0 for a string) and `bits: u32` (layout code in the low 8 bits, flags above). The marker reads the layout from `bits` and sets one bit per used shape id (`Shapes::note_live`). After the marking, `finish_marks` marks each shape cell once. A cache compares the id. `Shapes::of(header)` is a table load and then the shape.
+- Pointer: one `NonNull<Shape>`. The shape holds the layout code and the flags, so a string needs one static shape for each pair of layout and flags (4 × 8 = 32 here), and a flag change swaps the pointer. The marker reads the layout through the shape and marks the shape cell of every object it visits.
+
+Micro rows (`crates/js2/examples/header_load.rs`; archMachine, Ryzen 9 5900HX, release, `perf stat` user instructions, 3 runs each with the N = 0 or R = 0 run subtracted; spread of every cell below is under 0.01%). Object cells of 32 bytes (header and 3 words); S is the number of shapes.
+
+| Row | Id, instructions per op | Pointer | Pointer against id |
+| --- | ---: | ---: | ---: |
+| `alloc` (header write; each 100,000 cells a collection keeps 1,000), S = 1 / 64 / 4096 | 41.59 / 41.60 / 41.90 | 41.70 / 41.69 / 41.71 | +0.3% / +0.2% / -0.5% |
+| `mark` (a graph of 59,333 reachable cells, 3 in 4 are objects with 2 children), S = 1 / 64 / 4096, per visited cell | 81.39 / 81.43 / 83.90 | 86.39 / 86.38 / 86.88 | +6.1% / +6.1% / +3.6% |
+| `hit` (the check against the cached shape matches) | 22.00 | 21.00 | -4.5% |
+| `miss` (the check fails, the shape is read), S = 64 / 4096 | 27.91 / 28.00 | 23.95 / 24.00 | -14% / -14% |
+| `flags` (read the flags, flip a bit, write the header back) | 33.0 | 35.0 | +6% |
+
+Cycles (`cycles:u`) were not trusted: other builds shared the machine. Five runs of each form side by side, run in turns: `miss` with S = 4096 took 147 to 150 M cycles for the id form against 110 M for the pointer form (about 7.2 against 5.3 cycles per read; the extra table load misses the L1 cache). `mark` with S = 64 took 130 to 132 M for the id form and 131 to 135 M for the pointer form (equal within the spread). `flags`: 151.5 to 152.3 M against 185.0 to 187.1 M (3 runs each).
+
+Reading of the rows:
+- Allocation is the same: both forms write one 8-byte word. The pointer form adds the shape marks of the kept cells only.
+- The id form is cheaper in the marker by 5 instructions per cell, because the pointer form marks the shape cell of each object through `Heap::mark` (a block header lookup and one division by the cell size). A one-entry "last shape" test would cut this in both forms; not built.
+- The id form is dearer where code needs the contents of a shape: 4 instructions and one more dependent load (header, table base, table entry, shape field; the pointer form has header and shape field). An inline cache hit does not need it: the cache compares the id with the header word, one load, no table. Only a cache miss, a megamorphic site and a generic operation read the shape through the table. The hit row differs by 1 instruction in this loop (a zero-extending load of the 32-bit id); the cycles are equal (106 M against 107 M).
+- A variant that makes the id an index into a `Vec<Shape>` (no table of pointers) gave the same instruction count for `miss` (27.9 and 28.0) and no better cycles, so it was dropped.
+- Per-cell flags are the main structural reason. A string changes its flags after it is made (atom, rope that is flattened), and objects will (frozen, has overflow). In the id form that is a bit operation. In the pointer form every flag combination is a shape: 32 static shapes for strings alone, and a transition for each flag change of an object. Hypothesis, not built: shape counts grow by the number of flag combinations in use. The alternative, a second header word with the flags, makes the header 16 bytes.
+
+Memory side, from the old engine at its census peak (`BARE_JS_STATS=1`, `BARE_JS_EXEC=auto`, M3 census of #740 at `c3607163` plus a scratch patch that also prints counts, `/data/bare-tmp/s14/census-counts.patch`, not in the repository; 1 run each, the census is deterministic). A cell here is an object or a string of the old engine; the new engine makes each of them one cell, so this is an approximation.
+
+| Case | Census total | Objects | Strings | Shapes | Cells (objects + strings) | 16-byte header costs (8 bytes for each cell) | Id table (8 bytes for each shape) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `eval_load objects 10` | 8,240,509 | 521 | 2,457 | 177 | 2,978 | 23.8 KB (0.29%) | 1.4 KB |
+| `eval_load closures 10` | 26,257,250 | 50,521 | 457 | 49 | 50,978 | 407.8 KB (1.55%) | 0.4 KB |
+| `eval_load webpack 10` | 1,912,740 | 3,526 | 974 | 30 | 4,500 | 36.0 KB (1.88%) | 0.2 KB |
+| `browser_load event 1` | 819,435 | 1,457 | 1,239 | 558 | 2,696 | 21.6 KB (2.63%) | 4.5 KB |
+| `browser_load lookup 1` | 900,644 | 1,801 | 1,440 | 557 | 3,241 | 25.9 KB (2.88%) | 4.5 KB |
+| `browser_load mutation 1` | 1,191,402 | 2,301 | 1,439 | 557 | 3,740 | 29.9 KB (2.51%) | 4.5 KB |
+| `browser_load rel 1` | 1,203,008 | 2,525 | 1,748 | 574 | 4,273 | 34.2 KB (2.84%) | 4.6 KB |
+
+- Both 8-byte forms cost the same for the cells (8 bytes each). The 16-byte header (pointer and a flags word) is the form that would cost 0.3% to 2.9% of the old total, more as a share of the cell bytes alone. The id table is 0.2 to 4.6 KB, under 0.6% of each total. Shape counts are small (30 to 574): the table never matters; nor does the cache effect of the shapes at these counts.
+- Records that hold a shape: with ids, the hot part of a cache record (shape and offset, design 6.11 item 12) is 8 bytes; with pointers it is 16. The old engine has 87,088 to 123,304 bytes of feedback in these cases (24-byte `Ic` records, not all of them records of this kind). Hypothesis: about 8 bytes less for each record, not measured.
+- The census counts are at the sample with the most bytes, and the old engine counts garbage that its sweep has not freed. No `new` census hook was added: `bare-js2` has no collector or heap walk yet (S1.5), so there is nothing to count.
+
+32-bit targets: not built or measured. The design lists no 32-bit target and `Value` holds 48-bit addresses in 64 bits. On a 32-bit target a pointer is 4 bytes, so the pointer form would fit the header with a flags word in 8 bytes. Verify if a 32-bit target is ever added.
+
+Checks: `bare-js2` tests: 35 pass on Linux (4 new in `cell_tests.rs`: header round trip, shape lookup, a shape that a marked cell uses survives and an unused one is freed) and 35 on the Windows 11 VM (`cargo xwin test`); the three `header_load` rows also ran on the VM. Miri (nightly): 35 pass in 150 s of test time. The pointer form passed the same unit tests at `f6d06f8e`. Clippy shows no new finding in `cell.rs` (the existing findings in `heap.rs` and `bare-os` are not touched).
+
+Not tested: a real shape (S1.8); the marker of S1.5 (the mark row is a stand-in with a work stack); the cost matrix (js2 is not wired into the browser); arm64; a 32-bit target; a "last shape" test in the marker; objects with flag combinations (no count of flag combinations exists yet); wall time (the machine was shared; cycles above are indicative only); Windows instruction counts.
