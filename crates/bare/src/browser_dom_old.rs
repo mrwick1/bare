@@ -4,7 +4,6 @@
 
 use crate::browser::*;
 use crate::browser_dom::*;
-use bare_html::dom::Document;
 use crate::browser_scoped::*;
 use bare_html::dom::{NodeData, NodeId};
 use bare_js::eval::{Error, Interp};
@@ -258,21 +257,8 @@ pub(crate) fn set_text_content(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[V
     Ok(Value::Undefined)
 }
 
-pub(crate) fn document_element(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    doc_child(d, it, this, |doc, c| matches!(doc.data(c), NodeData::Element { .. }))
-}
-
 pub(crate) fn body(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     html_child(d, it, this, &["body", "frameset"])
-}
-
-fn doc_child(d: &Dom, it: &mut Interp<'_>, this: Value, pick: impl Fn(&Document, NodeId) -> bool) -> V {
-    let root = d.nd(it, this)?;
-    let r = {
-        let doc = d.doc.borrow();
-        doc.children(root).find(|&c| pick(&doc, c))
-    };
-    d.wrap_opt(it, r)
 }
 
 fn html_child(d: &Dom, it: &mut Interp<'_>, this: Value, names: &[&str]) -> V {

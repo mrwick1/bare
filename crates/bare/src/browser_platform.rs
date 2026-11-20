@@ -380,9 +380,9 @@ fn legacy(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], add: bool) -> 
     let ty = d.js_str(it, "change")?;
     let cb = arg(a, 0);
     if add {
-        crate::browser_events::add_event_listener(d, it, this, &[ty, cb])
+        crate::browser_scoped::via(d, it, crate::browser_events::add_event_listener, this, &[ty, cb])
     } else {
-        crate::browser_events::remove_event_listener(d, it, this, &[ty, cb])
+        crate::browser_scoped::via(d, it, crate::browser_events::remove_event_listener, this, &[ty, cb])
     }
 }
 

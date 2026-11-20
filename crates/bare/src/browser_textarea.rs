@@ -20,11 +20,14 @@
 
 use crate::browser::*;
 use crate::browser_dom::arg;
+use crate::browser_reflect::this_of;
+use crate::browser_scoped::*;
 use crate::browser_select::{get, reflect};
 use crate::browser_selection as sel;
 use bare_html::dom::{Document, NodeData, NodeId};
 use bare_js::eval::Interp;
 use bare_js::value::{ObjId, Value};
+use bare_js_api::{Args, Local, Type};
 use std::borrow::Cow;
 
 type V = R<Value>;
@@ -39,55 +42,56 @@ pub(crate) fn api_value(raw: &str) -> Cow<'_, str> {
     if raw.contains('\r') { Cow::Owned(raw.replace("\r\n", "\n").replace('\r', "\n")) } else { Cow::Borrowed(raw) }
 }
 
-fn this_el(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
-    d.html_el(it, this, "textarea")
+fn this_el<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
+    this_of(d, s, this, &["textarea"])
 }
 
-fn value(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = this_el(d, it, this)?;
-    let s = d.input_value_of(n).unwrap_or_default();
-    d.js_str(it, &s)
+fn value<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = this_el(d, s, this)?;
+    let v = d.input_value_of(n).unwrap_or_default();
+    d.js_str_s(s, &v)
 }
 
-fn set_value(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let n = this_el(d, it, this)?;
-    let v = arg(a, 0);
-    let s = if matches!(v, Value::Null) { String::new() } else { d.string_arg(it, v)? };
-    d.put_input_value(Some(it), n, api_value(&s).into_owned())?;
-    Ok(Value::Undefined)
+fn set_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = this_el(d, s, this)?;
+    let v = arg_s(s, a, 0);
+    let text = if s.type_of(v) == Type::Null { String::new() } else { d.string_arg_s(s, v)? };
+    put_input_value_s(d, s, n, api_value(&text).into_owned())?;
+    Ok(s.undefined())
 }
 
-fn default_value(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = this_el(d, it, this)?;
-    let s = default_text(&d.doc.borrow(), n);
-    d.js_str(it, &s)
+fn default_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = this_el(d, s, this)?;
+    let text = default_text(&d.doc.borrow(), n);
+    d.js_str_s(s, &text)
 }
 
-fn set_default_value(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let n = this_el(d, it, this)?;
-    let s = d.string_arg(it, arg(a, 0))?;
-    let v = d.js_str(it, &s)?;
-    crate::browser_dom::set_text_content(d, it, this, &[v])?;
+fn set_default_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = this_el(d, s, this)?;
+    let text = d.arg_str_s(s, a, 0)?;
+    let v = d.js_str_s(s, &text)?;
+    crate::browser_dom::set_text_content_s(d, s, this, Args::from_slots(v.slot(), 1))?;
     if let Some(i) = d.st.borrow_mut().inputs.get_mut(&n).filter(|i| i.value.is_none()) {
         i.sel = None; // Chrome: the caret goes back to 0, unless the value is dirty and stays
     }
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-fn text_length(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = this_el(d, it, this)?;
-    Ok(Value::Number(d.with_input_value(n, |v| v.encode_utf16().count()).unwrap_or(0) as f64))
+fn text_length<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = this_el(d, s, this)?;
+    let len = d.with_input_value(n, |v| v.encode_utf16().count()).unwrap_or(0);
+    Ok(s.number(len as f64))
 }
 
-fn kind(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    this_el(d, it, this)?;
-    d.js_str(it, "textarea")
+fn kind<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    this_el(d, s, this)?;
+    d.js_str_s(s, "textarea")
 }
 
-fn form(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = this_el(d, it, this)?;
-    let f = d.form_owner(it, n)?;
-    d.wrap_opt(it, f)
+fn form<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = this_el(d, s, this)?;
+    let f = old(s, |it| d.form_owner(it, n))?;
+    d.wrap_opt_s(s, f)
 }
 
 reflect!("textarea", "placeholder", placeholder, set_placeholder, str);
@@ -100,31 +104,32 @@ reflect!("textarea", "readonly", read_only, set_read_only, bool);
 reflect!("textarea", "disabled", disabled, set_disabled, bool);
 
 /// "Limited to only non-negative numbers greater than zero with fallback": `rows` and `cols`.
-fn limited(d: &Dom, it: &mut Interp<'_>, this: Value, name: &str, fallback: u32) -> V {
-    let n = this_el(d, it, this)?;
+fn limited<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, name: &str, fallback: u32) -> Res<'s, Local<'s>> {
+    let n = this_el(d, s, this)?;
     let v = get(&d.doc.borrow(), n, name).and_then(crate::browser_select::parse_u).filter(|&v| v > 0).unwrap_or(fallback);
-    Ok(Value::Number(v as f64))
+    Ok(s.number(v as f64))
 }
 
-fn set_limited(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], name: &str, fallback: u32) -> V {
-    let n = this_el(d, it, this)?;
-    let v = bare_js::value::to_uint32(it.to_js_number(arg(a, 0))?);
+fn set_limited<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, name: &str, fallback: u32) -> Res<'s, Local<'s>> {
+    let n = this_el(d, s, this)?;
+    let x = arg_s(s, a, 0);
+    let v = bare_js::value::to_uint32(s.to_number(x)?);
     let v = if v == 0 || v > i32::MAX as u32 { fallback } else { v };
-    crate::browser_dom::attr_set(d, it, n, name, &v.to_string())?;
-    Ok(Value::Undefined)
+    crate::browser_dom::attr_set_s(d, s, n, name, &v.to_string())?;
+    Ok(s.undefined())
 }
 
-fn rows(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    limited(d, it, this, "rows", 2)
+fn rows<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    limited(d, s, this, "rows", 2)
 }
-fn set_rows(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    set_limited(d, it, this, a, "rows", 2)
+fn set_rows<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    set_limited(d, s, this, a, "rows", 2)
 }
-fn cols(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    limited(d, it, this, "cols", 20)
+fn cols<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    limited(d, s, this, "cols", 20)
 }
-fn set_cols(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    set_limited(d, it, this, a, "cols", 20)
+fn set_cols<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    set_limited(d, s, this, a, "cols", 20)
 }
 
 /// The "rules for parsing integers" on `maxlength` or `minlength`: a number of 0 or more, else -1.
@@ -141,23 +146,26 @@ fn length_of(doc: &Document, n: NodeId, name: &str) -> i64 {
     }
 }
 
-fn max_length(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = this_el(d, it, this)?;
-    Ok(Value::Number(length_of(&d.doc.borrow(), n, "maxlength") as f64))
+fn max_length<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = this_el(d, s, this)?;
+    let len = length_of(&d.doc.borrow(), n, "maxlength");
+    Ok(s.number(len as f64))
 }
 
-fn min_length(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = this_el(d, it, this)?;
-    Ok(Value::Number(length_of(&d.doc.borrow(), n, "minlength") as f64))
+fn min_length<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = this_el(d, s, this)?;
+    let len = length_of(&d.doc.borrow(), n, "minlength");
+    Ok(s.number(len as f64))
 }
 
 /// `maxLength` (`is_max`) or `minLength` setter: a negative value, and a pair out of order, are an `IndexSizeError`.
-fn set_length(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], is_max: bool) -> V {
-    let n = this_el(d, it, this)?;
-    let v = bare_js::value::to_int32(it.to_js_number(arg(a, 0))?) as i64;
+fn set_length<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, is_max: bool) -> Res<'s, Local<'s>> {
+    let n = this_el(d, s, this)?;
+    let x = arg_s(s, a, 0);
+    let v = bare_js::value::to_int32(s.to_number(x)?) as i64;
     let (name, other) = if is_max { ("maxLength", "minlength") } else { ("minLength", "maxlength") };
     let o = length_of(&d.doc.borrow(), n, other);
-    let mut fail = |m: String| d.dom_err(it, "IndexSizeError", &format!("Failed to set the '{name}' property on 'HTMLTextAreaElement': {m}"));
+    let mut fail = |m: String| d.dom_err_s(s, "IndexSizeError", &format!("Failed to set the '{name}' property on 'HTMLTextAreaElement': {m}"));
     if v < 0 {
         return Err(fail(format!("The value provided ({v}) is not positive or 0.")));
     }
@@ -167,42 +175,52 @@ fn set_length(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], is_max: bo
     if o >= 0 && !is_max && v > o {
         return Err(fail(format!("The minLength provided ({v}) is greater than the maximum bound ({o}).")));
     }
-    crate::browser_dom::attr_set(d, it, n, &name.to_ascii_lowercase(), &v.to_string())?;
-    Ok(Value::Undefined)
+    crate::browser_dom::attr_set_s(d, s, n, &name.to_ascii_lowercase(), &v.to_string())?;
+    Ok(s.undefined())
 }
 
-fn set_max_length(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    set_length(d, it, this, a, true)
+fn set_max_length<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    set_length(d, s, this, a, true)
 }
-fn set_min_length(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    set_length(d, it, this, a, false)
+fn set_min_length<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    set_length(d, s, this, a, false)
+}
+
+/// A property of the prototype: a getter and a setter of the new form or of the old form (the `reflect!` ones and `browser_selection.rs`).
+enum Acc {
+    New(HS, Option<HS>),
+    Old(H, Option<H>),
 }
 
 /// Make the properties of the `HTMLTextAreaElement` prototype `proto`.
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>, proto: ObjId) -> R<()> {
-    for (name, g, s) in [
-        ("value", value as H, Some(set_value as H)),
-        ("defaultValue", default_value, Some(set_default_value)),
-        ("textLength", text_length, None),
-        ("rows", rows, Some(set_rows)),
-        ("cols", cols, Some(set_cols)),
-        ("maxLength", max_length, Some(set_max_length)),
-        ("minLength", min_length, Some(set_min_length)),
-        ("placeholder", placeholder, Some(set_placeholder)),
-        ("required", required, Some(set_required)),
-        ("readOnly", read_only, Some(set_read_only)),
-        ("disabled", disabled, Some(set_disabled)),
-        ("name", name, Some(set_name)),
-        ("wrap", wrap, Some(set_wrap)),
-        ("dirName", dir_name, Some(set_dir_name)),
-        ("autocomplete", autocomplete, Some(set_autocomplete)),
-        ("type", kind, None),
-        ("form", form, None),
-        ("selectionStart", sel::selection_start, Some(sel::set_selection_start)),
-        ("selectionEnd", sel::selection_end, Some(sel::set_selection_end)),
-        ("selectionDirection", sel::selection_direction, Some(sel::set_selection_direction)),
+    use Acc::{New, Old};
+    for (name, acc) in [
+        ("value", New(value, Some(set_value))),
+        ("defaultValue", New(default_value, Some(set_default_value))),
+        ("textLength", New(text_length, None)),
+        ("rows", New(rows, Some(set_rows))),
+        ("cols", New(cols, Some(set_cols))),
+        ("maxLength", New(max_length, Some(set_max_length))),
+        ("minLength", New(min_length, Some(set_min_length))),
+        ("placeholder", Old(placeholder, Some(set_placeholder))),
+        ("required", Old(required, Some(set_required))),
+        ("readOnly", Old(read_only, Some(set_read_only))),
+        ("disabled", Old(disabled, Some(set_disabled))),
+        ("name", Old(name, Some(set_name))),
+        ("wrap", Old(wrap, Some(set_wrap))),
+        ("dirName", Old(dir_name, Some(set_dir_name))),
+        ("autocomplete", Old(autocomplete, Some(set_autocomplete))),
+        ("type", New(kind, None)),
+        ("form", New(form, None)),
+        ("selectionStart", Old(sel::selection_start, Some(sel::set_selection_start))),
+        ("selectionEnd", Old(sel::selection_end, Some(sel::set_selection_end))),
+        ("selectionDirection", Old(sel::selection_direction, Some(sel::set_selection_direction))),
     ] {
-        d.def_get(it, proto, name, g, s)?;
+        match acc {
+            New(g, s) => d.def_get_s(it, proto, name, g, s)?,
+            Old(g, s) => d.def_get(it, proto, name, g, s)?,
+        }
     }
     d.def_method(it, proto, "setSelectionRange", 2, sel::set_selection_range_method)?;
     d.def_method(it, proto, "select", 0, sel::select_method)?;

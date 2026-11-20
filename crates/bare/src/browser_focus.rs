@@ -46,12 +46,11 @@
 
 use crate::browser::*;
 use crate::browser_dom as nd;
-use crate::browser_events::init_flag;
+use crate::browser_events::init_flag_s;
+use crate::browser_scoped::*;
 use bare_html::dom::{NodeData, NodeId};
 use bare_js::eval::{Error, Interp};
-use bare_js::value::Value;
-
-type V = R<Value>;
+use bare_js_api::{Args, Local, Type};
 
 /// The deepest nest of focus transitions (a listener that moves focus again, and so on).
 const MAX_DEPTH: u8 = 16;
@@ -73,10 +72,6 @@ impl FocusState {
     pub(crate) fn depth_for_test(&self) -> u8 {
         self.depth
     }
-}
-
-fn arg(a: &[Value], i: usize) -> Value {
-    a.get(i).copied().unwrap_or(Value::Undefined)
 }
 
 /// HTML "rules for parsing integers", only the part that says valid or not: spaces, a sign, then a digit.
@@ -252,93 +247,86 @@ impl Dom {
     }
 }
 
-fn html_el(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
-    let n = d.nd(it, this)?;
-    if d.is_element(n) && !d.doc.borrow().is_foreign(n) { Ok(n) } else { Err(it.type_error("Illegal invocation")) }
+fn html_el<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
+    let n = d.nd_s(s, this)?;
+    if d.is_element(n) && !d.doc.borrow().is_foreign(n) { Ok(n) } else { Err(s.type_error("Illegal invocation")) }
 }
 
-pub(crate) fn focus(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let n = html_el(d, it, this)?;
-    match arg(a, 0) {
-        Value::Undefined | Value::Null => {}
-        o @ Value::Object(_) => {
-            init_flag(d, it, o, "focusVisible")?;
-            init_flag(d, it, o, "preventScroll")?;
-        }
-        _ => return Err(it.type_error("Failed to execute 'focus' on 'HTMLElement': parameter 1 is not of type 'FocusOptions'.")),
+pub(crate) fn focus<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = html_el(d, s, this)?;
+    let o = arg_s(s, a, 0);
+    if is_object(s, o) {
+        init_flag_s(s, o, "focusVisible")?;
+        init_flag_s(s, o, "preventScroll")?;
+    } else if !is_nullish(s, o) {
+        return Err(s.type_error("Failed to execute 'focus' on 'HTMLElement': parameter 1 is not of type 'FocusOptions'."));
     }
-    d.focus_node(it, n)?;
-    Ok(Value::Undefined)
+    old(s, |it| d.focus_node(it, n))?;
+    Ok(s.undefined())
 }
 
-pub(crate) fn blur(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = html_el(d, it, this)?;
-    if d.current_focus(it)? == Some(n) {
-        d.move_focus(it, None)?;
+pub(crate) fn blur<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = html_el(d, s, this)?;
+    if old(s, |it| d.current_focus(it))? == Some(n) {
+        old(s, |it| d.move_focus(it, None))?;
     }
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-pub(crate) fn active_element(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = d.nd(it, this)?;
-    if n != d.doc.borrow().root() {
-        // A frame document has no focus of its own: its body is the active element.
-        if !matches!(d.data(n), bare_html::dom::NodeData::Document) {
-            return Err(it.type_error("Illegal invocation"));
-        }
-        return match nd::body(d, it, this, &[])? {
-            Value::Null => nd::document_element(d, it, this, &[]),
-            body => Ok(body),
-        };
+pub(crate) fn active_element<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.nd_s(s, this)?;
+    // A frame document has no focus of its own: its body is the active element.
+    if n != d.doc.borrow().root() && !matches!(d.data(n), bare_html::dom::NodeData::Document) {
+        return Err(s.type_error("Illegal invocation"));
     }
-    if let Some(n) = d.current_focus(it)? {
-        return d.wrap(it, n);
+    if n == d.doc.borrow().root() && let Some(f) = old(s, |it| d.current_focus(it))? {
+        return d.wrap_s(s, f);
     }
-    match nd::body(d, it, this, &[])? {
-        Value::Null => nd::document_element(d, it, this, &[]),
-        body => Ok(body),
-    }
+    let body = nd::body_s(d, s, this, a)?;
+    if s.type_of(body) == Type::Null { nd::document_element_s(d, s, this, a) } else { Ok(body) }
 }
 
-pub(crate) fn related_target(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let o = d.event_of(it, this)?;
-    if !d.st.borrow().events[&o].is_focus {
-        return Err(it.type_error("Illegal invocation"));
+pub(crate) fn related_target<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = d.event_of_s(s, this)?;
+    let st = d.st.borrow();
+    if !st.events[&o].is_focus {
+        drop(st);
+        return Err(s.type_error("Illegal invocation"));
     }
-    Ok(it.traced_value(&d.st.borrow().events[&o].related))
+    Ok(s.traced(&st.events[&o].related))
 }
 
-pub(crate) fn focus_event_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
+pub(crate) fn focus_event_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     if a.is_empty() {
-        return Err(it.type_error("Failed to construct 'FocusEvent': 1 argument required, but only 0 present."));
+        return Err(s.type_error("Failed to construct 'FocusEvent': 1 argument required, but only 0 present."));
     }
-    let ty = d.string_arg(it, a[0])?;
-    let init = arg(a, 1);
-    let (mut bubbles, mut cancelable, mut composed, mut related) = (false, false, false, Value::Null);
-    match init {
-        Value::Undefined | Value::Null => {}
-        Value::Object(_) => {
-            bubbles = init_flag(d, it, init, "bubbles")?;
-            cancelable = init_flag(d, it, init, "cancelable")?;
-            composed = init_flag(d, it, init, "composed")?;
-            let k = d.key(it, "relatedTarget")?;
-            match it.get_value(init, k)? {
-                Value::Undefined | Value::Null => {}
-                v @ Value::Object(o) if d.st.borrow().by_obj.contains_key(&o) => related = v,
-                _ => return Err(it.type_error("Failed to construct 'FocusEvent': Failed to read the 'relatedTarget' property from 'FocusEventInit': The provided value is not of type 'EventTarget'.")),
-            }
+    let ty = d.arg_str_s(s, a, 0)?;
+    let init = arg_s(s, a, 1);
+    let (mut bubbles, mut cancelable, mut composed, mut related) = (false, false, false, s.null());
+    if is_object(s, init) {
+        bubbles = init_flag_s(s, init, "bubbles")?;
+        cancelable = init_flag_s(s, init, "cancelable")?;
+        composed = init_flag_s(s, init, "composed")?;
+        let v = s.get_str(init, "relatedTarget")?;
+        if obj_id(s, v).is_some_and(|o| d.st.borrow().by_obj.contains_key(&o)) {
+            related = v;
+        } else if s.type_of(v) != Type::Undefined && s.type_of(v) != Type::Null {
+            return Err(s.type_error("Failed to construct 'FocusEvent': Failed to read the 'relatedTarget' property from 'FocusEventInit': The provided value is not of type 'EventTarget'."));
         }
-        _ => return Err(it.type_error("The event initializer is not an object.")),
+    } else if !is_nullish(s, init) {
+        return Err(s.type_error("The event initializer is not an object."));
     }
-    let proto = it.host_proto_from_new_target(d.p().focus)?;
-    let e = d.new_event_proto(it, &ty, bubbles, cancelable, composed, proto)?;
+    let default = d.obj_local(s, d.p().focus);
+    let proto = s.proto_from_new_target(default)?;
+    let proto = obj_id(s, proto).expect("a prototype is an object");
+    let e = old(s, |it| d.new_event_proto(it, &ty, bubbles, cancelable, composed, proto))?;
     {
         let mut st = d.st.borrow_mut();
         let event = st.events.get_mut(&e).expect("just made");
-        it.store_value(&mut event.related, related);
+        s.store(&mut event.related, related);
         event.is_focus = true;
     }
-    Ok(Value::Object(e))
+    Ok(d.obj_local(s, e))
 }
 
 // ------------------------------------------------------------------------------------------ the driver
