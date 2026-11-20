@@ -14885,6 +14885,24 @@ Tests. Linux: `cargo test --locked -p bare-js-api -p bare-js -p bare --lib` once
 
 Not tested: `clone_copy` on a graph with a getter on a Map, Set, Error, wrapper or view as the parent (they take the generic path, and the generator uses Map and Date only as values); a differential run of the engine tests under `BARE_GC_STRESS=1` (only the browser filters ran under it); a heap that collects during the walk (the old engine does not collect in a call, and js2 has no `clone_copy`); the Windows release build and its cost; peak RSS; the full jemalloc matrix (jemalloc ran on the 6 rows above and on rows over the limit under glibc, which are none); `window.postMessage` and `MessagePort.postMessage` with a cross-page target (they keep the record path).
 
+## 2026-11-20: handler bodies design (plan step S0.4)
+
+Document: `docs/design-host-handlers.md`, for owner review. No code. Static counts with `rg` over `crates/bare/src` at origin/main `1cfb3807`; the commands are in the document. No instruction counts: the costs it cites are the earlier measurements.
+
+Measured (counts):
+
+- 2,099 `fn` items take `&mut Interp` in 88 files; 1,044 of them are host handlers (`this: Value`). `&mut Interp` 2,132 sites, `ObjId` 803 in 65 files, `Value` 3,793 in 94 files, `it.heap` 153 in 41 files. Lines that name `Interp`, `Value`, `ObjId` or `it.`: 6,851 of 66,560 (10.3%). `s.engine()`: 6 sites in 2 files.
+- The interface `Host::call` of `Dom` still returns `Unsupported`; the handlers run through the old `Host::call`. The old hook has 27 `roots`, 15 `trace` and 14 `prune` functions, 150 raw `ObjId` or `Value` fields in 31 files, and 50 maps keyed by `ObjId` in 26 files.
+- Tests: 88 files use `.it.` (322 sites). 35 of 39 examples name `bare_js`. `Browser::it` is public; `crates/drive` uses it in 5 places.
+
+Findings:
+
+- "One PR" does not hold: the diff would be about 13,700 lines in 88 files while main merged 14 PRs into these files in 2 days (48 commits, 20 in `browser.rs`).
+- Fourteen gaps in `bare-js-api` (G1 to G14): host function flags for constructors and `new.target`, `Scope::host_key`, string-key helpers, a task entry (`host_scope`, 51 sites), script entry, binary data, host-filled object creation, own-property kind, the `Vec` per call in the adapter, symbols, `display` and `inspect`, small calls, engine construction.
+- Options: A one PR; B groups on a dual registry (each handler on the old or the interface `Host`, so unconverted handlers keep today's call path); C a trampoline first; D a raw `Val` facade (rejected). Recommended: B, as H0 (interface additions, dual registry, cost spike), A1, then B, C, D1, D2, E, F, G, A2, then a cleanup PR Z. Eleven PRs. The cost of a `Local` push, the adapter `Vec`, key conversion and the wrapper are hypotheses until the spike in H0.
+- Ten open questions with proposed answers, among them the cost gate while the move runs, generic over `Engine` now or at the first `bare-js2` implementation, and the reverse lookup from `this` by host key.
+
+Not tested: everything above is static; no build, no test, no matrix row ran for this entry.
 ## 2026-11-20: collection inside a task (plan step S1.6)
 
 `bare-js2` collects inside a task: the allocation slow path refuses at a trigger, and the allocation helper collects with the frames as roots (design 6.8, 6.11 item 1, section 10 Q11). Base: the S1.8 branch (#745, `af044070`), because #745 was still open. New: `crates/js2/src/roots.rs` (root maps, frame stack, `alloc_in_task`). Changed: the allocation slow path in `heap.rs`, and `gc.rs` (one `Marker::shape` method and one doc line).
