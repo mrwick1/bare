@@ -44,6 +44,7 @@ use crate::object::{Ctx, F_CLASS, F_LAZY, F_NATIVE, Obj};
 use crate::shapes::{A_ACC, A_C, A_E, A_W, ShapeId, Shapes};
 use crate::string::{Chars, Str};
 use crate::value::{Kind, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// A thrown value (the result of a failed op).
@@ -259,6 +260,9 @@ pub struct Realm {
     tnames: [Str; 8],
     /// Every value that the realm keeps and the collector must mark.
     consts: Vec<Value>,
+    /// The global lexical environment: the top-level `let`, `const` and `class` names of the scripts that ran, each with its context
+    /// and slot (`DeclLex`). A global read that the global object does not answer looks here. The collector marks the names and contexts.
+    pub(crate) lex: HashMap<u64, (Str, Value, u32, bool)>,
     /// Shapes that no object may have yet.
     pins: Vec<ShapeId>,
     /// The top frame when a collection runs: code index, frame pointer, `pc` of the safepoint.
@@ -357,6 +361,7 @@ impl Realm {
             rng: 0,
             tnames,
             consts,
+            lex: HashMap::new(),
             pins,
             cur: (0, 0, 0),
             epoch,
@@ -375,10 +380,14 @@ impl Realm {
 
     /// Collect with the frames of the stack as roots. `walk_frames` marks them (see `interp.rs`); the realm adds its own.
     pub fn collect(&mut self, fbs: &mut [Feedback], walk_frames: impl FnOnce(&mut Marker)) {
-        let Realm { heap, shapes, atoms, consts, pins, .. } = self;
+        let Realm { heap, shapes, atoms, consts, pins, lex, .. } = self;
         let mut walk_frames = Some(walk_frames);
         let mut roots = |m: &mut Marker| {
             consts.iter().for_each(|v| m.value(*v));
+            lex.values().for_each(|(k, c, _, _)| {
+                m.value(k.value());
+                m.value(*c);
+            });
             pins.iter().for_each(|s| m.shape(*s));
             fbs.iter().for_each(|f| f.walk(m));
             if let Some(w) = walk_frames.take() {
@@ -566,8 +575,17 @@ impl Realm {
             if f > 0.0 { "Infinity".into() } else { "-Infinity".into() }
         } else if f == 0.0 {
             "0".into()
-        } else {
+        } else if (1e-6..1e21).contains(&f.abs()) {
             format!("{f}")
+        } else {
+            // The exponent form of Number::toString: the shortest digits, `n` is the place of the decimal point.
+            let e = format!("{:e}", f.abs());
+            let (m, x) = e.split_once('e').unwrap_or((&e, "0"));
+            let digits: String = m.chars().filter(|c| *c != '.').collect();
+            let n: i32 = x.parse::<i32>().unwrap_or(0) + 1;
+            let (sign, ex) = (if f < 0.0 { "-" } else { "" }, n - 1);
+            let es = format!("e{}{}", if ex < 0 { '-' } else { '+' }, ex.abs());
+            if digits.len() == 1 { format!("{sign}{digits}{es}") } else { format!("{sign}{}.{}{es}", &digits[..1], &digits[1..]) }
         }
     }
 
@@ -924,17 +942,20 @@ impl Realm {
     }
 
     /// `GetGlobal`: the property of the global object, or a `ReferenceError` when it is not there.
-    pub fn get_global_slow(&mut self, fb: &mut Feedback, site: usize, name: Str) -> R<Value> {
+    pub fn get_global_slow(&mut self, fb: &mut Feedback, site: usize, name: Str) -> R<Got> {
+        if let Some(v) = self.lex_get(name) {
+            return Ok(Got::Val(v?));
+        }
         let g = self.global.value();
-        let v = match self.get_field_slow(fb, site, name, g)? {
-            Got::Val(v) => v,
-            Got::Get(_) => return self.type_error("a global accessor needs a call"),
-        };
-        if v.is_undefined() && !self.has_prop(g, Key::Name(name))? {
+        let got = self.get_field_slow(fb, site, name, g)?;
+        if let Got::Val(v) = got
+            && v.is_undefined()
+            && !self.has_prop(g, Key::Name(name))?
+        {
             let n = self.text(name);
             return Err(self.error(ErrKind::Reference, &format!("{n} is not defined")));
         }
-        Ok(v)
+        Ok(got)
     }
 
     /// `recv.name = v` at a site.
@@ -1010,6 +1031,7 @@ impl Realm {
             Key::Name(k) => {
                 let id = o.shape(&self.shapes);
                 match self.shapes.find(id, k) {
+                    Some(e) if e.attrs() & A_C == 0 => self.type_error("cannot redefine a property that is not configurable"),
                     Some(e) if e.attrs() & A_ACC == 0 => {
                         o.set_slot(&self.shapes, e.slot(), v);
                         Ok(())

@@ -69,6 +69,8 @@ pub struct LevelVar {
     /// A `let`, `const` or `class`: a read can find the hole.
     pub tdz: bool,
     pub konst: bool,
+    /// The name of a named function expression, inside the function: an assignment throws in strict code and does nothing in sloppy code.
+    pub callee: bool,
 }
 
 impl Level {
@@ -302,6 +304,8 @@ pub(crate) struct Fc<'a> {
     pub strict: bool,
     pub is_script: bool,
     pub is_arrow: bool,
+    /// The function cannot be a constructor (an arrow, a method, a getter or a setter).
+    pub noctor: bool,
     pub fn_flags: u16,
     pub fn_id: Option<FnId>,
     pub self_name: bool,
@@ -317,6 +321,9 @@ pub(crate) struct Fc<'a> {
     /// Labels of the statement that is about to be compiled (`a: b: for (...)`).
     pub pending: Vec<String>,
     pub unsupported: Vec<&'static str>,
+    /// While the default of parameter `i` is compiled and it names a parameter that is not set yet: `(i, number of parameters, register
+    /// of the hole)`. A read of such a parameter reads the hole, so it throws.
+    pub param_dz: Option<(u32, u32, u32)>,
 }
 
 /// The first `PRESCAN` bytes of text are searched for an early use of a name; past that the compiler assumes one.
@@ -363,6 +370,7 @@ impl<'a> Fc<'a> {
             strict: false,
             is_script: false,
             is_arrow: false,
+            noctor: false,
             fn_flags: 0,
             fn_id: None,
             self_name: input.self_name,
@@ -374,6 +382,7 @@ impl<'a> Fc<'a> {
             chain_short: None,
             pending: Vec::new(),
             unsupported: Vec::new(),
+            param_dz: None,
         }
     }
 
@@ -680,7 +689,7 @@ impl<'a> Fc<'a> {
             let tdz = matches!(kind, VK::Let | VK::Const | VK::Class);
             let home = if self.captured(name, span) {
                 let slot = slots.len() as u32;
-                slots.push(LevelVar { name: name.as_ref().into(), slot, tdz, konst: kind == VK::Const || (kind == VK::Callee && self.strict) });
+                slots.push(LevelVar { name: name.as_ref().into(), slot, tdz, konst: kind == VK::Const || kind == VK::Callee, callee: kind == VK::Callee });
                 Home::Ctx { level, slot }
             } else {
                 let r = d.reg.unwrap_or_else(|| self.alloc());
@@ -722,8 +731,13 @@ impl<'a> Fc<'a> {
     /// What `name` is at the source offset `at`.
     pub(crate) fn resolve(&self, name: &str, at: u32) -> Res {
         if let Some(v) = self.find_var(name) {
+            if let (Some((from, n, hole)), VK::Param, Home::Reg(r)) = (self.param_dz, v.kind, v.home)
+                && (from..n).contains(&r)
+            {
+                return Res::Reg { reg: hole, tdz: true, konst: false };
+            }
             let tdz = matches!(v.kind, VK::Let | VK::Const | VK::Class) && (v.always_tdz || at < v.decl_end);
-            let konst = v.kind == VK::Const || (v.kind == VK::Callee && self.strict);
+            let konst = matches!(v.kind, VK::Const | VK::Callee);
             return match v.home {
                 Home::Reg(reg) => Res::Reg { reg, tdz, konst },
                 Home::Ctx { level, slot } => Res::Ctx { hops: self.depth - level, slot, tdz, konst },
@@ -739,6 +753,21 @@ impl<'a> Fc<'a> {
             l = level.parent.as_ref();
         }
         Res::Global
+    }
+
+    /// Is `name` the name of a named function expression that is a variable of this function or of one around it?
+    pub(crate) fn is_callee(&self, name: &str) -> bool {
+        if let Some(v) = self.find_var(name) {
+            return v.kind == VK::Callee;
+        }
+        let mut l = self.outer.as_ref();
+        while let Some(level) = l {
+            if let Some(v) = level.find(name) {
+                return v.callee;
+            }
+            l = level.parent.as_ref();
+        }
+        false
     }
 
     /// Does `name` occur in the text `from..to`? See [`Fc::occurrences`].
@@ -827,6 +856,7 @@ impl<'a> Fc<'a> {
         let mut code = Code::new(nregs, nparams as u16);
         code.fn_len = self.fn_len;
         code.strict = self.strict;
+        code.noctor = self.noctor;
         let mut roots = RootMaps::new(nregs as usize);
         for (k, &(idx, start)) in self.root_at.iter().enumerate() {
             let end = self.root_at.get(k + 1).map_or(self.root_regs.len(), |n| n.1);
@@ -894,6 +924,7 @@ pub fn compile_function(prog: &Program, fid: FuncId, id: FnId, facts: &Facts, at
     let f = facts.get(id);
     c.strict = prog.func(fid).strict;
     c.is_arrow = f.kind == FuncKind::Arrow;
+    c.noctor = matches!(f.kind, FuncKind::Arrow | FuncKind::Method | FuncKind::Getter | FuncKind::Setter);
     c.fn_flags = f.flags;
     c.fn_id = Some(id);
     c.derived = f.kind == FuncKind::DerivedConstructor;

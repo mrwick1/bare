@@ -95,6 +95,58 @@ impl Realm {
         Ok(())
     }
 
+    // ---- the global lexical environment ----
+
+    /// `DeclLex`: the slot `slot` of the context `ctx` is the global lexical binding `name`. A SyntaxError when a script declared the name
+    /// already, or the global object has a fixed property of that name (a `var`, `undefined`).
+    pub fn declare_lex(&mut self, name: Str, ctx: Value, slot: u32, konst: bool) -> R<()> {
+        self.check_lex(name)?;
+        self.lex.insert(name.value().bits(), (name, ctx, slot, konst));
+        Ok(())
+    }
+
+    /// `CheckLex`: the checks of `declare_lex`, without the declaration.
+    pub fn check_lex(&mut self, name: Str) -> R<()> {
+        let fixed = self.shapes.find(self.global.shape(&self.shapes), name).is_some_and(|e| e.attrs() & A_C == 0);
+        if fixed || self.lex.contains_key(&name.value().bits()) {
+            let n = self.text(name);
+            return Err(self.error(ErrKind::Syntax, &format!("Identifier '{n}' has already been declared")));
+        }
+        Ok(())
+    }
+
+    /// Is `name` a global lexical binding? (The binding is in its dead zone or it has a value.)
+    pub fn has_lex(&self, name: Str) -> bool {
+        !self.lex.is_empty() && self.lex.contains_key(&name.value().bits())
+    }
+
+    /// The value of the global lexical binding `name`. `None`: there is none. A ReferenceError in its dead zone.
+    pub fn lex_get(&mut self, name: Str) -> Option<R<Value>> {
+        let &(_, ctx, slot, _) = self.lex.get(&name.value().bits())?;
+        let v = Realm::ctx(ctx).expect("a context").get(1 + slot as usize);
+        Some(if v.is_hole() {
+            let n = self.text(name);
+            Err(self.error(ErrKind::Reference, &format!("cannot access '{n}' before initialization")))
+        } else {
+            Ok(v)
+        })
+    }
+
+    /// `name = v` for a global lexical binding. `None`: there is none. A TypeError for a `const`, a ReferenceError in the dead zone.
+    pub fn lex_put(&mut self, name: Str, v: Value) -> Option<R<()>> {
+        let &(_, ctx, slot, konst) = self.lex.get(&name.value().bits())?;
+        let cx = Realm::ctx(ctx).expect("a context");
+        let n = self.text(name);
+        Some(if cx.get(1 + slot as usize).is_hole() {
+            Err(self.error(ErrKind::Reference, &format!("cannot access '{n}' before initialization")))
+        } else if konst {
+            Err(self.error(ErrKind::Type, &format!("assignment to constant variable '{n}'")))
+        } else {
+            cx.set(1 + slot as usize, v);
+            Ok(())
+        })
+    }
+
     // ---- private names ----
 
     /// `NewPrivateName`: a key that no other evaluation of the class has.
@@ -208,7 +260,7 @@ impl Realm {
     pub fn super_get(&mut self, home: Value, key: Key) -> R<Got> {
         let k = self.key_atom(key);
         Ok(match self.super_base(home)? {
-            None => Got::Val(Value::UNDEFINED),
+            None => return self.type_error("cannot read properties of null (the prototype of the home object)"),
             Some(b) => Self::got(self.lookup_g(b, k)),
         })
     }
@@ -216,9 +268,8 @@ impl Realm {
     /// `super[key] = v`: a setter that the prototype chain gives runs with `this`; else the value is set on `this`.
     pub fn super_set(&mut self, home: Value, this: Value, key: Key, v: Value) -> R<Put> {
         let k = self.key_atom(key);
-        if let Some(b) = self.super_base(home)?
-            && let Some(Slot::Acc(_, s)) = self.lookup_g(b, k)
-        {
+        let Some(b) = self.super_base(home)? else { return self.type_error("cannot set properties of null (the prototype of the home object)") };
+        if let Some(Slot::Acc(_, s)) = self.lookup_g(b, k) {
             return Ok(Self::setter(s));
         }
         self.set_prop_g(this, key, v)
@@ -240,8 +291,7 @@ impl Realm {
             while i < units.len() {
                 let pair = (0xD800..0xDC00).contains(&units[i]) && units.get(i + 1).is_some_and(|u| (0xDC00..0xE000).contains(u));
                 let n = if pair { 2 } else { 1 };
-                let t = String::from_utf16_lossy(&units[i..i + n]);
-                out.push(self.string(&t));
+                out.push(crate::string::Str::new(&mut self.heap, crate::string::Chars::Two(&units[i..i + n])).expect("memory").value());
                 i += n;
             }
             return Ok(out);

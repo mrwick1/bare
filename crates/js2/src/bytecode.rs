@@ -156,6 +156,9 @@ ops! {
     DeleteGlobal Abx "w S" "`a = delete name` for a global name: false when the property is not configurable.",
     SetGlobalS Abx "r S" "As `SetGlobal` in strict code: a ReferenceError when the global does not exist.",
     DeclGlobal Abx "- S" "Create the global of the site `bx` with the value `undefined` when it does not exist (the hoisting of the `var` names and the function names of a script).",
+    DeclLex Abx "u S" "The slot `a` of the current context is the global lexical binding of the site `bx` (a top-level `let` or `class`): other scripts of the realm read it by name. A SyntaxError when the name is declared already.",
+    CheckLex Abx "- S" "A SyntaxError when the global lexical environment has the name of the site `bx` already, or the global object has a fixed property of that name (the early check of a top-level `let` that lives in a register).",
+    DeclLexC Abx "u S" "As `DeclLex` for a top-level `const`: an assignment throws a TypeError.",
     TypeofGlobal Abx "w S" "`a` = `typeof` the global of the site `bx`. A missing name gives `\"undefined\"`.",
     GetName Abx "w S" "`a` = the name of the site `bx` by the full search (a function with `with` or direct `eval`).",
     SetName Abx "r S" "The name of the site `bx` = `a`, by the full search.",
@@ -598,6 +601,8 @@ pub struct Code {
     pub fn_len: u16,
     /// The function is strict code: a write that fails (a read-only property, a primitive, `delete` of a fixed property) throws.
     pub strict: bool,
+    /// The function is an arrow, a method, a getter or a setter: `new` on it throws a `TypeError`.
+    pub noctor: bool,
 }
 
 /// `Code::fn_name` of a function that has no name.
@@ -623,6 +628,7 @@ impl Code {
             fn_name: NO_NAME,
             fn_len: 0,
             strict: false,
+            noctor: false,
         }
     }
 

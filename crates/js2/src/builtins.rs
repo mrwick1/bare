@@ -230,6 +230,10 @@ impl Realm {
         self.method(g, "__def", prelude_def);
         self.hidden(g, "globalThis", g.value());
         self.hidden(g, "self", g.value());
+        for (n, v) in [("NaN", Value::number(f64::NAN)), ("Infinity", Value::number(f64::INFINITY)), ("undefined", Value::UNDEFINED)] {
+            let k = self.intern(n);
+            self.define_attrs(g, Key::Name(k), 0, v).expect("define");
+        }
         self.install_object();
         self.install_function();
         self.install_error();
@@ -482,8 +486,11 @@ fn object_own_descriptor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Valu
     let k = match key {
         Key::Name(k) => k,
         Key::Idx(i) => {
-            let Some(v) = o.is_indexed().then(|| o.get_element(i)).flatten() else { return Ok(Value::UNDEFINED) };
-            return Ok(descriptor(rt, Some(v), None, A_W | A_E | A_C));
+            if let Some(v) = o.is_indexed().then(|| o.get_element(i)).flatten() {
+                return Ok(descriptor(rt, Some(v), None, A_W | A_E | A_C));
+            }
+            // An index on an object that is not an array is a named property.
+            rt.idx_atom(i)
         }
     };
     let Some(e) = rt.shapes.find(o.shape(&rt.shapes), k) else {

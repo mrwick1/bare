@@ -21,6 +21,7 @@ impl<'a> Fc<'a> {
     fn inline_fc(&self, id: FnId, flags: u16) -> Fc<'a> {
         let mut c = Fc::new(self.prog, self.facts, self.atoms, &Input { chain: self.cur_ctx.clone(), self_name: false, name: None });
         c.strict = true;
+        c.noctor = true;
         c.fn_id = Some(id);
         c.fn_flags = flags;
         c
@@ -106,6 +107,13 @@ impl<'a> Fc<'a> {
             }
         }
         let mark = self.enter(c.span, &decls, false)?;
+        // The inner name is in its dead zone while the heritage and the computed keys run.
+        if let Some(n) = &name
+            && let Some(Home::Reg(r)) = self.find_var(n).map(|v| v.home)
+        {
+            self.op(Op::LoadHole, r, 0, 0);
+            self.set_live(r);
+        }
         for n in &privates {
             let t = self.alloc();
             let a = self.atom(n)?;
