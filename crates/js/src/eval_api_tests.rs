@@ -4,6 +4,7 @@ use super::*;
 use crate::heap::Heap;
 use bare_js_api::{Args, Attrs, Engine, Local, Persistent, PromiseState, Scope, Type, enter};
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     std::thread::Builder::new().stack_size(64 << 20).spawn(f).unwrap().join().unwrap()
@@ -909,5 +910,185 @@ fn between_jobs_runs_before_each_job_and_once_when_the_queue_is_empty_and_an_err
         });
         assert_eq!(out(&mut it, "n"), "4", "3 jobs, then 1 more before the hook failed");
         assert_eq!(it.stack_len(), 0);
+    });
+}
+
+// Modules through the interface (plan step S0.4). The host side is written against the interface only: a map of file names to sources.
+
+type Files<'a> = &'a [(&'a str, &'a str)];
+
+/// Parse `name` and what it imports, the way the browser loader does.
+fn load<'s, E: Engine>(s: &mut Scope<'s, E>, files: Files, name: &str, cache: &mut HashMap<String, u32>) -> Result<u32, bare_js_api::Error<'s>> {
+    if let Some(&m) = cache.get(name) {
+        return Ok(m);
+    }
+    let src = files.iter().find(|f| f.0 == name).unwrap_or_else(|| panic!("no file {name}")).1;
+    let m = s.module_parse(src, name)?;
+    cache.insert(name.to_string(), m);
+    let deps = s.module_requests(m).iter().map(|r| load(s, files, r, cache)).collect::<Result<Vec<_>, _>>()?;
+    s.module_set_requested(m, &deps);
+    Ok(m)
+}
+
+/// `Name:message` of a thrown error.
+fn thrown<'s, E: Engine>(s: &mut Scope<'s, E>, e: bare_js_api::Error<'s>) -> String {
+    let bare_js_api::Error::Throw(v) = e else { return "abort".to_string() };
+    let (n, m) = (s.get_str(v, "name").unwrap(), s.get_str(v, "message").unwrap());
+    format!("{}:{}", s.as_str(n).unwrap().to_string_lossy(), s.as_str(m).unwrap().to_string_lossy())
+}
+
+/// The state of a promise as a word.
+fn state<'s, E: Engine>(s: &mut Scope<'s, E>, p: Local<'_>) -> String {
+    match s.promise_status(p) {
+        Some(PromiseState::Pending) => "pending".to_string(),
+        Some(PromiseState::Fulfilled(_)) => "ok".to_string(),
+        Some(PromiseState::Rejected(v)) => format!("rejected {}", thrown(s, bare_js_api::Error::Throw(v))),
+        None => "no promise".to_string(),
+    }
+}
+
+#[test]
+fn modules_are_parsed_linked_and_evaluated_through_the_interface() {
+    big(|| {
+        let (mut it, _) = setup();
+        out(&mut it, "var log = []; 0");
+        let files: Files = &[("a", "import { b } from 'b'; log.push('a' + b);"), ("b", "export const b = 1; log.push('b');")];
+        enter(&mut it, |s| {
+            let mut cache = HashMap::new();
+            let a = load(s, files, "a", &mut cache).unwrap();
+            assert_eq!((s.module_requests(a), s.module_url(a).to_string()), (vec!["b".to_string()], "a".to_string()));
+            s.module_link(a).unwrap();
+            let p = s.module_evaluate(a).unwrap();
+            assert_eq!(state(s, p), "ok", "no top-level await: settled at once");
+            // A second call gives the promise of the first.
+            let p2 = s.module_evaluate(a).unwrap();
+            assert_eq!(state(s, p2), "ok");
+            // The imports of a module that was not linked are an error of the host, not of the script.
+            let c = s.module_parse("import 'b'; export {}", "c").unwrap();
+            assert!(matches!(s.module_evaluate(c), Err(bare_js_api::Error::Abort(bare_js_api::Abort::Unsupported(_)))));
+        });
+        assert_eq!(out(&mut it, "log.join()"), "b,a1");
+        assert_eq!(it.stack_len(), 0);
+    });
+}
+
+#[test]
+fn a_cycle_and_a_top_level_await_run_through_the_interface() {
+    big(|| {
+        let (mut it, _) = setup();
+        out(&mut it, "var log = []; 0");
+        let files: Files = &[
+            ("a", "import { y } from 'b'; export const x = 'x'; log.push('a' + y);"),
+            ("b", "import { x } from 'a'; export const y = 'y'; log.push('b'); export function f() { return x }"),
+            ("w", "log.push('w1'); await null; log.push('w2');"),
+        ];
+        enter(&mut it, |s| {
+            let mut cache = HashMap::new();
+            let a = load(s, files, "a", &mut cache).unwrap();
+            s.module_link(a).unwrap();
+            let p = s.module_evaluate(a).unwrap();
+            assert_eq!(state(s, p), "ok");
+            let w = load(s, files, "w", &mut cache).unwrap();
+            s.module_link(w).unwrap();
+            let p = s.module_evaluate(w).unwrap();
+            assert_eq!(state(s, p), "pending", "the module waits at its `await`");
+            assert!(s.drain_microtasks().unwrap() > 0);
+            assert_eq!(state(s, p), "ok");
+        });
+        assert_eq!(out(&mut it, "log.join()"), "b,ay,w1,w2");
+    });
+}
+
+#[test]
+fn module_errors_are_thrown_to_the_host() {
+    big(|| {
+        let (mut it, _) = setup();
+        enter(&mut it, |s| {
+            let e = s.module_parse("export const = ;", "bad").unwrap_err();
+            assert!(thrown(s, e).starts_with("SyntaxError:"));
+            let files: Files = &[("a", "import { nope } from 'b'"), ("b", "export const yes = 1"), ("t", "throw new RangeError('boom')")];
+            let mut cache = HashMap::new();
+            let a = load(s, files, "a", &mut cache).unwrap();
+            let e = s.module_link(a).unwrap_err();
+            assert!(thrown(s, e).starts_with("SyntaxError:"), "a name that the module does not export");
+            let t = load(s, files, "t", &mut cache).unwrap();
+            s.module_link(t).unwrap();
+            let p = s.module_evaluate(t).unwrap();
+            assert_eq!(state(s, p), "rejected RangeError:boom", "an error in the module rejects the promise");
+        });
+        assert_eq!(it.stack_len(), 0);
+    });
+}
+
+#[test]
+fn an_import_call_is_taken_and_then_finished_rejected_or_failed() {
+    big(|| {
+        let (mut it, _) = setup();
+        out(&mut it, "var log = []; var note = tag => v => log.push(tag + ':' + (v && (v.name || v.v)));");
+        out(
+            &mut it,
+            "import('ok').then(note('ok'), note('bad')); import('syntax').then(note('bad'), note('syntax')); import('net').then(note('bad'), note('net')); import('throws').then(note('bad'), note('throws'));",
+        );
+        let files: Files = &[("ok", "export const v = 7"), ("syntax", "export const = ;"), ("throws", "throw new RangeError('x')")];
+        let reqs = enter(&mut it, |s| s.take_dynamic_imports());
+        assert_eq!(reqs.iter().map(|r| (r.specifier.as_str(), r.referrer)).collect::<Vec<_>>(), [("ok", None), ("syntax", None), ("net", None), ("throws", None)]);
+        assert!(enter(&mut it, |s| s.take_dynamic_imports()).is_empty(), "a request is taken once");
+        enter(&mut it, |s| {
+            let mut cache = HashMap::new();
+            let m = load(s, files, "ok", &mut cache).unwrap();
+            s.finish_dynamic_import(&reqs[0].promise, m).unwrap();
+            let e = load(s, files, "syntax", &mut cache).unwrap_err();
+            let bare_js_api::Error::Throw(reason) = e else { panic!("a throw") };
+            s.reject_dynamic_import(&reqs[1].promise, reason).unwrap();
+            s.fail_dynamic_import(&reqs[2].promise, "Failed to fetch net").unwrap();
+            let m = load(s, files, "throws", &mut cache).unwrap();
+            s.finish_dynamic_import(&reqs[3].promise, m).unwrap();
+            s.drain_microtasks().unwrap();
+        });
+        assert_eq!(out(&mut it, "log.join()"), "syntax:SyntaxError,net:TypeError,ok:7,throws:RangeError", "a finished import settles after the evaluation promise: later than a rejected one");
+        drop(reqs);
+        assert_eq!(it.stack_len(), 0);
+    });
+}
+
+#[test]
+fn an_import_call_in_a_module_names_the_module_as_its_referrer() {
+    big(|| {
+        let (mut it, _) = setup();
+        enter(&mut it, |s| {
+            let m = s.module_parse("import('x');", "root").unwrap();
+            s.module_link(m).unwrap();
+            s.module_evaluate(m).unwrap();
+            let reqs = s.take_dynamic_imports();
+            assert_eq!(reqs.iter().map(|r| (r.specifier.as_str(), r.referrer)).collect::<Vec<_>>(), [("x", Some(m))]);
+        });
+    });
+}
+
+#[test]
+fn a_persistent_import_promise_survives_a_collection_between_take_and_finish() {
+    big(|| {
+        let (mut it, _) = setup();
+        out(&mut it, "var log = []; var w = new WeakRef({ tag: 'junk' }); import('ok').then(v => log.push('ok:' + v.v), e => log.push('bad:' + e)); import('no').catch(e => log.push(e.name)); 0");
+        let reqs = enter(&mut it, |s| s.take_dynamic_imports());
+        assert_eq!(reqs.len(), 2);
+        let slots = it.persistent_slots();
+        // Only the handles reach the promises now: the engine gave up its root, and no script variable holds them.
+        it.collect(&[]).unwrap();
+        it.collect(&[]).unwrap();
+        assert_eq!(out(&mut it, "w.deref() === undefined"), "true", "a collection ran, and it freed what nothing held");
+        enter(&mut it, |s| {
+            let files: Files = &[("ok", "export const v = 5")];
+            let m = load(s, files, "ok", &mut HashMap::new()).unwrap();
+            s.finish_dynamic_import(&reqs[0].promise, m).unwrap();
+            s.fail_dynamic_import(&reqs[1].promise, "Failed to fetch no").unwrap();
+            s.drain_microtasks().unwrap();
+        });
+        assert_eq!(out(&mut it, "log.join()"), "TypeError,ok:5");
+        drop(reqs);
+        assert_eq!(it.persistent_slots(), slots, "the slots are free again and the table did not grow");
+        let mut live = 0;
+        it.api.slots.for_each(|_| live += 1);
+        assert_eq!(live, 0, "no handle is left");
     });
 }
