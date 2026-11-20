@@ -14,6 +14,7 @@ mod intl_data;
 mod intl_num_data;
 mod icu;
 pub mod heap;
+pub mod layout_census;
 pub mod json;
 pub mod regexp;
 pub mod text;

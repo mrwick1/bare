@@ -908,8 +908,8 @@ impl<'p> Interp<'p> {
     }
 
     /// Give the heap back (the interpreter and every environment are dropped).
-    pub fn into_heap(self) -> Heap {
-        self.heap
+    pub fn into_heap(mut self) -> Heap {
+        std::mem::take(&mut self.heap)
     }
 
     pub fn global_object(&self) -> ObjId {
@@ -1019,6 +1019,9 @@ impl<'p> Interp<'p> {
     pub fn collect(&mut self, extra: &[Value]) -> Result<Collected, Error> {
         if self.depth != 0 || self.stmt_frames != 0 {
             return Err(unsupported("collect during a call", Span::default()));
+        }
+        if crate::layout_census::stats_on() {
+            self.census_sample(0);
         }
         let mut seen = Seen(vec![0; self.heap.object_slots()]);
         self.api_owners(&mut seen);
@@ -1149,6 +1152,13 @@ impl<'p> Interp<'p> {
         roots.extend_from_slice(extra);
         roots.extend_from_slice(&host_vals);
         let sweeps = self.heap.shape_sweeps();
+        if crate::layout_census::stats_on() {
+            use std::mem::size_of;
+            let scratch = seen.0.capacity() * 8 + env_seen.capacity() + (work.capacity() + host_vals.capacity() + roots.capacity()) * size_of::<Value>()
+                + agg_seen.capacity() * 9 + env_work.capacity() * 4 + act_seen.capacity()
+                + pending.capacity() * (size_of::<(ObjId, Vec<Value>)>() + 1) + pending.values().map(|v| v.capacity() * size_of::<Value>()).sum::<usize>();
+            self.census_sample(scratch.max(1));
+        }
         let r = h!(self, self.heap.collect(&roots));
         if self.heap.shape_sweeps() != sweeps {
             self.reset_caches();
@@ -4138,7 +4148,12 @@ include!("eval_asyncgen.rs");
 include!("eval_clone.rs");
 include!("eval_ic.rs");
 include!("eval_bc.rs");
+include!("eval_census.rs");
 include!("eval_inspect.rs");
+
+#[cfg(test)]
+#[path = "eval_census_tests.rs"]
+mod census_tests;
 
 #[cfg(test)]
 #[path = "eval_class_tests.rs"]
@@ -4368,6 +4383,8 @@ struct GcCounters {
     collections: u64,
     young_objects: u64,
     young_kept: u64,
+    /// The sample of the layout census with the most bytes (`BARE_JS_STATS`, `eval_census.rs`).
+    peak: crate::layout_census::LayoutCensus,
 }
 
 impl Drop for GcCounters {
@@ -4380,6 +4397,9 @@ impl Drop for GcCounters {
                 self.young_kept,
                 self.task_max.get()
             );
+            if self.peak.total() > 0 {
+                eprintln!("{}", self.peak.line());
+            }
         }
     }
 }

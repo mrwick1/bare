@@ -14491,3 +14491,63 @@ QuickJS loop without concat: 23,339,978 to 23,340,267 (N = 100,000). N = 1,000 g
 Findings, not changed: (1) `Heap` rounds a cell above 8,192 bytes to a 64 KiB mapping (S1.3), so a flat string of 8 to 64 KiB wastes up to 56 KiB and costs a system call. The flatten of a long rope hits this. (2) `ROPE_MIN` = 32 is not tuned. (3) `Chars::hash` is one multiply for each unit: no measurement of its spread beyond the table tests. (4) The Miri run of the crate takes 143 s of test time (not split by test).
 
 Not tested: a collection inside a task (S1.5 and S1.6 do not exist); the shared table under a real second heap that collects; the cost matrix (js2 is not wired into the browser); arm64; substrings, `Value` of strings in objects (S1.8 and S1.9).
+## 2026-11-20: layout census of the old engine (plan step M3)
+
+COMPLETE for Linux. The PR is not merged and has no auto-merge. Base: origin/main `1aa1bc6a`.
+
+Changes (`bare-js`, no change to a hot path):
+- `layout_census.rs`: `LayoutCensus`, 18 buckets, and `stats_on()` (reads `BARE_JS_STATS` once per process).
+- `eval_census.rs`: `Interp::layout_census()` walks the realm. `Heap::census` (in `heap.rs`) does the heap part. A sample is taken at the start of `Interp::collect`, again just before the sweep (with the collector scratch), and when the `Interp` drops. The sample with the most bytes prints as a `layout total=... bucket=bytes ...` line after the `gcstats` line.
+- Every size is a capacity in bytes (what the engine asked of the allocator, no malloc headers). A shared tree, source text or compiled function counts once.
+- `Interp` now has a `Drop`, so `into_heap` takes the heap with `mem::take`. Nothing in the repo calls `into_heap`.
+- `tools/js/layout_census.sh` runs a command under massif (`--pages-as-heap=no`) and prints the census line and the engine bytes of the massif snapshot where they peak. `tools/js/massif_engine.py` does the second part: an allocation is the engine's when the nearest crate frame to the allocator is `bare_js`. With `--host-parse` it leaves out the tree that an example parses itself (`eval_load` keeps its copy after `Interp::new` clones it).
+- Tests: `eval_census_tests.rs`, 5 tests.
+- The `new` engine (`bare-js2`): no hook. Its heap has `mapped_bytes()` already, but no cell has a kind or a layout yet, so a census by layout has nothing to count. The hook belongs to S1.4 (cell header).
+
+Buckets: `objects` (records and slab tables), `slots` (inline and vector value slots), `dict`, `elements`, `shapes`, `strings` (records, units, interner, ropes), `binary`, `heap_other` (symbols, BigInt), `bytecode`, `feedback` (inline caches), `source`, `ast`, `tables` (per-script tables of the tree walker), `scopes`, `envs` (environments and the function table), `names`, `stacks` (pools kept for reuse), and `collector`.
+
+`collector` is a bucket the plan did not list. A collect holds the mark bits, the gray stack, the root vector and the work lists at the same time as the garbage. In `eval_load objects 10` it is 42% of the peak, because the 200 000 element array puts 200 000 values in the work list.
+
+Check (archMachine, release build with symbols, `--detailed-freq=1`, one run each; massif counts instructions, not time, so a run has no spread, and a second build gave the same numbers). Census total against the engine bytes of the massif peak snapshot:
+
+| Case | Census | Massif engine | Difference |
+|---|---:|---:|---:|
+| `eval_load objects 10`, auto | 8 240 509 | 8 179 616 | +0.74% |
+| `eval_load closures 10`, auto | 26 257 250 | 26 419 252 | -0.61% |
+| `eval_load webpack 10`, auto | 1 912 740 | 1 908 110 | +0.24% |
+| `eval_load objects 10`, tree | 8 238 969 | 8 179 616 | +0.73% |
+| `eval_load closures 10`, tree | 26 255 593 | 26 419 252 | -0.62% |
+| `eval_load webpack 10`, tree | 1 553 750 | 1 548 556 | +0.34% |
+| `browser_load event 1`, auto | 819 435 | 814 720 | +0.58% |
+| `browser_load lookup 1`, auto | 900 644 | 883 108 | +1.99% |
+| `browser_load mutation 1`, auto | 1 191 402 | 1 128 860 | +5.54% |
+| `browser_load rel 1`, auto | 1 203 008 | 1 138 012 | +5.71% |
+
+All three `eval_load` cases pass in both modes, and two of the four browser cases pass. `mutation` and `rel` are over 5%. Hypothesis: the census is right and massif does not attribute some engine bytes to the engine. Both cases make thousands of node wrappers, and the host code (`Dom::set_wrapper`, the `Host` impl, `def_method`) calls heap functions that the compiler inlined, so massif names `bare::` as the nearest crate. Those three sites hold 140 000 bytes in `mutation`. I did not prove it. The total massif heap of `mutation` is 1 459 849 bytes; 330 989 are the host's by this rule (the DOM nodes and the wrapper tables).
+
+Peak table, `auto` (bytes, share of the census total):
+
+| Bucket | objects 10 | closures 10 | webpack 10 | browser event 1 | browser lookup 1 |
+|---|---:|---:|---:|---:|---:|
+| objects | 69 632 (1%) | 4 456 448 (17%) | 278 528 (15%) | 141 749 (17%) | 143 002 (16%) |
+| slots | 50 176 (1%) | 3 146 752 (12%) | 205 120 (11%) | 117 216 (14%) | 117 216 (13%) |
+| dict | 144 760 (2%) | 65 072 (0%) | 67 666 (4%) | 78 184 (10%) | 78 184 (9%) |
+| elements | 4 194 304 (51%) | 1 048 576 (4%) | 56 576 (3%) | 0 | 32 000 (4%) |
+| shapes | 21 671 | 5 576 | 2 900 | 58 478 (7%) | 58 458 (6%) |
+| strings | 202 162 (2%) | 43 158 | 64 656 (3%) | 117 885 (14%) | 120 080 (13%) |
+| bytecode | 544 | 1 123 | 371 140 (19%) | 0 | 0 |
+| feedback | 87 088 (1%) | 87 088 | 123 304 (6%) | 87 232 (11%) | 87 424 (10%) |
+| ast + source | 2 850 | 2 719 | 368 862 (19%) | 3 345 | 5 560 |
+| tables + scopes + names | 3 521 | 2 897 | 204 556 (11%) | 20 329 | 20 883 |
+| envs | 34 088 | 12 631 568 (48%) | 67 840 (4%) | 128 640 (16%) | 128 032 (14%) |
+| collector | 3 428 529 (42%) | 4 765 057 (18%) | 99 320 (5%) | 65 183 (8%) | 108 411 (12%) |
+| binary + heap_other + stacks | 1 307 | 1 339 | 2 272 | 1 194 | 1 194 |
+| Total | 8 240 509 | 26 257 250 | 1 912 740 | 819 435 | 900 644 |
+
+What this says for S1.4 and the cell header (observations, not decisions): value slots are 11% to 14% of the peak in every case that has objects, and the object record is another 15% to 17%. In `closures`, environments are 48% of the peak, which a cell layout does not touch unless environments become cells. A browser realm at idle is mostly fixed cost: about 87 000 bytes of heap caches, 58 000 of shapes and 78 000 of dictionaries before any page script runs.
+
+Cost matrix (`tools/js/cost_matrix.sh -j4`, 819 rows, base `1aa1bc6a` against this branch, both with the default release profile): no row over +0.5% under both allocators. Mean change glibc +0.009%, jemalloc +0.131% (3 rows measured). Three rows are over under glibc only: `resources_load small 1` +1.78%, `resources_load small 10` +1.75% and `preload_load style 10` +0.98%; these are the known glibc noise rows, and their jemalloc numbers are +0.36%, +0.01% and +0.02%. All 16 `eval_load` rows move by at most +0.024%. `parse_load deep 1` and `deep 10` fail to run in the matrix; they overflow the stack the same way on the base tree (`parse_load deep 1` run by hand on both). The cost when `BARE_JS_STATS` is unset is two `OnceLock` reads per collect and one per `Interp` drop.
+
+Tests: Linux `cargo test --locked -p bare-js-api -p bare-js --lib` 31 and 1082 passed (1 ignored), `cargo test --locked -p bare --lib` 1707 passed (6 ignored). Windows (MSVC test executable, run on the VM): `census_tests` 5 passed, `heap::` 93 passed.
+
+Not tested: the full Windows suite, massif on Windows (valgrind has no Windows port, so the check ran on Linux only), a census of the `new` engine, `byte` exec mode, a page with a real framework bundle (the browser check used `browser_load`, which has little bytecode), a run with more than one realm, and codegen-units=1 runs (no row needed them). The census peak is the largest sample at a collect or at the end of the realm. A peak between two collects is not seen. `clippy -D warnings` fails in `bare-os` (`pages.rs:19`, `is_multiple_of`) before it reaches `bare-js`; the `bare-js` lints I ran without `-D warnings` show nothing in the new files.
