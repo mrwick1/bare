@@ -16428,6 +16428,18 @@ Re-measured on the merge with `origin/main` 450d4e46 (after #773 and #785), 2026
 | `objects` | 827.04 | 740.35 | -10.5% | 849.26 | 757.88 | -10.8% |
 
 No row is higher at either build, so the cost rule holds without a change of the code. The earlier merge (against `b0a0df89`, before #785 put `cold_path()` in the rare arms) had `objects` +1.23% and +2.7% and `loopfn` +4.3% at cgu=1. The rows moved with the layout of `Vm::run`, not with the global cache (hypothesis: not checked in the assembly). The rows `loopfn` and the others use no global in their loop. test262 (`tools/js/test262_js2.sh`): the counts equal `test262-js2-baseline.txt` (js2 15854 pass, js 16755 pass).
+Re-measured on the merge with `origin/main` 450d4e46 and the step 3 branch, 2026-11-21. Same method as the step 3 re-measure above (scale 10, minimum of 3, default build and `codegen-units=1`, built for both trees). Change of steps 3 and 4 together against main:
+
+| Row | main, default (M) | this PR, default (M) | change | main, cgu=1 (M) | this PR, cgu=1 (M) | change |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loopfn` | 525.89 | 435.89 | -17.1% | 539.89 | 451.89 | -16.3% |
+| `calls` | 1012.91 | 698.91 | -31.0% | 1029.90 | 688.90 | -33.1% |
+| `fib` | 45.00 | 37.12 | -17.5% | 45.78 | 36.33 | -20.7% |
+| `closures` | 170.04 | 142.94 | -15.9% | 175.13 | 142.58 | -18.6% |
+| `objects` | 827.04 | 734.56 | -11.2% | 849.26 | 735.27 | -13.4% |
+
+No row is higher at either build. The earlier merge (before #785) had `loopfn` +0.68% and +6.7% and `objects` +1.78% and +5.3%. The rows moved with the layout of `Vm::run` (hypothesis, not checked in the assembly). test262 counts equal the baseline file.
+
 ## 2026-11-20: property attributes, descriptors, non-extensible objects and generic Array methods in js2 (S2.7 follow-up)
 
 Branch `t3/js2-builtin-attrs`, from the test262 gate (#764). It fixes the groups that the gate reported as 325 (property attributes), 241 (Array methods on array-likes), 373 (missing methods) and 205 (accessors), the real non-extensible objects, and the hang of `Object.setPrototypeOf/set-failure-cycle.js`.
