@@ -568,12 +568,6 @@ pub(crate) fn wrap_coll_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, ids: &[NodeId]) -> Re
     old_v(s, |it| crate::browser_gaps::wrap_coll(d, it, ids))
 }
 
-pub(crate) fn note_owner_s(d: &Dom, s: &mut Sc<'_, '_>, this: Local<'_>, made: Local<'_>) {
-    let it = s.engine();
-    let (this, made) = (it.raw(this), it.raw(made));
-    crate::browser_frames::note_owner(d, it, this, made);
-}
-
 pub(crate) fn ns_put_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId, existing: Option<bare_html::dom::Atom>, qname: &str, value: &str) -> Res<'s, ()> {
     old(s, |it| crate::browser_namespace::put(d, it, n, existing, None, qname, value))
 }

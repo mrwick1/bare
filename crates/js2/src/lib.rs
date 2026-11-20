@@ -47,4 +47,9 @@ mod bi_object;
 mod bi_number;
 mod bi_wrap;
 mod bi_string;
+#[rustfmt::skip]
+mod prelude_facts;
 pub mod script;
+#[cfg(test)]
+#[path = "prelude_facts_tests.rs"]
+mod prelude_facts_tests;

@@ -24,9 +24,10 @@
 
 use crate::browser::*;
 use crate::browser_navigation_url::{self as nu, Part, Rec, UErr, form_parse, form_serialize};
+use crate::browser_scoped::*;
 use bare_js::eval::{Error, HostIter, Interp};
 use bare_js::value::{ObjId, PropertyKey, Value};
-use bare_js_api::Traced;
+use bare_js_api::{Args, Engine as _, Local, Traced, Type};
 
 /// The three kinds are owners (`Owner::Url`, `Owner::Params`, `Owner::Iter`): `Host::trace(key)` visits their edges and `Host::prune`
 /// drops their entries (`browser_navigation::trace_owner`, `prune_owner`).
@@ -57,24 +58,42 @@ pub(crate) fn edge(t: &Traced<Value>) -> ObjId {
 }
 
 /// Make `o` the owner of its edges. Call it once the entry is in its table and nothing can fail any more.
-fn own(d: &Dom, it: &mut Interp<'_>, o: ObjId, w: Owner) {
+fn own<'s>(d: &Dom, s: &mut Sc<'s, '_>, o: Local<'s>, w: Owner) -> Res<'s, ()> {
     let k = d.st.borrow_mut().owners.key(w);
-    it.set_host_owner_obj(o, k);
+    s.set_host_owner(o, k)
 }
 
-fn arg(a: &[Value], i: usize) -> Value {
-    a.get(i).copied().unwrap_or(Value::Undefined)
+/// The argument `i` that `need` has checked.
+fn at<'s>(a: Args<'s>, i: usize) -> Local<'s> {
+    a.get(i).expect("checked by need")
 }
 
-fn need(it: &mut Interp<'_>, a: &[Value], n: usize, what: &str) -> R<()> {
+fn need<'s>(s: &mut Sc<'s, '_>, a: Args<'s>, n: usize, what: &str) -> Res<'s, ()> {
     if a.len() < n {
-        return Err(it.type_error(&format!("Failed to execute '{what}': {n} argument{} required, but only {} present.", if n == 1 { "" } else { "s" }, a.len())));
+        return Err(s.type_error(&format!("Failed to execute '{what}': {n} argument{} required, but only {} present.", if n == 1 { "" } else { "s" }, a.len())));
     }
     Ok(())
 }
 
 /// `ToString(v)` as a USVString (a lone surrogate becomes U+FFFD, as WebIDL says).
-pub(crate) fn usv(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<String> {
+pub(crate) fn usv<'s>(d: &Dom, s: &mut Sc<'s, '_>, v: Local<'s>) -> Res<'s, String> {
+    // A string is read in place: `to_string` pushes a local for another value only.
+    let max = d.nav.lim.get().max_url_bytes;
+    let read = |s: &Sc<'_, '_>, t| s.as_str(t).map(|t| (t.len(), (t.len() <= max).then(|| t.to_string_lossy())));
+    let (len, out) = match read(s, v) {
+        Some(r) => r,
+        None => {
+            let t = s.to_string(v)?;
+            read(s, t).ok_or_else(|| s.type_error("not a string"))?
+        }
+    };
+    let Some(out) = out else { return Err(d.lim_s(s, "url-string")) };
+    s.charge((len / 32) as u64)?;
+    Ok(out)
+}
+
+/// `usv` for the helpers that hold an `Interp` (the init of `URLSearchParams`).
+fn usv_i(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<String> {
     let s = it.to_js_string(v)?;
     let len = it.heap.str_len(s).map_err(Error::Heap)?;
     if len > d.nav.lim.get().max_url_bytes {
@@ -87,13 +106,21 @@ pub(crate) fn usv(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<String> {
     }
 }
 
+/// `usv` of the optional argument `i`: `None` when it is absent or `undefined`.
+fn usv_opt<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>, i: usize) -> Res<'s, Option<String>> {
+    match a.get(i) {
+        Some(v) if s.type_of(v) != Type::Undefined => usv(d, s, v).map(Some),
+        _ => Ok(None),
+    }
+}
+
 /// The error a script sees for a failed parse. `what` is the `TypeError` text (a `SyntaxError` for `Location`).
-pub(crate) fn uerr(d: &Dom, it: &mut Interp<'_>, e: UErr, msg: &str, syntax: bool) -> Error {
+pub(crate) fn uerr<'s>(d: &Dom, s: &mut Sc<'s, '_>, e: UErr, msg: &str, syntax: bool) -> bare_js_api::Error<'s> {
     match e {
-        UErr::Invalid if syntax => d.dom_err(it, "SyntaxError", msg),
-        UErr::Invalid => it.type_error(msg),
-        UErr::Scheme => Error::Unsupported(unsupported("URL scheme other than http and https")),
-        UErr::Gate(w) => Error::Unsupported(unsupported(w)),
+        UErr::Invalid if syntax => d.dom_err_s(s, "SyntaxError", msg),
+        UErr::Invalid => s.type_error(msg),
+        UErr::Scheme => lift_err(s, Error::Unsupported(unsupported("URL scheme other than http and https"))),
+        UErr::Gate(w) => lift_err(s, Error::Unsupported(unsupported(w))),
     }
 }
 
@@ -151,138 +178,153 @@ fn commit_params(d: &Dom, sp: ObjId) -> R<()> {
     Ok(())
 }
 
-fn new_url(d: &Dom, it: &mut Interp<'_>, rec: Rec, proto: ObjId) -> R<ObjId> {
-    room(d)?;
-    fit(d, &rec)?;
-    let o = d.obj(it, proto)?;
+fn new_url<'s>(d: &Dom, s: &mut Sc<'s, '_>, rec: Rec, proto: ObjId) -> Res<'s, Local<'s>> {
+    lift(s, room(d))?;
+    lift(s, fit(d, &rec))?;
+    let o = d.obj_s(s, proto)?;
+    let l = d.obj_local(s, o);
     d.nav.s.borrow_mut().urls.insert(o, UrlObj { rec, sp: None });
-    own(d, it, o, Owner::Url(o));
-    Ok(o)
+    own(d, s, l, Owner::Url(o))?;
+    Ok(l)
 }
 
-fn new_params(d: &Dom, it: &mut Interp<'_>, list: Vec<(String, String)>, url: Option<ObjId>) -> R<ObjId> {
-    new_params_in(d, it, list, url, d.nav.p.get().expect("installed").params)
+/// A new `URLSearchParams` for `list`. `url` is the object of its `URL`, if it has one. The object and its local.
+fn new_params<'s>(d: &Dom, s: &mut Sc<'s, '_>, list: Vec<(String, String)>, url: Option<Local<'s>>) -> Res<'s, (ObjId, Local<'s>)> {
+    new_params_in(d, s, list, url, d.nav.p.get().expect("installed").params)
 }
 
-fn new_params_in(d: &Dom, it: &mut Interp<'_>, list: Vec<(String, String)>, url: Option<ObjId>, proto: ObjId) -> R<ObjId> {
-    room(d)?;
-    let o = d.obj(it, proto)?;
-    let url = url.map(|u| it.trace_value(Value::Object(u)));
+fn new_params_in<'s>(d: &Dom, s: &mut Sc<'s, '_>, list: Vec<(String, String)>, url: Option<Local<'s>>, proto: ObjId) -> Res<'s, (ObjId, Local<'s>)> {
+    lift(s, room(d))?;
+    let o = d.obj_s(s, proto)?;
+    let l = d.obj_local(s, o);
+    let url = url.map(|u| s.trace_ref(u));
     d.nav.s.borrow_mut().params.insert(o, ParamsObj { list: Vec::new(), url, bytes: 0 });
     if let Err(e) = set_list(d, o, list) {
         d.nav.s.borrow_mut().params.remove(&o);
-        return Err(e);
+        return Err(lift_err(s, e));
     }
-    own(d, it, o, Owner::Params(o));
-    Ok(o)
+    own(d, s, l, Owner::Params(o))?;
+    Ok((o, l))
 }
 
 // ------------------------------------------------------------------------------------------ URL
 
-fn url_id(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<ObjId> {
-    match this {
-        Value::Object(o) if d.nav.s.borrow().urls.contains_key(&o) => Ok(o),
-        _ => Err(it.type_error("Illegal invocation")),
+#[inline(always)]
+fn url_id<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, ObjId> {
+    match obj_id(s, this) {
+        Some(o) if d.nav.s.borrow().urls.contains_key(&o) => Ok(o),
+        _ => Err(s.type_error("Illegal invocation")),
     }
 }
 
-pub(crate) fn url_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    let proto = it.host_proto_from_new_target(d.nav.p.get().expect("installed").url)?;
-    need(it, a, 1, "construct 'URL'")?;
-    let s = usv(d, it, a[0])?;
-    let base = match arg(a, 1) {
-        Value::Undefined => None,
-        b => Some(usv(d, it, b)?),
-    };
-    let msg = "Failed to construct 'URL': Invalid URL";
-    let base = match base {
-        Some(b) => Some(nu::parse_any(&b, None).map_err(|e| uerr(d, it, e, msg, false))?),
-        None => None,
-    };
-    let rec = nu::parse_any(&s, base.as_ref()).map_err(|e| uerr(d, it, e, msg, false))?;
-    Ok(Value::Object(new_url(d, it, rec, proto)?))
+/// The prototype of a constructor call: the `prototype` of `new.target`, else `default`.
+fn proto_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, default: ObjId) -> Res<'s, ObjId> {
+    let default = d.obj_local(s, default);
+    let proto = s.proto_from_new_target(default)?;
+    Ok(obj_id(s, proto).expect("a prototype"))
 }
 
-pub(crate) fn url_can_parse(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    need(it, a, 1, "canParse' on 'URL")?;
-    let s = usv(d, it, a[0])?;
-    let base = match arg(a, 1) {
-        Value::Undefined => None,
-        b => Some(usv(d, it, b)?),
-    };
+pub(crate) fn url_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let proto = proto_of(d, s, d.nav.p.get().expect("installed").url)?;
+    need(s, a, 1, "construct 'URL'")?;
+    let text = usv(d, s, at(a, 0))?;
+    let base = usv_opt(d, s, a, 1)?;
+    let msg = "Failed to construct 'URL': Invalid URL";
     let base = match base {
         Some(b) => match nu::parse_any(&b, None) {
             Ok(r) => Some(r),
-            Err(UErr::Invalid) => return Ok(Value::Bool(false)),
-            Err(e) => return Err(uerr(d, it, e, "", false)),
+            Err(e) => return Err(uerr(d, s, e, msg, false)),
         },
         None => None,
     };
-    match nu::parse_any(&s, base.as_ref()) {
-        Ok(_) => Ok(Value::Bool(true)),
-        Err(UErr::Invalid) => Ok(Value::Bool(false)),
-        Err(e) => Err(uerr(d, it, e, "", false)),
+    let rec = match nu::parse_any(&text, base.as_ref()) {
+        Ok(r) => r,
+        Err(e) => return Err(uerr(d, s, e, msg, false)),
+    };
+    new_url(d, s, rec, proto)
+}
+
+pub(crate) fn url_can_parse<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    need(s, a, 1, "canParse' on 'URL")?;
+    let text = usv(d, s, at(a, 0))?;
+    let base = usv_opt(d, s, a, 1)?;
+    let base = match base {
+        Some(b) => match nu::parse_any(&b, None) {
+            Ok(r) => Some(r),
+            Err(UErr::Invalid) => return Ok(s.boolean(false)),
+            Err(e) => return Err(uerr(d, s, e, "", false)),
+        },
+        None => None,
+    };
+    match nu::parse_any(&text, base.as_ref()) {
+        Ok(_) => Ok(s.boolean(true)),
+        Err(UErr::Invalid) => Ok(s.boolean(false)),
+        Err(e) => Err(uerr(d, s, e, "", false)),
     }
 }
 
-pub(crate) fn url_get(d: &Dom, it: &mut Interp<'_>, this: Value, part: Part) -> R<Value> {
-    let id = url_id(d, it, this)?;
-    let s = part.get(&d.nav.s.borrow().urls[&id].rec);
-    d.js_str(it, &s)
+pub(crate) fn url_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, part: Part) -> Res<'s, Local<'s>> {
+    let id = url_id(d, s, this)?;
+    let text = part.get(&d.nav.s.borrow().urls[&id].rec);
+    d.js_str_s(s, &text)
 }
 
-pub(crate) fn url_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], part: Part) -> R<Value> {
-    let id = url_id(d, it, this)?;
-    need(it, a, 1, "set a property on 'URL'")?;
-    let v = usv(d, it, a[0])?;
+pub(crate) fn url_set<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, part: Part) -> Res<'s, Local<'s>> {
+    let id = url_id(d, s, this)?;
+    need(s, a, 1, "set a property on 'URL'")?;
+    let v = usv(d, s, at(a, 0))?;
     let mut cand = d.nav.s.borrow().urls[&id].rec.clone();
     if part == Part::Href {
-        cand = nu::parse_any(&v, None).map_err(|e| uerr(d, it, e, "Failed to set the 'href' property on 'URL': Invalid URL", false))?;
-    } else {
-        part.set(&mut cand, &v).map_err(|e| uerr(d, it, e, "Invalid URL", false))?;
+        cand = match nu::parse_any(&v, None) {
+            Ok(r) => r,
+            Err(e) => return Err(uerr(d, s, e, "Failed to set the 'href' property on 'URL': Invalid URL", false)),
+        };
+    } else if let Err(e) = part.set(&mut cand, &v) {
+        return Err(uerr(d, s, e, "Invalid URL", false));
     }
-    fit(d, &cand)?;
+    lift(s, fit(d, &cand))?;
     // The query may have changed: reload the live `searchParams` first (its caps may refuse), then keep the URL.
     let sp = d.nav.s.borrow().urls[&id].sp.as_ref().map(edge);
     if let (Some(sp), true) = (sp, matches!(part, Part::Href | Part::Search)) {
-        set_list(d, sp, form_parse(cand.query().unwrap_or("")))?;
+        lift(s, set_list(d, sp, form_parse(cand.query().unwrap_or(""))))?;
     }
     d.nav.s.borrow_mut().urls.get_mut(&id).expect("checked").rec = cand;
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-pub(crate) fn url_origin(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    let id = url_id(d, it, this)?;
-    let s = d.nav.s.borrow().urls[&id].rec.origin();
-    d.js_str(it, &s)
+pub(crate) fn url_origin<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let id = url_id(d, s, this)?;
+    let text = d.nav.s.borrow().urls[&id].rec.origin();
+    d.js_str_s(s, &text)
 }
 
-pub(crate) fn url_search_params(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    let id = url_id(d, it, this)?;
+pub(crate) fn url_search_params<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let id = url_id(d, s, this)?;
     let (sp, q) = {
         let n = d.nav.s.borrow();
         let u = &n.urls[&id];
         (u.sp.as_ref().map(edge), u.rec.query().unwrap_or("").to_string())
     };
     if let Some(sp) = sp {
-        return Ok(Value::Object(sp));
+        return Ok(d.obj_local(s, sp));
     }
-    let sp = new_params(d, it, form_parse(&q), Some(id))?;
-    let edge = it.trace_value(Value::Object(sp));
+    let (_, sp) = new_params(d, s, form_parse(&q), Some(this))?;
+    let edge = s.trace_ref(sp);
     d.nav.s.borrow_mut().urls.get_mut(&id).expect("checked").sp = Some(edge);
-    Ok(Value::Object(sp))
+    Ok(sp)
 }
 
-pub(crate) fn url_to_string(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    url_get(d, it, this, Part::Href)
+pub(crate) fn url_to_string<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    url_get(d, s, this, Part::Href)
 }
 
 // ------------------------------------------------------------------------------------------ URLSearchParams
 
-fn params_id(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<ObjId> {
-    match this {
-        Value::Object(o) if d.nav.s.borrow().params.contains_key(&o) => Ok(o),
-        _ => Err(it.type_error("Illegal invocation")),
+#[inline(always)]
+fn params_id<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, ObjId> {
+    match obj_id(s, this) {
+        Some(o) if d.nav.s.borrow().params.contains_key(&o) => Ok(o),
+        _ => Err(s.type_error("Illegal invocation")),
     }
 }
 
@@ -322,7 +364,7 @@ fn init_pair(d: &Dom, it: &mut Interp<'_>, x: Value) -> R<(String, String)> {
                 let e = it.type_error("Failed to construct 'URLSearchParams': Each pair must have exactly 2 elements.");
                 return Err(it.host_iter_fail(&mut inner, e));
             }
-            Ok(Some(v)) => usv(d, it, v).map(Some),
+            Ok(Some(v)) => usv_i(d, it, v).map(Some),
             Ok(None) => Ok(None),
             Err(e) => Err(e),
         };
@@ -384,7 +426,7 @@ fn init_record(d: &Dom, it: &mut Interp<'_>, o: ObjId) -> R<Vec<(String, String)
         let Some(name) = key_text(it, k)? else { return Err(it.type_error("Cannot convert a Symbol value to a string")) };
         init_room(d, &list, bytes, 0)?;
         let v = it.get_value(Value::Object(o), k)?;
-        let v = usv(d, it, v)?;
+        let v = usv_i(d, it, v)?;
         let add = name.len() + v.len() + 32;
         init_room(d, &list, bytes, add)?;
         bytes += add;
@@ -401,18 +443,22 @@ fn init_from_object(d: &Dom, it: &mut Interp<'_>, o: ObjId) -> R<Vec<(String, St
     }
 }
 
-pub(crate) fn params_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
+pub(crate) fn params_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     // Chrome reads `Get(newTarget, "prototype")` before it converts the init.
-    let proto = it.host_proto_from_new_target(d.nav.p.get().expect("installed").params)?;
-    let list = match arg(a, 0) {
-        Value::Undefined => Vec::new(),
-        Value::Object(o) => init_from_object(d, it, o)?,
-        v => {
-            let s = usv(d, it, v)?;
-            form_parse(s.strip_prefix('?').unwrap_or(&s))
+    let proto = proto_of(d, s, d.nav.p.get().expect("installed").params)?;
+    let init = a.get(0).unwrap_or_else(|| s.undefined());
+    let list = match s.type_of(init) {
+        Type::Undefined => Vec::new(),
+        Type::Object | Type::Function => {
+            let o = obj_id(s, init).expect("an object");
+            old(s, |it| init_from_object(d, it, o))?
+        }
+        _ => {
+            let t = usv(d, s, init)?;
+            form_parse(t.strip_prefix('?').unwrap_or(&t))
         }
     };
-    Ok(Value::Object(new_params_in(d, it, list, None, proto)?))
+    Ok(new_params_in(d, s, list, None, proto)?.1)
 }
 
 /// Set the list of `sp` and the byte count that goes with it.
@@ -467,184 +513,199 @@ fn push(d: &Dom, sp: ObjId, list: &mut Vec<(String, String)>, n: String, v: Stri
     Ok(Some(add as isize))
 }
 
-pub(crate) fn p_append(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    let sp = params_id(d, it, this)?;
-    need(it, a, 2, "append' on 'URLSearchParams")?;
-    let (n, v) = (usv(d, it, a[0])?, usv(d, it, a[1])?);
-    edit(d, sp, |l| push(d, sp, l, n, v))?;
-    Ok(Value::Undefined)
+pub(crate) fn p_append<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let sp = params_id(d, s, this)?;
+    need(s, a, 2, "append' on 'URLSearchParams")?;
+    let n = usv(d, s, at(a, 0))?;
+    let v = usv(d, s, at(a, 1))?;
+    lift(s, edit(d, sp, |l| push(d, sp, l, n, v)))?;
+    Ok(s.undefined())
 }
 
-pub(crate) fn p_delete(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    let sp = params_id(d, it, this)?;
-    need(it, a, 1, "delete' on 'URLSearchParams")?;
-    let n = usv(d, it, a[0])?;
-    let v = match arg(a, 1) {
-        Value::Undefined => None,
-        v => Some(usv(d, it, v)?),
-    };
-    edit(d, sp, |l| {
-        l.retain(|(k, x)| !(*k == n && v.as_ref().is_none_or(|v| v == x)));
-        Ok(None)
-    })?;
-    Ok(Value::Undefined)
+pub(crate) fn p_delete<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let sp = params_id(d, s, this)?;
+    need(s, a, 1, "delete' on 'URLSearchParams")?;
+    let n = usv(d, s, at(a, 0))?;
+    let v = usv_opt(d, s, a, 1)?;
+    lift(
+        s,
+        edit(d, sp, |l| {
+            l.retain(|(k, x)| !(*k == n && v.as_ref().is_none_or(|v| v == x)));
+            Ok(None)
+        }),
+    )?;
+    Ok(s.undefined())
 }
 
-pub(crate) fn p_get(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    let sp = params_id(d, it, this)?;
-    need(it, a, 1, "get' on 'URLSearchParams")?;
-    let n = usv(d, it, a[0])?;
+pub(crate) fn p_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let sp = params_id(d, s, this)?;
+    need(s, a, 1, "get' on 'URLSearchParams")?;
+    let n = usv(d, s, at(a, 0))?;
     let found = d.nav.s.borrow().params[&sp].list.iter().find(|(k, _)| *k == n).map(|(_, v)| v.clone());
     match found {
-        Some(v) => d.js_str(it, &v),
-        None => Ok(Value::Null),
+        Some(v) => d.js_str_s(s, &v),
+        None => Ok(s.null()),
     }
 }
 
-pub(crate) fn p_get_all(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    let sp = params_id(d, it, this)?;
-    need(it, a, 1, "getAll' on 'URLSearchParams")?;
-    let n = usv(d, it, a[0])?;
+pub(crate) fn p_get_all<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let sp = params_id(d, s, this)?;
+    need(s, a, 1, "getAll' on 'URLSearchParams")?;
+    let n = usv(d, s, at(a, 0))?;
     let found: Vec<String> = d.nav.s.borrow().params[&sp].list.iter().filter(|(k, _)| *k == n).map(|(_, v)| v.clone()).collect();
     let mut vals = Vec::with_capacity(found.len());
     for v in &found {
-        vals.push(d.js_str(it, v)?);
+        vals.push(d.js_str_s(s, v)?);
     }
-    it.array_from(&vals)
+    s.new_array(&vals)
 }
 
-pub(crate) fn p_has(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    let sp = params_id(d, it, this)?;
-    need(it, a, 1, "has' on 'URLSearchParams")?;
-    let n = usv(d, it, a[0])?;
-    let v = match arg(a, 1) {
-        Value::Undefined => None,
-        v => Some(usv(d, it, v)?),
-    };
+pub(crate) fn p_has<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let sp = params_id(d, s, this)?;
+    need(s, a, 1, "has' on 'URLSearchParams")?;
+    let n = usv(d, s, at(a, 0))?;
+    let v = usv_opt(d, s, a, 1)?;
     let has = d.nav.s.borrow().params[&sp].list.iter().any(|(k, x)| *k == n && v.as_ref().is_none_or(|v| v == x));
-    Ok(Value::Bool(has))
+    Ok(s.boolean(has))
 }
 
-pub(crate) fn p_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    let sp = params_id(d, it, this)?;
-    need(it, a, 2, "set' on 'URLSearchParams")?;
-    let (n, v) = (usv(d, it, a[0])?, usv(d, it, a[1])?);
+pub(crate) fn p_set<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let sp = params_id(d, s, this)?;
+    need(s, a, 2, "set' on 'URLSearchParams")?;
+    let n = usv(d, s, at(a, 0))?;
+    let v = usv(d, s, at(a, 1))?;
     {
-        let state = d.nav.s.borrow();
-        let p = &state.params[&sp];
-        it.charge((p.bytes / 32 + p.list.len()) as u64)?;
-        let removed: usize = p.list.iter().filter(|(k, _)| *k == n).map(|(k, v)| k.len() + v.len() + 32).sum();
-        let added = n.len() + v.len() + 32;
-        if state.param_bytes.saturating_sub(removed).saturating_add(added) > d.nav.lim.get().max_param_bytes {
-            return Err(d.lim("url-params"));
+        let (cost, over) = {
+            let state = d.nav.s.borrow();
+            let p = &state.params[&sp];
+            let removed: usize = p.list.iter().filter(|(k, _)| *k == n).map(|(k, v)| k.len() + v.len() + 32).sum();
+            let added = n.len() + v.len() + 32;
+            ((p.bytes / 32 + p.list.len()) as u64, state.param_bytes.saturating_sub(removed).saturating_add(added) > d.nav.lim.get().max_param_bytes)
+        };
+        s.charge(cost)?;
+        if over {
+            return Err(d.lim_s(s, "url-params"));
         }
     }
-    edit(d, sp, |l| {
-        match l.iter().position(|(k, _)| *k == n) {
-            Some(i) => {
-                l[i].1 = v;
-                let mut first = true;
-                l.retain(|(k, _)| *k != n || std::mem::replace(&mut first, false));
-                Ok(None)
+    lift(
+        s,
+        edit(d, sp, |l| {
+            match l.iter().position(|(k, _)| *k == n) {
+                Some(i) => {
+                    l[i].1 = v;
+                    let mut first = true;
+                    l.retain(|(k, _)| *k != n || std::mem::replace(&mut first, false));
+                    Ok(None)
+                }
+                None => push(d, sp, l, n, v),
             }
-            None => push(d, sp, l, n, v),
-        }
-    })?;
-    Ok(Value::Undefined)
+        }),
+    )?;
+    Ok(s.undefined())
 }
 
-pub(crate) fn p_sort(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    let sp = params_id(d, it, this)?;
+pub(crate) fn p_sort<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let sp = params_id(d, s, this)?;
     let len = d.nav.s.borrow().params[&sp].list.len();
-    it.charge(len as u64 * 4)?;
-    edit(d, sp, |l| {
-        l.sort_by(|a, b| a.0.encode_utf16().cmp(b.0.encode_utf16()));
-        Ok(Some(0))
-    })?;
-    Ok(Value::Undefined)
+    s.charge(len as u64 * 4)?;
+    lift(
+        s,
+        edit(d, sp, |l| {
+            l.sort_by(|a, b| a.0.encode_utf16().cmp(b.0.encode_utf16()));
+            Ok(Some(0))
+        }),
+    )?;
+    Ok(s.undefined())
 }
 
-pub(crate) fn p_to_string(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    let sp = params_id(d, it, this)?;
-    let s = form_serialize(&d.nav.s.borrow().params[&sp].list);
-    it.charge((s.len() / 32) as u64)?;
-    d.js_str(it, &s)
+pub(crate) fn p_to_string<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let sp = params_id(d, s, this)?;
+    let text = form_serialize(&d.nav.s.borrow().params[&sp].list);
+    s.charge((text.len() / 32) as u64)?;
+    d.js_str_s(s, &text)
 }
 
-pub(crate) fn p_size(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    let sp = params_id(d, it, this)?;
+pub(crate) fn p_size<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let sp = params_id(d, s, this)?;
     let n = d.nav.s.borrow().params[&sp].list.len();
-    Ok(Value::Number(n as f64))
+    Ok(s.number(n as f64))
 }
 
-pub(crate) fn p_for_each(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    let sp = params_id(d, it, this)?;
-    let cb = arg(a, 0);
-    if !it.is_callable_value(cb) {
-        return Err(it.type_error("Failed to execute 'forEach' on 'URLSearchParams': parameter 1 is not of type 'Function'."));
+pub(crate) fn p_for_each<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let sp = params_id(d, s, this)?;
+    let cb = arg_s(s, a, 0);
+    if !s.is_callable(cb) {
+        return Err(s.type_error("Failed to execute 'forEach' on 'URLSearchParams': parameter 1 is not of type 'Function'."));
     }
+    let this_arg = arg_s(s, a, 1);
+    let base = s.engine().stack_len();
     let mut i = 0;
     loop {
-        it.charge(1)?;
+        s.charge(1)?;
         let pair = d.nav.s.borrow().params.get(&sp).and_then(|p| p.list.get(i).cloned());
-        let Some((n, v)) = pair else { return Ok(Value::Undefined) };
-        let (v, n) = (d.js_str(it, &v)?, d.js_str(it, &n)?);
-        it.call(cb, arg(a, 1), &[v, n, this])?;
+        let Some((n, v)) = pair else { return Ok(s.undefined()) };
+        let (v, n) = (d.js_str_s(s, &v)?, d.js_str_s(s, &n)?);
+        s.call(cb, this_arg, &[v, n, this])?;
+        // The locals of a step are dead: a long list does not pile them up.
+        s.engine().stack_truncate(base);
         i += 1;
     }
 }
 
-fn make_iter(d: &Dom, it: &mut Interp<'_>, this: Value, kind: u8) -> R<Value> {
-    let sp = params_id(d, it, this)?;
-    room(d)?;
-    let o = d.obj(it, d.nav.p.get().expect("installed").iter)?;
-    let sp = it.trace_value(Value::Object(sp));
+fn make_iter<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, kind: u8) -> Res<'s, Local<'s>> {
+    params_id(d, s, this)?;
+    lift(s, room(d))?;
+    let o = d.obj_s(s, d.nav.p.get().expect("installed").iter)?;
+    let l = d.obj_local(s, o);
+    let sp = s.trace_ref(this);
     d.nav.s.borrow_mut().iters.insert(o, IterObj { sp, idx: 0, kind });
-    own(d, it, o, Owner::Iter(o));
-    Ok(Value::Object(o))
+    own(d, s, l, Owner::Iter(o))?;
+    Ok(l)
 }
 
-pub(crate) fn p_keys(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    make_iter(d, it, this, 0)
+pub(crate) fn p_keys<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    make_iter(d, s, this, 0)
 }
-pub(crate) fn p_values(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    make_iter(d, it, this, 1)
+pub(crate) fn p_values<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    make_iter(d, s, this, 1)
 }
-pub(crate) fn p_entries(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    make_iter(d, it, this, 2)
+pub(crate) fn p_entries<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    make_iter(d, s, this, 2)
 }
 
-pub(crate) fn iter_next(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    let id = match this {
-        Value::Object(o) if d.nav.s.borrow().iters.contains_key(&o) => o,
-        _ => return Err(it.type_error("Illegal invocation")),
-    };
-    it.charge(1)?;
+pub(crate) fn iter_next<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    // One lookup of the iterator: it checks the receiver and steps in one borrow. A step that the budget then refuses is lost with the run.
     let item = {
         let mut n = d.nav.s.borrow_mut();
         let n = &mut *n;
-        let i = n.iters.get_mut(&id).expect("checked");
-        let pair = n.params.get(&edge(&i.sp)).and_then(|p| p.list.get(i.idx).cloned());
-        match pair {
-            Some(p) => {
-                i.idx += 1;
-                Some((i.kind, p))
-            }
+        match obj_id(s, this).and_then(|o| n.iters.get_mut(&o)) {
             None => None,
+            Some(i) => {
+                let pair = n.params.get(&edge(&i.sp)).and_then(|p| p.list.get(i.idx).cloned());
+                Some(pair.map(|p| {
+                    i.idx += 1;
+                    (i.kind, p)
+                }))
+            }
         }
     };
-    let (value, done) = match item {
-        None => (Value::Undefined, true),
-        Some((0, (n, _))) => (d.js_str(it, &n)?, false),
-        Some((1, (_, v))) => (d.js_str(it, &v)?, false),
-        Some((_, (n, v))) => {
-            let (n, v) = (d.js_str(it, &n)?, d.js_str(it, &v)?);
-            (it.array_from(&[n, v])?, false)
-        }
-    };
-    let o = d.obj(it, it.object_prototype())?;
-    let (kv, kd) = (d.key(it, "value")?, d.key(it, "done")?);
-    it.define_data(o, kv, value, true, true, true)?;
-    it.define_data(o, kd, Value::Bool(done), true, true, true)?;
-    Ok(Value::Object(o))
+    let Some(item) = item else { return Err(s.type_error("Illegal invocation")) };
+    s.charge(1)?;
+    // The old calls are cheaper here: the keys are cached and an item is one native step (no scope entry per step).
+    old_v(s, |it| {
+        let (value, done) = match item {
+            None => (Value::Undefined, true),
+            Some((0, (n, _))) => (d.js_str(it, &n)?, false),
+            Some((1, (_, v))) => (d.js_str(it, &v)?, false),
+            Some((_, (n, v))) => {
+                let (n, v) = (d.js_str(it, &n)?, d.js_str(it, &v)?);
+                (it.array_from(&[n, v])?, false)
+            }
+        };
+        let o = d.obj(it, it.object_prototype())?;
+        let (kv, kd) = (d.key(it, "value")?, d.key(it, "done")?);
+        it.define_data(o, kv, value, true, true, true)?;
+        it.define_data(o, kd, Value::Bool(done), true, true, true)?;
+        Ok(Value::Object(o))
+    })
 }
