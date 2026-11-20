@@ -19,6 +19,10 @@ pub(super) struct Big {
 }
 
 impl Big {
+    /// The bytes of the limbs, by length (the box is exact).
+    pub(super) fn bytes(&self) -> usize {
+        self.limbs.len() * 8
+    }
     fn sv(&self) -> Sv<'_> {
         Sv { neg: self.neg, mag: &self.limbs }
     }
@@ -31,6 +35,9 @@ pub(super) struct BigTable {
 }
 
 impl BigTable {
+    pub(super) fn bytes(&self) -> usize {
+        self.table.capacity() * 4
+    }
     pub(super) fn new() -> Self {
         BigTable { table: vec![0; 16], count: 0 }
     }
