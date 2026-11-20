@@ -66,7 +66,7 @@ use crate::gc::Marker;
 use crate::interp_rt::{ErrKind, Feedback, Got, Key, Put, R, Realm};
 use crate::object::{F_DERIVED, Obj};
 use crate::roots::RootMaps;
-use crate::shapes::{A_C, A_W};
+use crate::shapes::{A_C, A_E, A_W};
 use crate::value::Value;
 use std::cmp::Ordering;
 use std::sync::Arc;
@@ -756,6 +756,12 @@ impl Vm {
                         r!(a!()) = code.atoms[bx!()].value();
                         pc = next;
                     }
+                    Op::CheckUnbound => {
+                        if !r!(a!()).is_hole() {
+                            err!(ErrKind::Reference, "super() called twice")
+                        }
+                        pc = next;
+                    }
                     Op::CheckInit => {
                         tdz!(r!(a!()), bx!());
                         pc = next;
@@ -932,7 +938,17 @@ impl Vm {
                         tri!(realm.define(o, k, r!(c!())));
                         pc = next;
                     }
+                    Op::DeleteGlobal => {
+                        gate!();
+                        let (g, n) = (realm.global.value(), name!(bx!()));
+                        r!(a!()) = Value::bool(tri!(realm.delete_prop(g, Key::Name(n))));
+                        pc = next;
+                    }
                     Op::Delete => {
+                        let o = r!(b!());
+                        if o.is_undefined() || o.is_null() {
+                            err!(ErrKind::Type, "cannot delete a property of undefined or null")
+                        }
                         let k = tri!(realm.key_of(r!(c!())));
                         let ok = tri!(realm.delete_prop(r!(b!()), k));
                         if !ok && code.strict {
@@ -1259,7 +1275,7 @@ impl Vm {
                         let n = name!(bx!());
                         let g = realm.global;
                         if !tri!(realm.has_prop(g.value(), Key::Name(n))) {
-                            tri!(realm.define(g, Key::Name(n), undef));
+                            tri!(realm.define_attrs(g, Key::Name(n), A_W | A_E, undef));
                         }
                         pc = next;
                     }

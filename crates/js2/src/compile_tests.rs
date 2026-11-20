@@ -1042,10 +1042,12 @@ code nregs=5 nparams=0 words=7 sites=2
         src,
         0,
         r#"
-code nregs=2 nparams=0 words=3 sites=0
+code nregs=3 nparams=0 words=5 sites=0
 0000  CallSuper   r0, 1, 0
-0001  InitCtx     r0, 0, 0
-0002  Ret         r0
+0001  GetCtx      r2, 0, 0
+0002  CheckUnbound r2
+0003  InitCtx     r0, 0, 0
+0004  Ret         r0
 "#,
     );
     golden(
@@ -1326,7 +1328,6 @@ fn constructs_the_compiler_does_not_build_are_listed() {
         ("return function*() {};", "a generator"),
         ("with (a) { b; }", "with"),
         ("eval('1');", "direct eval or with"),
-        ("return delete zz;", "delete of a global name"),
     ];
     for (body, what) in cases {
         let f = outer(&format!("function f(a) {{ {body} }}"));

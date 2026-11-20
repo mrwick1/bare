@@ -918,9 +918,11 @@ impl<'a> Fc<'a> {
             ExprKind::Ident => {
                 let n = self.name_of(a.span);
                 if matches!(self.resolve(&n, a.span.start), Res::Global) {
-                    self.unsup("delete of a global name");
+                    let s = self.site_of(&n)?;
+                    self.op(Op::DeleteGlobal, dst, s, 0);
+                } else {
+                    self.op(Op::LoadFalse, dst, 0, 0);
                 }
-                self.op(Op::LoadFalse, dst, 0, 0);
             }
             ExprKind::Chain(_) => {
                 self.unsup("delete of an optional chain");
@@ -1120,7 +1122,20 @@ impl<'a> Fc<'a> {
             self.op(Op::CallSuper, dst, base, n);
         }
         self.set_live(dst);
-        // The first `super()` binds `this`. (A second call should throw a ReferenceError: not checked.)
+        // The first `super()` binds `this`. A second call throws a ReferenceError, after the construct.
+        let slot = match self.resolve("this", 0) {
+            Res::Reg { reg, .. } => Some(reg),
+            Res::Ctx { hops, slot, .. } => {
+                let t = self.alloc();
+                self.op(Op::GetCtx, t, hops, slot);
+                self.set_live(t);
+                Some(t)
+            }
+            Res::Global => None,
+        };
+        if let Some(t) = slot {
+            self.op(Op::CheckUnbound, t, 0, 0);
+        }
         self.store_var("this", 0, dst, true)?;
         self.free(m);
         Ok(())
