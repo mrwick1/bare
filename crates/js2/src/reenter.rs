@@ -59,7 +59,7 @@ impl Realm {
         r
     }
 
-    fn call_held(&mut self, f: Value, this: Value, args: &[Value]) -> R<Value> {
+    pub(crate) fn call_held(&mut self, f: Value, this: Value, args: &[Value]) -> R<Value> {
         if self.native_id(f).is_none() {
             return self.call_script(f, this, args);
         }

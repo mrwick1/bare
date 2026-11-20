@@ -117,6 +117,8 @@
 #![forbid(unsafe_code)]
 
 pub mod clone;
+#[cfg(feature = "suite")]
+pub mod suite;
 pub use clone::{CloneHost, CloneIn, CloneLimits, CloneOpts, Cloned, Moved, Refused};
 
 use std::cell::{Cell, RefCell};

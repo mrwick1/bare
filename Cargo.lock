@@ -151,6 +151,10 @@ dependencies = [
 [[package]]
 name = "bare-js-api"
 version = "0.1.0"
+dependencies = [
+ "bare-js",
+ "bare-js2",
+]
 
 [[package]]
 name = "bare-js-diff"
@@ -164,6 +168,7 @@ dependencies = [
 name = "bare-js2"
 version = "0.1.0"
 dependencies = [
+ "bare-js-api",
  "bare-os",
  "icu_properties",
 ]

@@ -96,6 +96,11 @@ pub struct Program {
 /// loop, in any run, so it takes `&Codes`. The interpreter makes the feedback of the new codes.
 pub trait LazyCompile {
     fn compile(&mut self, codes: &Codes, ci: usize) -> Result<(), String>;
+    /// Compile `src` as a script and add it at the end of `codes`. Gives the index of its top level code: a function with no
+    /// parameters (`api.rs`, `Realm::run_text`).
+    fn script(&mut self, _codes: &Codes, _src: &str) -> Result<usize, String> {
+        Err("this compiler cannot add a script".into())
+    }
 }
 
 /// Why `Vm::call` stopped.
@@ -230,7 +235,7 @@ fn unwind(prog: &Codes, stack: &mut [Value], ci: &mut usize, fp: &mut usize, pc:
 }
 
 /// The shared atom of the `name` and the `length` of a code, for `Realm::fn_props`.
-fn code_info(c: &Code) -> (Option<crate::string::Str>, u16) {
+pub(crate) fn code_info(c: &Code) -> (Option<crate::string::Str>, u16) {
     (c.atoms.get(c.fn_name as usize).copied(), c.fn_len)
 }
 

@@ -34,6 +34,8 @@ jobs:
           --skip an_expired_or_not_yet_valid_leaf_is_refused
           --skip certificate_checks_are_the_same_as_for_tls13
           --skip ecdhe_key_exchange_with_x25519_and_with_p256
+      # The tests that both engines must pass (`crates/js-api/src/suite.rs`); the feature keeps them out of the workspace run.
+      - run: cargo test --locked -p bare-js-api --features suite
   windows:
     runs-on: windows-latest
     steps:
@@ -42,7 +44,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --locked -p bare-mcp -p bare-drive
   # The new engine (crates/js2): only its `cell`, `heap`, `string`, `atoms`, `shapes`, `object`, `gc`,
-  # `interp_rt` and `interp` modules may hold `unsafe` code, so its tests run under Miri.
+  # `interp_rt`, `interp` and `api` modules may hold `unsafe` code, so its tests run under Miri.
   miri:
     runs-on: ubuntu-24.04
     steps:

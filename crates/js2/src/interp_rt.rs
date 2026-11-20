@@ -283,6 +283,8 @@ pub struct Realm {
     /// Machines (a JS stack and a feedback vector) that no nested call uses now, and the nesting of nested calls: `reenter.rs`.
     pub(crate) pool: Vec<Machine>,
     pub(crate) nest: u32,
+    /// The state of the interface to the host (`api.rs`).
+    pub(crate) api: crate::api::ApiState,
     /// The compiler of the stubs of the program, if it has any (`Op::Lazy`, in any run: `Realm::compile_stub`).
     pub lazy: Option<Box<dyn LazyCompile>>,
     epoch: u32,
@@ -393,6 +395,7 @@ impl Realm {
             fuel: u64::MAX,
             pool: Vec::new(),
             nest: 0,
+            api: Default::default(),
             lazy: None,
             epoch,
             collections: 0,
@@ -412,7 +415,7 @@ impl Realm {
     pub fn collect(&mut self, fbs: &mut [Feedback], walk_frames: impl FnOnce(&mut Marker)) {
         // A nested call holds the collector (`Realm::call_function`), so no machine is in use now: the idle ones keep their feedback.
         debug_assert!(self.nest == 0, "a collection inside a nested call");
-        let Realm { heap, shapes, atoms, consts, pins, lex, pool, .. } = self;
+        let Realm { heap, shapes, atoms, consts, pins, lex, pool, api, .. } = self;
         let mut walk_frames = Some(walk_frames);
         let mut roots = |m: &mut Marker| {
             consts.iter().for_each(|v| m.value(*v));
@@ -421,6 +424,7 @@ impl Realm {
                 m.value(*c);
             });
             pins.iter().for_each(|s| m.shape(*s));
+            api.mark(m);
             fbs.iter().for_each(|f| f.walk(m));
             pool.iter().flat_map(|p| p.fbs.iter()).for_each(|f| f.walk(m));
             if let Some(w) = walk_frames.take() {
