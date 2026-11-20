@@ -809,3 +809,77 @@ fn transform_named_write_reaches_the_attribute() {
     assert_eq!(js(&mut b, "a.style.item(0) + ',' + getComputedStyle(a).transform"), "transform,matrix(1, 0, 0, 1, 1, 2)");
     assert_eq!(js(&mut b, "a.style.transform = 'wobble(1px)'; a.style.transform"), "translate(1px, 2px)");
 }
+
+// ------------------------------------------------------------------------------------------ accessors at first use
+
+fn installed(b: &Browser) -> bool {
+    b.dom.style.proto.get().is_some()
+}
+
+const SHEET: &str = "<!doctype html><html><head><style>p { color: blue }</style></head><body><div id=a></div><p id=b></p></body></html>";
+
+#[test]
+fn style_accessors_wait_for_first_use() {
+    let mut b = at(SHEET);
+    assert!(!installed(&b));
+    assert_eq!(js(&mut b, "var a = document.getElementById('a'); typeof a; document.title.length"), "0");
+    assert!(!installed(&b), "a page that never touches style does not install");
+    assert_eq!(js(&mut b, "document.createElement('div').getAttribute('style')"), "null");
+    assert!(!installed(&b));
+    assert_eq!(js(&mut b, "typeof getComputedStyle"), "function");
+    assert_eq!(js(&mut b, "typeof Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'style').get"), "function");
+    assert!(!installed(&b));
+}
+
+#[test]
+fn first_use_element_style() {
+    let mut b = at(SHEET);
+    assert_eq!(js(&mut b, "var a = document.getElementById('a'); a.style.color = 'red'; a.getAttribute('style') + '|' + a.style.color"), "color: red;|red");
+    assert!(installed(&b));
+}
+
+#[test]
+fn first_use_computed_style() {
+    let mut b = at(SHEET);
+    assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('b')).color"), "rgb(0, 0, 255)");
+    assert!(installed(&b));
+    assert_eq!(js(&mut b, "var c = getComputedStyle(document.getElementById('a')); Object.getPrototypeOf(Object.getPrototypeOf(c)) === CSSStyleDeclaration.prototype"), "true");
+}
+
+#[test]
+fn first_use_rule_style() {
+    let mut b = at(SHEET);
+    assert_eq!(js(&mut b, "document.styleSheets[0].cssRules[0].style.color"), "blue");
+    assert!(installed(&b));
+}
+
+#[test]
+fn first_use_global_and_prototype() {
+    let mut b = at(SHEET);
+    assert_eq!(js(&mut b, "'color' in CSSStyleDeclaration.prototype"), "true");
+    assert_eq!(b.style_stats().objects, 0);
+    assert!(installed(&b));
+    let mut b = at(SHEET);
+    assert_eq!(js(&mut b, "'CSSStyleDeclaration' in window && Object.getOwnPropertyNames(window).includes('CSSStyleDeclaration')"), "true");
+    assert!(!installed(&b), "listing the names does not read the global");
+    assert_eq!(js(&mut b, "window.CSSStyleDeclaration.name"), "CSSStyleDeclaration");
+    assert!(installed(&b));
+    // A write replaces the global and installs nothing.
+    let mut b = at(SHEET);
+    assert_eq!(js(&mut b, "window.CSSStyleDeclaration = 1; CSSStyleDeclaration"), "1");
+    assert!(!installed(&b));
+}
+
+#[test]
+fn prototype_key_order() {
+    let mut b = at(SHEET);
+    let names = js(&mut b, "Object.getOwnPropertyNames(CSSStyleDeclaration.prototype).join()");
+    let l: Vec<&str> = names.split(',').collect();
+    assert_eq!(&l[..8], ["cssText", "length", "parentRule", "item", "getPropertyValue", "getPropertyPriority", "setProperty", "removeProperty"]);
+    assert_eq!(l.last(), Some(&"constructor"));
+    assert!(l.contains(&"color") && l.contains(&"marginTop") && l.contains(&"margin-top"));
+    assert_eq!(l.len(), EXPECTED_NAMES, "{names}");
+    assert_eq!(js(&mut b, "Object.getOwnPropertyNames(Object.getPrototypeOf(getComputedStyle(document.body))).length"), COMPUTED_NAMES.to_string());
+}
+const EXPECTED_NAMES: usize = 260;
+const COMPUTED_NAMES: usize = 262;
