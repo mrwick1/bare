@@ -574,24 +574,27 @@ fn script_top_level_uses_globals() {
         r#"var s = 0; for (var i = 0; i < 10; i++) { s += i; } function g() { return s; }"#,
         SCRIPT,
         r#"
-code nregs=2 nparams=0 words=18 sites=9
-0000  Closure     r0, f0
-0001  SetGlobal   r0, s0
-0002  LoadI       r0, 0
-0003  SetGlobal   r0, s1
-0004  LoadI       r0, 0
-0005  SetGlobal   r0, s2
-0006  GetGlobal   r0, s3
-0007  JnLtI       r0, -> 0017, 10
-0009  GetGlobal   r0, s4
-0010  GetGlobal   r1, s5
-0011  Add         r0, r0, r1
-0012  SetGlobal   r0, s6
-0013  GetGlobal   r0, s7
-0014  Inc         r0, r0
-0015  SetGlobal   r0, s8
-0016  JmpBack     -> 0006
-0017  RetUndef    
+code nregs=2 nparams=0 words=21 sites=12
+0000  DeclGlobal  s0
+0001  DeclGlobal  s1
+0002  DeclGlobal  s2
+0003  Closure     r0, f0
+0004  SetGlobal   r0, s3
+0005  LoadI       r0, 0
+0006  SetGlobal   r0, s4
+0007  LoadI       r0, 0
+0008  SetGlobal   r0, s5
+0009  GetGlobal   r0, s6
+0010  JnLtI       r0, -> 0020, 10
+0012  GetGlobal   r0, s7
+0013  GetGlobal   r1, s8
+0014  Add         r0, r0, r1
+0015  SetGlobal   r0, s9
+0016  GetGlobal   r0, s10
+0017  Inc         r0, r0
+0018  SetGlobal   r0, s11
+0019  JmpBack     -> 0009
+0020  RetUndef    
 "#,
     );
 }
@@ -667,18 +670,536 @@ function t36(a) { try { throw 1; } catch { return 2; } }
 "#;
 
 #[test]
+fn the_arguments_object_is_made_at_entry() {
+    let src = r#"function f() { return arguments.length + arguments[0]; }"#;
+    golden(
+        src,
+        0,
+        r#"
+code nregs=4 nparams=0 words=5 sites=1
+0000  CreateArgs  r0
+0001  GetField    r2, r0, s0
+0002  GetElemI    r3, r0, 0
+0003  Add         r1, r2, r3
+0004  Ret         r1
+"#,
+    );
+}
+
+#[test]
+fn a_rest_parameter_and_a_spread_call() {
+    let src = r#"function f(a, ...r) { return g(...a, 1); }"#;
+    golden(
+        src,
+        0,
+        r#"
+code nregs=7 nparams=2 words=9 sites=1
+0000  CreateRest  r1, 1
+0001  GetGlobal   r3, s0
+0002  LoadUndef   r4
+0003  NewArray    r5, 0
+0004  ArraySpread r5, r0
+0005  LoadI       r6, 1
+0006  ArrayPush   r5, r6
+0007  CallSpread  r2, 3
+0008  Ret         r2
+"#,
+    );
+}
+
+#[test]
+fn spread_in_new_and_in_array_literals() {
+    let src = r#"function f(a) { return [new C(...a), [1, , ...a]]; }"#;
+    golden(
+        src,
+        0,
+        r#"
+code nregs=6 nparams=1 words=11 sites=1
+0000  GetGlobal   r4, s0
+0001  NewArray    r5, 0
+0002  ArraySpread r5, r0
+0003  NewSpread   r2, 4
+0004  NewArray    r3, 0
+0005  LoadI       r4, 1
+0006  ArrayPush   r3, r4
+0007  ArrayHole   r3
+0008  ArraySpread r3, r0
+0009  NewArrLit   r1, 2, 2
+0010  Ret         r1
+"#,
+    );
+}
+
+#[test]
+fn a_named_function_expression_reads_its_own_name() {
+    let src = r#"var g = function fact(n) { return n ? n * fact(n - 1) : 1; };"#;
+    golden(
+        src,
+        0,
+        r#"
+code nregs=6 nparams=1 words=9 sites=0
+0000  LoadCallee  r1
+0001  JmpIfNot    r0, -> 0007
+0002  Mov         r4, r1
+0003  SubI        r5, r0, 1
+0004  CallU       r3, 4, 1
+0005  Mul         r2, r0, r3
+0006  Jmp         -> 0008
+0007  LoadI       r2, 1
+0008  Ret         r2
+"#,
+    );
+}
+
+#[test]
+fn regexp_and_bigint_literals() {
+    let src = r#"function f(o) { return /x+/gi.test(o) + 10n; }"#;
+    golden(
+        src,
+        0,
+        r#"
+code nregs=6 nparams=1 words=7 sites=1
+0000  NewRegExp   r4, a0, a1
+0001  GetField    r3, r4, s0
+0002  Mov         r5, r0
+0003  Call        r2, 3, 1
+0004  LoadBigInt  r3, a3
+0005  Add         r1, r2, r3
+0006  Ret         r1
+"#,
+    );
+}
+
+#[test]
+fn a_tagged_template() {
+    let src = r#"function f(o) { return tag`a${o}b`; }"#;
+    golden(
+        src,
+        0,
+        r#"
+code nregs=4 nparams=1 words=4 sites=2
+0000  GetGlobal   r2, s0
+0001  GetTemplate r3, h0, s1
+0002  CallU       r1, 2, 1
+0003  Ret         r1
+"#,
+    );
+}
+
+#[test]
+fn object_literal_accessors_proto_and_spread() {
+    let src = r#"function f(x) { return { get a() { return 1; }, set a(v) {}, __proto__: null, ...x, m() { return super.m(); } }; }"#;
+    golden(
+        src,
+        3,
+        r#"
+code nregs=3 nparams=1 words=14 sites=3
+0000  NewObject   r1, 5
+0001  Closure     r2, f0
+0002  DefAccessor r1, r2, s0, 0
+0004  Closure     r2, f1
+0005  DefAccessor r1, r2, s1, 1
+0007  LoadNull    r2
+0008  SetProto    r1, r2
+0009  CopyProps   r1, r0
+0010  Closure     r2, f2
+0011  SetHome     r2, r1
+0012  DefField    r1, r2, s2
+0013  Ret         r1
+"#,
+    );
+}
+
+#[test]
+fn object_rest_pattern() {
+    let src = r#"function f(o) { var {a, ...r} = o; return r; }"#;
+    golden(
+        src,
+        0,
+        r#"
+code nregs=6 nparams=1 words=9 sites=1
+0000  LoadUndef   r1
+0001  LoadUndef   r2
+0002  Mov         r3, r0
+0003  LoadAtom    r4, a0
+0004  GetField    r1, r3, s0
+0005  ObjRest     r5, r3, 4, 1
+0007  Mov         r2, r5
+0008  Ret         r2
+"#,
+    );
+}
+
+#[test]
+fn class_methods_fields_and_static_elements() {
+    let src = r#"class A { static a = 1; static { this.b = 2; } [k] = 3; m() { return 1; } }"#;
+    golden(
+        src,
+        SCRIPT,
+        r#"
+code nregs=5 nparams=0 words=21 sites=4
+0000  PushCtx     1
+0001  DefaultCtor r1, 0
+0002  MakeClass   r1
+0003  GetField    r2, r1, s0
+0004  GetGlobal   r3, s1
+0005  ToKey       r4, r2, r3
+0006  InitCtx     r4, 0, 0
+0007  Closure     r3, f0
+0008  DefMethod   r2, r3, s2
+0009  Closure     r3, f1
+0010  SetFields   r1, r3
+0011  Closure     r3, f2
+0012  Mov         r4, r1
+0013  Call        r3, 3, 0
+0014  Closure     r3, f3
+0015  Mov         r4, r1
+0016  Call        r3, 3, 0
+0017  Mov         r0, r1
+0018  PopCtx
+0019  SetGlobal   r0, s3
+0020  RetUndef
+"#,
+    );
+    golden(
+        src,
+        0,
+        r#"
+code nregs=2 nparams=0 words=4 sites=1
+0000  LoadThis    r0
+0001  LoadI       r1, 1
+0002  DefField    r0, r1, s0
+0003  RetUndef
+"#,
+    );
+    golden(
+        src,
+        1,
+        r#"
+code nregs=1 nparams=0 words=3 sites=1
+0000  LoadThis    r0
+0001  SetFieldI   r0, 2, s0
+0002  RetUndef
+"#,
+    );
+    golden(
+        src,
+        2,
+        r#"
+code nregs=3 nparams=0 words=5 sites=0
+0000  LoadThis    r0
+0001  GetCtx      r1, 0, 0
+0002  LoadI       r2, 3
+0003  DefElem     r0, r1, r2
+0004  RetUndef
+"#,
+    );
+    golden(
+        src,
+        3,
+        r#"
+code nregs=1 nparams=0 words=2 sites=0
+0000  LoadI       r0, 1
+0001  Ret         r0
+"#,
+    );
+}
+
+#[test]
+fn a_derived_class_calls_super_in_an_arrow() {
+    let src = r#"class A extends B { constructor() { var f = () => super(); f(); } }"#;
+    golden(
+        src,
+        SCRIPT,
+        r#"
+code nregs=4 nparams=0 words=7 sites=3
+0000  GetGlobal   r1, s0
+0001  Closure     r2, f0
+0002  MakeDerived r2, r1
+0003  GetField    r3, r2, s1
+0004  Mov         r0, r2
+0005  SetGlobal   r0, s2
+0006  RetUndef
+"#,
+    );
+    golden(
+        src,
+        0,
+        r#"
+code nregs=2 nparams=0 words=3 sites=0
+0000  CallSuper   r0, 1, 0
+0001  InitCtx     r0, 0, 0
+0002  Ret         r0
+"#,
+    );
+    golden(
+        src,
+        1,
+        r#"
+code nregs=3 nparams=0 words=7 sites=0
+0000  PushCtx     1
+0001  Closure     r0, f0
+0002  Mov         r2, r0
+0003  CallU       r1, 2, 0
+0004  LoadUndef   r1
+0005  GetCtx      r2, 0, 0
+0006  RetDerived  r1, r2
+"#,
+    );
+}
+
+#[test]
+fn super_property_reads_and_writes() {
+    let src = r#"class A extends B { m() { super.x = 1; super.y += 2; super[k] = 3; return super.z++; } }"#;
+    golden(
+        src,
+        SCRIPT,
+        r#"
+code nregs=5 nparams=0 words=10 sites=4
+0000  GetGlobal   r1, s0
+0001  DefaultCtor r2, 1
+0002  MakeDerived r2, r1
+0003  GetField    r3, r2, s1
+0004  Closure     r4, f0
+0005  SetHome     r4, r3
+0006  DefMethod   r3, r4, s2
+0007  Mov         r0, r2
+0008  SetGlobal   r0, s3
+0009  RetUndef
+"#,
+    );
+    golden(
+        src,
+        0,
+        r#"
+code nregs=4 nparams=0 words=18 sites=6
+0000  LoadThis    r0
+0001  LoadI       r1, 1
+0002  SetSuper    r0, r1, s0
+0003  LoadThis    r0
+0004  GetSuper    r1, r0, s1
+0005  AddI        r1, r1, 2
+0006  SetSuper    r0, r1, s2
+0007  LoadThis    r0
+0008  GetGlobal   r1, s3
+0009  LoadI       r2, 3
+0010  SetSuperElem r0, r1, r2
+0011  LoadThis    r1
+0012  GetSuper    r2, r1, s4
+0013  ToNumeric   r2, r2
+0014  Inc         r3, r2
+0015  SetSuper    r1, r3, s5
+0016  Mov         r0, r2
+0017  Ret         r0
+"#,
+    );
+}
+
+#[test]
+fn private_names_methods_and_accessors() {
+    let src = r#"class A { #x = 1; static #m() {} #n() { return 1; } get #g() { return this.#x; } inc() { this.#x++; this.#x += 2; return #x in this; } }"#;
+    golden(
+        src,
+        SCRIPT,
+        r#"
+code nregs=5 nparams=0 words=27 sites=3
+0000  PushCtx     6
+0001  NewPrivateName r1, a0
+0002  InitCtx     r1, 0, 0
+0003  NewPrivateName r1, a1
+0004  InitCtx     r1, 0, 1
+0005  NewPrivateName r1, a2
+0006  InitCtx     r1, 0, 2
+0007  NewPrivateName r1, a3
+0008  InitCtx     r1, 0, 4
+0009  DefaultCtor r1, 0
+0010  MakeClass   r1
+0011  GetField    r2, r1, s0
+0012  Closure     r3, f0
+0013  GetCtx      r4, 0, 1
+0014  DefPrivateMethod r1, r4, r3
+0015  Closure     r3, f1
+0016  InitCtx     r3, 0, 3
+0017  Closure     r3, f2
+0018  InitCtx     r3, 0, 5
+0019  Closure     r3, f3
+0020  DefMethod   r2, r3, s1
+0021  Closure     r3, f4
+0022  SetFields   r1, r3
+0023  Mov         r0, r1
+0024  PopCtx
+0025  SetGlobal   r0, s2
+0026  RetUndef
+"#,
+    );
+    golden(
+        src,
+        0,
+        r#"
+code nregs=3 nparams=0 words=12 sites=0
+0000  LoadThis    r0
+0001  GetCtx      r1, 0, 2
+0002  GetCtx      r2, 0, 3
+0003  DefPrivateMethod r0, r1, r2
+0004  GetCtx      r1, 0, 4
+0005  GetCtx      r2, 0, 5
+0006  DefPrivateAccessor r0, r1, r2, 0
+0008  GetCtx      r1, 0, 0
+0009  LoadI       r2, 1
+0010  DefPrivate  r0, r1, r2
+0011  RetUndef
+"#,
+    );
+    golden(
+        src,
+        1,
+        r#"
+code nregs=1 nparams=0 words=1 sites=0
+0000  RetUndef
+"#,
+    );
+    golden(
+        src,
+        2,
+        r#"
+code nregs=1 nparams=0 words=2 sites=0
+0000  LoadI       r0, 1
+0001  Ret         r0
+"#,
+    );
+    golden(
+        src,
+        3,
+        r#"
+code nregs=3 nparams=0 words=4 sites=0
+0000  LoadThis    r1
+0001  GetCtx      r2, 0, 0
+0002  GetPrivate  r0, r1, r2
+0003  Ret         r0
+"#,
+    );
+    golden(
+        src,
+        4,
+        r#"
+code nregs=3 nparams=0 words=14 sites=0
+0000  LoadThis    r0
+0001  GetCtx      r1, 0, 0
+0002  GetPrivate  r2, r0, r1
+0003  Inc         r2, r2
+0004  SetPrivate  r0, r1, r2
+0005  LoadThis    r0
+0006  GetCtx      r1, 0, 0
+0007  GetPrivate  r2, r0, r1
+0008  AddI        r2, r2, 2
+0009  SetPrivate  r0, r1, r2
+0010  LoadThis    r1
+0011  GetCtx      r2, 0, 0
+0012  HasPrivate  r0, r1, r2
+0013  Ret         r0
+"#,
+    );
+}
+
+#[test]
+fn new_target_in_an_arrow_is_captured() {
+    let src = r#"function f() { return () => new.target; }"#;
+    golden(
+        src,
+        0,
+        r#"
+code nregs=1 nparams=0 words=2 sites=0
+0000  GetCtx      r0, 0, 0
+0001  Ret         r0
+"#,
+    );
+    golden(
+        src,
+        1,
+        r#"
+code nregs=1 nparams=0 words=5 sites=0
+0000  PushCtx     1
+0001  LoadNewTarget r0
+0002  InitCtx     r0, 0, 0
+0003  Closure     r0, f0
+0004  Ret         r0
+"#,
+    );
+}
+
+#[test]
+fn a_class_expression_name_is_a_binding_of_the_class() {
+    let src = r#"var C = class N { m() { return N; } };"#;
+    golden(
+        src,
+        SCRIPT,
+        r#"
+code nregs=4 nparams=0 words=12 sites=4
+0000  DeclGlobal  s0
+0001  PushCtx     1
+0002  DefaultCtor r1, 0
+0003  MakeClass   r1
+0004  GetField    r2, r1, s1
+0005  Closure     r3, f0
+0006  DefMethod   r2, r3, s2
+0007  InitCtx     r1, 0, 0
+0008  Mov         r0, r1
+0009  PopCtx
+0010  SetGlobal   r0, s3
+0011  RetUndef
+"#,
+    );
+    golden(
+        src,
+        0,
+        r#"
+code nregs=1 nparams=0 words=3 sites=0
+0000  GetCtxTdz   r0, 0, 0, a0
+0002  Ret         r0
+"#,
+    );
+}
+#[test]
+fn field_initializers_and_static_blocks_are_ready_children_of_the_class() {
+    // The text of an initializer is in the tree of the function that holds the class, so the parent compiles it: `ready` points to
+    // `Compiled::inline` (the driver `compile_all` takes the code from there, and `build` verifies it). The initializer reads `a` of the function around it, so `a` is a context slot.
+    let (s, fs) = build("function f() { const a = 1; return class { x = a; static y = a; static { a; } }; }");
+    assert!(s.children.iter().all(|c| c.ready.is_none()));
+    let f = fs.last().expect("f");
+    assert!(f.unsupported.is_empty(), "{:?}", f.unsupported);
+    assert_eq!(f.children.len(), 3);
+    assert!(f.children.iter().all(|c| c.ready.is_some()));
+    assert!(f.code.disassemble().contains("PushCtx"), "{}", f.code.disassemble());
+}
+
+#[test]
+fn every_construct_of_a_class_passes_the_verifier() {
+    let srcs = [
+        "class A { constructor(x) { this.x = x; } static of(x) { return new A(x); } get v() { return this.x; } set v(y) { this.x = y; } }",
+        "class A extends B { x = super.y; static z = super.w; constructor() { super(...arguments); } }",
+        "class A { static #p = 1; static get #q() { return A.#p; } static set #q(v) { A.#p = v; } static m() { return A.#q; } }",
+        "class A { ['a' + 1]() {} static [Symbol.iterator]() {} get [k]() { return 1; } 1() {} 'b c'() {} }",
+        "function f() { class A { m() { return () => this; } } return class extends A { constructor() { var a = () => super(); a(); return {}; } }; }",
+        "class A { x = () => this; y = function() { return this; }; z = class { w = 1; }; }",
+        "var C = class { static a = C; }",
+        "class A extends B { constructor() { try { super(); return; } finally { this.x = 1; } } }",
+        "function f() { for (let i = 0; i < 3; i++) { class A { m() { return i; } static s = i; } g(A); } { class Z {} } }",
+        "function f(a = arguments[1], ...[b, c]) { return () => arguments.length + b; }",
+        "function f({a, ...b}, [c, ...d]) { ({x: a.y, ...b.z} = c); }",
+        "var o = { get [k]() { return 1; }, set 5(v) {}, __proto__, '__proto__': 1, ...a, ...b, m() { return super.m(); } };",
+    ];
+    for src in srcs {
+        let (s, fs) = build(src);
+        assert!(s.unsupported.is_empty(), "{src}: {:?}", s.unsupported);
+        for f in &fs {
+            assert!(f.unsupported.is_empty(), "{src}: {:?}", f.unsupported);
+        }
+    }
+}
+
+#[test]
 fn constructs_the_compiler_does_not_build_are_listed() {
     let cases = [
-        ("return /a/;", "a regexp literal"),
-        ("return 10n;", "a BigInt literal"),
-        ("return f(...a);", "spread in a call"),
-        ("return [...a];", "a spread or a hole in an array literal"),
-        ("return {...a};", "spread in an object literal"),
-        ("return {get x() { return 1; }};", "a getter or a setter in an object literal"),
-        ("return class {};", "a class"),
-        ("return tag`x`;", "a tagged template"),
-        ("return arguments;", "the arguments object"),
-        ("return new.target;", "new.target"),
         ("return async function() {};", "an async function"),
         ("return function*() {};", "a generator"),
         ("with (a) { b; }", "with"),
@@ -765,4 +1286,102 @@ fn the_script_top_level_is_global() {
     let (s, _) = build("var s = 1; let t = 2; function g() {} s + t;");
     let text = s.code.disassemble();
     assert!(text.matches("SetGlobal").count() >= 3 && text.contains("GetGlobal") && !text.contains("PushCtx"), "{text}");
+}
+
+/// The `pc` of each instruction of `op` in `code`.
+fn pcs_of(code: &Code, op: Op) -> Vec<u32> {
+    let mut v = Vec::new();
+    let mut pc = 0;
+    while pc < code.words.len() {
+        let (ins, len) = crate::bytecode::decode(&code.words, pc).unwrap();
+        if ins.op == op {
+            v.push(pc as u32);
+        }
+        pc += len;
+    }
+    v
+}
+
+fn covered(code: &Code, pc: u32) -> bool {
+    code.handlers.iter().any(|h| h.start <= pc && pc < h.end)
+}
+
+/// Is the `IterClose` at `pc` inside a range whose handler closes the same iterator? (A handler of another loop around it is right.)
+fn closed_twice(code: &Code, pc: u32) -> bool {
+    let rec = crate::bytecode::decode(&code.words, pc as usize).unwrap().0.a;
+    code.handlers.iter().any(|h| {
+        let t = crate::bytecode::decode(&code.words, h.target as usize).unwrap().0;
+        h.start <= pc && pc < h.end && t.op == Op::IterClose && t.a == rec
+    })
+}
+
+#[test]
+fn a_script_var_without_an_initializer_is_declared() {
+    let (s, _) = build("var x; var y = 1; function g() {} if (0) { var z; }");
+    let text = s.code.disassemble();
+    // One declaration for each `var` name (also one in a block) and for the function, before any statement.
+    assert_eq!(text.matches("DeclGlobal").count(), 4, "{text}");
+    assert!(text.lines().skip(1).take(4).all(|l| l.contains("DeclGlobal")), "{text}");
+    // Not in a function.
+    let f = outer("function f() { var x; return x; }");
+    assert!(!f.code.disassemble().contains("DeclGlobal"));
+}
+
+#[test]
+fn a_break_out_of_for_of_closes_the_iterator_once() {
+    // `return()` can throw. The close that a `break` or `return` makes is not in the range of the loop's own handler: an exception from
+    // it would be caught by that handler and the iterator would be closed again.
+    let f = outer("function f(o) { for (const v of o) { if (v) break; if (g(v)) return v; } }");
+    let code = &f.code;
+    let closes = pcs_of(code, Op::IterClose);
+    assert_eq!(closes.len(), 3, "break, return, and the handler: {}", code.disassemble());
+    assert!(closes.iter().all(|&pc| !covered(code, pc)), "{:?}\n{}", code.handlers, code.disassemble());
+    assert!(!code.handlers.is_empty());
+    // The same for a labeled `continue` that leaves an inner loop.
+    let f = outer("function f(o, p) { a: for (const v of o) { for (const w of p) { if (w) continue a; } } }");
+    let code = &f.code;
+    let closes = pcs_of(code, Op::IterClose);
+    assert_eq!(closes.len(), 3, "the continue and the two handlers: {}", code.disassemble());
+    assert!(closes.iter().all(|&pc| !closed_twice(code, pc)), "{:?}\n{}", code.handlers, code.disassemble());
+}
+
+#[test]
+fn an_array_pattern_closes_the_iterator_when_a_binding_throws() {
+    let f = outer("function f(o) { var [a, b = g()] = o; return a + b; }");
+    let code = &f.code;
+    let text = code.disassemble();
+    assert!(!code.handlers.is_empty(), "{text}");
+    // A throw from `next()` does not close the iterator; a throw from a default does; the normal close is outside.
+    assert!(pcs_of(code, Op::IterNext).iter().all(|&pc| !covered(code, pc)), "{:?}\n{text}", code.handlers);
+    let closes = pcs_of(code, Op::IterClose);
+    assert_eq!(closes.len(), 2, "{text}");
+    assert!(closes.iter().all(|&pc| !covered(code, pc)), "{:?}\n{text}", code.handlers);
+    assert!(covered(code, pcs_of(code, Op::GetGlobal)[0]), "the default is covered: {:?}\n{text}", code.handlers);
+    // When nothing in the pattern can throw, no handler.
+    let f = outer("function f(o) { var [a, b] = o; return a + b; }");
+    assert!(f.code.handlers.is_empty(), "{}", f.code.disassemble());
+    // A rest element, and an assignment to a member.
+    let f = outer("function f(o, p) { [p.x, ...p.y] = o; }");
+    assert!(!f.code.handlers.is_empty());
+}
+
+#[test]
+fn a_scope_with_many_locals_compiles_in_linear_time() {
+    let src = |n: usize| {
+        let mut src = String::from("function f() {");
+        for i in 0..n {
+            src.push_str(&format!("var v{i} = {};", i % 9));
+        }
+        src.push_str("return v0 + v1; }");
+        src
+    };
+    let atoms = SharedAtoms::default();
+    let t = std::time::Instant::now();
+    let (_, fs) = compile_all(&src(60_000), &atoms, Limits::default()).expect("compile");
+    // The verifier keeps a register set for each instruction: too much for 60,000 registers, so it is not run here.
+    assert!((60_000..=60_010).contains(&fs[0].1.code.nregs), "{}", fs[0].1.code.nregs);
+    // More than the format has registers for: refused, and not after minutes.
+    let r = compile_all(&src(70_000), &atoms, Limits::default());
+    assert!(matches!(r, Err(ref e) if e.contains("Limit")), "{:?}", r.map(|_| ()));
+    assert!(t.elapsed().as_secs() < 20, "{:?}", t.elapsed());
 }

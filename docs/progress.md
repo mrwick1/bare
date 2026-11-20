@@ -15415,3 +15415,85 @@ Tests: `cargo test --locked -p bare-js2`: 166 passed on Linux (38 new in `interp
 Known gaps (left for S2.5 and S2.7): no prototype-chain cache entries (a property that a prototype gives is looked up each time); no accessors, `ToPrimitive`, `arguments`, generators, iterator protocol beyond arrays, or built-ins; a number prints with Rust's rules, so `1e21` differs; the hidden `code` and `ctx` slots of a function cell show in `for-in` (to fix with the function layout of S2.7).
 
 Not tested: a compiler or real JavaScript on this interpreter (S2.5); the cache-hit and helper `unsafe` against a safe form; wall time; the cost matrix (`bare-js2` is not connected to `bare`); arm64; Miri on the whole crate (only the `interp` tests) and with `-Zmiri-many-seeds`; Windows after the rebase on main and after the last two test edits (Linux was re-run: 318 passed).
+
+## 2026-11-20: compiler gaps and more constructs in js2 (plan step S2.5)
+
+This entry continues "compiler in js2 (plan step S2.5)". Base: main with #759. New module `compile_class.rs`. The compiler is not wired into the browser, so there is no cost matrix.
+
+Four gaps are fixed:
+
+- A script-level `var x;` and each function name of a script now emit `DeclGlobal` (new op, one site). Before, `var x;` made no global.
+- An array pattern closes its iterator when a binding throws (a handler on the pieces of code between the `IterNext` calls, and a cold block after the last `RetUndef` that runs `IterClose` and throws again). A throw from `next()` does not close it. A pattern whose bindings cannot throw (registers, literal defaults) has no handler.
+- An `IterClose` that a `break` or `return` repeats inside a `for-of` body is now outside the range of the loop's own handler, so it runs once. A frame keeps a list of pieces; `pause` and `resume` cut the repeated code out.
+- `enter` and `find_var` use a hash index for a scope or a level with more than 8 names. A scope with 20,000 locals compiled in 960 ms before and in 29 ms now. A scope with 70,000 locals is refused at once with `Limit` (a function has at most 65,535 registers; the test checks that it fails in under 20 s, it took 87 s to compile before).
+
+Constructs that are built now. All are compiler only. Each compiled function passes the verifier:
+
+- `arguments` (`CreateArgs` at entry, before the defaults), rest parameters (`CreateRest`), a spread in calls, `new` and array literals (`CallSpread`, `NewSpread`, `ArraySpread`, `ArrayHole`), an array hole, object spread (`CopyProps`), object rest in patterns (`ObjRest`; the keys of the other properties go to a window).
+- Named function expressions that use their own name (`LoadCallee`; a variable in the function, in a slot when a closure captures it).
+- Getters, setters and `__proto__` in object literals (`DefAccessor`, `DefAccessorElem`, `SetProto`). A method that uses `super` gets `SetHome`, and then the literal is not `NewObjLit`.
+- Regexp and BigInt literals (`NewRegExp`, `LoadBigInt`), tagged templates (`GetTemplate`, the template object is cached by site).
+- `new.target` (`LoadNewTarget`; an arrow takes it from a variable of the function around it).
+- `super.x`, `super[x]`, assignments and updates of them, `super(...)` (also in an arrow), derived constructors (`this` is the hole until `super()` returns; `RetDerived` on each return).
+- Private names: `#x` reads, writes, updates, `#x in o`, private methods and accessors, static ones too.
+- Classes: methods, getters, setters, static members, computed keys, fields, static fields, `static { }`, a class name binding inside the class, class declarations and expressions.
+
+How I ranked. I counted the functions that each construct made partial in 6 files (jQuery 3.4.1, axios, lodash, react-dom production, the clangd extension bundle, tauri's bundle; `/data/bare-tmp/s25b/corpus`, not in the repository), with the compiler before this change: `arguments` 158, regexp literal 123, class 85, spread and rest 74 (calls 18, arrays 5, object spread 8, rest parameter 20, `spread` expression 20, object rest 3), own-name function expression 18, getter, setter or `__proto__` in a literal 7, BigInt 0, tagged template 0. The eval_load cases use none of them. I built them in the order of the dependencies, not of the counts: `arguments` and rest first, then regexp, own name, spread, accessors, and classes last because they need most of the new ops. BigInt and tagged templates are cheap and are built, but no file in the corpus uses them.
+
+Result of `bc_hist` on the 6 files (archMachine, release build, same binary before and after except for this change):
+
+| File | Functions (partial) before | Functions (partial) after | Still partial because |
+| --- | ---: | ---: | --- |
+| jQuery 3.4.1 | 949 (88) | 949 (1) | direct `eval` |
+| axios | 422 (56) | 423 (0) | |
+| lodash | 691 (29) | 691 (0) | |
+| react-dom | 493 (8) | 493 (0) | |
+| clangd bundle | 3,197 (351) | 5,340 (275) | async 98, generators 18, `await` 144, `yield` 24, `for await` 1, `eval` 1 |
+| tauri bundle | 122 (11) | 425 (23) | async 10, `await` 16 |
+
+The function counts of clangd and tauri grow because the compiler now reaches the methods of the classes that it did not compile before. The jQuery numbers: words 34,678 to 34,739, instructions 33,758 to 33,789, registers 8,677 to 8,727, root-map bytes 261,168 to 263,664 (the 87 new complete functions). jQuery compile time, 3 runs: 19.1 to 19.55 ms at the start of the task, 18.9 to 19.2 ms after the scope index, 18.97 to 19.11 ms with all constructs (the old binary in the same session: 18.86 to 19.07 ms). So the scope index and the new code do not change the time for real code. The nine eval_load sources are still complete.
+
+New ops (38). The format is in `bytecode.rs`; each has a line there that says what the interpreter (S2.6) must do:
+
+| Group | Ops |
+| --- | --- |
+| Globals | `DeclGlobal` |
+| Frame | `CreateArgs`, `CreateRest`, `LoadCallee`, `LoadNewTarget` |
+| Literals | `NewRegExp`, `LoadBigInt`, `GetTemplate` |
+| Spread and rest | `ArraySpread`, `ArrayHole`, `CallSpread`, `NewSpread`, `CopyProps`, `ObjRest` |
+| Objects | `SetProto`, `DefAccessor`, `DefAccessorElem`, `DefMethod`, `DefMethodElem`, `SetHome` |
+| Classes | `MakeClass`, `MakeDerived`, `DefaultCtor`, `SetFields` |
+| Private names | `NewPrivateName`, `GetPrivate`, `SetPrivate`, `HasPrivate`, `DefPrivate`, `DefPrivateMethod`, `DefPrivateAccessor` |
+| Super | `GetSuper`, `GetSuperElem`, `SetSuper`, `SetSuperElem`, `CallSuper`, `CallSuperSpread`, `RetDerived` |
+
+`verify.rs` knows the register windows of the new ops (`CallSpread` 3, `NewSpread` 2, `ObjRest` x, `CallSuper` c). A `GetTemplate` recipe may hold `u32::MAX` as the cooked string (a bad escape), and its length must be even. A `RetDerived` and a `CallSuper` need no new rule.
+
+Class design (`compile_class.rs`):
+
+- A scope holds the inner class name and the names that the class makes: `#x` (the private name object that `NewPrivateName` makes, one per evaluation of the class), `%k<i>` (the key of a computed field), `%m#x`, `%g#x`, `%s#x` (the function of an instance private method, getter, setter). They are no identifiers, so the facts do not list them. `captured` puts each one in a context slot, and a method reads it through the chain.
+- The constructor is a closure or `DefaultCtor`. `MakeClass` or `MakeDerived` gives it a prototype. A method, getter or setter is defined on the prototype or on the constructor (`DefMethod`, `DefAccessor` with bit 1 set: not enumerable). A private static method goes on the constructor at once.
+- The text of a field initializer or a `static { }` block is in the tree of the function that holds the class. The facts have an entry for each (flag `INLINE`), but a later parse cannot find a body to skip. So the parent compiles them itself with a second `Fc` over the same tree: one synthetic function for all instance fields and private methods, and one for each static field or static block. Each is a child with `Child::ready = Some(i)`, and its code is `Compiled::inline[i]`. `compile_all` takes the code from there; the driver of S2.6 must do the same when it first runs such a child. The id of a synthetic function is the id of its first initializer entry.
+- `SetFields ctor, fn` stores the fields function on the constructor. The interpreter runs it with `this` set to the new object: at the start of a constructor of a base class (the constructor has no op for it), and in `CallSuper` and `CallSuperSpread` after the parent constructor returns. The static functions are called once, in the order of the text, with `this` set to the constructor, after the inner name is set.
+
+Deviations and known gaps (the interpreter or a later step must decide):
+
+- `arguments` is not mapped to the parameters in sloppy code (writing `arguments[0]` does not change the parameter).
+- Assigning to the own name of a named function expression assigns in sloppy code; the spec ignores it. In strict code it throws.
+- A second `super()` is not detected; the spec throws a ReferenceError. The message for `this` before `super()` is the one of `CheckInit` with the name `this`.
+- An arrow gets its home object from the function that makes it (S2.6: `Closure` copies it); the compiler emits `SetHome` only for a method, an accessor, a field function and a static function.
+- `ObjRest` takes its keys from a window that holds atoms (names), numbers (index keys) or the result of `ToKey` (computed keys). The interpreter must compare them as property keys.
+- No op sets the `name` or `length` of a method, an accessor, a class constructor or an anonymous function in a field. The class constructor is a normal closure.
+- `static` private methods and instance ones use the same ops on a different object; the brand check is in the interpreter.
+- A BigInt key (`{1n: x}`) and a private key in an object literal or a pattern are still listed as unsupported.
+- Class name reads inside the class use `GetCtxTdz` (a hole check on each read), because the name is a `const` that is not set until the class is done.
+
+Not built, design only. Each needs an interpreter change, and none is cheap enough to build now.
+
+- Generators. A generator function compiles like a normal function. Its first call makes the generator object from the frame (`Code` has the same root maps at each suspend point). New op `Yield a, b`: store the pc and the registers, give `b` to the caller; when it resumes, `a` gets the sent value. A `throw(e)` resumes by throwing `e` at the `Yield`, so the existing handlers work. A `return(v)` resumes by throwing a sentinel (a `GeneratorReturn` record that holds `v`). The compiler's `finally` already runs on a throw and rethrows, so the finalizers run; the interpreter ends the generator with `v` when the sentinel leaves the function. `yield*` is one op `YieldDelegate a, b`: it keeps its pc until the inner iterator is done, and passes `next`, `throw` and `return` to it.
+- Async functions. The same frame save as a generator, with `Await a, b` in place of `Yield`: the interpreter subscribes the resume to the promise in `b`. A rejection resumes by throwing at the `Await`. `Ret` resolves the promise. An async generator has both ops and a queue of requests. `for await` is `IterOpen` with a flag, then `IterNext` split in a call, an `Await` and a result check; `IterClose` awaits too.
+- `with`. `PushWith r` puts the object `r` on the context chain as a level of a new kind. Inside the body, and in each function with the flag `IN_WITH`, a name that is not declared inside the `with` compiles to `GetName a, site, hops` (and `SetName`, `TypeofName`, `CallName` for the `this` of a call): it looks in each object level from the innermost out to `hops` (`Symbol.unscopables` included), then falls back to the slot or the global. `PopCtx` leaves it.
+- Direct `eval`. A function with the flag `EVAL` or `INNER_EVAL` already keeps all variables in context slots. Two things are missing: a table in `Code` with the names, slots and kinds of each `PushCtx` (so that the interpreter can build the `Level` chain for the compiler at run time), and `CallEval a, base, n` (a call that checks whether the callee is the real `eval`). A sloppy `var` from the eval goes to a variable object that the function makes at entry (`PushVarEnv`), and the names of such a function that no scope declares are looked up in it first, as in `with`.
+
+Check. `cargo test --locked -p bare-js2 --lib`: 282 pass on Linux (260 on main). `compile::tests`: 54 (34 on main): 14 new golden tests (one for each of: `arguments`, rest and spread call, spread in `new` and arrays, own-name function expression, regexp and BigInt, tagged template, object accessors and `__proto__` and spread, object rest, class with fields and static members, derived class with `super()` in an arrow, `super` property access, private names, `new.target`, class expression name), `field_initializers_and_static_blocks_are_ready_children_of_the_class`, `every_construct_of_a_class_passes_the_verifier` (12 sources), the gaps (script var, iterator close, `break` closes once, 60,000 locals in linear time), and the updated list of unsupported constructs (async, generator, `with`, direct eval, `delete` of a global). I read each golden against the JS meaning. Windows 11 VM: the whole lib run is 280 pass and 2 fail (the same two parser corpus tests as before: `parse::tests::corpus_status_matches_acorn` and `parse::lazy_tests::a_lazy_parse_finds_the_same_errors_as_a_full_parse_on_the_corpus`; they do not find the corpus on the VM); `compile::tests` 54 pass. `cargo clippy -p bare-js2 --all-targets`: no warning in the files of this change (old warnings remain in `heap.rs`, `object_census.rs` and `bare-os`).
+
+Not tested: running any compiled code, so the semantics of the 38 new ops are checked by reading the disassembly and by the verifier only; class, `super`, private-name and spread behavior in an interpreter (S2.6); the S2.6 driver's use of `Child::ready`; mapped `arguments`; function names of methods and classes; Miri; arm64; a React bundle with classes beyond the clangd and tauri bundles; the cost matrix (js2 is not wired into the browser); the `bc_hist` example on Windows.
