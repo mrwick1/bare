@@ -371,13 +371,13 @@ fn the_accessors_are_made_by_use() {
     let mut b = page("<!doctype html><body><div id=a></div></body>");
     // Nothing is defined until a name is asked for: one name costs eight host functions (getter and setter on window, document, HTML elements and SVG elements).
     run(&mut b, "document.getElementById('a')");
-    let n0 = b.dom.handlers.borrow().len();
+    let n0 = b.dom.scoped.borrow().len();
     assert_eq!(run(&mut b, "typeof document.getElementById('a').onclick"), "object");
-    assert_eq!(b.dom.handlers.borrow().len() - n0, 8);
+    assert_eq!(b.dom.scoped.borrow().len() - n0, 8);
     assert_eq!(run(&mut b, "document.getElementById('a').onclick = function () {}; typeof document.getElementById('a').onclick"), "function");
-    assert_eq!(b.dom.handlers.borrow().len() - n0, 8);
+    assert_eq!(b.dom.scoped.borrow().len() - n0, 8);
     assert_eq!(run(&mut b, "var d = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'onclick'); typeof d.get + typeof d.set + d.enumerable + d.configurable"), "functionfunctiontruetrue");
-    assert_eq!(b.dom.handlers.borrow().len() - n0, 8);
+    assert_eq!(b.dom.scoped.borrow().len() - n0, 8);
     // The whole list on demand.
     assert_eq!(run(&mut b, "Object.keys(window).filter(function (n) { return /^on/.test(n) }).length > 100"), "true");
     // A name that is not a handler stays an expando.

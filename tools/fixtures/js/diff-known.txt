@@ -19,5 +19,3 @@ script_tests:478	self: the old engine has no global self
 script_tests:480	self: the old engine has no global self
 script_tests:479	Symbol: js2 has none
 corpus:error_gaps	new of a bound function, the strict assignment to an undeclared name, Error cause: js2 has none of them
-corpus:function_gaps	Function.length is missing; a sloppy call has this === undefined (bug)
-corpus:number_format	Number to string never uses the exponent form in js2 (1e21, 1e-7, 5e-324)

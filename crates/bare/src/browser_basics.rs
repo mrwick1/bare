@@ -33,9 +33,12 @@
 //! `TypeError`. The reply is ignored and a failure is silent.
 
 use crate::browser::*;
+use crate::browser_scoped::*;
+use bare_js_api::{Args, Local};
 use crate::browser_platform::arg;
 use bare_html::dom::{Document, NodeData};
 use bare_js::eval::Interp;
+use bare_js_api::HostFn;
 use bare_js::value::{ObjId, Value};
 use std::cell::Cell;
 
@@ -73,8 +76,8 @@ pub(crate) fn define(d: &Dom, it: &mut Interp<'_>, key: &str) -> R<()> {
         let k = d.key(it, key)?;
         it.define_data(o, k, v, true, true, true)
     };
-    let hidden = |it: &mut Interp<'_>, h: H| -> R<()> {
-        let f = d.add_fn(it, h, key, 0, false)?;
+    let hidden = |it: &mut Interp<'_>, h: HS| -> R<()> {
+        let f = d.add_fn_s_obj(it, h, key, 0, HostFn::Method)?;
         let k = d.key(it, key)?;
         it.define_data(g, k, Value::Object(f), true, false, true)
     };
@@ -91,21 +94,21 @@ pub(crate) fn define(d: &Dom, it: &mut Interp<'_>, key: &str) -> R<()> {
         "confirm" => hidden(it, confirm),
         "prompt" => hidden(it, prompt),
         "open" => hidden(it, open),
-        "isSecureContext" => getter(d, it, g, &["isSecureContext"], |d, _, _, _| Ok(Value::Bool(secure(d))), false),
-        "outerWidth" => getter(d, it, g, &["outerWidth"], crate::browser_scroll::win_inner_width, false),
-        "outerHeight" => getter(d, it, g, &["outerHeight"], crate::browser_scroll::win_inner_height, false),
-        "hidden" => getter(d, it, doc, &[key], |d, _, _, _| Ok(Value::Bool(d.basics.hidden.get())), false),
+        "isSecureContext" => getter(d, it, g, &["isSecureContext"], |d, s, _, _| Ok(s.boolean(secure(d))), false),
+        "outerWidth" => getter(d, it, g, &["outerWidth"], |d, s, _, _| Ok(s.number(d.plat.s.borrow().viewport.0 as f64)), false),
+        "outerHeight" => getter(d, it, g, &["outerHeight"], |d, s, _, _| Ok(s.number(d.plat.s.borrow().viewport.1 as f64)), false),
+        "hidden" => getter(d, it, doc, &[key], |d, s, _, _| Ok(s.boolean(d.basics.hidden.get())), false),
         "referrer" => {
             let empty = d.js_str(it, "")?;
             data(it, doc, empty)
         }
-        "visibilityState" => getter(d, it, doc, &[key], |d, it, _, _| d.js_str(it, if d.basics.hidden.get() { "hidden" } else { "visible" }), false),
-        "contentType" => getter(d, it, doc, &[key], |d, it, _, _| d.js_str(it, "text/html"), false),
-        "compatMode" => getter(d, it, doc, &[key], |d, it, _, _| d.js_str(it, if has_doctype(&d.doc.borrow()) { "CSS1Compat" } else { "BackCompat" }), false),
-        "characterSet" | "charset" | "inputEncoding" => getter(d, it, doc, &[key], |d, it, _, _| d.js_str(it, charset(&d.doc.borrow())), false),
-        "lastModified" => getter(d, it, doc, &[key], |d, it, _, _| d.js_str(it, &last_modified(d.basics.loaded.get())), false),
+        "visibilityState" => getter(d, it, doc, &[key], |d, s, _, _| d.js_str_s(s, if d.basics.hidden.get() { "hidden" } else { "visible" }), false),
+        "contentType" => getter(d, it, doc, &[key], |d, s, _, _| d.js_str_s(s, "text/html"), false),
+        "compatMode" => getter(d, it, doc, &[key], |d, s, _, _| d.js_str_s(s, if has_doctype(&d.doc.borrow()) { "CSS1Compat" } else { "BackCompat" }), false),
+        "characterSet" | "charset" | "inputEncoding" => getter(d, it, doc, &[key], |d, s, _, _| d.js_str_s(s, charset(&d.doc.borrow())), false),
+        "lastModified" => getter(d, it, doc, &[key], |d, s, _, _| d.js_str_s(s, &last_modified(d.basics.loaded.get())), false),
         // There is no design mode: the setter keeps nothing.
-        "designMode" => getter(d, it, doc, &[key], |d, it, _, a| if a.is_empty() { d.js_str(it, "off") } else { Ok(Value::Undefined) }, true),
+        "designMode" => getter(d, it, doc, &[key], |d, s, _, a| if a.is_empty() { d.js_str_s(s, "off") } else { Ok(s.undefined()) }, true),
         "dir" => getter(d, it, doc, &[key], dir, true),
         _ => Ok(()),
     }
@@ -125,8 +128,8 @@ pub(crate) fn define_all(d: &Dom, it: &mut Interp<'_>, owner: bare_js::value::Ob
 
 /// An accessor of `target` for each of `names`, all with one function (named as the first key, which the heap has already). With
 /// `set` the same function is the setter: it runs as one when it gets an argument.
-pub(crate) fn getter(d: &Dom, it: &mut Interp<'_>, target: bare_js::value::ObjId, names: &[&str], h: H, set: bool) -> R<()> {
-    let f = d.add_fn(it, h, names[0], 0, false)?;
+pub(crate) fn getter(d: &Dom, it: &mut Interp<'_>, target: bare_js::value::ObjId, names: &[&str], h: HS, set: bool) -> R<()> {
+    let f = d.add_fn_s_obj(it, h, names[0], 0, HostFn::Method)?;
     for name in names {
         let k = d.key(it, name)?;
         d.define_accessor(it, target, k, f, set.then_some(f))?;
@@ -134,46 +137,46 @@ pub(crate) fn getter(d: &Dom, it: &mut Interp<'_>, target: bare_js::value::ObjId
     Ok(())
 }
 
-fn nothing(_: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
-    Ok(Value::Undefined)
+fn nothing<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    Ok(s.undefined())
 }
 
 /// The argument `i` as text; a missing one is "".
-fn text_arg(it: &mut Interp<'_>, a: &[Value], i: usize) -> R<String> {
+fn text_arg<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>, i: usize) -> Res<'s, String> {
     if i >= a.len() {
         return Ok(String::new());
     }
-    let s = it.to_js_string(a[i])?;
-    it.heap.to_string_lossy(s).map_err(|e| it.heap_error(e))
+    let v = arg_s(s, a, i);
+    d.string_arg_s(s, v)
 }
 
 /// The dialogs answer from the policy of a driver (`agent.rs`). With no policy: `alert` does nothing, `confirm` gives false and `prompt` null.
-fn alert(_: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    let m = text_arg(it, a, 0)?;
+fn alert<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let m = text_arg(d, s, a, 0)?;
     crate::agent::dialog("alert", &m, "");
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-fn confirm(_: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    let m = text_arg(it, a, 0)?;
-    Ok(Value::Bool(crate::agent::dialog("confirm", &m, "").is_some_and(|(ok, _)| ok)))
+fn confirm<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let m = text_arg(d, s, a, 0)?;
+    Ok(s.boolean(crate::agent::dialog("confirm", &m, "").is_some_and(|(ok, _)| ok)))
 }
 
-fn prompt(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    let (m, dflt) = (text_arg(it, a, 0)?, text_arg(it, a, 1)?);
+fn prompt<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (m, dflt) = (text_arg(d, s, a, 0)?, text_arg(d, s, a, 1)?);
     match crate::agent::dialog("prompt", &m, &dflt) {
-        Some((true, Some(t))) => d.js_str(it, &t),
-        _ => Ok(Value::Null),
+        Some((true, Some(t))) => d.js_str_s(s, &t),
+        _ => Ok(s.null()),
     }
 }
 
 /// `window.open(url)`: a tab for a driver (`agent.rs`); else null, a blocked popup. It always gives null: the page gets no window.
-fn open(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    let u = text_arg(it, a, 0)?;
+fn open<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let u = text_arg(d, s, a, 0)?;
     if let Some(url) = d.resolve_http(&u) {
         crate::agent::tab(&url);
     }
-    Ok(Value::Null)
+    Ok(s.null())
 }
 
 // ---------------------------------------------------------------------------------------------- document
@@ -210,21 +213,20 @@ fn charset(doc: &Document) -> &'static str {
 }
 
 /// `document.dir`: the `dir` of `<html>` when it is `ltr`, `rtl` or `auto` (any case), else "". The setter writes the attribute.
-fn dir(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    if let Some(&v) = a.first() {
-        let s = it.to_js_string(v)?;
-        let v = it.heap.to_string_lossy(s).map_err(|e| it.heap_error(e))?;
+fn dir<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    if let Some(v) = a.get(0) {
+        let v = d.string_arg_s(s, v)?;
         let html = html_of(&d.doc.borrow());
         if let Some(h) = html {
-            crate::browser_dom::attr_set(d, it, h, "dir", &v)?;
+            crate::browser_dom::attr_set_s(d, s, h, "dir", &v)?;
         }
-        return Ok(Value::Undefined);
+        return Ok(s.undefined());
     }
     let v = {
         let doc = d.doc.borrow();
         html_of(&doc).and_then(|h| doc.find_atom("dir").and_then(|a| doc.attr(h, a))).map(str::to_ascii_lowercase).filter(|v| matches!(v.as_str(), "ltr" | "rtl" | "auto")).unwrap_or_default()
     };
-    d.js_str(it, &v)
+    d.js_str_s(s, &v)
 }
 
 /// `MM/DD/YYYY hh:mm:ss` in UTC of `ms` since the epoch (Howard Hinnant's `civil_from_days`).
@@ -429,7 +431,7 @@ fn send_beacon(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Valu
     let noop = match d.basics.noop.get() {
         Some(f) => f,
         None => {
-            let f = d.add_fn(it, nothing, "", 0, false)?;
+            let f = d.add_fn_s_obj(it, nothing, "", 0, HostFn::Method)?;
             d.fixed.borrow_mut().push(f);
             d.basics.noop.set(Some(f));
             f

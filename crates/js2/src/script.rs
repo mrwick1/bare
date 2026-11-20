@@ -7,6 +7,7 @@
 //! of its parent. `Code::funcs` of the compiler holds the id of the child in the facts; the driver replaces it by the index in the
 //! program (the facts id of a synthetic function is not always unique).
 use crate::atoms::SharedAtoms;
+use crate::string::Chars;
 use crate::bytecode::{CF_ARGS, CF_LINK, Code, Op};
 use crate::compile::{Child, Compiled, Input, compile_function, compile_script};
 use crate::facts::{Facts, SUPER};
@@ -18,11 +19,24 @@ use crate::value::Value;
 use std::sync::Arc;
 
 /// The stub of a function that waits for its first call: no parameters, all arguments in an array, and one instruction (`Op::Lazy`).
-fn stub() -> Code {
+/// It has the `name` and the `length` of the function (`Realm::fn_props` reads them before the first call).
+fn stub(atoms: &SharedAtoms, name: Option<&str>, length: u32) -> Result<Code, String> {
     let mut c = Code::new(0, 0);
     c.words = vec![Op::Lazy as u32];
     c.flags = CF_ARGS;
-    c
+    c.fn_len = length.min(u16::MAX as u32) as u16;
+    if let Some(n) = name {
+        let units: Vec<u16> = n.encode_utf16().collect();
+        let bytes: Option<Vec<u8>> = units.iter().map(|&u| u8::try_from(u).ok()).collect();
+        let s = match &bytes {
+            Some(b) => atoms.intern(Chars::One(b)),
+            None => atoms.intern(Chars::Two(&units)),
+        }
+        .map_err(|_| "out of memory")?;
+        c.fn_name = 0;
+        c.atoms.push(s);
+    }
+    Ok(c)
 }
 
 /// The functions that wait for their first call: their stubs in `codes`, and what compiles them. The loader makes a stub for a function
@@ -42,7 +56,7 @@ impl LazyCompile for Lazy {
         let ch = self.pending.remove(at).1;
         let first = codes.len();
         let (p, fid) = parse_function(self.source, &mut self.facts, ch.id, self.limits).map_err(|e| format!("parse fn {}: {}", ch.id, e.msg))?;
-        let sub = compile_function(&p, fid, ch.id, &self.facts, &self.atoms, &Input { chain: ch.chain.clone(), self_name: ch.self_name })
+        let sub = compile_function(&p, fid, ch.id, &self.facts, &self.atoms, &Input { chain: ch.chain.clone(), self_name: ch.self_name, name: ch.name.clone() })
             .map_err(|e| format!("compile fn {}: {e:?}", ch.id))?;
         let mut pending = Vec::new();
         let mut l = Loader { source: self.source, facts: &mut self.facts, atoms: &self.atoms, limits: self.limits, codes, lazy: Some(&mut pending) };
@@ -91,12 +105,13 @@ impl Loader<'_> {
                 None if self.lazy.is_some() && self.facts.get(ch.id).flags & SUPER == 0 => {
                     c.code.funcs[i] = self.codes.len() as u32;
                     self.lazy.as_mut().expect("lazy").push((self.codes.len(), ch.clone()));
-                    self.codes.push(stub());
+                    let (name, length) = (ch.name.as_deref(), self.facts.get(ch.id).length);
+                    self.codes.push(stub(self.atoms, name, length)?);
                     continue;
                 }
                 None => {
                     let (p, fid) = parse_function(self.source, self.facts, ch.id, self.limits).map_err(|e| format!("parse fn {}: {}", ch.id, e.msg))?;
-                    compile_function(&p, fid, ch.id, self.facts, self.atoms, &Input { chain: ch.chain.clone(), self_name: ch.self_name }).map_err(|e| format!("compile fn {}: {e:?}", ch.id))?
+                    compile_function(&p, fid, ch.id, self.facts, self.atoms, &Input { chain: ch.chain.clone(), self_name: ch.self_name, name: ch.name.clone() }).map_err(|e| format!("compile fn {}: {e:?}", ch.id))?
                 }
             };
             c.code.funcs[i] = self.add(sub)? as u32;
@@ -172,10 +187,12 @@ pub fn load_with(host: &str, source: &str) -> Result<Vm, String> {
     if let Err(e) = vm.run_main(pre) {
         panic!("the prelude failed: {e:?}");
     }
-    let g = vm.realm.global.value();
+    // Hide the helpers, do not delete them: a delete of a property that is not the last one puts the global object in dictionary mode, and
+    // then no global access can be cached. The properties are not enumerable; their value is `undefined`, so a script cannot reach them.
+    let g = vm.realm.global;
     for name in ["__def", "__helper", "__set"] {
         let k = vm.realm.intern(name);
-        let _ = vm.realm.delete_prop(g, crate::interp_rt::Key::Name(k));
+        vm.realm.define(g, crate::interp_rt::Key::Name(k), Value::UNDEFINED).expect("define");
     }
     if !host.is_empty()
         && let Err(e) = vm.run_main(at)

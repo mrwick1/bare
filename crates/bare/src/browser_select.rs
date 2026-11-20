@@ -1045,15 +1045,15 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<Made> {
     it.define_data(f, kp, Value::Object(option), false, false, false)?;
     ctors[6] = f;
 
-    d.def_get(it, collection, "length", nl::length, None)?;
-    d.def_method(it, collection, "item", 1, nl::item_method)?;
+    d.def_get_s(it, collection, "length", nl::length, None)?;
+    d.def_method_s(it, collection, "item", 1, nl::item_method)?;
     d.def_method(it, collection, "namedItem", 1, collection_named_item)?;
     let sym = d.plat.sym_iter.get().copied().expect("platform installed first");
     let kv = d.key(it, "values")?;
     let values = it.get_value(Value::Object(it.array_prototype()), kv)?;
     it.define_data(collection, sym, values, true, false, true)?;
 
-    d.def_get(it, options, "length", nl::length, Some(collection_length_set))?;
+    d.def_get_sh(it, options, "length", nl::length, collection_length_set)?;
     d.def_method(it, options, "add", 1, collection_add)?;
     d.def_method(it, options, "remove", 1, collection_remove)?;
     d.def_get(it, options, "selectedIndex", collection_selected_index, Some(set_collection_selected_index))?;

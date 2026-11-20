@@ -19,27 +19,26 @@
 //! Gaps: no transforms (the engine has none), no border radius or `clip-path`; a page that has a gate in layout cannot answer.
 
 use crate::browser::*;
-use crate::browser_dom::wrap_all;
+use crate::browser_dom::wrap_all_s;
+use crate::browser_scoped::*;
 use bare_html::dom::{Document, NodeData, NodeId};
-use bare_js::eval::Interp;
-use bare_js::value::Value;
-
-type V = R<Value>;
+use bare_js_api::{Args, Local};
 
 /// The context object, and the two numbers. The error text names the interface that the call is on.
-fn args(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], name: &str) -> R<(NodeId, f64, f64)> {
-    let scope = d.nd(it, this)?;
+fn args<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, name: &str) -> Res<'s, (NodeId, f64, f64)> {
+    let scope = d.nd_s(s, this)?;
     let iface = match d.data(scope) {
         NodeData::Document => "Document",
         NodeData::ShadowRoot => "ShadowRoot",
-        _ => return Err(it.type_error("Illegal invocation")),
+        _ => return Err(s.type_error("Illegal invocation")),
     };
     if a.len() < 2 {
-        return Err(it.type_error(&format!("Failed to execute '{name}' on '{iface}': 2 arguments required, but only {} present.", a.len())));
+        return Err(s.type_error(&format!("Failed to execute '{name}' on '{iface}': 2 arguments required, but only {} present.", a.len())));
     }
-    let (x, y) = (it.to_js_number(a[0])?, it.to_js_number(a[1])?);
+    let (a0, a1) = (arg_s(s, a, 0), arg_s(s, a, 1));
+    let (x, y) = (s.to_number(a0)?, s.to_number(a1)?);
     if !x.is_finite() || !y.is_finite() {
-        return Err(it.type_error(&format!("Failed to execute '{name}' on '{iface}': The provided double value is non-finite.")));
+        return Err(s.type_error(&format!("Failed to execute '{name}' on '{iface}': The provided double value is non-finite.")));
     }
     Ok((scope, x, y))
 }
@@ -76,22 +75,24 @@ pub(crate) fn retarget(doc: &Document, mut n: NodeId, roots: &[NodeId]) -> NodeI
 }
 
 /// The elements under the point, the topmost first, retargeted against `scope`.
-fn under(d: &Dom, it: &mut Interp<'_>, scope: NodeId, x: f64, y: f64) -> R<Vec<NodeId>> {
-        let _caller = crate::force::tag("elementFromPoint");
+fn under<'s>(d: &Dom, s: &mut Sc<'s, '_>, scope: NodeId, x: f64, y: f64) -> Res<'s, Vec<NodeId>> {
+    let _caller = crate::force::tag("elementFromPoint");
     let roots = roots_of(&d.doc.borrow(), scope);
-    it.charge(roots.len() as u64)?;
+    s.charge(roots.len() as u64)?;
     if roots.last() != Some(&d.doc.borrow().root()) {
         return Ok(Vec::new());
     }
     // Blink keeps a point in 1/64 px and cuts the rest toward zero: -0.01 is 0.
     let q = |v: f64| ((v * 64.0).trunc() / 64.0) as f32;
     let (px, py) = (q(x), q(y));
-    let hits = d.with_geo(it, |g, s| {
-        let (w, h) = g.view();
-        let (rx, ry) = (px.round(), py.round());
-        if rx >= 0.0 && ry >= 0.0 && rx < w && ry < h { bare_paint::hit::hits_scrolled(g.doc, g.styles, g.layout, g.areas, s, px, py) } else { Vec::new() }
+    let hits = old(s, |it| {
+        d.with_geo(it, |g, s| {
+            let (w, h) = g.view();
+            let (rx, ry) = (px.round(), py.round());
+            if rx >= 0.0 && ry >= 0.0 && rx < w && ry < h { bare_paint::hit::hits_scrolled(g.doc, g.styles, g.layout, g.areas, s, px, py) } else { Vec::new() }
+        })
     })?;
-    it.charge(hits.len() as u64)?;
+    s.charge(hits.len() as u64)?;
     let doc = d.doc.borrow();
     let mut out: Vec<NodeId> = Vec::with_capacity(hits.len());
     for h in hits {
@@ -103,28 +104,30 @@ fn under(d: &Dom, it: &mut Interp<'_>, scope: NodeId, x: f64, y: f64) -> R<Vec<N
     Ok(out)
 }
 
-pub(crate) fn element_from_point(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let (scope, x, y) = args(d, it, this, a, "elementFromPoint")?;
-    let top = under(d, it, scope, x, y)?.first().copied();
-    d.wrap_opt(it, top)
+pub(crate) fn element_from_point<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (scope, x, y) = args(d, s, this, a, "elementFromPoint")?;
+    let top = under(d, s, scope, x, y)?.first().copied();
+    d.wrap_opt_s(s, top)
 }
 
-pub(crate) fn elements_from_point(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let (scope, x, y) = args(d, it, this, a, "elementsFromPoint")?;
-    let all = under(d, it, scope, x, y)?;
-    wrap_all(d, it, &all)
+pub(crate) fn elements_from_point<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (scope, x, y) = args(d, s, this, a, "elementsFromPoint")?;
+    let all = under(d, s, scope, x, y)?;
+    wrap_all_s(d, s, &all)
 }
 
 /// `document.caretRangeFromPoint(x, y)`: a collapsed range at the text position under the point; `null` outside the window or over no text.
-pub(crate) fn caret_range_from_point(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let (_, x, y) = args(d, it, this, a, "caretRangeFromPoint")?;
-    let at = d.with_geo(it, |g, s| {
-        let (w, h) = g.view();
-        let (px, py) = (x as f32, y as f32);
-        if px.round() >= 0.0 && py.round() >= 0.0 && px.round() < w && py.round() < h { crate::browser_rects::text_at(g, s, px, py) } else { None }
+pub(crate) fn caret_range_from_point<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (_, x, y) = args(d, s, this, a, "caretRangeFromPoint")?;
+    let at = old(s, |it| {
+        d.with_geo(it, |g, s| {
+            let (w, h) = g.view();
+            let (px, py) = (x as f32, y as f32);
+            if px.round() >= 0.0 && py.round() >= 0.0 && px.round() < w && py.round() < h { crate::browser_rects::text_at(g, s, px, py) } else { None }
+        })
     })?;
     match at {
-        Some((n, o)) => d.caret_range(it, n, o),
-        None => Ok(Value::Null),
+        Some((n, o)) => old_v(s, |it| d.caret_range(it, n, o)),
+        None => Ok(s.null()),
     }
 }

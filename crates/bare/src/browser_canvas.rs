@@ -5,33 +5,39 @@
 //! with a no-op `setTransform` for any other element. A gradient is an object with a no-op `addColorStop`.
 //! Deviation: `width`, `height`, `data` and `colorSpace` are own read-only data properties, not prototype accessors.
 use crate::browser::*;
-use bare_js::eval::{Error, Interp};
-use bare_js::heap::Elem;
+use crate::browser_scoped::*;
+use bare_js::eval::Interp;
 use bare_js::value::{ObjId, Value};
+use bare_js_api::{Args, Attrs, Elem, HostFn, Local};
 
 /// The most bytes (`width * height * 4`) of one `ImageData`.
 const MAX_BYTES: u64 = 64 << 20;
 
-fn arg(a: &[Value], i: usize) -> Value {
-    crate::browser_platform::arg(a, i)
-}
-
+/// The `ImageData` constructor: made by the first use, kept in a hidden property of the global.
 #[cold]
 #[inline(never)]
-fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<ObjId> {
-    let g = it.global_object();
-    let k = d.key(it, "__bareImageData")?;
-    if let Value::Object(f) = it.get_value(Value::Object(g), k)? {
+fn ensure_s<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, Local<'s>> {
+    let g = s.global();
+    let f = s.get_str(g, "__bareImageData")?;
+    if is_object(s, f) {
         return Ok(f);
     }
-    let proto = d.obj(it, it.object_prototype())?;
-    let f = d.add_fn(it, image_data, "ImageData", 2, true)?;
-    let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
-    it.define_data(f, kp, Value::Object(proto), false, false, false)?;
-    it.define_data(proto, kc, Value::Object(f), true, false, true)?;
-    crate::browser_lazy::tag(d, it, proto, "ImageData")?;
-    it.define_data(g, k, Value::Object(f), false, false, false)?;
+    let proto = s.new_object()?;
+    let f = d.add_fn_s(s, image_data, "ImageData", 2, HostFn::Ctor)?;
+    let fixed = Attrs { writable: false, enumerable: false, configurable: false };
+    s.define_str(f, "prototype", proto, fixed)?;
+    s.define_str(proto, "constructor", f, Attrs { writable: true, enumerable: false, configurable: true })?;
+    let p = obj_id(s, proto).expect("an object");
+    old(s, |it| crate::browser_lazy::tag(d, it, p, "ImageData"))?;
+    s.define_str(g, "__bareImageData", f, fixed)?;
     Ok(f)
+}
+
+fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<ObjId> {
+    run(it, |s| {
+        let f = ensure_s(d, s)?;
+        Ok(obj_id(s, f).expect("an object"))
+    })
 }
 
 fn lazy_image_data(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
@@ -50,127 +56,124 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 }
 
 /// An `unsigned long` of the constructor (`[EnforceRange]`): a `TypeError` when it is not finite or out of range.
-fn ulong(it: &mut Interp<'_>, v: Value, who: &str) -> R<u32> {
-    let x = it.to_js_number(v)?.trunc();
+fn ulong<'s>(s: &mut Sc<'s, '_>, v: Local<'s>, who: &str) -> Res<'s, u32> {
+    let x = s.to_number(v)?.trunc();
     if !(0.0..=4294967295.0).contains(&x) {
-        return Err(it.type_error(&format!("Failed to construct 'ImageData': {who} is outside the range of an unsigned long.")));
+        return Err(s.type_error(&format!("Failed to construct 'ImageData': {who} is outside the range of an unsigned long.")));
     }
     Ok(x as u32)
 }
 
 /// A size of `createImageData` and `getImageData`: a `long` (`NaN` and infinity are 0), and its absolute value is used.
-fn long_abs(it: &mut Interp<'_>, v: Value) -> R<u32> {
-    let x = it.to_js_number(v)?;
+fn long_abs<'s>(s: &mut Sc<'s, '_>, v: Local<'s>) -> Res<'s, u32> {
+    let x = s.to_number(v)?;
     Ok(if x.is_finite() { x.trunc().abs().min(4294967295.0) as u32 } else { 0 })
 }
 
-fn index_size(d: &Dom, it: &mut Interp<'_>, who: &str, msg: &str) -> Error {
-    d.dom_err(it, "IndexSizeError", &format!("{who}: {msg}"))
+fn index_size<'s>(d: &Dom, s: &mut Sc<'s, '_>, who: &str, msg: &str) -> bare_js_api::Error<'s> {
+    d.dom_err_s(s, "IndexSizeError", &format!("{who}: {msg}"))
 }
 
-/// A new `ImageData` of `w` by `h` over `data` (zero bytes when `None`). The sizes are not zero.
-fn make(d: &Dom, it: &mut Interp<'_>, w: u32, h: u32, data: Option<Value>) -> R<Value> {
-    let f = ensure(d, it)?;
-    let kp = d.key(it, "prototype")?;
-    let Value::Object(proto) = it.get_value(Value::Object(f), kp)? else { unreachable!("made") };
-    let o = d.obj(it, proto)?;
-    make_on(d, it, o, w, h, data)
+/// A new `ImageData` of `w` by `h` with zero bytes. The sizes are not zero.
+fn make<'s>(d: &Dom, s: &mut Sc<'s, '_>, w: u32, h: u32) -> Res<'s, Local<'s>> {
+    let f = ensure_s(d, s)?;
+    let proto = s.get_str(f, "prototype")?;
+    let p = obj_id(s, proto).expect("made");
+    let o = d.obj_with_s(s, p)?;
+    make_on(d, s, o, w, h, None)
 }
 
-fn make_on(d: &Dom, it: &mut Interp<'_>, o: ObjId, w: u32, h: u32, data: Option<Value>) -> R<Value> {
+fn make_on<'s>(d: &Dom, s: &mut Sc<'s, '_>, o: Local<'s>, w: u32, h: u32, data: Option<Local<'s>>) -> Res<'s, Local<'s>> {
     let data = match data {
         Some(v) => v,
         None => {
             let n = (w as u64).saturating_mul(h as u64).saturating_mul(4);
             if n > MAX_BYTES {
-                return Err(it.range_error("Out of memory at ImageData creation"));
+                return Err(s.range_error("Out of memory at ImageData creation"));
             }
-            it.new_typed_array(Elem::U8C, vec![0; n as usize])?
+            s.new_typed_array(Elem::U8C, vec![0; n as usize])?
         }
     };
-    let cs = d.js_str(it, "srgb")?;
-    for (name, v) in [("width", Value::Number(w as f64)), ("height", Value::Number(h as f64)), ("data", data), ("colorSpace", cs)] {
-        let k = d.key(it, name)?;
-        it.define_data(o, k, v, false, false, true)?;
+    let cs = d.js_str_s(s, "srgb")?;
+    let (w, h) = (s.number(w as f64), s.number(h as f64));
+    let attrs = Attrs { writable: false, enumerable: false, configurable: true };
+    for (name, v) in [("width", w), ("height", h), ("data", data), ("colorSpace", cs)] {
+        s.define_str(o, name, v, attrs)?;
     }
-    Ok(Value::Object(o))
+    Ok(o)
 }
 
 /// `new ImageData(sw, sh)` and `new ImageData(data, sw, sh?)`.
-fn image_data(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
+fn image_data<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let who = "Failed to construct 'ImageData'";
     if a.len() < 2 {
-        return Err(it.type_error(&format!("{who}: 2 arguments required, but only {} present.", a.len())));
+        return Err(s.type_error(&format!("{who}: 2 arguments required, but only {} present.", a.len())));
     }
-    let default = ensure(d, it)?;
-    let kp = d.key(it, "prototype")?;
-    let Value::Object(default) = it.get_value(Value::Object(default), kp)? else { unreachable!("made") };
-    let proto = it.host_proto_from_new_target(default)?;
-    let o = d.obj(it, proto)?;
-    if let Value::Object(src) = a[0] {
-        if it.heap.view_type(src) != Some(Elem::U8C) {
-            return Err(it.type_error(&format!("{who}: parameter 1 is not of type 'Uint8ClampedArray'.")));
-        }
-        let len = it.heap.view_parts(src).map_or(0, |p| p.2) as u64;
-        let w = ulong(it, a[1], "The source width")?;
-        let given = match arg(a, 2) {
-            Value::Undefined => None,
-            v => Some(ulong(it, v, "The source height")?),
+    let f = ensure_s(d, s)?;
+    let default = s.get_str(f, "prototype")?;
+    let proto = s.proto_from_new_target(default)?;
+    let p = obj_id(s, proto).expect("an object");
+    let o = d.obj_with_s(s, p)?;
+    let (a0, a1, a2) = (arg_s(s, a, 0), arg_s(s, a, 1), arg_s(s, a, 2));
+    if is_object(s, a0) {
+        let len = match s.view(a0) {
+            Some(v) if v.elem == Elem::U8C => v.len as u64,
+            _ => return Err(s.type_error(&format!("{who}: parameter 1 is not of type 'Uint8ClampedArray'."))),
         };
+        let w = ulong(s, a1, "The source width")?;
+        let given = if matches!(s.type_of(a2), bare_js_api::Type::Undefined) { None } else { Some(ulong(s, a2, "The source height")?) };
         if !len.is_multiple_of(4) {
-            return Err(d.dom_err(it, "InvalidStateError", &format!("{who}: The input data length is not a multiple of 4.")));
+            return Err(d.dom_err_s(s, "InvalidStateError", &format!("{who}: The input data length is not a multiple of 4.")));
         }
         if len == 0 || w == 0 {
-            return Err(index_size(d, it, who, "The source width is zero or not a number."));
+            return Err(index_size(d, s, who, "The source width is zero or not a number."));
         }
         let rows = len / 4;
         if !rows.is_multiple_of(w as u64) {
-            return Err(index_size(d, it, who, "The input data length is not a multiple of (4 * width)."));
+            return Err(index_size(d, s, who, "The input data length is not a multiple of (4 * width)."));
         }
         let h = (rows / w as u64) as u32;
         if given.is_some_and(|g| g != h) {
-            return Err(index_size(d, it, who, "The input data length is not equal to (4 * width * height)."));
+            return Err(index_size(d, s, who, "The input data length is not equal to (4 * width * height)."));
         }
-        return make_on(d, it, o, w, h, Some(a[0]));
+        return make_on(d, s, o, w, h, Some(a0));
     }
-    let (w, h) = (ulong(it, a[0], "The source width")?, ulong(it, a[1], "The source height")?);
+    let (w, h) = (ulong(s, a0, "The source width")?, ulong(s, a1, "The source height")?);
     if w == 0 || h == 0 {
-        return Err(index_size(d, it, who, "The source width or height is zero or not a number."));
+        return Err(index_size(d, s, who, "The source width or height is zero or not a number."));
     }
-    make_on(d, it, o, w, h, None)
+    make_on(d, s, o, w, h, None)
 }
 
 pub(crate) fn members(d: &Dom, it: &mut Interp<'_>, p: ObjId) -> R<()> {
-    d.def_method(it, p, "getContext", 1, context)?;
-    d.def_method(it, p, "toDataURL", 0, data_url)?;
+    d.def_method_s(it, p, "getContext", 1, context)?;
+    d.def_method_s(it, p, "toDataURL", 0, data_url)?;
     Ok(())
 }
 
-fn canvas(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<ObjId> {
-    let n = d.el(it, this)?;
+fn canvas<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, ()> {
+    let n = d.el_s(s, this)?;
     if !d.doc.borrow().is_html(n, "canvas") {
-        return Err(it.type_error("Illegal invocation"));
+        return Err(s.type_error("Illegal invocation"));
     }
-    match this {
-        Value::Object(o) => Ok(o),
-        _ => unreachable!(),
-    }
+    Ok(())
 }
 
-fn noop(_: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
-    Ok(Value::Undefined)
+fn noop<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    Ok(s.undefined())
 }
 
-fn context(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    let c = canvas(d, it, this)?;
-    if d.string_arg(it, crate::browser_platform::arg(a, 0))? != "2d" {
-        return Ok(Value::Null);
+fn context<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    canvas(d, s, this)?;
+    let a0 = arg_s(s, a, 0);
+    if d.string_arg_s(s, a0)? != "2d" {
+        return Ok(s.null());
     }
-    let key = d.key(it, "__bareCanvas2D")?;
-    if let Value::Object(o) = it.get_value(this, key)? {
-        return Ok(Value::Object(o));
+    let made = s.get_str(this, "__bareCanvas2D")?;
+    if is_object(s, made) {
+        return Ok(made);
     }
-    let o = d.obj(it, it.object_prototype())?;
+    let o = s.new_object()?;
     for name in [
         "save",
         "restore",
@@ -204,11 +207,11 @@ fn context(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
         "putImageData",
         "setLineDash",
     ] {
-        d.def_method(it, o, name, 0, noop)?;
+        d.def_method_l(s, o, name, 0, noop, false)?;
     }
-    d.def_method(it, o, "measureText", 1, measure)?;
+    d.def_method_l(s, o, "measureText", 1, measure, false)?;
     for (name, len, h) in [
-        ("createImageData", 1, create_image_data as H),
+        ("createImageData", 1, create_image_data as HS),
         ("getImageData", 4, get_image_data),
         ("createLinearGradient", 4, gradient),
         ("createRadialGradient", 6, gradient),
@@ -217,12 +220,11 @@ fn context(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
         ("isPointInPath", 2, no),
         ("isPointInStroke", 2, no),
     ] {
-        d.def_method(it, o, name, len, h)?;
+        d.def_method_l(s, o, name, len, h, false)?;
     }
-    let k = d.key(it, "canvas")?;
-    it.define_data(o, k, this, false, true, true)?;
-    it.define_data(c, key, Value::Object(o), false, false, false)?;
-    Ok(Value::Object(o))
+    s.define_str(o, "canvas", this, Attrs { writable: false, enumerable: true, configurable: true })?;
+    s.define_str(this, "__bareCanvas2D", o, Attrs { writable: false, enumerable: false, configurable: false })?;
+    Ok(o)
 }
 
 /// The font of a canvas `font` value (a CSS `font` shorthand): its size in pixels and its face. A value without a size is the
@@ -259,88 +261,82 @@ fn canvas_font(v: &str) -> bare_layout::font::Metrics {
 }
 
 /// `measureText(text)`: the width of the text in the font of `this.font`, with the metrics that page text uses.
-fn measure(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    let text = d.string_arg(it, crate::browser_platform::arg(a, 0))?;
-    let k = d.key(it, "font")?;
-    let font = match it.get_value(this, k)? {
-        Value::Undefined => String::new(),
-        v => d.string_arg(it, v)?,
-    };
+fn measure<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let a0 = arg_s(s, a, 0);
+    let text = d.string_arg_s(s, a0)?;
+    let v = s.get_str(this, "font")?;
+    let font = if matches!(s.type_of(v), bare_js_api::Type::Undefined) { String::new() } else { d.string_arg_s(s, v)? };
     let width = bare_layout::controls::text_width(&canvas_font(&font), &text);
-    let o = d.obj(it, it.object_prototype())?;
-    let k = d.key(it, "width")?;
-    it.define_data(
-        o,
-        k,
-        Value::Number(width as f64),
-        false,
-        true,
-        true,
-    )?;
-    Ok(Value::Object(o))
+    let o = s.new_object()?;
+    let w = s.number(width as f64);
+    s.define_str(o, "width", w, Attrs { writable: false, enumerable: true, configurable: true })?;
+    Ok(o)
 }
 
-fn data_url(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    canvas(d, it, this)?;
-    d.js_str(it, "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAXpeqz8AAAAASUVORK5CYII=")
+fn data_url<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    canvas(d, s, this)?;
+    d.js_str_s(s, "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAXpeqz8AAAAASUVORK5CYII=")
 }
 
-fn no(_: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
-    Ok(Value::Bool(false))
+fn no<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    Ok(s.boolean(false))
 }
 
 /// `createImageData(sw, sh)` and `createImageData(imagedata)`: transparent black.
-fn create_image_data(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
+fn create_image_data<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let who = "Failed to execute 'createImageData' on 'CanvasRenderingContext2D'";
-    let (w, h) = match arg(a, 0) {
-        Value::Object(src) => {
-            let (kw, kh) = (d.key(it, "width")?, d.key(it, "height")?);
-            let (w, h) = (it.get_value(Value::Object(src), kw)?, it.get_value(Value::Object(src), kh)?);
-            (long_abs(it, w)?, long_abs(it, h)?)
-        }
-        _ if a.len() < 2 => return Err(it.type_error(&format!("{who}: 2 arguments required, but only {} present.", a.len()))),
-        w => (long_abs(it, w)?, long_abs(it, a[1])?),
+    let a0 = arg_s(s, a, 0);
+    let (w, h) = if is_object(s, a0) {
+        let (w, h) = (s.get_str(a0, "width")?, s.get_str(a0, "height")?);
+        (long_abs(s, w)?, long_abs(s, h)?)
+    } else if a.len() < 2 {
+        return Err(s.type_error(&format!("{who}: 2 arguments required, but only {} present.", a.len())));
+    } else {
+        let a1 = arg_s(s, a, 1);
+        (long_abs(s, a0)?, long_abs(s, a1)?)
     };
-    sized(d, it, who, w, h)
+    sized(d, s, who, w, h)
 }
 
 /// `getImageData(sx, sy, sw, sh)`: a canvas has no pixels, so the result is transparent black.
-fn get_image_data(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
+fn get_image_data<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let who = "Failed to execute 'getImageData' on 'CanvasRenderingContext2D'";
     if a.len() < 4 {
-        return Err(it.type_error(&format!("{who}: 4 arguments required, but only {} present.", a.len())));
+        return Err(s.type_error(&format!("{who}: 4 arguments required, but only {} present.", a.len())));
     }
-    let (w, h) = (long_abs(it, a[2])?, long_abs(it, a[3])?);
-    sized(d, it, who, w, h)
+    let (a2, a3) = (arg_s(s, a, 2), arg_s(s, a, 3));
+    let (w, h) = (long_abs(s, a2)?, long_abs(s, a3)?);
+    sized(d, s, who, w, h)
 }
 
-fn sized(d: &Dom, it: &mut Interp<'_>, who: &str, w: u32, h: u32) -> R<Value> {
+fn sized<'s>(d: &Dom, s: &mut Sc<'s, '_>, who: &str, w: u32, h: u32) -> Res<'s, Local<'s>> {
     if w == 0 || h == 0 {
-        return Err(index_size(d, it, who, "The source width or height is zero or not a number."));
+        return Err(index_size(d, s, who, "The source width or height is zero or not a number."));
     }
-    make(d, it, w, h, None)
+    make(d, s, w, h)
 }
 
-fn gradient(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
-    let o = d.obj(it, it.object_prototype())?;
-    d.def_method(it, o, "addColorStop", 2, noop)?;
-    Ok(Value::Object(o))
+fn gradient<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = s.new_object()?;
+    d.def_method_l(s, o, "addColorStop", 2, noop, false)?;
+    Ok(o)
 }
 
 /// `createPattern(image, repetition)`: `null` for an `<img>` that is not complete (the spec case), else an object.
-fn pattern(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    let Value::Object(_) = arg(a, 0) else {
-        return Err(it.type_error("Failed to execute 'createPattern' on 'CanvasRenderingContext2D': The provided value is not of type 'CanvasImageSource'."));
-    };
-    if let Ok(n) = d.el(it, a[0])
+fn pattern<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let a0 = arg_s(s, a, 0);
+    if !is_object(s, a0) {
+        return Err(s.type_error("Failed to execute 'createPattern' on 'CanvasRenderingContext2D': The provided value is not of type 'CanvasImageSource'."));
+    }
+    if let Some(n) = d.node_of_s(s, a0).filter(|&n| d.is_element(n))
         && d.doc.borrow().is_html(n, "img")
     {
-        let k = d.key(it, "complete")?;
-        if matches!(it.get_value(a[0], k)?, Value::Bool(false)) {
-            return Ok(Value::Null);
+        let c = s.get_str(a0, "complete")?;
+        if s.as_bool(c) == Some(false) {
+            return Ok(s.null());
         }
     }
-    let o = d.obj(it, it.object_prototype())?;
-    d.def_method(it, o, "setTransform", 1, noop)?;
-    Ok(Value::Object(o))
+    let o = s.new_object()?;
+    d.def_method_l(s, o, "setTransform", 1, noop, false)?;
+    Ok(o)
 }

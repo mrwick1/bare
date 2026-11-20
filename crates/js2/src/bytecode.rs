@@ -135,10 +135,12 @@ ops! {
     LoadTrue Abc "w" "`a = true`.",
     LoadFalse Abc "w" "`a = false`.",
     LoadThis Abc "w" "`a = this`.",
+    LoadThisS Abc "w" "`a = this` in sloppy code: `undefined` and `null` give the global object.",
     LoadHole Abc "w" "`a` = the hole value (a variable in its temporal dead zone).",
     LoadI AsBx "w i" "`a` = the integer `sbx`.",
     LoadN Abx "w N" "`a` = the number `numbers[bx]`.",
     LoadAtom Abx "w A" "`a` = the string of the atom `atoms[bx]` (a string literal).",
+    CheckUnbound Abc "r" "Throw a ReferenceError when `a` is not the hole: `super()` ran twice.",
     CheckInit Abx "r A" "Throw a ReferenceError that names `atoms[bx]` when `a` is the hole (a `let` or `const` in a register, read in its dead zone).",
     GetCtx Abc "w u u" "`a` = the slot `c` of the context `b` levels up. For a variable with no dead zone.",
     GetCtxTdz AbcX "w u u A" "As `GetCtx`, and a ReferenceError that names `atoms[x]` when the slot is the hole.",
@@ -151,7 +153,12 @@ ops! {
     CopyCtx Abc "" "Replace the context with a copy of it (one iteration of a `for` with `let` that a closure captured).",
     GetGlobal Abx "w S" "`a` = the global of the site `bx`. A missing name throws a ReferenceError.",
     SetGlobal Abx "r S" "The global of the site `bx` = `a`.",
+    DeleteGlobal Abx "w S" "`a = delete name` for a global name: false when the property is not configurable.",
+    SetGlobalS Abx "r S" "As `SetGlobal` in strict code: a ReferenceError when the global does not exist.",
     DeclGlobal Abx "- S" "Create the global of the site `bx` with the value `undefined` when it does not exist (the hoisting of the `var` names and the function names of a script).",
+    DeclLex Abx "u S" "The slot `a` of the current context is the global lexical binding of the site `bx` (a top-level `let` or `class`): other scripts of the realm read it by name. A SyntaxError when the name is declared already.",
+    CheckLex Abx "- S" "A SyntaxError when the global lexical environment has the name of the site `bx` already, or the global object has a fixed property of that name (the early check of a top-level `let` that lives in a register).",
+    DeclLexC Abx "u S" "As `DeclLex` for a top-level `const`: an assignment throws a TypeError.",
     TypeofGlobal Abx "w S" "`a` = `typeof` the global of the site `bx`. A missing name gives `\"undefined\"`.",
     GetName Abx "w S" "`a` = the name of the site `bx` by the full search (a function with `with` or direct `eval`).",
     SetName Abx "r S" "The name of the site `bx` = `a`, by the full search.",
@@ -165,6 +172,7 @@ ops! {
     GetElem Abc "w r r" "`a = b[c]`.",
     GetElemI Abc "w r u" "`a = b[c]` for the index `c` (8 bits).",
     SetElem Abc "r r r" "`a[b] = c`.",
+    RequireObj Abc "r" "Throw a TypeError when `a` is `undefined` or `null` (an empty object pattern takes no property, so no read throws).",
     ToKey Abc "w r r" "`a` = the property key of `c` (ToPropertyKey). A `null` or `undefined` `b` throws first, as `b[c]` does.",
     DefElem Abc "r r r" "Define the own data property with the key `b` (already a key, see `ToKey`) on `a` with the value `c` (a computed key).",
     Delete Abc "w r r" "`a = delete b[c]`.",
@@ -288,6 +296,7 @@ ops! {
     GetTemplate Abc "w H S" "`a` = the template object of the tagged template at the site `c`: the same object each time. `recipes[b]` holds pairs of atoms: the cooked string and the raw string of each piece (`u32::MAX` as the cooked string: it is `undefined`).",
     MakeClass Abc "r" "`a` is the constructor of a class that has no `extends`: give it a new prototype object (its `constructor` is `a`, its home object is that object).",
     MakeDerived Abc "r r" "As `MakeClass` for a class with `extends`: `a` is the constructor, `b` the value of the `extends` clause. Throws a TypeError when it is no constructor and no `null`.",
+    SetFnName Abc "r r u" "Define the `name` of the function `a` from the key `b` (already a key, see `ToKey`; for a number key, its text): with the prefix `get ` for `c` 1, `set ` for `c` 2 (`SetFunctionName`).",
     DefaultCtor Abc "w u" "`a` = the default constructor of a class (`b` 1: a derived class, which calls `super(...args)`).",
     SetFields Abc "r r" "The function `b` makes the fields of an instance of the class `a`. The constructor calls it with `this` (when it has no `super()`, at its start; else right after `super()` returns).",
     NewPrivateName Abx "w A" "`a` = a new private name, whose description is `atoms[bx]` (one for each class evaluation).",
@@ -587,7 +596,18 @@ pub struct Code {
     pub lines: Vec<(u32, u32)>,
     /// Facts about the code that the interpreter finds when it loads a program (`CF_ARGS`, `CF_LINK`); the compiler leaves it 0.
     pub flags: u8,
+    /// The `name` of the function as an index of `atoms` ([`NO_NAME`]: the empty string) and its `length` (the parameters before the first
+    /// default or rest parameter). The realm defines both properties of a function cell at the first look at its own properties.
+    pub fn_name: u32,
+    pub fn_len: u16,
+    /// The function is strict code: a write that fails (a read-only property, a primitive, `delete` of a fixed property) throws.
+    pub strict: bool,
+    /// The function is an arrow, a method, a getter or a setter: `new` on it throws a `TypeError`.
+    pub noctor: bool,
 }
+
+/// `Code::fn_name` of a function that has no name.
+pub const NO_NAME: u32 = u32::MAX;
 
 impl Code {
     pub fn new(nregs: u16, nparams: u16) -> Code {
@@ -606,6 +626,10 @@ impl Code {
             roots: RootMaps::new(nregs as usize),
             lines: Vec::new(),
             flags: 0,
+            fn_name: NO_NAME,
+            fn_len: 0,
+            strict: false,
+            noctor: false,
         }
     }
 

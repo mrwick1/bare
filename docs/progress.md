@@ -15673,6 +15673,40 @@ Check. `cargo test --locked -p bare-js2 --lib`: 282 pass on Linux (260 on main).
 
 Not tested: running any compiled code, so the semantics of the 38 new ops are checked by reading the disassembly and by the verifier only; class, `super`, private-name and spread behavior in an interpreter (S2.6); the S2.6 driver's use of `Child::ready`; mapped `arguments`; function names of methods and classes; Miri; arm64; a React bundle with classes beyond the clangd and tauri bundles; the cost matrix (js2 is not wired into the browser); the `bc_hist` example on Windows.
 
+## 2026-11-20: host handlers on the interface, A1c: the rest of group A1 (plan step S0.4 / A1c)
+
+Status: the handlers of the files below run through the interface (`Scope`, `Local`, `Args`). Tests pass on Linux and Windows. The full matrix passes under the standing rule, with one row on the limit (below). Base: origin/main `6067b9fb` (the commit #758 merged). The diff is 2,810 changed lines.
+
+Files converted: `browser_attr.rs`, `browser_nodelist.rs`, `browser_dataset.rs`, `browser_element.rs`, `browser_elements.rs`, `browser_html.rs`, `browser_html_members.rs`, `browser_reflect.rs`, `browser_nodecmp.rs`, `browser_chardata.rs`, `browser_fragment.rs`, `browser_namespace.rs`, `browser_slot.rs`, `browser_shadow.rs`, `browser_table.rs`, `browser_details.rs`, `browser_svg.rs`, `browser_gaps.rs`, `browser_shims.rs`, `browser_basics.rs` (the dialogs, `document.dir` and the getters), `browser_handlers.rs`, `browser_cookie.rs`. Registrations changed in `browser.rs` (the `DEFS` rows), `browser_select.rs` and `browser_navigation.rs` (`document.cookie`).
+
+Not converted, and why:
+
+- `browser_implementation.rs`: its handlers (`DOMParser`, `XMLSerializer`, `DOMImplementation`) use `new.target`, the lazy global definers and `interface`. Only one call of `fragment::serialize` changed. Next step.
+- `browser_lazy.rs`, `browser_sources.rs`: they have no handler of the old form. They hold install code and tables.
+- In `browser_basics.rs`: `postMessage`, `navigator.plugins`, `navigator.mimeTypes`, `javaEnabled` and `sendBeacon`. They need `clone_with`, `transfer_list`, `fetch` and `host_promise_then`, which still take the old engine.
+- The install functions, the lazy global definers, `Host::fill_indexed` and the named hooks stay in the old form in every file. They run once, or they key tables by `ObjId`.
+
+Changes.
+
+- `browser_scoped.rs`: bridges `lift`, `obj_id`, `raw_arg`, `Dom::obj_s`, `Dom::new_source_s`, `Dom::style_html_el_s`. `Dom::call_scoped` reads the entry of `Dom::scoped` through a raw pointer, with no `RefCell` borrow (A1b lever 1). `CUR_NEW` is `pub(crate)`.
+- `browser_dom_old.rs`: `def_get_s` and `def_get_sh` (getter new, setter old). The wrappers `adjacent_start` and `adjacent_pos` are removed (no caller). `browser_cookie.rs` and `browser_navigation.rs`: `document.cookie` uses `def_get_s`; `def_acc` stays for its other callers.
+- `browser_handlers.rs`: the handler accessors read their id as `style.cur & !CUR_NEW`, and the ids come from `Dom::scoped`. The test `the_accessors_are_made_by_use` counts `Dom::scoped` now, not `Dom::handlers`.
+- `browser_nodelist.rs`: `fill` skips the scope when the list is fresh.
+- Dead code of the old form in the converted files is removed (`probe`, `arg`, the `V` aliases).
+
+Grep gate (`\bbare_js::(value|eval::Interp)|\bObjId\b|\bInterp\b|\.engine\(\)|\.heap\.`, lines for each file, origin/main then now): attr 66 to 29, nodelist 22 to 19, dataset 25 to 22, element 20 to 3, elements 24 to 11, html_members 13 to 3, html 15 to 12, reflect 8 to 3, nodecmp 19 to 2, chardata 14 to 3, fragment 13 to 6, namespace 13 to 2, slot 8 to 3, shadow 12 to 1, table 24 to 4, details 12 to 5, svg 18 to 12, gaps 13 to 11, shims 7 to 5, basics 30 to 21, handlers 39 to 33, cookie 4 to 0. Unchanged: implementation 24, lazy 9, sources 13. The goal 0 is not met: what stays is install code, `ObjId`-keyed tables (the Attr and map tables, the listener tables, the nodelist `lists`), the lazy definers and the bridges in the files above.
+
+Measurements. Machine archMachine. Instruction counts (`perf stat -e instructions:u`, minimum of 3 runs, `tools/js/cost_matrix.sh -j4`, 817 rows).
+
+- Early check, `tools/js/instr.sh`, 3 runs: `attr_load react 1` +0.773% before the `Dom::scoped` lever, +0.595% after. `churn 1` +0.675% to +0.576%.
+- Full matrix at default flags, final tree: mean -0.017% glibc and +0.524% jemalloc (8 rows measured). Over +0.5% under both allocators: `attr_load churn 1` +0.573% / +0.529%, `churn 10` +0.576% / +0.581%, `react 1` +0.610% / +0.588%, `react 10` +0.633% / +0.619%, `select_load react 1000` +0.775% / +0.770%. Over under one allocator only: `dataset_load read 10000 1` (known exception), `session_load chain 10`, `select_load react 10`. `parse_load deep 1` and `10` do not run on the base tree either.
+- Rule of the owner (both trees built with `RUSTFLAGS="-C codegen-units=1"`, glibc): `attr_load churn 1` +0.474% to +0.478%, `react 1` +0.358%, `react 10` +0.384%, `select_load react 1000` +0.496%, `react 10` +0.408%. `attr_load churn 10` is on the limit: six runs gave +0.441%, +0.448%, +0.461%, +0.497%, +0.508% and +0.514% (jemalloc on the two runs over: +0.518% and +0.552%). The count of one build varies by about 0.05% between runs of the matrix script. I did not find a change that moves it clearly under the limit.
+- Tried and reverted: a check for an existing `Attr` wrapper in `attr::fill` before the scope. `attr_load churn` went to +1.2% (every read in that row makes a new wrapper, so the check only adds work).
+- Lever left: a read of `this` first in `api_win` (about 3 instructions a call) and `this` stored by pointer (about 2). Not built.
+
+Tests. Linux: `cargo test --locked -p bare-js-api -p bare-js -p bare --lib`: 32, 1104 (1 ignored) and 1714 (6 ignored) pass. The filters of the converted files and of `browser_scoped`, `custom`, `domexception`, `mutation`, `range`, `select`, `cookie`, `browser_tests` (436 tests, 1 ignored): pass plain, with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1`. Windows 11 VM (`cargo xwin test --no-run`, `winssh`): the same filters, 436 pass.
+
+Not tested: `BARE_GC_STRESS=1` and `BARE_ALL_API=1` with the whole `bare --lib`; the full `bare --lib` on Windows; the jemalloc run of the rows at `codegen-units=1` except the two noted; RSS and wall time; the files that are not converted.
 ## 2026-11-20: core built-ins in js2 (plan step S2.7)
 
 Real scripts now run end to end on the js2 interpreter. This step adds `Object`, `Function.prototype`, `Error` and its subclasses, `ToPrimitive`, `Array`, `String.prototype`, `Number`, `Boolean`, `Math`, `parseInt`, `parseFloat`, `isNaN`, `isFinite`, `globalThis` and `self`. Base: PR #757 (`t3/js2-interpreter`), merged with the newest main.
@@ -15839,6 +15873,221 @@ Known gaps:
 - A table with 3 cases of strings uses 14 words where the chain uses 7; the gain is 6% of one switch turn.
 
 Not tested: Miri on the new arms (they are safe code in an `unsafe` module; the arms use the same string helpers as `JSEqA`); arm64; the effect on a real bundle (how many switches of jQuery or a React bundle become tables, and what it saves there); wall time; the cost matrix (js2 is not wired into the browser); the plain loops with `codegen-units=1`; a switch with more than 65,535 words of tables (the wide form of the op is covered by the encoder tests, not by a switch).
+
+## 2026-11-20: a cheaper host call of the interface form (A1c cost rule)
+
+Task: PR #762 (A1c) had rows over +0.5% under both allocators: `attr_load churn 1` and `churn 10`, `react 1` and `react 10` (+0.57% to +0.63%), and `select_load react 1000` (+0.775%). At `codegen-units=1` the row `attr_load churn 10` was on the limit. The owner's rule: make the call path cheaper; ask for no exception. Base: `6067b9fb` (the engine and browser crates are the same as origin/main `b0b12935`).
+
+Where the cost was. `callgrind` on `attr_load churn 1` (14,204 converted calls): `call_api_host` 49 instructions a call, `Dom::call_scoped` 31, the old path (`call_host` + `Dom::call`) about 40 for the same work. In `call_api_host` the host pointer cost 6 instructions: `Rc<dyn Host>::as_deref` reads the alignment from the vtable. The checks of `nt` and `is_new` ran on every plain call. For `select_load react 1000` the call path was not the cause. The call path was equal to the old one (149,352 calls: +17.2 M instructions new, -16.3 M old). The cost was in the handler `NodeList.length`: three hash lookups of the list for each call (`list_of`, `prepare`, the read of the length), and the push of the result.
+
+Levers. Each count is `hco_micro`: a loop of 200,000 calls of one handler; instructions a call = (count(200,000) - count(0)) / 200,000; `perf stat -e instructions:u`, minimum of 3 runs, release build. The loop itself costs 1,631 instructions an iteration. `hasChildNodes` (`has`), `isSameNode` (`same`), `hasAttributes` (`attrs`).
+
+| State | `has` | `same` | `attrs` |
+| --- | ---: | ---: | ---: |
+| Base `6067b9fb` (handlers of the old form) | 2404 | 3183 | 2401 |
+| PR #762 head (`167e105a`, merged with main) | 2396 | 3321 | 2414 |
+| Lever 1: `ApiState::host_ptr` (the host address, set in `set_host`) | 2391 | 3316 | 2409 |
+| Lever 2: `call_api_plain`, the plain call has its own entry | 2383 | 3308 | 2401 |
+| Lever 2 with `#[inline(never)]` in place of `#[cold]` (kept) | 2383 | 3308 | 2401 |
+
+So the engine side now costs 13 instructions a call less than the PR head (5 for lever 1, 8 for lever 2). Lever 3 is the `NodeList.length` read in `browser_nodelist.rs`: one lookup of the list when its cache is fresh (`is_fresh`, the same test that `fill` used), and the old three lookups for a stale list. It is -1.3% on `select_load react 1000`.
+
+Tried and not kept:
+
+- A read of `this` first in `api_at` (`slot == WIN`), and a window test first (`slot - WIN < 2^30`): +30 instructions a call on `has` and `attrs`, 0 on `same`. The larger `api_at` stops LLVM from inlining `node_of` into `el_s` and the reads of the handlers. A smaller `api_at` is better than a faster `this` read.
+- `this` stored by pointer in `Win` (`*const Value`): +3. The call saves the copy of 16 bytes, but every read of `this` loads one more.
+- `#[inline(always)]` on the closure of `enter` in the call: 0 (it was inlined already). `#[inline(always)]` on `api_at`: 0.
+- Not tried: no bounds check of `Dom::scoped[id]` (2 instructions; the id is safe only while every id comes from `add_fn_s`), the `style.cur` write (the handlers read it), and one flag for `ce.on` and `mo.armed()` (two structs; 2 instructions).
+
+Matrix. Machine archMachine, `tools/js/cost_matrix.sh -j4`, 817 rows, base `6067b9fb`, new = the head of this branch. The soundness test `a_panic_in_a_host_call_unlinks_its_window` and the GC-root tests pass. The window is unlinked on panic as before (`WinGuard` is unchanged).
+
+| Row | Before, default | Now, default | Before, cgu=1 | Now, cgu=1 |
+| --- | ---: | ---: | ---: | ---: |
+| `attr_load churn 1` | +0.573% | +0.376% | +0.474% | +0.241% |
+| `attr_load churn 10` | +0.576% | +0.355% | +0.441% to +0.514% | +0.214% |
+| `attr_load react 1` | +0.610% | +0.296% | +0.358% | -0.018% |
+| `attr_load react 10` | +0.633% | +0.282% | +0.384% | -0.017% |
+| `select_load react 1000` | +0.775% | -1.295% | +0.496% | -1.680% |
+
+- Default flags: over +0.5% under both allocators: 0 rows. Over under glibc only: `scripts_load reject 1` +0.618% (jemalloc +0.004%) and `fetch_load bytes 10` +0.513% (jemalloc +0.309%). `parse_load deep 1` and `10` fail to run on both trees (known). Mean change: glibc -0.019%.
+- `codegen-units=1` on both trees (glibc): over +0.5% under both: 0 rows. The highest rows: `scripts_load reject 1` +0.624% (glibc only; jemalloc -0.003% at default flags and the same row at both settings, so a layout effect of the allocator), `session_load chain 10` +0.487%. Mean change -0.027%. The same 2 `parse_load` rows fail on both trees.
+- The first matrix of this head showed `nodelist_load scan 10` at +0.648% under both allocators. A first version of the `length` change looked up the list again for a stale list. The second version (this one) gives `scan 10` -0.376%.
+
+Tests. Linux: `cargo test --locked -p bare-js-api -p bare-js -p bare --lib`: 32, 1104 (1 ignored) and 1714 (6 ignored) pass. The filters `attr nodelist dataset element elements html reflect nodecmp chardata fragment namespace slot shadow table details svg gaps shims basics handlers cookie scoped custom domexception mutation range select browser_tests` on `bare --lib` (600 tests, 1 ignored): pass plain, with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1`. `bare-js` filters `api_tests host_nt` (50 tests): pass plain and with `BARE_GC_STRESS=1`. Windows 11 VM (`cargo xwin test --no-run`, `winssh`): `bare-js-api` 32, `bare-js` filters `api_tests host_nt` 50, `bare` the same 600-test filters (1 ignored): pass.
+
+Not tested: `BARE_GC_STRESS=1` and `BARE_ALL_API=1` with the whole `bare --lib`; the full `bare --lib` and `bare-js` on Windows; the jemalloc run of every row at `codegen-units=1` (the script runs it only for a row over the limit under glibc); RSS and wall time; the other frames of the call path that stay in the old form (the old `call_host` path is unchanged).
+## 2026-11-20: where the instructions go in js2 (plan step S2.9, measurement)
+
+Design: `docs/design-js2-superinstructions.md` (for the owner to review; nothing of it is built). This entry holds the measurements.
+
+Base: PR #763 (`t3/js2-core-builtins`, head b4ef182a). Machine: archMachine, AMD Ryzen 9 5900HX, Linux. Release builds. Instructions are `instructions:u` from `perf stat` through `tools/js/instr.sh` (minimum of 3 runs, `GLIBC_TUNABLES` tcache set by the script). QuickJS: `quickjs-2026-06-04` (`qjs`), the program is `console.log(String((0, eval)(SRC)))`. Inputs: the 9 `eval_load` programs at scale 1 and 10 (`eval_load CASE SCALE --source`), run with `script_run --eval`; and `crates/js2/examples/data/bundle_like.js` (new).
+
+### Counting code
+
+- Cargo feature `op-count` of `bare-js2` (off by default): `src/opcount.rs`, one `#[cfg]` call in `Vm::run`, example `op_count` (ops, pairs, fusable pairs and triples, greedy fusion on the recorded run), example `op_cost` (cost of one op in a loop of K=8 copies; `op_cost list` names the cases).
+- A/B of the normal build: I built the head of the branch without my edits (a separate worktree) and with them, both with default features, `--release`, for `script_run` and `interp_load`. The `.text` section is byte-identical in both (1,585,383 and 1,138,391 bytes), and so are `.rodata` and `.data`. Only the build id and `.data.rel.ro` differ (hypothesis: panic locations hold the path of the worktree). So the instruction count of the normal build does not change. `cargo test --locked -p bare-js2 --lib`: 376 pass with default features, 377 with `--features op-count` (one new test, `opcount::tests::the_counts_add_up`).
+- A bug found by the feature tests and fixed: the table of jump targets was keyed by the address of the words, and a freed code and a new one at the same address shared an entry (index out of bounds in 16 tests). It is keyed by address and length now, and `reset` clears it. A program that frees code while it runs is still not counted right.
+
+### Rows, whole process
+
+Variant A is #763 as it is. Variant B has the one line `delete_prop(__def)` of `script::load` removed (only for the measurement; not in this PR). Spread of the 3 runs, variant B: at most 0.095% (`concat`), 0.02% or less on the other rows; QuickJS: at most 0.175% (`closures`). Variant A is not stable: the same binary gives 519 M to 567 M on `loop` scale 1 (6 runs of two identical binaries: 519, 525, 555, 567, 567, 567), so its numbers are lower bounds of a noisy cost (hypothesis: the slow path of a dictionary object depends on addresses, which ASLR changes).
+
+| Row | Scale | js2, variant A (as in #763), min of 3 | js2, variant B (no `__def` delete), min of 3 | QuickJS, min of 3 | B / QuickJS | Dispatches js2 | Dispatches QuickJS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loop` | 1 | 531.1 | 152.14 | 64.69 | 2.35 | 2,600,012 | 3,800,023 |
+| `loop` | 10 | 5270.5 | 1480.54 | 635.29 | 2.33 | 26,000,012 | 38,000,023 |
+| `loopfn` | 1 | 68.2 | 68.16 | 44.10 | 1.55 | 1,400,012 | 2,800,026 |
+| `loopfn` | 10 | 640.6 | 640.56 | 429.30 | 1.49 | 14,000,012 | 28,000,026 |
+| `calls` | 1 | 344.7 | 115.48 | 60.62 | 1.90 | 1,600,015 | 2,400,025 |
+| `calls` | 10 | 3405.6 | 1113.58 | 594.33 | 1.87 | 16,000,015 | 24,000,025 |
+| `fib` | 1 | 11.8 | 8.84 | 4.37 | 2.02 | 54,353 | 91,983 |
+| `fib` | 10 | 83.4 | 52.17 | 35.54 | 1.47 | 602,784 | 1,020,097 |
+| `closures` | 1 | 44.1 | 22.21 | 26.12 | 0.85 | 180,026 | 235,037 |
+| `closures` | 10 | 388.2 | 179.61 | 279.91 | 0.64 | 1,800,026 | 2,350,037 |
+| `objects` | 1 | 182.7 | 91.11 | 53.72 | 1.70 | 769,031 | 831,022 |
+| `objects` | 10 | 1742.0 | 855.84 | 512.45 | 1.67 | 7,609,031 | 8,211,022 |
+| `webpack` | 1 | 10.2 | 9.75 | 5.48 | 1.78 | 5,566 | 8,157 |
+| `webpack` | 10 | 56.5 | 52.05 | 41.97 | 1.24 | 55,066 | 81,057 |
+| `throws` | 1 | 96.4 | 39.76 | 88.54 | 0.45 | 380,015 | 913,360 |
+| `throws` | 10 | 873.8 | 356.74 | 875.00 | 0.41 | 3,800,015 | 9,133,360 |
+| `concat` | 1 | 4.8 | 4.61 | 1.34 | 3.45 | 1,013 | 1,524 |
+| `concat` | 10 | 6.8 | 5.30 | 2.15 | 2.46 | 10,013 | 15,024 |
+
+Bundle-like program (`bundle_like.js`, result 125972, same as Node): js2 A 131.2 M, js2 B 128.0 M, QuickJS 136.5 M (B / QuickJS = 0.94); dispatches 907,069 and about 1.49 M. An empty program: js2 4.47 M, QuickJS 1.23 M. About 3.2 M of the difference is the compile (lex, parse, encode) of the prelude at each start.
+
+Finding (verified): `script::load` deletes the `__def` global after the prelude. That puts the global object in dictionary mode. A dictionary shape is never cached, so each `GetGlobal` and `SetGlobal` takes the slow paths (`Table::probe`, `Shapes::find`, `lookup_g`, `get_field_slow`, `set_field_slow`, `get_prop_g`, `get_global_slow`). `loop` scale 1 goes from 531 M (A) to 152 M (B). It is not fixed in this PR (design, question 2).
+
+### Cost of one op
+
+`op_cost CASE 8 N`, instructions for one op with its dispatch, release build of the head of #763, minimum of 3 runs (the 3 runs were equal):
+
+```
+nop              15.0
+mov              26.1
+loadi            26.0
+loadi_wide       37.0
+loadundef        23.0
+addi             53.1
+add              53.1
+add_dbl          58.1
+muli             56.1
+mod              62.1
+modi             62.1
+inc              49.1
+jlti_no          32.1
+jlti_yes         39.1
+jsne_null_no     29.0
+jmpifnot_no      37.0
+jmp              19.0
+getfield         65.1
+setfield         69.1
+getglobal        68.1
+setglobal        74.1
+getctx           57.0
+setctx           57.0
+getelemi        101.1
+getelem         100.1
+newobjlit       181.7
+call0           303.1
+call2           303.1
+callu0          302.1
+closure         208.5
+newobj          115.5
+strictneq        46.1
+```
+
+Pairs: `lt` + `jmpifnot` 80.1, the fused `jgt_no` 37.0, `getglobal` + `jgt` 105.1, `mov` + `mov` 52.1, `inc` + `jmp` 68.0, `getfield` + `getfield` 130.1.
+
+Dispatch (callgrind with `--dump-instr=yes`, then `objdump`): 15 instructions: 12 at the loop head and 3 at the arm tail. Registers: 4 more for each register operand (`fp`, shift, `&stack`, add). In e1af87b1 (the base of #757) the dispatch is 14. The extra one is a store of `words` at the head and a reload at the tail, because `lea r13,[rcx+2]` (the `nextx` of the next word) overwrites `words` in `r13`. This explains the +2.4% of `fib` after #763 with no change in the hot path (verified: per-op cost, base against head: `nop` 14 to 15, `mov` 25 to 26, `addi` 51 to 53, `mod` 56 to 62, `jlti` 29 to 32, `getglobal` 58 to 68, `call` 303 to 303).
+
+Call and return, 303: `Vm::run` 238, `Realm::function` 51, `memcpy` of the record 13.
+
+### Spike, not kept
+
+One local `regs: *mut Value` for the register base (set in `reload!` and after `stack.resize` in `ensure!`; `r!` reads `*regs.add(i)`). Cost of one op, head against spike: `mov` 26 to 23, `loadi` 26 to 23, `loadi_wide` 37 to 32, `addi` 53 to 45, `add` 53 to 44, `muli` 56 to 48, `mod` 62 to 52, `inc` 49 to 42, `jlti_no` 32 to 29, `getglobal` 68 to 64, `setglobal` 74 to 72, `getelem` 100 to 90, `lt` 51 to 44, `getfield`, `getctx`, `setctx`, `jmp`, `closure` unchanged, `call0` 303 to 310. Whole process, scale 10, variant B, M instructions: `loop` 1480.5 to 1356.5 (-8.4%), `loopfn` 640.6 to 556.6 (-13.1%), `calls` 1113.6 to 1054.6 (-5.3%), `fib` 52.2 to 50.9 (-2.5%), `closures` 179.6 to 174.1 (-3.1%), `objects` 855.8 to 825.2 (-3.6%). Tests were not run on the spike.
+
+### Histogram
+
+`op_count` on scale 10 of each row and on the bundle-like program. Mean share of the dispatches over the 10 programs, fusable pairs: `GetGlobal`+`Inc` 4.71, `Inc`+`SetGlobal` 4.71, `GetGlobal`+`JnLtI` 4.20, `SetGlobal`+`JmpBack` 4.19, `JnLtI`+`GetGlobal` 4.19, `SetGlobal`+`GetGlobal` 3.29, `GetGlobal`+`GetGlobal` 3.12, `LoadI`+`Mod` 2.91, `Add`+`LoadI` 2.89, `MulI`+`Add` 2.82. The first seven exist because the `eval_load` programs keep their variables in globals. Bundle-like: `GetField`+`JnLt` 6.0, `Inc`+`JmpBack` 4.5, `LoadAtom`+`Add` 3.0, `Mov`+`GetField` 2.8, `Add`+`Inc` 2.8, `Mov`+`Call` 2.6, `GetField`+`Mov` 2.6, `GetCtx`+`GetField` 2.3, `GetField`+`GetField` 2.2, `JnLt`+`Mov` 2.0. Dispatches removed by fusing the top 8 pairs, with the list of each program alone: `loop` 38.5%, `loopfn` 42.9%, `calls` 37.5%, `fib` 23.1%, `closures` 27.8%, `objects` 28.9%, `webpack` 15.4%, `throws` 31.6%, `concat` 49.9%, bundle-like 21.3%. With 8 pairs and 8 triples: 61.5, 57.1, 56.2, 46.2, 44.4, 39.4, 31.8, 45.6, 59.9, 28.6. The old figure in the design (17.7% for 8 pairs) was for the old compiler.
+
+### Model
+
+Each op costs its measured cost; fusion saves 21 instructions for each removed dispatch (hypothesis); the other steps are the changes in the design (section 5). The model predicts `loop`, `loopfn`, `calls` and `fib` within 2% of the measured totals. Columns after "now / QJS" are js2 / QuickJS, cumulative: the measured per-op change of the spike, then a global cell cache (`GetGlobal` 35, `SetGlobal` 38), then a call path of 173, a 32-bit constant operand and a jump to return, then fusion of 8 pairs and 8 triples (each program with its own list), then 16 and 16.
+
+```
+| Row | scale | js2 now | QuickJS | now / QJS | lean (measured spike deltas) | + global fast path | + call path | + constants, jump-to-ret | + fuse 8+8 | + fuse 16+16 |
+| loop | 1 | 152.1 M | 64.7 M | 2.35 | 2.16 | 1.53 | 1.53 | 1.42 | 0.90 | 0.90 | (fuse8 alone 1.83)
+| loop | 10 | 1480.5 M | 635.3 M | 2.33 | 2.14 | 1.49 | 1.49 | 1.38 | 0.85 | 0.85 | (fuse8 alone 1.80)
+| loopfn | 1 | 68.2 M | 44.1 M | 1.55 | 1.36 | 1.36 | 1.36 | 1.19 | 0.81 | 0.81 | (fuse8 alone 1.16)
+| loopfn | 10 | 640.6 M | 429.3 M | 1.49 | 1.30 | 1.30 | 1.30 | 1.12 | 0.73 | 0.73 | (fuse8 alone 1.10)
+| calls | 1 | 115.5 M | 60.6 M | 1.90 | 1.81 | 1.42 | 1.20 | 1.14 | 0.83 | 0.79 | (fuse8 alone 1.59)
+| calls | 10 | 1113.6 M | 594.3 M | 1.87 | 1.77 | 1.37 | 1.16 | 1.09 | 0.77 | 0.74 | (fuse8 alone 1.56)
+| fib | 1 | 8.8 M | 4.4 M | 2.02 | 2.00 | 1.93 | 1.68 | 1.64 | 1.52 | 1.52 | (fuse8 alone 1.90)
+| fib | 10 | 52.2 M | 35.5 M | 1.47 | 1.43 | 1.34 | 1.00 | 0.94 | 0.78 | 0.78 | (fuse8 alone 1.30)
+| closures | 1 | 22.2 M | 26.1 M | 0.85 | 0.83 | 0.75 | 0.67 | 0.67 | 0.60 | 0.58 | (fuse8 alone 0.79)
+| closures | 10 | 179.6 M | 279.9 M | 0.64 | 0.62 | 0.55 | 0.48 | 0.47 | 0.41 | 0.39 | (fuse8 alone 0.58)
+| objects | 1 | 91.1 M | 53.7 M | 1.70 | 1.65 | 1.48 | 1.39 | 1.37 | 1.25 | 1.22 | (fuse8 alone 1.58)
+| objects | 10 | 855.8 M | 512.4 M | 1.67 | 1.62 | 1.45 | 1.35 | 1.33 | 1.21 | 1.17 | (fuse8 alone 1.55)
+| webpack | 1 | 9.7 M | 5.5 M | 1.78 | 1.78 | 1.77 | 1.76 | 1.76 | 1.76 | 1.75 | (fuse8 alone 1.77)
+| webpack | 10 | 52.1 M | 42.0 M | 1.24 | 1.24 | 1.23 | 1.22 | 1.22 | 1.21 | 1.20 | (fuse8 alone 1.23)
+| throws | 1 | 39.8 M | 88.5 M | 0.45 | 0.43 | 0.37 | 0.37 | 0.37 | 0.33 | 0.32 | (fuse8 alone 0.41)
+| throws | 10 | 356.7 M | 875.0 M | 0.41 | 0.39 | 0.32 | 0.32 | 0.32 | 0.28 | 0.28 | (fuse8 alone 0.37)
+| concat | 1 | 4.6 M | 1.3 M | 3.45 | 3.44 | 3.43 | 3.43 | 3.43 | 3.42 | 3.42 | (fuse8 alone 3.44)
+| concat | 10 | 5.3 M | 2.2 M | 2.46 | 2.45 | 2.37 | 2.37 | 2.37 | 2.31 | 2.31 | (fuse8 alone 2.41)
+| bundle | 1 | 128.0 M | 136.5 M | 0.94 | 0.93 | 0.92 | 0.87 | 0.87 | 0.83 | 0.82 | (fuse8 alone 0.90)
+```
+
+Not tested: arm64; Windows (the counting code is behind a feature and the normal build is unchanged); wall time and branch misses (this entry counts instructions only); a shared fusion list for all programs (the numbers use the list of each program); the model values of steps 3 to 5 of the design (only the `regs` change was built, as a spike); Miri; the cost matrix (js2 is not wired into the browser).
+
+## 2026-11-20: js2 steps 1 to 4 of the superinstruction design (build)
+
+Design: `docs/design-js2-superinstructions.md`, section 5, with the owner decisions of section 10. One PR for each step, in order, each measured before the next. Fusion (step 5) waits for the histogram taken after step 4.
+
+Method of every step. Machine: archMachine, AMD Ryzen 9 5900HX, Linux. Release builds of `script_run` (a separate `CARGO_TARGET_DIR` for each step). Instructions are `instructions:u` of `perf stat`, with `GLIBC_TUNABLES=glibc.malloc.tcache_count=65535` as in `tools/js/instr.sh`, 3 runs of each cell; the table gives the minimum and the spread `(max - min) / min` of the 3 runs. Inputs: the 9 `eval_load` programs at scale 1 and 10 (`eval_load CASE SCALE --source`), run as `script_run --eval FILE EXPECTED`; the bundle-like program (`crates/js2/examples/data/bundle_like.js`); an empty program. QuickJS `quickjs-2026-06-04`, `qjs` with `console.log(String((0, eval)(SRC)))`, same inputs. All program files sit under one short path: the QuickJS count of `throws` depends on the length of the file path (it builds a stack string with it), 85.1 M here against 88.5 M in the S2.9 entry. The gate of S2 is the net slope: instructions at scale 10 minus instructions at scale 1, at or below QuickJS (design question 1).
+
+### Step 1: keep `__def` and hide it
+
+Bug: `script::load` deleted the `__def` global after the prelude. `__def` was the first property added to the global object, so the delete put the object in dictionary mode, and a dictionary shape is never cached (`Shapes::cacheable`). Every `GetGlobal` and `SetGlobal` took the slow path. Fix (owner decision, question 2): the loader keeps the property and sets its value to `undefined` (`Realm::define`; no shape change). The property was already not enumerable. A script sees `typeof __def === "undefined"`, `Object.keys(globalThis)` does not list it, and `var __def = 5` still works. Limit: `"__def" in globalThis` is `true`, and a read of `__def` gives `undefined` where a missing name gives a `ReferenceError`.
+
+Failing test first: `script::tests::load_keeps_the_global_object_in_the_shape_tree` failed on #765 ("the global object is in dictionary mode after load") and passes with the fix. `def_is_hidden_after_load` passes on both.
+
+The "#765" column is the unfixed head of #765 (variant A of the S2.9 entry). Its numbers vary from run to run of one binary (S2.9 entry), so read its `loop`, `calls` and `objects` rows as one sample. The new column is the same as variant B of the S2.9 entry.
+
+| Row | Scale | #765 (M) | new (M) | change | spread new % | QuickJS (M) | new / QuickJS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loop` | 1 | 531.14 | 152.14 | -71.4% | 0.001 | 64.69 | 2.35 |
+| `loop` | 10 | 5270.54 | 1480.54 | -71.9% | 0.000 | 635.29 | 2.33 |
+| `loopfn` | 1 | 68.16 | 68.16 | -0.0% | 0.007 | 44.10 | 1.55 |
+| `loopfn` | 10 | 640.56 | 640.56 | -0.0% | 0.001 | 429.30 | 1.49 |
+| `calls` | 1 | 335.68 | 115.48 | -65.6% | 0.001 | 60.62 | 1.91 |
+| `calls` | 10 | 3405.58 | 1113.58 | -67.3% | 0.000 | 594.33 | 1.87 |
+| `fib` | 1 | 11.66 | 8.84 | -24.2% | 0.029 | 4.37 | 2.02 |
+| `fib` | 10 | 83.42 | 52.17 | -37.5% | 0.006 | 35.54 | 1.47 |
+| `closures` | 1 | 42.98 | 22.21 | -48.3% | 0.005 | 26.11 | 0.85 |
+| `closures` | 10 | 398.65 | 179.62 | -54.9% | 0.001 | 279.90 | 0.64 |
+| `objects` | 1 | 181.11 | 91.11 | -49.7% | 0.003 | 53.72 | 1.70 |
+| `objects` | 10 | 1699.92 | 855.84 | -49.7% | 0.001 | 512.44 | 1.67 |
+| `webpack` | 1 | 10.17 | 9.74 | -4.2% | 0.041 | 5.47 | 1.78 |
+| `webpack` | 10 | 56.40 | 52.06 | -7.7% | 0.014 | 41.97 | 1.24 |
+| `throws` | 1 | 96.43 | 39.76 | -58.8% | 0.013 | 85.11 | 0.47 |
+| `throws` | 10 | 885.79 | 356.74 | -59.7% | 0.000 | 840.93 | 0.42 |
+| `concat` | 1 | 4.76 | 4.61 | -3.1% | 0.159 | 1.34 | 3.45 |
+| `concat` | 10 | 6.80 | 5.30 | -22.0% | 0.043 | 2.15 | 2.47 |
+| `bundle` | 1 | 131.21 | 128.00 | -2.4% | 0.005 | 134.42 | 0.95 |
+| `empty` | 1 | 4.48 | 4.48 | +0.0% | 0.087 | 1.23 | 3.63 |
+
+Net slope (scale 10 minus scale 1), M instructions:
+| Row | #765 | new | change | QuickJS | new / QuickJS | gate (<= 1.00) |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `loop` | 4739.4 | 1328.4 | -72.0% | 570.6 | 2.33 | no |
+| `loopfn` | 572.4 | 572.4 | +0.0% | 385.2 | 1.49 | no |
+| `calls` | 3069.9 | 998.1 | -67.5% | 533.7 | 1.87 | no |
+| `fib` | 71.8 | 43.3 | -39.6% | 31.2 | 1.39 | no |
+| `closures` | 355.7 | 157.4 | -55.7% | 253.8 | 0.62 | yes |
+| `objects` | 1518.8 | 764.7 | -49.6% | 458.7 | 1.67 | no |
+| `webpack` | 46.2 | 42.3 | -8.5% | 36.5 | 1.16 | no |
+| `throws` | 789.4 | 317.0 | -59.8% | 755.8 | 0.42 | yes |
+| `concat` | 2.0 | 0.7 | -66.2% | 0.8 | 0.85 | yes |
 
 ## 2026-11-20: test262 and differential runners for js2 (gate S2 tools)
 
@@ -16072,3 +16321,206 @@ Windows and macOS; Miri (no `unsafe` was added, but `Op::Lazy` runs in `interp.r
 ### Open: the rest of the start cost
 
 4.01 M is not close to zero. 2.35 M is the pre-parse of the whole prelude, which still reads every function body. A prototype (not in the PR) that parses the top level of the prelude with known facts and jumps over each function costs 12.4 K for that step. That is option B′ of the design document: the facts of the prelude as a generated file. Hypothesis: about 1.7 M. A compiled image (option B) is about 1.0 M, hypothesis. The questions for the owner are in section 6 of `docs/design-js2-prelude.md`.
+## 2026-11-20: host handlers on the interface, D1: style, CSSOM and geometry (plan step S0.4 / D1)
+
+Status: the handlers of the files below run through the interface (`Scope`, `Local`, `Args`). Tests pass on Linux and Windows. The full matrix passes under the standing rule: no row is over +0.5% under both allocators. Base: PR #762 (`t3/convert-browser-host-handlers`, head `9f74a623`). The diff is about 2,200 changed lines.
+
+Files converted: `browser_style.rs`, `browser_computed.rs`, `browser_css_ns.rs`, `browser_geom.rs`, `browser_matrix.rs`, `browser_point.rs`, `browser_geometry.rs`, `browser_fonts.rs`, and `browser_cssom.rs` (the getters, `item`, `length` and the `CSSStyleSheet` constructor). `browser_rects.rs`: `client_rects`.
+
+Not converted, and why:
+
+- `browser_cssom.rs`: `insertRule`, `deleteRule`, `replace`, `replaceSync`, `selectorText` and `keyText` setters, `disabled` setter, group `insertRule` and `deleteRule`, `styleSheets`, `adoptedStyleSheets`. Each body is a chain of helpers of the old form (`publish`, `refresh`, `parsed_rules`, `set_text_content`, promises, `array_from`). A first build of them on the interface was slower than the old form. `cssom_load adopted 1` went from +0.83% (a bridge that copies `this` and the arguments) to +1.72% (written in place), because `Scope::new_array` and `Scope::get_str` cost more than `array_from` and `d.key`. They stay on the old registry. The old form costs the same as the base.
+- `browser_rects.rs`: `range_client_rects` and `range_bounding_rect` are registered by `browser_range.rs` (group A2). `range_client_rects` calls the new `rect_list_s` through `run_v`.
+- `browser_used.rs`: it has no handler, only `used_for` helpers that take `it`. `browser_fontface.rs`: JavaScript source only. `browser_style_block.rs`: no host code.
+- The install functions, the lazy global definers, the tables keyed by `ObjId` (`d.geom.slots`) and the GC hooks stay in the old form, as in A1c. `Dom::old` helpers (`with_geo`, `style_read`, `style_get`, `computed_value`, `caret_range`, `element_rects`, the cascade) take `it` and run through `old` and `old_v`.
+
+Changes.
+
+- `browser_scoped.rs`: `Dom::style_html_el_s` moves to `browser_style.rs` (a native form). New `Dom::add_fn_s_raw` makes a function inside a scope that the caller holds. `call_scoped` asks `bad_new_s` for the message of a constructor called without `new`.
+- `browser_geom.rs`: HS helpers (`new_obj_s`, `put_s`, `num_s`, `rect_object_s`, `layout_rect_s`, `rect_list_s`, `point_object_s`, `make_s`, `finish_s`). The old `rect_object` and `layout_rect` stay for callers of the old form (intersection and resize observers, scroll). `needs_new` compares HS pointers; the geometry fixture checks the message "Please use the 'new' operator".
+- `browser_style.rs` and `browser_computed.rs`: the 500 accessors of `ensure` and `fill` are made in one scope. A scope for each of them cost +100 instructions for each function (`sheets_load linked 1` +0.56%, `imports 1` +0.57%). `current` reads its id as `style.cur & !CUR_NEW`; the ids come from `Dom::scoped`. `rule_declaration` is now `rule_declaration_s`.
+- Dead code of the old form is removed (`wrap_all`, `new_obj`, `put`, `num`, `read_dict`, `rect_list`, `point_object`, the old style and computed helpers of arguments).
+
+Grep gate (`\bbare_js::(value|eval::Interp)|\bObjId\b|\bInterp\b|\.engine\(\)|\.heap\.`, lines for each file, base then now): cssom 113 to 96, computed 43 to 28, style 50 to 30, css_ns 10 to 5, geom 62 to 33, matrix 35 to 8, point 7 to 0, geometry 8 to 5, rects 10 to 9, used 2 to 2, fonts 6 to 5, style_block 0, fontface 0. Handlers of the old form (`fn x(d: &Dom, it: &mut Interp, this: Value ...)`): 0 in each converted file, except cssom 15 (listed above, with their helpers) and rects 3 (two are group A2).
+
+Measurements. Machine archMachine, loaded. Instruction counts (`perf stat -e instructions:u`, minimum of 3 runs, `tools/js/cost_matrix.sh -j4`, 817 rows, base tree built from the head of #762).
+
+- First matrix (everything converted, `adopted*` on a bridge): over +0.5% under both allocators: `cssom_load adopted 1` and `10` (+0.83% to +0.92%), `sheets_load imports 1` and `linked 1` (+0.56% to +0.95%), `dataset_load keys 1000 50` and `10000 50` (+0.55% to +0.64%, not a file of this group; the row was not over again after the change below).
+- Changes after that: one scope for the accessors of `ensure` and `fill` (the `sheets_load` rows); the `adopted*` handlers and the other handlers that only bridged back to the old form went back to the old registry.
+- Callgrind of `cssom_load adopted 1` (symbol builds of both trees): the call path of the interface is not the cause. `call_api_plain` and `call_scoped` together are about 1,000 instructions for 11,000 calls against about 1,250 for `call_host` and `Host::call`. The extra cost was in `new_array` and `get_str` of the bodies written in place.
+- Full matrix, final tree: mean -0.001% glibc and +0.321% jemalloc. Over under both allocators: none. Over under one allocator only: `cssom_load computed 1` (+0.511% glibc, +0.437% jemalloc), `computed 10` (+0.525%, +0.462%), `fetch_load bytes 10` (+0.597%, +0.064%). `parse_load deep 1` and `10` do not run on the base tree either. The `codegen-units=1` check was not needed, as no row is over under both allocators.
+- Lever left: `cssom_load computed` is 0.01% over the limit under glibc. Each `getComputedStyle` read goes through `current` (a hash lookup in `style.fns`) and `computed_value` as before. A table indexed by the id would remove the lookup. Not built.
+
+Tests. Linux: `cargo test --locked -p bare-js-api -p bare-js -p bare --lib`: 32, 1104 (1 ignored) and 1714 (6 ignored) pass. `bare --lib` with the filters `browser_geom_tests browser_geometry_tests browser_point_tests browser_css_ns_tests browser_fonts_tests browser_style browser_computed browser_cssom_tests browser_scoped browser_dom browser_attr browser_custom browser_mutation browser_range matrix rects svg` (295 pass, 4 ignored): pass plain, with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1`. Windows 11 VM (`cargo xwin test --no-run`, `winssh`): the same filters, 295 pass, 4 ignored.
+
+Not tested: the whole `bare --lib` with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1`; the whole `bare --lib` on Windows; macOS; RSS and wall time; the `codegen-units=1` and callgrind numbers of each row that was only slightly over under one allocator (`cssom_load computed`, `fetch_load bytes 10`).
+## 2026-11-20: host handlers on the interface, D2: media, image and canvas (plan step S0.4 / D2)
+
+Status: the handlers of the three files run through the interface (`Scope`, `Local`, `Args`). Tests pass on Linux and Windows. The matrix has no row over the limit. The PR is open without auto-merge.
+
+Base: `origin/t3/convert-browser-host-handlers` (the head of #762, A1c) merged with `origin/main` (`57357737`). #762 was not merged when this started, so the diff against main holds the commits of #762 until it merges. #769 (group C) is not in the base. The files of this group do not overlap with it.
+
+Files converted: `browser_media.rs` (59 handlers: the `HTMLMediaElement`, `HTMLVideoElement`, `TimeRanges` and `MediaError` members, `load`, `play`, `pause`, `canPlayType`, the constructors `Audio` and the illegal ones, the `on*` handlers, and the caption handlers `TextTrack`, `TextTrackList`, `HTMLTrackElement` and the cue accessors), `browser_canvas.rs` (the `ImageData` constructor, `getContext`, `toDataURL`, `measureText`, `createImageData`, `getImageData`, the gradient and pattern objects, the no-op methods), `browser_img.rs` (`Image`, `decode`, `onload`, `onerror`). 73 handlers in all.
+
+Not converted, and why:
+
+- The lazy global definers (`lazy_media`, `lazy_audio_el`, `lazy_video_el`, `lazy_ranges`, `lazy_error`, `lazy_audio`, `lazy_image`, `lazy_image_data`). They define a global from a property read. `browser_lazy::lazy` takes `it`, so they move with `browser_lazy.rs` (the lazy global definers stay old in every group, as in A1c).
+- The install code (`install`, `proto`, `ensure`, `make`, `caption_proto`, `method`) and `Dom::wrap` calling `proto`. It runs once and it keys tables by `ObjId`. It registers the new handlers through `add_fn_s_obj`, `def_get_s` and `def_method_s`.
+- The task code (`media_task`, `media_fire`, `media_heard`, `select`, `start`, `fail`, `caption_load`, `Dom::img_task`). The scheduler calls it with an `Interp`, and it fires events through `Dom::dispatch`. It moves with group B (events, scheduler). `reject` keeps its old signature and calls `reject_s` through `run`.
+- The host hooks `caption_len`, `caption_item` and `caption_fill`, and the tables with `ObjId` keys (`Media::lists`, `Media::tracks`, `Img::decodes`). `caption_fill` calls the new `caption_prepare` and `caption_object` through `run`.
+- The `ObjId` fields of `Made`, `CaptionTrack` and `CaptionCue`. The GC roots read them. They move with the table of roots (group Z).
+
+Changes.
+
+- `browser_scoped.rs`: three helpers for code that builds objects inside a handler: `Dom::obj_with_s` (a new object with a given prototype), `Dom::def_method_l` (a method on a `Local`, enumerable or not) and `Dom::def_get_l` (an accessor on a `Local`). The bridge `media_src_changed_s` calls `browser_media::src_changed` directly, which now takes a scope.
+- `browser_media.rs`: `src_changed`, `load_algorithm`, `queue_s`, `queue_event_s`, `reject_s`, `caption_object`, `caption_prepare`, `with_cue` and the `this` checks take a scope. The old `queue_event`, the old `load_algorithm` and the old `caption_object` are removed (no caller). `range_at` is two functions of a const parameter (`END`), not two closures.
+- `browser_canvas.rs`: `ensure_s` makes the `ImageData` constructor on the scope. The old `ensure` calls it through `run` for the lazy definer. The old `arg` wrapper is removed.
+- `browser_img.rs`: `on_get`, `on_set` and `decode` use `old_v` and `old` for `handler_get` and `handler_set` (the pattern of `browser_handlers.rs`).
+- `browser_media_tests.rs`: one new test, `the_members_that_the_cases_do_not_read_keep_their_answers_and_errors` (`TimeRanges` `start` and `end`, the reads and writes of `crossOrigin`, `width`, `playbackRate`, `currentTime`, the errors of `volume`, `currentTime` and `srcObject`, a wrong `this`, `activeCues`, `textTracks`, `Image` size and handlers). It passes on the base commit too (built in a separate checkout), so the answers did not change.
+
+Grep gate (`\bbare_js::(value|eval::Interp)|\bObjId\b|\bInterp\b|\.engine\(\)|\.heap\.`, lines for each file, before then after): media 106 to 36, canvas 25 to 6, img 13 to 8. Handler lines of the old form (`fn .*&\[Value\]`): media 59 to 0, canvas 12 to 1 (`lazy_image_data`), img 4 to 0. The lines that stay are the items in the list above. The goal 0 is not met for the same reasons as in A1c. Two of the media lines are `bare_js::value::to_uint32` (a pure function, not the engine).
+
+Measurements. Machine archMachine. Instruction counts (`perf stat -e instructions:u`, minimum of 3 runs), `tools/js/cost_matrix.sh -j4`, 817 rows, both trees built with the default release profile in separate target directories. Base: `57357737` (the tree before this change). New: `9fbd00f2`.
+
+- Mean change: glibc -0.002%. No row is over +0.5% under glibc, so the jemalloc run and the `codegen-units=1` run did not start. The top rows: `form_load validity 10` (`FORM_LOAD_STACK_MIB=8`) +0.493%, `scheduler_load timers 10` +0.231%, `scheduler_load mixed 10` +0.146%, `mixed 1` +0.127%, `form_load validity 1` +0.120%. None of these call a handler of this group (the form handlers are group C; the base has them in the old form). The lowest: `resources_load small 10` -0.453%.
+- The two rows that name this group: `platform_load media 1` -0.002% (48,127,549 to 48,126,611 instructions) and `media 10` +0.002% (408,955,161 to 408,961,627).
+- `parse_load deep 1` and `deep 10` fail to run on both trees (known: stack overflow).
+- The rows hardly use these handlers (2 rows of 817), so the matrix shows that the shared call path did not change. It does not measure the cost of one media call. A call of a converted handler costs what the A1 rounds measured (about the same as the old one).
+
+Tests. Linux, debug: `cargo test --locked -p bare-js-api -p bare-js -p bare --lib`: 32, 1104 (1 ignored) and 1715 (6 ignored) pass. The filters `browser_media_tests browser_canvas_tests browser_img_tests browser_elements_tests browser_scoped browser_reclaim browser_tests browser_navigation_tests browser_scheduler_tests browser_streams_tests browser_compression_tests canvas media image audio` (295 tests): pass plain, with `BARE_ALL_API=1` and with `BARE_GC_STRESS=1 BARE_ALL_API=1`. With `BARE_GC_STRESS=1` alone, 294 pass and 1 fails: `browser_reclaim_tests::parsed_documents_ask_for_a_collect_by_their_native_bytes` (the known failure of the base under `BARE_GC_STRESS=1`; it passes when `BARE_ALL_API=1` is also set). Windows 11 VM (`cargo xwin test --no-run`, exe through `winssh`): the same 295-test filter passes.
+
+Not tested: `BARE_GC_STRESS=1` and `BARE_ALL_API=1` with the whole `bare --lib`; the full `bare --lib` on Windows; the jemalloc and `codegen-units=1` runs (no row went over the limit under glibc); the journeys and `tools/suite/run.py`; RSS and wall time; the cost of one media, canvas or image call by a micro-loop; the `Image` and `decode()` paths with a real picture download (the tests use pages with no network).
+## 2026-11-20: js2 language failures (test262 `language/`)
+
+Task: fix the tests under `language/` that pass on the old engine and fail on js2. Scope: the compiler, the parser and the interpreter. Built-ins (`builtins.rs`, `bi_*.rs`) belong to two other agents. Generators, async, modules, `eval` and `with` belong to S3.
+
+### Result
+
+Same runner and same test262 checkout as the baseline (`tools/js/test262_js2.sh`, 8 jobs).
+
+| Measure | Before | After |
+| --- | ---: | ---: |
+| `language/` tests that pass on the old engine and fail on js2 | 1,779 | 1,148 |
+| js2 failures in `language/expressions` | 1,402 | 1,119 |
+| js2 failures in `language/statements` | 819 | 546 |
+| js2 failures in the other `language/` directories | 411 | 336 |
+| js2 failures, all directories | 5,840 | 5,162 |
+
+No test that passed on js2 before fails now (`language/`: 0 of 10,445 tests differ in that direction against the run of the base commit; no directory of the baseline lost a pass). The new baseline file lists the built-ins that gained passes from the function `name` and `length` change.
+
+### What changed
+
+- **Function `name` and `length`.** Each `Code` holds `fn_name` and `fn_len`. The own properties are lazy: a function cell has the flag `F_LAZY`, and `Realm::fn_props` makes `length` and `name` on the first access that can see own properties (`define_attrs`, `define_accessor`, `delete`, `getOwnPropertyDescriptor`, `getOwnPropertyNames`, `freeze`, `hasOwnProperty`). A function that nobody asks costs one flag.
+- **Names of anonymous functions and classes** (`var f = function(){}`, `{ k: () => 1 }`, default values, class fields, computed keys, `get`/`set` prefixes, private names, numeric keys in any base). The compiler passes a `Hint` to the child. A computed key sets the name at run time with the new op `SetFnName`. The default class constructor sets its name the same way.
+- **Strict-mode failures.** `Put::Fail` is a new result of a write that must fail: a non-writable data property, an accessor without a setter, an inherited read-only property, a write on a primitive. Code with `Code.strict` throws a `TypeError`; sloppy code ignores it. `delete` of a non-configurable property throws in strict code. A strict write to an unresolvable name is a `ReferenceError` (new op `SetGlobalS`).
+- **Script-level `let`, `const` and `class`** are script-scope variables (dead zone, `const` assignment error). They are not properties of the global object.
+- **Sloppy `this`** (`LoadThisS`): `undefined` and `null` become the global object. Strict code and the script top level keep `LoadThis`. A primitive `this` is not wrapped yet (needs wrapper objects).
+- **Empty object pattern** on `null` or `undefined` throws a `TypeError` (`RequireObj`).
+- **`delete name`** for a global name (`DeleteGlobal`), `delete null[k]` and `delete undefined.k` throw a `TypeError`. A global `var` or function is not configurable (`DeclGlobal` defines it with `writable` and `enumerable` only).
+- **A second `super()`** throws a `ReferenceError` after the construct (`CheckUnbound`).
+
+### Deliberate golden changes
+
+`compile_tests.rs`: `SetFnName` after the default class constructor in 5 class goldens (`a_class_expression_name_is_a_binding_of_the_class`, `class_methods_fields_and_static_elements`, `private_names_methods_and_accessors`, `super_property_reads_and_writes`, `a_derived_class_calls_super_in_an_arrow`). `a_derived_class_calls_super_in_an_arrow` also shows `GetCtx` and `CheckUnbound` before the bind of `this`. `the_script_top_level_is_global` is now `the_script_top_level_var_and_function_are_global_and_let_is_not`. The case `delete of a global name` left the list of unsupported constructs. `diff-known.txt` lost `corpus:function_gaps` (it no longer differs).
+
+### Cost
+
+`interp_load`, instructions of the run minus the run with N = 0, minimum of 3 runs (`tools/js/instr.sh`), base `e6a65639` against this branch, on archMachine:
+
+| Row | Default profile | `codegen-units=1` |
+| --- | ---: | ---: |
+| `loopfn 3000000` | -3.9% | -2.5% |
+| `calls 1000000` | -0.28% | -1.7% |
+| `fib 27` | +0.28% | -1.1% |
+| `closures 1000000` | +0.43% | -0.3% |
+| `objects 1000000` | +0.64% | -0.5% |
+
+`objects` is over +0.5% with the default profile and below it with `codegen-units=1` on both trees. It passes by the rule of the cost rows (the layout of the loop moves with the build, not the work). Hypothesis: the `Put::Fail` arm that the write macro now has moves the code of the hot arms. These rows are hand-written bytecode, so the compiler changes do not touch them.
+
+### Still failing (the groups that are left in `language/`)
+
+- Needs wrapper objects (443), `ToPrimitive` or accessor re-entry (about 120), `Symbol`, `RegExp`, `Function`: other agents or S4.
+- Not built: generators (67), `with` (29), async (24), direct `eval` (25). S3.
+- A parameter that reads a later parameter must throw a `ReferenceError` (`function f(a = b, b)`, 9 tests). The argument sits in the register of the parameter, so a dead zone needs a copy. Not done.
+- A compound assignment where the getter deletes the global (`x ^= 3`, 11 tests) and where `ToPropertyKey` throws (`base[prop] *= expr()`, 11 tests): the order of the reads and the re-entry of the getter.
+- `super` outside a call or member access (`delete super.x`, 4 tests), `delete` of an optional chain.
+- Mapped `arguments` with `defineProperty` (22 tests).
+- Class field and computed-key checks: `static ['prototype']` (4), class fields on frozen objects, `fields-run-once-on-double-super`.
+- Integer keys first in `for-in` and `Object.keys` order (js2 keeps the insertion order, S3).
+- Known gap of the script scope: a top-level `let` or `const` of one script is not visible to the next script of the same realm (a harness `const` is invisible to the test script). Cross-script lexical scope is future work. No test262 test fails from it today.
+- `SetFnName` for the default class constructor is run once for each class definition (cold).
+
+### Tests
+
+`cargo test --locked -p bare-js2 --lib`: 377 pass. `cargo test --locked --release -p bare-js-diff`: all pass (256 programs, 0 new differences, 20 known; `function_gaps` removed from the list).
+
+Not tested: Windows and macOS; the `language/` tests under the other agents' branches (their merge may change counts); wall time of the full run on an idle machine (the load average was above 8); the micro rows on another machine.
+
+## 2026-11-20: js2 language gaps (test262 `language/`, second round)
+
+Task: fix the gaps that the previous round left in the compiler and the interpreter (the "Not done" list above), then the next largest groups of `language/` tests that pass on the old engine and fail on js2. Built-ins (wrapper objects, `ToPrimitive` re-entry, property attributes, array-likes) belong to other agents. Generators, async, `Symbol`, `RegExp`, `with` and `eval` belong to S3. Base: `13568fdc` (the head of #767).
+
+### Result
+
+Same runner and checkout as the baseline (`tools/js/test262_js2.sh -j 6`). Base and branch were run on the same machine, one after the other.
+
+| Measure | Base | Branch |
+| --- | ---: | ---: |
+| `language/` tests that pass on the old engine and fail on js2 | 1,148 | 1,055 |
+| js2 passes, all directories | 12,622 | 12,768 |
+| js2 failures, all directories | 5,162 | 5,016 |
+
+Test by test against the run of the base: 146 tests go from fail to pass, 0 go from pass to fail. `tools/fixtures/js/test262-js2-baseline.txt` is the new table.
+
+| Group | Tests before | Tests after |
+| --- | ---: | ---: |
+| A parameter default that reads a later parameter (`dflt-params-ref-later`) | 8 | 0 |
+| Compound assignment where the getter of a global changes the global (`lref--v--N`) | 21 | 10 (all 10 need `with`) |
+| Class computed names, fields and `static ['prototype']` | about 28 | 0 |
+
+### What changed
+
+- **Parameter default and later parameter.** A parameter that is not initialized yet reads a dead-zone register (`param_dz`) and throws a `ReferenceError`.
+- **Global lexical environment.** A top-level `let`, `const` and `class` of one script is visible to the next script of the realm. `Realm.lex` maps a name to a context and a slot (`DeclLex`, `DeclLexC`, and `CheckLex` for the early check). A global read, write, `typeof` and `delete` look at it first; the global object never holds it. The collector marks the contexts. A name in a context slot (a function uses it) is declared at the start of the script. A name in a register stays in the register, so a loop at the top level keeps its speed. The script checks the name at the start (`CheckLex`: `SyntaxError` on a name that exists already) and hands the value over at the end (`PushCtx`, `InitCtx`, `DeclLex`, `PopCtx`). Test: `a_top_level_let_const_and_class_are_visible_to_the_next_script`.
+- **Global accessors.** A global that is an accessor property calls its getter on a read (`Got::Get`).
+- **Call of a parenthesized optional chain.** `(a?.b)()` and `(a?.b)?.()` keep `a` as `this`. Test: `a_parenthesized_optional_member_call_keeps_this`.
+- **Class.** An own property of the class that the class keeps by index (a computed numeric key) reads back through `getOwnPropertyDescriptor`. `static ['prototype']` throws a `TypeError`. The inner class name is in its dead zone during `extends`. `super.x` and `super.x = v` throw a `TypeError` when the home prototype is `null`. A derived constructor that returns a non-object throws at the caller, after the frame is gone. Arrow functions, methods and class members have no `[[Construct]]` (`Code.noctor`).
+- **Other.** A named function expression: `name = v` in sloppy code does nothing. An arrow function at the script top level reads the `this` of the script. `for-of` and array destructuring over a string iterate code points. `Number` to string uses the exponent form (`1e21`, `1e-7`, `5e-324`). `Object.defineProperty` on a non-configurable property that changes it throws a `TypeError`. `NaN`, `Infinity` and `undefined` are global properties.
+
+### Deliberate golden changes
+
+`compile_tests.rs`: the script goldens of 4 class tests (`a_derived_class_calls_super_in_an_arrow`, `class_methods_fields_and_static_elements`, `private_names_methods_and_accessors`, `super_property_reads_and_writes`) have `CheckLex` first and the hand-over of the class name at the end. `the_script_top_level_var_and_function_are_global_and_let_is_not` checks that a `let` stays in a register while the script runs (no `GetCtx`, no `SetCtx`) and that the script has `CheckLex` and `DeclLex`. `diff-known.txt` lost `corpus:number_format` (it no longer differs).
+
+### Cost
+
+`interp_load`, release, `tools/js/instr.sh` (minimum of 3 runs), count at N minus count at N = 0, base `13568fdc` against this branch, default profile, archMachine (load average 5 to 6, so only instruction counts are used). The rows are hand-written bytecode: the compiler changes do not touch them.
+
+| Row | Base | Branch | Change |
+| --- | ---: | ---: | ---: |
+| `loopfn 3000000` | 961.50 M | 931.50 M | -3.1% |
+| `calls 1000000` | 713.50 M | 691.50 M | -3.1% |
+| `fib 27` | 341.57 M | 338.71 M | -0.8% |
+| `closures 1000000` | 2,218.73 M | 2,187.10 M | -1.4% |
+| `objects 1000000` | 777.33 M | 757.39 M | -2.6% |
+
+No row is over +0.5%, so the `codegen-units=1` rule is not needed. Hypothesis: the gain comes from the layout of the interpreter loop, not from less work.
+
+A loop at the top level of a script with a `let` (`let s = 0; for (let i = 0; i < 1e6; i++) s += i & 7;`, run by `script_run`): 211 instructions per turn on the base, 201 on the branch. A first version of the global lexical environment put each top-level `let` in a context slot. That version measured 322 instructions per turn (+52%), so it was dropped for the register hand-over above.
+
+### Still failing in `language/` (1,055)
+
+- Wrapper objects (`new String`, `new Number`, `new Boolean`): 443. Other agent.
+- `ToPrimitive` with a script `valueOf` or `toString`, and the compound-assignment cases that need it (`S11.13.2_A7.x_T3`, 11): other agent.
+- Copying an accessor property (`{ ...o }`, `Object.assign` style, 48) and `typeof` of an accessor global: need the host to call a getter from a built-in.
+- `Object.preventExtensions` and `freeze` tests (for example `11.13.2-45-s`): other agent.
+- Mapped `arguments` with `defineProperty` (23 tests). js2 has no mapping between `arguments[i]` and the parameter, and no element attribute model. A mapping needs one of: a context slot for each mapped parameter, or a new `arguments` exotic object. Both touch the call path and the element model of the other agents, so this round does not build it.
+- `fields-run-once-on-double-super` (needs the second `super()` to stop before the fields run: call path).
+- Integer keys first in `for-in` and `Object.keys` order (S3).
+- 10 `lref--v--N` tests (`with`), generators, async, `Symbol`, `RegExp`, `Function`, `eval`: S3 or other agents.
+- A top-level `let` that sits in a register is handed over only when the script ends. A script that throws before its end does not hand over its `let` names. test262 has no test for this.
+
+### Tests
+
+`cargo test --locked -p bare-js2 --lib`: 379 tests. 378 pass in a full run on the loaded machine; `a_scope_with_many_locals_compiles_in_linear_time` fails when it runs with the others under load and passes when it runs alone (5.7 s and 8.4 s, 3 runs). `cargo test --locked -p bare-js-diff`: all pass (256 programs, 0 new differences, 20 known). Clippy: no finding in the changed code (the findings that remain are in `heap.rs`, `crates/js2/examples`, `bare-os` and `bare-observe`).
+
+Not tested: Windows and macOS; Miri on the new tests; the old engine behind the differential runner in modes other than `tree`; a throw at the top level between a `let` and the end of the script (the hand-over is skipped); a second test262 revision.

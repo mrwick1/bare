@@ -38,6 +38,8 @@ pub mod interp_rt;
 #[allow(unsafe_code)]
 pub mod interp;
 pub mod interp_ops;
+#[cfg(feature = "op-count")]
+pub mod opcount;
 pub mod builtins;
 mod bi_array;
 mod bi_object;
