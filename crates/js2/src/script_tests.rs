@@ -503,6 +503,14 @@ fn eval_load_programs_give_the_result_of_the_old_engine() {
 }
 
 #[test]
+fn a_host_script_runs_before_the_script_and_the_directive_prologue_stays() {
+    let mut vm = load_with("var h = 1;", "'use strict'; var r = h + 1; var s = (function () { return this === undefined; })();").unwrap();
+    vm.run_main(0).unwrap();
+    assert_eq!((vm.global_text("r"), vm.global_text("s")), ("2".into(), "true".into()));
+    assert!(load_with("var h = ;", "var r = 1;").err().unwrap().starts_with("host script:"));
+}
+
+#[test]
 fn built_ins_survive_constant_collection_with_many_live_values() {
     // Run in Miri too (one program): sort, map, filter, split, join, slice, splice, concat, bind and Object.entries, all holding many
     // fresh cells while the collector runs at nearly every allocation.

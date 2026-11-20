@@ -15916,3 +15916,97 @@ Matrix. Machine archMachine, `tools/js/cost_matrix.sh -j4`, 817 rows, base `6067
 Tests. Linux: `cargo test --locked -p bare-js-api -p bare-js -p bare --lib`: 32, 1104 (1 ignored) and 1714 (6 ignored) pass. The filters `attr nodelist dataset element elements html reflect nodecmp chardata fragment namespace slot shadow table details svg gaps shims basics handlers cookie scoped custom domexception mutation range select browser_tests` on `bare --lib` (600 tests, 1 ignored): pass plain, with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1`. `bare-js` filters `api_tests host_nt` (50 tests): pass plain and with `BARE_GC_STRESS=1`. Windows 11 VM (`cargo xwin test --no-run`, `winssh`): `bare-js-api` 32, `bare-js` filters `api_tests host_nt` 50, `bare` the same 600-test filters (1 ignored): pass.
 
 Not tested: `BARE_GC_STRESS=1` and `BARE_ALL_API=1` with the whole `bare --lib`; the full `bare --lib` and `bare-js` on Windows; the jemalloc run of every row at `codegen-units=1` (the script runs it only for a row over the limit under glibc); RSS and wall time; the other frames of the call path that stay in the old form (the old `call_host` path is unchanged).
+## 2026-11-20: test262 and differential runners for js2 (gate S2 tools)
+
+Two tools for the gate of stage S2 and the check of S3. A new crate `crates/js-diff` (`bare-js-diff`, `publish = false`) holds both engines in one process, so neither engine crate gets a new dependency. It adds no external dependency. Base: PR #763 (`t3/js2-core-builtins`, not merged yet) merged with the newest main. The only change in `bare-js2` is `script::load_with(host, source)`: a host script runs after the prelude and before the script, as its own script, so a test keeps its directive prologue (1 new test).
+
+### test262 runner
+
+- `crates/js-diff/examples/test262_run.rs`: the harness handling, includes, metadata, `negative` check, strict and sloppy runs, the START/PASS/FAIL/SKIP protocol and the 256 MiB stack of `crates/js/examples/test262_run.rs`, with `ENGINE old|new` as first argument. Modules and async tests are skipped (the new engine has neither). The old engine runs in `BARE_JS_EXEC=tree` (the default of the other examples).
+- `tools/js/test262_js2.sh` runs both engines on the same tests, directory by directory in parallel, and prints the counts of each directory, the tests that pass on the old engine and fail on the new one by directory, and the causes of those failures. `-u` writes `tools/fixtures/js/test262-js2-baseline.txt` (leaf directories, both engines). The pinned revision is the one of `test262-subset.txt` (`e4fbf577`); the script stops at another commit.
+- Selection (`test262-js2-subset.txt`, `test262-js2-skip.txt`): `language` without `module-code`, `import`, `export`, `eval-code` and `statements/with`; `built-ins/Object`, `Function`, `Array`, `Error` and `NativeErrors` (the error subclasses belong to the `Error` step of S2.7). A test runs only when each of its features is in the `allow:` list: plain syntax of ES2015 to ES2022 (classes with fields, private names and static blocks, arrow functions, destructuring, default and rest parameters, spread, templates, `let`, `const`, optional chaining, `??`, logical assignment, `new.target`, `super`) and the S2.7 built-ins. Generators, async, `Symbol`, `BigInt`, `Proxy`, `Reflect`, typed arrays, `Map`, `Set`, `Promise`, modules and `eval` are outside. A test with no feature always runs. Both engines get the same rules, so 11,979 tests are skipped on both and none counts as a failure.
+- The old runner's `$262` has no agent, realm, detach or evalScript. The same holds here (`src/host.js`): the tests that need them are skipped by `text:` rules, as in the old skip file.
+
+Check: three runs on archMachine (`-j 8`, release build) give the same `old.txt`, `new.txt` and `counts.txt` (same md5 for each file). A run takes 126 to 132 s; about 120 s of that is the timeout of one directory (see the hang below). In the first check runs, the text of one failure (`built-ins/Array/prototype/join/prop-desc.js`) held a pointer, so two runs wrote different files. The cause: that test deletes `Array.prototype.join`, and the host script used it, so the test failed on both engines. The host script now keeps its own `join` and `push` (that test passes on both engines now: +1 each), and the runner prints no address.
+
+Counts (tests that run on both engines; `ok` is pass, `no` is fail; 11,979 skipped on both):
+
+```
+  directory                          old ok old no   new ok new no
+  built-ins/Array                      2641     21     1520   1142
+  built-ins/Error                        40     25       32     33
+  built-ins/Function                    371     72      163    280
+  built-ins/NativeErrors                 81      0       36     45
+  built-ins/Object                     3177     26     1495   1708
+  language/arguments-object             109     37       85     61
+  language/asi                          102      0      102      0
+  language/block-scope                   94      0       93      1
+  language/comments                      45      6       43      8
+  language/computed-property-names       36      7       23     20
+  language/destructuring                 17      0       13      4
+  language/directive-prologue            52     10       34     28
+  language/expressions                 5045    363     4006   1402
+  language/function-code                204     13      143     74
+  language/future-reserved-words         55      0       55      0
+  language/global-code                   28      0       21      7
+  language/identifier-resolution         12      1        7      6
+  language/identifiers                  268      0      268      0
+  language/keywords                      25      0       25      0
+  language/line-terminators              32      9       32      9
+  language/literals                     281     57      254     84
+  language/punctuators                   11      0       11      0
+  language/reserved-words                26      0       26      0
+  language/rest-parameters               11      0       10      1
+  language/source-text                    1      0        1      0
+  language/statementList                 40     40       32     48
+  language/statements                  3791    326     3298    819
+  language/types                        109      0       90     19
+  language/white-space                   51     16       26     41
+  total                               16755   1029    11944   5840   (skipped on both: 11979)
+```
+
+The old engine fails 1,029 of the tests that run; the new engine fails 5,840. 4,852 tests pass on the old engine and fail on the new one. 41 tests pass on the new engine and fail on the old one.
+
+Where the 4,852 are (by directory): `built-ins/Object` 1,683, `built-ins/Array` 1,129, `language/expressions` 1,062, `language/statements` 498, `built-ins/Function` 208, `language/function-code` 61, `built-ins/NativeErrors` 45, and 13 smaller directories with 28 or fewer each. The list of each test is the output of the tool (`regress.txt` and `regress-by-cause.txt` in the output directory); it is too long for this file.
+
+Causes, in groups (counts of the 4,852; the first rule that matches wins):
+
+| Count | Cause | Takes it |
+| ---: | --- | --- |
+| 712 | `new String`, `new Number`, `new Boolean` throw: no wrapper objects | S4 `String`, `Number`, `Boolean` |
+| 408 | an expected error is not thrown (early errors and `TypeError` checks that are not built) | S3 |
+| 373 | `TypeError: not a function`: a method of `Object`, `Array` or `Function` is missing | S2.7 follow-up |
+| 325 | property attributes and own properties: `length` and `name` of built-ins, enumerable and writable flags | S2.7 follow-up |
+| 257 | `ToPrimitive` cannot call a script `valueOf` or `toString` (needs a call from inside a conversion) | S2 follow-up (re-entry of the interpreter) |
+| 241 | an `Array` method on an array-like (the method works on an array or `arguments` only) | S2.7 follow-up |
+| 205 | accessors in property descriptors, and copies of accessors (`defineProperty`, `assign`, spread) | S2 follow-up |
+| 187 | a construct that the compiler does not build (`not supported yet`) | S3 |
+| 173 | the `Function` constructor (needs `eval`) | S3 only if the census shows `eval` |
+| 141 / 97 / 81 | `Date` / `RegExp` / `JSON` are not defined | S4 |
+| 63 | a regexp literal | S4 `RegExp` |
+| 44 | `Symbol` is not defined | S4 |
+| 27 / 22 | `EvalError` / `URIError` are not defined | S2.7 follow-up |
+| 1,131 + 308 | other assertions and other errors, one by one (top ones: `Expected SameValue(undefined, ...)` 299, `cannot read properties of undefined` 161, `testResult !== true` 54, `invalid array length` 20) | to sort |
+
+The rest is 13 or fewer for each global (`Proxy`, `Reflect`, typed arrays, `Map`, `Set`, `Promise`, `DataView`, `WeakMap`) and 5 tests that run out of budget.
+
+Engine bugs that the run found (not fixed here):
+
+- A hang: `built-ins/Object/setPrototypeOf/set-failure-cycle.js` never ends in js2 (`Object.setPrototypeOf` accepts a prototype cycle, and a property read loops). The directory process is killed after `T262_DIR_TIMEOUT` (120 s) and the test is counted as a failure.
+- `Object.freeze` does not make the object non-extensible (known gap of S2.7).
+- Where the old engine fails and js2 passes (41), the old engine is wrong in 41 places; the list is in `new.txt` against `old.txt`.
+
+### Differential runner
+
+- `crates/js-diff/src/diff.rs`, `examples/diff_run.rs`, `tests/diff.rs`. The same script runs on both engines in a new realm each. The compared result is what `print` collected plus the value of one global shown by `src/host.js` (`__show`, written in JavaScript and run on both engines, so a difference in the text is a difference in the engines). A thrown value counts by the name of its constructor; a message text is not compared. A construct that an engine refuses (`Out::Unsupported`) is skipped, not a difference.
+- Corpus (256 programs): the 9 `eval_load` programs (`crates/js2/examples/data/eval_*.js`, the old engine's `eval_load` text), the 234 one-line programs of `crates/js2/src/script_tests.rs` (read from the file, so a new test joins the corpus; a program that spans lines is not read), and 8 files in `tools/fixtures/js/diff/` (numbers, strings, objects, arrays, functions, classes, control flow, errors) plus 5 files that hold one known gap each.
+- `tools/fixtures/js/diff-known.txt` lists the 22 differences that exist today, with the reason of each. A known difference does not fail the run. A listed program that no longer differs does fail it ("remove it"), so the list only shrinks. Any other difference exits with status 1.
+- Result today: 234 same, 0 skipped, 22 differ and all 22 known, status 0. All 9 `eval_load` programs are the same on both engines. The known ones are: error message texts (2), call-depth limit against `RangeError` (2), regexp, BigInt, wrapper objects and script `valueOf` (6), `Error.stack`, `Function.prototype.toString`, `toFixed` of a negative zero, `self` and `Symbol` (6), a method that has a `prototype` in js2 (bug), and the 5 gap files: `Array.of` and `flat`; `new` of a bound function, strict assignment to an undeclared name, `Error` `cause`; `Function.length` and a sloppy call with `this === undefined` (bug); integer key order; the exponent form of numbers (`1e21`, `1e-7`, `5e-324`).
+- Planted difference: `tests/diff.rs` runs `print(__engine)`, which differs by design (`__engine` is `'old'` or `'new'`). The runner reports it, and exits with status 1 (`diff_run FILE` with that file: status 1, `diff_run` with the corpus: status 0). Taking a line out of `diff-known.txt` also gives status 1.
+- Runtime: `diff_run` (release) 0.53 s for 3 runs (same each). As a test (`cargo test -p bare-js-diff --test diff`, debug) 4.2 to 7.3 s on archMachine with a load average of 9, so not idle. No CI file changes: `cargo test --workspace` of the `check` job already runs it, and a debug build of both engines is built there for their own tests.
+
+### Tests
+
+`cargo test --locked -p bare-js2 --lib`: 377 pass (376 before, 1 new for `load_with`). `cargo test --locked -p bare-js-diff`: 4 pass (2 unit tests of the reader of the script tests and of the verdict, 2 integration tests). Clippy (`cargo clippy -p bare-js-diff -p bare-js2 --all-targets`): no finding in the new code; the findings that remain are in `crates/js2/examples/object_census.rs` and `bare-js` (not changed here).
+
+Not tested: Windows and macOS (the shell tool needs GNU `find` and `timeout`; the cargo test is portable but not run there); the old engine in `auto` and `byte` modes (only `tree`); Miri on `load_with` (safe code); the `script_tests` programs that span several lines; a second test262 checkout revision; the old engine's modules and async tests (skipped on both); how the counts move when js2 gets a step budget of another size (20,000,000 back edges, the old engine 20,000,000 steps: not the same unit).
