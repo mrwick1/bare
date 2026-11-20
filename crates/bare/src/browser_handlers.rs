@@ -587,11 +587,11 @@ pub(crate) fn lazy_key(d: &Dom, it: &mut Interp<'_>, owner: ObjId, key: &str) ->
     if crate::browser::define_window(d,it,key)? || crate::browser_cssom::define(d,it,key)? { return Ok(()); }
     if crate::browser_svg::define(d,it,key)? || crate::browser_shims::define(d,it,key)? { return Ok(()); }
     match key {
-        "write" => {d.def_method(it,d.p().document,"write",1,crate::browser_loader::document_write)?; return Ok(());},
-        "writeln" => {d.def_method(it,d.p().document,"writeln",1,crate::browser_loader::document_writeln)?; return Ok(());},
+        "write" => {d.def_method_s(it,d.p().document,"write",1,crate::browser_loader::document_write)?; return Ok(());},
+        "writeln" => {d.def_method_s(it,d.p().document,"writeln",1,crate::browser_loader::document_writeln)?; return Ok(());},
         "hasFocus" => {d.def_method(it,d.p().document,"hasFocus",0,crate::browser_gaps::has_focus)?; return Ok(());},
-        "open" => {d.def_method(it,d.p().document,"open",0,crate::browser_loader::document_open)?; return Ok(());},
-        "close" => {d.def_method(it,d.p().document,"close",0,crate::browser_loader::document_close)?; return Ok(());},
+        "open" => {d.def_method_s(it,d.p().document,"open",0,crate::browser_loader::document_open)?; return Ok(());},
+        "close" => {d.def_method_s(it,d.p().document,"close",0,crate::browser_loader::document_close)?; return Ok(());},
         _=>{}
     }
     if matches!(key, "getContext" | "toDataURL") {
