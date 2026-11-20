@@ -5,8 +5,11 @@
 //!   header_load miss N S      N property reads whose cell has one of S shapes, so the check fails and the shape is read
 //!   header_load flags N       N flag changes on string cells (read the flags, set a bit, write the header back), as `Str::mark_atom` does
 //! Count with `tools/js/instr.sh` and subtract the row with N = 0 (or R = 0). The two forms of the header were compared at commit f6d06f8e (`docs/progress.md`, S1.4); only the winner is in `cell.rs` now.
-use bare_js2::cell::{CellHeader, Layout, Shape, Shapes};
+use bare_js2::atoms::{Atoms, SharedAtoms};
+use bare_js2::cell::{CellHeader, Layout};
 use bare_js2::heap::Heap;
+use bare_js2::shapes::Shapes;
+use bare_js2::string::Chars;
 use std::hint::black_box;
 use std::ptr::NonNull;
 
@@ -21,11 +24,18 @@ fn rng(s: &mut u64) -> u64 {
     *s
 }
 
+/// `n` shapes of 2 to 6 properties: a root for each prototype (a cell that is never read), and the keys `k0`, `k1`, ...
 fn shapes(h: &mut Heap, n: usize) -> (Shapes, Vec<CellHeader>) {
     let mut sh = Shapes::default();
+    let mut atoms = Atoms::new(std::sync::Arc::new(SharedAtoms::default()));
+    let keys: Vec<_> = (0..6).map(|i| atoms.intern(h, Chars::One(format!("k{i}").as_bytes())).expect("memory")).collect();
     let hs = (0..n.max(1)).map(|i| {
-        let r = sh.add(h, Shape { layout: Layout::Object, flags: 1, slots: 2 + (i % 5) as u32 }).expect("memory");
-        sh.header(r)
+        let proto = h.alloc(16).expect("memory");
+        let mut s = sh.root(Layout::Object, Some(proto), 6);
+        for &k in &keys[..2 + i % 5] {
+            s = sh.add(s, k, 7).expect("fits");
+        }
+        sh.header(s)
     });
     let hs = hs.collect();
     (sh, hs)

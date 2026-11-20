@@ -4,7 +4,9 @@
 //! Count with `tools/js/instr.sh`; subtract R = 0 for the cost of R collections.
 //!   gc_load chain|tree N R
 use bare_js2::atoms::{Atoms, SharedAtoms};
-use bare_js2::cell::{CellHeader, Layout, Shape, Shapes};
+use bare_js2::cell::{CellHeader, Layout, Shapes};
+use bare_js2::shapes::{A_C, A_E, A_W};
+use bare_js2::string::Chars;
 use bare_js2::gc::{Marker, collect};
 use bare_js2::heap::Heap;
 use bare_js2::value::{Kind, Value};
@@ -18,7 +20,12 @@ fn main() {
         _ => panic!("usage: gc_load chain|tree N R"),
     };
     let (mut heap, mut shapes, mut atoms) = (Heap::default(), Shapes::default(), Atoms::new(Arc::new(SharedAtoms::default())));
-    let shape = shapes.add(&mut heap, Shape { layout: Layout::Object, flags: 0, slots: 4 }).expect("memory");
+    // The shape of every object: the keys k0 to k3. The keys are atoms and a root of the collection keeps them through the shape.
+    let mut shape = shapes.root(Layout::Object, None, 4);
+    let keys: Vec<_> = (0..4).map(|i| atoms.intern(&mut heap, Chars::One(format!("k{i}").as_bytes())).expect("memory")).collect();
+    for &k in &keys {
+        shape = shapes.add(shape, k, A_W | A_E | A_C).expect("memory");
+    }
     let header = shapes.header(shape);
     let cells: Vec<NonNull<u8>> = (0..n)
         .map(|_| {
