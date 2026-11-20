@@ -55,7 +55,8 @@ fn bbox<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s
 }
 fn ctm<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     node(d, s, this)?;
-    old_v(s, |it| crate::browser_matrix::rw_ctor(d, it, Value::Undefined, &[]))
+    let u = s.undefined();
+    crate::browser_matrix::rw_ctor(d, s, u, Args::from_slots(0, 0))
 }
 fn animated<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, name: &str) -> Res<'s, Local<'s>> {
     let n = node(d, s, this)?;
