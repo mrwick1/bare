@@ -36,7 +36,7 @@ use crate::browser_scoped::*;
 use bare_js::eval::Interp;
 use bare_js::value::{ObjId, Value};
 use bare_js::eval::Error as OldError;
-use bare_js_api::{Args, Attrs, Engine, Error, HostFn, Local, Traced, Type};
+use bare_js_api::{Args, Attrs, Error, HostFn, Local, Traced, Type};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::VecDeque;
 
@@ -642,14 +642,6 @@ fn is_reader(d: &Dom, o: Option<ObjId>) -> Option<ObjId> {
     o.filter(|o| d.streams.st.borrow().readers.contains_key(o))
 }
 
-/// A method of `browser_fetch.rs` (it handles the body stream of a `Response`) on the arguments of a call of the new form.
-fn fetch_side<'s>(s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, f: impl FnOnce(&mut Interp<'_>, Value, &[Value]) -> R<Value>) -> Res<'s, Local<'s>> {
-    let it = s.engine();
-    let this = it.raw(this);
-    let args: Vec<Value> = a.iter().map(|l| it.raw(l)).collect();
-    old_v(s, |it| f(it, this, &args))
-}
-
 /// `(locked, disturbed)` of a stream made by script, or `None` if `o` is not one.
 pub(crate) fn lock_state(d: &Dom, o: ObjId) -> Option<(bool, bool)> {
     d.streams.st.borrow().streams.get(&o).map(|s| (s.reader.is_some(), s.disturbed))
@@ -657,7 +649,7 @@ pub(crate) fn lock_state(d: &Dom, o: ObjId) -> Option<(bool, bool)> {
 
 pub(crate) fn locked<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     enter(d, s, |s| {
-        let Some(strm) = is_stream(d, obj_id(s, this)) else { return fetch_side(s, this, a, |it, t, a| crate::browser_fetch::stream_locked(d, it, t, a)) };
+        let Some(strm) = is_stream(d, obj_id(s, this)) else { return crate::browser_fetch::stream_locked(d, s, this, a) };
         let locked = d.streams.st.borrow().streams.get(&strm).is_some_and(|x| x.reader.is_some());
         Ok(s.boolean(locked))
     })
@@ -682,10 +674,10 @@ pub(crate) fn get_reader<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Ar
         }
         let Some(strm) = is_stream(d, obj_id(s, this)) else {
             if byob {
-                fetch_side(s, this, Args::from_slots(0, 0), |it, t, a| crate::browser_fetch::stream_locked(d, it, t, a))?;
+                crate::browser_fetch::stream_locked(d, s, this, Args::from_slots(0, 0))?;
                 return Err(unsupp("ReadableStream BYOB reader"));
             }
-            return fetch_side(s, this, Args::from_slots(0, 0), |it, t, a| crate::browser_fetch::stream_get_reader(d, it, t, a));
+            return crate::browser_fetch::stream_get_reader(d, s, this, Args::from_slots(0, 0));
         };
         if byob {
             return Err(unsupp("ReadableStream BYOB reader"));
@@ -715,7 +707,7 @@ pub(crate) fn get_reader<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Ar
 
 pub(crate) fn cancel<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     enter(d, s, |s| {
-        let Some(strm) = is_stream(d, obj_id(s, this)) else { return fetch_side(s, this, a, |it, t, a| crate::browser_fetch::stream_cancel(d, it, t, a)) };
+        let Some(strm) = is_stream(d, obj_id(s, this)) else { return crate::browser_fetch::stream_cancel(d, s, this, a) };
         if d.streams.st.borrow().streams.get(&strm).is_some_and(|x| x.reader.is_some()) {
             let e = type_value(s, "Cannot cancel a stream that already has a reader")?;
             let p = s.new_promise()?;
@@ -731,7 +723,7 @@ pub(crate) fn cancel<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'
 
 pub(crate) fn read<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     enter(d, s, |s| {
-        let Some(rdr) = is_reader(d, obj_id(s, this)) else { return fetch_side(s, this, a, |it, t, a| crate::browser_fetch::reader_read(d, it, t, a)) };
+        let Some(rdr) = is_reader(d, obj_id(s, this)) else { return crate::browser_fetch::reader_read(d, s, this, a) };
         enum Out<'s> {
             Released,
             Done,
@@ -802,7 +794,7 @@ pub(crate) fn read<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>
 
 pub(crate) fn reader_cancel<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     enter(d, s, |s| {
-        let Some(rdr) = is_reader(d, obj_id(s, this)) else { return fetch_side(s, this, a, |it, t, a| crate::browser_fetch::reader_cancel(d, it, t, a)) };
+        let Some(rdr) = is_reader(d, obj_id(s, this)) else { return crate::browser_fetch::reader_cancel(d, s, this, a) };
         let stream = d.streams.st.borrow().readers.get(&rdr).and_then(|r| r.stream.as_ref().map(oid));
         match stream {
             Some(strm) => {
@@ -821,7 +813,7 @@ pub(crate) fn reader_cancel<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a:
 
 pub(crate) fn release<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     enter(d, s, |s| {
-        let Some(rdr) = is_reader(d, obj_id(s, this)) else { return fetch_side(s, this, a, |it, t, a| crate::browser_fetch::reader_release(d, it, t, a)) };
+        let Some(rdr) = is_reader(d, obj_id(s, this)) else { return crate::browser_fetch::reader_release(d, s, this, a) };
         let reads = {
             let mut st = d.streams.st.borrow_mut();
             let Some(r) = st.readers.get_mut(&rdr) else { return Ok(s.undefined()) };
@@ -954,7 +946,7 @@ pub(crate) fn reader_closed<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a:
         if is_reader(d, obj_id(s, this)).is_some() {
             return gate_closed(d, s, this, a);
         }
-        fetch_side(s, this, a, |it, t, a| crate::browser_fetch::gate_reader_closed(d, it, t, a))
+        crate::browser_fetch::gate_reader_closed(d, s, this, a)
     })
 }
 

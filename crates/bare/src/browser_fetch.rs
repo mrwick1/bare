@@ -82,11 +82,12 @@
 //! Not browser-verified except against Node for the pure parts (`tools/js/fetch_oracle.mjs`).
 
 use crate::browser::{Browser, Dom, IdMap, Kind, Owner, R, unsupported};
+use crate::browser_scoped::*;
 use crate::browser_navigation_url::form_serialize;
 use crate::browser_streams as streams;
 use bare_js::eval::{Error, Interp, LimitKind};
 use bare_js::value::{ObjId, Value};
-use bare_js_api::{HostFn, Persistent, Traced};
+use bare_js_api::{Args, Attrs, Engine, Error as AErr, HostFn, Local, Persistent, Traced, Type};
 use bare_net::http::{Client, Cookies, Ctx, Method, Request as NetRequest};
 use bare_net::parallel::Task;
 use bare_url::{Scheme, Url};
@@ -598,6 +599,11 @@ fn edge(it: &Interp<'_>, o: ObjId) -> Traced<Value> {
     it.trace_value(Value::Object(o))
 }
 
+/// `edge` for code of the new form, which holds no `Interp`.
+fn edge_of(o: ObjId) -> Traced<Value> {
+    Traced::from_raw(Value::Object(o))
+}
+
 /// The object of a traced reference that `edge` made.
 fn oid(t: &Traced<Value>) -> ObjId {
     match *t.raw() {
@@ -855,11 +861,6 @@ impl Dom {
         Ok(s.to_ascii_lowercase())
     }
 
-    fn header_value(&self, it: &mut Interp<'_>, v: Value) -> R<String> {
-        let s = self.string_arg(it, v)?;
-        self.normalize_header_value(it, s)
-    }
-
     fn normalize_header_value(&self, it: &mut Interp<'_>, s: String) -> R<String> {
         let t = s.trim_matches(['\t', '\n', '\r', ' ']);
         if t.chars().any(|c| matches!(c, '\0' | '\r' | '\n') || c as u32 > 0xFF) {
@@ -991,16 +992,6 @@ impl Dom {
         }
     }
 
-    /// Run `f` on the header list of `this` (a Headers). `f` cannot run JS: it holds the borrow.
-    fn on_headers<T>(&self, it: &mut Interp<'_>, this: Value, f: impl FnOnce(&mut HeaderList) -> Result<T, HErr>) -> R<T> {
-        let o = self.brand(it, this)?;
-        let r = match self.fetch.st.borrow_mut().f_get_mut(&o) {
-            Some(F::Headers(h)) => f(h),
-            _ => return Err(it.type_error("Illegal invocation")),
-        };
-        r.map_err(|e| self.herr(it, e))
-    }
-
     fn list_len(&self, o: ObjId) -> usize {
         match self.fetch.st.borrow().f_get(&o) {
             Some(F::Headers(h)) => h.list.len(),
@@ -1118,6 +1109,89 @@ impl Dom {
         match allowed.iter().find(|a| **a == s) {
             Some(a) => Ok(Some(a)),
             None => Err(it.type_error(&format!("The provided value is not a valid enum value of type {name}"))),
+        }
+    }
+}
+
+impl Dom {
+    /// `reserve` for a handler of the new form.
+    fn reserve_s<'s>(&self, s: &mut Sc<'s, '_>, objects: usize, bytes: usize) -> Res<'s, ()> {
+        let lim = self.fl();
+        {
+            let st = self.fetch.st.borrow();
+            if st.objs.len() + objects > lim.max_objects {
+                drop(st);
+                return Err(self.lim_s(s, "fetch-objects"));
+            }
+            if st.retained.saturating_add(st.queued_bytes).saturating_add(bytes) > lim.max_retained {
+                drop(st);
+                return Err(self.lim_s(s, "fetch-retained"));
+            }
+        }
+        s.charge(objects as u64 + (bytes / 64) as u64)
+    }
+
+    /// `add_obj` for a handler of the new form.
+    fn add_obj_s<'s>(&self, s: &mut Sc<'s, '_>, p: Pr, f: F) -> Res<'s, ObjId> {
+        let o = self.obj_s(s, self.fproto(p))?;
+        let k = self.st.borrow_mut().owners.key(Owner::Fetch(o));
+        let l = self.obj_local(s, o);
+        s.set_host_owner(l, k)?;
+        let mut st = self.fetch.st.borrow_mut();
+        match &f {
+            F::Request(r) => st.retained += r.c.body.len(),
+            F::Response(r) => st.retained += r.c.body.len(),
+            F::Reader { .. } => st.readers += 1,
+            _ => {}
+        }
+        st.objs.insert(o, Ent { key: k, f });
+        Ok(o)
+    }
+
+    fn herr_s<'s>(&self, s: &mut Sc<'s, '_>, e: HErr) -> AErr<'s> {
+        match e {
+            HErr::Immutable => s.type_error("Headers are immutable"),
+            HErr::Limit(n) => self.lim_s(s, n),
+        }
+    }
+
+    fn header_name_s<'s>(&self, s: &mut Sc<'s, '_>, v: Local<'s>) -> Res<'s, String> {
+        let t = self.string_arg_s(s, v)?;
+        if t.is_empty() || !t.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)) {
+            return Err(s.type_error("Invalid header name"));
+        }
+        Ok(t.to_ascii_lowercase())
+    }
+
+    fn header_value_s<'s>(&self, s: &mut Sc<'s, '_>, v: Local<'s>) -> Res<'s, String> {
+        let t = self.string_arg_s(s, v)?;
+        let t = t.trim_matches(['\t', '\n', '\r', ' ']);
+        if t.chars().any(|c| matches!(c, '\0' | '\r' | '\n') || c as u32 > 0xFF) {
+            return Err(s.type_error("Invalid header value"));
+        }
+        if !t.is_ascii() {
+            return Err(unsupp("non-ASCII header value (the wire encoding is not Latin-1 safe)"));
+        }
+        Ok(t.to_string())
+    }
+
+    fn brand_s<'s>(&self, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, ObjId> {
+        match obj_id(s, this).filter(|o| self.fetch.st.borrow().objs.contains_key(o)) {
+            Some(o) => Ok(o),
+            None => Err(s.type_error("Illegal invocation")),
+        }
+    }
+
+    /// Run `f` on the header list of `this` (a Headers). `f` cannot run JS: it holds the borrow.
+    fn on_headers_s<'s, T>(&self, s: &mut Sc<'s, '_>, this: Local<'s>, f: impl FnOnce(&mut HeaderList) -> Result<T, HErr>) -> Res<'s, T> {
+        let o = self.brand_s(s, this)?;
+        let r = match self.fetch.st.borrow_mut().f_get_mut(&o) {
+            Some(F::Headers(h)) => f(h),
+            _ => return Err(s.type_error("Illegal invocation")),
+        };
+        match r {
+            Ok(v) => Ok(v),
+            Err(e) => Err(self.herr_s(s, e)),
         }
     }
 }
@@ -1273,6 +1347,16 @@ pub(crate) fn settle(it: &mut Interp<'_>, p: Value, r: R<Value>) -> R<Value> {
     Ok(p)
 }
 
+/// `settle` for a handler of the new form.
+pub(crate) fn settle_s<'s>(s: &mut Sc<'s, '_>, p: Local<'s>, r: Res<'s, Local<'s>>) -> Res<'s, Local<'s>> {
+    match r {
+        Ok(v) => s.resolve_promise(p, v)?,
+        Err(AErr::Throw(v)) => s.reject_promise(p, v)?,
+        Err(e) => return Err(e),
+    }
+    Ok(p)
+}
+
 /// The abort algorithm of a queued request: reject its promise with `reason`. A request that already left the queue is not touched.
 pub(crate) fn abort_queued(d: &Dom, it: &mut Interp<'_>, promise: Value, reason: Value) -> R<()> {
     let found = {
@@ -1316,109 +1400,116 @@ fn arg(a: &[Value], i: usize) -> Value {
     a.get(i).copied().unwrap_or(Value::Undefined)
 }
 
-fn headers_append(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    let (n, v) = (d.header_name(it, arg(a, 0))?, d.header_value(it, arg(a, 1))?);
+fn headers_append<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (x, y) = (arg_s(s, a, 0), arg_s(s, a, 1));
+    let (n, v) = (d.header_name_s(s, x)?, d.header_value_s(s, y)?);
     let lim = d.fl();
-    d.on_headers(it, this, |h| h.append(&lim, n, v))?;
-    Ok(Value::Undefined)
+    d.on_headers_s(s, this, |h| h.append(&lim, n, v))?;
+    Ok(s.undefined())
 }
 
-fn headers_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    let (n, v) = (d.header_name(it, arg(a, 0))?, d.header_value(it, arg(a, 1))?);
+fn headers_set<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (x, y) = (arg_s(s, a, 0), arg_s(s, a, 1));
+    let (n, v) = (d.header_name_s(s, x)?, d.header_value_s(s, y)?);
     let lim = d.fl();
-    d.on_headers(it, this, |h| h.set(&lim, n, v))?;
-    Ok(Value::Undefined)
+    d.on_headers_s(s, this, |h| h.set(&lim, n, v))?;
+    Ok(s.undefined())
 }
 
-fn headers_delete(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    let n = d.header_name(it, arg(a, 0))?;
-    d.on_headers(it, this, |h| h.delete(&n))?;
-    Ok(Value::Undefined)
+fn headers_delete<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let x = arg_s(s, a, 0);
+    let n = d.header_name_s(s, x)?;
+    d.on_headers_s(s, this, |h| h.delete(&n))?;
+    Ok(s.undefined())
 }
 
-fn headers_get(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    let n = d.header_name(it, arg(a, 0))?;
-    match d.on_headers(it, this, |h| Ok(h.get(&n)))? {
-        Some(v) => d.js_str(it, &v),
-        None => Ok(Value::Null),
+fn headers_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let x = arg_s(s, a, 0);
+    let n = d.header_name_s(s, x)?;
+    match d.on_headers_s(s, this, |h| Ok(h.get(&n)))? {
+        Some(v) => d.js_str_s(s, &v),
+        None => Ok(s.null()),
     }
 }
 
-fn headers_has(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    let n = d.header_name(it, arg(a, 0))?;
-    Ok(Value::Bool(d.on_headers(it, this, |h| Ok(h.get(&n).is_some()))?))
+fn headers_has<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let x = arg_s(s, a, 0);
+    let n = d.header_name_s(s, x)?;
+    let has = d.on_headers_s(s, this, |h| Ok(h.get(&n).is_some()))?;
+    Ok(s.boolean(has))
 }
 
-fn headers_get_set_cookie(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    d.on_headers(it, this, |_| Ok(()))?;
-    it.array_from(&[])
+fn headers_get_set_cookie<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    d.on_headers_s(s, this, |_| Ok(()))?;
+    s.new_array(&[])
 }
 
-fn headers_for_each(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    let cb = arg(a, 0);
-    if !it.is_callable_value(cb) {
-        return Err(it.type_error("Failed to execute 'forEach' on 'Headers': parameter 1 is not of type 'Function'."));
+fn headers_for_each<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (cb, this_arg) = (arg_s(s, a, 0), arg_s(s, a, 1));
+    if !s.is_callable(cb) {
+        return Err(s.type_error("Failed to execute 'forEach' on 'Headers': parameter 1 is not of type 'Function'."));
     }
-    let snapshot = d.on_headers(it, this, |h| Ok(h.sorted()))?;
-    it.charge(snapshot.len() as u64)?;
+    let snapshot = d.on_headers_s(s, this, |h| Ok(h.sorted()))?;
+    s.charge(snapshot.len() as u64)?;
     for (n, v) in snapshot {
-        let (jv, jn) = (d.js_str(it, &v)?, d.js_str(it, &n)?);
-        it.call(cb, arg(a, 1), &[jv, jn, this])?;
+        let (jv, jn) = (d.js_str_s(s, &v)?, d.js_str_s(s, &n)?);
+        s.call(cb, this_arg, &[jv, jn, this])?;
     }
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-/// `keys()`, `values()` and `entries()` (kind 0, 1, 2): a live iterator. Each `next` reads the sorted, combined list again,
-/// so a header added or deleted during the loop shows (the index goes on, as the standard says).
-fn make_iter(d: &Dom, it: &mut Interp<'_>, this: Value, kind: u8) -> R<Value> {
-    d.on_headers(it, this, |_| Ok(()))?;
-    let Value::Object(headers) = this else { return Err(it.type_error("Illegal invocation")) };
-    d.reserve(it, 1, 0)?;
-    Ok(Value::Object(d.add_obj(it, Pr::HeadersIter, F::HeadersIter { headers: edge(it, headers), idx: 0, kind })?))
+fn make_iter<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, kind: u8) -> Res<'s, Local<'s>> {
+    d.on_headers_s(s, this, |_| Ok(()))?;
+    let Some(headers) = obj_id(s, this) else { return Err(s.type_error("Illegal invocation")) };
+    d.reserve_s(s, 1, 0)?;
+    let o = d.add_obj_s(s, Pr::HeadersIter, F::HeadersIter { headers: edge_of(headers), idx: 0, kind })?;
+    Ok(d.obj_local(s, o))
 }
 
-fn headers_keys(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    make_iter(d, it, this, 0)
+fn headers_keys<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    make_iter(d, s, this, 0)
 }
-fn headers_values(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    make_iter(d, it, this, 1)
+fn headers_values<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    make_iter(d, s, this, 1)
 }
-fn headers_entries(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    make_iter(d, it, this, 2)
+fn headers_entries<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    make_iter(d, s, this, 2)
 }
 
-fn headers_iter_next(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    let o = d.brand(it, this)?;
+fn headers_iter_next<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = d.brand_s(s, this)?;
     let (headers, idx, kind) = match d.fetch.st.borrow().f_get(&o) {
         Some(F::HeadersIter { headers, idx, kind }) => (oid(headers), *idx, *kind),
-        _ => return Err(it.type_error("Illegal invocation")),
+        _ => return Err(s.type_error("Illegal invocation")),
     };
-    it.charge(1 + d.list_len(headers) as u64)?;
+    s.charge(1 + d.list_len(headers) as u64)?;
     let item = match d.fetch.st.borrow().f_get(&headers) {
         Some(F::Headers(h)) => h.nth_sorted(idx),
         _ => None,
     };
     let (value, done) = match item {
-        None => (Value::Undefined, true),
+        None => (s.undefined(), true),
         Some((n, v)) => {
             if let Some(F::HeadersIter { idx, .. }) = d.fetch.st.borrow_mut().f_get_mut(&o) {
                 *idx += 1;
             }
             match kind {
-                0 => (d.js_str(it, &n)?, false),
-                1 => (d.js_str(it, &v)?, false),
+                0 => (d.js_str_s(s, &n)?, false),
+                1 => (d.js_str_s(s, &v)?, false),
                 _ => {
-                    let (jn, jv) = (d.js_str(it, &n)?, d.js_str(it, &v)?);
-                    (it.array_from(&[jn, jv])?, false)
+                    let (jn, jv) = (d.js_str_s(s, &n)?, d.js_str_s(s, &v)?);
+                    (s.new_array(&[jn, jv])?, false)
                 }
             }
         }
     };
-    let r = d.obj(it, it.object_prototype())?;
-    let (kv, kd) = (d.key(it, "value")?, d.key(it, "done")?);
-    it.define_data(r, kv, value, true, true, true)?;
-    it.define_data(r, kd, Value::Bool(done), true, true, true)?;
-    Ok(Value::Object(r))
+    let op = s.engine().object_prototype();
+    let r = d.obj_s(s, op)?;
+    let r = d.obj_local(s, r);
+    s.define_str(r, "value", value, Attrs::ALL)?;
+    let done = s.boolean(done);
+    s.define_str(r, "done", done, Attrs::ALL)?;
+    Ok(r)
 }
 
 // ---------------------------------------------------------------------------------------------- Request and Response
@@ -1536,7 +1627,10 @@ pub(crate) fn bytes_stream(d: &Dom, it: &mut Interp<'_>, bytes: Vec<u8>) -> R<Va
     let h = d.headers_obj(it, HeaderList::new(Guard::Immutable))?;
     let r = RespData { c: Common { headers: edge(it, h), body: Body::new(Some(Rc::new(bytes))) }, status: 200, status_text: String::new(), url: String::new(), redirected: false, ty: "default", stream: None };
     let o = d.add_obj(it, Pr::Response, F::Response(r))?;
-    resp_body(d, it, Value::Object(o), &[])
+    run_v(it, |s| {
+        let l = d.obj_local(s, o);
+        resp_body(d, s, l, Args::from_slots(0, 0))
+    })
 }
 
 /// `(locked, disturbed)` of a ReadableStream: one made by script, or the `body` of a response. `None` if `o` is not a stream.
@@ -1604,35 +1698,49 @@ fn with_resp<T>(d: &Dom, it: &mut Interp<'_>, this: Value, f: impl FnOnce(&RespD
     }
 }
 
-fn str_val(d: &Dom, it: &mut Interp<'_>, s: String) -> R<Value> {
-    d.js_str(it, &s)
+fn with_req_s<'s, T>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, f: impl FnOnce(&ReqData) -> T) -> Res<'s, T> {
+    let o = d.brand_s(s, this)?;
+    match d.fetch.st.borrow().f_get(&o) {
+        Some(F::Request(r)) => Ok(f(r)),
+        _ => Err(s.type_error("Illegal invocation")),
+    }
 }
 
-fn req_method(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    let s = with_req(d, it, this, |r| r.method.clone())?;
-    str_val(d, it, s)
+fn with_resp_s<'s, T>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, f: impl FnOnce(&RespData) -> T) -> Res<'s, T> {
+    let o = d.brand_s(s, this)?;
+    match d.fetch.st.borrow().f_get(&o) {
+        Some(F::Response(r)) => Ok(f(r)),
+        _ => Err(s.type_error("Illegal invocation")),
+    }
 }
-fn req_url(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    let s = with_req(d, it, this, |r| r.url.to_string())?;
-    str_val(d, it, s)
+
+fn req_method<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let v = with_req_s(d, s, this, |r| r.method.clone())?;
+    d.js_str_s(s, &v)
 }
-fn req_headers(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    Ok(Value::Object(with_req(d, it, this, |r| oid(&r.c.headers))?))
+fn req_url<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let v = with_req_s(d, s, this, |r| r.url.to_string())?;
+    d.js_str_s(s, &v)
 }
-fn req_redirect(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    let s = with_req(d, it, this, |r| match r.redirect { Redirect::Follow => "follow", Redirect::Error => "error", Redirect::Manual => "manual" }.to_string())?;
-    str_val(d, it, s)
+fn req_headers<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = with_req_s(d, s, this, |r| oid(&r.c.headers))?;
+    Ok(d.obj_local(s, o))
 }
-fn req_credentials(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    let s = with_req(d, it, this, |r| r.credentials.to_string())?;
-    str_val(d, it, s)
+fn req_redirect<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let v = with_req_s(d, s, this, |r| match r.redirect { Redirect::Follow => "follow", Redirect::Error => "error", Redirect::Manual => "manual" })?;
+    d.js_str_s(s, v)
 }
-fn req_mode(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    let s = with_req(d, it, this, |r| r.mode.to_string())?;
-    str_val(d, it, s)
+fn req_credentials<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let v = with_req_s(d, s, this, |r| r.credentials)?;
+    d.js_str_s(s, v)
 }
-fn req_body_used(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    Ok(Value::Bool(with_req(d, it, this, |r| r.c.body.used)?))
+fn req_mode<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let v = with_req_s(d, s, this, |r| r.mode)?;
+    d.js_str_s(s, v)
+}
+fn req_body_used<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let v = with_req_s(d, s, this, |r| r.c.body.used)?;
+    Ok(s.boolean(v))
 }
 fn req_clone(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
     let (method, url, redirect, credentials, mode, hdr, body, used, signal) = with_req(d, it, this, |r| (r.method.clone(), dup(&r.url), r.redirect, r.credentials, r.mode, oid(&r.c.headers), r.c.body.bytes.clone(), r.c.body.used || r.c.body.locked, r.signal.as_ref().map(oid)))?;
@@ -1654,38 +1762,43 @@ fn req_signal(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value
     }
     Ok(Value::Object(s))
 }
-fn gate_request_body(_: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
-    Err(Error::Unsupported(unsupported("Request.body (a request body stream)")))
+fn gate_request_body<'s>(_: &Dom, _: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    Err(unsupp("Request.body (a request body stream)"))
 }
 
-fn resp_status(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    Ok(Value::Number(with_resp(d, it, this, |r| r.status)? as f64))
+fn resp_status<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let v = with_resp_s(d, s, this, |r| r.status)?;
+    Ok(s.number(v as f64))
 }
-fn resp_ok(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    Ok(Value::Bool(with_resp(d, it, this, |r| (200..300).contains(&r.status))?))
+fn resp_ok<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let v = with_resp_s(d, s, this, |r| (200..300).contains(&r.status))?;
+    Ok(s.boolean(v))
 }
-fn resp_status_text(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    let s = with_resp(d, it, this, |r| r.status_text.clone())?;
-    str_val(d, it, s)
+fn resp_status_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let v = with_resp_s(d, s, this, |r| r.status_text.clone())?;
+    d.js_str_s(s, &v)
 }
-fn resp_url(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    let s = with_resp(d, it, this, |r| r.url.clone())?;
-    str_val(d, it, s)
+fn resp_url<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let v = with_resp_s(d, s, this, |r| r.url.clone())?;
+    d.js_str_s(s, &v)
 }
-fn resp_redirected(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    Ok(Value::Bool(with_resp(d, it, this, |r| r.redirected)?))
+fn resp_redirected<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let v = with_resp_s(d, s, this, |r| r.redirected)?;
+    Ok(s.boolean(v))
 }
-fn resp_type(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    let s = with_resp(d, it, this, |r| r.ty.to_string())?;
-    str_val(d, it, s)
+fn resp_type<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let v = with_resp_s(d, s, this, |r| r.ty)?;
+    d.js_str_s(s, v)
 }
-fn resp_headers(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    Ok(Value::Object(with_resp(d, it, this, |r| oid(&r.c.headers))?))
+fn resp_headers<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = with_resp_s(d, s, this, |r| oid(&r.c.headers))?;
+    Ok(d.obj_local(s, o))
 }
-fn resp_body_used(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    let used = with_resp(d, it, this, |r| r.c.body.used)?;
-    let src = d.brand(it, this).ok().and_then(|o| stream_src(d, o));
-    Ok(Value::Bool(used || src.and_then(|s| lock_state(d, s)).is_some_and(|ld| ld.1)))
+fn resp_body_used<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let used = with_resp_s(d, s, this, |r| r.c.body.used)?;
+    let src = d.brand_s(s, this).ok().and_then(|o| stream_src(d, o));
+    let v = used || src.and_then(|x| lock_state(d, x)).is_some_and(|ld| ld.1);
+    Ok(s.boolean(v))
 }
 fn resp_clone(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
     let (c_hdr, body, used, status, text, url, redirected, ty) =
@@ -1712,14 +1825,13 @@ enum As {
     Buffer,
 }
 
-/// Take the whole body (the one consumer). `TypeError` if it is used or locked.
-fn take_body(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<Option<Rc<Vec<u8>>>> {
-    let o = d.brand(it, this)?;
+fn take_body<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, Option<Rc<Vec<u8>>>> {
+    let o = d.brand_s(s, this)?;
     let mut st = d.fetch.st.borrow_mut();
-    let Some(c) = common(&mut st, o) else { return Err(it.type_error("Illegal invocation")) };
+    let Some(c) = common(&mut st, o) else { return Err(s.type_error("Illegal invocation")) };
     if c.body.used || c.body.locked {
         let msg = if c.body.used { "Body has already been consumed." } else { "Body is locked." };
-        return Err(it.type_error(msg));
+        return Err(s.type_error(msg));
     }
     // A `null` body is never "used".
     c.body.used = c.body.bytes.is_some();
@@ -1729,8 +1841,8 @@ fn take_body(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<Option<Rc<Vec<u8>>>
     Ok(bytes)
 }
 
-fn consume(d: &Dom, it: &mut Interp<'_>, this: Value, how: As) -> R<Value> {
-    if let Value::Object(o) = this && let Some(src) = stream_src(d, o) {
+fn consume<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, how: As) -> Res<'s, Local<'s>> {
+    if let Some(o) = obj_id(s, this) && let Some(src) = stream_src(d, o) {
         let kind = match how {
             As::Blob => "blob",
             As::Form => "formData",
@@ -1738,146 +1850,161 @@ fn consume(d: &Dom, it: &mut Interp<'_>, this: Value, how: As) -> R<Value> {
             As::Json => "json",
             As::Buffer => "arrayBuffer",
         };
-        return drain_stream(d, it, o, src, kind);
+        return old_v(s, |it| drain_stream(d, it, o, src, kind));
     }
-    let p = it.host_new_promise()?;
-    let r = (|| -> R<Value> {
+    let p = s.new_promise()?;
+    let r = (|| -> Res<'s, Local<'s>> {
         let ct = match how {
             As::Blob | As::Form => {
-                let o = d.brand(it, this)?;
+                let o = d.brand_s(s, this)?;
                 let h = common(&mut d.fetch.st.borrow_mut(), o).map(|c| oid(&c.headers));
                 h.and_then(|h| d.list_of(h).get("content-type")).unwrap_or_default()
             }
             _ => String::new(),
         };
-        let bytes = take_body(d, it, this)?;
+        let bytes = take_body(d, s, this)?;
         let bytes = bytes.unwrap_or_default();
         let n = bytes.len();
         match how {
             As::Blob => {
-                it.charge((n / 64) as u64)?;
-                crate::browser_web::blob_from_bytes(d, it, Rc::try_unwrap(bytes).unwrap_or_else(|rc| (*rc).clone()), ct)
+                s.charge((n / 64) as u64)?;
+                old_v(s, |it| crate::browser_web::blob_from_bytes(d, it, Rc::try_unwrap(bytes).unwrap_or_else(|rc| (*rc).clone()), ct))
             }
             As::Form => {
-                it.charge((n / 16) as u64)?;
-                crate::browser_web::form_from(d, it, &bytes, &ct)?.ok_or_else(|| it.type_error("Failed to fetch"))
+                s.charge((n / 16) as u64)?;
+                match old(s, |it| crate::browser_web::form_from(d, it, &bytes, &ct))? {
+                    Some(v) => Ok(s.engine().raw_local(&v)),
+                    None => Err(s.type_error("Failed to fetch")),
+                }
             }
             As::Buffer => {
-                it.charge((n / 64) as u64)?;
+                s.charge((n / 64) as u64)?;
                 let v = Rc::try_unwrap(bytes).unwrap_or_else(|rc| (*rc).clone());
-                it.new_array_buffer(v)
+                s.new_array_buffer(v)
             }
             As::Text | As::Json => {
-                it.charge((n / 16) as u64)?;
+                s.charge((n / 16) as u64)?;
                 let body = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&bytes);
                 let text = String::from_utf8_lossy(body);
-                let s = d.js_text(it, &text)?;
+                // `js_text`: an equal live text is the same string.
+                let text = old_v(s, |it| d.js_text(it, &text))?;
                 if let As::Text = how {
-                    return Ok(s);
+                    return Ok(text);
                 }
-                let Some(parse) = d.fetch.json_parse.get().map(|p| it.persistent_value(p)) else { return Err(Error::Unsupported(unsupported("Body.json without JSON.parse"))) };
-                it.charge((n / 16) as u64)?;
-                it.call(parse, Value::Undefined, &[s])
+                let Some(parse) = d.fetch.json_parse.get().map(|p| s.local(p)) else { return Err(unsupp("Body.json without JSON.parse")) };
+                s.charge((n / 16) as u64)?;
+                let u = s.undefined();
+                s.call(parse, u, &[text])
             }
         }
     })();
-    settle(it, p, r)
+    settle_s(s, p, r)
 }
 
-fn body_text(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    consume(d, it, this, As::Text)
+fn body_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    consume(d, s, this, As::Text)
 }
-fn body_json(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    consume(d, it, this, As::Json)
+fn body_json<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    consume(d, s, this, As::Json)
 }
-fn body_array_buffer(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    consume(d, it, this, As::Buffer)
+fn body_array_buffer<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    consume(d, s, this, As::Buffer)
 }
-fn body_blob(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    consume(d, it, this, As::Blob)
+fn body_blob<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    consume(d, s, this, As::Blob)
 }
-fn body_form_data(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    consume(d, it, this, As::Form)
+fn body_form_data<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    consume(d, s, this, As::Form)
 }
 
 // ---------------------------------------------------------------------------------------------- streams
 
-fn resp_body(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    let o = d.brand(it, this)?;
+fn resp_body<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = d.brand_s(s, this)?;
     let (stream, has_body) = match d.fetch.st.borrow().f_get(&o) {
         Some(F::Response(r)) => (r.stream.as_ref().map(oid), r.c.body.bytes.is_some() || r.c.body.used),
-        _ => return Err(it.type_error("Illegal invocation")),
+        _ => return Err(s.type_error("Illegal invocation")),
     };
-    if let Some(s) = stream {
-        return Ok(Value::Object(s));
+    if let Some(x) = stream {
+        return Ok(d.obj_local(s, x));
     }
     if !has_body {
-        return Ok(Value::Null);
+        return Ok(s.null());
     }
-    d.reserve(it, 1, 0)?;
-    let s = d.add_obj(it, Pr::Stream, F::Stream(edge(it, o)))?;
+    d.reserve_s(s, 1, 0)?;
+    let x = d.add_obj_s(s, Pr::Stream, F::Stream(edge_of(o)))?;
     if let Some(F::Response(r)) = d.fetch.st.borrow_mut().f_get_mut(&o) {
-        r.stream = Some(edge(it, s));
+        r.stream = Some(edge_of(x));
     }
-    Ok(Value::Object(s))
+    Ok(d.obj_local(s, x))
 }
 
 fn illegal(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
     Err(it.type_error("Illegal constructor"))
 }
 
-fn stream_owner(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<(ObjId, ObjId)> {
-    let o = d.brand(it, this)?;
+fn stream_owner<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, (ObjId, ObjId)> {
+    let o = d.brand_s(s, this)?;
     match d.fetch.st.borrow().f_get(&o) {
         Some(F::Stream(r)) => Ok((o, oid(r))),
-        _ => Err(it.type_error("Illegal invocation")),
+        _ => Err(s.type_error("Illegal invocation")),
     }
 }
 
-pub(crate) fn stream_locked(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    let (_, r) = stream_owner(d, it, this)?;
+pub(crate) fn stream_locked<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let (_, r) = stream_owner(d, s, this)?;
     let locked = match d.fetch.st.borrow().f_get(&r) {
         Some(F::Response(r)) => r.c.body.locked,
         _ => false,
     };
-    Ok(Value::Bool(locked))
+    Ok(s.boolean(locked))
 }
 
-pub(crate) fn stream_get_reader(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    let (s, r) = stream_owner(d, it, this)?;
-    if !matches!(arg(a, 0), Value::Undefined) {
-        let mode = d.prop(it, arg(a, 0), "mode")?;
-        if !matches!(mode, Value::Undefined) {
-            return Err(Error::Unsupported(unsupported("ReadableStream BYOB reader")));
+pub(crate) fn stream_get_reader<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (x, r) = stream_owner(d, s, this)?;
+    let opts = arg_s(s, a, 0);
+    if s.type_of(opts) != Type::Undefined {
+        let mode = s.get_str(opts, "mode")?;
+        if s.type_of(mode) != Type::Undefined {
+            return Err(unsupp("ReadableStream BYOB reader"));
         }
     }
     if d.fetch.st.borrow().readers >= d.fl().max_readers {
-        return Err(d.lim("fetch-readers"));
+        return Err(d.lim_s(s, "fetch-readers"));
     }
-    d.reserve(it, 1, 0)?;
+    d.reserve_s(s, 1, 0)?;
     {
         let mut st = d.fetch.st.borrow_mut();
         match st.f_get_mut(&r) {
             Some(F::Response(resp)) if !resp.c.body.locked => resp.c.body.locked = true,
-            _ => return Err(it.type_error("ReadableStream is locked")),
+            _ => {
+                drop(st);
+                return Err(s.type_error("ReadableStream is locked"));
+            }
         }
     }
-    Ok(Value::Object(d.add_obj(it, Pr::Reader, F::Reader { stream: edge(it, s), released: false })?))
+    let o = d.add_obj_s(s, Pr::Reader, F::Reader { stream: edge_of(x), released: false })?;
+    Ok(d.obj_local(s, o))
 }
 
-pub(crate) fn stream_cancel(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    let p = it.host_new_promise()?;
-    let r = (|| -> R<Value> {
-        let (_, resp) = stream_owner(d, it, this)?;
+pub(crate) fn stream_cancel<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let p = s.new_promise()?;
+    let r = (|| -> Res<'s, Local<'s>> {
+        let (_, resp) = stream_owner(d, s, this)?;
         let mut st = d.fetch.st.borrow_mut();
-        let Some(c) = common(&mut st, resp) else { return Err(it.type_error("Illegal invocation")) };
+        let Some(c) = common(&mut st, resp) else {
+            drop(st);
+            return Err(s.type_error("Illegal invocation"));
+        };
         if c.body.locked {
-            return Err(it.type_error("Cannot cancel a stream that already has a reader"));
+            drop(st);
+            return Err(s.type_error("Cannot cancel a stream that already has a reader"));
         }
         drop_body(&mut st, resp);
-        Ok(Value::Undefined)
+        drop(st);
+        Ok(s.undefined())
     })();
-    settle(it, p, r)
+    settle_s(s, p, r)
 }
 
 /// Mark the body used and free its bytes.
@@ -1890,30 +2017,33 @@ fn drop_body(st: &mut FetchState, o: ObjId) {
     }
 }
 
-fn reader_parts(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<(ObjId, ObjId, bool)> {
-    let o = d.brand(it, this)?;
+fn reader_parts<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, (ObjId, ObjId, bool)> {
+    let o = d.brand_s(s, this)?;
     let (stream, released) = match d.fetch.st.borrow().f_get(&o) {
         Some(F::Reader { stream, released }) => (oid(stream), *released),
-        _ => return Err(it.type_error("Illegal invocation")),
+        _ => return Err(s.type_error("Illegal invocation")),
     };
     let resp = match d.fetch.st.borrow().f_get(&stream) {
         Some(F::Stream(r)) => oid(r),
-        _ => return Err(it.type_error("Illegal invocation")),
+        _ => return Err(s.type_error("Illegal invocation")),
     };
     Ok((o, resp, released))
 }
 
-pub(crate) fn reader_read(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    let p = it.host_new_promise()?;
-    let r = (|| -> R<Value> {
-        let (_, resp, released) = reader_parts(d, it, this)?;
+pub(crate) fn reader_read<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let p = s.new_promise()?;
+    let r = (|| -> Res<'s, Local<'s>> {
+        let (_, resp, released) = reader_parts(d, s, this)?;
         if released {
-            return Err(it.type_error("This readable stream reader has been released and cannot be used to read from its previous owner stream"));
+            return Err(s.type_error("This readable stream reader has been released and cannot be used to read from its previous owner stream"));
         }
         let chunk_max = d.fl().chunk_bytes.max(1);
         let chunk = {
             let mut st = d.fetch.st.borrow_mut();
-            let Some(c) = common(&mut st, resp) else { return Err(it.type_error("Illegal invocation")) };
+            let Some(c) = common(&mut st, resp) else {
+                drop(st);
+                return Err(s.type_error("Illegal invocation"));
+            };
             c.body.used = true;
             let total = c.body.len();
             if c.body.pos >= total {
@@ -1927,11 +2057,11 @@ pub(crate) fn reader_read(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]
         let (value, done) = match chunk {
             None => {
                 drop_body(&mut d.fetch.st.borrow_mut(), resp);
-                (Value::Undefined, true)
+                (s.undefined(), true)
             }
             Some((bytes, pos, n)) => {
-                it.charge((n / 64) as u64)?;
-                let v = it.new_uint8_array(bytes[pos..pos + n].to_vec())?;
+                s.charge((n / 64) as u64)?;
+                let v = s.new_uint8_array(bytes[pos..pos + n].to_vec())?;
                 let mut st = d.fetch.st.borrow_mut();
                 let finished = match common(&mut st, resp) {
                     Some(c) => {
@@ -1952,30 +2082,32 @@ pub(crate) fn reader_read(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]
                 (v, false)
             }
         };
-        let res = d.obj(it, it.object_prototype())?;
-        let (kv, kd) = (d.key(it, "value")?, d.key(it, "done")?);
-        it.define_data(res, kv, value, true, true, true)?;
-        it.define_data(res, kd, Value::Bool(done), true, true, true)?;
-        Ok(Value::Object(res))
+        let op = s.engine().object_prototype();
+        let res = d.obj_s(s, op)?;
+        let res = d.obj_local(s, res);
+        s.define_str(res, "value", value, Attrs::ALL)?;
+        let done = s.boolean(done);
+        s.define_str(res, "done", done, Attrs::ALL)?;
+        Ok(res)
     })();
-    settle(it, p, r)
+    settle_s(s, p, r)
 }
 
-pub(crate) fn reader_cancel(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    let p = it.host_new_promise()?;
-    let r = (|| -> R<Value> {
-        let (_, resp, released) = reader_parts(d, it, this)?;
+pub(crate) fn reader_cancel<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let p = s.new_promise()?;
+    let r = (|| -> Res<'s, Local<'s>> {
+        let (_, resp, released) = reader_parts(d, s, this)?;
         if released {
-            return Err(it.type_error("This readable stream reader has been released and cannot be used to cancel its previous owner stream"));
+            return Err(s.type_error("This readable stream reader has been released and cannot be used to cancel its previous owner stream"));
         }
         drop_body(&mut d.fetch.st.borrow_mut(), resp);
-        Ok(Value::Undefined)
+        Ok(s.undefined())
     })();
-    settle(it, p, r)
+    settle_s(s, p, r)
 }
 
-pub(crate) fn reader_release(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    let (o, resp, released) = reader_parts(d, it, this)?;
+pub(crate) fn reader_release<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let (o, resp, released) = reader_parts(d, s, this)?;
     if !released {
         let mut st = d.fetch.st.borrow_mut();
         if let Some(F::Reader { released, .. }) = st.f_get_mut(&o) {
@@ -1985,11 +2117,11 @@ pub(crate) fn reader_release(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Val
             c.body.locked = false;
         }
     }
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-pub(crate) fn gate_reader_closed(_: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
-    Err(Error::Unsupported(unsupported("ReadableStreamDefaultReader.closed")))
+pub(crate) fn gate_reader_closed<'s>(_: &Dom, _: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    Err(unsupp("ReadableStreamDefaultReader.closed"))
 }
 
 // ---------------------------------------------------------------------------------------------- fetch
@@ -2893,47 +3025,47 @@ struct Def {
 }
 
 static DEFS: &[Def] = &[
-    Def { on: Headers, name: "append", len: 2, kind: M(headers_append) },
-    Def { on: Headers, name: "delete", len: 1, kind: M(headers_delete) },
-    Def { on: Headers, name: "get", len: 1, kind: M(headers_get) },
-    Def { on: Headers, name: "getSetCookie", len: 0, kind: M(headers_get_set_cookie) },
-    Def { on: Headers, name: "has", len: 1, kind: M(headers_has) },
-    Def { on: Headers, name: "set", len: 2, kind: M(headers_set) },
-    Def { on: Headers, name: "forEach", len: 1, kind: M(headers_for_each) },
-    Def { on: Headers, name: "entries", len: 0, kind: M(headers_entries) },
-    Def { on: Headers, name: "keys", len: 0, kind: M(headers_keys) },
-    Def { on: Headers, name: "values", len: 0, kind: M(headers_values) },
-    Def { on: HeadersIter, name: "next", len: 0, kind: M(headers_iter_next) },
-    Def { on: Request, name: "method", len: 0, kind: G(req_method) },
-    Def { on: Request, name: "url", len: 0, kind: G(req_url) },
-    Def { on: Request, name: "headers", len: 0, kind: G(req_headers) },
-    Def { on: Request, name: "redirect", len: 0, kind: G(req_redirect) },
-    Def { on: Request, name: "credentials", len: 0, kind: G(req_credentials) },
-    Def { on: Request, name: "mode", len: 0, kind: G(req_mode) },
-    Def { on: Request, name: "bodyUsed", len: 0, kind: G(req_body_used) },
-    Def { on: Request, name: "body", len: 0, kind: G(gate_request_body) },
+    Def { on: Headers, name: "append", len: 2, kind: MS(headers_append) },
+    Def { on: Headers, name: "delete", len: 1, kind: MS(headers_delete) },
+    Def { on: Headers, name: "get", len: 1, kind: MS(headers_get) },
+    Def { on: Headers, name: "getSetCookie", len: 0, kind: MS(headers_get_set_cookie) },
+    Def { on: Headers, name: "has", len: 1, kind: MS(headers_has) },
+    Def { on: Headers, name: "set", len: 2, kind: MS(headers_set) },
+    Def { on: Headers, name: "forEach", len: 1, kind: MS(headers_for_each) },
+    Def { on: Headers, name: "entries", len: 0, kind: MS(headers_entries) },
+    Def { on: Headers, name: "keys", len: 0, kind: MS(headers_keys) },
+    Def { on: Headers, name: "values", len: 0, kind: MS(headers_values) },
+    Def { on: HeadersIter, name: "next", len: 0, kind: MS(headers_iter_next) },
+    Def { on: Request, name: "method", len: 0, kind: GS(req_method) },
+    Def { on: Request, name: "url", len: 0, kind: GS(req_url) },
+    Def { on: Request, name: "headers", len: 0, kind: GS(req_headers) },
+    Def { on: Request, name: "redirect", len: 0, kind: GS(req_redirect) },
+    Def { on: Request, name: "credentials", len: 0, kind: GS(req_credentials) },
+    Def { on: Request, name: "mode", len: 0, kind: GS(req_mode) },
+    Def { on: Request, name: "bodyUsed", len: 0, kind: GS(req_body_used) },
+    Def { on: Request, name: "body", len: 0, kind: GS(gate_request_body) },
     Def { on: Request, name: "signal", len: 0, kind: G(req_signal) },
     Def { on: Request, name: "clone", len: 0, kind: M(req_clone) },
-    Def { on: Request, name: "text", len: 0, kind: M(body_text) },
-    Def { on: Request, name: "json", len: 0, kind: M(body_json) },
-    Def { on: Request, name: "arrayBuffer", len: 0, kind: M(body_array_buffer) },
-    Def { on: Request, name: "blob", len: 0, kind: M(body_blob) },
-    Def { on: Request, name: "formData", len: 0, kind: M(body_form_data) },
-    Def { on: Response, name: "status", len: 0, kind: G(resp_status) },
-    Def { on: Response, name: "ok", len: 0, kind: G(resp_ok) },
-    Def { on: Response, name: "statusText", len: 0, kind: G(resp_status_text) },
-    Def { on: Response, name: "url", len: 0, kind: G(resp_url) },
-    Def { on: Response, name: "redirected", len: 0, kind: G(resp_redirected) },
-    Def { on: Response, name: "type", len: 0, kind: G(resp_type) },
-    Def { on: Response, name: "headers", len: 0, kind: G(resp_headers) },
-    Def { on: Response, name: "bodyUsed", len: 0, kind: G(resp_body_used) },
-    Def { on: Response, name: "body", len: 0, kind: G(resp_body) },
+    Def { on: Request, name: "text", len: 0, kind: MS(body_text) },
+    Def { on: Request, name: "json", len: 0, kind: MS(body_json) },
+    Def { on: Request, name: "arrayBuffer", len: 0, kind: MS(body_array_buffer) },
+    Def { on: Request, name: "blob", len: 0, kind: MS(body_blob) },
+    Def { on: Request, name: "formData", len: 0, kind: MS(body_form_data) },
+    Def { on: Response, name: "status", len: 0, kind: GS(resp_status) },
+    Def { on: Response, name: "ok", len: 0, kind: GS(resp_ok) },
+    Def { on: Response, name: "statusText", len: 0, kind: GS(resp_status_text) },
+    Def { on: Response, name: "url", len: 0, kind: GS(resp_url) },
+    Def { on: Response, name: "redirected", len: 0, kind: GS(resp_redirected) },
+    Def { on: Response, name: "type", len: 0, kind: GS(resp_type) },
+    Def { on: Response, name: "headers", len: 0, kind: GS(resp_headers) },
+    Def { on: Response, name: "bodyUsed", len: 0, kind: GS(resp_body_used) },
+    Def { on: Response, name: "body", len: 0, kind: GS(resp_body) },
     Def { on: Response, name: "clone", len: 0, kind: M(resp_clone) },
-    Def { on: Response, name: "text", len: 0, kind: M(body_text) },
-    Def { on: Response, name: "json", len: 0, kind: M(body_json) },
-    Def { on: Response, name: "arrayBuffer", len: 0, kind: M(body_array_buffer) },
-    Def { on: Response, name: "blob", len: 0, kind: M(body_blob) },
-    Def { on: Response, name: "formData", len: 0, kind: M(body_form_data) },
+    Def { on: Response, name: "text", len: 0, kind: MS(body_text) },
+    Def { on: Response, name: "json", len: 0, kind: MS(body_json) },
+    Def { on: Response, name: "arrayBuffer", len: 0, kind: MS(body_array_buffer) },
+    Def { on: Response, name: "blob", len: 0, kind: MS(body_blob) },
+    Def { on: Response, name: "formData", len: 0, kind: MS(body_form_data) },
     Def { on: Stream, name: "locked", len: 0, kind: GS(streams::locked) },
     Def { on: Stream, name: "getReader", len: 0, kind: MS(streams::get_reader) },
     Def { on: Stream, name: "cancel", len: 1, kind: MS(streams::cancel) },
@@ -2961,6 +3093,10 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
             Kind::MethodS(h) => {
                 let f = d.add_fn_s_obj(it, h, def.name, def.len, HostFn::Method)?;
                 it.define_data(target, key, Value::Object(f), true, false, true)?;
+                // `Headers.prototype[Symbol.iterator]` is the same function object as `entries`.
+                if def.name == "entries" {
+                    it.define_data(target, it.symbol_iterator(), Value::Object(f), true, false, true)?;
+                }
             }
             Kind::GetS(h) => {
                 let f = d.add_fn_s_obj(it, h, &format!("get {}", def.name), 0, HostFn::Method)?;
