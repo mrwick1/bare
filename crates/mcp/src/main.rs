@@ -1510,7 +1510,11 @@ fn compact(rep: &Report, red: &Redactor) -> String {
             let script = rep.logs.iter().find(|(_, l)| bare_drive::diag::uncaught(l)).filter(|_| matches!(f.kind, "not_found" | "hidden" | "page"));
             let hint = match script {
                 Some((_, l)) => format!("\nhint: the page script failed: {}", l.text.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(200).collect::<String>()),
-                None if f.message.contains("; near: ") => "\nhint: use a near name: name~ matches a part, in any case".into(),
+                // The part match of the failed locator: its first `="` (a role is not quoted, so this is the name of `role=x name="y"`).
+                None if f.message.contains("; near: ") => match f.message.strip_prefix("no element matches ").and_then(|m| m.split_once("; near: ")) {
+                    Some((loc, _)) => format!("\nhint: {} matches a part, in any case", loc.replacen("=\"", "~\"", 1)),
+                    None => "\nhint: use ~ instead of = to match a part, in any case".into(),
+                },
                 None if hint.is_empty() => String::new(),
                 None => format!("\nhint: {hint}"),
             };

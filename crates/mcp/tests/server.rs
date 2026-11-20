@@ -1818,6 +1818,11 @@ fn an_exact_name_with_near_names_fails_at_once_and_lists_them() {
     assert!(error && r.starts_with("FAILED not_found"), "{r}");
     assert!(ms < 2000, "took {ms} ms: {r}");
     assert!(r.contains("\"Issues (5k+)\"") && r.contains("\"Issues closed\"") && !r.contains("Pull requests"), "{r}");
+    // The hint gives the part match of the same locator: name~ only goes with a role.
+    assert!(r.contains("hint: role=link name~\"Issues\" matches a part"), "{r}");
+    let (r, _) = s.tool("act", json!({"op": "click", "loc": "text=\"Issues\"", "snapshot": false}));
+    let r = r.as_str().unwrap();
+    assert!(r.contains("hint: text~\"Issues\" matches a part") && !r.contains("name~"), "{r}");
 }
 
 #[test]
