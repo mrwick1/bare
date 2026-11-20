@@ -17696,3 +17696,58 @@ The `codegen-units=1` rule was not needed: no row is over +0.5% at the default b
 Tests. Linux, debug: `cargo test --locked -p bare --lib -p bare-js -p bare-js-api`: 1718 (6 ignored), 1106 (1 ignored) and 32 pass (run before the merge of `origin/main`, which changes only tests and docs in the Windows fixes).
 
 Not tested: the Windows tests (only `cargo xwin check`, no VM run); `BARE_GC_STRESS=1` and `BARE_ALL_API=1` runs; `codegen-units=1`; RSS and wall time; the journeys and `tools/suite/run.py`; macOS; the `cfg` paths of other targets.
+
+## 2026-11-21: js2 prototype-chain inline cache
+
+Status: built and measured. The PR is open without auto-merge. The cost rule (see "Cost rule") is not met cleanly: it needs an owner decision. Design: [design-js2-proto-ic.md](design-js2-proto-ic.md).
+
+Problem: a read that finds a data property on the prototype chain (`p.then`, `o.m()` with `m` on the class prototype, `arr.push`, `str.slice`) had no site cache. Each read walked the chain. The promise agent measured `p.then` at 473 of the 1,849 instructions of a `then` step (PR #800).
+
+Design chosen: design (b), one global epoch (`Shapes::proto_epoch`) and a sticky flag `F_PROTO` on each object that an entry depends on (the holder and the links). An entry is `{holder, slot place, epoch}` in `Feedback::protos`; the hit is the compare of the receiver shape, the compare of the epoch and one load. It costs the same at any depth. Design (a), a shape compare for each link, costs more with each link and cannot see a change of a dictionary-mode prototype. Every shape change of a flagged object bumps the epoch; a collection bumps it too, so an entry holds no root. A cached add (`SetField` hit) refuses a flagged object. Accessors, absent keys and dictionary receivers are not cached. A string, a number or a boolean receiver uses the slow path only (it still gets an entry).
+
+Method. Machine archMachine, loaded, so only instruction counts (`tools/js/instr.sh`, minimum of 3 runs). Base is `origin/main` `a04014eb`, the new tree is `86ba4a4f` (the same plus this change). Separate target directories, release builds. A case is a loop in `script_run`; the number is `(I(N=100000) - I(N=0)) / 100000`. 3 rounds. The 3 rounds differ by 0 to 2 instructions in most rows (up to 15 in `slice` and `push`). The values below are the minimum.
+
+Measured cases, instructions for each loop turn:
+
+| Case (body of the loop) | Base | New | Change |
+| --- | --- | --- | --- |
+| `s += 1` (`empty`) | 139 | 147 | +5.8% |
+| `s += o.x`, own property (`own`) | 199 | 209 | +5.0% |
+| `r = o.m`, `m` on the class prototype (`fld1`) | 620 | 226 | -63.5% |
+| `s += o.m()`, depth 1 (`m1`) | 888 | 486 | -45.3% |
+| `s += o.m()`, depth 2 (`m2`) | 967 | 486 | -49.7% |
+| `s += o.m()`, depth 3 (`m3`) | 1,046 | 486 | -53.5% |
+| `s += o.f()`, `f` own (`fn`) | 468 | 471 | +0.6% |
+| `a.push(i)` (`push`) | 1,371 | 935 | -31.8% |
+| `a[i % 100] = i` (`pushref`, no read of a prototype) | 636 | 645 | +1.4% |
+| `t.slice(1, 3).length`, string receiver (`slice`) | 2,024 | 1,850 | -8.6% |
+| `s += t.length`, string receiver (`lenstr`) | 345 | 362 | +4.9% |
+
+At `codegen-units=1` (both trees): `empty` 141 / 144, `own` 202 / 209, `fld1` 627 / 223, `m1` 874 / 472, `m2` 950 / 472, `m3` 1,026 / 472, `fn` 450 / 459, `push` 1,379 / 941, `pushref` 639 / 644, `slice` 1,985 / 1,761, `lenstr` 347 / 324.
+
+Where the time went before: a prototype read of the class method (`m1` minus `fn`) cost about 420 instructions more than an own read, and each extra link cost about 80. After the change the read costs about 15 more than an own read, at any depth (`m1`, `m2` and `m3` are equal).
+
+`then` step. PR #800 is still open at `5083fd32`. I built `examples/promise_load.rs` on that head with and without this change (the change cherry-picked on it; one conflict, in the flag constants of `object.rs`, kept both). 20,000 steps minus 0, 3 rounds, all the same:
+
+| `promise_load` case | #800 head | With this change | Change |
+| --- | --- | --- | --- |
+| `then` (one step of `p = p.then(f)` and its job) | 1,839 | 1,421 | -22.7% (-418) |
+| `get` (`g = p.then` in a loop) | 591 | 172 | -70.9% |
+
+Micro rows of `interp_load` (instructions for each turn; `fib` is the total of `fib 27`), default build and `codegen-units=1`:
+
+| Row | Default base | Default new | Change | cgu1 base | cgu1 new | Change |
+| --- | --- | --- | --- | --- | --- | --- |
+| `loopfn` | 272 | 277 | +1.8% | 282 | 288 | +2.1% |
+| `calls` | 586 | 578 | -1.4% | 579 | 579 | 0.0% |
+| `fib` | 261,438,766 | 261,438,578 | -0.0001% | 252,205,716 | 257,610,068 | +2.1% |
+| `closures` | 1,765 | 1,780 | +0.8% | 1,761 | 1,758 | -0.2% |
+| `objects` | 707 | 719 | +1.7% | 717 | 722 | +0.7% |
+
+Startup, `script_run` with `run(0)` (`empty.0.js`): default 2,025,350 base, 2,029,957 new (+0.23%); `codegen-units=1` 2,018,367 and 2,020,947 (+0.13%).
+
+Cost rule (a row over +0.5% at the default build passes only if it is within +0.5% at `codegen-units=1` on both trees). Three micro rows are over +0.5% at the default build: `loopfn` (+1.8%), `closures` (+0.8%) and `objects` (+1.7%). `closures` passes (-0.2% at `codegen-units=1`). `loopfn` (+2.1%) and `objects` (+0.7%) are over at `codegen-units=1` too, so the rule fails for them. `fib` is 0.0% at the default build and +2.1% at `codegen-units=1`. Cause: the code of `Vm::run` changes shape, and the compiler lays the loop out another way. Evidence that it is layout and not the added work: the loop `s += 1` (`empty`, no property op at all, and the arms that I changed do not run) costs +8 instructions for each turn at the default build and +3 at `codegen-units=1`; `fib` has the same instruction count at the default build and +2.1% at `codegen-units=1`; `pushref`, `fn` and `own` move by 3 to 10 instructions with no change in the code that they run. The added code in `get_field!` runs only after the own-hit check fails, and `set_field!` adds one compare of the result of `set_shape_id` (`c.to == 0 || ...`). Before the rebase I tried several variants of the same logic (a `Cell` field in `Shapes` was one: it was worse); each moved the rows by a similar amount in another direction, and none was clean on both builds. I report it and do not hide it: the rows that gain are large (a prototype read -45% to -64%, the `then` step -23%) and the rows that lose are 1% to 2% in noise of layout, but the rule as written is not met.
+
+Tests. Linux, debug: `cargo test --locked -p bare-js2 --lib`: 471 of 472 pass in a run that shared the machine with 3 builds; the failing one is `compile::tests::a_scope_with_many_locals_compiles_in_linear_time` (a timing test, unrelated), which passes alone. `cargo test --locked --release -p bare-js-diff`: pass. test262 (`tools/js/test262_js2.sh -j 4`): the base `a04014eb` and the new tree give the same result for all 31,819 test lines (`diff` of `new.txt` is empty), so the baseline file is not changed. `proto_ic_tests.rs`: 15 tests (each normally and under constant collection); Before the rebase I broke the invalidation rules in the code on purpose, one at a time, and a test failed each time (not repeated after the rebase).
+
+Not tested: Windows, macOS, Miri and clippy; the browser (js2 is not wired in); a getter or an absent key on the chain (not cached, by design); a program that changes a prototype in a hot loop (the 16-refill budget is covered by a test, no timing); wall time and memory (RSS) of a whole run; a `then` step on a tree with the generator and Symbol changes (not merged yet).
