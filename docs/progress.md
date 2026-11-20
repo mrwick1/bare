@@ -17803,3 +17803,69 @@ The `codegen-units=1` rule was not needed: no row is over +0.5% at the default b
 Tests. Linux, debug: `cargo test --locked -p bare --lib -p bare-js -p bare-js-api`: 1718 (6 ignored), 1106 (1 ignored) and 32 pass (run before the merge of `origin/main`, which changes only tests and docs in the Windows fixes).
 
 Not tested: the Windows tests (only `cargo xwin check`, no VM run); `BARE_GC_STRESS=1` and `BARE_ALL_API=1` runs; `codegen-units=1`; RSS and wall time; the journeys and `tools/suite/run.py`; macOS; the `cfg` paths of other targets.
+
+## 2026-11-21: what blocks `Dom<E: Engine>`, and PR 1 of the plan (S0.4 after Z)
+
+Goal. The browser switch to js2 (S2.8 step 4) needs `Dom<E: Engine>`. This entry measures what is left of S0.4 and sets the order of the PRs. It also holds PR 1 (handlers of the lazy globals and of small families).
+
+### Scope on `origin/main` a04014eb (`crates/bare/src`, without `*_tests.rs`)
+
+The earlier count of 77 was a loose grep. It counted helpers that take `&[Value]`. The strict count is the form `fn f(&Dom, &mut Interp, Value, &[Value])`.
+
+| Item | Count | Where |
+| --- | --- | --- |
+| Handlers of the old form (strict) | 51 | `browser_implementation` 13, `browser_cssom` 13, `browser_fetch` 10, `browser_dom_old` 3, `browser_web` 2, `browser` 2, `browser_perf` 2, `browser_basics` 2, `browser_gaps`, `browser_details`, `browser_css_ns`, `browser_canvas` 1 each |
+| Handlers made by `lazy_global!` (old form inside the macro) | 55 invocations | `browser_lazy` and the files that call the macro |
+| Install functions of the form `(d, it: &mut Interp)` | 154 | every `browser_*.rs` that defines an interface |
+| Callers of `old` / `old_v` / `run` / `run_v` | 206 / 48 / 33 / 5 | install functions and handlers that still call helpers of the old form |
+| `add_fn` and `add_ctor_nt` callers | 31 | old registry (`Dom::handlers`) |
+| `DEFS` rows of `Kind::Method` and `Kind::Get` | 6 uses | `browser.rs`, `browser_fetch.rs` |
+| `roots`, `trace` and `prune` functions | 39 | tables that hold `ObjId` and raw `Value` |
+| `Browser::it` uses | 72 in source (16 files; `browser_loader/modules.rs` 20, `browser.rs` 13), 324 in tests | `browser_session.rs` is the only allowed site at the end |
+| Grep gate (count from the task brief; I did not reproduce it: a plain `rg Interp` gives other numbers) | 1,820 | gate target: 0 except `browser_session.rs` |
+
+Tables that hold `ObjId` or raw `Value` have `roots`, `trace` or `prune` in 23 files: `browser`, `browser_abort`, `browser_attr`, `browser_computed`, `browser_console`, `browser_cssom`, `browser_dataset`, `browser_elements`, `browser_face`, `browser_fetch`, `browser_frames`, `browser_geom`, `browser_handlers`, `browser_img`, `browser_media`, `browser_nodelist`, `browser_platform`, `browser_sources`, `browser_streams`, `browser_style`, `browser_web`, `browser_worker` and `browser_xhr`. In the interface form such a table holds a `Persistent` or `Traced` handle. Its owner implements `Host::trace(key)` and `Host::prune(dead keys)` (design-js2-host-api.md, decisions on owners). That design is not built yet. It is PR 5, and no handler PR needs it.
+
+### PR plan
+
+1. PR 1 (this entry): lazy globals, `illegal_constructor`, DOMImplementation, CSSOM handlers, small families.
+2. PR 2: the 10 fetch handlers and `Kind::Method` / `Kind::Get`. Then remove `H`, `add_fn`, `add_ctor_nt`, `add_old` and `Dom::handlers`.
+3. PR 3: the structured clone and transfer cluster (`post_args`, `post_message`, `send_beacon`, remote window `post`, `clone_with`, `transfer_list`).
+4. PR 4: the 154 install functions go to the `Scope` form. `old`, `old_v`, `run` and `run_v` go as their callers go.
+5. PR 5: owners, `trace` and `prune` for the tables (the 39 functions). Then remove the old `eval::Host` impl of `Dom`.
+6. PR 6: `Browser::it` uses to the facade. `Sc` becomes engine-generic. Add the grep gate. Then `Dom<E: Engine>`.
+
+PR 2 and PR 3 are independent. PR 4 needs PR 2 and PR 3. PR 5 can start after PR 2. PR 6 needs all.
+
+### PR 1: what changed
+
+- `lazy_global!` and `browser_lazy::lazy` give a handler of the interface form. This converts all 55 lazy globals at once. `install` registers them with `add_fn_s`.
+- `illegal_constructor` is `HS`. Every `add_fn(it, illegal_constructor, ...)` is now `add_fn_s_obj(..., HostFn::Ctor | HostFn::Method)`.
+- `browser_implementation.rs` (13 handlers), `browser_cssom.rs` (13 handlers), and the single handlers of `browser_details` (`toggle_event_ctor`), `browser_canvas` (`lazy_image_data`), `browser_css_ns`, `browser_perf` (`entry_json`, `detail_json`, `json`, and the performance entry constructors), `browser_gaps` (`has_focus`), `browser_web` (`create_object_url`, `revoke_object_url`), `browser` (`window_screen`, Screen).
+- Removed: the old forms in `browser_geom.rs` (`illegal`, `method`, `make`, `finish`), `init_flag` in `browser_events.rs`, `def_fn` in `browser_navigation.rs`, `need_old` in `browser_web.rs`, and `arg`, `def_get_sh`, `text_content`, `set_text_content`, `remove_attribute` in `browser_dom_old.rs` (copies of handlers that exist in the interface form).
+- The CSSOM handlers call helpers of the old form through `old(...)`. The helpers move in PR 4.
+
+Left after PR 1 (strict count): 12 handlers (`browser_fetch` 10, `browser_basics` 2). Old-form helpers, install functions, wrappers, tables and `Browser::it` are as in the plan.
+
+### PR 1: measurements
+
+Machine archMachine (loaded: only instruction counts are used). Base is `origin/main` a04014eb. Both trees are release builds in separate target directories.
+
+| Check | Base | New | Change |
+| --- | --- | --- | --- |
+| `tools/js/cost_matrix.sh -j4`, 817 rows (minimum of 3 runs; `parse_load deep 1` and `deep 10` fail on both trees, known) | | | mean glibc -0.023%; 2 rows over +0.5% under both allocators, 1 under one allocator only (`loader_load modules 1` +0.503% glibc, +0.038% jemalloc) |
+| `dataset_load keys 10000 50`, default build, glibc / jemalloc | 3,137,103,784 / 3,152,290,232 | 3,165,340,059 / 3,172,337,221 | +0.900% / +0.636% |
+| `dataset_load keys 1000 50`, default build, glibc / jemalloc | 330,537,724 / 338,266,182 | 333,251,549 / 340,293,051 | +0.821% / +0.599% |
+| `dataset_load keys 10000 50`, `codegen-units=1` on both trees, glibc | 3,185,221,633 | 3,193,366,234 | +0.256% |
+| same, jemalloc | 3,197,146,540 | 3,197,156,423 | +0.000% |
+| `dataset_load keys 1000 50`, `codegen-units=1`, glibc | 335,099,377 | 335,801,797 | +0.210% |
+| same, jemalloc | 339,737,961 | 339,756,360 | +0.005% |
+| `bare --run http://127.0.0.1:PORT/` of a small page (one script), instructions, 3 rounds of `instr.sh` (each the minimum of 3 runs) | 5,171,947 / 5,171,366 / 5,171,796 | 5,189,133 / 5,188,542 / 5,188,938 | +17.2 K (+0.33%) |
+
+The two `dataset_load keys` rows pass the rule: both are within +0.5% at `codegen-units=1` on both trees. The only change in `browser_dataset.rs` is the `DOMStringMap` constructor registration, which does not run in the loop. The cause is the split of the codegen units (hypothesis: not checked with `-Z print-mono-items`).
+
+Startup is +0.33%. This is real work and not noise: the 3 rounds are within 0.02% of each other. Hypothesis: the 55 lazy globals are made through the interface (`add_fn_s` with a `Scope`, a `Local` and a second table push, then `define_accessor_str`). That is about 310 instructions for each global. I did not profile it. It is under the 0.5% limit, so I did not change it. The cost goes away only if the interface function creation gets cheaper in `bare-js-api`, or if the lazy globals are made once for a realm and not for each window. This is not part of PR 1.
+
+Tests. Linux, debug: `cargo test --locked -p bare --lib`: 1718 pass (6 ignored). `-p bare-js`: 1106 pass (1 ignored). `-p bare-js-api`: 32 pass. `BARE_GC_STRESS=1` on 107 tests of the touched files (`browser_cssom`, `browser_implementation`, `browser_perf`, `browser_lazy`, `browser_details`, `browser_web`, and tests with `url`, `blob` or `screen` in the name): all pass. `cargo xwin check -p bare --target x86_64-pc-windows-msvc`: passes. `bare-js-api` has no `suite` feature, so there is no suite run.
+
+Not tested: the Windows tests (only `cargo xwin check`, no VM run); `BARE_ALL_API=1` runs; `BARE_GC_STRESS=1` over the whole `bare` crate; startup at `codegen-units=1`; RSS and wall time; the journeys and `tools/suite/run.py`; macOS.

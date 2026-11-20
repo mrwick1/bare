@@ -1179,7 +1179,7 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     crate::browser_lazy::install(
         d,
         it,
-        &[("HTMLSelectElement", lazy_select as H), ("HTMLOptionElement", lazy_option_el), ("HTMLOptGroupElement", lazy_optgroup), ("HTMLOptionsCollection", lazy_options), ("HTMLCollection", lazy_collection), ("HTMLTextAreaElement", lazy_textarea), ("Option", lazy_option)],
+        &[("HTMLSelectElement", lazy_select as HS), ("HTMLOptionElement", lazy_option_el), ("HTMLOptGroupElement", lazy_optgroup), ("HTMLOptionsCollection", lazy_options), ("HTMLCollection", lazy_collection), ("HTMLTextAreaElement", lazy_textarea), ("Option", lazy_option)],
     )
 }
 

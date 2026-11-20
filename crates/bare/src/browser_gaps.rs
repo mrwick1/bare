@@ -26,8 +26,8 @@ pub(crate) fn set_script_no_module<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<
     crate::browser_loader::set_flag(d, s, this, a, "nomodule")
 }
 
-pub(crate) fn has_focus(_: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
-    Ok(Value::Bool(true))
+pub(crate) fn has_focus<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    Ok(s.boolean(true))
 }
 
 /// The accessor `window.event`. The same function is the getter and the setter: a write has an argument.

@@ -301,7 +301,7 @@ impl Dom {
         // interface objects and `matchMedia`
         let (kp, kc) = (self.key(it, "prototype")?, self.key(it, "constructor")?);
         for (name, proto) in [("MediaQueryList", mql), ("DOMTokenList", list)] {
-            let f = self.add_fn(it, illegal_constructor, name, 0, false)?;
+            let f = self.add_fn_s_obj(it, illegal_constructor, name, 0, bare_js_api::HostFn::Method)?;
             it.define_data(f, kp, Value::Object(proto), false, false, false)?;
             it.define_data(proto, kc, Value::Object(f), true, false, true)?;
             let k = self.key(it, name)?;
