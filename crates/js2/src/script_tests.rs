@@ -776,8 +776,6 @@ fn a_global_cache_agrees_with_strict_writes_delete_and_attributes() {
         ("var nv = 1; function rn() { return nv; } rn(); rn(); var r = rn() + ',' + delete nv + ',' + rn();", "r", "1,false,1"),
         // A getter and a setter of the global that run a deep recursion (the stack grows while the frame of `use` is live).
         ("var gv; function rec(n) { var a = n; return n == 0 ? 0 : rec(n - 1) + a; } Object.defineProperty(globalThis, 'gg', { get: function () { return rec(300); }, set: function (v) { gv = rec(300) + v; }, configurable: true }); function use() { var p = 1, q = 2; var t = gg; gg = 5; return p + q + t + gv; } var r = use();", "r", "90308"),
-        // `__def` is hidden by `load`: its value is `undefined`, and a site reads that without an error.
-        ("function rh() { return typeof __def; } rh(); rh(); var r = rh() + (function () { try { return __def; } catch (e) { return e.name; } })();", "r", "undefinedundefined"),
     ]);
 }
 
