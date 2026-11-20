@@ -212,3 +212,13 @@ Raw TZif over the compact format: no decoder, the unchanged `Zone::parse`, and a
 - Whole-browser numbers: all timings are from small programs. Instruction counts, RSS of the whole browser and the cost matrix come with the build.
 - `zic` output across versions of `zic`: slim output has no known version dependence, but I used one version (the one on archMachine).
 - Chrome or Node as an oracle for the 2026f data. The Node 22 corpus of `eval_date_tests` uses Node's own tzdata.
+
+## Decisions (owner, 2026-11-20)
+
+1. Embed the zone data on every OS (A). Do not read system zone files.
+2. Embed raw slim TZif (+221 KB). Add no new decoder.
+3. Map the Windows local zone with the CLDR `001` rows only. A Windows zone id with no row gets a fixed offset from `Bias`.
+4. Put the data in a new crate `bare-tzdata`. Put the local-zone lookup in `bare-os::tz::local_zone`. `tz.rs` stays in `bare-js` for now.
+5. Regenerate the data at a bare release when IANA has a newer version. Add no CI job.
+6. Keep the 10,000-step charge per zone load.
+7. Do the regular-file `/etc/localtime` read and case-insensitive zone names in separate PRs.
