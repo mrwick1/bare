@@ -33,17 +33,13 @@
 //!   at a time; `display:contents` is not modelled. An atomic inline (`img`, `inline-block`) counts as text on the line, so the white space around it stays.
 
 use crate::browser::*;
+use crate::browser_scoped::*;
+use bare_js_api::{Args, Local, Type};
 use crate::browser_dom as nd;
 use bare_css::values::{Keyword, Property, Value as Cv};
 use bare_html::dom::{Document, NodeData, NodeId};
 use bare_js::eval::Interp;
-use bare_js::value::{Value, to_int32};
-
-type V = R<Value>;
-
-fn arg(a: &[Value], i: usize) -> Value {
-    a.get(i).copied().unwrap_or(Value::Undefined)
-}
+use bare_js::value::to_int32;
 
 /// The local name of an element of any namespace, `""` for other nodes.
 fn name(doc: &Document, n: NodeId) -> &str {
@@ -68,41 +64,41 @@ fn kw(v: Cv, k: Keyword) -> bool {
 
 // ---------------------------------------------------------------------------------------------- hidden, inert, tabIndex
 
-fn hidden(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = d.style_html_el(it, this)?;
-    let found = attr(&d.doc.borrow(), n, "hidden").map(|s| s.eq_ignore_ascii_case("until-found"));
+fn hidden<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.style_html_el_s(s, this)?;
+    let found = attr(&d.doc.borrow(), n, "hidden").map(|st| st.eq_ignore_ascii_case("until-found"));
     match found {
-        Some(true) => d.js_str(it, "until-found"),
-        found => Ok(Value::Bool(found.is_some())),
+        Some(true) => d.js_str_s(s, "until-found"),
+        found => Ok(s.boolean(found.is_some())),
     }
 }
 
-fn set_hidden(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let n = d.style_html_el(it, this)?;
-    let v = arg(a, 0);
-    if matches!(v, Value::String(_)) && d.string_arg(it, v)?.eq_ignore_ascii_case("until-found") {
-        nd::attr_set(d, it, n, "hidden", "until-found")?;
-    } else if it.to_js_bool(v)? {
-        nd::attr_set(d, it, n, "hidden", "")?;
+fn set_hidden<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.style_html_el_s(s, this)?;
+    let v = arg_s(s, a, 0);
+    if matches!(s.type_of(v), Type::String) && d.string_arg_s(s, v)?.eq_ignore_ascii_case("until-found") {
+        nd::attr_set_s(d, s, n, "hidden", "until-found")?;
+    } else if s.to_boolean(v) {
+        nd::attr_set_s(d, s, n, "hidden", "")?;
     } else {
         d.doc.borrow_mut().remove_attr(n, "hidden");
     }
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-fn inert(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = d.style_html_el(it, this)?;
-    Ok(Value::Bool(attr(&d.doc.borrow(), n, "inert").is_some()))
+fn inert<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.style_html_el_s(s, this)?;
+    Ok(s.boolean(attr(&d.doc.borrow(), n, "inert").is_some()))
 }
 
-fn set_inert(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let n = d.style_html_el(it, this)?;
-    if it.to_js_bool(arg(a, 0))? {
-        nd::attr_set(d, it, n, "inert", "")?;
+fn set_inert<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.style_html_el_s(s, this)?;
+    if { let v0 = arg_s(s, a, 0); s.to_boolean(v0) } {
+        nd::attr_set_s(d, s, n, "inert", "")?;
     } else {
         d.doc.borrow_mut().remove_attr(n, "inert");
     }
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
 /// The default `tabIndex` of an element.
@@ -133,29 +129,30 @@ pub(crate) fn parse_int(s: &str) -> Option<i32> {
     i32::try_from(if neg { -v } else { v }).ok()
 }
 
-fn tab_index(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = d.el(it, this)?;
+fn tab_index<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.el_s(s, this)?;
     let doc = d.doc.borrow();
-    Ok(Value::Number(attr(&doc, n, "tabindex").and_then(parse_int).unwrap_or_else(|| default_tab(&doc, n)) as f64))
+    Ok(s.number(attr(&doc, n, "tabindex").and_then(parse_int).unwrap_or_else(|| default_tab(&doc, n)) as f64))
 }
 
-fn set_tab_index(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let n = d.el(it, this)?;
-    let v = to_int32(it.to_js_number(arg(a, 0))?);
-    nd::attr_set(d, it, n, "tabindex", &v.to_string())?;
-    Ok(Value::Undefined)
+fn set_tab_index<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.el_s(s, this)?;
+    let arg0 = arg_s(s, a, 0);
+    let v = to_int32(s.to_number(arg0)?);
+    nd::attr_set_s(d, s, n, "tabindex", &v.to_string())?;
+    Ok(s.undefined())
 }
 
 // ---------------------------------------------------------------------------------------------- click
 
-fn click(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = d.style_html_el(it, this)?;
-    if d.is_disabled_control(it, n)? || d.clicking.borrow().contains(&n) {
-        return Ok(Value::Undefined);
+fn click<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.style_html_el_s(s, this)?;
+    if old(s, |it| d.is_disabled_control(it, n))? || d.clicking.borrow().contains(&n) {
+        return Ok(s.undefined());
     }
     // A link (`a` with `href`): after a click that no listener canceled, follow it as the window does.
     let mut link = None;
-    if let Some(t) = d.activation_target(it, n)? {
+    if let Some(t) = old(s, |it| d.activation_target(it, n))? {
         let doc = d.doc.borrow();
         let kind = match html_name(&doc, t) {
             "a" => {
@@ -169,16 +166,17 @@ fn click(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
             _ => None,
         };
         if kind.is_some() {
-            return Err(Dom::gate("HTMLElement.click() on an area link, a label, a summary, a checkbox or a radio (the default action is built for the window only)"));
+            return Err(lift_err(s, Dom::gate("HTMLElement.click() on an area link, a label, a summary, a checkbox or a radio (the default action is built for the window only)")));
         }
     }
     d.clicking.borrow_mut().push(n);
-    let r = d.user_click(it, n, None);
+    let r = old(s, |it| d.user_click(it, n, None));
     d.clicking.borrow_mut().retain(|&c| c != n);
     if let (Some(t), Ok(true)) = (link, &r) {
-        d.follow_link(it, t)?;
+        old(s, |it| d.follow_link(it, t))?;
     }
-    r.map(|_| Value::Undefined)
+    r?;
+    Ok(s.undefined())
 }
 
 // ---------------------------------------------------------------------------------------------- offsetParent, offsetTop, offsetLeft
@@ -204,7 +202,7 @@ enum First {
 }
 
 /// The first box of `n`, in layout coordinates.
-fn first_box(d: &Dom, it: &mut Interp<'_>, styles: &bare_css::cascade::Styles, layout: &bare_layout::fragment::Layout, n: NodeId) -> R<First> {
+fn first_box<'s>(d: &Dom, s: &mut Sc<'s, '_>, styles: &bare_css::cascade::Styles, layout: &bare_layout::fragment::Layout, n: NodeId) -> Res<'s, First> {
     if let Some(r) = first_fragment(layout, n) {
         return Ok(First::Box(r));
     }
@@ -214,8 +212,8 @@ fn first_box(d: &Dom, it: &mut Interp<'_>, styles: &bare_css::cascade::Styles, l
     let kind = bare_layout::boxes::Tree::new(&d.doc.borrow(), styles).kind(n);
     match kind {
         bare_layout::boxes::Kind::Inline => {
-            let Some(&w) = crate::browser_rects::element_rects(d, it, n)?.first() else { return Ok(First::None) };
-            let (dx, dy) = d.with_geo_it(it, |g, s, _| g.shift(s, n))?;
+            let Some(&w) = old(s, |it| crate::browser_rects::element_rects(d, it, n))?.first() else { return Ok(First::None) };
+            let (dx, dy) = old(s, |it| d.with_geo_it(it, |g, st, _| g.shift(st, n)))?;
             Ok(First::Box(bare_layout::fragment::Rect { x: w.x - dx, y: w.y - dy, ..w }))
         }
         bare_layout::boxes::Kind::Break => Ok(First::Break),
@@ -224,27 +222,27 @@ fn first_box(d: &Dom, it: &mut Interp<'_>, styles: &bare_css::cascade::Styles, l
 }
 
 /// `None`: the element has no box. Else its offset parent and offsets.
-fn offset(d: &Dom, it: &mut Interp<'_>, el: NodeId) -> R<Option<Offset>> {
+fn offset<'s>(d: &Dom, s: &mut Sc<'s, '_>, el: NodeId) -> Res<'s, Option<Offset>> {
         let _caller = crate::force::tag("offsetTop/Left/Parent");
-    if !d.in_document(it, el)? {
+    if !old(s, |it| d.in_document(it, el))? {
         return Ok(None);
     }
-    let styles = d.cascade_now(it)?;
-    let shown = |n: NodeId| styles.style(n).is_some_and(|s| !kw(s.get(Property::Display), Keyword::None));
+    let styles = old(s, |it| d.cascade_now(it))?;
+    let shown = |n: NodeId| styles.style(n).is_some_and(|st| !kw(st.get(Property::Display), Keyword::None));
     let doc = d.doc.borrow();
     let (mut cur, mut parent) = (Some(el), None);
     // The first positioned ancestor, and whether the element or an ancestor is not shown.
     let own = styles.style(el);
-    let fixed = own.is_some_and(|s| kw(s.get(Property::Position), Keyword::Fixed));
-    let is_static = own.is_none_or(|s| kw(s.get(Property::Position), Keyword::Static));
+    let fixed = own.is_some_and(|st| kw(st.get(Property::Position), Keyword::Fixed));
+    let is_static = own.is_none_or(|st| kw(st.get(Property::Position), Keyword::Static));
     let barred = fixed || matches!(html_name(&doc, el), "html" | "body");
     while let Some(c) = cur {
-        it.charge(1)?;
+        s.charge(1)?;
         if !shown(c) && matches!(doc.data(c), NodeData::Element { .. }) {
             return Ok(None);
         }
         if c != el && parent.is_none() && !barred && matches!(doc.data(c), NodeData::Element { .. }) {
-            let by_position = styles.style(c).is_some_and(|s| !kw(s.get(Property::Position), Keyword::Static));
+            let by_position = styles.style(c).is_some_and(|st| !kw(st.get(Property::Position), Keyword::Static));
             if by_position || html_name(&doc, c) == "body" || (is_static && matches!(html_name(&doc, c), "td" | "th" | "table")) {
                 parent = Some(c);
             }
@@ -255,9 +253,9 @@ fn offset(d: &Dom, it: &mut Interp<'_>, el: NodeId) -> R<Option<Offset>> {
         return Ok(Some(Offset { parent: None, top: 0, left: 0 }));
     }
     drop(doc);
-    let lay = d.layout_shared(it, &styles)?;
+    let lay = old(s, |it| d.layout_shared(it, &styles))?;
     let (layout, areas) = (&lay.layout, &lay.areas);
-    let r = match first_box(d, it, &styles, layout, el)? {
+    let r = match first_box(d, s, &styles, layout, el)? {
         First::Box(r) => r,
         // A `br` is not a box (Chrome: `LayoutBR` is a text), so its offsets are 0. It still has an offset parent.
         First::Break => return Ok(Some(Offset { parent, top: 0, left: 0 })),
@@ -267,8 +265,8 @@ fn offset(d: &Dom, it: &mut Interp<'_>, el: NodeId) -> R<Option<Offset>> {
     let (sx, sy) = d.stuck_now(&styles, areas, el);
     let (mut x, mut y) = (r.x + sx, r.y + sy);
     if let Some(p) = parent.filter(|&p| html_name(&d.doc.borrow(), p) != "body") {
-        let First::Box(pr) = first_box(d, it, &styles, layout, p)? else {
-            return Err(Dom::gate("offsetTop and offsetLeft in an offset parent that has no box of its own"));
+        let First::Box(pr) = first_box(d, s, &styles, layout, p)? else {
+            return Err(lift_err(s, Dom::gate("offsetTop and offsetLeft in an offset parent that has no box of its own")));
         };
         let ps = styles.style(p).expect("a positioned parent has a style");
         let (px, py) = d.stuck_now(&styles, areas, p);
@@ -281,26 +279,28 @@ fn offset(d: &Dom, it: &mut Interp<'_>, el: NodeId) -> R<Option<Offset>> {
     };
     match (long(y), long(x)) {
         (Some(top), Some(left)) => Ok(Some(Offset { parent, top, left })),
-        _ => Err(Dom::gate("an offset that does not fit a long")),
+        _ => Err(lift_err(s, Dom::gate("an offset that does not fit a long"))),
     }
 }
 
-fn offset_parent(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let el = d.style_html_el(it, this)?;
-    match offset(d, it, el)?.and_then(|o| o.parent) {
-        Some(p) => d.wrap(it, p),
-        None => Ok(Value::Null),
+fn offset_parent<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = d.style_html_el_s(s, this)?;
+    match offset(d, s, el)?.and_then(|o| o.parent) {
+        Some(p) => d.wrap_s(s, p),
+        None => Ok(s.null()),
     }
 }
 
-fn offset_top(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let el = d.style_html_el(it, this)?;
-    Ok(Value::Number(offset(d, it, el)?.map_or(0, |o| o.top) as f64))
+fn offset_top<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = d.style_html_el_s(s, this)?;
+    let off = offset(d, s, el)?;
+    Ok(s.number(off.map_or(0, |o| o.top) as f64))
 }
 
-fn offset_left(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let el = d.style_html_el(it, this)?;
-    Ok(Value::Number(offset(d, it, el)?.map_or(0, |o| o.left) as f64))
+fn offset_left<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = d.style_html_el_s(s, this)?;
+    let off = offset(d, s, el)?;
+    Ok(s.number(off.map_or(0, |o| o.left) as f64))
 }
 
 // ---------------------------------------------------------------------------------------------- innerText
@@ -389,13 +389,13 @@ fn transform(text: &str, t: Cv) -> String {
     }
 }
 
-fn inner_text(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+fn inner_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
         let _caller = crate::force::tag("innerText");
-    let n = d.style_html_el(it, this)?;
-    let styles = if d.in_document(it, n)? { Some(d.cascade_now(it)?) } else { None };
-    let shown = |s: &bare_css::cascade::Styles, n| s.style(n).is_some_and(|c| !kw(c.get(Property::Display), Keyword::None));
-    let Some(styles) = styles.filter(|s| shown(s, n)) else {
-        return nd::text_content(d, it, this, &[]);
+    let n = d.style_html_el_s(s, this)?;
+    let styles = if old(s, |it| d.in_document(it, n))? { Some(old(s, |it| d.cascade_now(it))?) } else { None };
+    let shown = |st: &bare_css::cascade::Styles, n| st.style(n).is_some_and(|c| !kw(c.get(Property::Display), Keyword::None));
+    let Some(styles) = styles.filter(|st| shown(st, n)) else {
+        return nd::text_content_s(d, s, this, a);
     };
     let doc = d.doc.borrow();
     let tree = bare_layout::boxes::Tree::new(&doc, &styles);
@@ -403,11 +403,11 @@ fn inner_text(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let group = |k: Cv| [Keyword::TableRowGroup, Keyword::TableHeaderGroup, Keyword::TableFooterGroup].iter().any(|&g| kw(k, g));
     // A later sibling (an element) with this display.
     let later = |mut c: NodeId, ks: &[Keyword]| {
-        while let Some(s) = doc.next_sibling(c) {
-            if styles.style(s).is_some_and(|st| ks.iter().any(|&k| kw(st.get(Property::Display), k))) {
+        while let Some(st) = doc.next_sibling(c) {
+            if styles.style(st).is_some_and(|st| ks.iter().any(|&k| kw(st.get(Property::Display), k))) {
                 return true;
             }
-            c = s;
+            c = st;
         }
         false
     };
@@ -418,9 +418,9 @@ fn inner_text(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
         doc.children(n).collect::<Vec<_>>().into_iter().rev().map(|c| (c, false)).collect()
     };
     while let Some((c, exit)) = stack.pop() {
-        it.charge(1)?;
+        s.charge(1)?;
         if out.s.len() > d.lim.max_string_bytes {
-            return Err(d.lim("dom-string"));
+            return Err(d.lim_s(s, "dom-string"));
         }
         match *doc.data(c) {
             NodeData::Text(sp) => {
@@ -458,7 +458,7 @@ fn inner_text(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
                             let mut opts = Vec::new();
                             let mut todo: Vec<NodeId> = doc.children(c).collect::<Vec<_>>().into_iter().rev().collect();
                             while let Some(o) = todo.pop() {
-                                it.charge(1)?;
+                                s.charge(1)?;
                                 match html_name(&doc, o) {
                                     "optgroup" => todo.extend(doc.children(o).collect::<Vec<_>>().into_iter().rev()),
                                     "option" => opts.push(o),
@@ -489,7 +489,7 @@ fn inner_text(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
                     if kw(display, Keyword::TableCell) && later(c, &[Keyword::TableCell]) {
                         out.lit("\t");
                     }
-                    let in_group = doc.parent(c).is_some_and(|g| styles.style(g).is_some_and(|s| group(s.get(Property::Display))));
+                    let in_group = doc.parent(c).is_some_and(|g| styles.style(g).is_some_and(|st| group(st.get(Property::Display))));
                     if kw(display, Keyword::TableRow) && (later(c, &[Keyword::TableRow]) || in_group && doc.parent(c).is_some_and(|g| later(g, &[Keyword::TableRowGroup, Keyword::TableHeaderGroup, Keyword::TableFooterGroup]))) {
                         out.lit("\n");
                     }
@@ -503,23 +503,23 @@ fn inner_text(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
             _ => {}
         }
     }
-    let s = out.s;
+    let st = out.s;
     drop(doc);
-    d.js_str(it, &s)
+    d.js_str_s(s, &st)
 }
 
-fn set_inner_text(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let n = d.style_html_el(it, this)?;
-    let v = arg(a, 0);
-    let s = if matches!(v, Value::Null) { String::new() } else { d.string_arg(it, v)? };
+fn set_inner_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.style_html_el_s(s, this)?;
+    let v = arg_s(s, a, 0);
+    let st = if matches!(s.type_of(v), Type::Null) { String::new() } else { d.string_arg_s(s, v)? };
     // `\r\n`, `\r` and `\n` are one break each.
-    let s = s.replace("\r\n", "\n").replace('\r', "\n");
-    let lines: Vec<&str> = if s.is_empty() { Vec::new() } else { s.split('\n').collect() };
+    let st = st.replace("\r\n", "\n").replace('\r', "\n");
+    let lines: Vec<&str> = if st.is_empty() { Vec::new() } else { st.split('\n').collect() };
     d.mo_group(Some(n), || {
         let mut doc = d.doc.borrow_mut();
-        d.room(&doc, lines.iter().filter(|l| !l.is_empty()).count() + lines.len().saturating_sub(1), s.len())?;
+        d.room_s(s, &doc, lines.iter().filter(|l| !l.is_empty()).count() + lines.len().saturating_sub(1), st.len())?;
         while let Some(c) = doc.children(n).next() {
-            it.charge(1)?;
+            s.charge(1)?;
             doc.detach(c);
         }
         for (i, line) in lines.iter().enumerate() {
@@ -534,17 +534,17 @@ fn set_inner_text(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
         }
         Ok(())
     })?;
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
 // ---------------------------------------------------------------------------------------------- draggable, checkVisibility
 
 /// The `draggable` IDL attribute: `true` and `false` (ASCII case-insensitive) decide; any other value or none is "auto", which is true for `img`, and for
 /// `a` and `area` with `href` (Chrome; the standard names only `a`).
-fn draggable(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = d.style_html_el(it, this)?;
+fn draggable<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.style_html_el_s(s, this)?;
     let doc = d.doc.borrow();
-    Ok(Value::Bool(match attr(&doc, n, "draggable") {
+    Ok(s.boolean(match attr(&doc, n, "draggable") {
         Some(v) if v.eq_ignore_ascii_case("true") => true,
         Some(v) if v.eq_ignore_ascii_case("false") => false,
         _ => match name(&doc, n) {
@@ -555,11 +555,11 @@ fn draggable(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     }))
 }
 
-fn set_draggable(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let n = d.style_html_el(it, this)?;
-    let on = it.to_js_bool(arg(a, 0))?;
-    nd::attr_set(d, it, n, "draggable", if on { "true" } else { "false" })?;
-    Ok(Value::Undefined)
+fn set_draggable<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.style_html_el_s(s, this)?;
+    let on = { let v0 = arg_s(s, a, 0); s.to_boolean(v0) };
+    nd::attr_set_s(d, s, n, "draggable", if on { "true" } else { "false" })?;
+    Ok(s.undefined())
 }
 
 /// How many times a style text uses what the engine does not parse: `content-visibility` (`auto` only with `auto`) or `display: contents`.
@@ -647,44 +647,44 @@ fn odd_rules(doc: &mut Document, key: &[(NodeId, Option<String>, String)]) -> Op
 
 /// `Element.checkVisibility(options)` (CSSOM View). Options are read in the order of the dictionary (sorted by name). `opacityProperty` and
 /// `visibilityProperty` are the old names of `checkOpacity` and `checkVisibilityCSS`: either one turns the check on.
-fn check_visibility(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+fn check_visibility<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
         let _caller = crate::force::tag("checkVisibility");
-    let n = d.el(it, this)?;
+    let n = d.el_s(s, this)?;
     let mut opt = [false; 5];
-    match arg(a, 0) {
-        Value::Undefined | Value::Null => {}
-        o @ Value::Object(_) => {
+    let o = arg_s(s, a, 0);
+    match s.type_of(o) {
+        Type::Undefined | Type::Null => {}
+        Type::Object | Type::Function => {
             for (i, k) in ["checkOpacity", "checkVisibilityCSS", "contentVisibilityAuto", "opacityProperty", "visibilityProperty"].into_iter().enumerate() {
-                let k = d.key(it, k)?;
-                let v = it.get_value(o, k)?;
-                opt[i] = it.to_js_bool(v)?;
+                let v = s.get_str(o, k)?;
+                opt[i] = s.to_boolean(v);
             }
         }
-        _ => return Err(it.type_error("Failed to execute 'checkVisibility' on 'Element': The provided value is not of type 'CheckVisibilityOptions'.")),
+        _ => return Err(s.type_error("Failed to execute 'checkVisibility' on 'Element': The provided value is not of type 'CheckVisibilityOptions'.")),
     }
     let (opacity, visibility) = (opt[0] | opt[3], opt[1] | opt[4]);
     {
         let doc = d.doc.borrow();
         if doc.is_foreign(n) {
-            return Err(Dom::gate("checkVisibility of an SVG or MathML element (Chrome's answer is not modelled)"));
+            return Err(lift_err(s, Dom::gate("checkVisibility of an SVG or MathML element (Chrome's answer is not modelled)")));
         }
         if matches!(name(&doc, n), "option" | "optgroup") {
-            return Err(Dom::gate("checkVisibility of an option (it depends on how the select is drawn)"));
+            return Err(lift_err(s, Dom::gate("checkVisibility of an option (it depends on how the select is drawn)")));
         }
     }
-    if !d.in_document(it, n)? {
-        return Ok(Value::Bool(false));
+    if !old(s, |it| d.in_document(it, n))? {
+        return Ok(s.boolean(false));
     }
-    let Some(snap) = d.snapshot(it, n)? else { return Ok(Value::Bool(false)) };
+    let Some(snap) = old(s, |it| d.snapshot(it, n))? else { return Ok(s.boolean(false)) };
     if snap.hidden {
-        return Ok(Value::Bool(false));
+        return Ok(s.boolean(false));
     }
     // The rules are found once for each rule set that is built: the sheet text is parsed again only then.
     {
         let c = d.computed.cache.borrow();
         let b = c.as_ref().expect("built by the snapshot");
         if b.odd.get().is_none() {
-            it.charge(b.key.iter().map(|(_, _, t)| t.len() as u64 / 64).sum::<u64>() + 1)?;
+            s.charge(b.key.iter().map(|(_, _, t)| t.len() as u64 / 64).sum::<u64>() + 1)?;
             let rules = odd_rules(&mut d.doc.borrow_mut(), &b.key);
             let _ = b.odd.set(rules);
         }
@@ -692,7 +692,7 @@ fn check_visibility(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V
     let cache = d.computed.cache.borrow();
     let odd = cache.as_ref().and_then(|b| b.odd.get()).expect("set above");
     if visibility && matches!(snap.style.get(Property::Visibility), Cv::Keyword(Keyword::Hidden | Keyword::Collapse)) {
-        return Ok(Value::Bool(false));
+        return Ok(s.boolean(false));
     }
     let doc = d.doc.borrow();
     let (mut cur, mut child, mut steps, mut reach) = (Some(n), n, 0u64, false);
@@ -701,22 +701,22 @@ fn check_visibility(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V
         steps += 1;
         if let NodeData::Element { .. } = doc.data(e) {
             if attr(&doc, e, "style").is_some_and(|t| unmodelled(t, opt[2]) > 0) {
-                return Err(Dom::gate("checkVisibility with content-visibility or display: contents in a style attribute (not modelled)"));
+                return Err(lift_err(s, Dom::gate("checkVisibility with content-visibility or display: contents in a style attribute (not modelled)")));
             }
             // A rule that the engine cannot model may apply here: `display: contents` on the element, `content-visibility` above it.
             let may = |r: &OddRule| if e == n { r.contents } else { r.hidden || r.auto && opt[2] };
             reach |= match odd {
                 None => true,
-                Some(rules) => rules.iter().filter(|r| may(r)).any(|r| r.sels.as_ref().is_none_or(|l| l.iter().any(|s| bare_css::matching::matches(&doc, e, s)))),
+                Some(rules) => rules.iter().filter(|r| may(r)).any(|r| r.sels.as_ref().is_none_or(|l| l.iter().any(|st| bare_css::matching::matches(&doc, e, st)))),
             };
-            if opacity && snap.styles.style(e).is_some_and(|s| s.get(Property::Opacity) == Cv::Number(0.0)) {
-                return Ok(Value::Bool(false));
+            if opacity && snap.styles.style(e).is_some_and(|st| st.get(Property::Opacity) == Cv::Number(0.0)) {
+                return Ok(s.boolean(false));
             }
             // The content of a closed `details` (all but the first `summary`) is `content-visibility: hidden`.
             if e != child && name(&doc, e) == "details" && !doc.is_foreign(e) && attr(&doc, e, "open").is_none() {
                 let summary = doc.children(e).find(|&c| name(&doc, c) == "summary");
                 if summary != Some(child) {
-                    return Ok(Value::Bool(false));
+                    return Ok(s.boolean(false));
                 }
             }
         }
@@ -725,27 +725,27 @@ fn check_visibility(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V
     }
     drop(doc);
     drop(cache);
-    it.charge(steps * per_step / 8 + 1)?;
+    s.charge(steps * per_step / 8 + 1)?;
     // A call that is false for another reason (opacity, a closed `details`) is answered above.
     if reach {
-        return Err(Dom::gate("checkVisibility of an element that a style sheet rule with content-visibility or display: contents may reach (not modelled)"));
+        return Err(lift_err(s, Dom::gate("checkVisibility of an element that a style sheet rule with content-visibility or display: contents may reach (not modelled)")));
     }
-    Ok(Value::Bool(true))
+    Ok(s.boolean(true))
 }
 
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     let (html, svg) = (d.p().html, d.p().svg);
-    d.def_get(it, html, "hidden", hidden, Some(set_hidden))?;
-    d.def_get(it, html, "inert", inert, Some(set_inert))?;
-    d.def_get(it, html, "draggable", draggable, Some(set_draggable))?;
-    d.def_method(it, d.p().element, "checkVisibility", 0, check_visibility)?;
-    d.def_get(it, html, "innerText", inner_text, Some(set_inner_text))?;
-    d.def_get(it, html, "offsetParent", offset_parent, None)?;
-    d.def_get(it, html, "offsetTop", offset_top, None)?;
-    d.def_get(it, html, "offsetLeft", offset_left, None)?;
-    d.def_method(it, html, "click", 0, click)?;
+    d.def_get_s(it, html, "hidden", hidden, Some(set_hidden))?;
+    d.def_get_s(it, html, "inert", inert, Some(set_inert))?;
+    d.def_get_s(it, html, "draggable", draggable, Some(set_draggable))?;
+    d.def_method_s(it, d.p().element, "checkVisibility", 0, check_visibility)?;
+    d.def_get_s(it, html, "innerText", inner_text, Some(set_inner_text))?;
+    d.def_get_s(it, html, "offsetParent", offset_parent, None)?;
+    d.def_get_s(it, html, "offsetTop", offset_top, None)?;
+    d.def_get_s(it, html, "offsetLeft", offset_left, None)?;
+    d.def_method_s(it, html, "click", 0, click)?;
     for proto in [html, svg] {
-        d.def_get(it, proto, "tabIndex", tab_index, Some(set_tab_index))?;
+        d.def_get_s(it, proto, "tabIndex", tab_index, Some(set_tab_index))?;
     }
     Ok(())
 }
