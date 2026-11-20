@@ -72,7 +72,8 @@
 //! Not here: `window.onload`, `DOMContentLoaded` for scripts that were added late, `defer` on dynamic scripts,
 //! `integrity`, `crossorigin`, `nonce`, CSP, `<noscript>`, a service worker.
 
-use crate::browser::{Browser, Dom, IdHash, H, Listener, R, Survive, Target as EvTarget};
+use crate::browser::{Browser, Dom, IdHash, Listener, R, Survive, Target as EvTarget};
+use crate::browser_scoped::*;
 use crate::browser_dom as nd;
 use crate::browser_fetch::{FetchConfig, FetchLimits};
 use crate::browser_navigation::NavigationRequest;
@@ -80,6 +81,7 @@ use crate::resources::{self, Expect, JS_TYPES, Kind, Limits, LoadError, Source, 
 use bare_html::dom::{NodeData, NodeId};
 use bare_js::eval::{Error, Interp};
 use bare_js::value::{ObjId, Value};
+use bare_js_api::{Args, Local};
 use bare_net::http::Client;
 use bare_net::parallel::Task;
 use bare_url::Url;
@@ -108,12 +110,6 @@ mod sheets_tests;
 pub use preload::PreloadStats;
 pub use sheets::CssStats;
 pub(crate) use scan::Scan;
-
-type V = R<Value>;
-
-fn arg(a: &[Value], i: usize) -> Value {
-    a.get(i).copied().unwrap_or(Value::Undefined)
-}
 
 // ---------------------------------------------------------------------------------------------- public types
 
@@ -526,110 +522,116 @@ impl Dom {
 // ---------------------------------------------------------------------------------------------- JS surface
 
 /// The IDL value of a URL attribute: the resolved URL when it resolves against the document base, else the text.
-fn url_attr(d: &Dom, it: &mut Interp<'_>, n: NodeId, name: &str) -> V {
-    let raw = match nd::attr_get(d, it, n, name)? {
-        Value::Null => String::new(),
-        v => d.string_arg(it, v)?,
+fn url_attr_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId, name: &str) -> Res<'s, Local<'s>> {
+    let raw = {
+        let doc = d.doc.borrow();
+        doc.find_atom(name).and_then(|a| doc.attr(n, a)).unwrap_or("").to_string()
     };
     let resolved = d.scripts.base.borrow().as_deref().and_then(|b| Url::parse(b).ok()).filter(|_| !raw.trim_matches(WS).is_empty()).and_then(|b| b.join(raw.trim_matches(WS)).ok());
-    d.js_str(it, &resolved.map_or(raw, |u| u.to_string()))
+    d.js_str_s(s, &resolved.map_or(raw, |u| u.to_string()))
 }
 
-fn script_src(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = d.el(it, this)?;
-    url_attr(d, it, n, "src")
+fn script_src<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.el_s(s, this)?;
+    url_attr_s(d, s, n, "src")
 }
 
-pub(crate) fn link_href(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = nd::link_el(d, it, this)?;
-    url_attr(d, it, n, "href")
+pub(crate) fn link_href<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = nd::link_el_s(d, s, this)?;
+    url_attr_s(d, s, n, "href")
 }
 
-pub(crate) fn set_link_href(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let n = nd::link_el(d, it, this)?;
-    let s = d.string_arg(it, arg(a, 0))?;
-    nd::attr_set(d, it, n, "href", &s)?;
-    Ok(Value::Undefined)
+pub(crate) fn set_link_href<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = nd::link_el_s(d, s, this)?;
+    let text = d.arg_str_s(s, a, 0)?;
+    nd::attr_set_s(d, s, n, "href", &text)?;
+    Ok(s.undefined())
 }
 
-fn set_script_src(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let n = d.el(it, this)?;
-    let s = d.string_arg(it, arg(a, 0))?;
-    nd::attr_set(d, it, n, "src", &s)?;
-    d.script_src_changed(it, n)?;
-    Ok(Value::Undefined)
+fn set_script_src<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.el_s(s, this)?;
+    let text = d.arg_str_s(s, a, 0)?;
+    nd::attr_set_s(d, s, n, "src", &text)?;
+    script_src_changed_s(d, s, n)?;
+    Ok(s.undefined())
 }
 
-fn script_type(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = d.el(it, this)?;
-    match nd::attr_get(d, it, n, "type")? {
-        Value::Null => d.js_str(it, ""),
-        v => Ok(v),
-    }
+fn script_type<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.el_s(s, this)?;
+    let text = {
+        let doc = d.doc.borrow();
+        doc.find_atom("type").and_then(|a| doc.attr(n, a)).unwrap_or("").to_string()
+    };
+    d.js_str_s(s, &text)
 }
 
-fn set_script_type(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let n = d.el(it, this)?;
-    let s = d.string_arg(it, arg(a, 0))?;
-    nd::attr_set(d, it, n, "type", &s)?;
-    Ok(Value::Undefined)
+fn set_script_type<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.el_s(s, this)?;
+    let text = d.arg_str_s(s, a, 0)?;
+    nd::attr_set_s(d, s, n, "type", &text)?;
+    Ok(s.undefined())
 }
 
-pub(crate) fn flag(d: &Dom, it: &mut Interp<'_>, this: Value, name: &str) -> V {
-    let n = d.el(it, this)?;
-    let doc = d.doc.borrow();
-    Ok(Value::Bool(doc.find_atom(name).and_then(|a| doc.attr(n, a)).is_some()))
+pub(crate) fn flag<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, name: &str) -> Res<'s, Local<'s>> {
+    let n = d.el_s(s, this)?;
+    let on = {
+        let doc = d.doc.borrow();
+        doc.find_atom(name).and_then(|a| doc.attr(n, a)).is_some()
+    };
+    Ok(s.boolean(on))
 }
 
-pub(crate) fn set_flag(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], name: &str) -> V {
-    let n = d.el(it, this)?;
-    if it.to_js_bool(arg(a, 0))? {
-        nd::attr_set(d, it, n, name, "")?;
+pub(crate) fn set_flag<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, name: &str) -> Res<'s, Local<'s>> {
+    let n = d.el_s(s, this)?;
+    let v = arg_s(s, a, 0);
+    if s.to_boolean(v) {
+        nd::attr_set_s(d, s, n, name, "")?;
     } else {
         d.doc.borrow_mut().remove_attr(n, name);
     }
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-fn script_async(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    flag(d, it, this, "async")
+fn script_async<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    flag(d, s, this, "async")
 }
 
-fn set_script_async(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    set_flag(d, it, this, a, "async")
+fn set_script_async<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    set_flag(d, s, this, a, "async")
 }
 
-fn script_defer(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    flag(d, it, this, "defer")
+fn script_defer<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    flag(d, s, this, "defer")
 }
 
-fn set_script_defer(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    set_flag(d, it, this, a, "defer")
+fn set_script_defer<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    set_flag(d, s, this, a, "defer")
 }
 
 /// The listener of an `on...` handler: one per element and event, kept in the normal listener list.
-fn handler_get(d: &Dom, it: &mut Interp<'_>, this: Value, is_error: bool) -> V {
-    let n = d.el(it, this)?;
-    let Some(id) = d.scripts.handlers.borrow().get(&(n, is_error)).copied() else { return Ok(Value::Null) };
+fn handler_get<'s, const ERR: bool>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.el_s(s, this)?;
+    let Some(id) = d.scripts.handlers.borrow().get(&(n, ERR)).copied() else { return Ok(s.null()) };
     let st = d.st.borrow();
-    Ok(st.listeners.get(&EvTarget::Node(n)).and_then(|v| v.iter().find(|l| l.id == id)).map_or(Value::Null, |l| it.traced_value(&l.cb)))
+    match st.listeners.get(&EvTarget::Node(n)).and_then(|v| v.iter().find(|l| l.id == id)) {
+        Some(l) => Ok(s.traced(&l.cb)),
+        None => Ok(s.null()),
+    }
 }
 
-fn handler_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], is_error: bool) -> V {
-    let n = d.el(it, this)?;
-    let cb = match arg(a, 0) {
-        v @ Value::Object(o) if it.is_callable_value(v) => Some(o),
-        _ => None,
-    };
-    let (t, ty) = (EvTarget::Node(n), if is_error { "error" } else { "load" });
-    let old = d.scripts.handlers.borrow().get(&(n, is_error)).copied();
+fn handler_set<'s, const ERR: bool>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.el_s(s, this)?;
+    let v = arg_s(s, a, 0);
+    let cb = s.is_callable(v).then_some(v);
+    let (t, ty) = (EvTarget::Node(n), if ERR { "error" } else { "load" });
+    let old = d.scripts.handlers.borrow().get(&(n, ERR)).copied();
     let mut st = d.st.borrow_mut();
     let st = &mut *st;
     let at = old.and_then(|id| st.listeners.get(&t).and_then(|v| v.iter().position(|l| l.id == id)));
     match (at, cb) {
         (Some(i), Some(cb)) => {
-            it.store_value(&mut st.listeners.get_mut(&t).expect("found")[i].cb, Value::Object(cb));
-            d.own_listeners(st, it, t);
+            s.store(&mut st.listeners.get_mut(&t).expect("found")[i].cb, cb);
+            d.own_listeners(st, s.engine(), t);
         }
         (Some(i), None) => {
             let v = st.listeners.get_mut(&t).expect("found");
@@ -638,88 +640,66 @@ fn handler_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], is_error:
                 st.listeners.remove(&t);
             }
             st.n_listeners -= 1;
-            d.scripts.handlers.borrow_mut().remove(&(n, is_error));
+            d.scripts.handlers.borrow_mut().remove(&(n, ERR));
         }
         (None, Some(cb)) => {
             if st.n_listeners >= d.lim.max_listeners {
-                return Err(d.lim("dom-listeners"));
+                return Err(d.lim_s(s, "dom-listeners"));
             }
             let list = st.listeners.entry(t).or_default();
             if list.len() >= d.lim.max_listeners_per_target {
-                return Err(d.lim("dom-listeners-per-target"));
+                return Err(d.lim_s(s, "dom-listeners-per-target"));
             }
             st.next_id += 1;
             let id = st.next_id;
-            list.push(Listener { id, ty: ty.into(), cb: it.trace_value(Value::Object(cb)), capture: false, once: false, passive: false, handler: false });
+            list.push(Listener { id, ty: ty.into(), cb: s.trace_ref(cb), capture: false, once: false, passive: false, handler: false });
             st.n_listeners += 1;
-            d.own_listeners(st, it, t);
-            d.scripts.handlers.borrow_mut().insert((n, is_error), id);
+            d.own_listeners(st, s.engine(), t);
+            d.scripts.handlers.borrow_mut().insert((n, ERR), id);
         }
         (None, None) => {}
     }
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-fn script_onload(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    handler_get(d, it, this, false)
+fn script_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    d.el_s(s, this)?;
+    nd::text_content_s(d, s, this, a)
 }
 
-fn set_script_onload(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    handler_set(d, it, this, a, false)
+fn set_script_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    d.el_s(s, this)?;
+    nd::set_text_content_s(d, s, this, a)
 }
 
-fn script_onerror(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    handler_get(d, it, this, true)
+fn doc_ready_state<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    d.nd_s(s, this)?;
+    d.js_str_s(s, ["loading", "interactive", "complete"][d.scripts.ready.get() as usize])
 }
 
-fn set_script_onerror(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    handler_set(d, it, this, a, true)
-}
-
-fn script_text(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    d.el(it, this)?;
-    nd::text_content(d, it, this, a)
-}
-
-fn set_script_text(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    d.el(it, this)?;
-    nd::set_text_content(d, it, this, a)
-}
-
-fn doc_ready_state(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    d.nd(it, this)?;
-    d.js_str(it, ["loading", "interactive", "complete"][d.scripts.ready.get() as usize])
-}
-
-fn doc_current_script(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    d.nd(it, this)?;
-    d.wrap_opt(it, d.scripts.current.get())
+fn doc_current_script<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    d.nd_s(s, this)?;
+    d.wrap_opt_s(s, d.scripts.current.get())
 }
 
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     let proto = d.obj(it, d.p().html)?;
     let _ = d.scripts.proto.set(proto);
-    let acc = |it: &mut Interp<'_>, on: ObjId, name: &str, g: H, s: Option<H>| -> R<()> {
-        let gf = d.add_fn(it, g, &format!("get {name}"), 0, false)?;
-        let sf = s.map(|h| d.add_fn(it, h, &format!("set {name}"), 1, false)).transpose()?;
-        let k = d.key(it, name)?;
-        d.define_accessor(it, on, k, gf, sf)
-    };
     for (name, g, s) in [
-        ("src", script_src as H, set_script_src as H),
+        ("src", script_src as HS, set_script_src as HS),
         ("type", script_type, set_script_type),
         ("async", script_async, set_script_async),
         ("defer", script_defer, set_script_defer),
         ("noModule", crate::browser_gaps::script_no_module, crate::browser_gaps::set_script_no_module),
         ("text", script_text, set_script_text),
-        ("onload", script_onload, set_script_onload),
-        ("onerror", script_onerror, set_script_onerror),
+        ("onload", handler_get::<false>, handler_set::<false>),
+        ("onerror", handler_get::<true>, handler_set::<true>),
     ] {
-        acc(it, proto, name, g, Some(s))?;
+        d.def_get_s(it, proto, name, g, Some(s))?;
     }
     let document = d.p().document;
-    acc(it, document, "readyState", doc_ready_state, None)?;
-    acc(it, document, "currentScript", doc_current_script, None)?;
+    d.def_get_s(it, document, "readyState", doc_ready_state, None)?;
+    d.def_get_s(it, document, "currentScript", doc_current_script, None)?;
     let f = crate::browser_custom::interface_ctor(d, it, "HTMLScriptElement", false)?;
     let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
     it.define_data(f, kp, Value::Object(proto), false, false, false)?;
@@ -2061,67 +2041,100 @@ impl Run<'_> {
 }
 
 
+/// `this` is a document node, else `Illegal invocation`. The result says whether it is the main document.
+fn write_target<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, (NodeId, bool)> {
+    let root = d.nd_s(s, this)?;
+    if !matches!(d.doc.borrow().data(root), NodeData::Document) {
+        return Err(s.type_error("Illegal invocation"));
+    }
+    let main = root == d.doc.borrow().root();
+    Ok((root, main))
+}
+
 #[cold]
 #[inline(never)]
-pub(crate) fn document_open(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let root=d.nd(it,this)?;
-    if !matches!(d.doc.borrow().data(root), bare_html::dom::NodeData::Document) { return Err(it.type_error("Illegal invocation")); }
-    let main=root == d.doc.borrow().root();
-    let html={let doc=d.doc.borrow();doc.children(root).find(|&n|doc.is_html(n,"html"))};
-    if let Some(html)=html {
-        let wrapped=d.wrap(it,html)?;
-        let mut children=Vec::new();
-        for tag in ["head","body"] {
-            let tag=d.js_str(it,tag)?;
-            children.push(crate::browser_dom::create_element(d,it,this,&[tag])?);
+pub(crate) fn document_open<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let (root, main) = write_target(d, s, this)?;
+    let html = {
+        let doc = d.doc.borrow();
+        doc.children(root).find(|&n| doc.is_html(n, "html"))
+    };
+    if let Some(html) = html {
+        let wrapped = d.wrap_s(s, html)?;
+        let mut children = Vec::new();
+        for tag in ["head", "body"] {
+            let tag = d.js_str_s(s, tag)?;
+            children.push(call_hs(d, s, nd::create_element_s, this, &[tag])?);
         }
-        let empty=d.js_str(it,"")?;
-        crate::browser_dom::set_text_content(d,it,wrapped,&[empty])?;
-        for child in children { crate::browser_dom::append_child(d,it,wrapped,&[child])?; }
+        let empty = d.js_str_s(s, "")?;
+        call_hs(d, s, nd::set_text_content_s, wrapped, &[empty])?;
+        for child in children {
+            call_hs(d, s, nd::append_child_s, wrapped, &[child])?;
+        }
     }
-    if main { d.scripts.write_open.set(true); }
+    if main {
+        d.scripts.write_open.set(true);
+    }
     Ok(this)
 }
+
 #[cold]
 #[inline(never)]
-pub(crate) fn document_close(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let root=d.nd(it,this)?;
-    if !matches!(d.doc.borrow().data(root), bare_html::dom::NodeData::Document) { return Err(it.type_error("Illegal invocation")); }
-    let main=root == d.doc.borrow().root();
-    if main { d.scripts.write_open.set(false); }
-    Ok(Value::Undefined)
-}
-#[cold]
-#[inline(never)]
-pub(crate) fn document_write(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    write(d,it,this,a,false)
-}
-#[cold]
-#[inline(never)]
-pub(crate) fn document_writeln(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    write(d,it,this,a,true)
-}
-fn write(d: &Dom,it: &mut Interp<'_>,this: Value,a: &[Value],newline: bool)->V {
-    let root=d.nd(it,this)?;
-    if !matches!(d.doc.borrow().data(root), bare_html::dom::NodeData::Document) { return Err(it.type_error("Illegal invocation")); }
-    let main=root == d.doc.borrow().root();
-    let mut text=String::new();
-    for &v in a { text.push_str(&d.string_arg(it,v)?); if text.len()>d.lim.max_string_bytes { return Err(d.lim("dom-string")); } }
-    if newline { text.push('\n'); }
-    if let Some(script)=d.scripts.current.get().filter(|_|main && d.scripts.ready.get()==0)
-        && d.in_document(it,script)? {
-        let before=match d.scripts.write_anchor.get() {
-            Some((s,before)) if s==script=>before,
-            _=>{let before=d.doc.borrow().next_sibling(script);d.scripts.write_anchor.set(Some((script,before)));before}
-        };
-        let parent=d.doc.borrow().parent(script);
-        if let Some(parent)=parent { return crate::browser_fragment::write_at(d,it,&text,parent,before); }
-        return Ok(Value::Undefined);
+pub(crate) fn document_close<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let (_, main) = write_target(d, s, this)?;
+    if main {
+        d.scripts.write_open.set(false);
     }
-    if main && !d.scripts.write_open.get() { document_open(d,it,this,&[])?; }
-    let body=crate::browser_dom::body(d,it,this,&[])?;
-    let n=d.el(it,body)?;
-    crate::browser_fragment::write_at(d,it,&text,n,None)
+    Ok(s.undefined())
+}
+
+#[cold]
+#[inline(never)]
+pub(crate) fn document_write<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    write::<false>(d, s, this, a)
+}
+
+#[cold]
+#[inline(never)]
+pub(crate) fn document_writeln<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    write::<true>(d, s, this, a)
+}
+
+fn write<'s, const NEWLINE: bool>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (_, main) = write_target(d, s, this)?;
+    let mut text = String::new();
+    for v in a.iter() {
+        text.push_str(&d.string_arg_s(s, v)?);
+        if text.len() > d.lim.max_string_bytes {
+            return Err(d.lim_s(s, "dom-string"));
+        }
+    }
+    if NEWLINE {
+        text.push('\n');
+    }
+    if let Some(script) = d.scripts.current.get().filter(|_| main && d.scripts.ready.get() == 0)
+        && old(s, |it| d.in_document(it, script))?
+    {
+        let before = match d.scripts.write_anchor.get() {
+            Some((sc, before)) if sc == script => before,
+            _ => {
+                let before = d.doc.borrow().next_sibling(script);
+                d.scripts.write_anchor.set(Some((script, before)));
+                before
+            }
+        };
+        let parent = d.doc.borrow().parent(script);
+        if let Some(parent) = parent {
+            return old_v(s, |it| crate::browser_fragment::write_at(d, it, &text, parent, before));
+        }
+        return Ok(s.undefined());
+    }
+    if main && !d.scripts.write_open.get() {
+        document_open(d, s, this, Args::from_slots(0, 0))?;
+    }
+    let body = nd::body_s(d, s, this, Args::from_slots(0, 0))?;
+    let n = d.el_s(s, body)?;
+    old_v(s, |it| crate::browser_fragment::write_at(d, it, &text, n, None))
 }
 
 // ---------------------------------------------------------------------------------------------- arena reclaim (`browser_reclaim.rs`)
