@@ -2,7 +2,7 @@
 //!
 //! How it fits together
 //! - The DOM is the native `bare_html::dom::Document` behind `Rc<RefCell<Document>>`. JS never sees a copy.
-//! - `Dom` implements `bare_js::eval::Host`. JS calls reach it as numbered methods (`handlers`). Getters and setters
+//! - `Dom` implements `bare_js::eval::Host`. JS calls reach it as numbered methods (`Dom::scoped`). Getters and setters
 //!   are ordinary accessor properties on the prototypes, so `el.id` runs through the same call path and obeys the
 //!   same step and 100-call guards.
 //! - A JS node is a wrapper object. There is one wrapper for each native node while it is alive, so `a === a`.
@@ -256,7 +256,6 @@ impl<K: SlotKey, V> IdTab<K, V> {
     }
 }
 /// A host method: the DOM, the interpreter, `this`, the arguments.
-pub(crate) type H = fn(&Dom, &mut Interp<'_>, Value, &[Value]) -> R<Value>;
 
 /// Hard bounds of one browser. Every one is checked before the thing grows.
 #[derive(Clone, Copy, Debug)]
@@ -706,13 +705,11 @@ pub(crate) enum P {
 }
 
 pub(crate) enum Kind {
-    Method(H),
-    /// A method of the new form, on the interface registry (`browser_scoped.rs`).
+    /// A method, on the interface registry (`browser_scoped.rs`).
     MethodS(crate::browser_scoped::HS),
-    Get(H),
-    /// A getter of the new form.
+    /// A getter.
     GetS(crate::browser_scoped::HS),
-    /// A getter and a setter of the new form.
+    /// A getter and a setter.
     AccessorS(crate::browser_scoped::HS, crate::browser_scoped::HS),
 }
 
@@ -737,7 +734,6 @@ pub struct Dom {
     /// object is stored: `Dom::new_source`, the `Attr` tables and the frame tables.
     pub(crate) wrapper_edges: Cell<bool>,
     /// `(handler, needs new)` for each host function id.
-    pub(crate) handlers: RefCell<Vec<(H, bool)>>,
     /// The functions of the new form (and, in a test build, every old one): the registry of the interface `Host::call`.
     pub(crate) scoped: RefCell<Vec<crate::browser_scoped::Scoped>>,
     /// Prototypes and interface objects: permanent roots.
@@ -1013,9 +1009,9 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
 }
 
 impl Host for Dom {
-    fn call(&self, it: &mut Interp<'_>, id: u32, this: Value, args: &[Value], is_new: bool) -> R<Value> {
-        let (h, needs_new) = self.handlers.borrow()[id as usize];
-        self.dispatch_host(it, id, needs_new && !is_new, |it| h(self, it, this, args))
+    /// Every host function is on the interface (`Dom::call_scoped`), so the engine never calls this.
+    fn call(&self, _: &mut Interp<'_>, _: u32, _: Value, _: &[Value], _: bool) -> R<Value> {
+        Err(Error::Unsupported(unsupported("a host function of the old registry")))
     }
 
     fn roots(&self, out: &mut Vec<Value>) {
@@ -1495,15 +1491,6 @@ impl Dom {
         }
     }
 
-    pub(crate) fn add_fn(&self, it: &mut Interp<'_>, h: H, name: &str, len: u32, ctor: bool) -> R<ObjId> {
-        self.add_old(it, h, name, len, if ctor { HostFn::Ctor } else { HostFn::Method })
-    }
-
-    /// A constructor that takes a different `new.target`: it reads it with `host_proto_from_new_target`.
-    pub(crate) fn add_ctor_nt(&self, it: &mut Interp<'_>, h: H, name: &str, len: u32) -> R<ObjId> {
-        self.add_old(it, h, name, len, HostFn::CtorNewTarget)
-    }
-
     pub(crate) fn install(&self, it: &mut Interp<'_>) -> R<()> {
         let g = it.global_object();
         let _ = self.global.set(g);
@@ -1559,17 +1546,6 @@ impl Dom {
             let key = self.key(it, d.name)?;
             let (f, s) = match d.kind {
                 Kind::MethodS(h) => (self.add_fn_s_obj(it, h, d.name, d.len, HostFn::Method)?, None),
-                Kind::Method(h) if self.methods_on_api() => (self.add_old(it, h, d.name, d.len, HostFn::Method)?, None),
-                Kind::Method(h) => {
-                    let id = self.handlers.borrow().len() as u32;
-                    self.handlers.borrow_mut().push((h, false));
-                    let PropertyKey::String(name) = key else { unreachable!("a method name is not an index") };
-                    (it.host_function_interned(id, name, d.len, false)?, None)
-                }
-                Kind::Get(h) => {
-                    named(&mut nm, "get ", d.name);
-                    (self.add_fn(it, h, &nm, 0, false)?, None)
-                }
                 Kind::GetS(h) => {
                     named(&mut nm, "get ", d.name);
                     (self.add_fn_s_obj(it, h, &nm, 0, HostFn::Method)?, None)
@@ -1584,7 +1560,7 @@ impl Dom {
             for &on in d.on {
                 let target = self.pick(on);
                 match d.kind {
-                    Kind::Method(_) | Kind::MethodS(_) => it.define_data(target, key, Value::Object(f), true, false, true)?,
+                    Kind::MethodS(_) => it.define_data(target, key, Value::Object(f), true, false, true)?,
                     _ => self.define_accessor(it, target, key, f, s)?,
                 }
             }
@@ -2004,7 +1980,6 @@ impl Browser {
             selector_scope: Default::default(),
             doc_wrapper: OnceCell::new(),
             wrapper_edges: Cell::new(false),
-            handlers: RefCell::default(),
             scoped: RefCell::default(),
             fixed: RefCell::default(),
             start: Instant::now(),

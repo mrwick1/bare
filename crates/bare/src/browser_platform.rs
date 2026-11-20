@@ -228,23 +228,6 @@ impl Dom {
 
     // ------------------------------------------------------------------------------------ install helpers
 
-    pub(crate) fn def_method(&self, it: &mut Interp<'_>, target: ObjId, name: &str, len: u32, h: H) -> R<ObjId> {
-        let key = self.key(it, name)?;
-        let f = self.add_fn(it, h, name, len, false)?;
-        it.define_data(target, key, Value::Object(f), true, false, true)?;
-        Ok(f)
-    }
-
-    pub(crate) fn def_get(&self, it: &mut Interp<'_>, target: ObjId, name: &str, get: H, set: Option<H>) -> R<()> {
-        let key = self.key(it, name)?;
-        let g = self.add_fn(it, get, &format!("get {name}"), 0, false)?;
-        let s = match set {
-            Some(h) => Some(self.add_fn(it, h, &format!("set {name}"), 1, false)?),
-            None => None,
-        };
-        self.define_accessor(it, target, key, g, s)
-    }
-
     fn symbol_iterator(&self, it: &mut Interp<'_>) -> R<PropertyKey> {
         let g = *self.global.get().expect("installed");
         let (ks, ki) = (self.key(it, "Symbol")?, self.key(it, "iterator")?);
