@@ -1452,20 +1452,6 @@ pub(crate) fn set_lang(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -
     reflect_set(d, it, this, a, "lang")
 }
 
-pub(crate) fn get_attribute(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let n = d.el(it, this)?;
-    let name = d.string_arg(it, arg(a, 0))?;
-    let s = {
-        let doc = d.doc.borrow();
-        let name = crate::browser_namespace::attr_key(&doc, n, &name);
-        doc.find_attr_qname(n, &name).and_then(|a| doc.attr(n, a)).map(str::to_string)
-    };
-    match s {
-        Some(s) => d.js_str(it, &s),
-        None => Ok(Value::Null),
-    }
-}
-
 pub(crate) fn get_attribute_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.el_s(s, this)?;
     let arg0 = arg_s(s, a, 0);
@@ -1502,13 +1488,6 @@ pub(crate) fn matches_selector_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s
         Ok(b) => Ok(s.boolean(b)),
         Err(e) => Err(s.engine().api_err(e)),
     }
-}
-
-pub(crate) fn has_attribute(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let n = d.el(it, this)?;
-    let name = d.string_arg(it, arg(a, 0))?;
-    let doc = d.doc.borrow();
-    Ok(Value::Bool(doc.find_attr_qname(n, &crate::browser_namespace::attr_key(&doc, n, &name)).is_some()))
 }
 
 pub(crate) fn set_attribute(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
@@ -1626,13 +1605,6 @@ fn match_here(d: &Dom, it: &mut Interp<'_>, n: NodeId, sels: &[Selector]) -> R<b
         it.charge(doc.len() as u64)?;
     }
     Ok(sels.iter().any(|s| matches(&doc, n, s)))
-}
-
-pub(crate) fn matches_selector(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let n = d.el(it, this)?;
-    let text = d.string_arg(it, arg(a, 0))?;
-    let sels = d.selectors_at(it, &text, n)?;
-    Ok(Value::Bool(match_here(d, it, n, &sels)?))
 }
 
 pub(crate) fn closest(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {

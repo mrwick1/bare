@@ -64,13 +64,13 @@ impl<'p> Interp<'p> {
     /// A function object that calls host method `id`. `ctor` allows `new`. The function has no `prototype`:
     /// a constructor's owner defines it. Counts toward `max_functions`.
     pub fn host_function(&mut self, id: u32, name: &str, len: u32, ctor: bool) -> Result<ObjId, Error> {
-        self.host_function_with(id, name, len, ctor, false)
+        self.host_function_with(id, name, len, ctor, false, false)
     }
 
     /// Like `host_function(.., true)`, and `Reflect.construct` and `class extends` may give it a different `new.target`.
     /// The constructor reads it with [`Interp::host_proto_from_new_target`]. Other host constructors refuse such a call.
     pub fn host_ctor_with_new_target(&mut self, id: u32, name: &str, len: u32) -> Result<ObjId, Error> {
-        self.host_function_with(id, name, len, true, true)
+        self.host_function_with(id, name, len, true, true, false)
     }
 
     /// Like `host_function` for a name that the caller has interned already (the same string as the property key): no second lookup.
@@ -80,8 +80,8 @@ impl<'p> Interp<'p> {
         Ok(o)
     }
 
-    fn host_function_with(&mut self, id: u32, name: &str, len: u32, ctor: bool, nt: bool) -> Result<ObjId, Error> {
-        let o = self.new_func_object(Callee::Host { id, ctor, nt })?;
+    fn host_function_with(&mut self, id: u32, name: &str, len: u32, ctor: bool, nt: bool, api: bool) -> Result<ObjId, Error> {
+        let o = self.new_func_object(if api { Callee::ApiHost { id, ctor, nt } } else { Callee::Host { id, ctor, nt } })?;
         let s = h!(self, self.heap.intern_str(name));
         h!(self, self.heap.init_function(o, (self.k_length, len as f64), (self.k_name, s)));
         Ok(o)
@@ -113,10 +113,6 @@ impl<'p> Interp<'p> {
     }
 
     fn call_host(&mut self, id: u32, this: Value, args: &[Value], is_new: bool, nt: Option<ObjId>) -> Res<Value> {
-        // A function made through the interface (`Engine::host_function`) has `API_ID` in its id (the dual registry of `Dom`).
-        if id & API_ID != 0 {
-            return self.call_api_host(id & !API_ID, this, args, is_new, nt);
-        }
         let Some(host) = self.host.clone() else { return self.call_api_host(id, this, args, is_new, nt) };
         // This call sees its own `new.target` (none for a plain call). The caller's comes back on every exit.
         let saved = std::mem::replace(&mut self.host_nt, nt);

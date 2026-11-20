@@ -21,6 +21,7 @@ pub(crate) type Res<'s, T> = Result<T, bare_js_api::Error<'s>>;
 const CUR_NEW: u32 = 1 << 31;
 
 #[derive(Clone, Copy)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) enum Fun {
     New(HS),
     /// An old handler that a test build put on the interface.
@@ -84,25 +85,42 @@ impl Dom {
     pub(crate) fn dispatch_host<'p, X: Entry<'p>, T>(&self, x: &mut X, cur: u32, bad_new: bool, h: Option<H>, body: impl FnOnce(&mut X) -> Result<T, X::Err>) -> Result<T, X::Err> {
         self.style.cur.set(cur);
         if bad_new {
-            let e = crate::browser_custom::needs_new(x.it(), h);
-            return Err(x.err(e));
+            return Err(self.bad_new(x, h));
         }
-        let r = if self.ce.on.get() {
-            self.ce_enter();
-            let r = body(x);
-            let q = self.ce_pop(x.it());
-            match (r, q) {
-                (Ok(v), Ok(())) => Ok(v),
-                (Err(e), _) => Err(e),
-                (Ok(_), Err(e)) => Err(x.err(e)),
-            }
-        } else {
-            body(x)
-        };
-        if self.mo.armed() && let Err(e) = self.mo_after(x.it()) {
-            return Err(x.err(e));
+        let r = if self.ce.on.get() { self.dispatch_ce(x, body) } else { body(x) };
+        if self.mo.armed() {
+            self.mo_done(x)?;
         }
         r
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn bad_new<'p, X: Entry<'p>>(&self, x: &mut X, h: Option<H>) -> X::Err {
+        let e = crate::browser_custom::needs_new(x.it(), h);
+        x.err(e)
+    }
+
+    /// The mutation observer hook after a host call.
+    #[inline(never)]
+    fn mo_done<'p, X: Entry<'p>>(&self, x: &mut X) -> Result<(), X::Err> {
+        match self.mo_after(x.it()) {
+            Ok(()) => Ok(()),
+            Err(e) => Err(x.err(e)),
+        }
+    }
+
+    /// `body` with a scope of custom element reactions around it.
+    #[inline(never)]
+    fn dispatch_ce<'p, X: Entry<'p>, T>(&self, x: &mut X, body: impl FnOnce(&mut X) -> Result<T, X::Err>) -> Result<T, X::Err> {
+        self.ce_enter();
+        let r = body(x);
+        let q = self.ce_pop(x.it());
+        match (r, q) {
+            (Ok(v), Ok(())) => Ok(v),
+            (Err(e), _) => Err(e),
+            (Ok(_), Err(e)) => Err(x.err(e)),
+        }
     }
 
     /// The entry of the interface `Host::call`.
@@ -200,7 +218,8 @@ impl Dom {
 
     /// `Dom::string_arg` on a local: `ToString`, the caps of a DOM string, and the UTF-8 text.
     pub(crate) fn string_arg_s<'s>(&self, s: &mut Sc<'s, '_>, v: Local<'s>) -> Res<'s, String> {
-        let t = s.to_string(v)?;
+        // A string is read in place: `to_string` pushes a local only for another value.
+        let t = if s.as_str(v).is_some() { v } else { s.to_string(v)? };
         let Some(text) = s.as_str(t) else { return Err(s.type_error("not a string")) };
         let len = text.len();
         if len > self.lim.max_string_bytes {

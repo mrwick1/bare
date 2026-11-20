@@ -14939,3 +14939,44 @@ Cost of the trigger on the allocation fast path (`crates/js2/examples/heap_load.
 - `task` mode (new): 20,000,000 objects of 2 slots through `alloc_in_task`, the last 1,000 in a native frame, the trigger collects (38 collections): 67.2 instructions per allocation, of which the loop itself (shape header, 3 stores, the frame write) is most. `perf record` (1 run): `finish_mark`, `Marker::cell`, `alloc_slow` and `sweep` together are 0.9% of the samples. A collection costs little here because only 1,000 objects are live; this row does not size the root walk of a deep stack. `alloc_in_task` and `Frames::regs` are not inlined across crates without `#[inline]`: the first build of the row had 106 instructions per allocation for that reason; both are `#[inline]` now.
 
 Not tested: a real interpreter, compiler root maps or deep stacks (S2); a collection that a host function causes while JS frames are below it (the handle scopes of design 6.8 are one native frame here); the cost of a walk of a deep stack; the trigger on `eval_load throws` or on the journeys (the new engine runs no script, so the peak of 16 MiB there is arithmetic); a second realm; arm64; the cost matrix (js2 is not wired into the browser); wall time.
+## 2026-11-20: host handler spike, H0 stopped at the cost rule (plan step S0.4, `design-host-handlers.md` step H0)
+
+Status: STOPPED after 2 measurements, as the design says. Branch `t3/host-handler-facade` (no PR). It holds the spike only: the dual registry, one shared host-call hook function, and `get_attribute`, `has_attribute` and `matches_selector` on `Scope` and `Local`. The facade, G1 to G13 (except `HostFn`) and their tests are not built.
+
+Changes.
+
+- `crates/js/src/eval.rs`, `eval_host.rs`, `eval_classes.rs`, `eval_native.rs`, `eval_api.rs`: `Callee::ApiHost` for a function made through `Engine::host_function`. Its call goes straight to `call_api_host`; the old `call_host` is unchanged. `host_function` takes `HostFn::{Method, Ctor, CtorNewTarget}` (G1).
+- `crates/js-api/src/lib.rs`: `HostFn`.
+- `crates/bare/src/browser_scoped.rs`: the registry `Dom::scoped`, `Dom::dispatch_host` (`style.cur`, `needs_new`, custom element scope, mutation observer hook) for both entries, `Entry`, and the `Local` forms of `el`, `string_arg`, `js_str`. A test build with `BARE_ALL_API=1` puts every old handler on the interface.
+- `crates/bare/src/browser_dom.rs`: the three handlers on `Scope`.
+- `crates/bare/examples/host_call_load.rs`: one host call in a loop (`nop`, `get`, `has`, `match`). Not a cost-matrix row.
+
+Method. Machine archMachine. Base: origin/main `1cfa3c69` built fresh. `tools/js/instr.sh` (minimum of 3 runs of `instructions:u`) on `host_call_load MODE 200000`. Rows by `tools/js/cost_matrix.sh -j4 -g 'attr_load|select_load react|handler_load|nodelist_load'` (16 rows, glibc; jemalloc only for a row over the limit).
+
+Measurement 1 (bit `1<<31` in the host function id, checked in `call_host`; `Dom::call` through the shared hook). Instructions per call, over base:
+
+| Path | `get` | `has` | `match` |
+|---|---:|---:|---:|
+| old registry (all handlers old) | +18 | +18 | +18 |
+| new registry (three handlers on `Scope`) | +184 | +137 | +151 |
+
+Rows: 14 of 16 over +0.2%, `select_load react 1000` +0.637% under both allocators. The three handlers added about 0.00 to 0.02 points to the rows against the same tree with them old: the rows call them rarely, so the rows say little about the cost of one call.
+
+Cause of the +9 of the bit check: the extra branch in `call_host` stopped the tail call to `call_api_host`, and `call_host` got 3 more pushes (disassembly). A separate `Callee::ApiHost` variant gives -3 per call on the old path (it adds a match arm only).
+
+Measurement 2 (`ApiHost`; a string argument is read in place, `to_string` only for another value):
+
+| Path | `get` | `has` | `match` |
+|---|---:|---:|---:|
+| old registry, shared hook | +5 | +5 | +5 |
+| new registry | +83 | +36 | +52 |
+
+Rows (all 16, glibc): +0.014% to +0.215%, mean +0.118%. The row over +0.2% is `select_load react 1000` (+0.215%); `attr_load react 1` +0.148%, `nodelist_load scan 1` +0.180%. Not within the +0.2% of the rule, so the spike stops here.
+
+Split of the cost of one interface call (callgrind, `get`, per call, before the string change; `has` is 123 in total): `call_api_host` 44 against `call_host` 26 (+18: host `Rc` clone, `host_nt`, handle stack push of `this` and the argument); `call_scoped` and its closure 73 against the old `Dom::call` 36 (+37); `enter` 12; argument `to_string` and `as_str` 27+12 against 11 (the string change removed most of it); result string `Engine::string` 25 and `shared_text` 27 against `intern_str` 7 (only `get`); `boolean` push 11; `el_s` 22 against 21; `node_of` is the same `by_obj` lookup in both (`host_key` for a wrapper needs a key in the object or a map; the old engine has neither, so it was not measured).
+
+Reading. A converted handler costs a fixed +36 to +83 instructions per call after the first fixes, 1.6% to 3.1% of a `hasAttribute` or `getAttribute` call in a loop. The cost scales with the number of converted calls, so converting a group of call-dense handlers (events, DOM core) is expected to pass +0.5% on its rows (hypothesis; not measured). The next change to the call path, not tried here: one `Scope` per host call kept by the engine (no `enter`, no second `Local` for `this`), the `Rc` clone of the interface host replaced by a borrowed pointer, `call_scoped` with no `RefCell` borrow, and `Engine::string` with `intern_str` directly. Each is 5 to 40 instructions by the callgrind split.
+
+Tests. Linux, debug: `cargo test --locked -p bare-js-api -p bare-js --lib` 31 and 1094 pass. `bare --lib` filters `dom attr custom mutation` (121): pass plain, with `BARE_GC_STRESS=1`, with `BARE_ALL_API=1`, and with both. `browser_custom` and `browser_mutation` (25) pass with `BARE_ALL_API=1`.
+
+Not tested: the Windows VM, the full `bare --lib` run, the full cost matrix, G2 to G13, the facade methods, and a unit test for `HostFn::CtorNewTarget` and for the constructor path of `ApiHost`.

@@ -334,7 +334,7 @@ impl<'p> Interp<'p> {
                 Some(Callee::Class) => return true,
                 Some(&Callee::Script { script, fid, .. }) => return self.func_of(script, fid).is_plain_ctor(),
                 Some(&Callee::Native(n)) => return matches!(n, Nat::ObjectCtor | Nat::FnCtor(_) | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::StringFn | Nat::NumberFn | Nat::BooleanFn | Nat::Ext(Bi::RegExpCtor) | Nat::Sc(ScFn::IterCtor | ScFn::SymbolCtor)) || Self::native_branded(n),
-                Some(&Callee::Host { ctor, .. }) => return ctor,
+                Some(&Callee::Host { ctor, .. } | &Callee::ApiHost { ctor, .. }) => return ctor,
                 Some(&Callee::Promise(pf)) => return matches!(pf, PFn::Ctor | PFn::AggErrCtor),
                 Some(&Callee::Bound { target, .. }) => o = target,
                 Some(&Callee::Proxy { ctor }) => return ctor,
@@ -375,7 +375,7 @@ impl<'p> Interp<'p> {
         }
         enum D {
             Class,
-            Host(u32),
+            Host(u32, bool),
             Script(u32, FuncId, u32, bool, u8),
             /// A host constructor that does not read `new.target` yet (it did not opt in with `add_ctor_nt`).
             NoNt(&'static str),
@@ -386,11 +386,12 @@ impl<'p> Interp<'p> {
         }
         let d = match self.funcs.get(&f) {
             Some(Callee::Class) => D::Class,
-            Some(&Callee::Host { id, ctor: true, nt: true }) => D::Host(id),
+            Some(&Callee::Host { id, ctor: true, nt: true }) => D::Host(id, false),
+            Some(&Callee::ApiHost { id, ctor: true, nt: true }) => D::Host(id, true),
             Some(&Callee::Script { script, fid, env, self_binding, hint }) if self.func_of(script, fid).is_plain_ctor() => D::Script(script, fid, env, self_binding, hint),
             Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor(_) | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::StringFn | Nat::NumberFn | Nat::BooleanFn | Nat::Ext(Bi::RegExpCtor) | Nat::Sc(ScFn::IterCtor) | Nat::Px(PxFn::Ctor)) || Self::native_branded(n) => D::Native(n),
             Some(&Callee::Promise(pf @ (PFn::Ctor | PFn::AggErrCtor))) => D::Promise(pf),
-            Some(&Callee::Host { ctor: true, nt: false, .. }) => D::NoNt("subclassing a host constructor (new.target is not passed to the constructor)"),
+            Some(&Callee::Host { ctor: true, nt: false, .. } | &Callee::ApiHost { ctor: true, nt: false, .. }) => D::NoNt("subclassing a host constructor (new.target is not passed to the constructor)"),
             Some(Callee::Bound { target, args, .. }) => D::Bound(*target, args.clone()),
             Some(&Callee::Proxy { ctor: true }) => D::Proxy,
             Some(&Callee::Native(Nat::Sc(ScFn::SymbolCtor))) => return Err(self.type_err("Symbol is not a constructor")),
@@ -421,13 +422,13 @@ impl<'p> Interp<'p> {
                 self.depth -= 1;
                 r
             }
-            D::Host(id) => {
+            D::Host(id, api) => {
                 if self.depth >= self.limits.max_call_depth {
                     return Err(Error::Limit(LimitKind::CallDepth));
                 }
                 self.tick()?;
                 self.depth += 1;
-                let r = self.call_host(id, Value::Undefined, args, true, Some(nt));
+                let r = if api { self.call_api_host(id, Value::Undefined, args, true, Some(nt)) } else { self.call_host(id, Value::Undefined, args, true, Some(nt)) };
                 self.depth -= 1;
                 r
             }
