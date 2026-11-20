@@ -16183,3 +16183,40 @@ Engine bugs that the run found (not fixed here):
 `cargo test --locked -p bare-js2 --lib`: 377 pass (376 before, 1 new for `load_with`). `cargo test --locked -p bare-js-diff`: 4 pass (2 unit tests of the reader of the script tests and of the verdict, 2 integration tests). Clippy (`cargo clippy -p bare-js-diff -p bare-js2 --all-targets`): no finding in the new code; the findings that remain are in `crates/js2/examples/object_census.rs` and `bare-js` (not changed here).
 
 Not tested: Windows and macOS (the shell tool needs GNU `find` and `timeout`; the cargo test is portable but not run there); the old engine in `auto` and `byte` modes (only `tree`); Miri on `load_with` (safe code); the `script_tests` programs that span several lines; a second test262 checkout revision; the old engine's modules and async tests (skipped on both); how the counts move when js2 gets a step budget of another size (20,000,000 back edges, the old engine 20,000,000 steps: not the same unit).
+
+## 2026-11-20: host handlers on the interface, D2: media, image and canvas (plan step S0.4 / D2)
+
+Status: the handlers of the three files run through the interface (`Scope`, `Local`, `Args`). Tests pass on Linux and Windows. The matrix has no row over the limit. The PR is open without auto-merge.
+
+Base: `origin/t3/convert-browser-host-handlers` (the head of #762, A1c) merged with `origin/main` (`57357737`). #762 was not merged when this started, so the diff against main holds the commits of #762 until it merges. #769 (group C) is not in the base. The files of this group do not overlap with it.
+
+Files converted: `browser_media.rs` (59 handlers: the `HTMLMediaElement`, `HTMLVideoElement`, `TimeRanges` and `MediaError` members, `load`, `play`, `pause`, `canPlayType`, the constructors `Audio` and the illegal ones, the `on*` handlers, and the caption handlers `TextTrack`, `TextTrackList`, `HTMLTrackElement` and the cue accessors), `browser_canvas.rs` (the `ImageData` constructor, `getContext`, `toDataURL`, `measureText`, `createImageData`, `getImageData`, the gradient and pattern objects, the no-op methods), `browser_img.rs` (`Image`, `decode`, `onload`, `onerror`). 73 handlers in all.
+
+Not converted, and why:
+
+- The lazy global definers (`lazy_media`, `lazy_audio_el`, `lazy_video_el`, `lazy_ranges`, `lazy_error`, `lazy_audio`, `lazy_image`, `lazy_image_data`). They define a global from a property read. `browser_lazy::lazy` takes `it`, so they move with `browser_lazy.rs` (the lazy global definers stay old in every group, as in A1c).
+- The install code (`install`, `proto`, `ensure`, `make`, `caption_proto`, `method`) and `Dom::wrap` calling `proto`. It runs once and it keys tables by `ObjId`. It registers the new handlers through `add_fn_s_obj`, `def_get_s` and `def_method_s`.
+- The task code (`media_task`, `media_fire`, `media_heard`, `select`, `start`, `fail`, `caption_load`, `Dom::img_task`). The scheduler calls it with an `Interp`, and it fires events through `Dom::dispatch`. It moves with group B (events, scheduler). `reject` keeps its old signature and calls `reject_s` through `run`.
+- The host hooks `caption_len`, `caption_item` and `caption_fill`, and the tables with `ObjId` keys (`Media::lists`, `Media::tracks`, `Img::decodes`). `caption_fill` calls the new `caption_prepare` and `caption_object` through `run`.
+- The `ObjId` fields of `Made`, `CaptionTrack` and `CaptionCue`. The GC roots read them. They move with the table of roots (group Z).
+
+Changes.
+
+- `browser_scoped.rs`: three helpers for code that builds objects inside a handler: `Dom::obj_with_s` (a new object with a given prototype), `Dom::def_method_l` (a method on a `Local`, enumerable or not) and `Dom::def_get_l` (an accessor on a `Local`). The bridge `media_src_changed_s` calls `browser_media::src_changed` directly, which now takes a scope.
+- `browser_media.rs`: `src_changed`, `load_algorithm`, `queue_s`, `queue_event_s`, `reject_s`, `caption_object`, `caption_prepare`, `with_cue` and the `this` checks take a scope. The old `queue_event`, the old `load_algorithm` and the old `caption_object` are removed (no caller). `range_at` is two functions of a const parameter (`END`), not two closures.
+- `browser_canvas.rs`: `ensure_s` makes the `ImageData` constructor on the scope. The old `ensure` calls it through `run` for the lazy definer. The old `arg` wrapper is removed.
+- `browser_img.rs`: `on_get`, `on_set` and `decode` use `old_v` and `old` for `handler_get` and `handler_set` (the pattern of `browser_handlers.rs`).
+- `browser_media_tests.rs`: one new test, `the_members_that_the_cases_do_not_read_keep_their_answers_and_errors` (`TimeRanges` `start` and `end`, the reads and writes of `crossOrigin`, `width`, `playbackRate`, `currentTime`, the errors of `volume`, `currentTime` and `srcObject`, a wrong `this`, `activeCues`, `textTracks`, `Image` size and handlers). It passes on the base commit too (built in a separate checkout), so the answers did not change.
+
+Grep gate (`\bbare_js::(value|eval::Interp)|\bObjId\b|\bInterp\b|\.engine\(\)|\.heap\.`, lines for each file, before then after): media 106 to 36, canvas 25 to 6, img 13 to 8. Handler lines of the old form (`fn .*&\[Value\]`): media 59 to 0, canvas 12 to 1 (`lazy_image_data`), img 4 to 0. The lines that stay are the items in the list above. The goal 0 is not met for the same reasons as in A1c. Two of the media lines are `bare_js::value::to_uint32` (a pure function, not the engine).
+
+Measurements. Machine archMachine. Instruction counts (`perf stat -e instructions:u`, minimum of 3 runs), `tools/js/cost_matrix.sh -j4`, 817 rows, both trees built with the default release profile in separate target directories. Base: `57357737` (the tree before this change). New: `9fbd00f2`.
+
+- Mean change: glibc -0.002%. No row is over +0.5% under glibc, so the jemalloc run and the `codegen-units=1` run did not start. The top rows: `form_load validity 10` (`FORM_LOAD_STACK_MIB=8`) +0.493%, `scheduler_load timers 10` +0.231%, `scheduler_load mixed 10` +0.146%, `mixed 1` +0.127%, `form_load validity 1` +0.120%. None of these call a handler of this group (the form handlers are group C; the base has them in the old form). The lowest: `resources_load small 10` -0.453%.
+- The two rows that name this group: `platform_load media 1` -0.002% (48,127,549 to 48,126,611 instructions) and `media 10` +0.002% (408,955,161 to 408,961,627).
+- `parse_load deep 1` and `deep 10` fail to run on both trees (known: stack overflow).
+- The rows hardly use these handlers (2 rows of 817), so the matrix shows that the shared call path did not change. It does not measure the cost of one media call. A call of a converted handler costs what the A1 rounds measured (about the same as the old one).
+
+Tests. Linux, debug: `cargo test --locked -p bare-js-api -p bare-js -p bare --lib`: 32, 1104 (1 ignored) and 1715 (6 ignored) pass. The filters `browser_media_tests browser_canvas_tests browser_img_tests browser_elements_tests browser_scoped browser_reclaim browser_tests browser_navigation_tests browser_scheduler_tests browser_streams_tests browser_compression_tests canvas media image audio` (295 tests): pass plain, with `BARE_ALL_API=1` and with `BARE_GC_STRESS=1 BARE_ALL_API=1`. With `BARE_GC_STRESS=1` alone, 294 pass and 1 fails: `browser_reclaim_tests::parsed_documents_ask_for_a_collect_by_their_native_bytes` (the known failure of the base under `BARE_GC_STRESS=1`; it passes when `BARE_ALL_API=1` is also set). Windows 11 VM (`cargo xwin test --no-run`, exe through `winssh`): the same 295-test filter passes.
+
+Not tested: `BARE_GC_STRESS=1` and `BARE_ALL_API=1` with the whole `bare --lib`; the full `bare --lib` on Windows; the jemalloc and `codegen-units=1` runs (no row went over the limit under glibc); the journeys and `tools/suite/run.py`; RSS and wall time; the cost of one media, canvas or image call by a micro-loop; the `Image` and `decode()` paths with a real picture download (the tests use pages with no network).
