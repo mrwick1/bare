@@ -273,3 +273,10 @@ One change in the target design would reduce cost, not add it. With `Scope::host
 - The split of `peek_own_property` sites into presence tests and kind reads is partial (8 of 16 seen on one line).
 - Whether `Scope::string` interns, and whether a bit in the host function id adds no branch on the old call path.
 - Counts cover `crates/bare/src`. `crates/drive` (2 files) and `crates/bare/examples` are listed, not counted by group.
+
+## Decisions (owner, 2026-11-20)
+
+- Option B is approved: 11 PRs. H0 comes first, with the cost spike inside it. A1 follows. Then groups B, C, D1, D2, E, F, G and A2, up to 5 at once. Z is the cleanup.
+- Question 2: the bodies use one alias (`Eng`). The change to `Dom<E: Engine>` is its own mechanical PR, with the first `bare-js2` `Engine` (S2.8).
+- Questions 1 and 3 to 10: the proposed answers are accepted.
+- This replaces the 2026-11-19 decision to move all handler bodies in one PR.
