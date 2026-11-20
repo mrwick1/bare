@@ -14592,7 +14592,7 @@ Not tested: the full Windows suite, massif on Windows (valgrind has no Windows p
 
 ## 2026-11-20: cell header, shape id against shape pointer (plan step S1.4)
 
-Decision: the cell header is two 32-bit words, a shape id and a word of layout code plus 24 flag bits. A raw 8-byte shape pointer lost. `crates/js2/src/cell.rs` now holds only the id form, with a stub `Shape` and a `Shapes` table (S1.8 builds the real shapes). Both forms were built and measured at commit `e9f52faa` (feature `shape-ptr` in `cell.rs`); the next commit removes the pointer form. The header stays 8 bytes in both forms. Only `cell.rs` changed for the header; `string.rs` got one arm for the new `Layout::Object`.
+Decision: the cell header is two 32-bit words, a shape id and a word of layout code plus 24 flag bits. A raw 8-byte shape pointer lost. `crates/js2/src/cell.rs` now holds only the id form, with a stub `Shape` and a `Shapes` table (S1.8 builds the real shapes). Both forms were built and measured at commit `f6d06f8e` (feature `shape-ptr` in `cell.rs`); the next commit removes the pointer form. The header stays 8 bytes in both forms. Only `cell.rs` changed for the header; `string.rs` got one arm for the new `Layout::Object`.
 
 The two forms:
 - Id (kept): `shape: u32` (0 for a string) and `bits: u32` (layout code in the low 8 bits, flags above). The marker reads the layout from `bits` and sets one bit per used shape id (`Shapes::note_live`). After the marking, `finish_marks` marks each shape cell once. A cache compares the id. `Shapes::of(header)` is a table load and then the shape.
@@ -14635,6 +14635,6 @@ Memory side, from the old engine at its census peak (`BARE_JS_STATS=1`, `BARE_JS
 
 32-bit targets: not built or measured. The design lists no 32-bit target and `Value` holds 48-bit addresses in 64 bits. On a 32-bit target a pointer is 4 bytes, so the pointer form would fit the header with a flags word in 8 bytes. Verify if a 32-bit target is ever added.
 
-Checks: `bare-js2` tests: 35 pass on Linux (4 new in `cell_tests.rs`: header round trip, shape lookup, a shape that a marked cell uses survives and an unused one is freed) and 35 on the Windows 11 VM (`cargo xwin test`); the three `header_load` rows also ran on the VM. Miri (nightly): 35 pass in 150 s of test time. The pointer form passed the same unit tests at `e9f52faa`. Clippy shows no new finding in `cell.rs` (the existing findings in `heap.rs` and `bare-os` are not touched).
+Checks: `bare-js2` tests: 35 pass on Linux (4 new in `cell_tests.rs`: header round trip, shape lookup, a shape that a marked cell uses survives and an unused one is freed) and 35 on the Windows 11 VM (`cargo xwin test`); the three `header_load` rows also ran on the VM. Miri (nightly): 35 pass in 150 s of test time. The pointer form passed the same unit tests at `f6d06f8e`. Clippy shows no new finding in `cell.rs` (the existing findings in `heap.rs` and `bare-os` are not touched).
 
 Not tested: a real shape (S1.8); the marker of S1.5 (the mark row is a stand-in with a work stack); the cost matrix (js2 is not wired into the browser); arm64; a 32-bit target; a "last shape" test in the marker; objects with flag combinations (no count of flag combinations exists yet); wall time (the machine was shared; cycles above are indicative only); Windows instruction counts.
