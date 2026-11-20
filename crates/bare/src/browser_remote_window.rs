@@ -23,9 +23,11 @@
 //!   parent window and the top window are one object when the child is a frame of the top page. In a deeper child, the `parent` of
 //!   the parent window is taken as the top window (the exact grandparent needs 3b).
 use crate::browser::*;
+use crate::browser_scoped::*;
 use crate::browser_child::{FrameId, Out};
-use bare_js::eval::{Error, Interp};
+use bare_js::eval::Interp;
 use bare_js::value::{ObjId, Value};
+use bare_js_api::{Args, Engine as _, HostFn, Local};
 
 /// Which page a window stands for, seen from the page that holds it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -63,88 +65,89 @@ pub(crate) struct Common {
 
 const API: [&str; 13] = ["window", "self", "frames", "length", "top", "parent", "opener", "closed", "postMessage", "blur", "focus", "close", "location"];
 
-fn text(it: &mut Interp<'_>, v: Value) -> Option<String> {
-    match v {
-        Value::String(s) => it.heap.to_string_lossy(s).ok(),
-        _ => None,
-    }
+fn text(s: &Sc<'_, '_>, v: Local<'_>) -> Option<String> {
+    s.as_str(v).map(|t| t.to_string_lossy())
 }
 
-fn blocked(d: &Dom, it: &mut Interp<'_>, verb: &str, key: &str) -> Error {
+fn blocked<'s>(d: &Dom, s: &mut Sc<'s, '_>, verb: &str, key: &str) -> bare_js_api::Error<'s> {
     let origin = d.cur_rec().map_or_else(|_| "null".to_string(), |r| r.origin());
-    d.dom_err(it, "SecurityError", &format!("Failed to {verb} a named property '{key}' {} 'Window': Blocked a frame with origin \"{origin}\" from accessing a cross-origin frame.", if verb == "read" { "from" } else { "on" }))
+    d.dom_err_s(s, "SecurityError", &format!("Failed to {verb} a named property '{key}' {} 'Window': Blocked a frame with origin \"{origin}\" from accessing a cross-origin frame.", if verb == "read" { "from" } else { "on" }))
 }
 
-fn key_text(it: &mut Interp<'_>, v: Value) -> String {
-    text(it, v).unwrap_or_default()
+fn key_text(s: &Sc<'_, '_>, v: Local<'_>) -> String {
+    text(s, v).unwrap_or_default()
 }
 
-fn trap_get(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    let (target, k) = (a.first().copied().unwrap_or(Value::Undefined), a.get(1).copied().unwrap_or(Value::Undefined));
+fn trap_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (target, k) = (arg_s(s, a, 0), arg_s(s, a, 1));
     // A symbol key (`Symbol.toPrimitive`, `Symbol.toStringTag`) and `then` read as `undefined`, as in a browser.
-    let Some(name) = text(it, k) else { return Ok(Value::Undefined) };
+    let Some(name) = text(s, k) else { return Ok(s.undefined()) };
     if name == "then" {
-        return Ok(Value::Undefined);
+        return Ok(s.undefined());
     }
     if !API.contains(&name.as_str()) {
-        return Err(blocked(d, it, "read", &name));
+        return Err(blocked(d, s, "read", &name));
     }
-    let key = d.key(it, &name)?;
-    it.get_value(target, key)
+    s.get(target, k)
 }
 
-fn trap_set(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    let (target, k, v) = (a.first().copied().unwrap_or(Value::Undefined), a.get(1).copied().unwrap_or(Value::Undefined), a.get(2).copied().unwrap_or(Value::Undefined));
-    let name = key_text(it, k);
-    let win = match target {
-        Value::Object(t) => d.kids.win_of(t),
-        _ => None,
-    };
+fn trap_set<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (target, k, v) = (arg_s(s, a, 0), arg_s(s, a, 1), arg_s(s, a, 2));
+    let name = key_text(s, k);
+    let win = obj_id(s, target).and_then(|t| d.kids.win_of(t));
     match (name.as_str(), win) {
         ("location", Some(w)) if !w.location => {
-            let url = d.string_arg(it, v)?;
+            let url = d.string_arg_s(s, v)?;
             if let Side::Child(id) = w.side {
                 d.kids.navigate(d, id, &url);
             }
-            Ok(Value::Bool(true))
+            Ok(s.boolean(true))
         }
-        _ => Err(blocked(d, it, "set", &name)),
+        _ => Err(blocked(d, s, "set", &name)),
     }
 }
 
-fn trap_has(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    match text(it, a.get(1).copied().unwrap_or(Value::Undefined)) {
-        Some(name) if !API.contains(&name.as_str()) => Err(blocked(d, it, "read", &name)),
-        Some(_) => Ok(Value::Bool(true)),
-        None => Ok(Value::Bool(false)),
+fn trap_has<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let k = arg_s(s, a, 1);
+    match text(s, k) {
+        Some(name) if !API.contains(&name.as_str()) => Err(blocked(d, s, "read", &name)),
+        Some(_) => Ok(s.boolean(true)),
+        None => Ok(s.boolean(false)),
     }
 }
 
-fn trap_define(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    let name = key_text(it, a.get(1).copied().unwrap_or(Value::Undefined));
-    Err(blocked(d, it, "define", &name))
+fn trap_define<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let k = arg_s(s, a, 1);
+    let name = key_text(s, k);
+    Err(blocked(d, s, "define", &name))
 }
 
-fn trap_delete(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    let name = key_text(it, a.get(1).copied().unwrap_or(Value::Undefined));
-    Err(blocked(d, it, "delete", &name))
+fn trap_delete<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let k = arg_s(s, a, 1);
+    let name = key_text(s, k);
+    Err(blocked(d, s, "delete", &name))
 }
 
-fn win_closed(d: &Dom, _: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    let Value::Object(t) = this else { return Ok(Value::Bool(true)) };
-    Ok(Value::Bool(match d.kids.win_of(t).map(|w| w.side) {
+fn win_closed<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let Some(t) = obj_id(s, this) else { return Ok(s.boolean(true)) };
+    let closed = match d.kids.win_of(t).map(|w| w.side) {
         Some(Side::Child(id)) => !d.kids.alive(id),
         _ => false,
-    }))
+    };
+    Ok(s.boolean(closed))
 }
 
 /// `postMessage` of a remote window: the message goes to the outbox of this page. The driver routes it (`Browser::kids_turn`).
-fn win_post(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    let win = match this {
-        Value::Object(p) => d.kids.target_of(p).and_then(|t| d.kids.win_of(t)),
-        _ => None,
-    };
-    let Some(Win { side: to, .. }) = win else { return Err(it.type_error("Illegal invocation")) };
+fn win_post<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let win = obj_id(s, this).and_then(|p| d.kids.target_of(p)).and_then(|t| d.kids.win_of(t));
+    let Some(Win { side: to, .. }) = win else { return Err(s.type_error("Illegal invocation")) };
+    // The message walk and the port export take the old engine.
+    let args: Vec<Value> = a.iter().map(|l| s.engine().raw(l)).collect();
+    old(s, |it| post(d, it, to, &args))?;
+    Ok(s.undefined())
+}
+
+fn post(d: &Dom, it: &mut Interp<'_>, to: Side, a: &[Value]) -> R<()> {
     let (target, list) = crate::browser_basics::post_args(d, it, a)?;
     let origin = d.window_origin();
     let target_origin = match crate::browser_basics::target_origin(it, d, &target)? {
@@ -153,7 +156,7 @@ fn win_post(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> 
         None => origin.clone(),
     };
     if matches!(to, Side::Child(id) if !d.kids.alive(id)) {
-        return Ok(Value::Undefined);
+        return Ok(());
     }
     if d.kids.outbox_len() >= d.max_messages() {
         return Err(d.lim("messages"));
@@ -161,32 +164,31 @@ fn win_post(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> 
     let mut cloned = crate::browser_navigation_state::clone_state_with(d, it, a[0], &list)?;
     d.export_ports(it, &mut cloned)?;
     d.kids.send(Out { to, target_origin, origin, cloned });
-    Ok(Value::Undefined)
+    Ok(())
 }
 
-fn loc_target(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<Win> {
-    let found = match this {
-        Value::Object(t) => d.kids.win_of(t).filter(|w| w.location),
-        _ => None,
-    };
-    found.ok_or_else(|| it.type_error("Illegal invocation"))
+fn loc_target<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, Win> {
+    match obj_id(s, this).and_then(|t| d.kids.win_of(t)).filter(|w| w.location) {
+        Some(w) => Ok(w),
+        None => Err(s.type_error("Illegal invocation")),
+    }
 }
 
-fn loc_replace(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    let w = loc_target(d, it, this)?;
-    let url = d.string_arg(it, a.first().copied().unwrap_or(Value::Undefined))?;
+fn loc_replace<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let w = loc_target(d, s, this)?;
+    let url = d.arg_str_s(s, a, 0)?;
     if let Side::Child(id) = w.side {
         d.kids.navigate(d, id, &url);
     }
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-fn loc_href_get(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
-    Err(blocked(d, it, "read", "href"))
+fn loc_href_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    Err(blocked(d, s, "read", "href"))
 }
 
-fn loc_href_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    loc_replace(d, it, this, a)
+fn loc_href_set<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    loc_replace(d, s, this, a)
 }
 
 fn common(d: &Dom, it: &mut Interp<'_>) -> R<Common> {
@@ -194,20 +196,20 @@ fn common(d: &Dom, it: &mut Interp<'_>) -> R<Common> {
         return Ok(c);
     }
     let handler = it.heap.new_object(None).map_err(|e| it.heap_error(e))?;
-    let traps: [(&str, H); 5] = [("get", trap_get), ("set", trap_set), ("has", trap_has), ("defineProperty", trap_define), ("deleteProperty", trap_delete)];
+    let traps: [(&str, HS); 5] = [("get", trap_get), ("set", trap_set), ("has", trap_has), ("defineProperty", trap_define), ("deleteProperty", trap_delete)];
     for (name, h) in traps {
-        let f = d.add_fn(it, h, name, 3, false)?;
+        let f = d.add_fn_s_obj(it, h, name, 3, HostFn::Method)?;
         let k = d.key(it, name)?;
         it.define_data(handler, k, Value::Object(f), true, false, true)?;
     }
     let mut no_op = [handler; 4];
     for (slot, name) in no_op.iter_mut().zip(["postMessage", "blur", "focus", "close"]) {
-        *slot = if name == "postMessage" { d.add_fn(it, win_post, name, 1, false)? } else { d.add_fn(it, |_, _, _, _| Ok(Value::Undefined), name, 0, false)? };
+        *slot = if name == "postMessage" { d.add_fn_s_obj(it, win_post, name, 1, HostFn::Method)? } else { d.add_fn_s_obj(it, |_, s, _, _| Ok(s.undefined()), name, 0, HostFn::Method)? };
     }
-    let closed = d.add_fn(it, win_closed, "get closed", 0, false)?;
-    let replace = d.add_fn(it, loc_replace, "replace", 1, false)?;
-    let href_get = d.add_fn(it, loc_href_get, "get href", 0, false)?;
-    let href_set = d.add_fn(it, loc_href_set, "set href", 1, false)?;
+    let closed = d.add_fn_s_obj(it, win_closed, "get closed", 0, HostFn::Method)?;
+    let replace = d.add_fn_s_obj(it, loc_replace, "replace", 1, HostFn::Method)?;
+    let href_get = d.add_fn_s_obj(it, loc_href_get, "get href", 0, HostFn::Method)?;
+    let href_set = d.add_fn_s_obj(it, loc_href_set, "set href", 1, HostFn::Method)?;
     let g = Value::Object(it.global_object());
     let kp = d.key(it, "Proxy")?;
     let px = it.get_value(g, kp)?;
