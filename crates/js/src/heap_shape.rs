@@ -1889,6 +1889,135 @@ impl Heap {
     }
 }
 
+// ---------- structured clone fast path (`docs/design-host-clone.md`, plan step 4) ----------
+
+/// What a clone walk read of an object when it started: the shape and the number of elements. A shape never changes, so the same shape
+/// means the same keys and attributes. The walk reads each value at its turn (`Heap::clone_prop`, `Heap::clone_elem`) and falls back to the
+/// generic path (`Heap::clone_keys`) as soon as the object is not as it was.
+#[derive(Clone, Copy)]
+pub struct CloneShape {
+    shape: u32,
+    pub elems: usize,
+    /// The number of entries of the shape (an array's `length` is entry 0).
+    pub named: usize,
+    pub array: bool,
+}
+
+impl Heap {
+    /// An ordinary object or a dense array in shape mode whose properties are all plain data properties with string keys, and which has no
+    /// hole: the keys and the values can be read with no script. `None` for any other object.
+    pub fn clone_shape(&self, o: ObjId) -> Option<CloneShape> {
+        let ob = self.objects.get(o.index, o.gn)?;
+        if ob.exotic != 0 || ob.lazy != 0 || ob.dict().is_some() {
+            return None;
+        }
+        let entries = self.shapes.entries(ob.shape);
+        let skip = ob.is_array as usize;
+        if ob.is_array {
+            let l = entries.first()?;
+            if l.slot != 0 || l.attrs != A_W || !matches!(ob.slot0(), Some(Value::Number(n)) if *n == ob.elems.len() as f64) || !ob.elems.iter().all(|e| e.is_some()) {
+                return None;
+            }
+        } else if !ob.elems.is_empty() {
+            return None;
+        }
+        if !entries[skip..].iter().all(|e| e.attrs == A_W | A_E | A_C && matches!(e.key, PropertyKey::String(_))) {
+            return None;
+        }
+        Some(CloneShape { shape: ob.shape, elems: ob.elems.len(), named: entries.len(), array: ob.is_array })
+    }
+
+    /// Entry `i` of the shape of `o`, with its value now. `None` when `o` is not as `sh` says: its shape or its element count changed.
+    #[inline]
+    pub fn clone_prop(&self, o: ObjId, sh: CloneShape, i: usize) -> Option<(PropertyKey, Value)> {
+        let ob = self.objects.get(o.index, o.gn)?;
+        if ob.shape != sh.shape || ob.elems.len() != sh.elems {
+            return None;
+        }
+        let e = self.shapes.entries(sh.shape).get(i)?;
+        Some((e.key, *ob.slot(e.slot as usize)?))
+    }
+
+    /// Element `i` of `o` now. `None` when `o` is not as `sh` says, or the element is a hole.
+    #[inline]
+    pub fn clone_elem(&self, o: ObjId, sh: CloneShape, i: usize) -> Option<Value> {
+        let ob = self.objects.get(o.index, o.gn)?;
+        if ob.shape != sh.shape || ob.elems.len() != sh.elems {
+            return None;
+        }
+        (*ob.elems.get(i)?).as_ref().copied()
+    }
+
+    /// The keys `sh` listed from place `from` on, in the order of `own_keys`: the elements, then the entries.
+    #[cold]
+    pub fn clone_keys(&self, sh: CloneShape, from: usize) -> Vec<PropertyKey> {
+        let entries = self.shapes.entries(sh.shape);
+        (from..sh.elems + entries.len()).map(|p| if p < sh.elems { PropertyKey::Index(p as u32) } else { entries[p - sh.elems].key }).collect()
+    }
+
+    /// Give the new empty object `o` the data properties `keys` with the values `vals`, all at once, with the shape that adding them one by
+    /// one gives. `cache` remembers the shapes of the last key lists of this read: the next object with the same keys takes its shape from
+    /// it, with no transition. `Ok(false)` and no change when that is not possible: `o` is not new and empty, a key is not a string or is
+    /// there twice, or there are too many keys.
+    pub fn clone_install(&mut self, o: ObjId, keys: &[PropertyKey], vals: &[Value], cache: &mut CloneShapes) -> R<bool> {
+        let ob = self.obj(o)?;
+        if keys.len() != vals.len() || ob.shape != ROOT || ob.is_array || ob.exotic != 0 || ob.has_slots() || !ob.elems.is_empty() {
+            return Ok(false);
+        }
+        if keys.is_empty() {
+            return Ok(true);
+        }
+        let hash = cache.hash(keys);
+        let shape = match cache.0.iter().find(|e| e.0 == hash).map(|e| e.1) {
+            // A hit is checked against the keys of the shape, so a clash of the hash cannot give a wrong shape.
+            Some(s) if self.shapes.entries(s).len() == keys.len() && self.shapes.entries(s).iter().zip(keys).all(|(e, k)| e.key == *k && e.attrs == A_W | A_E | A_C) => s,
+            _ => {
+                if keys.len() > MAX_PROPS || keys.iter().enumerate().any(|(i, k)| !matches!(k, PropertyKey::String(_)) || keys[..i].contains(k)) {
+                    return Ok(false);
+                }
+                let mut shape = ROOT;
+                for &k in keys {
+                    match self.shapes.add(shape, k, A_W | A_E | A_C) {
+                        Some(s) => shape = s,
+                        None => return Ok(false),
+                    }
+                }
+                cache.put(hash, shape);
+                shape
+            }
+        };
+        self.charge(if vals.len() > INLINE { vals.len() * SLOT_BYTES } else { 0 })?;
+        self.edit_with(o, |ob, _| {
+            ob.shape = shape;
+            ob.fill_slots(vals);
+        });
+        Ok(true)
+    }
+}
+
+/// The shapes of the last 4 key lists that one structured-clone read gave to new objects (`Heap::clone_install`), by a hash of the list:
+/// an array of objects with the same keys makes its shape once. No allocation. A shape never changes, so an entry stays true; the hash is
+/// only a guess that the caller checks.
+#[derive(Default)]
+pub struct CloneShapes([(u64, u32); 4], usize);
+
+impl CloneShapes {
+    fn hash(&self, keys: &[PropertyKey]) -> u64 {
+        keys.iter().fold(keys.len() as u64, |h, k| {
+            let k = match *k {
+                PropertyKey::String(s) => (s.gn as u64) << 32 | s.index as u64,
+                _ => 0,
+            };
+            (h.rotate_left(5) ^ k).wrapping_mul(0x517c_c1b7_2722_0a95)
+        })
+    }
+
+    fn put(&mut self, hash: u64, shape: u32) {
+        self.0[self.1 & 3] = (hash, shape);
+        self.1 += 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
