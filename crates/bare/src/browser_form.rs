@@ -48,16 +48,10 @@
 
 use crate::browser::*;
 use crate::browser_dom as nd;
-use crate::browser_events::init_flag;
+use crate::browser_scoped::*;
 use bare_html::dom::{Atom, Document, NodeData, NodeId};
-use bare_js::eval::{Error, Interp};
-use bare_js::value::{ObjId, Value};
-
-type V = R<Value>;
-
-fn arg(a: &[Value], i: usize) -> Value {
-    a.get(i).copied().unwrap_or(Value::Undefined)
-}
+use bare_js::eval::Interp;
+use bare_js_api::{Args, Local};
 
 /// The content attribute `name` in no namespace.
 fn attr<'a>(doc: &'a Document, n: NodeId, name: &str) -> Option<&'a str> {
@@ -88,35 +82,31 @@ pub(crate) fn button_state(doc: &Document, n: NodeId) -> (bool, &'static str) {
     if invoker || in_select { (false, "button") } else { (true, "submit") }
 }
 
-fn illegal(it: &mut Interp<'_>) -> Error {
-    it.type_error("Illegal invocation")
-}
-
 impl Dom {
     /// `this` of an accessor on an HTML element of one of `tags`.
-    fn html_this(&self, it: &mut Interp<'_>, this: Value, tags: &[&str]) -> R<NodeId> {
-        let n = self.el(it, this)?;
-        if tag_is(&self.doc.borrow(), n, tags) { Ok(n) } else { Err(illegal(it)) }
+    fn html_this_s<'s>(&self, s: &mut Sc<'s, '_>, this: Local<'s>, tags: &[&str]) -> Res<'s, NodeId> {
+        let n = self.el_s(s, this)?;
+        if tag_is(&self.doc.borrow(), n, tags) { Ok(n) } else { Err(s.type_error("Illegal invocation")) }
     }
 
-    fn reflect_str(&self, it: &mut Interp<'_>, n: NodeId, name: &str) -> V {
-        let s = attr(&self.doc.borrow(), n, name).unwrap_or("").to_string();
-        self.js_str(it, &s)
+    fn reflect_str_s<'s>(&self, s: &mut Sc<'s, '_>, n: NodeId, name: &str) -> Res<'s, Local<'s>> {
+        let t = attr(&self.doc.borrow(), n, name).unwrap_or("").to_string();
+        self.js_str_s(s, &t)
     }
 
-    fn reflect_set_str(&self, it: &mut Interp<'_>, n: NodeId, name: &str, v: Value) -> V {
-        let s = self.string_arg(it, v)?;
-        nd::attr_set(self, it, n, name, &s)?;
-        Ok(Value::Undefined)
+    fn reflect_set_str_s<'s>(&self, s: &mut Sc<'s, '_>, n: NodeId, name: &str, v: Local<'s>) -> Res<'s, Local<'s>> {
+        let t = self.string_arg_s(s, v)?;
+        nd::attr_set_s(self, s, n, name, &t)?;
+        Ok(s.undefined())
     }
 
-    fn reflect_bool_set(&self, it: &mut Interp<'_>, n: NodeId, name: &str, v: Value) -> V {
-        if it.to_js_bool(v)? {
-            nd::attr_set(self, it, n, name, "")?;
+    fn reflect_bool_set_s<'s>(&self, s: &mut Sc<'s, '_>, n: NodeId, name: &str, v: Local<'s>) -> Res<'s, Local<'s>> {
+        if s.to_boolean(v) {
+            nd::attr_set_s(self, s, n, name, "")?;
         } else {
             self.doc.borrow_mut().remove_attr(n, name);
         }
-        Ok(Value::Undefined)
+        Ok(s.undefined())
     }
 
     /// Is `n` connected to the document? Charges the walk.
@@ -312,47 +302,51 @@ impl Browser {
 
 // ------------------------------------------------------------------------------------------ reflection
 
-pub(crate) fn input_name(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = d.html_this(it, this, &["input"])?;
-    d.reflect_str(it, n, "name")
+pub(crate) fn input_name<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.html_this_s(s, this, &["input"])?;
+    d.reflect_str_s(s, n, "name")
 }
 
-pub(crate) fn set_input_name(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let n = d.html_this(it, this, &["input"])?;
-    d.reflect_set_str(it, n, "name", arg(a, 0))
+pub(crate) fn set_input_name<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.html_this_s(s, this, &["input"])?;
+    let v = arg_s(s, a, 0);
+    d.reflect_set_str_s(s, n, "name", v)
 }
 
-pub(crate) fn button_name(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = d.html_this(it, this, &["button"])?;
-    d.reflect_str(it, n, "name")
+pub(crate) fn button_name<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.html_this_s(s, this, &["button"])?;
+    d.reflect_str_s(s, n, "name")
 }
 
-pub(crate) fn set_button_name(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let n = d.html_this(it, this, &["button"])?;
-    d.reflect_set_str(it, n, "name", arg(a, 0))
+pub(crate) fn set_button_name<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.html_this_s(s, this, &["button"])?;
+    let v = arg_s(s, a, 0);
+    d.reflect_set_str_s(s, n, "name", v)
 }
 
-pub(crate) fn button_type(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = d.html_this(it, this, &["button"])?;
+pub(crate) fn button_type<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.html_this_s(s, this, &["button"])?;
     let t = button_state(&d.doc.borrow(), n).1;
-    d.js_str(it, t)
+    d.js_str_s(s, t)
 }
 
-pub(crate) fn set_button_type(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let n = d.html_this(it, this, &["button"])?;
-    d.reflect_set_str(it, n, "type", arg(a, 0))
+pub(crate) fn set_button_type<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.html_this_s(s, this, &["button"])?;
+    let v = arg_s(s, a, 0);
+    d.reflect_set_str_s(s, n, "type", v)
 }
 
 /// One boolean reflection pair for `input` (`$tag` "input") or `button`.
 macro_rules! bool_attr {
     ($get:ident, $set:ident, $tag:literal, $attr:literal) => {
-        pub(crate) fn $get(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-            let n = d.html_this(it, this, &[$tag])?;
-            Ok(Value::Bool(attr(&d.doc.borrow(), n, $attr).is_some()))
+        pub(crate) fn $get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+            let n = d.html_this_s(s, this, &[$tag])?;
+            Ok(s.boolean(attr(&d.doc.borrow(), n, $attr).is_some()))
         }
-        pub(crate) fn $set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-            let n = d.html_this(it, this, &[$tag])?;
-            d.reflect_bool_set(it, n, $attr, arg(a, 0))
+        pub(crate) fn $set<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+            let n = d.html_this_s(s, this, &[$tag])?;
+            let v = arg_s(s, a, 0);
+            d.reflect_bool_set_s(s, n, $attr, v)
         }
     };
 }
@@ -364,55 +358,64 @@ bool_attr!(input_form_no_validate, set_input_form_no_validate, "input", "formnov
 bool_attr!(button_form_no_validate, set_button_form_no_validate, "button", "formnovalidate");
 bool_attr!(form_no_validate, set_form_no_validate, "form", "novalidate");
 
-pub(crate) fn input_form(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = d.html_this(it, this, &["input"])?;
-    let f = d.form_owner(it, n)?;
-    d.wrap_opt(it, f)
+pub(crate) fn input_form<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.html_this_s(s, this, &["input"])?;
+    let f = old(s, |it| d.form_owner(it, n))?;
+    d.wrap_opt_s(s, f)
 }
 
-pub(crate) fn button_form(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = d.html_this(it, this, &["button"])?;
-    let f = d.form_owner(it, n)?;
-    d.wrap_opt(it, f)
+pub(crate) fn button_form<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.html_this_s(s, this, &["button"])?;
+    let f = old(s, |it| d.form_owner(it, n))?;
+    d.wrap_opt_s(s, f)
 }
 
 // ------------------------------------------------------------------------------------------ SubmitEvent
 
-pub(crate) fn submit_event_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
+pub(crate) fn submit_event_ctor_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     if a.is_empty() {
-        return Err(it.type_error("Failed to construct 'SubmitEvent': 1 argument required, but only 0 present."));
+        return Err(s.type_error("Failed to construct 'SubmitEvent': 1 argument required, but only 0 present."));
     }
-    let ty = d.string_arg(it, a[0])?;
-    let (mut bubbles, mut cancelable, mut composed, mut submitter) = (false, false, false, Value::Null);
-    match arg(a, 1) {
-        Value::Undefined | Value::Null => {}
-        init @ Value::Object(_) => {
-            bubbles = init_flag(d, it, init, "bubbles")?;
-            cancelable = init_flag(d, it, init, "cancelable")?;
-            composed = init_flag(d, it, init, "composed")?;
-            let k = d.key(it, "submitter")?;
-            match it.get_value(init, k)? {
-                Value::Undefined | Value::Null => {}
-                v => match d.node_of(v) {
-                    Some(n) if d.is_element(n) && !d.doc.borrow().is_foreign(n) => submitter = v,
-                    _ => return Err(it.type_error("Failed to construct 'SubmitEvent': Failed to read the 'submitter' property from 'SubmitEventInit': Failed to convert value to 'HTMLElement'.")),
-                },
+    let ty = d.arg_str_s(s, a, 0)?;
+    let (mut flags, mut submitter) = ([false; 3], None);
+    let init = arg_s(s, a, 1);
+    if !is_nullish(s, init) {
+        if !is_object(s, init) {
+            return Err(s.type_error("The event initializer is not an object."));
+        }
+        for (flag, name) in flags.iter_mut().zip(["bubbles", "cancelable", "composed"]) {
+            let v = s.get_str(init, name)?;
+            *flag = s.to_boolean(v);
+        }
+        let v = s.get_str(init, "submitter")?;
+        if !is_nullish(s, v) {
+            match d.node_of_s(s, v) {
+                Some(n) if d.is_element(n) && !d.doc.borrow().is_foreign(n) => submitter = Some(v),
+                _ => return Err(s.type_error("Failed to construct 'SubmitEvent': Failed to read the 'submitter' property from 'SubmitEventInit': Failed to convert value to 'HTMLElement'.")),
             }
         }
-        _ => return Err(it.type_error("The event initializer is not an object.")),
     }
-    let proto = it.host_proto_from_new_target(d.p().submit)?;
-    let e = d.new_event_proto(it, &ty, bubbles, cancelable, composed, proto)?;
-    let mut st = d.st.borrow_mut();
-    let ev = st.events.get_mut(&e).expect("just made");
-    it.store_value(&mut ev.related, submitter);
-    ev.is_submit = true;
-    Ok(Value::Object(e))
+    let default = d.obj_local(s, d.p().submit);
+    let proto = s.proto_from_new_target(default)?;
+    let proto = obj_id(s, proto).expect("a prototype is an object");
+    let [bubbles, cancelable, composed] = flags;
+    let e = old(s, |it| d.new_event_proto(it, &ty, bubbles, cancelable, composed, proto))?;
+    let who = match submitter {
+        Some(v) => v,
+        None => s.null(),
+    };
+    {
+        let mut st = d.st.borrow_mut();
+        let ev = st.events.get_mut(&e).expect("just made");
+        s.store(&mut ev.related, who);
+        ev.is_submit = true;
+    }
+    Ok(d.obj_local(s, e))
 }
 
-pub(crate) fn submit_event_submitter(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let o: ObjId = d.event_of(it, this)?;
+pub(crate) fn submit_event_submitter<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let Some(o) = obj_id(s, this).filter(|o| d.st.borrow().events.contains_key(o)) else { return Err(s.type_error("Illegal invocation")) };
     let st = d.st.borrow();
     let ev = &st.events[&o];
-    if ev.is_submit { Ok(it.traced_value(&ev.related)) } else { drop(st); Err(illegal(it)) }
+    if ev.is_submit { Ok(s.traced(&ev.related)) } else { drop(st); Err(s.type_error("Illegal invocation")) }
 }

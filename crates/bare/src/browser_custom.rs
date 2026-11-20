@@ -1075,7 +1075,7 @@ fn define<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<
     d.ce.on.set(true);
     st(d).borrow_mut().stack.push(Vec::new());
     d.sync_watcher();
-    old(s, |it| d.def_method(it, d.p().html, "attachInternals", 0, crate::browser_face::attach_internals))?;
+    old(s, |it| d.def_method_s(it, d.p().html, "attachInternals", 0, crate::browser_face::attach_internals))?;
     let r = define_in(d, s, this, a);
     let q = old(s, |it| d.ce_pop(it));
     r.and_then(|v| q.map(|()| v))
