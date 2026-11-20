@@ -537,6 +537,51 @@ fn a_top_level_let_const_and_class_are_visible_to_the_next_script() {
     assert_eq!(vm.global_text("r"), "undefinedfalse");
 }
 
+/// Run the script `a` (it may throw), then the script `b`, in one realm; read the global `name` as text. `gc`: constant collection.
+fn two_scripts(a: &str, b: &str, name: &str, gc: bool) -> Result<String, String> {
+    let shared = Arc::new(SharedAtoms::default());
+    let mut prog = compile(b, &shared, Limits::default())?;
+    let pre = prog.codes.len();
+    prog.codes = compile_after(prog.codes, PRELUDE, &shared, Limits::default(), None)?.0;
+    let at = prog.codes.len();
+    prog.codes = compile_after(prog.codes, a, &shared, Limits::default(), None)?.0;
+    let mut vm = Vm::new(prog, shared);
+    vm.run_main(pre).expect("the prelude");
+    if gc {
+        vm.realm.heap.set_trigger(Trigger { min: 1 << 10, slack: 1 << 10 });
+    }
+    assert!(vm.run_main(at).is_err(), "script a must throw: {a}");
+    vm.run_main(0).map_err(|e| format!("{e:?}"))?;
+    Ok(vm.global_text(name))
+}
+
+#[test]
+fn a_top_level_name_stays_after_the_script_throws() {
+    let catch = "var r; try { NAME; r = 'value'; } catch (e) { r = e.name; }";
+    for gc in [false, true] {
+        let ok = |a: &str, b: &str| two_scripts(a, b, "r", gc).unwrap();
+        // A name that is initialized before the throw keeps its value (`let`, `const`, `class`, and a heap value).
+        assert_eq!(ok("let x = 1; throw 0;", "var r = x;"), "1");
+        assert_eq!(ok("let y; throw 0; y = 2;", "var r = typeof y;"), "undefined");
+        assert_eq!(ok("const k = 5; throw 0;", "var r = k; try { k = 1; } catch (e) { r += e.name; }"), "5TypeError");
+        assert_eq!(ok("class C { m() { return 3; } } throw 0;", "var r = new C().m();"), "3");
+        assert_eq!(ok("let o = { a: [1, 2, 3] }; for (var i = 0; i < 2000; i++) { var j = [i]; } throw 0;", "var r = o.a.length;"), "3");
+        // A name that is declared after the throw is in its dead zone.
+        assert_eq!(ok("throw 0; let z = 2;", &catch.replace("NAME", "z")), "ReferenceError");
+        assert_eq!(ok("let a = 1; throw 0; const b = 2;", "var r = a; try { b; } catch (e) { r += e.name; }"), "1ReferenceError");
+        assert_eq!(ok("throw 0; class D {}", &catch.replace("NAME", "D")), "ReferenceError");
+        // A throw inside a function that the script calls, and a throw that a `try` of the script does not catch.
+        assert_eq!(ok("let x = 1; function f() { throw 0; } f();", "var r = x;"), "1");
+        assert_eq!(ok("let x = 1; try { throw 0; } finally { x = 2; }", "var r = x;"), "2");
+        // The name is declared: a later `let`, `var` or function of the name is a SyntaxError, also for a name in its dead zone.
+        for a in ["let x = 1; throw 0;", "throw 0; let x = 1;"] {
+            for b in ["let x = 2;", "var x = 2;", "function x() {}"] {
+                assert!(two_scripts(a, b, "r", gc).is_err(), "{a} then {b}");
+            }
+        }
+    }
+}
+
 #[test]
 fn a_parenthesized_optional_member_call_keeps_this() {
     let o = "var o = { m() { return this.v; }, v: 7 }; var n = null; ";
