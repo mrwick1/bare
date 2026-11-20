@@ -17703,3 +17703,24 @@ Every row passed the rule on that base. `loopfn` runs no new op, no call and no 
 **Known gaps (G2).** The stub of a lazy function has no `gen_kind`, so a script that reads `f.prototype` of a generator function before its first call gets a plain object (the compiler must put the kind in the stub). No `finally` or `for of` closing on `return`. No Windows run. The collector does not run while a generator runs on a pooled machine (the nested call holds it, as for any nested call).
 
 Not tested: Windows; the browser; test262; `miri` (the tests have a smaller size for it, not run); a generator with more than 5 live registers in the loop cost (only 5 measured); the cost of `return` and `throw` (only `next`).
+
+**G0 gate, second measurement, after #774 and #775.** Base: `origin/main` at `b0183cfc` (code the same as at `351f9b72`; only documents came after). Tree: this branch merged with that main. `interp_load`, the same N as above, and `eval_load CASE 10 --source` run by `script_run --eval` (the rows `loop`, `calls`, `fib`, `closures`, `objects`). Instructions in user mode, minimum of 3 runs (`tools/js/instr.sh`), archMachine. The first measurement of the merged tree, before any change, gave the picture above: `objects` +0.99% at the default build; at `codegen-units=1` `loopfn` +1.77%, `calls` +0.86%, `fib` +0.38%, `closures` +0.71%, `objects` +0.84%.
+
+Cause, found by bisect (`codegen-units=1`, `interp_load`): the code that `native_call!` had for `Outcome::Resume` (`gen_resume`, `reload!` and `throw!` in the arm) moved the registers of the whole loop. With that block removed, `loopfn` went from +1.77% to -1.41% and `calls` to -2.24%. The new `pc` argument of `Vm::run`, the `GEN` check in `unwind`, and the numbers of the new ops changed nothing (counts equal to 0.003 M). The arm of `GenInit`, `Yield` and `RetGen` changed nothing either: a stub with `err!` gave the same counts.
+
+Fix: `Outcome::Resume` is gone. A native that wants a resume asks for `Outcome::Enter { f: generator, this: hole }` (the tail channel did that already; `call_native` no longer turns it into a variant). In the loop, the `else` of `realm.function(f)` in `native_call!` is now one call of the cold function `gen_resume`, which pushes the generator frame when `this` is the hole, and otherwise makes the same `TypeError` that `call_err!` made. The `else` is smaller than before the change (the two `err!` messages moved into the cold function). `reenter.rs` checks the hole in its `Enter` arm.
+
+| Row | main cgu 16 | this tree | vs main | main cgu 1 | this tree | vs main |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loopfn` (`interp_load`) | 273.35 | 273.36 | +0.00% | 283.34 | 283.35 | +0.00% |
+| `calls` | 587.41 | 585.42 | -0.34% | 580.39 | 579.40 | -0.17% |
+| `fib` | 1104.51 | 1099.13 | -0.49% | 1065.45 | 1062.77 | -0.25% |
+| `closures` | 367.95 | 367.36 | -0.16% | 366.97 | 366.98 | +0.00% |
+| `objects` | 142.46 | 143.66 | +0.85% | 144.43 | 144.24 | -0.13% |
+| `loop` (`eval_load` 10) | 840.01 | 832.02 | -0.95% | 844.00 | 844.01 | +0.00% |
+| `calls` | 699.06 | 695.07 | -0.57% | 689.05 | 688.06 | -0.14% |
+| `fib` | 37.27 | 37.23 | -0.11% | 36.47 | 36.38 | -0.24% |
+| `closures` | 143.09 | 142.54 | -0.38% | 142.73 | 142.83 | +0.07% |
+| `objects` | 734.45 | 732.05 | -0.33% | 735.61 | 735.64 | +0.00% |
+
+Result: by the standing rule every row passes. `objects` of `interp_load` is over +0.5% at the default build (+0.85%) and within +0.5% at `codegen-units=1` (-0.13%); the other nine rows are within +0.5% at both builds. The `objects` row at the default build is still above main. I did not find a cause in the work: the arms that it runs are the same; the layout of the loop moves with the build. test262 (`TEST262=/data/claude-tmp/test262`, `tools/js/test262_js2.sh -j 4`): 17,324 tests pass on main and on this tree; no test that passes on main fails here (per-test `new.txt` compared). `cargo test --locked -p bare-js2 --lib`: 480 pass. `cargo test --locked -p bare-js-diff`: pass. Not tested: Windows; the cost of `next` after the change (`gen_load`; the cold path has the same code as before, one `is_hole` test more).
