@@ -31,7 +31,7 @@ fn a_shape_gives_its_cells_the_layout_flags_and_slots() {
     let a = shapes.add(&mut heap, Shape { layout: Layout::Object, flags: 1, slots: 3 }).unwrap();
     let b = shapes.add(&mut heap, Shape { layout: Layout::Object, flags: 0, slots: 7 }).unwrap();
     let (ha, hb) = (shapes.header(a), shapes.header(b));
-    assert_eq!(shapes.len(), 2);
+    assert_eq!(shapes.count(), 2);
     assert_eq!((ha.layout(), ha.flags(), shapes.of(ha).slots), (Layout::Object, 1, 3));
     assert_eq!((hb.layout(), hb.flags(), shapes.of(hb).slots), (Layout::Object, 0, 7));
     assert_eq!(ha, shapes.header(a));

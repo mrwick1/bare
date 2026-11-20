@@ -6,9 +6,5 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[features]
-shape-ptr = []
-shape-arena = []
-
 [dependencies]
 bare-os = { path = "../os" }
