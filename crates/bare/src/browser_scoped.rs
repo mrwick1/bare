@@ -20,7 +20,7 @@ pub(crate) type Sc<'s, 'p> = Scope<'s, Interp<'p>>;
 pub(crate) type Res<'s, T> = Result<T, bare_js_api::Error<'s>>;
 
 /// The `style.cur` of a function of the new form: its index in `Dom::scoped`, with this bit, so it cannot equal an old function id.
-const CUR_NEW: u32 = 1 << 31;
+pub(crate) const CUR_NEW: u32 = 1 << 31;
 
 #[derive(Clone, Copy)]
 pub(crate) enum Fun {
@@ -128,11 +128,8 @@ impl Dom {
     /// The entry of the interface `Host::call`. It runs the hooks of `dispatch_host` in the same order, with no closure: the call
     /// path of a handler is the hot path, and a closure that both the plain and the custom element branch use sits in memory first.
     pub(crate) fn call_scoped<'s, 'p>(&self, s: &mut Sc<'s, 'p>, id: u32, this: Local<'s>, args: Args<'s>, is_new: bool) -> Res<'s, Local<'s>> {
-        let (f, needs_new, cur) = {
-            let t = self.scoped.borrow();
-            let e = &t[id as usize];
-            (e.f, e.needs_new, e.cur)
-        };
+        // SAFETY: the entry is copied out at once. Nothing runs between the read and the copy, so no push (`add_fn_s`) can move the vector under it.
+        let Scoped { f, needs_new, cur } = unsafe { &*self.scoped.as_ptr() }[id as usize];
         self.style.cur.set(cur);
         if needs_new && !is_new {
             #[cfg(test)]
@@ -310,6 +307,29 @@ fn illegal<'s>(s: &mut Sc<'s, '_>) -> bare_js_api::Error<'s> {
     s.type_error("Illegal invocation")
 }
 
+/// Argument `i` as a raw value, for code of the old form. `None` when the call has no such argument.
+pub(crate) fn raw_arg<'s>(s: &mut Sc<'s, '_>, a: Args<'s>, i: usize) -> Option<Value> {
+    let l = a.get(i)?;
+    Some(s.engine().raw(l))
+}
+
+impl Dom {
+    /// `style_html_el` for a handler of the new form: the element of `this`, or `TypeError`.
+    pub(crate) fn style_html_el_s<'s>(&self, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
+        let t = s.engine().raw(this);
+        old(s, |it| self.style_html_el(it, t))
+    }
+}
+
+/// A result of the old form as one of the interface.
+#[inline]
+pub(crate) fn lift<'s, T>(s: &mut Sc<'s, '_>, r: R<T>) -> Res<'s, T> {
+    match r {
+        Ok(v) => Ok(v),
+        Err(e) => Err(lift_err(s, e)),
+    }
+}
+
 /// A feature that the browser does not have, as an error of the interface.
 pub(crate) fn unsupp<'s>(what: &'static str) -> bare_js_api::Error<'s> {
     bare_js_api::Error::Abort(Abort::Unsupported(what))
@@ -387,6 +407,16 @@ impl Dom {
     #[inline]
     pub(crate) fn obj_local<'s>(&self, s: &mut Sc<'s, '_>, o: ObjId) -> Local<'s> {
         s.engine().raw_local(&Value::Object(o))
+    }
+
+    /// `Dom::obj`: a new object of the host with the prototype `proto`.
+    pub(crate) fn obj_s<'s>(&self, s: &mut Sc<'s, '_>, proto: ObjId) -> Res<'s, ObjId> {
+        old(s, |it| self.obj(it, proto))
+    }
+
+    /// `Dom::new_source`.
+    pub(crate) fn new_source_s<'s>(&self, s: &mut Sc<'s, '_>, k: crate::browser_sources::Source, proto: Option<ObjId>) -> Res<'s, ObjId> {
+        old(s, |it| self.new_source(it, k, proto))
     }
 
     /// Is `v` the object `o`?
@@ -535,6 +565,15 @@ fn obj_of(s: &mut Sc<'_, '_>, l: Local<'_>) -> ObjId {
     match s.engine().raw(l) {
         Value::Object(o) => o,
         _ => unreachable!("a function is an object"),
+    }
+}
+
+/// The object of a local, or `None` for another value.
+#[inline]
+pub(crate) fn obj_id(s: &mut Sc<'_, '_>, v: Local<'_>) -> Option<ObjId> {
+    match s.engine().raw(v) {
+        Value::Object(o) => Some(o),
+        _ => None,
     }
 }
 

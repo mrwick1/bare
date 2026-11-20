@@ -14,6 +14,8 @@
 //! microtasks. Not compared with a real browser.
 
 use crate::browser::*;
+use crate::browser_scoped::*;
+use bare_js_api::{Args, HostFn, Local, Type};
 use bare_js::eval::Interp;
 use bare_js::value::Value;
 
@@ -45,7 +47,7 @@ pub(crate) fn define(d: &Dom, it: &mut Interp<'_>, name: &str) -> R<bool> {
         let made = it.eval_global(Value::String(s))?;
         if sentinel == "CompressionStream" {
             // The source gives its install function. It takes the native codec.
-            let f = d.add_fn(it, codec, "codec", 3, false)?;
+            let f = d.add_fn_s_obj(it, codec, "codec", 3, HostFn::Method)?;
             it.call(made, Value::Undefined, &[Value::Object(f)])?;
         }
     }
@@ -58,24 +60,24 @@ const MAX_OUTPUT: usize = 256 << 20;
 /// `codec(mode, format, bytes)` of `shims/compression.js`: mode 0 compresses, 1 decompresses. Formats: 0 gzip (RFC 1952), 1 deflate
 /// (zlib, RFC 1950), 2 deflate-raw (RFC 1951). Bad, cut or too big data, and bytes after the end of the stream, are a `TypeError`, as
 /// the Compression Standard says.
-fn codec(_: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    let num = |i: usize| match a.get(i) {
-        Some(Value::Number(n)) => *n as u8,
+fn codec<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let mut num = |i: usize| match a.get(i) {
+        Some(v) if matches!(s.type_of(v), Type::Number) => s.to_number(v).map_or(0, |n| n as u8),
         _ => 0,
     };
     let (mode, format) = (num(0), num(1));
     let input = match a.get(2) {
-        Some(Value::Object(o)) => it.heap.bytes(*o).map(<[u8]>::to_vec).unwrap_or_default(),
+        Some(v) if matches!(s.type_of(v), Type::Object | Type::Function) => s.bytes(v).map(<[u8]>::to_vec).unwrap_or_default(),
         _ => Vec::new(),
     };
-    it.charge((input.len() / 64) as u64)?;
+    s.charge((input.len() / 64) as u64)?;
     let out = if mode == 0 { Ok(compress(format, &input)) } else { decompress(format, &input) };
     match out {
         Ok(out) => {
-            it.charge((out.len() / 64) as u64)?;
-            it.new_uint8_array(out)
+            s.charge((out.len() / 64) as u64)?;
+            s.new_uint8_array(out)
         }
-        Err(why) => Err(it.type_error(&format!("Failed to execute 'flush' on 'DecompressionStream': {why}"))),
+        Err(why) => Err(s.type_error(&format!("Failed to execute 'flush' on 'DecompressionStream': {why}"))),
     }
 }
 

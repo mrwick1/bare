@@ -1,13 +1,15 @@
 //! SVG attribute reads and shape metrics. Matrices use the untransformed identity.
 use crate::browser::*;
+use crate::browser_scoped::*;
+use bare_js_api::{Args, Attrs, Local};
 use bare_html::dom::{NodeId, Ns};
 use bare_js::eval::Interp;
 use bare_js::value::{ObjId, Value};
 
-fn node(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
-    let n = d.el(it, this)?;
+fn node<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
+    let n = d.el_s(s, this)?;
     if d.doc.borrow().element_ns(n) != Ns::Svg {
-        return Err(it.type_error("Illegal invocation"));
+        return Err(s.type_error("Illegal invocation"));
     }
     Ok(n)
 }
@@ -20,13 +22,13 @@ fn num(d: &Dom, n: NodeId, name: &str) -> f64 {
             .unwrap_or(0.0)
     }
 }
-fn object(d: &Dom, it: &mut Interp<'_>, fields: &[(&str, f64)]) -> R<Value> {
-    let o = d.obj(it, it.object_prototype())?;
+fn object<'s>(_d: &Dom, s: &mut Sc<'s, '_>, fields: &[(&str, f64)]) -> Res<'s, Local<'s>> {
+    let o = s.new_object()?;
     for &(name, v) in fields {
-        let k = d.key(it, name)?;
-        it.define_data(o, k, Value::Number(v), true, true, true)?;
+        let v = s.number(v);
+        s.define_str(o, name, v, Attrs::ALL)?;
     }
-    Ok(Value::Object(o))
+    Ok(o)
 }
 /// The box of an element of an `<svg>` that layout made no box for (a shape, a `g`, a `text`): the bounds of what it draws, through the
 /// `transform` of each element above it and the `viewBox`, in the layout. `None` for an `<svg>` (it has fragments), an element that
@@ -44,19 +46,19 @@ pub(crate) fn layout_box(g: &crate::browser_scroll::Geo, n: NodeId) -> Option<ba
     Some(bare_layout::fragment::Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
 }
 /// `getBBox()`: the bounds of what the element draws, in its own user space (before its `transform`).
-fn bbox(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    let n = node(d, it, this)?;
-    let styles = d.cascade_now(it)?;
+fn bbox<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = node(d, s, this)?;
+    let styles = old(s, |it| d.cascade_now(it))?;
     let [x0, y0, x1, y1] = bare_paint::svg::user_box::<SoftwareMath>(&d.doc.borrow(), &styles, n).unwrap_or([0.0; 4]);
     let f = |v: f32| v as f64;
-    object(d, it, &[("x", f(x0)), ("y", f(y0)), ("width", f(x1 - x0)), ("height", f(y1 - y0))])
+    object(d, s, &[("x", f(x0)), ("y", f(y0)), ("width", f(x1 - x0)), ("height", f(y1 - y0))])
 }
-fn ctm(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    node(d, it, this)?;
-    crate::browser_matrix::rw_ctor(d, it, Value::Undefined, &[])
+fn ctm<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    node(d, s, this)?;
+    old_v(s, |it| crate::browser_matrix::rw_ctor(d, it, Value::Undefined, &[]))
 }
-fn animated(d: &Dom, it: &mut Interp<'_>, this: Value, name: &str) -> R<Value> {
-    let n = node(d, it, this)?;
+fn animated<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, name: &str) -> Res<'s, Local<'s>> {
+    let n = node(d, s, this)?;
     let v = if name == "viewBox" {
         let text = {
             let doc = d.doc.borrow();
@@ -67,11 +69,11 @@ fn animated(d: &Dom, it: &mut Interp<'_>, this: Value, name: &str) -> R<Value> {
         };
         let a: Vec<f64> = text
             .split(|c: char| c.is_ascii_whitespace() || c == ',')
-            .filter_map(|s| s.parse().ok())
+            .filter_map(|st| st.parse().ok())
             .collect();
         object(
             d,
-            it,
+            s,
             &[
                 ("x", *a.first().unwrap_or(&0.0)),
                 ("y", *a.get(1).unwrap_or(&0.0)),
@@ -80,14 +82,13 @@ fn animated(d: &Dom, it: &mut Interp<'_>, this: Value, name: &str) -> R<Value> {
             ],
         )?
     } else {
-        object(d, it, &[("value", num(d, n, name))])?
+        object(d, s, &[("value", num(d, n, name))])?
     };
-    let o = d.obj(it, it.object_prototype())?;
+    let o = s.new_object()?;
     for name in ["baseVal", "animVal"] {
-        let k = d.key(it, name)?;
-        it.define_data(o, k, v, false, true, true)?;
+        s.define_str(o, name, v, Attrs { writable: false, enumerable: true, configurable: true })?;
     }
-    Ok(Value::Object(o))
+    Ok(o)
 }
 #[cold]
 #[inline(never)]
@@ -114,17 +115,17 @@ pub(crate) fn define(d: &Dom, it: &mut Interp<'_>, name: &str) -> R<bool> {
             it.define_data(proto, kc, Value::Object(f), true, false, true)?;
             let k = d.key(it, name)?;
             it.define_data(it.global_object(), k, Value::Object(f), true, false, true)?;
-            d.def_get(it, p, "className", class_name, None)?;
+            d.def_get_s(it, p, "className", class_name, None)?;
             d.fixed.borrow_mut().extend([proto, f]);
         }
         "getTotalLength" => {
-            d.def_method(it, p, name, 0, |d, it, t, a| metrics(d, it, t, a, false))?;
+            d.def_method_s(it, p, name, 0, |d, s, t, a| metrics(d, s, t, a, false))?;
         }
         "getPointAtLength" => {
-            d.def_method(it, p, name, 1, |d, it, t, a| metrics(d, it, t, a, true))?;
+            d.def_method_s(it, p, name, 1, |d, s, t, a| metrics(d, s, t, a, true))?;
         }
         "getBBox" => {
-            d.def_method(it, p, name, 0, bbox)?;
+            d.def_method_s(it, p, name, 0, bbox)?;
         }
         "transform" => {
             // A miss of `transform` on any host object asks once more: install the getter only once.
@@ -136,27 +137,27 @@ pub(crate) fn define(d: &Dom, it: &mut Interp<'_>, name: &str) -> R<bool> {
             }
         }
         "getComputedTextLength" => {
-            d.def_method(it, p, name, 0, |d, it, t, a| text_length(d, it, t, a, false))?;
+            d.def_method_s(it, p, name, 0, |d, s, t, a| text_length(d, s, t, a, false))?;
         }
         "getSubStringLength" => {
-            d.def_method(it, p, name, 2, |d, it, t, a| text_length(d, it, t, a, true))?;
+            d.def_method_s(it, p, name, 2, |d, s, t, a| text_length(d, s, t, a, true))?;
         }
         "getCTM" | "getScreenCTM" => {
-            d.def_method(it, p, name, 0, ctm)?;
+            d.def_method_s(it, p, name, 0, ctm)?;
         }
-        "width" => d.def_get(it, p, name, |d, it, t, _| animated(d, it, t, "width"), None)?,
-        "height" => d.def_get(
+        "width" => d.def_get_s(it, p, name, |d, s, t, _| animated(d, s, t, "width"), None)?,
+        "height" => d.def_get_s(
             it,
             p,
             name,
-            |d, it, t, _| animated(d, it, t, "height"),
+            |d, s, t, _| animated(d, s, t, "height"),
             None,
         )?,
-        "viewBox" => d.def_get(
+        "viewBox" => d.def_get_s(
             it,
             p,
             name,
-            |d, it, t, _| animated(d, it, t, "viewBox"),
+            |d, s, t, _| animated(d, s, t, "viewBox"),
             None,
         )?,
         _ => return Ok(false),
@@ -164,14 +165,15 @@ pub(crate) fn define(d: &Dom, it: &mut Interp<'_>, name: &str) -> R<bool> {
     Ok(true)
 }
 /// `getComputedTextLength()` and `getSubStringLength(start, n)` of a `text` or a `tspan`: the advance of the letters in user units.
-fn text_length(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], sub: bool) -> R<Value> {
-    let n = node(d, it, this)?;
+fn text_length<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, sub: bool) -> Res<'s, Local<'s>> {
+    let n = node(d, s, this)?;
     // WebIDL `unsigned long`: NaN and infinity are 0, and -1 is the biggest number.
-    let mut ulong = |i| -> R<usize> {
-        let x = it.to_js_number(crate::browser_platform::arg(a, i))?;
+    let ulong = |s: &mut Sc<'s, '_>, i| -> Res<'s, usize> {
+        let v = arg_s(s, a, i);
+        let x = s.to_number(v)?;
         Ok(if x.is_finite() { x.trunc().rem_euclid(4294967296.0) as usize } else { 0 })
     };
-    let (start, count) = if sub { (ulong(0)?, ulong(1)?) } else { (0, usize::MAX) };
+    let (start, count) = if sub { (ulong(s, 0)?, ulong(s, 1)?) } else { (0, usize::MAX) };
     // The font of a `tspan` is the one of its `text` (a `tspan` has no style of its own here).
     let text = {
         let doc = d.doc.borrow();
@@ -179,25 +181,27 @@ fn text_length(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], sub: bool
             "text" => n,
             "tspan" => match std::iter::successors(doc.parent(n), |&p| doc.parent(p)).find(|&p| doc.element_ns(p) == Ns::Svg && doc.element_name(p) == "text") {
                 Some(p) => p,
-                None => return Err(it.type_error("Illegal invocation")),
+                None => return Err(s.type_error("Illegal invocation")),
             },
-            _ => return Err(it.type_error("Illegal invocation")),
+            _ => return Err(s.type_error("Illegal invocation")),
         }
     };
-    let Some(snap) = d.snapshot_with(it, text, true)? else { return Ok(Value::Number(0.0)) };
+    let Some(snap) = old(s, |it| d.snapshot_with(it, text, true))? else { return Ok(s.number(0.0)) };
     let m = bare_layout::font::Metrics::of(&snap.style);
     let width = bare_paint::svg::text_length(&d.doc.borrow(), text, n, &m, start, count);
     match width {
-        Some(w) => Ok(Value::Number(w as f64)),
-        None if start == 0 && !sub => Ok(Value::Number(0.0)),
-        None => Err(d.dom_err(it, "IndexSizeError", "The start index is out of range")),
+        Some(w) => Ok(s.number(w as f64)),
+        None if start == 0 && !sub => Ok(s.number(0.0)),
+        None => Err(d.dom_err_s(s, "IndexSizeError", "The start index is out of range")),
     }
 }
-fn metrics(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], point: bool) -> R<Value> {
-    let n = node(d, it, this)?;
+fn metrics<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, point: bool) -> Res<'s, Local<'s>> {
+    let n = node(d, s, this)?;
     let mut at = if point {
-        it.to_js_number(crate::browser_platform::arg(a, 0))?
-            .max(0.0)
+        {
+            let v = arg_s(s, a, 0);
+            s.to_number(v)?.max(0.0)
+        }
     } else {
         f64::INFINITY
     };
@@ -209,7 +213,7 @@ fn metrics(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], point: bool) 
             last = (p.0 as f64, p.1 as f64);
         }
         for edge in curve.windows(2) {
-            it.charge(1)?;
+            s.charge(1)?;
             let (p, q) = (
                 (edge[0].0 as f64, edge[0].1 as f64),
                 (edge[1].0 as f64, edge[1].1 as f64),
@@ -218,7 +222,7 @@ fn metrics(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], point: bool) 
             if point && at <= distance && distance > 0.0 {
                 return object(
                     d,
-                    it,
+                    s,
                     &[
                         ("x", p.0 + (q.0 - p.0) * at / distance),
                         ("y", p.1 + (q.1 - p.1) * at / distance),
@@ -231,36 +235,31 @@ fn metrics(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], point: bool) 
         }
     }
     if point {
-        object(d, it, &[("x", last.0), ("y", last.1)])
+        object(d, s, &[("x", last.0), ("y", last.1)])
     } else {
-        Ok(Value::Number(length))
+        Ok(s.number(length))
     }
 }
 
-fn class_name(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    let n = node(d, it, this)?;
-    let k = d.key(it, "SVGAnimatedString")?;
-    if it
-        .heap
-        .peek_own_property(it.global_object(), k)
-        .map_err(|e| it.heap_error(e))?
-        .is_none()
-    {
-        define(d, it, "SVGAnimatedString")?;
-    }
-    let ctor = match it
-        .heap
-        .peek_own_property(it.global_object(), k)
-        .map_err(|e| it.heap_error(e))?
-    {
-        Some(bare_js::heap::Property::Data { value, .. }) => value,
-        _ => Value::Undefined,
+fn class_name<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = node(d, s, this)?;
+    let ctor = old_v(s, |it| {
+        let k = d.key(it, "SVGAnimatedString")?;
+        let g = it.global_object();
+        if it.heap.peek_own_property(g, k).map_err(|e| it.heap_error(e))?.is_none() {
+            define(d, it, "SVGAnimatedString")?;
+        }
+        Ok(match it.heap.peek_own_property(g, k).map_err(|e| it.heap_error(e))? {
+            Some(bare_js::heap::Property::Data { value, .. }) => value,
+            _ => Value::Undefined,
+        })
+    })?;
+    let proto = s.get_str(ctor, "prototype")?;
+    let Some(p) = obj_id(s, proto) else {
+        return Err(s.type_error("Invalid SVGAnimatedString prototype"));
     };
-    let kp = d.key(it, "prototype")?;
-    let Value::Object(p) = it.get_value(ctor, kp)? else {
-        return Err(it.type_error("Invalid SVGAnimatedString prototype"));
-    };
-    let o = d.obj(it, p)?;
+    let o = d.obj_s(s, p)?;
+    let o = d.obj_local(s, o);
     let text = {
         let doc = d.doc.borrow();
         doc.find_atom("class")
@@ -268,18 +267,17 @@ fn class_name(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value
             .unwrap_or("")
             .to_string()
     };
-    let value = d.js_str(it, &text)?;
+    let value = d.js_str_s(s, &text)?;
     for name in ["baseVal", "animVal"] {
-        let k = d.key(it, name)?;
-        it.define_data(o, k, value, true, true, true)?;
+        s.define_str(o, name, value, Attrs::ALL)?;
     }
-    Ok(Value::Object(o))
+    Ok(o)
 }
 
 #[cold]
 #[inline(never)]
 fn init_class_name(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    d.def_get(it, d.p().svg, "className", class_name, None)?;
+    d.def_get_s(it, d.p().svg, "className", class_name, None)?;
     d.els.tagged.set(d.els.tagged.get() | 2);
     Ok(())
 }
