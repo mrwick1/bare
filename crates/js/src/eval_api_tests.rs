@@ -1339,6 +1339,8 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Win {
                 let t = format!("{},{},{}", tag(s, this)?, tag(s, a)?, tag(s, b)?);
                 s.string(&t)
             }
+            // boom(): the host panics in the middle of a call
+            2 => panic!("host panic"),
             // nest(f, z): f(), then the tags of this and z, after f ran a call of its own and a collection inside it
             _ => {
                 let f = args.get(0).unwrap();
@@ -1361,7 +1363,7 @@ fn win_realm() -> Interp<'static> {
     enter(&mut it, |s| {
         s.set_host(Rc::new(Win));
         let g = s.global();
-        for (id, name) in [(0, "probe"), (1, "nest")] {
+        for (id, name) in [(0, "probe"), (1, "nest"), (2, "boom")] {
             let f = s.host_function(name, id, 2, bare_js_api::HostFn::Method).unwrap();
             s.define_str(g, name, f, Attrs::METHOD).unwrap();
         }
@@ -1391,6 +1393,19 @@ fn nested_host_calls_keep_every_window_a_root_and_restore_the_outer_one() {
         it.set_gc_stress(true);
         assert_eq!(out(&mut it, src), "in,x,y|N,Z");
         assert_eq!(it.stack_len(), 0);
+    });
+}
+
+#[test]
+fn a_panic_in_a_host_call_unlinks_its_window() {
+    big(|| {
+        let mut it = win_realm();
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| out(&mut it, "boom.call({ tag: 'P' }, { tag: 'Q' })")));
+        assert!(r.is_err(), "the host panicked");
+        assert!(it.api.win.is_null(), "the window of the dead frame is unlinked");
+        // A later collection must not read the dead frame (the roots walk the window chain).
+        let roots = it.roots();
+        it.heap.collect(&roots).unwrap();
     });
 }
 

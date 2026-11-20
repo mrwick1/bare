@@ -362,18 +362,33 @@ impl<'p> Interp<'p> {
         debug_assert!(args.len() < (1 << 30));
         let win = Win { this, args: args.as_ptr(), len: args.len() as u32, prev: self.api.win };
         self.api.win = &win;
-        let r = bare_js_api::enter(self, |s| {
+        // The guard unlinks the window and restores `new.target` also when the host panics: a caller that catches the panic keeps the
+        // realm, and a later collection must not read this dead frame.
+        let g = WinGuard { it: self, prev: win.prev, saved: swap.then_some(saved) };
+        bare_js_api::enter(&mut *g.it, |s| {
             let r = h.call(s, id, bare_js_api::Local::from_slot(WIN), bare_js_api::Args::from_slots(WIN + 1, args.len() as u32), is_new);
             match r {
                 Ok(v) => Ok(s.engine().api_at(v)),
                 Err(e) => Err(s.engine().api_unerr(e)),
             }
-        });
-        self.api.win = win.prev;
-        if swap {
-            self.host_nt = saved;
+        })
+    }
+}
+
+/// Undoes the window link and the `new.target` swap of `call_api_host` when the call ends, by return or by panic.
+struct WinGuard<'a, 'p> {
+    it: &'a mut Interp<'p>,
+    prev: *const Win,
+    saved: Option<Option<ObjId>>,
+}
+
+impl Drop for WinGuard<'_, '_> {
+    #[inline]
+    fn drop(&mut self) {
+        self.it.api.win = self.prev;
+        if let Some(nt) = self.saved {
+            self.it.host_nt = nt;
         }
-        r
     }
 }
 
