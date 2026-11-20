@@ -15003,6 +15003,36 @@ Cost of the trigger on the allocation fast path (`crates/js2/examples/heap_load.
 
 Not tested: a real interpreter, compiler root maps or deep stacks (S2); a collection that a host function causes while JS frames are below it (the handle scopes of design 6.8 are one native frame here); the cost of a walk of a deep stack; the trigger on `eval_load throws` or on the journeys (the new engine runs no script, so the peak of 16 MiB there is arithmetic); a second realm; arm64; the cost matrix (js2 is not wired into the browser); wall time.
 
+## 2026-11-20: lexer in js2 (plan step S2.1)
+
+`bare-js2` has the lexer (`crates/js2/src/lex.rs`, tests in `lex_tests.rs`; design 6.9 item 9). It is the streaming lexer of `crates/js/src/lex.rs` with the same token type, goals, errors and decode helpers. A token is 12 bytes: a kind, a byte span into the source and two flags. The lexer borrows the source and never allocates while it scans. Base: origin/main `e36a8dd4`. `crates/js` is not changed.
+
+Decision: the lexer gives spans, and the S2.5 compiler makes atoms. Reasons: (1) The lexer has no heap and no `Atoms`. With `Atoms` it would need `&mut Heap` and a realm, and an allocation failure path (`R<Str>`), in a loop that is allocation-free today (`lex_load` checks 0 allocations). (2) The grammar will also run in check-only mode (design 6.9 item 9) and skip nested functions. Most identifiers in such a text are never used as names, so interning them in the lexer is work that nothing needs. The compiler knows which names it needs (and a token with no escape is already a `&str` slice, `ident_name`). (3) `SharedAtoms::intern` takes a mutex. The compiler can intern once for each distinct name of a function, not once for each token. (4) A string literal can hold lone surrogates, so its value is `Vec<u16>` (`decode_string`), not text. The compiler decides which of them are keys (atoms) and which are only values. Cost of the choice: the compiler hashes a name that the lexer has already scanned. `Chars::One` takes a `&[u8]`, so a name with no escape can be passed as a slice of the source (to verify in S2.5).
+
+What changed in the copy, and why:
+- `use crate::number` is gone: `crates/js2` must not depend on `crates/js`. The three functions the lexer uses (`decimal_value`, `separated_decimal_value`, `reduce` with its helpers, about 110 lines of `number.rs`) are copied into `lex.rs` as private items. `decimal_units_value` (used only by the JSON parser) is not copied. When S2 gets a `Number(string)` conversion, it can take these from `lex.rs`.
+- `icu_properties` (version, features and `compiled_data` as in `bare-js`) is a dependency of `bare-js2` for ID_Start and ID_Continue. Because of it the `license` field of `bare-js2` is now `(MIT OR Apache-2.0) AND Unicode-3.0` (the `bare-js` string without its `BSD-3-Clause` part; I did not check where that part comes from). `Cargo.lock` gets one line. `--locked` needs this line.
+- The 31 tests moved to `lex_tests.rs` (`#[path]` module, as `atoms_tests.rs`), with one level less indent. No test changed.
+- `crates/js2/examples/lex_load.rs` and `lex_check.rs` are copies with `bare_js2::lex`. `tools/js_lex_load.sh` and `tools/js_lex_check.sh` take `LEX_PKG=bare-js2` and honour `CARGO_TARGET_DIR`. Default is unchanged.
+- No `unsafe` in `lex.rs`: `#![deny(unsafe_code)]` of the crate holds, and the module has no `allow`. The old lexer has none either, so no measured gain was needed.
+
+Checks:
+- Tests: 31 of 31 lexer tests pass (the old module has 31). `bare-js2` has 113: Linux 113 pass; Windows 11 VM: 31 lexer tests pass (`cargo xwin test --no-run`, exe copied to the VM and run with the filter `lex`; the other 82 were not run there this time). `cargo clippy -p bare-js2 --all-targets` shows no finding in `lex.rs` or the two examples.
+- Oracle: `tools/js_lex_oracle.mjs` (Acorn from `/usr/share/cursor/resources/app/node_modules/acorn`, ecma2022 script) on 400 `.js` files (2 KiB to 3 MB; `next/dist/compiled` and the Cursor `node_modules`): the oracle parsed 388 (12 are module syntax or fail in Acorn script mode and were skipped). On those 388, `lex_check` of the old and the new lexer print identical lines (token count, FNV of the spans, `ok=true`), and neither fails.
+- `tools/js_lex_load.sh` rows, instructions:u (`perf stat`, one `lex_load` process per row with `runs=1`, 3 interleaved runs each, old then new, glibc `tcache_count=65535`, archMachine, AMD Ryzen 9 5900HX, release, the old and the new binaries from one target dir and one commit): the spread of both is under 0.00004% (about 1 to 3 thousand instructions) and the new row is lower by 1,800 to 2,900 instructions in each row (hypothesis: the smaller start of `bare-js2`; not checked). So the rows are equal. Medians, old | new:
+
+| Row | Scale 1 | Scale 10 | Scale 100 |
+| --- | ---: | ---: | ---: |
+| small | 111,404,426 \| 111,401,882 | 1,110,820,061 \| 1,110,817,320 | 11,105,338,821 \| 11,105,336,030 |
+| repeat | 51,857,801 \| 51,854,737 | 515,439,342 \| 515,436,943 | 5,151,814,030 \| 5,151,812,103 |
+| comments | 8,843,243 \| 8,840,292 | 85,748,032 \| 85,745,022 | 854,980,953 \| 854,977,884 |
+| strings | 17,313,306 \| 17,311,285 | 171,278,693 \| 171,275,928 | 1,711,492,077 \| 1,711,489,353 |
+| malformed | 82,186,612 \| 82,184,014 | 818,707,294 \| 818,704,775 | 8,185,094,456 \| 8,185,091,815 |
+| strings decode | 28,819,167 \| 28,816,380 | 287,217,220 \| 287,214,793 | 2,871,884,956 \| 2,871,882,626 |
+
+- Every row prints `allocs=0` and `ok=true`. Wall time at scale 1 `small`: 3.82 ms new, 3.85 ms old (1 run each, a loaded machine: not evidence).
+
+Not tested: wall time on an idle machine; the loader rows on Windows (only the unit tests ran there); the lexer under Miri; the cost matrix (js2 is not wired into the browser); a parser or compiler on top of it (S2.5); the size of the `bare-js2` binary with `icu_properties` (not measured); arm64.
 ## 2026-11-20: sticky-mark young generation, experiment not kept (plan step S1.10)
 
 The experiment is built and measured. It is **not kept in main**. The code is on branch `t3/js2-sticky-mark-minor-gc` (head `1f0a3eeb`, on top of the S1.9 branch `t3/js2-object-layout` at `bf367cb6`, PR #749). This entry is the only change in this PR.
@@ -15087,6 +15117,49 @@ What would change the answer: a measured lifetime of survivors (how many of the 
 Findings, not changed in main: (1) A block with no free cell is swept again in each cycle; a minor collection could keep such blocks aside. Not built. (2) `remember` for a long record can be about 3 instructions with the shift kept in the block header. Not built. (3) The division in `Heap::mark` (S1.5 finding) is on every mark, minor or full. Not built.
 
 Not tested: Windows (the experiment is not in main, so no VM run); a real interpreter or a JIT (the barrier in an inline cache, 3 to 5 instructions, is not measured); lifetimes of real survivors; the old-data size of the real journeys; arm64; wall time and cycles; weak tables in a minor collection beyond the stub (a table is traced when remembered; no test writes one after it is old); `Obj::add` under a shape cap with a remembered object; the cost matrix (js2 is not wired into the browser).
+
+## 2026-11-20: pre-parser in js2 (plan step S2.2)
+
+`bare-js2` has a parser with a pre-parse mode (`crates/js2/src/parse.rs`, `ast.rs`, `facts.rs`; design 6.5 and 6.9 items 4 and 9). Base: the S2.1 branch (`t3/js2-lexer-module`, PR #752). `crates/js` is not changed. S2.5 needs two things from it: a tree of one function, and for each inner function the names that it uses from outside.
+
+What it does:
+- `parse_script` and `parse_module` give one tree of the whole text, as `crates/js` does. The tests use them.
+- `parse_script_lazy` and `parse_module_lazy` give a tree of the top level only. Each function inside it is checked, not kept. The check finds every early error. It writes one `FnFacts` entry (`facts.rs`): the skip range, the captures (the outer names that it uses, one entry for each distinct name), `this`, `arguments`, `super`, `new.target`, direct `eval` and `with` flags, strictness, `length`, and the context at the start. The tree has `Body::Skipped(id)` for it.
+- `parse_function(source, &mut facts, id)` gives the tree of one function from its facts. It finds each function inside it by its start offset (`Facts::find`, a binary search in the entries sorted by start) and the lexer jumps over its body. It adds no facts entry, and it does not pre-parse again. `Facts::preparsed` counts the bodies that were read in check mode; the tests and `parse_load fns` check that it does not change.
+
+How the captures work. A name that an identifier expression uses goes on one stack (`refs`, 8 bytes each, only inside a function). A scope that closes removes the names that it declared (so a use before the `var`, `let` or function declaration is bound too). What a function leaves is its capture list, and it stays on the stack for the function around it. Entries are written when a function ends, so a function comes after the functions in it (`fns[sub..own]` are its descendants). The head of an arrow is read as an expression before `=>` shows that it is an arrow, so an arrow takes the stack and the entries from the start of its head (`(a, b = () => a) => ...`: the inner arrow belongs to the outer one and `a` is bound by its parameter). Rules: `arguments` is bound by a function that is not an arrow (it sets `ARGS` and is no capture); an arrow lists it. A function expression binds its own name; a class expression binds its name for its members. A class field initializer and a `static {}` block are functions for the names (their `this` is their own) and stay in the tree of the function around the class (`INLINE`, with their own entry). A direct `eval` (the name `eval`, not in parentheses, not `?.`) sets `EVAL` on the function and `INNER_EVAL` on every function around it. `with` sets `WITH`; a function in its body gets `IN_WITH`.
+
+What a check-only body keeps. It builds nodes as the full parse does, and `parse_function_body` drops them after each statement (the arena goes back to the mark; the node count too). So the peak is the largest statement. A true no-node check is not built: the cover grammar (`(a, b) =>`, `[a] = x`) reads the nodes it has made. On real files the check costs 13% to 17% more instructions than the full parse (table below). The capture stack is most of it: the same build with the stack off gives 661 M on `index.js`, against 735 M with it and 644 M for the full parse (hypothesis for the cost: the name decode at each scope close and the sort of the lists at each function end; not profiled).
+
+What changed in the copy of `parse.rs` and `ast.rs`:
+- Gone: the regexp pattern check (`crates/js2` has no regexp engine; the lexer checks the flags; no case of the parse corpus has a bad pattern, and the test `regexp_pattern_gate` is not ported), `parse_data` and `ExprKind::Data` (the data literal of `crates/js`), the `Rc` source, the shared marks, `into_owned` and `Program::lazy_function`, `bare_observe`, the census hook, the `eager_at` and `in_class` rules (they kept arrows, async functions, generators, class members and functions after `(` or `!` out of lazy mode because the old evaluator needed their context; every function kind is skipped here), `LAZY_MIN_BODY` (a short body is skipped too; S2.5 can parse a short function at once, with `parse_function`).
+- `max_nodes` counts the live tree: a dropped statement gives its count back. `crates/js` counted dropped bodies for the parse cache.
+- A private name is not checked in `parse_function` (the class is not there; the first parse checked it).
+
+Tests (`cargo test --locked -p bare-js2 --lib parse`: 67): 
+- Ported from `parse_tests.rs`: 37 of the 38 tests (all except `regexp_pattern_gate`); `corpus_status_matches_acorn` runs the same 2,207-case corpus (1,233 accepted) unchanged. From `parse_lazy_tests.rs` I ported by idea, not by code: the body is skipped, an early error in a skipped body fails the parse (10 bodies compared with the full parse), the second parse gives the function of the first, strictness. Not ported: `these_functions_are_never_lazy` (the rule is gone) and `the_node_count_of_the_first_parse_still_counts_a_dropped_body` (replaced by `the_node_limit_counts_the_live_tree`).
+- New, 29: nested closures (3 levels); hoisting; block, `for` and `catch` scopes; function and class expression names; arrows (head, default parameters, `async`); default parameters against the body scope; `eval` (direct, indirect, `?.`, member, in an arrow) and `with`; `arguments`; `this`, `new.target` and `super` through arrows; class fields, static blocks, computed keys; labels and property names are no uses; shorthand and destructuring; one entry for each name; escaped names; strictness; module; the tree is dropped after each statement; the node limit; and the counter tests: `each_function_is_pre_parsed_at_most_once` (depth 6, a full parse of each function in reverse order, `preparsed` and `fns.len()` unchanged, starts unique), `a_full_parse_skips_the_functions_inside_by_their_ranges_and_pre_parses_nothing`, and `a_lazy_parse_finds_the_same_errors_as_a_full_parse_on_the_corpus` (a lazy parse of each of the 2,207 corpus cases gives the same error as the full parse; every function of the 1,233 that parse can be parsed in full, with no growth of the counter).
+- Sweep (`/data/bare-tmp/s2/sweep.sh`, not in the repo): the first 600 `.js` files of 4 KiB or more under `/usr/share/cursor/resources/app/node_modules`, `~/.cursor/extensions` and `/opt/postman/app/resources/app` (files over 16 MB skipped). `full` and `fns` exit with the same status on all 600 (239 fail in both: module syntax in script mode). On the 361 that parse, `parse_function` of all 20,593 functions succeeds and `preparsed` does not change.
+- `cargo test --locked -p bare-js2 --lib`: 180 pass on Linux. Windows 11 VM (`cargo xwin test --no-run`, the exe copied to the VM): 65 of the 67 parse tests pass; the 2 corpus tests need `tools/fixtures` at the build path and were skipped. `cargo clippy -p bare-js2 --all-targets` shows no finding in the new files.
+
+Parse-only rows (`crates/js2/examples/parse_load.rs`; `crates/js/examples/parse_load.rs` through a copy of the same harness in `/data/bare-tmp/oldparse`; `perf stat -e instructions:u`, `glibc.malloc.tcache_count=65535`, 3 runs each, release, archMachine, AMD Ryzen 9 5900HX; the spread is below 0.05% in every row). `full` = one tree of the whole text; `lazy` = the pre-parse; `fns` = `lazy`, then `parse_function` of every function once (what compiling each function costs). Peak = peak live heap bytes during the parse, source not counted (counting allocator, 1 run). The old parser's `stmts`, `chain` and `bodies` sources are used at the same scale.
+
+| Row | old `full` instr | new `full` | new `lazy` | new `fns` | old full peak | new full | new lazy |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| stmts 10 | 101.72 M | 101.42 M | 101.40 M | 101.40 M | 6.32 MB | 6.32 MB | 6.32 MB |
+| chain 10 | 244.22 M | 245.91 M | 246.11 M | 246.11 M | 12.58 MB | 12.58 MB | 12.58 MB |
+| bodies 10 | 107.07 M | 108.28 M | 118.87 M | 223.66 M | 6.68 MB | 6.68 MB | 3.29 MB |
+| bodies 100 | 1,067.5 M | 1,079.7 M | 1,185.5 M | 2,234.3 M | | | |
+| Claude webview `index.js` (4.7 MB) | 692.3 M | 643.8 M | 735.2 M | 1,466.5 M | 38.9 MB | 38.9 MB | 7.4 MB |
+| Postman `postman-runtime.min.js` (4.7 MB) | 431.5 M | 381.5 M | 429.9 M | 858.4 M | 17.8 MB | 17.8 MB | 1.8 MB |
+| Postman `main.js` (1.9 MB) | 320.7 M | 260.1 M | 303.6 M | 627.3 M | 17.7 MB | 17.7 MB | 1.7 MB |
+
+Reading the table:
+- Peak memory: the pre-parse of a real file holds 5 to 10 times less than a full parse (38.9 to 7.4 MB, 17.8 to 1.8 MB, 17.7 to 1.7 MB). What stays is the top-level tree and the facts: `index.js` has 24,090 entries (23,220 pre-parsed bodies) and 43,101 capture names.
+- Instructions: the new full parse is 0.3% to 19% below the old one on `stmts` and the three real files (7.0%, 11.6% and 18.9% on the real files), and 0.7% to 1.1% above on `chain` and `bodies`. Hypothesis, not checked: the regexp pattern check, the `bare_observe` span and the data-literal scan that `crates/js` runs and the copy does not. The pre-parse (`lazy`) costs 14%, 13% and 17% more than the new full parse on the three files, and about the same as the old full parse (+6%, -0.4%, -5%). So the pre-parse does not save instructions. It saves memory, and it gives the capture facts. Compiling every function once (`fns`) costs 2.2 times the full parse: the function bodies are read twice. A function that never runs is read once.
+- `fns` makes 313,131 allocations on `index.js` (13 for each function parse: the arenas of a new `Parser` start empty). `lazy` makes 361. S2.5 can keep one parser's buffers (not done).
+
+Not tested: the cost matrix (js2 is not wired into the browser); wall time; the Windows corpus tests; a second oracle for the captures (the tests state each expected list by hand; the sweep proves only that nothing fails and no function is read twice, not that the lists are right on real files); the Annex B rule (a function in a block is a `var` of the function; an extra capture can appear, a missing one cannot); direct `eval` that declares `var` in a sloppy function (flags only); the rows under glibc without `tcache_count`; macOS and arm64; the parser under Miri (it has no `unsafe`).
 ## 2026-11-20: host handlers on the interface, H0: spike, call path cost and interface methods (plan step S0.4, `design-host-handlers.md` step H0)
 
 Status: DONE in two rounds. Round 1 (branch `t3/host-handler-facade`) built the spike and stopped at the cost rule. Round 2 (branch `t3/optimize-host-handler-cost`, PR below) cut the interface path to below the old path, then built the facade and G2 to G13. Round 1 follows as it was written; round 2 is at the end of the entry.
@@ -15219,3 +15292,54 @@ Judgment calls:
 - `Frames::walk` takes `&[RootMaps]`; the interpreter (S2.6) will hold the maps in `Code::roots`. I did not change `Frames`.
 
 Not tested: a compiler or an interpreter on this format (S2.5, S2.6), so dispatch counts, instructions per op and the root maps of real functions are untested; the translation is static, by rules, and counts no dispatch weights; a modern React bundle (only jQuery 3.4.1 and the `eval_load` programs were available offline); Miri on the new modules (they hold no `unsafe`; the tests use `SharedAtoms`, which does); arm64; the cost matrix (js2 is not wired into the browser).
+
+## 2026-11-20: compiler in js2 (plan step S2.5)
+
+New modules in `crates/js2`: `compile.rs` (scope analysis, registers, labels, root maps, entry points), `compile_expr.rs`, `compile_stmt.rs`, `compile_pat.rs`, and the example `examples/bc_hist.rs` with the `eval_load` sources in `examples/data/`. The compiler turns the tree of one function into a `Code` through `Asm`. It never holds more than one function tree. It needs no interpreter: the tests run the S2.4 verifier on every function that it compiles. Base: the S2.4 branch plus the pre-parser (S2.2, PR #756).
+
+What it does:
+
+- Scope analysis. A variable that no inner function names lives in a register. A captured variable lives in a context slot, one `PushCtx` per scope that has one. The pre-parser facts say which names a child captures, and the parent passes a chain of context levels to each child (`Child::chain`), so a child compiles alone. A name that no scope declares is a global. The top level of a script has only globals. `let`, `const` and `class` get the hole (`LoadHole`) only when the name can occur in the text before the end of its declaration (a scan of at most 4,096 bytes, then it assumes yes). A read from a child function uses `GetCtxTdz`.
+- Contexts. `to(e, dst)` (value into a register chosen by the caller), `any(e)` (a register variable is read in place), `effect(e)` and `cond(e, jump_if, label)` (a test: `&&`, `||`, `!` and the comparisons make jumps, no boolean value). Compare-jumps take a constant on either side (the operator is mirrored) and `null`, `undefined`, `true` and `false` use their own ops. `x += 2` on a register is one `AddI` in place. A register variable is copied only when the right side may assign it (a text scan of the right side for `=`, `++`, `--` and the variable name).
+- Literals. An object literal with plain names is `NewObjLit` (keys in a recipe), an array literal is `NewArrLit`, up to 64 items; larger or computed ones use `NewObject`/`DefField`/`DefElem` and `NewArray`/`ArrayPush`. A template literal is one `Concat`.
+- Loops, `break`, `continue`, labels. A loop is `head: test; body; cont: JmpBack head; exit:`. `if (t) break;` and `if (t) continue;` are one conditional jump when nothing must be popped or run first. A `for (let ...)` whose variables are captured pushes one context for the loop and makes `CopyCtx` at the end of each iteration. `for-in` and `for-of` use the iterator record ops. A `for-of` has a handler on the body that runs `IterClose` and throws again.
+- `try`, `catch`, `finally`. The finalizer is compiled in line, after the block, after the `catch` clause, in front of each `break`, `continue` and `return` that leaves it, and once more for an exception. The handler ranges are split so that no inlined copy is inside the range of its own `try`. `return` keeps its value in a temporary when a finalizer or an iterator close runs first.
+- Destructuring in declarations, assignments, parameters, `catch` and `for` heads (objects, arrays with holes, defaults, rest of arrays).
+- Root maps. At each safepoint the compiler lists the registers that every path has written (a register joins on its first write and leaves when freed; at a join the set is the intersection of the sets of all jumps to it). That is the exact condition that the verifier checks. It is not liveness: a variable stays in the map until its scope ends.
+- Dead code is not emitted (after `return`, `throw`, `break`, and so on, until a label that a jump reaches).
+
+Check: 34 tests in `compile_tests.rs`. 25 golden tests (the disassembly of one function per construct, in the order of the listing; each was read by hand against the JS meaning), and the others: the 9 `eval_load` sources compile with nothing unsupported; 36 functions of control-flow and scope shapes (labels, `finally` with `break` and `return`, `switch` with lexicals, closures in loops, patterns in `for-of`, and so on) with 10 more inner functions; the list of unsupported constructs; the handler ranges of `try`/`catch`/`finally`; a root map; the literal fallbacks; the hole; the register limit (a call with 70,000 arguments is refused); the script top level. `build` in the tests runs `verify` on every function. Linux: `cargo test --locked -p bare-js2 --lib` 260 pass (226 before this change). Windows 11 VM (`cargo xwin test --no-run`, exe through `winssh`): `compile::tests` 34 pass; the whole lib run is 258 pass and 2 fail: `parse::tests::corpus_status_matches_acorn` and `parse::lazy_tests::a_lazy_parse_finds_the_same_errors_as_a_full_parse_on_the_corpus` (parser corpus tests of S2.2, panic at the corpus read; hypothesis: the corpus is not found on the VM; not changed here and not run on main on the VM). `cargo clippy -p bare-js2 --all-targets`: no warning in the new files.
+
+`bc-hist` (`cargo run --release -p bare-js2 --example bc_hist [-v] [FILE...]`, archMachine, Ryzen 9 5900HX, 3 runs; the jQuery compile time was 19.4 to 19.9 ms, the small cases 0.03 to 0.11 ms). It counts the instructions that the compiler emits (static). It cannot count executed ops, because there is no interpreter yet, so it does not compare with the executed-op histograms of `tools/js/bc_hist.sh`. The comparison is with the static dump of the old compiler that S2.4 made (`/data/bare-tmp/s24/dumps`, 7 programs, functions only, because the old engine runs the script top level in the tree walker). Every function passes the verifier.
+
+| Case | Old words (functions) | New words (functions) | New words (script top level) |
+| --- | ---: | ---: | ---: |
+| loopfn | 11 | 12 | 5 |
+| calls | 5 | 6 | 20 |
+| fib | 14 | 12 | 6 |
+| closures | 20 | 16 | 41 |
+| objects | 5 | 4 | 61 |
+| webpack | 990 | 776 | 241 |
+| loop, throws, concat | 0 | 0 | 21, 44, 18 |
+| total of the 6 with functions | 1,045 | 826 (-21.0%) | |
+| jQuery 3.4.1 minified | 47,934 | 34,678 (-27.7%) | 29 |
+
+- S2.4 estimated 839 to 844 words for the same 6 programs by rewriting the old instructions one to one; the compiler needs 826. For jQuery the estimate was 35,664 to 42,593 words; the compiler gives 34,678, but 88 of 949 functions are partial (see the unsupported list), so this number is a lower bound.
+- The 1,214 instructions of the 9 programs (functions and script): `LoadI` 224, `GetField` 121, `CallU` 106, `Mov` 104, `GetGlobal` 86, `Add` 68, `RetUndef` 61, `Closure` 59, `SetGlobal` 57, `Mod` 52. Most `LoadI` and `Mov` are in `webpack`: the arguments of `require(0)` and the window of each call.
+- `loopfn` and `calls` get 1 word larger: the modulus 1,000,003 and 65,521 do not fit the immediate, so `LoadI.w` and `Mod` take 3 words where the old `ModK` took 1. The constant is loaded again in each iteration. A `ModK` with a constant table, or hoisting the constant out of the loop, would remove it (not built).
+- Compile time of the whole file, pre-parse and parse of each function included: `eval_load` programs 0.03 to 0.09 ms, `webpack` 0.42 ms, jQuery 19.1 ms (949 functions, 33,758 instructions).
+
+Not built (recorded in `Compiled::unsupported`, the code must not run): classes, generators and async functions, `await` and `yield`, spread (calls, arrays, objects), rest parameters, object rest, `arguments`, regexp and BigInt literals, tagged templates, private names, `super`, `new.target`, `import()`, getters and setters and `__proto__` in object literals, `with` and direct `eval`, `delete` of a global name, a named function expression that may use its own name (needs a callee op), and a `break` or `continue` that has no target. jQuery has 88 functions with one of these (58 `arguments`, 28 regexp literals, 2 own-name function expressions, 1 `eval`).
+
+Judgment calls and known gaps:
+
+- `switch` is a chain of compare-jumps, not a table. A jump table needs a new op (a table of jump offsets in `Code`), a verifier change for its successors and an arm in the interpreter (S2.6). Both S2.4 and S2.6 are in other PRs, so I did not add it. The plan lists it for S2.5, so it needs a decision.
+- Script-level `var x;` with no initializer emits nothing, so the global is not created. It needs a declare-global op.
+- An iterator opened by an array pattern is not closed when a binding throws. A `for-of` closes it. An `IterClose` that throws inside a `for-of` body is caught by the loop's own handler and runs a second time.
+- A block-level function in sloppy code is a function-level `var` that is set at the start of the block (Annex B, simplified). Parameters and the function body share one scope.
+- `enter` and `find_var` scan the variables of a scope linearly (a test with 70,000 locals took 87 s).
+- The root maps list written registers, not live ones, so a dead variable stays a root until its scope ends. Liveness would make maps smaller but the verifier only knows "written".
+- `delete a` on a local variable is `false`, and `void e` evaluates `e` for effect.
+- `Code::disassemble` (S2.4) writes a space after an op name of 12 or more characters, so `JmpNotNullish r4` is readable.
+
+Not tested: execution of any compiled code (S2.6), so the semantics are checked by reading the disassembly and by the verifier, not by running; Miri; arm64; a modern React bundle; the cost matrix (js2 is not wired into the browser); the compile time of the compiler alone (the example times the pre-parse and parse of each function too).
