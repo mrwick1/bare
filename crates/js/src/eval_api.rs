@@ -198,17 +198,23 @@ impl<'p> Interp<'p> {
         }
     }
 
-    /// The arguments `from..to` of a host call as values, in one copy. A range in the window of the running call is read as a slice;
-    /// arguments that the host made (on the stack) are read one by one.
-    pub fn api_args(&self, a: bare_js_api::Args<'_>, from: usize, to: usize) -> Vec<Value> {
+    /// The arguments `from..to` of a host call, read in place, when they are in the window of the running call (the usual call).
+    #[inline]
+    pub fn api_args_slice(&self, a: bare_js_api::Args<'_>, from: usize, to: usize) -> Option<&[Value]> {
         let n = to.min(a.len()).saturating_sub(from);
-        let Some(first) = a.get(from).filter(|_| n > 0) else { return Vec::new() };
+        let first = a.get(from).filter(|_| n > 0)?;
         // SAFETY: see `ApiState::values`. The slice is inside the arguments of the running call, which no one writes or moves.
-        if let (Some(w), Some(k)) = (unsafe { self.api.win.as_ref() }, first.slot().checked_sub(WIN + 1))
-            && k as usize + n <= w.len as usize
-        {
-            return unsafe { std::slice::from_raw_parts(w.args.add(k as usize), n) }.to_vec();
+        let w = unsafe { self.api.win.as_ref() }?;
+        let k = first.slot().checked_sub(WIN + 1)? as usize;
+        (k + n <= w.len as usize).then(|| unsafe { std::slice::from_raw_parts(w.args.add(k), n) })
+    }
+
+    /// `api_args_slice`, or one copy of the arguments that the host made (on the stack).
+    pub fn api_args(&self, a: bare_js_api::Args<'_>, from: usize, to: usize) -> Vec<Value> {
+        if let Some(s) = self.api_args_slice(a, from, to) {
+            return s.to_vec();
         }
+        let n = to.min(a.len()).saturating_sub(from);
         a.iter().skip(from).take(n).map(|l| self.api_at(l)).collect()
     }
 

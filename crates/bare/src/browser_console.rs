@@ -123,9 +123,40 @@ const MAX_LABELS: usize = 1024;
 const MAX_LABEL_BYTES: usize = 256;
 const MAX_GROUP_DEPTH: u8 = 64;
 
+/// A kept call. One or two values sit in the record: the common call allocates nothing, and a dropped record frees nothing.
+struct Rec {
+    seq: u64,
+    level: ConsoleLevel,
+    indent: u8,
+    args: Vals,
+}
+
+enum Vals {
+    Inline(u8, [Value; 2]),
+    Heap(Vec<Value>),
+}
+
+impl Vals {
+    fn new(v: &[Value]) -> Self {
+        match *v {
+            [] => Vals::Inline(0, [Value::Undefined; 2]),
+            [a] => Vals::Inline(1, [a, Value::Undefined]),
+            [a, b] => Vals::Inline(2, [a, b]),
+            _ => Vals::Heap(v.to_vec()),
+        }
+    }
+
+    fn as_slice(&self) -> &[Value] {
+        match self {
+            Vals::Inline(n, a) => &a[..*n as usize],
+            Vals::Heap(v) => v,
+        }
+    }
+}
+
 #[derive(Default)]
 struct CState {
-    q: VecDeque<ConsoleRecord>,
+    q: VecDeque<Rec>,
     values: usize,
     calls: u64,
     dropped: u64,
@@ -157,48 +188,64 @@ pub(crate) struct Console {
 impl Console {
     pub(crate) fn roots(&self, out: &mut Vec<Value>) {
         for r in &self.st.borrow().q {
-            out.extend_from_slice(&r.args);
+            out.extend_from_slice(r.args.as_slice());
         }
     }
 
     fn drop_oldest(&self, st: &mut CState) {
         if let Some(r) = st.q.pop_front() {
-            st.values -= r.args.len();
+            st.values -= r.args.as_slice().len();
         }
         st.dropped += 1;
     }
 }
 
-fn record_vec<'s>(d: &Dom, s: &mut Sc<'s, '_>, level: ConsoleLevel, args: Vec<Value>) -> Res<'s, Local<'s>> {
-    let lim = d.console.lim.get();
-    if args.len() > lim.max_args {
+impl Console {
+    /// Keep a call of `args`. The caller has checked `max_args` and charged the steps.
+    fn push(&self, level: ConsoleLevel, args: &[Value]) {
+        let lim = self.lim.get();
+        let mut st = self.st.borrow_mut();
+        let seq = st.calls;
+        st.calls += 1;
+        if lim.max_records == 0 {
+            st.dropped += 1;
+            return;
+        }
+        while st.q.len() >= lim.max_records {
+            self.drop_oldest(&mut st);
+        }
+        st.values += args.len();
+        let indent = st.depth;
+        st.q.push_back(Rec { seq, level, indent, args: Vals::new(args) });
+    }
+}
+
+fn record_vec<'s>(d: &Dom, s: &mut Sc<'s, '_>, level: ConsoleLevel, args: &[Value]) -> Res<'s, Local<'s>> {
+    if args.len() > d.console.lim.get().max_args {
         return Err(d.lim_s(s, "console-args"));
     }
     s.charge(1 + args.len() as u64)?;
-    let mut st = d.console.st.borrow_mut();
-    let seq = st.calls;
-    st.calls += 1;
-    if lim.max_records == 0 {
-        st.dropped += 1;
-        return Ok(s.undefined());
-    }
-    while st.q.len() >= lim.max_records {
-        d.console.drop_oldest(&mut st);
-    }
-    st.values += args.len();
-    let indent = st.depth;
-    st.q.push_back(ConsoleRecord { seq, level, indent, args });
+    d.console.push(level, args);
     Ok(s.undefined())
 }
 
-/// `record` of the arguments `from..` of a call. The cap is checked before anything is copied.
+/// `record_vec` of the arguments `from..to` of a call. The cap is checked before anything is copied, and the arguments are read in place.
 fn record<'s>(d: &Dom, s: &mut Sc<'s, '_>, level: ConsoleLevel, a: Args<'s>, from: usize, to: usize) -> Res<'s, Local<'s>> {
-    let to = to.min(a.len());
-    if to.saturating_sub(from) > d.console.lim.get().max_args {
+    let n = to.min(a.len()).saturating_sub(from);
+    if n > d.console.lim.get().max_args {
         return Err(d.lim_s(s, "console-args"));
     }
-    let args = s.engine().api_args(a, from, to);
-    record_vec(d, s, level, args)
+    s.charge(1 + n as u64)?;
+    let undefined = s.undefined();
+    let it = s.engine();
+    match it.api_args_slice(a, from, to) {
+        Some(args) => d.console.push(level, args),
+        None => {
+            let args = it.api_args(a, from, to);
+            d.console.push(level, &args);
+        }
+    }
+    Ok(undefined)
 }
 
 /// Record a console call from the host with one string argument. It charges no step: the host uses it right after a task ended
@@ -217,7 +264,7 @@ pub(crate) fn push_text(d: &Dom, it: &mut Interp<'_>, level: ConsoleLevel, text:
         d.console.drop_oldest(&mut st);
     }
     st.values += 1;
-    st.q.push_back(ConsoleRecord { seq, level, indent: 0, args: vec![Value::String(s)] });
+    st.q.push_back(Rec { seq, level, indent: 0, args: Vals::Inline(1, [Value::String(s), Value::Undefined]) });
 }
 
 fn log<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
@@ -272,7 +319,7 @@ fn say<'s>(d: &Dom, s: &mut Sc<'s, '_>, level: ConsoleLevel, text: &str, rest: O
     if let Some(a) = rest {
         args.extend((from..a.len()).map(|i| raw_arg(s, a, i).expect("in range")));
     }
-    record_vec(d, s, level, args)
+    record_vec(d, s, level, &args)
 }
 
 /// The label of a call: `default` for undefined, else a string, a primitive as `%s` prints it, or `[object]`. `None` after the
@@ -451,7 +498,7 @@ impl Browser {
     pub fn take_console_records(&mut self) -> Vec<ConsoleRecord> {
         let mut st = self.dom.console.st.borrow_mut();
         st.values = 0;
-        st.q.drain(..).collect()
+        st.q.drain(..).map(|r| ConsoleRecord { seq: r.seq, level: r.level, indent: r.indent, args: r.args.as_slice().to_vec() }).collect()
     }
 
     /// The text of a record (see the header for the gates). Runs no JavaScript. Returns the text to the caller only.
