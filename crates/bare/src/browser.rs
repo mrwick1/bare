@@ -93,6 +93,7 @@ use bare_html::dom::{Document, NodeData, NodeId, Ns};
 use bare_js::eval::{Error, EvalLimits, Host, Interp, LimitKind};
 use bare_js::heap::{Heap, HeapLimits, PropertyDescriptor};
 use bare_js::value::{ObjId, PropertyKey, Value};
+use bare_js_api::HostFn;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::hash::{BuildHasherDefault, Hasher};
@@ -705,6 +706,8 @@ pub(crate) enum P {
 
 pub(crate) enum Kind {
     Method(H),
+    /// A method of the new form, on the interface registry (`browser_scoped.rs`).
+    MethodS(crate::browser_scoped::HS),
     Get(H),
     Accessor(H, H),
 }
@@ -731,6 +734,8 @@ pub struct Dom {
     pub(crate) wrapper_edges: Cell<bool>,
     /// `(handler, needs new)` for each host function id.
     pub(crate) handlers: RefCell<Vec<(H, bool)>>,
+    /// The functions of the new form (and, in a test build, every old one): the registry of the interface `Host::call`.
+    pub(crate) scoped: RefCell<Vec<crate::browser_scoped::Scoped>>,
     /// Prototypes and interface objects: permanent roots.
     pub(crate) fixed: RefCell<Vec<ObjId>>,
     pub(crate) start: Instant,
@@ -835,8 +840,9 @@ pub struct Dom {
 /// The host of `bare-js-api`: only the references that owners keep (`docs/design-host-tracing.md`). Host functions still go through
 /// the old `Host` until the browser is generic over the engine.
 impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
-    fn call<'s>(&self, _s: &mut bare_js_api::Scope<'s, Interp<'p>>, _id: u32, _this: bare_js_api::Local<'s>, _args: bare_js_api::Args<'s>, _is_new: bool) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
-        Err(bare_js_api::Error::Abort(bare_js_api::Abort::Unsupported("browser host functions through the interface")))
+    #[inline]
+    fn call<'s>(&self, s: &mut bare_js_api::Scope<'s, Interp<'p>>, id: u32, this: bare_js_api::Local<'s>, args: bare_js_api::Args<'s>, is_new: bool) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
+        self.call_scoped(s, id, this, args, is_new)
     }
 
     fn trace(&self, key: u32, t: &mut bare_js_api::Tracer<'_, Value>) {
@@ -1005,15 +1011,7 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
 impl Host for Dom {
     fn call(&self, it: &mut Interp<'_>, id: u32, this: Value, args: &[Value], is_new: bool) -> R<Value> {
         let (h, needs_new) = self.handlers.borrow()[id as usize];
-        self.style.cur.set(id);
-        if needs_new && !is_new {
-            return Err(crate::browser_custom::needs_new(it, h));
-        }
-        let r = if self.ce.on.get() { self.call_ce(it, h, this, args) } else { h(self, it, this, args) };
-        if self.mo.armed() {
-            self.mo_after(it)?;
-        }
-        r
+        self.dispatch_host(it, id, needs_new && !is_new, Some(h), |it| h(self, it, this, args))
     }
 
     fn roots(&self, out: &mut Vec<Value>) {
@@ -1505,16 +1503,12 @@ impl Dom {
     }
 
     pub(crate) fn add_fn(&self, it: &mut Interp<'_>, h: H, name: &str, len: u32, ctor: bool) -> R<ObjId> {
-        let id = self.handlers.borrow().len() as u32;
-        self.handlers.borrow_mut().push((h, ctor));
-        it.host_function(id, name, len, ctor)
+        self.add_old(it, h, name, len, if ctor { HostFn::Ctor } else { HostFn::Method })
     }
 
     /// A constructor that takes a different `new.target`: it reads it with `host_proto_from_new_target`.
     pub(crate) fn add_ctor_nt(&self, it: &mut Interp<'_>, h: H, name: &str, len: u32) -> R<ObjId> {
-        let id = self.handlers.borrow().len() as u32;
-        self.handlers.borrow_mut().push((h, true));
-        it.host_ctor_with_new_target(id, name, len)
+        self.add_old(it, h, name, len, HostFn::CtorNewTarget)
     }
 
     pub(crate) fn install(&self, it: &mut Interp<'_>) -> R<()> {
@@ -1571,6 +1565,8 @@ impl Dom {
         for d in DEFS {
             let key = self.key(it, d.name)?;
             let (f, s) = match d.kind {
+                Kind::MethodS(h) => (self.add_fn_s_obj(it, h, d.name, d.len, HostFn::Method)?, None),
+                Kind::Method(h) if self.methods_on_api() => (self.add_old(it, h, d.name, d.len, HostFn::Method)?, None),
                 Kind::Method(h) => {
                     let id = self.handlers.borrow().len() as u32;
                     self.handlers.borrow_mut().push((h, false));
@@ -1591,7 +1587,7 @@ impl Dom {
             for &on in d.on {
                 let target = self.pick(on);
                 match d.kind {
-                    Kind::Method(_) => it.define_data(target, key, Value::Object(f), true, false, true)?,
+                    Kind::Method(_) | Kind::MethodS(_) => it.define_data(target, key, Value::Object(f), true, false, true)?,
                     _ => self.define_accessor(it, target, key, f, s)?,
                 }
             }
@@ -1727,7 +1723,7 @@ pub(crate) fn illegal_constructor(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[V
     Err(it.type_error("Illegal constructor"))
 }
 
-use Kind::{Accessor as A, Get as G, Method as M};
+use Kind::{Accessor as A, Get as G, Method as M, MethodS as MS};
 use P::*;
 
 const PARENT: &[P] = &[Element, Document, Fragment];
@@ -1785,10 +1781,10 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Element], name: "id", len: 0, kind: A(nd::id, nd::set_id) },
     Def { on: &[Element], name: "className", len: 0, kind: A(nd::class_name, nd::set_class_name) },
     Def { on: &[Element], name: "lang", len: 0, kind: A(nd::lang, nd::set_lang) },
-    Def { on: &[Element], name: "getAttribute", len: 1, kind: M(nd::get_attribute) },
+    Def { on: &[Element], name: "getAttribute", len: 1, kind: MS(nd::get_attribute_s) },
     Def { on: &[Element], name: "setAttribute", len: 2, kind: M(nd::set_attribute) },
     Def { on: &[Element], name: "removeAttribute", len: 1, kind: M(nd::remove_attribute) },
-    Def { on: &[Element], name: "hasAttribute", len: 1, kind: M(nd::has_attribute) },
+    Def { on: &[Element], name: "hasAttribute", len: 1, kind: MS(nd::has_attribute_s) },
     Def { on: &[Element], name: "getAttributeNames", len: 0, kind: M(nd::get_attribute_names) },
     Def { on: &[Element], name: "attributes", len: 0, kind: G(at::attributes) },
     Def { on: &[Element], name: "hasAttributes", len: 0, kind: M(at::has_attributes) },
@@ -1809,7 +1805,7 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Shadow], name: "clonable", len: 0, kind: G(sh::flag_bit::<2>) },
     Def { on: &[Shadow], name: "serializable", len: 0, kind: G(sh::flag_bit::<4>) },
     Def { on: &[Shadow], name: "host", len: 0, kind: G(sh::host) },
-    Def { on: &[Element], name: "matches", len: 1, kind: M(nd::matches_selector) },
+    Def { on: &[Element], name: "matches", len: 1, kind: MS(nd::matches_selector_s) },
     Def { on: &[Element], name: "closest", len: 1, kind: M(nd::closest) },
     Def { on: CHILD, name: "remove", len: 0, kind: M(nd::remove) },
     Def { on: &[CharData], name: "data", len: 0, kind: A(nd::node_value_text, nd::set_node_value_text) },
@@ -1991,6 +1987,7 @@ impl Browser {
             doc_wrapper: OnceCell::new(),
             wrapper_edges: Cell::new(false),
             handlers: RefCell::default(),
+            scoped: RefCell::default(),
             fixed: RefCell::default(),
             start: Instant::now(),
             vorigin: if bare_net::vclock::on() { bare_net::vclock::now() } else { 0.0 },

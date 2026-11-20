@@ -25,3 +25,5 @@ pub mod gc;
 pub mod object;
 pub mod roots;
 pub mod parse_ahead;
+pub mod bytecode;
+pub mod verify;
