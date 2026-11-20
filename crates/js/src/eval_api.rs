@@ -5,10 +5,34 @@
 // exception crosses the interface as `Abort`; the original `Error` waits in `ApiState::abort`, so a host that passes the abort on
 // gives back the same error.
 
+/// The shared slots at the start of the handle stack: `undefined`, `null`, `false`, `true`. They sit at the physical indices 0 to 3 and
+/// have the slot numbers `u32::MAX - 3` to `u32::MAX`, so a pushed value of logical index `n` is at the physical index `n + 4` and
+/// `stack_len` is 0 for an empty stack. `undefined`, `null` and `boolean` push nothing: a handler that answers with one of them costs no push.
+const SEEDS: usize = 4;
+static SEED_VALUES: [Value; SEEDS] = [Value::Undefined, Value::Null, Value::Bool(false), Value::Bool(true)];
+const SLOT_UNDEFINED: u32 = u32::MAX - 3;
+const SLOT_NULL: u32 = u32::MAX - 2;
+const SLOT_FALSE: u32 = u32::MAX - 1;
+
+/// Slot numbers from here up name the `this` and the arguments of the host call that runs: `WIN` is `this`, `WIN + 1 + i` is argument `i`.
+/// The engine reads the argument slots of its caller in place (no copy, no push): a handle names a slot of that slice.
+const WIN: u32 = 1 << 31;
+
+/// The `this` and the arguments of a running host call (`call_api_host`). It lives in the frame of that call, and `ApiState::win`
+/// points at the innermost one until the call ends. `args` is the slice that the caller of the call holds (`&[Value]`): it is neither
+/// written nor moved while the call runs. `roots` reads the whole chain, so a collection inside the call sees `this` and every argument.
+struct Win {
+    this: Value,
+    args: *const Value,
+    len: u32,
+    prev: *const Win,
+}
+
 /// The realm state of the host interface.
-#[derive(Default)]
 pub(crate) struct ApiState<'p> {
     stack: Vec<Value>,
+    /// The innermost running host call, or null. See `Win`.
+    win: *const Win,
     /// The persistent table. A slot whose bit in `slots` is clear is free; its old value is no root and waits to be overwritten.
     persistent: Vec<Value>,
     slots: Rc<bare_js_api::Slots>,
@@ -20,9 +44,32 @@ pub(crate) struct ApiState<'p> {
     owners: Vec<(ObjId, u32)>,
 }
 
+impl Default for ApiState<'_> {
+    fn default() -> Self {
+        ApiState {
+            stack: SEED_VALUES.to_vec(),
+            win: std::ptr::null(),
+            persistent: Vec::new(),
+            slots: Default::default(),
+            host: None,
+            abort: None,
+            owners: Vec::new(),
+        }
+    }
+}
+
 impl ApiState<'_> {
     fn values(&self, out: &mut Vec<Value>) {
-        out.extend_from_slice(&self.stack);
+        // The shared constant slots hold no heap value.
+        out.extend_from_slice(&self.stack[SEEDS..]);
+        let mut w = self.win;
+        // SAFETY: each `Win` is in the frame of a `call_api_host` that is still running, and its `args` slice is held by the caller of that
+        // call (`call_api_host` links a window before the call and unlinks it after).
+        while let Some(x) = unsafe { w.as_ref() } {
+            out.push(x.this);
+            out.extend_from_slice(unsafe { std::slice::from_raw_parts(x.args, x.len as usize) });
+            w = x.prev;
+        }
         self.slots.for_each(|id| out.push(self.persistent[id as usize]));
     }
 }
@@ -122,12 +169,29 @@ impl<'p> Interp<'p> {
     #[inline]
     fn api_push<'s>(&mut self, v: Value) -> bare_js_api::Local<'s> {
         self.api.stack.push(v);
-        bare_js_api::Local::from_slot(self.api.stack.len() as u32 - 1)
+        bare_js_api::Local::from_slot((self.api.stack.len() - SEEDS - 1) as u32)
     }
 
+    /// The value of a handle: a slot of the stack (one bounds check), else a slot of the running call (`api_win`).
     #[inline]
     fn api_at(&self, v: bare_js_api::Local<'_>) -> Value {
-        self.api.stack[v.slot() as usize]
+        match self.api.stack.get(v.slot().wrapping_add(SEEDS as u32) as usize) {
+            Some(&x) => x,
+            None => self.api_win(v.slot()),
+        }
+    }
+
+    /// The value of a slot of the running call: `this` or an argument. A slot that names nothing is a bug of the host: a panic, never
+    /// a read outside the slice.
+    #[inline]
+    fn api_win(&self, slot: u32) -> Value {
+        // SAFETY: see `ApiState::values`.
+        let (Some(w), Some(k)) = (unsafe { self.api.win.as_ref() }, slot.checked_sub(WIN)) else { panic!("a handle that is no slot of the handle stack") };
+        match k.checked_sub(1) {
+            None => w.this,
+            Some(i) if i < w.len => unsafe { *w.args.add(i as usize) },
+            Some(_) => panic!("an argument handle past the arguments of the call"),
+        }
     }
 
     fn api_key(&mut self, key: bare_js_api::Local<'_>) -> Result<PropertyKey, Error> {
@@ -179,7 +243,7 @@ impl<'p> Interp<'p> {
         };
         let base = self.api.stack.len();
         self.api.stack.push(Value::Object(owner));
-        let r = bare_js_api::enter(self, |s| match h.lazy_member(s, bare_js_api::Local::from_slot(base as u32), what) {
+        let r = bare_js_api::enter(self, |s| match h.lazy_member(s, bare_js_api::Local::from_slot((base - SEEDS) as u32), what) {
             Ok(()) => Ok(()),
             Err(bare_js_api::Error::Throw(v)) => Err(Error::Throw(s.engine().api_at(v))),
             Err(bare_js_api::Error::Abort(a)) => Err(s.engine().api.abort.take().unwrap_or(match a {
@@ -191,6 +255,7 @@ impl<'p> Interp<'p> {
     }
 
     /// An error of the interface as an error of this engine: the inverse of `api_err`.
+    #[cold]
     pub fn api_unerr(&mut self, e: bare_js_api::Error<'_>) -> Error {
         match e {
             bare_js_api::Error::Throw(v) => Error::Throw(self.api_at(v)),
@@ -278,44 +343,37 @@ impl<'p> Interp<'p> {
 
     /// `call_host` for a function of the interface host (`Callee::ApiHost`), or for a realm that has no old host. Kept apart, so the old
     /// host path does not change.
+    ///
+    /// `this` and the arguments are not copied to the handle stack. The host gets handles that name them where they are (`Win`), and the one
+    /// scope of the call opens over them: only a value that the handler makes is pushed, and the scope's end drops it. A handle into
+    /// the window cannot outlive the call (it is a `Local<'s>` of this scope), the window is no part of the stack (so nothing can move it),
+    /// and `ApiState::values` reads the whole chain, so a collection inside the call finds `this` and the arguments as roots.
     #[cold]
     fn call_api_host(&mut self, id: u32, this: Value, args: &[Value], is_new: bool, nt: Option<ObjId>) -> Result<Value, Error> {
-        let Some(h) = self.api.host.clone() else { return Err(unsupported("host function without a host", Span::default())) };
-        let saved = std::mem::replace(&mut self.host_nt, nt);
-        let r = self.api_call_host(&*h, id, this, args, is_new);
-        self.host_nt = saved;
-        r
-    }
-
-    /// Run host function `id` of the interface host `h`: `this` and the arguments go onto the handle stack for the call. The scope opens
-    /// first, so its end drops them too.
-    #[inline(always)]
-    fn api_call_host(&mut self, h: &dyn bare_js_api::Host<Interp<'p>>, id: u32, this: Value, args: &[Value], is_new: bool) -> Result<Value, Error> {
-        bare_js_api::enter(self, |s| {
-            let it = s.engine();
-            let base = it.api.stack.len() as u32;
-            // A constant length copies in line; the general case calls `memcpy`.
-            match *args {
-                [] => it.api.stack.push(this),
-                [a] => it.api.stack.extend_from_slice(&[this, a]),
-                [a, b] => it.api.stack.extend_from_slice(&[this, a, b]),
-                _ => {
-                    it.api.stack.push(this);
-                    it.api.stack.extend_from_slice(args);
-                }
-            }
-            let this = bare_js_api::Local::from_slot(base);
-            let args = bare_js_api::Args::from_slots(base + 1, args.len() as u32);
-            let r = h.call(s, id, this, args, is_new);
-            let it = s.engine();
+        let Some(h) = self.api.host.as_deref().map(|h| h as *const dyn bare_js_api::Host<Interp<'p>>) else {
+            return Err(unsupported("host function without a host", Span::default()));
+        };
+        // SAFETY: `h` points into the `Rc` of `api.host`, which `set_host` does not replace while a host call runs (it checks `win`), and
+        // which lives as long as the realm. So no `Rc` clone is needed for the call.
+        let h = unsafe { &*h };
+        // The common call has no `new.target` and runs under none: nothing to save, set or restore.
+        let swap = nt.is_some() || self.host_nt.is_some();
+        let saved = if swap { std::mem::replace(&mut self.host_nt, nt) } else { None };
+        debug_assert!(args.len() < (1 << 30));
+        let win = Win { this, args: args.as_ptr(), len: args.len() as u32, prev: self.api.win };
+        self.api.win = &win;
+        let r = bare_js_api::enter(self, |s| {
+            let r = h.call(s, id, bare_js_api::Local::from_slot(WIN), bare_js_api::Args::from_slots(WIN + 1, args.len() as u32), is_new);
             match r {
-                Ok(v) => Ok(it.api_at(v)),
-                Err(bare_js_api::Error::Throw(v)) => Err(Error::Throw(it.api_at(v))),
-                Err(bare_js_api::Error::Abort(a)) => Err(it.api.abort.take().unwrap_or(match a {
-                    bare_js_api::Abort::Limit(w) | bare_js_api::Abort::Unsupported(w) => unsupported(w, Span::default()),
-                })),
+                Ok(v) => Ok(s.engine().api_at(v)),
+                Err(e) => Err(s.engine().api_unerr(e)),
             }
-        })
+        });
+        self.api.win = win.prev;
+        if swap {
+            self.host_nt = saved;
+        }
+        r
     }
 }
 
@@ -361,16 +419,17 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
 
     #[inline]
     fn stack_len(&self) -> u32 {
-        self.api.stack.len() as u32
+        (self.api.stack.len() - SEEDS) as u32
     }
 
     #[inline]
     fn stack_truncate(&mut self, len: u32) {
-        self.api.stack.truncate(len as usize);
+        self.api.stack.truncate(len as usize + SEEDS);
     }
 
     fn stack_set(&mut self, to: u32, from: u32) {
-        self.api.stack[to as usize] = self.api.stack[from as usize];
+        let v = self.api_at(bare_js_api::Local::from_slot(from));
+        self.api.stack[to as usize + SEEDS] = v;
     }
 
     fn persist(&mut self, v: bare_js_api::Local<'_>) -> u32 {
@@ -387,17 +446,17 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
 
     #[inline]
     fn undefined<'s>(&mut self) -> bare_js_api::Local<'s> {
-        self.api_push(Value::Undefined)
+        bare_js_api::Local::from_slot(SLOT_UNDEFINED)
     }
 
     #[inline]
     fn null<'s>(&mut self) -> bare_js_api::Local<'s> {
-        self.api_push(Value::Null)
+        bare_js_api::Local::from_slot(SLOT_NULL)
     }
 
     #[inline]
     fn boolean<'s>(&mut self, b: bool) -> bare_js_api::Local<'s> {
-        self.api_push(Value::Bool(b))
+        bare_js_api::Local::from_slot(SLOT_FALSE + b as u32)
     }
 
     #[inline]
@@ -516,6 +575,8 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
     }
 
     fn set_host(&mut self, host: Rc<dyn bare_js_api::Host<Self>>) {
+        // `call_api_host` borrows the host without a clone, so it must not change under a running call.
+        assert!(self.api.win.is_null(), "set_host inside a host call");
         self.api.host = Some(host);
     }
 

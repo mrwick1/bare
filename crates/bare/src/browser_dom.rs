@@ -794,9 +794,10 @@ pub(crate) fn is_connected<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: 
     let n = d.nd_s(s, this)?;
     let doc = d.doc.borrow();
     let mut cur = n;
+    let it = s.engine();
     // Shadow-including: a node of a shadow tree is connected when its host is.
     while let Some(p) = doc.parent_or_host(cur) {
-        s.charge(1)?;
+        bare_js_api::Engine::charge(it, 1)?;
         cur = p;
     }
     Ok(s.boolean(cur == doc.root()))

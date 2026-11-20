@@ -125,21 +125,42 @@ impl Dom {
         }
     }
 
-    /// The entry of the interface `Host::call`.
+    /// The entry of the interface `Host::call`. It runs the hooks of `dispatch_host` in the same order, with no closure: the call
+    /// path of a handler is the hot path, and a closure that both the plain and the custom element branch use sits in memory first.
     pub(crate) fn call_scoped<'s, 'p>(&self, s: &mut Sc<'s, 'p>, id: u32, this: Local<'s>, args: Args<'s>, is_new: bool) -> Res<'s, Local<'s>> {
-        let e = self.scoped.borrow()[id as usize];
-        #[cfg(test)]
-        let h = match e.f {
-            Fun::Old(h) => Some(h),
-            Fun::New(_) => None,
+        let (f, needs_new, cur) = {
+            let t = self.scoped.borrow();
+            let e = &t[id as usize];
+            (e.f, e.needs_new, e.cur)
         };
-        #[cfg(not(test))]
-        let h = None;
-        self.dispatch_host(s, e.cur, e.needs_new && !is_new, h, |s| match e.f {
+        self.style.cur.set(cur);
+        if needs_new && !is_new {
+            #[cfg(test)]
+            let h = if let Fun::Old(h) = f { Some(h) } else { None };
+            #[cfg(not(test))]
+            let h = None;
+            return Err(self.bad_new(s, h));
+        }
+        let r = if self.ce.on.get() { self.call_scoped_ce(s, f, this, args) } else { self.run_fun(s, f, this, args) };
+        if self.mo.armed() {
+            self.mo_done(s)?;
+        }
+        r
+    }
+
+    #[inline(always)]
+    fn run_fun<'s, 'p>(&self, s: &mut Sc<'s, 'p>, f: Fun, this: Local<'s>, args: Args<'s>) -> Res<'s, Local<'s>> {
+        match f {
             Fun::New(f) => f(self, s, this, args),
             #[cfg(test)]
             Fun::Old(h) => self.call_old(s, h, this, args),
-        })
+        }
+    }
+
+    /// `call_scoped` with a scope of custom element reactions around the handler.
+    #[inline(never)]
+    fn call_scoped_ce<'s, 'p>(&self, s: &mut Sc<'s, 'p>, f: Fun, this: Local<'s>, args: Args<'s>) -> Res<'s, Local<'s>> {
+        self.dispatch_ce(s, |s| self.run_fun(s, f, this, args))
     }
 
     #[cfg(test)]

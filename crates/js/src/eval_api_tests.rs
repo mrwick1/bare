@@ -1316,3 +1316,91 @@ fn host_constructors_of_the_interface_take_new_target_as_declared() {
         });
     });
 }
+
+/// A host whose functions collect while they run: they read `this` and the arguments in place, then run the heap collection with the roots
+/// of the engine (`Interp::collect` refuses inside a call, so this goes to `Heap::collect` with `Interp::roots`).
+struct Win;
+
+impl<'p> bare_js_api::Host<Interp<'p>> for Win {
+    fn call<'s>(&self, s: &mut Scope<'s, Interp<'p>>, id: u32, this: Local<'s>, args: Args<'s>, _is_new: bool) -> Result<Local<'s>, bare_js_api::Error<'s>> {
+        let tag = |s: &mut Scope<'s, Interp<'p>>, o: Local<'s>| -> Result<String, bare_js_api::Error<'s>> {
+            let t = s.get_str(o, "tag")?;
+            Ok(s.as_str(t).map(|t| t.to_string_lossy()).unwrap_or_default())
+        };
+        // Nothing was pushed for `this` and the arguments.
+        assert_eq!(s.engine().stack_len(), 0, "this and the arguments are read where the engine holds them");
+        let it = s.engine();
+        let roots = it.roots();
+        it.heap.collect(&roots).unwrap();
+        match id {
+            // probe(a, b): the tags of this, a and b, after a collection
+            0 => {
+                let (a, b) = (args.get(0).unwrap(), args.get(1).unwrap());
+                let t = format!("{},{},{}", tag(s, this)?, tag(s, a)?, tag(s, b)?);
+                s.string(&t)
+            }
+            // nest(f, z): f(), then the tags of this and z, after f ran a call of its own and a collection inside it
+            _ => {
+                let f = args.get(0).unwrap();
+                let z = args.get(1).unwrap();
+                let undef = s.undefined();
+                let inner = s.call(f, undef, &[])?;
+                let inner = s.as_str(inner).map(|t| t.to_string_lossy()).unwrap_or_default();
+                let it = s.engine();
+                let roots = it.roots();
+                it.heap.collect(&roots).unwrap();
+                let t = format!("{inner}|{},{}", tag(s, this)?, tag(s, z)?);
+                s.string(&t)
+            }
+        }
+    }
+}
+
+fn win_realm() -> Interp<'static> {
+    let mut it = Interp::realm(Heap::default(), EvalLimits { max_steps: 1_000_000, ..Default::default() }).unwrap();
+    enter(&mut it, |s| {
+        s.set_host(Rc::new(Win));
+        let g = s.global();
+        for (id, name) in [(0, "probe"), (1, "nest")] {
+            let f = s.host_function(name, id, 2, bare_js_api::HostFn::Method).unwrap();
+            s.define_str(g, name, f, Attrs::METHOD).unwrap();
+        }
+    });
+    it
+}
+
+#[test]
+fn a_collection_inside_a_host_call_keeps_this_and_the_arguments_alive() {
+    big(|| {
+        let mut it = win_realm();
+        // The three objects are reachable only through the arguments of the call (and `this`).
+        assert_eq!(out(&mut it, "probe.call({ tag: 'T' }, { tag: 'A' }, { tag: 'B' })"), "T,A,B");
+        assert_eq!(it.stack_len(), 0, "every call gave its slots back");
+        assert!(it.api.win.is_null(), "no window is left linked");
+    });
+}
+
+#[test]
+fn nested_host_calls_keep_every_window_a_root_and_restore_the_outer_one() {
+    big(|| {
+        let mut it = win_realm();
+        let src = "nest.call({ tag: 'N' }, function () { return probe.call({ tag: 'in' }, { tag: 'x' }, { tag: 'y' }); }, { tag: 'Z' })";
+        assert_eq!(out(&mut it, src), "in,x,y|N,Z");
+        assert!(it.api.win.is_null());
+        // The same under the stress mode that collects at every safe point.
+        it.set_gc_stress(true);
+        assert_eq!(out(&mut it, src), "in,x,y|N,Z");
+        assert_eq!(it.stack_len(), 0);
+    });
+}
+
+#[test]
+fn a_handle_that_names_no_slot_is_a_panic_never_a_read() {
+    big(|| {
+        let mut it = win_realm();
+        let outside = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| enter(&mut it, |s| s.type_of(Local::from_slot(1 << 31)))));
+        assert!(outside.is_err(), "no call runs, so the window names nothing");
+        let past = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| enter(&mut it, |s| s.type_of(Local::from_slot(5)))));
+        assert!(past.is_err(), "a slot past the stack");
+    });
+}
