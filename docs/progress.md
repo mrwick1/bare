@@ -16351,6 +16351,52 @@ Windows and macOS; Miri (no `unsafe` was added, but `Op::Lazy` runs in `interp.r
 ### Open: the rest of the start cost
 
 4.01 M is not close to zero. 2.35 M is the pre-parse of the whole prelude, which still reads every function body. A prototype (not in the PR) that parses the top level of the prelude with known facts and jumps over each function costs 12.4 K for that step. That is option B′ of the design document: the facts of the prelude as a generated file. Hypothesis: about 1.7 M. A compiled image (option B) is about 1.0 M, hypothesis. The questions for the owner are in section 6 of `docs/design-js2-prelude.md`.
+
+## 2026-11-20: the pre-parse facts of the prelude are a generated file (js2, option B′ of `docs/design-js2-prelude.md`)
+
+Branch `t3/js2-prelude-facts`, from the head of #770 (`ee5fc1f5`, it was open when I started). Decision of the owner (section 8 of the design): build B′.
+
+### What changed
+
+- `crates/js2/src/prelude_facts.rs`: generated. The `FnFacts` and spans of `prelude.js` as `static` tables, and `facts()`, which copies them into a `Facts`. The file is excluded from rustfmt.
+- `parse_script_known` (`parse.rs`): the tree of the top level of a text from the facts of an earlier pre-parse. It uses `Mode::Function` with no function as the one parsed in full, so the lexer jumps over each function at the top level by its facts. About 25 lines.
+- `script.rs`: `compile_after` takes the known facts for the prelude. A user script and the host script still get a pre-parse. `Op::Lazy` and the first-call compile are as in #770.
+- `prelude_facts_tests.rs`: `prelude_facts_file_is_up_to_date` makes the file from a pre-parse of `prelude.js` and fails when the checked-in file differs; `BLESS_PRELUDE_FACTS=1 cargo test -p bare-js2 --lib prelude_facts` writes it. `prelude_facts_equal_a_fresh_pre_parse` compares the loaded facts with a fresh pre-parse. I checked that a one-byte change of `prelude.js` fails both.
+
+### Cost
+
+Machine archMachine (AMD Ryzen 9 5900HX), release build, load average 13 to 24 from other jobs, so only instruction counts are used. Base: `ee5fc1f5` built in the same session. Tool: `tools/js/instr.sh` (minimum of 3 runs), `script_run`. Sources of the rows: `eval_load CASE SCALE --source` of the old engine, run as `script_run --eval`.
+
+VM setup, `script_run` of `var x = 1;`: **4.01 M to 1.68 M** (4.013 M base; 1.681 M and 1.681 M in two runs of the new build; the design said about 1.7 M).
+
+Peak RSS of `var x = 1;`, 7 runs, KiB (a launcher with `wait4`): base 5084 5112 5148 5152 5160 5228 5236; new 5088 5128 5140 5140 5152 5176 5232. No change. The spread of a run is 150 KiB.
+
+First call of `a.forEach(f)` over a later call: 357 K before and 359 K after (the full parse and compile of the function did not change).
+
+`eval_load` rows, user instructions of the whole process in millions (minimum of 3 runs, base then new), and peak RSS in KiB (median of 3 runs). Net slope is the count at scale 10 minus the count at scale 1:
+
+| Row | Scale 1 base | Scale 1 new | Net slope base | Net slope new | RSS 1 base / new | RSS 10 base / new |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loop` | 515.28 | 512.95 | 4600.8 | 4600.8 | 5144 / 5016 | 5216 / 5156 |
+| `calls` | 330.72 | 328.39 | 2939.4 | 2939.4 | 5228 / 5240 | 5040 / 5136 |
+| `fib` | 11.12 | 8.79 | 71.0 | 71.0 | 5176 / 5232 | 5212 / 5180 |
+| `closures` | 42.24 | 39.99 | 341.9 | 342.6 | 5808 / 5876 | 10620 / 10816 |
+| `objects` | 174.94 | 176.21 | 1521.2 | 1541.1 | 7424 / 7544 | 21456 / 21272 |
+| `webpack` (bundle-like) | 10.04 | 7.71 | 46.2 | 46.2 | 5612 / 5544 | 6384 / 6184 |
+| `throws` | 91.88 | 89.54 | 789.8 | 789.8 | 5860 / 5856 | 12384 / 12444 |
+| `concat` | 4.31 | 1.98 | 2.03 | 2.03 | 5216 / 5240 | 5328 / 5320 |
+
+Scale 1 is 2.3 M lower on each row except `objects`. No net slope changed except `objects`, which is noisy: three more runs of `objects` at scale 10 gave 1680.7, 1684.2 and 1716.6 M for base and 1702.8, 1699.8 and 1678.3 M for the new build, so the difference is the noise of this row (the old doc saw 1517.8 to 1605.2 M for the base). Nothing in this change runs after the start.
+
+### Tests
+
+- `cargo test --locked -p bare-js2 --lib`: 387 pass (2 new).
+- `cargo test --locked -p bare-js-diff`: pass (the crate has no unit tests that matter here; its examples build).
+- test262 (`tools/js/test262_js2.sh -j 6`, checkout at `e4fbf577`): `counts.txt` is the same as `tools/fixtures/js/test262-js2-baseline.txt` (without its comment lines), 452 directories, no new failure.
+
+### Not tested
+
+Windows and macOS; Miri (no `unsafe` was added); wall time; a first call of a lazy function from a getter, setter, constructor with fields or a native's `Outcome::Enter` (the prelude has no such function; the next PR makes user functions lazy and tests it); the browser (js2 is not wired in).
 ## 2026-11-20: host handlers on the interface, D1: style, CSSOM and geometry (plan step S0.4 / D1)
 
 Status: the handlers of the files below run through the interface (`Scope`, `Local`, `Args`). Tests pass on Linux and Windows. The full matrix passes under the standing rule: no row is over +0.5% under both allocators. Base: PR #762 (`t3/convert-browser-host-handlers`, head `9f74a623`). The diff is about 2,200 changed lines.
