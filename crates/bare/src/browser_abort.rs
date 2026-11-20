@@ -308,29 +308,37 @@ fn static_timeout<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) ->
 }
 
 fn static_any<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    let bad = "Failed to execute 'any' on 'AbortSignal': The provided value is not of type 'AbortSignal'.";
     let a0 = arg_s(s, a, 0);
-    let Some(mut iter) = s.iter_open(a0)? else { return Err(s.type_error("Failed to execute 'any' on 'AbortSignal': The provided value cannot be converted to a sequence.")) };
+    let a0 = s.engine().raw(a0);
+    // The iterator of the old engine: one call for each item, with no handle for the iterator or the items.
+    let o = old(s, |it| {
+        let inputs = any_inputs(d, it, a0)?;
+        d.any_of(it, inputs)
+    })?;
+    Ok(d.obj_local(s, o))
+}
+
+/// The signals of the iterable `v` of `AbortSignal.any`.
+fn any_inputs(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<Vec<ObjId>> {
+    let bad = "Failed to execute 'any' on 'AbortSignal': The provided value is not of type 'AbortSignal'.";
+    let Some(mut iter) = it.host_iter_open(v)? else { return Err(it.type_error("Failed to execute 'any' on 'AbortSignal': The provided value cannot be converted to a sequence.")) };
     let mut inputs = Vec::new();
     loop {
-        s.charge(1)?;
-        match s.iter_next(&mut iter) {
-            Ok(Some(v)) => match obj_id(s, v) {
-                Some(o) if d.is_signal(o) => inputs.push(o),
-                _ => {
-                    let e = s.type_error(bad);
-                    return Err(s.iter_fail(&mut iter, e));
-                }
-            },
+        it.charge(1)?;
+        match it.host_iter_next(&mut iter) {
+            Ok(Some(Value::Object(o))) if d.is_signal(o) => inputs.push(o),
+            Ok(Some(_)) => {
+                let e = it.type_error(bad);
+                return Err(it.host_iter_fail(&mut iter, e));
+            }
             Ok(None) => break,
             Err(e) => return Err(e),
         }
         if inputs.len() > d.lim.max_listeners {
-            return Err(d.lim_s(s, "abort-any-sources"));
+            return Err(d.lim("abort-any-sources"));
         }
     }
-    let o = old(s, |it| d.any_of(it, inputs))?;
-    Ok(d.obj_local(s, o))
+    Ok(inputs)
 }
 
 impl Dom {
@@ -387,10 +395,8 @@ impl Dom {
 
 fn controller_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let default = d.abort.objs.borrow().expect("made")[1];
-    let default = d.obj_local(s, default);
-    let proto = s.proto_from_new_target(default)?;
-    let proto = obj_id(s, proto).expect("a prototype is an object");
     let c = old(s, |it| {
+        let proto = it.host_proto_from_new_target(default)?;
         let sig = d.new_signal(it)?;
         let c = d.obj(it, proto)?;
         let k = d.st.borrow_mut().owners.key(Owner::Ctl(c));

@@ -36,7 +36,7 @@ use crate::browser_scoped::*;
 use bare_js::eval::Interp;
 use bare_js::value::{ObjId, Value};
 use bare_js::eval::Error as OldError;
-use bare_js_api::{Args, Attrs, Error, HostFn, Local, Traced, Type};
+use bare_js_api::{Args, Engine, Error, HostFn, Local, Traced, Type};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::VecDeque;
 
@@ -255,22 +255,21 @@ fn type_value<'s>(s: &mut Sc<'s, '_>, msg: &str) -> Res<'s, Local<'s>> {
     thrown(e)
 }
 
-fn iter_result<'s>(s: &mut Sc<'s, '_>, value: Local<'s>, done: bool) -> Res<'s, Local<'s>> {
-    s.charge(1)?;
-    let o = s.new_object()?;
-    s.define_str(o, "value", value, Attrs::ALL)?;
-    let done = s.boolean(done);
-    s.define_str(o, "done", done, Attrs::ALL)?;
-    Ok(o)
+fn iter_result_raw(it: &mut Interp<'_>, value: Value, done: bool) -> R<Value> {
+    it.charge(1)?;
+    it.host_iter_result(value, done)
 }
 
 fn resolve_with<'s>(s: &mut Sc<'s, '_>, p: Local<'s>, value: Local<'s>, done: bool) -> Res<'s, ()> {
-    let r = iter_result(s, value, done)?;
-    s.resolve_promise(p, r)
+    let (p, value) = (s.engine().raw(p), s.engine().raw(value));
+    old(s, |it| {
+        let r = iter_result_raw(it, value, done)?;
+        it.host_resolve_promise(p, r)
+    })
 }
 
 /// Call a user callback of the source. `Ok(Err(v))` is a JS exception. Counted and charged.
-fn invoke<'s>(d: &Dom, s: &mut Sc<'s, '_>, f: Local<'s>, this: Local<'s>, args: &[Local<'s>]) -> Res<'s, Result<Local<'s>, Local<'s>>> {
+fn invoke<'s>(d: &Dom, s: &mut Sc<'s, '_>, f: Local<'s>, this: Local<'s>, arg: Local<'s>) -> Res<'s, Result<Local<'s>, Local<'s>>> {
     {
         let mut st = d.streams.st.borrow_mut();
         if st.callbacks >= lim(d).max_callbacks {
@@ -280,10 +279,12 @@ fn invoke<'s>(d: &Dom, s: &mut Sc<'s, '_>, f: Local<'s>, this: Local<'s>, args: 
         st.callbacks += 1;
     }
     s.charge(2)?;
-    match s.call(f, this, args) {
-        Ok(v) => Ok(Ok(v)),
-        Err(Error::Throw(v)) => Ok(Err(v)),
-        Err(e) => Err(e),
+    let it = s.engine();
+    let (f, this, arg) = (it.raw(f), it.raw(this), it.raw(arg));
+    match it.call(f, this, &[arg]) {
+        Ok(v) => Ok(Ok(it.raw_local(&v))),
+        Err(OldError::Throw(v)) => Ok(Err(it.raw_local(&v))),
+        Err(e) => Err(it.api_err(e)),
     }
 }
 
@@ -337,8 +338,7 @@ fn pull_if_needed<'s>(d: &Dom, s: &mut Sc<'s, '_>, ctl: ObjId) -> Res<'s, ()> {
         Some(p) => p,
         None => {
             let f = fns(d);
-            let (po, pe) = (d.obj_local(s, f.pull_ok), d.obj_local(s, f.pull_err));
-            let p = (s.bind(po, ctl_l)?, s.bind(pe, ctl_l)?);
+            let p = (bind_obj(s, f.pull_ok, ctl)?, bind_obj(s, f.pull_err, ctl)?);
             let edges = (s.trace_ref(p.0), s.trace_ref(p.1));
             if let Some(c) = d.streams.st.borrow_mut().ctls.get_mut(&ctl) {
                 c.pull_fns = Some(edges);
@@ -346,7 +346,7 @@ fn pull_if_needed<'s>(d: &Dom, s: &mut Sc<'s, '_>, ctl: ObjId) -> Res<'s, ()> {
             p
         }
     };
-    let r = invoke(d, s, pull, source, &[ctl_l])?;
+    let r = invoke(d, s, pull, source, ctl_l)?;
     match react(s, r, ok, err) {
         Err(Error::Throw(v)) => controller_error(d, s, ctl, v),
         r => r,
@@ -462,7 +462,7 @@ fn cancel_stream<'s>(d: &Dom, s: &mut Sc<'s, '_>, stream: ObjId, reason: Local<'
                 let (r, u) = (s.traced(&r), s.undefined());
                 resolve_with(s, r, u, true)?;
             }
-            let r = if s.type_of(cancel) == Type::Undefined { Ok(s.undefined()) } else { invoke(d, s, cancel, source, &[reason])? };
+            let r = if s.type_of(cancel) == Type::Undefined { Ok(s.undefined()) } else { invoke(d, s, cancel, source, reason)? };
             let f = fns(d);
             let (co, ce) = (d.obj_local(s, f.cancel_ok), d.obj_local(s, f.cancel_err));
             let (ok, err) = (s.bind(co, p)?, s.bind(ce, p)?);
@@ -549,9 +549,13 @@ pub(crate) fn ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -
 fn own<'s>(d: &Dom, s: &mut Sc<'s, '_>, proto: ObjId) -> Res<'s, (ObjId, u32)> {
     let o = d.obj_s(s, proto)?;
     let k = d.st.borrow_mut().owners.key(Owner::Stream(o));
-    let l = d.obj_local(s, o);
-    s.set_host_owner(l, k)?;
+    s.engine().set_host_owner_obj(o, k);
     Ok((o, k))
+}
+
+/// `bind` of a host function and an object, with no handle for either.
+fn bind_obj<'s>(s: &mut Sc<'s, '_>, target: ObjId, this: ObjId) -> Res<'s, Local<'s>> {
+    old_v(s, |it| it.host_bind(target, Value::Object(this)).map(Value::Object))
 }
 
 fn construct<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>) -> Res<'s, Local<'s>> {
@@ -608,8 +612,7 @@ fn construct<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>) -> Res<'s, Local<'s>>
     let f = fns(d);
     let ((strm, sk), (c, ck)) = (own(d, s, f.stream_proto)?, own(d, s, f.ctl_proto)?);
     let (cl, sl) = (d.obj_local(s, c), d.obj_local(s, strm));
-    let (so, se) = (d.obj_local(s, f.start_ok), d.obj_local(s, f.start_err));
-    let (ok, err) = (s.bind(so, cl)?, s.bind(se, cl)?);
+    let (ok, err) = (bind_obj(s, f.start_ok, c)?, bind_obj(s, f.start_err, c)?);
     {
         let (ctl_edge, stream_edge) = (s.trace_ref(cl), s.trace_ref(sl));
         let ctl = Ctl { key: ck, stream: stream_edge, source: s.trace_ref(src), start: s.trace_ref(start), pull: s.trace_ref(pull), cancel: s.trace_ref(cancel), queue: VecDeque::new(), qbytes: 0, hwm, started: false, pulling: false, pull_again: false, close_requested: false, pull_fns: None };
@@ -617,7 +620,7 @@ fn construct<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>) -> Res<'s, Local<'s>>
         st.streams.insert(strm, Stream { key: sk, st: St::Readable, ctl: ctl_edge, reader: None, disturbed: false });
         st.ctls.insert(c, ctl);
     }
-    let started = if s.type_of(start) == Type::Undefined { Ok(u) } else { invoke(d, s, start, src, &[cl])? };
+    let started = if s.type_of(start) == Type::Undefined { Ok(u) } else { invoke(d, s, start, src, cl)? };
     match started {
         // A controller can escape through start() even when that callback throws. Its stream state stays valid
         // until collection proves it unreachable.

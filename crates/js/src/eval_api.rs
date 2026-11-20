@@ -564,6 +564,27 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
         }
     }
 
+    #[inline]
+    fn get_str<'s>(&mut self, obj: bare_js_api::Local<'_>, key: &str) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
+        let r = match self.heap.key_from_str(key) {
+            Ok(k) => self.get_value(self.api_at(obj), k),
+            Err(e) => Err(self.herr(e)),
+        };
+        match r {
+            Ok(v) => Ok(self.api_push(v)),
+            Err(e) => Err(self.api_err(e)),
+        }
+    }
+
+    #[inline]
+    fn define_str<'s>(&mut self, obj: bare_js_api::Local<'_>, key: &str, value: bare_js_api::Local<'_>, a: bare_js_api::Attrs) -> Result<(), bare_js_api::Error<'s>> {
+        let r = self.api_obj(obj).and_then(|o| match self.heap.key_from_str(key) {
+            Ok(k) => self.define_data(o, k, self.api_at(value), a.writable, a.enumerable, a.configurable),
+            Err(e) => Err(self.herr(e)),
+        });
+        r.map_err(|e| self.api_err(e))
+    }
+
     fn set<'s>(&mut self, obj: bare_js_api::Local<'_>, key: bare_js_api::Local<'_>, value: bare_js_api::Local<'_>) -> Result<(), bare_js_api::Error<'s>> {
         let r = self.api_key(key).and_then(|k| self.put_value(self.api_at(obj), k, self.api_at(value)));
         r.map_err(|e| self.api_err(e))
