@@ -971,3 +971,29 @@ fn a_frozen_global_object_stops_the_stores_of_the_sites() {
     // The `var t` of the script is not possible on a frozen object, so the script cannot report: the throw is the exit.
     assert!(vm.run_main(0).is_err() || vm.global_text("fz") == "3");
 }
+
+/// The global cache with the built-ins of attributes: a global object that is not extensible, sealed or frozen, a data property that
+/// becomes an accessor (and back), `defineProperty` with `writable: false`, and a strict store to each.
+#[test]
+fn a_global_cache_follows_the_attributes_that_the_object_built_ins_give() {
+    let strict = |body: &str| format!("'use strict'; {body}");
+    check(&[
+        ("globalThis.pe = 1; function wp(x) { pe = x; } function nw(x) { newg = x; } wp(1); wp(2); wp(3); Object.preventExtensions(globalThis); wp(7); nw(1); var r = pe + ',' + typeof newg;", "r", "7,undefined"),
+        (&strict("globalThis.pe = 1; function wp(x) { pe = x; } function nw(x) { newg = x; } wp(1); wp(2); wp(3); Object.preventExtensions(globalThis); wp(7); var r = pe; try { nw(1); } catch (e) { r += e.name; }"), "r", "7ReferenceError"),
+        ("globalThis.sl = 1; function ws(x) { sl = x; } function rs() { return sl; } ws(2); ws(3); rs(); rs(); Object.seal(globalThis); ws(4); var r = rs() + ',' + delete globalThis.sl + ',' + rs();", "r", "4,false,4"),
+        // A data property becomes an accessor and the sites that had an entry call the accessor.
+        ("globalThis.ac = 1; var log = ''; function ra() { return ac; } function wa(x) { ac = x; } ra(); ra(); wa(1); wa(1); Object.defineProperty(globalThis, 'ac', { get: function () { log += 'g'; return 42; }, set: function (v) { log += 's' + v; }, configurable: true }); var r = ra() + ',' + (wa(5), log);", "r", "42,gs5"),
+        // ... and back to a data property.
+        ("globalThis.ab = 1; var log = ''; function ra() { return ab; } ra(); ra(); Object.defineProperty(globalThis, 'ab', { get: function () { return 'acc'; }, configurable: true }); var r = ra(); Object.defineProperty(globalThis, 'ab', { value: 'data', writable: true, configurable: true }); r += ra();", "r", "accdata"),
+        (&strict("globalThis.ro = 1; function wr(x) { ro = x; } wr(2); wr(3); Object.defineProperty(globalThis, 'ro', { writable: false }); var r; try { wr(4); r = 'no'; } catch (e) { r = e.name; } r += ro;"), "r", "TypeError3"),
+        // A getter without a setter: a strict store throws, a sloppy store does nothing, a read calls the getter.
+        (&strict("globalThis.go = 1; function wg(x) { go = x; } function rg() { return go; } rg(); rg(); wg(1); wg(1); Object.defineProperty(globalThis, 'go', { get: function () { return 9; }, configurable: true }); var r = rg(); try { wg(3); } catch (e) { r += e.name; }"), "r", "9TypeError"),
+    ]);
+    let host = "globalThis.fz = 1; function wf(x) { fz = x; } function rf() { return fz; } wf(2); wf(3); wf(3); rf(); rf(); Object.freeze(globalThis);";
+    let mut vm = load_with(host, "wf(9);").unwrap();
+    vm.run_main(0).unwrap();
+    assert_eq!(vm.global_text("fz"), "3");
+    let mut vm = load_with(&format!("'use strict'; {host}"), "'use strict'; wf(9);").unwrap();
+    assert!(vm.run_main(0).is_err(), "a strict store to a frozen global throws");
+    assert_eq!(vm.global_text("fz"), "3");
+}
