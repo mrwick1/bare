@@ -177,9 +177,9 @@ enum TimerArg {
 
 impl TimerArg {
     fn new(s: &mut Sc<'_, '_>, l: Local<'_>) -> Self {
-        match s.type_of(l) {
-            Type::Undefined | Type::Null | Type::Boolean | Type::Number | Type::BigInt => TimerArg::Plain(bare_js_api::Engine::raw(s.engine(), l)),
-            _ => TimerArg::Held(s.persist(l)),
+        match bare_js_api::Engine::raw(s.engine(), l) {
+            v @ (Value::Undefined | Value::Null | Value::Bool(_) | Value::Number(_) | Value::BigInt(_)) => TimerArg::Plain(v),
+            v => TimerArg::Held(s.engine().persist_value(v)),
         }
     }
 
@@ -1157,7 +1157,8 @@ fn set_timer<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, repe
     let Some(cb) = a.get(0) else {
         return Err(s.type_error(&format!("Failed to execute '{name}' on 'Window': 1 argument required, but only 0 present.")));
     };
-    if !s.is_callable(cb) {
+    let cbv = bare_js_api::Engine::raw(s.engine(), cb);
+    if !s.engine().is_callable_value(cbv) {
         return Err(unsupp(match (repeat, s.type_of(cb) == Type::String) {
             (false, true) => "setTimeout with a string callback (eval)",
             (true, true) => "setInterval with a string callback (eval)",
@@ -1166,7 +1167,10 @@ fn set_timer<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, repe
         }));
     }
     let n = match a.get(1) {
-        Some(dl) => s.to_number(dl)?,
+        Some(dl) => match bare_js_api::Engine::raw(s.engine(), dl) {
+            Value::Number(n) => n,
+            _ => s.to_number(dl)?,
+        },
         None => f64::NAN,
     };
     let mut delay = to_int32(n).max(0) as u32;
@@ -1191,9 +1195,9 @@ fn set_timer<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, repe
     }
     s.charge(1 + argc as u64)?;
     let args = if argc == 0 { Vec::new() } else { (2..a.len()).map(|i| TimerArg::new(s, a.get(i).expect("in range"))).collect() };
-    let call = TimerCall { cb: s.persist(cb), args };
+    let call = TimerCall { cb: s.engine().persist_value(cbv), args };
     let key = lift(s, d.schedule(now + delay as f64, Task::Timer(id)))?;
-    let cb_obj = obj_id(s, cb);
+    let cb_obj = if let Value::Object(o) = cbv { Some(o) } else { None };
     let mut sc = d.sched.borrow_mut();
     sc.next_timer = id;
     let rearm = cb_obj.is_some_and(|o| sc.running == Some(o));
@@ -1230,11 +1234,12 @@ fn clear_timer<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) ->
 
 fn queue_microtask<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     crate::browser_frame::window_this(d, s, this)?;
-    let cb = arg_s(s, a, 0);
-    if !s.is_callable(cb) {
+    let cb = raw_arg(s, a, 0).unwrap_or(Value::Undefined);
+    if !s.engine().is_callable_value(cb) {
         return Err(s.type_error("Failed to execute 'queueMicrotask' on 'Window': parameter 1 is not of type 'Function'."));
     }
-    s.queue_microtask(cb)?;
+    let r = s.engine().queue_microtask(cb);
+    lift(s, r)?;
     Ok(s.undefined())
 }
 

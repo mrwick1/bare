@@ -656,6 +656,11 @@ pub trait Engine: Sized {
         let k = self.string(key)?;
         self.get(obj, k)
     }
+    /// `ToBoolean(obj[key])` with a key from Rust (a flag of an init dictionary). An engine can skip the local of the value.
+    fn get_named_bool<'s>(&mut self, obj: Local<'_>, key: &str) -> Result<bool, Error<'s>> {
+        let v = self.get_named(obj, key)?;
+        Ok(self.to_boolean(v))
+    }
     /// `define` with a key from Rust. An engine can skip the string value of the key.
     fn define_named<'s>(&mut self, obj: Local<'_>, key: &str, value: Local<'_>, attrs: Attrs) -> Result<(), Error<'s>> {
         let k = self.string(key)?;
@@ -1059,6 +1064,11 @@ impl<'s, E: Engine> Scope<'s, E> {
     /// `obj[key]` with a key from Rust.
     pub fn get_str(&mut self, obj: Local<'_>, key: &str) -> Result<Local<'s>, Error<'s>> {
         self.e.get_named(obj, key)
+    }
+
+    /// `ToBoolean(obj[key])` with a key from Rust.
+    pub fn get_bool_str(&mut self, obj: Local<'_>, key: &str) -> Result<bool, Error<'s>> {
+        self.e.get_named_bool(obj, key)
     }
 
     pub fn set(&mut self, obj: Local<'_>, key: Local<'_>, value: Local<'_>) -> Result<(), Error<'s>> {

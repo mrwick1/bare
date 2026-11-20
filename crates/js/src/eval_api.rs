@@ -598,6 +598,17 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
         }
     }
 
+    fn get_named_bool<'s>(&mut self, obj: bare_js_api::Local<'_>, key: &str) -> Result<bool, bare_js_api::Error<'s>> {
+        let r = match self.heap.key_from_str(key) {
+            Ok(k) => {
+                let o = self.api_at(obj);
+                self.get_value(o, k).and_then(|v| self.to_js_bool(v))
+            }
+            Err(e) => Err(self.herr(e)),
+        };
+        r.map_err(|e| self.api_err(e))
+    }
+
     fn define_named<'s>(&mut self, obj: bare_js_api::Local<'_>, key: &str, value: bare_js_api::Local<'_>, a: bare_js_api::Attrs) -> Result<(), bare_js_api::Error<'s>> {
         let r = self.api_obj(obj).and_then(|o| match self.heap.key_from_str(key) {
             Ok(k) => self.define_data(o, k, self.api_at(value), a.writable, a.enumerable, a.configurable),

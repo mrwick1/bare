@@ -412,8 +412,7 @@ pub(crate) fn init_flag(d: &Dom, it: &mut Interp<'_>, init: Value, name: &str) -
 
 /// `init_flag` on a local.
 pub(crate) fn init_flag_s<'s>(s: &mut Sc<'s, '_>, init: Local<'s>, name: &str) -> Res<'s, bool> {
-    let v = s.get_str(init, name)?;
-    Ok(s.to_boolean(v))
+    s.get_bool_str(init, name)
 }
 
 fn make_event<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>, custom: bool) -> Res<'s, Local<'s>> {
