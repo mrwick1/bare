@@ -14529,6 +14529,39 @@ QuickJS loop without concat: 23,339,978 to 23,340,267 (N = 100,000). N = 1,000 g
 Findings, not changed: (1) `Heap` rounds a cell above 8,192 bytes to a 64 KiB mapping (S1.3), so a flat string of 8 to 64 KiB wastes up to 56 KiB and costs a system call. The flatten of a long rope hits this. (2) `ROPE_MIN` = 32 is not tuned. (3) `Chars::hash` is one multiply for each unit: no measurement of its spread beyond the table tests. (4) The Miri run of the crate takes 143 s of test time (not split by test).
 
 Not tested: a collection inside a task (S1.5 and S1.6 do not exist); the shared table under a real second heap that collects; the cost matrix (js2 is not wired into the browser); arm64; substrings, `Value` of strings in objects (S1.8 and S1.9).
+
+## 2026-11-20: subsystem profile tool (plan step M2)
+
+Changes:
+- `tools/bench/subsystem_profile.sh`: `run` makes N cold `perf record` runs (4 kHz `cpu-clock`, `--call-graph fp`) of a journey on one `bare-drive`, then prints the tables. `report` prints the tables of existing `perf script` files. A run that does not pass stops the script. `--secrets FILE` goes to `bare-drive` as it is; the script reads no vault. `--replay DIR` sets `BARE_NET_REPLAY` and `BARE_SEED=1`, so a journey that `journeys.sh record` made runs on fixed network input. STEPS is a file or a name in `tools/drive/public`.
+- `tools/bench/classify.py` (the 2026-11-18 rules, moved from the scratch dir): a table of the plan's seven subsystems, the 2026-11-18 SELF, JS split and INCLUSIVE tables, a column for each run, then mean and range. The collector row counts any sample with `Interp::collect` or `Heap::collect` on its stack (design 3.1). Its JS and Parsing rows exclude those samples. Parsing is HTML parse plus JS lex, parse and compile; Style includes CSS parse.
+- `tools/bench/jscat.py`: the JS engine by kind of work, as a share of all samples, with the same collector row. The old "GC (mark, sweep)" kind is gone, because the stack rule replaces it.
+- `journeys.py` and `journeys.sh` are not changed. `perf record --call-graph fp` fails for a user on archMachine (`perf_event_paranoid=2`), so the script runs perf with `sudo -n`; `--no-sudo` is for a machine that allows it.
+- The profiling build: `CARGO_PROFILE_RELEASE_STRIP=false CARGO_PROFILE_RELEASE_DEBUG=1 RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release -p bare-drive`, with its own `CARGO_TARGET_DIR`.
+
+Check 1: the classifier on the 2026-11-18 data. The three `perf script` files of that run were still on disk. The new `classify.py` gives the same SELF, JS split and INCLUSIVE numbers as the published table, to 0.1 point in every row (for example JS engine self 77.95 to 78.70%, style 8.68 to 8.98%, HTML parse 1.78 to 2.01%, JS parse and compile 7.00 to 7.59%). The collector row on those files: 6.27 to 7.36% (any frame), against 5.97 to 6.99% for the old "garbage collect" row.
+
+Check 2: new runs of the staging journey (create and delete a client and an agent, live staging, default mode `tree`, 3 runs each, all passed, no test client left, archMachine, other builds ran at the same time). SELF table, percent of samples, range of 3 runs:
+
+| Row | 2026-11-18 (published) | `25126702` now | `09ddff85` (main) |
+|---|---:|---:|---:|
+| JS engine | 78.0 to 78.7 | 77.24 to 78.74 | 76.57 to 79.67 |
+| Style | 8.7 to 9.0 | 8.10 to 8.29 | 8.15 to 8.84 |
+| Network, TLS, HTTP | 3.1 to 3.3 | 3.10 to 3.70 | 2.97 to 3.87 |
+| DOM and Web APIs | 3.2 to 3.3 | 2.84 to 3.58 | 2.25 to 2.87 |
+| Layout and text | 2.6 to 2.9 | 2.46 to 2.71 | 2.36 to 3.35 |
+| HTML parse | 1.8 to 2.0 | 3.34 to 3.80 | 3.69 to 4.10 |
+| Driver | 1.4 to 1.6 | 0.80 to 1.18 | 0.71 to 1.37 |
+| JS: run the code | 63.9 to 65.1 | 65.35 to 67.18 | 65.42 to 68.53 |
+| JS: parse and compile | 7.0 to 7.6 | 5.11 to 6.11 | 5.14 to 5.31 |
+
+The new runs match the 2026-11-18 split for the JS engine, network, DOM, layout and (at `25126702`) style. They do not match for HTML parse (+1.6 points), the driver (-0.5), JS parse and compile (-1.7) and JS run (+1.5), also with the same commit `25126702`. So the difference is not a change in the code. The tool is not the cause either (check 1). Hypothesis: staging serves other pages than on 2026-11-18, or the toolchain changed the inlining of the builds. I did not check either.
+
+The plan's seven rows, `09ddff85`, mean of 3 runs: JS engine without parse and collector 67.08% (65.48 to 68.57), parsing 9.09% (8.83 to 9.25), style 8.52% (8.15 to 8.84), collector 5.87% (5.42 to 6.11), network 3.31% (2.97 to 3.86), layout 2.72% (2.36 to 3.35), paint 0.02%. DOM 2.31%, driver 0.95%. Headless runs do not paint. Reports: `/data/bare-tmp/s0/m2-reports/` (not in the repository).
+
+Check 3: a replayable journey. `journeys.sh record` of `hn-front` into a scratch corpus, then `subsystem_profile.sh run --replay CORPUS/hn-front ... hn-front`: 3 runs passed, about 150 samples each. The script warns about the small sample count. This only shows that the replay path works; the shares of so short a run are not data.
+
+Not tested: Windows (the tool is Linux `perf`), a windowed run (paint), `--no-sudo`, a profile of the `auto` mode, wall time on an idle machine. Only the staging journey was profiled in full.
 ## 2026-11-20: layout census of the old engine (plan step M3)
 
 COMPLETE for Linux. The PR is not merged and has no auto-merge. Base: origin/main `1aa1bc6a`.
