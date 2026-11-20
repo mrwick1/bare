@@ -16397,6 +16397,63 @@ Scale 1 is 2.3 M lower on each row except `objects`. No net slope changed except
 ### Not tested
 
 Windows and macOS; Miri (no `unsafe` was added); wall time; a first call of a lazy function from a getter, setter, constructor with fields or a native's `Outcome::Enter` (the prelude has no such function; the next PR makes user functions lazy and tests it); the browser (js2 is not wired in).
+
+## 2026-11-20: lazy compile for the functions of user scripts (js2, decision 2 of `docs/design-js2-prelude.md`)
+
+Branch `t3/js2-lazy-user-scripts`, on top of `t3/js2-prelude-facts` (#772) and `origin/main` at `ba621081` (#766). Section 10 of the design document has the design and the behaviour change.
+
+### What changed
+
+- `script.rs`: `Lazy` has one `Unit` (text and `Facts`) for each text with stubs, and a sorted list of `Wait` entries. `load_with` makes the functions of the user script stubs. The host script and `script::compile` still compile every function. A function waits when no function in it (at any depth) uses `super`.
+- Two stub forms. A function with plain parameters that does not read `arguments` gets a stub with its parameter registers: the call makes no array. Any other function gets the stub with `CF_ARGS` of #770. `Op::Lazy` has one operand now (`a` = 1 for the array form); `code_flags` reads it.
+- `bare-js-diff` (`lib.rs`): a thrown `Error: not supported yet` from the new engine is `Out::Unsupported`, as the load error was.
+- Behaviour change, in `script.rs` docs, the design document and the tests: a construct that the compiler does not build (`with`, a generator or `async` function, direct `eval`) in the code of a function fails at the first call of that function, with an `Error` that a `try` can catch, not at load. Early errors still fail at load. The error is a plain `Error`, not a `SyntaxError` as #770 had it: with a `SyntaxError`, 60 test262 tests that expect one from a direct `eval` in a function passed by accident (`assert.throws(SyntaxError, ...)`); they fail as before now.
+
+### Cost
+
+Machine archMachine (AMD Ryzen 9 5900HX), release build, load average 20 to 25 from other jobs, so only instruction counts are used. Base: the head of #772 merged with `origin/main` (`m.b2`), new: this branch (`m.l5`), both built in the same session. Tool: `tools/js/instr.sh` (minimum of 3 runs) and a launcher with `wait4` (3 runs, peak RSS in KiB). Main moved during the work (#766), so these rows are 3 to 5 times smaller than the rows of the entries above.
+
+Setup (`var x = 1;`): 1.676 M on the base. The new build is the same within 0.01 M: the stubs of the user script cost nothing when it has no function.
+
+`eval_load` rows, user instructions in millions, `script_run --eval` of the sources of `eval_load CASE SCALE --source`. Net slope is the count at scale 10 minus the count at scale 1:
+
+| Row | Scale 1 base | Scale 1 new | Net slope base | Net slope new | RSS 1 base / new | RSS 10 base / new |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loop` | 144.55 | 144.55 | 1285.2 | 1285.2 | 5092 / 5252 | 5100 / 5156 |
+| `calls` | 110.29 | 110.30 | 976.5 | 976.5 | 5012 / 5172 | 5016 / 5240 |
+| `fib` | 5.95 | 5.96 | 42.36 | 42.36 | 5124 / 5192 | 5100 / 5236 |
+| `closures` | 19.44 | 19.43 | 157.6 | 157.6 | 5768 / 5900 | 10736 / 10868 |
+| `objects` | 88.76 | 88.70 | 764.3 | 764.7 | 7444 / 7464 | 21352 / 21488 |
+| `webpack` (bundle-like, calls all 502 functions at scale 10) | 7.30 | 7.36 | 42.35 | 42.75 (+0.9%) | 5492 / 5484 | 6144 / 6508 |
+| `throws` | 36.51 | 36.52 | 312.8 | 312.8 | 5752 / 5880 | 12364 / 12332 |
+| `concat` | 1.83 | 1.84 | 0.68 | 0.68 | 5068 / 5208 | 5232 / 5384 |
+
+The `webpack` row is the one that calls every function once, and its net slope grows by 0.46 M for 502 functions: about 0.9 K for each called function. Its peak RSS at scale 10 grows by 0.36 MiB. The other rows have a few functions and do not move; the RSS of a row is within the noise of the launcher (the same binary differs by 100 to 150 KiB from one session to the next), except `webpack`.
+
+Where the 0.9 K goes (callgrind, 500 small functions that are all called, 28.6 M to 29.1 M): `Lazy::compile` itself 0.4 K, `Loader::fill` 0.17 K, a second decode of the words for the flags 0.12 K, the frame and the handler in `Vm::run` 0.12 K, the second `Feedback::init` 0.07 K. The first version of the stub encoded its word with the general encoder (0.5 K for each stub) and made an array of arguments for each call (about 0.5 K); the two are gone. A `HashMap` for the pending list cost 0.4 K for each function; it is a sorted list now.
+
+Programs with many functions, at 500 functions each (a sum of calls where noted; RSS from the launcher, median of 5):
+
+| Program | Instructions base | new | Peak RSS base | new |
+| --- | ---: | ---: | ---: | ---: |
+| 500 small functions, none called | 20.04 M | 10.53 M | 5.62 MiB | 6.00 MiB |
+| 500 small functions, all called | 27.77 M | 28.29 M (+1.9%) | 6.14 MiB | 6.18 MiB |
+| 500 functions of 330 bytes, none called | 141.11 M | 38.81 M (-72%) | 6.58 MiB | 6.04 MiB |
+| 500 functions of 330 bytes, all called | 153.74 M | 154.98 M (+0.8%) | 6.86 MiB | 7.33 MiB |
+
+The copy of the text and the facts stay for the life of the `Vm`: DHAT peak live bytes for the 500 small functions (not called) are 644 KB on the base and 718 KB with lazy compile (the stubs, the `Wait` list of 40 KB, 26 KB of facts, and the text). Small functions are so small that a stub and its facts are about the size of their code; for functions of 330 bytes the compile dominates, and lazy compile wins. A program that calls every function pays about 1% instructions and 0.3 to 0.5 MiB; a program that calls a part of its functions gains on both. The data that would remove the copy of the text is shared source (decision 3 of section 8 of the design: later, with S2.8).
+
+First-call cost: one small function, 1 K over the old eager load, as above. The prelude functions cost as before (355 K for the five of `forEach`).
+
+### Tests
+
+- `cargo test --locked -p bare-js2 --lib`: 397 pass (8 new in `script_tests.rs`): `the_functions_of_a_user_script_are_compiled_at_their_first_call`, `a_function_that_is_never_called_is_never_compiled`, `an_unbuilt_construct_in_a_function_fails_at_its_first_call_not_at_load`, `early_errors_in_a_function_that_is_never_called_still_fail_the_load`, `a_first_call_from_a_getter_a_setter_a_constructor_and_a_native_works` (getter and setter of an object and of a class, a constructor with fields in a base and a derived class, a `static` block, a first call through `call`, `apply` and `bind` (`Outcome::Enter`), and a callback of a prelude function; each also under constant collection through `check`), `a_function_that_is_called_from_rust_is_compiled_at_that_call` (`Vm::call`), `the_stubs_of_user_functions_keep_a_program_that_is_not_called_small` and `a_stub_that_keeps_the_arguments_in_registers_and_a_stub_with_an_array_agree` (fewer, equal and more arguments, duplicate names, defaults, rest, patterns, `arguments` in an arrow, each under constant collection). `a_scope_with_many_locals_compiles_in_linear_time` failed once under load (load average 25) and passed alone (9.3 s).
+- `cargo test --locked -p bare-js-diff`: pass.
+- test262 (`tools/js/test262_js2.sh`, test262 commit e4fbf577, base run and this build run on the same tree): 0 tests went from pass to fail. 13923 pass on the base, 13924 with lazy compile. The one new pass, `language/statements/function/S13.2.2_A13.js`, is not a real pass: its `eval` is in a function, the first call throws the plain `Error`, and the test catches any error. 'unsupported' failures of the base now read `Expected a SyntaxError but got a Error` (the test needs a real `eval`).
+
+### Not tested
+
+Windows and macOS; Miri (no `unsafe` was added; `Op::Lazy` is in `interp.rs`, which CI runs under Miri, and its second form reads only the stack); wall time; the first call of a function with more than 64 parameters (it takes the array form by rule; no test); a lazy function inside a field initializer of a class and a function with a `super` in a nested method (the loader compiles those at load by rule; the class tests pass, and one test makes a class with `super` inside a lazy function); several realms that share one `Lazy` (decision 3, later); the browser (js2 is not wired in); a bundle with a deep nesting of functions (`super_inside` reads the facts of all functions inside a child: the cost is the depth of the nesting for each function).
 ## 2026-11-20: host handlers on the interface, D1: style, CSSOM and geometry (plan step S0.4 / D1)
 
 Status: the handlers of the files below run through the interface (`Scope`, `Local`, `Args`). Tests pass on Linux and Windows. The full matrix passes under the standing rule: no row is over +0.5% under both allocators. Base: PR #762 (`t3/convert-browser-host-handlers`, head `9f74a623`). The diff is about 2,200 changed lines.
