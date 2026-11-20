@@ -542,9 +542,9 @@ fn two_scripts(a: &str, b: &str, name: &str, gc: bool) -> Result<String, String>
     let shared = Arc::new(SharedAtoms::default());
     let mut prog = compile(b, &shared, Limits::default())?;
     let pre = prog.codes.len();
-    prog.codes = compile_after(prog.codes, PRELUDE, &shared, Limits::default(), None)?.0;
+    prog.codes = compile_after(prog.codes, PRELUDE, &shared, Limits::default(), None, None)?.0;
     let at = prog.codes.len();
-    prog.codes = compile_after(prog.codes, a, &shared, Limits::default(), None)?.0;
+    prog.codes = compile_after(prog.codes, a, &shared, Limits::default(), None, None)?.0;
     let mut vm = Vm::new(prog, shared);
     vm.run_main(pre).expect("the prelude");
     if gc {
