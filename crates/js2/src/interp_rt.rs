@@ -74,6 +74,20 @@ pub struct Cache {
     pub poly: u16,
 }
 
+impl Cache {
+    /// A site of `GetGlobal` or `SetGlobal` holds in `shape` the tag of the global object (`Shapes::watch_tag`, never a shape id) and in
+    /// `loc` and `to` the address of the slot of the global (low and high 32 bits), so a hit is one compare and one load or store.
+    #[inline]
+    pub fn global_slot(&self) -> *mut Value {
+        std::ptr::with_exposed_provenance_mut((self.loc as u64 | (self.to as u64) << 32) as usize)
+    }
+
+    fn global_entry(tag: u32, slot: *mut Value) -> Cache {
+        let a = slot.expose_provenance() as u64;
+        Cache { shape: tag, loc: a as u32, to: (a >> 32) as u32, state: MONO, poly: 0 }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct Poly {
     n: u8,
@@ -314,6 +328,7 @@ impl Realm {
         let array_proto = Obj::new(&mut heap, &shapes, s_object).expect("memory");
         let error_proto = Obj::new(&mut heap, &shapes, s_object).expect("memory");
         let global = Obj::new(&mut heap, &shapes, s_object).expect("memory");
+        shapes.watch(global.cell().as_ptr() as usize);
         let s_array = shapes.root(Layout::Indexed, Some(array_proto.cell()), 0);
         let f = shapes.root(Layout::Object, Some(function_proto.cell()), 4);
         let f = shapes.add(f, k_code, 0).expect("shape");
@@ -342,6 +357,7 @@ impl Realm {
         let epoch = shapes.epoch();
         let probe = Obj::new(&mut heap, &shapes, s_func).expect("memory");
         let (func_shape, loc_code, loc_ctx) = (s_func.raw(), probe.loc(&shapes, 0), probe.loc(&shapes, 1));
+        assert!(loc_code >> 9 == 0 && loc_ctx >> 9 == 0, "the code and the context of a function are inline slots");
         let mut rt = Realm {
             heap,
             shapes,
@@ -1012,13 +1028,36 @@ impl Realm {
         self.get_prop_g(recv, Key::Name(name))
     }
 
-    /// `GetGlobal`: the property of the global object, or a `ReferenceError` when it is not there.
+    /// Make the entry of the global site `site` for the own data property in slot `slot` of the global object. The first run only marks
+    /// the site (as for a property site), the second makes the entry.
+    fn fill_global(&mut self, fb: &mut Feedback, site: usize, slot: u32) {
+        let c = &mut fb.caches[site];
+        if c.state == FRESH {
+            c.state = SEEN;
+        } else {
+            *c = Cache::global_entry(self.shapes.watch_tag(), self.global.slot_addr(&self.shapes, slot));
+        }
+    }
+
+    /// `GetGlobal`: the property of the global object, or a `ReferenceError` when it is not there. A global lexical binding comes first and
+    /// has no entry (`declare_lex` changes the tag, so an entry for a property that a binding now hides does not match). An own data
+    /// property of a tree shape gets a cache entry (the address of its slot, valid while the tag of the global object stays); an accessor
+    /// and the rest are looked up each time.
     pub fn get_global_slow(&mut self, fb: &mut Feedback, site: usize, name: Str) -> R<Got> {
         if let Some(v) = self.lex_get(name) {
             return Ok(Got::Val(v?));
         }
-        let g = self.global.value();
-        let got = self.get_field_slow(fb, site, name, g)?;
+        let o = self.global;
+        let id = o.shape(&self.shapes);
+        if self.shapes.cacheable(id)
+            && let Some(e) = self.shapes.find(id, name)
+            && e.attrs() & A_ACC == 0
+        {
+            self.fill_global(fb, site, e.slot());
+            return Ok(Got::Val(o.slot(&self.shapes, e.slot())));
+        }
+        let g = o.value();
+        let got = self.get_prop_g(g, Key::Name(name))?;
         if let Got::Val(v) = got
             && v.is_undefined()
             && !self.has_prop(g, Key::Name(name))?
@@ -1027,6 +1066,31 @@ impl Realm {
             return Err(self.error(ErrKind::Reference, &format!("{n} is not defined")));
         }
         Ok(got)
+    }
+
+    /// `SetGlobal` (`strict` false) and `SetGlobalS`: a global lexical binding first; then a writable own data property of a tree shape
+    /// gets a cache entry as in `get_global_slow`. In strict code a name that is not there is a `ReferenceError`. An add, a setter and
+    /// the rest are `set_prop_g`.
+    pub fn set_global_slow(&mut self, fb: &mut Feedback, site: usize, name: Str, v: Value, strict: bool) -> R<Put> {
+        if let Some(res) = self.lex_put(name, v) {
+            res?;
+            return Ok(Put::Done);
+        }
+        let o = self.global;
+        let id = o.shape(&self.shapes);
+        if self.shapes.cacheable(id)
+            && let Some(e) = self.shapes.find(id, name)
+            && e.attrs() & (A_ACC | A_W) == A_W
+        {
+            o.set_slot(&self.shapes, e.slot(), v);
+            self.fill_global(fb, site, e.slot());
+            return Ok(Put::Done);
+        }
+        if strict && !self.has_prop(o.value(), Key::Name(name))? {
+            let t = self.text(name);
+            return Err(self.error(ErrKind::Reference, &format!("{t} is not defined")));
+        }
+        self.set_prop_g(o.value(), Key::Name(name), v)
     }
 
     /// `recv.name = v` at a site.
@@ -1075,7 +1139,8 @@ impl Realm {
                 }
                 let slot = self.add_named(o, name, v)?;
                 let new = o.shape(&self.shapes);
-                if layout_ok && self.shapes.cacheable(new) {
+                // The global object gets no add entry: a hit would change its shape with no change of its tag (`Shapes::watch_tag`).
+                if layout_ok && self.shapes.cacheable(new) && o != self.global {
                     let loc = o.loc(&self.shapes, slot);
                     // Only an inline slot: the hit then needs no allocation.
                     if loc >> 9 == 0 {
@@ -1268,7 +1333,7 @@ impl Realm {
             && shape == self.func_shape
         {
             // SAFETY: an object of the shape `s_func` has its two slots at these places (found in `new`).
-            let (code, ctx) = unsafe { (o.read_loc(self.loc_code), o.read_loc(self.loc_ctx)) };
+            let (code, ctx) = unsafe { (o.read_inline(self.loc_code), o.read_inline(self.loc_ctx)) };
             return Some((code.as_int()? as usize, ctx));
         }
         let f = Realm::obj(v).filter(|o| o.is_callable() && !o.has_flag(F_CLASS | F_NATIVE))?;

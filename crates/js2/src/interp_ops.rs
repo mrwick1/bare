@@ -102,6 +102,8 @@ impl Realm {
     pub fn declare_lex(&mut self, name: Str, ctx: Value, slot: u32, konst: bool) -> R<()> {
         self.check_lex(name)?;
         self.lex.insert(name.value().bits(), (name, ctx, slot, konst));
+        // A binding hides a property of the global object of that name: the cache of the global sites must not give the property.
+        self.shapes.changed(self.global.cell().as_ptr() as usize);
         Ok(())
     }
 
