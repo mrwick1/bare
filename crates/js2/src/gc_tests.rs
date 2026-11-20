@@ -913,3 +913,42 @@ fn random_minor_and_full_collections_keep_every_reachable_node() {
         gen_stress(0x9E37_79B9 + seed * 7919, steps);
     }
 }
+
+#[test]
+fn a_store_into_a_long_old_record_remembers_its_card_only() {
+    let mut r = Realm::new();
+    for n in [5_000usize, if MIRI { 20_000 } else { 300_000 }] {
+        // A collection frees a shape that no object uses, so each round makes its own.
+        let arr_shape = r.shapes.root(Layout::Indexed, None, 0);
+        let vals = vec![Value::int(1); n];
+        let arr = Obj::array(&mut r.heap, &r.shapes, arr_shape, &vals).unwrap();
+        r.collect(&[arr.value()]);
+        // Stores of young objects at the start, the middle, the last index and one beyond the capacity of the record.
+        let at = [0usize, 17, n / 2 + 3, n - 1];
+        let young: Vec<NonNull<u8>> = at.iter().map(|&i| {
+            let y = r.obj(1);
+            set(y, 0, Value::int(i as i32));
+            arr.set_element(&mut r.heap, i as u32, ov(y)).unwrap();
+            y
+        }).collect();
+        let garbage = r.obj(1);
+        let s = r.minor(&[arr.value()]);
+        assert_eq!(s.marked, young.len() as u64, "only the stored objects are marked, and the old elements are not rescanned");
+        let fresh = r.scribble(5000);
+        assert!(fresh.contains(&garbage));
+        for (&i, &y) in at.iter().zip(&young) {
+            assert!(!fresh.contains(&y), "young object stored at {i} was freed");
+            assert_eq!(get(y, 0), Value::int(i as i32));
+            assert_eq!(arr.get_element(i as u32), Some(ov(y)));
+        }
+        // A second round on the same (now old) objects: stores into other cards are remembered again.
+        let y2 = r.obj(1);
+        set(y2, 0, Value::int(99));
+        arr.set_element(&mut r.heap, (n / 4) as u32, ov(y2)).unwrap();
+        r.minor(&[arr.value()]);
+        let fresh = r.scribble(5000);
+        assert!(!fresh.contains(&y2));
+        assert_eq!(get(y2, 0), Value::int(99));
+        r.collect(&[]);
+    }
+}

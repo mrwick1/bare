@@ -301,15 +301,16 @@ impl Heap {
             // SAFETY: `b` is a large object of this heap.
             unsafe {
                 (*b.as_ptr()).marks[0] = 0;
-                (*b.as_ptr()).dirty[0] = 0;
+                (*b.as_ptr()).dirty = [0; MARK_WORDS];
             }
         }
     }
 
-    /// The remembered cells (old cells that the write barrier saw a pointer store into), and forget them. A minor collection traces them
-    /// as roots. Their `F_REM` flag is cleared here.
-    pub fn take_remembered(&mut self) -> Vec<NonNull<u8>> {
-        let mut out = Vec::new();
+    /// The remembered set, and forget it. A minor collection traces it as roots. A small cell is remembered whole (its `F_REM` flag is
+    /// cleared here). A large cell (a long record) has one dirty bit for each card of [`CARD_MIN`] bytes or more: the result lists the
+    /// byte ranges `(cell, from, to)` of its dirty cards, from the start of the cell.
+    pub fn take_remembered(&mut self) -> (Vec<NonNull<u8>>, Vec<(NonNull<u8>, usize, usize)>) {
+        let (mut cells, mut ranges) = (Vec::new(), Vec::new());
         let blocks = self.swept.iter().chain(self.unswept.iter()).flatten().chain(self.large.iter());
         for b in blocks {
             // SAFETY: `b` is a block of this heap.
@@ -319,6 +320,12 @@ impl Heap {
                 while bits != 0 {
                     let i = w * 64 + bits.trailing_zeros() as usize;
                     bits &= bits - 1;
+                    if h.class == LARGE {
+                        let p = NonNull::new(b.as_ptr().cast::<u8>().wrapping_add(FIRST)).expect("not null");
+                        let shift = card_shift(h.len);
+                        ranges.push((p, i << shift, (i + 1) << shift));
+                        continue;
+                    }
                     let p = b.as_ptr().cast::<u8>().wrapping_add(FIRST + i * h.cell as usize);
                     // SAFETY: bit `i` is set for a cell that `remember` named; old cells are not freed by a minor collection.
                     unsafe {
@@ -326,11 +333,11 @@ impl Heap {
                         let hd = hp.read();
                         hp.write(hd.with_flags(hd.flags() & !F_REM));
                     }
-                    out.push(NonNull::new(p).expect("not null"));
+                    cells.push(NonNull::new(p).expect("not null"));
                 }
             }
         }
-        out
+        (cells, ranges)
     }
 
     /// Mark the cell at `p`. True when it was not marked yet.
@@ -446,9 +453,9 @@ pub(crate) const F_REM: u32 = 1 << 23;
 
 /// The write barrier: `holder` (a cell with header `h`) gets the value `v`. An old cell that gets a pointer is remembered once.
 #[inline(always)]
-pub(crate) fn barrier(holder: NonNull<u8>, h: CellHeader, v: Value) {
+pub(crate) fn barrier(holder: NonNull<u8>, h: CellHeader, v: Value, at: *const u8) {
     if h.flags() & (F_OLD | F_REM) == F_OLD && v.is_pointer() {
-        remember(holder);
+        remember(holder, at);
     }
 }
 
@@ -456,22 +463,35 @@ pub(crate) fn barrier(holder: NonNull<u8>, h: CellHeader, v: Value) {
 #[inline(always)]
 pub(crate) fn barrier_any(holder: NonNull<u8>, h: CellHeader) {
     if h.flags() & (F_OLD | F_REM) == F_OLD {
-        remember(holder);
+        remember(holder, holder.as_ptr());
     }
 }
 
-/// Remember an old cell: set its `F_REM` flag and the bit in the dirty map of its block.
+/// The smallest card of a large cell, in bytes (a power of two). A large cell has at most 4,096 cards, so its card is larger when it is.
+pub const CARD_MIN: usize = 512;
+
+fn card_shift(len: usize) -> u32 {
+    (len / (MARK_WORDS * 64)).next_power_of_two().trailing_zeros().max(CARD_MIN.trailing_zeros())
+}
+
+/// Remember an old cell. `at` is the address that the store writes. A small cell gets its `F_REM` flag and a bit in the dirty map of its
+/// block. A large cell (a record) gets the bit of the card of `at`; it has no flag, so each store comes here.
 #[cold]
 #[inline(never)]
-fn remember(p: NonNull<u8>) {
+fn remember(p: NonNull<u8>, at: *const u8) {
     let b = p.as_ptr().map_addr(|a| a & !(BLOCK - 1)).cast::<Header>();
     // SAFETY: `p` is a live cell of a heap: its first block starts with a `Header`, and its first 8 bytes are its header.
     unsafe {
+        if (*b).class == LARGE {
+            let card = (at.addr().saturating_sub(p.as_ptr().addr())) >> card_shift((*b).len);
+            (*b).dirty[card / 64] |= 1 << (card % 64);
+            return;
+        }
         let hp = p.cast::<CellHeader>();
         let hd = hp.read();
         hp.write(hd.with_flags(hd.flags() | F_REM));
         let cell = (*b).cell as usize;
-        let i = if cell == 0 { 0 } else { (p.as_ptr() as usize - b as usize - FIRST) / cell };
+        let i = (p.as_ptr() as usize - b as usize - FIRST) / cell;
         (*b).dirty[i / 64] |= 1 << (i % 64);
     }
 }

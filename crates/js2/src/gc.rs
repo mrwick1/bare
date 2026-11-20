@@ -442,9 +442,19 @@ pub fn collect_minor(heap: &mut Heap, shapes: &mut Shapes, roots: &mut impl Root
             m.cell(p);
         }
     }
-    let rem = m.heap.take_remembered();
+    let (rem, ranges) = m.heap.take_remembered();
     for &p in &rem {
         m.trace(p);
+    }
+    // The dirty cards of long records: scan the values of each card only.
+    for &(p, lo, hi) in &ranges {
+        // SAFETY: as in `cell`.
+        let h = unsafe { p.cast::<CellHeader>().read() };
+        let at = if h.layout() == Layout::Elements { object::ELEMS_AT } else { object::SLOTS_AT };
+        let (lo, hi) = (lo.max(at), hi.min(at + 8 * h.cap() as usize));
+        if lo < hi {
+            m.scan(p.as_ptr().wrapping_add(at).cast(), (lo - at) / 8, (hi - at) / 8);
+        }
     }
     m.drain();
     let mut cleared = 0;
@@ -466,7 +476,7 @@ pub fn collect_minor(heap: &mut Heap, shapes: &mut Shapes, roots: &mut impl Root
     roots.weak(&Live(m.heap));
     let Marker { heap, work, big_peak, marked, waited, released, weak_peak, .. } = m;
     heap.finish_mark();
-    Stats { marked, live_bytes: heap.marked_bytes(), work_bytes: work.peak * CHUNK * std::mem::size_of::<NonNull<u8>>() + big_peak * std::mem::size_of::<(*mut Value, usize, usize)>(), weak_bytes: weak_peak, waited, released, cleared, atoms_dropped: 0, remembered: rem.len() }
+    Stats { marked, live_bytes: heap.marked_bytes(), work_bytes: work.peak * CHUNK * std::mem::size_of::<NonNull<u8>>() + big_peak * std::mem::size_of::<(*mut Value, usize, usize)>(), weak_bytes: weak_peak, waited, released, cleared, atoms_dropped: 0, remembered: rem.len() + ranges.len() }
 }
 
 #[cfg(test)]

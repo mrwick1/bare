@@ -425,7 +425,7 @@ impl Str {
             }
         }
         debug_assert_eq!(pos, 0);
-        crate::heap::barrier(root.0, root.head(), flat.value());
+        crate::heap::barrier(root.0, root.head(), flat.value(), root.0.as_ptr());
         // SAFETY: `root` is a rope cell of 32 bytes. Its header changes layout and keeps its flags; the left word now holds the
         // flat string, the right word 0.
         unsafe {

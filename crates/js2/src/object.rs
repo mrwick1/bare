@@ -152,7 +152,8 @@ impl Rec {
 
     /// Like [`Rec::put`] for a store into a record that may be old: the write barrier runs first.
     fn put_b(self, i: usize, v: Value) {
-        barrier(self.0, self.head(), v);
+        // SAFETY: `i` is below the capacity (checked in `put`); the address is only compared.
+        barrier(self.0, self.head(), v, self.vals().wrapping_add(i).cast());
         self.put(i, v);
     }
 
@@ -346,7 +347,7 @@ impl Obj {
     #[inline]
     pub fn set_slot(self, shapes: &Shapes, i: u32, v: Value) {
         let (p, holder, h) = self.slot_loc(shapes, i);
-        barrier(holder, h, v);
+        barrier(holder, h, v, p.cast());
         // SAFETY: as in `slot`.
         unsafe { p.write(v) }
     }
@@ -364,7 +365,7 @@ impl Obj {
         if h.flags() & F_OVER == 0 {
             // SAFETY: one value is copied, from the last inline word.
             let r = unsafe { make_record(heap, Layout::Slots, 0, need.max(MIN_OVER), Value::UNDEFINED, last, 1)? };
-            barrier(self.0, h, r.value());
+            barrier(self.0, h, r.value(), self.0.as_ptr());
             // SAFETY: `last` is in the cell.
             unsafe { last.write(r.value()) };
             let cur = self.head();
@@ -375,7 +376,7 @@ impl Obj {
                 let ncap = need.max(old.cap() + old.cap() / 2);
                 // SAFETY: `old` has `old.cap()` initialized values.
                 let r = unsafe { make_record(heap, Layout::Slots, 0, ncap, Value::UNDEFINED, old.slots(), old.cap())? };
-                barrier(self.0, h, r.value());
+                barrier(self.0, h, r.value(), self.0.as_ptr());
                 // SAFETY: `last` is in the cell.
                 unsafe { last.write(r.value()) };
             }
@@ -433,7 +434,7 @@ impl Obj {
             // The record's first value is the one that was in the last inline word (`undefined` if that slot is unused now).
             // SAFETY: the record has a first value; the last inline word is in the cell.
             let v = unsafe { Obj::over(inl, cap).slots().read() };
-            barrier(self.0, h, v);
+            barrier(self.0, h, v, self.0.as_ptr());
             // SAFETY: the last inline word is in the cell.
             unsafe { inl.add(cap - 1).write(v) };
             let cur = self.head();
@@ -484,7 +485,7 @@ impl Obj {
     }
 
     fn set_elems(self, r: Rec) {
-        barrier(self.0, self.head(), r.value());
+        barrier(self.0, self.head(), r.value(), self.0.as_ptr());
         // SAFETY: as in `elems`.
         unsafe { self.elems_word().write(r.value()) }
     }
