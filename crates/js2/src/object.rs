@@ -55,6 +55,19 @@ pub const F_CLASS: u32 = 4;
 pub const F_DERIVED: u32 = 8;
 /// Object header flag: the function is a built-in written in Rust (S2.7). Its slot 0 is the index in `Realm::natives`, not a code index.
 pub const F_NATIVE: u32 = 16;
+/// Object header flag: no property may be added (`Object.preventExtensions`). The object has its own dictionary shape, so no cache adds to it.
+pub const F_NOEXT: u32 = 32;
+/// Object header flag: a built-in function has its own `length` and `name` (they are made at the first use, `builtins.rs`).
+pub const F_FNPROPS: u32 = 64;
+/// Object header flag: the elements of the array are not writable (frozen).
+pub const F_ELEMS_RO: u32 = 128;
+/// Object header flag: the elements of the array are not configurable (sealed or frozen).
+pub const F_ELEMS_FIXED: u32 = 256;
+/// Object header flag: the length of the array is not writable.
+pub const F_LEN_RO: u32 = 512;
+/// Object header flag: the array keeps its index properties in its shape, with the names `"0"`, `"1"`, ... (an element has attributes
+/// other than writable, enumerable and configurable, or is an accessor). The elements record is empty.
+pub const F_SLOWIDX: u32 = 1024;
 /// `Elements` header flag: the record is sparse.
 const F_SPARSE: u32 = 1;
 /// A write at an index this far above the capacity of a dense record makes it sparse.
@@ -270,6 +283,39 @@ impl Obj {
     pub fn set_flag(self, f: u32) {
         let h = self.head();
         self.set_head(h.with_flags(h.flags() | f));
+    }
+
+    /// Clear the flag bits `f`.
+    pub fn clear_flag(self, f: u32) {
+        let h = self.head();
+        self.set_head(h.with_flags(h.flags() & !f));
+    }
+
+    /// May a property be added? (`F_NOEXT` is not set.)
+    #[inline]
+    pub fn extensible(self) -> bool {
+        self.head().flags() & F_NOEXT == 0
+    }
+
+    /// `Object.preventExtensions`: set `F_NOEXT` and give the object its own dictionary shape, so that no cache entry of a tree shape can
+    /// add a property to it.
+    pub fn prevent_extensions(self, shapes: &mut Shapes) {
+        let id = shapes.id_of(self.head());
+        let d = shapes.to_dict(id);
+        if d != id {
+            self.set_shape(shapes, d);
+        }
+        self.set_flag(F_NOEXT);
+    }
+
+    /// The indexes that have an element, in ascending order.
+    pub fn indices(self) -> Vec<u32> {
+        let Some(r) = self.elems() else { return Vec::new() };
+        if r.sparse() {
+            (0..r.count()).map(|p| r.key(p)).collect()
+        } else {
+            (0..r.cap()).filter(|&i| !r.get(i).is_hole()).map(|i| i as u32).collect()
+        }
     }
 
     /// The place of slot `slot` for every object that has the shape of `self` (a cache entry, S2.6). Bits 0..9: the byte offset in the

@@ -40,7 +40,7 @@ use crate::cell::Layout;
 use crate::gc::{Marker, collect};
 use crate::heap::Heap;
 use crate::builtins::{Hint, Native};
-use crate::object::{Ctx, F_CLASS, F_NATIVE, Obj};
+use crate::object::{Ctx, F_CLASS, F_ELEMS_FIXED, F_ELEMS_RO, F_LEN_RO, F_NATIVE, F_NOEXT, F_SLOWIDX, Obj};
 use crate::shapes::{A_ACC, A_C, A_E, A_W, ShapeId, Shapes};
 use crate::string::{Chars, Str};
 use crate::value::{Kind, Value};
@@ -233,13 +233,15 @@ pub struct Realm {
     pub number_proto: Obj,
     pub boolean_proto: Obj,
     /// `TypeError.prototype` and the others, by `ErrKind`.
-    pub error_protos: [Obj; 5],
+    pub error_protos: [Obj; 7],
     /// The shape of a built-in function cell: slot 0 is the index in `natives`, slots 1 to 3 are free for the function (a bound function).
     pub s_native: ShapeId,
     /// The built-ins written in Rust (`builtins.rs`).
     pub natives: Vec<Native>,
     /// The index of the native that runs a bound function.
     pub(crate) bound_id: i32,
+    /// The helpers of `prelude.js` that natives call through the tail channel (`bi_object.rs`).
+    pub(crate) helpers: [Value; crate::bi_object::HELPERS],
     /// While a native runs: the function cell that was called, and `new.target` (`undefined` for a plain call).
     pub callee: Value,
     pub nt: Value,
@@ -254,7 +256,7 @@ pub struct Realm {
     /// `typeof` results: undefined, object, boolean, number, string, function, symbol, bigint.
     tnames: [Str; 8],
     /// Every value that the realm keeps and the collector must mark.
-    consts: Vec<Value>,
+    pub(crate) consts: Vec<Value>,
     /// Shapes that no object may have yet.
     pins: Vec<ShapeId>,
     /// The top frame when a collection runs: code index, frame pointer, `pc` of the safepoint.
@@ -298,9 +300,11 @@ impl Realm {
         let (string_proto, number_proto, boolean_proto) = (mk(&mut heap), mk(&mut heap), mk(&mut heap));
         // The prototypes of `TypeError` and the others inherit from `Error.prototype`.
         let eshape = shapes.root(Layout::Object, Some(error_proto.cell()), 4);
-        let mut error_protos = [error_proto; 5];
-        for p in error_protos.iter_mut().take(4) {
-            *p = Obj::new(&mut heap, &shapes, eshape).expect("memory");
+        let mut error_protos = [error_proto; 7];
+        for (i, p) in error_protos.iter_mut().enumerate() {
+            if i != 4 {
+                *p = Obj::new(&mut heap, &shapes, eshape).expect("memory");
+            }
         }
         let s_native = hidden.iter().fold(shapes.root(Layout::Object, Some(function_proto.cell()), 4), |f, k| shapes.add(f, *k, 0).expect("shape"));
         let mut consts: Vec<Value> = [object_proto, function_proto, array_proto, error_proto, global, string_proto, number_proto, boolean_proto].iter().map(|o| o.value()).collect();
@@ -344,6 +348,7 @@ impl Realm {
             s_native,
             natives: Vec::new(),
             bound_id: 0,
+            helpers: [Value::UNDEFINED; crate::bi_object::HELPERS],
             callee: Value::UNDEFINED,
             nt: Value::UNDEFINED,
             tail: None,
@@ -435,6 +440,10 @@ impl Realm {
     /// Is `v` an object that has `Error.prototype` in its chain?
     pub fn is_error(&self, v: Value) -> bool {
         let Some(mut o) = Realm::obj(v) else { return false };
+        // The prototype objects of the errors are ordinary objects.
+        if o == self.error_proto || self.error_protos.contains(&o) {
+            return false;
+        }
         while let Some(p) = self.proto_of(o) {
             if p == self.error_proto {
                 return true;
@@ -761,6 +770,7 @@ impl Realm {
                     if k == self.k_length && self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed {
                         return Ok(Got::Val(Realm::num(o.len() as f64)));
                     }
+                    self.fn_prep(o, k);
                     match self.lookup_g(o, k) {
                         None if k == self.k_prototype && self.needs_prototype(o) => self.make_prototype(o).map(Got::Val),
                         s => Ok(Self::got(s)),
@@ -807,7 +817,8 @@ impl Realm {
         }
     }
 
-    /// `recv[key] = v`. A write to a primitive does nothing. A setter gives [`Put::Set`].
+    /// `recv[key] = v`. A write to a primitive does nothing. A setter gives [`Put::Set`]. A write that the object refuses (not writable,
+    /// not extensible) does nothing, as in sloppy mode; [`Realm::set_checked`] throws instead.
     pub fn set_prop_g(&mut self, recv: Value, key: Key, v: Value) -> R<Put> {
         let Some(o) = Realm::obj(recv) else {
             if recv.is_undefined() || recv.is_null() {
@@ -816,7 +827,14 @@ impl Realm {
             return Ok(Put::Done);
         };
         match key {
-            Key::Idx(i) if self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed => {
+            Key::Idx(i) if self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed && !o.has_flag(F_SLOWIDX) => {
+                if o.has_flag(F_NOEXT | F_ELEMS_RO | F_LEN_RO) {
+                    let exists = o.get_element(i).is_some();
+                    let refuse = if exists { o.has_flag(F_ELEMS_RO) } else { o.has_flag(F_NOEXT) || (i >= o.len() && o.has_flag(F_LEN_RO)) };
+                    if refuse {
+                        return Ok(Put::Done);
+                    }
+                }
                 if o.set_element(&mut self.heap, i, v).is_none() {
                     return Err(self.error(ErrKind::Range, "invalid array length"));
                 }
@@ -824,7 +842,14 @@ impl Realm {
             }
             Key::Idx(i) => {
                 let k = self.idx_atom(i);
-                self.set_named(o, k, v)
+                if self.shapes.find(o.shape(&self.shapes), k).is_none() && o.is_indexed() && o.has_flag(F_LEN_RO) && i >= o.len() {
+                    return Ok(Put::Done);
+                }
+                let r = self.set_named(o, k, v)?;
+                if o.is_indexed() && i >= o.len() && self.shapes.find(o.shape(&self.shapes), k).is_some() {
+                    o.set_len(&mut self.heap, i + 1);
+                }
+                Ok(r)
             }
             Key::Name(k) => {
                 if k == self.k_length && self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed {
@@ -832,7 +857,9 @@ impl Realm {
                     if n < 0.0 || n.fract() != 0.0 || n >= u32::MAX as f64 {
                         return Err(self.error(ErrKind::Range, "invalid array length"));
                     }
-                    o.set_len(&mut self.heap, n as u32);
+                    if !o.has_flag(F_LEN_RO) {
+                        self.truncate(o, n as u32);
+                    }
                     return Ok(Put::Done);
                 }
                 self.set_named(o, k, v)
@@ -853,14 +880,23 @@ impl Realm {
         let mut p = self.proto_of(o)?;
         loop {
             if let Some(e) = self.shapes.find(p.shape(&self.shapes), k) {
-                return (e.attrs() & A_ACC != 0).then(|| Self::setter(p.slot(&self.shapes, e.slot() + 1)));
+                // An accessor: its setter. A data property that is not writable: nothing is written (`Put::Done`).
+                return if e.attrs() & A_ACC != 0 {
+                    Some(Self::setter(p.slot(&self.shapes, e.slot() + 1)))
+                } else if e.attrs() & A_W == 0 {
+                    Some(Put::Done)
+                } else {
+                    None
+                };
             }
             p = self.proto_of(p)?;
         }
     }
 
-    /// Set an own named property: write it if it is there and writable, else call the setter that a prototype gives, else add it.
+    /// Set an own named property: write it if it is there and writable, else call the setter that a prototype gives, else add it (when
+    /// the object is extensible).
     fn set_named(&mut self, o: Obj, k: Str, v: Value) -> R<Put> {
+        self.fn_prep(o, k);
         let id = o.shape(&self.shapes);
         match self.shapes.find(id, k) {
             Some(e) if e.attrs() & A_ACC != 0 => Ok(Self::setter(o.slot(&self.shapes, e.slot() + 1))),
@@ -873,6 +909,9 @@ impl Realm {
             None => {
                 if let Some(p) = self.proto_setter(o, k) {
                     return Ok(p);
+                }
+                if !o.extensible() {
+                    return Ok(Put::Done);
                 }
                 self.add_named(o, k, v).map(|_| Put::Done)
             }
@@ -928,6 +967,7 @@ impl Realm {
     /// `recv.name = v` at a site.
     pub fn set_field_slow(&mut self, fb: &mut Feedback, site: usize, name: Str, recv: Value, v: Value) -> R<Put> {
         let Some(o) = Realm::obj(recv) else { return self.set_prop_g(recv, Key::Name(name), v) };
+        self.fn_prep(o, name);
         let id = o.shape(&self.shapes);
         if fb.caches[site].state == POLY
             && let Some((loc, to)) = fb.poly_find(site, id.raw())
@@ -964,6 +1004,9 @@ impl Realm {
                 if let Some(p) = self.proto_setter(o, name) {
                     return Ok(p);
                 }
+                if !o.extensible() {
+                    return Ok(Put::Done);
+                }
                 let slot = self.add_named(o, name, v)?;
                 let new = o.shape(&self.shapes);
                 if layout_ok && self.shapes.cacheable(new) {
@@ -982,6 +1025,10 @@ impl Realm {
 
     /// Define the own data property `key` of `o` (an object literal or a computed key): add it, or overwrite it.
     pub fn define(&mut self, o: Obj, key: Key, v: Value) -> R<()> {
+        if o.has_flag(F_NOEXT | F_SLOWIDX | F_ELEMS_RO | F_ELEMS_FIXED | F_LEN_RO) {
+            let d = crate::bi_object::Desc { value: Some(v), w: Some(true), e: Some(true), c: Some(true), ..Default::default() };
+            return if self.define_own(o, key, &d)? { Ok(()) } else { self.type_error("cannot define the property") };
+        }
         match key {
             Key::Idx(i) if self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed => {
                 if o.set_element(&mut self.heap, i, v).is_none() {
@@ -1019,6 +1066,7 @@ impl Realm {
                     self.shapes.find(o.shape(&self.shapes), k).is_some()
                 },
                 Key::Name(k) => {
+                    self.fn_prep(o, k);
                     self.shapes.find(o.shape(&self.shapes), k).is_some() || (k == self.k_length && self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed)
                 }
             };
@@ -1035,25 +1083,35 @@ impl Realm {
     pub fn delete_prop(&mut self, recv: Value, key: Key) -> R<bool> {
         let Some(o) = Realm::obj(recv) else { return Ok(true) };
         match key {
-            Key::Idx(i) if self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed => {
+            Key::Idx(i) if self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed && !o.has_flag(F_SLOWIDX) => {
+                if o.has_flag(F_ELEMS_FIXED) && o.get_element(i).is_some() {
+                    return Ok(false);
+                }
                 o.delete_element(i);
                 Ok(true)
             }
             Key::Idx(i) => {
                 let k = self.idx_atom(i);
-                o.remove(&mut self.shapes, k);
-                Ok(true)
+                self.delete_named(o, k)
             }
             Key::Name(k) => {
-                if let Some(e) = self.shapes.find(o.shape(&self.shapes), k)
-                    && e.attrs() & A_C == 0
-                {
+                if k == self.k_length && self.is_array(o) {
                     return Ok(false);
                 }
-                o.remove(&mut self.shapes, k);
-                Ok(true)
+                self.fn_prep(o, k);
+                self.delete_named(o, k)
             }
         }
+    }
+
+    fn delete_named(&mut self, o: Obj, k: Str) -> R<bool> {
+        if let Some(e) = self.shapes.find(o.shape(&self.shapes), k)
+            && e.attrs() & A_C == 0
+        {
+            return Ok(false);
+        }
+        o.remove(&mut self.shapes, k);
+        Ok(true)
     }
 
     /// `x instanceof f`: the prototype chain of `x` holds the `prototype` property of `f`.
@@ -1070,25 +1128,17 @@ impl Realm {
         Ok(false)
     }
 
-    /// The own enumerable string keys of an object, as an array of strings (the keys of `for-in`).
+    /// The own enumerable string keys of an object, as an array of strings (the keys of `for-in` and `Object.keys`), in the order of the
+    /// specification: array indexes ascending, then the names as they were added.
     pub fn own_keys(&mut self, recv: Value) -> R<Value> {
-        let mut keys: Vec<Value> = Vec::new();
-        if let Some(o) = Realm::obj(recv) {
-            if self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed {
-                for i in 0..o.len() {
-                    if o.get_element(i).is_some() {
-                        keys.push(self.string(&i.to_string()));
-                    }
-                }
-            }
-            keys.extend(self.shapes.entries(o.shape(&self.shapes)).filter(|e| e.attrs() & A_E != 0).map(|e| e.key().value()));
-        } else if recv.is_undefined() || recv.is_null() {
-            // `for (k in undefined)` has no keys.
+        let keys: Vec<Value> = if let Some(o) = Realm::obj(recv) {
+            self.own_key_list(o, true)
         } else if let Some(s) = Realm::str_of(recv) {
-            for i in 0..s.len() {
-                keys.push(self.string(&i.to_string()));
-            }
-        }
+            (0..s.len()).map(|i| self.string(&i.to_string())).collect()
+        } else {
+            // `for (k in undefined)` has no keys.
+            Vec::new()
+        };
         Ok(Obj::array(&mut self.heap, &self.shapes, self.s_array, &keys).expect("memory").value())
     }
 

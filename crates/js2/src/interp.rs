@@ -579,6 +579,20 @@ impl Vm {
                 continue;
             }};
         }
+        // Call the helper `$h` of the prelude with the arguments in `realm.tail_args`; the result goes to register `$dst`.
+        macro_rules! enter_helper {
+            ($h:expr, $dst:expr, $next:expr) => {{
+                let f = realm.helpers[$h];
+                let Some((ni, cctx)) = realm.function(f) else { call_err!(f) };
+                let len = realm.tail_args.len();
+                let nf = fp + code.nregs as usize + REC;
+                ensure!(nf + len + 8);
+                stack[nf..nf + len].copy_from_slice(&realm.tail_args);
+                enter!(f, ni, cctx, undef, undef, $dst as i32, pc, $next, nf, len);
+                pc = 0;
+                continue;
+            }};
+        }
         // Call with a frame record. `$argbase`: the first argument register. `$this`: the value of `this`.
         macro_rules! call {
             ($a:expr, $b:expr, $argbase:expr, $argc:expr, $this:expr, $next:expr) => {{
@@ -1217,7 +1231,8 @@ impl Vm {
                         gate!();
                         let n = name!(bx!());
                         let g = realm.global;
-                        if !tri!(realm.has_prop(g.value(), Key::Name(n))) {
+                        // An own property of the global object: an inherited one (`__proto__`) does not count.
+                        if realm.get_own(g, Key::Name(n)).is_none() {
                             tri!(realm.define(g, Key::Name(n), undef));
                         }
                         pc = next;
@@ -1309,14 +1324,23 @@ impl Vm {
                     Op::CopyProps => {
                         gate!();
                         let o = Realm::obj(r!(a!())).expect("an object literal");
-                        tri!(realm.copy_props(o, r!(b!())));
-                        pc = next;
+                        if tri!(realm.copy_props(o, r!(b!()))) {
+                            pc = next;
+                        } else {
+                            // An accessor: the helper copies; it returns the object, which goes back to the register of the object.
+                            enter_helper!(crate::bi_object::H_SPREAD, a!(), next);
+                        }
                     }
                     Op::ObjRest => {
                         gate!();
                         let keys: Vec<Value> = (0..$x as usize).map(|i| r!(c!() + i)).collect();
-                        r!(a!()) = tri!(realm.obj_rest(r!(b!()), &keys));
-                        pc = nextx;
+                        match tri!(realm.obj_rest(r!(b!()), &keys)) {
+                            Some(v) => {
+                                r!(a!()) = v;
+                                pc = nextx;
+                            }
+                            None => enter_helper!(crate::bi_object::H_REST, a!(), nextx),
+                        }
                     }
                     Op::SetProto => {
                         gate!();

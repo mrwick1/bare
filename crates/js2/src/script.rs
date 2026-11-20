@@ -113,9 +113,11 @@ pub fn load_with(host: &str, source: &str) -> Result<Vm, String> {
     if let Err(e) = vm.run_main(pre) {
         panic!("the prelude failed: {e:?}");
     }
-    let k = vm.realm.intern("__def");
     let g = vm.realm.global.value();
-    let _ = vm.realm.delete_prop(g, crate::interp_rt::Key::Name(k));
+    for name in ["__def", "__helper", "__set"] {
+        let k = vm.realm.intern(name);
+        let _ = vm.realm.delete_prop(g, crate::interp_rt::Key::Name(k));
+    }
     if !host.is_empty()
         && let Err(e) = vm.run_main(at)
     {

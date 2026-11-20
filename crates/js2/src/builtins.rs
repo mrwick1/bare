@@ -25,9 +25,10 @@
 //! the caller, which the root map of the call names. So a native may keep any cell in a Rust local, and may allocate. A native that
 //! allocates more than the slack of the heap limit (8 MiB) only makes the next gate collect.
 use crate::cell::Layout;
+use crate::bi_object::Own;
 use crate::interp_rt::{ErrKind, Key, R, Realm, Slot};
-use crate::object::{F_CALLABLE, F_CLASS, F_NATIVE, Obj};
-use crate::shapes::{A_ACC, A_C, A_E, A_W};
+use crate::object::{F_CALLABLE, F_CLASS, F_FNPROPS, F_NATIVE, Obj};
+use crate::shapes::{A_C, A_W};
 use crate::string::Str;
 use crate::value::Value;
 
@@ -40,6 +41,9 @@ pub struct Native {
     pub f: NativeFn,
     /// May a script `new` it?
     pub ctor: bool,
+    /// The `length` and the `name` of the function, made into own properties at the first use ([`Realm::fn_prep`]).
+    pub len: u8,
+    pub name: &'static str,
 }
 
 /// What the interpreter does after a native returned.
@@ -82,16 +86,62 @@ impl Realm {
         o
     }
 
-    pub(crate) fn new_native(&mut self, f: NativeFn, ctor: bool) -> Obj {
-        self.natives.push(Native { f, ctor });
+    pub(crate) fn new_native(&mut self, f: NativeFn, ctor: bool, len: u8, name: &'static str) -> Obj {
+        self.natives.push(Native { f, ctor, len, name });
         self.native_cell(self.natives.len() - 1)
     }
 
-    /// Define the method `name` of `o`.
-    pub(crate) fn method(&mut self, o: Obj, name: &str, f: NativeFn) {
+    /// Define the method `name` of `o` with the function `length` `len`.
+    pub(crate) fn method(&mut self, o: Obj, name: &'static str, len: u8, f: NativeFn) {
         let k = self.intern(name);
-        let c = self.new_native(f, false);
+        let c = self.new_native(f, false, len, name);
         self.define_attrs(o, Key::Name(k), HIDDEN, c.value()).expect("define");
+    }
+
+    /// Keep `v` alive for the life of the realm (a root).
+    pub(crate) fn keep(&mut self, v: Value) {
+        self.consts.push(v);
+    }
+
+    /// Give a built-in function its own `length` and `name` before a script reads, changes or lists them. A function has them from its
+    /// first use only, so installing a built-in costs no property. Call it with the key that is being used: nothing happens for another
+    /// key, so `f.call` does not make them.
+    #[inline]
+    pub(crate) fn fn_prep(&mut self, o: Obj, k: Str) {
+        if o.has_flag(F_NATIVE) && !o.has_flag(F_FNPROPS) && (k == self.k_length || k == self.k_name) {
+            self.materialize(o);
+        }
+    }
+
+    /// As [`Realm::fn_prep`] for an operation on all properties.
+    pub(crate) fn fn_prep_all(&mut self, o: Obj) {
+        if o.has_flag(F_NATIVE) && !o.has_flag(F_FNPROPS) {
+            self.materialize(o);
+        }
+    }
+
+    #[inline(never)]
+    fn materialize(&mut self, o: Obj) {
+        o.set_flag(F_FNPROPS);
+        let Some(id) = self.native_id(o.value()) else { return };
+        let (len, name) = if id == self.bound_id as usize {
+            // A bound function: the length of the target less the bound arguments, and "bound " and the name of the target.
+            let target = o.slot(&self.shapes, 1);
+            let nb = Realm::obj(o.slot(&self.shapes, 3)).map_or(0, |a| a.len()) as f64;
+            let tl = self.get_named(target, "length").ok().and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let tn = self.get_named(target, "name").ok().and_then(Realm::str_of).map(|s| self.text(s)).unwrap_or_default();
+            ((tl - nb).max(0.0), format!("bound {tn}"))
+        } else {
+            (self.natives[id].len as f64, self.natives[id].name.to_string())
+        };
+        let nv = self.string(&name);
+        let (kl, kn) = (self.k_length, self.k_name);
+        let attrs = A_C;
+        for (k, v) in [(kl, Realm::num(len)), (kn, nv)] {
+            if self.shapes.find(o.shape(&self.shapes), k).is_none() {
+                self.define_attrs(o, Key::Name(k), attrs, v).expect("define");
+            }
+        }
     }
 
     /// Define a data property of `o` that is not enumerable.
@@ -101,8 +151,8 @@ impl Realm {
     }
 
     /// A constructor `name` that is a global, with `proto` as its `prototype`.
-    pub(crate) fn ctor(&mut self, name: &str, f: NativeFn, proto: Obj) -> Obj {
-        let c = self.new_native(f, true);
+    pub(crate) fn ctor(&mut self, name: &'static str, len: u8, f: NativeFn, proto: Obj) -> Obj {
+        let c = self.new_native(f, true, len, name);
         self.define_attrs(c, Key::Name(self.k_prototype), 0, proto.value()).expect("define");
         self.define_attrs(proto, Key::Name(self.k_constructor), HIDDEN, c.value()).expect("define");
         let g = self.global;
@@ -224,10 +274,10 @@ impl Realm {
 
     pub(crate) fn install_builtins(&mut self) {
         // The native that runs a bound function has the index `bound_id`.
-        self.natives.push(Native { f: bound_call, ctor: false });
+        self.natives.push(Native { f: bound_call, ctor: false, len: 0, name: "" });
         self.bound_id = 0;
         let g = self.global;
-        self.method(g, "__def", prelude_def);
+        self.method(g, "__def", 2, prelude_def);
         self.hidden(g, "globalThis", g.value());
         self.hidden(g, "self", g.value());
         self.install_object();
@@ -238,390 +288,35 @@ impl Realm {
         self.install_number();
     }
 
-    fn install_object(&mut self) {
-        let proto = self.object_proto;
-        let c = self.ctor("Object", object_ctor, proto);
-        for (n, f) in [
-            ("keys", object_keys as NativeFn),
-            ("values", object_values),
-            ("entries", object_entries),
-            ("assign", object_assign),
-            ("create", object_create),
-            ("defineProperty", object_define_property),
-            ("defineProperties", object_define_properties),
-            ("getPrototypeOf", object_get_prototype_of),
-            ("setPrototypeOf", object_set_prototype_of),
-            ("getOwnPropertyNames", object_own_names),
-            ("getOwnPropertyDescriptor", object_own_descriptor),
-            ("freeze", object_freeze),
-            ("isFrozen", object_is_frozen),
-        ] {
-            self.method(c, n, f);
-        }
-        for (n, f) in [("hasOwnProperty", has_own as NativeFn), ("toString", object_to_string), ("valueOf", object_value_of), ("isPrototypeOf", is_prototype_of), ("propertyIsEnumerable", property_is_enumerable)] {
-            self.method(proto, n, f);
-        }
-    }
-
     fn install_function(&mut self) {
         let proto = self.function_proto;
-        self.ctor("Function", function_ctor, proto);
-        for (n, f) in [("call", fn_call as NativeFn), ("apply", fn_apply), ("bind", fn_bind), ("toString", fn_to_string)] {
-            self.method(proto, n, f);
+        self.ctor("Function", 1, function_ctor, proto);
+        for (n, len, f) in [("apply", 2, fn_apply as NativeFn), ("bind", 1, fn_bind), ("call", 1, fn_call), ("toString", 0, fn_to_string)] {
+            self.method(proto, n, len, f);
         }
     }
 
     fn install_error(&mut self) {
-        let names = ["TypeError", "ReferenceError", "RangeError", "SyntaxError", "Error"];
-        for (i, n) in names.iter().enumerate() {
+        // The order is that of `ErrKind` and `Realm::error_protos`.
+        let names = ["TypeError", "ReferenceError", "RangeError", "SyntaxError", "Error", "EvalError", "URIError"];
+        let mut error_ctor_cell = None;
+        for i in [4, 0, 1, 2, 3, 5, 6] {
+            let n = names[i];
             let proto = self.error_protos[i];
             let nv = self.string(n);
             self.hidden(proto, "name", nv);
             let empty = self.string("");
             self.hidden(proto, "message", empty);
-            self.ctor(n, error_ctor, proto);
-        }
-        let p = self.error_proto;
-        self.method(p, "toString", error_to_string);
-    }
-}
-
-// ---- Object ----
-
-fn object_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    // `new Object()` from `super()` of a class that extends it: the prototype comes from `new.target`.
-    // A primitive is not boxed (there are no wrapper objects): `Object(1)` is `1`.
-    let a = arg(args, 0);
-    if Realm::obj(rt.nt).is_none() && !a.is_undefined() && !a.is_null() {
-        return Ok(a);
-    }
-    let proto = rt.new_proto()?;
-    let shape = rt.shapes.root(Layout::Object, Some(proto.cell()), 4);
-    Ok(Obj::new(&mut rt.heap, &rt.shapes, shape).expect("memory").value())
-}
-
-fn object_keys(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    rt.own_keys(arg(args, 0))
-}
-
-/// The own enumerable keys of `v` and the value of each.
-fn own_pairs(rt: &mut Realm, v: Value) -> R<Vec<(Value, Value)>> {
-    let keys = rt.own_keys(v)?;
-    let ko = Realm::obj(keys).expect("an array");
-    let mut out = Vec::with_capacity(ko.len() as usize);
-    for i in 0..ko.len() {
-        let k = ko.get_element(i).expect("a key");
-        let key = rt.key_of(k)?;
-        out.push((k, rt.get_prop(v, key)?));
-    }
-    Ok(out)
-}
-
-fn object_values(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    let v: Vec<Value> = own_pairs(rt, arg(args, 0))?.into_iter().map(|p| p.1).collect();
-    Ok(rt.new_array(&v))
-}
-
-fn object_entries(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    let pairs = own_pairs(rt, arg(args, 0))?;
-    let v: Vec<Value> = pairs.into_iter().map(|p| rt.new_array(&[p.0, p.1])).collect();
-    Ok(rt.new_array(&v))
-}
-
-fn object_assign(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    let target = arg(args, 0);
-    if target.is_undefined() || target.is_null() {
-        return rt.type_error("cannot convert undefined or null to an object");
-    }
-    for &src in args.iter().skip(1) {
-        for (k, v) in own_pairs(rt, src)? {
-            let key = rt.key_of(k)?;
-            rt.set_prop(target, key, v)?;
-        }
-    }
-    Ok(target)
-}
-
-fn object_create(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    let p = arg(args, 0);
-    let proto = match (Realm::obj(p), p.is_null()) {
-        (Some(o), _) => Some(o.cell()),
-        (None, true) => None,
-        _ => return rt.type_error("object prototype may only be an object or null"),
-    };
-    let shape = rt.shapes.root(Layout::Object, proto, 4);
-    let o = Obj::new(&mut rt.heap, &rt.shapes, shape).expect("memory");
-    if !arg(args, 1).is_undefined() {
-        object_define_properties(rt, Value::UNDEFINED, &[o.value(), arg(args, 1)])?;
-    }
-    Ok(o.value())
-}
-
-/// Read the field `name` of the descriptor `d` (own or inherited data property).
-fn field(rt: &mut Realm, d: Obj, name: &str) -> R<Option<Value>> {
-    let k = rt.intern(name);
-    match rt.lookup_g(d, k) {
-        Some(Slot::Data(v)) => Ok(Some(v)),
-        Some(Slot::Acc(..)) => rt.type_error("accessors in a property descriptor are not supported here"),
-        None => Ok(None),
-    }
-}
-
-fn define_prop(rt: &mut Realm, o: Obj, key: Key, d: Value) -> R<()> {
-    let Some(d) = Realm::obj(d) else { return rt.type_error("property description must be an object") };
-    let (get, set) = (field(rt, d, "get")?, field(rt, d, "set")?);
-    let (value, w, e, c) = (field(rt, d, "value")?, field(rt, d, "writable")?, field(rt, d, "enumerable")?, field(rt, d, "configurable")?);
-    let k = match key {
-        Key::Name(k) => k,
-        Key::Idx(i) if o.is_indexed() && get.is_none() && set.is_none() => {
-            return rt.set_prop(o.value(), Key::Idx(i), value.unwrap_or(Value::UNDEFINED));
-        }
-        Key::Idx(i) => rt.idx_atom(i),
-    };
-    let old = rt.shapes.find(o.shape(&rt.shapes), k);
-    let base = old.map_or(0, |e| e.attrs());
-    let flag = |x: Option<Value>, bit: u8, base: u8| match x {
-        Some(v) if Realm::truthy(v) => bit,
-        Some(_) => 0,
-        None => base & bit,
-    };
-    let (e_bit, c_bit) = (flag(e, A_E, base), flag(c, A_C, base));
-    if get.is_some() || set.is_some() {
-        if value.is_some() || w.is_some() {
-            return rt.type_error("invalid property descriptor: cannot both specify accessors and a value or writable");
-        }
-        let (og, os) = match old {
-            Some(en) if en.attrs() & A_ACC != 0 => (o.slot(&rt.shapes, en.slot()), o.slot(&rt.shapes, en.slot() + 1)),
-            _ => (Value::UNDEFINED, Value::UNDEFINED),
-        };
-        let vals = [get.unwrap_or(og), set.unwrap_or(os)];
-        let attrs = A_ACC | e_bit | c_bit;
-        return match old {
-            Some(_) => rt.reconfigure(o, k, attrs, &vals),
-            None => match o.add(&mut rt.heap, &mut rt.shapes, k, attrs, &vals) {
-                Some(_) => Ok(()),
-                None => Err(rt.error(ErrKind::Range, "out of memory")),
-            },
-        };
-    }
-    let w_bit = flag(w, A_W, if base & A_ACC != 0 { 0 } else { base });
-    let cur = match old {
-        Some(en) if en.attrs() & A_ACC == 0 => o.slot(&rt.shapes, en.slot()),
-        _ => Value::UNDEFINED,
-    };
-    rt.define_attrs(o, Key::Name(k), w_bit | e_bit | c_bit, value.unwrap_or(cur))
-}
-
-fn object_define_property(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    let Some(o) = Realm::obj(arg(args, 0)) else { return rt.type_error("Object.defineProperty called on a non-object") };
-    let key = rt.key_of(arg(args, 1))?;
-    define_prop(rt, o, key, arg(args, 2))?;
-    Ok(o.value())
-}
-
-fn object_define_properties(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    let Some(o) = Realm::obj(arg(args, 0)) else { return rt.type_error("Object.defineProperties called on a non-object") };
-    for (k, d) in own_pairs(rt, arg(args, 1))? {
-        let key = rt.key_of(k)?;
-        define_prop(rt, o, key, d)?;
-    }
-    Ok(o.value())
-}
-
-fn object_get_prototype_of(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    let v = arg(args, 0);
-    if let Some(o) = Realm::obj(v) {
-        return Ok(rt.proto_of(o).map_or(Value::NULL, |p| p.value()));
-    }
-    Ok(if Realm::str_of(v).is_some() {
-        rt.string_proto.value()
-    } else if v.is_number() {
-        rt.number_proto.value()
-    } else if v.as_bool().is_some() {
-        rt.boolean_proto.value()
-    } else {
-        return rt.type_error("cannot convert undefined or null to an object");
-    })
-}
-
-fn object_set_prototype_of(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    let (v, p) = (arg(args, 0), arg(args, 1));
-    let proto = match (Realm::obj(p), p.is_null()) {
-        (Some(o), _) => Some(o.cell()),
-        (None, true) => None,
-        _ => return rt.type_error("object prototype may only be an object or null"),
-    };
-    if let Some(o) = Realm::obj(v) {
-        o.set_proto(&mut rt.shapes, proto);
-    }
-    Ok(v)
-}
-
-fn object_own_names(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    let Some(o) = Realm::obj(arg(args, 0)) else { return Ok(rt.new_array(&[])) };
-    let mut out: Vec<Value> = Vec::new();
-    if o.is_indexed() {
-        for i in 0..o.len() {
-            if o.get_element(i).is_some() {
-                out.push(rt.string(&i.to_string()));
+            let c = self.ctor(n, 1, error_ctor, proto);
+            match error_ctor_cell {
+                None => error_ctor_cell = Some(c),
+                // The constructor of a native error inherits from `Error`.
+                Some(e) => c.set_proto(&mut self.shapes, Some(e.cell())),
             }
         }
-        out.push(rt.k_length.value());
+        let p = self.error_proto;
+        self.method(p, "toString", 0, error_to_string);
     }
-    let keys: Vec<Str> = rt.shapes.entries(o.shape(&rt.shapes)).map(|e| e.key()).collect();
-    out.extend(keys.into_iter().filter(|k| !rt.text(*k).starts_with('\0')).map(|k| k.value()));
-    Ok(rt.new_array(&out))
-}
-
-fn object_own_descriptor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    let Some(o) = Realm::obj(arg(args, 0)) else { return Ok(Value::UNDEFINED) };
-    let key = rt.key_of(arg(args, 1))?;
-    let k = match key {
-        Key::Name(k) => k,
-        Key::Idx(i) => {
-            let Some(v) = o.is_indexed().then(|| o.get_element(i)).flatten() else { return Ok(Value::UNDEFINED) };
-            return Ok(descriptor(rt, Some(v), None, A_W | A_E | A_C));
-        }
-    };
-    let Some(e) = rt.shapes.find(o.shape(&rt.shapes), k) else {
-        if k == rt.k_length && o.is_indexed() {
-            return Ok(descriptor(rt, Some(Realm::num(o.len() as f64)), None, A_W));
-        }
-        return Ok(Value::UNDEFINED);
-    };
-    let at = e.attrs();
-    Ok(if at & A_ACC != 0 {
-        let (g, s) = (o.slot(&rt.shapes, e.slot()), o.slot(&rt.shapes, e.slot() + 1));
-        descriptor(rt, None, Some((g, s)), at)
-    } else {
-        descriptor(rt, Some(o.slot(&rt.shapes, e.slot())), None, at)
-    })
-}
-
-fn descriptor(rt: &mut Realm, value: Option<Value>, acc: Option<(Value, Value)>, attrs: u8) -> Value {
-    let d = Obj::new(&mut rt.heap, &rt.shapes, rt.s_object).expect("memory");
-    let put = |rt: &mut Realm, n: &str, v: Value| rt.set_own(d, n, v);
-    if let Some(v) = value {
-        put(rt, "value", v);
-        put(rt, "writable", Value::bool(attrs & A_W != 0));
-    }
-    if let Some((g, s)) = acc {
-        put(rt, "get", g);
-        put(rt, "set", s);
-    }
-    put(rt, "enumerable", Value::bool(attrs & A_E != 0));
-    put(rt, "configurable", Value::bool(attrs & A_C != 0));
-    d.value()
-}
-
-/// Make each property of `o` read-only and not configurable. The elements of an array stay writable (the element records have no
-/// attributes), and `o` can still get new properties (there is no `preventExtensions`): known gaps.
-fn object_freeze(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    let v = arg(args, 0);
-    let Some(o) = Realm::obj(v) else { return Ok(v) };
-    let entries: Vec<_> = rt.shapes.entries(o.shape(&rt.shapes)).collect();
-    for e in entries {
-        let at = e.attrs();
-        let frozen = if at & A_ACC != 0 { at & !A_C } else { at & !(A_W | A_C) };
-        if frozen != at {
-            let vals: Vec<Value> = (0..e.width()).map(|j| o.slot(&rt.shapes, e.slot() + j)).collect();
-            rt.reconfigure(o, e.key(), frozen, &vals)?;
-        }
-    }
-    Ok(v)
-}
-
-fn object_is_frozen(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    let Some(o) = Realm::obj(arg(args, 0)) else { return Ok(Value::TRUE) };
-    let all = rt.shapes.entries(o.shape(&rt.shapes)).all(|e| e.attrs() & A_C == 0 && (e.attrs() & A_ACC != 0 || e.attrs() & A_W == 0));
-    Ok(Value::bool(all && (!o.is_indexed() || o.is_empty())))
-}
-
-fn own_has(rt: &mut Realm, v: Value, key: Key) -> bool {
-    if let Some(s) = Realm::str_of(v) {
-        return match key {
-            Key::Idx(i) => (i as usize) < s.len(),
-            Key::Name(k) => k == rt.k_length,
-        };
-    }
-    let Some(o) = Realm::obj(v) else { return false };
-    match key {
-        Key::Idx(i) if o.is_indexed() && o.get_element(i).is_some() => true,
-        Key::Idx(i) => {
-            let k = rt.idx_atom(i);
-            rt.shapes.find(o.shape(&rt.shapes), k).is_some()
-        }
-        Key::Name(k) => rt.shapes.find(o.shape(&rt.shapes), k).is_some() || (k == rt.k_length && o.is_indexed()),
-    }
-}
-
-fn has_own(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
-    if this.is_undefined() || this.is_null() {
-        return rt.type_error("cannot convert undefined or null to an object");
-    }
-    let key = rt.key_of(arg(args, 0))?;
-    Ok(Value::bool(own_has(rt, this, key)))
-}
-
-fn property_is_enumerable(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
-    let key = rt.key_of(arg(args, 0))?;
-    if !own_has(rt, this, key) {
-        return Ok(Value::FALSE);
-    }
-    let Some(o) = Realm::obj(this) else { return Ok(Value::TRUE) };
-    let k = match key {
-        Key::Name(k) => k,
-        Key::Idx(i) if o.is_indexed() && o.get_element(i).is_some() => return Ok(Value::TRUE),
-        Key::Idx(i) => rt.idx_atom(i),
-    };
-    Ok(Value::bool(rt.shapes.find(o.shape(&rt.shapes), k).is_some_and(|e| e.attrs() & A_E != 0)))
-}
-
-pub(crate) fn object_to_string(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
-    let tag = if this.is_undefined() {
-        "Undefined"
-    } else if this.is_null() {
-        "Null"
-    } else if Realm::str_of(this).is_some() {
-        "String"
-    } else if this.is_number() {
-        "Number"
-    } else if this.as_bool().is_some() {
-        "Boolean"
-    } else if let Some(o) = Realm::obj(this) {
-        if o.is_callable() {
-            "Function"
-        } else if rt.is_array(o) {
-            "Array"
-        } else if rt.is_error(this) {
-            "Error"
-        } else if o.is_indexed() {
-            "Arguments"
-        } else {
-            "Object"
-        }
-    } else {
-        "Object"
-    };
-    Ok(rt.string(&format!("[object {tag}]")))
-}
-
-fn object_value_of(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
-    if this.is_undefined() || this.is_null() {
-        return rt.type_error("cannot convert undefined or null to an object");
-    }
-    Ok(this)
-}
-
-fn is_prototype_of(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
-    let (Some(p), Some(mut o)) = (Realm::obj(this), Realm::obj(arg(args, 0))) else { return Ok(Value::FALSE) };
-    while let Some(n) = rt.proto_of(o) {
-        if n == p {
-            return Ok(Value::TRUE);
-        }
-        o = n;
-    }
-    Ok(Value::FALSE)
 }
 
 impl Realm {
@@ -710,9 +405,18 @@ fn fn_to_string(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
 /// `__def(target, methods)` for `prelude.js`: copy the own enumerable properties of `methods` to `target`, not enumerable.
 fn prelude_def(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let Some(t) = Realm::obj(arg(args, 0)) else { return rt.type_error("__def needs an object") };
-    for (k, v) in own_pairs(rt, arg(args, 1))? {
+    let Some(m) = Realm::obj(arg(args, 1)) else { return rt.type_error("__def needs an object") };
+    let lens = Realm::obj(arg(args, 2));
+    for k in rt.own_key_list(m, true) {
         let key = rt.key_of(k)?;
+        let Some(Own::Data(v, _)) = rt.get_own(m, key) else { continue };
         rt.define_attrs(t, key, HIDDEN, v)?;
+        // The functions of the prelude are script functions: they get their own `length` and `name` here.
+        if let Some(f) = Realm::obj(v).filter(|f| f.is_callable()) {
+            let len = lens.and_then(|l| rt.get_own(l, key)).map_or(0, |p| if let Own::Data(n, _) = p { n.as_int().unwrap_or(0) } else { 0 });
+            rt.define_attrs(f, Key::Name(rt.k_length), A_C, Value::int(len))?;
+            rt.define_attrs(f, Key::Name(rt.k_name), A_C, k)?;
+        }
     }
     Ok(Value::UNDEFINED)
 }
@@ -723,7 +427,16 @@ fn error_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let proto = rt.new_proto()?;
     let m = arg(args, 0);
     let msg = if m.is_undefined() { None } else { Some(rt.to_str(m)?.value()) };
-    Ok(rt.make_error(proto, msg))
+    let e = rt.make_error(proto, msg);
+    // `new Error(message, { cause })`: an own `cause` when the options have the property.
+    if let Some(opts) = Realm::obj(arg(args, 1)) {
+        let k = rt.intern("cause");
+        if rt.has_prop(opts.value(), Key::Name(k))? {
+            let c = rt.get_prop(opts.value(), Key::Name(k))?;
+            rt.hidden(Realm::obj(e).expect("an error"), "cause", c);
+        }
+    }
+    Ok(e)
 }
 
 fn error_to_string(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
