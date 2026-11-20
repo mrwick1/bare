@@ -5,8 +5,9 @@
 //! `HttpOnly` cookie, and the setter cannot make one or replace one. A cookie value is never put in a log, a console message or an error.
 
 use crate::browser::*;
-use bare_js::eval::{Error, Interp};
-use bare_js::value::Value;
+use crate::browser_scoped::*;
+use bare_js_api::{Args, Local};
+use bare_js::eval::Error;
 use bare_net::cookie::{At, Via};
 
 // ------------------------------------------------------------------------------------------ JS
@@ -20,20 +21,20 @@ fn doc(d: &Dom) -> R<(bool, String, String)> {
     Ok((e.url.protocol() == "https:" || bare_net::cookie::loopback(&host), host, e.url.pathname().to_string()))
 }
 
-pub(crate) fn doc_cookie_get(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
-    let (secure, host, path) = doc(d)?;
+pub(crate) fn doc_cookie_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let (secure, host, path) = lift(s, doc(d))?;
     let jar = d.nav.s.borrow().store.jar();
-    let s = jar.lock().unwrap_or_else(|e| e.into_inner()).script_get(&At { secure, host: &host, path: &path }, it.wall_now_ms());
-    d.js_str(it, &s)
+    let text = jar.lock().unwrap_or_else(|e| e.into_inner()).script_get(&At { secure, host: &host, path: &path }, s.wall_now_ms());
+    d.js_str_s(s, &text)
 }
 
-pub(crate) fn doc_cookie_set(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    let text = d.string_arg(it, a.first().copied().unwrap_or(Value::Undefined))?;
-    let (secure, host, path) = doc(d)?;
+pub(crate) fn doc_cookie_set<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let text = d.arg_str_s(s, a, 0)?;
+    let (secure, host, path) = lift(s, doc(d))?;
     let jar = d.nav.s.borrow().store.jar();
     let mut jar = jar.lock().unwrap_or_else(|e| e.into_inner());
-    it.charge(1 + (jar.len() / 64) as u64)?;
-    jar.set(&At { secure, host: &host, path: &path }, &text, Via::Script, it.wall_now_ms());
-    Ok(Value::Undefined)
+    s.charge(1 + (jar.len() / 64) as u64)?;
+    jar.set(&At { secure, host: &host, path: &path }, &text, Via::Script, s.wall_now_ms());
+    Ok(s.undefined())
 }
 

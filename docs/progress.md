@@ -15673,6 +15673,40 @@ Check. `cargo test --locked -p bare-js2 --lib`: 282 pass on Linux (260 on main).
 
 Not tested: running any compiled code, so the semantics of the 38 new ops are checked by reading the disassembly and by the verifier only; class, `super`, private-name and spread behavior in an interpreter (S2.6); the S2.6 driver's use of `Child::ready`; mapped `arguments`; function names of methods and classes; Miri; arm64; a React bundle with classes beyond the clangd and tauri bundles; the cost matrix (js2 is not wired into the browser); the `bc_hist` example on Windows.
 
+## 2026-11-20: host handlers on the interface, A1c: the rest of group A1 (plan step S0.4 / A1c)
+
+Status: the handlers of the files below run through the interface (`Scope`, `Local`, `Args`). Tests pass on Linux and Windows. The full matrix passes under the standing rule, with one row on the limit (below). Base: origin/main `6067b9fb` (the commit #758 merged). The diff is 2,810 changed lines.
+
+Files converted: `browser_attr.rs`, `browser_nodelist.rs`, `browser_dataset.rs`, `browser_element.rs`, `browser_elements.rs`, `browser_html.rs`, `browser_html_members.rs`, `browser_reflect.rs`, `browser_nodecmp.rs`, `browser_chardata.rs`, `browser_fragment.rs`, `browser_namespace.rs`, `browser_slot.rs`, `browser_shadow.rs`, `browser_table.rs`, `browser_details.rs`, `browser_svg.rs`, `browser_gaps.rs`, `browser_shims.rs`, `browser_basics.rs` (the dialogs, `document.dir` and the getters), `browser_handlers.rs`, `browser_cookie.rs`. Registrations changed in `browser.rs` (the `DEFS` rows), `browser_select.rs` and `browser_navigation.rs` (`document.cookie`).
+
+Not converted, and why:
+
+- `browser_implementation.rs`: its handlers (`DOMParser`, `XMLSerializer`, `DOMImplementation`) use `new.target`, the lazy global definers and `interface`. Only one call of `fragment::serialize` changed. Next step.
+- `browser_lazy.rs`, `browser_sources.rs`: they have no handler of the old form. They hold install code and tables.
+- In `browser_basics.rs`: `postMessage`, `navigator.plugins`, `navigator.mimeTypes`, `javaEnabled` and `sendBeacon`. They need `clone_with`, `transfer_list`, `fetch` and `host_promise_then`, which still take the old engine.
+- The install functions, the lazy global definers, `Host::fill_indexed` and the named hooks stay in the old form in every file. They run once, or they key tables by `ObjId`.
+
+Changes.
+
+- `browser_scoped.rs`: bridges `lift`, `obj_id`, `raw_arg`, `Dom::obj_s`, `Dom::new_source_s`, `Dom::style_html_el_s`. `Dom::call_scoped` reads the entry of `Dom::scoped` through a raw pointer, with no `RefCell` borrow (A1b lever 1). `CUR_NEW` is `pub(crate)`.
+- `browser_dom_old.rs`: `def_get_s` and `def_get_sh` (getter new, setter old). The wrappers `adjacent_start` and `adjacent_pos` are removed (no caller). `browser_cookie.rs` and `browser_navigation.rs`: `document.cookie` uses `def_get_s`; `def_acc` stays for its other callers.
+- `browser_handlers.rs`: the handler accessors read their id as `style.cur & !CUR_NEW`, and the ids come from `Dom::scoped`. The test `the_accessors_are_made_by_use` counts `Dom::scoped` now, not `Dom::handlers`.
+- `browser_nodelist.rs`: `fill` skips the scope when the list is fresh.
+- Dead code of the old form in the converted files is removed (`probe`, `arg`, the `V` aliases).
+
+Grep gate (`\bbare_js::(value|eval::Interp)|\bObjId\b|\bInterp\b|\.engine\(\)|\.heap\.`, lines for each file, origin/main then now): attr 66 to 29, nodelist 22 to 19, dataset 25 to 22, element 20 to 3, elements 24 to 11, html_members 13 to 3, html 15 to 12, reflect 8 to 3, nodecmp 19 to 2, chardata 14 to 3, fragment 13 to 6, namespace 13 to 2, slot 8 to 3, shadow 12 to 1, table 24 to 4, details 12 to 5, svg 18 to 12, gaps 13 to 11, shims 7 to 5, basics 30 to 21, handlers 39 to 33, cookie 4 to 0. Unchanged: implementation 24, lazy 9, sources 13. The goal 0 is not met: what stays is install code, `ObjId`-keyed tables (the Attr and map tables, the listener tables, the nodelist `lists`), the lazy definers and the bridges in the files above.
+
+Measurements. Machine archMachine. Instruction counts (`perf stat -e instructions:u`, minimum of 3 runs, `tools/js/cost_matrix.sh -j4`, 817 rows).
+
+- Early check, `tools/js/instr.sh`, 3 runs: `attr_load react 1` +0.773% before the `Dom::scoped` lever, +0.595% after. `churn 1` +0.675% to +0.576%.
+- Full matrix at default flags, final tree: mean -0.017% glibc and +0.524% jemalloc (8 rows measured). Over +0.5% under both allocators: `attr_load churn 1` +0.573% / +0.529%, `churn 10` +0.576% / +0.581%, `react 1` +0.610% / +0.588%, `react 10` +0.633% / +0.619%, `select_load react 1000` +0.775% / +0.770%. Over under one allocator only: `dataset_load read 10000 1` (known exception), `session_load chain 10`, `select_load react 10`. `parse_load deep 1` and `10` do not run on the base tree either.
+- Rule of the owner (both trees built with `RUSTFLAGS="-C codegen-units=1"`, glibc): `attr_load churn 1` +0.474% to +0.478%, `react 1` +0.358%, `react 10` +0.384%, `select_load react 1000` +0.496%, `react 10` +0.408%. `attr_load churn 10` is on the limit: six runs gave +0.441%, +0.448%, +0.461%, +0.497%, +0.508% and +0.514% (jemalloc on the two runs over: +0.518% and +0.552%). The count of one build varies by about 0.05% between runs of the matrix script. I did not find a change that moves it clearly under the limit.
+- Tried and reverted: a check for an existing `Attr` wrapper in `attr::fill` before the scope. `attr_load churn` went to +1.2% (every read in that row makes a new wrapper, so the check only adds work).
+- Lever left: a read of `this` first in `api_win` (about 3 instructions a call) and `this` stored by pointer (about 2). Not built.
+
+Tests. Linux: `cargo test --locked -p bare-js-api -p bare-js -p bare --lib`: 32, 1104 (1 ignored) and 1714 (6 ignored) pass. The filters of the converted files and of `browser_scoped`, `custom`, `domexception`, `mutation`, `range`, `select`, `cookie`, `browser_tests` (436 tests, 1 ignored): pass plain, with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1`. Windows 11 VM (`cargo xwin test --no-run`, `winssh`): the same filters, 436 pass.
+
+Not tested: `BARE_GC_STRESS=1` and `BARE_ALL_API=1` with the whole `bare --lib`; the full `bare --lib` on Windows; the jemalloc run of the rows at `codegen-units=1` except the two noted; RSS and wall time; the files that are not converted.
 ## 2026-11-20: core built-ins in js2 (plan step S2.7)
 
 Real scripts now run end to end on the js2 interpreter. This step adds `Object`, `Function.prototype`, `Error` and its subclasses, `ToPrimitive`, `Array`, `String.prototype`, `Number`, `Boolean`, `Math`, `parseInt`, `parseFloat`, `isNaN`, `isFinite`, `globalThis` and `self`. Base: PR #757 (`t3/js2-interpreter`), merged with the newest main.
@@ -15840,6 +15874,48 @@ Known gaps:
 
 Not tested: Miri on the new arms (they are safe code in an `unsafe` module; the arms use the same string helpers as `JSEqA`); arm64; the effect on a real bundle (how many switches of jQuery or a React bundle become tables, and what it saves there); wall time; the cost matrix (js2 is not wired into the browser); the plain loops with `codegen-units=1`; a switch with more than 65,535 words of tables (the wide form of the op is covered by the encoder tests, not by a switch).
 
+## 2026-11-20: a cheaper host call of the interface form (A1c cost rule)
+
+Task: PR #762 (A1c) had rows over +0.5% under both allocators: `attr_load churn 1` and `churn 10`, `react 1` and `react 10` (+0.57% to +0.63%), and `select_load react 1000` (+0.775%). At `codegen-units=1` the row `attr_load churn 10` was on the limit. The owner's rule: make the call path cheaper; ask for no exception. Base: `6067b9fb` (the engine and browser crates are the same as origin/main `b0b12935`).
+
+Where the cost was. `callgrind` on `attr_load churn 1` (14,204 converted calls): `call_api_host` 49 instructions a call, `Dom::call_scoped` 31, the old path (`call_host` + `Dom::call`) about 40 for the same work. In `call_api_host` the host pointer cost 6 instructions: `Rc<dyn Host>::as_deref` reads the alignment from the vtable. The checks of `nt` and `is_new` ran on every plain call. For `select_load react 1000` the call path was not the cause. The call path was equal to the old one (149,352 calls: +17.2 M instructions new, -16.3 M old). The cost was in the handler `NodeList.length`: three hash lookups of the list for each call (`list_of`, `prepare`, the read of the length), and the push of the result.
+
+Levers. Each count is `hco_micro`: a loop of 200,000 calls of one handler; instructions a call = (count(200,000) - count(0)) / 200,000; `perf stat -e instructions:u`, minimum of 3 runs, release build. The loop itself costs 1,631 instructions an iteration. `hasChildNodes` (`has`), `isSameNode` (`same`), `hasAttributes` (`attrs`).
+
+| State | `has` | `same` | `attrs` |
+| --- | ---: | ---: | ---: |
+| Base `6067b9fb` (handlers of the old form) | 2404 | 3183 | 2401 |
+| PR #762 head (`167e105a`, merged with main) | 2396 | 3321 | 2414 |
+| Lever 1: `ApiState::host_ptr` (the host address, set in `set_host`) | 2391 | 3316 | 2409 |
+| Lever 2: `call_api_plain`, the plain call has its own entry | 2383 | 3308 | 2401 |
+| Lever 2 with `#[inline(never)]` in place of `#[cold]` (kept) | 2383 | 3308 | 2401 |
+
+So the engine side now costs 13 instructions a call less than the PR head (5 for lever 1, 8 for lever 2). Lever 3 is the `NodeList.length` read in `browser_nodelist.rs`: one lookup of the list when its cache is fresh (`is_fresh`, the same test that `fill` used), and the old three lookups for a stale list. It is -1.3% on `select_load react 1000`.
+
+Tried and not kept:
+
+- A read of `this` first in `api_at` (`slot == WIN`), and a window test first (`slot - WIN < 2^30`): +30 instructions a call on `has` and `attrs`, 0 on `same`. The larger `api_at` stops LLVM from inlining `node_of` into `el_s` and the reads of the handlers. A smaller `api_at` is better than a faster `this` read.
+- `this` stored by pointer in `Win` (`*const Value`): +3. The call saves the copy of 16 bytes, but every read of `this` loads one more.
+- `#[inline(always)]` on the closure of `enter` in the call: 0 (it was inlined already). `#[inline(always)]` on `api_at`: 0.
+- Not tried: no bounds check of `Dom::scoped[id]` (2 instructions; the id is safe only while every id comes from `add_fn_s`), the `style.cur` write (the handlers read it), and one flag for `ce.on` and `mo.armed()` (two structs; 2 instructions).
+
+Matrix. Machine archMachine, `tools/js/cost_matrix.sh -j4`, 817 rows, base `6067b9fb`, new = the head of this branch. The soundness test `a_panic_in_a_host_call_unlinks_its_window` and the GC-root tests pass. The window is unlinked on panic as before (`WinGuard` is unchanged).
+
+| Row | Before, default | Now, default | Before, cgu=1 | Now, cgu=1 |
+| --- | ---: | ---: | ---: | ---: |
+| `attr_load churn 1` | +0.573% | +0.376% | +0.474% | +0.241% |
+| `attr_load churn 10` | +0.576% | +0.355% | +0.441% to +0.514% | +0.214% |
+| `attr_load react 1` | +0.610% | +0.296% | +0.358% | -0.018% |
+| `attr_load react 10` | +0.633% | +0.282% | +0.384% | -0.017% |
+| `select_load react 1000` | +0.775% | -1.295% | +0.496% | -1.680% |
+
+- Default flags: over +0.5% under both allocators: 0 rows. Over under glibc only: `scripts_load reject 1` +0.618% (jemalloc +0.004%) and `fetch_load bytes 10` +0.513% (jemalloc +0.309%). `parse_load deep 1` and `10` fail to run on both trees (known). Mean change: glibc -0.019%.
+- `codegen-units=1` on both trees (glibc): over +0.5% under both: 0 rows. The highest rows: `scripts_load reject 1` +0.624% (glibc only; jemalloc -0.003% at default flags and the same row at both settings, so a layout effect of the allocator), `session_load chain 10` +0.487%. Mean change -0.027%. The same 2 `parse_load` rows fail on both trees.
+- The first matrix of this head showed `nodelist_load scan 10` at +0.648% under both allocators. A first version of the `length` change looked up the list again for a stale list. The second version (this one) gives `scan 10` -0.376%.
+
+Tests. Linux: `cargo test --locked -p bare-js-api -p bare-js -p bare --lib`: 32, 1104 (1 ignored) and 1714 (6 ignored) pass. The filters `attr nodelist dataset element elements html reflect nodecmp chardata fragment namespace slot shadow table details svg gaps shims basics handlers cookie scoped custom domexception mutation range select browser_tests` on `bare --lib` (600 tests, 1 ignored): pass plain, with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1`. `bare-js` filters `api_tests host_nt` (50 tests): pass plain and with `BARE_GC_STRESS=1`. Windows 11 VM (`cargo xwin test --no-run`, `winssh`): `bare-js-api` 32, `bare-js` filters `api_tests host_nt` 50, `bare` the same 600-test filters (1 ignored): pass.
+
+Not tested: `BARE_GC_STRESS=1` and `BARE_ALL_API=1` with the whole `bare --lib`; the full `bare --lib` and `bare-js` on Windows; the jemalloc run of every row at `codegen-units=1` (the script runs it only for a row over the limit under glibc); RSS and wall time; the other frames of the call path that stay in the old form (the old `call_host` path is unchanged).
 ## 2026-11-20: where the instructions go in js2 (plan step S2.9, measurement)
 
 Design: `docs/design-js2-superinstructions.md` (for the owner to review; nothing of it is built). This entry holds the measurements.
@@ -16108,6 +16184,42 @@ Engine bugs that the run found (not fixed here):
 
 Not tested: Windows and macOS (the shell tool needs GNU `find` and `timeout`; the cargo test is portable but not run there); the old engine in `auto` and `byte` modes (only `tree`); Miri on `load_with` (safe code); the `script_tests` programs that span several lines; a second test262 checkout revision; the old engine's modules and async tests (skipped on both); how the counts move when js2 gets a step budget of another size (20,000,000 back edges, the old engine 20,000,000 steps: not the same unit).
 
+## 2026-11-20: host handlers on the interface, D2: media, image and canvas (plan step S0.4 / D2)
+
+Status: the handlers of the three files run through the interface (`Scope`, `Local`, `Args`). Tests pass on Linux and Windows. The matrix has no row over the limit. The PR is open without auto-merge.
+
+Base: `origin/t3/convert-browser-host-handlers` (the head of #762, A1c) merged with `origin/main` (`57357737`). #762 was not merged when this started, so the diff against main holds the commits of #762 until it merges. #769 (group C) is not in the base. The files of this group do not overlap with it.
+
+Files converted: `browser_media.rs` (59 handlers: the `HTMLMediaElement`, `HTMLVideoElement`, `TimeRanges` and `MediaError` members, `load`, `play`, `pause`, `canPlayType`, the constructors `Audio` and the illegal ones, the `on*` handlers, and the caption handlers `TextTrack`, `TextTrackList`, `HTMLTrackElement` and the cue accessors), `browser_canvas.rs` (the `ImageData` constructor, `getContext`, `toDataURL`, `measureText`, `createImageData`, `getImageData`, the gradient and pattern objects, the no-op methods), `browser_img.rs` (`Image`, `decode`, `onload`, `onerror`). 73 handlers in all.
+
+Not converted, and why:
+
+- The lazy global definers (`lazy_media`, `lazy_audio_el`, `lazy_video_el`, `lazy_ranges`, `lazy_error`, `lazy_audio`, `lazy_image`, `lazy_image_data`). They define a global from a property read. `browser_lazy::lazy` takes `it`, so they move with `browser_lazy.rs` (the lazy global definers stay old in every group, as in A1c).
+- The install code (`install`, `proto`, `ensure`, `make`, `caption_proto`, `method`) and `Dom::wrap` calling `proto`. It runs once and it keys tables by `ObjId`. It registers the new handlers through `add_fn_s_obj`, `def_get_s` and `def_method_s`.
+- The task code (`media_task`, `media_fire`, `media_heard`, `select`, `start`, `fail`, `caption_load`, `Dom::img_task`). The scheduler calls it with an `Interp`, and it fires events through `Dom::dispatch`. It moves with group B (events, scheduler). `reject` keeps its old signature and calls `reject_s` through `run`.
+- The host hooks `caption_len`, `caption_item` and `caption_fill`, and the tables with `ObjId` keys (`Media::lists`, `Media::tracks`, `Img::decodes`). `caption_fill` calls the new `caption_prepare` and `caption_object` through `run`.
+- The `ObjId` fields of `Made`, `CaptionTrack` and `CaptionCue`. The GC roots read them. They move with the table of roots (group Z).
+
+Changes.
+
+- `browser_scoped.rs`: three helpers for code that builds objects inside a handler: `Dom::obj_with_s` (a new object with a given prototype), `Dom::def_method_l` (a method on a `Local`, enumerable or not) and `Dom::def_get_l` (an accessor on a `Local`). The bridge `media_src_changed_s` calls `browser_media::src_changed` directly, which now takes a scope.
+- `browser_media.rs`: `src_changed`, `load_algorithm`, `queue_s`, `queue_event_s`, `reject_s`, `caption_object`, `caption_prepare`, `with_cue` and the `this` checks take a scope. The old `queue_event`, the old `load_algorithm` and the old `caption_object` are removed (no caller). `range_at` is two functions of a const parameter (`END`), not two closures.
+- `browser_canvas.rs`: `ensure_s` makes the `ImageData` constructor on the scope. The old `ensure` calls it through `run` for the lazy definer. The old `arg` wrapper is removed.
+- `browser_img.rs`: `on_get`, `on_set` and `decode` use `old_v` and `old` for `handler_get` and `handler_set` (the pattern of `browser_handlers.rs`).
+- `browser_media_tests.rs`: one new test, `the_members_that_the_cases_do_not_read_keep_their_answers_and_errors` (`TimeRanges` `start` and `end`, the reads and writes of `crossOrigin`, `width`, `playbackRate`, `currentTime`, the errors of `volume`, `currentTime` and `srcObject`, a wrong `this`, `activeCues`, `textTracks`, `Image` size and handlers). It passes on the base commit too (built in a separate checkout), so the answers did not change.
+
+Grep gate (`\bbare_js::(value|eval::Interp)|\bObjId\b|\bInterp\b|\.engine\(\)|\.heap\.`, lines for each file, before then after): media 106 to 36, canvas 25 to 6, img 13 to 8. Handler lines of the old form (`fn .*&\[Value\]`): media 59 to 0, canvas 12 to 1 (`lazy_image_data`), img 4 to 0. The lines that stay are the items in the list above. The goal 0 is not met for the same reasons as in A1c. Two of the media lines are `bare_js::value::to_uint32` (a pure function, not the engine).
+
+Measurements. Machine archMachine. Instruction counts (`perf stat -e instructions:u`, minimum of 3 runs), `tools/js/cost_matrix.sh -j4`, 817 rows, both trees built with the default release profile in separate target directories. Base: `57357737` (the tree before this change). New: `9fbd00f2`.
+
+- Mean change: glibc -0.002%. No row is over +0.5% under glibc, so the jemalloc run and the `codegen-units=1` run did not start. The top rows: `form_load validity 10` (`FORM_LOAD_STACK_MIB=8`) +0.493%, `scheduler_load timers 10` +0.231%, `scheduler_load mixed 10` +0.146%, `mixed 1` +0.127%, `form_load validity 1` +0.120%. None of these call a handler of this group (the form handlers are group C; the base has them in the old form). The lowest: `resources_load small 10` -0.453%.
+- The two rows that name this group: `platform_load media 1` -0.002% (48,127,549 to 48,126,611 instructions) and `media 10` +0.002% (408,955,161 to 408,961,627).
+- `parse_load deep 1` and `deep 10` fail to run on both trees (known: stack overflow).
+- The rows hardly use these handlers (2 rows of 817), so the matrix shows that the shared call path did not change. It does not measure the cost of one media call. A call of a converted handler costs what the A1 rounds measured (about the same as the old one).
+
+Tests. Linux, debug: `cargo test --locked -p bare-js-api -p bare-js -p bare --lib`: 32, 1104 (1 ignored) and 1715 (6 ignored) pass. The filters `browser_media_tests browser_canvas_tests browser_img_tests browser_elements_tests browser_scoped browser_reclaim browser_tests browser_navigation_tests browser_scheduler_tests browser_streams_tests browser_compression_tests canvas media image audio` (295 tests): pass plain, with `BARE_ALL_API=1` and with `BARE_GC_STRESS=1 BARE_ALL_API=1`. With `BARE_GC_STRESS=1` alone, 294 pass and 1 fails: `browser_reclaim_tests::parsed_documents_ask_for_a_collect_by_their_native_bytes` (the known failure of the base under `BARE_GC_STRESS=1`; it passes when `BARE_ALL_API=1` is also set). Windows 11 VM (`cargo xwin test --no-run`, exe through `winssh`): the same 295-test filter passes.
+
+Not tested: `BARE_GC_STRESS=1` and `BARE_ALL_API=1` with the whole `bare --lib`; the full `bare --lib` on Windows; the jemalloc and `codegen-units=1` runs (no row went over the limit under glibc); the journeys and `tools/suite/run.py`; RSS and wall time; the cost of one media, canvas or image call by a micro-loop; the `Image` and `decode()` paths with a real picture download (the tests use pages with no network).
 ## 2026-11-20: js2 language failures (test262 `language/`)
 
 Task: fix the tests under `language/` that pass on the old engine and fail on js2. Scope: the compiler, the parser and the interpreter. Built-ins (`builtins.rs`, `bi_*.rs`) belong to two other agents. Generators, async, modules, `eval` and `with` belong to S3.

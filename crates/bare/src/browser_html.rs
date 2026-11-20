@@ -21,6 +21,8 @@
 //!   (`a`, `img`, `input`, `select`, ...) is not handled here.
 
 use crate::browser::*;
+use crate::browser_scoped::*;
+use bare_js_api::{Args, Local};
 use bare_html::dom::{NodeData, NodeId, Ns};
 use bare_js::eval::Interp;
 use bare_js::value::{ObjId, Value};
@@ -194,7 +196,7 @@ fn make(d: &Dom, it: &mut Interp<'_>, i: usize) -> R<(ObjId, ObjId)> {
 /// pointer in Rust (like a JS function that uses no outer variable), so it fits the `H` type of the handlers.
 macro_rules! meta_attr {
     ($d:expr, $it:expr, $o:expr, $name:literal, $attr:literal) => {
-        $d.def_get($it, $o, $name, |d, it, t, _| meta_get(d, it, t, $attr), Some(|d, it, t, a| meta_set(d, it, t, a, $attr)))?;
+        $d.def_get_s($it, $o, $name, |d, s, t, _| meta_get(d, s, t, $attr), Some(|d, s, t, a| meta_set(d, s, t, a, $attr)))?;
     };
 }
 
@@ -207,22 +209,23 @@ fn meta_members(d: &Dom, it: &mut Interp<'_>, o: ObjId) -> R<()> {
 }
 
 /// The `meta` element of `this`, or `TypeError: Illegal invocation`.
-fn meta_el(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
-    let n = d.el(it, this)?;
-    if d.doc.borrow().is_html(n, "meta") { Ok(n) } else { Err(it.type_error("Illegal invocation")) }
+fn meta_el<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
+    let n = d.el_s(s, this)?;
+    if d.doc.borrow().is_html(n, "meta") { Ok(n) } else { Err(s.type_error("Illegal invocation")) }
 }
 
-fn meta_get(d: &Dom, it: &mut Interp<'_>, this: Value, name: &str) -> R<Value> {
-    let n = meta_el(d, it, this)?;
+fn meta_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, name: &str) -> Res<'s, Local<'s>> {
+    let n = meta_el(d, s, this)?;
     let v = { let doc = d.doc.borrow(); doc.find_atom(name).and_then(|k| doc.attr(n, k)).unwrap_or("").to_string() };
-    d.js_str(it, &v)
+    d.js_str_s(s, &v)
 }
 
-fn meta_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], name: &str) -> R<Value> {
-    let n = meta_el(d, it, this)?;
-    let v = d.string_arg(it, crate::browser_platform::arg(a, 0))?;
-    crate::browser_dom::attr_set(d, it, n, name, &v)?;
-    Ok(Value::Undefined)
+fn meta_set<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, name: &str) -> Res<'s, Local<'s>> {
+    let n = meta_el(d, s, this)?;
+    let arg0 = arg_s(s, a, 0);
+    let v = d.string_arg_s(s, arg0)?;
+    crate::browser_dom::attr_set_s(d, s, n, name, &v)?;
+    Ok(s.undefined())
 }
 
 /// The ask of the heap for the global `name` (`Heap::set_lazy_chain`, see `browser_handlers.rs`): define it on the window when it is one of the
