@@ -343,19 +343,17 @@ pub(crate) fn of(d: &Dom, it: &mut Interp<'_>, n: NodeId, kind: u8) -> V {
     Ok(v)
 }
 
-/// The members of the list `this`, fresh. `None`: `this` is not a list.
-pub(crate) fn members(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<Option<Vec<NodeId>>> {
-    let Value::Object(o) = this else { return Ok(None) };
+/// The members of the list `o`, fresh. `None`: `o` is not a list.
+pub(crate) fn members<'s>(d: &Dom, s: &mut Sc<'s, '_>, o: ObjId) -> Res<'s, Option<Vec<NodeId>>> {
     if !d.nl.s.borrow().lists.contains_key(&o) {
         return Ok(None);
     }
-    run(it, |s| prepare(d, s, o))?;
+    prepare(d, s, o)?;
     Ok(Some(d.nl.s.borrow().lists[&o].ids.clone()))
 }
 
 /// The select of a list made by `make_list` over the options of a select.
-pub(crate) fn select_of(d: &Dom, this: Value) -> Option<NodeId> {
-    let Value::Object(o) = this else { return None };
+pub(crate) fn select_of(d: &Dom, o: ObjId) -> Option<NodeId> {
     match d.nl.s.borrow().lists.get(&o)?.src {
         Src::Options(s) | Src::Selected(s) => Some(s),
         Src::Name(_) | Src::Labels(_) | Src::Of(..) => None,
