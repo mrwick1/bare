@@ -24,3 +24,5 @@ pub mod gc;
 #[allow(unsafe_code)]
 pub mod object;
 pub mod roots;
+pub mod bytecode;
+pub mod verify;

@@ -77,6 +77,16 @@ impl RootMaps {
         Some(Map(&self.words[i * w..(i + 1) * w]))
     }
 
+    /// The register count of the function.
+    pub fn regs(&self) -> usize {
+        self.regs
+    }
+
+    /// The `pc` of each safepoint, in increasing order.
+    pub fn pcs(&self) -> &[u32] {
+        &self.pcs
+    }
+
     /// Bytes of the maps (compile-time memory).
     pub fn bytes(&self) -> usize {
         self.pcs.capacity() * 4 + self.words.capacity() * 8
