@@ -30,12 +30,12 @@
 
 use crate::browser::*;
 use crate::browser_dom as nd;
+use crate::browser_scoped::*;
 use bare_html::dom::{Document, NodeData, NodeId};
 use bare_js::eval::{Error, Interp};
 use crate::browser_web::Ent;
 use bare_js::value::Value;
-
-type V = R<Value>;
+use bare_js_api::{Args, Local};
 
 fn attr<'a>(doc: &'a Document, n: NodeId, name: &str) -> Option<&'a str> {
     doc.find_atom(name).and_then(|a| doc.attr(n, a))
@@ -332,67 +332,72 @@ impl Dom {
 
 // ---------------------------------------------------------------------------------------------- JS API
 
-fn form_this(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
-    let n = d.el(it, this)?;
-    if tag_is(&d.doc.borrow(), n, &["form"]) { Ok(n) } else { Err(it.type_error("Illegal invocation")) }
+fn form_this<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
+    let n = d.el_s(s, this)?;
+    if tag_is(&d.doc.borrow(), n, &["form"]) { Ok(n) } else { Err(s.type_error("Illegal invocation")) }
 }
 
-pub(crate) fn request_submit(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let form = form_this(d, it, this)?;
-    let submitter = match a.first().copied() {
-        None | Some(Value::Undefined) | Some(Value::Null) => None,
+pub(crate) fn request_submit<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let form = form_this(d, s, this)?;
+    let submitter = match a.get(0).filter(|&v| !is_nullish(s, v)) {
+        None => None,
         Some(v) => {
-            let Some(s) = d.node_of(v).filter(|&s| d.is_element(s)) else {
-                return Err(it.type_error("Failed to execute 'requestSubmit' on 'HTMLFormElement': parameter 1 is not of type 'HTMLElement'."));
+            let Some(sub) = d.node_of_s(s, v).filter(|&x| d.is_element(x)) else {
+                return Err(s.type_error("Failed to execute 'requestSubmit' on 'HTMLFormElement': parameter 1 is not of type 'HTMLElement'."));
             };
-            if !d.is_submit_button(s) {
-                return Err(it.type_error("Failed to execute 'requestSubmit' on 'HTMLFormElement': The specified element is not a submit button."));
+            if !d.is_submit_button(sub) {
+                return Err(s.type_error("Failed to execute 'requestSubmit' on 'HTMLFormElement': The specified element is not a submit button."));
             }
-            if d.form_owner(it, s)? != Some(form) {
-                return Err(d.dom_err(it, "NotFoundError", "Failed to execute 'requestSubmit' on 'HTMLFormElement': The specified element is not owned by this form element."));
+            if old(s, |it| d.form_owner(it, sub))? != Some(form) {
+                return Err(d.dom_err_s(s, "NotFoundError", "Failed to execute 'requestSubmit' on 'HTMLFormElement': The specified element is not owned by this form element."));
             }
-            Some(s)
+            Some(sub)
         }
     };
-    d.submit_with(it, form, submitter, true, true)?;
-    Ok(Value::Undefined)
+    old(s, |it| d.submit_with(it, form, submitter, true, true))?;
+    Ok(s.undefined())
 }
 
-pub(crate) fn submit_method(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let form = form_this(d, it, this)?;
-    d.submit_with(it, form, None, false, false)?;
-    Ok(Value::Undefined)
+pub(crate) fn submit_method<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let form = form_this(d, s, this)?;
+    old(s, |it| d.submit_with(it, form, None, false, false))?;
+    Ok(s.undefined())
 }
 
-pub(crate) fn form_check_validity(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let form = form_this(d, it, this)?;
-    let bad = d.invalid_controls(it, form)?;
-    Ok(Value::Bool(d.report_invalid(it, &bad, false)?))
+fn form_validity<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, focus: bool) -> Res<'s, Local<'s>> {
+    let form = form_this(d, s, this)?;
+    let ok = old(s, |it| {
+        let bad = d.invalid_controls(it, form)?;
+        d.report_invalid(it, &bad, focus)
+    })?;
+    Ok(s.boolean(ok))
 }
 
-pub(crate) fn form_report_validity(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let form = form_this(d, it, this)?;
-    let bad = d.invalid_controls(it, form)?;
-    Ok(Value::Bool(d.report_invalid(it, &bad, true)?))
+pub(crate) fn form_check_validity<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    form_validity(d, s, this, false)
 }
 
-fn control_validity(d: &Dom, it: &mut Interp<'_>, this: Value, focus: bool) -> V {
-    let n = crate::browser_controls::control(d, it, this)?;
-    report_one(d, it, n, focus)
+pub(crate) fn form_report_validity<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    form_validity(d, s, this, true)
 }
 
 /// `checkValidity()` and `reportValidity()` of the one element `n`.
-pub(crate) fn report_one(d: &Dom, it: &mut Interp<'_>, n: NodeId, focus: bool) -> V {
-    let bad = if d.is_invalid(it, n)? { vec![n] } else { vec![] };
-    Ok(Value::Bool(d.report_invalid(it, &bad, focus)?))
+pub(crate) fn report_one<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId, focus: bool) -> Res<'s, Local<'s>> {
+    let ok = old(s, |it| {
+        let bad = if d.is_invalid(it, n)? { vec![n] } else { vec![] };
+        d.report_invalid(it, &bad, focus)
+    })?;
+    Ok(s.boolean(ok))
 }
 
-pub(crate) fn control_check_validity(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    control_validity(d, it, this, false)
+pub(crate) fn control_check_validity<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = crate::browser_controls::control(d, s, this)?;
+    report_one(d, s, n, false)
 }
 
-pub(crate) fn control_report_validity(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    control_validity(d, it, this, true)
+pub(crate) fn control_report_validity<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = crate::browser_controls::control(d, s, this)?;
+    report_one(d, s, n, true)
 }
 
 #[cfg(test)]

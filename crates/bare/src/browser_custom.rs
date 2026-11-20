@@ -1061,7 +1061,7 @@ fn define(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     d.ce.on.set(true);
     st(d).borrow_mut().stack.push(Vec::new());
     d.sync_watcher();
-    d.def_method(it, d.p().html, "attachInternals", 0, crate::browser_face::attach_internals)?;
+    d.def_method_s(it, d.p().html, "attachInternals", 0, crate::browser_face::attach_internals)?;
     let r = define_in(d, it, this, a);
     let q = d.ce_pop(it);
     r.and_then(|v| q.map(|()| v))
