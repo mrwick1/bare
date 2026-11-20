@@ -3138,3 +3138,70 @@ mod tests {
         assert!(at_most > 20, "shapes were made: {at_most}");
     }
 }
+
+// ---------- structured clone fast path (spike) ----------
+
+/// What the structured-clone fast path may read from an object (spike).
+pub struct ClonePeek<'a> {
+    pub array: bool,
+    pub elems: &'a [Option<Value>],
+    entries: &'a [Entry],
+    slots: &'a [Value],
+}
+
+impl<'a> ClonePeek<'a> {
+    pub fn nprops(&self) -> usize {
+        self.entries.len() - self.array as usize
+    }
+
+    /// The named properties in order (an array's `length` left out).
+    pub fn props(&self) -> impl Iterator<Item = (PropertyKey, Value)> + 'a {
+        let slots = self.slots;
+        self.entries[self.array as usize..].iter().map(move |e| (e.key, slots[e.slot as usize]))
+    }
+}
+
+impl Heap {
+    /// An ordinary object or a dense array in shape mode, with only plain data properties with string keys (and no hole): its data can be read with no script.
+    pub fn clone_peek(&self, o: ObjId) -> Option<ClonePeek<'_>> {
+        let ob = self.objects.get(o.index, o.gn)?;
+        if ob.exotic != 0 || ob.lazy != 0 || ob.dict().is_some() {
+            return None;
+        }
+        let entries = self.shapes.entries(ob.shape);
+        let slots = ob.slots();
+        let skip = ob.is_array as usize;
+        if ob.is_array {
+            let l = entries.first()?;
+            if l.slot != 0 || l.attrs != A_W || !matches!(slots[0], Value::Number(n) if n == ob.elems.len() as f64) || !ob.elems.iter().all(|e| e.is_some()) {
+                return None;
+            }
+        } else if !ob.elems.is_empty() {
+            return None;
+        }
+        if !entries[skip..].iter().all(|e| e.attrs == A_W | A_E | A_C && matches!(e.key, PropertyKey::String(_))) {
+            return None;
+        }
+        Some(ClonePeek { array: ob.is_array, elems: &ob.elems, entries, slots })
+    }
+
+    /// Give the new empty object `o` the data properties `keys` with the values `vals`, all at once. `Ok(false)`: no change (too many keys).
+    pub fn clone_install(&mut self, o: ObjId, keys: &[PropertyKey], vals: &[Value]) -> R<bool> {
+        let mut shape = ROOT;
+        for &k in keys {
+            match self.shapes.add(shape, k, A_W | A_E | A_C) {
+                Some(s) => shape = s,
+                None => return Ok(false),
+            }
+        }
+        self.obj(o)?;
+        let extra = if vals.len() > INLINE { vals.len() * SLOT_BYTES } else { 0 };
+        self.charge(extra)?;
+        let ob = self.objects.get_mut(o.index, o.gn).expect("checked");
+        ob.shape = shape;
+        ob.fill_slots(vals);
+        self.bytes += extra;
+        Ok(true)
+    }
+}
+

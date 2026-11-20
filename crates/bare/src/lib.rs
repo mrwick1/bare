@@ -120,6 +120,8 @@ mod browser_history_state_cap_tests;
 #[cfg(test)]
 mod browser_navigation_subclass_tests;
 #[cfg(test)]
+mod browser_clone_ops_tests;
+#[cfg(test)]
 mod browser_namespace_tests;
 #[cfg(test)]
 mod browser_iframe_tests;

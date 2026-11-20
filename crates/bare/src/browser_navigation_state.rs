@@ -85,6 +85,8 @@ pub(crate) struct State {
     pub root: SV,
     pub nodes: Vec<SNode>,
     pub bytes: usize,
+    /// Spike: the native record of a graph of the data classes. `root` and `nodes` are empty then.
+    pub rec: Option<Box<[u8]>>,
 }
 
 /// Bounds of one walk and the names of their limit errors.
@@ -121,6 +123,9 @@ fn clone_err(d: &Dom, it: &mut Interp<'_>, what: &str) -> Error {
 pub(crate) fn serialize(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<State> {
     let l: NavLimits = d.nav.lim.get();
     let b = Bounds { bytes: l.max_state_bytes, depth: l.max_state_depth.min(128), nodes: l.max_state_nodes, names: ["history-state-bytes", "history-state-depth", "history-state-nodes"] };
+    if let Some(rec) = it.clone_out_fast(v, b.bytes, b.depth, b.nodes, &|o| d.is_host_object(o))? {
+        return Ok(State { root: SV::Undef, nodes: Vec::new(), bytes: rec.cost, rec: Some(rec.bytes) });
+    }
     match walk(d, it, v, b, &[]) {
         // The size is the page's choice: a catchable error, as in Firefox. The depth cap stays a limit.
         Err(Error::Limit(LimitKind::Host("history-state-bytes" | "history-state-nodes"))) => Err(clone_err(d, it, "A state over the size cap")),
@@ -140,6 +145,11 @@ pub(crate) fn clone_with(d: &Dom, it: &mut Interp<'_>, v: Value, list: &[ObjId])
 /// are detached and the listed ports are parked after the walk succeeded. A listed item that changed during the walk (a getter
 /// detached it) throws `DataCloneError` before any item moves.
 pub(crate) fn clone_state_with(d: &Dom, it: &mut Interp<'_>, v: Value, list: &[ObjId]) -> R<(State, Vec<Transfer>)> {
+    if list.is_empty()
+        && let Some(rec) = it.clone_out_fast(v, 64 << 20, 256, 1 << 20, &|o| d.is_host_object(o))?
+    {
+        return Ok((State { root: SV::Undef, nodes: Vec::new(), bytes: rec.cost, rec: Some(rec.bytes) }, Vec::new()));
+    }
     let st = walk(d, it, v, Bounds { bytes: 64 << 20, depth: 256, nodes: 1 << 20, names: ["clone-bytes", "clone-depth", "clone-nodes"] }, list)?;
     let is_buf = |it: &Interp<'_>, o: ObjId| matches!(it.clone_class(o), CloneClass::Buffer);
     for &o in list {
@@ -174,7 +184,7 @@ fn walk(d: &Dom, it: &mut Interp<'_>, v: Value, b: Bounds, list: &[ObjId]) -> R<
         add(&mut c, d, 64 + n)?;
         it.charge((n / 64) as u64)?;
     }
-    Ok(State { root, nodes: c.nodes, bytes: c.bytes })
+    Ok(State { root, nodes: c.nodes, bytes: c.bytes, rec: None })
 }
 
 fn units(d: &Dom, it: &mut Interp<'_>, c: &mut Ser, s: bare_js::value::StrId) -> R<Rc<[u16]>> {
@@ -370,6 +380,9 @@ pub(crate) fn materialize(d: &Dom, it: &mut Interp<'_>, st: &State) -> R<Value> 
 
 /// `materialize` with a transfer list: the graph and the new ports of the list, in list order. A listed buffer that no node uses is dropped.
 pub(crate) fn materialize_with(d: &Dom, it: &mut Interp<'_>, st: &State, mut xf: Vec<Transfer>) -> R<(Value, Vec<ObjId>)> {
+    if let Some(rec) = &st.rec {
+        return Ok((it.clone_in(rec)?, Vec::new()));
+    }
     let keys: Vec<u64> = xf.iter().filter_map(|t| if let Transfer::Port(k) = t { Some(*k) } else { None }).collect();
     let mut ports = d.make_ports(it, &keys)?;
     let mut by_item: Vec<Option<ObjId>> = Vec::new();
