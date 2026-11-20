@@ -16169,7 +16169,7 @@ How it stays right (the invariant):
 - GC: the cache holds no cell. The address points into the global object, which the realm roots, and into its overflow record, which lives as long as the tag. The collector does not move cells. `Feedback::clear` still clears the entries when a shape was freed.
 - The cost: one more compare in `Obj::set_shape` and `Obj::reserve` (`self` against `watch`), and a pointer packed in two `u32` fields (no larger `Cache`).
 
-Check: `a_global_cache_follows_every_change_of_the_global_object` (adds that regrow the record 300 times between two runs of one site; a delete that goes back to an older shape, three rounds; a deleted and re-added name; `Object.defineProperty` that makes the global read-only; a setter on a global; `Object.setPrototypeOf(globalThis, ...)`), also under constant collection. Under Miri a stale address is a use after free.
+Check: `a_global_cache_follows_every_change_of_the_global_object` (adds that regrow the record 300 times between two runs of one site; a delete that goes back to an older shape, three rounds; a deleted and re-added name; `Object.defineProperty` that makes the global read-only; a setter on a global; `Object.setPrototypeOf(globalThis, ...)`), also under constant collection. Under Miri a stale address is a use after free. Miri (nightly) on this head: this test, `a_stack_that_grows_in_a_callee_keeps_the_registers_of_the_callers`, `load_keeps_the_global_object_in_the_shape_tree` and `def_is_hidden_after_load` pass (770 s). A check that Miri finds a stale address (a mutation of `Obj::set_shape` that does not bump the tag) did not finish, so it is not shown that this test catches that bug under Miri.
 
 Instructions of the whole process, same method:
 
