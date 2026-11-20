@@ -1,0 +1,81 @@
+# Rules of crates/js-diff/examples/test262_run.rs for tools/js/test262_js2.sh. Both engines get the same rules, so a skipped test is not
+# a failure of either. A test with a `module` or `async` flag is always skipped by the runner.
+# NAME: a test262 feature. include:FILE: a harness file. text:STRING: the test source holds STRING. allow:NAME: see below.
+# What the runner does not offer (the same as tools/fixtures/js/test262-skip.txt):
+cross-realm
+IsHTMLDDA
+SharedArrayBuffer
+Atomics
+Atomics.waitAsync
+ShadowRealm
+Temporal
+tail-call-optimization
+host-gc-required
+include:atomicsHelper.js
+include:detachArrayBuffer.js
+include:tcoHelper.js
+text:$262.agent
+text:$262.createRealm
+text:$262.detachArrayBuffer
+text:$262.evalScript
+text:$262.IsHTMLDDA
+import-attributes
+source-phase-imports
+import-defer
+json-modules
+# Core census features: a test runs only when each of its features is named by an `allow:` line (a test with no feature runs).
+# The census (docs/census/2026-11-18.tsv) has these syntax kinds; the first group is plain syntax of ES2015 to ES2022, the second the
+# built-ins of S2.7. Left out until S3 and S4 build them: generators, async functions and iteration, Symbol and its well-known symbols,
+# BigInt, Proxy and Reflect, typed arrays, RegExp features, Map and Set, Promise, modules and dynamic import, resource management.
+allow:arrow-function
+allow:class
+allow:class-fields-public
+allow:class-fields-private
+allow:class-fields-private-in
+allow:class-methods-private
+allow:class-static-methods-private
+allow:class-static-fields-public
+allow:class-static-fields-private
+allow:class-static-block
+allow:computed-property-names
+allow:const
+allow:let
+allow:default-parameters
+allow:destructuring-binding
+allow:destructuring-assignment
+allow:rest-parameters
+allow:object-rest
+allow:object-spread
+allow:spread
+allow:template
+allow:exponentiation
+allow:coalesce-expression
+allow:optional-chaining
+allow:optional-catch-binding
+allow:logical-assignment-operators
+allow:numeric-separator-literal
+allow:new.target
+allow:super
+allow:hashbang
+allow:json-superset
+allow:for-of
+allow:for-in-order
+allow:globalThis
+allow:__proto__
+allow:__getter__
+allow:__setter__
+allow:u180e
+allow:caller
+allow:Object.hasOwn
+allow:Object.fromEntries
+allow:Object.is
+allow:Array.prototype.at
+allow:Array.prototype.flat
+allow:Array.prototype.flatMap
+allow:Array.prototype.includes
+allow:Array.prototype.values
+allow:array-find-from-last
+allow:change-array-by-copy
+allow:stable-array-sort
+allow:error-cause
+allow:error-stack-accessor

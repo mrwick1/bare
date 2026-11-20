@@ -95,10 +95,20 @@ pub const PRELUDE: &str = include_str!("prelude.js");
 /// Compile `source` and make a [`Vm`] that can run it (`Vm::run_main(0)`). The prelude is compiled after the script, and it has run
 /// when this returns, so `Array.prototype.forEach` and the others are there.
 pub fn load(source: &str) -> Result<Vm, String> {
+    load_with("", source)
+}
+
+/// [`load`] with a host script that has run when this returns, after the prelude and before `source` (a test harness: it sets globals,
+/// and `source` keeps its own directive prologue).
+pub fn load_with(host: &str, source: &str) -> Result<Vm, String> {
     let shared = Arc::new(SharedAtoms::default());
     let mut prog = compile(source, &shared, Limits::default())?;
     let pre = prog.codes.len();
     prog.codes = compile_after(prog.codes, PRELUDE, &shared, Limits::default()).map_err(|e| format!("prelude: {e}"))?;
+    let at = prog.codes.len();
+    if !host.is_empty() {
+        prog.codes = compile_after(prog.codes, host, &shared, Limits::default()).map_err(|e| format!("host script: {e}"))?;
+    }
     let mut vm = Vm::new(prog, shared);
     if let Err(e) = vm.run_main(pre) {
         panic!("the prelude failed: {e:?}");
@@ -108,6 +118,11 @@ pub fn load(source: &str) -> Result<Vm, String> {
     let k = vm.realm.intern("__def");
     let g = vm.realm.global;
     vm.realm.define(g, crate::interp_rt::Key::Name(k), Value::UNDEFINED).expect("define");
+    if !host.is_empty()
+        && let Err(e) = vm.run_main(at)
+    {
+        return Err(format!("host script failed: {e:?}"));
+    }
     Ok(vm)
 }
 

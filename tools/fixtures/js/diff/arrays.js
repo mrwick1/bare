@@ -1,0 +1,11 @@
+var a = [5, 1, 4, 2, 3];
+print(a.length, a.indexOf(4), a.includes(9), a.slice(1, 3).join(), a.concat([9, 8]).join(), a.reverse().join());
+print(a.map(function (x) { return x * 2; }).join(), a.filter(function (x) { return x % 2; }).join(), a.reduce(function (s, x) { return s + x; }, 0));
+print(a.sort().join(), [10, 9, 1].sort().join(), [10, 9, 1].sort(function (x, y) { return x - y; }).join());
+var b = [1, 2, 3]; b.push(4, 5); print(b.pop(), b.shift(), b.unshift(0), b.join(), b.splice(1, 2, 'x').join(), b.join());
+var h = [1, , 3]; print(h.length, 1 in h, h.join());
+var c = []; c[5] = 1; print(c.length, Array.isArray(c), Array(3).length, new Array(2, 3).join());
+print([3, 4].findIndex(function (x) { return x > 3; }), [1, 2, 3].some(function (x) { return x > 2; }), [1, 2, 3].every(function (x) { return x > 2; }));
+var l = [1, 2, 3]; l.length = 1; print(l.join(), l.length);
+print([1, 2, 3].join('-'), [null, undefined, 1].join(), [[1, 2], [3]].join(';'));
+print(Array.from({ length: 3 }, function (v, i) { return i * i; }).join(), [3, 2, 1].lastIndexOf(1));
