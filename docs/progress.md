@@ -14145,3 +14145,28 @@ Callgrind (release with symbols, one run each, instruction counts): `form_load v
 Checks: new tests in `browser_controls_tests.rs` (a `ValidityState` of a dead element frees its key and its map entries; the same `validity` and `labels` object while a script holds it, and a new one after the collector freed it; a reused key answers for the new `ValidityState` only; the shared objects work after collections that no script reaches) and in `browser_select_tests.rs` (a collected `options` list frees its cache entry and a held one keeps it; a reused key answers for the new collection only; the select interfaces work after collections). Linux: `cargo test --locked -p bare --lib` with filters `controls select validity form label`: 167 passed, also with `BARE_GC_STRESS=1`. Crate tests before the rebase onto `c77f6247`: `bare` lib 1660 passed, `bare-js` lib 1061 passed, `bare-js-api` 5 passed. Windows 11 VM (cargo xwin debug test exe): same filters, 167 passed.
 
 Not tested: the matrix on `c77f6247` (the base build is the commit before the rebase; main added the stress flag and CI changes only); the full `bare` lib suite on Windows; peak memory of the persistent handles and owner entries (about 16 bytes for each `ValidityState`); the staging journeys.
+
+## 2026-11-20: module loader on Persistent (plan step S0.4, MD2)
+
+Changes (`docs/design-host-modules.md`, option A, plan step 3), all in `crates/bare/src/browser_loader/modules.rs`. The loader still calls the old `Interp` methods. Three raw references became `Persistent` handles:
+
+- `Modules::evals` holds a `Persistent` of the evaluation promise of each module graph, made in `run_graph`. `settle_evals` reads the promise from the handle at each checkpoint, and the handle drops when the promise is seen settled.
+- `Load::Throw` holds a `Persistent`, made where `module_parse` throws and where a bad specifier makes a `TypeError`. `finish_module` and `reject_dynamic_import` read the value from it.
+- `serve_imports` takes the `import()` queue with the interface method `Engine::take_dynamic_imports`, so each request's promise is a `Persistent`. The loader reads the promise object from the handle where it settles the request (`import_promise`).
+
+No `Host::roots` line is removed: there was none. The design already says so ("Old-engine calls that leave the old hook: None"); `evals` was rooted only by the engine (`ModRec::cap`). A link error from `module_link` and a rejection read in `settle_evals` stay raw values: the loader reports them at once, with no engine call between.
+
+Cost matrix: base = `a9943b94` (the head of #725, this work's start), built fresh into `/data/bare-tmp/s0/base-md2`; new = this change. archMachine, release, 3 runs for each row, minimum (`tools/js/cost_matrix.sh -j4`), 817 rows measured. Mean change: glibc +0.003%. `parse_load deep 1` and `deep 10` did not run (stack overflow on both trees, known). Two rows were over +0.5% under both allocators: `dataset_load keys 10000 50` +0.640% (jemalloc +0.640%) and `dataset_load keys 1000 50` +0.603% (+0.591%). No module code runs in those rows. With both trees built with `RUSTFLAGS="-C codegen-units=1"` (`/data/bare-tmp/s0/base-md2-cgu`, `/data/bare-tmp/s0/new-md2-cgu`, 3 runs): 3,190,230,727 to 3,190,229,953 (-0.000%) and 338,525,868 to 338,526,211 (+0.000%). That is the codegen-unit split, not new work.
+
+| Row (glibc) | Base | New | Change |
+| --- | ---: | ---: | ---: |
+| `loader_load modules 1` | 12,178,324 | 12,184,142 | +0.048% |
+| `loader_load modules 10` | 29,235,745 | 29,293,739 | +0.198% |
+| `loader_load dynamic 1` | 14,626,216 | 14,639,829 | +0.093% |
+| `loader_load dynamic 10` | 66,838,662 | 66,970,496 | +0.197% |
+
+The 8 `loader_load` rows: mean change +0.148% glibc. None is over +0.5%.
+
+Checks: new tests in `browser_loader_tests.rs` (a rejected top-level `await` is reported once after collections run between all tasks; `import()` of a namespace, a missing file and a syntax error settles under stress mode; a collection between `take_dynamic_imports` and `finish_dynamic_import` keeps a promise that no script holds). The stress tests set `Interp::set_gc_stress(true)` themselves, so they collect in both modes. Linux: `cargo test --locked -p bare --lib` with filters `loader` (118), `module` (18) and `import` (25) pass, also with `BARE_GC_STRESS=1`. Crate tests once: `bare` lib 1693 passed (6 ignored), `bare-js` lib 1076 passed (1 ignored), `bare-js-api` 6 passed. Windows 11 VM (cargo xwin debug test exe of `bare`): same three filters, 118, 18 and 25 passed.
+
+Not tested: a collection inside the loader between a take and a finish (the old engine collects only between tasks, so the new tests cannot make one; they check the handles across collections around the loader); a full `bare` run on Windows; wall time; peak memory of the handles; clippy (`cargo clippy -p bare` stops on lints in `bare-os` and `bare-observe` that are not in this change).
