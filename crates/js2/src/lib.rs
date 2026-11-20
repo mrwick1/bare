@@ -28,3 +28,5 @@ pub mod lex;
 pub mod ast;
 pub mod facts;
 pub mod parse;
+pub mod bytecode;
+pub mod verify;

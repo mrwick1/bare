@@ -8,7 +8,7 @@
 //!
 //! Reactions. A tree change tells the native watcher (`Dom::sync_watcher`), which cannot run script. The watcher puts a reaction on the
 //! queue of the element (`CeSt::queues`) and the element on the top element queue (`CeSt::stack`). `Host::call` opens one stack entry around
-//! each host call once the first `define` ran (`Dom::call_ce`), and `ce_pop` runs the reactions of that entry when the call ends, as the
+//! each host call once the first `define` ran (`Dom::dispatch_host`: `ce_enter`), and `ce_pop` runs the reactions of that entry when the call ends, as the
 //! `[CEReactions]` of the standard do. A page that never calls `define` pays one `Cell` read per host call. When the stack is empty (a change
 //! that does not come from a host call), the element goes on the backup queue and a microtask runs it (`flush`).
 //!
@@ -449,19 +449,13 @@ impl CeSt {
 }
 
 impl Dom {
-    /// `Host::call` with a scope of "custom element reactions" around the host function.
-    pub(crate) fn call_ce(&self, it: &mut Interp<'_>, h: H, this: Value, args: &[Value]) -> V {
+    /// Open the scope of "custom element reactions" of a host call (`Dom::dispatch_host`). `ce_pop` closes it.
+    pub(crate) fn ce_enter(&self) {
         st(self).borrow_mut().stack.push(Vec::new());
-        let r = h(self, it, this, args);
-        let q = self.ce_pop(it);
-        match (r, q) {
-            (Ok(v), Ok(())) => Ok(v),
-            (Err(e), _) | (Ok(_), Err(e)) => Err(e),
-        }
     }
 
     /// End a scope: run the reactions of its element queue, then queue the microtask of the backup queue when it is needed.
-    fn ce_pop(&self, it: &mut Interp<'_>) -> R<()> {
+    pub(crate) fn ce_pop(&self, it: &mut Interp<'_>) -> R<()> {
         let els = st(self).borrow_mut().stack.pop().unwrap_or_default();
         if !els.is_empty() {
             self.invoke(it, els)?;
@@ -887,7 +881,8 @@ pub(crate) fn interface_ctor(d: &Dom, it: &mut Interp<'_>, name: &str, new_ok: b
 }
 
 /// The error of `HTMLElement()` without `new`: `h` is the host function that was called.
-pub(crate) fn needs_new(it: &mut Interp<'_>, h: H) -> Error {
+pub(crate) fn needs_new(it: &mut Interp<'_>, h: Option<H>) -> Error {
+    let Some(h) = h else { return it.type_error("Failed to construct: please use the 'new' operator") };
     match HANDLERS.iter().position(|&x| x as usize == h as usize) {
         Some(k) => it.type_error(&format!("Failed to construct '{}': Please use the 'new' operator, this DOM object constructor cannot be called as a function.", IFACES[k])),
         None if h as usize == unknown_ctor as *const () as usize => it.type_error("Illegal constructor"),

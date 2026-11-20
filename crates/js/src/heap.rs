@@ -473,7 +473,7 @@ struct Str {
 /// The value is from the length counts of `docs/design-js.md` (to tune: `docs/progress.md`, "Strings").
 pub const ATOM_MAX: usize = 32;
 /// A host text of at most this many bytes is not looked up in the table of shared texts.
-const SHARE_MIN: usize = 256;
+pub(crate) const SHARE_MIN: usize = 256;
 
 /// A concatenation, not yet copied. `left` and `right` are the `index` of the children (their kind bits and their slot, no generation): a rope
 /// keeps its children alive until it is flat, and a flat rope never reads them again. `flat` is filled by the first read of the units.
