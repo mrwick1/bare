@@ -4,10 +4,9 @@
 
 use crate::browser::*;
 use crate::browser_dom::*;
-use bare_html::dom::Document;
 use crate::browser_scoped::*;
 use bare_html::dom::{NodeData, NodeId};
-use bare_js::eval::{Error, Interp};
+use bare_js::eval::Interp;
 use bare_js::value::{ObjId, Value};
 
 type V = R<Value>;
@@ -59,32 +58,6 @@ impl Dom {
 
     pub(crate) fn depth_of(&self, it: &mut Interp<'_>, n: NodeId) -> R<usize> {
         run(it, |s| self.depth_of_s(s, n))
-    }
-
-    pub(crate) fn insert_checked(&self, it: &mut Interp<'_>, parent: NodeId, node: NodeId, before: Option<NodeId>, op: Op) -> R<()> {
-        run(it, |s| self.insert_checked_s(s, parent, node, before, op))
-    }
-
-    pub(crate) fn check_insert(&self, it: &mut Interp<'_>, parent: NodeId, node: NodeId, before: Option<NodeId>, replacing: Option<NodeId>, op: Op) -> R<bool> {
-        run(it, |s| self.check_insert_s(s, parent, node, before, replacing, op))
-    }
-
-    pub(crate) fn insert_valid(&self, it: &mut Interp<'_>, parent: NodeId, node: NodeId, before: Option<NodeId>, frag: bool, op: Op) -> R<()> {
-        run(it, |s| self.insert_valid_s(s, parent, node, before, frag, op))
-    }
-
-    /// The error of a refused insert. `op` puts the name of the call in front, as Chrome does: "Failed to execute 'append' on 'Document': ...".
-    pub(crate) fn refuse(&self, it: &mut Interp<'_>, op: Op, parent: NodeId, name: &str, reason: &str) -> Error {
-        if op.0.is_empty() {
-            return self.dom_err(it, name, reason);
-        }
-        let iface = match (op.1, self.data(parent)) {
-            ("", NodeData::Document) => "Document",
-            ("", NodeData::ShadowRoot) => "DocumentFragment",
-            ("", _) => "Element",
-            (i, _) => i,
-        };
-        self.dom_err(it, name, &format!("Failed to execute '{}' on '{iface}': {reason}", op.0))
     }
 
     /// `def_method` for a function of the new form.
@@ -224,21 +197,8 @@ pub(crate) fn set_text_content(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[V
     Ok(Value::Undefined)
 }
 
-pub(crate) fn document_element(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    doc_child(d, it, this, |doc, c| matches!(doc.data(c), NodeData::Element { .. }))
-}
-
 pub(crate) fn body(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     html_child(d, it, this, &["body", "frameset"])
-}
-
-fn doc_child(d: &Dom, it: &mut Interp<'_>, this: Value, pick: impl Fn(&Document, NodeId) -> bool) -> V {
-    let root = d.nd(it, this)?;
-    let r = {
-        let doc = d.doc.borrow();
-        doc.children(root).find(|&c| pick(&doc, c))
-    };
-    d.wrap_opt(it, r)
 }
 
 fn html_child(d: &Dom, it: &mut Interp<'_>, this: Value, names: &[&str]) -> V {

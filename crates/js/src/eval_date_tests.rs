@@ -457,10 +457,10 @@ fn local_time_zone_names_and_offsets_in_text() {
 }
 
 #[test]
-fn local_time_zone_file_is_read_on_the_first_local_call_only() {
+fn local_time_zone_is_loaded_on_the_first_local_call_only() {
     big(|| {
         let mut it = realm();
-        // a zone that cannot be read would fail the realm if anything loaded it before the first local call
+        // a zone that cannot be loaded would fail the realm if anything loaded it before the first local call
         it.run_script("Date.UTC(2020, 0); new Date(5).toISOString(); new Date(5).getUTCHours(); new Date(NaN).getHours(); new Date(NaN).toString();").unwrap();
         assert!(it.intl.default_zone.is_none());
         assert_eq!(out(&mut it, "new Date(0).getTimezoneOffset() === new Date(0).getTimezoneOffset()"), "boolean:true");

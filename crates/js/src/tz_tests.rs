@@ -1,4 +1,4 @@
-//! Zone tests. Rules and files made here, then the system files of three zones with known offsets.
+//! Zone tests. Rules and files made here, then the embedded files of three zones with known offsets.
 
 use super::*;
 
@@ -105,29 +105,52 @@ fn names() {
     }
     assert!(is_utc_name("utc") && is_utc_name("Etc/GMT") && is_utc_name("Zulu"));
     assert!(!is_utc_name("Etc/GMT+5"));
-    assert!(is_file_name("America/Argentina/Buenos_Aires") && is_file_name("Etc/GMT+5"));
-    for bad in ["", "../etc/passwd", "Asia/../UTC", "/etc/passwd", "Asia//Kolkata", "posix/Asia/Kolkata", "right/UTC", "a.b", "posixrules", "Asia/Kolkata\0"] {
-        assert!(!is_file_name(bad), "{bad}");
-    }
 }
 
 #[test]
-fn system_files() {
-    let dir = std::env::var("TZDIR").unwrap_or_else(|_| "/usr/share/zoneinfo".into());
-    let load = |n: &str| std::fs::read(format!("{dir}/{n}")).ok().map(|b| Zone::parse(&b).expect(n));
-    let Some(ny) = load("America/New_York") else {
-        eprintln!("no system tzdata in {dir}: skipped");
-        return;
-    };
+fn embedded_files() {
+    let load = |n: &str| Zone::parse(bare_tzdata::find(n).expect(n)).expect(n);
+    let ny = load("America/New_York");
     assert_eq!(ny.offset(utc(2024, 1, 15, 12, 0, 0)), -5 * H);
     assert_eq!(ny.offset(utc(2024, 7, 1, 12, 0, 0)), -4 * H);
     assert_eq!(ny.offset(utc(2024, 3, 10, 7, 0, 0)), -4 * H);
     assert_eq!(ny.offset(utc(2060, 7, 1, 12, 0, 0)), -4 * H, "the footer after 2037");
     assert_eq!(ny.offset(utc(1850, 1, 1, 0, 0, 0)), -(4 * H + 56 * 60 + 2), "local mean time before 1883");
-    let kol = load("Asia/Kolkata").unwrap();
+    let kol = load("Asia/Kolkata");
     assert_eq!(kol.offset(utc(2024, 1, 5, 0, 0, 0)), 5 * H + 1800);
     assert_eq!(kol.offset(utc(1943, 1, 1, 0, 0, 0)), 6 * H + 1800, "war time");
-    let syd = load("Australia/Sydney").unwrap();
+    let syd = load("Australia/Sydney");
     assert_eq!(syd.offset(utc(2024, 1, 15, 0, 0, 0)), 11 * H);
     assert_eq!(syd.offset(utc(2024, 7, 15, 0, 0, 0)), 10 * H);
+}
+
+#[test]
+fn all_names_parse() {
+    for i in 0..bare_tzdata::len() {
+        let (n, bytes) = bare_tzdata::entry(i);
+        let z = Zone::parse(bytes).unwrap_or_else(|| panic!("{n}"));
+        z.offset(utc(2024, 7, 1, 0, 0, 0));
+    }
+}
+
+/// With a system tzdata of the same release, every name gives the same offset as the system file, every 6 hours from 1970 to 2040.
+/// Skipped when the system has another release or no files.
+#[test]
+fn embedded_matches_system() {
+    let dir = std::env::var("TZDIR").unwrap_or_else(|_| "/usr/share/zoneinfo".into());
+    let zi = std::fs::read_to_string(format!("{dir}/tzdata.zi")).unwrap_or_default();
+    if zi.lines().next() != Some(&format!("# version {}", bare_tzdata::VERSION)) {
+        eprintln!("no system tzdata {} in {dir}: skipped", bare_tzdata::VERSION);
+        return;
+    }
+    for i in 0..bare_tzdata::len() {
+        let (n, bytes) = bare_tzdata::entry(i);
+        let mine = Zone::parse(bytes).expect(n);
+        let sys = Zone::parse(&std::fs::read(format!("{dir}/{n}")).expect(n)).expect(n);
+        let mut t = utc(1970, 1, 1, 0, 0, 0);
+        while t < utc(2040, 1, 1, 0, 0, 0) {
+            assert_eq!(mine.offset(t), sys.offset(t), "{n} at {t}");
+            t += 6 * 3600;
+        }
+    }
 }

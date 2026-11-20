@@ -442,6 +442,8 @@ struct Parser<'a> {
     for_await_head: bool,
     /// Start + 1 of the first `await` expression since the last reset; 0 when none (Acorn: `awaitPos`).
     await_pos: u32,
+    /// Start + 1 of the first `await` used as a name since the last reset; 0 when none. An async arrow cannot have one in its parameters.
+    await_ident: u32,
     /// The module goal (see [`parse_module`]).
     module: bool,
     /// The exported names so far (a duplicate is an early error).
@@ -678,6 +680,7 @@ impl<'a> Parser<'a> {
             parens: Vec::new(),
             for_await_head: false,
             await_pos: 0,
+            await_ident: 0,
             module,
             export_names: Default::default(),
             local_exports: Vec::new(),
@@ -918,8 +921,11 @@ impl<'a> Parser<'a> {
     }
 
     /// Reserved words and context rules for a name used as a reference or a binding.
-    fn check_word(&self, span: Span) -> R<()> {
+    fn check_word(&mut self, span: Span) -> R<()> {
         let text = self.p.text(span);
+        if text == "await" {
+            self.await_ident = span.start + 1;
+        }
         let escaped = text.as_bytes().contains(&b'\\');
         if !(escaped || self.strict || self.ctx.is_async || self.ctx.is_gen || self.module) {
             return Ok(());
@@ -941,7 +947,7 @@ impl<'a> Parser<'a> {
     }
 
     /// A name that is bound (declared, a parameter, an assignment target in a pattern).
-    fn check_binding_name(&self, span: Span) -> R<()> {
+    fn check_binding_name(&mut self, span: Span) -> R<()> {
         self.check_word(span)?;
         if self.strict {
             let n = self.name_of(span);
@@ -1468,13 +1474,13 @@ impl<'a> Parser<'a> {
         if t != "\"use strict\"" && t != "'use strict'" {
             return Ok(());
         }
-        if self.strict {
-            return Ok(());
-        }
         if let Some(i) = info
             && !i.simple
         {
             return Err(self.early("'use strict' directive in a function with non-simple parameters", span));
+        }
+        if self.strict {
+            return Ok(());
         }
         if let Some(o) = *octal {
             return Err(self.early("octal escape sequences are not allowed in strict mode", Span { start: o, end: o + 1 }));
@@ -1660,6 +1666,12 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_expr_statement(&mut self, start: u32, prologue: bool, sc: Sc) -> R<StmtId> {
+        // `arguments:` in a field initializer is a label, not a use of `arguments`.
+        if self.ctx.field_init && self.tok.kind == Kind::Ident && self.peek()?.kind == Kind::Punct(P::Colon) {
+            let label = self.tspan();
+            self.advance()?;
+            return self.parse_labeled(start, label, sc);
+        }
         let e = self.parse_expression(false)?;
         let ex = self.ex(e);
         if matches!(ex.kind, ExprKind::Ident) && self.is(P::Colon) && !self.is_paren(e) {
@@ -2795,6 +2807,7 @@ impl<'a> Parser<'a> {
             }
             Kind::Punct(P::Slash | P::SlashAssign) => {
                 self.rescan(Goal::RegExp)?;
+                self.check_regexp()?;
                 self.advance()?;
                 self.mk_expr(ExprKind::RegExp, start)
             }
@@ -2872,10 +2885,23 @@ impl<'a> Parser<'a> {
         self.mk_expr(ExprKind::Ident, start)
     }
 
+    /// The early errors of the pattern of the regular expression token. The pre-parse of the text has checked it already.
+    #[inline(never)]
+    fn check_regexp(&self) -> R<()> {
+        if self.mode != Mode::Function
+            && let Some((pattern, flags)) = lex::regexp_parts(self.p.source, &self.tok)
+            && let Err(msg) = crate::regexp_check::check(pattern, flags)
+        {
+            return Err(self.syntax(msg, self.tspan()));
+        }
+        Ok(())
+    }
+
     /// `async (...)`: a call of a function named `async`, or the parameters of an async arrow.
     fn parse_async_call_or_arrow(&mut self, start: u32, async_tok: Token) -> R<ExprId> {
         let head = self.head();
         let old_await = std::mem::take(&mut self.await_pos);
+        let old_ident = std::mem::take(&mut self.await_ident);
         self.expect(P::LParen)?;
         let base = self.lbegin();
         let mut trailing_comma = false;
@@ -2890,8 +2916,11 @@ impl<'a> Parser<'a> {
         }
         self.advance()?; // `)`
         let arrow = self.is(P::Arrow) && !self.tok.newline_before;
-        if arrow && self.await_pos != 0 {
+        if arrow && (self.await_pos != 0 || self.await_ident != 0) {
             return Err(self.early("an arrow function parameter contains an await expression", Span { start, end: self.prev_end }));
+        }
+        if arrow || self.await_ident == 0 {
+            self.await_ident = old_ident;
         }
         if self.await_pos == 0 || arrow {
             self.await_pos = old_await;
@@ -3292,10 +3321,10 @@ impl<'a> Parser<'a> {
         let mut name = None;
         if self.tok.kind == Kind::Ident {
             let s = self.tspan();
-            let saved = self.ctx;
-            (self.ctx.is_async, self.ctx.is_gen) = (is_async, is_gen);
+            let (saved, ident) = (self.ctx, self.await_ident);
+            (self.ctx.is_async, self.ctx.is_gen, self.ctx.static_block) = (is_async, is_gen, false);
             let r = self.check_binding_name(s);
-            self.ctx = saved;
+            (self.ctx, self.await_ident) = (saved, ident);
             r?;
             name = Some(s);
             self.advance()?;
@@ -3342,9 +3371,9 @@ impl<'a> Parser<'a> {
         self.label_base = self.labels.len();
         self.push_scope(S_VAR | S_FUNC);
         self.scopes[self.nscopes - 1].ref_base = mark.refs;
-        let old_await = std::mem::take(&mut self.await_pos);
+        let (old_await, old_ident) = (std::mem::take(&mut self.await_pos), std::mem::take(&mut self.await_ident));
         let r = self.function_inner(name, kind);
-        self.await_pos = old_await;
+        (self.await_pos, self.await_ident) = (old_await, old_ident);
         self.pop_scope();
         self.labels.truncate(self.label_base);
         let strict = self.strict;

@@ -50,13 +50,13 @@
 
 use crate::browser::*;
 use crate::browser_dom as nd;
+use crate::browser_scoped::*;
 use crate::browser_selection::Dir;
+use bare_js_api::{Args, Local};
 use bare_css::cascade::Change;
 use bare_html::dom::{Document, Mark, NodeData, NodeId};
 use bare_js::eval::Interp;
 use bare_js::value::{ObjId, Value};
-
-type V = R<Value>;
 
 /// Modifier keys held at the time of an event.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -163,37 +163,42 @@ pub(crate) struct UiState {
 // ------------------------------------------------------------------------------------------ getters
 
 /// A traced value of the UI event `this`, or `null` when `f` gives none.
-pub(crate) fn ui_value(d: &Dom, it: &mut Interp<'_>, this: Value, f: impl for<'a> FnOnce(&'a EventState) -> Option<&'a bare_js_api::Traced<Value>>) -> V {
-    with_ui(d, it, this, |_, _| ())?;
-    let o = d.event_of(it, this)?;
+pub(crate) fn ui_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, f: impl for<'a> FnOnce(&'a EventState) -> Option<&'a bare_js_api::Traced<Value>>) -> Res<'s, Local<'s>> {
+    with_ui(d, s, this, |_, _| ())?;
+    let o = d.event_of_s(s, this)?;
     let st = d.st.borrow();
-    Ok(f(&st.events[&o]).map_or(Value::Null, |v| it.traced_value(v)))
+    Ok(match f(&st.events[&o]) {
+        Some(v) => s.traced(v),
+        None => s.null(),
+    })
 }
 
-pub(crate) fn with_ui<T>(d: &Dom, it: &mut Interp<'_>, this: Value, f: impl FnOnce(&EventState, &Ui) -> T) -> R<T> {
-    let o = d.event_of(it, this)?;
+pub(crate) fn with_ui<'s, T>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, f: impl FnOnce(&EventState, &Ui) -> T) -> Res<'s, T> {
+    let o = d.event_of_s(s, this)?;
     let st = d.st.borrow();
     let e = &st.events[&o];
     match &e.ui {
         Some(u) => Ok(f(e, u)),
         None => {
             drop(st);
-            Err(it.type_error("Illegal invocation"))
+            Err(s.type_error("Illegal invocation"))
         }
     }
 }
 
 macro_rules! num {
     ($name:ident, |$u:ident| $e:expr) => {
-        pub(crate) fn $name(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-            with_ui(d, it, this, |_, $u| Value::Number($e as f64))
+        pub(crate) fn $name<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+            let n = with_ui(d, s, this, |_, $u| $e as f64)?;
+            Ok(s.number(n))
         }
     };
 }
 macro_rules! flag {
     ($name:ident, |$u:ident| $e:expr) => {
-        pub(crate) fn $name(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-            with_ui(d, it, this, |_, $u| Value::Bool($e))
+        pub(crate) fn $name<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+            let b = with_ui(d, s, this, |_, $u| $e)?;
+            Ok(s.boolean(b))
         }
     };
 }
@@ -228,40 +233,39 @@ impl PointerData {
     pub(crate) const MOUSE: PointerData = PointerData { id: 1, width: 1.0, height: 1.0, pressure: 0.0, tangential: 0.0, tilt: (0, 0), twist: 0, kind: String::new(), primary: true };
 }
 
-pub(crate) fn related(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    ui_value(d, it, this, |e| Some(&e.related))
+pub(crate) fn related<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    ui_value(d, s, this, |e| Some(&e.related))
 }
 
-pub(crate) fn pointer_type(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let k = with_ui(d, it, this, |_, u| u.pointer.as_ref().map_or("mouse".to_string(), |p| p.kind.clone()))?;
-    d.js_str(it, &k)
+pub(crate) fn pointer_type<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let k = with_ui(d, s, this, |_, u| u.pointer.as_ref().map_or("mouse".to_string(), |p| p.kind.clone()))?;
+    d.js_str_s(s, &k)
 }
 
-fn text_of(d: &Dom, it: &mut Interp<'_>, this: Value, f: impl FnOnce(&Ui) -> String) -> V {
-    let s = with_ui(d, it, this, |_, u| f(u))?;
-    d.js_str(it, &s)
+fn text_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, f: impl FnOnce(&Ui) -> String) -> Res<'s, Local<'s>> {
+    let t = with_ui(d, s, this, |_, u| f(u))?;
+    d.js_str_s(s, &t)
 }
 
-pub(crate) fn key(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    text_of(d, it, this, |u| u.key.clone())
+pub(crate) fn key<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    text_of(d, s, this, |u| u.key.clone())
 }
 
-pub(crate) fn code(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    text_of(d, it, this, |u| u.code.clone())
+pub(crate) fn code<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    text_of(d, s, this, |u| u.code.clone())
 }
 
-pub(crate) fn input_type(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    text_of(d, it, this, |u| u.input_type.clone())
+pub(crate) fn input_type<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    text_of(d, s, this, |u| u.input_type.clone())
 }
 
-pub(crate) fn data(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    match with_ui(d, it, this, |_, u| u.data.clone())? {
-        Some(s) => d.js_str(it, &s),
-        None => Ok(Value::Null),
+pub(crate) fn data<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    match with_ui(d, s, this, |_, u| u.data.clone())? {
+        Some(t) => d.js_str_s(s, &t),
+        None => Ok(s.null()),
     }
 }
 
-/// The legacy `keyCode`: the ASCII code of a letter or a digit, and the codes of the keys that scripts test.
 fn key_code_of(key: &str, code: &str) -> u32 {
     match key {
         "Backspace" => 8,
