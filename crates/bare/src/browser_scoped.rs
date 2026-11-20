@@ -348,6 +348,34 @@ pub(crate) fn is_object(s: &Sc<'_, '_>, v: Local<'_>) -> bool {
     matches!(s.type_of(v), Type::Object | Type::Function)
 }
 
+/// Property names that a handler reads on every call, kept as strings that the engine holds (`Persistent`). The table is made at its
+/// first use. A read then costs one handle and a key check, not a lookup of the text in the atom table (about 290 instructions).
+#[derive(Default)]
+pub(crate) struct Names(std::cell::OnceCell<Box<[Persistent]>>);
+
+impl Names {
+    /// The name `list[i]` as a local of this scope. `list` is the same list at every call.
+    #[inline]
+    pub(crate) fn local<'s>(&self, s: &mut Sc<'s, '_>, list: &[&str], i: usize) -> Res<'s, Local<'s>> {
+        match self.0.get() {
+            Some(t) => Ok(s.local(&t[i])),
+            None => self.make(s, list, i),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn make<'s>(&self, s: &mut Sc<'s, '_>, list: &[&str], i: usize) -> Res<'s, Local<'s>> {
+        let mut t = Vec::with_capacity(list.len());
+        for n in list {
+            let l = s.string(n)?;
+            t.push(s.persist(l));
+        }
+        let t = self.0.get_or_init(|| t.into_boxed_slice());
+        Ok(s.local(&t[i]))
+    }
+}
+
 /// Is `v` `undefined` or `null`?
 #[inline]
 pub(crate) fn is_nullish(s: &Sc<'_, '_>, v: Local<'_>) -> bool {

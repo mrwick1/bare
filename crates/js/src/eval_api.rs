@@ -200,6 +200,10 @@ impl<'p> Interp<'p> {
 
     fn api_key(&mut self, key: bare_js_api::Local<'_>) -> Result<PropertyKey, Error> {
         let k = self.api_at(key);
+        // A string is the usual key: `key_from_string` checks the handle itself, so skip the `to_string` of `to_property_key`.
+        if let Value::String(s) = k {
+            return Ok(h!(self, self.heap.key_from_string(s)));
+        }
         Ok(h!(self, self.heap.to_property_key(k)))
     }
 

@@ -146,6 +146,7 @@ struct Fns {
 /// The stream state of one `Dom`.
 #[derive(Default)]
 pub(crate) struct Streams {
+    names: Names,
     st: RefCell<State>,
     lim: Cell<StreamLimits>,
     fns: OnceCell<Fns>,
@@ -241,6 +242,22 @@ fn enter<'s, 'p, T>(d: &Dom, s: &mut Sc<'s, 'p>, f: impl FnOnce(&mut Sc<'s, 'p>)
 
 fn prop<'s>(s: &mut Sc<'s, '_>, o: Local<'s>, name: &str) -> Res<'s, Local<'s>> {
     s.get_str(o, name)
+}
+
+/// The names that the constructor reads on every call. `K_*` index it.
+const NAMES: [&str; 7] = ["autoAllocateChunkSize", "cancel", "pull", "start", "type", "highWaterMark", "size"];
+const K_AUTO: usize = 0;
+const K_CANCEL: usize = 1;
+const K_PULL: usize = 2;
+const K_START: usize = 3;
+const K_TYPE: usize = 4;
+const K_HWM: usize = 5;
+const K_SIZE: usize = 6;
+
+/// `o[NAMES[i]]`, with no lookup of the text.
+fn named<'s>(d: &Dom, s: &mut Sc<'s, '_>, o: Local<'s>, i: usize) -> Res<'s, Local<'s>> {
+    let k = d.streams.names.local(s, &NAMES, i)?;
+    s.get(o, k)
 }
 
 fn thrown<'s>(e: Error<'s>) -> Res<'s, Local<'s>> {
@@ -533,10 +550,10 @@ fn cancel_err<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> 
 
 // ---------------------------------------------------------------------------------------------- constructor
 
-fn callback_option<'s>(s: &mut Sc<'s, '_>, src: Local<'s>, name: &str) -> Res<'s, Local<'s>> {
-    let v = prop(s, src, name)?;
+fn callback_option<'s>(d: &Dom, s: &mut Sc<'s, '_>, src: Local<'s>, i: usize) -> Res<'s, Local<'s>> {
+    let v = named(d, s, src, i)?;
     if s.type_of(v) != Type::Undefined && !s.is_callable(v) {
-        return Err(s.type_error(&format!("Failed to construct 'ReadableStream': The {name} member is not a function")));
+        return Err(s.type_error(&format!("Failed to construct 'ReadableStream': The {} member is not a function", NAMES[i])));
     }
     Ok(v)
 }
@@ -567,14 +584,14 @@ fn construct<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>) -> Res<'s, Local<'s>>
             return Err(s.type_error("Failed to construct 'ReadableStream': The underlying source is not an object"));
         }
         // Dictionary members are read in alphabetical order, as WebIDL does.
-        let auto = prop(s, src, "autoAllocateChunkSize")?;
+        let auto = named(d, s, src, K_AUTO)?;
         if s.type_of(auto) != Type::Undefined {
             return Err(unsupp("ReadableStream autoAllocateChunkSize (byte streams)"));
         }
-        cancel = callback_option(s, src, "cancel")?;
-        pull = callback_option(s, src, "pull")?;
-        start = callback_option(s, src, "start")?;
-        let ty = prop(s, src, "type")?;
+        cancel = callback_option(d, s, src, K_CANCEL)?;
+        pull = callback_option(d, s, src, K_PULL)?;
+        start = callback_option(d, s, src, K_START)?;
+        let ty = named(d, s, src, K_TYPE)?;
         if s.type_of(ty) != Type::Undefined {
             let t = s.to_string(ty)?;
             let text = s.as_str(t).map(|x| x.to_string_lossy()).unwrap_or_default();
@@ -589,14 +606,14 @@ fn construct<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>) -> Res<'s, Local<'s>>
         if !is_object(s, strategy) {
             return Err(s.type_error("Failed to construct 'ReadableStream': The queuing strategy is not an object"));
         }
-        let h = prop(s, strategy, "highWaterMark")?;
+        let h = named(d, s, strategy, K_HWM)?;
         if s.type_of(h) != Type::Undefined {
             hwm = s.to_number(h)?;
             if hwm.is_nan() || hwm < 0.0 {
                 return Err(s.range_error("Failed to construct 'ReadableStream': Invalid highWaterMark"));
             }
         }
-        let size = prop(s, strategy, "size")?;
+        let size = named(d, s, strategy, K_SIZE)?;
         if s.type_of(size) != Type::Undefined {
             if !s.is_callable(size) {
                 return Err(s.type_error("Failed to construct 'ReadableStream': The size member is not a function"));
