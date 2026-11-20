@@ -263,7 +263,7 @@ impl Marker<'_> {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn cell(&mut self, p: NonNull<u8>) {
         // SAFETY: `p` is a cell: its first 8 bytes are its header.
         let h = unsafe { p.cast::<CellHeader>().read() };
