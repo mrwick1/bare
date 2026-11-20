@@ -1063,6 +1063,10 @@ mod tests {
 
     fn saved_pages() -> Vec<String> {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        if !root.join("tools/fixtures").is_dir() {
+            eprintln!("no checkout at {}: saved pages skipped", root.display());
+            return Vec::new();
+        }
         let mut pages = Vec::new();
         for dir in ["tools/fixtures/staging", "tools/fixtures/ui", "tools/fixtures/drive", "crates/paint/tests/fixtures"] {
             for e in std::fs::read_dir(root.join(dir)).unwrap().flatten() {

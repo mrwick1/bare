@@ -17252,6 +17252,21 @@ Tests. Linux, debug: `cargo test --locked -p bare-js-api -p bare-js -p bare --li
 
 Not tested: the whole `bare --lib` with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1` (the base fails one test under whole-crate `BARE_GC_STRESS=1`, as the entry before says); macOS; RSS and wall time; `-J` on the old head `2876c1e1`; the stress mode with a collect between a stream `read` and its reaction; the merge with the open PRs B (#779), A2 (#781) and G (#782).
 
+## Four `bare --lib` tests on Windows (2026-11-20)
+
+Four `bare --lib` tests failed on the Windows 11 VM and passed on Linux. Reproduced on the VM with a build of `origin/main` (43b62b05): `cargo xwin test --target x86_64-pc-windows-msvc -p bare --lib`, exe run through `winssh`. 1720 tests filtered out, 4 failed.
+
+| Test | Cause (verified on the VM) | Fix |
+| --- | --- | --- |
+| `browser_date_tests::local_time_uses_the_zone_of_the_realm_in_the_browser` | The VM has no `/usr/share/zoneinfo`, and `TZDIR` is not set. `set_default_time_zone("Asia/Kolkata")` finds no zone file and throws a `RangeError`. | The test returns early, with a message, when `$TZDIR` or `/usr/share/zoneinfo` has no `Asia/Kolkata`. The same rule as `tz_tests::system_files`. |
+| `browser_session::tests::a_page_parsed_in_slices_...`, `a_page_fed_in_pieces_...` | `saved_pages` reads `tools/fixtures` from `env!("CARGO_MANIFEST_DIR")`. A cross build bakes in the Linux path of the checkout. The VM has no such path, so `read_dir` returns `NotFound`. | `saved_pages` returns no pages, with a message, when `tools/fixtures` is not there. A checkout still runs both tests on 36 pages. |
+| `resources::tests::staging_login_fixture_discovery` | The same baked-in path. | The test uses `include_str!` for `tools/fixtures/staging/login.html`. It now runs on the VM. |
+
+Result. Linux, debug: `cargo test --locked -q -p bare --lib`: 1718 passed, 6 ignored. Windows 11 VM, whole `bare --lib`: 1718 passed, 6 ignored, 0 failed.
+
+Known gap, not fixed here: Windows has no time zone data. A realm with no zone file uses UTC, and `timeZone: "Asia/Kolkata"` throws. The date test skips on the VM, so the VM does not test zone rules. A fix needs zone data in `bare-os` or in the binary. That is the "local time zone with zone data" item of cross-platform topic 2, and it costs binary size and memory.
+
+Not tested: macOS; the two session tests with real pages on Windows (they skip there); a base build on the VM after the fix.
 ## 2026-11-20: js2 early errors, group 1 (parser rules)
 
 Task: raise the test262 pass rate of js2 on early errors (a script that must fail at parse time and is accepted, a valid script that is rejected). Base: `43b62b05` (`origin/main`). Method: `tools/js/test262_js2.sh -j 6` on the base, then a scan of every test of `test/language`, `test/annexB/language`, `test/built-ins`, `test/staging` and `test/annexB/built-ins` (module tests left out), whatever their features, with `negative: phase: parse|early` (must be a SyntaxError) or no `negative` (must not be a SyntaxError). The scan compiles each file in sloppy and strict mode with `script::compile` (a scratch example, not committed). A `not supported yet` error counts as accepted for a negative test: it comes after the parse.
@@ -17444,3 +17459,30 @@ Start-up (`script_run` of `var x = 1;`): 1,793,513 (base, round 1; 1,794,107 in 
 ### Not tested
 
 Windows and macOS; Miri; `Symbol.species` and `Symbol.toStringTag` (no `Symbol`); a subclass with a script constructor that calls `then` (`TypeError`, see above); `finally`, `withResolvers`, `try` and the combinators (not in this step, skipped by test262 features); a rejected promise reported by the host in a real browser loop (the host side of `take_rejections` is not built); a second test262 revision; the base measurement against the newest `origin/main`.
+## Time zone data in the binary, on every OS (2026-11-21)
+
+Design: [design-time-zones.md](design-time-zones.md), "Decisions (owner, 2026-11-20)". Base: `0c56d4a1` (`origin/main`). Machine: archMachine (AMD Ryzen 9 5900HX), not idle (other sessions ran). Windows: the Windows 11 VM, local zone `Pacific Standard Time`.
+
+What changed.
+
+1. New crate `bare-tzdata` (no dependencies). `tzdata.bin` holds the slim TZif file of each distinct zone of tzdata 2026f and a sorted name table (597 names, 344 zones, 220,237 B). `find(name)` is a binary search that returns a slice. `windows.txt` holds the 142 CLDR territory-001 rows (5,461 B); `windows_zone(key)` scans it. `tools/gen_tz.py` builds both files from `data/tz/tzdata.zi` and `data/tz/windowsZones.xml` (`zic -b slim`); `--check` fails when a file is out of date. The generator fails when a CLDR target is not a name of the data.
+2. `eval_intl.rs` loads zones with `bare_tzdata::find`. It reads no file and no `TZDIR`. `is_file_name` and `MAX_FILE` are gone. The charge of 10,000 steps stays for each zone load. A name that is not in the data now costs no steps (it cost 10,000 when its format was valid).
+3. `bare-os::tz::local_zone()`: the `/etc/localtime` link on Unix (code moved from `eval_intl.rs`, same logic); `GetDynamicTimeZoneInformation`, then the CLDR row, on Windows. A key with no row gets a fixed offset from `Bias` plus the active bias (`+05:30`, `UTC` for 0). `TZ` is still read in `eval_intl.rs` (a `TZ` that is not a zone falls through to the OS zone, as before). `eval_intl` left the `known` list of `tools/portable_check.sh`.
+4. Tests: `tz_tests::embedded_files` (was `system_files`, reads the embedded data), `all_names_parse`, `embedded_matches_system` (offset of each of 597 names every 6 hours from 1970 to 2040 against the system files of the same release; skipped when the release differs), `bare-tzdata` tests (sorted names, links, bad names, every Windows row has data), `bare-os::tz` tests (key with and without a row).
+
+Results.
+
+| Check | Result |
+| --- | --- |
+| `browser_date_tests::local_time_uses_the_zone_of_the_realm_in_the_browser` | passes on Linux and on the VM (no skip) |
+| `bare-js` tests that failed on the VM (`date_tests` 2, `intl_tests` 3) | pass on the VM (`date_tests intl_tests tz_tests`: 41 passed) |
+| Linux, debug, `FULL_TESTS=1 cargo test --locked -p bare-js -p bare-os -p bare-tzdata -p bare --lib` | `bare` 1718 passed (6 ignored); `bare-js` 1106 passed (1 ignored); `bare-os` 12; `bare-tzdata` 3; 0 failed |
+| VM, `bare --lib` | 1715 passed, 3 failed: `browser_session` (2) and `resources::tests::staging_login_fixture_discovery`. `NotFound` on a fixture path. The same 3 as in #788, which fixes them. Not caused by this change. |
+| VM, `bare-js --lib` | 1103 passed, 3 failed: `bc_gen::tests::golden_disassembly`, `eval::tests::parser_corpus_never_panics_or_faults`, `parse::tests::corpus_status_matches_acorn`. `NotFound` on a corpus path (the exe runs without the checkout). Not caused by this change. |
+| VM, local zone | A probe that calls `bare_os::tz::local_zone()`: `Pacific Standard Time` gives `America/Los_Angeles`; after `tzutil /s`, `India Standard Time` gives `Asia/Calcutta`, `Nepal Standard Time` gives `Asia/Katmandu`. Each name has data. The VM zone is restored. |
+| Cost matrix (`tools/js/cost_matrix.sh -j4`, 817 rows, base and new, instruction counts) | 0 rows over +0.5% under both allocators (0 under glibc, so no jemalloc run). Largest row: `resources_load small 10` +0.083%. Mean -0.008%. Lowest: `intl_load locale 10` -2.6% and `locale 1` -2.5% (hypothesis: the old code ran `is_file_name` on each call before the cache lookup). 2 rows failed to run: `parse_load deep 1` and `deep 10` overflow the stack on the base too (exit 134). |
+| Start-up | The blob is never touched before the first local-time call. A row with no local-time call: `date_load clock 1` 21,771,530 (base) and 21,769,312 (new) instructions, -2,218. |
+| Release binary size, `bare-mcp` Linux amd64 | 19,132,160 B (base) to 19,345,696 B (new): +213,536 B (+1.1%). The data is +225,698 B; the removed file code gives the rest back. |
+| One zone load, `find` + `Zone::parse`, against `metadata` + `read` + `Zone::parse` of the system file (best of 5 batches of 200,000, 3 runs, machine not idle) | `America/New_York`: 402, 517, 406 ns against 1,982, 2,420, 1,970 ns. `Asia/Kolkata`: 361, 174, 165 ns against 4,040, 1,693, 1,603 ns. `Pacific/Auckland`: 384, 323, 305 ns against 2,702, 1,988, 1,851 ns. The system files on this machine are fat; the embedded files are slim. |
+
+Not tested: macOS and a macOS build of the new code beyond the existing cross check; Windows 10 and ARM; the Windows release binary size; a Windows zone id with no CLDR row on the VM (`tzutil` refuses the two retired ids; the unit test covers the offset); the `bare-drive` journey of the design (check 4: `getTimezoneOffset` and `resolvedOptions().timeZone` through the whole browser on the VM); RSS of the whole browser; wall time on an idle machine; `tools/portable_check.sh` without `--scan` (the scan fails on three older files of main: `downloads/run.rs`, `force.rs`, `mcp/src/main.rs`; none is touched here); the stale-`known` check of the scan, which runs after that failure.
