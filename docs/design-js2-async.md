@@ -402,3 +402,10 @@ Each has a recommended answer.
 8. May `Symbol` (at least `iterator`, `asyncIterator`, `species`, `toStringTag`) be scheduled as its own step before G3 and P3? Recommended: yes, a small step first. Until then generators work with `next()` and the intrinsic `for-of` fast path, and `Promise` reads `constructor` as `%Promise%` only.
 9. Is `for await` and the async generator (A2) after the browser slice? Recommended: yes. The census shows 25 uses of async generator functions in 7 workloads and the journeys can wait. Re-run the census (P0.1) when a journey is added.
 10. Do we pin the code of a function that has a suspended activation, when bytecode flushing comes? Recommended: yes: never flush a `gen_kind` code while a counter on it is above 0.
+
+## Decisions (owner, 2026-11-21)
+
+1. Suspended frames: option A (copy the live registers into a heap record). The G0 kill criterion stays.
+2. Build order: P and G in parallel, then A1. The small `Symbol` step comes before G3 and P3. A2 (async generators, `for await`) comes after the browser slice.
+3. Combinators (question 4): write them in Rust from the start, not in `prelude.js`.
+4. Questions 3, 5, 6, 7 and 10: accepted as written.
