@@ -42,12 +42,14 @@
 //! GC: the made objects are roots. A form traces its Blobs and an iterator traces its form. Side tables are pruned at `collect`.
 
 use crate::browser::*;
-use crate::browser_platform::{V, arg};
+use crate::browser_scoped::*;
 use bare_js::eval::{Error, Interp};
-use bare_js::heap::{Elem, PropertyDescriptor};
-use bare_js::value::{ObjId, PropertyKey, Value};
+use bare_js::value::{ObjId, Value};
+use bare_js_api::{Args, Attrs, Elem, Error as AErr, HostFn, Intrinsic, Local, Type};
 use std::cell::{Cell, RefCell};
 use std::fmt::Write;
+
+type V = R<Value>;
 
 /// The user agent string, and the major version that `userAgentData.brands` reports. The only place of both.
 pub(crate) const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36";
@@ -235,7 +237,7 @@ impl Dom {
         }
         let mut r = [0u8; 16];
         if page_random(&mut r).is_err() {
-            return Err(random_failed(self, it));
+            return Err(random_failed_old(self, it));
         }
         const ALNUM: &[u8; 62] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
         Ok(r.iter().fold(String::from("----WebKitFormBoundary"), |mut s, b| {
@@ -267,229 +269,248 @@ fn text(out: &mut Vec<u8>, s: &str, norm: bool, esc: bool) {
 // ------------------------------------------------------------------------------------------ install
 
 macro_rules! lazy {
-    ($($f:ident $i:literal),*) => { $(fn $f(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V { lazy(d, it, $i, a) })* };
+    ($($f:ident $i:literal),*) => { $(fn $f<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> { lazy(d, s, $i, a) })* };
 }
 lazy!(lazy0 0, lazy1 1, lazy2 2, lazy3 3, lazy4 4, lazy5 5);
 
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    let g = it.global_object();
-    for (i, h) in [lazy0 as H, lazy1, lazy2, lazy3, lazy4, lazy5].into_iter().enumerate() {
-        let f = d.add_fn(it, h, NAMES[i], 0, false)?;
-        let k = d.key(it, NAMES[i])?;
-        let desc = PropertyDescriptor { get: Some(Some(f)), set: Some(Some(f)), enumerable: Some(i < 2), configurable: Some(true), ..Default::default() };
-        it.heap.define_own_property(g, k, &desc).map_err(|e| it.heap_error(e))?;
-    }
-    Ok(())
+    run(it, |s| {
+        let g = s.global();
+        for (i, h) in [lazy0 as HS, lazy1, lazy2, lazy3, lazy4, lazy5].into_iter().enumerate() {
+            let f = d.add_fn_s(s, h, NAMES[i], 0, HostFn::Method)?;
+            s.define_accessor_str(g, NAMES[i], Some(f), Some(f), Attrs { writable: false, enumerable: i < 2, configurable: true })?;
+        }
+        Ok(())
+    })
 }
 
 /// The getter (no argument) and the setter (the new value) of global `NAMES[i]`.
-fn lazy(d: &Dom, it: &mut Interp<'_>, i: usize, a: &[Value]) -> V {
-    let k = d.key(it, NAMES[i])?;
-    let g = it.global_object();
-    if let Some(&v) = a.first() {
-        it.define_data(g, k, v, true, i < 2, true)?;
-        return Ok(Value::Undefined);
+fn lazy<'s>(d: &Dom, s: &mut Sc<'s, '_>, i: usize, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let g = s.global();
+    let attrs = Attrs { writable: true, enumerable: i < 2, configurable: true };
+    if let Some(v) = a.get(0) {
+        s.define_str(g, NAMES[i], v, attrs)?;
+        return Ok(s.undefined());
     }
-    let m = made(d, it)?;
-    let v = Value::Object(m.glob[i]);
-    it.define_data(g, k, v, true, i < 2, true)?;
+    let m = made_s(d, s)?;
+    let v = d.obj_local(s, m.glob[i]);
+    s.define_str(g, NAMES[i], v, attrs)?;
     Ok(v)
 }
 
-fn made(d: &Dom, it: &mut Interp<'_>) -> R<Made> {
+fn made_s<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, Made> {
     let m = d.web.s.borrow().made;
     if let Some(m) = m {
         return Ok(m);
     }
-    let m = make(d, it)?;
+    let m = make(d, s)?;
     d.web.s.borrow_mut().made = Some(m);
     Ok(m)
 }
 
+fn made(d: &Dom, it: &mut Interp<'_>) -> R<Made> {
+    run(it, |s| made_s(d, s))
+}
+
 /// A WebIDL operation: writable, enumerable, configurable.
-fn op(d: &Dom, it: &mut Interp<'_>, on: ObjId, name: &str, len: u32, h: H) -> R<ObjId> {
-    let f = d.add_fn(it, h, name, len, false)?;
-    let k = d.key(it, name)?;
-    it.define_data(on, k, Value::Object(f), true, true, true)?;
+fn op<'s>(d: &Dom, s: &mut Sc<'s, '_>, on: Local<'s>, name: &str, len: u32, h: HS) -> Res<'s, Local<'s>> {
+    let f = d.add_fn_s(s, h, name, len, HostFn::Method)?;
+    s.define_str(on, name, f, Attrs::ALL)?;
     Ok(f)
+}
+
+/// An attribute getter: enumerable, configurable.
+fn getter<'s>(d: &Dom, s: &mut Sc<'s, '_>, on: Local<'s>, name: &str, h: HS) -> Res<'s, ()> {
+    let f = d.add_fn_s(s, h, &format!("get {name}"), 0, HostFn::Method)?;
+    s.define_accessor_str(on, name, Some(f), None, Attrs { writable: false, enumerable: true, configurable: true })
 }
 
 /// A constructor with its `prototype`, and `constructor` of the prototype.
-fn iface(d: &Dom, it: &mut Interp<'_>, name: &str, len: u32, h: H, proto: ObjId) -> R<ObjId> {
-    let f = d.add_ctor_nt(it, h, name, len)?;
-    let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
-    it.define_data(f, kp, Value::Object(proto), false, false, false)?;
-    it.define_data(proto, kc, Value::Object(f), true, false, true)?;
+fn iface<'s>(d: &Dom, s: &mut Sc<'s, '_>, name: &str, len: u32, h: HS, proto: Local<'s>) -> Res<'s, Local<'s>> {
+    let f = d.add_fn_s(s, h, name, len, HostFn::CtorNewTarget)?;
+    s.define_str(f, "prototype", proto, Attrs { writable: false, enumerable: false, configurable: false })?;
+    s.define_str(proto, "constructor", f, Attrs { writable: true, enumerable: false, configurable: true })?;
     Ok(f)
 }
 
-fn make(d: &Dom, it: &mut Interp<'_>) -> R<Made> {
-    let g = it.global_object();
-    let op_ = it.object_prototype();
-    let (ks, kt) = (d.key(it, "Symbol")?, d.key(it, "toStringTag")?);
-    let sym = it.get_value(Value::Object(g), ks)?;
-    let tag = match it.get_value(sym, kt)? {
-        Value::Symbol(s) => Some(PropertyKey::Symbol(s)),
-        _ => None,
-    };
-    let tagged = |it: &mut Interp<'_>, o: ObjId, name: &str| -> R<()> {
-        if let Some(k) = tag {
-            let v = d.js_str(it, name)?;
-            it.define_data(o, k, v, false, false, true)?;
-        }
-        Ok(())
-    };
-    let proto = |it: &mut Interp<'_>, parent: ObjId, name: &str| -> R<ObjId> {
-        let o = d.obj(it, parent)?;
-        tagged(it, o, name)?;
+fn lid<'s>(s: &mut Sc<'s, '_>, l: Local<'s>) -> ObjId {
+    obj_id(s, l).expect("an object that this file made")
+}
+
+fn make<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, Made> {
+    let obj_proto = s.engine().object_prototype();
+    let op_ = d.obj_local(s, obj_proto);
+    let tag = s.intrinsic(Intrinsic::SymbolToStringTag);
+    let proto = |d: &Dom, s: &mut Sc<'s, '_>, parent: Local<'s>, name: &str| -> Res<'s, Local<'s>> {
+        let po = lid(s, parent);
+        let o = d.obj_s(s, po)?;
+        let o = d.obj_local(s, o);
+        let n = s.string(name)?;
+        s.define(o, tag, n, Attrs { writable: false, enumerable: false, configurable: true })?;
         Ok(o)
+    };
+    let plain = |d: &Dom, s: &mut Sc<'s, '_>, parent: Local<'s>| -> Res<'s, Local<'s>> {
+        let po = lid(s, parent);
+        let o = d.obj_s(s, po)?;
+        Ok(d.obj_local(s, o))
     };
 
     // crypto
-    let cp = proto(it, op_, "Crypto")?;
-    op(d, it, cp, "getRandomValues", 1, get_random_values)?;
-    op(d, it, cp, "randomUUID", 0, random_uuid)?;
-    d.def_get(it, cp, "subtle", subtle_attr, None)?;
-    let crypto = d.obj(it, cp)?;
+    let cp = proto(d, s, op_, "Crypto")?;
+    op(d, s, cp, "getRandomValues", 1, get_random_values)?;
+    op(d, s, cp, "randomUUID", 0, random_uuid)?;
+    getter(d, s, cp, "subtle", subtle_attr)?;
+    let crypto = plain(d, s, cp)?;
 
     // SubtleCrypto: `digest` hashes; the other methods reject until they are built.
-    let sp = proto(it, op_, "SubtleCrypto")?;
-    op(d, it, sp, "digest", 2, subtle_digest)?;
+    let sp = proto(d, s, op_, "SubtleCrypto")?;
+    op(d, s, sp, "digest", 2, subtle_digest)?;
     for (name, len) in [("encrypt", 3), ("decrypt", 3), ("sign", 3), ("verify", 4), ("generateKey", 3), ("importKey", 5), ("exportKey", 2), ("deriveKey", 5), ("deriveBits", 2), ("wrapKey", 4), ("unwrapKey", 7)] {
-        op(d, it, sp, name, len, subtle_unsupported)?;
+        op(d, s, sp, name, len, subtle_unsupported)?;
     }
-    let subtle = d.obj(it, sp)?;
-    let subtle_ctor = iface(d, it, "SubtleCrypto", 0, subtle_illegal, sp)?;
+    let subtle = plain(d, s, sp)?;
+    let subtle_ctor = iface(d, s, "SubtleCrypto", 0, subtle_illegal, sp)?;
 
     // navigator
-    let np = proto(it, op_, "Navigator")?;
-    let getters: [(&str, H); 8] = [
-        ("userAgent", |d, it, t, _| nav(d, it, t).and_then(|_| d.js_str(it, USER_AGENT))),
-        ("userAgentData", |d, it, t, _| nav(d, it, t).map(|m| Value::Object(m.uad))),
-        ("language", |d, it, t, _| nav(d, it, t).and_then(|_| d.js_str(it, "en-US"))),
-        ("languages", |d, it, t, _| nav(d, it, t).map(|m| Value::Object(m.langs))),
-        ("platform", |d, it, t, _| nav(d, it, t).and_then(|_| d.js_str(it, "Linux x86_64"))),
-        ("onLine", |d, it, t, _| nav(d, it, t).map(|_| Value::Bool(true))),
-        ("cookieEnabled", |d, it, t, _| nav(d, it, t).map(|_| Value::Bool(true))),
-        ("hardwareConcurrency", |d, it, t, _| nav(d, it, t).map(|_| Value::Number(std::thread::available_parallelism().map_or(1, |n| n.get()) as f64))),
+    let np = proto(d, s, op_, "Navigator")?;
+    let getters: [(&str, HS); 8] = [
+        ("userAgent", nav_user_agent),
+        ("userAgentData", nav_uad),
+        ("language", nav_language),
+        ("languages", nav_languages),
+        ("platform", nav_platform),
+        ("onLine", nav_on_line),
+        ("cookieEnabled", nav_cookie_enabled),
+        ("hardwareConcurrency", nav_cores),
     ];
     for (name, h) in getters {
-        d.def_get(it, np, name, h, None)?;
+        getter(d, s, np, name, h)?;
     }
-    crate::browser_basics::navigator(d, it, np)?;
-    let navigator = d.obj(it, np)?;
-    let en = [d.js_str(it, "en-US")?, d.js_str(it, "en")?];
-    let langs = it.array_from(&en)?;
-    let Value::Object(langs) = langs else { unreachable!() };
-    freeze(it, langs)?;
+    let np_id = lid(s, np);
+    old(s, |it| crate::browser_basics::navigator(d, it, np_id))?;
+    let navigator = plain(d, s, np)?;
+    let en = [d.js_str_s(s, "en-US")?, d.js_str_s(s, "en")?];
+    let langs = s.new_array(&en)?;
+    s.set_integrity(langs, true)?;
 
     // navigator.userAgentData
-    let up = proto(it, op_, "NavigatorUAData")?;
-    d.def_get(it, up, "brands", |d, it, t, _| uad(d, it, t).map(|m| Value::Object(m.brands)), None)?;
-    d.def_get(it, up, "mobile", |d, it, t, _| uad(d, it, t).map(|_| Value::Bool(false)), None)?;
-    d.def_get(it, up, "platform", |d, it, t, _| uad(d, it, t).and_then(|_| d.js_str(it, PLATFORM)), None)?;
-    op(d, it, up, "getHighEntropyValues", 1, high_entropy)?;
-    op(d, it, up, "toJSON", 0, |d, it, t, _| uad(d, it, t).and_then(|m| low_entropy(d, it, m)).map(Value::Object))?;
-    let uad = d.obj(it, up)?;
+    let up = proto(d, s, op_, "NavigatorUAData")?;
+    getter(d, s, up, "brands", uad_brands)?;
+    getter(d, s, up, "mobile", uad_mobile)?;
+    getter(d, s, up, "platform", uad_platform)?;
+    op(d, s, up, "getHighEntropyValues", 1, high_entropy)?;
+    op(d, s, up, "toJSON", 0, uad_to_json)?;
+    let uad = plain(d, s, up)?;
     let mut brands = Vec::new();
     for (b, v) in BRANDS {
-        let o = d.obj(it, op_)?;
-        for (k, s) in [("brand", b), ("version", v)] {
-            let (k, s) = (d.key(it, k)?, d.js_str(it, s)?);
-            it.define_data(o, k, s, true, true, true)?;
+        let o = plain(d, s, op_)?;
+        for (k, x) in [("brand", b), ("version", v)] {
+            let x = d.js_str_s(s, x)?;
+            s.define_str(o, k, x, Attrs::ALL)?;
         }
-        brands.push(Value::Object(o));
+        brands.push(o);
     }
-    let Value::Object(brands) = it.array_from(&brands)? else { unreachable!() };
-    freeze(it, brands)?;
+    let brands = s.new_array(&brands)?;
+    s.set_integrity(brands, true)?;
 
     // Blob, File
-    let bp = proto(it, op_, "Blob")?;
-    let blob = iface(d, it, "Blob", 0, blob_ctor, bp)?;
-    d.def_get(it, bp, "size", |d, it, t, _| blob_of(d, it, t).map(|o| Value::Number(d.web.s.borrow().blobs[&o].bytes.len() as f64)), None)?;
-    d.def_get(it, bp, "type", |d, it, t, _| blob_of(d, it, t).and_then(|o| { let ty = d.web.s.borrow().blobs[&o].ty.clone(); d.js_str(it, &ty) }), None)?;
-    op(d, it, bp, "slice", 2, blob_slice)?;
-    op(d, it, bp, "text", 0, blob_text)?;
-    op(d, it, bp, "arrayBuffer", 0, blob_array_buffer)?;
-    op(d, it, bp, "stream", 0, blob_stream)?;
-    let fp = proto(it, bp, "File")?;
-    let file = iface(d, it, "File", 2, file_ctor, fp)?;
-    it.heap.set_prototype_of(file, Some(blob)).map_err(|e| it.heap_error(e))?;
-    d.def_get(it, fp, "name", |d, it, t, _| file_of(d, it, t).and_then(|(n, _)| d.js_str(it, &n)), None)?;
-    d.def_get(it, fp, "lastModified", |d, it, t, _| file_of(d, it, t).map(|(_, m)| Value::Number(m)), None)?;
+    let bp = proto(d, s, op_, "Blob")?;
+    let blob = iface(d, s, "Blob", 0, blob_ctor, bp)?;
+    getter(d, s, bp, "size", blob_size)?;
+    getter(d, s, bp, "type", blob_type_get)?;
+    op(d, s, bp, "slice", 2, blob_slice)?;
+    op(d, s, bp, "text", 0, blob_text)?;
+    op(d, s, bp, "arrayBuffer", 0, blob_array_buffer)?;
+    op(d, s, bp, "stream", 0, blob_stream)?;
+    let fp = proto(d, s, bp, "File")?;
+    let file = iface(d, s, "File", 2, file_ctor, fp)?;
+    s.set_prototype_of(file, Some(blob))?;
+    getter(d, s, fp, "name", file_name_get)?;
+    getter(d, s, fp, "lastModified", file_modified)?;
 
     // FormData and its iterator
-    let fo = proto(it, op_, "FormData")?;
-    let form = iface(d, it, "FormData", 0, form_ctor, fo)?;
-    for (name, len, h) in [("append", 2, f_append as H), ("delete", 1, f_delete), ("get", 1, f_get), ("getAll", 1, f_get_all), ("has", 1, f_has), ("set", 2, f_set), ("forEach", 1, f_for_each), ("keys", 0, |d, it, t, _| make_iter(d, it, t, 0)), ("values", 0, |d, it, t, _| make_iter(d, it, t, 1))] {
-        op(d, it, fo, name, len, h)?;
+    let fo = proto(d, s, op_, "FormData")?;
+    let form = iface(d, s, "FormData", 0, form_ctor, fo)?;
+    for (name, len, h) in [("append", 2, f_append as HS), ("delete", 1, f_delete), ("get", 1, f_get), ("getAll", 1, f_get_all), ("has", 1, f_has), ("set", 2, f_set), ("forEach", 1, f_for_each), ("keys", 0, f_keys), ("values", 0, f_values)] {
+        op(d, s, fo, name, len, h)?;
     }
-    let entries = op(d, it, fo, "entries", 0, |d, it, t, _| make_iter(d, it, t, 2))?;
-    it.define_data(fo, it.symbol_iterator(), Value::Object(entries), true, false, true)?;
-    let ip = d.obj(it, it.iterator_prototype())?;
-    op(d, it, ip, "next", 0, iter_next)?;
+    let entries = op(d, s, fo, "entries", 0, f_entries)?;
+    let sym = s.intrinsic(Intrinsic::SymbolIterator);
+    s.define(fo, sym, entries, Attrs { writable: true, enumerable: false, configurable: true })?;
+    let ipr = s.engine().iterator_prototype();
+    let ip = d.obj_local(s, ipr);
+    let ip = plain(d, s, ip)?;
+    op(d, s, ip, "next", 0, iter_next)?;
 
+    let [crypto, navigator, blob, file, form, subtle_ctor, subtle, langs, uad, brands, bp, fp, fo, ip] = [crypto, navigator, blob, file, form, subtle_ctor, subtle, langs, uad, brands, bp, fp, fo, ip].map(|l| lid(s, l));
     Ok(Made { glob: [crypto, navigator, blob, file, form, subtle_ctor], subtle, langs, uad, brands, blob_p: bp, file_p: fp, form_p: fo, iter_p: ip })
 }
 
-fn freeze(it: &mut Interp<'_>, o: ObjId) -> R<()> {
-    it.heap.set_integrity(o, true).map(drop).map_err(|e| it.heap_error(e))
-}
-
-fn need(it: &mut Interp<'_>, a: &[Value], n: usize, what: &str) -> R<()> {
+fn need_old(it: &mut Interp<'_>, a: &[Value], n: usize, what: &str) -> R<()> {
     if a.len() < n {
         return Err(it.type_error(&format!("Failed to execute '{what}': {n} argument{} required, but only {} present.", if n == 1 { "" } else { "s" }, a.len())));
     }
     Ok(())
 }
 
-/// `ToString(v)` as a USVString: a lone surrogate becomes U+FFFD.
-fn usv(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<String> {
-    let s = it.to_js_string(v)?;
-    let len = it.heap.str_len(s).map_err(Error::Heap)?;
-    if len > d.lim.max_string_bytes {
-        return Err(d.lim("dom-string"));
+fn need<'s>(s: &mut Sc<'s, '_>, a: Args<'s>, n: usize, what: &str) -> Res<'s, ()> {
+    if a.len() < n {
+        return Err(s.type_error(&format!("Failed to execute '{what}': {n} argument{} required, but only {} present.", if n == 1 { "" } else { "s" }, a.len())));
     }
-    it.charge((len / 32) as u64)?;
-    it.heap.to_string_lossy(s).map_err(|e| it.heap_error(e))
+    Ok(())
 }
 
-fn illegal(it: &mut Interp<'_>) -> Error {
-    it.type_error("Illegal invocation")
+/// `ToString(v)` as a USVString: a lone surrogate becomes U+FFFD.
+fn usv<'s>(d: &Dom, s: &mut Sc<'s, '_>, v: Local<'s>) -> Res<'s, String> {
+    let l = s.to_string(v)?;
+    let (len, text) = {
+        let t = s.as_str(l).expect("a string");
+        (t.len(), (t.len() <= d.lim.max_string_bytes).then(|| t.to_string_lossy()))
+    };
+    let Some(text) = text else { return Err(d.lim_s(s, "dom-string")) };
+    s.charge((len / 32) as u64)?;
+    Ok(text)
+}
+
+fn illegal<'s>(s: &mut Sc<'s, '_>) -> AErr<'s> {
+    s.type_error("Illegal invocation")
 }
 
 // ------------------------------------------------------------------------------------------ crypto
 
-fn crypto_this(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<()> {
-    match (this, d.web.s.borrow().made) {
-        (Value::Object(o), Some(m)) if o == m.glob[0] => Ok(()),
-        _ => Err(illegal(it)),
+fn crypto_this<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, ()> {
+    match (obj_id(s, this), d.web.s.borrow().made) {
+        (Some(o), Some(m)) if o == m.glob[0] => Ok(()),
+        _ => Err(illegal(s)),
     }
 }
 
-fn random_failed(d: &Dom, it: &mut Interp<'_>) -> Error {
+fn random_failed<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> AErr<'s> {
+    d.dom_err_s(s, "OperationError", "The operating system random source failed.")
+}
+
+/// The old form of `random_failed`, for `boundary` and `createObjectURL`.
+fn random_failed_old(d: &Dom, it: &mut Interp<'_>) -> Error {
     d.dom_err(it, "OperationError", "The operating system random source failed.")
 }
 
-fn get_random_values(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    crypto_this(d, it, this)?;
-    need(it, a, 1, "getRandomValues' on 'Crypto")?;
-    let integer = matches!(a[0], Value::Object(o) if it.heap.view_type(o).is_some_and(|t| t != Elem::Data && !t.is_float()));
+fn get_random_values<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    crypto_this(d, s, this)?;
+    need(s, a, 1, "getRandomValues' on 'Crypto")?;
+    let x = arg_s(s, a, 0);
+    let integer = s.view(x).is_some_and(|v| v.elem != Elem::Data && !matches!(v.elem, Elem::F32 | Elem::F64));
     if !integer {
-        return Err(d.dom_err(it, "TypeMismatchError", "The data argument must be an integer-type TypedArray."));
+        return Err(d.dom_err_s(s, "TypeMismatchError", "The data argument must be an integer-type TypedArray."));
     }
-    let Value::Object(o) = a[0] else { unreachable!() };
-    let len = it.heap.bytes(o).map_or(0, <[u8]>::len);
+    let len = s.bytes(x).map_or(0, <[u8]>::len);
     if len > MAX_RANDOM {
-        return Err(d.dom_err(it, "QuotaExceededError", &format!("The ArrayBufferView's byte length ({len}) exceeds the number of bytes of entropy available via this API ({MAX_RANDOM}).")));
+        return Err(d.dom_err_s(s, "QuotaExceededError", &format!("The ArrayBufferView's byte length ({len}) exceeds the number of bytes of entropy available via this API ({MAX_RANDOM}).")));
     }
-    it.charge((len / 64) as u64)?;
-    if let Some(b) = it.heap.bytes_mut(o)
-        && page_random(b).is_err()
-    {
-        return Err(random_failed(d, it));
+    s.charge((len / 64) as u64)?;
+    if s.bytes_mut(x).is_some_and(|b| page_random(b).is_err()) {
+        return Err(random_failed(d, s));
     }
-    Ok(a[0])
+    Ok(x)
 }
 
 /// Random bytes for page code (`crypto`, multipart boundaries): from the OS. With `BARE_SEED=<number>` in the environment they are one fixed
@@ -524,32 +545,43 @@ fn uuid_v4() -> Option<String> {
     Some(s)
 }
 
-fn random_uuid(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    crypto_this(d, it, this)?;
-    let Some(s) = uuid_v4() else { return Err(random_failed(d, it)) };
-    d.js_str(it, &s)
+fn random_uuid<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    crypto_this(d, s, this)?;
+    let Some(id) = uuid_v4() else { return Err(random_failed(d, s)) };
+    d.js_str_s(s, &id)
 }
 
 /// `crypto.subtle`: a `SubtleCrypto` in a secure context, `undefined` otherwise.
-fn subtle_attr(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    crypto_this(d, it, this)?;
+fn subtle_attr<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    crypto_this(d, s, this)?;
     if !crate::browser_basics::secure(d) {
-        return Ok(Value::Undefined);
+        return Ok(s.undefined());
     }
-    Ok(Value::Object(d.web.s.borrow().made.expect("made").subtle))
+    let o = d.web.s.borrow().made.expect("made").subtle;
+    Ok(d.obj_local(s, o))
+}
+
+/// Settle `p` with the outcome of `r`: a value fulfills, a thrown value rejects, any other error is the result.
+fn settle<'s>(s: &mut Sc<'s, '_>, p: Local<'s>, r: Res<'s, Local<'s>>) -> Res<'s, Local<'s>> {
+    match r {
+        Ok(v) => s.resolve_promise(p, v)?,
+        Err(AErr::Throw(v)) => s.reject_promise(p, v)?,
+        Err(e) => return Err(e),
+    }
+    Ok(p)
 }
 
 // ------------------------------------------------------------------------------------------ SubtleCrypto
 
-fn subtle_this(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<()> {
-    match (this, d.web.s.borrow().made) {
-        (Value::Object(o), Some(m)) if o == m.subtle => Ok(()),
-        _ => Err(illegal(it)),
+fn subtle_this<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, ()> {
+    match (obj_id(s, this), d.web.s.borrow().made) {
+        (Some(o), Some(m)) if o == m.subtle => Ok(()),
+        _ => Err(illegal(s)),
     }
 }
 
-fn subtle_illegal(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
-    Err(it.type_error("Illegal constructor"))
+fn subtle_illegal<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    Err(s.type_error("Illegal constructor"))
 }
 
 /// The digest of `data` for an algorithm name. The name is ASCII case-insensitive. `None` for a name we do not hash.
@@ -564,132 +596,191 @@ fn digest_bytes(name: &str, data: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// `digest(algorithm, data)`: converts both arguments first (a TypeError rejects), then looks up the name (`NotSupportedError`).
-fn subtle_digest(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let p = it.host_new_promise()?;
-    let r = (|| -> V {
-        subtle_this(d, it, this)?;
-        need(it, a, 2, "SubtleCrypto.digest")?;
-        let name = match a[0] {
-            Value::Object(_) => {
-                let k = d.key(it, "name")?;
-                match it.get_value(a[0], k)? {
-                    Value::Undefined => return Err(it.type_error("Failed to execute 'digest' on 'SubtleCrypto': Algorithm: Missing 'name'.")),
-                    n => usv(d, it, n)?,
-                }
+fn subtle_digest<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let p = s.new_promise()?;
+    let r = (|| -> Res<'s, Local<'s>> {
+        subtle_this(d, s, this)?;
+        need(s, a, 2, "SubtleCrypto.digest")?;
+        let alg = arg_s(s, a, 0);
+        let name = if is_object(s, alg) {
+            let n = s.get_str(alg, "name")?;
+            if s.type_of(n) == bare_js_api::Type::Undefined {
+                return Err(s.type_error("Failed to execute 'digest' on 'SubtleCrypto': Algorithm: Missing 'name'."));
             }
-            v => usv(d, it, v)?,
+            usv(d, s, n)?
+        } else {
+            usv(d, s, alg)?
         };
-        let copied = match a[1] {
-            Value::Object(o) => it.heap.bytes(o).map(<[u8]>::to_vec),
-            _ => None,
-        };
-        let Some(data) = copied else { return Err(it.type_error("Failed to execute 'digest' on 'SubtleCrypto': The provided value is not of type '(ArrayBuffer or ArrayBufferView)'.")) };
-        it.charge((data.len() / 64) as u64)?;
+        let data = arg_s(s, a, 1);
+        let Some(data) = s.bytes(data).map(<[u8]>::to_vec) else { return Err(s.type_error("Failed to execute 'digest' on 'SubtleCrypto': The provided value is not of type '(ArrayBuffer or ArrayBufferView)'.")) };
+        s.charge((data.len() / 64) as u64)?;
         match digest_bytes(&name, &data) {
-            Some(h) => it.new_array_buffer(h),
-            None => Err(d.dom_err(it, "NotSupportedError", "Unrecognized algorithm name.")),
+            Some(h) => s.new_array_buffer(h),
+            None => Err(d.dom_err_s(s, "NotSupportedError", "Unrecognized algorithm name.")),
         }
     })();
-    crate::browser_fetch::settle(it, p, r)
+    settle(s, p, r)
 }
 
 /// The methods that are not built yet. Each returns a Promise rejected with `NotSupportedError`.
-fn subtle_unsupported(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let p = it.host_new_promise()?;
-    let r = (|| -> V {
-        subtle_this(d, it, this)?;
-        Err(d.dom_err(it, "NotSupportedError", "This SubtleCrypto method is not supported yet."))
+fn subtle_unsupported<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let p = s.new_promise()?;
+    let r = (|| -> Res<'s, Local<'s>> {
+        subtle_this(d, s, this)?;
+        Err(d.dom_err_s(s, "NotSupportedError", "This SubtleCrypto method is not supported yet."))
     })();
-    crate::browser_fetch::settle(it, p, r)
+    settle(s, p, r)
 }
 
 // ------------------------------------------------------------------------------------------ navigator
 
-fn nav(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<Made> {
-    match (this, d.web.s.borrow().made) {
-        (Value::Object(o), Some(m)) if o == m.glob[1] => Ok(m),
-        _ => Err(illegal(it)),
+fn nav<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, Made> {
+    match (obj_id(s, this), d.web.s.borrow().made) {
+        (Some(o), Some(m)) if o == m.glob[1] => Ok(m),
+        _ => Err(illegal(s)),
     }
 }
 
 pub(crate) fn nav_this(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<()> {
-    nav(d, it, this).map(|_| ())
-}
-
-fn uad(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<Made> {
     match (this, d.web.s.borrow().made) {
-        (Value::Object(o), Some(m)) if o == m.uad => Ok(m),
-        _ => Err(illegal(it)),
+        (Value::Object(o), Some(m)) if o == m.glob[1] => Ok(()),
+        _ => Err(it.type_error("Illegal invocation")),
     }
 }
 
+fn uad<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, Made> {
+    match (obj_id(s, this), d.web.s.borrow().made) {
+        (Some(o), Some(m)) if o == m.uad => Ok(m),
+        _ => Err(illegal(s)),
+    }
+}
+
+fn nav_user_agent<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    nav(d, s, this)?;
+    d.js_str_s(s, USER_AGENT)
+}
+
+fn nav_uad<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let m = nav(d, s, this)?;
+    Ok(d.obj_local(s, m.uad))
+}
+
+fn nav_language<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    nav(d, s, this)?;
+    d.js_str_s(s, "en-US")
+}
+
+fn nav_languages<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let m = nav(d, s, this)?;
+    Ok(d.obj_local(s, m.langs))
+}
+
+fn nav_platform<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    nav(d, s, this)?;
+    d.js_str_s(s, "Linux x86_64")
+}
+
+fn nav_on_line<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    nav(d, s, this)?;
+    Ok(s.boolean(true))
+}
+
+fn nav_cookie_enabled<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    nav(d, s, this)?;
+    Ok(s.boolean(true))
+}
+
+fn nav_cores<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    nav(d, s, this)?;
+    Ok(s.number(std::thread::available_parallelism().map_or(1, |n| n.get()) as f64))
+}
+
+fn uad_brands<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let m = uad(d, s, this)?;
+    Ok(d.obj_local(s, m.brands))
+}
+
+fn uad_mobile<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    uad(d, s, this)?;
+    Ok(s.boolean(false))
+}
+
+fn uad_platform<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    uad(d, s, this)?;
+    d.js_str_s(s, PLATFORM)
+}
+
+fn uad_to_json<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let m = uad(d, s, this)?;
+    low_entropy(d, s, m)
+}
+
 /// A new object with `brands`, `mobile` and `platform`: the low entropy hints.
-fn low_entropy(d: &Dom, it: &mut Interp<'_>, m: Made) -> R<ObjId> {
-    let o = d.obj(it, it.object_prototype())?;
-    let p = d.js_str(it, PLATFORM)?;
-    for (k, v) in [("brands", Value::Object(m.brands)), ("mobile", Value::Bool(false)), ("platform", p)] {
-        put(d, it, o, k, v)?;
+fn low_entropy<'s>(d: &Dom, s: &mut Sc<'s, '_>, m: Made) -> Res<'s, Local<'s>> {
+    let op = s.engine().object_prototype();
+    let o = d.obj_s(s, op)?;
+    let o = d.obj_local(s, o);
+    let (b, f, p) = (d.obj_local(s, m.brands), s.boolean(false), d.js_str_s(s, PLATFORM)?);
+    for (k, v) in [("brands", b), ("mobile", f), ("platform", p)] {
+        s.define_str(o, k, v, Attrs::ALL)?;
     }
     Ok(o)
 }
 
-fn put(d: &Dom, it: &mut Interp<'_>, o: ObjId, k: &str, v: Value) -> R<()> {
-    let k = d.key(it, k)?;
-    it.define_data(o, k, v, true, true, true)
-}
-
 /// `getHighEntropyValues(hints)`: `hints` is any iterable of strings.
-fn high_entropy(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let p = it.host_new_promise()?;
-    let r = (|| -> V {
-        let m = uad(d, it, this)?;
-        need(it, a, 1, "NavigatorUAData.getHighEntropyValues")?;
+fn high_entropy<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let p = s.new_promise()?;
+    let r = (|| -> Res<'s, Local<'s>> {
+        let m = uad(d, s, this)?;
+        need(s, a, 1, "NavigatorUAData.getHighEntropyValues")?;
         let bad = "Failed to execute 'getHighEntropyValues' on 'NavigatorUAData': The provided value cannot be converted to a sequence.";
-        let hints = a[0];
-        let Some(mut iter) = (if matches!(hints, Value::Object(_)) { it.host_iter_open(hints)? } else { None }) else { return Err(it.type_error(bad)) };
-        let out = low_entropy(d, it, m)?;
+        let hints = arg_s(s, a, 0);
+        let Some(mut iter) = (if is_object(s, hints) { s.iter_open(hints)? } else { None }) else { return Err(s.type_error(bad)) };
+        let out = low_entropy(d, s, m)?;
         loop {
-            let step = match it.host_iter_next(&mut iter) {
-                Ok(Some(x)) => it.charge(1).and_then(|_| usv(d, it, x)).and_then(|h| hint(d, it, out, &h)).map(|_| true),
+            let step = match s.iter_next(&mut iter) {
+                Ok(Some(x)) => s.charge(1).and_then(|_| usv(d, s, x)).and_then(|h| hint(d, s, out, &h)).map(|_| true),
                 Ok(None) => Ok(false),
                 Err(e) => Err(e),
             };
             match step {
                 Ok(true) => {}
-                Ok(false) => return Ok(Value::Object(out)),
-                Err(e) => return Err(it.host_iter_fail(&mut iter, e)),
+                Ok(false) => return Ok(out),
+                Err(e) => return Err(s.iter_fail(&mut iter, e)),
             }
         }
     })();
-    crate::browser_fetch::settle(it, p, r)
+    settle(s, p, r)
 }
 
 /// One high entropy hint of `getHighEntropyValues`. Unknown names add nothing.
-fn hint(d: &Dom, it: &mut Interp<'_>, out: ObjId, name: &str) -> R<()> {
+fn hint<'s>(d: &Dom, s: &mut Sc<'s, '_>, out: Local<'s>, name: &str) -> Res<'s, ()> {
     let v = match name {
-        "architecture" => d.js_str(it, "x86")?,
-        "bitness" => d.js_str(it, "64")?,
-        "model" | "platformVersion" => d.js_str(it, "")?,
-        "uaFullVersion" => d.js_str(it, &format!("{CHROME}.0.0.0"))?,
-        "wow64" => Value::Bool(false),
+        "architecture" => d.js_str_s(s, "x86")?,
+        "bitness" => d.js_str_s(s, "64")?,
+        "model" | "platformVersion" => d.js_str_s(s, "")?,
+        "uaFullVersion" => d.js_str_s(s, &format!("{CHROME}.0.0.0"))?,
+        "wow64" => s.boolean(false),
         "formFactors" => {
-            let f = d.js_str(it, "Desktop")?;
-            it.array_from(&[f])?
+            let f = d.js_str_s(s, "Desktop")?;
+            s.new_array(&[f])?
         }
         "fullVersionList" => {
             let mut list = Vec::new();
             for (b, v) in [("Not.A/Brand", "8.0.0.0".to_string()), ("Chromium", format!("{CHROME}.0.0.0")), ("Google Chrome", format!("{CHROME}.0.0.0"))] {
-                let o = d.obj(it, it.object_prototype())?;
-                let (bv, vv) = (d.js_str(it, b)?, d.js_str(it, &v)?);
-                put(d, it, o, "brand", bv)?;
-                put(d, it, o, "version", vv)?;
-                list.push(Value::Object(o));
+                let op = s.engine().object_prototype();
+                let o = d.obj_s(s, op)?;
+                let o = d.obj_local(s, o);
+                let (bv, vv) = (d.js_str_s(s, b)?, d.js_str_s(s, &v)?);
+                s.define_str(o, "brand", bv, Attrs::ALL)?;
+                s.define_str(o, "version", vv, Attrs::ALL)?;
+                list.push(o);
             }
-            it.array_from(&list)?
+            s.new_array(&list)?
         }
         _ => return Ok(()),
     };
-    put(d, it, out, name, v)
+    s.define_str(out, name, v, Attrs::ALL)
 }
 
 // ------------------------------------------------------------------------------------------ object URLs
@@ -698,7 +789,7 @@ fn hint(d: &Dom, it: &mut Interp<'_>, out: ObjId, name: &str) -> R<()> {
 #[cold]
 #[inline(never)]
 pub(crate) fn create_object_url(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
-    need(it, a, 1, "createObjectURL' on 'URL")?;
+    need_old(it, a, 1, "createObjectURL' on 'URL")?;
     let blob = match a[0] {
         Value::Object(o) if d.web.s.borrow().blobs.contains_key(&o) => o,
         _ => return Err(it.type_error("Failed to execute 'createObjectURL' on 'URL': Overload resolution failed.")),
@@ -706,7 +797,7 @@ pub(crate) fn create_object_url(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Val
     if d.web.s.borrow().urls.len() >= MAX_URLS {
         return Err(d.lim("web-objects"));
     }
-    let Some(id) = uuid_v4() else { return Err(random_failed(d, it)) };
+    let Some(id) = uuid_v4() else { return Err(random_failed_old(d, it)) };
     let origin = d.cur_rec().map_or_else(|_| "null".to_string(), |r| r.origin());
     let url = format!("blob:{origin}/{id}");
     d.web.s.borrow_mut().urls.insert(url.clone(), blob);
@@ -717,7 +808,7 @@ pub(crate) fn create_object_url(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Val
 #[cold]
 #[inline(never)]
 pub(crate) fn revoke_object_url(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
-    need(it, a, 1, "revokeObjectURL' on 'URL")?;
+    need_old(it, a, 1, "revokeObjectURL' on 'URL")?;
     let url = d.string_arg(it, a[0])?;
     d.web.s.borrow_mut().urls.remove(url.trim_matches(|c: char| c <= ' ').split('#').next().unwrap_or(""));
     Ok(Value::Undefined)
@@ -749,15 +840,20 @@ fn room(d: &Dom, n: usize) -> R<()> {
     Ok(())
 }
 
-fn new_blob(d: &Dom, it: &mut Interp<'_>, proto: ObjId, b: BlobData) -> V {
+fn new_blob_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, proto: ObjId, b: BlobData) -> Res<'s, Local<'s>> {
     let n = b.bytes.len();
-    room(d, n)?;
-    it.charge((n / 64) as u64)?;
-    let o = d.obj(it, proto)?;
-    let mut s = d.web.s.borrow_mut();
-    s.bytes += n;
-    s.blobs.insert(o, b);
-    Ok(Value::Object(o))
+    lift(s, room(d, n))?;
+    s.charge((n / 64) as u64)?;
+    let o = d.obj_s(s, proto)?;
+    let mut w = d.web.s.borrow_mut();
+    w.bytes += n;
+    w.blobs.insert(o, b);
+    drop(w);
+    Ok(d.obj_local(s, o))
+}
+
+fn new_blob(d: &Dom, it: &mut Interp<'_>, proto: ObjId, b: BlobData) -> V {
+    run_v(it, |s| new_blob_s(d, s, proto, b))
 }
 
 /// A new Blob with these bytes and type (the `response` of an `XMLHttpRequest` with `responseType = "blob"`).
@@ -843,16 +939,17 @@ pub(crate) fn form_from(d: &Dom, it: &mut Interp<'_>, bytes: &[u8], ct: &str) ->
     Ok(Some(Value::Object(o)))
 }
 
-fn blob_of(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<ObjId> {
-    match this {
-        Value::Object(o) if d.web.s.borrow().blobs.contains_key(&o) => Ok(o),
-        _ => Err(illegal(it)),
+fn blob_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, ObjId> {
+    match obj_id(s, this) {
+        Some(o) if d.web.s.borrow().blobs.contains_key(&o) => Ok(o),
+        _ => Err(illegal(s)),
     }
 }
 
-fn file_of(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<(String, f64)> {
-    let o = blob_of(d, it, this)?;
-    d.web.s.borrow().blobs[&o].file.clone().ok_or_else(|| illegal(it))
+fn file_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, (String, f64)> {
+    let o = blob_of(d, s, this)?;
+    let f = d.web.s.borrow().blobs[&o].file.clone();
+    f.ok_or_else(|| illegal(s))
 }
 
 /// The type of a Blob: the empty string when it has a character outside U+0020 to U+007E, else in lower case.
@@ -860,157 +957,170 @@ fn blob_type(t: String) -> String {
     if t.bytes().all(|b| (0x20..=0x7e).contains(&b)) { t.to_ascii_lowercase() } else { String::new() }
 }
 
-fn add_part(d: &Dom, it: &mut Interp<'_>, out: &mut Vec<u8>, x: Value) -> R<()> {
-    let own = match x {
-        Value::Object(o) => d.web.s.borrow().blobs.get(&o).map(|b| b.bytes.len()),
-        _ => None,
-    };
-    let n = own.or_else(|| it.bytes_of(x).map(<[u8]>::len));
+fn add_part<'s>(d: &Dom, s: &mut Sc<'s, '_>, out: &mut Vec<u8>, x: Local<'s>) -> Res<'s, ()> {
+    let own = obj_id(s, x).and_then(|o| d.web.s.borrow().blobs.get(&o).map(|b| b.bytes.len()));
+    let n = own.or_else(|| s.bytes(x).map(<[u8]>::len));
     if let Some(n) = n {
         if out.len().saturating_add(n) > MAX_BLOB {
-            return Err(d.lim("blob-bytes"));
+            return Err(d.lim_s(s, "blob-bytes"));
         }
-        match x {
-            Value::Object(o) if own.is_some() => out.extend_from_slice(&d.web.s.borrow().blobs[&o].bytes),
-            _ => out.extend_from_slice(it.bytes_of(x).unwrap_or_default()),
+        match obj_id(s, x) {
+            Some(o) if own.is_some() => out.extend_from_slice(&d.web.s.borrow().blobs[&o].bytes),
+            _ => out.extend_from_slice(s.bytes(x).unwrap_or_default()),
         }
         return Ok(());
     }
-    let s = usv(d, it, x)?;
-    if out.len().saturating_add(s.len()) > MAX_BLOB {
-        return Err(d.lim("blob-bytes"));
+    let text = usv(d, s, x)?;
+    if out.len().saturating_add(text.len()) > MAX_BLOB {
+        return Err(d.lim_s(s, "blob-bytes"));
     }
-    out.extend_from_slice(s.as_bytes());
+    out.extend_from_slice(text.as_bytes());
     Ok(())
 }
 
-/// `sequence<BlobPart>`: the bytes of every part, read with the engine's own iteration.
-fn parts(d: &Dom, it: &mut Interp<'_>, v: Value, who: &str) -> R<Vec<u8>> {
+fn parts<'s>(d: &Dom, s: &mut Sc<'s, '_>, v: Local<'s>, who: &str) -> Res<'s, Vec<u8>> {
     let bad = format!("Failed to construct '{who}': The provided value cannot be converted to a sequence.");
-    if !matches!(v, Value::Object(_)) {
-        return Err(it.type_error(&bad));
+    if !is_object(s, v) {
+        return Err(s.type_error(&bad));
     }
-    let Some(mut iter) = it.host_iter_open(v)? else { return Err(it.type_error(&bad)) };
+    let Some(mut iter) = s.iter_open(v)? else { return Err(s.type_error(&bad)) };
     let mut out = Vec::new();
     loop {
-        let step = match it.host_iter_next(&mut iter) {
-            Ok(Some(x)) => add_part(d, it, &mut out, x).map(|_| true),
+        let step = match s.iter_next(&mut iter) {
+            Ok(Some(x)) => add_part(d, s, &mut out, x).map(|_| true),
             Ok(None) => Ok(false),
             Err(e) => Err(e),
         };
         match step {
             Ok(true) => {}
             Ok(false) => return Ok(out),
-            Err(e) => return Err(it.host_iter_fail(&mut iter, e)),
+            Err(e) => return Err(s.iter_fail(&mut iter, e)),
         }
     }
 }
 
-/// `type` of a `BlobPropertyBag`, and `lastModified` of a `FilePropertyBag` when `file`.
-fn options(d: &Dom, it: &mut Interp<'_>, v: Value, who: &str, file: bool) -> R<(String, Option<f64>)> {
-    match v {
-        Value::Undefined | Value::Null => return Ok((String::new(), None)),
-        Value::Object(_) => {}
-        _ => return Err(it.type_error(&format!("Failed to construct '{who}': The provided value is not of type '{who}PropertyBag'."))),
+fn options<'s>(d: &Dom, s: &mut Sc<'s, '_>, v: Local<'s>, who: &str, file: bool) -> Res<'s, (String, Option<f64>)> {
+    if is_nullish(s, v) {
+        return Ok((String::new(), None));
     }
-    let kt = d.key(it, "type")?;
-    let ty = match it.get_value(v, kt)? {
-        Value::Undefined => String::new(),
-        t => blob_type(usv(d, it, t)?),
-    };
+    if !is_object(s, v) {
+        return Err(s.type_error(&format!("Failed to construct '{who}': The provided value is not of type '{who}PropertyBag'.")));
+    }
+    let t = s.get_str(v, "type")?;
+    let ty = if s.type_of(t) == Type::Undefined { String::new() } else { blob_type(usv(d, s, t)?) };
     let mut modified = None;
     if file {
-        let km = d.key(it, "lastModified")?;
-        match it.get_value(v, km)? {
-            Value::Undefined => {}
-            m => {
-                let n = it.to_js_number(m)?;
-                if !n.is_finite() {
-                    return Err(it.type_error("Failed to construct 'File': The provided value is not finite."));
-                }
-                modified = Some(n.trunc());
+        let m = s.get_str(v, "lastModified")?;
+        if s.type_of(m) != Type::Undefined {
+            let n = s.to_number(m)?;
+            if !n.is_finite() {
+                return Err(s.type_error("Failed to construct 'File': The provided value is not finite."));
             }
+            modified = Some(n.trunc());
         }
     }
     Ok((ty, modified))
 }
 
-fn blob_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
+fn blob_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let intrinsic = d.web.s.borrow().made.expect("made").blob_p;
-    let proto = it.host_proto_from_new_target(intrinsic)?;
-    let bytes = match arg(a, 0) {
-        Value::Undefined => Vec::new(),
-        v => parts(d, it, v, "Blob")?,
-    };
-    let (ty, _) = options(d, it, arg(a, 1), "Blob", false)?;
-    new_blob(d, it, proto, BlobData { bytes, ty, file: None })
+    let intrinsic = d.obj_local(s, intrinsic);
+    let proto = s.proto_from_new_target(intrinsic)?;
+    let proto = lid(s, proto);
+    let v = arg_s(s, a, 0);
+    let bytes = if s.type_of(v) == Type::Undefined { Vec::new() } else { parts(d, s, v, "Blob")? };
+    let o = arg_s(s, a, 1);
+    let (ty, _) = options(d, s, o, "Blob", false)?;
+    new_blob_s(d, s, proto, BlobData { bytes, ty, file: None })
 }
 
-fn file_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
+fn file_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let intrinsic = d.web.s.borrow().made.expect("made").file_p;
-    let proto = it.host_proto_from_new_target(intrinsic)?;
-    need(it, a, 2, "construct 'File")?;
-    let bytes = parts(d, it, a[0], "File")?;
-    let name = usv(d, it, a[1])?;
-    let (ty, modified) = options(d, it, arg(a, 2), "File", true)?;
-    let modified = modified.unwrap_or_else(|| it.wall_now_ms());
-    new_blob(d, it, proto, BlobData { bytes, ty, file: Some((name, modified)) })
+    let intrinsic = d.obj_local(s, intrinsic);
+    let proto = s.proto_from_new_target(intrinsic)?;
+    let proto = lid(s, proto);
+    need(s, a, 2, "construct 'File")?;
+    let (v, n, o) = (arg_s(s, a, 0), arg_s(s, a, 1), arg_s(s, a, 2));
+    let bytes = parts(d, s, v, "File")?;
+    let name = usv(d, s, n)?;
+    let (ty, modified) = options(d, s, o, "File", true)?;
+    let modified = modified.unwrap_or_else(|| s.wall_now_ms());
+    new_blob_s(d, s, proto, BlobData { bytes, ty, file: Some((name, modified)) })
 }
 
-/// `[Clamp] long long` start or end of `slice`, as an offset in `0..=size`.
-fn offset(it: &mut Interp<'_>, v: Value, size: usize, default: usize) -> R<usize> {
-    if matches!(v, Value::Undefined) {
+fn offset<'s>(s: &mut Sc<'s, '_>, v: Local<'s>, size: usize, default: usize) -> Res<'s, usize> {
+    if s.type_of(v) == Type::Undefined {
         return Ok(default);
     }
-    let n = it.to_js_number(v)?;
+    let n = s.to_number(v)?;
     let n = if n.is_nan() { 0.0 } else { n.trunc() };
     Ok(if n < 0.0 { (size as f64 + n).max(0.0) } else { n.min(size as f64) } as usize)
 }
 
-fn blob_slice(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let o = blob_of(d, it, this)?;
+fn blob_slice<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = blob_of(d, s, this)?;
     let size = d.web.s.borrow().blobs[&o].bytes.len();
-    let start = offset(it, arg(a, 0), size, 0)?;
-    let end = offset(it, arg(a, 1), size, size)?;
-    let ty = match arg(a, 2) {
-        Value::Undefined => String::new(),
-        t => blob_type(usv(d, it, t)?),
-    };
+    let (x0, x1, x2) = (arg_s(s, a, 0), arg_s(s, a, 1), arg_s(s, a, 2));
+    let start = offset(s, x0, size, 0)?;
+    let end = offset(s, x1, size, size)?;
+    let ty = if s.type_of(x2) == Type::Undefined { String::new() } else { blob_type(usv(d, s, x2)?) };
     let bytes = d.web.s.borrow().blobs[&o].bytes.get(start..end.max(start)).unwrap_or_default().to_vec();
     let proto = d.web.s.borrow().made.expect("made").blob_p;
-    new_blob(d, it, proto, BlobData { bytes, ty, file: None })
+    new_blob_s(d, s, proto, BlobData { bytes, ty, file: None })
 }
 
-fn blob_text(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let p = it.host_new_promise()?;
-    let r = (|| -> V {
-        let o = blob_of(d, it, this)?;
+fn blob_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let p = s.new_promise()?;
+    let r = (|| -> Res<'s, Local<'s>> {
+        let o = blob_of(d, s, this)?;
         let text = {
-            let s = d.web.s.borrow();
-            let b = &s.blobs[&o].bytes;
+            let w = d.web.s.borrow();
+            let b = &w.blobs[&o].bytes;
             String::from_utf8_lossy(b.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(b)).into_owned()
         };
-        it.charge((text.len() / 16) as u64)?;
-        d.js_str(it, &text)
+        s.charge((text.len() / 16) as u64)?;
+        d.js_str_s(s, &text)
     })();
-    crate::browser_fetch::settle(it, p, r)
+    settle(s, p, r)
 }
 
-fn blob_array_buffer(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let p = it.host_new_promise()?;
-    let r = (|| -> V {
-        let o = blob_of(d, it, this)?;
+fn blob_array_buffer<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let p = s.new_promise()?;
+    let r = (|| -> Res<'s, Local<'s>> {
+        let o = blob_of(d, s, this)?;
         let bytes = d.web.s.borrow().blobs[&o].bytes.clone();
-        it.charge((bytes.len() / 64) as u64)?;
-        it.new_array_buffer(bytes)
+        s.charge((bytes.len() / 64) as u64)?;
+        s.new_array_buffer(bytes)
     })();
-    crate::browser_fetch::settle(it, p, r)
+    settle(s, p, r)
 }
 
-fn blob_stream(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let o = blob_of(d, it, this)?;
+fn blob_stream<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = blob_of(d, s, this)?;
     let bytes = d.web.s.borrow().blobs[&o].bytes.clone();
-    crate::browser_fetch::bytes_stream(d, it, bytes)
+    old_v(s, |it| crate::browser_fetch::bytes_stream(d, it, bytes))
+}
+
+fn blob_size<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = blob_of(d, s, this)?;
+    let n = d.web.s.borrow().blobs[&o].bytes.len();
+    Ok(s.number(n as f64))
+}
+
+fn blob_type_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = blob_of(d, s, this)?;
+    let ty = d.web.s.borrow().blobs[&o].ty.clone();
+    d.js_str_s(s, &ty)
+}
+
+fn file_name_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let (n, _) = file_of(d, s, this)?;
+    d.js_str_s(s, &n)
+}
+
+fn file_modified<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let (_, m) = file_of(d, s, this)?;
+    Ok(s.number(m))
 }
 
 // ------------------------------------------------------------------------------------------ FormData
@@ -1019,33 +1129,36 @@ fn cost(n: &str, e: &Ent) -> usize {
     n.len() + 32 + if let Ent::S(v) = e { v.len() } else { 0 }
 }
 
-fn form_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
+fn form_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let intrinsic = d.web.s.borrow().made.expect("made").form_p;
-    let proto = it.host_proto_from_new_target(intrinsic)?;
-    let form = match arg(a, 0) {
-        Value::Undefined => None,
-        v => match d.node_of(v).filter(|&n| d.doc.borrow().is_html(n, "form")) {
+    let intrinsic = d.obj_local(s, intrinsic);
+    let proto = s.proto_from_new_target(intrinsic)?;
+    let proto = lid(s, proto);
+    let v = arg_s(s, a, 0);
+    let form = if s.type_of(v) == Type::Undefined {
+        None
+    } else {
+        match d.node_of_s(s, v).filter(|&n| d.doc.borrow().is_html(n, "form")) {
             Some(n) => Some(n),
-            None => return Err(it.type_error("Failed to construct 'FormData': parameter 1 is not of type 'HTMLFormElement'.")),
-        },
+            None => return Err(s.type_error("Failed to construct 'FormData': parameter 1 is not of type 'HTMLFormElement'.")),
+        }
     };
-    room(d, 0)?;
+    lift(s, room(d, 0))?;
     // The entries first: the form walk can fail, and then no FormData exists.
     let list = match form {
-        Some(f) => d.entry_list(it, f, None)?,
+        Some(f) => old(s, |it| d.entry_list(it, f, None))?,
         None => Vec::new(),
     };
-    fill_form(d, it, proto, list)
+    fill_form(d, s, proto, list)
 }
 
-/// A new FormData with these entries; `None` (a file input with no file) is an empty File with no name.
 pub(crate) fn form_from_entries(d: &Dom, it: &mut Interp<'_>, list: Vec<(String, Option<Ent>)>) -> V {
     let m = made(d, it)?;
-    fill_form(d, it, m.form_p, list)
+    run_v(it, |s| fill_form(d, s, m.form_p, list))
 }
 
-fn fill_form(d: &Dom, it: &mut Interp<'_>, proto: ObjId, list: Vec<(String, Option<Ent>)>) -> V {
-    let o = d.obj(it, proto)?;
+fn fill_form<'s>(d: &Dom, s: &mut Sc<'s, '_>, proto: ObjId, list: Vec<(String, Option<Ent>)>) -> Res<'s, Local<'s>> {
+    let o = d.obj_s(s, proto)?;
     d.web.s.borrow_mut().forms.insert(o, Form::default());
     d.web.active.set(true);
     for (n, v) in list {
@@ -1053,13 +1166,14 @@ fn fill_form(d: &Dom, it: &mut Interp<'_>, proto: ObjId, list: Vec<(String, Opti
             Some(e) => e,
             None => {
                 let fp = d.web.s.borrow().made.expect("made").file_p;
-                let Value::Object(f) = new_blob(d, it, fp, BlobData { bytes: Vec::new(), ty: "application/octet-stream".into(), file: Some((String::new(), it.wall_now_ms())) })? else { unreachable!() };
-                Ent::B(f)
+                let now = s.wall_now_ms();
+                let f = new_blob_s(d, s, fp, BlobData { bytes: Vec::new(), ty: "application/octet-stream".into(), file: Some((String::new(), now)) })?;
+                Ent::B(lid(s, f))
             }
         };
-        push(d, o, n, e)?;
+        lift(s, push(d, o, n, e))?;
     }
-    Ok(Value::Object(o))
+    Ok(d.obj_local(s, o))
 }
 
 /// The most that one uploaded file may hold.
@@ -1108,42 +1222,37 @@ pub(crate) fn file_name(d: &Dom, v: Value) -> Option<String> {
     Some(d.web.s.borrow().blobs.get(&o)?.file.as_ref()?.0.clone())
 }
 
-fn form_of(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<ObjId> {
-    match this {
-        Value::Object(o) if d.web.s.borrow().forms.contains_key(&o) => Ok(o),
-        _ => Err(illegal(it)),
+fn form_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, ObjId> {
+    match obj_id(s, this) {
+        Some(o) if d.web.s.borrow().forms.contains_key(&o) => Ok(o),
+        _ => Err(illegal(s)),
     }
 }
 
-/// The value of `append` and `set` (`a[1]`, and the file name `a[2]`): a string, or a File.
-fn entry(d: &Dom, it: &mut Interp<'_>, a: &[Value], what: &str) -> R<Ent> {
-    let blob = match a[1] {
-        Value::Object(o) if d.web.s.borrow().blobs.contains_key(&o) => Some(o),
-        _ => None,
-    };
+fn entry<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>, what: &str) -> Res<'s, Ent> {
+    let x = arg_s(s, a, 1);
+    let blob = obj_id(s, x).filter(|o| d.web.s.borrow().blobs.contains_key(o));
     let Some(o) = blob else {
         if a.len() > 2 {
-            return Err(it.type_error(&format!("Failed to execute '{what}' on 'FormData': parameter 2 is not of type 'Blob'.")));
+            return Err(s.type_error(&format!("Failed to execute '{what}' on 'FormData': parameter 2 is not of type 'Blob'.")));
         }
-        return Ok(Ent::S(usv(d, it, a[1])?));
+        return Ok(Ent::S(usv(d, s, x)?));
     };
-    let given = match arg(a, 2) {
-        Value::Undefined => None,
-        f => Some(usv(d, it, f)?),
-    };
+    let f = arg_s(s, a, 2);
+    let given = if s.type_of(f) == Type::Undefined { None } else { Some(usv(d, s, f)?) };
     let (file, bytes, ty) = {
-        let s = d.web.s.borrow();
-        let b = &s.blobs[&o];
+        let w = d.web.s.borrow();
+        let b = &w.blobs[&o];
         if b.file.is_some() && given.is_none() {
             return Ok(Ent::B(o));
         }
         (b.file.clone(), b.bytes.clone(), b.ty.clone())
     };
     let (name, modified) = file.unzip();
-    let file = (given.or(name).unwrap_or_else(|| "blob".into()), modified.unwrap_or_else(|| it.wall_now_ms()));
+    let file = (given.or(name).unwrap_or_else(|| "blob".into()), modified.unwrap_or_else(|| s.wall_now_ms()));
     let proto = d.web.s.borrow().made.expect("made").file_p;
-    let Value::Object(f) = new_blob(d, it, proto, BlobData { bytes, ty, file: Some(file) })? else { unreachable!() };
-    Ok(Ent::B(f))
+    let f = new_blob_s(d, s, proto, BlobData { bytes, ty, file: Some(file) })?;
+    Ok(Ent::B(lid(s, f)))
 }
 
 fn push(d: &Dom, f: ObjId, n: String, e: Ent) -> R<()> {
@@ -1159,13 +1268,14 @@ fn push(d: &Dom, f: ObjId, n: String, e: Ent) -> R<()> {
     Ok(())
 }
 
-fn f_append(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let f = form_of(d, it, this)?;
-    need(it, a, 2, "append' on 'FormData")?;
-    let n = usv(d, it, a[0])?;
-    let e = entry(d, it, a, "append")?;
-    push(d, f, n, e)?;
-    Ok(Value::Undefined)
+fn f_append<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let f = form_of(d, s, this)?;
+    need(s, a, 2, "append' on 'FormData")?;
+    let x = arg_s(s, a, 0);
+    let n = usv(d, s, x)?;
+    let e = entry(d, s, a, "append")?;
+    lift(s, push(d, f, n, e))?;
+    Ok(s.undefined())
 }
 
 /// Change the list with `f` (no JS runs inside) and count its bytes again.
@@ -1179,16 +1289,17 @@ fn edit(d: &Dom, o: ObjId, f: impl FnOnce(&mut Vec<(String, Ent)>)) {
     form.bytes = now;
 }
 
-fn f_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let f = form_of(d, it, this)?;
-    need(it, a, 2, "set' on 'FormData")?;
-    let n = usv(d, it, a[0])?;
-    let e = entry(d, it, a, "set")?;
+fn f_set<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let f = form_of(d, s, this)?;
+    need(s, a, 2, "set' on 'FormData")?;
+    let x = arg_s(s, a, 0);
+    let n = usv(d, s, x)?;
+    let e = entry(d, s, a, "set")?;
     let len = d.web.s.borrow().forms[&f].list.len();
-    it.charge(len as u64 / 8)?;
+    s.charge(len as u64 / 8)?;
     let pos = d.web.s.borrow().forms[&f].list.iter().position(|x| x.0 == n);
     match pos {
-        None => push(d, f, n, e)?,
+        None => lift(s, push(d, f, n, e))?,
         Some(i) => edit(d, f, |l| {
             l[i].1 = e;
             let mut k = 0;
@@ -1198,21 +1309,22 @@ fn f_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
             });
         }),
     }
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-fn f_delete(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let f = form_of(d, it, this)?;
-    need(it, a, 1, "delete' on 'FormData")?;
-    let n = usv(d, it, a[0])?;
+fn f_delete<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let f = form_of(d, s, this)?;
+    need(s, a, 1, "delete' on 'FormData")?;
+    let x = arg_s(s, a, 0);
+    let n = usv(d, s, x)?;
     edit(d, f, |l| l.retain(|x| x.0 != n));
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-fn ent_value(d: &Dom, it: &mut Interp<'_>, e: &Ent) -> V {
+fn ent_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, e: &Ent) -> Res<'s, Local<'s>> {
     match e {
-        Ent::S(v) => d.js_str(it, v),
-        Ent::B(o) => Ok(Value::Object(*o)),
+        Ent::S(v) => d.js_str_s(s, v),
+        Ent::B(o) => Ok(d.obj_local(s, *o)),
     }
 }
 
@@ -1223,34 +1335,38 @@ pub(crate) fn clone_ent(e: &Ent) -> Ent {
     }
 }
 
-fn f_get(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let f = form_of(d, it, this)?;
-    need(it, a, 1, "get' on 'FormData")?;
-    let n = usv(d, it, a[0])?;
+fn f_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let f = form_of(d, s, this)?;
+    need(s, a, 1, "get' on 'FormData")?;
+    let x = arg_s(s, a, 0);
+    let n = usv(d, s, x)?;
     let found = d.web.s.borrow().forms[&f].list.iter().find(|x| x.0 == n).map(|x| clone_ent(&x.1));
     match found {
-        Some(e) => ent_value(d, it, &e),
-        None => Ok(Value::Null),
+        Some(e) => ent_value(d, s, &e),
+        None => Ok(s.null()),
     }
 }
 
-fn f_get_all(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let f = form_of(d, it, this)?;
-    need(it, a, 1, "getAll' on 'FormData")?;
-    let n = usv(d, it, a[0])?;
+fn f_get_all<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let f = form_of(d, s, this)?;
+    need(s, a, 1, "getAll' on 'FormData")?;
+    let x = arg_s(s, a, 0);
+    let n = usv(d, s, x)?;
     let found: Vec<Ent> = d.web.s.borrow().forms[&f].list.iter().filter(|x| x.0 == n).map(|x| clone_ent(&x.1)).collect();
     let mut vals = Vec::with_capacity(found.len());
     for e in &found {
-        vals.push(ent_value(d, it, e)?);
+        vals.push(ent_value(d, s, e)?);
     }
-    it.array_from(&vals)
+    s.new_array(&vals)
 }
 
-fn f_has(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let f = form_of(d, it, this)?;
-    need(it, a, 1, "has' on 'FormData")?;
-    let n = usv(d, it, a[0])?;
-    Ok(Value::Bool(d.web.s.borrow().forms[&f].list.iter().any(|x| x.0 == n)))
+fn f_has<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let f = form_of(d, s, this)?;
+    need(s, a, 1, "has' on 'FormData")?;
+    let x = arg_s(s, a, 0);
+    let n = usv(d, s, x)?;
+    let has = d.web.s.borrow().forms[&f].list.iter().any(|x| x.0 == n);
+    Ok(s.boolean(has))
 }
 
 /// The pair at `i` of form `f`, if both still exist.
@@ -1258,61 +1374,69 @@ fn pair_at(d: &Dom, f: ObjId, i: usize) -> Option<(String, Ent)> {
     d.web.s.borrow().forms.get(&f)?.list.get(i).map(|(n, e)| (n.clone(), clone_ent(e)))
 }
 
-fn f_for_each(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let f = form_of(d, it, this)?;
-    let cb = arg(a, 0);
-    if !it.is_callable_value(cb) {
-        return Err(it.type_error("Failed to execute 'forEach' on 'FormData': parameter 1 is not of type 'Function'."));
+fn f_for_each<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let f = form_of(d, s, this)?;
+    let (cb, this_arg) = (arg_s(s, a, 0), arg_s(s, a, 1));
+    if !s.is_callable(cb) {
+        return Err(s.type_error("Failed to execute 'forEach' on 'FormData': parameter 1 is not of type 'Function'."));
     }
     let mut i = 0;
     loop {
-        it.charge(1)?;
-        let Some((n, e)) = pair_at(d, f, i) else { return Ok(Value::Undefined) };
-        let (v, n) = (ent_value(d, it, &e)?, d.js_str(it, &n)?);
-        it.call(cb, arg(a, 1), &[v, n, this])?;
+        s.charge(1)?;
+        let Some((n, e)) = pair_at(d, f, i) else { return Ok(s.undefined()) };
+        let (v, n) = (ent_value(d, s, &e)?, d.js_str_s(s, &n)?);
+        s.call(cb, this_arg, &[v, n, this])?;
         i += 1;
     }
 }
 
-fn make_iter(d: &Dom, it: &mut Interp<'_>, this: Value, kind: u8) -> V {
-    let form = form_of(d, it, this)?;
-    room(d, 0)?;
+fn make_iter<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, kind: u8) -> Res<'s, Local<'s>> {
+    let form = form_of(d, s, this)?;
+    lift(s, room(d, 0))?;
     let proto = d.web.s.borrow().made.expect("made").iter_p;
-    let o = d.obj(it, proto)?;
+    let o = d.obj_s(s, proto)?;
     d.web.s.borrow_mut().iters.insert(o, IterObj { form, idx: 0, kind });
     d.web.active.set(true);
-    Ok(Value::Object(o))
+    Ok(d.obj_local(s, o))
 }
 
-fn iter_next(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let id = match this {
-        Value::Object(o) if d.web.s.borrow().iters.contains_key(&o) => o,
-        _ => return Err(illegal(it)),
+fn f_keys<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    make_iter(d, s, this, 0)
+}
+
+fn f_values<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    make_iter(d, s, this, 1)
+}
+
+fn f_entries<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    make_iter(d, s, this, 2)
+}
+
+fn iter_next<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let id = match obj_id(s, this) {
+        Some(o) if d.web.s.borrow().iters.contains_key(&o) => o,
+        _ => return Err(illegal(s)),
     };
-    it.charge(1)?;
+    s.charge(1)?;
     let (form, idx, kind) = {
-        let s = d.web.s.borrow();
-        let i = &s.iters[&id];
+        let w = d.web.s.borrow();
+        let i = &w.iters[&id];
         (i.form, i.idx, i.kind)
     };
     let (value, done) = match pair_at(d, form, idx) {
-        None => (Value::Undefined, true),
+        None => (s.undefined(), true),
         Some((n, e)) => {
             d.web.s.borrow_mut().iters.get_mut(&id).expect("checked").idx += 1;
             let v = match kind {
-                0 => d.js_str(it, &n)?,
-                1 => ent_value(d, it, &e)?,
+                0 => d.js_str_s(s, &n)?,
+                1 => ent_value(d, s, &e)?,
                 _ => {
-                    let (n, v) = (d.js_str(it, &n)?, ent_value(d, it, &e)?);
-                    it.array_from(&[n, v])?
+                    let (n, v) = (d.js_str_s(s, &n)?, ent_value(d, s, &e)?);
+                    s.new_array(&[n, v])?
                 }
             };
             (v, false)
         }
     };
-    let o = d.obj(it, it.object_prototype())?;
-    let (kv, kd) = (d.key(it, "value")?, d.key(it, "done")?);
-    it.define_data(o, kv, value, true, true, true)?;
-    it.define_data(o, kd, Value::Bool(done), true, true, true)?;
-    Ok(Value::Object(o))
+    iter_result_s(s, value, done)
 }

@@ -1201,7 +1201,7 @@ pub(crate) fn define_window(d: &Dom, it: &mut Interp<'_>, name: &str) -> R<bool>
     let key=d.key(it,name)?;
     if it.heap.peek_own_property(g,key).map_err(|e|it.heap_error(e))?.is_some(){return Ok(true);}
     if name == "length" {
-        let f = d.add_fn(it, crate::browser_frames::length, "get length", 0, false)?;
+        let f = d.add_fn_s_obj(it, crate::browser_frames::length, "get length", 0, bare_js_api::HostFn::Method)?;
         d.define_accessor(it, g, key, f, None)?;
         return Ok(true);
     }

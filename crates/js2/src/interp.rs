@@ -1389,25 +1389,35 @@ impl Vm {
                     }
                     Op::Lazy => {
                         let Some(l) = lazy.as_mut() else { err!(ErrKind::Plain, "a lazy function has no compiler") };
+                        let (kept, np) = (a!() == 0, code.nparams as usize);
                         if let Err(m) = l.compile(&mut prog.codes, ci) {
-                            err!(ErrKind::Syntax, "{m}")
+                            // A plain `Error`, not a `SyntaxError`: the text has no early error (the pre-parse found none), and a script (or a
+                            // test262 test that expects a `SyntaxError`) must not take a limit of the compiler for one.
+                            err!(ErrKind::Plain, "{m}")
                         }
                         // The `name` and the `length` of the functions that the compile added (the stub of `ci` has them already).
                         let known = realm.fn_info.len();
                         realm.fn_info.extend(prog.codes[known..].iter().map(code_info));
                         fbs.resize_with(prog.codes.len(), Feedback::default);
                         fbs[ci] = Feedback::default();
-                        // The frame was made for the stub (no parameters, all arguments in an array). Make it again for the code.
                         let ncode = &prog.codes[ci];
                         ensure!(fp + ncode.nregs as usize + 8);
-                        let all = Realm::obj(record(stack, fp, 9)).expect("the arguments of a stub");
-                        let (np, given) = (ncode.nparams as usize, (ncode.nparams as usize).min(all.len() as usize));
-                        for i in 0..given {
-                            stack[fp + i] = all.get_element(i as u32).unwrap_or(undef);
-                        }
-                        stack[fp + given..fp + np].fill(undef);
-                        if ncode.flags & CF_ARGS == 0 {
-                            stack[fp - REC + 9] = undef;
+                        if kept {
+                            // The stub had the parameter registers of the code: the frame has the arguments already.
+                            if ncode.nparams as usize != np || ncode.flags & CF_ARGS != 0 {
+                                err!(ErrKind::Plain, "a lazy function does not have the parameters that its stub had")
+                            }
+                        } else {
+                            // The frame was made for the stub (no parameters, all arguments in an array). Make it again for the code.
+                            let all = Realm::obj(record(stack, fp, 9)).expect("the arguments of a stub");
+                            let (np, given) = (ncode.nparams as usize, (ncode.nparams as usize).min(all.len() as usize));
+                            for i in 0..given {
+                                stack[fp + i] = all.get_element(i as u32).unwrap_or(undef);
+                            }
+                            stack[fp + given..fp + np].fill(undef);
+                            if ncode.flags & CF_ARGS == 0 {
+                                stack[fp - REC + 9] = undef;
+                            }
                         }
                         reload!();
                         pc = 0;
@@ -1799,7 +1809,8 @@ pub fn code_flags(c: &Code) -> u8 {
     let (mut pc, mut f) = (0, 0);
     while let Ok((ins, n)) = decode(&c.words, pc) {
         match ins.op {
-            Op::CreateArgs | Op::CreateRest | Op::Lazy => f |= CF_ARGS,
+            Op::CreateArgs | Op::CreateRest => f |= CF_ARGS,
+            Op::Lazy if ins.a != 0 => f |= CF_ARGS,
             Op::CallSuper | Op::CallSuperSpread | Op::GetSuper | Op::GetSuperElem | Op::SetSuper | Op::SetSuperElem => f |= CF_LINK,
             _ => {}
         }

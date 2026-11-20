@@ -233,6 +233,25 @@ fn parse_lazy<'a>(source: &'a str, limits: Limits, facts: &mut Facts, module: bo
     Ok(p.p)
 }
 
+/// The tree of the top level of `source` (a script) from the facts of an earlier [`parse_script_lazy`] of the same text, which `facts`
+/// holds. The lexer jumps over each function at the top level by its facts, so the cost is the size of the top level and not of the
+/// text. It finds no early error: the first parse did, so the caller must pass facts that were made from this exact text (a generated
+/// file and a test that compares it, see `prelude_facts.rs`). The facts are not changed.
+pub fn parse_script_known<'a>(source: &'a str, limits: Limits, facts: &mut Facts) -> Result<Program<'a>, Error> {
+    let mut p = match Parser::new(source, limits, facts.module, Mode::Function, std::mem::take(facts), 0, false, 0, false) {
+        Ok(p) => p,
+        Err((f, e)) => {
+            *facts = f;
+            return Err(e);
+        }
+    };
+    p.full_at = u32::MAX; // no function is parsed in full: each one is skipped
+    let r = p.parse_program();
+    *facts = std::mem::take(&mut p.facts);
+    r?;
+    Ok(p.p)
+}
+
 /// The full parse of function `id` of an earlier lazy parse of the same `source`: the parameters and the body in one tree, from the
 /// `(` of the parameters (the start of an arrow), with the context that the first parse had there. The function is the last function
 /// of the tree. The functions inside it are not read again: the lexer jumps over each of them (`Body::Skipped`). The first parse
