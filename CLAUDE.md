@@ -10,7 +10,7 @@ The design process below is for performance work. A bug fix or a small change sk
 
 1. Write a failing test for the bug.
 2. Make the shortest fix.
-3. Run the tests of the crates you touched: `cargo test --locked -p <crate>`. CI runs `cargo test --workspace`.
+3. Run `t`. It runs the tests that cover the changed files (`t --for <file>` lists them). Without `t`, run `cargo test --locked -p <crate> <module>::`. CI runs `cargo test --workspace`.
 4. Open the PR and run `gh pr merge --auto --merge`. GitHub merges it when the checks pass. Do not wait for CI in the session.
 ## How to improve a part
 
