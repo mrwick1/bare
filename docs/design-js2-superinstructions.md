@@ -292,3 +292,12 @@ Evidence: `script_run --eval` on the clean #763 build gives 519 M to 567 M instr
 ## 9. The counting feature
 
 `cargo build --release -p bare-js2 --features op-count --example op_count`. With the feature off, `opcount` does not exist and `run` has no call to it. The A/B of the normal build is in `docs/progress.md`. `examples/op_count.rs FILE...` prints, for each program, the dispatches, the hot ops, the hot pairs, the fusable pairs and triples, and the dispatches that greedy fusion removes (tables in section 3). `examples/op_cost.rs CASE K N` is the program for the per-op costs (section 2.3).
+
+## 10. Decisions (owner, 2026-11-20)
+
+- Plan: build all 5 steps of section 5 in order. Each step is one PR. Measure after each step. Fusion uses the histogram taken after steps 1 to 4.
+- Question 1: the S2 gate uses the net slope (scale 10 minus scale 1). The startup cost gets its own target, a cheaper prelude.
+- Question 2: keep `__def` and hide it. Do not delete it.
+- Question 3: the order of section 5 stays. The global cell cache comes before fusion.
+- Question 6: the function cell may grow by two words. The PR of step 4 records the peak RSS change on the bundle-like program.
+- Questions 4, 5, 7 and 8 were not asked. The build follows section 5: the overlay encoding, a pass after `encode`, and `op-count` kept behind its feature. The deeper dispatch change of option 4 is not built now.
