@@ -28,7 +28,7 @@
 //! `import.meta`, `delete` of a global name. See [`Fc::unsup`] and the progress entry.
 use crate::ast::*;
 use crate::atoms::SharedAtoms;
-use crate::bytecode::{Asm, BcError, Code, Handler, Ins, Label, Op, Recipes};
+use crate::bytecode::{Asm, BcError, Code, Handler, Ins, Label, NO_NAME, Op, Recipes};
 use crate::facts::{self, Facts, FnId};
 use crate::roots::RootMaps;
 use crate::string::{Chars, Str};
@@ -69,6 +69,8 @@ pub struct LevelVar {
     /// A `let`, `const` or `class`: a read can find the hole.
     pub tdz: bool,
     pub konst: bool,
+    /// The name of a named function expression, inside the function: an assignment throws in strict code and does nothing in sloppy code.
+    pub callee: bool,
 }
 
 impl Level {
@@ -93,6 +95,8 @@ pub struct Input {
     pub chain: Option<Rc<Level>>,
     /// The function is a named function expression: its name is a variable inside it that holds the function ([`Child::self_name`]).
     pub self_name: bool,
+    /// The `name` of the function ([`Child::name`]).
+    pub name: Option<Box<str>>,
 }
 
 /// A function inside the compiled one: the entry of the facts, and the chain that its closure sees. Parallel to `Code::funcs`.
@@ -103,9 +107,18 @@ pub struct Child {
     /// A named function expression. Its name is a binding in a scope of its own, inside the function and outside its parameters. The
     /// child compiles it as a variable (`LoadCallee`) when its text uses the name. (A function declaration binds the name outside.)
     pub self_name: bool,
+    /// The `name` property of the function: its own name, else the name that the text around it gives (`var f = function () {}`).
+    pub name: Option<Box<str>>,
     /// The function has no tree to parse: the parent compiled it, and its code is `Compiled::inline[ready]` of the parent (the initializers
     /// of the fields of a class and its `static` blocks: their text is in the tree of the function that holds the class).
     pub ready: Option<u32>,
+}
+
+/// The name that the function or class `0` gets when the compiler makes it (`SetFunctionName` of an anonymous function definition).
+#[derive(Clone, Debug)]
+pub enum Hint {
+    Func(FuncId, Box<str>),
+    Class(ClassId, Box<str>),
 }
 
 #[derive(Debug)]
@@ -291,9 +304,15 @@ pub(crate) struct Fc<'a> {
     pub strict: bool,
     pub is_script: bool,
     pub is_arrow: bool,
+    /// The function cannot be a constructor (an arrow, a method, a getter or a setter).
+    pub noctor: bool,
     pub fn_flags: u16,
     pub fn_id: Option<FnId>,
     pub self_name: bool,
+    /// The `name` of this function (from the parent), its `length`, and the name that the next function or class made here gets.
+    pub fn_name: Option<Box<str>>,
+    pub fn_len: u16,
+    pub hint: Option<Hint>,
     /// The function is the constructor of a class with `extends`.
     pub derived: bool,
     // control flow
@@ -302,6 +321,9 @@ pub(crate) struct Fc<'a> {
     /// Labels of the statement that is about to be compiled (`a: b: for (...)`).
     pub pending: Vec<String>,
     pub unsupported: Vec<&'static str>,
+    /// While the default of parameter `i` is compiled and it names a parameter that is not set yet: `(i, number of parameters, register
+    /// of the hole)`. A read of such a parameter reads the hole, so it throws.
+    pub param_dz: Option<(u32, u32, u32)>,
 }
 
 /// The first `PRESCAN` bytes of text are searched for an early use of a name; past that the compiler assumes one.
@@ -348,14 +370,19 @@ impl<'a> Fc<'a> {
             strict: false,
             is_script: false,
             is_arrow: false,
+            noctor: false,
             fn_flags: 0,
             fn_id: None,
             self_name: input.self_name,
+            fn_name: input.name.clone(),
+            fn_len: 0,
+            hint: None,
             derived: false,
             frames: Vec::new(),
             chain_short: None,
             pending: Vec::new(),
             unsupported: Vec::new(),
+            param_dz: None,
         }
     }
 
@@ -662,7 +689,7 @@ impl<'a> Fc<'a> {
             let tdz = matches!(kind, VK::Let | VK::Const | VK::Class);
             let home = if self.captured(name, span) {
                 let slot = slots.len() as u32;
-                slots.push(LevelVar { name: name.as_ref().into(), slot, tdz, konst: kind == VK::Const || (kind == VK::Callee && self.strict) });
+                slots.push(LevelVar { name: name.as_ref().into(), slot, tdz, konst: kind == VK::Const || kind == VK::Callee, callee: kind == VK::Callee });
                 Home::Ctx { level, slot }
             } else {
                 let r = d.reg.unwrap_or_else(|| self.alloc());
@@ -704,8 +731,13 @@ impl<'a> Fc<'a> {
     /// What `name` is at the source offset `at`.
     pub(crate) fn resolve(&self, name: &str, at: u32) -> Res {
         if let Some(v) = self.find_var(name) {
+            if let (Some((from, n, hole)), VK::Param, Home::Reg(r)) = (self.param_dz, v.kind, v.home)
+                && (from..n).contains(&r)
+            {
+                return Res::Reg { reg: hole, tdz: true, konst: false };
+            }
             let tdz = matches!(v.kind, VK::Let | VK::Const | VK::Class) && (v.always_tdz || at < v.decl_end);
-            let konst = v.kind == VK::Const || (v.kind == VK::Callee && self.strict);
+            let konst = matches!(v.kind, VK::Const | VK::Callee);
             return match v.home {
                 Home::Reg(reg) => Res::Reg { reg, tdz, konst },
                 Home::Ctx { level, slot } => Res::Ctx { hops: self.depth - level, slot, tdz, konst },
@@ -721,6 +753,21 @@ impl<'a> Fc<'a> {
             l = level.parent.as_ref();
         }
         Res::Global
+    }
+
+    /// Is `name` the name of a named function expression that is a variable of this function or of one around it?
+    pub(crate) fn is_callee(&self, name: &str) -> bool {
+        if let Some(v) = self.find_var(name) {
+            return v.kind == VK::Callee;
+        }
+        let mut l = self.outer.as_ref();
+        while let Some(level) = l {
+            if let Some(v) = level.find(name) {
+                return v.callee;
+            }
+            l = level.parent.as_ref();
+        }
+        false
     }
 
     /// Does `name` occur in the text `from..to`? See [`Fc::occurrences`].
@@ -761,7 +808,7 @@ impl<'a> Fc<'a> {
     // ------------------------------------------------------------ children
 
     /// The child function whose body the pre-parser skipped. Gives its index in `Code::funcs`.
-    pub(crate) fn child(&mut self, f: FuncId, self_name: bool) -> CR<u32> {
+    pub(crate) fn child(&mut self, f: FuncId, self_name: bool, name: Option<Box<str>>) -> CR<u32> {
         let func = self.prog.func(f);
         let id = match func.body {
             Body::Skipped(id) => id,
@@ -771,7 +818,7 @@ impl<'a> Fc<'a> {
             }
         };
         self.funcs.push(id);
-        self.children.push(Child { id, chain: self.cur_ctx.clone(), self_name, ready: None });
+        self.children.push(Child { id, chain: self.cur_ctx.clone(), self_name, name, ready: None });
         if self.funcs.len() > u16::MAX as usize {
             return Err(CompileError::Limit("more than 65,535 child functions"));
         }
@@ -798,11 +845,18 @@ impl<'a> Fc<'a> {
             return Err(CompileError::Limit(why));
         }
         let nregs = self.max.max(nparams).max(1) as u16;
+        let fn_name = match self.fn_name.take() {
+            Some(n) => self.atom(&n)?,
+            None => NO_NAME,
+        };
         let asm = std::mem::take(&mut self.asm).finish()?;
         for &(at, l) in &self.table_fix {
             self.tables[at] = asm.label_pcs[l.0];
         }
         let mut code = Code::new(nregs, nparams as u16);
+        code.fn_len = self.fn_len;
+        code.strict = self.strict;
+        code.noctor = self.noctor;
         let mut roots = RootMaps::new(nregs as usize);
         for (k, &(idx, start)) in self.root_at.iter().enumerate() {
             let end = self.root_at.get(k + 1).map_or(self.root_regs.len(), |n| n.1);
@@ -827,6 +881,7 @@ impl<'a> Fc<'a> {
                 last = pc;
             }
         }
+        code.fn_name = fn_name;
         code.words = asm.words;
         code.loops = asm.loops;
         code.numbers = self.numbers;
@@ -869,9 +924,11 @@ pub fn compile_function(prog: &Program, fid: FuncId, id: FnId, facts: &Facts, at
     let f = facts.get(id);
     c.strict = prog.func(fid).strict;
     c.is_arrow = f.kind == FuncKind::Arrow;
+    c.noctor = matches!(f.kind, FuncKind::Arrow | FuncKind::Method | FuncKind::Getter | FuncKind::Setter);
     c.fn_flags = f.flags;
     c.fn_id = Some(id);
     c.derived = f.kind == FuncKind::DerivedConstructor;
+    c.fn_len = prog.list(prog.func(fid).params).take_while(|&p| !matches!(prog.pat(p).kind, PatKind::Assign { .. } | PatKind::Rest(_))).count().min(u16::MAX as usize) as u16;
     c.force_ctx = f.flags & facts::INNER_EVAL != 0;
     if f.flags & (facts::EVAL | facts::WITH | facts::IN_WITH) != 0 {
         c.unsup("direct eval or with");
@@ -925,7 +982,7 @@ pub fn compile_all(source: &str, atoms: &SharedAtoms, limits: crate::parse::Limi
             Some(c) => c,
             None => {
                 let (p, fid) = parse_function(source, &mut facts, ch.id, limits).map_err(|e| format!("parse fn {}: {}", ch.id, e.msg))?;
-                compile_function(&p, fid, ch.id, &facts, atoms, &Input { chain: ch.chain.clone(), self_name: ch.self_name }).map_err(|e| format!("{e:?}"))?
+                compile_function(&p, fid, ch.id, &facts, atoms, &Input { chain: ch.chain.clone(), self_name: ch.self_name, name: ch.name.clone() }).map_err(|e| format!("{e:?}"))?
             }
         };
         todo.extend(take(&mut c));

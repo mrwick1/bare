@@ -229,6 +229,7 @@ impl Realm {
 
     /// `seal` (`freeze` false) or `freeze`: no new property, no property configurable, and for `freeze` no data property writable.
     pub(crate) fn lock(&mut self, o: Obj, freeze: bool) -> R<()> {
+        self.fn_prep_all(o);
         self.prevent_extensions(o);
         if o.is_indexed() {
             o.set_flag(F_ELEMS_FIXED | if freeze { F_ELEMS_RO | F_LEN_RO } else { 0 });
@@ -246,10 +247,11 @@ impl Realm {
     }
 
     /// Is `o` sealed (`frozen` false) or frozen?
-    pub(crate) fn is_locked(&self, o: Obj, frozen: bool) -> bool {
+    pub(crate) fn is_locked(&mut self, o: Obj, frozen: bool) -> bool {
         if o.extensible() {
             return false;
         }
+        self.fn_prep_all(o);
         if o.is_indexed() {
             let has = !o.is_empty() && !o.indices().is_empty();
             if has && (!o.has_flag(F_ELEMS_FIXED) || (frozen && !o.has_flag(F_ELEMS_RO))) {

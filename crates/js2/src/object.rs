@@ -53,6 +53,9 @@ pub const F_CALLABLE: u32 = 2;
 pub const F_CLASS: u32 = 4;
 /// Object header flag: the function is the constructor of a class with `extends` (its `this` is the hole until `super()` returns).
 pub const F_DERIVED: u32 = 8;
+/// Object header flag: the function cell has not got its own `length` and `name` yet ([`crate::interp_rt::Realm::fn_props`] defines them
+/// at the first look at its own properties, so a closure costs no more to make). A shape change keeps it.
+pub const F_LAZY: u32 = 2048;
 /// Object header flag: the function is a built-in written in Rust (S2.7). Its slot 0 is the index in `Realm::natives`, not a code index.
 pub const F_NATIVE: u32 = 16;
 /// Object header flag: no property may be added (`Object.preventExtensions`). The object has its own dictionary shape, so no cache adds to it.

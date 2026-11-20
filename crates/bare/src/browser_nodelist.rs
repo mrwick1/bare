@@ -33,7 +33,9 @@
 //! `getElementsByClassName` are still snapshot arrays. `NodeList` is not returned by `childNodes` or `querySelectorAll`.
 
 use crate::browser::*;
-use crate::browser_dom::{arg, next_in};
+use crate::browser_scoped::*;
+use bare_js_api::{Args, Local};
+use crate::browser_dom::{next_in};
 use bare_html::dom::{NodeData, NodeId, Ns};
 use bare_js::eval::Interp;
 use bare_js::heap::{HeapError, Slot};
@@ -142,6 +144,12 @@ pub(crate) fn item(d: &Dom, owner: ObjId, index: usize) -> Option<Result<Slot, H
     })())
 }
 
+/// Does `prepare` have nothing to do for `l`? (No scan of the document: the cache is of the current revision. A list by name always goes through `prepare`.)
+#[inline]
+fn is_fresh(d: &Dom, l: &List) -> bool {
+    !matches!(l.src, Src::Name(_)) && l.rev == Some(d.doc.borrow().revision())
+}
+
 fn fresh(d: &Dom, l: &List) -> Result<bool, HeapError> {
     let doc = d.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
     Ok(l.rev == Some(doc.revision()))
@@ -149,10 +157,14 @@ fn fresh(d: &Dom, l: &List) -> Result<bool, HeapError> {
 
 /// `Host::fill_indexed`: make the cache fresh and the wrapper of member `index`. `Ok(false)`: `owner` is not a list.
 pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<bool> {
-    if !d.nl.s.borrow().lists.contains_key(&owner) {
-        return Ok(false);
+    // A list that is fresh needs no scope: `prepare` would return at once.
+    let fresh = match d.nl.s.borrow().lists.get(&owner) {
+        None => return Ok(false),
+        Some(l) => is_fresh(d, l),
+    };
+    if !fresh {
+        run(it, |s| prepare(d, s, owner))?;
     }
-    prepare(d, it, owner)?;
     let id = d.nl.s.borrow().lists.get(&owner).and_then(|l| l.ids.get(index as usize).copied());
     if let Some(id) = id {
         d.wrap(it, id)?;
@@ -163,14 +175,14 @@ pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<
 // ------------------------------------------------------------------------------------ the rebuild
 
 /// Make the cache of the list `owner` fresh. It is the only place that scans the document for a list.
-fn prepare(d: &Dom, it: &mut Interp<'_>, owner: ObjId) -> R<()> {
+fn prepare<'s>(d: &Dom, s: &mut Sc<'s, '_>, owner: ObjId) -> Res<'s, ()> {
     let (src, cached, base) = {
         let t = d.nl.s.borrow();
         let Some(l) = t.lists.get(&owner) else { return Ok(()) };
         (match &l.src {
             Src::Name(n) => Ok(n.clone()),
-            Src::Options(s) => Err((*s, 0)),
-            Src::Selected(s) => Err((*s, 1)),
+            Src::Options(st) => Err((*st, 0)),
+            Src::Selected(st) => Err((*st, 1)),
             Src::Labels(c) => Err((*c, 2)),
             Src::Of(n, k) => Err((*n, 3 + *k)),
         }, l.rev, t.cached_ids - l.ids.len())
@@ -182,15 +194,15 @@ fn prepare(d: &Dom, it: &mut Interp<'_>, owner: ObjId) -> R<()> {
                 return Ok(());
             }
             let ids = match mode {
-                0 | 1 => crate::browser_select::list_ids(d, it, owner_node, mode == 1)?,
-                2 => crate::browser_controls::label_ids(d, it, owner_node)?,
-                m => crate::browser_table::ids(d, it, owner_node, m - 3)?,
+                0 | 1 => old(s, |it| crate::browser_select::list_ids(d, it, owner_node, mode == 1))?,
+                2 => old(s, |it| crate::browser_controls::label_ids(d, it, owner_node))?,
+                m => crate::browser_table::ids(d, s, owner_node, m - 3)?,
             };
             if ids.len() > d.lim.max_results {
-                return Err(d.lim("dom-results"));
+                return Err(d.lim_s(s, "dom-results"));
             }
             if base + ids.len() > d.lim.max_results.saturating_mul(4) {
-                return Err(d.lim("dom-nodelist-nodes"));
+                return Err(d.lim_s(s, "dom-nodelist-nodes"));
             }
             let rev = d.doc.borrow().revision();
             let mut t = d.nl.s.borrow_mut();
@@ -210,25 +222,25 @@ fn prepare(d: &Dom, it: &mut Interp<'_>, owner: ObjId) -> R<()> {
             return Ok(());
         }
         let mut out = Vec::new();
-        it.charge(1)?;
+        s.charge(1)?;
         if let Some(atom) = doc.find_atom("name") {
             let root = doc.root();
             let (mut cur, mut depth) = (root, 0usize);
             while let Some((c, cd)) = next_in(&doc, root, cur, depth) {
                 (cur, depth) = (c, cd);
                 let NodeData::Element { .. } = *doc.data(c) else {
-                    it.charge(1)?;
+                    s.charge(1)?;
                     continue;
                 };
-                it.charge(1 + doc.attr_count(c) as u64 / 8)?;
+                s.charge(1 + doc.attr_count(c) as u64 / 8)?;
                 let value = if doc.element_ns(c) == Ns::Html { doc.attr(c, atom) } else { None };
-                if let Some(value) = value { it.charge(value.len().min(name.len()) as u64 / 32 + 1)?; }
+                if let Some(value) = value { s.charge(value.len().min(name.len()) as u64 / 32 + 1)?; }
                 if value == Some(&*name) {
                     if out.len() >= d.lim.max_results {
-                        return Err(d.lim("dom-results"));
+                        return Err(d.lim_s(s, "dom-results"));
                     }
                     if base + out.len() >= d.lim.max_results.saturating_mul(4) {
-                        return Err(d.lim("dom-nodelist-nodes"));
+                        return Err(d.lim_s(s, "dom-nodelist-nodes"));
                     }
                     out.push(c);
                 }
@@ -248,48 +260,55 @@ fn prepare(d: &Dom, it: &mut Interp<'_>, owner: ObjId) -> R<()> {
 
 // ------------------------------------------------------------------------------------ methods
 
-fn list_of(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<ObjId> {
-    if let Value::Object(o) = this
-        && d.nl.s.borrow().lists.contains_key(&o)
-    {
+fn list_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, ObjId> {
+    if let Some(o) = obj_id(s, this).filter(|o| d.nl.s.borrow().lists.contains_key(o)) {
         return Ok(o);
     }
-    Err(it.type_error("Illegal invocation"))
+    Err(s.type_error("Illegal invocation"))
 }
 
-pub(crate) fn length(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let o = list_of(d, it, this)?;
-    prepare(d, it, o)?;
-    Ok(Value::Number(d.nl.s.borrow().lists[&o].ids.len() as f64))
+pub(crate) fn length<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    // One lookup of the list when its cache is fresh (the common read, `i < list.length`); a stale list costs the lookups that it cost before.
+    let Some(o) = obj_id(s, this) else { return Err(s.type_error("Illegal invocation")) };
+    let fresh = match d.nl.s.borrow().lists.get(&o) {
+        None => return Err(s.type_error("Illegal invocation")),
+        Some(l) => is_fresh(d, l).then(|| l.ids.len()),
+    };
+    if let Some(n) = fresh {
+        return Ok(s.number(n as f64));
+    }
+    prepare(d, s, o)?;
+    Ok(s.number(d.nl.s.borrow().lists[&o].ids.len() as f64))
 }
 
-pub(crate) fn item_method(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let o = list_of(d, it, this)?;
+pub(crate) fn item_method<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = list_of(d, s, this)?;
     if a.is_empty() {
-        return Err(it.type_error("Failed to execute 'item' on 'NodeList': 1 argument required, but only 0 present."));
+        return Err(s.type_error("Failed to execute 'item' on 'NodeList': 1 argument required, but only 0 present."));
     }
     // WebIDL `unsigned long`: ToNumber, then modulo 2^32. Converting can run script, so no state is read before it.
-    let n = it.to_js_number(arg(a, 0))?;
+    let arg0 = arg_s(s, a, 0);
+    let n = s.to_number(arg0)?;
     let i = if n.is_finite() { n.trunc().rem_euclid(4294967296.0) as usize } else { 0 };
-    prepare(d, it, o)?;
+    prepare(d, s, o)?;
     let id = d.nl.s.borrow().lists[&o].ids.get(i).copied();
     match id {
-        Some(id) => d.wrap(it, id),
-        None => Ok(Value::Null),
+        Some(id) => d.wrap_s(s, id),
+        None => Ok(s.null()),
     }
 }
 
-pub(crate) fn get_elements_by_name(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let n = d.nd(it, this)?;
+pub(crate) fn get_elements_by_name<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.nd_s(s, this)?;
     if !matches!(d.data(n), NodeData::Document) {
-        return Err(it.type_error("Illegal invocation"));
+        return Err(s.type_error("Illegal invocation"));
     }
     if a.is_empty() {
-        return Err(it.type_error("Failed to execute 'getElementsByName' on 'Document': 1 argument required, but only 0 present."));
+        return Err(s.type_error("Failed to execute 'getElementsByName' on 'Document': 1 argument required, but only 0 present."));
     }
-    let name = d.string_arg(it, arg(a, 0))?;
+    let name = d.arg_str_s(s, a, 0)?;
     let proto = *d.nl.proto.get().expect("installed");
-    make_list(d, it, proto, Src::Name(name.into()))
+    old_v(s, |it| make_list(d, it, proto, Src::Name(name.into())))
 }
 
 /// A new live list over `src`, with the prototype `proto`. It counts with the wrappers.
@@ -324,19 +343,17 @@ pub(crate) fn of(d: &Dom, it: &mut Interp<'_>, n: NodeId, kind: u8) -> V {
     Ok(v)
 }
 
-/// The members of the list `this`, fresh. `None`: `this` is not a list.
-pub(crate) fn members(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<Option<Vec<NodeId>>> {
-    let Value::Object(o) = this else { return Ok(None) };
+/// The members of the list `o`, fresh. `None`: `o` is not a list.
+pub(crate) fn members<'s>(d: &Dom, s: &mut Sc<'s, '_>, o: ObjId) -> Res<'s, Option<Vec<NodeId>>> {
     if !d.nl.s.borrow().lists.contains_key(&o) {
         return Ok(None);
     }
-    prepare(d, it, o)?;
+    prepare(d, s, o)?;
     Ok(Some(d.nl.s.borrow().lists[&o].ids.clone()))
 }
 
 /// The select of a list made by `make_list` over the options of a select.
-pub(crate) fn select_of(d: &Dom, this: Value) -> Option<NodeId> {
-    let Value::Object(o) = this else { return None };
+pub(crate) fn select_of(d: &Dom, o: ObjId) -> Option<NodeId> {
     match d.nl.s.borrow().lists.get(&o)?.src {
         Src::Options(s) | Src::Selected(s) => Some(s),
         Src::Name(_) | Src::Labels(_) | Src::Of(..) => None,
@@ -355,8 +372,8 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     let proto = d.obj(it, it.object_prototype())?;
     let _ = d.nl.proto.set(proto);
     let mut fixed = vec![proto];
-    d.def_get(it, proto, "length", length, None)?;
-    d.def_method(it, proto, "item", 1, item_method)?;
+    d.def_get_s(it, proto, "length", length, None)?;
+    d.def_method_s(it, proto, "item", 1, item_method)?;
     // The value iterator of an interface with an indexed getter: the `Array.prototype` functions (WebIDL "iterable").
     let ap = Value::Object(it.array_prototype());
     for name in ["entries", "keys", "values", "forEach"] {

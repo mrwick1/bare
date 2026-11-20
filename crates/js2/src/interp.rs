@@ -66,7 +66,7 @@ use crate::gc::Marker;
 use crate::interp_rt::{ErrKind, Feedback, Got, Key, Put, R, Realm};
 use crate::object::{F_DERIVED, Obj};
 use crate::roots::RootMaps;
-use crate::shapes::{A_C, A_W};
+use crate::shapes::{A_C, A_E, A_W};
 use crate::value::Value;
 use std::cmp::Ordering;
 use std::sync::Arc;
@@ -216,13 +216,20 @@ fn unwind(prog: &Program, stack: &mut [Value], ci: &mut usize, fp: &mut usize, p
     }
 }
 
+/// The shared atom of the `name` and the `length` of a code, for `Realm::fn_props`.
+fn code_info(c: &Code) -> (Option<crate::string::Str>, u16) {
+    (c.atoms.get(c.fn_name as usize).copied(), c.fn_len)
+}
+
 impl Vm {
     pub fn new(mut prog: Program, shared: Arc<SharedAtoms>) -> Vm {
         let dctor = [prog.codes.len(), prog.codes.len() + 1];
         prog.codes.extend(default_ctors());
         scan_flags(&mut prog.codes);
         let fbs = prog.codes.iter().map(|_| Feedback::default()).collect();
-        Vm { realm: Realm::new(shared), stack: Vec::new(), fbs, prog, lazy: None, dctor, fuel: u64::MAX }
+        let mut realm = Realm::new(shared);
+        realm.fn_info = prog.codes.iter().map(code_info).collect();
+        Vm { realm, stack: Vec::new(), fbs, prog, lazy: None, dctor, fuel: u64::MAX }
     }
 
     /// A function cell for code `code` with no context.
@@ -388,7 +395,10 @@ impl Vm {
             }};
         }
         macro_rules! set_field {
-            ($recv:expr, $val:expr, $site:expr, $next:expr) => {{
+            ($recv:expr, $val:expr, $site:expr, $next:expr) => {
+                set_field!($recv, $val, $site, $next, |_n| {})
+            };
+            ($recv:expr, $val:expr, $site:expr, $next:expr, |$nm:ident| $pre:block) => {{
                 let (recv, val): (Value, Value) = ($recv, $val);
                 // SAFETY: the registers hold live values.
                 if let Some((o, shape)) = unsafe { Obj::from_value_shape(recv) } {
@@ -407,9 +417,19 @@ impl Vm {
                 }
                 gate!();
                 let n = name!($site);
+                {
+                    let $nm = n;
+                    $pre
+                }
                 match tri!(realm.set_field_slow(fb, $site, n, recv, val)) {
                     Put::Done => pc = $next,
                     Put::Set(f) => call_set!(f, recv, val, $next),
+                    Put::Fail => {
+                        if code.strict {
+                            err!(ErrKind::Type, "cannot assign to a read-only property or a property with no setter")
+                        }
+                        pc = $next;
+                    }
                 }
             }};
         }
@@ -619,6 +639,9 @@ impl Vm {
         macro_rules! construct {
             ($callee:expr, $ni:expr, $cctx:expr, $nt:expr, $dst:expr, $next:expr, $ab:expr, $argc:expr, $flag:expr) => {{
                 let callee: Value = $callee;
+                if prog.codes[$ni].noctor {
+                    err!(ErrKind::Type, "not a constructor")
+                }
                 let derived = Realm::obj(callee).is_some_and(|f| f.has_flag(F_DERIVED));
                 let this = if derived { undef } else { tri!(realm.new_this($nt)) };
                 enter!(callee, $ni, $cctx, this, $nt, ($dst as i32) | CONSTRUCT | $flag, pc, $next, $ab, $argc);
@@ -748,6 +771,11 @@ impl Vm {
                         r!(a!()) = record(stack, fp, 1);
                         pc = next;
                     }
+                    Op::LoadThisS => {
+                        let t = record(stack, fp, 1);
+                        r!(a!()) = if t.is_undefined() || t.is_null() { realm.global.value() } else { t };
+                        pc = next;
+                    }
                     Op::LoadHole => {
                         r!(a!()) = Value::HOLE;
                         pc = next;
@@ -762,6 +790,12 @@ impl Vm {
                     }
                     Op::LoadAtom => {
                         r!(a!()) = code.atoms[bx!()].value();
+                        pc = next;
+                    }
+                    Op::CheckUnbound => {
+                        if !r!(a!()).is_hole() {
+                            err!(ErrKind::Reference, "super() called twice")
+                        }
                         pc = next;
                     }
                     Op::CheckInit => {
@@ -833,19 +867,50 @@ impl Vm {
                         }
                         gate!();
                         let n = name!(bx!());
-                        let v = tri!(realm.get_global_slow(fb, bx!(), n));
-                        r!(a!()) = v;
-                        pc = next;
+                        match tri!(realm.get_global_slow(fb, bx!(), n)) {
+                            Got::Val(v) => {
+                                r!(a!()) = v;
+                                pc = next;
+                            }
+                            Got::Get(f) => call_get!(f, realm.global.value(), a!(), next),
+                        }
                     }
                     Op::SetGlobal | Op::SetName => {
                         let g = realm.global.value();
+                        // A global lexical binding (a `let` of another script) is not a property of the global object.
+                        set_field!(g, r!(a!()), bx!(), next, |n| {
+                            if let Some(res) = realm.lex_put(n, r!(a!())) {
+                                tri!(res);
+                                pc = next;
+                                continue;
+                            }
+                        });
+                    }
+                    Op::SetGlobalS => {
+                        gate!();
+                        let (g, n) = (realm.global.value(), name!(bx!()));
+                        if let Some(res) = realm.lex_put(n, r!(a!())) {
+                            tri!(res);
+                            pc = next;
+                            continue;
+                        }
+                        // A cache entry of the global's shape says that an earlier write found the name there.
+                        // SAFETY: the register holds a live value.
+                        let known = unsafe { Obj::from_value_shape(g) }.is_some_and(|(_, shape)| fb.caches[bx!()].shape == shape);
+                        if !known && !tri!(realm.has_prop(g, Key::Name(n))) {
+                            let t = realm.text(n);
+                            err!(ErrKind::Reference, "{t} is not defined")
+                        }
                         set_field!(g, r!(a!()), bx!(), next);
                     }
                     Op::TypeofGlobal | Op::TypeofName => {
                         gate!();
                         let n = name!(bx!());
                         let g = realm.global.value();
-                        let v = tri!(realm.get_prop(g, Key::Name(n)));
+                        let v = match realm.lex_get(n) {
+                            Some(res) => tri!(res),
+                            None => tri!(realm.get_prop(g, Key::Name(n))),
+                        };
                         r!(a!()) = realm.typeof_name(v);
                         pc = next;
                     }
@@ -894,7 +959,20 @@ impl Vm {
                         match tri!(realm.set_prop_g(recv, k, v)) {
                             Put::Done => pc = next,
                             Put::Set(f) => call_set!(f, recv, v, next),
+                            Put::Fail => {
+                            if code.strict {
+                                err!(ErrKind::Type, "cannot assign to a read-only property or a property with no setter")
+                            }
+                            pc = next;
+                    }
                         }
+                    }
+                    Op::RequireObj => {
+                        let v = r!(a!());
+                        if v.is_undefined() || v.is_null() {
+                            err!(ErrKind::Type, "cannot destructure undefined or null")
+                        }
+                        pc = next;
                     }
                     Op::ToKey => {
                         gate!();
@@ -915,9 +993,22 @@ impl Vm {
                         tri!(realm.define(o, k, r!(c!())));
                         pc = next;
                     }
+                    Op::DeleteGlobal => {
+                        gate!();
+                        let (g, n) = (realm.global.value(), name!(bx!()));
+                        r!(a!()) = Value::bool(!realm.has_lex(n) && tri!(realm.delete_prop(g, Key::Name(n))));
+                        pc = next;
+                    }
                     Op::Delete => {
+                        let o = r!(b!());
+                        if o.is_undefined() || o.is_null() {
+                            err!(ErrKind::Type, "cannot delete a property of undefined or null")
+                        }
                         let k = tri!(realm.key_of(r!(c!())));
                         let ok = tri!(realm.delete_prop(r!(b!()), k));
+                        if !ok && code.strict {
+                            err!(ErrKind::Type, "cannot delete a property that is not configurable")
+                        }
                         r!(a!()) = Value::bool(ok);
                         pc = next;
                     }
@@ -1203,7 +1294,13 @@ impl Vm {
                         err!(ErrKind::Type, "assignment to constant variable '{}'", n)
                     }
                     Op::IterOpen => {
-                        let it = r!(b!());
+                        let mut it = r!(b!());
+                        if Realm::str_of(it).is_some() {
+                            // A string is iterated by code points: walk an array of them.
+                            gate!();
+                            let vals = tri!(realm.iter_values(it));
+                            it = Obj::array(&mut realm.heap, &realm.shapes, realm.s_array, &vals).expect("memory").value();
+                        }
                         let is_array = Realm::obj(it).is_some_and(|o| realm.shapes.get(o.shape(&realm.shapes)).layout == crate::cell::Layout::Indexed);
                         if !is_array {
                             err!(ErrKind::Type, "the value is not iterable (the iterator protocol is S2.7)")
@@ -1238,10 +1335,27 @@ impl Vm {
                         gate!();
                         let n = name!(bx!());
                         let g = realm.global;
+                        if realm.has_lex(n) {
+                            let t = realm.text(n);
+                            err!(ErrKind::Syntax, "Identifier '{t}' has already been declared")
+                        }
                         // An own property of the global object: an inherited one (`__proto__`) does not count.
                         if realm.get_own(g, Key::Name(n)).is_none() {
-                            tri!(realm.define(g, Key::Name(n), undef));
+                            tri!(realm.define_attrs(g, Key::Name(n), A_W | A_E, undef));
                         }
+                        pc = next;
+                    }
+                    Op::CheckLex => {
+                        gate!();
+                        let n = name!(bx!());
+                        tri!(realm.check_lex(n));
+                        pc = next;
+                    }
+                    Op::DeclLex | Op::DeclLexC => {
+                        gate!();
+                        let n = name!(bx!());
+                        let cx = stack[fp - REC + 2];
+                        tri!(realm.declare_lex(n, cx, a!() as u32, opv == Op::DeclLexC));
                         pc = next;
                     }
                     Op::CreateArgs => {
@@ -1260,6 +1374,9 @@ impl Vm {
                         if let Err(m) = l.compile(&mut prog.codes, ci) {
                             err!(ErrKind::Syntax, "{m}")
                         }
+                        // The `name` and the `length` of the functions that the compile added (the stub of `ci` has them already).
+                        let known = realm.fn_info.len();
+                        realm.fn_info.extend(prog.codes[known..].iter().map(code_info));
                         fbs.resize_with(prog.codes.len(), Feedback::default);
                         fbs[ci] = Feedback::default();
                         // The frame was made for the stub (no parameters, all arguments in an array). Make it again for the code.
@@ -1420,7 +1537,18 @@ impl Vm {
                     }
                     Op::MakeDerived => {
                         gate!();
+                        if let Some((ni, _)) = realm.function_new(r!(b!()))
+                            && prog.codes[ni].noctor
+                        {
+                            err!(ErrKind::Type, "class extends value is not a constructor or null")
+                        }
                         tri!(realm.make_class(r!(a!()), Some(r!(b!()))));
+                        pc = next;
+                    }
+                    Op::SetFnName => {
+                        gate!();
+                        let k = tri!(realm.key_of(r!(b!())));
+                        tri!(realm.name_function(r!(a!()), k, c!() as u32));
                         pc = next;
                     }
                     Op::DefaultCtor => {
@@ -1453,6 +1581,12 @@ impl Vm {
                         match tri!(realm.private_set(r!(a!()), r!(b!()), r!(c!()))) {
                             Put::Done => pc = next,
                             Put::Set(f) => call_set!(f, r!(a!()), r!(c!()), next),
+                            Put::Fail => {
+                            if code.strict {
+                                err!(ErrKind::Type, "cannot assign to a read-only property or a property with no setter")
+                            }
+                            pc = next;
+                    }
                         }
                     }
                     Op::HasPrivate => {
@@ -1504,6 +1638,12 @@ impl Vm {
                         match tri!(realm.super_set(home!(), r!(a!()), Key::Name(n), r!(b!()))) {
                             Put::Done => pc = next,
                             Put::Set(f) => call_set!(f, r!(a!()), r!(b!()), next),
+                            Put::Fail => {
+                            if code.strict {
+                                err!(ErrKind::Type, "cannot assign to a read-only property or a property with no setter")
+                            }
+                            pc = next;
+                    }
                         }
                     }
                     Op::SetSuperElem => {
@@ -1512,6 +1652,12 @@ impl Vm {
                         match tri!(realm.super_set(home!(), r!(a!()), k, r!(c!()))) {
                             Put::Done => pc = next,
                             Put::Set(f) => call_set!(f, r!(a!()), r!(c!()), next),
+                            Put::Fail => {
+                            if code.strict {
+                                err!(ErrKind::Type, "cannot assign to a read-only property or a property with no setter")
+                            }
+                            pc = next;
+                    }
                         }
                     }
                     Op::CallSuper | Op::CallSuperSpread => {
@@ -1541,17 +1687,29 @@ impl Vm {
                     }
                     Op::RetDerived => {
                         let (v, t) = (r!(a!()), r!(b!()));
-                        let res = if Realm::obj(v).is_some() {
-                            v
-                        } else if v.is_undefined() {
-                            if t.is_hole() {
-                                err!(ErrKind::Reference, "must call super constructor in derived class before returning from derived constructor")
-                            }
-                            t
+                        let bad = if Realm::obj(v).is_some() {
+                            None
+                        } else if !v.is_undefined() {
+                            Some((ErrKind::Type, "derived constructors may only return object or undefined"))
+                        } else if t.is_hole() {
+                            Some((ErrKind::Reference, "must call super constructor in derived class before returning from derived constructor"))
                         } else {
-                            err!(ErrKind::Type, "derived constructors may only return object or undefined")
+                            None
                         };
-                        ret!(res)
+                        if let Some((kind, msg)) = bad {
+                            // The error is for the caller of the constructor: a `catch` inside the constructor does not see it.
+                            let e = realm.error(kind, msg);
+                            let caller = int_at(stack, fp, 5);
+                            if caller == ENTRY {
+                                return Err(Exit::Throw(e));
+                            }
+                            pc = int_at(stack, fp, 3) as usize;
+                            ci = caller as usize;
+                            fp -= REC + prog.codes[ci].nregs as usize;
+                            reload!();
+                            throw!(e)
+                        }
+                        ret!(if v.is_undefined() { t } else { v })
                     }
                 }
             }};

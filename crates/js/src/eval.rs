@@ -2209,7 +2209,7 @@ impl<'p> Interp<'p> {
                 D::S(script, fid, env, sb) => it.call_script((script, fid), o, env, sb, this, args),
                 D::P(pf) => it.call_promise(pf, this, args, false),
                 D::H(id) => it.call_host(id, this, args, false, None),
-                D::A(id) => it.call_api_host(id, this, args, false, None),
+                D::A(id) => it.call_api_plain(id, this, args),
                 D::X => it.px_call(o, this, args),
                 D::R => it.call_revoke(o),
                 D::B(t, bthis, mut bargs) => {

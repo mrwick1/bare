@@ -96,38 +96,24 @@ impl Dom {
     }
 }
 
-pub(crate) fn make_element(d: &Dom, it: &mut Interp<'_>, name: &str) -> V {
-    let n = {
-        let mut doc = d.doc.borrow_mut();
-        d.room(&doc, 1, 0)?;
-        if doc.find_atom(name).is_none() && doc.name_count() + 1 > d.lim.max_names {
-            return Err(d.lim("dom-names"));
-        }
-        doc.create_element(name)
-    };
-    d.wrap(it, n)
-}
-
-/// An HTML `link` in the HTML namespace. An SVG or MathML `link` is not one (`is_named` skips foreign elements).
-pub(crate) fn link_el(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
-    let n = d.el(it, this)?;
-    if is_named(&d.doc.borrow(), n, &["link"]) { Ok(n) } else { Err(it.type_error("Illegal invocation")) }
-}
-
-/// The start of `insertAdjacentElement/Text/HTML`: the receiver and the position text, after the argument count check.
-pub(crate) fn adjacent_start(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], name: &str) -> R<(NodeId, String)> {
-    let me = d.el(it, this)?;
-    if a.len() < 2 {
-        return Err(it.type_error(&format!("Failed to execute '{name}' on 'Element': 2 arguments required, but only {} present.", a.len())));
+impl Dom {
+    /// `def_get` for a getter of the new form and a setter of the old form (the setter's file has not moved).
+    pub(crate) fn def_get_sh(&self, it: &mut Interp<'_>, target: ObjId, name: &str, get: HS, set: H) -> R<()> {
+        let key = self.key(it, name)?;
+        let g = self.add_fn_s_obj(it, get, &format!("get {name}"), 0, bare_js_api::HostFn::Method)?;
+        let s = self.add_fn(it, set, &format!("set {name}"), 1, false)?;
+        self.define_accessor(it, target, key, g, Some(s))
     }
-    Ok((me, d.string_arg(it, a[0])?))
-}
 
-/// `beforebegin`, `afterbegin`, `beforeend`, `afterend` (any case) as 0 to 3.
-pub(crate) fn adjacent_pos(d: &Dom, it: &mut Interp<'_>, name: &str, s: &str) -> R<u8> {
-    match ["beforebegin", "afterbegin", "beforeend", "afterend"].iter().position(|p| s.eq_ignore_ascii_case(p)) {
-        Some(i) => Ok(i as u8),
-        None => Err(d.dom_err(it, "SyntaxError", &format!("Failed to execute '{name}' on 'Element': The value provided ('{s}') is not one of 'beforeBegin', 'afterBegin', 'beforeEnd', or 'afterEnd'."))),
+    /// `def_get` for functions of the new form.
+    pub(crate) fn def_get_s(&self, it: &mut Interp<'_>, target: ObjId, name: &str, get: HS, set: Option<HS>) -> R<()> {
+        let key = self.key(it, name)?;
+        let g = self.add_fn_s_obj(it, get, &format!("get {name}"), 0, bare_js_api::HostFn::Method)?;
+        let s = match set {
+            Some(h) => Some(self.add_fn_s_obj(it, h, &format!("set {name}"), 1, bare_js_api::HostFn::Method)?),
+            None => None,
+        };
+        self.define_accessor(it, target, key, g, s)
     }
 }
 
@@ -160,7 +146,7 @@ pub(crate) fn install_late(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     it.define_data(d.p().document, k, Value::Object(f), true, false, true)?;
     d.def_method_s(it, d.p().element, "insertAdjacentElement", 2, insert_adjacent_element)?;
     d.def_method_s(it, d.p().element, "insertAdjacentText", 2, insert_adjacent_text)?;
-    d.def_method(it, d.p().element, "insertAdjacentHTML", 2, crate::browser_fragment::insert_adjacent_html)?;
+    d.def_method_s(it, d.p().element, "insertAdjacentHTML", 2, crate::browser_fragment::insert_adjacent_html)?;
     crate::browser_implementation::install(d, it)
 }
 
@@ -173,22 +159,6 @@ pub(crate) fn new_fragment(d: &Dom, it: &mut Interp<'_>, proto: Option<ObjId>) -
 
 pub(crate) fn clone_tree(d: &Dom, it: &mut Interp<'_>, n: NodeId, deep: bool, import: bool) -> R<NodeId> {
     run(it, |s| clone_tree_s(d, s, n, deep, import))
-}
-
-pub(crate) fn wrap_all(d: &Dom, it: &mut Interp<'_>, ids: &[NodeId]) -> V {
-    run_v(it, |s| wrap_all_s(d, s, ids))
-}
-
-pub(crate) fn append_child(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    via(d, it, append_child_s, this, a)
-}
-
-pub(crate) fn create_element(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    via(d, it, create_element_s, this, a)
-}
-
-pub(crate) fn toggle_attribute(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    via(d, it, toggle_attribute_s, this, a)
 }
 
 pub(crate) fn text_content(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {

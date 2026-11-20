@@ -879,7 +879,7 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     let p = d.p();
     def_acc(d, it, p.document, "URL", doc_url, None)?;
     def_acc(d, it, p.document, "documentURI", doc_url, None)?;
-    def_acc(d, it, p.document, "cookie", crate::browser_cookie::doc_cookie_get, Some(crate::browser_cookie::doc_cookie_set))?;
+    d.def_get_s(it, p.document, "cookie", crate::browser_cookie::doc_cookie_get, Some(crate::browser_cookie::doc_cookie_set))?;
     def_acc(d, it, p.document, "domain", doc_domain, Some(doc_set_domain))?;
     def_acc(d, it, p.node, "baseURI", doc_url, None)?;
     def_acc(d, it, p.document, "location", loc_obj, Some(win_set_location))?;
