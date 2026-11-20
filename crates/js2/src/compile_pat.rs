@@ -153,13 +153,18 @@ impl<'a> Fc<'a> {
         match x.kind {
             ExprKind::Member { obj, name, .. } => {
                 let nm = self.name_of(name);
-                let o = self.any(obj)?;
-                self.set_member(o, Some(&nm), None, v)
+                let (o, mode) = self.member_base(obj, None)?;
+                self.set_member(mode, o, Some(&nm), None, v)
             }
             ExprKind::Index { obj, index, .. } => {
-                let o = self.any(obj)?;
+                let (o, mode) = self.member_base(obj, Some(index))?;
                 let k = self.any(index)?;
-                self.set_member(o, None, Some(k), v)
+                self.set_member(mode, o, None, Some(k), v)
+            }
+            ExprKind::PrivateMember { obj, name, .. } => {
+                let o = self.any(obj)?;
+                let k = self.private_key(name)?;
+                self.set_member(Mode::Private, o, None, Some(k), v)
             }
             _ => {
                 self.unsup("this assignment target");
@@ -171,13 +176,26 @@ impl<'a> Fc<'a> {
     fn object_pattern(&mut self, list: List<PatProp>, v: u32, mode: Bind) -> CR {
         let prog = self.prog;
         let props: Vec<PatProp> = prog.list(list).map(|p| *prog.pat_prop(p)).collect();
-        for pp in props {
+        // With a rest property, the keys of the other properties go to a window of registers that `ObjRest` reads.
+        let nkeys = props.len() as u32 - props.iter().any(|p| matches!(p.key, Key::None)) as u32;
+        let base = props.iter().any(|p| matches!(p.key, Key::None)).then(|| self.window(nkeys));
+        for (i, pp) in props.into_iter().enumerate() {
             let m = self.mark();
+            let slot = base.map(|b| b + i as u32);
             match pp.key {
-                Key::None => self.unsup("a rest property in an object pattern"),
+                Key::None => {
+                    let PatKind::Rest(t) = prog.pat(pp.value).kind else { continue };
+                    let r = self.alloc();
+                    self.opx(Op::ObjRest, r, v, base.unwrap_or(0), nkeys);
+                    self.set_live(r);
+                    self.bind_src(t, Src::Reg(r), mode)?;
+                }
                 Key::Computed(k) => {
                     let kr = self.any(k)?;
-                    self.bind_src(pp.value, Src::Elem(v, kr), mode)?;
+                    let kt = slot.unwrap_or_else(|| self.alloc());
+                    self.op(Op::ToKey, kt, v, kr);
+                    self.set_live(kt);
+                    self.bind_src(pp.value, Src::Elem(v, kt), mode)?;
                 }
                 Key::Name(s) | Key::Str(s) => {
                     let name: Cow<str> = if matches!(pp.key, Key::Name(_)) {
@@ -188,16 +206,21 @@ impl<'a> Fc<'a> {
                         Cow::Owned(String::from_utf16_lossy(&b))
                     };
                     if super::expr::index_like(&name) {
-                        let k = self.alloc();
+                        let k = slot.unwrap_or_else(|| self.alloc());
                         self.load_number(k, name.parse::<f64>().unwrap_or(0.0));
                         self.set_live(k);
                         self.bind_src(pp.value, Src::Elem(v, k), mode)?;
                     } else {
+                        if let Some(sl) = slot {
+                            let a = self.atom(&name)?;
+                            self.op(Op::LoadAtom, sl, a, 0);
+                            self.set_live(sl);
+                        }
                         self.bind_src(pp.value, Src::Field(v, &name), mode)?;
                     }
                 }
                 Key::Num(s) => {
-                    let k = self.alloc();
+                    let k = slot.unwrap_or_else(|| self.alloc());
                     let n = prog.number(s, crate::lex::NumberBase::Decimal).unwrap_or(0.0);
                     self.load_number(k, n);
                     self.set_live(k);
@@ -210,7 +233,27 @@ impl<'a> Fc<'a> {
         Ok(())
     }
 
-    /// `[a, , b = 1, ...c] = iterable`. The iterator is not closed when a binding throws (not built).
+    /// Can writing to the names of `p` throw? A write to a register or a context slot does not, unless it is an assignment to a `const`
+    /// or to a `let` that may be in its dead zone. A default, a nested pattern and a member target run code.
+    fn pat_may_throw(&self, p: PatId, mode: Bind) -> bool {
+        let pt = *self.prog.pat(p);
+        match pt.kind {
+            PatKind::Hole => false,
+            PatKind::Rest(t) => self.pat_may_throw(t, mode),
+            PatKind::Assign { target, default } => {
+                let pure = matches!(self.prog.expr(default).kind, ExprKind::Number(_) | ExprKind::String | ExprKind::Null | ExprKind::Bool(_) | ExprKind::This | ExprKind::Function(_));
+                !pure || self.pat_may_throw(target, mode)
+            }
+            PatKind::Ident => match self.resolve(&self.name_of(pt.span), pt.span.start) {
+                Res::Reg { tdz, konst, .. } | Res::Ctx { tdz, konst, .. } => mode == Bind::Assign && (tdz || konst),
+                Res::Global => self.strict,
+            },
+            _ => true,
+        }
+    }
+
+    /// `[a, , b = 1, ...c] = iterable`. A binding that throws closes the iterator (the spec's IteratorClose on a throw), unless the iterator
+    /// is done. A throw from `next()` itself does not: the ranges of the handler leave out each `IterNext`.
     fn array_pattern(&mut self, list: List<Pat>, v: u32, mode: Bind) -> CR {
         let prog = self.prog;
         let elems: Vec<PatId> = prog.list(list).collect();
@@ -222,6 +265,10 @@ impl<'a> Fc<'a> {
         let done = self.alloc();
         self.op(Op::LoadFalse, done, 0, 0);
         self.set_live(done);
+        let ex = elems.iter().any(|&e| self.pat_may_throw(e, mode)).then(|| self.alloc());
+        let snapshot = self.live.clone();
+        let mut pieces: Vec<(usize, usize)> = Vec::new();
+        let mut open = self.asm.len();
         for el in elems {
             let m2 = self.mark();
             let ep = *prog.pat(el);
@@ -230,16 +277,18 @@ impl<'a> Fc<'a> {
                     let arr = self.alloc();
                     self.op(Op::NewArray, arr, 0, 0);
                     self.set_live(arr);
-                    let (head, ex, end) = (self.label(), self.label(), self.label());
+                    let (head, exh, end) = (self.label(), self.label(), self.label());
                     self.bind(head);
                     self.mark_used(head);
                     self.jmp_r(Op::JmpIf, done, end);
                     let t = self.alloc();
-                    self.jmp_rx(Op::IterNext, t, rec, ex);
+                    pieces.push((open, self.asm.len()));
+                    self.jmp_rx(Op::IterNext, t, rec, exh);
+                    open = self.asm.len();
                     self.set_live(t);
                     self.op(Op::ArrayPush, arr, t, 0);
                     self.jmp_back(head);
-                    self.bind(ex);
+                    self.bind(exh);
                     self.op(Op::LoadTrue, done, 0, 0);
                     self.bind(end);
                     self.bind_src(target, Src::Reg(arr), mode)?;
@@ -248,7 +297,9 @@ impl<'a> Fc<'a> {
                     let t = self.alloc();
                     let (undef, exhausted, got) = (self.label(), self.label(), self.label());
                     self.jmp_r(Op::JmpIf, done, undef);
+                    pieces.push((open, self.asm.len()));
                     self.jmp_rx(Op::IterNext, t, rec, exhausted);
+                    open = self.asm.len();
                     self.jmp(got);
                     self.bind(exhausted);
                     self.op(Op::LoadTrue, done, 0, 0);
@@ -263,10 +314,20 @@ impl<'a> Fc<'a> {
             }
             self.free(m2);
         }
+        pieces.push((open, self.asm.len()));
         let end = self.label();
         self.jmp_r(Op::JmpIf, done, end);
         self.op(Op::IterClose, rec, 0, 0);
         self.bind(end);
+        if let Some(ex) = ex {
+            let label = self.label();
+            self.mark_used(label);
+            let depth = self.depth;
+            for (start, end) in pieces {
+                self.handlers.push(HandlerRec { start, end, target: label, reg: ex, depth });
+            }
+            self.cold.push(Cold { label, live: snapshot, rec, done, ex });
+        }
         self.free(m);
         Ok(())
     }

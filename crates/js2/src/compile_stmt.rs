@@ -131,7 +131,10 @@ impl<'a> Fc<'a> {
             }
             match pt.kind {
                 PatKind::Ident => decls.push(Decl { name: prog.name(pt.span), kind: VK::Param, end: 0, reg: Some(i as u32) }),
-                PatKind::Rest(_) => self.unsup("a rest parameter"),
+                // A rest parameter: `CreateRest` makes the array in the register of the parameter.
+                PatKind::Rest(t) if matches!(prog.pat(t).kind, PatKind::Ident) => {
+                    decls.push(Decl { name: prog.name(prog.pat(t).span), kind: VK::Param, end: 0, reg: Some(i as u32) })
+                }
                 _ => {
                     let mut names = Vec::new();
                     self.pat_names(*p, &mut names);
@@ -139,18 +142,37 @@ impl<'a> Fc<'a> {
                 }
             }
         }
-        let uses_this = !self.is_arrow && self.cap.contains_key("this");
+        // In a derived constructor `this` is a variable that is the hole until `super()` returns.
+        let uses_this = !self.is_arrow && (self.cap.contains_key("this") || self.derived);
         if uses_this {
-            decls.push(Decl { name: Cow::Borrowed("this"), kind: VK::Var, end: 0, reg: None });
+            let (kind, end) = if self.derived { (VK::Let, u32::MAX) } else { (VK::Var, 0) };
+            decls.push(Decl { name: Cow::Borrowed("this"), kind, end, reg: None });
         }
-        let nparams_decls = decls.len();
+        let uses_nt = !self.is_arrow && self.cap.contains_key("new.target");
+        if uses_nt {
+            decls.push(Decl { name: Cow::Borrowed("new.target"), kind: VK::Var, end: 0, reg: None });
+        }
         decls.extend(h.vars.iter().map(|n| Decl { name: n.clone(), kind: VK::Var, end: 0, reg: None }));
         decls.extend(h.funcs.iter().map(|(_, n)| Decl { name: n.clone(), kind: VK::Func, end: 0, reg: None }));
         decls.extend(h.lex.iter().map(|(n, k, e)| Decl { name: n.clone(), kind: *k, end: *e, reg: None }));
-        let _ = nparams_decls;
+        // `arguments`: a variable that holds the arguments object. A declaration of that name (a parameter, a `var`) comes first.
+        let uses_args = !self.is_arrow && (self.fn_flags & facts::ARGS != 0 || self.cap.contains_key("arguments")) && !decls.iter().any(|d| d.name == "arguments");
+        if uses_args {
+            decls.push(Decl { name: Cow::Borrowed("arguments"), kind: VK::Var, end: 0, reg: None });
+        }
+        // The name of a named function expression, when the text of the function uses it and nothing else binds it.
+        if self.self_name
+            && let (Some(n), Some(id)) = (f.name, self.fn_id)
+        {
+            let name = prog.name(n);
+            let ff = self.facts.get(id);
+            if !decls.iter().any(|d| d.name == name) && self.may_occur(&name, ff.parse_at, ff.end) {
+                decls.push(Decl { name, kind: VK::Callee, end: 0, reg: None });
+            }
+        }
         let inited = match stmts {
             Some(l) => self.top_inits(l, f.span.start),
-            None => Vec::new(),
+            None => Default::default(),
         };
         let span = Span { start: 0, end: u32::MAX };
         let mark = self.enter(span, &decls, false)?;
@@ -159,6 +181,18 @@ impl<'a> Fc<'a> {
             let Some(v) = self.find_var(&d.name) else { continue };
             let (home, kind) = (v.home, v.kind);
             match (kind, home, d.reg) {
+                // Written by `CreateArgs` below.
+                (VK::Var, _, None) if matches!(&*d.name, "arguments" | "new.target") => {}
+                (VK::Callee, Home::Reg(r), None) => {
+                    self.op(Op::LoadCallee, r, 0, 0);
+                    self.set_live(r);
+                }
+                (VK::Callee, Home::Ctx { level, slot }, None) => {
+                    let t = self.alloc();
+                    self.op(Op::LoadCallee, t, 0, 0);
+                    self.op(Op::InitCtx, t, self.depth - level, slot);
+                    self.free(t);
+                }
                 // A `var` whose first mention is an initialized declaration of the top level needs no `undefined` at the entry.
                 (VK::Var, Home::Reg(_), None) if inited.contains(&d.name) => {}
                 (VK::Var, Home::Reg(r), None) => {
@@ -179,7 +213,35 @@ impl<'a> Fc<'a> {
                 _ => {}
             }
         }
-        if uses_this && let Some(Var { home: Home::Ctx { level, slot }, .. }) = self.find_var("this") {
+        if uses_args && let Some(home) = self.find_var("arguments").map(|v| v.home) {
+            match home {
+                Home::Reg(r) => {
+                    self.op(Op::CreateArgs, r, 0, 0);
+                    self.set_live(r);
+                }
+                Home::Ctx { level, slot } => {
+                    let t = self.alloc();
+                    self.op(Op::CreateArgs, t, 0, 0);
+                    self.op(Op::InitCtx, t, self.depth - level, slot);
+                    self.free(t);
+                }
+            }
+        }
+        if uses_nt && let Some(home) = self.find_var("new.target").map(|v| v.home) {
+            match home {
+                Home::Reg(r) => {
+                    self.op(Op::LoadNewTarget, r, 0, 0);
+                    self.set_live(r);
+                }
+                Home::Ctx { level, slot } => {
+                    let t = self.alloc();
+                    self.op(Op::LoadNewTarget, t, 0, 0);
+                    self.op(Op::InitCtx, t, self.depth - level, slot);
+                    self.free(t);
+                }
+            }
+        }
+        if uses_this && !self.derived && let Some(Var { home: Home::Ctx { level, slot }, .. }) = self.find_var("this") {
             let (level, slot) = (*level, *slot);
             let t = self.alloc();
             self.op(Op::LoadThis, t, 0, 0);
@@ -190,6 +252,18 @@ impl<'a> Fc<'a> {
         for (i, p) in params.iter().enumerate() {
             let r = i as u32;
             let pt = *prog.pat(*p);
+            if let PatKind::Rest(t) = pt.kind {
+                self.op(Op::CreateRest, r, i as u32, 0);
+                let tp = *prog.pat(t);
+                if matches!(tp.kind, PatKind::Ident) {
+                    if let Some(Home::Ctx { level, slot }) = self.find_var(&prog.name(tp.span)).map(|v| v.home) {
+                        self.op(Op::InitCtx, r, self.depth - level, slot);
+                    }
+                } else {
+                    self.bind_pattern(t, r, Bind::Init)?;
+                }
+                continue;
+            }
             let (target, default) = match pt.kind {
                 PatKind::Assign { target, default } => (target, Some(default)),
                 _ => (*p, None),
@@ -228,15 +302,51 @@ impl<'a> Fc<'a> {
             }
             Body::Skipped(_) => {}
         }
+        if self.derived && !self.dead {
+            self.derived_return(None)?;
+        }
         self.leave(mark);
+        Ok(())
+    }
+
+    /// The return of a derived constructor: an object is the result; `undefined` gives `this`, which throws when `super()` has not run.
+    fn derived_return(&mut self, value: Option<u32>) -> CR {
+        let m = self.mark();
+        let v = match value {
+            Some(v) => v,
+            None => {
+                let u = self.alloc();
+                self.op(Op::LoadUndef, u, 0, 0);
+                self.set_live(u);
+                u
+            }
+        };
+        // The raw slot, with no dead-zone check: `return {}` is legal before `super()`.
+        let t = match self.resolve("this", 0) {
+            Res::Reg { reg, .. } => reg,
+            Res::Ctx { hops, slot, .. } => {
+                let t = self.alloc();
+                self.op(Op::GetCtx, t, hops, slot);
+                self.set_live(t);
+                t
+            }
+            Res::Global => {
+                let t = self.alloc();
+                self.op(Op::LoadHole, t, 0, 0);
+                self.set_live(t);
+                t
+            }
+        };
+        self.op(Op::RetDerived, v, t, 0);
+        self.free(m);
         Ok(())
     }
 
     /// The `var` names whose first mention in the text is a declaration with an initializer in a statement of the top level (or in the head
     /// of a top-level `for`): the code writes them before any read, on every path.
-    fn top_inits(&self, list: List<Stmt>, from: u32) -> Vec<Cow<'a, str>> {
+    fn top_inits(&self, list: List<Stmt>, from: u32) -> std::collections::HashSet<Cow<'a, str>> {
         let prog = self.prog;
-        let mut out = Vec::new();
+        let mut out = std::collections::HashSet::new();
         for s in prog.list(list) {
             let mut v = prog.stmt(s).kind;
             if let StmtKind::For { init: ForInit::Var(i), .. } = v {
@@ -250,7 +360,7 @@ impl<'a> Fc<'a> {
                 let name = prog.name(t.span);
                 let ispan = prog.expr(init).span;
                 if !self.may_occur(&name, from, t.span.start) && !self.may_occur(&name, ispan.start, ispan.end) {
-                    out.push(name);
+                    out.insert(name);
                 }
             }
         }
@@ -275,6 +385,15 @@ impl<'a> Fc<'a> {
     pub(crate) fn script_body(&mut self, list: List<Stmt>) -> CR {
         let mut h = Hoist::default();
         self.hoist_list(list, true, &mut h);
+        // Each name exists as a global (`undefined`) before the first statement runs, so a read or `typeof` finds it, and a `var` with no
+        // initializer is not lost.
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for n in h.vars.iter().chain(h.funcs.iter().map(|(_, n)| n)) {
+            if seen.insert(n) {
+                let s = self.site_of(n)?;
+                self.op(Op::DeclGlobal, 0, s, 0);
+            }
+        }
         for (f, name) in &h.funcs {
             self.declare_function(*f, name)?;
         }
@@ -366,7 +485,14 @@ impl<'a> Fc<'a> {
             StmtKind::Expr(e) => self.effect(e)?,
             StmtKind::Directive(_) | StmtKind::Empty | StmtKind::Debugger | StmtKind::Function(_) => {}
             StmtKind::Var { kind, decls } => self.var_decls(kind, decls)?,
-            StmtKind::Class(_) => self.unsup("a class"),
+            StmtKind::Class(c) => {
+                let t = self.alloc();
+                self.class(c, t)?;
+                self.set_live(t);
+                if let Some(n) = prog.class(c).name {
+                    self.store_var(&prog.name(n), u32::MAX, t, true)?;
+                }
+            }
             StmtKind::Return(arg) => self.ret(arg)?,
             StmtKind::If { test, cons, alt } => {
                 let end = self.label();
@@ -505,8 +631,31 @@ impl<'a> Fc<'a> {
     // ------------------------------------------------------------ jumps out
 
     fn push_frame(&mut self, labels: Vec<String>, kind: FrameKind) {
-        let f = Frame { labels, kind, depth: self.depth, brk_depth: self.depth, ctx: self.cur_ctx.clone(), nscopes: self.scopes.len() };
+        let f = Frame { labels, kind, depth: self.depth, brk_depth: self.depth, ctx: self.cur_ctx.clone(), nscopes: self.scopes.len(), pieces: Vec::new(), open: None };
         self.frames.push(f);
+    }
+
+    /// The handler of the frame on top covers the code from here.
+    fn guard_top(&mut self) {
+        let at = self.asm.len();
+        self.frames.last_mut().expect("a frame").open = Some(at);
+    }
+
+    /// The handler of frame `k` stops covering the code from here (see `Frame::pieces`).
+    fn pause(&mut self, k: usize) {
+        let now = self.asm.len();
+        let f = &mut self.frames[k];
+        if let Some(o) = f.open.take() {
+            f.pieces.push((o, now));
+        }
+    }
+
+    /// The frames in `ks` cover the code from here again.
+    fn resume(&mut self, ks: &[usize]) {
+        let now = self.asm.len();
+        for &k in ks {
+            self.frames[k].open = Some(now);
+        }
     }
 
     fn push_loop(&mut self, brk: Lb, cont: Lb, iter: Option<u32>) {
@@ -532,6 +681,10 @@ impl<'a> Fc<'a> {
             match &self.frames[k].kind {
                 FrameKind::Loop { iter: Some(rec), .. } => {
                     let rec = *rec;
+                    if self.frames[k].open.is_some() {
+                        self.pause(k);
+                        paused.push(k);
+                    }
                     self.op(Op::IterClose, rec, 0, 0);
                 }
                 FrameKind::Try { fin: Some(fin), .. } => {
@@ -539,13 +692,10 @@ impl<'a> Fc<'a> {
                     let (depth, ctx, nscopes) = (self.frames[k].depth, self.frames[k].ctx.clone(), self.frames[k].nscopes);
                     self.emit_pops(rt, depth);
                     rt = depth;
-                    let now = self.asm.len();
-                    if let FrameKind::Try { pieces, open, .. } = &mut self.frames[k].kind
-                        && let Some(o) = open.take()
-                    {
-                        pieces.push((o, now));
+                    if self.frames[k].open.is_some() {
+                        self.pause(k);
+                        paused.push(k);
                     }
-                    paused.push(k);
                     // The finalizer sees the scopes and contexts that were there when the `try` began, and no frame above it.
                     let tail = self.frames.split_off(k);
                     let scopes = self.scopes.split_off(nscopes);
@@ -559,12 +709,7 @@ impl<'a> Fc<'a> {
                 _ => {}
             }
         }
-        let now = self.asm.len();
-        for k in paused {
-            if let FrameKind::Try { open, .. } = &mut self.frames[k].kind {
-                *open = Some(now);
-            }
-        }
+        self.resume(&paused);
         self.depth = d0;
         self.cur_ctx = c0;
         Ok(rt)
@@ -618,7 +763,13 @@ impl<'a> Fc<'a> {
             FrameKind::Loop { brk, cont, iter } => {
                 if is_break {
                     if let Some(rec) = iter {
+                        // A `return()` that throws is not for the handler of this loop: it would close the iterator twice.
+                        let was_open = self.frames[k].open.is_some();
+                        self.pause(k);
                         self.op(Op::IterClose, rec, 0, 0);
+                        if was_open {
+                            self.resume(&[k]);
+                        }
                     }
                     (brk, self.frames[k].brk_depth)
                 } else {
@@ -636,6 +787,16 @@ impl<'a> Fc<'a> {
     fn ret(&mut self, arg: Option<ExprId>) -> CR {
         let cleanup = self.frames.iter().any(|f| matches!(f.kind, FrameKind::Try { fin: Some(_), .. } | FrameKind::Loop { iter: Some(_), .. }));
         match arg {
+            None if self.derived => {
+                self.unwind(0)?;
+                self.derived_return(None)?;
+            }
+            Some(e) if self.derived => {
+                let t = self.alloc();
+                self.to(e, t)?;
+                self.unwind(0)?;
+                self.derived_return(Some(t))?;
+            }
             None => {
                 self.unwind(0)?;
                 self.op(Op::RetUndef, 0, 0, 0);
@@ -747,18 +908,20 @@ impl<'a> Fc<'a> {
         {
             // `break` leaves the scope of the binding too; `continue` goes to its end.
             let outer = scope.as_ref().map_or(self.depth, |m| m.ctx);
-            self.frames.last_mut().expect("the loop frame").brk_depth = outer;
+            let top = self.frames.last_mut().expect("the loop frame");
+            top.brk_depth = outer;
+            // The handler covers the binding of the head and the body, except the iterator closes that a jump out repeats.
+            top.open = guard.as_ref().map(|g| g.2);
         }
         self.stmt(body)?;
-        self.frames.pop();
-        let end = self.asm.len();
+        let pieces = self.pop_try();
         self.bind(cont);
         if let Some(sc) = scope {
             self.leave(sc);
         }
         self.jmp_back(head);
-        if let Some((ex, live, start, depth)) = guard
-            && end > start
+        if let Some((ex, live, _, depth)) = guard
+            && !pieces.is_empty()
         {
             // After the back edge, where no path falls in: every exit of the loop jumps to `brk`.
             let lb = self.label();
@@ -768,7 +931,9 @@ impl<'a> Fc<'a> {
             self.set_live(ex);
             self.op(Op::IterClose, rec, 0, 0);
             self.op(Op::Throw, ex, 0, 0);
-            self.handlers.push(HandlerRec { start, end, target: lb, reg: ex, depth });
+            for (start, end) in pieces {
+                self.handlers.push(HandlerRec { start, end, target: lb, reg: ex, depth });
+            }
         }
         self.bind(brk);
         self.free(m);
@@ -875,7 +1040,8 @@ impl<'a> Fc<'a> {
             self.mark_used(l);
         }
         // The block.
-        self.push_frame(Vec::new(), FrameKind::Try { fin, pieces: Vec::new(), open: Some(self.asm.len()) });
+        self.push_frame(Vec::new(), FrameKind::Try { fin });
+        self.guard_top();
         self.stmt(block)?;
         let mut a_pieces = self.pop_try();
         if let Some(f) = fin {
@@ -890,7 +1056,8 @@ impl<'a> Fc<'a> {
             self.live = live_before.clone();
             self.set_live(ex);
             if fin.is_some() {
-                self.push_frame(Vec::new(), FrameKind::Try { fin, pieces: Vec::new(), open: Some(self.asm.len()) });
+                self.push_frame(Vec::new(), FrameKind::Try { fin });
+                self.guard_top();
             }
             let mut ds = Vec::new();
             if let Some(p) = c.param {
@@ -933,17 +1100,17 @@ impl<'a> Fc<'a> {
         Ok(())
     }
 
-    /// Pop the frame of a `try` and give the ranges that it protected.
+    /// Pop the frame on top (a `try`, a loop) and give the ranges that its handler covers.
     fn pop_try(&mut self) -> Vec<(usize, usize)> {
         let now = self.asm.len();
-        match self.frames.pop().map(|f| f.kind) {
-            Some(FrameKind::Try { mut pieces, open, .. }) => {
-                if let Some(o) = open {
-                    pieces.push((o, now));
+        match self.frames.pop() {
+            Some(mut f) => {
+                if let Some(o) = f.open {
+                    f.pieces.push((o, now));
                 }
-                pieces
+                f.pieces
             }
-            _ => Vec::new(),
+            None => Vec::new(),
         }
     }
 }
