@@ -215,6 +215,7 @@ impl Str {
             Layout::TwoByte => true,
             Layout::Rope => self.head().flags() & FLAG_WIDE != 0,
             Layout::Indirect => self.resolve().is_two_byte(),
+            Layout::Object => unreachable!("a string cell has a string layout"),
         }
     }
 
