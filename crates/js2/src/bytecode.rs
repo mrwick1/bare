@@ -539,6 +539,12 @@ pub struct Handler {
     pub depth: u16,
 }
 
+/// `Code::flags`: the function reads all its arguments (`CreateArgs`, `CreateRest`), so a call keeps them.
+pub const CF_ARGS: u8 = 1;
+/// `Code::flags`: the function (or a function inside it) uses `super`, so `Closure` gives the new function the home object and the
+/// constructor link of the function that makes it.
+pub const CF_LINK: u8 = 2;
+
 /// The code of one function. It holds no pointer to a realm's heap: its atoms are shared atoms, so all realms of a session can use it.
 #[derive(Debug)]
 pub struct Code {
@@ -561,6 +567,8 @@ pub struct Code {
     pub roots: RootMaps,
     /// Pairs `(pc, source offset)`, sorted by `pc`. The offset of a word is that of the last pair at or before it.
     pub lines: Vec<(u32, u32)>,
+    /// Facts about the code that the interpreter finds when it loads a program (`CF_ARGS`, `CF_LINK`); the compiler leaves it 0.
+    pub flags: u8,
 }
 
 impl Code {
@@ -578,6 +586,7 @@ impl Code {
             handlers: Vec::new(),
             roots: RootMaps::new(nregs as usize),
             lines: Vec::new(),
+            flags: 0,
         }
     }
 

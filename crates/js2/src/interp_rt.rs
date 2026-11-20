@@ -38,7 +38,7 @@ use crate::bytecode::Code;
 use crate::cell::Layout;
 use crate::gc::{Marker, collect};
 use crate::heap::Heap;
-use crate::object::{Ctx, Obj};
+use crate::object::{Ctx, F_CLASS, Obj};
 use crate::shapes::{A_ACC, A_C, A_E, A_W, ShapeId, Shapes};
 use crate::string::{Chars, Str};
 use crate::value::{Kind, Value};
@@ -82,6 +82,8 @@ pub struct Feedback {
     /// The shape of each object literal recipe, made at the first use. It is pinned.
     pub lits: Box<[Option<ShapeId>]>,
     poly: Vec<Poly>,
+    /// The template object of each tagged template site (`GetTemplate`): the site and the object.
+    pub tmpl: Vec<(u32, Value)>,
     pub ready: bool,
 }
 
@@ -102,6 +104,7 @@ impl Feedback {
     pub fn walk(&self, m: &mut Marker) {
         self.names.iter().flatten().for_each(|s| m.value(s.value()));
         self.lits.iter().flatten().for_each(|s| m.shape(*s));
+        self.tmpl.iter().for_each(|t| m.value(t.1));
     }
 
     /// Entries in the pool for the site, for tests.
@@ -155,6 +158,28 @@ impl Feedback {
     }
 }
 
+/// The result of a property read that may need a call: the value, or the getter that the interpreter must call with the receiver.
+#[derive(Clone, Copy, Debug)]
+pub enum Got {
+    Val(Value),
+    Get(Value),
+}
+
+/// The result of a property write that may need a call: done, or the setter that the interpreter must call with the receiver and the
+/// value.
+#[derive(Clone, Copy, Debug)]
+pub enum Put {
+    Done,
+    Set(Value),
+}
+
+/// What a property lookup found: a data value, or the getter and the setter of an accessor.
+#[derive(Clone, Copy, Debug)]
+pub enum Slot {
+    Data(Value),
+    Acc(Value, Value),
+}
+
 /// A property key: an array index or a name (a canonical atom of the realm).
 #[derive(Clone, Copy, Debug)]
 pub enum Key {
@@ -183,6 +208,12 @@ pub struct Realm {
     pub s_object: ShapeId,
     pub s_array: ShapeId,
     pub s_func: ShapeId,
+    /// The shape of an arguments object: an array with the prototype of `Object`.
+    pub s_args: ShapeId,
+    pub k_constructor: Str,
+    pub k_raw: Str,
+    /// Counter of the private names (`NewPrivateName`).
+    pub private_n: u32,
     /// The raw id of `s_func` and the places of its two hidden slots (the code index and the context): the call reads them with no
     /// shape lookup.
     func_shape: u32,
@@ -216,6 +247,7 @@ impl Realm {
         let mut atoms = Atoms::new(shared);
         let mut atom = |s: &str| atoms.intern(&mut heap, Chars::One(s.as_bytes())).expect("memory");
         let (k_code, k_ctx, k_prototype, k_length, k_name, k_message) = (atom("\0code"), atom("\0ctx"), atom("prototype"), atom("length"), atom("name"), atom("message"));
+        let (k_home, k_fields, k_link, k_constructor, k_raw) = (atom("\0home"), atom("\0fields"), atom("\0link"), atom("constructor"), atom("raw"));
         let tnames = TYPEOF.map(&mut atom);
         let ename = ERRORS.map(&mut atom);
         let root = shapes.root(Layout::Object, None, 4);
@@ -229,12 +261,16 @@ impl Realm {
         let s_array = shapes.root(Layout::Indexed, Some(array_proto.cell()), 0);
         let f = shapes.root(Layout::Object, Some(function_proto.cell()), 4);
         let f = shapes.add(f, k_code, 0).expect("shape");
-        let s_func = shapes.add(f, k_ctx, 0).expect("shape");
+        let f = shapes.add(f, k_ctx, 0).expect("shape");
+        let f = shapes.add(f, k_home, 0).expect("shape");
+        let f = shapes.add(f, k_fields, 0).expect("shape");
+        let s_func = shapes.add(f, k_link, 0).expect("shape");
+        let s_args = shapes.root(Layout::Indexed, Some(object_proto.cell()), 0);
         let s_error = shapes.literal(Layout::Object, Some(error_proto.cell()), &[k_name, k_message]).expect("shape");
         let mut consts: Vec<Value> = [object_proto, function_proto, array_proto, error_proto, global].iter().map(|o| o.value()).collect();
-        consts.extend([k_code, k_ctx, k_prototype, k_length, k_name, k_message].iter().map(|s| s.value()));
+        consts.extend([k_code, k_ctx, k_prototype, k_length, k_name, k_message, k_home, k_fields, k_link, k_constructor, k_raw].iter().map(|s| s.value()));
         consts.extend(tnames.iter().chain(ename.iter()).map(|s| s.value()));
-        let pins = vec![s_object, s_array, s_func, s_error];
+        let pins = vec![s_object, s_array, s_func, s_error, s_args];
         let epoch = shapes.epoch();
         let probe = Obj::new(&mut heap, &shapes, s_func).expect("memory");
         let (func_shape, loc_code, loc_ctx) = (s_func.raw(), probe.loc(&shapes, 0), probe.loc(&shapes, 1));
@@ -250,6 +286,10 @@ impl Realm {
             s_object,
             s_array,
             s_func,
+            s_args,
+            k_constructor,
+            k_raw,
+            private_n: 0,
             func_shape,
             loc_code,
             loc_ctx,
@@ -361,7 +401,7 @@ impl Realm {
         }
     }
 
-    fn flat(&mut self, s: Str) -> Str {
+    pub(crate) fn flat(&mut self, s: Str) -> Str {
         s.flatten(&mut self.heap).expect("memory")
     }
 
@@ -504,7 +544,7 @@ impl Realm {
     }
 
     /// The atom of the decimal text of an index (an integer key of a plain object).
-    fn idx_atom(&mut self, i: u32) -> Str {
+    pub(crate) fn idx_atom(&mut self, i: u32) -> Str {
         self.intern(&i.to_string())
     }
 
@@ -567,25 +607,44 @@ impl Realm {
     // ---- properties ----
 
     /// The prototype of an object as an object.
-    fn proto_of(&self, o: Obj) -> Option<Obj> {
+    pub(crate) fn proto_of(&self, o: Obj) -> Option<Obj> {
         o.proto(&self.shapes).and_then(|p| Realm::obj(Value::pointer(Kind::Object, p)))
     }
 
-    /// Look up `key` along the prototype chain: the value of an own data property. An accessor throws (S2.7).
-    fn lookup(&mut self, mut o: Obj, key: Str) -> R<Option<Value>> {
+    /// Look up `key` along the prototype chain: what the first object that has it holds.
+    pub fn lookup_g(&self, mut o: Obj, key: Str) -> Option<Slot> {
         loop {
             let id = o.shape(&self.shapes);
             if let Some(e) = self.shapes.find(id, key) {
-                if e.attrs() & A_ACC != 0 {
-                    return self.type_error("accessors are not supported yet (S2.7)");
-                }
-                return Ok(Some(o.slot(&self.shapes, e.slot())));
+                return Some(if e.attrs() & A_ACC != 0 {
+                    Slot::Acc(o.slot(&self.shapes, e.slot()), o.slot(&self.shapes, e.slot() + 1))
+                } else {
+                    Slot::Data(o.slot(&self.shapes, e.slot()))
+                });
             }
-            match self.proto_of(o) {
-                Some(p) => o = p,
-                None => return Ok(None),
-            }
+            o = self.proto_of(o)?;
         }
+    }
+
+    /// The value of an own or inherited data property. An accessor throws: use [`Realm::get_prop_g`] where the interpreter can call.
+    pub(crate) fn lookup(&mut self, o: Obj, key: Str) -> R<Option<Value>> {
+        match self.lookup_g(o, key) {
+            Some(Slot::Data(v)) => Ok(Some(v)),
+            Some(Slot::Acc(..)) => self.type_error("accessors are not supported here (the host needs a call)"),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) fn got(s: Option<Slot>) -> Got {
+        match s {
+            Some(Slot::Data(v)) => Got::Val(v),
+            Some(Slot::Acc(g, _)) if !g.is_undefined() => Got::Get(g),
+            _ => Got::Val(Value::UNDEFINED),
+        }
+    }
+
+    pub(crate) fn setter(s: Value) -> Put {
+        if s.is_undefined() { Put::Done } else { Put::Set(s) }
     }
 
     fn undefined_read<T>(&mut self, recv: Value, name: &str) -> R<T> {
@@ -593,30 +652,30 @@ impl Realm {
         self.type_error(&format!("cannot read properties of {what} (reading '{name}')"))
     }
 
-    /// `recv[key]`.
-    pub fn get_prop(&mut self, recv: Value, key: Key) -> R<Value> {
+    /// `recv[key]`; an accessor with a getter gives [`Got::Get`].
+    pub fn get_prop_g(&mut self, recv: Value, key: Key) -> R<Got> {
         if let Some(o) = Realm::obj(recv) {
             return match key {
                 Key::Idx(i) => {
                     if o.is_indexed()
                         && let Some(v) = o.get_element(i)
                     {
-                        return Ok(v);
+                        return Ok(Got::Val(v));
                     }
                     let k = self.idx_atom(i);
-                    Ok(self.lookup(o, k)?.unwrap_or(Value::UNDEFINED))
+                    Ok(Self::got(self.lookup_g(o, k)))
                 }
                 Key::Name(k) => {
                     if k == self.k_length && self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed {
-                        return Ok(Realm::num(o.len() as f64));
+                        return Ok(Got::Val(Realm::num(o.len() as f64)));
                     }
-                    Ok(self.lookup(o, k)?.unwrap_or(Value::UNDEFINED))
+                    Ok(Self::got(self.lookup_g(o, k)))
                 }
             };
         }
         if let Some(s) = Realm::str_of(recv) {
             let s = self.flat(s);
-            return Ok(match key {
+            return Ok(Got::Val(match key {
                 Key::Name(k) if k == self.k_length => Realm::num(s.len() as f64),
                 Key::Idx(i) => match s.unit_at(i as usize) {
                     Some(u) => {
@@ -626,7 +685,7 @@ impl Realm {
                     None => Value::UNDEFINED,
                 },
                 _ => Value::UNDEFINED,
-            });
+            }));
         }
         if recv.is_undefined() || recv.is_null() {
             let name = match key {
@@ -635,23 +694,31 @@ impl Realm {
             };
             return self.undefined_read(recv, &name);
         }
-        Ok(Value::UNDEFINED)
+        Ok(Got::Val(Value::UNDEFINED))
     }
 
-    /// `recv[key] = v`. A write to a primitive does nothing.
-    pub fn set_prop(&mut self, recv: Value, key: Key, v: Value) -> R<()> {
+    /// `recv[key]` where an accessor throws (the host and the tests have no frame to call from).
+    pub fn get_prop(&mut self, recv: Value, key: Key) -> R<Value> {
+        match self.get_prop_g(recv, key)? {
+            Got::Val(v) => Ok(v),
+            Got::Get(_) => self.type_error("accessors are not supported here (the host needs a call)"),
+        }
+    }
+
+    /// `recv[key] = v`. A write to a primitive does nothing. A setter gives [`Put::Set`].
+    pub fn set_prop_g(&mut self, recv: Value, key: Key, v: Value) -> R<Put> {
         let Some(o) = Realm::obj(recv) else {
             if recv.is_undefined() || recv.is_null() {
                 return self.type_error("cannot set properties of undefined or null");
             }
-            return Ok(());
+            return Ok(Put::Done);
         };
         match key {
             Key::Idx(i) if self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed => {
                 if o.set_element(&mut self.heap, i, v).is_none() {
                     return Err(self.error(ErrKind::Range, "invalid array length"));
                 }
-                Ok(())
+                Ok(Put::Done)
             }
             Key::Idx(i) => {
                 let k = self.idx_atom(i);
@@ -664,29 +731,53 @@ impl Realm {
                         return Err(self.error(ErrKind::Range, "invalid array length"));
                     }
                     o.set_len(&mut self.heap, n as u32);
-                    return Ok(());
+                    return Ok(Put::Done);
                 }
                 self.set_named(o, k, v)
             }
         }
     }
 
-    /// Set an own named property: write it if it is there and writable, else add it.
-    fn set_named(&mut self, o: Obj, k: Str, v: Value) -> R<()> {
+    /// `recv[key] = v` where a setter throws (the host and the tests have no frame to call from).
+    pub fn set_prop(&mut self, recv: Value, key: Key, v: Value) -> R<()> {
+        match self.set_prop_g(recv, key, v)? {
+            Put::Done => Ok(()),
+            Put::Set(_) => self.type_error("accessors are not supported here (the host needs a call)"),
+        }
+    }
+
+    /// The setter that the prototype chain of `o` gives for `k`, when the first property that it finds there is an accessor.
+    pub(crate) fn proto_setter(&self, o: Obj, k: Str) -> Option<Put> {
+        let mut p = self.proto_of(o)?;
+        loop {
+            if let Some(e) = self.shapes.find(p.shape(&self.shapes), k) {
+                return (e.attrs() & A_ACC != 0).then(|| Self::setter(p.slot(&self.shapes, e.slot() + 1)));
+            }
+            p = self.proto_of(p)?;
+        }
+    }
+
+    /// Set an own named property: write it if it is there and writable, else call the setter that a prototype gives, else add it.
+    fn set_named(&mut self, o: Obj, k: Str, v: Value) -> R<Put> {
         let id = o.shape(&self.shapes);
         match self.shapes.find(id, k) {
-            Some(e) if e.attrs() & A_ACC != 0 => self.type_error("accessors are not supported yet (S2.7)"),
+            Some(e) if e.attrs() & A_ACC != 0 => Ok(Self::setter(o.slot(&self.shapes, e.slot() + 1))),
             Some(e) => {
                 if e.attrs() & A_W != 0 {
                     o.set_slot(&self.shapes, e.slot(), v);
                 }
-                Ok(())
+                Ok(Put::Done)
             }
-            None => self.add_named(o, k, v).map(|_| ()),
+            None => {
+                if let Some(p) = self.proto_setter(o, k) {
+                    return Ok(p);
+                }
+                self.add_named(o, k, v).map(|_| Put::Done)
+            }
         }
     }
 
-    fn add_named(&mut self, o: Obj, k: Str, v: Value) -> R<u32> {
+    pub(crate) fn add_named(&mut self, o: Obj, k: Str, v: Value) -> R<u32> {
         match o.add(&mut self.heap, &mut self.shapes, k, A_W | A_E | A_C, &[v]) {
             Some(slot) => Ok(slot),
             None => Err(self.error(ErrKind::Range, "out of memory")),
@@ -694,14 +785,14 @@ impl Realm {
     }
 
     /// `recv.name` at a site, with the cache work of the module comment. The loop tried the hit already.
-    pub fn get_field_slow(&mut self, fb: &mut Feedback, site: usize, name: Str, recv: Value) -> R<Value> {
-        let Some(o) = Realm::obj(recv) else { return self.get_prop(recv, Key::Name(name)) };
+    pub fn get_field_slow(&mut self, fb: &mut Feedback, site: usize, name: Str, recv: Value) -> R<Got> {
+        let Some(o) = Realm::obj(recv) else { return self.get_prop_g(recv, Key::Name(name)) };
         let id = o.shape(&self.shapes);
         if fb.caches[site].state == POLY
             && let Some((loc, _)) = fb.poly_find(site, id.raw())
         {
             // SAFETY: the pool entry was made by `Obj::loc` for this shape id, and a cache holds tree shapes only.
-            return Ok(unsafe { o.read_loc(loc) });
+            return Ok(Got::Val(unsafe { o.read_loc(loc) }));
         }
         if fb.caches[site].state != MEGA
             && self.shapes.cacheable(id)
@@ -710,18 +801,21 @@ impl Realm {
         {
             let loc = o.loc(&self.shapes, e.slot());
             fb.fill(site, id.raw(), loc, 0);
-            return Ok(o.slot(&self.shapes, e.slot()));
+            return Ok(Got::Val(o.slot(&self.shapes, e.slot())));
         }
         if fb.caches[site].state == FRESH {
             fb.caches[site].state = SEEN;
         }
-        self.get_prop(recv, Key::Name(name))
+        self.get_prop_g(recv, Key::Name(name))
     }
 
     /// `GetGlobal`: the property of the global object, or a `ReferenceError` when it is not there.
     pub fn get_global_slow(&mut self, fb: &mut Feedback, site: usize, name: Str) -> R<Value> {
         let g = self.global.value();
-        let v = self.get_field_slow(fb, site, name, g)?;
+        let v = match self.get_field_slow(fb, site, name, g)? {
+            Got::Val(v) => v,
+            Got::Get(_) => return self.type_error("a global accessor needs a call"),
+        };
         if v.is_undefined() && !self.has_prop(g, Key::Name(name))? {
             let n = self.text(name);
             return Err(self.error(ErrKind::Reference, &format!("{n} is not defined")));
@@ -730,8 +824,8 @@ impl Realm {
     }
 
     /// `recv.name = v` at a site.
-    pub fn set_field_slow(&mut self, fb: &mut Feedback, site: usize, name: Str, recv: Value, v: Value) -> R<()> {
-        let Some(o) = Realm::obj(recv) else { return self.set_prop(recv, Key::Name(name), v) };
+    pub fn set_field_slow(&mut self, fb: &mut Feedback, site: usize, name: Str, recv: Value, v: Value) -> R<Put> {
+        let Some(o) = Realm::obj(recv) else { return self.set_prop_g(recv, Key::Name(name), v) };
         let id = o.shape(&self.shapes);
         if fb.caches[site].state == POLY
             && let Some((loc, to)) = fb.poly_find(site, id.raw())
@@ -743,14 +837,14 @@ impl Realm {
                     o.set_shape_id(to);
                 }
             }
-            return Ok(());
+            return Ok(Put::Done);
         }
         let layout_ok = self.shapes.cacheable(id) && fb.caches[site].state != MEGA && self.shapes.get(id).layout == Layout::Object;
         match self.shapes.find(id, name) {
-            Some(e) if e.attrs() & A_ACC != 0 => self.type_error("accessors are not supported yet (S2.7)"),
+            Some(e) if e.attrs() & A_ACC != 0 => Ok(Self::setter(o.slot(&self.shapes, e.slot() + 1))),
             Some(e) => {
                 if e.attrs() & A_W == 0 {
-                    return Ok(());
+                    return Ok(Put::Done);
                 }
                 if layout_ok {
                     let loc = o.loc(&self.shapes, e.slot());
@@ -759,11 +853,14 @@ impl Realm {
                     fb.caches[site].state = SEEN;
                 }
                 o.set_slot(&self.shapes, e.slot(), v);
-                Ok(())
+                Ok(Put::Done)
             }
             None => {
                 if name == self.k_length && self.shapes.get(id).layout == Layout::Indexed {
-                    return self.set_prop(recv, Key::Name(name), v);
+                    return self.set_prop_g(recv, Key::Name(name), v);
+                }
+                if let Some(p) = self.proto_setter(o, name) {
+                    return Ok(p);
                 }
                 let slot = self.add_named(o, name, v)?;
                 let new = o.shape(&self.shapes);
@@ -776,7 +873,7 @@ impl Realm {
                 } else if fb.caches[site].state == FRESH {
                     fb.caches[site].state = SEEN;
                 }
-                Ok(())
+                Ok(Put::Done)
             }
         }
     }
@@ -801,7 +898,10 @@ impl Realm {
                         o.set_slot(&self.shapes, e.slot(), v);
                         Ok(())
                     }
-                    Some(_) => self.type_error("accessors are not supported yet (S2.7)"),
+                    Some(_) => {
+                        self.reconfigure(o, k, A_W | A_E | A_C, &[v])?;
+                        Ok(())
+                    }
                     None => self.add_named(o, k, v).map(|_| ()),
                 }
             }
@@ -912,8 +1012,22 @@ impl Realm {
             let (code, ctx) = unsafe { (o.read_loc(self.loc_code), o.read_loc(self.loc_ctx)) };
             return Some((code.as_int()? as usize, ctx));
         }
+        let f = Realm::obj(v).filter(|o| o.is_callable() && !o.has_flag(F_CLASS))?;
+        Some((f.slot(&self.shapes, 0).as_int()? as usize, f.slot(&self.shapes, 1)))
+    }
+
+    /// As [`Realm::function`], for a construct call: a class constructor is allowed.
+    pub fn function_new(&self, v: Value) -> Option<(usize, Value)> {
         let f = Realm::obj(v).filter(|o| o.is_callable())?;
         Some((f.slot(&self.shapes, 0).as_int()? as usize, f.slot(&self.shapes, 1)))
+    }
+
+    /// The fields function of the class constructor `f`: its code index, its context and the function itself. `None` when it has none.
+    pub fn fields_of(&self, f: Value) -> Option<(usize, Value, Value)> {
+        let o = Realm::obj(f).filter(|o| o.has_flag(F_CLASS))?;
+        let ff = o.slot(&self.shapes, 3);
+        let (ci, ctx) = self.function_new(ff)?;
+        Some((ci, ctx, ff))
     }
 
     /// The object that `New` makes for constructor `f`: its prototype is `f.prototype` if that is an object.

@@ -1,5 +1,6 @@
 //! The new JavaScript engine of bare (`docs/design-engine-rewrite.md`). Stage S1 builds values, the heap and objects here; stage S2
-//! adds the compiler and the interpreter. Until then it runs no scripts, and `BARE_JS_EXEC=new` stops with [`NOT_READY`].
+//! adds the compiler and the interpreter. [`script::run`] runs a script end to end, but there are no built-ins yet (S2.7) and the engine
+//! is not wired into the browser: `BARE_JS_EXEC=new` still stops with [`NOT_READY`].
 //!
 //! Only the `cell`, `heap`, `string`, `atoms`, `shapes`, `object`, `gc`, `interp_rt` and `interp` modules may hold `unsafe` code. CI runs this crate under Miri.
 #![deny(unsafe_code)]
@@ -36,3 +37,5 @@ pub mod compile;
 pub mod interp_rt;
 #[allow(unsafe_code)]
 pub mod interp;
+pub mod interp_ops;
+pub mod script;

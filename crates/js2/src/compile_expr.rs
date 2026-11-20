@@ -438,7 +438,10 @@ impl<'a> Fc<'a> {
                 let (body, flags) = (self.atom(&t[1..cut])?, self.atom(&t[cut + 1..])?);
                 self.op(Op::NewRegExp, dst, body, flags);
             }
-            ExprKind::Tagged { tag, quasi } => self.call_parts(e, tag, Some(quasi), Vec::new(), false, dst)?,
+            ExprKind::Tagged { tag, quasi } => {
+                let subs: Vec<ExprId> = self.prog.template_exprs(self.prog.template(quasi)).collect();
+                self.call_parts(e, tag, Some(quasi), subs, false, dst)?
+            }
             ExprKind::Class(c) => self.class(c, dst)?,
             ExprKind::Super => self.not_built(dst, "super outside a call or a member access"),
             ExprKind::NewTarget => {
@@ -1142,6 +1145,8 @@ impl<'a> Fc<'a> {
                 };
                 self.binary_regs(bop, cur, value, target)?;
                 if !matches!(res, Res::Reg { tdz: false, konst: false, .. }) {
+                    // The store is a safepoint and reads `target`, so its root map must name it.
+                    self.set_live(target);
                     self.store_var(name, at, target, false)?;
                 }
                 if let Some(d) = dst

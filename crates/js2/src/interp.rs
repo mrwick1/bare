@@ -10,18 +10,29 @@
 //!
 //! | Word | Holds |
 //! | --- | --- |
-//! | `fp-8` | the function cell (a root; it keeps the context that the code closed over) |
-//! | `fp-7` | `this` |
-//! | `fp-6` | the current context: the closure's context at the entry, then `PushCtx`, `PopCtx` and `CopyCtx` change it |
-//! | `fp-5` | the `pc` of the call in the caller (the key of its root map) |
-//! | `fp-4` | the `pc` where the caller goes on |
-//! | `fp-3` | the code index of the caller, or -1 for the frame that the host entered |
-//! | `fp-2` | the number of contexts that this function pushed (the handlers need it) |
-//! | `fp-1` | the register of the caller that gets the result, and bit 24 for a `New` |
+//! | `fp-10` | the function cell (a root; it keeps the context that the code closed over) |
+//! | `fp-9` | `this` |
+//! | `fp-8` | the current context: the closure's context at the entry, then `PushCtx`, `PopCtx` and `CopyCtx` change it |
+//! | `fp-7` | the `pc` of the call in the caller (the key of its root map; -1: a frame that has no map, see below) |
+//! | `fp-6` | the `pc` where the caller goes on |
+//! | `fp-5` | the code index of the caller, or -1 for the frame that the host entered |
+//! | `fp-4` | the number of contexts that this function pushed (the handlers need it) |
+//! | `fp-3` | the register of the caller that gets the result, bit 24 for a construct call, bit 25 for `super()` |
+//! | `fp-2` | `new.target` (`undefined` for a plain call) |
+//! | `fp-1` | the arguments object, for a function that reads all its arguments (`Code::flags` `CF_ARGS`), else `undefined` |
 //!
 //! A call writes the record and copies the arguments to registers `0..nparams` (missing ones are `undefined`; extra ones are dropped,
-//! because there is no `arguments` yet). It does **not** fill the other registers: the verifier proved that a register is written
-//! before it is read (6.10 item 4). A return writes the result into the caller's register and drops the frame by moving `fp`.
+//! except that a function with `CF_ARGS` gets all of them as the arguments object, made at the call). It does **not** fill the other
+//! registers: the verifier proved that a register is written before it is read (6.10 item 4). A return writes the result into the
+//! caller's register and drops the frame by moving `fp`.
+//!
+//! **Constructors and fields.** A construct call (`New`, `NewSpread`, `CallSuper`) makes `this` from `new.target.prototype` (not for a
+//! derived class, whose `this` is the variable that `super()` sets). The fields of a base class run before its body: the call pushes the
+//! frame of the constructor and, on top of it, the frame of its fields function (`SetFields`), which has the pc -1 in its record, so
+//! that no handler of the constructor catches its exceptions and no root map is looked up for the constructor (its arguments are
+//! also in the registers of the caller). The fields of a derived class run when `super()` returns: the return of the parent frame
+//! (bit 25) pushes the fields function of the class on top of the caller, at the pc of the `CallSuper`. A getter or a setter is a frame
+//! too: its result goes to the register of the op (a setter: to the dead word past the registers of the caller).
 //!
 //! **Collection.** An op that allocates starts with `gate!`: when `Realm::due`, it stores `(code, fp, pc)` and collects, and the
 //! frames are walked in place (`walk_frames`): the record words and the registers that the root map of the safepoint names, from the top
@@ -36,8 +47,10 @@
 //! of the site and then load or store at its place, inline (`interp_rt.rs`: the states and the transitions). Everything else about a
 //! miss is in the realm, out of line.
 //!
-//! **Not here:** the generators, `arguments`, accessors and `ToPrimitive`, the iterator protocol (an array is iterated, anything else
-//! throws; `for-in` walks the own keys), and every built-in. They come with S2.7 and the compiler (S2.5).
+//! **Not here:** the generators and async functions, `with` and direct `eval`, regexp and BigInt (a literal throws a `TypeError`),
+//! `ToPrimitive`, the iterator protocol (an array and a string are iterated, anything else throws; `for-in` walks the own keys), and every
+//! built-in. They come with S2.7. The classes, `super`, private names, accessors, spread and rest, `arguments` and `new.target` are here
+//! (`interp_ops.rs` has the runtime side).
 //!
 //! `unsafe` is in five places, each with a `SAFETY` comment. (1) `r!`: a register is read or written with no bounds check. (2) `word!`:
 //! an instruction word is read with no bounds check. (3) The `Op` of the opcode byte is a `transmute`, so the `match` is one jump table
@@ -47,18 +60,24 @@
 //! invariant that every pointer in a register or a cell is live (the roots above keep it). The gains of (1) to (3) are measured with the
 //! safe form of each, in `docs/progress.md` (S2.6): (1) and (2) together save 8 to 18% of the instructions of a micro loop, (3) another 6 to 9%.
 use crate::atoms::SharedAtoms;
-use crate::bytecode::{Code, ITER_REGS, Op};
+use crate::bytecode::{Asm, CF_ARGS, CF_LINK, Code, ITER_REGS, Ins, Op, decode};
 use crate::gc::Marker;
-use crate::interp_rt::{ErrKind, Feedback, Key, R, Realm};
-use crate::object::Obj;
+use crate::interp_rt::{ErrKind, Feedback, Got, Key, Put, R, Realm};
+use crate::object::{F_DERIVED, Obj};
+use crate::roots::RootMaps;
+use crate::shapes::{A_C, A_W};
 use crate::value::Value;
 use std::cmp::Ordering;
 use std::sync::Arc;
 
 /// Words of a frame record.
-pub const REC: usize = 8;
+pub const REC: usize = 10;
 const ENTRY: i32 = -1;
 const CONSTRUCT: i32 = 1 << 24;
+/// A construct call made by `super()`: the return runs the fields of the class that made the call.
+const AFTER_SUPER: i32 = 1 << 25;
+/// The pc of a frame that has no root map: the constructor of a base class, below its fields function.
+const NOPC: u32 = u32::MAX;
 /// The most words of the stack (about 4 MiB).
 const MAX_STACK: usize = 1 << 19;
 
@@ -83,6 +102,8 @@ pub struct Vm {
     pub stack: Vec<Value>,
     pub fbs: Vec<Feedback>,
     pub prog: Program,
+    /// The code indexes of the default constructors (`DefaultCtor`): a base class and a derived class.
+    pub dctor: [usize; 2],
     /// Back edges that may still run. At 0 the run stops with [`Exit::Fuel`].
     pub fuel: u64,
 }
@@ -102,9 +123,12 @@ fn walk_frames(m: &mut Marker, prog: &Program, stack: &[Value], mut ci: usize, m
     loop {
         let rec = fp - REC;
         m.values(&stack[rec..rec + 3]);
-        let map = prog.codes[ci].roots.find(pc).expect("a root map for each safepoint");
-        for r in map.slots() {
-            m.value(stack[fp + r]);
+        m.values(&stack[rec + 8..rec + 10]);
+        if pc != NOPC {
+            let map = prog.codes[ci].roots.find(pc).expect("a root map for each safepoint");
+            for r in map.slots() {
+                m.value(stack[fp + r]);
+            }
         }
         let caller = int_at(stack, fp, 5);
         if caller == ENTRY {
@@ -144,9 +168,12 @@ fn unwind(prog: &Program, stack: &mut [Value], ci: &mut usize, fp: &mut usize, p
 }
 
 impl Vm {
-    pub fn new(prog: Program, shared: Arc<SharedAtoms>) -> Vm {
+    pub fn new(mut prog: Program, shared: Arc<SharedAtoms>) -> Vm {
+        let dctor = [prog.codes.len(), prog.codes.len() + 1];
+        prog.codes.extend(default_ctors());
+        scan_flags(&mut prog.codes);
         let fbs = prog.codes.iter().map(|_| Feedback::default()).collect();
-        Vm { realm: Realm::new(shared), stack: Vec::new(), fbs, prog, fuel: u64::MAX }
+        Vm { realm: Realm::new(shared), stack: Vec::new(), fbs, prog, dctor, fuel: u64::MAX }
     }
 
     /// A function cell for code `code` with no context.
@@ -167,7 +194,12 @@ impl Vm {
         if self.stack.len() < need {
             self.stack.resize(need.max(256), Value::UNDEFINED);
         }
-        let rec = [f, this, ctx, Value::int(0), Value::int(0), Value::int(ENTRY), Value::int(0), Value::int(0)];
+        let args_obj = if code.flags & CF_ARGS != 0 {
+            Obj::array(&mut self.realm.heap, &self.realm.shapes, self.realm.s_args, args).expect("memory").value()
+        } else {
+            Value::UNDEFINED
+        };
+        let rec = [f, this, ctx, Value::int(0), Value::int(0), Value::int(ENTRY), Value::int(0), Value::int(0), Value::UNDEFINED, args_obj];
         self.stack[..REC].copy_from_slice(&rec);
         for i in 0..code.nparams as usize {
             self.stack[fp + i] = args.get(i).copied().unwrap_or(Value::UNDEFINED);
@@ -190,7 +222,7 @@ impl Vm {
 
     #[allow(unused_assignments)]
     fn run(&mut self, mut ci: usize, mut fp: usize) -> Result<Value, Exit> {
-        let Vm { realm, stack, fbs, prog, fuel } = self;
+        let Vm { realm, stack, fbs, prog, dctor, fuel } = self;
         let prog: &Program = prog;
         let mut code: &Code = &prog.codes[ci];
         let mut words: &[u32] = &code.words;
@@ -297,9 +329,13 @@ impl Vm {
                 }
                 gate!();
                 let n = name!($site);
-                let v = tri!(realm.get_field_slow(fb, $site, n, recv));
-                r!($dst) = v;
-                pc = $next;
+                match tri!(realm.get_field_slow(fb, $site, n, recv)) {
+                    Got::Val(v) => {
+                        r!($dst) = v;
+                        pc = $next;
+                    }
+                    Got::Get(g) => call_get!(g, recv, $dst, $next),
+                }
             }};
         }
         macro_rules! set_field {
@@ -322,8 +358,10 @@ impl Vm {
                 }
                 gate!();
                 let n = name!($site);
-                tri!(realm.set_field_slow(fb, $site, n, recv, val));
-                pc = $next;
+                match tri!(realm.set_field_slow(fb, $site, n, recv, val)) {
+                    Put::Done => pc = $next,
+                    Put::Set(f) => call_set!(f, recv, val, $next),
+                }
             }};
         }
         // Binary arithmetic: two integers, two numbers, else the realm.
@@ -427,14 +465,10 @@ impl Vm {
                 }
             };
         }
-        // Call with a frame record. `$argbase`: the first argument register. `$this`: the value of `this`.
-        macro_rules! call {
-            ($a:expr, $b:expr, $argbase:expr, $argc:expr, $this:expr, $flag:expr, $next:expr) => {{
-                let callee: Value = r!($b);
-                let Some((ni, cctx)) = realm.function(callee) else { err!(ErrKind::Type, "not a function") };
-                let ncode = &prog.codes[ni];
-                let new_fp = fp + code.nregs as usize + REC;
-                let need = new_fp + ncode.nregs as usize + 8;
+        // Make sure that the stack has `$need` words.
+        macro_rules! ensure {
+            ($need:expr) => {{
+                let need: usize = $need;
                 if need > stack.len() {
                     if need > MAX_STACK {
                         err!(ErrKind::Range, "maximum call stack size exceeded")
@@ -442,19 +476,108 @@ impl Vm {
                     let grown = need.max(2 * stack.len()).min(MAX_STACK + 8);
                     stack.resize(grown, undef);
                 }
-                let (np, argc, ab) = (ncode.nparams as usize, $argc as usize, fp + $argbase as usize);
-                let this: Value = $this;
-                let rec = &mut stack[new_fp - REC..new_fp];
-                rec.copy_from_slice(&[callee, this, cctx, Value::int(pc as i32), Value::int($next as i32), Value::int(ci as i32), Value::int(0), Value::int($a as i32 | $flag)]);
+            }};
+        }
+        // Push the frame of code `$ni` on top of the current one and make it the current frame (the caller sets `pc`). The `$argc`
+        // arguments are at the stack index `$ab` (the registers of the caller, or values staged at the new frame). `$dstw`: the register
+        // of the caller that gets the result, and the flags. `$callpc`: the key of the caller's root map. `$next`: where the caller goes on.
+        macro_rules! enter {
+            ($callee:expr, $ni:expr, $cctx:expr, $this:expr, $nt:expr, $dstw:expr, $callpc:expr, $next:expr, $ab:expr, $argc:expr) => {{
+                let ncode = &prog.codes[$ni];
+                let new_fp = fp + code.nregs as usize + REC;
+                ensure!(new_fp + ncode.nregs as usize + 8);
+                let (np, argc, ab) = (ncode.nparams as usize, $argc as usize, $ab as usize);
+                let argsw = if ncode.flags & CF_ARGS != 0 {
+                    Obj::array(&mut realm.heap, &realm.shapes, realm.s_args, &stack[ab..ab + argc]).expect("memory").value()
+                } else {
+                    undef
+                };
                 let given = np.min(argc);
+                let (callee, this, nt): (Value, Value, Value) = ($callee, $this, $nt);
+                let rec = &mut stack[new_fp - REC..new_fp];
+                rec.copy_from_slice(&[callee, this, $cctx, Value::int($callpc as i32), Value::int($next as i32), Value::int(ci as i32), Value::int(0), Value::int($dstw as i32), nt, argsw]);
                 stack.copy_within(ab..ab + given, new_fp);
                 stack[new_fp + given..new_fp + np].fill(undef);
-                ci = ni;
+                ci = $ni;
                 fp = new_fp;
                 reload!();
+            }};
+        }
+        macro_rules! call_err {
+            ($callee:expr) => {{
+                if realm.function_new($callee).is_some() {
+                    err!(ErrKind::Type, "class constructor cannot be invoked without 'new'")
+                } else {
+                    err!(ErrKind::Type, "not a function")
+                }
+            }};
+        }
+        // Call with a frame record. `$argbase`: the first argument register. `$this`: the value of `this`.
+        macro_rules! call {
+            ($a:expr, $b:expr, $argbase:expr, $argc:expr, $this:expr, $next:expr) => {{
+                let callee: Value = r!($b);
+                let Some((ni, cctx)) = realm.function(callee) else { call_err!(callee) };
+                enter!(callee, ni, cctx, $this, undef, $a as i32, pc, $next, fp + $argbase as usize, $argc);
                 pc = 0;
                 continue;
             }};
+        }
+        // A construct call. `this` comes from `$nt.prototype`, unless the callee is a derived class. A base class runs its fields first.
+        macro_rules! construct {
+            ($callee:expr, $ni:expr, $cctx:expr, $nt:expr, $dst:expr, $next:expr, $ab:expr, $argc:expr, $flag:expr) => {{
+                let callee: Value = $callee;
+                let derived = Realm::obj(callee).is_some_and(|f| f.has_flag(F_DERIVED));
+                let this = if derived { undef } else { tri!(realm.new_this($nt)) };
+                enter!(callee, $ni, $cctx, this, $nt, ($dst as i32) | CONSTRUCT | $flag, pc, $next, $ab, $argc);
+                if !derived && let Some((fi, fctx, ff)) = realm.fields_of(callee) {
+                    enter!(ff, fi, fctx, this, undef, code.nregs as i32, NOPC as usize, 0usize, 0usize, 0usize);
+                }
+                pc = 0;
+                continue;
+            }};
+        }
+        // Run the getter `$g` with `this` and go on at `$next`; its result goes to register `$dst`.
+        macro_rules! call_get {
+            ($g:expr, $this:expr, $dst:expr, $next:expr) => {{
+                let g: Value = $g;
+                let this: Value = $this;
+                let Some((ni, cctx)) = realm.function(g) else { err!(ErrKind::Type, "a getter is not a function") };
+                enter!(g, ni, cctx, this, undef, $dst as i32, pc, $next, fp, 0usize);
+                pc = 0;
+                continue;
+            }};
+        }
+        // Run the setter `$f` with `this` and the value `$v`; the result goes to the dead word past the registers.
+        macro_rules! call_set {
+            ($f:expr, $this:expr, $v:expr, $next:expr) => {{
+                let (f, this, v): (Value, Value, Value) = ($f, $this, $v);
+                let Some((ni, cctx)) = realm.function(f) else { err!(ErrKind::Type, "a setter is not a function") };
+                let nf = fp + code.nregs as usize + REC;
+                ensure!(nf + 8);
+                stack[nf] = v;
+                enter!(f, ni, cctx, this, undef, code.nregs as i32, pc, $next, nf, 1usize);
+                pc = 0;
+                continue;
+            }};
+        }
+        // The arguments of `CallSpread` and the like: the elements of the array `$arr`, staged where the new frame goes.
+        macro_rules! stage_array {
+            ($arr:expr) => {{
+                let arr = Realm::obj($arr).expect("an array");
+                let len = arr.len() as usize;
+                let nf = fp + code.nregs as usize + REC;
+                ensure!(nf + len + 8);
+                for i in 0..len {
+                    stack[nf + i] = arr.get_element(i as u32).unwrap_or(undef);
+                }
+                (nf, len)
+            }};
+        }
+        // The home object of the running function (`super.x` starts at its prototype).
+        macro_rules! home {
+            () => {
+                Realm::obj(record(stack, fp, 0)).map_or(undef, |f| f.slot(&realm.shapes, 2))
+            };
         }
         macro_rules! ret {
             ($v:expr) => {{
@@ -468,10 +591,19 @@ impl Vm {
                     return Ok(v);
                 }
                 pc = int_at(stack, fp, 4) as usize;
+                let callpc = int_at(stack, fp, 3);
                 ci = caller as usize;
                 fp -= REC + prog.codes[ci].nregs as usize;
                 stack[fp + (dst & 0xffff) as usize] = v;
                 reload!();
+                if dst & AFTER_SUPER != 0
+                    && let Some((class, _)) = super_info(realm, stack, fp)
+                    && let Some((fi, fctx, ff)) = realm.fields_of(class)
+                {
+                    // The fields of the class that called `super()`: a frame on top of the caller, then the caller goes on.
+                    enter!(ff, fi, fctx, v, undef, code.nregs as i32, callpc as u32 as usize, pc, 0usize, 0usize);
+                    pc = 0;
+                }
                 continue;
             }};
         }
@@ -654,15 +786,22 @@ impl Vm {
                         }
                         gate!();
                         let k = tri!(realm.key_of(key));
-                        r!(a!()) = tri!(realm.get_prop(recv, k));
-                        pc = next;
+                        match tri!(realm.get_prop_g(recv, k)) {
+                            Got::Val(v) => {
+                                r!(a!()) = v;
+                                pc = next;
+                            }
+                            Got::Get(g) => call_get!(g, recv, a!(), next),
+                        }
                     }
                     Op::SetElem => {
                         gate!();
                         let (recv, key, v) = (r!(a!()), r!(b!()), r!(c!()));
                         let k = tri!(realm.key_of(key));
-                        tri!(realm.set_prop(recv, k, v));
-                        pc = next;
+                        match tri!(realm.set_prop_g(recv, k, v)) {
+                            Put::Done => pc = next,
+                            Put::Set(f) => call_set!(f, recv, v, next),
+                        }
                     }
                     Op::ToKey => {
                         gate!();
@@ -733,15 +872,30 @@ impl Vm {
                     Op::Closure => {
                         gate!();
                         let ctx = stack[fp - REC + 2];
-                        r!(a!()) = realm.new_function(code.funcs[bx!()] as usize, ctx);
+                        let child = code.funcs[bx!()] as usize;
+                        let f = realm.new_function(child, ctx);
+                        if prog.codes[child].flags & CF_LINK != 0 {
+                            // The function uses `super` (or holds one that does): it gets the home object and the constructor link.
+                            let (cur, nt) = (record(stack, fp, 0), record(stack, fp, 8));
+                            let (co, fo) = (Realm::obj(cur).expect("a function"), Realm::obj(f).expect("a function"));
+                            fo.set_slot(&realm.shapes, 2, co.slot(&realm.shapes, 2));
+                            let link = if nt.is_undefined() {
+                                co.slot(&realm.shapes, 4)
+                            } else {
+                                Obj::array(&mut realm.heap, &realm.shapes, realm.s_array, &[cur, nt]).expect("memory").value()
+                            };
+                            fo.set_slot(&realm.shapes, 4, link);
+                        }
+                        r!(a!()) = f;
                         pc = next;
                     }
-                    Op::Call => call!(a!(), b!(), b!() + 2, c!(), r!(b!() + 1), 0, next),
-                    Op::CallU => call!(a!(), b!(), b!() + 1, c!(), undef, 0, next),
+                    Op::Call => call!(a!(), b!(), b!() + 2, c!(), r!(b!() + 1), next),
+                    Op::CallU => call!(a!(), b!(), b!() + 1, c!(), undef, next),
                     Op::New => {
                         gate!();
-                        let this = tri!(realm.new_this(r!(b!())));
-                        call!(a!(), b!(), b!() + 1, c!(), this, CONSTRUCT, next)
+                        let callee = r!(b!());
+                        let Some((ni, cctx)) = realm.function_new(callee) else { err!(ErrKind::Type, "not a constructor") };
+                        construct!(callee, ni, cctx, callee, a!(), next, fp + b!() + 1, c!(), 0)
                     }
                     Op::Add | Op::AddI => {
                         let y = if opv == Op::AddI { Value::int(sc!()) } else { r!(c!()) };
@@ -977,6 +1131,263 @@ impl Vm {
                         }
                     }
                     Op::IterClose => pc = next,
+                    Op::DeclGlobal => {
+                        gate!();
+                        let n = name!(bx!());
+                        let g = realm.global;
+                        if !tri!(realm.has_prop(g.value(), Key::Name(n))) {
+                            tri!(realm.define(g, Key::Name(n), undef));
+                        }
+                        pc = next;
+                    }
+                    Op::CreateArgs => {
+                        r!(a!()) = record(stack, fp, 9);
+                        pc = next;
+                    }
+                    Op::CreateRest => {
+                        gate!();
+                        let all = Realm::obj(record(stack, fp, 9)).expect("the arguments of a function with CF_ARGS");
+                        let vals: Vec<Value> = (b!() as u32..all.len()).map(|i| all.get_element(i).unwrap_or(undef)).collect();
+                        r!(a!()) = Obj::array(&mut realm.heap, &realm.shapes, realm.s_array, &vals).expect("memory").value();
+                        pc = next;
+                    }
+                    Op::LoadCallee => {
+                        r!(a!()) = record(stack, fp, 0);
+                        pc = next;
+                    }
+                    Op::LoadNewTarget => {
+                        r!(a!()) = record(stack, fp, 8);
+                        pc = next;
+                    }
+                    Op::NewRegExp => err!(ErrKind::Type, "regular expression literals are not supported yet (js2 has no RegExp engine: S2.7)"),
+                    Op::LoadBigInt => err!(ErrKind::Type, "BigInt literals are not supported yet (js2 has no BigInt: S2.7)"),
+                    Op::GetTemplate => {
+                        gate!();
+                        r!(a!()) = match fb.tmpl.iter().find(|t| t.0 == c!() as u32) {
+                            Some(t) => t.1,
+                            None => {
+                                let rec: Vec<u32> = code.recipes.get(b!()).expect("a recipe").to_vec();
+                                let (mut cooked, mut raw) = (Vec::new(), Vec::new());
+                                for p in rec.chunks(2) {
+                                    cooked.push(if p[0] == u32::MAX { undef } else { atom!(p[0]).value() });
+                                    raw.push(atom!(p[1]).value());
+                                }
+                                let t = realm.make_template(&cooked, &raw);
+                                fb.tmpl.push((c!() as u32, t));
+                                t
+                            }
+                        };
+                        pc = next;
+                    }
+                    Op::ArraySpread => {
+                        gate!();
+                        let vals = tri!(realm.iter_values(r!(b!())));
+                        let o = Realm::obj(r!(a!())).expect("an array");
+                        for v in vals {
+                            o.set_element(&mut realm.heap, o.len(), v).expect("memory");
+                        }
+                        pc = next;
+                    }
+                    Op::ArrayHole => {
+                        gate!();
+                        let o = Realm::obj(r!(a!())).expect("an array");
+                        o.set_len(&mut realm.heap, o.len() + 1).expect("memory");
+                        pc = next;
+                    }
+                    Op::CallSpread => {
+                        let callee = r!(b!());
+                        let Some((ni, cctx)) = realm.function(callee) else { call_err!(callee) };
+                        let (nf, len) = stage_array!(r!(b!() + 2));
+                        enter!(callee, ni, cctx, r!(b!() + 1), undef, a!() as i32, pc, next, nf, len);
+                        pc = 0;
+                        continue;
+                    }
+                    Op::NewSpread => {
+                        gate!();
+                        let callee = r!(b!());
+                        let Some((ni, cctx)) = realm.function_new(callee) else { err!(ErrKind::Type, "not a constructor") };
+                        let (nf, len) = stage_array!(r!(b!() + 1));
+                        construct!(callee, ni, cctx, callee, a!(), next, nf, len, 0)
+                    }
+                    Op::CopyProps => {
+                        gate!();
+                        let o = Realm::obj(r!(a!())).expect("an object literal");
+                        tri!(realm.copy_props(o, r!(b!())));
+                        pc = next;
+                    }
+                    Op::ObjRest => {
+                        gate!();
+                        let keys: Vec<Value> = (0..$x as usize).map(|i| r!(c!() + i)).collect();
+                        r!(a!()) = tri!(realm.obj_rest(r!(b!()), &keys));
+                        pc = nextx;
+                    }
+                    Op::SetProto => {
+                        gate!();
+                        let (o, v) = (Realm::obj(r!(a!())).expect("an object literal"), r!(b!()));
+                        if let Some(p) = Realm::obj(v) {
+                            o.set_proto(&mut realm.shapes, Some(p.cell()));
+                        } else if v.is_null() {
+                            o.set_proto(&mut realm.shapes, None);
+                        }
+                        pc = next;
+                    }
+                    Op::DefAccessor => {
+                        gate!();
+                        let n = name!(c!());
+                        let o = Realm::obj(r!(a!())).expect("an object");
+                        tri!(realm.define_accessor(o, Key::Name(n), r!(b!()), $x & 1 != 0, $x & 2 == 0));
+                        pc = nextx;
+                    }
+                    Op::DefAccessorElem => {
+                        gate!();
+                        let o = Realm::obj(r!(a!())).expect("an object");
+                        let k = tri!(realm.key_of(r!(b!())));
+                        tri!(realm.define_accessor(o, k, r!(c!()), $x & 1 != 0, $x & 2 == 0));
+                        pc = nextx;
+                    }
+                    Op::DefMethod => {
+                        gate!();
+                        let n = name!(c!());
+                        let o = Realm::obj(r!(a!())).expect("an object");
+                        tri!(realm.define_attrs(o, Key::Name(n), A_W | A_C, r!(b!())));
+                        pc = next;
+                    }
+                    Op::DefMethodElem => {
+                        gate!();
+                        let o = Realm::obj(r!(a!())).expect("an object");
+                        let k = tri!(realm.key_of(r!(b!())));
+                        tri!(realm.define_attrs(o, k, A_W | A_C, r!(c!())));
+                        pc = next;
+                    }
+                    Op::SetHome => {
+                        Realm::obj(r!(a!())).expect("a function").set_slot(&realm.shapes, 2, r!(b!()));
+                        pc = next;
+                    }
+                    Op::MakeClass => {
+                        gate!();
+                        tri!(realm.make_class(r!(a!()), None));
+                        pc = next;
+                    }
+                    Op::MakeDerived => {
+                        gate!();
+                        tri!(realm.make_class(r!(a!()), Some(r!(b!()))));
+                        pc = next;
+                    }
+                    Op::DefaultCtor => {
+                        gate!();
+                        r!(a!()) = realm.new_function(dctor[b!() & 1], undef);
+                        pc = next;
+                    }
+                    Op::SetFields => {
+                        Realm::obj(r!(a!())).expect("a constructor").set_slot(&realm.shapes, 3, r!(b!()));
+                        pc = next;
+                    }
+                    Op::NewPrivateName => {
+                        gate!();
+                        let d = atom!(bx!());
+                        r!(a!()) = realm.new_private_name(d);
+                        pc = next;
+                    }
+                    Op::GetPrivate => {
+                        gate!();
+                        match tri!(realm.private_get(r!(b!()), r!(c!()))) {
+                            Got::Val(v) => {
+                                r!(a!()) = v;
+                                pc = next;
+                            }
+                            Got::Get(g) => call_get!(g, r!(b!()), a!(), next),
+                        }
+                    }
+                    Op::SetPrivate => {
+                        gate!();
+                        match tri!(realm.private_set(r!(a!()), r!(b!()), r!(c!()))) {
+                            Put::Done => pc = next,
+                            Put::Set(f) => call_set!(f, r!(a!()), r!(c!()), next),
+                        }
+                    }
+                    Op::HasPrivate => {
+                        gate!();
+                        let h = tri!(realm.private_has(r!(b!()), r!(c!())));
+                        r!(a!()) = Value::bool(h);
+                        pc = next;
+                    }
+                    Op::DefPrivate => {
+                        gate!();
+                        tri!(realm.private_def(r!(a!()), r!(b!()), A_W, r!(c!())));
+                        pc = next;
+                    }
+                    Op::DefPrivateMethod => {
+                        gate!();
+                        tri!(realm.private_def(r!(a!()), r!(b!()), 0, r!(c!())));
+                        pc = next;
+                    }
+                    Op::DefPrivateAccessor => {
+                        gate!();
+                        tri!(realm.private_def_accessor(r!(a!()), r!(b!()), r!(c!()), $x == 1));
+                        pc = nextx;
+                    }
+                    Op::GetSuper => {
+                        gate!();
+                        let n = name!(c!());
+                        match tri!(realm.super_get(home!(), Key::Name(n))) {
+                            Got::Val(v) => {
+                                r!(a!()) = v;
+                                pc = next;
+                            }
+                            Got::Get(g) => call_get!(g, r!(b!()), a!(), next),
+                        }
+                    }
+                    Op::GetSuperElem => {
+                        gate!();
+                        let k = tri!(realm.key_of(r!(c!())));
+                        match tri!(realm.super_get(home!(), k)) {
+                            Got::Val(v) => {
+                                r!(a!()) = v;
+                                pc = next;
+                            }
+                            Got::Get(g) => call_get!(g, r!(b!()), a!(), next),
+                        }
+                    }
+                    Op::SetSuper => {
+                        gate!();
+                        let n = name!(c!());
+                        match tri!(realm.super_set(home!(), r!(a!()), Key::Name(n), r!(b!()))) {
+                            Put::Done => pc = next,
+                            Put::Set(f) => call_set!(f, r!(a!()), r!(b!()), next),
+                        }
+                    }
+                    Op::SetSuperElem => {
+                        gate!();
+                        let k = tri!(realm.key_of(r!(b!())));
+                        match tri!(realm.super_set(home!(), r!(a!()), k, r!(c!()))) {
+                            Put::Done => pc = next,
+                            Put::Set(f) => call_set!(f, r!(a!()), r!(c!()), next),
+                        }
+                    }
+                    Op::CallSuper | Op::CallSuperSpread => {
+                        gate!();
+                        let Some((class, nt)) = super_info(realm, stack, fp) else { err!(ErrKind::Reference, "'super' keyword unexpected here") };
+                        let Some(pv) = Realm::obj(class).and_then(|f| realm.proto_of(f)).map(|p| p.value()) else {
+                            err!(ErrKind::Type, "super constructor is not a constructor")
+                        };
+                        let Some((ni, cctx)) = realm.function_new(pv) else { err!(ErrKind::Type, "super constructor is not a constructor") };
+                        let (ab, argc) = if opv == Op::CallSuper { (fp + b!(), c!()) } else { stage_array!(r!(b!())) };
+                        construct!(pv, ni, cctx, nt, a!(), next, ab, argc, AFTER_SUPER)
+                    }
+                    Op::RetDerived => {
+                        let (v, t) = (r!(a!()), r!(b!()));
+                        let res = if Realm::obj(v).is_some() {
+                            v
+                        } else if v.is_undefined() {
+                            if t.is_hole() {
+                                err!(ErrKind::Reference, "must call super constructor in derived class before returning from derived constructor")
+                            }
+                            t
+                        } else {
+                            err!(ErrKind::Type, "derived constructors may only return object or undefined")
+                        };
+                        ret!(res)
+                    }
                 }
             }};
         }
@@ -1007,6 +1418,64 @@ impl Vm {
                 let (sb, sc) = (w2 as u16 as i16 as i32, (w2 >> 16) as u16 as i16 as i32);
                 step!(op, a, b, c, w2 as usize, w2 as i32, sb, sc, w2 as i32, word!(pc + 2), 2)
             }
+        }
+    }
+}
+
+/// `new.target` and the class constructor of a frame that may call `super()`: the frame of the constructor itself, or an arrow
+/// inside it (the arrow's function cell has the link that `Closure` made: the constructor and `new.target`).
+fn super_info(realm: &Realm, stack: &[Value], fp: usize) -> Option<(Value, Value)> {
+    let nt = record(stack, fp, 8);
+    if !nt.is_undefined() {
+        return Some((record(stack, fp, 0), nt));
+    }
+    let link = Realm::obj(Realm::obj(record(stack, fp, 0))?.slot(&realm.shapes, 4))?;
+    Some((link.get_element(0)?, link.get_element(1)?))
+}
+
+/// The default constructors of a class: `constructor() {}` and `constructor(...args) { super(...args); }`.
+fn default_ctors() -> [Code; 2] {
+    let mut base = Code::new(0, 0);
+    base.words = vec![Op::RetUndef as u32];
+    let mut a = Asm::default();
+    for ins in [Ins::new(Op::CreateRest, 0, 0, 0), Ins::new(Op::CallSuperSpread, 1, 0, 0), Ins::new(Op::LoadUndef, 2, 0, 0), Ins::new(Op::RetDerived, 2, 1, 0)] {
+        a.emit(ins);
+    }
+    let asm = a.finish().expect("the default constructor assembles");
+    let mut derived = Code::new(3, 1);
+    derived.words = asm.words;
+    derived.roots = RootMaps::new(3);
+    derived.roots.add(asm.pcs[0], [0]);
+    derived.roots.add(asm.pcs[1], [0]);
+    derived.roots.add(asm.pcs[3], [1, 2]);
+    [base, derived]
+}
+
+/// Fill `Code::flags` of each code: `CF_ARGS` for a code that reads all its arguments, `CF_LINK` for one that uses `super` or holds a
+/// function that does.
+fn scan_flags(codes: &mut [Code]) {
+    for c in codes.iter_mut() {
+        let (mut pc, mut f) = (0, 0);
+        while let Ok((ins, n)) = decode(&c.words, pc) {
+            match ins.op {
+                Op::CreateArgs | Op::CreateRest => f |= CF_ARGS,
+                Op::CallSuper | Op::CallSuperSpread | Op::GetSuper | Op::GetSuperElem | Op::SetSuper | Op::SetSuperElem => f |= CF_LINK,
+                _ => {}
+            }
+            pc += n;
+        }
+        c.flags = f;
+    }
+    loop {
+        let mut changed = false;
+        for i in 0..codes.len() {
+            if codes[i].flags & CF_LINK == 0 && codes[i].funcs.iter().any(|&k| codes.get(k as usize).is_some_and(|c| c.flags & CF_LINK != 0)) {
+                codes[i].flags |= CF_LINK;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
         }
     }
 }

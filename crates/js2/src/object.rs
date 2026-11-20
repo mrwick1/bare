@@ -49,6 +49,10 @@ const WORD: usize = 8;
 const F_OVER: u32 = 1;
 /// Object header flag: a script can call the object (a function cell, S2.6). A shape change keeps it.
 pub const F_CALLABLE: u32 = 2;
+/// Object header flag: the function is a class constructor (a plain call throws).
+pub const F_CLASS: u32 = 4;
+/// Object header flag: the function is the constructor of a class with `extends` (its `this` is the hole until `super()` returns).
+pub const F_DERIVED: u32 = 8;
 /// `Elements` header flag: the record is sparse.
 const F_SPARSE: u32 = 1;
 /// A write at an index this far above the capacity of a dense record makes it sparse.
@@ -251,8 +255,19 @@ impl Obj {
     }
 
     pub fn set_callable(self) {
+        self.set_flag(F_CALLABLE);
+    }
+
+    /// Does the header have the flag bit `f` (`F_CLASS`, `F_DERIVED`)?
+    #[inline]
+    pub fn has_flag(self, f: u32) -> bool {
+        self.head().flags() & f != 0
+    }
+
+    /// Set the flag bit `f`. A shape change keeps it.
+    pub fn set_flag(self, f: u32) {
         let h = self.head();
-        self.set_head(h.with_flags(h.flags() | F_CALLABLE));
+        self.set_head(h.with_flags(h.flags() | f));
     }
 
     /// The place of slot `slot` for every object that has the shape of `self` (a cache entry, S2.6). Bits 0..9: the byte offset in the

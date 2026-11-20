@@ -15416,6 +15416,89 @@ Known gaps (left for S2.5 and S2.7): no prototype-chain cache entries (a propert
 
 Not tested: a compiler or real JavaScript on this interpreter (S2.5); the cache-hit and helper `unsafe` against a safe form; wall time; the cost matrix (`bare-js2` is not connected to `bare`); arm64; Miri on the whole crate (only the `interp` tests) and with `-Zmiri-many-seeds`; Windows after the rebase on main and after the last two test edits (Linux was re-run: 318 passed).
 
+### 2026-11-20 (later): the interpreter runs scripts end to end (S2.6, after the merge of #760)
+
+Branch `t3/js2-interpreter` (PR #757). I merged `t3/extend-js2-bytecode-compiler` (#760, not merged to main at that time) into it. The merge did not compile: the `match` in `run` had no arm for the 38 new ops. Each of the 38 ops now has an arm, and no arm is `unreachable!`. `crates/bare`, `crates/js` and `crates/js-api` are untouched.
+
+New and changed code (all in `crates/js2`):
+
+- `interp.rs`: the 38 arms (`DeclGlobal`, `CreateArgs`, `CreateRest`, `LoadCallee`, `LoadNewTarget`, `NewRegExp`, `LoadBigInt`, `GetTemplate`, `ArraySpread`, `ArrayHole`, `CallSpread`, `NewSpread`, `CopyProps`, `ObjRest`, `SetProto`, `DefAccessor`, `DefAccessorElem`, `DefMethod`, `DefMethodElem`, `SetHome`, `MakeClass`, `MakeDerived`, `DefaultCtor`, `SetFields`, `NewPrivateName`, `GetPrivate`, `SetPrivate`, `HasPrivate`, `DefPrivate`, `DefPrivateMethod`, `DefPrivateAccessor`, `GetSuper`, `GetSuperElem`, `SetSuper`, `SetSuperElem`, `CallSuper`, `CallSuperSpread`, `RetDerived`). `GetField`, `GetElem`, `SetField`, `SetElem`, `Closure`, `Call` and `New` now call getters and setters as frames and run constructors and fields.
+- Frame record: 10 words (`REC`), was 8. Word 8 is `new.target`. Word 9 is the arguments object (`undefined` when the function does not read `arguments`). The result word has two new flags: `CONSTRUCT` (bit 24) and `AFTER_SUPER` (bit 25). A frame whose call pc is `NOPC` has no root map: it is a base-class constructor that waits below its fields function.
+- A base-class constructor runs its fields first. `construct!` pushes the constructor frame and, above it, the fields frame. A derived class runs its fields when `super()` returns (`ret!` with `AFTER_SUPER`).
+- `Code::flags` (`CF_ARGS`: the function reads `arguments` or a rest parameter; `CF_LINK`: it uses `super`). `scan_flags` runs in `Vm::new` and spreads `CF_LINK` up through `Code::funcs`. A function cell has 5 hidden slots: `code`, `ctx`, `home`, `fields`, `link`. `link` holds the function and `new.target` that `super()` needs. An arrow takes both from its parent.
+- Two synthetic default-constructor codes (`Vm::dctor`). The derived one is `CreateRest`, `CallSuperSpread`, `RetDerived`, with hand-made root maps.
+- `interp_rt.rs`: `Got` and `Put` (a property access that must call a getter or a setter), `Slot`, `lookup_g`, `get_prop_g`, `set_prop_g`, `proto_setter`, `fields_of`, the `arguments` shape, and the template cache `Feedback::tmpl`. A class constructor called without `new` throws a TypeError.
+- `interp_ops.rs` (new, no `unsafe`): the runtime side of the ops (`make_class`, accessors, private names, `super`, `copy_props`, `obj_rest`, templates, spread).
+- `script.rs` (new, no `unsafe`): `script::compile`, `script::load` and `script::run` lex, parse, compile and run a script. `Loader::add` compiles each function when it loads the script, maps `Code::funcs` to program indices by position, and takes the code of a `ready` child from `Compiled::inline`. It stops with an error when the compiler reports an unsupported construct. `Vm::global`, `Vm::global_text` and `Vm::display` read the result.
+- `examples/script_run.rs`: runs a file and prints globals, or runs an `eval_load` program with `--eval FILE EXPECTED`.
+- `script_tests.rs`: 13 tests that run real JavaScript and check a global: arithmetic and strings, control flow, functions and closures, objects and arrays, exceptions, destructuring, spread and rest, tagged templates, regexp and BigInt (clean TypeError), classes (inheritance, `super`, `new.target`, fields, static blocks), private names and accessors, the load errors of generators, async and `with`, the budget, and a collection stress test. Each case also runs again with a 1 KiB collection trigger (4 KiB under Miri, where only a few programs run under collection).
+
+Two compiler bugs found by these tests, both fixed here (the compiler is #760):
+
+- A tagged template dropped its `${}` values: `tag`a${1}b`` called `tag` with the strings only. `call_parts` now receives the expressions of the template. The golden test `a_tagged_template` held the wrong output (no argument); I changed it.
+- A compound assignment to a global (`log += 'f'`) did not name its result register in the root map of the `SetGlobal`. A collection at that point freed the new string. `assign_ident` now marks the register live before the store. The test `a_few_programs_under_constant_collection` has the program that failed.
+
+Interpreter bug found by the same tests: `HasPrivate` read its operands in the wrong order. Fixed.
+
+`eval_load` programs end to end (scale 1 and 10 from `eval_load CASE SCALE --source`; the result is checked against the expected line; `script_run --eval`):
+
+| Case | Result | Reason |
+| --- | --- | --- |
+| `loop`, `loopfn`, `calls`, `fib`, `concat` | run, result correct | |
+| `closures` | fails: `TypeError: not a function` | `Array.prototype.push` is missing (S2.7) |
+| `objects` | fails: `TypeError: not a function` | `push` and `forEach` are missing (S2.7) |
+| `webpack` | fails: `TypeError: cannot read properties of undefined (reading 'chunks')` | the global `self` is missing, and `push`, `forEach` and `bind` (S2.7 and the host) |
+| `throws` | runs, result wrong (166673, expected 69629) | there is no `Error`. `new Error(...)` throws a `ReferenceError` that the `catch` catches, so the sums differ (S2.7) |
+
+I checked each cause with a one-line script (`typeof a.push`, `typeof f.bind`, `typeof self` and `typeof Error` are all `undefined`).
+
+Micro loops again (`interp_load`, `tools/js/instr.sh`, minimum of 3 runs, count at N minus count at N = 0, same method as above). Machine: AMD Ryzen 9 5900HX. "Base" is `c318100b` (this branch before the merge and the changes), built and measured in the same session. Instructions per turn:
+
+| Row | Base | New | Change | Base, 1 codegen unit | New, 1 codegen unit | Change |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loopfn` | 292.5 | 314.5 | +7.5% | 309.5 | 311.5 | +0.6% |
+| `calls` | 645.5 | 692.5 | +7.3% | 671.5 | 693.5 | +3.3% |
+| `fib(30)` | 985.7 | 1033.7 | +4.9% | 1022.2 | 1052.7 | +3.0% |
+| `closures` | 1956.2 | 2064.2 | +5.5% | 2050.5 | 2087.5 | +1.8% |
+| `objects` | 738.4 | 763.3 | +3.4% | 768.2 | 778.2 | +1.3% |
+
+The base numbers of the default build match the first S2.6 table. The new interpreter costs 0.6% to 7.5% more. Hypothesis (not profiled): the larger `run` function changes the code layout and the register use of the dispatch, and a call stores 2 more words and tests 2 more flags. `loopfn` has no call, and it moves by 7.5% in the default build but 0.6% with 1 codegen unit, so most of its change is layout. `calls` and `fib` keep 3% at 1 codegen unit; this part is the frame record. I did not try to reduce it (a cold arm moved out of `run` is the first candidate).
+
+`eval_load` cases, user instructions of the whole process (`tools/js/instr.sh`, minimum of 3 runs, millions). Old engine: `BARE_JS_EXEC=auto` through `eval_load`. New: `script_run --eval` (parse, compile and run). QuickJS 2026-06-04 from `tools/js/engine_compare.py` (3 runs):
+
+| Case | Scale | Old `auto` | New js2 | New / old | QuickJS | New / QuickJS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loop` | 1 | 230.6 | 132.7 | 0.58 | 64.7 | 2.05 |
+| `loop` | 10 | 2373.1 | 1322.5 | 0.56 | 635.3 | 2.08 |
+| `loopfn` | 1 | 76.4 | 60.4 | 0.79 | 44.1 | 1.37 |
+| `loopfn` | 10 | 831.1 | 598.6 | 0.72 | 429.3 | 1.39 |
+| `calls` | 1 | 162.2 | 102.7 | 0.63 | 60.6 | 1.69 |
+| `calls` | 10 | 1603.3 | 1021.6 | 0.64 | 594.3 | 1.72 |
+| `fib` | 1 | 7.7 | 4.7 | 0.61 | 4.4 | 1.06 |
+| `fib` | 10 | 58.3 | 46.3 | 0.79 | 35.5 | 1.30 |
+| `concat` | 1 | 2.8 | 0.6 | 0.22 | 1.3 | 0.47 |
+| `concat` | 10 | 4.0 | 1.2 | 0.30 | 2.1 | 0.58 |
+
+The cost matrix is not applicable: `bare-js2` is not connected to `bare`.
+
+Tests. Linux: `cargo test --locked -p bare-js2 --lib`: 353 passed, 0 failed (13 of them are the new `script` tests, and `a_tagged_template` has a new golden). Windows (`cargo xwin test`, MSVC, run on the VM through `/data/vms/winssh`): 351 passed, 2 failed. The 2 failures are `parse::tests::corpus_status_matches_acorn` and `parse::lazy_tests::a_lazy_parse_finds_the_same_errors_as_a_full_parse_on_the_corpus`. They read a corpus by a path from the build machine, and the VM has no such path (`NotFound`). They do not touch this change. Miri (`cargo +nightly miri test --locked -p bare-js2 --lib`, filters `interp` and `script::tests`): `interp` 37 passed, 1 ignored (the same test as before), 23 minutes; `script::tests` 13 passed, 13 minutes. The first Miri run of the script tests took 29 minutes and failed `arithmetic_and_strings`: Miri adds a random error to the result of `pow`, so `2 ** 3` was 8.000000000000002. Under Miri the tests now skip the cases with `**` and run the collection stress only for a few programs. `cargo clippy --locked -p bare-js2 --all-targets` gives no new warning (the existing ones are in `heap.rs`, `crates/os` and the census examples).
+
+Known gaps (S2.7 or later):
+
+- Missing built-ins: `Object`, `Error` and its subclasses, `Array.prototype` methods (`push`, `forEach`, `bind`), `Function.prototype`, `Math`, `JSON`, `Symbol`, `Map`, `Set`, `Promise`, and the host globals (`self`).
+- No `ToPrimitive`: `'' + [1]` and `'' + {}` throw a TypeError. No iterator protocol beyond arrays and strings. A plain function has no `prototype` property, so `class A extends F` with a plain function `F` throws.
+- Regexp and BigInt literals, generators, async functions, `with` and direct `eval` are not supported. A literal throws a TypeError when it runs; generators, async functions and `with` stop the load; direct `eval` is not defined at all (`eval` is an undefined global).
+- The loader compiles every function when it loads the script (no lazy compile).
+- Top-level `let` and `const` are global properties: a `const` at the top level can be assigned, and there is no dead zone at the top level (inside a function or block both work).
+- The expression statement `this;` in a derived constructor before `super()` emits no code, so it does not throw. `this.x` does.
+- `arguments` is unmapped (a write to `arguments[0]` does not change the parameter).
+- A private name is an atom with the text `\0#x\0N`. A script that builds that exact string as a key can forge it. S2.7 should use a symbol cell.
+- `CopyProps` (`{...o}`) throws a TypeError for an enumerable accessor (no getter call in the helper yet).
+- In strict code, an assignment to a property that has only a getter is ignored with no error.
+- An add-transition cache entry can miss a setter that a prototype defines later.
+
+Not tested: the cost matrix (`bare-js2` is not connected to `bare`); arm64; Miri on the whole crate (only the `interp` and `script` tests); a real-world bundle (jQuery, lodash and others need built-ins); wall time; the memory use of the 10-word frame (the peak memory of the micro loops was not measured); the `unsafe` code of the new arms against a safe form.
+
 ## 2026-11-20: compiler gaps and more constructs in js2 (plan step S2.5)
 
 This entry continues "compiler in js2 (plan step S2.5)". Base: main with #759. New module `compile_class.rs`. The compiler is not wired into the browser, so there is no cost matrix.
