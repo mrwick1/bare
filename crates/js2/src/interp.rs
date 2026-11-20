@@ -81,8 +81,12 @@ const CONSTRUCT: i32 = 1 << 24;
 const AFTER_SUPER: i32 = 1 << 25;
 /// The pc of a frame that has no root map: the constructor of a base class, below its fields function.
 const NOPC: u32 = u32::MAX;
+/// A frame that runs a generator: an exception that drops it ends the generator (`generator.rs`).
+pub(crate) const GEN: i32 = 1 << 26;
+/// With [`GEN`]: the caller wants the result object `{ value, done }` (a `next()` call).
+pub(crate) const ITER: i32 = 1 << 27;
 /// The most words of the stack (about 4 MiB).
-const MAX_STACK: usize = 1 << 19;
+pub(crate) const MAX_STACK: usize = 1 << 19;
 
 /// The functions of a script, as the compiler makes them. A function cell holds an index of this table; `Code::funcs` holds indexes
 /// too. `Vm::new` moves them to a [`Codes`], the table that the realm runs (it can grow during a run).
@@ -219,6 +223,10 @@ fn unwind(prog: &Codes, stack: &mut [Value], ci: &mut usize, fp: &mut usize, pc:
             *pc = h.target as usize;
             return Ok(());
         }
+        if int_at(stack, *fp, 7) & GEN != 0 {
+            // The frame of a generator goes away: the generator is done.
+            crate::generator::abandon(stack[*fp - REC + 8]);
+        }
         let caller = int_at(stack, *fp, 5);
         if caller == ENTRY {
             return Err(e);
@@ -282,6 +290,54 @@ fn grow_fbs(fbs: &mut Vec<Feedback>, n: usize) {
     fbs.resize_with(n, Feedback::default);
 }
 
+/// How `gen_op` ends: the first frame of the run returned (`Done`), or `ci`, `fp` and `pc` are the caller's (`reload!` follows).
+enum GenExit {
+    Back(usize, usize, usize),
+    Done(Value),
+}
+
+/// `GenInit`, `Yield` and `RetGen` with the return to the caller, out of line so that the loop of `Vm::run` keeps its shape
+/// (`generator.rs`). As `ret!`, for a frame that has no `new` flags (the verifier does not let a generator be constructed).
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn gen_op(realm: &mut Realm, stack: &mut [Value], fbs: &mut [Feedback], prog: &Codes, ci: usize, fp: usize, pc: usize, op: Op, a: usize, bx: u32, next: usize) -> Result<GenExit, Value> {
+    if realm.due() {
+        realm.cur = (ci, fp, pc as u32);
+        let (cur, st) = (realm.cur, &stack[..]);
+        realm.collect(fbs, |m| walk_frames(m, prog, st, cur.0, cur.1, cur.2));
+    }
+    let iter = int_at(stack, fp, 7) & ITER != 0;
+    let code = &prog[ci];
+    let v = match op {
+        Op::GenInit => realm.gen_init(stack, fp, ci, code, bx, next)?,
+        Op::Yield => realm.gen_yield(stack, fp, ci, code, bx, next, stack[fp + a], iter),
+        _ => realm.gen_return(stack, fp, stack[fp + a], iter),
+    };
+    let (caller, dst) = (int_at(stack, fp, 5), int_at(stack, fp, 7));
+    if caller == ENTRY {
+        return Ok(GenExit::Done(v));
+    }
+    let nfp = fp - REC - prog[caller as usize].nregs as usize;
+    stack[nfp + (dst & 0xffff) as usize] = v;
+    Ok(GenExit::Back(caller as usize, nfp, int_at(stack, fp, 4) as usize))
+}
+
+/// The cold end of `Outcome::Enter` when `g` is no script function. With the hole as `this`, `g` is a suspended generator: push its frame on top of
+/// the frame `fp` of code `ci` and give the new `ci`, `fp` and `pc`. Else the call is a `TypeError`. The code is here and not in the loop so that the
+/// loop keeps its shape (`generator.rs`).
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn gen_resume(realm: &mut Realm, stack: &mut Vec<Value>, prog: &Codes, ci: usize, fp: usize, dstw: i32, pc: usize, next: usize, g: Value, this: Value) -> Result<(usize, usize, usize), Value> {
+    if !this.is_hole() {
+        return Err(if realm.function_new(g).is_some() { realm.error(ErrKind::Type, "class constructor cannot be invoked without 'new'") } else { realm.error(ErrKind::Type, "not a function") });
+    }
+    let nf = fp + prog[ci].nregs as usize + REC;
+    let (nci, rpc) = realm.gen_enter(stack, prog, nf, ci as i32, dstw, pc, next, g)?;
+    Ok((nci, nf, rpc))
+}
+
 impl Vm {
     pub fn new(mut prog: Program, shared: Arc<SharedAtoms>) -> Vm {
         let dctor = [prog.codes.len(), prog.codes.len() + 1];
@@ -333,8 +389,13 @@ impl Vm {
         for i in 0..code.nparams as usize {
             stack[fp + i] = args.get(i).copied().unwrap_or(Value::UNDEFINED);
         }
-        let r = Vm::run(realm, stack, fbs, &prog, ci, fp);
-        // The stubs that a lazy compile replaced are freed when no run is active: no `&Code` can point to them then.
+        let r = Vm::run(realm, stack, fbs, &prog, ci, fp, 0);
+        Vm::finish(realm, prog, r)
+    }
+
+    /// The end of a run that the host or `Realm::call_function` started: the stubs that a lazy compile replaced are freed when no run is
+    /// active (no `&Code` can point to them then), and a stop in a nested call is the fuel.
+    fn finish(realm: &mut Realm, prog: Rc<Codes>, r: Result<Value, Exit>) -> Result<Value, Exit> {
         if realm.nest == 0 && prog.has_retired() {
             drop(prog);
             if let Some(c) = Rc::get_mut(&mut realm.prog) {
@@ -345,6 +406,32 @@ impl Vm {
             Err(Exit::Throw(e)) if e == STOP => Err(Exit::Fuel),
             r => r,
         }
+    }
+
+    /// Resume the generator `g` (the request is answered, [`Realm::gen_request`] said `Step::Enter`) as a new entry into the interpreter, on
+    /// the empty stack `stack`. Gives what the generator yields or returns, with no result object ([`Realm::gen_done`] tells which).
+    pub(crate) fn resume_start(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, g: Value) -> Result<Value, Exit> {
+        let prog = realm.prog.clone();
+        let (ci, pc) = match realm.gen_enter(stack, &prog, REC, ENTRY, 0, 0, 0, g) {
+            Ok(x) => x,
+            Err(e) => return Err(Exit::Throw(e)),
+        };
+        let r = Vm::run(realm, stack, fbs, &prog, ci, REC, pc);
+        Vm::finish(realm, prog, r)
+    }
+
+    /// Send `v` to the generator `g` from the host: `mode` is `MODE_NEXT`, `MODE_THROW` or `MODE_RETURN` (`generator.rs`). Gives the value that
+    /// came back and whether the generator is done. The JS stack must be empty, as for [`Vm::call`].
+    pub fn resume(&mut self, g: Value, mode: i32, v: Value) -> Result<(Value, bool), Exit> {
+        let Vm { realm, stack, fbs, fuel, .. } = self;
+        realm.fuel = *fuel;
+        let r = match realm.gen_request(g, mode, v) {
+            Err(e) => Err(Exit::Throw(e)),
+            Ok(crate::generator::Step::Result(v, done)) => Ok((v, done)),
+            Ok(crate::generator::Step::Enter) => Vm::resume_start(realm, stack, fbs, g).map(|v| (v, realm.gen_done(g))),
+        };
+        *fuel = realm.fuel;
+        r
     }
 
     /// Run code `ci` (a function with no parameters and no context) as the main function.
@@ -361,7 +448,7 @@ impl Vm {
     }
 
     #[allow(unused_assignments, clippy::ptr_arg)]
-    fn run(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, prog: &Codes, mut ci: usize, mut fp: usize) -> Result<Value, Exit> {
+    fn run(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, prog: &Codes, mut ci: usize, mut fp: usize, mut pc: usize) -> Result<Value, Exit> {
         let mut code: &Code = &prog[ci];
         let mut words: &[u32] = &code.words;
         let mut fb: &mut Feedback = if ci < fbs.len() {
@@ -373,7 +460,6 @@ impl Vm {
         if !fb.ready {
             fb.init(code);
         }
-        let mut pc: usize = 0;
         let undef = Value::UNDEFINED;
         // Register 0 of the current frame: `stack.as_mut_ptr().add(fp)`. Each time `fp` changes (`reload!`) or the stack is reallocated
         // (`ensure!`, and any native that could re-enter the VM) it must be set again; a stale `regs` is a use after free.
@@ -749,7 +835,17 @@ impl Vm {
                         pc = $next;
                     }
                     Outcome::Enter { f, this } => {
-                        let Some((ni, cctx)) = realm.function(f) else { call_err!(f) };
+                        let Some((ni, cctx)) = realm.function(f) else {
+                            // `next`, `return` or `throw` of a generator (the hole as `this`): its frame goes on top of this one. Else not a function.
+                            match gen_resume(realm, stack, prog, ci, fp, ($dst as i32) | ITER, pc, $next, f, this) {
+                                Ok((nci, nfp, rpc)) => {
+                                    (ci, fp, pc) = (nci, nfp, rpc);
+                                    reload!();
+                                    continue;
+                                }
+                                Err(e) => throw!(e),
+                            }
+                        };
                         let len = realm.tail_args.len();
                         let nf = fp + code.nregs as usize + REC;
                         ensure!(nf + len + 8);
@@ -1560,6 +1656,18 @@ impl Vm {
                         reload!();
                         pc = 0;
                         continue;
+                    }
+                    Op::GenInit | Op::Yield | Op::RetGen => {
+                        std::hint::cold_path();
+                        match gen_op(realm, stack, fbs, prog, ci, fp, pc, opv, a!(), bx!() as u32, next) {
+                            Ok(GenExit::Back(nci, nfp, npc)) => {
+                                (ci, fp, pc) = (nci, nfp, npc);
+                                reload!();
+                                continue;
+                            }
+                            Ok(GenExit::Done(v)) => return Ok(v),
+                            Err(e) => throw!(e),
+                        }
                     }
                     Op::LoadCallee => {
                         r!(a!()) = record(stack, fp, 0);

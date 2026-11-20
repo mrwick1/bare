@@ -263,6 +263,8 @@ pub struct Realm {
     pub natives: Vec<Native>,
     /// The shared atom of the `name` and the `length` of each code (`Code::fn_name`, `Code::fn_len`), for `Realm::fn_props`.
     pub fn_info: Vec<(Option<Str>, u16)>,
+    /// The generator prototype, the shape of an iterator result and the names of the hidden slots of a generator (`gen.rs`).
+    pub(crate) genr: crate::generator::GenRealm,
     /// The index of the native that runs a bound function.
     pub(crate) bound_id: i32,
     /// The helpers of `prelude.js` that natives call through the tail channel (`bi_object.rs`).
@@ -286,7 +288,7 @@ pub struct Realm {
     /// and slot (`DeclLex`). A global read that the global object does not answer looks here. The collector marks the names and contexts.
     pub(crate) lex: HashMap<u64, (Str, Value, u32, bool)>,
     /// Shapes that no object may have yet.
-    pins: Vec<ShapeId>,
+    pub(crate) pins: Vec<ShapeId>,
     /// The top frame when a collection runs: code index, frame pointer, `pc` of the safepoint.
     pub cur: (usize, usize, u32),
     /// The program that the realm runs, the code indexes of its default constructors, and the back edges that may still run (`Vm` sets
@@ -320,6 +322,8 @@ impl Realm {
         let (k_home, k_fields, k_link, k_constructor, k_raw) = (atom("\0home"), atom("\0fields"), atom("\0link"), atom("constructor"), atom("raw"));
         let (k_value_of, k_to_string, k_prim) = (atom("valueOf"), atom("toString"), atom("\0prim"));
         let hidden = ["\0native", "\0n1", "\0n2", "\0n3"].map(&mut atom);
+        let (k_value, k_done) = (atom("value"), atom("done"));
+        let gkeys = ["\0gstate", "\0gframe", "\0gsent", "\0gmode"].map(&mut atom);
         let root = shapes.root(Layout::Object, None, 4);
         let object_proto = Obj::new(&mut heap, &shapes, root).expect("memory");
         let proto = Some(object_proto.cell());
@@ -348,12 +352,19 @@ impl Realm {
             }
         }
         let s_native = hidden.iter().fold(shapes.root(Layout::Object, Some(function_proto.cell()), 4), |f, k| shapes.add(f, *k, 0).expect("shape"));
+        let gen_proto = Obj::new(&mut heap, &shapes, s_object).expect("memory");
+        let s_iter = {
+            let s = shapes.root(Layout::Object, proto, 2);
+            let s = shapes.add(s, k_value, A_W | A_E | A_C).expect("shape");
+            shapes.add(s, k_done, A_W | A_E | A_C).expect("shape")
+        };
         let mut consts: Vec<Value> = [object_proto, function_proto, array_proto, error_proto, global, string_proto, number_proto, boolean_proto].iter().map(|o| o.value()).collect();
         consts.extend(error_protos.iter().map(|o| o.value()));
-        consts.extend(hidden.iter().map(|s| s.value()));
+        consts.extend(hidden.iter().chain(&gkeys).chain([&k_value, &k_done]).map(|s| s.value()));
+        consts.push(gen_proto.value());
         consts.extend([k_prim, k_code, k_ctx, k_prototype, k_length, k_name, k_message, k_home, k_fields, k_link, k_constructor, k_raw, k_value_of, k_to_string].iter().map(|s| s.value()));
         consts.extend(tnames.iter().map(|s| s.value()));
-        let pins = vec![s_object, s_array, s_func, s_args, s_native];
+        let pins = vec![s_object, s_array, s_func, s_args, s_native, s_iter];
         let epoch = shapes.epoch();
         let probe = Obj::new(&mut heap, &shapes, s_func).expect("memory");
         let (func_shape, loc_code, loc_ctx) = (s_func.raw(), probe.loc(&shapes, 0), probe.loc(&shapes, 1));
@@ -389,6 +400,7 @@ impl Realm {
             boolean_proto,
             error_protos,
             s_native,
+            genr: crate::generator::GenRealm { proto: gen_proto, s_iter, keys: gkeys },
             natives: Vec::new(),
             fn_info: Vec::new(),
             bound_id: 0,

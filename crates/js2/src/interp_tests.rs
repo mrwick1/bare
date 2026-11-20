@@ -7,7 +7,7 @@ use crate::interp_rt::{FRESH, MEGA, MONO, POLY, SEEN};
 
 mod prelude {
     pub use crate::atoms::SharedAtoms;
-    pub use crate::bytecode::{Asm, Code, Handler, Ins, Label, Op, Recipes, decode};
+    pub use crate::bytecode::{Asm, Code, GK_GEN, Handler, Ins, Label, NO_REG, Op, Recipes, decode};
     pub use crate::roots::RootMaps;
     pub use crate::string::{Chars, Str};
     pub use crate::verify::verify;

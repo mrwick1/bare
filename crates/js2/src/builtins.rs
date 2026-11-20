@@ -47,6 +47,8 @@ pub struct Native {
 pub enum Outcome {
     Val(Value),
     /// Call the script function `f` with `this` and the arguments in `Realm::tail_args`; the result is the result of the call.
+    ///
+    /// With the hole as `this` (no script can pass it), `f` is a suspended generator: push its frame (`generator.rs`).
     Enter { f: Value, this: Value },
 }
 
@@ -216,6 +218,13 @@ impl Realm {
     }
 
     pub(crate) fn make_prototype(&mut self, f: Obj) -> R<Value> {
+        if self.function(f.value()).is_some_and(|(ci, _)| self.prog[ci].gen_kind != crate::bytecode::GK_NONE) {
+            // A generator function: its `prototype` inherits `%GeneratorPrototype%` and has no `constructor`.
+            let shape = self.shapes.root(Layout::Object, Some(self.genr.proto.cell()), 4);
+            let p = Obj::new(&mut self.heap, &self.shapes, shape).expect("memory");
+            self.define_attrs(f, Key::Name(self.k_prototype), A_W, p.value())?;
+            return Ok(p.value());
+        }
         let p = Obj::new(&mut self.heap, &self.shapes, self.s_object).expect("memory");
         self.define_attrs(p, Key::Name(self.k_constructor), HIDDEN, f.value())?;
         self.define_attrs(f, Key::Name(self.k_prototype), A_W, p.value())?;
@@ -284,6 +293,7 @@ impl Realm {
         self.install_array();
         self.install_string();
         self.install_number();
+        self.install_generator();
         self.install_json();
     }
 
