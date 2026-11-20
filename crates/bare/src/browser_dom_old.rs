@@ -90,24 +90,6 @@ impl Dom {
     }
 }
 
-pub(crate) fn make_element(d: &Dom, it: &mut Interp<'_>, name: &str) -> V {
-    let n = {
-        let mut doc = d.doc.borrow_mut();
-        d.room(&doc, 1, 0)?;
-        if doc.find_atom(name).is_none() && doc.name_count() + 1 > d.lim.max_names {
-            return Err(d.lim("dom-names"));
-        }
-        doc.create_element(name)
-    };
-    d.wrap(it, n)
-}
-
-/// An HTML `link` in the HTML namespace. An SVG or MathML `link` is not one (`is_named` skips foreign elements).
-pub(crate) fn link_el(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
-    let n = d.el(it, this)?;
-    if is_named(&d.doc.borrow(), n, &["link"]) { Ok(n) } else { Err(it.type_error("Illegal invocation")) }
-}
-
 /// The prototype of a new `<link>` wrapper. The first one adds the reflected members that the start-up table (`DEFS`) does not hold, so a
 /// page without a `<link>` does not pay for them.
 pub(crate) fn link_proto(d: &Dom, it: &mut Interp<'_>) -> R<ObjId> {
@@ -150,18 +132,6 @@ pub(crate) fn new_fragment(d: &Dom, it: &mut Interp<'_>, proto: Option<ObjId>) -
 
 pub(crate) fn clone_tree(d: &Dom, it: &mut Interp<'_>, n: NodeId, deep: bool, import: bool) -> R<NodeId> {
     run(it, |s| clone_tree_s(d, s, n, deep, import))
-}
-
-pub(crate) fn append_child(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    via(d, it, append_child_s, this, a)
-}
-
-pub(crate) fn create_element(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    via(d, it, create_element_s, this, a)
-}
-
-pub(crate) fn toggle_attribute(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    via(d, it, toggle_attribute_s, this, a)
 }
 
 pub(crate) fn text_content(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
