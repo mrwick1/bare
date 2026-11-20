@@ -385,7 +385,14 @@ impl Str<'_> {
     pub fn to_string_lossy(&self) -> String {
         match self {
             Str::Latin1(b) => b.iter().map(|&c| c as char).collect(),
-            Str::Utf16(u) => String::from_utf16_lossy(u),
+            Str::Utf16(u) => {
+                // An explicit loop with the room set at the start: `from_utf16_lossy` starts with half the room and grows.
+                let mut out = String::with_capacity(u.len().max(8));
+                for r in char::decode_utf16(u.iter().copied()) {
+                    out.push(r.unwrap_or('\u{FFFD}'));
+                }
+                out
+            }
         }
     }
 }

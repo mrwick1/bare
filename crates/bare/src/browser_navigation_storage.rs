@@ -29,9 +29,11 @@
 //! Without a document URL a read finds nothing and a write is `Unsupported`.
 
 use crate::browser::*;
+use crate::browser_scoped::*;
 use bare_js::eval::{Error, Interp};
 use bare_js::heap::{HeapError, NamedOp, NamedRequest};
 use bare_js::value::{ObjId, PropertyKey, Value};
+use bare_js_api::{Args, Engine as _, Local, Str, Type};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -272,33 +274,34 @@ impl WebStorage {
 // ------------------------------------------------------------------------------------------ JS bindings
 
 /// Which area `this` is (`true`: `sessionStorage`). A method of another receiver throws "Illegal invocation".
-fn area(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<bool> {
-    match this {
-        Value::Object(o) => d.storage_area(o),
-        _ => None,
+#[inline(always)]
+fn area<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, bool> {
+    match obj_id(s, this).and_then(|o| d.storage_area(o)) {
+        Some(a) => Ok(a),
+        None => Err(s.type_error("Illegal invocation")),
     }
-    .ok_or_else(|| it.type_error("Illegal invocation"))
 }
 
 /// The getter of `window.localStorage` and `window.sessionStorage`. It makes the object on the first read.
-pub(crate) fn area_get(d: &Dom, it: &mut Interp<'_>, session: bool) -> R<Value> {
+pub(crate) fn area_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, session: bool) -> Res<'s, Local<'s>> {
     let cell = &d.nav.areas[session as usize];
     let o = match cell.get() {
         Some(o) => o,
-        None => {
+        None => old(s, |it| {
             let proto = d.nav.p.get().map(|p| p.storage_proto);
             let o = d.new_source(it, crate::browser_sources::Source::Storage, proto)?;
             cell.set(Some(o));
             d.nav.area_held.borrow_mut().push(it.persist_value(Value::Object(o)));
-            o
-        }
+            Ok(o)
+        })?,
     };
-    Ok(Value::Object(o))
+    Ok(d.obj_local(s, o))
 }
 
 /// `area`, and the origin of the document. `Unsupported` while the document URL is not configured.
-fn target(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<(bool, String)> {
-    Ok((area(d, it, this)?, origin_of(d)?))
+fn target<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, (bool, String)> {
+    let a = area(d, s, this)?;
+    Ok((a, lift(s, origin_of(d))?))
 }
 
 /// The origin of the document. `Unsupported` while the document URL is not configured.
@@ -369,123 +372,137 @@ pub(crate) fn write(d: &Dom, it: &mut Interp<'_>, req: NamedRequest) -> R<bool> 
             return Ok(true);
         }
     };
-    let Some(v) = units(d, it, value, &named)? else { return Err(over(d, it, &key, &named, "storage-item")) };
-    let origin = origin_of(d)?;
-    store_set(d, it, session, &origin, &key, &v, &named).map(|()| true)
+    run(it, |s| {
+        let v = s.engine().raw_local(&value);
+        let Some(v) = units(d, s, v, &named)? else { return Err(over(d, s, &key, &named, "storage-item")) };
+        let origin = lift(s, origin_of(d))?;
+        store_set(d, s, session, &origin, &key, &v, &named)
+    })
+    .map(|()| true)
 }
 
 /// The `QuotaExceededError` of a write that does not fit. A sandbox bound of bare (`bound`) fails the one call in the same way: a browser
 /// throws this error from a full store and never stops the page. The message names the bound, so an agent sees which one it was.
-fn over(d: &Dom, it: &mut Interp<'_>, k: &[u16], who: &str, bound: &str) -> Error {
+fn over<'s>(d: &Dom, s: &mut Sc<'s, '_>, k: &[u16], who: &str, bound: &str) -> bare_js_api::Error<'s> {
     let k = lossy(k);
     let why = if bound.is_empty() { String::new() } else { format!(" (bare bound {bound})") };
-    d.dom_err(it, "QuotaExceededError", &format!("{who}: Setting the value of '{k}' exceeded the quota{why}."))
+    d.dom_err_s(s, "QuotaExceededError", &format!("{who}: Setting the value of '{k}' exceeded the quota{why}."))
 }
 
 /// The write of `setItem` and of the named setter. `who` starts the quota message.
-fn store_set(d: &Dom, it: &mut Interp<'_>, session: bool, origin: &str, k: &[u16], v: &[u16], who: &str) -> R<()> {
+fn store_set<'s>(d: &Dom, s: &mut Sc<'s, '_>, session: bool, origin: &str, k: &[u16], v: &[u16], who: &str) -> Res<'s, ()> {
     let store = d.nav.s.borrow().store.clone();
-    it.charge(1 + store.len(session, origin) as u64 / 16)?;
+    s.charge(1 + store.len(session, origin) as u64 / 16)?;
     match store.set(session, origin, k, v) {
         Ok(()) => Ok(()),
-        Err(StoreError::Quota) => Err(over(d, it, k, who, "")),
-        Err(StoreError::Limit(w)) => Err(over(d, it, k, who, w)),
+        Err(StoreError::Quota) => Err(over(d, s, k, who, "")),
+        Err(StoreError::Limit(w)) => Err(over(d, s, k, who, w)),
     }
 }
 
-fn need(it: &mut Interp<'_>, a: &[Value], n: usize, name: &str) -> R<()> {
+/// The argument `i` that `need` has checked.
+fn at<'s>(a: Args<'s>, i: usize) -> Local<'s> {
+    a.get(i).expect("checked by need")
+}
+
+fn need<'s>(s: &mut Sc<'s, '_>, a: Args<'s>, n: usize, name: &str) -> Res<'s, ()> {
     if a.len() < n {
-        return Err(it.type_error(&format!("Failed to execute '{name}' on 'Storage': {n} argument{} required, but only {} present.", if n == 1 { "" } else { "s" }, a.len())));
+        return Err(s.type_error(&format!("Failed to execute '{name}' on 'Storage': {n} argument{} required, but only {} present.", if n == 1 { "" } else { "s" }, a.len())));
     }
     Ok(())
 }
 
 /// `ToString(v)` as UTF-16 units (lone surrogates are kept). `None` when the text is longer than one item may be: no store holds it.
 /// (`Option` is a value or nothing, as `T | undefined` in TypeScript.)
-fn units(d: &Dom, it: &mut Interp<'_>, v: Value, who: &str) -> R<Option<Vec<u16>>> {
-    if matches!(v, Value::Symbol(_)) {
-        return Err(it.type_error(&format!("{who}: Cannot convert a Symbol value to a string")));
+fn units<'s>(d: &Dom, s: &mut Sc<'s, '_>, v: Local<'s>, who: &str) -> Res<'s, Option<Vec<u16>>> {
+    if s.type_of(v) == Type::Symbol {
+        return Err(s.type_error(&format!("{who}: Cannot convert a Symbol value to a string")));
     }
-    let s = it.to_js_string(v)?;
-    let len = it.heap.str_len(s).map_err(Error::Heap)?;
-    if len > d.nav.lim.get().max_item_units {
-        return Ok(None);
-    }
-    it.charge((len / 32) as u64 + 1)?;
-    match it.heap.str_units(s) {
-        Ok(u) => Ok(Some(u.to_vec())),
-        Err(e) => Err(it.heap_error(e)),
-    }
+    // A string is read in place: `to_string` pushes a local for another value only.
+    let max = d.nav.lim.get().max_item_units;
+    let read = |s: &Sc<'_, '_>, t| {
+        s.as_str(t).map(|t| {
+            let len = t.len();
+            let u = (len <= max).then(|| match t {
+                Str::Latin1(b) => b.iter().map(|&c| c as u16).collect(),
+                Str::Utf16(u) => u.to_vec(),
+            });
+            (len, u)
+        })
+    };
+    let (len, u) = match read(s, v) {
+        Some(r) => r,
+        None => {
+            let t = s.to_string(v)?;
+            read(s, t).ok_or_else(|| s.type_error("not a string"))?
+        }
+    };
+    let Some(u) = u else { return Ok(None) };
+    s.charge((len / 32) as u64 + 1)?;
+    Ok(Some(u))
 }
 
-fn str_value(it: &mut Interp<'_>, u: &[u16]) -> R<Value> {
-    match it.heap.intern_units(u) {
-        Ok(s) => Ok(Value::String(s)),
-        Err(e) => Err(it.heap_error(e)),
-    }
-}
-
-pub(crate) fn get_item(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    let session = area(d, it, this)?;
-    need(it, a, 1, "getItem")?;
-    let Some(k) = units(d, it, a[0], "Failed to execute 'getItem' on 'Storage'")? else { return Ok(Value::Null) };
-    let (_, origin) = target(d, it, this)?;
+pub(crate) fn get_item<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let session = area(d, s, this)?;
+    need(s, a, 1, "getItem")?;
+    let Some(k) = units(d, s, at(a, 0), "Failed to execute 'getItem' on 'Storage'")? else { return Ok(s.null()) };
+    let origin = lift(s, origin_of(d))?;
     let store = d.nav.s.borrow().store.clone();
-    it.charge(1 + store.len(session, &origin) as u64 / 16)?;
+    s.charge(1 + store.len(session, &origin) as u64 / 16)?;
     match store.get(session, &origin, &k) {
-        Some(v) => str_value(it, &v),
-        None => Ok(Value::Null),
+        Some(v) => s.string_utf16(&v),
+        None => Ok(s.null()),
     }
 }
 
-pub(crate) fn set_item(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    let session = area(d, it, this)?;
-    need(it, a, 2, "setItem")?;
+pub(crate) fn set_item<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let session = area(d, s, this)?;
+    need(s, a, 2, "setItem")?;
     let who = "Failed to execute 'setItem' on 'Storage'";
-    let Some(k) = units(d, it, a[0], who)? else { return Err(over(d, it, &[0x2026], who, "storage-item")) };
-    let Some(v) = units(d, it, a[1], who)? else { return Err(over(d, it, &k, who, "storage-item")) };
+    let Some(k) = units(d, s, at(a, 0), who)? else { return Err(over(d, s, &[0x2026], who, "storage-item")) };
+    let Some(v) = units(d, s, at(a, 1), who)? else { return Err(over(d, s, &k, who, "storage-item")) };
     // A script may have changed the document URL while it coerced the arguments: read the origin now.
-    let (_, origin) = target(d, it, this)?;
-    store_set(d, it, session, &origin, &k, &v, "Failed to execute 'setItem' on 'Storage'")?;
-    Ok(Value::Undefined)
+    let origin = lift(s, origin_of(d))?;
+    store_set(d, s, session, &origin, &k, &v, "Failed to execute 'setItem' on 'Storage'")?;
+    Ok(s.undefined())
 }
 
-pub(crate) fn remove_item(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    let session = area(d, it, this)?;
-    need(it, a, 1, "removeItem")?;
-    let Some(k) = units(d, it, a[0], "Failed to execute 'removeItem' on 'Storage'")? else { return Ok(Value::Undefined) };
-    let (_, origin) = target(d, it, this)?;
+pub(crate) fn remove_item<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let session = area(d, s, this)?;
+    need(s, a, 1, "removeItem")?;
+    let Some(k) = units(d, s, at(a, 0), "Failed to execute 'removeItem' on 'Storage'")? else { return Ok(s.undefined()) };
+    let origin = lift(s, origin_of(d))?;
     let store = d.nav.s.borrow().store.clone();
-    it.charge(1 + store.len(session, &origin) as u64 / 16)?;
+    s.charge(1 + store.len(session, &origin) as u64 / 16)?;
     store.remove(session, &origin, &k);
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-pub(crate) fn clear(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    let (session, origin) = target(d, it, this)?;
+pub(crate) fn clear<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let (session, origin) = target(d, s, this)?;
     let store = d.nav.s.borrow().store.clone();
     store.clear(session, &origin);
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-pub(crate) fn key(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    let session = area(d, it, this)?;
-    need(it, a, 1, "key")?;
-    let n = it.to_js_number(a[0])?;
-    let (_, origin) = target(d, it, this)?;
+pub(crate) fn key<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let session = area(d, s, this)?;
+    need(s, a, 1, "key")?;
+    let n = s.to_number(at(a, 0))?;
+    let origin = lift(s, origin_of(d))?;
     // WebIDL `unsigned long`: NaN is 0, the rest wraps modulo 2^32.
     let i = if n.is_finite() { n.trunc().rem_euclid(4294967296.0) as usize } else { 0 };
     let store = d.nav.s.borrow().store.clone();
     match store.key_at(session, &origin, i) {
-        Some(k) => str_value(it, &k),
-        None => Ok(Value::Null),
+        Some(k) => s.string_utf16(&k),
+        None => Ok(s.null()),
     }
 }
 
-pub(crate) fn length(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    let (session, origin) = target(d, it, this)?;
+pub(crate) fn length<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let (session, origin) = target(d, s, this)?;
     let n = d.nav.s.borrow().store.len(session, &origin);
-    Ok(Value::Number(n as f64))
+    Ok(s.number(n as f64))
 }
 
 #[cfg(test)]

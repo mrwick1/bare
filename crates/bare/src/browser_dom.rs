@@ -1595,7 +1595,7 @@ pub(crate) fn create_element_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>,
     } else {
         make_element_s(d, s, &name)?
     };
-    note_owner_s(d, s, this, v);
+    crate::browser_frames::note_owner(d, s, this, v);
     Ok(v)
 }
 
@@ -1608,7 +1608,7 @@ pub(crate) fn create_text_node<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>,
         doc.create_text(&text)
     };
     let v = d.wrap_s(s, n)?;
-    note_owner_s(d, s, this, v);
+    crate::browser_frames::note_owner(d, s, this, v);
     Ok(v)
 }
 
@@ -1621,7 +1621,7 @@ pub(crate) fn create_comment<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a
         doc.create_comment(&text)
     };
     let v = d.wrap_s(s, n)?;
-    note_owner_s(d, s, this, v);
+    crate::browser_frames::note_owner(d, s, this, v);
     Ok(v)
 }
 
