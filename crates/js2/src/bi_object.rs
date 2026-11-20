@@ -116,6 +116,11 @@ impl Realm {
 
     /// The own property `key` of `o`.
     pub(crate) fn get_own(&mut self, o: Obj, key: Key) -> Option<Own> {
+        if let Some(s) = self.string_wrapper(o)
+            && let Some(v) = self.string_own(s, key)
+        {
+            return Some(Own::Data(v, if matches!(key, Key::Idx(_)) { A_E } else { 0 }));
+        }
         let k = match key {
             Key::Idx(i) => {
                 if o.is_indexed()
@@ -207,7 +212,13 @@ impl Realm {
                 out.push(if v.is_undefined() { self.string(&i.to_string()) } else { v });
             }
         }
-        if !enumerable && o.is_indexed() {
+        // A `String` wrapper has the units of its string (and `length`) before its other properties; they are not in its shape.
+        let wrapped = self.string_wrapper(o);
+        if let Some(s) = wrapped {
+            let units: Vec<Value> = (0..s.len()).map(|i| self.string(&i.to_string())).collect();
+            out.splice(0..0, units);
+        }
+        if !enumerable && (o.is_indexed() || wrapped.is_some()) {
             out.push(self.k_length.value());
         }
         out.extend(names);
@@ -655,11 +666,11 @@ fn to_obj(rt: &mut Realm, v: Value) -> R<Value> {
 }
 
 fn object_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    // `new Object()` from `super()` of a class that extends it: the prototype comes from `new.target`.
-    // A primitive is not boxed (there are no wrapper objects): `Object(1)` is `1`.
+    // `new Object()` from `super()` of a class that extends it: the prototype comes from `new.target`, and the argument is not read.
+    // `Object(v)` and `new Object(v)` give `ToObject(v)`: an object is itself, a primitive gets a wrapper.
     let a = arg(args, 0);
-    if Realm::obj(rt.nt).is_none() && !a.is_undefined() && !a.is_null() {
-        return Ok(a);
+    if !a.is_undefined() && !a.is_null() && (Realm::obj(rt.nt).is_none() || rt.nt == rt.callee) {
+        return Ok(rt.to_object(a)?.value());
     }
     if Realm::obj(rt.nt).is_none() && Realm::obj(a).is_some() {
         return Ok(a);
@@ -1022,7 +1033,15 @@ pub(crate) fn object_to_string(rt: &mut Realm, this: Value, _args: &[Value]) -> 
     } else if this.as_bool().is_some() {
         "Boolean"
     } else if let Some(o) = Realm::obj(this) {
-        if o.is_callable() {
+        if let Some(p) = rt.prim_of(this) {
+            if Realm::str_of(p).is_some() {
+                "String"
+            } else if p.is_number() {
+                "Number"
+            } else {
+                "Boolean"
+            }
+        } else if o.is_callable() {
             "Function"
         } else if rt.is_array(o) {
             "Array"
