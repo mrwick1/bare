@@ -15934,3 +15934,65 @@ Engine bugs that the run found (not fixed here):
 `cargo test --locked -p bare-js2 --lib`: 377 pass (376 before, 1 new for `load_with`). `cargo test --locked -p bare-js-diff`: 4 pass (2 unit tests of the reader of the script tests and of the verdict, 2 integration tests). Clippy (`cargo clippy -p bare-js-diff -p bare-js2 --all-targets`): no finding in the new code; the findings that remain are in `crates/js2/examples/object_census.rs` and `bare-js` (not changed here).
 
 Not tested: Windows and macOS (the shell tool needs GNU `find` and `timeout`; the cargo test is portable but not run there); the old engine in `auto` and `byte` modes (only `tree`); Miri on `load_with` (safe code); the `script_tests` programs that span several lines; a second test262 checkout revision; the old engine's modules and async tests (skipped on both); how the counts move when js2 gets a step budget of another size (20,000,000 back edges, the old engine 20,000,000 steps: not the same unit).
+
+## 2026-11-20: property attributes, descriptors, non-extensible objects and generic Array methods in js2 (S2.7 follow-up)
+
+Branch `t3/js2-builtin-attrs`, from the test262 gate (#764). It fixes the groups that the gate reported as 325 (property attributes), 241 (Array methods on array-likes), 373 (missing methods) and 205 (accessors), the real non-extensible objects, and the hang of `Object.setPrototypeOf/set-failure-cycle.js`.
+
+### What changed
+
+- Built-in functions take their `length` and `name` from a static recipe (`Native { f, ctor, len, name }`). The two properties become own properties at the first use (`fn_prep`, flag `F_FNPROPS`), so installing a built-in costs no property. A bound function takes them from its target. `length` and `name` are not writable and are configurable. Methods have no own `prototype`.
+- Objects can be non-extensible: flag `F_NOEXT`, and the object gets its own dictionary shape. `Object.preventExtensions`, `seal`, `freeze`, `isExtensible`, `isSealed` and `isFrozen` work on plain objects and arrays. An array has uniform flags for all its elements (`F_ELEMS_RO`, `F_ELEMS_FIXED`, `F_LEN_RO`), and an array with one element of other attributes goes to the slow-index mode (`F_SLOWIDX`).
+- `crates/js2/src/bi_object.rs` (new) holds the property descriptors: `ValidateAndApplyPropertyDescriptor` in `define_own`, `Object.defineProperty`, `defineProperties`, `getOwnPropertyDescriptor(s)`, `getOwnPropertyNames`, the key order (indexes ascending, then names in insertion order), `assign`, `entries`, `values`, `setPrototypeOf` with the cycle check, and the other `Object` methods that were missing.
+- A native cannot call a script function. When a native meets an accessor, it uses the tail channel to call a helper of `prelude.js` (`Realm::helper`): `defineProperty`, `defineProperties`, `assign`, the search methods (`indexOf`, `lastIndexOf`, `includes`) on an object that is not a plain array, `values` and `entries`. The two ops `CopyProps` (`{...x}`) and `ObjRest` (`{a, ...rest} = x`) do the same when the source has an accessor (`Op` calls `H_SPREAD` or `H_REST`, result goes to the register of the op).
+- `bi_array.rs` is rewritten to follow the specification: `ToObject(this)`, `ToLength`, and `get`, `has`, `set` and `delete` for each element. A plain array takes the direct path after one flag test. New: `at`, `fill`, `copyWithin`, `toReversed`, `toSpliced`, `with`. `RangeError` for an invalid length. The callback methods in `prelude.js` follow the same rules and have the right `length`. New there: `findLast`, `findLastIndex`, `flat`, `flatMap`, `toSorted`, `toLocaleString`, `Array.of`, `Array.from` on array-likes. The prelude is strict code now, so a write to a frozen array throws.
+- `Error` and the six native errors are real constructors that inherit from `Error`. `new Error(msg, { cause })` works. The prototype objects of the errors are not errors.
+- `Object.prototype.__proto__` is an accessor. `DeclGlobal` looks at the own properties of the global object only (a `var __proto__` was a read of the inherited accessor).
+
+### test262 (`tools/js/test262_js2.sh -j 8`, 16,755 tests that the old engine passes)
+
+| | #764 head | this change |
+| --- | ---: | ---: |
+| pass on the old engine, fail on js2 | 4,852 | 2,877 |
+| js2 passes (of the tests that run) | 11,944 | 13,923 |
+| js2 fails | 5,840 | 3,861 |
+| pass on js2, fail on the old engine | 41 | 45 |
+| group: property attributes (325) | 325 | 76 |
+| group: method is missing (373) | 373 | 8 |
+| group: accessors (205) | 205 | 18 |
+| group: Array method on an array-like (241) | 241 | 0 |
+| runner time (8 jobs, 30 s per directory) | 49 s, and the hang | 22 s |
+
+No test that passes on js2 on #764 fails now (0 of 11,944; compared test by test). The hang is gone: `set-failure-cycle.js` throws `TypeError`. `tools/fixtures/js/test262-js2-baseline.txt` is the new table.
+Most of what is left in these groups needs work that other tasks do: wrapper objects (`Object(1)`, `new String`), `ToPrimitive` that calls a script `valueOf` or `toString`, the `length` and `name` of script functions, `Symbol` and iterators (`Array.prototype.keys` and the others), and the number-to-string form of `1e21`.
+
+### Differential runner
+
+292 programs: 272 same, 20 differ, 0 new. Two known differences are gone and their lines are removed from `tools/fixtures/js/diff-known.txt`: `corpus:array_gaps` and `corpus:key_order`. The known list is smaller.
+
+### Cost
+
+Machine archMachine (AMD Ryzen 9 5900HX), release build, `perf stat -e instructions:u` with `GLIBC_TUNABLES=glibc.malloc.tcache_count=65535`, minimum of 3 runs, 2 rounds. Base is origin/main at the merge of #764 (ee8ba415). Net = count(N) - count(0), in millions. The two rounds differ by 0.003 M at most.
+
+| Row | N | Base | New | Change |
+| --- | ---: | ---: | ---: | ---: |
+| `loopfn` | 1,000,000 | 333.50 | 312.50 | -6.3% |
+| `calls` | 1,000,000 | 715.50 | 687.50 | -3.9% |
+| `fib` | 30 | 1442.86 | 1411.89 | -2.1% |
+| `closures` | 200,000 | 419.42 | 411.23 | -2.0% |
+| `objects` | 200,000 | 154.06 | 152.59 | -1.0% |
+
+No row is over +0.5%. The change touches no op of the hot loops, so hypothesis: the drop comes from code layout and inlining, not from the change. Not verified (no run at `codegen-units=1`).
+
+VM setup, two numbers:
+
+- `interp_load` with N = 0 (VM, realm and built-in install, no prelude): 0.761 M to 0.795 M (+0.035 M, +4.6%). Built-ins install no `length` or `name` property, so this is the cost of the new static tables and flags.
+- `script_run` of `var r = 1;` (compile and run of the prelude too): 4.472 M to 9.732 M (+5.26 M). **This is a rise.** The prelude grew from 6,123 to 14,210 bytes. A part is the generic callback methods, and a part is the helpers for accessors (2,496 bytes, 1.5 M of the rise; measured by removing them). The cost is about 650 instructions for each byte of prelude. Callgrind (`script_run`, 9.84 M): parse of the top level 2.35 M, parse of each function again 2.26 M, compile 3.9 M, the run of the prelude is small. The cause is that `Loader::add` compiles every function of the prelude at load, also those that no script calls.
+
+The way to remove this cost is to compile a prelude function at its first call (a stub with the source range, replaced at the first call). That needs the compiler to run inside a running VM, which the `Function` constructor needs too. It is not done here. The other way is to cache the compiled prelude for each process, which helps the second page but not the first.
+
+### Tests
+
+`cargo test --locked -p bare-js2 --lib`: 381 pass (4 new in `script_tests.rs`: attributes, accessors, frozen and sealed objects, array-likes; each under constant collection too). `cargo test --locked -p bare-js-diff`: all pass.
+
+Not tested: Windows and macOS; Miri; the old-engine modes `auto` and `byte`; a collection during a helper call that is made from `CopyProps` or `ObjRest` (only the unit tests under constant collection of the other paths run); array-likes with an accessor in `slice`, `splice`, `concat`, `reverse`, `toReversed`, `toSpliced` and `with` (they throw `TypeError`: the helper exists for the search methods only); an index setter on `Array.prototype` during `push` (the native path does not call it); arrays of length 4,294,967,295; `Object.create(Error.prototype)` is still reported as `[object Error]`; strict-mode assignment to a read-only property in the interpreter (it is silent; natives and the prelude throw); VM setup at `codegen-units=1`.
