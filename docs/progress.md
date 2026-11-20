@@ -16000,3 +16000,72 @@ No test that passed on js2 before fails now (`language/`: 0 of 10,445 tests diff
 `cargo test --locked -p bare-js2 --lib`: 377 pass. `cargo test --locked --release -p bare-js-diff`: all pass (256 programs, 0 new differences, 20 known; `function_gaps` removed from the list).
 
 Not tested: Windows and macOS; the `language/` tests under the other agents' branches (their merge may change counts); wall time of the full run on an idle machine (the load average was above 8); the micro rows on another machine.
+
+## 2026-11-20: js2 language gaps (test262 `language/`, second round)
+
+Task: fix the gaps that the previous round left in the compiler and the interpreter (the "Not done" list above), then the next largest groups of `language/` tests that pass on the old engine and fail on js2. Built-ins (wrapper objects, `ToPrimitive` re-entry, property attributes, array-likes) belong to other agents. Generators, async, `Symbol`, `RegExp`, `with` and `eval` belong to S3. Base: `13568fdc` (the head of #767).
+
+### Result
+
+Same runner and checkout as the baseline (`tools/js/test262_js2.sh -j 6`). Base and branch were run on the same machine, one after the other.
+
+| Measure | Base | Branch |
+| --- | ---: | ---: |
+| `language/` tests that pass on the old engine and fail on js2 | 1,148 | 1,055 |
+| js2 passes, all directories | 12,622 | 12,768 |
+| js2 failures, all directories | 5,162 | 5,016 |
+
+Test by test against the run of the base: 146 tests go from fail to pass, 0 go from pass to fail. `tools/fixtures/js/test262-js2-baseline.txt` is the new table.
+
+| Group | Tests before | Tests after |
+| --- | ---: | ---: |
+| A parameter default that reads a later parameter (`dflt-params-ref-later`) | 8 | 0 |
+| Compound assignment where the getter of a global changes the global (`lref--v--N`) | 21 | 10 (all 10 need `with`) |
+| Class computed names, fields and `static ['prototype']` | about 28 | 0 |
+
+### What changed
+
+- **Parameter default and later parameter.** A parameter that is not initialized yet reads a dead-zone register (`param_dz`) and throws a `ReferenceError`.
+- **Global lexical environment.** A top-level `let`, `const` and `class` of one script is visible to the next script of the realm. `Realm.lex` maps a name to a context and a slot (`DeclLex`, `DeclLexC`, and `CheckLex` for the early check). A global read, write, `typeof` and `delete` look at it first; the global object never holds it. The collector marks the contexts. A name in a context slot (a function uses it) is declared at the start of the script. A name in a register stays in the register, so a loop at the top level keeps its speed. The script checks the name at the start (`CheckLex`: `SyntaxError` on a name that exists already) and hands the value over at the end (`PushCtx`, `InitCtx`, `DeclLex`, `PopCtx`). Test: `a_top_level_let_const_and_class_are_visible_to_the_next_script`.
+- **Global accessors.** A global that is an accessor property calls its getter on a read (`Got::Get`).
+- **Call of a parenthesized optional chain.** `(a?.b)()` and `(a?.b)?.()` keep `a` as `this`. Test: `a_parenthesized_optional_member_call_keeps_this`.
+- **Class.** An own property of the class that the class keeps by index (a computed numeric key) reads back through `getOwnPropertyDescriptor`. `static ['prototype']` throws a `TypeError`. The inner class name is in its dead zone during `extends`. `super.x` and `super.x = v` throw a `TypeError` when the home prototype is `null`. A derived constructor that returns a non-object throws at the caller, after the frame is gone. Arrow functions, methods and class members have no `[[Construct]]` (`Code.noctor`).
+- **Other.** A named function expression: `name = v` in sloppy code does nothing. An arrow function at the script top level reads the `this` of the script. `for-of` and array destructuring over a string iterate code points. `Number` to string uses the exponent form (`1e21`, `1e-7`, `5e-324`). `Object.defineProperty` on a non-configurable property that changes it throws a `TypeError`. `NaN`, `Infinity` and `undefined` are global properties.
+
+### Deliberate golden changes
+
+`compile_tests.rs`: the script goldens of 4 class tests (`a_derived_class_calls_super_in_an_arrow`, `class_methods_fields_and_static_elements`, `private_names_methods_and_accessors`, `super_property_reads_and_writes`) have `CheckLex` first and the hand-over of the class name at the end. `the_script_top_level_var_and_function_are_global_and_let_is_not` checks that a `let` stays in a register while the script runs (no `GetCtx`, no `SetCtx`) and that the script has `CheckLex` and `DeclLex`. `diff-known.txt` lost `corpus:number_format` (it no longer differs).
+
+### Cost
+
+`interp_load`, release, `tools/js/instr.sh` (minimum of 3 runs), count at N minus count at N = 0, base `13568fdc` against this branch, default profile, archMachine (load average 5 to 6, so only instruction counts are used). The rows are hand-written bytecode: the compiler changes do not touch them.
+
+| Row | Base | Branch | Change |
+| --- | ---: | ---: | ---: |
+| `loopfn 3000000` | 961.50 M | 931.50 M | -3.1% |
+| `calls 1000000` | 713.50 M | 691.50 M | -3.1% |
+| `fib 27` | 341.57 M | 338.71 M | -0.8% |
+| `closures 1000000` | 2,218.73 M | 2,187.10 M | -1.4% |
+| `objects 1000000` | 777.33 M | 757.39 M | -2.6% |
+
+No row is over +0.5%, so the `codegen-units=1` rule is not needed. Hypothesis: the gain comes from the layout of the interpreter loop, not from less work.
+
+A loop at the top level of a script with a `let` (`let s = 0; for (let i = 0; i < 1e6; i++) s += i & 7;`, run by `script_run`): 211 instructions per turn on the base, 201 on the branch. A first version of the global lexical environment put each top-level `let` in a context slot. That version measured 322 instructions per turn (+52%), so it was dropped for the register hand-over above.
+
+### Still failing in `language/` (1,055)
+
+- Wrapper objects (`new String`, `new Number`, `new Boolean`): 443. Other agent.
+- `ToPrimitive` with a script `valueOf` or `toString`, and the compound-assignment cases that need it (`S11.13.2_A7.x_T3`, 11): other agent.
+- Copying an accessor property (`{ ...o }`, `Object.assign` style, 48) and `typeof` of an accessor global: need the host to call a getter from a built-in.
+- `Object.preventExtensions` and `freeze` tests (for example `11.13.2-45-s`): other agent.
+- Mapped `arguments` with `defineProperty` (23 tests). js2 has no mapping between `arguments[i]` and the parameter, and no element attribute model. A mapping needs one of: a context slot for each mapped parameter, or a new `arguments` exotic object. Both touch the call path and the element model of the other agents, so this round does not build it.
+- `fields-run-once-on-double-super` (needs the second `super()` to stop before the fields run: call path).
+- Integer keys first in `for-in` and `Object.keys` order (S3).
+- 10 `lref--v--N` tests (`with`), generators, async, `Symbol`, `RegExp`, `Function`, `eval`: S3 or other agents.
+- A top-level `let` that sits in a register is handed over only when the script ends. A script that throws before its end does not hand over its `let` names. test262 has no test for this.
+
+### Tests
+
+`cargo test --locked -p bare-js2 --lib`: 379 tests. 378 pass in a full run on the loaded machine; `a_scope_with_many_locals_compiles_in_linear_time` fails when it runs with the others under load and passes when it runs alone (5.7 s and 8.4 s, 3 runs). `cargo test --locked -p bare-js-diff`: all pass (256 programs, 0 new differences, 20 known). Clippy: no finding in the changed code (the findings that remain are in `heap.rs`, `crates/js2/examples`, `bare-os` and `bare-observe`).
+
+Not tested: Windows and macOS; Miri on the new tests; the old engine behind the differential runner in modes other than `tree`; a throw at the top level between a `let` and the end of the script (the hand-over is skipped); a second test262 revision.

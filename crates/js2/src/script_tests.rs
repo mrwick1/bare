@@ -511,6 +511,45 @@ fn a_host_script_runs_before_the_script_and_the_directive_prologue_stays() {
 }
 
 #[test]
+fn a_top_level_let_const_and_class_are_visible_to_the_next_script() {
+    let host = "let a = 1; const b = 2; class C { m() { return 3; } } let later; let o = { k: 5 };";
+    let src = "var r = a + b + new C().m(); a = 10; var s = a; var t; try { b = 1; } catch (e) { t = e.name; }
+               var u = typeof later + typeof C + typeof nothing; later = 4; var w = (function () { return a + later; })();
+               var junk; for (var i = 0; i < 3000; i++) { junk = [i, { i: i }]; } var x = o.k + (this.a === undefined ? 'g' : 'p');
+               var y; try { zzz; } catch (e) { y = e.name; }";
+    let mut vm = load_with(host, src).unwrap();
+    vm.run_main(0).unwrap();
+    let got: Vec<String> = ["r", "s", "t", "u", "w", "x", "y"].iter().map(|n| vm.global_text(n)).collect();
+    assert_eq!(got, ["6", "10", "TypeError", "undefinedfunctionundefined", "14", "5g", "ReferenceError"]);
+    // The names are not properties of the global object, and a name that is declared twice is a SyntaxError.
+    let mut vm = load_with("let a = 1;", "let a = 2;").unwrap();
+    assert!(vm.run_main(0).is_err());
+    let mut vm = load_with("var a = 1;", "let a = 2;").unwrap();
+    assert!(vm.run_main(0).is_err());
+    // The check comes before the first statement of the script.
+    let mut vm = load_with("let a = 1;", "var side = 1; let a = 2;").unwrap();
+    assert!(vm.run_main(0).is_err());
+    assert_eq!(vm.global_text("side"), "undefined");
+    let mut vm = load_with("let a = 1;", "var a = 2;").unwrap();
+    assert!(vm.run_main(0).is_err());
+    let mut vm = load_with("let a = 1;", "var r = typeof globalThis.a + delete a;").unwrap();
+    vm.run_main(0).unwrap();
+    assert_eq!(vm.global_text("r"), "undefinedfalse");
+}
+
+#[test]
+fn a_parenthesized_optional_member_call_keeps_this() {
+    let o = "var o = { m() { return this.v; }, v: 7 }; var n = null; ";
+    check(&[
+        (&format!("{o} var r = (o?.m)();"), "r", "7"),
+        (&format!("{o} var r = (o?.m)?.();"), "r", "7"),
+        (&format!("{o} var r = (o.m)?.();"), "r", "7"),
+        (&format!("{o} var r = 0; try {{ (n?.m)(); }} catch (e) {{ r = e.name; }}"), "r", "TypeError"),
+        (&format!("{o} var r = (n?.m)?.();"), "r", "undefined"),
+    ]);
+}
+
+#[test]
 fn built_ins_survive_constant_collection_with_many_live_values() {
     // Run in Miri too (one program): sort, map, filter, split, join, slice, splice, concat, bind and Object.entries, all holding many
     // fresh cells while the collector runs at nearly every allocation.

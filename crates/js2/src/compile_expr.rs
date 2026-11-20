@@ -183,7 +183,12 @@ impl<'a> Fc<'a> {
 
     /// Store register `src` into variable `name`. `init`: the first write of a declaration (no dead-zone or constant check).
     pub(crate) fn store_var(&mut self, name: &str, at: u32, src: u32, init: bool) -> CR {
-        match self.resolve(name, at) {
+        let res = self.resolve(name, at);
+        // Sloppy code assigns the name of its own function expression with no effect.
+        if !init && !self.strict && matches!(res, Res::Reg { konst: true, .. } | Res::Ctx { konst: true, .. }) && self.is_callee(name) {
+            return Ok(());
+        }
+        match res {
             Res::Reg { reg, tdz, konst } => {
                 if konst && !init {
                     return self.throw_const(name, tdz, reg);
@@ -991,7 +996,15 @@ impl<'a> Fc<'a> {
     /// arguments as an array (`CallSpread`).
     fn call_parts(&mut self, e: ExprId, callee: ExprId, tpl: Option<Id<Template>>, args: Vec<ExprId>, optional: bool, dst: u32) -> CR {
         let prog = self.prog;
-        let c = *prog.expr(callee);
+        let mut c = *prog.expr(callee);
+        // `(a?.b)()` keeps `a` as `this`: the member is the callee, and the chain ends at the parenthesis.
+        let mut paren_chain = None;
+        if let ExprKind::Chain(inner) = c.kind
+            && matches!(self.expr_kind(inner), ExprKind::Member { .. } | ExprKind::Index { .. } | ExprKind::PrivateMember { .. })
+        {
+            c = *prog.expr(inner);
+            paren_chain = Some(self.label());
+        }
         let spread = args.iter().any(|&a| matches!(self.expr_kind(a), ExprKind::Spread(_)));
         if matches!(c.kind, ExprKind::Super) {
             return self.super_call(e, &args, spread, dst);
@@ -1001,6 +1014,7 @@ impl<'a> Fc<'a> {
         let n = args.len() as u32 + tn;
         let method = matches!(c.kind, ExprKind::Member { .. } | ExprKind::Index { .. } | ExprKind::PrivateMember { .. });
         let base = self.window(if spread { 3 } else if method { 2 + n } else { 1 + n });
+        let outer_short = paren_chain.and_then(|l| self.chain_short.replace(l));
         match c.kind {
             ExprKind::Member { obj, name, optional: o2 } => {
                 let nm = self.name_of(name);
@@ -1056,6 +1070,17 @@ impl<'a> Fc<'a> {
                     self.set_live(base + 1);
                 }
             }
+        }
+        if let Some(short) = paren_chain {
+            self.chain_short = outer_short;
+            let done = self.label();
+            self.jmp(done);
+            self.bind(short);
+            self.op(Op::LoadUndef, base, 0, 0);
+            self.op(Op::LoadUndef, base + 1, 0, 0);
+            self.bind(done);
+            self.set_live(base);
+            self.set_live(base + 1);
         }
         if optional {
             self.short(base);
