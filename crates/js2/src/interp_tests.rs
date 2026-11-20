@@ -534,7 +534,7 @@ fn a_get_field_site_goes_from_fresh_to_mono_poly_and_mega() {
 }
 
 #[test]
-fn a_get_field_of_an_inherited_or_missing_name_makes_no_entry() {
+fn a_get_field_of_an_inherited_name_makes_a_prototype_entry_and_a_missing_name_makes_none() {
     let sh = shared();
     let mut vm = vm_with(&sh, getter(&sh, "inherited"));
     let f = vm.function(0);
@@ -544,11 +544,16 @@ fn a_get_field_of_an_inherited_or_missing_name_makes_no_entry() {
     for _ in 0..4 {
         assert_eq!(call1(&mut vm, f, o), n(5));
     }
-    assert_eq!((vm.fbs[0].caches[0].state, vm.fbs[0].entries(0)), (SEEN, 0));
+    // The first read makes the site `SEEN`, the second makes the entry (a prototype entry: the record has shape 0).
+    assert_eq!((vm.fbs[0].caches[0].state, vm.fbs[0].entries(0), vm.fbs[0].protos.len()), (MONO, 1, 1));
+    assert_eq!(vm.fbs[0].caches[0].shape, 0, "the own-property hit never matches a prototype entry");
     let mut vm = vm_with(&sh, getter(&sh, "missing"));
     let f = vm.function(0);
     let o = mk(&mut vm, &[("x", 1)]);
-    assert_eq!(call1(&mut vm, f, o), Value::UNDEFINED);
+    for _ in 0..4 {
+        assert_eq!(call1(&mut vm, f, o), Value::UNDEFINED);
+    }
+    assert_eq!((vm.fbs[0].caches[0].state, vm.fbs[0].entries(0)), (SEEN, 0));
 }
 
 #[test]

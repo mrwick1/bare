@@ -379,3 +379,7 @@ mod tests;
 #[cfg(test)]
 #[path = "conversion_tests.rs"]
 mod conversion_tests;
+
+#[cfg(test)]
+#[path = "proto_ic_tests.rs"]
+mod proto_ic_tests;
