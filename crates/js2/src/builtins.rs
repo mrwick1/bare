@@ -7,23 +7,20 @@
 //! shape. The call of a script function does not change: `Realm::function` and `Realm::function_new` answer `None` for a native, and the
 //! interpreter asks [`Realm::call_native`] only then. So the hot path of a call has no new test.
 //!
-//! **A native cannot call a script function and wait for the result.** The interpreter keeps the JS stack in `run`, and a collection
-//! walks it there, so a native has no frame to call from, and the result of a call would have to be rooted by hand. There are two ways
-//! around it:
+//! **Calling a script function from a native.** There are three ways:
 //!
 //! 1. A native that only wants a call made (`call`, `apply`, a bound function) sets `Realm::tail` and `Realm::tail_args` and returns.
 //!    [`Realm::call_native`] gives [`Outcome::Enter`] and the interpreter pushes the frame, with the result going to the register of the
 //!    call. A tail to another native runs in the loop of `call_native`.
 //! 2. A built-in that has to call back many times (`forEach`, `map`, `sort`, ...) is written in JavaScript: `prelude.js`, compiled with
-//!    each script (`script.rs`). Those calls are plain `Call` ops, so a callback needs no re-entry, and each live value is in a
-//!    register that a root map names.
-//!
-//! `ToPrimitive` runs a `valueOf` or `toString` only when it is a native. A script function there throws a `TypeError` (known gap, see
-//! `docs/progress.md`): it needs a call from inside a conversion, which needs the same re-entry.
+//!    each script (`script.rs`). Those calls are plain `Call` ops, so a callback needs no re-entry.
+//! 3. A native or a conversion that needs the result in the middle of its work (`ToPrimitive`, a getter, a setter) calls
+//!    [`Realm::call_function`] (`reenter.rs`): a nested run of the interpreter on a machine of its own.
 //!
 //! **GC.** A native never collects: the interpreter runs `gate!` before it, and the values in its arguments and `this` are registers of
-//! the caller, which the root map of the call names. So a native may keep any cell in a Rust local, and may allocate. A native that
-//! allocates more than the slack of the heap limit (8 MiB) only makes the next gate collect.
+//! the caller, which the root map of the call names. A nested call holds the collector too (`reenter.rs`). So a native may keep any
+//! cell in a Rust local, and may allocate and call. A native that allocates more than the slack of the heap limit (8 MiB) only makes
+//! the next gate collect.
 use crate::cell::Layout;
 use crate::interp_rt::{ErrKind, Key, R, Realm, Slot};
 use crate::object::{F_CALLABLE, F_CLASS, F_NATIVE, Obj};
@@ -188,7 +185,7 @@ impl Realm {
     // ---- ToPrimitive ----
 
     /// `ToPrimitive` (`OrdinaryToPrimitive`: `valueOf` then `toString`, or the reverse for the hint `String`). There are no symbols, so
-    /// no `Symbol.toPrimitive`. A method that is a script function throws a `TypeError` (see the module comment).
+    /// no `Symbol.toPrimitive`. The methods may be script functions, and a getter (`Realm::call_function`).
     pub fn to_primitive(&mut self, v: Value, hint: Hint) -> R<Value> {
         let Some(o) = Realm::obj(v) else { return Ok(v) };
         let order = if hint == Hint::String { [self.k_to_string, self.k_value_of] } else { [self.k_value_of, self.k_to_string] };
@@ -203,17 +200,12 @@ impl Realm {
 
     fn ordinary_to_primitive(&mut self, v: Value, o: Obj, order: [Str; 2]) -> R<Value> {
         for k in order {
-            let Some(Slot::Data(f)) = self.lookup_g(o, k) else { continue };
+            let f = self.get_prop(o.value(), Key::Name(k))?;
             if !Realm::obj(f).is_some_and(|f| f.is_callable()) {
                 continue;
             }
-            if self.native_id(f).is_none() {
-                let n = self.text(k);
-                return self.type_error(&format!("a script function as {n} cannot be called from a conversion yet"));
-            }
-            if let Outcome::Val(r) = self.call_native(f, v, &[])?
-                && Realm::obj(r).is_none()
-            {
+            let r = self.call_function(f, v, &[])?;
+            if Realm::obj(r).is_none() {
                 return Ok(r);
             }
         }
@@ -289,23 +281,33 @@ impl Realm {
 // ---- Object ----
 
 fn object_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    // `new Object()` from `super()` of a class that extends it: the prototype comes from `new.target`.
-    // A primitive is not boxed (there are no wrapper objects): `Object(1)` is `1`.
+    // `new Object()` from `super()` of a class that extends it: the prototype comes from `new.target`, and the argument is not read.
+    // `Object(v)` and `new Object(v)` give `ToObject(v)`: an object is itself, a primitive gets a wrapper.
     let a = arg(args, 0);
-    if Realm::obj(rt.nt).is_none() && !a.is_undefined() && !a.is_null() {
-        return Ok(a);
+    if !a.is_undefined() && !a.is_null() && (Realm::obj(rt.nt).is_none() || rt.nt == rt.callee) {
+        return Ok(rt.to_object(a)?.value());
     }
     let proto = rt.new_proto()?;
     let shape = rt.shapes.root(Layout::Object, Some(proto.cell()), 4);
     Ok(Obj::new(&mut rt.heap, &rt.shapes, shape).expect("memory").value())
 }
 
+/// `ToObject(v)` for a built-in that reads the own properties of `v`: `undefined` and `null` throw (`own_keys` alone gives no keys).
+fn need_object(rt: &mut Realm, v: Value) -> R<()> {
+    if v.is_undefined() || v.is_null() {
+        return rt.type_error("cannot convert undefined or null to an object");
+    }
+    Ok(())
+}
+
 fn object_keys(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+    need_object(rt, arg(args, 0))?;
     rt.own_keys(arg(args, 0))
 }
 
 /// The own enumerable keys of `v` and the value of each.
 fn own_pairs(rt: &mut Realm, v: Value) -> R<Vec<(Value, Value)>> {
+    need_object(rt, v)?;
     let keys = rt.own_keys(v)?;
     let ko = Realm::obj(keys).expect("an array");
     let mut out = Vec::with_capacity(ko.len() as usize);
@@ -333,7 +335,7 @@ fn object_assign(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     if target.is_undefined() || target.is_null() {
         return rt.type_error("cannot convert undefined or null to an object");
     }
-    for &src in args.iter().skip(1) {
+    for &src in args.iter().skip(1).filter(|s| !s.is_undefined() && !s.is_null()) {
         for (k, v) in own_pairs(rt, src)? {
             let key = rt.key_of(k)?;
             rt.set_prop(target, key, v)?;
@@ -458,8 +460,14 @@ fn object_set_prototype_of(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Va
 }
 
 fn object_own_names(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    let Some(o) = Realm::obj(arg(args, 0)) else { return Ok(rt.new_array(&[])) };
+    let o = rt.to_object(arg(args, 0))?;
     let mut out: Vec<Value> = Vec::new();
+    if let Some(s) = rt.string_wrapper(o) {
+        for i in 0..s.len() {
+            out.push(rt.string(&i.to_string()));
+        }
+        out.push(rt.k_length.value());
+    }
     if o.is_indexed() {
         for i in 0..o.len() {
             if o.get_element(i).is_some() {
@@ -474,8 +482,14 @@ fn object_own_names(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
 }
 
 fn object_own_descriptor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    let Some(o) = Realm::obj(arg(args, 0)) else { return Ok(Value::UNDEFINED) };
+    let o = rt.to_object(arg(args, 0))?;
     let key = rt.key_of(arg(args, 1))?;
+    if let Some(s) = rt.string_wrapper(o)
+        && let Some(v) = rt.string_own(s, key)
+    {
+        let at = if matches!(key, Key::Idx(_)) { A_E } else { 0 };
+        return Ok(descriptor(rt, Some(v), None, at));
+    }
     let k = match key {
         Key::Name(k) => k,
         Key::Idx(i) => {
@@ -545,6 +559,11 @@ fn own_has(rt: &mut Realm, v: Value, key: Key) -> bool {
         };
     }
     let Some(o) = Realm::obj(v) else { return false };
+    if let Some(s) = rt.string_wrapper(o)
+        && rt.string_own(s, key).is_some()
+    {
+        return true;
+    }
     match key {
         Key::Idx(i) if o.is_indexed() && o.get_element(i).is_some() => true,
         Key::Idx(i) => {
@@ -569,6 +588,11 @@ fn property_is_enumerable(rt: &mut Realm, this: Value, args: &[Value]) -> R<Valu
         return Ok(Value::FALSE);
     }
     let Some(o) = Realm::obj(this) else { return Ok(Value::TRUE) };
+    if let Some(s) = rt.string_wrapper(o)
+        && rt.string_own(s, key).is_some()
+    {
+        return Ok(Value::bool(matches!(key, Key::Idx(_))));
+    }
     let k = match key {
         Key::Name(k) => k,
         Key::Idx(i) if o.is_indexed() && o.get_element(i).is_some() => return Ok(Value::TRUE),
@@ -589,7 +613,15 @@ pub(crate) fn object_to_string(rt: &mut Realm, this: Value, _args: &[Value]) -> 
     } else if this.as_bool().is_some() {
         "Boolean"
     } else if let Some(o) = Realm::obj(this) {
-        if o.is_callable() {
+        if let Some(p) = rt.prim_of(this) {
+            if Realm::str_of(p).is_some() {
+                "String"
+            } else if p.is_number() {
+                "Number"
+            } else {
+                "Boolean"
+            }
+        } else if o.is_callable() {
             "Function"
         } else if rt.is_array(o) {
             "Array"
@@ -614,7 +646,11 @@ fn object_value_of(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
 }
 
 fn is_prototype_of(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
-    let (Some(p), Some(mut o)) = (Realm::obj(this), Realm::obj(arg(args, 0))) else { return Ok(Value::FALSE) };
+    let Some(mut o) = Realm::obj(arg(args, 0)) else { return Ok(Value::FALSE) };
+    let Some(p) = Realm::obj(this) else {
+        need_object(rt, this)?;
+        return Ok(Value::FALSE);
+    };
     while let Some(n) = rt.proto_of(o) {
         if n == p {
             return Ok(Value::TRUE);

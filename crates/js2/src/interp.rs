@@ -69,6 +69,7 @@ use crate::roots::RootMaps;
 use crate::shapes::{A_C, A_W};
 use crate::value::Value;
 use std::cmp::Ordering;
+use std::rc::Rc;
 use std::sync::Arc;
 
 /// Words of a frame record.
@@ -102,12 +103,18 @@ pub struct Vm {
     pub realm: Realm,
     pub stack: Vec<Value>,
     pub fbs: Vec<Feedback>,
-    pub prog: Program,
-    /// The code indexes of the default constructors (`DefaultCtor`): a base class and a derived class.
+    /// The program, shared with `Realm::prog` (a native that calls a script function runs it from the realm: `reenter.rs`).
+    pub prog: Rc<Program>,
+    /// The code indexes of the default constructors (`DefaultCtor`): a base class and a derived class. Also in `Realm::dctor`.
     pub dctor: [usize; 2],
-    /// Back edges that may still run. At 0 the run stops with [`Exit::Fuel`].
+    /// Back edges that may still run. At 0 the run stops with [`Exit::Fuel`]. A call copies it to `Realm::fuel` (where the loop and a
+    /// nested call count) and back.
     pub fuel: u64,
 }
+
+/// The value that a stop (`Exit::Fuel` in a nested call) is thrown as. No script can throw it: it is the marker of an uninitialized
+/// binding. `unwind` runs no handler for it, and `Vm::start` turns it back into `Exit::Fuel`.
+pub(crate) const STOP: Value = Value::HOLE;
 
 fn record(stack: &[Value], fp: usize, k: usize) -> Value {
     stack[fp - REC + k]
@@ -184,8 +191,10 @@ fn walk_frames(m: &mut Marker, prog: &Program, stack: &[Value], mut ci: usize, m
 /// Find the handler for `e` thrown at `pc` of frame `(ci, fp)`, dropping frames that have none. On `Ok`, the frame, `pc` and the
 /// handler register are set. `Err(e)` when the frame of the host has no handler either.
 fn unwind(prog: &Program, stack: &mut [Value], ci: &mut usize, fp: &mut usize, pc: &mut usize, e: Value) -> Result<(), Value> {
+    // The budget ran out in a nested call (`Realm::call_function` gives `STOP`): no handler runs, every frame goes away.
+    let stop = e == STOP;
     loop {
-        if let Some(h) = prog.codes[*ci].handler_at(*pc as u32) {
+        if !stop && let Some(h) = prog.codes[*ci].handler_at(*pc as u32) {
             let rec = *fp - REC;
             let mut depth = stack[rec + 6].as_int().expect("depth");
             while depth > h.depth as i32 {
@@ -214,7 +223,10 @@ impl Vm {
         prog.codes.extend(default_ctors());
         scan_flags(&mut prog.codes);
         let fbs = prog.codes.iter().map(|_| Feedback::default()).collect();
-        Vm { realm: Realm::new(shared), stack: Vec::new(), fbs, prog, dctor, fuel: u64::MAX }
+        let prog = Rc::new(prog);
+        let mut realm = Realm::new(shared);
+        (realm.prog, realm.dctor) = (prog.clone(), dctor);
+        Vm { realm, stack: Vec::new(), fbs, prog, dctor, fuel: u64::MAX }
     }
 
     /// A function cell for code `code` with no context.
@@ -222,30 +234,44 @@ impl Vm {
         self.realm.new_function(code, Value::UNDEFINED)
     }
 
-    /// Call `f` with `this` and `args` from the host. The JS stack must be empty (no re-entry yet). The result is not rooted: use it
-    /// before the next call into the engine.
+    /// Call `f` with `this` and `args` from the host. The JS stack must be empty. The result is not rooted: use it before the next call
+    /// into the engine. A native that wants to call a script function does not come here: see `Realm::call_function` (`reenter.rs`).
     pub fn call(&mut self, f: Value, this: Value, args: &[Value]) -> Result<Value, Exit> {
-        let Some((ci, ctx)) = self.realm.function(f) else {
-            let e = self.realm.error(ErrKind::Type, "not a function");
+        let Vm { realm, stack, fbs, fuel, .. } = self;
+        realm.fuel = *fuel;
+        let r = Vm::start(realm, stack, fbs, f, this, args);
+        *fuel = realm.fuel;
+        r
+    }
+
+    /// Run `f` with `this` and `args` as a new entry into the interpreter, on the empty stack `stack` with the feedback `fbs` of the
+    /// program. `Vm::call` uses the stack of the `Vm`, and `Realm::call_function` a machine of its own.
+    pub(crate) fn start(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, f: Value, this: Value, args: &[Value]) -> Result<Value, Exit> {
+        let Some((ci, ctx)) = realm.function(f) else {
+            let e = realm.error(ErrKind::Type, "not a function");
             return Err(Exit::Throw(e));
         };
-        let code = &self.prog.codes[ci];
+        let prog = realm.prog.clone();
+        let code = &prog.codes[ci];
         let fp = REC;
         let need = fp + code.nregs as usize + 8;
-        if self.stack.len() < need {
-            self.stack.resize(need.max(256), Value::UNDEFINED);
+        if stack.len() < need {
+            stack.resize(need.max(256), Value::UNDEFINED);
         }
         let args_obj = if code.flags & CF_ARGS != 0 {
-            Obj::array(&mut self.realm.heap, &self.realm.shapes, self.realm.s_args, args).expect("memory").value()
+            Obj::array(&mut realm.heap, &realm.shapes, realm.s_args, args).expect("memory").value()
         } else {
             Value::UNDEFINED
         };
         let rec = [f, this, ctx, Value::int(0), Value::int(0), Value::int(ENTRY), Value::int(0), Value::int(0), Value::UNDEFINED, args_obj];
-        self.stack[..REC].copy_from_slice(&rec);
+        stack[..REC].copy_from_slice(&rec);
         for i in 0..code.nparams as usize {
-            self.stack[fp + i] = args.get(i).copied().unwrap_or(Value::UNDEFINED);
+            stack[fp + i] = args.get(i).copied().unwrap_or(Value::UNDEFINED);
         }
-        self.run(ci, fp)
+        match Vm::run(realm, stack, fbs, &prog, ci, fp) {
+            Err(Exit::Throw(e)) if e == STOP => Err(Exit::Fuel),
+            r => r,
+        }
     }
 
     /// Run code `ci` (a function with no parameters and no context) as the main function.
@@ -257,15 +283,12 @@ impl Vm {
 
     /// Collect now, as the gate does (for tests and the host between tasks: the stack must be empty or stopped at a safepoint).
     pub fn collect_idle(&mut self) {
-        let Vm { realm, stack, fbs, prog, .. } = self;
+        let Vm { realm, fbs, .. } = self;
         realm.collect(fbs, |_| {});
-        let _ = (stack, prog);
     }
 
-    #[allow(unused_assignments)]
-    fn run(&mut self, mut ci: usize, mut fp: usize) -> Result<Value, Exit> {
-        let Vm { realm, stack, fbs, prog, dctor, fuel } = self;
-        let prog: &Program = prog;
+    #[allow(unused_assignments, clippy::ptr_arg)]
+    fn run(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, prog: &Program, mut ci: usize, mut fp: usize) -> Result<Value, Exit> {
         let mut code: &Code = &prog.codes[ci];
         let mut words: &[u32] = &code.words;
         let mut fb: &mut Feedback = &mut fbs[ci];
@@ -857,6 +880,10 @@ impl Vm {
                             continue;
                         }
                         gate!();
+                        // The base is checked before the key is converted: a script `toString` of the key must not run first.
+                        if recv.is_undefined() || recv.is_null() {
+                            err!(ErrKind::Type, "cannot read properties of undefined or null")
+                        }
                         let k = tri!(realm.key_of(key));
                         match tri!(realm.get_prop_g(recv, k)) {
                             Got::Val(v) => {
@@ -869,6 +896,9 @@ impl Vm {
                     Op::SetElem => {
                         gate!();
                         let (recv, key, v) = (r!(a!()), r!(b!()), r!(c!()));
+                        if recv.is_undefined() || recv.is_null() {
+                            err!(ErrKind::Type, "cannot set properties of undefined or null")
+                        }
                         let k = tri!(realm.key_of(key));
                         match tri!(realm.set_prop_g(recv, k, v)) {
                             Put::Done => pc = next,
@@ -895,6 +925,9 @@ impl Vm {
                         pc = next;
                     }
                     Op::Delete => {
+                        if r!(b!()).is_undefined() || r!(b!()).is_null() {
+                            err!(ErrKind::Type, "cannot delete properties of undefined or null")
+                        }
                         let k = tri!(realm.key_of(r!(c!())));
                         let ok = tri!(realm.delete_prop(r!(b!()), k));
                         r!(a!()) = Value::bool(ok);
@@ -1054,6 +1087,9 @@ impl Vm {
                         pc = next;
                     }
                     Op::In => {
+                        if Realm::obj(r!(c!())).is_none() {
+                            err!(ErrKind::Type, "cannot use 'in' on a non-object")
+                        }
                         let k = tri!(realm.key_of(r!(b!())));
                         let v = tri!(realm.has_prop(r!(c!()), k));
                         r!(a!()) = Value::bool(v);
@@ -1118,10 +1154,10 @@ impl Vm {
                     }
                     Op::Jmp => jump!(true, next, sj!()),
                     Op::JmpBack => {
-                        if *fuel == 0 {
+                        if realm.fuel == 0 {
                             return Err(Exit::Fuel);
                         }
-                        *fuel -= 1;
+                        realm.fuel -= 1;
                         jump!(true, next, sj!())
                     }
                     Op::JmpIf => jump!(Realm::truthy(r!(a!())), next, sbx!()),
@@ -1372,7 +1408,7 @@ impl Vm {
                     }
                     Op::DefaultCtor => {
                         gate!();
-                        r!(a!()) = realm.new_function(dctor[b!() & 1], undef);
+                        r!(a!()) = realm.new_function(realm.dctor[b!() & 1], undef);
                         pc = next;
                     }
                     Op::SetFields => {

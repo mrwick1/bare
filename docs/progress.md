@@ -15934,3 +15934,62 @@ Engine bugs that the run found (not fixed here):
 `cargo test --locked -p bare-js2 --lib`: 377 pass (376 before, 1 new for `load_with`). `cargo test --locked -p bare-js-diff`: 4 pass (2 unit tests of the reader of the script tests and of the verdict, 2 integration tests). Clippy (`cargo clippy -p bare-js-diff -p bare-js2 --all-targets`): no finding in the new code; the findings that remain are in `crates/js2/examples/object_census.rs` and `bare-js` (not changed here).
 
 Not tested: Windows and macOS (the shell tool needs GNU `find` and `timeout`; the cargo test is portable but not run there); the old engine in `auto` and `byte` modes (only `tree`); Miri on `load_with` (safe code); the `script_tests` programs that span several lines; a second test262 checkout revision; the old engine's modules and async tests (skipped on both); how the counts move when js2 gets a step budget of another size (20,000,000 back edges, the old engine 20,000,000 steps: not the same unit).
+
+## 2026-11-20: conversions in js2: a call from native code, wrapper objects (follow-up of S2.7 and the test262 gate)
+
+Base: PR #764 (merged, `ee8ba415`). Two gaps of S2.7 are closed: a native can call a script function, and `new String`, `new Number`, `new Boolean` and `Object(x)` make wrapper objects.
+
+### Re-entry: `Realm::call_function`
+
+- `crates/js2/src/reenter.rs`. `Realm::call_function(f, this, args) -> R<Value>` calls a script function or a built-in from any code that has `&mut Realm`. The module doc has the full design.
+- The loop of `Vm::run` owns the JS stack and the feedback vectors, and lends only `&mut Realm` to a native. A nested call on the same stack would need `&mut` twice, and a push to the stack would leave the `args` window of the native dangling. So a nested call runs on its own `Machine` (a stack and a feedback vector), taken from `Realm::pool` and given back after the call. The code uses no new `unsafe`.
+- The program (`Rc<Program>`), the table of default constructors and the budget (`fuel`) are fields of the realm. `Vm::run` takes the program as `&Program` from its caller (`Vm::start`), so the loop holds no `Rc`. This matters for the cost (see below).
+- Where it is used: `ToPrimitive` (`+`, compare, `==`, `ToNumber`, `ToString`, `ToPropertyKey`, argument coercion of built-ins), getters and setters that a built-in reads or writes (`Object.assign`, `Object.values`, `Object.entries`), and a native that ends in a call (`call`, `apply`, a bound function) when it runs nested.
+- Errors. A thrown value is `Err(value)`. When the budget ends in a nested call, `Err(STOP)` comes back (`STOP` is `Value::HOLE`: no script can throw it). `unwind` runs no handler for it, and `Vm::start` turns it into `Exit::Fuel`. The budget is shared by the nested runs.
+- State that a nested call must keep: `callee`, `nt`, `tail` and `tail_args` are saved and restored. The nest limit is `MAX_NEST = 100` and gives a `RangeError`. One level costs about 2 KB of Rust stack in release and about 200 KB in debug; the test of the limit runs on a 256 MiB thread.
+- GC. A native keeps cells in Rust locals, and a root map names registers only. So `Heap::hold_task` stops collection until the outermost nested call returns. **Known gap:** a `valueOf` that allocates much without returning grows the heap until it returns; the budget is the only bound. The design to lift it (rooted temporaries for natives, and the outer frames in `walk_frames`) is in the `reenter.rs` doc. `collect` asserts `nest == 0` and walks the pooled machines.
+- Order of conversion errors. `base[key]`, `base[key] = v`, `delete base[key]` with a base of `undefined` or `null` now throw `TypeError` before `ToPropertyKey` runs the `toString` of the key (`GetElem`, `SetElem`, `Delete` slow paths only). `key in x` with a non-object `x` throws before the key conversion. The fast path of `GetElem` is not changed. Without this the change would have turned 34 tests that passed by accident into failures (`compound-assignment/S11.13.2_A7.*`, `postfix-increment/S11.3.1_A6_*`, `logical-assignment/*-lhs-before-rhs`, `member-expression/computed-reference-null-or-undefined`).
+
+### Wrapper objects
+
+- `crates/js2/src/bi_wrap.rs`: `wrap`, `prim_of`, `string_wrapper`, `string_own`, `to_object`. A wrapper is a plain object with the flag `F_WRAP` and a hidden property `"\0prim"` that holds the primitive. The code finds the property by name, not by slot, so a script that deletes or redefines it cannot cause a bad read. A `String` wrapper has `length` and index properties (`string_own`; `own_keys` lists the indices).
+- `new String/Number/Boolean`, `Object(x)` and `new Object(x)` make wrappers. `String.prototype`, `Number.prototype` and `Boolean.prototype` methods accept a wrapper as `this` (`this_num`, `this_bool`, `to_string`). `Object.prototype.toString` tags a wrapper. `Object.keys`, `values`, `entries`, `getOwnPropertyNames`, `getOwnPropertyDescriptor`, `assign` and `isPrototypeOf` do `ToObject` on their argument: a primitive works, `undefined` and `null` throw `TypeError` (`Object.assign` skips them as sources).
+- Not done: sloppy-mode boxing of a primitive `this` in a plain function call (`this` stays the primitive).
+
+### Tests
+
+- `crates/js2/src/conversion_tests.rs`: 8 tests. A script `valueOf` and `toString` in every conversion; a throw from a conversion is catchable; a function that calls itself through a conversion gives `RangeError`; the budget stops a nested call that has no handler, and the budget is shared; a nested call that allocates keeps the native's values; getters and setters in `Object.assign` and `Object.values`; wrapper objects; a wrapper loop under constant collection. Each runs also with a collection at every safepoint.
+- `script_tests.rs`: 4 cases changed (a script `valueOf` now works; `new String` and `new Number` no longer throw; `Object(5) === 5` is false). Their lines left `tools/fixtures/js/diff-known.txt` (4 entries removed: 22 known differences became 14, still all listed, 0 new).
+- `cargo test --locked -p bare-js2 --lib`: 385 pass (377 before, 8 new). `cargo test --locked -p bare-js-diff`: pass. Miri: see the end of this section.
+
+### test262 (`tools/js/test262_js2.sh -j 8`, the same pinned checkout `e4fbf577`)
+
+| | Before | After |
+| --- | ---: | ---: |
+| js2 pass / fail | 11,944 / 5,840 | 12,874 / 4,910 |
+| old engine pass / fail | 16,755 / 1,029 | 16,755 / 1,029 |
+| pass on old, fail on js2 | 4,852 | 3,927 |
+| pass on js2, fail on old | 41 | 46 |
+| passed on js2 before, fail now | - | 0 |
+
+- Groups: wrapper objects 712 → 0 (the tests that call `new Boolean`, `new String`, `new Number`: 269 + 243 + 200); script `valueOf`/`toString` in conversions 257 → 0. "Expected an error, none thrown" 408 → 392 and "different error constructor" 114 → 83 (the part that is conversion order and conversion errors). The rest of the first group is in the areas of the other two agents (strict-mode assignment to read-only and undeclared names, validation in `defineProperty` and `defineProperties`, early errors).
+- The cost of the check: a first run after the change showed 34 tests that passed before and failed (the order of key conversion above). They pass again.
+
+### Cost of the hot loop
+
+`interp_load`, release build, `perf stat -e instructions:u` with `GLIBC_TUNABLES=glibc.malloc.tcache_count=65535`, archMachine (load average 10 to 18, so only instruction counts), 3 runs each (spread at most 0.002 M), net = count(N) - count(0), in M instructions. Base is `e6a65639` (the tree before this change) built the same way.
+
+| Row | N | Base (cgu 16) | New (cgu 16) | Change | Base (cgu 1) | New (cgu 1) | Change |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loopfn` | 1,000,000 | 333.5 | 310.5 | -6.9% | 323.5 | 347.5 | +7.4% |
+| `calls` | 1,000,000 | 715.5 | 666.5 | -6.8% | 712.5 | 737.5 | +3.5% |
+| `fib` | 30 | 1442.9 | 1358.0 | -5.9% | 1475.2 | 1476.5 | +0.1% |
+| `closures` | 200,000 | 419.4 | 402.6 | -4.0% | 423.9 | 435.7 | +2.8% |
+| `objects` | 200,000 | 154.1 | 151.0 | -2.0% | 156.3 | 166.5 | +6.5% |
+
+- The default release build is `codegen-units = 16`. There no row is over +0.5%. With `codegen-units = 1` four rows are over (`loopfn`, `calls`, `closures`, `objects`). **This needs an owner decision.** No new work runs on these paths: the changes in the loop are the `JmpBack` budget (a field of the realm, not a local), the `GetElem` and `SetElem` checks (slow path only) and the entry of `Vm::run`. Hypothesis: the register allocation and block layout of the one large `Vm::run` change with the code around it, as in the `fib` row of S2.7; both settings swing by several percent in either direction.
+- What I found first (measured): with `Rc<Program>` cloned inside `Vm::run`, the same build gave `closures` +3.6%, `fib` +2.1%, `objects` +1.3% at cgu 16 (callgrind: +1 instruction at each op dispatch, the realm pointer was reloaded from the stack). Passing `&Program` from `Vm::start` removed that. Two other tries made it worse or changed nothing (`dctor` read from the realm at its one use: no change; one `Machine` struct for the stack and the feedback: `fib` +4.1%).
+
+### Not tested
+
+Windows and macOS; arm64; Miri on the whole crate (only `conversion_tests`); the GC-hold gap with a `valueOf` that allocates more than the slack in a loop (no test; the budget bounds it); sloppy-mode `this` boxing; the cgu 1 numbers on an idle machine.

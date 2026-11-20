@@ -333,7 +333,7 @@ fn object_and_object_prototype() {
         ("var o = {a: 1}; var r = o.hasOwnProperty('a') + ',' + o.hasOwnProperty('toString') + ',' + ('toString' in o) + ',' + [1].hasOwnProperty(0) + ',' + [1].hasOwnProperty('length');", "r", "true,false,true,true,true"),
         ("var t = Object.prototype.toString; var r = [t.call([]), t.call(null), t.call(undefined), t.call({}), t.call(function () {}), t.call(1), t.call('s'), t.call(true), t.call(new Error())].join();", "r", "[object Array],[object Null],[object Undefined],[object Object],[object Function],[object Number],[object String],[object Boolean],[object Error]"),
         ("var o = {}; var r = (o.valueOf() === o) + ',' + Object.prototype.isPrototypeOf.call(Object.prototype, o) + ',' + o.propertyIsEnumerable('x');", "r", "true,true,false"),
-        ("var o = new Object(); o.q = 1; var r = typeof o + o.q + (Object(5) === 5) + (Object(o) === o);", "r", "object1truetrue"),
+        ("var o = new Object(); o.q = 1; var r = typeof o + o.q + (Object(5) === 5) + (Object(o) === o);", "r", "object1falsetrue"),
         ("var r = typeof Object + typeof Object.keys + (Object.prototype.constructor === Object) + (({}).constructor === Object);", "r", "functionfunctiontruetrue"),
         ("var a = [3, 4]; var r = Object.keys(a).join() + Object.entries('ab').join('/');", "r", "0,10,a/1,b"),
     ]);
@@ -399,7 +399,7 @@ fn to_primitive() {
         ("var r = +[] + ',' + +[7] + ',' + +[1, 2] + ',' + (-[3]);", "r", "0,7,NaN,-3"),
         ("var r = (function () {}) + '';", "r", "function () { [native code] }"),
         ("var a = []; a.push(a); try { '' + a; } catch (e) { var r = e.name; }", "r", "RangeError"),
-        ("var o = {valueOf: function () { return 3; }}; try { var r = o + 1; } catch (e) { r = e.name; }", "r", "TypeError"),
+        ("var o = {valueOf: function () { return 3; }}; var r = o + 1;", "r", "4"),
         ("var e = new Error('m'); var r = '' + e + (e + '' === String(e));", "r", "Error: mtrue"),
     ]);
 }
@@ -455,7 +455,7 @@ fn string_prototype() {
         ("var s = ''; for (var i = 0; i < 40; i++) s += String.fromCharCode(97 + i % 26); var r = s.length + s.slice(26, 30) + s.toUpperCase().indexOf('Z');", "r", "40abcd25"),
         ("var r = 'é'.length + 'é'.toUpperCase() + '日本'.charAt(1) + '日本'.charCodeAt(0) + '日本語'.slice(1) + '\\u{1F600}'.length;", "r", "1É本26085本語2"),
         ("try { String.prototype.trim.call(null); } catch (e) { var r = e.name; }", "r", "TypeError"),
-        ("try { new String('a'); } catch (e) { var r = e.name; }", "r", "TypeError"),
+        ("var r = typeof new String('a') + new String('ab').length;", "r", "object2"),
     ]);
 }
 
@@ -478,7 +478,7 @@ fn number_boolean_math_and_global_functions() {
         ("var r = typeof globalThis + (globalThis === self) + (globalThis.Math === Math) + (this === globalThis) + typeof self.Object;", "r", "objecttruetruetruefunction"),
         ("var r = typeof __def + typeof Symbol + typeof undefined;", "r", "undefinedundefinedundefined"),
         ("var g = 1; var r = globalThis.g + ',' + self.parseInt('9') + ',' + (Number.NaN !== Number.NaN) + ',' + Number.EPSILON.toFixed(0) + ',' + (Number.MIN_VALUE > 0);", "r", "1,9,true,0,true"),
-        ("try { new Number(1); } catch (e) { var r = e.name; }", "r", "TypeError"),
+        ("var r = typeof new Number(1) + (new Number(5) + 1);", "r", "object6"),
         ("try { (5).toString(1); } catch (e) { var r = e.name; }", "r", "RangeError"),
         ("try { Number.prototype.toString.call('x'); } catch (e) { var r = e.name; }", "r", "TypeError"),
     ]);

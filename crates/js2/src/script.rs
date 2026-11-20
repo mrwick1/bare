@@ -212,3 +212,7 @@ impl Vm {
 #[cfg(test)]
 #[path = "script_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "conversion_tests.rs"]
+mod conversion_tests;

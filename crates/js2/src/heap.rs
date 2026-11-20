@@ -361,6 +361,18 @@ impl Heap {
         self.task_limit = self.limit.saturating_add(self.trigger.slack);
     }
 
+    /// Stop [`Heap::task_due`] from answering true until [`Heap::release_task`]: a native that calls a script function holds the
+    /// collector, so that its Rust locals stay valid (`reenter.rs`). Gives the limit to hand back to `release_task`. The allocation
+    /// itself never refuses (`alloc`), so the heap only grows until the call returns.
+    pub fn hold_task(&mut self) -> usize {
+        std::mem::replace(&mut self.task_limit, usize::MAX)
+    }
+
+    /// Hand back the limit that [`Heap::hold_task`] gave. A collection in between would have set it again, and none runs.
+    pub fn release_task(&mut self, limit: usize) {
+        self.task_limit = limit;
+    }
+
     /// Change the trigger. The limits follow at once.
     pub fn set_trigger(&mut self, t: Trigger) {
         self.trigger = t;
