@@ -574,24 +574,27 @@ fn script_top_level_uses_globals() {
         r#"var s = 0; for (var i = 0; i < 10; i++) { s += i; } function g() { return s; }"#,
         SCRIPT,
         r#"
-code nregs=2 nparams=0 words=18 sites=9
-0000  Closure     r0, f0
-0001  SetGlobal   r0, s0
-0002  LoadI       r0, 0
-0003  SetGlobal   r0, s1
-0004  LoadI       r0, 0
-0005  SetGlobal   r0, s2
-0006  GetGlobal   r0, s3
-0007  JnLtI       r0, -> 0017, 10
-0009  GetGlobal   r0, s4
-0010  GetGlobal   r1, s5
-0011  Add         r0, r0, r1
-0012  SetGlobal   r0, s6
-0013  GetGlobal   r0, s7
-0014  Inc         r0, r0
-0015  SetGlobal   r0, s8
-0016  JmpBack     -> 0006
-0017  RetUndef    
+code nregs=2 nparams=0 words=21 sites=12
+0000  DeclGlobal  s0
+0001  DeclGlobal  s1
+0002  DeclGlobal  s2
+0003  Closure     r0, f0
+0004  SetGlobal   r0, s3
+0005  LoadI       r0, 0
+0006  SetGlobal   r0, s4
+0007  LoadI       r0, 0
+0008  SetGlobal   r0, s5
+0009  GetGlobal   r0, s6
+0010  JnLtI       r0, -> 0020, 10
+0012  GetGlobal   r0, s7
+0013  GetGlobal   r1, s8
+0014  Add         r0, r0, r1
+0015  SetGlobal   r0, s9
+0016  GetGlobal   r0, s10
+0017  Inc         r0, r0
+0018  SetGlobal   r0, s11
+0019  JmpBack     -> 0009
+0020  RetUndef    
 "#,
     );
 }
@@ -765,4 +768,102 @@ fn the_script_top_level_is_global() {
     let (s, _) = build("var s = 1; let t = 2; function g() {} s + t;");
     let text = s.code.disassemble();
     assert!(text.matches("SetGlobal").count() >= 3 && text.contains("GetGlobal") && !text.contains("PushCtx"), "{text}");
+}
+
+/// The `pc` of each instruction of `op` in `code`.
+fn pcs_of(code: &Code, op: Op) -> Vec<u32> {
+    let mut v = Vec::new();
+    let mut pc = 0;
+    while pc < code.words.len() {
+        let (ins, len) = crate::bytecode::decode(&code.words, pc).unwrap();
+        if ins.op == op {
+            v.push(pc as u32);
+        }
+        pc += len;
+    }
+    v
+}
+
+fn covered(code: &Code, pc: u32) -> bool {
+    code.handlers.iter().any(|h| h.start <= pc && pc < h.end)
+}
+
+/// Is the `IterClose` at `pc` inside a range whose handler closes the same iterator? (A handler of another loop around it is right.)
+fn closed_twice(code: &Code, pc: u32) -> bool {
+    let rec = crate::bytecode::decode(&code.words, pc as usize).unwrap().0.a;
+    code.handlers.iter().any(|h| {
+        let t = crate::bytecode::decode(&code.words, h.target as usize).unwrap().0;
+        h.start <= pc && pc < h.end && t.op == Op::IterClose && t.a == rec
+    })
+}
+
+#[test]
+fn a_script_var_without_an_initializer_is_declared() {
+    let (s, _) = build("var x; var y = 1; function g() {} if (0) { var z; }");
+    let text = s.code.disassemble();
+    // One declaration for each `var` name (also one in a block) and for the function, before any statement.
+    assert_eq!(text.matches("DeclGlobal").count(), 4, "{text}");
+    assert!(text.lines().skip(1).take(4).all(|l| l.contains("DeclGlobal")), "{text}");
+    // Not in a function.
+    let f = outer("function f() { var x; return x; }");
+    assert!(!f.code.disassemble().contains("DeclGlobal"));
+}
+
+#[test]
+fn a_break_out_of_for_of_closes_the_iterator_once() {
+    // `return()` can throw. The close that a `break` or `return` makes is not in the range of the loop's own handler: an exception from
+    // it would be caught by that handler and the iterator would be closed again.
+    let f = outer("function f(o) { for (const v of o) { if (v) break; if (g(v)) return v; } }");
+    let code = &f.code;
+    let closes = pcs_of(code, Op::IterClose);
+    assert_eq!(closes.len(), 3, "break, return, and the handler: {}", code.disassemble());
+    assert!(closes.iter().all(|&pc| !covered(code, pc)), "{:?}\n{}", code.handlers, code.disassemble());
+    assert!(!code.handlers.is_empty());
+    // The same for a labeled `continue` that leaves an inner loop.
+    let f = outer("function f(o, p) { a: for (const v of o) { for (const w of p) { if (w) continue a; } } }");
+    let code = &f.code;
+    let closes = pcs_of(code, Op::IterClose);
+    assert_eq!(closes.len(), 3, "the continue and the two handlers: {}", code.disassemble());
+    assert!(closes.iter().all(|&pc| !closed_twice(code, pc)), "{:?}\n{}", code.handlers, code.disassemble());
+}
+
+#[test]
+fn an_array_pattern_closes_the_iterator_when_a_binding_throws() {
+    let f = outer("function f(o) { var [a, b = g()] = o; return a + b; }");
+    let code = &f.code;
+    let text = code.disassemble();
+    assert!(!code.handlers.is_empty(), "{text}");
+    // A throw from `next()` does not close the iterator; a throw from a default does; the normal close is outside.
+    assert!(pcs_of(code, Op::IterNext).iter().all(|&pc| !covered(code, pc)), "{:?}\n{text}", code.handlers);
+    let closes = pcs_of(code, Op::IterClose);
+    assert_eq!(closes.len(), 2, "{text}");
+    assert!(closes.iter().all(|&pc| !covered(code, pc)), "{:?}\n{text}", code.handlers);
+    assert!(covered(code, pcs_of(code, Op::GetGlobal)[0]), "the default is covered: {:?}\n{text}", code.handlers);
+    // When nothing in the pattern can throw, no handler.
+    let f = outer("function f(o) { var [a, b] = o; return a + b; }");
+    assert!(f.code.handlers.is_empty(), "{}", f.code.disassemble());
+    // A rest element, and an assignment to a member.
+    let f = outer("function f(o, p) { [p.x, ...p.y] = o; }");
+    assert!(!f.code.handlers.is_empty());
+}
+
+#[test]
+fn a_scope_with_many_locals_compiles_in_linear_time() {
+    let src = |n: usize| {
+        let mut src = String::from("function f() {");
+        for i in 0..n {
+            src.push_str(&format!("var v{i} = {};", i % 9));
+        }
+        src.push_str("return v0 + v1; }");
+        src
+    };
+    let atoms = SharedAtoms::default();
+    let t = std::time::Instant::now();
+    let (_, fs) = compile_all(&src(60_000), &atoms, Limits::default()).expect("compile");
+    // The verifier keeps a register set for each instruction: too much for 60,000 registers, so it is not run here.
+    assert!((60_000..=60_010).contains(&fs[0].1.code.nregs), "{}", fs[0].1.code.nregs);
+    // More than the format has registers for: refused, and not after minutes.
+    let r = compile_all(&src(70_000), &atoms, Limits::default());
+    assert!(matches!(r, Err(ref e) if e.contains("Limit")), "{:?}", r.map(|_| ()));
+    assert!(t.elapsed().as_secs() < 20, "{:?}", t.elapsed());
 }

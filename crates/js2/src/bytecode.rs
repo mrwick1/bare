@@ -143,6 +143,7 @@ ops! {
     CopyCtx Abc "" "Replace the context with a copy of it (one iteration of a `for` with `let` that a closure captured).",
     GetGlobal Abx "w S" "`a` = the global of the site `bx`. A missing name throws a ReferenceError.",
     SetGlobal Abx "r S" "The global of the site `bx` = `a`.",
+    DeclGlobal Abx "- S" "Create the global of the site `bx` with the value `undefined` when it does not exist (the hoisting of the `var` names and the function names of a script).",
     TypeofGlobal Abx "w S" "`a` = `typeof` the global of the site `bx`. A missing name gives `\"undefined\"`.",
     GetName Abx "w S" "`a` = the name of the site `bx` by the full search (a function with `with` or direct `eval`).",
     SetName Abx "r S" "The name of the site `bx` = `a`, by the full search.",

@@ -54,6 +54,8 @@ pub(crate) type CR<T = ()> = Result<T, CompileError>;
 pub struct Level {
     pub parent: Option<Rc<Level>>,
     pub vars: Vec<LevelVar>,
+    /// Name to position in `vars`, for a level with more than `INDEX_MIN` names.
+    index: HashMap<Box<str>, u32>,
 }
 
 #[derive(Debug)]
@@ -66,8 +68,17 @@ pub struct LevelVar {
 }
 
 impl Level {
+    pub fn new(parent: Option<Rc<Level>>, vars: Vec<LevelVar>) -> Level {
+        let index = if vars.len() > INDEX_MIN { vars.iter().enumerate().map(|(i, v)| (v.name.clone(), i as u32)).collect() } else { HashMap::new() };
+        Level { parent, vars, index }
+    }
+
     fn find(&self, name: &str) -> Option<&LevelVar> {
-        self.vars.iter().rev().find(|v| &*v.name == name)
+        if self.index.is_empty() {
+            self.vars.iter().rev().find(|v| &*v.name == name)
+        } else {
+            self.index.get(name).map(|&i| &self.vars[i as usize])
+        }
     }
 }
 
@@ -124,6 +135,21 @@ pub(crate) struct Var<'a> {
 #[derive(Default)]
 pub(crate) struct Scope<'a> {
     pub vars: Vec<Var<'a>>,
+    /// Name to position in `vars`, for a scope with more than `INDEX_MIN` names (a scan of a few names is faster than a hash).
+    pub index: HashMap<Cow<'a, str>, u32>,
+}
+
+/// A scope with more names than this has a hash index.
+const INDEX_MIN: usize = 8;
+
+impl<'a> Scope<'a> {
+    pub(crate) fn find(&self, name: &str) -> Option<&Var<'a>> {
+        if self.index.is_empty() {
+            self.vars.iter().rev().find(|v| v.name == name)
+        } else {
+            self.index.get(name).map(|&i| &self.vars[i as usize])
+        }
+    }
 }
 
 /// A name that a scope declares.
@@ -159,15 +185,19 @@ pub(crate) struct Frame {
     pub ctx: Option<Rc<Level>>,
     /// The number of scopes at the frame (a repeated finalizer sees only these).
     pub nscopes: usize,
+    /// The ranges of instructions that the handler of this frame covers (a `try` with a `finally`, a `for-of` body). Code that a jump out
+    /// of the frame repeats (a finalizer, an iterator close) is cut out of them: an exception there is not for this frame's handler.
+    pub pieces: Vec<(usize, usize)>,
+    /// The start of the range that is open now, `None` while the frame is paused.
+    pub open: Option<usize>,
 }
 
 pub(crate) enum FrameKind {
     Loop { brk: Lb, cont: Lb, iter: Option<u32> },
     /// A `switch` (`is_switch`: an unlabeled `break` ends it) or a labeled statement.
     Block { brk: Lb, is_switch: bool },
-    /// A `try` with a `finally`: the code of the finalizer is repeated on each jump out. `pieces` are the ranges of instructions that the
-    /// handlers protect; a repeated finalizer is cut out of them.
-    Try { fin: Option<StmtId>, pieces: Vec<(usize, usize)>, open: Option<usize> },
+    /// A `try` with a `finally`: the code of the finalizer is repeated on each jump out.
+    Try { fin: Option<StmtId> },
 }
 
 pub(crate) struct HandlerRec {
@@ -176,6 +206,17 @@ pub(crate) struct HandlerRec {
     pub target: Lb,
     pub reg: u32,
     pub depth: u32,
+}
+
+/// A handler block that is emitted after the last instruction of the function, where no path falls into it: close the iterator that
+/// record `rec` holds (unless `done` is true), and throw the exception that is in `ex`.
+pub(crate) struct Cold {
+    pub label: Lb,
+    /// The registers that are live at the start of the range that the handler covers, and `ex`.
+    pub live: Vec<u64>,
+    pub rec: u32,
+    pub done: u32,
+    pub ex: u32,
 }
 
 pub(crate) struct Fc<'a> {
@@ -208,6 +249,7 @@ pub(crate) struct Fc<'a> {
     pub root_regs: Vec<u16>,
     pub lines: Vec<(usize, u32)>,
     pub handlers: Vec<HandlerRec>,
+    pub cold: Vec<Cold>,
     // scopes
     pub scopes: Vec<Scope<'a>>,
     pub outer: Option<Rc<Level>>,
@@ -258,6 +300,7 @@ impl<'a> Fc<'a> {
             root_regs: Vec::new(),
             lines: Vec::new(),
             handlers: Vec::new(),
+            cold: Vec::new(),
             scopes: Vec::new(),
             outer: input.chain.clone(),
             cur_ctx: input.chain.clone(),
@@ -552,11 +595,14 @@ impl<'a> Fc<'a> {
     pub(crate) fn enter(&mut self, span: Span, decls: &[Decl<'a>], switch: bool) -> CR<ScopeMark> {
         let mark = ScopeMark { reg: self.next, scopes: self.scopes.len(), ctx: self.depth, cur: self.cur_ctx.clone() };
         let mut vars: Vec<Var<'a>> = Vec::with_capacity(decls.len());
+        let mut index: HashMap<Cow<'a, str>, u32> = HashMap::new();
+        let indexed = decls.len() > INDEX_MIN;
         let mut slots: Vec<LevelVar> = Vec::new();
         let level = self.depth + 1;
         for d in decls {
             let (name, kind) = (&d.name, d.kind);
-            if let Some(v) = vars.iter_mut().find(|v| v.name == *name) {
+            let known = if indexed { index.get(name).map(|&i| i as usize) } else { vars.iter().position(|v| v.name == *name) };
+            if let Some(v) = known.map(|i| &mut vars[i]) {
                 // A second declaration of the name in one scope (`var a; var a`, a parameter and a `var`) is the same variable.
                 if matches!(kind, VK::Func) {
                     v.kind = VK::Func;
@@ -576,16 +622,19 @@ impl<'a> Fc<'a> {
                 self.set_var(r);
                 Home::Reg(r)
             };
+            if indexed {
+                index.insert(name.clone(), vars.len() as u32);
+            }
             vars.push(Var { name: name.clone(), kind, home, decl_end: d.end, always_tdz: switch && tdz });
         }
-        self.scopes.push(Scope { vars });
+        self.scopes.push(Scope { vars, index });
         if !slots.is_empty() {
             if slots.len() > u16::MAX as usize {
                 return Err(CompileError::Limit("more than 65,535 context slots"));
             }
             self.op(Op::PushCtx, 0, slots.len() as u32, 0);
             self.depth += 1;
-            self.cur_ctx = Some(Rc::new(Level { parent: self.cur_ctx.clone(), vars: slots }));
+            self.cur_ctx = Some(Rc::new(Level::new(self.cur_ctx.clone(), slots)));
         }
         Ok(mark)
     }
@@ -602,7 +651,7 @@ impl<'a> Fc<'a> {
     }
 
     pub(crate) fn find_var(&self, name: &str) -> Option<&Var<'a>> {
-        self.scopes.iter().rev().find_map(|s| s.vars.iter().rev().find(|v| v.name == name))
+        self.scopes.iter().rev().find_map(|s| s.find(name))
     }
 
     /// What `name` is at the source offset `at`.
@@ -687,6 +736,16 @@ impl<'a> Fc<'a> {
     pub(crate) fn finish(mut self, nparams: u32) -> CR<Compiled> {
         if !self.dead {
             self.op(Op::RetUndef, 0, 0, 0);
+        }
+        for c in std::mem::take(&mut self.cold) {
+            self.bind(c.label);
+            self.live = c.live;
+            self.set_live(c.ex);
+            let skip = self.label();
+            self.jmp_r(Op::JmpIf, c.done, skip);
+            self.op(Op::IterClose, c.rec, 0, 0);
+            self.bind(skip);
+            self.op(Op::Throw, c.ex, 0, 0);
         }
         if let Some(why) = self.overflow {
             return Err(CompileError::Limit(why));
