@@ -1,0 +1,934 @@
+//! Runtime services of the interpreter (`interp.rs`, plan step S2.6): the realm, the feedback vectors with their caches, and the slow
+//! paths that the loop calls: conversions, arithmetic that is not on integers or doubles, property access, errors.
+//!
+//! **Realm.** One heap, one shape table, one atom table, the global object and the prototypes. Every pointer that the realm keeps is
+//! walked as a root by [`Realm::collect`] (`consts`) or pinned as a shape (`pins`).
+//!
+//! **Collection.** The loop calls [`Realm::gate`] at the start of each op that allocates. It collects when the heap has passed the
+//! task limit (`Heap::task_due`), with the frames of the JS stack as roots, and then the op runs with no collection inside. So an op
+//! may keep a cell in a Rust local after the gate, and the slow paths here never collect. A task may pass the limit by one op, and the
+//! slack of the limit (8 MiB, `heap.rs`) is far above what one op allocates.
+//!
+//! **Feedback.** Each code has one [`Feedback`] for the realm: a [`Cache`] for each site (same index as `Code::sites`), the atoms of
+//! the code made canonical for this realm, and the shapes of its object literals. The code holds no realm pointer (design 6.11 item 11).
+//!
+//! Cache states of a property site (`Cache::state`), and the transitions:
+//!
+//! | State | Meaning | On a miss |
+//! | --- | --- | --- |
+//! | `FRESH` | never ran | the slow path runs and the state becomes `SEEN`; no entry is made, so code that runs once costs no entry |
+//! | `SEEN` | ran once | the slow path runs; for a cacheable shape the record gets the entry and the state becomes `MONO` |
+//! | `MONO` | one entry in the record: (shape, place, shape after an add) | for another cacheable shape: the entries go to a pool, the record keeps the first, state `POLY` |
+//! | `POLY` | 2 to 4 entries; the pool holds all, the record the first | the pool is scanned in the slow path; a fifth shape makes the state `MEGA` |
+//! | `MEGA` | too many shapes | the lookup runs with no cache work. The record has shape 0, which no object has |
+//!
+//! A hit is the compare of the shape id of the receiver with `Cache::shape`, then one load or store at `Cache::loc` (`Obj::loc`).
+//! A set that adds a property is a hit too: the entry has the shape after the add, and the hit stores the value and the new shape id.
+//! That entry is made only when the new slot is inline, so no allocation is needed. A dictionary shape (`Shapes::cacheable`) never
+//! gets an entry. A property that the prototype chain gives is looked up each time (no entry): design 6.4 guards it with a validity
+//! cell of the prototype, and S1.9 has no such cell yet.
+//!
+//! After a collection that freed a shape (`Shapes::epoch` changed) [`Realm::collect`] clears every record, because an id may name
+//! another shape now.
+//!
+//! **Not here (S2.7):** accessors, `ToPrimitive` (an object in an arithmetic op throws a `TypeError`), `Symbol`, `BigInt`, the full
+//! `Number` to string rules (a number prints with Rust's rules, so `1e21` differs), and any built-in.
+use crate::atoms::{Atoms, SharedAtoms};
+use crate::bytecode::Code;
+use crate::cell::Layout;
+use crate::gc::{Marker, collect};
+use crate::heap::Heap;
+use crate::object::{Ctx, Obj};
+use crate::shapes::{A_ACC, A_C, A_E, A_W, ShapeId, Shapes};
+use crate::string::{Chars, Str};
+use crate::value::{Kind, Value};
+use std::sync::Arc;
+
+/// A thrown value (the result of a failed op).
+pub type R<T> = Result<T, Value>;
+
+pub const FRESH: u8 = 0;
+pub const SEEN: u8 = 1;
+pub const MONO: u8 = 2;
+pub const POLY: u8 = 3;
+pub const MEGA: u8 = 4;
+/// Entries of a polymorphic site.
+const POLY_MAX: usize = 4;
+
+/// The hot part of a feedback record (design 6.10 item 12): 16 bytes. `shape` is the shape id of the receiver (0: no entry). `loc` is
+/// the place of the slot (`Obj::loc`). `to` is the shape id after an add (0: the property is there already). `poly` is the index of
+/// the pool entry in the state `POLY`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Cache {
+    pub shape: u32,
+    pub loc: u32,
+    pub to: u32,
+    pub state: u8,
+    pub poly: u16,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct Poly {
+    n: u8,
+    e: [(u32, u32, u32); POLY_MAX],
+}
+
+/// The feedback vector of one code for one realm.
+#[derive(Debug, Default)]
+pub struct Feedback {
+    pub caches: Box<[Cache]>,
+    /// `Code::atoms[i]` as the canonical atom of this realm, made at the first use.
+    pub names: Box<[Option<Str>]>,
+    /// The shape of each object literal recipe, made at the first use. It is pinned.
+    pub lits: Box<[Option<ShapeId>]>,
+    poly: Vec<Poly>,
+    pub ready: bool,
+}
+
+impl Feedback {
+    pub fn init(&mut self, code: &Code) {
+        self.caches = vec![Cache::default(); code.sites.len()].into();
+        self.names = vec![None; code.atoms.len()].into();
+        self.lits = vec![None; code.recipes.len()].into();
+        self.ready = true;
+    }
+
+    fn clear(&mut self) {
+        self.caches.iter_mut().for_each(|c| *c = Cache::default());
+        self.poly.clear();
+    }
+
+    /// Mark what the vector keeps alive: its atoms and literal shapes.
+    pub fn walk(&self, m: &mut Marker) {
+        self.names.iter().flatten().for_each(|s| m.value(s.value()));
+        self.lits.iter().flatten().for_each(|s| m.shape(*s));
+    }
+
+    /// Entries in the pool for the site, for tests.
+    pub fn entries(&self, site: usize) -> usize {
+        let c = &self.caches[site];
+        match c.state {
+            MONO => 1,
+            POLY => self.poly[c.poly as usize].n as usize,
+            _ => 0,
+        }
+    }
+
+    /// Record an entry after a slow path found `(shape, loc, to)` for the site. See the table in the module comment.
+    fn fill(&mut self, site: usize, shape: u32, loc: u32, to: u32) {
+        let c = &mut self.caches[site];
+        match c.state {
+            FRESH => c.state = SEEN,
+            SEEN => *c = Cache { shape, loc, to, state: MONO, poly: 0 },
+            MONO => match u16::try_from(self.poly.len()) {
+                Ok(i) => {
+                    let mut p = Poly { n: 2, ..Poly::default() };
+                    p.e[0] = (c.shape, c.loc, c.to);
+                    p.e[1] = (shape, loc, to);
+                    self.poly.push(p);
+                    c.poly = i;
+                    c.state = POLY;
+                }
+                Err(_) => *c = Cache { state: MEGA, ..Cache::default() },
+            },
+            POLY => {
+                let p = &mut self.poly[c.poly as usize];
+                if (p.n as usize) < POLY_MAX {
+                    p.e[p.n as usize] = (shape, loc, to);
+                    p.n += 1;
+                } else {
+                    *c = Cache { state: MEGA, ..Cache::default() };
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The pool entry of a `POLY` site for `shape`.
+    fn poly_find(&self, site: usize, shape: u32) -> Option<(u32, u32)> {
+        let c = &self.caches[site];
+        if c.state != POLY {
+            return None;
+        }
+        let p = &self.poly[c.poly as usize];
+        p.e[..p.n as usize].iter().find(|e| e.0 == shape).map(|e| (e.1, e.2))
+    }
+}
+
+/// A property key: an array index or a name (a canonical atom of the realm).
+#[derive(Clone, Copy, Debug)]
+pub enum Key {
+    Idx(u32),
+    Name(Str),
+}
+
+/// The kinds of error that the interpreter throws.
+#[derive(Clone, Copy, Debug)]
+pub enum ErrKind {
+    Type,
+    Reference,
+    Range,
+}
+
+/// The realm: heap, tables, global object and prototypes.
+pub struct Realm {
+    pub heap: Heap,
+    pub shapes: Shapes,
+    pub atoms: Atoms,
+    pub global: Obj,
+    pub object_proto: Obj,
+    pub function_proto: Obj,
+    pub array_proto: Obj,
+    pub error_proto: Obj,
+    pub s_object: ShapeId,
+    pub s_array: ShapeId,
+    pub s_func: ShapeId,
+    /// The raw id of `s_func` and the places of its two hidden slots (the code index and the context): the call reads them with no
+    /// shape lookup.
+    func_shape: u32,
+    loc_code: u32,
+    loc_ctx: u32,
+    pub s_error: ShapeId,
+    pub k_prototype: Str,
+    pub k_length: Str,
+    /// `typeof` results: undefined, object, boolean, number, string, function, symbol, bigint.
+    tnames: [Str; 8],
+    ename: [Str; 3],
+    /// Every value that the realm keeps and the collector must mark.
+    consts: Vec<Value>,
+    /// Shapes that no object may have yet.
+    pins: Vec<ShapeId>,
+    /// The top frame when a collection runs: code index, frame pointer, `pc` of the safepoint.
+    pub cur: (usize, usize, u32),
+    epoch: u32,
+    pub collections: u32,
+    /// What the last collection counted.
+    pub last_gc: crate::gc::Stats,
+}
+
+const TYPEOF: [&str; 8] = ["undefined", "object", "boolean", "number", "string", "function", "symbol", "bigint"];
+const ERRORS: [&str; 3] = ["TypeError", "ReferenceError", "RangeError"];
+
+impl Realm {
+    pub fn new(shared: Arc<SharedAtoms>) -> Realm {
+        let mut heap = Heap::default();
+        let mut shapes = Shapes::default();
+        let mut atoms = Atoms::new(shared);
+        let mut atom = |s: &str| atoms.intern(&mut heap, Chars::One(s.as_bytes())).expect("memory");
+        let (k_code, k_ctx, k_prototype, k_length, k_name, k_message) = (atom("\0code"), atom("\0ctx"), atom("prototype"), atom("length"), atom("name"), atom("message"));
+        let tnames = TYPEOF.map(&mut atom);
+        let ename = ERRORS.map(&mut atom);
+        let root = shapes.root(Layout::Object, None, 4);
+        let object_proto = Obj::new(&mut heap, &shapes, root).expect("memory");
+        let proto = Some(object_proto.cell());
+        let s_object = shapes.root(Layout::Object, proto, 4);
+        let function_proto = Obj::new(&mut heap, &shapes, s_object).expect("memory");
+        let array_proto = Obj::new(&mut heap, &shapes, s_object).expect("memory");
+        let error_proto = Obj::new(&mut heap, &shapes, s_object).expect("memory");
+        let global = Obj::new(&mut heap, &shapes, s_object).expect("memory");
+        let s_array = shapes.root(Layout::Indexed, Some(array_proto.cell()), 0);
+        let f = shapes.root(Layout::Object, Some(function_proto.cell()), 4);
+        let f = shapes.add(f, k_code, 0).expect("shape");
+        let s_func = shapes.add(f, k_ctx, 0).expect("shape");
+        let s_error = shapes.literal(Layout::Object, Some(error_proto.cell()), &[k_name, k_message]).expect("shape");
+        let mut consts: Vec<Value> = [object_proto, function_proto, array_proto, error_proto, global].iter().map(|o| o.value()).collect();
+        consts.extend([k_code, k_ctx, k_prototype, k_length, k_name, k_message].iter().map(|s| s.value()));
+        consts.extend(tnames.iter().chain(ename.iter()).map(|s| s.value()));
+        let pins = vec![s_object, s_array, s_func, s_error];
+        let epoch = shapes.epoch();
+        let probe = Obj::new(&mut heap, &shapes, s_func).expect("memory");
+        let (func_shape, loc_code, loc_ctx) = (s_func.raw(), probe.loc(&shapes, 0), probe.loc(&shapes, 1));
+        Realm {
+            heap,
+            shapes,
+            atoms,
+            global,
+            object_proto,
+            function_proto,
+            array_proto,
+            error_proto,
+            s_object,
+            s_array,
+            s_func,
+            func_shape,
+            loc_code,
+            loc_ctx,
+            s_error,
+            k_prototype,
+            k_length,
+            tnames,
+            ename,
+            consts,
+            pins,
+            cur: (0, 0, 0),
+            epoch,
+            collections: 0,
+            last_gc: Default::default(),
+        }
+    }
+
+    /// Does an op that allocates have to collect first? See the module comment.
+    #[inline(always)]
+    pub fn due(&self) -> bool {
+        self.heap.task_due()
+    }
+
+    /// Collect with the frames of the stack as roots. `walk_frames` marks them (see `interp.rs`); the realm adds its own.
+    pub fn collect(&mut self, fbs: &mut [Feedback], walk_frames: impl FnOnce(&mut Marker)) {
+        let Realm { heap, shapes, atoms, consts, pins, .. } = self;
+        let mut walk_frames = Some(walk_frames);
+        let mut roots = |m: &mut Marker| {
+            consts.iter().for_each(|v| m.value(*v));
+            pins.iter().for_each(|s| m.shape(*s));
+            fbs.iter().for_each(|f| f.walk(m));
+            if let Some(w) = walk_frames.take() {
+                w(m);
+            }
+        };
+        let stats = collect(heap, shapes, atoms, &mut roots);
+        self.last_gc = stats;
+        self.collections += 1;
+        if self.shapes.epoch() != self.epoch {
+            self.epoch = self.shapes.epoch();
+            fbs.iter_mut().for_each(Feedback::clear);
+        }
+    }
+
+    // ---- values to cells ----
+
+    /// The object of a value. The interpreter's invariant is that every pointer in a register, a context or an object is a live cell of
+    /// this heap: the collector marks them all, and a stale pointer is a bug of the roots (`roots.rs`, rules).
+    #[inline]
+    pub fn obj(v: Value) -> Option<Obj> {
+        // SAFETY: by the invariant above.
+        unsafe { Obj::from_value(v) }
+    }
+
+    #[inline]
+    pub fn str_of(v: Value) -> Option<Str> {
+        // SAFETY: by the invariant above.
+        unsafe { Str::from_value(v) }
+    }
+
+    #[inline]
+    pub fn ctx(v: Value) -> Option<Ctx> {
+        // SAFETY: by the invariant above.
+        unsafe { Ctx::from_value(v) }
+    }
+
+    // ---- errors ----
+
+    pub fn error(&mut self, kind: ErrKind, msg: &str) -> Value {
+        let o = Obj::new(&mut self.heap, &self.shapes, self.s_error).expect("memory");
+        let m = Str::from_str(&mut self.heap, msg).expect("memory");
+        o.set_slot(&self.shapes, 0, self.ename[kind as usize].value());
+        o.set_slot(&self.shapes, 1, m.value());
+        o.value()
+    }
+
+    pub fn type_error<T>(&mut self, msg: &str) -> R<T> {
+        Err(self.error(ErrKind::Type, msg))
+    }
+
+    /// The text of an error value made by [`Realm::error`], for tests: `Name: message`.
+    pub fn error_text(&self, v: Value) -> String {
+        let Some(o) = Realm::obj(v) else { return format!("{v:?}") };
+        let s = |i| Realm::str_of(o.slot(&self.shapes, i)).map(|s| self.text(s)).unwrap_or_default();
+        format!("{}: {}", s(0), s(1))
+    }
+
+    // ---- strings ----
+
+    pub fn intern(&mut self, s: &str) -> Str {
+        if s.is_ascii() {
+            self.atoms.intern(&mut self.heap, Chars::One(s.as_bytes())).expect("memory")
+        } else {
+            let u: Vec<u16> = s.encode_utf16().collect();
+            self.atoms.intern(&mut self.heap, Chars::Two(&u)).expect("memory")
+        }
+    }
+
+    pub fn string(&mut self, s: &str) -> Value {
+        Str::from_str(&mut self.heap, s).expect("memory").value()
+    }
+
+    /// The text of a string (a rope is flattened).
+    pub fn text(&self, s: Str) -> String {
+        match s.resolve().chars() {
+            Some(Chars::One(b)) => b.iter().map(|&c| c as char).collect(),
+            Some(Chars::Two(u)) => String::from_utf16_lossy(u),
+            None => "<rope>".into(),
+        }
+    }
+
+    fn flat(&mut self, s: Str) -> Str {
+        s.flatten(&mut self.heap).expect("memory")
+    }
+
+    pub fn typeof_name(&self, v: Value) -> Value {
+        let i = match v.as_pointer() {
+            _ if v.is_undefined() => 0,
+            _ if v.is_null() => 1,
+            _ if v.as_bool().is_some() => 2,
+            _ if v.is_number() => 3,
+            Some((Kind::String, _)) => 4,
+            Some((Kind::Symbol, _)) => 6,
+            Some((Kind::BigInt, _)) => 7,
+            Some((Kind::Object, _)) => Realm::obj(v).map_or(1, |o| if o.is_callable() { 5 } else { 1 }),
+            None => 0,
+        };
+        self.tnames[i].value()
+    }
+
+    // ---- conversions ----
+
+    pub fn truthy(v: Value) -> bool {
+        if let Some(b) = v.as_bool() {
+            b
+        } else if let Some(i) = v.as_int() {
+            i != 0
+        } else if let Some(f) = v.as_f64() {
+            f != 0.0 && !f.is_nan()
+        } else if v.is_undefined() || v.is_null() {
+            false
+        } else if let Some(s) = Realm::str_of(v) {
+            !s.is_empty()
+        } else {
+            true
+        }
+    }
+
+    /// `ToNumber`. An object throws (no `ToPrimitive` yet).
+    pub fn to_number(&mut self, v: Value) -> R<f64> {
+        if let Some(f) = v.as_f64() {
+            return Ok(f);
+        }
+        if v.is_undefined() {
+            return Ok(f64::NAN);
+        }
+        if v.is_null() {
+            return Ok(0.0);
+        }
+        if let Some(b) = v.as_bool() {
+            return Ok(b as u8 as f64);
+        }
+        if let Some(s) = Realm::str_of(v) {
+            let t = self.text(s);
+            let t = t.trim();
+            return Ok(if t.is_empty() {
+                0.0
+            } else if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+                u64::from_str_radix(h, 16).map_or(f64::NAN, |n| n as f64)
+            } else if matches!(t, "Infinity" | "+Infinity") {
+                f64::INFINITY
+            } else if t == "-Infinity" {
+                f64::NEG_INFINITY
+            } else if t.chars().all(|c| c.is_ascii_digit() || matches!(c, '+' | '-' | '.' | 'e' | 'E')) {
+                t.parse().unwrap_or(f64::NAN)
+            } else {
+                f64::NAN
+            });
+        }
+        self.type_error("cannot convert a value to a number (ToPrimitive is S2.7)")
+    }
+
+    pub fn to_int32(f: f64) -> i32 {
+        if f.is_finite() { (f.trunc() % 4294967296.0) as i64 as i32 } else { 0 }
+    }
+
+    /// A number as a value: an integer when it is one (and not -0).
+    #[inline]
+    pub fn num(f: f64) -> Value {
+        let i = f as i32;
+        if i as f64 == f && (i != 0 || f.is_sign_positive()) { Value::int(i) } else { Value::number(f) }
+    }
+
+    pub fn num_to_string(f: f64) -> String {
+        if f.is_nan() {
+            "NaN".into()
+        } else if f.is_infinite() {
+            if f > 0.0 { "Infinity".into() } else { "-Infinity".into() }
+        } else if f == 0.0 {
+            "0".into()
+        } else {
+            format!("{f}")
+        }
+    }
+
+    /// `ToString` for a primitive. An object throws.
+    pub fn to_str(&mut self, v: Value) -> R<Str> {
+        if let Some(s) = Realm::str_of(v) {
+            return Ok(s);
+        }
+        let t = if let Some(i) = v.as_int() {
+            i.to_string()
+        } else if let Some(f) = v.as_f64() {
+            Realm::num_to_string(f)
+        } else if v.is_undefined() {
+            "undefined".into()
+        } else if v.is_null() {
+            "null".into()
+        } else if let Some(b) = v.as_bool() {
+            b.to_string()
+        } else {
+            return self.type_error("cannot convert a value to a string (ToPrimitive is S2.7)");
+        };
+        Ok(Str::from_str(&mut self.heap, &t).expect("memory"))
+    }
+
+    /// The property key of a value (`ToPropertyKey`).
+    pub fn key_of(&mut self, v: Value) -> R<Key> {
+        if let Some(i) = v.as_int().filter(|i| *i >= 0) {
+            return Ok(Key::Idx(i as u32));
+        }
+        if let Some(f) = v.as_f64()
+            && f >= 0.0
+            && f < u32::MAX as f64
+            && f.fract() == 0.0
+        {
+            return Ok(Key::Idx(f as u32));
+        }
+        let s = self.to_str(v)?;
+        let s = self.flat(s);
+        if let Some(Chars::One(b)) = s.chars()
+            && !b.is_empty()
+            && b.len() <= 10
+            && b.iter().all(u8::is_ascii_digit)
+            && (b[0] != b'0' || b.len() == 1)
+            && let Ok(n) = std::str::from_utf8(b).unwrap_or("x").parse::<u32>()
+            && n != u32::MAX
+        {
+            return Ok(Key::Idx(n));
+        }
+        Ok(Key::Name(self.atoms.atomize(&mut self.heap, s).expect("memory")))
+    }
+
+    /// The atom of the decimal text of an index (an integer key of a plain object).
+    fn idx_atom(&mut self, i: u32) -> Str {
+        self.intern(&i.to_string())
+    }
+
+    // ---- operators ----
+
+    /// `a + b` when the fast path (two numbers) did not apply.
+    pub fn add_slow(&mut self, x: Value, y: Value) -> R<Value> {
+        if let (Some(a), Some(b)) = (Realm::str_of(x), Realm::str_of(y)) {
+            return Ok(Str::concat(&mut self.heap, a, b).expect("memory").value());
+        }
+        if Realm::str_of(x).is_some() || Realm::str_of(y).is_some() {
+            let (a, b) = (self.to_str(x)?, self.to_str(y)?);
+            return Ok(Str::concat(&mut self.heap, a, b).expect("memory").value());
+        }
+        let (a, b) = (self.to_number(x)?, self.to_number(y)?);
+        Ok(Value::number(a + b))
+    }
+
+    /// The abstract relational comparison: `Some(ordering)` or `None` for a NaN.
+    pub fn compare(&mut self, x: Value, y: Value) -> R<Option<std::cmp::Ordering>> {
+        if let (Some(a), Some(b)) = (Realm::str_of(x), Realm::str_of(y)) {
+            let (a, b) = (self.flat(a), self.flat(b));
+            let (ca, cb) = (a.chars().expect("flat"), b.chars().expect("flat"));
+            return Ok(Some(ca.units().cmp(cb.units())));
+        }
+        let (a, b) = (self.to_number(x)?, self.to_number(y)?);
+        Ok(a.partial_cmp(&b))
+    }
+
+    pub fn strict_eq(&mut self, x: Value, y: Value) -> bool {
+        if x == y {
+            return x.as_f64().is_none_or(|f| !f.is_nan());
+        }
+        if let (Some(a), Some(b)) = (x.as_f64(), y.as_f64()) {
+            return a == b;
+        }
+        match (Realm::str_of(x), Realm::str_of(y)) {
+            (Some(a), Some(b)) => Str::equals(&mut self.heap, a, b).expect("memory"),
+            _ => false,
+        }
+    }
+
+    /// `==`. An object against a primitive is false (no `ToPrimitive` yet).
+    pub fn loose_eq(&mut self, x: Value, y: Value) -> R<bool> {
+        let nullish = |v: Value| v.is_undefined() || v.is_null();
+        if nullish(x) || nullish(y) {
+            return Ok(nullish(x) && nullish(y));
+        }
+        let (ox, oy) = (Realm::obj(x).is_some(), Realm::obj(y).is_some());
+        if ox || oy {
+            return Ok(x == y);
+        }
+        if let (Some(_), Some(_)) = (Realm::str_of(x), Realm::str_of(y)) {
+            return Ok(self.strict_eq(x, y));
+        }
+        let (a, b) = (self.to_number(x)?, self.to_number(y)?);
+        Ok(a == b)
+    }
+
+    // ---- properties ----
+
+    /// The prototype of an object as an object.
+    fn proto_of(&self, o: Obj) -> Option<Obj> {
+        o.proto(&self.shapes).and_then(|p| Realm::obj(Value::pointer(Kind::Object, p)))
+    }
+
+    /// Look up `key` along the prototype chain: the value of an own data property. An accessor throws (S2.7).
+    fn lookup(&mut self, mut o: Obj, key: Str) -> R<Option<Value>> {
+        loop {
+            let id = o.shape(&self.shapes);
+            if let Some(e) = self.shapes.find(id, key) {
+                if e.attrs() & A_ACC != 0 {
+                    return self.type_error("accessors are not supported yet (S2.7)");
+                }
+                return Ok(Some(o.slot(&self.shapes, e.slot())));
+            }
+            match self.proto_of(o) {
+                Some(p) => o = p,
+                None => return Ok(None),
+            }
+        }
+    }
+
+    fn undefined_read<T>(&mut self, recv: Value, name: &str) -> R<T> {
+        let what = if recv.is_null() { "null" } else { "undefined" };
+        self.type_error(&format!("cannot read properties of {what} (reading '{name}')"))
+    }
+
+    /// `recv[key]`.
+    pub fn get_prop(&mut self, recv: Value, key: Key) -> R<Value> {
+        if let Some(o) = Realm::obj(recv) {
+            return match key {
+                Key::Idx(i) => {
+                    if o.is_indexed()
+                        && let Some(v) = o.get_element(i)
+                    {
+                        return Ok(v);
+                    }
+                    let k = self.idx_atom(i);
+                    Ok(self.lookup(o, k)?.unwrap_or(Value::UNDEFINED))
+                }
+                Key::Name(k) => {
+                    if k == self.k_length && self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed {
+                        return Ok(Realm::num(o.len() as f64));
+                    }
+                    Ok(self.lookup(o, k)?.unwrap_or(Value::UNDEFINED))
+                }
+            };
+        }
+        if let Some(s) = Realm::str_of(recv) {
+            let s = self.flat(s);
+            return Ok(match key {
+                Key::Name(k) if k == self.k_length => Realm::num(s.len() as f64),
+                Key::Idx(i) => match s.unit_at(i as usize) {
+                    Some(u) => {
+                        let t = String::from_utf16_lossy(&[u]);
+                        self.string(&t)
+                    }
+                    None => Value::UNDEFINED,
+                },
+                _ => Value::UNDEFINED,
+            });
+        }
+        if recv.is_undefined() || recv.is_null() {
+            let name = match key {
+                Key::Idx(i) => i.to_string(),
+                Key::Name(k) => self.text(k),
+            };
+            return self.undefined_read(recv, &name);
+        }
+        Ok(Value::UNDEFINED)
+    }
+
+    /// `recv[key] = v`. A write to a primitive does nothing.
+    pub fn set_prop(&mut self, recv: Value, key: Key, v: Value) -> R<()> {
+        let Some(o) = Realm::obj(recv) else {
+            if recv.is_undefined() || recv.is_null() {
+                return self.type_error("cannot set properties of undefined or null");
+            }
+            return Ok(());
+        };
+        match key {
+            Key::Idx(i) if self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed => {
+                if o.set_element(&mut self.heap, i, v).is_none() {
+                    return Err(self.error(ErrKind::Range, "invalid array length"));
+                }
+                Ok(())
+            }
+            Key::Idx(i) => {
+                let k = self.idx_atom(i);
+                self.set_named(o, k, v)
+            }
+            Key::Name(k) => {
+                if k == self.k_length && self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed {
+                    let n = self.to_number(v)?;
+                    if n < 0.0 || n.fract() != 0.0 || n >= u32::MAX as f64 {
+                        return Err(self.error(ErrKind::Range, "invalid array length"));
+                    }
+                    o.set_len(&mut self.heap, n as u32);
+                    return Ok(());
+                }
+                self.set_named(o, k, v)
+            }
+        }
+    }
+
+    /// Set an own named property: write it if it is there and writable, else add it.
+    fn set_named(&mut self, o: Obj, k: Str, v: Value) -> R<()> {
+        let id = o.shape(&self.shapes);
+        match self.shapes.find(id, k) {
+            Some(e) if e.attrs() & A_ACC != 0 => self.type_error("accessors are not supported yet (S2.7)"),
+            Some(e) => {
+                if e.attrs() & A_W != 0 {
+                    o.set_slot(&self.shapes, e.slot(), v);
+                }
+                Ok(())
+            }
+            None => self.add_named(o, k, v).map(|_| ()),
+        }
+    }
+
+    fn add_named(&mut self, o: Obj, k: Str, v: Value) -> R<u32> {
+        match o.add(&mut self.heap, &mut self.shapes, k, A_W | A_E | A_C, &[v]) {
+            Some(slot) => Ok(slot),
+            None => Err(self.error(ErrKind::Range, "out of memory")),
+        }
+    }
+
+    /// `recv.name` at a site, with the cache work of the module comment. The loop tried the hit already.
+    pub fn get_field_slow(&mut self, fb: &mut Feedback, site: usize, name: Str, recv: Value) -> R<Value> {
+        let Some(o) = Realm::obj(recv) else { return self.get_prop(recv, Key::Name(name)) };
+        let id = o.shape(&self.shapes);
+        if fb.caches[site].state == POLY
+            && let Some((loc, _)) = fb.poly_find(site, id.raw())
+        {
+            // SAFETY: the pool entry was made by `Obj::loc` for this shape id, and a cache holds tree shapes only.
+            return Ok(unsafe { o.read_loc(loc) });
+        }
+        if fb.caches[site].state != MEGA
+            && self.shapes.cacheable(id)
+            && let Some(e) = self.shapes.find(id, name)
+            && e.attrs() & A_ACC == 0
+        {
+            let loc = o.loc(&self.shapes, e.slot());
+            fb.fill(site, id.raw(), loc, 0);
+            return Ok(o.slot(&self.shapes, e.slot()));
+        }
+        if fb.caches[site].state == FRESH {
+            fb.caches[site].state = SEEN;
+        }
+        self.get_prop(recv, Key::Name(name))
+    }
+
+    /// `GetGlobal`: the property of the global object, or a `ReferenceError` when it is not there.
+    pub fn get_global_slow(&mut self, fb: &mut Feedback, site: usize, name: Str) -> R<Value> {
+        let g = self.global.value();
+        let v = self.get_field_slow(fb, site, name, g)?;
+        if v.is_undefined() && !self.has_prop(g, Key::Name(name))? {
+            let n = self.text(name);
+            return Err(self.error(ErrKind::Reference, &format!("{n} is not defined")));
+        }
+        Ok(v)
+    }
+
+    /// `recv.name = v` at a site.
+    pub fn set_field_slow(&mut self, fb: &mut Feedback, site: usize, name: Str, recv: Value, v: Value) -> R<()> {
+        let Some(o) = Realm::obj(recv) else { return self.set_prop(recv, Key::Name(name), v) };
+        let id = o.shape(&self.shapes);
+        if fb.caches[site].state == POLY
+            && let Some((loc, to)) = fb.poly_find(site, id.raw())
+        {
+            // SAFETY: as in `get_field_slow`; an add entry was made for an object with room in its inline words.
+            unsafe {
+                o.write_loc(loc, v);
+                if to != 0 {
+                    o.set_shape_id(to);
+                }
+            }
+            return Ok(());
+        }
+        let layout_ok = self.shapes.cacheable(id) && fb.caches[site].state != MEGA && self.shapes.get(id).layout == Layout::Object;
+        match self.shapes.find(id, name) {
+            Some(e) if e.attrs() & A_ACC != 0 => self.type_error("accessors are not supported yet (S2.7)"),
+            Some(e) => {
+                if e.attrs() & A_W == 0 {
+                    return Ok(());
+                }
+                if layout_ok {
+                    let loc = o.loc(&self.shapes, e.slot());
+                    fb.fill(site, id.raw(), loc, 0);
+                } else if fb.caches[site].state == FRESH {
+                    fb.caches[site].state = SEEN;
+                }
+                o.set_slot(&self.shapes, e.slot(), v);
+                Ok(())
+            }
+            None => {
+                if name == self.k_length && self.shapes.get(id).layout == Layout::Indexed {
+                    return self.set_prop(recv, Key::Name(name), v);
+                }
+                let slot = self.add_named(o, name, v)?;
+                let new = o.shape(&self.shapes);
+                if layout_ok && self.shapes.cacheable(new) {
+                    let loc = o.loc(&self.shapes, slot);
+                    // Only an inline slot: the hit then needs no allocation.
+                    if loc >> 9 == 0 {
+                        fb.fill(site, id.raw(), loc, new.raw());
+                    }
+                } else if fb.caches[site].state == FRESH {
+                    fb.caches[site].state = SEEN;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Define the own data property `key` of `o` (an object literal or a computed key): add it, or overwrite it.
+    pub fn define(&mut self, o: Obj, key: Key, v: Value) -> R<()> {
+        match key {
+            Key::Idx(i) if self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed => {
+                if o.set_element(&mut self.heap, i, v).is_none() {
+                    return Err(self.error(ErrKind::Range, "invalid array length"));
+                }
+                Ok(())
+            }
+            Key::Idx(i) => {
+                let k = self.idx_atom(i);
+                self.define(o, Key::Name(k), v)
+            }
+            Key::Name(k) => {
+                let id = o.shape(&self.shapes);
+                match self.shapes.find(id, k) {
+                    Some(e) if e.attrs() & A_ACC == 0 => {
+                        o.set_slot(&self.shapes, e.slot(), v);
+                        Ok(())
+                    }
+                    Some(_) => self.type_error("accessors are not supported yet (S2.7)"),
+                    None => self.add_named(o, k, v).map(|_| ()),
+                }
+            }
+        }
+    }
+
+    pub fn has_prop(&mut self, recv: Value, key: Key) -> R<bool> {
+        let Some(mut o) = Realm::obj(recv) else { return self.type_error("cannot use 'in' on a primitive") };
+        loop {
+            let found = match key {
+                Key::Idx(i) => (o.is_indexed() && o.get_element(i).is_some()) || {
+                    let k = self.idx_atom(i);
+                    self.shapes.find(o.shape(&self.shapes), k).is_some()
+                },
+                Key::Name(k) => {
+                    self.shapes.find(o.shape(&self.shapes), k).is_some() || (k == self.k_length && self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed)
+                }
+            };
+            if found {
+                return Ok(true);
+            }
+            match self.proto_of(o) {
+                Some(p) => o = p,
+                None => return Ok(false),
+            }
+        }
+    }
+
+    pub fn delete_prop(&mut self, recv: Value, key: Key) -> R<bool> {
+        let Some(o) = Realm::obj(recv) else { return Ok(true) };
+        match key {
+            Key::Idx(i) if self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed => {
+                o.delete_element(i);
+                Ok(true)
+            }
+            Key::Idx(i) => {
+                let k = self.idx_atom(i);
+                o.remove(&mut self.shapes, k);
+                Ok(true)
+            }
+            Key::Name(k) => {
+                if let Some(e) = self.shapes.find(o.shape(&self.shapes), k)
+                    && e.attrs() & A_C == 0
+                {
+                    return Ok(false);
+                }
+                o.remove(&mut self.shapes, k);
+                Ok(true)
+            }
+        }
+    }
+
+    /// `x instanceof f`: the prototype chain of `x` holds the `prototype` property of `f`.
+    pub fn instance_of(&mut self, x: Value, f: Value) -> R<bool> {
+        let Some(fo) = Realm::obj(f).filter(|o| o.is_callable()) else { return self.type_error("the right side of instanceof is not callable") };
+        let Some(p) = self.lookup(fo, self.k_prototype)? else { return Ok(false) };
+        let (Some(po), Some(mut o)) = (Realm::obj(p), Realm::obj(x)) else { return Ok(false) };
+        while let Some(n) = self.proto_of(o) {
+            if n == po {
+                return Ok(true);
+            }
+            o = n;
+        }
+        Ok(false)
+    }
+
+    /// The own enumerable string keys of an object, as an array of strings (the keys of `for-in`).
+    pub fn own_keys(&mut self, recv: Value) -> R<Value> {
+        let mut keys: Vec<Value> = Vec::new();
+        if let Some(o) = Realm::obj(recv) {
+            if self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed {
+                for i in 0..o.len() {
+                    if o.get_element(i).is_some() {
+                        keys.push(self.string(&i.to_string()));
+                    }
+                }
+            }
+            keys.extend(self.shapes.entries(o.shape(&self.shapes)).filter(|e| e.attrs() & A_E != 0).map(|e| e.key().value()));
+        } else if recv.is_undefined() || recv.is_null() {
+            // `for (k in undefined)` has no keys.
+        } else if let Some(s) = Realm::str_of(recv) {
+            for i in 0..s.len() {
+                keys.push(self.string(&i.to_string()));
+            }
+        }
+        Ok(Obj::array(&mut self.heap, &self.shapes, self.s_array, &keys).expect("memory").value())
+    }
+
+    // ---- function cells ----
+
+    /// A function cell for code `code` in context `ctx` (`undefined` for none).
+    pub fn new_function(&mut self, code: usize, ctx: Value) -> Value {
+        let f = Obj::new(&mut self.heap, &self.shapes, self.s_func).expect("memory");
+        f.set_slot(&self.shapes, 0, Value::int(code as i32));
+        f.set_slot(&self.shapes, 1, ctx);
+        f.set_callable();
+        f.value()
+    }
+
+    /// The code index and the context of a function cell; `None` when the value is not callable.
+    #[inline]
+    pub fn function(&self, v: Value) -> Option<(usize, Value)> {
+        // SAFETY: by the invariant of `Realm::obj`.
+        if let Some((o, shape)) = unsafe { Obj::from_value_shape(v) }
+            && shape == self.func_shape
+        {
+            // SAFETY: an object of the shape `s_func` has its two slots at these places (found in `new`).
+            let (code, ctx) = unsafe { (o.read_loc(self.loc_code), o.read_loc(self.loc_ctx)) };
+            return Some((code.as_int()? as usize, ctx));
+        }
+        let f = Realm::obj(v).filter(|o| o.is_callable())?;
+        Some((f.slot(&self.shapes, 0).as_int()? as usize, f.slot(&self.shapes, 1)))
+    }
+
+    /// The object that `New` makes for constructor `f`: its prototype is `f.prototype` if that is an object.
+    pub fn new_this(&mut self, f: Value) -> R<Value> {
+        let proto = Realm::obj(f).and_then(|fo| self.lookup(fo, self.k_prototype).ok().flatten()).and_then(Realm::obj);
+        let shape = match proto {
+            Some(p) => self.shapes.root(Layout::Object, Some(p.cell()), 4),
+            None => self.s_object,
+        };
+        Ok(Obj::new(&mut self.heap, &self.shapes, shape).expect("memory").value())
+    }
+
+    /// Add the own property `name` to `o` from Rust (tests and the host).
+    pub fn set_own(&mut self, o: Obj, name: &str, v: Value) {
+        let k = self.intern(name);
+        self.define(o, Key::Name(k), v).expect("define");
+    }
+}

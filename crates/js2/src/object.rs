@@ -47,6 +47,8 @@ use std::ptr::{self, NonNull};
 const WORD: usize = 8;
 /// Object header flag: the last inline word holds the pointer to a `Slots` record.
 const F_OVER: u32 = 1;
+/// Object header flag: a script can call the object (a function cell, S2.6). A shape change keeps it.
+pub const F_CALLABLE: u32 = 2;
 /// `Elements` header flag: the record is sparse.
 const F_SPARSE: u32 = 1;
 /// A write at an index this far above the capacity of a dense record makes it sparse.
@@ -228,6 +230,89 @@ impl Obj {
     #[inline]
     pub fn value(self) -> Value {
         Value::pointer(Kind::Object, self.0)
+    }
+
+    /// As [`Obj::from_value`], with the shape id of the object: the interpreter reads the header once for the test and the cache compare.
+    ///
+    /// # Safety
+    /// As for [`Obj::from_value`].
+    #[inline]
+    pub unsafe fn from_value_shape(v: Value) -> Option<(Obj, u32)> {
+        let (Kind::Object, p) = v.as_pointer()? else { return None };
+        // SAFETY: by the contract of this function.
+        let h = unsafe { p.cast::<CellHeader>().read() };
+        matches!(h.layout(), Layout::Object | Layout::Indexed).then_some((Obj(p), h.shape_id()))
+    }
+
+    /// Can a script call the object? (A function cell: [`Obj::set_callable`].)
+    #[inline]
+    pub fn is_callable(self) -> bool {
+        self.head().flags() & F_CALLABLE != 0
+    }
+
+    pub fn set_callable(self) {
+        let h = self.head();
+        self.set_head(h.with_flags(h.flags() | F_CALLABLE));
+    }
+
+    /// The place of slot `slot` for every object that has the shape of `self` (a cache entry, S2.6). Bits 0..9: the byte offset in the
+    /// cell of the inline word. Above: 0 for an inline slot, else 1 plus the index in the overflow record, and the offset is that of
+    /// the last inline word, which holds the pointer to the record. A cache that holds the shape id of an object knows the place without
+    /// reading the header flag (see the module comment). Use it for a tree shape only (a dictionary shape may have a record early).
+    pub fn loc(self, shapes: &Shapes, slot: u32) -> u32 {
+        let h = self.head();
+        let s = shapes.of(h);
+        debug_assert!(slot < s.slots && !s.is_dict());
+        let (base, cap) = geometry(h.layout(), s.inline());
+        let i = slot as usize;
+        if i < cap - 1 || (i == cap - 1 && s.slots as usize <= cap) {
+            (base + WORD * i) as u32
+        } else {
+            (base + WORD * (cap - 1)) as u32 | ((i - (cap - 1) + 1) as u32) << 9
+        }
+    }
+
+    /// The value at a place made by [`Obj::loc`].
+    ///
+    /// # Safety
+    /// `loc` was made by `Obj::loc` for an object with the same shape id as `self`, and that shape is a tree shape.
+    #[inline]
+    pub unsafe fn read_loc(self, loc: u32) -> Value {
+        let at = self.0.as_ptr().wrapping_add((loc & 511) as usize).cast::<Value>();
+        // SAFETY: by the contract, the word is a slot of this cell, or the pointer to its overflow record.
+        unsafe {
+            match loc >> 9 {
+                0 => at.read(),
+                k => Rec(at.read().as_pointer().expect("a record pointer").1).slots().add(k as usize - 1).read(),
+            }
+        }
+    }
+
+    /// Write the value at a place made by [`Obj::loc`].
+    ///
+    /// # Safety
+    /// As for [`Obj::read_loc`].
+    #[inline]
+    pub unsafe fn write_loc(self, loc: u32, v: Value) {
+        let at = self.0.as_ptr().wrapping_add((loc & 511) as usize).cast::<Value>();
+        // SAFETY: as in `read_loc`.
+        unsafe {
+            match loc >> 9 {
+                0 => at.write(v),
+                k => Rec(at.read().as_pointer().expect("a record pointer").1).slots().add(k as usize - 1).write(v),
+            }
+        }
+    }
+
+    /// Give the object the shape with id `id` that a cache recorded for an add: the new shape has the same layout, the object has room
+    /// in its inline slots for its slots (the cache checked that when it filled), and the caller has written the new slot.
+    ///
+    /// # Safety
+    /// `id` is a live tree shape with the layout of the object and no more slots than the inline words, as the cache entry recorded.
+    #[inline]
+    pub unsafe fn set_shape_id(self, id: u32) {
+        let h = self.head();
+        self.set_head(CellHeader::object(id, h.layout(), h.flags()));
     }
 
     #[inline]
@@ -464,6 +549,11 @@ impl Obj {
         unsafe { self.elems_word().write(r.value()) }
     }
 
+    /// Has the object an elements word (is it an array)? `get_element` and `set_element` need it.
+    pub fn is_indexed(self) -> bool {
+        self.head().layout() == Layout::Indexed
+    }
+
     /// The length of the array. 0 when there are no elements.
     pub fn len(self) -> u32 {
         self.elems().map_or(0, Rec::len)
@@ -622,6 +712,75 @@ impl Obj {
         }
         r.set_len(n);
         Some(())
+    }
+}
+
+/// A context: the variables of a scope that a closure captured (`PushCtx`, S2.6). One `Slots` record with no shape: slot 0 is the
+/// parent context (or `undefined`), the variables follow. The collector scans it like any record. A script never sees one: a value
+/// that points to it is not an object for [`Obj::from_value`].
+///
+/// Type invariant: it points to a live `Slots` cell made by [`Ctx::new`]. The owner keeps it reachable. No collection may run inside
+/// a call of this module.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Ctx(NonNull<u8>);
+
+impl Ctx {
+    /// A context of `n` slots, all `fill`. `None` when out of memory.
+    pub fn new(heap: &mut Heap, n: usize, fill: Value) -> Option<Ctx> {
+        // SAFETY: no values are copied.
+        let r = unsafe { make_record(heap, Layout::Slots, 0, n, fill, ptr::null(), 0)? };
+        Some(Ctx(r.0))
+    }
+
+    /// The context of a value.
+    ///
+    /// # Safety
+    /// If `v` is a pointer value of kind `Object` that is not an object, it is a live `Slots` cell made by [`Ctx::new`].
+    #[inline]
+    pub unsafe fn from_value(v: Value) -> Option<Ctx> {
+        let (Kind::Object, p) = v.as_pointer()? else { return None };
+        // SAFETY: by the contract of this function.
+        let l = unsafe { p.cast::<CellHeader>().read() }.layout();
+        (l == Layout::Slots).then_some(Ctx(p))
+    }
+
+    #[inline]
+    pub fn value(self) -> Value {
+        Value::pointer(Kind::Object, self.0)
+    }
+
+    /// The number of slots.
+    #[inline]
+    pub fn len(self) -> usize {
+        Rec(self.0).cap()
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+
+    #[inline]
+    pub fn get(self, i: usize) -> Value {
+        let r = Rec(self.0);
+        assert!(i < r.cap(), "slot {i} of {}", r.cap());
+        // SAFETY: `i` is below the capacity, and every value is initialized.
+        unsafe { r.slots().add(i).read() }
+    }
+
+    #[inline]
+    pub fn set(self, i: usize, v: Value) {
+        let r = Rec(self.0);
+        assert!(i < r.cap(), "slot {i} of {}", r.cap());
+        // SAFETY: as in `get`.
+        unsafe { r.slots().add(i).write(v) }
+    }
+
+    /// A copy of the context (`CopyCtx`). `None` when out of memory.
+    pub fn copy(self, heap: &mut Heap) -> Option<Ctx> {
+        let r = Rec(self.0);
+        // SAFETY: `r` has `cap` initialized values.
+        let c = unsafe { make_record(heap, Layout::Slots, 0, r.cap(), Value::UNDEFINED, r.slots(), r.cap())? };
+        Some(Ctx(c.0))
     }
 }
 
