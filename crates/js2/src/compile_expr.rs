@@ -215,7 +215,7 @@ impl<'a> Fc<'a> {
             }
             Res::Global => {
                 let s = self.site_of(name)?;
-                self.op(Op::SetGlobal, src, s, 0);
+                self.op(if self.strict && !init { Op::SetGlobalS } else { Op::SetGlobal }, src, s, 0);
             }
         }
         Ok(())
@@ -479,8 +479,13 @@ impl<'a> Fc<'a> {
         if (self.is_arrow || self.derived) && !matches!(self.resolve("this", 0), Res::Global) {
             return self.read_var("this", 0, dst);
         }
-        self.op(Op::LoadThis, dst, 0, 0);
+        self.op(self.load_this_op(), dst, 0, 0);
         Ok(())
+    }
+
+    /// `LoadThis` in strict code and in the top level of a script (its `this` is the global object already).
+    pub(crate) fn load_this_op(&self) -> Op {
+        if self.strict || self.is_script { Op::LoadThis } else { Op::LoadThisS }
     }
 
     /// `this` in a new temporary register (live).
@@ -609,6 +614,21 @@ impl<'a> Fc<'a> {
     }
 
     /// The static name of a property key that a slot can hold, or `None` for a computed key or an index.
+    /// The value of the number literal that is a property key (`0x10`, `0b1`, `017`, `1_0`).
+    pub(crate) fn num_key(&self, s: Span) -> f64 {
+        use crate::lex::NumberBase as B;
+        let t = self.prog.text(s).as_bytes();
+        let base = match t {
+            [b'0', b'x' | b'X', ..] => B::Hex,
+            [b'0', b'o' | b'O', ..] => B::Octal,
+            [b'0', b'b' | b'B', ..] => B::Binary,
+            [b'0', b'0'..=b'7', ..] if t.iter().all(|c| (b'0'..=b'7').contains(c)) => B::LegacyOctal,
+            [b'0', b'0'..=b'9', ..] => B::NonOctalDecimal,
+            _ => B::Decimal,
+        };
+        self.prog.number(s, base).unwrap_or(0.0)
+    }
+
     fn static_key(&self, key: Key) -> Option<Cow<'a, str>> {
         let prog = self.prog;
         match key {
@@ -657,7 +677,7 @@ impl<'a> Fc<'a> {
             }
             (Some(n), _) => self.load_number(kt, n.parse::<f64>().unwrap_or(0.0)),
             (_, Key::Num(s)) => {
-                let v = self.prog.number(s, crate::lex::NumberBase::Decimal).unwrap_or(0.0);
+                let v = self.num_key(s);
                 self.load_number(kt, v);
             }
             _ => {
@@ -690,6 +710,7 @@ impl<'a> Fc<'a> {
             let base = self.window(props.len() as u32);
             let mut keys = Vec::with_capacity(props.len());
             for (i, p) in props.iter().enumerate() {
+                self.name_hint(p.value, &names[i]);
                 self.to(p.value, base + i as u32)?;
                 keys.push(self.atom(&names[i])?);
             }
@@ -707,8 +728,10 @@ impl<'a> Fc<'a> {
                     }
                     PropKind::Get | PropKind::Set => {
                         let key = self.prop_key(d, p.key)?;
-                        let v = self.any(p.value)?;
                         let setter = (p.kind == PropKind::Set) as u32;
+                        self.name_for_key(p.value, &key, 1 + setter);
+                        let v = self.any(p.value)?;
+                        self.name_at_run(p.value, v, &key, 1 + setter);
                         self.set_home(v, d, p.value);
                         match key {
                             Ok(n) => {
@@ -724,7 +747,9 @@ impl<'a> Fc<'a> {
                     }
                     _ => {
                         let key = self.prop_key(d, p.key)?;
+                        self.name_for_key(p.value, &key, 0);
                         let v = self.any(p.value)?;
+                        self.name_at_run(p.value, v, &key, 0);
                         if p.kind == PropKind::Method {
                             self.set_home(v, d, p.value);
                         }
@@ -747,9 +772,72 @@ impl<'a> Fc<'a> {
         Ok(())
     }
 
+    /// The anonymous function or class `e` gets the name `name` when it is made (the spec's `NamedEvaluation`).
+    pub(crate) fn name_hint(&mut self, e: ExprId, name: &str) {
+        match self.prog.expr(e).kind {
+            ExprKind::Function(f) if self.prog.func(f).name.is_none() => self.hint = Some(Hint::Func(f, name.into())),
+            ExprKind::Class(c) if self.prog.class(c).name.is_none() => self.hint = Some(Hint::Class(c, name.into())),
+            _ => {}
+        }
+    }
+
+    /// Is `e` an anonymous function or class definition?
+    pub(crate) fn is_anon_def(&self, e: ExprId) -> bool {
+        match self.prog.expr(e).kind {
+            ExprKind::Function(f) => self.prog.func(f).name.is_none(),
+            ExprKind::Class(c) => self.prog.class(c).name.is_none(),
+            _ => false,
+        }
+    }
+
+    /// `name_hint` for a property key that the text gives (`prefix` 1: `get `, 2: `set `). A computed key names the function at run time
+    /// ([`Fc::name_at_run`]).
+    pub(crate) fn name_for_key(&mut self, e: ExprId, key: &Result<Cow<'a, str>, u32>, prefix: u32) {
+        if let Ok(n) = key {
+            match prefix {
+                0 => self.name_hint(e, n),
+                p => self.name_hint(e, &format!("{}{n}", if p == 1 { "get " } else { "set " })),
+            }
+        }
+    }
+
+    /// After the function in `v` was made for the computed key in a register: `SetFnName` when it is an anonymous definition.
+    pub(crate) fn name_at_run(&mut self, e: ExprId, v: u32, key: &Result<Cow<'a, str>, u32>, prefix: u32) {
+        if let Err(k) = key
+            && self.is_anon_def(e)
+        {
+            self.set_live(v);
+            self.op(Op::SetFnName, v, *k, prefix);
+        }
+    }
+
+    pub(crate) fn hint_for_func(&mut self, f: FuncId) -> Option<Box<str>> {
+        match self.hint.take() {
+            Some(Hint::Func(g, n)) if g == f => Some(n),
+            h => {
+                self.hint = h;
+                None
+            }
+        }
+    }
+
+    pub(crate) fn hint_for_class(&mut self, c: ClassId) -> Option<Box<str>> {
+        match self.hint.take() {
+            Some(Hint::Class(d, n)) if d == c => Some(n),
+            h => {
+                self.hint = h;
+                None
+            }
+        }
+    }
+
     /// A function value: a closure over the current context. `expr`: a function expression (a name that it uses is its own binding).
     pub(crate) fn function(&mut self, f: FuncId, dst: u32, expr: bool) -> CR {
         let func = *self.prog.func(f);
+        let name = match func.name {
+            Some(n) => Some(Box::from(&*self.prog.name(n))),
+            None => self.hint_for_func(f),
+        };
         if func.is_async() {
             self.unsup("an async function");
         }
@@ -757,7 +845,7 @@ impl<'a> Fc<'a> {
             self.unsup("a generator");
         }
         let self_name = expr && func.name.is_some() && func.kind == FuncKind::Normal;
-        let i = self.child(f, self_name)?;
+        let i = self.child(f, self_name, name)?;
         self.op(Op::Closure, dst, i, 0);
         Ok(())
     }
@@ -830,9 +918,11 @@ impl<'a> Fc<'a> {
             ExprKind::Ident => {
                 let n = self.name_of(a.span);
                 if matches!(self.resolve(&n, a.span.start), Res::Global) {
-                    self.unsup("delete of a global name");
+                    let s = self.site_of(&n)?;
+                    self.op(Op::DeleteGlobal, dst, s, 0);
+                } else {
+                    self.op(Op::LoadFalse, dst, 0, 0);
                 }
-                self.op(Op::LoadFalse, dst, 0, 0);
             }
             ExprKind::Chain(_) => {
                 self.unsup("delete of an optional chain");
@@ -1032,7 +1122,20 @@ impl<'a> Fc<'a> {
             self.op(Op::CallSuper, dst, base, n);
         }
         self.set_live(dst);
-        // The first `super()` binds `this`. (A second call should throw a ReferenceError: not checked.)
+        // The first `super()` binds `this`. A second call throws a ReferenceError, after the construct.
+        let slot = match self.resolve("this", 0) {
+            Res::Reg { reg, .. } => Some(reg),
+            Res::Ctx { hops, slot, .. } => {
+                let t = self.alloc();
+                self.op(Op::GetCtx, t, hops, slot);
+                self.set_live(t);
+                Some(t)
+            }
+            Res::Global => None,
+        };
+        if let Some(t) = slot {
+            self.op(Op::CheckUnbound, t, 0, 0);
+        }
         self.store_var("this", 0, dst, true)?;
         self.free(m);
         Ok(())
@@ -1105,6 +1208,9 @@ impl<'a> Fc<'a> {
 
     fn assign_ident(&mut self, op: AssignOp, name: &str, at: u32, value: ExprId, dst: Option<u32>) -> CR {
         let res = self.resolve(name, at);
+        if matches!(op, AssignOp::Assign | AssignOp::Logical(_)) {
+            self.name_hint(value, name);
+        }
         match op {
             AssignOp::Assign => {
                 if let Res::Reg { reg, tdz: false, konst: false } = res {

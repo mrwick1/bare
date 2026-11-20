@@ -16107,3 +16107,69 @@ Engine bugs that the run found (not fixed here):
 `cargo test --locked -p bare-js2 --lib`: 377 pass (376 before, 1 new for `load_with`). `cargo test --locked -p bare-js-diff`: 4 pass (2 unit tests of the reader of the script tests and of the verdict, 2 integration tests). Clippy (`cargo clippy -p bare-js-diff -p bare-js2 --all-targets`): no finding in the new code; the findings that remain are in `crates/js2/examples/object_census.rs` and `bare-js` (not changed here).
 
 Not tested: Windows and macOS (the shell tool needs GNU `find` and `timeout`; the cargo test is portable but not run there); the old engine in `auto` and `byte` modes (only `tree`); Miri on `load_with` (safe code); the `script_tests` programs that span several lines; a second test262 checkout revision; the old engine's modules and async tests (skipped on both); how the counts move when js2 gets a step budget of another size (20,000,000 back edges, the old engine 20,000,000 steps: not the same unit).
+
+## 2026-11-20: js2 language failures (test262 `language/`)
+
+Task: fix the tests under `language/` that pass on the old engine and fail on js2. Scope: the compiler, the parser and the interpreter. Built-ins (`builtins.rs`, `bi_*.rs`) belong to two other agents. Generators, async, modules, `eval` and `with` belong to S3.
+
+### Result
+
+Same runner and same test262 checkout as the baseline (`tools/js/test262_js2.sh`, 8 jobs).
+
+| Measure | Before | After |
+| --- | ---: | ---: |
+| `language/` tests that pass on the old engine and fail on js2 | 1,779 | 1,148 |
+| js2 failures in `language/expressions` | 1,402 | 1,119 |
+| js2 failures in `language/statements` | 819 | 546 |
+| js2 failures in the other `language/` directories | 411 | 336 |
+| js2 failures, all directories | 5,840 | 5,162 |
+
+No test that passed on js2 before fails now (`language/`: 0 of 10,445 tests differ in that direction against the run of the base commit; no directory of the baseline lost a pass). The new baseline file lists the built-ins that gained passes from the function `name` and `length` change.
+
+### What changed
+
+- **Function `name` and `length`.** Each `Code` holds `fn_name` and `fn_len`. The own properties are lazy: a function cell has the flag `F_LAZY`, and `Realm::fn_props` makes `length` and `name` on the first access that can see own properties (`define_attrs`, `define_accessor`, `delete`, `getOwnPropertyDescriptor`, `getOwnPropertyNames`, `freeze`, `hasOwnProperty`). A function that nobody asks costs one flag.
+- **Names of anonymous functions and classes** (`var f = function(){}`, `{ k: () => 1 }`, default values, class fields, computed keys, `get`/`set` prefixes, private names, numeric keys in any base). The compiler passes a `Hint` to the child. A computed key sets the name at run time with the new op `SetFnName`. The default class constructor sets its name the same way.
+- **Strict-mode failures.** `Put::Fail` is a new result of a write that must fail: a non-writable data property, an accessor without a setter, an inherited read-only property, a write on a primitive. Code with `Code.strict` throws a `TypeError`; sloppy code ignores it. `delete` of a non-configurable property throws in strict code. A strict write to an unresolvable name is a `ReferenceError` (new op `SetGlobalS`).
+- **Script-level `let`, `const` and `class`** are script-scope variables (dead zone, `const` assignment error). They are not properties of the global object.
+- **Sloppy `this`** (`LoadThisS`): `undefined` and `null` become the global object. Strict code and the script top level keep `LoadThis`. A primitive `this` is not wrapped yet (needs wrapper objects).
+- **Empty object pattern** on `null` or `undefined` throws a `TypeError` (`RequireObj`).
+- **`delete name`** for a global name (`DeleteGlobal`), `delete null[k]` and `delete undefined.k` throw a `TypeError`. A global `var` or function is not configurable (`DeclGlobal` defines it with `writable` and `enumerable` only).
+- **A second `super()`** throws a `ReferenceError` after the construct (`CheckUnbound`).
+
+### Deliberate golden changes
+
+`compile_tests.rs`: `SetFnName` after the default class constructor in 5 class goldens (`a_class_expression_name_is_a_binding_of_the_class`, `class_methods_fields_and_static_elements`, `private_names_methods_and_accessors`, `super_property_reads_and_writes`, `a_derived_class_calls_super_in_an_arrow`). `a_derived_class_calls_super_in_an_arrow` also shows `GetCtx` and `CheckUnbound` before the bind of `this`. `the_script_top_level_is_global` is now `the_script_top_level_var_and_function_are_global_and_let_is_not`. The case `delete of a global name` left the list of unsupported constructs. `diff-known.txt` lost `corpus:function_gaps` (it no longer differs).
+
+### Cost
+
+`interp_load`, instructions of the run minus the run with N = 0, minimum of 3 runs (`tools/js/instr.sh`), base `e6a65639` against this branch, on archMachine:
+
+| Row | Default profile | `codegen-units=1` |
+| --- | ---: | ---: |
+| `loopfn 3000000` | -3.9% | -2.5% |
+| `calls 1000000` | -0.28% | -1.7% |
+| `fib 27` | +0.28% | -1.1% |
+| `closures 1000000` | +0.43% | -0.3% |
+| `objects 1000000` | +0.64% | -0.5% |
+
+`objects` is over +0.5% with the default profile and below it with `codegen-units=1` on both trees. It passes by the rule of the cost rows (the layout of the loop moves with the build, not the work). Hypothesis: the `Put::Fail` arm that the write macro now has moves the code of the hot arms. These rows are hand-written bytecode, so the compiler changes do not touch them.
+
+### Still failing (the groups that are left in `language/`)
+
+- Needs wrapper objects (443), `ToPrimitive` or accessor re-entry (about 120), `Symbol`, `RegExp`, `Function`: other agents or S4.
+- Not built: generators (67), `with` (29), async (24), direct `eval` (25). S3.
+- A parameter that reads a later parameter must throw a `ReferenceError` (`function f(a = b, b)`, 9 tests). The argument sits in the register of the parameter, so a dead zone needs a copy. Not done.
+- A compound assignment where the getter deletes the global (`x ^= 3`, 11 tests) and where `ToPropertyKey` throws (`base[prop] *= expr()`, 11 tests): the order of the reads and the re-entry of the getter.
+- `super` outside a call or member access (`delete super.x`, 4 tests), `delete` of an optional chain.
+- Mapped `arguments` with `defineProperty` (22 tests).
+- Class field and computed-key checks: `static ['prototype']` (4), class fields on frozen objects, `fields-run-once-on-double-super`.
+- Integer keys first in `for-in` and `Object.keys` order (js2 keeps the insertion order, S3).
+- Known gap of the script scope: a top-level `let` or `const` of one script is not visible to the next script of the same realm (a harness `const` is invisible to the test script). Cross-script lexical scope is future work. No test262 test fails from it today.
+- `SetFnName` for the default class constructor is run once for each class definition (cold).
+
+### Tests
+
+`cargo test --locked -p bare-js2 --lib`: 377 pass. `cargo test --locked --release -p bare-js-diff`: all pass (256 programs, 0 new differences, 20 known; `function_gaps` removed from the list).
+
+Not tested: Windows and macOS; the `language/` tests under the other agents' branches (their merge may change counts); wall time of the full run on an idle machine (the load average was above 8); the micro rows on another machine.

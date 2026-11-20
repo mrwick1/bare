@@ -66,7 +66,7 @@ use crate::gc::Marker;
 use crate::interp_rt::{ErrKind, Feedback, Got, Key, Put, R, Realm};
 use crate::object::{F_DERIVED, Obj};
 use crate::roots::RootMaps;
-use crate::shapes::{A_C, A_W};
+use crate::shapes::{A_C, A_E, A_W};
 use crate::value::Value;
 use std::cmp::Ordering;
 use std::sync::Arc;
@@ -214,7 +214,9 @@ impl Vm {
         prog.codes.extend(default_ctors());
         scan_flags(&mut prog.codes);
         let fbs = prog.codes.iter().map(|_| Feedback::default()).collect();
-        Vm { realm: Realm::new(shared), stack: Vec::new(), fbs, prog, dctor, fuel: u64::MAX }
+        let mut realm = Realm::new(shared);
+        realm.fn_info = prog.codes.iter().map(|c| (c.atoms.get(c.fn_name as usize).copied(), c.fn_len)).collect();
+        Vm { realm, stack: Vec::new(), fbs, prog, dctor, fuel: u64::MAX }
     }
 
     /// A function cell for code `code` with no context.
@@ -403,6 +405,12 @@ impl Vm {
                 match tri!(realm.set_field_slow(fb, $site, n, recv, val)) {
                     Put::Done => pc = $next,
                     Put::Set(f) => call_set!(f, recv, val, $next),
+                    Put::Fail => {
+                        if code.strict {
+                            err!(ErrKind::Type, "cannot assign to a read-only property or a property with no setter")
+                        }
+                        pc = $next;
+                    }
                 }
             }};
         }
@@ -727,6 +735,11 @@ impl Vm {
                         r!(a!()) = record(stack, fp, 1);
                         pc = next;
                     }
+                    Op::LoadThisS => {
+                        let t = record(stack, fp, 1);
+                        r!(a!()) = if t.is_undefined() || t.is_null() { realm.global.value() } else { t };
+                        pc = next;
+                    }
                     Op::LoadHole => {
                         r!(a!()) = Value::HOLE;
                         pc = next;
@@ -741,6 +754,12 @@ impl Vm {
                     }
                     Op::LoadAtom => {
                         r!(a!()) = code.atoms[bx!()].value();
+                        pc = next;
+                    }
+                    Op::CheckUnbound => {
+                        if !r!(a!()).is_hole() {
+                            err!(ErrKind::Reference, "super() called twice")
+                        }
                         pc = next;
                     }
                     Op::CheckInit => {
@@ -820,6 +839,18 @@ impl Vm {
                         let g = realm.global.value();
                         set_field!(g, r!(a!()), bx!(), next);
                     }
+                    Op::SetGlobalS => {
+                        gate!();
+                        let (g, n) = (realm.global.value(), name!(bx!()));
+                        // A cache entry of the global's shape says that an earlier write found the name there.
+                        // SAFETY: the register holds a live value.
+                        let known = unsafe { Obj::from_value_shape(g) }.is_some_and(|(_, shape)| fb.caches[bx!()].shape == shape);
+                        if !known && !tri!(realm.has_prop(g, Key::Name(n))) {
+                            let t = realm.text(n);
+                            err!(ErrKind::Reference, "{t} is not defined")
+                        }
+                        set_field!(g, r!(a!()), bx!(), next);
+                    }
                     Op::TypeofGlobal | Op::TypeofName => {
                         gate!();
                         let n = name!(bx!());
@@ -873,7 +904,20 @@ impl Vm {
                         match tri!(realm.set_prop_g(recv, k, v)) {
                             Put::Done => pc = next,
                             Put::Set(f) => call_set!(f, recv, v, next),
+                            Put::Fail => {
+                            if code.strict {
+                                err!(ErrKind::Type, "cannot assign to a read-only property or a property with no setter")
+                            }
+                            pc = next;
+                    }
                         }
+                    }
+                    Op::RequireObj => {
+                        let v = r!(a!());
+                        if v.is_undefined() || v.is_null() {
+                            err!(ErrKind::Type, "cannot destructure undefined or null")
+                        }
+                        pc = next;
                     }
                     Op::ToKey => {
                         gate!();
@@ -894,9 +938,22 @@ impl Vm {
                         tri!(realm.define(o, k, r!(c!())));
                         pc = next;
                     }
+                    Op::DeleteGlobal => {
+                        gate!();
+                        let (g, n) = (realm.global.value(), name!(bx!()));
+                        r!(a!()) = Value::bool(tri!(realm.delete_prop(g, Key::Name(n))));
+                        pc = next;
+                    }
                     Op::Delete => {
+                        let o = r!(b!());
+                        if o.is_undefined() || o.is_null() {
+                            err!(ErrKind::Type, "cannot delete a property of undefined or null")
+                        }
                         let k = tri!(realm.key_of(r!(c!())));
                         let ok = tri!(realm.delete_prop(r!(b!()), k));
+                        if !ok && code.strict {
+                            err!(ErrKind::Type, "cannot delete a property that is not configurable")
+                        }
                         r!(a!()) = Value::bool(ok);
                         pc = next;
                     }
@@ -1218,7 +1275,7 @@ impl Vm {
                         let n = name!(bx!());
                         let g = realm.global;
                         if !tri!(realm.has_prop(g.value(), Key::Name(n))) {
-                            tri!(realm.define(g, Key::Name(n), undef));
+                            tri!(realm.define_attrs(g, Key::Name(n), A_W | A_E, undef));
                         }
                         pc = next;
                     }
@@ -1370,6 +1427,12 @@ impl Vm {
                         tri!(realm.make_class(r!(a!()), Some(r!(b!()))));
                         pc = next;
                     }
+                    Op::SetFnName => {
+                        gate!();
+                        let k = tri!(realm.key_of(r!(b!())));
+                        tri!(realm.name_function(r!(a!()), k, c!() as u32));
+                        pc = next;
+                    }
                     Op::DefaultCtor => {
                         gate!();
                         r!(a!()) = realm.new_function(dctor[b!() & 1], undef);
@@ -1400,6 +1463,12 @@ impl Vm {
                         match tri!(realm.private_set(r!(a!()), r!(b!()), r!(c!()))) {
                             Put::Done => pc = next,
                             Put::Set(f) => call_set!(f, r!(a!()), r!(c!()), next),
+                            Put::Fail => {
+                            if code.strict {
+                                err!(ErrKind::Type, "cannot assign to a read-only property or a property with no setter")
+                            }
+                            pc = next;
+                    }
                         }
                     }
                     Op::HasPrivate => {
@@ -1451,6 +1520,12 @@ impl Vm {
                         match tri!(realm.super_set(home!(), r!(a!()), Key::Name(n), r!(b!()))) {
                             Put::Done => pc = next,
                             Put::Set(f) => call_set!(f, r!(a!()), r!(b!()), next),
+                            Put::Fail => {
+                            if code.strict {
+                                err!(ErrKind::Type, "cannot assign to a read-only property or a property with no setter")
+                            }
+                            pc = next;
+                    }
                         }
                     }
                     Op::SetSuperElem => {
@@ -1459,6 +1534,12 @@ impl Vm {
                         match tri!(realm.super_set(home!(), r!(a!()), k, r!(c!()))) {
                             Put::Done => pc = next,
                             Put::Set(f) => call_set!(f, r!(a!()), r!(c!()), next),
+                            Put::Fail => {
+                            if code.strict {
+                                err!(ErrKind::Type, "cannot assign to a read-only property or a property with no setter")
+                            }
+                            pc = next;
+                    }
                         }
                     }
                     Op::CallSuper | Op::CallSuperSpread => {

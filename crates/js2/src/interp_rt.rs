@@ -40,7 +40,7 @@ use crate::cell::Layout;
 use crate::gc::{Marker, collect};
 use crate::heap::Heap;
 use crate::builtins::{Hint, Native};
-use crate::object::{Ctx, F_CLASS, F_NATIVE, Obj};
+use crate::object::{Ctx, F_CLASS, F_LAZY, F_NATIVE, Obj};
 use crate::shapes::{A_ACC, A_C, A_E, A_W, ShapeId, Shapes};
 use crate::string::{Chars, Str};
 use crate::value::{Kind, Value};
@@ -173,6 +173,8 @@ pub enum Got {
 pub enum Put {
     Done,
     Set(Value),
+    /// The write did not happen (a read-only property, an accessor with no setter, a primitive): strict code throws a TypeError.
+    Fail,
 }
 
 /// What a property lookup found: a data value, or the getter and the setter of an accessor.
@@ -238,6 +240,8 @@ pub struct Realm {
     pub s_native: ShapeId,
     /// The built-ins written in Rust (`builtins.rs`).
     pub natives: Vec<Native>,
+    /// The shared atom of the `name` and the `length` of each code (`Code::fn_name`, `Code::fn_len`), for `Realm::fn_props`.
+    pub fn_info: Vec<(Option<Str>, u16)>,
     /// The index of the native that runs a bound function.
     pub(crate) bound_id: i32,
     /// While a native runs: the function cell that was called, and `new.target` (`undefined` for a plain call).
@@ -343,6 +347,7 @@ impl Realm {
             error_protos,
             s_native,
             natives: Vec::new(),
+            fn_info: Vec::new(),
             bound_id: 0,
             callee: Value::UNDEFINED,
             nt: Value::UNDEFINED,
@@ -719,6 +724,7 @@ impl Realm {
 
     /// The value of an own or inherited data property. An accessor throws: use [`Realm::get_prop_g`] where the interpreter can call.
     pub(crate) fn lookup(&mut self, o: Obj, key: Str) -> R<Option<Value>> {
+        self.fn_props(o);
         match self.lookup_g(o, key) {
             Some(Slot::Data(v)) => Ok(Some(v)),
             Some(Slot::Acc(..)) => self.type_error("accessors are not supported here (the host needs a call)"),
@@ -736,7 +742,7 @@ impl Realm {
     }
 
     pub(crate) fn setter(s: Value) -> Put {
-        if s.is_undefined() { Put::Done } else { Put::Set(s) }
+        if s.is_undefined() { Put::Fail } else { Put::Set(s) }
     }
 
     fn undefined_read<T>(&mut self, recv: Value, name: &str) -> R<T> {
@@ -747,6 +753,7 @@ impl Realm {
     /// `recv[key]`; an accessor with a getter gives [`Got::Get`].
     pub fn get_prop_g(&mut self, recv: Value, key: Key) -> R<Got> {
         if let Some(o) = Realm::obj(recv) {
+            self.fn_props(o);
             return match key {
                 Key::Idx(i) => {
                     if o.is_indexed()
@@ -813,8 +820,9 @@ impl Realm {
             if recv.is_undefined() || recv.is_null() {
                 return self.type_error("cannot set properties of undefined or null");
             }
-            return Ok(Put::Done);
+            return Ok(Put::Fail);
         };
+        self.fn_props(o);
         match key {
             Key::Idx(i) if self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed => {
                 if o.set_element(&mut self.heap, i, v).is_none() {
@@ -843,7 +851,7 @@ impl Realm {
     /// `recv[key] = v` where a setter throws (the host and the tests have no frame to call from).
     pub fn set_prop(&mut self, recv: Value, key: Key, v: Value) -> R<()> {
         match self.set_prop_g(recv, key, v)? {
-            Put::Done => Ok(()),
+            Put::Done | Put::Fail => Ok(()),
             Put::Set(_) => self.type_error("accessors are not supported here (the host needs a call)"),
         }
     }
@@ -853,7 +861,10 @@ impl Realm {
         let mut p = self.proto_of(o)?;
         loop {
             if let Some(e) = self.shapes.find(p.shape(&self.shapes), k) {
-                return (e.attrs() & A_ACC != 0).then(|| Self::setter(p.slot(&self.shapes, e.slot() + 1)));
+                if e.attrs() & A_ACC != 0 {
+                    return Some(Self::setter(p.slot(&self.shapes, e.slot() + 1)));
+                }
+                return (e.attrs() & A_W == 0).then_some(Put::Fail);
             }
             p = self.proto_of(p)?;
         }
@@ -865,9 +876,10 @@ impl Realm {
         match self.shapes.find(id, k) {
             Some(e) if e.attrs() & A_ACC != 0 => Ok(Self::setter(o.slot(&self.shapes, e.slot() + 1))),
             Some(e) => {
-                if e.attrs() & A_W != 0 {
-                    o.set_slot(&self.shapes, e.slot(), v);
+                if e.attrs() & A_W == 0 {
+                    return Ok(Put::Fail);
                 }
+                o.set_slot(&self.shapes, e.slot(), v);
                 Ok(Put::Done)
             }
             None => {
@@ -928,6 +940,7 @@ impl Realm {
     /// `recv.name = v` at a site.
     pub fn set_field_slow(&mut self, fb: &mut Feedback, site: usize, name: Str, recv: Value, v: Value) -> R<Put> {
         let Some(o) = Realm::obj(recv) else { return self.set_prop_g(recv, Key::Name(name), v) };
+        self.fn_props(o);
         let id = o.shape(&self.shapes);
         if fb.caches[site].state == POLY
             && let Some((loc, to)) = fb.poly_find(site, id.raw())
@@ -946,7 +959,7 @@ impl Realm {
             Some(e) if e.attrs() & A_ACC != 0 => Ok(Self::setter(o.slot(&self.shapes, e.slot() + 1))),
             Some(e) => {
                 if e.attrs() & A_W == 0 {
-                    return Ok(Put::Done);
+                    return Ok(Put::Fail);
                 }
                 if layout_ok {
                     let loc = o.loc(&self.shapes, e.slot());
@@ -982,6 +995,7 @@ impl Realm {
 
     /// Define the own data property `key` of `o` (an object literal or a computed key): add it, or overwrite it.
     pub fn define(&mut self, o: Obj, key: Key, v: Value) -> R<()> {
+        self.fn_props(o);
         match key {
             Key::Idx(i) if self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed => {
                 if o.set_element(&mut self.heap, i, v).is_none() {
@@ -1013,6 +1027,7 @@ impl Realm {
     pub fn has_prop(&mut self, recv: Value, key: Key) -> R<bool> {
         let Some(mut o) = Realm::obj(recv) else { return self.type_error("cannot use 'in' on a primitive") };
         loop {
+            self.fn_props(o);
             let found = match key {
                 Key::Idx(i) => (o.is_indexed() && o.get_element(i).is_some()) || {
                     let k = self.idx_atom(i);
@@ -1034,6 +1049,7 @@ impl Realm {
 
     pub fn delete_prop(&mut self, recv: Value, key: Key) -> R<bool> {
         let Some(o) = Realm::obj(recv) else { return Ok(true) };
+        self.fn_props(o);
         match key {
             Key::Idx(i) if self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed => {
                 o.delete_element(i);
@@ -1074,6 +1090,7 @@ impl Realm {
     pub fn own_keys(&mut self, recv: Value) -> R<Value> {
         let mut keys: Vec<Value> = Vec::new();
         if let Some(o) = Realm::obj(recv) {
+            self.fn_props(o);
             if self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed {
                 for i in 0..o.len() {
                     if o.get_element(i).is_some() {
@@ -1100,7 +1117,44 @@ impl Realm {
         f.set_slot(&self.shapes, 0, Value::int(code as i32));
         f.set_slot(&self.shapes, 1, ctx);
         f.set_callable();
+        f.set_flag(F_LAZY);
         f.value()
+    }
+
+    /// Give a function cell its own `length` and `name` now (not writable, not enumerable, configurable). It runs before any look at the
+    /// own properties of the cell; a cell that nothing inspects never pays for them.
+    #[inline]
+    pub(crate) fn fn_props(&mut self, o: Obj) {
+        if o.has_flag(F_LAZY) {
+            self.fn_props_slow(o);
+        }
+    }
+
+    #[cold]
+    fn fn_props_slow(&mut self, o: Obj) {
+        o.clear_flag(F_LAZY);
+        let (name, len) = o.slot(&self.shapes, 0).as_int().and_then(|c| self.fn_info.get(c as usize).copied()).unwrap_or((None, 0));
+        let name = match name {
+            Some(s) => self.atoms.adopt(s),
+            None => self.intern(""),
+        };
+        self.define_attrs(o, Key::Name(self.k_length), A_C, Value::int(len as i32)).expect("memory");
+        self.define_attrs(o, Key::Name(self.k_name), A_C, name.value()).expect("memory");
+    }
+
+    /// `SetFunctionName(f, key, prefix)` of a computed key: `prefix` 1 is `get `, 2 is `set `.
+    pub fn name_function(&mut self, f: Value, key: Key, prefix: u32) -> R<()> {
+        let Some(o) = Realm::obj(f).filter(|o| o.is_callable()) else { return Ok(()) };
+        self.fn_props(o);
+        let mut t = match key {
+            Key::Idx(i) => i.to_string(),
+            Key::Name(k) => self.text(k),
+        };
+        if prefix != 0 {
+            t.insert_str(0, if prefix == 1 { "get " } else { "set " });
+        }
+        let n = self.intern(&t);
+        self.define_attrs(o, Key::Name(self.k_name), A_C, n.value())
     }
 
     /// The code index and the context of a function cell; `None` when the value is not callable.

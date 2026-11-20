@@ -34,6 +34,7 @@ impl Realm {
 
     /// Define the own data property `key` of `o` with the attributes `attrs` (a method: not enumerable).
     pub fn define_attrs(&mut self, o: Obj, key: Key, attrs: u8, v: Value) -> R<()> {
+        self.fn_props(o);
         let k = self.key_atom(key);
         match self.shapes.find(o.shape(&self.shapes), k) {
             Some(e) if e.attrs() == attrs => {
@@ -47,6 +48,7 @@ impl Realm {
 
     /// Define the getter (`setter` false) or the setter of the own accessor `key`. A getter and a setter of one name share a property.
     pub fn define_accessor(&mut self, o: Obj, key: Key, f: Value, setter: bool, enumerable: bool) -> R<()> {
+        self.fn_props(o);
         let k = self.key_atom(key);
         let attrs = A_ACC | A_C | if enumerable { A_E } else { 0 };
         let mut vals = [Value::UNDEFINED; 2];
@@ -144,7 +146,7 @@ impl Realm {
         let d = self.private_desc(k);
         match self.shapes.find(ob.shape(&self.shapes), k) {
             Some(e) if e.attrs() & A_ACC != 0 => match Self::setter(ob.slot(&self.shapes, e.slot() + 1)) {
-                Put::Done => self.type_error(&format!("'{d}' was defined without a setter")),
+                Put::Fail => self.type_error(&format!("'{d}' was defined without a setter")),
                 p => Ok(p),
             },
             Some(e) if e.attrs() & A_W == 0 => self.type_error(&format!("private method {d} is not writable")),

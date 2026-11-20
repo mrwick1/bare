@@ -19,7 +19,7 @@ use super::*;
 impl<'a> Fc<'a> {
     /// A new compiler for a function that has no tree of its own: it sees the variables of the scopes that are open here.
     fn inline_fc(&self, id: FnId, flags: u16) -> Fc<'a> {
-        let mut c = Fc::new(self.prog, self.facts, self.atoms, &Input { chain: self.cur_ctx.clone(), self_name: false });
+        let mut c = Fc::new(self.prog, self.facts, self.atoms, &Input { chain: self.cur_ctx.clone(), self_name: false, name: None });
         c.strict = true;
         c.fn_id = Some(id);
         c.fn_flags = flags;
@@ -43,17 +43,30 @@ impl<'a> Fc<'a> {
         }
         self.inline.push(code);
         self.funcs.push(id);
-        self.children.push(Child { id, chain: self.cur_ctx.clone(), self_name: false, ready: Some(self.inline.len() as u32 - 1) });
+        self.children.push(Child { id, chain: self.cur_ctx.clone(), self_name: false, name: None, ready: Some(self.inline.len() as u32 - 1) });
         if self.funcs.len() > u16::MAX as usize {
             return Err(CompileError::Limit("more than 65,535 child functions"));
         }
         Ok(self.funcs.len() as u32 - 1)
     }
 
+    /// The `name` of a method or accessor: `get x`, `set x` or `x`.
+    fn prefixed(n: &str, setter: u32, getter: bool) -> Box<str> {
+        match (getter, setter) {
+            (true, _) => format!("get {n}").into(),
+            (_, 1) => format!("set {n}").into(),
+            _ => n.into(),
+        }
+    }
+
     /// A class: its constructor goes to `dst`.
     pub(crate) fn class(&mut self, cid: ClassId, dst: u32) -> CR {
         let prog = self.prog;
         let c = *prog.class(cid);
+        let cname: Option<Box<str>> = match c.name {
+            Some(n) => Some(Box::from(&*prog.name(n))),
+            None => self.hint_for_class(cid),
+        };
         let elems: Vec<ClassElem> = prog.list(c.elems).map(|e| *prog.elem(e)).collect();
         let m = self.mark();
         let is_ctor = |e: &ClassElem| matches!(e.kind, ElemKind::Method(f) if matches!(prog.func(f).kind, FuncKind::Constructor | FuncKind::DerivedConstructor));
@@ -115,10 +128,22 @@ impl<'a> Fc<'a> {
         let ctor = self.alloc();
         match elems.iter().find(|e| is_ctor(e)).map(|e| e.kind) {
             Some(ElemKind::Method(f)) => {
-                let i = self.child(f, false)?;
+                let i = self.child(f, false, cname.clone())?;
                 self.op(Op::Closure, ctor, i, 0);
+                self.set_live(ctor);
             }
-            _ => self.op(Op::DefaultCtor, ctor, sup.is_some() as u32, 0),
+            _ => {
+                self.op(Op::DefaultCtor, ctor, sup.is_some() as u32, 0);
+                self.set_live(ctor);
+                if let Some(n) = &cname {
+                    let t = self.alloc();
+                    let a = self.atom(n)?;
+                    self.op(Op::LoadAtom, t, a, 0);
+                    self.set_live(t);
+                    self.op(Op::SetFnName, ctor, t, 0);
+                    self.free(t);
+                }
+            }
         }
         self.set_live(ctor);
         match sup {
@@ -146,6 +171,7 @@ impl<'a> Fc<'a> {
                     if let Key::Private(s) = e.key {
                         let n = self.private_name(s);
                         let fr = self.alloc();
+                        self.hint = Some(Hint::Func(f, Self::prefixed(&n, setter, getter)));
                         self.function(f, fr, false)?;
                         self.set_live(fr);
                         if self.func_uses_super(f) {
@@ -168,8 +194,14 @@ impl<'a> Fc<'a> {
                     } else {
                         let key = self.prop_key(obj, e.key)?;
                         let fr = self.alloc();
+                        if let Ok(n) = &key {
+                            self.hint = Some(Hint::Func(f, Self::prefixed(n, setter, getter)));
+                        }
                         self.function(f, fr, false)?;
                         self.set_live(fr);
+                        if let Err(k) = &key {
+                            self.op(Op::SetFnName, fr, *k, if getter { 1 } else { 2 * setter });
+                        }
                         if self.func_uses_super(f) {
                             self.op(Op::SetHome, fr, obj, 0);
                         }
@@ -348,6 +380,10 @@ impl<'a> Fc<'a> {
                     let k = c.alloc();
                     c.read_var(&n, 0, k)?;
                     c.set_live(k);
+                    if let (Key::Private(s), Some(x)) = (e.key, init) {
+                        let t = c.private_name(s);
+                        c.name_hint(x, &t);
+                    }
                     let v = c.field_value(init)?;
                     c.op(Op::DefPrivate, th, k, v);
                 }
@@ -356,16 +392,25 @@ impl<'a> Fc<'a> {
                     c.read_var(&format!("%k{i}"), 0, k)?;
                     c.set_live(k);
                     let v = c.field_value(init)?;
+                    if init.is_some_and(|x| c.is_anon_def(x)) {
+                        c.op(Op::SetFnName, v, k, 0);
+                    }
                     c.op(Op::DefElem, th, k, v);
                 }
                 key => match c.prop_key(th, key)? {
                     Ok(n) => {
+                        if let Some(x) = init {
+                            c.name_hint(x, &n);
+                        }
                         let v = c.field_value(init)?;
                         let s = c.site_of(&n)?;
                         c.op(Op::DefField, th, v, s);
                     }
                     Err(k) => {
                         let v = c.field_value(init)?;
+                        if init.is_some_and(|x| c.is_anon_def(x)) {
+                            c.op(Op::SetFnName, v, k, 0);
+                        }
                         c.op(Op::DefElem, th, k, v);
                     }
                 },
