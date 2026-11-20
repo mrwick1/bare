@@ -126,3 +126,10 @@ For the rest I suggest B′ as the next step, if the owner wants a start near 1.
 ## 7. Not measured
 
 Windows and macOS. Miri on the new `Op::Lazy` arm (it adds no `unsafe`). Wall time (instruction counts only; the machine had a load average of 11 to 40). A lazy compile inside a getter, a setter, a constructor with fields, or a native's `Outcome::Enter` (all use the same `enter!`; in the new tests only `forEach`, `reduce`, `Array.from`, `Array.of`, `sort` and `map` are first calls, and each runs under constant collection too). The first call on a cold CPU cache.
+
+## 8. Decisions (owner, 2026-11-20)
+
+- Next step: build B′, the generated, checked-in pre-parse facts of the prelude, with a test that fails when the file is old.
+- Lazy compile applies to user scripts too. One PR, measured on `eval_load` and the bundle-like program (instructions and peak RSS).
+- Shared lazy state and code across the realms of a session: decide later, with S2.8, when the browser slice shows how many realms a page makes.
+- Question 2 (start below 4.0 M for the S2 gate) was not asked. The gate stays the net slope.
