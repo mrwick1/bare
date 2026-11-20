@@ -102,9 +102,13 @@ impl<'a> Fc<'a> {
                 self.emit_src(src, t)?;
                 let skip = self.label();
                 self.jmp_r(Op::JSNeUndef, t, skip);
+                let tp = *prog.pat(target);
+                if matches!(tp.kind, PatKind::Ident) {
+                    let name = prog.name(tp.span);
+                    self.name_hint(default, &name);
+                }
                 self.to(default, t)?;
                 self.bind(skip);
-                let tp = *prog.pat(target);
                 if matches!(tp.kind, PatKind::Ident) && self.target_reg(target, mode).is_some() {
                     // already in the variable
                 } else {
@@ -176,6 +180,9 @@ impl<'a> Fc<'a> {
     fn object_pattern(&mut self, list: List<PatProp>, v: u32, mode: Bind) -> CR {
         let prog = self.prog;
         let props: Vec<PatProp> = prog.list(list).map(|p| *prog.pat_prop(p)).collect();
+        if props.is_empty() {
+            self.op(Op::RequireObj, v, 0, 0);
+        }
         // With a rest property, the keys of the other properties go to a window of registers that `ObjRest` reads.
         let nkeys = props.len() as u32 - props.iter().any(|p| matches!(p.key, Key::None)) as u32;
         let base = props.iter().any(|p| matches!(p.key, Key::None)).then(|| self.window(nkeys));
@@ -221,7 +228,7 @@ impl<'a> Fc<'a> {
                 }
                 Key::Num(s) => {
                     let k = slot.unwrap_or_else(|| self.alloc());
-                    let n = prog.number(s, crate::lex::NumberBase::Decimal).unwrap_or(0.0);
+                    let n = self.num_key(s);
                     self.load_number(k, n);
                     self.set_live(k);
                     self.bind_src(pp.value, Src::Elem(v, k), mode)?;
