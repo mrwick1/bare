@@ -51,16 +51,14 @@
 //! - No undo history, no `beforeinput`, no `styleWithCSS`, no `defaultParagraphSeparator`.
 
 use crate::browser::*;
+use crate::browser_scoped::*;
+use bare_js_api::{Args, Local, Type};
 use crate::browser_ui::Ui;
 use bare_html::dom::{Document, NodeData, NodeId};
 use bare_js::eval::Interp;
 use bare_js::value::Value;
 
 type V = R<Value>;
-
-fn arg(a: &[Value], i: usize) -> Value {
-    a.get(i).copied().unwrap_or(Value::Undefined)
-}
 
 fn num(n: u32) -> Value {
     Value::Number(n as f64)
@@ -1077,111 +1075,121 @@ const COMMANDS: [&str; 15] = [
     "insertunorderedlist", "insertorderedlist", "createlink", "unlink", "inserthtml", "removeformat",
 ];
 
-fn name_arg(d: &Dom, it: &mut Interp<'_>, a: &[Value]) -> R<String> {
-    Ok(d.string_arg(it, arg(a, 0))?.to_ascii_lowercase())
+fn name_arg<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>) -> Res<'s, String> {
+    Ok(d.arg_str_s(s, a, 0)?.to_ascii_lowercase())
 }
 
-fn exec_command(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
-    let name = name_arg(d, it, a)?;
+/// The string of the optional argument `i`: empty for `undefined`.
+fn opt_arg<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>, i: usize) -> Res<'s, String> {
+    let v = arg_s(s, a, i);
+    if s.type_of(v) == Type::Undefined { Ok(String::new()) } else { d.string_arg_s(s, v) }
+}
+
+fn exec_command<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let name = name_arg(d, s, a)?;
     let ok = match name.as_str() {
         "inserttext" => {
-            let text = if matches!(arg(a, 2), Value::Undefined) { String::new() } else { d.string_arg(it, arg(a, 2))? };
-            d.insert_text(it, &text)?
+            let text = opt_arg(d, s, a, 2)?;
+            old(s, |it| d.insert_text(it, &text))?
         }
-        "delete" => d.delete_back(it)?,
-        "forwarddelete" => d.delete_forward(it)?,
-        "insertparagraph" => d.insert_paragraph(it)?,
-        "insertlinebreak" => d.insert_line_break(it)?,
-        "selectall" => d.select_all(it)?,
-        "bold" => d.format_inline(it, &["b", "strong"], "b", "formatBold")?,
-        "italic" => d.format_inline(it, &["i", "em"], "i", "formatItalic")?,
-        "underline" => d.format_inline(it, &["u"], "u", "formatUnderline")?,
-        "insertunorderedlist" => d.list(it, "ul")?,
-        "insertorderedlist" => d.list(it, "ol")?,
+        "delete" => old(s, |it| d.delete_back(it))?,
+        "forwarddelete" => old(s, |it| d.delete_forward(it))?,
+        "insertparagraph" => old(s, |it| d.insert_paragraph(it))?,
+        "insertlinebreak" => old(s, |it| d.insert_line_break(it))?,
+        "selectall" => old(s, |it| d.select_all(it))?,
+        "bold" => old(s, |it| d.format_inline(it, &["b", "strong"], "b", "formatBold"))?,
+        "italic" => old(s, |it| d.format_inline(it, &["i", "em"], "i", "formatItalic"))?,
+        "underline" => old(s, |it| d.format_inline(it, &["u"], "u", "formatUnderline"))?,
+        "insertunorderedlist" => old(s, |it| d.list(it, "ul"))?,
+        "insertorderedlist" => old(s, |it| d.list(it, "ol"))?,
         "createlink" => {
-            let url = if matches!(arg(a, 2), Value::Undefined) { String::new() } else { d.string_arg(it, arg(a, 2))? };
-            d.create_link(it, &url)?
+            let url = opt_arg(d, s, a, 2)?;
+            old(s, |it| d.create_link(it, &url))?
         }
-        "unlink" => d.unwrap_command(it, &["a"])?,
-        "removeformat" => d.unwrap_command(it, &["b", "strong", "i", "em", "u", "s", "strike", "sub", "sup", "font", "span"])?,
+        "unlink" => old(s, |it| d.unwrap_command(it, &["a"]))?,
+        "removeformat" => old(s, |it| d.unwrap_command(it, &["b", "strong", "i", "em", "u", "s", "strike", "sub", "sup", "font", "span"]))?,
         "inserthtml" => {
-            let html = if matches!(arg(a, 2), Value::Undefined) { String::new() } else { d.string_arg(it, arg(a, 2))? };
-            d.insert_html(it, &html)?
+            let html = opt_arg(d, s, a, 2)?;
+            old(s, |it| d.insert_html(it, &html))?
         }
         _ => false,
     };
-    Ok(Value::Bool(ok))
+    Ok(s.boolean(ok))
 }
 
-fn query_supported(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
-    let name = name_arg(d, it, a)?;
-    Ok(Value::Bool(COMMANDS.contains(&name.as_str())))
+fn query_supported<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let name = name_arg(d, s, a)?;
+    Ok(s.boolean(COMMANDS.contains(&name.as_str())))
 }
 
-fn query_enabled(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
-    let name = name_arg(d, it, a)?;
-    Ok(Value::Bool(match name.as_str() {
+fn query_enabled<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let name = name_arg(d, s, a)?;
+    let on = match name.as_str() {
         "selectall" => true,
-        n if COMMANDS.contains(&n) => d.editing(it)?.is_some(),
+        n if COMMANDS.contains(&n) => old(s, |it| d.editing(it))?.is_some(),
         _ => false,
-    }))
+    };
+    Ok(s.boolean(on))
 }
 
-fn query_state(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
-    let name = name_arg(d, it, a)?;
-    Ok(Value::Bool(d.format_state(it, &name)?))
+fn query_state<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let name = name_arg(d, s, a)?;
+    let on = old(s, |it| d.format_state(it, &name))?;
+    Ok(s.boolean(on))
 }
 
-fn query_indeterm(_: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
-    Ok(Value::Bool(false))
+fn query_indeterm<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    Ok(s.boolean(false))
 }
 
-fn query_value(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
-    d.js_str(it, "")
+fn query_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    d.js_str_s(s, "")
 }
 
 // ------------------------------------------------------------------------------------ HTMLElement
 
-fn is_content_editable(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = d.nd(it, this)?;
-    Ok(Value::Bool(editable(&d.doc.borrow(), n)))
+fn is_content_editable<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.nd_s(s, this)?;
+    let on = editable(&d.doc.borrow(), n);
+    Ok(s.boolean(on))
 }
 
-fn content_editable(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let n = d.nd(it, this)?;
-    if a.is_empty() {
+fn content_editable<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.nd_s(s, this)?;
+    if a.len() == 0 {
         let v = attr(&d.doc.borrow(), n, "contenteditable").map(str::to_ascii_lowercase);
-        return d.js_str(it, match v.as_deref() {
+        return d.js_str_s(s, match v.as_deref() {
             Some("" | "true") => "true",
             Some("false") => "false",
             Some("plaintext-only") => "plaintext-only",
             _ => "inherit",
         });
     }
-    let v = d.string_arg(it, a[0])?.to_ascii_lowercase();
+    let v = d.arg_str_s(s, a, 0)?.to_ascii_lowercase();
+    let recv = bare_js_api::Engine::raw(s.engine(), this);
     match v.as_str() {
-        "inherit" => {
+        "inherit" => old(s, |it| {
             let k = d.js_str(it, "contenteditable")?;
-            call(d, it, this, "removeAttribute", &[k])?
-        }
-        "true" | "false" | "plaintext-only" => {
-            let (k, s) = (d.js_str(it, "contenteditable")?, d.js_str(it, &v)?);
-            call(d, it, this, "setAttribute", &[k, s])?
-        }
-        _ => return Err(d.dom_err(it, "SyntaxError", &format!("Failed to set the 'contentEditable' property on 'HTMLElement': The value provided ('{v}') is not one of 'true', 'false', 'plaintext-only', or 'inherit'."))),
+            call(d, it, recv, "removeAttribute", &[k])
+        })?,
+        "true" | "false" | "plaintext-only" => old(s, |it| {
+            let (k, x) = (d.js_str(it, "contenteditable")?, d.js_str(it, &v)?);
+            call(d, it, recv, "setAttribute", &[k, x])
+        })?,
+        _ => return Err(d.dom_err_s(s, "SyntaxError", &format!("Failed to set the 'contentEditable' property on 'HTMLElement': The value provided ('{v}') is not one of 'true', 'false', 'plaintext-only', or 'inherit'."))),
     };
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     let doc = d.p().document;
-    d.def_method(it, doc, "execCommand", 1, exec_command)?;
-    d.def_method(it, doc, "queryCommandSupported", 1, query_supported)?;
-    d.def_method(it, doc, "queryCommandEnabled", 1, query_enabled)?;
-    d.def_method(it, doc, "queryCommandState", 1, query_state)?;
-    d.def_method(it, doc, "queryCommandIndeterm", 1, query_indeterm)?;
-    d.def_method(it, doc, "queryCommandValue", 1, query_value)?;
-    d.def_get(it, d.p().html, "isContentEditable", is_content_editable, None)?;
-    d.def_get(it, d.p().html, "contentEditable", content_editable, Some(content_editable))?;
+    d.def_method_s(it, doc, "execCommand", 1, exec_command)?;
+    d.def_method_s(it, doc, "queryCommandSupported", 1, query_supported)?;
+    d.def_method_s(it, doc, "queryCommandEnabled", 1, query_enabled)?;
+    d.def_method_s(it, doc, "queryCommandState", 1, query_state)?;
+    d.def_method_s(it, doc, "queryCommandIndeterm", 1, query_indeterm)?;
+    d.def_method_s(it, doc, "queryCommandValue", 1, query_value)?;
+    d.def_get_s(it, d.p().html, "isContentEditable", is_content_editable, None)?;
+    d.def_get_s(it, d.p().html, "contentEditable", content_editable, Some(content_editable))?;
     Ok(())
 }

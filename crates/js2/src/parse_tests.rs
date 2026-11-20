@@ -232,6 +232,59 @@ fn directives_and_strict_mode() {
     ok("function f(){ 'use strict' } 010");
 }
 
+/// Parse `src` in full and with the pre-parser (the way a script is compiled): both must give the same answer.
+fn both(src: &str, accept: bool) {
+    let full = parse_script(src, Limits::default()).is_ok();
+    let lazy = parse_script_lazy(src, Limits::default(), &mut crate::facts::Facts::new()).is_ok();
+    assert_eq!((full, lazy), (accept, accept), "{src:?}: full parse, pre-parse");
+}
+
+#[test]
+fn use_strict_with_non_simple_parameters_fails_in_strict_code_too() {
+    // The function is strict already (a directive, a class body or a strict script), and the rule still holds (test262 `*-param-strict-body`).
+    for s in ["'use strict'; function f(a = 0) { 'use strict' }", "'use strict'; (function (...r) { 'use strict' })", "'use strict'; (a = 0) => { 'use strict' }",
+        "'use strict'; ({ m([a]) { 'use strict' } })", "class A { m({ a }) { 'use strict' } }", "class A { static m(...r) { 'use strict' } }",
+        "'use strict'; async (a = 0) => { 'use strict' }"] {
+        both(s, false);
+    }
+    both("'use strict'; function f(a) { 'use strict' }", true);
+    both("class A { m(a) { 'use strict' } }", true);
+}
+
+#[test]
+fn a_label_named_arguments_is_allowed_in_a_field_initializer() {
+    both("class C { x = () => { arguments: for (;;) { break arguments; } }; }", true);
+    both("class C { static { arguments: for (;;) { break arguments; } arguments: x = 1; } }", true);
+    both("class C { x = arguments; }", false);
+    both("class C { x = () => arguments; }", false);
+    both("class C { x = a ? arguments : 1; }", false);
+    both("class C { static { arguments; } }", false);
+}
+
+#[test]
+fn a_function_in_a_static_block_may_bind_await() {
+    both("class C { static { (function await(await) {}); } }", true);
+    both("class C { static { (function* await(await) {}); } }", true);
+    both("class C { static { function await() {} } }", false);
+    both("class C { static { await: 1; } }", false);
+}
+
+#[test]
+fn an_async_arrow_parameter_cannot_use_await_as_a_name() {
+    for s in ["async(x = await) => {}", "async(a = await => {}) => {}", "async(a = (await) => {}) => {}", "async(a = (...await) => {}) => {}",
+        "async(await) => {}", "async(...await) => {}", "async({ await }) => {}", "async(x = [await]) => {}"] {
+        both(s, false);
+    }
+    // A call, not an arrow; or a function with its own context.
+    both("async(await)", true);
+    both("async(x = await)", true);
+    both("async(x = function () { var await; }) => {}", true);
+    both("async(x = function await() {}) => {}", true);
+    both("async(x = function* () { await: 1; }) => {}", true);
+    both("(await) => {}; async(a) => {}", true);
+    both("async(a) => { var await }", false);
+}
+
 #[test]
 fn asi_and_restricted_productions() {
     assert_eq!(ok("a\nb").list(ok("a\nb").body).len(), 2);
@@ -1020,5 +1073,19 @@ fn a_sequence_in_parentheses_spans_its_first_and_last_tokens() {
         let ex = p.expr(e);
         assert!(matches!(ex.kind, ExprKind::Seq(_)), "{src}");
         assert_eq!((ex.span.start, ex.span.end), want, "{src}");
+    }
+}
+
+#[test]
+fn a_regular_expression_literal_with_a_bad_pattern_is_an_early_error() {
+    for s in ["/(/", "/a**/", "/[z-a]/", "/a{2,1}/", "/(?<a>x)(?<a>y)/", "/\\k<b>(?<a>x)/", "/\\u{110000}/u", "/\\-/u", "/(?<=a)*/", "x = /(/;", "if (a) b = /+/;"] {
+        both(s, false);
+    }
+    // In a function body too: a lazy function is checked when its text is first read.
+    both("function f() { return /(/; }", false);
+    both("var f = () => /a{2,1}/;", false);
+    both("class A { m() { return /[z-a]/; } }", false);
+    for s in ["/(a)\\1/", "/a{/", "/[\\d-a]/", "/(?<a>x)|(?<a>y)/", "/\\k<a>/", "a / b / c", "function f() { return /a+?/giu; }", "x = /[/]/"] {
+        both(s, true);
     }
 }
