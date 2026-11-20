@@ -190,6 +190,11 @@ fn walk_frames(m: &mut Marker, prog: &Program, stack: &[Value], mut ci: usize, m
 
 /// Find the handler for `e` thrown at `pc` of frame `(ci, fp)`, dropping frames that have none. On `Ok`, the frame, `pc` and the
 /// handler register are set. `Err(e)` when the frame of the host has no handler either.
+///
+/// `#[cold]` is a cost fix: every `throw!` site calls this function, and the attribute marks those paths as unlikely. Measured at
+/// codegen-units 16, `loopfn` goes from +4.8% to -0.6% and `objects` from +3.0% to +0.4%. The cause in the allocator is a hypothesis.
+#[cold]
+#[inline(never)]
 fn unwind(prog: &Program, stack: &mut [Value], ci: &mut usize, fp: &mut usize, pc: &mut usize, e: Value) -> Result<(), Value> {
     // The budget ran out in a nested call (`Realm::call_function` gives `STOP`): no handler runs, every frame goes away.
     let stop = e == STOP;

@@ -16273,6 +16273,31 @@ Before: `origin/main` `fae94731` (built and run the same way). After: this branc
 - Earlier builds of this branch on the older base (`e6a65639`), for the record: with `Rc<Program>` cloned inside `Vm::run`, `closures` +3.6%, `fib` +2.1%, `objects` +1.3% at cgu 16 (callgrind: +1 instruction at each op dispatch). Passing `&Program` from `Vm::start` gave -6.9%, -6.8%, -5.9%, -4.0%, -2.0% for the five rows at cgu 16, and +7.4%, +3.5%, +0.1%, +2.8%, +6.5% at cgu 1. Two other tries made it worse or changed nothing (`dctor` read from the realm at its one use: no change; one `Machine` struct for the stack and the feedback: `fib` +4.1%).
 - A way to remove the cause without a change in the interface: keep the program, stack and feedback in the same struct as the realm for the host's own entry, and run nested calls through `Vm::run` on a second struct. It needs `Realm` to be a field of a struct that a nested call can build, which is a bigger change; not tried.
 
+### Cost of the hot loop, second round: `#[cold]` on `unwind`
+
+Machine archMachine (load average 3 at the end of the work; instruction counts do not depend on load). Base `fae94731` (`crates/js2` is identical to `origin/main` `ab2010b8`), PR head `232c7d14`, and the fix. Net M instructions of `interp_load` (count(N) - count(0)), `GLIBC_TUNABLES=glibc.malloc.tcache_count=65535`, 3 runs each, spread at most 0.002 M. The numbers of the base and of the PR head repeat the first round exactly.
+
+| Row | Base cgu 16 | PR head | Fix | Fix vs base | Base cgu 1 | PR head | Fix | Fix vs base |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loopfn` | 310.5 | 325.5 | 308.5 | -0.6% | 323.5 | 333.5 | 333.5 | +3.1% |
+| `calls` | 691.5 | 692.5 | 664.5 | -3.9% | 717.5 | 715.5 | 715.5 | -0.3% |
+| `fib` | 1434.8 | 1407.9 | 1375.5 | -4.1% | 1477.9 | 1445.5 | 1449.6 | -1.9% |
+| `closures` | 415.1 | 413.5 | 402.9 | -2.9% | 425.9 | 427.3 | 427.3 | +0.3% |
+| `objects` | 151.1 | 155.7 | 151.6 | +0.35% | 155.7 | 162.6 | 162.9 | +4.6% |
+
+- **The fix.** `unwind` (the function that every `throw!` site of `Vm::run` calls) is `#[cold]` and `#[inline(never)]`. Two lines. At codegen-units 16 (the default release build, which the cost matrix uses) `loopfn` and `objects` are inside +0.5% and the other three rows are lower than the base. At codegen-units 1 the rows do not move: `loopfn` +3.1% and `objects` +4.6% remain.
+- **The cause (verified for what; hypothesis for why).** `callgrind --dump-instr=yes` on `loopfn`, base and PR head: both run the same ops; the hot path of one turn has 295 instructions in the base and 310 in the PR head. The 15 extra instructions are loads and moves that the register allocator adds: `words` is reloaded from the stack at each dispatch (`mov 0x38(%rsp),%rbp`) instead of living in `r11`, and several temporaries go through stack slots. The ops of these rows (`loopfn`: `MulI`, `Add`, `Mod`, `Inc`, `JnLtI`, `JmpBack`; `objects`: `NewObjLit`, `Add`, `Mov`, `Inc`, `JnLtI`, `JmpBack`) do not run the new `GetElem`, `SetElem`, `In` checks or the wrapper flag test, and `JmpBack` only reads the budget from the realm (same cost as before). `callgrind` on `objects` puts the whole gain or loss in `Vm::run` (13.46 M against 13.92 M for 20,000 turns); `Obj::new`, `alloc_slow` and the other functions have the same counts. Hypothesis for why: the change of the `run` signature and the new call sites change the choices of the allocator in one function of 330 KB. The size of `Vm::run` fell from 0x61bd0 to 0x512ee bytes with the PR.
+- **Tries that did not help** (net M instructions at cgu 16 / cgu 1 for `loopfn`, then `objects`; PR head 325.5 / 333.5 and 155.7 / 162.6):
+  - `#[inline(never)]` on `Vm::run`: no change (it was not inlined).
+  - One `Machine` struct (stack, feedback, program) passed as one argument, `Vm` holding it: 332.5 / 343.5 and 156.5 / 166.7. Worse. The idea was that the loop derives all three from one pointer, as the base derived them from `self`.
+  - The program read from `realm.prog` at each use (a macro) instead of an argument: 334.5 / 347.5 and 156.7 / 166.0. Worse.
+  - `#[cold]` on `unwind` plus `#[cold]` on `Realm::error`: 310.5 / 333.5 and 154.2 / 163.4. `objects` is worse than with `unwind` alone.
+  - `#[cold]` on `unwind` plus `#[cold]` on `Realm::collect`: 326.5 / 325.5 and 156.9 / 160.3. Worse at cgu 16.
+  - One place for all throws (`throw!` as a `break` to one `unwind` call after the op, instead of a copy of `unwind` and `reload!` at each site), with `#[cold]`: 322.5 / 324.5 and 155.5 / 163.7. The binary is 140 KB smaller, but the counts are worse at cgu 16. Without `#[cold]`: 327.5 / 332.5 and 157.8 / 162.4. Not used.
+  - The results swing by up to 5% for changes that do not change what the loop does. The fix above is the best of the variants for the five rows together, not a proof of the cause. A later change to `Vm::run` can move the rows again: measure each one.
+- **The rule for cgu 1.** `objects` at cgu 1 is +4.4% to +5% in every variant, and `loopfn` +3.1% to +7% in all but two (the shared-throw variant with `#[cold]`, +0.3%, and `#[cold]` on `collect`, +0.6%; both worse at cgu 16). Only the cgu 16 numbers meet +0.5%. I did not find a variant that meets it at both.
+- **Interaction with #773** (`t3/js2-step2-regs-local`, open at the time of this work, caches the frame base `regs` in a raw pointer). A nested call from `Realm::call_function` runs on its own `Machine` (its own stack), so it never grows or moves the stack of the outer loop: the outer `regs` stays valid after any native call that re-enters. The re-entry points are `Realm::call_script` -> `Vm::start` -> `Vm::run`. If a later change lets a nested run use the stack of the outer loop, `regs` must be set again after it, and the test needs a `valueOf` that grows the stack during a conversion. Not tested together with #773: it is not merged.
+
 ### Not tested
 
 Windows and macOS; arm64; Miri on the whole crate (only `conversion_tests`; a first run of the loop test with 300 turns did not end in 2 hours, so it runs 12 turns under Miri); the GC-hold gap with a `valueOf` that allocates more than the slack in a loop (no test; the budget bounds it); sloppy-mode `this` boxing; the cgu 1 numbers on an idle machine.
