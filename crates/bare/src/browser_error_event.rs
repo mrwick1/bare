@@ -6,12 +6,10 @@
 //! `filename` = the empty string, `lineno` = `colno` = 0 (the evaluator has no source position to give here).
 
 use crate::browser::*;
+use crate::browser_scoped::*;
 use bare_js::eval::Interp;
 use bare_js::value::{ObjId, Value};
-
-fn arg(a: &[Value], i: usize) -> Value {
-    a.get(i).copied().unwrap_or(Value::Undefined)
-}
+use bare_js_api::{Args, Engine, HostFn, Local, Type};
 
 #[cold]
 #[inline(never)]
@@ -20,7 +18,7 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<[ObjId; 2]> {
         return Ok(o);
     }
     let proto = d.obj(it, d.p().event)?;
-    let f = d.add_fn(it, ctor, "ErrorEvent", 1, true)?;
+    let f = d.add_fn_s_obj(it, ctor, "ErrorEvent", 1, HostFn::Ctor)?;
     let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
     it.define_data(f, kp, Value::Object(proto), false, false, false)?;
     it.define_data(proto, kc, Value::Object(f), true, false, true)?;
@@ -61,41 +59,37 @@ pub(crate) fn build(d: &Dom, it: &mut Interp<'_>, ty: &str, flags: [bool; 3], f:
     Ok(ev)
 }
 
-fn ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
+fn ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     if a.is_empty() {
-        return Err(it.type_error("Failed to construct 'ErrorEvent': 1 argument required, but only 0 present."));
+        return Err(s.type_error("Failed to construct 'ErrorEvent': 1 argument required, but only 0 present."));
     }
-    let ty = d.string_arg(it, a[0])?;
-    let init = arg(a, 1);
+    let ty = d.arg_str_s(s, a, 0)?;
+    let init = arg_s(s, a, 1);
     let (mut flags, mut message, mut filename, mut nums, mut error) = ([false; 3], String::new(), String::new(), [0u32; 2], Value::Null);
-    match init {
-        Value::Undefined | Value::Null => {}
-        Value::Object(_) => {
-            for (i, n) in ["bubbles", "cancelable", "composed"].into_iter().enumerate() {
-                flags[i] = crate::browser_events::init_flag(d, it, init, n)?;
-            }
-            for (name, out) in [("message", &mut message), ("filename", &mut filename)] {
-                let k = d.key(it, name)?;
-                let v = it.get_value(init, k)?;
-                if !matches!(v, Value::Undefined) {
-                    *out = d.string_arg(it, v)?;
-                }
-            }
-            for (i, n) in ["lineno", "colno"].into_iter().enumerate() {
-                let k = d.key(it, n)?;
-                let v = it.get_value(init, k)?;
-                if !matches!(v, Value::Undefined) {
-                    let x = it.to_js_number(v)?;
-                    nums[i] = if x.is_finite() { (x.trunc() % 4294967296.0).rem_euclid(4294967296.0) as u32 } else { 0 };
-                }
-            }
-            let k = d.key(it, "error")?;
-            error = it.get_value(init, k)?;
-            if matches!(error, Value::Undefined) {
-                error = Value::Null;
+    if is_object(s, init) {
+        for (i, n) in ["bubbles", "cancelable", "composed"].into_iter().enumerate() {
+            flags[i] = crate::browser_events::init_flag_s(s, init, n)?;
+        }
+        for (name, out) in [("message", &mut message), ("filename", &mut filename)] {
+            let v = s.get_str(init, name)?;
+            if s.type_of(v) != Type::Undefined {
+                *out = d.string_arg_s(s, v)?;
             }
         }
-        _ => return Err(it.type_error("The provided value is not of type 'ErrorEventInit'.")),
+        for (i, n) in ["lineno", "colno"].into_iter().enumerate() {
+            let v = s.get_str(init, n)?;
+            if s.type_of(v) != Type::Undefined {
+                let x = s.to_number(v)?;
+                nums[i] = if x.is_finite() { (x.trunc() % 4294967296.0).rem_euclid(4294967296.0) as u32 } else { 0 };
+            }
+        }
+        let v = s.get_str(init, "error")?;
+        if s.type_of(v) != Type::Undefined {
+            error = s.engine().raw(v);
+        }
+    } else if !is_nullish(s, init) {
+        return Err(s.type_error("The provided value is not of type 'ErrorEventInit'."));
     }
-    Ok(Value::Object(build(d, it, &ty, flags, Fields { message: &message, filename: &filename, lineno: nums[0], colno: nums[1], error })?))
+    let ev = old(s, |it| build(d, it, &ty, flags, Fields { message: &message, filename: &filename, lineno: nums[0], colno: nums[1], error }))?;
+    Ok(d.obj_local(s, ev))
 }

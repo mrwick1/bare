@@ -36,7 +36,9 @@
 
 use crate::browser::*;
 use bare_js::eval::{Error, Interp};
+use crate::browser_scoped::*;
 use bare_js::value::{ObjId, PropertyKey, Value};
+use bare_js_api::{Args, Engine, Local};
 use bare_html::dom::NodeId;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::rc::Rc;
@@ -283,17 +285,17 @@ impl Dom {
         let mut fixed = vec![mql, list, iter];
 
         // MediaQueryList
-        self.def_get(it, mql, "media", media_get, None)?;
-        self.def_get(it, mql, "matches", matches_get, None)?;
-        self.def_get(it, mql, "onchange", onchange_get, Some(onchange_set))?;
-        self.def_method(it, mql, "addListener", 1, add_listener)?;
-        self.def_method(it, mql, "removeListener", 1, remove_listener)?;
+        self.def_get_s(it, mql, "media", media_get, None)?;
+        self.def_get_s(it, mql, "matches", matches_get, None)?;
+        self.def_get_s(it, mql, "onchange", onchange_get, Some(onchange_set))?;
+        self.def_method_s(it, mql, "addListener", 1, add_listener)?;
+        self.def_method_s(it, mql, "removeListener", 1, remove_listener)?;
 
         // DOMTokenList and its iterator, then Element.classList
         crate::browser_platform_class::install(self, it, list, iter, sym)?;
-        self.def_get(it, p.element, "classList", crate::browser_platform_class::class_list, Some(crate::browser_platform_class::set_class_list))?;
-        self.def_get(it, p.link, "relList", crate::browser_platform_class::rel_list::<0>, Some(crate::browser_platform_class::set_rel_list::<0>))?;
-        self.def_get(it, p.iframe, "sandbox", crate::browser_platform_class::sandbox_list, Some(crate::browser_platform_class::set_sandbox_list))?;
+        self.def_get_s(it, p.element, "classList", crate::browser_platform_class::class_list, Some(crate::browser_platform_class::set_class_list))?;
+        self.def_get_s(it, p.link, "relList", crate::browser_platform_class::rel_list::<0>, Some(crate::browser_platform_class::set_rel_list::<0>))?;
+        self.def_get_s(it, p.iframe, "sandbox", crate::browser_platform_class::sandbox_list, Some(crate::browser_platform_class::set_sandbox_list))?;
         crate::browser_platform_query::install(self, it)?;
 
         // interface objects and `matchMedia`
@@ -306,7 +308,7 @@ impl Dom {
             it.define_data(g, k, Value::Object(f), true, false, true)?;
             fixed.push(f);
         }
-        let mm = self.def_method(it, g, "matchMedia", 1, match_media)?;
+        let mm = self.def_method_s(it, g, "matchMedia", 1, match_media)?;
         // Window operations are enumerable.
         let k = self.key(it, "matchMedia")?;
         it.define_data(g, k, Value::Object(mm), true, true, true)?;
@@ -323,10 +325,10 @@ impl Dom {
         Ok(bare_css::at_rules::media_matches(q, vp))
     }
 
-    fn mql_of(&self, it: &mut Interp<'_>, this: Value) -> R<ObjId> {
-        match this {
-            Value::Object(o) if self.plat.s.borrow().mql.contains_key(&o) => Ok(o),
-            _ => Err(it.type_error("Illegal invocation")),
+    fn mql_of<'s>(&self, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, ObjId> {
+        match obj_id(s, this) {
+            Some(o) if self.plat.s.borrow().mql.contains_key(&o) => Ok(o),
+            _ => Err(s.type_error("Illegal invocation")),
         }
     }
 
@@ -338,107 +340,118 @@ impl Dom {
     }
 }
 
-fn match_media(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
+fn match_media<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     if a.is_empty() {
-        return Err(it.type_error("Failed to execute 'matchMedia' on 'Window': 1 argument required, but only 0 present."));
+        return Err(s.type_error("Failed to execute 'matchMedia' on 'Window': 1 argument required, but only 0 present."));
     }
-    let q = d.string_arg(it, a[0])?;
+    let q = d.arg_str_s(s, a, 0)?;
     let lim = d.pl_limits();
     if q.len() > lim.max_media_query_bytes {
-        return Err(d.lim("media-query"));
+        return Err(d.lim_s(s, "media-query"));
     }
     let q: Rc<str> = Rc::from(q.trim_matches(|c: char| c.is_ascii_whitespace()));
     if d.plat.s.borrow().mql.len() >= lim.max_media_lists {
-        return Err(d.lim("media-lists"));
+        return Err(d.lim_s(s, "media-lists"));
     }
     if d.st.borrow().by_obj.len() >= d.lim.max_wrappers {
-        return Err(d.lim("dom-wrappers"));
+        return Err(d.lim_s(s, "dom-wrappers"));
     }
-    let matches = d.media_eval(it, &q)?;
-    let o = d.obj(it, d.plat.p.get().expect("installed").mql)?;
+    let matches = old(s, |it| d.media_eval(it, &q))?;
+    let o = d.obj_s(s, d.plat.p.get().expect("installed").mql)?;
     d.st.borrow_mut().by_obj.insert(o, Target::Obj(o));
-    let mut s = d.plat.s.borrow_mut();
-    s.seq += 1;
-    let seq = s.seq;
-    s.mql.insert(o, Mql { q, matches, seq, handler: None });
-    Ok(Value::Object(o))
+    let mut m = d.plat.s.borrow_mut();
+    m.seq += 1;
+    let seq = m.seq;
+    m.mql.insert(o, Mql { q, matches, seq, handler: None });
+    drop(m);
+    Ok(d.obj_local(s, o))
 }
 
-fn media_get(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let o = d.mql_of(it, this)?;
+fn media_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = d.mql_of(s, this)?;
     let q = d.plat.s.borrow().mql[&o].q.clone();
-    d.js_str(it, &q)
+    d.js_str_s(s, &q)
 }
 
-fn matches_get(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let o = d.mql_of(it, this)?;
-    Ok(Value::Bool(d.plat.s.borrow().mql[&o].matches))
+fn matches_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = d.mql_of(s, this)?;
+    let m = d.plat.s.borrow().mql[&o].matches;
+    Ok(s.boolean(m))
 }
 
-fn legacy(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], add: bool) -> V {
-    d.mql_of(it, this)?;
-    let ty = d.js_str(it, "change")?;
-    let cb = arg(a, 0);
+fn legacy<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, add: bool) -> Res<'s, Local<'s>> {
+    d.mql_of(s, this)?;
+    // The two arguments of the listener call, in a window of their own.
+    let (ty, cb) = (d.js_str_s(s, "change")?, arg_s(s, a, 0));
+    let e = s.engine();
+    let (ty, cb) = (e.raw(ty), e.raw(cb));
+    let base = e.stack_len();
+    e.raw_local(&ty);
+    e.raw_local(&cb);
+    let args = Args::from_slots(base, 2);
     if add {
-        crate::browser_events::add_event_listener(d, it, this, &[ty, cb])
+        crate::browser_events::add_event_listener(d, s, this, args)
     } else {
-        crate::browser_events::remove_event_listener(d, it, this, &[ty, cb])
+        crate::browser_events::remove_event_listener(d, s, this, args)
     }
 }
 
-fn add_listener(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    legacy(d, it, this, a, true)
+fn add_listener<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    legacy(d, s, this, a, true)
 }
 
-fn remove_listener(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    legacy(d, it, this, a, false)
+fn remove_listener<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    legacy(d, s, this, a, false)
 }
 
-fn onchange_get(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let o = d.mql_of(it, this)?;
-    Ok(d.handler_cb(it, o).unwrap_or(Value::Null))
+fn onchange_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = d.mql_of(s, this)?;
+    Ok(match d.handler_cb(s.engine(), o) {
+        Some(v) => s.engine().raw_local(&v),
+        None => s.null(),
+    })
 }
 
-fn onchange_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let o = d.mql_of(it, this)?;
-    let v = arg(a, 0);
-    let cb = match v {
-        Value::Object(f) if it.is_callable_value(v) => Some(f),
-        _ => None,
-    };
-    let t = Target::Obj(o);
-    let old = d.plat.s.borrow().mql[&o].handler;
-    let mut guard = d.st.borrow_mut();
-    let st = &mut *guard;
-    let present = old.and_then(|id| st.listeners.get(&t).and_then(|l| l.iter().position(|x| x.id == id)));
-    match (cb, present) {
-        (Some(f), Some(i)) => {
-            it.store_value(&mut st.listeners.get_mut(&t).expect("listed")[i].cb, Value::Object(f));
-            d.own_listeners(st, it, t);
-        }
-        (Some(f), None) => {
-            if st.n_listeners >= d.lim.max_listeners {
-                return Err(d.lim("dom-listeners"));
+fn onchange_set<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = d.mql_of(s, this)?;
+    let v = arg_s(s, a, 0);
+    let cb = if s.is_callable(v) { obj_id(s, v) } else { None };
+    old(s, |it| {
+        let t = Target::Obj(o);
+        let old = d.plat.s.borrow().mql[&o].handler;
+        let mut guard = d.st.borrow_mut();
+        let st = &mut *guard;
+        let present = old.and_then(|id| st.listeners.get(&t).and_then(|l| l.iter().position(|x| x.id == id)));
+        match (cb, present) {
+            (Some(f), Some(i)) => {
+                it.store_value(&mut st.listeners.get_mut(&t).expect("listed")[i].cb, Value::Object(f));
+                d.own_listeners(st, it, t);
             }
-            if st.listeners.get(&t).map_or(0, |l| l.len()) >= d.lim.max_listeners_per_target {
-                return Err(d.lim("dom-listeners-per-target"));
+            (Some(f), None) => {
+                if st.n_listeners >= d.lim.max_listeners {
+                    return Err(d.lim("dom-listeners"));
+                }
+                if st.listeners.get(&t).map_or(0, |l| l.len()) >= d.lim.max_listeners_per_target {
+                    return Err(d.lim("dom-listeners-per-target"));
+                }
+                st.next_id += 1;
+                let id = st.next_id;
+                let cb = it.trace_value(Value::Object(f));
+                st.listeners.entry(t).or_default().push(Listener { id, ty: Rc::from("change"), cb, capture: false, once: false, passive: false, handler: false });
+                st.n_listeners += 1;
+                d.own_listeners(st, it, t);
+                d.plat.s.borrow_mut().mql.get_mut(&o).expect("checked").handler = Some(id);
             }
-            st.next_id += 1;
-            let id = st.next_id;
-            let cb = it.trace_value(Value::Object(f));
-            st.listeners.entry(t).or_default().push(Listener { id, ty: Rc::from("change"), cb, capture: false, once: false, passive: false, handler: false });
-            st.n_listeners += 1;
-            d.own_listeners(st, it, t);
-            d.plat.s.borrow_mut().mql.get_mut(&o).expect("checked").handler = Some(id);
+            (None, Some(_)) => {
+                drop(guard);
+                d.remove_listener(t, old.expect("present"));
+                d.plat.s.borrow_mut().mql.get_mut(&o).expect("checked").handler = None;
+            }
+            (None, None) => {}
         }
-        (None, Some(_)) => {
-            drop(guard);
-            d.remove_listener(t, old.expect("present"));
-            d.plat.s.borrow_mut().mql.get_mut(&o).expect("checked").handler = None;
-        }
-        (None, None) => {}
-    }
-    Ok(Value::Undefined)
+        Ok(())
+    })?;
+    Ok(s.undefined())
 }
 
 // ------------------------------------------------------------------------------------------ Browser API
