@@ -951,35 +951,42 @@ fn class_methods_fields_and_static_elements() {
         src,
         SCRIPT,
         r#"
-code nregs=6 nparams=0 words=28 sites=5
+code nregs=6 nparams=0 words=35 sites=6
 0000  CheckLex    s0
-0001  PushCtx     1
-0002  DefaultCtor r2, 0
-0003  LoadAtom    r3, a0
-0004  SetFnName   r2, r3, 0
-0005  MakeClass   r2
-0006  GetField    r3, r2, s1
-0007  GetGlobal   r4, s2
-0008  ToKey       r5, r3, r4
-0009  InitCtx     r5, 0, 0
-0010  Closure     r4, f0
-0011  DefMethod   r3, r4, s3
-0012  Closure     r4, f1
-0013  SetFields   r2, r4
-0014  Closure     r4, f2
-0015  Mov         r5, r2
-0016  Call        r4, 4, 0
-0017  Closure     r4, f3
-0018  Mov         r5, r2
-0019  Call        r4, 4, 0
-0020  Mov         r1, r2
-0021  PopCtx
-0022  Mov         r0, r1
-0023  PushCtx     1
-0024  InitCtx     r0, 0, 0
-0025  DeclLex     0, s4
-0026  PopCtx
-0027  RetUndef
+0001  LoadHole    r0
+0002  PushCtx     1
+0003  DefaultCtor r2, 0
+0004  LoadAtom    r3, a0
+0005  SetFnName   r2, r3, 0
+0006  MakeClass   r2
+0007  GetField    r3, r2, s1
+0008  GetGlobal   r4, s2
+0009  ToKey       r5, r3, r4
+0010  InitCtx     r5, 0, 0
+0011  Closure     r4, f0
+0012  DefMethod   r3, r4, s3
+0013  Closure     r4, f1
+0014  SetFields   r2, r4
+0015  Closure     r4, f2
+0016  Mov         r5, r2
+0017  Call        r4, 4, 0
+0018  Closure     r4, f3
+0019  Mov         r5, r2
+0020  Call        r4, 4, 0
+0021  Mov         r1, r2
+0022  PopCtx
+0023  Mov         r0, r1
+0024  Jmp         -> 0030
+0025  PushCtx     1
+0026  InitCtx     r0, 0, 0
+0027  DeclLex     0, s4
+0028  PopCtx
+0029  Throw       r1
+0030  PushCtx     1
+0031  InitCtx     r0, 0, 0
+0032  DeclLex     0, s5
+0033  PopCtx
+0034  RetUndef
 "#,
     );
     golden(
@@ -1033,19 +1040,26 @@ fn a_derived_class_calls_super_in_an_arrow() {
         src,
         SCRIPT,
         r#"
-code nregs=5 nparams=0 words=12 sites=4
+code nregs=5 nparams=0 words=19 sites=5
 0000  CheckLex    s0
-0001  GetGlobal   r2, s1
-0002  Closure     r3, f0
-0003  MakeDerived r3, r2
-0004  GetField    r4, r3, s2
-0005  Mov         r1, r3
-0006  Mov         r0, r1
-0007  PushCtx     1
-0008  InitCtx     r0, 0, 0
-0009  DeclLex     0, s3
-0010  PopCtx
-0011  RetUndef
+0001  LoadHole    r0
+0002  GetGlobal   r2, s1
+0003  Closure     r3, f0
+0004  MakeDerived r3, r2
+0005  GetField    r4, r3, s2
+0006  Mov         r1, r3
+0007  Mov         r0, r1
+0008  Jmp         -> 0014
+0009  PushCtx     1
+0010  InitCtx     r0, 0, 0
+0011  DeclLex     0, s3
+0012  PopCtx
+0013  Throw       r1
+0014  PushCtx     1
+0015  InitCtx     r0, 0, 0
+0016  DeclLex     0, s4
+0017  PopCtx
+0018  RetUndef
 "#,
     );
     golden(
@@ -1083,24 +1097,31 @@ fn super_property_reads_and_writes() {
         src,
         SCRIPT,
         r#"
-code nregs=6 nparams=0 words=17 sites=5
+code nregs=6 nparams=0 words=24 sites=6
 0000  CheckLex    s0
-0001  GetGlobal   r2, s1
-0002  DefaultCtor r3, 1
-0003  LoadAtom    r4, a0
-0004  SetFnName   r3, r4, 0
-0005  MakeDerived r3, r2
-0006  GetField    r4, r3, s2
-0007  Closure     r5, f0
-0008  SetHome     r5, r4
-0009  DefMethod   r4, r5, s3
-0010  Mov         r1, r3
-0011  Mov         r0, r1
-0012  PushCtx     1
-0013  InitCtx     r0, 0, 0
-0014  DeclLex     0, s4
-0015  PopCtx
-0016  RetUndef
+0001  LoadHole    r0
+0002  GetGlobal   r2, s1
+0003  DefaultCtor r3, 1
+0004  LoadAtom    r4, a0
+0005  SetFnName   r3, r4, 0
+0006  MakeDerived r3, r2
+0007  GetField    r4, r3, s2
+0008  Closure     r5, f0
+0009  SetHome     r5, r4
+0010  DefMethod   r4, r5, s3
+0011  Mov         r1, r3
+0012  Mov         r0, r1
+0013  Jmp         -> 0019
+0014  PushCtx     1
+0015  InitCtx     r0, 0, 0
+0016  DeclLex     0, s4
+0017  PopCtx
+0018  Throw       r1
+0019  PushCtx     1
+0020  InitCtx     r0, 0, 0
+0021  DeclLex     0, s5
+0022  PopCtx
+0023  RetUndef
 "#,
     );
     golden(
@@ -1137,41 +1158,48 @@ fn private_names_methods_and_accessors() {
         src,
         SCRIPT,
         r#"
-code nregs=6 nparams=0 words=34 sites=4
+code nregs=6 nparams=0 words=41 sites=5
 0000  CheckLex    s0
-0001  PushCtx     6
-0002  NewPrivateName r2, a1
-0003  InitCtx     r2, 0, 0
-0004  NewPrivateName r2, a2
-0005  InitCtx     r2, 0, 1
-0006  NewPrivateName r2, a3
-0007  InitCtx     r2, 0, 2
-0008  NewPrivateName r2, a4
-0009  InitCtx     r2, 0, 4
-0010  DefaultCtor r2, 0
-0011  LoadAtom    r3, a0
-0012  SetFnName   r2, r3, 0
-0013  MakeClass   r2
-0014  GetField    r3, r2, s1
-0015  Closure     r4, f0
-0016  GetCtx      r5, 0, 1
-0017  DefPrivateMethod r2, r5, r4
-0018  Closure     r4, f1
-0019  InitCtx     r4, 0, 3
-0020  Closure     r4, f2
-0021  InitCtx     r4, 0, 5
-0022  Closure     r4, f3
-0023  DefMethod   r3, r4, s2
-0024  Closure     r4, f4
-0025  SetFields   r2, r4
-0026  Mov         r1, r2
-0027  PopCtx
-0028  Mov         r0, r1
-0029  PushCtx     1
-0030  InitCtx     r0, 0, 0
-0031  DeclLex     0, s3
-0032  PopCtx
-0033  RetUndef
+0001  LoadHole    r0
+0002  PushCtx     6
+0003  NewPrivateName r2, a1
+0004  InitCtx     r2, 0, 0
+0005  NewPrivateName r2, a2
+0006  InitCtx     r2, 0, 1
+0007  NewPrivateName r2, a3
+0008  InitCtx     r2, 0, 2
+0009  NewPrivateName r2, a4
+0010  InitCtx     r2, 0, 4
+0011  DefaultCtor r2, 0
+0012  LoadAtom    r3, a0
+0013  SetFnName   r2, r3, 0
+0014  MakeClass   r2
+0015  GetField    r3, r2, s1
+0016  Closure     r4, f0
+0017  GetCtx      r5, 0, 1
+0018  DefPrivateMethod r2, r5, r4
+0019  Closure     r4, f1
+0020  InitCtx     r4, 0, 3
+0021  Closure     r4, f2
+0022  InitCtx     r4, 0, 5
+0023  Closure     r4, f3
+0024  DefMethod   r3, r4, s2
+0025  Closure     r4, f4
+0026  SetFields   r2, r4
+0027  Mov         r1, r2
+0028  PopCtx
+0029  Mov         r0, r1
+0030  Jmp         -> 0036
+0031  PushCtx     1
+0032  InitCtx     r0, 0, 0
+0033  DeclLex     0, s3
+0034  PopCtx
+0035  Throw       r1
+0036  PushCtx     1
+0037  InitCtx     r0, 0, 0
+0038  DeclLex     0, s4
+0039  PopCtx
+0040  RetUndef
 "#,
     );
     golden(

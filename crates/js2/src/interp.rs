@@ -241,7 +241,8 @@ impl Realm {
     ///
     /// It runs in any run, nested or not: `prog` is append-only (`Codes`) and the other runs hold no table that a push changes. A
     /// machine that is below in the Rust stack has its feedback vector in its loop; the loop makes the entry that it needs (`grow_fbs`).
-    fn compile_stub(&mut self, prog: &Codes, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, ci: usize, fp: usize) -> Result<(), String> {
+    #[allow(clippy::too_many_arguments)]
+    fn compile_stub(&mut self, prog: &Codes, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, ci: usize, fp: usize, kept: bool, np: usize) -> Result<(), String> {
         let l = self.lazy.as_mut().ok_or("a lazy function has no compiler")?;
         l.compile(prog, ci)?;
         // The `name` and the `length` of the functions that the compile added (the stub of `ci` has them already).
@@ -253,14 +254,21 @@ impl Realm {
         if need > stack.len() {
             stack.resize(need.max(2 * stack.len()).min(MAX_STACK + 8).max(need), Value::UNDEFINED);
         }
-        let all = Realm::obj(record(stack, fp, 9)).expect("the arguments of a stub");
-        let (np, given) = (ncode.nparams as usize, (ncode.nparams as usize).min(all.len() as usize));
-        for i in 0..given {
-            stack[fp + i] = all.get_element(i as u32).unwrap_or(Value::UNDEFINED);
-        }
-        stack[fp + given..fp + np].fill(Value::UNDEFINED);
-        if ncode.flags & CF_ARGS == 0 {
-            stack[fp - REC + 9] = Value::UNDEFINED;
+        if kept {
+            // The stub had the parameter registers of the code: the frame has the arguments already.
+            if ncode.nparams as usize != np || ncode.flags & CF_ARGS != 0 {
+                return Err("a lazy function does not have the parameters that its stub had".into());
+            }
+        } else {
+            let all = Realm::obj(record(stack, fp, 9)).expect("the arguments of a stub");
+            let (np, given) = (ncode.nparams as usize, (ncode.nparams as usize).min(all.len() as usize));
+            for i in 0..given {
+                stack[fp + i] = all.get_element(i as u32).unwrap_or(Value::UNDEFINED);
+            }
+            stack[fp + given..fp + np].fill(Value::UNDEFINED);
+            if ncode.flags & CF_ARGS == 0 {
+                stack[fp - REC + 9] = Value::UNDEFINED;
+            }
         }
         Ok(())
     }
@@ -1471,8 +1479,10 @@ impl Vm {
                     Op::Lazy => {
                         // Compile the function and run its code from pc 0, in this frame. The compile adds to `prog` and may grow the
                         // stack and `fbs`: `reload!` makes the locals again. No collection runs here (no `gate!`).
-                        if let Err(m) = realm.compile_stub(prog, stack, fbs, ci, fp) {
-                            err!(ErrKind::Syntax, "{m}")
+                        if let Err(m) = realm.compile_stub(prog, stack, fbs, ci, fp, a!() == 0, code.nparams as usize) {
+                            // A plain `Error`, not a `SyntaxError`: the text has no early error (the pre-parse found none), and a script (or a
+                            // test262 test that expects a `SyntaxError`) must not take a limit of the compiler for one.
+                            err!(ErrKind::Plain, "{m}")
                         }
                         reload!();
                         pc = 0;
@@ -1865,7 +1875,8 @@ pub fn code_flags(c: &Code) -> u8 {
     let (mut pc, mut f) = (0, 0);
     while let Ok((ins, n)) = decode(&c.words, pc) {
         match ins.op {
-            Op::CreateArgs | Op::CreateRest | Op::Lazy => f |= CF_ARGS,
+            Op::CreateArgs | Op::CreateRest => f |= CF_ARGS,
+            Op::Lazy if ins.a != 0 => f |= CF_ARGS,
             Op::CallSuper | Op::CallSuperSpread | Op::GetSuper | Op::GetSuperElem | Op::SetSuper | Op::SetSuperElem => f |= CF_LINK,
             _ => {}
         }
