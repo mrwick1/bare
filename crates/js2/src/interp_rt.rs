@@ -39,11 +39,15 @@ use crate::bytecode::Code;
 use crate::cell::Layout;
 use crate::gc::{Marker, collect};
 use crate::heap::Heap;
+use crate::codes::Codes;
+use crate::interp::LazyCompile;
+use crate::reenter::Machine;
 use crate::builtins::{Hint, Native};
 use crate::object::{Ctx, F_CLASS, F_ELEMS_FIXED, F_ELEMS_RO, F_LAZY, F_LEN_RO, F_NATIVE, F_NOEXT, F_SLOWIDX, Obj};
 use crate::shapes::{A_ACC, A_C, A_E, A_W, ShapeId, Shapes};
 use crate::string::{Chars, Str};
 use crate::value::{Kind, Value};
+use std::rc::Rc;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -227,6 +231,8 @@ pub struct Realm {
     loc_code: u32,
     loc_ctx: u32,
     pub k_prototype: Str,
+    /// The hidden property that holds the `[[PrimitiveValue]]` of a wrapper object (`bi_wrap.rs`).
+    pub k_prim: Str,
     pub k_length: Str,
     pub k_name: Str,
     pub k_message: Str,
@@ -269,6 +275,16 @@ pub struct Realm {
     pins: Vec<ShapeId>,
     /// The top frame when a collection runs: code index, frame pointer, `pc` of the safepoint.
     pub cur: (usize, usize, u32),
+    /// The program that the realm runs, the code indexes of its default constructors, and the back edges that may still run (`Vm` sets
+    /// the first two, and copies the third at each call from the host). A native that calls a script function needs all three.
+    pub(crate) prog: Rc<Codes>,
+    pub(crate) dctor: [usize; 2],
+    pub(crate) fuel: u64,
+    /// Machines (a JS stack and a feedback vector) that no nested call uses now, and the nesting of nested calls: `reenter.rs`.
+    pub(crate) pool: Vec<Machine>,
+    pub(crate) nest: u32,
+    /// The compiler of the stubs of the program, if it has any (`Op::Lazy`, in any run: `Realm::compile_stub`).
+    pub lazy: Option<Box<dyn LazyCompile>>,
     epoch: u32,
     pub collections: u32,
     /// What the last collection counted.
@@ -288,7 +304,7 @@ impl Realm {
         let mut atom = |s: &str| atoms.intern(&mut heap, Chars::One(s.as_bytes())).expect("memory");
         let (k_code, k_ctx, k_prototype, k_length, k_name, k_message) = (atom("\0code"), atom("\0ctx"), atom("prototype"), atom("length"), atom("name"), atom("message"));
         let (k_home, k_fields, k_link, k_constructor, k_raw) = (atom("\0home"), atom("\0fields"), atom("\0link"), atom("constructor"), atom("raw"));
-        let (k_value_of, k_to_string) = (atom("valueOf"), atom("toString"));
+        let (k_value_of, k_to_string, k_prim) = (atom("valueOf"), atom("toString"), atom("\0prim"));
         let hidden = ["\0native", "\0n1", "\0n2", "\0n3"].map(&mut atom);
         let root = shapes.root(Layout::Object, None, 4);
         let object_proto = Obj::new(&mut heap, &shapes, root).expect("memory");
@@ -320,7 +336,7 @@ impl Realm {
         let mut consts: Vec<Value> = [object_proto, function_proto, array_proto, error_proto, global, string_proto, number_proto, boolean_proto].iter().map(|o| o.value()).collect();
         consts.extend(error_protos.iter().map(|o| o.value()));
         consts.extend(hidden.iter().map(|s| s.value()));
-        consts.extend([k_code, k_ctx, k_prototype, k_length, k_name, k_message, k_home, k_fields, k_link, k_constructor, k_raw, k_value_of, k_to_string].iter().map(|s| s.value()));
+        consts.extend([k_prim, k_code, k_ctx, k_prototype, k_length, k_name, k_message, k_home, k_fields, k_link, k_constructor, k_raw, k_value_of, k_to_string].iter().map(|s| s.value()));
         consts.extend(tnames.iter().map(|s| s.value()));
         let pins = vec![s_object, s_array, s_func, s_args, s_native];
         let epoch = shapes.epoch();
@@ -346,6 +362,7 @@ impl Realm {
             loc_code,
             loc_ctx,
             k_prototype,
+            k_prim,
             k_length,
             k_name,
             k_message,
@@ -371,6 +388,12 @@ impl Realm {
             lex: HashMap::new(),
             pins,
             cur: (0, 0, 0),
+            prog: Rc::default(),
+            dctor: [0, 0],
+            fuel: u64::MAX,
+            pool: Vec::new(),
+            nest: 0,
+            lazy: None,
             epoch,
             collections: 0,
             last_gc: Default::default(),
@@ -387,7 +410,9 @@ impl Realm {
 
     /// Collect with the frames of the stack as roots. `walk_frames` marks them (see `interp.rs`); the realm adds its own.
     pub fn collect(&mut self, fbs: &mut [Feedback], walk_frames: impl FnOnce(&mut Marker)) {
-        let Realm { heap, shapes, atoms, consts, pins, lex, .. } = self;
+        // A nested call holds the collector (`Realm::call_function`), so no machine is in use now: the idle ones keep their feedback.
+        debug_assert!(self.nest == 0, "a collection inside a nested call");
+        let Realm { heap, shapes, atoms, consts, pins, lex, pool, .. } = self;
         let mut walk_frames = Some(walk_frames);
         let mut roots = |m: &mut Marker| {
             consts.iter().for_each(|v| m.value(*v));
@@ -397,6 +422,7 @@ impl Realm {
             });
             pins.iter().for_each(|s| m.shape(*s));
             fbs.iter().for_each(|f| f.walk(m));
+            pool.iter().flat_map(|p| p.fbs.iter()).for_each(|f| f.walk(m));
             if let Some(w) = walk_frames.take() {
                 w(m);
             }
@@ -407,6 +433,7 @@ impl Realm {
         if self.shapes.epoch() != self.epoch {
             self.epoch = self.shapes.epoch();
             fbs.iter_mut().for_each(Feedback::clear);
+            self.pool.iter_mut().flat_map(|p| p.fbs.iter_mut()).for_each(Feedback::clear);
         }
     }
 
@@ -782,6 +809,11 @@ impl Realm {
     /// `recv[key]`; an accessor with a getter gives [`Got::Get`].
     pub fn get_prop_g(&mut self, recv: Value, key: Key) -> R<Got> {
         if let Some(o) = Realm::obj(recv) {
+            if let Some(s) = self.string_wrapper(o)
+                && let Some(v) = self.string_own(s, key)
+            {
+                return Ok(Got::Val(v));
+            }
             self.fn_props(o);
             return match key {
                 Key::Idx(i) => {
@@ -836,11 +868,11 @@ impl Realm {
         Ok(Got::Val(Value::UNDEFINED))
     }
 
-    /// `recv[key]` where an accessor throws (the host and the tests have no frame to call from).
+    /// `recv[key]` for Rust code: a getter runs through [`Realm::call_function`].
     pub fn get_prop(&mut self, recv: Value, key: Key) -> R<Value> {
         match self.get_prop_g(recv, key)? {
             Got::Val(v) => Ok(v),
-            Got::Get(_) => self.type_error("accessors are not supported here (the host needs a call)"),
+            Got::Get(g) => self.call_function(g, recv, &[]),
         }
     }
 
@@ -896,11 +928,11 @@ impl Realm {
         }
     }
 
-    /// `recv[key] = v` where a setter throws (the host and the tests have no frame to call from).
+    /// `recv[key] = v` for Rust code: a setter runs through [`Realm::call_function`].
     pub fn set_prop(&mut self, recv: Value, key: Key, v: Value) -> R<()> {
         match self.set_prop_g(recv, key, v)? {
             Put::Done | Put::Fail => Ok(()),
-            Put::Set(_) => self.type_error("accessors are not supported here (the host needs a call)"),
+            Put::Set(f) => self.call_function(f, recv, &[v]).map(|_| ()),
         }
     }
 

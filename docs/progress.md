@@ -16399,6 +16399,240 @@ Windows and macOS; Miri (no `unsafe` was added, but `Op::Lazy` runs in `interp.r
 ### Open: the rest of the start cost
 
 4.01 M is not close to zero. 2.35 M is the pre-parse of the whole prelude, which still reads every function body. A prototype (not in the PR) that parses the top level of the prelude with known facts and jumps over each function costs 12.4 K for that step. That is option B′ of the design document: the facts of the prelude as a generated file. Hypothesis: about 1.7 M. A compiled image (option B) is about 1.0 M, hypothesis. The questions for the owner are in section 6 of `docs/design-js2-prelude.md`.
+## 2026-11-20: conversions in js2: a call from native code, wrapper objects (follow-up of S2.7 and the test262 gate)
+
+Base: PR #764 (merged, `ee8ba415`). Two gaps of S2.7 are closed: a native can call a script function, and `new String`, `new Number`, `new Boolean` and `Object(x)` make wrapper objects.
+
+### Re-entry: `Realm::call_function`
+
+- `crates/js2/src/reenter.rs`. `Realm::call_function(f, this, args) -> R<Value>` calls a script function or a built-in from any code that has `&mut Realm`. The module doc has the full design.
+- The loop of `Vm::run` owns the JS stack and the feedback vectors, and lends only `&mut Realm` to a native. A nested call on the same stack would need `&mut` twice, and a push to the stack would leave the `args` window of the native dangling. So a nested call runs on its own `Machine` (a stack and a feedback vector), taken from `Realm::pool` and given back after the call. The code uses no new `unsafe`.
+- The program (`Rc<Program>`), the table of default constructors and the budget (`fuel`) are fields of the realm. `Vm::run` takes the program as `&Program` from its caller (`Vm::start`), so the loop holds no `Rc`. This matters for the cost (see below).
+- Where it is used: `ToPrimitive` (`+`, compare, `==`, `ToNumber`, `ToString`, `ToPropertyKey`, argument coercion of built-ins), getters and setters that a built-in reads or writes (`Object.assign`, `Object.values`, `Object.entries`), and a native that ends in a call (`call`, `apply`, a bound function) when it runs nested.
+- Errors. A thrown value is `Err(value)`. When the budget ends in a nested call, `Err(STOP)` comes back (`STOP` is `Value::HOLE`: no script can throw it). `unwind` runs no handler for it, and `Vm::start` turns it into `Exit::Fuel`. The budget is shared by the nested runs.
+- State that a nested call must keep: `callee`, `nt`, `tail` and `tail_args` are saved and restored. The nest limit is `MAX_NEST = 100` and gives a `RangeError`. One level costs about 2 KB of Rust stack in release and about 200 KB in debug; the test of the limit runs on a 256 MiB thread.
+- GC. A native keeps cells in Rust locals, and a root map names registers only. So `Heap::hold_task` stops collection until the outermost nested call returns. **Known gap:** a `valueOf` that allocates much without returning grows the heap until it returns; the budget is the only bound. The design to lift it (rooted temporaries for natives, and the outer frames in `walk_frames`) is in the `reenter.rs` doc. `collect` asserts `nest == 0` and walks the pooled machines.
+- Order of conversion errors. `base[key]`, `base[key] = v`, `delete base[key]` with a base of `undefined` or `null` now throw `TypeError` before `ToPropertyKey` runs the `toString` of the key (`GetElem`, `SetElem`, `Delete` slow paths only). `key in x` with a non-object `x` throws before the key conversion. The fast path of `GetElem` is not changed. Without this the change would have turned 34 tests that passed by accident into failures (`compound-assignment/S11.13.2_A7.*`, `postfix-increment/S11.3.1_A6_*`, `logical-assignment/*-lhs-before-rhs`, `member-expression/computed-reference-null-or-undefined`).
+
+### Wrapper objects
+
+- `crates/js2/src/bi_wrap.rs`: `wrap`, `prim_of`, `string_wrapper`, `string_own`, `to_object`. A wrapper is a plain object with the flag `F_WRAP` and a hidden property `"\0prim"` that holds the primitive. The code finds the property by name, not by slot, so a script that deletes or redefines it cannot cause a bad read. A `String` wrapper has `length` and index properties (`string_own`; `own_keys` lists the indices).
+- `new String/Number/Boolean`, `Object(x)` and `new Object(x)` make wrappers. `String.prototype`, `Number.prototype` and `Boolean.prototype` methods accept a wrapper as `this` (`this_num`, `this_bool`, `to_string`). `Object.prototype.toString` tags a wrapper. `Object.keys`, `values`, `entries`, `getOwnPropertyNames`, `getOwnPropertyDescriptor`, `assign` and `isPrototypeOf` do `ToObject` on their argument: a primitive works, `undefined` and `null` throw `TypeError` (`Object.assign` skips them as sources).
+- Not done: sloppy-mode boxing of a primitive `this` in a plain function call (`this` stays the primitive).
+
+### Tests
+
+- `crates/js2/src/conversion_tests.rs`: 8 tests. A script `valueOf` and `toString` in every conversion; a throw from a conversion is catchable; a function that calls itself through a conversion gives `RangeError`; the budget stops a nested call that has no handler, and the budget is shared; a nested call that allocates keeps the native's values; getters and setters in `Object.assign` and `Object.values`; wrapper objects; a wrapper loop under constant collection. Each runs also with a collection at every safepoint.
+- `script_tests.rs`: 4 cases changed (a script `valueOf` now works; `new String` and `new Number` no longer throw; `Object(5) === 5` is false). Their lines left `tools/fixtures/js/diff-known.txt` (4 entries removed; the merge with main removed 2 more; 16 known differences are left, all listed, 0 new).
+- `cargo test --locked -p bare-js2 --lib`: 389 pass after the merge with main (8 are new). `cargo test --locked -p bare-js-diff`: pass. Miri (`cargo +nightly miri test -p bare-js2 --lib -- conversion_tests`): all 8 pass (the 6 light ones in 1,562 s, the loop test in 240 s with 12 turns instead of 300, the self-calling test in 190 s). The whole crate is not run under Miri here; CI does that.
+
+### test262 (`tools/js/test262_js2.sh`, the pinned checkout `e4fbf577`)
+
+Before: `origin/main` `fae94731` (built and run the same way). After: this branch merged with it.
+
+| | Before | After |
+| --- | ---: | ---: |
+| js2 pass / fail | 12,768 / 5,016 | 13,694 / 4,090 |
+| old engine pass / fail | 16,755 / 1,029 | 16,755 / 1,029 |
+| pass on old, fail on js2 | 4,040 | 3,119 |
+| pass on js2, fail on old | 53 | 58 |
+| passed on js2 before, fail now | - | 0 |
+
+- A first measure, on the base before the other agents merged (`#764` head `e6a65639`): 4,852 → 3,927. There the groups were: wrapper objects 712 → 0 (the tests that call `new Boolean`, `new String`, `new Number`: 269 + 243 + 200); script `valueOf`/`toString` in conversions 257 → 0; "expected an error, none thrown" 408 → 392; "different error constructor" 114 → 83. On the new base the same two groups are 237 → 226 and 23 → 20. The rest of the "expected an error" group is in the areas of the other agents (strict-mode assignment to read-only and undeclared names, validation in `defineProperty` and `defineProperties`, early errors).
+- A first run after the change showed 34 tests that passed before and failed (the order of key conversion above). They pass again. The comparison lists the tests that pass on js2 in the base run and fail in the new run; it is empty.
+- `tools/fixtures/js/test262-js2-baseline.txt` is the table of the new run (`-u`).
+
+### Cost of the hot loop
+
+`interp_load`, release build, `perf stat -e instructions:u` with `GLIBC_TUNABLES=glibc.malloc.tcache_count=65535`, archMachine (load average 10 to 18, so only instruction counts), 3 runs each (spread at most 0.002 M), net = count(N) - count(0), in M instructions. Base is `origin/main` `fae94731`, built the same way.
+
+| Row | N | Base (cgu 16) | New (cgu 16) | Change | Base (cgu 1) | New (cgu 1) | Change |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loopfn` | 1,000,000 | 310.5 | 325.5 | +4.8% | 323.5 | 333.5 | +3.1% |
+| `calls` | 1,000,000 | 691.5 | 692.5 | +0.1% | 717.5 | 715.5 | -0.3% |
+| `fib` | 30 | 1434.8 | 1407.9 | -1.9% | 1477.9 | 1445.5 | -2.2% |
+| `closures` | 200,000 | 415.1 | 413.5 | -0.4% | 425.9 | 427.3 | +0.3% |
+| `objects` | 200,000 | 151.1 | 155.7 | +3.0% | 155.7 | 162.6 | +4.4% |
+
+- **The bound of +0.5% is not met for `loopfn` and `objects` (both codegen settings). This needs an owner decision.** I found no new work on these paths. The changes in the loop are: the budget is a field of the realm (`JmpBack`), the program comes in as an argument of `Vm::run`, and the `GetElem`, `SetElem`, `Delete` and `In` checks are on the slow paths. `callgrind` on `loopfn` (20,000 turns, profiling build) gives 304 instructions per turn for the base and 310 for the new build; the instruction diff of the hot path is only a different register allocation (for example the `words` pointer is reloaded from the stack at each dispatch, about 1 instruction per op). Hypothesis: `Vm::run` was one value (`self`) from which the realm, the stack, the feedback and the program were derived; now they are four arguments, so the allocator keeps one more value live. The same function swung by -7% to +7% between builds of this branch (below), so the sign is not stable.
+- Earlier builds of this branch on the older base (`e6a65639`), for the record: with `Rc<Program>` cloned inside `Vm::run`, `closures` +3.6%, `fib` +2.1%, `objects` +1.3% at cgu 16 (callgrind: +1 instruction at each op dispatch). Passing `&Program` from `Vm::start` gave -6.9%, -6.8%, -5.9%, -4.0%, -2.0% for the five rows at cgu 16, and +7.4%, +3.5%, +0.1%, +2.8%, +6.5% at cgu 1. Two other tries made it worse or changed nothing (`dctor` read from the realm at its one use: no change; one `Machine` struct for the stack and the feedback: `fib` +4.1%).
+- A way to remove the cause without a change in the interface: keep the program, stack and feedback in the same struct as the realm for the host's own entry, and run nested calls through `Vm::run` on a second struct. It needs `Realm` to be a field of a struct that a nested call can build, which is a bigger change; not tried.
+
+### Cost of the hot loop, second round: `#[cold]` on `unwind`
+
+Machine archMachine (load average 3 at the end of the work; instruction counts do not depend on load). Base `fae94731` (`crates/js2` is identical to `origin/main` `ab2010b8`), PR head `232c7d14`, and the fix. Net M instructions of `interp_load` (count(N) - count(0)), `GLIBC_TUNABLES=glibc.malloc.tcache_count=65535`, 3 runs each, spread at most 0.002 M. The numbers of the base and of the PR head repeat the first round exactly.
+
+| Row | Base cgu 16 | PR head | Fix | Fix vs base | Base cgu 1 | PR head | Fix | Fix vs base |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loopfn` | 310.5 | 325.5 | 308.5 | -0.6% | 323.5 | 333.5 | 333.5 | +3.1% |
+| `calls` | 691.5 | 692.5 | 664.5 | -3.9% | 717.5 | 715.5 | 715.5 | -0.3% |
+| `fib` | 1434.8 | 1407.9 | 1375.5 | -4.1% | 1477.9 | 1445.5 | 1449.6 | -1.9% |
+| `closures` | 415.1 | 413.5 | 402.9 | -2.9% | 425.9 | 427.3 | 427.3 | +0.3% |
+| `objects` | 151.1 | 155.7 | 151.6 | +0.35% | 155.7 | 162.6 | 162.9 | +4.6% |
+
+- **The fix.** `unwind` (the function that every `throw!` site of `Vm::run` calls) is `#[cold]` and `#[inline(never)]`. Two lines. At codegen-units 16 (the default release build, which the cost matrix uses) `loopfn` and `objects` are inside +0.5% and the other three rows are lower than the base. At codegen-units 1 the rows do not move: `loopfn` +3.1% and `objects` +4.6% remain.
+- **The cause (verified for what; hypothesis for why).** `callgrind --dump-instr=yes` on `loopfn`, base and PR head: both run the same ops; the hot path of one turn has 295 instructions in the base and 310 in the PR head. The 15 extra instructions are loads and moves that the register allocator adds: `words` is reloaded from the stack at each dispatch (`mov 0x38(%rsp),%rbp`) instead of living in `r11`, and several temporaries go through stack slots. The ops of these rows (`loopfn`: `MulI`, `Add`, `Mod`, `Inc`, `JnLtI`, `JmpBack`; `objects`: `NewObjLit`, `Add`, `Mov`, `Inc`, `JnLtI`, `JmpBack`) do not run the new `GetElem`, `SetElem`, `In` checks or the wrapper flag test, and `JmpBack` only reads the budget from the realm (same cost as before). `callgrind` on `objects` puts the whole gain or loss in `Vm::run` (13.46 M against 13.92 M for 20,000 turns); `Obj::new`, `alloc_slow` and the other functions have the same counts. Hypothesis for why: the change of the `run` signature and the new call sites change the choices of the allocator in one function of 330 KB. The size of `Vm::run` fell from 0x61bd0 to 0x512ee bytes with the PR.
+- **Tries that did not help** (net M instructions at cgu 16 / cgu 1 for `loopfn`, then `objects`; PR head 325.5 / 333.5 and 155.7 / 162.6):
+  - `#[inline(never)]` on `Vm::run`: no change (it was not inlined).
+  - One `Machine` struct (stack, feedback, program) passed as one argument, `Vm` holding it: 332.5 / 343.5 and 156.5 / 166.7. Worse. The idea was that the loop derives all three from one pointer, as the base derived them from `self`.
+  - The program read from `realm.prog` at each use (a macro) instead of an argument: 334.5 / 347.5 and 156.7 / 166.0. Worse.
+  - `#[cold]` on `unwind` plus `#[cold]` on `Realm::error`: 310.5 / 333.5 and 154.2 / 163.4. `objects` is worse than with `unwind` alone.
+  - `#[cold]` on `unwind` plus `#[cold]` on `Realm::collect`: 326.5 / 325.5 and 156.9 / 160.3. Worse at cgu 16.
+  - One place for all throws (`throw!` as a `break` to one `unwind` call after the op, instead of a copy of `unwind` and `reload!` at each site), with `#[cold]`: 322.5 / 324.5 and 155.5 / 163.7. The binary is 140 KB smaller, but the counts are worse at cgu 16. Without `#[cold]`: 327.5 / 332.5 and 157.8 / 162.4. Not used.
+  - The results swing by up to 5% for changes that do not change what the loop does. The fix above is the best of the variants for the five rows together, not a proof of the cause. A later change to `Vm::run` can move the rows again: measure each one.
+- **The rule for cgu 1.** `objects` at cgu 1 is +4.4% to +5% in every variant, and `loopfn` +3.1% to +7% in all but two (the shared-throw variant with `#[cold]`, +0.3%, and `#[cold]` on `collect`, +0.6%; both worse at cgu 16). Only the cgu 16 numbers meet +0.5%. I did not find a variant that meets it at both.
+- **Interaction with #773** (`t3/js2-step2-regs-local`, open at the time of this work, caches the frame base `regs` in a raw pointer). A nested call from `Realm::call_function` runs on its own `Machine` (its own stack), so it never grows or moves the stack of the outer loop: the outer `regs` stays valid after any native call that re-enters. The re-entry points are `Realm::call_script` -> `Vm::start` -> `Vm::run`. If a later change lets a nested run use the stack of the outer loop, `regs` must be set again after it, and the test needs a `valueOf` that grows the stack during a conversion. Not tested together with #773: it is not merged.
+
+### Not tested
+
+Windows and macOS; arm64; Miri on the whole crate (only `conversion_tests`; a first run of the loop test with 300 turns did not end in 2 hours, so it runs 12 turns under Miri); the GC-hold gap with a `valueOf` that allocates more than the slack in a loop (no test; the budget bounds it); sloppy-mode `this` boxing; the cgu 1 numbers on an idle machine.
+
+### Merge with main (#768 built-in attributes, #770 lazy prelude)
+
+Merged `origin/main` (`d4709367`, then again `ee09fd09`) into the branch (head of #785 was `468c695b`, based on `fae94731`). Conflicts in `builtins.rs`, `interp.rs`, `interp_rt.rs`, `object.rs` and the test262 baseline.
+
+- **Flags.** `F_WRAP` is 4096. Main uses 1 (`F_OVER`, `Elements`: `F_SPARSE`), 2, 4, 8, 16, 32 (`F_NOEXT`), 64 (`F_FNPROPS`), 128, 256, 512, 1024 and 2048 (`F_LAZY`). A cell has 24 flag bits (`FLAG_MAX`). Every use of `F_WRAP` goes through the constant.
+- **Object built-ins.** Main moved them to `bi_object.rs`. The changes of #785 went into that file; attributes, `fn_props`, `Put::Fail` and the non-extensible checks are main's. `object_ctor` makes `ToObject` wrappers (`Object(v)`, `new Object(v)`). `get_own` answers the units and `length` of a `String` wrapper, so `getOwnPropertyDescriptor(s)`, `hasOwnProperty`, `propertyIsEnumerable`, `hasOwn` and `Object.entries` see them. `own_key_list` lists them (units first, `length` after the indexes). `object_to_string` tags a wrapper. `getPrototypeOf` on a primitive, the `ToObject` throw for `undefined` and `null`, and the skip of such sources in `assign` were already in main. `\0prim` is a hidden key, so `own_key_list` leaves it out.
+- **`interp.rs`.** `unwind` keeps `#[cold] #[inline(never)]`. The `Op::Lazy` and `ObjRest` arms of main stay, `Op::Lazy` changed (below). `Vm::run` takes `prog: &Program` as in #785.
+- **Lazy compile and the shared program (new design).** #770 compiles a stub inside the loop, with `&mut Program`. #785 shares the program as `Rc<Program>` with nested runs, and the loop holds `&Program`. Both cannot hold. Now `Op::Lazy` sets `Realm::lazy_at` (stub code index and frame pointer) and returns from `run`. `Vm::start` drops its `Rc`, calls `Realm::compile_stub` (the compile, the `fn_info` of the new codes, the feedback vectors, the frame made again for the real code), takes a new `Rc` and calls `run` again at `(ci, fp)`, pc 0. Frames below stay on the stack, so the run goes on as before. `Vm` has no `prog` field (a second `Rc` would block `Rc::get_mut`); the program is `Vm::realm.prog`, and the compiler is `Realm::lazy`. A failed compile sets `Realm::lazy_err`, and the op throws it as a `SyntaxError` in the frame of the stub (the old test `a_lazy_compile_that_fails_throws_a_syntax_error` passes). A machine in the pool gets its feedback for the compiled code reset (it may have run the stub).
+- **Known gap: a stub cannot be compiled inside a nested run.** A nested run (`Realm::call_function`) has runs above it that borrow the program, so `Rc::get_mut` fails. A prelude function that waits and is called for the first time inside a conversion, getter or setter that a native runs throws a `SyntaxError` there; the script can catch it, the stub still waits, and the next call from an outer run compiles it. A prelude function that an outer run compiled before works in a nested call. No test262 test meets the gap (the pass list of main loses nothing). Ways to lift it: compile all stubs at the first nested call (needs the program free then), or keep the code table in a structure that allows an append through `&` (stable addresses, one more load for each call and return). Not built.
+- **Tests added** (`conversion_tests.rs`): a `valueOf` that recurses 3,000 deep grows the stack of its own machine and the outer loop goes on with its registers; a prelude function that the outer run compiled works in a nested call; the gap above (error caught, next outer run compiles). The test for #773 (`regs` pointer in `Vm::run`) is the first of these; #773 had not landed (no `regs` in `interp.rs` of main), so it did not run against it.
+
+#### test262 after the merge (`tools/js/test262_js2.sh -j 6`, checkout `e4fbf577`)
+
+| | main `ee09fd09` | merged |
+| --- | ---: | ---: |
+| js2 pass | 14,720 | 15,772 |
+| js2 fail | 3,064 | 2,012 |
+| old engine pass | 16,755 | 16,755 |
+| pass on old, fail on js2 | 2,094 | 1,060 |
+| pass on js2, fail on old | 59 | 77 |
+| passed on main, fails now | - | 0 |
+
+The comparison is test by test (PASS lines of `new.txt`): 0 tests lost, 1,052 gained. `tools/fixtures/js/test262-js2-baseline.txt` is regenerated (`-u`).
+
+#### Differential runner
+
+`cargo test --locked -p bare-js-diff`: pass. `tools/fixtures/js/diff-known.txt` went from 21 lines to 17: 4 lines removed (`new String`, `new Number`, `Object(5)`, script `valueOf`), none added.
+
+#### Cost after the merge
+
+`interp_load` release, `perf stat -e instructions:u` with `GLIBC_TUNABLES=glibc.malloc.tcache_count=65535` (`tools/js/instr.sh`, minimum of 3 runs), net = count(N) - count(0), in M instructions. Main `ee09fd09` and the merged tree built and measured in the same hour on archMachine; two rounds, equal to 0.003 M. cgu 16 is the default; cgu 1 is `CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1` for both trees.
+
+| Row | N | Main cgu 16 | Merged cgu 16 | Change | Main cgu 1 | Merged cgu 1 | Change |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loopfn` | 1,000,000 | 320.50 | 327.50 | +2.2% | 328.50 | 313.50 | -4.6% |
+| `calls` | 1,000,000 | 708.50 | 689.50 | -2.7% | 723.50 | 685.50 | -5.3% |
+| `fib` | 30 | 1452.28 | 1393.04 | -4.1% | 1483.24 | 1407.85 | -5.1% |
+| `closures` | 200,000 | 418.29 | 412.09 | -1.5% | 428.95 | 414.55 | -3.4% |
+| `objects` | 200,000 | 153.39 | 154.06 | +0.43% | 158.40 | 156.80 | -1.0% |
+
+`loopfn` is over +0.5% at the default build and is within +0.5% (it is 4.6% lower) at codegen-units 1 on both trees, so it passes by the rule. No other row is over +0.5%. The cgu 16 sign of `loopfn` is the swing of the register allocator that the earlier rounds describe (`Vm::run` is one function of 330 KB); the loop of the ops of this row did not change in the merge.
+
+#### Tests
+
+`cargo test --locked -p bare-js2 --lib`: 405 pass (the 8 tests of #785 and the 3 new ones included; `a_scope_with_many_locals_compiles_in_linear_time` passes). `cargo test --locked -p bare-js-diff`: pass.
+
+Not tested: Windows and macOS; arm64; Miri after the merge; the nested-stub gap beyond the one test; #773, #774, #775 (not on main when this was measured); the cgu 1 numbers on an idle machine. `cargo clippy` stops on `bi_object.rs:450` (`ro || (d.w == Some(true) && ro)`, `overly_complex_bool_expr`), code of #768 that this merge did not change.
+
+
+### Lazy compile in a nested run (the gap of the merge above)
+
+The gap: `Op::Lazy` leaves the loop, and `Vm::start` compiles with `Rc::get_mut(&mut realm.prog)`. That works only at `nest == 0`. In a nested run (`Realm::call_function`) the runs above hold `&Program`, so a waiting function that is first called there (a getter, a setter, `valueOf`, `toString`, any native that calls a script function) threw a `SyntaxError`. With #777 every function of a user script waits, so this would fail in scripts. The owner rule: lazy compile must be invisible to a script. Three things hold the program or a table of its size while a nested run starts: (1) `&Program` in each outer loop, (2) the `&Code` and `&[u32]` locals of each outer loop, (3) the feedback vector (`fbs[ci]`) of each outer machine, which is a `&mut Vec` in its loop and must have one entry for each code.
+
+#### Designs compared
+
+Costs below are for the hot path (the `prog.codes[ci]` read in `enter!`, `reload!`, return and `unwind`) and for memory. "Now" is `Vec<Code>` behind `&Program` (the loop may keep `ptr` and `len` in registers because nothing can write them).
+
+| | A: append-only table of pointers (`Codes`) | B: one `Vec<Code>` with the capacity reserved at load | C: compile every waiting function at the first nested call | D: stub slot as a `Cell` pointer, `Vec<Code>` as now |
+| --- | --- | --- | --- | --- |
+| Data | `Vec<*mut Code>` in an `UnsafeCell`; each `Code` is its own heap block that never moves | `Vec<Code>` in an `UnsafeCell`; no growth past `capacity` | `Vec<Code>` as now | `Vec<Code>` as now, plus `Cell<*const Code>` for each stub |
+| `codes[ci]` | load table ptr, load len, compare, load the block ptr (1 more dependent load; the index is scaled by 8, not by `size_of::<Code>()`) | as now, except that ptr and len are no longer read-only | as now | as now, plus a load of the cell for a stub test |
+| Append in any run | yes: push a pointer; old blocks do not move; only the table may move, and nobody holds the table | only while `len < capacity`; the capacity is the function count of one script, so `eval`, `Function` and a second script beyond it need the gap again | no append: it compiles all at once, and O(all stubs) at the first nested call | no append (the table is still a `Vec`) |
+| Replace a stub | swap the pointer; the old block is retired (freed at the end of the outermost run, when no `&Code` can exist) | write into the slot while the loop may hold `&Code` of it (needs a contract "nobody holds the stub") | n/a | swap the cell |
+| Memory | +8 B for each code (table) and +16 B malloc header for each block; a retired stub is freed at the end of the outermost run | reserved: `capacity * size_of::<Code>()` up front, also for functions that never run | none | +8 B for each stub |
+| `unsafe` | one module (about 60 lines), Miri tests | one module, and a hole when the capacity runs out | none | the same as A, spread over the loop |
+| Lazy compile invisible | yes | no (capacity) | no (cost: it kills the saving) | yes, but a cost on each call |
+
+Choice: **A**. It is the only one with no limit on appends and no change of cost that depends on the size of the program. The cost is one more dependent load in `enter!` and `reload!`, bought back in part by an index that needs no multiply. B fails the rule when the capacity runs out. C makes the first nested call O(program) and puts the saving at risk. D adds a test to every call.
+
+The first build of A gave each `Code` its own heap block. That cost 22 K instructions at start (+1.2%: 44 blocks for the prelude). The built design keeps A and changes where the `Code` values live:
+
+- `crates/js2/src/codes.rs` (the only new `unsafe`, one module, `#![allow(unsafe_code)]` on the `mod` line, SAFETY comment at the top). `Codes` is a table `Vec<*mut Code>` and a slab. The slab holds *chunks*: the buffer of a `Vec<Code>` that a loader hands over (no copy), with its spare room for later single codes. One heap block for each compile, not for each code.
+- `push_all(Vec<Code>)` adds a chunk. `set(i, Code)` takes a slot (a free one, else room in the last chunk, else a new chunk of 16) and *retires* the old slot. A `&Code` of the old code stays valid.
+- `free_retired(&mut self)` drops the retired codes and keeps their slots for the next `set`. `Vm::start` calls it when the outermost run ends (`nest == 0`, through `Rc::get_mut`), so no `&Code` can exist. A chunk goes back to the allocator when the `Codes` drops.
+- `Codes::at(i)` is `unsafe` and has no bounds check. The loop uses it only for the code of a frame that is on its stack (`enter!` and `Vm::start` checked the index). The table never shrinks.
+- The loop compiles in place: `Op::Lazy` calls `Realm::compile_stub` (compile, `fn_info`, one feedback entry, the frame made again for the code, as for a stub that keeps its parameters since #777) and goes on at pc 0 after `reload!`. `lazy_at`, `lazy_err` and the exit through `Vm::start` are gone.
+- A machine that is below in the Rust stack has a feedback vector that is shorter than the table. `reload!` has the bounds check that it had; its miss branch calls the cold `grow_fbs`. `Realm::call_function` no longer resizes the vector of a pooled machine.
+- A compile failure throws a plain `Error` (since #777) at the stub, and the stub fails again at its next call.
+
+#### Cost of the built design
+
+`interp_load` release, `tools/js/instr.sh` (minimum of 3, `instructions:u`), net = count(N) - count(0), in M instructions. Main `43b62b05` and this tree (merge with main, 3 runs each, spread under 0.002 M) built and measured in the same hour on archMachine. cgu 16 is the default build; cgu 1 is `CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1` for both trees.
+
+| Row | N | Main cgu 16 | New cgu 16 | Change | Main cgu 1 | New cgu 1 | Change |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loopfn` | 1,000,000 | 320.50 | 323.50 | +0.94% | 328.50 | 327.50 | -0.30% |
+| `calls` | 1,000,000 | 708.50 | 691.50 | -2.40% | 723.50 | 710.50 | -1.80% |
+| `fib` | 30 | 1452.28 | 1401.12 | -3.52% | 1480.55 | 1454.97 | -1.73% |
+| `closures` | 200,000 | 418.29 | 414.69 | -0.86% | 428.95 | 426.95 | -0.47% |
+| `objects` | 200,000 | 153.39 | 155.66 | +1.48% | 158.20 | 162.86 | **+2.95%** |
+
+`loopfn` is over +0.5% at cgu 16 and under it at cgu 1, so it passes by the rule. **`objects` fails the rule**: +1.48% at cgu 16 and +2.95% at cgu 1. Its loop makes one construct call and one return for each iteration. What I measured:
+
+- The extra cost is about 11 instructions for each iteration at cgu 16 and 23 at cgu 1. A table load for each call and return explains only 2 to 4.
+- With the body of the `Op::Lazy` arm cut out (it only throws), `objects` stays at 155.79 M at cgu 16. So the compile code in the loop is not the cause.
+- With `Codes` made hoistable by a cast that is undefined behaviour (an experiment, not kept), cgu 1 gives `objects` 161.8 M (+2.1% against main). So the `UnsafeCell` that blocks the hoist of the table pointer is part of it and not all.
+- Hypothesis: the rest is the register allocation of the 330 KB `Vm::run` (the earlier rounds show the same swing in both signs on rows whose ops did not change). I did not find one line that causes it.
+- Not built: design H, a table with a fixed address and a `(ptr, len)` snapshot in the loop that refreshes on a miss. It would let LLVM hoist the table again. I judged it large and uncertain. The owner decides whether to build it.
+
+Start-up: `script_run` of `var x = 1;` is 1,786,500 (main, 3 runs: 1,785,885 / 1,786,524 / 1,786,732) and 1,789,750 (new, 3 runs: 1,789,371 / 1,789,750 / 1,790,476): +3.3 K, +0.19%. `interp_load loopfn 0`: 808.4 K to 809.1 K (main) and 810.0 K to 810.4 K (new): +0.17%. It does not meet "must not regress" to the instruction. The table, the chunk list and the `Rc<Codes>` cost it. The prelude `Vec<Code>` is adopted without a copy.
+
+#### Tests
+
+- `cargo test --locked -p bare-js2 --lib`: 422 pass (the merge with main, which now has #777). `-p bare-js-diff`: pass. `a_scope_with_many_locals_compiles_in_linear_time` passed in the full run.
+- `codes_tests.rs` (5): append and read, `set` keeps a `&Code` of the old code until `free_retired`, a slot is reused after it, growth of the table with a `&Code` held, `set` out of range panics. Miri passes them under Stacked Borrows and under `-Zmiri-tree-borrows`. Miri (Stacked Borrows, 288 s) also passes the three nested tests `a_stub_first_called_two_levels_deep_compiles_and_the_levels_above_use_what_it_made`, `a_function_that_waits_and_is_called_in_a_nested_run_that_throws_stays_usable` and the #777 test above. Miri did not run on the whole crate, and not the other two conversion tests (the run hit the time limit).
+- `conversion_tests.rs`: the test that asserted the `SyntaxError` is replaced by three that first-call `map`, `sort`, `reduce`, `Array.from`, `forEach` and `find` inside `valueOf`, a getter, a setter and `toString`, two levels deep, and after a nested run that throws. Each fails on the old head and passes now.
+- #777 combination (it landed in main before the final merge; `script_tests.rs::a_user_function_first_called_in_a_nested_run_is_compiled_there`, 8 cases, each also under constant collection): a user function first called from a getter, a setter, `valueOf` and `toString`, with a stub that keeps its parameter registers and one that makes the array (`arguments`, a default value, a rest parameter); a three-level chain (`valueOf` -> getter -> `valueOf`); a stub that compiles in a nested run and has a function inside it. It fails on main `43b62b05` (checked in a scratch worktree with the same test) and passes here.
+- test262 (`TEST262=/data/claude-tmp/test262` at `e4fbf577`, `tools/js/test262_js2.sh -j 6`, 452 directories), this tree against `tools/fixtures/js/test262-js2-baseline.txt` and against main `43b62b05` run the same way. No test passes on main and fails here (0 lost). Against main, this tree passes more (the coercions of #785): for example `built-ins/Array/prototype/every` 178 to 201, `Object/seal` 42 to 51, `compound-assignment` 236 to 379. Against the checked-in baseline, 3 directories have one pass less, and main has the same count in each: `language/expressions/arrow-function` 41 to 40, `language/expressions/class` 190 to 189, `language/expressions/object/method-definition` 55 to 54. The baseline file is older than main there; this change did not cause the drop. I did not rewrite the baseline.
+- Main `43b62b05` does not build its lib tests: `script_tests.rs` calls `compile_after` with 5 arguments (it has 6 since #786) and reads `vm.prog` (it is `vm.realm.prog`). This change fixes the three lines.
+
+#### Stable code of the hot loop: cold paths (the `objects` row)
+
+The `objects` row failed the rule (+1.48% at cgu 16, +2.95% at cgu 1). The owner rule: fix the design, no exception. This section is the fix. Head before: `8c3ec195`.
+
+**What I found.** `objects` runs no call: its bytecode is `NewObjLit`, `GetField`, `SetField`, `Add`, `Inc`, `JnLtI`, `JmpBack` (the earlier text of this section says one construct call for each turn; that is wrong, `interp_load objects` has no `Call`). `callgrind --dump-instr=yes` at cgu 1 on 20,000 turns: `Vm::run` 12.96 M (main) and 13.44 M (PR head), 648 and 672 instructions for each turn. Every other function has the same count. The extra instructions are register traffic. On main the loop state is already in stack slots at cgu 1 (`pc` at `[rsp+0x38]`, `fp` at `[rsp+0x18]`, the stack base through a pointer to the `Vec`). `Vm::run` is 0xa1d1d bytes on main and 0xd74b2 on the PR head at cgu 1 (`step!` is expanded twice, for the `Wide` prefix and without it).
+
+**The design.** LLVM gives every arm of the dispatch `match` the same weight. A call in a rare arm (a class op, a private name, `super`, a spread call, `Lazy`) makes LLVM keep `pc`, `fp`, `words` and the stack base in slots around that call. The hot arms pay for it. The change tells LLVM which paths are rare, with `std::hint::cold_path()` (stable since Rust 1.95; the repo builds with 1.96):
+
+1. The first statement of the 48 arms of rare ops (declarations, `Lazy`, `CreateArgs`, `CreateRest`, templates, spread, `CopyProps`, `ObjRest`, accessors and methods, classes, private names, `super`, `Delete`, `In`, `InstanceOf`, `Exp`, `Throw`, `ThrowConst`, `ForInOpen`, `RetDerived`) is `cold_path()`.
+2. `throw!` and the collection branch of `gate!` start with `cold_path()`. Every `err!`, `tri!` error path and every allocation gate ends in one of them. `unwind` was already `#[cold]` (the earlier fix); that marked only the call, not the code that builds the error and reloads the frame.
+
+No arm moved and no logic changed; the diff is 4 lines of comment, 2 lines in the macros and 48 lines in the arms. The arms that stay hot: loads, moves, context ops, globals, fields, elements, object and array literals, `Closure`, `Call`, `CallU`, `New`, arithmetic, compare, jumps, switch, `Ret`, `RetUndef`, iterators, `Concat`, `ToStr`, `Typeof`, `LoadCallee`, `LoadNewTarget`.
+
+**Cost.** `interp_load`, `tools/js/instr.sh` method (`perf stat -e instructions:u`, `GLIBC_TUNABLES=glibc.malloc.tcache_count=65535`, 3 runs, net = count(N) - count(0), M instructions, spread at most 0.003 M). Main `43b62b05` and this tree built and measured in the same session on archMachine, both with the symbols kept (`CARGO_PROFILE_RELEASE_STRIP=false`; the counts equal the stripped build). cgu 16 is the default; cgu 1 is `CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1` for both trees.
+
+| Row | N | Main cgu 16 | PR head | Now | vs main | Main cgu 1 | PR head | Now | vs main |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loopfn` | 1,000,000 | 320.50 | 323.50 | 312.50 | -2.50% | 328.50 | 327.50 | 308.50 | -6.09% |
+| `calls` | 1,000,000 | 708.50 | 691.50 | 668.50 | -5.65% | 723.50 | 710.50 | 678.50 | -6.22% |
+| `fib` | 30 | 1452.28 | 1401.12 | 1371.50 | -5.56% | 1480.55 | 1454.97 | 1415.93 | -4.36% |
+| `closures` | 200,000 | 418.29 | 414.69 | 403.49 | -3.54% | 428.95 | 426.95 | 410.55 | -4.29% |
+| `objects` | 200,000 | 153.39 | 155.66 | 151.79 | -1.04% | 158.20 | 162.86 | 153.39 | -3.04% |
+
+No row is above main at either build, so the rule needs no exception. Which part moved `objects` (verified, each step built and measured): step 1 (the arms) alone gave `objects` 151.79 (-1.04%) at cgu 16 and 161.13 (+1.85%) at cgu 1, and the other rows lower than main at cgu 16. Step 2 (`throw!` and `gate!`) took cgu 1 to 153.39 and moved the other rows at cgu 1 down by 2% to 5%. Why the allocator behaves so is a hypothesis: the callgrind diff before the change showed only different register choices.
+
+Start-up, `script_run` of `var x = 1;` (3 runs, instructions): main 1,786,773 / 1,787,272 / 1,789,366; PR head 1,792,760 / 1,793,015 / 1,795,915; now 1,791,923 / 1,793,950 / 1,794,258 at cgu 16 (+0.29% on the minimum against main; the PR head is +0.34%). At cgu 1: main 1,777,903, PR head 1,786,994, now 1,782,332 (+0.25%; the PR head +0.51%). This change does not add to the start-up cost of the PR and does not remove it. The start-up cost is the `Codes` table, as described above.
+
+Two other programs (`script_run`, cgu 16, instructions, main to now): a class program with a private field, a derived class with a field, `super.m()` and `super()` (20,000 objects, 170.2 M against 173.7 M, -2.0%), and a mixed program with `for of`, `for in`, `try`, `in`, `instanceof` (53.9 M against 54.2 M, -0.7%). So marking the class and private ops cold costs nothing that I could measure.
+
+**Stability test (the aim).** The earlier rounds moved the hot rows by 2% to 7% for an edit that did not touch them. I edited the cold arm `GetSuper` twice and built both settings each time. First edit, on the build with step 1 only: an `ensure!` (stack growth), an xor into `realm.fuel`, and a `black_box`. Rows moved by at most 0.2% (`fib` cgu 1 1476.51 to 1473.82; `calls` cgu 1 706.50 to 705.50; `closures` 0.1% to 0.2% at both settings; the others equal to 0.003 M). Second edit, on the final build (steps 1 and 2): the same plus a loop over the registers and two `gate!()` (a collection in the arm). All ten numbers (five rows, two settings) equal the table above to 0.003 M. Neither edit is kept.
+
+**Not built:** moving the bodies of the rare arms into `#[cold] #[inline(never)]` functions, and design H (a fixed table address with a snapshot in the loop). The hint reached the aim of both (the hot rows no longer follow the rare arms) with a 54-line change, and the code stays in place. If a later edit moves a row again, the next step is to move the body of the arm into a function. A new arm of a rare op must start with `cold_path()`; the comment at the `match` says so.
+
+**Tests.** `cargo test --locked -p bare-js2 --lib`: 422 pass (`a_scope_with_many_locals_compiles_in_linear_time` included, run in the full set). `cargo test --locked -p bare-js-diff`: pass. test262 (`tools/js/test262_js2.sh -j 6`, checkout `e4fbf577`), test by test (the `PASS` lines): main `43b62b05` 14,718, PR head `8c3ec195` 15,770, this tree 15,770. No test that passes on main fails here (0 lost), and the PR head and this tree have the same set. No Miri run: `codes.rs` did not change and the change adds no `unsafe`.
+
+**Not tested:** the interaction with #773, #774 and #775 (none of them is on main; #773 changes `r!` to a cached pointer, so it moves the register allocation again: measure `objects` after the first of them lands); Windows, macOS, arm64 (`cold_path` is a hint on every target, the numbers are x86-64 only); an idle machine for wall time (instruction counts only); the other rows of the cost matrix of `docs/resources.md` outside js2; the start-up cost of the PR.
 
 ## 2026-11-20: the pre-parse facts of the prelude are a generated file (js2, option B′ of `docs/design-js2-prelude.md`)
 
