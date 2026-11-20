@@ -16220,7 +16220,7 @@ Change (`Vm::run`, `interp.rs`): a local `regs: *mut Value` holds `stack.as_mut_
 
 Invariant: `regs` must be set again each time `fp` changes or the stack is reallocated. A missed spot is a use after free. Today only `ensure!` and `Vm::call` reallocate the stack, and `Vm::call` runs only with an empty stack. A native that re-enters the VM (the re-entrant call of the conversion work) must set `regs` again after the nested run.
 
-Checks: test `a_stack_that_grows_in_a_callee_keeps_the_registers_of_the_callers` (deep recursion by `call`, `new`, a method call and a rest parameter: each caller has live registers and reads `this` and its arguments after the call that grows the stack). It passes without the fix in `ensure!` in a normal run (the freed block still holds the old data), so a normal test cannot see the bug. Under Miri, with the line in `ensure!` removed, it fails: "pointer is dangling". With the line it passes under Miri on the heads of steps 3 and 4, which hold this change (see there). It was not run on this head alone.
+Checks: test `a_stack_that_grows_in_a_callee_keeps_the_registers_of_the_callers` (deep recursion by `call`, `new`, a method call and a rest parameter: each caller has live registers and reads `this` and its arguments after the call that grows the stack). It passes without the fix in `ensure!` in a normal run (the freed block still holds the old data), so a normal test cannot see the bug. Under Miri, with the line in `ensure!` removed, it fails: "pointer is dangling". With the line, the new test passes under Miri on the step 3 head (769 s) and on the step 4 head (422 s). The run of the whole `interp::` module under Miri was stopped after 5 tests (it needs more than 40 minutes); the CI job runs the whole crate.
 
 Instructions of the whole process, same method as step 1. "Step 1" is the head of PR #766 merged with the design branch, built again for this table (it differs from the step 1 table above by 0.13% at most, in `concat`).
 
@@ -16262,6 +16262,184 @@ Net slope (scale 10 minus scale 1), M instructions:
 
 
 Per-op costs in the S2.9 entry predicted 2.5% to 13% (spike). Measured: `fib` -4.0%, `closures` -4.7%, `objects` -5.0%, `calls` -7.5%, `loop` -11.5%, `loopfn` -17.8%. Every row is lower; none is higher. The spike did not have the `nextx` change, and the rows are better than the spike by 0.5 to 4.7 points (hypothesis: `nextx`; not measured separately).
+
+### Step 3: a cache of the address of the global
+
+Design: section 4, option 7a. A `GetGlobal` or `SetGlobal` site held the shape id and the place of the slot (`Obj::loc`), and a hit read the global object through `Obj::from_value_shape` and `read_loc` (a kind test, a layout test, and a second load through the overflow record: almost every global of a script is past the 5 inline slots). Now a site holds the address of the slot of the global object, and a hit is one compare and one load or store.
+
+How it stays right (the invariant):
+- The address of a slot of the global object changes only when the object gets another shape (an add, a delete, an attribute change, a new prototype: all go through `Obj::set_shape`) or when its overflow record is replaced (`Obj::reserve`). `Shapes` watches the global object (`Shapes::watch`, set in `Realm::new`). `Obj::set_shape` and `Obj::reserve` change `Shapes::watch_tag` when `self` is that object. The tag starts at 2^31 and only grows, so it is never 0 and never a shape id (a shape id is below 2^20).
+- A site holds the tag in `Cache::shape` and the address in `loc` and `to` (low and high 32 bits). A hit tests `cache.shape == shapes.watch_tag()`. A stale entry (any change since the fill) has an old tag and misses. The tag is not the shape id, because a delete that goes back to an older shape gives the old shape id but may leave another overflow record.
+- The one change of the shape that does not go through `set_shape` is the cached add of a property (`set_shape_id` on a hit of `SetField`). `set_field_slow` makes no add entry for the global object, so a store `globalThis.name = v` takes the slow path when it adds.
+- A site gets an entry on its second run, as a property site does. Only an own data property of a tree shape gets one (a `SetGlobal` entry also needs `A_W`). A name that the prototype chain gives, an accessor, a missing name and a dictionary shape take the slow path each time, as before. (A global getter still throws "a global accessor needs a call" in `GetGlobal`; that is as before.)
+- GC: the cache holds no cell. The address points into the global object, which the realm roots, and into its overflow record, which lives as long as the tag. The collector does not move cells. `Feedback::clear` still clears the entries when a shape was freed.
+- The cost: one more compare in `Obj::set_shape` and `Obj::reserve` (`self` against `watch`), and a pointer packed in two `u32` fields (no larger `Cache`).
+
+Check: `a_global_cache_follows_every_change_of_the_global_object` (adds that regrow the record 300 times between two runs of one site; a delete that goes back to an older shape, three rounds; a deleted and re-added name; `Object.defineProperty` that makes the global read-only; a setter on a global; `Object.setPrototypeOf(globalThis, ...)`), also under constant collection. Under Miri a stale address is a use after free. Miri (nightly) on the step 3 head: this test, `a_stack_that_grows_in_a_callee_keeps_the_registers_of_the_callers`, `load_keeps_the_global_object_in_the_shape_tree` and `def_is_hidden_after_load` pass (770 s). A check that Miri finds a stale address (a mutation of `Obj::set_shape` that does not bump the tag) did not finish, so it is not shown that this test catches that bug under Miri.
+
+Instructions of the whole process, same method:
+
+| Row | Scale | step 2 (M) | step 3 (M) | change | spread new % | QuickJS (M) | step 3 / QuickJS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loop` | 1 | 135.14 | 96.34 | -28.7% | 0.003 | 64.69 | 1.49 |
+| `loop` | 10 | 1310.54 | 922.54 | -29.6% | 0.000 | 635.29 | 1.45 |
+| `loopfn` | 1 | 56.76 | 56.76 | +0.0% | 0.007 | 44.10 | 1.29 |
+| `loopfn` | 10 | 526.57 | 526.57 | +0.0% | 0.001 | 429.30 | 1.23 |
+| `calls` | 1 | 107.18 | 84.78 | -20.9% | 0.001 | 60.62 | 1.40 |
+| `calls` | 10 | 1030.58 | 806.58 | -21.7% | 0.000 | 594.33 | 1.36 |
+| `fib` | 1 | 8.65 | 8.41 | -2.8% | 0.024 | 4.37 | 1.92 |
+| `fib` | 10 | 50.09 | 47.30 | -5.6% | 0.013 | 35.54 | 1.33 |
+| `closures` | 1 | 21.37 | 19.36 | -9.4% | 0.016 | 26.11 | 0.74 |
+| `closures` | 10 | 171.21 | 151.16 | -11.7% | 0.001 | 279.90 | 0.54 |
+| `objects` | 1 | 86.75 | 78.50 | -9.5% | 0.002 | 53.72 | 1.46 |
+| `objects` | 10 | 812.78 | 731.62 | -10.0% | 0.047 | 512.44 | 1.43 |
+| `webpack` | 1 | 9.71 | 9.67 | -0.4% | 0.056 | 5.47 | 1.77 |
+| `webpack` | 10 | 51.75 | 51.40 | -0.7% | 0.011 | 41.97 | 1.22 |
+| `throws` | 1 | 37.63 | 32.13 | -14.6% | 0.011 | 85.11 | 0.38 |
+| `throws` | 10 | 335.40 | 280.40 | -16.4% | 0.001 | 840.93 | 0.33 |
+| `concat` | 1 | 4.61 | 4.59 | -0.4% | 0.032 | 1.34 | 3.43 |
+| `concat` | 10 | 5.24 | 5.08 | -3.1% | 0.003 | 2.15 | 2.36 |
+| `bundle` | 1 | 122.86 | 122.82 | -0.0% | 0.003 | 134.42 | 0.91 |
+| `empty` | 1 | 4.48 | 4.48 | +0.0% | 0.049 | 1.23 | 3.63 |
+
+Net slope (scale 10 minus scale 1), M instructions:
+| Row | step 2 | step 3 | change | QuickJS | step 3 / QuickJS | gate (<= 1.00) |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `loop` | 1175.4 | 826.2 | -29.7% | 570.6 | 1.45 | no |
+| `loopfn` | 469.8 | 469.8 | -0.0% | 385.2 | 1.22 | no |
+| `calls` | 923.4 | 721.8 | -21.8% | 533.7 | 1.35 | no |
+| `fib` | 41.4 | 38.9 | -6.1% | 31.2 | 1.25 | no |
+| `closures` | 149.8 | 131.8 | -12.0% | 253.8 | 0.52 | yes |
+| `objects` | 726.0 | 653.1 | -10.0% | 458.7 | 1.42 | no |
+| `webpack` | 42.0 | 41.7 | -0.7% | 36.5 | 1.14 | no |
+| `throws` | 297.8 | 248.3 | -16.6% | 755.8 | 0.33 | yes |
+| `concat` | 0.6 | 0.5 | -22.9% | 0.8 | 0.60 | yes |
+
+
+Model of the design (section 5, step 3, hypothesis): `loop` 1.49 at scale 10, `calls` 1.37, `fib` 1.34, `closures` 0.55, `objects` 1.45, bundle-like 0.92. Measured: `loop` 1.45, `calls` 1.36, `fib` 1.33, `closures` 0.54, `objects` 1.43, bundle-like 0.91 (scale 1). The model matched within 0.04. The bundle-like program does not change (it has no top-level globals in its hot loop).
+
+### Step 4: the call path, a constant of 32 bits and a jump to a return
+
+Design: section 5, step 4 (options 3 and 2). Three changes. No function cell grows (see the memory note below).
+
+1. The call path (`enter!` and `ret!` in `Vm::run`, `reload_to!`). `enter!` stored the 10 words of the frame record with the checked `stack[..]` index one by one, looked the callee code up twice, and `reload!` looked the code up a third time. Now `enter!` writes the record through the raw pointer after one `ensure!`, finds the code of the callee once (`ncode`), and `reload_to!(code)` sets `regs`, `code`, `words` and the feedback of the frame in one place. `ret!` reads the record with `rec_int!` (a read through `regs`), finds the code of the caller once, and writes the result through `regs`. `Realm::function` reads the two slots of the function cell (the code and the context) with `Obj::read_inline` (one unchecked read of an inline slot, the layout is fixed for a function cell; the two indexes are asserted below 9 in `Realm::new`) in place of a kind test and a layout test.
+2. A constant that does not fit the 16-bit immediate: `AddX`, `SubX`, `MulX` and `ModX` (form `AbcX`, spec `w r - i`; the constant is the 32-bit word `x`). The compiler emits them in `binary` and `binary_regs` when the right operand is an int constant outside the immediate range (and the left one for `Mul`, which commutes). Before, such a constant was a `LoadI` with a wide operand into a temporary and then the register op: two dispatches. The verifier needs no new rule: `x` is checked as for `AsBxX`. No op is added for `Div` and the bit ops: no row has one.
+3. A jump to a return (`Asm::finish`). A `Jmp` whose target is a `Ret` or `RetUndef` becomes that `Ret`. It is done at the end, on the instructions, so the root maps (the numbers of the instructions do not change; neither op is a safepoint) and the handler ranges stay. A `return` inside `try` with `finally` or inside `for-of` unwinds before its `Ret`, so its `Jmp` does not go to a `Ret` and does not change. The golden disassembly of 4 compile tests changed (the `Jmp -> Ret` lines).
+
+Checks: `every_shape_of_callee_gives_its_value` (fewer and more arguments than parameters, `arguments`, rest, default value, a native tail call, `new` with an object as result, getter and setter, arrow, closure; the values are those of node), `a_constant_of_32_bits_and_a_jump_to_a_return_give_the_same_values` (an int, a string, a double, `-0`, an overflow, a `null` and a `true`, with the values of node; `return` of a conditional in `try`/`finally`, in `for-of` and in `catch`). `cargo test --locked -p bare-js2 --lib`: 383 pass.
+
+Per-op cost of the process (`op_cost`, instructions for one op, mean of the 3 runs), step 3 against step 4: `call0` 308 against 218.2, `add` 42.1 against 43.2, `addi` 43.0 against 44.1, `inc` 40.1 against 40.1. The call is 29% cheaper. The `add` and `addi` arms are 1.1 instructions dearer: the same size of change as in the other steps (a change in the giant `run` function moves the allocation of the registers; two trials to remove it, `get_unchecked_mut` for the feedback and `#[inline(always)]` on `Realm::function`, made `loopfn` worse and were taken out). No row is worse, because the rows gain more than the arms lose.
+
+Instructions of the whole process, same method:
+
+| Row | Scale | step 3 (M) | step 4 (M) | change | spread step 4 % | QuickJS (M) | step 4 / QuickJS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loop` | 1 | 96.34 | 89.15 | -7.5% | 0.004 | 64.69 | 1.38 |
+| `loop` | 10 | 922.54 | 850.55 | -7.8% | 0.001 | 635.29 | 1.34 |
+| `loopfn` | 1 | 56.76 | 49.57 | -12.7% | 0.016 | 44.10 | 1.12 |
+| `loopfn` | 10 | 526.57 | 454.57 | -13.7% | 0.001 | 429.30 | 1.06 |
+| `calls` | 1 | 84.78 | 74.28 | -12.4% | 0.001 | 60.62 | 1.23 |
+| `calls` | 10 | 806.58 | 701.59 | -13.0% | 0.001 | 594.33 | 1.18 |
+| `fib` | 1 | 8.41 | 7.72 | -8.2% | 0.101 | 4.37 | 1.77 |
+| `fib` | 10 | 47.30 | 39.65 | -16.2% | 0.020 | 35.54 | 1.12 |
+| `closures` | 1 | 19.36 | 18.56 | -4.1% | 0.016 | 26.11 | 0.71 |
+| `closures` | 10 | 151.16 | 143.11 | -5.3% | 0.003 | 279.90 | 0.51 |
+| `objects` | 1 | 78.50 | 77.15 | -1.7% | 0.052 | 53.72 | 1.44 |
+| `objects` | 10 | 731.62 | 718.04 | -1.9% | 0.046 | 512.44 | 1.40 |
+| `webpack` | 1 | 9.67 | 9.63 | -0.5% | 0.024 | 5.47 | 1.76 |
+| `webpack` | 10 | 51.40 | 50.83 | -1.1% | 0.012 | 41.97 | 1.21 |
+| `throws` | 1 | 32.13 | 32.17 | +0.1% | 0.014 | 85.11 | 0.38 |
+| `throws` | 10 | 280.40 | 280.81 | +0.1% | 0.002 | 840.93 | 0.33 |
+| `concat` | 1 | 4.59 | 4.59 | +0.1% | 0.133 | 1.34 | 3.43 |
+| `concat` | 10 | 5.08 | 5.08 | +0.1% | 0.024 | 2.15 | 2.36 |
+| `bundle` | 1 | 122.82 | 120.24 | -2.1% | 0.005 | 134.42 | 0.89 |
+| `empty` | 1 | 4.48 | 4.49 | +0.1% | 0.046 | 1.23 | 3.64 |
+
+Net slope (scale 10 minus scale 1), M instructions:
+| Row | step 3 | step 4 | change | QuickJS | step 4 / QuickJS | gate (<= 1.00) |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `loop` | 826.2 | 761.4 | -7.8% | 570.6 | 1.33 | no |
+| `loopfn` | 469.8 | 405.0 | -13.8% | 385.2 | 1.05 | no |
+| `calls` | 721.8 | 627.3 | -13.1% | 533.7 | 1.18 | no |
+| `fib` | 38.9 | 31.9 | -17.9% | 31.2 | 1.02 | no |
+| `closures` | 131.8 | 124.5 | -5.5% | 253.8 | 0.49 | yes |
+| `objects` | 653.1 | 640.9 | -1.9% | 458.7 | 1.40 | no |
+| `webpack` | 41.7 | 41.2 | -1.3% | 36.5 | 1.13 | no |
+| `throws` | 248.3 | 248.6 | +0.1% | 755.8 | 0.33 | yes |
+| `concat` | 0.5 | 0.5 | +0.0% | 0.8 | 0.60 | yes |
+
+
+The rows that still lose to QuickJS on the net slope: `loop` 1.33, `calls` 1.18, `objects` 1.40, `webpack` 1.13, `loopfn` 1.05, `fib` 1.02. Not reached in this task: `objects`, `webpack` and `concat` need the prototype-chain caches and a cheaper prelude (design section 5, out of scope of steps 1 to 4). `fib` is 2% from the gate and `loopfn` 5%.
+
+Peak resident memory (`wait4` `ru_maxrss`, 3 runs each, one binary of the head of step 3 and one of step 4): the bundle-like program 12,672 KiB on both (one run of step 3 gave 12,544 KiB); the `eval_load` bundle row, the same. No function cell grew: the code and the context of a function are in the same two inline slots as before, read with `read_inline`. Change: 0 KiB, within the 128 KiB step of one run.
+
+### Histogram after step 4 (input of step 5)
+
+Tool: `cargo build --release -p bare-js2 --features op-count --example op_count`, then `op_count --top 6 FILE...` (the counters start at the main code; the prelude and the compile are not counted; every result is checked). Inputs: the 9 `eval_load` programs at scale 10 and `crates/js2/examples/data/bundle_like.js`. Binary: head of step 4. "Fusable" means the next op follows in the code and no jump lands on it. Dispatches that greedy fusion would remove (left to right, a triple first) are from the recorded run.
+
+| Program | dispatches | top ops | top fusable pairs | top fusable triples | removed by 4 pairs | removed by 8 pairs + 8 triples | removed by 16 + 16 |
+| --- | ---: | --- | --- | --- | ---: | ---: | ---: |
+| `loop` | 24,000,012 | GetGlobal 33.3%, SetGlobal 16.7%, JnLtI, Add, MulI, ModX 8.3% each | GetGlobal+JnLtI, GetGlobal+GetGlobal, GetGlobal+MulI, GetGlobal+Inc, SetGlobal+GetGlobal 8.3% each | GetGlobal+GetGlobal+MulI, GetGlobal+MulI+Add, GetGlobal+Inc+SetGlobal 8.3% each | 25.0% | 58.3% | 66.7% |
+| `loopfn` | 12,000,012 | JnLtI, Add, MulI, ModX, Inc, JmpBack 16.7% each | Add+ModX, MulI+Add, ModX+Inc, Inc+JmpBack, JnLtI+MulI 16.7% each | Add+ModX+Inc, MulI+Add+ModX, ModX+Inc+JmpBack, JnLtI+MulI+Add 16.7% each | 33.3% | 66.7% | 66.7% |
+| `calls` | 15,000,015 | GetGlobal 33.3%, SetGlobal 13.3%, JnLtI, CallU, Add, MulI 6.7% each | GetGlobal+GetGlobal 13.3%, GetGlobal+JnLtI, GetGlobal+CallU, GetGlobal+Inc 6.7% each | GetGlobal+GetGlobal+GetGlobal, GetGlobal+GetGlobal+CallU, Add+ModX+Ret 6.7% each | 26.7% | 60.0% | 60.0% |
+| `fib` | 556,416 | GetGlobal, CallU, JnLtI, Ret, SubI 16.7% each, Mov 8.3% | GetGlobal+SubI, SubI+CallU 16.7% each, Mov+Ret, JnLtI+Mov, Add+Ret 8.3% each | GetGlobal+SubI+CallU 16.7%, JnLtI+Mov+Ret 8.3% | 25.0% | 58.3% | 58.3% |
+| `closures` | 1,800,026 | GetGlobal 27.8%, SetGlobal 8.3%, JnLtI, GetCtx, Call, Inc 5.6% each | GetGlobal+GetGlobal 8.3%, GetGlobal+JnLtI, GetGlobal+Inc, SetGlobal+JmpBack, Inc+SetGlobal 5.6% each | GetGlobal+Inc+SetGlobal, GetGlobal+JnLtI+GetGlobal, Inc+SetGlobal+JmpBack 5.6% each | 22.2% | 44.4% | 58.3% |
+| `objects` | 7,609,030 | GetGlobal 26.3%, Mov 10.5%, SetGlobal 7.9%, JmpBack 7.9%, Inc 7.9%, Add 5.3% | Mov+Mov 7.9%, SetGlobal+JmpBack, GetGlobal+JnLtI, GetGlobal+ModI, GetGlobal+Inc, Inc+SetGlobal 5.3% each | Mov+Mov+Mov, GetGlobal+Inc+SetGlobal, GetGlobal+JnLtI+GetGlobal, Inc+SetGlobal+JmpBack 5.3% each | 21.0% | 39.4% | 52.6% |
+| `webpack` | 54,566 | GetGlobal 18.3%, GetField 12.8%, GetElem 7.3%, Mov 5.5%, SetGlobal 4.6%, LoadI 4.6% | GetGlobal+GetElem 5.5%, GetGlobal+GetGlobal, Add+SetGlobal 2.8% each, GetField+JnLt, GetElemI+GetField, GetField+Ret 2.7% each | GetElemI+GetField+JnLt, GetGlobal+GetElem+GetField, GetGlobal+GetElem+JmpIfNot 2.7% each | 12.8% | 32.1% | 40.3% |
+| `throws` | 3,800,015 | GetGlobal 29.8%, SetGlobal 15.8%, Inc 10.5%, JnLtI, ModI, Jmp 5.3% each | GetGlobal+Inc 10.5%, Inc+SetGlobal 10.5%, GetGlobal+JnLtI, GetGlobal+ModI, SetGlobal+GetGlobal, SetGlobal+Jmp 5.3% each | GetGlobal+Inc+SetGlobal 10.5%, GetGlobal+ModI+JNeI, GetGlobal+JnLtI+GetGlobal, SetGlobal+GetGlobal+Inc 5.3% each | 21.1% | 45.6% | 54.4% |
+| `concat` | 10,013 | GetGlobal 30.0%, SetGlobal 20.0%, LoadAtom, JnLtI, Add, Inc 10.0% each | GetGlobal+JnLtI, LoadAtom+Add, GetGlobal+LoadAtom, GetGlobal+Inc, SetGlobal+GetGlobal, SetGlobal+JmpBack 10.0% each | LoadAtom+Add+SetGlobal, GetGlobal+LoadAtom+Add, GetGlobal+Inc+SetGlobal 10.0% each | 30.0% | 59.9% | 60.0% |
+| bundle-like | 906,919 | GetField 16.8%, Mov 12.0%, Add 7.9%, JnLt 6.4%, LoadAtom 5.3%, JmpBack 5.1% | GetField+JnLt 6.0%, Inc+JmpBack 4.5%, LoadAtom+Add 3.0%, Mov+GetField 2.8%, Add+Inc 2.8%, Mov+Call 2.6% | Add+Inc+JmpBack 2.8%, Mov+GetField+Mov 2.5%, GetField+Mov+Call 2.5%, GetField+JnLt+Mov 2.0% | 16.3% | 28.6% | 39.1% |
+
+What this says for step 5 (hypothesis, not built):
+
+- The `eval_load` programs run at the top level with `var`, so a variable is a global: `GetGlobal` is 18% to 33% of the dispatches and `SetGlobal` 5% to 20%. Every top pair and triple of those rows holds a `GetGlobal` or `SetGlobal` (`GetGlobal+JnLtI`, `GetGlobal+Inc+SetGlobal`, `GetGlobal+GetGlobal`). Bundle-like code keeps its variables in registers and contexts: its tops are `GetField+JnLt`, `Inc+JmpBack`, `LoadAtom+Add`, `Mov+GetField`. The two groups share almost no pair, so the fused set has to be chosen for both, and the bundle-like program is the closer model of a real page. The gain of the same fusion on it (16% to 39% of dispatches) is a bound on the instructions, not a measure.
+- `loopfn` (a loop in a function) has a flat top: `Add+ModX+Inc`, `MulI+Add+ModX`, `ModX+Inc+JmpBack`, `JnLtI+MulI+Add`. The 4 triples remove 66.7% of its dispatches. That is the loop shape of the bundle code too (`Add+Inc+JmpBack`).
+- `Mov+Ret` and `JnLtI+Mov+Ret` in `fib`: the value of `n < 2 ? n : ...` is copied to a register and then returned. A `return` of a conditional can return each branch's register directly, with no `Mov` (a compiler change, not a fused op; it removes one dispatch of every 12 in `fib`).
+- `Add+ModX+Ret` (`calls`) and the jump-to-return rewrite: `Jmp` is gone from the top lists of every row except `throws` (`SetGlobal+Jmp`, the `try`).
+
+Miri (nightly) on the step 4 head: `every_shape_of_callee_gives_its_value`, `a_constant_of_32_bits_and_a_jump_to_a_return_give_the_same_values` and `a_stack_that_grows_in_a_callee_keeps_the_registers_of_the_callers` pass (422 s). They cover the raw stores of `enter!`, the reads of `ret!` and `Obj::read_inline`. Windows 11 VM (`cargo xwin test`, step 4 head): 381 of 383 pass; the 2 that fail are the corpus tests that read a path of the repository (`corpus_status_matches_acorn`, `a_lazy_parse_finds_the_same_errors_as_a_full_parse_on_the_corpus`), known.
+
+Not tested in steps 1 to 4: arm64; wall time and branch misses; a modern React bundle; the `bare-js-diff` corpus beyond its existing test; the whole crate under Miri; a global getter read by `GetGlobal` (it throws "a global accessor needs a call" before and after); the re-entrant native-to-interpreter call of the conversion work (`regs` and `fp` must be set again after a nested run: see step 2). Tests of steps 2 and 3 alone: the lib tests only (step 4 head: also `op-count` and `bare-js-diff`).
+
+### Steps 2 to 4 after the merge with main (2026-11-20)
+
+Main got #765, #766, #767, #771 and the host work while these steps waited. The merge changed three things in `Vm::run` and the realm. (1) `GetGlobal` and `SetGlobal` check the global lexical binding first (`lex_get`, `lex_put`) when a site has no entry, and `declare_lex` changes the tag of the global object, so no entry gives a property that a binding now hides. (2) `SetGlobalS` has the fast path of `SetGlobal`. `set_global_slow` takes `strict` and throws a `ReferenceError` for a name that is not there. A write that fails gives `Put::Fail`. (3) `get_global_slow` gives `Got`, so a getter on the global runs (the sentence "a global getter throws" above is no longer true). New tests: `a_global_cache_agrees_with_strict_writes_delete_and_attributes`, `a_global_lexical_binding_hides_the_property_that_a_site_cached`, `a_frozen_global_object_stops_the_stores_of_the_sites`.
+
+Instructions of the whole process at scale 1 (`script_run --eval`, `instructions:u`, minimum of 3 runs, spread under 0.1%), archMachine, loaded. Same bytecode in both columns (disassembly compared for `loopfn`):
+
+| Row | step 4 before the merge (M) | step 4 after the merge (M) | change | main before (M) | main now (M) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `loop` | 89.14 | 94.62 | +6.1% | 152.15 | 148.41 |
+| `loopfn` | 49.57 | 52.24 | +5.4% | 68.16 | 63.64 |
+| `calls` | 74.29 | 77.16 | +3.9% | 115.49 | 114.16 |
+| `fib` | 7.72 | 7.83 | +1.4% | 8.85 | 8.87 |
+| `closures` | 18.56 | 18.99 | +2.3% | 22.21 | 22.26 |
+| `objects` | 77.15 | 78.66 | +2.0% | 91.11 | 90.61 |
+
+Every row of step 4 is over +0.5% against its own numbers before the merge. The bytecode is the same, so the cause is the machine code of `Vm::run` (hypothesis: the new ops and arms of #767 and #771 move the allocation of the registers, as in the notes of steps 2 to 4). Main alone is cheaper than before on `loop` and `loopfn`, so the steps still gain against main now: `loop` -36%, `loopfn` -18%, `calls` -32%, `fib` -12%, `closures` -15%, `objects` -13%. Not done: a search for the cause.
+Re-measured on the merge with `origin/main` 450d4e46 (after #773 and #785), 2026-11-21. Method: `script_run --eval` on release builds of `bare-js2` (`--example script_run`), archMachine, instructions:u, minimum of 3 runs, `GLIBC_TUNABLES=glibc.malloc.tcache_count=65535`, scale 10 of the rows above. Each tree was built twice: default profile and `codegen-units=1`. Change of this PR against main:
+
+| Row | main, default (M) | this PR, default (M) | change | main, cgu=1 (M) | this PR, cgu=1 (M) | change |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loopfn` | 525.89 | 515.89 | -1.9% | 539.89 | 505.89 | -6.3% |
+| `calls` | 1012.91 | 773.91 | -23.6% | 1029.90 | 785.91 | -23.7% |
+| `fib` | 45.00 | 41.85 | -7.0% | 45.78 | 43.28 | -5.5% |
+| `closures` | 170.03 | 147.98 | -13.0% | 175.13 | 153.73 | -12.2% |
+| `objects` | 827.04 | 740.35 | -10.5% | 849.26 | 757.88 | -10.8% |
+
+No row is higher at either build, so the cost rule holds without a change of the code. The earlier merge (against `b0a0df89`, before #785 put `cold_path()` in the rare arms) had `objects` +1.23% and +2.7% and `loopfn` +4.3% at cgu=1. The rows moved with the layout of `Vm::run`, not with the global cache (hypothesis: not checked in the assembly). The rows `loopfn` and the others use no global in their loop. test262 (`tools/js/test262_js2.sh`): the counts equal `test262-js2-baseline.txt` (js2 15854 pass, js 16755 pass).
+Re-measured on the merge with `origin/main` 450d4e46 and the step 3 branch, 2026-11-21. Same method as the step 3 re-measure above (scale 10, minimum of 3, default build and `codegen-units=1`, built for both trees). Change of steps 3 and 4 together against main:
+
+| Row | main, default (M) | this PR, default (M) | change | main, cgu=1 (M) | this PR, cgu=1 (M) | change |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loopfn` | 525.89 | 435.89 | -17.1% | 539.89 | 451.89 | -16.3% |
+| `calls` | 1012.91 | 698.91 | -31.0% | 1029.90 | 688.90 | -33.1% |
+| `fib` | 45.00 | 37.12 | -17.5% | 45.78 | 36.33 | -20.7% |
+| `closures` | 170.04 | 142.94 | -15.9% | 175.13 | 142.58 | -18.6% |
+| `objects` | 827.04 | 734.56 | -11.2% | 849.26 | 735.27 | -13.4% |
+
+No row is higher at either build. The earlier merge (before #785) had `loopfn` +0.68% and +6.7% and `objects` +1.78% and +5.3%. The rows moved with the layout of `Vm::run` (hypothesis, not checked in the assembly). test262 counts equal the baseline file.
+
 ## 2026-11-20: property attributes, descriptors, non-extensible objects and generic Array methods in js2 (S2.7 follow-up)
 
 Branch `t3/js2-builtin-attrs`, from the test262 gate (#764). It fixes the groups that the gate reported as 325 (property attributes), 241 (Array methods on array-likes), 373 (missing methods) and 205 (accessors), the real non-extensible objects, and the hang of `Object.setPrototypeOf/set-failure-cycle.js`.
@@ -17252,6 +17430,57 @@ Tests. Linux, debug: `cargo test --locked -p bare-js-api -p bare-js -p bare --li
 
 Not tested: the whole `bare --lib` with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1` (the base fails one test under whole-crate `BARE_GC_STRESS=1`, as the entry before says); macOS; RSS and wall time; `-J` on the old head `2876c1e1`; the stress mode with a collect between a stream `read` and its reaction; the merge with the open PRs B (#779), A2 (#781) and G (#782).
 
+## 2026-11-20: js2 built-ins, test262 round (String, Array, Number, Math, JSON)
+
+Goal: raise the test262 pass rate of `bare-js2` in the built-ins that pass on the old engine and fail on js2. Scope: String, Array, Number, Math and JSON. Object, conversions and early errors belong to other work. Base: `origin/main` at `43b62b05`. Machine archMachine, `tools/js/test262_js2.sh -j 8`, test262 at the commit of the fixtures.
+
+Result. The new engine passes 306 more tests (15581 to 15887). No test that passed before fails now (checked test by test against the base run).
+
+| Built-in | Pass before | Pass now | Gain | "Pass on old, fail on js2" before | now |
+| -------- | ----------: | -------: | ---: | --------------------------------: | --: |
+| String   | 423 | 496 | +73 | 473 | 400 |
+| Array    | 2214 | 2250 | +36 | 436 | 400 |
+| Number   | 210 | 232 | +22 | 103 | 81 |
+| Math     | 230 | 273 | +43 | 46 | 3 |
+| JSON     | 0 | 75 | +75 | 110 | 35 |
+
+Causes fixed.
+- JSON had no object. New `bi_json.rs`: `JSON.parse` and `JSON.stringify` (gap, `toJSON` of a native, key lists, cycle and depth errors). A hidden global keeps the object out of key lists.
+- Math: `hypot` rewritten (it coerces every argument before it returns); new `clz32`, `sinh`, `cosh`, `tanh`, `asinh`, `acosh`, `atanh`, `expm1` and `log1p`.
+- Number: `toExponential`, `toPrecision` and `toLocaleString`, with round-half-up on the decimal digits (Rust `{:e}` rounds ties to even; `(25).toExponential(0)` must be `3e+1`). `toString.length` is 1. `Number.parseInt` and `Number.parseFloat` are the global function objects.
+- String: new `bi_string_more.rs` (`raw`, `fromCodePoint`, `normalize`, `toLocaleLowerCase`, `toLocaleUpperCase`, `isWellFormed`, `toWellFormed`, and the `match` and `search` errors for a regexp argument). `localeCompare` compares normalized units (new dependency `bare-unicode`). `charAt` maps NaN to 0.
+- Array: `keys`, `values` and `entries` with an iterator object (no generators and no symbols yet, so the state is in three hidden own properties). The check of `ArraySpeciesCreate` that js2 can make without `Symbol.species` in `slice`, `splice`, `concat`, `map`, `filter`, `flat` and `flatMap`. The iterator prototype is built at the first call, not at load.
+- `script_tests.rs` lines 545 and 547 did not compile on main (`compile_after` takes 6 arguments). They pass `None, None` now.
+
+Causes left (about 920 of the old-pass, js2-fail cases in these five built-ins).
+- Waiting for #785 (a native must call a script function): `valueOf` and `toString` of a script object in a conversion (Array 100, String 57 or more, Math 2, Number 2), `JSON.parse` reviver (8), `JSON.stringify` replacer function (6) and `toJSON` of a script object (2), accessors that need a host call (2).
+- Wrapper objects (`new String`, `new Number`, `new Boolean`): String 211, Array 94, Number 22, JSON 8. Engine work, not built-in work.
+- No RegExp: String 43 (literals), Array 21 and more.
+- `Number.prototype.toString` and `valueOf` on a wrapper (41): needs wrapper objects.
+- Concise methods are constructible and have `prototype` in js2 (engine gap). Some "Expected a TestNError but got a TypeError" cases come from the same call limit; to verify per case.
+
+Cost. Instructions (`tools/js/instr.sh`, `perf stat instructions:u`, minimum of 3), `script_run x.js` for startup, `interp_load CASE N` for the loops, both trees built at `--release`.
+
+| Row | Base | New |
+| --- | ---: | ---: |
+| startup `script_run` (empty script) | 1,787,715 | 1,958,924 (+9.6%) |
+| loopfn 3,000,000: N minus N=0 | 961,500,159 | 961,501,194 (+0.0001%) |
+| calls 1,000,000 | 708,499,896 | 708,500,762 (+0.0001%) |
+| fib 27 | 342,838,261 | 342,837,869 (-0.0001%) |
+| closures 1,000,000 | 2,203,666,082 | 2,203,678,423 (+0.0006%) |
+| objects 1,000,000 | 769,338,738 | 769,346,348 (+0.001%) |
+
+The slope of every loop row is the same (change at most +0.001%); the loop rows with N=0 carry the startup change. The startup row is over the +0.5% limit. The extra 171K instructions come from (callgrind with symbols, `script_run`): `Realm::new` +32K (about 60 new natives installed with `Realm::method`), `parse_function` +38K and `prelude_def` +21K (2.6 KB more prelude source and three more `Array.prototype` closures), and +26K in the dynamic loader (hypothesis: more relocations for the bigger binary). I reduced the first version (+12.2%) by building the iterator prototype lazily and writing the species check inline. The rest is the cost of the new methods. It is not fixed here. A lower cost needs a design change (install a built-in at the first read of its global, or a lazy native table), which touches `builtins.rs` and `interp_rt.rs`. Owner decision. `codegen-units=1` was not measured: the extra work is instructions that run, so I do not expect it to remove 9%.
+
+Tests. `cargo test --locked -p bare-js2 --lib`: 415 pass (12 new tests in `builtins_more_tests.rs`). `cargo test --locked --release -p bare-js-diff`: pass; the known list did not grow. The prelude facts are regenerated. `tools/fixtures/js/test262-js2-subset.txt` has the four `built-ins/` directories for the new tests; `test262-js2-baseline.txt` is regenerated.
+
+Not tested: Windows and macOS; the micro rows at `codegen-units=1`; RSS and wall time; the cases left for #785 (not run with #785 merged); `a_scope_with_many_locals_compiles_in_linear_time` was not seen failing in the full run.
+
+### Waiver: #791 startup cost (owner, 2026-11-20)
+
+- #791 raises js2 startup from 1,787,715 to 1,958,924 instructions (+9.6%). The +0.5% rule fails.
+- The owner accepts this one time. js2 is not in the browser yet.
+- Step 1 of `docs/design-js2-lazy-builtins.md` (lazy static method tables, about -225 K) pays it back. Steps 0 and 2 follow.
 ## Four `bare --lib` tests on Windows (2026-11-20)
 
 Four `bare --lib` tests failed on the Windows 11 VM and passed on Linux. Reproduced on the VM with a build of `origin/main` (43b62b05): `cargo xwin test --target x86_64-pc-windows-msvc -p bare --lib`, exe run through `winssh`. 1720 tests filtered out, 4 failed.

@@ -10,7 +10,7 @@ impl Realm {
     pub(crate) fn install_number(&mut self) {
         let proto = self.number_proto;
         let c = self.ctor("Number", 1, number_ctor, proto);
-        for (n, len, f) in [("isInteger", 1, is_integer as NativeFn), ("isFinite", 1, number_is_finite), ("isNaN", 1, number_is_nan), ("isSafeInteger", 1, is_safe_integer), ("parseFloat", 1, parse_float), ("parseInt", 2, parse_int)] {
+        for (n, len, f) in [("isInteger", 1, is_integer as NativeFn), ("isFinite", 1, number_is_finite), ("isNaN", 1, number_is_nan), ("isSafeInteger", 1, is_safe_integer)] {
             self.method(c, n, len, f);
         }
         for (n, v) in [
@@ -26,7 +26,14 @@ impl Realm {
             let k = self.intern(n);
             self.define_attrs(c, crate::interp_rt::Key::Name(k), 0, Value::number(v)).expect("define");
         }
-        for (n, len, f) in [("toString", 0, number_to_string as NativeFn), ("toFixed", 1, to_fixed), ("valueOf", 0, number_value_of)] {
+        for (n, len, f) in [
+            ("toString", 1, number_to_string as NativeFn),
+            ("toFixed", 1, to_fixed),
+            ("toExponential", 1, to_exponential),
+            ("toPrecision", 1, to_precision),
+            ("toLocaleString", 0, to_locale_string),
+            ("valueOf", 0, number_value_of),
+        ] {
             self.method(proto, n, len, f);
         }
         let b = self.boolean_proto;
@@ -36,6 +43,11 @@ impl Realm {
         let g = self.global;
         for (n, len, f) in [("parseInt", 2, parse_int as NativeFn), ("parseFloat", 1, parse_float), ("isNaN", 1, global_is_nan), ("isFinite", 1, global_is_finite)] {
             self.method(g, n, len, f);
+        }
+        // `Number.parseInt` and `Number.parseFloat` are the same function objects as the globals.
+        for n in ["parseFloat", "parseInt"] {
+            let v = self.get_named(g.value(), n).expect("a global");
+            self.hidden(c, n, v);
         }
         let m = Obj::new_plain(self);
         self.hidden(g, "Math", m.value());
@@ -69,6 +81,15 @@ impl Realm {
             ("hypot", 2, hypot),
             ("imul", 2, imul),
             ("fround", 1, fround),
+            ("clz32", 1, clz32),
+            ("sinh", 1, sinh),
+            ("cosh", 1, cosh),
+            ("tanh", 1, tanh),
+            ("asinh", 1, asinh),
+            ("acosh", 1, acosh),
+            ("atanh", 1, atanh),
+            ("expm1", 1, expm1),
+            ("log1p", 1, log1p),
             ("random", 0, random),
         ] {
             self.method(m, n, len, f);
@@ -194,6 +215,124 @@ fn to_fixed(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let t = if x.is_finite() && x.abs() < 1e21 { format!("{:.*}", d as usize, x) } else { Realm::num_to_string(x) };
     // `-0.00` is `0.00` for the language.
     let t = if t.starts_with('-') && t[1..].bytes().all(|b| b == b'0' || b == b'.') { t[1..].to_string() } else { t };
+    Ok(rt.string(&t))
+}
+
+/// `ToIntegerOrInfinity` of the digits argument of `toFixed`, `toExponential` and `toPrecision`.
+fn digits_arg(rt: &mut Realm, v: Value) -> R<f64> {
+    let d = rt.to_number(v)?;
+    Ok(if d.is_nan() { 0.0 } else { d.trunc() })
+}
+
+/// The digits and the decimal exponent of `x` (finite, above 0) from Rust's `{:e}` text: `1.2345e-7` is `("12345", -7)`.
+fn sci_digits(t: &str) -> (String, i32) {
+    let (m, e) = t.split_once('e').expect("an exponent");
+    (m.replace('.', ""), e.parse().expect("an exponent number"))
+}
+
+/// The `p` significant digits of `a` (finite, above 0) and the decimal exponent, rounded half up on the exact binary value. Rust's
+/// `{:.N e}` rounds an exact tie to even where the language takes the larger digit (`(25).toExponential(0)` is `3e+1`), so the exact
+/// expansion (at most 767 significant digits) is cut here.
+fn round_sig(a: f64, p: usize) -> (String, i32) {
+    let (mut d, mut e) = sci_digits(&format!("{:.*e}", 800, a));
+    let up = d.as_bytes().get(p).is_some_and(|&c| c >= b'5');
+    d.truncate(p);
+    if up {
+        let mut b = d.into_bytes();
+        let mut i = b.len();
+        while i > 0 && b[i - 1] == b'9' {
+            b[i - 1] = b'0';
+            i -= 1;
+        }
+        if i > 0 {
+            b[i - 1] += 1;
+        } else {
+            // 99 + 1: the digits are `10` and the exponent grows.
+            b[0] = b'1';
+            e += 1;
+        }
+        d = String::from_utf8(b).expect("ascii");
+    }
+    (d, e)
+}
+
+/// `d.ddd` and `e+N` or `e-N`.
+fn exp_text(digits: &str, e: i32) -> String {
+    let m = if digits.len() > 1 { format!("{}.{}", &digits[..1], &digits[1..]) } else { digits.to_string() };
+    format!("{m}e{}{}", if e < 0 { '-' } else { '+' }, e.abs())
+}
+
+fn to_exponential(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+    let x = this_num(rt, this, "toExponential")?;
+    let f = if arg(args, 0).is_undefined() { None } else { Some(digits_arg(rt, args[0])?) };
+    if !x.is_finite() {
+        return Ok(rt.string(&Realm::num_to_string(x)));
+    }
+    if let Some(f) = f
+        && !(0.0..=100.0).contains(&f)
+    {
+        return Err(rt.error(ErrKind::Range, "toExponential() argument must be between 0 and 100"));
+    }
+    let (neg, a) = (x < 0.0, x.abs());
+    let (digits, e) = match f {
+        _ if a == 0.0 => ("0".repeat(f.map_or(0, |f| f as usize) + 1), 0),
+        Some(f) => round_sig(a, f as usize + 1),
+        None => sci_digits(&format!("{a:e}")),
+    };
+    let t = exp_text(&digits, e);
+    Ok(rt.string(&if neg { format!("-{t}") } else { t }))
+}
+
+fn to_precision(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+    let x = this_num(rt, this, "toPrecision")?;
+    if arg(args, 0).is_undefined() {
+        return Ok(rt.string(&Realm::num_to_string(x)));
+    }
+    let p = digits_arg(rt, args[0])?;
+    if !x.is_finite() {
+        return Ok(rt.string(&Realm::num_to_string(x)));
+    }
+    if !(1.0..=100.0).contains(&p) {
+        return Err(rt.error(ErrKind::Range, "toPrecision() argument must be between 1 and 100"));
+    }
+    let p = p as usize;
+    let (neg, a) = (x < 0.0, x.abs());
+    let t = if a == 0.0 {
+        if p == 1 { "0".to_string() } else { format!("0.{}", "0".repeat(p - 1)) }
+    } else {
+        let (d, e) = round_sig(a, p);
+        if e < -6 || e >= p as i32 {
+            exp_text(&d, e)
+        } else if e >= 0 {
+            let k = e as usize + 1;
+            if k == d.len() { d } else { format!("{}.{}", &d[..k], &d[k..]) }
+        } else {
+            format!("0.{}{d}", "0".repeat((-e - 1) as usize))
+        }
+    };
+    Ok(rt.string(&if neg { format!("-{t}") } else { t }))
+}
+
+/// `toLocaleString` for the locale `en-US`, with no `Intl`: at most 3 fraction digits and commas between groups of 3 integer digits.
+fn to_locale_string(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
+    let x = this_num(rt, this, "toLocaleString")?;
+    let t = if x.is_nan() {
+        "NaN".to_string()
+    } else if x.is_infinite() {
+        if x > 0.0 { "∞".to_string() } else { "-∞".to_string() }
+    } else {
+        let f = format!("{:.3}", x.abs());
+        let f = f.trim_end_matches('0').trim_end_matches('.');
+        let (int, frac) = f.split_once('.').unwrap_or((f, ""));
+        let mut g = String::new();
+        for (i, c) in int.chars().enumerate() {
+            if i > 0 && (int.len() - i) % 3 == 0 {
+                g.push(',');
+            }
+            g.push(c);
+        }
+        format!("{}{g}{}{frac}", if x.is_sign_negative() { "-" } else { "" }, if frac.is_empty() { "" } else { "." })
+    };
     Ok(rt.string(&t))
 }
 
@@ -325,6 +464,15 @@ unary!(asin, |x| x.asin());
 unary!(acos, |x| x.acos());
 unary!(atan, |x| x.atan());
 unary!(fround, |x| x as f32 as f64);
+unary!(clz32, |x| Realm::to_int32(x).leading_zeros() as f64);
+unary!(sinh, |x| x.sinh());
+unary!(cosh, |x| x.cosh());
+unary!(tanh, |x| x.tanh());
+unary!(asinh, |x| x.asinh());
+unary!(acosh, |x| x.acosh());
+unary!(atanh, |x| x.atanh());
+unary!(expm1, |x| x.exp_m1());
+unary!(log1p, |x| x.ln_1p());
 
 /// Half up: `Math.round(-2.5)` is -2. `x - floor(x) >= 0.5` is exact, where `floor(x + 0.5)` is wrong for 0.49999999999999994.
 fn js_round(x: f64) -> f64 {
@@ -373,15 +521,23 @@ fn min(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
 }
 
 fn hypot(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    let mut s = 0.0f64;
+    // Every argument is converted first, so a throw from a later one is not skipped by an infinity before it.
+    let mut v = Vec::with_capacity(args.len());
     for i in 0..args.len() {
-        let x = num_arg(rt, args, i)?;
-        if x.is_infinite() {
-            return Ok(Value::number(f64::INFINITY));
-        }
-        s += x * x;
+        v.push(num_arg(rt, args, i)?);
     }
-    Ok(Realm::num(s.sqrt()))
+    if v.iter().any(|x| x.is_infinite()) {
+        return Ok(Value::number(f64::INFINITY));
+    }
+    if v.iter().any(|x| x.is_nan()) {
+        return Ok(Value::number(f64::NAN));
+    }
+    // Scale by the largest magnitude, so a square that overflows or underflows does not change the result.
+    let m = v.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+    if m == 0.0 {
+        return Ok(Value::int(0));
+    }
+    Ok(Realm::num(m * v.iter().map(|x| (x / m) * (x / m)).sum::<f64>().sqrt()))
 }
 
 fn imul(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {

@@ -39,3 +39,7 @@ built-ins/Promise
 -built-ins/Promise/allSettledKeyed
 -built-ins/Promise/any
 -built-ins/Promise/race
+built-ins/String
+built-ins/Number
+built-ins/Math
+built-ins/JSON
