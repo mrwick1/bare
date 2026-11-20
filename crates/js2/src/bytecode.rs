@@ -27,6 +27,7 @@
 //!   property name is the name of a *site* (below), so `GetField` has no name operand.
 //! - Other numbers: [`Code::numbers`] (`LoadN`).
 //! - Child functions: [`Code::funcs`]. Object-literal key lists: [`Code::recipes`].
+//! - Jump tables of a `switch`: [`Code::tables`], one pool of words for all the tables of the function (see below).
 //!
 //! **Sites.** A property op, a global access or a name access names a *site*: an index into [`Code::sites`], where each site has the
 //! atom of its name. The per-realm feedback vector (6.11 item 11) has one cache record for each site, at the same index. A cache hit
@@ -35,6 +36,13 @@
 //! **Loops.** A jump backward is always `JmpBack`, and every other jump goes forward. `JmpBack` is the back edge: the place of the
 //! budget and interrupt check, and a safepoint. [`Code::loops`] lists each loop header with the last back edge that targets it, sorted
 //! by header, so the JIT needs no loop discovery (6.11 item 19). [`Asm::finish`] builds it from the `JmpBack` ops.
+//!
+//! **Switch tables.** `SwitchI` and `SwitchA` jump on the value of one register to one of many targets. The table is in [`Code::tables`], not
+//! in the instruction stream, so every instruction keeps a fixed size. The op names the table by its offset in the pool. The targets are
+//! absolute `pc`s of instructions after the switch (the compiler fills them after the widths are fixed). An integer table is `lo`,
+//! `default`, `len` and `len` targets: the target of `v` is `targets[v - lo]` (a gap holds `default`). A string table is `default`, `mask` and
+//! `mask + 1` slots of `hash`, `atom`, `target`, probed linearly from `hash & mask`; a slot with `atom == u32::MAX` is empty and ends a
+//! probe. Both ops end the basic block: they do not fall through.
 //!
 //! **Root maps.** [`Code::roots`] holds the root maps of S1.6. The safepoints are the instructions where [`Op::is_safepoint`] is true:
 //! every op that can allocate, call JS (a getter, `valueOf`) or throw, and `JmpBack`. The key of a map is the `pc` of the first word of
@@ -90,7 +98,7 @@ impl Form {
 ///
 /// `w` a register that the op writes. `r` a register that it reads. `i` a signed immediate. `u` an unsigned number (a count, a
 /// depth, a slot). `j` a jump offset in words from the word after the instruction. `z` a special constant (0 to 3, see above).
-/// `N` an index of the numbers, `A` of the atoms, `F` of the child functions, `H` of the recipes, `S` of the sites. `-` a field that is 0.
+/// `N` an index of the numbers, `A` of the atoms, `F` of the child functions, `H` of the recipes, `S` of the sites, `T` the offset of a switch table in [`Code::tables`]. `-` a field that is 0.
 /// `R` is the first register of a window that the op reads (a call, a literal, an iterator record), and `W` of a window that it writes:
 /// the size of a window comes from the op ([`crate::verify`]).
 macro_rules! ops {
@@ -249,6 +257,8 @@ ops! {
     JSNeNull AsBx "r j" "Jump when `a !== null`.",
     JSEqUndef AsBx "r j" "Jump when `a === undefined`.",
     JSNeUndef AsBx "r j" "Jump when `a !== undefined`.",
+    SwitchI Abx "r T" "Jump by the integer table at `tables[bx..]` on the value of `a`: an integer or a double that is an integer value (`-0` is 0) in the table goes to its target; anything else goes to the default.",
+    SwitchA Abx "r T" "Jump by the string table at `tables[bx..]` on the value of `a`: a string with the content of a case goes to its target; anything else goes to the default.",
     Ret Abc "r" "Return `a`.",
     RetUndef Abc "" "Return `undefined`.",
     Throw Abc "r" "Throw `a`.",
@@ -296,6 +306,11 @@ ops! {
     RetDerived Abc "r r" "Return from a derived constructor with the value `a` and the variable `this` in `b`: an object is returned as it is; `undefined` gives `this` (a ReferenceError when `this` is the hole); anything else is a TypeError.",
 }
 
+/// Words of a slot of a string switch table: the hash, the atom and the target.
+pub const STR_SLOT: usize = 3;
+/// The atom field of an empty slot of a string switch table.
+pub const STR_EMPTY: u32 = u32::MAX;
+
 /// The registers of an iterator record (`IterOpen`, `ForInOpen`, `IterNext`, `IterClose`).
 pub const ITER_REGS: u32 = 3;
 
@@ -317,7 +332,7 @@ impl Op {
 
     /// Does control go on to the next instruction? (`Jmp`, `JmpBack`, the returns and the throws do not.)
     pub fn falls_through(self) -> bool {
-        !matches!(self, Op::Jmp | Op::JmpBack | Op::Ret | Op::RetUndef | Op::Throw | Op::ThrowConst | Op::RetDerived)
+        !matches!(self, Op::Jmp | Op::JmpBack | Op::Ret | Op::RetUndef | Op::Throw | Op::ThrowConst | Op::RetDerived | Op::SwitchI | Op::SwitchA)
     }
 
     /// Can the instruction run JS, allocate or throw, so that a collection can happen in it? The compiler gives a root map to each one.
@@ -328,7 +343,7 @@ impl Op {
             self,
             Nop | Mov | LoadCallee | LoadNewTarget | LoadUndef | LoadNull | LoadTrue | LoadFalse | LoadThis | LoadHole | LoadI | LoadN | LoadAtom | GetCtx | SetCtx | InitCtx | PopCtx
                 | StrictEq | StrictNe | Not | Typeof | Jmp | JmpIf | JmpIfNot | JmpNullish | JmpNotNullish | JSEq | JSNe | JSEqI | JSNeI | JSEqA
-                | JSNeA | JSEqB | JSNeB | JSEqNull | JSNeNull | JSEqUndef | JSNeUndef | Ret | RetUndef | Throw
+                | JSNeA | JSEqB | JSNeB | JSEqNull | JSNeNull | JSEqUndef | JSNeUndef | SwitchI | SwitchA | Ret | RetUndef | Throw
         )
     }
 }
@@ -559,6 +574,8 @@ pub struct Code {
     /// The child functions, as numbers of the script.
     pub funcs: Vec<u32>,
     pub recipes: Recipes,
+    /// The jump tables of `SwitchI` and `SwitchA` (see the module comment for the layout).
+    pub tables: Vec<u32>,
     /// The name of each site, as an index of `atoms`. Each site has exactly one instruction.
     pub sites: Vec<u32>,
     /// Sorted by `head`, one entry for each header.
@@ -581,6 +598,7 @@ impl Code {
             atoms: Vec::new(),
             funcs: Vec::new(),
             recipes: Recipes::default(),
+            tables: Vec::new(),
             sites: Vec::new(),
             loops: Vec::new(),
             handlers: Vec::new(),
@@ -601,6 +619,31 @@ impl Code {
         i.checked_sub(1).map(|i| self.lines[i].1)
     }
 
+    /// The integer table at `t` of `tables`: `lo`, the default target and the targets. `None` when it is not inside the pool.
+    pub fn int_table(&self, t: u32) -> Option<(i32, u32, &[u32])> {
+        let rest = self.tables.get(t as usize..)?;
+        let &[lo, default, len] = rest.get(..3)? else { return None };
+        Some((lo as i32, default, rest.get(3..)?.get(..len as usize)?))
+    }
+
+    /// The string table at `t`: the default target and the slots (`STR_SLOT` words each). `None` when it is not inside the pool or its
+    /// slot count is not a power of two.
+    pub fn str_table(&self, t: u32) -> Option<(u32, &[u32])> {
+        let rest = self.tables.get(t as usize..)?;
+        let &[default, mask] = rest.get(..2)? else { return None };
+        let slots = (mask as usize).checked_add(1).filter(|n| n.is_power_of_two())?;
+        Some((default, rest.get(2..)?.get(..slots.checked_mul(STR_SLOT)?)?))
+    }
+
+    /// Every target of `ins` when it is a switch (the default included), `None` for another op or a table that is not in the pool.
+    pub fn switch_targets(&self, ins: &Ins) -> Option<Vec<u32>> {
+        match ins.op {
+            Op::SwitchI => self.int_table(ins.b).map(|(_, d, t)| t.iter().copied().chain([d]).collect()),
+            Op::SwitchA => self.str_table(ins.b).map(|(d, s)| s.chunks(STR_SLOT).filter(|c| c[1] != STR_EMPTY).map(|c| c[2]).chain([d]).collect()),
+            _ => None,
+        }
+    }
+
     /// Bytes of the code and its tables (not the root maps, which `RootMaps::bytes` counts).
     pub fn bytes(&self) -> usize {
         self.words.len() * 4
@@ -608,6 +651,7 @@ impl Code {
             + self.atoms.len() * 8
             + self.funcs.len() * 4
             + (self.recipes.ends.len() + self.recipes.keys.len()) * 4
+            + self.tables.len() * 4
             + self.sites.len() * 4
             + self.loops.len() * 8
             + self.handlers.len() * 12
@@ -637,12 +681,29 @@ impl Code {
                         'w' | 'r' => format!("r{v}"),
                         'i' => format!("{}", v as i32),
                         'j' => format!("-> {:04}", (pc + n) as i64 + v as i32 as i64),
-                        l @ ('N' | 'A' | 'F' | 'H' | 'S') => format!("{}{v}", l.to_ascii_lowercase()),
+                        l @ ('N' | 'A' | 'F' | 'H' | 'S' | 'T') => format!("{}{v}", l.to_ascii_lowercase()),
                         _ => format!("{v}"),
                     }
                 })
                 .collect();
             let _ = writeln!(s, "{}", parts.join(", "));
+            match ins.op {
+                Op::SwitchI => {
+                    if let Some((lo, default, targets)) = self.int_table(ins.b) {
+                        let list: Vec<String> = targets.iter().enumerate().filter(|(_, t)| **t != default).map(|(k, t)| format!("{} -> {t:04}", lo as i64 + k as i64)).collect();
+                        let _ = writeln!(s, "      [{}{}default -> {default:04}]", list.join(", "), if list.is_empty() { "" } else { ", " });
+                    }
+                }
+                Op::SwitchA => {
+                    if let Some((default, slots)) = self.str_table(ins.b) {
+                        let mut list: Vec<(u32, u32)> = slots.chunks(STR_SLOT).filter(|c| c[1] != STR_EMPTY).map(|c| (c[1], c[2])).collect();
+                        list.sort_unstable();
+                        let list: Vec<String> = list.iter().map(|(a, t)| format!("a{a} -> {t:04}")).collect();
+                        let _ = writeln!(s, "      [{}{}default -> {default:04}]", list.join(", "), if list.is_empty() { "" } else { ", " });
+                    }
+                }
+                _ => {}
+            }
             pc += n;
         }
         s

@@ -265,6 +265,9 @@ pub(crate) struct Fc<'a> {
     pub children: Vec<Child>,
     pub inline: Vec<Compiled>,
     pub recipes: Recipes,
+    /// The switch tables (`Code::tables`). A target is 0 until `finish`, which fills each `(index, label)` of `table_fix` with the `pc`.
+    pub tables: Vec<u32>,
+    pub table_fix: Vec<(usize, Lb)>,
     pub unit_buf: Vec<u16>,
     // registers
     pub next: u32,
@@ -323,6 +326,8 @@ impl<'a> Fc<'a> {
             children: Vec::new(),
             inline: Vec::new(),
             recipes: Recipes::default(),
+            tables: Vec::new(),
+            table_fix: Vec::new(),
             unit_buf: Vec::new(),
             next: 0,
             max: 0,
@@ -565,18 +570,23 @@ impl<'a> Fc<'a> {
         self.after(idx, ins.op);
         // A backward jump goes to a label that is already bound; its registers are those of the first entry.
         if ins.op != Op::JmpBack {
-            let lab = &mut self.labels[to.0];
-            lab.1 = true;
-            match &mut lab.2 {
-                None => lab.2 = Some(self.live.clone()),
-                Some(lv) => {
-                    for (w, word) in lv.iter_mut().enumerate() {
-                        *word &= self.live.get(w).copied().unwrap_or(0);
-                    }
-                }
-            }
+            self.reach(to);
         } else {
             self.labels[to.0].1 = true;
+        }
+    }
+
+    /// A forward jump reaches `to`: the label is used, and the registers live there are those that every jump to it has written.
+    pub(crate) fn reach(&mut self, to: Lb) {
+        let lab = &mut self.labels[to.0];
+        lab.1 = true;
+        match &mut lab.2 {
+            None => lab.2 = Some(self.live.clone()),
+            Some(lv) => {
+                for (w, word) in lv.iter_mut().enumerate() {
+                    *word &= self.live.get(w).copied().unwrap_or(0);
+                }
+            }
         }
     }
 
@@ -789,6 +799,9 @@ impl<'a> Fc<'a> {
         }
         let nregs = self.max.max(nparams).max(1) as u16;
         let asm = std::mem::take(&mut self.asm).finish()?;
+        for &(at, l) in &self.table_fix {
+            self.tables[at] = asm.label_pcs[l.0];
+        }
         let mut code = Code::new(nregs, nparams as u16);
         let mut roots = RootMaps::new(nregs as usize);
         for (k, &(idx, start)) in self.root_at.iter().enumerate() {
@@ -820,6 +833,7 @@ impl<'a> Fc<'a> {
         code.atoms = self.atom_tab;
         code.funcs = self.funcs;
         code.recipes = self.recipes;
+        code.tables = self.tables;
         code.sites = self.sites;
         code.roots = roots;
         Ok(Compiled { code, children: self.children, strict: self.strict, unsupported: self.unsupported, inline: self.inline })
