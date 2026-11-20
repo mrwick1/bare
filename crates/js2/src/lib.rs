@@ -24,6 +24,7 @@ pub mod gc;
 #[allow(unsafe_code)]
 pub mod object;
 pub mod roots;
+pub mod parse_ahead;
 pub mod lex;
 pub mod ast;
 pub mod facts;
