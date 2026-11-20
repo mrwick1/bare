@@ -778,7 +778,10 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
     }
 
     fn set_lazy<'s>(&mut self, obj: bare_js_api::Local<'_>, chain: bool) -> Result<(), bare_js_api::Error<'s>> {
-        let r = self.api_obj(obj).and_then(|o| Ok(h!(self, if chain { self.heap.set_lazy_chain(o) } else { self.heap.set_lazy_on(o) })));
+        let r = self.api_obj(obj).and_then(|o| {
+            h!(self, if chain { self.heap.set_lazy_chain(o) } else { self.heap.set_lazy_on(o) });
+            Ok(())
+        });
         r.map_err(|e| self.api_err(e))
     }
 
