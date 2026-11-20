@@ -16399,6 +16399,109 @@ Windows and macOS; Miri (no `unsafe` was added, but `Op::Lazy` runs in `interp.r
 ### Open: the rest of the start cost
 
 4.01 M is not close to zero. 2.35 M is the pre-parse of the whole prelude, which still reads every function body. A prototype (not in the PR) that parses the top level of the prelude with known facts and jumps over each function costs 12.4 K for that step. That is option B′ of the design document: the facts of the prelude as a generated file. Hypothesis: about 1.7 M. A compiled image (option B) is about 1.0 M, hypothesis. The questions for the owner are in section 6 of `docs/design-js2-prelude.md`.
+
+## 2026-11-20: the pre-parse facts of the prelude are a generated file (js2, option B′ of `docs/design-js2-prelude.md`)
+
+Branch `t3/js2-prelude-facts`, from the head of #770 (`ee5fc1f5`, it was open when I started). Decision of the owner (section 8 of the design): build B′.
+
+### What changed
+
+- `crates/js2/src/prelude_facts.rs`: generated. The `FnFacts` and spans of `prelude.js` as `static` tables, and `facts()`, which copies them into a `Facts`. The file is excluded from rustfmt.
+- `parse_script_known` (`parse.rs`): the tree of the top level of a text from the facts of an earlier pre-parse. It uses `Mode::Function` with no function as the one parsed in full, so the lexer jumps over each function at the top level by its facts. About 25 lines.
+- `script.rs`: `compile_after` takes the known facts for the prelude. A user script and the host script still get a pre-parse. `Op::Lazy` and the first-call compile are as in #770.
+- `prelude_facts_tests.rs`: `prelude_facts_file_is_up_to_date` makes the file from a pre-parse of `prelude.js` and fails when the checked-in file differs; `BLESS_PRELUDE_FACTS=1 cargo test -p bare-js2 --lib prelude_facts` writes it. `prelude_facts_equal_a_fresh_pre_parse` compares the loaded facts with a fresh pre-parse. I checked that a one-byte change of `prelude.js` fails both.
+
+### Cost
+
+Machine archMachine (AMD Ryzen 9 5900HX), release build, load average 13 to 24 from other jobs, so only instruction counts are used. Base: `ee5fc1f5` built in the same session. Tool: `tools/js/instr.sh` (minimum of 3 runs), `script_run`. Sources of the rows: `eval_load CASE SCALE --source` of the old engine, run as `script_run --eval`.
+
+VM setup, `script_run` of `var x = 1;`: **4.01 M to 1.68 M** (4.013 M base; 1.681 M and 1.681 M in two runs of the new build; the design said about 1.7 M).
+
+Peak RSS of `var x = 1;`, 7 runs, KiB (a launcher with `wait4`): base 5084 5112 5148 5152 5160 5228 5236; new 5088 5128 5140 5140 5152 5176 5232. No change. The spread of a run is 150 KiB.
+
+First call of `a.forEach(f)` over a later call: 357 K before and 359 K after (the full parse and compile of the function did not change).
+
+`eval_load` rows, user instructions of the whole process in millions (minimum of 3 runs, base then new), and peak RSS in KiB (median of 3 runs). Net slope is the count at scale 10 minus the count at scale 1:
+
+| Row | Scale 1 base | Scale 1 new | Net slope base | Net slope new | RSS 1 base / new | RSS 10 base / new |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loop` | 515.28 | 512.95 | 4600.8 | 4600.8 | 5144 / 5016 | 5216 / 5156 |
+| `calls` | 330.72 | 328.39 | 2939.4 | 2939.4 | 5228 / 5240 | 5040 / 5136 |
+| `fib` | 11.12 | 8.79 | 71.0 | 71.0 | 5176 / 5232 | 5212 / 5180 |
+| `closures` | 42.24 | 39.99 | 341.9 | 342.6 | 5808 / 5876 | 10620 / 10816 |
+| `objects` | 174.94 | 176.21 | 1521.2 | 1541.1 | 7424 / 7544 | 21456 / 21272 |
+| `webpack` (bundle-like) | 10.04 | 7.71 | 46.2 | 46.2 | 5612 / 5544 | 6384 / 6184 |
+| `throws` | 91.88 | 89.54 | 789.8 | 789.8 | 5860 / 5856 | 12384 / 12444 |
+| `concat` | 4.31 | 1.98 | 2.03 | 2.03 | 5216 / 5240 | 5328 / 5320 |
+
+Scale 1 is 2.3 M lower on each row except `objects`. No net slope changed except `objects`, which is noisy: three more runs of `objects` at scale 10 gave 1680.7, 1684.2 and 1716.6 M for base and 1702.8, 1699.8 and 1678.3 M for the new build, so the difference is the noise of this row (the old doc saw 1517.8 to 1605.2 M for the base). Nothing in this change runs after the start.
+
+### Tests
+
+- `cargo test --locked -p bare-js2 --lib`: 387 pass (2 new).
+- `cargo test --locked -p bare-js-diff`: pass (the crate has no unit tests that matter here; its examples build).
+- test262 (`tools/js/test262_js2.sh -j 6`, checkout at `e4fbf577`): `counts.txt` is the same as `tools/fixtures/js/test262-js2-baseline.txt` (without its comment lines), 452 directories, no new failure.
+
+### Not tested
+
+Windows and macOS; Miri (no `unsafe` was added); wall time; a first call of a lazy function from a getter, setter, constructor with fields or a native's `Outcome::Enter` (the prelude has no such function; the next PR makes user functions lazy and tests it); the browser (js2 is not wired in).
+
+## 2026-11-20: lazy compile for the functions of user scripts (js2, decision 2 of `docs/design-js2-prelude.md`)
+
+Branch `t3/js2-lazy-user-scripts`, on top of `t3/js2-prelude-facts` (#772) and `origin/main` at `ba621081` (#766). Section 10 of the design document has the design and the behaviour change.
+
+### What changed
+
+- `script.rs`: `Lazy` has one `Unit` (text and `Facts`) for each text with stubs, and a sorted list of `Wait` entries. `load_with` makes the functions of the user script stubs. The host script and `script::compile` still compile every function. A function waits when no function in it (at any depth) uses `super`.
+- Two stub forms. A function with plain parameters that does not read `arguments` gets a stub with its parameter registers: the call makes no array. Any other function gets the stub with `CF_ARGS` of #770. `Op::Lazy` has one operand now (`a` = 1 for the array form); `code_flags` reads it.
+- `bare-js-diff` (`lib.rs`): a thrown `Error: not supported yet` from the new engine is `Out::Unsupported`, as the load error was.
+- Behaviour change, in `script.rs` docs, the design document and the tests: a construct that the compiler does not build (`with`, a generator or `async` function, direct `eval`) in the code of a function fails at the first call of that function, with an `Error` that a `try` can catch, not at load. Early errors still fail at load. The error is a plain `Error`, not a `SyntaxError` as #770 had it: with a `SyntaxError`, 60 test262 tests that expect one from a direct `eval` in a function passed by accident (`assert.throws(SyntaxError, ...)`); they fail as before now.
+
+### Cost
+
+Machine archMachine (AMD Ryzen 9 5900HX), release build, load average 20 to 25 from other jobs, so only instruction counts are used. Base: the head of #772 merged with `origin/main` (`m.b2`), new: this branch (`m.l5`), both built in the same session. Tool: `tools/js/instr.sh` (minimum of 3 runs) and a launcher with `wait4` (3 runs, peak RSS in KiB). Main moved during the work (#766), so these rows are 3 to 5 times smaller than the rows of the entries above.
+
+Setup (`var x = 1;`): 1.676 M on the base. The new build is the same within 0.01 M: the stubs of the user script cost nothing when it has no function.
+
+`eval_load` rows, user instructions in millions, `script_run --eval` of the sources of `eval_load CASE SCALE --source`. Net slope is the count at scale 10 minus the count at scale 1:
+
+| Row | Scale 1 base | Scale 1 new | Net slope base | Net slope new | RSS 1 base / new | RSS 10 base / new |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loop` | 144.55 | 144.55 | 1285.2 | 1285.2 | 5092 / 5252 | 5100 / 5156 |
+| `calls` | 110.29 | 110.30 | 976.5 | 976.5 | 5012 / 5172 | 5016 / 5240 |
+| `fib` | 5.95 | 5.96 | 42.36 | 42.36 | 5124 / 5192 | 5100 / 5236 |
+| `closures` | 19.44 | 19.43 | 157.6 | 157.6 | 5768 / 5900 | 10736 / 10868 |
+| `objects` | 88.76 | 88.70 | 764.3 | 764.7 | 7444 / 7464 | 21352 / 21488 |
+| `webpack` (bundle-like, calls all 502 functions at scale 10) | 7.30 | 7.36 | 42.35 | 42.75 (+0.9%) | 5492 / 5484 | 6144 / 6508 |
+| `throws` | 36.51 | 36.52 | 312.8 | 312.8 | 5752 / 5880 | 12364 / 12332 |
+| `concat` | 1.83 | 1.84 | 0.68 | 0.68 | 5068 / 5208 | 5232 / 5384 |
+
+The `webpack` row is the one that calls every function once, and its net slope grows by 0.46 M for 502 functions: about 0.9 K for each called function. Its peak RSS at scale 10 grows by 0.36 MiB. The other rows have a few functions and do not move; the RSS of a row is within the noise of the launcher (the same binary differs by 100 to 150 KiB from one session to the next), except `webpack`.
+
+Where the 0.9 K goes (callgrind, 500 small functions that are all called, 28.6 M to 29.1 M): `Lazy::compile` itself 0.4 K, `Loader::fill` 0.17 K, a second decode of the words for the flags 0.12 K, the frame and the handler in `Vm::run` 0.12 K, the second `Feedback::init` 0.07 K. The first version of the stub encoded its word with the general encoder (0.5 K for each stub) and made an array of arguments for each call (about 0.5 K); the two are gone. A `HashMap` for the pending list cost 0.4 K for each function; it is a sorted list now.
+
+Programs with many functions, at 500 functions each (a sum of calls where noted; RSS from the launcher, median of 5):
+
+| Program | Instructions base | new | Peak RSS base | new |
+| --- | ---: | ---: | ---: | ---: |
+| 500 small functions, none called | 20.04 M | 10.53 M | 5.62 MiB | 6.00 MiB |
+| 500 small functions, all called | 27.77 M | 28.29 M (+1.9%) | 6.14 MiB | 6.18 MiB |
+| 500 functions of 330 bytes, none called | 141.11 M | 38.81 M (-72%) | 6.58 MiB | 6.04 MiB |
+| 500 functions of 330 bytes, all called | 153.74 M | 154.98 M (+0.8%) | 6.86 MiB | 7.33 MiB |
+
+The copy of the text and the facts stay for the life of the `Vm`: DHAT peak live bytes for the 500 small functions (not called) are 644 KB on the base and 718 KB with lazy compile (the stubs, the `Wait` list of 40 KB, 26 KB of facts, and the text). Small functions are so small that a stub and its facts are about the size of their code; for functions of 330 bytes the compile dominates, and lazy compile wins. A program that calls every function pays about 1% instructions and 0.3 to 0.5 MiB; a program that calls a part of its functions gains on both. The data that would remove the copy of the text is shared source (decision 3 of section 8 of the design: later, with S2.8).
+
+First-call cost: one small function, 1 K over the old eager load, as above. The prelude functions cost as before (355 K for the five of `forEach`).
+
+### Tests
+
+- `cargo test --locked -p bare-js2 --lib`: 397 pass (8 new in `script_tests.rs`): `the_functions_of_a_user_script_are_compiled_at_their_first_call`, `a_function_that_is_never_called_is_never_compiled`, `an_unbuilt_construct_in_a_function_fails_at_its_first_call_not_at_load`, `early_errors_in_a_function_that_is_never_called_still_fail_the_load`, `a_first_call_from_a_getter_a_setter_a_constructor_and_a_native_works` (getter and setter of an object and of a class, a constructor with fields in a base and a derived class, a `static` block, a first call through `call`, `apply` and `bind` (`Outcome::Enter`), and a callback of a prelude function; each also under constant collection through `check`), `a_function_that_is_called_from_rust_is_compiled_at_that_call` (`Vm::call`), `the_stubs_of_user_functions_keep_a_program_that_is_not_called_small` and `a_stub_that_keeps_the_arguments_in_registers_and_a_stub_with_an_array_agree` (fewer, equal and more arguments, duplicate names, defaults, rest, patterns, `arguments` in an arrow, each under constant collection). `a_scope_with_many_locals_compiles_in_linear_time` failed once under load (load average 25) and passed alone (9.3 s).
+- `cargo test --locked -p bare-js-diff`: pass.
+- test262 (`tools/js/test262_js2.sh`, test262 commit e4fbf577, base run and this build run on the same tree): 0 tests went from pass to fail. 13923 pass on the base, 13924 with lazy compile. The one new pass, `language/statements/function/S13.2.2_A13.js`, is not a real pass: its `eval` is in a function, the first call throws the plain `Error`, and the test catches any error. 'unsupported' failures of the base now read `Expected a SyntaxError but got a Error` (the test needs a real `eval`).
+
+### Not tested
+
+Windows and macOS; Miri (no `unsafe` was added; `Op::Lazy` is in `interp.rs`, which CI runs under Miri, and its second form reads only the stack); wall time; the first call of a function with more than 64 parameters (it takes the array form by rule; no test); a lazy function inside a field initializer of a class and a function with a `super` in a nested method (the loader compiles those at load by rule; the class tests pass, and one test makes a class with `super` inside a lazy function); several realms that share one `Lazy` (decision 3, later); the browser (js2 is not wired in); a bundle with a deep nesting of functions (`super_inside` reads the facts of all functions inside a child: the cost is the depth of the nesting for each function).
 ## 2026-11-20: host handlers on the interface, D1: style, CSSOM and geometry (plan step S0.4 / D1)
 
 Status: the handlers of the files below run through the interface (`Scope`, `Local`, `Args`). Tests pass on Linux and Windows. The full matrix passes under the standing rule: no row is over +0.5% under both allocators. Base: PR #762 (`t3/convert-browser-host-handlers`, head `9f74a623`). The diff is about 2,200 changed lines.
@@ -16468,6 +16571,69 @@ Measurements. Machine archMachine. Instruction counts (`perf stat -e instruction
 Tests. Linux, debug: `cargo test --locked -p bare-js-api -p bare-js -p bare --lib`: 32, 1104 (1 ignored) and 1715 (6 ignored) pass. The filters `browser_media_tests browser_canvas_tests browser_img_tests browser_elements_tests browser_scoped browser_reclaim browser_tests browser_navigation_tests browser_scheduler_tests browser_streams_tests browser_compression_tests canvas media image audio` (295 tests): pass plain, with `BARE_ALL_API=1` and with `BARE_GC_STRESS=1 BARE_ALL_API=1`. With `BARE_GC_STRESS=1` alone, 294 pass and 1 fails: `browser_reclaim_tests::parsed_documents_ask_for_a_collect_by_their_native_bytes` (the known failure of the base under `BARE_GC_STRESS=1`; it passes when `BARE_ALL_API=1` is also set). Windows 11 VM (`cargo xwin test --no-run`, exe through `winssh`): the same 295-test filter passes.
 
 Not tested: `BARE_GC_STRESS=1` and `BARE_ALL_API=1` with the whole `bare --lib`; the full `bare --lib` on Windows; the jemalloc and `codegen-units=1` runs (no row went over the limit under glibc); the journeys and `tools/suite/run.py`; RSS and wall time; the cost of one media, canvas or image call by a micro-loop; the `Image` and `decode()` paths with a real picture download (the tests use pages with no network).
+## 2026-11-20: host handlers on the interface, F: navigation, frames, storage and remote windows (plan step S0.4 / F)
+
+Status: the handlers of the files below run through the interface (`Scope`, `Local`, `Args`). Tests pass on Linux and Windows. The full matrix has no row over +0.5% under glibc (the highest is +0.46%), so the jemalloc and `codegen-units=1` runs did not start. The PR is open without auto-merge. The diff is about 1,300 changed lines (one PR).
+
+Base: `origin/main` at `fae94731` (#769, group C, merged). #779 (group B) is still open, so `get_named`, `define_named` and `get_named_bool` do not exist yet; this group does not need them. `origin/main` does not compile by itself: #769 removed `Dom::def_get_sh`, and `browser_cssom.rs` (group D1, #778) still calls it three times. This PR puts the 8 lines of `def_get_sh` back in `browser_dom_old.rs`. The base tree of the matrix is `origin/main` with that one fix.
+
+Files converted.
+
+- `browser_navigation.rs`: the `Location`, `History` and `document.URL`, `documentURI`, `domain`, `baseURI` and `window.origin` handlers, the interface constructors (`URL`, `URLSearchParams`, `Location`, `History`, `Storage`) and the `parts!` accessors.
+- `browser_navigation_params.rs`: all handlers of `URL`, `URLSearchParams` and the iterator (22).
+- `browser_navigation_storage.rs`: `getItem`, `setItem`, `removeItem`, `clear`, `key` and `length`, and the body of the named write hook.
+- `browser_frames.rs`: `contentWindow`, `contentDocument`, `length`, `name` and `name=`; `note_owner` takes a scope (`browser_dom.rs` calls it, so `note_owner_s` is removed from `browser_scoped.rs`).
+- `browser_remote_window.rs`: the proxy traps (`get`, `set`, `has`, `defineProperty`, `deleteProperty`), `closed`, `postMessage` and the `location` members of a remote window.
+- `browser.rs`: one row (the `length` getter of `window`).
+
+Not converted, and why.
+
+- `browser_navigation_state.rs`: the structured clone helpers over `Engine::clone_out` and `clone_in`. `Scope` has no `clone_out`. It has no handler.
+- `browser_child.rs` (loader and driver helpers), `browser_port_hub.rs`, `browser_navigation_url.rs`, `browser_refresh.rs`: no handler and no engine use.
+- Install code, the named-write hook, the trace and prune hooks of the owners, `make`, `install_up` and `child_window` of the remote window, `frame_location`, `entry_state`, `navigate`, `run_navigation_task`, `fire_window`: they take `it`, key tables by `ObjId` or run once. They stay old and run through `old`, `old_v` and `run`.
+- Inside converted handlers, four pieces stay on the old calls because the same work on the interface costs more (callgrind numbers below): the init of `URLSearchParams` from a sequence or a record (`init_sequence`, `init_pair`, `init_record`, with `usv_i`), the result object of the iterator `next` (`d.key` and `define_data`), the `Interp` helpers `key_text`, `is_connected_node` (group C, still old) and `frame_location`.
+- `browser_web.rs`: `createObjectURL` and `revokeObjectURL` stay on the old registry (group E). `navigation::def_fn` is kept for them.
+
+Changes.
+
+- `browser_navigation_storage.rs`: `units` and `store_set` read the string in place. A string is read once (`as_str`), not twice.
+- `browser_navigation_params.rs`: `usv` reads the string once and checks the limit before it makes the copy. `iter_next` looks up the iterator once. `url_id`, `params_id` and `area` are `#[inline(always)]`.
+- `crates/js-api/src/lib.rs`: `Str::to_string_lossy` for UTF-16 uses a loop with the capacity set at the start. `String::from_utf16_lossy` starts with half of the room and grows. This is a shared lever: every handler that reads a string benefits.
+- `browser_navigation.rs`: the `Storage` prototype methods are defined as before (not enumerable, then enumerable). Defined once as enumerable, the lookups of `localStorage.getItem` cost more (see below).
+- `browser_dom_old.rs`: `def_get_sh` is back (see Base).
+- Dead code of the old form is removed (`arg`, `def_acc`, the old handlers).
+
+Grep gate (`\bbare_js::(value|eval::Interp)|\bObjId\b|\bInterp\b|\.engine\(\)|\.heap\.`, lines for each file, before then after; and handlers of the old form `fn .*&\[Value\]`, before then after).
+
+| File | Engine lines | Old handlers |
+| --- | ---: | ---: |
+| `browser_navigation.rs` | 58 to 31 | 20 to 0 |
+| `browser_navigation_params.rs` | 53 to 31 | 23 to 0 |
+| `browser_navigation_storage.rs` | 22 to 6 | 7 to 0 |
+| `browser_frames.rs` | 28 to 22 | 5 to 0 |
+| `browser_remote_window.rs` | 32 to 19 | 10 to 1 |
+| `browser_navigation_state.rs` | 15 to 15 | 0 to 0 |
+| `browser_child.rs` | 13 to 13 | 0 to 0 |
+| `browser_port_hub.rs`, `browser_navigation_url.rs` | 1 to 1, 0 to 0 | 0 to 0 |
+
+The one old line of `browser_remote_window.rs` is `post`, a helper that takes `it` (it is not a handler). The lines that stay are the items in the lists above.
+
+Measurements. Machine archMachine, loaded, so only instruction counts are used (`perf stat -e instructions:u`, minimum of 3 runs, `tools/js/cost_matrix.sh -j4`, 817 rows). Both trees use the default release profile in separate target directories.
+
+- First matrix, everything on the interface: 10 of the 14 `navigation_load` rows were over +0.5% under both allocators: `iterate` +6.6% (+6.3% jemalloc), `url` +2.3% to +2.8%, `subclass` +2.1% to +2.3%, `storage` +0.8%, `history` +0.6%. `frames` (-0.2%) and `route` (+0.2% to +0.4%) were not.
+- Callgrind of `iterate 1` and `url 1` (symbol builds of both trees, difference of the exclusive cost by function). The call path is not the cause: `call_api_plain`, `call_scoped` and `call_api_host` together cost about the same as `call_host`, `Host::call` and `call_fn_inner` of the base (3.8 M against 3.9 M for 29,000 calls). The extra cost was in the bodies:
+  - `Scope::define_str` makes a string and interns the key at each call: 23,000 calls, 37 M inclusive. The old `define_data` with the cached `d.key` costs 16 M. `iter_next` goes back to the old calls for the result object (`iterate` +6.6% to +2.0%).
+  - `Str::to_string_lossy` grew the buffer in `String::from_utf16_lossy` (`finish_grow` and `do_reserve_and_handle` +0.76 M in `url 1`). With the capacity set, `url` +2.3% to +0.5% and `subclass` +2.1% to +0.9%.
+  - The scope iterator (`Engine::iter_next` 2.64 M, `api_it` 1.62 M, `iter_open` 0.88 M) against `host_iter_next` (0.85 M) and `host_iter_open` (0.56 M) of the old form. The init of `URLSearchParams` goes back to the old calls (`iterate` +1.3% to +0.55%, `subclass` +0.9% to +0.4%).
+  - `storage 1`: a `Storage` prototype defined once as enumerable made 4,000 lookups of `lookup` and `has_property` go through `shape_get` (+0.62 M) in place of `PropMap::find` (-0.44 M). The old code defines the method as not enumerable and then as enumerable, which gives the cheaper lookup. Hypothesis: the second definition changes how the object stores its properties. The old way is back, and `get_item` and the others no longer call `area` twice (`storage` +0.8% to +0.05%).
+  - `iter_next` looks up the iterator once instead of twice (`iterate` +0.55% to +0.41%).
+- Final matrix: mean +0.001% glibc. No row is over +0.5%. The highest: `nodelist_load scan 10` +0.461% (not a file of this group), `navigation_load iterate 10` +0.421%, `subclass 10` +0.414%, `iterate 1` +0.414%, `subclass 1` +0.387%, `url 10` +0.336%, `url 1` +0.314%, `history` +0.23%, `storage` +0.05% and -0.03%, `frames` -0.12% and -0.18%, `route` -0.08% and -0.12%. Before the last lever, `iterate 10` was +0.524% under glibc and +0.516% under jemalloc (over under both).
+- `parse_load deep 1` and `deep 10` fail to run on both trees (exit 134, known).
+- Levers left: the scope iterator is slow for a host that iterates a script value in a loop (it costs about three times the old `host_iter_next`). A cheaper `Engine::iter_next` would let the init of `URLSearchParams` move. `Scope::new_array` and `Scope::define_str` cost more than `array_from` and `define_data` with a cached key. A scoped way to define a property with a cached key would remove the last old calls of `iter_next`. Not built.
+
+Tests. Linux: `cargo test --locked -p bare-js-api -p bare-js -p bare --lib`: 32, 1104 (1 ignored) and 1715 (6 ignored) pass. `bare --lib` with the filters `browser_navigation_tests browser_navigation_subclass_tests browser_clone_tests browser_storage_tests browser_iframe_tests browser_child_tests browser_history_state_cap_tests browser_named_tests browser_scoped browser_reclaim browser_basics_tests browser_loader_tests browser_session_tests browser_tests::` (320 tests): 320 pass plain and with `BARE_ALL_API=1`. With `BARE_GC_STRESS=1`, 319 pass and 1 fails: `browser_reclaim_tests::parsed_documents_ask_for_a_collect_by_their_native_bytes` (the known failure of the base). Windows 11 VM (`cargo xwin test --no-run`, `winssh`): the same filters, the same result (320, 320, 319 and the same one failure). No new test: the existing tests of the group cover the handlers, and no behaviour changed.
+
+Not tested: `BARE_GC_STRESS=1` and `BARE_ALL_API=1` with the whole `bare --lib`; the whole `bare --lib` on Windows; macOS; the jemalloc and `codegen-units=1` runs (no row is over under glibc in the final matrix); the journeys and `tools/suite/run.py`; RSS and wall time; a cost number for one call of each handler (the matrix rows use the group in loops of 1,000 or more); the order of the budget charge and the step of `iter_next` (the step now comes first; a refused step is lost with the run, and no test reads it).
 ## 2026-11-20: host handlers on the interface, G: loader, custom elements, drive and session (plan step S0.4 / G)
 
 Status: the handlers of the loader and the custom elements run through the interface (`Scope`, `Local`, `Args`). Tests pass on Linux. On Windows, 2 tests fail because the VM has no fixture files (see Tests). The matrix has no row over the limit under both allocators. The PR is open without auto-merge.
@@ -16648,3 +16814,130 @@ A loop at the top level of a script with a `let` (`let s = 0; for (let i = 0; i 
 `cargo test --locked -p bare-js2 --lib`: 379 tests. 378 pass in a full run on the loaded machine; `a_scope_with_many_locals_compiles_in_linear_time` fails when it runs with the others under load and passes when it runs alone (5.7 s and 8.4 s, 3 runs). `cargo test --locked -p bare-js-diff`: all pass (256 programs, 0 new differences, 20 known). Clippy: no finding in the changed code (the findings that remain are in `heap.rs`, `crates/js2/examples`, `bare-os` and `bare-observe`).
 
 Not tested: Windows and macOS; Miri on the new tests; the old engine behind the differential runner in modes other than `tree`; a throw at the top level between a `let` and the end of the script (the hand-over is skipped); a second test262 revision.
+
+## 2026-11-20: js2 global lexical names after a throw at the top level
+
+Bug (follow-up of #771): a top-level `let`, `const` or `class` that no function uses lives in a register, and the script hands it over to the global lexical environment at its end. A script that threw before its end skipped the hand-over. A later script of the same realm did not see the name (`ReferenceError`), and could declare it again. The spec keeps the binding after an abrupt completion: with its value if its declaration ran, in its dead zone if not. A script that throws partway is common on a page.
+
+Tests (they failed before the fix): `a_top_level_name_stays_after_the_script_throws` runs script A (it throws), then script B, in one realm, normally and under constant collection. Cases: `let x = 1; throw 0;` (B reads 1); `let y; throw 0; y = 2;`; `const` (B assigns: `TypeError`); `class`; a heap value after 2,000 allocations; a name after the throw is in its dead zone (`ReferenceError` for `let`, `const`, `class`); a throw from a called function; a throw through `try`/`finally`; and a `let`, `var` or function of the same name in B is a `SyntaxError` (also for a name in its dead zone).
+
+Fix (`compile_stmt.rs`, `script_body`): the statements of the script are covered by one handler. Its code hands over the names in registers (`hand_over`, the same code as the normal end) and throws the exception again. Each name in a register is loaded with a hole at the start of the script, so a name whose declaration did not run is in its dead zone. The exception register is allocated after the last statement (a free register), so no register number of the script changes. The handler is after the normal path, and the normal path jumps over it (one `Jmp` for each script run). The interpreter loop did not change. A script with no top-level `let`, `const` or `class` in a register has no handler and no extra instruction.
+
+Deliberate golden changes (`compile_tests.rs`): the script goldens of `a_derived_class_calls_super_in_an_arrow`, `class_methods_fields_and_static_elements`, `private_names_methods_and_accessors` and `super_property_reads_and_writes` have `LoadHole` at the start, `Jmp`, the handler and a second hand-over.
+
+### Cost
+
+Machine: archMachine (load average 10 to 20, so only instruction counts). Release build, `tools/js/instr.sh` (the minimum of 3 runs), base `1e6899fb` (origin/main) against this branch, count at N minus count at N = 0. The micro rows are hand-written bytecode and do not run the compiler, so they check that the interpreter code did not move. Each cell was measured 3 times with `instr.sh` (9 runs for each side); the spread is under 0.001%.
+
+| Row | Base | Branch | Change |
+| --- | ---: | ---: | ---: |
+| `loopfn 3000000` | 931.50 M | 931.50 M | 0.0% |
+| `calls 1000000` | 691.50 M | 691.50 M | 0.0% |
+| `fib 27` | 338.71 M | 338.71 M | 0.0% |
+| `closures 1000000` | 2,187.10 M | 2,187.10 M | 0.0% |
+| `objects 1000000` | 757.40 M | 757.40 M | 0.0% |
+| top-level loop (`let s = 0; for (let i = 0; i < 1e6; i++) s += i & 7;`, `script_run`), per turn | 200.998 | 201.001 | +0.001% |
+
+The setup of the top-level script (compile, prelude and run with 0 turns) is 4,584,206 instructions on the base and 4,592,401 on the branch (+8,195, +0.18%, one time for each run: the second hand-over and the handler).
+
+### test262
+
+`tools/js/test262_js2.sh -j 4`, checkout `e4fbf577` (the pinned commit). Base and branch: 12,768 passes and 5,016 failures on js2, and the lists of results are identical, line by line (29,763 lines each). No new failure.
+
+### Tests
+
+`cargo test --locked -p bare-js2 --lib`: 382 pass (including `a_scope_with_many_locals_compiles_in_linear_time`). `cargo test --locked --release -p bare-js-diff`: all pass.
+
+Not tested: Windows and macOS; Miri on the new test; a throw that is not catchable (an out-of-memory error or the end of the step budget): the handler also runs for them if the unwind reaches it, and I did not test that path; a script with a `let` in a register and a name that also sits in a context slot; the order of the checks when a name in a context slot is declared and a later register name fails `CheckLex` (the context name stays declared; this is older than this change).
+## 2026-11-20: host handlers on the interface, E: fetch, XHR, streams, abort, web, encoding, worker (plan step S0.4 / E)
+
+Status: the handlers of the seven files run through the interface (`Scope`, `Local`, `Args`). Tests pass on Linux and Windows. The matrix has two rows over the limit: `streams_load churn 1` and `churn 10` (+1.2% and +1.6%). The cause is in the section "Rows over". The PR is open without auto-merge. Base: `origin/main` at `479d89a0` (A1a, A1b, A1c, C, D1 and D2 are in it). The diff is about 3,540 changed lines, so it is one PR.
+
+Files converted: `browser_abort.rs`, `browser_worker.rs`, `browser_encoding.rs`, `browser_xhr.rs`, `browser_streams.rs`, `browser_web.rs` (crypto, `SubtleCrypto`, navigator and `userAgentData`, `Blob`, `File`, `FormData` and its iterators) and `browser_fetch.rs` (`Headers`, `Request`, `Response`, the body methods, the body streams, `fetch`).
+
+Not converted, and why:
+
+- `browser_fetch.rs`: `req_signal` (getter), `req_clone` and `resp_clone`. They stay in the old registry (`Kind::Get`, `Kind::Method`). The two clones copy a `Persistent` body stream and need `with_req` and `with_resp` of the old form; the getter reads a signal object that `browser_abort.rs` keeps as an `ObjId`. The install loop refuses `AccessorS`: no handler of the file needs it.
+- `browser_abort.rs`: `signal_abort`, `new_signal`, `any_of`, `follow_signal`, `fresh_signal`, `ensure_abort`, and the trace and prune hooks. They hold `Traced<Value>` and run from timers and from the GC. The tables stay keyed by `ObjId`.
+- `browser_worker.rs`: `start`, `roots`, `prune` and `worker_failed`. They run from the event loop, with no scope.
+- `browser_xhr.rs`: `xfire`, `xabort`, `request_error`, `event_object` and the delivery code. They run from the network pump.
+- `browser_encoding.rs`: `structured_clone` runs through `old_v`. The clone of a graph uses the old heap.
+- The install functions and the lazy global definers stay in the old form, as in A1c.
+
+Changes.
+
+- `bare-js-api`: `Engine::get_str` and `define_str` have a default body (a string, then `get` or `define`). `Scope::get_str` and `define_str` call them. `Interp` overrides both with `Heap::key_from_str` and `get_value` or `define_data`: no JS string for the key and one key conversion, as the old `Dom::key` did. The default made a string, then `to_property_key` and `to_string`.
+- `eval_host.rs`: `Interp::host_iter_result` makes `{ value, done }` with the keys the engine holds (`sc_iter_result`). The old stream code did two `key_from_str` for each read.
+- `browser_scoped.rs`: `iter_result_s`, used by `Headers`, `FormData` and the fetch body reads.
+- `browser_streams.rs`: the state of a fatal error stays an old `Error`, because `api_err` stashes the old error and `api_unerr` gives it back. An `Abort` would lose it (two tests failed on that: `a_step_budget_error_inside_a_callback_is_fatal_and_charged` and `limits_end_the_call_fatally_...`). The fetch body reads call the scoped stream functions directly (`stream_locked`, `reader_read`, and the others).
+- `browser_abort.rs`: `AbortSignal.any` reads its iterable with `host_iter_open` and `host_iter_next` inside one `old` call. The Engine iterator made +350 instructions for each call. `AbortController` reads `new.target` with `host_proto_from_new_target`.
+- Dead code of the old form is removed (`signal_of`, the old `header_value` and `on_headers`, `fetch_side`, the stream `edge`).
+
+Grep gate (`\bbare_js::(value|eval::Interp)|\bObjId\b|\bInterp\b|\.engine\(\)|\.heap\.`, lines for each file, base then now): abort 39 to 31, fetch 128 to 89, streams 69 to 41, web 96 to 47, encoding 13 to 3, worker 26 to 13, xhr 65 to 36. The lines that remain are the kept pieces above, the `.engine()` bridges and the types of the owner tables.
+
+Measurements. Machine archMachine, loaded. Instruction counts (`perf stat -e instructions:u`, minimum of 3 runs, `tools/js/cost_matrix.sh -j4`, 817 rows, base tree built from `origin/main`).
+
+- First matrix (the five files before the cost round, base `9f74a623`): over +0.5% under both allocators: 11 rows. `streams_load` churn, flow, many and pending, at 1 and 10 (+1.9% to +4.9%), and `web_apis_load abort 1` and `10` (+0.8% to +0.9%).
+- Callgrind of `streams_load churn 1` and `flow 1` (symbol builds of both trees): the cost was `Scope::get_str` and `define_str` (a string and two key conversions for each call), two `key_from_str` for each read result, one handle round trip for each `own` and each `bind`, and the iterator of `AbortSignal.any`. The call path itself is not the cause: `call_api_plain` and `call_scoped` cost about 15 instructions a call more than `call_host` and `Host::call`.
+- After the changes in the list above: `streams_load` flow, many and pending are 0.5% to 1.6% under the base. `fetch_load iterate` was +2.2% (the `Headers` iterator made its result with two `define_str`) and is -3.4% now. The abort rows pass.
+- Full matrix, final tree: mean -0.005% glibc and +1.042% jemalloc (3 rows measured). Over under both allocators: `platform_load query 10` (+0.538% glibc, +0.540% jemalloc), `streams_load churn 1` (+1.243%, +0.999%) and `churn 10` (+1.578%, +1.529%). `parse_load deep 1` and `10` fail to run on both trees (known).
+- Rows over. `platform_load query 10`: the code of the row is not in this PR. Callgrind shows the move in `browser_form::tag_is`, `browser_attr::trace_node` and `note_owner_s`, which a different inlining of the crate causes. At `codegen-units=1` on both trees (the 44 rows of `platform_load`, `streams_load`, `dataset_load`, `fetch_load` and `web_apis_load`) the row is under the limit, and so are `dataset_load keys`. `fetch_load objects 1` and `10` are at +0.6% there and under the limit at the default flags. `streams_load churn 1` and `churn 10` stay over at `codegen-units=1` (+1.29% and +1.66%). `dataset_load keys 1000 50` and `10000 50` were at +0.6% to +0.7% in an earlier matrix of this branch for the same reason (D1 saw the same rows).
+- `streams_load churn`: 800 instructions more for each stream made, about 1.2%. The sum of all functions that read a property is equal on both trees (1,772,000 against 1,776,000). The rest is spread over about 30 small wrappers: `Engine::resolve_promise`, `promise_then`, `new_promise`, `bind`, `type_of`, `is_callable`, `brand_ctl`, and the extra handle for each value. A direct old-form call of the promise functions gave 0 (tried and not kept). `#[inline]` on 13 trait methods gave 0 (not kept).
+- Levers left, not built: a table of property keys that the engine roots (`start`, `pull`, `cancel`, `type`, `highWaterMark`, `size`, `autoAllocateChunkSize` cost 290 instructions each in `atom_str`); this would make the stream constructor cheaper than the base, because the old code paid the same. A cheaper read of `this` in a handler (`brand_ctl` costs 66 instructions a read).
+
+Tests. Linux, debug: `cargo test --locked -p bare-js-api -p bare-js -p bare --lib`: 32, 1104 (1 ignored) and 1715 (6 ignored) pass. The filters `fetch xhr stream abort web_ encoding worker crypto blob form_data formdata navigator headers request response textencoder file_ subtle` on `bare --lib` (332 test runs, some tests match two filters): pass plain, with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1`. Windows 11 VM (`cargo xwin test --no-run`, exe through `winssh`): the same filters pass with the same counts. The whole `bare --lib` on Windows: 1711 pass and 4 fail (`browser_date_tests::local_time_uses_the_zone_of_the_realm_in_the_browser`, `browser_session::tests::a_page_fed_in_pieces_gives_the_tree_of_a_one_step_parse`, `a_page_parsed_in_slices_gives_the_tree_of_a_one_step_parse`, `resources::tests::staging_login_fixture_discovery`). No test of these four touches the converted files. I did not run them on a base build on Windows.
+
+Not tested: the whole `bare --lib` with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1` (`browser_reclaim_tests::parsed_documents_ask_for_a_collect_by_their_native_bytes` fails under whole-crate `BARE_GC_STRESS=1` on the base too); macOS; RSS and wall time; the four Windows failures on the base; tests of the converted handlers under GC stress that the old tests do not cover (a stream read with a collect between `read` and its reaction).
+
+## 2026-11-20: group E cost round, the stream rows (plan step S0.4 / E)
+
+Status: the rows `streams_load churn 1` and `churn 10` of PR #780 are under the limit now (-0.87% and -1.23% at the default flags). No row is over +0.5% under both allocators. Two changes did it: a table of option names that the engine holds, for the `ReadableStream` constructor, and a string fast path in the key conversion of the interface. Base for all numbers: `origin/main` `fae94731` plus one fix (below).
+
+`origin/main` does not compile at `fae94731`. Group C (#769) removed `Dom::def_get_sh`, and group D1 (`browser_cssom.rs`, three calls) still uses it. The two PRs merged in the wrong order for a semantic conflict. This branch restores the function (`browser_dom_old.rs`, 8 lines, as C removed it). The base tree of the matrix has the same fix, so the A/B holds. Main needs this fix or a different one before any other PR can merge.
+
+Profile. Callgrind, symbol builds of both trees, `streams_load churn 10` (3,000 streams), instructions for each stream, exclusive cost by function. The whole program: base 65,895; E head 66,942 (+1,048, +1.6%); this change 65,120 (-775, -1.2%).
+
+| Function (for each stream)                                          | E head vs base | now vs base |
+| ------------------------------------------------------------------- | -------------: | ----------: |
+| `Engine::get_str` (the option reads)                                |           +589 |           0 |
+| `Heap::intern_slice` + `str_from` + `key_from_str` (text to atom)   |           -503 |      -2,846 |
+| `Engine::get` + `api_key` + `Engine::persistent` (the table reads)  |              0 |      +1,179 |
+| `call_api_plain` + `call_api_host` + `call_scoped` (x2) + `Host::call` | +1,035      |      +1,035 |
+| `Dom::Host::call` (x2) + `call_host` (x2), the old entry            |          -972 |        -972 |
+| `brand_ctl` (new)                                                   |           +166 |        +166 |
+| `resolve_promise`, `promise_then`, `new_promise`, `bind`, `type_of`, `is_callable`, `is_callable_value` (new wrappers) | +596 | +596 |
+| `host_resolve_promise`, `host_promise_then`, `host_new_promise` (old) |          -250 |        -250 |
+| `get_reader` + `invoke` + `bind_obj` + `obj_s` (own cost)           |           +450 |        +450 |
+
+The first column is the cost that #780 had. The call path itself is about +63 for each stream (15 calls), the same on both sides of this change. The rest was spread over about 30 small wrappers, as the earlier entry said. The key reads were the same on both trees: about 2,850 instructions for each stream in `key_from_str`, `str_from` and `intern_slice` (about 6.3 reads of `autoAllocateChunkSize`, `cancel`, `pull`, `start`, `type`, `highWaterMark` and `size`, so about 450 each; hypothesis for the read count: 5 reads with a source and 2 with a strategy, and 2 of 3 streams have one). So the lever was to remove the work, not to make the wrappers cheaper.
+
+Changes.
+
+- `browser_scoped.rs`: `Names`. A table of property names, as `Persistent` strings, made at the first use (a cold function). A read is `Scope::local` (one handle) and `Scope::get`. `Persistent` slots are GC roots, so a name cannot die. The table is made only when a stream is made: a page without a stream pays nothing.
+- `browser_streams.rs`: the constructor reads its seven options through `Names`. `callback_option` takes the index and names the member in its message from the same list.
+- `eval_api.rs`: `api_key` converts a string key with `Heap::key_from_string` at once. `to_property_key` ran `to_string` first (a second liveness check, 260 instructions for each stream here). This helps every `get`, `set` and `define` of the interface that has a `Local` key, in all groups.
+- New test `the_names_the_constructor_reads_survive_collection` (`browser_streams_tests.rs`): the table is made, three collections run, and a stream with `start`, `pull`, `cancel` and a strategy still works, with its error messages.
+
+Not built, and why: a direct engine key handle (`Key`) with no handle push. The remaining cost of the table is `persistent` (243 for each stream, 38 for each read) and `api_key` (364, 58 for each read). It is not needed, because every row passes. If a later group needs it, the place is `Engine::get_key`.
+
+The jemalloc mean of the earlier entry (+1.04%) is an artifact of the script, not a real cost. `cost_matrix.sh` runs jemalloc only for a row that is over the limit under glibc (`jb=- jn=-` otherwise, `FULL` unset). The mean is over those rows only. The line said "3 rows measured": the three rows that failed under glibc (`platform_load query 10`, `streams_load churn 1` and `churn 10`: +0.54%, +1.0%, +1.5% under jemalloc). Evidence on this tree: the matrix without `-J` prints "jemalloc +0.177% (3 rows measured)" (rows `nodelist_load scan 10`, `resources_load small 1` and `10`); the same matrix with `-J` prints "glibc -0.010%, jemalloc -0.010% (817 rows measured)". The mean over all rows is the same under both allocators. Read the jemalloc mean only when the count of rows measured is the count of rows. I did not run `-J` on the old head `2876c1e1`, so its real jemalloc mean over 817 rows is not measured.
+
+Measurements. Machine archMachine. Instruction counts (`perf stat -e instructions:u`, minimum of 3 runs, `tools/js/cost_matrix.sh -j6 -J`, 817 rows measured, both trees built from source at `--release`). Mean change: glibc -0.010%, jemalloc -0.010%. Over +0.5% under both allocators: none. Failed to run: `parse_load deep 1` and `10` (known, both trees).
+
+| Row (before: glibc / jemalloc, earlier entry)       | Now: glibc | Now: jemalloc |
+| --------------------------------------------------- | ---------: | ------------: |
+| `streams_load churn 1` (+1.243% / +0.999%)          |    -0.871% |       -0.684% |
+| `streams_load churn 10` (+1.578% / +1.529%)         |    -1.225% |       -1.161% |
+| `streams_load flow 1`, `flow 10`                    | -0.477%, -0.528% | -0.453%, -0.513% |
+| `streams_load many 1`, `many 10`                    | -1.575%, -1.838% | -1.432%, -1.762% |
+| `streams_load pending 1`, `pending 10`              | -1.549%, -1.709% | -1.450%, -1.677% |
+| `platform_load query 10` (+0.538% / +0.540%)        |    +0.323% |       +0.317% |
+| `web_apis_load abort 1`, `abort 10`                 | +0.470%, +0.493% | +0.367%, +0.453% |
+| `fetch_load objects 1`, `10`                        | +0.165%, +0.163% | +0.160%, +0.181% |
+| `fetch_load iterate 1`, `10`                        | -3.4%, -3.5% | -3.2%, -3.4% |
+
+The `codegen-units=1` rule was not needed: no row is over under both allocators at the default flags. Over under one allocator only: `nodelist_load scan 10` (+0.505% glibc, +0.496% jemalloc: at the limit, group C/A1 code, not E), `preload_load dups 1` and `font 1` (+0.75%, +0.66% jemalloc only), `session_load chain 1` (+0.52% jemalloc only), `resources_load small 1` and `10` (+1.3%, +1.4% glibc only; known noise). The abort rows have little margin (+0.47% and +0.49% glibc, both under the limit): the call path costs about 90,000 instructions in the row, and `signal_of_s`, `controller_signal` and a table insert add the rest. A rebase that moves them over needs a look at `browser_abort.rs`.
+
+Tests. Linux, debug: `cargo test --locked -p bare-js-api -p bare-js -p bare --lib`: 32, 1104 (1 ignored) and 1716 (6 ignored) pass (one new test). `a_panic_in_a_host_call_unlinks_its_window` passes. The filters `fetch xhr stream abort web_ encoding worker crypto blob form_data formdata navigator headers request response textencoder file_ subtle` on `bare --lib`: 254 tests (333 runs, one for each filter), pass plain, with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1`. Windows 11 VM (`cargo xwin test --no-run`, exe through `winssh`): the same filters, 254 tests, pass in the three modes. The whole `bare --lib` on Windows: 1712 pass and 4 fail. The same 4 tests fail on a Windows build of the base (`origin/main` with the `def_get_sh` fix): `browser_date_tests::local_time_uses_the_zone_of_the_realm_in_the_browser` (a JS `Throw` at line 140: the time zone of the realm on Windows), `browser_session::tests::a_page_fed_in_pieces_gives_the_tree_of_a_one_step_parse` and `a_page_parsed_in_slices_gives_the_tree_of_a_one_step_parse` (`NotFound` at `browser_session.rs:1068`, a fixture path) and `resources::tests::staging_login_fixture_discovery` (`NotFound` at `resources.rs:821`, a fixture path). So they are not caused by E. Cause for the three `NotFound` tests (hypothesis): the exe runs on the VM without the repository tree.
+
+Not tested: the whole `bare --lib` with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1` (the base fails one test under whole-crate `BARE_GC_STRESS=1`, as the entry before says); macOS; RSS and wall time; `-J` on the old head `2876c1e1`; the stress mode with a collect between a stream `read` and its reaction; the merge with the open PRs B (#779), A2 (#781) and G (#782).

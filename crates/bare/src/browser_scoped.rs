@@ -349,6 +349,34 @@ pub(crate) fn is_object(s: &Sc<'_, '_>, v: Local<'_>) -> bool {
     matches!(s.type_of(v), Type::Object | Type::Function)
 }
 
+/// Property names that a handler reads on every call, kept as strings that the engine holds (`Persistent`). The table is made at its
+/// first use. A read then costs one handle and a key check, not a lookup of the text in the atom table (several hundred instructions).
+#[derive(Default)]
+pub(crate) struct Names(std::cell::OnceCell<Box<[Persistent]>>);
+
+impl Names {
+    /// The name `list[i]` as a local of this scope. `list` is the same list at every call.
+    #[inline]
+    pub(crate) fn local<'s>(&self, s: &mut Sc<'s, '_>, list: &[&str], i: usize) -> Res<'s, Local<'s>> {
+        match self.0.get() {
+            Some(t) => Ok(s.local(&t[i])),
+            None => self.make(s, list, i),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn make<'s>(&self, s: &mut Sc<'s, '_>, list: &[&str], i: usize) -> Res<'s, Local<'s>> {
+        let mut t = Vec::with_capacity(list.len());
+        for n in list {
+            let l = s.string(n)?;
+            t.push(s.persist(l));
+        }
+        let t = self.0.get_or_init(|| t.into_boxed_slice());
+        Ok(s.local(&t[i]))
+    }
+}
+
 /// Is `v` `undefined` or `null`?
 #[inline]
 pub(crate) fn is_nullish(s: &Sc<'_, '_>, v: Local<'_>) -> bool {
@@ -373,6 +401,12 @@ pub(crate) fn old_v<'s>(s: &mut Sc<'s, '_>, f: impl FnOnce(&mut Interp<'_>) -> R
         Ok(v) => Ok(it.raw_local(&v)),
         Err(e) => Err(it.api_err(e)),
     }
+}
+
+/// The iterator result `{ value, done }`.
+pub(crate) fn iter_result_s<'s>(s: &mut Sc<'s, '_>, value: Local<'s>, done: bool) -> Res<'s, Local<'s>> {
+    let value = s.engine().raw(value);
+    old_v(s, |it| it.host_iter_result(value, done))
 }
 
 /// Run code of the new form where the caller has an interpreter: a scope, the result as an old error.
@@ -532,12 +566,6 @@ impl Dom {
 
 pub(crate) fn wrap_coll_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, ids: &[NodeId]) -> Res<'s, Local<'s>> {
     old_v(s, |it| crate::browser_gaps::wrap_coll(d, it, ids))
-}
-
-pub(crate) fn note_owner_s(d: &Dom, s: &mut Sc<'_, '_>, this: Local<'_>, made: Local<'_>) {
-    let it = s.engine();
-    let (this, made) = (it.raw(this), it.raw(made));
-    crate::browser_frames::note_owner(d, it, this, made);
 }
 
 pub(crate) fn ns_put_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId, existing: Option<bare_html::dom::Atom>, qname: &str, value: &str) -> Res<'s, ()> {
