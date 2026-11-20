@@ -16939,3 +16939,9 @@ The slope of every loop row is the same (change at most +0.001%); the loop rows 
 Tests. `cargo test --locked -p bare-js2 --lib`: 415 pass (12 new tests in `builtins_more_tests.rs`). `cargo test --locked --release -p bare-js-diff`: pass; the known list did not grow. The prelude facts are regenerated. `tools/fixtures/js/test262-js2-subset.txt` has the four `built-ins/` directories for the new tests; `test262-js2-baseline.txt` is regenerated.
 
 Not tested: Windows and macOS; the micro rows at `codegen-units=1`; RSS and wall time; the cases left for #785 (not run with #785 merged); `a_scope_with_many_locals_compiles_in_linear_time` was not seen failing in the full run.
+
+### Waiver: #791 startup cost (owner, 2026-11-20)
+
+- #791 raises js2 startup from 1,787,715 to 1,958,924 instructions (+9.6%). The +0.5% rule fails.
+- The owner accepts this one time. js2 is not in the browser yet.
+- Step 1 of `docs/design-js2-lazy-builtins.md` (lazy static method tables, about -225 K) pays it back. Steps 0 and 2 follow.
