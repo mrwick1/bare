@@ -7,45 +7,92 @@
 //! of its parent. `Code::funcs` of the compiler holds the id of the child in the facts; the driver replaces it by the index in the
 //! program (the facts id of a synthetic function is not always unique).
 use crate::atoms::SharedAtoms;
-use crate::bytecode::{CF_ARGS, CF_LINK, Code, Op};
+use crate::bytecode::{CF_ARGS, CF_LINK, Code, Ins, Op};
 use crate::compile::{Child, Compiled, Input, compile_function, compile_script};
-use crate::facts::{Facts, SUPER};
+use crate::facts::{ARGS, EVAL, Facts, FnFacts, FnId, INNER_EVAL, SUPER};
 use crate::interp::{Exit, LazyCompile, Program, Vm, code_flags};
 use crate::interp_rt::Realm;
 use crate::parse::{Limits, parse_function, parse_script_known, parse_script_lazy};
 use crate::shapes::A_E;
 use crate::value::Value;
-use std::sync::Arc;
+use std::borrow::Cow;
+use std::sync::{Arc, OnceLock};
 
-/// The stub of a function that waits for its first call: no parameters, all arguments in an array, and one instruction (`Op::Lazy`).
-fn stub() -> Code {
-    let mut c = Code::new(0, 0);
-    c.words = vec![Op::Lazy as u32];
-    c.flags = CF_ARGS;
+/// The stub of a function that waits for its first call, and its one instruction (`Op::Lazy`). A function with plain parameters that does
+/// not read `arguments` gets a stub with its parameter registers: the arguments are in them when the stub runs, so the call makes no
+/// array. Any other function gets a stub with no parameters and `CF_ARGS`: the call makes the array of all arguments.
+fn stub(f: &FnFacts) -> Code {
+    fn kept_word(array: bool) -> u32 {
+        let mut w = Vec::new();
+        crate::bytecode::encode(&mut w, &Ins::new(Op::Lazy, array as u32, 0, 0)).expect("encode Lazy");
+        assert_eq!(w.len(), 1, "Lazy is one word");
+        w[0]
+    }
+    let kept = f.simple && f.flags & (ARGS | EVAL | INNER_EVAL) == 0 && f.length <= 64;
+    let mut c = if kept { Code::new((f.length as u16).max(1), f.length as u16) } else { Code::new(0, 0) };
+    // The two words, made once: the general encoder costs about 500 instructions for each stub.
+    static WORDS: OnceLock<[u32; 2]> = OnceLock::new();
+    let w = WORDS.get_or_init(|| [kept_word(false), kept_word(true)]);
+    c.words = vec![w[!kept as usize]];
+    c.flags = if kept { 0 } else { CF_ARGS };
     c
 }
 
-/// The functions that wait for their first call: their stubs in `codes`, and what compiles them. The loader makes a stub for a function
-/// that no `super` reaches (`CF_LINK` is not known before the compile), and [`LazyCompile::compile`] fills it at the first call.
-pub struct Lazy {
-    source: &'static str,
+/// One source text that has stubs: the text and its facts.
+struct Unit {
+    source: Cow<'static, str>,
     facts: Facts,
+}
+
+/// The functions that wait for their first call: their stubs in `codes`, and what compiles them. The loader makes a stub for a function
+/// with no `super` in it or in a function inside it (`CF_LINK` is not known before the compile), and [`LazyCompile::compile`] fills it
+/// at the first call. A program has one unit for each text that has stubs (the script and the prelude).
+pub struct Lazy {
+    units: Vec<Unit>,
     atoms: Arc<SharedAtoms>,
     limits: Limits,
-    /// `(index of the stub, the function)`, sorted by the index.
-    pending: Vec<(usize, Child)>,
+    /// The functions that wait, sorted by the code index of the stub (a new stub is always after the others). A function that was compiled
+    /// stays in the list with no `Child`: a search costs `log n`, and no entry moves.
+    pending: Vec<Wait>,
+}
+
+/// A function that waits at the code index `ci`, and the unit that holds its text.
+struct Wait {
+    ci: usize,
+    unit: usize,
+    child: Option<Child>,
+}
+
+impl Lazy {
+    fn new(atoms: Arc<SharedAtoms>, limits: Limits) -> Lazy {
+        Lazy { units: Vec::new(), atoms, limits, pending: Vec::new() }
+    }
+
+    /// Add a text and the stubs that its loader made.
+    fn add(&mut self, source: Cow<'static, str>, facts: Facts, pending: Vec<(usize, Child)>) {
+        let u = self.units.len();
+        self.units.push(Unit { source, facts });
+        self.wait(u, pending);
+    }
+
+    fn wait(&mut self, unit: usize, pending: Vec<(usize, Child)>) {
+        self.pending.extend(pending.into_iter().map(|(ci, ch)| Wait { ci, unit, child: Some(ch) }));
+        debug_assert!(self.pending.windows(2).all(|w| w[0].ci < w[1].ci), "the stubs are added in the order of their indexes");
+    }
 }
 
 impl LazyCompile for Lazy {
     fn compile(&mut self, codes: &mut Vec<Code>, ci: usize) -> Result<(), String> {
-        let at = self.pending.binary_search_by_key(&ci, |p| p.0).map_err(|_| "no function waits at this code")?;
-        let ch = self.pending.remove(at).1;
+        let at = self.pending.binary_search_by_key(&ci, |w| w.ci).map_err(|_| "no function waits at this code")?;
+        let w = &mut self.pending[at];
+        let (u, ch) = (w.unit, w.child.take().ok_or("this function was compiled already")?);
         let first = codes.len();
-        let (p, fid) = parse_function(self.source, &mut self.facts, ch.id, self.limits).map_err(|e| format!("parse fn {}: {}", ch.id, e.msg))?;
-        let sub = compile_function(&p, fid, ch.id, &self.facts, &self.atoms, &Input { chain: ch.chain.clone(), self_name: ch.self_name })
+        let unit = &mut self.units[u];
+        let (p, fid) = parse_function(&unit.source, &mut unit.facts, ch.id, self.limits).map_err(|e| format!("parse fn {}: {}", ch.id, e.msg))?;
+        let sub = compile_function(&p, fid, ch.id, &unit.facts, &self.atoms, &Input { chain: ch.chain.clone(), self_name: ch.self_name })
             .map_err(|e| format!("compile fn {}: {e:?}", ch.id))?;
         let mut pending = Vec::new();
-        let mut l = Loader { source: self.source, facts: &mut self.facts, atoms: &self.atoms, limits: self.limits, codes, lazy: Some(&mut pending) };
+        let mut l = Loader { source: &unit.source, facts: &mut unit.facts, atoms: &self.atoms, limits: self.limits, codes, lazy: Some(&mut pending) };
         l.fill(ci, sub)?;
         // The flags of the new codes: the children come after their parent, so the last come first (a stub has no `super`).
         for i in (first..codes.len()).rev().chain([ci]) {
@@ -54,7 +101,7 @@ impl LazyCompile for Lazy {
             codes[i].flags = f | if from_children { CF_LINK } else { 0 };
         }
         debug_assert!(codes[ci].flags & CF_LINK == 0, "a lazy function must not use super");
-        self.pending.extend(pending);
+        self.wait(u, pending);
         Ok(())
     }
 }
@@ -70,6 +117,12 @@ struct Loader<'a> {
 }
 
 impl Loader<'_> {
+    /// Does function `id`, or a function inside it, use `super`? The code of such a function may get `CF_LINK`, which the stub cannot know.
+    fn super_inside(&self, id: FnId) -> bool {
+        let f = &self.facts.fns;
+        f[f[id as usize].sub as usize..=id as usize].iter().any(|f| f.flags & SUPER != 0)
+    }
+
     /// Add `c` and, below it, its children. Gives the index of `c` in the program.
     fn add(&mut self, c: Compiled) -> Result<usize, String> {
         let at = self.codes.len();
@@ -88,10 +141,10 @@ impl Loader<'_> {
         for (i, ch) in children.iter().enumerate() {
             let sub = match ch.ready {
                 Some(r) => inline[r as usize].take().ok_or("a ready child is used twice")?,
-                None if self.lazy.is_some() && self.facts.get(ch.id).flags & SUPER == 0 => {
+                None if self.lazy.is_some() && !self.super_inside(ch.id) => {
                     c.code.funcs[i] = self.codes.len() as u32;
                     self.lazy.as_mut().expect("lazy").push((self.codes.len(), ch.clone()));
-                    self.codes.push(stub());
+                    self.codes.push(stub(self.facts.get(ch.id)));
                     continue;
                 }
                 None => {
@@ -168,17 +221,21 @@ pub fn load(source: &str) -> Result<Vm, String> {
 /// and `source` keeps its own directive prologue).
 pub fn load_with(host: &str, source: &str) -> Result<Vm, String> {
     let shared = Arc::new(SharedAtoms::default());
-    let mut prog = compile(source, &shared, Limits::default())?;
-    let pre = prog.codes.len();
+    let mut lazy = Lazy::new(shared.clone(), Limits::default());
     let mut pending = Vec::new();
-    let (codes, facts) = compile_after(prog.codes, PRELUDE, &shared, Limits::default(), Some(&mut pending), Some(crate::prelude_facts::facts())).map_err(|e| format!("prelude: {e}"))?;
-    prog.codes = codes;
-    let at = prog.codes.len();
+    let (codes, facts) = compile_after(Vec::new(), source, &shared, Limits::default(), Some(&mut pending), None)?;
+    lazy.add(Cow::Owned(source.to_owned()), facts, pending);
+    let pre = codes.len();
+    let mut pending = Vec::new();
+    let (codes, facts) = compile_after(codes, PRELUDE, &shared, Limits::default(), Some(&mut pending), Some(crate::prelude_facts::facts())).map_err(|e| format!("prelude: {e}"))?;
+    lazy.add(Cow::Borrowed(PRELUDE), facts, pending);
+    let at = codes.len();
+    let mut prog = Program { codes };
     if !host.is_empty() {
         prog.codes = compile_after(prog.codes, host, &shared, Limits::default(), None, None).map_err(|e| format!("host script: {e}"))?.0;
     }
-    let mut vm = Vm::new(prog, shared.clone());
-    vm.lazy = Some(Box::new(Lazy { source: PRELUDE, facts, atoms: shared, limits: Limits::default(), pending }));
+    let mut vm = Vm::new(prog, shared);
+    vm.lazy = Some(Box::new(lazy));
     if let Err(e) = vm.run_main(pre) {
         panic!("the prelude failed: {e:?}");
     }
