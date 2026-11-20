@@ -5,6 +5,8 @@
 //!   barrier_load oldptr N      N pointer stores into one old object (the first remembers it; the rest see the flag)
 //!   barrier_load first N       one pointer store into each of N old objects (N slow paths, each into a cold cell)
 //!   barrier_load setup N       the setup of `first` with no store
+//!   barrier_load recyoung N    N pointer stores into the elements of a young array of 4,096 (`set_element`)
+//!   barrier_load recold N      the same into an old array: a large record has no flag, so each store records its card
 use bare_js2::atoms::{Atoms, SharedAtoms};
 use bare_js2::cell::Layout;
 use bare_js2::gc::{Marker, collect};
@@ -36,6 +38,11 @@ fn main() {
         collect(&mut heap, &mut shapes, &mut atoms, &mut |m: &mut Marker| m.values(&roots));
     }
     let ptr = other.value();
+    let arr_shape = shapes.root(Layout::Indexed, None, 0);
+    let arr = Obj::array(&mut heap, &shapes, arr_shape, &vec![Value::int(1); 4096]).expect("memory");
+    if row == "recold" {
+        collect(&mut heap, &mut shapes, &mut atoms, &mut |m: &mut Marker| m.values(&[arr.value(), target.value(), other.value()]));
+    }
     match row {
         "loop" | "setup" => {
             for i in 0..n {
@@ -53,12 +60,17 @@ fn main() {
                 target.set_slot(&shapes, black_box(i as u32 & 3), black_box(Value::int(i as i32)));
             }
         }
+        "recyoung" | "recold" => {
+            for i in 0..n {
+                arr.set_element(&mut heap, black_box(i as u32 & 4095), black_box(ptr)).expect("memory");
+            }
+        }
         "first" => {
             for o in &many {
                 o.set_slot(&shapes, black_box(0), black_box(ptr));
             }
         }
-        _ => panic!("rows: loop young oldint oldptr first setup"),
+        _ => panic!("rows: loop young oldint oldptr first setup recyoung recold"),
     }
     black_box(&many);
 }

@@ -1,7 +1,7 @@
 //! Workload for the sticky-mark experiment (plan step S1.10). A mutator makes small objects in rounds (one round is one task) and keeps
 //! a share of them in a ring array, so a kept object dies when its slot is overwritten. Between rounds a policy decides the collection.
 //!   gen_load POLICY SURV LIFE ROUNDS [NURSERY_KB] [MUT] [STATIC]
-//! - POLICY: `none` (never collect), `full` (the rule of the old engine: `Heap::due`), `fulln` (a full collection each NURSERY of
+//! - POLICY: `none` (never collect), `minor` (a minor collection each NURSERY of growth, never a full one; for the cost of one minor), `full` (the rule of the old engine: `Heap::due`), `fulln` (a full collection each NURSERY of
 //!   growth), `gen` (a minor collection each NURSERY of growth, a full one when the old bytes plus a nursery pass the limit of `full`: 8 MiB or 1.75 times the live bytes of the last full collection).
 //!   Build with `RUSTFLAGS="--cfg base"` for the tree that has no minor collection: `gen` is then not available.
 //! - SURV: the percent of new objects that are kept. LIFE: rounds that a kept object lives (the ring holds LIFE * SURV% * 20,000).
@@ -104,6 +104,13 @@ fn main() {
             "fulln" if heap.grown_bytes() >= nursery => {
                 marked += collect(&mut heap, &mut shapes, &mut atoms, &mut |m: &mut Marker| m.values(&roots)).marked;
                 fulls += 1;
+            }
+            #[cfg(not(base))]
+            "minor" if heap.grown_bytes() >= nursery => {
+                let s = bare_js2::gc::collect_minor(&mut heap, &mut shapes, &mut |m: &mut Marker| m.values(&roots));
+                marked += s.marked;
+                remembered += s.remembered;
+                minors += 1;
             }
             #[cfg(not(base))]
             "gen" if heap.grown_bytes() >= nursery => {
