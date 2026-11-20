@@ -466,6 +466,59 @@ fn timer_sources_and_aggregate_reads_keep_weak_controller_edges_through_collecti
     });
 }
 
+/// The controller is no global and no local: only the stream is reachable. The stream names the controller, and the controller names
+/// the queued chunks, the source callbacks and the bound pull reactions.
+#[test]
+fn a_stream_keeps_the_chunks_of_its_controller_while_the_stream_is_reachable() {
+    big(|| {
+        let mut b = mk();
+        js(&mut b, "var out = [], rs = new ReadableStream({ start(c) { c.enqueue({ n: 1 }); c.enqueue({ n: 2 }); }, pull() {} }, { highWaterMark: 5 });");
+        b.drain().unwrap();
+        for _ in 0..3 {
+            b.collect(&[]).unwrap();
+        }
+        assert_eq!((b.stream_stats().streams, b.stream_stats().queued_chunks), (1, 2));
+        assert_eq!(go(&mut b, "var r = rs.getReader(); r.read().then(function (x) { out.push(x.value.n); return r.read(); }).then(function (x) { out.push(x.value.n); });"), "1|2");
+        js(&mut b, "rs = r = null;");
+        b.collect(&[]).unwrap();
+        let s = b.stream_stats();
+        assert_eq!((s.streams, s.readers, s.queued_chunks, s.queued_bytes), (0, 0, 0, 0), "{s:?}");
+    });
+}
+
+/// A collect between the tasks of a pull cycle (the old engine collects only at a safe point, never inside a call) gives the results
+/// of a run without collects. The stream lives only through the reader loop and the timers.
+#[test]
+fn a_collect_between_the_tasks_of_a_pull_cycle_keeps_the_stream_and_its_reactions() {
+    big(|| {
+        let run = |stress: bool| {
+            let mut b = mk();
+            b.use_virtual_clock();
+            b.it.set_gc_stress(stress);
+            js(&mut b, "var out = [], n = 0;
+(function () {
+  var rs = new ReadableStream({ pull(c) { return new Promise(function (ok) { setTimeout(function () { c.enqueue('c' + (++n)); if (n == 4) c.close(); ok(); }, 5); }); } });
+  var r = rs.getReader();
+  (function step() { return r.read().then(function (x) { if (x.done) { out.push('done'); return; } out.push(x.value); return step(); }); })();
+})();");
+            let before = b.it.heap.stats().collections;
+            for _ in 0..40 {
+                b.advance_time(5.0, 50).expect("advance");
+                b.drain().unwrap();
+                if b.collect_due() {
+                    b.collect(&[]).expect("collect");
+                }
+            }
+            (js(&mut b, "out.join()"), b.it.heap.stats().collections - before)
+        };
+        let (plain, n0) = run(false);
+        let (stress, n1) = run(true);
+        assert_eq!(plain, "c1,c2,c3,c4,done");
+        assert_eq!(stress, plain);
+        assert!(n0 == 0 && n1 >= 20, "collections: {n0} without stress, {n1} with it");
+    });
+}
+
 #[test]
 fn byob_gate_does_not_replace_receiver_brand_validation() {
     big(|| {
