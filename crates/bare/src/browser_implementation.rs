@@ -12,6 +12,7 @@
 //!   `createDocument` and `createDocumentType` are absent.
 
 use crate::browser::*;
+use crate::browser_scoped::run;
 use bare_js::eval::Interp;
 use bare_js::value::{ObjId, Value};
 use bare_html::dom::NodeData;
@@ -159,7 +160,8 @@ fn parse_from_string(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<V
 fn serialize_to_string(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
     let n = d.nd(it, arg(a, 0))?;
     let doc = d.doc.borrow();
-    let text = crate::browser_fragment::serialize(d, it, &doc, n, !matches!(doc.data(n), bare_html::dom::NodeData::Document))?;
+    let whole = !matches!(doc.data(n), bare_html::dom::NodeData::Document);
+    let text = run(it, |s| crate::browser_fragment::serialize(d, s, &doc, n, whole))?;
     d.js_str(it, &text)
 }
 

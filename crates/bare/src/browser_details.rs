@@ -14,10 +14,12 @@
 //! attribute (exclusive accordion) does not close the other `details` of its group. `HTMLElement.click()` on a summary stays gated.
 
 use crate::browser::*;
+use crate::browser_scoped::*;
+use bare_js_api::{Args, Local};
 use crate::browser_reflect::this_of;
 use bare_html::dom::NodeId;
 use bare_js::eval::Interp;
-use bare_js::value::{ObjId, Value};
+use bare_js::value::{Value};
 
 type V = R<Value>;
 
@@ -50,48 +52,51 @@ pub(crate) fn toggle_event_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Val
     Ok(Value::Object(e))
 }
 
-fn state(d: &Dom, it: &mut Interp<'_>, this: Value, new: bool) -> V {
-    let o: ObjId = d.event_of(it, this)?;
-    let s = d.st.borrow().events[&o].toggle.as_ref().map(|(old, n)| if new { n.clone() } else { old.clone() });
-    match s {
-        Some(s) => d.js_str(it, &s),
-        None => Err(it.type_error("Illegal invocation")),
+fn state<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, new: bool) -> Res<'s, Local<'s>> {
+    let Some(o) = obj_id(s, this).filter(|o| d.st.borrow().events.contains_key(o)) else {
+        return Err(s.type_error("Illegal invocation"));
+    };
+    let st = d.st.borrow().events[&o].toggle.as_ref().map(|(old, n)| if new { n.clone() } else { old.clone() });
+    match st {
+        Some(st) => d.js_str_s(s, &st),
+        None => Err(s.type_error("Illegal invocation")),
     }
 }
 
-pub(crate) fn old_state(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    state(d, it, this, false)
+pub(crate) fn old_state<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    state(d, s, this, false)
 }
 
-pub(crate) fn new_state(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    state(d, it, this, true)
+pub(crate) fn new_state<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    state(d, s, this, true)
 }
 
-pub(crate) fn open_get(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = this_of(d, it, this, &["details"])?;
-    Ok(Value::Bool(crate::browser_reflect::text(d, n, "open").is_some()))
+pub(crate) fn open_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = this_of(d, s, this, &["details"])?;
+    Ok(s.boolean(crate::browser_reflect::text(d, n, "open").is_some()))
 }
 
-pub(crate) fn open_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let n = this_of(d, it, this, &["details"])?;
-    let on = it.to_js_bool(a.first().copied().unwrap_or(Value::Undefined))?;
-    d.set_details_open(it, n, on)?;
-    Ok(Value::Undefined)
+pub(crate) fn open_set<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = this_of(d, s, this, &["details"])?;
+    let arg0 = arg_s(s, a, 0);
+    let on = s.to_boolean(arg0);
+    d.set_details_open(s, n, on)?;
+    Ok(s.undefined())
 }
 
 impl Dom {
     /// Set or remove `open` on the `details` `n`, and queue the `toggle` event when the state changed.
-    pub(crate) fn set_details_open(&self, it: &mut Interp<'_>, n: NodeId, on: bool) -> R<()> {
+    pub(crate) fn set_details_open<'s>(&self, s: &mut Sc<'s, '_>, n: NodeId, on: bool) -> Res<'s, ()> {
         let was = crate::browser_reflect::text(self, n, "open").is_some();
         if was == on {
             return Ok(());
         }
         if on {
-            crate::browser_dom::attr_set(self, it, n, "open", "")?;
+            crate::browser_dom::attr_set_s(self, s, n, "open", "")?;
         } else {
             self.doc.borrow_mut().remove_attr(n, "open");
         }
-        self.queue_toggle(n, was, on)
+        lift(s, self.queue_toggle(n, was, on))
     }
 
     /// HTML "details notification task steps": a queued task of `n` goes, and its old state stays.
@@ -130,7 +135,7 @@ impl Dom {
             Some(p) => {
                 it.charge(1)?;
                 let on = crate::browser_reflect::text(self, p, "open").is_none();
-                self.set_details_open(it, p, on)
+                run(it, |s| self.set_details_open(s, p, on))
             }
             None => Ok(()),
         }

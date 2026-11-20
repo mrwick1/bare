@@ -259,7 +259,7 @@ impl<'a> Fc<'a> {
         if uses_this && !self.derived && let Some(Var { home: Home::Ctx { level, slot }, .. }) = self.find_var("this") {
             let (level, slot) = (*level, *slot);
             let t = self.alloc();
-            self.op(Op::LoadThis, t, 0, 0);
+            self.op(self.load_this_op(), t, 0, 0);
             self.op(Op::InitCtx, t, self.depth - level, slot);
             self.free(t);
         }
@@ -286,7 +286,29 @@ impl<'a> Fc<'a> {
             if let Some(d) = default {
                 let skip = self.label();
                 self.jmp_r(Op::JSNeUndef, r, skip);
+                if matches!(prog.pat(target).kind, PatKind::Ident) {
+                    let name = prog.name(prog.pat(target).span);
+                    self.name_hint(d, &name);
+                }
+                // A default that names this parameter or a later one reads it before it is set: a `ReferenceError`.
+                let ds = prog.expr(d).span;
+                let m = self.mark();
+                if params[i..].iter().any(|&q| {
+                    let t = match prog.pat(q).kind {
+                        PatKind::Assign { target, .. } => target,
+                        _ => q,
+                    };
+                    matches!(prog.pat(t).kind, PatKind::Ident) && self.may_occur(&prog.name(prog.pat(t).span), ds.start, ds.end)
+                })
+                {
+                    let h = self.alloc();
+                    self.op(Op::LoadHole, h, 0, 0);
+                    self.set_live(h);
+                    self.param_dz = Some((i as u32, params.len() as u32, h));
+                }
                 self.to(d, r)?;
+                self.param_dz = None;
+                self.free(m);
                 self.bind(skip);
             }
             let tp = *prog.pat(target);
@@ -400,6 +422,50 @@ impl<'a> Fc<'a> {
     pub(crate) fn script_body(&mut self, list: List<Stmt>) -> CR {
         let mut h = Hoist::default();
         self.hoist_list(list, true, &mut h);
+        // The top-level `let`, `const` and `class` names are variables of the script (a register, or a context slot when a function
+        // uses them), not properties of the global object: they have a dead zone, and a `const` cannot be assigned.
+        let mut decls: Vec<Decl<'a>> = h.lex.iter().map(|(n, k, e)| Decl { name: n.clone(), kind: *k, end: *e, reg: None }).collect();
+        // An arrow function at the top level reads the `this` of the script, not the one of its call.
+        let this_captured = self.cap.contains_key("this");
+        if this_captured {
+            decls.push(Decl { name: Cow::Borrowed("this"), kind: VK::Var, end: 0, reg: None });
+        }
+        let mark = if decls.is_empty() { None } else { Some(self.enter(Span { start: 0, end: u32::MAX }, &decls, false)?) };
+        // The scripts that run later read these names through the global lexical environment of the realm. A name in a context slot is
+        // declared now (`DeclLex`). A name in a register stays there, so a loop at the top level keeps its speed: the script checks the
+        // name now (`CheckLex`) and hands its value over at the end.
+        let mut in_regs = Vec::new();
+        for (n, k, _) in &h.lex {
+            let s = self.site_of(n)?;
+            match self.find_var(n) {
+                Some(Var { home: Home::Ctx { slot, .. }, .. }) => {
+                    let slot = *slot;
+                    self.op(if *k == VK::Const { Op::DeclLexC } else { Op::DeclLex }, slot, s, 0);
+                }
+                Some(Var { home: Home::Reg(r), .. }) => {
+                    let r = *r;
+                    self.op(Op::CheckLex, 0, s, 0);
+                    in_regs.push((r, n.clone(), *k == VK::Const));
+                }
+                None => {}
+            }
+        }
+        if this_captured && let Some(Var { home: Home::Ctx { level, slot }, .. }) = self.find_var("this") {
+            let (level, slot) = (*level, *slot);
+            let t = self.alloc();
+            self.op(Op::LoadThis, t, 0, 0);
+            self.op(Op::InitCtx, t, self.depth - level, slot);
+            self.free(t);
+        }
+        for d in &decls {
+            if let Some(v) = self.find_var(&d.name)
+                && let (VK::Let | VK::Const | VK::Class, Home::Reg(r)) = (v.kind, v.home)
+                && self.early_use(d, 0)
+            {
+                self.op(Op::LoadHole, r, 0, 0);
+                self.set_live(r);
+            }
+        }
         // Each name exists as a global (`undefined`) before the first statement runs, so a read or `typeof` finds it, and a `var` with no
         // initializer is not lost.
         let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
@@ -414,6 +480,22 @@ impl<'a> Fc<'a> {
         }
         for s in self.prog.list(list) {
             self.stmt(s)?;
+        }
+        if !in_regs.is_empty() {
+            for (r, ..) in &in_regs {
+                self.set_live(*r);
+            }
+            self.op(Op::PushCtx, 0, in_regs.len() as u32, 0);
+            for (i, (r, n, konst)) in in_regs.iter().enumerate() {
+                let (r, konst) = (*r, *konst);
+                let s = self.site_of(n)?;
+                self.op(Op::InitCtx, r, 0, i as u32);
+                self.op(if konst { Op::DeclLexC } else { Op::DeclLex }, i as u32, s, 0);
+            }
+            self.op(Op::PopCtx, 0, 0, 0);
+        }
+        if let Some(m) = mark {
+            self.leave(m);
         }
         Ok(())
     }
@@ -604,6 +686,7 @@ impl<'a> Fc<'a> {
             match (t.kind, d.init) {
                 (PatKind::Ident, Some(init)) => {
                     let name = prog.name(t.span);
+                    self.name_hint(init, &name);
                     match self.find_var(&name).map(|v| v.home) {
                         Some(Home::Reg(r)) => {
                             self.to(init, r)?;

@@ -19,9 +19,11 @@
 use crate::browser::*;
 use crate::browser_lazy::{self, lazy_global};
 use crate::browser_matrix::Mat;
-use crate::browser_platform::{V, arg};
+use crate::browser_platform::V;
+use crate::browser_scoped::*;
 use bare_js::eval::{Error, Interp};
-use bare_js::value::{ObjId, PropertyKey, Value};
+use bare_js::value::{ObjId, Value};
+use bare_js_api::{Args, Attrs, HostFn, Local, Type};
 use bare_layout::fragment::Rect;
 use std::cell::{Cell, OnceCell, RefCell};
 
@@ -63,25 +65,29 @@ pub(crate) fn illegal(it: &mut Interp<'_>) -> Error {
     it.type_error("Illegal invocation")
 }
 
+#[cold]
+pub(crate) fn illegal_s<'s>(s: &mut Sc<'s, '_>) -> bare_js_api::Error<'s> {
+    s.type_error("Illegal invocation")
+}
+
 /// `ToNumber(v)`; a Symbol gives the message of Chrome, with `ctx` before it. `ctx` is built only for that error.
-pub(crate) fn num(it: &mut Interp<'_>, v: Value, ctx: &dyn Fn() -> String) -> R<f64> {
-    if matches!(v, Value::Symbol(_)) {
-        return Err(it.type_error(&format!("{}: Cannot convert a Symbol value to a number", ctx())));
+pub(crate) fn num_s<'s>(s: &mut Sc<'s, '_>, v: Local<'s>, ctx: &dyn Fn() -> String) -> Res<'s, f64> {
+    if s.type_of(v) == Type::Symbol {
+        return Err(s.type_error(&format!("{}: Cannot convert a Symbol value to a number", ctx())));
     }
-    it.to_js_number(v)
+    s.to_number(v)
 }
 
 /// An object with `proto` and the slot.
-pub(crate) fn new_obj(d: &Dom, it: &mut Interp<'_>, proto: ObjId, slot: Slot) -> R<ObjId> {
-    let o = d.obj(it, proto)?;
+pub(crate) fn new_obj_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, proto: ObjId, slot: Slot) -> Res<'s, ObjId> {
+    let o = d.obj_s(s, proto)?;
     d.geom.slots.borrow_mut().insert(o, slot);
     Ok(o)
 }
 
 /// A data property that a script may change (`CreateDataProperty`).
-pub(crate) fn put(d: &Dom, it: &mut Interp<'_>, o: ObjId, name: &str, v: Value) -> R<()> {
-    let k = d.key(it, name)?;
-    it.define_data(o, k, v, true, true, true)
+pub(crate) fn put_s<'s>(s: &mut Sc<'s, '_>, o: Local<'s>, name: &str, v: Local<'s>) -> Res<'s, ()> {
+    s.define_str(o, name, v, Attrs { writable: true, enumerable: true, configurable: true })
 }
 
 /// An operation of an interface: a writable, enumerable, configurable method.
@@ -91,10 +97,28 @@ pub(crate) fn method(d: &Dom, it: &mut Interp<'_>, target: ObjId, name: &str, le
     it.define_data(target, k, Value::Object(f), true, true, true)
 }
 
+/// `method` for a function of the new form.
+pub(crate) fn method_s(d: &Dom, it: &mut Interp<'_>, target: ObjId, name: &str, len: u32, h: HS) -> R<()> {
+    let k = d.key(it, name)?;
+    let f = d.add_fn_s_obj(it, h, name, len, HostFn::Method)?;
+    it.define_data(target, k, Value::Object(f), true, true, true)
+}
+
 /// A prototype and a constructor that are linked by `prototype`. Both are roots: the realm keeps them while the page can drop the global.
 pub(crate) fn make(d: &Dom, it: &mut Interp<'_>, parent: ObjId, name: &str, ctor: H, nt: bool) -> R<Iface> {
     let proto = d.obj(it, parent)?;
     let ctor = if nt { d.add_ctor_nt(it, ctor, name, 0)? } else { d.add_fn(it, ctor, name, 0, true)? };
+    link(d, it, proto, ctor)
+}
+
+/// `make` for a constructor of the new form.
+pub(crate) fn make_s(d: &Dom, it: &mut Interp<'_>, parent: ObjId, name: &str, ctor: HS, kind: HostFn) -> R<Iface> {
+    let proto = d.obj(it, parent)?;
+    let ctor = d.add_fn_s_obj(it, ctor, name, 0, kind)?;
+    link(d, it, proto, ctor)
+}
+
+fn link(d: &Dom, it: &mut Interp<'_>, proto: ObjId, ctor: ObjId) -> R<Iface> {
     let kp = d.key(it, "prototype")?;
     it.define_data(ctor, kp, Value::Object(proto), false, false, false)?;
     d.fixed.borrow_mut().extend([proto, ctor]);
@@ -111,22 +135,31 @@ pub(crate) fn finish(d: &Dom, it: &mut Interp<'_>, i: Iface, name: &str, extra: 
     browser_lazy::tag(d, it, i.proto, name)
 }
 
+/// `finish` for members of the new form.
+pub(crate) fn finish_s(d: &Dom, it: &mut Interp<'_>, i: Iface, name: &str, extra: &[(&str, u32, HS)]) -> R<()> {
+    let kc = d.key(it, "constructor")?;
+    it.define_data(i.proto, kc, Value::Object(i.ctor), true, false, true)?;
+    for &(n, len, h) in extra {
+        method_s(d, it, i.proto, n, len, h)?;
+    }
+    browser_lazy::tag(d, it, i.proto, name)
+}
+
 /// Read the members `names` of the dictionary `dict` from `v`, in this order. Undefined and null are the empty dictionary. A member that is
 /// undefined is `None`. `who` starts the messages ("Failed to construct 'DOMQuad'"). `member_dict` names the dictionary of member `i`.
-pub(crate) fn read_dict<const N: usize>(d: &Dom, it: &mut Interp<'_>, v: Value, who: &str, dict: &str, member_dict: &dyn Fn(usize) -> &'static str, names: [&str; N]) -> R<[Option<f64>; N]> {
+pub(crate) fn read_dict_s<'s, const N: usize>(s: &mut Sc<'s, '_>, v: Local<'s>, who: &str, dict: &str, member_dict: &dyn Fn(usize) -> &'static str, names: [&str; N]) -> Res<'s, [Option<f64>; N]> {
     let mut out = [None; N];
-    match v {
-        Value::Undefined | Value::Null => {}
-        Value::Object(_) => {
+    match s.type_of(v) {
+        Type::Undefined | Type::Null => {}
+        Type::Object | Type::Function => {
             for (i, name) in names.into_iter().enumerate() {
-                let k = d.key(it, name)?;
-                let x = it.get_value(v, k)?;
-                if !matches!(x, Value::Undefined) {
-                    out[i] = Some(num(it, x, &|| format!("{who}: Failed to read the '{name}' property from '{}'", member_dict(i)))?);
+                let x = s.get_str(v, name)?;
+                if s.type_of(x) != Type::Undefined {
+                    out[i] = Some(num_s(s, x, &|| format!("{who}: Failed to read the '{name}' property from '{}'", member_dict(i)))?);
                 }
             }
         }
-        _ => return Err(it.type_error(&format!("{who}: The provided value is not of type '{dict}'."))),
+        _ => return Err(s.type_error(&format!("{who}: The provided value is not of type '{dict}'."))),
     }
     Ok(out)
 }
@@ -154,16 +187,15 @@ fn rect_field(v: [f64; 4], i: usize) -> f64 {
     }
 }
 
-fn rect_slot(d: &Dom, this: Value) -> Option<([f64; 4], bool)> {
-    let Value::Object(o) = this else { return None };
+fn rect_slot(d: &Dom, s: &mut Sc<'_, '_>, this: Local<'_>) -> Option<([f64; 4], bool)> {
+    let o = obj_id(s, this)?;
     match d.geom.slots.borrow().get(&o) {
         Some(Slot::Rect(v, rw)) => Some((*v, *rw)),
         _ => None,
     }
 }
 
-fn point_slot(d: &Dom, this: Value) -> Option<([f64; 4], bool)> {
-    let Value::Object(o) = this else { return None };
+fn point_slot(d: &Dom, o: ObjId) -> Option<([f64; 4], bool)> {
     match d.geom.slots.borrow().get(&o) {
         Some(Slot::Point(v, rw)) => Some((*v, *rw)),
         _ => None,
@@ -179,32 +211,39 @@ fn ensure_r(d: &Dom, it: &mut Interp<'_>) -> R<[Iface; 3]> {
     make_r(d, it)
 }
 
+fn ensure_r_s<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, [Iface; 3]> {
+    if let Some(r) = d.geom.r.get() {
+        return Ok(*r);
+    }
+    old(s, |it| make_r(d, it))
+}
+
 #[cold]
 #[inline(never)]
 fn make_r(d: &Dom, it: &mut Interp<'_>) -> R<[Iface; 3]> {
     let op = it.object_prototype();
-    let ro = make(d, it, op, "DOMRectReadOnly", rect_ro_ctor, true)?;
-    let rw = make(d, it, ro.proto, "DOMRect", rect_rw_ctor, true)?;
-    let list = make(d, it, op, "DOMRectList", list_ctor, false)?;
+    let ro = make_s(d, it, op, "DOMRectReadOnly", rect_ro_ctor, HostFn::CtorNewTarget)?;
+    let rw = make_s(d, it, ro.proto, "DOMRect", rect_rw_ctor, HostFn::CtorNewTarget)?;
+    let list = make_s(d, it, op, "DOMRectList", list_ctor, HostFn::Ctor)?;
     it.heap.set_prototype_of(rw.ctor, Some(ro.ctor)).map_err(|e| it.heap_error(e))?;
-    method(d, it, ro.ctor, "fromRect", 0, rect_from_ro)?;
-    method(d, it, rw.ctor, "fromRect", 0, rect_from_rw)?;
+    method_s(d, it, ro.ctor, "fromRect", 0, rect_from_ro)?;
+    method_s(d, it, rw.ctor, "fromRect", 0, rect_from_rw)?;
     // The attributes in the order of Chrome: x y width height, then top right bottom left (read only).
-    let getters: [H; 8] = [rect_get::<0>, rect_get::<1>, rect_get::<2>, rect_get::<3>, rect_get::<4>, rect_get::<5>, rect_get::<6>, rect_get::<7>];
-    let setters: [H; 4] = [rect_set::<0>, rect_set::<1>, rect_set::<2>, rect_set::<3>];
+    let getters: [HS; 8] = [rect_get::<0>, rect_get::<1>, rect_get::<2>, rect_get::<3>, rect_get::<4>, rect_get::<5>, rect_get::<6>, rect_get::<7>];
+    let setters: [HS; 4] = [rect_set::<0>, rect_set::<1>, rect_set::<2>, rect_set::<3>];
     let names = ["x", "y", "width", "height", "top", "right", "bottom", "left"];
     for (i, name) in names.into_iter().enumerate() {
-        d.def_get(it, ro.proto, name, getters[i], None)?;
+        d.def_get_s(it, ro.proto, name, getters[i], None)?;
     }
-    method(d, it, ro.proto, "toJSON", 0, rect_to_json)?;
+    method_s(d, it, ro.proto, "toJSON", 0, rect_to_json)?;
     for (i, name) in names.into_iter().take(4).enumerate() {
-        d.def_get(it, rw.proto, name, getters[i], Some(setters[i]))?;
+        d.def_get_s(it, rw.proto, name, getters[i], Some(setters[i]))?;
     }
-    finish(d, it, ro, "DOMRectReadOnly", &[])?;
-    finish(d, it, rw, "DOMRect", &[])?;
-    d.def_get(it, list.proto, "length", list_length, None)?;
-    method(d, it, list.proto, "item", 1, list_item)?;
-    finish(d, it, list, "DOMRectList", &[])?;
+    finish_s(d, it, ro, "DOMRectReadOnly", &[])?;
+    finish_s(d, it, rw, "DOMRect", &[])?;
+    d.def_get_s(it, list.proto, "length", list_length, None)?;
+    method_s(d, it, list.proto, "item", 1, list_item)?;
+    finish_s(d, it, list, "DOMRectList", &[])?;
     let (kv, ki) = (d.key(it, "values")?, it.symbol_iterator());
     let values = it.get_value(Value::Object(it.array_prototype()), kv)?;
     it.define_data(list.proto, ki, values, true, false, true)?;
@@ -224,7 +263,16 @@ lazy_global!(lazy_rect_list, "DOMRectList", ensure_r_unit, |d| d.geom.r.get().ex
 /// A rectangle for a layout read or an observer entry. `rw`: a `DOMRect`, else a `DOMRectReadOnly`.
 pub(crate) fn rect_object(d: &Dom, it: &mut Interp<'_>, v: [f64; 4], rw: bool) -> V {
     let proto = ensure_r(d, it)?[rw as usize].proto;
-    Ok(Value::Object(new_obj(d, it, proto, Slot::Rect(v, rw))?))
+    let o = d.obj(it, proto)?;
+    d.geom.slots.borrow_mut().insert(o, Slot::Rect(v, rw));
+    Ok(Value::Object(o))
+}
+
+/// `rect_object` as a local.
+pub(crate) fn rect_object_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, v: [f64; 4], rw: bool) -> Res<'s, Local<'s>> {
+    let proto = ensure_r_s(d, s)?[rw as usize].proto;
+    let o = new_obj_s(d, s, proto, Slot::Rect(v, rw))?;
+    Ok(d.obj_local(s, o))
 }
 
 /// A layout rectangle as a `DOMRect`.
@@ -232,113 +280,133 @@ pub(crate) fn layout_rect(d: &Dom, it: &mut Interp<'_>, r: Rect) -> V {
     rect_object(d, it, [r.x as f64, r.y as f64, r.w as f64, r.h as f64], true)
 }
 
-/// A `DOMRectList` of `DOMRect`.
-pub(crate) fn rect_list(d: &Dom, it: &mut Interp<'_>, rects: &[Rect]) -> V {
-    let items = rects.iter().map(|&r| layout_rect(d, it, r)).collect::<R<Vec<_>>>()?;
-    let proto = ensure_r(d, it)?[2].proto;
-    let o = new_obj(d, it, proto, Slot::List(items.len() as u32))?;
-    for (i, v) in items.into_iter().enumerate() {
-        it.define_data(o, PropertyKey::Index(i as u32), v, false, true, false)?;
-    }
-    Ok(Value::Object(o))
+/// A layout rectangle as a `DOMRect`, as a local.
+pub(crate) fn layout_rect_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, r: Rect) -> Res<'s, Local<'s>> {
+    rect_object_s(d, s, [r.x as f64, r.y as f64, r.w as f64, r.h as f64], true)
 }
 
-fn rect_ctor(d: &Dom, it: &mut Interp<'_>, a: &[Value], rw: bool) -> V {
+/// A `DOMRectList` of `DOMRect`.
+pub(crate) fn rect_list_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, rects: &[Rect]) -> Res<'s, Local<'s>> {
+    let items = rects.iter().map(|&r| layout_rect_s(d, s, r)).collect::<Res<'s, Vec<_>>>()?;
+    let proto = ensure_r_s(d, s)?[2].proto;
+    let o = new_obj_s(d, s, proto, Slot::List(items.len() as u32))?;
+    let o = d.obj_local(s, o);
+    for (i, v) in items.into_iter().enumerate() {
+        let k = s.number(i as f64);
+        s.define(o, k, v, Attrs { writable: false, enumerable: true, configurable: false })?;
+    }
+    Ok(o)
+}
+
+fn rect_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>, rw: bool) -> Res<'s, Local<'s>> {
     let name = if rw { "DOMRect" } else { "DOMRectReadOnly" };
     let mut v = [0.0; 4];
     for (i, slot) in v.iter_mut().enumerate() {
-        let x = arg(a, i);
-        if !matches!(x, Value::Undefined) {
-            *slot = num(it, x, &|| format!("Failed to construct '{name}'"))?;
+        if let Some(x) = a.get(i).filter(|&x| s.type_of(x) != Type::Undefined) {
+            *slot = num_s(s, x, &|| format!("Failed to construct '{name}'"))?;
         }
     }
-    let default = ensure_r(d, it)?[rw as usize].proto;
-    let proto = it.host_proto_from_new_target(default)?;
-    Ok(Value::Object(new_obj(d, it, proto, Slot::Rect(v, rw))?))
+    let default = ensure_r_s(d, s)?[rw as usize].proto;
+    let default = d.obj_local(s, default);
+    let proto = s.proto_from_new_target(default)?;
+    let proto = obj_id(s, proto).expect("a prototype");
+    let o = new_obj_s(d, s, proto, Slot::Rect(v, rw))?;
+    Ok(d.obj_local(s, o))
 }
 
-fn rect_ro_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
-    rect_ctor(d, it, a, false)
+fn rect_ro_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    rect_ctor(d, s, a, false)
 }
 
-fn rect_rw_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
-    rect_ctor(d, it, a, true)
+fn rect_rw_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    rect_ctor(d, s, a, true)
 }
 
-fn rect_from(d: &Dom, it: &mut Interp<'_>, a: &[Value], rw: bool) -> V {
+fn rect_from<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>, rw: bool) -> Res<'s, Local<'s>> {
     let who = if rw { "Failed to execute 'fromRect' on 'DOMRect'" } else { "Failed to execute 'fromRect' on 'DOMRectReadOnly'" };
-    let v = rect_init(d, it, arg(a, 0), who)?;
-    rect_object(d, it, v, rw)
+    let v = arg_s(s, a, 0);
+    let v = rect_init(s, v, who)?;
+    rect_object_s(d, s, v, rw)
 }
 
-fn rect_from_ro(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
-    rect_from(d, it, a, false)
+fn rect_from_ro<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    rect_from(d, s, a, false)
 }
 
-fn rect_from_rw(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
-    rect_from(d, it, a, true)
+fn rect_from_rw<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    rect_from(d, s, a, true)
 }
 
 /// A `DOMRectInit`: height, width, x, y are read in this order (the members are sorted), each defaults to 0.
-fn rect_init(d: &Dom, it: &mut Interp<'_>, v: Value, who: &str) -> R<[f64; 4]> {
-    let [h, w, x, y] = read_dict(d, it, v, who, "DOMRectInit", &|_| "DOMRectInit", ["height", "width", "x", "y"])?;
+fn rect_init<'s>(s: &mut Sc<'s, '_>, v: Local<'s>, who: &str) -> Res<'s, [f64; 4]> {
+    let [h, w, x, y] = read_dict_s(s, v, who, "DOMRectInit", &|_| "DOMRectInit", ["height", "width", "x", "y"])?;
     Ok([x.unwrap_or(0.0), y.unwrap_or(0.0), w.unwrap_or(0.0), h.unwrap_or(0.0)])
 }
 
-fn rect_get<const I: usize>(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    match rect_slot(d, this) {
-        Some((v, _)) => Ok(Value::Number(rect_field(v, I))),
-        None => Err(illegal(it)),
+fn rect_get<'s, const I: usize>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    match rect_slot(d, s, this) {
+        Some((v, _)) => Ok(s.number(rect_field(v, I))),
+        None => Err(illegal_s(s)),
     }
 }
 
-fn rect_set<const I: usize>(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let Some((_, true)) = rect_slot(d, this) else { return Err(illegal(it)) };
+fn rect_set<'s, const I: usize>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let Some((_, true)) = rect_slot(d, s, this) else { return Err(illegal_s(s)) };
     let name = ["x", "y", "width", "height"][I];
-    let x = num(it, arg(a, 0), &|| format!("Failed to set the '{name}' property on 'DOMRect'"))?;
-    if let Value::Object(o) = this
+    let x = arg_s(s, a, 0);
+    let x = num_s(s, x, &|| format!("Failed to set the '{name}' property on 'DOMRect'"))?;
+    if let Some(o) = obj_id(s, this)
         && let Some(Slot::Rect(v, _)) = d.geom.slots.borrow_mut().get_mut(&o)
     {
         v[I] = x;
     }
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-fn rect_to_json(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let Some((v, _)) = rect_slot(d, this) else { return Err(illegal(it)) };
-    let o = d.obj(it, it.object_prototype())?;
+fn rect_to_json<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let Some((v, _)) = rect_slot(d, s, this) else { return Err(illegal_s(s)) };
+    let o = s.new_object()?;
     for (i, name) in ["x", "y", "width", "height", "top", "right", "bottom", "left"].into_iter().enumerate() {
-        put(d, it, o, name, Value::Number(rect_field(v, i)))?;
+        let n = s.number(rect_field(v, i));
+        put_s(s, o, name, n)?;
     }
-    Ok(Value::Object(o))
+    Ok(o)
 }
 
 // ------------------------------------------------------------------------------------------ the list
 
-fn list_ctor(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
-    Err(it.type_error("Failed to construct 'DOMRectList': Illegal constructor"))
+fn list_ctor<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    Err(s.type_error("Failed to construct 'DOMRectList': Illegal constructor"))
 }
 
-fn list_len(d: &Dom, this: Value) -> Option<u32> {
-    let Value::Object(o) = this else { return None };
+fn list_len(d: &Dom, s: &mut Sc<'_, '_>, this: Local<'_>) -> Option<u32> {
+    let o = obj_id(s, this)?;
     match d.geom.slots.borrow().get(&o) {
         Some(Slot::List(n)) => Some(*n),
         _ => None,
     }
 }
 
-fn list_length(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    list_len(d, this).map(|n| Value::Number(n as f64)).ok_or_else(|| illegal(it))
+fn list_length<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    match list_len(d, s, this) {
+        Some(n) => Ok(s.number(n as f64)),
+        None => Err(illegal_s(s)),
+    }
 }
 
-fn list_item(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let Some(len) = list_len(d, this) else { return Err(illegal(it)) };
-    let Some(&i) = a.first() else {
-        return Err(it.type_error("Failed to execute 'item' on 'DOMRectList': 1 argument required, but only 0 present."));
+fn list_item<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let Some(len) = list_len(d, s, this) else { return Err(illegal_s(s)) };
+    let Some(i) = a.get(0) else {
+        return Err(s.type_error("Failed to execute 'item' on 'DOMRectList': 1 argument required, but only 0 present."));
     };
-    let n = it.to_js_number(i)?;
+    let n = s.to_number(i)?;
     let i = if n.is_finite() { n.trunc().rem_euclid(4294967296.0) as u32 } else { 0 };
-    if i < len { it.get_value(this, PropertyKey::Index(i)) } else { Ok(Value::Null) }
+    if i < len {
+        let k = s.number(i as f64);
+        s.get(this, k)
+    } else {
+        Ok(s.null())
+    }
 }
 
 // ------------------------------------------------------------------------------------------ points and the quad
@@ -350,38 +418,45 @@ fn ensure_p(d: &Dom, it: &mut Interp<'_>) -> R<[Iface; 3]> {
     make_p(d, it)
 }
 
+fn ensure_p_s<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, [Iface; 3]> {
+    if let Some(p) = d.geom.p.get() {
+        return Ok(*p);
+    }
+    old(s, |it| make_p(d, it))
+}
+
 #[cold]
 #[inline(never)]
 fn make_p(d: &Dom, it: &mut Interp<'_>) -> R<[Iface; 3]> {
     let op = it.object_prototype();
-    let ro = make(d, it, op, "DOMPointReadOnly", point_ro_ctor, true)?;
-    let rw = make(d, it, ro.proto, "DOMPoint", point_rw_ctor, true)?;
-    let quad = make(d, it, op, "DOMQuad", quad_ctor, true)?;
+    let ro = make_s(d, it, op, "DOMPointReadOnly", point_ro_ctor, HostFn::CtorNewTarget)?;
+    let rw = make_s(d, it, ro.proto, "DOMPoint", point_rw_ctor, HostFn::CtorNewTarget)?;
+    let quad = make_s(d, it, op, "DOMQuad", quad_ctor, HostFn::CtorNewTarget)?;
     it.heap.set_prototype_of(rw.ctor, Some(ro.ctor)).map_err(|e| it.heap_error(e))?;
-    method(d, it, ro.ctor, "fromPoint", 0, point_from_ro)?;
-    method(d, it, rw.ctor, "fromPoint", 0, point_from_rw)?;
-    let getters: [H; 4] = [point_get::<0>, point_get::<1>, point_get::<2>, point_get::<3>];
-    let setters: [H; 4] = [point_set::<0>, point_set::<1>, point_set::<2>, point_set::<3>];
+    method_s(d, it, ro.ctor, "fromPoint", 0, point_from_ro)?;
+    method_s(d, it, rw.ctor, "fromPoint", 0, point_from_rw)?;
+    let getters: [HS; 4] = [point_get::<0>, point_get::<1>, point_get::<2>, point_get::<3>];
+    let setters: [HS; 4] = [point_set::<0>, point_set::<1>, point_set::<2>, point_set::<3>];
     let names = ["x", "y", "z", "w"];
     for (i, name) in names.into_iter().enumerate() {
-        d.def_get(it, ro.proto, name, getters[i], None)?;
+        d.def_get_s(it, ro.proto, name, getters[i], None)?;
     }
-    method(d, it, ro.proto, "matrixTransform", 0, point_matrix_transform)?;
-    method(d, it, ro.proto, "toJSON", 0, point_to_json)?;
+    method_s(d, it, ro.proto, "matrixTransform", 0, point_matrix_transform)?;
+    method_s(d, it, ro.proto, "toJSON", 0, point_to_json)?;
     for (i, name) in names.into_iter().enumerate() {
-        d.def_get(it, rw.proto, name, getters[i], Some(setters[i]))?;
+        d.def_get_s(it, rw.proto, name, getters[i], Some(setters[i]))?;
     }
-    finish(d, it, ro, "DOMPointReadOnly", &[])?;
-    finish(d, it, rw, "DOMPoint", &[])?;
-    method(d, it, quad.ctor, "fromQuad", 0, quad_from_quad)?;
-    method(d, it, quad.ctor, "fromRect", 0, quad_from_rect)?;
-    let quad_getters: [H; 4] = [quad_get::<0>, quad_get::<1>, quad_get::<2>, quad_get::<3>];
+    finish_s(d, it, ro, "DOMPointReadOnly", &[])?;
+    finish_s(d, it, rw, "DOMPoint", &[])?;
+    method_s(d, it, quad.ctor, "fromQuad", 0, quad_from_quad)?;
+    method_s(d, it, quad.ctor, "fromRect", 0, quad_from_rect)?;
+    let quad_getters: [HS; 4] = [quad_get::<0>, quad_get::<1>, quad_get::<2>, quad_get::<3>];
     for (i, name) in ["p1", "p2", "p3", "p4"].into_iter().enumerate() {
-        d.def_get(it, quad.proto, name, quad_getters[i], None)?;
+        d.def_get_s(it, quad.proto, name, quad_getters[i], None)?;
     }
-    method(d, it, quad.proto, "getBounds", 0, quad_bounds)?;
-    method(d, it, quad.proto, "toJSON", 0, quad_to_json)?;
-    finish(d, it, quad, "DOMQuad", &[])?;
+    method_s(d, it, quad.proto, "getBounds", 0, quad_bounds)?;
+    method_s(d, it, quad.proto, "toJSON", 0, quad_to_json)?;
+    finish_s(d, it, quad, "DOMQuad", &[])?;
     let p = [ro, rw, quad];
     let _ = d.geom.p.set(p);
     Ok(p)
@@ -396,157 +471,176 @@ lazy_global!(lazy_point_rw, "DOMPoint", ensure_p_unit, |d| d.geom.p.get().expect
 lazy_global!(lazy_quad, "DOMQuad", ensure_p_unit, |d| d.geom.p.get().expect("made")[2].ctor);
 
 /// A `DOMPoint` (or `DOMPointReadOnly`) with these numbers.
-pub(crate) fn point_object(d: &Dom, it: &mut Interp<'_>, v: [f64; 4], rw: bool) -> R<ObjId> {
-    let proto = ensure_p(d, it)?[rw as usize].proto;
-    new_obj(d, it, proto, Slot::Point(v, rw))
+pub(crate) fn point_object_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, v: [f64; 4], rw: bool) -> Res<'s, ObjId> {
+    let proto = ensure_p_s(d, s)?[rw as usize].proto;
+    new_obj_s(d, s, proto, Slot::Point(v, rw))
 }
 
 const POINT_DEFAULT: [f64; 4] = [0.0, 0.0, 0.0, 1.0];
 
-fn point_ctor(d: &Dom, it: &mut Interp<'_>, a: &[Value], rw: bool) -> V {
+fn point_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>, rw: bool) -> Res<'s, Local<'s>> {
     let name = if rw { "DOMPoint" } else { "DOMPointReadOnly" };
     let mut v = POINT_DEFAULT;
     for (i, slot) in v.iter_mut().enumerate() {
-        let x = arg(a, i);
-        if !matches!(x, Value::Undefined) {
-            *slot = num(it, x, &|| format!("Failed to construct '{name}'"))?;
+        if let Some(x) = a.get(i).filter(|&x| s.type_of(x) != Type::Undefined) {
+            *slot = num_s(s, x, &|| format!("Failed to construct '{name}'"))?;
         }
     }
-    let default = ensure_p(d, it)?[rw as usize].proto;
-    let proto = it.host_proto_from_new_target(default)?;
-    Ok(Value::Object(new_obj(d, it, proto, Slot::Point(v, rw))?))
+    let default = ensure_p_s(d, s)?[rw as usize].proto;
+    let default = d.obj_local(s, default);
+    let proto = s.proto_from_new_target(default)?;
+    let proto = obj_id(s, proto).expect("a prototype");
+    let o = new_obj_s(d, s, proto, Slot::Point(v, rw))?;
+    Ok(d.obj_local(s, o))
 }
 
-fn point_ro_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
-    point_ctor(d, it, a, false)
+fn point_ro_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    point_ctor(d, s, a, false)
 }
 
-fn point_rw_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
-    point_ctor(d, it, a, true)
+fn point_rw_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    point_ctor(d, s, a, true)
 }
 
 /// A `DOMPointInit` (x, y, z, w; the defaults are 0, 0, 0, 1).
-pub(crate) fn point_init(d: &Dom, it: &mut Interp<'_>, v: Value, who: &str) -> R<[f64; 4]> {
-    let r = read_dict(d, it, v, who, "DOMPointInit", &|_| "DOMPointInit", ["w", "x", "y", "z"])?;
+pub(crate) fn point_init<'s>(s: &mut Sc<'s, '_>, v: Local<'s>, who: &str) -> Res<'s, [f64; 4]> {
+    let r = read_dict_s(s, v, who, "DOMPointInit", &|_| "DOMPointInit", ["w", "x", "y", "z"])?;
     // The members are read in the sorted order w, x, y, z.
     Ok([r[1].unwrap_or(0.0), r[2].unwrap_or(0.0), r[3].unwrap_or(0.0), r[0].unwrap_or(1.0)])
 }
 
-fn point_from(d: &Dom, it: &mut Interp<'_>, a: &[Value], rw: bool) -> V {
+fn point_from<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>, rw: bool) -> Res<'s, Local<'s>> {
     let who = if rw { "Failed to execute 'fromPoint' on 'DOMPoint'" } else { "Failed to execute 'fromPoint' on 'DOMPointReadOnly'" };
-    let v = point_init(d, it, arg(a, 0), who)?;
-    Ok(Value::Object(point_object(d, it, v, rw)?))
+    let v = arg_s(s, a, 0);
+    let v = point_init(s, v, who)?;
+    let o = point_object_s(d, s, v, rw)?;
+    Ok(d.obj_local(s, o))
 }
 
-fn point_from_ro(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
-    point_from(d, it, a, false)
+fn point_from_ro<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    point_from(d, s, a, false)
 }
 
-fn point_from_rw(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
-    point_from(d, it, a, true)
+fn point_from_rw<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    point_from(d, s, a, true)
 }
 
-fn point_get<const I: usize>(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    match point_slot(d, this) {
-        Some((v, _)) => Ok(Value::Number(v[I])),
-        None => Err(illegal(it)),
+/// The numbers of the point object `this`.
+fn point_of(d: &Dom, s: &mut Sc<'_, '_>, this: Local<'_>) -> Option<([f64; 4], bool)> {
+    point_slot(d, obj_id(s, this)?)
+}
+
+fn point_get<'s, const I: usize>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    match point_of(d, s, this) {
+        Some((v, _)) => Ok(s.number(v[I])),
+        None => Err(illegal_s(s)),
     }
 }
 
-fn point_set<const I: usize>(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let Some((_, true)) = point_slot(d, this) else { return Err(illegal(it)) };
+fn point_set<'s, const I: usize>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let Some((_, true)) = point_of(d, s, this) else { return Err(illegal_s(s)) };
     let name = ["x", "y", "z", "w"][I];
-    let x = num(it, arg(a, 0), &|| format!("Failed to set the '{name}' property on 'DOMPoint'"))?;
-    if let Value::Object(o) = this
+    let x = arg_s(s, a, 0);
+    let x = num_s(s, x, &|| format!("Failed to set the '{name}' property on 'DOMPoint'"))?;
+    if let Some(o) = obj_id(s, this)
         && let Some(Slot::Point(v, _)) = d.geom.slots.borrow_mut().get_mut(&o)
     {
         v[I] = x;
     }
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-fn point_to_json(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let Some((v, _)) = point_slot(d, this) else { return Err(illegal(it)) };
-    let o = d.obj(it, it.object_prototype())?;
+fn point_to_json<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let Some((v, _)) = point_of(d, s, this) else { return Err(illegal_s(s)) };
+    let o = s.new_object()?;
     for (i, name) in ["x", "y", "z", "w"].into_iter().enumerate() {
-        put(d, it, o, name, Value::Number(v[i]))?;
+        let n = s.number(v[i]);
+        put_s(s, o, name, n)?;
     }
-    Ok(Value::Object(o))
+    Ok(o)
 }
 
-fn point_matrix_transform(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let Some((v, _)) = point_slot(d, this) else { return Err(illegal(it)) };
-    let m = crate::browser_matrix::init_matrix(d, it, arg(a, 0), "Failed to execute 'matrixTransform' on 'DOMPointReadOnly'")?;
-    Ok(Value::Object(point_object(d, it, m.transform(v), true)?))
+fn point_matrix_transform<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let Some((v, _)) = point_of(d, s, this) else { return Err(illegal_s(s)) };
+    let init = arg_s(s, a, 0);
+    let m = crate::browser_matrix::init_matrix(d, s, init, "Failed to execute 'matrixTransform' on 'DOMPointReadOnly'")?;
+    let o = point_object_s(d, s, m.transform(v), true)?;
+    Ok(d.obj_local(s, o))
 }
 
 // The quad.
 
-fn quad_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
+fn quad_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let mut pts = [POINT_DEFAULT; 4];
     for (i, p) in pts.iter_mut().enumerate() {
-        *p = point_init(d, it, arg(a, i), "Failed to construct 'DOMQuad'")?;
+        let v = arg_s(s, a, i);
+        *p = point_init(s, v, "Failed to construct 'DOMQuad'")?;
     }
-    let default = ensure_p(d, it)?[2].proto;
-    let proto = it.host_proto_from_new_target(default)?;
-    Ok(Value::Object(make_quad(d, it, proto, pts)?))
+    let default = ensure_p_s(d, s)?[2].proto;
+    let default = d.obj_local(s, default);
+    let proto = s.proto_from_new_target(default)?;
+    let proto = obj_id(s, proto).expect("a prototype");
+    let q = make_quad(d, s, proto, pts)?;
+    Ok(d.obj_local(s, q))
 }
 
-fn make_quad(d: &Dom, it: &mut Interp<'_>, proto: ObjId, pts: [[f64; 4]; 4]) -> R<ObjId> {
+fn make_quad<'s>(d: &Dom, s: &mut Sc<'s, '_>, proto: ObjId, pts: [[f64; 4]; 4]) -> Res<'s, ObjId> {
     let mut ids = [proto; 4];
     for (id, p) in ids.iter_mut().zip(pts) {
-        *id = point_object(d, it, p, true)?;
+        *id = point_object_s(d, s, p, true)?;
     }
     d.geom.quad.set(true);
-    new_obj(d, it, proto, Slot::Quad(ids))
+    new_obj_s(d, s, proto, Slot::Quad(ids))
 }
 
-fn quad_from_rect(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
-    let [x, y, w, h] = rect_init(d, it, arg(a, 0), "Failed to execute 'fromRect' on 'DOMQuad'")?;
-    let proto = ensure_p(d, it)?[2].proto;
+fn quad_from_rect<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let v = arg_s(s, a, 0);
+    let [x, y, w, h] = rect_init(s, v, "Failed to execute 'fromRect' on 'DOMQuad'")?;
+    let proto = ensure_p_s(d, s)?[2].proto;
     let p = |x, y| [x, y, 0.0, 1.0];
-    Ok(Value::Object(make_quad(d, it, proto, [p(x, y), p(x + w, y), p(x + w, y + h), p(x, y + h)])?))
+    let q = make_quad(d, s, proto, [p(x, y), p(x + w, y), p(x + w, y + h), p(x, y + h)])?;
+    Ok(d.obj_local(s, q))
 }
 
-fn quad_from_quad(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
+fn quad_from_quad<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let who = "Failed to execute 'fromQuad' on 'DOMQuad'";
-    let v = arg(a, 0);
+    let v = arg_s(s, a, 0);
     let mut pts = [POINT_DEFAULT; 4];
-    match v {
-        Value::Undefined | Value::Null => {}
-        Value::Object(_) => {
+    match s.type_of(v) {
+        Type::Undefined | Type::Null => {}
+        Type::Object | Type::Function => {
             for (i, name) in ["p1", "p2", "p3", "p4"].into_iter().enumerate() {
-                let k = d.key(it, name)?;
-                let x = it.get_value(v, k)?;
-                if !matches!(x, Value::Undefined) {
-                    pts[i] = point_init(d, it, x, &format!("{who}: Failed to read the '{name}' property from 'DOMQuadInit'"))?;
+                let x = s.get_str(v, name)?;
+                if s.type_of(x) != Type::Undefined {
+                    pts[i] = point_init(s, x, &format!("{who}: Failed to read the '{name}' property from 'DOMQuadInit'"))?;
                 }
             }
         }
-        _ => return Err(it.type_error(&format!("{who}: The provided value is not of type 'DOMQuadInit'."))),
+        _ => return Err(s.type_error(&format!("{who}: The provided value is not of type 'DOMQuadInit'."))),
     }
-    let proto = ensure_p(d, it)?[2].proto;
-    Ok(Value::Object(make_quad(d, it, proto, pts)?))
+    let proto = ensure_p_s(d, s)?[2].proto;
+    let q = make_quad(d, s, proto, pts)?;
+    Ok(d.obj_local(s, q))
 }
 
-fn quad_points(d: &Dom, this: Value) -> Option<[ObjId; 4]> {
-    let Value::Object(o) = this else { return None };
+fn quad_points(d: &Dom, s: &mut Sc<'_, '_>, this: Local<'_>) -> Option<[ObjId; 4]> {
+    let o = obj_id(s, this)?;
     match d.geom.slots.borrow().get(&o) {
         Some(Slot::Quad(p)) => Some(*p),
         _ => None,
     }
 }
 
-fn quad_get<const I: usize>(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    match quad_points(d, this) {
-        Some(p) => Ok(Value::Object(p[I])),
-        None => Err(illegal(it)),
+fn quad_get<'s, const I: usize>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    match quad_points(d, s, this) {
+        Some(p) => Ok(d.obj_local(s, p[I])),
+        None => Err(illegal_s(s)),
     }
 }
 
-fn quad_bounds(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let Some(ids) = quad_points(d, this) else { return Err(illegal(it)) };
-    let pts: Vec<[f64; 4]> = ids.iter().map(|&o| point_slot(d, Value::Object(o)).map_or(POINT_DEFAULT, |p| p.0)).collect();
+fn quad_bounds<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let Some(ids) = quad_points(d, s, this) else { return Err(illegal_s(s)) };
+    let pts: Vec<[f64; 4]> = ids.iter().map(|&o| point_slot(d, o).map_or(POINT_DEFAULT, |p| p.0)).collect();
     let (mut left, mut top, mut right, mut bottom) = (pts[0][0], pts[0][1], pts[0][0], pts[0][1]);
     for p in &pts[1..] {
         left = lo(left, p[0]);
@@ -554,16 +648,17 @@ fn quad_bounds(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
         right = hi(right, p[0]);
         bottom = hi(bottom, p[1]);
     }
-    rect_object(d, it, [left, top, right - left, bottom - top], true)
+    rect_object_s(d, s, [left, top, right - left, bottom - top], true)
 }
 
-fn quad_to_json(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let Some(p) = quad_points(d, this) else { return Err(illegal(it)) };
-    let o = d.obj(it, it.object_prototype())?;
+fn quad_to_json<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let Some(p) = quad_points(d, s, this) else { return Err(illegal_s(s)) };
+    let o = s.new_object()?;
     for (i, name) in ["p1", "p2", "p3", "p4"].into_iter().enumerate() {
-        put(d, it, o, name, Value::Object(p[i]))?;
+        let l = d.obj_local(s, p[i]);
+        put_s(s, o, name, l)?;
     }
-    Ok(Value::Object(o))
+    Ok(o)
 }
 
 // ------------------------------------------------------------------------------------------ the realm
@@ -612,8 +707,8 @@ impl Dom {
 }
 
 /// The error of a call without `new` of the constructor `h`, when `h` is one of this module's.
-pub(crate) fn needs_new(it: &mut Interp<'_>, h: H) -> Option<Error> {
-    let list: [(H, &str); 7] = [
+pub(crate) fn needs_new(it: &mut Interp<'_>, h: HS) -> Option<Error> {
+    let list: [(HS, &str); 7] = [
         (rect_ro_ctor, "DOMRectReadOnly"),
         (rect_rw_ctor, "DOMRect"),
         (point_ro_ctor, "DOMPointReadOnly"),
@@ -622,7 +717,7 @@ pub(crate) fn needs_new(it: &mut Interp<'_>, h: H) -> Option<Error> {
         (crate::browser_matrix::ro_ctor, "DOMMatrixReadOnly"),
         (crate::browser_matrix::rw_ctor, "DOMMatrix"),
     ];
-    if h as usize == list_ctor as H as usize {
+    if h as usize == list_ctor as HS as usize {
         return Some(it.type_error("Illegal constructor"));
     }
     let n = list.iter().find(|&&(f, _)| f as usize == h as usize).map(|&(_, n)| n)?;

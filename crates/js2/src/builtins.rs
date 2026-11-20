@@ -222,6 +222,10 @@ impl Realm {
         self.method(g, "__def", prelude_def);
         self.hidden(g, "globalThis", g.value());
         self.hidden(g, "self", g.value());
+        for (n, v) in [("NaN", Value::number(f64::NAN)), ("Infinity", Value::number(f64::INFINITY)), ("undefined", Value::UNDEFINED)] {
+            let k = self.intern(n);
+            self.define_attrs(g, Key::Name(k), 0, v).expect("define");
+        }
         self.install_object();
         self.install_function();
         self.install_error();
@@ -371,6 +375,7 @@ fn field(rt: &mut Realm, d: Obj, name: &str) -> R<Option<Value>> {
 
 fn define_prop(rt: &mut Realm, o: Obj, key: Key, d: Value) -> R<()> {
     let Some(d) = Realm::obj(d) else { return rt.type_error("property description must be an object") };
+    rt.fn_props(o);
     let (get, set) = (field(rt, d, "get")?, field(rt, d, "set")?);
     let (value, w, e, c) = (field(rt, d, "value")?, field(rt, d, "writable")?, field(rt, d, "enumerable")?, field(rt, d, "configurable")?);
     let k = match key {
@@ -461,6 +466,7 @@ fn object_set_prototype_of(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Va
 
 fn object_own_names(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let o = rt.to_object(arg(args, 0))?;
+    rt.fn_props(o);
     let mut out: Vec<Value> = Vec::new();
     if let Some(s) = rt.string_wrapper(o) {
         for i in 0..s.len() {
@@ -483,6 +489,7 @@ fn object_own_names(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
 
 fn object_own_descriptor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let o = rt.to_object(arg(args, 0))?;
+    rt.fn_props(o);
     let key = rt.key_of(arg(args, 1))?;
     if let Some(s) = rt.string_wrapper(o)
         && let Some(v) = rt.string_own(s, key)
@@ -493,8 +500,11 @@ fn object_own_descriptor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Valu
     let k = match key {
         Key::Name(k) => k,
         Key::Idx(i) => {
-            let Some(v) = o.is_indexed().then(|| o.get_element(i)).flatten() else { return Ok(Value::UNDEFINED) };
-            return Ok(descriptor(rt, Some(v), None, A_W | A_E | A_C));
+            if let Some(v) = o.is_indexed().then(|| o.get_element(i)).flatten() {
+                return Ok(descriptor(rt, Some(v), None, A_W | A_E | A_C));
+            }
+            // An index on an object that is not an array is a named property.
+            rt.idx_atom(i)
         }
     };
     let Some(e) = rt.shapes.find(o.shape(&rt.shapes), k) else {
@@ -533,6 +543,7 @@ fn descriptor(rt: &mut Realm, value: Option<Value>, acc: Option<(Value, Value)>,
 fn object_freeze(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let v = arg(args, 0);
     let Some(o) = Realm::obj(v) else { return Ok(v) };
+    rt.fn_props(o);
     let entries: Vec<_> = rt.shapes.entries(o.shape(&rt.shapes)).collect();
     for e in entries {
         let at = e.attrs();
@@ -547,6 +558,7 @@ fn object_freeze(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
 
 fn object_is_frozen(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let Some(o) = Realm::obj(arg(args, 0)) else { return Ok(Value::TRUE) };
+    rt.fn_props(o);
     let all = rt.shapes.entries(o.shape(&rt.shapes)).all(|e| e.attrs() & A_C == 0 && (e.attrs() & A_ACC != 0 || e.attrs() & A_W == 0));
     Ok(Value::bool(all && (!o.is_indexed() || o.is_empty())))
 }
@@ -564,6 +576,7 @@ fn own_has(rt: &mut Realm, v: Value, key: Key) -> bool {
     {
         return true;
     }
+    rt.fn_props(o);
     match key {
         Key::Idx(i) if o.is_indexed() && o.get_element(i).is_some() => true,
         Key::Idx(i) => {

@@ -40,6 +40,8 @@
 //! - Not done: the special return value of `beforeunload` (no page leaves here), line and column of an `ErrorEvent` (0).
 
 use crate::browser::*;
+use crate::browser_scoped::*;
+use bare_js_api::{Args, HostFn, Local, Type};
 use bare_html::dom::{Atom, Document, NodeData, NodeId, Ns};
 use bare_js::eval::{Error, Interp};
 use bare_js::value::{ObjId, Value};
@@ -174,10 +176,10 @@ pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
 impl Dom {
     /// The owner of a handler of interface `k`, or `Illegal invocation`. Window also takes `undefined` and `null`. A body or frameset
     /// element gives the window.
-    fn handler_owner(&self, it: &mut Interp<'_>, this: Value, k: u8) -> R<Target> {
-        let t = match this {
-            Value::Undefined | Value::Null if k == WINDOW => Some(Target::Window),
-            Value::Object(o) => self.st.borrow().by_obj.get(&o).copied(),
+    fn handler_owner<'s>(&self, s: &mut Sc<'s, '_>, this: Local<'s>, k: u8) -> Res<'s, Target> {
+        let t = match s.type_of(this) {
+            Type::Undefined | Type::Null if k == WINDOW => Some(Target::Window),
+            Type::Object | Type::Function => obj_id(s, this).and_then(|o| self.st.borrow().by_obj.get(&o).copied()),
             _ => None,
         };
         let ok = match t {
@@ -198,13 +200,13 @@ impl Dom {
         match t {
             Some(Target::Node(_)) if ok && k == BODY => Ok(Target::Window),
             Some(t) if ok => Ok(t),
-            _ => Err(it.type_error("Illegal invocation")),
+            _ => Err(s.type_error("Illegal invocation")),
         }
     }
 
     /// The kind and event type of the accessor function that is running.
     fn handler_fn(&self) -> (u8, &'static str) {
-        let (st, id) = (self.st.borrow(), self.style.cur.get());
+        let (st, id) = (self.st.borrow(), self.style.cur.get() & !CUR_NEW);
         st.hd.fns[id as usize]
     }
 }
@@ -219,29 +221,31 @@ fn body_element(doc: &Document) -> Option<NodeId> {
     doc.children(html).find(|&c| body_like(doc, c))
 }
 
-fn hget(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+fn hget<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let (k, ty) = d.handler_fn();
-    let t = d.handler_owner(it, this, k)?;
-    handler_value(d, it, t, ty)
+    let t = d.handler_owner(s, this, k)?;
+    handler_value(d, s, t, ty)
 }
 
-fn hset(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+fn hset<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let (k, ty) = d.handler_fn();
-    let t = d.handler_owner(it, this, k)?;
+    let t = d.handler_owner(s, this, k)?;
     sync(d, t, ty);
-    handler_set(d, it, t, ty, a.first().copied())?;
-    Ok(Value::Undefined)
+    let v = raw_arg(s, a, 0);
+    old(s, |it| handler_set(d, it, t, ty, v))?;
+    Ok(s.undefined())
 }
 
-fn sig_get(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let t = d.handler_owner(it, this, SIGNAL)?;
-    Ok(handler_get(d, it, t, "abort"))
+fn sig_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let t = d.handler_owner(s, this, SIGNAL)?;
+    old_v(s, |it| Ok(handler_get(d, it, t, "abort")))
 }
 
-fn sig_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let t = d.handler_owner(it, this, SIGNAL)?;
-    handler_set(d, it, t, "abort", a.first().copied())?;
-    Ok(Value::Undefined)
+fn sig_set<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let t = d.handler_owner(s, this, SIGNAL)?;
+    let v = raw_arg(s, a, 0);
+    old(s, |it| handler_set(d, it, t, "abort", v))?;
+    Ok(s.undefined())
 }
 
 /// The value of the handler `on<ty>` of `t`, or `null`, with no attribute and no compile (for the host-made targets).
@@ -251,16 +255,16 @@ pub(crate) fn handler_get(d: &Dom, it: &mut Interp<'_>, t: Target, ty: &str) -> 
 }
 
 /// The value of the handler `on<ty>` of `t` (the getter): the attribute is read and compiled if it is new.
-fn handler_value(d: &Dom, it: &mut Interp<'_>, t: Target, ty: &str) -> V {
+fn handler_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, t: Target, ty: &str) -> Res<'s, Local<'s>> {
     sync(d, t, ty);
     let found = {
         let st = d.st.borrow();
-        st.listeners.get(&t).and_then(|v| v.iter().find(|l| l.handler && *l.ty == *ty)).map(|l| (l.id, it.traced_value(&l.cb), !st.hd.raw.is_empty() && st.hd.raw.contains_key(&l.id)))
+        st.listeners.get(&t).and_then(|v| v.iter().find(|l| l.handler && *l.ty == *ty)).map(|l| (l.id, !st.hd.raw.is_empty() && st.hd.raw.contains_key(&l.id)))
     };
     match found {
-        None => Ok(Value::Null),
-        Some((id, _, true)) => compile_slot(d, it, t, ty, id),
-        Some((_, cb, false)) => Ok(cb),
+        None => Ok(s.null()),
+        Some((id, true)) => old_v(s, |it| compile_slot(d, it, t, ty, id)),
+        Some((_, false)) => old_v(s, |it| Ok(handler_get(d, it, t, ty))),
     }
 }
 
@@ -625,9 +629,9 @@ fn define(d: &Dom, it: &mut Interp<'_>, owner: ObjId, k: u8, n: &'static str) ->
     if it.heap.has_own_property(owner, key).map_err(|e| it.heap_error(e))? {
         return Ok(());
     }
-    let id = d.handlers.borrow().len() as u32;
-    let gf = d.add_fn(it, hget, &format!("get {name}"), 0, false)?;
-    let sf = d.add_fn(it, hset, &format!("set {name}"), 1, false)?;
+    let id = d.scoped.borrow().len() as u32;
+    let gf = d.add_fn_s_obj(it, hget, &format!("get {name}"), 0, HostFn::Method)?;
+    let sf = d.add_fn_s_obj(it, hset, &format!("set {name}"), 1, HostFn::Method)?;
     let ty = etype(n);
     let mut st = d.st.borrow_mut();
     st.hd.fns.resize(id as usize + 2, (0, ""));
@@ -638,7 +642,7 @@ fn define(d: &Dom, it: &mut Interp<'_>, owner: ObjId, k: u8, n: &'static str) ->
 
 /// `onabort` of `AbortSignal.prototype`, made with the lazy `AbortSignal` (`browser_abort.rs`).
 pub(crate) fn install_onabort(d: &Dom, it: &mut Interp<'_>, proto: ObjId) -> R<()> {
-    d.def_get(it, proto, "onabort", sig_get, Some(sig_set))
+    d.def_get_s(it, proto, "onabort", sig_get, Some(sig_set))
 }
 
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {

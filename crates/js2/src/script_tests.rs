@@ -511,6 +511,45 @@ fn a_host_script_runs_before_the_script_and_the_directive_prologue_stays() {
 }
 
 #[test]
+fn a_top_level_let_const_and_class_are_visible_to_the_next_script() {
+    let host = "let a = 1; const b = 2; class C { m() { return 3; } } let later; let o = { k: 5 };";
+    let src = "var r = a + b + new C().m(); a = 10; var s = a; var t; try { b = 1; } catch (e) { t = e.name; }
+               var u = typeof later + typeof C + typeof nothing; later = 4; var w = (function () { return a + later; })();
+               var junk; for (var i = 0; i < 3000; i++) { junk = [i, { i: i }]; } var x = o.k + (this.a === undefined ? 'g' : 'p');
+               var y; try { zzz; } catch (e) { y = e.name; }";
+    let mut vm = load_with(host, src).unwrap();
+    vm.run_main(0).unwrap();
+    let got: Vec<String> = ["r", "s", "t", "u", "w", "x", "y"].iter().map(|n| vm.global_text(n)).collect();
+    assert_eq!(got, ["6", "10", "TypeError", "undefinedfunctionundefined", "14", "5g", "ReferenceError"]);
+    // The names are not properties of the global object, and a name that is declared twice is a SyntaxError.
+    let mut vm = load_with("let a = 1;", "let a = 2;").unwrap();
+    assert!(vm.run_main(0).is_err());
+    let mut vm = load_with("var a = 1;", "let a = 2;").unwrap();
+    assert!(vm.run_main(0).is_err());
+    // The check comes before the first statement of the script.
+    let mut vm = load_with("let a = 1;", "var side = 1; let a = 2;").unwrap();
+    assert!(vm.run_main(0).is_err());
+    assert_eq!(vm.global_text("side"), "undefined");
+    let mut vm = load_with("let a = 1;", "var a = 2;").unwrap();
+    assert!(vm.run_main(0).is_err());
+    let mut vm = load_with("let a = 1;", "var r = typeof globalThis.a + delete a;").unwrap();
+    vm.run_main(0).unwrap();
+    assert_eq!(vm.global_text("r"), "undefinedfalse");
+}
+
+#[test]
+fn a_parenthesized_optional_member_call_keeps_this() {
+    let o = "var o = { m() { return this.v; }, v: 7 }; var n = null; ";
+    check(&[
+        (&format!("{o} var r = (o?.m)();"), "r", "7"),
+        (&format!("{o} var r = (o?.m)?.();"), "r", "7"),
+        (&format!("{o} var r = (o.m)?.();"), "r", "7"),
+        (&format!("{o} var r = 0; try {{ (n?.m)(); }} catch (e) {{ r = e.name; }}"), "r", "TypeError"),
+        (&format!("{o} var r = (n?.m)?.();"), "r", "undefined"),
+    ]);
+}
+
+#[test]
 fn built_ins_survive_constant_collection_with_many_live_values() {
     // Run in Miri too (one program): sort, map, filter, split, join, slice, splice, concat, bind and Object.entries, all holding many
     // fresh cells while the collector runs at nearly every allocation.
@@ -661,4 +700,23 @@ fn switch_in_loops_with_continue_break_labels_and_lexical_cases() {
     let src = "function f(v) { var g = null; switch (v) { case 1: let x = 10; g = () => x; break; case 2: let y = 20; g = () => y; break; case 3: try { x = 1; } catch (e) { g = () => 'tdz'; } break; case 4: break; } return g ? g() : 'none'; } var result = '' + f(1) + f(2) + f(3) + f(4) + f(5);";
     assert_eq!(table_ops(src), 1);
     check(&[(src, "result", "1020tdznonenone")]);
+}
+
+/// `load` runs the prelude and then hides `__def`. It must not delete it: a delete of a property that is not the last one puts the global
+/// object in dictionary mode, and then no global access can be cached (`Shapes::cacheable`).
+#[test]
+fn load_keeps_the_global_object_in_the_shape_tree() {
+    let vm = load("var x = 1;").unwrap();
+    let id = vm.realm.global.shape(&vm.realm.shapes);
+    assert!(!vm.realm.shapes.get(id).is_dict(), "the global object is in dictionary mode after load");
+    assert!(vm.realm.shapes.cacheable(id));
+}
+
+/// A script cannot read the function that `__def` was, and the name is not enumerable.
+#[test]
+fn def_is_hidden_after_load() {
+    check(&[
+        ("var r = typeof __def + Object.keys(globalThis).indexOf('__def');", "r", "undefined-1"),
+        ("var __def = 5; var r = __def;", "r", "5"),
+    ]);
 }
