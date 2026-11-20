@@ -172,7 +172,20 @@ pub enum Joining {
     out.write(ranges("JOINING", "Joining", joining) + "\n")
     out.write(ranges("COMBINING_CLASS", "u8", merge((cp, cp, v) for cp, v in ccc.items())) + "\n")
     out.write(ranges("MARKS", "()", merge(marks)) + "\n")
-    out.write(table("DECOMPOSE", "(u32, &str)", (f"(0x{cp:x}, {rust_str(p)})" for cp, p in sorted(full_decomp.items()))) + "\n")
+    # DECOMPOSE and DECOMPOSE_DATA are arrays, not slices or &str. They hold no pointer, so the loader has nothing to
+    # relocate at process start. Each entry is (code point, first index in DECOMPOSE_DATA, length).
+    data, entries = [], []
+    for cp, parts in sorted(full_decomp.items()):
+        assert len(parts) < 256 and len(data) < 65536
+        entries.append(f"    (0x{cp:x}, {len(data)}, {len(parts)}),\n")
+        data += parts
+    out.write("/// Full canonical decomposition: (code point, first index in `DECOMPOSE_DATA`, length).\n")
+    out.write(f"pub static DECOMPOSE: [(u32, u16, u8); {len(entries)}] = [\n{''.join(entries)}];\n\n")
+    out.write("/// The decomposed parts of all `DECOMPOSE` entries, one entry after the other.\n")
+    out.write(f"pub static DECOMPOSE_DATA: [char; {len(data)}] = [\n")
+    for i in range(0, len(data), 8):
+        out.write("    " + ", ".join(f"'\\u{{{c:x}}}'" for c in data[i:i + 8]) + ",\n")
+    out.write("];\n\n")
     out.write(table("COMPOSE", "(u32, u32, u32)", (f"(0x{a:x}, 0x{b:x}, 0x{c:x})" for a, b, c in sorted(compose))) + "\n")
     out.write("/// Simple case folding (CaseFolding.txt, statuses C and S): (code point, folded code point).\n")
     out.write(table("CASE_FOLD", "(u32, u32)", (f"(0x{a:x}, 0x{b:x})" for a, b in fold)) + "\n")
