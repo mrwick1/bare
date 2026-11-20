@@ -171,6 +171,7 @@ version = "0.1.0"
 dependencies = [
  "bare-js-api",
  "bare-os",
+ "bare-unicode",
  "icu_properties",
 ]
 

@@ -9,6 +9,8 @@ license = "(MIT OR Apache-2.0) AND Unicode-3.0"
 [dependencies]
 bare-os = { path = "../os" }
 bare-js-api = { path = "../js-api" }
+# NFC and NFD for `String.prototype.normalize`
+bare-unicode = { path = "../unicode" }
 # ID_Start and ID_Continue for the lexer (`lex.rs`); the compiled data of the property sets, as in `bare-js`
 icu_properties = { version = "2.4.0", default-features = false, features = ["compiled_data"] }
 

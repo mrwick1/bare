@@ -286,6 +286,7 @@ impl Realm {
         self.install_array();
         self.install_string();
         self.install_number();
+        self.install_json();
     }
 
     fn install_function(&mut self) {
