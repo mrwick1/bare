@@ -27,6 +27,9 @@ impl ApiState<'_> {
     }
 }
 
+/// The abort name of an error of the old engine that `Interp::api_err` keeps for `api_back`.
+const OLD_LIMIT: &str = "a limit of the old engine";
+
 impl<'p> Interp<'p> {
     /// Note the owners in `seen` before a collection marks, so that marking an owner finds its key.
     pub(crate) fn api_owners(&self, seen: &mut Seen) {
@@ -146,10 +149,21 @@ impl<'p> Interp<'p> {
         let a = match e {
             Error::Throw(v) => return bare_js_api::Error::Throw(self.api_push(v)),
             Error::Unsupported(u) => Abort::Unsupported(u.what),
-            Error::Limit(_) | Error::Heap(_) => Abort::Limit("a limit of the old engine"),
+            Error::Limit(_) | Error::Heap(_) => Abort::Limit(OLD_LIMIT),
         };
         self.api.abort = Some(e);
         bare_js_api::Error::Abort(a)
+    }
+
+    /// An error of the interface as an error of this engine: the inverse of `api_err`. A limit with a name of the host
+    /// (`Abort::Limit(name)`) is `LimitKind::Host(name)`.
+    pub fn api_back(&mut self, e: bare_js_api::Error<'_>) -> Error {
+        use bare_js_api::{Abort, Error as E};
+        match e {
+            E::Throw(l) => Error::Throw(self.api_at(l)),
+            E::Abort(Abort::Limit(w)) if w != OLD_LIMIT => Error::Limit(LimitKind::Host(w)),
+            E::Abort(Abort::Limit(w) | Abort::Unsupported(w)) => self.api.abort.take().unwrap_or_else(|| unsupported(w, Span::default())),
+        }
     }
 
     /// The heap asked for a lazy member (`Heap::set_lazy_on`, `set_lazy_chain`) with the reserved `index` of `NeedsHost`: ask the

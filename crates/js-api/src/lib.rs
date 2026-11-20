@@ -687,6 +687,107 @@ pub trait Engine: Sized {
     fn is_callable(&self, v: Local<'_>) -> bool;
 }
 
+/// The element type of a view, for structured clone. `Data` is a `DataView`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewType {
+    I8,
+    U8,
+    U8C,
+    I16,
+    U16,
+    I32,
+    U32,
+    F32,
+    F64,
+    BI64,
+    BU64,
+    Data,
+}
+
+/// What an object is for structured clone ([`CloneOps::clone_class`]).
+#[derive(Clone, Copy, Debug)]
+pub enum CloneClass<'s> {
+    /// An ordinary object or an arguments object: copied by own enumerable keys, the prototype is lost.
+    Plain,
+    /// An array and its length.
+    Array(u32),
+    Date(f64),
+    /// `(source, flags)`, two strings.
+    RegExp(Local<'s>, Local<'s>),
+    Map,
+    Set,
+    /// An ordinary object that has `Error.prototype` in its chain.
+    Error,
+    /// A Boolean, Number, String or BigInt wrapper, and its primitive.
+    Wrapper(Local<'s>),
+    Buffer,
+    /// A typed array or a `DataView`.
+    View,
+    /// A promise, a proxy, a weak collection, an iterator, a generator, an `Intl` object, a symbol wrapper or a host-indexed object:
+    /// `DataCloneError`.
+    Other,
+}
+
+/// An own key that structured clone copies: an array index, or a string that is not one.
+#[derive(Clone, Copy, Debug)]
+pub enum CloneKey<'s> {
+    Index(u32),
+    Name(Local<'s>),
+}
+
+/// The name of a property that structured clone makes: an array index, or a string that is not one.
+#[derive(Clone, Copy, Debug)]
+pub enum CloneName<'a> {
+    Index(u32),
+    Units(&'a [u16]),
+}
+
+/// What the structured-clone walk of the browser needs from an engine (plan step S0.4, `docs/design-host-navigation.md`, option E).
+/// The walk stays in the browser (it owns the limits and the `DataCloneError`); `serialize` and `materialize` are generic over
+/// this trait. The engine knows which object is a `Date`, a `Map` or a view, so it answers these. A method that makes a value
+/// pushes it on the handle stack, so it takes `&mut self`.
+pub trait CloneOps: Engine {
+    /// A number that is the same for the same object while it lives, and different for two live objects. `None` for a primitive.
+    fn object_id(&self, v: Local<'_>) -> Option<u64>;
+    /// The class of the object `v`. `v` is not callable (the caller checked).
+    fn clone_class<'s>(&mut self, v: Local<'_>) -> CloneClass<'s>;
+    /// The own string keys in order, indices first as numbers. It skips symbols. It charges nothing.
+    fn clone_keys<'s>(&mut self, obj: Local<'_>) -> Result<Vec<CloneKey<'s>>, Error<'s>>;
+    /// The value of the own enumerable property `key` of [`CloneOps::clone_keys`], or `None` when there is none now. It runs a getter, as
+    /// `[[Get]]`. The key is the engine's own, so it needs no conversion.
+    fn clone_get<'s>(&mut self, obj: Local<'_>, key: CloneKey<'_>) -> Result<Option<Local<'s>>, Error<'s>>;
+    /// Define the data property `name` of a new object (writable, enumerable, configurable). No script can run.
+    fn clone_define<'s>(&mut self, obj: Local<'_>, name: CloneName<'_>, value: Local<'_>) -> Result<(), Error<'s>>;
+    /// The value of the own data property `key`, or `None` when there is none or it is an accessor. It runs no script.
+    fn own_data<'s>(&mut self, obj: Local<'_>, key: Local<'_>) -> Result<Option<Local<'s>>, Error<'s>>;
+    /// The live entries of a map or set, in order. A set gives `(key, undefined)`.
+    fn clone_coll_entries<'s>(&mut self, coll: Local<'_>) -> Vec<(Local<'s>, Local<'s>)>;
+    fn clone_new_date<'s>(&mut self, t: f64) -> Result<Local<'s>, Error<'s>>;
+    fn clone_new_regexp<'s>(&mut self, source: Local<'_>, flags: Local<'_>) -> Result<Local<'s>, Error<'s>>;
+    fn clone_new_coll<'s>(&mut self, is_map: bool) -> Result<Local<'s>, Error<'s>>;
+    fn clone_coll_put<'s>(&mut self, coll: Local<'_>, key: Local<'_>, value: Local<'_>) -> Result<(), Error<'s>>;
+    /// A new, empty object with the prototype of the error type `name` (`Error` for an unknown name).
+    fn clone_new_error<'s>(&mut self, name: &[u16]) -> Result<Local<'s>, Error<'s>>;
+    /// A new wrapper object of the primitive `v`.
+    fn clone_new_wrapper<'s>(&mut self, v: Local<'_>) -> Result<Local<'s>, Error<'s>>;
+    /// A new view of `ty` over `buffer`. The caller checked the range.
+    fn clone_new_view<'s>(&mut self, buffer: Local<'_>, offset: usize, len: usize, ty: ViewType) -> Result<Local<'s>, Error<'s>>;
+    fn new_array_buffer<'s>(&mut self, bytes: Vec<u8>) -> Result<Local<'s>, Error<'s>>;
+    /// The length in bytes: `Some(0)` for a detached buffer, `None` for a value that is no buffer.
+    fn buffer_len(&self, v: Local<'_>) -> Option<usize>;
+    /// The bytes of a buffer. It borrows engine memory, so no collection can run while the borrow lives.
+    fn buffer_bytes(&self, v: Local<'_>) -> Option<&[u8]>;
+    fn buffer_detached(&self, v: Local<'_>) -> bool;
+    /// `(buffer, byte offset, length)` of a view. The length is in elements (bytes for a `DataView`). The buffer may be detached.
+    fn view_parts<'s>(&mut self, v: Local<'_>) -> Option<(Local<'s>, usize, usize)>;
+    fn view_type(&self, v: Local<'_>) -> Option<ViewType>;
+    /// Is the buffer of the view `v` detached?
+    fn view_detached(&self, v: Local<'_>) -> bool;
+    /// `(negative, limbs)` of a BigInt, least significant limb first.
+    fn bigint_parts(&self, v: Local<'_>) -> Option<(bool, Vec<u64>)>;
+    fn bigint_from_parts<'s>(&mut self, negative: bool, limbs: Vec<u64>) -> Result<Local<'s>, Error<'s>>;
+}
+
 /// Open the outermost scope of `e`.
 pub fn enter<E: Engine, R>(e: &mut E, f: impl for<'s> FnOnce(&mut Scope<'s, E>) -> R) -> R {
     let base = e.stack_len();
