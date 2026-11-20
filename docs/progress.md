@@ -16214,6 +16214,54 @@ Engine bugs that the run found (not fixed here):
 
 Not tested: Windows and macOS (the shell tool needs GNU `find` and `timeout`; the cargo test is portable but not run there); the old engine in `auto` and `byte` modes (only `tree`); Miri on `load_with` (safe code); the `script_tests` programs that span several lines; a second test262 checkout revision; the old engine's modules and async tests (skipped on both); how the counts move when js2 gets a step budget of another size (20,000,000 back edges, the old engine 20,000,000 steps: not the same unit).
 
+### Step 2: the base of the registers in a local pointer
+
+Change (`Vm::run`, `interp.rs`): a local `regs: *mut Value` holds `stack.as_mut_ptr().add(fp)`. `r!` reads `*regs.add(i)`. `reload!` sets it (it runs after each change of `fp`: `enter!`, `ret!`, `throw!`), and `ensure!` sets it again after a reallocation of the stack. The second change: `nextx` (the word after the extra word) was a `let` that every op computed, and the compiler kept it in the register of `words`, so `words` was stored and reloaded around each op (the `fib` +2.4% of #763, design 2.1). It is a macro now (`nextx!()`), and only the ops with an extra word compute it. No change in an arm other than that.
+
+Invariant: `regs` must be set again each time `fp` changes or the stack is reallocated. A missed spot is a use after free. Today only `ensure!` and `Vm::call` reallocate the stack, and `Vm::call` runs only with an empty stack. A native that re-enters the VM (the re-entrant call of the conversion work) must set `regs` again after the nested run.
+
+Checks: test `a_stack_that_grows_in_a_callee_keeps_the_registers_of_the_callers` (deep recursion by `call`, `new`, a method call and a rest parameter: each caller has live registers and reads `this` and its arguments after the call that grows the stack). It passes without the fix in `ensure!` in a normal run (the freed block still holds the old data), so a normal test cannot see the bug. Under Miri, with the line in `ensure!` removed, it fails: "pointer is dangling". With the line it passes under Miri on the heads of steps 3 and 4, which hold this change (see there). It was not run on this head alone.
+
+Instructions of the whole process, same method as step 1. "Step 1" is the head of PR #766 merged with the design branch, built again for this table (it differs from the step 1 table above by 0.13% at most, in `concat`).
+
+| Row | Scale | step 1 (M) | step 2 (M) | change | spread new % | QuickJS (M) | step 2 / QuickJS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loop` | 1 | 152.14 | 135.14 | -11.2% | 0.006 | 64.69 | 2.09 |
+| `loop` | 10 | 1480.54 | 1310.54 | -11.5% | 0.000 | 635.29 | 2.06 |
+| `loopfn` | 1 | 68.16 | 56.76 | -16.7% | 0.003 | 44.10 | 1.29 |
+| `loopfn` | 10 | 640.57 | 526.57 | -17.8% | 0.001 | 429.30 | 1.23 |
+| `calls` | 1 | 115.48 | 107.18 | -7.2% | 0.005 | 60.62 | 1.77 |
+| `calls` | 10 | 1113.58 | 1030.58 | -7.5% | 0.001 | 594.33 | 1.73 |
+| `fib` | 1 | 8.84 | 8.65 | -2.1% | 0.055 | 4.37 | 1.98 |
+| `fib` | 10 | 52.17 | 50.09 | -4.0% | 0.004 | 35.54 | 1.41 |
+| `closures` | 1 | 22.21 | 21.37 | -3.8% | 0.005 | 26.11 | 0.82 |
+| `closures` | 10 | 179.61 | 171.21 | -4.7% | 0.001 | 279.90 | 0.61 |
+| `objects` | 1 | 91.11 | 86.75 | -4.8% | 0.007 | 53.72 | 1.61 |
+| `objects` | 10 | 855.84 | 812.78 | -5.0% | 0.000 | 512.44 | 1.59 |
+| `webpack` | 1 | 9.75 | 9.71 | -0.3% | 0.087 | 5.47 | 1.77 |
+| `webpack` | 10 | 52.05 | 51.75 | -0.6% | 0.016 | 41.97 | 1.23 |
+| `throws` | 1 | 39.76 | 37.63 | -5.4% | 0.019 | 85.11 | 0.44 |
+| `throws` | 10 | 356.74 | 335.40 | -6.0% | 0.001 | 840.93 | 0.40 |
+| `concat` | 1 | 4.62 | 4.61 | -0.2% | 0.053 | 1.34 | 3.44 |
+| `concat` | 10 | 5.30 | 5.24 | -1.2% | 0.007 | 2.15 | 2.44 |
+| `bundle` | 1 | 128.01 | 122.86 | -4.0% | 0.004 | 134.42 | 0.91 |
+| `empty` | 1 | 4.48 | 4.48 | -0.0% | 0.059 | 1.23 | 3.63 |
+
+Net slope (scale 10 minus scale 1), M instructions:
+| Row | step 1 | step 2 | change | QuickJS | step 2 / QuickJS | gate (<= 1.00) |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `loop` | 1328.4 | 1175.4 | -11.5% | 570.6 | 2.06 | no |
+| `loopfn` | 572.4 | 469.8 | -17.9% | 385.2 | 1.22 | no |
+| `calls` | 998.1 | 923.4 | -7.5% | 533.7 | 1.73 | no |
+| `fib` | 43.3 | 41.4 | -4.4% | 31.2 | 1.33 | no |
+| `closures` | 157.4 | 149.8 | -4.8% | 253.8 | 0.59 | yes |
+| `objects` | 764.7 | 726.0 | -5.1% | 458.7 | 1.58 | no |
+| `webpack` | 42.3 | 42.0 | -0.6% | 36.5 | 1.15 | no |
+| `throws` | 317.0 | 297.8 | -6.1% | 755.8 | 0.39 | yes |
+| `concat` | 0.7 | 0.6 | -8.1% | 0.8 | 0.78 | yes |
+
+
+Per-op costs in the S2.9 entry predicted 2.5% to 13% (spike). Measured: `fib` -4.0%, `closures` -4.7%, `objects` -5.0%, `calls` -7.5%, `loop` -11.5%, `loopfn` -17.8%. Every row is lower; none is higher. The spike did not have the `nextx` change, and the rows are better than the spike by 0.5 to 4.7 points (hypothesis: `nextx`; not measured separately).
 ## 2026-11-20: property attributes, descriptors, non-extensible objects and generic Array methods in js2 (S2.7 follow-up)
 
 Branch `t3/js2-builtin-attrs`, from the test262 gate (#764). It fixes the groups that the gate reported as 325 (property attributes), 241 (Array methods on array-likes), 373 (missing methods) and 205 (accessors), the real non-extensible objects, and the hang of `Object.setPrototypeOf/set-failure-cycle.js`.
@@ -16397,6 +16445,63 @@ Scale 1 is 2.3 M lower on each row except `objects`. No net slope changed except
 ### Not tested
 
 Windows and macOS; Miri (no `unsafe` was added); wall time; a first call of a lazy function from a getter, setter, constructor with fields or a native's `Outcome::Enter` (the prelude has no such function; the next PR makes user functions lazy and tests it); the browser (js2 is not wired in).
+
+## 2026-11-20: lazy compile for the functions of user scripts (js2, decision 2 of `docs/design-js2-prelude.md`)
+
+Branch `t3/js2-lazy-user-scripts`, on top of `t3/js2-prelude-facts` (#772) and `origin/main` at `ba621081` (#766). Section 10 of the design document has the design and the behaviour change.
+
+### What changed
+
+- `script.rs`: `Lazy` has one `Unit` (text and `Facts`) for each text with stubs, and a sorted list of `Wait` entries. `load_with` makes the functions of the user script stubs. The host script and `script::compile` still compile every function. A function waits when no function in it (at any depth) uses `super`.
+- Two stub forms. A function with plain parameters that does not read `arguments` gets a stub with its parameter registers: the call makes no array. Any other function gets the stub with `CF_ARGS` of #770. `Op::Lazy` has one operand now (`a` = 1 for the array form); `code_flags` reads it.
+- `bare-js-diff` (`lib.rs`): a thrown `Error: not supported yet` from the new engine is `Out::Unsupported`, as the load error was.
+- Behaviour change, in `script.rs` docs, the design document and the tests: a construct that the compiler does not build (`with`, a generator or `async` function, direct `eval`) in the code of a function fails at the first call of that function, with an `Error` that a `try` can catch, not at load. Early errors still fail at load. The error is a plain `Error`, not a `SyntaxError` as #770 had it: with a `SyntaxError`, 60 test262 tests that expect one from a direct `eval` in a function passed by accident (`assert.throws(SyntaxError, ...)`); they fail as before now.
+
+### Cost
+
+Machine archMachine (AMD Ryzen 9 5900HX), release build, load average 20 to 25 from other jobs, so only instruction counts are used. Base: the head of #772 merged with `origin/main` (`m.b2`), new: this branch (`m.l5`), both built in the same session. Tool: `tools/js/instr.sh` (minimum of 3 runs) and a launcher with `wait4` (3 runs, peak RSS in KiB). Main moved during the work (#766), so these rows are 3 to 5 times smaller than the rows of the entries above.
+
+Setup (`var x = 1;`): 1.676 M on the base. The new build is the same within 0.01 M: the stubs of the user script cost nothing when it has no function.
+
+`eval_load` rows, user instructions in millions, `script_run --eval` of the sources of `eval_load CASE SCALE --source`. Net slope is the count at scale 10 minus the count at scale 1:
+
+| Row | Scale 1 base | Scale 1 new | Net slope base | Net slope new | RSS 1 base / new | RSS 10 base / new |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loop` | 144.55 | 144.55 | 1285.2 | 1285.2 | 5092 / 5252 | 5100 / 5156 |
+| `calls` | 110.29 | 110.30 | 976.5 | 976.5 | 5012 / 5172 | 5016 / 5240 |
+| `fib` | 5.95 | 5.96 | 42.36 | 42.36 | 5124 / 5192 | 5100 / 5236 |
+| `closures` | 19.44 | 19.43 | 157.6 | 157.6 | 5768 / 5900 | 10736 / 10868 |
+| `objects` | 88.76 | 88.70 | 764.3 | 764.7 | 7444 / 7464 | 21352 / 21488 |
+| `webpack` (bundle-like, calls all 502 functions at scale 10) | 7.30 | 7.36 | 42.35 | 42.75 (+0.9%) | 5492 / 5484 | 6144 / 6508 |
+| `throws` | 36.51 | 36.52 | 312.8 | 312.8 | 5752 / 5880 | 12364 / 12332 |
+| `concat` | 1.83 | 1.84 | 0.68 | 0.68 | 5068 / 5208 | 5232 / 5384 |
+
+The `webpack` row is the one that calls every function once, and its net slope grows by 0.46 M for 502 functions: about 0.9 K for each called function. Its peak RSS at scale 10 grows by 0.36 MiB. The other rows have a few functions and do not move; the RSS of a row is within the noise of the launcher (the same binary differs by 100 to 150 KiB from one session to the next), except `webpack`.
+
+Where the 0.9 K goes (callgrind, 500 small functions that are all called, 28.6 M to 29.1 M): `Lazy::compile` itself 0.4 K, `Loader::fill` 0.17 K, a second decode of the words for the flags 0.12 K, the frame and the handler in `Vm::run` 0.12 K, the second `Feedback::init` 0.07 K. The first version of the stub encoded its word with the general encoder (0.5 K for each stub) and made an array of arguments for each call (about 0.5 K); the two are gone. A `HashMap` for the pending list cost 0.4 K for each function; it is a sorted list now.
+
+Programs with many functions, at 500 functions each (a sum of calls where noted; RSS from the launcher, median of 5):
+
+| Program | Instructions base | new | Peak RSS base | new |
+| --- | ---: | ---: | ---: | ---: |
+| 500 small functions, none called | 20.04 M | 10.53 M | 5.62 MiB | 6.00 MiB |
+| 500 small functions, all called | 27.77 M | 28.29 M (+1.9%) | 6.14 MiB | 6.18 MiB |
+| 500 functions of 330 bytes, none called | 141.11 M | 38.81 M (-72%) | 6.58 MiB | 6.04 MiB |
+| 500 functions of 330 bytes, all called | 153.74 M | 154.98 M (+0.8%) | 6.86 MiB | 7.33 MiB |
+
+The copy of the text and the facts stay for the life of the `Vm`: DHAT peak live bytes for the 500 small functions (not called) are 644 KB on the base and 718 KB with lazy compile (the stubs, the `Wait` list of 40 KB, 26 KB of facts, and the text). Small functions are so small that a stub and its facts are about the size of their code; for functions of 330 bytes the compile dominates, and lazy compile wins. A program that calls every function pays about 1% instructions and 0.3 to 0.5 MiB; a program that calls a part of its functions gains on both. The data that would remove the copy of the text is shared source (decision 3 of section 8 of the design: later, with S2.8).
+
+First-call cost: one small function, 1 K over the old eager load, as above. The prelude functions cost as before (355 K for the five of `forEach`).
+
+### Tests
+
+- `cargo test --locked -p bare-js2 --lib`: 397 pass (8 new in `script_tests.rs`): `the_functions_of_a_user_script_are_compiled_at_their_first_call`, `a_function_that_is_never_called_is_never_compiled`, `an_unbuilt_construct_in_a_function_fails_at_its_first_call_not_at_load`, `early_errors_in_a_function_that_is_never_called_still_fail_the_load`, `a_first_call_from_a_getter_a_setter_a_constructor_and_a_native_works` (getter and setter of an object and of a class, a constructor with fields in a base and a derived class, a `static` block, a first call through `call`, `apply` and `bind` (`Outcome::Enter`), and a callback of a prelude function; each also under constant collection through `check`), `a_function_that_is_called_from_rust_is_compiled_at_that_call` (`Vm::call`), `the_stubs_of_user_functions_keep_a_program_that_is_not_called_small` and `a_stub_that_keeps_the_arguments_in_registers_and_a_stub_with_an_array_agree` (fewer, equal and more arguments, duplicate names, defaults, rest, patterns, `arguments` in an arrow, each under constant collection). `a_scope_with_many_locals_compiles_in_linear_time` failed once under load (load average 25) and passed alone (9.3 s).
+- `cargo test --locked -p bare-js-diff`: pass.
+- test262 (`tools/js/test262_js2.sh`, test262 commit e4fbf577, base run and this build run on the same tree): 0 tests went from pass to fail. 13923 pass on the base, 13924 with lazy compile. The one new pass, `language/statements/function/S13.2.2_A13.js`, is not a real pass: its `eval` is in a function, the first call throws the plain `Error`, and the test catches any error. 'unsupported' failures of the base now read `Expected a SyntaxError but got a Error` (the test needs a real `eval`).
+
+### Not tested
+
+Windows and macOS; Miri (no `unsafe` was added; `Op::Lazy` is in `interp.rs`, which CI runs under Miri, and its second form reads only the stack); wall time; the first call of a function with more than 64 parameters (it takes the array form by rule; no test); a lazy function inside a field initializer of a class and a function with a `super` in a nested method (the loader compiles those at load by rule; the class tests pass, and one test makes a class with `super` inside a lazy function); several realms that share one `Lazy` (decision 3, later); the browser (js2 is not wired in); a bundle with a deep nesting of functions (`super_inside` reads the facts of all functions inside a child: the cost is the depth of the nesting for each function).
 ## 2026-11-20: host handlers on the interface, D1: style, CSSOM and geometry (plan step S0.4 / D1)
 
 Status: the handlers of the files below run through the interface (`Scope`, `Local`, `Args`). Tests pass on Linux and Windows. The full matrix passes under the standing rule: no row is over +0.5% under both allocators. Base: PR #762 (`t3/convert-browser-host-handlers`, head `9f74a623`). The diff is about 2,200 changed lines.
@@ -16508,6 +16613,40 @@ Measurements. Machine archMachine (loaded: only instruction counts are used). `t
 Tests. Linux, debug: `cargo test --locked -p bare-js-api -p bare-js -p bare --lib`: 32, 1104 (1 ignored) and 1715 (6 ignored) pass. The filters `browser_console_tests browser_editing_tests browser_focus_tests browser_idle_tests browser_mouse_legacy_tests browser_rejection_tests browser_scheduler_tests browser_scroll_tests browser_uievent_tests browser_ui_tests browser_raf_tests browser_events browser_basics_tests browser_perf browser_textarea` (200 tests, 1 ignored) pass plain, with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1`. The whole `bare --lib` passes with `BARE_ALL_API=1` (1714 tests before the merge). Windows (`cargo xwin test`, the exe through `winssh`): `bare-js-api` 32 pass, `bare-js` filter `api_tests` 46 pass, `bare` with the same filters 200 pass.
 
 Not tested: `BARE_GC_STRESS=1` with the whole `bare --lib`; the whole `bare --lib` on Windows; the journeys and `tools/suite/run.py`; RSS and wall time; the cost of one call of each handler by a micro-loop (only the rows and the callgrind runs above); the macro-built `textarea` handlers (they stay old).
+
+## 2026-11-20: host handlers on the interface, A2: range, walker, selection, observers and platform (plan step S0.4 / A2)
+
+Status: the handlers of group A2 run through the interface (`Scope`, `Local`, `Args`). Tests pass on Linux and Windows. The matrix has no row over the limit under the rule. The PR is open without auto-merge.
+
+Base: the head of group B (`dbc5c166`, which holds #779). The textarea selection members need group B, so this branch builds on it. The diff holds the B commits until #779 merges. Groups F, G and E run in parallel. This change does not edit their files.
+
+Files converted: `browser_range.rs` (`Range`, `Selection`, `getSelection`), `browser_walker.rs` (`TreeWalker`, `NodeIterator`, `NodeFilter`, `createTreeWalker`, `createNodeIterator`), `browser_selection.rs` (the selection members of `<input>`), `browser_textarea.rs` (the selection members), `browser_mutation.rs` (`MutationObserver`, `MutationRecord`, the delivery microtask), `browser_intersection.rs`, `browser_resize.rs`, `browser_platform.rs` (`matchMedia`, `MediaQueryList`), `browser_platform_class.rs` (`DOMTokenList`, `classList`, `relList`, `sandbox`), `browser_platform_query.rs` (`getElementsBy*`, `document.scripts` and the other lists), and the two `Range` members of `browser_rects.rs`. `browser_dom_old.rs` lost the wrappers `check_insert`, `insert_valid` and `refuse` (no caller is left). Two shared files have small edits: the `DEFS` rows in `browser.rs` (the six selection rows of `<input>` and the six `document.*` list rows) and two `relList` lines in `browser_elements.rs`.
+
+Not converted, and why:
+
+- The install code of every file (`ensure`, `ensure_iter`, `install`, `install_platform`), the lazy globals and `browser_lazy`: they define the interface objects with an `Interp` and keep the old form in every group.
+- State keyed by `ObjId` or holding raw `Value`: the range and selection tables, the walker `filter`, the observer callbacks and queues, the GC hooks (`roots`, `trace`, `prune`). They stay until group Z.
+- `browser_range.rs`: `modify_selection`, `caret_range` and `select_at_text` keep an old wrapper (callers in `browser_ui.rs` and `browser_point.rs`). `bounds` stays old (callers in `browser_editing.rs` and `browser_rects.rs`).
+- `browser_selection.rs`: `effective`, `select_text`, `selection_after_value`, `set_value_attr`, `set_user_selection`, `update_selection` and the three `fire_*` functions. The control and focus code of other groups calls them with an `Interp`. The new handlers call the scope forms (`effective_s`, `update_selection_s`).
+- `browser_textarea.rs`: the members made by `reflect!` (`placeholder`, `required`, `readOnly`, `disabled`, `name`, `wrap`, `dirName`, `autocomplete`). The macro is in `browser_select.rs`, group C.
+- `browser_rects.rs`: `range_rects` and the other `Interp` helpers. The two `Range` handlers call `range_rects` through a bridge.
+- `browser_mutation.rs`: `record_array` and `mo_after`. See the cost work below.
+- `browser_intersection.rs` and `browser_resize.rs`: the frame hooks (`io_frame`, `io_notify`, `measure`, `broadcast`, `resize_frame`) and the entry builders. The scheduler calls them with an `Interp`.
+- `browser_platform.rs`: `def_method`, `def_get` (many files still use them) and `media_eval` (`set_viewport` calls it).
+
+Cost work. The first full matrix had two rows over the limit: `observer_load mo 1` (+1.519% glibc, +1.511% jemalloc) and `observer_load mo 10` (+1.882%, +1.934%). The cause is `record_array` in the scope form. Each record made nine locals, two arrays and nine `define_str` calls. The old form builds the same objects with no handle and with cached keys. The delivery microtask is not a handler call. It has no cheaper form in the interface. So `record_array` stays in the old form, and `take_records` and the delivery microtask call it through `old_v`. After that change the rows are at -0.01% (6 rows of the families `observer_load` and `mutation`).
+
+Other cost choices: `walker::filter` and `DOMTokenList.forEach` drop the handle stack after each step (`stack_truncate`) so a walk over a large tree keeps the stack small. The mutation options and the intersection init read their members in place (`get_str`). The `MediaQueryList` legacy `addListener` builds the two arguments of the listener call in one window and calls the scope handler directly (no second scope).
+
+Grep gate (`\bbare_js::(value|eval::Interp)|\bObjId\b|\bInterp\b|\.engine\(\)|\.heap\.`, lines for each file, before then after): range 98 to 23, walker 46 to 22, selection 31 to 11, mutation 31 to 29, intersection 36 to 29, resize 24 to 20, platform 37 to 32, platform_class 43 to 11, platform_query 14 to 2, rects 9 to 8, textarea 5 to 5, dom_old 30 to 27. Handler lines of the old form (`fn .*&\[Value\]`): range 62 to 0, walker 26 to 0, selection 11 to 0, mutation 6 to 0, intersection 10 to 0, resize 6 to 0, platform 9 to 1, platform_class 23 to 0, platform_query 8 to 0, rects 2 to 0. The one line in `browser_platform.rs` is the helper `arg`. The goal 0 for the gate is not met. The lines that stay are the items in the list above and the `old` bridges.
+
+Measurements. Machine archMachine (loaded: only instruction counts are used). `tools/js/cost_matrix.sh -j4`, 819 rows, `perf stat -e instructions:u`, minimum of 3 runs. Base `dbc5c166`, new: this branch. Both trees use the default release profile in separate target directories. Final matrix: mean change glibc +0.006%. No row is over +0.5% under both allocators. One row is over under glibc only and passes under jemalloc: `fetch_load bytes 10` (+0.698% glibc, -0.226% jemalloc; no code of this group runs in it). The first matrix listed `range_load iter 1` and `selection_load short 10` as over under one allocator only (+0.554% and +0.501% glibc, +0.470% and +0.482% jemalloc). They are under the limit in the final matrix. The `codegen-units=1` rule was not needed. `parse_load deep 1` and `deep 10` fail to run on both trees (known: stack overflow).
+
+Tests. Linux, debug: `cargo test --locked -p bare-js-api -p bare-js --lib`: 32 and 1104 (1 ignored) pass. `bare --lib`: 1715 pass (6 ignored), plain and with `BARE_ALL_API=1`. With `BARE_GC_STRESS=1`, 1714 pass and `browser_reclaim_tests::parsed_documents_ask_for_a_collect_by_their_native_bytes` fails (known on the base). The filters `browser_mutation browser_intersection browser_resize browser_platform browser_range browser_walker browser_selection browser_textarea browser_rects browser_scoped browser_editing` (151 tests) pass plain, with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1`, on Linux and on Windows (`cargo xwin test --no-run`, MSVC, exe through `winssh`).
+
+After the matrix and the Windows run, this branch merged `origin/main` (`fae94731`, which holds group C, #769). Two points of the merge: `origin/main` does not compile on its own (`browser_cssom.rs` calls `Dom::def_get_sh`, which #769 removed from `browser_dom_old.rs`), so this branch has the function back. The `DEFS` rows and the interface-object table of `browser.rs` took the rows of both groups. After the merge, Linux debug: `bare --lib` 1715 pass (6 ignored), `bare-js` 1104 (1 ignored), `bare-js-api` 32; the filters above plus `browser_form browser_select browser_submit browser_face browser_controls` (202 tests) pass plain, with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1`. `Dom::event_of` has no caller after the merge (the last one was in `browser_form.rs`); it is left in place.
+
+Not tested: the matrix and the Windows run after the merge (a base tree of the merged parents does not compile without the `def_get_sh` fix); the whole `bare --lib` on Windows; the journeys and `tools/suite/run.py`; RSS and wall time; the cost of one call of each handler by a micro-loop (only the rows above); `codegen-units=1` (not needed).
 ## 2026-11-20: host handlers on the interface, F: navigation, frames, storage and remote windows (plan step S0.4 / F)
 
 Status: the handlers of the files below run through the interface (`Scope`, `Local`, `Args`). Tests pass on Linux and Windows. The full matrix has no row over +0.5% under glibc (the highest is +0.46%), so the jemalloc and `codegen-units=1` runs did not start. The PR is open without auto-merge. The diff is about 1,300 changed lines (one PR).
@@ -16752,6 +16891,40 @@ A loop at the top level of a script with a `let` (`let s = 0; for (let i = 0; i 
 
 Not tested: Windows and macOS; Miri on the new tests; the old engine behind the differential runner in modes other than `tree`; a throw at the top level between a `let` and the end of the script (the hand-over is skipped); a second test262 revision.
 
+## 2026-11-20: js2 global lexical names after a throw at the top level
+
+Bug (follow-up of #771): a top-level `let`, `const` or `class` that no function uses lives in a register, and the script hands it over to the global lexical environment at its end. A script that threw before its end skipped the hand-over. A later script of the same realm did not see the name (`ReferenceError`), and could declare it again. The spec keeps the binding after an abrupt completion: with its value if its declaration ran, in its dead zone if not. A script that throws partway is common on a page.
+
+Tests (they failed before the fix): `a_top_level_name_stays_after_the_script_throws` runs script A (it throws), then script B, in one realm, normally and under constant collection. Cases: `let x = 1; throw 0;` (B reads 1); `let y; throw 0; y = 2;`; `const` (B assigns: `TypeError`); `class`; a heap value after 2,000 allocations; a name after the throw is in its dead zone (`ReferenceError` for `let`, `const`, `class`); a throw from a called function; a throw through `try`/`finally`; and a `let`, `var` or function of the same name in B is a `SyntaxError` (also for a name in its dead zone).
+
+Fix (`compile_stmt.rs`, `script_body`): the statements of the script are covered by one handler. Its code hands over the names in registers (`hand_over`, the same code as the normal end) and throws the exception again. Each name in a register is loaded with a hole at the start of the script, so a name whose declaration did not run is in its dead zone. The exception register is allocated after the last statement (a free register), so no register number of the script changes. The handler is after the normal path, and the normal path jumps over it (one `Jmp` for each script run). The interpreter loop did not change. A script with no top-level `let`, `const` or `class` in a register has no handler and no extra instruction.
+
+Deliberate golden changes (`compile_tests.rs`): the script goldens of `a_derived_class_calls_super_in_an_arrow`, `class_methods_fields_and_static_elements`, `private_names_methods_and_accessors` and `super_property_reads_and_writes` have `LoadHole` at the start, `Jmp`, the handler and a second hand-over.
+
+### Cost
+
+Machine: archMachine (load average 10 to 20, so only instruction counts). Release build, `tools/js/instr.sh` (the minimum of 3 runs), base `1e6899fb` (origin/main) against this branch, count at N minus count at N = 0. The micro rows are hand-written bytecode and do not run the compiler, so they check that the interpreter code did not move. Each cell was measured 3 times with `instr.sh` (9 runs for each side); the spread is under 0.001%.
+
+| Row | Base | Branch | Change |
+| --- | ---: | ---: | ---: |
+| `loopfn 3000000` | 931.50 M | 931.50 M | 0.0% |
+| `calls 1000000` | 691.50 M | 691.50 M | 0.0% |
+| `fib 27` | 338.71 M | 338.71 M | 0.0% |
+| `closures 1000000` | 2,187.10 M | 2,187.10 M | 0.0% |
+| `objects 1000000` | 757.40 M | 757.40 M | 0.0% |
+| top-level loop (`let s = 0; for (let i = 0; i < 1e6; i++) s += i & 7;`, `script_run`), per turn | 200.998 | 201.001 | +0.001% |
+
+The setup of the top-level script (compile, prelude and run with 0 turns) is 4,584,206 instructions on the base and 4,592,401 on the branch (+8,195, +0.18%, one time for each run: the second hand-over and the handler).
+
+### test262
+
+`tools/js/test262_js2.sh -j 4`, checkout `e4fbf577` (the pinned commit). Base and branch: 12,768 passes and 5,016 failures on js2, and the lists of results are identical, line by line (29,763 lines each). No new failure.
+
+### Tests
+
+`cargo test --locked -p bare-js2 --lib`: 382 pass (including `a_scope_with_many_locals_compiles_in_linear_time`). `cargo test --locked --release -p bare-js-diff`: all pass.
+
+Not tested: Windows and macOS; Miri on the new test; a throw that is not catchable (an out-of-memory error or the end of the step budget): the handler also runs for them if the unwind reaches it, and I did not test that path; a script with a `let` in a register and a name that also sits in a context slot; the order of the checks when a name in a context slot is declared and a later register name fails `CheckLex` (the context name stays declared; this is older than this change).
 ## 2026-11-20: host handlers on the interface, E: fetch, XHR, streams, abort, web, encoding, worker (plan step S0.4 / E)
 
 Status: the handlers of the seven files run through the interface (`Scope`, `Local`, `Args`). Tests pass on Linux and Windows. The matrix has two rows over the limit: `streams_load churn 1` and `churn 10` (+1.2% and +1.6%). The cause is in the section "Rows over". The PR is open without auto-merge. Base: `origin/main` at `479d89a0` (A1a, A1b, A1c, C, D1 and D2 are in it). The diff is about 3,540 changed lines, so it is one PR.
@@ -16844,3 +17017,114 @@ The `codegen-units=1` rule was not needed: no row is over under both allocators 
 Tests. Linux, debug: `cargo test --locked -p bare-js-api -p bare-js -p bare --lib`: 32, 1104 (1 ignored) and 1716 (6 ignored) pass (one new test). `a_panic_in_a_host_call_unlinks_its_window` passes. The filters `fetch xhr stream abort web_ encoding worker crypto blob form_data formdata navigator headers request response textencoder file_ subtle` on `bare --lib`: 254 tests (333 runs, one for each filter), pass plain, with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1`. Windows 11 VM (`cargo xwin test --no-run`, exe through `winssh`): the same filters, 254 tests, pass in the three modes. The whole `bare --lib` on Windows: 1712 pass and 4 fail. The same 4 tests fail on a Windows build of the base (`origin/main` with the `def_get_sh` fix): `browser_date_tests::local_time_uses_the_zone_of_the_realm_in_the_browser` (a JS `Throw` at line 140: the time zone of the realm on Windows), `browser_session::tests::a_page_fed_in_pieces_gives_the_tree_of_a_one_step_parse` and `a_page_parsed_in_slices_gives_the_tree_of_a_one_step_parse` (`NotFound` at `browser_session.rs:1068`, a fixture path) and `resources::tests::staging_login_fixture_discovery` (`NotFound` at `resources.rs:821`, a fixture path). So they are not caused by E. Cause for the three `NotFound` tests (hypothesis): the exe runs on the VM without the repository tree.
 
 Not tested: the whole `bare --lib` with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1` (the base fails one test under whole-crate `BARE_GC_STRESS=1`, as the entry before says); macOS; RSS and wall time; `-J` on the old head `2876c1e1`; the stress mode with a collect between a stream `read` and its reaction; the merge with the open PRs B (#779), A2 (#781) and G (#782).
+
+## 2026-11-20: js2 early errors, group 1 (parser rules)
+
+Task: raise the test262 pass rate of js2 on early errors (a script that must fail at parse time and is accepted, a valid script that is rejected). Base: `43b62b05` (`origin/main`). Method: `tools/js/test262_js2.sh -j 6` on the base, then a scan of every test of `test/language`, `test/annexB/language`, `test/built-ins`, `test/staging` and `test/annexB/built-ins` (module tests left out), whatever their features, with `negative: phase: parse|early` (must be a SyntaxError) or no `negative` (must not be a SyntaxError). The scan compiles each file in sloppy and strict mode with `script::compile` (a scratch example, not committed). A `not supported yet` error counts as accepted for a negative test: it comes after the parse.
+
+Result on the runner (`tools/js/test262_js2.sh`): js2 passes 14,718 before and 14,772 after (3,066 and 3,012 failures; 11,979 skipped on both). Test by test against the run of the base: 54 go from fail to pass, 0 from pass to fail. The new baseline file lists the gains. The committed baseline of the earlier entry was stale against `origin/main` (for example `language/statements/function` was 192 passes in the file and 172 on the base); this run regenerates it from the base plus this change.
+
+Causes fixed (all in `parse.rs`).
+
+1. `'use strict'` in the body of a function with non-simple parameters was an error only in sloppy code. In strict code (a strict script, a class body, an enclosing directive) the check was skipped by an early return in `on_directive`. The check now comes first. Fixes the `*-param-strict-body` and `use-strict-with-non-simple-param` tests of functions, arrows, async arrows, methods and class methods (49 tests of the runner).
+2. `arguments: ...` as a label in a class field initializer, an arrow in one, or a static block was rejected as a use of `arguments`. The expression statement now reads `NAME :` as a label first when `field_init` is set. The test is a flag test, so the other statements pay nothing. 2 tests of the runner.
+3. `(function await(await) {})` in a static block was rejected: the name of a function expression was checked with `static_block` still set. The function has its own context. 2 tests of the runner.
+4. `async(x = await) => {}`, `async(a = await => {}) => {}`, `async(await) => {}`, `async(a = (await) => {}) => {}` and `async(a = (...await) => {}) => {}` were accepted. `await` as a name is now recorded (`await_ident`, like `await_pos`) and an async arrow with one in its parameters is an error. A nested function has its own record, so `async(x = function () { var await }) => {}` is still valid. 1 test of the runner (the other forms are in `an_async_arrow_parameter_cannot_use_await_as_a_name`: their tests are skipped by feature).
+
+Parse cost (instructions, `parse_load MODE file 1 PATH`, minimum of 3 runs for each of 3 runs, machine archMachine, `--release`, base and branch built from source). The cost is the compare of each name with `await`.
+
+| File (modes full / lazy / fns)       | Base full | After | Change | lazy | fns |
+| ------------------------------------ | --------: | ----: | -----: | ---: | --: |
+| `lodash.js` (73 KB)                  | 17,800,786 | 17,846,008 | +0.25% | +0.21% | +0.21% |
+| `reactdom.js` (132 KB)               | 27,256,958 | 27,316,437 | +0.22% | +0.17% | +0.17% |
+| `clangd.js` (1 MB)                   | 170,770,401 | 171,005,544 | +0.14% | +0.12% | +0.12% |
+| `axios.js` (54 KB)                   | 10,920,645 | 10,940,827 | +0.18% | +0.16% | +0.16% |
+| `prelude.js` (14 KB)                 | 2,318,383 | 2,323,007 | +0.20% | +0.17% | +0.18% |
+
+The spread of the 3 runs is under 0.01% on each row. All rows are under +0.5%.
+
+Left (not fixed in group 1): the regular expression pattern errors (334 tests of `literals/regexp` and 384 of `built-ins/RegExp`; group 2); every test that checks an early error through `eval` or `new Function` (about 60 in the runner; `eval` belongs to S3); the Annex B `f() = 1` forms (7 valid sloppy tests of `annexB/language/expressions/assignmenttargettype`, js2 rejects them); `await` in the body of an arrow in a static block (js2 accepts it, to verify against the spec).
+
+Tests: 4 new tests in `parse_tests.rs` (each checks the full parse and the pre-parse): `use_strict_with_non_simple_parameters_fails_in_strict_code_too`, `a_label_named_arguments_is_allowed_in_a_field_initializer`, `a_function_in_a_static_block_may_bind_await`, `an_async_arrow_parameter_cannot_use_await_as_a_name`. `script_tests.rs` did not compile on the base (`compile_after` takes a sixth argument since #787): two calls got `None`. `cargo test --locked -p bare-js2 --lib`: 407 pass (including `a_scope_with_many_locals_compiles_in_linear_time`). `cargo test --locked -p bare-js-diff`: all pass (256 programs, no new difference, known list unchanged).
+
+Not tested: Windows; the browser (js2 is not wired in); the test262 `module` flag tests; `built-ins` tests beyond the scan.
+
+## 2026-11-20: js2 early errors, group 2 (regular expression patterns)
+
+Task: the second group of the early-error round. js2 checked the flags of a regular expression literal but not its pattern, so `/(/`, `/a{2,1}/`, `/[z-a]/` and the like were accepted. This group is stacked on group 1 (#789). Base: `ad895eae`.
+
+Change: new module `regexp_check.rs`. `check(pattern, flags)` reads the pattern once, builds nothing, and returns the first early error of ECMA-262 22.2.1 with the Annex B grammar (the grammar with `u` off). The parser calls it for each regular expression token (`check_regexp`, not inlined, so `parse_primary` does not grow). The full parse of one function (`Mode::Function`) skips it: the pre-parse of the text has checked that body. Rules covered:
+
+- Quantifiers: nothing to repeat, `{n,m}` with n > m, a quantifier after `^`, `$`, `\b`, `\B` or a lookbehind (and after a lookahead with `u`), a lone `{`, `}` or `]` and an incomplete `{` with `u`.
+- Groups: unmatched `(` and `)`, `(?x`, lookarounds, named groups (the name is read with escapes and surrogate pairs and must be ID_Start then ID_Continue; a duplicate name is an error unless the two groups are in different alternatives of one disjunction), `\k` (an error when the pattern has a named group, even one that comes later, or when `u` is on; the name must exist), modifiers `(?ims-ims:` (no repeat, no flag in both parts, not both parts empty).
+- Classes: a range out of order, a class escape as an end of a range with `u`; without `u` an astral character counts as two units, as in the engines.
+- Escapes: `u` mode accepts only syntax characters, `/`, `\0` not before a digit, `\x`, `\u` (with `{}` and pairs), `\c` and a letter; a backreference larger than the number of groups is an error with `u`; legacy octal escapes, `\c` and identity escapes without `u`.
+- Not checked: the names inside `\p{...}` (the shape is checked), and the inside of a class with the `v` flag (only the brackets are matched). `u` and `v` together is an error.
+
+Evidence of correctness. Differential against V8 (Deno 2.9.8, V8 15.0): 660,000 pairs of a random pattern (1 to 14 pieces from a list of 111 pieces that covers the rules above) and the flags none, `u` and `i`: accept or reject is the same on all (3 runs with different seeds: 60,000, 300,000 and 300,000 pairs, 0 differences; 18% to 32% of the pairs are accepted by both, depending on the length). Real code: the 15 files of `/data/bare-tmp/s25b/corpus` and `/data/bare-tmp/s24/progs` (jquery, lodash, react-dom, axios, clangd, tauri, ...) and 3,744 files of the global npm packages parse as before (no file gets a new error).
+
+Result on the runner: js2 passes 14,772 (#789) and 14,802 here: 30 tests of `language/literals/regexp` go from fail to pass, 0 from pass to fail (against the run of #789). All tests of `language/` and `annexB/language` that must fail at parse time now do, except the ones that need the Unicode property tables: the scan of every `negative: phase: parse|early` test in `language`, `annexB/language`, `built-ins`, `annexB/built-ins` and `staging` goes from 722 accepted (334 after group 1, 388 in the other directories) to 300 accepted. The 300 are 242 in `built-ins/RegExp/property-escapes` (non-existent property names and values; needs the tables), 54 in `built-ins/RegExp/prototype/unicodeSets` (class syntax of `v`) and 4 in `staging` (`staging/sm/module/await-restricted-nested.js` and `staging/sm/fields/await-identifier-module-2.js`; not looked at, probably module goal tests). The tests that remain in the runner for this directory fail on `RegExp is not defined`, `eval` or regular expression literals not supported (the engine is S3).
+
+Parse cost (instructions, `parse_load full|lazy file 1 PATH`, minimum of 3 runs, 3 runs each, machine archMachine). The default build moves every row by +0.7% to +1.3%, also on `prelude.js`, which has no regular expression: the codegen-unit split changed (a new module and a new function in `parse.rs`). By the standing rule the rows are measured again with `codegen-units=1` on all three trees (base `43b62b05`, #789 `ad895eae`, this change):
+
+| Row, full parse | Base | #789 | This change | vs base | vs #789 |
+| --------------- | ---: | ---: | ----------: | ------: | ------: |
+| `lodash.js`     | 18,055,304 | 18,109,981 | 18,149,365 | +0.52% | +0.22% |
+| `reactdom.js`   | 27,537,982 | 27,611,147 | 27,621,074 | +0.30% | +0.04% |
+| `clangd.js`     | 173,055,533 | 173,348,550 | 173,381,593 | +0.19% | +0.02% |
+| `axios.js`      | 11,032,800 | 11,058,021 | 11,075,484 | +0.39% | +0.16% |
+| `prelude.js`    | 2,336,500 | 2,341,981 | 2,341,969 | +0.24% | 0.00% |
+
+(The minimum of the 3 runs; the spread is under 0.02%.) Lazy parse (the path of a compiled script): `lodash.js` +0.25% vs base, +0.01% vs #789; `reactdom.js` +0.09%, -0.12%; `clangd.js` +0.08%, -0.07%; `axios.js` +0.20%, +0.01%; `prelude.js` +0.08%, -0.13%. The check costs about 40 instructions for each byte of pattern (callgrind on the 44 patterns of `lodash.js` that a text search finds, 961 bytes: 905 instructions for a pattern). The full parse of `lodash.js` is +0.52% over the base, 0.02% over the limit of +0.5%, and the increase of this group alone is +0.22%. That row has the most regular expressions of the five. The lazy parse, which is the path of a compiled script, is +0.25% there. The next paragraphs (cost round) lower the cost.
+
+Tests: `regexp_check_tests.rs` (10 tests: quantifiers, groups, ranges, escapes in `u` mode and without it, backreferences, named groups with duplicates in alternatives, modifiers, `u` with `v`); one test in `parse_tests.rs` checks that a bad literal fails in the full parse and in the pre-parse, also inside a function, an arrow and a class method. `cargo test --locked -p bare-js2 --lib`: 417 pass (418 after the cost round). `cargo test --locked -p bare-js-diff`: all pass. `tools/fixtures/js/test262-js2-baseline.txt` is regenerated.
+
+Not tested: patterns with the `v` flag (accepted without a check), property names, a pattern with lone surrogates (the source is UTF-8), Windows and the browser.
+
+### Cost round of the regular expression check
+
+Task: `lodash.js` was +0.52% over the base at `codegen-units=1` (limit +0.5%). Make the check cheaper with a design that removes work. Trees: base `43b62b05`, #789 `ad895eae`, #790 `86ea9be3`, this change. Machine archMachine, rustc 1.96.0, instructions of `parse_load full|lazy file 1 PATH` by `tools/js/instr.sh` (minimum of 3 runs), each tree in its own `CARGO_TARGET_DIR`.
+
+Where the cost went (callgrind, `lodash.js`, `codegen-units=1`, symbols): the 39 literals hold 846 bytes of pattern. `check` cost 35,204 instructions (0.19% of the parse), 41 for each byte, and 900 for each pattern. There is no hot spot. The cost is the work for each term: a bounds-checked byte read, a `match` on the byte, an `Option`, a call or a return for each atom, group and class atom, and a `Path` for each alternative. `lex::regexp_parts` (one `memrchr` call to find the flags) added 4,400 (110 for each literal).
+
+Design: the checker is a recursive reader that has to keep state for names, groups and `\k`. A pattern with none of those needs none of that state. So `check` first runs `simple`: one pass over the bytes with a 256-entry table and three states (nothing to repeat, atom, quantifier), a depth counter for `(`, and no recursion, no stack and no allocation. It answers `true` only when it is sure that the pattern is valid, and `false` for an error or for a feature it does not read. Then the full check runs from the start, as before. `simple` reads: literals (also non-ASCII), `.`, `^`, `$`, `|`, groups `(`, `(?:`, `(?=`, `(?!`, quantifiers `* + ?` and `{n}`, `{n,}`, `{n,m}` with a lazy `?`, simple escapes, `\b`, `\B`, `\xHH`, `\uHHHH`, `\1` to `\9` and `\0` (without `u` a backreference is never an error: a number above the group count is an octal escape, so no count of groups is needed), and classes with literals, escapes and ranges of two characters (the value of each end is read, so `[\x00-\x2f]` is checked). It does not read: named groups, `(?<`, modifiers, `\k`, `\c`, `\p`, a `{` that is not a complete quantifier, a class escape at an end of a range, and any pattern with the flag `u` or `v`. The full check keeps three smaller fast paths for those patterns (a run of literals, a simple escape, and a run of class literals or a range of two literals), because `u` patterns still go there. `simple` has no error text: an error always comes from the full check, so the messages did not change.
+
+Correctness: the test `the_fast_path_accepts_only_what_the_full_check_accepts` makes 200,000 random patterns from 49 pieces (valid and invalid ones) and checks that whenever `simple` says yes the full check says yes (more than 5% of the patterns take the fast path). Against V8 (Deno 2.9.8) 450,000 new pairs (3 seeds, 150,000 each, 132 pieces, flags none, `u` and `i`; 31% accepted by both): 2 differences, both `\p{2}` with `u` (the property names are not checked; this is in "Not checked" above, and the full check gives the same answer on #790). 0 differences on all others. The five files parse without an error. In `lodash.js` all 39 literals take `simple` (checked with a print in a temporary build: 5 bailed with the first version).
+
+Result on `lodash.js`: `check` falls from 35,204 to 18,899 instructions (22 for each byte). With the first version of `simple` 5 of the 39 patterns bailed (they were the long ones: `\1`, `\xHH` and `\uHHHH` were not read); now none bails. I tried three more changes and dropped them because they gave under 2,000 instructions (0.01%): a run loop of literals inside `simple`, a byte loop from the end in `regexp_parts` instead of `rfind`, and checking the flags with a byte loop. Of these only the last stays (`flags.bytes().any`, replaces two `contains` calls). The rest of the cost is the fixed cost of each literal (about 200 instructions: `check_regexp`, `regexp_parts`, the flag scan and the call) and the table loop (about 13 for each byte); a lower cost needs the lexer to give the end of the pattern (a new field in `Token`, a hot type; not done).
+
+Ideas that I did not build, and why. (1) Dedupe by hash of the pattern: a hash reads each byte too (more than 5 instructions for each byte with any hash that is not trivial), and `lodash.js` has no repeated pattern; minified code repeats some, but the hash costs on all the others. (2) Check at the first evaluation of the literal: not correct for a script. `ParseScript` reports the early errors before any evaluation, so a script with `/(/` in a function that never runs must fail to parse. The negative `phase: parse` tests of `language/literals/regexp` check this, and they are the tests that this group moves from fail to pass. (3) A check outside the parser loop: `check_regexp` is already `#[inline(never)]`, so the codegen of `parse_primary` did not change.
+
+Parse cost, full parse (minimum of 3 runs; each row ran 3 times in this order and the spread is under 0.02%):
+
+| Row, `codegen-units=1` | Base | #789 | #790 | This change | vs base | vs #790 |
+| ---------------------- | ---: | ---: | ---: | ----------: | ------: | ------: |
+| `lodash.js`            | 18,054,358 | 18,110,914 | 18,148,441 | 18,134,439 | +0.44% | -0.08% |
+| `reactdom.js`          | 27,538,036 | 27,609,131 | 27,620,735 | 27,616,217 | +0.28% | -0.02% |
+| `clangd.js`            | 173,056,916 | 173,349,503 | 173,382,210 | 173,313,614 | +0.15% | -0.04% |
+| `axios.js`             | 11,032,810 | 11,057,646 | 11,075,186 | 11,068,441 | +0.32% | -0.06% |
+| `prelude.js`           | 2,335,535 | 2,341,386 | 2,341,155 | 2,341,421 | +0.25% | +0.01% |
+
+| Row, `codegen-units=1`, lazy | Base | #789 | #790 | This change | vs base | vs #790 |
+| ---------------------------- | ---: | ---: | ---: | ----------: | ------: | ------: |
+| `lodash.js`                  | 22,383,640 | 22,439,254 | 22,438,241 | 22,426,222 | +0.19% | -0.05% |
+| `reactdom.js`                | 33,753,638 | 33,825,003 | 33,786,655 | 33,780,388 | +0.08% | -0.02% |
+| `clangd.js`                  | 194,064,355 | 194,350,639 | 194,209,258 | 194,144,252 | +0.04% | -0.03% |
+| `axios.js`                   | 13,071,979 | 13,096,973 | 13,097,885 | 13,091,470 | +0.15% | -0.05% |
+| `prelude.js`                 | 2,716,710 | 2,722,344 | 2,718,813 | 2,718,640 | +0.07% | -0.01% |
+
+| Row, default build, full | Base | #789 | #790 | This change | vs base | vs #790 |
+| ------------------------ | ---: | ---: | ---: | ----------: | ------: | ------: |
+| `lodash.js`              | 17,800,238 | 17,842,925 | 18,039,015 | 18,024,741 | +1.26% | -0.08% |
+| `reactdom.js`            | 27,257,554 | 27,314,021 | 27,560,678 | 27,555,685 | +1.09% | -0.02% |
+| `clangd.js`              | 170,766,735 | 171,002,386 | 172,767,284 | 172,699,640 | +1.13% | -0.04% |
+| `axios.js`               | 10,919,713 | 10,939,571 | 11,052,447 | 11,045,724 | +1.15% | -0.06% |
+| `prelude.js`             | 2,317,483 | 2,322,053 | 2,338,614 | 2,338,379 | +0.90% | -0.01% |
+
+The lazy rows at the default build are +0.76% to +1.01% over the base (#790: +0.77% to +1.07%). By the standing rule (a row over +0.5% at the default build passes if it is within +0.5% at `codegen-units=1` on both trees) all rows pass: the worst is `lodash.js` full at +0.44%. The margin there is 0.06% (10,191 instructions). Of the +0.44%, #789 gives +0.31% (56,556 instructions) and this group +0.13% (23,525). The default build moves every row, also `prelude.js` which has no regular expression: the codegen split changed (see above).
+
+test262 (`TEST262=/data/claude-tmp/test262 tools/js/test262_js2.sh -j 4`, checkout at `e4fbf577`): this change passes 14,802, fails 2,982, skips 11,979, the same as `tools/fixtures/js/test262-js2-baseline.txt` (no directory differs). The per-test list (`new.txt`, 29,763 lines) is identical to the list of #790 built from `86ea9be3` (`diff` empty), so no passing test fails and no new test passes.
+
+Tests: `cargo test --locked -p bare-js2 --lib`: 418 pass (the new test above). `cargo test --locked -p bare-js-diff`: all pass.
+
+Not tested: Windows; the browser; the `v` flag; the `u` fast paths of the full check against real `u` patterns (only random pieces); the 3,744 npm files of #790 again (only the five files above); no V8 run of the patterns of the five files themselves (they take `simple`, which the random test covers by the rule "yes implies full yes"); a `Token` field for the end of the pattern (not built).

@@ -27,10 +27,9 @@
 //!   inline are not measured as Chrome does: the tab counts as one letter and the margin as 0.
 
 use crate::browser::*;
-use crate::browser_platform::V;
 use crate::browser_range::{bounds, utf16_len};
 use crate::browser_scoped::*;
-use bare_js_api::{Args, Local};
+use bare_js_api::{Args, Engine, Local};
 use bare_css::values::{Keyword, Property, Value as Cv};
 use bare_html::dom::{Document, NodeData, NodeId};
 use bare_js::eval::{Error, Interp};
@@ -550,14 +549,20 @@ fn range_rects(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<Vec<Rect>> {
     d.with_geo_it(it, |g, s, it| with_pass(d, it, g, s, |p| range(p, b)))?
 }
 
-pub(crate) fn range_client_rects(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let r = range_rects(d, it, this)?;
-    run_v(it, |s| crate::browser_geom::rect_list_s(d, s, &r))
+/// `range_rects` for a handler: `this` is the range.
+fn range_rects_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, Vec<Rect>> {
+    let this = s.engine().raw(this);
+    old(s, |it| range_rects(d, it, this))
 }
 
-pub(crate) fn range_bounding_rect(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let r = range_rects(d, it, this)?;
-    crate::browser_geom::layout_rect(d, it, union(&r))
+pub(crate) fn range_client_rects<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let r = range_rects_s(d, s, this)?;
+    crate::browser_geom::rect_list_s(d, s, &r)
+}
+
+pub(crate) fn range_bounding_rect<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let r = range_rects_s(d, s, this)?;
+    crate::browser_geom::layout_rect_s(d, s, union(&r))
 }
 
 /// `getBoundingClientRect` of an element that has no box fragment: the union of its rectangles.

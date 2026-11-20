@@ -19,7 +19,6 @@
 //! - A change of the text children of a textarea that is not dirty does not move a caret that was set before. `setRangeText` is absent.
 
 use crate::browser::*;
-use crate::browser_dom::arg;
 use crate::browser_reflect::this_of;
 use crate::browser_scoped::*;
 use crate::browser_select::{get, reflect};
@@ -213,17 +212,17 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>, proto: ObjId) -> R<()> {
         ("autocomplete", Old(autocomplete, Some(set_autocomplete))),
         ("type", New(kind, None)),
         ("form", New(form, None)),
-        ("selectionStart", Old(sel::selection_start, Some(sel::set_selection_start))),
-        ("selectionEnd", Old(sel::selection_end, Some(sel::set_selection_end))),
-        ("selectionDirection", Old(sel::selection_direction, Some(sel::set_selection_direction))),
+        ("selectionStart", New(sel::selection_start, Some(sel::set_selection_start))),
+        ("selectionEnd", New(sel::selection_end, Some(sel::set_selection_end))),
+        ("selectionDirection", New(sel::selection_direction, Some(sel::set_selection_direction))),
     ] {
         match acc {
             New(g, s) => d.def_get_s(it, proto, name, g, s)?,
             Old(g, s) => d.def_get(it, proto, name, g, s)?,
         }
     }
-    d.def_method(it, proto, "setSelectionRange", 2, sel::set_selection_range_method)?;
-    d.def_method(it, proto, "select", 0, sel::select_method)?;
-    d.def_method(it, proto, "setRangeText", 1, sel::set_range_text_area)?;
+    d.def_method_s(it, proto, "setSelectionRange", 2, sel::set_selection_range_method)?;
+    d.def_method_s(it, proto, "select", 0, sel::select_method)?;
+    d.def_method_s(it, proto, "setRangeText", 1, sel::set_range_text_area)?;
     crate::browser_controls::decorate(d, it, proto, true)
 }

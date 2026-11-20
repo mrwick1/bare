@@ -1753,7 +1753,7 @@ pub(crate) fn illegal_constructor(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[V
     Err(it.type_error("Illegal constructor"))
 }
 
-use Kind::{Accessor as A, AccessorS as AS, Get as G, GetS as GS, Method as M, MethodS as MS};
+use Kind::{Accessor as A, AccessorS as AS, GetS as GS, MethodS as MS};
 use P::*;
 
 const PARENT: &[P] = &[Element, Document, Fragment];
@@ -1869,12 +1869,12 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Input], name: "files", len: 0, kind: GS(nd::input_files) },
     Def { on: &[Input], name: "checked", len: 0, kind: AS(nd::input_checked, nd::set_input_checked) },
     Def { on: &[Input], name: "indeterminate", len: 0, kind: AS(nd::input_indeterminate, nd::set_input_indeterminate) },
-    Def { on: &[Input], name: "selectionStart", len: 0, kind: A(sel::selection_start, sel::set_selection_start) },
-    Def { on: &[Input], name: "selectionEnd", len: 0, kind: A(sel::selection_end, sel::set_selection_end) },
-    Def { on: &[Input], name: "selectionDirection", len: 0, kind: A(sel::selection_direction, sel::set_selection_direction) },
-    Def { on: &[Input], name: "setSelectionRange", len: 2, kind: M(sel::set_selection_range_method) },
-    Def { on: &[Input], name: "select", len: 0, kind: M(sel::select_method) },
-    Def { on: &[Input], name: "setRangeText", len: 1, kind: M(sel::set_range_text_input) },
+    Def { on: &[Input], name: "selectionStart", len: 0, kind: AS(sel::selection_start, sel::set_selection_start) },
+    Def { on: &[Input], name: "selectionEnd", len: 0, kind: AS(sel::selection_end, sel::set_selection_end) },
+    Def { on: &[Input], name: "selectionDirection", len: 0, kind: AS(sel::selection_direction, sel::set_selection_direction) },
+    Def { on: &[Input], name: "setSelectionRange", len: 2, kind: MS(sel::set_selection_range_method) },
+    Def { on: &[Input], name: "select", len: 0, kind: MS(sel::select_method) },
+    Def { on: &[Input], name: "setRangeText", len: 1, kind: MS(sel::set_range_text_input) },
     Def { on: &[Input], name: "type", len: 0, kind: AS(nd::input_type, nd::set_input_type) },
     Def { on: &[Input], name: "defaultValue", len: 0, kind: AS(nd::default_value, nd::set_default_value) },
     Def { on: &[Input], name: "defaultChecked", len: 0, kind: AS(nd::default_checked, nd::set_default_checked) },
@@ -1882,12 +1882,12 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Link], name: "href", len: 0, kind: AS(crate::browser_loader::link_href, crate::browser_loader::set_link_href) },
     Def { on: &[Link], name: "as", len: 0, kind: AS(nd::link_as, nd::set_link_as) },
     Def { on: &[Link], name: "crossOrigin", len: 0, kind: AS(nd::link_cross_origin, nd::set_link_cross_origin) },
-    Def { on: &[Document], name: "scripts", len: 0, kind: G(crate::browser_platform_query::scripts) },
-    Def { on: &[Document], name: "forms", len: 0, kind: G(crate::browser_platform_query::forms) },
-    Def { on: &[Document], name: "images", len: 0, kind: G(crate::browser_platform_query::images) },
-    Def { on: &[Document], name: "embeds", len: 0, kind: G(crate::browser_platform_query::embeds) },
-    Def { on: &[Document], name: "links", len: 0, kind: G(crate::browser_platform_query::links) },
-    Def { on: &[Document], name: "anchors", len: 0, kind: G(crate::browser_platform_query::anchors) },
+    Def { on: &[Document], name: "scripts", len: 0, kind: GS(crate::browser_platform_query::scripts) },
+    Def { on: &[Document], name: "forms", len: 0, kind: GS(crate::browser_platform_query::forms) },
+    Def { on: &[Document], name: "images", len: 0, kind: GS(crate::browser_platform_query::images) },
+    Def { on: &[Document], name: "embeds", len: 0, kind: GS(crate::browser_platform_query::embeds) },
+    Def { on: &[Document], name: "links", len: 0, kind: GS(crate::browser_platform_query::links) },
+    Def { on: &[Document], name: "anchors", len: 0, kind: GS(crate::browser_platform_query::anchors) },
     Def { on: &[Input], name: "name", len: 0, kind: AS(fm::input_name, fm::set_input_name) },
     Def { on: &[Input], name: "disabled", len: 0, kind: AS(fm::input_disabled, fm::set_input_disabled) },
     Def { on: &[Input], name: "readOnly", len: 0, kind: AS(fm::input_read_only, fm::set_input_read_only) },

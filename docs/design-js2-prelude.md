@@ -141,3 +141,24 @@ Decision 1 of section 8 is built. The pre-parse facts of `prelude.js` are a gene
 The file is made by the test helper, not by an example: `BLESS_PRELUDE_FACTS=1 cargo test -p bare-js2 --lib prelude_facts`. The test `prelude_facts_file_is_up_to_date` makes the file again from a pre-parse of `prelude.js` and fails when it differs from the checked-in file. `prelude_facts_equal_a_fresh_pre_parse` compares the loaded facts with a fresh pre-parse. A change of `prelude.js`, of the pre-parser or of the fields of `FnFacts` fails the first test until the file is made again. The text of the test file says how to recover when the old file no longer compiles.
 
 Measured (archMachine, release, `tools/js/instr.sh`, minimum of 3 runs): setup, `script_run` of `var x = 1;`, **4.01 M to 1.68 M** (hypothesis in section 3: 1.7 M). Peak RSS, 7 runs of each: 5084 to 5236 KiB before, 5088 to 5232 KiB after (no change beyond the noise; the facts are 3.4 KB and the pre-parse made no long-lived data). The first call of `a.forEach(f)` costs the same as before (357 K and 359 K over a later call): the full parse of the function and its compile did not change.
+
+## 10. Built: lazy compile for user scripts (2026-11-20)
+
+Decision 2 of section 8 is built, as a second PR on top of option B′.
+
+Data. `Lazy` holds one `Unit` (text and `Facts`) for each text that has stubs: the user script (a copy of the text: `load` takes a `&str`) and the prelude (the static text). `pending` is a list of `Wait` entries `(code index, unit, Child)`, sorted by the code index; a new stub is always the last code, so the list stays sorted and a search is a binary search. A function that was compiled keeps its entry with no `Child`. The host script (the test harness of `load_with`) and `script::compile` are still compiled in full.
+
+A function waits when it, and no function inside it, uses `super` (the facts have `SUPER` at any depth: the code of a function that holds a method with `super` can get `CF_LINK`, and a stub cannot know that). A stub has one of two forms. A function with plain parameters that does not read `arguments` (`simple`, no `ARGS`, `EVAL` or `INNER_EVAL`, at most 64 parameters) gets a stub with the parameter registers of its code, and `Op::Lazy` has operand `a = 0`: the arguments are in the registers when the stub runs, and the call makes no array. Any other function gets the stub of #770 (no parameters, `CF_ARGS`, `a = 1`). `Op::Lazy` checks that a kept-register stub got a code with the same number of parameters and no `CF_ARGS`, and throws if not (it does not happen: the facts say the same).
+
+Behaviour change, as the engine design says (6.10 item 19). The pre-parse of the whole text still runs at load, so every early error of the text (a redeclaration, a `break` outside a loop, a bad private name, a strict-mode rule) is found at load, also in a function that nobody calls. What moves is only a construct that the compiler does not build yet (direct `eval`, `with`, a generator or `async` function, ...):
+
+| Where the construct is | Before | Now |
+| --- | --- | --- |
+| the top level code of the script (a generator declared there too) | the load fails: `not supported yet` | the same |
+| in the code of a function | the load fails | the load works. The first call of that function throws `Error: not supported yet: [...]`. A `try` can catch it. A function that nobody calls does not fail |
+
+The error is a plain `Error`, not the `SyntaxError` of #770: the text has no early error, and test262 tests that expect a `SyntaxError` from a direct `eval` in a function (`assert.throws(SyntaxError, ...)`) passed by accident with a `SyntaxError` (60 tests in a first run). The differential runner (`bare-js-diff`) reads an `Error` of that text as "unsupported", as it read the load error. A function that `try` catches and goes on is not counted.
+
+Not changed: the first call of a function costs a full parse and compile of that function, as in #770. `function.length` and `function.name` are not properties of js2 functions yet; when they are, they must come from the facts (`FnFacts::length`, `name`) and not from the code, because a stub has no real code.
+
+Measured: see `docs/progress.md`. A summary: a function that is never called costs its pre-parse, a stub and its facts, and no compile (500 small functions: 20.0 M to 10.5 M instructions, 19 K saved for each). A function that is called costs about 1 K more than before (a stub, a search, a second `Feedback`). The net slope of a program that calls every function therefore grows by about 1%, and its peak RSS by 0.3 to 0.5 MiB (the copy of the text and the facts stay for the life of the `Vm`). A program with 500 functions of 330 bytes that calls none of them gets 72% fewer instructions and 0.5 MiB less peak RSS.
