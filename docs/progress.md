@@ -14399,7 +14399,7 @@ Decision for the owner: the gate passes, so the series may go on. The gain on `h
 Not tested: codegen-units=1 runs, the cost matrix (only 3 rows ran), the Windows VM, `clone_copy` (F3), the other classes, accessors and getters, the transfer list, the full `bare` test suite (only the 4 filters above ran), peak memory and the record size of the `history` state (48 bytes by hand in the design, not read from the spike), wall time. The disk of `/data` was full once during the work. The first release build of the spike failed with "No space left on device" and was built again after space was freed.
 ## 2026-11-20: clone record format (design-host-clone.md step 2)
 
-COMPLETE for Linux. Windows: see "Windows" below. PR is not merged and has no auto-merge. Base: origin/main `511d3eb4`.
+COMPLETE for Linux. The Windows run did not happen (see "Windows"). PR is not merged and has no auto-merge. Base: origin/main `511d3eb4`.
 
 Changes: the `clone` module of `bare-js-api` (`crates/js-api/src/clone.rs`, tests in `clone_tests.rs`). No engine change and no browser change.
 
@@ -14414,6 +14414,8 @@ Two small differences from the design page: `KNew` is two tags (`KNew8` for Lati
 Pinned costs: `the_cost_model_gives_the_numbers_of_the_old_walk` fixes 22 inputs. I got the numbers from the browser at `511d3eb4`: a scratch test (not committed) ran `history.pushState(<value>, '')` on a fresh page for each source and read `Browser::navigation_stats().state_bytes`, which is `State::bytes` of `serialize`. Examples: `({a: 1})` 66, `[1, 2, 3]` 108, `/ab/g` 86, `new ArrayBuffer(100)` 148, `new Uint8Array(10)` 106, `{i, self, tags: ['a', 'b', i], nested: {k}}` with a cycle 352 (50 states are the `state_bytes=17600` of `navigation_load history 1`). The step counts are by hand from `ser` and `props`; they are not measured.
 
 Tests (Linux, `cargo test --locked -p bare-js-api`): 31 unit tests and 6 doc tests pass. They cover the round trip of every tag (a test reads the record back and checks that each tag was met), varint edges (1, 2, 3, 5, 6, 9, 10 bytes; 10th byte over 1; 11 bytes), zigzag edges, `Int` or `Num` for `-0`, `NaN`, `i32` limits, Latin-1 or UTF-16 (lone surrogates), key table reuse (also 40 keys and two idents with one text), ids and `Ref` checks, limits on each side (at the cap, one over, saturation at `usize::MAX`, order of the checks), every strict prefix of 13 records (always an error), damaged lengths, 20,000 random and flipped records (no panic), and the default `Unsupported` of the three methods. `cargo clippy --locked -p bare-js-api --all-targets -- -D warnings` passes. `cargo check --locked -p bare-js -p bare` passes.
+
+Windows: `RUSTFLAGS="-C target-feature=+crt-static" cargo xwin test --locked --no-run --target x86_64-pc-windows-msvc -p bare-js-api` builds the test executable. I could not run it. The VM at `127.0.0.1:22220` accepts the TCP connection but sshd sends no banner ("Connection timed out during banner exchange", 4 tries over about 10 minutes, `scp` hung for 5 minutes). I did not restart the VM, because other agents share it. The run is still open.
 
 Cost matrix: not run. No engine or browser code changes, so no row can move. The new code is in a crate that no engine calls yet (the `Engine` default bodies add three methods that nothing calls).
 
