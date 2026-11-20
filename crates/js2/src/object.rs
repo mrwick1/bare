@@ -71,6 +71,9 @@ pub const F_LEN_RO: u32 = 512;
 /// Object header flag: the array keeps its index properties in its shape, with the names `"0"`, `"1"`, ... (an element has attributes
 /// other than writable, enumerable and configurable, or is an accessor). The elements record is empty.
 pub const F_SLOWIDX: u32 = 1024;
+/// Object header flag: a wrapper object (`new String`, `new Number`, `new Boolean`, `Object(1)`). The value is in the hidden property
+/// `Realm::k_prim` (`bi_wrap.rs`). The flag, not the shape, tells a wrapper: a property that a script adds changes the shape.
+pub const F_WRAP: u32 = 4096;
 /// `Elements` header flag: the record is sparse.
 const F_SPARSE: u32 = 1;
 /// A write at an index this far above the capacity of a dense record makes it sparse.

@@ -25,12 +25,12 @@
 //! The two globals are plain data properties of `window`. `requestIdleCallback` is in `browser_idle.rs`. Not here: `document.timeline`, `Animation`.
 
 use crate::browser::*;
+use crate::browser_scoped::*;
 use bare_js::eval::{Error, Interp};
 use bare_js::value::{Value, to_uint32};
+use bare_js_api::{Args, Engine, HostFn, Local};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
-
-type V = R<Value>;
 
 /// One frame is 1000/60 ms.
 pub(crate) const FRAME_MS: f64 = 1000.0 / 60.0;
@@ -47,47 +47,48 @@ pub(crate) struct Frame {
     pub(crate) due: Cell<f64>,
 }
 
-pub(crate) fn window_this(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<()> {
-    match this {
-        Value::Undefined | Value::Null => Ok(()),
-        Value::Object(o) if Some(&o) == d.global.get() || crate::browser_frames::is_blank_window(d, o) => Ok(()),
-        _ => Err(it.type_error("Illegal invocation")),
-    }
+pub(crate) fn window_this<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, ()> {
+    let ok = match obj_id(s, this) {
+        Some(o) => Some(&o) == d.global.get() || crate::browser_frames::is_blank_window(d, o),
+        None => is_nullish(s, this),
+    };
+    if ok { Ok(()) } else { Err(s.type_error("Illegal invocation")) }
 }
 
-fn request(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    window_this(d, it, this)?;
-    let Some(&cb) = a.first() else {
-        return Err(it.type_error("Failed to execute 'requestAnimationFrame' on 'Window': 1 argument required, but only 0 present."));
+fn request<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    window_this(d, s, this)?;
+    let Some(cb) = a.get(0) else {
+        return Err(s.type_error("Failed to execute 'requestAnimationFrame' on 'Window': 1 argument required, but only 0 present."));
     };
-    if !it.is_callable_value(cb) {
-        return Err(it.type_error("Failed to execute 'requestAnimationFrame' on 'Window': parameter 1 is not of type 'Function'."));
+    if !s.is_callable(cb) {
+        return Err(s.type_error("Failed to execute 'requestAnimationFrame' on 'Window': parameter 1 is not of type 'Function'."));
     }
+    let cb = s.engine().raw(cb);
     let f = &d.frame;
     if f.cbs.borrow().len() >= MAX_CALLBACKS {
-        return Err(d.lim("animation-frame-callbacks"));
+        return Err(d.lim_s(s, "animation-frame-callbacks"));
     }
-    let id = f.next.get().checked_add(1).ok_or_else(|| d.lim("animation-frame-handles"))?;
-    d.want_frame()?;
+    let Some(id) = f.next.get().checked_add(1) else { return Err(d.lim_s(s, "animation-frame-handles")) };
+    lift(s, d.want_frame())?;
     f.next.set(id);
     f.cbs.borrow_mut().insert(id, cb);
-    Ok(Value::Number(id as f64))
+    Ok(s.number(id as f64))
 }
 
-fn cancel(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    window_this(d, it, this)?;
-    if a.is_empty() {
-        return Err(it.type_error("Failed to execute 'cancelAnimationFrame' on 'Window': 1 argument required, but only 0 present."));
-    }
-    let n = it.to_js_number(a[0])?;
+fn cancel<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    window_this(d, s, this)?;
+    let Some(v) = a.get(0) else {
+        return Err(s.type_error("Failed to execute 'cancelAnimationFrame' on 'Window': 1 argument required, but only 0 present."));
+    };
+    let n = s.to_number(v)?;
     d.frame.cbs.borrow_mut().remove(&to_uint32(n));
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     let g = it.global_object();
-    for (name, h) in [("requestAnimationFrame", request as H), ("cancelAnimationFrame", cancel)] {
-        let f = d.add_fn(it, h, name, 1, false)?;
+    for (name, h) in [("requestAnimationFrame", request as HS), ("cancelAnimationFrame", cancel)] {
+        let f = d.add_fn_s_obj(it, h, name, 1, HostFn::Method)?;
         let k = d.key(it, name)?;
         it.define_data(g, k, Value::Object(f), true, true, true)?;
     }
