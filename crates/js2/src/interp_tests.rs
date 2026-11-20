@@ -25,12 +25,7 @@ fn n(i: i32) -> Value {
 }
 
 fn vm_with(shared: &Arc<SharedAtoms>, codes: Vec<Code>) -> Vm {
-    let mut vm = Vm::new(Program { codes }, shared.clone());
-    if MIRI {
-        // Miri is slow: a small trigger makes the collection tests collect after a few hundred objects.
-        vm.realm.heap.set_trigger(Trigger { min: 4 << 10, slack: 4 << 10 });
-    }
-    vm
+    Vm::new(Program { codes }, shared.clone())
 }
 
 fn run_main(sh: &Arc<SharedAtoms>, codes: Vec<Code>) -> (Vm, Value) {
@@ -107,7 +102,8 @@ fn arithmetic_runs_on_integers_and_doubles() {
     assert_eq!(v[4], n(2));
     assert_eq!(v[5], n(2147483647));
     assert_eq!(f64_of(v[6]), 2147483648.0, "an integer overflow is a double");
-    assert_eq!(f64_of(v[7]), 16807.0);
+    // Miri changes the result of `powf` by a few ulps on purpose.
+    assert!((f64_of(v[7]) - 16807.0).abs() <= if MIRI { 1e-9 } else { 0.0 });
     assert_eq!(v[8], n(7), "a division with an integer result gives an integer");
 }
 
@@ -257,7 +253,9 @@ fn a_wide_instruction_runs_like_a_narrow_one() {
     assert_eq!(v, n(200000));
 }
 
+// 40,000 words: the liveness pass of `asm_util::roots` takes over 10 minutes of Miri time.
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_long_jump_uses_the_wide_offset() {
     let sh = shared();
     let mut f = F::new(&sh, 4, 0);
