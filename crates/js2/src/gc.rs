@@ -10,8 +10,10 @@
 //!    it is pushed once, and a graph with cycles ends. A cell with no edge (a flat string) is marked and never pushed. A shared atom
 //!    (`FLAG_SHARED`) is in no heap of a realm and is skipped.
 //! 4. Ephemerons, in the same loop (below).
-//! 5. [`Shapes::finish_marks`]: mark the shapes that a marked cell used. A real shape that names cells must be traced in step 3 to 5
-//!    as a fixpoint with the work list (S1.8); the stub shape names none.
+//! 5. [`Shapes::finish_marks`]: free the shapes and tables that no marked object used, and mark the key atoms of the others. The
+//!    one cell that a shape names, its prototype, is marked in step 3: the first marked object of a shape gets it from
+//!    [`Shapes::note_live`], and the marker marks it and pushes it on the work list. So no shape is traced after the loop, and
+//!    the keys are atoms (leaves), so step 5 needs no second loop. It runs before step 6 because the atom sweep must see the keys.
 //! 6. [`Atoms::sweep`], the clear of dead entries in marked weak tables, and [`Roots::weak`] for the weak tables of the host.
 //! 7. [`Heap::finish_mark`]. The sweep itself is lazy (`heap.rs`).
 //!
@@ -21,13 +23,14 @@
 //! the collection. Its peak is the number of cells that were found and not traced yet, so a long chain needs one entry and a cell
 //! with many edges needs one entry for each edge.
 //!
-//! The typed trace: [`Marker::trace`] reads the layout from the header (`cell.rs`) and calls the code of that layout. S1.8 and S1.9
-//! add their layouts as arms of that one `match`.
+//! The typed trace: [`Marker::trace`] reads the layout from the header (`cell.rs`) and calls the code of that layout. S1.9 adds its
+//! layouts as arms of that one `match`.
 //!
 //! - `OneByte`, `TwoByte`: no edge.
 //! - `Rope`, `Indirect`: the children that [`Str::children`] names.
-//! - `Object`: the stub layout of S1.4 until S1.9: the header, then one value slot for each slot of its [`Shape`]
-//!   (`Shapes::of`). Every slot holds a value from the moment the cell is allocated: the collector reads them all.
+//! - `Object`: the stub layout of S1.4 until S1.9: the header, then one value slot for each slot of its shape (`Shapes::of`, the
+//!   `slots` field). The marker also marks the prototype of the shape, once for each shape in a collection. Every slot holds a value
+//!   from the moment the cell is allocated: the collector reads them all.
 //! - `WeakTable`: the stub of an ephemeron table (below).
 //!
 //! Ephemerons (a `WeakMap` entry): the value of an entry is alive only when its key is. The table cell is marked and traced like any
@@ -278,9 +281,12 @@ impl Marker<'_> {
         }
     }
 
-    /// The stub object: one value slot for each slot of its shape, after the header.
+    /// The stub object: one value slot for each slot of its shape, after the header. The first object of a shape in a collection also
+    /// marks the prototype of the shape: a prototype that only a shape names must live.
     fn object(&mut self, p: NonNull<u8>, h: CellHeader) {
-        self.shapes.note_live(self.heap, h);
+        if let Some(proto) = self.shapes.note_live(self.heap, h) {
+            self.cell(proto);
+        }
         let n = self.shapes.of(h).slots as usize;
         let slots = p.as_ptr().wrapping_add(CellHeader::SIZE).cast::<Value>();
         for i in 0..n {

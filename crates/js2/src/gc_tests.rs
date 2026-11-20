@@ -1,23 +1,27 @@
 // Tests of `gc.rs`. Miri runs them in CI, so the counts shrink under it. The objects are the stub layout of the collector: a
-// header and N value slots, with the N of the stub shape.
+// header and N value slots. Their shape has the N keys `k0`, `k1`, ... as data properties, so it has N slots.
 use super::*;
 use crate::atoms::SharedAtoms;
-use crate::cell::{Shape, ShapeRef};
 use crate::heap::{BLOCK, POOL_KEEP};
+use crate::shapes::{A_C, A_E, A_W, MAX_PROPS, ShapeId};
 use crate::string::Chars;
 use crate::value::Kind;
 use std::sync::Arc;
 
 const MIRI: bool = cfg!(miri);
 
-/// A realm for the tests: a heap, shapes and atoms, with one pinned object for each shape so that its shape cell never dies (the
-/// stub `Shapes` keeps a dead id in its table, so a test must not make a cell with an id that no live cell uses).
+const WRITE: u8 = A_W | A_E | A_C;
+
+/// A realm for the tests: a heap, shapes and atoms, with one pinned object for each shape. A shape that no marked object uses is freed
+/// and its id is reused, so a test must not make a cell with the id of a shape that no live cell uses.
 struct Realm {
     heap: Heap,
     shapes: Shapes,
     atoms: Atoms,
     shared: Arc<SharedAtoms>,
-    by_slots: Vec<Option<ShapeRef>>,
+    by_slots: Vec<Option<ShapeId>>,
+    /// The atoms `k0`, `k1`, ...: each is a key of the pinned shape that first needed it.
+    keys: Vec<Str>,
     pins: Vec<Value>,
 }
 
@@ -58,29 +62,54 @@ impl Realm {
     /// A realm that has the shapes (and their pins) of the objects with 0 to 8 slots.
     fn new() -> Realm {
         let shared = Arc::new(SharedAtoms::default());
-        let mut r = Realm { heap: Heap::default(), shapes: Shapes::default(), atoms: Atoms::new(shared.clone()), shared, by_slots: Vec::new(), pins: Vec::new() };
+        let mut r = Realm { heap: Heap::default(), shapes: Shapes::default(), atoms: Atoms::new(shared.clone()), shared, by_slots: Vec::new(), keys: Vec::new(), pins: Vec::new() };
         (0..=8).for_each(|n| {
             r.shape(n);
         });
         r
     }
 
+    /// The first `n` atoms of `k0`, `k1`, ...
+    fn keys(&mut self, n: usize) -> Vec<Str> {
+        while self.keys.len() < n {
+            let name = format!("k{}", self.keys.len());
+            self.keys.push(self.atoms.intern(&mut self.heap, Chars::One(name.as_bytes())).unwrap());
+        }
+        self.keys[..n].to_vec()
+    }
+
+    /// A shape of `n` slots with no prototype and the keys `k0` to `k(n-1)`: a tree shape (shared by all objects of this size), or a
+    /// dictionary shape of its own when `n` is over `MAX_PROPS`. `dict` asks for a dictionary shape in any case.
+    fn new_shape(&mut self, n: usize, dict: bool) -> ShapeId {
+        let keys = self.keys(n);
+        let root = self.shapes.root(Layout::Object, None, 4);
+        if n > MAX_PROPS || dict {
+            let d = self.shapes.to_dict(root);
+            keys.iter().for_each(|&k| {
+                self.shapes.dict_add(d, k, WRITE);
+            });
+            d
+        } else {
+            keys.iter().fold(root, |s, &k| self.shapes.add(s, k, WRITE).unwrap())
+        }
+    }
+
     /// The shape of the objects with `n` slots. The first call makes it, with an object that every collection of the test marks.
-    fn shape(&mut self, n: usize) -> ShapeRef {
+    fn shape(&mut self, n: usize) -> ShapeId {
         if self.by_slots.len() <= n {
             self.by_slots.resize(n + 1, None);
         }
         if let Some(r) = self.by_slots[n] {
             return r;
         }
-        let r = self.shapes.add(&mut self.heap, Shape { layout: Layout::Object, flags: 0, slots: n as u32 }).unwrap();
+        let r = self.new_shape(n, false);
         self.by_slots[n] = Some(r);
         let pin = self.make(r, n);
         self.pins.push(ov(pin));
         r
     }
 
-    fn make(&mut self, r: ShapeRef, n: usize) -> NonNull<u8> {
+    fn make(&mut self, r: ShapeId, n: usize) -> NonNull<u8> {
         let p = self.heap.alloc((CellHeader::SIZE + 8 * n).max(16)).unwrap();
         // SAFETY: a new cell with room for the header.
         unsafe { p.cast::<CellHeader>().write(self.shapes.header(r)) };
@@ -91,6 +120,12 @@ impl Realm {
     /// An object with `n` slots, all `undefined`.
     fn obj(&mut self, n: usize) -> NonNull<u8> {
         let r = self.shape(n);
+        self.make(r, n)
+    }
+
+    /// An object with `n` slots and a dictionary shape of its own (no other object has its shape).
+    fn own(&mut self, n: usize) -> NonNull<u8> {
+        let r = self.new_shape(n, true);
         self.make(r, n)
     }
 
@@ -250,11 +285,13 @@ fn a_shared_atom_is_skipped() {
 fn the_atom_table_drops_the_dead_atoms() {
     let mut r = Realm::new();
     let n = if MIRI { 40 } else { 2_000 };
+    // The keys of the pinned shapes are atoms of the table, and they stay.
+    let pinned = r.atoms.runtime().len();
     let all: Vec<Str> = (0..n).map(|i| r.atoms.intern(&mut r.heap, Chars::One(format!("atom number {i}").as_bytes())).unwrap()).collect();
     let live: Vec<Value> = all.iter().step_by(2).map(|s| s.value()).collect();
     let s = r.collect(&live);
     assert_eq!(s.atoms_dropped, n / 2);
-    assert_eq!(r.atoms.runtime().len(), n - n / 2);
+    assert_eq!(r.atoms.runtime().len(), pinned + n - n / 2);
     for i in (0..n).step_by(2) {
         assert_eq!(r.atoms.runtime().find(&Chars::One(format!("atom number {i}").as_bytes())), Some(all[i]));
     }
@@ -382,6 +419,65 @@ fn a_set_has_no_value_to_wait_for() {
     assert_eq!(entry(t, 1), (Value::UNDEFINED, Value::UNDEFINED));
 }
 
+// ---- shapes
+
+#[test]
+fn a_prototype_that_only_a_shape_holds_survives() {
+    let mut r = Realm::new();
+    let base = r.base();
+    let (proto, child) = (r.obj(1), r.obj(0));
+    set(proto, 0, ov(child));
+    // The object has no edge to `proto`: only its shape names it.
+    let k = r.keys(1);
+    let root = r.shapes.root(Layout::Object, Some(proto), 4);
+    let shape = r.shapes.add(root, k[0], WRITE).unwrap();
+    let o = r.make(shape, 1);
+    let s = r.collect(&[ov(o)]);
+    // The object, its prototype, and what the prototype names.
+    assert_eq!(s.marked, base.marked + 3);
+    let fresh: Vec<NonNull<u8>> = (0..50).map(|_| r.obj(1)).collect();
+    assert!(!fresh.contains(&proto) && !fresh.contains(&child));
+    assert_eq!(get(proto, 0), ov(child));
+    // Many objects of one shape make the prototype one entry of the work list, and the shape stays after the collection.
+    let many: Vec<Value> = (0..20).map(|_| ov(r.make(shape, 1))).collect();
+    assert_eq!(r.collect(&many).marked, base.marked + 22);
+    assert_eq!(r.shapes.get(shape).proto(), Some(proto));
+    // With no object, the shape goes and so does the prototype.
+    assert_eq!(r.collect(&[]).live_bytes, base.live_bytes);
+}
+
+#[test]
+fn a_shape_that_no_marked_cell_uses_is_freed_and_its_id_is_reused() {
+    let mut r = Realm::new();
+    let base = r.base();
+    let (live_key, dead_key) = (r.atoms.intern(&mut r.heap, Chars::One(b"a key of a live shape")).unwrap(), r.atoms.intern(&mut r.heap, Chars::One(b"a key of a dead shape")).unwrap());
+    let k = r.keys(1);
+    let root = r.shapes.root(Layout::Object, None, 2);
+    let a = r.shapes.add(root, k[0], WRITE).unwrap();
+    let live = r.shapes.add(a, live_key, WRITE).unwrap();
+    // A branch of the tree: its table is its own, and its key is in no other shape.
+    let dead = r.shapes.add(root, dead_key, WRITE).unwrap();
+    let (kept, gone) = (r.make(live, 2), r.make(dead, 1));
+    let (count, epoch) = (r.shapes.count(), r.shapes.epoch());
+    let _ = gone;
+    let s = r.collect(&[ov(kept)]);
+    // `live` and its parents stay. `dead` is freed, with the atom that only it named.
+    assert_eq!(r.shapes.count(), count - 1);
+    assert_ne!(r.shapes.epoch(), epoch);
+    assert_eq!((s.marked, s.atoms_dropped), (base.marked + 1, 1));
+    assert_eq!(r.atoms.runtime().find(&Chars::One(b"a key of a dead shape")), None);
+    assert_eq!(r.atoms.runtime().find(&Chars::One(b"a key of a live shape")), Some(live_key));
+    assert_eq!(r.shapes.entries(live).map(|e| e.key()).collect::<Vec<_>>(), [k[0], live_key]);
+    // The next shape takes the freed id.
+    let next = r.shapes.add(root, k[0], A_W).unwrap();
+    assert_eq!(next, dead);
+    // A collection that frees nothing keeps the epoch.
+    let reuse = r.make(next, 1);
+    let epoch = r.shapes.epoch();
+    r.collect(&[ov(kept), ov(reuse)]);
+    assert_eq!(r.shapes.epoch(), epoch);
+}
+
 // ---- stress
 
 /// One random graph: its cells, its strong edges, its tables, and a model of what a collection keeps.
@@ -392,15 +488,20 @@ struct Graph {
     edges: Vec<Vec<usize>>,
     entries: Vec<Vec<(usize, usize)>>,
     roots: Vec<usize>,
+    /// The object has a dictionary shape of its own.
+    own: Vec<bool>,
 }
 
 fn build(r: &mut Realm, rng: &mut Rng, n: usize, table_share: usize) -> Graph {
-    let mut g = Graph { cells: Vec::new(), kind: Vec::new(), edges: vec![Vec::new(); n], entries: vec![Vec::new(); n], roots: Vec::new() };
+    let mut g = Graph { cells: Vec::new(), kind: Vec::new(), edges: vec![Vec::new(); n], entries: vec![Vec::new(); n], roots: Vec::new(), own: vec![false; n] };
     let mut strings = Vec::new();
     for i in 0..n {
         let roll = rng.below(100);
         let (v, k) = if roll < 55 {
-            let o = r.obj(1 + rng.below(6));
+            let n = 1 + rng.below(6);
+            // Most objects share the shape of their size; one in eight has a dictionary shape of its own.
+            g.own[i] = rng.below(8) == 0;
+            let o = if g.own[i] { r.own(n) } else { r.obj(n) };
             set(o, 0, Value::int(i as i32));
             (ov(o), 0)
         } else if roll < 80 || strings.is_empty() && roll < 90 {
@@ -489,6 +590,8 @@ fn check(r: &mut Realm, g: &Graph, keep: &[bool], base: Stats) -> Stats {
     let s = r.collect(&roots);
     let kept = keep.iter().filter(|&&k| k).count() as u64;
     assert_eq!(s.marked, base.marked + kept);
+    // The shapes of the dead objects are freed: the dictionary shapes that remain are those of the kept objects.
+    assert_eq!(r.shapes.stats().dicts, (0..n).filter(|&i| keep[i] && g.own[i]).count());
     // Allocate over the dead cells: nothing live is overwritten.
     let spam: Vec<NonNull<u8>> = (0..n.min(if MIRI { 60 } else { 20_000 })).map(|i| r.heap.alloc([16, 40, 64, 200, 1000][i % 5]).unwrap()).collect();
     for &p in &spam {
@@ -524,6 +627,7 @@ fn stress(seed: u64, n: usize, table_share: usize) -> Stats {
     let mut rng = Rng(seed);
     let base = r.base();
     let start_mapped = r.heap.mapped_bytes();
+    let shapes_at_start = r.shapes.count();
     assert!(base.live_bytes > 0);
     let g = build(&mut r, &mut rng, n, table_share);
     let keep = model(&g);
@@ -535,6 +639,7 @@ fn stress(seed: u64, n: usize, table_share: usize) -> Stats {
     r.collect(&[]);
     let end = r.collect(&[]);
     assert_eq!((end.marked, end.live_bytes), (base.marked, base.live_bytes));
+    assert_eq!((r.shapes.stats().dicts, r.shapes.count()), (0, shapes_at_start));
     r.collect(&[]);
     assert!(r.heap.mapped_bytes() <= start_mapped + POOL_KEEP * BLOCK, "{} against {start_mapped}", r.heap.mapped_bytes());
     first
