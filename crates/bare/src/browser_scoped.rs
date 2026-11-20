@@ -442,6 +442,19 @@ pub(crate) fn call_hs<'s>(d: &Dom, s: &mut Sc<'s, '_>, h: HS, this: Local<'s>, v
     h(d, s, this, a)
 }
 
+/// A handler of the new form called as one of the old form (for the callers that have not moved).
+pub(crate) fn via(d: &Dom, it: &mut Interp<'_>, h: HS, this: Value, a: &[Value]) -> R<Value> {
+    run_v(it, |s| {
+        let e = s.engine();
+        let this = e.raw_local(&this);
+        let base = e.stack_len();
+        for v in a {
+            e.raw_local(v);
+        }
+        h(d, s, this, Args::from_slots(base, a.len() as u32))
+    })
+}
+
 impl Dom {
     /// `Dom::lim` as an error of the interface.
     #[cold]
