@@ -241,6 +241,13 @@ pub struct Realm {
     pub string_proto: Obj,
     pub number_proto: Obj,
     pub boolean_proto: Obj,
+    /// `Symbol.prototype`, and the well-known symbols in the order of `bi_symbol::WK` (`bi_symbol.rs`). The members of `Symbol` and of
+    /// the prototype are made at the first use of either (`Realm::fn_props`).
+    pub symbol_proto: Obj,
+    pub symbol_ctor: Option<Obj>,
+    pub(crate) wk: [Str; crate::bi_symbol::WK],
+    /// The registry of `Symbol.for`: an object with no prototype, made at the first call. It is a root.
+    pub(crate) registry: Option<Obj>,
     /// `TypeError.prototype` and the others, by `ErrKind`.
     pub error_protos: [Obj; 7],
     /// The shape of a built-in function cell: slot 0 is the index in `natives`, slots 1 to 3 are free for the function (a bound function).
@@ -323,7 +330,8 @@ impl Realm {
         let s_func = shapes.add(f, k_link, 0).expect("shape");
         let s_args = shapes.root(Layout::Indexed, Some(object_proto.cell()), 0);
         let mk = |heap: &mut Heap| Obj::new(heap, &shapes, s_object).expect("memory");
-        let (string_proto, number_proto, boolean_proto) = (mk(&mut heap), mk(&mut heap), mk(&mut heap));
+        let (string_proto, number_proto, boolean_proto, symbol_proto) = (mk(&mut heap), mk(&mut heap), mk(&mut heap), mk(&mut heap));
+        let wk = crate::bi_symbol::well_known(&mut heap);
         // The prototypes of `TypeError` and the others inherit from `Error.prototype`.
         let eshape = shapes.root(Layout::Object, Some(error_proto.cell()), 4);
         let mut error_protos = [error_proto; 7];
@@ -333,11 +341,12 @@ impl Realm {
             }
         }
         let s_native = hidden.iter().fold(shapes.root(Layout::Object, Some(function_proto.cell()), 4), |f, k| shapes.add(f, *k, 0).expect("shape"));
-        let mut consts: Vec<Value> = [object_proto, function_proto, array_proto, error_proto, global, string_proto, number_proto, boolean_proto].iter().map(|o| o.value()).collect();
+        let mut consts: Vec<Value> = [object_proto, function_proto, array_proto, error_proto, global, string_proto, number_proto, boolean_proto, symbol_proto].iter().map(|o| o.value()).collect();
         consts.extend(error_protos.iter().map(|o| o.value()));
         consts.extend(hidden.iter().map(|s| s.value()));
         consts.extend([k_prim, k_code, k_ctx, k_prototype, k_length, k_name, k_message, k_home, k_fields, k_link, k_constructor, k_raw, k_value_of, k_to_string].iter().map(|s| s.value()));
         consts.extend(tnames.iter().map(|s| s.value()));
+        consts.extend(wk.iter().map(|s| s.key_value()));
         let pins = vec![s_object, s_array, s_func, s_args, s_native];
         let epoch = shapes.epoch();
         let probe = Obj::new(&mut heap, &shapes, s_func).expect("memory");
@@ -371,6 +380,10 @@ impl Realm {
             string_proto,
             number_proto,
             boolean_proto,
+            symbol_proto,
+            symbol_ctor: None,
+            wk,
+            registry: None,
             error_protos,
             s_native,
             natives: Vec::new(),
@@ -451,6 +464,13 @@ impl Realm {
     pub fn str_of(v: Value) -> Option<Str> {
         // SAFETY: by the invariant above.
         unsafe { Str::from_value(v) }
+    }
+
+    /// The symbol of a value of kind `Symbol`.
+    #[inline]
+    pub fn sym_of(v: Value) -> Option<Str> {
+        // SAFETY: by the invariant above.
+        unsafe { Str::from_symbol(v) }
     }
 
     #[inline]
@@ -663,6 +683,10 @@ impl Realm {
         {
             return Ok(Key::Idx(f as u32));
         }
+        let v = if Realm::obj(v).is_some() { self.to_primitive(v, Hint::String)? } else { v };
+        if let Some(sym) = Realm::sym_of(v) {
+            return Ok(Key::Name(sym));
+        }
         let s = self.to_str(v)?;
         let s = self.flat(s);
         if let Some(Chars::One(b)) = s.chars()
@@ -751,6 +775,10 @@ impl Realm {
         }
         if let (Some(_), Some(_)) = (Realm::str_of(x), Realm::str_of(y)) {
             return Ok(self.strict_eq(x, y));
+        }
+        // A symbol is equal to itself only; it never converts to a number.
+        if x.as_pointer().is_some_and(|p| p.0 == Kind::Symbol) || y.as_pointer().is_some_and(|p| p.0 == Kind::Symbol) {
+            return Ok(x == y);
         }
         let (a, b) = (self.to_number(x)?, self.to_number(y)?);
         Ok(a == b)
@@ -855,6 +883,13 @@ impl Realm {
             let proto = if recv.is_number() { self.number_proto } else { self.boolean_proto };
             return Ok(match key {
                 Key::Name(k) => Self::got(self.lookup_g(proto, k)),
+                Key::Idx(_) => Got::Val(Value::UNDEFINED),
+            });
+        }
+        if recv.as_pointer().is_some_and(|p| p.0 == Kind::Symbol) {
+            self.fn_props(self.symbol_proto);
+            return Ok(match key {
+                Key::Name(k) => Self::got(self.lookup_g(self.symbol_proto, k)),
                 Key::Idx(_) => Got::Val(Value::UNDEFINED),
             });
         }
@@ -1184,11 +1219,43 @@ impl Realm {
         Ok(true)
     }
 
-    /// `x instanceof f`: the prototype chain of `x` holds the `prototype` property of `f`.
+    /// `x instanceof f`: `f[Symbol.hasInstance](x)` if `f` has it, else the prototype chain of `x` holds the `prototype` property of `f`.
+    /// `Function.prototype[Symbol.hasInstance]` is the ordinary test, so the common case skips the call.
     pub fn instance_of(&mut self, x: Value, f: Value) -> R<bool> {
-        let Some(fo) = Realm::obj(f).filter(|o| o.is_callable()) else { return self.type_error("the right side of instanceof is not callable") };
+        let Some(fo) = Realm::obj(f) else { return self.type_error("the right side of instanceof is not an object") };
+        self.fn_props(fo);
+        match self.lookup_g(fo, self.wk[crate::bi_symbol::HAS_INSTANCE]) {
+            None => {}
+            Some(Slot::Data(h)) if self.native_id(h).is_some_and(|i| self.natives[i].name == crate::bi_symbol::HAS_INSTANCE_NAME) => {}
+            Some(s) => {
+                let h = match Self::got(Some(s)) {
+                    Got::Val(h) => h,
+                    Got::Get(g) => self.call_function(g, f, &[])?,
+                };
+                if h.is_undefined() || h.is_null() {
+                    if !fo.is_callable() {
+                        return self.type_error("the right side of instanceof is not callable");
+                    }
+                    return self.ordinary_has_instance(fo, x);
+                }
+                if !Realm::obj(h).is_some_and(|h| h.is_callable()) {
+                    return self.type_error("Symbol.hasInstance is not a function");
+                }
+                let r = self.call_function(h, f, &[x])?;
+                return Ok(Realm::truthy(r));
+            }
+        }
+        if !fo.is_callable() {
+            return self.type_error("the right side of instanceof is not callable");
+        }
+        self.ordinary_has_instance(fo, x)
+    }
+
+    /// `OrdinaryHasInstance(fo, x)`.
+    pub(crate) fn ordinary_has_instance(&mut self, fo: Obj, x: Value) -> R<bool> {
+        let Some(mut o) = Realm::obj(x).filter(|_| fo.is_callable()) else { return Ok(false) };
         let Some(p) = self.lookup(fo, self.k_prototype)? else { return Ok(false) };
-        let (Some(po), Some(mut o)) = (Realm::obj(p), Realm::obj(x)) else { return Ok(false) };
+        let Some(po) = Realm::obj(p) else { return self.type_error("function has non-object prototype in instanceof check") };
         while let Some(n) = self.proto_of(o) {
             if n == po {
                 return Ok(true);
@@ -1235,6 +1302,10 @@ impl Realm {
 
     #[cold]
     fn fn_props_slow(&mut self, o: Obj) {
+        // The flag also marks `Symbol` and `Symbol.prototype`, which make their members at the first read (`bi_symbol.rs`).
+        if o == self.symbol_proto || Some(o) == self.symbol_ctor {
+            return self.symbol_members();
+        }
         o.clear_flag(F_LAZY);
         let (name, len) = o.slot(&self.shapes, 0).as_int().and_then(|c| self.fn_info.get(c as usize).copied()).unwrap_or((None, 0));
         let name = match name {

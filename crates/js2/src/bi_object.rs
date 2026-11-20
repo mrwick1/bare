@@ -67,6 +67,9 @@ pub(crate) const HELPERS: usize = 7;
 
 /// The array index that the text of the atom `k` is, if it is one (a canonical decimal below 2^32 - 1).
 pub(crate) fn atom_index(k: Str) -> Option<u32> {
+    if k.is_symbol() {
+        return None;
+    }
     let s = k.resolve();
     let Some(Chars::One(b)) = s.chars() else { return None };
     if b.is_empty() || b.len() > 10 || !b[0].is_ascii_digit() || (b[0] == b'0' && b.len() > 1) || !b.iter().all(u8::is_ascii_digit) {
@@ -191,6 +194,9 @@ impl Realm {
                 continue;
             }
             let k = e.key();
+            if k.is_symbol() {
+                continue;
+            }
             match atom_index(k) {
                 Some(i) => idx.push((i, k.value())),
                 None if self.is_hidden_key(k) => {}
@@ -223,6 +229,13 @@ impl Realm {
         }
         out.extend(names);
         out
+    }
+
+    /// The own symbol keys of an object in the order they were added (`Object.getOwnPropertySymbols`, and the symbols that `Object.assign`
+    /// copies). `enumerable` leaves out the properties that are not enumerable.
+    pub(crate) fn own_symbol_list(&mut self, o: Obj, enumerable: bool) -> Vec<Value> {
+        self.fn_prep_all(o);
+        self.shapes.entries(o.shape(&self.shapes)).filter(|e| e.key().is_symbol() && (!enumerable || e.attrs() & A_E != 0)).map(|e| e.key().key_value()).collect()
     }
 
     /// Is `k` the name of an internal slot (`\0code`, a private name)?
@@ -607,6 +620,7 @@ impl Realm {
             ("getOwnPropertyDescriptor", 2, object_own_descriptor),
             ("getOwnPropertyDescriptors", 1, object_own_descriptors),
             ("getOwnPropertyNames", 1, object_own_names),
+            ("getOwnPropertySymbols", 1, object_own_symbols),
             ("is", 2, object_is),
             ("preventExtensions", 1, object_prevent_extensions),
             ("seal", 1, object_seal),
@@ -748,6 +762,13 @@ fn object_assign(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
             let key = rt.key_of(k)?;
             rt.set_checked(target, key, v, false)?;
         }
+        for k in Realm::obj(src).map(|o| rt.own_symbol_list(o, true)).unwrap_or_default() {
+            let key = rt.key_of(k)?;
+            match rt.get_own_of(src, key)? {
+                Some(Own::Data(v, _)) => rt.set_checked(target, key, v, false)?,
+                _ => return rt.helper(H_ASSIGN, args),
+            }
+        }
     }
     Ok(target)
 }
@@ -778,8 +799,8 @@ fn define_all(rt: &mut Realm, o: Obj, props: Value) -> R<Value> {
     let keys = rt.own_keys(props)?;
     let ko = Realm::obj(keys).expect("an array");
     let mut work: Vec<(Key, Desc)> = Vec::new();
-    for i in 0..ko.len() {
-        let kv = ko.get_element(i).expect("a key");
+    let syms = Realm::obj(props).map(|o| rt.own_symbol_list(o, true)).unwrap_or_default();
+    for kv in (0..ko.len()).map(|i| ko.get_element(i).expect("a key")).chain(syms) {
         let key = rt.key_of(kv)?;
         let Some(Own::Data(dv, _)) = rt.get_own_of(props, key)? else { return rt.helper(H_DEFINE_ALL, &[o.value(), props]) };
         let Some(d) = rt.read_desc(dv)? else { return rt.helper(H_DEFINE_ALL, &[o.value(), props]) };
@@ -808,6 +829,12 @@ fn object_define_properties(rt: &mut Realm, _this: Value, args: &[Value]) -> R<V
     define_all(rt, o, arg(args, 1))
 }
 
+fn object_own_symbols(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+    let v = to_obj(rt, arg(args, 0))?;
+    let list = Realm::obj(v).map(|o| rt.own_symbol_list(o, false)).unwrap_or_default();
+    Ok(rt.new_array(&list))
+}
+
 fn object_get_prototype_of(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let v = arg(args, 0);
     if let Some(o) = Realm::obj(v) {
@@ -819,6 +846,8 @@ fn object_get_prototype_of(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Va
         rt.number_proto.value()
     } else if v.as_bool().is_some() {
         rt.boolean_proto.value()
+    } else if Realm::sym_of(v).is_some() {
+        rt.symbol_proto.value()
     } else {
         return rt.type_error("cannot convert undefined or null to an object");
     })
@@ -886,7 +915,9 @@ fn object_own_descriptors(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Val
     let v = to_obj(rt, arg(args, 0))?;
     let out = Obj::new(&mut rt.heap, &rt.shapes, rt.s_object).expect("memory");
     if let Some(o) = Realm::obj(v) {
-        for k in rt.own_key_list(o, false) {
+        let mut keys = rt.own_key_list(o, false);
+        keys.extend(rt.own_symbol_list(o, false));
+        for k in keys {
             let key = rt.key_of(k)?;
             if let Some(p) = rt.get_own(o, key) {
                 let d = rt.from_own(p);
@@ -1038,6 +1069,8 @@ pub(crate) fn object_to_string(rt: &mut Realm, this: Value, _args: &[Value]) -> 
                 "String"
             } else if p.is_number() {
                 "Number"
+            } else if Realm::sym_of(p).is_some() {
+                "Object"
             } else {
                 "Boolean"
             }
@@ -1054,6 +1087,11 @@ pub(crate) fn object_to_string(rt: &mut Realm, this: Value, _args: &[Value]) -> 
         }
     } else {
         "Object"
+    };
+    // `Symbol.toStringTag` of the value (a string) replaces the built-in tag. `undefined` and `null` have none.
+    let tag = match if this.is_undefined() || this.is_null() { Value::UNDEFINED } else { rt.get_prop(this, Key::Name(rt.wk[crate::bi_symbol::TO_STRING_TAG]))? } {
+        t if Realm::str_of(t).is_some() => rt.text(Realm::str_of(t).expect("a string")),
+        _ => tag.to_string(),
     };
     Ok(rt.string(&format!("[object {tag}]")))
 }

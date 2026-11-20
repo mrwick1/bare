@@ -764,7 +764,13 @@ impl Vm {
             ($g:expr, $this:expr, $dst:expr, $next:expr) => {{
                 let g: Value = $g;
                 let this: Value = $this;
-                let Some((ni, cctx)) = realm.function(g) else { err!(ErrKind::Type, "a getter is not a function") };
+                let Some((ni, cctx)) = realm.function(g) else {
+                    // A getter written in Rust (`Symbol.prototype.description`), or no function: the nested call runs it or throws.
+                    std::hint::cold_path();
+                    r!($dst) = tri!(realm.call_function(g, this, &[]));
+                    pc = $next;
+                    continue;
+                };
                 enter!(g, ni, cctx, this, undef, $dst as i32, pc, $next, fp, 0usize);
                 pc = 0;
                 continue;
@@ -1103,7 +1109,7 @@ impl Vm {
                         }
                         r!(a!()) = match tri!(realm.key_of(r!(c!()))) {
                             Key::Idx(i) => Realm::num(i as f64),
-                            Key::Name(s) => s.value(),
+                            Key::Name(s) => s.key_value(),
                         };
                         pc = next;
                     }
