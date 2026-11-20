@@ -252,6 +252,10 @@ impl Realm {
         self.fn_info.extend(prog.codes[known..].iter().map(code_info));
         fbs.resize_with(prog.codes.len(), Feedback::default);
         fbs[ci] = Feedback::default();
+        // A machine in the pool may have run the stub (and made its feedback for it): no nested run is active, so reset it too.
+        for m in self.pool.iter_mut().filter(|m| m.fbs.len() > ci) {
+            m.fbs[ci] = Feedback::default();
+        }
         let ncode = &prog.codes[ci];
         let need = fp + ncode.nregs as usize + 8;
         if need > stack.len() {

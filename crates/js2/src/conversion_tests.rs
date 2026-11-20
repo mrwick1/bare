@@ -178,3 +178,40 @@ fn a_wrapper_in_a_loop_under_constant_collection() {
     assert_eq!(ev(src, "r"), want);
     assert_eq!(ev_gc(src, "r"), want);
 }
+
+#[test]
+fn a_conversion_that_recurses_deep_grows_its_own_stack_and_the_outer_loop_goes_on() {
+    // The nested run has a stack of its own: the outer frame (its registers) is still valid after a `valueOf` that grows a stack.
+    let depth: i32 = if MIRI { 30 } else { 3000 };
+    check(&[(
+        &format!(
+            "function down(n) {{ return n == 0 ? 0 : 1 + down(n - 1); }} var o = {{valueOf: function () {{ return down({depth}); }}}};
+             var a = 1, b = 2, c = [3];
+             var r = 0;
+             for (var i = 0; i < 3; i++) {{ var x = a + b; r += (o + x) + c[0]; c[0] = c[0] + 1; }}
+             r = r + ',' + a + b + c[0];"
+        ),
+        "r",
+        &format!("{},126", (0..3).map(|i| depth + 3 + 3 + i).sum::<i32>()),
+    )]);
+}
+
+#[test]
+fn a_prelude_function_that_an_outer_run_compiled_works_in_a_nested_call() {
+    // `map` waits as a stub until its first call (`Op::Lazy`). The outer run compiles it; a `valueOf` that calls it later works.
+    check(&[(
+        "[1].map(function (x) { return x; }); var o = {valueOf: function () { return [1, 2, 3].map(function (x) { return x * 2; }).length; }}; var r = o + 1;",
+        "r",
+        "4",
+    )]);
+}
+
+#[test]
+fn a_prelude_function_that_waits_cannot_be_compiled_inside_a_nested_call_and_the_next_outer_run_compiles_it() {
+    // Known gap: a nested run cannot change the program that the runs above it borrow, so the first call of a stub there throws. The
+    // script can catch the error, and the stub still waits: the outer run compiles it.
+    let mut vm = load("var e; var o = {valueOf: function () { return [1].map(function (x) { return x; }).length; }}; try { o + 1; } catch (x) { e = x.name; } var r = [1, 2].map(function (x) { return x; }).length + o;").unwrap();
+    vm.run_main(0).unwrap();
+    assert_eq!(vm.global_text("e"), "SyntaxError");
+    assert_eq!(vm.global_text("r"), "3");
+}

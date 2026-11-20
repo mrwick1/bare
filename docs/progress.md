@@ -16438,6 +16438,55 @@ Machine archMachine (load average 3 at the end of the work; instruction counts d
 ### Not tested
 
 Windows and macOS; arm64; Miri on the whole crate (only `conversion_tests`; a first run of the loop test with 300 turns did not end in 2 hours, so it runs 12 turns under Miri); the GC-hold gap with a `valueOf` that allocates more than the slack in a loop (no test; the budget bounds it); sloppy-mode `this` boxing; the cgu 1 numbers on an idle machine.
+
+### Merge with main (#768 built-in attributes, #770 lazy prelude)
+
+Merged `origin/main` `d4709367` into the branch (head of #785 was `468c695b`, based on `fae94731`). Conflicts in `builtins.rs`, `interp.rs`, `interp_rt.rs`, `object.rs` and the test262 baseline.
+
+- **Flags.** `F_WRAP` is 4096. Main uses 1 (`F_OVER`, `Elements`: `F_SPARSE`), 2, 4, 8, 16, 32 (`F_NOEXT`), 64 (`F_FNPROPS`), 128, 256, 512, 1024 and 2048 (`F_LAZY`). A cell has 24 flag bits (`FLAG_MAX`). Every use of `F_WRAP` goes through the constant.
+- **Object built-ins.** Main moved them to `bi_object.rs`. The changes of #785 went into that file; attributes, `fn_props`, `Put::Fail` and the non-extensible checks are main's. `object_ctor` makes `ToObject` wrappers (`Object(v)`, `new Object(v)`). `get_own` answers the units and `length` of a `String` wrapper, so `getOwnPropertyDescriptor(s)`, `hasOwnProperty`, `propertyIsEnumerable`, `hasOwn` and `Object.entries` see them. `own_key_list` lists them (units first, `length` after the indexes). `object_to_string` tags a wrapper. `getPrototypeOf` on a primitive, the `ToObject` throw for `undefined` and `null`, and the skip of such sources in `assign` were already in main. `\0prim` is a hidden key, so `own_key_list` leaves it out.
+- **`interp.rs`.** `unwind` keeps `#[cold] #[inline(never)]`. The `Op::Lazy` and `ObjRest` arms of main stay, `Op::Lazy` changed (below). `Vm::run` takes `prog: &Program` as in #785.
+- **Lazy compile and the shared program (new design).** #770 compiles a stub inside the loop, with `&mut Program`. #785 shares the program as `Rc<Program>` with nested runs, and the loop holds `&Program`. Both cannot hold. Now `Op::Lazy` sets `Realm::lazy_at` (stub code index and frame pointer) and returns from `run`. `Vm::start` drops its `Rc`, calls `Realm::compile_stub` (the compile, the `fn_info` of the new codes, the feedback vectors, the frame made again for the real code), takes a new `Rc` and calls `run` again at `(ci, fp)`, pc 0. Frames below stay on the stack, so the run goes on as before. `Vm` has no `prog` field (a second `Rc` would block `Rc::get_mut`); the program is `Vm::realm.prog`, and the compiler is `Realm::lazy`. A failed compile sets `Realm::lazy_err`, and the op throws it as a `SyntaxError` in the frame of the stub (the old test `a_lazy_compile_that_fails_throws_a_syntax_error` passes). A machine in the pool gets its feedback for the compiled code reset (it may have run the stub).
+- **Known gap: a stub cannot be compiled inside a nested run.** A nested run (`Realm::call_function`) has runs above it that borrow the program, so `Rc::get_mut` fails. A prelude function that waits and is called for the first time inside a conversion, getter or setter that a native runs throws a `SyntaxError` there; the script can catch it, the stub still waits, and the next call from an outer run compiles it. A prelude function that an outer run compiled before works in a nested call. No test262 test meets the gap (the pass list of main loses nothing). Ways to lift it: compile all stubs at the first nested call (needs the program free then), or keep the code table in a structure that allows an append through `&` (stable addresses, one more load for each call and return). Not built.
+- **Tests added** (`conversion_tests.rs`): a `valueOf` that recurses 3,000 deep grows the stack of its own machine and the outer loop goes on with its registers; a prelude function that the outer run compiled works in a nested call; the gap above (error caught, next outer run compiles). The test for #773 (`regs` pointer in `Vm::run`) is the first of these; #773 had not landed (no `regs` in `interp.rs` of main `d4709367`), so it did not run against it.
+
+#### test262 after the merge (`tools/js/test262_js2.sh -j 6`, checkout `e4fbf577`)
+
+| | main `d4709367` | merged |
+| --- | ---: | ---: |
+| js2 pass | 14,720 | 15,772 |
+| js2 fail | 3,064 | 2,012 |
+| old engine pass | 16,755 | 16,755 |
+| pass on old, fail on js2 | 2,094 | 1,060 |
+| pass on js2, fail on old | 59 | 77 |
+| passed on main, fails now | - | 0 |
+
+The comparison is test by test (PASS lines of `new.txt`): 0 tests lost, 1,052 gained. `tools/fixtures/js/test262-js2-baseline.txt` is regenerated (`-u`).
+
+#### Differential runner
+
+`cargo test --locked -p bare-js-diff`: pass. `tools/fixtures/js/diff-known.txt` went from 21 lines to 17: 4 lines removed (`new String`, `new Number`, `Object(5)`, script `valueOf`), none added.
+
+#### Cost after the merge
+
+`interp_load` release, `perf stat -e instructions:u` with `GLIBC_TUNABLES=glibc.malloc.tcache_count=65535` (`tools/js/instr.sh`, minimum of 3 runs), net = count(N) - count(0), in M instructions. Main `d4709367` and the merged tree built and measured in the same hour on archMachine; two rounds, equal to 0.003 M. cgu 16 is the default; cgu 1 is `CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1` for both trees.
+
+| Row | N | Main cgu 16 | Merged cgu 16 | Change | Main cgu 1 | Merged cgu 1 | Change |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loopfn` | 1,000,000 | 320.50 | 327.50 | +2.2% | 328.50 | 313.50 | -4.6% |
+| `calls` | 1,000,000 | 708.50 | 689.50 | -2.7% | 723.50 | 685.50 | -5.3% |
+| `fib` | 30 | 1452.28 | 1393.04 | -4.1% | 1483.24 | 1407.85 | -5.1% |
+| `closures` | 200,000 | 418.29 | 412.09 | -1.5% | 428.95 | 414.55 | -3.4% |
+| `objects` | 200,000 | 153.39 | 154.06 | +0.43% | 158.40 | 156.80 | -1.0% |
+
+`loopfn` is over +0.5% at the default build and is within +0.5% (it is 4.6% lower) at codegen-units 1 on both trees, so it passes by the rule. No other row is over +0.5%. The cgu 16 sign of `loopfn` is the swing of the register allocator that the earlier rounds describe (`Vm::run` is one function of 330 KB); the loop of the ops of this row did not change in the merge.
+
+#### Tests
+
+`cargo test --locked -p bare-js2 --lib`: 403 pass (400 before the three new tests; `a_scope_with_many_locals_compiles_in_linear_time` passes). `cargo test --locked -p bare-js-diff`: pass.
+
+Not tested: Windows and macOS; arm64; Miri after the merge; the nested-stub gap beyond the one test; #773, #774, #775 (not on main when this was measured); the cgu 1 numbers on an idle machine. `cargo clippy` stops on `bi_object.rs:450` (`ro || (d.w == Some(true) && ro)`, `overly_complex_bool_expr`), code of #768 that this merge did not change.
+
 ## 2026-11-20: host handlers on the interface, D1: style, CSSOM and geometry (plan step S0.4 / D1)
 
 Status: the handlers of the files below run through the interface (`Scope`, `Local`, `Args`). Tests pass on Linux and Windows. The full matrix passes under the standing rule: no row is over +0.5% under both allocators. Base: PR #762 (`t3/convert-browser-host-handlers`, head `9f74a623`). The diff is about 2,200 changed lines.
