@@ -25,3 +25,6 @@ pub mod gc;
 pub mod object;
 pub mod roots;
 pub mod lex;
+pub mod ast;
+pub mod facts;
+pub mod parse;
