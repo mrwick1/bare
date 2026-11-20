@@ -23,3 +23,4 @@ pub mod shapes;
 pub mod gc;
 #[allow(unsafe_code)]
 pub mod object;
+pub mod roots;

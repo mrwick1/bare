@@ -10,6 +10,14 @@
 //!   objects are swept at once.
 //! - A block with no live cell after its sweep goes to a pool of [`POOL_KEEP`] blocks; the rest go back to the OS.
 //!
+//! The trigger (design 6.11 item 1 and section 10 Q11, plan step S1.6) counts bytes of cells that the allocator took since the last
+//! collection ([`Heap::grown_bytes`]). The count grows only on the slow path, when a block (a new one or a swept one) puts its free
+//! cells on the free list, so the fast path has no counter and no compare. It is an upper bound by at most one block for each class
+//! (the cells of a refilled block that no one took yet). The count has two limits, both in [`Trigger`] terms:
+//! - [`Heap::due`]: the limit of a collection between tasks. The host asks at a safepoint with an empty JS stack.
+//! - [`Heap::try_alloc`] refuses at the task limit, which is the first limit plus [`Trigger::slack`]. The caller collects with the
+//!   roots of its frames (`roots.rs`) and then calls [`Heap::alloc`], which never refuses.
+//!
 //! Address invariant (design 6.1): a [`crate::value::Value`] holds 48 address bits, so a block that the OS maps above that is
 //! given back and the allocation fails.
 //!
@@ -28,6 +36,10 @@ const NCLASS: usize = CLASSES.len();
 /// The class of a large object.
 const LARGE: u16 = u16::MAX;
 const MARK_WORDS: usize = 64;
+/// The default of [`Trigger::min`]: the floor that the old engine uses (`GC_MIN_BYTES`).
+pub const TRIGGER_MIN: usize = 8 << 20;
+/// The default of [`Trigger::slack`]: 2 times `task_alloc_max` of the daily journeys (4.23 MiB at most, `docs/progress.md`, P0.2).
+pub const TRIGGER_SLACK: usize = 8 << 20;
 const ADDRESS_LIMIT: usize = 1 << 48;
 
 #[repr(C)]
@@ -60,6 +72,23 @@ const CLASS_OF: [u8; MAX_SMALL / 16 + 1] = {
 
 type Block = NonNull<Header>;
 
+/// The sizes of the trigger.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Trigger {
+    /// A collection is due when the heap (the live bytes of the last collection and the bytes allocated since) passes the larger of this
+    /// and 1.75 times the live bytes. This is the rule of the old engine (`Interp::gc_due`), in bytes of growth.
+    pub min: usize,
+    /// A task may allocate this much past that limit before the allocation itself collects. With the slack above the largest task
+    /// that the journeys make, only a task that grows by more than the slack ever collects inside the task.
+    pub slack: usize,
+}
+
+impl Default for Trigger {
+    fn default() -> Self {
+        Trigger { min: TRIGGER_MIN, slack: TRIGGER_SLACK }
+    }
+}
+
 pub struct Heap {
     /// The head of the free list of each class; null when it is empty.
     free: [*mut u8; NCLASS],
@@ -72,11 +101,30 @@ pub struct Heap {
     mapped: usize,
     /// Bytes of the cells that the last collection marked (see [`Heap::marked_bytes`]).
     marked: usize,
+    /// Bytes of cells that the slow path made available since the last collection (see [`Heap::grown_bytes`]).
+    grown: usize,
+    /// `grown` at which a collection is due, and at which [`Heap::try_alloc`] refuses.
+    limit: usize,
+    task_limit: usize,
+    trigger: Trigger,
 }
 
 impl Default for Heap {
     fn default() -> Self {
-        Heap { free: [ptr::null_mut(); NCLASS], swept: Default::default(), unswept: Default::default(), large: Vec::new(), pool: Vec::new(), mapped: 0, marked: 0 }
+        let trigger = Trigger::default();
+        Heap {
+            free: [ptr::null_mut(); NCLASS],
+            swept: Default::default(),
+            unswept: Default::default(),
+            large: Vec::new(),
+            pool: Vec::new(),
+            mapped: 0,
+            marked: 0,
+            grown: 0,
+            limit: trigger.min,
+            task_limit: trigger.min.saturating_add(trigger.slack),
+            trigger,
+        }
     }
 }
 
@@ -85,12 +133,12 @@ impl Heap {
     #[inline]
     pub fn alloc(&mut self, size: usize) -> Option<NonNull<u8>> {
         if size > MAX_SMALL {
-            return self.alloc_large(size);
+            return self.alloc_large(size, false);
         }
         let c = CLASS_OF[size.div_ceil(16)] as usize;
         let p = self.free[c];
         if p.is_null() {
-            return self.alloc_slow(c);
+            return self.alloc_slow(c, false);
         }
         // SAFETY: a free cell holds the next free cell in its first 8 bytes (see `link`).
         self.free[c] = unsafe { p.cast::<*mut u8>().read() };
@@ -98,8 +146,31 @@ impl Heap {
         Some(unsafe { NonNull::new_unchecked(p) })
     }
 
+    /// Like [`Heap::alloc`], for code that can collect: `None` when the task limit has passed (see [`Heap::task_due`]) or the OS gives no
+    /// memory. The limit is tested on the slow path only, so this costs the same as `alloc` while the free list has cells. After a
+    /// refusal at the limit, collect and call [`Heap::alloc`].
+    #[inline]
+    pub fn try_alloc(&mut self, size: usize) -> Option<NonNull<u8>> {
+        if size > MAX_SMALL {
+            return self.alloc_large(size, true);
+        }
+        let c = CLASS_OF[size.div_ceil(16)] as usize;
+        let p = self.free[c];
+        if p.is_null() {
+            return self.alloc_slow(c, true);
+        }
+        // SAFETY: as in `alloc`.
+        self.free[c] = unsafe { p.cast::<*mut u8>().read() };
+        // SAFETY: `p` is not null.
+        Some(unsafe { NonNull::new_unchecked(p) })
+    }
+
+    /// `task`: refuse (return `None`) when the task limit has passed.
     #[cold]
-    fn alloc_slow(&mut self, c: usize) -> Option<NonNull<u8>> {
+    fn alloc_slow(&mut self, c: usize, task: bool) -> Option<NonNull<u8>> {
+        if task && self.task_due() {
+            return None;
+        }
         while self.free[c].is_null() {
             match self.unswept[c].pop() {
                 Some(b) => self.sweep(b, c),
@@ -107,11 +178,16 @@ impl Heap {
                     let b = self.new_block(c)?;
                     // SAFETY: a new block: every cell is free.
                     unsafe { self.link(b, c, |_| false) };
+                    self.grown += ((BLOCK - FIRST) / CLASSES[c] as usize) * CLASSES[c] as usize;
                     self.swept[c].push(b);
                 }
             }
         }
-        self.alloc(CLASSES[c] as usize)
+        let p = self.free[c];
+        // SAFETY: as in `alloc`; the loop ended with a cell on the list.
+        self.free[c] = unsafe { p.cast::<*mut u8>().read() };
+        // SAFETY: `p` is not null.
+        Some(unsafe { NonNull::new_unchecked(p) })
     }
 
     /// Put the cells of `b` for which `live` is false on the free list of class `c`, in address order.
@@ -144,6 +220,9 @@ impl Heap {
         }
         // SAFETY: the cells of an unswept block are on no free list (`finish_mark` emptied them).
         unsafe { self.link(b, c, |i| marks[i / 64] >> (i % 64) & 1 != 0) };
+        // SAFETY: as above.
+        let (cell, cells) = unsafe { ((*b.as_ptr()).cell as usize, (*b.as_ptr()).cells as usize) };
+        self.grown += (cells - marks.iter().map(|w| w.count_ones() as usize).sum::<usize>()) * cell;
         self.swept[c].push(b);
     }
 
@@ -187,9 +266,13 @@ impl Heap {
     }
 
     #[cold]
-    fn alloc_large(&mut self, size: usize) -> Option<NonNull<u8>> {
+    fn alloc_large(&mut self, size: usize, task: bool) -> Option<NonNull<u8>> {
+        if task && self.task_due() {
+            return None;
+        }
         let len = (FIRST + size).checked_next_multiple_of(BLOCK)?;
         let b: Block = self.map(len)?.cast();
+        self.grown += len;
         // SAFETY: a new mapping with room for the header.
         unsafe { b.as_ptr().write(Header { cell: 0, cells: 1, class: LARGE, len, marks: [0; MARK_WORDS] }) };
         self.large.push(b);
@@ -266,6 +349,40 @@ impl Heap {
         for b in dead {
             self.unmap(b);
         }
+        self.grown = 0;
+        self.set_limits();
+    }
+
+    /// Set the limits from the live bytes of the last collection: a collection is due when live + grown passes the larger of
+    /// `trigger.min` and 1.75 times live.
+    fn set_limits(&mut self) {
+        let live = self.marked;
+        self.limit = self.trigger.min.max(live / 4 * 7).saturating_sub(live);
+        self.task_limit = self.limit.saturating_add(self.trigger.slack);
+    }
+
+    /// Change the trigger. The limits follow at once.
+    pub fn set_trigger(&mut self, t: Trigger) {
+        self.trigger = t;
+        self.set_limits();
+    }
+
+    /// Bytes of cells that the allocator took since the last collection, counted when a block gives its free cells to the free list
+    /// (see the module comment): large objects count their whole mapping.
+    pub fn grown_bytes(&self) -> usize {
+        self.grown
+    }
+
+    /// True when the heap has grown to the limit of a collection between tasks. The host asks at a safepoint with no JS frame.
+    #[inline]
+    pub fn due(&self) -> bool {
+        self.grown >= self.limit
+    }
+
+    /// True when [`Heap::try_alloc`] refuses: the task has passed the trigger by the slack.
+    #[inline]
+    pub fn task_due(&self) -> bool {
+        self.grown >= self.task_limit
     }
 
     /// Bytes of the cells that the last [`Heap::finish_mark`] found marked: the size class of a small cell and the whole mapping of a
