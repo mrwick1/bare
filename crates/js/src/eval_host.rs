@@ -236,6 +236,11 @@ impl<'p> Interp<'p> {
         self.perform_then(o, on_ok, on_err, derived)
     }
 
+    /// The iterator result `{ value, done }`, made with the keys the engine holds already.
+    pub fn host_iter_result(&mut self, value: Value, done: bool) -> Result<Value, Error> {
+        self.sc_iter_result(value, done)
+    }
+
     /// Reject a promise made by [`Interp::host_new_promise`]. See `host_resolve_promise`.
     pub fn host_reject_promise(&mut self, p: Value, v: Value) -> Result<(), Error> {
         let o = self.host_promise(p)?;

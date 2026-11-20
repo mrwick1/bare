@@ -31,11 +31,12 @@
 //!
 //! Node oracle for the semantics: `tools/js/streams_oracle.mjs` over `tools/fixtures/js/streams-cases.txt`.
 
-use crate::browser::{Browser, Dom, IdMap, Owner, R, illegal_constructor, unsupported};
-use bare_js::eval::Error;
+use crate::browser::{Browser, Dom, IdMap, Owner, R, illegal_constructor};
+use crate::browser_scoped::*;
 use bare_js::eval::Interp;
 use bare_js::value::{ObjId, Value};
-use bare_js_api::Traced;
+use bare_js::eval::Error as OldError;
+use bare_js_api::{Args, Engine, Error, HostFn, Local, Traced, Type};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::VecDeque;
 
@@ -125,7 +126,7 @@ struct State {
     readers: IdMap<ObjId, Rdr>,
     queued_bytes: usize,
     callbacks: u64,
-    fatal: Option<Error>,
+    fatal: Option<OldError>,
 }
 
 /// The templates of the host reactions. `this` of each bound copy is the controller, or the promise of a `cancel()` call.
@@ -145,17 +146,13 @@ struct Fns {
 /// The stream state of one `Dom`.
 #[derive(Default)]
 pub(crate) struct Streams {
+    names: Names,
     st: RefCell<State>,
     lim: Cell<StreamLimits>,
     fns: OnceCell<Fns>,
 }
 
-/// A traced reference to the object `o`.
-fn edge(it: &Interp<'_>, o: ObjId) -> Traced<Value> {
-    it.trace_value(Value::Object(o))
-}
-
-/// The object of a traced reference that `edge` made.
+/// The object of a traced reference to an object.
 fn oid(t: &Traced<Value>) -> ObjId {
     match *t.raw() {
         Value::Object(o) => o,
@@ -163,8 +160,9 @@ fn oid(t: &Traced<Value>) -> ObjId {
     }
 }
 
-fn val(t: &Traced<Value>) -> Value {
-    *t.raw()
+/// Is the traced value `undefined`? (Read in place: no local is pushed.)
+fn undef(t: &Traced<Value>) -> bool {
+    matches!(*t.raw(), Value::Undefined)
 }
 
 /// The references of the owner `Owner::Stream(owner)`: a stream, a controller or a reader.
@@ -225,81 +223,99 @@ fn fns(d: &Dom) -> Fns {
     *d.streams.fns.get().expect("installed")
 }
 
-/// Run an entry point: refuse after a fatal error, and make a non-JS error fatal for good.
-fn enter<T>(d: &Dom, f: impl FnOnce() -> R<T>) -> R<T> {
-    if let Some(e) = d.streams.st.borrow().fatal {
-        return Err(e);
+/// Run an entry point: refuse after a fatal error, and make a non-JS error fatal for good. The error is kept in the old form, so a
+/// later call gives the same limit.
+fn enter<'s, 'p, T>(d: &Dom, s: &mut Sc<'s, 'p>, f: impl FnOnce(&mut Sc<'s, 'p>) -> Res<'s, T>) -> Res<'s, T> {
+    if let Some(e) = d.streams.st.borrow().fatal.clone() {
+        return Err(s.engine().api_err(e));
     }
-    let r = f();
-    if let Err(e) = &r && !matches!(e, Error::Throw(_)) {
-        d.streams.st.borrow_mut().fatal = Some(*e);
+    match f(s) {
+        Err(bare_js_api::Error::Abort(a)) => {
+            let it = s.engine();
+            let e = it.api_unerr(bare_js_api::Error::Abort(a));
+            d.streams.st.borrow_mut().fatal = Some(e.clone());
+            Err(it.api_err(e))
+        }
+        r => r,
     }
-    r
 }
 
-fn arg(a: &[Value], i: usize) -> Value {
-    a.get(i).copied().unwrap_or(Value::Undefined)
+fn prop<'s>(s: &mut Sc<'s, '_>, o: Local<'s>, name: &str) -> Res<'s, Local<'s>> {
+    s.get_str(o, name)
 }
 
-fn prop(d: &Dom, it: &mut Interp<'_>, o: Value, name: &str) -> R<Value> {
-    let k = d.key(it, name)?;
-    it.get_value(o, k)
+/// The names that the constructor reads on every call. `K_*` index it.
+const NAMES: [&str; 7] = ["autoAllocateChunkSize", "cancel", "pull", "start", "type", "highWaterMark", "size"];
+const K_AUTO: usize = 0;
+const K_CANCEL: usize = 1;
+const K_PULL: usize = 2;
+const K_START: usize = 3;
+const K_TYPE: usize = 4;
+const K_HWM: usize = 5;
+const K_SIZE: usize = 6;
+
+/// `o[NAMES[i]]`, with no lookup of the text.
+fn named<'s>(d: &Dom, s: &mut Sc<'s, '_>, o: Local<'s>, i: usize) -> Res<'s, Local<'s>> {
+    let k = d.streams.names.local(s, &NAMES, i)?;
+    s.get(o, k)
 }
 
-fn thrown(e: Error) -> R<Value> {
+fn thrown<'s>(e: Error<'s>) -> Res<'s, Local<'s>> {
     match e {
         Error::Throw(v) => Ok(v),
         e => Err(e),
     }
 }
 
-fn type_value(it: &mut Interp<'_>, msg: &str) -> R<Value> {
-    let e = it.type_error(msg);
+fn type_value<'s>(s: &mut Sc<'s, '_>, msg: &str) -> Res<'s, Local<'s>> {
+    let e = s.type_error(msg);
     thrown(e)
 }
 
-fn iter_result(d: &Dom, it: &mut Interp<'_>, value: Value, done: bool) -> R<Value> {
+fn iter_result_raw(it: &mut Interp<'_>, value: Value, done: bool) -> R<Value> {
     it.charge(1)?;
-    let o = d.obj(it, it.object_prototype())?;
-    let (kv, kd) = (d.key(it, "value")?, d.key(it, "done")?);
-    it.define_data(o, kv, value, true, true, true)?;
-    it.define_data(o, kd, Value::Bool(done), true, true, true)?;
-    Ok(Value::Object(o))
+    it.host_iter_result(value, done)
 }
 
-fn resolve_with(d: &Dom, it: &mut Interp<'_>, p: Value, value: Value, done: bool) -> R<()> {
-    let r = iter_result(d, it, value, done)?;
-    it.host_resolve_promise(p, r)
+fn resolve_with<'s>(s: &mut Sc<'s, '_>, p: Local<'s>, value: Local<'s>, done: bool) -> Res<'s, ()> {
+    let (p, value) = (s.engine().raw(p), s.engine().raw(value));
+    old(s, |it| {
+        let r = iter_result_raw(it, value, done)?;
+        it.host_resolve_promise(p, r)
+    })
 }
 
 /// Call a user callback of the source. `Ok(Err(v))` is a JS exception. Counted and charged.
-fn invoke(d: &Dom, it: &mut Interp<'_>, f: Value, this: Value, args: &[Value]) -> R<Result<Value, Value>> {
+fn invoke<'s>(d: &Dom, s: &mut Sc<'s, '_>, f: Local<'s>, this: Local<'s>, arg: Local<'s>) -> Res<'s, Result<Local<'s>, Local<'s>>> {
     {
         let mut st = d.streams.st.borrow_mut();
         if st.callbacks >= lim(d).max_callbacks {
-            return Err(d.lim("stream-callbacks"));
+            drop(st);
+            return Err(d.lim_s(s, "stream-callbacks"));
         }
         st.callbacks += 1;
     }
-    it.charge(2)?;
-    match it.call(f, this, args) {
-        Ok(v) => Ok(Ok(v)),
-        Err(Error::Throw(v)) => Ok(Err(v)),
-        Err(e) => Err(e),
+    s.charge(2)?;
+    let it = s.engine();
+    let (f, this, arg) = (it.raw(f), it.raw(this), it.raw(arg));
+    match it.call(f, this, &[arg]) {
+        Ok(v) => Ok(Ok(it.raw_local(&v))),
+        Err(OldError::Throw(v)) => Ok(Err(it.raw_local(&v))),
+        Err(e) => Err(it.api_err(e)),
     }
 }
 
 /// React to the outcome of a promise-returning callback. A throw becomes a rejected promise, as the standard says.
-fn react(it: &mut Interp<'_>, r: Result<Value, Value>, ok: ObjId, err: ObjId) -> R<()> {
+fn react<'s>(s: &mut Sc<'s, '_>, r: Result<Local<'s>, Local<'s>>, ok: Local<'s>, err: Local<'s>) -> Res<'s, ()> {
     let x = match r {
         Ok(v) => v,
         Err(e) => {
-            let p = it.host_new_promise()?;
-            it.host_reject_promise(p, e)?;
+            let p = s.new_promise()?;
+            s.reject_promise(p, e)?;
             p
         }
     };
-    it.host_promise_react(x, Value::Object(ok), Value::Object(err))
+    s.promise_react(x, ok, err)
 }
 
 // ---------------------------------------------------------------------------------------------- algorithms
@@ -318,12 +334,12 @@ fn should_pull(st: &State, c: &Ctl) -> bool {
 }
 
 /// `ReadableStreamDefaultControllerCallPullIfNeeded`.
-fn pull_if_needed(d: &Dom, it: &mut Interp<'_>, ctl: ObjId) -> R<()> {
+fn pull_if_needed<'s>(d: &Dom, s: &mut Sc<'s, '_>, ctl: ObjId) -> Res<'s, ()> {
     let (pull, source, cached) = {
         let mut st = d.streams.st.borrow_mut();
         let Some(c) = st.ctls.get(&ctl) else { return Ok(()) };
         // A stream with no `pull` can never start a cycle that anyone could see.
-        if matches!(val(&c.pull), Value::Undefined) || !should_pull(&st, c) {
+        if undef(&c.pull) || !should_pull(&st, c) {
             return Ok(());
         }
         let c = st.ctls.get_mut(&ctl).expect("checked");
@@ -332,29 +348,32 @@ fn pull_if_needed(d: &Dom, it: &mut Interp<'_>, ctl: ObjId) -> R<()> {
             return Ok(());
         }
         c.pulling = true;
-        (val(&c.pull), val(&c.source), c.pull_fns.as_ref().map(|(a, b)| (oid(a), oid(b))))
+        (s.traced(&c.pull), s.traced(&c.source), c.pull_fns.as_ref().map(|(a, b)| (s.traced(a), s.traced(b))))
     };
+    let ctl_l = d.obj_local(s, ctl);
     let (ok, err) = match cached {
         Some(p) => p,
         None => {
             let f = fns(d);
-            let p = (it.host_bind(f.pull_ok, Value::Object(ctl))?, it.host_bind(f.pull_err, Value::Object(ctl))?);
+            let p = (bind_obj(s, f.pull_ok, ctl)?, bind_obj(s, f.pull_err, ctl)?);
+            let edges = (s.trace_ref(p.0), s.trace_ref(p.1));
             if let Some(c) = d.streams.st.borrow_mut().ctls.get_mut(&ctl) {
-                c.pull_fns = Some((edge(it, p.0), edge(it, p.1)));
+                c.pull_fns = Some(edges);
             }
             p
         }
     };
-    let r = invoke(d, it, pull, source, &[Value::Object(ctl)])?;
-    match react(it, r, ok, err) {
-        Err(Error::Throw(v)) => controller_error(d, it, ctl, v),
+    let r = invoke(d, s, pull, source, ctl_l)?;
+    match react(s, r, ok, err) {
+        Err(Error::Throw(v)) => controller_error(d, s, ctl, v),
         r => r,
     }
 }
 
-fn clear_algorithms(it: &mut Interp<'_>, c: &mut Ctl) {
+fn clear_algorithms(s: &mut Sc<'_, '_>, c: &mut Ctl) {
+    let u = s.undefined();
     for t in [&mut c.source, &mut c.start, &mut c.pull, &mut c.cancel] {
-        it.store_value(t, Value::Undefined);
+        s.store(t, u);
     }
     c.pull_fns = None;
 }
@@ -368,97 +387,104 @@ fn reset_queue(st: &mut State, ctl: ObjId) {
 }
 
 /// Make the stream closed and take its pending read requests.
-fn close_stream(st: &mut State, stream: ObjId) -> Vec<Value> {
-    let Some(s) = st.streams.get_mut(&stream) else { return Vec::new() };
-    s.st = St::Closed;
-    match s.reader.as_ref().and_then(|r| st.readers.get_mut(&oid(r))) {
-        Some(r) => r.reads.drain(..).map(|p| val(&p)).collect(),
+fn close_stream(st: &mut State, stream: ObjId) -> Vec<Traced<Value>> {
+    let Some(strm) = st.streams.get_mut(&stream) else { return Vec::new() };
+    strm.st = St::Closed;
+    match strm.reader.as_ref().and_then(|r| st.readers.get_mut(&oid(r))) {
+        Some(r) => r.reads.drain(..).collect(),
         None => Vec::new(),
     }
 }
 
 /// `ClearAlgorithms`, then `ReadableStreamClose`, then settle the pending reads with `done`.
-fn finish_close(d: &Dom, it: &mut Interp<'_>, ctl: ObjId) -> R<()> {
+fn finish_close<'s>(d: &Dom, s: &mut Sc<'s, '_>, ctl: ObjId) -> Res<'s, ()> {
     let reads = {
         let mut st = d.streams.st.borrow_mut();
         let Some(c) = st.ctls.get_mut(&ctl) else { return Ok(()) };
-        clear_algorithms(it, c);
-        let s = oid(&c.stream);
-        close_stream(&mut st, s)
+        clear_algorithms(s, c);
+        let strm = oid(&c.stream);
+        close_stream(&mut st, strm)
     };
     for p in reads {
-        resolve_with(d, it, p, Value::Undefined, true)?;
+        let (p, u) = (s.traced(&p), s.undefined());
+        resolve_with(s, p, u, true)?;
     }
     Ok(())
 }
 
 /// `ReadableStreamDefaultControllerError`.
-fn controller_error(d: &Dom, it: &mut Interp<'_>, ctl: ObjId, e: Value) -> R<()> {
+fn controller_error<'s>(d: &Dom, s: &mut Sc<'s, '_>, ctl: ObjId, e: Local<'s>) -> Res<'s, ()> {
     let reads = {
         let mut st = d.streams.st.borrow_mut();
         let Some(c) = st.ctls.get(&ctl) else { return Ok(()) };
         let sid = oid(&c.stream);
-        if !st.streams.get(&sid).is_some_and(|s| matches!(s.st, St::Readable)) {
+        if !st.streams.get(&sid).is_some_and(|x| matches!(x.st, St::Readable)) {
             return Ok(());
         }
         reset_queue(&mut st, ctl);
         if let Some(c) = st.ctls.get_mut(&ctl) {
-            clear_algorithms(it, c);
+            clear_algorithms(s, c);
         }
-        let s = st.streams.get_mut(&sid).expect("checked");
-        s.st = St::Errored(it.trace_value(e));
-        let rid = s.reader.as_ref().map(oid);
+        let strm = st.streams.get_mut(&sid).expect("checked");
+        strm.st = St::Errored(s.trace_ref(e));
+        let rid = strm.reader.as_ref().map(oid);
         match rid.and_then(|r| st.readers.get_mut(&r)) {
-            Some(r) => r.reads.drain(..).map(|p| val(&p)).collect::<Vec<_>>(),
+            Some(r) => r.reads.drain(..).collect::<Vec<_>>(),
             None => Vec::new(),
         }
     };
     for p in reads {
-        it.host_reject_promise(p, e)?;
+        let p = s.traced(&p);
+        s.reject_promise(p, e)?;
     }
     Ok(())
 }
 
 /// `ReadableStreamCancel`. Returns the promise `cancel()` gives.
-fn cancel_stream(d: &Dom, it: &mut Interp<'_>, stream: ObjId, reason: Value) -> R<Value> {
-    enum C {
+fn cancel_stream<'s>(d: &Dom, s: &mut Sc<'s, '_>, stream: ObjId, reason: Local<'s>) -> Res<'s, Local<'s>> {
+    enum C<'s> {
         Closed,
-        Errored(Value),
-        Go { cancel: Value, source: Value, reads: Vec<Value> },
+        Errored(Local<'s>),
+        Go { cancel: Local<'s>, source: Local<'s>, reads: Vec<Traced<Value>> },
     }
     let c = {
         let mut st = d.streams.st.borrow_mut();
-        if let Some(s) = st.streams.get_mut(&stream) {
-            s.disturbed = true;
+        if let Some(x) = st.streams.get_mut(&stream) {
+            x.disturbed = true;
         }
-        match st.streams.get(&stream).map(|s| (&s.st, &s.ctl)) {
+        match st.streams.get(&stream).map(|x| (&x.st, &x.ctl)) {
             None => C::Closed,
             Some((St::Closed, _)) => C::Closed,
-            Some((St::Errored(e), _)) => C::Errored(val(e)),
+            Some((St::Errored(e), _)) => C::Errored(s.traced(e)),
             Some((St::Readable, ctl)) => {
                 let ctl = oid(ctl);
                 let reads = close_stream(&mut st, stream);
                 reset_queue(&mut st, ctl);
                 let c = st.ctls.get_mut(&ctl).expect("a stream has a controller");
-                let (cancel, source) = (val(&c.cancel), val(&c.source));
-                clear_algorithms(it, c);
+                let (cancel, source) = (s.traced(&c.cancel), s.traced(&c.source));
+                clear_algorithms(s, c);
                 C::Go { cancel, source, reads }
             }
         }
     };
-    let p = it.host_new_promise()?;
+    let p = s.new_promise()?;
     match c {
-        C::Closed => it.host_resolve_promise(p, Value::Undefined)?,
-        C::Errored(e) => it.host_reject_promise(p, e)?,
+        C::Closed => {
+            let u = s.undefined();
+            s.resolve_promise(p, u)?
+        }
+        C::Errored(e) => s.reject_promise(p, e)?,
         C::Go { cancel, source, reads } => {
             for r in reads {
-                resolve_with(d, it, r, Value::Undefined, true)?;
+                let (r, u) = (s.traced(&r), s.undefined());
+                resolve_with(s, r, u, true)?;
             }
-            let r = if matches!(cancel, Value::Undefined) { Ok(Value::Undefined) } else { invoke(d, it, cancel, source, &[reason])? };
+            let r = if s.type_of(cancel) == Type::Undefined { Ok(s.undefined()) } else { invoke(d, s, cancel, source, reason)? };
             let f = fns(d);
-            let (ok, err) = (it.host_bind(f.cancel_ok, p)?, it.host_bind(f.cancel_err, p)?);
-            match react(it, r, ok, err) {
-                Err(Error::Throw(v)) => it.host_reject_promise(p, v)?,
+            let (co, ce) = (d.obj_local(s, f.cancel_ok), d.obj_local(s, f.cancel_err));
+            let (ok, err) = (s.bind(co, p)?, s.bind(ce, p)?);
+            match react(s, r, ok, err) {
+                Err(Error::Throw(v)) => s.reject_promise(p, v)?,
                 r => r?,
             }
         }
@@ -468,36 +494,30 @@ fn cancel_stream(d: &Dom, it: &mut Interp<'_>, stream: ObjId, reason: Value) -> 
 
 // ---------------------------------------------------------------------------------------------- reactions
 
-fn this_obj(this: Value) -> Option<ObjId> {
-    match this {
-        Value::Object(o) => Some(o),
-        _ => None,
-    }
-}
-
-fn start_ok(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    enter(d, || {
-        let Some(ctl) = this_obj(this) else { return Ok(Value::Undefined) };
+fn start_ok<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    enter(d, s, |s| {
+        let Some(ctl) = obj_id(s, this) else { return Ok(s.undefined()) };
         if let Some(c) = d.streams.st.borrow_mut().ctls.get_mut(&ctl) {
             c.started = true;
         }
-        pull_if_needed(d, it, ctl)?;
-        Ok(Value::Undefined)
+        pull_if_needed(d, s, ctl)?;
+        Ok(s.undefined())
     })
 }
 
-fn error_reaction(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    enter(d, || {
-        if let Some(ctl) = this_obj(this) {
-            controller_error(d, it, ctl, arg(a, 0))?;
+fn error_reaction<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    enter(d, s, |s| {
+        if let Some(ctl) = obj_id(s, this) {
+            let e = arg_s(s, a, 0);
+            controller_error(d, s, ctl, e)?;
         }
-        Ok(Value::Undefined)
+        Ok(s.undefined())
     })
 }
 
-fn pull_ok(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    enter(d, || {
-        let Some(ctl) = this_obj(this) else { return Ok(Value::Undefined) };
+fn pull_ok<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    enter(d, s, |s| {
+        let Some(ctl) = obj_id(s, this) else { return Ok(s.undefined()) };
         let again = match d.streams.st.borrow_mut().ctls.get_mut(&ctl) {
             Some(c) => {
                 c.pulling = false;
@@ -506,132 +526,140 @@ fn pull_ok(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
             None => false,
         };
         if again {
-            pull_if_needed(d, it, ctl)?;
+            pull_if_needed(d, s, ctl)?;
         }
-        Ok(Value::Undefined)
+        Ok(s.undefined())
     })
 }
 
-fn cancel_ok(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    enter(d, || {
-        it.host_resolve_promise(this, Value::Undefined)?;
-        Ok(Value::Undefined)
+fn cancel_ok<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    enter(d, s, |s| {
+        let u = s.undefined();
+        s.resolve_promise(this, u)?;
+        Ok(u)
     })
 }
 
-fn cancel_err(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    enter(d, || {
-        it.host_reject_promise(this, arg(a, 0))?;
-        Ok(Value::Undefined)
+fn cancel_err<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    enter(d, s, |s| {
+        let e = arg_s(s, a, 0);
+        s.reject_promise(this, e)?;
+        Ok(s.undefined())
     })
 }
 
 // ---------------------------------------------------------------------------------------------- constructor
 
-fn callback_option(d: &Dom, it: &mut Interp<'_>, src: Value, name: &str) -> R<Value> {
-    let v = prop(d, it, src, name)?;
-    if !matches!(v, Value::Undefined) && !it.is_callable_value(v) {
-        return Err(it.type_error(&format!("Failed to construct 'ReadableStream': The {name} member is not a function")));
+fn callback_option<'s>(d: &Dom, s: &mut Sc<'s, '_>, src: Local<'s>, i: usize) -> Res<'s, Local<'s>> {
+    let v = named(d, s, src, i)?;
+    if s.type_of(v) != Type::Undefined && !s.is_callable(v) {
+        return Err(s.type_error(&format!("Failed to construct 'ReadableStream': The {} member is not a function", NAMES[i])));
     }
     Ok(v)
 }
 
-pub(crate) fn ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    enter(d, || construct(d, it, a))
+pub(crate) fn ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    enter(d, s, |s| construct(d, s, a))
 }
 
 /// A new object with the prototype `proto`, registered as the owner of its entry. Gives the object and its host key.
-fn own(d: &Dom, it: &mut Interp<'_>, proto: ObjId) -> R<(ObjId, u32)> {
-    let o = d.obj(it, proto)?;
+fn own<'s>(d: &Dom, s: &mut Sc<'s, '_>, proto: ObjId) -> Res<'s, (ObjId, u32)> {
+    let o = d.obj_s(s, proto)?;
     let k = d.st.borrow_mut().owners.key(Owner::Stream(o));
-    it.set_host_owner_obj(o, k);
+    s.engine().set_host_owner_obj(o, k);
     Ok((o, k))
 }
 
-fn construct(d: &Dom, it: &mut Interp<'_>, a: &[Value]) -> R<Value> {
-    let (src, strategy) = (arg(a, 0), arg(a, 1));
-    let (mut start, mut pull, mut cancel) = (Value::Undefined, Value::Undefined, Value::Undefined);
-    if !matches!(src, Value::Undefined) {
-        if !matches!(src, Value::Object(_)) {
-            return Err(it.type_error("Failed to construct 'ReadableStream': The underlying source is not an object"));
+/// `bind` of a host function and an object, with no handle for either.
+fn bind_obj<'s>(s: &mut Sc<'s, '_>, target: ObjId, this: ObjId) -> Res<'s, Local<'s>> {
+    old_v(s, |it| it.host_bind(target, Value::Object(this)).map(Value::Object))
+}
+
+fn construct<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (src, strategy) = (arg_s(s, a, 0), arg_s(s, a, 1));
+    let u = s.undefined();
+    let (mut start, mut pull, mut cancel) = (u, u, u);
+    if s.type_of(src) != Type::Undefined {
+        if !is_object(s, src) {
+            return Err(s.type_error("Failed to construct 'ReadableStream': The underlying source is not an object"));
         }
         // Dictionary members are read in alphabetical order, as WebIDL does.
-        if !matches!(prop(d, it, src, "autoAllocateChunkSize")?, Value::Undefined) {
-            return Err(Error::Unsupported(unsupported("ReadableStream autoAllocateChunkSize (byte streams)")));
+        let auto = named(d, s, src, K_AUTO)?;
+        if s.type_of(auto) != Type::Undefined {
+            return Err(unsupp("ReadableStream autoAllocateChunkSize (byte streams)"));
         }
-        cancel = callback_option(d, it, src, "cancel")?;
-        pull = callback_option(d, it, src, "pull")?;
-        start = callback_option(d, it, src, "start")?;
-        let ty = prop(d, it, src, "type")?;
-        if !matches!(ty, Value::Undefined) {
-            let s = it.to_js_string(ty)?;
-            let s = it.heap.to_string_lossy(s).unwrap_or_default();
-            if s == "bytes" {
-                return Err(Error::Unsupported(unsupported("ReadableStream type: \"bytes\" (byte streams and BYOB)")));
+        cancel = callback_option(d, s, src, K_CANCEL)?;
+        pull = callback_option(d, s, src, K_PULL)?;
+        start = callback_option(d, s, src, K_START)?;
+        let ty = named(d, s, src, K_TYPE)?;
+        if s.type_of(ty) != Type::Undefined {
+            let t = s.to_string(ty)?;
+            let text = s.as_str(t).map(|x| x.to_string_lossy()).unwrap_or_default();
+            if text == "bytes" {
+                return Err(unsupp("ReadableStream type: \"bytes\" (byte streams and BYOB)"));
             }
-            return Err(it.type_error("Failed to construct 'ReadableStream': The provided value is not a valid enum value of type ReadableStreamType"));
+            return Err(s.type_error("Failed to construct 'ReadableStream': The provided value is not a valid enum value of type ReadableStreamType"));
         }
     }
     let mut hwm = 1.0;
-    if !matches!(strategy, Value::Undefined | Value::Null) {
-        if !matches!(strategy, Value::Object(_)) {
-            return Err(it.type_error("Failed to construct 'ReadableStream': The queuing strategy is not an object"));
+    if !matches!(s.type_of(strategy), Type::Undefined | Type::Null) {
+        if !is_object(s, strategy) {
+            return Err(s.type_error("Failed to construct 'ReadableStream': The queuing strategy is not an object"));
         }
-        let h = prop(d, it, strategy, "highWaterMark")?;
-        if !matches!(h, Value::Undefined) {
-            hwm = it.to_js_number(h)?;
+        let h = named(d, s, strategy, K_HWM)?;
+        if s.type_of(h) != Type::Undefined {
+            hwm = s.to_number(h)?;
             if hwm.is_nan() || hwm < 0.0 {
-                return Err(it.range_error("Failed to construct 'ReadableStream': Invalid highWaterMark"));
+                return Err(s.range_error("Failed to construct 'ReadableStream': Invalid highWaterMark"));
             }
         }
-        let size = prop(d, it, strategy, "size")?;
-        if !matches!(size, Value::Undefined) {
-            if !it.is_callable_value(size) {
-                return Err(it.type_error("Failed to construct 'ReadableStream': The size member is not a function"));
+        let size = named(d, s, strategy, K_SIZE)?;
+        if s.type_of(size) != Type::Undefined {
+            if !s.is_callable(size) {
+                return Err(s.type_error("Failed to construct 'ReadableStream': The size member is not a function"));
             }
-            return Err(Error::Unsupported(unsupported("ReadableStream strategy.size (custom queuing strategy)")));
+            return Err(unsupp("ReadableStream strategy.size (custom queuing strategy)"));
         }
     }
     let l = lim(d);
-    {
-        let st = d.streams.st.borrow();
-        if st.streams.len() >= l.max_streams {
-            return Err(d.lim("stream-objects"));
-        }
+    if d.streams.st.borrow().streams.len() >= l.max_streams {
+        return Err(d.lim_s(s, "stream-objects"));
     }
-    it.charge(4)?;
+    s.charge(4)?;
     let f = fns(d);
-    let ((s, sk), (c, ck)) = (own(d, it, f.stream_proto)?, own(d, it, f.ctl_proto)?);
-    let (ok, err) = (it.host_bind(f.start_ok, Value::Object(c))?, it.host_bind(f.start_err, Value::Object(c))?);
+    let ((strm, sk), (c, ck)) = (own(d, s, f.stream_proto)?, own(d, s, f.ctl_proto)?);
+    let (cl, sl) = (d.obj_local(s, c), d.obj_local(s, strm));
+    let (ok, err) = (bind_obj(s, f.start_ok, c)?, bind_obj(s, f.start_err, c)?);
     {
+        let (ctl_edge, stream_edge) = (s.trace_ref(cl), s.trace_ref(sl));
+        let ctl = Ctl { key: ck, stream: stream_edge, source: s.trace_ref(src), start: s.trace_ref(start), pull: s.trace_ref(pull), cancel: s.trace_ref(cancel), queue: VecDeque::new(), qbytes: 0, hwm, started: false, pulling: false, pull_again: false, close_requested: false, pull_fns: None };
         let mut st = d.streams.st.borrow_mut();
-        st.streams.insert(s, Stream { key: sk, st: St::Readable, ctl: edge(it, c), reader: None, disturbed: false });
-        let v = |x| it.trace_value(x);
-        st.ctls.insert(c, Ctl { key: ck, stream: edge(it, s), source: v(src), start: v(start), pull: v(pull), cancel: v(cancel), queue: VecDeque::new(), qbytes: 0, hwm, started: false, pulling: false, pull_again: false, close_requested: false, pull_fns: None });
+        st.streams.insert(strm, Stream { key: sk, st: St::Readable, ctl: ctl_edge, reader: None, disturbed: false });
+        st.ctls.insert(c, ctl);
     }
-    let started = if matches!(start, Value::Undefined) { Ok(Value::Undefined) } else { invoke(d, it, start, src, &[Value::Object(c)])? };
+    let started = if s.type_of(start) == Type::Undefined { Ok(u) } else { invoke(d, s, start, src, cl)? };
     match started {
         // A controller can escape through start() even when that callback throws. Its stream state stays valid
         // until collection proves it unreachable.
         Err(e) => return Err(Error::Throw(e)),
         Ok(v) => {
             // start returns any, not Promise<void>. Resolve a fresh promise with it, so assimilation is a job.
-            let p = it.host_new_promise()?;
-            it.host_resolve_promise(p, v)?;
-            it.host_promise_then(p, Value::Object(ok), Value::Object(err))?;
+            let p = s.new_promise()?;
+            s.resolve_promise(p, v)?;
+            s.promise_then(p, ok, err)?;
         }
     }
-    Ok(Value::Object(s))
+    Ok(sl)
 }
 
 // ---------------------------------------------------------------------------------------------- stream methods
 
-fn is_stream(d: &Dom, this: Value) -> Option<ObjId> {
-    this_obj(this).filter(|o| d.streams.st.borrow().streams.contains_key(o))
+fn is_stream(d: &Dom, o: Option<ObjId>) -> Option<ObjId> {
+    o.filter(|o| d.streams.st.borrow().streams.contains_key(o))
 }
 
-fn is_reader(d: &Dom, this: Value) -> Option<ObjId> {
-    this_obj(this).filter(|o| d.streams.st.borrow().readers.contains_key(o))
+fn is_reader(d: &Dom, o: Option<ObjId>) -> Option<ObjId> {
+    o.filter(|o| d.streams.st.borrow().readers.contains_key(o))
 }
 
 /// `(locked, disturbed)` of a stream made by script, or `None` if `o` is not one.
@@ -639,108 +667,119 @@ pub(crate) fn lock_state(d: &Dom, o: ObjId) -> Option<(bool, bool)> {
     d.streams.st.borrow().streams.get(&o).map(|s| (s.reader.is_some(), s.disturbed))
 }
 
-pub(crate) fn locked(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    enter(d, || {
-        let Some(s) = is_stream(d, this) else { return crate::browser_fetch::stream_locked(d, it, this, a) };
-        Ok(Value::Bool(d.streams.st.borrow().streams.get(&s).is_some_and(|s| s.reader.is_some())))
+pub(crate) fn locked<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    enter(d, s, |s| {
+        let Some(strm) = is_stream(d, obj_id(s, this)) else { return crate::browser_fetch::stream_locked(d, s, this, a) };
+        let locked = d.streams.st.borrow().streams.get(&strm).is_some_and(|x| x.reader.is_some());
+        Ok(s.boolean(locked))
     })
 }
 
-pub(crate) fn get_reader(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    enter(d, || {
-        let options = arg(a, 0);
+pub(crate) fn get_reader<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    enter(d, s, |s| {
+        let options = arg_s(s, a, 0);
         let mut byob = false;
-        if !matches!(options, Value::Undefined | Value::Null) {
-            if !matches!(options, Value::Object(_)) { return Err(it.type_error("Reader options must be a dictionary")); }
-            let mode = prop(d, it, options, "mode")?;
-            if !matches!(mode, Value::Undefined) {
-                let mode = it.to_js_string(mode)?;
-                if it.heap.to_string_lossy(mode).unwrap_or_default() != "byob" {
-                    return Err(it.type_error("Invalid readable stream reader mode"));
+        if !matches!(s.type_of(options), Type::Undefined | Type::Null) {
+            if !is_object(s, options) {
+                return Err(s.type_error("Reader options must be a dictionary"));
+            }
+            let mode = prop(s, options, "mode")?;
+            if s.type_of(mode) != Type::Undefined {
+                let mode = s.to_string(mode)?;
+                if s.as_str(mode).map(|x| x.to_string_lossy()).unwrap_or_default() != "byob" {
+                    return Err(s.type_error("Invalid readable stream reader mode"));
                 }
                 byob = true;
             }
         }
-        let Some(s) = is_stream(d, this) else {
+        let Some(strm) = is_stream(d, obj_id(s, this)) else {
             if byob {
-                crate::browser_fetch::stream_locked(d, it, this, &[])?;
-                return Err(Error::Unsupported(unsupported("ReadableStream BYOB reader")));
+                crate::browser_fetch::stream_locked(d, s, this, Args::from_slots(0, 0))?;
+                return Err(unsupp("ReadableStream BYOB reader"));
             }
-            return crate::browser_fetch::stream_get_reader(d, it, this, &[]);
+            return crate::browser_fetch::stream_get_reader(d, s, this, Args::from_slots(0, 0));
         };
-        if byob { return Err(Error::Unsupported(unsupported("ReadableStream BYOB reader"))); }
+        if byob {
+            return Err(unsupp("ReadableStream BYOB reader"));
+        }
         {
-            let st = d.streams.st.borrow();
-            if st.streams.get(&s).is_some_and(|s| s.reader.is_some()) {
-                drop(st);
-                return Err(it.type_error("ReadableStream is locked"));
+            let locked = d.streams.st.borrow().streams.get(&strm).is_some_and(|x| x.reader.is_some());
+            if locked {
+                return Err(s.type_error("ReadableStream is locked"));
             }
-            if st.readers.len() >= lim(d).max_readers {
-                return Err(d.lim("stream-readers"));
+            if d.streams.st.borrow().readers.len() >= lim(d).max_readers {
+                return Err(d.lim_s(s, "stream-readers"));
             }
         }
-        it.charge(2)?;
-        let (r, key) = own(d, it, fns(d).reader_proto)?;
+        s.charge(2)?;
+        let (r, key) = own(d, s, fns(d).reader_proto)?;
+        let rl = d.obj_local(s, r);
+        let sl = d.obj_local(s, strm);
+        let (stream_edge, reader_edge) = (s.trace_ref(sl), s.trace_ref(rl));
         let mut st = d.streams.st.borrow_mut();
-        st.readers.insert(r, Rdr { key, stream: Some(edge(it, s)), reads: VecDeque::new() });
-        if let Some(s) = st.streams.get_mut(&s) {
-            s.reader = Some(edge(it, r));
+        st.readers.insert(r, Rdr { key, stream: Some(stream_edge), reads: VecDeque::new() });
+        if let Some(x) = st.streams.get_mut(&strm) {
+            x.reader = Some(reader_edge);
         }
-        Ok(Value::Object(r))
+        Ok(rl)
     })
 }
 
-pub(crate) fn cancel(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    enter(d, || {
-        let Some(s) = is_stream(d, this) else { return crate::browser_fetch::stream_cancel(d, it, this, a) };
-        if d.streams.st.borrow().streams.get(&s).is_some_and(|s| s.reader.is_some()) {
-            let e = type_value(it, "Cannot cancel a stream that already has a reader")?;
-            let p = it.host_new_promise()?;
-            it.host_reject_promise(p, e)?;
+pub(crate) fn cancel<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    enter(d, s, |s| {
+        let Some(strm) = is_stream(d, obj_id(s, this)) else { return crate::browser_fetch::stream_cancel(d, s, this, a) };
+        if d.streams.st.borrow().streams.get(&strm).is_some_and(|x| x.reader.is_some()) {
+            let e = type_value(s, "Cannot cancel a stream that already has a reader")?;
+            let p = s.new_promise()?;
+            s.reject_promise(p, e)?;
             return Ok(p);
         }
-        cancel_stream(d, it, s, arg(a, 0))
+        let r = arg_s(s, a, 0);
+        cancel_stream(d, s, strm, r)
     })
 }
 
 // ---------------------------------------------------------------------------------------------- reader methods
 
-pub(crate) fn read(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    enter(d, || {
-        let Some(rdr) = is_reader(d, this) else { return crate::browser_fetch::reader_read(d, it, this, a) };
-        enum Out {
+pub(crate) fn read<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    enter(d, s, |s| {
+        let Some(rdr) = is_reader(d, obj_id(s, this)) else { return crate::browser_fetch::reader_read(d, s, this, a) };
+        enum Out<'s> {
             Released,
             Done,
-            Err(Value),
-            Chunk(Value, ObjId, bool),
+            Err(Local<'s>),
+            Chunk(Local<'s>, ObjId, bool),
             Pending(ObjId),
             Full,
         }
-        it.charge(1)?;
-        let p = it.host_new_promise()?;
+        s.charge(1)?;
+        let p = s.new_promise()?;
         let max = lim(d).max_pending_reads;
         let out = {
             let mut st = d.streams.st.borrow_mut();
             let st = &mut *st;
             match st.readers.get(&rdr).and_then(|r| r.stream.as_ref().map(oid)) {
                 None => Out::Released,
-                Some(s) => match st.streams.get_mut(&s).map(|x| { x.disturbed = true; &*x }) {
+                Some(sid) => match st.streams.get_mut(&sid).map(|x| {
+                    x.disturbed = true;
+                    &*x
+                }) {
                     None => Out::Released,
                     Some(Stream { st: St::Closed, .. }) => Out::Done,
-                    Some(Stream { st: St::Errored(e), .. }) => Out::Err(val(e)),
+                    Some(Stream { st: St::Errored(e), .. }) => Out::Err(s.traced(e)),
                     Some(Stream { ctl, .. }) => {
                         let ctl = oid(ctl);
                         let c = st.ctls.get_mut(&ctl).expect("a stream has a controller");
                         if let Some((chunk, cost)) = c.queue.pop_front() {
                             c.qbytes -= cost;
                             st.queued_bytes -= cost;
-                            Out::Chunk(val(&chunk), ctl, c.close_requested && c.queue.is_empty())
+                            Out::Chunk(s.traced(&chunk), ctl, c.close_requested && c.queue.is_empty())
                         } else {
                             let r = st.readers.get_mut(&rdr).expect("checked");
                             if r.reads.len() >= max {
                                 Out::Full
                             } else {
-                                r.reads.push_back(it.trace_value(p));
+                                r.reads.push_back(s.trace_ref(p));
                                 Out::Pending(ctl)
                             }
                         }
@@ -750,83 +789,90 @@ pub(crate) fn read(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<
         };
         match out {
             Out::Released => {
-                let e = type_value(it, "This readable stream reader has been released and cannot be used to read from its previous owner stream")?;
-                it.host_reject_promise(p, e)?;
+                let e = type_value(s, "This readable stream reader has been released and cannot be used to read from its previous owner stream")?;
+                s.reject_promise(p, e)?;
             }
-            Out::Done => resolve_with(d, it, p, Value::Undefined, true)?,
-            Out::Err(e) => it.host_reject_promise(p, e)?,
-            Out::Full => return Err(d.lim("stream-reads")),
+            Out::Done => {
+                let u = s.undefined();
+                resolve_with(s, p, u, true)?
+            }
+            Out::Err(e) => s.reject_promise(p, e)?,
+            Out::Full => return Err(d.lim_s(s, "stream-reads")),
             Out::Chunk(chunk, ctl, close) => {
                 if close {
-                    finish_close(d, it, ctl)?;
+                    finish_close(d, s, ctl)?;
                 } else {
-                    pull_if_needed(d, it, ctl)?;
+                    pull_if_needed(d, s, ctl)?;
                 }
-                resolve_with(d, it, p, chunk, false)?;
+                resolve_with(s, p, chunk, false)?;
             }
-            Out::Pending(ctl) => pull_if_needed(d, it, ctl)?,
+            Out::Pending(ctl) => pull_if_needed(d, s, ctl)?,
         }
         Ok(p)
     })
 }
 
-pub(crate) fn reader_cancel(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    enter(d, || {
-        let Some(rdr) = is_reader(d, this) else { return crate::browser_fetch::reader_cancel(d, it, this, a) };
+pub(crate) fn reader_cancel<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    enter(d, s, |s| {
+        let Some(rdr) = is_reader(d, obj_id(s, this)) else { return crate::browser_fetch::reader_cancel(d, s, this, a) };
         let stream = d.streams.st.borrow().readers.get(&rdr).and_then(|r| r.stream.as_ref().map(oid));
         match stream {
-            Some(s) => cancel_stream(d, it, s, arg(a, 0)),
+            Some(strm) => {
+                let r = arg_s(s, a, 0);
+                cancel_stream(d, s, strm, r)
+            }
             None => {
-                let e = type_value(it, "This readable stream reader has been released and cannot be used to cancel its previous owner stream")?;
-                let p = it.host_new_promise()?;
-                it.host_reject_promise(p, e)?;
+                let e = type_value(s, "This readable stream reader has been released and cannot be used to cancel its previous owner stream")?;
+                let p = s.new_promise()?;
+                s.reject_promise(p, e)?;
                 Ok(p)
             }
         }
     })
 }
 
-pub(crate) fn release(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    enter(d, || {
-        let Some(rdr) = is_reader(d, this) else { return crate::browser_fetch::reader_release(d, it, this, a) };
+pub(crate) fn release<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    enter(d, s, |s| {
+        let Some(rdr) = is_reader(d, obj_id(s, this)) else { return crate::browser_fetch::reader_release(d, s, this, a) };
         let reads = {
             let mut st = d.streams.st.borrow_mut();
-            let Some(r) = st.readers.get_mut(&rdr) else { return Ok(Value::Undefined) };
-            let Some(s) = r.stream.take().map(|s| oid(&s)) else { return Ok(Value::Undefined) };
-            let reads: Vec<Value> = r.reads.drain(..).map(|p| val(&p)).collect();
-            if let Some(s) = st.streams.get_mut(&s) {
-                s.reader = None;
+            let Some(r) = st.readers.get_mut(&rdr) else { return Ok(s.undefined()) };
+            let Some(sid) = r.stream.take().map(|x| oid(&x)) else { return Ok(s.undefined()) };
+            let reads: Vec<Traced<Value>> = r.reads.drain(..).collect();
+            if let Some(x) = st.streams.get_mut(&sid) {
+                x.reader = None;
             }
             reads
         };
         for p in reads {
-            let e = type_value(it, "Reader was released")?;
-            it.host_reject_promise(p, e)?;
+            let p = s.traced(&p);
+            let e = type_value(s, "Reader was released")?;
+            s.reject_promise(p, e)?;
         }
-        Ok(Value::Undefined)
+        Ok(s.undefined())
     })
 }
 
 // ---------------------------------------------------------------------------------------------- controller methods
 
-fn brand_ctl(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<ObjId> {
-    match this_obj(this).filter(|o| d.streams.st.borrow().ctls.contains_key(o)) {
+fn brand_ctl<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, ObjId> {
+    match obj_id(s, this).filter(|o| d.streams.st.borrow().ctls.contains_key(o)) {
         Some(o) => Ok(o),
-        None => Err(it.type_error("Illegal invocation")),
+        None => Err(s.type_error("Illegal invocation")),
     }
 }
 
 /// `CanCloseOrEnqueue`.
 fn can_close_or_enqueue(st: &State, c: &Ctl) -> bool {
-    !c.close_requested && st.streams.get(&oid(&c.stream)).is_some_and(|s| matches!(s.st, St::Readable))
+    !c.close_requested && st.streams.get(&oid(&c.stream)).is_some_and(|x| matches!(x.st, St::Readable))
 }
 
-fn ctl_enqueue(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    enter(d, || {
-        let ctl = brand_ctl(d, it, this)?;
-        let chunk = arg(a, 0);
-        let bytes = it.bytes_of(chunk).map_or(0, |b| b.len());
-        it.charge(1 + (bytes / 64) as u64)?;
+fn ctl_enqueue<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    enter(d, s, |s| {
+        let ctl = brand_ctl(d, s, this)?;
+        let chunk = arg_s(s, a, 0);
+        let bytes = s.bytes(chunk).map_or(0, |b| b.len());
+        s.charge(1 + (bytes / 64) as u64)?;
         let l = lim(d);
         let direct = {
             let mut st = d.streams.st.borrow_mut();
@@ -835,18 +881,18 @@ fn ctl_enqueue(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Valu
             if !can_close_or_enqueue(st, c) {
                 None
             } else {
-                let waiting = st.streams.get(&oid(&c.stream)).and_then(|s| s.reader.as_ref().map(oid)).and_then(|r| st.readers.get_mut(&r)).and_then(|r| r.reads.pop_front());
+                let waiting = st.streams.get(&oid(&c.stream)).and_then(|x| x.reader.as_ref().map(oid)).and_then(|r| st.readers.get_mut(&r)).and_then(|r| r.reads.pop_front());
                 match waiting {
-                    Some(p) => Some(Some(val(&p))),
+                    Some(p) => Some(Some(s.traced(&p))),
                     None => {
                         if c.queue.len() >= l.max_queue_chunks {
-                            return Err(d.lim("stream-queue"));
+                            return Err(d.lim_s(s, "stream-queue"));
                         }
                         if st.queued_bytes.saturating_add(bytes) > l.max_queued_bytes {
-                            return Err(d.lim("stream-bytes"));
+                            return Err(d.lim_s(s, "stream-bytes"));
                         }
                         let c = st.ctls.get_mut(&ctl).expect("checked");
-                        c.queue.push_back((it.trace_value(chunk), bytes));
+                        c.queue.push_back((s.trace_ref(chunk), bytes));
                         c.qbytes += bytes;
                         st.queued_bytes += bytes;
                         Some(None)
@@ -855,19 +901,19 @@ fn ctl_enqueue(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Valu
             }
         };
         match direct {
-            None => return Err(it.type_error("Invalid state: Controller is already closed")),
-            Some(Some(p)) => resolve_with(d, it, p, chunk, false)?,
+            None => return Err(s.type_error("Invalid state: Controller is already closed")),
+            Some(Some(p)) => resolve_with(s, p, chunk, false)?,
             Some(None) => {}
         }
-        pull_if_needed(d, it, ctl)?;
-        Ok(Value::Undefined)
+        pull_if_needed(d, s, ctl)?;
+        Ok(s.undefined())
     })
 }
 
-fn ctl_close(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    enter(d, || {
-        let ctl = brand_ctl(d, it, this)?;
-        it.charge(1)?;
+fn ctl_close<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    enter(d, s, |s| {
+        let ctl = brand_ctl(d, s, this)?;
+        s.charge(1)?;
         let empty = {
             let mut st = d.streams.st.borrow_mut();
             let c = st.ctls.get(&ctl).expect("checked");
@@ -880,70 +926,75 @@ fn ctl_close(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value>
             }
         };
         match empty {
-            None => return Err(it.type_error("Invalid state: Controller is already closed")),
-            Some(true) => finish_close(d, it, ctl)?,
+            None => return Err(s.type_error("Invalid state: Controller is already closed")),
+            Some(true) => finish_close(d, s, ctl)?,
             Some(false) => {}
         }
-        Ok(Value::Undefined)
+        Ok(s.undefined())
     })
 }
 
-fn ctl_error(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    enter(d, || {
-        let ctl = brand_ctl(d, it, this)?;
-        it.charge(1)?;
-        controller_error(d, it, ctl, arg(a, 0))?;
-        Ok(Value::Undefined)
+fn ctl_error<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    enter(d, s, |s| {
+        let ctl = brand_ctl(d, s, this)?;
+        s.charge(1)?;
+        let e = arg_s(s, a, 0);
+        controller_error(d, s, ctl, e)?;
+        Ok(s.undefined())
     })
 }
 
-fn ctl_desired_size(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    enter(d, || {
-        let ctl = brand_ctl(d, it, this)?;
+fn ctl_desired_size<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    enter(d, s, |s| {
+        let ctl = brand_ctl(d, s, this)?;
         let st = d.streams.st.borrow();
         let c = st.ctls.get(&ctl).expect("checked");
-        Ok(match st.streams.get(&oid(&c.stream)).map(|s| &s.st) {
-            Some(St::Errored(_)) | None => Value::Null,
-            Some(St::Closed) => Value::Number(0.0),
-            Some(St::Readable) => Value::Number(c.hwm - c.queue.len() as f64),
+        Ok(match st.streams.get(&oid(&c.stream)).map(|x| &x.st) {
+            Some(St::Errored(_)) | None => s.null(),
+            Some(St::Closed) => s.number(0.0),
+            Some(St::Readable) => s.number(c.hwm - c.queue.len() as f64),
         })
     })
 }
 
-fn gate_closed(_: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
-    Err(Error::Unsupported(unsupported("ReadableStreamDefaultReader.closed")))
+fn gate_closed<'s>(_: &Dom, _: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    Err(unsupp("ReadableStreamDefaultReader.closed"))
 }
 
-pub(crate) fn reader_closed(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    enter(d, || {
-        if is_reader(d, this).is_some() { return gate_closed(d, it, this, a); }
-        crate::browser_fetch::gate_reader_closed(d, it, this, a)
+pub(crate) fn reader_closed<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    enter(d, s, |s| {
+        if is_reader(d, obj_id(s, this)).is_some() {
+            return gate_closed(d, s, this, a);
+        }
+        crate::browser_fetch::gate_reader_closed(d, s, this, a)
     })
 }
 
-pub(crate) fn gate(d: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
-    enter(d, || Err(Error::Unsupported(unsupported("ReadableStream tee and async iteration"))))
+pub(crate) fn gate<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    enter(d, s, |_| Err(unsupp("ReadableStream tee and async iteration")))
 }
 
 /// `pipeTo` and `pipeThrough` are JavaScript (`shims/streams.js`), as `WritableStream` and `TransformStream` are. The first call makes
 /// the shim, which replaces both methods on the prototype. This method then calls the method that the prototype now has.
-fn pipe(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], name: &str) -> R<Value> {
-    enter(d, || {
-        crate::browser_shims::define(d, it, "WritableStream")?;
-        let f = prop(d, it, Value::Object(fns(d).stream_proto), name)?;
-        if !it.is_callable_value(f) {
-            return Err(it.type_error(&format!("ReadableStream.prototype.{name} is not a function")));
+fn pipe<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, name: &str) -> Res<'s, Local<'s>> {
+    enter(d, s, |s| {
+        old(s, |it| crate::browser_shims::define(d, it, "WritableStream"))?;
+        let proto = d.obj_local(s, fns(d).stream_proto);
+        let f = prop(s, proto, name)?;
+        if !s.is_callable(f) {
+            return Err(s.type_error(&format!("ReadableStream.prototype.{name} is not a function")));
         }
-        it.call(f, this, a)
+        let args: Vec<Local<'s>> = a.iter().collect();
+        s.call(f, this, &args)
     })
 }
 
-pub(crate) fn pipe_to(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    pipe(d, it, this, a, "pipeTo")
+pub(crate) fn pipe_to<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    pipe(d, s, this, a, "pipeTo")
 }
 
-pub(crate) fn pipe_through(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    pipe(d, it, this, a, "pipeThrough")
+pub(crate) fn pipe_through<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    pipe(d, s, this, a, "pipeThrough")
 }
 
 // ---------------------------------------------------------------------------------------------- install
@@ -951,7 +1002,7 @@ pub(crate) fn pipe_through(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value
 /// Make the host reactions and the controller prototype. `fixed` gets every object that must live as long as the realm.
 /// `stream_proto` and `reader_proto` are the prototypes of `ReadableStream` and the default reader.
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>, stream_proto: ObjId, reader_proto: ObjId, fixed: &mut Vec<ObjId>) -> R<()> {
-    let f = |it: &mut Interp<'_>, h, name: &str| d.add_fn(it, h, name, 1, false);
+    let f = |it: &mut Interp<'_>, h: HS, name: &str| d.add_fn_s_obj(it, h, name, 1, HostFn::Method);
     let start_ok_f = f(it, start_ok, "startOk")?;
     let start_err = f(it, error_reaction, "startErr")?;
     let pull_ok_f = f(it, pull_ok, "pullOk")?;
@@ -960,13 +1011,10 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>, stream_proto: ObjId, reader_
     let cancel_err_f = f(it, cancel_err, "cancelErr")?;
     let op = it.object_prototype();
     let ctl_proto = d.obj(it, op)?;
-    for (name, h, len) in [("enqueue", ctl_enqueue as crate::browser::H, 1), ("close", ctl_close, 0), ("error", ctl_error, 1)] {
-        let k = d.key(it, name)?;
-        let m = d.add_fn(it, h, name, len, false)?;
-        it.define_data(ctl_proto, k, Value::Object(m), true, false, true)?;
+    for (name, h, len) in [("enqueue", ctl_enqueue as HS, 1), ("close", ctl_close, 0), ("error", ctl_error, 1)] {
+        d.def_method_s(it, ctl_proto, name, len, h)?;
     }
-    let (k, g) = (d.key(it, "desiredSize")?, d.add_fn(it, ctl_desired_size, "get desiredSize", 0, false)?);
-    d.define_accessor(it, ctl_proto, k, g, None)?;
+    d.def_get_s(it, ctl_proto, "desiredSize", ctl_desired_size, None)?;
     let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
     let ctor = d.add_fn(it, illegal_constructor, "ReadableStreamDefaultController", 0, false)?;
     it.define_data(ctor, kp, Value::Object(ctl_proto), false, false, false)?;

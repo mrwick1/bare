@@ -30,12 +30,11 @@ use crate::browser::*;
 use crate::browser_console::ConsoleLevel;
 use crate::browser_handlers::{handler_get, handler_set};
 use crate::browser_navigation_url as nu;
+use crate::browser_scoped::*;
 use bare_js::eval::Interp;
-use bare_js::heap::PropertyDescriptor;
-use bare_js::value::{ObjId, PropertyKey, Value};
+use bare_js::value::{ObjId, Value};
+use bare_js_api::{Args, Attrs, HostFn, Intrinsic, Local, Type};
 use std::cell::{Cell, RefCell};
-
-type V = R<Value>;
 
 /// The most worker objects that a page keeps alive.
 const MAX_WORKERS: usize = 64;
@@ -70,88 +69,89 @@ pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
     d.worker.ports.borrow_mut().retain(|&o, _| live(o));
 }
 
-fn lazy_dedicated(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
-    lazy(d, it, a, false)
+fn lazy_dedicated<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    lazy(d, s, a, false)
 }
 
-fn lazy_shared(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
-    lazy(d, it, a, true)
+fn lazy_shared<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    lazy(d, s, a, true)
 }
 
 /// `Worker` and `SharedWorker` are accessors of the global until the first read. A call with an argument is the setter.
-fn lazy(d: &Dom, it: &mut Interp<'_>, a: &[Value], shared: bool) -> V {
-    let g = *d.global.get().expect("installed");
-    let k = d.key(it, if shared { "SharedWorker" } else { "Worker" })?;
-    if let Some(&v) = a.first() {
-        it.define_data(g, k, v, true, false, true)?;
-        return Ok(Value::Undefined);
+fn lazy<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>, shared: bool) -> Res<'s, Local<'s>> {
+    let g = s.global();
+    let name = if shared { "SharedWorker" } else { "Worker" };
+    let attrs = Attrs { writable: true, enumerable: false, configurable: true };
+    if let Some(v) = a.get(0) {
+        s.define_str(g, name, v, attrs)?;
+        return Ok(s.undefined());
     }
     let made = if shared { d.worker.made_shared.get() } else { d.worker.made.get() };
     let ctor = match made {
         Some(m) => m[1],
-        None => make(d, it, shared)?,
+        None => old(s, |it| make(d, it, shared))?,
     };
-    it.define_data(g, k, Value::Object(ctor), true, false, true)?;
-    Ok(Value::Object(ctor))
+    let ctor = d.obj_local(s, ctor);
+    s.define_str(g, name, ctor, attrs)?;
+    Ok(ctor)
 }
 
 #[cold]
 #[inline(never)]
 fn make(d: &Dom, it: &mut Interp<'_>, shared: bool) -> R<ObjId> {
-    let g = *d.global.get().expect("installed");
     let name = if shared { "SharedWorker" } else { "Worker" };
     let proto = d.obj(it, d.p().et)?;
-    let f = d.add_ctor_nt(it, if shared { shared_worker_ctor } else { worker_ctor }, name, 1)?;
-    let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
-    it.define_data(f, kp, Value::Object(proto), false, false, false)?;
-    it.define_data(proto, kc, Value::Object(f), true, false, true)?;
-    let (ks, kt) = (d.key(it, "Symbol")?, d.key(it, "toStringTag")?);
-    let sy = it.get_value(Value::Object(g), ks)?;
-    if let Value::Symbol(s) = it.get_value(sy, kt)? {
-        let t = d.js_str(it, name)?;
-        it.define_data(proto, PropertyKey::Symbol(s), t, false, false, true)?;
-    }
+    let f = run(it, |s| {
+        let f = d.add_fn_s(s, if shared { shared_worker_ctor } else { worker_ctor }, name, 1, HostFn::CtorNewTarget)?;
+        let p = d.obj_local(s, proto);
+        s.define_str(f, "prototype", p, Attrs { writable: false, enumerable: false, configurable: false })?;
+        s.define_str(p, "constructor", f, Attrs { writable: true, enumerable: false, configurable: true })?;
+        let tag = s.intrinsic(Intrinsic::SymbolToStringTag);
+        let t = s.string(name)?;
+        s.define(p, tag, t, Attrs { writable: false, enumerable: false, configurable: true })?;
+        Ok(obj_id(s, f).expect("a function"))
+    })?;
     if shared {
-        d.def_get(it, proto, "port", shared_port, None)?;
-        d.def_get(it, proto, "onerror", hget::<2>, Some(hset::<2>))?;
+        d.def_get_s(it, proto, "port", shared_port, None)?;
+        d.def_get_s(it, proto, "onerror", hget::<2>, Some(hset::<2>))?;
         d.worker.made_shared.set(Some([proto, f]));
         return Ok(f);
     }
-    d.def_method(it, proto, "postMessage", 1, post_message)?;
-    d.def_method(it, proto, "terminate", 0, terminate)?;
-    let gets: [H; 3] = [hget::<0>, hget::<1>, hget::<2>];
-    let sets: [H; 3] = [hset::<0>, hset::<1>, hset::<2>];
+    d.def_method_s(it, proto, "postMessage", 1, post_message)?;
+    d.def_method_s(it, proto, "terminate", 0, terminate)?;
+    let gets: [HS; 3] = [hget::<0>, hget::<1>, hget::<2>];
+    let sets: [HS; 3] = [hset::<0>, hset::<1>, hset::<2>];
     for n in 0..3 {
-        d.def_get(it, proto, &format!("on{}", TYPES[n]), gets[n], Some(sets[n]))?;
+        d.def_get_s(it, proto, &format!("on{}", TYPES[n]), gets[n], Some(sets[n]))?;
     }
     d.worker.made.set(Some([proto, f]));
     Ok(f)
 }
 
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    let g = *d.global.get().expect("installed");
-    for (name, lazy) in [("Worker", lazy_dedicated as H), ("SharedWorker", lazy_shared as H)] {
-        let key = d.key(it, name)?;
-        let f = d.add_fn(it, lazy, name, 0, false)?;
-        let desc = PropertyDescriptor { get: Some(Some(f)), set: Some(Some(f)), enumerable: Some(false), configurable: Some(true), ..Default::default() };
-        it.heap.define_own_property(g, key, &desc).map(|_| ()).map_err(|e| it.heap_error(e))?;
-    }
-    Ok(())
+    run(it, |s| {
+        let g = s.global();
+        for (name, lazy) in [("Worker", lazy_dedicated as HS), ("SharedWorker", lazy_shared)] {
+            let f = d.add_fn_s(s, lazy, name, 0, HostFn::Method)?;
+            s.define_accessor_str(g, name, Some(f), Some(f), Attrs { writable: false, enumerable: false, configurable: true })?;
+        }
+        Ok(())
+    })
 }
 
 impl Dom {
-    fn worker_of(&self, it: &mut Interp<'_>, this: Value) -> R<ObjId> {
-        match this {
-            Value::Object(o) if self.worker.objs.borrow().contains_key(&o) => Ok(o),
-            _ => Err(it.type_error("Illegal invocation")),
+    fn worker_of<'s>(&self, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, ObjId> {
+        match obj_id(s, this) {
+            Some(o) if self.worker.objs.borrow().contains_key(&o) => Ok(o),
+            _ => Err(s.type_error("Illegal invocation")),
         }
     }
 
     /// A `Worker` and not a `SharedWorker`: only a worker has `postMessage` and `terminate`.
-    fn dedicated_of(&self, it: &mut Interp<'_>, this: Value) -> R<ObjId> {
-        let o = self.worker_of(it, this)?;
+    fn dedicated_of<'s>(&self, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, ObjId> {
+        let o = self.worker_of(s, this)?;
         if self.worker.ports.borrow().contains_key(&o) {
-            return Err(it.type_error("Illegal invocation"));
+            return Err(s.type_error("Illegal invocation"));
         }
         Ok(o)
     }
@@ -173,26 +173,26 @@ impl Dom {
 }
 
 /// The checks of both constructors after the arguments: the URL against the document, the origin, the caps. Gives the absolute URL.
-fn check_url(d: &Dom, it: &mut Interp<'_>, who: &str, url: &str) -> R<String> {
+fn check_url<'s>(d: &Dom, s: &mut Sc<'s, '_>, who: &str, url: &str) -> Res<'s, String> {
     let cur = d.cur_rec().ok();
     let rec = match nu::parse_any(url, cur.as_ref()) {
         Ok(r) => r,
-        Err(nu::UErr::Invalid) => return Err(d.dom_err(it, "SyntaxError", &format!("Failed to construct '{who}': Script at '{url}' is invalid."))),
-        Err(nu::UErr::Scheme | nu::UErr::Gate(_)) => return Err(d.dom_err(it, "SecurityError", &format!("Failed to construct '{who}': Script at '{url}' cannot be accessed."))),
+        Err(nu::UErr::Invalid) => return Err(d.dom_err_s(s, "SyntaxError", &format!("Failed to construct '{who}': Script at '{url}' is invalid."))),
+        Err(nu::UErr::Scheme | nu::UErr::Gate(_)) => return Err(d.dom_err_s(s, "SecurityError", &format!("Failed to construct '{who}': Script at '{url}' cannot be accessed."))),
     };
     let href = rec.href();
     if !href.starts_with("data:") {
         let same = cur.as_ref().is_none_or(|c| rec.origin() == c.origin()) && (href.starts_with("http") || href.starts_with("blob:"));
         if !same {
             let from = cur.as_ref().map_or_else(String::new, |c| c.origin());
-            return Err(d.dom_err(it, "SecurityError", &format!("Failed to construct '{who}': Script at '{href}' cannot be accessed from origin '{from}'.")));
+            return Err(d.dom_err_s(s, "SecurityError", &format!("Failed to construct '{who}': Script at '{href}' cannot be accessed from origin '{from}'.")));
         }
     }
     if d.worker.objs.borrow().len() >= MAX_WORKERS {
-        return Err(d.dom_err(it, "NotSupportedError", &format!("Failed to construct '{who}': at most {MAX_WORKERS} workers can be alive in this page (bare cannot run them).")));
+        return Err(d.dom_err_s(s, "NotSupportedError", &format!("Failed to construct '{who}': at most {MAX_WORKERS} workers can be alive in this page (bare cannot run them).")));
     }
     if d.st.borrow().by_obj.len() >= d.lim.max_wrappers {
-        return Err(d.lim("dom-wrappers"));
+        return Err(d.lim_s(s, "dom-wrappers"));
     }
     Ok(href)
 }
@@ -217,84 +217,93 @@ fn start(d: &Dom, it: &mut Interp<'_>, proto: ObjId, href: &str, shared: bool) -
 }
 
 /// `WorkerOptions.type` is `classic` or `module`; `name` and `credentials` are ignored.
-fn check_type(d: &Dom, it: &mut Interp<'_>, who: &str, opts: Value) -> R<()> {
-    let k = d.key(it, "type")?;
-    let t = it.get_value(opts, k)?;
-    if !matches!(t, Value::Undefined) {
-        let t = d.string_arg(it, t)?;
+fn check_type<'s>(d: &Dom, s: &mut Sc<'s, '_>, who: &str, opts: Local<'s>) -> Res<'s, ()> {
+    let t = s.get_str(opts, "type")?;
+    if s.type_of(t) != Type::Undefined {
+        let t = d.string_arg_s(s, t)?;
         if t != "classic" && t != "module" {
-            return Err(it.type_error(&format!("Failed to construct '{who}': The provided value '{t}' is not a valid enum value of type WorkerType.")));
+            return Err(s.type_error(&format!("Failed to construct '{who}': The provided value '{t}' is not a valid enum value of type WorkerType.")));
         }
     }
     Ok(())
 }
 
-fn worker_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
-    let proto = it.host_proto_from_new_target(d.worker.made.get().expect("made")[0])?;
-    if a.is_empty() {
-        return Err(it.type_error("Failed to construct 'Worker': 1 argument required, but only 0 present."));
+fn worker_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let default = d.worker.made.get().expect("made")[0];
+    let default = d.obj_local(s, default);
+    let proto = s.proto_from_new_target(default)?;
+    let proto = obj_id(s, proto).expect("a prototype is an object");
+    let Some(a0) = a.get(0) else {
+        return Err(s.type_error("Failed to construct 'Worker': 1 argument required, but only 0 present."));
+    };
+    let url = d.string_arg_s(s, a0)?;
+    let a1 = arg_s(s, a, 1);
+    match s.type_of(a1) {
+        Type::Undefined | Type::Null => {}
+        Type::Object | Type::Function => check_type(d, s, "Worker", a1)?,
+        _ => return Err(s.type_error("Failed to construct 'Worker': parameter 2 is not of type 'WorkerOptions'.")),
     }
-    let url = d.string_arg(it, a[0])?;
-    match a.get(1).copied().unwrap_or(Value::Undefined) {
-        Value::Undefined | Value::Null => {}
-        opts @ Value::Object(_) => check_type(d, it, "Worker", opts)?,
-        _ => return Err(it.type_error("Failed to construct 'Worker': parameter 2 is not of type 'WorkerOptions'.")),
-    }
-    let href = check_url(d, it, "Worker", &url)?;
-    start(d, it, proto, &href, false)
+    let href = check_url(d, s, "Worker", &url)?;
+    old_v(s, |it| start(d, it, proto, &href, false))
 }
 
 /// `SharedWorker(url, name or options)`: the second argument is an options object, or else a string (the name).
-fn shared_worker_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
-    let proto = it.host_proto_from_new_target(d.worker.made_shared.get().expect("made")[0])?;
-    if a.is_empty() {
-        return Err(it.type_error("Failed to construct 'SharedWorker': 1 argument required, but only 0 present."));
-    }
-    let url = d.string_arg(it, a[0])?;
-    match a.get(1).copied().unwrap_or(Value::Undefined) {
-        Value::Undefined | Value::Null => {}
-        opts @ Value::Object(_) => check_type(d, it, "SharedWorker", opts)?,
-        name => {
-            d.string_arg(it, name)?;
+fn shared_worker_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let default = d.worker.made_shared.get().expect("made")[0];
+    let default = d.obj_local(s, default);
+    let proto = s.proto_from_new_target(default)?;
+    let proto = obj_id(s, proto).expect("a prototype is an object");
+    let Some(a0) = a.get(0) else {
+        return Err(s.type_error("Failed to construct 'SharedWorker': 1 argument required, but only 0 present."));
+    };
+    let url = d.string_arg_s(s, a0)?;
+    let a1 = arg_s(s, a, 1);
+    match s.type_of(a1) {
+        Type::Undefined | Type::Null => {}
+        Type::Object | Type::Function => check_type(d, s, "SharedWorker", a1)?,
+        _ => {
+            d.string_arg_s(s, a1)?;
         }
     }
-    let href = check_url(d, it, "SharedWorker", &url)?;
-    start(d, it, proto, &href, true)
+    let href = check_url(d, s, "SharedWorker", &url)?;
+    old_v(s, |it| start(d, it, proto, &href, true))
 }
 
-fn post_message(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    d.dedicated_of(it, this)?;
-    let Some(&m) = a.first() else {
-        return Err(it.type_error("Failed to execute 'postMessage' on 'Worker': 1 argument required, but only 0 present."));
+fn post_message<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    d.dedicated_of(s, this)?;
+    let Some(m) = a.get(0) else {
+        return Err(s.type_error("Failed to execute 'postMessage' on 'Worker': 1 argument required, but only 0 present."));
     };
-    match m {
-        Value::Symbol(_) => Err(d.dom_err(it, "DataCloneError", "Symbol could not be cloned.")),
-        Value::Object(_) if it.is_callable_value(m) => Err(d.dom_err(it, "DataCloneError", "function could not be cloned.")),
-        _ => Ok(Value::Undefined),
+    match s.type_of(m) {
+        Type::Symbol => Err(d.dom_err_s(s, "DataCloneError", "Symbol could not be cloned.")),
+        Type::Object | Type::Function if s.is_callable(m) => Err(d.dom_err_s(s, "DataCloneError", "function could not be cloned.")),
+        _ => Ok(s.undefined()),
     }
 }
 
-fn terminate(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let o = d.dedicated_of(it, this)?;
+fn terminate<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = d.dedicated_of(s, this)?;
     d.worker.objs.borrow_mut().insert(o, false);
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-fn hget<const N: usize>(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let o = d.worker_of(it, this)?;
-    Ok(handler_get(d, it, Target::Obj(o), TYPES[N]))
+fn hget<'s, const N: usize>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = d.worker_of(s, this)?;
+    old_v(s, |it| Ok(handler_get(d, it, Target::Obj(o), TYPES[N])))
 }
 
-fn hset<const N: usize>(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let o = d.worker_of(it, this)?;
-    handler_set(d, it, Target::Obj(o), TYPES[N], a.first().copied())?;
-    Ok(Value::Undefined)
+fn hset<'s, const N: usize>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = d.worker_of(s, this)?;
+    let v = raw_arg(s, a, 0);
+    old(s, |it| handler_set(d, it, Target::Obj(o), TYPES[N], v))?;
+    Ok(s.undefined())
 }
 
-fn shared_port(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let o = d.worker_of(it, this)?;
-    match d.worker.ports.borrow().get(&o) {
-        Some(&p) => Ok(Value::Object(p)),
-        None => Err(it.type_error("Illegal invocation")),
+fn shared_port<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = d.worker_of(s, this)?;
+    let p = d.worker.ports.borrow().get(&o).copied();
+    match p {
+        Some(p) => Ok(d.obj_local(s, p)),
+        None => Err(s.type_error("Illegal invocation")),
     }
 }
