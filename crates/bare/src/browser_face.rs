@@ -27,13 +27,12 @@
 
 use crate::browser::*;
 use crate::browser_custom::st;
-use crate::browser_dom::arg;
+use crate::browser_scoped::*;
 use crate::browser_web::Ent;
 use bare_html::dom::{Document, NodeId, PRECUSTOMIZED};
 use bare_js::eval::Interp;
 use bare_js::value::{ObjId, Value};
-
-type V = R<Value>;
+use bare_js_api::{Args, Local, Type};
 
 /// What `setFormValue` kept.
 pub(crate) enum FVal {
@@ -116,300 +115,308 @@ impl Dom {
 // ------------------------------------------------------------------------------------------ the members
 
 /// The element of `ElementInternals` (`states` false) or `CustomStateSet` (`states` true) `this`.
-fn target(d: &Dom, it: &mut Interp<'_>, this: Value, states: bool) -> R<NodeId> {
-    match this {
-        Value::Object(o) => match st(d).borrow().ints.get(&o) {
-            Some(&(n, k)) if k == states => Ok(n),
-            _ => Err(it.type_error("Illegal invocation")),
-        },
-        _ => Err(it.type_error("Illegal invocation")),
+fn target<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, states: bool) -> Res<'s, NodeId> {
+    match obj_id(s, this).and_then(|o| st(d).borrow().ints.get(&o).copied()) {
+        Some((n, k)) if k == states => Ok(n),
+        _ => Err(s.type_error("Illegal invocation")),
     }
 }
 
 /// The element of `this`, which must be a form-associated custom element. `what` starts the message: `Failed to execute 'setFormValue' on`.
-fn face_target(d: &Dom, it: &mut Interp<'_>, this: Value, what: &str) -> R<NodeId> {
-    let n = target(d, it, this, false)?;
+fn face_target<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, what: &str) -> Res<'s, NodeId> {
+    let n = target(d, s, this, false)?;
     if d.is_face(n) {
         return Ok(n);
     }
-    Err(d.dom_err(it, "NotSupportedError", &format!("{what} 'ElementInternals': The target element is not a form-associated custom element.")))
+    Err(d.dom_err_s(s, "NotSupportedError", &format!("{what} 'ElementInternals': The target element is not a form-associated custom element.")))
 }
 
-fn read_member(d: &Dom, it: &mut Interp<'_>, this: Value, name: &str) -> R<NodeId> {
-    face_target(d, it, this, &format!("Failed to read the '{name}' property from"))
+fn read_member<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, name: &str) -> Res<'s, NodeId> {
+    face_target(d, s, this, &format!("Failed to read the '{name}' property from"))
 }
 
-fn call_member(d: &Dom, it: &mut Interp<'_>, this: Value, name: &str) -> R<NodeId> {
-    face_target(d, it, this, &format!("Failed to execute '{name}' on"))
+fn call_member<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, name: &str) -> Res<'s, NodeId> {
+    face_target(d, s, this, &format!("Failed to execute '{name}' on"))
 }
 
-fn args_needed(it: &mut Interp<'_>, a: &[Value], what: &str) -> R<()> {
+fn args_needed<'s>(s: &mut Sc<'s, '_>, a: Args<'s>, what: &str) -> Res<'s, ()> {
     if a.is_empty() {
-        return Err(it.type_error(&format!("Failed to execute '{what}': 1 argument required, but only 0 present.")));
+        return Err(s.type_error(&format!("Failed to execute '{what}': 1 argument required, but only 0 present.")));
     }
     Ok(())
 }
 
 /// `HTMLElement.prototype.attachInternals()`.
-pub(crate) fn attach_internals(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = d.el(it, this)?;
-    let fail = |it: &mut Interp<'_>, m: &str| d.dom_err(it, "NotSupportedError", &format!("Failed to execute 'attachInternals' on 'HTMLElement': {m}"));
-    let Some(no_internals) = d.ce_def(n) else { return Err(fail(it, "Unable to attach ElementInternals to non-custom elements.")) };
+pub(crate) fn attach_internals<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.el_s(s, this)?;
+    let fail = |s: &mut Sc<'s, '_>, m: &str| d.dom_err_s(s, "NotSupportedError", &format!("Failed to execute 'attachInternals' on 'HTMLElement': {m}"));
+    let Some(no_internals) = d.ce_def(n) else { return Err(fail(s, "Unable to attach ElementInternals to non-custom elements.")) };
     if no_internals {
-        return Err(fail(it, "ElementInternals is disabled by disabledFeature static field."));
+        return Err(fail(s, "ElementInternals is disabled by disabledFeature static field."));
     }
     if st(d).borrow().face.get(&(n.index() as u32)).is_some_and(|f| f.ints.is_some()) {
-        return Err(fail(it, "ElementInternals for the specified element was already attached."));
+        return Err(fail(s, "ElementInternals for the specified element was already attached."));
     }
-    let proto = made(d, it)?[0];
-    let o = d.obj(it, proto)?;
-    let mut s = st(d).borrow_mut();
-    s.face.entry(n.index() as u32).or_insert_with(|| Face::new(n)).ints = Some(o);
-    s.ints.insert(o, (n, false));
-    Ok(Value::Object(o))
+    let proto = old(s, |it| made(d, it))?[0];
+    let o = d.obj_s(s, proto)?;
+    let l = d.obj_local(s, o);
+    let mut sc = st(d).borrow_mut();
+    sc.face.entry(n.index() as u32).or_insert_with(|| Face::new(n)).ints = Some(o);
+    sc.ints.insert(o, (n, false));
+    Ok(l)
 }
 
-fn form(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = read_member(d, it, this, "form")?;
+fn form<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = read_member(d, s, this, "form")?;
     // An upgrade has no form owner until its constructor returned.
-    let f = if d.doc.borrow().custom_state(n) == Some(PRECUSTOMIZED) { None } else { d.form_owner(it, n)? };
-    d.wrap_opt(it, f)
+    let f = if d.doc.borrow().custom_state(n) == Some(PRECUSTOMIZED) { None } else { old(s, |it| d.form_owner(it, n))? };
+    d.wrap_opt_s(s, f)
 }
 
-fn labels(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = read_member(d, it, this, "labels")?;
-    crate::browser_controls::labels_of(d, it, n)
+fn labels<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = read_member(d, s, this, "labels")?;
+    crate::browser_controls::labels_of(d, s, n)
 }
 
-fn will_validate(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = read_member(d, it, this, "willValidate")?;
-    Ok(Value::Bool(d.will_validate(it, n)?))
+fn will_validate<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = read_member(d, s, this, "willValidate")?;
+    let w = old(s, |it| d.will_validate(it, n))?;
+    Ok(s.boolean(w))
 }
 
-fn validity(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = read_member(d, it, this, "validity")?;
-    crate::browser_controls::validity_of(d, it, n)
+fn validity<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = read_member(d, s, this, "validity")?;
+    crate::browser_controls::validity_of(d, s, n)
 }
 
-fn validation_message(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = read_member(d, it, this, "validationMessage")?;
-    let m = crate::browser_controls::message_of(d, it, n)?;
-    d.js_str(it, &m)
+fn validation_message<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = read_member(d, s, this, "validationMessage")?;
+    let m = old(s, |it| crate::browser_controls::message_of(d, it, n))?;
+    d.js_str_s(s, &m)
 }
 
-fn check_validity(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = call_member(d, it, this, "checkValidity")?;
-    crate::browser_submit::report_one(d, it, n, false)
+fn check_validity<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = call_member(d, s, this, "checkValidity")?;
+    crate::browser_submit::report_one(d, s, n, false)
 }
 
-fn report_validity(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = call_member(d, it, this, "reportValidity")?;
-    crate::browser_submit::report_one(d, it, n, true)
+fn report_validity<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = call_member(d, s, this, "reportValidity")?;
+    crate::browser_submit::report_one(d, s, n, true)
 }
 
-fn set_form_value(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    args_needed(it, a, "setFormValue' on 'ElementInternals")?;
-    let value = match a[0] {
-        Value::Undefined | Value::Null => None,
-        v => Some(if let Some(l) = crate::browser_web::form_entries(d, v) {
+fn set_form_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    args_needed(s, a, "setFormValue' on 'ElementInternals")?;
+    let a0 = arg_s(s, a, 0);
+    let value = if is_nullish(s, a0) {
+        None
+    } else {
+        let raw = raw_arg(s, a, 0).expect("one argument");
+        Some(if let Some(l) = crate::browser_web::form_entries(d, raw) {
             FVal::List(l)
-        } else if crate::browser_web::file_name(d, v).is_some() {
-            let Value::Object(o) = v else { unreachable!("a File is an object") };
-            FVal::B(o)
+        } else if crate::browser_web::file_name(d, raw).is_some() {
+            FVal::B(obj_id(s, a0).expect("a File is an object"))
         } else {
-            FVal::S(d.string_arg(it, v)?)
-        }),
+            FVal::S(d.string_arg_s(s, a0)?)
+        })
     };
-    let n = call_member(d, it, this, "setFormValue")?;
+    let n = call_member(d, s, this, "setFormValue")?;
     st(d).borrow_mut().face.entry(n.index() as u32).or_insert_with(|| Face::new(n)).value = value;
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
 const FLAGS: [&str; 10] = ["valueMissing", "typeMismatch", "patternMismatch", "tooLong", "tooShort", "rangeUnderflow", "rangeOverflow", "stepMismatch", "badInput", "customError"];
 
-fn set_validity(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    args_needed(it, a, "setValidity' on 'ElementInternals")?;
+fn set_validity<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    args_needed(s, a, "setValidity' on 'ElementInternals")?;
     let mut flags = 0u16;
-    match a[0] {
-        Value::Undefined | Value::Null => {}
-        o @ Value::Object(_) => {
-            for (i, name) in FLAGS.iter().enumerate() {
-                let k = d.key(it, name)?;
-                let v = it.get_value(o, k)?;
-                if it.to_js_bool(v)? {
-                    flags |= 1 << i;
-                }
+    let a0 = arg_s(s, a, 0);
+    if !is_nullish(s, a0) {
+        if !is_object(s, a0) {
+            return Err(s.type_error("Failed to execute 'setValidity' on 'ElementInternals': The provided value is not of type 'ValidityStateFlags'."));
+        }
+        for (i, name) in FLAGS.iter().enumerate() {
+            let v = s.get_str(a0, name)?;
+            if s.to_boolean(v) {
+                flags |= 1 << i;
             }
         }
-        _ => return Err(it.type_error("Failed to execute 'setValidity' on 'ElementInternals': The provided value is not of type 'ValidityStateFlags'.")),
     }
-    let msg = match arg(a, 1) {
-        Value::Undefined => String::new(),
-        v => d.string_arg(it, v)?,
+    let a1 = arg_s(s, a, 1);
+    let msg = match s.type_of(a1) {
+        Type::Undefined => String::new(),
+        _ => d.string_arg_s(s, a1)?,
     };
-    let anchor = match arg(a, 2) {
-        Value::Undefined | Value::Null => None,
-        v => match d.node_of(v).filter(|&n| d.is_element(n)) {
+    let a2 = arg_s(s, a, 2);
+    let anchor = if is_nullish(s, a2) {
+        None
+    } else {
+        match d.node_of_s(s, a2).filter(|&n| d.is_element(n)) {
             Some(n) => Some(n),
-            None => return Err(it.type_error("Failed to execute 'setValidity' on 'ElementInternals': parameter 3 is not of type 'HTMLElement'.")),
-        },
+            None => return Err(s.type_error("Failed to execute 'setValidity' on 'ElementInternals': parameter 3 is not of type 'HTMLElement'.")),
+        }
     };
-    let n = call_member(d, it, this, "setValidity")?;
+    let n = call_member(d, s, this, "setValidity")?;
     if flags != 0 && msg.is_empty() {
-        return Err(it.type_error("Failed to execute 'setValidity' on 'ElementInternals': The second argument should not be empty if one or more flags in the first argument are true."));
+        return Err(s.type_error("Failed to execute 'setValidity' on 'ElementInternals': The second argument should not be empty if one or more flags in the first argument are true."));
     }
     if let Some(x) = anchor {
         let doc = d.doc.borrow();
         let mut cur = Some(x);
         while let Some(c) = cur.filter(|&c| c != n) {
-            it.charge(1)?;
+            s.charge(1)?;
             cur = doc.parent_or_host(c);
         }
         if cur.is_none() {
             drop(doc);
-            return Err(d.dom_err(it, "NotFoundError", "Failed to execute 'setValidity' on 'ElementInternals': The Element argument should be a shadow-including inclusive descendant of the target element."));
+            return Err(d.dom_err_s(s, "NotFoundError", "Failed to execute 'setValidity' on 'ElementInternals': The Element argument should be a shadow-including inclusive descendant of the target element."));
         }
     }
-    let mut s = st(d).borrow_mut();
-    let f = s.face.entry(n.index() as u32).or_insert_with(|| Face::new(n));
+    let mut sc = st(d).borrow_mut();
+    let f = sc.face.entry(n.index() as u32).or_insert_with(|| Face::new(n));
     (f.flags, f.msg) = (flags, if flags == 0 { String::new() } else { msg });
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-fn shadow_root(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = target(d, it, this, false)?;
+fn shadow_root<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = target(d, s, this, false)?;
     let r = d.doc.borrow().shadow_root(n);
-    d.wrap_opt(it, r)
+    d.wrap_opt_s(s, r)
 }
 
-fn role(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = target(d, it, this, false)?;
+fn role<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = target(d, s, this, false)?;
     let r = st(d).borrow().face.get(&(n.index() as u32)).and_then(|f| f.role.clone());
     match r {
-        Some(r) => d.js_str(it, &r),
-        None => Ok(Value::Null),
+        Some(r) => d.js_str_s(s, &r),
+        None => Ok(s.null()),
     }
 }
 
-fn set_role(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    args_needed(it, a, "role' on 'ElementInternals")?;
-    let v = match a[0] {
-        Value::Null => None,
-        v => Some(d.string_arg(it, v)?),
+fn set_role<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    args_needed(s, a, "role' on 'ElementInternals")?;
+    let a0 = arg_s(s, a, 0);
+    let v = match s.type_of(a0) {
+        Type::Null => None,
+        _ => Some(d.string_arg_s(s, a0)?),
     };
-    let n = target(d, it, this, false)?;
+    let n = target(d, s, this, false)?;
     st(d).borrow_mut().face.entry(n.index() as u32).or_insert_with(|| Face::new(n)).role = v;
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-fn states(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = target(d, it, this, false)?;
+fn states<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = target(d, s, this, false)?;
     let cached = st(d).borrow().face.get(&(n.index() as u32)).and_then(|f| f.states);
     if let Some(o) = cached {
-        return Ok(Value::Object(o));
+        return Ok(d.obj_local(s, o));
     }
-    let proto = made(d, it)?[2];
-    let o = d.obj(it, proto)?;
-    let mut s = st(d).borrow_mut();
-    s.face.entry(n.index() as u32).or_insert_with(|| Face::new(n)).states = Some(o);
-    s.ints.insert(o, (n, true));
-    Ok(Value::Object(o))
+    let proto = old(s, |it| made(d, it))?[2];
+    let o = d.obj_s(s, proto)?;
+    let l = d.obj_local(s, o);
+    let mut sc = st(d).borrow_mut();
+    sc.face.entry(n.index() as u32).or_insert_with(|| Face::new(n)).states = Some(o);
+    sc.ints.insert(o, (n, true));
+    Ok(l)
 }
 
 // ------------------------------------------------------------------------------------------ CustomStateSet
 
-fn state_arg(d: &Dom, it: &mut Interp<'_>, a: &[Value], what: &str) -> R<String> {
-    args_needed(it, a, &format!("{what}' on 'CustomStateSet"))?;
-    d.string_arg(it, a[0])
+fn state_arg<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>, what: &str) -> Res<'s, String> {
+    args_needed(s, a, &format!("{what}' on 'CustomStateSet"))?;
+    d.arg_str_s(s, a, 0)
 }
 
-fn state_add(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let v = state_arg(d, it, a, "add")?;
-    let n = target(d, it, this, true)?;
+fn state_add<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let v = state_arg(d, s, a, "add")?;
+    let n = target(d, s, this, true)?;
     let mut all = d.doc.borrow().states(n).to_vec();
-    if !all.iter().any(|s| **s == *v) {
+    if !all.iter().any(|x| **x == *v) {
         all.push(v.into());
         d.doc.borrow_mut().set_states(n, all);
     }
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-fn state_delete(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let v = state_arg(d, it, a, "delete")?;
-    let n = target(d, it, this, true)?;
+fn state_delete<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let v = state_arg(d, s, a, "delete")?;
+    let n = target(d, s, this, true)?;
     let mut all = d.doc.borrow().states(n).to_vec();
-    let Some(i) = all.iter().position(|s| **s == *v) else { return Ok(Value::Bool(false)) };
+    let Some(i) = all.iter().position(|x| **x == *v) else { return Ok(s.boolean(false)) };
     all.remove(i);
     d.doc.borrow_mut().set_states(n, all);
-    Ok(Value::Bool(true))
+    Ok(s.boolean(true))
 }
 
-fn state_has(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let v = state_arg(d, it, a, "has")?;
-    let n = target(d, it, this, true)?;
-    Ok(Value::Bool(d.doc.borrow().states(n).iter().any(|s| **s == *v)))
+fn state_has<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let v = state_arg(d, s, a, "has")?;
+    let n = target(d, s, this, true)?;
+    let has = d.doc.borrow().states(n).iter().any(|x| **x == *v);
+    Ok(s.boolean(has))
 }
 
-fn state_clear(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = target(d, it, this, true)?;
+fn state_clear<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = target(d, s, this, true)?;
     if !d.doc.borrow().states(n).is_empty() {
         d.doc.borrow_mut().set_states(n, Vec::new());
     }
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-fn state_size(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = target(d, it, this, true)?;
-    Ok(Value::Number(d.doc.borrow().states(n).len() as f64))
+fn state_size<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = target(d, s, this, true)?;
+    let len = d.doc.borrow().states(n).len();
+    Ok(s.number(len as f64))
 }
 
 /// The states of the set `this`, as strings.
-fn state_list(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<Vec<Value>> {
-    let n = target(d, it, this, true)?;
+fn state_list<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, Vec<Local<'s>>> {
+    let n = target(d, s, this, true)?;
     let all = d.doc.borrow().states(n).to_vec();
-    all.iter().map(|s| d.js_str(it, s)).collect()
+    all.iter().map(|x| d.js_str_s(s, x)).collect()
 }
 
 /// An iterator over `items`: the one of a new array.
-fn iterate(d: &Dom, it: &mut Interp<'_>, items: &[Value]) -> V {
-    let arr = it.array_from(items)?;
-    let k = d.key(it, "values")?;
-    let f = it.get_value(arr, k)?;
-    it.call(f, arr, &[])
+fn iterate<'s>(s: &mut Sc<'s, '_>, items: &[Local<'s>]) -> Res<'s, Local<'s>> {
+    let arr = s.new_array(items)?;
+    let f = s.get_str(arr, "values")?;
+    s.call(f, arr, &[])
 }
 
-fn state_values(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let items = state_list(d, it, this)?;
-    iterate(d, it, &items)
+fn state_values<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let items = state_list(d, s, this)?;
+    iterate(s, &items)
 }
 
-fn state_entries(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let items = state_list(d, it, this)?;
-    let pairs = items.iter().map(|&v| it.array_from(&[v, v])).collect::<R<Vec<_>>>()?;
-    iterate(d, it, &pairs)
+fn state_entries<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let items = state_list(d, s, this)?;
+    let pairs = items.iter().map(|&v| s.new_array(&[v, v])).collect::<Res<'s, Vec<_>>>()?;
+    iterate(s, &pairs)
 }
 
-fn state_for_each(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    args_needed(it, a, "forEach' on 'CustomStateSet")?;
-    let items = state_list(d, it, this)?;
-    if !it.is_callable_value(a[0]) {
-        return Err(it.type_error("Failed to execute 'forEach' on 'CustomStateSet': The callback provided as parameter 1 is not a function."));
+fn state_for_each<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    args_needed(s, a, "forEach' on 'CustomStateSet")?;
+    let items = state_list(d, s, this)?;
+    let cb = arg_s(s, a, 0);
+    if !s.is_callable(cb) {
+        return Err(s.type_error("Failed to execute 'forEach' on 'CustomStateSet': The callback provided as parameter 1 is not a function."));
     }
+    let this_arg = arg_s(s, a, 1);
     for v in items {
-        it.charge(1)?;
-        it.call(a[0], arg(a, 1), &[v, v, this])?;
+        s.charge(1)?;
+        s.call(cb, this_arg, &[v, v, this])?;
     }
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
 // ------------------------------------------------------------------------------------------ the interfaces
 
-fn internals_ctor(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
-    Err(it.type_error("Failed to construct 'ElementInternals': Illegal constructor"))
+fn internals_ctor<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    Err(s.type_error("Failed to construct 'ElementInternals': Illegal constructor"))
 }
 
-fn states_ctor(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
-    Err(it.type_error("Failed to construct 'CustomStateSet': Illegal constructor"))
+fn states_ctor<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    Err(s.type_error("Failed to construct 'CustomStateSet': Illegal constructor"))
 }
 
 /// The prototype and the constructor of `ElementInternals`, then those of `CustomStateSet`.
@@ -419,18 +426,18 @@ fn made(d: &Dom, it: &mut Interp<'_>) -> R<[ObjId; 4]> {
     }
     let op = it.object_prototype();
     let (ip, sp) = (d.obj(it, op)?, d.obj(it, op)?);
-    for (n, g) in [("form", form as H), ("labels", labels), ("willValidate", will_validate), ("validity", validity), ("validationMessage", validation_message), ("states", states), ("shadowRoot", shadow_root)] {
-        d.def_get(it, ip, n, g, None)?;
+    for (n, g) in [("form", form as HS), ("labels", labels), ("willValidate", will_validate), ("validity", validity), ("validationMessage", validation_message), ("states", states), ("shadowRoot", shadow_root)] {
+        d.def_get_s(it, ip, n, g, None)?;
     }
-    d.def_get(it, ip, "role", role, Some(set_role))?;
-    for (n, len, h) in [("checkValidity", 0, check_validity as H), ("reportValidity", 0, report_validity), ("setFormValue", 1, set_form_value), ("setValidity", 1, set_validity)] {
-        d.def_method(it, ip, n, len, h)?;
+    d.def_get_s(it, ip, "role", role, Some(set_role))?;
+    for (n, len, h) in [("checkValidity", 0, check_validity as HS), ("reportValidity", 0, report_validity), ("setFormValue", 1, set_form_value), ("setValidity", 1, set_validity)] {
+        d.def_method_s(it, ip, n, len, h)?;
     }
-    for (n, len, h) in [("add", 1, state_add as H), ("delete", 1, state_delete), ("has", 1, state_has), ("clear", 0, state_clear), ("forEach", 1, state_for_each), ("entries", 0, state_entries)] {
-        d.def_method(it, sp, n, len, h)?;
+    for (n, len, h) in [("add", 1, state_add as HS), ("delete", 1, state_delete), ("has", 1, state_has), ("clear", 0, state_clear), ("forEach", 1, state_for_each), ("entries", 0, state_entries)] {
+        d.def_method_s(it, sp, n, len, h)?;
     }
-    d.def_get(it, sp, "size", state_size, None)?;
-    let values = d.def_method(it, sp, "values", 0, state_values)?;
+    d.def_get_s(it, sp, "size", state_size, None)?;
+    let values = d.def_method_s(it, sp, "values", 0, state_values)?;
     let k = d.key(it, "keys")?;
     it.define_data(sp, k, Value::Object(values), true, true, true)?;
     it.define_data(sp, it.symbol_iterator(), Value::Object(values), true, false, true)?;

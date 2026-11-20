@@ -97,14 +97,6 @@ impl Dom {
 }
 
 impl Dom {
-    /// `def_get` for a getter of the new form and a setter of the old form (the setter's file has not moved).
-    pub(crate) fn def_get_sh(&self, it: &mut Interp<'_>, target: ObjId, name: &str, get: HS, set: H) -> R<()> {
-        let key = self.key(it, name)?;
-        let g = self.add_fn_s_obj(it, get, &format!("get {name}"), 0, bare_js_api::HostFn::Method)?;
-        let s = self.add_fn(it, set, &format!("set {name}"), 1, false)?;
-        self.define_accessor(it, target, key, g, Some(s))
-    }
-
     /// `def_get` for functions of the new form.
     pub(crate) fn def_get_s(&self, it: &mut Interp<'_>, target: ObjId, name: &str, get: HS, set: Option<HS>) -> R<()> {
         let key = self.key(it, name)?;
