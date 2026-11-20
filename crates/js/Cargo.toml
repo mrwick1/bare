@@ -18,6 +18,7 @@ census = []
 bare-js-api = { path = "../js-api" }
 bare-observe = { path = "../observe" }
 bare-os = { path = "../os" }
+bare-tzdata = { path = "../tzdata" }
 bare-unicode = { path = "../unicode" }
 fixed_decimal = "0.7.3"
 # ICU4X without its compiled data: the data of 5 English locales is in `src/icu_data` (see `tools/js/icu_data_gen.sh`)

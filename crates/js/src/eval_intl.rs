@@ -12,8 +12,9 @@
 //   `formatMatcher`, `dateStyle` and `timeStyle`, then the defaults (ToDateTimeOptions).
 // - Locales: see `intl.rs`. The calendar is always `gregory` and the numbering system `latn` (other values are valid and
 //   ignored, as for a locale that does not have them).
-// - Time zones: IANA names from the system tzdata, offsets (`+05:30`), and the UTC names. With no `timeZone`, the zone of the
-//   system: `TZ`, else the target of `/etc/localtime`, else UTC. `Interp::set_default_time_zone` replaces it (tests).
+// - Time zones: IANA names from the tzdata in the binary (`bare-tzdata`, the same on every OS), offsets (`+05:30`), and the UTC
+//   names. With no `timeZone`, the zone of the system: `TZ`, else the zone of the OS (`bare_os::tz::local_zone`: the target of
+//   `/etc/localtime`, or the Windows zone), else UTC. `Interp::set_default_time_zone` replaces it (tests).
 // - `timeZoneName` (all six values) and the full and long time styles: the names are in `tz_names.rs` (a table of common zones,
 //   the offset form for the others). `fractionalSecondDigits` (1 to 3) when the pattern has seconds.
 //
@@ -26,7 +27,7 @@
 // then dropped from the resolved locale. A kept keyword goes in `resolvedOptions().locale` (`exts`).
 //
 // Known deviations: `resolvedOptions().timeZone` is the name as given (the current spec), where V8 gives the old ICU name for
-// some links (`Asia/Kolkata` is `Asia/Calcutta` in V8). A zone name must have the case of its file (`asia/kolkata` is a
+// some links (`Asia/Kolkata` is `Asia/Calcutta` in V8). A zone name must have the case of its IANA name (`asia/kolkata` is a
 // RangeError; V8 accepts it). A locale that ICU has and bare has not resolves to its English parent or to `en-US`. With `-u-hc-h12` or `h11` in `en-GB`, a time style
 // pads the hour (`03:06 pm`); V8 does not.
 //
@@ -294,7 +295,7 @@ static NON_LATN: [&str; 20] = [
     "tamldec", "telu", "thai", "tibt", "adlm",
 ];
 
-/// Steps charged for each zone file read.
+/// Steps charged for each zone load.
 const ZONE_READ_STEPS: u64 = 10_000;
 
 /// The option names that each part of CreateDateTimeFormat reads, with their values.
@@ -664,7 +665,7 @@ impl<'p> Interp<'p> {
         Ok(Some(h!(self, self.heap.to_string_lossy(s))))
     }
 
-    /// A zone by name: the UTC names, an offset, or a tzdata file (read once). `None` when it is not a zone.
+    /// A zone by name: the UTC names, an offset, or a zone of `bare-tzdata` (parsed once). `None` when it is not a zone.
     fn intl_zone(&mut self, name: &str) -> Res<Option<(Rc<str>, Rc<Zone>)>> {
         if tz::is_utc_name(name) {
             let utc = self.intl.utc.get_or_insert_with(|| (Rc::from("UTC"), Rc::new(Zone::fixed(0))));
@@ -675,17 +676,12 @@ impl<'p> Interp<'p> {
             let n = format!("{}{:02}:{:02}", if off < 0 { '-' } else { '+' }, a / 3600, a / 60 % 60);
             return Ok(Some((Rc::from(n.as_str()), Rc::new(Zone::fixed(off)))));
         }
-        if !tz::is_file_name(name) {
-            return Ok(None);
-        }
         if let Some((k, z)) = self.intl.zones.get_key_value(name) {
             return Ok(Some((k.clone(), z.clone())));
         }
+        let Some(bytes) = bare_tzdata::find(name) else { return Ok(None) };
         self.charge_steps(ZONE_READ_STEPS)?;
-        let dir = std::env::var_os("TZDIR").map_or_else(|| std::path::PathBuf::from("/usr/share/zoneinfo"), std::path::PathBuf::from);
-        let path = dir.join(name);
-        let ok = std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() <= tz::MAX_FILE);
-        let Some(z) = ok.then(|| std::fs::read(&path).ok()).flatten().and_then(|b| Zone::parse(&b)) else { return Ok(None) };
+        let Some(z) = Zone::parse(bytes) else { return Ok(None) };
         let (k, z): (Rc<str>, Rc<Zone>) = (Rc::from(name), Rc::new(z));
         if self.intl.zones.len() < MAX_ZONES {
             self.intl.zones.insert(k.clone(), z.clone());
@@ -693,15 +689,14 @@ impl<'p> Interp<'p> {
         Ok(Some((k, z)))
     }
 
-    /// DefaultTimeZone: `set_default_time_zone`, else `TZ`, else the target of `/etc/localtime`, else UTC.
+    /// DefaultTimeZone: `set_default_time_zone`, else `TZ`, else the zone of the OS (`bare_os::tz::local_zone`), else UTC.
     fn intl_default_zone(&mut self) -> Res<(Rc<str>, Rc<Zone>)> {
         if let Some(z) = &self.intl.default_zone {
             return Ok(z.clone());
         }
         let from_tz = std::env::var("TZ").ok().map(|s| s.trim_start_matches(':').to_string());
-        let from_link = || std::fs::read_link("/etc/localtime").ok().and_then(|p| p.to_str().and_then(|s| s.split_once("zoneinfo/").map(|x| x.1.to_string())));
         let mut z = None;
-        for name in [from_tz, from_link()].into_iter().flatten() {
+        for name in [from_tz, bare_os::tz::local_zone()].into_iter().flatten() {
             if let Some(found) = self.intl_zone(&name)? {
                 z = Some(found);
                 break;
