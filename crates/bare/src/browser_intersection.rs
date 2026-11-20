@@ -38,15 +38,15 @@
 
 use crate::browser::*;
 use crate::browser_lazy::lazy_global;
+use crate::browser_scoped::*;
 use bare_css::values::{Keyword, Property, Value as Cv};
 use bare_html::dom::{NodeData, NodeId};
 use bare_js::eval::{Error, Interp};
 use bare_js::value::{ObjId, Value};
+use bare_js_api::{Args, Engine, HostFn, Local, Type};
 use bare_layout::fragment::Rect;
 use std::cell::{OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
-
-type V = R<Value>;
 
 const MAX_OBSERVERS: usize = 1024;
 const MAX_OBSERVATIONS: usize = 1 << 14;
@@ -160,34 +160,35 @@ fn margin_text(m: &[Mar; 4]) -> String {
 
 // ---------------------------------------------------------------------------------------------- constructor and methods
 
-fn bad_init(it: &mut Interp<'_>, member: &str, what: &str) -> Error {
-    it.type_error(&format!("{CTOR}: {}: {what}", INIT.replace("{}", member)))
+fn bad_init<'s>(s: &mut Sc<'s, '_>, member: &str, what: &str) -> bare_js_api::Error<'s> {
+    s.type_error(&format!("{CTOR}: {}: {what}", INIT.replace("{}", member)))
 }
 
-fn threshold_list(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<Vec<f32>> {
+fn threshold_list<'s>(d: &Dom, s: &mut Sc<'s, '_>, v: Local<'s>) -> Res<'s, Vec<f32>> {
     let mut items = Vec::new();
-    match v {
-        Value::Undefined => {}
-        Value::Object(o) if it.heap.is_array(o).map_err(|e| it.heap_error(e))? => {
-            let n = it.heap.array_length(o).map_err(|e| it.heap_error(e))?.unwrap_or(0);
-            if n as usize > MAX_OBSERVATIONS {
-                return Err(d.lim("intersection-thresholds"));
-            }
-            for i in 0..n {
-                let k = d.key(it, &i.to_string())?;
-                let x = it.get_value(v, k)?;
-                items.push(it.to_js_number(x)?);
-            }
+    if s.type_of(v) == Type::Undefined {
+    } else if s.is_array(v)? {
+        let len = s.get_str(v, "length")?;
+        let n = s.to_number(len)?;
+        if n > MAX_OBSERVATIONS as f64 {
+            return Err(d.lim_s(s, "intersection-thresholds"));
         }
-        _ => items.push(it.to_js_number(v)?),
+        let base = s.engine().stack_len();
+        for i in 0..n as usize {
+            let x = s.get_str(v, &i.to_string())?;
+            items.push(s.to_number(x)?);
+            s.engine().stack_truncate(base);
+        }
+    } else {
+        items.push(s.to_number(v)?);
     }
     for &x in &items {
         if !x.is_finite() {
-            return Err(bad_init(it, "threshold", "The provided double value is non-finite."));
+            return Err(bad_init(s, "threshold", "The provided double value is non-finite."));
         }
     }
     if items.iter().any(|x| !(0.0..=1.0).contains(x)) {
-        return Err(it.range_error(&format!("{CTOR}: Threshold values must be numbers between 0 and 1")));
+        return Err(s.range_error(&format!("{CTOR}: Threshold values must be numbers between 0 and 1")));
     }
     let mut out: Vec<f32> = items.into_iter().map(|x| x as f32).collect();
     out.sort_by(f32::total_cmp);
@@ -197,146 +198,159 @@ fn threshold_list(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<Vec<f32>> {
     Ok(out)
 }
 
-fn construct(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
-    let Some(&cb) = a.first() else {
-        return Err(it.type_error(&format!("{CTOR}: 1 argument required, but only 0 present.")));
-    };
-    if !it.is_callable_value(cb) {
-        return Err(it.type_error(&format!("{CTOR}: parameter 1 is not of type 'Function'.")));
+/// Member `name` of the options object, `undefined` when there is no object.
+fn init_member<'s>(s: &mut Sc<'s, '_>, opts: Option<Local<'s>>, name: &str) -> Res<'s, Local<'s>> {
+    match opts {
+        Some(o) => s.get_str(o, name),
+        None => Ok(s.undefined()),
     }
-    let opts = a.get(1).copied().unwrap_or(Value::Undefined);
-    if !matches!(opts, Value::Undefined | Value::Null | Value::Object(_)) {
-        return Err(it.type_error(&format!("{CTOR}: The provided value is not of type 'IntersectionObserverInit'.")));
-    }
-    let get = |it: &mut Interp<'_>, name: &str| -> R<Value> {
-        if let Value::Object(_) = opts {
-            let k = d.key(it, name)?;
-            it.get_value(opts, k)
-        } else {
-            Ok(Value::Undefined)
-        }
+}
+
+fn construct<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let Some(cb) = a.get(0) else {
+        return Err(s.type_error(&format!("{CTOR}: 1 argument required, but only 0 present.")));
     };
+    if !s.is_callable(cb) {
+        return Err(s.type_error(&format!("{CTOR}: parameter 1 is not of type 'Function'.")));
+    }
+    let cb = s.engine().raw(cb);
+    let opts = a.get(1);
+    if opts.is_some_and(|o| !is_nullish(s, o) && !is_object(s, o)) {
+        return Err(s.type_error(&format!("{CTOR}: The provided value is not of type 'IntersectionObserverInit'.")));
+    }
+    let opts = opts.filter(|&o| is_object(s, o));
     // WebIDL reads the members in alphabetical order.
-    let root = get(it, "root")?;
-    let (root, doc) = match (root, d.node_of(root)) {
-        (Value::Undefined | Value::Null, _) => (None, false),
-        (Value::Object(o), Some(n)) if d.is_element(n) => (Some((n, o)), false),
-        (Value::Object(o), Some(n)) if matches!(d.data(n), NodeData::Document) => (Some((n, o)), true),
-        _ => return Err(bad_init(it, "root", "The provided value is not of type '(Document or Element)'.")),
+    let root = init_member(s, opts, "root")?;
+    let node = d.node_of_s(s, root);
+    let (root, doc) = match (is_nullish(s, root), node) {
+        (true, _) => (None, false),
+        (false, Some(n)) if d.is_element(n) => (Some((n, obj_id(s, root).expect("a node has a wrapper"))), false),
+        (false, Some(n)) if matches!(d.data(n), NodeData::Document) => (Some((n, obj_id(s, root).expect("a node has a wrapper"))), true),
+        _ => return Err(bad_init(s, "root", "The provided value is not of type '(Document or Element)'.")),
     };
-    let margin = match get(it, "rootMargin")? {
-        Value::Undefined => [Mar::Px(0); 4],
-        v => {
-            let s = d.string_arg(it, v)?;
-            parse_margin(&s).map_err(|m| d.dom_err(it, "SyntaxError", &format!("{CTOR}: {m}")))?
+    let m = init_member(s, opts, "rootMargin")?;
+    let margin = if s.type_of(m) == Type::Undefined {
+        [Mar::Px(0); 4]
+    } else {
+        let text = d.string_arg_s(s, m)?;
+        match parse_margin(&text) {
+            Ok(m) => m,
+            Err(m) => return Err(d.dom_err_s(s, "SyntaxError", &format!("{CTOR}: {m}"))),
         }
     };
-    let threshold = get(it, "threshold")?;
-    let thresholds = threshold_list(d, it, threshold)?;
-    let track = get(it, "trackVisibility")?;
-    if it.to_js_bool(track)? {
-        return Err(Dom::gate("IntersectionObserver trackVisibility (it needs occlusion, opacity and transforms)"));
+    let threshold = init_member(s, opts, "threshold")?;
+    let thresholds = threshold_list(d, s, threshold)?;
+    let track = init_member(s, opts, "trackVisibility")?;
+    if s.to_boolean(track) {
+        return Err(s.engine().api_err(Dom::gate("IntersectionObserver trackVisibility (it needs occlusion, opacity and transforms)")));
     }
     let st = state(d);
     if st.borrow().observers.len() >= MAX_OBSERVERS {
-        return Err(d.lim("intersection-observers"));
+        return Err(d.lim_s(s, "intersection-observers"));
     }
-    let list: Vec<Value> = thresholds.iter().map(|&t| Value::Number(t as f64)).collect();
-    let thresholds_array = it.array_from(&list)?;
+    let list: Vec<Local<'s>> = thresholds.iter().map(|&t| s.number(t as f64)).collect();
+    let thresholds_array = s.new_array(&list)?;
+    let thresholds_array = s.engine().raw(thresholds_array);
     let proto = st.borrow().protos.expect("made").observer;
-    let o = d.obj(it, proto)?;
+    let o = d.obj_s(s, proto)?;
     let margin_text = margin_text(&margin);
-    let mut s = st.borrow_mut();
-    s.observers.insert(o, Observer { cb, root: root.map(|r| (r.0, r.1)), doc, margin, margin_text, thresholds, thresholds_array, obs: Vec::new(), targets: HashSet::new(), queue: Vec::new() });
-    s.order.push(o);
-    Ok(Value::Object(o))
+    let mut m = st.borrow_mut();
+    m.observers.insert(o, Observer { cb, root, doc, margin, margin_text, thresholds, thresholds_array, obs: Vec::new(), targets: HashSet::new(), queue: Vec::new() });
+    m.order.push(o);
+    drop(m);
+    Ok(d.obj_local(s, o))
 }
 
-fn illegal_entry(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
-    Err(it.type_error("Failed to construct 'IntersectionObserverEntry': Illegal constructor"))
+fn illegal_entry<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    Err(s.type_error("Failed to construct 'IntersectionObserverEntry': Illegal constructor"))
 }
 
-fn observer_of(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<ObjId> {
-    match this {
-        Value::Object(o) if state(d).borrow().observers.contains_key(&o) => Ok(o),
-        _ => Err(it.type_error("Illegal invocation")),
+fn observer_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, ObjId> {
+    match obj_id(s, this) {
+        Some(o) if state(d).borrow().observers.contains_key(&o) => Ok(o),
+        _ => Err(s.type_error("Illegal invocation")),
     }
 }
 
-fn target_arg(d: &Dom, it: &mut Interp<'_>, a: &[Value], method: &str) -> R<(NodeId, ObjId)> {
-    let v = a.first().copied();
-    let Some(v) = v else {
-        return Err(it.type_error(&format!("Failed to execute '{method}' on 'IntersectionObserver': 1 argument required, but only 0 present.")));
+fn target_arg<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>, method: &str) -> Res<'s, (NodeId, ObjId)> {
+    let Some(v) = a.get(0) else {
+        return Err(s.type_error(&format!("Failed to execute '{method}' on 'IntersectionObserver': 1 argument required, but only 0 present.")));
     };
-    match (d.node_of(v), v) {
-        (Some(n), Value::Object(o)) if d.is_element(n) => Ok((n, o)),
-        _ => Err(it.type_error(&format!("Failed to execute '{method}' on 'IntersectionObserver': parameter 1 is not of type 'Element'."))),
+    match (d.node_of_s(s, v), obj_id(s, v)) {
+        (Some(n), Some(o)) if d.is_element(n) => Ok((n, o)),
+        _ => Err(s.type_error(&format!("Failed to execute '{method}' on 'IntersectionObserver': parameter 1 is not of type 'Element'."))),
     }
 }
 
-fn observe(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let o = observer_of(d, it, this)?;
-    let (target, wrapper) = target_arg(d, it, a, "observe")?;
-    let mut s = state(d).borrow_mut();
-    let s = &mut *s;
-    let ob = s.observers.get_mut(&o).expect("checked");
+fn observe<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = observer_of(d, s, this)?;
+    let (target, wrapper) = target_arg(d, s, a, "observe")?;
+    let mut m = state(d).borrow_mut();
+    let m = &mut *m;
+    let ob = m.observers.get_mut(&o).expect("checked");
     if ob.targets.contains(&target) {
-        return Ok(Value::Undefined);
+        return Ok(s.undefined());
     }
-    if s.observations >= MAX_OBSERVATIONS {
-        return Err(d.lim("intersection-observations"));
+    if m.observations >= MAX_OBSERVATIONS {
+        return Err(d.lim_s(s, "intersection-observations"));
     }
-    s.observations += 1;
+    m.observations += 1;
     ob.targets.insert(target);
     ob.obs.push(Observation { target, wrapper, index: -1, inside: false });
-    s.last_key = None;
-    Ok(Value::Undefined)
+    m.last_key = None;
+    Ok(s.undefined())
 }
 
-fn unobserve(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let o = observer_of(d, it, this)?;
-    let (target, _) = target_arg(d, it, a, "unobserve")?;
-    let mut s = state(d).borrow_mut();
-    let s = &mut *s;
-    let ob = s.observers.get_mut(&o).expect("checked");
+fn unobserve<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = observer_of(d, s, this)?;
+    let (target, _) = target_arg(d, s, a, "unobserve")?;
+    let mut m = state(d).borrow_mut();
+    let m = &mut *m;
+    let ob = m.observers.get_mut(&o).expect("checked");
     if ob.targets.remove(&target) {
         ob.obs.retain(|x| x.target != target);
-        s.observations -= 1;
+        m.observations -= 1;
     }
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-fn disconnect(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let o = observer_of(d, it, this)?;
-    let mut s = state(d).borrow_mut();
-    let s = &mut *s;
-    let ob = s.observers.get_mut(&o).expect("checked");
-    s.observations -= ob.obs.len();
+fn disconnect<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = observer_of(d, s, this)?;
+    let mut m = state(d).borrow_mut();
+    let m = &mut *m;
+    let ob = m.observers.get_mut(&o).expect("checked");
+    m.observations -= ob.obs.len();
     ob.obs.clear();
     ob.targets.clear();
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-fn take_records(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let o = observer_of(d, it, this)?;
+fn take_records<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = observer_of(d, s, this)?;
     let q = std::mem::take(&mut state(d).borrow_mut().observers.get_mut(&o).expect("checked").queue);
-    it.array_from(&q)
+    let items: Vec<Local<'s>> = q.iter().map(|v| s.engine().raw_local(v)).collect();
+    s.new_array(&items)
 }
 
-fn root_get(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let o = observer_of(d, it, this)?;
-    Ok(state(d).borrow().observers[&o].root.map_or(Value::Null, |r| Value::Object(r.1)))
+fn root_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = observer_of(d, s, this)?;
+    let root = state(d).borrow().observers[&o].root;
+    Ok(match root {
+        Some(r) => d.obj_local(s, r.1),
+        None => s.null(),
+    })
 }
 
-fn margin_get(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let o = observer_of(d, it, this)?;
+fn margin_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = observer_of(d, s, this)?;
     let t = state(d).borrow().observers[&o].margin_text.clone();
-    d.js_str(it, &t)
+    d.js_str_s(s, &t)
 }
 
-fn thresholds_get(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let o = observer_of(d, it, this)?;
-    Ok(state(d).borrow().observers[&o].thresholds_array)
+fn thresholds_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = observer_of(d, s, this)?;
+    let v = state(d).borrow().observers[&o].thresholds_array;
+    Ok(s.engine().raw_local(&v))
 }
 
 fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
@@ -347,20 +361,20 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     let (observer, entry) = (d.obj(it, op)?, d.obj(it, op)?);
     let (kc, kp) = (d.key(it, "constructor")?, d.key(it, "prototype")?);
     let mut ctors = Vec::new();
-    for (name, proto, ctor, len) in [("IntersectionObserver", observer, construct as H, 1), ("IntersectionObserverEntry", entry, illegal_entry, 0)] {
-        let f = d.add_fn(it, ctor, name, len, true)?;
+    for (name, proto, ctor, len) in [("IntersectionObserver", observer, construct as HS, 1), ("IntersectionObserverEntry", entry, illegal_entry, 0)] {
+        let f = d.add_fn_s_obj(it, ctor, name, len, HostFn::Ctor)?;
         it.define_data(f, kp, Value::Object(proto), false, false, false)?;
         it.define_data(proto, kc, Value::Object(f), true, false, true)?;
         crate::browser_lazy::tag(d, it, proto, name)?;
         ctors.push(f);
     }
-    d.def_method(it, observer, "observe", 1, observe)?;
-    d.def_method(it, observer, "unobserve", 1, unobserve)?;
-    d.def_method(it, observer, "disconnect", 0, disconnect)?;
-    d.def_method(it, observer, "takeRecords", 0, take_records)?;
-    d.def_get(it, observer, "root", root_get, None)?;
-    d.def_get(it, observer, "rootMargin", margin_get, None)?;
-    d.def_get(it, observer, "thresholds", thresholds_get, None)?;
+    d.def_method_s(it, observer, "observe", 1, observe)?;
+    d.def_method_s(it, observer, "unobserve", 1, unobserve)?;
+    d.def_method_s(it, observer, "disconnect", 0, disconnect)?;
+    d.def_method_s(it, observer, "takeRecords", 0, take_records)?;
+    d.def_get_s(it, observer, "root", root_get, None)?;
+    d.def_get_s(it, observer, "rootMargin", margin_get, None)?;
+    d.def_get_s(it, observer, "thresholds", thresholds_get, None)?;
     state(d).borrow_mut().protos = Some(Protos { observer, entry, ctors: (ctors[0], ctors[1]) });
     Ok(())
 }

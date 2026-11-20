@@ -2807,6 +2807,7 @@ impl<'a> Parser<'a> {
             }
             Kind::Punct(P::Slash | P::SlashAssign) => {
                 self.rescan(Goal::RegExp)?;
+                self.check_regexp()?;
                 self.advance()?;
                 self.mk_expr(ExprKind::RegExp, start)
             }
@@ -2882,6 +2883,18 @@ impl<'a> Parser<'a> {
         }
         self.add_ref(span);
         self.mk_expr(ExprKind::Ident, start)
+    }
+
+    /// The early errors of the pattern of the regular expression token. The pre-parse of the text has checked it already.
+    #[inline(never)]
+    fn check_regexp(&self) -> R<()> {
+        if self.mode != Mode::Function
+            && let Some((pattern, flags)) = lex::regexp_parts(self.p.source, &self.tok)
+            && let Err(msg) = crate::regexp_check::check(pattern, flags)
+        {
+            return Err(self.syntax(msg, self.tspan()));
+        }
+        Ok(())
     }
 
     /// `async (...)`: a call of a function named `async`, or the parameters of an async arrow.

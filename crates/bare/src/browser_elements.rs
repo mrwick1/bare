@@ -114,8 +114,8 @@ fn make(d: &Dom, it: &mut Interp<'_>) -> R<[ObjId; 10]> {
         (o[i], o[i + 5]) = (proto, f);
     }
     tag_fragments(d, it)?;
-    d.def_get(it, o[0], "relList", crate::browser_platform_class::rel_list::<1>, Some(crate::browser_platform_class::set_rel_list::<1>))?;
-    d.def_get(it, o[1], "relList", crate::browser_platform_class::rel_list::<2>, Some(crate::browser_platform_class::set_rel_list::<2>))?;
+    d.def_get_s(it, o[0], "relList", crate::browser_platform_class::rel_list::<1>, Some(crate::browser_platform_class::set_rel_list::<1>))?;
+    d.def_get_s(it, o[1], "relList", crate::browser_platform_class::rel_list::<2>, Some(crate::browser_platform_class::set_rel_list::<2>))?;
     members::<false>(d, it, o[0])?;
     d.def_get_s(it, o[0], "download", download, Some(set_download))?;
     members::<true>(d, it, o[1])?;

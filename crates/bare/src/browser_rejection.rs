@@ -8,6 +8,8 @@
 
 use crate::browser::*;
 use crate::browser_console::{push_text, ConsoleLevel};
+use crate::browser_scoped::*;
+use bare_js_api::{Args, HostFn, Local};
 use bare_js::eval::{Interp, PromiseStatus, MAX_PENDING_REJECTIONS};
 use bare_js::heap::Get;
 use bare_js::value::{ObjId, Value};
@@ -19,7 +21,7 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<[ObjId; 2]> {
         return Ok(o);
     }
     let proto = d.obj(it, d.p().event)?;
-    let f = d.add_fn(it, ctor, "PromiseRejectionEvent", 2, true)?;
+    let f = d.add_fn_s_obj(it, ctor, "PromiseRejectionEvent", 2, HostFn::Ctor)?;
     let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
     it.define_data(f, kp, Value::Object(proto), false, false, false)?;
     it.define_data(proto, kc, Value::Object(f), true, false, true)?;
@@ -49,26 +51,27 @@ fn build(d: &Dom, it: &mut Interp<'_>, ty: &str, flags: [bool; 3], promise: Valu
 }
 
 /// `new PromiseRejectionEvent(type, { promise, reason })`. `promise` is required (any object, as the IDL type `object`).
-fn ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
+fn ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     if a.len() < 2 {
-        return Err(it.type_error(&format!("Failed to construct 'PromiseRejectionEvent': 2 arguments required, but only {} present.", a.len())));
+        return Err(s.type_error(&format!("Failed to construct 'PromiseRejectionEvent': 2 arguments required, but only {} present.", a.len())));
     }
-    let ty = d.string_arg(it, a[0])?;
-    let init = a[1];
-    if !matches!(init, Value::Object(_)) {
-        return Err(it.type_error("Failed to construct 'PromiseRejectionEvent': The provided value is not of type 'PromiseRejectionEventInit'."));
+    let ty = d.arg_str_s(s, a, 0)?;
+    let init = arg_s(s, a, 1);
+    if !is_object(s, init) {
+        return Err(s.type_error("Failed to construct 'PromiseRejectionEvent': The provided value is not of type 'PromiseRejectionEventInit'."));
     }
     let mut flags = [false; 3];
     for (i, n) in ["bubbles", "cancelable", "composed"].into_iter().enumerate() {
-        flags[i] = crate::browser_events::init_flag(d, it, init, n)?;
+        flags[i] = crate::browser_events::init_flag_s(s, init, n)?;
     }
-    let (kp, kr) = (d.key(it, "promise")?, d.key(it, "reason")?);
-    let promise = it.get_value(init, kp)?;
-    if !matches!(promise, Value::Object(_)) {
-        return Err(it.type_error("Failed to construct 'PromiseRejectionEvent': Failed to read the 'promise' property from 'PromiseRejectionEventInit': Required member is undefined."));
+    let promise = s.get_str(init, "promise")?;
+    if !is_object(s, promise) {
+        return Err(s.type_error("Failed to construct 'PromiseRejectionEvent': Failed to read the 'promise' property from 'PromiseRejectionEventInit': Required member is undefined."));
     }
-    let reason = it.get_value(init, kr)?;
-    Ok(Value::Object(build(d, it, &ty, flags, promise, reason)?))
+    let reason = s.get_str(init, "reason")?;
+    let (promise, reason) = (bare_js_api::Engine::raw(s.engine(), promise), bare_js_api::Engine::raw(s.engine(), reason));
+    let ev = old(s, |it| build(d, it, &ty, flags, promise, reason))?;
+    Ok(d.obj_local(s, ev))
 }
 
 /// Whether a listener or a handler property for `ty` is on `window`.
