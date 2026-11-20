@@ -281,13 +281,15 @@ impl Realm {
     pub fn new(shared: Arc<SharedAtoms>) -> Realm {
         let mut heap = Heap::default();
         let mut shapes = Shapes::default();
+        // The names that `typeof` gives are shared atoms, as the string literals of the code are (`LoadAtom` loads the shared atom), so a
+        // comparison with a literal is a pointer test whatever the order of compile and `Realm::new`.
+        let tnames = TYPEOF.map(|s| shared.intern(Chars::One(s.as_bytes())).expect("memory"));
         let mut atoms = Atoms::new(shared);
         let mut atom = |s: &str| atoms.intern(&mut heap, Chars::One(s.as_bytes())).expect("memory");
         let (k_code, k_ctx, k_prototype, k_length, k_name, k_message) = (atom("\0code"), atom("\0ctx"), atom("prototype"), atom("length"), atom("name"), atom("message"));
         let (k_home, k_fields, k_link, k_constructor, k_raw) = (atom("\0home"), atom("\0fields"), atom("\0link"), atom("constructor"), atom("raw"));
         let (k_value_of, k_to_string) = (atom("valueOf"), atom("toString"));
         let hidden = ["\0native", "\0n1", "\0n2", "\0n3"].map(&mut atom);
-        let tnames = TYPEOF.map(&mut atom);
         let root = shapes.root(Layout::Object, None, 4);
         let object_proto = Obj::new(&mut heap, &shapes, root).expect("memory");
         let proto = Some(object_proto.cell());
