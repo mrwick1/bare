@@ -16463,3 +16463,38 @@ A loop at the top level of a script with a `let` (`let s = 0; for (let i = 0; i 
 `cargo test --locked -p bare-js2 --lib`: 379 tests. 378 pass in a full run on the loaded machine; `a_scope_with_many_locals_compiles_in_linear_time` fails when it runs with the others under load and passes when it runs alone (5.7 s and 8.4 s, 3 runs). `cargo test --locked -p bare-js-diff`: all pass (256 programs, 0 new differences, 20 known). Clippy: no finding in the changed code (the findings that remain are in `heap.rs`, `crates/js2/examples`, `bare-os` and `bare-observe`).
 
 Not tested: Windows and macOS; Miri on the new tests; the old engine behind the differential runner in modes other than `tree`; a throw at the top level between a `let` and the end of the script (the hand-over is skipped); a second test262 revision.
+
+## 2026-11-20: js2 global lexical names after a throw at the top level
+
+Bug (follow-up of #771): a top-level `let`, `const` or `class` that no function uses lives in a register, and the script hands it over to the global lexical environment at its end. A script that threw before its end skipped the hand-over. A later script of the same realm did not see the name (`ReferenceError`), and could declare it again. The spec keeps the binding after an abrupt completion: with its value if its declaration ran, in its dead zone if not. A script that throws partway is common on a page.
+
+Tests (they failed before the fix): `a_top_level_name_stays_after_the_script_throws` runs script A (it throws), then script B, in one realm, normally and under constant collection. Cases: `let x = 1; throw 0;` (B reads 1); `let y; throw 0; y = 2;`; `const` (B assigns: `TypeError`); `class`; a heap value after 2,000 allocations; a name after the throw is in its dead zone (`ReferenceError` for `let`, `const`, `class`); a throw from a called function; a throw through `try`/`finally`; and a `let`, `var` or function of the same name in B is a `SyntaxError` (also for a name in its dead zone).
+
+Fix (`compile_stmt.rs`, `script_body`): the statements of the script are covered by one handler. Its code hands over the names in registers (`hand_over`, the same code as the normal end) and throws the exception again. Each name in a register is loaded with a hole at the start of the script, so a name whose declaration did not run is in its dead zone. The exception register is allocated after the last statement (a free register), so no register number of the script changes. The handler is after the normal path, and the normal path jumps over it (one `Jmp` for each script run). The interpreter loop did not change. A script with no top-level `let`, `const` or `class` in a register has no handler and no extra instruction.
+
+Deliberate golden changes (`compile_tests.rs`): the script goldens of `a_derived_class_calls_super_in_an_arrow`, `class_methods_fields_and_static_elements`, `private_names_methods_and_accessors` and `super_property_reads_and_writes` have `LoadHole` at the start, `Jmp`, the handler and a second hand-over.
+
+### Cost
+
+Machine: archMachine (load average 10 to 20, so only instruction counts). Release build, `tools/js/instr.sh` (the minimum of 3 runs), base `1e6899fb` (origin/main) against this branch, count at N minus count at N = 0. The micro rows are hand-written bytecode and do not run the compiler, so they check that the interpreter code did not move. Each cell was measured 3 times with `instr.sh` (9 runs for each side); the spread is under 0.001%.
+
+| Row | Base | Branch | Change |
+| --- | ---: | ---: | ---: |
+| `loopfn 3000000` | 931.50 M | 931.50 M | 0.0% |
+| `calls 1000000` | 691.50 M | 691.50 M | 0.0% |
+| `fib 27` | 338.71 M | 338.71 M | 0.0% |
+| `closures 1000000` | 2,187.10 M | 2,187.10 M | 0.0% |
+| `objects 1000000` | 757.40 M | 757.40 M | 0.0% |
+| top-level loop (`let s = 0; for (let i = 0; i < 1e6; i++) s += i & 7;`, `script_run`), per turn | 200.998 | 201.001 | +0.001% |
+
+The setup of the top-level script (compile, prelude and run with 0 turns) is 4,584,206 instructions on the base and 4,592,401 on the branch (+8,195, +0.18%, one time for each run: the second hand-over and the handler).
+
+### test262
+
+`tools/js/test262_js2.sh -j 4`, checkout `e4fbf577` (the pinned commit). Base and branch: 12,768 passes and 5,016 failures on js2, and the lists of results are identical, line by line (29,763 lines each). No new failure.
+
+### Tests
+
+`cargo test --locked -p bare-js2 --lib`: 382 pass (including `a_scope_with_many_locals_compiles_in_linear_time`). `cargo test --locked --release -p bare-js-diff`: all pass.
+
+Not tested: Windows and macOS; Miri on the new test; a throw that is not catchable (an out-of-memory error or the end of the step budget): the handler also runs for them if the unwind reaches it, and I did not test that path; a script with a `let` in a register and a name that also sits in a context slot; the order of the checks when a name in a context slot is declared and a later register name fails `CheckLex` (the context name stays declared; this is older than this change).
