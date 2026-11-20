@@ -14355,3 +14355,45 @@ Design: F2 (the engine walks plain data and writes a byte record in the V8 style
 Hypothesis (not measured): the native walk costs about 4.4 K per `history` state against 21.7 K, about 17 M less on `history 1`. The record is about 48 bytes against about 1.1 KB.
 
 Not tested: every "Expected cost" number, the cost of option E (taken from the brief), `jemalloc` and codegen-units=1 runs, the Windows VM, the new engine. The V8, WebKit and Ladybird record layouts are verified only as far as the public headers show; statements marked "from memory" in the page are not verified.
+
+## 2026-11-20: structured clone spike (design-host-clone.md step 1)
+
+COMPLETE. GATE PASS: `navigation_load history 1` has 10.93 M fewer instructions (glibc), against the gate of 8.5 M. The spike is not merged and has no PR. Code: branch `t3/clone-spike`, commit `e64c76ad` (reference only).
+
+What the spike is: `Interp::clone_out_fast` and `Interp::clone_in` in `crates/js/src/eval_clone.rs` (about 300 lines), `Heap::clone_peek` and `Heap::clone_install` in `heap_shape.rs`, and a hook in `browser_navigation_state.rs` (`State.rec`). They handle primitives (not Symbol and not BigInt), strings, plain objects, dense arrays without holes, and the cycle. The record has one byte buffer with a tag for each value, varints, a string table for property names and back-references by id. The fast path reads shape entries and slots straight from the object. It builds each new object with its final shape at once (`new_object` then `clone_install`, `fill_array` for an array). An object with an accessor, a dictionary, an exotic kind, a hole, a symbol or index key, a BigInt, or any other class makes the fast path return `None` before anything changed. The old walk then runs. A limit also gives `None`, so the old walk makes the error. No getter runs on the fast path, so the spec order of getters is not at risk. The cost model and the step charges are the old ones. Used for `serialize` (history) and for `clone_state_with` with an empty transfer list.
+
+Behavior: `state_bytes=17600` and `checksum=ok` on `history 1` are unchanged. `browser_clone_ops_tests.rs` of `55594ea6` (65 cases and 2 cap tests, in 2 test functions) passes, and so do the filters `browser_history_state_cap_tests` (3), `browser_navigation_tests` (56) and `structured` (4). Many of the 65 cases hit other classes and run the old walk, so they do not all test the fast path.
+
+Measured: archMachine, release with symbols, base = origin/main `42018c02` built fresh (`/data/bare-tmp/s0/base-spike`), spike = `e64c76ad` (`/data/bare-tmp/s0/spike-rel`). `perf stat -e instructions:u`, 3 runs each, glibc with `tcache_count=65535`, and jemalloc.
+
+| Row | Allocator | Base (3 runs) | Spike (3 runs) | Change |
+|---|---|---:|---:|---:|
+| `navigation_load history 1` | glibc | 85,906,173 to 85,907,348 | 74,978,320 to 74,980,030 | -10.93 M (-12.7%) |
+| `navigation_load history 1` | jemalloc | 93,604,719 to 93,606,048 | 83,130,182 to 83,130,305 | -10.47 M (-11.2%) |
+| `navigation_load history 10` | glibc | 791,783,803 to 791,786,563 | 683,148,598 to 683,153,852 | -108.6 M (-13.7%) |
+| `navigation_load history 10` | jemalloc | 835,740,559 to 835,885,870 | 731,617,830 to 731,707,101 | -104.1 M (-12.5%) |
+| `web_apis_load clone 1` (information) | glibc | 182,467,781 to 182,470,428 | 186,380,593 to 186,381,971 | +3.91 M (+2.1%) |
+| `web_apis_load clone 1` (information) | jemalloc | 191,770,000 to 191,807,492 | 195,686,081 to 195,723,331 | +3.93 M (+2.0%) |
+
+The spread is under 0.01% for glibc and under 0.02% for jemalloc, except base `history 10` jemalloc (0.02%). Allocations on `history 1`: 72,267 to 62,267 (10 fewer per state).
+
+Callgrind, `history 1`, 1 run per tree (86,857,469 and 75,929,967 instructions in all), per state (1,000 states):
+
+| Part | Base | Spike | Design hypothesis |
+|---|---:|---:|---:|
+| Serialize (`serialize`) | 13.29 K | 4.93 K | 2.4 K |
+| Materialize (`materialize_with`) | 8.37 K | 6.32 K | 2.0 K |
+| Both | 21.7 K | 11.2 K | 4.4 K |
+
+The gain is 10.9 M of the hypothesis of 17 M (64%). The serialize part came near the hypothesis. The materialize part did not.
+
+Where the remaining cost sits (per state, callgrind inclusive):
+- Serialize 4.9 K: `CloneW::val` 4.5 K, of which `CloneW::key` 1.44 K for 5 keys (0.44 K in `units`, the rest is the key table scan and the cost add), `is_host_object` 0.2 K, `clone_class` 0.22 K, `id_put` 0.19 K, `clone_peek` 0.11 K. The rest is the record `Vec` growth and `into_boxed_slice` (a realloc), the `ids` and `keys` `Vec`s, and the recursion.
+- Materialize 6.3 K: `clone_units` (intern of 4 keys and 2 strings) 1.9 K, with 0.63 K self time (a zeroed 128-byte stack buffer on each call); `clone_install` 0.33 K; the new objects and the `fill_array` call; the two scratch `Vec`s.
+- The hypothesis counted interning at 1.1 K. It is 1.9 K. The intern cost is now the largest part of the read. A cache of the last keys, or interning from the Latin-1 bytes with no copy to a `u16` buffer, would cut it. Neither is built.
+
+`web_apis_load clone` goes up by 2%: its graph holds a Map, a Set, a Date and a typed array. The fast path walks the plain prefix, meets the first other class and drops its work. The old walk then runs from the start. The real design (step 3, every class native) has no such waste. This row says nothing about the gain of F3.
+
+Decision for the owner: the gate passes, so the series may go on. The gain on `history` is 64% of the hypothesis and the spike has no transfer, no other class and no getters. The cost limit of the old option E (+0.5%) is now met with a margin of 10.4 M on `history 1`.
+
+Not tested: codegen-units=1 runs, the cost matrix (only 3 rows ran), the Windows VM, `clone_copy` (F3), the other classes, accessors and getters, the transfer list, the full `bare` test suite (only the 4 filters above ran), peak memory and the record size of the `history` state (48 bytes by hand in the design, not read from the spike), wall time. The disk of `/data` was full once during the work. The first release build of the spike failed with "No space left on device" and was built again after space was freed.
