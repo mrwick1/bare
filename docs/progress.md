@@ -16488,6 +16488,32 @@ The comparison is test by test (PASS lines of `new.txt`): 0 tests lost, 1,052 ga
 Not tested: Windows and macOS; arm64; Miri after the merge; the nested-stub gap beyond the one test; #773, #774, #775 (not on main when this was measured); the cgu 1 numbers on an idle machine. `cargo clippy` stops on `bi_object.rs:450` (`ro || (d.w == Some(true) && ro)`, `overly_complex_bool_expr`), code of #768 that this merge did not change.
 
 
+### Lazy compile in a nested run (the gap of the merge above)
+
+The gap: `Op::Lazy` leaves the loop, and `Vm::start` compiles with `Rc::get_mut(&mut realm.prog)`. That works only at `nest == 0`. In a nested run (`Realm::call_function`) the runs above hold `&Program`, so a waiting function that is first called there (a getter, a setter, `valueOf`, `toString`, any native that calls a script function) threw a `SyntaxError`. With #777 every function of a user script waits, so this would fail in scripts. The owner rule: lazy compile must be invisible to a script. Three things hold the program or a table of its size while a nested run starts: (1) `&Program` in each outer loop, (2) the `&Code` and `&[u32]` locals of each outer loop, (3) the feedback vector (`fbs[ci]`) of each outer machine, which is a `&mut Vec` in its loop and must have one entry for each code.
+
+#### Designs compared
+
+Costs below are for the hot path (the `prog.codes[ci]` read in `enter!`, `reload!`, return and `unwind`) and for memory. "Now" is `Vec<Code>` behind `&Program` (the loop may keep `ptr` and `len` in registers because nothing can write them).
+
+| | A: append-only table of pointers (`Codes`) | B: one `Vec<Code>` with the capacity reserved at load | C: compile every waiting function at the first nested call | D: stub slot as a `Cell` pointer, `Vec<Code>` as now |
+| --- | --- | --- | --- | --- |
+| Data | `Vec<*mut Code>` in an `UnsafeCell`; each `Code` is its own heap block that never moves | `Vec<Code>` in an `UnsafeCell`; no growth past `capacity` | `Vec<Code>` as now | `Vec<Code>` as now, plus `Cell<*const Code>` for each stub |
+| `codes[ci]` | load table ptr, load len, compare, load the block ptr (1 more dependent load; the index is scaled by 8, not by `size_of::<Code>()`) | as now, except that ptr and len are no longer read-only | as now | as now, plus a load of the cell for a stub test |
+| Append in any run | yes: push a pointer; old blocks do not move; only the table may move, and nobody holds the table | only while `len < capacity`; the capacity is the function count of one script, so `eval`, `Function` and a second script beyond it need the gap again | no append: it compiles all at once, and O(all stubs) at the first nested call | no append (the table is still a `Vec`) |
+| Replace a stub | swap the pointer; the old block is retired (freed at the end of the outermost run, when no `&Code` can exist) | write into the slot while the loop may hold `&Code` of it (needs a contract "nobody holds the stub") | n/a | swap the cell |
+| Memory | +8 B for each code (table) and +16 B malloc header for each block; a retired stub is freed at the end of the outermost run | reserved: `capacity * size_of::<Code>()` up front, also for functions that never run | none | +8 B for each stub |
+| `unsafe` | one module (about 60 lines), Miri tests | one module, and a hole when the capacity runs out | none | the same as A, spread over the loop |
+| Lazy compile invisible | yes | no (capacity) | no (cost: it kills the saving) | yes, but a cost on each call |
+
+Choice: **A**. It is the only one with no limit on appends and no change of cost that depends on the size of the program. The cost is one more dependent load in `enter!` and `reload!`, bought back in part by an index that needs no multiply. B fails the rule when the capacity runs out. C makes the first nested call O(program) and puts the saving at risk. D adds a test to every call.
+
+Two other parts of the change, both on the same cost line:
+
+- **Compile in the loop again.** The store allows an append through `&Program`, so `Op::Lazy` calls `Realm::compile_stub` and goes on at pc 0 of the new code: `lazy_at`, `lazy_err` and the `Err(Exit::Fuel)` round trip through `Vm::start` go away. The loop reloads `code`, `words` and `fb` after the compile (`reload!`), as after any call. A failed compile throws a `SyntaxError` at the stub, as before; it fails again at each call (the pending entry is gone), so no machine keeps feedback of a stub that is no longer one.
+- **Feedback grows on demand.** An outer machine cannot be resized from a nested run: its `&mut Vec<Feedback>` is in its loop. So the loop makes the entry when it needs it: `reload!` reads `fbs[ci]`, and the bounds check that it already has now calls a cold function that resizes the vector to the size of the table. The hot path has the same compare and branch as before.
+
+
 ## 2026-11-20: the pre-parse facts of the prelude are a generated file (js2, option B′ of `docs/design-js2-prelude.md`)
 
 Branch `t3/js2-prelude-facts`, from the head of #770 (`ee5fc1f5`, it was open when I started). Decision of the owner (section 8 of the design): build B′.

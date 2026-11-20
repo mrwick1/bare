@@ -39,7 +39,8 @@ use crate::bytecode::Code;
 use crate::cell::Layout;
 use crate::gc::{Marker, collect};
 use crate::heap::Heap;
-use crate::interp::{LazyCompile, Program};
+use crate::codes::Codes;
+use crate::interp::LazyCompile;
 use crate::reenter::Machine;
 use crate::builtins::{Hint, Native};
 use crate::object::{Ctx, F_CLASS, F_ELEMS_FIXED, F_ELEMS_RO, F_LAZY, F_LEN_RO, F_NATIVE, F_NOEXT, F_SLOWIDX, Obj};
@@ -276,17 +277,14 @@ pub struct Realm {
     pub cur: (usize, usize, u32),
     /// The program that the realm runs, the code indexes of its default constructors, and the back edges that may still run (`Vm` sets
     /// the first two, and copies the third at each call from the host). A native that calls a script function needs all three.
-    pub(crate) prog: Rc<Program>,
+    pub(crate) prog: Rc<Codes>,
     pub(crate) dctor: [usize; 2],
     pub(crate) fuel: u64,
     /// Machines (a JS stack and a feedback vector) that no nested call uses now, and the nesting of nested calls: `reenter.rs`.
     pub(crate) pool: Vec<Machine>,
     pub(crate) nest: u32,
-    /// The compiler of the stubs of the program (`Op::Lazy`), if it has any. `Op::Lazy` sets `lazy_at` (code index and frame pointer
-    /// of the stub) and leaves the loop; `Vm::start` compiles it, or sets `lazy_err` when it cannot, and runs the frame again.
+    /// The compiler of the stubs of the program, if it has any (`Op::Lazy`, in any run: `Realm::compile_stub`).
     pub lazy: Option<Box<dyn LazyCompile>>,
-    pub(crate) lazy_at: Option<(usize, usize)>,
-    pub(crate) lazy_err: Option<String>,
     epoch: u32,
     pub collections: u32,
     /// What the last collection counted.
@@ -396,8 +394,6 @@ impl Realm {
             pool: Vec::new(),
             nest: 0,
             lazy: None,
-            lazy_at: None,
-            lazy_err: None,
             epoch,
             collections: 0,
             last_gc: Default::default(),

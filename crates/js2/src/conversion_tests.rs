@@ -207,11 +207,41 @@ fn a_prelude_function_that_an_outer_run_compiled_works_in_a_nested_call() {
 }
 
 #[test]
-fn a_prelude_function_that_waits_cannot_be_compiled_inside_a_nested_call_and_the_next_outer_run_compiles_it() {
-    // Known gap: a nested run cannot change the program that the runs above it borrow, so the first call of a stub there throws. The
-    // script can catch the error, and the stub still waits: the outer run compiles it.
-    let mut vm = load("var e; var o = {valueOf: function () { return [1].map(function (x) { return x; }).length; }}; try { o + 1; } catch (x) { e = x.name; } var r = [1, 2].map(function (x) { return x; }).length + o;").unwrap();
-    vm.run_main(0).unwrap();
-    assert_eq!(vm.global_text("e"), "SyntaxError");
-    assert_eq!(vm.global_text("r"), "3");
+fn a_prelude_function_that_waits_is_compiled_at_its_first_call_inside_a_nested_call() {
+    // The first call of `map`, `sort`, `reduce`, `Array.from` is inside a `valueOf`, a getter, a setter and a `toString` that a native runs. Each
+    // compiles its stub in the nested run. The outer loop goes on, and it calls the same functions (and the helpers that they call, which are
+    // new codes that its feedback vector did not have) afterwards.
+    check(&[
+        ("var o = {valueOf: function () { return [1, 2, 3].map(function (x) { return x * 2; }).length; }}; var r = (o + 1) + ',' + [4, 5].map(function (x) { return x; }).join();", "r", "4,4,5"),
+        ("var o = {get g() { return [3, 1, 2].sort().join(); }}; var r = Object.getOwnPropertyDescriptor(o, 'g').get.call(o) + ',' + Object.assign({}, o).g + ',' + [2, 1].sort().join();", "r", "1,2,3,1,2,3,1,2"),
+        ("var s; var o = {set v(x) { s = [1, 2, 3].reduce(function (a, b) { return a + b; }, x); }}; Object.assign(o, {v: 10}); var r = s + ',' + [1, 2].reduce(function (a, b) { return a + b; });", "r", "16,3"),
+        ("var o = {toString: function () { return Array.from({length: 2, 0: 'a', 1: 'b'}).join('-'); }}; var r = ('x' + o) + ',' + `${o}` + ',' + Array.from([7]).join();", "r", "xa-b,a-b,7"),
+    ]);
+}
+
+#[test]
+fn a_stub_first_called_two_levels_deep_compiles_and_the_levels_above_use_what_it_made() {
+    // `valueOf` -> a getter (read by `Object.assign`) -> `valueOf` again -> the first call of `map` and of `sort`. The three machines
+    // are nested; the one at the top made no feedback for the codes that the lowest compile added.
+    check(&[(
+        "var inner = {valueOf: function () { return [2, 1].sort().length + [1].map(function (x) { return x; }).length; }};
+         var mid = {get g() { return inner + 1; }};
+         var outer = {valueOf: function () { return Object.assign({}, mid).g + [3, 2, 1].sort().join(''); }};
+         var r = (outer + '') + ',' + [9, 8].sort().join() + ',' + [5].map(function (x) { return x + 1; }).join() + ',' + (inner + 0);",
+        "r",
+        "4123,8,9,6,3",
+    )]);
+}
+
+#[test]
+fn a_function_that_waits_and_is_called_in_a_nested_run_that_throws_stays_usable() {
+    // The nested run compiles `forEach` and then throws; the catch in the outer run calls it again (it is compiled), and a conversion
+    // that never ran it before compiles another one.
+    check(&[(
+        "var o = {valueOf: function () { [1].forEach(function () {}); throw new Error('x'); }}; var e = 0; try { o + 1; } catch (x) { e = x.message; }
+         var n = 0; [1, 2].forEach(function (v) { n += v; }); var p = {valueOf: function () { return [3, 4].find(function (v) { return v > 3; }); }};
+         var r = e + n + (p + 0);",
+        "r",
+        "x34",
+    )]);
 }

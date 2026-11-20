@@ -9,6 +9,7 @@
 use crate::atoms::SharedAtoms;
 use crate::string::Chars;
 use crate::bytecode::{CF_ARGS, CF_LINK, Code, Op};
+use crate::codes::Codes;
 use crate::compile::{Child, Compiled, Input, compile_function, compile_script};
 use crate::facts::{Facts, SUPER};
 use crate::interp::{Exit, LazyCompile, Program, Vm, code_flags};
@@ -51,23 +52,30 @@ pub struct Lazy {
 }
 
 impl LazyCompile for Lazy {
-    fn compile(&mut self, codes: &mut Vec<Code>, ci: usize) -> Result<(), String> {
+    fn compile(&mut self, codes: &Codes, ci: usize) -> Result<(), String> {
         let at = self.pending.binary_search_by_key(&ci, |p| p.0).map_err(|_| "no function waits at this code")?;
         let ch = self.pending.remove(at).1;
-        let first = codes.len();
+        let base = codes.len();
         let (p, fid) = parse_function(self.source, &mut self.facts, ch.id, self.limits).map_err(|e| format!("parse fn {}: {}", ch.id, e.msg))?;
         let sub = compile_function(&p, fid, ch.id, &self.facts, &self.atoms, &Input { chain: ch.chain.clone(), self_name: ch.self_name, name: ch.name.clone() })
             .map_err(|e| format!("compile fn {}: {e:?}", ch.id))?;
-        let mut pending = Vec::new();
-        let mut l = Loader { source: self.source, facts: &mut self.facts, atoms: &self.atoms, limits: self.limits, codes, lazy: Some(&mut pending) };
-        l.fill(ci, sub)?;
+        // The new codes wait in `new` (their indexes start at `base`) and go into the program only when all are made: a failure leaves it as it was.
+        // The room is one code for each child and one more, for the code of `ci` (`Codes::set` takes room from the last chunk).
+        let (mut new, mut pending) = (Vec::with_capacity(sub.children.len() + 1), Vec::new());
+        let mut l = Loader { source: self.source, facts: &mut self.facts, atoms: &self.atoms, limits: self.limits, base, codes: &mut new, lazy: Some(&mut pending) };
+        let mut sub = sub;
+        l.children(&mut sub)?;
+        let mut code = sub.code;
         // The flags of the new codes: the children come after their parent, so the last come first (a stub has no `super`).
-        for i in (first..codes.len()).rev().chain([ci]) {
-            let f = code_flags(&codes[i]);
-            let from_children = codes[i].funcs.iter().any(|&k| codes.get(k as usize).is_some_and(|c| c.flags & CF_LINK != 0));
-            codes[i].flags = f | if from_children { CF_LINK } else { 0 };
+        let link = |new: &[Code], c: &Code| c.funcs.iter().any(|&k| k as usize >= base && new[k as usize - base].flags & CF_LINK != 0);
+        for i in (0..new.len()).rev() {
+            new[i].flags = code_flags(&new[i]) | if link(&new, &new[i]) { CF_LINK } else { 0 };
         }
-        debug_assert!(codes[ci].flags & CF_LINK == 0, "a lazy function must not use super");
+        code.flags = code_flags(&code) | if link(&new, &code) { CF_LINK } else { 0 };
+        debug_assert!(code.flags & CF_LINK == 0, "a lazy function must not use super");
+        debug_assert_eq!(codes.len(), base, "nothing else adds codes during a compile");
+        codes.push_all(new);
+        codes.set(ci, code);
         self.pending.extend(pending);
         Ok(())
     }
@@ -78,6 +86,8 @@ struct Loader<'a> {
     facts: &'a mut Facts,
     atoms: &'a SharedAtoms,
     limits: Limits,
+    /// The program index of `codes[0]`: the codes before it are in the program already (a lazy compile adds to a program that runs).
+    base: usize,
     codes: &'a mut Vec<Code>,
     /// Make a stub for each function that may wait (the `Child` goes here); `None`: compile every function now.
     lazy: Option<&'a mut Vec<(usize, Child)>>,
@@ -86,14 +96,17 @@ struct Loader<'a> {
 impl Loader<'_> {
     /// Add `c` and, below it, its children. Gives the index of `c` in the program.
     fn add(&mut self, c: Compiled) -> Result<usize, String> {
-        let at = self.codes.len();
+        let at = self.base + self.codes.len();
         self.codes.push(Code::new(0, 0));
-        self.fill(at, c)?;
+        let mut c = c;
+        self.children(&mut c)?;
+        self.codes[at - self.base] = c.code;
         Ok(at)
     }
 
-    /// Put `c` at the index `at` (a placeholder or a stub) and add its children.
-    fn fill(&mut self, at: usize, mut c: Compiled) -> Result<(), String> {
+    /// Add the children of `c` (a stub or a compiled code each) and put their indexes in `c.code.funcs`. The caller puts `c.code` at its
+    /// index (a placeholder or a stub).
+    fn children(&mut self, c: &mut Compiled) -> Result<(), String> {
         if !c.unsupported.is_empty() {
             return Err(format!("not supported yet: {:?}", c.unsupported));
         }
@@ -103,8 +116,9 @@ impl Loader<'_> {
             let sub = match ch.ready {
                 Some(r) => inline[r as usize].take().ok_or("a ready child is used twice")?,
                 None if self.lazy.is_some() && self.facts.get(ch.id).flags & SUPER == 0 => {
-                    c.code.funcs[i] = self.codes.len() as u32;
-                    self.lazy.as_mut().expect("lazy").push((self.codes.len(), ch.clone()));
+                    let at = self.base + self.codes.len();
+                    c.code.funcs[i] = at as u32;
+                    self.lazy.as_mut().expect("lazy").push((at, ch.clone()));
                     let (name, length) = (ch.name.as_deref(), self.facts.get(ch.id).length);
                     self.codes.push(stub(self.atoms, name, length)?);
                     continue;
@@ -116,7 +130,6 @@ impl Loader<'_> {
             };
             c.code.funcs[i] = self.add(sub)? as u32;
         }
-        self.codes[at] = c.code;
         Ok(())
     }
 }
@@ -137,7 +150,7 @@ fn compile_after(mut codes: Vec<Code>, source: &str, atoms: &SharedAtoms, limits
         }
     };
     let script = compile_script(&prog, &facts, atoms).map_err(|e| format!("compile: {e:?}"))?;
-    Loader { source, facts: &mut facts, atoms, limits, codes: &mut codes, lazy }.add(script)?;
+    Loader { source, facts: &mut facts, atoms, limits, base: 0, codes: &mut codes, lazy }.add(script)?;
     Ok((codes, facts))
 }
 

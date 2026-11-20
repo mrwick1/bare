@@ -763,7 +763,7 @@ fn array_methods_work_on_array_likes_and_follow_the_specification() {
 }
 
 fn waiting(vm: &Vm) -> usize {
-    vm.realm.prog.codes.iter().filter(|c| c.words == [crate::bytecode::Op::Lazy as u32]).count()
+    vm.realm.prog.iter().filter(|c| c.words == [crate::bytecode::Op::Lazy as u32]).count()
 }
 
 #[test]
@@ -811,7 +811,7 @@ fn a_lazy_function_gets_its_arguments_the_first_time_and_after() {
 fn a_lazy_compile_that_fails_throws_a_syntax_error() {
     struct Fails;
     impl crate::interp::LazyCompile for Fails {
-        fn compile(&mut self, _: &mut Vec<crate::bytecode::Code>, _: usize) -> Result<(), String> {
+        fn compile(&mut self, _: &crate::codes::Codes, _: usize) -> Result<(), String> {
             Err("no compiler".into())
         }
     }

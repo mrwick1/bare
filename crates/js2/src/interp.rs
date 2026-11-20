@@ -62,6 +62,7 @@
 use crate::atoms::SharedAtoms;
 use crate::builtins::Outcome;
 use crate::bytecode::{Asm, CF_ARGS, CF_LINK, Code, ITER_REGS, Ins, Op, STR_EMPTY, STR_SLOT, decode};
+use crate::codes::Codes;
 use crate::gc::Marker;
 use crate::interp_rt::{ErrKind, Feedback, Got, Key, Put, R, Realm};
 use crate::object::{F_DERIVED, Obj};
@@ -83,16 +84,18 @@ const NOPC: u32 = u32::MAX;
 /// The most words of the stack (about 4 MiB).
 const MAX_STACK: usize = 1 << 19;
 
-/// The functions of a script. A function cell holds an index of this table; `Code::funcs` holds indexes too.
+/// The functions of a script, as the compiler makes them. A function cell holds an index of this table; `Code::funcs` holds indexes
+/// too. `Vm::new` moves them to a [`Codes`], the table that the realm runs (it can grow during a run).
 #[derive(Debug, Default)]
 pub struct Program {
     pub codes: Vec<Code>,
 }
 
-/// The compiler of the functions that wait for their first call. The code at `ci` is a stub (`Op::Lazy`): `compile` makes its real code in
-/// place and may add stubs for the functions inside it at the end of `codes`. The interpreter makes the feedback of the new codes.
+/// The compiler of the functions that wait for their first call. The code at `ci` is a stub (`Op::Lazy`): `compile` puts its real code
+/// at `ci` (`Codes::set`) and may add stubs for the functions inside it at the end of `codes` (`Codes::push_all`). It runs inside the
+/// loop, in any run, so it takes `&Codes`. The interpreter makes the feedback of the new codes.
 pub trait LazyCompile {
-    fn compile(&mut self, codes: &mut Vec<Code>, ci: usize) -> Result<(), String>;
+    fn compile(&mut self, codes: &Codes, ci: usize) -> Result<(), String>;
 }
 
 /// Why `Vm::call` stopped.
@@ -171,13 +174,13 @@ fn switch_str(heap: &mut crate::heap::Heap, code: &Code, t: &[u32], v: Value) ->
 }
 
 /// Mark the frames, from the top (`ci`, `fp`, `pc` of its safepoint) down to the frame of the host.
-fn walk_frames(m: &mut Marker, prog: &Program, stack: &[Value], mut ci: usize, mut fp: usize, mut pc: u32) {
+fn walk_frames(m: &mut Marker, prog: &Codes, stack: &[Value], mut ci: usize, mut fp: usize, mut pc: u32) {
     loop {
         let rec = fp - REC;
         m.values(&stack[rec..rec + 3]);
         m.values(&stack[rec + 8..rec + 10]);
         if pc != NOPC {
-            let map = prog.codes[ci].roots.find(pc).expect("a root map for each safepoint");
+            let map = prog[ci].roots.find(pc).expect("a root map for each safepoint");
             for r in map.slots() {
                 m.value(stack[fp + r]);
             }
@@ -188,7 +191,7 @@ fn walk_frames(m: &mut Marker, prog: &Program, stack: &[Value], mut ci: usize, m
         }
         pc = int_at(stack, fp, 3) as u32;
         ci = caller as usize;
-        fp = fp - REC - prog.codes[ci].nregs as usize;
+        fp = fp - REC - prog[ci].nregs as usize;
     }
 }
 
@@ -199,11 +202,11 @@ fn walk_frames(m: &mut Marker, prog: &Program, stack: &[Value], mut ci: usize, m
 /// codegen-units 16, `loopfn` goes from +4.8% to -0.6% and `objects` from +3.0% to +0.4%. The cause in the allocator is a hypothesis.
 #[cold]
 #[inline(never)]
-fn unwind(prog: &Program, stack: &mut [Value], ci: &mut usize, fp: &mut usize, pc: &mut usize, e: Value) -> Result<(), Value> {
+fn unwind(prog: &Codes, stack: &mut [Value], ci: &mut usize, fp: &mut usize, pc: &mut usize, e: Value) -> Result<(), Value> {
     // The budget ran out in a nested call (`Realm::call_function` gives `STOP`): no handler runs, every frame goes away.
     let stop = e == STOP;
     loop {
-        if !stop && let Some(h) = prog.codes[*ci].handler_at(*pc as u32) {
+        if !stop && let Some(h) = prog[*ci].handler_at(*pc as u32) {
             let rec = *fp - REC;
             let mut depth = stack[rec + 6].as_int().expect("depth");
             while depth > h.depth as i32 {
@@ -222,7 +225,7 @@ fn unwind(prog: &Program, stack: &mut [Value], ci: &mut usize, fp: &mut usize, p
         }
         *pc = int_at(stack, *fp, 3) as usize;
         *ci = caller as usize;
-        *fp -= REC + prog.codes[*ci].nregs as usize;
+        *fp -= REC + prog[*ci].nregs as usize;
     }
 }
 
@@ -232,31 +235,20 @@ fn code_info(c: &Code) -> (Option<crate::string::Str>, u16) {
 }
 
 impl Realm {
-    /// Compile the stub at `at.0` (the frame at `at.1` is running it), for `Vm::start` after `Op::Lazy` left the loop. The frame is made
-    /// again for the real code (it was made for the stub: no parameters, all arguments in an array). On a failure the stub stays and
-    /// `lazy_err` makes the op throw.
+    /// Compile the stub at `ci` (the frame at `fp` is running it), for `Op::Lazy`. The frame is made again for the real code (it was
+    /// made for the stub: no parameters, all arguments in an array). On a failure the stub stays, and it fails again at each call (its
+    /// entry in the compiler is gone), so no machine has feedback made for a stub that is no longer one.
     ///
-    /// Only the outermost run can compile: a nested run (`Realm::call_function`) has runs above it that borrow the program, so it cannot
-    /// change it. A prelude function that is called for the first time inside a conversion, a getter or a setter that a native runs
-    /// throws a `SyntaxError` there (known gap: `docs/progress.md`). The next outermost run compiles it.
-    fn compile_stub(&mut self, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, (ci, fp): (usize, usize)) {
-        let Some(l) = self.lazy.as_mut() else { return self.lazy_err = Some("a lazy function has no compiler".into()) };
-        let Some(prog) = Rc::get_mut(&mut self.prog).filter(|_| self.nest == 0) else {
-            return self.lazy_err = Some("a function of the prelude is compiled at its first call, which a nested call cannot do".into());
-        };
-        if let Err(m) = l.compile(&mut prog.codes, ci) {
-            return self.lazy_err = Some(m);
-        }
+    /// It runs in any run, nested or not: `prog` is append-only (`Codes`) and the other runs hold no table that a push changes. A
+    /// machine that is below in the Rust stack has its feedback vector in its loop; the loop makes the entry that it needs (`grow_fbs`).
+    fn compile_stub(&mut self, prog: &Codes, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, ci: usize, fp: usize) -> Result<(), String> {
+        let l = self.lazy.as_mut().ok_or("a lazy function has no compiler")?;
+        l.compile(prog, ci)?;
         // The `name` and the `length` of the functions that the compile added (the stub of `ci` has them already).
-        let known = self.fn_info.len();
-        self.fn_info.extend(prog.codes[known..].iter().map(code_info));
-        fbs.resize_with(prog.codes.len(), Feedback::default);
+        self.fn_info.extend((self.fn_info.len()..prog.len()).map(|i| code_info(&prog[i])));
+        fbs.resize_with(prog.len(), Feedback::default);
         fbs[ci] = Feedback::default();
-        // A machine in the pool may have run the stub (and made its feedback for it): no nested run is active, so reset it too.
-        for m in self.pool.iter_mut().filter(|m| m.fbs.len() > ci) {
-            m.fbs[ci] = Feedback::default();
-        }
-        let ncode = &prog.codes[ci];
+        let ncode = &prog[ci];
         let need = fp + ncode.nregs as usize + 8;
         if need > stack.len() {
             stack.resize(need.max(2 * stack.len()).min(MAX_STACK + 8).max(need), Value::UNDEFINED);
@@ -270,7 +262,16 @@ impl Realm {
         if ncode.flags & CF_ARGS == 0 {
             stack[fp - REC + 9] = Value::UNDEFINED;
         }
+        Ok(())
     }
+}
+
+/// Make the feedback vector as long as the table of codes: the program grew since this machine made its vector (a lazy compile in a
+/// run above it). Cold: the loop checks the length it already checks for the index.
+#[cold]
+#[inline(never)]
+fn grow_fbs(fbs: &mut Vec<Feedback>, n: usize) {
+    fbs.resize_with(n, Feedback::default);
 }
 
 impl Vm {
@@ -280,8 +281,8 @@ impl Vm {
         scan_flags(&mut prog.codes);
         let fbs = prog.codes.iter().map(|_| Feedback::default()).collect();
         let mut realm = Realm::new(shared);
-        (realm.prog, realm.dctor) = (Rc::new(prog), dctor);
-        realm.fn_info = realm.prog.codes.iter().map(code_info).collect();
+        (realm.prog, realm.dctor) = (Rc::new(prog.codes.into()), dctor);
+        realm.fn_info = realm.prog.iter().map(code_info).collect();
         Vm { realm, stack: Vec::new(), fbs, dctor, fuel: u64::MAX }
     }
 
@@ -308,7 +309,7 @@ impl Vm {
             return Err(Exit::Throw(e));
         };
         let prog = realm.prog.clone();
-        let code = &prog.codes[ci];
+        let code = &prog[ci];
         let fp = REC;
         let need = fp + code.nregs as usize + 8;
         if stack.len() < need {
@@ -324,20 +325,17 @@ impl Vm {
         for i in 0..code.nparams as usize {
             stack[fp + i] = args.get(i).copied().unwrap_or(Value::UNDEFINED);
         }
-        let (mut prog, mut at) = (prog, (ci, fp));
-        loop {
-            let r = Vm::run(realm, stack, fbs, &prog, at.0, at.1);
-            // `Op::Lazy` leaves the loop to this function: the loop holds `&Program`, and a compile changes it (`Realm::lazy_at`).
-            if let (Err(Exit::Fuel), Some(l)) = (&r, realm.lazy_at.take()) {
-                drop(prog);
-                realm.compile_stub(stack, fbs, l);
-                (prog, at) = (realm.prog.clone(), l);
-                continue;
+        let r = Vm::run(realm, stack, fbs, &prog, ci, fp);
+        // The stubs that a lazy compile replaced are freed when no run is active: no `&Code` can point to them then.
+        if realm.nest == 0 && prog.has_retired() {
+            drop(prog);
+            if let Some(c) = Rc::get_mut(&mut realm.prog) {
+                c.free_retired();
             }
-            return match r {
-                Err(Exit::Throw(e)) if e == STOP => Err(Exit::Fuel),
-                r => r,
-            };
+        }
+        match r {
+            Err(Exit::Throw(e)) if e == STOP => Err(Exit::Fuel),
+            r => r,
         }
     }
 
@@ -355,22 +353,37 @@ impl Vm {
     }
 
     #[allow(unused_assignments, clippy::ptr_arg)]
-    fn run(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, prog: &Program, mut ci: usize, mut fp: usize) -> Result<Value, Exit> {
-        let mut code: &Code = &prog.codes[ci];
+    fn run(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, prog: &Codes, mut ci: usize, mut fp: usize) -> Result<Value, Exit> {
+        let mut code: &Code = &prog[ci];
         let mut words: &[u32] = &code.words;
-        let mut fb: &mut Feedback = &mut fbs[ci];
+        let mut fb: &mut Feedback = if ci < fbs.len() {
+            &mut fbs[ci]
+        } else {
+            grow_fbs(fbs, prog.len());
+            &mut fbs[ci]
+        };
         if !fb.ready {
             fb.init(code);
         }
         let mut pc: usize = 0;
         let undef = Value::UNDEFINED;
 
-        // Make the locals of the frame `(ci, fp)`.
+        // Make the locals of the frame `(ci, fp)`. The feedback vector is shorter than the table when a lazy compile ran in a run above
+        // this one (`grow_fbs`); the length check is the one that the index does.
         macro_rules! reload {
             () => {{
-                code = &prog.codes[ci];
+                // SAFETY: `ci` is the index of a frame on the stack. `enter!` and `Vm::start` checked it when they made the frame.
+                reload!(unsafe { prog.at(ci) })
+            }};
+            ($c:expr) => {{
+                code = $c;
                 words = &code.words;
-                fb = &mut fbs[ci];
+                fb = if ci < fbs.len() {
+                    &mut fbs[ci]
+                } else {
+                    grow_fbs(fbs, prog.len());
+                    &mut fbs[ci]
+                };
                 if !fb.ready {
                     fb.init(code);
                 }
@@ -628,7 +641,7 @@ impl Vm {
         // of the caller that gets the result, and the flags. `$callpc`: the key of the caller's root map. `$next`: where the caller goes on.
         macro_rules! enter {
             ($callee:expr, $ni:expr, $cctx:expr, $this:expr, $nt:expr, $dstw:expr, $callpc:expr, $next:expr, $ab:expr, $argc:expr) => {{
-                let ncode = &prog.codes[$ni];
+                let ncode = &prog[$ni];
                 let new_fp = fp + code.nregs as usize + REC;
                 ensure!(new_fp + ncode.nregs as usize + 8);
                 let (np, argc, ab) = (ncode.nparams as usize, $argc as usize, $ab as usize);
@@ -645,7 +658,7 @@ impl Vm {
                 stack[new_fp + given..new_fp + np].fill(undef);
                 ci = $ni;
                 fp = new_fp;
-                reload!();
+                reload!(ncode);
             }};
         }
         macro_rules! call_err {
@@ -715,7 +728,7 @@ impl Vm {
         macro_rules! construct {
             ($callee:expr, $ni:expr, $cctx:expr, $nt:expr, $dst:expr, $next:expr, $ab:expr, $argc:expr, $flag:expr) => {{
                 let callee: Value = $callee;
-                if prog.codes[$ni].noctor {
+                if prog[$ni].noctor {
                     err!(ErrKind::Type, "not a constructor")
                 }
                 let derived = Realm::obj(callee).is_some_and(|f| f.has_flag(F_DERIVED));
@@ -785,9 +798,9 @@ impl Vm {
                 pc = int_at(stack, fp, 4) as usize;
                 let callpc = int_at(stack, fp, 3);
                 ci = caller as usize;
-                fp -= REC + prog.codes[ci].nregs as usize;
-                stack[fp + (dst & 0xffff) as usize] = v;
                 reload!();
+                fp -= REC + code.nregs as usize;
+                stack[fp + (dst & 0xffff) as usize] = v;
                 if dst & AFTER_SUPER != 0
                     && let Some((class, _)) = super_info(realm, stack, fp)
                     && let Some((fi, fctx, ff)) = realm.fields_of(class)
@@ -1141,7 +1154,7 @@ impl Vm {
                         let ctx = stack[fp - REC + 2];
                         let child = code.funcs[bx!()] as usize;
                         let f = realm.new_function(child, ctx);
-                        if prog.codes[child].flags & CF_LINK != 0 {
+                        if prog[child].flags & CF_LINK != 0 {
                             // The function uses `super` (or holds one that does): it gets the home object and the constructor link.
                             let (cur, nt) = (record(stack, fp, 0), record(stack, fp, 8));
                             let (co, fo) = (Realm::obj(cur).expect("a function"), Realm::obj(f).expect("a function"));
@@ -1456,13 +1469,14 @@ impl Vm {
                         pc = next;
                     }
                     Op::Lazy => {
-                        // The compile changes the program, which this loop borrows: `Vm::start` makes it and runs the frame again. A failed
-                        // compile comes back to this op as `lazy_err`.
-                        if let Some(m) = realm.lazy_err.take() {
+                        // Compile the function and run its code from pc 0, in this frame. The compile adds to `prog` and may grow the
+                        // stack and `fbs`: `reload!` makes the locals again. No collection runs here (no `gate!`).
+                        if let Err(m) = realm.compile_stub(prog, stack, fbs, ci, fp) {
                             err!(ErrKind::Syntax, "{m}")
                         }
-                        realm.lazy_at = Some((ci, fp));
-                        return Err(Exit::Fuel);
+                        reload!();
+                        pc = 0;
+                        continue;
                     }
                     Op::LoadCallee => {
                         r!(a!()) = record(stack, fp, 0);
@@ -1608,7 +1622,7 @@ impl Vm {
                     Op::MakeDerived => {
                         gate!();
                         if let Some((ni, _)) = realm.function_new(r!(b!()))
-                            && prog.codes[ni].noctor
+                            && prog[ni].noctor
                         {
                             err!(ErrKind::Type, "class extends value is not a constructor or null")
                         }
@@ -1775,8 +1789,8 @@ impl Vm {
                             }
                             pc = int_at(stack, fp, 3) as usize;
                             ci = caller as usize;
-                            fp -= REC + prog.codes[ci].nregs as usize;
                             reload!();
+                            fp -= REC + code.nregs as usize;
                             throw!(e)
                         }
                         ret!(if v.is_undefined() { t } else { v })

@@ -78,8 +78,6 @@ impl Realm {
             return if self.function_new(f).is_some() { self.type_error("class constructor cannot be invoked without 'new'") } else { self.type_error("not a function") };
         }
         let mut m = self.pool.pop().unwrap_or_else(|| Machine { stack: Vec::new(), fbs: Vec::new() });
-        // The program grows when a stub is compiled (`Vm::start`), so a machine that waited in the pool may have too few vectors.
-        m.fbs.resize_with(self.prog.codes.len(), Feedback::default);
         let r = Vm::start(self, &mut m.stack, &mut m.fbs, f, this, args);
         self.pool.push(m);
         match r {
