@@ -796,6 +796,29 @@ fn url_components_and_live_search_params() {
 }
 
 #[test]
+fn an_http_scheme_without_slashes_resolves_as_a_browser_does() {
+    big(|| {
+        let mut b = at(URL0);
+        let base = "'https://h.test/a/b?q'";
+        for (input, want) in [
+            ("https:/x/y", "https://h.test/x/y"),
+            ("https:x/y", "https://h.test/a/x/y"),
+            ("HTTPS:/../x", "https://h.test/x"),
+            ("https:", "https://h.test/a/b?q"),
+            ("https:?z", "https://h.test/a/b?z"),
+            ("https:#f", "https://h.test/a/b?q#f"),
+            ("http:/x/y", "http://x/y"),
+            ("http:x", "http://x/"),
+        ] {
+            assert_eq!(js(&mut b, &format!("new URL('{input}', {base}).href")), want, "{input}");
+        }
+        assert_eq!(js(&mut b, "new URL('https:/host/p').href"), "https://host/p");
+        assert_eq!(js(&mut b, "new URL('https:host/p').href"), "https://host/p");
+        assert_eq!(js(&mut b, "var a = document.createElement('a'); a.href = 'https:/x/y'; a.pathname"), "/x/y");
+    });
+}
+
+#[test]
 fn search_params_semantics() {
     big(|| {
         let mut b = at(URL0);
