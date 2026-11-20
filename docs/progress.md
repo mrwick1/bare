@@ -14948,6 +14948,24 @@ These are for native reads and writes. A cache hit in S2 does not call `slot`: i
 Checks: `bare-js2` has 93 tests: Linux 93 pass; Windows 11 VM 93 pass (`cargo xwin test`, `bare_js2` exe through `winssh`); Miri (nightly): 93 pass in 567 s of test time (the one known integer-to-pointer warning of `Value::as_pointer`). 24 new tests in `object_tests.rs`: geometry; the free room of the rounding; every value across the inline/record boundary at every step for 5 capacities; record growth; an accessor that straddles the boundary; delete of the last key, of a middle key (the shape equals that of an object that never had the key), and the fall back into the inline words; a dictionary object with slot reuse; attribute change and data to accessor; prototype change; elements (literal, push, holes, delete, length, `new Array(1e6)`, sparse and dense again); a random test of 6 seeds against a `BTreeMap` (writes, deletes, length changes, pushes, indexes in three ranges); the collector (inline slots, record, dense and sparse elements, a record that the object outgrew, a long array in slices with truncation, a sparse record longer than a slice); `from_value` refuses a record. 1 test of `gc_tests.rs` changed (the wide object is scanned in slices); the others only changed their object maker.
 
 Not tested: arm64; a 32-bit target; the cost matrix (js2 is not wired into the browser); a collection inside a task (S1.6); a cache that uses the layout (S2); typed arrays, `arguments` and exotic objects (no layout for them yet); an element census on a real page (the arrays here are synthetic; no numeric-only elements store was built, as 6.9 item 8 says); an allocation failure (`Heap::alloc` returning `None` has no hook to force it); `Obj::add` and `remove` under a shape cap; a dictionary object that holds a record early (tested only through slot reuse); the examples on the Windows VM; wall time.
+## 2026-11-20: handler bodies design (plan step S0.4)
+
+Document: `docs/design-host-handlers.md`, for owner review. No code. Static counts with `rg` over `crates/bare/src` at origin/main `1cfb3807`; the commands are in the document. No instruction counts: the costs it cites are the earlier measurements.
+
+Measured (counts):
+
+- 2,099 `fn` items take `&mut Interp` in 88 files; 1,044 of them are host handlers (`this: Value`). `&mut Interp` 2,132 sites, `ObjId` 803 in 65 files, `Value` 3,793 in 94 files, `it.heap` 153 in 41 files. Lines that name `Interp`, `Value`, `ObjId` or `it.`: 6,851 of 66,560 (10.3%). `s.engine()`: 6 sites in 2 files.
+- The interface `Host::call` of `Dom` still returns `Unsupported`; the handlers run through the old `Host::call`. The old hook has 27 `roots`, 15 `trace` and 14 `prune` functions, 150 raw `ObjId` or `Value` fields in 31 files, and 50 maps keyed by `ObjId` in 26 files.
+- Tests: 88 files use `.it.` (322 sites). 35 of 39 examples name `bare_js`. `Browser::it` is public; `crates/drive` uses it in 5 places.
+
+Findings:
+
+- "One PR" does not hold: the diff would be about 13,700 lines in 88 files while main merged 14 PRs into these files in 2 days (48 commits, 20 in `browser.rs`).
+- Fourteen gaps in `bare-js-api` (G1 to G14): host function flags for constructors and `new.target`, `Scope::host_key`, string-key helpers, a task entry (`host_scope`, 51 sites), script entry, binary data, host-filled object creation, own-property kind, the `Vec` per call in the adapter, symbols, `display` and `inspect`, small calls, engine construction.
+- Options: A one PR; B groups on a dual registry (each handler on the old or the interface `Host`, so unconverted handlers keep today's call path); C a trampoline first; D a raw `Val` facade (rejected). Recommended: B, as H0 (interface additions, dual registry, cost spike), A1, then B, C, D1, D2, E, F, G, A2, then a cleanup PR Z. Eleven PRs. The cost of a `Local` push, the adapter `Vec`, key conversion and the wrapper are hypotheses until the spike in H0.
+- Ten open questions with proposed answers, among them the cost gate while the move runs, generic over `Engine` now or at the first `bare-js2` implementation, and the reverse lookup from `this` by host key.
+
+Not tested: everything above is static; no build, no test, no matrix row ran for this entry.
 ## 2026-11-20: collection inside a task (plan step S1.6)
 
 `bare-js2` collects inside a task: the allocation slow path refuses at a trigger, and the allocation helper collects with the frames as roots (design 6.8, 6.11 item 1, section 10 Q11). Base: the S1.8 branch (#745, `af044070`), because #745 was still open. New: `crates/js2/src/roots.rs` (root maps, frame stack, `alloc_in_task`). Changed: the allocation slow path in `heap.rs`, and `gc.rs` (one `Marker::shape` method and one doc line).
