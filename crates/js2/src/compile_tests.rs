@@ -777,11 +777,12 @@ fn a_tagged_template() {
         src,
         0,
         r#"
-code nregs=4 nparams=1 words=4 sites=2
+code nregs=5 nparams=1 words=5 sites=2
 0000  GetGlobal   r2, s0
 0001  GetTemplate r3, h0, s1
-0002  CallU       r1, 2, 1
-0003  Ret         r1
+0002  Mov         r4, r0
+0003  CallU       r1, 2, 2
+0004  Ret         r1
 "#,
     );
 }
