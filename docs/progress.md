@@ -16400,6 +16400,23 @@ What this says for step 5 (hypothesis, not built):
 Miri (nightly) on the step 4 head: `every_shape_of_callee_gives_its_value`, `a_constant_of_32_bits_and_a_jump_to_a_return_give_the_same_values` and `a_stack_that_grows_in_a_callee_keeps_the_registers_of_the_callers` pass (422 s). They cover the raw stores of `enter!`, the reads of `ret!` and `Obj::read_inline`. Windows 11 VM (`cargo xwin test`, step 4 head): 381 of 383 pass; the 2 that fail are the corpus tests that read a path of the repository (`corpus_status_matches_acorn`, `a_lazy_parse_finds_the_same_errors_as_a_full_parse_on_the_corpus`), known.
 
 Not tested in steps 1 to 4: arm64; wall time and branch misses; a modern React bundle; the `bare-js-diff` corpus beyond its existing test; the whole crate under Miri; a global getter read by `GetGlobal` (it throws "a global accessor needs a call" before and after); the re-entrant native-to-interpreter call of the conversion work (`regs` and `fp` must be set again after a nested run: see step 2). Tests of steps 2 and 3 alone: the lib tests only (step 4 head: also `op-count` and `bare-js-diff`).
+
+### Steps 2 to 4 after the merge with main (2026-11-20)
+
+Main got #765, #766, #767, #771 and the host work while these steps waited. The merge changed three things in `Vm::run` and the realm. (1) `GetGlobal` and `SetGlobal` check the global lexical binding first (`lex_get`, `lex_put`) when a site has no entry, and `declare_lex` changes the tag of the global object, so no entry gives a property that a binding now hides. (2) `SetGlobalS` has the fast path of `SetGlobal`. `set_global_slow` takes `strict` and throws a `ReferenceError` for a name that is not there. A write that fails gives `Put::Fail`. (3) `get_global_slow` gives `Got`, so a getter on the global runs (the sentence "a global getter throws" above is no longer true). New tests: `a_global_cache_agrees_with_strict_writes_delete_and_attributes`, `a_global_lexical_binding_hides_the_property_that_a_site_cached`, `a_frozen_global_object_stops_the_stores_of_the_sites`.
+
+Instructions of the whole process at scale 1 (`script_run --eval`, `instructions:u`, minimum of 3 runs, spread under 0.1%), archMachine, loaded. Same bytecode in both columns (disassembly compared for `loopfn`):
+
+| Row | step 4 before the merge (M) | step 4 after the merge (M) | change | main before (M) | main now (M) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `loop` | 89.14 | 94.62 | +6.1% | 152.15 | 148.41 |
+| `loopfn` | 49.57 | 52.24 | +5.4% | 68.16 | 63.64 |
+| `calls` | 74.29 | 77.16 | +3.9% | 115.49 | 114.16 |
+| `fib` | 7.72 | 7.83 | +1.4% | 8.85 | 8.87 |
+| `closures` | 18.56 | 18.99 | +2.3% | 22.21 | 22.26 |
+| `objects` | 77.15 | 78.66 | +2.0% | 91.11 | 90.61 |
+
+Every row of step 4 is over +0.5% against its own numbers before the merge. The bytecode is the same, so the cause is the machine code of `Vm::run` (hypothesis: the new ops and arms of #767 and #771 move the allocation of the registers, as in the notes of steps 2 to 4). Main alone is cheaper than before on `loop` and `loopfn`, so the steps still gain against main now: `loop` -36%, `loopfn` -18%, `calls` -32%, `fib` -12%, `closures` -15%, `objects` -13%. Not done: a search for the cause.
 ## 2026-11-20: host handlers on the interface, D1: style, CSSOM and geometry (plan step S0.4 / D1)
 
 Status: the handlers of the files below run through the interface (`Scope`, `Local`, `Args`). Tests pass on Linux and Windows. The full matrix passes under the standing rule: no row is over +0.5% under both allocators. Base: PR #762 (`t3/convert-browser-host-handlers`, head `9f74a623`). The diff is about 2,200 changed lines.
