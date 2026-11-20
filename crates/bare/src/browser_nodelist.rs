@@ -151,10 +151,14 @@ fn fresh(d: &Dom, l: &List) -> Result<bool, HeapError> {
 
 /// `Host::fill_indexed`: make the cache fresh and the wrapper of member `index`. `Ok(false)`: `owner` is not a list.
 pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<bool> {
-    if !d.nl.s.borrow().lists.contains_key(&owner) {
-        return Ok(false);
+    // A list that is fresh needs no scope: `prepare` would return at once.
+    let fresh = match d.nl.s.borrow().lists.get(&owner) {
+        None => return Ok(false),
+        Some(l) => !matches!(l.src, Src::Name(_)) && l.rev == Some(d.doc.borrow().revision()),
+    };
+    if !fresh {
+        run(it, |s| prepare(d, s, owner))?;
     }
-    run(it, |s| prepare(d, s, owner))?;
     let id = d.nl.s.borrow().lists.get(&owner).and_then(|l| l.ids.get(index as usize).copied());
     if let Some(id) = id {
         d.wrap(it, id)?;
