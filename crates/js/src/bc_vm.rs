@@ -55,6 +55,11 @@ pub(super) struct RegStack {
 }
 
 impl RegStack {
+    /// Capacity bytes of the three vectors (`BARE_JS_STATS`).
+    pub(super) fn census_bytes(&self) -> usize {
+        self.regs.capacity() * std::mem::size_of::<Value>() + self.frames.capacity() * std::mem::size_of::<Fr>() + self.iters.capacity() * std::mem::size_of::<BcIter>()
+    }
+
     /// Grow the registers to `n` for a call, by at least half of the capacity. A stack goes back to the pool with its capacity, and
     /// the doubling of `Vec` kept up to twice the deepest run of each stack. Exact growth copied the stack at each new depth.
     #[cold]

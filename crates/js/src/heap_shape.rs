@@ -189,6 +189,11 @@ impl Shapes {
             + self.tables.iter().map(|t| t.entries.capacity() * size_of::<Entry>() + t.index.get().map_or(0, |m| m.capacity() * (size_of::<(PropertyKey, u32)>() + 1))).sum::<usize>()
     }
 
+    /// The bytes of the two lookup caches of the shape tree (`recent`, `found`), which are inline caches, not shapes.
+    pub(super) fn cache_bytes(&self) -> usize {
+        std::mem::size_of_val(&*self.recent) + std::mem::size_of_val(&*self.found)
+    }
+
     /// The properties of `shape` in order.
     #[inline]
     pub(super) fn entries(&self, shape: u32) -> &[Entry] {
