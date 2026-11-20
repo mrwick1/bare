@@ -15960,7 +15960,7 @@ Base: PR #764 (merged, `ee8ba415`). Two gaps of S2.7 are closed: a native can ca
 
 - `crates/js2/src/conversion_tests.rs`: 8 tests. A script `valueOf` and `toString` in every conversion; a throw from a conversion is catchable; a function that calls itself through a conversion gives `RangeError`; the budget stops a nested call that has no handler, and the budget is shared; a nested call that allocates keeps the native's values; getters and setters in `Object.assign` and `Object.values`; wrapper objects; a wrapper loop under constant collection. Each runs also with a collection at every safepoint.
 - `script_tests.rs`: 4 cases changed (a script `valueOf` now works; `new String` and `new Number` no longer throw; `Object(5) === 5` is false). Their lines left `tools/fixtures/js/diff-known.txt` (4 entries removed: 22 known differences became 14, still all listed, 0 new).
-- `cargo test --locked -p bare-js2 --lib`: 385 pass (377 before, 8 new). `cargo test --locked -p bare-js-diff`: pass. Miri: see the end of this section.
+- `cargo test --locked -p bare-js2 --lib`: 385 pass (377 before, 8 new). `cargo test --locked -p bare-js-diff`: pass. Miri (`cargo +nightly miri test -p bare-js2 --lib -- conversion_tests`): all 8 pass (the 6 light ones in 1,562 s, the loop test in 240 s with 12 turns instead of 300, the self-calling test in 190 s). The whole crate is not run under Miri here; CI does that.
 
 ### test262 (`tools/js/test262_js2.sh -j 8`, the same pinned checkout `e4fbf577`)
 
@@ -15992,4 +15992,4 @@ Base: PR #764 (merged, `ee8ba415`). Two gaps of S2.7 are closed: a native can ca
 
 ### Not tested
 
-Windows and macOS; arm64; Miri on the whole crate (only `conversion_tests`); the GC-hold gap with a `valueOf` that allocates more than the slack in a loop (no test; the budget bounds it); sloppy-mode `this` boxing; the cgu 1 numbers on an idle machine.
+Windows and macOS; arm64; Miri on the whole crate (only `conversion_tests`; a first run of the loop test with 300 turns did not end in 2 hours, so it runs 12 turns under Miri); the GC-hold gap with a `valueOf` that allocates more than the slack in a loop (no test; the budget bounds it); sloppy-mode `this` boxing; the cgu 1 numbers on an idle machine.

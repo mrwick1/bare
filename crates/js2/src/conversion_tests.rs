@@ -172,8 +172,9 @@ fn wrapper_objects() {
 
 #[test]
 fn a_wrapper_in_a_loop_under_constant_collection() {
-    let src = "var t = 0; for (var i = 0; i < 300; i++) { var w = new Number(i); w.k = i; var s = new String('v' + i); t += w + s.length + (w.k - i); } var r = t;";
-    let want = (0..300).map(|i: i32| i + (format!("v{i}").len() as i32)).sum::<i32>().to_string();
+    let n = if MIRI { 12 } else { 300 };
+    let src = &format!("var t = 0; for (var i = 0; i < {n}; i++) {{ var w = new Number(i); w.k = i; var s = new String('v' + i); t += w + s.length + (w.k - i); }} var r = t;");
+    let want = (0..n).map(|i: i32| i + (format!("v{i}").len() as i32)).sum::<i32>().to_string();
     assert_eq!(ev(src, "r"), want);
     assert_eq!(ev_gc(src, "r"), want);
 }
