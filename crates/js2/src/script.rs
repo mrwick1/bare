@@ -40,7 +40,7 @@ impl Loader<'_> {
                 Some(r) => inline[r as usize].take().ok_or("a ready child is used twice")?,
                 None => {
                     let (p, fid) = parse_function(self.source, &mut self.facts, ch.id, self.limits).map_err(|e| format!("parse fn {}: {}", ch.id, e.msg))?;
-                    compile_function(&p, fid, ch.id, &self.facts, self.atoms, &Input { chain: ch.chain.clone(), self_name: ch.self_name }).map_err(|e| format!("compile fn {}: {e:?}", ch.id))?
+                    compile_function(&p, fid, ch.id, &self.facts, self.atoms, &Input { chain: ch.chain.clone(), self_name: ch.self_name, name: ch.name.clone() }).map_err(|e| format!("compile fn {}: {e:?}", ch.id))?
                 }
             };
             c.code.funcs[i] = self.add(sub)? as u32;
