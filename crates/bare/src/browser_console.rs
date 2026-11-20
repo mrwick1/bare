@@ -197,7 +197,7 @@ fn record<'s>(d: &Dom, s: &mut Sc<'s, '_>, level: ConsoleLevel, a: Args<'s>, fro
     if to.saturating_sub(from) > d.console.lim.get().max_args {
         return Err(d.lim_s(s, "console-args"));
     }
-    let args = (from..to).map(|i| raw_arg(s, a, i).expect("in range")).collect();
+    let args = s.engine().api_args(a, from, to);
     record_vec(d, s, level, args)
 }
 

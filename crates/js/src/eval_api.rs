@@ -198,6 +198,20 @@ impl<'p> Interp<'p> {
         }
     }
 
+    /// The arguments `from..to` of a host call as values, in one copy. A range in the window of the running call is read as a slice;
+    /// arguments that the host made (on the stack) are read one by one.
+    pub fn api_args(&self, a: bare_js_api::Args<'_>, from: usize, to: usize) -> Vec<Value> {
+        let n = to.min(a.len()).saturating_sub(from);
+        let Some(first) = a.get(from).filter(|_| n > 0) else { return Vec::new() };
+        // SAFETY: see `ApiState::values`. The slice is inside the arguments of the running call, which no one writes or moves.
+        if let (Some(w), Some(k)) = (unsafe { self.api.win.as_ref() }, first.slot().checked_sub(WIN + 1))
+            && k as usize + n <= w.len as usize
+        {
+            return unsafe { std::slice::from_raw_parts(w.args.add(k as usize), n) }.to_vec();
+        }
+        a.iter().skip(from).take(n).map(|l| self.api_at(l)).collect()
+    }
+
     fn api_key(&mut self, key: bare_js_api::Local<'_>) -> Result<PropertyKey, Error> {
         let k = self.api_at(key);
         Ok(h!(self, self.heap.to_property_key(k)))
