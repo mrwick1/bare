@@ -1044,7 +1044,6 @@ impl Host for Dom {
         self.ce_roots(out);
         crate::browser_geom::roots(self, out);
         crate::browser_worker::roots(self, out);
-        self.kids.roots(out);
     }
 
     fn trace(&self, owner: ObjId, out: &mut Vec<Value>) {

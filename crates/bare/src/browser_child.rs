@@ -179,7 +179,10 @@ pub(crate) struct Kids {
     env: RefCell<Option<KidEnv>>,
     slots: RefCell<Vec<Option<Slot>>>,
     kids: RefCell<Vec<Option<Child>>>,
-    wins: RefCell<HashMap<ObjId, Win>>,
+    /// The remote windows by target. Each entry holds the handles of its objects: they are roots exactly while the entry lives.
+    wins: RefCell<HashMap<ObjId, (Win, Vec<bare_js_api::Persistent>)>>,
+    /// The handles of the shared host functions of `Common`. They live as long as the page.
+    common_held: RefCell<Vec<bare_js_api::Persistent>>,
     /// Messages to other pages, in post order.
     outbox: RefCell<Vec<Out>>,
     pub(crate) common: Cell<Option<Common>>,
@@ -253,11 +256,26 @@ impl Kids {
     }
 
     pub(crate) fn win_of(&self, target: ObjId) -> Option<Win> {
-        self.wins.borrow().get(&target).copied()
+        self.wins.borrow().get(&target).map(|e| e.0)
     }
 
-    pub(crate) fn add_win(&self, target: ObjId, w: Win) {
-        self.wins.borrow_mut().insert(target, w);
+    /// Keep the window `w` with its `target` (and, for a window, its proxy) in persistent handles until `sync` drops the child.
+    pub(crate) fn add_win(&self, it: &mut Interp<'_>, target: ObjId, w: Win) {
+        let held = [Some(target), (!w.location).then_some(w.proxy)].into_iter().flatten().map(|o| it.persist_value(Value::Object(o))).collect();
+        self.wins.borrow_mut().insert(target, (w, held));
+    }
+
+    /// The persistent handles that this page holds for remote windows and their shared functions (a test counts them).
+    #[cfg(test)]
+    pub(crate) fn handle_count(&self) -> usize {
+        self.wins.borrow().values().map(|e| e.1.len()).sum::<usize>() + self.common_held.borrow().len()
+    }
+
+    /// Keep the shared host functions of `c` for the life of the page.
+    pub(crate) fn set_common(&self, it: &mut Interp<'_>, c: Common) {
+        let objs = [c.handler, c.ctor, c.closed, c.replace, c.href_get, c.href_set].into_iter().chain(c.no_op);
+        *self.common_held.borrow_mut() = objs.map(|o| it.persist_value(Value::Object(o))).collect();
+        self.common.set(Some(c));
     }
 
     pub(crate) fn send(&self, m: Out) {
@@ -278,12 +296,12 @@ impl Kids {
 
     /// The window of `side` in this heap, if a script or the setup made it.
     fn proxy_of(&self, side: Side) -> Option<ObjId> {
-        self.wins.borrow().values().find(|w| w.side == side && !w.location).map(|w| w.proxy)
+        self.wins.borrow().values().find(|e| e.0.side == side && !e.0.location).map(|e| e.0.proxy)
     }
 
     /// The target of the window `proxy` (not of its location).
     pub(crate) fn target_of(&self, proxy: ObjId) -> Option<ObjId> {
-        self.wins.borrow().iter().find(|(_, w)| w.proxy == proxy && !w.location).map(|(&t, _)| t)
+        self.wins.borrow().iter().find(|(_, e)| e.0.proxy == proxy && !e.0.location).map(|(&t, _)| t)
     }
 
     pub(crate) fn window_of(&self, id: FrameId) -> Option<ObjId> {
@@ -357,17 +375,6 @@ impl Kids {
         }
     }
 
-    /// Roots of the windows (they live as long as the child does).
-    pub(crate) fn roots(&self, out: &mut Vec<bare_js::value::Value>) {
-        use bare_js::value::Value::Object;
-        for (&t, w) in self.wins.borrow().iter() {
-            out.extend([Object(t), Object(w.proxy)]);
-        }
-        if let Some(c) = self.common.get() {
-            out.extend([c.handler, c.ctor, c.closed, c.replace, c.href_get, c.href_set].into_iter().chain(c.no_op).map(Object));
-        }
-    }
-
     /// The iframe nodes that slots keep: the arena must not reuse them.
     pub(crate) fn held(&self, out: &mut Vec<NodeId>) {
         out.extend(self.slots.borrow().iter().flatten().map(|s| s.node));
@@ -386,7 +393,7 @@ impl Kids {
                     cfg.total.set(cfg.total.get().saturating_sub(1));
                 }
                 kids[i] = None;
-                self.wins.borrow_mut().retain(|_, w| w.side != Side::Child(i as FrameId));
+                self.wins.borrow_mut().retain(|_, e| e.0.side != Side::Child(i as FrameId));
                 continue;
             }
             let Some(s) = slots[i].as_mut().filter(|s| s.dirty) else { continue };
