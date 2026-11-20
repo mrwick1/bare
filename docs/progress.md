@@ -14372,10 +14372,10 @@ Measured: archMachine, release with symbols, base = origin/main `42018c02` built
 | `navigation_load history 1` | jemalloc | 93,604,719 to 93,606,048 | 83,130,182 to 83,130,305 | -10.47 M (-11.2%) |
 | `navigation_load history 10` | glibc | 791,783,803 to 791,786,563 | 683,148,598 to 683,153,852 | -108.6 M (-13.7%) |
 | `navigation_load history 10` | jemalloc | 835,740,559 to 835,885,870 | 731,617,830 to 731,707,101 | -104.1 M (-12.5%) |
-| `web_apis_load clone 1` (information) | glibc | 182,467,781 to 182,470,428 | 186,380,593 to 186,381,971 | +3.91 M (+2.1%) |
+| `web_apis_load clone 1` (information) | glibc | 182,467,781 to 182,470,428 | 186,380,593 to 186,381,972 | +3.91 M (+2.1%) |
 | `web_apis_load clone 1` (information) | jemalloc | 191,770,000 to 191,807,492 | 195,686,081 to 195,723,331 | +3.93 M (+2.0%) |
 
-The spread is under 0.01% for glibc and under 0.02% for jemalloc, except base `history 10` jemalloc (0.02%). Allocations on `history 1`: 72,267 to 62,267 (10 fewer per state).
+The spread of the 3 runs is under 0.002% for glibc and under 0.02% for jemalloc. Allocations on `history 1`: 72,267 to 62,267 (10 fewer per state).
 
 Callgrind, `history 1`, 1 run per tree (86,857,469 and 75,929,967 instructions in all), per state (1,000 states):
 
@@ -14392,8 +14392,8 @@ Where the remaining cost sits (per state, callgrind inclusive):
 - Materialize 6.3 K: `clone_units` (intern of 4 keys and 2 strings) 1.9 K, with 0.63 K self time (a zeroed 128-byte stack buffer on each call); `clone_install` 0.33 K; the new objects and the `fill_array` call; the two scratch `Vec`s.
 - The hypothesis counted interning at 1.1 K. It is 1.9 K. The intern cost is now the largest part of the read. A cache of the last keys, or interning from the Latin-1 bytes with no copy to a `u16` buffer, would cut it. Neither is built.
 
-`web_apis_load clone` goes up by 2%: its graph holds a Map, a Set, a Date and a typed array. The fast path walks the plain prefix, meets the first other class and drops its work. The old walk then runs from the start. The real design (step 3, every class native) has no such waste. This row says nothing about the gain of F3.
+`web_apis_load clone` goes up by 2%: its graph holds a Map, a Set, a Date and a typed array. The fast path (hypothesis, not profiled) walks the plain prefix, meets the first other class and drops its work. The old walk then runs from the start. The real design (step 3, every class native) has no such waste. This row says nothing about the gain of F3.
 
-Decision for the owner: the gate passes, so the series may go on. The gain on `history` is 64% of the hypothesis and the spike has no transfer, no other class and no getters. The cost limit of the old option E (+0.5%) is now met with a margin of 10.4 M on `history 1`.
+Decision for the owner: the gate passes, so the series may go on. The gain on `history` is 64% of the hypothesis and the spike has no transfer, no other class and no getters.
 
 Not tested: codegen-units=1 runs, the cost matrix (only 3 rows ran), the Windows VM, `clone_copy` (F3), the other classes, accessors and getters, the transfer list, the full `bare` test suite (only the 4 filters above ran), peak memory and the record size of the `history` state (48 bytes by hand in the design, not read from the spike), wall time. The disk of `/data` was full once during the work. The first release build of the spike failed with "No space left on device" and was built again after space was freed.
