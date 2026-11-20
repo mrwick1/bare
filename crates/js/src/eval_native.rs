@@ -527,7 +527,7 @@ impl<'p> Interp<'p> {
                 }
                 None => native(self, true),
             },
-            Some(Callee::Native(_) | Callee::Host { .. }) => native(self, true),
+            Some(Callee::Native(_) | Callee::Host { .. } | Callee::ApiHost { .. }) => native(self, true),
             Some(_) => native(self, false),
             None => return Err(self.type_err("Function.prototype.toString requires that 'this' be a Function")),
         })

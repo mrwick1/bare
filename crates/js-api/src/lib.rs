@@ -413,6 +413,52 @@ pub enum Intrinsic {
     ErrorPrototype,
     /// The symbol `Symbol.iterator` of the realm. It does not depend on the global `Symbol`, which a script can replace.
     SymbolIterator,
+    /// The symbol `Symbol.toStringTag` of the realm.
+    SymbolToStringTag,
+}
+
+/// How a host function takes a call ([`Scope::host_function`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostFn {
+    /// A plain function: `new` on it is a `TypeError`.
+    Method,
+    /// A constructor. A `new.target` that is not the function itself (`class extends`, `Reflect.construct`) is refused.
+    Ctor,
+    /// A constructor that reads `new.target` with [`Scope::proto_from_new_target`].
+    CtorNewTarget,
+}
+
+/// The element type of a typed array ([`Scope::new_typed_array`], [`View`]). `Data` is a `DataView`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Elem {
+    I8,
+    U8,
+    U8C,
+    I16,
+    U16,
+    I32,
+    U32,
+    F32,
+    F64,
+    BI64,
+    BU64,
+    Data,
+}
+
+/// A typed array or `DataView` ([`Scope::view`]). `len` is in elements (bytes for a `DataView`); `offset` is in bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct View<'s> {
+    pub buffer: Local<'s>,
+    pub offset: usize,
+    pub len: usize,
+    pub elem: Elem,
+}
+
+/// An own property, as [`Scope::own_kind`] reads it. It runs no getter and no proxy trap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Own<'s> {
+    Data(Local<'s>),
+    Accessor { get: Option<Local<'s>>, set: Option<Local<'s>> },
 }
 
 /// Why a call failed.
@@ -600,8 +646,8 @@ pub trait Engine: Sized {
     /// `Object.defineProperty` of a data property.
     fn define<'s>(&mut self, obj: Local<'_>, key: Local<'_>, value: Local<'_>, attrs: Attrs) -> Result<(), Error<'s>>;
     fn call<'s>(&mut self, f: Local<'_>, this: Local<'_>, args: &[Local<'_>]) -> Result<Local<'s>, Error<'s>>;
-    /// A function whose calls go to [`Host::call`] with `id`.
-    fn host_function<'s>(&mut self, name: &str, id: u32, length: u32) -> Result<Local<'s>, Error<'s>>;
+    /// A function whose calls go to [`Host::call`] with `id`. `id` is below 2^31.
+    fn host_function<'s>(&mut self, name: &str, id: u32, length: u32, kind: HostFn) -> Result<Local<'s>, Error<'s>>;
     fn set_host(&mut self, host: Rc<dyn Host<Self>>);
 
     /// The raw value of a local, for a [`Traced`].
@@ -729,6 +775,120 @@ pub trait Engine: Sized {
     /// A function that calls `target` with `this` fixed, with the arguments of its own call. It reads no `Function.prototype.bind`.
     /// The engine traces both. `target` is a function, or a `TypeError`.
     fn bind<'s>(&mut self, target: Local<'_>, this: Local<'_>) -> Result<Local<'s>, Error<'s>>;
+
+    // Handler bodies of the browser (`docs/design-host-handlers.md`, section 2). The default bodies say that the engine has no such
+    // method yet; an engine that has it overrides them.
+
+    /// The host key of a host-filled object (`new_host_indexed`, `new_host_named`). `None` for any other object, also for an object
+    /// that has a key from [`Engine::set_host_owner`] (the old engine keeps no map from the object to that key).
+    fn host_key(&self, _obj: Local<'_>) -> Option<u32> {
+        None
+    }
+    /// Run `f` as one host operation: it starts the step budget when no call is active, counts as one call level, and refuses
+    /// `collect`, `run_script` and `drain_microtasks` until it ends. `Err` when the call depth is full ([`task`] gives a scope).
+    fn task<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> Result<R, Abort> {
+        let _ = f;
+        Err(Abort::Unsupported("task"))
+    }
+    /// `Construct(f, args, new_target)`; `None` is `f`. A value that is not a constructor is a `TypeError`.
+    fn construct<'s>(&mut self, _f: Local<'_>, _args: &[Local<'_>], _new_target: Option<Local<'_>>) -> Result<Local<'s>, Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("construct")))
+    }
+    /// Run script text as a script of the realm: its completion value.
+    fn run_script<'s>(&mut self, _source: &str) -> Result<Local<'s>, Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("run_script")))
+    }
+    /// An event handler: `function NAME(PARAMS) {\nBODY\n}` in the global environment. A body that does not parse alone is a `SyntaxError`.
+    fn compile_function<'s>(&mut self, _name: &str, _params: &str, _body: &str) -> Result<Local<'s>, Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("compile_function")))
+    }
+    /// `call(f, this, args)` while the names of the code of [`Engine::compile_function`] are looked up in `scope` first, innermost first.
+    fn call_scoped<'s>(&mut self, _f: Local<'_>, _this: Local<'_>, _args: &[Local<'_>], _scope: &[Local<'_>]) -> Result<Local<'s>, Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("call_scoped")))
+    }
+    /// Indirect eval of the string `src` in the global environment.
+    fn eval_global<'s>(&mut self, _src: Local<'_>) -> Result<Local<'s>, Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("eval_global")))
+    }
+    /// The `%eval%` function of the realm, for the global `eval`.
+    fn eval_function<'s>(&mut self) -> Result<Local<'s>, Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("eval_function")))
+    }
+    /// A new `ArrayBuffer` that owns `bytes`.
+    fn new_array_buffer<'s>(&mut self, _bytes: Vec<u8>) -> Result<Local<'s>, Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("new_array_buffer")))
+    }
+    /// A typed array of type `elem` over a new buffer that owns `bytes`. `Elem::Data` is not a typed array.
+    fn new_typed_array<'s>(&mut self, _elem: Elem, _bytes: Vec<u8>) -> Result<Local<'s>, Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("new_typed_array")))
+    }
+    /// The bytes of an `ArrayBuffer`, a typed array or a `DataView`, with no copy; empty when detached. The borrow ends before any
+    /// call that may collect.
+    fn bytes(&self, _v: Local<'_>) -> Option<&[u8]> {
+        None
+    }
+    /// The bytes of a buffer or a view, to write. No script may run while the borrow is held.
+    fn bytes_mut(&mut self, _v: Local<'_>) -> Option<&mut [u8]> {
+        None
+    }
+    /// The parts of a typed array or `DataView`. The buffer is a new local.
+    fn view<'s>(&mut self, _v: Local<'_>) -> Option<View<'s>> {
+        None
+    }
+    /// Is the buffer detached (of a view: the buffer of the view)? `false` for another value.
+    fn is_detached(&self, _v: Local<'_>) -> bool {
+        false
+    }
+    /// The element `i` of a typed array as a number. `None` for a `BigInt` array, a `DataView`, a detached buffer or an index out of range.
+    fn view_get(&self, _v: Local<'_>, _i: usize) -> Option<f64> {
+        None
+    }
+    /// The number of 64-bit limbs of a `BigInt` value (0 for another value).
+    fn bigint_limbs(&self, _v: Local<'_>) -> usize {
+        0
+    }
+    /// An object whose integer-index properties come from [`Host::indexed_item`], with the host key `key`.
+    fn new_host_indexed<'s>(&mut self, _proto: Option<Local<'_>>, _key: u32) -> Result<Local<'s>, Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("new_host_indexed")))
+    }
+    /// An object whose string keys come from the `named_*` hooks, with the host key `key`. `open`: it accepts new names.
+    fn new_host_named<'s>(&mut self, _proto: Option<Local<'_>>, _key: u32, _open: bool) -> Result<Local<'s>, Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("new_host_named")))
+    }
+    /// Mark `obj` lazy: the engine calls [`Host::lazy_member`] before it answers a miss. `chain`: for the objects of its prototype chain too.
+    fn set_lazy<'s>(&mut self, _obj: Local<'_>, _chain: bool) -> Result<(), Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("set_lazy")))
+    }
+    /// Remove the lazy mark of `obj`.
+    fn clear_lazy(&mut self, _obj: Local<'_>) {}
+    /// The own property `key`, with no getter and no proxy trap. `None`: there is none (a proxy has none of its own).
+    fn own_kind<'s>(&mut self, _obj: Local<'_>, _key: Local<'_>) -> Result<Option<Own<'s>>, Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("own_kind")))
+    }
+    /// The description of a symbol, or `None` for `undefined`.
+    fn symbol_description<'s>(&mut self, _v: Local<'_>) -> Result<Option<Local<'s>>, Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("symbol_description")))
+    }
+    /// Text of a value for tools and tests: strings raw, numbers as JavaScript prints them, an object as `object` or `function`.
+    fn display(&self, _v: Local<'_>) -> String {
+        String::new()
+    }
+    /// Text of a value for tools: nested objects up to `cap` characters. `node` describes a host object, or gives `None`.
+    fn inspect(&mut self, _v: Local<'_>, _cap: usize, _node: &dyn Fn(&Self::Raw) -> Option<String>) -> String {
+        String::new()
+    }
+    /// `Object.freeze` (`frozen`) or `Object.seal`. `false` when it cannot (a host-filled object).
+    fn set_integrity<'s>(&mut self, _obj: Local<'_>, _frozen: bool) -> Result<bool, Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("set_integrity")))
+    }
+    /// The `length` of an array, or `None` for another value.
+    fn array_len<'s>(&mut self, _v: Local<'_>) -> Result<Option<u32>, Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("array_len")))
+    }
+    /// An error object whose prototype is `proto`, with own `message`, and the stack of the call.
+    fn new_error<'s>(&mut self, _proto: Local<'_>, _msg: &str) -> Result<Local<'s>, Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("new_error")))
+    }
 
     // Structured clone (`docs/design-host-clone.md`). The engine walks plain data itself and writes a record (`clone`). It asks the
     // host only for host objects, the transfer list and the error. The default bodies say that the engine has no clone yet.
@@ -896,8 +1056,8 @@ impl<'s, E: Engine> Scope<'s, E> {
         self.e.call(f, this, args)
     }
 
-    pub fn host_function(&mut self, name: &str, id: u32, length: u32) -> Result<Local<'s>, Error<'s>> {
-        self.e.host_function(name, id, length)
+    pub fn host_function(&mut self, name: &str, id: u32, length: u32, kind: HostFn) -> Result<Local<'s>, Error<'s>> {
+        self.e.host_function(name, id, length, kind)
     }
 
     pub fn set_host(&mut self, host: Rc<dyn Host<E>>) {
@@ -1094,6 +1254,140 @@ impl<'s, E: Engine> Scope<'s, E> {
     pub fn bind(&mut self, target: Local<'_>, this: Local<'_>) -> Result<Local<'s>, Error<'s>> {
         self.e.bind(target, this)
     }
+}
+
+/// The methods for the handler bodies (`docs/design-host-handlers.md`). See [`Engine`] for each one.
+impl<'s, E: Engine> Scope<'s, E> {
+    pub fn host_key(&self, obj: Local<'_>) -> Option<u32> {
+        self.e.host_key(obj)
+    }
+
+    pub fn construct(&mut self, f: Local<'_>, args: &[Local<'_>], new_target: Option<Local<'_>>) -> Result<Local<'s>, Error<'s>> {
+        self.e.construct(f, args, new_target)
+    }
+
+    pub fn run_script(&mut self, source: &str) -> Result<Local<'s>, Error<'s>> {
+        self.e.run_script(source)
+    }
+
+    pub fn compile_function(&mut self, name: &str, params: &str, body: &str) -> Result<Local<'s>, Error<'s>> {
+        self.e.compile_function(name, params, body)
+    }
+
+    pub fn call_scoped(&mut self, f: Local<'_>, this: Local<'_>, args: &[Local<'_>], scope: &[Local<'_>]) -> Result<Local<'s>, Error<'s>> {
+        self.e.call_scoped(f, this, args, scope)
+    }
+
+    pub fn eval_global(&mut self, src: Local<'_>) -> Result<Local<'s>, Error<'s>> {
+        self.e.eval_global(src)
+    }
+
+    pub fn eval_function(&mut self) -> Result<Local<'s>, Error<'s>> {
+        self.e.eval_function()
+    }
+
+    pub fn new_array_buffer(&mut self, bytes: Vec<u8>) -> Result<Local<'s>, Error<'s>> {
+        self.e.new_array_buffer(bytes)
+    }
+
+    pub fn new_typed_array(&mut self, elem: Elem, bytes: Vec<u8>) -> Result<Local<'s>, Error<'s>> {
+        self.e.new_typed_array(elem, bytes)
+    }
+
+    pub fn new_uint8_array(&mut self, bytes: Vec<u8>) -> Result<Local<'s>, Error<'s>> {
+        self.e.new_typed_array(Elem::U8, bytes)
+    }
+
+    pub fn bytes(&self, v: Local<'_>) -> Option<&[u8]> {
+        self.e.bytes(v)
+    }
+
+    pub fn bytes_mut(&mut self, v: Local<'_>) -> Option<&mut [u8]> {
+        self.e.bytes_mut(v)
+    }
+
+    pub fn view(&mut self, v: Local<'_>) -> Option<View<'s>> {
+        self.e.view(v)
+    }
+
+    pub fn is_detached(&self, v: Local<'_>) -> bool {
+        self.e.is_detached(v)
+    }
+
+    pub fn view_get(&self, v: Local<'_>, i: usize) -> Option<f64> {
+        self.e.view_get(v, i)
+    }
+
+    pub fn bigint_limbs(&self, v: Local<'_>) -> usize {
+        self.e.bigint_limbs(v)
+    }
+
+    pub fn new_host_indexed(&mut self, proto: Option<Local<'_>>, key: u32) -> Result<Local<'s>, Error<'s>> {
+        self.e.new_host_indexed(proto, key)
+    }
+
+    pub fn new_host_named(&mut self, proto: Option<Local<'_>>, key: u32, open: bool) -> Result<Local<'s>, Error<'s>> {
+        self.e.new_host_named(proto, key, open)
+    }
+
+    pub fn set_lazy(&mut self, obj: Local<'_>, chain: bool) -> Result<(), Error<'s>> {
+        self.e.set_lazy(obj, chain)
+    }
+
+    pub fn clear_lazy(&mut self, obj: Local<'_>) {
+        self.e.clear_lazy(obj);
+    }
+
+    pub fn own_kind(&mut self, obj: Local<'_>, key: Local<'_>) -> Result<Option<Own<'s>>, Error<'s>> {
+        self.e.own_kind(obj, key)
+    }
+
+    pub fn symbol_description(&mut self, v: Local<'_>) -> Result<Option<Local<'s>>, Error<'s>> {
+        self.e.symbol_description(v)
+    }
+
+    pub fn display(&self, v: Local<'_>) -> String {
+        self.e.display(v)
+    }
+
+    pub fn inspect(&mut self, v: Local<'_>, cap: usize, node: &dyn Fn(&E::Raw) -> Option<String>) -> String {
+        self.e.inspect(v, cap, node)
+    }
+
+    pub fn set_integrity(&mut self, obj: Local<'_>, frozen: bool) -> Result<bool, Error<'s>> {
+        self.e.set_integrity(obj, frozen)
+    }
+
+    pub fn array_len(&mut self, v: Local<'_>) -> Result<Option<u32>, Error<'s>> {
+        self.e.array_len(v)
+    }
+
+    pub fn new_error(&mut self, proto: Local<'_>, msg: &str) -> Result<Local<'s>, Error<'s>> {
+        self.e.new_error(proto, msg)
+    }
+
+    /// `define` with a key from Rust.
+    pub fn define_str(&mut self, obj: Local<'_>, key: &str, value: Local<'_>, attrs: Attrs) -> Result<(), Error<'s>> {
+        let k = self.string(key)?;
+        self.define(obj, k, value, attrs)
+    }
+
+    /// `set` with a key from Rust.
+    pub fn set_str(&mut self, obj: Local<'_>, key: &str, value: Local<'_>) -> Result<(), Error<'s>> {
+        let k = self.string(key)?;
+        self.set(obj, k, value)
+    }
+
+    /// `define_accessor` with a key from Rust.
+    pub fn define_accessor_str(&mut self, obj: Local<'_>, key: &str, get: Option<Local<'_>>, set: Option<Local<'_>>, attrs: Attrs) -> Result<(), Error<'s>> {
+        let k = self.string(key)?;
+        self.define_accessor(obj, k, get, set, attrs)
+    }
+}
+
+/// Run `f` as one host operation ([`Engine::task`]) in its own outermost scope.
+pub fn task<E: Engine, R>(e: &mut E, f: impl for<'s> FnOnce(&mut Scope<'s, E>) -> R) -> Result<R, Abort> {
+    e.task(|e| enter(e, f))
 }
 
 #[cfg(test)]

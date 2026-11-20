@@ -116,7 +116,7 @@ impl Engine for Toy {
     fn call<'s>(&mut self, _f: Local<'_>, _this: Local<'_>, _args: &[Local<'_>]) -> Result<Local<'s>, Error<'s>> {
         Err(Error::Abort(Abort::Unsupported("calls")))
     }
-    fn host_function<'s>(&mut self, _name: &str, _id: u32, _length: u32) -> Result<Local<'s>, Error<'s>> {
+    fn host_function<'s>(&mut self, _name: &str, _id: u32, _length: u32, _kind: HostFn) -> Result<Local<'s>, Error<'s>> {
         Err(Error::Abort(Abort::Unsupported("host functions")))
     }
     fn set_host(&mut self, _host: Rc<dyn Host<Self>>) {}
@@ -442,4 +442,15 @@ fn an_engine_with_no_clone_says_unsupported() {
     let mut c = Cloned::new(Box::from([]), Vec::new(), 0);
     assert_eq!(e.clone_in(&mut c, &mut NoClone).err(), Some(Error::Abort(Abort::Unsupported("clone_in"))));
     assert_eq!(e.clone_copy(v, &limits, &mut NoClone).err(), Some(Error::Abort(Abort::Unsupported("clone_copy"))));
+}
+
+#[test]
+fn an_engine_with_no_handler_methods_says_unsupported() {
+    let mut e = toy();
+    let v = Local::from_slot(0);
+    assert!(enter(&mut e, |s| matches!(s.run_script("1"), Err(Error::Abort(Abort::Unsupported("run_script"))))));
+    assert!(enter(&mut e, |s| matches!(s.new_error(v, "m"), Err(Error::Abort(Abort::Unsupported("new_error"))))));
+    assert!(enter(&mut e, |s| matches!(s.array_len(v), Err(Error::Abort(Abort::Unsupported("array_len"))))));
+    assert_eq!(enter(&mut e, |s| (s.host_key(v), s.is_detached(v), s.bytes(v).is_none(), s.display(v))), (None, false, true, String::new()));
+    assert_eq!(task(&mut e, |_| 1), Err(Abort::Unsupported("task")));
 }
