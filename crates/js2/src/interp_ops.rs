@@ -301,8 +301,9 @@ impl Realm {
         self.type_error("the value is not iterable (the iterator protocol is S2.7)")
     }
 
-    /// The own enumerable properties of `src`, minus the keys `skip`. An accessor throws (it needs a call).
-    fn own_enumerable(&mut self, src: Value, skip: &[Key]) -> R<Vec<(Key, Value)>> {
+    /// The own enumerable properties of `src`, minus the keys `skip`. `None` when `src` has an accessor: the copy needs calls, so the
+    /// caller hands it to a helper of the prelude.
+    fn own_enumerable(&mut self, src: Value, skip: &[Key]) -> R<Option<Vec<(Key, Value)>>> {
         let (mut names, mut idxs) = (Vec::new(), Vec::new());
         for k in skip {
             match *k {
@@ -327,7 +328,7 @@ impl Realm {
             let entries: Vec<_> = self.shapes.entries(o.shape(&self.shapes)).filter(|e| e.attrs() & A_E != 0).map(|e| (e.key(), e.attrs(), e.slot())).collect();
             for (k, a, slot) in entries {
                 if a & A_ACC != 0 {
-                    return self.type_error("copying an accessor property is not supported yet (S2.7)");
+                    return Ok(None);
                 }
                 if !names.contains(&k) {
                     out.push((Key::Name(k), o.slot(&self.shapes, slot)));
@@ -341,28 +342,38 @@ impl Realm {
                 }
             }
         }
-        Ok(out)
+        Ok(Some(out))
     }
 
-    /// `{...src}` into the object `dst`.
-    pub fn copy_props(&mut self, dst: Obj, src: Value) -> R<()> {
-        for (k, v) in self.own_enumerable(src, &[])? {
+    /// `{...src}` into the object `dst`. `false` when `src` has an accessor and nothing was copied: the helper `H_SPREAD` does it.
+    pub fn copy_props(&mut self, dst: Obj, src: Value) -> R<bool> {
+        let Some(props) = self.own_enumerable(src, &[])? else {
+            self.helper_args(&[dst.value(), src]);
+            return Ok(false);
+        };
+        for (k, v) in props {
             self.define(dst, k, v)?;
         }
-        Ok(())
+        Ok(true)
     }
 
     /// `{a, ...rest} = src`: a new object with the own enumerable properties of `src` except `keys`.
-    pub fn obj_rest(&mut self, src: Value, keys: &[Value]) -> R<Value> {
+    /// `None` when `src` has an accessor: the helper `H_REST` does it with `tail_args` = `src` and `keys`.
+    pub fn obj_rest(&mut self, src: Value, keys: &[Value]) -> R<Option<Value>> {
         if src.is_undefined() || src.is_null() {
             return self.type_error("cannot destructure 'undefined' or 'null'");
         }
         let skip = keys.iter().map(|k| self.key_of(*k)).collect::<R<Vec<_>>>()?;
+        let Some(props) = self.own_enumerable(src, &skip)? else {
+            self.helper_args(&[src]);
+            self.tail_args.extend_from_slice(keys);
+            return Ok(None);
+        };
         let o = Obj::new(&mut self.heap, &self.shapes, self.s_object).expect("memory");
-        for (k, v) in self.own_enumerable(src, &skip)? {
+        for (k, v) in props {
             self.define(o, k, v)?;
         }
-        Ok(o.value())
+        Ok(Some(o.value()))
     }
 
     /// The template object of a tagged template: the array of the cooked strings with the array of the raw strings as `raw`.
