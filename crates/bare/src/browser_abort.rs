@@ -15,17 +15,14 @@
 //! - Gates: a response body that is being read is not aborted (bodies are buffered). `request.signal` is a new signal that follows `init.signal`.
 
 use crate::browser::*;
+use crate::browser_scoped::*;
 use bare_js::eval::Error;
 use bare_js::eval::Interp;
-use bare_js::heap::PropertyDescriptor;
-use bare_js::value::{ObjId, PropertyKey, Value};
+use bare_js::value::{ObjId, Value};
+use bare_js_api::{Args, Attrs, Engine, HostFn, Intrinsic, Local};
 use std::cell::{Cell, RefCell};
 
 type V = R<Value>;
-
-fn arg(a: &[Value], i: usize) -> Value {
-    a.get(i).copied().unwrap_or(Value::Undefined)
-}
 
 pub(crate) enum Algo {
     /// Remove the listener `(target, id)`.
@@ -134,13 +131,6 @@ impl Dom {
     /// Is `o` an `AbortController` (so not plain data for structured clone)?
     pub(crate) fn is_abort_controller(&self, o: ObjId) -> bool {
         self.abort.s.borrow().ctls.contains_key(&o)
-    }
-
-    fn signal_of(&self, it: &mut Interp<'_>, v: Value) -> R<ObjId> {
-        match v {
-            Value::Object(o) if self.is_signal(o) => Ok(o),
-            _ => Err(it.type_error("Illegal invocation")),
-        }
     }
 
     fn exc(&self, it: &mut Interp<'_>, name: &str, msg: &str) -> V {
@@ -263,67 +253,84 @@ impl Dom {
 
 // ------------------------------------------------------------------------------------ methods
 
-fn signal_illegal(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
-    Err(it.type_error("Failed to construct 'AbortSignal': Illegal constructor"))
+fn signal_illegal<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    Err(s.type_error("Failed to construct 'AbortSignal': Illegal constructor"))
 }
 
-fn aborted(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let o = d.signal_of(it, this)?;
-    Ok(Value::Bool(d.signal_state(o).is_some_and(|s| s.0)))
+impl Dom {
+    fn signal_of_s<'s>(&self, s: &mut Sc<'s, '_>, v: Local<'s>) -> Res<'s, ObjId> {
+        match obj_id(s, v) {
+            Some(o) if self.is_signal(o) => Ok(o),
+            _ => Err(s.type_error("Illegal invocation")),
+        }
+    }
 }
 
-fn reason(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let o = d.signal_of(it, this)?;
-    Ok(d.signal_state(o).map_or(Value::Undefined, |s| if s.0 { s.1 } else { Value::Undefined }))
+fn aborted<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = d.signal_of_s(s, this)?;
+    Ok(s.boolean(d.signal_state(o).is_some_and(|s| s.0)))
 }
 
-fn throw_if_aborted(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let o = d.signal_of(it, this)?;
+fn reason<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = d.signal_of_s(s, this)?;
     match d.signal_state(o) {
-        Some((true, r)) => Err(Error::Throw(r)),
-        _ => Ok(Value::Undefined),
+        Some((true, r)) => Ok(s.engine().raw_local(&r)),
+        _ => Ok(s.undefined()),
     }
 }
 
-fn static_abort(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
-    let o = d.new_signal(it)?;
-    d.signal_abort(it, o, arg(a, 0))?;
-    Ok(Value::Object(o))
+fn throw_if_aborted<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = d.signal_of_s(s, this)?;
+    match d.signal_state(o) {
+        Some((true, r)) => Err(bare_js_api::Error::Throw(s.engine().raw_local(&r))),
+        _ => Ok(s.undefined()),
+    }
 }
 
-fn static_timeout(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
-    if a.is_empty() {
-        return Err(it.type_error("Failed to execute 'timeout' on 'AbortSignal': 1 argument required, but only 0 present."));
-    }
-    let n = it.to_js_number(a[0])?;
+fn static_abort<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = old(s, |it| d.new_signal(it))?;
+    let r = raw_arg(s, a, 0).unwrap_or(Value::Undefined);
+    old(s, |it| d.signal_abort(it, o, r))?;
+    Ok(d.obj_local(s, o))
+}
+
+fn static_timeout<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let Some(a0) = a.get(0) else {
+        return Err(s.type_error("Failed to execute 'timeout' on 'AbortSignal': 1 argument required, but only 0 present."));
+    };
+    let n = s.to_number(a0)?;
     if !n.is_finite() || !(0.0..=18446744073709551615.0).contains(&n) {
-        return Err(it.type_error("Failed to execute 'timeout' on 'AbortSignal': Value is outside the range of an unsigned long long."));
+        return Err(s.type_error("Failed to execute 'timeout' on 'AbortSignal': Value is outside the range of an unsigned long long."));
     }
-    let o = d.new_signal(it)?;
-    d.queue_abort_timeout(o, n.trunc())?;
-    Ok(Value::Object(o))
+    let o = old(s, |it| d.new_signal(it))?;
+    lift(s, d.queue_abort_timeout(o, n.trunc()))?;
+    Ok(d.obj_local(s, o))
 }
 
-fn static_any(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
+fn static_any<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let bad = "Failed to execute 'any' on 'AbortSignal': The provided value is not of type 'AbortSignal'.";
-    let Some(mut iter) = it.host_iter_open(arg(a, 0))? else { return Err(it.type_error("Failed to execute 'any' on 'AbortSignal': The provided value cannot be converted to a sequence.")) };
+    let a0 = arg_s(s, a, 0);
+    let Some(mut iter) = s.iter_open(a0)? else { return Err(s.type_error("Failed to execute 'any' on 'AbortSignal': The provided value cannot be converted to a sequence.")) };
     let mut inputs = Vec::new();
     loop {
-        it.charge(1)?;
-        match it.host_iter_next(&mut iter) {
-            Ok(Some(Value::Object(o))) if d.is_signal(o) => inputs.push(o),
-            Ok(Some(_)) => {
-                let e = it.type_error(bad);
-                return Err(it.host_iter_fail(&mut iter, e));
-            }
+        s.charge(1)?;
+        match s.iter_next(&mut iter) {
+            Ok(Some(v)) => match obj_id(s, v) {
+                Some(o) if d.is_signal(o) => inputs.push(o),
+                _ => {
+                    let e = s.type_error(bad);
+                    return Err(s.iter_fail(&mut iter, e));
+                }
+            },
             Ok(None) => break,
             Err(e) => return Err(e),
         }
         if inputs.len() > d.lim.max_listeners {
-            return Err(d.lim("abort-any-sources"));
+            return Err(d.lim_s(s, "abort-any-sources"));
         }
     }
-    Ok(Value::Object(d.any_of(it, inputs)?))
+    let o = old(s, |it| d.any_of(it, inputs))?;
+    Ok(d.obj_local(s, o))
 }
 
 impl Dom {
@@ -378,85 +385,91 @@ impl Dom {
     }
 }
 
-fn controller_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
+fn controller_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let default = d.abort.objs.borrow().expect("made")[1];
-    let proto = it.host_proto_from_new_target(default)?;
-    let sig = d.new_signal(it)?;
-    let c = d.obj(it, proto)?;
-    let k = d.st.borrow_mut().owners.key(Owner::Ctl(c));
-    it.set_host_owner_obj(c, k);
-    let sig = it.trace_value(Value::Object(sig));
-    d.abort.s.borrow_mut().ctls.insert(c, (k, sig));
-    Ok(Value::Object(c))
+    let default = d.obj_local(s, default);
+    let proto = s.proto_from_new_target(default)?;
+    let proto = obj_id(s, proto).expect("a prototype is an object");
+    let c = old(s, |it| {
+        let sig = d.new_signal(it)?;
+        let c = d.obj(it, proto)?;
+        let k = d.st.borrow_mut().owners.key(Owner::Ctl(c));
+        it.set_host_owner_obj(c, k);
+        let sig = it.trace_value(Value::Object(sig));
+        d.abort.s.borrow_mut().ctls.insert(c, (k, sig));
+        Ok(c)
+    })?;
+    Ok(d.obj_local(s, c))
 }
 
-fn controller_of(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<ObjId> {
-    match this {
-        Value::Object(o) => match d.abort.s.borrow().ctls.get(&o) {
-            Some((_, s)) => match *s.raw() {
-                Value::Object(s) => Ok(s),
-                _ => unreachable!("a signal"),
-            },
-            None => Err(it.type_error("Illegal invocation")),
-        },
-        _ => Err(it.type_error("Illegal invocation")),
+fn controller_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, ObjId> {
+    if let Some(o) = obj_id(s, this)
+        && let Some((_, sig)) = d.abort.s.borrow().ctls.get(&o)
+        && let Value::Object(sig) = *sig.raw()
+    {
+        return Ok(sig);
     }
+    Err(s.type_error("Illegal invocation"))
 }
 
-fn controller_signal(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    Ok(Value::Object(controller_of(d, it, this)?))
+fn controller_signal<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = controller_of(d, s, this)?;
+    Ok(d.obj_local(s, o))
 }
 
-fn controller_abort(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let s = controller_of(d, it, this)?;
-    d.signal_abort(it, s, arg(a, 0))?;
-    Ok(Value::Undefined)
+fn controller_abort<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = controller_of(d, s, this)?;
+    let r = raw_arg(s, a, 0).unwrap_or(Value::Undefined);
+    old(s, |it| d.signal_abort(it, o, r))?;
+    Ok(s.undefined())
 }
 
 // ------------------------------------------------------------------------------------ install
 
 /// The two globals are accessors until one is read. A call with an argument is the setter.
-fn lazy<const SIG: bool>(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
-    let g = *d.global.get().expect("installed");
-    let k = d.key(it, if SIG { "AbortSignal" } else { "AbortController" })?;
-    if let Some(&v) = a.first() {
-        it.define_data(g, k, v, true, false, true)?;
-        return Ok(Value::Undefined);
+fn lazy<'s, const SIG: bool>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let g = s.global();
+    let name = if SIG { "AbortSignal" } else { "AbortController" };
+    let attrs = Attrs { writable: true, enumerable: false, configurable: true };
+    if let Some(v) = a.get(0) {
+        s.define_str(g, name, v, attrs)?;
+        return Ok(s.undefined());
     }
-    d.ensure_abort(it)?;
+    old(s, |it| d.ensure_abort(it))?;
     let ctor = d.abort.objs.borrow().expect("made")[if SIG { 2 } else { 3 }];
-    it.define_data(g, k, Value::Object(ctor), true, false, true)?;
-    Ok(Value::Object(ctor))
+    let ctor = d.obj_local(s, ctor);
+    s.define_str(g, name, ctor, attrs)?;
+    Ok(ctor)
 }
 
 #[cold]
 #[inline(never)]
 fn make(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    let g = *d.global.get().expect("installed");
     let (op, et) = (it.object_prototype(), d.p().et);
     let (sp, cp) = (d.obj(it, et)?, d.obj(it, op)?);
-    let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
-    let sc = d.add_ctor_nt(it, signal_illegal, "AbortSignal", 0)?;
-    let cc = d.add_ctor_nt(it, controller_ctor, "AbortController", 0)?;
-    for (f, proto, tag) in [(sc, sp, "AbortSignal"), (cc, cp, "AbortController")] {
-        it.define_data(f, kp, Value::Object(proto), false, false, false)?;
-        it.define_data(proto, kc, Value::Object(f), true, false, true)?;
-        let (ks, kt) = (d.key(it, "Symbol")?, d.key(it, "toStringTag")?);
-        let sy = it.get_value(Value::Object(g), ks)?;
-        if let Value::Symbol(s) = it.get_value(sy, kt)? {
-            let t = d.js_str(it, tag)?;
-            it.define_data(proto, PropertyKey::Symbol(s), t, false, false, true)?;
+    let (sc, cc) = run(it, |s| {
+        let sc = d.add_fn_s(s, signal_illegal, "AbortSignal", 0, HostFn::CtorNewTarget)?;
+        let cc = d.add_fn_s(s, controller_ctor, "AbortController", 0, HostFn::CtorNewTarget)?;
+        let attrs = |w, c| Attrs { writable: w, enumerable: false, configurable: c };
+        let tag = s.intrinsic(Intrinsic::SymbolToStringTag);
+        for (f, proto, name) in [(sc, sp, "AbortSignal"), (cc, cp, "AbortController")] {
+            let proto = d.obj_local(s, proto);
+            s.define_str(f, "prototype", proto, attrs(false, false))?;
+            s.define_str(proto, "constructor", f, attrs(true, true))?;
+            let t = s.string(name)?;
+            s.define(proto, tag, t, attrs(false, true))?;
         }
-    }
-    d.def_get(it, sp, "aborted", aborted, None)?;
-    d.def_get(it, sp, "reason", reason, None)?;
-    d.def_method(it, sp, "throwIfAborted", 0, throw_if_aborted)?;
+        Ok((obj_id(s, sc).expect("a function"), obj_id(s, cc).expect("a function")))
+    })?;
+    d.def_get_s(it, sp, "aborted", aborted, None)?;
+    d.def_get_s(it, sp, "reason", reason, None)?;
+    d.def_method_s(it, sp, "throwIfAborted", 0, throw_if_aborted)?;
     crate::browser_handlers::install_onabort(d, it, sp)?;
-    d.def_method(it, sc, "abort", 0, static_abort)?;
-    d.def_method(it, sc, "timeout", 1, static_timeout)?;
-    d.def_method(it, sc, "any", 1, static_any)?;
-    d.def_get(it, cp, "signal", controller_signal, None)?;
-    d.def_method(it, cp, "abort", 0, controller_abort)?;
+    d.def_method_s(it, sc, "abort", 0, static_abort)?;
+    d.def_method_s(it, sc, "timeout", 1, static_timeout)?;
+    d.def_method_s(it, sc, "any", 1, static_any)?;
+    d.def_get_s(it, cp, "signal", controller_signal, None)?;
+    d.def_method_s(it, cp, "abort", 0, controller_abort)?;
     *d.abort.held.borrow_mut() = [sp, cp, sc, cc].map(|o| it.persist_value(Value::Object(o))).into();
     *d.abort.objs.borrow_mut() = Some([sp, cp, sc, cc]);
     d.abort.made.set(true);
@@ -464,14 +477,12 @@ fn make(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 }
 
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    let g = *d.global.get().expect("installed");
-    for (name, f) in [("AbortController", lazy::<false> as H), ("AbortSignal", lazy::<true> as H)] {
-        let key = d.key(it, name)?;
-        let f = d.add_fn(it, f, name, 0, false)?;
-        let desc = PropertyDescriptor { get: Some(Some(f)), set: Some(Some(f)), enumerable: Some(false), configurable: Some(true), ..Default::default() };
-        if let Err(e) = it.heap.define_own_property(g, key, &desc) {
-            return Err(it.heap_error(e));
+    run(it, |s| {
+        let g = s.global();
+        for (name, f) in [("AbortController", lazy::<false> as HS), ("AbortSignal", lazy::<true> as HS)] {
+            let f = d.add_fn_s(s, f, name, 0, HostFn::Method)?;
+            s.define_accessor_str(g, name, Some(f), Some(f), Attrs { writable: false, enumerable: false, configurable: true })?;
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }

@@ -10,55 +10,59 @@
 //!   not in the standard alphabet is `InvalidCharacterError`. The unused bits of the last character are dropped.
 
 use crate::browser::*;
-use bare_js::eval::Error;
+use crate::browser_scoped::*;
 use bare_js::eval::Interp;
 use bare_js::value::Value;
+use bare_js_api::{Args, Attrs, HostFn, Local, Str, Type};
 
-fn arg(a: &[Value], i: usize) -> Value {
-    a.get(i).copied().unwrap_or(Value::Undefined)
-}
-
-fn need(it: &mut Interp<'_>, a: &[Value], f: &str) -> R<()> {
+fn need<'s>(s: &mut Sc<'s, '_>, a: Args<'s>, f: &str) -> Res<'s, ()> {
     match a.is_empty() {
-        true => Err(it.type_error(&format!("Failed to execute '{f}' on 'Window': 1 argument required, but only 0 present."))),
+        true => Err(s.type_error(&format!("Failed to execute '{f}' on 'Window': 1 argument required, but only 0 present."))),
         false => Ok(()),
     }
 }
 
-fn structured_clone(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    need(it, a, "structuredClone")?;
-    let list = match arg(a, 1) {
-        Value::Undefined | Value::Null => Vec::new(),
-        o @ Value::Object(_) => {
-            let k = d.key(it, "transfer")?;
-            let t = it.get_value(o, k)?;
-            d.transfer_list(it, t, None, "Failed to execute 'structuredClone' on 'Window'")?
-        }
-        _ => return Err(it.type_error("Failed to execute 'structuredClone' on 'Window': The provided value is not of type 'StructuredSerializeOptions'.")),
-    };
-    crate::browser_navigation_state::clone_with(d, it, arg(a, 0), &list).map(|r| r.0)
+fn structured_clone<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    need(s, a, "structuredClone")?;
+    let (value, options) = (raw_arg(s, a, 0).unwrap_or(Value::Undefined), raw_arg(s, a, 1).unwrap_or(Value::Undefined));
+    // `clone_with` and `transfer_list` take the old engine (the record format of `browser_navigation_state.rs`).
+    old_v(s, |it| {
+        let list = match options {
+            Value::Undefined | Value::Null => Vec::new(),
+            o @ Value::Object(_) => {
+                let k = d.key(it, "transfer")?;
+                let t = it.get_value(o, k)?;
+                d.transfer_list(it, t, None, "Failed to execute 'structuredClone' on 'Window'")?
+            }
+            _ => return Err(it.type_error("Failed to execute 'structuredClone' on 'Window': The provided value is not of type 'StructuredSerializeOptions'.")),
+        };
+        crate::browser_navigation_state::clone_with(d, it, value, &list).map(|r| r.0)
+    })
 }
 
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-fn units_of(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<Vec<u16>> {
-    let s = it.to_js_string(v)?;
-    let len = it.heap.str_len(s).map_err(Error::Heap)?;
+/// The UTF-16 units of `ToString(v)`, within the DOM string cap.
+fn units_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, v: Local<'s>) -> Res<'s, Vec<u16>> {
+    let v = if s.type_of(v) == Type::String { v } else { s.to_string(v)? };
+    let len = s.as_str(v).map_or(0, |t| t.len());
     if len > d.lim.max_string_bytes {
-        return Err(d.lim("dom-string"));
+        return Err(d.lim_s(s, "dom-string"));
     }
-    it.charge((len / 32) as u64)?;
-    match it.heap.str_units(s) {
-        Ok(u) => Ok(u.to_vec()),
-        Err(e) => Err(it.heap_error(e)),
-    }
+    s.charge((len / 32) as u64)?;
+    Ok(match s.as_str(v) {
+        Some(Str::Latin1(b)) => b.iter().map(|&c| c as u16).collect(),
+        Some(Str::Utf16(u)) => u.to_vec(),
+        None => Vec::new(),
+    })
 }
 
-fn btoa(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    need(it, a, "btoa")?;
-    let u = units_of(d, it, a[0])?;
+fn btoa<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    need(s, a, "btoa")?;
+    let a0 = arg_s(s, a, 0);
+    let u = units_of(d, s, a0)?;
     if u.iter().any(|&c| c > 0xFF) {
-        return Err(d.dom_err(it, "InvalidCharacterError", "Failed to execute 'btoa' on 'Window': The string to be encoded contains characters outside of the Latin1 range."));
+        return Err(d.dom_err_s(s, "InvalidCharacterError", "Failed to execute 'btoa' on 'Window': The string to be encoded contains characters outside of the Latin1 range."));
     }
     let mut out: Vec<u16> = Vec::with_capacity(u.len().div_ceil(3) * 4);
     for c in u.chunks(3) {
@@ -67,15 +71,13 @@ fn btoa(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
             out.push(if i <= c.len() { ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as u16 } else { b'=' as u16 });
         }
     }
-    match it.heap.intern_units(&out) {
-        Ok(s) => Ok(Value::String(s)),
-        Err(e) => Err(it.heap_error(e)),
-    }
+    s.string_utf16(&out)
 }
 
-fn atob(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    need(it, a, "atob")?;
-    let mut u = units_of(d, it, a[0])?;
+fn atob<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    need(s, a, "atob")?;
+    let a0 = arg_s(s, a, 0);
+    let mut u = units_of(d, s, a0)?;
     u.retain(|&c| !matches!(c, 9 | 10 | 12 | 13 | 32));
     if u.len() % 4 == 0 {
         for _ in 0..2 {
@@ -84,14 +86,14 @@ fn atob(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
             }
         }
     }
-    let bad = |d: &Dom, it: &mut Interp<'_>| d.dom_err(it, "InvalidCharacterError", "Failed to execute 'atob' on 'Window': The string to be decoded is not correctly encoded.");
+    let bad = "Failed to execute 'atob' on 'Window': The string to be decoded is not correctly encoded.";
     if u.len() % 4 == 1 {
-        return Err(bad(d, it));
+        return Err(d.dom_err_s(s, "InvalidCharacterError", bad));
     }
     let mut out: Vec<u16> = Vec::with_capacity(u.len() / 4 * 3 + 2);
     let (mut acc, mut bits) = (0u32, 0u32);
     for &c in &u {
-        let Some(v) = u8::try_from(c).ok().and_then(|c| ALPHABET.iter().position(|&x| x == c)) else { return Err(bad(d, it)) };
+        let Some(v) = u8::try_from(c).ok().and_then(|c| ALPHABET.iter().position(|&x| x == c)) else { return Err(d.dom_err_s(s, "InvalidCharacterError", bad)) };
         acc = acc << 6 | v as u32;
         bits += 6;
         if bits >= 8 {
@@ -99,18 +101,16 @@ fn atob(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
             out.push((acc >> bits & 0xFF) as u16);
         }
     }
-    match it.heap.intern_units(&out) {
-        Ok(s) => Ok(Value::String(s)),
-        Err(e) => Err(it.heap_error(e)),
-    }
+    s.string_utf16(&out)
 }
 
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    let g = *d.global.get().expect("installed");
-    for (name, h, len) in [("structuredClone", structured_clone as H, 1), ("btoa", btoa as H, 1), ("atob", atob as H, 1)] {
-        let f = d.add_fn(it, h, name, len, false)?;
-        let k = d.key(it, name)?;
-        it.define_data(g, k, Value::Object(f), true, true, true)?;
-    }
-    Ok(())
+    run(it, |s| {
+        let g = s.global();
+        for (name, h, len) in [("structuredClone", structured_clone as HS, 1), ("btoa", btoa as HS, 1), ("atob", atob as HS, 1)] {
+            let f = d.add_fn_s(s, h, name, len, HostFn::Method)?;
+            s.define_str(g, name, f, Attrs::ALL)?;
+        }
+        Ok(())
+    })
 }

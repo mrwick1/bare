@@ -86,7 +86,7 @@ use crate::browser_navigation_url::form_serialize;
 use crate::browser_streams as streams;
 use bare_js::eval::{Error, Interp, LimitKind};
 use bare_js::value::{ObjId, Value};
-use bare_js_api::{Persistent, Traced};
+use bare_js_api::{HostFn, Persistent, Traced};
 use bare_net::http::{Client, Cookies, Ctx, Method, Request as NetRequest};
 use bare_net::parallel::Task;
 use bare_url::{Scheme, Url};
@@ -2882,7 +2882,7 @@ impl Browser {
 
 // ---------------------------------------------------------------------------------------------- install
 
-use Kind::{Get as G, Method as M};
+use Kind::{Get as G, GetS as GS, Method as M, MethodS as MS};
 use Pr::*;
 
 struct Def {
@@ -2934,16 +2934,16 @@ static DEFS: &[Def] = &[
     Def { on: Response, name: "arrayBuffer", len: 0, kind: M(body_array_buffer) },
     Def { on: Response, name: "blob", len: 0, kind: M(body_blob) },
     Def { on: Response, name: "formData", len: 0, kind: M(body_form_data) },
-    Def { on: Stream, name: "locked", len: 0, kind: G(streams::locked) },
-    Def { on: Stream, name: "getReader", len: 0, kind: M(streams::get_reader) },
-    Def { on: Stream, name: "cancel", len: 1, kind: M(streams::cancel) },
-    Def { on: Stream, name: "tee", len: 0, kind: M(streams::gate) },
-    Def { on: Stream, name: "pipeTo", len: 1, kind: M(streams::pipe_to) },
-    Def { on: Stream, name: "pipeThrough", len: 1, kind: M(streams::pipe_through) },
-    Def { on: Reader, name: "read", len: 0, kind: M(streams::read) },
-    Def { on: Reader, name: "cancel", len: 1, kind: M(streams::reader_cancel) },
-    Def { on: Reader, name: "releaseLock", len: 0, kind: M(streams::release) },
-    Def { on: Reader, name: "closed", len: 0, kind: G(streams::reader_closed) },
+    Def { on: Stream, name: "locked", len: 0, kind: GS(streams::locked) },
+    Def { on: Stream, name: "getReader", len: 0, kind: MS(streams::get_reader) },
+    Def { on: Stream, name: "cancel", len: 1, kind: MS(streams::cancel) },
+    Def { on: Stream, name: "tee", len: 0, kind: MS(streams::gate) },
+    Def { on: Stream, name: "pipeTo", len: 1, kind: MS(streams::pipe_to) },
+    Def { on: Stream, name: "pipeThrough", len: 1, kind: MS(streams::pipe_through) },
+    Def { on: Reader, name: "read", len: 0, kind: MS(streams::read) },
+    Def { on: Reader, name: "cancel", len: 1, kind: MS(streams::reader_cancel) },
+    Def { on: Reader, name: "releaseLock", len: 0, kind: MS(streams::release) },
+    Def { on: Reader, name: "closed", len: 0, kind: GS(streams::reader_closed) },
 ];
 
 /// Define the globals `fetch`, `Headers`, `Request`, `Response`, `ReadableStream`, `ReadableStreamDefaultReader`.
@@ -2958,7 +2958,15 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         let target = protos[def.on as usize];
         let key = d.key(it, def.name)?;
         match def.kind {
-            Kind::MethodS(_) | Kind::GetS(_) | Kind::AccessorS(..) => return Err(Error::Unsupported(unsupported("a method of the new form in the fetch table"))),
+            Kind::MethodS(h) => {
+                let f = d.add_fn_s_obj(it, h, def.name, def.len, HostFn::Method)?;
+                it.define_data(target, key, Value::Object(f), true, false, true)?;
+            }
+            Kind::GetS(h) => {
+                let f = d.add_fn_s_obj(it, h, &format!("get {}", def.name), 0, HostFn::Method)?;
+                d.define_accessor(it, target, key, f, None)?;
+            }
+            Kind::AccessorS(..) => return Err(Error::Unsupported(unsupported("an accessor of the new form in the fetch table"))),
             Kind::Method(h) => {
                 let f = d.add_fn(it, h, def.name, def.len, false)?;
                 it.define_data(target, key, Value::Object(f), true, false, true)?;
@@ -2979,17 +2987,22 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         }
     }
     let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
-    let ifaces: [(&str, Pr, crate::browser::H, bool); 5] = [
-        ("Headers", Headers, headers_ctor, true),
-        ("Request", Request, request_ctor, true),
-        ("Response", Response, response_ctor, true),
-        ("ReadableStream", Stream, streams::ctor, true),
-        ("ReadableStreamDefaultReader", Reader, illegal, false),
+    // `ReadableStream` has no old handler: its constructor is of the new form.
+    let ifaces: [(&str, Pr, Option<crate::browser::H>, bool); 5] = [
+        ("Headers", Headers, Some(headers_ctor), true),
+        ("Request", Request, Some(request_ctor), true),
+        ("Response", Response, Some(response_ctor), true),
+        ("ReadableStream", Stream, None, true),
+        ("ReadableStreamDefaultReader", Reader, Some(illegal), false),
     ];
     for (name, p, h, ctor) in ifaces {
         let len = if matches!(name, "Headers" | "Response" | "ReadableStream") { 0 } else { 1 };
         // These three read `new.target`, so a class may extend them.
-        let f = if matches!(p, Headers | Request | Response) { d.add_ctor_nt(it, h, name, len)? } else { d.add_fn(it, h, name, len, ctor)? };
+        let f = match h {
+            None => d.add_fn_s_obj(it, streams::ctor, name, len, HostFn::Ctor)?,
+            Some(h) if matches!(p, Headers | Request | Response) => d.add_ctor_nt(it, h, name, len)?,
+            Some(h) => d.add_fn(it, h, name, len, ctor)?,
+        };
         let proto = protos[p as usize];
         it.define_data(f, kp, Value::Object(proto), false, false, false)?;
         it.define_data(proto, kc, Value::Object(f), true, false, true)?;
