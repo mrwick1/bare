@@ -17659,3 +17659,19 @@ Results.
 | One zone load, `find` + `Zone::parse`, against `metadata` + `read` + `Zone::parse` of the system file (best of 5 batches of 200,000, 3 runs, machine not idle) | `America/New_York`: 402, 517, 406 ns against 1,982, 2,420, 1,970 ns. `Asia/Kolkata`: 361, 174, 165 ns against 4,040, 1,693, 1,603 ns. `Pacific/Auckland`: 384, 323, 305 ns against 2,702, 1,988, 1,851 ns. The system files on this machine are fat; the embedded files are slim. |
 
 Not tested: macOS and a macOS build of the new code beyond the existing cross check; Windows 10 and ARM; the Windows release binary size; a Windows zone id with no CLDR row on the VM (`tzutil` refuses the two retired ids; the unit test covers the offset); the `bare-drive` journey of the design (check 4: `getTimezoneOffset` and `resolvedOptions().timeZone` through the whole browser on the VM); RSS of the whole browser; wall time on an idle machine; `tools/portable_check.sh` without `--scan` (the scan fails on three older files of main: `downloads/run.rs`, `force.rs`, `mcp/src/main.rs`; none is touched here); the stale-`known` check of the scan, which runs after that failure.
+
+## 2026-11-21: design of the js2 dispatch (`docs/design-js2-dispatch.md`)
+
+Design document for owner review. No engine code changed. Base `fd9c749b` (its `crates/js2` equals the head of #775). Machine: archMachine, load average 17, so instruction counts only.
+
+| Measure | Result |
+| --- | --- |
+| `loopfn` turn, `Vm::run` only (callgrind) | 262 instructions on `f3cfa8f8`, 257 on main. 40 stack reads and writes per turn. `Vm::run` is 255,676 bytes on main. |
+| #775 on the rows (default build) | `fib` -16.7%, `calls` -5.2%, `closures` -5.1%, `loopfn` -1.8%, `objects` +1.9%. |
+| Spike: 48 cold arms in a second function (corrected jump table) | Default build: `loopfn` -1.1%, `calls` -3.6%, `fib` -3.8%, `closures` -2.4%, `objects` -3.9%. `codegen-units=1`: -2.1%, -4.1%, -0.6%, -2.5%, -1.5%. `Vm::run` is 158,800 bytes. 445 lib tests pass. |
+| Spike: `unwind` by value | No gain (rows 0% to +3%). `pc` stays in a stack slot. |
+| Toy loop, 7 ops of `loopfn`, instructions per turn | `loop { match }` 219. Stable tail calls 175. `become` (nightly) 167. Direct threaded 159. |
+
+Recommendation: outline the cold arms first, then tail-call handlers for the hot ops after the owner chooses stable or nightly. Questions for the owner are in section 11 of the design.
+
+Not tested: wall time, Windows, macOS, arm64, Miri on the real engine, test262 on the spikes, a real tail-call engine (toy only).
