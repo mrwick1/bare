@@ -103,6 +103,16 @@ impl Dom {
         x.err(e)
     }
 
+    /// `bad_new` for a handler of the new form: the constructors of `browser_geom` have their own message.
+    #[cold]
+    #[inline(never)]
+    fn bad_new_s<'s, 'p>(&self, s: &mut Sc<'s, 'p>, f: HS) -> bare_js_api::Error<'s> {
+        match crate::browser_geom::needs_new(s.engine(), f) {
+            Some(e) => s.engine().api_err(e),
+            None => self.bad_new(s, None),
+        }
+    }
+
     /// The mutation observer hook after a host call.
     #[inline(never)]
     fn mo_done<'p, X: Entry<'p>>(&self, x: &mut X) -> Result<(), X::Err> {
@@ -132,11 +142,11 @@ impl Dom {
         let Scoped { f, needs_new, cur } = unsafe { &*self.scoped.as_ptr() }[id as usize];
         self.style.cur.set(cur);
         if needs_new && !is_new {
-            #[cfg(test)]
-            let h = if let Fun::Old(h) = f { Some(h) } else { None };
-            #[cfg(not(test))]
-            let h = None;
-            return Err(self.bad_new(s, h));
+            return Err(match f {
+                Fun::New(f) => self.bad_new_s(s, f),
+                #[cfg(test)]
+                Fun::Old(h) => self.bad_new(s, Some(h)),
+            });
         }
         let r = if self.ce.on.get() { self.call_scoped_ce(s, f, this, args) } else { self.run_fun(s, f, this, args) };
         if self.mo.armed() {
@@ -181,10 +191,15 @@ impl Dom {
 
     /// `add_fn_s` for code that has an interpreter and wants the function object.
     pub(crate) fn add_fn_s_obj(&self, it: &mut Interp<'_>, f: HS, name: &str, len: u32, kind: HostFn) -> R<ObjId> {
-        bare_js_api::enter(it, |s| match self.add_fn_s(s, f, name, len, kind) {
+        bare_js_api::enter(it, |s| self.add_fn_s_raw(s, f, name, len, kind))
+    }
+
+    /// `add_fn_s_obj` inside a scope that the caller holds, for a loop that makes many functions in one scope.
+    pub(crate) fn add_fn_s_raw(&self, s: &mut Sc<'_, '_>, f: HS, name: &str, len: u32, kind: HostFn) -> R<ObjId> {
+        match self.add_fn_s(s, f, name, len, kind) {
             Ok(l) => Ok(obj_of(s, l)),
             Err(e) => Err(s.engine().api_unerr(e)),
-        })
+        }
     }
 
     /// An old handler on the interface (a test build with `BARE_ALL_API`): the same ids as the old registry, in `Dom::handlers`.
@@ -311,14 +326,6 @@ fn illegal<'s>(s: &mut Sc<'s, '_>) -> bare_js_api::Error<'s> {
 pub(crate) fn raw_arg<'s>(s: &mut Sc<'s, '_>, a: Args<'s>, i: usize) -> Option<Value> {
     let l = a.get(i)?;
     Some(s.engine().raw(l))
-}
-
-impl Dom {
-    /// `style_html_el` for a handler of the new form: the element of `this`, or `TypeError`.
-    pub(crate) fn style_html_el_s<'s>(&self, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
-        let t = s.engine().raw(this);
-        old(s, |it| self.style_html_el(it, t))
-    }
 }
 
 /// A result of the old form as one of the interface.
