@@ -17662,7 +17662,7 @@ Not tested: macOS and a macOS build of the new code beyond the existing cross ch
 
 ## js2: the Symbol primitive (2026-11-21)
 
-Design: [design-js2-async.md](design-js2-async.md), decision 2. Base: `fd9c749b` (`origin/main` at the start). Machine: archMachine, not idle; instruction counts only.
+Design: [design-js2-async.md](design-js2-async.md), decision 2. Base: `351f9b72` (`origin/main`, with #791 JSON and the String, Array, Number and Math built-ins merged in). Machine: archMachine, not idle; instruction counts only.
 
 What changed.
 
@@ -17679,11 +17679,11 @@ Results.
 
 | Check | Result |
 | --- | --- |
-| test262 (`tools/js/test262_js2.sh -u`, `built-ins/Symbol` added to the subset, `allow:` lines for the Symbol features) | new engine: 16,256 pass, against 15,894 on main with the same rules. 0 tests pass on main and fail here. 362 tests gain. `built-ins/Symbol` (all its directories): 61 pass, 4 fail, 33 skipped for other features. The 4 fail on `Proxy`, `Date`, `RegExp` or a `Symbol.species` getter. |
-| `cargo test --locked -p bare-js2 --lib` | 455 pass (10 new in `bi_symbol_tests.rs`, each run plain and under constant collection) |
+| test262 (`tools/js/test262_js2.sh -u`, `built-ins/Symbol` added to the subset, `allow:` lines for the Symbol features) | new engine: 17,775 pass, 2,444 fail. Main with the same rules: 17,365 pass. 0 tests pass on main and fail here. 410 tests gain. Main with its own rules passes 17,324. `built-ins/Symbol` (all its directories): 61 pass, 4 fail, 33 skipped for other features. The 4 fail on `Proxy`, `Date`, `RegExp` or a `Symbol.species` getter. |
+| `cargo test --locked -p bare-js2 --lib` | 467 pass (10 new in `bi_symbol_tests.rs`, each run plain and under constant collection) |
 | `cargo test --locked -p bare-js-diff` | pass (`script_tests:479` now expects `typeof Symbol` to be `function`; its `diff-known.txt` entry is gone) |
-| Micro rows, `tools/js/instr.sh` (min of 3, instructions:u, N minus N=0), default build, base then new | `loopfn 3000000` 817,501,573 to 838,500,338 (+2.57%); `calls 1000000` 586,500,399 to 589,500,229 (+0.51%); `fib 27` 260,524,327 to 260,842,777 (+0.12%); `closures 1000000` 1,947,237,527 to 1,954,236,527 (+0.36%); `objects 1000000` 710,274,979 to 708,275,975 (-0.28%) |
-| Same rows, `codegen-units=1`, base then new | `loopfn` 847,499,967 to 847,500,224 (0.00%); `calls` 579,500,262 to 579,500,501 (0.00%); `fib` 251,308,373 to 251,307,475 (0.00%); `closures` 1,942,161,118 to 1,943,162,571 (+0.05%); `objects` 720,276,001 to 720,277,874 (0.00%). All within +0.5%, so the two default-build rows over +0.5% pass by the cost rule. Hypothesis: the `loopfn` default-build swing is code layout, because it is 0.00% at `codegen-units=1`. |
-| Start-up, `script_run` on `var x = 1;` (min of 3, three samples) | base 1,796,789 / 1,797,687 / 1,794,741; new 1,804,693 / 1,803,441 / 1,803,620. +7K to +8.7K (+0.4% to +0.5%). The Rust-side install alone is about +1K. The rest is the `assign`, `copyData` and `rest` helpers of `prelude.js` (symbols are copied). A new top-level `var` in the prelude cost +45K, so none was added. |
+| Micro rows, `tools/js/instr.sh` (min of 3, instructions:u, N minus N=0), default build, base then new | `loopfn 3000000` 817,500,160 to 838,501,178 (+2.57%); `calls 1000000` 586,501,612 to 589,500,937 (+0.51%); `fib 27` 260,525,190 to 260,842,044 (+0.12%); `closures 1000000` 1,947,254,460 to 1,954,254,550 (+0.36%); `objects 1000000` 710,282,673 to 708,284,276 (-0.28%) |
+| Same rows, `codegen-units=1`, base then new | `loopfn` 847,500,974 to 847,500,193 (0.00%); `calls` 579,500,062 to 579,499,993 (0.00%); `fib` 251,308,742 to 251,307,790 (0.00%); `closures` 1,942,176,229 to 1,943,178,410 (+0.05%); `objects` 720,284,311 to 720,285,602 (0.00%). All within +0.5%, so the two default-build rows over +0.5% pass by the cost rule. Hypothesis: the `loopfn` default-build swing is code layout, because it is 0.00% at `codegen-units=1`. |
+| Start-up, `script_run` on `var x = 1;` (min of 3, three samples each) | default build: base 1,941,215 / 1,941,369 / 1,939,068; new 1,947,111 / 1,947,746 / 1,947,912 (+5.9K to +8.8K, +0.30% to +0.45%). `codegen-units=1`: base 1,932,659 / 1,932,999 / 1,933,199; new 1,941,212 / 1,942,605 / 1,940,830 (+7.6K to +9.6K, +0.39% to +0.50%). The Rust-side install alone is about +1K. The rest is the `assign`, `copyData` and `rest` helpers of `prelude.js` (symbols are copied). A new top-level `var` in the prelude cost +45K, so none was added. |
 
 Not tested: Windows; the browser and the old engine with symbols (the old engine has none); Miri locally (the tests use small loops for the CI Miri job); `Symbol.species`, `iterator` and `asyncIterator` reads (no built-in reads them yet); the whole-browser cost; wall time on an idle machine; the `cost_matrix.sh` rows other than the five micro rows and start-up.
