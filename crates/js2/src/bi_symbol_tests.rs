@@ -70,6 +70,7 @@ fn the_keys_of_the_string_operations_skip_symbols() {
         ("var s = Symbol('s'), o = {[s]: 1, a: 2}; var c = Object.assign({}, o); var d = {...o}; var {a, ...rest} = o; var r = c[s] + ',' + d[s] + ',' + rest[s] + ',' + Object.keys(rest);", "r", "1,1,1,"),
         ("var s = Symbol('s'), o = {get a() { return 1; }, [s]: 2}; var c = Object.assign({}, o); var d = {...o}; var r = c[s] + ',' + d[s];", "r", "2,2"),
         ("var s = Symbol('s'), o = {[s]: 1}; var d = Object.getOwnPropertyDescriptors(o); var r = d[s].value + ',' + Object.getOwnPropertyDescriptor(o, s).enumerable; var p = Object.create(null, {[s]: {value: 5, enumerable: true}}); r += ',' + p[s];", "r", "1,true,5"),
+        ("var s = Symbol('s'), o = {a: 1, b: s, [s]: 2}; var r = JSON.stringify(o) + '|' + JSON.stringify([s]) + '|' + JSON.stringify(s);", "r", "{\"a\":1}|[null]|undefined"),
         ("var s = Symbol('s'), o = {}; Object.defineProperty(o, s, {get() { return 9; }}); var r = o[s]; o = Object.freeze({[s]: 1}); r += ',' + Object.isFrozen(o);", "r", "9,true"),
     ]);
 }
