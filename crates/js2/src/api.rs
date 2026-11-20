@@ -1,0 +1,787 @@
+//! `bare-js2` behind `bare-js-api` (plan step S2.8, `docs/design-js2-host-api.md`): `Realm` is the engine, so a host function, which is a
+//! native and has only `&mut Realm`, reaches the engine type. The state of the interface is one field of the realm, [`ApiState`].
+//!
+//! **Handles.** A `Local` is a slot number. A pushed value is a slot of `ApiState::stack` (above four shared seeds: `undefined`, `null`,
+//! `false`, `true`, which hold no cell and have the numbers `u32::MAX - 3..`). The `this` and the arguments of a running host call are
+//! named where they are: slot `WIN` is `this` and `WIN + 1 + i` is argument `i`, read through a [`Win`] record in the frame of the
+//! trampoline ([`host_call`]). So a call copies and pushes nothing. A `Persistent` is a slot of `ApiState::persistent`; the live bits
+//! are in `bare_js_api::Slots`. `Realm::collect` marks the stack, the live persistent slots and the whole `Win` chain.
+//!
+//! **Strings.** `Engine::as_str(&self)` cannot flatten a rope, so a string that a handle names is flat or indirect: [`Realm::a_push`]
+//! flattens a rope, and the trampoline flattens the ropes of the window.
+//!
+//! **Calls into script.** A host function runs with `win` set. Inside it (or inside any native: `nest > 0`) a call goes through
+//! `Realm::call_function`, which holds the collector until it returns (`reenter.rs`). At the top, with no native on the Rust stack, a
+//! call starts a run on a pooled machine with no hold, so a browser task collects inside itself; the host holds only handles, and the
+//! handle stack is a root. This is why a collection never runs while `win` is set today. The window is still a root: a safepoint that
+//! a later step adds needs it.
+//!
+//! **Errors.** `Error::Throw` is `Err(value)`. An abort is `Err(STOP)` with the reason in `ApiState::abort`: a script cannot catch it,
+//! and the top-level call gives it back as `Error::Abort`. The step budget is `Realm::fuel`; a top-level call outside a [`Engine::task`]
+//! starts it from [`Realm::set_budget`].
+//!
+//! Not here yet: promises and microtasks, iteration, modules, buffers, owners with `trace` and `prune`, host-filled objects,
+//! structured clone, `Symbol`, and `run_script` (`Realm::run_text` runs a script but computes no completion value; the compiler has
+//! none yet). Each of these answers `Abort::Unsupported(name)`.
+use crate::bi_object::Desc;
+use crate::builtins::Native;
+use crate::interp::STOP;
+use crate::interp_rt::{ErrKind, Key, R, Realm};
+use crate::gc::Marker;
+use crate::object::{F_CLASS, Obj};
+use crate::shapes::A_E;
+use crate::string::{Chars, Str};
+use crate::value::{Kind, Value};
+use bare_js_api::{Abort, Args, Attrs, Engine, Error, Host, HostFn, Intrinsic, Iter, Local, Slots, Type};
+use std::ptr::NonNull;
+use std::rc::Rc;
+
+/// The shared slots at the start of the handle stack. They have the numbers `u32::MAX - 3..=u32::MAX`, so a pushed value of logical
+/// index `n` is at the physical index `n + 4` and `stack_len` is 0 for an empty stack.
+const SEEDS: usize = 4;
+const SLOT_UNDEFINED: u32 = u32::MAX - 3;
+const SLOT_NULL: u32 = u32::MAX - 2;
+const SLOT_FALSE: u32 = u32::MAX - 1;
+/// The slot number of `this` in a host call; argument `i` is `WIN + 1 + i`.
+const WIN: u32 = 1 << 31;
+/// The most nested [`Engine::task`] calls.
+const MAX_TASKS: u32 = 100;
+
+/// The `this` and the arguments of a running host call. It lives in the frame of [`host_call`]; `ApiState::win` points at the innermost
+/// one. `args` is the slice that the caller holds: it is neither written nor moved while the call runs.
+struct Win {
+    this: Value,
+    args: *const Value,
+    len: u32,
+    prev: *const Win,
+}
+
+/// The state of the interface in a realm.
+pub(crate) struct ApiState {
+    stack: Vec<Value>,
+    win: *const Win,
+    /// The persistent table: a slot whose bit in `slots` is clear is free, and its old value is no root.
+    persistent: Vec<Value>,
+    slots: Rc<Slots>,
+    host: Option<Rc<dyn Host<Realm>>>,
+    /// The address of the value in `host`: the trampoline reads it with no `Rc` clone. Set only by `set_host`.
+    host_ptr: Option<NonNull<dyn Host<Realm>>>,
+    /// Why the last run stopped, when it was not a limit.
+    abort: Option<Abort>,
+    /// The index in `Realm::natives` of the trampoline of a plain host function and of a host constructor (`usize::MAX`: not made).
+    natives: [usize; 2],
+    /// The step budget of a task, and the nesting of [`Engine::task`].
+    budget: u64,
+    tasks: u32,
+}
+
+impl Default for ApiState {
+    fn default() -> Self {
+        ApiState {
+            stack: vec![Value::UNDEFINED, Value::NULL, Value::FALSE, Value::TRUE],
+            win: std::ptr::null(),
+            persistent: Vec::new(),
+            slots: Default::default(),
+            host: None,
+            host_ptr: None,
+            abort: None,
+            natives: [usize::MAX; 2],
+            budget: u64::MAX,
+            tasks: 0,
+        }
+    }
+}
+
+impl ApiState {
+    /// Mark the roots of the interface: the handle stack, the live persistent slots and the windows of the running host calls.
+    pub(crate) fn mark(&self, m: &mut Marker) {
+        m.values(&self.stack[SEEDS..]);
+        let mut w = self.win;
+        // SAFETY: each `Win` is in the frame of a `host_call` that is still running, and its `args` slice is held by the caller of
+        // that call (`host_call` links a window before the call and unlinks it after, also when the host panics).
+        while let Some(x) = unsafe { w.as_ref() } {
+            m.value(x.this);
+            m.values(unsafe { std::slice::from_raw_parts(x.args, x.len as usize) });
+            w = x.prev;
+        }
+        self.slots.for_each(|id| m.value(self.persistent[id as usize]));
+    }
+}
+
+/// Why `Realm::run_text` stopped.
+#[derive(Clone, Copy, Debug)]
+pub enum RunError {
+    /// A thrown value, not rooted: use it before the next call into the engine.
+    Throw(Value),
+    Abort(Abort),
+}
+
+impl Realm {
+    /// The step budget of a task: a top-level call outside [`Engine::task`] starts with this many back edges (default: no limit).
+    pub fn set_budget(&mut self, steps: u64) {
+        self.api.budget = steps;
+    }
+
+    /// Compile `src` as a script of this realm and run it with the global object as `this`. For tests and tools: it computes no
+    /// completion value. A syntax error is a thrown `SyntaxError`.
+    pub fn run_text(&mut self, src: &str) -> Result<(), RunError> {
+        self.api.abort = None;
+        let Some(l) = self.lazy.as_mut() else { return Err(RunError::Abort(Abort::Unsupported("a realm with no compiler"))) };
+        let ci = match l.script(&self.prog, src) {
+            Ok(ci) => ci,
+            Err(m) => {
+                let (kind, text) = match m.strip_prefix("SyntaxError: ") {
+                    Some(t) => (ErrKind::Syntax, t),
+                    None => (ErrKind::Plain, m.as_str()),
+                };
+                return Err(RunError::Throw(self.error(kind, text)));
+            }
+        };
+        self.fn_info.extend((self.fn_info.len()..self.prog.len()).map(|i| crate::interp::code_info(&self.prog[i])));
+        let f = self.new_function(ci, Value::UNDEFINED);
+        let g = self.global.value();
+        match self.a_call(f, g, &[]) {
+            Ok(_) => Ok(()),
+            Err(STOP) => Err(RunError::Abort(self.api.abort.take().unwrap_or(Abort::Limit("the step budget")))),
+            Err(e) => Err(RunError::Throw(e)),
+        }
+    }
+
+    #[inline]
+    fn a_push<'s>(&mut self, v: Value) -> Local<'s> {
+        if let Some(s) = Realm::str_of(v)
+            && s.is_rope()
+        {
+            self.flat(s);
+        }
+        self.api.stack.push(v);
+        Local::from_slot((self.api.stack.len() - SEEDS - 1) as u32)
+    }
+
+    /// The value of a handle: a slot of the stack (one bounds check), else a slot of the running call.
+    #[inline]
+    fn a_at(&self, l: Local<'_>) -> Value {
+        match self.api.stack.get(l.slot().wrapping_add(SEEDS as u32) as usize) {
+            Some(&x) => x,
+            None => self.a_win(l.slot()),
+        }
+    }
+
+    /// The value of a slot of the running call. A slot that names nothing is a bug of the host: a panic, never a read outside the slice.
+    #[inline(never)]
+    fn a_win(&self, slot: u32) -> Value {
+        // SAFETY: see `ApiState::mark`.
+        let (Some(w), Some(k)) = (unsafe { self.api.win.as_ref() }, slot.checked_sub(WIN)) else { panic!("a handle that is no slot of the handle stack") };
+        match k.checked_sub(1) {
+            None => w.this,
+            // SAFETY: `i < len`, inside the slice that the caller of the host call holds.
+            Some(i) if i < w.len => unsafe { *w.args.add(i as usize) },
+            Some(_) => panic!("an argument handle past the arguments of the call"),
+        }
+    }
+
+    /// An error of the engine as an error of the interface: a thrown value is a local, the stop marker is the abort that was recorded.
+    fn a_err<'s>(&mut self, e: Value) -> Error<'s> {
+        if e == STOP { Error::Abort(self.api.abort.take().unwrap_or(Abort::Limit("the step budget"))) } else { Error::Throw(self.a_push(e)) }
+    }
+
+    fn a_ret<'s>(&mut self, r: R<Value>) -> Result<Local<'s>, Error<'s>> {
+        match r {
+            Ok(v) => Ok(self.a_push(v)),
+            Err(e) => Err(self.a_err(e)),
+        }
+    }
+
+    fn a_unsup<'s>(&mut self, what: &'static str) -> Error<'s> {
+        self.api.abort = Some(Abort::Unsupported(what));
+        Error::Abort(Abort::Unsupported(what))
+    }
+
+    fn a_throw<'s>(&mut self, kind: ErrKind, msg: &str) -> Error<'s> {
+        let e = self.error(kind, msg);
+        self.a_err(e)
+    }
+
+    fn a_obj<'s>(&mut self, l: Local<'_>) -> Result<Obj, Error<'s>> {
+        match Realm::obj(self.a_at(l)) {
+            Some(o) => Ok(o),
+            None => Err(self.a_throw(ErrKind::Type, "not an object")),
+        }
+    }
+
+    fn a_key<'s>(&mut self, l: Local<'_>) -> Result<Key, Error<'s>> {
+        let v = self.a_at(l);
+        self.key_of(v).map_err(|e| self.a_err(e))
+    }
+
+    fn a_args(&self, args: &[Local<'_>]) -> Vec<Value> {
+        args.iter().map(|&l| self.a_at(l)).collect()
+    }
+
+    /// Is a native or a host call on the Rust stack? A call from there goes through `call_function`, which holds the collector.
+    #[inline]
+    fn a_nested(&self) -> bool {
+        !self.api.win.is_null() || self.nest > 0
+    }
+
+    /// `f.call(this, ...args)`: nested inside a host call or a native, else a run on a pooled machine that may collect.
+    fn a_call(&mut self, f: Value, this: Value, args: &[Value]) -> R<Value> {
+        if self.a_nested() {
+            return self.call_function(f, this, args);
+        }
+        if self.api.tasks == 0 {
+            self.fuel = self.api.budget;
+        }
+        self.call_held(f, this, args)
+    }
+
+    /// `Construct(f, args, nt)` for a native constructor or a plain function. A class is not supported yet.
+    fn a_construct(&mut self, f: Value, args: &[Value], nt: Value) -> R<Value> {
+        if self.native_id(f).is_some() {
+            let saved = (self.callee, self.nt, self.tail.take(), std::mem::take(&mut self.tail_args));
+            let r = self.construct_native(f, args, nt);
+            (self.callee, self.nt, self.tail, self.tail_args) = saved;
+            return r;
+        }
+        let Some((ci, _)) = self.function_new(f) else { return self.type_error("not a constructor") };
+        if Realm::obj(f).is_some_and(|o| o.has_flag(F_CLASS)) {
+            self.api.abort = Some(Abort::Unsupported("construct of a class"));
+            return Err(STOP);
+        }
+        if self.prog[ci].noctor {
+            return self.type_error("not a constructor");
+        }
+        let this = self.new_this(nt)?;
+        let r = self.a_call(f, this, args)?;
+        Ok(if Realm::obj(r).is_some() { r } else { this })
+    }
+
+    /// The `length` and the `name` of a host function (`Realm::materialize`).
+    pub(crate) fn host_props(&self, o: Obj) -> Option<(f64, String)> {
+        let id = self.native_id(o.value())?;
+        if !self.api.natives.contains(&id) {
+            return None;
+        }
+        let len = o.slot(&self.shapes, 2).as_int()? >> 2;
+        Some((len as f64, Realm::str_of(o.slot(&self.shapes, 3)).map(|s| self.text(s)).unwrap_or_default()))
+    }
+
+    fn host_native(&mut self, ctor: bool) -> usize {
+        let i = ctor as usize;
+        if self.api.natives[i] == usize::MAX {
+            self.natives.push(Native { f: host_call, ctor, len: 0, name: "" });
+            self.api.natives[i] = self.natives.len() - 1;
+        }
+        self.api.natives[i]
+    }
+}
+
+/// Undoes the window link when the host call ends, by return or by panic: a caller that catches the panic keeps the realm, and a
+/// later collection must not read this dead frame.
+struct WinGuard<'a> {
+    rt: &'a mut Realm,
+    prev: *const Win,
+}
+
+impl Drop for WinGuard<'_> {
+    #[inline]
+    fn drop(&mut self) {
+        self.rt.api.win = self.prev;
+    }
+}
+
+/// The native that every host function runs. The function cell keeps the host `id` in slot 1, the kind and the `length` in slot 2
+/// and the name in slot 3.
+fn host_call(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+    let (callee, nt) = (rt.callee, rt.nt);
+    let (id, meta) = {
+        let o = Realm::obj(callee).expect("a host function");
+        (o.slot(&rt.shapes, 1).as_int().expect("a host id") as u32, o.slot(&rt.shapes, 2).as_int().expect("a host kind"))
+    };
+    let is_new = !nt.is_undefined();
+    if meta & 3 == HostFn::Ctor as i32 && is_new && nt != callee {
+        return rt.type_error("a host constructor cannot be extended");
+    }
+    let Some(h) = rt.api.host_ptr else {
+        rt.api.abort = Some(Abort::Unsupported("a host function without a host"));
+        return Err(STOP);
+    };
+    // SAFETY: `h` points into the `Rc` of `api.host`, which `set_host` does not replace while a host call runs (it checks `win`).
+    let h = unsafe { h.as_ref() };
+    for v in std::iter::once(this).chain(args.iter().copied()) {
+        if let Some(s) = Realm::str_of(v)
+            && s.is_rope()
+        {
+            rt.flat(s);
+        }
+    }
+    debug_assert!(args.len() < (1 << 30));
+    let win = Win { this, args: args.as_ptr(), len: args.len() as u32, prev: rt.api.win };
+    rt.api.win = &win;
+    let g = WinGuard { rt, prev: win.prev };
+    bare_js_api::enter(&mut *g.rt, |s| match h.call(s, id, Local::from_slot(WIN), Args::from_slots(WIN + 1, args.len() as u32), is_new) {
+        Ok(l) => Ok(s.engine().a_at(l)),
+        Err(Error::Throw(l)) => Err(s.engine().a_at(l)),
+        Err(Error::Abort(a)) => {
+            s.engine().api.abort.get_or_insert(a);
+            Err(STOP)
+        }
+    })
+}
+
+impl Engine for Realm {
+    type Raw = Value;
+
+    #[inline]
+    fn stack_len(&self) -> u32 {
+        (self.api.stack.len() - SEEDS) as u32
+    }
+
+    #[inline]
+    fn stack_truncate(&mut self, len: u32) {
+        self.api.stack.truncate(len as usize + SEEDS);
+    }
+
+    fn stack_set(&mut self, to: u32, from: u32) {
+        let v = self.a_at(Local::from_slot(from));
+        self.api.stack[to as usize + SEEDS] = v;
+    }
+
+    fn persist(&mut self, v: Local<'_>) -> u32 {
+        let x = self.a_at(v);
+        let a = &mut self.api;
+        let id = a.slots.take();
+        match a.persistent.get_mut(id as usize) {
+            Some(slot) => *slot = x,
+            None => a.persistent.push(x),
+        }
+        id
+    }
+
+    fn persistent<'s>(&mut self, id: u32) -> Local<'s> {
+        self.a_push(self.api.persistent[id as usize])
+    }
+
+    fn slots(&self) -> &Rc<Slots> {
+        &self.api.slots
+    }
+
+    #[inline]
+    fn undefined<'s>(&mut self) -> Local<'s> {
+        Local::from_slot(SLOT_UNDEFINED)
+    }
+
+    #[inline]
+    fn null<'s>(&mut self) -> Local<'s> {
+        Local::from_slot(SLOT_NULL)
+    }
+
+    #[inline]
+    fn boolean<'s>(&mut self, b: bool) -> Local<'s> {
+        Local::from_slot(SLOT_FALSE + b as u32)
+    }
+
+    #[inline]
+    fn number<'s>(&mut self, n: f64) -> Local<'s> {
+        self.a_push(Realm::num(n))
+    }
+
+    fn string<'s>(&mut self, text: &str) -> Result<Local<'s>, Error<'s>> {
+        match Str::from_str(&mut self.heap, text) {
+            Ok(s) => Ok(self.a_push(s.value())),
+            Err(_) => Err(Error::Abort(Abort::Limit("a string that is too long or no memory"))),
+        }
+    }
+
+    fn type_of(&self, v: Local<'_>) -> Type {
+        let v = self.a_at(v);
+        if v.is_undefined() {
+            Type::Undefined
+        } else if v.is_null() {
+            Type::Null
+        } else if v.as_bool().is_some() {
+            Type::Boolean
+        } else if v.is_number() {
+            Type::Number
+        } else {
+            match v.as_pointer() {
+                Some((Kind::String, _)) => Type::String,
+                Some((Kind::Symbol, _)) => Type::Symbol,
+                Some((Kind::BigInt, _)) => Type::BigInt,
+                Some((Kind::Object, _)) if Realm::obj(v).is_some_and(|o| o.is_callable()) => Type::Function,
+                Some((Kind::Object, _)) => Type::Object,
+                None => Type::Undefined,
+            }
+        }
+    }
+
+    fn as_bool(&self, v: Local<'_>) -> Option<bool> {
+        self.a_at(v).as_bool()
+    }
+
+    fn as_number(&self, v: Local<'_>) -> Option<f64> {
+        self.a_at(v).as_f64()
+    }
+
+    fn as_str(&self, v: Local<'_>) -> Option<bare_js_api::Str<'_>> {
+        let s = Realm::str_of(self.a_at(v))?;
+        // SAFETY: the characters are in the cell of the string, not in the local `s` that `chars` borrows. A handle names a flat or
+        // indirect string (`a_push` and `host_call` flatten), and the cell lives until the next collection; `&self` rules that out.
+        match s.chars()? {
+            Chars::One(b) => Some(bare_js_api::Str::Latin1(unsafe { &*(b as *const [u8]) })),
+            Chars::Two(u) => Some(bare_js_api::Str::Utf16(unsafe { &*(u as *const [u16]) })),
+        }
+    }
+
+    fn global<'s>(&mut self) -> Local<'s> {
+        self.a_push(self.global.value())
+    }
+
+    fn new_object<'s>(&mut self) -> Result<Local<'s>, Error<'s>> {
+        let o = Obj::new(&mut self.heap, &self.shapes, self.s_object).expect("memory");
+        Ok(self.a_push(o.value()))
+    }
+
+    fn get<'s>(&mut self, obj: Local<'_>, key: Local<'_>) -> Result<Local<'s>, Error<'s>> {
+        let (o, k) = (self.a_at(obj), self.a_key(key)?);
+        let r = self.get_prop(o, k);
+        self.a_ret(r)
+    }
+
+    fn set<'s>(&mut self, obj: Local<'_>, key: Local<'_>, value: Local<'_>) -> Result<(), Error<'s>> {
+        let (o, k, v) = (self.a_at(obj), self.a_key(key)?, self.a_at(value));
+        let r = match self.set_prop_g(o, k, v) {
+            Ok(crate::interp_rt::Put::Done) => Ok(()),
+            Ok(crate::interp_rt::Put::Fail) => self.type_error("cannot assign to a read-only property or a property with no setter"),
+            Ok(crate::interp_rt::Put::Set(f)) => self.a_call(f, o, &[v]).map(|_| ()),
+            Err(e) => Err(e),
+        };
+        r.map_err(|e| self.a_err(e))
+    }
+
+    fn define<'s>(&mut self, obj: Local<'_>, key: Local<'_>, value: Local<'_>, attrs: Attrs) -> Result<(), Error<'s>> {
+        let (o, k, v) = (self.a_obj(obj)?, self.a_key(key)?, self.a_at(value));
+        let d = Desc { value: Some(v), w: Some(attrs.writable), e: Some(attrs.enumerable), c: Some(attrs.configurable), ..Default::default() };
+        self.a_define(o, k, &d)
+    }
+
+    fn call<'s>(&mut self, f: Local<'_>, this: Local<'_>, args: &[Local<'_>]) -> Result<Local<'s>, Error<'s>> {
+        let (f, this, args) = (self.a_at(f), self.a_at(this), self.a_args(args));
+        let r = self.a_call(f, this, &args);
+        self.a_ret(r)
+    }
+
+    fn host_function<'s>(&mut self, name: &str, id: u32, length: u32, kind: HostFn) -> Result<Local<'s>, Error<'s>> {
+        assert!(id < 1 << 31, "a host id is below 2^31");
+        let nid = self.host_native(kind != HostFn::Method);
+        let cell = self.native_cell(nid);
+        let name = self.string(name);
+        cell.set_slot(&self.shapes, 1, Value::int(id as i32));
+        cell.set_slot(&self.shapes, 2, Value::int(kind as i32 | (length.min(1 << 20) as i32) << 2));
+        cell.set_slot(&self.shapes, 3, name);
+        Ok(self.a_push(cell.value()))
+    }
+
+    fn set_host(&mut self, host: Rc<dyn Host<Realm>>) {
+        assert!(self.api.win.is_null(), "set_host inside a host call");
+        self.api.host_ptr = NonNull::new(Rc::as_ptr(&host) as *mut dyn Host<Realm>);
+        self.api.host = Some(host);
+    }
+
+    fn raw(&self, v: Local<'_>) -> Value {
+        self.a_at(v)
+    }
+
+    fn raw_local<'s>(&mut self, r: &Value) -> Local<'s> {
+        self.a_push(*r)
+    }
+
+    fn set_host_owner<'s>(&mut self, _obj: Local<'_>, _key: u32) -> Result<(), Error<'s>> {
+        Err(self.a_unsup("set_host_owner"))
+    }
+
+    fn new_promise<'s>(&mut self) -> Result<Local<'s>, Error<'s>> {
+        Err(self.a_unsup("new_promise"))
+    }
+
+    fn resolve_promise<'s>(&mut self, _p: Local<'_>, _v: Local<'_>) -> Result<(), Error<'s>> {
+        Err(self.a_unsup("resolve_promise"))
+    }
+
+    fn reject_promise<'s>(&mut self, _p: Local<'_>, _reason: Local<'_>) -> Result<(), Error<'s>> {
+        Err(self.a_unsup("reject_promise"))
+    }
+
+    fn promise_then<'s>(&mut self, _p: Local<'_>, _ok: Local<'_>, _err: Local<'_>) -> Result<(), Error<'s>> {
+        Err(self.a_unsup("promise_then"))
+    }
+
+    fn promise_react<'s>(&mut self, _x: Local<'_>, _ok: Local<'_>, _err: Local<'_>) -> Result<(), Error<'s>> {
+        Err(self.a_unsup("promise_react"))
+    }
+
+    /// No value is a promise.
+    fn promise_status<'s>(&mut self, _v: Local<'_>) -> Option<bare_js_api::PromiseState<'s>> {
+        None
+    }
+
+    fn queue_microtask<'s>(&mut self, _cb: Local<'_>) -> Result<(), Error<'s>> {
+        Err(self.a_unsup("queue_microtask"))
+    }
+
+    fn checkpoint<'s>(&mut self) -> Result<usize, Error<'s>> {
+        Err(self.a_unsup("checkpoint"))
+    }
+
+    fn drain_microtasks<'s>(&mut self) -> Result<usize, Error<'s>> {
+        Err(self.a_unsup("drain_microtasks"))
+    }
+
+    fn pending_jobs(&self) -> usize {
+        0
+    }
+
+    fn clear_failed_job(&mut self) {}
+
+    fn iter_open<'s>(&mut self, _v: Local<'_>) -> Result<Option<Iter<'s>>, Error<'s>> {
+        Err(self.a_unsup("iter_open"))
+    }
+
+    fn iter_next<'s>(&mut self, _it: &mut Iter<'s>) -> Result<Option<Local<'s>>, Error<'s>> {
+        Err(self.a_unsup("iter_next"))
+    }
+
+    fn iter_fail<'s>(&mut self, _it: &mut Iter<'s>, err: Error<'s>) -> Error<'s> {
+        err
+    }
+
+    fn module_parse<'s>(&mut self, _source: &str, _url: &str) -> Result<u32, Error<'s>> {
+        Err(self.a_unsup("module_parse"))
+    }
+
+    fn module_requests(&self, _m: u32) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn module_set_requested(&mut self, _m: u32, _deps: &[u32]) {}
+
+    fn module_url(&self, _m: u32) -> &str {
+        ""
+    }
+
+    fn module_link<'s>(&mut self, _root: u32) -> Result<(), Error<'s>> {
+        Err(self.a_unsup("module_link"))
+    }
+
+    fn module_evaluate<'s>(&mut self, _m: u32) -> Result<Local<'s>, Error<'s>> {
+        Err(self.a_unsup("module_evaluate"))
+    }
+
+    fn take_dynamic_imports(&mut self) -> Vec<bare_js_api::ImportRequest> {
+        Vec::new()
+    }
+
+    fn finish_dynamic_import<'s>(&mut self, _p: &bare_js_api::Persistent, _m: u32) -> Result<(), Error<'s>> {
+        Err(self.a_unsup("finish_dynamic_import"))
+    }
+
+    fn reject_dynamic_import<'s>(&mut self, _p: &bare_js_api::Persistent, _reason: Local<'_>) -> Result<(), Error<'s>> {
+        Err(self.a_unsup("reject_dynamic_import"))
+    }
+
+    fn fail_dynamic_import<'s>(&mut self, _p: &bare_js_api::Persistent, _message: &str) -> Result<(), Error<'s>> {
+        Err(self.a_unsup("fail_dynamic_import"))
+    }
+
+    /// Nothing yet: a safepoint needs the frames of the caller to be walkable, and a host function has none.
+    fn safepoint(&mut self) {}
+
+    fn type_error<'s>(&mut self, msg: &str) -> Error<'s> {
+        self.a_throw(ErrKind::Type, msg)
+    }
+
+    fn range_error<'s>(&mut self, msg: &str) -> Error<'s> {
+        self.a_throw(ErrKind::Range, msg)
+    }
+
+    fn charge<'s>(&mut self, n: u64) -> Result<(), Error<'s>> {
+        match self.fuel.checked_sub(n) {
+            Some(left) => {
+                self.fuel = left;
+                Ok(())
+            }
+            None => Err(Error::Abort(Abort::Limit("the step budget"))),
+        }
+    }
+
+    fn to_number<'s>(&mut self, v: Local<'_>) -> Result<f64, Error<'s>> {
+        let v = self.a_at(v);
+        Realm::to_number(self, v).map_err(|e| self.a_err(e))
+    }
+
+    fn to_string<'s>(&mut self, v: Local<'_>) -> Result<Local<'s>, Error<'s>> {
+        let v = self.a_at(v);
+        let r = self.to_str(v).map(Str::value);
+        self.a_ret(r)
+    }
+
+    fn to_boolean(&self, v: Local<'_>) -> bool {
+        Realm::truthy(self.a_at(v))
+    }
+
+    fn new_array<'s>(&mut self, items: &[Local<'_>]) -> Result<Local<'s>, Error<'s>> {
+        let vals = self.a_args(items);
+        let a = Realm::new_array(self, &vals);
+        Ok(self.a_push(a))
+    }
+
+    fn is_array<'s>(&mut self, v: Local<'_>) -> Result<bool, Error<'s>> {
+        Ok(Realm::obj(self.a_at(v)).is_some_and(|o| Realm::is_array(self, o)))
+    }
+
+    fn intrinsic<'s>(&mut self, which: Intrinsic) -> Local<'s> {
+        let o = match which {
+            Intrinsic::ObjectPrototype => self.object_proto,
+            Intrinsic::ArrayPrototype => self.array_proto,
+            Intrinsic::ErrorPrototype => self.error_proto,
+            // There is no `Symbol` and no iterator protocol yet: the host sees `undefined`.
+            Intrinsic::IteratorPrototype | Intrinsic::SymbolIterator | Intrinsic::SymbolToStringTag => return self.undefined(),
+        };
+        self.a_push(o.value())
+    }
+
+    fn get_prototype_of<'s>(&mut self, obj: Local<'_>) -> Result<Option<Local<'s>>, Error<'s>> {
+        let o = self.a_obj(obj)?;
+        Ok(self.proto_of(o).map(|p| self.a_push(p.value())))
+    }
+
+    fn set_prototype_of<'s>(&mut self, obj: Local<'_>, proto: Option<Local<'_>>) -> Result<bool, Error<'s>> {
+        let o = self.a_obj(obj)?;
+        let p = match proto {
+            None => None,
+            Some(p) => Some(self.a_obj(p)?),
+        };
+        self.set_proto_checked(o, p).map_err(|e| self.a_err(e))
+    }
+
+    fn define_accessor<'s>(&mut self, obj: Local<'_>, key: Local<'_>, get: Option<Local<'_>>, set: Option<Local<'_>>, attrs: Attrs) -> Result<(), Error<'s>> {
+        let (o, k) = (self.a_obj(obj)?, self.a_key(key)?);
+        let mut fns = [Value::UNDEFINED; 2];
+        for (slot, f) in fns.iter_mut().zip([get, set]) {
+            if let Some(f) = f {
+                *slot = self.a_at(f);
+            }
+            if !slot.is_undefined() && !Realm::obj(*slot).is_some_and(|f| f.is_callable()) {
+                return Err(self.a_throw(ErrKind::Type, "an accessor is not a function"));
+            }
+        }
+        let d = Desc { get: Some(fns[0]), set: Some(fns[1]), e: Some(attrs.enumerable), c: Some(attrs.configurable), ..Default::default() };
+        self.a_define(o, k, &d)
+    }
+
+    fn proto_from_new_target<'s>(&mut self, default: Local<'_>) -> Result<Local<'s>, Error<'s>> {
+        let (callee, nt) = (self.callee, self.nt);
+        if nt.is_undefined() || nt == callee {
+            return Ok(self.a_push(self.a_at(default)));
+        }
+        let p = self.get_prop(nt, Key::Name(self.k_prototype)).map_err(|e| self.a_err(e))?;
+        let p = if Realm::obj(p).is_some() { p } else { self.object_proto.value() };
+        Ok(self.a_push(p))
+    }
+
+    fn string_utf16<'s>(&mut self, units: &[u16]) -> Result<Local<'s>, Error<'s>> {
+        match Str::new(&mut self.heap, Chars::Two(units)) {
+            Ok(s) => Ok(self.a_push(s.value())),
+            Err(_) => Err(Error::Abort(Abort::Limit("a string that is too long or no memory"))),
+        }
+    }
+
+    fn wall_now_ms(&self) -> f64 {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_millis() as f64)
+    }
+
+    fn has_own<'s>(&mut self, obj: Local<'_>, key: Local<'_>) -> Result<bool, Error<'s>> {
+        let (o, k) = (self.a_obj(obj)?, self.a_key(key)?);
+        Ok(self.get_own(o, k).is_some())
+    }
+
+    fn own_keys<'s>(&mut self, obj: Local<'_>) -> Result<Vec<Local<'s>>, Error<'s>> {
+        let o = self.a_obj(obj)?;
+        let keys = self.own_key_list(o, false);
+        Ok(keys.into_iter().map(|k| self.a_push(k)).collect())
+    }
+
+    fn own_enumerable_data<'s>(&mut self, obj: Local<'_>, key: Local<'_>) -> Result<Option<Local<'s>>, Error<'s>> {
+        let (o, k) = (self.a_obj(obj)?, self.a_key(key)?);
+        match self.get_own(o, k) {
+            Some(p) if p.attrs() & A_E != 0 => {
+                let r = self.get_prop(o.value(), k);
+                self.a_ret(r).map(Some)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn is_callable(&self, v: Local<'_>) -> bool {
+        Realm::obj(self.a_at(v)).is_some_and(|o| o.is_callable())
+    }
+
+    fn bind<'s>(&mut self, target: Local<'_>, this: Local<'_>) -> Result<Local<'s>, Error<'s>> {
+        let (t, this) = (self.a_at(target), self.a_at(this));
+        if !Realm::obj(t).is_some_and(|o| o.is_callable()) {
+            return Err(self.a_throw(ErrKind::Type, "bind needs a function"));
+        }
+        let b = self.native_cell(self.bound_id as usize);
+        b.set_slot(&self.shapes, 1, t);
+        b.set_slot(&self.shapes, 2, this);
+        b.set_slot(&self.shapes, 3, Value::UNDEFINED);
+        Ok(self.a_push(b.value()))
+    }
+
+    fn task<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> Result<R, Abort> {
+        if self.api.tasks >= MAX_TASKS {
+            return Err(Abort::Limit("the call depth"));
+        }
+        if self.api.tasks == 0 {
+            self.fuel = self.api.budget;
+        }
+        self.api.tasks += 1;
+        let r = f(self);
+        self.api.tasks -= 1;
+        Ok(r)
+    }
+
+    fn construct<'s>(&mut self, f: Local<'_>, args: &[Local<'_>], new_target: Option<Local<'_>>) -> Result<Local<'s>, Error<'s>> {
+        let f = self.a_at(f);
+        let nt = new_target.map_or(f, |n| self.a_at(n));
+        let args = self.a_args(args);
+        let r = self.a_construct(f, &args, nt);
+        self.a_ret(r)
+    }
+
+    fn array_len<'s>(&mut self, v: Local<'_>) -> Result<Option<u32>, Error<'s>> {
+        Ok(Realm::obj(self.a_at(v)).filter(|&o| Realm::is_array(self, o)).map(|o| o.len()))
+    }
+
+    fn new_error<'s>(&mut self, proto: Local<'_>, msg: &str) -> Result<Local<'s>, Error<'s>> {
+        let p = self.a_obj(proto)?;
+        let m = self.string(msg);
+        let e = self.make_error(p, Some(m));
+        Ok(self.a_push(e))
+    }
+}
+
+impl Realm {
+    fn a_define<'s>(&mut self, o: Obj, k: Key, d: &Desc) -> Result<(), Error<'s>> {
+        match self.define_own(o, k, d) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(self.a_throw(ErrKind::Type, "cannot define the property")),
+            Err(e) => Err(self.a_err(e)),
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(unsafe_code)]
+#[path = "api_tests.rs"]
+mod tests;

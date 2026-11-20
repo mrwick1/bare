@@ -132,6 +132,8 @@ impl Realm {
             let tl = self.get_named(target, "length").ok().and_then(|v| v.as_f64()).unwrap_or(0.0);
             let tn = self.get_named(target, "name").ok().and_then(Realm::str_of).map(|s| self.text(s)).unwrap_or_default();
             ((tl - nb).max(0.0), format!("bound {tn}"))
+        } else if let Some(p) = self.host_props(o) {
+            p
         } else {
             (self.natives[id].len as f64, self.natives[id].name.to_string())
         };

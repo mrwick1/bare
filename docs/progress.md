@@ -17632,6 +17632,49 @@ test262 (`TEST262=/data/claude-tmp/test262 tools/js/test262_js2.sh -j 4`, checko
 Tests: `cargo test --locked -p bare-js2 --lib`: 418 pass (the new test above). `cargo test --locked -p bare-js-diff`: all pass.
 
 Not tested: Windows; the browser; the `v` flag; the `u` fast paths of the full check against real `u` patterns (only random pieces); the 3,744 npm files of #790 again (only the five files above); no V8 run of the patterns of the five files themselves (they take `simple`, which the random test covers by the rule "yes implies full yes"); a `Token` field for the end of the pattern (not built).
+
+## 2026-11-21: js2 on the host interface, steps 1 to 3 (plan step S2.8, `docs/design-js2-host-api.md`)
+
+What is built. `Realm` implements `bare_js_api::Engine` (`crates/js2/src/api.rs`). The state is one field of the realm, `ApiState`: the handle stack, the table of persistent handles, the host, and the window of the running host call. `this` and the arguments of a host call are named in place (the slots from `WIN`), so a call copies and pushes nothing. `Realm::collect` marks the handle stack, the live persistent slots and the whole chain of windows. A host function is a native: all host functions share two `Native` entries (plain and constructor), and the cell keeps the host id, the kind with the `length`, and the name in its three free slots. A call into script from a host function goes through `Realm::call_function` (the collector is held). A call from the host with no native on the Rust stack runs on a pooled machine and may collect. An abort (`Unsupported`, or a limit that the host raised with `charge`) is `STOP` with the reason in `ApiState::abort`. Promises, microtasks, iteration, modules, buffers, owners, host-filled objects, clone and `run_script` answer `Abort::Unsupported(name)` (`run_script` needs a completion value, which the compiler does not make yet). `Realm::run_text` runs a script text for tests and tools; `LazyCompile::script` adds a script to a program that runs.
+
+The shared suite is `crates/js-api/src/suite.rs` (feature `suite`): 12 tests, written once, generic over a `Harness`. `crates/js-api/tests/engines.rs` runs them on `bare-js` and `bare-js2`, plain and under constant collection (`Trigger { min: 1 << 10, slack: 1 << 10 }` on the new engine, a `collect` after each script on the old one). CI runs `cargo test --locked -p bare-js-api --features suite`. Two facts of the old engine shaped the suite: it counts steps only inside a task, so the scope test runs in `bare_js_api::task`; and `class extends` of a `HostFn::Ctor` function stops the script as unsupported where the new engine throws a `TypeError`, so the test accepts both and rejects only a success.
+
+Results (archMachine, debug build, own target directory):
+
+| Command | Result |
+| --- | --- |
+| `cargo test -p bare-js-api --features suite` | 32 lib + 48 suite (12 tests x old, old stress, new, new stress) + doc tests, all pass |
+| `cargo test -p bare-js2 --lib` | 447 pass (9 new in `api_tests.rs`) |
+| `cargo test -p bare --lib` | 1718 pass, 6 ignored |
+| `cargo test -p bare-js-diff` | all pass |
+| `cargo +nightly miri test -p bare-js2 --lib api::` | 9 pass, no undefined behavior |
+| `cargo xwin build --target x86_64-pc-windows-msvc -p bare-js2 -p bare-js-api` | builds |
+
+Cost. Release build, default profile, `tools/js/instr.sh` (minimum of 3 runs), 3 rounds of each row, base `15157cbe` (a worktree of the parent commit) against this branch. Micro rows are `interp_load` at N minus N = 0. `script_run` is `var x = 1;`. The load average was 8 to 10, so only instruction counts are used.
+
+| Row | Base | Branch | Change | Spread over 3 rounds (base / branch) |
+| --- | ---: | ---: | ---: | ---: |
+| `loopfn 3000000` | 832,499,180 | 832,499,906 | +0.000% | 1,434 / 783 |
+| `calls 1000000` | 618,500,456 | 618,500,837 | +0.000% | 486 / 494 |
+| `fib 27` | 312,963,067 | 312,963,375 | +0.000% | 1,034 / 801 |
+| `closures 1000000` | 2,045,234,112 | 2,045,235,185 | +0.000% | 2,645 / 965 |
+| `objects 1000000` | 697,272,557 | 697,274,131 | +0.000% | 937 / 402 |
+| `script_run` | 1,793,315 | 1,792,272 | -0.058% | 1,189 / 2,219 |
+
+No row is over +0.5%, so the `codegen-units=1` rule is not needed. The new code is outside `Vm::run`: the loop got no new arm. The one change on the path of every collection is the call `api.mark(m)`.
+
+Host call cost (`crates/js-api/examples/host_call_load.rs`, release, minimum of 3 runs, N = 1,000,000 minus N = 0, instructions for each turn of `x = f(i)`):
+
+| Engine | Loop with `x = i` | `Object.is(i, 1)` | `nop(i)` (host function) | Host call, less the loop | Plain native, less the loop |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| old (`bare-js`) | 1,622 | 2,550 | 2,302 | 680 | 928 |
+| new (`bare-js2`) | 431 | 894 | 948 | 517 | 463 |
+
+The host call of the new engine costs 517 instructions against 680 on the old engine in the same example (24% less). The trampoline adds 54 instructions to a plain native call of the new engine (the design guessed 60 to 100; `Object.is` takes two arguments and `nop` one, so the true gap is a little larger). The old engine's own row in the design (588) was measured on a DOM call, not on this loop.
+
+Not tested. The browser: `Dom` is a concrete type that holds the old engine's `Interp`, so the page switch needs `Dom<E: Engine>`, which is its own change. A page's scripts do not run on js2 yet. The whole `cargo miri test -p bare-js2` of CI (only the 9 `api::` tests ran under Miri: they pass, with the integer-to-pointer warnings that the crate has already). macOS and arm64. A collection that runs inside a host call (no safepoint exists there; the one test that collects in a host call runs it with no script frame under it). A nested allocation larger than the heap slack (the collector is held, the browser slice must measure it). `cargo test -p bare-js` in full (no change in that crate).
+
+Steps left: owners with `trace` and `prune` (3.9); promises and the job queue (when js2 has them); modules; `run_script` (needs a completion value); buffers; `Dom<E: Engine>` and the switch in the browser.
 ## Time zone data in the binary, on every OS (2026-11-21)
 
 Design: [design-time-zones.md](design-time-zones.md), "Decisions (owner, 2026-11-20)". Base: `0c56d4a1` (`origin/main`). Machine: archMachine (AMD Ryzen 9 5900HX), not idle (other sessions ran). Windows: the Windows 11 VM, local zone `Pacific Standard Time`.
