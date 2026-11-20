@@ -101,9 +101,9 @@ fn run_new(code: &str, steps: u64) -> Out {
     };
     match vm.run_main(0) {
         Ok(_) => end(&mut vm, "__finish", &[]).map_or_else(Out::Internal, Out::Done),
-        // A function that holds an unbuilt construct fails at its first call (lazy compile): a SyntaxError of that text is "unsupported" too.
+        // A function that holds an unbuilt construct fails at its first call (lazy compile): an Error of that text is "unsupported" too.
         Err(Exit::Throw(e)) => end(&mut vm, "__thrown", &[e]).map_or_else(Out::Internal, |t| match threw(&t) {
-            Out::Threw { name, message } if name == "SyntaxError" && message.starts_with("not supported yet") => Out::Unsupported(message),
+            Out::Threw { name, message } if name == "Error" && message.starts_with("not supported yet") => Out::Unsupported(message),
             o => o,
         }),
         Err(Exit::Fuel) => Out::Limit("the budget ran out".into()),

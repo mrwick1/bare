@@ -1,7 +1,13 @@
-//! Run a script: lex, parse, compile and interpret (plan steps S2.1 to S2.6, end to end). [`load`] compiles a whole script (the top level
-//! and every function inside it, eagerly) into a [`Program`] and makes a [`Vm`] for it; [`run`] also runs it. There is no lazy compile
-//! yet: the function table of the interpreter is fixed when the [`Vm`] is made, so the driver compiles each function before the run.
-//! A function that has an unbuilt construct (a generator, `async`, `with`, direct `eval`) stops the load with an error.
+//! Run a script: lex, parse, compile and interpret (plan steps S2.1 to S2.6, end to end). [`load`] makes a [`Program`] and a [`Vm`] for a
+//! script; [`run`] also runs it. The top level of the script is compiled at once. A function inside it is a stub (`Op::Lazy`) that waits
+//! for its first call ([`Lazy`]): the pre-parse of the whole text finds every early error at load, and the full parse and the compile of
+//! one function happen at its first call. [`compile`] still compiles every function (the examples and the tests of the compiler use it).
+//!
+//! What a lazy function changes: a construct that the compiler does not build yet (direct `eval`, `with`, a generator or `async` function,
+//! ...) stops the load when the top level code of the script holds it (a generator declared there counts). In the code of a function
+//! it fails at the first call of the function that holds it: the call throws an `Error` ("not supported yet: ...") that a `try` can
+//! catch, and a function that nobody calls never fails. A function with `super` in it or in a function inside it is compiled at load
+//! (the `CF_LINK` flag of its code is not known before the compile).
 //!
 //! A child with [`Child::ready`] (the initializers of the fields of a class, `static` blocks) takes its code from `Compiled::inline`
 //! of its parent. `Code::funcs` of the compiler holds the id of the child in the facts; the driver replaces it by the index in the

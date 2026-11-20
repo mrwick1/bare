@@ -760,7 +760,7 @@ fn a_lazy_function_gets_its_arguments_the_first_time_and_after() {
 }
 
 #[test]
-fn a_lazy_compile_that_fails_throws_a_syntax_error() {
+fn a_lazy_compile_that_fails_throws_a_plain_error() {
     struct Fails;
     impl crate::interp::LazyCompile for Fails {
         fn compile(&mut self, _: &mut Vec<crate::bytecode::Code>, _: usize) -> Result<(), String> {
@@ -770,7 +770,7 @@ fn a_lazy_compile_that_fails_throws_a_syntax_error() {
     let mut vm = load("var e; try { [1].forEach(function () {}); } catch (x) { e = x.name + ': ' + x.message; }").unwrap();
     vm.lazy = Some(Box::new(Fails));
     vm.run_main(0).unwrap();
-    assert_eq!(vm.global_text("e"), "SyntaxError: no compiler");
+    assert_eq!(vm.global_text("e"), "Error: no compiler");
 }
 
 #[test]
@@ -834,7 +834,7 @@ fn a_function_that_is_never_called_is_never_compiled() {
 #[test]
 fn an_unbuilt_construct_in_a_function_fails_at_its_first_call_not_at_load() {
     let src = "function bad() { with ({}) { return 1; } } var e; try { bad(); } catch (x) { e = x.name + ': ' + x.message.slice(0, 17); } try { bad(); } catch (x) { e += '|' + x.name; }";
-    assert_eq!(ev(src, "e"), "SyntaxError: not supported yet|SyntaxError");
+    assert_eq!(ev(src, "e"), "Error: not supported yet|Error");
     // The top level has the construct: the load fails, as before.
     assert!(load("with ({}) {}").err().unwrap().starts_with("not supported yet"));
     // A generator at the top level of the script is found when its parent is compiled, so the load fails (not a lazy case).

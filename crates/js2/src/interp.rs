@@ -1259,7 +1259,9 @@ impl Vm {
                         let Some(l) = lazy.as_mut() else { err!(ErrKind::Plain, "a lazy function has no compiler") };
                         let (kept, np) = (a!() == 0, code.nparams as usize);
                         if let Err(m) = l.compile(&mut prog.codes, ci) {
-                            err!(ErrKind::Syntax, "{m}")
+                            // A plain `Error`, not a `SyntaxError`: the text has no early error (the pre-parse found none), and a script (or a
+                            // test262 test that expects a `SyntaxError`) must not take a limit of the compiler for one.
+                            err!(ErrKind::Plain, "{m}")
                         }
                         fbs.resize_with(prog.codes.len(), Feedback::default);
                         fbs[ci] = Feedback::default();
