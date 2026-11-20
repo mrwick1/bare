@@ -53,6 +53,8 @@ pub const F_CALLABLE: u32 = 2;
 pub const F_CLASS: u32 = 4;
 /// Object header flag: the function is the constructor of a class with `extends` (its `this` is the hole until `super()` returns).
 pub const F_DERIVED: u32 = 8;
+/// Object header flag: the function is a built-in written in Rust (S2.7). Its slot 0 is the index in `Realm::natives`, not a code index.
+pub const F_NATIVE: u32 = 16;
 /// `Elements` header flag: the record is sparse.
 const F_SPARSE: u32 = 1;
 /// A write at an index this far above the capacity of a dense record makes it sparse.

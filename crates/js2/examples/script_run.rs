@@ -14,26 +14,7 @@ fn main() {
     let mut names: Vec<String> = a.collect();
     let expected = if eval { Some(names.remove(0)) } else { None };
     if eval {
-        let t = src.trim_end().to_string();
-        // The last statement boundary at brace depth 0 (a `;` or a `}`); quotes are skipped.
-        let (mut depth, mut quote, mut i) = (0i32, None, 0);
-        for (k, c) in t.char_indices() {
-            match (quote, c) {
-                (Some(q), c) if c == q => quote = None,
-                (Some(_), _) => {}
-                (None, '\'' | '"') => quote = Some(c),
-                (None, '{' | '(' | '[') => depth += 1,
-                (None, '}' | ')' | ']') => {
-                    depth -= 1;
-                    if c == '}' && depth == 0 {
-                        i = k + 1;
-                    }
-                }
-                (None, ';') if depth == 0 => i = k + 1,
-                _ => {}
-            }
-        }
-        src = format!("{}\nvar __result = ({});", &t[..i], t[i..].trim());
+        src = script::eval_program(&src);
         names = vec!["__result".into()];
     } else if names.is_empty() {
         names.push("result".into());

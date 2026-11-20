@@ -15672,3 +15672,64 @@ Not built, design only. Each needs an interpreter change, and none is cheap enou
 Check. `cargo test --locked -p bare-js2 --lib`: 282 pass on Linux (260 on main). `compile::tests`: 54 (34 on main): 14 new golden tests (one for each of: `arguments`, rest and spread call, spread in `new` and arrays, own-name function expression, regexp and BigInt, tagged template, object accessors and `__proto__` and spread, object rest, class with fields and static members, derived class with `super()` in an arrow, `super` property access, private names, `new.target`, class expression name), `field_initializers_and_static_blocks_are_ready_children_of_the_class`, `every_construct_of_a_class_passes_the_verifier` (12 sources), the gaps (script var, iterator close, `break` closes once, 60,000 locals in linear time), and the updated list of unsupported constructs (async, generator, `with`, direct eval, `delete` of a global). I read each golden against the JS meaning. Windows 11 VM: the whole lib run is 280 pass and 2 fail (the same two parser corpus tests as before: `parse::tests::corpus_status_matches_acorn` and `parse::lazy_tests::a_lazy_parse_finds_the_same_errors_as_a_full_parse_on_the_corpus`; they do not find the corpus on the VM); `compile::tests` 54 pass. `cargo clippy -p bare-js2 --all-targets`: no warning in the files of this change (old warnings remain in `heap.rs`, `object_census.rs` and `bare-os`).
 
 Not tested: running any compiled code, so the semantics of the 38 new ops are checked by reading the disassembly and by the verifier only; class, `super`, private-name and spread behavior in an interpreter (S2.6); the S2.6 driver's use of `Child::ready`; mapped `arguments`; function names of methods and classes; Miri; arm64; a React bundle with classes beyond the clangd and tauri bundles; the cost matrix (js2 is not wired into the browser); the `bc_hist` example on Windows.
+
+## 2026-11-20: core built-ins in js2 (plan step S2.7)
+
+Real scripts now run end to end on the js2 interpreter. This step adds `Object`, `Function.prototype`, `Error` and its subclasses, `ToPrimitive`, `Array`, `String.prototype`, `Number`, `Boolean`, `Math`, `parseInt`, `parseFloat`, `isNaN`, `isFinite`, `globalThis` and `self`. Base: PR #757 (`t3/js2-interpreter`), merged with the newest main.
+
+New files in `crates/js2/src`: `builtins.rs` (the native-call design, `Object`, `Function`, `Error`, `ToPrimitive`), `bi_array.rs`, `bi_string.rs`, `bi_number.rs` (`Number`, `Boolean`, `Math`, the global functions) and `prelude.js`.
+
+Design:
+
+- A native function is a cell with the flag `F_NATIVE` and the shape `s_native`. Slot 0 is an index in `Realm::natives`. The type is `fn(&mut Realm, this, &[Value]) -> R<Value>`. `Realm::function` skips natives, so the hot call path is the same as before. A call to a native is the `else` branch of `call!` and of the three other call ops.
+- A native never collects and never calls a script function. `gate!()` runs before the native, so every value that the native holds is on the stack and rooted.
+- A built-in that calls back (`forEach`, `map`, `filter`, `reduce`, `some`, `every`, `find`, `findIndex`, `sort`, `Array.from`, `replace` with a function) is written in JavaScript in `prelude.js`. The prelude compiles with each script and runs once at setup. Its helper `__def` defines a hidden method and is deleted from the global afterwards. This needs no re-entry of `Vm::run` from a native.
+- `call`, `apply` and `bind` return `Outcome::Enter` (the "tail channel"): the interpreter pushes the frame of the target. A bound function is a native cell with the target, `this` and the argument array in slots 1 to 3.
+- A plain function gets its `prototype` object on first read (a hook in `lookup` and `get_prop_g`). A function that nobody reads makes no extra object.
+- `Error` objects have one prototype for each kind. `message` and `name` are hidden properties of the prototype. The engine throws `TypeError`, `ReferenceError`, `RangeError` and `SyntaxError` objects, so `e instanceof TypeError` works.
+- `ToPrimitive` and `OrdinaryToPrimitive` are in `to_number`, `to_str`, `add_slow`, `compare` and `loose_eq`. They call only native `valueOf` and `toString`. A depth guard of 100 stops a cycle with a `RangeError`.
+- A method on a string, number or boolean value looks up `string_proto`, `number_proto` or `boolean_proto`. No wrapper object is made.
+- `class X extends Error` and `class X extends Array` work: `CallSuper` on a native parent runs `construct_native`, then the fields function of the class.
+
+Acceptance. The four `eval_load` programs give the same result on js2 (`script_run --eval`) and on the old engine (`eval_load CASE 1`, checksum ok):
+
+| Case | Old engine | js2 |
+| --- | --- | --- |
+| `closures` | 23222546 | 23222546 |
+| `objects` | 19442497,119979 | 19442497,119979 |
+| `throws` | 69629 | 69629 |
+| `webpack` | 3890,150,50 | 3890,150,50 |
+
+Cost of the interpreter hot loop. `interp_load`, release build, `perf stat -e instructions:u` with `GLIBC_TUNABLES=glibc.malloc.tcache_count=65535`, archMachine, 3 runs for each row. The three runs give the same count (spread 0). Net instructions = count(N) - count(0), in millions. "Base" is the tree of #757 without this change.
+
+| Row | N | Base (cgu 16) | New (cgu 16) | Change | Base (cgu 1) | New (cgu 1) | Change |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loopfn` | 1,000,000 | 314.5 | 313.5 | -0.3% | 311.5 | 311.5 | 0.0% |
+| `calls` | 1,000,000 | 692.5 | 685.5 | -1.0% | 693.5 | 695.5 | +0.3% |
+| `fib` | 30 | 1391.7 | 1425.4 | +2.4% | 1417.3 | 1449.6 | +2.3% |
+| `closures` | 200,000 | 412.8 | 411.6 | -0.3% | 417.3 | 418.3 | +0.2% |
+| `objects` | 200,000 | 152.2 | 152.9 | +0.5% | 155.1 | 155.3 | +0.1% |
+
+Setup of a `Vm` (count(0)): 0.53 to 0.72 M before, 0.76 to 0.95 M after. The extra 0.23 M is the install of the built-ins and the compile of the prelude.
+
+`fib` is over the +0.5% bound at both codegen-unit settings. What I found (hypothesis for the cause, measured for the rest):
+
+- `callgrind` on the release binaries with symbols (`fib 26`): 207.4 M instructions before, 212.3 M after. `Realm::function` costs the same in both (10,999,408 instructions, one call for each `fib` call). No native function runs in `fib`, and `native_id` is never called.
+- The extra 4.9 M instructions (about 12 for each `fib` call) are spread over `Vm::run` in many lines (`Value::kind`, option matches, a jump-table label). I did not find one added instruction. Hypothesis: the new cold branches in `Vm::run` change the register allocation and the block layout of the hot ops.
+- I tried three changes. (1) One `enter!` for all call kinds (a tuple from `native_call!`): `fib` +5.8% at cgu 1, worse. (2) No native branch in `call!` (an experiment only): `calls` equals base, `fib` +1.9%, so the call op is not the cause. (3) `#[inline(never)]` on `call_native` and `construct_native`: no change. The code in the PR is the first form.
+- This row needs an owner decision under the cgu rule: it is still over at `codegen-units=1`, and I found no new work on its path.
+
+Tests. `cargo test --locked -p bare-js2 --lib`: 362 pass on Linux (353 before this step, 9 new). Windows (`cargo xwin test`, run on the VM): 360 pass and 2 fail. The 2 failures are the known corpus-path tests (`parse::tests::corpus_status_matches_acorn` and `parse::lazy_tests::a_lazy_parse_finds_the_same_errors_as_a_full_parse_on_the_corpus`). Clippy on the crate: no warning in the new files. The warnings that remain are in `heap.rs`, `crates/os/src/pages.rs` and the census examples (not changed here).
+
+New tests in `script_tests.rs`, one for each group. Each runs normally and under constant collection (`check`): `object_and_object_prototype`, `function_prototype_and_plain_function_prototypes`, `errors_and_their_subclasses`, `to_primitive`, `array_constructor_and_methods`, `string_prototype`, `number_boolean_math_and_global_functions`, `eval_load_programs_give_the_result_of_the_old_engine` (the 4 programs above) and `built_ins_survive_constant_collection_with_many_live_values`. Under Miri a group runs only its first 3 cases.
+
+Known gaps:
+
+- `Object.freeze` does not make the object non-extensible (there is no `preventExtensions`), and the elements of a frozen array stay writable. So `Object.isFrozen({})` is `true`; the spec says `false`.
+- An `Array` method works on an array or an `arguments` object. A generic array-like gives a `TypeError`. `shift` and `unshift` are O(n).
+- `ToPrimitive` calls only native `valueOf` and `toString`. An object with a `valueOf` or `toString` written in the script gives a `TypeError` in `+`, `==` and `String(x)`. This needs a re-entry of the interpreter from a native; it is the next step to design.
+- No wrapper objects: `new String`, `new Number` and `new Boolean` throw. `Function(...)` throws. There is no `Symbol`, `Map`, `Set`, `JSON`, `Date`, `Promise`, `RegExp` or `Error.stack`.
+- `String.prototype.replace` and `replaceAll` take a string pattern (or a function replacer through the prelude). A regexp pattern is not supported.
+- The prelude compiles with each script. A cache of the compiled prelude across scripts is not built.
+
+Not tested: Miri on the new code; arm64 and macOS; the new built-ins on real sites (only the 4 `eval_load` programs and the unit tests run them); `sort` on arrays larger than the unit tests (about 10 elements); `Math.random` quality; wall time (instruction counts only); a call of `Vm::run` from a native, because none exists; the `webpack` case under the cost rule on other scales than 1.
