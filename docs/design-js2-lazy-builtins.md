@@ -347,3 +347,14 @@ Engine:
 7. Is a snapshot (design C) rejected for good? Recommended: yes for now. Revisit only if, after steps 1 and 2, startup for a typical page is above 1 M, or if the S5 JIT decision fixes the layout of `Code`.
 8. Static atoms and pre-built shapes (B2) after step 1? Recommended: not now. Decide with a profile of a typical page after step 2: B2 saves about 1.3 K for each used native (56 K for 44 natives).
 9. Does the realm count per page matter for the order of these steps? Recommended: measure it in the browser slice (S2.8) while step 1 is built. If a page makes 5 realms or more, the shared-code decision (`design-js2-prelude.md` section 8) comes before step 2, because D2 pays stubs per realm.
+
+## Decisions (owner, 2026-11-20)
+
+1. #791 merges first with a written waiver. The waiver is in `docs/progress.md`. Step 1 pays the startup cost back.
+2. A changed own-key order of built-in objects is acceptable.
+3. Build step 0, step 1 and step 2 in that order. Step 0 is its own PR and may touch `tools/gen_unicode_tables.py` and `crates/unicode`. Step 2 uses `GetPre` after the spike. If the spike fails, use D1.
+4. The gate: no row above +0.5%, and startup falls by the amount in the table. For step 2, the four prelude rows also stay within +0.5%.
+5. Callback built-ins move to Rust after #785, one group per PR.
+6. The snapshot is rejected for now.
+7. Decide B2 and static atoms after step 2, with a profile.
+8. S2.8 measures the realm count per page. If a page makes 5 or more realms, decide on shared code before step 2.
