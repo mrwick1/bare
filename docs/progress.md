@@ -15377,3 +15377,37 @@ Judgment calls and known gaps:
 - `Code::disassemble` (S2.4) writes a space after an op name of 12 or more characters, so `JmpNotNullish r4` is readable.
 
 Not tested: execution of any compiled code (S2.6), so the semantics are checked by reading the disassembly and by the verifier, not by running; Miri; arm64; a modern React bundle; the cost matrix (js2 is not wired into the browser); the compile time of the compiler alone (the example times the pre-parse and parse of each function too).
+## 2026-11-20: interpreter for `bare-js2` (plan step S2.6)
+
+Branch `t3/js2-interpreter`. There is no compiler yet (S2.5), so every test and measurement runs bytecode that `Asm` built, and each program goes through `verify` first.
+
+Changes (all in `crates/js2`; `crates/js`, `crates/js-api` and `crates/bare` are untouched):
+
+- `interp.rs`: `Vm`, `Program`, `Exit` and `run`. It has one `loop` with one `match`, one frame record on one `Vec<Value>` stack, and lazy field decode in each arm. `Wide` is a branch before the `match`; both branches run the same arms (the `step!` macro). Calls, returns, closures with contexts (`PushCtx`, `PopCtx`, `GetEnv`, `SetEnv`), jumps and loops (`JmpBack` is the budget and collection point), property get and set, elements, `for-in` over own keys, array iteration, exceptions with handler ranges, and a collection inside a call.
+- `interp_rt.rs`: `Realm` (heap, shapes, atoms, globals), the per-realm `Feedback` of each code (one `Cache` of 16 bytes for each site, atoms made canonical for the realm, literal shapes), and the slow paths: property lookup and add, element access, arithmetic and compare for non-number values, `typeof`, equality, string concatenation.
+- `object.rs`: a callable flag, `Obj::loc`, `read_loc`, `write_loc`, `set_shape_id`, `from_value_shape`, `is_indexed`, and the `Ctx` record (the parent context in slot 0). A function cell is an object with the hidden slots `code` and `ctx`.
+- `asm_util.rs` (test and example helper, included by `#[path]`): an `F` builder over `Asm`, and a `roots` function that computes the live registers at each safepoint.
+- Tests: 38 in `interp_tests.rs`. Example `crates/js2/examples/interp_load.rs`: the five micro loops.
+- `lib.rs`, `Cargo.toml`, `ci.yml`: `interp_rt` and `interp` are in the list of `unsafe` modules (see below). `lib.rs` has only the two `pub mod` lines and the comment.
+
+Frame record (8 words, `REC`, before register 0): function cell, `this`, current context, `pc` of the call in the caller, `pc` where the caller goes on, code index of the caller (-1 for a frame that the host entered), number of contexts pushed, result register of the caller (bit 24: `New`). A call copies the arguments, gives missing ones `undefined`, and does not fill other registers (the verifier proved write before read). The collector walks the record words and the registers that the root map of the safepoint names. `gate!` runs at the start of each op that allocates, so no collection runs inside an op.
+
+Cache states (design 6.10 item 9): `FRESH` (never ran; the slow path runs, state `SEEN`, no entry) to `SEEN` (second run: the entry is made, state `MONO`) to `MONO` (one entry: shape, place, shape after an add) to `POLY` (2 to 4 entries in a pool, a scan on a miss in the slow path) to `MEGA` (a fifth shape; the record has shape 0 and the lookup runs with no cache work). A set that adds a property is a hit when the new slot is inline. A dictionary shape and a property of the prototype chain never get an entry. A collection that freed a shape (`Shapes::epoch` changed) clears every record.
+
+Measurement. Machine: AMD Ryzen 9 5900HX, Linux, release build. Tool: `tools/js/instr.sh` (perf `instructions:u`, minimum of 3 runs). Each row is the count at N turns minus the count at N = 0 (the setup, which is 0.5 M for the new engine and 2.2 M for the old one). Old engine: the `crates/js` bytecode lane (`Exec::Byte`) at `1a61213f` (the base of this branch, which leaves `crates/js` as on main then), running the JavaScript that `interp_load CASE N --source` prints (one function, locals only, same loop as the hand-written bytecode); a scratch driver, not committed. New engine: `interp_load CASE N`, which checks its result against the same sum in Rust.
+
+| Row | Turns | New instructions per turn | Old instructions per turn | Old / new | New instructions per op | Ops per turn, new / old |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loopfn` | 2,000,000 | 292.5 | 398.7 | 1.36 | 41.8 | 7 / 6 |
+| `calls` | 1,000,000 | 645.5 | 943.6 | 1.46 | 53.8 | 12 / 11 |
+| `fib(30)` | 1,346,269 calls | 985.7 | 1,180.0 | 1.20 | 75.8 | 13 / 11 |
+| `closures` | 200,000 | 1,956.2 | 7,011.2 | 3.58 | 78.2 | 25 / 28 |
+| `objects` | 1,000,000 | 738.3 | 1,977.1 | 2.68 | 61.5 | 12 / 16 |
+
+- How the loops were matched: the five cases follow the shape of the `eval_load` rows. The JavaScript of each case is the same loop, written once, and the bytecode of the new engine is written by hand for the same loop with the new op set. I did not dump the old compiler's code; I only counted its ops, so the op counts differ (the old op histogram is from the `bc-hist` feature of `bare-js`, run through the scratch driver on the same files: 12.0 M, 11.0 M, 14.8 M, 5.6 M and 16.0 M ops). The sums are the same, and both sides check them. A compiler (S2.5) may emit other code, so these rows measure the interpreter, not a compiler.
+- Caveats: the old row counts everything of the old lane (its compile of the source is in the N = 0 setup and is subtracted). The new rows have no built-ins and no `arguments`. `closures` is 3.6 times fewer; the cause is not known (hypothesis: the old lane allocates a context and a closure object in a slower path; not profiled). Wall time was not used. Instruction counts do not show cache misses or branch misses of the dispatch.
+- The cost matrix is not applicable: `bare-js2` is not connected to `bare`.
+
+`unsafe` (five places, each with a `SAFETY` comment, listed in `lib.rs`, `Cargo.toml` and `ci.yml`): (1) `r!`, a register with no bounds check; (2) `word!`, an instruction word with no bounds check; (3) the `Op` of the opcode byte as a `transmute`; (4) the cache hit and the element read (`Obj::from_value_shape`, `read_loc`, `write_loc`, `set_shape_id`); (5) the helpers in `interp_rt.rs` that do the same, and the fast path of `Realm::function`. Each of (1) to (3) rests on `verify`. Measured with the safe form of each, the same loops and the same counting: (1) and (2) together save 14% of the instructions (loopfn 18.2%, calls 14.6%, fib 8.3%, closures 8.3%, objects 14.0%); (3) saves another 6.1% to 8.4% (safe versions: `loopfn` 715.0 M against 585.0 M, 781.0 M with (3) also safe). The gains of (4) and (5) were not measured one by one (they hold the safe compare and one pointer load, and a safe form needs a checked cell type that S1.9 does not have).
+
+Tests: `cargo test --locked -p bare-js2`: 166 passed on Linux (38 new in `interp`), and 166 passed on the Windows VM (`cargo xwin test`, MSVC, run through `/data/vms/winssh`). The five micro loops pass their checksums on Windows. Clippy (1.96) reports nothing in the new files; it reports `manual_is_multiple_of` in files that this step did not change (`heap.rs`, `bare-os` `pages.rs`, the two census examples), so `-D warnings` fails there before and after this change.
