@@ -417,3 +417,9 @@ Order and size (hypothesis, in lines): step 2 about 350, step 3 about 900 change
 8. Old-engine header bit for the side-table classes (step 4) or keep the 16 probes? Proposed: decide by the profile after step 3. The probes are 0.7 K of 4.4 K in the estimate, so the bit is optional.
 9. Should `Cloned` be `Send` for a future worker? Proposed: no. Pages share one thread today. A worker needs its own design, and `Box<dyn Any>` would then become `Box<dyn Any + Send>`.
 10. The first PR after approval: the spike (step 1, a scratch tree, never merged) or the format module (step 2)? Proposed: the spike first. It costs one task and it can stop the series.
+
+## Decisions (owner, 2026-11-20)
+
+- The owner approves F2 and F3.
+- The owner accepts the proposed answer to each of the 10 open questions.
+- Step 1, the spike, comes first. The series stops if `navigation_load history 1` does not drop by at least 8.5 M instructions.
