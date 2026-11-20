@@ -16238,36 +16238,40 @@ Base: PR #764 (merged, `ee8ba415`). Two gaps of S2.7 are closed: a native can ca
 ### Tests
 
 - `crates/js2/src/conversion_tests.rs`: 8 tests. A script `valueOf` and `toString` in every conversion; a throw from a conversion is catchable; a function that calls itself through a conversion gives `RangeError`; the budget stops a nested call that has no handler, and the budget is shared; a nested call that allocates keeps the native's values; getters and setters in `Object.assign` and `Object.values`; wrapper objects; a wrapper loop under constant collection. Each runs also with a collection at every safepoint.
-- `script_tests.rs`: 4 cases changed (a script `valueOf` now works; `new String` and `new Number` no longer throw; `Object(5) === 5` is false). Their lines left `tools/fixtures/js/diff-known.txt` (4 entries removed: 22 known differences became 14, still all listed, 0 new).
-- `cargo test --locked -p bare-js2 --lib`: 385 pass (377 before, 8 new). `cargo test --locked -p bare-js-diff`: pass. Miri (`cargo +nightly miri test -p bare-js2 --lib -- conversion_tests`): all 8 pass (the 6 light ones in 1,562 s, the loop test in 240 s with 12 turns instead of 300, the self-calling test in 190 s). The whole crate is not run under Miri here; CI does that.
+- `script_tests.rs`: 4 cases changed (a script `valueOf` now works; `new String` and `new Number` no longer throw; `Object(5) === 5` is false). Their lines left `tools/fixtures/js/diff-known.txt` (4 entries removed; the merge with main removed 2 more; 16 known differences are left, all listed, 0 new).
+- `cargo test --locked -p bare-js2 --lib`: 389 pass after the merge with main (8 are new). `cargo test --locked -p bare-js-diff`: pass. Miri (`cargo +nightly miri test -p bare-js2 --lib -- conversion_tests`): all 8 pass (the 6 light ones in 1,562 s, the loop test in 240 s with 12 turns instead of 300, the self-calling test in 190 s). The whole crate is not run under Miri here; CI does that.
 
-### test262 (`tools/js/test262_js2.sh -j 8`, the same pinned checkout `e4fbf577`)
+### test262 (`tools/js/test262_js2.sh`, the pinned checkout `e4fbf577`)
+
+Before: `origin/main` `fae94731` (built and run the same way). After: this branch merged with it.
 
 | | Before | After |
 | --- | ---: | ---: |
-| js2 pass / fail | 11,944 / 5,840 | 12,874 / 4,910 |
+| js2 pass / fail | 12,768 / 5,016 | 13,694 / 4,090 |
 | old engine pass / fail | 16,755 / 1,029 | 16,755 / 1,029 |
-| pass on old, fail on js2 | 4,852 | 3,927 |
-| pass on js2, fail on old | 41 | 46 |
+| pass on old, fail on js2 | 4,040 | 3,119 |
+| pass on js2, fail on old | 53 | 58 |
 | passed on js2 before, fail now | - | 0 |
 
-- Groups: wrapper objects 712 → 0 (the tests that call `new Boolean`, `new String`, `new Number`: 269 + 243 + 200); script `valueOf`/`toString` in conversions 257 → 0. "Expected an error, none thrown" 408 → 392 and "different error constructor" 114 → 83 (the part that is conversion order and conversion errors). The rest of the first group is in the areas of the other two agents (strict-mode assignment to read-only and undeclared names, validation in `defineProperty` and `defineProperties`, early errors).
-- The cost of the check: a first run after the change showed 34 tests that passed before and failed (the order of key conversion above). They pass again.
+- A first measure, on the base before the other agents merged (`#764` head `e6a65639`): 4,852 → 3,927. There the groups were: wrapper objects 712 → 0 (the tests that call `new Boolean`, `new String`, `new Number`: 269 + 243 + 200); script `valueOf`/`toString` in conversions 257 → 0; "expected an error, none thrown" 408 → 392; "different error constructor" 114 → 83. On the new base the same two groups are 237 → 226 and 23 → 20. The rest of the "expected an error" group is in the areas of the other agents (strict-mode assignment to read-only and undeclared names, validation in `defineProperty` and `defineProperties`, early errors).
+- A first run after the change showed 34 tests that passed before and failed (the order of key conversion above). They pass again. The comparison lists the tests that pass on js2 in the base run and fail in the new run; it is empty.
+- `tools/fixtures/js/test262-js2-baseline.txt` is the table of the new run (`-u`).
 
 ### Cost of the hot loop
 
-`interp_load`, release build, `perf stat -e instructions:u` with `GLIBC_TUNABLES=glibc.malloc.tcache_count=65535`, archMachine (load average 10 to 18, so only instruction counts), 3 runs each (spread at most 0.002 M), net = count(N) - count(0), in M instructions. Base is `e6a65639` (the tree before this change) built the same way.
+`interp_load`, release build, `perf stat -e instructions:u` with `GLIBC_TUNABLES=glibc.malloc.tcache_count=65535`, archMachine (load average 10 to 18, so only instruction counts), 3 runs each (spread at most 0.002 M), net = count(N) - count(0), in M instructions. Base is `origin/main` `fae94731`, built the same way.
 
 | Row | N | Base (cgu 16) | New (cgu 16) | Change | Base (cgu 1) | New (cgu 1) | Change |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `loopfn` | 1,000,000 | 333.5 | 310.5 | -6.9% | 323.5 | 347.5 | +7.4% |
-| `calls` | 1,000,000 | 715.5 | 666.5 | -6.8% | 712.5 | 737.5 | +3.5% |
-| `fib` | 30 | 1442.9 | 1358.0 | -5.9% | 1475.2 | 1476.5 | +0.1% |
-| `closures` | 200,000 | 419.4 | 402.6 | -4.0% | 423.9 | 435.7 | +2.8% |
-| `objects` | 200,000 | 154.1 | 151.0 | -2.0% | 156.3 | 166.5 | +6.5% |
+| `loopfn` | 1,000,000 | 310.5 | 325.5 | +4.8% | 323.5 | 333.5 | +3.1% |
+| `calls` | 1,000,000 | 691.5 | 692.5 | +0.1% | 717.5 | 715.5 | -0.3% |
+| `fib` | 30 | 1434.8 | 1407.9 | -1.9% | 1477.9 | 1445.5 | -2.2% |
+| `closures` | 200,000 | 415.1 | 413.5 | -0.4% | 425.9 | 427.3 | +0.3% |
+| `objects` | 200,000 | 151.1 | 155.7 | +3.0% | 155.7 | 162.6 | +4.4% |
 
-- The default release build is `codegen-units = 16`. There no row is over +0.5%. With `codegen-units = 1` four rows are over (`loopfn`, `calls`, `closures`, `objects`). **This needs an owner decision.** No new work runs on these paths: the changes in the loop are the `JmpBack` budget (a field of the realm, not a local), the `GetElem` and `SetElem` checks (slow path only) and the entry of `Vm::run`. Hypothesis: the register allocation and block layout of the one large `Vm::run` change with the code around it, as in the `fib` row of S2.7; both settings swing by several percent in either direction.
-- What I found first (measured): with `Rc<Program>` cloned inside `Vm::run`, the same build gave `closures` +3.6%, `fib` +2.1%, `objects` +1.3% at cgu 16 (callgrind: +1 instruction at each op dispatch, the realm pointer was reloaded from the stack). Passing `&Program` from `Vm::start` removed that. Two other tries made it worse or changed nothing (`dctor` read from the realm at its one use: no change; one `Machine` struct for the stack and the feedback: `fib` +4.1%).
+- **The bound of +0.5% is not met for `loopfn` and `objects` (both codegen settings). This needs an owner decision.** I found no new work on these paths. The changes in the loop are: the budget is a field of the realm (`JmpBack`), the program comes in as an argument of `Vm::run`, and the `GetElem`, `SetElem`, `Delete` and `In` checks are on the slow paths. `callgrind` on `loopfn` (20,000 turns, profiling build) gives 304 instructions per turn for the base and 310 for the new build; the instruction diff of the hot path is only a different register allocation (for example the `words` pointer is reloaded from the stack at each dispatch, about 1 instruction per op). Hypothesis: `Vm::run` was one value (`self`) from which the realm, the stack, the feedback and the program were derived; now they are four arguments, so the allocator keeps one more value live. The same function swung by -7% to +7% between builds of this branch (below), so the sign is not stable.
+- Earlier builds of this branch on the older base (`e6a65639`), for the record: with `Rc<Program>` cloned inside `Vm::run`, `closures` +3.6%, `fib` +2.1%, `objects` +1.3% at cgu 16 (callgrind: +1 instruction at each op dispatch). Passing `&Program` from `Vm::start` gave -6.9%, -6.8%, -5.9%, -4.0%, -2.0% for the five rows at cgu 16, and +7.4%, +3.5%, +0.1%, +2.8%, +6.5% at cgu 1. Two other tries made it worse or changed nothing (`dctor` read from the realm at its one use: no change; one `Machine` struct for the stack and the feedback: `fib` +4.1%).
+- A way to remove the cause without a change in the interface: keep the program, stack and feedback in the same struct as the realm for the host's own entry, and run nested calls through `Vm::run` on a second struct. It needs `Realm` to be a field of a struct that a nested call can build, which is a bigger change; not tried.
 
 ### Not tested
 
