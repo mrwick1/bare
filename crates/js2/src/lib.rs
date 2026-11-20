@@ -47,13 +47,18 @@ pub mod builtins;
 pub mod reenter;
 pub mod generator;
 mod bi_array;
+mod bi_json;
 mod bi_object;
 mod bi_number;
 mod bi_wrap;
 mod bi_string;
+mod bi_string_more;
 #[rustfmt::skip]
 mod prelude_facts;
 pub mod script;
 #[cfg(test)]
 #[path = "prelude_facts_tests.rs"]
 mod prelude_facts_tests;
+#[cfg(test)]
+#[path = "builtins_more_tests.rs"]
+mod builtins_more_tests;
