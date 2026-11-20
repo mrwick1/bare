@@ -16549,6 +16549,43 @@ Start-up: `script_run` of `var x = 1;` is 1,786,500 (main, 3 runs: 1,785,885 / 1
 - test262 (`TEST262=/data/claude-tmp/test262` at `e4fbf577`, `tools/js/test262_js2.sh -j 6`, 452 directories), this tree against `tools/fixtures/js/test262-js2-baseline.txt` and against main `43b62b05` run the same way. No test passes on main and fails here (0 lost). Against main, this tree passes more (the coercions of #785): for example `built-ins/Array/prototype/every` 178 to 201, `Object/seal` 42 to 51, `compound-assignment` 236 to 379. Against the checked-in baseline, 3 directories have one pass less, and main has the same count in each: `language/expressions/arrow-function` 41 to 40, `language/expressions/class` 190 to 189, `language/expressions/object/method-definition` 55 to 54. The baseline file is older than main there; this change did not cause the drop. I did not rewrite the baseline.
 - Main `43b62b05` does not build its lib tests: `script_tests.rs` calls `compile_after` with 5 arguments (it has 6 since #786) and reads `vm.prog` (it is `vm.realm.prog`). This change fixes the three lines.
 
+#### Stable code of the hot loop: cold paths (the `objects` row)
+
+The `objects` row failed the rule (+1.48% at cgu 16, +2.95% at cgu 1). The owner rule: fix the design, no exception. This section is the fix. Head before: `8c3ec195`.
+
+**What I found.** `objects` runs no call: its bytecode is `NewObjLit`, `GetField`, `SetField`, `Add`, `Inc`, `JnLtI`, `JmpBack` (the earlier text of this section says one construct call for each turn; that is wrong, `interp_load objects` has no `Call`). `callgrind --dump-instr=yes` at cgu 1 on 20,000 turns: `Vm::run` 12.96 M (main) and 13.44 M (PR head), 648 and 672 instructions for each turn. Every other function has the same count. The extra instructions are register traffic. On main the loop state is already in stack slots at cgu 1 (`pc` at `[rsp+0x38]`, `fp` at `[rsp+0x18]`, the stack base through a pointer to the `Vec`). `Vm::run` is 0xa1d1d bytes on main and 0xd74b2 on the PR head at cgu 1 (`step!` is expanded twice, for the `Wide` prefix and without it).
+
+**The design.** LLVM gives every arm of the dispatch `match` the same weight. A call in a rare arm (a class op, a private name, `super`, a spread call, `Lazy`) makes LLVM keep `pc`, `fp`, `words` and the stack base in slots around that call. The hot arms pay for it. The change tells LLVM which paths are rare, with `std::hint::cold_path()` (stable since Rust 1.95; the repo builds with 1.96):
+
+1. The first statement of the 48 arms of rare ops (declarations, `Lazy`, `CreateArgs`, `CreateRest`, templates, spread, `CopyProps`, `ObjRest`, accessors and methods, classes, private names, `super`, `Delete`, `In`, `InstanceOf`, `Exp`, `Throw`, `ThrowConst`, `ForInOpen`, `RetDerived`) is `cold_path()`.
+2. `throw!` and the collection branch of `gate!` start with `cold_path()`. Every `err!`, `tri!` error path and every allocation gate ends in one of them. `unwind` was already `#[cold]` (the earlier fix); that marked only the call, not the code that builds the error and reloads the frame.
+
+No arm moved and no logic changed; the diff is 4 lines of comment, 2 lines in the macros and 48 lines in the arms. The arms that stay hot: loads, moves, context ops, globals, fields, elements, object and array literals, `Closure`, `Call`, `CallU`, `New`, arithmetic, compare, jumps, switch, `Ret`, `RetUndef`, iterators, `Concat`, `ToStr`, `Typeof`, `LoadCallee`, `LoadNewTarget`.
+
+**Cost.** `interp_load`, `tools/js/instr.sh` method (`perf stat -e instructions:u`, `GLIBC_TUNABLES=glibc.malloc.tcache_count=65535`, 3 runs, net = count(N) - count(0), M instructions, spread at most 0.003 M). Main `43b62b05` and this tree built and measured in the same session on archMachine, both with the symbols kept (`CARGO_PROFILE_RELEASE_STRIP=false`; the counts equal the stripped build). cgu 16 is the default; cgu 1 is `CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1` for both trees.
+
+| Row | N | Main cgu 16 | PR head | Now | vs main | Main cgu 1 | PR head | Now | vs main |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loopfn` | 1,000,000 | 320.50 | 323.50 | 312.50 | -2.50% | 328.50 | 327.50 | 308.50 | -6.09% |
+| `calls` | 1,000,000 | 708.50 | 691.50 | 668.50 | -5.65% | 723.50 | 710.50 | 678.50 | -6.22% |
+| `fib` | 30 | 1452.28 | 1401.12 | 1371.50 | -5.56% | 1480.55 | 1454.97 | 1415.93 | -4.36% |
+| `closures` | 200,000 | 418.29 | 414.69 | 403.49 | -3.54% | 428.95 | 426.95 | 410.55 | -4.29% |
+| `objects` | 200,000 | 153.39 | 155.66 | 151.79 | -1.04% | 158.20 | 162.86 | 153.39 | -3.04% |
+
+No row is above main at either build, so the rule needs no exception. Which part moved `objects` (verified, each step built and measured): step 1 (the arms) alone gave `objects` 151.79 (-1.04%) at cgu 16 and 161.13 (+1.85%) at cgu 1, and the other rows lower than main at cgu 16. Step 2 (`throw!` and `gate!`) took cgu 1 to 153.39 and moved the other rows at cgu 1 down by 2% to 5%. Why the allocator behaves so is a hypothesis: the callgrind diff before the change showed only different register choices.
+
+Start-up, `script_run` of `var x = 1;` (3 runs, instructions): main 1,786,773 / 1,787,272 / 1,789,366; PR head 1,792,760 / 1,793,015 / 1,795,915; now 1,791,923 / 1,793,950 / 1,794,258 at cgu 16 (+0.29% on the minimum against main; the PR head is +0.34%). At cgu 1: main 1,777,903, PR head 1,786,994, now 1,782,332 (+0.25%; the PR head +0.51%). This change does not add to the start-up cost of the PR and does not remove it. The start-up cost is the `Codes` table, as described above.
+
+Two other programs (`script_run`, cgu 16, instructions, main to now): a class program with a private field, a derived class with a field, `super.m()` and `super()` (20,000 objects, 170.2 M against 173.7 M, -2.0%), and a mixed program with `for of`, `for in`, `try`, `in`, `instanceof` (53.9 M against 54.2 M, -0.7%). So marking the class and private ops cold costs nothing that I could measure.
+
+**Stability test (the aim).** The earlier rounds moved the hot rows by 2% to 7% for an edit that did not touch them. I edited the cold arm `GetSuper` twice and built both settings each time. First edit, on the build with step 1 only: an `ensure!` (stack growth), an xor into `realm.fuel`, and a `black_box`. Rows moved by at most 0.2% (`fib` cgu 1 1476.51 to 1473.82; `calls` cgu 1 706.50 to 705.50; `closures` 0.1% to 0.2% at both settings; the others equal to 0.003 M). Second edit, on the final build (steps 1 and 2): the same plus a loop over the registers and two `gate!()` (a collection in the arm). All ten numbers (five rows, two settings) equal the table above to 0.003 M. Neither edit is kept.
+
+**Not built:** moving the bodies of the rare arms into `#[cold] #[inline(never)]` functions, and design H (a fixed table address with a snapshot in the loop). The hint reached the aim of both (the hot rows no longer follow the rare arms) with a 54-line change, and the code stays in place. If a later edit moves a row again, the next step is to move the body of the arm into a function. A new arm of a rare op must start with `cold_path()`; the comment at the `match` says so.
+
+**Tests.** `cargo test --locked -p bare-js2 --lib`: 422 pass (`a_scope_with_many_locals_compiles_in_linear_time` included, run in the full set). `cargo test --locked -p bare-js-diff`: pass. test262 (`tools/js/test262_js2.sh -j 6`, checkout `e4fbf577`), test by test (the `PASS` lines): main `43b62b05` 14,718, PR head `8c3ec195` 15,770, this tree 15,770. No test that passes on main fails here (0 lost), and the PR head and this tree have the same set. No Miri run: `codes.rs` did not change and the change adds no `unsafe`.
+
+**Not tested:** the interaction with #773, #774 and #775 (none of them is on main; #773 changes `r!` to a cached pointer, so it moves the register allocation again: measure `objects` after the first of them lands); Windows, macOS, arm64 (`cold_path` is a hint on every target, the numbers are x86-64 only); an idle machine for wall time (instruction counts only); the other rows of the cost matrix of `docs/resources.md` outside js2; the start-up cost of the PR.
+
 ## 2026-11-20: the pre-parse facts of the prelude are a generated file (js2, option B′ of `docs/design-js2-prelude.md`)
 
 Branch `t3/js2-prelude-facts`, from the head of #770 (`ee5fc1f5`, it was open when I started). Decision of the owner (section 8 of the design): build B′.
