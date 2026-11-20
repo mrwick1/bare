@@ -14285,3 +14285,26 @@ The 8 `loader_load` rows: mean change +0.148% glibc. None is over +0.5%.
 Checks: new tests in `browser_loader_tests.rs` (a rejected top-level `await` is reported once after collections run between all tasks; `import()` of a namespace, a missing file and a syntax error settles under stress mode; a collection between `take_dynamic_imports` and `finish_dynamic_import` keeps a promise that no script holds). The stress tests set `Interp::set_gc_stress(true)` themselves, so they collect in both modes. Linux: `cargo test --locked -p bare --lib` with filters `loader` (118), `module` (18) and `import` (25) pass, also with `BARE_GC_STRESS=1`. Crate tests once: `bare` lib 1693 passed (6 ignored), `bare-js` lib 1076 passed (1 ignored), `bare-js-api` 6 passed. Windows 11 VM (cargo xwin debug test exe of `bare`): same three filters, 118, 18 and 25 passed.
 
 Not tested: a collection inside the loader between a take and a finish (the old engine collects only between tasks, so the new tests cannot make one; they check the handles across collections around the loader); a full `bare` run on Windows; wall time; peak memory of the handles; clippy (`cargo clippy -p bare` stops on lints in `bare-os` and `bare-observe` that are not in this change).
+
+## 2026-11-20: structured clone design (plan step S0.4, navigation)
+
+COMPLETE. Design only: `docs/design-host-clone.md`. No code changed. The PR is not merged and has no auto-merge. The owner reviews it before any code.
+
+Why: option E (the `CloneOps` sub-trait, commit `55594ea6`, not merged) gave the same output as the old walk but was +2.76% on `navigation_load history 1` and +3.00% on `history 10` (figures from the task brief, not rebuilt). The owner chose option F: a native clone algorithm in the engine, with a host `Delegate` as in V8.
+
+Measured (archMachine, origin/main `a8049517`, release build with symbols in `/data/bare-tmp/s0/design-clone/target`; `tools/js/instr.sh`, minimum of 3 runs; callgrind, 1 run per row):
+
+| Row | Instructions | Walk | `materialize_with` |
+|---|---:|---:|---:|
+| `navigation_load history 1` | 85,956,359 | 13.31 M (15.3%) | 8.38 M (9.6%) |
+| `navigation_load history 10` | 792,321,020 | 132.5 M (16.6%) | 83.6 M (10.5%) |
+| `web_apis_load clone 1` | 182,540,980 | 53.3 M (28.9%) | 19.7 M (10.7%) |
+| `scheduler_load messages 1` | 31,125,968 | not on the path (scalar messages skip the walk) | |
+
+One `history` state is 13.3 K (walk) + 8.4 K (materialize) = 21.7 K instructions, for 3 objects and 8 properties. The +0.5% limit is 434 instructions per state. Per-call costs: `own_keys` 750, `get_value` 232, `get_own_property` 138, `HashMap::insert` 346 (+ SipHash), `clone_class` 229, `is_host_object` 199, `define_data` 473, `put_value(length)` 1,228, `intern_units` 155. Type sizes of the old `State` (scratch program): `SV` 24, `SKey` 16, `SKind` 88, `SNode` 112 bytes.
+
+Design: F2 (the engine walks plain data and writes a byte record in the V8 style, with a string table for property names) plus F3 (a fused copy with no record for `structuredClone` and same-heap `postMessage`). The host sees only host objects, the transfer list and the error, through `CloneHost`. The format, the cost model and the limit checks live in `bare-js-api`, so the old engine and js2 share one copy. The page gives the interface, the format, the walk rules, the js2 route, and a plan with a spike first (gate: at least 8.5 M fewer instructions on `history 1`).
+
+Hypothesis (not measured): the native walk costs about 4.4 K per `history` state against 21.7 K, about 17 M less on `history 1`. The record is about 48 bytes against about 1.1 KB.
+
+Not tested: every "Expected cost" number, the cost of option E (taken from the brief), `jemalloc` and codegen-units=1 runs, the Windows VM, the new engine. The V8, WebKit and Ladybird record layouts are verified only as far as the public headers show; statements marked "from memory" in the page are not verified.
