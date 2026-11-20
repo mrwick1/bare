@@ -113,6 +113,9 @@
 //! engine runs its write barrier there.
 #![forbid(unsafe_code)]
 
+pub mod clone;
+pub use clone::{CloneHost, CloneIn, CloneLimits, CloneOpts, Cloned, Moved, Refused};
+
 use std::cell::{Cell, RefCell};
 use std::marker::PhantomData;
 use std::rc::Rc;
@@ -726,6 +729,23 @@ pub trait Engine: Sized {
     /// A function that calls `target` with `this` fixed, with the arguments of its own call. It reads no `Function.prototype.bind`.
     /// The engine traces both. `target` is a function, or a `TypeError`.
     fn bind<'s>(&mut self, target: Local<'_>, this: Local<'_>) -> Result<Local<'s>, Error<'s>>;
+
+    // Structured clone (`docs/design-host-clone.md`). The engine walks plain data itself and writes a record (`clone`). It asks the
+    // host only for host objects, the transfer list and the error. The default bodies say that the engine has no clone yet.
+
+    /// Serialize `v` into a record, with the limits and the transfer list of `o`. The engine detaches the listed buffers and calls
+    /// [`CloneHost::transfer_out`] for the other listed items only after the walk and every check passed.
+    fn clone_out<'s>(&mut self, _v: Local<'_>, _o: &CloneOpts<'_, '_>, _h: &mut dyn CloneHost<Self>) -> Result<Cloned, Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("clone_out")))
+    }
+    /// Build the object graph of a record, and the objects of its moved host items.
+    fn clone_in<'s>(&mut self, _c: Cloned, _h: &mut dyn CloneHost<Self>) -> Result<CloneIn<'s>, Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("clone_in")))
+    }
+    /// Serialize and build in one pass, with no record and no transfer list: the copy and its byte cost.
+    fn clone_copy<'s>(&mut self, _v: Local<'_>, _l: &CloneLimits, _h: &mut dyn CloneHost<Self>) -> Result<(Local<'s>, usize), Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("clone_copy")))
+    }
 }
 
 /// Open the outermost scope of `e`.
@@ -1075,5 +1095,7 @@ impl<'s, E: Engine> Scope<'s, E> {
     }
 }
 
+#[cfg(test)]
+mod clone_tests;
 #[cfg(test)]
 mod tests;
