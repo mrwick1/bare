@@ -14159,3 +14159,42 @@ Checks:
 - Windows 11 VM: `fetch` 95, `abort` 19, `stream` 48, `frame` 50, `owner` 8 passed.
 
 Not tested: the crate tests of `bare-js-api` and `bare-js` on Windows; wall time; a collection with 100,000 owners of mixed kinds; the full cost matrix at codegen-units=1 (only the `fetch_load objects` and `iterate` rows).
+
+## 2026-11-20: persistent remote windows (plan step S0.4, navigation step 6)
+
+Plan step 6 of `docs/design-host-navigation.md`: child pages and the session keep their remote windows in persistent handles. No interface change.
+
+Changes:
+
+- `Kids::wins` (`browser_child.rs`) holds `(Win, Vec<Persistent>)` for each window object. The window entry holds its target and its proxy. The `location` entry holds the `location` object. `Kids::common_held` holds the 10 shared functions of `Common` (handler, `Proxy.revocable`, `closed`, `replace`, the two `href` functions, four no-ops). `Kids::add_win` and `Kids::set_common` make the handles.
+- `Kids::roots` and its call in `Dom::roots` are gone. `Kids::sync` drops the entries of a child that left the document, so the handles of its windows go with it. `Drop for Kids` frees the rest.
+- The design named `window.open`, `opener` and the session as other holders. In the code `window.open` gives `null` (`browser_basics.rs`) and `opener` is `null`. The session makes a new `Browser` for each document, and a `Browser` owns its `Kids`. So `Kids` is the only holder, and no other code needed a change.
+- Observation: in the parent page a live iframe wrapper also reaches its window through the frames owner (`browser_frames::trace_node`). In a mutation run with no handles at all, a window that no script held still survived three collections. So in the parent page the handle is a second root. A test that waits for a collection cannot show a missing handle. The tests count the handles through a test-only `Kids::handle_count`.
+
+Tests (`browser_child_tests.rs`): a remote window that no script holds has its 3 handles and the 10 shared ones while its page lives (this test fails when `add_win` makes no handle). Removing the iframe leaves only the 10 shared handles, and a `WeakRef` to the window is empty after a collection. A window that a script holds, with its `location` object, answers the same after 3 collections.
+
+Cost matrix (archMachine, base = origin/main `6d9f6c25` built fresh, new = this branch; 3 runs per row, minimum; `-j4`; 817 rows): mean change glibc -0.001%, jemalloc +0.000%. Rows over +0.5% under one allocator: 0. Under both: 0. `parse_load deep 1` and `10` fail to run on both trees (stack overflow, known). No cost row loads a child page, so the matrix does not measure this change. The change removes a call at each collection (`Kids::roots`, a walk over an empty map in these rows).
+
+| `navigation_load` row | glibc base | glibc new | change |
+|---|---|---|---|
+| `url 1` | 127,691,296 | 127,679,779 | -0.009% |
+| `iterate 1` | 258,258,845 | 258,282,944 | +0.009% |
+| `subclass 1` | 71,707,895 | 71,705,126 | -0.004% |
+| `history 1` | 86,442,843 | 86,441,250 | -0.002% |
+| `storage 1` | 55,152,686 | 55,139,471 | -0.024% |
+| `route 1` | 58,010,946 | 58,007,636 | -0.006% |
+| `frames 1` | 120,650,480 | 120,627,360 | -0.019% |
+| `url 10` | 1,219,382,582 | 1,219,417,320 | +0.003% |
+| `iterate 10` | 2,504,234,846 | 2,504,520,587 | +0.011% |
+| `subclass 10` | 633,153,551 | 633,148,941 | -0.001% |
+| `history 10` | 795,299,530 | 795,095,518 | -0.026% |
+| `storage 10` | 481,828,907 | 481,803,607 | -0.005% |
+| `route 10` | 510,604,159 | 510,861,232 | +0.050% |
+| `frames 10` | 1,137,920,137 | 1,137,821,811 | -0.009% |
+
+Checks:
+
+- Linux: `cargo check -p bare -p bare-js -p bare-js-api` exits 0. `cargo test --locked -p bare --lib` filtered `navigation` 89, `window` 40, `open` 5, `session` 43, `child` 49 passed, also with `BARE_GC_STRESS=1`. `cargo test --locked -p bare-js-api -p bare-js -p bare --lib` ran once: `bare` 1696, `bare-js` 1070, `bare-js-api` 6 passed.
+- Windows 11 VM: `navigation` 89, `window` 40, `open` 5, `child` 49 passed. `session` 41 passed and 2 failed: `a_page_fed_in_pieces_gives_the_tree_of_a_one_step_parse` and `a_page_parsed_in_slices_gives_the_tree_of_a_one_step_parse` (fixture path, `browser_session.rs:1068`, known, not fixed).
+
+Not tested: a grandchild page whose parent window is the only holder of its handles (`delete window.parent` at depth 2); the crate tests of `bare-js-api` and `bare-js` on Windows; wall time; the codegen-unit check (no row was over the limit).
