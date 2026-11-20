@@ -21,3 +21,4 @@ pub mod atoms;
 pub mod shapes;
 #[allow(unsafe_code)]
 pub mod gc;
+pub mod roots;
