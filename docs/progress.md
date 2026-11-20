@@ -15672,3 +15672,38 @@ Not built, design only. Each needs an interpreter change, and none is cheap enou
 Check. `cargo test --locked -p bare-js2 --lib`: 282 pass on Linux (260 on main). `compile::tests`: 54 (34 on main): 14 new golden tests (one for each of: `arguments`, rest and spread call, spread in `new` and arrays, own-name function expression, regexp and BigInt, tagged template, object accessors and `__proto__` and spread, object rest, class with fields and static members, derived class with `super()` in an arrow, `super` property access, private names, `new.target`, class expression name), `field_initializers_and_static_blocks_are_ready_children_of_the_class`, `every_construct_of_a_class_passes_the_verifier` (12 sources), the gaps (script var, iterator close, `break` closes once, 60,000 locals in linear time), and the updated list of unsupported constructs (async, generator, `with`, direct eval, `delete` of a global). I read each golden against the JS meaning. Windows 11 VM: the whole lib run is 280 pass and 2 fail (the same two parser corpus tests as before: `parse::tests::corpus_status_matches_acorn` and `parse::lazy_tests::a_lazy_parse_finds_the_same_errors_as_a_full_parse_on_the_corpus`; they do not find the corpus on the VM); `compile::tests` 54 pass. `cargo clippy -p bare-js2 --all-targets`: no warning in the files of this change (old warnings remain in `heap.rs`, `object_census.rs` and `bare-os`).
 
 Not tested: running any compiled code, so the semantics of the 38 new ops are checked by reading the disassembly and by the verifier only; class, `super`, private-name and spread behavior in an interpreter (S2.6); the S2.6 driver's use of `Child::ready`; mapped `arguments`; function names of methods and classes; Miri; arm64; a React bundle with classes beyond the clangd and tauri bundles; the cost matrix (js2 is not wired into the browser); the `bc_hist` example on Windows.
+
+## 2026-11-20: host handlers on the interface, A1c: the rest of group A1 (plan step S0.4 / A1c)
+
+Status: the handlers of the files below run through the interface (`Scope`, `Local`, `Args`). Tests pass on Linux and Windows. The full matrix passes under the standing rule, with one row on the limit (below). Base: origin/main `6067b9fb` (the commit #758 merged). The diff is 2,810 changed lines.
+
+Files converted: `browser_attr.rs`, `browser_nodelist.rs`, `browser_dataset.rs`, `browser_element.rs`, `browser_elements.rs`, `browser_html.rs`, `browser_html_members.rs`, `browser_reflect.rs`, `browser_nodecmp.rs`, `browser_chardata.rs`, `browser_fragment.rs`, `browser_namespace.rs`, `browser_slot.rs`, `browser_shadow.rs`, `browser_table.rs`, `browser_details.rs`, `browser_svg.rs`, `browser_gaps.rs`, `browser_shims.rs`, `browser_basics.rs` (the dialogs, `document.dir` and the getters), `browser_handlers.rs`, `browser_cookie.rs`. Registrations changed in `browser.rs` (the `DEFS` rows), `browser_select.rs` and `browser_navigation.rs` (`document.cookie`).
+
+Not converted, and why:
+
+- `browser_implementation.rs`: its handlers (`DOMParser`, `XMLSerializer`, `DOMImplementation`) use `new.target`, the lazy global definers and `interface`. Only one call of `fragment::serialize` changed. Next step.
+- `browser_lazy.rs`, `browser_sources.rs`: they have no handler of the old form. They hold install code and tables.
+- In `browser_basics.rs`: `postMessage`, `navigator.plugins`, `navigator.mimeTypes`, `javaEnabled` and `sendBeacon`. They need `clone_with`, `transfer_list`, `fetch` and `host_promise_then`, which still take the old engine.
+- The install functions, the lazy global definers, `Host::fill_indexed` and the named hooks stay in the old form in every file. They run once, or they key tables by `ObjId`.
+
+Changes.
+
+- `browser_scoped.rs`: bridges `lift`, `obj_id`, `raw_arg`, `Dom::obj_s`, `Dom::new_source_s`, `Dom::style_html_el_s`. `Dom::call_scoped` reads the entry of `Dom::scoped` through a raw pointer, with no `RefCell` borrow (A1b lever 1). `CUR_NEW` is `pub(crate)`.
+- `browser_dom_old.rs`: `def_get_s` and `def_get_sh` (getter new, setter old). The wrappers `adjacent_start` and `adjacent_pos` are removed (no caller). `browser_cookie.rs` and `browser_navigation.rs`: `document.cookie` uses `def_get_s`; `def_acc` stays for its other callers.
+- `browser_handlers.rs`: the handler accessors read their id as `style.cur & !CUR_NEW`, and the ids come from `Dom::scoped`. The test `the_accessors_are_made_by_use` counts `Dom::scoped` now, not `Dom::handlers`.
+- `browser_nodelist.rs`: `fill` skips the scope when the list is fresh.
+- Dead code of the old form in the converted files is removed (`probe`, `arg`, the `V` aliases).
+
+Grep gate (`\bbare_js::(value|eval::Interp)|\bObjId\b|\bInterp\b|\.engine\(\)|\.heap\.`, lines for each file, origin/main then now): attr 66 to 29, nodelist 22 to 19, dataset 25 to 22, element 20 to 3, elements 24 to 11, html_members 13 to 3, html 15 to 12, reflect 8 to 3, nodecmp 19 to 2, chardata 14 to 3, fragment 13 to 6, namespace 13 to 2, slot 8 to 3, shadow 12 to 1, table 24 to 4, details 12 to 5, svg 18 to 12, gaps 13 to 11, shims 7 to 5, basics 30 to 21, handlers 39 to 33, cookie 4 to 0. Unchanged: implementation 24, lazy 9, sources 13. The goal 0 is not met: what stays is install code, `ObjId`-keyed tables (the Attr and map tables, the listener tables, the nodelist `lists`), the lazy definers and the bridges in the files above.
+
+Measurements. Machine archMachine. Instruction counts (`perf stat -e instructions:u`, minimum of 3 runs, `tools/js/cost_matrix.sh -j4`, 817 rows).
+
+- Early check, `tools/js/instr.sh`, 3 runs: `attr_load react 1` +0.773% before the `Dom::scoped` lever, +0.595% after. `churn 1` +0.675% to +0.576%.
+- Full matrix at default flags, final tree: mean -0.017% glibc and +0.524% jemalloc (8 rows measured). Over +0.5% under both allocators: `attr_load churn 1` +0.573% / +0.529%, `churn 10` +0.576% / +0.581%, `react 1` +0.610% / +0.588%, `react 10` +0.633% / +0.619%, `select_load react 1000` +0.775% / +0.770%. Over under one allocator only: `dataset_load read 10000 1` (known exception), `session_load chain 10`, `select_load react 10`. `parse_load deep 1` and `10` do not run on the base tree either.
+- Rule of the owner (both trees built with `RUSTFLAGS="-C codegen-units=1"`, glibc): `attr_load churn 1` +0.474% to +0.478%, `react 1` +0.358%, `react 10` +0.384%, `select_load react 1000` +0.496%, `react 10` +0.408%. `attr_load churn 10` is on the limit: six runs gave +0.441%, +0.448%, +0.461%, +0.497%, +0.508% and +0.514% (jemalloc on the two runs over: +0.518% and +0.552%). The count of one build varies by about 0.05% between runs of the matrix script. I did not find a change that moves it clearly under the limit.
+- Tried and reverted: a check for an existing `Attr` wrapper in `attr::fill` before the scope. `attr_load churn` went to +1.2% (every read in that row makes a new wrapper, so the check only adds work).
+- Lever left: a read of `this` first in `api_win` (about 3 instructions a call) and `this` stored by pointer (about 2). Not built.
+
+Tests. Linux: `cargo test --locked -p bare-js-api -p bare-js -p bare --lib`: 32, 1104 (1 ignored) and 1714 (6 ignored) pass. The filters of the converted files and of `browser_scoped`, `custom`, `domexception`, `mutation`, `range`, `select`, `cookie`, `browser_tests` (436 tests, 1 ignored): pass plain, with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1`. Windows 11 VM (`cargo xwin test --no-run`, `winssh`): the same filters, 436 pass.
+
+Not tested: `BARE_GC_STRESS=1` and `BARE_ALL_API=1` with the whole `bare --lib`; the full `bare --lib` on Windows; the jemalloc run of the rows at `codegen-units=1` except the two noted; RSS and wall time; the files that are not converted.
