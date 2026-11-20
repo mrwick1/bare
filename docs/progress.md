@@ -17724,3 +17724,39 @@ Fix: `Outcome::Resume` is gone. A native that wants a resume asks for `Outcome::
 | `objects` | 734.45 | 732.05 | -0.33% | 735.61 | 735.64 | +0.00% |
 
 Result: by the standing rule every row passes. `objects` of `interp_load` is over +0.5% at the default build (+0.85%) and within +0.5% at `codegen-units=1` (-0.13%); the other nine rows are within +0.5% at both builds. The `objects` row at the default build is still above main. I did not find a cause in the work: the arms that it runs are the same; the layout of the loop moves with the build. test262 (`TEST262=/data/claude-tmp/test262`, `tools/js/test262_js2.sh -j 4`): 17,324 tests pass on main and on this tree; no test that passes on main fails here (per-test `new.txt` compared). `cargo test --locked -p bare-js2 --lib`: 480 pass. `cargo test --locked -p bare-js-diff`: pass. Not tested: Windows; the cost of `next` after the change (`gen_load`; the cold path has the same code as before, one `is_hole` test more).
+## 2026-11-21: host handlers on the interface, Z: dead bridges (plan step S0.4 / Z)
+
+Status: S0.4 complete for the handlers. This PR removes the code that the groups H0 to E left unused. The PR is open without auto-merge. The rest of group Z cannot be done now (see "Kept").
+
+Base: `origin/main` at `1f10a631` (it holds #779, #781 and the other groups). The compiler found the dead code: `cargo check --locked -p bare --all-targets` gave 8 warnings on the base and gives none now. The same check for `x86_64-pc-windows-msvc` (`cargo xwin check`) and for the lib without tests gives none.
+
+Removed (61 lines, 1 line added; 5 files):
+
+- `browser_scoped.rs`: `via`, the bridge that called a handler of the new form from the old form. It has no caller.
+- `browser.rs` and `browser_fetch.rs`: `Kind::Accessor` (an accessor pair of the old form), its match arms in the `DEFS` install loop and in the fetch table, and the `A` alias. Every accessor row is `AccessorS` now.
+- `browser_dom_old.rs`: `attr_get`, `clone_tree`, `body` and `html_child`. They have no caller.
+- `browser_events.rs`: `Dom::event_of`. It has no caller (A2 entry: the last caller was in `browser_form.rs`).
+
+Kept, and why. The plan lists these for Z, and each is still in use:
+
+- The old `eval::Host` impl of `Dom` and the old `H` alias: 77 functions of the form `fn ... &[Value]` are left in `crates/bare/src`, and `DEFS` rows of `Kind::Method` and `Kind::Get`, `add_fn` (28 calls) and `add_old` still register them. Every install function (`ensure`, `install`, the lazy globals, `browser_lazy`) uses the old form.
+- The wrappers of A1 (`old`, `old_v`, `run`, `run_v`, `*_s` adapters): they have callers. `run_v` has 5 (`browser_fetch.rs`, `browser_web.rs` twice, `browser_range.rs`, `browser_dom_old.rs`).
+- The 39 `roots`, `trace` and `prune` functions: the tables hold `ObjId` and raw `Value`. The plan moves them with the tables. That needs a design for host tables on `Persistent` and `Traced`, and it is not a removal.
+- `Browser::it` stays public: 396 `.it.` sites in `crates/bare/src`, plus the examples and `drive`. The plan moves them to the facade in separate PRs.
+- The grep gate is not added. The count is 1,820 lines over `crates/bare/src` (the gate in the design must be 0 except `browser_session.rs`).
+- `BARE_ALL_API`, `Fun::Old` and `add_old_on_api` (test build only): used by the tests of the interface entry.
+- `bare-js-api`: the plan does not list a removal there. Items with no use in `crates/bare`, `drive` and `mcp` (`array_len`, `set_lazy`, `clear_lazy`, `new_host_indexed`, `new_host_named`, `own_kind`, `own_enumerable_data`, `set_str`, `define_named` and a few more) are part of the `Engine` interface for the second engine (`bare-js2`). I did not remove them.
+
+Measurements. Machine archMachine (loaded: only instruction counts are used). Both trees are release builds in separate target directories; the base is `origin/main` `1f10a631`, the new tree is this branch after the merge of it.
+
+| Check | Base | New | Change |
+| --- | --- | --- | --- |
+| `tools/js/cost_matrix.sh -j4`, 817 rows (minimum of 3 runs; `parse_load deep 1` and `deep 10` fail on both trees, known) | | | mean glibc -0.002%; 0 rows over +0.5%; largest `resources_load small 1` +0.295%; smallest `fetch_load bytes 10` -0.940% |
+| `bare --run http://127.0.0.1:PORT/` of a small page (one script), instructions, 3 rounds of `instr.sh` (each the minimum of 3 runs) | 5,185,763 / 5,185,712 / 5,185,042 | 5,182,900 / 5,186,090 / 5,185,856 | within 0.06% (noise) |
+| Release `bare` binary | 17,236,944 B | 17,235,472 B | -1,472 B |
+
+The `codegen-units=1` rule was not needed: no row is over +0.5% at the default build. The change removes functions that nothing calls, so the code that runs is the same.
+
+Tests. Linux, debug: `cargo test --locked -p bare --lib -p bare-js -p bare-js-api`: 1718 (6 ignored), 1106 (1 ignored) and 32 pass (run before the merge of `origin/main`, which changes only tests and docs in the Windows fixes).
+
+Not tested: the Windows tests (only `cargo xwin check`, no VM run); `BARE_GC_STRESS=1` and `BARE_ALL_API=1` runs; `codegen-units=1`; RSS and wall time; the journeys and `tools/suite/run.py`; macOS; the `cfg` paths of other targets.

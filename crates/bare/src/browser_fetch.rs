@@ -3103,11 +3103,6 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
                 let f = d.add_fn(it, h, &format!("get {}", def.name), 0, false)?;
                 d.define_accessor(it, target, key, f, None)?;
             }
-            Kind::Accessor(gh, sh) => {
-                let f = d.add_fn(it, gh, &format!("get {}", def.name), 0, false)?;
-                let s = d.add_fn(it, sh, &format!("set {}", def.name), 1, false)?;
-                d.define_accessor(it, target, key, f, Some(s))?;
-            }
         }
     }
     let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
