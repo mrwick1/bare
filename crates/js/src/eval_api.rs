@@ -609,6 +609,14 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
         self.clone_out_impl(v, o, h).map_err(|e| self.api_err(e))
     }
 
+    fn clone_copy<'s>(&mut self, v: bare_js_api::Local<'_>, l: &bare_js_api::CloneLimits, h: &mut dyn bare_js_api::CloneHost<Self>) -> Result<(bare_js_api::Local<'s>, usize), bare_js_api::Error<'s>> {
+        let v = self.api_at(v);
+        match self.clone_copy_impl(v, l, h) {
+            Ok((v, cost)) => Ok((self.api_push(v), cost)),
+            Err(e) => Err(self.api_err(e)),
+        }
+    }
+
     fn clone_in<'s>(&mut self, c: &mut bare_js_api::Cloned, h: &mut dyn bare_js_api::CloneHost<Self>) -> Result<bare_js_api::CloneIn<'s>, bare_js_api::Error<'s>> {
         match self.clone_in_impl(c, h) {
             Ok((v, hosts)) => {

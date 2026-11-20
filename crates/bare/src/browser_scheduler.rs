@@ -1022,10 +1022,8 @@ impl Dom {
             Value::BigInt(_) | Value::BigHeap(_) => Ok((v, 16usize.saturating_add(it.heap.bigint_limbs(v).saturating_mul(8)), none)),
             Value::Object(_) if it.is_callable_value(v) => Err(self.dom_err(it, "DataCloneError", "function could not be cloned.")),
             Value::Object(_) => {
-                let mut snapshot = crate::browser_navigation_state::clone_state_with(self, it, v, &[])?;
-                let bytes = 16usize.saturating_add(snapshot.cost());
-                let data = crate::browser_navigation_state::materialize(self, it, &mut snapshot)?;
-                Ok((data, bytes, none))
+                let (data, _, bytes) = crate::browser_navigation_state::clone_with(self, it, v, &[])?;
+                Ok((data, 16usize.saturating_add(bytes), none))
             }
         }
     }
