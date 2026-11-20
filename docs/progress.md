@@ -16211,3 +16211,82 @@ Net slope (scale 10 minus scale 1), M instructions:
 
 
 Model of the design (section 5, step 3, hypothesis): `loop` 1.49 at scale 10, `calls` 1.37, `fib` 1.34, `closures` 0.55, `objects` 1.45, bundle-like 0.92. Measured: `loop` 1.45, `calls` 1.36, `fib` 1.33, `closures` 0.54, `objects` 1.43, bundle-like 0.91 (scale 1). The model matched within 0.04. The bundle-like program does not change (it has no top-level globals in its hot loop).
+
+### Step 4: the call path, a constant of 32 bits and a jump to a return
+
+Design: section 5, step 4 (options 3 and 2). Three changes. No function cell grows (see the memory note below).
+
+1. The call path (`enter!` and `ret!` in `Vm::run`, `reload_to!`). `enter!` stored the 10 words of the frame record with the checked `stack[..]` index one by one, looked the callee code up twice, and `reload!` looked the code up a third time. Now `enter!` writes the record through the raw pointer after one `ensure!`, finds the code of the callee once (`ncode`), and `reload_to!(code)` sets `regs`, `code`, `words` and the feedback of the frame in one place. `ret!` reads the record with `rec_int!` (a read through `regs`), finds the code of the caller once, and writes the result through `regs`. `Realm::function` reads the two slots of the function cell (the code and the context) with `Obj::read_inline` (one unchecked read of an inline slot, the layout is fixed for a function cell; the two indexes are asserted below 9 in `Realm::new`) in place of a kind test and a layout test.
+2. A constant that does not fit the 16-bit immediate: `AddX`, `SubX`, `MulX` and `ModX` (form `AbcX`, spec `w r - i`; the constant is the 32-bit word `x`). The compiler emits them in `binary` and `binary_regs` when the right operand is an int constant outside the immediate range (and the left one for `Mul`, which commutes). Before, such a constant was a `LoadI` with a wide operand into a temporary and then the register op: two dispatches. The verifier needs no new rule: `x` is checked as for `AsBxX`. No op is added for `Div` and the bit ops: no row has one.
+3. A jump to a return (`Asm::finish`). A `Jmp` whose target is a `Ret` or `RetUndef` becomes that `Ret`. It is done at the end, on the instructions, so the root maps (the numbers of the instructions do not change; neither op is a safepoint) and the handler ranges stay. A `return` inside `try` with `finally` or inside `for-of` unwinds before its `Ret`, so its `Jmp` does not go to a `Ret` and does not change. The golden disassembly of 4 compile tests changed (the `Jmp -> Ret` lines).
+
+Checks: `every_shape_of_callee_gives_its_value` (fewer and more arguments than parameters, `arguments`, rest, default value, a native tail call, `new` with an object as result, getter and setter, arrow, closure; the values are those of node), `a_constant_of_32_bits_and_a_jump_to_a_return_give_the_same_values` (an int, a string, a double, `-0`, an overflow, a `null` and a `true`, with the values of node; `return` of a conditional in `try`/`finally`, in `for-of` and in `catch`). `cargo test --locked -p bare-js2 --lib`: 383 pass.
+
+Per-op cost of the process (`op_cost`, instructions for one op, mean of the 3 runs), step 3 against step 4: `call0` 308 against 218.2, `add` 42.1 against 43.2, `addi` 43.0 against 44.1, `inc` 40.1 against 40.1. The call is 29% cheaper. The `add` and `addi` arms are 1.1 instructions dearer: the same size of change as in the other steps (a change in the giant `run` function moves the allocation of the registers; two trials to remove it, `get_unchecked_mut` for the feedback and `#[inline(always)]` on `Realm::function`, made `loopfn` worse and were taken out). No row is worse, because the rows gain more than the arms lose.
+
+Instructions of the whole process, same method:
+
+| Row | Scale | step 3 (M) | step 4 (M) | change | spread step 4 % | QuickJS (M) | step 4 / QuickJS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loop` | 1 | 96.34 | 89.15 | -7.5% | 0.004 | 64.69 | 1.38 |
+| `loop` | 10 | 922.54 | 850.55 | -7.8% | 0.001 | 635.29 | 1.34 |
+| `loopfn` | 1 | 56.76 | 49.57 | -12.7% | 0.016 | 44.10 | 1.12 |
+| `loopfn` | 10 | 526.57 | 454.57 | -13.7% | 0.001 | 429.30 | 1.06 |
+| `calls` | 1 | 84.78 | 74.28 | -12.4% | 0.001 | 60.62 | 1.23 |
+| `calls` | 10 | 806.58 | 701.59 | -13.0% | 0.001 | 594.33 | 1.18 |
+| `fib` | 1 | 8.41 | 7.72 | -8.2% | 0.101 | 4.37 | 1.77 |
+| `fib` | 10 | 47.30 | 39.65 | -16.2% | 0.020 | 35.54 | 1.12 |
+| `closures` | 1 | 19.36 | 18.56 | -4.1% | 0.016 | 26.11 | 0.71 |
+| `closures` | 10 | 151.16 | 143.11 | -5.3% | 0.003 | 279.90 | 0.51 |
+| `objects` | 1 | 78.50 | 77.15 | -1.7% | 0.052 | 53.72 | 1.44 |
+| `objects` | 10 | 731.62 | 718.04 | -1.9% | 0.046 | 512.44 | 1.40 |
+| `webpack` | 1 | 9.67 | 9.63 | -0.5% | 0.024 | 5.47 | 1.76 |
+| `webpack` | 10 | 51.40 | 50.83 | -1.1% | 0.012 | 41.97 | 1.21 |
+| `throws` | 1 | 32.13 | 32.17 | +0.1% | 0.014 | 85.11 | 0.38 |
+| `throws` | 10 | 280.40 | 280.81 | +0.1% | 0.002 | 840.93 | 0.33 |
+| `concat` | 1 | 4.59 | 4.59 | +0.1% | 0.133 | 1.34 | 3.43 |
+| `concat` | 10 | 5.08 | 5.08 | +0.1% | 0.024 | 2.15 | 2.36 |
+| `bundle` | 1 | 122.82 | 120.24 | -2.1% | 0.005 | 134.42 | 0.89 |
+| `empty` | 1 | 4.48 | 4.49 | +0.1% | 0.046 | 1.23 | 3.64 |
+
+Net slope (scale 10 minus scale 1), M instructions:
+| Row | step 3 | step 4 | change | QuickJS | step 4 / QuickJS | gate (<= 1.00) |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `loop` | 826.2 | 761.4 | -7.8% | 570.6 | 1.33 | no |
+| `loopfn` | 469.8 | 405.0 | -13.8% | 385.2 | 1.05 | no |
+| `calls` | 721.8 | 627.3 | -13.1% | 533.7 | 1.18 | no |
+| `fib` | 38.9 | 31.9 | -17.9% | 31.2 | 1.02 | no |
+| `closures` | 131.8 | 124.5 | -5.5% | 253.8 | 0.49 | yes |
+| `objects` | 653.1 | 640.9 | -1.9% | 458.7 | 1.40 | no |
+| `webpack` | 41.7 | 41.2 | -1.3% | 36.5 | 1.13 | no |
+| `throws` | 248.3 | 248.6 | +0.1% | 755.8 | 0.33 | yes |
+| `concat` | 0.5 | 0.5 | +0.0% | 0.8 | 0.60 | yes |
+
+
+The rows that still lose to QuickJS on the net slope: `loop` 1.33, `calls` 1.18, `objects` 1.40, `webpack` 1.13, `loopfn` 1.05, `fib` 1.02. Not reached in this task: `objects`, `webpack` and `concat` need the prototype-chain caches and a cheaper prelude (design section 5, out of scope of steps 1 to 4). `fib` is 2% from the gate and `loopfn` 5%.
+
+Peak resident memory (`wait4` `ru_maxrss`, 3 runs each, one binary of the head of step 3 and one of step 4): the bundle-like program 12,672 KiB on both (one run of step 3 gave 12,544 KiB); the `eval_load` bundle row, the same. No function cell grew: the code and the context of a function are in the same two inline slots as before, read with `read_inline`. Change: 0 KiB, within the 128 KiB step of one run.
+
+### Histogram after step 4 (input of step 5)
+
+Tool: `cargo build --release -p bare-js2 --features op-count --example op_count`, then `op_count --top 6 FILE...` (the counters start at the main code; the prelude and the compile are not counted; every result is checked). Inputs: the 9 `eval_load` programs at scale 10 and `crates/js2/examples/data/bundle_like.js`. Binary: head of step 4. "Fusable" means the next op follows in the code and no jump lands on it. Dispatches that greedy fusion would remove (left to right, a triple first) are from the recorded run.
+
+| Program | dispatches | top ops | top fusable pairs | top fusable triples | removed by 4 pairs | removed by 8 pairs + 8 triples | removed by 16 + 16 |
+| --- | ---: | --- | --- | --- | ---: | ---: | ---: |
+| `loop` | 24,000,012 | GetGlobal 33.3%, SetGlobal 16.7%, JnLtI, Add, MulI, ModX 8.3% each | GetGlobal+JnLtI, GetGlobal+GetGlobal, GetGlobal+MulI, GetGlobal+Inc, SetGlobal+GetGlobal 8.3% each | GetGlobal+GetGlobal+MulI, GetGlobal+MulI+Add, GetGlobal+Inc+SetGlobal 8.3% each | 25.0% | 58.3% | 66.7% |
+| `loopfn` | 12,000,012 | JnLtI, Add, MulI, ModX, Inc, JmpBack 16.7% each | Add+ModX, MulI+Add, ModX+Inc, Inc+JmpBack, JnLtI+MulI 16.7% each | Add+ModX+Inc, MulI+Add+ModX, ModX+Inc+JmpBack, JnLtI+MulI+Add 16.7% each | 33.3% | 66.7% | 66.7% |
+| `calls` | 15,000,015 | GetGlobal 33.3%, SetGlobal 13.3%, JnLtI, CallU, Add, MulI 6.7% each | GetGlobal+GetGlobal 13.3%, GetGlobal+JnLtI, GetGlobal+CallU, GetGlobal+Inc 6.7% each | GetGlobal+GetGlobal+GetGlobal, GetGlobal+GetGlobal+CallU, Add+ModX+Ret 6.7% each | 26.7% | 60.0% | 60.0% |
+| `fib` | 556,416 | GetGlobal, CallU, JnLtI, Ret, SubI 16.7% each, Mov 8.3% | GetGlobal+SubI, SubI+CallU 16.7% each, Mov+Ret, JnLtI+Mov, Add+Ret 8.3% each | GetGlobal+SubI+CallU 16.7%, JnLtI+Mov+Ret 8.3% | 25.0% | 58.3% | 58.3% |
+| `closures` | 1,800,026 | GetGlobal 27.8%, SetGlobal 8.3%, JnLtI, GetCtx, Call, Inc 5.6% each | GetGlobal+GetGlobal 8.3%, GetGlobal+JnLtI, GetGlobal+Inc, SetGlobal+JmpBack, Inc+SetGlobal 5.6% each | GetGlobal+Inc+SetGlobal, GetGlobal+JnLtI+GetGlobal, Inc+SetGlobal+JmpBack 5.6% each | 22.2% | 44.4% | 58.3% |
+| `objects` | 7,609,030 | GetGlobal 26.3%, Mov 10.5%, SetGlobal 7.9%, JmpBack 7.9%, Inc 7.9%, Add 5.3% | Mov+Mov 7.9%, SetGlobal+JmpBack, GetGlobal+JnLtI, GetGlobal+ModI, GetGlobal+Inc, Inc+SetGlobal 5.3% each | Mov+Mov+Mov, GetGlobal+Inc+SetGlobal, GetGlobal+JnLtI+GetGlobal, Inc+SetGlobal+JmpBack 5.3% each | 21.0% | 39.4% | 52.6% |
+| `webpack` | 54,566 | GetGlobal 18.3%, GetField 12.8%, GetElem 7.3%, Mov 5.5%, SetGlobal 4.6%, LoadI 4.6% | GetGlobal+GetElem 5.5%, GetGlobal+GetGlobal, Add+SetGlobal 2.8% each, GetField+JnLt, GetElemI+GetField, GetField+Ret 2.7% each | GetElemI+GetField+JnLt, GetGlobal+GetElem+GetField, GetGlobal+GetElem+JmpIfNot 2.7% each | 12.8% | 32.1% | 40.3% |
+| `throws` | 3,800,015 | GetGlobal 29.8%, SetGlobal 15.8%, Inc 10.5%, JnLtI, ModI, Jmp 5.3% each | GetGlobal+Inc 10.5%, Inc+SetGlobal 10.5%, GetGlobal+JnLtI, GetGlobal+ModI, SetGlobal+GetGlobal, SetGlobal+Jmp 5.3% each | GetGlobal+Inc+SetGlobal 10.5%, GetGlobal+ModI+JNeI, GetGlobal+JnLtI+GetGlobal, SetGlobal+GetGlobal+Inc 5.3% each | 21.1% | 45.6% | 54.4% |
+| `concat` | 10,013 | GetGlobal 30.0%, SetGlobal 20.0%, LoadAtom, JnLtI, Add, Inc 10.0% each | GetGlobal+JnLtI, LoadAtom+Add, GetGlobal+LoadAtom, GetGlobal+Inc, SetGlobal+GetGlobal, SetGlobal+JmpBack 10.0% each | LoadAtom+Add+SetGlobal, GetGlobal+LoadAtom+Add, GetGlobal+Inc+SetGlobal 10.0% each | 30.0% | 59.9% | 60.0% |
+| bundle-like | 906,919 | GetField 16.8%, Mov 12.0%, Add 7.9%, JnLt 6.4%, LoadAtom 5.3%, JmpBack 5.1% | GetField+JnLt 6.0%, Inc+JmpBack 4.5%, LoadAtom+Add 3.0%, Mov+GetField 2.8%, Add+Inc 2.8%, Mov+Call 2.6% | Add+Inc+JmpBack 2.8%, Mov+GetField+Mov 2.5%, GetField+Mov+Call 2.5%, GetField+JnLt+Mov 2.0% | 16.3% | 28.6% | 39.1% |
+
+What this says for step 5 (hypothesis, not built):
+
+- The `eval_load` programs run at the top level with `var`, so a variable is a global: `GetGlobal` is 18% to 33% of the dispatches and `SetGlobal` 5% to 20%. Every top pair and triple of those rows holds a `GetGlobal` or `SetGlobal` (`GetGlobal+JnLtI`, `GetGlobal+Inc+SetGlobal`, `GetGlobal+GetGlobal`). Bundle-like code keeps its variables in registers and contexts: its tops are `GetField+JnLt`, `Inc+JmpBack`, `LoadAtom+Add`, `Mov+GetField`. The two groups share almost no pair, so the fused set has to be chosen for both, and the bundle-like program is the closer model of a real page. The gain of the same fusion on it (16% to 39% of dispatches) is a bound on the instructions, not a measure.
+- `loopfn` (a loop in a function) has a flat top: `Add+ModX+Inc`, `MulI+Add+ModX`, `ModX+Inc+JmpBack`, `JnLtI+MulI+Add`. The 4 triples remove 66.7% of its dispatches. That is the loop shape of the bundle code too (`Add+Inc+JmpBack`).
+- `Mov+Ret` and `JnLtI+Mov+Ret` in `fib`: the value of `n < 2 ? n : ...` is copied to a register and then returned. A `return` of a conditional can return each branch's register directly, with no `Mov` (a compiler change, not a fused op; it removes one dispatch of every 12 in `fib`).
+- `Add+ModX+Ret` (`calls`) and the jump-to-return rewrite: `Jmp` is gone from the top lists of every row except `throws` (`SetGlobal+Jmp`, the `try`).
