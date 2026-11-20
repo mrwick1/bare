@@ -7,26 +7,23 @@
 //! shape. The call of a script function does not change: `Realm::function` and `Realm::function_new` answer `None` for a native, and the
 //! interpreter asks [`Realm::call_native`] only then. So the hot path of a call has no new test.
 //!
-//! **A native cannot call a script function and wait for the result.** The interpreter keeps the JS stack in `run`, and a collection
-//! walks it there, so a native has no frame to call from, and the result of a call would have to be rooted by hand. There are two ways
-//! around it:
+//! **Calling a script function from a native.** There are three ways:
 //!
 //! 1. A native that only wants a call made (`call`, `apply`, a bound function) sets `Realm::tail` and `Realm::tail_args` and returns.
 //!    [`Realm::call_native`] gives [`Outcome::Enter`] and the interpreter pushes the frame, with the result going to the register of the
 //!    call. A tail to another native runs in the loop of `call_native`.
 //! 2. A built-in that has to call back many times (`forEach`, `map`, `sort`, ...) is written in JavaScript: `prelude.js`, compiled with
-//!    each script (`script.rs`). Those calls are plain `Call` ops, so a callback needs no re-entry, and each live value is in a
-//!    register that a root map names.
-//!
-//! `ToPrimitive` runs a `valueOf` or `toString` only when it is a native. A script function there throws a `TypeError` (known gap, see
-//! `docs/progress.md`): it needs a call from inside a conversion, which needs the same re-entry.
+//!    each script (`script.rs`). Those calls are plain `Call` ops, so a callback needs no re-entry.
+//! 3. A native or a conversion that needs the result in the middle of its work (`ToPrimitive`, a getter, a setter) calls
+//!    [`Realm::call_function`] (`reenter.rs`): a nested run of the interpreter on a machine of its own.
 //!
 //! **GC.** A native never collects: the interpreter runs `gate!` before it, and the values in its arguments and `this` are registers of
-//! the caller, which the root map of the call names. So a native may keep any cell in a Rust local, and may allocate. A native that
-//! allocates more than the slack of the heap limit (8 MiB) only makes the next gate collect.
+//! the caller, which the root map of the call names. A nested call holds the collector too (`reenter.rs`). So a native may keep any
+//! cell in a Rust local, and may allocate and call. A native that allocates more than the slack of the heap limit (8 MiB) only makes
+//! the next gate collect.
 use crate::cell::Layout;
 use crate::bi_object::Own;
-use crate::interp_rt::{ErrKind, Key, R, Realm, Slot};
+use crate::interp_rt::{ErrKind, Key, R, Realm};
 use crate::object::{F_CALLABLE, F_CLASS, F_FNPROPS, F_NATIVE, Obj};
 use crate::shapes::{A_C, A_W};
 use crate::string::Str;
@@ -240,7 +237,7 @@ impl Realm {
     // ---- ToPrimitive ----
 
     /// `ToPrimitive` (`OrdinaryToPrimitive`: `valueOf` then `toString`, or the reverse for the hint `String`). There are no symbols, so
-    /// no `Symbol.toPrimitive`. A method that is a script function throws a `TypeError` (see the module comment).
+    /// no `Symbol.toPrimitive`. The methods may be script functions, and a getter (`Realm::call_function`).
     pub fn to_primitive(&mut self, v: Value, hint: Hint) -> R<Value> {
         let Some(o) = Realm::obj(v) else { return Ok(v) };
         let order = if hint == Hint::String { [self.k_to_string, self.k_value_of] } else { [self.k_value_of, self.k_to_string] };
@@ -255,17 +252,12 @@ impl Realm {
 
     fn ordinary_to_primitive(&mut self, v: Value, o: Obj, order: [Str; 2]) -> R<Value> {
         for k in order {
-            let Some(Slot::Data(f)) = self.lookup_g(o, k) else { continue };
+            let f = self.get_prop(o.value(), Key::Name(k))?;
             if !Realm::obj(f).is_some_and(|f| f.is_callable()) {
                 continue;
             }
-            if self.native_id(f).is_none() {
-                let n = self.text(k);
-                return self.type_error(&format!("a script function as {n} cannot be called from a conversion yet"));
-            }
-            if let Outcome::Val(r) = self.call_native(f, v, &[])?
-                && Realm::obj(r).is_none()
-            {
+            let r = self.call_function(f, v, &[])?;
+            if Realm::obj(r).is_none() {
                 return Ok(r);
             }
         }

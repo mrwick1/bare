@@ -41,8 +41,10 @@ pub mod interp_ops;
 #[cfg(feature = "op-count")]
 pub mod opcount;
 pub mod builtins;
+pub mod reenter;
 mod bi_array;
 mod bi_object;
 mod bi_number;
+mod bi_wrap;
 mod bi_string;
 pub mod script;

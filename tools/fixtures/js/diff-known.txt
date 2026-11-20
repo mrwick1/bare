@@ -7,10 +7,6 @@ script_tests:149	old engine stops at its call-depth limit; js2 throws RangeError
 script_tests:401	old engine stops at its traversal-depth limit; js2 throws RangeError
 script_tests:180	regexp literal: js2 throws TypeError (not built)
 script_tests:181	BigInt literal: js2 throws TypeError (not built)
-script_tests:458	new String: js2 throws TypeError (no wrapper objects)
-script_tests:481	new Number: js2 throws TypeError (no wrapper objects)
-script_tests:336	Object(5) is not 5 in the old engine: js2 returns the primitive (no wrapper objects)
-script_tests:402	valueOf written in the script: js2 throws TypeError in ToPrimitive
 script_tests:360	a method has no prototype property; js2 makes one (bug)
 script_tests:384	Error.stack: js2 has none
 script_tests:400	Function.prototype.toString of a script function: js2 gives "[native code]"

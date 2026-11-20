@@ -183,7 +183,7 @@ pub fn load_with(host: &str, source: &str) -> Result<Vm, String> {
         prog.codes = compile_after(prog.codes, host, &shared, Limits::default(), None).map_err(|e| format!("host script: {e}"))?.0;
     }
     let mut vm = Vm::new(prog, shared.clone());
-    vm.lazy = Some(Box::new(Lazy { source: PRELUDE, facts, atoms: shared, limits: Limits::default(), pending }));
+    vm.realm.lazy = Some(Box::new(Lazy { source: PRELUDE, facts, atoms: shared, limits: Limits::default(), pending }));
     if let Err(e) = vm.run_main(pre) {
         panic!("the prelude failed: {e:?}");
     }
@@ -290,3 +290,7 @@ impl Vm {
 #[cfg(test)]
 #[path = "script_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "conversion_tests.rs"]
+mod conversion_tests;

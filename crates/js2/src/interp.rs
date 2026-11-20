@@ -69,6 +69,7 @@ use crate::roots::RootMaps;
 use crate::shapes::{A_C, A_E, A_W};
 use crate::value::Value;
 use std::cmp::Ordering;
+use std::rc::Rc;
 use std::sync::Arc;
 
 /// Words of a frame record.
@@ -108,14 +109,16 @@ pub struct Vm {
     pub realm: Realm,
     pub stack: Vec<Value>,
     pub fbs: Vec<Feedback>,
-    pub prog: Program,
-    /// The compiler of the stubs of `prog` (`Op::Lazy`), if it has any.
-    pub lazy: Option<Box<dyn LazyCompile>>,
-    /// The code indexes of the default constructors (`DefaultCtor`): a base class and a derived class.
+    /// The code indexes of the default constructors (`DefaultCtor`): a base class and a derived class. Also in `Realm::dctor`.
     pub dctor: [usize; 2],
-    /// Back edges that may still run. At 0 the run stops with [`Exit::Fuel`].
+    /// Back edges that may still run. At 0 the run stops with [`Exit::Fuel`]. A call copies it to `Realm::fuel` (where the loop and a
+    /// nested call count) and back.
     pub fuel: u64,
 }
+
+/// The value that a stop (`Exit::Fuel` in a nested call) is thrown as. No script can throw it: it is the marker of an uninitialized
+/// binding. `unwind` runs no handler for it, and `Vm::start` turns it back into `Exit::Fuel`.
+pub(crate) const STOP: Value = Value::HOLE;
 
 fn record(stack: &[Value], fp: usize, k: usize) -> Value {
     stack[fp - REC + k]
@@ -191,9 +194,16 @@ fn walk_frames(m: &mut Marker, prog: &Program, stack: &[Value], mut ci: usize, m
 
 /// Find the handler for `e` thrown at `pc` of frame `(ci, fp)`, dropping frames that have none. On `Ok`, the frame, `pc` and the
 /// handler register are set. `Err(e)` when the frame of the host has no handler either.
+///
+/// `#[cold]` is a cost fix: every `throw!` site calls this function, and the attribute marks those paths as unlikely. Measured at
+/// codegen-units 16, `loopfn` goes from +4.8% to -0.6% and `objects` from +3.0% to +0.4%. The cause in the allocator is a hypothesis.
+#[cold]
+#[inline(never)]
 fn unwind(prog: &Program, stack: &mut [Value], ci: &mut usize, fp: &mut usize, pc: &mut usize, e: Value) -> Result<(), Value> {
+    // The budget ran out in a nested call (`Realm::call_function` gives `STOP`): no handler runs, every frame goes away.
+    let stop = e == STOP;
     loop {
-        if let Some(h) = prog.codes[*ci].handler_at(*pc as u32) {
+        if !stop && let Some(h) = prog.codes[*ci].handler_at(*pc as u32) {
             let rec = *fp - REC;
             let mut depth = stack[rec + 6].as_int().expect("depth");
             while depth > h.depth as i32 {
@@ -221,6 +231,44 @@ fn code_info(c: &Code) -> (Option<crate::string::Str>, u16) {
     (c.atoms.get(c.fn_name as usize).copied(), c.fn_len)
 }
 
+impl Realm {
+    /// Compile the stub at `at.0` (the frame at `at.1` is running it), for `Vm::start` after `Op::Lazy` left the loop. The frame is made
+    /// again for the real code (it was made for the stub: no parameters, all arguments in an array). On a failure the stub stays and
+    /// `lazy_err` makes the op throw.
+    ///
+    /// Only the outermost run can compile: a nested run (`Realm::call_function`) has runs above it that borrow the program, so it cannot
+    /// change it. A prelude function that is called for the first time inside a conversion, a getter or a setter that a native runs
+    /// throws a `SyntaxError` there (known gap: `docs/progress.md`). The next outermost run compiles it.
+    fn compile_stub(&mut self, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, (ci, fp): (usize, usize)) {
+        let Some(l) = self.lazy.as_mut() else { return self.lazy_err = Some("a lazy function has no compiler".into()) };
+        let Some(prog) = Rc::get_mut(&mut self.prog).filter(|_| self.nest == 0) else {
+            return self.lazy_err = Some("a function of the prelude is compiled at its first call, which a nested call cannot do".into());
+        };
+        if let Err(m) = l.compile(&mut prog.codes, ci) {
+            return self.lazy_err = Some(m);
+        }
+        // The `name` and the `length` of the functions that the compile added (the stub of `ci` has them already).
+        let known = self.fn_info.len();
+        self.fn_info.extend(prog.codes[known..].iter().map(code_info));
+        fbs.resize_with(prog.codes.len(), Feedback::default);
+        fbs[ci] = Feedback::default();
+        let ncode = &prog.codes[ci];
+        let need = fp + ncode.nregs as usize + 8;
+        if need > stack.len() {
+            stack.resize(need.max(2 * stack.len()).min(MAX_STACK + 8).max(need), Value::UNDEFINED);
+        }
+        let all = Realm::obj(record(stack, fp, 9)).expect("the arguments of a stub");
+        let (np, given) = (ncode.nparams as usize, (ncode.nparams as usize).min(all.len() as usize));
+        for i in 0..given {
+            stack[fp + i] = all.get_element(i as u32).unwrap_or(Value::UNDEFINED);
+        }
+        stack[fp + given..fp + np].fill(Value::UNDEFINED);
+        if ncode.flags & CF_ARGS == 0 {
+            stack[fp - REC + 9] = Value::UNDEFINED;
+        }
+    }
+}
+
 impl Vm {
     pub fn new(mut prog: Program, shared: Arc<SharedAtoms>) -> Vm {
         let dctor = [prog.codes.len(), prog.codes.len() + 1];
@@ -228,8 +276,9 @@ impl Vm {
         scan_flags(&mut prog.codes);
         let fbs = prog.codes.iter().map(|_| Feedback::default()).collect();
         let mut realm = Realm::new(shared);
-        realm.fn_info = prog.codes.iter().map(code_info).collect();
-        Vm { realm, stack: Vec::new(), fbs, prog, lazy: None, dctor, fuel: u64::MAX }
+        (realm.prog, realm.dctor) = (Rc::new(prog), dctor);
+        realm.fn_info = realm.prog.codes.iter().map(code_info).collect();
+        Vm { realm, stack: Vec::new(), fbs, dctor, fuel: u64::MAX }
     }
 
     /// A function cell for code `code` with no context.
@@ -237,30 +286,55 @@ impl Vm {
         self.realm.new_function(code, Value::UNDEFINED)
     }
 
-    /// Call `f` with `this` and `args` from the host. The JS stack must be empty (no re-entry yet). The result is not rooted: use it
-    /// before the next call into the engine.
+    /// Call `f` with `this` and `args` from the host. The JS stack must be empty. The result is not rooted: use it before the next call
+    /// into the engine. A native that wants to call a script function does not come here: see `Realm::call_function` (`reenter.rs`).
     pub fn call(&mut self, f: Value, this: Value, args: &[Value]) -> Result<Value, Exit> {
-        let Some((ci, ctx)) = self.realm.function(f) else {
-            let e = self.realm.error(ErrKind::Type, "not a function");
+        let Vm { realm, stack, fbs, fuel, .. } = self;
+        realm.fuel = *fuel;
+        let r = Vm::start(realm, stack, fbs, f, this, args);
+        *fuel = realm.fuel;
+        r
+    }
+
+    /// Run `f` with `this` and `args` as a new entry into the interpreter, on the empty stack `stack` with the feedback `fbs` of the
+    /// program. `Vm::call` uses the stack of the `Vm`, and `Realm::call_function` a machine of its own.
+    pub(crate) fn start(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, f: Value, this: Value, args: &[Value]) -> Result<Value, Exit> {
+        let Some((ci, ctx)) = realm.function(f) else {
+            let e = realm.error(ErrKind::Type, "not a function");
             return Err(Exit::Throw(e));
         };
-        let code = &self.prog.codes[ci];
+        let prog = realm.prog.clone();
+        let code = &prog.codes[ci];
         let fp = REC;
         let need = fp + code.nregs as usize + 8;
-        if self.stack.len() < need {
-            self.stack.resize(need.max(256), Value::UNDEFINED);
+        if stack.len() < need {
+            stack.resize(need.max(256), Value::UNDEFINED);
         }
         let args_obj = if code.flags & CF_ARGS != 0 {
-            Obj::array(&mut self.realm.heap, &self.realm.shapes, self.realm.s_args, args).expect("memory").value()
+            Obj::array(&mut realm.heap, &realm.shapes, realm.s_args, args).expect("memory").value()
         } else {
             Value::UNDEFINED
         };
         let rec = [f, this, ctx, Value::int(0), Value::int(0), Value::int(ENTRY), Value::int(0), Value::int(0), Value::UNDEFINED, args_obj];
-        self.stack[..REC].copy_from_slice(&rec);
+        stack[..REC].copy_from_slice(&rec);
         for i in 0..code.nparams as usize {
-            self.stack[fp + i] = args.get(i).copied().unwrap_or(Value::UNDEFINED);
+            stack[fp + i] = args.get(i).copied().unwrap_or(Value::UNDEFINED);
         }
-        self.run(ci, fp)
+        let (mut prog, mut at) = (prog, (ci, fp));
+        loop {
+            let r = Vm::run(realm, stack, fbs, &prog, at.0, at.1);
+            // `Op::Lazy` leaves the loop to this function: the loop holds `&Program`, and a compile changes it (`Realm::lazy_at`).
+            if let (Err(Exit::Fuel), Some(l)) = (&r, realm.lazy_at.take()) {
+                drop(prog);
+                realm.compile_stub(stack, fbs, l);
+                (prog, at) = (realm.prog.clone(), l);
+                continue;
+            }
+            return match r {
+                Err(Exit::Throw(e)) if e == STOP => Err(Exit::Fuel),
+                r => r,
+            };
+        }
     }
 
     /// Run code `ci` (a function with no parameters and no context) as the main function.
@@ -272,14 +346,12 @@ impl Vm {
 
     /// Collect now, as the gate does (for tests and the host between tasks: the stack must be empty or stopped at a safepoint).
     pub fn collect_idle(&mut self) {
-        let Vm { realm, stack, fbs, prog, .. } = self;
+        let Vm { realm, fbs, .. } = self;
         realm.collect(fbs, |_| {});
-        let _ = (stack, prog);
     }
 
-    #[allow(unused_assignments)]
-    fn run(&mut self, mut ci: usize, mut fp: usize) -> Result<Value, Exit> {
-        let Vm { realm, stack, fbs, prog, lazy, dctor, fuel } = self;
+    #[allow(unused_assignments, clippy::ptr_arg)]
+    fn run(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, prog: &Program, mut ci: usize, mut fp: usize) -> Result<Value, Exit> {
         let mut code: &Code = &prog.codes[ci];
         let mut words: &[u32] = &code.words;
         let mut fb: &mut Feedback = &mut fbs[ci];
@@ -943,6 +1015,10 @@ impl Vm {
                             continue;
                         }
                         gate!();
+                        // The base is checked before the key is converted: a script `toString` of the key must not run first.
+                        if recv.is_undefined() || recv.is_null() {
+                            err!(ErrKind::Type, "cannot read properties of undefined or null")
+                        }
                         let k = tri!(realm.key_of(key));
                         match tri!(realm.get_prop_g(recv, k)) {
                             Got::Val(v) => {
@@ -955,6 +1031,9 @@ impl Vm {
                     Op::SetElem => {
                         gate!();
                         let (recv, key, v) = (r!(a!()), r!(b!()), r!(c!()));
+                        if recv.is_undefined() || recv.is_null() {
+                            err!(ErrKind::Type, "cannot set properties of undefined or null")
+                        }
                         let k = tri!(realm.key_of(key));
                         match tri!(realm.set_prop_g(recv, k, v)) {
                             Put::Done => pc = next,
@@ -1166,6 +1245,9 @@ impl Vm {
                         pc = next;
                     }
                     Op::In => {
+                        if Realm::obj(r!(c!())).is_none() {
+                            err!(ErrKind::Type, "cannot use 'in' on a non-object")
+                        }
                         let k = tri!(realm.key_of(r!(b!())));
                         let v = tri!(realm.has_prop(r!(c!()), k));
                         r!(a!()) = Value::bool(v);
@@ -1230,10 +1312,10 @@ impl Vm {
                     }
                     Op::Jmp => jump!(true, next, sj!()),
                     Op::JmpBack => {
-                        if *fuel == 0 {
+                        if realm.fuel == 0 {
                             return Err(Exit::Fuel);
                         }
-                        *fuel -= 1;
+                        realm.fuel -= 1;
                         jump!(true, next, sj!())
                     }
                     Op::JmpIf => jump!(Realm::truthy(r!(a!())), next, sbx!()),
@@ -1370,29 +1452,13 @@ impl Vm {
                         pc = next;
                     }
                     Op::Lazy => {
-                        let Some(l) = lazy.as_mut() else { err!(ErrKind::Plain, "a lazy function has no compiler") };
-                        if let Err(m) = l.compile(&mut prog.codes, ci) {
+                        // The compile changes the program, which this loop borrows: `Vm::start` makes it and runs the frame again. A failed
+                        // compile comes back to this op as `lazy_err`.
+                        if let Some(m) = realm.lazy_err.take() {
                             err!(ErrKind::Syntax, "{m}")
                         }
-                        // The `name` and the `length` of the functions that the compile added (the stub of `ci` has them already).
-                        let known = realm.fn_info.len();
-                        realm.fn_info.extend(prog.codes[known..].iter().map(code_info));
-                        fbs.resize_with(prog.codes.len(), Feedback::default);
-                        fbs[ci] = Feedback::default();
-                        // The frame was made for the stub (no parameters, all arguments in an array). Make it again for the code.
-                        let ncode = &prog.codes[ci];
-                        ensure!(fp + ncode.nregs as usize + 8);
-                        let all = Realm::obj(record(stack, fp, 9)).expect("the arguments of a stub");
-                        let (np, given) = (ncode.nparams as usize, (ncode.nparams as usize).min(all.len() as usize));
-                        for i in 0..given {
-                            stack[fp + i] = all.get_element(i as u32).unwrap_or(undef);
-                        }
-                        stack[fp + given..fp + np].fill(undef);
-                        if ncode.flags & CF_ARGS == 0 {
-                            stack[fp - REC + 9] = undef;
-                        }
-                        reload!();
-                        pc = 0;
+                        realm.lazy_at = Some((ci, fp));
+                        return Err(Exit::Fuel);
                     }
                     Op::LoadCallee => {
                         r!(a!()) = record(stack, fp, 0);
@@ -1553,7 +1619,7 @@ impl Vm {
                     }
                     Op::DefaultCtor => {
                         gate!();
-                        r!(a!()) = realm.new_function(dctor[b!() & 1], undef);
+                        r!(a!()) = realm.new_function(realm.dctor[b!() & 1], undef);
                         pc = next;
                     }
                     Op::SetFields => {
