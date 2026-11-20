@@ -942,6 +942,9 @@ fn a_stack_that_grows_in_a_callee_keeps_the_registers_of_the_callers() {
         ("function C(n) { this.n = n; this.k = n == 0 ? 0 : new C(n - 1).k + n; } var r = new C(200).k;", "r", "20100"),
         ("var o = { f: function (n, acc) { var t = this; if (n == 0) return acc; return t.f(n - 1, acc + n); } }; var r = o.f(200, 0);", "r", "20100"),
         ("function f(n, ...rest) { var x = n * 2; if (n == 0) return rest.length; var y = f(n - 1, n, n); return y + x - 2 * n; } var r = f(200);", "r", "2"),
+    ]);
+}
+
 // ---- Lazy compile of the functions of a user script (`Lazy`, `Op::Lazy`): a function is compiled at its first call.
 
 #[test]
