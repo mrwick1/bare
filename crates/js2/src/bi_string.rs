@@ -71,6 +71,7 @@ impl Realm {
         ] {
             self.method(proto, n, len, f);
         }
+        self.install_string_more();
     }
 }
 
@@ -94,6 +95,7 @@ fn from_char_code(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
 fn char_at(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let s = rt.this_str(this, "charAt")?;
     let i = rt.to_number(arg(args, 0))?;
+    let i = if i.is_nan() { 0.0 } else { i.trunc() };
     let s = rt.flat(s);
     match if i >= 0.0 && i < s.len() as f64 { s.unit_at(i as usize) } else { None } {
         Some(u) => Ok(rt.make_units(&[u])),
@@ -424,6 +426,9 @@ fn locale_compare(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let s = rt.this_str(this, "localeCompare")?;
     let t = pattern(rt, arg(args, 0))?;
     let u = rt.units(s);
+    // Canonically equivalent strings are equal (`o` and U+0308 against U+00F6): compare the NFC forms. The order of other strings is
+    // that of the units: js2 has no collation data yet.
+    let (u, t) = (crate::bi_string_more::normalize_units(&u, true), crate::bi_string_more::normalize_units(&t, true));
     Ok(Value::int(match u.cmp(&t) {
         std::cmp::Ordering::Less => -1,
         std::cmp::Ordering::Equal => 0,

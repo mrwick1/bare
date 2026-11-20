@@ -17430,6 +17430,57 @@ Tests. Linux, debug: `cargo test --locked -p bare-js-api -p bare-js -p bare --li
 
 Not tested: the whole `bare --lib` with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1` (the base fails one test under whole-crate `BARE_GC_STRESS=1`, as the entry before says); macOS; RSS and wall time; `-J` on the old head `2876c1e1`; the stress mode with a collect between a stream `read` and its reaction; the merge with the open PRs B (#779), A2 (#781) and G (#782).
 
+## 2026-11-20: js2 built-ins, test262 round (String, Array, Number, Math, JSON)
+
+Goal: raise the test262 pass rate of `bare-js2` in the built-ins that pass on the old engine and fail on js2. Scope: String, Array, Number, Math and JSON. Object, conversions and early errors belong to other work. Base: `origin/main` at `43b62b05`. Machine archMachine, `tools/js/test262_js2.sh -j 8`, test262 at the commit of the fixtures.
+
+Result. The new engine passes 306 more tests (15581 to 15887). No test that passed before fails now (checked test by test against the base run).
+
+| Built-in | Pass before | Pass now | Gain | "Pass on old, fail on js2" before | now |
+| -------- | ----------: | -------: | ---: | --------------------------------: | --: |
+| String   | 423 | 496 | +73 | 473 | 400 |
+| Array    | 2214 | 2250 | +36 | 436 | 400 |
+| Number   | 210 | 232 | +22 | 103 | 81 |
+| Math     | 230 | 273 | +43 | 46 | 3 |
+| JSON     | 0 | 75 | +75 | 110 | 35 |
+
+Causes fixed.
+- JSON had no object. New `bi_json.rs`: `JSON.parse` and `JSON.stringify` (gap, `toJSON` of a native, key lists, cycle and depth errors). A hidden global keeps the object out of key lists.
+- Math: `hypot` rewritten (it coerces every argument before it returns); new `clz32`, `sinh`, `cosh`, `tanh`, `asinh`, `acosh`, `atanh`, `expm1` and `log1p`.
+- Number: `toExponential`, `toPrecision` and `toLocaleString`, with round-half-up on the decimal digits (Rust `{:e}` rounds ties to even; `(25).toExponential(0)` must be `3e+1`). `toString.length` is 1. `Number.parseInt` and `Number.parseFloat` are the global function objects.
+- String: new `bi_string_more.rs` (`raw`, `fromCodePoint`, `normalize`, `toLocaleLowerCase`, `toLocaleUpperCase`, `isWellFormed`, `toWellFormed`, and the `match` and `search` errors for a regexp argument). `localeCompare` compares normalized units (new dependency `bare-unicode`). `charAt` maps NaN to 0.
+- Array: `keys`, `values` and `entries` with an iterator object (no generators and no symbols yet, so the state is in three hidden own properties). The check of `ArraySpeciesCreate` that js2 can make without `Symbol.species` in `slice`, `splice`, `concat`, `map`, `filter`, `flat` and `flatMap`. The iterator prototype is built at the first call, not at load.
+- `script_tests.rs` lines 545 and 547 did not compile on main (`compile_after` takes 6 arguments). They pass `None, None` now.
+
+Causes left (about 920 of the old-pass, js2-fail cases in these five built-ins).
+- Waiting for #785 (a native must call a script function): `valueOf` and `toString` of a script object in a conversion (Array 100, String 57 or more, Math 2, Number 2), `JSON.parse` reviver (8), `JSON.stringify` replacer function (6) and `toJSON` of a script object (2), accessors that need a host call (2).
+- Wrapper objects (`new String`, `new Number`, `new Boolean`): String 211, Array 94, Number 22, JSON 8. Engine work, not built-in work.
+- No RegExp: String 43 (literals), Array 21 and more.
+- `Number.prototype.toString` and `valueOf` on a wrapper (41): needs wrapper objects.
+- Concise methods are constructible and have `prototype` in js2 (engine gap). Some "Expected a TestNError but got a TypeError" cases come from the same call limit; to verify per case.
+
+Cost. Instructions (`tools/js/instr.sh`, `perf stat instructions:u`, minimum of 3), `script_run x.js` for startup, `interp_load CASE N` for the loops, both trees built at `--release`.
+
+| Row | Base | New |
+| --- | ---: | ---: |
+| startup `script_run` (empty script) | 1,787,715 | 1,958,924 (+9.6%) |
+| loopfn 3,000,000: N minus N=0 | 961,500,159 | 961,501,194 (+0.0001%) |
+| calls 1,000,000 | 708,499,896 | 708,500,762 (+0.0001%) |
+| fib 27 | 342,838,261 | 342,837,869 (-0.0001%) |
+| closures 1,000,000 | 2,203,666,082 | 2,203,678,423 (+0.0006%) |
+| objects 1,000,000 | 769,338,738 | 769,346,348 (+0.001%) |
+
+The slope of every loop row is the same (change at most +0.001%); the loop rows with N=0 carry the startup change. The startup row is over the +0.5% limit. The extra 171K instructions come from (callgrind with symbols, `script_run`): `Realm::new` +32K (about 60 new natives installed with `Realm::method`), `parse_function` +38K and `prelude_def` +21K (2.6 KB more prelude source and three more `Array.prototype` closures), and +26K in the dynamic loader (hypothesis: more relocations for the bigger binary). I reduced the first version (+12.2%) by building the iterator prototype lazily and writing the species check inline. The rest is the cost of the new methods. It is not fixed here. A lower cost needs a design change (install a built-in at the first read of its global, or a lazy native table), which touches `builtins.rs` and `interp_rt.rs`. Owner decision. `codegen-units=1` was not measured: the extra work is instructions that run, so I do not expect it to remove 9%.
+
+Tests. `cargo test --locked -p bare-js2 --lib`: 415 pass (12 new tests in `builtins_more_tests.rs`). `cargo test --locked --release -p bare-js-diff`: pass; the known list did not grow. The prelude facts are regenerated. `tools/fixtures/js/test262-js2-subset.txt` has the four `built-ins/` directories for the new tests; `test262-js2-baseline.txt` is regenerated.
+
+Not tested: Windows and macOS; the micro rows at `codegen-units=1`; RSS and wall time; the cases left for #785 (not run with #785 merged); `a_scope_with_many_locals_compiles_in_linear_time` was not seen failing in the full run.
+
+### Waiver: #791 startup cost (owner, 2026-11-20)
+
+- #791 raises js2 startup from 1,787,715 to 1,958,924 instructions (+9.6%). The +0.5% rule fails.
+- The owner accepts this one time. js2 is not in the browser yet.
+- Step 1 of `docs/design-js2-lazy-builtins.md` (lazy static method tables, about -225 K) pays it back. Steps 0 and 2 follow.
 ## Four `bare --lib` tests on Windows (2026-11-20)
 
 Four `bare --lib` tests failed on the Windows 11 VM and passed on Linux. Reproduced on the VM with a build of `origin/main` (43b62b05): `cargo xwin test --target x86_64-pc-windows-msvc -p bare --lib`, exe run through `winssh`. 1720 tests filtered out, 4 failed.
@@ -17634,10 +17685,10 @@ Results.
 | Compile, 66 patterns, per pattern | old 25,474; new about 25,764 (+1.1%) |
 | Compiled bytes for each pattern (66 patterns) | new 308 B (blob cell, rounded to 16); the design gives 916 B for the old engine |
 | `(a+)+b`, n = 28 | both end with a budget error; new stops at the cap of 50 M steps (about 120 ms); old about 140 to 250 ms |
-| test262 (`tools/js/test262_js2.sh -u`, checkout `e4fbf577`) | js2 passes 16,865 (base baseline 15,854); no directory has fewer passes than the base baseline |
+| test262 (`tools/js/test262_js2.sh -u`, checkout `e4fbf577`) | js2 passes 18,604 (baseline of `origin/main` at `a54b7df2`: 17,324); no directory has fewer passes than that baseline |
 | test262, `built-ins/RegExp` against the old engine | old passes 603, js2 723; 22 tests pass on the old engine and fail on js2 (below) |
-| test262, String regex methods | 128 tests pass on the old engine and fail on js2: they need the String methods with a RegExp argument (R3) |
-| `cargo test --locked -p bare-js2 --lib` | 479 pass |
+| test262, String regex methods | the String directories still have 127 tests that pass on the old engine and fail on js2 (the String methods with a RegExp argument, R3) |
+| `cargo test --locked -p bare-js2 --lib` | 491 pass (after the merge of `origin/main`) |
 | `cargo test --locked -p bare-js-diff` | all pass (363 programs, no new difference) |
 | Startup, `script_run` with `var x = 1;` | base 1,795,527; new 1,805,177 (+0.54%); at `codegen-units=1`: 1,789,488 and 1,796,190 (+0.37%) |
 | Micro rows, default build (`interp_load`, base then new) | loopfn +0.002%, calls -0.509%, fib +0.004%, closures -0.104%, objects -0.419% |
@@ -17650,4 +17701,42 @@ How the regex row moved. The first port was +26.6% (staging) and +14.7% (Porter)
 
 Not done in this change: String methods, the Symbol protocol, named groups in the result, `d`, and `\p{}` matching in the String methods (R3); the linear side (R2); the calibration of `FUEL_PER_BLOCK`.
 
+Miri (`cargo +nightly miri test`): the 3 `blob` tests, `regexp::tests::basics`, `a_one_byte_input_gives_the_same_spans_as_a_two_byte_input` and `regexp_rt_tests::last_index` pass. The full suite under Miri did not finish in 50 minutes here (`regexp::tests::compile_bounds` is slow); CI runs it.
+
 Not tested: Windows; the browser; peak RSS on `rust-book-search` and `substack-home` (no journey run); a V8 comparison of the new glue; the cost matrix of the whole repo; Miri on the whole js2 suite (the Blob and RegExp tests only; see the PR).
+## 2026-11-21: host handlers on the interface, Z: dead bridges (plan step S0.4 / Z)
+
+Status: S0.4 complete for the handlers. This PR removes the code that the groups H0 to E left unused. The PR is open without auto-merge. The rest of group Z cannot be done now (see "Kept").
+
+Base: `origin/main` at `1f10a631` (it holds #779, #781 and the other groups). The compiler found the dead code: `cargo check --locked -p bare --all-targets` gave 8 warnings on the base and gives none now. The same check for `x86_64-pc-windows-msvc` (`cargo xwin check`) and for the lib without tests gives none.
+
+Removed (61 lines, 1 line added; 5 files):
+
+- `browser_scoped.rs`: `via`, the bridge that called a handler of the new form from the old form. It has no caller.
+- `browser.rs` and `browser_fetch.rs`: `Kind::Accessor` (an accessor pair of the old form), its match arms in the `DEFS` install loop and in the fetch table, and the `A` alias. Every accessor row is `AccessorS` now.
+- `browser_dom_old.rs`: `attr_get`, `clone_tree`, `body` and `html_child`. They have no caller.
+- `browser_events.rs`: `Dom::event_of`. It has no caller (A2 entry: the last caller was in `browser_form.rs`).
+
+Kept, and why. The plan lists these for Z, and each is still in use:
+
+- The old `eval::Host` impl of `Dom` and the old `H` alias: 77 functions of the form `fn ... &[Value]` are left in `crates/bare/src`, and `DEFS` rows of `Kind::Method` and `Kind::Get`, `add_fn` (28 calls) and `add_old` still register them. Every install function (`ensure`, `install`, the lazy globals, `browser_lazy`) uses the old form.
+- The wrappers of A1 (`old`, `old_v`, `run`, `run_v`, `*_s` adapters): they have callers. `run_v` has 5 (`browser_fetch.rs`, `browser_web.rs` twice, `browser_range.rs`, `browser_dom_old.rs`).
+- The 39 `roots`, `trace` and `prune` functions: the tables hold `ObjId` and raw `Value`. The plan moves them with the tables. That needs a design for host tables on `Persistent` and `Traced`, and it is not a removal.
+- `Browser::it` stays public: 396 `.it.` sites in `crates/bare/src`, plus the examples and `drive`. The plan moves them to the facade in separate PRs.
+- The grep gate is not added. The count is 1,820 lines over `crates/bare/src` (the gate in the design must be 0 except `browser_session.rs`).
+- `BARE_ALL_API`, `Fun::Old` and `add_old_on_api` (test build only): used by the tests of the interface entry.
+- `bare-js-api`: the plan does not list a removal there. Items with no use in `crates/bare`, `drive` and `mcp` (`array_len`, `set_lazy`, `clear_lazy`, `new_host_indexed`, `new_host_named`, `own_kind`, `own_enumerable_data`, `set_str`, `define_named` and a few more) are part of the `Engine` interface for the second engine (`bare-js2`). I did not remove them.
+
+Measurements. Machine archMachine (loaded: only instruction counts are used). Both trees are release builds in separate target directories; the base is `origin/main` `1f10a631`, the new tree is this branch after the merge of it.
+
+| Check | Base | New | Change |
+| --- | --- | --- | --- |
+| `tools/js/cost_matrix.sh -j4`, 817 rows (minimum of 3 runs; `parse_load deep 1` and `deep 10` fail on both trees, known) | | | mean glibc -0.002%; 0 rows over +0.5%; largest `resources_load small 1` +0.295%; smallest `fetch_load bytes 10` -0.940% |
+| `bare --run http://127.0.0.1:PORT/` of a small page (one script), instructions, 3 rounds of `instr.sh` (each the minimum of 3 runs) | 5,185,763 / 5,185,712 / 5,185,042 | 5,182,900 / 5,186,090 / 5,185,856 | within 0.06% (noise) |
+| Release `bare` binary | 17,236,944 B | 17,235,472 B | -1,472 B |
+
+The `codegen-units=1` rule was not needed: no row is over +0.5% at the default build. The change removes functions that nothing calls, so the code that runs is the same.
+
+Tests. Linux, debug: `cargo test --locked -p bare --lib -p bare-js -p bare-js-api`: 1718 (6 ignored), 1106 (1 ignored) and 32 pass (run before the merge of `origin/main`, which changes only tests and docs in the Windows fixes).
+
+Not tested: the Windows tests (only `cargo xwin check`, no VM run); `BARE_GC_STRESS=1` and `BARE_ALL_API=1` runs; `codegen-units=1`; RSS and wall time; the journeys and `tools/suite/run.py`; macOS; the `cfg` paths of other targets.
