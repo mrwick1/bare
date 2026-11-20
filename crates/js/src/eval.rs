@@ -493,6 +493,8 @@ enum Callee {
     Promise(PFn),
     /// A method of the embedder's [`Host`]. `ctor` allows `new`. `nt` (a constructor only) also takes a different `new.target`.
     Host { id: u32, ctor: bool, nt: bool },
+    /// A function of the interface host (`bare_js_api::Engine::host_function`). Same fields as `Host`; its calls go to `call_api_host`.
+    ApiHost { id: u32, ctor: bool, nt: bool },
     /// A class constructor. Its code and fields are in `ClassState::classes` (see `eval_classes.rs`).
     Class,
     /// A proxy whose target is callable (see `eval_proxy.rs`). The target and handler are in the heap, so a revoked proxy stays
@@ -1089,7 +1091,7 @@ impl<'p> Interp<'p> {
             // A host function owns no host state: the embedder's `trace` is not asked about it.
             let mut host_fn = false;
             match self.funcs.get(&o) {
-                Some(Callee::Host { .. }) => host_fn = true,
+                Some(Callee::Host { .. } | Callee::ApiHost { .. }) => host_fn = true,
                 Some(Callee::Script { env, .. }) => env_work.push(*env),
                 Some(Callee::Bound { target, this, args }) => {
                     work.push(Value::Object(*target));
@@ -2180,6 +2182,7 @@ impl<'p> Interp<'p> {
             B(ObjId, Value, Vec<Value>),
             P(PFn),
             H(u32),
+            A(u32),
             X,
             R,
         }
@@ -2188,6 +2191,7 @@ impl<'p> Interp<'p> {
             Some(Callee::Proxy { .. }) => D::X,
             Some(Callee::Revoke(_)) => D::R,
             Some(&Callee::Host { id, .. }) => D::H(id),
+            Some(&Callee::ApiHost { id, .. }) => D::A(id),
             Some(&Callee::Native(n)) => D::N(n),
             Some(Callee::Bound { target, this, args }) => D::B(*target, *this, args.clone()),
             Some(&Callee::Promise(pf)) => D::P(pf),
@@ -2205,6 +2209,7 @@ impl<'p> Interp<'p> {
                 D::S(script, fid, env, sb) => it.call_script((script, fid), o, env, sb, this, args),
                 D::P(pf) => it.call_promise(pf, this, args, false),
                 D::H(id) => it.call_host(id, this, args, false, None),
+                D::A(id) => it.call_api_host(id, this, args, false, None),
                 D::X => it.px_call(o, this, args),
                 D::R => it.call_revoke(o),
                 D::B(t, bthis, mut bargs) => {
@@ -2319,6 +2324,7 @@ impl<'p> Interp<'p> {
             B(ObjId, Vec<Value>),
             P(PFn),
             H(u32),
+            A(u32),
             C,
             X,
         }
@@ -2326,6 +2332,7 @@ impl<'p> Interp<'p> {
             Some(Callee::Class) => D::C,
             Some(&Callee::Proxy { ctor: true }) => D::X,
             Some(&Callee::Host { id, ctor: true, .. }) => D::H(id),
+            Some(&Callee::ApiHost { id, ctor: true, .. }) => D::A(id),
             Some(&Callee::Script { script, fid, env, self_binding, hint }) if self.func_of(script, fid).is_plain_ctor() => D::S(script, fid, env, self_binding, hint),
             Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor(_) | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::StringFn | Nat::NumberFn | Nat::BooleanFn | Nat::Ext(Bi::RegExpCtor) | Nat::Sc(ScFn::IterCtor) | Nat::Px(PxFn::Ctor)) || matches!(n, Nat::Bin(b) if b.ctor_name().is_some() || b == BinFn::TaCtor) || matches!(n, Nat::Sc(f) if f.is_ctor()) || n == Nat::Date(DateFn::Ctor) || matches!(n, Nat::Intl(f) if f.is_ctor()) => D::N(n),
             Some(Callee::Bound { target, args, .. }) => D::B(*target, args.clone()),
@@ -2353,6 +2360,7 @@ impl<'p> Interp<'p> {
             D::P(pf) => it.call_promise(pf, Value::Undefined, args, true),
             // A plain `new F` has no different `new.target`: the `prototype` of a host constructor is read-only, so it is the default.
             D::H(id) => it.call_host(id, Value::Undefined, args, true, None),
+            D::A(id) => it.call_api_host(id, Value::Undefined, args, true, None),
             D::B(t, mut bargs) => {
                 bargs.extend_from_slice(args);
                 it.construct(Value::Object(t), &bargs, callee)

@@ -15087,6 +15087,84 @@ What would change the answer: a measured lifetime of survivors (how many of the 
 Findings, not changed in main: (1) A block with no free cell is swept again in each cycle; a minor collection could keep such blocks aside. Not built. (2) `remember` for a long record can be about 3 instructions with the shift kept in the block header. Not built. (3) The division in `Heap::mark` (S1.5 finding) is on every mark, minor or full. Not built.
 
 Not tested: Windows (the experiment is not in main, so no VM run); a real interpreter or a JIT (the barrier in an inline cache, 3 to 5 instructions, is not measured); lifetimes of real survivors; the old-data size of the real journeys; arm64; wall time and cycles; weak tables in a minor collection beyond the stub (a table is traced when remembered; no test writes one after it is old); `Obj::add` under a shape cap with a remembered object; the cost matrix (js2 is not wired into the browser).
+## 2026-11-20: host handlers on the interface, H0: spike, call path cost and interface methods (plan step S0.4, `design-host-handlers.md` step H0)
+
+Status: DONE in two rounds. Round 1 (branch `t3/host-handler-facade`) built the spike and stopped at the cost rule. Round 2 (branch `t3/optimize-host-handler-cost`, PR below) cut the interface path to below the old path, then built the facade and G2 to G13. Round 1 follows as it was written; round 2 is at the end of the entry.
+
+Changes.
+
+- `crates/js/src/eval.rs`, `eval_host.rs`, `eval_classes.rs`, `eval_native.rs`, `eval_api.rs`: `Callee::ApiHost` for a function made through `Engine::host_function`. Its call goes straight to `call_api_host`; the old `call_host` is unchanged. `host_function` takes `HostFn::{Method, Ctor, CtorNewTarget}` (G1).
+- `crates/js-api/src/lib.rs`: `HostFn`.
+- `crates/bare/src/browser_scoped.rs`: the registry `Dom::scoped`, `Dom::dispatch_host` (`style.cur`, `needs_new`, custom element scope, mutation observer hook) for both entries, `Entry`, and the `Local` forms of `el`, `string_arg`, `js_str`. A test build with `BARE_ALL_API=1` puts every old handler on the interface.
+- `crates/bare/src/browser_dom.rs`: the three handlers on `Scope`.
+- `crates/bare/examples/host_call_load.rs`: one host call in a loop (`nop`, `get`, `has`, `match`). Not a cost-matrix row.
+
+Method. Machine archMachine. Base: origin/main `1cfa3c69` built fresh. `tools/js/instr.sh` (minimum of 3 runs of `instructions:u`) on `host_call_load MODE 200000`. Rows by `tools/js/cost_matrix.sh -j4 -g 'attr_load|select_load react|handler_load|nodelist_load'` (16 rows, glibc; jemalloc only for a row over the limit).
+
+Measurement 1 (bit `1<<31` in the host function id, checked in `call_host`; `Dom::call` through the shared hook). Instructions per call, over base:
+
+| Path | `get` | `has` | `match` |
+|---|---:|---:|---:|
+| old registry (all handlers old) | +18 | +18 | +18 |
+| new registry (three handlers on `Scope`) | +184 | +137 | +151 |
+
+Rows: 14 of 16 over +0.2%, `select_load react 1000` +0.637% under both allocators. The three handlers added about 0.00 to 0.02 points to the rows against the same tree with them old: the rows call them rarely, so the rows say little about the cost of one call.
+
+Cause of the +9 of the bit check: the extra branch in `call_host` stopped the tail call to `call_api_host`, and `call_host` got 3 more pushes (disassembly). A separate `Callee::ApiHost` variant gives -3 per call on the old path (it adds a match arm only).
+
+Measurement 2 (`ApiHost`; a string argument is read in place, `to_string` only for another value):
+
+| Path | `get` | `has` | `match` |
+|---|---:|---:|---:|
+| old registry, shared hook | +5 | +5 | +5 |
+| new registry | +83 | +36 | +52 |
+
+Rows (all 16, glibc): +0.014% to +0.215%, mean +0.118%. The row over +0.2% is `select_load react 1000` (+0.215%); `attr_load react 1` +0.148%, `nodelist_load scan 1` +0.180%. Not within the +0.2% of the rule, so the spike stops here.
+
+Split of the cost of one interface call (callgrind, `get`, per call, before the string change; `has` is 123 in total): `call_api_host` 44 against `call_host` 26 (+18: host `Rc` clone, `host_nt`, handle stack push of `this` and the argument); `call_scoped` and its closure 73 against the old `Dom::call` 36 (+37); `enter` 12; argument `to_string` and `as_str` 27+12 against 11 (the string change removed most of it); result string `Engine::string` 25 and `shared_text` 27 against `intern_str` 7 (only `get`); `boolean` push 11; `el_s` 22 against 21; `node_of` is the same `by_obj` lookup in both (`host_key` for a wrapper needs a key in the object or a map; the old engine has neither, so it was not measured).
+
+Reading. A converted handler costs a fixed +36 to +83 instructions per call after the first fixes, 1.6% to 3.1% of a `hasAttribute` or `getAttribute` call in a loop. The cost scales with the number of converted calls, so converting a group of call-dense handlers (events, DOM core) is expected to pass +0.5% on its rows (hypothesis; not measured). The next change to the call path, not tried here: one `Scope` per host call kept by the engine (no `enter`, no second `Local` for `this`), the `Rc` clone of the interface host replaced by a borrowed pointer, `call_scoped` with no `RefCell` borrow, and `Engine::string` with `intern_str` directly. Each is 5 to 40 instructions by the callgrind split.
+
+Tests. Linux, debug: `cargo test --locked -p bare-js-api -p bare-js --lib` 31 and 1094 pass. `bare --lib` filters `dom attr custom mutation` (121): pass plain, with `BARE_GC_STRESS=1`, with `BARE_ALL_API=1`, and with both. `browser_custom` and `browser_mutation` (25) pass with `BARE_ALL_API=1`.
+
+Not tested: the Windows VM, the full `bare --lib` run, the full cost matrix, G2 to G13, the facade methods, and a unit test for `HostFn::CtorNewTarget` and for the constructor path of `ApiHost`.
+
+Round 2: the cost of the interface path, and the rest of H0.
+
+Method. Machine archMachine. Base: origin/main `e36a8dd4` first, `69f93aaa` for the full matrix (main changed only `crates/js2` in between), built fresh in a separate target directory. Micro-loop: `crates/bare/examples/host_call_load.rs` with `tools/js/instr.sh` (minimum of 3 runs of `instructions:u`), 200,000 calls, instructions per call over base. The base tree got a copy of the example. Callgrind (1 run, 20,000 calls, exclusive cost by function) found the share of each part before the levers.
+
+Callgrind of `has` before round 2 (per call, exclusive): `call_api_host` 107, `enter` 48, `call_scoped` 64 and its closure 26, `Engine::as_str` 64, `string_arg_s` 70, `el_s` 75, `has_attribute_s` 82, `Engine::boolean` 21, `Engine::charge` 10. The old path: `string_arg` 201 with `to_js_string` 30, `Heap::to_string` 30 and `coerce_primitive` 23, `has_attribute` 82, `el` 68, `Host::call` 53, `call_host` 49. The `Engine` methods are not generic and have no `#[inline]`, so the browser crate called each one (the build has no LTO and 16 codegen units).
+
+Levers, in the order tried, each measured on the micro-loop (instructions per call over base; spike head first):
+
+| Lever | `get` | `has` | `match` | Gain `get` / `has` / `match` |
+|---|---:|---:|---:|---|
+| Spike head (round 1, measurement 2) | +84 | +37 | +53 | |
+| 1. `#[inline]` on the small `Engine` methods of `Interp` (`stack_len`, `stack_truncate`, `undefined`, `null`, `boolean`, `number`, `raw`, `raw_local`, `as_str`) and on `api_push` and `api_at` | +36 | -21 | -1 | -48 / -58 / -54 |
+| 2. `Engine::string` calls `intern_str` for text up to `SHARE_MIN`, and is `#[inline]` | +23 | -21 | -1 | -13 / 0 / 0 |
+| 3. `string_arg_s` reads the argument with one `as_str` (a string; `to_string` only for another value) | +14 | -30 | -10 | -9 / -9 / -9 |
+| 4. `Fun::Old` and its match only in test builds (`#[cfg(test)]`) | -9 | -54 | -37 | -23 / -24 / -27 |
+| Final, after the rebase, base rebuilt | -12 | -57 | -37 | |
+
+The interface path costs less than the old body for all three handlers: the old `string_arg` coerces and measures the string in 4 calls. Levers not tried, because the target was met: a borrowed pointer for the `Rc` of the host, no `RefCell` borrow in `call_scoped`, one `Scope` for each host call. Each would give 5 to 20 instructions (by the callgrind split).
+
+Rows. `tools/js/cost_matrix.sh -j4`, all 819 rows, glibc, jemalloc only for a row over the limit: 817 ran, mean +0.017%, no row over +0.5% (largest: `focus_load focus 1` +0.302%, `fragment_load deep 10` +0.215%, `fragment_load deep 1` +0.200%, `observer_load mo 10` +0.187%). `parse_load deep 1` and `parse_load deep 10` do not run on the base tree either (stack overflow, also with `ulimit -s 262144`), so they are not measured. The 16 spike rows (`attr_load`, `select_load react`, `handler_load`, `nodelist_load`): +0.024% to +0.176%; `select_load react 1000` +0.176%, `select_load react 10` +0.141%, `attr_load react 10` +0.111%; every other row is under +0.11%. These rows call old handlers: the +5 instructions per call of the shared `dispatch_host` on the old path is what they show (round 1, measurement 2). It is not reduced.
+
+What H0 now has.
+
+- `bare-js-api` (`crates/js-api/src/lib.rs`): `Engine` methods with default bodies that say `Unsupported`, and the `Scope` forms: `host_key` (G2), `task` and the free function `task` (G5), `construct` with `new_target` (G1), `run_script`, `compile_function`, `call_scoped`, `eval_global`, `eval_function` (G6), `new_array_buffer`, `new_typed_array`, `new_uint8_array`, `bytes`, `bytes_mut`, `view`, `is_detached`, `view_get`, `bigint_limbs` with the types `Elem` and `View` (G7), `new_host_indexed`, `new_host_named`, `set_lazy`, `clear_lazy` (G8), `own_kind` with `Own` (G9), `Intrinsic::SymbolToStringTag` and `symbol_description` (G11), `display` and `inspect` (G12), `set_integrity`, `array_len`, `new_error` (G13), and the provided `define_str`, `set_str`, `define_accessor_str` (G3). G4 needs no API. `inspect` gives the node callback the raw value (`&E::Raw`), not a `Local`: the callback cannot push while the engine walks.
+- `crates/js/src/eval_api.rs`: the bodies on the old engine. `Interp::call` of the interface keeps up to 8 arguments in an array (G10). `host_key` answers only for objects of `new_host_indexed` and `new_host_named`: the old engine keeps no map from an object with an owner key (`set_host_owner`) to its key, so it answers `None` for those (a group that converts a wrapper keeps its `by_obj` map until it moves, as question 3 says).
+- `crates/bare/src/browser_scoped.rs`: the facade of `Browser`: `with_scope`, `eval`, `display`, `get_str`, `call`, with `Failed`. Values are `Persistent`.
+
+Tests (new).
+
+- `bare-js` `eval_api_tests.rs`: 6 tests for the methods above, among them host constructors of the interface (`HostFn::Ctor` and `CtorNewTarget`, `new` on a `Method`, a subclass of a constructor that does not read `new.target`, `Scope::construct` with a `new.target`) and a task that refuses `run_script`.
+- `bare-js-api` `tests.rs`: 1 test for the default bodies.
+- `bare` `browser_scoped_tests.rs`: 4 tests: the facade; the three handlers on the interface against the answers of the old ones (12 cases); the three handlers in a loop under `BARE_GC_STRESS` (state kept, no slot left); the mutation observer hook after a converted call.
+
+Linux. `cargo test --locked -p bare-js-api -p bare-js -p bare --lib`: 32, 1100 and 1713 pass (6 and 1 ignored). `bare --lib` filters `dom attr custom mutation scoped` (126 pass, 1 ignored): pass plain, with `BARE_GC_STRESS=1`, with `BARE_ALL_API=1`, and with both. Windows 11 VM (`cargo xwin test`, exe through `winssh`): `bare-js-api` 32 pass; `bare-js` filter `api_tests` 42 pass; `bare` same filters 126 pass.
+
+Not tested: the journeys and `tools/suite/run.py`; the `bare-js` and `bare` full test runs on Windows (an unfiltered run of the `bare-js` and `bare` test executables on the VM showed failures in `date_tests`, `intl_tests`, `bc_gen::tests::golden_disassembly`, `browser_session` and `resources::tests` that I did not check against the base commit); the jemalloc matrix (no row was over the limit under glibc); the cost of a handler of a later group; the interface path with a non-string `this` or a key-indexed owner table (G2 on a plain owner object); a second engine (`bare-js2` has none of the new methods, they default to `Unsupported`); wall time. `clippy -D warnings` fails on the base commit in `bare-os`, `bare-js` (3 sites) and `bare` (4 sites) before and after this change; the new code adds none.
 ## 2026-11-20: bytecode format and verifier for `bare-js2` (plan step S2.4)
 
 New modules in `crates/js2`: `bytecode.rs` (ops, encoder, decoder, the `Code` object, an assembler) and `verify.rs` (the verifier). No compiler and no interpreter yet (S2.5, S2.6). Base: main `bccb5b67`.
