@@ -711,7 +711,6 @@ pub(crate) enum Kind {
     Get(H),
     /// A getter of the new form.
     GetS(crate::browser_scoped::HS),
-    Accessor(H, H),
     /// A getter and a setter of the new form.
     AccessorS(crate::browser_scoped::HS, crate::browser_scoped::HS),
 }
@@ -1580,12 +1579,6 @@ impl Dom {
                     named(&mut nm, "get ", d.name);
                     (self.add_fn_s_obj(it, h, &nm, 0, HostFn::Method)?, None)
                 }
-                Kind::Accessor(gh, sh) => {
-                    named(&mut nm, "get ", d.name);
-                    let f = self.add_fn(it, gh, &nm, 0, false)?;
-                    named(&mut nm, "set ", d.name);
-                    (f, Some(self.add_fn(it, sh, &nm, 1, false)?))
-                }
                 Kind::AccessorS(gh, sh) => {
                     named(&mut nm, "get ", d.name);
                     let f = self.add_fn_s_obj(it, gh, &nm, 0, HostFn::Method)?;
@@ -1753,7 +1746,7 @@ pub(crate) fn illegal_constructor(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[V
     Err(it.type_error("Illegal constructor"))
 }
 
-use Kind::{Accessor as A, AccessorS as AS, GetS as GS, MethodS as MS};
+use Kind::{AccessorS as AS, GetS as GS, MethodS as MS};
 use P::*;
 
 const PARENT: &[P] = &[Element, Document, Fragment];
