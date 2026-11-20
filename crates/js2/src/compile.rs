@@ -826,6 +826,7 @@ impl<'a> Fc<'a> {
         }
         let mut code = Code::new(nregs, nparams as u16);
         code.fn_len = self.fn_len;
+        code.strict = self.strict;
         let mut roots = RootMaps::new(nregs as usize);
         for (k, &(idx, start)) in self.root_at.iter().enumerate() {
             let end = self.root_at.get(k + 1).map_or(self.root_regs.len(), |n| n.1);

@@ -215,7 +215,7 @@ impl<'a> Fc<'a> {
             }
             Res::Global => {
                 let s = self.site_of(name)?;
-                self.op(Op::SetGlobal, src, s, 0);
+                self.op(if self.strict && !init { Op::SetGlobalS } else { Op::SetGlobal }, src, s, 0);
             }
         }
         Ok(())

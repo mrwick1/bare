@@ -180,6 +180,9 @@ impl<'a> Fc<'a> {
     fn object_pattern(&mut self, list: List<PatProp>, v: u32, mode: Bind) -> CR {
         let prog = self.prog;
         let props: Vec<PatProp> = prog.list(list).map(|p| *prog.pat_prop(p)).collect();
+        if props.is_empty() {
+            self.op(Op::RequireObj, v, 0, 0);
+        }
         // With a rest property, the keys of the other properties go to a window of registers that `ObjRest` reads.
         let nkeys = props.len() as u32 - props.iter().any(|p| matches!(p.key, Key::None)) as u32;
         let base = props.iter().any(|p| matches!(p.key, Key::None)).then(|| self.window(nkeys));

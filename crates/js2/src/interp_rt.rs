@@ -173,6 +173,8 @@ pub enum Got {
 pub enum Put {
     Done,
     Set(Value),
+    /// The write did not happen (a read-only property, an accessor with no setter, a primitive): strict code throws a TypeError.
+    Fail,
 }
 
 /// What a property lookup found: a data value, or the getter and the setter of an accessor.
@@ -740,7 +742,7 @@ impl Realm {
     }
 
     pub(crate) fn setter(s: Value) -> Put {
-        if s.is_undefined() { Put::Done } else { Put::Set(s) }
+        if s.is_undefined() { Put::Fail } else { Put::Set(s) }
     }
 
     fn undefined_read<T>(&mut self, recv: Value, name: &str) -> R<T> {
@@ -818,7 +820,7 @@ impl Realm {
             if recv.is_undefined() || recv.is_null() {
                 return self.type_error("cannot set properties of undefined or null");
             }
-            return Ok(Put::Done);
+            return Ok(Put::Fail);
         };
         self.fn_props(o);
         match key {
@@ -849,7 +851,7 @@ impl Realm {
     /// `recv[key] = v` where a setter throws (the host and the tests have no frame to call from).
     pub fn set_prop(&mut self, recv: Value, key: Key, v: Value) -> R<()> {
         match self.set_prop_g(recv, key, v)? {
-            Put::Done => Ok(()),
+            Put::Done | Put::Fail => Ok(()),
             Put::Set(_) => self.type_error("accessors are not supported here (the host needs a call)"),
         }
     }
@@ -859,7 +861,10 @@ impl Realm {
         let mut p = self.proto_of(o)?;
         loop {
             if let Some(e) = self.shapes.find(p.shape(&self.shapes), k) {
-                return (e.attrs() & A_ACC != 0).then(|| Self::setter(p.slot(&self.shapes, e.slot() + 1)));
+                if e.attrs() & A_ACC != 0 {
+                    return Some(Self::setter(p.slot(&self.shapes, e.slot() + 1)));
+                }
+                return (e.attrs() & A_W == 0).then_some(Put::Fail);
             }
             p = self.proto_of(p)?;
         }
@@ -871,9 +876,10 @@ impl Realm {
         match self.shapes.find(id, k) {
             Some(e) if e.attrs() & A_ACC != 0 => Ok(Self::setter(o.slot(&self.shapes, e.slot() + 1))),
             Some(e) => {
-                if e.attrs() & A_W != 0 {
-                    o.set_slot(&self.shapes, e.slot(), v);
+                if e.attrs() & A_W == 0 {
+                    return Ok(Put::Fail);
                 }
+                o.set_slot(&self.shapes, e.slot(), v);
                 Ok(Put::Done)
             }
             None => {
@@ -953,7 +959,7 @@ impl Realm {
             Some(e) if e.attrs() & A_ACC != 0 => Ok(Self::setter(o.slot(&self.shapes, e.slot() + 1))),
             Some(e) => {
                 if e.attrs() & A_W == 0 {
-                    return Ok(Put::Done);
+                    return Ok(Put::Fail);
                 }
                 if layout_ok {
                     let loc = o.loc(&self.shapes, e.slot());

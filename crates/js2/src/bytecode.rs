@@ -151,6 +151,7 @@ ops! {
     CopyCtx Abc "" "Replace the context with a copy of it (one iteration of a `for` with `let` that a closure captured).",
     GetGlobal Abx "w S" "`a` = the global of the site `bx`. A missing name throws a ReferenceError.",
     SetGlobal Abx "r S" "The global of the site `bx` = `a`.",
+    SetGlobalS Abx "r S" "As `SetGlobal` in strict code: a ReferenceError when the global does not exist.",
     DeclGlobal Abx "- S" "Create the global of the site `bx` with the value `undefined` when it does not exist (the hoisting of the `var` names and the function names of a script).",
     TypeofGlobal Abx "w S" "`a` = `typeof` the global of the site `bx`. A missing name gives `\"undefined\"`.",
     GetName Abx "w S" "`a` = the name of the site `bx` by the full search (a function with `with` or direct `eval`).",
@@ -165,6 +166,7 @@ ops! {
     GetElem Abc "w r r" "`a = b[c]`.",
     GetElemI Abc "w r u" "`a = b[c]` for the index `c` (8 bits).",
     SetElem Abc "r r r" "`a[b] = c`.",
+    RequireObj Abc "r" "Throw a TypeError when `a` is `undefined` or `null` (an empty object pattern takes no property, so no read throws).",
     ToKey Abc "w r r" "`a` = the property key of `c` (ToPropertyKey). A `null` or `undefined` `b` throws first, as `b[c]` does.",
     DefElem Abc "r r r" "Define the own data property with the key `b` (already a key, see `ToKey`) on `a` with the value `c` (a computed key).",
     Delete Abc "w r r" "`a = delete b[c]`.",
@@ -591,6 +593,8 @@ pub struct Code {
     /// default or rest parameter). The realm defines both properties of a function cell at the first look at its own properties.
     pub fn_name: u32,
     pub fn_len: u16,
+    /// The function is strict code: a write that fails (a read-only property, a primitive, `delete` of a fixed property) throws.
+    pub strict: bool,
 }
 
 /// `Code::fn_name` of a function that has no name.
@@ -615,6 +619,7 @@ impl Code {
             flags: 0,
             fn_name: NO_NAME,
             fn_len: 0,
+            strict: false,
         }
     }
 

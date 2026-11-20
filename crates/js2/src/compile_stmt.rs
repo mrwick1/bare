@@ -286,6 +286,10 @@ impl<'a> Fc<'a> {
             if let Some(d) = default {
                 let skip = self.label();
                 self.jmp_r(Op::JSNeUndef, r, skip);
+                if matches!(prog.pat(target).kind, PatKind::Ident) {
+                    let name = prog.name(prog.pat(target).span);
+                    self.name_hint(d, &name);
+                }
                 self.to(d, r)?;
                 self.bind(skip);
             }
@@ -400,6 +404,19 @@ impl<'a> Fc<'a> {
     pub(crate) fn script_body(&mut self, list: List<Stmt>) -> CR {
         let mut h = Hoist::default();
         self.hoist_list(list, true, &mut h);
+        // The top-level `let`, `const` and `class` names are variables of the script (a register, or a context slot when a function
+        // uses them), not properties of the global object: they have a dead zone, and a `const` cannot be assigned.
+        let decls: Vec<Decl<'a>> = h.lex.iter().map(|(n, k, e)| Decl { name: n.clone(), kind: *k, end: *e, reg: None }).collect();
+        let mark = if decls.is_empty() { None } else { Some(self.enter(Span { start: 0, end: u32::MAX }, &decls, false)?) };
+        for d in &decls {
+            if let Some(v) = self.find_var(&d.name)
+                && let (VK::Let | VK::Const | VK::Class, Home::Reg(r)) = (v.kind, v.home)
+                && self.early_use(d, 0)
+            {
+                self.op(Op::LoadHole, r, 0, 0);
+                self.set_live(r);
+            }
+        }
         // Each name exists as a global (`undefined`) before the first statement runs, so a read or `typeof` finds it, and a `var` with no
         // initializer is not lost.
         let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
@@ -414,6 +431,9 @@ impl<'a> Fc<'a> {
         }
         for s in self.prog.list(list) {
             self.stmt(s)?;
+        }
+        if let Some(m) = mark {
+            self.leave(m);
         }
         Ok(())
     }

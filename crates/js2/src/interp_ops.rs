@@ -146,7 +146,7 @@ impl Realm {
         let d = self.private_desc(k);
         match self.shapes.find(ob.shape(&self.shapes), k) {
             Some(e) if e.attrs() & A_ACC != 0 => match Self::setter(ob.slot(&self.shapes, e.slot() + 1)) {
-                Put::Done => self.type_error(&format!("'{d}' was defined without a setter")),
+                Put::Fail => self.type_error(&format!("'{d}' was defined without a setter")),
                 p => Ok(p),
             },
             Some(e) if e.attrs() & A_W == 0 => self.type_error(&format!("private method {d} is not writable")),
