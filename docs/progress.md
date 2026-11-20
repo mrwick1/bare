@@ -15087,3 +15087,57 @@ What would change the answer: a measured lifetime of survivors (how many of the 
 Findings, not changed in main: (1) A block with no free cell is swept again in each cycle; a minor collection could keep such blocks aside. Not built. (2) `remember` for a long record can be about 3 instructions with the shift kept in the block header. Not built. (3) The division in `Heap::mark` (S1.5 finding) is on every mark, minor or full. Not built.
 
 Not tested: Windows (the experiment is not in main, so no VM run); a real interpreter or a JIT (the barrier in an inline cache, 3 to 5 instructions, is not measured); lifetimes of real survivors; the old-data size of the real journeys; arm64; wall time and cycles; weak tables in a minor collection beyond the stub (a table is traced when remembered; no test writes one after it is old); `Obj::add` under a shape cap with a remembered object; the cost matrix (js2 is not wired into the browser).
+## 2026-11-20: bytecode format and verifier for `bare-js2` (plan step S2.4)
+
+New modules in `crates/js2`: `bytecode.rs` (ops, encoder, decoder, the `Code` object, an assembler) and `verify.rs` (the verifier). No compiler and no interpreter yet (S2.5, S2.6). Base: main `bccb5b67`.
+
+The format (details are in the module comment of `bytecode.rs`):
+
+- One instruction is one 32-bit word `[op:8][a:8][b:8][c:8]`, plus one raw word `x` for 4 operands or for a compare-jump. A `Wide` prefix word makes the operands 16 bits (32 bits for a table index or an offset). `encode` picks the narrow form, so the compiler never names a width. 137 ops (the old format has 111).
+- Constants are split by kind. Integers are immediates (`LoadI` 16 bits, `AddI` and the other `...I` ops 8 bits, the compare-jumps `J..I` 32 bits). `null`, `undefined`, `true` and `false` have no operand (`LoadNull`, `JSEqNull`, `JSNeUndef`, the 2-bit selector of `SetFieldK`, `JSEqB`). Atoms, other numbers, child functions and object-literal key lists have a table each.
+- A property or global op names a site, not a name. `Code::sites[i]` is the atom of site `i`, and the per-realm feedback vector has one cache record at index `i`. A cache hit reads only the record, so `GetField dst, obj, site` is one word. The old op was two words (`AbcX`: cache number in `c`, name constant in `x`).
+- Compare-jumps: `x === null` and its `undefined` forms are one word; a compare with an integer or an atom is two words (`x` is the operand); two registers are two words (`x` is the offset). Both polarities exist for `<`, `<=`, `>` and `>=`, because `!(a < b)` is not `a >= b` for NaN. The equalities need one polarity.
+- Loops: every jump back is `JmpBack`, every other jump goes forward. `JmpBack` is the budget check and a safepoint. `Code::loops` has one entry per header (the header and the last back edge), sorted. `Asm::finish` builds it from the `JmpBack` ops, so the JIT needs no loop discovery (design 6.11 item 19).
+- Root maps: `Code::roots` is the `RootMaps` of S1.6. `Op::is_safepoint` says which ops need a map: every op except moves, loads, jumps and compares that cannot call JS, allocate or throw. `JmpBack` is one. The key is the `pc` of the first word. `roots.rs` gets two readers, `regs()` and `pcs()`, for the verifier.
+- `Asm` (labels, `emit`, `jump`, `finish`) fills the jump offsets and chooses each width. A jump that does not fit 16 bits goes wide; widening one jump can push another over the limit, so the widths only grow until they stop changing.
+
+The verifier checks: decoding and instruction starts; registers, windows (calls, literals, iterator records), special constants and each table index; unused fields are 0; each site has an atom and exactly one instruction; jump targets are instruction starts and only `JmpBack` goes back; the loop table; handlers; sorted source positions; a root map for each safepoint and for nothing else; and, by data flow over all paths, that no path runs past the end, the context depth agrees at joins, no instruction reads a register that a path has not written, and a root map names only registers that every path has written (this is what lets a frame skip the fill, design 6.10 item 4). It keeps one register set for each instruction, so it is for tests and debug builds.
+
+Tests (22 new in `bytecode_tests.rs` and `verify_tests.rs`): an op-table consistency test; every op round-trips with narrow and wide values at the edges of each field (14 values, each field alone and all fields together), the narrow form is chosen when it fits, and an error writes nothing; sizes of the common instructions; decode errors; the assembler on forward and backward jumps, nested loops, two back edges to one header, and the cascade of widening (two jumps at the 16-bit edge); one test per class of verifier error, each with the exact message. Linux: `cargo test --locked -p bare-js2 --lib` 128 pass (106 on main). Windows 11 VM (`cargo xwin test`, exe through `winssh`): 128 pass. Both after the rebase on `bccb5b67`. `cargo clippy -p bare-js2 --all-targets`: no warning in the new files (`bare-os` and `heap.rs` have warnings that this change does not touch).
+
+Code size against the old format. Method: the old compiler (`bc_gen_check`, in a scratch checkout of `e36a8dd4` with a dump added; not in the repository) compiled every function of jQuery 3.4.1 minified (a real minified library, 946 functions, 3 not compiled for direct `eval`) and of the 7 `eval_load` programs at scale 1 (59 functions). Each old instruction maps to one new instruction by the rules below, and the words are counted. This isolates the format. It does not include scope analysis, destination-driven registers, the effect context or switch tables (S2.5). Scripts and dumps: `/data/bare-tmp/s24/` (not in the repository).
+
+- `GetField`, `SetField`: 2 words to 1 (2 when the function has more than 255 sites: 1 function of 946, 328 sites). `CallR`: 2 to 1. Compare-jump with `null` or `undefined`: 2 to 1; with an integer, an atom or a register: 2 to 2; with a non-integer number: 2 to 3 (`LoadN` first). `AddK` family: 1 to 1 for an 8-bit integer, 2 otherwise. `ClosureName`: 2 to 1. `GetEnv` and `SetEnv`: 1 to 1 (low) or 2 (high: every one is `GetCtxTdz`). `DefField` and `ArrayPush`: removed by `NewObjLit` and `NewArrLit` (low) or kept (high).
+
+| Set | Functions | Old words | New words (low to high) | Change | Words per function, old to new |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| jQuery 3.4.1 minified | 946 | 47,934 | 35,664 to 42,593 | -25.6% to -11.1% | 50.7 to 37.7 / 45.0 |
+| `eval_load`, 7 cases at scale 1 | 59 | 1,045 | 839 to 844 | -19.7% to -19.2% | 17.7 to 14.2 |
+
+- In jQuery 47.2% of the old words are in 2-word instructions (`GetField` 25.2% of all words, `CallR` 14.2%). `GetEnv` is 9.6% and `Mov` 7.7%. The median function is 22.5 words, the 90th percentile 110, the maximum 2,907.
+- The high bound counts every `GetEnv` as a dead-zone read. jQuery 3.4.1 is ES5 and has few `let` and `const`; a modern bundle has more, so its result is nearer the high bound (hypothesis).
+- Two `eval_load` programs get larger by 1 word (`calls` 5 to 6, `loopfn` 11 to 12), and `closures` by 4 words at the high bound only. `fib` falls from 14 to 12 and `webpack` from 990 to 784. The constants of the larger ones (for example a modulus above 127) do not fit the 8-bit immediate, so `ModI` becomes `LoadN` and `Mod` (2 words, 2 dispatches). A wide `ModI` with a 16-bit immediate is also 2 words, and 1 dispatch. The interpreter (S2.6) can take that form.
+- Tables and caches: the old `Code` holds a 24-byte `Const` for each constant and a 24-byte cache for each property op, in every code object. The new code has an 8-byte atom for each constant and a 4-byte site (hypothesis: one atom table entry for each old constant). Words, constants and caches together: jQuery 520,896 bytes to 226,920 to 254,636 bytes (-56.4% to -51.1%); `eval_load` (7 cases) 11,908 bytes to 5,364 to 5,384 bytes (-55.0% to -54.8%). The caches of the new engine are in the per-realm feedback vector, allocated on the second use, and are not counted: 8 to 16 bytes for each site that runs twice (design 6.10 item 12).
+- Instructions: 36,391 old instructions in jQuery; `NewObjLit` and `NewArrLit` would remove 1,502 (4.1%). The other instructions map one to one, so the dispatch count of the format alone is 4.1% lower (low bound). The real change in dispatches depends on S2.5.
+- Old `Wide` words: 282 of 36,391 instructions (0.77%) in this library, none of them `GetEnv`. The staging journey executed `Wide` for 1.6% of its ops (design 3.2); that journey is not available offline here.
+
+Compared with QuickJS and Ignition (from `research-quickjs-reference.md` and `research-v8-reference.md`; the upstream sources were not read again):
+
+| | QuickJS | V8 Ignition | `bare-js2` |
+| --- | --- | --- | --- |
+| Unit | bytes, length set by the opcode | bytes | 32-bit words |
+| Machine | stack (244 ops) | register with an accumulator | register, no accumulator (137 ops) |
+| Larger operands | separate short and long opcodes; atoms are 32 bits in the stream | `Wide` and `ExtraWide` prefix bytes make all operands 2 or 4 bytes | one `Wide` prefix word; a table index or an offset has 32 bits |
+| Constants | short forms of common pushes; atoms inline | `Smi` immediates, a constant pool, `LdaNull` and friends | immediates, per-kind tables, and a special-constant selector |
+| Cache or feedback | none in the stream | slot operand, feedback vector for each closure | site operand; the feedback vector has the same index |
+
+- Fixed words give up density in the narrow case: `Mov` is 4 bytes here and 3 in a byte format (hypothesis, not measured on the same code). They gain a decode that is one load and three shifts, no byte assembling, and jump offsets in words. The cost of a wide instruction is one extra word and one prefix dispatch. The old format already used this layout and measured 0.77% wide instructions on jQuery.
+
+Judgment calls:
+
+- The design (6.10 item 7) says atoms are inline in the word where they fit. An atom of `bare-js2` is the address of a cell (`atoms.rs`), 48 bits, so it cannot sit in a word. Atom operands are table indexes (8 or 16 bits), and a property name is the name of a site. A numeric atom id in S1.7 would allow inline atoms; I did not change S1.7.
+- Both polarities of the relational compare-jumps and the integer-immediate forms make the op count grow from 111 to 137. Each extra op is one more interpreter arm. Hypothesis: the instruction-cache cost is small against the dispatches that they remove; S2.6 measures it.
+- Only the iterator and loop ops that the core language needs are in the set. Classes, generators, destructuring, spread, regexp literals and templates add ops in S3 and S4. A new op needs one line in the table, and the verifier knows its operands from the letters.
+- `Frames::walk` takes `&[RootMaps]`; the interpreter (S2.6) will hold the maps in `Code::roots`. I did not change `Frames`.
+
+Not tested: a compiler or an interpreter on this format (S2.5, S2.6), so dispatch counts, instructions per op and the root maps of real functions are untested; the translation is static, by rules, and counts no dispatch weights; a modern React bundle (only jQuery 3.4.1 and the `eval_load` programs were available offline); Miri on the new modules (they hold no `unsafe`; the tests use `SharedAtoms`, which does); arm64; the cost matrix (js2 is not wired into the browser).
