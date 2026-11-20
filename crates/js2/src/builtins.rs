@@ -47,9 +47,9 @@ pub struct Native {
 pub enum Outcome {
     Val(Value),
     /// Call the script function `f` with `this` and the arguments in `Realm::tail_args`; the result is the result of the call.
+    ///
+    /// With the hole as `this` (no script can pass it), `f` is a suspended generator: push its frame (`generator.rs`).
     Enter { f: Value, this: Value },
-    /// Push the frame of the suspended generator `g` (`generator.rs`); the result is the result of the call.
-    Resume { g: Value },
 }
 
 /// The hint of `ToPrimitive`.
@@ -174,8 +174,6 @@ impl Realm {
                 let a = std::mem::take(&mut self.tail_args);
                 self.call_native(f2, this2, &a)
             }
-            // The hole is no `this` that a script can pass: `generator.rs` asks for a resume this way.
-            Some((f2, this2)) if this2.is_hole() => Ok(Outcome::Resume { g: f2 }),
             Some((f2, this2)) => Ok(Outcome::Enter { f: f2, this: this2 }),
         }
     }

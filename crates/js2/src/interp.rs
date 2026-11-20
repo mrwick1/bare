@@ -323,11 +323,16 @@ fn gen_op(realm: &mut Realm, stack: &mut [Value], fbs: &mut [Feedback], prog: &C
     Ok(GenExit::Back(caller as usize, nfp, int_at(stack, fp, 4) as usize))
 }
 
-/// Push the frame of the suspended generator `g` on top of the frame `fp` of code `ci` (`Outcome::Resume`). Gives the new `ci`, `fp` and `pc`.
+/// The cold end of `Outcome::Enter` when `g` is no script function. With the hole as `this`, `g` is a suspended generator: push its frame on top of
+/// the frame `fp` of code `ci` and give the new `ci`, `fp` and `pc`. Else the call is a `TypeError`. The code is here and not in the loop so that the
+/// loop keeps its shape (`generator.rs`).
 #[cold]
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn gen_resume(realm: &mut Realm, stack: &mut Vec<Value>, prog: &Codes, ci: usize, fp: usize, dstw: i32, pc: usize, next: usize, g: Value) -> Result<(usize, usize, usize), Value> {
+fn gen_resume(realm: &mut Realm, stack: &mut Vec<Value>, prog: &Codes, ci: usize, fp: usize, dstw: i32, pc: usize, next: usize, g: Value, this: Value) -> Result<(usize, usize, usize), Value> {
+    if !this.is_hole() {
+        return Err(if realm.function_new(g).is_some() { realm.error(ErrKind::Type, "class constructor cannot be invoked without 'new'") } else { realm.error(ErrKind::Type, "not a function") });
+    }
     let nf = fp + prog[ci].nregs as usize + REC;
     let (nci, rpc) = realm.gen_enter(stack, prog, nf, ci as i32, dstw, pc, next, g)?;
     Ok((nci, nf, rpc))
@@ -830,24 +835,23 @@ impl Vm {
                         pc = $next;
                     }
                     Outcome::Enter { f, this } => {
-                        let Some((ni, cctx)) = realm.function(f) else { call_err!(f) };
+                        let Some((ni, cctx)) = realm.function(f) else {
+                            // `next`, `return` or `throw` of a generator (the hole as `this`): its frame goes on top of this one. Else not a function.
+                            match gen_resume(realm, stack, prog, ci, fp, ($dst as i32) | ITER, pc, $next, f, this) {
+                                Ok((nci, nfp, rpc)) => {
+                                    (ci, fp, pc) = (nci, nfp, rpc);
+                                    reload!();
+                                    continue;
+                                }
+                                Err(e) => throw!(e),
+                            }
+                        };
                         let len = realm.tail_args.len();
                         let nf = fp + code.nregs as usize + REC;
                         ensure!(nf + len + 8);
                         stack[nf..nf + len].copy_from_slice(&realm.tail_args);
                         enter!(f, ni, cctx, this, undef, $dst as i32, pc, $next, nf, len);
                         pc = 0;
-                    }
-                    Outcome::Resume { g } => {
-                        std::hint::cold_path();
-                        // The frame of a suspended generator goes on top of this one; `reload!` makes `regs` again, as for any call.
-                        match gen_resume(realm, stack, prog, ci, fp, ($dst as i32) | ITER, pc, $next, g) {
-                            Ok((nci, nfp, rpc)) => {
-                                (ci, fp, pc) = (nci, nfp, rpc);
-                                reload!();
-                            }
-                            Err(e) => throw!(e),
-                        }
                     }
                 }
                 continue;

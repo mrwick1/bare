@@ -23,7 +23,7 @@
 //!
 //! **Resume.** `next`, `return` and `throw` are natives. [`Realm::gen_request`] checks the state, writes the sent value and the mode, and
 //! says what to do: an answer ([`Step::Result`]) or a frame to enter ([`Step::Enter`]). The native answers an `Enter` by asking for
-//! [`Outcome::Resume`] through the tail channel (`Realm::tail` holds the generator and the hole as `this`, which no script can pass). The loop
+//! [`Outcome::Enter`] through the tail channel (`Realm::tail` holds the generator and the hole as `this`, which no script can pass). The loop
 //! then pushes the frame with [`Realm::gen_enter`]: the same `ensure!` and `reload!` as a call, so the register pointer of the loop is
 //! made again. Nothing in the saved state names a stack, so a generator that suspended on one machine resumes on any other.
 use crate::builtins::{NativeFn, arg};
@@ -247,7 +247,7 @@ fn request(rt: &mut Realm, this: Value, mode: i32, v: Value) -> R<Value> {
     match rt.gen_request(this, mode, v)? {
         Step::Result(v, d) => Ok(rt.iter_result(v, d)),
         Step::Enter => {
-            // The loop turns this into `Outcome::Resume` (`Realm::call_native`). The hole is no `this` that a script can pass.
+            // The loop sees `Outcome::Enter` with this hole (`Realm::call_native`). The hole is no `this` that a script can pass.
             rt.tail = Some((this, Value::HOLE));
             Ok(Value::UNDEFINED)
         }

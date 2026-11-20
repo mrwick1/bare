@@ -65,13 +65,13 @@ impl Realm {
         }
         match self.call_native(f, this, args)? {
             Outcome::Val(v) => Ok(v),
-            // A native that ends in a call (`call`, `apply`, a bound function): the target is a script function.
+            // A native that ends in a call (`call`, `apply`, a bound function): the target is a script function. With the hole as `this`:
+            // `next`, `return` or `throw` of a generator that a native called.
+            Outcome::Enter { f, this } if this.is_hole() => self.resume_script(f),
             Outcome::Enter { f, this } => {
                 let a = std::mem::take(&mut self.tail_args);
                 self.call_script(f, this, &a)
             }
-            // `next`, `return` or `throw` of a generator that a native called.
-            Outcome::Resume { g } => self.resume_script(g),
         }
     }
 
