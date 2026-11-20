@@ -1165,8 +1165,10 @@ fn set_timer<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, repe
             (true, false) => "setInterval with a non-function callback",
         }));
     }
-    let dl = arg_s(s, a, 1);
-    let n = s.to_number(dl)?;
+    let n = match a.get(1) {
+        Some(dl) => s.to_number(dl)?,
+        None => f64::NAN,
+    };
     let mut delay = to_int32(n).max(0) as u32;
     let argc = a.len().saturating_sub(2);
     let now = d.now_ms();
@@ -1188,7 +1190,7 @@ fn set_timer<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, repe
         delay = 4;
     }
     s.charge(1 + argc as u64)?;
-    let args = (2..a.len()).map(|i| TimerArg::new(s, a.get(i).expect("in range"))).collect();
+    let args = if argc == 0 { Vec::new() } else { (2..a.len()).map(|i| TimerArg::new(s, a.get(i).expect("in range"))).collect() };
     let call = TimerCall { cb: s.persist(cb), args };
     let key = lift(s, d.schedule(now + delay as f64, Task::Timer(id)))?;
     let cb_obj = obj_id(s, cb);
