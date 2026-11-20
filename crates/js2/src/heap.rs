@@ -70,11 +70,13 @@ pub struct Heap {
     large: Vec<Block>,
     pool: Vec<Block>,
     mapped: usize,
+    /// Bytes of the cells that the last collection marked (see [`Heap::marked_bytes`]).
+    marked: usize,
 }
 
 impl Default for Heap {
     fn default() -> Self {
-        Heap { free: [ptr::null_mut(); NCLASS], swept: Default::default(), unswept: Default::default(), large: Vec::new(), pool: Vec::new(), mapped: 0 }
+        Heap { free: [ptr::null_mut(); NCLASS], swept: Default::default(), unswept: Default::default(), large: Vec::new(), pool: Vec::new(), mapped: 0, marked: 0 }
     }
 }
 
@@ -242,6 +244,15 @@ impl Heap {
             let s = std::mem::take(&mut self.swept[c]);
             self.unswept[c].extend(s);
         }
+        // Every block of cells waits for its sweep now, with the marks of this collection: count them (64 words for each block).
+        let mut marked = 0;
+        for c in 0..NCLASS {
+            for b in &self.unswept[c] {
+                // SAFETY: `b` is a block of this heap.
+                let h = unsafe { &*b.as_ptr() };
+                marked += h.marks.iter().map(|w| w.count_ones() as usize).sum::<usize>() * h.cell as usize;
+            }
+        }
         let (live, dead): (Vec<Block>, Vec<Block>) = std::mem::take(&mut self.large).into_iter().partition(|&b| {
             // SAFETY: `b` is a large object of this heap.
             let m = unsafe { &mut (*b.as_ptr()).marks[0] };
@@ -249,10 +260,18 @@ impl Heap {
             *m = 0;
             live
         });
+        // SAFETY: each block of `live` is a large object of this heap.
+        self.marked = marked + live.iter().map(|b| unsafe { (*b.as_ptr()).len }).sum::<usize>();
         self.large = live;
         for b in dead {
             self.unmap(b);
         }
+    }
+
+    /// Bytes of the cells that the last [`Heap::finish_mark`] found marked: the size class of a small cell and the whole mapping of a
+    /// large one. A cell allocated since then is not counted. With no root, a collection brings it to 0.
+    pub fn marked_bytes(&self) -> usize {
+        self.marked
     }
 
     /// Bytes mapped from the OS: blocks in use, pooled blocks and large objects.

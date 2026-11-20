@@ -28,6 +28,8 @@ pub enum Layout {
     Indirect = 4,
     /// An object: its shape says what its slots are.
     Object = 16,
+    /// A weak table (a `WeakMap` or `WeakSet`): entries of a weak key and a value. The collector treats it as an ephemeron table.
+    WeakTable = 17,
 }
 
 impl Layout {
@@ -39,6 +41,7 @@ impl Layout {
             3 => Layout::Rope,
             4 => Layout::Indirect,
             16 => Layout::Object,
+            17 => Layout::WeakTable,
             // A header of this crate never holds another code.
             _ => unreachable!(),
         }
