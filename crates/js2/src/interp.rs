@@ -62,6 +62,7 @@
 use crate::atoms::SharedAtoms;
 use crate::builtins::Outcome;
 use crate::bytecode::{Asm, CF_ARGS, CF_LINK, Code, ITER_REGS, Ins, Op, STR_EMPTY, STR_SLOT, decode};
+use crate::codes::Codes;
 use crate::gc::Marker;
 use crate::interp_rt::{ErrKind, Feedback, Got, Key, Put, R, Realm};
 use crate::object::{F_DERIVED, Obj};
@@ -69,6 +70,7 @@ use crate::roots::RootMaps;
 use crate::shapes::{A_C, A_E, A_W};
 use crate::value::Value;
 use std::cmp::Ordering;
+use std::rc::Rc;
 use std::sync::Arc;
 
 /// Words of a frame record.
@@ -82,16 +84,18 @@ const NOPC: u32 = u32::MAX;
 /// The most words of the stack (about 4 MiB).
 const MAX_STACK: usize = 1 << 19;
 
-/// The functions of a script. A function cell holds an index of this table; `Code::funcs` holds indexes too.
+/// The functions of a script, as the compiler makes them. A function cell holds an index of this table; `Code::funcs` holds indexes
+/// too. `Vm::new` moves them to a [`Codes`], the table that the realm runs (it can grow during a run).
 #[derive(Debug, Default)]
 pub struct Program {
     pub codes: Vec<Code>,
 }
 
-/// The compiler of the functions that wait for their first call. The code at `ci` is a stub (`Op::Lazy`): `compile` makes its real code in
-/// place and may add stubs for the functions inside it at the end of `codes`. The interpreter makes the feedback of the new codes.
+/// The compiler of the functions that wait for their first call. The code at `ci` is a stub (`Op::Lazy`): `compile` puts its real code
+/// at `ci` (`Codes::set`) and may add stubs for the functions inside it at the end of `codes` (`Codes::push_all`). It runs inside the
+/// loop, in any run, so it takes `&Codes`. The interpreter makes the feedback of the new codes.
 pub trait LazyCompile {
-    fn compile(&mut self, codes: &mut Vec<Code>, ci: usize) -> Result<(), String>;
+    fn compile(&mut self, codes: &Codes, ci: usize) -> Result<(), String>;
 }
 
 /// Why `Vm::call` stopped.
@@ -108,14 +112,16 @@ pub struct Vm {
     pub realm: Realm,
     pub stack: Vec<Value>,
     pub fbs: Vec<Feedback>,
-    pub prog: Program,
-    /// The compiler of the stubs of `prog` (`Op::Lazy`), if it has any.
-    pub lazy: Option<Box<dyn LazyCompile>>,
-    /// The code indexes of the default constructors (`DefaultCtor`): a base class and a derived class.
+    /// The code indexes of the default constructors (`DefaultCtor`): a base class and a derived class. Also in `Realm::dctor`.
     pub dctor: [usize; 2],
-    /// Back edges that may still run. At 0 the run stops with [`Exit::Fuel`].
+    /// Back edges that may still run. At 0 the run stops with [`Exit::Fuel`]. A call copies it to `Realm::fuel` (where the loop and a
+    /// nested call count) and back.
     pub fuel: u64,
 }
+
+/// The value that a stop (`Exit::Fuel` in a nested call) is thrown as. No script can throw it: it is the marker of an uninitialized
+/// binding. `unwind` runs no handler for it, and `Vm::start` turns it back into `Exit::Fuel`.
+pub(crate) const STOP: Value = Value::HOLE;
 
 fn record(stack: &[Value], fp: usize, k: usize) -> Value {
     stack[fp - REC + k]
@@ -168,13 +174,13 @@ fn switch_str(heap: &mut crate::heap::Heap, code: &Code, t: &[u32], v: Value) ->
 }
 
 /// Mark the frames, from the top (`ci`, `fp`, `pc` of its safepoint) down to the frame of the host.
-fn walk_frames(m: &mut Marker, prog: &Program, stack: &[Value], mut ci: usize, mut fp: usize, mut pc: u32) {
+fn walk_frames(m: &mut Marker, prog: &Codes, stack: &[Value], mut ci: usize, mut fp: usize, mut pc: u32) {
     loop {
         let rec = fp - REC;
         m.values(&stack[rec..rec + 3]);
         m.values(&stack[rec + 8..rec + 10]);
         if pc != NOPC {
-            let map = prog.codes[ci].roots.find(pc).expect("a root map for each safepoint");
+            let map = prog[ci].roots.find(pc).expect("a root map for each safepoint");
             for r in map.slots() {
                 m.value(stack[fp + r]);
             }
@@ -185,15 +191,22 @@ fn walk_frames(m: &mut Marker, prog: &Program, stack: &[Value], mut ci: usize, m
         }
         pc = int_at(stack, fp, 3) as u32;
         ci = caller as usize;
-        fp = fp - REC - prog.codes[ci].nregs as usize;
+        fp = fp - REC - prog[ci].nregs as usize;
     }
 }
 
 /// Find the handler for `e` thrown at `pc` of frame `(ci, fp)`, dropping frames that have none. On `Ok`, the frame, `pc` and the
 /// handler register are set. `Err(e)` when the frame of the host has no handler either.
-fn unwind(prog: &Program, stack: &mut [Value], ci: &mut usize, fp: &mut usize, pc: &mut usize, e: Value) -> Result<(), Value> {
+///
+/// `#[cold]` is a cost fix: every `throw!` site calls this function, and the attribute marks those paths as unlikely. Measured at
+/// codegen-units 16, `loopfn` goes from +4.8% to -0.6% and `objects` from +3.0% to +0.4%. The cause in the allocator is a hypothesis.
+#[cold]
+#[inline(never)]
+fn unwind(prog: &Codes, stack: &mut [Value], ci: &mut usize, fp: &mut usize, pc: &mut usize, e: Value) -> Result<(), Value> {
+    // The budget ran out in a nested call (`Realm::call_function` gives `STOP`): no handler runs, every frame goes away.
+    let stop = e == STOP;
     loop {
-        if let Some(h) = prog.codes[*ci].handler_at(*pc as u32) {
+        if !stop && let Some(h) = prog[*ci].handler_at(*pc as u32) {
             let rec = *fp - REC;
             let mut depth = stack[rec + 6].as_int().expect("depth");
             while depth > h.depth as i32 {
@@ -212,13 +225,61 @@ fn unwind(prog: &Program, stack: &mut [Value], ci: &mut usize, fp: &mut usize, p
         }
         *pc = int_at(stack, *fp, 3) as usize;
         *ci = caller as usize;
-        *fp -= REC + prog.codes[*ci].nregs as usize;
+        *fp -= REC + prog[*ci].nregs as usize;
     }
 }
 
 /// The shared atom of the `name` and the `length` of a code, for `Realm::fn_props`.
 fn code_info(c: &Code) -> (Option<crate::string::Str>, u16) {
     (c.atoms.get(c.fn_name as usize).copied(), c.fn_len)
+}
+
+impl Realm {
+    /// Compile the stub at `ci` (the frame at `fp` is running it), for `Op::Lazy`. The frame is made again for the real code (it was
+    /// made for the stub: no parameters, all arguments in an array). On a failure the stub stays, and it fails again at each call (its
+    /// entry in the compiler is gone), so no machine has feedback made for a stub that is no longer one.
+    ///
+    /// It runs in any run, nested or not: `prog` is append-only (`Codes`) and the other runs hold no table that a push changes. A
+    /// machine that is below in the Rust stack has its feedback vector in its loop; the loop makes the entry that it needs (`grow_fbs`).
+    #[allow(clippy::too_many_arguments)]
+    fn compile_stub(&mut self, prog: &Codes, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, ci: usize, fp: usize, kept: bool, np: usize) -> Result<(), String> {
+        let l = self.lazy.as_mut().ok_or("a lazy function has no compiler")?;
+        l.compile(prog, ci)?;
+        // The `name` and the `length` of the functions that the compile added (the stub of `ci` has them already).
+        self.fn_info.extend((self.fn_info.len()..prog.len()).map(|i| code_info(&prog[i])));
+        fbs.resize_with(prog.len(), Feedback::default);
+        fbs[ci] = Feedback::default();
+        let ncode = &prog[ci];
+        let need = fp + ncode.nregs as usize + 8;
+        if need > stack.len() {
+            stack.resize(need.max(2 * stack.len()).min(MAX_STACK + 8).max(need), Value::UNDEFINED);
+        }
+        if kept {
+            // The stub had the parameter registers of the code: the frame has the arguments already.
+            if ncode.nparams as usize != np || ncode.flags & CF_ARGS != 0 {
+                return Err("a lazy function does not have the parameters that its stub had".into());
+            }
+        } else {
+            let all = Realm::obj(record(stack, fp, 9)).expect("the arguments of a stub");
+            let (np, given) = (ncode.nparams as usize, (ncode.nparams as usize).min(all.len() as usize));
+            for i in 0..given {
+                stack[fp + i] = all.get_element(i as u32).unwrap_or(Value::UNDEFINED);
+            }
+            stack[fp + given..fp + np].fill(Value::UNDEFINED);
+            if ncode.flags & CF_ARGS == 0 {
+                stack[fp - REC + 9] = Value::UNDEFINED;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Make the feedback vector as long as the table of codes: the program grew since this machine made its vector (a lazy compile in a
+/// run above it). Cold: the loop checks the length it already checks for the index.
+#[cold]
+#[inline(never)]
+fn grow_fbs(fbs: &mut Vec<Feedback>, n: usize) {
+    fbs.resize_with(n, Feedback::default);
 }
 
 impl Vm {
@@ -228,8 +289,9 @@ impl Vm {
         scan_flags(&mut prog.codes);
         let fbs = prog.codes.iter().map(|_| Feedback::default()).collect();
         let mut realm = Realm::new(shared);
-        realm.fn_info = prog.codes.iter().map(code_info).collect();
-        Vm { realm, stack: Vec::new(), fbs, prog, lazy: None, dctor, fuel: u64::MAX }
+        (realm.prog, realm.dctor) = (Rc::new(prog.codes.into()), dctor);
+        realm.fn_info = realm.prog.iter().map(code_info).collect();
+        Vm { realm, stack: Vec::new(), fbs, dctor, fuel: u64::MAX }
     }
 
     /// A function cell for code `code` with no context.
@@ -237,30 +299,52 @@ impl Vm {
         self.realm.new_function(code, Value::UNDEFINED)
     }
 
-    /// Call `f` with `this` and `args` from the host. The JS stack must be empty (no re-entry yet). The result is not rooted: use it
-    /// before the next call into the engine.
+    /// Call `f` with `this` and `args` from the host. The JS stack must be empty. The result is not rooted: use it before the next call
+    /// into the engine. A native that wants to call a script function does not come here: see `Realm::call_function` (`reenter.rs`).
     pub fn call(&mut self, f: Value, this: Value, args: &[Value]) -> Result<Value, Exit> {
-        let Some((ci, ctx)) = self.realm.function(f) else {
-            let e = self.realm.error(ErrKind::Type, "not a function");
+        let Vm { realm, stack, fbs, fuel, .. } = self;
+        realm.fuel = *fuel;
+        let r = Vm::start(realm, stack, fbs, f, this, args);
+        *fuel = realm.fuel;
+        r
+    }
+
+    /// Run `f` with `this` and `args` as a new entry into the interpreter, on the empty stack `stack` with the feedback `fbs` of the
+    /// program. `Vm::call` uses the stack of the `Vm`, and `Realm::call_function` a machine of its own.
+    pub(crate) fn start(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, f: Value, this: Value, args: &[Value]) -> Result<Value, Exit> {
+        let Some((ci, ctx)) = realm.function(f) else {
+            let e = realm.error(ErrKind::Type, "not a function");
             return Err(Exit::Throw(e));
         };
-        let code = &self.prog.codes[ci];
+        let prog = realm.prog.clone();
+        let code = &prog[ci];
         let fp = REC;
         let need = fp + code.nregs as usize + 8;
-        if self.stack.len() < need {
-            self.stack.resize(need.max(256), Value::UNDEFINED);
+        if stack.len() < need {
+            stack.resize(need.max(256), Value::UNDEFINED);
         }
         let args_obj = if code.flags & CF_ARGS != 0 {
-            Obj::array(&mut self.realm.heap, &self.realm.shapes, self.realm.s_args, args).expect("memory").value()
+            Obj::array(&mut realm.heap, &realm.shapes, realm.s_args, args).expect("memory").value()
         } else {
             Value::UNDEFINED
         };
         let rec = [f, this, ctx, Value::int(0), Value::int(0), Value::int(ENTRY), Value::int(0), Value::int(0), Value::UNDEFINED, args_obj];
-        self.stack[..REC].copy_from_slice(&rec);
+        stack[..REC].copy_from_slice(&rec);
         for i in 0..code.nparams as usize {
-            self.stack[fp + i] = args.get(i).copied().unwrap_or(Value::UNDEFINED);
+            stack[fp + i] = args.get(i).copied().unwrap_or(Value::UNDEFINED);
         }
-        self.run(ci, fp)
+        let r = Vm::run(realm, stack, fbs, &prog, ci, fp);
+        // The stubs that a lazy compile replaced are freed when no run is active: no `&Code` can point to them then.
+        if realm.nest == 0 && prog.has_retired() {
+            drop(prog);
+            if let Some(c) = Rc::get_mut(&mut realm.prog) {
+                c.free_retired();
+            }
+        }
+        match r {
+            Err(Exit::Throw(e)) if e == STOP => Err(Exit::Fuel),
+            r => r,
+        }
     }
 
     /// Run code `ci` (a function with no parameters and no context) as the main function.
@@ -272,17 +356,20 @@ impl Vm {
 
     /// Collect now, as the gate does (for tests and the host between tasks: the stack must be empty or stopped at a safepoint).
     pub fn collect_idle(&mut self) {
-        let Vm { realm, stack, fbs, prog, .. } = self;
+        let Vm { realm, fbs, .. } = self;
         realm.collect(fbs, |_| {});
-        let _ = (stack, prog);
     }
 
-    #[allow(unused_assignments)]
-    fn run(&mut self, mut ci: usize, mut fp: usize) -> Result<Value, Exit> {
-        let Vm { realm, stack, fbs, prog, lazy, dctor, fuel } = self;
-        let mut code: &Code = &prog.codes[ci];
+    #[allow(unused_assignments, clippy::ptr_arg)]
+    fn run(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, prog: &Codes, mut ci: usize, mut fp: usize) -> Result<Value, Exit> {
+        let mut code: &Code = &prog[ci];
         let mut words: &[u32] = &code.words;
-        let mut fb: &mut Feedback = &mut fbs[ci];
+        let mut fb: &mut Feedback = if ci < fbs.len() {
+            &mut fbs[ci]
+        } else {
+            grow_fbs(fbs, prog.len());
+            &mut fbs[ci]
+        };
         if !fb.ready {
             fb.init(code);
         }
@@ -293,18 +380,35 @@ impl Vm {
         // SAFETY: `fp` is in the stack: `Vm::call` and `enter!` make it hold `fp + nregs` words.
         let mut regs: *mut Value = unsafe { stack.as_mut_ptr().add(fp) };
 
-        // Make the locals of the frame `(ci, fp)`.
+        // Make the locals of the frame `(ci, fp)`. The feedback vector is shorter than the table when a lazy compile ran in a run above
+        // this one (`grow_fbs`); the length check is the one that the index does.
         macro_rules! reload {
             () => {{
+                // SAFETY: `ci` is the index of a frame on the stack. `enter!` and `Vm::start` checked it when they made the frame.
+                reload!(unsafe { prog.at(ci) })
+            }};
+            ($c:expr) => {{
                 // SAFETY: as above, the frame `fp` is inside the stack.
                 regs = unsafe { stack.as_mut_ptr().add(fp) };
-                code = &prog.codes[ci];
+                code = $c;
                 words = &code.words;
-                fb = &mut fbs[ci];
+                fb = if ci < fbs.len() {
+                    &mut fbs[ci]
+                } else {
+                    grow_fbs(fbs, prog.len());
+                    &mut fbs[ci]
+                };
                 if !fb.ready {
                     fb.init(code);
                 }
             }};
+        }
+        // The integer word `$k` of the frame record of the current frame (see `int_at`).
+        macro_rules! rec_int {
+            ($k:expr) => {
+                // SAFETY: the record `REC` words below `fp` is in the stack.
+                (unsafe { *regs.sub(REC - $k) }.bits() as u32 as i32)
+            };
         }
         // SAFETY (`r!` and `word!`): `verify` bounds every register by `nregs` and every pc by the code, and a call or `Vm::call` makes
         // the stack hold `fp + nregs` words (`need` in `call!`). `regs` is the base of the frame (see its declaration).
@@ -322,6 +426,7 @@ impl Vm {
         macro_rules! throw {
             ($e:expr) => {{
                 let e: Value = $e;
+                std::hint::cold_path();
                 match unwind(prog, stack, &mut ci, &mut fp, &mut pc, e) {
                     Ok(()) => {
                         reload!();
@@ -349,6 +454,7 @@ impl Vm {
         macro_rules! gate {
             () => {
                 if realm.due() {
+                    std::hint::cold_path();
                     realm.cur = (ci, fp, pc as u32);
                     let (cur, st) = (realm.cur, &stack[..]);
                     realm.collect(&mut fbs[..], |m| walk_frames(m, prog, st, cur.0, cur.1, cur.2));
@@ -430,6 +536,24 @@ impl Vm {
                 match tri!(realm.set_field_slow(fb, $site, n, recv, val)) {
                     Put::Done => pc = $next,
                     Put::Set(f) => call_set!(f, recv, val, $next),
+                    Put::Fail => {
+                        if code.strict {
+                            err!(ErrKind::Type, "cannot assign to a read-only property or a property with no setter")
+                        }
+                        pc = $next;
+                    }
+                }
+            }};
+        }
+        // The slow path of `SetGlobal` and `SetGlobalS`: a global lexical binding, a cache entry, a setter, a write that fails.
+        macro_rules! set_global {
+            ($strict:expr, $v:expr, $site:expr, $next:expr) => {{
+                gate!();
+                let n = name!($site);
+                let v: Value = $v;
+                match tri!(realm.set_global_slow(fb, $site, n, v, $strict)) {
+                    Put::Done => pc = $next,
+                    Put::Set(f) => call_set!(f, realm.global.value(), v, $next),
                     Put::Fail => {
                         if code.strict {
                             err!(ErrKind::Type, "cannot assign to a read-only property or a property with no setter")
@@ -560,7 +684,7 @@ impl Vm {
         // of the caller that gets the result, and the flags. `$callpc`: the key of the caller's root map. `$next`: where the caller goes on.
         macro_rules! enter {
             ($callee:expr, $ni:expr, $cctx:expr, $this:expr, $nt:expr, $dstw:expr, $callpc:expr, $next:expr, $ab:expr, $argc:expr) => {{
-                let ncode = &prog.codes[$ni];
+                let ncode = &prog[$ni];
                 let new_fp = fp + code.nregs as usize + REC;
                 ensure!(new_fp + ncode.nregs as usize + 8);
                 let (np, argc, ab) = (ncode.nparams as usize, $argc as usize, $ab as usize);
@@ -571,13 +695,36 @@ impl Vm {
                 };
                 let given = np.min(argc);
                 let (callee, this, nt): (Value, Value, Value) = ($callee, $this, $nt);
-                let rec = &mut stack[new_fp - REC..new_fp];
-                rec.copy_from_slice(&[callee, this, $cctx, Value::int($callpc as i32), Value::int($next as i32), Value::int(ci as i32), Value::int(0), Value::int($dstw as i32), nt, argsw]);
-                stack.copy_within(ab..ab + given, new_fp);
-                stack[new_fp + given..new_fp + np].fill(undef);
+                // SAFETY: `ensure!` made the stack hold `new_fp + nregs + 8` words, so the record, the `np` parameters and the registers
+                // are inside it. The arguments are at `ab..ab + given`, which ends below `new_fp - REC` (the registers of the caller) or
+                // is at `new_fp` itself (staged); a forward copy is right in both cases.
+                unsafe {
+                    let base = stack.as_mut_ptr();
+                    let rec = base.add(new_fp - REC);
+                    rec.write(callee);
+                    rec.add(1).write(this);
+                    rec.add(2).write($cctx);
+                    rec.add(3).write(Value::int($callpc as i32));
+                    rec.add(4).write(Value::int($next as i32));
+                    rec.add(5).write(Value::int(ci as i32));
+                    rec.add(6).write(Value::int(0));
+                    rec.add(7).write(Value::int($dstw as i32));
+                    rec.add(8).write(nt);
+                    rec.add(9).write(argsw);
+                    let (dst, src) = (base.add(new_fp), base.add(ab));
+                    let mut i = 0;
+                    while i < given {
+                        dst.add(i).write(src.add(i).read());
+                        i += 1;
+                    }
+                    while i < np {
+                        dst.add(i).write(undef);
+                        i += 1;
+                    }
+                }
                 ci = $ni;
                 fp = new_fp;
-                reload!();
+                reload!(ncode);
             }};
         }
         macro_rules! call_err {
@@ -647,7 +794,7 @@ impl Vm {
         macro_rules! construct {
             ($callee:expr, $ni:expr, $cctx:expr, $nt:expr, $dst:expr, $next:expr, $ab:expr, $argc:expr, $flag:expr) => {{
                 let callee: Value = $callee;
-                if prog.codes[$ni].noctor {
+                if prog[$ni].noctor {
                     err!(ErrKind::Type, "not a constructor")
                 }
                 let derived = Realm::obj(callee).is_some_and(|f| f.has_flag(F_DERIVED));
@@ -706,20 +853,22 @@ impl Vm {
         macro_rules! ret {
             ($v:expr) => {{
                 let mut v: Value = $v;
-                let caller = int_at(stack, fp, 5);
-                let dst = int_at(stack, fp, 7);
+                let caller = rec_int!(5);
+                let dst = rec_int!(7);
                 if dst & CONSTRUCT != 0 && Realm::obj(v).is_none() {
                     v = record(stack, fp, 1);
                 }
                 if caller == ENTRY {
                     return Ok(v);
                 }
-                pc = int_at(stack, fp, 4) as usize;
-                let callpc = int_at(stack, fp, 3);
+                pc = rec_int!(4) as usize;
+                let callpc = rec_int!(3);
                 ci = caller as usize;
-                fp -= REC + prog.codes[ci].nregs as usize;
-                stack[fp + (dst & 0xffff) as usize] = v;
-                reload!();
+                // SAFETY: as in `reload!`: `ci` is a frame that the stack holds. `fp` moves before the reload, which sets `regs` from it.
+                let ccode = unsafe { prog.at(ci) };
+                fp -= REC + ccode.nregs as usize;
+                reload!(ccode);
+                r!(dst & 0xffff) = v;
                 if dst & AFTER_SUPER != 0
                     && let Some((class, _)) = super_info(realm, stack, fp)
                     && let Some((fi, fctx, ff)) = realm.fields_of(class)
@@ -752,6 +901,10 @@ impl Vm {
                 // SAFETY: `verify` accepted the code, and it rejects a byte that is no opcode; the loop reaches only the first word of
                 // an instruction (the start of the code, or a verified jump target, or the word after an instruction).
                 let opv: Op = unsafe { std::mem::transmute::<u8, Op>($op) };
+                // Cost rule (docs/progress.md, "Stable code of the hot loop"): LLVM weighs every arm of this match the same, so the
+                // spills and reloads that a call in a rare arm needs also hit the loop state (`pc`, `fp`, `words`, the stack base) of the hot
+                // arms. An arm of a rare op starts with `cold_path()`, as do the `throw!` and `gate!` slow paths. Then an edit in such an arm
+                // does not move the hot rows. Put `cold_path()` first in each new arm of a rare op, and measure `objects` after a change here.
                 match opv {
                     Op::Nop => pc = next,
                     Op::Wide => unreachable!("a!() Wide prefix is decoded before the dispatch"),
@@ -863,15 +1016,13 @@ impl Vm {
                         pc = next;
                     }
                     Op::GetGlobal | Op::GetName => {
-                        let g = realm.global.value();
-                        if let Some((o, shape)) = unsafe { Obj::from_value_shape(g) } {
-                            let cc = &fb.caches[bx!()];
-                            if cc.shape == shape {
-                                // SAFETY: as in `get_field`.
-                                r!(a!()) = unsafe { o.read_loc(cc.loc) };
-                                pc = next;
-                                continue;
-                            }
+                        let cc = &fb.caches[bx!()];
+                        if cc.shape == realm.shapes.watch_tag() {
+                            // SAFETY: the entry has the address of a slot of the global object, made while the tag was the same, and
+                            // the tag changes each time the object gets another shape (`Shapes::watch_tag`).
+                            r!(a!()) = unsafe { cc.global_slot().read() };
+                            pc = next;
+                            continue;
                         }
                         gate!();
                         let n = name!(bx!());
@@ -884,34 +1035,29 @@ impl Vm {
                         }
                     }
                     Op::SetGlobal | Op::SetName => {
-                        let g = realm.global.value();
-                        // A global lexical binding (a `let` of another script) is not a property of the global object.
-                        set_field!(g, r!(a!()), bx!(), next, |n| {
-                            if let Some(res) = realm.lex_put(n, r!(a!())) {
-                                tri!(res);
-                                pc = next;
-                                continue;
-                            }
-                        });
-                    }
-                    Op::SetGlobalS => {
-                        gate!();
-                        let (g, n) = (realm.global.value(), name!(bx!()));
-                        if let Some(res) = realm.lex_put(n, r!(a!())) {
-                            tri!(res);
+                        let cc = &fb.caches[bx!()];
+                        if cc.shape == realm.shapes.watch_tag() {
+                            let v = r!(a!());
+                            // SAFETY: as for `GetGlobal`; the entry was made for a writable data property.
+                            unsafe { cc.global_slot().write(v) };
                             pc = next;
                             continue;
                         }
-                        // A cache entry of the global's shape says that an earlier write found the name there.
-                        // SAFETY: the register holds a live value.
-                        let known = unsafe { Obj::from_value_shape(g) }.is_some_and(|(_, shape)| fb.caches[bx!()].shape == shape);
-                        if !known && !tri!(realm.has_prop(g, Key::Name(n))) {
-                            let t = realm.text(n);
-                            err!(ErrKind::Reference, "{t} is not defined")
+                        set_global!(false, r!(a!()), bx!(), next);
+                    }
+                    Op::SetGlobalS => {
+                        let cc = &fb.caches[bx!()];
+                        if cc.shape == realm.shapes.watch_tag() {
+                            let v = r!(a!());
+                            // SAFETY: as for `SetGlobal`.
+                            unsafe { cc.global_slot().write(v) };
+                            pc = next;
+                            continue;
                         }
-                        set_field!(g, r!(a!()), bx!(), next);
+                        set_global!(true, r!(a!()), bx!(), next);
                     }
                     Op::TypeofGlobal | Op::TypeofName => {
+                        std::hint::cold_path();
                         gate!();
                         let n = name!(bx!());
                         let g = realm.global.value();
@@ -951,6 +1097,10 @@ impl Vm {
                             continue;
                         }
                         gate!();
+                        // The base is checked before the key is converted: a script `toString` of the key must not run first.
+                        if recv.is_undefined() || recv.is_null() {
+                            err!(ErrKind::Type, "cannot read properties of undefined or null")
+                        }
                         let k = tri!(realm.key_of(key));
                         match tri!(realm.get_prop_g(recv, k)) {
                             Got::Val(v) => {
@@ -963,6 +1113,9 @@ impl Vm {
                     Op::SetElem => {
                         gate!();
                         let (recv, key, v) = (r!(a!()), r!(b!()), r!(c!()));
+                        if recv.is_undefined() || recv.is_null() {
+                            err!(ErrKind::Type, "cannot set properties of undefined or null")
+                        }
                         let k = tri!(realm.key_of(key));
                         match tri!(realm.set_prop_g(recv, k, v)) {
                             Put::Done => pc = next,
@@ -1002,12 +1155,14 @@ impl Vm {
                         pc = next;
                     }
                     Op::DeleteGlobal => {
+                        std::hint::cold_path();
                         gate!();
                         let (g, n) = (realm.global.value(), name!(bx!()));
                         r!(a!()) = Value::bool(!realm.has_lex(n) && tri!(realm.delete_prop(g, Key::Name(n))));
                         pc = next;
                     }
                     Op::Delete => {
+                        std::hint::cold_path();
                         let o = r!(b!());
                         if o.is_undefined() || o.is_null() {
                             err!(ErrKind::Type, "cannot delete a property of undefined or null")
@@ -1066,7 +1221,7 @@ impl Vm {
                         let ctx = stack[fp - REC + 2];
                         let child = code.funcs[bx!()] as usize;
                         let f = realm.new_function(child, ctx);
-                        if prog.codes[child].flags & CF_LINK != 0 {
+                        if prog[child].flags & CF_LINK != 0 {
                             // The function uses `super` (or holds one that does): it gets the home object and the constructor link.
                             let (cur, nt) = (record(stack, fp, 0), record(stack, fp, 8));
                             let (co, fo) = (Realm::obj(cur).expect("a function"), Realm::obj(f).expect("a function"));
@@ -1117,7 +1272,11 @@ impl Vm {
                         let y = if opv == Op::ModI { Value::int(sc!()) } else { r!(c!()) };
                         op_mod!(a!(), r!(b!()), y, next)
                     }
-                    Op::Exp => op_exp!(a!(), r!(b!()), r!(c!()), next),
+                    Op::AddX => op_add!(a!(), r!(b!()), Value::int($x as i32), nextx!()),
+                    Op::SubX => op_sub!(a!(), r!(b!()), Value::int($x as i32), nextx!()),
+                    Op::MulX => op_mul!(a!(), r!(b!()), Value::int($x as i32), nextx!()),
+                    Op::ModX => op_mod!(a!(), r!(b!()), Value::int($x as i32), nextx!()),
+                    Op::Exp => { std::hint::cold_path(); op_exp!(a!(), r!(b!()), r!(c!()), next) }
                     Op::BitAnd | Op::BitAndI => {
                         let y = if opv == Op::BitAndI { Value::int(sc!()) } else { r!(c!()) };
                         bitop!(a!(), r!(b!()), y, next, |i, j| Value::int(i & j))
@@ -1174,12 +1333,17 @@ impl Vm {
                         pc = next;
                     }
                     Op::In => {
+                        std::hint::cold_path();
+                        if Realm::obj(r!(c!())).is_none() {
+                            err!(ErrKind::Type, "cannot use 'in' on a non-object")
+                        }
                         let k = tri!(realm.key_of(r!(b!())));
                         let v = tri!(realm.has_prop(r!(c!()), k));
                         r!(a!()) = Value::bool(v);
                         pc = next;
                     }
                     Op::InstanceOf => {
+                        std::hint::cold_path();
                         let v = tri!(realm.instance_of(r!(b!()), r!(c!())));
                         r!(a!()) = Value::bool(v);
                         pc = next;
@@ -1238,10 +1402,10 @@ impl Vm {
                     }
                     Op::Jmp => jump!(true, next, sj!()),
                     Op::JmpBack => {
-                        if *fuel == 0 {
+                        if realm.fuel == 0 {
                             return Err(Exit::Fuel);
                         }
-                        *fuel -= 1;
+                        realm.fuel -= 1;
                         jump!(true, next, sj!())
                     }
                     Op::JmpIf => jump!(Realm::truthy(r!(a!())), next, sbx!()),
@@ -1296,8 +1460,9 @@ impl Vm {
                     Op::SwitchA => pc = switch_str(&mut realm.heap, code, &code.tables[bx!()..], r!(a!())),
                     Op::Ret => ret!(r!(a!())),
                     Op::RetUndef => ret!(undef),
-                    Op::Throw => throw!(r!(a!())),
+                    Op::Throw => { std::hint::cold_path(); throw!(r!(a!())) }
                     Op::ThrowConst => {
+                        std::hint::cold_path();
                         let n = realm.text(code.atoms[bx!()]);
                         err!(ErrKind::Type, "assignment to constant variable '{}'", n)
                     }
@@ -1319,6 +1484,7 @@ impl Vm {
                         pc = next;
                     }
                     Op::ForInOpen => {
+                        std::hint::cold_path();
                         gate!();
                         let keys = tri!(realm.own_keys(r!(b!())));
                         r!(a!()) = keys;
@@ -1340,6 +1506,7 @@ impl Vm {
                     }
                     Op::IterClose => pc = next,
                     Op::DeclGlobal => {
+                        std::hint::cold_path();
                         gate!();
                         let n = name!(bx!());
                         let g = realm.global;
@@ -1354,12 +1521,14 @@ impl Vm {
                         pc = next;
                     }
                     Op::CheckLex => {
+                        std::hint::cold_path();
                         gate!();
                         let n = name!(bx!());
                         tri!(realm.check_lex(n));
                         pc = next;
                     }
                     Op::DeclLex | Op::DeclLexC => {
+                        std::hint::cold_path();
                         gate!();
                         let n = name!(bx!());
                         let cx = stack[fp - REC + 2];
@@ -1367,10 +1536,12 @@ impl Vm {
                         pc = next;
                     }
                     Op::CreateArgs => {
+                        std::hint::cold_path();
                         r!(a!()) = record(stack, fp, 9);
                         pc = next;
                     }
                     Op::CreateRest => {
+                        std::hint::cold_path();
                         gate!();
                         let all = Realm::obj(record(stack, fp, 9)).expect("the arguments of a function with CF_ARGS");
                         let vals: Vec<Value> = (b!() as u32..all.len()).map(|i| all.get_element(i).unwrap_or(undef)).collect();
@@ -1378,39 +1549,17 @@ impl Vm {
                         pc = next;
                     }
                     Op::Lazy => {
-                        let Some(l) = lazy.as_mut() else { err!(ErrKind::Plain, "a lazy function has no compiler") };
-                        let (kept, np) = (a!() == 0, code.nparams as usize);
-                        if let Err(m) = l.compile(&mut prog.codes, ci) {
+                        std::hint::cold_path();
+                        // Compile the function and run its code from pc 0, in this frame. The compile adds to `prog` and may grow the
+                        // stack and `fbs`: `reload!` makes the locals again. No collection runs here (no `gate!`).
+                        if let Err(m) = realm.compile_stub(prog, stack, fbs, ci, fp, a!() == 0, code.nparams as usize) {
                             // A plain `Error`, not a `SyntaxError`: the text has no early error (the pre-parse found none), and a script (or a
                             // test262 test that expects a `SyntaxError`) must not take a limit of the compiler for one.
                             err!(ErrKind::Plain, "{m}")
                         }
-                        // The `name` and the `length` of the functions that the compile added (the stub of `ci` has them already).
-                        let known = realm.fn_info.len();
-                        realm.fn_info.extend(prog.codes[known..].iter().map(code_info));
-                        fbs.resize_with(prog.codes.len(), Feedback::default);
-                        fbs[ci] = Feedback::default();
-                        let ncode = &prog.codes[ci];
-                        ensure!(fp + ncode.nregs as usize + 8);
-                        if kept {
-                            // The stub had the parameter registers of the code: the frame has the arguments already.
-                            if ncode.nparams as usize != np || ncode.flags & CF_ARGS != 0 {
-                                err!(ErrKind::Plain, "a lazy function does not have the parameters that its stub had")
-                            }
-                        } else {
-                            // The frame was made for the stub (no parameters, all arguments in an array). Make it again for the code.
-                            let all = Realm::obj(record(stack, fp, 9)).expect("the arguments of a stub");
-                            let (np, given) = (ncode.nparams as usize, (ncode.nparams as usize).min(all.len() as usize));
-                            for i in 0..given {
-                                stack[fp + i] = all.get_element(i as u32).unwrap_or(undef);
-                            }
-                            stack[fp + given..fp + np].fill(undef);
-                            if ncode.flags & CF_ARGS == 0 {
-                                stack[fp - REC + 9] = undef;
-                            }
-                        }
                         reload!();
                         pc = 0;
+                        continue;
                     }
                     Op::LoadCallee => {
                         r!(a!()) = record(stack, fp, 0);
@@ -1420,9 +1569,10 @@ impl Vm {
                         r!(a!()) = record(stack, fp, 8);
                         pc = next;
                     }
-                    Op::NewRegExp => err!(ErrKind::Type, "regular expression literals are not supported yet (js2 has no RegExp engine: S2.7)"),
-                    Op::LoadBigInt => err!(ErrKind::Type, "BigInt literals are not supported yet (js2 has no BigInt: S2.7)"),
+                    Op::NewRegExp => { std::hint::cold_path(); err!(ErrKind::Type, "regular expression literals are not supported yet (js2 has no RegExp engine: S2.7)") }
+                    Op::LoadBigInt => { std::hint::cold_path(); err!(ErrKind::Type, "BigInt literals are not supported yet (js2 has no BigInt: S2.7)") }
                     Op::GetTemplate => {
+                        std::hint::cold_path();
                         gate!();
                         r!(a!()) = match fb.tmpl.iter().find(|t| t.0 == c!() as u32) {
                             Some(t) => t.1,
@@ -1441,6 +1591,7 @@ impl Vm {
                         pc = next;
                     }
                     Op::ArraySpread => {
+                        std::hint::cold_path();
                         gate!();
                         let vals = tri!(realm.iter_values(r!(b!())));
                         let o = Realm::obj(r!(a!())).expect("an array");
@@ -1450,12 +1601,14 @@ impl Vm {
                         pc = next;
                     }
                     Op::ArrayHole => {
+                        std::hint::cold_path();
                         gate!();
                         let o = Realm::obj(r!(a!())).expect("an array");
                         o.set_len(&mut realm.heap, o.len() + 1).expect("memory");
                         pc = next;
                     }
                     Op::CallSpread => {
+                        std::hint::cold_path();
                         let callee = r!(b!());
                         let Some((ni, cctx)) = realm.function(callee) else {
                             if realm.native_id(callee).is_some() {
@@ -1471,6 +1624,7 @@ impl Vm {
                         continue;
                     }
                     Op::NewSpread => {
+                        std::hint::cold_path();
                         gate!();
                         let callee = r!(b!());
                         let Some((ni, cctx)) = realm.function_new(callee) else {
@@ -1486,6 +1640,7 @@ impl Vm {
                         construct!(callee, ni, cctx, callee, a!(), next, nf, len, 0)
                     }
                     Op::CopyProps => {
+                        std::hint::cold_path();
                         gate!();
                         let o = Realm::obj(r!(a!())).expect("an object literal");
                         if tri!(realm.copy_props(o, r!(b!()))) {
@@ -1496,6 +1651,7 @@ impl Vm {
                         }
                     }
                     Op::ObjRest => {
+                        std::hint::cold_path();
                         gate!();
                         let keys: Vec<Value> = (0..$x as usize).map(|i| r!(c!() + i)).collect();
                         match tri!(realm.obj_rest(r!(b!()), &keys)) {
@@ -1507,6 +1663,7 @@ impl Vm {
                         }
                     }
                     Op::SetProto => {
+                        std::hint::cold_path();
                         gate!();
                         let (o, v) = (Realm::obj(r!(a!())).expect("an object literal"), r!(b!()));
                         if let Some(p) = Realm::obj(v) {
@@ -1517,6 +1674,7 @@ impl Vm {
                         pc = next;
                     }
                     Op::DefAccessor => {
+                        std::hint::cold_path();
                         gate!();
                         let n = name!(c!());
                         let o = Realm::obj(r!(a!())).expect("an object");
@@ -1524,6 +1682,7 @@ impl Vm {
                         pc = nextx!();
                     }
                     Op::DefAccessorElem => {
+                        std::hint::cold_path();
                         gate!();
                         let o = Realm::obj(r!(a!())).expect("an object");
                         let k = tri!(realm.key_of(r!(b!())));
@@ -1531,6 +1690,7 @@ impl Vm {
                         pc = nextx!();
                     }
                     Op::DefMethod => {
+                        std::hint::cold_path();
                         gate!();
                         let n = name!(c!());
                         let o = Realm::obj(r!(a!())).expect("an object");
@@ -1538,6 +1698,7 @@ impl Vm {
                         pc = next;
                     }
                     Op::DefMethodElem => {
+                        std::hint::cold_path();
                         gate!();
                         let o = Realm::obj(r!(a!())).expect("an object");
                         let k = tri!(realm.key_of(r!(b!())));
@@ -1545,18 +1706,21 @@ impl Vm {
                         pc = next;
                     }
                     Op::SetHome => {
+                        std::hint::cold_path();
                         Realm::obj(r!(a!())).expect("a function").set_slot(&realm.shapes, 2, r!(b!()));
                         pc = next;
                     }
                     Op::MakeClass => {
+                        std::hint::cold_path();
                         gate!();
                         tri!(realm.make_class(r!(a!()), None));
                         pc = next;
                     }
                     Op::MakeDerived => {
+                        std::hint::cold_path();
                         gate!();
                         if let Some((ni, _)) = realm.function_new(r!(b!()))
-                            && prog.codes[ni].noctor
+                            && prog[ni].noctor
                         {
                             err!(ErrKind::Type, "class extends value is not a constructor or null")
                         }
@@ -1564,27 +1728,32 @@ impl Vm {
                         pc = next;
                     }
                     Op::SetFnName => {
+                        std::hint::cold_path();
                         gate!();
                         let k = tri!(realm.key_of(r!(b!())));
                         tri!(realm.name_function(r!(a!()), k, c!() as u32));
                         pc = next;
                     }
                     Op::DefaultCtor => {
+                        std::hint::cold_path();
                         gate!();
-                        r!(a!()) = realm.new_function(dctor[b!() & 1], undef);
+                        r!(a!()) = realm.new_function(realm.dctor[b!() & 1], undef);
                         pc = next;
                     }
                     Op::SetFields => {
+                        std::hint::cold_path();
                         Realm::obj(r!(a!())).expect("a constructor").set_slot(&realm.shapes, 3, r!(b!()));
                         pc = next;
                     }
                     Op::NewPrivateName => {
+                        std::hint::cold_path();
                         gate!();
                         let d = atom!(bx!());
                         r!(a!()) = realm.new_private_name(d);
                         pc = next;
                     }
                     Op::GetPrivate => {
+                        std::hint::cold_path();
                         gate!();
                         match tri!(realm.private_get(r!(b!()), r!(c!()))) {
                             Got::Val(v) => {
@@ -1595,6 +1764,7 @@ impl Vm {
                         }
                     }
                     Op::SetPrivate => {
+                        std::hint::cold_path();
                         gate!();
                         match tri!(realm.private_set(r!(a!()), r!(b!()), r!(c!()))) {
                             Put::Done => pc = next,
@@ -1608,27 +1778,32 @@ impl Vm {
                         }
                     }
                     Op::HasPrivate => {
+                        std::hint::cold_path();
                         gate!();
                         let h = tri!(realm.private_has(r!(b!()), r!(c!())));
                         r!(a!()) = Value::bool(h);
                         pc = next;
                     }
                     Op::DefPrivate => {
+                        std::hint::cold_path();
                         gate!();
                         tri!(realm.private_def(r!(a!()), r!(b!()), A_W, r!(c!())));
                         pc = next;
                     }
                     Op::DefPrivateMethod => {
+                        std::hint::cold_path();
                         gate!();
                         tri!(realm.private_def(r!(a!()), r!(b!()), 0, r!(c!())));
                         pc = next;
                     }
                     Op::DefPrivateAccessor => {
+                        std::hint::cold_path();
                         gate!();
                         tri!(realm.private_def_accessor(r!(a!()), r!(b!()), r!(c!()), $x == 1));
                         pc = nextx!();
                     }
                     Op::GetSuper => {
+                        std::hint::cold_path();
                         gate!();
                         let n = name!(c!());
                         match tri!(realm.super_get(home!(), Key::Name(n))) {
@@ -1640,6 +1815,7 @@ impl Vm {
                         }
                     }
                     Op::GetSuperElem => {
+                        std::hint::cold_path();
                         gate!();
                         let k = tri!(realm.key_of(r!(c!())));
                         match tri!(realm.super_get(home!(), k)) {
@@ -1651,6 +1827,7 @@ impl Vm {
                         }
                     }
                     Op::SetSuper => {
+                        std::hint::cold_path();
                         gate!();
                         let n = name!(c!());
                         match tri!(realm.super_set(home!(), r!(a!()), Key::Name(n), r!(b!()))) {
@@ -1665,6 +1842,7 @@ impl Vm {
                         }
                     }
                     Op::SetSuperElem => {
+                        std::hint::cold_path();
                         gate!();
                         let k = tri!(realm.key_of(r!(b!())));
                         match tri!(realm.super_set(home!(), r!(a!()), k, r!(c!()))) {
@@ -1679,6 +1857,7 @@ impl Vm {
                         }
                     }
                     Op::CallSuper | Op::CallSuperSpread => {
+                        std::hint::cold_path();
                         gate!();
                         let Some((class, nt)) = super_info(realm, stack, fp) else { err!(ErrKind::Reference, "'super' keyword unexpected here") };
                         let Some(pv) = Realm::obj(class).and_then(|f| realm.proto_of(f)).map(|p| p.value()) else {
@@ -1704,6 +1883,7 @@ impl Vm {
                         construct!(pv, ni, cctx, nt, a!(), next, ab, argc, AFTER_SUPER)
                     }
                     Op::RetDerived => {
+                        std::hint::cold_path();
                         let (v, t) = (r!(a!()), r!(b!()));
                         let bad = if Realm::obj(v).is_some() {
                             None
@@ -1723,8 +1903,10 @@ impl Vm {
                             }
                             pc = int_at(stack, fp, 3) as usize;
                             ci = caller as usize;
-                            fp -= REC + prog.codes[ci].nregs as usize;
-                            reload!();
+                            // SAFETY: as in `ret!`.
+                            let ccode = unsafe { prog.at(ci) };
+                            fp -= REC + ccode.nregs as usize;
+                            reload!(ccode);
                             throw!(e)
                         }
                         ret!(if v.is_undefined() { t } else { v })

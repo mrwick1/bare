@@ -10,7 +10,7 @@ pub mod props;
 pub mod tables;
 // The generated data in `tables.rs`. `pub` lets other crates use it.
 
-use crate::tables::{CASE_FOLD, COMBINING_CLASS, COMPOSE, DECOMPOSE};
+use crate::tables::{CASE_FOLD, COMBINING_CLASS, COMPOSE, DECOMPOSE, DECOMPOSE_DATA};
 // `crate` means the root of this crate.
 use std::cmp::Ordering;
 
@@ -136,8 +136,9 @@ fn decompose(c: char, out: &mut Vec<char>) {
                 // `char::from_u32` gives an `Option`. `extend` adds it if it is `Some`.
             }
         }
-    } else if let Ok(i) = DECOMPOSE.binary_search_by_key(&cp, |&(key, _)| key) {
-        out.extend(DECOMPOSE[i].1.chars());
+    } else if let Ok(i) = DECOMPOSE.binary_search_by_key(&cp, |&(key, ..)| key) {
+        let (_, start, len) = DECOMPOSE[i];
+        out.extend_from_slice(&DECOMPOSE_DATA[start as usize..start as usize + len as usize]);
     } else {
         out.push(c);
         // Nothing to split: keep the character.
@@ -203,5 +204,35 @@ mod tests {
         assert_eq!(nfc("\u{958}"), "\u{915}\u{93C}");
         // This Hindi letter is on Unicode's "never join" list.
         // NFC splits it and never joins it again.
+    }
+
+    /// Every code point decomposes as UnicodeData.txt says: the mapping, applied again and again until it stops.
+    #[test]
+    fn decomposes_every_code_point_as_unicode_data() {
+        let text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/unicode/UnicodeData.txt")).unwrap();
+        let mut maps = std::collections::HashMap::new();
+        for line in text.lines() {
+            let f: Vec<&str> = line.split(';').collect();
+            if !f[5].is_empty() && !f[5].starts_with('<') {
+                let parts: Vec<u32> = f[5].split(' ').map(|x| u32::from_str_radix(x, 16).unwrap()).collect();
+                maps.insert(u32::from_str_radix(f[0], 16).unwrap(), parts);
+            }
+        }
+        fn full(cp: u32, maps: &std::collections::HashMap<u32, Vec<u32>>, out: &mut Vec<char>) {
+            match maps.get(&cp) {
+                Some(parts) => parts.iter().for_each(|&p| full(p, maps, out)),
+                None => out.extend(char::from_u32(cp)),
+            }
+        }
+        for cp in 0..=0x10FFFF {
+            let Some(c) = char::from_u32(cp) else { continue };
+            if (S_BASE..S_BASE + S_COUNT).contains(&cp) {
+                continue; // Hangul has its own test; UnicodeData.txt lists it as a range
+            }
+            let (mut want, mut got) = (Vec::new(), Vec::new());
+            full(cp, &maps, &mut want);
+            decompose(c, &mut got);
+            assert_eq!(got, want, "U+{cp:04X}");
+        }
     }
 }

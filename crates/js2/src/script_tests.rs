@@ -333,7 +333,7 @@ fn object_and_object_prototype() {
         ("var o = {a: 1}; var r = o.hasOwnProperty('a') + ',' + o.hasOwnProperty('toString') + ',' + ('toString' in o) + ',' + [1].hasOwnProperty(0) + ',' + [1].hasOwnProperty('length');", "r", "true,false,true,true,true"),
         ("var t = Object.prototype.toString; var r = [t.call([]), t.call(null), t.call(undefined), t.call({}), t.call(function () {}), t.call(1), t.call('s'), t.call(true), t.call(new Error())].join();", "r", "[object Array],[object Null],[object Undefined],[object Object],[object Function],[object Number],[object String],[object Boolean],[object Error]"),
         ("var o = {}; var r = (o.valueOf() === o) + ',' + Object.prototype.isPrototypeOf.call(Object.prototype, o) + ',' + o.propertyIsEnumerable('x');", "r", "true,true,false"),
-        ("var o = new Object(); o.q = 1; var r = typeof o + o.q + (Object(5) === 5) + (Object(o) === o);", "r", "object1truetrue"),
+        ("var o = new Object(); o.q = 1; var r = typeof o + o.q + (Object(5) === 5) + (Object(o) === o);", "r", "object1falsetrue"),
         ("var r = typeof Object + typeof Object.keys + (Object.prototype.constructor === Object) + (({}).constructor === Object);", "r", "functionfunctiontruetrue"),
         ("var a = [3, 4]; var r = Object.keys(a).join() + Object.entries('ab').join('/');", "r", "0,10,a/1,b"),
     ]);
@@ -399,7 +399,7 @@ fn to_primitive() {
         ("var r = +[] + ',' + +[7] + ',' + +[1, 2] + ',' + (-[3]);", "r", "0,7,NaN,-3"),
         ("var r = (function () {}) + '';", "r", "function () { [native code] }"),
         ("var a = []; a.push(a); try { '' + a; } catch (e) { var r = e.name; }", "r", "RangeError"),
-        ("var o = {valueOf: function () { return 3; }}; try { var r = o + 1; } catch (e) { r = e.name; }", "r", "TypeError"),
+        ("var o = {valueOf: function () { return 3; }}; var r = o + 1;", "r", "4"),
         ("var e = new Error('m'); var r = '' + e + (e + '' === String(e));", "r", "Error: mtrue"),
     ]);
 }
@@ -455,7 +455,7 @@ fn string_prototype() {
         ("var s = ''; for (var i = 0; i < 40; i++) s += String.fromCharCode(97 + i % 26); var r = s.length + s.slice(26, 30) + s.toUpperCase().indexOf('Z');", "r", "40abcd25"),
         ("var r = 'é'.length + 'é'.toUpperCase() + '日本'.charAt(1) + '日本'.charCodeAt(0) + '日本語'.slice(1) + '\\u{1F600}'.length;", "r", "1É本26085本語2"),
         ("try { String.prototype.trim.call(null); } catch (e) { var r = e.name; }", "r", "TypeError"),
-        ("try { new String('a'); } catch (e) { var r = e.name; }", "r", "TypeError"),
+        ("var r = typeof new String('a') + new String('ab').length;", "r", "object2"),
     ]);
 }
 
@@ -478,7 +478,7 @@ fn number_boolean_math_and_global_functions() {
         ("var r = typeof globalThis + (globalThis === self) + (globalThis.Math === Math) + (this === globalThis) + typeof self.Object;", "r", "objecttruetruetruefunction"),
         ("var r = typeof __def + typeof Symbol + typeof undefined;", "r", "undefinedundefinedundefined"),
         ("var g = 1; var r = globalThis.g + ',' + self.parseInt('9') + ',' + (Number.NaN !== Number.NaN) + ',' + Number.EPSILON.toFixed(0) + ',' + (Number.MIN_VALUE > 0);", "r", "1,9,true,0,true"),
-        ("try { new Number(1); } catch (e) { var r = e.name; }", "r", "TypeError"),
+        ("var r = typeof new Number(1) + (new Number(5) + 1);", "r", "object6"),
         ("try { (5).toString(1); } catch (e) { var r = e.name; }", "r", "RangeError"),
         ("try { Number.prototype.toString.call('x'); } catch (e) { var r = e.name; }", "r", "TypeError"),
     ]);
@@ -808,7 +808,7 @@ fn array_methods_work_on_array_likes_and_follow_the_specification() {
 }
 
 fn waiting(vm: &Vm) -> usize {
-    vm.prog.codes.iter().filter(|c| c.words.first().is_some_and(|w| *w as u8 == crate::bytecode::Op::Lazy as u8)).count()
+    vm.realm.prog.iter().filter(|c| c.words.first().is_some_and(|w| *w as u8 == crate::bytecode::Op::Lazy as u8)).count()
 }
 
 #[test]
@@ -856,12 +856,12 @@ fn a_lazy_function_gets_its_arguments_the_first_time_and_after() {
 fn a_lazy_compile_that_fails_throws_a_plain_error() {
     struct Fails;
     impl crate::interp::LazyCompile for Fails {
-        fn compile(&mut self, _: &mut Vec<crate::bytecode::Code>, _: usize) -> Result<(), String> {
+        fn compile(&mut self, _: &crate::codes::Codes, _: usize) -> Result<(), String> {
             Err("no compiler".into())
         }
     }
     let mut vm = load("var e; try { [1].forEach(function () {}); } catch (x) { e = x.name + ': ' + x.message; }").unwrap();
-    vm.lazy = Some(Box::new(Fails));
+    vm.realm.lazy = Some(Box::new(Fails));
     vm.run_main(0).unwrap();
     assert_eq!(vm.global_text("e"), "Error: no compiler");
 }
@@ -945,6 +945,122 @@ fn a_stack_that_grows_in_a_callee_keeps_the_registers_of_the_callers() {
     ]);
 }
 
+/// A `GetGlobal` or `SetGlobal` site holds the address of the slot of the global (`Shapes::watch_tag`). Each case changes the global
+/// object between two runs of one site: an add that grows its overflow record many times, a delete that goes back to an older shape
+/// (the record of that shape is not the one that the old address pointed into), an attribute change, an accessor, a new prototype.
+/// Under Miri a stale address is a use after free.
+#[test]
+fn a_global_cache_follows_every_change_of_the_global_object() {
+    check(&[
+        // Adds: the loop reads and writes `x` at the same sites while 300 other globals are added (the overflow record regrows).
+        ("var x = 1; var s = 0; for (var i = 0; i < 300; i++) { s += x; globalThis['g' + i] = i; x = x + 1; } var r = s + ',' + x + ',' + g299;", "r", "45150,301,299"),
+        // Back to an older shape: add 40 globals, read `x`, delete them last first, read `x`, again.
+        (
+            "var x = 7; var s = 0; for (var round = 0; round < 3; round++) { for (var i = 0; i < 40; i++) { globalThis['t' + i] = i; s += x; } for (var i = 39; i >= 0; i--) { delete globalThis['t' + i]; s += x; x = x + 1; } } var r = s + ',' + x;",
+            "r",
+            "13620,127",
+        ),
+        // A global that is deleted (a global made by an assignment: a `var` is not configurable) is gone for a site that has an entry; the same name added again is found.
+        ("globalThis.y = 5; var r = ''; function rd() { try { return y; } catch (e) { return e.name; } } for (var i = 0; i < 4; i++) { r += rd(); } delete globalThis.y; r += rd(); globalThis.y = 9; r += rd() + rd();", "r", "5555ReferenceError18"),
+        // An attribute change (a dictionary shape) and a read-only global: a store from a site that has an entry is dropped.
+        ("var z = 1; function st(v) { z = v; } function rz() { return z; } st(2); st(3); Object.defineProperty(globalThis, 'z', { writable: false }); st(4); var r = rz() + ',' + Object.getOwnPropertyDescriptor(globalThis, 'z').writable;", "r", "3,false"),
+        // A setter on a global (a getter on a global is not supported by `GetGlobal` yet: it throws; the field read `globalThis.w` works).
+        ("globalThis.w = 1; function gw() { return w; } function sw(v) { w = v; } gw(); gw(); sw(1); sw(1); var log = ''; Object.defineProperty(globalThis, 'w', { get: function () { return 42; }, set: function (v) { log += v; }, configurable: true }); sw(5); var r = globalThis.w + ',' + log;", "r", "42,5"),
+        // A new prototype for the global object: a name that only the prototype has.
+        ("var p = 1; function rp() { return typeof q === 'undefined' ? 'no' : q; } rp(); rp(); Object.setPrototypeOf(globalThis, { q: 'proto' }); var r = rp() + p;", "r", "proto1"),
+    ]);
+}
+
+/// `AddX`, `SubX`, `MulX` and `ModX` hold a 32-bit constant in the word `x` (a constant that does not fit the 16-bit immediate): the
+/// result is that of the register form for an int, a double that is not an int, a string, an object, `-0` and an overflow. A `Jmp` to a
+/// `Ret` is that `Ret`: a `return` of a conditional, inside `try` with `finally`, in a `for-of`, in a `catch`.
+#[test]
+fn a_constant_of_32_bits_and_a_jump_to_a_return_give_the_same_values() {
+    check(&[
+        (r#"var out=[]; function k1(x){ return [x+100000, x-100000, x*100000, x%100003, 100000*x, 3000000-x].join(); } out.push(k1(5)+"|"+k1("7")+"|"+k1(2147483647)+"|"+k1(-4.5)+"|"+k1(-2147483648)+"|"+k1(null)+"|"+k1(true)); out.push(String((-100003)%100003)+","+1/(-100003 % 100003)+","+(function(a){return 1/(a%100003)})(-100003)+","+(function(a){return a+100000})("s")); out.push((function(a){return -(a*70000)})(0)+","+(function(a){return 1/(a*70000)})(-0)+","+(function(a){return 1/(a*70000)})(-0));  var r = out.join('|');"#, "r", "100005,-99995,500000,5,500000,2999995|7100000,-99993,700000,7,700000,2999993|2147583647,2147383647,214748364700000,19225,214748364700000,-2144483647|99995.5,-100004.5,-450000,-4.5,-450000,3000004.5|-2147383648,-2147583648,-214748364800000,-19226,-214748364800000,2150483648|100000,-100000,0,0,0,3000000|100001,-99999,100000,1,100000,2999999|0,-Infinity,-Infinity,s100000|0,-Infinity,-Infinity"),
+        (r#"var out = []; function t1(c){ try { return c ? 1 : 2 } finally { out.push("f"+c) } } function t2(c){ var r; if (c) { r = 'a' } else { r = 'b' } return r } function t3(c){ for (var x of [1,2,3]) { if (c == x) return x*10 } return c ? 'n' : 'z' } function t4(c){ try { if (c) throw 1; return c ? 7 : 8 } catch (e) { return c ? 'c1' : 'c0' } } out.push([t1(true),t1(false),t2(1),t2(0),t3(2),t3(9),t3(0),t4(0),t4(1)].join()); var r = out.join('|'); "#, "r", "ftrue|ffalse|1,2,a,b,20,n,z,8,c1"),
+    ]);
+}
+
+/// Every shape of callee through the call path of `Vm::run` (`enter!`, `ret!`): fewer and more arguments than parameters, `arguments`,
+/// a rest parameter, a default value, a native tail call, `new` (with an object as the result), a getter and a setter, an arrow, a closure.
+#[test]
+fn every_shape_of_callee_gives_its_value() {
+    check(&[(r#"function none() { return 1 } function two(a, b) { return a + ',' + b } function args() { return arguments.length + ':' + arguments[0] + arguments[2] } function rest(a, ...r) { return a + ':' + r.length + r.join('') } function def(a, b = a + 1) { return a + b } function nat(a, b) { return Math.max(a, b) } function Ctor(a) { this.a = a; this.n = arguments.length } function ctorRet(a) { this.a = a; return { z: 9 } } var o = { get g() { return this.v + 1 }, set g(x) { this.v = x * 2 }, v: 1, m(a) { return this.v + a } }; var arrow = (a, b) => a * b; var cl = (function () { var c = 0; return function (d) { c += d; return c } })(); var out = [none(9, 9, 9), two(1), two(1, 2, 3), args(7, 8, 9, 10), args(), rest(1), rest(1, 2, 3), def(1), def(1, 5), nat(3, 8), new Ctor(4).a + '/' + new Ctor(4, 5, 6).n, new ctorRet(1).z, (o.g = 5, o.g), o.m(3), arrow(6, 7), arrow(6), cl(1), cl(2), (function () { return this === undefined || this === globalThis })()]; var r = out.join('|');"#, "r", "1|1,undefined|1,2|4:79|0:undefinedundefined|1:0|1:223|3|6|8|4/3|9|11|13|42|NaN|1|3|true")]);
+}
+
+/// The cache of a global site and the other ways to reach a global name: strict writes (`SetGlobalS`), `delete` of a name
+/// (`DeleteGlobal`), a `var` that cannot be deleted, a property that becomes read-only, a getter and a setter that grow the stack.
+#[test]
+fn a_global_cache_agrees_with_strict_writes_delete_and_attributes() {
+    check(&[
+        // A strict write to a name that was deleted is a ReferenceError at a site that had an entry; the name added again works.
+        ("'use strict'; globalThis.s = 0; function ws(x) { s = x; } for (var i = 0; i < 4; i++) ws(i); delete globalThis.s; var r; try { ws(4); r = 'no'; } catch (e) { r = e.name; } globalThis.s = 9; ws(5); r += ',' + s;", "r", "ReferenceError,5"),
+        // A read-only global: the store of a site that had an entry throws in strict code and is dropped in sloppy code.
+        ("'use strict'; globalThis.n = 0; function wn(x) { n = x; } wn(1); wn(2); wn(3); Object.defineProperty(globalThis, 'n', { writable: false }); var r; try { wn(4); r = 'no'; } catch (e) { r = e.name; } r += ',' + n;", "r", "TypeError,3"),
+        ("globalThis.n = 0; function wn(x) { n = x; } wn(1); wn(2); wn(3); Object.defineProperty(globalThis, 'n', { writable: false }); wn(4); var r = n;", "r", "3"),
+        // `delete name` (DeleteGlobal) of a property that a site has an entry for: the next read is a ReferenceError.
+        ("globalThis.d = 1; function rd() { try { return d; } catch (e) { return e.name; } } rd(); rd(); var r = rd() + ',' + delete d + ',' + rd();", "r", "1,true,ReferenceError"),
+        // A `var` cannot be deleted: the entry stays right.
+        ("var nv = 1; function rn() { return nv; } rn(); rn(); var r = rn() + ',' + delete nv + ',' + rn();", "r", "1,false,1"),
+        // A getter and a setter of the global that run a deep recursion (the stack grows while the frame of `use` is live).
+        ("var gv; function rec(n) { var a = n; return n == 0 ? 0 : rec(n - 1) + a; } Object.defineProperty(globalThis, 'gg', { get: function () { return rec(300); }, set: function (v) { gv = rec(300) + v; }, configurable: true }); function use() { var p = 1, q = 2; var t = gg; gg = 5; return p + q + t + gv; } var r = use();", "r", "90308"),
+    ]);
+}
+
+/// A global lexical binding (a `let`, `const` or `class` of an earlier or later script) hides a property of the global object of the same
+/// name. A site that has an entry for the property must not give it (`declare_lex` changes the tag of the global object).
+#[test]
+fn a_global_lexical_binding_hides_the_property_that_a_site_cached() {
+    // The host makes the globals that the script writes (`var a, b, e, d`), so the script adds nothing to the global object after its
+    // `let` and `const` are declared: only `declare_lex` can end the entries of `rd`, `wr` and `wc`.
+    let host = "var a, b, e, d; globalThis.v = 1; function rd() { return v; } function wr(x) { v = x; } rd(); rd(); rd(); wr(1); wr(1); wr(1); globalThis.c = 1; function wc(x) { c = x; } wc(1); wc(1); wc(1);";
+    // A function expression uses the names, so they are slots of a context and are declared before the first statement.
+    let src = "let v = 2; const c = 3; (function () { return v + c; }); a = rd(); wr(5); b = v + ',' + globalThis.v; try { wc(4); } catch (x) { e = x.name; } d = c + ',' + globalThis.c;";
+    let mut vm = load_with(host, src).unwrap();
+    vm.run_main(0).unwrap();
+    let got: Vec<String> = ["a", "b", "e", "d"].iter().map(|n| vm.global_text(n)).collect();
+    assert_eq!(got, ["2", "5,1", "TypeError", "3,1"]);
+}
+
+/// A frozen global object: a site that had an entry for a property stores nothing after `Object.freeze(globalThis)`.
+#[test]
+fn a_frozen_global_object_stops_the_stores_of_the_sites() {
+    let host = "globalThis.fz = 1; function wf(x) { fz = x; } function rf() { return fz; } wf(2); wf(3); wf(3); rf(); rf(); Object.freeze(globalThis);";
+    let mut vm = load_with(host, "wf(9);").unwrap();
+    vm.run_main(0).unwrap();
+    assert_eq!(vm.global_text("fz"), "3");
+    let mut vm = load_with(&format!("'use strict'; {host}"), "'use strict'; var t; try { wf(9); } catch (e) { t = e.name; }").unwrap();
+    // The `var t` of the script is not possible on a frozen object, so the script cannot report: the throw is the exit.
+    assert!(vm.run_main(0).is_err() || vm.global_text("fz") == "3");
+}
+
+/// The global cache with the built-ins of attributes: a global object that is not extensible, sealed or frozen, a data property that
+/// becomes an accessor (and back), `defineProperty` with `writable: false`, and a strict store to each.
+#[test]
+fn a_global_cache_follows_the_attributes_that_the_object_built_ins_give() {
+    let strict = |body: &str| format!("'use strict'; {body}");
+    check(&[
+        ("globalThis.pe = 1; function wp(x) { pe = x; } function nw(x) { newg = x; } wp(1); wp(2); wp(3); Object.preventExtensions(globalThis); wp(7); nw(1); var r = pe + ',' + typeof newg;", "r", "7,undefined"),
+        (&strict("globalThis.pe = 1; function wp(x) { pe = x; } function nw(x) { newg = x; } wp(1); wp(2); wp(3); Object.preventExtensions(globalThis); wp(7); var r = pe; try { nw(1); } catch (e) { r += e.name; }"), "r", "7ReferenceError"),
+        ("globalThis.sl = 1; function ws(x) { sl = x; } function rs() { return sl; } ws(2); ws(3); rs(); rs(); Object.seal(globalThis); ws(4); var r = rs() + ',' + delete globalThis.sl + ',' + rs();", "r", "4,false,4"),
+        // A data property becomes an accessor and the sites that had an entry call the accessor.
+        ("globalThis.ac = 1; var log = ''; function ra() { return ac; } function wa(x) { ac = x; } ra(); ra(); wa(1); wa(1); Object.defineProperty(globalThis, 'ac', { get: function () { log += 'g'; return 42; }, set: function (v) { log += 's' + v; }, configurable: true }); var r = ra() + ',' + (wa(5), log);", "r", "42,gs5"),
+        // ... and back to a data property.
+        ("globalThis.ab = 1; var log = ''; function ra() { return ab; } ra(); ra(); Object.defineProperty(globalThis, 'ab', { get: function () { return 'acc'; }, configurable: true }); var r = ra(); Object.defineProperty(globalThis, 'ab', { value: 'data', writable: true, configurable: true }); r += ra();", "r", "accdata"),
+        (&strict("globalThis.ro = 1; function wr(x) { ro = x; } wr(2); wr(3); Object.defineProperty(globalThis, 'ro', { writable: false }); var r; try { wr(4); r = 'no'; } catch (e) { r = e.name; } r += ro;"), "r", "TypeError3"),
+        // A getter without a setter: a strict store throws, a sloppy store does nothing, a read calls the getter.
+        (&strict("globalThis.go = 1; function wg(x) { go = x; } function rg() { return go; } rg(); rg(); wg(1); wg(1); Object.defineProperty(globalThis, 'go', { get: function () { return 9; }, configurable: true }); var r = rg(); try { wg(3); } catch (e) { r += e.name; }"), "r", "9TypeError"),
+    ]);
+    let host = "globalThis.fz = 1; function wf(x) { fz = x; } function rf() { return fz; } wf(2); wf(3); wf(3); rf(); rf(); Object.freeze(globalThis);";
+    let mut vm = load_with(host, "wf(9);").unwrap();
+    vm.run_main(0).unwrap();
+    assert_eq!(vm.global_text("fz"), "3");
+    let mut vm = load_with(&format!("'use strict'; {host}"), "'use strict'; wf(9);").unwrap();
+    assert!(vm.run_main(0).is_err(), "a strict store to a frozen global throws");
+    assert_eq!(vm.global_text("fz"), "3");
+}
+
 // ---- Lazy compile of the functions of a user script (`Lazy`, `Op::Lazy`): a function is compiled at its first call.
 
 #[test]
@@ -1024,6 +1140,30 @@ fn a_first_call_from_a_getter_a_setter_a_constructor_and_a_native_works() {
 }
 
 #[test]
+fn a_user_function_first_called_in_a_nested_run_is_compiled_there() {
+    // The user functions below wait as stubs (#777). Their first call is inside a getter, a setter, `valueOf` or `toString` that a native
+    // runs, so the stub compiles in a nested run. Each case has a stub that keeps its parameter registers (plain parameters) and one that
+    // makes the array of arguments (`arguments`, a default value, a rest parameter). `check` also runs each case under constant collection.
+    check(&[
+        ("function p(a, b) { return a * b; } var o = {get g() { return p(6, 7); }}; var r = Object.assign({}, o).g;", "r", "42"),
+        ("function q() { return arguments.length; } var o = {get g() { return q(1, 2, 3); }}; var r = Object.assign({}, o).g;", "r", "3"),
+        ("var s; function p(a, b) { return a + b; } var o = {set v(x) { s = p(x, 1); }}; Object.assign(o, {v: 41}); var r = s;", "r", "42"),
+        ("var s; function d(a, b = 2) { return a + b; } var o = {set v(x) { s = d(x); }}; Object.assign(o, {v: 40}); var r = s;", "r", "42"),
+        ("function p(a) { return a + 1; } var o = {valueOf: function () { return p(41); }}; var r = o + 0;", "r", "42"),
+        ("function d(a, ...m) { return a + m.length; } var o = {toString: function () { return 'v' + d(40, 1, 2); }}; var r = `${o}` + ('' + o);", "r", "v42v42"),
+        // Two levels: `valueOf` -> a getter -> `valueOf` again. Each level first calls a stub that waits, and the loops above call it after.
+        ("function a1(x) { return x + 1; } function a2() { return arguments[0] * 2; } function a3(x, y) { return x - y; }
+          var inner = {valueOf: function () { return a3(a2(10), a1(4)); }};
+          var mid = {get g() { return a1(inner) + a2(1); }};
+          var outer = {valueOf: function () { return Object.assign({}, mid).g + a3(9, 1); }};
+          var r = (outer + 0) + ',' + a1(1) + ',' + a2(2) + ',' + a3(5, 3) + ',' + (inner + 0);",
+         "r", "26,2,4,2,15"),
+        // A stub that compiles in a nested run and has a function inside it: the child is a new stub there, and an outer run calls it.
+        ("function mk(n) { return function (x) { return x + n; }; } var o = {valueOf: function () { return mk(1)(2); }}; var r = (o + 0) + ',' + mk(10)(5);", "r", "3,15"),
+    ]);
+}
+
+#[test]
 fn a_function_that_is_called_from_rust_is_compiled_at_that_call() {
     let mut vm = load("function add(a, b) { return a + b; } function get() { return 'g'; }").unwrap();
     vm.run_main(0).unwrap();
@@ -1049,7 +1189,7 @@ fn the_stubs_of_user_functions_keep_a_program_that_is_not_called_small() {
     assert!(waiting(&vm) >= 200 + 40, "the 200 functions and the prelude wait: {}", waiting(&vm));
     vm.run_main(0).unwrap();
     assert_eq!(vm.global_text("r"), "42");
-    let words: usize = vm.prog.codes.iter().map(|c| c.words.len()).sum();
+    let words: usize = vm.realm.prog.iter().map(|c| c.words.len()).sum();
     assert!(words < 4000, "only the script, the wrapper of the prelude and f7 hold code: {words} words");
 }
 
