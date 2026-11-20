@@ -14459,3 +14459,41 @@ Noticed, not changed:
 - Peak RSS of `history 1` went from 12.0 to 12.4 MiB in single runs. I did not analyse it.
 
 Not tested: the oracle (the old walk of main on the 65 cases) in a separate run; the frozen text is the oracle. The fast path and `clone_copy`. Real two-heap messages under Windows beyond the unit tests. A callgrind split (not needed: `history 1/10` is under the limit).
+## 2026-11-20: long-session row and ready time (plan steps M4 and M5)
+
+COMPLETE for M4. M5 is built and run, but its check (spread under 5% on 5 runs on an idle machine) is NOT met: the machine was never idle. Linux only. PR is not merged and has no auto-merge.
+
+Changes: `tools/bench/journeys.py` has two new modes, `journeys.sh session` (M4) and `journeys.sh ready` (M5). No change in `crates/*`. The existing `record`, `run` and `compare` are not changed.
+
+- `session [--rounds N] BARE_DRIVE`: one `bare-drive --repeat N` process for each journey (default N = 20). Each round opens a new page in the same process. It prints RSS and peak RSS (`VmHWM`) after each round, and the glibc heap in use. It fits a least-squares slope over rounds 2 to N (round 1 pays the one-time costs). The session total is the sum of the slopes over the journeys.
+- `ready [--runs N] BARE_DRIVE`: one cold replay for each run (default 5). `ready_ms` is the time from the start of the process to the stderr line of the first step after `open`. `open` itself ends at about 0 ms: the next step waits for the page. At that moment the tool reads the CPU (all threads, `schedstat`) and the RSS of the process and all its descendants, and counts them. It also prints `load1` and the spread of `ready_ms` and of the CPU.
+- A bare-drive run has one process (`procs` is 1 in every row), so "all processes" is one process today. The tool counts the whole tree, so a later multi-process browser is counted.
+
+Inputs: bare-drive built from this branch (origin/main `1aa1bc6a`), release. Machine archMachine, 16 cores. Corpus recorded live on 2026-11-20 with `journeys.sh record` into `/data/bare-tmp/s0/m4m5/corpus`, real clock (the old `/data/bare-tmp/corpus` does not exist any more). 45 public journeys recorded; 3 did not pass live (`curl-se-home`, `duckduckgo-html-search`, `nextjs-docs`) and are not measured. The staging journey and the typing page are not in `tools/drive/public` (login and local fixture), so they are not in these rows.
+
+### M4: long session, 20 rounds, today's engine
+
+Two full passes (`journeys.sh session --rounds 20`), machine busy with other agents (load 5 for the first pass, 20 for the second; memory does not depend on load as much as time does).
+
+| Pass | Journeys with 20 rounds | Sum RSS slope | Sum peak RSS slope | Sum heap slope | Sum of RSS, round 1 to round 20 |
+| ---- | ----------------------- | ------------- | ------------------ | -------------- | ------------------------------- |
+| 1    | 42                      | +17.9 MiB/round | +23.7 MiB/round  | +8.9 MiB/round | 1,437 to 2,105 MiB              |
+| 2    | 42                      | +12.7 MiB/round | +18.2 MiB/round  | +4.2 MiB/round | 1,366 to 1,938 MiB              |
+
+- Mean per journey: about +0.3 to +0.4 MiB/round of RSS (42 journeys). The two passes differ by 30%, so the slope has a spread of that size. Hypothesis: allocator slack and a timing change in what a page loads under different load. Not checked.
+- One journey, one pass: the slope is rough. Passes differ by more than 0.3 MiB/round for 14 of 42 journeys (largest: `python-docs-search` +3.86 then +1.33, `rust-book-search` RSS -2.41 then -0.25 with the peak +2.02 then +1.72). `example-page` and the three `httpbin-*` journeys stay under +0.06 MiB/round. Pages with large scripts grow most: `crates-io-home` +1.0 and +0.3, `nodejs-org-home` +1.0, `debian-org-home` +1.3 and +0.7.
+- The slope is not a proof of a leak. The process keeps its HTTP cache and style and script caches across rounds, and they grow with the first rounds. I did not split the slope into caches and leaks. A leak check needs rounds past the point where the caches are full.
+- Three journeys stop at round 2 in both passes: `python-docs-search-results`, `rust-book-chapters`, `rust-book-sidebar`. They pass in a single run. In round 2 of `rust-book-chapters` the style sheets come back as 304 with no body (the HTTP cache of the first round asks the replay again), the `click` fails with `hidden`. Hypothesis: the replay answers a conditional request with the recorded 304 and no body. Not checked, and I did not change the browser or the replay. The slopes of these three are `n/a`.
+- A round after the first sees the cache of the first round, so rounds 2 to 20 do less network work than round 1. The row measures what stays in memory, not the cost of a cold page.
+
+### M5: ready time, 5 runs, 45 journeys
+
+Best run (the only one with a lower load): load average 3.1 to 4.2 on 16 cores, so NOT idle. `ready_ms` has a median of 9.2 ms over the journeys (2.6 ms to 95.5 ms; the sum of the medians is 903.7 ms). Spread (max - min over the median of 5 runs): 23 of 45 journeys are under 5%, 31 under 10%, the median spread is 5.0%, the largest is 159% (`httpbin-cookies`, 2.7 ms). The slower journeys (median 20 ms or more, 16 journeys) have spreads of 2.1% to 16.6%; 6 of them are over 5%.
+
+Two later runs at load 10 to 27 and 17 to 11 gave sums of medians of 1,703 ms and 979 ms and 37 to 42 journeys over 5% spread. Load changes ready time by up to 2 times, so the check needs an idle machine. Other agents ran builds and `massif` on this machine for the whole task. Under load the CPU at ready time (all threads) has a spread above 5% for 41 to 45 of 45 journeys, so the CPU is not a stable gate here either.
+
+The 5% target is not verified. At 3 to 100 ms, 5% is 0.15 to 5 ms: hypothesis, the noise of the scheduler and the process start is of that size even on an idle machine. A run on an idle machine, or a gate on instructions at ready time, would settle it. The tool does not count instructions at ready time (`perf stat` counts the whole process).
+
+RSS at ready time: 15.2 MiB (`npr-text-story`) to 42 MiB (`substack-home`); the sum of the medians over 45 journeys is 960 MiB.
+
+Not tested: an idle machine, the staging journey and the typing page, the virtual-clock corpus (`--clock virtual`, whose wall time means nothing), Windows, a build of `bare-mcp` or a window run (their process trees), instructions at ready time, the cause of the three round-2 stops, a split of the slope into caches and leaks. Replay misses were not a gate: `go-dev-home` (6), `mdn-reference` (8), `wikipedia-search` (up to 8) and 7 more journeys had 1 to 4 misses in some runs; the recording was filled until two runs in a row had none, and the timing of a real clock still moves a request or two.
