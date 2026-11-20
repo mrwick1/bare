@@ -152,7 +152,7 @@ mod prim;
 mod proxy;
 #[path = "heap_shape.rs"]
 mod shape;
-pub use shape::{Ic, IcStats};
+pub use shape::{CloneShape, CloneShapes, Ic, IcStats};
 use shape::Shapes;
 
 // ---------- property model ----------

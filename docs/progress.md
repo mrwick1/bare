@@ -14491,3 +14491,68 @@ QuickJS loop without concat: 23,339,978 to 23,340,267 (N = 100,000). N = 1,000 g
 Findings, not changed: (1) `Heap` rounds a cell above 8,192 bytes to a 64 KiB mapping (S1.3), so a flat string of 8 to 64 KiB wastes up to 56 KiB and costs a system call. The flatten of a long rope hits this. (2) `ROPE_MIN` = 32 is not tuned. (3) `Chars::hash` is one multiply for each unit: no measurement of its spread beyond the table tests. (4) The Miri run of the crate takes 143 s of test time (not split by test).
 
 Not tested: a collection inside a task (S1.5 and S1.6 do not exist); the shared table under a real second heap that collects; the cost matrix (js2 is not wired into the browser); arm64; substrings, `Value` of strings in objects (S1.8 and S1.9).
+
+## 2026-11-20: clone fast paths (design-host-clone.md step 4)
+
+Linux and Windows pass the filtered tests. The cost matrix has no row over the limit, and `history 1` and `10` drop by about 12%. The PR is not merged and has no auto-merge. Base: origin/main `3a0c7bf9`, which has #737 (step 3). Since `b72ac7d9`, the head of #737, main changed only `crates/js2`, the CI file and docs (`git diff --stat`). So the `bare` and `bare-js` sources of the base are the ones of `b72ac7d9`, and all numbers below come from a fresh build of `b72ac7d9`.
+
+Changes.
+
+- `crates/js/src/heap_shape.rs`: `Heap::clone_shape`, `clone_prop`, `clone_elem`, `clone_keys` and `clone_install`, with `CloneShape` and `CloneShapes`. `clone_shape` accepts an ordinary object or a dense array in shape mode, with only plain data properties, string keys and no hole. `clone_prop` and `clone_elem` read one value at its turn and give `None` when the shape or the element count is not what `clone_shape` saw. A shape never changes, so the same shape id means the same keys. `clone_install` gives a new object its keys and values at once. It refuses (and the caller defines key by key) for a key that is not a string, a key that is there twice, more than 128 keys, or an object that is not new and empty.
+- `crates/js/src/eval_clone.rs`, walk: `CloneWalk::props_fast` reads the keys and the values straight from the shape and the slots, and writes an array as `ArrD`. The steps and the byte charges are the ones of the generic `props`, in the same order. After each read it needs the object to be as it was. When a child (which can run a getter) changed it, `props_back` gives the keys that are left to `props`, which reads them as the spec does. `props` has a new argument `dense`: for an array that `props_fast` began, an index below it is written as a value with no key, and a key that a getter deleted is written as `Hole`.
+- `crates/js/src/eval_clone.rs`, reader: the keys and values of an object go to two scratch stacks and `clone_install` makes the shape at once. A dense array gets its elements and its `length` from one `fill_array`, with no `put_value`. The string scratch is a reused `Vec<u16>` (the old 64-unit zeroed buffer cost 0.63 K a state in the spike). The vectors of the reader have room for 8.
+- Shape map: `CloneShapes` keeps the last 4 key lists of one read, by a hash. A hit is checked against the keys of the shape, so a clash of the hash cannot give a wrong shape. It makes no allocation.
+- Test-only switch: a thread-local in `eval_clone.rs` (`GENERIC_OUT`, `GENERIC_IN`) turns off the fast path of the walk or of the reader. It does not exist outside `cfg(test)`: `clone_generic` is `false` there.
+
+Differential test: `clone_fast_path_gives_what_the_generic_path_gives` (`eval_clone_tests.rs`). A seeded generator makes 2 to 5 objects and arrays with plain keys, holes, Maps, Dates, BigInts, a function (refused), and getters. A getter deletes, adds, overwrites or redefines (data, accessor, enumerable or not) a key of any object, also of the root that the walk is inside, pushes, pops, cuts or deletes in an array, and some throw. Some cases run under small byte, depth and node limits. Each case runs in 4 realms: both generic, fast walk with generic reader, generic walk with fast reader, both fast. The answers must be the same text: the copy, the source graph after the walk, the log of the getters, and the cost (or the error). The test counts the objects that took the fast path (1,474 in the 1,000 default seeds), the objects that fell back half way (59), the throws (51) and the limit stops (297), and asserts a floor on each. `CLONE_FUZZ_SEEDS=N` runs more seeds: 30,000 and 20,000 seeds pass (53,716 fast objects and 3,348 half-way fallbacks in the 30,000).
+
+The test found one bug before it passed. A dense array that fell back half way wrote the `ArrD` header for all `n` elements, then keyed pairs for the rest. The reader then read the keys as values and reported a damaged record. The fix is the `dense` argument of `props`.
+
+Step 3 review items.
+
+1. The reader now checks a view against its buffer: `len * size + offset` with checked arithmetic against the buffer length, and a buffer that is not a buffer. A bad view is `Unsupported("damaged clone record")`. The test `clone_view_outside_its_buffer_is_a_damaged_record` has 7 bad views (offset, length, element size, overflow) and one good view. It failed before the check (the error was not `Unsupported`) and passes after.
+2. Peak RSS of `history 1`, base (`b72ac7d9`) against new, `cp --reflink=never` copies of both binaries, 3 runs each, idle machine, no glibc tunable: base 13.2, 13.0, 13.1 MiB; new 13.4, 13.3, 13.5 MiB (`VmHWM`). New is higher by about 0.3 MiB, more than the spread. The cause is not the heap. `Anonymous` of `smaps_rollup` (sampled in `history 100`): base 1,952, 1,936, 1,936 KiB; new 1,948, 1,948, 1,952 KiB. `peak_live` is 0.9 MiB on both and allocations are 62,266 → 58,266. So the record buffers and the `Cloned` overhead are not the cause (hypothesis falsified). The rest is file-backed pages: `size` shows text 12,914,313 → 12,924,417 bytes (+10 KB), and page faults are 605 and 607 → 611 and 610. Hypothesis, not checked: code layout changes which pages the kernel maps around a fault. No fix. I did not build main `1aa1bc6a` to check the 12.0 to 12.4 of step 3 in the same way.
+
+Measured: archMachine (AMD Ryzen 9 5900HX), release builds of the base (`/data/bare-tmp/s0/base-clone4`) and the PR (`/data/bare-tmp/s0/new-clone4`). `tools/js/cost_matrix.sh -j4`, 3 runs a row, minimum of `instructions:u`. 819 rows, 817 measured. Mean change glibc -0.046%. No row over +0.5% under glibc (the largest is `resources_load large 1` +0.354%), so the jemalloc run and the codegen-units=1 rule did not apply to any row. `parse_load deep 1` and `10` fail on both trees (the known stale example). The rows of the brief, with jemalloc run on them (`-J`):
+
+| Row | glibc base | glibc new | Change | jemalloc base | jemalloc new | Change |
+|---|---:|---:|---:|---:|---:|---:|
+| `navigation_load history 1` | 79,467,357 | 70,097,946 | -11.790% | 89,929,895 | 80,984,378 | -9.947% |
+| `navigation_load history 10` | 747,264,348 | 653,663,488 | -12.526% | 792,735,083 | 703,301,019 | -11.282% |
+| `web_apis_load clone 1` | 170,173,207 | 157,983,138 | -7.163% | 183,629,621 | 170,391,084 | -7.209% |
+| `web_apis_load clone 10` | 1,636,622,477 | 1,518,972,561 | -7.189% | 1,713,834,766 | 1,587,497,791 | -7.372% |
+| `scheduler_load messages 1` | 26,792,535 | 26,792,655 | +0.000% | 33,735,266 | 33,735,685 | +0.001% |
+| `scheduler_load messages 10` | 207,856,678 | 207,857,412 | +0.000% | 218,108,443 | 218,121,451 | +0.006% |
+
+Spread of 3 runs with `perf stat` on the same two binaries (copies): `history 1` base 79,239,115 to 79,239,223, new 69,867,934 to 69,868,511. Under 0.001%. (These absolute numbers differ from the matrix by 0.3% because the run environment differs. The change is the same: -11.8%.) `state_bytes=17600` and `checksum=ok` are unchanged. Allocations of `history 1`: 62,266 → 58,266.
+
+Against the spike (`e64c76ad`): the spike took 10.93 M (-12.7%) off `history 1` on its base of 85.9 M. This PR takes 9.37 M (-11.8%) off a base of 79.47 M, which has the generic record of step 3 already. The new absolute count (70.10 M) is below the spike's (74.98 M); the bases differ (`42018c02` for the spike). `web_apis_load clone` falls by 7.2% (the spike raised it by 2%), because every class is native now.
+
+Callgrind, `history 1`, new tree with symbols, 1 run, 70,561,656 instructions in all, 1,000 states, inclusive per state:
+
+| Part | Per state |
+|---|---:|
+| `clone_out` (the walk) | 5.47 K |
+| of it `props_fast` and its children | 4.20 K |
+| of it `RecordWriter::key` (5 keys) | 0.87 K |
+| of it `clone_class` (3 objects) | 0.69 K |
+| of it `CloneHost::is_host_object` (3 objects) | 0.60 K |
+| of it `clone_shape` | 0.26 K |
+| of it `RecordWriter::finish` (shrink realloc) | 0.29 K |
+| `clone_in` (the reader) | 7.1 K |
+| of it `RecordReader::key` (5 keys) | 0.46 K |
+| of it `clone_install` (2 calls) | 0.89 K |
+| of it `fill_array` | 0.25 K |
+
+Header bit for the side-table classes: not built. `clone_class` is 0.69 K a state, which is 0.98% of the row and 12.6% of the walk. The largest self cost in the whole profile is 2.96% (libc), so no probe is a top cost. A bit would save at most about 0.7 M of 70 M. `is_host_object` costs about as much (0.60 K) and belongs to step 6 of the plan. The owner can still ask for the bit.
+
+Shape map. It is built (`CloneShapes`). A scratch case (not committed; a copy of `web_apis_load` that clones an array of 50 objects with 5 keys in each iteration, `rows 10`) went from 5,824,725,501 to 5,756,910,721 instructions with the map (-1.16% of a row that spends most of its time building the rows in JS). On `history 1` the map costs 0.1 M: 69,992,051 without it and 70,097,711 with it (+0.15%), because each state has 2 objects with keys that no other object has. No row of the matrix clones an array of same-shaped objects, so the matrix does not show the gain.
+
+Tests. Linux: filters `clone`, `navigation`, `history`, `message`, `structured`, `port` and `scheduler` of `cargo test --locked -p bare --lib` pass (262 tests), also with `BARE_GC_STRESS=1`. `bare-js` `clone`: 11 tests pass. `cargo test --locked -p bare-js-api -p bare-js -p bare --lib` once: 31, 1088 (1 ignored) and 1709 (6 ignored) pass. `cargo check -p bare -p bare-js -p bare-js-api` exits 0. Windows (VM `127.0.0.1:22220`, xwin build, exes in `C:\s0\clone4`): `clone` 26, `navigation` 89, `history` 17, `message` 36, `structured` 4, `port` 104, `scheduler` 42 (bare); `clone` 11 (bare-js, with the differential test: 54 s); `clone` 25 (bare-js-api). All pass. The 65 cases and the 2 cap tests of `browser_clone_tests.rs` give the same text.
+
+Noticed, not changed:
+- `RecordWriter::key` costs 0.87 K for 5 keys (an `IdMap` scan and a `units` scan). `RecordWriter::finish` shrinks the buffer with a realloc (0.29 K a state). Both are in `bare-js-api`, outside this step.
+- Interning of the 7 strings of a state is the largest part of the reader; I did not isolate it (`Heap::intern_slice` has 1.10 M self over all callers).
+- `cargo clippy -p bare-js --all-targets -- -D warnings` stops on `crates/os/src/pages.rs:19` (`manual_is_multiple_of`), before it reaches this change. Clippy without `-D warnings` gives no warning in the files of this change.
+
+Not tested: `clone_copy` (step 5); a differential run under `BARE_GC_STRESS=1` (only the browser filters ran under it); getters on Map, Set, Error, wrappers and views as parents (they take the generic path, and the generator covers Map and Date as values only); a host that lists a transfer item in the differential test; the Windows release build and the Windows cost; the full jemalloc matrix (jemalloc ran only on the 6 rows above and on rows over the limit under glibc, which are none); peak RSS of `history 10`.
