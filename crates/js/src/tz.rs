@@ -1,7 +1,7 @@
 //! Time zones for `Intl.DateTimeFormat`: the UTC offset of a zone at an instant.
 //!
-//! - The rules come from the TZif files of the system (RFC 8536, versions 1 to 4), under `$TZDIR` or `/usr/share/zoneinfo`.
-//!   bare carries no zone data. A file is read on the first use of its zone (`eval_intl.rs` keeps the parsed zone).
+//! - The rules come from the TZif files (RFC 8536, versions 1 to 4) of `bare-tzdata`, which are in the binary. bare reads no
+//!   zone file of the system. A file is parsed on the first use of its zone (`eval_intl.rs` keeps the parsed zone).
 //! - A file has transitions (an instant and the offset after it) and a footer rule (a POSIX TZ string) for the instants after
 //!   the last transition, or for all time when there is no transition. Instants before the first transition use time type 0,
 //!   as RFC 8536 says.
@@ -12,8 +12,6 @@
 
 use crate::date::days_from_civil;
 
-/// The largest TZif file we read. The biggest file in tzdata 2025 is under 4 KiB.
-pub const MAX_FILE: u64 = 64 * 1024;
 const MAX_TRANSITIONS: usize = 8192;
 
 #[derive(Debug, PartialEq)]
@@ -323,17 +321,6 @@ pub fn is_utc_name(s: &str) -> bool {
         "Etc/GMT-0", "GMT+0", "GMT-0", "Etc/Greenwich", "Greenwich",
     ];
     UTC.iter().any(|u| u.eq_ignore_ascii_case(s))
-}
-
-/// A zone name that may name a file: ASCII letters, digits, `_`, `-`, `+` and `/` between non-empty parts, no `.`, at most
-/// 64 bytes, not under `posix/` or `right/`, and not a tzdata file that is not a zone.
-pub fn is_file_name(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 64
-        && s.split('/').all(|p| !p.is_empty() && p.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'+')))
-        && !s.starts_with("posix/")
-        && !s.starts_with("right/")
-        && !matches!(s, "posixrules" | "Factory" | "SECURITY" | "leapseconds")
 }
 
 #[cfg(test)]

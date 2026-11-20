@@ -131,6 +131,7 @@ dependencies = [
  "bare-js-api",
  "bare-observe",
  "bare-os",
+ "bare-tzdata",
  "bare-unicode",
  "fixed_decimal",
  "icu_collator",
@@ -220,6 +221,9 @@ dependencies = [
 [[package]]
 name = "bare-os"
 version = "0.1.0"
+dependencies = [
+ "bare-tzdata",
+]
 
 [[package]]
 name = "bare-paint"
@@ -250,6 +254,10 @@ version = "0.1.0"
 dependencies = [
  "bare-os",
 ]
+
+[[package]]
+name = "bare-tzdata"
+version = "0.1.0"
 
 [[package]]
 name = "bare-unicode"
