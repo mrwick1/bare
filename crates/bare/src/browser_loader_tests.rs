@@ -10,6 +10,7 @@ use crate::resources::test_server::{Reply, Server, serve};
 use bare_html::tree;
 use bare_js::eval::EvalLimits;
 use bare_js::heap::HeapLimits;
+use bare_js::value::Value;
 use bare_net::http::Client;
 use std::time::Duration;
 
@@ -593,6 +594,73 @@ fn top_level_await_waits_for_a_timer_and_the_page_still_settles() {
         let (log, r, _) = page(&html, vec![], quick());
         assert_eq!(log, "second:interactive|after-await:complete");
         assert_eq!(r.stop, Stop::Settled, "{r:?}");
+    });
+}
+
+/// A page that collects between all tasks (`Interp::set_gc_stress`) still gets the report of a module whose top-level `await` rejects in a later
+/// task: the host holds the evaluation promise in `Modules::evals` and reads it after the collections.
+#[test]
+fn settle_evals_after_collections_reports_a_rejected_evaluation() {
+    big(|| {
+        let html = format!(
+            "{PRE}<script>addEventListener('error', function (e) {{ log.push('err:' + e.message) }})</script>
+             <script type=module>await new Promise(function (r) {{ setTimeout(r, 30) }}); throw new RangeError('late')</script>
+             <script type=module>await new Promise(function (r) {{ setTimeout(r, 60) }}); L('ok')</script>"
+        );
+        let srv = server(vec![]);
+        let mut b = make(&html, &srv, 5_000_000, true);
+        b.it.set_gc_stress(true);
+        let r = load(&mut b, &srv, quick());
+        let log = eval(&mut b, "log.join('|')");
+        assert_eq!(log, "err:Uncaught RangeError: late|ok:complete");
+        assert_eq!((&r.stop, r.script_throws), (&Stop::Settled, 1), "{r:?}");
+        assert!(b.it.heap.stats().collections >= 3, "stress mode collected {} times", b.it.heap.stats().collections);
+    });
+}
+
+/// `import()` answers every kind of result while a collect runs between all tasks: a namespace, a fetch failure (`TypeError`) and a syntax
+/// error (`SyntaxError`, held in `Load::Throw` until it rejects the promise).
+#[test]
+fn dynamic_imports_settle_when_collections_run_between_tasks() {
+    big(|| {
+        let html = format!(
+            "{PRE}<script>
+               import('/m/a.js').then(function (ns) {{ log.push('a:' + ns.v) }});
+               import('/m/missing.js').catch(function (e) {{ log.push('missing:' + e.name) }});
+               import('/m/bad.js').catch(function (e) {{ log.push('bad:' + e.name) }});
+               setTimeout(function () {{ import('/m/a.js').then(function (ns) {{ log.push('late:' + ns.v) }}) }}, 20);
+             </script>"
+        );
+        let srv = server(vec![js("/m/a.js", "export const v = 'va'"), js("/m/bad.js", "let a; let a;")]);
+        let mut b = make(&html, &srv, 5_000_000, true);
+        b.it.set_gc_stress(true);
+        let r = load(&mut b, &srv, quick());
+        let log = eval(&mut b, "log.slice().sort().join('|')");
+        assert_eq!(log, "a:va|bad:SyntaxError|late:va|missing:TypeError");
+        assert_eq!(r.stop, Stop::Settled, "{r:?}");
+        assert!(b.it.heap.stats().collections >= 3, "stress mode collected {} times", b.it.heap.stats().collections);
+    });
+}
+
+/// A collect between the take and the finish of an `import()`: the promise is in no script variable, so only the handle that the take made
+/// keeps it. The loader holds the request across its downloads and parses.
+#[test]
+fn a_collection_between_the_take_and_the_finish_of_an_import_keeps_the_promise() {
+    big(|| {
+        let mut b = Browser::new(tree::parse("<p>"), BrowserLimits::default(), EvalLimits::default(), HeapLimits::default()).expect("browser");
+        eval(&mut b, "var log = []; import('/x.js').then(function (ns) { log.push('v' + ns.v) }); 0");
+        let mut reqs = bare_js_api::Engine::take_dynamic_imports(&mut b.it);
+        assert_eq!(reqs.len(), 1);
+        let req = reqs.pop().unwrap();
+        b.it.set_gc_stress(true);
+        b.collect(&[]).expect("collect");
+        b.collect(&[]).expect("collect");
+        let m = b.it.module_parse("export const v = 7", "/x.js").expect("parse");
+        b.it.module_set_requested(m, &[]);
+        let Value::Object(p) = b.it.persistent_value(&req.promise) else { panic!("an object") };
+        b.it.finish_dynamic_import(p, m).expect("finish");
+        b.drain().expect("drain");
+        assert_eq!(eval(&mut b, "log.join()"), "v7");
     });
 }
 

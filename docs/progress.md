@@ -14102,6 +14102,26 @@ Checks:
 - Windows 11 VM: `frame` 49 and `navigation` 89 passed.
 
 Not tested: the crate tests of `bare-js-api` and `bare-js` on Windows; a collection with 100,000 marked objects and 50 iframes (the `frames` case has no such scale); wall time; structured clone and child pages (steps 5 and 6).
+## 2026-11-19: module interface (plan step S0.4, MD1)
+
+PR MD1 of `docs/design-host-modules.md` (option A, decided 2026-11-19), plan step 2. No browser change. The loader (MD2) is not in this PR.
+
+Changes:
+
+- `bare-js-api`: the `Engine` methods `module_parse`, `module_requests`, `module_set_requested`, `module_url`, `module_link`, `module_evaluate`, `take_dynamic_imports`, `finish_dynamic_import`, `reject_dynamic_import` and `fail_dynamic_import`, with thin `Scope` wrappers. New type `ImportRequest { promise: Persistent, specifier, referrer }`. Module ids stay `u32`. The three `*_dynamic_import` methods that settle take the promise as `&Persistent`; `reject_dynamic_import` takes the reason as a `Local`.
+- Old engine (`eval_api.rs`): each method calls the `module_*` or `*_dynamic_import` method of the same name. `module_evaluate` pushes the promise as a `Local`. `take_dynamic_imports` makes one `Persistent` for each request, so the host holds the root that the engine gave up at the take. The three settle methods read the `ObjId` from the `Persistent`.
+- The old methods have the semantics that the design lists. There is no difference to report.
+- The toy engine of `bare-js-api` answers `Abort::Unsupported` for the methods that run code, and nothing for the others.
+
+Cost matrix (archMachine, base = #720 head `f46b98c5` built fresh into `/data/bare-tmp/s0/base-md1`, new = this branch; 3 runs per row, minimum; `-j4`; 807 rows; jemalloc for rows over the limit under glibc): mean change glibc -0.001%. 0 rows are over +0.5% under both allocators, so the codegen-unit check was not needed. One row is over under glibc only, a known noise row: `resources_load small 1` +0.739% glibc, +0.140% jemalloc. `loader_load modules 1`: 12,325,762 base, 12,324,343 new. `loader_load modules 10`: 29,402,513 base, 29,388,556 new. `parse_load deep 1` and `deep 10` fail to run (stack overflow) on both trees. They fail the same way on the older 37df5bd1 build, so the cause is not this change. Not fixed.
+
+Checks:
+
+- New tests in `eval_api_tests`, all written against the interface: parse, link and evaluate a graph, and a second `module_evaluate` call; a cycle; a top-level `await` (pending, then settled by the drain); a syntax error, a bad import name and an error in a module; an `import()` that is taken, finished, rejected with a parse error, failed with a `TypeError`, and finished with a module that throws; the referrer of an `import()` inside a module; a `Persistent` promise that survives two collections between take and finish (and the table does not grow after the handles drop).
+- Linux: `bare` lib 1649 passed (6 ignored), `bare-js` lib 1075 passed (1 ignored), `bare-js-api` 6 passed and 1 doc test. `bare-js` `api` 37 and `module` 34 also pass with `BARE_GC_STRESS=1` (`api`).
+- Windows 11 VM: `bare-js-api` 6 passed; `bare-js` filter `api` 37 passed and `module` 34 passed.
+
+Not tested: a browser use of the methods (MD2 changes the loader); a collection that runs inside `module_link` or `module_evaluate` (the old engine collects only between tasks); a full `bare` run on the Windows VM; wall time.
 
 ## 2026-11-19: form companions as owners (plan step S0.4, forms)
 
@@ -14202,3 +14222,28 @@ Checks:
 - Windows 11 VM: `stream` 50, `fetch` 95 (`bare`) and `api` 33 (`bare-js`) passed.
 
 Not tested: the crate tests of `bare-js-api` and the full `bare-js` and `bare` suites on Windows; a collection inside a `pull` call (needs the new engine); `jemalloc` and codegen-units=1 runs (no row needed them); wall time. `cargo clippy -D warnings` fails on `crates/os/src/pages.rs:19` (`manual_is_multiple_of`), a file this change does not touch.
+
+## 2026-11-20: module loader on Persistent (plan step S0.4, MD2)
+
+Changes (`docs/design-host-modules.md`, option A, plan step 3), all in `crates/bare/src/browser_loader/modules.rs`. The loader still calls the old `Interp` methods. Three raw references became `Persistent` handles:
+
+- `Modules::evals` holds a `Persistent` of the evaluation promise of each module graph, made in `run_graph`. `settle_evals` reads the promise from the handle at each checkpoint, and the handle drops when the promise is seen settled.
+- `Load::Throw` holds a `Persistent`, made where `module_parse` throws and where a bad specifier makes a `TypeError`. `finish_module` and `reject_dynamic_import` read the value from it.
+- `serve_imports` takes the `import()` queue with the interface method `Engine::take_dynamic_imports`, so each request's promise is a `Persistent`. The loader reads the promise object from the handle where it settles the request (`import_promise`).
+
+No `Host::roots` line is removed: there was none. The design already says so ("Old-engine calls that leave the old hook: None"); `evals` was rooted only by the engine (`ModRec::cap`). A link error from `module_link` and a rejection read in `settle_evals` stay raw values: the loader reports them at once, with no engine call between.
+
+Cost matrix: base = `a9943b94` (the head of #725, this work's start), built fresh into `/data/bare-tmp/s0/base-md2`; new = this change. archMachine, release, 3 runs for each row, minimum (`tools/js/cost_matrix.sh -j4`), 817 rows measured. Mean change: glibc +0.003%. `parse_load deep 1` and `deep 10` did not run (stack overflow on both trees, known). Two rows were over +0.5% under both allocators: `dataset_load keys 10000 50` +0.640% (jemalloc +0.640%) and `dataset_load keys 1000 50` +0.603% (+0.591%). No module code runs in those rows. With both trees built with `RUSTFLAGS="-C codegen-units=1"` (`/data/bare-tmp/s0/base-md2-cgu`, `/data/bare-tmp/s0/new-md2-cgu`, 3 runs): 3,190,230,727 to 3,190,229,953 (-0.000%) and 338,525,868 to 338,526,211 (+0.000%). That is the codegen-unit split, not new work.
+
+| Row (glibc) | Base | New | Change |
+| --- | ---: | ---: | ---: |
+| `loader_load modules 1` | 12,178,324 | 12,184,142 | +0.048% |
+| `loader_load modules 10` | 29,235,745 | 29,293,739 | +0.198% |
+| `loader_load dynamic 1` | 14,626,216 | 14,639,829 | +0.093% |
+| `loader_load dynamic 10` | 66,838,662 | 66,970,496 | +0.197% |
+
+The 8 `loader_load` rows: mean change +0.148% glibc. None is over +0.5%.
+
+Checks: new tests in `browser_loader_tests.rs` (a rejected top-level `await` is reported once after collections run between all tasks; `import()` of a namespace, a missing file and a syntax error settles under stress mode; a collection between `take_dynamic_imports` and `finish_dynamic_import` keeps a promise that no script holds). The stress tests set `Interp::set_gc_stress(true)` themselves, so they collect in both modes. Linux: `cargo test --locked -p bare --lib` with filters `loader` (118), `module` (18) and `import` (25) pass, also with `BARE_GC_STRESS=1`. Crate tests once: `bare` lib 1693 passed (6 ignored), `bare-js` lib 1076 passed (1 ignored), `bare-js-api` 6 passed. Windows 11 VM (cargo xwin debug test exe of `bare`): same three filters, 118, 18 and 25 passed.
+
+Not tested: a collection inside the loader between a take and a finish (the old engine collects only between tasks, so the new tests cannot make one; they check the handles across collections around the loader); a full `bare` run on Windows; wall time; peak memory of the handles; clippy (`cargo clippy -p bare` stops on lints in `bare-os` and `bare-observe` that are not in this change).
