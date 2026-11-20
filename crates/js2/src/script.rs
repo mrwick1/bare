@@ -103,9 +103,11 @@ pub fn load(source: &str) -> Result<Vm, String> {
     if let Err(e) = vm.run_main(pre) {
         panic!("the prelude failed: {e:?}");
     }
+    // Hide `__def`, do not delete it: a delete of a property that is not the last one puts the global object in dictionary mode, and
+    // then no global access can be cached. The property is not enumerable; its value is `undefined`, so a script cannot reach the function.
     let k = vm.realm.intern("__def");
-    let g = vm.realm.global.value();
-    let _ = vm.realm.delete_prop(g, crate::interp_rt::Key::Name(k));
+    let g = vm.realm.global;
+    vm.realm.define(g, crate::interp_rt::Key::Name(k), Value::UNDEFINED).expect("define");
     Ok(vm)
 }
 

@@ -654,3 +654,22 @@ fn switch_in_loops_with_continue_break_labels_and_lexical_cases() {
     assert_eq!(table_ops(src), 1);
     check(&[(src, "result", "1020tdznonenone")]);
 }
+
+/// `load` runs the prelude and then hides `__def`. It must not delete it: a delete of a property that is not the last one puts the global
+/// object in dictionary mode, and then no global access can be cached (`Shapes::cacheable`).
+#[test]
+fn load_keeps_the_global_object_in_the_shape_tree() {
+    let vm = load("var x = 1;").unwrap();
+    let id = vm.realm.global.shape(&vm.realm.shapes);
+    assert!(!vm.realm.shapes.get(id).is_dict(), "the global object is in dictionary mode after load");
+    assert!(vm.realm.shapes.cacheable(id));
+}
+
+/// A script cannot read the function that `__def` was, and the name is not enumerable.
+#[test]
+fn def_is_hidden_after_load() {
+    check(&[
+        ("var r = typeof __def + Object.keys(globalThis).indexOf('__def');", "r", "undefined-1"),
+        ("var __def = 5; var r = __def;", "r", "5"),
+    ]);
+}
