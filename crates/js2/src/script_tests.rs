@@ -1011,6 +1011,30 @@ fn a_first_call_from_a_getter_a_setter_a_constructor_and_a_native_works() {
 }
 
 #[test]
+fn a_user_function_first_called_in_a_nested_run_is_compiled_there() {
+    // The user functions below wait as stubs (#777). Their first call is inside a getter, a setter, `valueOf` or `toString` that a native
+    // runs, so the stub compiles in a nested run. Each case has a stub that keeps its parameter registers (plain parameters) and one that
+    // makes the array of arguments (`arguments`, a default value, a rest parameter). `check` also runs each case under constant collection.
+    check(&[
+        ("function p(a, b) { return a * b; } var o = {get g() { return p(6, 7); }}; var r = Object.assign({}, o).g;", "r", "42"),
+        ("function q() { return arguments.length; } var o = {get g() { return q(1, 2, 3); }}; var r = Object.assign({}, o).g;", "r", "3"),
+        ("var s; function p(a, b) { return a + b; } var o = {set v(x) { s = p(x, 1); }}; Object.assign(o, {v: 41}); var r = s;", "r", "42"),
+        ("var s; function d(a, b = 2) { return a + b; } var o = {set v(x) { s = d(x); }}; Object.assign(o, {v: 40}); var r = s;", "r", "42"),
+        ("function p(a) { return a + 1; } var o = {valueOf: function () { return p(41); }}; var r = o + 0;", "r", "42"),
+        ("function d(a, ...m) { return a + m.length; } var o = {toString: function () { return 'v' + d(40, 1, 2); }}; var r = `${o}` + ('' + o);", "r", "v42v42"),
+        // Two levels: `valueOf` -> a getter -> `valueOf` again. Each level first calls a stub that waits, and the loops above call it after.
+        ("function a1(x) { return x + 1; } function a2() { return arguments[0] * 2; } function a3(x, y) { return x - y; }
+          var inner = {valueOf: function () { return a3(a2(10), a1(4)); }};
+          var mid = {get g() { return a1(inner) + a2(1); }};
+          var outer = {valueOf: function () { return Object.assign({}, mid).g + a3(9, 1); }};
+          var r = (outer + 0) + ',' + a1(1) + ',' + a2(2) + ',' + a3(5, 3) + ',' + (inner + 0);",
+         "r", "26,2,4,2,15"),
+        // A stub that compiles in a nested run and has a function inside it: the child is a new stub there, and an outer run calls it.
+        ("function mk(n) { return function (x) { return x + n; }; } var o = {valueOf: function () { return mk(1)(2); }}; var r = (o + 0) + ',' + mk(10)(5);", "r", "3,15"),
+    ]);
+}
+
+#[test]
 fn a_function_that_is_called_from_rust_is_compiled_at_that_call() {
     let mut vm = load("function add(a, b) { return a + b; } function get() { return 'g'; }").unwrap();
     vm.run_main(0).unwrap();
