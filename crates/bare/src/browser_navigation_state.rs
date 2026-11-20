@@ -113,9 +113,22 @@ pub(crate) fn serialize(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<Cloned> {
     }
 }
 
+/// The limits of `structuredClone` and of a message.
+fn clone_limits() -> CloneLimits {
+    CloneLimits { bytes: 64 << 20, depth: 256, nodes: 1 << 20, names: ["clone-bytes", "clone-depth", "clone-nodes"] }
+}
+
 /// `structuredClone(v, { transfer })` and a message: the copy, the new ports of the transfer list (in list order) and the byte cost.
-/// `list` comes from `Dom::transfer_list`.
+/// `list` comes from `Dom::transfer_list`. With no list the engine copies in one pass and makes no record (`Engine::clone_copy`).
 pub(crate) fn clone_with(d: &Dom, it: &mut Interp<'_>, v: Value, list: &[ObjId]) -> R<(Value, Vec<ObjId>, usize)> {
+    if list.is_empty() {
+        let base = it.stack_len();
+        let root = it.raw_local(&v);
+        let mut host = d;
+        let r = it.clone_copy(root, &clone_limits(), &mut host).map(|(l, cost)| (it.raw(l), Vec::new(), cost)).map_err(|e| it.api_unerr(e));
+        it.stack_truncate(base);
+        return r;
+    }
     let mut c = clone_state_with(d, it, v, list)?;
     let (val, ports) = materialize_with(d, it, &mut c)?;
     Ok((val, ports, c.cost()))
@@ -125,7 +138,7 @@ pub(crate) fn clone_with(d: &Dom, it: &mut Interp<'_>, v: Value, list: &[ObjId])
 /// are detached and the listed ports are parked after the walk succeeded. A listed item that changed during the walk (a getter
 /// detached it) throws `DataCloneError` before any item moves.
 pub(crate) fn clone_state_with(d: &Dom, it: &mut Interp<'_>, v: Value, list: &[ObjId]) -> R<Cloned> {
-    out(d, it, v, CloneLimits { bytes: 64 << 20, depth: 256, nodes: 1 << 20, names: ["clone-bytes", "clone-depth", "clone-nodes"] }, list)
+    out(d, it, v, clone_limits(), list)
 }
 
 /// A new object graph for `c`. No JS runs (the objects are new, so no setter can be hit). A record with no moved item can be read again.

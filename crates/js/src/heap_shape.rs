@@ -1928,7 +1928,7 @@ impl Heap {
     }
 
     /// Entry `i` of the shape of `o`, with its value now. `None` when `o` is not as `sh` says: its shape or its element count changed.
-    #[inline]
+    #[inline(always)]
     pub fn clone_prop(&self, o: ObjId, sh: CloneShape, i: usize) -> Option<(PropertyKey, Value)> {
         let ob = self.objects.get(o.index, o.gn)?;
         if ob.shape != sh.shape || ob.elems.len() != sh.elems {
@@ -1939,7 +1939,7 @@ impl Heap {
     }
 
     /// Element `i` of `o` now. `None` when `o` is not as `sh` says, or the element is a hole.
-    #[inline]
+    #[inline(always)]
     pub fn clone_elem(&self, o: ObjId, sh: CloneShape, i: usize) -> Option<Value> {
         let ob = self.objects.get(o.index, o.gn)?;
         if ob.shape != sh.shape || ob.elems.len() != sh.elems {

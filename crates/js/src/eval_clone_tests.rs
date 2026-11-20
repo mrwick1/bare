@@ -61,6 +61,15 @@ fn clone_out(it: &mut Interp<'static>, v: Value, list: &[Value], l: CloneLimits,
     r
 }
 
+/// `clone_copy` of `v`, as the old error.
+fn clone_copy(it: &mut Interp<'static>, v: Value, l: CloneLimits, h: &mut Host) -> Result<(Value, usize), Error> {
+    let base = it.stack_len();
+    let root = it.raw_local(&v);
+    let r = it.clone_copy(root, &l, h).map(|(x, cost)| (it.raw(x), cost)).map_err(|e| it.api_unerr(e));
+    it.stack_truncate(base);
+    r
+}
+
 fn clone_in(it: &mut Interp<'static>, c: &mut Cloned, h: &mut Host) -> Result<(Value, Vec<Value>), Error> {
     let base = it.stack_len();
     let r = it.clone_in(c, h).map(|ci| (it.raw(ci.value), ci.hosts.iter().map(|&l| it.raw(l)).collect())).map_err(|e| it.api_unerr(e));
@@ -262,7 +271,7 @@ fn random_graph(seed: u64) -> String {
             6 => "true".into(),
             7 => "null".into(),
             8 => "undefined".into(),
-            9 => "3n".into(),
+            9 => ["3n", "0n", "(-2n) ** 70n"][r.below(3)].into(),
             10 => "new Date(5)".into(),
             11 => format!("new Map([[1, o{}]])", r.below(n)),
             12 => format!("[o{}, {}]", r.below(n), r.below(9)),
@@ -344,19 +353,23 @@ globalThis.L = [];
 0";
 
 /// One case in one realm with the fast path off for the bits of `generic`: the answer as text (the copy, the graph after the walk, the
-/// log of the getters, the cost) and the counts of the fast path.
-fn run_graph(it: &mut Interp<'static>, src: &str, generic: u8, l: CloneLimits) -> (String, (u32, u32)) {
+/// log of the getters, the cost) and the counts of the fast path. `fused` makes the copy with `clone_copy`, not with `clone_out` and `clone_in`.
+fn run_graph(it: &mut Interp<'static>, src: &str, generic: u8, l: CloneLimits, fused: bool) -> (String, (u32, u32)) {
     let mut h = Host::default();
     CLONE_GENERIC.with(|c| c.set(generic));
     CLONE_FAST_COUNT.with(|c| c.set((0, 0)));
     let root = script(it, src);
     set(it, "orig", root);
-    let copy = match clone_out(it, root, &[], l, &mut h) {
-        Ok(mut c) => {
-            let cost = c.cost();
-            clone_in(it, &mut c, &mut h).map(|(v, _)| (v, cost))
+    let copy = if fused {
+        clone_copy(it, root, l, &mut h)
+    } else {
+        match clone_out(it, root, &[], l, &mut h) {
+            Ok(mut c) => {
+                let cost = c.cost();
+                clone_in(it, &mut c, &mut h).map(|(v, _)| (v, cost))
+            }
+            Err(e) => Err(e),
         }
-        Err(e) => Err(e),
     };
     let count = CLONE_FAST_COUNT.with(|c| c.get());
     CLONE_GENERIC.with(|c| c.set(0));
@@ -382,9 +395,9 @@ fn clone_fast_path_gives_what_the_generic_path_gives() {
     // `CLONE_FUZZ_SEEDS=20000` runs a longer search.
     let seeds = std::env::var("CLONE_FUZZ_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(1000u64);
     for seed in 0..seeds {
-        // A realm takes a limited number of scripts, so a new set of four every 400 cases.
+        // A realm takes a limited number of scripts, so a new set of six every 400 cases.
         if seed % 400 == 0 {
-            realms = (0..4).map(|_| Interp::realm(Heap::default(), big).unwrap()).collect();
+            realms = (0..6).map(|_| Interp::realm(Heap::default(), big).unwrap()).collect();
             realms.iter_mut().for_each(|it| {
                 script(it, DUMP);
             });
@@ -397,13 +410,15 @@ fn clone_fast_path_gives_what_the_generic_path_gives() {
             2 => CloneLimits { nodes: 3, ..limits() },
             _ => limits(),
         };
-        // Both off, fast write only, fast read only, both on.
-        let modes = [GENERIC_OUT | GENERIC_IN, GENERIC_IN, GENERIC_OUT, 0];
-        let answers: Vec<(String, (u32, u32))> = realms.iter_mut().zip(modes).map(|(it, m)| run_graph(it, &src, m, l)).collect();
+        // Both off, fast write only, fast read only, both on; then the fused copy with both off and with both on.
+        let modes = [GENERIC_OUT | GENERIC_IN, GENERIC_IN, GENERIC_OUT, 0, GENERIC_OUT | GENERIC_IN, 0];
+        let answers: Vec<(String, (u32, u32))> = realms.iter_mut().zip(modes).enumerate().map(|(i, (it, m))| run_graph(it, &src, m, l, i >= 4)).collect();
         for (i, (a, _)) in answers.iter().enumerate().skip(1) {
             assert_eq!(a, &answers[0].0, "seed {seed}, mode {:?}\n{src}", modes[i]);
         }
         assert_eq!(answers[0].1, (0, 0), "the generic walk never starts the fast path");
+        assert_eq!(answers[4].1, (0, 0), "the generic fused walk never starts the fast path");
+        assert_eq!(answers[5].1, answers[3].1, "seed {seed}: the fused walk takes the fast path where the walk does\n{src}");
         fast_objects += answers[1].1.0;
         fell_back += answers[1].1.1;
         thrown += answers[0].0.starts_with("throw") as u32;
@@ -415,4 +430,46 @@ fn clone_fast_path_gives_what_the_generic_path_gives() {
     assert!(fell_back > 40, "objects handed back to the generic path half way: {fell_back}");
     assert!(thrown > 5, "cases where a getter throws: {thrown}");
     assert!(limited > 100, "cases that stop at a limit: {limited}");
+}
+
+// ---------- the fused copy (`docs/design-host-clone.md`, plan step 5) ----------
+
+/// The one case where `clone_copy` differs from `clone_out` and `clone_in`: the heap ends the script. The copy of a big graph needs more
+/// memory than the heap has left. The two-step clone runs every getter, then fails to build the copy. The fused clone fails while it
+/// builds, so a getter after that point has not run. Both fail with the same error, and a heap limit ends the script, so no page sees it.
+#[test]
+fn clone_copy_out_of_heap_stops_before_a_later_getter() {
+    use crate::heap::HeapLimits;
+    let big = EvalLimits { max_steps: u64::MAX / 4, ..Default::default() };
+    let src = "globalThis.L = [];
+        var rows = []; for (var i = 0; i < 300; i++) rows.push({a: i, b: [i, i]});
+        var root = {rows: rows}; Object.defineProperty(root, 'z', {get: function () { L.push('z'); return 1; }, enumerable: true, configurable: true});
+        root";
+    // The heap has room for half of the copy.
+    let (used, grew) = {
+        let mut it = Interp::realm(Heap::default(), big).unwrap();
+        let root = script(&mut it, src);
+        let used = it.heap.used_bytes();
+        clone_copy(&mut it, root, limits(), &mut Host::default()).unwrap();
+        (used, it.heap.used_bytes() - used)
+    };
+    assert!(grew > 20_000, "{grew}");
+    let limit = HeapLimits { max_bytes: used + grew / 2, ..Default::default() };
+    let run = |fused: bool| {
+        let mut it = Interp::realm(Heap::new(limit).unwrap(), big).unwrap();
+        let mut h = Host::default();
+        let root = script(&mut it, src);
+        let r = if fused {
+            clone_copy(&mut it, root, limits(), &mut h).map(|_| ())
+        } else {
+            clone_out(&mut it, root, &[], limits(), &mut h).and_then(|mut c| clone_in(&mut it, &mut c, &mut h)).map(|_| ())
+        };
+        // A number, so that the read needs no memory from a heap that is full.
+        let log = script(&mut it, "L.length");
+        (format!("{r:?}"), it.display(log))
+    };
+    let (two_step, fused) = (run(false), run(true));
+    assert!(two_step.0.contains("Limit") || two_step.0.contains("Heap"), "{two_step:?}");
+    assert_eq!(two_step.0, fused.0, "the same error");
+    assert_eq!((two_step.1.as_str(), fused.1.as_str()), ("1", "0"), "the two-step clone ran the getter, the fused clone stopped before it");
 }
