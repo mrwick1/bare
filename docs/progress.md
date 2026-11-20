@@ -14671,3 +14671,68 @@ Memory side, from the old engine at its census peak (`BARE_JS_STATS=1`, `BARE_JS
 Checks: `bare-js2` tests: 35 pass on Linux (4 new in `cell_tests.rs`: header round trip, shape lookup, a shape that a marked cell uses survives and an unused one is freed) and 35 on the Windows 11 VM (`cargo xwin test`); the three `header_load` rows also ran on the VM. Miri (nightly): 35 pass in 150 s of test time. The pointer form passed the same unit tests at `f6d06f8e`. Clippy shows no new finding in `cell.rs` (the existing findings in `heap.rs` and `bare-os` are not touched).
 
 Not tested: a real shape (S1.8); the marker of S1.5 (the mark row is a stand-in with a work stack); the cost matrix (js2 is not wired into the browser); arm64; a 32-bit target; a "last shape" test in the marker; objects with flag combinations (no count of flag combinations exists yet); wall time (the machine was shared; cycles above are indicative only); Windows instruction counts.
+
+## 2026-11-20: shapes (plan step S1.8)
+
+`bare-js2` has real shapes (`crates/js2/src/shapes.rs`; design 6.4, 6.11 items 12 and 15). They replace the stub `Shape` and `Shapes` of S1.4 in `cell.rs`. The header keeps its 32-bit shape id. Base: the S1.4 branch (#743), which is based on origin/main `1a323b46`.
+
+What it has:
+- Transition tree. A shape is a node: prototype, parent, table, slot count, inline capacity, layout (48 bytes). The first child sits in two fields; the others are in a map. A root is `(layout, prototype, inline capacity)`. The prototype is in the shape. `Shapes::literal` gives the final shape of an object literal (exact capacity, no slack).
+- Shared descriptor tables (design 6.11 item 15). The keys of a chain are one table of 12-byte entries (key address, slot, attributes). A shape uses the first `count` entries. A shape that adds an entry that the table already has at that place reuses the table. So shapes that differ only in prototype or inline capacity share one table. Only a branch that adds another entry copies the prefix. A table of more than 8 entries gets an open-addressing index (4 bytes for each of 2 times the entries) at its first probe.
+- Dictionary mode. `to_dict` gives one object its own shape and a table that changes in place. Its slots keep their numbers, a deleted slot is reused, and the id stays, so no value moves. A cache must not fill for it (`cacheable`). It happens for a delete in the middle of an object of more than 8 properties, for an attribute change (`reconfigure`: freeze, seal, data to accessor), and for more than 128 properties. A small object (8 properties or fewer) stays in the tree when it deletes a key: the shape before the key takes the later keys again, as the old engine does (`remove_prop`). The caller shifts the later slots (`Removed::shifts`).
+- `with_proto` makes one node with the same table and the new prototype, so `setPrototypeOf` does not cost a dictionary.
+- Slack (`Site`): a site gives its first 8 objects `initial` inline slots, then the most that they used (at most 30). A later object that needs more widens it, twice at most. The new capacity is a new root; objects that exist keep their shape.
+- Collector hooks. `note_live(heap, header)` and `finish_marks(heap)` keep the signatures of S1.4. `note_live` now returns the prototype of a shape the first time the shape is seen in a collection (it returned nothing), and the collector must push that cell on its work list. `finish_marks` frees every shape that no marked object uses and that is not a parent of one that is used, frees the tables that only they used, and marks the key atoms of the shapes that stay (not a shared atom). It runs every collection (O(shapes + entries)); no id is renumbered. A freed id can be reused, so `Shapes::epoch` changes when a tree shape was freed: a record that holds an id must drop it then. Order for S1.5: marking, then `finish_marks`, then `Atoms::sweep`, then `Heap::finish_mark`.
+- The shape ids of freed shapes are reused at once, and a shape id that is in no live header is valid only until the next `finish_marks` (a shape that a native function made and has not put in an object yet, when a collection runs).
+- `header_load` (S1.4) now builds its shapes with the real API (a root for each prototype and 2 to 6 keys). Its rows were not run again.
+
+Checks: 52 `bare-js2` tests pass on Linux (18 new in `shapes_tests.rs`; `cell_tests.rs` lost its 2 shape tests and has 1 new) and 52 on the Windows 11 VM (`cargo xwin test`). Miri: see the end of this entry. The tests cover roots, memoized transitions, accessors (2 slots), table sharing across prototypes and capacities, branch copies, the hash index (128 keys), the 129th property, literals, a delete of the last, first and a middle key of a small object (the same shape as an object that never had the key), the dictionary path (slot reuse, 300 keys, packing), attribute changes, prototype change, the header, a collection (freed shapes, id reuse, tables cut, key atoms marked or not marked, prototypes returned once, dictionary shapes freed with their object without an epoch change, a shared atom as key) and slack.
+
+Shape census on a synthetic React-like trace (`crates/js2/examples/shape_census.rs`; the same trace as a script in `tools/js/shape_trace.js`; xorshift32 from one seed, so both make the same objects). 8,000 steps; each step makes a props object (a template of 1 to 8 of 16 names, 40 templates, biased to the first; one in 8 swaps two keys; one in 16 deletes its first key), an element (a literal of 6 keys), every second step a hook (a literal of 5 keys), every fourth step a fiber (a constructor that sets 24 keys; every 20th deletes `f3`, so it goes to dictionary mode). 22,000 objects, all alive. The census is deterministic (no timing), so one run each. archMachine.
+
+New engine (`shape_census`, release):
+
+| | Value |
+|---|---:|
+| Shapes (live, after a collection in which every object is live) | 1,661 (1,561 tree, 100 dictionary); 1,697 before it (36 freed) |
+| Descriptor tables / entries / entry room | 473 / 4,484 / 5,276 |
+| Descriptor-table bytes (tables, entries by capacity, indexes) | 125,080 |
+| Shape-node bytes (node vector by capacity, live bits, table vector) | 135,680 |
+| Transition-map bytes | 15,516 |
+| Shape bytes in all | 276,276 (12.6 per object) |
+
+Object cells, 22,000 objects (bytes by size class, per object): props 79.9 (avg 4.5 slots used, 8.0 inline), element 64.0 (6 of 6), hook 48.0 (5 of 5), fiber 255.9 (24 of 23.9). Layout A (the overflow pointer word exists only in an object that overflows): 84.3 per object, 96.9 with the shape bytes. Layout B (a pointer word in every object): 87.3 and 99.8. Overflow: 4 props objects and 8 fibers (the first objects of their sites, before the slack settles). There is no object module yet (S1.9): a cell is the 8-byte header, the inline slots, the pointer word and the overflow record (an 8-byte header and the extra slots), counted by size class; no object was built.
+
+Old engine (`bare-js`, #740 census: `BARE_JS_STATS=1 BARE_JS_EXEC=auto eval_check -e 'var SCALE = N; <shape_trace.js>'`, release; the numbers are the line at the peak with SCALE 1 minus the line with SCALE 0, which removes the realm; 1 run each, deterministic). `eval_check` needs `EVAL_CHECK_STEPS=4000000000`. The shape count comes from the scratch patch `/data/bare-tmp/s14/census-counts.patch` of S1.4 (not in the repository):
+
+| Bucket | auto | tree |
+|---|---:|---:|
+| objects | 2,158,592 | 2,158,592 |
+| slots | 4,122,048 | 4,057,664 |
+| dict (100 dictionaries of 24 properties; 1,689 bytes each) | 168,922 | 170,000 |
+| shapes | 184,581 | 184,043 |
+| Per object: objects + slots + dict (22,000 objects) | 293.2 | 291.2 |
+| Per object with shapes | 301.6 | 299.6 |
+| Shapes (count) | 1,466 | 1,455 |
+| Live objects (count) | 22,001 | 22,001 |
+
+Reading:
+- Per object the new cell is 3.1 times smaller than the old engine's (96.9 against 301.6 bytes with the shape bytes; 84.3 against 293.2 without them). Most of this is not the shapes: the old object is a 104-byte record with 16-byte values, and the new one is an 8-byte header with 8-byte values (S1.2, S1.4).
+- Shapes cost more in the new engine: 276,276 bytes for 1,661 shapes (166 each) against 184,581 for 1,466 (126 each), +50% in bytes and +13% in count. Slack roots explain the count, not the bytes: the first 8 objects of a site get a root with the initial capacity and the later ones a root with the settled capacity (8 props objects, 8 fibers: a second 24-key chain). The same trace with fixed capacities (props 8, fibers 24; a scratch change of the example, not kept) gives 1,522 shapes and 270,805 bytes (178 each), so the slack roots add 139 shapes and 5,471 bytes. The bytes come from the size of the records: the node is 48 bytes, the table struct is 72, the entry vectors have 18% spare room (5,276 entries of room for 4,484), and a 24-entry dictionary has a node, a table, 24 entries and a 256-byte index (about 670 bytes by arithmetic: 48, 72, 288, 256; not measured on its own) against 1,689 bytes for the old dictionary. Hypothesis, not built: the dictionary fields (`free`, `tombs`, `dict`) of the table in an optional box would cut the table struct to 48 bytes (11 KB here), and `shrink_to_fit` on the entry vectors at the collection would cut the spare room (10 KB).
+- Slack: the props site settles at 8 inline slots (the most that one of its first 8 objects used), but the objects use 4.5 on average. So 3.5 slots (28 bytes) of 80 bytes per props object are empty. The rule `max` is V8's. A site that makes objects of many shapes wastes the difference. Not changed; a rule with a percentile of the first 8 would give fewer inline slots and more overflow records (an overflow record is at least 32 bytes with its pointer word), so it needs a measurement on a real page.
+- The old engine keeps the 1 in 16 props objects that delete their first key in shape mode (8 properties or fewer), and so does the new one. Only the 100 fibers go to dictionary mode in both.
+
+Micro rows (`crates/js2/examples/shape_load.rs`; user instructions from `perf stat`, release, 3 runs each, the run with N = 0 and the loop without a lookup subtracted; spread under 0.01% except `find` with 24 keys, 2%):
+
+| Row | Instructions |
+|---|---:|
+| `add` (transition exists), 4 keys | 27.7 per add |
+| `add`, 24 keys | 24.6 per add |
+| `find`, 1 key (scan) | 50 per lookup |
+| `find`, 4 keys (scan) | 58 per lookup |
+| `find`, 24 keys (index probe) | 110 per lookup |
+| `literal`, 6 keys (root lookup, then 6 transitions) | 232 per call |
+
+`find` is the cost of a cache miss and of native reads; a cache hit does not call it. `Table::pos`, `Shapes::table` and `Shapes::table_mut` were not inlined at first (73 instructions for a 1-key lookup); `#[inline]` on them gave 50.
+
+Not tested: objects (S1.9), a cache (S2), the collector of S1.5 (the hooks run in the tests with a stand-in marker), a shape sweep with a real second realm, arm64, a 32-bit target, a trace from a real page (the trace is synthetic: the old engine's `browser_load` has 557 shapes and little else), a collection inside a task with a shape that only a native function holds, the cost matrix (js2 is not wired into the browser), `header_load` rows after the change, Windows instruction counts, and the Windows run of the examples. `cargo clippy` shows no finding in `shapes.rs`; two `manual_is_multiple_of` findings in the `shape_census` example were left (the repository uses `%` elsewhere).
