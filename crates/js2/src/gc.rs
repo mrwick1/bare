@@ -57,7 +57,7 @@
 //! (S1.6), which collects when the allocation slow path refuses. It never allocates in the heap.
 use crate::atoms::Atoms;
 use crate::cell::{CellHeader, Layout, Shapes};
-use crate::heap::Heap;
+use crate::heap::{F_OLD, F_REM, Heap};
 use crate::object;
 use crate::shapes::ShapeId;
 use crate::string::{FLAG_SHARED, Str};
@@ -93,6 +93,8 @@ pub struct Stats {
     pub cleared: u64,
     /// Entries that the runtime atom table dropped.
     pub atoms_dropped: usize,
+    /// Cells that the write barrier had remembered (a minor collection only).
+    pub remembered: usize,
 }
 
 /// The roots of a collection. The owner of the roots (a realm and the host) implements it.
@@ -225,6 +227,8 @@ pub struct Marker<'a> {
     /// The ranges of long records that wait for their next slice: the first value, the next index and the end.
     big: Vec<(*mut Value, usize, usize)>,
     big_peak: usize,
+    /// A minor collection (experiment S1.10): it traces the young cells and the remembered cells only.
+    minor: bool,
     marked: u64,
     waited: u64,
     released: u64,
@@ -271,6 +275,9 @@ impl Marker<'_> {
         if unsafe { self.heap.mark(p) } {
             self.marked += 1;
             if !leaf {
+                // The cell survives this collection, so it is old: the write barrier tests this flag.
+                // SAFETY: as above.
+                unsafe { p.cast::<CellHeader>().write(h.with_flags(h.flags() & !F_REM | F_OLD)) };
                 self.work.push(p);
             }
         }
@@ -315,8 +322,10 @@ impl Marker<'_> {
     /// record, so those two are ordinary edges. The first object of a shape in a collection also marks the prototype of the shape: a
     /// prototype that only a shape names must live.
     fn object(&mut self, p: NonNull<u8>, h: CellHeader) {
-        let s = self.shapes.note_live(self.heap, h);
-        if let Some(proto) = s {
+        // A minor collection marks the prototypes of all shapes instead (`collect_minor`).
+        if !self.minor
+            && let Some(proto) = self.shapes.note_live(self.heap, h)
+        {
             self.cell(proto);
         }
         let n = object::words(h.layout(), self.shapes.of(h).inline());
@@ -393,7 +402,8 @@ fn table(p: NonNull<u8>) -> (usize, *mut Value) {
 /// The caller keeps the invariant of the roots: each pointer in a root or a cell is a live cell of `heap` or a shared atom.
 pub fn collect(heap: &mut Heap, shapes: &mut Shapes, atoms: &mut Atoms, roots: &mut impl Roots) -> Stats {
     heap.start_mark();
-    let mut m = Marker { heap, shapes, work: Work::default(), waiting: Waiting::default(), tables: Vec::new(), big: Vec::new(), big_peak: 0, marked: 0, waited: 0, released: 0, weak_peak: 0 };
+    shapes.clear_live();
+    let mut m = Marker { heap, shapes, work: Work::default(), waiting: Waiting::default(), tables: Vec::new(), big: Vec::new(), big_peak: 0, minor: false, marked: 0, waited: 0, released: 0, weak_peak: 0 };
     roots.walk(&mut m);
     m.drain();
     m.shapes.finish_marks(m.heap);
@@ -417,7 +427,46 @@ pub fn collect(heap: &mut Heap, shapes: &mut Shapes, atoms: &mut Atoms, roots: &
     roots.weak(&Live(m.heap));
     let Marker { heap, work, big_peak, marked, waited, released, weak_peak, .. } = m;
     heap.finish_mark();
-    Stats { marked, live_bytes: heap.marked_bytes(), work_bytes: work.peak * CHUNK * std::mem::size_of::<NonNull<u8>>() + big_peak * std::mem::size_of::<(*mut Value, usize, usize)>(), weak_bytes: weak_peak, waited, released, cleared, atoms_dropped }
+    Stats { marked, live_bytes: heap.marked_bytes(), work_bytes: work.peak * CHUNK * std::mem::size_of::<NonNull<u8>>() + big_peak * std::mem::size_of::<(*mut Value, usize, usize)>(), weak_bytes: weak_peak, waited, released, cleared, atoms_dropped, remembered: 0 }
+}
+
+/// A minor collection (experiment S1.10, sticky marks). The marks of the last collection stay, so a marked cell is old and is not traced.
+/// The roots are the roots of a full collection, the cells that the write barrier remembered, and the prototype of every shape. Cells
+/// that nothing marked (the young garbage) are free afterwards. Shapes, runtime atoms and old cells are not freed: a full collection
+/// does that. A new atom is marked when it is made (`atoms.rs`), so no table of atoms or shape keys needs a walk here.
+pub fn collect_minor(heap: &mut Heap, shapes: &mut Shapes, roots: &mut impl Roots) -> Stats {
+    let mut m = Marker { heap, shapes, work: Work::default(), waiting: Waiting::default(), tables: Vec::new(), big: Vec::new(), big_peak: 0, minor: true, marked: 0, waited: 0, released: 0, weak_peak: 0 };
+    roots.walk(&mut m);
+    for i in 0..m.shapes.node_count() {
+        if let Some(p) = m.shapes.proto_of_node(i) {
+            m.cell(p);
+        }
+    }
+    let rem = m.heap.take_remembered();
+    for &p in &rem {
+        m.trace(p);
+    }
+    m.drain();
+    let mut cleared = 0;
+    for &t in &m.tables {
+        let (len, entries) = table(t);
+        for i in 0..len {
+            // SAFETY: as in `collect`.
+            unsafe {
+                if let Some((_, key)) = entries.add(2 * i).read().as_pointer()
+                    && !m.heap.is_marked(key)
+                {
+                    entries.add(2 * i).write(Value::UNDEFINED);
+                    entries.add(2 * i + 1).write(Value::UNDEFINED);
+                    cleared += 1;
+                }
+            }
+        }
+    }
+    roots.weak(&Live(m.heap));
+    let Marker { heap, work, big_peak, marked, waited, released, weak_peak, .. } = m;
+    heap.finish_mark();
+    Stats { marked, live_bytes: heap.marked_bytes(), work_bytes: work.peak * CHUNK * std::mem::size_of::<NonNull<u8>>() + big_peak * std::mem::size_of::<(*mut Value, usize, usize)>(), weak_bytes: weak_peak, waited, released, cleared, atoms_dropped: 0, remembered: rem.len() }
 }
 
 #[cfg(test)]

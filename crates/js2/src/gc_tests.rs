@@ -696,3 +696,220 @@ fn live_bytes_return_to_the_start_after_each_round_of_a_growing_graph() {
         assert_eq!(r.collect(&[]).live_bytes, base.live_bytes);
     }
 }
+
+// ---- experiment S1.10: sticky marks, minor collections and the write barrier ----
+
+impl Realm {
+    fn minor(&mut self, roots: &[Value]) -> Stats {
+        let pins = self.pins.clone();
+        collect_minor(&mut self.heap, &mut self.shapes, &mut |m: &mut Marker| {
+            m.values(&pins);
+            m.values(roots);
+        })
+    }
+
+    /// Make many small objects that hold ints: they are handed the cells that a collection freed, if any.
+    fn scribble(&mut self, n: usize) -> Vec<NonNull<u8>> {
+        (0..n)
+            .map(|i| {
+                let p = self.obj(4);
+                (0..4).for_each(|k| set(p, k, Value::int(-(i as i32) - 1)));
+                p
+            })
+            .collect()
+    }
+}
+
+#[test]
+fn a_minor_collection_keeps_what_an_old_object_names_after_a_store() {
+    let mut r = Realm::new();
+    let (old, dead_old) = (r.obj(2), r.obj(2));
+    r.collect(&[ov(old), ov(dead_old)]);
+    // `old` and `dead_old` are old now. Store a young object into `old` and drop `dead_old` from the roots.
+    let (young, garbage) = (r.obj(2), r.obj(2));
+    set(young, 0, Value::int(7));
+    r.set(old, 0, ov(young));
+    set(garbage, 0, Value::int(9));
+    let s = r.minor(&[ov(old)]);
+    // Only the young object that the old one names is marked.
+    assert_eq!(s.marked, 1);
+    let fresh = r.scribble(2000);
+    assert!(fresh.contains(&garbage), "the young garbage is handed out again");
+    assert!(!fresh.contains(&young) && !fresh.contains(&old), "the young survivor and the old object stay");
+    assert!(!fresh.contains(&dead_old), "a minor collection does not free an old cell");
+    assert_eq!(get(young, 0), Value::int(7));
+    assert_eq!(get(old, 0), ov(young));
+    // The survivor is old now: a store of another young object is remembered again.
+    let young2 = r.obj(2);
+    r.set(young, 1, ov(young2));
+    r.minor(&[ov(old)]);
+    let fresh = r.scribble(2000);
+    assert!(!fresh.contains(&young2));
+    assert_eq!(get(young, 1), ov(young2));
+    // A full collection frees the old garbage that no root names.
+    r.collect(&[ov(old)]);
+    let fresh = r.scribble(4000);
+    assert!(fresh.contains(&dead_old));
+    assert!(!fresh.contains(&young2) && !fresh.contains(&young));
+}
+
+#[test]
+fn the_barrier_covers_records_elements_ropes_and_shape_changes() {
+    let mut r = Realm::new();
+    let k = r.keys(12);
+    let proto_root = r.shapes.root(Layout::Object, None, 2);
+    let arr_shape = r.shapes.root(Layout::Indexed, None, 0);
+    let plain = r.obj(0);
+    let arr = Obj::array(&mut r.heap, &r.shapes, arr_shape, &[Value::int(1), Value::int(2)]).unwrap().cell();
+    let wide = Obj::new(&mut r.heap, &r.shapes, proto_root).unwrap();
+    let a = Str::from_str(&mut r.heap, &"a".repeat(40)).unwrap();
+    let b = Str::from_str(&mut r.heap, &"b".repeat(40)).unwrap();
+    let rope = Str::concat(&mut r.heap, a, b).unwrap();
+    let roots = [ov(plain), ov(arr), wide.value(), rope.value()];
+    r.collect(&roots);
+    // Everything is old. Now each kind of store gets a young cell.
+    // 1. An element store into the elements record.
+    let ye = r.obj(1);
+    set(ye, 0, Value::int(11));
+    Obj::from_cell(arr).set_element(&mut r.heap, 1, ov(ye)).unwrap();
+    // 2. A property add that grows the object into an overflow record, and a store into that record afterwards.
+    let (yo, yr) = (r.obj(1), r.obj(1));
+    set(yo, 0, Value::int(12));
+    set(yr, 0, Value::int(13));
+    for (i, &key) in k.iter().enumerate().take(5) {
+        wide.add(&mut r.heap, &mut r.shapes, key, WRITE, &[if i == 0 { ov(yo) } else { Value::int(i as i32) }]).unwrap();
+    }
+    assert!(wide.overflow_cap(&r.shapes) > 0);
+    let slot = wide.slot(&r.shapes, 4);
+    assert_eq!(slot, Value::int(4));
+    wide.set_slot(&r.shapes, 4, ov(yr));
+    // 3. A rope that flattens: the old rope now names a young flat string.
+    let flat = rope.flatten(&mut r.heap).unwrap();
+    // 4. A prototype change on an old object: a young prototype that only the shape names.
+    let proto = r.obj(1);
+    set(proto, 0, Value::int(14));
+    plain_set_proto(&mut r, plain, proto);
+    let s = r.minor(&roots);
+    // ye, yo, yr, the overflow record, the prototype and the flat string.
+    assert_eq!(s.marked, 6);
+    let fresh = r.scribble(4000);
+    for live in [ye, yo, yr, proto, flat.cell()] {
+        assert!(!fresh.contains(&live));
+    }
+    assert_eq!(get(ye, 0), Value::int(11));
+    assert_eq!(get(yo, 0), Value::int(12));
+    assert_eq!(get(yr, 0), Value::int(13));
+    assert_eq!(get(proto, 0), Value::int(14));
+    assert_eq!(Obj::from_cell(plain).proto(&r.shapes), Some(proto));
+    assert_eq!(flat.len(), 80);
+    // A full collection afterwards agrees: the same cells are alive.
+    r.collect(&roots);
+    let fresh = r.scribble(4000);
+    for live in [ye, yo, yr, proto, flat.cell()] {
+        assert!(!fresh.contains(&live));
+    }
+    assert_eq!(get(yr, 0), Value::int(13));
+}
+
+fn plain_set_proto(r: &mut Realm, o: NonNull<u8>, proto: NonNull<u8>) {
+    Obj::from_cell(o).set_proto(&mut r.shapes, Some(proto));
+}
+
+/// A random graph of objects with 4 slots (slot 3 holds the id). Random stores, new objects, dropped roots, minor and full
+/// collections. After each collection a model of the reachable set must still read back: freed cells are overwritten by new ones first.
+fn gen_stress(seed: u64, steps: usize) {
+    let mut r = Realm::new();
+    let mut rng = Rng(seed | 1);
+    // nodes[i] = (cell, edges: slot 0..3 -> node index or None); id = i.
+    let mut nodes: Vec<(NonNull<u8>, [Option<usize>; 3])> = Vec::new();
+    let mut roots: Vec<usize> = Vec::new();
+    let new_node = |r: &mut Realm, nodes: &mut Vec<(NonNull<u8>, [Option<usize>; 3])>| {
+        let p = r.obj(4);
+        set(p, 3, Value::int(nodes.len() as i32));
+        nodes.push((p, [None; 3]));
+        nodes.len() - 1
+    };
+    let reach = |nodes: &Vec<(NonNull<u8>, [Option<usize>; 3])>, roots: &[usize]| {
+        let mut seen = vec![false; nodes.len()];
+        let mut stack: Vec<usize> = roots.to_vec();
+        while let Some(i) = stack.pop() {
+            if !std::mem::replace(&mut seen[i], true) {
+                stack.extend(nodes[i].1.iter().flatten());
+            }
+        }
+        seen
+    };
+    for step in 0..steps {
+        for _ in 0..1 + rng.below(40) {
+            match rng.below(10) {
+                0..=3 => {
+                    // A new object, stored into a random live node (or made a root).
+                    let n = new_node(&mut r, &mut nodes);
+                    let live = reach(&nodes, &roots);
+                    let hosts: Vec<usize> = (0..n).filter(|&i| live[i]).collect();
+                    if hosts.is_empty() || rng.below(8) == 0 {
+                        roots.push(n);
+                    } else {
+                        let h = hosts[rng.below(hosts.len())];
+                        let s = rng.below(3);
+                        nodes[h].1[s] = Some(n);
+                        r.set(nodes[h].0, s, ov(nodes[n].0));
+                    }
+                }
+                4..=6 => {
+                    // Overwrite a slot of a random live node with another live node or nothing.
+                    let live = reach(&nodes, &roots);
+                    let l: Vec<usize> = (0..nodes.len()).filter(|&i| live[i]).collect();
+                    if l.is_empty() {
+                        continue;
+                    }
+                    let (h, s) = (l[rng.below(l.len())], rng.below(3));
+                    if rng.below(3) == 0 {
+                        nodes[h].1[s] = None;
+                        r.set(nodes[h].0, s, Value::UNDEFINED);
+                    } else {
+                        let t = l[rng.below(l.len())];
+                        nodes[h].1[s] = Some(t);
+                        r.set(nodes[h].0, s, ov(nodes[t].0));
+                    }
+                }
+                7 if !roots.is_empty() => {
+                    roots.swap_remove(rng.below(roots.len()));
+                }
+                _ => {
+                    new_node(&mut r, &mut nodes);
+                }
+            }
+        }
+        let rv: Vec<Value> = roots.iter().map(|&i| ov(nodes[i].0)).collect();
+        if rng.below(6) == 0 { r.collect(&rv) } else { r.minor(&rv) };
+        // Dead nodes' cells may be freed: forget them in the model by never reading them; overwrite the freed memory.
+        let live = reach(&nodes, &roots);
+        let junk = r.scribble(300);
+        for (i, &(p, e)) in nodes.iter().enumerate() {
+            if !live[i] {
+                continue;
+            }
+            assert!(!junk.contains(&p), "step {step}: live node {i} was handed out again");
+            assert_eq!(get(p, 3), Value::int(i as i32), "step {step}: node {i}");
+            for (s, t) in e.iter().enumerate() {
+                let want = t.map_or(Value::UNDEFINED, |t| ov(nodes[t].0));
+                assert_eq!(get(p, s), want, "step {step}: node {i} slot {s}");
+            }
+        }
+        // A dead node is not read again: forget its edges, so a later store never names it.
+        for i in 0..nodes.len() {
+            if !live[i] {
+                nodes[i].1 = [None; 3];
+            }
+        }
+    }
+}
+
+#[test]
+fn random_minor_and_full_collections_keep_every_reachable_node() {
+    let (seeds, steps) = if MIRI { (1, 30) } else { (8, 400) };
+    for seed in 0..seeds {
+        gen_stress(0x9E37_79B9 + seed * 7919, steps);
+    }
+}

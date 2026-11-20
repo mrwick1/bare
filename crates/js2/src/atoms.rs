@@ -223,6 +223,9 @@ impl Atoms {
         let s = Str::new(heap, c)?;
         s.set_hash(hash);
         s.add_flags(FLAG_ATOM);
+        // A new atom is born marked (old): only a full collection frees it (experiment S1.10).
+        // SAFETY: `s` is a cell that `heap` just made.
+        unsafe { heap.mark(s.cell()) };
         self.runtime.table.insert(s, hash);
         Ok(s)
     }
@@ -243,6 +246,8 @@ impl Atoms {
             return Ok(a);
         }
         s.add_flags(FLAG_ATOM);
+        // SAFETY: `s` is a flat cell of `heap`.
+        unsafe { heap.mark(s.cell()) };
         self.runtime.table.insert(s, hash);
         Ok(s)
     }

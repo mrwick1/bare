@@ -22,6 +22,8 @@
 //! given back and the allocation fails.
 //!
 //! The cells hold no meaning here: the content of a new cell is not specified, and the caller writes it.
+use crate::cell::CellHeader;
+use crate::value::Value;
 use bare_os::pages;
 use std::ptr::{self, NonNull};
 
@@ -50,6 +52,8 @@ struct Header {
     /// The length of the mapping: [`BLOCK`] for a block of cells.
     len: usize,
     marks: [u64; MARK_WORDS],
+    /// Experiment S1.10: one bit for each cell that the write barrier remembered (an old cell that got a pointer store).
+    dirty: [u64; MARK_WORDS],
 }
 
 /// The offset of the first cell in a block.
@@ -210,10 +214,10 @@ impl Heap {
         self.free[c] = head;
     }
 
-    /// Sweep block `b` of class `c`: unmarked cells become free, and the marks are cleared. A block with no mark leaves the class.
+    /// Sweep block `b` of class `c`: unmarked cells become free. The marks stay (sticky marks). A block with no mark leaves the class.
     fn sweep(&mut self, b: Block, c: usize) {
-        // SAFETY: `b` is a block of this heap, and no other reference to its header is alive.
-        let marks = unsafe { std::mem::replace(&mut (*b.as_ptr()).marks, [0; MARK_WORDS]) };
+        // SAFETY: `b` is a block of this heap, and no other reference to its header is alive. The marks stay: a marked cell is old.
+        let marks = unsafe { (*b.as_ptr()).marks };
         if marks.iter().all(|&w| w == 0) {
             self.release(b);
             return;
@@ -243,7 +247,7 @@ impl Heap {
             None => self.map(BLOCK)?.cast(),
         };
         let cell = CLASSES[c];
-        let h = Header { cell, cells: ((BLOCK - FIRST) / cell as usize) as u32, class: c as u16, len: BLOCK, marks: [0; MARK_WORDS] };
+        let h = Header { cell, cells: ((BLOCK - FIRST) / cell as usize) as u32, class: c as u16, len: BLOCK, marks: [0; MARK_WORDS], dirty: [0; MARK_WORDS] };
         // SAFETY: the block is ours and starts with room for a header.
         unsafe { b.as_ptr().write(h) };
         Some(b)
@@ -274,18 +278,59 @@ impl Heap {
         let b: Block = self.map(len)?.cast();
         self.grown += len;
         // SAFETY: a new mapping with room for the header.
-        unsafe { b.as_ptr().write(Header { cell: 0, cells: 1, class: LARGE, len, marks: [0; MARK_WORDS] }) };
+        unsafe { b.as_ptr().write(Header { cell: 0, cells: 1, class: LARGE, len, marks: [0; MARK_WORDS], dirty: [0; MARK_WORDS] }) };
         self.large.push(b);
         Some(NonNull::new(b.as_ptr().cast::<u8>().wrapping_add(FIRST)).expect("not null"))
     }
 
-    /// Begin a collection: finish the sweep of the last cycle, so every mark bit is clear.
+    /// Begin a full collection: finish the sweep of the last cycle, then clear every mark bit and every remembered cell.
     pub fn start_mark(&mut self) {
         for c in 0..NCLASS {
             while let Some(b) = self.unswept[c].pop() {
                 self.sweep(b, c);
             }
+            for b in &self.swept[c] {
+                // SAFETY: `b` is a block of this heap.
+                unsafe {
+                    (*b.as_ptr()).marks = [0; MARK_WORDS];
+                    (*b.as_ptr()).dirty = [0; MARK_WORDS];
+                }
+            }
         }
+        for b in &self.large {
+            // SAFETY: `b` is a large object of this heap.
+            unsafe {
+                (*b.as_ptr()).marks[0] = 0;
+                (*b.as_ptr()).dirty[0] = 0;
+            }
+        }
+    }
+
+    /// The remembered cells (old cells that the write barrier saw a pointer store into), and forget them. A minor collection traces them
+    /// as roots. Their `F_REM` flag is cleared here.
+    pub fn take_remembered(&mut self) -> Vec<NonNull<u8>> {
+        let mut out = Vec::new();
+        let blocks = self.swept.iter().chain(self.unswept.iter()).flatten().chain(self.large.iter());
+        for b in blocks {
+            // SAFETY: `b` is a block of this heap.
+            let h = unsafe { &mut *b.as_ptr() };
+            for w in 0..MARK_WORDS {
+                let mut bits = std::mem::take(&mut h.dirty[w]);
+                while bits != 0 {
+                    let i = w * 64 + bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    let p = b.as_ptr().cast::<u8>().wrapping_add(FIRST + i * h.cell as usize);
+                    // SAFETY: bit `i` is set for a cell that `remember` named; old cells are not freed by a minor collection.
+                    unsafe {
+                        let hp = p.cast::<CellHeader>();
+                        let hd = hp.read();
+                        hp.write(hd.with_flags(hd.flags() & !F_REM));
+                    }
+                    out.push(NonNull::new(p).expect("not null"));
+                }
+            }
+        }
+        out
     }
 
     /// Mark the cell at `p`. True when it was not marked yet.
@@ -337,11 +382,8 @@ impl Heap {
             }
         }
         let (live, dead): (Vec<Block>, Vec<Block>) = std::mem::take(&mut self.large).into_iter().partition(|&b| {
-            // SAFETY: `b` is a large object of this heap.
-            let m = unsafe { &mut (*b.as_ptr()).marks[0] };
-            let live = *m & 1 != 0;
-            *m = 0;
-            live
+            // SAFETY: `b` is a large object of this heap. Its mark stays (sticky marks).
+            unsafe { (*b.as_ptr()).marks[0] & 1 != 0 }
         });
         // SAFETY: each block of `live` is a large object of this heap.
         self.marked = marked + live.iter().map(|b| unsafe { (*b.as_ptr()).len }).sum::<usize>();
@@ -394,6 +436,43 @@ impl Heap {
     /// Bytes mapped from the OS: blocks in use, pooled blocks and large objects.
     pub fn mapped_bytes(&self) -> usize {
         self.mapped
+    }
+}
+
+/// Header flag (experiment S1.10): the cell was marked by a collection, so it is old. The marker sets it.
+pub(crate) const F_OLD: u32 = 1 << 22;
+/// Header flag: the write barrier remembered this old cell since the last collection.
+pub(crate) const F_REM: u32 = 1 << 23;
+
+/// The write barrier: `holder` (a cell with header `h`) gets the value `v`. An old cell that gets a pointer is remembered once.
+#[inline(always)]
+pub(crate) fn barrier(holder: NonNull<u8>, h: CellHeader, v: Value) {
+    if h.flags() & (F_OLD | F_REM) == F_OLD && v.is_pointer() {
+        remember(holder);
+    }
+}
+
+/// Like [`barrier`] for a store that is not a `Value` (a new shape id: the shape holds a prototype cell).
+#[inline(always)]
+pub(crate) fn barrier_any(holder: NonNull<u8>, h: CellHeader) {
+    if h.flags() & (F_OLD | F_REM) == F_OLD {
+        remember(holder);
+    }
+}
+
+/// Remember an old cell: set its `F_REM` flag and the bit in the dirty map of its block.
+#[cold]
+#[inline(never)]
+fn remember(p: NonNull<u8>) {
+    let b = p.as_ptr().map_addr(|a| a & !(BLOCK - 1)).cast::<Header>();
+    // SAFETY: `p` is a live cell of a heap: its first block starts with a `Header`, and its first 8 bytes are its header.
+    unsafe {
+        let hp = p.cast::<CellHeader>();
+        let hd = hp.read();
+        hp.write(hd.with_flags(hd.flags() | F_REM));
+        let cell = (*b).cell as usize;
+        let i = if cell == 0 { 0 } else { (p.as_ptr() as usize - b as usize - FIRST) / cell };
+        (*b).dirty[i / 64] |= 1 << (i % 64);
     }
 }
 

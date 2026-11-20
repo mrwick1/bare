@@ -706,6 +706,21 @@ impl Shapes {
         Some((d, old, new))
     }
 
+    /// Forget the shapes that the last collection saw live (a full collection starts with none).
+    pub fn clear_live(&mut self) {
+        self.live.iter_mut().for_each(|w| *w = 0);
+    }
+
+    /// The number of shape nodes, free ones included (experiment S1.10: a minor collection marks every prototype).
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// The prototype cell of node `i`; a free node has none.
+    pub fn proto_of_node(&self, i: usize) -> Option<NonNull<u8>> {
+        self.nodes[i].proto()
+    }
+
     /// A marked object cell with header `h` uses its shape: keep it. One bit is set; nothing else is read. Returns the prototype cell
     /// of the shape the first time the shape is seen in a collection, and the collector pushes it on its work list. A prototype that
     /// only a shape holds would be freed otherwise.

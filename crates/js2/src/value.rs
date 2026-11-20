@@ -129,6 +129,12 @@ impl Value {
         self == Value::NULL
     }
 
+    /// True for a pointer value (a string, symbol, bigint or object); no address check.
+    #[inline(always)]
+    pub(crate) fn is_pointer(self) -> bool {
+        self.tag().wrapping_sub(TAG_STRING) < 4
+    }
+
     /// The kind and the address of a pointer value, with the provenance that [`Value::pointer`] exposed.
     #[inline]
     pub fn as_pointer(self) -> Option<(Kind, NonNull<u8>)> {

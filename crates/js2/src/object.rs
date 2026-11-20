@@ -38,7 +38,7 @@
 //! Type invariant of [`Obj`]: it points to a live cell of layout `Object` or `Indexed` made by [`Obj::new`] whose shape id names a
 //! live shape. The owner of an `Obj` keeps it reachable. No collection may run inside a call of this module.
 use crate::cell::{CellHeader, Layout};
-use crate::heap::Heap;
+use crate::heap::{Heap, barrier, barrier_any};
 use crate::shapes::{A_ACC, ShapeId, Shapes};
 use crate::string::Str;
 use crate::value::{Kind, Value};
@@ -150,6 +150,12 @@ impl Rec {
         unsafe { self.vals().add(i).write(v) }
     }
 
+    /// Like [`Rec::put`] for a store into a record that may be old: the write barrier runs first.
+    fn put_b(self, i: usize, v: Value) {
+        barrier(self.0, self.head(), v);
+        self.put(i, v);
+    }
+
     /// The index of pair `p` of a sparse record.
     fn key(self, p: usize) -> u32 {
         self.get(2 * p).as_f64().expect("a key is a number") as u32
@@ -243,6 +249,9 @@ impl Obj {
     }
 
     fn set_shape(self, shapes: &Shapes, id: ShapeId) {
+        let old = self.head();
+        // The shape holds a prototype cell that no old object names yet: an old object that changes shape is remembered.
+        barrier_any(self.0, old);
         self.set_head(shapes.header(id).with_flags(self.head().flags()));
     }
 
@@ -306,6 +315,12 @@ impl Obj {
     /// The location of slot `i`. Panics when the shape has no such slot.
     #[inline]
     fn slot_ptr(self, shapes: &Shapes, i: u32) -> *mut Value {
+        self.slot_loc(shapes, i).0
+    }
+
+    /// The location of slot `i`, and the cell that holds it with its header (the object, or its overflow record).
+    #[inline(always)]
+    fn slot_loc(self, shapes: &Shapes, i: u32) -> (*mut Value, NonNull<u8>, CellHeader) {
         let h = self.head();
         let s = shapes.of(h);
         assert!(i < s.slots, "slot {i} is not in the shape");
@@ -313,11 +328,11 @@ impl Obj {
         let inl: *mut Value = self.0.as_ptr().wrapping_add(base).cast();
         let i = i as usize;
         if i < cap - 1 || h.flags() & F_OVER == 0 {
-            inl.wrapping_add(i)
+            (inl.wrapping_add(i), self.0, h)
         } else {
             let r = Obj::over(inl, cap);
             debug_assert!(i - (cap - 1) < r.cap());
-            r.slots().wrapping_add(i - (cap - 1))
+            (r.slots().wrapping_add(i - (cap - 1)), r.0, r.head())
         }
     }
 
@@ -330,8 +345,10 @@ impl Obj {
 
     #[inline]
     pub fn set_slot(self, shapes: &Shapes, i: u32, v: Value) {
+        let (p, holder, h) = self.slot_loc(shapes, i);
+        barrier(holder, h, v);
         // SAFETY: as in `slot`.
-        unsafe { self.slot_ptr(shapes, i).write(v) }
+        unsafe { p.write(v) }
     }
 
     /// Make room for `to` slots. The object keeps its shape: the caller changes it next. Nothing changes when this fails.
@@ -347,15 +364,18 @@ impl Obj {
         if h.flags() & F_OVER == 0 {
             // SAFETY: one value is copied, from the last inline word.
             let r = unsafe { make_record(heap, Layout::Slots, 0, need.max(MIN_OVER), Value::UNDEFINED, last, 1)? };
+            barrier(self.0, h, r.value());
             // SAFETY: `last` is in the cell.
             unsafe { last.write(r.value()) };
-            self.set_head(h.with_flags(h.flags() | F_OVER));
+            let cur = self.head();
+            self.set_head(cur.with_flags(cur.flags() | F_OVER));
         } else {
             let old = Obj::over(inl, cap);
             if need > old.cap() {
                 let ncap = need.max(old.cap() + old.cap() / 2);
                 // SAFETY: `old` has `old.cap()` initialized values.
                 let r = unsafe { make_record(heap, Layout::Slots, 0, ncap, Value::UNDEFINED, old.slots(), old.cap())? };
+                barrier(self.0, h, r.value());
                 // SAFETY: `last` is in the cell.
                 unsafe { last.write(r.value()) };
             }
@@ -412,8 +432,12 @@ impl Obj {
         if !n.is_dict() && h.flags() & F_OVER != 0 && n.slots as usize <= cap {
             // The record's first value is the one that was in the last inline word (`undefined` if that slot is unused now).
             // SAFETY: the record has a first value; the last inline word is in the cell.
-            unsafe { inl.add(cap - 1).write(Obj::over(inl, cap).slots().read()) };
-            self.set_head(h.with_flags(h.flags() & !F_OVER));
+            let v = unsafe { Obj::over(inl, cap).slots().read() };
+            barrier(self.0, h, v);
+            // SAFETY: the last inline word is in the cell.
+            unsafe { inl.add(cap - 1).write(v) };
+            let cur = self.head();
+            self.set_head(cur.with_flags(cur.flags() & !F_OVER));
         }
         true
     }
@@ -460,6 +484,7 @@ impl Obj {
     }
 
     fn set_elems(self, r: Rec) {
+        barrier(self.0, self.head(), r.value());
         // SAFETY: as in `elems`.
         unsafe { self.elems_word().write(r.value()) }
     }
@@ -538,7 +563,7 @@ impl Obj {
                 return self.sparse_set(heap, s, i, v);
             }
         };
-        r.put(iu, v);
+        r.put_b(iu, v);
         r.set_len(r.len().max(i + 1));
         Some(())
     }
@@ -555,7 +580,7 @@ impl Obj {
 
     fn sparse_set(self, heap: &mut Heap, mut r: Rec, i: u32, v: Value) -> Option<()> {
         match r.find(i) {
-            Ok(p) => r.put(2 * p + 1, v),
+            Ok(p) => r.put_b(2 * p + 1, v),
             Err(p) => {
                 let n = r.count();
                 if 2 * (n + 1) > r.cap() {
@@ -570,7 +595,7 @@ impl Obj {
                 // SAFETY: the record has room for pair `n`; the pairs from `p` move up by one.
                 unsafe { ptr::copy(r.vals().add(2 * p), r.vals().add(2 * p + 2), 2 * (n - p)) };
                 r.put(2 * p, Value::number(i as f64));
-                r.put(2 * p + 1, v);
+                r.put_b(2 * p + 1, v);
                 r.set_count(n + 1);
                 r.set_len(r.len().max(i + 1));
             }
