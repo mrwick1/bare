@@ -40,7 +40,7 @@ impl Loader<'_> {
                 Some(r) => inline[r as usize].take().ok_or("a ready child is used twice")?,
                 None => {
                     let (p, fid) = parse_function(self.source, &mut self.facts, ch.id, self.limits).map_err(|e| format!("parse fn {}: {}", ch.id, e.msg))?;
-                    compile_function(&p, fid, ch.id, &self.facts, self.atoms, &Input { chain: ch.chain.clone(), self_name: ch.self_name }).map_err(|e| format!("compile fn {}: {e:?}", ch.id))?
+                    compile_function(&p, fid, ch.id, &self.facts, self.atoms, &Input { chain: ch.chain.clone(), self_name: ch.self_name, name: ch.name.clone() }).map_err(|e| format!("compile fn {}: {e:?}", ch.id))?
                 }
             };
             c.code.funcs[i] = self.add(sub)? as u32;
@@ -113,10 +113,12 @@ pub fn load_with(host: &str, source: &str) -> Result<Vm, String> {
     if let Err(e) = vm.run_main(pre) {
         panic!("the prelude failed: {e:?}");
     }
-    let g = vm.realm.global.value();
+    // Hide the helpers, do not delete them: a delete of a property that is not the last one puts the global object in dictionary mode, and
+    // then no global access can be cached. The properties are not enumerable; their value is `undefined`, so a script cannot reach them.
+    let g = vm.realm.global;
     for name in ["__def", "__helper", "__set"] {
         let k = vm.realm.intern(name);
-        let _ = vm.realm.delete_prop(g, crate::interp_rt::Key::Name(k));
+        vm.realm.define(g, crate::interp_rt::Key::Name(k), Value::UNDEFINED).expect("define");
     }
     if !host.is_empty()
         && let Err(e) = vm.run_main(at)
