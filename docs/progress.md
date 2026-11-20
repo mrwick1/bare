@@ -14222,3 +14222,49 @@ Checks:
 - Windows 11 VM: `stream` 50, `fetch` 95 (`bare`) and `api` 33 (`bare-js`) passed.
 
 Not tested: the crate tests of `bare-js-api` and the full `bare-js` and `bare` suites on Windows; a collection inside a `pull` call (needs the new engine); `jemalloc` and codegen-units=1 runs (no row needed them); wall time. `cargo clippy -D warnings` fails on `crates/os/src/pages.rs:19` (`manual_is_multiple_of`), a file this change does not touch.
+## 2026-11-20: style accessors at first use (plan step S0.4, CSSOM)
+
+COMPLETE. PR is open and not merged.
+
+Owner decision (2026-11-20): host-only fill, no engine change. The 250 style accessors and the computed prototype members are made at first use, not at page start. Option F of `docs/design-host-cssom.md` was not built. It planned `Host::lazy_member` for the two prototypes. The old engine asks the host only for `on*`, `HTML*Element` and a fixed list of names (`Heap::lazy_step`, `lazy_own`, `lazy_miss` gate on `on_name`), and only `EventTarget.prototype` has `LAZY_CHAIN`. So option F needs an engine change.
+
+Changes:
+
+- `browser_style::install` defines only the lazy global `CSSStyleDeclaration` (`browser_lazy`) and the `style` accessors of `HTMLElement` and `SVGElement`. `browser_style::ensure` makes the prototype, the 250 accessors, `constructor` and (through `browser_computed::fill`) the computed prototype. `Style.proto` is the flag. It is set last, so a failed `ensure` does not leave a half-made prototype behind.
+- `ensure` runs at the three places that make a style object or hand out the prototype: `style_of` (the first `el.style`, and `rule.style` through `rule_declaration`), `get_computed_style` (after the argument checks) and a read of the `CSSStyleDeclaration` global. There is no other path: `Style.proto` and `Computed.proto` are read only in `style_of` and `get_computed_style`.
+- Kept: handler ids in `style.fns` (handler id to property index), the computed prototype inheriting from the style prototype, and the key order base members, 250 accessors, `constructor`. `getComputedStyle` stays a global at its old place; `computed::install` only defines it.
+- `computed` accessor names use one buffer, as `style` does (no `format!` for each of the 250 names). The two `transform` names keep `format!`.
+- Deviation, as for every lazy global in `browser_lazy.rs`: until the first read, `Object.getOwnPropertyDescriptor(window, 'CSSStyleDeclaration')` shows an accessor. A write replaces the global and installs nothing. The names list, `in` and `Object.keys` do not read it.
+
+Tests (`browser_style_tests.rs`): a page that never touches style does not install; `el.style`, `getComputedStyle(el)` and `rule.style` each work as the first use; `'color' in CSSStyleDeclaration.prototype` is true with no style object; the prototype has 260 own names (8 base members first, `constructor` last) and the computed prototype 262. The two counts were also checked on the base tree with the same test. A write to the global installs nothing.
+
+Cost matrix (archMachine, base = origin/main `6d9f6c25` built fresh into `/data/bare-tmp/s0/base-cssom5b-target`, new = this branch; 3 runs per row, minimum; `-j4`; 817 rows): mean change glibc -1.698%. Rows over +0.5% under both allocators: 0. Rows over under one allocator: 0. The largest rise is `bare-stress boxes-deep-blocks 2000` +0.249%, then `block-deep-over-limit 2000` +0.231%, `cssom_load computed 10` +0.204%. `parse_load deep 1` and `10` fail to run on both trees (stack overflow, known). The codegen-unit check was not needed.
+
+| Row | glibc base | glibc new | change |
+|---|---|---|---|
+| `sheets_load dynamic 1` / `10` | 9,284,518 / 33,463,329 | 9,171,386 / 33,322,918 | -1.219% / -0.420% |
+| `sheets_load imports 1` / `10` | 8,750,318 / 13,053,941 | 8,637,281 / 12,951,289 | -1.292% / -0.786% |
+| `sheets_load linked 1` / `10` | 9,138,850 / 19,384,398 | 9,040,552 / 19,244,672 | -1.076% / -0.721% |
+| `style_load attrs 1` / `10` | 35,157,123 / 254,816,494 | 34,564,599 / 254,241,779 | -1.685% / -0.226% |
+| `style_load churn 1` / `10` | 42,211,571 / 308,969,668 | 41,643,383 / 308,716,317 | -1.346% / -0.082% |
+| `style_load setget 1` / `10` | 55,407,550 / 400,989,441 | 54,828,318 / 400,429,156 | -1.045% / -0.140% |
+| `style_load shorthand 1` / `10` | 128,915,037 / 1,164,221,514 | 128,368,907 / 1,163,798,759 | -0.424% / -0.036% |
+| `cssom_load adopted 1` / `10` | 97,153,699 / 884,125,177 | 89,978,110 / 836,405,093 | -7.386% / -5.397% |
+| `cssom_load sheets 1` / `10` | 108,686,024 / 999,576,438 | 101,575,116 / 952,555,544 | -6.543% / -4.704% |
+| `cssom_load rules 1` / `10` | 171,175,818 / 1,594,678,302 | 170,558,535 / 1,594,305,593 | -0.361% / -0.023% |
+| `cssom_load computed 1` / `10` | 274,329,589 / 2,646,505,609 | 274,341,384 / 2,651,909,533 | +0.004% / +0.204% |
+| `form_load gates 1` / `10` | 135,391,113 / 1,272,890,171 | 127,922,641 / 1,216,932,086 | -5.516% / -4.396% |
+| `form_load gc 1` / `10` | 118,402,267 / 1,111,304,861 | 111,268,429 / 1,060,983,617 | -6.025% / -4.528% |
+| `form_load submit 1` / `10` | 41,726,405 / 333,854,515 | 35,037,558 / 286,988,241 | -16.030% / -14.038% |
+| `form_load validity 1` / `10` | 115,317,353 / 1,119,925,724 | 108,295,576 / 1,069,950,130 | -6.089% / -4.462% |
+
+The `sheets_load` and `style_load` rows touch style or computed style, so they pay the install and gain only the part of the page that comes before it. The largest gains are rows that never touch style: `session_load chain 10` -35.0%, `session_load chain 1` -29.6%, `xhr_load 1` -29.0%, `preload_load font 1` -26.6%, `preload_load dups 1` -26.6%, `fetch_load bytes 1` -25.8%, `loader_load blocking 1` -23.6% (8,569,043 from 11,212,317, about 2.6 M instructions: the install of both prototypes).
+
+Peak RSS (archMachine, `loader_load blocking 1`, which never touches style; `cp --reflink=never` copies of both binaries; 3 runs, `getrusage` maximum of the child): base 14,936 / 15,308 / 15,028 KB, new 14,752 / 14,888 / 14,864 KB. About 0.3 MiB less.
+
+Checks:
+
+- Linux: `cargo check -p bare -p bare-js -p bare-js-api` exits 0. `cargo test --locked -p bare --lib` filtered `style` 102, `cssom` 27, `computed` 67 (1 ignored), `sheet` 67 passed, also with `BARE_GC_STRESS=1`. The crate tests ran once: `bare` 1699, `bare-js` 1070 (1 ignored), `bare-js-api` 6 passed.
+- Windows 11 VM: `style` 102, `cssom` 27, `computed` 67 (1 ignored), `sheet` 67 passed.
+
+Not tested: the crate tests of `bare-js-api` and `bare-js` on Windows; wall time; a page that makes a style object near the 65,536 cap; the staging journeys; the matrix at codegen-units=1 (no row needed it).

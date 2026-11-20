@@ -170,7 +170,7 @@ fn camel(css: &str) -> String {
 
 /// The IDL attribute names of one property.
 pub(crate) fn keys_of(css: &str) -> Vec<String> {
-    // At most 3 names, so that no push grows the list: this runs for every property when a page starts.
+    // At most 3 names, so that no push grows the list: this runs for every property at the first style use (`ensure`).
     let mut keys = Vec::with_capacity(3);
     let camel = camel(css);
     let webkit = css.starts_with("-webkit-").then(|| format!("w{}", &camel[1..]));
@@ -447,7 +447,8 @@ fn style_of(d: &Dom, it: &mut Interp<'_>, el: NodeId) -> V {
     if d.style.s.borrow().objs.len() >= d.style_lim().max_objects {
         return Err(d.lim("style-objects"));
     }
-    let o = d.new_source(it, crate::browser_sources::Source::Style, Some(*d.style.proto.get().expect("installed")))?;
+    ensure(d, it)?;
+    let o = d.new_source(it, crate::browser_sources::Source::Style, Some(*d.style.proto.get().expect("ensured")))?;
     let mut s = d.style.s.borrow_mut();
     s.objs.insert(o, el);
     s.by_el.insert(el, o);
@@ -610,12 +611,23 @@ fn named_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     Ok(Value::Undefined)
 }
 
+crate::browser_lazy::lazy_global!(lazy_ctor, "CSSStyleDeclaration", ensure, |d| d.style.fixed.borrow()[1]);
+
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    let g = *d.global.get().expect("installed");
-    let html = d.p().html;
+    // The prototype, its 250 accessors and the computed prototype wait for the first style object, the first `getComputedStyle` or the
+    // first read of the global (`ensure`). A page that uses none of them never pays for them.
+    crate::browser_lazy::install(d, it, &[("CSSStyleDeclaration", lazy_ctor as H)])?;
+    d.def_get(it, d.p().html, "style", style_attr, Some(set_style_attr))?;
+    d.def_get(it, d.p().svg, "style", style_attr_svg, Some(set_style_attr_svg))?;
+    Ok(())
+}
+
+/// Make the `CSSStyleDeclaration` prototype and the computed prototype, once. `style.proto` is the flag, set last.
+pub(crate) fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+    if d.style.proto.get().is_some() {
+        return Ok(());
+    }
     let proto = d.obj(it, it.object_prototype())?;
-    let _ = d.style.proto.set(proto);
-    let mut fixed = vec![proto];
     d.def_get(it, proto, "cssText", css_text, Some(set_css_text))?;
     d.def_get(it, proto, "length", length, None)?;
     d.def_get(it, proto, "parentRule", parent_rule, None)?;
@@ -651,19 +663,16 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
             d.define_accessor(it, proto, key, gf, Some(sf))?;
         }
     }
-    let _ = d.style.props.set(props);
 
-    // `CSSStyleDeclaration` and `HTMLElement.prototype.style`
+    // `constructor` comes after the accessors, as in `getOwnPropertyNames`.
     let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
     let f = d.add_fn(it, illegal_constructor, "CSSStyleDeclaration", 0, false)?;
     it.define_data(f, kp, Value::Object(proto), false, false, false)?;
     it.define_data(proto, kc, Value::Object(f), true, false, true)?;
-    let k = d.key(it, "CSSStyleDeclaration")?;
-    it.define_data(g, k, Value::Object(f), true, false, true)?;
-    fixed.push(f);
-    d.def_get(it, html, "style", style_attr, Some(set_style_attr))?;
-    d.def_get(it, d.p().svg, "style", style_attr_svg, Some(set_style_attr_svg))?;
-    *d.style.fixed.borrow_mut() = fixed;
+    crate::browser_computed::fill(d, it, proto, &props)?;
+    *d.style.fixed.borrow_mut() = vec![proto, f];
+    let _ = d.style.props.set(props);
+    let _ = d.style.proto.set(proto);
     Ok(())
 }
 

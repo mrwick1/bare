@@ -1182,7 +1182,8 @@ fn get_computed_style(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V 
         return Err(d.lim("computed-objects"));
     }
     d.wrap(it, el)?;
-    let o = d.obj(it, *d.computed.proto.get().expect("installed"))?;
+    crate::browser_style::ensure(d, it)?;
+    let o = d.obj(it, *d.computed.proto.get().expect("ensured"))?;
     d.computed.objs.borrow_mut().insert(o, el);
     if kind != 0 {
         d.computed.kinds.borrow_mut().insert(o, kind);
@@ -1292,8 +1293,17 @@ fn named_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
 
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     let g = *d.global.get().expect("installed");
-    let proto = d.obj(it, *d.style.proto.get().expect("style installed first"))?;
-    let _ = d.computed.proto.set(proto);
+    let f = d.def_method(it, g, "getComputedStyle", 1, get_computed_style)?;
+    // Window operations are enumerable.
+    let k = d.key(it, "getComputedStyle")?;
+    it.define_data(g, k, Value::Object(f), true, true, true)?;
+    *d.computed.fixed.borrow_mut() = vec![f];
+    Ok(())
+}
+
+/// The computed prototype, made with the style prototype `sproto` (`browser_style::ensure`). `props` are its property names.
+pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, sproto: ObjId, props: &[&'static str]) -> R<()> {
+    let proto = d.obj(it, sproto)?;
     d.def_get(it, proto, "cssText", css_text, Some(set_css_text))?;
     d.def_get(it, proto, "length", length, None)?;
     d.def_get(it, proto, "parentRule", parent_rule, None)?;
@@ -1302,12 +1312,16 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     d.def_method(it, proto, "getPropertyPriority", 1, get_property_priority)?;
     d.def_method(it, proto, "setProperty", 2, set_property)?;
     d.def_method(it, proto, "removeProperty", 1, remove_property)?;
-    let props = d.style.props.get().expect("style installed first");
+    let mut nm = String::new();
     for (i, css) in props.iter().enumerate() {
         let keys = keys_of(css);
         let (gid, sid) = (d.handlers.borrow().len() as u32, d.handlers.borrow().len() as u32 + 1);
-        let gf = d.add_fn(it, named_get, &format!("get {}", keys[0]), 0, false)?;
-        let sf = d.add_fn(it, named_set, &format!("set {}", keys[0]), 1, false)?;
+        nm.clear();
+        nm.push_str("get ");
+        nm.push_str(&keys[0]);
+        let gf = d.add_fn(it, named_get, &nm, 0, false)?;
+        nm.replace_range(..3, "set");
+        let sf = d.add_fn(it, named_set, &nm, 1, false)?;
         d.style.fns.borrow_mut().extend([(gid, i), (sid, i)]);
         for k in &keys {
             let key = d.key(it, k)?;
@@ -1322,11 +1336,8 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
             d.define_accessor(it, proto, key, gf, None)?;
         }
     }
-    let f = d.def_method(it, g, "getComputedStyle", 1, get_computed_style)?;
-    // Window operations are enumerable.
-    let k = d.key(it, "getComputedStyle")?;
-    it.define_data(g, k, Value::Object(f), true, true, true)?;
-    *d.computed.fixed.borrow_mut() = vec![proto, f];
+    d.computed.fixed.borrow_mut().push(proto);
+    let _ = d.computed.proto.set(proto);
     Ok(())
 }
 
