@@ -340,6 +340,8 @@ pub(crate) enum Owner {
     Iter(ObjId),
     /// The `Location` of a frame window (`browser_frames.rs`).
     Loc(ObjId),
+    /// A fetch object (`Headers`, `Request`, `Response`, a body stream, a reader or a headers iterator), with an entry in `browser_fetch.rs`.
+    Fetch(ObjId),
 }
 
 impl Owner {
@@ -348,7 +350,7 @@ impl Owner {
         match self {
             Owner::Target(t) => Some(t),
             Owner::Xhr(o) | Owner::Abort(o) => Some(Target::Obj(o)),
-            Owner::Event(_) | Owner::Ctl(_) | Owner::Computed(_) | Owner::Source(_) | Owner::Reserved | Owner::Url(_) | Owner::Params(_) | Owner::Iter(_) | Owner::Loc(_) => None,
+            Owner::Event(_) | Owner::Ctl(_) | Owner::Computed(_) | Owner::Source(_) | Owner::Reserved | Owner::Url(_) | Owner::Params(_) | Owner::Iter(_) | Owner::Loc(_) | Owner::Fetch(_) => None,
         }
     }
 }
@@ -873,6 +875,7 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
             }
             Some(Owner::Ctl(o)) => crate::browser_abort::trace_ctl(self, o, t),
             Some(Owner::Source(o)) => crate::browser_sources::trace(self, key, o, t),
+            Some(Owner::Fetch(o)) => crate::browser_fetch::trace(self, o, t),
             Some(Owner::Event(o)) => {
                 let Some(e) = st.events.get(&o) else { return };
                 for v in [&e.target, &e.current, &e.detail, &e.related] {
@@ -903,31 +906,23 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
             match st.owners.get(k) {
                 Some(Owner::Xhr(o)) => crate::browser_xhr::forget(self, o),
                 Some(Owner::Event(o)) => crate::browser_xhr::forget_event(self, o),
+                Some(Owner::Target(t @ Target::Node(n))) => {
+                    if let Some(w) = st.by_node.remove(&n) {
+                        if let Value::Object(o) = *w.raw() {
+                            st.by_obj.remove(&o);
+                        }
+                        if !st.listeners.is_empty()
+                            && let Some(l) = st.listeners.remove(&t)
+                        {
+                            st.n_listeners -= l.len();
+                        }
+                    }
+                }
+                Some(Owner::Computed(o)) => crate::browser_computed::drop_owner(self, o),
+                Some(Owner::Source(o)) => crate::browser_sources::prune(self, k, o),
+                Some(w @ (Owner::Url(_) | Owner::Params(_) | Owner::Iter(_))) => crate::browser_navigation::prune_owner(self, w),
+                Some(Owner::Loc(o)) => crate::browser_frames::prune_loc(self, o),
                 _ => {}
-            }
-            if let Some(Owner::Target(t @ Target::Node(n))) = st.owners.get(k)
-                && let Some(w) = st.by_node.remove(&n)
-            {
-                if let Value::Object(o) = *w.raw() {
-                    st.by_obj.remove(&o);
-                }
-                if !st.listeners.is_empty()
-                    && let Some(l) = st.listeners.remove(&t)
-                {
-                    st.n_listeners -= l.len();
-                }
-            }
-            if let Some(Owner::Computed(o)) = st.owners.get(k) {
-                crate::browser_computed::drop_owner(self, o);
-            }
-            if let Some(Owner::Source(o)) = st.owners.get(k) {
-                crate::browser_sources::prune(self, k, o);
-            }
-            if let Some(w @ (Owner::Url(_) | Owner::Params(_) | Owner::Iter(_))) = st.owners.get(k) {
-                crate::browser_navigation::prune_owner(self, w);
-            }
-            if let Some(Owner::Loc(o)) = st.owners.get(k) {
-                crate::browser_frames::prune_loc(self, o);
             }
             st.owners.release(k);
         }
@@ -936,6 +931,7 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
         }
         // After the keys are released, and after the old host's prune of the listener table.
         crate::browser_abort::prune(self, st);
+        crate::browser_fetch::prune(self, st);
         crate::browser_dataset::compact(self, datasets);
     }
 
@@ -1059,7 +1055,6 @@ impl Host for Dom {
         if self.web.active.get() {
             crate::browser_web::trace(self, owner, out);
         }
-        self.fetch.trace(owner, out);
         self.streams.trace(owner, out);
     }
 
@@ -1089,7 +1084,6 @@ impl Host for Dom {
         drop(guard);
         self.sched_prune(live);
         self.idle_prune(live);
-        self.fetch.prune(live);
         self.streams.prune(live);
         crate::browser_worker::prune(self, live);
         self.reclaim_wanted();
