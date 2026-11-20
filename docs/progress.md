@@ -16283,6 +16283,70 @@ Measurements. Machine archMachine. Instruction counts (`perf stat -e instruction
 Tests. Linux, debug: `cargo test --locked -p bare-js-api -p bare-js -p bare --lib`: 32, 1104 (1 ignored) and 1715 (6 ignored) pass. The filters `browser_media_tests browser_canvas_tests browser_img_tests browser_elements_tests browser_scoped browser_reclaim browser_tests browser_navigation_tests browser_scheduler_tests browser_streams_tests browser_compression_tests canvas media image audio` (295 tests): pass plain, with `BARE_ALL_API=1` and with `BARE_GC_STRESS=1 BARE_ALL_API=1`. With `BARE_GC_STRESS=1` alone, 294 pass and 1 fails: `browser_reclaim_tests::parsed_documents_ask_for_a_collect_by_their_native_bytes` (the known failure of the base under `BARE_GC_STRESS=1`; it passes when `BARE_ALL_API=1` is also set). Windows 11 VM (`cargo xwin test --no-run`, exe through `winssh`): the same 295-test filter passes.
 
 Not tested: `BARE_GC_STRESS=1` and `BARE_ALL_API=1` with the whole `bare --lib`; the full `bare --lib` on Windows; the jemalloc and `codegen-units=1` runs (no row went over the limit under glibc); the journeys and `tools/suite/run.py`; RSS and wall time; the cost of one media, canvas or image call by a micro-loop; the `Image` and `decode()` paths with a real picture download (the tests use pages with no network).
+## 2026-11-20: host handlers on the interface, F: navigation, frames, storage and remote windows (plan step S0.4 / F)
+
+Status: the handlers of the files below run through the interface (`Scope`, `Local`, `Args`). Tests pass on Linux and Windows. The full matrix has no row over +0.5% under glibc (the highest is +0.46%), so the jemalloc and `codegen-units=1` runs did not start. The PR is open without auto-merge. The diff is about 1,300 changed lines (one PR).
+
+Base: `origin/main` at `fae94731` (#769, group C, merged). #779 (group B) is still open, so `get_named`, `define_named` and `get_named_bool` do not exist yet; this group does not need them. `origin/main` does not compile by itself: #769 removed `Dom::def_get_sh`, and `browser_cssom.rs` (group D1, #778) still calls it three times. This PR puts the 8 lines of `def_get_sh` back in `browser_dom_old.rs`. The base tree of the matrix is `origin/main` with that one fix.
+
+Files converted.
+
+- `browser_navigation.rs`: the `Location`, `History` and `document.URL`, `documentURI`, `domain`, `baseURI` and `window.origin` handlers, the interface constructors (`URL`, `URLSearchParams`, `Location`, `History`, `Storage`) and the `parts!` accessors.
+- `browser_navigation_params.rs`: all handlers of `URL`, `URLSearchParams` and the iterator (22).
+- `browser_navigation_storage.rs`: `getItem`, `setItem`, `removeItem`, `clear`, `key` and `length`, and the body of the named write hook.
+- `browser_frames.rs`: `contentWindow`, `contentDocument`, `length`, `name` and `name=`; `note_owner` takes a scope (`browser_dom.rs` calls it, so `note_owner_s` is removed from `browser_scoped.rs`).
+- `browser_remote_window.rs`: the proxy traps (`get`, `set`, `has`, `defineProperty`, `deleteProperty`), `closed`, `postMessage` and the `location` members of a remote window.
+- `browser.rs`: one row (the `length` getter of `window`).
+
+Not converted, and why.
+
+- `browser_navigation_state.rs`: the structured clone helpers over `Engine::clone_out` and `clone_in`. `Scope` has no `clone_out`. It has no handler.
+- `browser_child.rs` (loader and driver helpers), `browser_port_hub.rs`, `browser_navigation_url.rs`, `browser_refresh.rs`: no handler and no engine use.
+- Install code, the named-write hook, the trace and prune hooks of the owners, `make`, `install_up` and `child_window` of the remote window, `frame_location`, `entry_state`, `navigate`, `run_navigation_task`, `fire_window`: they take `it`, key tables by `ObjId` or run once. They stay old and run through `old`, `old_v` and `run`.
+- Inside converted handlers, four pieces stay on the old calls because the same work on the interface costs more (callgrind numbers below): the init of `URLSearchParams` from a sequence or a record (`init_sequence`, `init_pair`, `init_record`, with `usv_i`), the result object of the iterator `next` (`d.key` and `define_data`), the `Interp` helpers `key_text`, `is_connected_node` (group C, still old) and `frame_location`.
+- `browser_web.rs`: `createObjectURL` and `revokeObjectURL` stay on the old registry (group E). `navigation::def_fn` is kept for them.
+
+Changes.
+
+- `browser_navigation_storage.rs`: `units` and `store_set` read the string in place. A string is read once (`as_str`), not twice.
+- `browser_navigation_params.rs`: `usv` reads the string once and checks the limit before it makes the copy. `iter_next` looks up the iterator once. `url_id`, `params_id` and `area` are `#[inline(always)]`.
+- `crates/js-api/src/lib.rs`: `Str::to_string_lossy` for UTF-16 uses a loop with the capacity set at the start. `String::from_utf16_lossy` starts with half of the room and grows. This is a shared lever: every handler that reads a string benefits.
+- `browser_navigation.rs`: the `Storage` prototype methods are defined as before (not enumerable, then enumerable). Defined once as enumerable, the lookups of `localStorage.getItem` cost more (see below).
+- `browser_dom_old.rs`: `def_get_sh` is back (see Base).
+- Dead code of the old form is removed (`arg`, `def_acc`, the old handlers).
+
+Grep gate (`\bbare_js::(value|eval::Interp)|\bObjId\b|\bInterp\b|\.engine\(\)|\.heap\.`, lines for each file, before then after; and handlers of the old form `fn .*&\[Value\]`, before then after).
+
+| File | Engine lines | Old handlers |
+| --- | ---: | ---: |
+| `browser_navigation.rs` | 58 to 31 | 20 to 0 |
+| `browser_navigation_params.rs` | 53 to 31 | 23 to 0 |
+| `browser_navigation_storage.rs` | 22 to 6 | 7 to 0 |
+| `browser_frames.rs` | 28 to 22 | 5 to 0 |
+| `browser_remote_window.rs` | 32 to 19 | 10 to 1 |
+| `browser_navigation_state.rs` | 15 to 15 | 0 to 0 |
+| `browser_child.rs` | 13 to 13 | 0 to 0 |
+| `browser_port_hub.rs`, `browser_navigation_url.rs` | 1 to 1, 0 to 0 | 0 to 0 |
+
+The one old line of `browser_remote_window.rs` is `post`, a helper that takes `it` (it is not a handler). The lines that stay are the items in the lists above.
+
+Measurements. Machine archMachine, loaded, so only instruction counts are used (`perf stat -e instructions:u`, minimum of 3 runs, `tools/js/cost_matrix.sh -j4`, 817 rows). Both trees use the default release profile in separate target directories.
+
+- First matrix, everything on the interface: 10 of the 14 `navigation_load` rows were over +0.5% under both allocators: `iterate` +6.6% (+6.3% jemalloc), `url` +2.3% to +2.8%, `subclass` +2.1% to +2.3%, `storage` +0.8%, `history` +0.6%. `frames` (-0.2%) and `route` (+0.2% to +0.4%) were not.
+- Callgrind of `iterate 1` and `url 1` (symbol builds of both trees, difference of the exclusive cost by function). The call path is not the cause: `call_api_plain`, `call_scoped` and `call_api_host` together cost about the same as `call_host`, `Host::call` and `call_fn_inner` of the base (3.8 M against 3.9 M for 29,000 calls). The extra cost was in the bodies:
+  - `Scope::define_str` makes a string and interns the key at each call: 23,000 calls, 37 M inclusive. The old `define_data` with the cached `d.key` costs 16 M. `iter_next` goes back to the old calls for the result object (`iterate` +6.6% to +2.0%).
+  - `Str::to_string_lossy` grew the buffer in `String::from_utf16_lossy` (`finish_grow` and `do_reserve_and_handle` +0.76 M in `url 1`). With the capacity set, `url` +2.3% to +0.5% and `subclass` +2.1% to +0.9%.
+  - The scope iterator (`Engine::iter_next` 2.64 M, `api_it` 1.62 M, `iter_open` 0.88 M) against `host_iter_next` (0.85 M) and `host_iter_open` (0.56 M) of the old form. The init of `URLSearchParams` goes back to the old calls (`iterate` +1.3% to +0.55%, `subclass` +0.9% to +0.4%).
+  - `storage 1`: a `Storage` prototype defined once as enumerable made 4,000 lookups of `lookup` and `has_property` go through `shape_get` (+0.62 M) in place of `PropMap::find` (-0.44 M). The old code defines the method as not enumerable and then as enumerable, which gives the cheaper lookup. Hypothesis: the second definition changes how the object stores its properties. The old way is back, and `get_item` and the others no longer call `area` twice (`storage` +0.8% to +0.05%).
+  - `iter_next` looks up the iterator once instead of twice (`iterate` +0.55% to +0.41%).
+- Final matrix: mean +0.001% glibc. No row is over +0.5%. The highest: `nodelist_load scan 10` +0.461% (not a file of this group), `navigation_load iterate 10` +0.421%, `subclass 10` +0.414%, `iterate 1` +0.414%, `subclass 1` +0.387%, `url 10` +0.336%, `url 1` +0.314%, `history` +0.23%, `storage` +0.05% and -0.03%, `frames` -0.12% and -0.18%, `route` -0.08% and -0.12%. Before the last lever, `iterate 10` was +0.524% under glibc and +0.516% under jemalloc (over under both).
+- `parse_load deep 1` and `deep 10` fail to run on both trees (exit 134, known).
+- Levers left: the scope iterator is slow for a host that iterates a script value in a loop (it costs about three times the old `host_iter_next`). A cheaper `Engine::iter_next` would let the init of `URLSearchParams` move. `Scope::new_array` and `Scope::define_str` cost more than `array_from` and `define_data` with a cached key. A scoped way to define a property with a cached key would remove the last old calls of `iter_next`. Not built.
+
+Tests. Linux: `cargo test --locked -p bare-js-api -p bare-js -p bare --lib`: 32, 1104 (1 ignored) and 1715 (6 ignored) pass. `bare --lib` with the filters `browser_navigation_tests browser_navigation_subclass_tests browser_clone_tests browser_storage_tests browser_iframe_tests browser_child_tests browser_history_state_cap_tests browser_named_tests browser_scoped browser_reclaim browser_basics_tests browser_loader_tests browser_session_tests browser_tests::` (320 tests): 320 pass plain and with `BARE_ALL_API=1`. With `BARE_GC_STRESS=1`, 319 pass and 1 fails: `browser_reclaim_tests::parsed_documents_ask_for_a_collect_by_their_native_bytes` (the known failure of the base). Windows 11 VM (`cargo xwin test --no-run`, `winssh`): the same filters, the same result (320, 320, 319 and the same one failure). No new test: the existing tests of the group cover the handlers, and no behaviour changed.
+
+Not tested: `BARE_GC_STRESS=1` and `BARE_ALL_API=1` with the whole `bare --lib`; the whole `bare --lib` on Windows; macOS; the jemalloc and `codegen-units=1` runs (no row is over under glibc in the final matrix); the journeys and `tools/suite/run.py`; RSS and wall time; a cost number for one call of each handler (the matrix rows use the group in loops of 1,000 or more); the order of the budget charge and the step of `iter_next` (the step now comes first; a refused step is lost with the run, and no test reads it).
+
 ## 2026-11-20: js2 language failures (test262 `language/`)
 
 Task: fix the tests under `language/` that pass on the old engine and fail on js2. Scope: the compiler, the parser and the interpreter. Built-ins (`builtins.rs`, `bi_*.rs`) belong to two other agents. Generators, async, modules, `eval` and `with` belong to S3.

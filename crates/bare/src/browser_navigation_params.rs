@@ -674,24 +674,23 @@ pub(crate) fn p_entries<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Arg
 }
 
 pub(crate) fn iter_next<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
-    let id = match obj_id(s, this) {
-        Some(o) if d.nav.s.borrow().iters.contains_key(&o) => o,
-        _ => return Err(s.type_error("Illegal invocation")),
-    };
-    s.charge(1)?;
+    // One lookup of the iterator: it checks the receiver and steps in one borrow. A step that the budget then refuses is lost with the run.
     let item = {
         let mut n = d.nav.s.borrow_mut();
         let n = &mut *n;
-        let i = n.iters.get_mut(&id).expect("checked");
-        let pair = n.params.get(&edge(&i.sp)).and_then(|p| p.list.get(i.idx).cloned());
-        match pair {
-            Some(p) => {
-                i.idx += 1;
-                Some((i.kind, p))
-            }
+        match obj_id(s, this).and_then(|o| n.iters.get_mut(&o)) {
             None => None,
+            Some(i) => {
+                let pair = n.params.get(&edge(&i.sp)).and_then(|p| p.list.get(i.idx).cloned());
+                Some(pair.map(|p| {
+                    i.idx += 1;
+                    (i.kind, p)
+                }))
+            }
         }
     };
+    let Some(item) = item else { return Err(s.type_error("Illegal invocation")) };
+    s.charge(1)?;
     // The old calls are cheaper here: the keys are cached and an item is one native step (no scope entry per step).
     old_v(s, |it| {
         let (value, done) = match item {
