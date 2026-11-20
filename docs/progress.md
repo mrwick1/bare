@@ -17403,6 +17403,7 @@ Results (archMachine, debug build, own target directory):
 | `cargo test -p bare-js2 --lib` | 447 pass (9 new in `api_tests.rs`) |
 | `cargo test -p bare --lib` | 1718 pass, 6 ignored |
 | `cargo test -p bare-js-diff` | all pass |
+| `cargo +nightly miri test -p bare-js2 --lib api::` | 9 pass, no undefined behavior |
 | `cargo xwin build --target x86_64-pc-windows-msvc -p bare-js2 -p bare-js-api` | builds |
 
 Cost. Release build, default profile, `tools/js/instr.sh` (minimum of 3 runs), 3 rounds of each row, base `15157cbe` (a worktree of the parent commit) against this branch. Micro rows are `interp_load` at N minus N = 0. `script_run` is `var x = 1;`. The load average was 8 to 10, so only instruction counts are used.
@@ -17427,7 +17428,7 @@ Host call cost (`crates/js-api/examples/host_call_load.rs`, release, minimum of 
 
 The host call of the new engine costs 517 instructions against 680 on the old engine in the same example (24% less). The trampoline adds 54 instructions to a plain native call of the new engine (the design guessed 60 to 100; `Object.is` takes two arguments and `nop` one, so the true gap is a little larger). The old engine's own row in the design (588) was measured on a DOM call, not on this loop.
 
-Not tested. The browser: `Dom` is a concrete type that holds the old engine's `Interp`, so the page switch needs `Dom<E: Engine>`, which is its own change. A page's scripts do not run on js2 yet. Miri: `cargo +nightly miri test -p bare-js2 --lib api::` was started and its result is in the PR text. macOS and arm64. A collection that runs inside a host call (no safepoint exists there; the one test that collects in a host call runs it with no script frame under it). A nested allocation larger than the heap slack (the collector is held, the browser slice must measure it). `cargo test -p bare-js` in full (no change in that crate).
+Not tested. The browser: `Dom` is a concrete type that holds the old engine's `Interp`, so the page switch needs `Dom<E: Engine>`, which is its own change. A page's scripts do not run on js2 yet. The whole `cargo miri test -p bare-js2` of CI (only the 9 `api::` tests ran under Miri: they pass, with the integer-to-pointer warnings that the crate has already). macOS and arm64. A collection that runs inside a host call (no safepoint exists there; the one test that collects in a host call runs it with no script frame under it). A nested allocation larger than the heap slack (the collector is held, the browser slice must measure it). `cargo test -p bare-js` in full (no change in that crate).
 
 Steps left: owners with `trace` and `prune` (3.9); promises and the job queue (when js2 has them); modules; `run_script` (needs a completion value); buffers; `Dom<E: Engine>` and the switch in the browser.
 ## Time zone data in the binary, on every OS (2026-11-21)
