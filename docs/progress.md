@@ -15214,3 +15214,54 @@ Judgment calls:
 - `Frames::walk` takes `&[RootMaps]`; the interpreter (S2.6) will hold the maps in `Code::roots`. I did not change `Frames`.
 
 Not tested: a compiler or an interpreter on this format (S2.5, S2.6), so dispatch counts, instructions per op and the root maps of real functions are untested; the translation is static, by rules, and counts no dispatch weights; a modern React bundle (only jQuery 3.4.1 and the `eval_load` programs were available offline); Miri on the new modules (they hold no `unsafe`; the tests use `SharedAtoms`, which does); arm64; the cost matrix (js2 is not wired into the browser).
+
+## 2026-11-20: compiler in js2 (plan step S2.5)
+
+New modules in `crates/js2`: `compile.rs` (scope analysis, registers, labels, root maps, entry points), `compile_expr.rs`, `compile_stmt.rs`, `compile_pat.rs`, and the example `examples/bc_hist.rs` with the `eval_load` sources in `examples/data/`. The compiler turns the tree of one function into a `Code` through `Asm`. It never holds more than one function tree. It needs no interpreter: the tests run the S2.4 verifier on every function that it compiles. Base: the S2.4 branch plus the pre-parser (S2.2, PR #756).
+
+What it does:
+
+- Scope analysis. A variable that no inner function names lives in a register. A captured variable lives in a context slot, one `PushCtx` per scope that has one. The pre-parser facts say which names a child captures, and the parent passes a chain of context levels to each child (`Child::chain`), so a child compiles alone. A name that no scope declares is a global. The top level of a script has only globals. `let`, `const` and `class` get the hole (`LoadHole`) only when the name can occur in the text before the end of its declaration (a scan of at most 4,096 bytes, then it assumes yes). A read from a child function uses `GetCtxTdz`.
+- Contexts. `to(e, dst)` (value into a register chosen by the caller), `any(e)` (a register variable is read in place), `effect(e)` and `cond(e, jump_if, label)` (a test: `&&`, `||`, `!` and the comparisons make jumps, no boolean value). Compare-jumps take a constant on either side (the operator is mirrored) and `null`, `undefined`, `true` and `false` use their own ops. `x += 2` on a register is one `AddI` in place. A register variable is copied only when the right side may assign it (a text scan of the right side for `=`, `++`, `--` and the variable name).
+- Literals. An object literal with plain names is `NewObjLit` (keys in a recipe), an array literal is `NewArrLit`, up to 64 items; larger or computed ones use `NewObject`/`DefField`/`DefElem` and `NewArray`/`ArrayPush`. A template literal is one `Concat`.
+- Loops, `break`, `continue`, labels. A loop is `head: test; body; cont: JmpBack head; exit:`. `if (t) break;` and `if (t) continue;` are one conditional jump when nothing must be popped or run first. A `for (let ...)` whose variables are captured pushes one context for the loop and makes `CopyCtx` at the end of each iteration. `for-in` and `for-of` use the iterator record ops. A `for-of` has a handler on the body that runs `IterClose` and throws again.
+- `try`, `catch`, `finally`. The finalizer is compiled in line, after the block, after the `catch` clause, in front of each `break`, `continue` and `return` that leaves it, and once more for an exception. The handler ranges are split so that no inlined copy is inside the range of its own `try`. `return` keeps its value in a temporary when a finalizer or an iterator close runs first.
+- Destructuring in declarations, assignments, parameters, `catch` and `for` heads (objects, arrays with holes, defaults, rest of arrays).
+- Root maps. At each safepoint the compiler lists the registers that every path has written (a register joins on its first write and leaves when freed; at a join the set is the intersection of the sets of all jumps to it). That is the exact condition that the verifier checks. It is not liveness: a variable stays in the map until its scope ends.
+- Dead code is not emitted (after `return`, `throw`, `break`, and so on, until a label that a jump reaches).
+
+Check: 34 tests in `compile_tests.rs`. 25 golden tests (the disassembly of one function per construct, in the order of the listing; each was read by hand against the JS meaning), and the others: the 9 `eval_load` sources compile with nothing unsupported; 36 functions of control-flow and scope shapes (labels, `finally` with `break` and `return`, `switch` with lexicals, closures in loops, patterns in `for-of`, and so on) with 10 more inner functions; the list of unsupported constructs; the handler ranges of `try`/`catch`/`finally`; a root map; the literal fallbacks; the hole; the register limit (a call with 70,000 arguments is refused); the script top level. `build` in the tests runs `verify` on every function. Linux: `cargo test --locked -p bare-js2 --lib` 260 pass (226 before this change). Windows 11 VM (`cargo xwin test --no-run`, exe through `winssh`): `compile::tests` 34 pass; the whole lib run is 258 pass and 2 fail: `parse::tests::corpus_status_matches_acorn` and `parse::lazy_tests::a_lazy_parse_finds_the_same_errors_as_a_full_parse_on_the_corpus` (parser corpus tests of S2.2, panic at the corpus read; hypothesis: the corpus is not found on the VM; not changed here and not run on main on the VM). `cargo clippy -p bare-js2 --all-targets`: no warning in the new files.
+
+`bc-hist` (`cargo run --release -p bare-js2 --example bc_hist [-v] [FILE...]`, archMachine, Ryzen 9 5900HX, 3 runs; the jQuery compile time was 19.4 to 19.9 ms, the small cases 0.03 to 0.11 ms). It counts the instructions that the compiler emits (static). It cannot count executed ops, because there is no interpreter yet, so it does not compare with the executed-op histograms of `tools/js/bc_hist.sh`. The comparison is with the static dump of the old compiler that S2.4 made (`/data/bare-tmp/s24/dumps`, 7 programs, functions only, because the old engine runs the script top level in the tree walker). Every function passes the verifier.
+
+| Case | Old words (functions) | New words (functions) | New words (script top level) |
+| --- | ---: | ---: | ---: |
+| loopfn | 11 | 12 | 5 |
+| calls | 5 | 6 | 20 |
+| fib | 14 | 12 | 6 |
+| closures | 20 | 16 | 41 |
+| objects | 5 | 4 | 61 |
+| webpack | 990 | 776 | 241 |
+| loop, throws, concat | 0 | 0 | 21, 44, 18 |
+| total of the 6 with functions | 1,045 | 826 (-21.0%) | |
+| jQuery 3.4.1 minified | 47,934 | 34,678 (-27.7%) | 29 |
+
+- S2.4 estimated 839 to 844 words for the same 6 programs by rewriting the old instructions one to one; the compiler needs 826. For jQuery the estimate was 35,664 to 42,593 words; the compiler gives 34,678, but 88 of 949 functions are partial (see the unsupported list), so this number is a lower bound.
+- The 1,214 instructions of the 9 programs (functions and script): `LoadI` 224, `GetField` 121, `CallU` 106, `Mov` 104, `GetGlobal` 86, `Add` 68, `RetUndef` 61, `Closure` 59, `SetGlobal` 57, `Mod` 52. Most `LoadI` and `Mov` are in `webpack`: the arguments of `require(0)` and the window of each call.
+- `loopfn` and `calls` get 1 word larger: the modulus 1,000,003 and 65,521 do not fit the immediate, so `LoadI.w` and `Mod` take 3 words where the old `ModK` took 1. The constant is loaded again in each iteration. A `ModK` with a constant table, or hoisting the constant out of the loop, would remove it (not built).
+- Compile time of the whole file, pre-parse and parse of each function included: `eval_load` programs 0.03 to 0.09 ms, `webpack` 0.42 ms, jQuery 19.1 ms (949 functions, 33,758 instructions).
+
+Not built (recorded in `Compiled::unsupported`, the code must not run): classes, generators and async functions, `await` and `yield`, spread (calls, arrays, objects), rest parameters, object rest, `arguments`, regexp and BigInt literals, tagged templates, private names, `super`, `new.target`, `import()`, getters and setters and `__proto__` in object literals, `with` and direct `eval`, `delete` of a global name, a named function expression that may use its own name (needs a callee op), and a `break` or `continue` that has no target. jQuery has 88 functions with one of these (58 `arguments`, 28 regexp literals, 2 own-name function expressions, 1 `eval`).
+
+Judgment calls and known gaps:
+
+- `switch` is a chain of compare-jumps, not a table. A jump table needs a new op (a table of jump offsets in `Code`), a verifier change for its successors and an arm in the interpreter (S2.6). Both S2.4 and S2.6 are in other PRs, so I did not add it. The plan lists it for S2.5, so it needs a decision.
+- Script-level `var x;` with no initializer emits nothing, so the global is not created. It needs a declare-global op.
+- An iterator opened by an array pattern is not closed when a binding throws. A `for-of` closes it. An `IterClose` that throws inside a `for-of` body is caught by the loop's own handler and runs a second time.
+- A block-level function in sloppy code is a function-level `var` that is set at the start of the block (Annex B, simplified). Parameters and the function body share one scope.
+- `enter` and `find_var` scan the variables of a scope linearly (a test with 70,000 locals took 87 s).
+- The root maps list written registers, not live ones, so a dead variable stays a root until its scope ends. Liveness would make maps smaller but the verifier only knows "written".
+- `delete a` on a local variable is `false`, and `void e` evaluates `e` for effect.
+- `Code::disassemble` (S2.4) writes a space after an op name of 12 or more characters, so `JmpNotNullish r4` is readable.
+
+Not tested: execution of any compiled code (S2.6), so the semantics are checked by reading the disassembly and by the verifier, not by running; Miri; arm64; a modern React bundle; the cost matrix (js2 is not wired into the browser); the compile time of the compiler alone (the example times the pre-parse and parse of each function too).

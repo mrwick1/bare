@@ -580,7 +580,8 @@ impl Code {
                 }
             };
             let wide = if self.words[pc] as u8 == Op::Wide as u8 { ".w" } else { "" };
-            let _ = write!(s, "{pc:04}  {:<12}", format!("{}{wide}", ins.op.name()));
+            let name = format!("{}{wide}", ins.op.name());
+            let _ = write!(s, "{pc:04}  {name:<12}{}", if name.len() >= 12 { " " } else { "" });
             let parts: Vec<String> = (0..ins.op.form().fields())
                 .filter(|&i| ins.op.letter(i) != '-')
                 .map(|i| {
@@ -639,6 +640,15 @@ impl Asm {
         debug_assert!(ins.op.jump_field().is_some());
         self.ins.push((ins, Some(to)));
         self.ins.len() - 1
+    }
+
+    /// The number of instructions emitted so far (the number that the next [`Asm::emit`] gives).
+    pub fn len(&self) -> usize {
+        self.ins.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ins.is_empty()
     }
 
     pub fn label(&mut self) -> Label {

@@ -30,3 +30,4 @@ pub mod facts;
 pub mod parse;
 pub mod bytecode;
 pub mod verify;
+pub mod compile;
