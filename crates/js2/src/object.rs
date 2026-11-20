@@ -359,6 +359,17 @@ impl Obj {
         }
     }
 
+    /// The value at a place made by [`Obj::loc`] that is an inline slot (the bits above 9 are 0): no test, no record.
+    ///
+    /// # Safety
+    /// As for [`Obj::read_loc`], and `loc >> 9 == 0`.
+    #[inline]
+    pub unsafe fn read_inline(self, loc: u32) -> Value {
+        debug_assert!(loc >> 9 == 0);
+        // SAFETY: by the contract, the word is an inline slot of this cell.
+        unsafe { self.0.as_ptr().wrapping_add(loc as usize).cast::<Value>().read() }
+    }
+
     /// Write the value at a place made by [`Obj::loc`].
     ///
     /// # Safety
@@ -399,6 +410,7 @@ impl Obj {
     }
 
     fn set_shape(self, shapes: &Shapes, id: ShapeId) {
+        shapes.changed(self.0.as_ptr() as usize);
         self.set_head(shapes.header(id).with_flags(self.head().flags()));
     }
 
@@ -457,6 +469,12 @@ impl Obj {
     pub fn set_proto(self, shapes: &mut Shapes, proto: Option<NonNull<u8>>) {
         let id = shapes.with_proto(shapes.id_of(self.head()), proto);
         self.set_shape(shapes, id);
+    }
+
+    /// The address of slot `i`, for a cache that holds the tag of the object (`Shapes::watch_tag`): it is right until the object gets
+    /// another shape. Panics when the shape has no such slot.
+    pub fn slot_addr(self, shapes: &Shapes, i: u32) -> *mut Value {
+        self.slot_ptr(shapes, i)
     }
 
     /// The location of slot `i`. Panics when the shape has no such slot.
@@ -518,6 +536,8 @@ impl Obj {
         let need = to - (cap - 1);
         // SAFETY: the last inline word is a slot of the cell.
         let last = unsafe { inl.add(cap - 1) };
+        // The record is made or replaced below, even when the caller then fails before it changes the shape.
+        shapes.changed(self.0.as_ptr() as usize);
         if h.flags() & F_OVER == 0 {
             // SAFETY: one value is copied, from the last inline word.
             let r = unsafe { make_record(heap, Layout::Slots, 0, need.max(MIN_OVER), Value::UNDEFINED, last, 1)? };

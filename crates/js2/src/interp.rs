@@ -484,6 +484,13 @@ impl Vm {
                 }
             }};
         }
+        // The integer word `$k` of the frame record of the current frame (see `int_at`).
+        macro_rules! rec_int {
+            ($k:expr) => {
+                // SAFETY: the record `REC` words below `fp` is in the stack.
+                (unsafe { *regs.sub(REC - $k) }.bits() as u32 as i32)
+            };
+        }
         // SAFETY (`r!` and `word!`): `verify` bounds every register by `nregs` and every pc by the code, and a call or `Vm::call` makes
         // the stack hold `fp + nregs` words (`need` in `call!`). `regs` is the base of the frame (see its declaration).
         macro_rules! r {
@@ -610,6 +617,24 @@ impl Vm {
                 match tri!(realm.set_field_slow(fb, $site, n, recv, val)) {
                     Put::Done => pc = $next,
                     Put::Set(f) => call_set!(f, recv, val, $next),
+                    Put::Fail => {
+                        if code.strict {
+                            err!(ErrKind::Type, "cannot assign to a read-only property or a property with no setter")
+                        }
+                        pc = $next;
+                    }
+                }
+            }};
+        }
+        // The slow path of `SetGlobal` and `SetGlobalS`: a global lexical binding, a cache entry, a setter, a write that fails.
+        macro_rules! set_global {
+            ($strict:expr, $v:expr, $site:expr, $next:expr) => {{
+                gate!();
+                let n = name!($site);
+                let v: Value = $v;
+                match tri!(realm.set_global_slow(fb, $site, n, v, $strict)) {
+                    Put::Done => pc = $next,
+                    Put::Set(f) => call_set!(f, realm.global.value(), v, $next),
                     Put::Fail => {
                         if code.strict {
                             err!(ErrKind::Type, "cannot assign to a read-only property or a property with no setter")
@@ -751,10 +776,33 @@ impl Vm {
                 };
                 let given = np.min(argc);
                 let (callee, this, nt): (Value, Value, Value) = ($callee, $this, $nt);
-                let rec = &mut stack[new_fp - REC..new_fp];
-                rec.copy_from_slice(&[callee, this, $cctx, Value::int($callpc as i32), Value::int($next as i32), Value::int(ci as i32), Value::int(0), Value::int($dstw as i32), nt, argsw]);
-                stack.copy_within(ab..ab + given, new_fp);
-                stack[new_fp + given..new_fp + np].fill(undef);
+                // SAFETY: `ensure!` made the stack hold `new_fp + nregs + 8` words, so the record, the `np` parameters and the registers
+                // are inside it. The arguments are at `ab..ab + given`, which ends below `new_fp - REC` (the registers of the caller) or
+                // is at `new_fp` itself (staged); a forward copy is right in both cases.
+                unsafe {
+                    let base = stack.as_mut_ptr();
+                    let rec = base.add(new_fp - REC);
+                    rec.write(callee);
+                    rec.add(1).write(this);
+                    rec.add(2).write($cctx);
+                    rec.add(3).write(Value::int($callpc as i32));
+                    rec.add(4).write(Value::int($next as i32));
+                    rec.add(5).write(Value::int(ci as i32));
+                    rec.add(6).write(Value::int(0));
+                    rec.add(7).write(Value::int($dstw as i32));
+                    rec.add(8).write(nt);
+                    rec.add(9).write(argsw);
+                    let (dst, src) = (base.add(new_fp), base.add(ab));
+                    let mut i = 0;
+                    while i < given {
+                        dst.add(i).write(src.add(i).read());
+                        i += 1;
+                    }
+                    while i < np {
+                        dst.add(i).write(undef);
+                        i += 1;
+                    }
+                }
                 ci = $ni;
                 fp = new_fp;
                 reload!(ncode);
@@ -897,16 +945,16 @@ impl Vm {
         macro_rules! ret {
             ($v:expr) => {{
                 let mut v: Value = $v;
-                let caller = int_at(stack, fp, 5);
-                let dst = int_at(stack, fp, 7);
+                let caller = rec_int!(5);
+                let dst = rec_int!(7);
                 if dst & CONSTRUCT != 0 && Realm::obj(v).is_none() {
                     v = record(stack, fp, 1);
                 }
                 if caller == ENTRY {
                     return Ok(v);
                 }
-                pc = int_at(stack, fp, 4) as usize;
-                let callpc = int_at(stack, fp, 3);
+                pc = rec_int!(4) as usize;
+                let callpc = rec_int!(3);
                 ci = caller as usize;
                 // SAFETY: as in `reload!`: `ci` is a frame that the stack holds. `fp` moves before the reload, which sets `regs` from it.
                 let ccode = unsafe { prog.at(ci) };
@@ -1060,15 +1108,13 @@ impl Vm {
                         pc = next;
                     }
                     Op::GetGlobal | Op::GetName => {
-                        let g = realm.global.value();
-                        if let Some((o, shape)) = unsafe { Obj::from_value_shape(g) } {
-                            let cc = &fb.caches[bx!()];
-                            if cc.shape == shape {
-                                // SAFETY: as in `get_field`.
-                                r!(a!()) = unsafe { o.read_loc(cc.loc) };
-                                pc = next;
-                                continue;
-                            }
+                        let cc = &fb.caches[bx!()];
+                        if cc.shape == realm.shapes.watch_tag() {
+                            // SAFETY: the entry has the address of a slot of the global object, made while the tag was the same, and
+                            // the tag changes each time the object gets another shape (`Shapes::watch_tag`).
+                            r!(a!()) = unsafe { cc.global_slot().read() };
+                            pc = next;
+                            continue;
                         }
                         gate!();
                         let n = name!(bx!());
@@ -1081,32 +1127,26 @@ impl Vm {
                         }
                     }
                     Op::SetGlobal | Op::SetName => {
-                        let g = realm.global.value();
-                        // A global lexical binding (a `let` of another script) is not a property of the global object.
-                        set_field!(g, r!(a!()), bx!(), next, |n| {
-                            if let Some(res) = realm.lex_put(n, r!(a!())) {
-                                tri!(res);
-                                pc = next;
-                                continue;
-                            }
-                        });
-                    }
-                    Op::SetGlobalS => {
-                        gate!();
-                        let (g, n) = (realm.global.value(), name!(bx!()));
-                        if let Some(res) = realm.lex_put(n, r!(a!())) {
-                            tri!(res);
+                        let cc = &fb.caches[bx!()];
+                        if cc.shape == realm.shapes.watch_tag() {
+                            let v = r!(a!());
+                            // SAFETY: as for `GetGlobal`; the entry was made for a writable data property.
+                            unsafe { cc.global_slot().write(v) };
                             pc = next;
                             continue;
                         }
-                        // A cache entry of the global's shape says that an earlier write found the name there.
-                        // SAFETY: the register holds a live value.
-                        let known = unsafe { Obj::from_value_shape(g) }.is_some_and(|(_, shape)| fb.caches[bx!()].shape == shape);
-                        if !known && !tri!(realm.has_prop(g, Key::Name(n))) {
-                            let t = realm.text(n);
-                            err!(ErrKind::Reference, "{t} is not defined")
+                        set_global!(false, r!(a!()), bx!(), next);
+                    }
+                    Op::SetGlobalS => {
+                        let cc = &fb.caches[bx!()];
+                        if cc.shape == realm.shapes.watch_tag() {
+                            let v = r!(a!());
+                            // SAFETY: as for `SetGlobal`.
+                            unsafe { cc.global_slot().write(v) };
+                            pc = next;
+                            continue;
                         }
-                        set_field!(g, r!(a!()), bx!(), next);
+                        set_global!(true, r!(a!()), bx!(), next);
                     }
                     Op::TypeofGlobal | Op::TypeofName => {
                         std::hint::cold_path();
@@ -1324,6 +1364,10 @@ impl Vm {
                         let y = if opv == Op::ModI { Value::int(sc!()) } else { r!(c!()) };
                         op_mod!(a!(), r!(b!()), y, next)
                     }
+                    Op::AddX => op_add!(a!(), r!(b!()), Value::int($x as i32), nextx!()),
+                    Op::SubX => op_sub!(a!(), r!(b!()), Value::int($x as i32), nextx!()),
+                    Op::MulX => op_mul!(a!(), r!(b!()), Value::int($x as i32), nextx!()),
+                    Op::ModX => op_mod!(a!(), r!(b!()), Value::int($x as i32), nextx!()),
                     Op::Exp => { std::hint::cold_path(); op_exp!(a!(), r!(b!()), r!(c!()), next) }
                     Op::BitAnd | Op::BitAndI => {
                         let y = if opv == Op::BitAndI { Value::int(sc!()) } else { r!(c!()) };

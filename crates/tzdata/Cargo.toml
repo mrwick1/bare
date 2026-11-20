@@ -1,0 +1,9 @@
+# IANA time zone data in the binary (slim TZif files for every zone name) and the CLDR map from Windows zone ids.
+# `docs/design-time-zones.md` explains the design. No dependencies.
+[package]
+name = "bare-tzdata"
+version.workspace = true
+edition.workspace = true
+license = "MIT OR Apache-2.0"
+
+[dependencies]

@@ -213,6 +213,10 @@ ops! {
     ShlI Abc "w r i" "`a = b << c`.",
     ShrI Abc "w r i" "`a = b >> c`.",
     UShrI Abc "w r i" "`a = b >>> c`.",
+    AddX AbcX "w r - i" "`a = b + x` (`x` is a 32-bit integer).",
+    SubX AbcX "w r - i" "`a = b - x`.",
+    MulX AbcX "w r - i" "`a = b * x`.",
+    ModX AbcX "w r - i" "`a = b % x`.",
     Eq Abc "w r r" "`a = b == c`.",
     Ne Abc "w r r" "`a = b != c`.",
     StrictEq Abc "w r r" "`a = b === c`.",
@@ -831,8 +835,17 @@ impl Asm {
         self.at[l.0 as usize] = Some(self.ins.len() as u32);
     }
 
-    pub fn finish(self) -> Result<Assembled, BcError> {
+    pub fn finish(mut self) -> Result<Assembled, BcError> {
         let n = self.ins.len();
+        // A `Jmp` to a `Ret` is that `Ret`. Neither op is a safepoint and neither can throw, so the root maps and the handler ranges stay.
+        for i in 0..n {
+            if let (Op::Jmp, Some(l)) = (self.ins[i].0.op, self.ins[i].1) {
+                let t = self.at[l.0 as usize].ok_or(BcError::Unbound)? as usize;
+                if t < n && matches!(self.ins[t].0.op, Op::Ret | Op::RetUndef) {
+                    self.ins[i] = (self.ins[t].0, None);
+                }
+            }
+        }
         let mut cur: Vec<Ins> = self.ins.iter().map(|x| x.0).collect();
         let mut wide = vec![false; n];
         let mut pcs = vec![0u32; n + 1];
