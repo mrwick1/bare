@@ -16331,6 +16331,52 @@ Measurements. Machine archMachine. Instruction counts (`perf stat -e instruction
 Tests. Linux, debug: `cargo test --locked -p bare-js-api -p bare-js -p bare --lib`: 32, 1104 (1 ignored) and 1715 (6 ignored) pass. The filters `browser_media_tests browser_canvas_tests browser_img_tests browser_elements_tests browser_scoped browser_reclaim browser_tests browser_navigation_tests browser_scheduler_tests browser_streams_tests browser_compression_tests canvas media image audio` (295 tests): pass plain, with `BARE_ALL_API=1` and with `BARE_GC_STRESS=1 BARE_ALL_API=1`. With `BARE_GC_STRESS=1` alone, 294 pass and 1 fails: `browser_reclaim_tests::parsed_documents_ask_for_a_collect_by_their_native_bytes` (the known failure of the base under `BARE_GC_STRESS=1`; it passes when `BARE_ALL_API=1` is also set). Windows 11 VM (`cargo xwin test --no-run`, exe through `winssh`): the same 295-test filter passes.
 
 Not tested: `BARE_GC_STRESS=1` and `BARE_ALL_API=1` with the whole `bare --lib`; the full `bare --lib` on Windows; the jemalloc and `codegen-units=1` runs (no row went over the limit under glibc); the journeys and `tools/suite/run.py`; RSS and wall time; the cost of one media, canvas or image call by a micro-loop; the `Image` and `decode()` paths with a real picture download (the tests use pages with no network).
+## 2026-11-20: host handlers on the interface, G: loader, custom elements, drive and session (plan step S0.4 / G)
+
+Status: the handlers of the loader and the custom elements run through the interface (`Scope`, `Local`, `Args`). Tests pass on Linux. On Windows, 2 tests fail because the VM has no fixture files (see Tests). The matrix has no row over the limit under both allocators. The PR is open without auto-merge.
+
+Base: `origin/main` (`479d89a0`), then merged with `origin/main` (`fae94731`) after #769 (group C) merged. `origin/main` at `fae94731` does not build: #769 removed `Dom::def_get_sh`, and `browser_cssom.rs` (#778) still calls it three times. This PR puts the helper back in `browser_dom_old.rs`. The matrix and the Windows run were taken before this merge (tree `479d89a0` plus this change); the Linux tests were run again after it. #779 (group B) and #780, #781 were still open, so `get_named`, `define_named` and `get_named_bool` were not used.
+
+Files converted: `browser_loader.rs` (the `script` and `link` members: `src`, `href`, `type`, `async`, `defer`, `text`, `noModule`; the `on*` handler accessors; `document.write`, `writeln`, `open`, `close`; `readyState`, `currentScript`; 26 handlers), `browser_custom.rs` (14 handlers: the `customElements` members `define`, `get`, `getName`, `whenDefined`, `upgrade`; the HTML constructors and the unknown-element constructor; `importNode`, `adoptNode`; the callback flush). `browser_gaps.rs`: `noModule` (2 handlers).
+
+Not converted, and why:
+
+- `browser_loader.rs`: `script_inserted`, `script_src_changed`, `run_inline_scripts` and `prepare_script`. The driver calls them with an `Interp`. `install` takes `it` and keys tables by `ObjId`. It registers the new handlers through `def_get_s`.
+- `browser_custom.rs`: `ce_pop`, `invoke`, `react`, the instance `upgrade`, `construct_checked`, `parse_construct`, `ce_release`, `guarded`, the `form_*` hooks, the lazy global definers and `ensure` / `make` / `unknown_proto`. The parser and the reaction queue call them with an `Interp`. The tables `Def.cb`, `Def.ctor` and `ce_roots` hold raw `ObjId` and `Value`; the GC roots read them (group Z). The `attachInternals` registration stays with group C.
+- `browser_loader/modules.rs` (3 lines), `browser_drive.rs` (2 lines): the lines are driver hooks and `ObjId` tables. `browser_loader/preload.rs`, `scan.rs`, `sheets.rs` and `browser_session.rs` have no handler and no line of the gate.
+- Interface gaps, kept through `s.engine()` or `old`: `Scope` has no `new_target` (`html_ctor` reads `host_new_target`), and no constructor test (`define` uses `is_constructor_value` through `old`). `own_listeners` takes an `Interp` (group B).
+
+Changes.
+
+- `browser_scoped.rs`: `dispatch_host` and `bad_new` lose the `h` parameter. `bad_new_s` asks `browser_custom::needs_new_s` for the custom handlers. The wrappers `via` and `custom_create_s` are removed. New: `call_hs`, which calls one `HS` handler from another with a list of `Local`.
+- `browser.rs`: `Host::call` calls `dispatch_host` without `Some(h)`. The six HTML constructors in the interface table go through `ce::interface_ctor` (one new match arm).
+- `browser_custom.rs`: `needs_new` has one generic message. `needs_new_s` gives the message of a scoped constructor. `create_s` replaces `create`. `read_definition` keeps the callbacks as `Local` and makes the raw `Value` table at the end.
+- `browser_dom_old.rs`: the wrappers `link_el`, `append_child`, `create_element`, `make_element` and `toggle_attribute` had no caller and are removed.
+- Two new tests. The answers were taken on the base first (a copy of the base tree), then written as `(source, expected)` pairs. Both pass on the base and on this tree, so the answers did not change. `browser_elements_tests::script_and_link_members_keep_their_answers_and_errors` (20 cases) and `browser_custom_tests::registry_and_constructor_members_keep_their_answers_and_errors` (48 cases: `define` errors, `get`, `whenDefined`, `upgrade`, `importNode`, `adoptNode`, constructors, `new` checks).
+
+Grep gate (`\bbare_js::(value|eval::Interp)|\bObjId\b|\bInterp\b|\.engine\(\)|\.heap\.`, lines for each file, before then after; old handler lines are `fn .*&\[Value\]`):
+
+| File | Gate lines | Old handlers |
+| --- | ---: | ---: |
+| `browser_custom.rs` | 59 to 40 | 14 to 1 (`form_cb`, a helper of the form hooks) |
+| `browser_loader.rs` | 39 to 12 | 26 to 0 |
+| `browser_loader/modules.rs` | 3 to 3 | 0 to 0 |
+| `browser_loader/preload.rs`, `scan.rs`, `sheets.rs` | 0 to 0 | 0 to 0 |
+| `browser_drive.rs` | 2 to 2 | 0 to 0 |
+| `browser_session.rs` | 0 to 0 | 0 to 0 |
+
+The goal 0 is not met for the reasons in the list above.
+
+Measurements. Machine archMachine (loaded; instruction counts only). `tools/js/cost_matrix.sh -j4`, 817 rows, both trees built with the default release profile in separate target directories. Base: `origin/main` (`479d89a0`).
+
+- Mean change: glibc +0.002%, jemalloc -0.009% (2 rows measured). Over under both allocators: 0. Failed to run: 2 (`parse_load deep 1` and `deep 10`, known, they fail on both trees).
+- Over under glibc only: `form_load gates 1` +0.632% (127,748,406 to 128,556,275) and `gates 10` +0.550%. Under jemalloc they are -0.013% and -0.006%. They pass by the rule. The form handlers are group C, not this group. Hypothesis: code layout.
+- No row measures `script`, `link` or `customElements` calls in a tight loop. The matrix shows that the shared call path did not change. It does not measure the cost of one call of these handlers.
+
+Tests. Linux, debug: `cargo test --locked -p bare-js-api -p bare-js -p bare --lib`: 32, 1104 (1 ignored) and 1715 (6 ignored) pass (run before the two new tests; they pass alone). The group filters (`browser_custom_tests browser_elements_tests browser_loader browser_scoped browser_reclaim browser_tests browser_session` and others, list in the PR; 614 tests): 612 pass and 2 are ignored, plain and with `BARE_GC_STRESS=1 BARE_ALL_API=1` and with `BARE_ALL_API=1`. With `BARE_GC_STRESS=1` alone, 611 pass and 1 fails: `browser_reclaim_tests::parsed_documents_ask_for_a_collect_by_their_native_bytes` (the known failure of the base). After the merge of `fae94731` the same test also fails with `BARE_GC_STRESS=1 BARE_ALL_API=1` (611 pass, 1 fails); it fails the same way on `origin/main` plus the restored `def_get_sh`, so this change does not cause it. Windows 11 VM: 610 pass, 2 ignored, 2 fail: `a_page_fed_in_pieces_gives_the_tree_of_a_one_step_parse` and `a_page_parsed_in_slices_gives_the_tree_of_a_one_step_parse`. `saved_pages()` reads `tools/fixtures` through `CARGO_MANIFEST_DIR`, and the VM has no such directory (`Os NotFound`). The files of this change do not touch that code. Hypothesis: the base fails the same way.
+
+Not tested: `BARE_GC_STRESS=1` and `BARE_ALL_API=1` with the whole `bare --lib`; the full `bare --lib` on Windows; the two Windows failures on the base; `bare-drive` and `bare-mcp` (not touched); the jemalloc and `codegen-units=1` runs for the two glibc-only rows (they pass under jemalloc); the journeys and `tools/suite/run.py`; RSS and wall time; the cost of one loader or custom-element call by a micro-loop.
+
 ## 2026-11-20: js2 language failures (test262 `language/`)
 
 Task: fix the tests under `language/` that pass on the old engine and fail on js2. Scope: the compiler, the parser and the interpreter. Built-ins (`builtins.rs`, `bi_*.rs`) belong to two other agents. Generators, async, modules, `eval` and `with` belong to S3.
