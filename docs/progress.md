@@ -16317,6 +16317,18 @@ Net slope (scale 10 minus scale 1), M instructions:
 
 
 Model of the design (section 5, step 3, hypothesis): `loop` 1.49 at scale 10, `calls` 1.37, `fib` 1.34, `closures` 0.55, `objects` 1.45, bundle-like 0.92. Measured: `loop` 1.45, `calls` 1.36, `fib` 1.33, `closures` 0.54, `objects` 1.43, bundle-like 0.91 (scale 1). The model matched within 0.04. The bundle-like program does not change (it has no top-level globals in its hot loop).
+
+Re-measured on the merge with `origin/main` 450d4e46 (after #773 and #785), 2026-11-21. Method: `script_run --eval` on release builds of `bare-js2` (`--example script_run`), archMachine, instructions:u, minimum of 3 runs, `GLIBC_TUNABLES=glibc.malloc.tcache_count=65535`, scale 10 of the rows above. Each tree was built twice: default profile and `codegen-units=1`. Change of this PR against main:
+
+| Row | main, default (M) | this PR, default (M) | change | main, cgu=1 (M) | this PR, cgu=1 (M) | change |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loopfn` | 525.89 | 515.89 | -1.9% | 539.89 | 505.89 | -6.3% |
+| `calls` | 1012.91 | 773.91 | -23.6% | 1029.90 | 785.91 | -23.7% |
+| `fib` | 45.00 | 41.85 | -7.0% | 45.78 | 43.28 | -5.5% |
+| `closures` | 170.03 | 147.98 | -13.0% | 175.13 | 153.73 | -12.2% |
+| `objects` | 827.04 | 740.35 | -10.5% | 849.26 | 757.88 | -10.8% |
+
+No row is higher at either build, so the cost rule holds without a change of the code. The earlier merge (against `b0a0df89`, before #785 put `cold_path()` in the rare arms) had `objects` +1.23% and +2.7% and `loopfn` +4.3% at cgu=1. The rows moved with the layout of `Vm::run`, not with the global cache (hypothesis: not checked in the assembly). The rows `loopfn` and the others use no global in their loop. test262 (`tools/js/test262_js2.sh`): the counts equal `test262-js2-baseline.txt` (js2 15854 pass, js 16755 pass).
 ## 2026-11-20: property attributes, descriptors, non-extensible objects and generic Array methods in js2 (S2.7 follow-up)
 
 Branch `t3/js2-builtin-attrs`, from the test262 gate (#764). It fixes the groups that the gate reported as 325 (property attributes), 241 (Array methods on array-likes), 373 (missing methods) and 205 (accessors), the real non-extensible objects, and the hang of `Object.setPrototypeOf/set-failure-cycle.js`.
