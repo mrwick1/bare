@@ -808,15 +808,13 @@ impl Vm {
                         pc = next;
                     }
                     Op::GetGlobal | Op::GetName => {
-                        let g = realm.global.value();
-                        if let Some((o, shape)) = unsafe { Obj::from_value_shape(g) } {
-                            let cc = &fb.caches[bx!()];
-                            if cc.shape == shape {
-                                // SAFETY: as in `get_field`.
-                                r!(a!()) = unsafe { o.read_loc(cc.loc) };
-                                pc = next;
-                                continue;
-                            }
+                        let cc = &fb.caches[bx!()];
+                        if cc.shape == realm.shapes.watch_tag() {
+                            // SAFETY: the entry has the address of a slot of the global object, made while the tag was the same, and
+                            // the tag changes each time the object gets another shape (`Shapes::watch_tag`).
+                            r!(a!()) = unsafe { cc.global_slot().read() };
+                            pc = next;
+                            continue;
                         }
                         gate!();
                         let n = name!(bx!());
@@ -825,8 +823,21 @@ impl Vm {
                         pc = next;
                     }
                     Op::SetGlobal | Op::SetName => {
-                        let g = realm.global.value();
-                        set_field!(g, r!(a!()), bx!(), next);
+                        let cc = &fb.caches[bx!()];
+                        if cc.shape == realm.shapes.watch_tag() {
+                            let v = r!(a!());
+                            // SAFETY: as for `GetGlobal`; the entry was made for a writable data property.
+                            unsafe { cc.global_slot().write(v) };
+                            pc = next;
+                            continue;
+                        }
+                        gate!();
+                        let n = name!(bx!());
+                        let v = r!(a!());
+                        match tri!(realm.set_global_slow(fb, bx!(), n, v)) {
+                            Put::Done => pc = next,
+                            Put::Set(f) => call_set!(f, realm.global.value(), v, next),
+                        }
                     }
                     Op::TypeofGlobal | Op::TypeofName => {
                         gate!();

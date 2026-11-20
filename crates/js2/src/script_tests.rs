@@ -694,3 +694,29 @@ fn a_stack_that_grows_in_a_callee_keeps_the_registers_of_the_callers() {
         ("function f(n, ...rest) { var x = n * 2; if (n == 0) return rest.length; var y = f(n - 1, n, n); return y + x - 2 * n; } var r = f(200);", "r", "2"),
     ]);
 }
+
+/// A `GetGlobal` or `SetGlobal` site holds the address of the slot of the global (`Shapes::watch_tag`). Each case changes the global
+/// object between two runs of one site: an add that grows its overflow record many times, a delete that goes back to an older shape
+/// (the record of that shape is not the one that the old address pointed into), an attribute change, an accessor, a new prototype.
+/// Under Miri a stale address is a use after free.
+#[test]
+fn a_global_cache_follows_every_change_of_the_global_object() {
+    check(&[
+        // Adds: the loop reads and writes `x` at the same sites while 300 other globals are added (the overflow record regrows).
+        ("var x = 1; var s = 0; for (var i = 0; i < 300; i++) { s += x; globalThis['g' + i] = i; x = x + 1; } var r = s + ',' + x + ',' + g299;", "r", "45150,301,299"),
+        // Back to an older shape: add 40 globals, read `x`, delete them last first, read `x`, again.
+        (
+            "var x = 7; var s = 0; for (var round = 0; round < 3; round++) { for (var i = 0; i < 40; i++) { globalThis['t' + i] = i; s += x; } for (var i = 39; i >= 0; i--) { delete globalThis['t' + i]; s += x; x = x + 1; } } var r = s + ',' + x;",
+            "r",
+            "13620,127",
+        ),
+        // A global that is deleted (a global made by an assignment: a `var` is not configurable) is gone for a site that has an entry; the same name added again is found.
+        ("globalThis.y = 5; var r = ''; function rd() { try { return y; } catch (e) { return e.name; } } for (var i = 0; i < 4; i++) { r += rd(); } delete globalThis.y; r += rd(); globalThis.y = 9; r += rd() + rd();", "r", "5555ReferenceError18"),
+        // An attribute change (a dictionary shape) and a read-only global: a store from a site that has an entry is dropped.
+        ("var z = 1; function st(v) { z = v; } function rz() { return z; } st(2); st(3); Object.defineProperty(globalThis, 'z', { writable: false }); st(4); var r = rz() + ',' + Object.getOwnPropertyDescriptor(globalThis, 'z').writable;", "r", "3,false"),
+        // A setter on a global (a getter on a global is not supported by `GetGlobal` yet: it throws; the field read `globalThis.w` works).
+        ("globalThis.w = 1; function gw() { return w; } function sw(v) { w = v; } gw(); gw(); sw(1); sw(1); var log = ''; Object.defineProperty(globalThis, 'w', { get: function () { return 42; }, set: function (v) { log += v; }, configurable: true }); sw(5); var r = globalThis.w + ',' + log;", "r", "42,5"),
+        // A new prototype for the global object: a name that only the prototype has.
+        ("var p = 1; function rp() { return typeof q === 'undefined' ? 'no' : q; } rp(); rp(); Object.setPrototypeOf(globalThis, { q: 'proto' }); var r = rp() + p;", "r", "proto1"),
+    ]);
+}

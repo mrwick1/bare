@@ -16156,3 +16156,58 @@ Net slope (scale 10 minus scale 1), M instructions:
 
 
 Per-op costs in the S2.9 entry predicted 2.5% to 13% (spike). Measured: `fib` -4.0%, `closures` -4.7%, `objects` -5.0%, `calls` -7.5%, `loop` -11.5%, `loopfn` -17.8%. Every row is lower; none is higher. The spike did not have the `nextx` change, and the rows are better than the spike by 0.5 to 4.7 points (hypothesis: `nextx`; not measured separately).
+
+### Step 3: a cache of the address of the global
+
+Design: section 4, option 7a. A `GetGlobal` or `SetGlobal` site held the shape id and the place of the slot (`Obj::loc`), and a hit read the global object through `Obj::from_value_shape` and `read_loc` (a kind test, a layout test, and a second load through the overflow record: almost every global of a script is past the 5 inline slots). Now a site holds the address of the slot of the global object, and a hit is one compare and one load or store.
+
+How it stays right (the invariant):
+- The address of a slot of the global object changes only when the object gets another shape (an add, a delete, an attribute change, a new prototype: all go through `Obj::set_shape`) or when its overflow record is replaced (`Obj::reserve`). `Shapes` watches the global object (`Shapes::watch`, set in `Realm::new`). `Obj::set_shape` and `Obj::reserve` change `Shapes::watch_tag` when `self` is that object. The tag starts at 2^31 and only grows, so it is never 0 and never a shape id (a shape id is below 2^20).
+- A site holds the tag in `Cache::shape` and the address in `loc` and `to` (low and high 32 bits). A hit tests `cache.shape == shapes.watch_tag()`. A stale entry (any change since the fill) has an old tag and misses. The tag alone is not enough for the old design (a delete that goes back to an older shape has the old shape id but may have another record), which is why the tag is not the shape id.
+- The one change of the shape that does not go through `set_shape` is the cached add of a property (`set_shape_id` on a hit of `SetField`). `set_field_slow` makes no add entry for the global object, so a store `globalThis.name = v` takes the slow path when it adds.
+- A site gets an entry on its second run, as a property site does. Only an own data property of a tree shape gets one (a `SetGlobal` entry also needs `A_W`). A name that the prototype chain gives, an accessor, a missing name and a dictionary shape take the slow path each time, as before. (A global getter still throws "a global accessor needs a call" in `GetGlobal`; that is as before.)
+- GC: the cache holds no cell. The address points into the global object, which the realm roots, and into its overflow record, which lives as long as the tag. The collector does not move cells. `Feedback::clear` still clears the entries when a shape was freed.
+- The cost: one more compare in `Obj::set_shape` and `Obj::reserve` (`self` against `watch`), and a pointer packed in two `u32` fields (no larger `Cache`).
+
+Check: `a_global_cache_follows_every_change_of_the_global_object` (adds that regrow the record 300 times between two runs of one site; a delete that goes back to an older shape, three rounds; a deleted and re-added name; `Object.defineProperty` that makes the global read-only; a setter on a global; `Object.setPrototypeOf(globalThis, ...)`), also under constant collection. Under Miri a stale address is a use after free.
+
+Instructions of the whole process, same method:
+
+| Row | Scale | step 2 (M) | step 3 (M) | change | spread new % | QuickJS (M) | step 3 / QuickJS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loop` | 1 | 135.14 | 96.34 | -28.7% | 0.003 | 64.69 | 1.49 |
+| `loop` | 10 | 1310.54 | 922.54 | -29.6% | 0.000 | 635.29 | 1.45 |
+| `loopfn` | 1 | 56.76 | 56.76 | +0.0% | 0.007 | 44.10 | 1.29 |
+| `loopfn` | 10 | 526.57 | 526.57 | +0.0% | 0.001 | 429.30 | 1.23 |
+| `calls` | 1 | 107.18 | 84.78 | -20.9% | 0.001 | 60.62 | 1.40 |
+| `calls` | 10 | 1030.58 | 806.58 | -21.7% | 0.000 | 594.33 | 1.36 |
+| `fib` | 1 | 8.65 | 8.41 | -2.8% | 0.024 | 4.37 | 1.92 |
+| `fib` | 10 | 50.09 | 47.30 | -5.6% | 0.013 | 35.54 | 1.33 |
+| `closures` | 1 | 21.37 | 19.36 | -9.4% | 0.016 | 26.11 | 0.74 |
+| `closures` | 10 | 171.21 | 151.16 | -11.7% | 0.001 | 279.90 | 0.54 |
+| `objects` | 1 | 86.75 | 78.50 | -9.5% | 0.002 | 53.72 | 1.46 |
+| `objects` | 10 | 812.78 | 731.62 | -10.0% | 0.047 | 512.44 | 1.43 |
+| `webpack` | 1 | 9.71 | 9.67 | -0.4% | 0.056 | 5.47 | 1.77 |
+| `webpack` | 10 | 51.75 | 51.40 | -0.7% | 0.011 | 41.97 | 1.22 |
+| `throws` | 1 | 37.63 | 32.13 | -14.6% | 0.011 | 85.11 | 0.38 |
+| `throws` | 10 | 335.40 | 280.40 | -16.4% | 0.001 | 840.93 | 0.33 |
+| `concat` | 1 | 4.61 | 4.59 | -0.4% | 0.032 | 1.34 | 3.43 |
+| `concat` | 10 | 5.24 | 5.08 | -3.1% | 0.003 | 2.15 | 2.36 |
+| `bundle` | 1 | 122.86 | 122.82 | -0.0% | 0.003 | 134.42 | 0.91 |
+| `empty` | 1 | 4.48 | 4.48 | +0.0% | 0.049 | 1.23 | 3.63 |
+
+Net slope (scale 10 minus scale 1), M instructions:
+| Row | step 2 | step 3 | change | QuickJS | step 3 / QuickJS | gate (<= 1.00) |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `loop` | 1175.4 | 826.2 | -29.7% | 570.6 | 1.45 | no |
+| `loopfn` | 469.8 | 469.8 | -0.0% | 385.2 | 1.22 | no |
+| `calls` | 923.4 | 721.8 | -21.8% | 533.7 | 1.35 | no |
+| `fib` | 41.4 | 38.9 | -6.1% | 31.2 | 1.25 | no |
+| `closures` | 149.8 | 131.8 | -12.0% | 253.8 | 0.52 | yes |
+| `objects` | 726.0 | 653.1 | -10.0% | 458.7 | 1.42 | no |
+| `webpack` | 42.0 | 41.7 | -0.7% | 36.5 | 1.14 | no |
+| `throws` | 297.8 | 248.3 | -16.6% | 755.8 | 0.33 | yes |
+| `concat` | 0.6 | 0.5 | -22.9% | 0.8 | 0.60 | yes |
+
+
+Model of the design (section 5, step 3, hypothesis): `loop` 1.49 at scale 10, `calls` 1.37, `fib` 1.34, `closures` 0.55, `objects` 1.45, bundle-like 0.92. Measured: `loop` 1.45, `calls` 1.36, `fib` 1.33, `closures` 0.54, `objects` 1.43, bundle-like 0.91 (scale 1). The model matched within 0.04. The bundle-like program does not change (it has no top-level globals in its hot loop).

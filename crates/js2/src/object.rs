@@ -345,6 +345,7 @@ impl Obj {
     }
 
     fn set_shape(self, shapes: &Shapes, id: ShapeId) {
+        shapes.changed(self.0.as_ptr() as usize);
         self.set_head(shapes.header(id).with_flags(self.head().flags()));
     }
 
@@ -405,6 +406,12 @@ impl Obj {
         self.set_shape(shapes, id);
     }
 
+    /// The address of slot `i`, for a cache that holds the tag of the object (`Shapes::watch_tag`): it is right until the object gets
+    /// another shape. Panics when the shape has no such slot.
+    pub fn slot_addr(self, shapes: &Shapes, i: u32) -> *mut Value {
+        self.slot_ptr(shapes, i)
+    }
+
     /// The location of slot `i`. Panics when the shape has no such slot.
     #[inline]
     fn slot_ptr(self, shapes: &Shapes, i: u32) -> *mut Value {
@@ -446,6 +453,8 @@ impl Obj {
         let need = to - (cap - 1);
         // SAFETY: the last inline word is a slot of the cell.
         let last = unsafe { inl.add(cap - 1) };
+        // The record is made or replaced below, even when the caller then fails before it changes the shape.
+        shapes.changed(self.0.as_ptr() as usize);
         if h.flags() & F_OVER == 0 {
             // SAFETY: one value is copied, from the last inline word.
             let r = unsafe { make_record(heap, Layout::Slots, 0, need.max(MIN_OVER), Value::UNDEFINED, last, 1)? };
