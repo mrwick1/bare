@@ -14235,6 +14235,7 @@ Changes:
 - Kept: handler ids in `style.fns` (handler id to property index), the computed prototype inheriting from the style prototype, and the key order base members, 250 accessors, `constructor`. `getComputedStyle` stays a global at its old place; `computed::install` only defines it.
 - `computed` accessor names use one buffer, as `style` does (no `format!` for each of the 250 names). The two `transform` names keep `format!`.
 - Deviation, as for every lazy global in `browser_lazy.rs`: until the first read, `Object.getOwnPropertyDescriptor(window, 'CSSStyleDeclaration')` shows an accessor. A write replaces the global and installs nothing. The names list, `in` and `Object.keys` do not read it.
+- Owner decision (2026-11-20): this deviation is accepted. It matches the other lazy globals.
 
 Tests (`browser_style_tests.rs`): a page that never touches style does not install; `el.style`, `getComputedStyle(el)` and `rule.style` each work as the first use; `'color' in CSSStyleDeclaration.prototype` is true with no style object; the prototype has 260 own names (8 base members first, `constructor` last) and the computed prototype 262. The two counts were also checked on the base tree with the same test. A write to the global installs nothing.
 
