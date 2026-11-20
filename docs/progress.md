@@ -16296,6 +16296,38 @@ Tests. Linux, debug: `cargo test --locked -p bare-js-api -p bare-js -p bare --li
 
 Not tested: `BARE_GC_STRESS=1` with the whole `bare --lib`; the whole `bare --lib` on Windows; the journeys and `tools/suite/run.py`; RSS and wall time; the cost of one call of each handler by a micro-loop (only the rows and the callgrind runs above); the macro-built `textarea` handlers (they stay old).
 
+## 2026-11-20: host handlers on the interface, A2: range, walker, selection, observers and platform (plan step S0.4 / A2)
+
+Status: the handlers of group A2 run through the interface (`Scope`, `Local`, `Args`). Tests pass on Linux and Windows. The matrix has no row over the limit under the rule. The PR is open without auto-merge.
+
+Base: the head of group B (`dbc5c166`, which holds #779). The textarea selection members need group B, so this branch builds on it. The diff holds the B commits until #779 merges. Groups F, G and E run in parallel. This change does not edit their files.
+
+Files converted: `browser_range.rs` (`Range`, `Selection`, `getSelection`), `browser_walker.rs` (`TreeWalker`, `NodeIterator`, `NodeFilter`, `createTreeWalker`, `createNodeIterator`), `browser_selection.rs` (the selection members of `<input>`), `browser_textarea.rs` (the selection members), `browser_mutation.rs` (`MutationObserver`, `MutationRecord`, the delivery microtask), `browser_intersection.rs`, `browser_resize.rs`, `browser_platform.rs` (`matchMedia`, `MediaQueryList`), `browser_platform_class.rs` (`DOMTokenList`, `classList`, `relList`, `sandbox`), `browser_platform_query.rs` (`getElementsBy*`, `document.scripts` and the other lists), and the two `Range` members of `browser_rects.rs`. `browser_dom_old.rs` lost the wrappers `check_insert`, `insert_valid` and `refuse` (no caller is left). Two shared files have small edits: the `DEFS` rows in `browser.rs` (the six selection rows of `<input>` and the six `document.*` list rows) and two `relList` lines in `browser_elements.rs`.
+
+Not converted, and why:
+
+- The install code of every file (`ensure`, `ensure_iter`, `install`, `install_platform`), the lazy globals and `browser_lazy`: they define the interface objects with an `Interp` and keep the old form in every group.
+- State keyed by `ObjId` or holding raw `Value`: the range and selection tables, the walker `filter`, the observer callbacks and queues, the GC hooks (`roots`, `trace`, `prune`). They stay until group Z.
+- `browser_range.rs`: `modify_selection`, `caret_range` and `select_at_text` keep an old wrapper (callers in `browser_ui.rs` and `browser_point.rs`). `bounds` stays old (callers in `browser_editing.rs` and `browser_rects.rs`).
+- `browser_selection.rs`: `effective`, `select_text`, `selection_after_value`, `set_value_attr`, `set_user_selection`, `update_selection` and the three `fire_*` functions. The control and focus code of other groups calls them with an `Interp`. The new handlers call the scope forms (`effective_s`, `update_selection_s`).
+- `browser_textarea.rs`: the members made by `reflect!` (`placeholder`, `required`, `readOnly`, `disabled`, `name`, `wrap`, `dirName`, `autocomplete`). The macro is in `browser_select.rs`, group C.
+- `browser_rects.rs`: `range_rects` and the other `Interp` helpers. The two `Range` handlers call `range_rects` through a bridge.
+- `browser_mutation.rs`: `record_array` and `mo_after`. See the cost work below.
+- `browser_intersection.rs` and `browser_resize.rs`: the frame hooks (`io_frame`, `io_notify`, `measure`, `broadcast`, `resize_frame`) and the entry builders. The scheduler calls them with an `Interp`.
+- `browser_platform.rs`: `def_method`, `def_get` (many files still use them) and `media_eval` (`set_viewport` calls it).
+
+Cost work. The first full matrix had two rows over the limit: `observer_load mo 1` (+1.519% glibc, +1.511% jemalloc) and `observer_load mo 10` (+1.882%, +1.934%). The cause is `record_array` in the scope form. Each record made nine locals, two arrays and nine `define_str` calls. The old form builds the same objects with no handle and with cached keys. The delivery microtask is not a handler call. It has no cheaper form in the interface. So `record_array` stays in the old form, and `take_records` and the delivery microtask call it through `old_v`. After that change the rows are at -0.01% (6 rows of the families `observer_load` and `mutation`).
+
+Other cost choices: `walker::filter` and `DOMTokenList.forEach` drop the handle stack after each step (`stack_truncate`) so a walk over a large tree keeps the stack small. The mutation options and the intersection init read their members in place (`get_str`). The `MediaQueryList` legacy `addListener` builds the two arguments of the listener call in one window and calls the scope handler directly (no second scope).
+
+Grep gate (`\bbare_js::(value|eval::Interp)|\bObjId\b|\bInterp\b|\.engine\(\)|\.heap\.`, lines for each file, before then after): range 98 to 23, walker 46 to 22, selection 31 to 11, mutation 31 to 29, intersection 36 to 29, resize 24 to 20, platform 37 to 32, platform_class 43 to 11, platform_query 14 to 2, rects 9 to 8, textarea 5 to 5, dom_old 30 to 27. Handler lines of the old form (`fn .*&\[Value\]`): range 62 to 0, walker 26 to 0, selection 11 to 0, mutation 6 to 0, intersection 10 to 0, resize 6 to 0, platform 9 to 1, platform_class 23 to 0, platform_query 8 to 0, rects 2 to 0. The one line in `browser_platform.rs` is the helper `arg`. The goal 0 for the gate is not met. The lines that stay are the items in the list above and the `old` bridges.
+
+Measurements. Machine archMachine (loaded: only instruction counts are used). `tools/js/cost_matrix.sh -j4`, 819 rows, `perf stat -e instructions:u`, minimum of 3 runs. Base `dbc5c166`, new: this branch. Both trees use the default release profile in separate target directories. Final matrix: mean change glibc +0.006%. No row is over +0.5% under both allocators. One row is over under glibc only and passes under jemalloc: `fetch_load bytes 10` (+0.698% glibc, -0.226% jemalloc; no code of this group runs in it). The first matrix listed `range_load iter 1` and `selection_load short 10` as over under one allocator only (+0.554% and +0.501% glibc, +0.470% and +0.482% jemalloc). They are under the limit in the final matrix. The `codegen-units=1` rule was not needed. `parse_load deep 1` and `deep 10` fail to run on both trees (known: stack overflow).
+
+Tests. Linux, debug: `cargo test --locked -p bare-js-api -p bare-js --lib`: 32 and 1104 (1 ignored) pass. `bare --lib`: 1715 pass (6 ignored), plain and with `BARE_ALL_API=1`. With `BARE_GC_STRESS=1`, 1714 pass and `browser_reclaim_tests::parsed_documents_ask_for_a_collect_by_their_native_bytes` fails (known on the base). The filters `browser_mutation browser_intersection browser_resize browser_platform browser_range browser_walker browser_selection browser_textarea browser_rects browser_scoped browser_editing` (151 tests) pass plain, with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1`, on Linux and on Windows (`cargo xwin test --no-run`, MSVC, exe through `winssh`).
+
+Not tested: the whole `bare --lib` on Windows; the journeys and `tools/suite/run.py`; RSS and wall time; the cost of one call of each handler by a micro-loop (only the rows above); `codegen-units=1` (not needed).
+
 ## 2026-11-20: js2 language failures (test262 `language/`)
 
 Task: fix the tests under `language/` that pass on the old engine and fail on js2. Scope: the compiler, the parser and the interpreter. Built-ins (`builtins.rs`, `bi_*.rs`) belong to two other agents. Generators, async, modules, `eval` and `with` belong to S3.

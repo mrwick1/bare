@@ -6,7 +6,7 @@ use crate::browser::*;
 use crate::browser_dom::*;
 use crate::browser_scoped::*;
 use bare_html::dom::{NodeData, NodeId};
-use bare_js::eval::{Error, Interp};
+use bare_js::eval::Interp;
 use bare_js::value::{ObjId, Value};
 
 type V = R<Value>;
@@ -62,28 +62,6 @@ impl Dom {
 
     pub(crate) fn insert_checked(&self, it: &mut Interp<'_>, parent: NodeId, node: NodeId, before: Option<NodeId>, op: Op) -> R<()> {
         run(it, |s| self.insert_checked_s(s, parent, node, before, op))
-    }
-
-    pub(crate) fn check_insert(&self, it: &mut Interp<'_>, parent: NodeId, node: NodeId, before: Option<NodeId>, replacing: Option<NodeId>, op: Op) -> R<bool> {
-        run(it, |s| self.check_insert_s(s, parent, node, before, replacing, op))
-    }
-
-    pub(crate) fn insert_valid(&self, it: &mut Interp<'_>, parent: NodeId, node: NodeId, before: Option<NodeId>, frag: bool, op: Op) -> R<()> {
-        run(it, |s| self.insert_valid_s(s, parent, node, before, frag, op))
-    }
-
-    /// The error of a refused insert. `op` puts the name of the call in front, as Chrome does: "Failed to execute 'append' on 'Document': ...".
-    pub(crate) fn refuse(&self, it: &mut Interp<'_>, op: Op, parent: NodeId, name: &str, reason: &str) -> Error {
-        if op.0.is_empty() {
-            return self.dom_err(it, name, reason);
-        }
-        let iface = match (op.1, self.data(parent)) {
-            ("", NodeData::Document) => "Document",
-            ("", NodeData::ShadowRoot) => "DocumentFragment",
-            ("", _) => "Element",
-            (i, _) => i,
-        };
-        self.dom_err(it, name, &format!("Failed to execute '{}' on '{iface}': {reason}", op.0))
     }
 
     /// `def_method` for a function of the new form.
