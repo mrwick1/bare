@@ -16220,6 +16220,49 @@ Measurements. Machine archMachine. Instruction counts (`perf stat -e instruction
 Tests. Linux, debug: `cargo test --locked -p bare-js-api -p bare-js -p bare --lib`: 32, 1104 (1 ignored) and 1715 (6 ignored) pass. The filters `browser_media_tests browser_canvas_tests browser_img_tests browser_elements_tests browser_scoped browser_reclaim browser_tests browser_navigation_tests browser_scheduler_tests browser_streams_tests browser_compression_tests canvas media image audio` (295 tests): pass plain, with `BARE_ALL_API=1` and with `BARE_GC_STRESS=1 BARE_ALL_API=1`. With `BARE_GC_STRESS=1` alone, 294 pass and 1 fails: `browser_reclaim_tests::parsed_documents_ask_for_a_collect_by_their_native_bytes` (the known failure of the base under `BARE_GC_STRESS=1`; it passes when `BARE_ALL_API=1` is also set). Windows 11 VM (`cargo xwin test --no-run`, exe through `winssh`): the same 295-test filter passes.
 
 Not tested: `BARE_GC_STRESS=1` and `BARE_ALL_API=1` with the whole `bare --lib`; the full `bare --lib` on Windows; the jemalloc and `codegen-units=1` runs (no row went over the limit under glibc); the journeys and `tools/suite/run.py`; RSS and wall time; the cost of one media, canvas or image call by a micro-loop; the `Image` and `decode()` paths with a real picture download (the tests use pages with no network).
+## 2026-11-20: host handlers on the interface, B: events, scheduler, console, perf, scroll and editing (plan step S0.4 / B)
+
+Status: the handlers of group B run through the interface (`Scope`, `Local`, `Args`). Tests pass on Linux and Windows. The matrix has no row over the limit under the rule (one row is over at the default profile and passes at `codegen-units=1`). The PR is open without auto-merge.
+
+Base: `origin/main` at `557e4df4`. It holds #762 (A1c) and D2 (#776). Group C (form, controls, select, submit, face) runs in parallel. This change does not edit its files.
+
+Files converted: `browser_events.rs` (`Event` and its subclasses, `EventTarget`, listeners, `dispatchEvent`, `CustomEvent`, the getters), `browser_uievent.rs`, `browser_mouse_legacy.rs`, `browser_focus.rs`, `browser_ui.rs` (the getters), `browser_frame.rs` (`requestAnimationFrame` and the window members), `browser_idle.rs`, `browser_error_event.rs`, `browser_rejection.rs`, `browser_scheduler.rs` (`setTimeout`, `setInterval`, `clear*`, `queueMicrotask`, `MessageChannel`, `MessagePort`, `BroadcastChannel` handlers, `performance.now`), `browser_console.rs` (the `console` methods), `browser_perf.rs` and `browser_perf_observer.rs` (the timeline), `browser_scroll.rs`, `browser_editing.rs` and `browser_textarea.rs` (most members). `browser.rs` has the `DEFS` rows of these files as `MS`, `GS` and `AS` rows, and `ctor_s`. `browser_motion.rs` has no handler.
+
+Not converted, and why:
+
+- `browser_textarea.rs`: `placeholder`, `required`, `readOnly`, `disabled`, `name`, `wrap`, `dirName`, `autocomplete` (the `reflect!` macro is in `browser_select.rs`, group C), `selectionStart`, `selectionEnd`, `selectionDirection`, `setSelectionRange`, `select` and `setRangeText` (they call `sel::*` in `browser_selection.rs`, group A2).
+- `browser_perf.rs`: `toJSON` of the entries. `browser_geom::finish` and `make` take the old handler type, and `browser_geom.rs` is not in this group. `illegal_constructor` is in `browser.rs`.
+- `browser_perf_observer.rs`: the lazy global install goes through `browser_lazy`, which keeps the old form in every group.
+- `browser_editing.rs`: the editing engine (`insert_text`, `delete_*` and the other helpers). They are not handlers and they key tables by `ObjId`.
+- `browser_console.rs`: the formatter (`text`, `plain`, `error_text`, `format`, `format_console_record`), `push_text` and `install`. The scheduler and the page code call them with an `Interp`.
+
+Engine and interface changes (shared files, small):
+
+- `Interp::api_args_slice` and `Interp::api_args` (`eval_api.rs`) read the arguments `from..to` of the running call in place (the window of `call_api_plain`), or one by one when the handles are not in the window.
+- `Engine::get_named`, `Engine::define_named` and `Engine::get_named_bool` (provided methods in `bare-js-api`, overridden in `Interp`). A key from Rust goes to `key_from_str` with no string value and no handle for the key. `Scope::get_str`, `Scope::define_str` and `Scope::get_bool_str` call them. The default bodies keep the old behaviour for other engines.
+- `browser_console.rs` keeps a record of one or two values inline (`Vals::Inline`). A record with more values owns a `Vec`. `take_console_records` moves the values out.
+
+Cost work. The first full matrix had 17 rows over the limit. The rows were the console rows, the event rows, the timer rows and `focus dispatch 10`. The fixed cost of a call of the interface form is about +50 instructions over the old form (`call_api_plain` about 56 and `call_scoped` about 32, against `call_host` about 26 and `Dom::call` about 13). Hypothesis: it cannot go lower without a change of the call protocol, because the two functions are close to the minimum by their assembly (6 pushes, one `Win` frame, one result through memory). So the handlers pay less instead:
+
+- A handler reads an argument as a raw value once (`Engine::raw`) and uses it for the checks. `setTimeout`, `setInterval` and `queueMicrotask` do this. Each `api_at` is about 12 to 15 instructions. `TimerArg::new` and the delay no longer call `type_of` and `to_number` for a number.
+- The init flags (`bubbles`, `cancelable`, `composed`, `capture`, `once`, `passive`) use `get_named_bool`: no handle is pushed.
+- The `console` methods read all arguments in one copy and keep one or two of them inline.
+- `get_named` and `define_named` skip the string value of the key.
+
+Grep gate (`\bbare_js::(value|eval::Interp)|\bObjId\b|\bInterp\b|\.engine\(\)|\.heap\.`, lines for each file, before then after): events 56 to 24, uievent 24 to 4, mouse_legacy 12 to 0, error_event 7 to 7, focus 16 to 9, ui 44 to 33, editing 46 to 38, textarea 24 to 5, scroll 30 to 9, motion 6 to 6, frame 7 to 5, idle 16 to 11, scheduler 81 to 72, rejection 13 to 13, perf 29 to 13, perf_observer 8 to 4, console 39 to 23. Handler lines of the old form (`fn .*&\[Value\]`): events 32 to 0, uievent 15 to 0, mouse_legacy 9 to 0, error_event 2 to 0, focus 6 to 0, ui 8 to 0, editing 11 to 1, textarea 17 to 0, scroll 18 to 0, frame 2 to 0, idle 5 to 0, scheduler 19 to 0, rejection 2 to 1, perf 15 to 2, perf_observer 5 to 0, console 18 to 5. The goal 0 is not met. The lines that stay are the items in the list above, the install code (`ObjId` tables) and the `old` bridges. `error_event` and `rejection` keep their counts because `build` and `ensure` make the event objects with an `Interp`.
+
+Measurements. Machine archMachine (loaded: only instruction counts are used). `tools/js/cost_matrix.sh -J -j4`, 819 rows, `perf stat -e instructions:u`, minimum of 3 runs. Base `557e4df4`. New: this branch after the merge of `557e4df4`. Both trees are built with the default release profile in separate target directories, and again with `codegen-units=1`.
+
+- Default profile, glibc and jemalloc: mean change glibc +0.014%, jemalloc +0.010%. One row is over +0.5% under both: `nodelist_load scan 10` (+0.569% glibc, +0.546% jemalloc). No handler of this group runs in that row (hypothesis: a code layout effect). At `codegen-units=1` the row is +0.018% glibc and +0.014% jemalloc, so it passes the rule.
+- Before the last two changes the rows `scheduler_load timers 10`, `scheduler_load mixed 10`, `dataset_load keys 10000 50` and `dataset_load keys 1000 50` were over at the default profile. All of them pass at `codegen-units=1` (the mean of the 19 rows of these families is +0.066% glibc).
+- In the final matrix no row is over under one allocator only. The rows of the group at the default profile (`browser_load event`, `focus_load`, `scheduler_load`, `console_load`) are all under +0.5%. At `codegen-units=1`, 30 rows of these families: none over.
+- Callgrind (symbol builds, before the last two changes), `scheduler_load timers 1` (1,000 timers): +122,260 instructions of 23,179,469 (+0.53%), about 120 for each timer. `browser_load event 1`: +136,566 of 33,448,458 (+0.41%). `get_named` was +102,000 of that (3 flags of 500 constructors), so the flags moved to `get_named_bool`.
+- `parse_load deep 1` and `deep 10` fail to run on both trees (known: stack overflow).
+
+Tests. Linux, debug: `cargo test --locked -p bare-js-api -p bare-js -p bare --lib`: 32, 1104 (1 ignored) and 1715 (6 ignored) pass. The filters `browser_console_tests browser_editing_tests browser_focus_tests browser_idle_tests browser_mouse_legacy_tests browser_rejection_tests browser_scheduler_tests browser_scroll_tests browser_uievent_tests browser_ui_tests browser_raf_tests browser_events browser_basics_tests browser_perf browser_textarea` (200 tests, 1 ignored) pass plain, with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1`. The whole `bare --lib` passes with `BARE_ALL_API=1` (1714 tests before the merge). Windows (`cargo xwin test`, the exe through `winssh`): `bare-js-api` 32 pass, `bare-js` filter `api_tests` 46 pass, `bare` with the same filters 200 pass.
+
+Not tested: `BARE_GC_STRESS=1` with the whole `bare --lib`; the whole `bare --lib` on Windows; the journeys and `tools/suite/run.py`; RSS and wall time; the cost of one call of each handler by a micro-loop (only the rows and the callgrind runs above); the macro-built `textarea` handlers (they stay old).
+
 ## 2026-11-20: js2 language failures (test262 `language/`)
 
 Task: fix the tests under `language/` that pass on the old engine and fail on js2. Scope: the compiler, the parser and the interpreter. Built-ins (`builtins.rs`, `bi_*.rs`) belong to two other agents. Generators, async, modules, `eval` and `with` belong to S3.
