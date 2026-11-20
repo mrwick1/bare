@@ -16,15 +16,15 @@
 //!
 //! Removal. An end goes when its port closes, when the GC drops its port, when its owner page ends, and when a message that carried it is
 //! dropped (`release`). A send to a missing end is dropped with no error.
-use crate::browser_navigation_state::{State, Transfer};
+use crate::browser_navigation_state::Transfer;
+use bare_js_api::{Cloned, Moved};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 
 /// A message for an end, as data.
 pub(crate) struct Wire {
-    pub state: State,
-    pub transfer: Vec<Transfer>,
-    /// The byte cost in the queue of a port (`16 + state.bytes`).
+    pub cloned: Cloned,
+    /// The byte cost in the queue of a port (`16 + cloned.cost()`).
     pub bytes: usize,
 }
 
@@ -49,8 +49,14 @@ pub(crate) struct PortHub {
     st: RefCell<Ends>,
 }
 
-fn ends_of(xf: &[Transfer]) -> impl Iterator<Item = u64> + '_ {
-    xf.iter().filter_map(|t| if let Transfer::End { me, .. } = t { Some(*me) } else { None })
+fn ends_of(xf: &[Moved]) -> impl Iterator<Item = u64> + '_ {
+    xf.iter().filter_map(|m| match m {
+        Moved::Host(b) => match b.downcast_ref::<Transfer>() {
+            Some(Transfer::End { me, .. }) => Some(*me),
+            _ => None,
+        },
+        Moved::Buffer(_) => None,
+    })
 }
 
 impl PortHub {
@@ -128,7 +134,7 @@ impl PortHub {
             for w in e.queue {
                 self.wires.set(self.wires.get() - 1);
                 self.bytes.set(self.bytes.get() - w.bytes);
-                todo.extend(ends_of(&w.transfer));
+                todo.extend(ends_of(w.cloned.moved()));
             }
         }
     }
@@ -139,8 +145,8 @@ impl PortHub {
     }
 
     /// The ports of a message that is dropped never arrive: their ends go.
-    pub(crate) fn release(&self, xf: &[Transfer]) {
-        if xf.iter().any(|t| matches!(t, Transfer::End { .. })) {
+    pub(crate) fn release(&self, xf: &[Moved]) {
+        if ends_of(xf).next().is_some() {
             let mut s = self.st.borrow_mut();
             self.remove_all(&mut s, ends_of(xf).collect());
         }

@@ -168,8 +168,7 @@ pub(crate) struct Out {
     pub target_origin: String,
     /// The origin of this page, for the `origin` of the event.
     pub origin: String,
-    pub state: crate::browser_navigation_state::State,
-    pub transfer: Vec<crate::browser_navigation_state::Transfer>,
+    pub cloned: bare_js_api::Cloned,
 }
 
 /// The children of one page: the slots (what a script sees), the states (what the driver runs), and the windows.
@@ -202,7 +201,7 @@ impl Drop for Kids {
             // The page ends: its ends go, and the ports of the messages that never left it.
             cfg.hub.drop_page(self.page.get());
             for m in self.outbox.get_mut().drain(..) {
-                cfg.hub.release(&m.transfer);
+                cfg.hub.release(m.cloned.moved());
             }
         }
     }
@@ -648,7 +647,7 @@ impl Browser {
             };
             // A message for a child that did not run is dropped: its ports never arrive.
             for m in down {
-                cfg.hub.release(&m.transfer);
+                cfg.hub.release(m.cloned.moved());
             }
             if let Some(slot) = self.dom.kids.kids.borrow_mut().get_mut(i) {
                 *slot = Some(ch);
@@ -657,7 +656,7 @@ impl Browser {
         // Each live child took its messages above. What is left is for a frame that was removed: drop it.
         if self.dom.kids.outbox_len() > 0 {
             for m in self.dom.kids.take_out(|m| matches!(m.to, Side::Child(_))) {
-                cfg.hub.release(&m.transfer);
+                cfg.hub.release(m.cloned.moved());
             }
         }
         t
@@ -707,15 +706,15 @@ impl Browser {
 impl Dom {
     /// A message from another page reaches this page: drop it if the target origin does not match, else queue a `message` event for the
     /// window. `source` is the window of the sender in this heap.
-    fn deliver(&self, it: &mut Interp<'_>, m: Out, source: Option<ObjId>) -> R<()> {
+    fn deliver(&self, it: &mut Interp<'_>, mut m: Out, source: Option<ObjId>) -> R<()> {
         if m.target_origin != "*" && m.target_origin != self.window_origin() {
             if let Some(h) = self.kids.hub() {
-                h.release(&m.transfer);
+                h.release(m.cloned.moved());
             }
             return Ok(());
         }
-        let bytes = 16usize.saturating_add(m.state.bytes);
-        let (data, ports) = crate::browser_navigation_state::materialize_with(self, it, &m.state, m.transfer)?;
+        let bytes = 16usize.saturating_add(m.cloned.cost());
+        let (data, ports) = crate::browser_navigation_state::materialize_with(self, it, &mut m.cloned)?;
         self.queue_window(data, ports.into_boxed_slice(), bytes, Some(Box::new(Sender { origin: m.origin, source })))
     }
 
