@@ -44,6 +44,9 @@ impl Layout {
     }
 }
 
+/// The table of shapes moved to `shapes.rs` (S1.8). This keeps the path of S1.4 for the code that names it.
+pub use crate::shapes::Shapes;
+
 /// Flag bits that fit the header: 24.
 pub const FLAG_MAX: u32 = (1 << 24) - 1;
 
