@@ -17608,3 +17608,31 @@ Results.
 | One zone load, `find` + `Zone::parse`, against `metadata` + `read` + `Zone::parse` of the system file (best of 5 batches of 200,000, 3 runs, machine not idle) | `America/New_York`: 402, 517, 406 ns against 1,982, 2,420, 1,970 ns. `Asia/Kolkata`: 361, 174, 165 ns against 4,040, 1,693, 1,603 ns. `Pacific/Auckland`: 384, 323, 305 ns against 2,702, 1,988, 1,851 ns. The system files on this machine are fat; the embedded files are slim. |
 
 Not tested: macOS and a macOS build of the new code beyond the existing cross check; Windows 10 and ARM; the Windows release binary size; a Windows zone id with no CLDR row on the VM (`tzutil` refuses the two retired ids; the unit test covers the offset); the `bare-drive` journey of the design (check 4: `getTimezoneOffset` and `resolvedOptions().timeZone` through the whole browser on the VM); RSS of the whole browser; wall time on an idle machine; `tools/portable_check.sh` without `--scan` (the scan fails on three older files of main: `downloads/run.rs`, `force.rs`, `mcp/src/main.rs`; none is touched here); the stale-`known` check of the scan, which runs after that failure.
+
+## js2: the Symbol primitive (2026-11-21)
+
+Design: [design-js2-async.md](design-js2-async.md), decision 2. Base: `fd9c749b` (`origin/main` at the start). Machine: archMachine, not idle; instruction counts only.
+
+What changed.
+
+1. A symbol is a cell with the layout of a flat string and the flag `FLAG_SYMBOL` (`string.rs`). Its units are the description. `FLAG_NO_DESC` marks `Symbol()`. `FLAG_REGISTERED` marks `Symbol.for`. The `Value` kind `Symbol` already existed. The collector marks the cell as a leaf string.
+2. A symbol is a property key with no new key type. A shape key is a cell address, and a symbol is a different cell from every atom. `for-in`, `Object.keys`, `Object.getOwnPropertyNames` and the script display skip symbols. `Object.getOwnPropertySymbols` lists them.
+3. The members of `Symbol` and `Symbol.prototype` are lazy (`F_LAZY`, as the `length` of a function). `Realm::new` makes the six well-known symbols and one native cell.
+4. `ToPrimitive` reads `Symbol.toPrimitive`. `instanceof` reads `Symbol.hasInstance` (the native default is not called). `Object.prototype.toString` reads `Symbol.toStringTag`. `Object.assign`, the object spread, `getOwnPropertyDescriptors` and `defineProperties` include symbols. Implicit string or number conversion of a symbol throws `TypeError`.
+5. `call_get!` in `Vm::run` calls a native getter through a cold arm (the `description` getter needs it).
+
+Wired: `typeof`, `Symbol()`, `Symbol.for`, `keyFor`, `toString`, `valueOf`, `description`, the six symbols `iterator`, `asyncIterator`, `species`, `toStringTag`, `hasInstance`, `toPrimitive`, and the hooks above.
+Later: `match`, `matchAll`, `replace`, `search`, `split`, `unscopables`, `isConcatSpreadable` (they need `RegExp`, `with` and `concat`); `iterator` and `asyncIterator` are values that no built-in reads until step G3; `species` waits for step P3; `Array.prototype[Symbol.iterator]`; `new` of a bound function (a known gap).
+
+Results.
+
+| Check | Result |
+| --- | --- |
+| test262 (`tools/js/test262_js2.sh -u`, `built-ins/Symbol` added to the subset, `allow:` lines for the Symbol features) | new engine: 16,256 pass, against 15,894 on main with the same rules. 0 tests pass on main and fail here. 362 tests gain. `built-ins/Symbol` (all its directories): 61 pass, 4 fail, 33 skipped for other features. The 4 fail on `Proxy`, `Date`, `RegExp` or a `Symbol.species` getter. |
+| `cargo test --locked -p bare-js2 --lib` | 455 pass (10 new in `bi_symbol_tests.rs`, each run plain and under constant collection) |
+| `cargo test --locked -p bare-js-diff` | pass (`script_tests:479` now expects `typeof Symbol` to be `function`; its `diff-known.txt` entry is gone) |
+| Micro rows, `tools/js/instr.sh` (min of 3, instructions:u, N minus N=0), default build, base then new | `loopfn 3000000` 817,501,573 to 838,500,338 (+2.57%); `calls 1000000` 586,500,399 to 589,500,229 (+0.51%); `fib 27` 260,524,327 to 260,842,777 (+0.12%); `closures 1000000` 1,947,237,527 to 1,954,236,527 (+0.36%); `objects 1000000` 710,274,979 to 708,275,975 (-0.28%) |
+| Same rows, `codegen-units=1`, base then new | `loopfn` 847,499,967 to 847,500,224 (0.00%); `calls` 579,500,262 to 579,500,501 (0.00%); `fib` 251,308,373 to 251,307,475 (0.00%); `closures` 1,942,161,118 to 1,943,162,571 (+0.05%); `objects` 720,276,001 to 720,277,874 (0.00%). All within +0.5%, so the two default-build rows over +0.5% pass by the cost rule. Hypothesis: the `loopfn` default-build swing is code layout, because it is 0.00% at `codegen-units=1`. |
+| Start-up, `script_run` on `var x = 1;` (min of 3, three samples) | base 1,796,789 / 1,797,687 / 1,794,741; new 1,804,693 / 1,803,441 / 1,803,620. +7K to +8.7K (+0.4% to +0.5%). The Rust-side install alone is about +1K. The rest is the `assign`, `copyData` and `rest` helpers of `prelude.js` (symbols are copied). A new top-level `var` in the prelude cost +45K, so none was added. |
+
+Not tested: Windows; the browser and the old engine with symbols (the old engine has none); Miri locally (the tests use small loops for the CI Miri job); `Symbol.species`, `iterator` and `asyncIterator` reads (no built-in reads them yet); the whole-browser cost; wall time on an idle machine; the `cost_matrix.sh` rows other than the five micro rows and start-up.
