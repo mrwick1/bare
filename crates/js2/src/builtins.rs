@@ -309,6 +309,7 @@ impl Realm {
         self.install_string();
         self.install_number();
         self.install_symbol();
+        self.install_json();
     }
 
     fn install_function(&mut self) {

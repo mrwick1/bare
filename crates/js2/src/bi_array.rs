@@ -149,6 +149,18 @@ fn del_at(rt: &mut Realm, v: Value, i: f64) -> R<()> {
     if rt.delete_prop(v, k)? { Ok(()) } else { rt.type_error("cannot delete a property that is not configurable") }
 }
 
+/// The check of `ArraySpeciesCreate` that js2 can make without `Symbol.species`: the `constructor` of an array must be `undefined` or an
+/// object (any object gives a plain array). Reading it runs a getter.
+fn species_check(rt: &mut Realm, o: Value) -> R<()> {
+    if Realm::obj(o).is_some_and(|x| rt.is_array(x)) {
+        let c = rt.get_prop(o, Key::Name(rt.k_constructor))?;
+        if c.is_null() || !c.is_undefined() && Realm::obj(c).is_none() {
+            return rt.type_error("the constructor of the array is not an object");
+        }
+    }
+    Ok(())
+}
+
 /// A new array of length 0 with room for `n` elements; a `RangeError` when `n` is not a valid length.
 fn new_arr(rt: &mut Realm, n: f64) -> R<Obj> {
     if n > u32::MAX as f64 - 1.0 {
@@ -318,6 +330,7 @@ fn slice(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let o = this_val(rt, this)?;
     let len = len_of(rt, o)?;
     let (mut k, fin) = (rel(rt, arg(args, 0), 0.0, len)?, rel(rt, arg(args, 1), len, len)?);
+    species_check(rt, o)?;
     let a = new_arr(rt, (fin - k).max(0.0))?;
     let mut n = 0.0;
     while k < fin {
@@ -346,6 +359,7 @@ fn splice(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     if len + n - count > MAX_LEN {
         return rt.type_error("the length of the array-like would be above 2^53 - 1");
     }
+    species_check(rt, o)?;
     let a = new_arr(rt, count)?;
     let mut k = 0.0;
     while k < count {
@@ -393,6 +407,7 @@ fn splice(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
 
 fn concat(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let o = this_val(rt, this)?;
+    species_check(rt, o)?;
     let a = new_arr(rt, 0.0)?;
     let mut n = 0.0;
     for e in std::iter::once(o).chain(args.iter().copied()) {
