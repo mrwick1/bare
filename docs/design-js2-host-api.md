@@ -217,3 +217,13 @@ Each PR is at most about 400 changed lines of code (the rule of `plan-engine-rew
 - The old engine's lane in the baseline.
 - The nested allocation of the journeys (needs the browser slice).
 - Windows, macOS and arm64.
+
+## 9. Decisions (owner, 2026-11-20)
+
+1. The `api` module joins the unsafe modules of js2. The host call reads the window in place. Miri tests cover the two sites.
+2. `Realm` is the engine type (4.1 A).
+3. The collector stays held in a nested call (4.3 A). Build the registry of suspended machines only if the browser slice measures a large nested allocation.
+4. An `Unsupported` abort goes through `STOP` and `ApiState::abort`.
+5. The build waits for #785 to merge.
+6. The shared suite lives in `bare-js-api` behind a feature (5.1).
+7. The trait keeps `as_str(&self)`. Ropes are flattened on push and at window entry (3.6).
