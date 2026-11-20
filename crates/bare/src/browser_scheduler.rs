@@ -79,17 +79,15 @@
 use crate::browser::*;
 use crate::browser_navigation_state::Transfer;
 use crate::browser_port_hub::Wire;
+use crate::browser_scoped::*;
 use bare_html::dom::NodeId;
 use bare_js::eval::{Error, Interp, WallClock};
 use bare_js::value::{ObjId, Value};
+use bare_js_api::{Args, Attrs, HostFn, Local, Type};
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 type V = R<Value>;
-
-fn arg(a: &[Value], i: usize) -> Value {
-    a.get(i).copied().unwrap_or(Value::Undefined)
-}
 
 /// Bounds of the scheduler. Each one is checked before the thing grows and ends with `Limit(Host(name))`.
 #[derive(Clone, Copy, Debug)]
@@ -178,10 +176,10 @@ enum TimerArg {
 }
 
 impl TimerArg {
-    fn new(it: &mut Interp<'_>, v: Value) -> Self {
-        match v {
-            Value::Undefined | Value::Null | Value::Bool(_) | Value::Number(_) | Value::BigInt(_) => TimerArg::Plain(v),
-            _ => TimerArg::Held(it.persist_value(v)),
+    fn new(s: &mut Sc<'_, '_>, l: Local<'_>) -> Self {
+        match s.type_of(l) {
+            Type::Undefined | Type::Null | Type::Boolean | Type::Number | Type::BigInt => TimerArg::Plain(bare_js_api::Engine::raw(s.engine(), l)),
+            _ => TimerArg::Held(s.persist(l)),
         }
     }
 
@@ -878,33 +876,33 @@ impl Dom {
         let kc = self.key(it, "constructor")?;
         let kp = self.key(it, "prototype")?;
         for (name, h, len) in [
-            ("setTimeout", set_timeout as H, 1),
-            ("setInterval", set_interval as H, 1),
-            ("clearTimeout", clear_timer as H, 1),
-            ("clearInterval", clear_timer as H, 1),
-            ("queueMicrotask", queue_microtask as H, 1),
+            ("setTimeout", set_timeout as HS, 1),
+            ("setInterval", set_interval as HS, 1),
+            ("clearTimeout", clear_timer as HS, 1),
+            ("clearInterval", clear_timer as HS, 1),
+            ("queueMicrotask", queue_microtask as HS, 1),
         ] {
-            let f = self.add_fn(it, h, name, len, false)?;
+            let f = self.add_fn_s_obj(it, h, name, len, HostFn::Method)?;
             let k = self.key(it, name)?;
             it.define_data(g, k, Value::Object(f), true, true, true)?;
         }
         // interface objects
         for (name, proto, ctor) in [
-            ("MessageChannel", channel, Some(message_channel_ctor as H)),
+            ("MessageChannel", channel, Some(message_channel_ctor as HS)),
             ("MessagePort", port, None),
             ("MessageEvent", event, None),
         ] {
-            let f = self.add_fn(it, ctor.unwrap_or(illegal), name, 0, ctor.is_some())?;
+            let f = self.add_fn_s_obj(it, ctor.unwrap_or(illegal), name, 0, if ctor.is_some() { HostFn::Ctor } else { HostFn::Method })?;
             it.define_data(f, kp, Value::Object(proto), false, false, false)?;
             it.define_data(proto, kc, Value::Object(f), true, false, true)?;
             let k = self.key(it, name)?;
             it.define_data(g, k, Value::Object(f), true, false, true)?;
         }
-        let acc = |it: &mut Interp<'_>, on: ObjId, name: &str, get: H, set: Option<H>| -> R<()> {
+        let acc = |it: &mut Interp<'_>, on: ObjId, name: &str, get: HS, set: Option<HS>| -> R<()> {
             let key = self.key(it, name)?;
-            let gf = self.add_fn(it, get, &format!("get {name}"), 0, false)?;
+            let gf = self.add_fn_s_obj(it, get, &format!("get {name}"), 0, HostFn::Method)?;
             let sf = match set {
-                Some(s) => Some(self.add_fn(it, s, &format!("set {name}"), 1, false)?),
+                Some(s) => Some(self.add_fn_s_obj(it, s, &format!("set {name}"), 1, HostFn::Method)?),
                 None => None,
             };
             let d = bare_js::heap::PropertyDescriptor { get: Some(Some(gf)), set: Some(sf), enumerable: Some(true), configurable: Some(true), ..Default::default() };
@@ -913,8 +911,8 @@ impl Dom {
                 Err(e) => Err(it.heap_error(e)),
             }
         };
-        let method = |it: &mut Interp<'_>, on: ObjId, name: &str, h: H, len: u32| -> R<()> {
-            let f = self.add_fn(it, h, name, len, false)?;
+        let method = |it: &mut Interp<'_>, on: ObjId, name: &str, h: HS, len: u32| -> R<()> {
+            let f = self.add_fn_s_obj(it, h, name, len, HostFn::Method)?;
             let k = self.key(it, name)?;
             it.define_data(on, k, Value::Object(f), true, true, true)
         };
@@ -922,7 +920,7 @@ impl Dom {
         method(it, port, "start", port_start, 0)?;
         method(it, port, "close", port_close, 0)?;
         acc(it, port, "onmessage", port_onmessage, Some(set_port_onmessage))?;
-        for (name, h) in [("data", msg_data as H), ("origin", msg_origin), ("lastEventId", msg_empty), ("source", msg_source), ("ports", msg_ports)] {
+        for (name, h) in [("data", msg_data as HS), ("origin", msg_origin), ("lastEventId", msg_empty), ("source", msg_source), ("ports", msg_ports)] {
             acc(it, event, name, h, None)?;
         }
         method(it, perf, "now", performance_now, 0)?;
@@ -974,10 +972,10 @@ impl Dom {
         Ok(e)
     }
 
-    fn port_of(&self, it: &mut Interp<'_>, this: Value) -> R<ObjId> {
-        match this {
-            Value::Object(o) if self.sched.borrow().ports.contains_key(&o) => Ok(o),
-            _ => Err(it.type_error("Illegal invocation")),
+    fn port_of<'s>(&self, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, ObjId> {
+        match obj_id(s, this).filter(|o| self.sched.borrow().ports.contains_key(o)) {
+            Some(o) => Ok(o),
+            None => Err(s.type_error("Illegal invocation")),
         }
     }
 
@@ -1147,131 +1145,131 @@ impl Dom {
     }
 }
 
-fn illegal(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
-    Err(it.type_error("Illegal constructor"))
+fn illegal<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    Err(s.type_error("Illegal constructor"))
 }
 
 // ------------------------------------------------------------------------------------------ timers
 
-fn window_this(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<()> {
-    match this {
-        Value::Undefined | Value::Null => Ok(()),
-        Value::Object(o) if Some(&o) == d.global.get() || crate::browser_frames::is_blank_window(d, o) => Ok(()),
-        _ => Err(it.type_error("Illegal invocation")),
-    }
-}
-
-fn set_timer(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], repeat: bool) -> V {
-    window_this(d, it, this)?;
+fn set_timer<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, repeat: bool) -> Res<'s, Local<'s>> {
+    crate::browser_frame::window_this(d, s, this)?;
     let name = if repeat { "setInterval" } else { "setTimeout" };
-    if a.is_empty() {
-        return Err(it.type_error(&format!("Failed to execute '{name}' on 'Window': 1 argument required, but only 0 present.")));
-    }
-    let cb = a[0];
-    if !it.is_callable_value(cb) {
-        return Err(Error::Unsupported(unsupported(match (repeat, matches!(cb, Value::String(_))) {
+    let Some(cb) = a.get(0) else {
+        return Err(s.type_error(&format!("Failed to execute '{name}' on 'Window': 1 argument required, but only 0 present.")));
+    };
+    if !s.is_callable(cb) {
+        return Err(unsupp(match (repeat, s.type_of(cb) == Type::String) {
             (false, true) => "setTimeout with a string callback (eval)",
             (true, true) => "setInterval with a string callback (eval)",
             (false, false) => "setTimeout with a non-function callback",
             (true, false) => "setInterval with a non-function callback",
-        })));
+        }));
     }
-    let n = it.to_js_number(arg(a, 1))?;
+    let dl = arg_s(s, a, 1);
+    let n = s.to_number(dl)?;
     let mut delay = to_int32(n).max(0) as u32;
     let argc = a.len().saturating_sub(2);
     let now = d.now_ms();
     let (id, level) = {
-        let s = d.sched.borrow();
-        if argc > s.limits.max_timer_args {
-            return Err(d.lim("timer-args"));
+        let sc = d.sched.borrow();
+        if argc > sc.limits.max_timer_args {
+            return Err(d.lim_s(s, "timer-args"));
         }
-        if s.timers.len() >= s.limits.max_timers {
-            return Err(d.lim("timers"));
+        if sc.timers.len() >= sc.limits.max_timers {
+            return Err(d.lim_s(s, "timers"));
         }
-        let id = s.next_timer + 1;
+        let id = sc.next_timer + 1;
         if id > i32::MAX as u64 {
-            return Err(d.lim("timer-ids"));
+            return Err(d.lim_s(s, "timer-ids"));
         }
-        (id, s.nesting.saturating_add(1))
+        (id, sc.nesting.saturating_add(1))
     };
     if level > 5 && delay < 4 {
         delay = 4;
     }
-    it.charge(1 + argc as u64)?;
-    let args = if argc == 0 { Vec::new() } else { a[2..].iter().map(|&v| TimerArg::new(it, v)).collect() };
-    let call = TimerCall { cb: it.persist_value(cb), args };
-    let key = d.schedule(now + delay as f64, Task::Timer(id))?;
-    let mut s = d.sched.borrow_mut();
-    s.next_timer = id;
-    let rearm = matches!(cb, Value::Object(o) if s.running == Some(o));
+    s.charge(1 + argc as u64)?;
+    let args = (2..a.len()).map(|i| TimerArg::new(s, a.get(i).expect("in range"))).collect();
+    let call = TimerCall { cb: s.persist(cb), args };
+    let key = lift(s, d.schedule(now + delay as f64, Task::Timer(id)))?;
+    let cb_obj = obj_id(s, cb);
+    let mut sc = d.sched.borrow_mut();
+    sc.next_timer = id;
+    let rearm = cb_obj.is_some_and(|o| sc.running == Some(o));
     let period = if delay >= RECURRING_MIN_MS && (repeat || rearm) { delay } else { 0 };
     if rearm && period > 0 {
-        s.rearmed = Some(id);
+        sc.rearmed = Some(id);
     }
-    s.timers.insert(id, Timer { call, interval: repeat.then_some(delay), nesting: level, key: Some(key), period, idle: false });
-    Ok(Value::Number(id as f64))
+    sc.timers.insert(id, Timer { call, interval: repeat.then_some(delay), nesting: level, key: Some(key), period, idle: false });
+    Ok(s.number(id as f64))
 }
 
-fn set_timeout(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    set_timer(d, it, this, a, false)
+fn set_timeout<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    set_timer(d, s, this, a, false)
 }
 
-fn set_interval(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    set_timer(d, it, this, a, true)
+fn set_interval<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    set_timer(d, s, this, a, true)
 }
 
-fn clear_timer(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    window_this(d, it, this)?;
-    let n = it.to_js_number(arg(a, 0))?;
+fn clear_timer<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    crate::browser_frame::window_this(d, s, this)?;
+    let v = arg_s(s, a, 0);
+    let n = s.to_number(v)?;
     let id = to_int32(n);
-    let mut s = d.sched.borrow_mut();
+    let mut sc = d.sched.borrow_mut();
     if id > 0
-        && let Some(t) = s.timers.remove(&(id as u64))
+        && let Some(t) = sc.timers.remove(&(id as u64))
         && let Some(k) = t.key
     {
-        s.tasks.remove(&k);
+        sc.tasks.remove(&k);
     }
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-fn queue_microtask(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    window_this(d, it, this)?;
-    if !it.is_callable_value(arg(a, 0)) {
-        return Err(it.type_error("Failed to execute 'queueMicrotask' on 'Window': parameter 1 is not of type 'Function'."));
+fn queue_microtask<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    crate::browser_frame::window_this(d, s, this)?;
+    let cb = arg_s(s, a, 0);
+    if !s.is_callable(cb) {
+        return Err(s.type_error("Failed to execute 'queueMicrotask' on 'Window': parameter 1 is not of type 'Function'."));
     }
-    it.queue_microtask(a[0])?;
-    Ok(Value::Undefined)
+    s.queue_microtask(cb)?;
+    Ok(s.undefined())
 }
 
-fn performance_now(d: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
+fn performance_now<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     // On the virtual clock a read takes a little time, so that a loop that waits for `performance.now()` to pass a value ends.
     if bare_net::vclock::on() {
         bare_net::vclock::advance_by(bare_net::vclock::READ_MS);
     }
-    Ok(Value::Number(d.now_ms()))
+    Ok(s.number(d.now_ms()))
 }
 
 // ------------------------------------------------------------------------------------------ message ports
 
-fn message_channel_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
+fn message_channel_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     if d.sched.borrow().ports.len() + 2 > d.sched.borrow().limits.max_ports {
-        return Err(d.lim("message-ports"));
+        return Err(d.lim_s(s, "message-ports"));
     }
     if d.st.borrow().by_obj.len() + 2 > d.lim.max_wrappers {
-        return Err(d.lim("dom-wrappers"));
+        return Err(d.lim_s(s, "dom-wrappers"));
     }
     let protos = d.sched.borrow().protos.expect("installed");
-    let (p1, p2, ch) = (d.obj(it, protos.port)?, d.obj(it, protos.port)?, d.obj(it, protos.channel)?);
-    let (k1, k2) = (d.key(it, "port1")?, d.key(it, "port2")?);
-    it.define_data(ch, k1, Value::Object(p1), false, false, false)?;
-    it.define_data(ch, k2, Value::Object(p2), false, false, false)?;
+    let p1 = d.obj_s(s, protos.port)?;
+    let l1 = d.obj_local(s, p1);
+    let p2 = d.obj_s(s, protos.port)?;
+    let l2 = d.obj_local(s, p2);
+    let ch = d.obj_s(s, protos.channel)?;
+    let lc = d.obj_local(s, ch);
+    let fixed = Attrs { writable: false, enumerable: false, configurable: false };
+    s.define_str(lc, "port1", l1, fixed)?;
+    s.define_str(lc, "port2", l2, fixed)?;
     let mut st = d.st.borrow_mut();
-    let mut s = d.sched.borrow_mut();
+    let mut sc = d.sched.borrow_mut();
     for (me, peer) in [(p1, p2), (p2, p1)] {
         st.by_obj.insert(me, Target::Obj(me));
-        s.ports.insert(me, Port::new(Some(peer), false));
+        sc.ports.insert(me, Port::new(Some(peer), false));
     }
-    Ok(Value::Object(ch))
+    Ok(lc)
 }
 
 impl Dom {
@@ -1451,39 +1449,41 @@ impl Dom {
     }
 }
 
-fn port_post_message(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let port = d.port_of(it, this)?;
-    if a.is_empty() {
-        return Err(it.type_error("Failed to execute 'postMessage' on 'MessagePort': 1 argument required, but only 0 present."));
-    }
-    let list = d.transfer_arg(it, arg(a, 1), Some(port))?;
+fn port_post_message<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let port = d.port_of(s, this)?;
+    let Some(v) = raw_arg(s, a, 0) else {
+        return Err(s.type_error("Failed to execute 'postMessage' on 'MessagePort': 1 argument required, but only 0 present."));
+    };
+    let transfer = raw_arg(s, a, 1).unwrap_or(Value::Undefined);
+    let list = old(s, |it| d.transfer_arg(it, transfer, Some(port)))?;
     let remote = d.sched.borrow().ports.get(&port).and_then(|p| p.remote);
     if let Some(end) = remote {
-        return post_remote(d, it, a[0], &list, end);
+        old(s, |it| post_remote(d, it, v, &list, end))?;
+        return Ok(s.undefined());
     }
-    let (data, bytes, moved) = d.clone_payload(it, a[0], &list)?;
+    let (data, bytes, moved) = old(s, |it| d.clone_payload(it, v, &list))?;
     let now = d.now_ms();
     let target = {
-        let s = d.sched.borrow();
-        let Some(p) = s.ports.get(&port) else { return Ok(Value::Undefined) };
-        let Some(peer) = p.peer else { return Ok(Value::Undefined) };
-        if s.queued >= s.limits.max_queued_messages {
-            return Err(d.lim("messages"));
+        let sc = d.sched.borrow();
+        let Some(p) = sc.ports.get(&port) else { return Ok(s.undefined()) };
+        let Some(peer) = p.peer else { return Ok(s.undefined()) };
+        if sc.queued >= sc.limits.max_queued_messages {
+            return Err(d.lim_s(s, "messages"));
         }
-        if s.queued_bytes.saturating_add(bytes) > s.limits.max_queued_message_bytes {
-            return Err(d.lim("message-bytes"));
+        if sc.queued_bytes.saturating_add(bytes) > sc.limits.max_queued_message_bytes {
+            return Err(d.lim_s(s, "message-bytes"));
         }
         peer
     };
     let enabled = d.sched.borrow().ports[&target].enabled;
-    let key = if enabled { Some(d.schedule(now, Task::Deliver(target))?) } else { None };
-    let mut s = d.sched.borrow_mut();
-    s.queued += 1;
-    s.queued_bytes += bytes;
-    let t = s.ports.get_mut(&target).expect("checked");
+    let key = if enabled { Some(lift(s, d.schedule(now, Task::Deliver(target)))?) } else { None };
+    let mut sc = d.sched.borrow_mut();
+    sc.queued += 1;
+    sc.queued_bytes += bytes;
+    let t = sc.ports.get_mut(&target).expect("checked");
     t.inbox.push_back(Msg { data, bytes, ports: moved, from: None });
     t.keys.extend(key);
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
 /// `postMessage` of a port whose peer is in another page: the message goes to the hub as data. A missing end drops it.
@@ -1504,43 +1504,44 @@ fn post_remote(d: &Dom, it: &mut Interp<'_>, v: Value, list: &[ObjId], end: u64)
     Ok(Value::Undefined)
 }
 
-fn port_start(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let port = d.port_of(it, this)?;
-    d.start_port(port)?;
-    Ok(Value::Undefined)
+fn port_start<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let port = d.port_of(s, this)?;
+    lift(s, d.start_port(port))?;
+    Ok(s.undefined())
 }
 
-fn port_close(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let port = d.port_of(it, this)?;
-    let mut s = d.sched.borrow_mut();
-    let p = s.ports.get_mut(&port).expect("checked");
+fn port_close<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let port = d.port_of(s, this)?;
+    let mut sc = d.sched.borrow_mut();
+    let p = sc.ports.get_mut(&port).expect("checked");
     let (peer, me) = (p.peer.take(), p.me.take());
     p.remote = None;
-    if let Some(q) = peer.and_then(|q| s.ports.get_mut(&q)) {
+    if let Some(q) = peer.and_then(|q| sc.ports.get_mut(&q)) {
         q.peer = None;
     }
     if let Some(e) = me {
-        s.ends.remove(&e);
+        sc.ends.remove(&e);
         if let Some(h) = d.kids.hub() {
             h.remove_end(e);
         }
     }
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-fn port_onmessage(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let port = d.port_of(it, this)?;
-    let Some(id) = d.sched.borrow().ports[&port].handler else { return Ok(Value::Null) };
+fn port_onmessage<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let port = d.port_of(s, this)?;
+    let Some(id) = d.sched.borrow().ports[&port].handler else { return Ok(s.null()) };
     let st = d.st.borrow();
-    Ok(st.listeners.get(&Target::Obj(port)).and_then(|v| v.iter().find(|l| l.id == id)).map_or(Value::Null, |l| it.traced_value(&l.cb)))
+    match st.listeners.get(&Target::Obj(port)).and_then(|v| v.iter().find(|l| l.id == id)) {
+        Some(l) => Ok(s.traced(&l.cb)),
+        None => Ok(s.null()),
+    }
 }
 
-fn set_port_onmessage(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let port = d.port_of(it, this)?;
-    let cb = match arg(a, 0) {
-        v @ Value::Object(o) if it.is_callable_value(v) => Some(o),
-        _ => None,
-    };
+fn set_port_onmessage<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let port = d.port_of(s, this)?;
+    let v = arg_s(s, a, 0);
+    let cb = s.is_callable(v).then_some(v);
     let t = Target::Obj(port);
     let old = d.sched.borrow().ports[&port].handler;
     {
@@ -1549,8 +1550,8 @@ fn set_port_onmessage(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) ->
     let existing = old.and_then(|id| st.listeners.get(&t).and_then(|v| v.iter().position(|l| l.id == id)));
     match (existing, cb) {
         (Some(i), Some(cb)) => {
-            it.store_value(&mut st.listeners.get_mut(&t).expect("found")[i].cb, Value::Object(cb));
-            d.own_listeners(st, it, t);
+            s.store(&mut st.listeners.get_mut(&t).expect("found")[i].cb, cb);
+            d.own_listeners(st, s.engine(), t);
         }
         (Some(i), None) => {
             let v = st.listeners.get_mut(&t).expect("found");
@@ -1563,72 +1564,78 @@ fn set_port_onmessage(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) ->
         }
         (None, Some(cb)) => {
             if st.n_listeners >= d.lim.max_listeners {
-                return Err(d.lim("dom-listeners"));
+                return Err(d.lim_s(s, "dom-listeners"));
             }
             let list = st.listeners.entry(t).or_default();
             if list.len() >= d.lim.max_listeners_per_target {
-                return Err(d.lim("dom-listeners-per-target"));
+                return Err(d.lim_s(s, "dom-listeners-per-target"));
             }
             st.next_id += 1;
             let id = st.next_id;
-            list.push(Listener { id, ty: "message".into(), cb: it.trace_value(Value::Object(cb)), capture: false, once: false, passive: false, handler: false });
+            list.push(Listener { id, ty: "message".into(), cb: s.trace_ref(cb), capture: false, once: false, passive: false, handler: false });
             st.n_listeners += 1;
-            d.own_listeners(st, it, t);
+            d.own_listeners(st, s.engine(), t);
             d.sched.borrow_mut().ports.get_mut(&port).expect("checked").handler = Some(id);
         }
         (None, None) => {}
     }
     }
     if cb.is_some() {
-        d.start_port(port)?;
+        lift(s, d.start_port(port))?;
     }
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
 // ------------------------------------------------------------------------------------------ MessageEvent
 
-fn msg_event<T>(d: &Dom, it: &mut Interp<'_>, this: Value, f: impl FnOnce(&mut MsgEvent) -> T) -> R<T> {
-    if let Value::Object(o) = this
+fn msg_event<'s, T>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, f: impl FnOnce(&mut MsgEvent) -> T) -> Res<'s, T> {
+    if let Some(o) = obj_id(s, this)
         && let Some(e) = d.sched.borrow_mut().msg_events.get_mut(&o)
     {
         return Ok(f(e));
     }
-    Err(it.type_error("Illegal invocation"))
+    Err(s.type_error("Illegal invocation"))
 }
 
-fn msg_data(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    msg_event(d, it, this, |e| e.data)
+/// The local of a raw value that the scheduler holds.
+fn local_of<'s>(s: &mut Sc<'s, '_>, v: Value) -> Local<'s> {
+    bare_js_api::Engine::raw_local(s.engine(), &v)
 }
 
-fn msg_empty(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    msg_event(d, it, this, |_| ())?;
-    d.js_str(it, "")
+fn msg_data<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let v = msg_event(d, s, this, |e| e.data)?;
+    Ok(local_of(s, v))
 }
 
-fn msg_origin(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let (win, from) = msg_event(d, it, this, |e| (e.win, e.from.as_ref().map(|f| f.origin.clone())))?;
-    d.js_str(it, &from.unwrap_or_else(|| if win { d.window_origin() } else { String::new() }))
+fn msg_empty<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    msg_event(d, s, this, |_| ())?;
+    d.js_str_s(s, "")
 }
 
-fn msg_source(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let (win, from) = msg_event(d, it, this, |e| (e.win, e.from.as_ref().map(|f| f.source)))?;
+fn msg_origin<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let (win, from) = msg_event(d, s, this, |e| (e.win, e.from.as_ref().map(|f| f.origin.clone())))?;
+    d.js_str_s(s, &from.unwrap_or_else(|| if win { d.window_origin() } else { String::new() }))
+}
+
+fn msg_source<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let (win, from) = msg_event(d, s, this, |e| (e.win, e.from.as_ref().map(|f| f.source)))?;
     Ok(match from {
-        Some(src) => src.map_or(Value::Null, Value::Object),
-        None if win => Value::Object(*d.global.get().expect("installed")),
-        None => Value::Null,
+        Some(Some(src)) => d.obj_local(s, src),
+        None if win => s.global(),
+        _ => s.null(),
     })
 }
 
-fn msg_ports(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    if let Some(v) = msg_event(d, it, this, |e| e.ports)? {
-        return Ok(v);
+fn msg_ports<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    if let Some(v) = msg_event(d, s, this, |e| e.ports)? {
+        return Ok(local_of(s, v));
     }
-    let moved: Vec<Value> = msg_event(d, it, this, |e| e.moved.iter().map(|&o| Value::Object(o)).collect())?;
-    let arr = it.array_from(&moved)?;
-    if let Value::Object(o) = arr {
-        it.heap.set_integrity(o, true).map_err(|e| it.heap_error(e))?;
-    }
-    msg_event(d, it, this, |e| e.ports = Some(arr))?;
+    let moved: Vec<ObjId> = msg_event(d, s, this, |e| e.moved.to_vec())?;
+    let items: Vec<Local<'s>> = moved.into_iter().map(|o| d.obj_local(s, o)).collect();
+    let arr = s.new_array(&items)?;
+    s.set_integrity(arr, true)?;
+    let raw = bare_js_api::Engine::raw(s.engine(), arr);
+    msg_event(d, s, this, |e| e.ports = Some(raw))?;
     Ok(arr)
 }
 
