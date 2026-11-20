@@ -542,9 +542,9 @@ fn two_scripts(a: &str, b: &str, name: &str, gc: bool) -> Result<String, String>
     let shared = Arc::new(SharedAtoms::default());
     let mut prog = compile(b, &shared, Limits::default())?;
     let pre = prog.codes.len();
-    prog.codes = compile_after(prog.codes, PRELUDE, &shared, Limits::default(), None)?.0;
+    prog.codes = compile_after(prog.codes, PRELUDE, &shared, Limits::default(), None, None)?.0;
     let at = prog.codes.len();
-    prog.codes = compile_after(prog.codes, a, &shared, Limits::default(), None)?.0;
+    prog.codes = compile_after(prog.codes, a, &shared, Limits::default(), None, None)?.0;
     let mut vm = Vm::new(prog, shared);
     vm.run_main(pre).expect("the prelude");
     if gc {
@@ -929,6 +929,19 @@ fn freeze_and_define_see_the_lazy_length_and_name_of_functions() {
         ("function f() {} Object.defineProperty(f, 'x', {value: 1}); var n = Object.getOwnPropertyNames(f); var r = n.slice(0, 2).join() + ',' + (n.indexOf('x') > 1);", "r", "length,name,true"),
         ("function f() {} Object.preventExtensions(f); var r = f.name + ',' + f.length + ',' + Object.getOwnPropertyNames(f).slice(0, 2).join();", "r", "f,0,length,name"),
         ("var f = Array.prototype.push; Object.preventExtensions(f); var r = f.name + ',' + f.length;", "r", "push,1"),
+    ]);
+}
+
+/// `Vm::run` keeps the base of the registers in a pointer (`regs`). The stack is a `Vec` that a deep call chain reallocates (it starts
+/// with 256 words), so the pointer must be set again after each growth. Each caller below has live registers before and after the call
+/// that grows the stack, and reads `this` and the arguments from registers right after it.
+#[test]
+fn a_stack_that_grows_in_a_callee_keeps_the_registers_of_the_callers() {
+    check(&[
+        ("function sum(n) { var a = n, b = 2 * n; if (n == 0) return 0; var r = sum(n - 1); return r + a + b; } var r = sum(200);", "r", "60300"),
+        ("function C(n) { this.n = n; this.k = n == 0 ? 0 : new C(n - 1).k + n; } var r = new C(200).k;", "r", "20100"),
+        ("var o = { f: function (n, acc) { var t = this; if (n == 0) return acc; return t.f(n - 1, acc + n); } }; var r = o.f(200, 0);", "r", "20100"),
+        ("function f(n, ...rest) { var x = n * 2; if (n == 0) return rest.length; var y = f(n - 1, n, n); return y + x - 2 * n; } var r = f(200);", "r", "2"),
     ]);
 }
 

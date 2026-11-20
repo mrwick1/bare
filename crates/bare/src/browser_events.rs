@@ -10,16 +10,14 @@
 //! (the event is cleaned up) and are the result of the call. No document borrow is held while a listener runs.
 
 use crate::browser::*;
+use crate::browser_scoped::*;
 use bare_js::eval::{Error, Interp};
 use bare_js::heap::Get;
 use bare_js::value::{ObjId, Value};
+use bare_js_api::{Args, Local, Type};
 use std::rc::Rc;
 
 type V = R<Value>;
-
-fn arg(a: &[Value], i: usize) -> Value {
-    a.get(i).copied().unwrap_or(Value::Undefined)
-}
 
 /// A listener of one turn of `fire`. Its callback is read at its turn.
 struct Turn {
@@ -30,18 +28,6 @@ struct Turn {
 }
 
 impl Dom {
-    /// `this` of an `EventTarget` method. `undefined` and `null` mean `window`, as in a browser.
-    fn target_of(&self, it: &mut Interp<'_>, this: Value) -> R<Target> {
-        match this {
-            Value::Undefined | Value::Null => Ok(Target::Window),
-            Value::Object(o) => match self.st.borrow().by_obj.get(&o) {
-                Some(&t) => Ok(t),
-                None => Err(it.type_error("Illegal invocation")),
-            },
-            _ => Err(it.type_error("Illegal invocation")),
-        }
-    }
-
     pub(crate) fn target_value(&self, it: &mut Interp<'_>, t: Target) -> V {
         match t {
             Target::Window => Ok(Value::Object(*self.global.get().expect("installed"))),
@@ -424,246 +410,298 @@ pub(crate) fn init_flag(d: &Dom, it: &mut Interp<'_>, init: Value, name: &str) -
     it.to_js_bool(v)
 }
 
-fn make_event(d: &Dom, it: &mut Interp<'_>, a: &[Value], custom: bool) -> V {
+/// `init_flag` on a local.
+pub(crate) fn init_flag_s<'s>(s: &mut Sc<'s, '_>, init: Local<'s>, name: &str) -> Res<'s, bool> {
+    s.get_bool_str(init, name)
+}
+
+fn make_event<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>, custom: bool) -> Res<'s, Local<'s>> {
     if a.is_empty() {
-        return Err(it.type_error("Failed to construct 'Event': 1 argument required, but only 0 present."));
+        return Err(s.type_error("Failed to construct 'Event': 1 argument required, but only 0 present."));
     }
-    let ty = d.string_arg(it, a[0])?;
-    let init = arg(a, 1);
-    let (mut bubbles, mut cancelable, mut composed, mut detail) = (false, false, false, Value::Null);
-    match init {
-        Value::Undefined | Value::Null => {}
-        Value::Object(_) => {
-            bubbles = init_flag(d, it, init, "bubbles")?;
-            cancelable = init_flag(d, it, init, "cancelable")?;
-            composed = init_flag(d, it, init, "composed")?;
+    let ty = d.arg_str_s(s, a, 0)?;
+    let init = arg_s(s, a, 1);
+    let (mut bubbles, mut cancelable, mut composed, mut detail) = (false, false, false, None);
+    match s.type_of(init) {
+        Type::Undefined | Type::Null => {}
+        Type::Object | Type::Function => {
+            bubbles = init_flag_s(s, init, "bubbles")?;
+            cancelable = init_flag_s(s, init, "cancelable")?;
+            composed = init_flag_s(s, init, "composed")?;
             if custom {
-                let k = d.key(it, "detail")?;
-                detail = it.get_value(init, k)?;
-                if matches!(detail, Value::Undefined) { detail = Value::Null; }
+                let v = s.get_str(init, "detail")?;
+                detail = Some(if s.type_of(v) == Type::Undefined { s.null() } else { v });
             }
         }
-        _ => return Err(it.type_error("The event initializer is not an object.")),
+        _ => return Err(s.type_error("The event initializer is not an object.")),
     }
     // A custom event passes its detail (`null` at least); a plain one passes `undefined`.
-    let proto = it.host_proto_from_new_target(if custom { d.p().custom } else { d.p().event })?;
-    let e = d.new_event_proto(it, &ty, bubbles, cancelable, composed, proto)?;
-    if custom {
-        it.store_value(&mut d.st.borrow_mut().events.get_mut(&e).expect("just made").detail, detail);
+    let default = d.obj_local(s, if custom { d.p().custom } else { d.p().event });
+    let proto = s.proto_from_new_target(default)?;
+    let proto = obj_id(s, proto).expect("a prototype is an object");
+    let e = old(s, |it| d.new_event_proto(it, &ty, bubbles, cancelable, composed, proto))?;
+    if let Some(v) = detail {
+        s.store(&mut d.st.borrow_mut().events.get_mut(&e).expect("just made").detail, v);
     }
-    Ok(Value::Object(e))
+    Ok(d.obj_local(s, e))
 }
 
-pub(crate) fn event_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
-    make_event(d, it, a, false)
+pub(crate) fn event_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    make_event(d, s, a, false)
 }
 
-pub(crate) fn custom_event_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
-    make_event(d, it, a, true)
+pub(crate) fn custom_event_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    make_event(d, s, a, true)
 }
 
-pub(crate) fn event_target_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
+pub(crate) fn event_target_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     if d.st.borrow().by_obj.len() >= d.lim.max_wrappers {
-        return Err(d.lim("dom-wrappers"));
+        return Err(d.lim_s(s, "dom-wrappers"));
     }
-    let proto = it.host_proto_from_new_target(d.p().et)?;
-    let o = d.obj(it, proto)?;
+    let default = d.obj_local(s, d.p().et);
+    let proto = s.proto_from_new_target(default)?;
+    let proto = obj_id(s, proto).expect("a prototype is an object");
+    let o = d.obj_s(s, proto)?;
     d.st.borrow_mut().by_obj.insert(o, Target::Obj(o));
-    Ok(Value::Object(o))
+    Ok(d.obj_local(s, o))
 }
 
 // ------------------------------------------------------------------------------------------ EventTarget
 
-pub(crate) fn add_event_listener(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let t = d.target_of(it, this)?;
-    let ty = d.string_arg(it, arg(a, 0))?;
-    let cb = match arg(a, 1) {
-        Value::Null | Value::Undefined => return Ok(Value::Undefined),
-        Value::Object(o) => o,
-        _ => return Err(it.type_error("Failed to execute 'addEventListener': parameter 2 is not of type 'Object'.")),
+impl Dom {
+    /// `target_of` on a local.
+    fn target_of_s<'s>(&self, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, Target> {
+        match obj_id(s, this) {
+            Some(o) => match self.st.borrow().by_obj.get(&o) {
+                Some(&t) => Ok(t),
+                None => Err(s.type_error("Illegal invocation")),
+            },
+            None if is_nullish(s, this) => Ok(Target::Window),
+            None => Err(s.type_error("Illegal invocation")),
+        }
+    }
+
+    /// `target_value` as a local.
+    pub(crate) fn target_local<'s>(&self, s: &mut Sc<'s, '_>, t: Target) -> Res<'s, Local<'s>> {
+        match t {
+            Target::Window => Ok(s.global()),
+            Target::Node(n) => self.wrap_s(s, n),
+            Target::Obj(o) => Ok(self.obj_local(s, o)),
+        }
+    }
+
+    /// `event_of` on a local.
+    pub(crate) fn event_of_s<'s>(&self, s: &mut Sc<'s, '_>, v: Local<'s>) -> Res<'s, ObjId> {
+        match obj_id(s, v).filter(|o| self.st.borrow().events.contains_key(o)) {
+            Some(o) => Ok(o),
+            None => Err(s.type_error("Illegal invocation")),
+        }
+    }
+}
+
+pub(crate) fn add_event_listener<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let t = d.target_of_s(s, this)?;
+    let ty = d.arg_str_s(s, a, 0)?;
+    let cbl = arg_s(s, a, 1);
+    let cb = match obj_id(s, cbl) {
+        Some(o) => o,
+        None if is_nullish(s, cbl) => return Ok(s.undefined()),
+        None => return Err(s.type_error("Failed to execute 'addEventListener': parameter 2 is not of type 'Object'.")),
     };
-    let (mut capture, mut once, mut passive, mut signal) = (false, false, false, None);
-    match arg(a, 2) {
-        opts @ Value::Object(_) => {
-            capture = init_flag(d, it, opts, "capture")?;
-            once = init_flag(d, it, opts, "once")?;
-            passive = init_flag(d, it, opts, "passive")?;
-            let k = d.key(it, "signal")?;
-            match it.get_value(opts, k)? {
-                Value::Undefined => {}
-                Value::Object(o) if d.is_signal(o) => signal = Some(o),
-                _ => return Err(it.type_error("Failed to execute 'addEventListener' on 'EventTarget': Failed to read the 'signal' property from 'AddEventListenerOptions': Failed to convert value to 'AbortSignal'.")),
+    let (mut once, mut passive, mut signal) = (false, false, None);
+    let opts = arg_s(s, a, 2);
+    let capture;
+    if is_object(s, opts) {
+        capture = init_flag_s(s, opts, "capture")?;
+        once = init_flag_s(s, opts, "once")?;
+        passive = init_flag_s(s, opts, "passive")?;
+        let sg = s.get_str(opts, "signal")?;
+        if s.type_of(sg) != Type::Undefined {
+            match obj_id(s, sg).filter(|&o| d.is_signal(o)) {
+                Some(o) => signal = Some(o),
+                None => return Err(s.type_error("Failed to execute 'addEventListener' on 'EventTarget': Failed to read the 'signal' property from 'AddEventListenerOptions': Failed to convert value to 'AbortSignal'.")),
             }
         }
-        Value::Undefined | Value::Null => {}
-        v => capture = it.to_js_bool(v)?,
+    } else {
+        capture = s.to_boolean(opts);
     }
-    if let Some(s) = signal
-        && d.signal_state(s).is_some_and(|s| s.0)
+    if let Some(sg) = signal
+        && d.signal_state(sg).is_some_and(|x| x.0)
     {
-        return Ok(Value::Undefined);
+        return Ok(s.undefined());
     }
     crate::browser_handlers::sync_all(d, t);
+    let traced = s.trace_ref(cbl);
     let mut guard = d.st.borrow_mut();
     let st = &mut *guard;
     let list = st.listeners.entry(t).or_default();
-    if list.iter().any(|l| *l.ty == *ty && !l.handler && matches!(it.traced_value(&l.cb), Value::Object(x) if x == cb) && l.capture == capture) {
-        return Ok(Value::Undefined);
+    if list.iter().any(|l| *l.ty == *ty && !l.handler && matches!(l.cb.raw(), Value::Object(x) if *x == cb) && l.capture == capture) {
+        return Ok(s.undefined());
     }
     if st.n_listeners >= d.lim.max_listeners {
-        return Err(d.lim("dom-listeners"));
+        return Err(d.lim_s(s, "dom-listeners"));
     }
     if list.len() >= d.lim.max_listeners_per_target {
-        return Err(d.lim("dom-listeners-per-target"));
+        return Err(d.lim_s(s, "dom-listeners-per-target"));
     }
     st.next_id += 1;
     let id = st.next_id;
-    list.push(Listener { id, ty: Rc::from(ty.as_str()), cb: it.trace_value(Value::Object(cb)), capture, once, passive, handler: false });
+    list.push(Listener { id, ty: Rc::from(ty.as_str()), cb: traced, capture, once, passive, handler: false });
     st.n_listeners += 1;
-    d.own(&mut st.owners, it, t, list);
+    d.own(&mut st.owners, s.engine(), t, list);
     drop(guard);
-    if let Some(s) = signal
-        && let Err(e) = d.signal_add_algo(s, crate::browser_abort::Algo::Remove(t, id))
+    if let Some(sg) = signal
+        && let Err(e) = d.signal_add_algo(sg, crate::browser_abort::Algo::Remove(t, id))
     {
         d.remove_listener(t, id);
-        return Err(e);
+        return Err(lift_err(s, e));
     }
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-pub(crate) fn remove_event_listener(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let t = d.target_of(it, this)?;
-    let ty = d.string_arg(it, arg(a, 0))?;
-    let Value::Object(cb) = arg(a, 1) else { return Ok(Value::Undefined) };
-    let capture = match arg(a, 2) {
-        opts @ Value::Object(_) => init_flag(d, it, opts, "capture")?,
-        v => it.to_js_bool(v)?,
-    };
-    let found = d.st.borrow().listeners.get(&t).and_then(|v| v.iter().find(|l| !l.handler && *l.ty == *ty && matches!(it.traced_value(&l.cb), Value::Object(x) if x == cb) && l.capture == capture).map(|l| l.id));
+pub(crate) fn remove_event_listener<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let t = d.target_of_s(s, this)?;
+    let ty = d.arg_str_s(s, a, 0)?;
+    let cbl = arg_s(s, a, 1);
+    let Some(cb) = obj_id(s, cbl) else { return Ok(s.undefined()) };
+    let opts = arg_s(s, a, 2);
+    let capture = if is_object(s, opts) { init_flag_s(s, opts, "capture")? } else { s.to_boolean(opts) };
+    let found = d.st.borrow().listeners.get(&t).and_then(|v| v.iter().find(|l| !l.handler && *l.ty == *ty && matches!(l.cb.raw(), Value::Object(x) if *x == cb) && l.capture == capture).map(|l| l.id));
     if let Some(id) = found {
         d.remove_listener(t, id);
     }
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-pub(crate) fn dispatch_event(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let t = d.target_of(it, this)?;
-    let Value::Object(e) = arg(a, 0) else { return Err(it.type_error("Failed to execute 'dispatchEvent': parameter 1 is not of type 'Event'.")) };
-    if !d.st.borrow().events.contains_key(&e) {
-        return Err(it.type_error("Failed to execute 'dispatchEvent': parameter 1 is not of type 'Event'."));
-    }
-    Ok(Value::Bool(d.dispatch(it, t, e)?))
+pub(crate) fn dispatch_event<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let t = d.target_of_s(s, this)?;
+    let el = arg_s(s, a, 0);
+    let Some(e) = obj_id(s, el).filter(|e| d.st.borrow().events.contains_key(e)) else {
+        return Err(s.type_error("Failed to execute 'dispatchEvent': parameter 1 is not of type 'Event'."));
+    };
+    let not_canceled = old(s, |it| d.dispatch(it, t, e))?;
+    Ok(s.boolean(not_canceled))
 }
 
 // ------------------------------------------------------------------------------------------ Event
 
-fn with_event<T>(d: &Dom, it: &mut Interp<'_>, this: Value, f: impl FnOnce(&mut EventState) -> T) -> R<T> {
-    let o = d.event_of(it, this)?;
+fn with_event<'s, T>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, f: impl FnOnce(&mut EventState) -> T) -> Res<'s, T> {
+    let o = d.event_of_s(s, this)?;
     Ok(f(d.st.borrow_mut().events.get_mut(&o).expect("checked")))
 }
 
 /// A traced value of the event `this`.
-pub(crate) fn event_value(d: &Dom, it: &mut Interp<'_>, this: Value, f: impl FnOnce(&EventState) -> &bare_js_api::Traced<Value>) -> V {
-    let o = d.event_of(it, this)?;
+pub(crate) fn event_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, f: impl FnOnce(&EventState) -> &bare_js_api::Traced<Value>) -> Res<'s, Local<'s>> {
+    let o = d.event_of_s(s, this)?;
     let st = d.st.borrow();
-    Ok(it.traced_value(f(&st.events[&o])))
+    Ok(s.traced(f(&st.events[&o])))
 }
 
-pub(crate) fn event_type(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let ty = with_event(d, it, this, |e| e.ty.clone())?;
-    d.js_str(it, &ty)
+/// A boolean field of the event `this`.
+fn event_flag<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, f: impl FnOnce(&mut EventState) -> bool) -> Res<'s, Local<'s>> {
+    let b = with_event(d, s, this, f)?;
+    Ok(s.boolean(b))
 }
 
-pub(crate) fn event_target(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    event_value(d, it, this, |e| &e.target)
+pub(crate) fn event_type<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let ty = with_event(d, s, this, |e| e.ty.clone())?;
+    d.js_str_s(s, &ty)
 }
 
-pub(crate) fn event_current_target(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    event_value(d, it, this, |e| &e.current)
+pub(crate) fn event_target<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    event_value(d, s, this, |e| &e.target)
 }
 
-pub(crate) fn event_phase(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    with_event(d, it, this, |e| Value::Number(e.phase as f64))
+pub(crate) fn event_current_target<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    event_value(d, s, this, |e| &e.current)
 }
 
-pub(crate) fn event_bubbles(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    with_event(d, it, this, |e| Value::Bool(e.bubbles))
+pub(crate) fn event_phase<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let p = with_event(d, s, this, |e| e.phase)?;
+    Ok(s.number(p as f64))
 }
 
-pub(crate) fn event_cancelable(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    with_event(d, it, this, |e| Value::Bool(e.cancelable))
+pub(crate) fn event_bubbles<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    event_flag(d, s, this, |e| e.bubbles)
 }
 
-pub(crate) fn event_composed(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    with_event(d, it, this, |e| Value::Bool(e.composed))
+pub(crate) fn event_cancelable<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    event_flag(d, s, this, |e| e.cancelable)
 }
 
-pub(crate) fn event_default_prevented(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    with_event(d, it, this, |e| Value::Bool(e.canceled))
+pub(crate) fn event_composed<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    event_flag(d, s, this, |e| e.composed)
+}
+
+pub(crate) fn event_default_prevented<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    event_flag(d, s, this, |e| e.canceled)
 }
 
 /// True for the events of the window input (`browser_ui.rs`), false for all others.
-pub(crate) fn event_is_trusted(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    with_event(d, it, this, |e| Value::Bool(e.trusted))
+pub(crate) fn event_is_trusted<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    event_flag(d, s, this, |e| e.trusted)
 }
 
-pub(crate) fn event_time_stamp(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    with_event(d, it, this, |e| Value::Number(e.time))
+pub(crate) fn event_time_stamp<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let t = with_event(d, s, this, |e| e.time)?;
+    Ok(s.number(t))
 }
 
 /// `Event.srcElement`: the legacy name of `target`.
-pub(crate) fn event_src_element(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    event_target(d, it, this, a)
+pub(crate) fn event_src_element<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    event_target(d, s, this, a)
 }
 
 /// `Event.returnValue`: `!defaultPrevented`. Setting it to `false` is `preventDefault()`; `true` does nothing.
-pub(crate) fn event_return_value(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    with_event(d, it, this, |e| Value::Bool(!e.canceled))
+pub(crate) fn event_return_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    event_flag(d, s, this, |e| !e.canceled)
 }
 
-pub(crate) fn set_event_return_value(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let keep = it.to_js_bool(a.first().copied().unwrap_or(Value::Undefined))?;
-    with_event(d, it, this, |e| e.canceled |= !keep && e.cancelable && !e.in_passive)?;
-    Ok(Value::Undefined)
+pub(crate) fn set_event_return_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let v = arg_s(s, a, 0);
+    let keep = s.to_boolean(v);
+    with_event(d, s, this, |e| e.canceled |= !keep && e.cancelable && !e.in_passive)?;
+    Ok(s.undefined())
 }
 
 /// `Event.cancelBubble`: whether propagation is stopped. Setting it to `true` is `stopPropagation()`; `false` does nothing.
-pub(crate) fn event_cancel_bubble(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    with_event(d, it, this, |e| Value::Bool(e.stop))
+pub(crate) fn event_cancel_bubble<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    event_flag(d, s, this, |e| e.stop)
 }
 
-pub(crate) fn set_event_cancel_bubble(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let on = it.to_js_bool(a.first().copied().unwrap_or(Value::Undefined))?;
-    with_event(d, it, this, |e| e.stop |= on)?;
-    Ok(Value::Undefined)
+pub(crate) fn set_event_cancel_bubble<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let v = arg_s(s, a, 0);
+    let on = s.to_boolean(v);
+    with_event(d, s, this, |e| e.stop |= on)?;
+    Ok(s.undefined())
 }
 
-pub(crate) fn prevent_default(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    with_event(d, it, this, |e| e.canceled |= e.cancelable && !e.in_passive)?;
-    Ok(Value::Undefined)
+pub(crate) fn prevent_default<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    with_event(d, s, this, |e| e.canceled |= e.cancelable && !e.in_passive)?;
+    Ok(s.undefined())
 }
 
-pub(crate) fn stop_propagation(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    with_event(d, it, this, |e| e.stop = true)?;
-    Ok(Value::Undefined)
+pub(crate) fn stop_propagation<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    with_event(d, s, this, |e| e.stop = true)?;
+    Ok(s.undefined())
 }
 
-pub(crate) fn stop_immediate_propagation(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    with_event(d, it, this, |e| (e.stop, e.stop_imm) = (true, true))?;
-    Ok(Value::Undefined)
+pub(crate) fn stop_immediate_propagation<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    with_event(d, s, this, |e| (e.stop, e.stop_imm) = (true, true))?;
+    Ok(s.undefined())
 }
 
-pub(crate) fn composed_path(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let path = with_event(d, it, this, |e| e.path.clone())?;
+pub(crate) fn composed_path<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let path = with_event(d, s, this, |e| e.path.clone())?;
     let mut vals = Vec::with_capacity(path.len());
     for t in path {
-        vals.push(d.target_value(it, t)?);
+        vals.push(d.target_local(s, t)?);
     }
-    it.array_from(&vals)
+    s.new_array(&vals)
 }
 
-pub(crate) fn custom_detail(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    event_value(d, it, this, |e| &e.detail)
+pub(crate) fn custom_detail<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    event_value(d, s, this, |e| &e.detail)
 }
 
 // ------------------------------------------------------------------------------------------ createEvent
@@ -671,50 +709,54 @@ pub(crate) fn custom_detail(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Valu
 /// `document.createEvent(name)` (DOM Standard, legacy): an event with an empty type that `initEvent` or `initCustomEvent` sets. The name is
 /// not case sensitive. `UIEvent` and `UIEvents` give a plain `Event`, because bare has no `UIEvent` interface. The event is not marked
 /// uninitialized: dispatching it before `initEvent` sends an event of type `""`.
-pub(crate) fn create_event(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
+pub(crate) fn create_event<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     if a.is_empty() {
-        return Err(it.type_error("Failed to execute 'createEvent' on 'Document': 1 argument required, but only 0 present."));
+        return Err(s.type_error("Failed to execute 'createEvent' on 'Document': 1 argument required, but only 0 present."));
     }
-    let name = d.string_arg(it, a[0])?;
-    let empty = d.js_str(it, "")?;
-    match name.to_ascii_lowercase().as_str() {
-        "event" | "events" | "htmlevents" | "svgevents" | "uievent" | "uievents" => Ok(Value::Object(d.new_event(it, "", false, false, false, None)?)),
-        "customevent" => Ok(Value::Object(d.new_event(it, "", false, false, false, Some(Value::Null))?)),
-        "mouseevent" | "mouseevents" => crate::browser_uievent::ctor::<0>(d, it, Value::Undefined, &[empty]),
-        "keyboardevent" => crate::browser_uievent::ctor::<2>(d, it, Value::Undefined, &[empty]),
-        _ => Err(d.dom_err(it, "NotSupportedError", &format!("Failed to execute 'createEvent' on 'Document': The provided event type ('{name}') is invalid."))),
-    }
+    let name = d.arg_str_s(s, a, 0)?;
+    let o = match name.to_ascii_lowercase().as_str() {
+        "event" | "events" | "htmlevents" | "svgevents" | "uievent" | "uievents" => old(s, |it| d.new_event(it, "", false, false, false, None))?,
+        "customevent" => old(s, |it| d.new_event(it, "", false, false, false, Some(Value::Null)))?,
+        "mouseevent" | "mouseevents" => return crate::browser_uievent::ctor_empty::<0>(d, s),
+        "keyboardevent" => return crate::browser_uievent::ctor_empty::<2>(d, s),
+        _ => return Err(d.dom_err_s(s, "NotSupportedError", &format!("Failed to execute 'createEvent' on 'Document': The provided event type ('{name}') is invalid."))),
+    };
+    Ok(d.obj_local(s, o))
 }
 
 /// `event.initEvent(type, bubbles, cancelable)` and, with a fourth argument, `initCustomEvent`. Nothing happens while the event dispatches.
-fn init(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], what: &str, detail: bool) -> V {
+fn init<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, what: &str, detail: bool) -> Res<'s, Local<'s>> {
     if a.is_empty() {
-        return Err(it.type_error(&format!("Failed to execute '{what}' on '{}': 1 argument required, but only 0 present.", if detail { "CustomEvent" } else { "Event" })));
+        return Err(s.type_error(&format!("Failed to execute '{what}' on '{}': 1 argument required, but only 0 present.", if detail { "CustomEvent" } else { "Event" })));
     }
-    let ty = d.string_arg(it, a[0])?;
-    let (bubbles, cancelable) = (it.to_js_bool(arg(a, 1))?, it.to_js_bool(arg(a, 2))?);
-    let o = d.event_of(it, this)?;
+    let ty = d.arg_str_s(s, a, 0)?;
+    let (b, c) = (arg_s(s, a, 1), arg_s(s, a, 2));
+    let (bubbles, cancelable) = (s.to_boolean(b), s.to_boolean(c));
+    let o = d.event_of_s(s, this)?;
+    let null = s.null();
+    let dl = if detail {
+        let v = arg_s(s, a, 3);
+        if s.type_of(v) == Type::Undefined { null } else { v }
+    } else {
+        null
+    };
     let mut st = d.st.borrow_mut();
     let e = st.events.get_mut(&o).expect("checked");
     if !e.dispatching {
         (e.ty, e.bubbles, e.cancelable) = (Rc::from(ty.as_str()), bubbles, cancelable);
         (e.stop, e.stop_imm, e.canceled, e.trusted) = (false, false, false, false);
-        it.store_value(&mut e.target, Value::Null);
+        s.store(&mut e.target, null);
         if detail {
-            let v = match arg(a, 3) {
-                Value::Undefined => Value::Null,
-                v => v,
-            };
-            it.store_value(&mut e.detail, v);
+            s.store(&mut e.detail, dl);
         }
     }
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-pub(crate) fn init_event(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    init(d, it, this, a, "initEvent", false)
+pub(crate) fn init_event<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    init(d, s, this, a, "initEvent", false)
 }
 
-pub(crate) fn init_custom_event(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    init(d, it, this, a, "initCustomEvent", true)
+pub(crate) fn init_custom_event<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    init(d, s, this, a, "initCustomEvent", true)
 }

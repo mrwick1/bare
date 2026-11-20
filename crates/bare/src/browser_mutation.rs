@@ -31,13 +31,13 @@
 
 use crate::browser::*;
 use bare_html::dom::{Atom, Change, Document, NodeId, Watcher};
-use bare_js::eval::{Error, Interp};
+use crate::browser_scoped::*;
+use bare_js::eval::Interp;
 use bare_js::value::{ObjId, Value};
+use bare_js_api::{Args, Engine, Error, HostFn, Local, Type};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
-
-type V = R<Value>;
 
 const MAX_OBSERVERS: usize = 1024;
 const MAX_REGS: usize = 1 << 14;
@@ -295,71 +295,73 @@ fn state(d: &Dom) -> &Rc<RefCell<St>> {
     d.mo.st.get_or_init(Default::default)
 }
 
-fn observer_of(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<ObjId> {
-    match this {
-        Value::Object(o) if state(d).borrow().obs.contains_key(&o) => Ok(o),
-        _ => Err(it.type_error("Illegal invocation")),
+fn observer_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, ObjId> {
+    match obj_id(s, this) {
+        Some(o) if state(d).borrow().obs.contains_key(&o) => Ok(o),
+        _ => Err(s.type_error("Illegal invocation")),
     }
 }
 
-fn illegal(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
-    Err(it.type_error("Failed to construct 'MutationRecord': Illegal constructor"))
+fn illegal<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    Err(s.type_error("Failed to construct 'MutationRecord': Illegal constructor"))
 }
 
-fn construct(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
-    let Some(&cb) = a.first() else {
-        return Err(it.type_error("Failed to construct 'MutationObserver': 1 argument required, but only 0 present."));
+fn construct<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let Some(cb) = a.get(0) else {
+        return Err(s.type_error("Failed to construct 'MutationObserver': 1 argument required, but only 0 present."));
     };
-    if !it.is_callable_value(cb) {
-        return Err(it.type_error("Failed to construct 'MutationObserver': parameter 1 is not of type 'Function'."));
+    if !s.is_callable(cb) {
+        return Err(s.type_error("Failed to construct 'MutationObserver': parameter 1 is not of type 'Function'."));
     }
+    let cb = s.engine().raw(cb);
     let st = state(d);
     if st.borrow().obs.len() >= MAX_OBSERVERS {
-        return Err(d.lim("mutation-observers"));
+        return Err(d.lim_s(s, "mutation-observers"));
     }
     let proto = st.borrow().observer.expect("made");
-    let o = d.obj(it, proto)?;
-    let mut s = st.borrow_mut();
-    s.obs.insert(o, Obs { cb, recs: Vec::new(), regs: 0 });
-    s.order.push(o);
-    Ok(Value::Object(o))
+    let o = d.obj_s(s, proto)?;
+    let mut s2 = st.borrow_mut();
+    s2.obs.insert(o, Obs { cb, recs: Vec::new(), regs: 0 });
+    s2.order.push(o);
+    drop(s2);
+    Ok(d.obj_local(s, o))
 }
 
 const NEED: &str = "Failed to execute 'observe' on 'MutationObserver': The options object must set at least one of 'attributes', 'characterData', or 'childList' to true.";
 
-fn parse_opts(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<Opts> {
+/// Member `name` of the options object `v`, `None` when there is no object or the member is `undefined`.
+fn member<'s>(s: &mut Sc<'s, '_>, v: Option<Local<'s>>, name: &str) -> Res<'s, Option<Local<'s>>> {
+    let Some(v) = v.filter(|&v| is_object(s, v)) else { return Ok(None) };
+    let x = s.get_str(v, name)?;
+    Ok((s.type_of(x) != Type::Undefined).then_some(x))
+}
+
+fn parse_opts<'s>(d: &Dom, s: &mut Sc<'s, '_>, v: Option<Local<'s>>) -> Res<'s, Opts> {
     // WebIDL dictionary members are read in alphabetical order.
-    let get = |it: &mut Interp<'_>, name: &str| -> R<Option<Value>> {
-        if !matches!(v, Value::Object(_)) {
-            return Ok(None);
-        }
-        let k = d.key(it, name)?;
-        Ok(Some(it.get_value(v, k)?).filter(|x| !matches!(x, Value::Undefined)))
-    };
-    let filter = get(it, "attributeFilter")?;
-    let attr_old = get(it, "attributeOldValue")?;
-    let attrs = get(it, "attributes")?;
-    let chars = get(it, "characterData")?;
-    let char_old = get(it, "characterDataOldValue")?;
-    let child = get(it, "childList")?;
-    let subtree = get(it, "subtree")?;
-    let b = |it: &mut Interp<'_>, x: Option<Value>| -> R<Option<bool>> { x.map(|x| it.to_js_bool(x)).transpose() };
-    let (attr_old, attrs, chars, char_old, child, subtree) = (b(it, attr_old)?, b(it, attrs)?, b(it, chars)?, b(it, char_old)?, b(it, child)?, b(it, subtree)?);
+    let filter = member(s, v, "attributeFilter")?;
+    let attr_old = member(s, v, "attributeOldValue")?;
+    let attrs = member(s, v, "attributes")?;
+    let chars = member(s, v, "characterData")?;
+    let char_old = member(s, v, "characterDataOldValue")?;
+    let child = member(s, v, "childList")?;
+    let subtree = member(s, v, "subtree")?;
+    let b = |s: &Sc<'s, '_>, x: Option<Local<'s>>| x.map(|x| s.to_boolean(x));
+    let (attr_old, attrs, chars, char_old, child, subtree) = (b(s, attr_old), b(s, attrs), b(s, chars), b(s, char_old), b(s, child), b(s, subtree));
     let filter = match filter {
         None => None,
         Some(f) => {
-            let kl = d.key(it, "length")?;
-            let len = it.get_value(f, kl)?;
-            let n = it.to_js_number(len)?;
+            let len = s.get_str(f, "length")?;
+            let n = s.to_number(len)?;
             let n = if n.is_finite() && n > 0.0 { n as usize } else { 0 };
             if n > 1 << 12 {
-                return Err(d.lim("mutation-filter"));
+                return Err(d.lim_s(s, "mutation-filter"));
             }
             let mut names = Vec::with_capacity(n);
+            let base = s.engine().stack_len();
             for i in 0..n {
-                let k = d.key(it, &i.to_string())?;
-                let x = it.get_value(f, k)?;
-                names.push(d.string_arg(it, x)?.into_boxed_str());
+                let x = s.get_str(f, &i.to_string())?;
+                names.push(d.string_arg_s(s, x)?.into_boxed_str());
+                s.engine().stack_truncate(base);
             }
             Some(names)
         }
@@ -369,97 +371,98 @@ fn parse_opts(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<Opts> {
     let o = Opts { child: child.unwrap_or(false), attrs: attrs.unwrap_or(false), chars: chars.unwrap_or(false), subtree: subtree.unwrap_or(false), attr_old: attr_old.unwrap_or(false), char_old: char_old.unwrap_or(false), filter };
     let m = |what: &str| format!("Failed to execute 'observe' on 'MutationObserver': The options object may only set '{what}' when '{}' is true or not present.", if what.starts_with("attr") { "attributes" } else { "characterData" });
     if o.attr_old && !o.attrs {
-        return Err(it.type_error(&m("attributeOldValue").replace("'attributeOldValue'", "'attributeOldValue' to true")));
+        return Err(s.type_error(&m("attributeOldValue").replace("'attributeOldValue'", "'attributeOldValue' to true")));
     }
     if o.filter.is_some() && !o.attrs {
-        return Err(it.type_error(&m("attributeFilter")));
+        return Err(s.type_error(&m("attributeFilter")));
     }
     if o.char_old && !o.chars {
-        return Err(it.type_error(&m("characterDataOldValue").replace("'characterDataOldValue'", "'characterDataOldValue' to true")));
+        return Err(s.type_error(&m("characterDataOldValue").replace("'characterDataOldValue'", "'characterDataOldValue' to true")));
     }
     // Chrome checks the old-value and filter members before the "at least one" rule (the standard has them the other way round).
     if !(o.child || o.attrs || o.chars) {
-        return Err(it.type_error(NEED));
+        return Err(s.type_error(NEED));
     }
     Ok(o)
 }
 
-fn observe(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let o = observer_of(d, it, this)?;
-    if a.is_empty() {
-        return Err(it.type_error("Failed to execute 'observe' on 'MutationObserver': 1 argument required, but only 0 present."));
-    }
-    let Some(target) = d.node_of(a[0]) else {
-        return Err(it.type_error("Failed to execute 'observe' on 'MutationObserver': parameter 1 is not of type 'Node'."));
+fn observe<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = observer_of(d, s, this)?;
+    let Some(t) = a.get(0) else {
+        return Err(s.type_error("Failed to execute 'observe' on 'MutationObserver': 1 argument required, but only 0 present."));
     };
-    let opts = Rc::new(parse_opts(d, it, a.get(1).copied().unwrap_or(Value::Undefined))?);
+    let Some(target) = d.node_of_s(s, t) else {
+        return Err(s.type_error("Failed to execute 'observe' on 'MutationObserver': parameter 1 is not of type 'Node'."));
+    };
+    let opts = Rc::new(parse_opts(d, s, a.get(1))?);
     let st = state(d);
     let watch = {
-        let mut s = st.borrow_mut();
-        let s = &mut *s;
-        if let Some(r) = s.regs.get_mut(&target).and_then(|v| v.iter_mut().find(|r| r.obs == o && r.source.is_none())) {
+        let mut m = st.borrow_mut();
+        let m = &mut *m;
+        if let Some(r) = m.regs.get_mut(&target).and_then(|v| v.iter_mut().find(|r| r.obs == o && r.source.is_none())) {
             // The standard replaces the options and drops the transient registrations that came from this one.
             r.o = opts;
             let mut gone = 0;
-            for v in s.regs.values_mut() {
+            for v in m.regs.values_mut() {
                 let n = v.len();
                 v.retain(|r| !(r.obs == o && r.source == Some(target)));
                 gone += n - v.len();
             }
-            s.n_regs -= gone;
-            s.transient -= gone;
-            s.obs.get_mut(&o).expect("checked").regs -= gone;
+            m.n_regs -= gone;
+            m.transient -= gone;
+            m.obs.get_mut(&o).expect("checked").regs -= gone;
         } else {
-            if s.n_regs >= MAX_REGS {
-                return Err(d.lim("mutation-registrations"));
+            if m.n_regs >= MAX_REGS {
+                return Err(d.lim_s(s, "mutation-registrations"));
             }
-            s.regs.entry(target).or_default().push(Reg { obs: o, o: opts, source: None });
-            s.n_regs += 1;
-            s.obs.get_mut(&o).expect("checked").regs += 1;
+            m.regs.entry(target).or_default().push(Reg { obs: o, o: opts, source: None });
+            m.n_regs += 1;
+            m.obs.get_mut(&o).expect("checked").regs += 1;
         }
-        !std::mem::replace(&mut s.watching, true)
+        !std::mem::replace(&mut m.watching, true)
     };
     d.mo.armed.set(true);
-    d.ensure_notify(it)?;
+    d.ensure_notify(s)?;
     if watch {
         d.sync_watcher();
     }
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-fn disconnect(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let o = observer_of(d, it, this)?;
-    let mut s = state(d).borrow_mut();
-    s.drop_regs(o, false);
-    let ob = s.obs.get_mut(&o).expect("checked");
+fn disconnect<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = observer_of(d, s, this)?;
+    let mut m = state(d).borrow_mut();
+    m.drop_regs(o, false);
+    let ob = m.obs.get_mut(&o).expect("checked");
     let n = std::mem::take(&mut ob.recs).len();
-    s.n_recs -= n;
-    drop(s);
+    m.n_recs -= n;
+    drop(m);
     d.mo_unwatch_if_idle();
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-fn take_records(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let o = observer_of(d, it, this)?;
+fn take_records<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = observer_of(d, s, this)?;
     let recs = {
-        let mut s = state(d).borrow_mut();
-        let r = std::mem::take(&mut s.obs.get_mut(&o).expect("checked").recs);
-        s.n_recs -= r.len();
+        let mut m = state(d).borrow_mut();
+        let r = std::mem::take(&mut m.obs.get_mut(&o).expect("checked").recs);
+        m.n_recs -= r.len();
         r
     };
-    d.record_array(it, recs)
+    old_v(s, |it| d.record_array(it, recs))
 }
 
 impl Dom {
-    fn ensure_notify(&self, it: &mut Interp<'_>) -> R<()> {
+    fn ensure_notify<'s>(&self, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
         if state(self).borrow().notify.is_none() {
-            let f = self.add_fn(it, notify, "notify", 0, false)?;
+            let r = self.add_fn_s_raw(s, notify, "notify", 0, HostFn::Method);
+            let f = lift(s, r)?;
             state(self).borrow_mut().notify = Some(f);
         }
         Ok(())
     }
 
-    fn record_array(&self, it: &mut Interp<'_>, recs: Vec<Rec>) -> V {
+    fn record_array(&self, it: &mut Interp<'_>, recs: Vec<Rec>) -> R<Value> {
         let proto = state(self).borrow().record.expect("made");
         let mut items = Vec::with_capacity(recs.len());
         for r in recs {
@@ -467,7 +470,7 @@ impl Dom {
             let o = self.obj(it, proto)?;
             let ty = self.js_str(it, match r.ty { Ty::Child => "childList", Ty::Attrs => "attributes", Ty::Chars => "characterData" })?;
             let target = self.wrap(it, r.target)?;
-            let list = |it: &mut Interp<'_>, ids: &[NodeId]| -> V {
+            let list = |it: &mut Interp<'_>, ids: &[NodeId]| -> R<Value> {
                 let mut v = Vec::with_capacity(ids.len());
                 for &n in ids {
                     v.push(self.wrap(it, n)?);
@@ -587,36 +590,43 @@ impl Dom {
 }
 
 /// "Notify mutation observers": the delivery microtask.
-fn notify(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
+fn notify<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let order = {
-        let mut s = state(d).borrow_mut();
-        s.queued = false;
-        s.order.clone()
+        let mut m = state(d).borrow_mut();
+        m.queued = false;
+        m.order.clone()
     };
     for o in order {
         let (cb, recs) = {
-            let mut s = state(d).borrow_mut();
-            let Some(ob) = s.obs.get_mut(&o) else { continue };
+            let mut m = state(d).borrow_mut();
+            let Some(ob) = m.obs.get_mut(&o) else { continue };
             let cb = ob.cb;
             let recs = std::mem::take(&mut ob.recs);
-            s.n_recs -= recs.len();
-            if s.transient > 0 {
-                s.drop_regs(o, true);
+            m.n_recs -= recs.len();
+            if m.transient > 0 {
+                m.drop_regs(o, true);
             }
             if recs.is_empty() {
                 continue;
             }
             (cb, recs)
         };
-        let list = d.record_array(it, recs)?;
+        // The locals of one observer are dropped before the next one.
+        let base = s.engine().stack_len();
+        let list = old_v(s, |it| d.record_array(it, recs))?;
         d.mo_unwatch_if_idle();
-        match it.call(cb, Value::Object(o), &[list, Value::Object(o)]) {
+        let (cb, this) = (s.engine().raw_local(&cb), d.obj_local(s, o));
+        match s.call(cb, this, &[list, this]) {
             Ok(_) => {}
-            Err(Error::Throw(v)) => d.report(it, v, "mutationobserver", Target::Window),
+            Err(Error::Throw(v)) => {
+                let v = s.engine().raw(v);
+                d.report(s.engine(), v, "mutationobserver", Target::Window);
+            }
             Err(e) => return Err(e),
         }
+        s.engine().stack_truncate(base);
     }
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
 fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
@@ -626,14 +636,14 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     let op = it.object_prototype();
     let (observer, record) = (d.obj(it, op)?, d.obj(it, op)?);
     let (kc, kp) = (d.key(it, "constructor")?, d.key(it, "prototype")?);
-    let (co, cr) = (d.add_fn(it, construct, "MutationObserver", 1, true)?, d.add_fn(it, illegal, "MutationRecord", 0, true)?);
+    let (co, cr) = (d.add_fn_s_obj(it, construct, "MutationObserver", 1, HostFn::Ctor)?, d.add_fn_s_obj(it, illegal, "MutationRecord", 0, HostFn::Ctor)?);
     for (f, proto) in [(co, observer), (cr, record)] {
         it.define_data(f, kp, Value::Object(proto), false, false, false)?;
         it.define_data(proto, kc, Value::Object(f), true, false, true)?;
     }
-    d.def_method(it, observer, "observe", 1, observe)?;
-    d.def_method(it, observer, "disconnect", 0, disconnect)?;
-    d.def_method(it, observer, "takeRecords", 0, take_records)?;
+    d.def_method_s(it, observer, "observe", 1, observe)?;
+    d.def_method_s(it, observer, "disconnect", 0, disconnect)?;
+    d.def_method_s(it, observer, "takeRecords", 0, take_records)?;
     let mut s = state(d).borrow_mut();
     s.observer = Some(observer);
     s.record = Some(record);

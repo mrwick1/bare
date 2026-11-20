@@ -658,13 +658,18 @@ pub trait Engine: Sized {
     fn set<'s>(&mut self, obj: Local<'_>, key: Local<'_>, value: Local<'_>) -> Result<(), Error<'s>>;
     /// `Object.defineProperty` of a data property.
     fn define<'s>(&mut self, obj: Local<'_>, key: Local<'_>, value: Local<'_>, attrs: Attrs) -> Result<(), Error<'s>>;
-    /// `get` with a key from Rust. An engine can skip the string value of the key.
-    fn get_str<'s>(&mut self, obj: Local<'_>, key: &str) -> Result<Local<'s>, Error<'s>> {
+    /// `obj[key]` with a key from Rust. An engine can skip the string value of the key.
+    fn get_named<'s>(&mut self, obj: Local<'_>, key: &str) -> Result<Local<'s>, Error<'s>> {
         let k = self.string(key)?;
         self.get(obj, k)
     }
+    /// `ToBoolean(obj[key])` with a key from Rust (a flag of an init dictionary). An engine can skip the local of the value.
+    fn get_named_bool<'s>(&mut self, obj: Local<'_>, key: &str) -> Result<bool, Error<'s>> {
+        let v = self.get_named(obj, key)?;
+        Ok(self.to_boolean(v))
+    }
     /// `define` with a key from Rust. An engine can skip the string value of the key.
-    fn define_str<'s>(&mut self, obj: Local<'_>, key: &str, value: Local<'_>, attrs: Attrs) -> Result<(), Error<'s>> {
+    fn define_named<'s>(&mut self, obj: Local<'_>, key: &str, value: Local<'_>, attrs: Attrs) -> Result<(), Error<'s>> {
         let k = self.string(key)?;
         self.define(obj, k, value, attrs)
     }
@@ -1065,7 +1070,12 @@ impl<'s, E: Engine> Scope<'s, E> {
 
     /// `obj[key]` with a key from Rust.
     pub fn get_str(&mut self, obj: Local<'_>, key: &str) -> Result<Local<'s>, Error<'s>> {
-        self.e.get_str(obj, key)
+        self.e.get_named(obj, key)
+    }
+
+    /// `ToBoolean(obj[key])` with a key from Rust.
+    pub fn get_bool_str(&mut self, obj: Local<'_>, key: &str) -> Result<bool, Error<'s>> {
+        self.e.get_named_bool(obj, key)
     }
 
     pub fn set(&mut self, obj: Local<'_>, key: Local<'_>, value: Local<'_>) -> Result<(), Error<'s>> {
@@ -1392,7 +1402,7 @@ impl<'s, E: Engine> Scope<'s, E> {
 
     /// `define` with a key from Rust.
     pub fn define_str(&mut self, obj: Local<'_>, key: &str, value: Local<'_>, attrs: Attrs) -> Result<(), Error<'s>> {
-        self.e.define_str(obj, key, value, attrs)
+        self.e.define_named(obj, key, value, attrs)
     }
 
     /// `set` with a key from Rust.
