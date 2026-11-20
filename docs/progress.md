@@ -16508,11 +16508,46 @@ Costs below are for the hot path (the `prog.codes[ci]` read in `enter!`, `reload
 
 Choice: **A**. It is the only one with no limit on appends and no change of cost that depends on the size of the program. The cost is one more dependent load in `enter!` and `reload!`, bought back in part by an index that needs no multiply. B fails the rule when the capacity runs out. C makes the first nested call O(program) and puts the saving at risk. D adds a test to every call.
 
-Two other parts of the change, both on the same cost line:
+The first build of A gave each `Code` its own heap block. That cost 22 K instructions at start (+1.2%: 44 blocks for the prelude). The built design keeps A and changes where the `Code` values live:
 
-- **Compile in the loop again.** The store allows an append through `&Program`, so `Op::Lazy` calls `Realm::compile_stub` and goes on at pc 0 of the new code: `lazy_at`, `lazy_err` and the `Err(Exit::Fuel)` round trip through `Vm::start` go away. The loop reloads `code`, `words` and `fb` after the compile (`reload!`), as after any call. A failed compile throws a `SyntaxError` at the stub, as before; it fails again at each call (the pending entry is gone), so no machine keeps feedback of a stub that is no longer one.
-- **Feedback grows on demand.** An outer machine cannot be resized from a nested run: its `&mut Vec<Feedback>` is in its loop. So the loop makes the entry when it needs it: `reload!` reads `fbs[ci]`, and the bounds check that it already has now calls a cold function that resizes the vector to the size of the table. The hot path has the same compare and branch as before.
+- `crates/js2/src/codes.rs` (the only new `unsafe`, one module, `#![allow(unsafe_code)]` on the `mod` line, SAFETY comment at the top). `Codes` is a table `Vec<*mut Code>` and a slab. The slab holds *chunks*: the buffer of a `Vec<Code>` that a loader hands over (no copy), with its spare room for later single codes. One heap block for each compile, not for each code.
+- `push_all(Vec<Code>)` adds a chunk. `set(i, Code)` takes a slot (a free one, else room in the last chunk, else a new chunk of 16) and *retires* the old slot. A `&Code` of the old code stays valid.
+- `free_retired(&mut self)` drops the retired codes and keeps their slots for the next `set`. `Vm::start` calls it when the outermost run ends (`nest == 0`, through `Rc::get_mut`), so no `&Code` can exist. A chunk goes back to the allocator when the `Codes` drops.
+- `Codes::at(i)` is `unsafe` and has no bounds check. The loop uses it only for the code of a frame that is on its stack (`enter!` and `Vm::start` checked the index). The table never shrinks.
+- The loop compiles in place: `Op::Lazy` calls `Realm::compile_stub` (compile, `fn_info`, one feedback entry, the frame made again for the code, as for a stub that keeps its parameters since #777) and goes on at pc 0 after `reload!`. `lazy_at`, `lazy_err` and the exit through `Vm::start` are gone.
+- A machine that is below in the Rust stack has a feedback vector that is shorter than the table. `reload!` has the bounds check that it had; its miss branch calls the cold `grow_fbs`. `Realm::call_function` no longer resizes the vector of a pooled machine.
+- A compile failure throws a plain `Error` (since #777) at the stub, and the stub fails again at its next call.
 
+#### Cost of the built design
+
+`interp_load` release, `tools/js/instr.sh` (minimum of 3, `instructions:u`), net = count(N) - count(0), in M instructions. Main `43b62b05` and this tree (merge with main, 3 runs each, spread under 0.002 M) built and measured in the same hour on archMachine. cgu 16 is the default build; cgu 1 is `CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1` for both trees.
+
+| Row | N | Main cgu 16 | New cgu 16 | Change | Main cgu 1 | New cgu 1 | Change |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loopfn` | 1,000,000 | 320.50 | 323.50 | +0.94% | 328.50 | 327.50 | -0.30% |
+| `calls` | 1,000,000 | 708.50 | 691.50 | -2.40% | 723.50 | 710.50 | -1.80% |
+| `fib` | 30 | 1452.28 | 1401.12 | -3.52% | 1480.55 | 1454.97 | -1.73% |
+| `closures` | 200,000 | 418.29 | 414.69 | -0.86% | 428.95 | 426.95 | -0.47% |
+| `objects` | 200,000 | 153.39 | 155.66 | +1.48% | 158.20 | 162.86 | **+2.95%** |
+
+`loopfn` is over +0.5% at cgu 16 and under it at cgu 1, so it passes by the rule. **`objects` fails the rule**: +1.48% at cgu 16 and +2.95% at cgu 1. Its loop makes one construct call and one return for each iteration. What I measured:
+
+- The extra cost is about 11 instructions for each iteration at cgu 16 and 23 at cgu 1. A table load for each call and return explains only 2 to 4.
+- With the body of the `Op::Lazy` arm cut out (it only throws), `objects` stays at 155.79 M at cgu 16. So the compile code in the loop is not the cause.
+- With `Codes` made hoistable by a cast that is undefined behaviour (an experiment, not kept), cgu 1 gives `objects` 161.8 M (+2.1% against main). So the `UnsafeCell` that blocks the hoist of the table pointer is part of it and not all.
+- Hypothesis: the rest is the register allocation of the 330 KB `Vm::run` (the earlier rounds show the same swing in both signs on rows whose ops did not change). I did not find one line that causes it.
+- Not built: design H, a table with a fixed address and a `(ptr, len)` snapshot in the loop that refreshes on a miss. It would let LLVM hoist the table again. I judged it large and uncertain. The owner decides whether to build it.
+
+Start-up: `script_run` of `var x = 1;` is 1,786,500 (main, 3 runs: 1,785,885 / 1,786,524 / 1,786,732) and 1,789,750 (new, 3 runs: 1,789,371 / 1,789,750 / 1,790,476): +3.3 K, +0.19%. `interp_load loopfn 0`: 808.4 K to 809.1 K (main) and 810.0 K to 810.4 K (new): +0.17%. It does not meet "must not regress" to the instruction. The table, the chunk list and the `Rc<Codes>` cost it. The prelude `Vec<Code>` is adopted without a copy.
+
+#### Tests
+
+- `cargo test --locked -p bare-js2 --lib`: 422 pass (the merge with main, which now has #777). `-p bare-js-diff`: pass. `a_scope_with_many_locals_compiles_in_linear_time` passed in the full run.
+- `codes_tests.rs` (5): append and read, `set` keeps a `&Code` of the old code until `free_retired`, a slot is reused after it, growth of the table with a `&Code` held, `set` out of range panics. Miri passes them under Stacked Borrows and under `-Zmiri-tree-borrows`.
+- `conversion_tests.rs`: the test that asserted the `SyntaxError` is replaced by three that first-call `map`, `sort`, `reduce`, `Array.from`, `forEach` and `find` inside `valueOf`, a getter, a setter and `toString`, two levels deep, and after a nested run that throws. Each fails on the old head and passes now.
+- #777 combination (it landed in main before the final merge; `script_tests.rs::a_user_function_first_called_in_a_nested_run_is_compiled_there`, 8 cases, each also under constant collection): a user function first called from a getter, a setter, `valueOf` and `toString`, with a stub that keeps its parameter registers and one that makes the array (`arguments`, a default value, a rest parameter); a three-level chain (`valueOf` -> getter -> `valueOf`); a stub that compiles in a nested run and has a function inside it. It fails on main `43b62b05` (checked in a scratch worktree with the same test) and passes here.
+- test262 (`TEST262=/data/claude-tmp/test262` at `e4fbf577`, `tools/js/test262_js2.sh -j 6`, 452 directories), this tree against `tools/fixtures/js/test262-js2-baseline.txt` and against main `43b62b05` run the same way. No test passes on main and fails here (0 lost). Against main, this tree passes more (the coercions of #785): for example `built-ins/Array/prototype/every` 178 to 201, `Object/seal` 42 to 51, `compound-assignment` 236 to 379. Against the checked-in baseline, 3 directories have one pass less, and main has the same count in each: `language/expressions/arrow-function` 41 to 40, `language/expressions/class` 190 to 189, `language/expressions/object/method-definition` 55 to 54. The baseline file is older than main there; this change did not cause the drop. I did not rewrite the baseline.
+- Main `43b62b05` does not build its lib tests: `script_tests.rs` calls `compile_after` with 5 arguments (it has 6 since #786) and reads `vm.prog` (it is `vm.realm.prog`). This change fixes the three lines.
 
 ## 2026-11-20: the pre-parse facts of the prelude are a generated file (js2, option B′ of `docs/design-js2-prelude.md`)
 
