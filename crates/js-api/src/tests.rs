@@ -411,3 +411,35 @@ fn the_microtask_hooks_of_a_host_default_to_doing_nothing() {
         assert_eq!(MAX_PENDING_REJECTIONS, 1024);
     });
 }
+
+struct NoClone;
+
+impl CloneHost<Toy> for NoClone {
+    fn is_host_object(&self, _: &V) -> bool {
+        false
+    }
+    fn can_transfer(&self, _: &V) -> bool {
+        false
+    }
+    fn transfer_out(&mut self, _: &V) -> Box<dyn std::any::Any> {
+        Box::new(())
+    }
+    fn transfer_in<'s>(&mut self, _: &mut Scope<'s, Toy>, _: Vec<Box<dyn std::any::Any>>) -> Result<Vec<Local<'s>>, Error<'s>> {
+        Ok(Vec::new())
+    }
+    fn data_clone_error<'s>(&mut self, s: &mut Scope<'s, Toy>, _: Refused) -> Error<'s> {
+        Error::Throw(s.undefined())
+    }
+}
+
+#[test]
+fn an_engine_with_no_clone_says_unsupported() {
+    let mut e = toy();
+    let v = Local::from_slot(0);
+    let limits = CloneLimits { bytes: 1, depth: 1, nodes: 1, names: ["b", "d", "n"] };
+    let opts = CloneOpts { limits, transfer: &[] };
+    assert_eq!(e.clone_out(v, &opts, &mut NoClone).err(), Some(Error::Abort(Abort::Unsupported("clone_out"))));
+    let c = Cloned::new(Box::from([]), Vec::new(), 0);
+    assert_eq!(e.clone_in(c, &mut NoClone).err(), Some(Error::Abort(Abort::Unsupported("clone_in"))));
+    assert_eq!(e.clone_copy(v, &limits, &mut NoClone).err(), Some(Error::Abort(Abort::Unsupported("clone_copy"))));
+}
