@@ -16214,6 +16214,54 @@ Engine bugs that the run found (not fixed here):
 
 Not tested: Windows and macOS (the shell tool needs GNU `find` and `timeout`; the cargo test is portable but not run there); the old engine in `auto` and `byte` modes (only `tree`); Miri on `load_with` (safe code); the `script_tests` programs that span several lines; a second test262 checkout revision; the old engine's modules and async tests (skipped on both); how the counts move when js2 gets a step budget of another size (20,000,000 back edges, the old engine 20,000,000 steps: not the same unit).
 
+### Step 2: the base of the registers in a local pointer
+
+Change (`Vm::run`, `interp.rs`): a local `regs: *mut Value` holds `stack.as_mut_ptr().add(fp)`. `r!` reads `*regs.add(i)`. `reload!` sets it (it runs after each change of `fp`: `enter!`, `ret!`, `throw!`), and `ensure!` sets it again after a reallocation of the stack. The second change: `nextx` (the word after the extra word) was a `let` that every op computed, and the compiler kept it in the register of `words`, so `words` was stored and reloaded around each op (the `fib` +2.4% of #763, design 2.1). It is a macro now (`nextx!()`), and only the ops with an extra word compute it. No change in an arm other than that.
+
+Invariant: `regs` must be set again each time `fp` changes or the stack is reallocated. A missed spot is a use after free. Today only `ensure!` and `Vm::call` reallocate the stack, and `Vm::call` runs only with an empty stack. A native that re-enters the VM (the re-entrant call of the conversion work) must set `regs` again after the nested run.
+
+Checks: test `a_stack_that_grows_in_a_callee_keeps_the_registers_of_the_callers` (deep recursion by `call`, `new`, a method call and a rest parameter: each caller has live registers and reads `this` and its arguments after the call that grows the stack). It passes without the fix in `ensure!` in a normal run (the freed block still holds the old data), so a normal test cannot see the bug. Under Miri, with the line in `ensure!` removed, it fails: "pointer is dangling". With the line it passes under Miri on the heads of steps 3 and 4, which hold this change (see there). It was not run on this head alone.
+
+Instructions of the whole process, same method as step 1. "Step 1" is the head of PR #766 merged with the design branch, built again for this table (it differs from the step 1 table above by 0.13% at most, in `concat`).
+
+| Row | Scale | step 1 (M) | step 2 (M) | change | spread new % | QuickJS (M) | step 2 / QuickJS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loop` | 1 | 152.14 | 135.14 | -11.2% | 0.006 | 64.69 | 2.09 |
+| `loop` | 10 | 1480.54 | 1310.54 | -11.5% | 0.000 | 635.29 | 2.06 |
+| `loopfn` | 1 | 68.16 | 56.76 | -16.7% | 0.003 | 44.10 | 1.29 |
+| `loopfn` | 10 | 640.57 | 526.57 | -17.8% | 0.001 | 429.30 | 1.23 |
+| `calls` | 1 | 115.48 | 107.18 | -7.2% | 0.005 | 60.62 | 1.77 |
+| `calls` | 10 | 1113.58 | 1030.58 | -7.5% | 0.001 | 594.33 | 1.73 |
+| `fib` | 1 | 8.84 | 8.65 | -2.1% | 0.055 | 4.37 | 1.98 |
+| `fib` | 10 | 52.17 | 50.09 | -4.0% | 0.004 | 35.54 | 1.41 |
+| `closures` | 1 | 22.21 | 21.37 | -3.8% | 0.005 | 26.11 | 0.82 |
+| `closures` | 10 | 179.61 | 171.21 | -4.7% | 0.001 | 279.90 | 0.61 |
+| `objects` | 1 | 91.11 | 86.75 | -4.8% | 0.007 | 53.72 | 1.61 |
+| `objects` | 10 | 855.84 | 812.78 | -5.0% | 0.000 | 512.44 | 1.59 |
+| `webpack` | 1 | 9.75 | 9.71 | -0.3% | 0.087 | 5.47 | 1.77 |
+| `webpack` | 10 | 52.05 | 51.75 | -0.6% | 0.016 | 41.97 | 1.23 |
+| `throws` | 1 | 39.76 | 37.63 | -5.4% | 0.019 | 85.11 | 0.44 |
+| `throws` | 10 | 356.74 | 335.40 | -6.0% | 0.001 | 840.93 | 0.40 |
+| `concat` | 1 | 4.62 | 4.61 | -0.2% | 0.053 | 1.34 | 3.44 |
+| `concat` | 10 | 5.30 | 5.24 | -1.2% | 0.007 | 2.15 | 2.44 |
+| `bundle` | 1 | 128.01 | 122.86 | -4.0% | 0.004 | 134.42 | 0.91 |
+| `empty` | 1 | 4.48 | 4.48 | -0.0% | 0.059 | 1.23 | 3.63 |
+
+Net slope (scale 10 minus scale 1), M instructions:
+| Row | step 1 | step 2 | change | QuickJS | step 2 / QuickJS | gate (<= 1.00) |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `loop` | 1328.4 | 1175.4 | -11.5% | 570.6 | 2.06 | no |
+| `loopfn` | 572.4 | 469.8 | -17.9% | 385.2 | 1.22 | no |
+| `calls` | 998.1 | 923.4 | -7.5% | 533.7 | 1.73 | no |
+| `fib` | 43.3 | 41.4 | -4.4% | 31.2 | 1.33 | no |
+| `closures` | 157.4 | 149.8 | -4.8% | 253.8 | 0.59 | yes |
+| `objects` | 764.7 | 726.0 | -5.1% | 458.7 | 1.58 | no |
+| `webpack` | 42.3 | 42.0 | -0.6% | 36.5 | 1.15 | no |
+| `throws` | 317.0 | 297.8 | -6.1% | 755.8 | 0.39 | yes |
+| `concat` | 0.7 | 0.6 | -8.1% | 0.8 | 0.78 | yes |
+
+
+Per-op costs in the S2.9 entry predicted 2.5% to 13% (spike). Measured: `fib` -4.0%, `closures` -4.7%, `objects` -5.0%, `calls` -7.5%, `loop` -11.5%, `loopfn` -17.8%. Every row is lower; none is higher. The spike did not have the `nextx` change, and the rows are better than the spike by 0.5 to 4.7 points (hypothesis: `nextx`; not measured separately).
 ## 2026-11-20: property attributes, descriptors, non-extensible objects and generic Array methods in js2 (S2.7 follow-up)
 
 Branch `t3/js2-builtin-attrs`, from the test262 gate (#764). It fixes the groups that the gate reported as 325 (property attributes), 241 (Array methods on array-likes), 373 (missing methods) and 205 (accessors), the real non-extensible objects, and the hang of `Object.setPrototypeOf/set-failure-cycle.js`.
