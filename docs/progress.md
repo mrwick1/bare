@@ -14198,3 +14198,45 @@ Checks:
 - Windows 11 VM: `navigation` 89, `window` 40, `open` 5, `child` 49 passed. `session` 41 passed and 2 failed: `a_page_fed_in_pieces_gives_the_tree_of_a_one_step_parse` and `a_page_parsed_in_slices_gives_the_tree_of_a_one_step_parse` (fixture path, `browser_session.rs:1068`, known, not fixed).
 
 Not tested: a grandchild page whose parent window is the only holder of its handles (`delete window.parent` at depth 2); the crate tests of `bare-js-api` and `bare-js` on Windows; wall time; the codegen-unit check (no row was over the limit).
+## 2026-11-20: streams as owners (plan step S0.4, F4)
+
+COMPLETE. PR is open and not merged. No cost row is over +0.5% under glibc, so the codegen-unit and jemalloc checks were not needed.
+
+Changes:
+
+- `bind` in `bare-js-api`: `Engine::bind(target, this)` and `Scope::bind`. The adapter in `crates/js/src/eval_api.rs` calls `Interp::host_bind`. The toy engine of `crates/js-api/src/tests.rs` answers `Unsupported("bind")`. Adapter test `bind_fixes_this_and_reads_no_script_bind`: `this` is fixed, a script that replaces `Function.prototype.bind` changes nothing, and a target that is not a function throws a `TypeError`.
+- `Owner::Stream(ObjId)` in `browser.rs`. A stream, its controller and its reader each get a host key in `browser_streams::own`. The entries (`Stream`, `Ctl`, `Rdr`) hold their key. Every edge is a `Traced` value: the links between the three objects, `source`, `start`, `pull`, `cancel`, the queued chunks, the bound pull reactions, the errored reason and the pending reads of the reader.
+- `Dom::trace` has one arm for `Owner::Stream`. `Dom::prune` calls `browser_streams::prune` once, after the keys are released and next to the fetch call. `prune` is one pass over the three maps. It takes the queued bytes of a dead controller out of the total. There is no arm in the dead-key loop, because a stream key needs no per-key action (the F3 cost finding). `self.streams.trace` and `self.streams.prune` are gone from the old hook.
+- `host_bind` sites: 6 calls in 3 places of `browser_streams.rs` (`pull_if_needed`, `cancel_stream`, `construct`). They stay on `Interp::host_bind`. The handler bodies have no `Scope` yet, and the design moves them in one later PR.
+
+Tests: `a_stream_keeps_the_chunks_of_its_controller_while_the_stream_is_reachable` keeps only the stream reachable (no global for the controller) over 3 collections, reads the chunks, then drops the stream and sees zero entries and zero bytes. `a_collect_between_the_tasks_of_a_pull_cycle_keeps_the_stream_and_its_reactions` runs a timer-driven `pull` with the stress mode on and off and compares the output. The old engine collects only at a safe point, never inside a call, so a collection inside `pull` is not possible there. That case needs the new engine.
+
+Cost matrix (archMachine, base = origin/main `6d9f6c25` built fresh, new = this branch; 3 runs per row, minimum; `-j4`; 817 rows; glibc): mean change -0.060%. Rows over +0.5%: 0. The worst row is a `bare-stress` row at +0.377%. 2 rows fail to run on both trees (`parse_load deep 1` and `10`, known stack overflow).
+
+| Row | base | new | change |
+|---|---|---|---|
+| `streams_load flow 1` | 212,241,570 | 211,856,843 | -0.181% |
+| `streams_load flow 10` | 1,998,016,452 | 1,995,363,452 | -0.133% |
+| `streams_load many 1` | 50,184,215 | 50,071,624 | -0.224% |
+| `streams_load many 10` | 415,053,516 | 414,176,383 | -0.211% |
+| `streams_load pending 1` | 89,830,630 | 87,116,866 | -3.021% |
+| `streams_load pending 10` | 811,099,272 | 784,543,679 | -3.274% |
+| `streams_load churn 1` | 29,771,738 | 29,680,889 | -0.305% |
+| `streams_load churn 10` | 212,572,717 | 212,133,344 | -0.207% |
+| `fetch_load post 1` | 22,350,914 | 22,308,189 | -0.191% |
+| `fetch_load post 10` | 136,786,246 | 136,499,337 | -0.210% |
+| `fetch_load bytes 1` | 10,655,868 | 10,620,841 | -0.329% |
+| `fetch_load bytes 10` | 33,062,431 | 32,627,896 | -1.314% |
+| `fetch_load objects 1` | 93,615,710 | 93,395,328 | -0.235% |
+| `fetch_load objects 10` | 868,107,395 | 865,890,476 | -0.255% |
+| `fetch_load iterate 1` | 216,922,905 | 216,704,306 | -0.101% |
+| `fetch_load iterate 10` | 2,092,490,367 | 2,090,282,193 | -0.106% |
+
+Hypothesis: the `fetch_load` gain comes from the dead-key loop and the pruned fetch hook of F3 that main already has, plus the removed `Streams::trace` probe per object. The base is the F3 merge, so the cause of the small `fetch_load` gain is not measured.
+
+Checks:
+
+- Linux: `cargo check -p bare -p bare-js -p bare-js-api` exits 0. `cargo test --locked -p bare --lib` filtered `stream` 50 and `fetch` 95 passed, also with `BARE_GC_STRESS=1`. `cargo test --locked -p bare-js --lib api` 33 passed. `cargo test --locked -p bare-js-api -p bare-js -p bare --lib` ran once: `bare` 1695, `bare-js` 1071, `bare-js-api` 6 passed.
+- Windows 11 VM: `stream` 50, `fetch` 95 (`bare`) and `api` 33 (`bare-js`) passed.
+
+Not tested: the crate tests of `bare-js-api` and the full `bare-js` and `bare` suites on Windows; a collection inside a `pull` call (needs the new engine); `jemalloc` and codegen-units=1 runs (no row needed them); wall time. `cargo clippy -D warnings` fails on `crates/os/src/pages.rs:19` (`manual_is_multiple_of`), a file this change does not touch.
