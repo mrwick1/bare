@@ -36,13 +36,6 @@ impl Dom {
         }
     }
 
-    pub(crate) fn event_of(&self, it: &mut Interp<'_>, v: Value) -> R<ObjId> {
-        match v {
-            Value::Object(o) if self.st.borrow().events.contains_key(&o) => Ok(o),
-            _ => Err(it.type_error("Illegal invocation")),
-        }
-    }
-
     /// A new event object. `Some(detail)` makes a `CustomEvent`, including an undefined detail.
     pub(crate) fn new_event(&self, it: &mut Interp<'_>, ty: &str, bubbles: bool, cancelable: bool, composed: bool, detail: Option<Value>) -> R<ObjId> {
         let p = self.p();

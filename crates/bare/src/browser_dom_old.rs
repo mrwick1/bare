@@ -15,17 +15,6 @@ pub(crate) fn arg(a: &[Value], i: usize) -> Value {
     a.get(i).copied().unwrap_or(Value::Undefined)
 }
 
-pub(crate) fn attr_get(d: &Dom, it: &mut Interp<'_>, n: NodeId, name: &str) -> V {
-    let s = {
-        let doc = d.doc.borrow();
-        doc.find_atom(name).and_then(|a| doc.attr(n, a)).map(str::to_string)
-    };
-    match s {
-        Some(s) => d.js_str(it, &s),
-        None => Ok(Value::Null),
-    }
-}
-
 pub(crate) fn attr_set(d: &Dom, it: &mut Interp<'_>, n: NodeId, name: &str, value: &str) -> R<()> {
     let mut doc = d.doc.borrow_mut();
     d.attr_room(&doc, n, name, value)?;
@@ -130,10 +119,6 @@ pub(crate) fn new_fragment(d: &Dom, it: &mut Interp<'_>, proto: Option<ObjId>) -
     })
 }
 
-pub(crate) fn clone_tree(d: &Dom, it: &mut Interp<'_>, n: NodeId, deep: bool, import: bool) -> R<NodeId> {
-    run(it, |s| clone_tree_s(d, s, n, deep, import))
-}
-
 pub(crate) fn text_content(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let n = d.nd(it, this)?;
     let s = {
@@ -195,19 +180,6 @@ pub(crate) fn set_text_content(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[V
         NodeData::Document | NodeData::Doctype(_) => {}
     }
     Ok(Value::Undefined)
-}
-
-pub(crate) fn body(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    html_child(d, it, this, &["body", "frameset"])
-}
-
-fn html_child(d: &Dom, it: &mut Interp<'_>, this: Value, names: &[&str]) -> V {
-    let root = d.nd(it, this)?;
-    let r = {
-        let doc = d.doc.borrow();
-        doc.children(root).find(|&c| matches!(doc.data(c), NodeData::Element { .. })).and_then(|html| doc.children(html).find(|&c| is_named(&doc, c, names)))
-    };
-    d.wrap_opt(it, r)
 }
 
 
