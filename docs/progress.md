@@ -15707,12 +15707,12 @@ Memory layout. `Code::tables: Vec<u32>`, one pool for all the tables of a functi
 | Integer | `lo` (as `u32`), `default`, `len`, then `len` targets. The target of `v` is `targets[v - lo]`. |
 | String | `default`, `mask`, then `mask + 1` slots of 3 words: `hash`, `atom`, `target`. An empty slot has `atom = u32::MAX`. The first probe is `hash & mask`; the next is the slot after (linear probing). |
 
-A string table has a power of two slots, with at least 1.5 slots for each case (load factor at most 2/3), so a probe ends at an empty slot. The verifier checks this.
+A string table has a power of two slots, with at least 4/3 slots for each case (a load of at most 3/4), so a probe ends at an empty slot. The verifier checks this. (The first draft said 1.5 slots. A 3-case switch then took 8 slots, 26 words, against 7 words for the chain. 4 slots take 14 words.)
 
-Thresholds (from the V8 and JSC rules; the numbers of this engine are in the measurement below):
+Thresholds (the V8 and JSC rules were the start; the numbers of this engine are measured below):
 
-- Integers: at least `MIN_INT_CASES` distinct values, and `span < 3 * cases` where `span = max - min + 1`. The table is then at most 3 words for each case, against 2 words for each case of a chain.
-- Strings: at least `MIN_STR_CASES` distinct strings.
+- Integers: at least 3 distinct values (`MIN_INT_CASES`), and `span < 3 * cases` where `span = max - min + 1` (`INT_SPAN`, V8's spread rule). The table has at most 3 words for each case, plus 3 words of header; a chain has 2 words for each case.
+- Strings: at least 3 distinct strings (`MIN_STR_CASES`).
 
 Check, defined before the code:
 
@@ -15720,3 +15720,62 @@ Check, defined before the code:
 - Verifier: accepts what the compiler makes; rejects a table out of the pool, a target that is not an instruction or that goes back, a string table with no empty slot, a slot with an atom out of range or a wrong hash, and a table length that disagrees with the pool.
 - Script tests (`check`: each runs normally and under constant collection): dense, sparse, strings, `default` in the middle, fallthrough, `-0`, NaN, a double that is an integer, a number against a string, a rope as the discriminant, duplicates, a `break` out of nested `switch` and loops, a `let` in a case. Each result equals what the chain gives (the old compiler's result, by reading the source and by running the same program with a case made non-constant).
 - Measure: a 16-case integer switch and an 8-case string switch in a loop, instructions before and after, 3 runs; the loops `loopfn` and `fib` must not move.
+
+### Result
+
+Changes (all in `crates/js2`): `bytecode.rs` (the ops `SwitchI` and `SwitchA`, the letter `T`, `Code::tables`, `int_table`, `str_table`, `switch_targets`, and a table line under the op in `disassemble`), `verify.rs` (`check_table`, and the table targets as successors in the data flow), `compile.rs` (`reach`: the label bookkeeping of a forward jump, taken out of `jump_ins`; `tables` and `table_fix`, which `finish` fills with the `pc` of each label), `compile_stmt.rs` (`table_plan`, `switch_table`), `interp.rs` (the two arms, and the helpers `switch_int` and `switch_str`). `interp_rt.rs` and `script.rs` are untouched.
+
+Two choices that the measurement changed:
+
+- `switch_str` is a function that is not inlined in `run`. With the probe written inside the `SwitchA` arm, the string rows were 4% cheaper, but `fib` cost +1.74% (1,391.70 M to 1,415.93 M) and `calls` +0.43%, for code that has no `switch`. Out of line, `fib` is +0.19% and `calls` is -0.43%. Hypothesis (not profiled): the larger `run` changed its register allocation. A fast path in line for an atom that sits in its first slot gave only 5 instructions per turn back and was not kept. `switch_int` is a few instructions and stays in line (a call for it changed nothing in the plain rows).
+- The threshold of 3 cases for both kinds. With 2 cases the table gives no gain (integers: 278.0 against 277.4 instructions per turn; strings: 404.0 against 407.5, and 14 words of table against 5 words of chain; both measured with the first build, where `SwitchA` was in line, which is cheaper than the final one). With 3 cases the table wins (rows below).
+
+Measurement. Machine: archMachine (AMD Ryzen 9 5900HX, Linux, load average 5 to 6 from other jobs, so only instruction counts are used). Build: release, `cargo build --locked --release -p bare-js2 --example script_run --example interp_load`. Tool: `perf stat -e instructions:u`, with `GLIBC_TUNABLES=glibc.malloc.tcache_count=65535` as in `tools/js/instr.sh`. Before: `t3/js2-interpreter` `9934d6d0`. After: this branch. Each switch row is a JavaScript function with a loop of 1,000,000 turns and the `switch` in the loop body, run by `script_run`; the row is (count at 1,000,000 turns - count at 0 turns) / 1,000,000, so the setup (compile of the script) is out. The value is the discriminant of each turn cycling over the cases (`i & 15`, `ks[i & 7]` for strings from an array literal, so each is an atom). 3 runs each. The counts are almost exactly the same in each run: the spread is at most 0.1 instruction per turn (the table shows the three runs). The sources are made by a script in the session scratch directory (not in the repository); `int16` is the `switch (i & 15)` with 16 cases of `s += k + 1; break;` and a `default`.
+
+| Row | Before (instructions per turn, 3 runs) | After | Change | Path after |
+| --- | --- | --- | ---: | --- |
+| `int16`: 16 integer cases, dense | 508.5, 508.5, 508.5 | 278.0, 278.0, 278.0 | -45.3% | `SwitchI` |
+| `int4`: 4 cases | 310.5, 310.4, 310.5 | 278.0, 277.9, 278.0 | -10.5% | `SwitchI` |
+| `int3`: 3 cases, `i % 3` | 302.0, 302.0, 301.9 | 286.0, 286.0, 286.0 | -5.3% | `SwitchI` |
+| `int2`: 2 cases | 277.4, 277.5, 277.5 | 277.0, 277.0, 277.0 | -0.2% | chain (same bytecode) |
+| `intsparse`: 8 cases, 1 to 10,000,000 | 474.5, 474.4, 474.4 | 471.0, 471.0, 471.0 | -0.7% | chain (same bytecode) |
+| `str8`: 8 string cases | 706.0, 705.9, 706.0 | 432.4, 432.5, 432.5 | -38.7% | `SwitchA` |
+| `str4`: 4 cases | 523.4, 523.5, 523.5 | 432.5, 432.5, 432.5 | -17.4% | `SwitchA` |
+| `str3`: 3 cases | 472.0, 471.9, 472.0 | 443.6, 443.6, 443.6 | -6.0% | `SwitchA` |
+| `str2`: 2 cases | 407.5, 407.5, 407.5 | 406.5, 406.5, 406.5 | -0.2% | chain (same bytecode) |
+| `str8fresh`: 8 cases, the discriminant `'k' + (i & 7)` is a new string each turn | 2,245.2 (3 runs equal) | 1,310.8 (3 runs equal) | -41.6% | `SwitchA` |
+
+The rows with the chain after have the same bytecode as before. Their change of -0.2% and -0.7% comes from the interpreter (I did not look for the cause; hypothesis: code layout). `str8fresh` is the worst case for the hash (a discriminant that has no hash yet: one hash of 2 units, then the compare), and it is still 41.6% below the chain, because each step of the chain flattens and compares the new string.
+
+The plain loops of `interp_load` (no `switch`). Delta of the count at N turns and at the setup, 3 runs, in M instructions; the 3 runs differ by at most 0.003 M:
+
+| Row | Before | After | Change |
+| --- | ---: | ---: | ---: |
+| `loopfn` 2,000,000 | 629.00 | 629.00 | +0.00% |
+| `fib(30)` | 1,391.70 | 1,394.39 | +0.19% |
+| `calls` 1,000,000 | 692.50 | 689.50 | -0.43% |
+| `closures` 200,000 | 412.84 | 412.44 | -0.10% |
+| `objects` 1,000,000 | 763.29 | 762.29 | -0.13% |
+
+No plain row is over +0.5%. They move with the code layout of `run`, not with a `switch` (none of these loops has one). I did not repeat them with `codegen-units=1`.
+
+Size. Words of the function (instruction words, then the words of `Code::tables`), chain against table: `int16` 74 against 42 + 19 = 61; `int4` 26 against 18 + 7 = 25; `int3` 22 against 16 + 6 = 22; `str8` 52 against 36 + 50 = 86; `str4` 32 against 24 + 26 = 50; `str3` 27 against 21 + 14 = 35. An integer table is smaller than the chain from 4 cases on. A string table is larger: 3 words in each of the slots, and the slots are at most 3/4 full. A 2-word slot (the hash read from the atom cell) would save a third; not built, since it adds a load for each probe.
+
+Tests. `cargo test --locked -p bare-js2 --lib`: 367 pass on Linux (353 before), 14 new:
+
+- `compile` (4): the goldens `switch_with_integer_cases_is_a_jump_table` (fallthrough, `break`, `default` before the last case, a gap; and the words of the pool), `switch_with_string_cases_is_a_hash_table` (and the size of the pool), `a_duplicate_case_gets_no_table_entry`; and `a_switch_keeps_the_chain_when_it_is_cheaper_or_cannot_be_a_table` (25 sources: the minimum of 3 cases, duplicates, the span at its limit, negative values and the top of the 32-bit range, a case that is a variable, a call, a sum, `1.5`, `-0`, a string among integers, `null`, `true` and `undefined`, and `default` anywhere). Every function passes the verifier.
+- `verify` (3): a table passes and its targets are the successors (the data flow finds a read of a register that a target path did not write); 15 bad integer tables (pool too short, empty, a target in the middle of a wide instruction, a target that goes back, a target past the end, a table past the largest integer, an offset that names no table, a register out of range); a string table passes and 8 bad ones (slot count not a power of two, cut off, no empty slot, an atom out of range, a wrong hash, a bad target, a bad default, a slot that its own probe cannot find).
+- `script` (7): the tests run each program with the table and with the chain (every `case X:` changed to `case (void 0, X):`, which is not a constant, and the test checks that the table version has a table op and the chain version has none), normally and under constant collection. They cover a dense switch with `default` in the middle and fallthrough over 25 values (ints, `1.0`, `6 / 2`, `-0`, NaN, `1.5`, `2^31`, `1e300`, `Infinity`, `'1'`, `null`, `undefined`, booleans, an object), negative values and the top of the range, strings of one byte and of two bytes (`é`, `日本`, the empty string, new strings made by `+`), a rope of 66 units as the discriminant, 40 cases of each kind with each key and 5 misses (the string table has 64 slots, so keys collide and the probe runs), a non-constant case (the order of evaluation: log `12`, and the discriminant is evaluated once), and `continue`, `break`, a labeled `break` out of a nested switch, a closure over a `let` of the switch scope and a read in its dead zone.
+- `bytecode`: the op table test covers the new letter, and that a switch does not fall through and is not a safepoint.
+
+The first run of the script tests crashed (SIGSEGV): a test helper dropped the `SharedAtoms` before the verifier read the atoms of the code. Fixed in the test (the atoms must outlive the code, as `Code` says). It was not a bug of the new code. Windows 11 VM (`cargo xwin test`, MSVC, exe through `/data/vms/winssh`): 365 pass and 2 fail, the two known corpus-path tests (`parse::tests::corpus_status_matches_acorn` and `parse::lazy_tests::a_lazy_parse_finds_the_same_errors_as_a_full_parse_on_the_corpus`). `cargo clippy --locked -p bare-js2 --all-targets`: no new warning (the old ones are in `heap.rs`, `crates/os` and the census examples).
+
+Known gaps:
+
+- A sparse integer switch with many cases keeps the chain (JSC has a sorted list for it). A chain is correct, and the cost grows with the number of cases.
+- A switch with one case that is not a constant keeps the whole chain. V8 and JSC also give up on the table there. A table for the constants before the first non-constant case, and a chain after it, would be right and is not built.
+- `case -0:` is not an integer constant (`int_const` refuses it), so such a switch keeps the chain. The discriminant `-0` does match `case 0` in a table.
+- A string discriminant that has no hash yet pays one pass over its units. The cell keeps the hash, so a string that is a key again pays once.
+- A table with 3 cases of strings uses 14 words where the chain uses 7; the gain is 6% of one switch turn.
+
+Not tested: Miri on the new arms (they are safe code in an `unsafe` module; the arms use the same string helpers as `JSEqA`); arm64; the effect on a real bundle (how many switches of jQuery or a React bundle become tables, and what it saves there); wall time; the cost matrix (js2 is not wired into the browser); the plain loops with `codegen-units=1`; a switch with more than 65,535 words of tables (the wide form of the op is covered by the encoder tests, not by a switch).
