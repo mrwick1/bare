@@ -75,13 +75,12 @@ impl Realm {
 }
 
 fn string_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    if Realm::obj(rt.nt).is_some() {
-        return rt.type_error("wrapper objects (new String) are not supported");
+    let s = if args.is_empty() { rt.string("") } else { rt.to_str(args[0])?.value() };
+    if Realm::obj(rt.nt).is_none() {
+        return Ok(s);
     }
-    if args.is_empty() {
-        return Ok(rt.string(""));
-    }
-    Ok(rt.to_str(args[0])?.value())
+    let proto = rt.new_proto()?;
+    Ok(rt.wrap(proto, s).value())
 }
 
 fn from_char_code(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
@@ -433,7 +432,7 @@ fn locale_compare(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
 }
 
 fn to_string(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
-    match Realm::str_of(this) {
+    match Realm::str_of(this).or_else(|| rt.prim_of(this).and_then(Realm::str_of)) {
         Some(s) => Ok(s.value()),
         None => rt.type_error("String.prototype.toString requires that 'this' be a String"),
     }

@@ -55,6 +55,8 @@
 //! Not compared with a real browser.
 
 use crate::browser::*;
+use crate::browser_scoped::*;
+use bare_js_api::{Args, Local};
 use bare_js::eval::{Error, Interp};
 use bare_js::heap::{Property, PropertyDescriptor};
 use bare_js::value::{ObjId, PropertyKey, StrId, Value, is_js_space, number_to_string, string_to_number};
@@ -121,9 +123,47 @@ const MAX_LABELS: usize = 1024;
 const MAX_LABEL_BYTES: usize = 256;
 const MAX_GROUP_DEPTH: u8 = 64;
 
+/// A kept call. One or two values sit in the record: the common call allocates nothing, and a dropped record frees nothing.
+struct Rec {
+    seq: u64,
+    level: ConsoleLevel,
+    indent: u8,
+    args: Vals,
+}
+
+enum Vals {
+    Inline(u8, [Value; 2]),
+    Heap(Vec<Value>),
+}
+
+impl Vals {
+    fn new(v: &[Value]) -> Self {
+        match *v {
+            [] => Vals::Inline(0, [Value::Undefined; 2]),
+            [a] => Vals::Inline(1, [a, Value::Undefined]),
+            [a, b] => Vals::Inline(2, [a, b]),
+            _ => Vals::Heap(v.to_vec()),
+        }
+    }
+
+    fn into_vec(self) -> Vec<Value> {
+        match self {
+            Vals::Inline(n, a) => a[..n as usize].to_vec(),
+            Vals::Heap(v) => v,
+        }
+    }
+
+    fn as_slice(&self) -> &[Value] {
+        match self {
+            Vals::Inline(n, a) => &a[..*n as usize],
+            Vals::Heap(v) => v,
+        }
+    }
+}
+
 #[derive(Default)]
 struct CState {
-    q: VecDeque<ConsoleRecord>,
+    q: VecDeque<Rec>,
     values: usize,
     calls: u64,
     dropped: u64,
@@ -155,38 +195,64 @@ pub(crate) struct Console {
 impl Console {
     pub(crate) fn roots(&self, out: &mut Vec<Value>) {
         for r in &self.st.borrow().q {
-            out.extend_from_slice(&r.args);
+            out.extend_from_slice(r.args.as_slice());
         }
     }
 
     fn drop_oldest(&self, st: &mut CState) {
         if let Some(r) = st.q.pop_front() {
-            st.values -= r.args.len();
+            st.values -= r.args.as_slice().len();
         }
         st.dropped += 1;
     }
 }
 
-fn record(d: &Dom, it: &mut Interp<'_>, level: ConsoleLevel, args: &[Value]) -> R<Value> {
-    let lim = d.console.lim.get();
-    if args.len() > lim.max_args {
-        return Err(d.lim("console-args"));
+impl Console {
+    /// Keep a call of `args`. The caller has checked `max_args` and charged the steps.
+    fn push(&self, level: ConsoleLevel, args: &[Value]) {
+        let lim = self.lim.get();
+        let mut st = self.st.borrow_mut();
+        let seq = st.calls;
+        st.calls += 1;
+        if lim.max_records == 0 {
+            st.dropped += 1;
+            return;
+        }
+        while st.q.len() >= lim.max_records {
+            self.drop_oldest(&mut st);
+        }
+        st.values += args.len();
+        let indent = st.depth;
+        st.q.push_back(Rec { seq, level, indent, args: Vals::new(args) });
     }
-    it.charge(1 + args.len() as u64)?;
-    let mut st = d.console.st.borrow_mut();
-    let seq = st.calls;
-    st.calls += 1;
-    if lim.max_records == 0 {
-        st.dropped += 1;
-        return Ok(Value::Undefined);
+}
+
+fn record_vec<'s>(d: &Dom, s: &mut Sc<'s, '_>, level: ConsoleLevel, args: &[Value]) -> Res<'s, Local<'s>> {
+    if args.len() > d.console.lim.get().max_args {
+        return Err(d.lim_s(s, "console-args"));
     }
-    while st.q.len() >= lim.max_records {
-        d.console.drop_oldest(&mut st);
+    s.charge(1 + args.len() as u64)?;
+    d.console.push(level, args);
+    Ok(s.undefined())
+}
+
+/// `record_vec` of the arguments `from..to` of a call. The cap is checked before anything is copied, and the arguments are read in place.
+fn record<'s>(d: &Dom, s: &mut Sc<'s, '_>, level: ConsoleLevel, a: Args<'s>, from: usize, to: usize) -> Res<'s, Local<'s>> {
+    let n = to.min(a.len()).saturating_sub(from);
+    if n > d.console.lim.get().max_args {
+        return Err(d.lim_s(s, "console-args"));
     }
-    st.values += args.len();
-    let indent = st.depth;
-    st.q.push_back(ConsoleRecord { seq, level, indent, args: args.to_vec() });
-    Ok(Value::Undefined)
+    s.charge(1 + n as u64)?;
+    let undefined = s.undefined();
+    let it = s.engine();
+    match it.api_args_slice(a, from, to) {
+        Some(args) => d.console.push(level, args),
+        None => {
+            let args = it.api_args(a, from, to);
+            d.console.push(level, &args);
+        }
+    }
+    Ok(undefined)
 }
 
 /// Record a console call from the host with one string argument. It charges no step: the host uses it right after a task ended
@@ -205,148 +271,162 @@ pub(crate) fn push_text(d: &Dom, it: &mut Interp<'_>, level: ConsoleLevel, text:
         d.console.drop_oldest(&mut st);
     }
     st.values += 1;
-    st.q.push_back(ConsoleRecord { seq, level, indent: 0, args: vec![Value::String(s)] });
+    st.q.push_back(Rec { seq, level, indent: 0, args: Vals::Inline(1, [Value::String(s), Value::Undefined]) });
 }
 
-fn log(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    record(d, it, ConsoleLevel::Log, a)
+fn log<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    record(d, s, ConsoleLevel::Log, a, 0, usize::MAX)
 }
-fn warn(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    record(d, it, ConsoleLevel::Warn, a)
+fn warn<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    record(d, s, ConsoleLevel::Warn, a, 0, usize::MAX)
 }
-fn error(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    record(d, it, ConsoleLevel::Error, a)
+fn error<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    record(d, s, ConsoleLevel::Error, a, 0, usize::MAX)
 }
 /// `dir` and `table`: the first argument only (no options, no layout).
-fn first(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    record(d, it, ConsoleLevel::Log, &a[..a.len().min(1)])
+fn first<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    record(d, s, ConsoleLevel::Log, a, 0, 1)
 }
-fn nothing(_: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
-    Ok(Value::Undefined)
+fn nothing<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    Ok(s.undefined())
 }
 
-fn assert(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    if a.first().map_or(Ok(false), |&v| it.heap.to_boolean(v).map_err(|e| it.heap_error(e)))? {
-        return Ok(Value::Undefined);
+fn assert<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    if let Some(c) = a.get(0)
+        && s.to_boolean(c)
+    {
+        return Ok(s.undefined());
     }
-    let mut args = vec![d.js_str(it, "Assertion failed")?];
-    args.extend_from_slice(a.get(1..).unwrap_or_default());
-    record(d, it, ConsoleLevel::Error, &args)
+    say(d, s, ConsoleLevel::Error, "Assertion failed", Some(a), 1)
 }
 
-fn group(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    if !a.is_empty() {
-        record(d, it, ConsoleLevel::Log, a)?;
+fn group<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    if a.len() > 0 {
+        record(d, s, ConsoleLevel::Log, a, 0, usize::MAX)?;
     }
     let mut st = d.console.st.borrow_mut();
     st.depth = (st.depth + 1).min(MAX_GROUP_DEPTH);
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-fn group_end(d: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
+fn group_end<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let mut st = d.console.st.borrow_mut();
     st.depth = st.depth.saturating_sub(1);
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-/// A one-string record of the host (`label: 1.234 ms`, a warning) followed by `rest`.
-fn say(d: &Dom, it: &mut Interp<'_>, level: ConsoleLevel, text: &str, rest: &[Value]) -> R<Value> {
-    let mut args = vec![d.js_str(it, text)?];
-    args.extend_from_slice(rest);
-    record(d, it, level, &args)
+/// A one-string record of the host (`label: 1.234 ms`, a warning) followed by the arguments `from..` of `rest`.
+fn say<'s>(d: &Dom, s: &mut Sc<'s, '_>, level: ConsoleLevel, text: &str, rest: Option<Args<'s>>, from: usize) -> Res<'s, Local<'s>> {
+    let l = d.js_str_s(s, text)?;
+    let n = rest.map_or(0, |a| a.len().saturating_sub(from));
+    if n + 1 > d.console.lim.get().max_args {
+        return Err(d.lim_s(s, "console-args"));
+    }
+    let mut args = vec![bare_js_api::Engine::raw(s.engine(), l)];
+    if let Some(a) = rest {
+        args.extend((from..a.len()).map(|i| raw_arg(s, a, i).expect("in range")));
+    }
+    record_vec(d, s, level, &args)
 }
 
 /// The label of a call: `default` for undefined, else a string, a primitive as `%s` prints it, or `[object]`. `None` after the
 /// warning for a label over `MAX_LABEL_BYTES` (nothing is kept).
-fn label(d: &Dom, it: &mut Interp<'_>, v: Option<&Value>, name: &str) -> R<Option<String>> {
-    let t = match v.copied() {
-        None | Some(Value::Undefined) => "default".to_string(),
-        Some(Value::String(s)) => {
+fn label<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>, name: &str) -> Res<'s, Option<String>> {
+    let v = raw_arg(s, a, 0);
+    let t = match v {
+        None | Some(Value::Undefined) => Some("default".to_string()),
+        Some(v) => old(s, |it| label_text(d, it, v))?,
+    };
+    if t.is_none() {
+        say(d, s, ConsoleLevel::Warn, &format!("console.{name}: the label is longer than {MAX_LABEL_BYTES} bytes and is not kept"), None, 0)?;
+    }
+    Ok(t)
+}
+
+/// The text of a label value, or `None` over `MAX_LABEL_BYTES`.
+fn label_text(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<Option<String>> {
+    let t = match v {
+        Value::String(s) => {
             if it.heap.str_len(s).map_err(Error::Heap)? > MAX_LABEL_BYTES {
-                say(d, it, ConsoleLevel::Warn, &format!("console.{name}: the label is longer than {MAX_LABEL_BYTES} bytes and is not kept"), &[])?;
                 return Ok(None);
             }
             text(d, it, s, MAX_LABEL_BYTES)?
         }
-        Some(Value::Object(_)) => "[object]".to_string(),
-        Some(v) => it.display(v),
+        Value::Object(_) => "[object]".to_string(),
+        v => it.display(v),
     };
-    if t.len() > MAX_LABEL_BYTES {
-        say(d, it, ConsoleLevel::Warn, &format!("console.{name}: the label is longer than {MAX_LABEL_BYTES} bytes and is not kept"), &[])?;
-        return Ok(None);
-    }
-    Ok(Some(t))
+    Ok((t.len() <= MAX_LABEL_BYTES).then_some(t))
 }
 
-fn full(d: &Dom, it: &mut Interp<'_>, name: &str) -> R<Value> {
-    say(d, it, ConsoleLevel::Warn, &format!("console.{name}: {MAX_LABELS} labels are in use, so this label is not kept"), &[])
+fn full<'s>(d: &Dom, s: &mut Sc<'s, '_>, name: &str) -> Res<'s, Local<'s>> {
+    say(d, s, ConsoleLevel::Warn, &format!("console.{name}: {MAX_LABELS} labels are in use, so this label is not kept"), None, 0)
 }
 
-fn time(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    let Some(l) = label(d, it, a.first(), "time")? else { return Ok(Value::Undefined) };
+fn time<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let Some(l) = label(d, s, a, "time")? else { return Ok(s.undefined()) };
     let now = d.now_ms();
     let mut st = d.console.st.borrow_mut();
     if st.lab().timers.contains_key(&l) {
         drop(st);
-        return say(d, it, ConsoleLevel::Warn, &format!("Timer '{l}' already exists"), &[]);
+        return say(d, s, ConsoleLevel::Warn, &format!("Timer '{l}' already exists"), None, 0);
     }
     if st.lab().timers.len() >= MAX_LABELS {
         drop(st);
-        return full(d, it, "time");
+        return full(d, s, "time");
     }
     st.lab().timers.insert(l, now);
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-fn time_log_or_end(d: &Dom, it: &mut Interp<'_>, a: &[Value], end: bool) -> R<Value> {
+fn time_log_or_end<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>, end: bool) -> Res<'s, Local<'s>> {
     let name = if end { "timeEnd" } else { "timeLog" };
-    let Some(l) = label(d, it, a.first(), name)? else { return Ok(Value::Undefined) };
+    let Some(l) = label(d, s, a, name)? else { return Ok(s.undefined()) };
     let now = d.now_ms();
     let start = {
         let mut st = d.console.st.borrow_mut();
         if end { st.lab().timers.remove(&l) } else { st.lab().timers.get(&l).copied() }
     };
     match start {
-        Some(t) => say(d, it, ConsoleLevel::Log, &format!("{l}: {:.3} ms", now - t), if end { &[] } else { a.get(1..).unwrap_or_default() }),
-        None => say(d, it, ConsoleLevel::Warn, &format!("Timer '{l}' does not exist"), &[]),
+        Some(t) => say(d, s, ConsoleLevel::Log, &format!("{l}: {:.3} ms", now - t), (!end).then_some(a), 1),
+        None => say(d, s, ConsoleLevel::Warn, &format!("Timer '{l}' does not exist"), None, 0),
     }
 }
 
-fn time_log(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    time_log_or_end(d, it, a, false)
+fn time_log<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    time_log_or_end(d, s, a, false)
 }
-fn time_end(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    time_log_or_end(d, it, a, true)
+fn time_end<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    time_log_or_end(d, s, a, true)
 }
 
-fn count(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    let Some(l) = label(d, it, a.first(), "count")? else { return Ok(Value::Undefined) };
+fn count<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let Some(l) = label(d, s, a, "count")? else { return Ok(s.undefined()) };
     let mut st = d.console.st.borrow_mut();
     if st.lab().counts.len() >= MAX_LABELS && !st.lab().counts.contains_key(&l) {
         drop(st);
-        return full(d, it, "count");
+        return full(d, s, "count");
     }
     let n = st.lab().counts.entry(l.clone()).or_insert(0);
     *n += 1;
     let n = *n;
     drop(st);
-    say(d, it, ConsoleLevel::Log, &format!("{l}: {n}"), &[])
+    say(d, s, ConsoleLevel::Log, &format!("{l}: {n}"), None, 0)
 }
 
-fn count_reset(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    let Some(l) = label(d, it, a.first(), "countReset")? else { return Ok(Value::Undefined) };
+fn count_reset<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let Some(l) = label(d, s, a, "countReset")? else { return Ok(s.undefined()) };
     let known = d.console.st.borrow_mut().lab().counts.get_mut(&l).map(|n| *n = 0).is_some();
     if known {
-        return Ok(Value::Undefined);
+        return Ok(s.undefined());
     }
-    say(d, it, ConsoleLevel::Warn, &format!("Count for '{l}' does not exist"), &[])
+    say(d, s, ConsoleLevel::Warn, &format!("Count for '{l}' does not exist"), None, 0)
 }
 
 /// The global `console` is an accessor until the first read or write (as `CSS`, `crypto` and `Intl`): a page that never reads
 /// it does not pay for 19 functions. The first read makes the object and replaces the accessor with a data property.
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     let g = *d.global.get().expect("installed");
-    let f = d.add_fn(it, lazy, "console", 0, false)?;
+    let f = d.add_fn_s_obj(it, lazy, "console", 0, bare_js_api::HostFn::Method)?;
     let k = d.key(it, "console")?;
     let desc = PropertyDescriptor { get: Some(Some(f)), set: Some(Some(f)), enumerable: Some(false), configurable: Some(true), ..Default::default() };
     it.heap.define_own_property(g, k, &desc).map_err(|e| it.heap_error(e))?;
@@ -354,16 +434,21 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 }
 
 /// The getter (no argument) and the setter (the new value) of the global.
-fn lazy(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
+fn lazy<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let v = raw_arg(s, a, 0);
+    old_v(s, |it| make_console(d, it, v))
+}
+
+fn make_console(d: &Dom, it: &mut Interp<'_>, set: Option<Value>) -> R<Value> {
     let g = *d.global.get().expect("installed");
     let k = d.key(it, "console")?;
-    if let Some(&v) = a.first() {
+    if let Some(v) = set {
         it.define_data(g, k, v, true, false, true)?;
         return Ok(Value::Undefined);
     }
     let console = d.obj(it, it.object_prototype())?;
     for (name, h) in [
-        ("log", log as H),
+        ("log", log as HS),
         ("warn", warn),
         ("error", error),
         ("info", log),
@@ -384,7 +469,7 @@ fn lazy(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
         ("clear", nothing),
     ] {
         let key = d.key(it, name)?;
-        let f = d.add_fn(it, h, name, 0, false)?;
+        let f = d.add_fn_s_obj(it, h, name, 0, bare_js_api::HostFn::Method)?;
         it.define_data(console, key, Value::Object(f), true, true, true)?;
     }
     // `console[Symbol.toStringTag]` is "console".
@@ -420,7 +505,7 @@ impl Browser {
     pub fn take_console_records(&mut self) -> Vec<ConsoleRecord> {
         let mut st = self.dom.console.st.borrow_mut();
         st.values = 0;
-        st.q.drain(..).collect()
+        st.q.drain(..).map(|r| ConsoleRecord { seq: r.seq, level: r.level, indent: r.indent, args: r.args.into_vec() }).collect()
     }
 
     /// The text of a record (see the header for the gates). Runs no JavaScript. Returns the text to the caller only.

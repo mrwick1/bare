@@ -198,6 +198,26 @@ impl<'p> Interp<'p> {
         }
     }
 
+    /// The arguments `from..to` of a host call, read in place, when they are in the window of the running call (the usual call).
+    #[inline]
+    pub fn api_args_slice(&self, a: bare_js_api::Args<'_>, from: usize, to: usize) -> Option<&[Value]> {
+        let n = to.min(a.len()).saturating_sub(from);
+        let first = a.get(from).filter(|_| n > 0)?;
+        // SAFETY: see `ApiState::values`. The slice is inside the arguments of the running call, which no one writes or moves.
+        let w = unsafe { self.api.win.as_ref() }?;
+        let k = first.slot().checked_sub(WIN + 1)? as usize;
+        (k + n <= w.len as usize).then(|| unsafe { std::slice::from_raw_parts(w.args.add(k), n) })
+    }
+
+    /// `api_args_slice`, or one copy of the arguments that the host made (on the stack).
+    pub fn api_args(&self, a: bare_js_api::Args<'_>, from: usize, to: usize) -> Vec<Value> {
+        if let Some(s) = self.api_args_slice(a, from, to) {
+            return s.to_vec();
+        }
+        let n = to.min(a.len()).saturating_sub(from);
+        a.iter().skip(from).take(n).map(|l| self.api_at(l)).collect()
+    }
+
     fn api_key(&mut self, key: bare_js_api::Local<'_>) -> Result<PropertyKey, Error> {
         let k = self.api_at(key);
         // A string is the usual key: `key_from_string` checks the handle itself, so skip the `to_string` of `to_property_key`.
@@ -569,9 +589,12 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
     }
 
     #[inline]
-    fn get_str<'s>(&mut self, obj: bare_js_api::Local<'_>, key: &str) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
+    fn get_named<'s>(&mut self, obj: bare_js_api::Local<'_>, key: &str) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
         let r = match self.heap.key_from_str(key) {
-            Ok(k) => self.get_value(self.api_at(obj), k),
+            Ok(k) => {
+                let o = self.api_at(obj);
+                self.get_value(o, k)
+            }
             Err(e) => Err(self.herr(e)),
         };
         match r {
@@ -580,8 +603,19 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
         }
     }
 
+    fn get_named_bool<'s>(&mut self, obj: bare_js_api::Local<'_>, key: &str) -> Result<bool, bare_js_api::Error<'s>> {
+        let r = match self.heap.key_from_str(key) {
+            Ok(k) => {
+                let o = self.api_at(obj);
+                self.get_value(o, k).and_then(|v| self.to_js_bool(v))
+            }
+            Err(e) => Err(self.herr(e)),
+        };
+        r.map_err(|e| self.api_err(e))
+    }
+
     #[inline]
-    fn define_str<'s>(&mut self, obj: bare_js_api::Local<'_>, key: &str, value: bare_js_api::Local<'_>, a: bare_js_api::Attrs) -> Result<(), bare_js_api::Error<'s>> {
+    fn define_named<'s>(&mut self, obj: bare_js_api::Local<'_>, key: &str, value: bare_js_api::Local<'_>, a: bare_js_api::Attrs) -> Result<(), bare_js_api::Error<'s>> {
         let r = self.api_obj(obj).and_then(|o| match self.heap.key_from_str(key) {
             Ok(k) => self.define_data(o, k, self.api_at(value), a.writable, a.enumerable, a.configurable),
             Err(e) => Err(self.herr(e)),

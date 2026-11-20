@@ -333,7 +333,7 @@ fn object_and_object_prototype() {
         ("var o = {a: 1}; var r = o.hasOwnProperty('a') + ',' + o.hasOwnProperty('toString') + ',' + ('toString' in o) + ',' + [1].hasOwnProperty(0) + ',' + [1].hasOwnProperty('length');", "r", "true,false,true,true,true"),
         ("var t = Object.prototype.toString; var r = [t.call([]), t.call(null), t.call(undefined), t.call({}), t.call(function () {}), t.call(1), t.call('s'), t.call(true), t.call(new Error())].join();", "r", "[object Array],[object Null],[object Undefined],[object Object],[object Function],[object Number],[object String],[object Boolean],[object Error]"),
         ("var o = {}; var r = (o.valueOf() === o) + ',' + Object.prototype.isPrototypeOf.call(Object.prototype, o) + ',' + o.propertyIsEnumerable('x');", "r", "true,true,false"),
-        ("var o = new Object(); o.q = 1; var r = typeof o + o.q + (Object(5) === 5) + (Object(o) === o);", "r", "object1truetrue"),
+        ("var o = new Object(); o.q = 1; var r = typeof o + o.q + (Object(5) === 5) + (Object(o) === o);", "r", "object1falsetrue"),
         ("var r = typeof Object + typeof Object.keys + (Object.prototype.constructor === Object) + (({}).constructor === Object);", "r", "functionfunctiontruetrue"),
         ("var a = [3, 4]; var r = Object.keys(a).join() + Object.entries('ab').join('/');", "r", "0,10,a/1,b"),
     ]);
@@ -399,7 +399,7 @@ fn to_primitive() {
         ("var r = +[] + ',' + +[7] + ',' + +[1, 2] + ',' + (-[3]);", "r", "0,7,NaN,-3"),
         ("var r = (function () {}) + '';", "r", "function () { [native code] }"),
         ("var a = []; a.push(a); try { '' + a; } catch (e) { var r = e.name; }", "r", "RangeError"),
-        ("var o = {valueOf: function () { return 3; }}; try { var r = o + 1; } catch (e) { r = e.name; }", "r", "TypeError"),
+        ("var o = {valueOf: function () { return 3; }}; var r = o + 1;", "r", "4"),
         ("var e = new Error('m'); var r = '' + e + (e + '' === String(e));", "r", "Error: mtrue"),
     ]);
 }
@@ -455,7 +455,7 @@ fn string_prototype() {
         ("var s = ''; for (var i = 0; i < 40; i++) s += String.fromCharCode(97 + i % 26); var r = s.length + s.slice(26, 30) + s.toUpperCase().indexOf('Z');", "r", "40abcd25"),
         ("var r = 'é'.length + 'é'.toUpperCase() + '日本'.charAt(1) + '日本'.charCodeAt(0) + '日本語'.slice(1) + '\\u{1F600}'.length;", "r", "1É本26085本語2"),
         ("try { String.prototype.trim.call(null); } catch (e) { var r = e.name; }", "r", "TypeError"),
-        ("try { new String('a'); } catch (e) { var r = e.name; }", "r", "TypeError"),
+        ("var r = typeof new String('a') + new String('ab').length;", "r", "object2"),
     ]);
 }
 
@@ -478,7 +478,7 @@ fn number_boolean_math_and_global_functions() {
         ("var r = typeof globalThis + (globalThis === self) + (globalThis.Math === Math) + (this === globalThis) + typeof self.Object;", "r", "objecttruetruetruefunction"),
         ("var r = typeof __def + typeof Symbol + typeof undefined;", "r", "undefinedundefinedundefined"),
         ("var g = 1; var r = globalThis.g + ',' + self.parseInt('9') + ',' + (Number.NaN !== Number.NaN) + ',' + Number.EPSILON.toFixed(0) + ',' + (Number.MIN_VALUE > 0);", "r", "1,9,true,0,true"),
-        ("try { new Number(1); } catch (e) { var r = e.name; }", "r", "TypeError"),
+        ("var r = typeof new Number(1) + (new Number(5) + 1);", "r", "object6"),
         ("try { (5).toString(1); } catch (e) { var r = e.name; }", "r", "RangeError"),
         ("try { Number.prototype.toString.call('x'); } catch (e) { var r = e.name; }", "r", "TypeError"),
     ]);
@@ -542,9 +542,9 @@ fn two_scripts(a: &str, b: &str, name: &str, gc: bool) -> Result<String, String>
     let shared = Arc::new(SharedAtoms::default());
     let mut prog = compile(b, &shared, Limits::default())?;
     let pre = prog.codes.len();
-    prog.codes = compile_after(prog.codes, PRELUDE, &shared, Limits::default(), None)?.0;
+    prog.codes = compile_after(prog.codes, PRELUDE, &shared, Limits::default(), None, None)?.0;
     let at = prog.codes.len();
-    prog.codes = compile_after(prog.codes, a, &shared, Limits::default(), None)?.0;
+    prog.codes = compile_after(prog.codes, a, &shared, Limits::default(), None, None)?.0;
     let mut vm = Vm::new(prog, shared);
     vm.run_main(pre).expect("the prelude");
     if gc {
@@ -808,7 +808,7 @@ fn array_methods_work_on_array_likes_and_follow_the_specification() {
 }
 
 fn waiting(vm: &Vm) -> usize {
-    vm.prog.codes.iter().filter(|c| c.words.first().is_some_and(|w| *w as u8 == crate::bytecode::Op::Lazy as u8)).count()
+    vm.realm.prog.iter().filter(|c| c.words.first().is_some_and(|w| *w as u8 == crate::bytecode::Op::Lazy as u8)).count()
 }
 
 #[test]
@@ -856,12 +856,12 @@ fn a_lazy_function_gets_its_arguments_the_first_time_and_after() {
 fn a_lazy_compile_that_fails_throws_a_plain_error() {
     struct Fails;
     impl crate::interp::LazyCompile for Fails {
-        fn compile(&mut self, _: &mut Vec<crate::bytecode::Code>, _: usize) -> Result<(), String> {
+        fn compile(&mut self, _: &crate::codes::Codes, _: usize) -> Result<(), String> {
             Err("no compiler".into())
         }
     }
     let mut vm = load("var e; try { [1].forEach(function () {}); } catch (x) { e = x.name + ': ' + x.message; }").unwrap();
-    vm.lazy = Some(Box::new(Fails));
+    vm.realm.lazy = Some(Box::new(Fails));
     vm.run_main(0).unwrap();
     assert_eq!(vm.global_text("e"), "Error: no compiler");
 }
@@ -929,6 +929,19 @@ fn freeze_and_define_see_the_lazy_length_and_name_of_functions() {
         ("function f() {} Object.defineProperty(f, 'x', {value: 1}); var n = Object.getOwnPropertyNames(f); var r = n.slice(0, 2).join() + ',' + (n.indexOf('x') > 1);", "r", "length,name,true"),
         ("function f() {} Object.preventExtensions(f); var r = f.name + ',' + f.length + ',' + Object.getOwnPropertyNames(f).slice(0, 2).join();", "r", "f,0,length,name"),
         ("var f = Array.prototype.push; Object.preventExtensions(f); var r = f.name + ',' + f.length;", "r", "push,1"),
+    ]);
+}
+
+/// `Vm::run` keeps the base of the registers in a pointer (`regs`). The stack is a `Vec` that a deep call chain reallocates (it starts
+/// with 256 words), so the pointer must be set again after each growth. Each caller below has live registers before and after the call
+/// that grows the stack, and reads `this` and the arguments from registers right after it.
+#[test]
+fn a_stack_that_grows_in_a_callee_keeps_the_registers_of_the_callers() {
+    check(&[
+        ("function sum(n) { var a = n, b = 2 * n; if (n == 0) return 0; var r = sum(n - 1); return r + a + b; } var r = sum(200);", "r", "60300"),
+        ("function C(n) { this.n = n; this.k = n == 0 ? 0 : new C(n - 1).k + n; } var r = new C(200).k;", "r", "20100"),
+        ("var o = { f: function (n, acc) { var t = this; if (n == 0) return acc; return t.f(n - 1, acc + n); } }; var r = o.f(200, 0);", "r", "20100"),
+        ("function f(n, ...rest) { var x = n * 2; if (n == 0) return rest.length; var y = f(n - 1, n, n); return y + x - 2 * n; } var r = f(200);", "r", "2"),
     ]);
 }
 
@@ -1011,6 +1024,30 @@ fn a_first_call_from_a_getter_a_setter_a_constructor_and_a_native_works() {
 }
 
 #[test]
+fn a_user_function_first_called_in_a_nested_run_is_compiled_there() {
+    // The user functions below wait as stubs (#777). Their first call is inside a getter, a setter, `valueOf` or `toString` that a native
+    // runs, so the stub compiles in a nested run. Each case has a stub that keeps its parameter registers (plain parameters) and one that
+    // makes the array of arguments (`arguments`, a default value, a rest parameter). `check` also runs each case under constant collection.
+    check(&[
+        ("function p(a, b) { return a * b; } var o = {get g() { return p(6, 7); }}; var r = Object.assign({}, o).g;", "r", "42"),
+        ("function q() { return arguments.length; } var o = {get g() { return q(1, 2, 3); }}; var r = Object.assign({}, o).g;", "r", "3"),
+        ("var s; function p(a, b) { return a + b; } var o = {set v(x) { s = p(x, 1); }}; Object.assign(o, {v: 41}); var r = s;", "r", "42"),
+        ("var s; function d(a, b = 2) { return a + b; } var o = {set v(x) { s = d(x); }}; Object.assign(o, {v: 40}); var r = s;", "r", "42"),
+        ("function p(a) { return a + 1; } var o = {valueOf: function () { return p(41); }}; var r = o + 0;", "r", "42"),
+        ("function d(a, ...m) { return a + m.length; } var o = {toString: function () { return 'v' + d(40, 1, 2); }}; var r = `${o}` + ('' + o);", "r", "v42v42"),
+        // Two levels: `valueOf` -> a getter -> `valueOf` again. Each level first calls a stub that waits, and the loops above call it after.
+        ("function a1(x) { return x + 1; } function a2() { return arguments[0] * 2; } function a3(x, y) { return x - y; }
+          var inner = {valueOf: function () { return a3(a2(10), a1(4)); }};
+          var mid = {get g() { return a1(inner) + a2(1); }};
+          var outer = {valueOf: function () { return Object.assign({}, mid).g + a3(9, 1); }};
+          var r = (outer + 0) + ',' + a1(1) + ',' + a2(2) + ',' + a3(5, 3) + ',' + (inner + 0);",
+         "r", "26,2,4,2,15"),
+        // A stub that compiles in a nested run and has a function inside it: the child is a new stub there, and an outer run calls it.
+        ("function mk(n) { return function (x) { return x + n; }; } var o = {valueOf: function () { return mk(1)(2); }}; var r = (o + 0) + ',' + mk(10)(5);", "r", "3,15"),
+    ]);
+}
+
+#[test]
 fn a_function_that_is_called_from_rust_is_compiled_at_that_call() {
     let mut vm = load("function add(a, b) { return a + b; } function get() { return 'g'; }").unwrap();
     vm.run_main(0).unwrap();
@@ -1036,7 +1073,7 @@ fn the_stubs_of_user_functions_keep_a_program_that_is_not_called_small() {
     assert!(waiting(&vm) >= 200 + 40, "the 200 functions and the prelude wait: {}", waiting(&vm));
     vm.run_main(0).unwrap();
     assert_eq!(vm.global_text("r"), "42");
-    let words: usize = vm.prog.codes.iter().map(|c| c.words.len()).sum();
+    let words: usize = vm.realm.prog.iter().map(|c| c.words.len()).sum();
     assert!(words < 4000, "only the script, the wrapper of the prelude and f7 hold code: {words} words");
 }
 

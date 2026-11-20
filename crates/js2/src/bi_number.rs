@@ -1,5 +1,5 @@
-//! `Number`, `Boolean`, `Math` and the global number functions (plan step S2.7). There are no wrapper objects: `new Number(1)` and
-//! `new Boolean(true)` throw a `TypeError`, and a method of a primitive runs with the primitive as `this`.
+//! `Number`, `Boolean`, `Math` and the global number functions (plan step S2.7). `new Number(1)` and `new Boolean(true)` make a wrapper
+//! object (`bi_wrap.rs`); a method of a primitive runs with the primitive as `this`, and the methods also accept a wrapper.
 //! Known gaps: `toFixed` rounds the exact binary value half to even where the language rounds half up; `toString(radix)` of a fraction
 //! gives at most 52 digits; `toPrecision`, `toExponential` and `Intl` are missing; a number prints with Rust's rules (`Realm::num_to_string`).
 use crate::builtins::{NativeFn, arg};
@@ -90,46 +90,51 @@ fn num_arg(rt: &mut Realm, args: &[Value], i: usize) -> R<f64> {
 }
 
 fn number_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    if Realm::obj(rt.nt).is_some() {
-        return rt.type_error("wrapper objects (new Number) are not supported");
+    let n = if args.is_empty() { Value::int(0) } else { Realm::num(rt.to_number(args[0])?) };
+    if Realm::obj(rt.nt).is_none() {
+        return Ok(n);
     }
-    if args.is_empty() {
-        return Ok(Value::int(0));
-    }
-    Ok(Realm::num(rt.to_number(args[0])?))
+    let proto = rt.new_proto()?;
+    Ok(rt.wrap(proto, n).value())
 }
 
 fn boolean_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    if Realm::obj(rt.nt).is_some() {
-        return rt.type_error("wrapper objects (new Boolean) are not supported");
+    let b = Value::bool(Realm::truthy(arg(args, 0)));
+    if Realm::obj(rt.nt).is_none() {
+        return Ok(b);
     }
-    Ok(Value::bool(Realm::truthy(arg(args, 0))))
+    let proto = rt.new_proto()?;
+    Ok(rt.wrap(proto, b).value())
+}
+
+/// The boolean of `this`: a boolean, or a `Boolean` wrapper.
+fn this_bool(rt: &mut Realm, this: Value, what: &str) -> R<bool> {
+    match this.as_bool().or_else(|| rt.prim_of(this).and_then(Value::as_bool)) {
+        Some(b) => Ok(b),
+        None => rt.type_error(&format!("Boolean.prototype.{what} requires that 'this' be a Boolean")),
+    }
 }
 
 fn boolean_to_string(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
-    match this.as_bool() {
-        Some(b) => Ok(rt.string(if b { "true" } else { "false" })),
-        None => rt.type_error("Boolean.prototype.toString requires that 'this' be a Boolean"),
-    }
+    let b = this_bool(rt, this, "toString")?;
+    Ok(rt.string(if b { "true" } else { "false" }))
 }
 
 fn boolean_value_of(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
-    match this.as_bool() {
-        Some(_) => Ok(this),
-        None => rt.type_error("Boolean.prototype.valueOf requires that 'this' be a Boolean"),
-    }
+    Ok(Value::bool(this_bool(rt, this, "valueOf")?))
 }
 
+/// The number of `this`: a number, or a `Number` wrapper.
 fn this_num(rt: &mut Realm, this: Value, what: &str) -> R<f64> {
-    match this.as_f64() {
+    match this.as_f64().or_else(|| rt.prim_of(this).and_then(Value::as_f64)) {
         Some(f) => Ok(f),
         None => rt.type_error(&format!("Number.prototype.{what} requires that 'this' be a Number")),
     }
 }
 
 fn number_value_of(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
-    this_num(rt, this, "valueOf")?;
-    Ok(this)
+    let x = this_num(rt, this, "valueOf")?;
+    Ok(Realm::num(x))
 }
 
 const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
