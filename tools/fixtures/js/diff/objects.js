@@ -1,0 +1,12 @@
+var o = { b: 1, a: 2, c: { d: [1, 2, 3] } };
+o.e = 5; delete o.b; o.b = 9;
+print(Object.keys(o).join(), Object.values(o).length, Object.entries({ x: 1, y: 2 }).join(';'));
+var p = { a: 1 }, q = Object.create(p); q.b = 2;
+print(q.a, q.b, 'a' in q, q.hasOwnProperty('a'), Object.getPrototypeOf(q) === p);
+var d = {}; Object.defineProperty(d, 'x', { value: 1, enumerable: false });
+print(Object.keys(d).length, d.x, Object.getOwnPropertyNames(d).join());
+var f = Object.freeze({ z: 1 }); f.z = 2; print(f.z, Object.isFrozen(f));
+var g = { get v() { return this._v + 1; }, set v(x) { this._v = x; } }; g.v = 4; print(g.v);
+print(Object.assign({ a: 1 }, { b: 2 }, null, { a: 3 }).a, { ...{ a: 1 }, b: 2 }.b);
+print(typeof null, typeof undefined, typeof {}, typeof [], typeof function () {}, typeof 1, typeof 's');
+print({} + '', [] + '', [1, 2] + '', ({}).toString(), Object.prototype.toString.call([]), Object.prototype.toString.call(null));
