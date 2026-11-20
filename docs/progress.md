@@ -16457,3 +16457,56 @@ Measurements. Machine archMachine, loaded. Instruction counts (`perf stat -e ins
 Tests. Linux, debug: `cargo test --locked -p bare-js-api -p bare-js -p bare --lib`: 32, 1104 (1 ignored) and 1715 (6 ignored) pass. The filters `fetch xhr stream abort web_ encoding worker crypto blob form_data formdata navigator headers request response textencoder file_ subtle` on `bare --lib` (332 test runs, some tests match two filters): pass plain, with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1`. Windows 11 VM (`cargo xwin test --no-run`, exe through `winssh`): the same filters pass with the same counts. The whole `bare --lib` on Windows: 1711 pass and 4 fail (`browser_date_tests::local_time_uses_the_zone_of_the_realm_in_the_browser`, `browser_session::tests::a_page_fed_in_pieces_gives_the_tree_of_a_one_step_parse`, `a_page_parsed_in_slices_gives_the_tree_of_a_one_step_parse`, `resources::tests::staging_login_fixture_discovery`). No test of these four touches the converted files. I did not run them on a base build on Windows.
 
 Not tested: the whole `bare --lib` with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1` (`browser_reclaim_tests::parsed_documents_ask_for_a_collect_by_their_native_bytes` fails under whole-crate `BARE_GC_STRESS=1` on the base too); macOS; RSS and wall time; the four Windows failures on the base; tests of the converted handlers under GC stress that the old tests do not cover (a stream read with a collect between `read` and its reaction).
+
+## 2026-11-20: group E cost round, the stream rows (plan step S0.4 / E)
+
+Status: the rows `streams_load churn 1` and `churn 10` of PR #780 are under the limit now (-0.87% and -1.23% at the default flags). No row is over +0.5% under both allocators. Two changes did it: a table of option names that the engine holds, for the `ReadableStream` constructor, and a string fast path in the key conversion of the interface. Base for all numbers: `origin/main` `fae94731` plus one fix (below).
+
+`origin/main` does not compile at `fae94731`. Group C (#769) removed `Dom::def_get_sh`, and group D1 (`browser_cssom.rs`, three calls) still uses it. The two PRs merged in the wrong order for a semantic conflict. This branch restores the function (`browser_dom_old.rs`, 8 lines, as C removed it). The base tree of the matrix has the same fix, so the A/B holds. Main needs this fix or a different one before any other PR can merge.
+
+Profile. Callgrind, symbol builds of both trees, `streams_load churn 10` (3,000 streams), instructions for each stream, exclusive cost by function. The whole program: base 65,895; E head 66,942 (+1,048, +1.6%); this change 65,120 (-775, -1.2%).
+
+| Function (for each stream)                                          | E head vs base | now vs base |
+| ------------------------------------------------------------------- | -------------: | ----------: |
+| `Engine::get_str` (the option reads)                                |           +589 |           0 |
+| `Heap::intern_slice` + `str_from` + `key_from_str` (text to atom)   |           -503 |      -2,846 |
+| `Engine::get` + `api_key` + `Engine::persistent` (the table reads)  |              0 |      +1,179 |
+| `call_api_plain` + `call_api_host` + `call_scoped` (x2) + `Host::call` | +1,035      |      +1,035 |
+| `Dom::Host::call` (x2) + `call_host` (x2), the old entry            |          -972 |        -972 |
+| `brand_ctl` (new)                                                   |           +166 |        +166 |
+| `resolve_promise`, `promise_then`, `new_promise`, `bind`, `type_of`, `is_callable` (new wrappers) | +620 | +620 |
+| `host_resolve_promise`, `host_promise_then`, `host_new_promise` (old) |          -250 |        -250 |
+| `get_reader` + `invoke` + `bind_obj` + `obj_s` (own cost)           |           +450 |        +450 |
+
+The first column is the cost that #780 had. The call path itself is about +63 for each stream (15 calls), the same on both sides of this change. The rest was spread over about 30 small wrappers, as the earlier entry said. The key reads were the same on both trees (about 1,900 for each stream: 6.3 reads of `autoAllocateChunkSize`, `cancel`, `pull`, `start`, `type`, `highWaterMark` and `size`, each about 290 instructions in `atom_str`). So the lever was to remove the work, not to make the wrappers cheaper.
+
+Changes.
+
+- `browser_scoped.rs`: `Names`. A table of property names, as `Persistent` strings, made at the first use (a cold function). A read is `Scope::local` (one handle) and `Scope::get`. `Persistent` slots are GC roots, so a name cannot die. The table is made only when a stream is made: a page without a stream pays nothing.
+- `browser_streams.rs`: the constructor reads its seven options through `Names`. `callback_option` takes the index and names the member in its message from the same list.
+- `eval_api.rs`: `api_key` converts a string key with `Heap::key_from_string` at once. `to_property_key` ran `to_string` first (a second liveness check, 260 instructions for each stream here). This helps every `get`, `set` and `define` of the interface that has a `Local` key, in all groups.
+- New test `the_names_the_constructor_reads_survive_collection` (`browser_streams_tests.rs`): the table is made, three collections run, and a stream with `start`, `pull`, `cancel` and a strategy still works, with its error messages.
+
+Not built, and why: a direct engine key handle (`Key`) with no handle push. The remaining cost of the table is `persistent` (243 for each stream, 38 for each read) and `api_key` (364, 58 for each read). It is not needed, because every row passes. If a later group needs it, the place is `Engine::get_key`.
+
+The jemalloc mean of the earlier entry (+1.04%) is an artifact of the script, not a real cost. `cost_matrix.sh` runs jemalloc only for a row that is over the limit under glibc (`jb=- jn=-` otherwise, `FULL` unset). The mean is over those rows only. The line said "3 rows measured": the three rows that failed under glibc (`platform_load query 10`, `streams_load churn 1` and `churn 10`: +0.54%, +1.0%, +1.5% under jemalloc). Evidence on this tree: the matrix without `-J` prints "jemalloc +0.177% (3 rows measured)" (rows `nodelist_load scan 10`, `resources_load small 1` and `10`); the same matrix with `-J` prints "glibc -0.010%, jemalloc -0.010% (817 rows measured)". The mean over all rows is the same under both allocators. Read the jemalloc mean only when the count of rows measured is the count of rows. I did not run `-J` on the old head `2876c1e1`, so its real jemalloc mean over 817 rows is not measured.
+
+Measurements. Machine archMachine. Instruction counts (`perf stat -e instructions:u`, minimum of 3 runs, `tools/js/cost_matrix.sh -j6 -J`, 817 rows measured, both trees built from source at `--release`). Mean change: glibc -0.010%, jemalloc -0.010%. Over +0.5% under both allocators: none. Failed to run: `parse_load deep 1` and `10` (known, both trees).
+
+| Row (before: glibc / jemalloc, earlier entry)       | Now: glibc | Now: jemalloc |
+| --------------------------------------------------- | ---------: | ------------: |
+| `streams_load churn 1` (+1.243% / +0.999%)          |    -0.871% |       -0.684% |
+| `streams_load churn 10` (+1.578% / +1.529%)         |    -1.225% |       -1.161% |
+| `streams_load flow 1`, `flow 10`                    | -0.477%, -0.528% | -0.453%, -0.513% |
+| `streams_load many 1`, `many 10`                    | -1.575%, -1.838% | -1.432%, -1.762% |
+| `streams_load pending 1`, `pending 10`              | -1.549%, -1.709% | -1.450%, -1.677% |
+| `platform_load query 10` (+0.538% / +0.540%)        |    +0.323% |       +0.317% |
+| `web_apis_load abort 1`, `abort 10`                 | +0.470%, +0.493% | +0.367%, +0.453% |
+| `fetch_load objects 1`, `10`                        | +0.165%, +0.163% | +0.160%, +0.181% |
+| `fetch_load iterate 1`, `10`                        | -3.4%, -3.5% | -3.2%, -3.4% |
+
+The `codegen-units=1` rule was not needed: no row is over under both allocators at the default flags. Over under one allocator only: `nodelist_load scan 10` (+0.505% glibc, +0.496% jemalloc: at the limit, group C/A1 code, not E), `preload_load dups 1` and `font 1` (+0.75%, +0.66% jemalloc only), `session_load chain 1` (+0.52% jemalloc only), `resources_load small 1` and `10` (+1.3%, +1.4% glibc only; known noise). The abort rows have little margin (+0.47% and +0.49% glibc, both under the limit): the call path costs about 90,000 instructions in the row, and `signal_of_s`, `controller_signal` and a table insert add the rest. A rebase that moves them over needs a look at `browser_abort.rs`.
+
+Tests. Linux, debug: `cargo test --locked -p bare-js-api -p bare-js -p bare --lib`: 32, 1104 (1 ignored) and 1716 (6 ignored) pass (one new test). `a_panic_in_a_host_call_unlinks_its_window` passes. The filters `fetch xhr stream abort web_ encoding worker crypto blob form_data formdata navigator headers request response textencoder file_ subtle` on `bare --lib`: 254 tests (333 runs, one for each filter), pass plain, with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1`. Windows 11 VM (`cargo xwin test --no-run`, exe through `winssh`): the same filters, 254 tests, pass in the three modes. The whole `bare --lib` on Windows: 1712 pass and 4 fail. The same 4 tests fail on a Windows build of the base (`origin/main` with the `def_get_sh` fix): `browser_date_tests::local_time_uses_the_zone_of_the_realm_in_the_browser` (a JS `Throw` at line 140: the time zone of the realm on Windows), `browser_session::tests::a_page_fed_in_pieces_gives_the_tree_of_a_one_step_parse` and `a_page_parsed_in_slices_gives_the_tree_of_a_one_step_parse` (`NotFound` at `browser_session.rs:1068`, a fixture path) and `resources::tests::staging_login_fixture_discovery` (`NotFound` at `resources.rs:821`, a fixture path). So they are not caused by E. Cause for the three `NotFound` tests (hypothesis): the exe runs on the VM without the repository tree.
+
+Not tested: the whole `bare --lib` with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1` (the base fails one test under whole-crate `BARE_GC_STRESS=1`, as the entry before says); macOS; RSS and wall time; `-J` on the old head `2876c1e1`; the stress mode with a collect between a stream `read` and its reaction; the merge with the open PRs B (#779), A2 (#781) and G (#782).
