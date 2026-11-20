@@ -159,7 +159,7 @@ impl<'a> Fc<'a> {
                 "undefined" => self.op(Op::LoadUndef, dst, 0, 0),
                 "NaN" => self.load_number(dst, f64::NAN),
                 "Infinity" => self.load_number(dst, f64::INFINITY),
-                "arguments" if !self.is_script => {
+                "arguments" if !self.is_script && !self.is_arrow => {
                     self.unsup("the arguments object");
                     self.op(Op::LoadUndef, dst, 0, 0);
                 }
@@ -347,23 +347,56 @@ impl<'a> Fc<'a> {
             ExprKind::Member { obj, name, optional } => {
                 let nm = self.name_of(name);
                 let m = self.mark();
-                let o = self.any(obj)?;
-                if optional {
-                    self.short(o);
+                if matches!(self.expr_kind(obj), ExprKind::Super) {
+                    let t = self.this_reg()?;
+                    let s = self.site_of(&nm)?;
+                    self.line(x.span.start);
+                    self.op(Op::GetSuper, dst, t, s);
+                } else {
+                    let o = self.any(obj)?;
+                    if optional {
+                        self.short(o);
+                    }
+                    let s = self.site_of(&nm)?;
+                    self.line(x.span.start);
+                    self.op(Op::GetField, dst, o, s);
                 }
-                let s = self.site_of(&nm)?;
-                self.line(x.span.start);
-                self.op(Op::GetField, dst, o, s);
                 self.free(m);
             }
             ExprKind::Index { obj, index, optional } => {
                 let m = self.mark();
-                let o = self.any_before(obj, index)?;
+                if matches!(self.expr_kind(obj), ExprKind::Super) {
+                    let t = self.this_reg()?;
+                    let k = self.any(index)?;
+                    self.line(x.span.start);
+                    self.op(Op::GetSuperElem, dst, t, k);
+                } else {
+                    let o = self.any_before(obj, index)?;
+                    if optional {
+                        self.short(o);
+                    }
+                    self.line(x.span.start);
+                    self.get_index(dst, o, index)?;
+                }
+                self.free(m);
+            }
+            ExprKind::PrivateMember { obj, name, optional } => {
+                let m = self.mark();
+                let o = self.any(obj)?;
                 if optional {
                     self.short(o);
                 }
+                let k = self.private_key(name)?;
                 self.line(x.span.start);
-                self.get_index(dst, o, index)?;
+                self.op(Op::GetPrivate, dst, o, k);
+                self.free(m);
+            }
+            ExprKind::PrivateIn { name, right } => {
+                let m = self.mark();
+                let o = self.any(right)?;
+                let k = self.private_key(name)?;
+                self.line(x.span.start);
+                self.op(Op::HasPrivate, dst, o, k);
                 self.free(m);
             }
             ExprKind::Seq(list) => {
@@ -392,13 +425,29 @@ impl<'a> Fc<'a> {
                 }
                 self.free(m);
             }
-            ExprKind::BigInt => self.not_built(dst, "a BigInt literal"),
-            ExprKind::RegExp => self.not_built(dst, "a regexp literal"),
-            ExprKind::Tagged { .. } => self.not_built(dst, "a tagged template"),
-            ExprKind::Class(_) => self.not_built(dst, "a class"),
-            ExprKind::PrivateMember { .. } | ExprKind::PrivateIn { .. } => self.not_built(dst, "a private name"),
-            ExprKind::Super => self.not_built(dst, "super"),
-            ExprKind::NewTarget => self.not_built(dst, "new.target"),
+            ExprKind::BigInt => {
+                let t = self.src.get(x.span.start as usize..x.span.end as usize).unwrap_or("0n");
+                let digits: String = t.trim_end_matches('n').chars().filter(|c| *c != '_').collect();
+                let a = self.atom(&digits)?;
+                self.op(Op::LoadBigInt, dst, a, 0);
+            }
+            ExprKind::RegExp => {
+                // `/body/flags`: the flags follow the last `/`.
+                let t = self.src.get(x.span.start as usize..x.span.end as usize).unwrap_or("//");
+                let cut = t.rfind('/').unwrap_or(t.len() - 1).max(1);
+                let (body, flags) = (self.atom(&t[1..cut])?, self.atom(&t[cut + 1..])?);
+                self.op(Op::NewRegExp, dst, body, flags);
+            }
+            ExprKind::Tagged { tag, quasi } => self.call_parts(e, tag, Some(quasi), Vec::new(), false, dst)?,
+            ExprKind::Class(c) => self.class(c, dst)?,
+            ExprKind::Super => self.not_built(dst, "super outside a call or a member access"),
+            ExprKind::NewTarget => {
+                if self.is_arrow && !matches!(self.resolve("new.target", 0), Res::Global) {
+                    self.read_var("new.target", 0, dst)?;
+                } else {
+                    self.op(Op::LoadNewTarget, dst, 0, 0);
+                }
+            }
             ExprKind::Await(_) => self.not_built(dst, "await"),
             ExprKind::Yield { .. } => self.not_built(dst, "yield"),
             ExprKind::Spread(_) => self.not_built(dst, "spread"),
@@ -421,15 +470,37 @@ impl<'a> Fc<'a> {
         }
     }
 
-    fn this(&mut self, dst: u32) -> CR {
-        if self.is_arrow
-            && let Res::Ctx { hops, slot, .. } = self.resolve("this", u32::MAX)
-        {
-            self.op(Op::GetCtx, dst, hops, slot);
-        } else {
-            self.op(Op::LoadThis, dst, 0, 0);
+    /// `this`. In an arrow, or in a derived constructor, it is a variable (in the derived constructor it is the hole until `super()`
+    /// returns, so a read checks it); elsewhere it is the `this` of the frame.
+    pub(crate) fn this(&mut self, dst: u32) -> CR {
+        if (self.is_arrow || self.derived) && !matches!(self.resolve("this", 0), Res::Global) {
+            return self.read_var("this", 0, dst);
         }
+        self.op(Op::LoadThis, dst, 0, 0);
         Ok(())
+    }
+
+    /// `this` in a new temporary register (live).
+    fn this_reg(&mut self) -> CR<u32> {
+        let t = self.alloc();
+        self.this(t)?;
+        self.set_live(t);
+        Ok(t)
+    }
+
+    /// The name of a private name, with the `#`: its variable in the scope of the class.
+    pub(crate) fn private_name(&self, span: Span) -> String {
+        let n = self.name_of(span);
+        if n.starts_with('#') { n.into_owned() } else { format!("#{n}") }
+    }
+
+    /// The private name `#name` (a span with the `#`) in a new temporary register: a variable of the class scope.
+    pub(crate) fn private_key(&mut self, name: Span) -> CR<u32> {
+        let n = self.private_name(name);
+        let t = self.alloc();
+        self.read_var(&n, 0, t)?;
+        self.set_live(t);
+        Ok(t)
     }
 
     /// `dst = o[index]`, with the forms for a constant index.
@@ -502,12 +573,14 @@ impl<'a> Fc<'a> {
 
     fn array(&mut self, list: List<Expr>, dst: u32) -> CR {
         let items: Vec<ExprId> = self.prog.list(list).collect();
-        if items.iter().any(|&i| matches!(self.expr_kind(i), ExprKind::Spread(_) | ExprKind::Hole)) {
-            self.unsup("a spread or a hole in an array literal");
-        }
+        let irregular = items.iter().any(|&i| matches!(self.expr_kind(i), ExprKind::Spread(_) | ExprKind::Hole));
         let m = self.mark();
         let d = self.scratch(dst, &items);
-        if items.is_empty() {
+        if irregular {
+            self.op(Op::NewArray, d, 0, 0);
+            self.set_live(d);
+            self.fill_array(d, &items)?;
+        } else if items.is_empty() {
             self.op(Op::NewArray, d, 0, 0);
         } else if items.len() as u32 <= LIT_MAX {
             let base = self.window(items.len() as u32);
@@ -546,13 +619,60 @@ impl<'a> Fc<'a> {
         }
     }
 
+    /// Is `e` a method or accessor function that uses `super.x` (its own or in an arrow inside it)? It needs a home object.
+    pub(crate) fn uses_super(&self, e: ExprId) -> bool {
+        match self.prog.expr(e).kind {
+            ExprKind::Function(f) => self.func_uses_super(f),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn func_uses_super(&self, f: FuncId) -> bool {
+        matches!(self.prog.func(f).body, Body::Skipped(id) if self.facts.get(id).flags & facts::SUPER != 0)
+    }
+
+    /// `SetHome fn, home` for a method that uses `super`.
+    pub(crate) fn set_home(&mut self, f: u32, home: u32, e: ExprId) {
+        if self.uses_super(e) {
+            self.op(Op::SetHome, f, home, 0);
+        }
+    }
+
+    /// The key of a property for a define op: `Ok(name)` for a name that a site holds, `Err(reg)` for a register that holds the key
+    /// (a computed key after `ToKey`, an index). `d` is the object (a `ToKey` of a computed key reads it for the error).
+    pub(crate) fn prop_key(&mut self, d: u32, key: Key) -> CR<Result<Cow<'a, str>, u32>> {
+        if let Some(n) = self.static_key(key)
+            && !index_like(&n)
+        {
+            return Ok(Ok(n));
+        }
+        let kt = self.alloc();
+        match (self.static_key(key), key) {
+            (_, Key::Computed(k)) => {
+                let kv = self.any(k)?;
+                self.op(Op::ToKey, kt, d, kv);
+            }
+            (Some(n), _) => self.load_number(kt, n.parse::<f64>().unwrap_or(0.0)),
+            (_, Key::Num(s)) => {
+                let v = self.prog.number(s, crate::lex::NumberBase::Decimal).unwrap_or(0.0);
+                self.load_number(kt, v);
+            }
+            _ => {
+                self.unsup("a BigInt or private key in an object literal");
+                self.op(Op::LoadUndef, kt, 0, 0);
+            }
+        }
+        self.set_live(kt);
+        Ok(Err(kt))
+    }
+
     fn object(&mut self, list: List<Prop>, dst: u32) -> CR {
         let prog = self.prog;
         let props: Vec<Prop> = prog.list(list).map(|p| *prog.prop(p)).collect();
         let mut names: Vec<Cow<'a, str>> = Vec::new();
         let mut simple = props.len() as u32 <= LIT_MAX;
         for p in &props {
-            let ok_kind = matches!(p.kind, PropKind::Init | PropKind::Shorthand | PropKind::Method);
+            let ok_kind = matches!(p.kind, PropKind::Init | PropKind::Shorthand | PropKind::Method) && !self.uses_super(p.value);
             match self.static_key(p.key) {
                 Some(n) if ok_kind && !(index_like(&n) || (n == "__proto__" && p.kind == PropKind::Init) || names.contains(&n)) => names.push(n),
                 _ => simple = false,
@@ -578,44 +698,39 @@ impl<'a> Fc<'a> {
             for p in &props {
                 let m2 = self.mark();
                 match p.kind {
-                    PropKind::Spread => self.unsup("spread in an object literal"),
-                    PropKind::Get | PropKind::Set => self.unsup("a getter or a setter in an object literal"),
-                    _ => {
-                        if matches!(p.kind, PropKind::Init) && self.static_key(p.key).is_some_and(|n| n == "__proto__") {
-                            self.unsup("__proto__ in an object literal");
+                    PropKind::Spread => {
+                        let v = self.any(p.value)?;
+                        self.op(Op::CopyProps, d, v, 0);
+                    }
+                    PropKind::Get | PropKind::Set => {
+                        let key = self.prop_key(d, p.key)?;
+                        let v = self.any(p.value)?;
+                        let setter = (p.kind == PropKind::Set) as u32;
+                        self.set_home(v, d, p.value);
+                        match key {
+                            Ok(n) => {
+                                let s = self.site_of(&n)?;
+                                self.opx(Op::DefAccessor, d, v, s, setter);
+                            }
+                            Err(k) => self.opx(Op::DefAccessorElem, d, k, v, setter),
                         }
-                        match (self.static_key(p.key), p.key) {
-                            (Some(n), _) if !index_like(&n) => {
-                                let v = self.any(p.value)?;
+                    }
+                    _ if p.kind == PropKind::Init && self.static_key(p.key).is_some_and(|n| n == "__proto__") => {
+                        let v = self.any(p.value)?;
+                        self.op(Op::SetProto, d, v, 0);
+                    }
+                    _ => {
+                        let key = self.prop_key(d, p.key)?;
+                        let v = self.any(p.value)?;
+                        if p.kind == PropKind::Method {
+                            self.set_home(v, d, p.value);
+                        }
+                        match key {
+                            Ok(n) => {
                                 let s = self.site_of(&n)?;
                                 self.op(Op::DefField, d, v, s);
                             }
-                            (_, Key::Computed(k)) => {
-                                let kv = self.any(k)?;
-                                let kt = self.alloc();
-                                self.op(Op::ToKey, kt, d, kv);
-                                self.set_live(kt);
-                                let v = self.any(p.value)?;
-                                self.op(Op::DefElem, d, kt, v);
-                            }
-                            (n, key) => {
-                                // An index key: a number or a string that is an index.
-                                let kt = self.alloc();
-                                match (n, key) {
-                                    (Some(n), _) => self.load_number(kt, n.parse::<f64>().unwrap_or(0.0)),
-                                    (_, Key::Num(s)) => {
-                                        let v = prog.number(s, crate::lex::NumberBase::Decimal).unwrap_or(0.0);
-                                        self.load_number(kt, v);
-                                    }
-                                    _ => {
-                                        self.unsup("a BigInt or private key in an object literal");
-                                        self.op(Op::LoadUndef, kt, 0, 0);
-                                    }
-                                }
-                                self.set_live(kt);
-                                let v = self.any(p.value)?;
-                                self.op(Op::DefElem, d, kt, v);
-                            }
+                            Err(k) => self.op(Op::DefElem, d, k, v),
                         }
                     }
                 }
@@ -638,17 +753,8 @@ impl<'a> Fc<'a> {
         if func.is_generator() {
             self.unsup("a generator");
         }
-        if expr
-            && let (Some(name), Body::Skipped(id)) = (func.name, func.body)
-            && func.kind == FuncKind::Normal
-        {
-            let ff = self.facts.get(id);
-            let n = self.name_of(name);
-            if self.may_occur(&n, ff.parse_at, ff.end) {
-                self.unsup("a function expression that may use its own name");
-            }
-        }
-        let i = self.child(f)?;
+        let self_name = expr && func.name.is_some() && func.kind == FuncKind::Normal;
+        let i = self.child(f, self_name)?;
         self.op(Op::Closure, dst, i, 0);
         Ok(())
     }
@@ -766,57 +872,165 @@ impl<'a> Fc<'a> {
     // ------------------------------------------------------------ calls
 
     fn call(&mut self, e: ExprId, callee: ExprId, args: List<Expr>, optional: bool, dst: u32) -> CR {
-        let prog = self.prog;
-        let args: Vec<ExprId> = prog.list(args).collect();
-        let c = *prog.expr(callee);
-        if args.iter().any(|&a| matches!(self.expr_kind(a), ExprKind::Spread(_))) {
-            self.unsup("spread in a call");
+        let args: Vec<ExprId> = self.prog.list(args).collect();
+        self.call_parts(e, callee, None, args, optional, dst)
+    }
+
+    /// Fill the array in `arr` with the arguments: `ArrayPush` for a value, `ArraySpread` for `...x`.
+    fn fill_array(&mut self, arr: u32, items: &[ExprId]) -> CR {
+        for &a in items {
+            let m = self.mark();
+            if let ExprKind::Spread(inner) = self.expr_kind(a) {
+                let v = self.any(inner)?;
+                self.op(Op::ArraySpread, arr, v, 0);
+            } else if matches!(self.expr_kind(a), ExprKind::Hole) {
+                self.op(Op::ArrayHole, arr, 0, 0);
+            } else {
+                let v = self.any(a)?;
+                self.op(Op::ArrayPush, arr, v, 0);
+            }
+            self.free(m);
         }
+        Ok(())
+    }
+
+    /// A call. `tpl`: a tagged template, whose template object is the first argument. A call with `...x` among its arguments builds the
+    /// arguments as an array (`CallSpread`).
+    fn call_parts(&mut self, e: ExprId, callee: ExprId, tpl: Option<Id<Template>>, args: Vec<ExprId>, optional: bool, dst: u32) -> CR {
+        let prog = self.prog;
+        let c = *prog.expr(callee);
+        let spread = args.iter().any(|&a| matches!(self.expr_kind(a), ExprKind::Spread(_)));
         if matches!(c.kind, ExprKind::Super) {
-            self.unsup("a super call");
+            return self.super_call(e, &args, spread, dst);
         }
         let m = self.mark();
-        let n = args.len() as u32;
-        let (base, first) = match c.kind {
+        let tn = tpl.is_some() as u32;
+        let n = args.len() as u32 + tn;
+        let method = matches!(c.kind, ExprKind::Member { .. } | ExprKind::Index { .. } | ExprKind::PrivateMember { .. });
+        let base = self.window(if spread { 3 } else if method { 2 + n } else { 1 + n });
+        match c.kind {
             ExprKind::Member { obj, name, optional: o2 } => {
                 let nm = self.name_of(name);
-                let base = self.window(2 + n);
-                self.to(obj, base + 1)?;
-                if o2 {
-                    self.short(base + 1);
+                if matches!(self.expr_kind(obj), ExprKind::Super) {
+                    self.this(base + 1)?;
+                    self.set_live(base + 1);
+                    let s = self.site_of(&nm)?;
+                    self.line(c.span.start);
+                    self.op(Op::GetSuper, base, base + 1, s);
+                } else {
+                    self.to(obj, base + 1)?;
+                    if o2 {
+                        self.short(base + 1);
+                    }
+                    let s = self.site_of(&nm)?;
+                    self.line(c.span.start);
+                    self.op(Op::GetField, base, base + 1, s);
                 }
-                let s = self.site_of(&nm)?;
-                self.line(c.span.start);
-                self.op(Op::GetField, base, base + 1, s);
                 self.set_live(base);
-                (base, base + 2)
             }
             ExprKind::Index { obj, index, optional: o2 } => {
-                let base = self.window(2 + n);
+                if matches!(self.expr_kind(obj), ExprKind::Super) {
+                    self.this(base + 1)?;
+                    self.set_live(base + 1);
+                    let k = self.any(index)?;
+                    self.line(c.span.start);
+                    self.op(Op::GetSuperElem, base, base + 1, k);
+                } else {
+                    self.to(obj, base + 1)?;
+                    if o2 {
+                        self.short(base + 1);
+                    }
+                    self.line(c.span.start);
+                    self.get_index(base, base + 1, index)?;
+                }
+                self.set_live(base);
+            }
+            ExprKind::PrivateMember { obj, name, optional: o2 } => {
                 self.to(obj, base + 1)?;
                 if o2 {
                     self.short(base + 1);
                 }
+                let k = self.private_key(name)?;
                 self.line(c.span.start);
-                self.get_index(base, base + 1, index)?;
+                self.op(Op::GetPrivate, base, base + 1, k);
                 self.set_live(base);
-                (base, base + 2)
+                self.free(k);
             }
             _ => {
-                let base = self.window(1 + n);
                 self.to(callee, base)?;
-                (base, base + 1)
+                if spread {
+                    self.op(Op::LoadUndef, base + 1, 0, 0);
+                    self.set_live(base + 1);
+                }
             }
-        };
-        let method = first == base + 2;
+        }
         if optional {
             self.short(base);
         }
-        for (i, a) in args.iter().enumerate() {
-            self.to(*a, first + i as u32)?;
+        if spread {
+            let arr = base + 2;
+            self.op(Op::NewArray, arr, 0, 0);
+            self.set_live(arr);
+            self.fill_array(arr, &args)?;
+            self.line(prog.expr(e).span.start);
+            self.op(Op::CallSpread, dst, base, 0);
+        } else {
+            let first = if method { base + 2 } else { base + 1 };
+            if let Some(t) = tpl {
+                let (h, site) = self.template_object(t)?;
+                self.op(Op::GetTemplate, first, h, site);
+                self.set_live(first);
+            }
+            for (i, a) in args.iter().enumerate() {
+                self.to(*a, first + tn + i as u32)?;
+            }
+            self.line(prog.expr(e).span.start);
+            self.op(if method { Op::Call } else { Op::CallU }, dst, base, n);
         }
-        self.line(prog.expr(e).span.start);
-        self.op(if method { Op::Call } else { Op::CallU }, dst, base, n);
+        self.free(m);
+        Ok(())
+    }
+
+    /// The recipe of a template (cooked and raw string of each piece) and its site, for `GetTemplate`.
+    fn template_object(&mut self, t: Id<Template>) -> CR<(u32, u32)> {
+        let prog = self.prog;
+        let tm = *prog.template(t);
+        let mut keys = Vec::new();
+        let mut buf = Vec::new();
+        for q in prog.template_quasis(&tm).collect::<Vec<_>>() {
+            let qn = *prog.quasi_node(q);
+            buf.clear();
+            keys.push(if prog.quasi(&qn, false, &mut buf).is_ok() { self.atom_units(&buf)? } else { u32::MAX });
+            buf.clear();
+            let _ = prog.quasi(&qn, true, &mut buf);
+            keys.push(self.atom_units(&buf)?);
+        }
+        let site = self.site(keys[1]);
+        Ok((self.recipes.push(&keys) as u32, site))
+    }
+
+    /// `super(...)` in a derived constructor (or an arrow inside it): construct, then the result is `this`.
+    fn super_call(&mut self, e: ExprId, args: &[ExprId], spread: bool, dst: u32) -> CR {
+        let m = self.mark();
+        if spread {
+            let arr = self.alloc();
+            self.op(Op::NewArray, arr, 0, 0);
+            self.set_live(arr);
+            self.fill_array(arr, args)?;
+            self.line(self.prog.expr(e).span.start);
+            self.op(Op::CallSuperSpread, dst, arr, 0);
+        } else {
+            let n = args.len() as u32;
+            let base = self.window(n);
+            for (i, a) in args.iter().enumerate() {
+                self.to(*a, base + i as u32)?;
+            }
+            self.line(self.prog.expr(e).span.start);
+            self.op(Op::CallSuper, dst, base, n);
+        }
+        self.set_live(dst);
+        // The first `super()` binds `this`. (A second call should throw a ReferenceError: not checked.)
+        self.store_var("this", 0, dst, true)?;
         self.free(m);
         Ok(())
     }
@@ -824,18 +1038,25 @@ impl<'a> Fc<'a> {
     fn new_expr(&mut self, e: ExprId, callee: ExprId, args: List<Expr>, dst: u32) -> CR {
         let prog = self.prog;
         let args: Vec<ExprId> = prog.list(args).collect();
-        if args.iter().any(|&a| matches!(self.expr_kind(a), ExprKind::Spread(_))) {
-            self.unsup("spread in a call");
-        }
         let m = self.mark();
         let n = args.len() as u32;
-        let base = self.window(1 + n);
-        self.to(callee, base)?;
-        for (i, a) in args.iter().enumerate() {
-            self.to(*a, base + 1 + i as u32)?;
+        if args.iter().any(|&a| matches!(self.expr_kind(a), ExprKind::Spread(_))) {
+            let base = self.window(2);
+            self.to(callee, base)?;
+            self.op(Op::NewArray, base + 1, 0, 0);
+            self.set_live(base + 1);
+            self.fill_array(base + 1, &args)?;
+            self.line(prog.expr(e).span.start);
+            self.op(Op::NewSpread, dst, base, 0);
+        } else {
+            let base = self.window(1 + n);
+            self.to(callee, base)?;
+            for (i, a) in args.iter().enumerate() {
+                self.to(*a, base + 1 + i as u32)?;
+            }
+            self.line(prog.expr(e).span.start);
+            self.op(Op::New, dst, base, n);
         }
-        self.line(prog.expr(e).span.start);
-        self.op(Op::New, dst, base, n);
         self.free(m);
         Ok(())
     }
@@ -985,14 +1206,16 @@ impl<'a> Fc<'a> {
     fn assign_member(&mut self, op: AssignOp, me: ExprId, value: ExprId, dst: Option<u32>, span: Span) -> CR {
         let prog = self.prog;
         let x = *prog.expr(me);
-        let (obj, name, index) = match x.kind {
-            ExprKind::Member { obj, name, .. } => (obj, Some(self.name_of(name)), None),
-            ExprKind::Index { obj, index, .. } => (obj, None, Some(index)),
+        let (obj, name, index, private) = match x.kind {
+            ExprKind::Member { obj, name, .. } => (obj, Some(self.name_of(name)), None, None),
+            ExprKind::Index { obj, index, .. } => (obj, None, Some(index), None),
+            ExprKind::PrivateMember { obj, name, .. } => (obj, None, None, Some(name)),
             _ => {
                 self.unsup("this assignment target");
                 return Ok(());
             }
         };
+        let mode = if matches!(self.expr_kind(obj), ExprKind::Super) { Mode::Super } else if private.is_some() { Mode::Private } else { Mode::Plain };
         // `a["k"]` with a name that is no index is `a.k`.
         let mut name = name;
         let mut index = index;
@@ -1009,19 +1232,22 @@ impl<'a> Fc<'a> {
             }
         }
         let m = self.mark();
-        let o = match index {
-            Some(ix) => self.any_before(obj, ix)?,
-            None => self.any_before(obj, value)?,
+        let o = match (mode, index) {
+            (Mode::Super, _) => self.this_reg()?,
+            (_, Some(ix)) => self.any_before(obj, ix)?,
+            _ => self.any_before(obj, value)?,
         };
-        let k = match index {
-            Some(ix) => Some(self.any_before(ix, value)?),
-            None => None,
+        let k = match (private, index) {
+            (Some(n), _) => Some(self.private_key(n)?),
+            (_, Some(ix)) => Some(self.any_before(ix, value)?),
+            _ => None,
         };
         self.line(span.start);
         match op {
             AssignOp::Assign => {
                 // Effect context with a constant: no register for the value.
                 if dst.is_none()
+                    && mode == Mode::Plain
                     && let Some(name) = &name
                     && let Some(kc) = self.konst(value)?
                 {
@@ -1047,7 +1273,7 @@ impl<'a> Fc<'a> {
                         }
                         _ => self.any(value)?,
                     };
-                    self.set_member(o, name.as_deref(), k, v)?;
+                    self.set_member(mode, o, name.as_deref(), k, v)?;
                     if let Some(d) = dst
                         && d != v
                     {
@@ -1057,14 +1283,14 @@ impl<'a> Fc<'a> {
             }
             AssignOp::Compound(bop) => {
                 let cur = self.alloc();
-                self.get_member(cur, o, name.as_deref(), k)?;
+                self.get_member(mode, cur, o, name.as_deref(), k)?;
                 self.set_live(cur);
                 let res = match dst {
                     Some(d) if !self.is_var_reg(d) => d,
                     _ => cur,
                 };
                 self.binary_regs(bop, cur, value, res)?;
-                self.set_member(o, name.as_deref(), k, res)?;
+                self.set_member(mode, o, name.as_deref(), k, res)?;
                 if let Some(d) = dst
                     && d != res
                 {
@@ -1076,12 +1302,12 @@ impl<'a> Fc<'a> {
                     Some(d) if !self.is_var_reg(d) => d,
                     _ => self.alloc(),
                 };
-                self.get_member(cur, o, name.as_deref(), k)?;
+                self.get_member(mode, cur, o, name.as_deref(), k)?;
                 self.set_live(cur);
                 let end = self.label();
                 self.jump_on_logic(lop, cur, end);
                 self.to(value, cur)?;
-                self.set_member(o, name.as_deref(), k, cur)?;
+                self.set_member(mode, o, name.as_deref(), k, cur)?;
                 self.bind(end);
                 if let Some(d) = dst
                     && d != cur
@@ -1094,25 +1320,37 @@ impl<'a> Fc<'a> {
         Ok(())
     }
 
-    pub(crate) fn get_member(&mut self, dst: u32, o: u32, name: Option<&str>, k: Option<u32>) -> CR {
-        match (name, k) {
-            (Some(n), _) => {
+    pub(crate) fn get_member(&mut self, mode: Mode, dst: u32, o: u32, name: Option<&str>, k: Option<u32>) -> CR {
+        match (mode, name, k) {
+            (Mode::Plain, Some(n), _) => {
                 let s = self.site_of(n)?;
                 self.op(Op::GetField, dst, o, s);
             }
-            (None, Some(k)) => self.op(Op::GetElem, dst, o, k),
+            (Mode::Plain, None, Some(k)) => self.op(Op::GetElem, dst, o, k),
+            (Mode::Super, Some(n), _) => {
+                let s = self.site_of(n)?;
+                self.op(Op::GetSuper, dst, o, s);
+            }
+            (Mode::Super, None, Some(k)) => self.op(Op::GetSuperElem, dst, o, k),
+            (Mode::Private, _, Some(k)) => self.op(Op::GetPrivate, dst, o, k),
             _ => {}
         }
         Ok(())
     }
 
-    pub(crate) fn set_member(&mut self, o: u32, name: Option<&str>, k: Option<u32>, v: u32) -> CR {
-        match (name, k) {
-            (Some(n), _) => {
+    pub(crate) fn set_member(&mut self, mode: Mode, o: u32, name: Option<&str>, k: Option<u32>, v: u32) -> CR {
+        match (mode, name, k) {
+            (Mode::Plain, Some(n), _) => {
                 let s = self.site_of(n)?;
                 self.op(Op::SetField, o, v, s);
             }
-            (None, Some(k)) => self.op(Op::SetElem, o, k, v),
+            (Mode::Plain, None, Some(k)) => self.op(Op::SetElem, o, k, v),
+            (Mode::Super, Some(n), _) => {
+                let s = self.site_of(n)?;
+                self.op(Op::SetSuper, o, v, s);
+            }
+            (Mode::Super, None, Some(k)) => self.op(Op::SetSuperElem, o, k, v),
+            (Mode::Private, _, Some(k)) => self.op(Op::SetPrivate, o, k, v),
             _ => {}
         }
         Ok(())
@@ -1162,13 +1400,18 @@ impl<'a> Fc<'a> {
             }
             ExprKind::Member { obj, name, .. } => {
                 let nm = self.name_of(name);
-                let o = self.any(obj)?;
-                self.member_update(iop, prefix, o, Some(&nm), None, dst)?;
+                let (o, mode) = self.member_base(obj, None)?;
+                self.member_update(mode, iop, prefix, o, (Some(&nm), None), dst)?;
             }
             ExprKind::Index { obj, index, .. } => {
-                let o = self.any_before(obj, index)?;
+                let (o, mode) = self.member_base(obj, Some(index))?;
                 let k = self.any(index)?;
-                self.member_update(iop, prefix, o, None, Some(k), dst)?;
+                self.member_update(mode, iop, prefix, o, (None, Some(k)), dst)?;
+            }
+            ExprKind::PrivateMember { obj, name, .. } => {
+                let o = self.any(obj)?;
+                let k = self.private_key(name)?;
+                self.member_update(Mode::Private, iop, prefix, o, (None, Some(k)), dst)?;
             }
             _ => self.unsup("this update target"),
         }
@@ -1190,13 +1433,21 @@ impl<'a> Fc<'a> {
         }
     }
 
-    fn member_update(&mut self, iop: Op, prefix: bool, o: u32, name: Option<&str>, k: Option<u32>, dst: Option<u32>) -> CR {
+    /// The register of the object of a member target, and how the member is read: `super.x` takes `this`.
+    pub(crate) fn member_base(&mut self, obj: ExprId, before: Option<ExprId>) -> CR<(u32, Mode)> {
+        if matches!(self.expr_kind(obj), ExprKind::Super) {
+            return Ok((self.this_reg()?, Mode::Super));
+        }
+        Ok((if let Some(ix) = before { self.any_before(obj, ix)? } else { self.any(obj)? }, Mode::Plain))
+    }
+
+    fn member_update(&mut self, mode: Mode, iop: Op, prefix: bool, o: u32, (name, k): (Option<&str>, Option<u32>), dst: Option<u32>) -> CR {
         let cur = self.alloc();
-        self.get_member(cur, o, name, k)?;
+        self.get_member(mode, cur, o, name, k)?;
         self.set_live(cur);
         self.update_value(iop, prefix, cur, dst);
         let new = if prefix || dst.is_none() { cur } else { cur + 1 };
-        self.set_member(o, name, k, new)?;
+        self.set_member(mode, o, name, k, new)?;
         if let Some(d) = dst {
             self.op(Op::Mov, d, if prefix { new } else { cur }, 0);
         }

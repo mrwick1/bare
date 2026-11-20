@@ -373,3 +373,48 @@ fn bad_words_and_registers() {
     c.words.clear();
     bad(&c, "no code");
 }
+
+#[test]
+fn windows_of_the_ops_for_spread_and_super() {
+    // `CallSpread` reads 3 registers from `b` (callee, this, array); `NewSpread` 2; `CallSuper` reads `c`; `ObjRest` reads `x` from `c`.
+    let ok = |i: Ins, written: u32| {
+        let (_s, c) = build(6, 0, |a| {
+            for r in 0..written {
+                a.emit(ins(Op::LoadUndef, r, 0, 0));
+            }
+            a.emit(i);
+            a.emit(ins(Op::RetUndef, 0, 0, 0));
+        });
+        let mut c = c;
+        maps(&mut c, |pc| (0..written.min(pc)).map(|r| r as usize).collect());
+        verify(&c)
+    };
+    assert!(ok(ins(Op::CallSpread, 5, 1, 0), 4).is_ok());
+    assert!(ok(ins(Op::CallSpread, 5, 1, 0), 3).unwrap_err().contains("window"));
+    assert!(ok(ins(Op::CallSpread, 5, 4, 0), 5).unwrap_err().contains("window out of range"));
+    assert!(ok(ins(Op::NewSpread, 5, 1, 0), 3).is_ok());
+    assert!(ok(ins(Op::NewSpread, 5, 1, 0), 2).unwrap_err().contains("window"));
+    assert!(ok(ins(Op::CallSuper, 5, 1, 2), 4).is_ok());
+    assert!(ok(ins(Op::CallSuper, 5, 1, 2), 2).unwrap_err().contains("window"));
+    assert!(ok(ins(Op::ObjRest, 5, 0, 1).with_x(3), 4).is_ok());
+    assert!(ok(ins(Op::ObjRest, 5, 0, 1).with_x(3), 3).unwrap_err().contains("window"));
+    assert!(ok(ins(Op::ObjRest, 5, 0, 4).with_x(3), 5).unwrap_err().contains("window out of range"));
+}
+
+#[test]
+fn a_template_recipe_may_hold_an_undefined_cooked_string() {
+    let make = |keys: &[u32], op: Op| {
+        let (_s, mut c) = build(2, 0, |a| _ = (a.emit(ins(op, 0, 0, 0)), a.emit(ins(Op::RetUndef, 0, 0, 0))));
+        c.recipes.push(keys);
+        c.sites = vec![0];
+        maps(&mut c, |_| vec![]);
+        c
+    };
+    verify(&make(&[u32::MAX, 1, 2, 3], Op::GetTemplate)).unwrap();
+    bad(&make(&[0, u32::MAX, 2, 3], Op::GetTemplate), "recipe");
+    bad(&make(&[0, 1, 2], Op::GetTemplate), "recipe");
+    // Another op cannot name an undefined key.
+    let (_s, mut c) = build(2, 0, |a| _ = (a.emit(ins(Op::NewObjLit, 0, 1, 0)), a.emit(ins(Op::RetUndef, 0, 0, 0))));
+    c.recipes.push(&[u32::MAX]);
+    bad(&c, "recipe");
+}
