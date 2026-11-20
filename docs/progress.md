@@ -14736,6 +14736,25 @@ Micro rows (`crates/js2/examples/shape_load.rs`; user instructions from `perf st
 `find` is the cost of a cache miss and of native reads; a cache hit does not call it. `Table::pos`, `Shapes::table` and `Shapes::table_mut` were not inlined at first (73 instructions for a 1-key lookup); `#[inline]` on them gave 50.
 
 Not tested: objects (S1.9), a cache (S2), the collector of S1.5 (the hooks run in the tests with a stand-in marker), a shape sweep with a real second realm, arm64, a 32-bit target, a trace from a real page (the trace is synthetic: the old engine's `browser_load` has 557 shapes and little else), a collection inside a task with a shape that only a native function holds, the cost matrix (js2 is not wired into the browser), `header_load` rows after the change, Windows instruction counts, and the Windows run of the examples. `cargo clippy` shows no finding in `shapes.rs`; two `manual_is_multiple_of` findings in the `shape_census` example were left (the repository uses `%` elsewhere).
+Join with the collector (S1.5, #744). The two branches were built in parallel; this branch merged `t3/js2-collector-ephemerons` (#744 had not merged). What changed:
+- `gc.rs`: `Marker::object` calls `Shapes::note_live`. When it returns a prototype (the first marked object of a shape in this collection), the marker marks it with `Marker::cell` (mark bit before the push, as for every cell). So a prototype that only a shape names lives, and the work stays one loop. `Shapes::finish_marks` already ran after the loop and before `Atoms::sweep` in `collect`; no change of order. Key atoms are leaves, so the shapes need no second pass. The module comment (step 5, the `Object` layout) says this now.
+- `gc_tests.rs` and `examples/gc_load.rs`: the stub `Shape { layout, flags, slots }` and `Shapes::add(heap, shape)` are gone. An object of N slots has a shape with the keys `k0` to `k(N-1)` (atoms of the realm, `Shapes::root` and `add`; a dictionary shape for more than `MAX_PROPS` keys, as the 1,290-slot object of the wide-object test needs). Each size has a pinned object, so a collection never frees its shape. Same graphs, same checks. One test changed a number: `the_atom_table_drops_the_dead_atoms` counts the 8 key atoms of the pinned shapes as live.
+- 2 new tests: a prototype held only by a shape (and what it names) survives, and dies with its shape; a shape that no marked object uses is freed with the atom that only it named, its id is reused, and `Shapes::epoch` changes (and does not change when nothing is freed). The 60,000-node random graph test is changed: it now gives one object in eight a dictionary shape of its own, and each check asserts that the dictionary shapes left are those of the kept objects and that the shape count returns to the start. With `self.cell(proto)` removed, only the first test fails.
+- `lib.rs` and `Cargo.toml`: the module list and the unsafe-module comment have both sets (`value`, `cell`, `heap`, `string`, `atoms`, `shapes`, `gc`).
+
+Join checks: `cargo test --locked -p bare-js2` 69 pass on Linux (#745 alone had 52 and #744 alone 50 `#[test]` functions; 2 are new here); 69 pass on the Windows 11 VM (`cargo xwin test`, `bare_js2` exe through `winssh`); Miri (nightly, `cargo miri test --locked -p bare-js2`): 69 pass in 351 s of test time.
+
+Collector mark cost after the join (`gc_load`, release, `tools/js/instr.sh` minimum of 3 runs, instructions of 10 collections minus the run with 0, divided by 10 and by N = 100,000 objects of 4 slots; the base is the #744 head built from its own checkout):
+
+| Row | #744 head | Joined | Change |
+|---|---:|---:|---:|
+| `chain` | 277.5 per object | 284.4 per object | +2.5% |
+| `tree` | 196.7 per object | 201.6 per object | +2.5% |
+
+The setup rows (R = 0) differ by 0.02%. The cost is 7 instructions per marked object. Hypothesis (not measured by a profile): `note_live` of the stub set a bit without a bounds check or a branch, and the real one reads the word, tests the bit, and indexes `live` and `nodes` with a check each (`note_live`, then `Shapes::of`). The prototype path runs once for each shape and does not show in these rows (one shape). Peak work list is unchanged (2,048 bytes for `tree`). No change was made to `shapes.rs` for this.
+
+Not tested in the join: a real second realm, a shape cap run, a collection with a shape that only a native function holds, arm64, the cost matrix (js2 is not wired into the browser), and Windows instruction counts. `cargo clippy -p bare-js2` was not run: it stops on an existing `manual_is_multiple_of` finding in `crates/os/src/pages.rs`. The comment in `.github/workflows/ci.yml` still lists only `value`, `heap`, `string` and `atoms` as the unsafe modules; it was not changed.
+
 ## 2026-11-20: collector, ephemerons and weak tables (plan step S1.5)
 
 `bare-js2` has a collector (`crates/js2/src/gc.rs`, design 6.9 item 3 and 6.11 item 3). `gc::collect(heap, shapes, atoms, roots)` runs one walk: `Heap::start_mark`, the roots, the mark loop, ephemerons, `Shapes::finish_marks`, `Atoms::sweep`, `Roots::weak`, `Heap::finish_mark`. The sweep stays lazy (S1.3).
