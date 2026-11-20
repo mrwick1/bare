@@ -593,3 +593,11 @@ The first-pass questions are answered (decisions 1 to 8). These are still open. 
 - The cost of widening a one-byte input (not needed: R1 uses a generic loop); the cost of `Symbol.replace` through the prelude.
 - Windows and macOS (the matcher is portable Rust; the old engine's tests run there, not rerun). The prototype ran on archMachine only.
 - The old engine's pass count with a larger step limit on `property-escapes`.
+
+## Decisions on the hybrid (owner, 2026-11-21)
+
+1. Linear engine: our own Pike VM and lazy DFA over the shared program, not `regex-automata`.
+2. Binary limit: +40 KB over R1. If R2 is over the limit, drop the u8 copy of the Pike VM first.
+3. The linear side does not take lookahead. Reopen only if a js2 profile asks.
+4. Tier-up to the DFA at run 64. Fallback from the backtracker after 100 K steps.
+5. Build order: R0, R1, R2, R3. R4 only if a profile asks.
