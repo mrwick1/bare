@@ -49,10 +49,12 @@
 //! Stub layout of `WeakTable` (S1.9 may build its own): the header, `len: u32`, 4 bytes of padding, and then `len` entries of two
 //! values, the key and the value. An entry whose key is not a pointer is empty.
 //!
-//! Collection runs when the caller decides to (the trigger is S1.6). It never allocates in the heap.
+//! Collection runs when the caller decides to: between tasks when [`Heap::due`], and inside a task through `roots::alloc_in_task`
+//! (S1.6), which collects when the allocation slow path refuses. It never allocates in the heap.
 use crate::atoms::Atoms;
 use crate::cell::{CellHeader, Layout, Shapes};
 use crate::heap::Heap;
+use crate::shapes::ShapeId;
 use crate::string::{FLAG_SHARED, Str};
 use crate::value::Value;
 use std::collections::HashMap;
@@ -227,6 +229,15 @@ impl Marker<'_> {
     pub fn value(&mut self, v: Value) {
         if let Some((_, p)) = v.as_pointer() {
             self.cell(p);
+        }
+    }
+
+    /// Keep a shape that no marked object may use yet: a shape that code or a native function holds before it makes the first object.
+    /// Its prototype is marked, as for the first object of the shape. Another shape is freed by `Shapes::finish_marks`.
+    pub fn shape(&mut self, id: ShapeId) {
+        let h = self.shapes.header(id);
+        if let Some(proto) = self.shapes.note_live(self.heap, h) {
+            self.cell(proto);
         }
     }
 

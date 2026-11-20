@@ -105,3 +105,114 @@ fn a_large_object_has_its_own_pages_and_lives_while_marked() {
     h.finish_mark();
     assert_eq!(h.mapped_bytes(), 0);
 }
+
+// The trigger (plan step S1.6). A block is 64 KiB, and the count grows by the free cells of a block, so the limits below are blocks.
+
+fn trigger(min: usize, slack: usize) -> Heap {
+    let mut h = Heap::default();
+    h.set_trigger(Trigger { min, slack });
+    h
+}
+
+/// The cells of one block of class 32.
+const CELLS_32: usize = (BLOCK - FIRST) / 32;
+
+#[test]
+fn the_count_grows_when_a_block_gives_its_cells_and_not_at_each_cell() {
+    let mut h = Heap::default();
+    assert_eq!(h.grown_bytes(), 0);
+    h.alloc(32).unwrap();
+    assert_eq!(h.grown_bytes(), CELLS_32 * 32);
+    for _ in 1..CELLS_32 {
+        h.alloc(32).unwrap();
+    }
+    assert_eq!(h.grown_bytes(), CELLS_32 * 32, "the fast path counts nothing");
+    h.alloc(32).unwrap();
+    assert_eq!(h.grown_bytes(), 2 * CELLS_32 * 32);
+    // A large object counts its whole mapping.
+    let before = h.grown_bytes();
+    h.alloc(100_000).unwrap();
+    assert_eq!(h.grown_bytes(), before + (FIRST + 100_000).next_multiple_of(BLOCK));
+}
+
+#[test]
+fn a_swept_block_counts_only_its_free_cells() {
+    let mut h = Heap::default();
+    let cells: Vec<_> = (0..CELLS_32).map(|_| h.alloc(32).unwrap()).collect();
+    h.start_mark();
+    // SAFETY: a live cell of `h`.
+    unsafe { h.mark(cells[5]) };
+    h.finish_mark();
+    assert_eq!(h.grown_bytes(), 0, "a collection resets the count");
+    h.alloc(32).unwrap();
+    assert_eq!(h.grown_bytes(), (CELLS_32 - 1) * 32, "the block has one live cell");
+}
+
+#[test]
+fn the_between_task_limit_is_the_old_rule_in_bytes_of_growth() {
+    let mut h = trigger(256 << 10, 128 << 10);
+    assert!(!h.due());
+    let mut n = 0;
+    while !h.due() {
+        h.alloc(32).unwrap();
+        n += 1;
+    }
+    assert!(h.grown_bytes() >= 256 << 10 && h.grown_bytes() < (256 << 10) + BLOCK, "{}", h.grown_bytes());
+    assert!(n >= (256 << 10) / 32 - CELLS_32, "{n} cells");
+    // With live data of 1 MiB (1,008 cells of 1,024 bytes, marked), a collection is due when the heap passes 1.75 MiB: 0.75 MiB of growth.
+    let mut h = trigger(256 << 10, 128 << 10);
+    let live: Vec<_> = (0..1000).map(|_| h.alloc(1024).unwrap()).collect();
+    h.start_mark();
+    for &p in &live {
+        // SAFETY: a live cell of `h`.
+        unsafe { h.mark(p) };
+    }
+    h.finish_mark();
+    let bytes = h.marked_bytes();
+    assert_eq!(bytes, 1000 * 1024);
+    assert!(!h.due());
+    let mut grown = 0;
+    while !h.due() {
+        h.alloc(1024).unwrap();
+        grown = h.grown_bytes();
+    }
+    assert!(grown >= bytes / 4 * 3 && grown < bytes / 4 * 3 + BLOCK, "{grown} bytes grown for {bytes} live");
+    // The floor wins while the live data is small.
+    let mut h = trigger(1 << 20, 0);
+    h.alloc(32).unwrap();
+    h.start_mark();
+    h.finish_mark();
+    assert_eq!(h.marked_bytes(), 0);
+    assert!(!h.due() && h.grown_bytes() == 0);
+}
+
+#[test]
+fn try_alloc_refuses_at_the_task_limit_and_alloc_never_does() {
+    let mut h = trigger(256 << 10, 128 << 10);
+    let mut n = 0;
+    while h.try_alloc(32).is_some() {
+        n += 1;
+    }
+    assert!(h.task_due() && h.due());
+    let g = h.grown_bytes();
+    assert!((384 << 10..(384 << 10) + BLOCK).contains(&g), "{g}");
+    assert!(n >= (384 << 10) / 32 - CELLS_32);
+    // It keeps refusing a small and a large request, and a class whose free list has cells still answers: the limit is tested when
+    // a block is needed.
+    assert!(h.try_alloc(32).is_none() && h.try_alloc(5000).is_none() && h.try_alloc(100_000).is_none());
+    assert!(h.alloc(32).is_some() && h.alloc(100_000).is_some());
+    // A collection with no live cell lifts the refusal.
+    h.start_mark();
+    h.finish_mark();
+    assert!(!h.task_due() && h.try_alloc(32).is_some() && h.try_alloc(100_000).is_some());
+}
+
+#[test]
+fn the_trigger_moves_when_it_is_set() {
+    let mut h = Heap::default();
+    assert_eq!(h.trigger, Trigger { min: TRIGGER_MIN, slack: TRIGGER_SLACK });
+    h.set_trigger(Trigger { min: 0, slack: 0 });
+    assert!(h.due() && h.task_due() && h.try_alloc(32).is_none());
+    h.set_trigger(Trigger { min: usize::MAX, slack: usize::MAX });
+    assert!(!h.due() && !h.task_due() && h.try_alloc(32).is_some(), "no overflow");
+}
