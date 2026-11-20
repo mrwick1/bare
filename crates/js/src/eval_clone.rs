@@ -179,48 +179,37 @@ struct CloneWalk<'a, 'p> {
     h: &'a mut dyn bare_js_api::CloneHost<Interp<'p>>,
 }
 
-/// Charge the steps that the cost model has added. The old walk charged each step when it happened; the total is the same.
-fn clone_flush(m: &mut cl::Meter, it: &mut Interp<'_>) -> Result<(), Error> {
-    match m.take_steps() {
-        0 => Ok(()),
-        n => it.charge(n),
-    }
-}
-
-/// The result of a charge of the cost model: the steps of the charge go to the budget, or the limit becomes the error. The steps that
-/// came before the failing byte charge go first, so the step budget can still win, as in the old walk.
-fn clone_done(m: &mut cl::Meter, it: &mut Interp<'_>, r: Result<(), bare_js_api::Abort>) -> Result<(), Error> {
-    match r {
-        Ok(()) => clone_flush(m, it),
-        Err(a) => {
-            clone_flush(m, it)?;
-            Err(match a {
-                bare_js_api::Abort::Limit(name) => Error::Limit(LimitKind::Host(name)),
-                bare_js_api::Abort::Unsupported(what) => unsupported(what, Span::default()),
-            })
+impl<'p> CloneWalk<'_, 'p> {
+    /// Charge the steps that the cost model has added. The old walk charged each step when it happened; the total is the same.
+    fn flush(&mut self, it: &mut Interp<'p>) -> Result<(), Error> {
+        match self.m.take_steps() {
+            0 => Ok(()),
+            n => it.charge(n),
         }
     }
-}
 
-/// The `DataCloneError` that the host makes for `what`.
-fn clone_refuse<'p>(h: &mut dyn bare_js_api::CloneHost<Interp<'p>>, it: &mut Interp<'p>, what: bare_js_api::Refused) -> Error {
-    bare_js_api::enter(it, |s| {
-        let e = h.data_clone_error(s, what);
-        s.engine().api_unerr(e)
-    })
-}
-
-impl<'p> CloneWalk<'_, 'p> {
-    fn flush(&mut self, it: &mut Interp<'p>) -> Result<(), Error> {
-        clone_flush(&mut self.m, it)
-    }
-
+    /// The result of a charge of the cost model: the steps of the charge go to the budget, or the limit becomes the error. The steps that
+    /// came before the failing byte charge go first, so the step budget can still win, as in the old walk.
     fn done(&mut self, it: &mut Interp<'p>, r: Result<(), bare_js_api::Abort>) -> Result<(), Error> {
-        clone_done(&mut self.m, it, r)
+        match r {
+            Ok(()) => self.flush(it),
+            Err(a) => {
+                self.flush(it)?;
+                Err(match a {
+                    bare_js_api::Abort::Limit(name) => Error::Limit(LimitKind::Host(name)),
+                    bare_js_api::Abort::Unsupported(what) => unsupported(what, Span::default()),
+                })
+            }
+        }
     }
 
+    /// The `DataCloneError` that the host makes for `what`.
     fn refuse(&mut self, it: &mut Interp<'p>, what: bare_js_api::Refused) -> Error {
-        clone_refuse(&mut *self.h, it, what)
+        let h = &mut *self.h;
+        bare_js_api::enter(it, |s| {
+            let e = h.data_clone_error(s, what);
+            s.engine().api_unerr(e)
+        })
     }
 
     fn string(&mut self, it: &mut Interp<'p>, s: StrId) -> Result<(), Error> {
@@ -816,6 +805,19 @@ impl<'p> Interp<'p> {
 
 // ---------- the fused copy: `Engine::clone_copy` ----------
 
+/// `CloneWalk::done`: the steps of the model go to the budget first, then a failed charge becomes the error.
+fn clone_done(m: &mut cl::Meter, it: &mut Interp<'_>, r: Result<(), bare_js_api::Abort>) -> Result<(), Error> {
+    let steps = m.take_steps();
+    if steps != 0 {
+        it.charge(steps)?;
+    }
+    match r {
+        Ok(()) => Ok(()),
+        Err(bare_js_api::Abort::Limit(name)) => Err(Error::Limit(LimitKind::Host(name))),
+        Err(bare_js_api::Abort::Unsupported(what)) => Err(unsupported(what, Span::default())),
+    }
+}
+
 /// A clone inside one heap with no transfer list and no record (design F3). It walks the source as `CloneWalk` does, with the same checks,
 /// the same getter order and the same charges of the cost model, and builds the copy as `clone_in` would build it from the record. No script
 /// can reach the new objects, so no getter can see a half-built copy. The steps that the reader would charge are added up in `later` and
@@ -838,7 +840,10 @@ struct CloneCp<'a, 'p> {
 
 impl<'p> CloneCp<'_, 'p> {
     fn flush(&mut self, it: &mut Interp<'p>) -> Result<(), Error> {
-        clone_flush(&mut self.m, it)
+        match self.m.take_steps() {
+            0 => Ok(()),
+            n => it.charge(n),
+        }
     }
 
     fn done(&mut self, it: &mut Interp<'p>, r: Result<(), bare_js_api::Abort>) -> Result<(), Error> {
@@ -846,7 +851,11 @@ impl<'p> CloneCp<'_, 'p> {
     }
 
     fn refuse(&mut self, it: &mut Interp<'p>, what: bare_js_api::Refused) -> Error {
-        clone_refuse(&mut *self.h, it, what)
+        let h = &mut *self.h;
+        bare_js_api::enter(it, |s| {
+            let e = h.data_clone_error(s, what);
+            s.engine().api_unerr(e)
+        })
     }
 
     /// Give the new object `c` of the source object `key` its place.
