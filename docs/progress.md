@@ -17696,3 +17696,57 @@ The `codegen-units=1` rule was not needed: no row is over +0.5% at the default b
 Tests. Linux, debug: `cargo test --locked -p bare --lib -p bare-js -p bare-js-api`: 1718 (6 ignored), 1106 (1 ignored) and 32 pass (run before the merge of `origin/main`, which changes only tests and docs in the Windows fixes).
 
 Not tested: the Windows tests (only `cargo xwin check`, no VM run); `BARE_GC_STRESS=1` and `BARE_ALL_API=1` runs; `codegen-units=1`; RSS and wall time; the journeys and `tools/suite/run.py`; macOS; the `cfg` paths of other targets.
+## Cold arms of `Vm::run` (step 1 of the dispatch design, 2026-11-21)
+
+Design: [design-js2-dispatch.md](design-js2-dispatch.md), step 1 and "Decisions (owner, 2026-11-21)". Base: `a04014eb` (`origin/main`). Its `crates/js2` is the same as at `351f9b72`, where I built and measured main (`git diff 351f9b72 a04014eb -- crates/js2` is empty). Machine: archMachine, not idle (other sessions ran), so instruction counts only.
+
+What changed.
+
+1. `Vm::run` is a thin wrapper. The loop is `Vm::exec<M: Mode>`, built in two copies from one text, so the macros (`reload!`, `ret!`, `enter!`, `throw!`, ...) serve both. `exec::<Hot>` is the loop as before. `exec::<Cold>` runs the one instruction at `pc` of a cold op and returns `Flow::Go(ci, fp, pc)`, or `Flow::Done` when the run ends. `Mode::COLD` is a constant, so each copy keeps only its own `match`. The hot copy returns `Result<Value, Exit>`, as `run` did.
+2. 43 of the 48 cold arms moved, with their text unchanged, into the cold `match`. The hot `match` has one arm for them, `cold_ops!()`: no `_ =>` arm, so no bounds check before the jump tables. The hot copy calls them through `Vm::run_cold`, which is `#[cold]`: without it `loopfn` was +6.6% at the default build, with the same arms.
+3. After the call the hot loop does `(ci, fp, pc) = ...; reload!(); continue;`. So `regs`, `code`, `words` and `fb` are set again after a stack growth, a compile (`Op::Lazy`), a nested run, an enter or an unwind in the cold function (the rule of #773). `ret!` is unchanged: `fp` moves first, then `reload!`. `Op::Lazy` is a cold arm, unchanged. #785 is not touched.
+4. The op counts (`--features op-count`) tick in the hot copy only, so a cold op counts once.
+5. The rule of the split is a comment at `Vm::exec`: a new rare op goes into the cold `match` and `cold_ops!` by default.
+
+The split. Op counts (`op_count`, `--features op-count`; the micro rows as `eval_loopfn.js` and the other `eval_*.js`, `bundle_like.js`; and a quarter of the test262 files of the js2 subset, 8,000 files, 33.1 M dispatches). Cold ops that run in a loop: `InstanceOf` 1.0%, `ForInOpen` 0.7%, `CreateArgs` 0.7% of the dispatches of `bundle_like.js`; `Throw` 1.8% of `eval_throws.js`; `In` 12% of test262, from a few tests with a loop of 1 M turns. The micro rows (`loopfn`, `calls`, `fib`, `closures`, `objects`) run no cold op in their loops. `Lazy`, `DeclGlobal` and `SetFnName` run once for each function or declaration (1% of `eval_webpack.js`, a program of 5,600 ops).
+
+The cost of a cold op, measured: one op in a loop of 200,000 turns inside a function (script_run, net instructions for each turn, default build): `**` 366 to 490 (+124), `...` spread call 1,348 to 1,590 (+242, two cold ops), `super.m()` call in a class 3,350 to 3,805 (+455, several cold ops). That is about 110 to 125 instructions for each cold op. The hypothesis of the design (about 50) was low. The hot `match` gains 0.5 to 2 instructions for each dispatch of any op (loopfn 7 ops in a turn, calls about 10). Break-even is about 1 dispatch in 100. So `In`, `InstanceOf`, `ForInOpen`, `CreateArgs` and `Throw` stay in the hot `match` with `cold_path()` as before. The first build had all 48 cold: `instanceof` in a loop was +26% (485 to 611) and `bundle_like.js` +8% (estimate from the op counts, not run). With the 5 ops hot, each of the 5 loops below is 1% to 5% cheaper than main:
+
+| Loop (net instructions for each turn) | Main default | New default | Main cgu1 | New cgu1 |
+| --- | ---: | ---: | ---: | ---: |
+| `instanceof` | 485 | 481 | 487 | 484 |
+| `in` | 663 | 656 | 653 | 645 |
+| `arguments.length` call | 952 | 928 | 931 | 914 |
+| `for-in` of 2 keys | 1,391 | 1,379 | 1,402 | 1,382 |
+| `try { throw } catch` | 316 | 300 | 311 | 296 |
+
+Cost rows. `interp_load`, the method of `tools/js/instr.sh` (`perf stat -e instructions:u`, `GLIBC_TUNABLES=glibc.malloc.tcache_count=65535`, net = count(N) minus count(0)), N as in the design (1,000,000 for `loopfn` and `calls`, 30 for `fib`, 200,000 for `closures` and `objects`). 3 runs for each cell, the widest spread is 0.002 M. Main (`351f9b72`) and this tree, built in the same session from `git archive` copies with symbols kept (`CARGO_PROFILE_RELEASE_STRIP=false`), each with its own `CARGO_TARGET_DIR`. Lowest run, M instructions.
+
+| Row | Main default | New default | | Main cgu1 | New cgu1 | |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loopfn` | 272.50 | 278.50 | +2.2% | 282.50 | 277.50 | -1.8% |
+| `calls` | 586.50 | 577.50 | -1.5% | 579.50 | 556.50 | -4.0% |
+| `fib` | 1,103.59 | 1,088.79 | -1.3% | 1,064.55 | 1,057.82 | -0.6% |
+| `closures` | 366.90 | 364.50 | -0.7% | 365.96 | 356.76 | -2.5% |
+| `objects` | 141.53 | 139.19 | -1.7% | 143.53 | 141.39 | -1.5% |
+
+`loopfn` is over +0.5% at the default build. By the cost rule it passes: it is within +0.5% (it is -1.8%) at codegen-units=1. The spike `sx2` gave `loopfn` 269.50 at the default build. I built `sx2` again on this main and got the same 269.50, 565.50, 1,061.86, 358.10 and 135.99. At cgu1 this tree equals the spike (276.50, 555.50, 1,057.82, 356.75, 141.39 within 1 M, with the 5 hot ops back in). At the default build the hot loop of `loopfn` has the same ops as the spike with 9 more register moves for each turn (263 instructions for each turn, the spike 254; main 257). Hypothesis: it is register allocation by LLVM in a generic function, not a design cost. I tried the 3 shapes that I could think of (a wider `Flow` return type: `loopfn` 274.50 and `closures` +0.5%; without `#[cold]` on the call: 290.50; this shape). Each edit of `Vm::run` moves a row by a few percent, as the design says.
+
+Other programs (`script_run`, whole run with compile, M instructions, lowest of 3): `bundle_like.js` 123.42 to 121.63 (-1.5%) at default, 123.39 to 121.84 (-1.3%) at cgu1; `eval_webpack.js` 7.73 to 7.73 (+0.1%) and 7.75 to 7.76 (+0.1%); `eval_throws.js` 29.98 to 29.89 (-0.3%) and 29.87 to 29.68 (-0.6%).
+
+`callgrind` on `loopfn`, 20,000 turns, default build, `Vm::run` of main and the hot `Vm::exec` of this tree:
+
+| | Main | New |
+| --- | ---: | ---: |
+| Size of the hot function | 255,374 B | 158,710 B (-38%) |
+| Size of the cold function | none | 104,659 B |
+| Instructions in the hot function for each turn | 257 | 263 |
+| Stack ops (`[rsp+N]`) for each turn | 40 (25 reads, 15 writes) | 25 (15 reads, 10 writes) |
+
+At cgu1: size 286,606 B against 181,491 B; instructions for each turn 267 against 262; stack ops 40 against 29.
+
+Stability test. I edited the cold arm `GetSuper` in a copy of this tree: `ensure!(fp + 100_000)`, a `black_box` loop over all registers and a second `gate!()`. All 10 numbers (5 rows, 2 builds) equal the numbers of this tree to 0.002 M (default: 278.50, 577.50, 1,088.79, 364.50, 139.19; cgu1: 277.50, 556.50, 1,057.82, 356.76, 141.39). One edit of one cold arm is not a proof for all edits. I did not repeat the hot-arm edit of the design.
+
+Tests. `cargo test --locked -p bare-js2 --lib`: 458 pass (main 457; the new test is below). The same with `--features op-count`: 459 pass. `cargo test --locked -p bare-js-diff`: pass. New test `a_cold_op_that_grows_the_stack_or_unwinds_keeps_the_registers_of_the_caller`: recursion of 200 and 300 frames through `CallSuper`, `CallSpread` and a `ThrowConst` that unwinds 150 frames, with live registers read after each cold op. I did not run it against a hot loop with no `reload!()` after the call. test262 (`tools/js/test262_js2.sh -j 4`, checkout `e4fbf577`, runner of main and runner of this tree, one after the other): both write the same 31,819 lines in `new.txt` (`diff` empty): 17,324 pass, 2,067 fail, 12,428 skip. So no passing test fails and no new test passes. `cargo xwin build --locked -p bare-js2 --target x86_64-pc-windows-msvc` builds (dev profile).  Miri (`cargo +nightly miri test --locked -p bare-js2 --lib`, run in 9 parts because one process takes hours): the 38 `interp::tests` (37 pass, 1 is `#[ignore]`) and the two `script_tests` `a_cold_op_that_grows_the_stack_or_unwinds_keeps_the_registers_of_the_caller` and `a_stack_that_grows_in_a_callee_keeps_the_registers_of_the_callers` pass. Only the known integer-to-pointer cast warnings appear. The other modules of the crate were not run under Miri.  XWIN_PLACEHOLDER
+
+Not tested: the whole crate under Miri (only `interp::tests` and 2 `script_tests`); Windows run (only the build); arm64; wall time, branch misses (machine not idle); the hot-arm stability edit; a class-heavy loop with all `super` ops hot (the design's cost of the cold call is measured above only for single ops and for one `super.m()` call); the browser (js2 is not wired in); a differential run on the `bare-js-diff` corpus beyond its tests.
