@@ -107,6 +107,12 @@ impl Realm {
         }
     }
 
+    /// `SymbolDescriptiveString`: `Symbol(description)` as a string value.
+    pub(crate) fn symbol_string(&mut self, s: Str) -> Value {
+        let units: Vec<u16> = "Symbol(".encode_utf16().chain(s.chars().expect("a symbol is flat").units()).chain(")".encode_utf16()).collect();
+        Str::new(&mut self.heap, Chars::Two(&units)).expect("memory").value()
+    }
+
     /// The description of a symbol as a string value: a copy of its units, or `undefined`.
     fn symbol_description_value(&mut self, s: Str) -> Value {
         if s.symbol_has_no_desc() {
@@ -162,8 +168,7 @@ fn symbol_key_for(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
 
 fn symbol_to_string(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
     let s = rt.this_symbol(this, "toString")?;
-    let units: Vec<u16> = "Symbol(".encode_utf16().chain(s.chars().expect("a symbol is flat").units()).chain(")".encode_utf16()).collect();
-    Ok(Str::new(&mut rt.heap, Chars::Two(&units)).expect("memory").value())
+    Ok(rt.symbol_string(s))
 }
 
 fn symbol_value_of(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {

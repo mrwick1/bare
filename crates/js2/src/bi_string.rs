@@ -75,6 +75,10 @@ impl Realm {
 }
 
 fn string_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+    // `String(symbol)` is the one conversion that accepts a symbol; `new String(symbol)` throws.
+    if let Some(sym) = args.first().and_then(|a| Realm::sym_of(*a)).filter(|_| Realm::obj(rt.nt).is_none()) {
+        return Ok(rt.symbol_string(sym));
+    }
     let s = if args.is_empty() { rt.string("") } else { rt.to_str(args[0])?.value() };
     if Realm::obj(rt.nt).is_none() {
         return Ok(s);

@@ -1387,6 +1387,8 @@ impl Realm {
         self.fn_props(o);
         let mut t = match key {
             Key::Idx(i) => i.to_string(),
+            // The name of a function with a symbol key is the description in brackets, or empty for a symbol with none.
+            Key::Name(k) if k.is_symbol() => if k.symbol_has_no_desc() { String::new() } else { format!("[{}]", self.text(k)) },
             Key::Name(k) => self.text(k),
         };
         if prefix != 0 {
