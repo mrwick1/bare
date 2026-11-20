@@ -17430,6 +17430,57 @@ Tests. Linux, debug: `cargo test --locked -p bare-js-api -p bare-js -p bare --li
 
 Not tested: the whole `bare --lib` with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1` (the base fails one test under whole-crate `BARE_GC_STRESS=1`, as the entry before says); macOS; RSS and wall time; `-J` on the old head `2876c1e1`; the stress mode with a collect between a stream `read` and its reaction; the merge with the open PRs B (#779), A2 (#781) and G (#782).
 
+## 2026-11-20: js2 built-ins, test262 round (String, Array, Number, Math, JSON)
+
+Goal: raise the test262 pass rate of `bare-js2` in the built-ins that pass on the old engine and fail on js2. Scope: String, Array, Number, Math and JSON. Object, conversions and early errors belong to other work. Base: `origin/main` at `43b62b05`. Machine archMachine, `tools/js/test262_js2.sh -j 8`, test262 at the commit of the fixtures.
+
+Result. The new engine passes 306 more tests (15581 to 15887). No test that passed before fails now (checked test by test against the base run).
+
+| Built-in | Pass before | Pass now | Gain | "Pass on old, fail on js2" before | now |
+| -------- | ----------: | -------: | ---: | --------------------------------: | --: |
+| String   | 423 | 496 | +73 | 473 | 400 |
+| Array    | 2214 | 2250 | +36 | 436 | 400 |
+| Number   | 210 | 232 | +22 | 103 | 81 |
+| Math     | 230 | 273 | +43 | 46 | 3 |
+| JSON     | 0 | 75 | +75 | 110 | 35 |
+
+Causes fixed.
+- JSON had no object. New `bi_json.rs`: `JSON.parse` and `JSON.stringify` (gap, `toJSON` of a native, key lists, cycle and depth errors). A hidden global keeps the object out of key lists.
+- Math: `hypot` rewritten (it coerces every argument before it returns); new `clz32`, `sinh`, `cosh`, `tanh`, `asinh`, `acosh`, `atanh`, `expm1` and `log1p`.
+- Number: `toExponential`, `toPrecision` and `toLocaleString`, with round-half-up on the decimal digits (Rust `{:e}` rounds ties to even; `(25).toExponential(0)` must be `3e+1`). `toString.length` is 1. `Number.parseInt` and `Number.parseFloat` are the global function objects.
+- String: new `bi_string_more.rs` (`raw`, `fromCodePoint`, `normalize`, `toLocaleLowerCase`, `toLocaleUpperCase`, `isWellFormed`, `toWellFormed`, and the `match` and `search` errors for a regexp argument). `localeCompare` compares normalized units (new dependency `bare-unicode`). `charAt` maps NaN to 0.
+- Array: `keys`, `values` and `entries` with an iterator object (no generators and no symbols yet, so the state is in three hidden own properties). The check of `ArraySpeciesCreate` that js2 can make without `Symbol.species` in `slice`, `splice`, `concat`, `map`, `filter`, `flat` and `flatMap`. The iterator prototype is built at the first call, not at load.
+- `script_tests.rs` lines 545 and 547 did not compile on main (`compile_after` takes 6 arguments). They pass `None, None` now.
+
+Causes left (about 920 of the old-pass, js2-fail cases in these five built-ins).
+- Waiting for #785 (a native must call a script function): `valueOf` and `toString` of a script object in a conversion (Array 100, String 57 or more, Math 2, Number 2), `JSON.parse` reviver (8), `JSON.stringify` replacer function (6) and `toJSON` of a script object (2), accessors that need a host call (2).
+- Wrapper objects (`new String`, `new Number`, `new Boolean`): String 211, Array 94, Number 22, JSON 8. Engine work, not built-in work.
+- No RegExp: String 43 (literals), Array 21 and more.
+- `Number.prototype.toString` and `valueOf` on a wrapper (41): needs wrapper objects.
+- Concise methods are constructible and have `prototype` in js2 (engine gap). Some "Expected a TestNError but got a TypeError" cases come from the same call limit; to verify per case.
+
+Cost. Instructions (`tools/js/instr.sh`, `perf stat instructions:u`, minimum of 3), `script_run x.js` for startup, `interp_load CASE N` for the loops, both trees built at `--release`.
+
+| Row | Base | New |
+| --- | ---: | ---: |
+| startup `script_run` (empty script) | 1,787,715 | 1,958,924 (+9.6%) |
+| loopfn 3,000,000: N minus N=0 | 961,500,159 | 961,501,194 (+0.0001%) |
+| calls 1,000,000 | 708,499,896 | 708,500,762 (+0.0001%) |
+| fib 27 | 342,838,261 | 342,837,869 (-0.0001%) |
+| closures 1,000,000 | 2,203,666,082 | 2,203,678,423 (+0.0006%) |
+| objects 1,000,000 | 769,338,738 | 769,346,348 (+0.001%) |
+
+The slope of every loop row is the same (change at most +0.001%); the loop rows with N=0 carry the startup change. The startup row is over the +0.5% limit. The extra 171K instructions come from (callgrind with symbols, `script_run`): `Realm::new` +32K (about 60 new natives installed with `Realm::method`), `parse_function` +38K and `prelude_def` +21K (2.6 KB more prelude source and three more `Array.prototype` closures), and +26K in the dynamic loader (hypothesis: more relocations for the bigger binary). I reduced the first version (+12.2%) by building the iterator prototype lazily and writing the species check inline. The rest is the cost of the new methods. It is not fixed here. A lower cost needs a design change (install a built-in at the first read of its global, or a lazy native table), which touches `builtins.rs` and `interp_rt.rs`. Owner decision. `codegen-units=1` was not measured: the extra work is instructions that run, so I do not expect it to remove 9%.
+
+Tests. `cargo test --locked -p bare-js2 --lib`: 415 pass (12 new tests in `builtins_more_tests.rs`). `cargo test --locked --release -p bare-js-diff`: pass; the known list did not grow. The prelude facts are regenerated. `tools/fixtures/js/test262-js2-subset.txt` has the four `built-ins/` directories for the new tests; `test262-js2-baseline.txt` is regenerated.
+
+Not tested: Windows and macOS; the micro rows at `codegen-units=1`; RSS and wall time; the cases left for #785 (not run with #785 merged); `a_scope_with_many_locals_compiles_in_linear_time` was not seen failing in the full run.
+
+### Waiver: #791 startup cost (owner, 2026-11-20)
+
+- #791 raises js2 startup from 1,787,715 to 1,958,924 instructions (+9.6%). The +0.5% rule fails.
+- The owner accepts this one time. js2 is not in the browser yet.
+- Step 1 of `docs/design-js2-lazy-builtins.md` (lazy static method tables, about -225 K) pays it back. Steps 0 and 2 follow.
 ## Four `bare --lib` tests on Windows (2026-11-20)
 
 Four `bare --lib` tests failed on the Windows 11 VM and passed on Linux. Reproduced on the VM with a build of `origin/main` (43b62b05): `cargo xwin test --target x86_64-pc-windows-msvc -p bare --lib`, exe run through `winssh`. 1720 tests filtered out, 4 failed.

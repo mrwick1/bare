@@ -150,6 +150,32 @@
     }
     return src;
   }
+  // The iterator of `keys`, `values` and `entries`. There are no generators and no symbols yet, so its state is in three own
+  // properties whose names start with U+0000: no list of keys shows them. The prototype is built at the first call, not at load.
+  var arrayIteratorProto;
+  function arrayIterator(a, kind) {
+    if (arrayIteratorProto === undefined) {
+      arrayIteratorProto = {};
+      def(arrayIteratorProto, {
+        next: function next() {
+          if (typeof this !== 'object' || this === null || !('\0k' in this)) throw new TypeError('next called on a value that is not an array iterator');
+          var a = this['\0o'], i = this['\0i'];
+          if (a !== undefined && i < len(a)) {
+            this['\0i'] = i + 1;
+            var k = this['\0k'];
+            return { value: k === 0 ? i : k === 1 ? a[i] : [i, a[i]], done: false };
+          }
+          this['\0o'] = undefined;
+          return { value: undefined, done: true };
+        }
+      }, { next: 0 });
+    }
+    var it = Object.create(arrayIteratorProto);
+    it['\0o'] = a;
+    it['\0i'] = 0;
+    it['\0k'] = kind;
+    return it;
+  }
   function replaceWith(native, s, p, r) {
     if (typeof r !== 'function') return native.call(s, p, r);
     s = '' + s;
@@ -193,6 +219,9 @@
     return k;
   }
   def(Array.prototype, {
+    keys: function keys() { return arrayIterator(obj(this), 0); },
+    values: function values() { return arrayIterator(obj(this), 1); },
+    entries: function entries() { return arrayIterator(obj(this), 2); },
     forEach: function forEach(cb) {
       var a = obj(this), n = len(a);
       need(cb);
@@ -205,6 +234,8 @@
     map: function map(cb) {
       var a = obj(this), n = len(a);
       need(cb);
+      var c;
+      if (Array.isArray(a) && ((c = a.constructor) === null || c !== undefined && typeof c !== 'object' && typeof c !== 'function')) throw new TypeError('the constructor of the array is not an object');
       var f = bound(cb, arguments[1]), r = [];
       check(n);
       for (var i = 0; i < n; i++) {
@@ -217,6 +248,8 @@
     filter: function filter(cb) {
       var a = obj(this), n = len(a);
       need(cb);
+      var c;
+      if (Array.isArray(a) && ((c = a.constructor) === null || c !== undefined && typeof c !== 'object' && typeof c !== 'function')) throw new TypeError('the constructor of the array is not an object');
       var f = bound(cb, arguments[1]), r = [], k = 0;
       for (var i = 0; i < n; i++) {
         var v = a[i];
@@ -313,13 +346,15 @@
       return -1;
     },
     flat: function flat() {
-      var a = obj(this), n = len(a), d = arguments[0] === undefined ? 1 : int(arguments[0]), r = [];
+      var a = obj(this), n = len(a), d = arguments[0] === undefined ? 1 : int(arguments[0]), r = [], c;
+      if (Array.isArray(a) && ((c = a.constructor) === null || c !== undefined && typeof c !== 'object' && typeof c !== 'function')) throw new TypeError('the constructor of the array is not an object');
       flatten(r, a, n, d);
       return r;
     },
     flatMap: function flatMap(cb) {
-      var a = obj(this), n = len(a), r = [];
+      var a = obj(this), n = len(a), r = [], c;
       need(cb);
+      if (Array.isArray(a) && ((c = a.constructor) === null || c !== undefined && typeof c !== 'object' && typeof c !== 'function')) throw new TypeError('the constructor of the array is not an object');
       flatten(r, a, n, 1, cb, arguments[1]);
       return r;
     },
@@ -357,7 +392,7 @@
       }
       return r;
     }
-  }, { forEach: 1, map: 1, filter: 1, reduce: 1, reduceRight: 1, some: 1, every: 1, find: 1, findIndex: 1, findLast: 1, findLastIndex: 1, flat: 0, flatMap: 1, sort: 1, toSorted: 1, toLocaleString: 0 });
+  }, { keys: 0, values: 0, entries: 0, forEach: 1, map: 1, filter: 1, reduce: 1, reduceRight: 1, some: 1, every: 1, find: 1, findIndex: 1, findLast: 1, findLastIndex: 1, flat: 0, flatMap: 1, sort: 1, toSorted: 1, toLocaleString: 0 });
   def(Array, {
     of: function of() {
       var n = arguments.length, C = this, r = typeof C === 'function' && C !== Array ? new C(n) : [];
