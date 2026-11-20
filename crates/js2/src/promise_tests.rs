@@ -202,3 +202,16 @@ fn a_reported_promise_that_nothing_holds_leaves_the_list_at_a_collection() {
     vm.collect_idle();
     assert_eq!(vm.realm.pr.reported.len(), 0);
 }
+
+/// Live bytes after a collection of a script that calls `then` `n` times on a pending promise that a global holds.
+fn pending_then_bytes(n: usize) -> usize {
+    let mut vm = load(&format!("var f = function () {{}}; var root = new Promise(function () {{}}); function fill() {{ for (var i = 0; i < {n}; i++) root.then(f); }} fill();")).unwrap();
+    vm.run_main(0).unwrap();
+    vm.collect_idle();
+    vm.realm.last_gc.live_bytes
+}
+
+#[test]
+fn a_pending_then_costs_a_reaction_of_48_bytes_and_a_derived_promise_of_32() {
+    assert_eq!((pending_then_bytes(2000) - pending_then_bytes(1000)) as f64 / 1000.0, 80.0);
+}

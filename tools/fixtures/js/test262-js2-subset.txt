@@ -32,3 +32,10 @@ built-ins/Function
 built-ins/Array
 built-ins/Error
 built-ins/NativeErrors
+built-ins/Promise
+-built-ins/Promise/all
+-built-ins/Promise/allKeyed
+-built-ins/Promise/allSettled
+-built-ins/Promise/allSettledKeyed
+-built-ins/Promise/any
+-built-ins/Promise/race

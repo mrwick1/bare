@@ -1,5 +1,5 @@
 # Rules of crates/js-diff/examples/test262_run.rs for tools/js/test262_js2.sh. Both engines get the same rules, so a skipped test is not
-# a failure of either. A test with a `module` or `async` flag is always skipped by the runner.
+# a failure of either. A test with a `module` flag is always skipped by the runner. A test with an `async` flag runs: see the runner.
 # NAME: a test262 feature. include:FILE: a harness file. text:STRING: the test source holds STRING. allow:NAME: see below.
 # What the runner does not offer (the same as tools/fixtures/js/test262-skip.txt):
 cross-realm
@@ -79,3 +79,4 @@ allow:change-array-by-copy
 allow:stable-array-sort
 allow:error-cause
 allow:error-stack-accessor
+allow:Promise

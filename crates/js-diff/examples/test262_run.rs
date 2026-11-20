@@ -6,8 +6,9 @@
 //! ENGINE is `old` or `new`. ROOT is a checkout of tc39/test262. LISTFILE has one test path (relative to ROOT) on each line.
 //! SKIPFILE (`tools/fixtures/js/test262-js2-skip.txt`) has one rule on each line: `NAME` skips a test with that feature,
 //! `include:FILE` one that includes that harness file, `text:STRING` one whose source holds STRING, and `allow:NAME` (once or more)
-//! skips every test that has a feature that no `allow:` line names. A test with a `module` or `async` flag is always skipped: neither
-//! engine runs them in this runner. STEPS is the budget of a test (default 20,000,000).
+//! skips every test that has a feature that no `allow:` line names. A test with a `module` flag is always skipped. A test with an `async`
+//! flag gets `doneprintHandle.js`, and the engine runs the jobs when the script ends (`bare_js_diff::run`); it passes when `print` got
+//! `Test262:AsyncTestComplete` and fails with the text of `Test262:AsyncTestFailure:` when it got that. STEPS is the budget of a test (default 20,000,000).
 //! For each test it prints `START path`, then `PASS path`, `FAIL path<TAB>reason` or `SKIP path<TAB>reason`, and flushes. A process that
 //! dies or hangs leaves a START with no result: the script marks that test and goes on.
 //! A test with no flag runs twice, sloppy and strict (`"use strict";` first), and passes when both pass. A `raw` test has no harness.
@@ -92,8 +93,8 @@ impl Ctx {
 
     /// Why this test is not run, if it is not.
     fn skipped(&self, m: &Meta, src: &str) -> Option<String> {
-        if let Some(f) = m.flags.iter().find(|f| *f == "module" || *f == "async") {
-            return Some(format!("flag:{f}"));
+        if m.flags.iter().any(|f| f == "module") {
+            return Some("flag:module".into());
         }
         for rule in &self.skip {
             let hit = if let Some(f) = rule.strip_prefix("include:") {
@@ -119,6 +120,7 @@ impl Ctx {
     }
 
     fn exec(&mut self, m: &Meta, src: &str, strict: bool) -> Result<(), String> {
+        let is_async = m.flags.iter().any(|f| f == "async");
         let mut code = String::new();
         if strict {
             code.push_str("\"use strict\";\n");
@@ -126,6 +128,9 @@ impl Ctx {
         if !m.flags.iter().any(|f| f == "raw") {
             let mut files = vec!["assert.js".to_string(), "sta.js".to_string()];
             files.extend(m.includes.iter().cloned());
+            if is_async && !files.iter().any(|f| f == "doneprintHandle.js") {
+                files.push("doneprintHandle.js".into());
+            }
             for f in files {
                 code.push_str(&self.harness(&f)?);
                 code.push('\n');
@@ -133,6 +138,15 @@ impl Ctx {
         }
         code.push_str(src);
         let thrown = match run(self.engine, &code, self.steps) {
+            Out::Done(log) if is_async && m.negative.is_none() => {
+                if let Some(i) = log.find("Test262:AsyncTestFailure:") {
+                    return Err(log[i + "Test262:AsyncTestFailure:".len()..].lines().next().unwrap_or("").to_string());
+                }
+                if !log.contains("Test262:AsyncTestComplete") {
+                    return Err("$DONE was not called".into());
+                }
+                None
+            }
             Out::Done(_) => None,
             Out::Threw { name, message } => Some((name, message)),
             Out::Unsupported(what) => return Err(format!("unsupported: {what}")),
