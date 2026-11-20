@@ -135,6 +135,11 @@ fn a_deleted_date_global_does_not_break_timers_that_hold_the_constructor() {
 
 #[test]
 fn local_time_uses_the_zone_of_the_realm_in_the_browser() {
+    let dir = std::env::var_os("TZDIR").map_or_else(|| "/usr/share/zoneinfo".into(), std::path::PathBuf::from);
+    if !dir.join("Asia/Kolkata").is_file() {
+        eprintln!("no system tzdata in {}: skipped", dir.display());
+        return;
+    }
     big(|| {
         let mut b = browser();
         b.it.set_default_time_zone("Asia/Kolkata").unwrap();

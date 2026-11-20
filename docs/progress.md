@@ -17252,6 +17252,21 @@ Tests. Linux, debug: `cargo test --locked -p bare-js-api -p bare-js -p bare --li
 
 Not tested: the whole `bare --lib` with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1` (the base fails one test under whole-crate `BARE_GC_STRESS=1`, as the entry before says); macOS; RSS and wall time; `-J` on the old head `2876c1e1`; the stress mode with a collect between a stream `read` and its reaction; the merge with the open PRs B (#779), A2 (#781) and G (#782).
 
+## Four `bare --lib` tests on Windows (2026-11-20)
+
+Four `bare --lib` tests failed on the Windows 11 VM and passed on Linux. Reproduced on the VM with a build of `origin/main` (43b62b05): `cargo xwin test --target x86_64-pc-windows-msvc -p bare --lib`, exe run through `winssh`. 1720 tests filtered out, 4 failed.
+
+| Test | Cause (verified on the VM) | Fix |
+| --- | --- | --- |
+| `browser_date_tests::local_time_uses_the_zone_of_the_realm_in_the_browser` | The VM has no `/usr/share/zoneinfo`, and `TZDIR` is not set. `set_default_time_zone("Asia/Kolkata")` finds no zone file and throws a `RangeError`. | The test returns early, with a message, when `$TZDIR` or `/usr/share/zoneinfo` has no `Asia/Kolkata`. The same rule as `tz_tests::system_files`. |
+| `browser_session::tests::a_page_parsed_in_slices_...`, `a_page_fed_in_pieces_...` | `saved_pages` reads `tools/fixtures` from `env!("CARGO_MANIFEST_DIR")`. A cross build bakes in the Linux path of the checkout. The VM has no such path, so `read_dir` returns `NotFound`. | `saved_pages` returns no pages, with a message, when `tools/fixtures` is not there. A checkout still runs both tests on 36 pages. |
+| `resources::tests::staging_login_fixture_discovery` | The same baked-in path. | The test uses `include_str!` for `tools/fixtures/staging/login.html`. It now runs on the VM. |
+
+Result. Linux, debug: `cargo test --locked -q -p bare --lib`: 1718 passed, 6 ignored. Windows 11 VM, whole `bare --lib`: 1718 passed, 6 ignored, 0 failed.
+
+Known gap, not fixed here: Windows has no time zone data. A realm with no zone file uses UTC, and `timeZone: "Asia/Kolkata"` throws. The date test skips on the VM, so the VM does not test zone rules. A fix needs zone data in `bare-os` or in the binary. That is the "local time zone with zone data" item of cross-platform topic 2, and it costs binary size and memory.
+
+Not tested: macOS; the two session tests with real pages on Windows (they skip there); a base build on the VM after the fix.
 ## 2026-11-20: js2 early errors, group 1 (parser rules)
 
 Task: raise the test262 pass rate of js2 on early errors (a script that must fail at parse time and is accepted, a valid script that is rejected). Base: `43b62b05` (`origin/main`). Method: `tools/js/test262_js2.sh -j 6` on the base, then a scan of every test of `test/language`, `test/annexB/language`, `test/built-ins`, `test/staging` and `test/annexB/built-ins` (module tests left out), whatever their features, with `negative: phase: parse|early` (must be a SyntaxError) or no `negative` (must not be a SyntaxError). The scan compiles each file in sloppy and strict mode with `script::compile` (a scratch example, not committed). A `not supported yet` error counts as accepted for a negative test: it comes after the parse.

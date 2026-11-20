@@ -818,7 +818,7 @@ mod tests {
     /// The saved staging login page: the references that the HTML names. Runtime chunks are not here (see the test below).
     #[test]
     fn staging_login_fixture_discovery() {
-        let html = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tools/fixtures/staging/login.html")).unwrap();
+        let html = include_str!("../../../tools/fixtures/staging/login.html");
         let p = Url::parse("https://staging.app.8vox.ai/login").unwrap();
         let d = discover(&parse(&html), &p, &Limits::default()).unwrap();
         let scripts = d.items.iter().filter(|i| matches!(i.kind, Kind::Script { .. })).count();
