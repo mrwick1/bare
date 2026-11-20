@@ -12,37 +12,37 @@
 use crate::browser::*;
 use bare_js::eval::Interp;
 use bare_js::value::Value;
+use crate::browser_scoped::*;
+use bare_js_api::{Args, HostFn, Local, Type};
 
-fn arg(a: &[Value], i: usize) -> Value {
-    a.get(i).copied().unwrap_or(Value::Undefined)
-}
-
-fn ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    if !it.is_callable_value(arg(a, 0)) {
-        return Err(it.type_error("Failed to construct 'PerformanceObserver': The callback provided as parameter 1 is not a function."));
+fn ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let cb = arg_s(s, a, 0);
+    if !s.is_callable(cb) {
+        return Err(s.type_error("Failed to construct 'PerformanceObserver': The callback provided as parameter 1 is not a function."));
     }
     let proto = d.perf_observer.get().expect("made");
-    Ok(Value::Object(d.obj(it, proto)?))
+    let o = d.obj_s(s, proto)?;
+    Ok(d.obj_local(s, o))
 }
 
-fn observe(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    let o = arg(a, 0);
-    if !matches!(o, Value::Object(_)) {
-        return Err(it.type_error("Failed to execute 'observe' on 'PerformanceObserver': parameter 1 is not of type 'PerformanceObserverInit'."));
+fn observe<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = arg_s(s, a, 0);
+    if !is_object(s, o) {
+        return Err(s.type_error("Failed to execute 'observe' on 'PerformanceObserver': parameter 1 is not of type 'PerformanceObserverInit'."));
     }
-    let (kt, ke) = (d.key(it, "type")?, d.key(it, "entryTypes")?);
-    if matches!(it.get_value(o, kt)?, Value::Undefined) && matches!(it.get_value(o, ke)?, Value::Undefined) {
-        return Err(it.type_error("Failed to execute 'observe' on 'PerformanceObserver': Either an 'entryTypes' or 'type' member must be present."));
+    let (t, e) = (s.get_str(o, "type")?, s.get_str(o, "entryTypes")?);
+    if s.type_of(t) == Type::Undefined && s.type_of(e) == Type::Undefined {
+        return Err(s.type_error("Failed to execute 'observe' on 'PerformanceObserver': Either an 'entryTypes' or 'type' member must be present."));
     }
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-fn nothing(_: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
-    Ok(Value::Undefined)
+fn nothing<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    Ok(s.undefined())
 }
 
-fn take_records(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
-    it.array_from(&[])
+fn take_records<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    s.new_array(&[])
 }
 
 #[cold]
@@ -52,13 +52,13 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         return Ok(());
     }
     let proto = d.obj(it, it.object_prototype())?;
-    let f = d.add_fn(it, ctor, "PerformanceObserver", 1, true)?;
+    let f = d.add_fn_s_obj(it, ctor, "PerformanceObserver", 1, HostFn::Ctor)?;
     let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
     it.define_data(f, kp, Value::Object(proto), false, false, false)?;
     it.define_data(proto, kc, Value::Object(f), true, false, true)?;
-    d.def_method(it, proto, "observe", 1, observe)?;
-    d.def_method(it, proto, "disconnect", 0, nothing)?;
-    d.def_method(it, proto, "takeRecords", 0, take_records)?;
+    d.def_method_s(it, proto, "observe", 1, observe)?;
+    d.def_method_s(it, proto, "disconnect", 0, nothing)?;
+    d.def_method_s(it, proto, "takeRecords", 0, take_records)?;
     crate::browser_lazy::tag(d, it, proto, "PerformanceObserver")?;
     let k = d.key(it, "supportedEntryTypes")?;
     let none = it.array_from(&[])?;

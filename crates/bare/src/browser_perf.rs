@@ -19,8 +19,10 @@
 
 use crate::browser::*;
 use crate::browser_geom::Iface;
+use crate::browser_scoped::*;
 use bare_js::eval::Interp;
 use bare_js::value::{ObjId, Value};
+use bare_js_api::{Args, Attrs, HostFn, Local, Type};
 
 const MAX_ENTRIES: usize = 50_000;
 
@@ -89,6 +91,11 @@ fn json(d: &Dom, it: &mut Interp<'_>, this: Value, detail: bool) -> R<Value> {
     Ok(Value::Object(o))
 }
 
+fn member(d: &Dom, it: &mut Interp<'_>, o: Value, name: &str) -> R<Value> {
+    let k = d.key(it, name)?;
+    it.get_value(o, k)
+}
+
 pub(crate) struct Entry {
     name: String,
     measure: bool,
@@ -107,61 +114,55 @@ pub(crate) struct LoadTimes {
     pub(crate) load_end: f64,
 }
 
-/// The navigation entry of the document `url`. Each read makes a new object. Its times are those of `LoadTimes`.
-fn nav_entry(d: &Dom, it: &mut Interp<'_>, url: &str) -> R<Value> {
-    let i = ensure(d, it)?;
-    let o = d.obj(it, i.navigation.proto)?;
-    let t = *d.load_times.borrow();
-    for (k, v) in [
-        ("name", d.js_str(it, url)?),
-        ("entryType", d.js_str(it, "navigation")?),
-        ("startTime", Value::Number(0.0)),
-        ("duration", Value::Number(t.load_end)),
-        ("type", d.js_str(it, "navigate")?),
-        ("domInteractive", Value::Number(t.interactive)),
-        ("domContentLoadedEventStart", Value::Number(t.dcl_start)),
-        ("domContentLoadedEventEnd", Value::Number(t.dcl_end)),
-        ("domComplete", Value::Number(t.complete)),
-        ("loadEventStart", Value::Number(t.load_start)),
-        ("loadEventEnd", Value::Number(t.load_end)),
-    ] {
-        let k = d.key(it, k)?;
-        it.define_data(o, k, v, true, true, true)?;
+/// A new plain object with the prototype `proto` and the data properties `props`, in this order.
+fn object<'s>(d: &Dom, s: &mut Sc<'s, '_>, proto: ObjId, props: &[(&str, Local<'s>)]) -> Res<'s, Local<'s>> {
+    let o = d.obj_s(s, proto)?;
+    let l = d.obj_local(s, o);
+    for &(k, v) in props {
+        s.define_str(l, k, v, Attrs::ALL)?;
     }
-    Ok(Value::Object(o))
+    Ok(l)
 }
 
-fn arg(a: &[Value], i: usize) -> Value {
-    a.get(i).copied().unwrap_or(Value::Undefined)
+/// The navigation entry of the document `url`. Each read makes a new object. Its times are those of `LoadTimes`.
+fn nav_entry<'s>(d: &Dom, s: &mut Sc<'s, '_>, url: &str) -> Res<'s, Local<'s>> {
+    let i = old(s, |it| ensure(d, it))?;
+    let t = *d.load_times.borrow();
+    let (name, ty, nav) = (d.js_str_s(s, url)?, d.js_str_s(s, "navigation")?, d.js_str_s(s, "navigate")?);
+    let n = |s: &mut Sc<'s, '_>, v: f64| s.number(v);
+    let props = [
+        ("name", name),
+        ("entryType", ty),
+        ("startTime", n(s, 0.0)),
+        ("duration", n(s, t.load_end)),
+        ("type", nav),
+        ("domInteractive", n(s, t.interactive)),
+        ("domContentLoadedEventStart", n(s, t.dcl_start)),
+        ("domContentLoadedEventEnd", n(s, t.dcl_end)),
+        ("domComplete", n(s, t.complete)),
+        ("loadEventStart", n(s, t.load_start)),
+        ("loadEventEnd", n(s, t.load_end)),
+    ];
+    object(d, s, i.navigation.proto, &props)
 }
 
-fn need(it: &mut Interp<'_>, a: &[Value], what: &str) -> R<()> {
-    if a.is_empty() {
-        return Err(it.type_error(&format!("Failed to execute '{what}' on 'Performance': 1 argument required, but only 0 present.")));
+fn need<'s>(s: &mut Sc<'s, '_>, a: Args<'s>, what: &str) -> Res<'s, ()> {
+    if a.len() == 0 {
+        return Err(s.type_error(&format!("Failed to execute '{what}' on 'Performance': 1 argument required, but only 0 present.")));
     }
     Ok(())
 }
 
-fn member(d: &Dom, it: &mut Interp<'_>, o: Value, name: &str) -> R<Value> {
-    let k = d.key(it, name)?;
-    it.get_value(o, k)
+fn present(s: &Sc<'_, '_>, v: Local<'_>) -> bool {
+    s.type_of(v) != Type::Undefined
 }
 
 /// The object of an entry: an instance of `PerformanceMark` or `PerformanceMeasure`.
-fn make(d: &Dom, it: &mut Interp<'_>, e: &Entry, detail: Value) -> R<Value> {
-    let i = ensure(d, it)?;
-    let o = d.obj(it, if e.measure { i.measure.proto } else { i.mark.proto })?;
-    for (k, v) in [
-        ("name", d.js_str(it, &e.name)?),
-        ("entryType", d.js_str(it, if e.measure { "measure" } else { "mark" })?),
-        ("startTime", Value::Number(e.start)),
-        ("duration", Value::Number(e.dur)),
-        ("detail", detail),
-    ] {
-        let k = d.key(it, k)?;
-        it.define_data(o, k, v, true, true, true)?;
-    }
-    Ok(Value::Object(o))
+fn make<'s>(d: &Dom, s: &mut Sc<'s, '_>, e: &Entry, detail: Local<'s>) -> Res<'s, Local<'s>> {
+    let i = old(s, |it| ensure(d, it))?;
+    let (name, ty) = (d.js_str_s(s, &e.name)?, d.js_str_s(s, if e.measure { "measure" } else { "mark" })?);
+    let (start, dur) = (s.number(e.start), s.number(e.dur));
+    object(d, s, if e.measure { i.measure.proto } else { i.mark.proto }, &[("name", name), ("entryType", ty), ("startTime", start), ("duration", dur), ("detail", detail)])
 }
 
 fn keep(d: &Dom, e: Entry) {
@@ -171,100 +172,102 @@ fn keep(d: &Dom, e: Entry) {
     }
 }
 
-fn mark(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    need(it, a, "mark")?;
-    let name = d.string_arg(it, a[0])?;
-    let (mut start, mut detail) = (d.now_ms(), Value::Null);
-    if let o @ Value::Object(_) = arg(a, 1) {
-        match member(d, it, o, "startTime")? {
-            Value::Undefined => {}
-            v => {
-                start = it.to_js_number(v)?;
-                if !start.is_finite() || start < 0.0 {
-                    return Err(it.type_error("Failed to execute 'mark' on 'Performance': 'startTime' must be a non-negative finite number."));
-                }
+fn mark<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    need(s, a, "mark")?;
+    let name = d.arg_str_s(s, a, 0)?;
+    let (mut start, mut detail) = (d.now_ms(), s.null());
+    let o = arg_s(s, a, 1);
+    if is_object(s, o) {
+        let v = s.get_str(o, "startTime")?;
+        if present(s, v) {
+            start = s.to_number(v)?;
+            if !start.is_finite() || start < 0.0 {
+                return Err(s.type_error("Failed to execute 'mark' on 'Performance': 'startTime' must be a non-negative finite number."));
             }
         }
-        match member(d, it, o, "detail")? {
-            Value::Undefined => {}
-            v => detail = v,
+        let v = s.get_str(o, "detail")?;
+        if present(s, v) {
+            detail = v;
         }
     }
     let e = Entry { name, measure: false, start, dur: 0.0 };
-    let v = make(d, it, &e, detail)?;
+    let v = make(d, s, &e, detail)?;
     keep(d, e);
     Ok(v)
 }
 
 /// A time of `measure`: a number, or the name of a mark. `None` for `undefined`.
-fn time(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<Option<f64>> {
-    match v {
-        Value::Undefined => Ok(None),
-        Value::Number(n) => Ok(Some(n)),
-        v => {
-            let n = d.string_arg(it, v)?;
-            if n == "navigationStart" {
-                return Ok(Some(0.0));
-            }
-            match d.perf_entries.borrow().iter().rev().find(|e| !e.measure && e.name == n) {
-                Some(e) => Ok(Some(e.start)),
-                None => Err(d.dom_err(it, "SyntaxError", &format!("Failed to execute 'measure' on 'Performance': The mark '{n}' does not exist."))),
-            }
-        }
+fn time<'s>(d: &Dom, s: &mut Sc<'s, '_>, v: Local<'s>) -> Res<'s, Option<f64>> {
+    if !present(s, v) {
+        return Ok(None);
+    }
+    if let Some(n) = s.as_number(v) {
+        return Ok(Some(n));
+    }
+    let n = d.string_arg_s(s, v)?;
+    if n == "navigationStart" {
+        return Ok(Some(0.0));
+    }
+    let found = d.perf_entries.borrow().iter().rev().find(|e| !e.measure && e.name == n).map(|e| e.start);
+    match found {
+        Some(t) => Ok(Some(t)),
+        None => Err(d.dom_err_s(s, "SyntaxError", &format!("Failed to execute 'measure' on 'Performance': The mark '{n}' does not exist."))),
     }
 }
 
-fn measure(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    need(it, a, "measure")?;
-    let name = d.string_arg(it, a[0])?;
+fn measure<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    need(s, a, "measure")?;
+    let name = d.arg_str_s(s, a, 0)?;
     let (start, end);
-    let (mut dur, mut detail) = (None, Value::Null);
-    if let o @ Value::Object(_) = arg(a, 1) {
-        let (s, e, du, de) = (member(d, it, o, "start")?, member(d, it, o, "end")?, member(d, it, o, "duration")?, member(d, it, o, "detail")?);
-        let present = |v| !matches!(v, Value::Undefined);
-        if [s, e, du, de].into_iter().any(present) {
-            if present(arg(a, 2)) {
-                return Err(it.type_error("Failed to execute 'measure' on 'Performance': The measureOptions and endMark cannot both be passed."));
+    let (mut dur, mut detail) = (None, s.null());
+    let (a1, a2) = (arg_s(s, a, 1), arg_s(s, a, 2));
+    if is_object(s, a1) {
+        let (st, e, du, de) = (s.get_str(a1, "start")?, s.get_str(a1, "end")?, s.get_str(a1, "duration")?, s.get_str(a1, "detail")?);
+        if [st, e, du, de].into_iter().any(|v| present(s, v)) {
+            if present(s, a2) {
+                return Err(s.type_error("Failed to execute 'measure' on 'Performance': The measureOptions and endMark cannot both be passed."));
             }
-            if (!present(s) && !present(e)) || (present(s) && present(e) && present(du)) {
-                return Err(it.type_error("Failed to execute 'measure' on 'Performance': Invalid measure options."));
+            let (ps, pe, pd) = (present(s, st), present(s, e), present(s, du));
+            if (!ps && !pe) || (ps && pe && pd) {
+                return Err(s.type_error("Failed to execute 'measure' on 'Performance': Invalid measure options."));
             }
         }
-        (start, end) = (time(d, it, s)?, time(d, it, if present(arg(a, 2)) { arg(a, 2) } else { e })?);
-        if !matches!(du, Value::Undefined) {
-            dur = Some(it.to_js_number(du)?);
+        let end_arg = if present(s, a2) { a2 } else { e };
+        (start, end) = (time(d, s, st)?, time(d, s, end_arg)?);
+        if present(s, du) {
+            dur = Some(s.to_number(du)?);
         }
-        if !matches!(de, Value::Undefined) {
+        if present(s, de) {
             detail = de;
         }
     } else {
-        (start, end) = (time(d, it, arg(a, 1))?, time(d, it, arg(a, 2))?);
+        (start, end) = (time(d, s, a1)?, time(d, s, a2)?);
     }
     let now = d.now_ms();
-    let (s, e) = match (start, end, dur) {
-        (Some(s), None, Some(du)) => (s, s + du),
+    let (st, e) = match (start, end, dur) {
+        (Some(st), None, Some(du)) => (st, st + du),
         (None, Some(e), Some(du)) => (e - du, e),
-        (s, e, _) => (s.unwrap_or(0.0), e.unwrap_or(now)),
+        (st, e, _) => (st.unwrap_or(0.0), e.unwrap_or(now)),
     };
-    let en = Entry { name, measure: true, start: s, dur: e - s };
-    let v = make(d, it, &en, detail)?;
+    let en = Entry { name, measure: true, start: st, dur: e - st };
+    let v = make(d, s, &en, detail)?;
     keep(d, en);
     Ok(v)
 }
 
-fn list(d: &Dom, it: &mut Interp<'_>, ty: Option<&str>, name: Option<&str>) -> R<Value> {
+fn list<'s>(d: &Dom, s: &mut Sc<'s, '_>, ty: Option<&str>, name: Option<&str>) -> Res<'s, Local<'s>> {
     let mut out = Vec::new();
     if let Ok(rec) = d.cur_rec() {
         let url = rec.href();
         if ty.is_none_or(|t| t == "navigation") && name.is_none_or(|n| n == url) {
-            out.push(nav_entry(d, it, &url)?);
+            out.push(nav_entry(d, s, &url)?);
         }
     }
     let mut idx: Vec<usize> = {
         let l = d.perf_entries.borrow();
         (0..l.len()).filter(|&i| ty.is_none_or(|t| t == if l[i].measure { "measure" } else { "mark" }) && name.is_none_or(|n| n == l[i].name)).collect()
     };
-    it.charge(idx.len() as u64)?;
+    s.charge(idx.len() as u64)?;
     idx.sort_by(|&x, &y| {
         let l = d.perf_entries.borrow();
         l[x].start.total_cmp(&l[y].start)
@@ -274,58 +277,55 @@ fn list(d: &Dom, it: &mut Interp<'_>, ty: Option<&str>, name: Option<&str>) -> R
             let l = d.perf_entries.borrow();
             Entry { name: l[i].name.clone(), measure: l[i].measure, start: l[i].start, dur: l[i].dur }
         };
-        out.push(make(d, it, &e, Value::Null)?);
+        let null = s.null();
+        out.push(make(d, s, &e, null)?);
     }
-    it.array_from(&out)
+    s.new_array(&out)
 }
 
-fn get_entries(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
-    list(d, it, None, None)
+fn get_entries<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    list(d, s, None, None)
 }
 
-fn by_type(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    need(it, a, "getEntriesByType")?;
-    let t = d.string_arg(it, a[0])?;
+fn by_type<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    need(s, a, "getEntriesByType")?;
+    let t = d.arg_str_s(s, a, 0)?;
     if !matches!(t.as_str(), "mark" | "measure" | "navigation") {
-        return it.array_from(&[]);
+        return s.new_array(&[]);
     }
-    list(d, it, Some(&t), None)
+    list(d, s, Some(&t), None)
 }
 
-fn by_name(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    need(it, a, "getEntriesByName")?;
-    let n = d.string_arg(it, a[0])?;
-    let t = match arg(a, 1) {
-        Value::Undefined => None,
-        v => Some(d.string_arg(it, v)?),
-    };
+fn by_name<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    need(s, a, "getEntriesByName")?;
+    let n = d.arg_str_s(s, a, 0)?;
+    let a1 = arg_s(s, a, 1);
+    let t = if present(s, a1) { Some(d.string_arg_s(s, a1)?) } else { None };
     if t.as_deref().is_some_and(|t| !matches!(t, "mark" | "measure" | "navigation")) {
-        return it.array_from(&[]);
+        return s.new_array(&[]);
     }
-    list(d, it, t.as_deref(), Some(&n))
+    list(d, s, t.as_deref(), Some(&n))
 }
 
-fn clear(d: &Dom, it: &mut Interp<'_>, a: &[Value], measure: bool) -> R<Value> {
-    let name = match arg(a, 0) {
-        Value::Undefined => None,
-        v => Some(d.string_arg(it, v)?),
-    };
+fn clear<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>, measure: bool) -> Res<'s, Local<'s>> {
+    let a0 = arg_s(s, a, 0);
+    let name = if present(s, a0) { Some(d.string_arg_s(s, a0)?) } else { None };
     d.perf_entries.borrow_mut().retain(|e| e.measure != measure || name.as_ref().is_some_and(|n| *n != e.name));
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-fn clear_marks(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    clear(d, it, a, false)
+fn clear_marks<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    clear(d, s, a, false)
 }
 
-fn clear_measures(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    clear(d, it, a, true)
+fn clear_measures<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    clear(d, s, a, true)
 }
 
 /// Define the methods on `perf`, the prototype of the `performance` object.
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>, perf: ObjId) -> R<()> {
     for (name, len, h) in [
-        ("mark", 1, mark as H),
+        ("mark", 1, mark as HS),
         ("measure", 1, measure),
         ("getEntries", 0, get_entries),
         ("getEntriesByType", 1, by_type),
@@ -333,10 +333,10 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>, perf: ObjId) -> R<()> {
         ("clearMarks", 0, clear_marks),
         ("clearMeasures", 0, clear_measures),
     ] {
-        d.def_method(it, perf, name, len, h)?;
+        d.def_method_s(it, perf, name, len, h)?;
     }
-    for (name, h) in [("timing", timing as H), ("navigation", navigation as H), ("timeOrigin", time_origin as H)] {
-        let f = d.add_fn(it, h, name, 0, false)?;
+    for (name, h) in [("timing", timing as HS), ("navigation", navigation as HS), ("timeOrigin", time_origin as HS)] {
+        let f = d.add_fn_s_obj(it, h, name, 0, HostFn::Method)?;
         let k = d.key(it, name)?;
         let desc = bare_js::heap::PropertyDescriptor { get: Some(Some(f)), enumerable: Some(true), configurable: Some(true), ..Default::default() };
         it.heap.define_own_property(perf, k, &desc).map_err(|e| it.heap_error(e))?;
@@ -346,40 +346,43 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>, perf: ObjId) -> R<()> {
 
 /// Legacy navigation data is synthesized on first access. It does not add realm state.
 #[cold]
-fn legacy(d: &Dom, it: &mut Interp<'_>, this: Value, timing: bool) -> R<Value> {
-    let o = d.obj(it, it.object_prototype())?;
-    crate::browser_lazy::tag(d, it, o, if timing { "PerformanceTiming" } else { "PerformanceNavigation" })?;
+fn legacy<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, timing: bool) -> Res<'s, Local<'s>> {
+    let proto = old(s, |it| Ok(it.object_prototype()))?;
+    let o = d.obj_s(s, proto)?;
+    old(s, |it| crate::browser_lazy::tag(d, it, o, if timing { "PerformanceTiming" } else { "PerformanceNavigation" }))?;
+    let l = d.obj_local(s, o);
+    let fixed = Attrs { writable: false, enumerable: true, configurable: true };
     if timing {
-        let origin = (it.wall_now_ms() - d.now_ms()).max(1.0).floor();
+        let origin = (s.wall_now_ms() - d.now_ms()).max(1.0).floor();
         for name in ["navigationStart", "unloadEventStart", "unloadEventEnd", "redirectStart", "redirectEnd", "fetchStart", "domainLookupStart", "domainLookupEnd", "connectStart", "connectEnd", "secureConnectionStart", "requestStart", "responseStart", "responseEnd", "domLoading", "domInteractive", "domContentLoadedEventStart", "domContentLoadedEventEnd", "domComplete", "loadEventStart", "loadEventEnd"] {
             let zero = matches!(name, "unloadEventStart" | "unloadEventEnd" | "redirectStart" | "redirectEnd" | "secureConnectionStart");
-            let k = d.key(it, name)?;
-            it.define_data(o, k, Value::Number(if zero { 0.0 } else { origin }), false, true, true)?;
+            let v = s.number(if zero { 0.0 } else { origin });
+            s.define_str(l, name, v, fixed)?;
         }
     } else {
         for (name, n) in [("type", 0.0), ("redirectCount", 0.0), ("TYPE_NAVIGATE", 0.0), ("TYPE_RELOAD", 1.0), ("TYPE_BACK_FORWARD", 2.0), ("TYPE_RESERVED", 255.0)] {
-            let k = d.key(it, name)?;
-            it.define_data(o, k, Value::Number(n), false, true, true)?;
+            let v = s.number(n);
+            s.define_str(l, name, v, fixed)?;
         }
     }
-    if let Value::Object(owner) = this {
-        let k = d.key(it, if timing { "timing" } else { "navigation" })?;
-        it.define_data(owner, k, Value::Object(o), false, true, true)?;
+    if is_object(s, this) {
+        s.define_str(this, if timing { "timing" } else { "navigation" }, l, fixed)?;
     }
-    Ok(Value::Object(o))
+    Ok(l)
 }
-fn timing(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    legacy(d, it, this, true)
+fn timing<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    legacy(d, s, this, true)
 }
-fn navigation(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    legacy(d, it, this, false)
+fn navigation<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    legacy(d, s, this, false)
 }
 /// The wall clock at time 0 of the scheduler clock, in ms. The first read fixes it on the owner, as `legacy` does.
-fn time_origin(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    let v = Value::Number(it.wall_now_ms() - d.now_ms());
-    if let Value::Object(owner) = this {
-        let k = d.key(it, "timeOrigin")?;
-        it.define_data(owner, k, v, false, true, true)?;
+fn time_origin<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let t = s.wall_now_ms() - d.now_ms();
+    let v = s.number(t);
+    if is_object(s, this) {
+        let fixed = Attrs { writable: false, enumerable: true, configurable: true };
+        s.define_str(this, "timeOrigin", v, fixed)?;
     }
     Ok(v)
 }

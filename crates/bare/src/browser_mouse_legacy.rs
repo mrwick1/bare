@@ -15,121 +15,126 @@
 //! - `initMouseEvent` does nothing while the event dispatches, and it does not read a `PointerEvent` pointer id.
 
 use crate::browser::*;
-use crate::browser_ui::{coord, with_ui};
+use crate::browser_scoped::*;
+use crate::browser_ui::{coord, ui_value, with_ui};
 use bare_css::values::{Keyword, Property, Value as Cv};
-use bare_js::eval::Interp;
-use bare_js::value::Value;
+use bare_js_api::{Args, Local};
 use std::rc::Rc;
 
-type V = R<Value>;
-
-fn arg(a: &[Value], i: usize) -> Value {
-    a.get(i).copied().unwrap_or(Value::Undefined)
-}
-
 /// `which` of a mouse event.
-pub(crate) fn mouse_which(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = with_ui(d, it, this, |e, u| match &*e.ty {
+pub(crate) fn mouse_which<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = with_ui(d, s, this, |e, u| match &*e.ty {
         "mousedown" | "mouseup" | "click" | "dblclick" | "auxclick" | "contextmenu" => (u.button as i32 + 1).max(0),
         _ => 0,
     })?;
-    Ok(Value::Number(n as f64))
+    Ok(s.number(n as f64))
 }
 
 /// `which` of an input event: 0.
-pub(crate) fn zero(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    with_ui(d, it, this, |_, _| Value::Number(0.0))
+pub(crate) fn zero<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    with_ui(d, s, this, |_, _| ())?;
+    Ok(s.number(0.0))
 }
 
-pub(crate) fn source_capabilities(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    with_ui(d, it, this, |_, _| Value::Null)
+pub(crate) fn source_capabilities<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    with_ui(d, s, this, |_, _| ())?;
+    Ok(s.null())
 }
 
-fn layer(d: &Dom, it: &mut Interp<'_>, this: Value, y: bool) -> V {
-    let target = crate::browser_ui::ui_value(d, it, this, |e| Some(&e.target))?;
-    let u = with_ui(d, it, this, |_, u| u.clone())?;
+fn layer<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, y: bool) -> Res<'s, Local<'s>> {
+    let target = ui_value(d, s, this, |e| Some(&e.target))?;
+    let u = with_ui(d, s, this, |_, u| u.clone())?;
     let mut v = if y { u.page.1 } else { u.page.0 };
-    if let Some(n) = d.node_of(target).filter(|&n| d.is_element(n)) && d.in_document(it, n)?
-        && let Some(r) = d.with_geo(it, |g, s| {
+    if let Some(n) = d.node_of_s(s, target).filter(|&n| d.is_element(n)) && old(s, |it| d.in_document(it, n))?
+        && let Some(r) = old(s, |it| d.with_geo(it, |g, st| {
             let mut cur = g.doc.parent(n);
             while let Some(a) = cur {
-                if g.styles.style(a).is_some_and(|st| st.get(Property::Position) != Cv::Keyword(Keyword::Static)) {
-                    return g.client_rect(s, a);
+                if g.styles.style(a).is_some_and(|x| x.get(Property::Position) != Cv::Keyword(Keyword::Static)) {
+                    return g.client_rect(st, a);
                 }
                 cur = g.doc.parent(a);
             }
             None
-        })? {
+        }))? {
         v = if y { u.y - r.y as f64 } else { u.x - r.x as f64 };
     }
-    Ok(Value::Number(coord(v, u.frac)))
+    Ok(s.number(coord(v, u.frac)))
 }
 
-pub(crate) fn layer_x(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    layer(d, it, this, false)
+pub(crate) fn layer_x<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    layer(d, s, this, false)
 }
 
-pub(crate) fn layer_y(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    layer(d, it, this, true)
+pub(crate) fn layer_y<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    layer(d, s, this, true)
 }
 
 /// `fromElement` (`to` false) and `toElement` (`to` true).
-fn from_to(d: &Dom, it: &mut Interp<'_>, this: Value, to: bool) -> V {
-    crate::browser_ui::ui_value(d, it, this, |e| match (&*e.ty, to) {
+fn from_to<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, to: bool) -> Res<'s, Local<'s>> {
+    ui_value(d, s, this, |e| match (&*e.ty, to) {
         ("mouseover" | "mouseenter", false) | ("mouseout" | "mouseleave", true) => Some(&e.related),
         ("mouseover" | "mouseenter", true) | ("mouseout" | "mouseleave", false) => Some(&e.target),
         _ => None,
     })
 }
 
-pub(crate) fn from_element(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    from_to(d, it, this, false)
+pub(crate) fn from_element<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    from_to(d, s, this, false)
 }
 
-pub(crate) fn to_element(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    from_to(d, it, this, true)
+pub(crate) fn to_element<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    from_to(d, s, this, true)
 }
 
 /// `event.initMouseEvent(type, bubbles, cancelable, view, detail, screenX, screenY, clientX, clientY, ctrlKey, altKey, shiftKey, metaKey,
 /// button, relatedTarget)`.
-pub(crate) fn init_mouse_event(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    with_ui(d, it, this, |_, _| ())?;
+pub(crate) fn init_mouse_event<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    with_ui(d, s, this, |_, _| ())?;
     if a.is_empty() {
-        return Err(it.type_error("Failed to execute 'initMouseEvent' on 'MouseEvent': 1 argument required, but only 0 present."));
+        return Err(s.type_error("Failed to execute 'initMouseEvent' on 'MouseEvent': 1 argument required, but only 0 present."));
     }
-    let ty = d.string_arg(it, a[0])?;
-    let (bubbles, cancelable) = (it.to_js_bool(arg(a, 1))?, it.to_js_bool(arg(a, 2))?);
-    let view = match arg(a, 3) {
-        Value::Undefined | Value::Null => false,
-        Value::Object(o) if o == it.global_object() => true,
-        _ => return Err(it.type_error("Failed to execute 'initMouseEvent' on 'MouseEvent': Failed to convert value to 'Window'.")),
+    let ty = d.arg_str_s(s, a, 0)?;
+    let (b, c) = (arg_s(s, a, 1), arg_s(s, a, 2));
+    let (bubbles, cancelable) = (s.to_boolean(b), s.to_boolean(c));
+    let vw = arg_s(s, a, 3);
+    let view = if is_nullish(s, vw) {
+        false
+    } else if d.is_obj_s(s, vw, *d.global.get().expect("installed")) {
+        true
+    } else {
+        return Err(s.type_error("Failed to execute 'initMouseEvent' on 'MouseEvent': Failed to convert value to 'Window'."));
     };
     let mut n = [0.0f64; 5];
     for (i, slot) in n.iter_mut().enumerate() {
-        let v = it.to_js_number(arg(a, 4 + i))?;
+        let x = arg_s(s, a, 4 + i);
+        let v = s.to_number(x)?;
         *slot = if v.is_finite() { v.trunc() } else { 0.0 };
     }
     let mut f = [false; 4];
     for (i, slot) in f.iter_mut().enumerate() {
-        *slot = it.to_js_bool(arg(a, 9 + i))?;
+        let x = arg_s(s, a, 9 + i);
+        *slot = s.to_boolean(x);
     }
-    let button = it.to_js_number(arg(a, 13))?;
-    let related = match arg(a, 14) {
-        Value::Undefined | Value::Null => Value::Null,
-        v @ Value::Object(o) if d.st.borrow().by_obj.contains_key(&o) => v,
-        _ => return Err(it.type_error("Failed to execute 'initMouseEvent' on 'MouseEvent': Failed to convert value to 'EventTarget'.")),
+    let bl = arg_s(s, a, 13);
+    let button = s.to_number(bl)?;
+    let rl = arg_s(s, a, 14);
+    let related = match obj_id(s, rl) {
+        Some(o) if d.st.borrow().by_obj.contains_key(&o) => rl,
+        None if is_nullish(s, rl) => s.null(),
+        _ => return Err(s.type_error("Failed to execute 'initMouseEvent' on 'MouseEvent': Failed to convert value to 'EventTarget'.")),
     };
+    let null = s.null();
     let off = if view { d.page_offset() } else { (0.0, 0.0) };
-    let o = d.event_of(it, this)?;
+    let o = d.event_of_s(s, this)?;
     let mut st = d.st.borrow_mut();
     let e = st.events.get_mut(&o).expect("checked");
     if e.dispatching {
-        return Ok(Value::Undefined);
+        return Ok(s.undefined());
     }
     (e.ty, e.bubbles, e.cancelable) = (Rc::from(ty.as_str()), bubbles, cancelable);
     (e.stop, e.stop_imm, e.canceled) = (false, false, false);
-    it.store_value(&mut e.target, Value::Null);
-    it.store_value(&mut e.related, related);
+    s.store(&mut e.target, null);
+    s.store(&mut e.related, related);
     let u = e.ui.as_mut().expect("checked");
     u.view = view;
     u.detail = n[0] as i32;
@@ -138,5 +143,5 @@ pub(crate) fn init_mouse_event(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[V
     u.page = (n[3] + off.0, n[4] + off.1);
     (u.mods.ctrl, u.mods.alt, u.mods.shift, u.mods.meta) = (f[0], f[1], f[2], f[3]);
     u.button = if button.is_finite() { button.trunc() as i64 as i16 } else { 0 };
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }

@@ -34,12 +34,12 @@
 
 use crate::browser::*;
 use crate::browser_geometry::{Lay, border_box};
-use crate::browser_platform::V;
+use crate::browser_scoped::*;
+use bare_js_api::{Args, Local, Type};
 use bare_css::cascade::Styles;
 use bare_css::values::{Keyword, Property, Value as Cv};
 use bare_html::dom::{Document, NodeData, NodeId};
 use bare_js::eval::Interp;
-use bare_js::value::Value;
 use bare_layout::fragment::{Layout, Rect};
 use bare_layout::keep::Kept;
 use bare_layout::scroll::{self, Areas};
@@ -521,40 +521,34 @@ impl Dom {
 
 // ---------------------------------------------------------------------------------------------- script API
 
-fn num(it: &mut Interp<'_>, v: Value) -> R<f32> {
-    let n = it.to_js_number(v)?;
+fn num<'s>(s: &mut Sc<'s, '_>, v: Local<'s>) -> Res<'s, f32> {
+    let n = s.to_number(v)?;
     Ok(if n.is_finite() { n as f32 } else { 0.0 })
 }
 
 /// The target of `scrollTo` and `scrollBy`: `(x, y)` or `{ left, top }`. A missing member is `cur`.
-fn target_of(d: &Dom, it: &mut Interp<'_>, a: &[Value], cur: (f32, f32), by: bool) -> R<(f32, f32)> {
+fn target_of<'s>(s: &mut Sc<'s, '_>, a: Args<'s>, cur: (f32, f32), by: bool) -> Res<'s, (f32, f32)> {
     let base = if by { (0.0, 0.0) } else { cur };
-    let pair = match a {
-        [] => base,
-        [Value::Object(o)] => {
-            let get = |name: &str, d0: f32, it: &mut Interp<'_>| -> R<f32> {
-                let k = d.key(it, name)?;
-                match it.get_value(Value::Object(*o), k)? {
-                    Value::Undefined => Ok(d0),
-                    v => num(it, v),
-                }
+    let (a0, a1) = (arg_s(s, a, 0), arg_s(s, a, 1));
+    let pair = match a.len() {
+        0 => base,
+        1 if is_object(s, a0) => {
+            let o = a0;
+            let mut get = |name: &str, d0: f32| -> Res<'s, f32> {
+                let v = s.get_str(o, name)?;
+                if s.type_of(v) == Type::Undefined { Ok(d0) } else { num(s, v) }
             };
-            (get("left", base.0, it)?, get("top", base.1, it)?)
+            (get("left", base.0)?, get("top", base.1)?)
         }
-        [x] => (num(it, *x)?, 0.0),
-        [x, y, ..] => (num(it, *x)?, num(it, *y)?),
+        1 => (num(s, a0)?, 0.0),
+        _ => (num(s, a0)?, num(s, a1)?),
     };
     Ok(if by { (cur.0 + pair.0, cur.1 + pair.1) } else { pair })
 }
 
 impl Dom {
-    /// Scroll `el` (the root element is the page) to `to`, or by `to` when `by`.
-    fn scroll_el(&self, it: &mut Interp<'_>, el: NodeId, a: &[Value], by: bool) -> R<()> {
-        let _caller = crate::force::tag("scrollTo/scrollBy");
-        if !self.in_document(it, el)? {
-            return Ok(());
-        }
-        let to = target_of(self, it, a, self.offset_of(el), by)?;
+    /// Scroll `el` (the root element is the page) to `to`. The caller has checked that `el` is in the document.
+    fn scroll_apply(&self, it: &mut Interp<'_>, el: NodeId, to: (f32, f32)) -> R<()> {
         let root = Some(el) == self.root_element();
         self.with_geo(it, |g, s| {
             let m = if root { g.page_max() } else { g.max_of(el) };
@@ -571,66 +565,79 @@ impl Dom {
             }
         })
     }
-}
 
-fn el_scroll_to(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let el = d.el(it, this)?;
-    d.scroll_el(it, el, a, false)?;
-    Ok(Value::Undefined)
-}
-
-fn el_scroll_by(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let el = d.el(it, this)?;
-    d.scroll_el(it, el, a, true)?;
-    Ok(Value::Undefined)
-}
-
-fn win_scroll_to(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
-    if let Some(r) = d.root_element() {
-        d.scroll_el(it, r, a, false)?;
+    /// Scroll `el` to the target of the arguments `a`, or by it when `by`.
+    fn scroll_el<'s>(&self, s: &mut Sc<'s, '_>, el: NodeId, a: Args<'s>, by: bool) -> Res<'s, ()> {
+        let _caller = crate::force::tag("scrollTo/scrollBy");
+        if !old(s, |it| self.in_document(it, el))? {
+            return Ok(());
+        }
+        let to = target_of(s, a, self.offset_of(el), by)?;
+        old(s, |it| self.scroll_apply(it, el, to))
     }
-    Ok(Value::Undefined)
-}
 
-fn win_scroll_by(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
-    if let Some(r) = d.root_element() {
-        d.scroll_el(it, r, a, true)?;
+    /// Scroll `el` to `to`, as `scrollTop` and `scrollLeft` do.
+    fn scroll_pos<'s>(&self, s: &mut Sc<'s, '_>, el: NodeId, to: (f32, f32)) -> Res<'s, ()> {
+        let _caller = crate::force::tag("scrollTo/scrollBy");
+        if !old(s, |it| self.in_document(it, el))? {
+            return Ok(());
+        }
+        old(s, |it| self.scroll_apply(it, el, to))
     }
-    Ok(Value::Undefined)
 }
 
-fn get_top(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let el = d.el(it, this)?;
-    Ok(Value::Number(d.offset_of(el).1 as f64))
+fn el_scroll_to<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = d.el_s(s, this)?;
+    d.scroll_el(s, el, a, false)?;
+    Ok(s.undefined())
 }
 
-fn get_left(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let el = d.el(it, this)?;
-    Ok(Value::Number(d.offset_of(el).0 as f64))
+fn el_scroll_by<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = d.el_s(s, this)?;
+    d.scroll_el(s, el, a, true)?;
+    Ok(s.undefined())
 }
 
-fn set_top(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let el = d.el(it, this)?;
-    let v = num(it, a.first().copied().unwrap_or(Value::Undefined))?;
+fn win_scroll_to<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    if let Some(r) = d.root_element() {
+        d.scroll_el(s, r, a, false)?;
+    }
+    Ok(s.undefined())
+}
+
+fn win_scroll_by<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    if let Some(r) = d.root_element() {
+        d.scroll_el(s, r, a, true)?;
+    }
+    Ok(s.undefined())
+}
+
+fn get_top<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = d.el_s(s, this)?;
+    Ok(s.number(d.offset_of(el).1 as f64))
+}
+
+fn get_left<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = d.el_s(s, this)?;
+    Ok(s.number(d.offset_of(el).0 as f64))
+}
+
+fn set_top<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = d.el_s(s, this)?;
+    let a0 = arg_s(s, a, 0);
+    let v = num(s, a0)?;
     let x = d.offset_of(el).0;
-    let (k, y) = (d.key(it, "left")?, d.key(it, "top")?);
-    let o = d.obj(it, it.object_prototype())?;
-    it.define_data(o, k, Value::Number(x as f64), true, true, true)?;
-    it.define_data(o, y, Value::Number(v as f64), true, true, true)?;
-    d.scroll_el(it, el, &[Value::Object(o)], false)?;
-    Ok(Value::Undefined)
+    d.scroll_pos(s, el, (x, v))?;
+    Ok(s.undefined())
 }
 
-fn set_left(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let el = d.el(it, this)?;
-    let v = num(it, a.first().copied().unwrap_or(Value::Undefined))?;
+fn set_left<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = d.el_s(s, this)?;
+    let a0 = arg_s(s, a, 0);
+    let v = num(s, a0)?;
     let y = d.offset_of(el).1;
-    let (k, t) = (d.key(it, "left")?, d.key(it, "top")?);
-    let o = d.obj(it, it.object_prototype())?;
-    it.define_data(o, k, Value::Number(v as f64), true, true, true)?;
-    it.define_data(o, t, Value::Number(y as f64), true, true, true)?;
-    d.scroll_el(it, el, &[Value::Object(o)], false)?;
-    Ok(Value::Undefined)
+    d.scroll_pos(s, el, (v, y))?;
+    Ok(s.undefined())
 }
 
 /// `scrollWidth`, `scrollHeight`, `clientWidth`, `clientHeight`, `clientTop`, `clientLeft` of `el`, in whole pixels.
@@ -665,9 +672,10 @@ fn sizes(d: &Dom, it: &mut Interp<'_>, el: NodeId) -> R<[f32; 6]> {
 
 macro_rules! size_get {
     ($name:ident, $i:expr) => {
-        fn $name(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-            let el = d.el(it, this)?;
-            Ok(Value::Number(sizes(d, it, el)?[$i] as f64))
+        fn $name<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+            let el = d.el_s(s, this)?;
+            let v = old(s, |it| sizes(d, it, el))?[$i];
+            Ok(s.number(v as f64))
         }
     };
 }
@@ -678,90 +686,94 @@ size_get!(client_height, 3);
 size_get!(client_top, 4);
 size_get!(client_left, 5);
 
-fn bounding_rect(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-        let _caller = crate::force::tag("getBoundingClientRect");
-    let el = d.el(it, this)?;
-    let r = if d.in_document(it, el)? { d.with_geo(it, |g, s| g.client_rect(s, el))? } else { None };
-    // No box fragment: an inline box that layout culled (or no box at all, which is empty).
-    let r = match r {
-        Some(r) => r,
-        None => crate::browser_rects::element_bounding(d, it, el)?,
-    };
-    crate::browser_geom::layout_rect(d, it, r)
+fn bounding_rect<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let _caller = crate::force::tag("getBoundingClientRect");
+    let el = d.el_s(s, this)?;
+    old_v(s, |it| {
+        let r = if d.in_document(it, el)? { d.with_geo(it, |g, s| g.client_rect(s, el))? } else { None };
+        // No box fragment: an inline box that layout culled (or no box at all, which is empty).
+        let r = match r {
+            Some(r) => r,
+            None => crate::browser_rects::element_bounding(d, it, el)?,
+        };
+        crate::browser_geom::layout_rect(d, it, r)
+    })
 }
 
-fn align_word(it: &mut Interp<'_>, o: Value, name: &str, default: Align) -> Align {
-    match it.get_str(o, name).as_str() {
-        "start" => Align::Start,
-        "center" => Align::Center,
-        "end" => Align::End,
-        "nearest" => Align::Nearest,
+fn align_word<'s>(s: &mut Sc<'s, '_>, o: Local<'s>, name: &str, default: Align) -> Align {
+    let text = s.get_str(o, name).and_then(|v| s.to_string(v)).ok().and_then(|v| s.as_str(v).map(|t| t.to_string_lossy()));
+    match text.as_deref() {
+        Some("start") => Align::Start,
+        Some("center") => Align::Center,
+        Some("end") => Align::End,
+        Some("nearest") => Align::Nearest,
         _ => default,
     }
 }
 
-fn scroll_into_view(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let el = d.el(it, this)?;
-    let (ay, ax) = match a.first().copied() {
-        None | Some(Value::Undefined) => (Align::Start, Align::Nearest),
-        Some(o @ Value::Object(_)) => (align_word(it, o, "block", Align::Start), align_word(it, o, "inline", Align::Nearest)),
-        Some(Value::Bool(false)) => (Align::End, Align::Nearest),
-        Some(_) => (Align::Start, Align::Nearest),
+fn scroll_into_view<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = d.el_s(s, this)?;
+    let a0 = arg_s(s, a, 0);
+    let (ay, ax) = if is_object(s, a0) {
+        (align_word(s, a0, "block", Align::Start), align_word(s, a0, "inline", Align::Nearest))
+    } else if s.as_bool(a0) == Some(false) {
+        (Align::End, Align::Nearest)
+    } else {
+        (Align::Start, Align::Nearest)
     };
-    if d.in_document(it, el)? {
-        d.with_geo(it, |g, s| g.reveal(s, el, ax, ay))?;
-    }
-    Ok(Value::Undefined)
+    old(s, |it| if d.in_document(it, el)? { d.with_geo(it, |g, s| { g.reveal(s, el, ax, ay); }) } else { Ok(()) })?;
+    Ok(s.undefined())
 }
 
-fn win_scroll_x(d: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
-    Ok(Value::Number(d.scrolling.s.borrow().scroll.x as f64))
+fn win_scroll_x<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let v = d.scrolling.s.borrow().scroll.x;
+    Ok(s.number(v as f64))
 }
 
-fn win_scroll_y(d: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
-    Ok(Value::Number(d.scrolling.s.borrow().scroll.y as f64))
+fn win_scroll_y<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let v = d.scrolling.s.borrow().scroll.y;
+    Ok(s.number(v as f64))
 }
 
-pub(crate) fn win_inner_width(d: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
-    Ok(Value::Number(d.plat.s.borrow().viewport.0 as f64))
+pub(crate) fn win_inner_width<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let v = d.plat.s.borrow().viewport.0;
+    Ok(s.number(v as f64))
 }
 
-pub(crate) fn win_inner_height(d: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
-    Ok(Value::Number(d.plat.s.borrow().viewport.1 as f64))
+pub(crate) fn win_inner_height<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let v = d.plat.s.borrow().viewport.1;
+    Ok(s.number(v as f64))
 }
 
-fn scrolling_element(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
-    match d.root_element() {
-        Some(r) => d.wrap(it, r),
-        None => Ok(Value::Null),
-    }
+fn scrolling_element<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    d.wrap_opt_s(s, d.root_element())
 }
 
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     let p = d.p();
-    d.def_get(it, p.element, "scrollTop", get_top, Some(set_top))?;
-    d.def_get(it, p.element, "scrollLeft", get_left, Some(set_left))?;
-    for (name, h) in [("scrollWidth", scroll_width as H), ("scrollHeight", scroll_height), ("clientWidth", client_width), ("clientHeight", client_height), ("clientTop", client_top), ("clientLeft", client_left)] {
-        d.def_get(it, p.element, name, h, None)?;
+    d.def_get_s(it, p.element, "scrollTop", get_top, Some(set_top))?;
+    d.def_get_s(it, p.element, "scrollLeft", get_left, Some(set_left))?;
+    for (name, h) in [("scrollWidth", scroll_width as HS), ("scrollHeight", scroll_height), ("clientWidth", client_width), ("clientHeight", client_height), ("clientTop", client_top), ("clientLeft", client_left)] {
+        d.def_get_s(it, p.element, name, h, None)?;
     }
-    d.def_method(it, p.element, "getBoundingClientRect", 0, bounding_rect)?;
-    d.def_method(it, p.element, "scrollTo", 2, el_scroll_to)?;
-    d.def_method(it, p.element, "scroll", 2, el_scroll_to)?;
-    d.def_method(it, p.element, "scrollBy", 2, el_scroll_by)?;
-    d.def_method(it, p.element, "scrollIntoView", 0, scroll_into_view)?;
-    d.def_get(it, p.document, "scrollingElement", scrolling_element, None)?;
+    d.def_method_s(it, p.element, "getBoundingClientRect", 0, bounding_rect)?;
+    d.def_method_s(it, p.element, "scrollTo", 2, el_scroll_to)?;
+    d.def_method_s(it, p.element, "scroll", 2, el_scroll_to)?;
+    d.def_method_s(it, p.element, "scrollBy", 2, el_scroll_by)?;
+    d.def_method_s(it, p.element, "scrollIntoView", 0, scroll_into_view)?;
+    d.def_get_s(it, p.document, "scrollingElement", scrolling_element, None)?;
     let g = *d.global.get().expect("installed");
     for name in ["scrollX", "pageXOffset"] {
-        d.def_get(it, g, name, win_scroll_x, None)?;
+        d.def_get_s(it, g, name, win_scroll_x, None)?;
     }
     for name in ["scrollY", "pageYOffset"] {
-        d.def_get(it, g, name, win_scroll_y, None)?;
+        d.def_get_s(it, g, name, win_scroll_y, None)?;
     }
-    d.def_get(it, g, "innerWidth", win_inner_width, None)?;
-    d.def_get(it, g, "innerHeight", win_inner_height, None)?;
-    d.def_method(it, g, "scrollTo", 2, win_scroll_to)?;
-    d.def_method(it, g, "scroll", 2, win_scroll_to)?;
-    d.def_method(it, g, "scrollBy", 2, win_scroll_by)?;
+    d.def_get_s(it, g, "innerWidth", win_inner_width, None)?;
+    d.def_get_s(it, g, "innerHeight", win_inner_height, None)?;
+    d.def_method_s(it, g, "scrollTo", 2, win_scroll_to)?;
+    d.def_method_s(it, g, "scroll", 2, win_scroll_to)?;
+    d.def_method_s(it, g, "scrollBy", 2, win_scroll_by)?;
     Ok(())
 }
 
