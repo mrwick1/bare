@@ -910,6 +910,7 @@ pub trait Engine: Sized {
 }
 
 /// Open the outermost scope of `e`.
+#[inline(always)]
 pub fn enter<E: Engine, R>(e: &mut E, f: impl for<'s> FnOnce(&mut Scope<'s, E>) -> R) -> R {
     let base = e.stack_len();
     f(&mut Scope { e, base })

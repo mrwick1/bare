@@ -287,14 +287,25 @@ impl<'p> Interp<'p> {
         r
     }
 
-    /// Run host function `id` of the interface host `h`: `this` and the arguments go onto the handle stack for the call.
+    /// Run host function `id` of the interface host `h`: `this` and the arguments go onto the handle stack for the call. The scope opens
+    /// first, so its end drops them too.
+    #[inline(always)]
     fn api_call_host(&mut self, h: &dyn bare_js_api::Host<Interp<'p>>, id: u32, this: Value, args: &[Value], is_new: bool) -> Result<Value, Error> {
-        let base = self.api.stack.len();
-        self.api.stack.push(this);
-        self.api.stack.extend_from_slice(args);
-        let r = bare_js_api::enter(self, |s| {
-            let this = bare_js_api::Local::from_slot(base as u32);
-            let args = bare_js_api::Args::from_slots(base as u32 + 1, args.len() as u32);
+        bare_js_api::enter(self, |s| {
+            let it = s.engine();
+            let base = it.api.stack.len() as u32;
+            // A constant length copies in line; the general case calls `memcpy`.
+            match *args {
+                [] => it.api.stack.push(this),
+                [a] => it.api.stack.extend_from_slice(&[this, a]),
+                [a, b] => it.api.stack.extend_from_slice(&[this, a, b]),
+                _ => {
+                    it.api.stack.push(this);
+                    it.api.stack.extend_from_slice(args);
+                }
+            }
+            let this = bare_js_api::Local::from_slot(base);
+            let args = bare_js_api::Args::from_slots(base + 1, args.len() as u32);
             let r = h.call(s, id, this, args, is_new);
             let it = s.engine();
             match r {
@@ -304,9 +315,7 @@ impl<'p> Interp<'p> {
                     bare_js_api::Abort::Limit(w) | bare_js_api::Abort::Unsupported(w) => unsupported(w, Span::default()),
                 })),
             }
-        });
-        self.api.stack.truncate(base);
-        r
+        })
     }
 }
 

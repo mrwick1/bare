@@ -1,4 +1,4 @@
-//! Scratch: the cost of one host call. `host_call_load MODE N`, MODE: nop, get, has, match, dom (getAttribute on a fresh element's `parentNode`).
+//! Scratch: the cost of one host call. `host_call_load MODE N`, MODE: nop, get, has, match, hcn, isc, dom (getAttribute on a fresh element's `parentNode`).
 use bare::browser::*;
 use bare_html::tree;
 use bare_js::eval::*;
@@ -19,6 +19,8 @@ fn exec(mode: &str, n: usize) {
         "get" => "x = e.getAttribute('class')",
         "has" => "x = e.hasAttribute('data-k')",
         "match" => "x = e.matches('div.x')",
+        "hcn" => "x = e.hasChildNodes()",
+        "isc" => "x = e.isConnected",
         _ => panic!("mode"),
     };
     let src = format!("var e = document.getElementById('a'), x; for (var i = 0; i < {n}; i++) {{ {body} }} x");

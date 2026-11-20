@@ -205,22 +205,25 @@ impl Dom {
     }
 
     /// The node of `this`, or `None`.
+    #[inline]
     pub(crate) fn node_of_s(&self, s: &mut Sc<'_, '_>, this: Local<'_>) -> Option<NodeId> {
         self.node_of(s.engine().raw(this))
     }
 
     /// `Dom::nd` on a local.
+    #[inline]
     pub(crate) fn nd_s<'s>(&self, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
         match self.node_of_s(s, this) {
             Some(n) => Ok(n),
-            None => Err(s.type_error("Illegal invocation")),
+            None => Err(illegal(s)),
         }
     }
 
     /// `Dom::el` on a local.
+    #[inline]
     pub(crate) fn el_s<'s>(&self, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
         let n = self.nd_s(s, this)?;
-        if self.is_element(n) { Ok(n) } else { Err(s.type_error("Illegal invocation")) }
+        if self.is_element(n) { Ok(n) } else { Err(illegal(s)) }
     }
 
     /// `Dom::string_arg` on a local: `ToString`, the caps of a DOM string, and the UTF-8 text.
@@ -277,6 +280,13 @@ impl Dom {
 #[cold]
 pub(crate) fn lift_err<'s>(s: &mut Sc<'s, '_>, e: Error) -> bare_js_api::Error<'s> {
     s.engine().api_err(e)
+}
+
+/// The `TypeError` of a method called on a wrong `this`.
+#[cold]
+#[inline(never)]
+fn illegal<'s>(s: &mut Sc<'s, '_>) -> bare_js_api::Error<'s> {
+    s.type_error("Illegal invocation")
 }
 
 /// A feature that the browser does not have, as an error of the interface.

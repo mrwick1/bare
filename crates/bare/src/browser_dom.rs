@@ -883,8 +883,9 @@ pub(crate) fn child_element_count<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'
     let n = d.nd_s(s, this)?;
     let doc = d.doc.borrow();
     let mut c = 0usize;
+    let it = s.engine();
     for k in doc.children(n) {
-        s.charge(1)?;
+        bare_js_api::Engine::charge(it, 1)?;
         c += matches!(doc.data(k), NodeData::Element { .. }) as usize;
     }
     Ok(s.number(c as f64))
