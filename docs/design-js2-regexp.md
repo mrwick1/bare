@@ -1,6 +1,6 @@
 # Design: the RegExp engine of js2 (S4)
 
-Status: design, for review by the owner. No engine code changed. Date: 2026-11-20. Base: main `b0a0df89`.
+Status: design, revised for the owner's decision of 2026-11-21 (option d, the hybrid). Waits for owner review. No engine code changed. Date: 2026-11-21. Base: main `b0a0df89`.
 
 `crates/js2` has no RegExp engine. `Op::NewRegExp` throws (`interp.rs`: "regular expression literals are not supported yet"). Pages use regular expressions in `String.prototype.replace`, `split`, `match`, `RegExp.prototype.test` and `exec`, so S4 and the browser slice (S5) need one.
 
@@ -9,8 +9,22 @@ Words used in this file:
 - "hypothesis" marks a number or a cause that no run proved.
 - "old engine" is `crates/js` (`bare-js`). "js2" is `crates/js2`.
 - "run" is one call of the matcher on one input (`Regex::exec` in the old engine). "compile" is pattern text to program.
+- "backtracker" is the matcher of the old engine (a backtracking VM). "linear side" is a Pike VM and a lazy DFA over the same program. The time of the linear side is O(program length × input length).
 - "memo" is the result table for `test()` of the old engine (`docs/progress.md`, R2-A build 2).
 - All instruction counts are `perf stat -e instructions:u`, minimum of 3 runs. The spread of the 3 runs was below 0.01% in every row.
+
+## Decisions (owner, 2026-11-21)
+
+1. Engine: option (d), the hybrid. A linear-time engine runs the patterns that need no backtracking feature. A backtracker runs all other patterns: backreferences, lookaround, and anything else that the linear engine cannot do exactly as ECMAScript says.
+2. Bar for each step: no test that passes on the old engine fails on js2.
+3. Step budget: charged to `Vm::fuel`, plus a cap of 50 M steps for each run. The cap is for the backtracking side.
+4. Compiled patterns live in a new `Blob` cell layout.
+5. js2 depends on `bare-unicode` for `\p{}` and case folding. `regexp_check.rs` uses it to check property names.
+6. The `test()` memo comes after S5, and only if a profile asks for it.
+7. The generic `Symbol.replace` and `Symbol.split` live in the prelude. An unmodified RegExp gets a Rust fast path.
+8. The R1 numbers are taken without a look at the 4 census journeys that failed (`curl-se-home`, `duckduckgo-html-search`, `lobsters-comments-back`, `nextjs-docs`).
+
+Sections 1 to 8 are the first pass (2026-11-20). They stay as the record of why. Section 9 works out the hybrid with new measurements. Section 10 is the build plan. Section 11 lists what is still open.
 
 ## 1. Summary
 
@@ -24,13 +38,16 @@ The census of the 48 public journeys (section 3) says what matters:
 
 So the matching speed is not the problem to solve. The problems are: do not compile what never runs, keep a compiled pattern small, keep the semantics exact, and keep catastrophic backtracking bounded.
 
-Recommendation (section 9): option (a), a port of the old matcher into js2, in three steps:
+Chosen: option (d), the hybrid (section 9). The new measurements of section 9 say:
 
-1. Port the matcher and compile it lazily, at the first run. The program stays a Rust value in a realm table.
-2. Flatten the program into one buffer in a heap cell, so the collector frees it, and make the matcher read one-byte strings without a copy.
-3. Put the `exec` fast paths and the `replace`, `split` and `match` protocol on top, with the generic spec path in the prelude.
+- 94.4% of the census runs (112,437 of 119,107) are on patterns that the linear side can run. 5.6% need the backtracker: 4.9% lookahead, 0.7% backreference, 0.0% `u` or `v` only.
+- A lazy DFA gives 3 to 20 times fewer instructions for `test()` after a warm-up of 34 to 60 runs for each pattern. A Pike VM for captures is 2.4 to 6 times slower than the backtracker. So the backtracker stays first for `exec`. The linear side takes over for hot `test()` and when the backtracker runs out of steps.
+- The main gain is safety: `(a+)+b` with n = 28 gives a result in 0.5 ms and not a budget error after 120 ms. The speed gain is at most about 0.5% of the 43.4 G instructions (hypothesis).
+- The own Pike VM and DFA cost +28 to +35 KB of binary and 13.6 K instructions of compile (about 450 lines in the prototype). The `regex-automata` crate costs +107 KB, 20 times more compile, and cannot do three ES rules exactly (section 9.2).
 
-Options (b), (c) and (d) lose on the numbers of section 6 or have no gain that the census can show (section 8).
+The build plan (section 10) has 5 steps: R0 baseline, R1 backtracker, R2 linear side, R3 String methods and the Symbol protocol, R4 the `test()` memo if a profile asks.
+
+Options (a), (b) and (c) are kept in section 8 with the reason why they lost.
 
 ## 2. How this was measured
 
@@ -59,7 +76,7 @@ From `docs/census/2026-11-18.tsv` (50 workloads: the staging journey, the typing
 | `String.prototype.search`                                     |         29 |         4 |
 | `matchAll`, `Symbol.replace`, `Symbol.split` called by script | 0 (no row) |         0 |
 
-The `replace`, `split` and `match` rows count string arguments too. The census cannot tell a regexp argument from a string argument (to verify in S4 step 3).
+The `replace`, `split` and `match` rows count string arguments too. The census cannot tell a regexp argument from a string argument (to verify in S4.R3).
 
 ### 3.2 Patterns on the 48 journeys
 
@@ -237,7 +254,7 @@ An array with `index`, `input`, `groups` (and `indices` for `d`). It is built fr
 
 ### 7.4 Named groups and `d`
 
-0 uses in the census. The old matcher supports both. Named groups need a `groups` object with null prototype; `d` needs the `indices` array. Both are built from the same span slice. They come after the first S4 pass (section 9, step 3).
+0 uses in the census. The old matcher supports both. Named groups need a `groups` object with null prototype; `d` needs the `indices` array. Both are built from the same span slice. They come after the first S4 pass (section 10, S4.R3).
 
 ### 7.5 `Symbol.replace` and `split` protocol
 
@@ -258,17 +275,17 @@ The js2 heap does not move cells and has no finalizer hook (`gc.rs` has weak tab
 2. The program as bytes in a heap cell with its own layout (`Blob`, no children) or in a one-byte string cell that no script can reach. The RegExp object points to it from a hidden slot. The sweep frees it with the object. No Rust ownership, no table, no destructor. Needs a flat program (no `Vec`, no `Box`).
 3. A cache keyed by (source atom, flags) so many RegExp objects (one for each evaluation of a literal) share one program. With 2.2 compiles for each unique pattern in the census (3,513 / 1,611), the cache saves compile time, not only memory.
 
-Step 1 of section 9 uses choice 1 plus 3. Step 2 moves to choice 2 plus 3.
+Decision 4 chooses choice 2 plus 3: a `Blob` layout and a cache keyed by (source atom, flags). It is built in S4.R1 (section 10). Choice 1 is not used.
 
 ### 7.8 Fuel and the step budget
 
-`Vm::fuel` counts down at loop back edges (`interp.rs`). The old engine charges its own `max_steps` (50 M) for each run. Plan: the matcher charges steps to `Vm::fuel` in blocks (a step of the matcher is about 10 to 30 instructions, a back edge more; the exchange rate must be measured: owner question 3). It stops with the same "fuel out" result as a loop. Two reasons to keep a per-run cap too: a regexp in a native callback has no back edge, and the per-run cap bounds the time of one call (120 ms for the 50 M budget in the table of section 6).
+`Vm::fuel` counts down at loop back edges (`interp.rs`). The old engine charges its own `max_steps` (50 M) for each run. Plan: the matcher charges steps to `Vm::fuel` in blocks (the exchange rate of a matcher step to a fuel unit must be measured: a task of S4.R1, section 9.7). It stops with the same "fuel out" result as a loop. Two reasons to keep a per-run cap too: a regexp in a native callback has no back edge, and the per-run cap bounds the time of one call (120 ms for the 50 M budget in the table of section 6).
 
 CLAUDE.md says that a limit that protects against a slow algorithm is a design problem. For a backtracking engine the limit is the standard answer (V8 has none and can hang; V8's linear engine is still experimental). A linear fallback (option d) is the way to lift it later.
 
 ### 7.9 The memo
 
-The old engine's `test()` memo (`R2-A build 2`) took `rust-book-search` from 13,442 M to 10,190 M (-24.2%): 987,649 `test` calls became 64,227 engine runs. js2 needs a memo only if the port of that journey shows the same loop. The key `(program id, from, string identity)` is safe in js2 only with a generation in the id, because a freed cell address can come back (the old engine used a process counter for the pattern and a slot generation for the string). Not in the first S4 steps (section 9, step 4).
+The old engine's `test()` memo (`R2-A build 2`) took `rust-book-search` from 13,442 M to 10,190 M (-24.2%): 987,649 `test` calls became 64,227 engine runs. js2 needs a memo only if the port of that journey shows the same loop. The key `(program id, from, string identity)` is safe in js2 only with a generation in the id, because a freed cell address can come back (the old engine used a process counter for the pattern and a slot generation for the string). Not in the first S4 steps (section 10, S4.R4).
 
 ## 8. The options
 
@@ -276,19 +293,21 @@ Each option has data, algorithm, complexity, memory, code size, and an expected 
 
 ### (a) Port the old engine's matcher into js2
 
-Data: as section 4 (`Vec<Inst>`, class sets, register file, `Frame` stack), later flattened into one `u32` buffer in a heap cell (step 2).
+In the hybrid (d), this port is the backtracker side (S4.R1).
+
+Data: as section 4 (`Vec<Inst>`, class sets, register file, `Frame` stack), later flattened into one buffer in a `Blob` cell (S4.R1, decision 4).
 
 Algorithm: backtracking VM, first-unit set, anchored flag. Complexity: O(n) for simple patterns; exponential for nested quantifiers, cut off by the budget (section 7.8). Counted repeats unroll: O(count × body) code.
 
 Catastrophic protection: the step budget, charged to fuel and capped for each run. Measured: `(a+)+b` stops at 117 to 121 ms for any n.
 
-Memory: 916 bytes for each compiled pattern now; with lazy compile the largest journey keeps 166 patterns (152 KB, hypothesis: 166 × 916 B). After the flat image (step 2) the size is bounded by the encoding: QuickJS shows 120 bytes on the same patterns (hypothesis for ours; the old class tables are larger than QuickJS's ranges).
+Memory: 916 bytes for each compiled pattern now; with lazy compile the largest journey keeps 166 patterns (152 KB, hypothesis: 166 × 916 B). After the flat image (S4.R1) the size is bounded by the encoding: QuickJS shows 120 bytes on the same patterns (hypothesis for ours; the old class tables are larger than QuickJS's ranges).
 
 Code size: 2,550 lines to port as is. The port changes the input type, the result type, the budget and the program owner: about 400 changed lines (hypothesis: from the list of five weak points in section 4). Binary: about +368 KB with the Unicode tables (measured in the harness), of which the tables are shared with `\p{}` and `fold` that js2 needs under every option.
 
 Cost on our rows: the row of section 6, 1.65 K and 3.84 K per run. The census total is about 0.2 to 0.45 G of 43.4 G. Lazy compile removes 72% of the 3,513 compiles: 3,513 × 25.8 K = 90.6 M becomes 990 × 25.8 K = 25.5 M (the compile of a pattern that runs is paid once; hypothesis: the compile count in the new engine equals the count of runs of the old one).
 
-Conformance: the starting point is known (section 3.4: 914 of 1,114 outside `property-escapes` and `unicodeSets`; the rest are protocol tests that step 3 builds).
+Conformance: the starting point is known (section 3.4: 914 of 1,114 outside `property-escapes` and `unicodeSets`; the rest are protocol tests that S4.R3 builds).
 
 Risks: the old code has `u32` position limits and `usize` spans; the `Scratch` buffers are kept across calls (peak 196 KB) and need a release rule (a `release()` exists).
 
@@ -320,76 +339,257 @@ Gains: no engine code to write or maintain (45,000 lines in the crate; 1,000 lin
 
 Cost on our rows: worse than (a) on all rows but one. Not recommended.
 
-### (d) Hybrid: a linear-time automaton for patterns without backreferences and lookaround, backtracking for the rest
+### (d) Hybrid: a linear-time automaton for patterns without backreferences and lookaround, backtracking for the rest. CHOSEN (owner, 2026-11-21)
 
-Data: the program of (a) as the NFA, plus a lazy DFA or a Pike VM over it. A DFA state is a sorted set of program counters; a transition table (`[u32; 256]` for Latin-1 units, a fallback for other units; at most 64 states for each pattern, then cleared, as RE2 does: `design-heavy-js-journeys.md`, section 5.3).
+The first pass (2026-11-20) recommended (a) and listed (d) as "measure later". The owner chose (d). Section 9 holds the measured design. This section keeps the first-pass analysis and marks what the new numbers changed.
 
-Algorithm: `test()` on a pattern with no backreference and no lookaround runs the DFA from the start index. One transition for each unit. Captures (`exec`, `replace`, `match`) still need a backtracker or a Pike VM.
+Data: the program of (a) as the NFA, plus a lazy DFA or a Pike VM over it. First-pass guess: a DFA state is a sorted set of program counters and a transition table of `[u32; 256]` for each state. Measured (section 9.2): a state is a row of byte classes (not 256 entries); a pattern has 7 to 16 states on our rows.
 
-Complexity: O(n) for each run; O(states × 256) to build. Linear time removes the need for a budget on those patterns. V8's experimental engine is O(pattern length × input length) and also excludes `u`, `i`, backreferences, lookaround and big repeats.
+Algorithm: `test()` on a pattern with no backreference and no lookaround runs the DFA from the start index, one transition for each unit. Captures (`exec`, `replace`, `match`) need the backtracker or a Pike VM.
 
-Memory: up to 64 KB for each pattern that uses the DFA (1 KB for each state, hypothesis from the earlier design; not measured).
+Complexity: O(n) for each run of the DFA; O(program length × n) for the Pike VM. V8's experimental engine is O(pattern length × input length) and also excludes `u`, `i`, backreferences, lookaround and big repeats.
 
-Code size: 400 to 600 lines (the earlier design's estimate), plus the care for case folding and `u` mode.
-
-Measured evidence: the `regex` crate row of section 6 shows 4 to 9 times fewer instructions for a `test`, and 14 times more for compile. That crate is not a design for us (UTF-8, Unicode `\w`, refuses 5 of 66 patterns), but it shows the shape: cheaper runs, dearer compile.
-
-Cost on our rows: by the census, 119,107 runs; 96% of the old engine's runs on `rust-book-search` were `test()` (progress, R2-A). If a DFA saves 3.3 K for each Porter `test` (3,842 → about 430), the saving on `rust-book-search` is 64,227 × 3.3 K = 212 M of 10,190 M (2.1%, hypothesis) and nothing on the other 47 journeys. The compile is dearer (a DFA state is built at the first use). The hole of the hybrid is the same as V8's: patterns with `i`, `u`, backreferences or lookaround (99 lookahead patterns, 292 `i` patterns, 17 backreference patterns in the census) stay on the backtracker, so the budget stays.
+First-pass cost estimate: 2.1% of `rust-book-search` and nothing on the other 47 journeys (hypothesis). The new estimate is in section 9.8. The hole of the hybrid is the same as V8's: patterns with backreferences or lookaround (section 9.8) stay on the backtracker, so the budget stays (decision 3).
 
 ### Comparison
 
-|                        | (a) port                       | (b) libregexp-style                                  | (c) `regress`                    | (d) hybrid                              |
-| ---------------------- | ------------------------------ | ---------------------------------------------------- | -------------------------------- | --------------------------------------- |
-| Run, staging `test`    | 1.65 K                         | about 5.4 K measured in C (first-unit set not there) | 3.67 K                           | 0.4 K for a DFA run (crate lower bound) |
-| Run, Porter `test`     | 3.84 K                         | 3.4 K                                                | 3.5 K                            | 0.43 K (crate lower bound)              |
-| Compile                | 25.8 K                         | 13.1 K                                               | 59.2 K                           | more than (a)                           |
-| Bytes for each pattern | 916 B, 120 B flat (hypothesis) | 120 B                                                | 1,474 B                          | 916 B plus DFA                          |
-| Budget on catastrophic | yes, 120 ms                    | to build                                             | none, 13.7 s                     | yes, except linear patterns             |
-| Sticky `y`             | yes                            | yes                                                  | no                               | yes                                     |
-| New code               | about 400 changed lines        | about 2,500 lines                                    | 0 (a fork if a budget is wanted) | (a) + 500 lines                         |
-| Conformance start      | 914 / 1,114 test262            | zero                                                 | not measured                     | as (a)                                  |
-| Census gain over (a)   | none (the base)                | 0.03% of 43.4 G                                      | negative                         | up to 2.1% of one journey               |
-| Binary                 | +368 KB (with tables)          | about the same                                       | +818 KB                          | (a) + 1 to 2 KB                         |
+|                        | (a) port                       | (b) libregexp-style                                  | (c) `regress`                    | (d) hybrid, chosen                                                |
+| ---------------------- | ------------------------------ | ---------------------------------------------------- | -------------------------------- | ----------------------------------------------------------------- |
+| Run, staging `test`    | 1.65 K                         | about 5.4 K measured in C (first-unit set not there) | 3.67 K                           | 0.47 K to 0.54 K (own DFA, after warm-up, section 9.2)            |
+| Run, Porter `test`     | 3.84 K                         | 3.4 K                                                | 3.5 K                            | 0.22 K to 0.25 K (own DFA, after warm-up)                         |
+| Run, `exec`            | 1.65 K, 3.84 K                 | 5.4 K, 3.4 K                                         | 3.7 K, 3.5 K                     | as (a): the backtracker runs first                                |
+| Compile                | 25.8 K                         | 13.1 K                                               | 59.2 K                           | as (a) + 1.2 K (Pike) + 13.6 K for the first DFA row set          |
+| Bytes for each pattern | 916 B, 120 B flat (hypothesis) | 120 B                                                | 1,474 B                          | as (a) + 2 to 4 KB for a pattern that tiers up to the DFA         |
+| Budget on catastrophic | yes, 120 ms                    | to build                                             | none, 13.7 s                     | linear patterns: result in 0.5 ms. Others: budget as (a), 120 ms  |
+| Sticky `y`             | yes                            | yes                                                  | no                               | yes                                                               |
+| New code               | about 400 changed lines        | about 2,500 lines                                    | 0 (a fork if a budget is wanted) | (a) + about 450 lines (prototype: Pike, DFA, eligibility)         |
+| Conformance start      | 914 / 1,114 test262            | zero                                                 | not measured                     | as (a), plus a differential test of the linear side               |
+| Census gain over (a)   | none (the base)                | 0.03% of 43.4 G                                      | negative                         | at most about 0.5% of 43.4 G (hypothesis) and bounded worst case  |
+| Binary                 | +368 KB (with tables)          | about the same                                       | +818 KB                          | (a) + 28 to 35 KB                                                 |
 
-## 9. Recommendation
+## 9. The hybrid in detail
 
-Build (a), in steps, and measure (d) after the browser runs journeys. Reasons, each from a number above:
+Tools of this section (throwaway, not in the repository): `/data/bare-tmp/rx-hybrid/` (a harness with the old engine, an own Pike VM and lazy DFA over its program, `regex-automata` 0.4.19, a differential runner). Copies of the sources and logs are in `/data/bare-tmp/rx-keep/hybrid/`. The census data is the `Regex::new` and `Regex::exec_in` log of section 2 (3,513 compiles).
 
-1. The matcher is below 1% of journey instructions, so a faster matcher is not the goal (section 1).
-2. The old matcher is the fastest of the three backtrackers on our short tests, bounds the catastrophic case at 120 ms, supports sticky, and has a known test262 and oracle record.
-3. The wasted work is the compile: 72% of 3,513 compiles are never used. Lazy compile removes it in any option.
-4. (b) saves 0.03% of 43.4 G and starts conformance from zero. (c) is worse on every row but one and has no budget and no sticky. (d) adds code for 2% of one journey.
+### 9.1 Shape
 
-Build plan. Each step is one PR of about 400 changed lines or fewer, tests not counted. Each step runs `cargo test --locked -p bare-js2` and the checks below. A check marked (R) records numbers in `docs/progress.md` with machine, inputs, run count and spread.
+One parser, one tree, one program for each pattern. Two executors read the same program:
 
-| Step  | What                                                                                                                                                                                                                                                                                                                                                                                                                                          | Checks                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| S4.R0 | Baseline. Run test262 `built-ins/RegExp`, `annexB/built-ins/RegExp`, `built-ins/String/prototype/{match,matchAll,replace,replaceAll,search,split}` on the old engine with the js2 skip rules and write the pass list (a `test262-js2-baseline` change). Add the regexp directories to `test262-js2-subset.txt`. Add a regexp row to `cost_rows.txt` for js2 (a run of the 66-pattern set of section 6).                                       | The old counts of section 3.4 reproduce. The row exists. (R)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| S4.R1 | Move the matcher to `crates/js2/src/regexp.rs`: input `&[u8]` or `&[u16]`, result in a caller slice, steps charged to `Vm::fuel`, no `AtomicU64`. Compile at the first run, not at the literal. `Op::NewRegExp` builds the object with `lastIndex` and the pattern atoms; `RegExp` constructor, `test`, `exec`, `lastIndex`, `g`, `y`. Programs in a realm table with a cache keyed by (source atom, flags). `js2` depends on `bare-unicode`. | test262 `built-ins/RegExp` outside `property-escapes` and `unicodeSets`: no test that passes on the old engine fails on js2. The oracle cases `regexp_cases.tsv` (846 rows) run on the js2 matcher: 0 differences. The differential runner (old against new on the same script) is clean on the regex cases. The regex row: instructions for each run not more than +5% over the old engine's 1.65 K and 3.84 K. Startup unchanged: `script_run` of `var x = 1;` stays at 4.01 M (the engine is not built before the first literal runs). (R) |
-| S4.R2 | Flat program: encode `Inst` and the class sets into one `u32` buffer in a heap cell (new layout, or a one-byte string cell with a hidden slot; owner question 4). Drop the realm table. A generic loop over `u8` and `u16` input. A "release" of the scratch after a run above a size.                                                                                                                                                        | The R1 checks again. Compiled bytes for each pattern on the 66 patterns: report (target: below 916 B). Peak RSS on `rust-book-search` and `substack-home` not above the R1 numbers. Miri on the cell code (the CI list of `unsafe` modules grows by one). (R)                                                                                                                                                                                                                                                                                 |
-| S4.R3 | `String.prototype.match`, `replace`, `replaceAll`, `split`, `search`, `matchAll`; `RegExp.prototype[Symbol.*]` with the fast path (shape and prototype check) and the spec path in the prelude; the `exec` result shape; `groups` and `d`. `RegExp.prototype.flags`, `source`, `toString`, `compile` (Annex B). Property escapes with `bare-unicode`, `\p{}` names checked in `regexp_check.rs`.                                              | test262: the six String directories and the rest of `built-ins/RegExp` at the old engine's counts or better. `regexp_check` closes the 242 `property-escapes` parse tests. The differential runner is clean. A replace-heavy row (`replace` with `g` and a function, 10,000 matches) is within 5% of the old engine. (R)                                                                                                                                                                                                                      |
-| S4.R4 | Only if a journey on js2 shows it: the `test()` memo with a generation in the program id (section 7.9).                                                                                                                                                                                                                                                                                                                                       | `rust-book-search` instructions with and without the memo, 3 runs.                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| S4.R5 | Only if a profile of the daily journeys on js2 shows regexp time above 5%: design the lazy DFA for `test()` (option d) in its own document.                                                                                                                                                                                                                                                                                                   | The profile.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+- The backtracker runs every pattern. It is the old matcher (section 4) with the changes of section 8, option (a).
+- The linear side runs the patterns that the emitter flags (section 9.4). It has two parts: a Pike VM (all capture spans, O(program length × n)) and a lazy DFA (yes or no, one table lookup for each unit).
 
-The plan does not touch startup: no regexp code runs before the first literal or constructor call. The old engine stays the default until S5 passes (plan section 1).
+The parser and the emitter exist once. The flags are set at emit time from the tree: no second parse.
 
-## 10. Questions for the owner
+### 9.2 The linear engine: `regex-automata` or our own
 
-1. Which option? Recommended: (a), the port, in the steps of section 9.
-2. Is a conformance bar of "no test that passes on the old engine fails on js2" right for S4.R1 to R3? Recommended: yes. Tests that the old engine fails (the `RegExp.escape` family, `createRealm`) wait.
-3. Keep a step budget? Recommended: yes, and charge it to `Vm::fuel` plus a per-run cap of 50 M steps. The exchange rate of a matcher step to a fuel unit is set in S4.R1 by measurement.
-4. A new `Blob` cell layout (marker change in `gc.rs`) or a one-byte string cell that no script can reach, for the compiled program? Recommended: the new layout, because a hidden string cell can leak into `typeof`, `==` and atom-table paths by mistake.
-5. Should js2 depend on `bare-unicode` for `\p{}` and case folding, and should `regexp_check.rs` use it to check property names? Recommended: yes (one set of tables for both engines; it closes 242 early-error tests).
-6. Is the memo (S4.R4) in S4 or only after S5? Recommended: after S5, if the browser slice shows the loop.
-7. Where do the generic `Symbol.replace`/`split` algorithms live? Recommended: the prelude (JS, lazy stubs), with Rust fast paths only for the unmodified RegExp.
-8. Do we build the 4 journeys that failed in my live run before the S4.R1 numbers are taken? Recommended: no. They failed on the old engine for reasons I did not look at (`curl-se-home`, `duckduckgo-html-search`, `lobsters-comments-back`, `nextjs-docs`). The numbers of section 3.2 include their partial runs.
+Both were built and measured on the same rows as section 6. The rows are the patterns that every engine in the table accepts (39 staging patterns, 14 Porter rules; 741 and 28,000 calls for each rep). The cost for each call is the steady cost: (instructions of 100 reps - instructions of 20 reps) / (80 reps × calls). The spread of 3 runs is below 0.002%.
 
-## 11. Not measured
+(i) `regex-automata` 0.4.19 with the minimal features (`std`, `nfa-thompson`, and one engine). The NFA is built from the old program with `thompson::Builder`. Limits, from the source and from the differential run:
 
-- The census is one live run on one day. A site that changes its scripts gives other patterns. The memo hides repeated `test()` runs (the run count is after the memo).
+- It reads bytes. A two-byte input needs another path.
+- `m` knows only LF. ES also uses CR, U+2028 and U+2029 for `^`, `$` and `.`.
+- It has no "reset the captures of a group at each iteration" rule. The Pike VM and the bounded backtracker of the crate gave 96 wrong spans on 177,594 runs. All 96 are a capture inside a quantified group, for example `(?:(a)|b)*` on `ab`: ES gives group 1 as undefined (the second iteration resets it), an engine without the reset keeps `a`.
+- `is_match` was right on all 177,594 runs (hybrid DFA and Pike VM).
+- The one-pass engine accepts almost no pattern of the census (not counted; it refused the patterns that I tried).
+
+(ii) Our own Pike VM and lazy DFA over the shared program (prototype: 706 lines with the eligibility walk and helpers; `Pike` about 140 lines, `Dfa` about 250 lines). The DFA state is the ordered list of kernel program counters plus the kind of the previous unit. Assertions (`^`, `$`, `\b`, `\B`) are resolved when a transition is built, with the kind of the previous and the next unit, so the match is reported one unit late. Units below 256 map to byte classes from cut points of the program. Units of 256 or more use a sorted cut table (binary search).
+
+Measured, instructions for each call (steady):
+
+| Engine                              | `test` staging | `test` Porter | `exec` staging | `exec` Porter |
+| ----------------------------------- | -------------: | ------------: | -------------: | ------------: |
+| old backtracker (the base)          |          1,731 |         4,490 |          1,731 |         4,490 |
+| own DFA, u16 input                  |            544 |           245 |              - |             - |
+| own DFA, u8 input                   |            469 |           219 |              - |             - |
+| `regex-automata` hybrid DFA         |            417 |           326 |              - |             - |
+| own Pike VM, u16 input              |         10,923 |        10,720 |         10,923 |        10,720 |
+| own Pike VM, u8 input               |         10,505 |        10,438 |         10,505 |        10,438 |
+| `regex-automata` Pike VM            |         12,136 |        10,914 |         12,960 |        11,522 |
+| `regex-automata` bounded backtracker |             - |             - |          6,380 |         5,286 |
+
+On all patterns that the own engines accept (45 staging, 18 Porter): old 1,596 and 3,924; own DFA (u8) 475 and 206; own Pike (u8) 10,148 and 9,220.
+
+Compile, warm-up, memory and size:
+
+|                                  | Compile, 39 staging / 14 Porter (instructions) | Warm-up for one pattern, staging / Porter (instructions) | Live bytes for each pattern after runs, staging / Porter | Binary (stripped, over old: 710,768 B) |
+| -------------------------------- | ---------------------------------------------: | -------------------------------------------------------: | -------------------------------------------------------: | -------------------------------------: |
+| old backtracker                  |                                 12.1 K / 12.2 K |                                                        - |                                                  590 / 628 |                                      base |
+| own Pike VM (extra)              |                                   1.2 K / 1.2 K |                                                   0.5 K / 0.5 K |                                              1,429 / 2,802 |                              +9.0 KB (u16) |
+| own DFA (extra)                  |                                  13.6 K / 5.7 K |                                                 39 K / 260 K |                                              2,045 / 4,405 |                             +19.8 KB (u16) |
+| own Pike VM and DFA              |                                   see rows above |                                                  see rows above |                                                  see rows above |   +28.2 KB (u16), +34.9 KB (u8 and u16) |
+| `regex-automata` hybrid DFA      |                                 279 K / 111 K |                                                 71 K / 454 K |                                              3,643 / 5,784 |                                   +107.2 KB |
+| `regex-automata` Pike VM         |                                 264 K / 96 K |                                                  0.5 K / 0.5 K |                                              3,192 / 4,964 |                                    +74.9 KB |
+| `regex-automata` bounded backtracker |                              262 K / 94 K |                                                  1.3 K / 1.3 K |                                              1,828 / 1,712 |                                    +69.6 KB |
+
+Notes on this table:
+
+- "Warm-up" is the first rep minus the steady rep, for one pattern over all its inputs. For the DFA it is the cost of building the states on demand (7.2 states for each staging pattern and 15.9 for each Porter rule).
+- The break-even run count for the own DFA is 34 runs (staging: 38.3 K / (1,596 - 475)) and 60 runs (Porter: 224.9 K / (3,924 - 206)). This sets the tier-up threshold of section 9.5.
+- Compile here is lower than the 25.8 K of section 6. Hypothesis: the section 6 set has the larger Porter rules and a different harness. Compare rows inside this table only.
+- Live bytes are what the harness counts after a run over all inputs. It does not split the program from the scratch (not measured).
+- The `regex-automata` binary sizes are the delta over the old engine alone (the old engine stays for the backtracker). The same crate with no old engine: Pike VM +68.0 KB, hybrid +104.3 KB, backtracker +64.4 KB, one-pass +77.5 KB over an empty program (347,312 B).
+- The own engine in the first measurement was 25 times worse in compile (343 K) because it allocated a table for each unit. Byte classes from cut points fixed it (13.6 K). The numbers above are after the fix.
+
+Catastrophic case, `(a+)+b` with n units of `a` (wall time; the machine was loaded, so the old engine shows 262 ms here and 121 ms in section 6):
+
+| Engine                                      | n = 28                | n = 4000              |
+| ------------------------------------------- | --------------------- | --------------------- |
+| old backtracker, budget 50 M                | budget error, 262 ms  | budget error, 276 ms  |
+| own Pike VM                                 | no match, 0.01 ms     | no match, 1.38 ms     |
+| own DFA                                     | no match, 0.01 ms     | no match, 0.03 ms     |
+| backtracker for 100 K steps, then Pike VM   | no match, 0.5 ms      | no match, 1.9 ms      |
+| `regex-automata` hybrid DFA                 | no match, 0.06 ms     | no match, 0.14 ms     |
+
+For n = 1,000 the Pike VM runs 16,996 thread steps (17 for each unit).
+
+Result. The two options match on `test()`. Option (i) loses on the rules that ES needs (reset of captures, line terminators, two-byte input), on compile (20 times more), and on binary size (+107 KB against +28 to +35 KB). It gives a safe yes or no only for one-byte input without `m`, and its spans are wrong for 96 runs. Recommended: (ii), our own engine. This is owner question 1.
+
+### 9.3 Exact ES semantics on the linear side
+
+Each rule is a place where a naive automaton gives a different answer from ES. The differential test of S4.R2 (section 10) checks each one.
+
+1. Priority. ES takes the first match by priority, not the longest. The Pike VM keeps its threads in priority order and cuts the lower threads when one thread matches. The DFA state is an ordered list for the same reason (hypothesis: for a yes or no an unordered set would give fewer states; not tried).
+2. Capture reset. At the start of each iteration of a quantified group, the captures inside the group become undefined (`Reset(lo, hi)` in the program). The Pike VM restores them with `Restore` entries on an explicit stack. A mutation test confirmed that the differential run catches a missing reset on either slot.
+3. Empty check. An iteration of a loop that matches the empty string is rejected (`Mark` and `EmptyCheck`). The DFA drops it, because it cannot change whether a match exists (hypothesis; 0 differences on 8,465 patterns). The prototype gives a nullable loop flag B only: the Pike VM does not run it, because the value of a capture can differ (2 unique patterns, 257 runs, 0.2%). Not tested: whether the Pike VM could do it exactly.
+4. Case. `i` without `u` uses `Canonicalize` of 22.2.2.7.3 (upper-case mapping). The table for units below 256 comes from the old engine's `canon`. A two-byte input with `i` goes to the backtracker.
+5. `\w`, `\W`, `\b`, `\B`. ASCII only without `u`. The kind of a unit is a word unit or not.
+6. Line terminators. `.`, `^` and `$` with `m` use LF, CR, U+2028 and U+2029.
+7. Sticky and start index. `y` means: match at the start index only. The DFA start state depends on the kind of the unit before the start index, so `^` and `\b` see the real context. The start states are cached (8 entries).
+8. Units. The input is a sequence of UTF-16 units. Outside `u` mode no pair of surrogates is joined.
+9. Errors are not "no match". Running out of fuel or of the state cap makes the linear side give up and the caller uses the next engine.
+
+### 9.4 What forces the backtracker
+
+The emitter sets one of three flags for each program.
+
+| Flag | Meaning                                              | Set when                                                                                   |
+| ---- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| NONE | The linear side cannot run it                        | backreference, lookahead or lookbehind, `u` or `v` flag                                    |
+| B    | The DFA and the Pike VM give a yes or no             | no feature of NONE                                                                         |
+| C    | The Pike VM also gives exact capture spans           | B, and no nullable loop (a loop whose body can match the empty string)                     |
+
+Run-time conditions that send one call to the backtracker, with no change to the flag: a two-byte input with `i`; a DFA that reaches the cap of 512 states (it gives up for that call and the backtracker runs; 16,040 gave-up runs in 332,504 in the differential run, mostly test262 stress patterns: not split).
+
+Why each feature stays on the backtracker:
+
+- Backreference: the match depends on the text of an earlier capture. An automaton cannot keep it in a bounded state.
+- Lookaround: needs a nested match at the same position. A linear version exists (a sub-automaton for each assertion) but it is a design of its own. Not in this plan (question 3).
+- `u` and `v`: code points and simple case folding with `bare-unicode` tables. 13 runs in the census. Not worth a second set of rules.
+
+### 9.5 The dispatch rule
+
+The rule is set at compile time, and compile is lazy: the first run of a pattern builds the program. The program header holds the flag and a run counter.
+
+| Call                                  | Rule                                                                                                                                   |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `test()`, flag NONE                   | The backtracker, with the 50 M cap and fuel.                                                                                           |
+| `test()`, flag B or C, run 1 to 63    | The backtracker. If it passes 100 K steps, the DFA takes this call at once.                                                            |
+| `test()`, flag B or C, run 64 and up  | The DFA. If it gives up (state cap, two-byte `i`), the backtracker runs.                                                               |
+| `exec()`, flag NONE or B              | The backtracker, with the 50 M cap and fuel.                                                                                           |
+| `exec()`, flag C                      | The backtracker. If it passes 100 K steps, the Pike VM runs the same call from the start. The result is the same by the rules of 9.3.  |
+
+Why these numbers:
+
+- 64 runs is the break-even of the DFA (34 to 60 runs, section 9.2). Of the 3,270 compiles with flag B or C, 136 compiled patterns pass 64 runs, and the runs after run 64 are 97,905 (82.2% of all runs). Threshold 8: 302 patterns, 91.2%. Threshold 256: 64 patterns, 67.6%. V8 tiers up at the second run, but its native compile costs less than 64 runs of its interpreter; ours is the DFA states.
+- 100 K steps for the fallback: on the census patterns with 20 inputs and 300 words (515,520 runs) the largest run is 56,724 steps; 18 runs pass 10 K and none passes 100 K. The fallback never fires on the census. It fires only for a pattern that is slow, which is the case that it is for.
+- The backtracker stays first for `exec` because the Pike VM is 2.4 to 6 times slower (section 9.2). The cost of the fallback is at most 100 K steps of waste for each slow call.
+- A run counter and a flag are the only state. No profile, no dynamic tiers.
+
+### 9.6 Shared parser and tree
+
+`crates/js2/src/regexp.rs`: parser, tree, emitter, backtracker (the port of section 8, option (a)). `crates/js2/src/regexp_linear.rs`: the Pike VM and the DFA. The linear file reads the program through a small view (the `Inst` kind and its operands), so a change of the program encoding touches one place.
+
+The checker `regexp_check.rs` (#790) is a separate syntax check today. To verify in R1: whether it can call the new parser, so that there is one parser. Not looked at.
+
+### 9.7 Budget and fuel on each side
+
+Backtracking side (decision 3): each step is charged to `Vm::fuel` in blocks of 256 steps, and to a counter with the cap of 50 M steps for each run. A step costs about 50 instructions in the old engine (hypothesis: not re-measured for this file). A back edge of the interpreter decrements fuel by 1 and costs less than 50 instructions. The exchange rate is set in R1 by measurement. The rule: a regexp that runs as long as a loop uses the same fuel. The first pass asked this as a question; it is now a task of R1.
+
+Linear side: the DFA charges 1 step for each 16 units, the Pike VM 1 step for each thread step, both to fuel in blocks. They have no per-run cap, because their time is O(program length × input length) and the input limit (16 Mi units) stays. A native callback has no back edge, so the charge is the only place where fuel can end the run. Fuel out is an error, as in the old engine, and never "no match".
+
+CLAUDE.md says that a limit that protects against a slow algorithm is a design problem. The hybrid lowers the problem: a pattern with flag B or C cannot reach the 50 M cap in practice, because the fallback at 100 K steps hands it to a linear engine. The cap stays for flag NONE (lookaround, backreference). Removing it there needs a linear engine for those features (question 3).
+
+### 9.8 Where the census lands
+
+From the census log: 3,513 compiles, 1,611 unique (flags, pattern) pairs, 119,107 runs. "Unique" counts a pattern once. "Runs" are the engine runs after the memo.
+
+| Class                                            | Unique | Compiles |    Runs | Share of runs |
+| ------------------------------------------------ | -----: | -------: | ------: | ------------: |
+| Flag B or C (the linear side can run it)         |  1,492 |    3,270 | 112,437 |         94.4% |
+| of which flag C (exact captures on Pike)         |  1,490 |    3,265 | 112,180 |         94.2% |
+| of which flag B only (nullable loop)             |      2 |        5 |     257 |          0.2% |
+| Flag NONE (backtracker only)                     |    119 |      243 |   6,670 |          5.6% |
+| of which lookahead, no backreference             |     90 |      184 |   5,780 |          4.9% |
+| of which backreference                           |     17 |       46 |     877 |          0.7% |
+| of which `u` or `v` only                         |     12 |       13 |      13 |          0.0% |
+
+Inside flag C:
+
+| Subset                              | Unique | Compiles |   Runs | Share of runs |
+| ----------------------------------- | -----: | -------: | -----: | ------------: |
+| lazy quantifier (the Porter rules)  |     73 |      145 | 55,633 |         46.7% |
+| `i` flag                            |    262 |      499 |  2,500 |          2.1% |
+| `m` flag                            |     38 |       45 |    417 |          0.4% |
+| program longer than 256 instructions |    16 |       33 |    329 |          0.3% |
+| program longer than 1,024           |      4 |        4 |      2 |          0.0% |
+
+- The lazy Porter rules (`^(.+?)e$` 7,871 runs and its 10 neighbours) are all flag C. These are the hot patterns. After 64 runs they run on the DFA for `test()` and the whole 55,633 runs are within reach of the linear side.
+- The 99 lookahead patterns (90 without a backreference, 9 with one) and the 17 backreference patterns (46 compiles) all run on the backtracker: 6,670 runs, 5.6%. The hottest of them has 426 runs. 83 of the 99 lookahead patterns are "simple" (no capture, no backreference, no nested lookaround): the first candidates if a later step puts lookahead on the linear side (4.1% of runs, question 3).
+- Lookbehind and named groups have 0 uses in the census. The old engine supports both, and S4.R3 carries them.
+
+Gain, with these numbers. `rust-book-search`: 64,227 engine runs, 96% `test()` (first pass, from `docs/progress.md`). If all are Porter `test()` runs at the DFA cost: (3,924 - 206) × 64,227 = 239 M of 10,190 M instructions (2.3%), against about 4.3 M of warm-up (19 rules × 225 K, hypothesis: 19 rules). Over the 48 journeys: about 0.5% of 43.4 G (hypothesis: the 239 M plus small shares of the other journeys; no journey was run with a DFA). The split of the 119,107 runs between `test()` and `exec()` was not logged (not measured).
+
+### 9.9 Memory and heap layout
+
+- The program, the class sets and the run counter are one `Blob` cell (decision 4): no `Vec`, no `Box`, no finalizer. A new `Layout::Blob = 21` (the layouts end at `Elements = 20`). The collector frees the Blob when no RegExp object points to it. Many objects with the same (source atom, flags) share one Blob through a cache keyed by those two (the census has 2.2 compiles for each unique pattern).
+- The DFA table is a second `Blob` that the first one points to. It grows to a cap of 512 states. At the cap the DFA gives up for that call. Measured: 7.2 states for each staging pattern and 15.9 for each Porter rule; 2.0 to 4.4 KB of live bytes for each pattern that ran.
+- The Pike VM thread lists and the backtracker stack are scratch on the realm (not in a cell). They are released after a run above a set size, as the old engine does (`release()`).
+- The matcher reads `&[u8]` or `&[u16]`. Decision for R1: a generic loop over the unit type (the prototype cost +6.7 KB for the second unit type: +34.9 KB against +28.2 KB), not a copy of every one-byte input to wide units.
+
+## 10. Build plan
+
+Each step is one PR of about 400 changed lines or fewer, tests not counted. A check marked (R) records numbers in `docs/progress.md` with machine, inputs, run count and spread.
+
+Checks that every step R1 to R3 runs (the "common checks"):
+
+- `cargo test --locked -p bare-js2`.
+- test262: the directories of the step (below). Bar (decision 2): no test that passes on the old engine fails on js2.
+- The differential runner: the old engine and js2 run the same script or the same (pattern, flags, input) list. The lists are the census patterns (1,611 unique) and the 846 oracle cases (`regexp_cases.tsv`, 1,591 lines). Zero differences.
+- The regex row (`cost_rows.txt`): instructions for each run on the 66-pattern set of section 6.
+- Startup unchanged: `script_run` of `var x = 1;` stays at 4.01 M instructions. The engine is not built before the first literal or constructor runs.
+- Binary size: the stripped size of the `script_run` example before and after the step, in the PR text.
+
+| Step  | What                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | Checks (besides the common checks)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| S4.R0 | Baseline. Run test262 `built-ins/RegExp`, `annexB/built-ins/RegExp`, `built-ins/String/prototype/{match,matchAll,replace,replaceAll,search,split}` on the old engine with the js2 skip rules and write the pass list (a `test262-js2-baseline` change). Add the regexp directories to `test262-js2-subset.txt`. Add a regexp row to `cost_rows.txt` for js2: the 66-pattern set of section 6, plus a row for `(a+)+b` with n = 28 and the 19 Porter rules on 2,000 words. | The old counts of section 3.4 reproduce. The rows exist and have 3 runs each. The old engine's numbers are the base of R1 and R2: 1.65 K and 3.84 K for each run. (R)                                                                                                                                                                                                                                                                                                                                                                                     |
+| S4.R1 | The backtracker behind the `Blob`. `crates/js2/src/regexp.rs`: parser, tree, emitter and matcher of the old engine; input `&[u8]` or `&[u16]` (a generic loop); result in a caller slice; no `AtomicU64`. Compile at the first run, not at the literal. Programs in a `Blob` (`Layout::Blob = 21`, marker change in `gc.rs`), shared through a cache keyed by (source atom, flags). Steps charged to `Vm::fuel` in blocks, plus the cap of 50 M steps for each run; the exchange rate is measured here. `Op::NewRegExp` builds the object with `lastIndex`; `RegExp` constructor, `test`, `exec`, `lastIndex`, `g`, `y`. `js2` depends on `bare-unicode`; `regexp_check.rs` checks property names with it. | test262 `built-ins/RegExp` outside `property-escapes` and `unicodeSets`. The `regexp_check` change closes the 242 parse-time `property-escapes` tests. Regex row: not more than +5% over 1.65 K and 3.84 K. The catastrophic row ends with a budget error, as in the old engine, and the fuel of the realm drops by the exchange rate. Compiled bytes for each pattern on the 66 patterns: report (target below 916 B). Peak RSS on `rust-book-search` and `substack-home` reported. Miri on the `Blob` code (the CI list of `unsafe` modules grows by one). (R) |
+| S4.R2 | The linear side. `crates/js2/src/regexp_linear.rs`: Pike VM and lazy DFA over the program of R1, for `u8` and `u16` input. Flags NONE, B and C set by the emitter. The dispatch of section 9.5: the run counter (tier-up at run 64), the fallback at 100 K steps, the DFA table in a second `Blob`, the cap of 512 states, charge to fuel (section 9.7).                                                                                                                  | A differential test of the linear side against the backtracker on all census patterns, all patterns of the test262 directories of R1 that have flag B or C, and the oracle cases, for `test()` and `exec()`, with `from > 0` and with `y`. Zero differences. A seeded fault (no capture reset) must make the test fail. The Porter `test` row after warm-up: at least 10 times fewer instructions than R1 (measured prototype: 18 to 20 times). The staging `test` row: at least 2.5 times fewer (prototype: 3.2 to 3.7). The `exec` rows: not worse than R1 by more than 1%. `(a+)+b` with n = 28 and n = 4000 return "no match" in under 5 ms. Binary: not more than +40 KB over R1 (prototype: +34.9 KB with both unit types). Startup unchanged. (R)                  |
+| S4.R3 | `String.prototype.match`, `replace`, `replaceAll`, `split`, `search`, `matchAll`; `RegExp.prototype[Symbol.*]` with a Rust fast path for an unmodified RegExp (one realm flag: shape and prototype checks) and the generic spec algorithms in the prelude (decision 7); the `exec` result shape; named `groups` and `d` indices; lookbehind. `RegExp.prototype.flags`, `source`, `toString`, `compile` (Annex B). `\p{}` and `u` and `v` case folding with `bare-unicode`. | test262: the six String directories and the rest of `built-ins/RegExp`, at the old engine's counts or better. A replace-heavy row (`replace` with `g` and a function, 10,000 matches) within 5% of the old engine. The differential runner is clean on the String methods. (R)                                                                                                                                                                                                                                                                                                                                                                               |
+| S4.R4 | Only if a profile of the daily journeys on js2 asks for it (decision 6): the `test()` memo with a generation in the program id (section 7.9). It starts after S5.                                                                                                                                                                                                                                                                                                    | `rust-book-search` instructions with and without the memo, 3 runs. The DFA of R2 may remove the need: measure with R2 first.                                                                                                                                                                                                                                                                                                                                                                                                                             |
+
+The plan does not touch startup: no regexp code runs before the first literal or constructor call. The old engine stays the default until S5 passes (plan section 1). Decision 8 means the R1 numbers are taken on the journeys that pass; the 4 failed journeys are not looked at.
+
+## 11. Questions for the owner
+
+The first-pass questions are answered (decisions 1 to 8). These are still open. Each has a recommended answer.
+
+1. Which linear engine: (i) `regex-automata` or (ii) our own Pike VM and lazy DFA? Recommended: (ii). (i) gives the same `test()` speed (417 and 326 against 544 and 245 for the own DFA on u16), but it costs +107 KB of binary against +28 to +35 KB, 20 times more compile (262 K against 13.6 K), reads bytes only, and gives 96 wrong capture spans on the ES reset rule. We would still write the translation, the LF-only `m` workaround and the two-byte path.
+2. A limit for the binary size of the linear side? Recommended: +40 KB over R1 for the stripped `script_run`, checked in R2. The prototype with both unit types is +34.9 KB. If R2 passes the limit, it drops the `u8` copy of the Pike VM first (the `u16` pair is +28.2 KB).
+3. Should the linear side take lookahead later? 90 census patterns (4.9% of runs) have lookahead and no backreference. Recommended: no, not in this plan. Their cost is on the backtracker with the 50 M cap and fuel. Reopen only if a profile of js2 shows a lookahead pattern as a top cost. This keeps the cap that CLAUDE.md calls a design smell, but only for lookaround and backreferences.
+4. Are the thresholds right: tier-up at run 64 and fallback at 100 K steps? Recommended: yes. 64 is the measured break-even of the DFA (34 to 60 runs). 100 K steps is above every census run (largest 56,724). R2 re-measures both on the js2 journeys and may change them.
+
+## 12. Not measured
+
+- The census is one live run on one day. A site that changes its scripts gives other patterns. The memo hides repeated `test()` runs (the run count is after the memo). The split of the 119,107 runs between `test()` and `exec()` was not logged.
 - The old log counts compiles by `Regex::new`. A pattern compiled for a syntax check only (`Regex::check`) is not counted.
-- Matcher cost on the real journey inputs (the rows use 20 chosen inputs and 2,000 words).
+- Matcher cost on the real journey inputs (the rows use 20 chosen inputs and 2,000 words). The census patterns in section 9.2 are run on 20 inputs and 300 words for the step counts.
+- No journey was run with the linear side. The 0.5% gain of section 9.8 is a product of numbers (hypothesis).
+- The prototype is built over the old engine's `Inst` program, not over a js2 `Blob`. The DFA table in a `Blob`, the fuel charge, and the exchange rate of a step to a fuel unit are not built.
+- Differential coverage: 8,465 patterns (the census, the staging, Porter and oracle patterns, and a crude scan of test262 literals) with 332,504 DFA runs and 324,636 Pike runs, 0 differences; one run ended with the budget error of the old engine and was skipped. The test262 scan was a text scan of regexp literals, not the test262 harness. Random inputs were used for the rest. Patterns built at run time with `new RegExp(...)` in the test262 files are not in it.
+- Whether the Pike VM can run nullable loops exactly (section 9.3, item 3), and whether an unordered DFA state would give fewer states (item 1).
+- Whether `regexp_check.rs` can share the new parser (section 9.6).
+- `regex-automata`: the one-pass engine and the full DFA were not measured beyond a first try. Only 0.4.19 and the minimal features were tried.
 - JSC YARR, SpiderMonkey and Boa are not re-read. `fancy-regex` is not measured.
-- Memory of a DFA for option (d); the cost of widening a one-byte input; the size of a second `u8` copy of the loop; the cost of `Symbol.replace` through the prelude.
-- Windows and macOS (the matcher is portable Rust; the old engine's tests run there, not rerun).
-- The 4 failed journeys and the old engine's pass count with a larger step limit on `property-escapes`.
+- The cost of widening a one-byte input (not needed: R1 uses a generic loop); the cost of `Symbol.replace` through the prelude.
+- Windows and macOS (the matcher is portable Rust; the old engine's tests run there, not rerun). The prototype ran on archMachine only.
+- The old engine's pass count with a larger step limit on `property-escapes`.
