@@ -5,6 +5,7 @@
 
 pub mod browser;
 mod browser_dom;
+mod browser_dom_old;
 mod browser_fragment;
 mod browser_shadow;
 mod browser_events;

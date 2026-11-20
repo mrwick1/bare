@@ -494,7 +494,7 @@ impl Dom {
     }
 
     /// Run `f` as one group of changes (see the header). A page with no observer pays one `Cell` read. `all`: a replace-all of the children of that node.
-    pub(crate) fn mo_group<T>(&self, all: Option<NodeId>, f: impl FnOnce() -> R<T>) -> R<T> {
+    pub(crate) fn mo_group<T, E>(&self, all: Option<NodeId>, f: impl FnOnce() -> Result<T, E>) -> Result<T, E> {
         if !self.mo.armed.get() {
             return f();
         }

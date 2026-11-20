@@ -408,6 +408,7 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
         }
     }
 
+    #[inline]
     fn type_of(&self, v: bare_js_api::Local<'_>) -> bare_js_api::Type {
         use bare_js_api::Type;
         match self.api_at(v) {
@@ -672,8 +673,12 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
         self.api_err(e)
     }
 
+    #[inline]
     fn charge<'s>(&mut self, n: u64) -> Result<(), bare_js_api::Error<'s>> {
-        Interp::charge(self, n).map_err(|e| self.api_err(e))
+        match Interp::charge(self, n) {
+            Ok(()) => Ok(()),
+            Err(e) => Err(self.api_err(e)),
+        }
     }
 
     fn host_key(&self, obj: bare_js_api::Local<'_>) -> Option<u32> {
@@ -887,6 +892,7 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
         }
     }
 
+    #[inline]
     fn to_boolean(&self, v: bare_js_api::Local<'_>) -> bool {
         self.to_js_bool(self.api_at(v)).unwrap_or(false)
     }

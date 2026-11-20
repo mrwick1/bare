@@ -7,10 +7,12 @@
 //! values, calls the old body and pushes the result. It proves that the interface entry does what the old entry does.
 
 use crate::browser::*;
-use bare_html::dom::NodeId;
+use bare_css::selector::Selector;
+use bare_html::dom::{Document, NodeId};
+use std::rc::Rc;
 use bare_js::eval::{Error, Interp};
 use bare_js::value::{ObjId, Value};
-use bare_js_api::{Args, Engine, HostFn, Local, Persistent, Scope};
+use bare_js_api::{Abort, Args, Attrs, Engine, HostFn, Local, Persistent, Scope, Type};
 
 /// A host method of the new form: the DOM, the scope, `this`, the arguments.
 pub(crate) type HS = for<'s, 'p> fn(&Dom, &mut Sc<'s, 'p>, Local<'s>, Args<'s>) -> Res<'s, Local<'s>>;
@@ -266,6 +268,234 @@ impl Dom {
         }
         s.charge((text.len() / 32) as u64)?;
         s.string(text)
+    }
+}
+
+// ------------------------------------------------------------------------------------------ helpers of the handler bodies
+
+/// An error of the old form as an error of the interface (the old form is kept for the engine to give back).
+#[cold]
+pub(crate) fn lift_err<'s>(s: &mut Sc<'s, '_>, e: Error) -> bare_js_api::Error<'s> {
+    s.engine().api_err(e)
+}
+
+/// A feature that the browser does not have, as an error of the interface.
+pub(crate) fn unsupp<'s>(what: &'static str) -> bare_js_api::Error<'s> {
+    bare_js_api::Error::Abort(Abort::Unsupported(what))
+}
+
+/// Is `v` an object (a function is one)?
+#[inline]
+pub(crate) fn is_object(s: &Sc<'_, '_>, v: Local<'_>) -> bool {
+    matches!(s.type_of(v), Type::Object | Type::Function)
+}
+
+/// Is `v` `undefined` or `null`?
+#[inline]
+pub(crate) fn is_nullish(s: &Sc<'_, '_>, v: Local<'_>) -> bool {
+    matches!(s.type_of(v), Type::Undefined | Type::Null)
+}
+
+/// Run a helper of the old form on the interpreter of `s`.
+#[inline(always)]
+pub(crate) fn old<'s, T>(s: &mut Sc<'s, '_>, f: impl FnOnce(&mut Interp<'_>) -> R<T>) -> Res<'s, T> {
+    let it = s.engine();
+    match f(it) {
+        Ok(v) => Ok(v),
+        Err(e) => Err(it.api_err(e)),
+    }
+}
+
+/// `old` for a helper that gives a value.
+#[inline(always)]
+pub(crate) fn old_v<'s>(s: &mut Sc<'s, '_>, f: impl FnOnce(&mut Interp<'_>) -> R<Value>) -> Res<'s, Local<'s>> {
+    let it = s.engine();
+    match f(it) {
+        Ok(v) => Ok(it.raw_local(&v)),
+        Err(e) => Err(it.api_err(e)),
+    }
+}
+
+/// Run code of the new form where the caller has an interpreter: a scope, the result as an old error.
+pub(crate) fn run<'p, T>(it: &mut Interp<'p>, f: impl for<'s> FnOnce(&mut Sc<'s, 'p>) -> Res<'s, T>) -> R<T> {
+    bare_js_api::enter(it, |s| match f(s) {
+        Ok(v) => Ok(v),
+        Err(e) => Err(s.engine().api_unerr(e)),
+    })
+}
+
+/// `run` for code that gives a value.
+pub(crate) fn run_v<'p>(it: &mut Interp<'p>, f: impl for<'s> FnOnce(&mut Sc<'s, 'p>) -> Res<'s, Local<'s>>) -> R<Value> {
+    bare_js_api::enter(it, |s| match f(s) {
+        Ok(l) => Ok(s.engine().raw(l)),
+        Err(e) => Err(s.engine().api_unerr(e)),
+    })
+}
+
+/// A handler of the new form called as one of the old form (for the callers that have not moved).
+pub(crate) fn via(d: &Dom, it: &mut Interp<'_>, h: HS, this: Value, a: &[Value]) -> R<Value> {
+    run_v(it, |s| {
+        let e = s.engine();
+        let this = e.raw_local(&this);
+        let base = e.stack_len();
+        for v in a {
+            e.raw_local(v);
+        }
+        h(d, s, this, Args::from_slots(base, a.len() as u32))
+    })
+}
+
+impl Dom {
+    /// `Dom::lim` as an error of the interface.
+    #[cold]
+    pub(crate) fn lim_s<'s>(&self, s: &mut Sc<'s, '_>, what: &'static str) -> bare_js_api::Error<'s> {
+        s.engine().api_err(self.lim(what))
+    }
+
+    /// The local of an object of the host (a prototype, an interface object).
+    #[inline]
+    pub(crate) fn obj_local<'s>(&self, s: &mut Sc<'s, '_>, o: ObjId) -> Local<'s> {
+        s.engine().raw_local(&Value::Object(o))
+    }
+
+    /// Is `v` the object `o`?
+    pub(crate) fn is_obj_s(&self, s: &mut Sc<'_, '_>, v: Local<'_>, o: ObjId) -> bool {
+        matches!(s.engine().raw(v), Value::Object(x) if x == o)
+    }
+
+    /// The wrapper of `node` (`Dom::wrap`).
+    pub(crate) fn wrap_s<'s>(&self, s: &mut Sc<'s, '_>, node: NodeId) -> Res<'s, Local<'s>> {
+        old_v(s, |it| self.wrap(it, node))
+    }
+
+    /// `Dom::wrap_opt`.
+    pub(crate) fn wrap_opt_s<'s>(&self, s: &mut Sc<'s, '_>, n: Option<NodeId>) -> Res<'s, Local<'s>> {
+        match n {
+            Some(n) => self.wrap_s(s, n),
+            None => Ok(s.null()),
+        }
+    }
+
+    /// `Dom::dom_err` on a scope: the exception to throw.
+    pub(crate) fn dom_err_s<'s>(&self, s: &mut Sc<'s, '_>, name: &str, msg: &str) -> bare_js_api::Error<'s> {
+        let r = (|| -> Res<'s, Local<'s>> {
+            let proto = self.obj_local(s, self.p().domexc);
+            let o = s.new_error(proto, msg)?;
+            let n = self.js_str_s(s, name)?;
+            let attrs = Attrs { writable: true, enumerable: false, configurable: true };
+            s.define_str(o, "name", n, attrs)?;
+            let code = s.number(domexc_codes(name) as f64);
+            s.define_str(o, "code", code, attrs)?;
+            Ok(o)
+        })();
+        match r {
+            Ok(v) => bare_js_api::Error::Throw(v),
+            Err(e) => e,
+        }
+    }
+
+    /// `Dom::arg_node`.
+    pub(crate) fn arg_node_s<'s>(&self, s: &mut Sc<'s, '_>, a: Args<'s>, i: usize) -> Res<'s, NodeId> {
+        let v = arg_s(s, a, i);
+        match self.node_of_s(s, v) {
+            Some(n) => Ok(n),
+            None => Err(s.type_error(&format!("parameter {} is not of type 'Node'", i + 1))),
+        }
+    }
+
+    /// `Dom::string_arg` of the argument `i`.
+    pub(crate) fn arg_str_s<'s>(&self, s: &mut Sc<'s, '_>, a: Args<'s>, i: usize) -> Res<'s, String> {
+        let v = arg_s(s, a, i);
+        self.string_arg_s(s, v)
+    }
+
+    /// `Dom::selectors_at`.
+    pub(crate) fn selectors_at_s<'s>(&self, s: &mut Sc<'s, '_>, text: &str, scope: NodeId) -> Res<'s, Rc<Vec<Selector>>> {
+        old(s, |it| self.selectors_at(it, text, scope))
+    }
+
+    /// `Dom::room`, with the cap as an error of the interface.
+    pub(crate) fn room_s<'s>(&self, s: &mut Sc<'s, '_>, doc: &Document, nodes: usize, text: usize) -> Res<'s, ()> {
+        match self.room(doc, nodes, text) {
+            Ok(()) => Ok(()),
+            Err(e) => Err(lift_err(s, e)),
+        }
+    }
+
+    /// `Dom::attr_room`, with the cap as an error of the interface.
+    pub(crate) fn attr_room_s<'s>(&self, s: &mut Sc<'s, '_>, doc: &Document, el: NodeId, name: &str, value: &str) -> Res<'s, ()> {
+        match self.attr_room(doc, el, name, value) {
+            Ok(()) => Ok(()),
+            Err(e) => Err(lift_err(s, e)),
+        }
+    }
+}
+
+// ------------------------------------------------------------------------------------------ bridges to code of the old form
+// Each of these gives a function of a file that has not moved a form on `Scope`. The file that owns the function removes the bridge when it moves.
+
+pub(crate) fn wrap_coll_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, ids: &[NodeId]) -> Res<'s, Local<'s>> {
+    old_v(s, |it| crate::browser_gaps::wrap_coll(d, it, ids))
+}
+
+pub(crate) fn note_owner_s(d: &Dom, s: &mut Sc<'_, '_>, this: Local<'_>, made: Local<'_>) {
+    let it = s.engine();
+    let (this, made) = (it.raw(this), it.raw(made));
+    crate::browser_frames::note_owner(d, it, this, made);
+}
+
+pub(crate) fn custom_create_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, name: &str, options: Local<'s>) -> Res<'s, Local<'s>> {
+    let o = s.engine().raw(options);
+    old_v(s, |it| crate::browser_custom::create(d, it, name, o))
+}
+
+pub(crate) fn ns_put_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId, existing: Option<bare_html::dom::Atom>, qname: &str, value: &str) -> Res<'s, ()> {
+    old(s, |it| crate::browser_namespace::put(d, it, n, existing, None, qname, value))
+}
+
+pub(crate) fn media_src_changed_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId) -> Res<'s, ()> {
+    old(s, |it| crate::browser_media::src_changed(d, it, n))
+}
+
+pub(crate) fn script_src_changed_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId) -> Res<'s, ()> {
+    old(s, |it| d.script_src_changed(it, n))
+}
+
+pub(crate) fn script_inserted_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId) -> Res<'s, ()> {
+    old(s, |it| d.script_inserted(it, n))
+}
+
+pub(crate) fn file_from_ref_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, f: &FileRef) -> Res<'s, Local<'s>> {
+    old_v(s, |it| crate::browser_web::file_from_ref(d, it, f))
+}
+
+pub(crate) fn radio_group_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId) -> Res<'s, Vec<NodeId>> {
+    old(s, |it| d.radio_group(it, n))
+}
+
+pub(crate) fn set_value_attr_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId, text: &str) -> Res<'s, ()> {
+    old(s, |it| d.set_value_attr(it, n, text))
+}
+
+pub(crate) fn tag_fragments_s<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+    old(s, |it| crate::browser_elements::tag_fragments(d, it))
+}
+
+pub(crate) fn put_input_value_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId, v: String) -> Res<'s, ()> {
+    old(s, |it| d.put_input_value(Some(it), n, v))
+}
+
+/// The window object of the frame of `n` (`browser_frames::window_of`), as a local.
+pub(crate) fn window_of_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId) -> Option<Local<'s>> {
+    let o = crate::browser_frames::window_of(d, n)?;
+    Some(d.obj_local(s, o))
+}
+
+/// Is `v` an `Attr` object (a key of `Dom::attr`)?
+pub(crate) fn is_attr_node_s(d: &Dom, s: &mut Sc<'_, '_>, v: Local<'_>) -> bool {
+    match s.engine().raw(v) {
+        Value::Object(o) => d.attr.s.borrow().attrs.contains_key(&o),
+        _ => false,
     }
 }
 
