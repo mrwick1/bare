@@ -38,38 +38,38 @@ impl Realm {
 
     pub(crate) fn install_string(&mut self) {
         let proto = self.string_proto;
-        let c = self.ctor("String", string_ctor, proto);
-        self.method(c, "fromCharCode", from_char_code);
-        for (n, f) in [
-            ("charAt", char_at as NativeFn),
-            ("charCodeAt", char_code_at),
-            ("codePointAt", code_point_at),
-            ("at", at),
-            ("indexOf", index_of),
-            ("lastIndexOf", last_index_of),
-            ("includes", includes),
-            ("startsWith", starts_with),
-            ("endsWith", ends_with),
-            ("slice", slice),
-            ("substring", substring),
-            ("substr", substr),
-            ("split", split),
-            ("toUpperCase", to_upper),
-            ("toLowerCase", to_lower),
-            ("trim", trim),
-            ("trimStart", trim_start),
-            ("trimEnd", trim_end),
-            ("concat", concat),
-            ("repeat", repeat),
-            ("padStart", pad_start),
-            ("padEnd", pad_end),
-            ("replace", replace),
-            ("replaceAll", replace_all),
-            ("localeCompare", locale_compare),
-            ("toString", to_string),
-            ("valueOf", to_string),
+        let c = self.ctor("String", 1, string_ctor, proto);
+        self.method(c, "fromCharCode", 1, from_char_code);
+        for (n, len, f) in [
+            ("charAt", 1, char_at as NativeFn),
+            ("charCodeAt", 1, char_code_at),
+            ("codePointAt", 1, code_point_at),
+            ("at", 1, at),
+            ("indexOf", 1, index_of),
+            ("lastIndexOf", 1, last_index_of),
+            ("includes", 1, includes),
+            ("startsWith", 1, starts_with),
+            ("endsWith", 1, ends_with),
+            ("slice", 2, slice),
+            ("substring", 2, substring),
+            ("substr", 2, substr),
+            ("split", 2, split),
+            ("toUpperCase", 0, to_upper),
+            ("toLowerCase", 0, to_lower),
+            ("trim", 0, trim),
+            ("trimStart", 0, trim_start),
+            ("trimEnd", 0, trim_end),
+            ("concat", 1, concat),
+            ("repeat", 1, repeat),
+            ("padStart", 1, pad_start),
+            ("padEnd", 1, pad_end),
+            ("replace", 2, replace),
+            ("replaceAll", 2, replace_all),
+            ("localeCompare", 1, locale_compare),
+            ("toString", 0, to_string),
+            ("valueOf", 0, to_string),
         ] {
-            self.method(proto, n, f);
+            self.method(proto, n, len, f);
         }
     }
 }

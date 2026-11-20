@@ -317,6 +317,7 @@ ops! {
     CallSuper Abc "w R u" "`a = super(...)`: the `c` arguments are in the registers from `b`. It constructs with the `new.target` of this call and runs the field initializers (`SetFields`) of the class. The compiler writes `a` to the variable `this`.",
     CallSuperSpread Abc "w r" "As `CallSuper`, with the arguments in the array `b`.",
     RetDerived Abc "r r" "Return from a derived constructor with the value `a` and the variable `this` in `b`: an object is returned as it is; `undefined` gives `this` (a ReferenceError when `this` is the hole); anything else is a TypeError.",
+    Lazy Abc "" "The only instruction of the stub of a function that is compiled at its first call (`script::Lazy`): compile the function into this code, then run it from the start with the same arguments. The compiler never emits it.",
 }
 
 /// Words of a slot of a string switch table: the hash, the atom and the target.

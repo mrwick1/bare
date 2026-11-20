@@ -16417,6 +16417,143 @@ Instructions of the whole process at scale 1 (`script_run --eval`, `instructions
 | `objects` | 77.15 | 78.66 | +2.0% | 91.11 | 90.61 |
 
 Every row of step 4 is over +0.5% against its own numbers before the merge. The bytecode is the same, so the cause is the machine code of `Vm::run` (hypothesis: the new ops and arms of #767 and #771 move the allocation of the registers, as in the notes of steps 2 to 4). Main alone is cheaper than before on `loop` and `loopfn`, so the steps still gain against main now: `loop` -36%, `loopfn` -18%, `calls` -32%, `fib` -12%, `closures` -15%, `objects` -13%. Not done: a search for the cause.
+## 2026-11-20: property attributes, descriptors, non-extensible objects and generic Array methods in js2 (S2.7 follow-up)
+
+Branch `t3/js2-builtin-attrs`, from the test262 gate (#764). It fixes the groups that the gate reported as 325 (property attributes), 241 (Array methods on array-likes), 373 (missing methods) and 205 (accessors), the real non-extensible objects, and the hang of `Object.setPrototypeOf/set-failure-cycle.js`.
+
+### What changed
+
+- Built-in functions take their `length` and `name` from a static recipe (`Native { f, ctor, len, name }`). The two properties become own properties at the first use (`fn_prep`, flag `F_FNPROPS`), so installing a built-in costs no property. A bound function takes them from its target. `length` and `name` are not writable and are configurable. Methods have no own `prototype`.
+- Objects can be non-extensible: flag `F_NOEXT`, and the object gets its own dictionary shape. `Object.preventExtensions`, `seal`, `freeze`, `isExtensible`, `isSealed` and `isFrozen` work on plain objects and arrays. An array has uniform flags for all its elements (`F_ELEMS_RO`, `F_ELEMS_FIXED`, `F_LEN_RO`), and an array with one element of other attributes goes to the slow-index mode (`F_SLOWIDX`).
+- `crates/js2/src/bi_object.rs` (new) holds the property descriptors: `ValidateAndApplyPropertyDescriptor` in `define_own`, `Object.defineProperty`, `defineProperties`, `getOwnPropertyDescriptor(s)`, `getOwnPropertyNames`, the key order (indexes ascending, then names in insertion order), `assign`, `entries`, `values`, `setPrototypeOf` with the cycle check, and the other `Object` methods that were missing.
+- A native cannot call a script function. When a native meets an accessor, it uses the tail channel to call a helper of `prelude.js` (`Realm::helper`): `defineProperty`, `defineProperties`, `assign`, the search methods (`indexOf`, `lastIndexOf`, `includes`) on an object that is not a plain array, `values` and `entries`. The two ops `CopyProps` (`{...x}`) and `ObjRest` (`{a, ...rest} = x`) do the same when the source has an accessor (`Op` calls `H_SPREAD` or `H_REST`, result goes to the register of the op).
+- `bi_array.rs` is rewritten to follow the specification: `ToObject(this)`, `ToLength`, and `get`, `has`, `set` and `delete` for each element. A plain array takes the direct path after one flag test. New: `at`, `fill`, `copyWithin`, `toReversed`, `toSpliced`, `with`. `RangeError` for an invalid length. The callback methods in `prelude.js` follow the same rules and have the right `length`. New there: `findLast`, `findLastIndex`, `flat`, `flatMap`, `toSorted`, `toLocaleString`, `Array.of`, `Array.from` on array-likes. The prelude is strict code now, so a write to a frozen array throws.
+- `Error` and the six native errors are real constructors that inherit from `Error`. `new Error(msg, { cause })` works. The prototype objects of the errors are not errors.
+- `Object.prototype.__proto__` is an accessor. `DeclGlobal` looks at the own properties of the global object only (a `var __proto__` was a read of the inherited accessor).
+
+### test262 (`tools/js/test262_js2.sh -j 8`, 16,755 tests that the old engine passes)
+
+| | #764 head | this change |
+| --- | ---: | ---: |
+| pass on the old engine, fail on js2 | 4,852 | 2,877 |
+| js2 passes (of the tests that run) | 11,944 | 13,923 |
+| js2 fails | 5,840 | 3,861 |
+| pass on js2, fail on the old engine | 41 | 45 |
+| group: property attributes (325) | 325 | 76 |
+| group: method is missing (373) | 373 | 8 |
+| group: accessors (205) | 205 | 18 |
+| group: Array method on an array-like (241) | 241 | 0 |
+| runner time (8 jobs, 30 s per directory) | 49 s, and the hang | 22 s |
+
+No test that passes on js2 on #764 fails now (0 of 11,944; compared test by test). The hang is gone: `set-failure-cycle.js` throws `TypeError`. `tools/fixtures/js/test262-js2-baseline.txt` is the new table.
+Most of what is left in these groups needs work that other tasks do: wrapper objects (`Object(1)`, `new String`), `ToPrimitive` that calls a script `valueOf` or `toString`, the `length` and `name` of script functions, `Symbol` and iterators (`Array.prototype.keys` and the others), and the number-to-string form of `1e21`.
+
+### Differential runner
+
+292 programs: 272 same, 20 differ, 0 new. Two known differences are gone and their lines are removed from `tools/fixtures/js/diff-known.txt`: `corpus:array_gaps` and `corpus:key_order`. The known list is smaller.
+
+### Cost
+
+Machine archMachine (AMD Ryzen 9 5900HX), release build, `perf stat -e instructions:u` with `GLIBC_TUNABLES=glibc.malloc.tcache_count=65535`, minimum of 3 runs, 2 rounds. Base is origin/main at the merge of #764 (ee8ba415). Net = count(N) - count(0), in millions. The two rounds differ by 0.003 M at most.
+
+| Row | N | Base | New | Change |
+| --- | ---: | ---: | ---: | ---: |
+| `loopfn` | 1,000,000 | 333.50 | 312.50 | -6.3% |
+| `calls` | 1,000,000 | 715.50 | 687.50 | -3.9% |
+| `fib` | 30 | 1442.86 | 1411.89 | -2.1% |
+| `closures` | 200,000 | 419.42 | 411.23 | -2.0% |
+| `objects` | 200,000 | 154.06 | 152.59 | -1.0% |
+
+No row is over +0.5%. The change touches no op of the hot loops, so hypothesis: the drop comes from code layout and inlining, not from the change. Not verified (no run at `codegen-units=1`).
+
+VM setup, two numbers:
+
+- `interp_load` with N = 0 (VM, realm and built-in install, no prelude): 0.761 M to 0.795 M (+0.035 M, +4.6%). Built-ins install no `length` or `name` property, so this is the cost of the new static tables and flags.
+- `script_run` of `var r = 1;` (compile and run of the prelude too): 4.472 M to 9.732 M (+5.26 M). **This is a rise.** The prelude grew from 6,123 to 14,210 bytes. A part is the generic callback methods, and a part is the helpers for accessors (2,496 bytes, 1.5 M of the rise; measured by removing them). The cost is about 650 instructions for each byte of prelude. Callgrind (`script_run`, 9.84 M): parse of the top level 2.35 M, parse of each function again 2.26 M, compile 3.9 M, the run of the prelude is small. The cause is that `Loader::add` compiles every function of the prelude at load, also those that no script calls.
+
+The way to remove this cost is to compile a prelude function at its first call (a stub with the source range, replaced at the first call). That needs the compiler to run inside a running VM, which the `Function` constructor needs too. It is not done here. The other way is to cache the compiled prelude for each process, which helps the second page but not the first.
+
+### Tests
+
+`cargo test --locked -p bare-js2 --lib`: 381 pass (4 new in `script_tests.rs`: attributes, accessors, frozen and sealed objects, array-likes; each under constant collection too). `cargo test --locked -p bare-js-diff`: all pass.
+
+Not tested: Windows and macOS; Miri; the old-engine modes `auto` and `byte`; a collection during a helper call that is made from `CopyProps` or `ObjRest` (only the unit tests under constant collection of the other paths run); array-likes with an accessor in `slice`, `splice`, `concat`, `reverse`, `toReversed`, `toSpliced` and `with` (they throw `TypeError`: the helper exists for the search methods only); an index setter on `Array.prototype` during `push` (the native path does not call it); arrays of length 4,294,967,295; `Object.create(Error.prototype)` is still reported as `[object Error]`; strict-mode assignment to a read-only property in the interpreter (it is silent; natives and the prelude throw); VM setup at `codegen-units=1`.
+
+## 2026-11-20: the prelude is compiled at the first call of each function (js2, S2.9 decision 1)
+
+Branch `t3/reduce-prelude-startup-cost`, from the head of #768 (`09b2e408`, it was open when I started). Design and the other options: `docs/design-js2-prelude.md`. The task: VM setup was 9.73 M instructions after #768 (the prelude grew from 6.1 KB to 14.2 KB), and the loader compiled all 43 prelude functions at start, 685 instructions for each byte, even for functions that no script calls.
+
+### What changed
+
+- `Op::Lazy` (`bytecode.rs`): the one instruction of a stub. A stub is a `Code` with no parameters and `CF_ARGS`, so a call to it makes the array of all arguments in the frame record, as for any call. Nothing on the ordinary call path changed.
+- `LazyCompile` (`interp.rs`) and `Vm::lazy`: `Op::Lazy` asks it to compile the code at the running index in place. Then the interpreter gives the code a new `Feedback`, makes the frame again from the array of arguments and runs from pc 0. `interp.rs` holds `prog` as `&mut Program` in `run`, and `code_flags` is split out of `scan_flags`.
+- `Lazy` (`script.rs`): the source text, the `Facts`, the shared atoms and the sorted list of `(stub index, Child)`. `Loader` got a lazy mode: a child is a stub when its facts have no `super`. `Loader::fill` puts a compiled child at a given index (a stub or a placeholder). `load_with` makes the prelude lazy. User scripts and the host script are compiled as before.
+- `typeof` names are shared atoms (`interp_rt.rs`, `Realm::new`). See the next section.
+
+### A finding: the `typeof` names
+
+A string literal is loaded as its shared atom (`LoadAtom`). `typeof` gave a run-time atom if the shared table had no atom for the word when `Realm::new` ran. The eager load put every word of the prelude in the table first, so it worked by chance. With the lazy compile, a call of `a.forEach(f)` cost 8,999 instead of 8,308 instructions, because `typeof cb !== 'function'` and `typeof v === 'object'` compared the contents each time (`Str::equals`, 2.2 calls for each call of `forEach`; found with a callgrind diff of the count at 1,100 calls and at 100 calls). The names are now made in the shared table. After the fix: 8,277. Test `the_names_of_typeof_are_shared_atoms_like_the_string_literals` fails without the fix (checked) and passes with it.
+
+### Cost
+
+Machine archMachine (AMD Ryzen 9 5900HX), release build, load average 11 to 40 from other jobs, so only instruction counts are used. Base: `09b2e408` (the head of #768) built in the same session. Tool: `tools/js/instr.sh` (`perf stat -e instructions:u`, minimum of 3 runs), `script_run`.
+
+VM setup, `script_run` of `var x = 1;`: **9.73 M to 4.01 M** (4.012 M to 4.016 M in four builds of this branch). Callgrind of the new build: pre-parse of the 14.2 KB 2.35 M, the compile of the wrapper function 0.80 M, `Vm::new` 0.29 M, the rest (realm, built-in install, process start, run) about 0.6 M. The pre-parse and the wrapper are what option B′ and B of the design document remove.
+
+Memory at start (`script_run` of `var x = 1;`):
+
+| Measure | Before | After |
+| --- | ---: | ---: |
+| malloc bytes made over the run (DHAT, 1 run) | 804 KB | 248 KB |
+| malloc blocks made | 4,153 | 778 |
+| malloc peak bytes live (DHAT `t-gmax`) | 90.2 KB | 81.8 KB |
+| peak RSS, 5 runs, KiB (a small launcher with `getrusage`; an empty Rust program is 2.2 MiB) | 5256 5264 5272 5288 5300 | 4972 5096 5208 5212 5252 |
+
+The RSS drops by 0.12 MiB (mean 5.15 to 5.03 MiB) and the spread of a run is as large as that. Most of the 5 MiB is the floor of the VM. With a script that calls `map` and `filter`: 5.17 MiB before, 4.96 MiB after; `webpack` at scale 1: 5.41 and 5.32 MiB.
+
+`eval_load` rows, user instructions of the whole process in millions (3 sessions of base and new in turn, each the minimum of 3 runs; range over the sessions). Net slope is the count at scale 10 minus the count at scale 1:
+
+| Row | Scale 1 base | Scale 1 new | Net slope base | Net slope new | Slope change (median) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `loop` | 522.0 to 528.0 | 515.3 | 4603.8 to 4669.8 | 4600.8 | -0.2% |
+| `loopfn` | 69.22 | 62.91 | 534.6 | 529.2 | -1.0% |
+| `calls` | 338.4 to 339.9 | 330.7 | 2955.9 to 2957.4 | 2939.4 | -0.6% |
+| `fib` | 17.09 to 17.34 | 11.12 | 71.8 to 73.5 | 71.0 | -1.5% |
+| `closures` | 48.27 to 48.35 | 42.24 to 42.32 | 344.7 to 361.1 | 341.8 to 342.7 | -0.8% |
+| `objects` | 183.3 to 190.0 | 174.9 to 178.8 | 1517.8 to 1605.2 | 1506.2 to 1520.7 | -2.9% |
+| `webpack` | 15.42 | 10.06 | 46.1 | 46.2 | 0.0% |
+| `throws` | 97.7 to 101.4 | 91.8 | 788.1 to 791.8 | 789.8 to 790.2 | -0.2% |
+| `concat` | 10.02 | 4.32 | 2.09 | 2.03 | -2.9% |
+
+No net slope is worse. Scale 1 is 4 to 6 M lower on each row, as the setup is. Note on the noise: the same binary gave `calls` at scale 10 in 3295.8 M and 3310.8 M in two sessions (glibc and environment, as `tools/js/instr.sh` says). A first pair of runs showed `calls` +0.8%. A variant that kept `prog` as `&Program` (and compiled the prelude eagerly) gave 3314.8 M to 3389.8 M in the same sessions, so the `&mut Program` in `run` is not the cause.
+
+First call of a prelude function (extra cost of the first call over a later call; each the minimum of 3 runs of 0, 1 and 2 calls in a script):
+
+| First call | Functions compiled | Before | After |
+| --- | ---: | ---: | ---: |
+| `a.forEach(f)` | 5 | 17.6 K | 354.7 K |
+| `a.find(f)` | 5 | 8.9 K | 351.9 K |
+| `a.flat()` | 4 | 13.2 K | 430.0 K |
+| `a.sort()` | 6 | 7.9 K | 944.4 K |
+
+58 K for each function on average (callgrind: 348 K for the 6 functions of one run). The 5.7 M that these functions cost at start is not paid by a script that does not call them.
+
+Steady state (count at 1,100 calls minus count at 100 calls, divided by 1,000), before and after the `typeof` fix: `forEach` 8,378 and 8,277; `sort` 23,871 and 23,794; `find` 6,898 and 6,903.
+
+### Tests
+
+- `cargo test --locked -p bare-js2 --lib`: 385 pass, 4 new in `script_tests.rs`: `prelude_functions_are_compiled_at_their_first_call` (the stubs that wait, and that a second call compiles none), `a_lazy_function_gets_its_arguments_the_first_time_and_after` (`reduce` with and without an initial value, `forEach`, `Array.from`, `Array.prototype.map` through `call` with extra arguments, `Array.of`; each under constant collection too, so a collection runs at the first call), `a_lazy_compile_that_fails_throws_a_syntax_error` and `the_names_of_typeof_are_shared_atoms_like_the_string_literals`. `a_scope_with_many_locals_compiles_in_linear_time` failed once under load (load average 40) and passed alone (8.7 s), as the task says.
+- `cargo test --locked -p bare-js-diff`: all pass.
+- test262 (`tools/js/test262_js2.sh`, checkout at `e4fbf577`, run twice: after the lazy compile and after the `typeof` fix): `counts.txt` is the same as `tools/fixtures/js/test262-js2-baseline.txt`, line by line (452 directories, no new failure).
+- `cargo clippy -p bare-js2 --all-targets`: no warning in the files that I changed.
+
+### Not tested
+
+Windows and macOS; Miri (no `unsafe` was added, but `Op::Lazy` runs in `interp.rs`, which CI runs under Miri); wall time; a first call of a lazy function from a getter, a setter, a constructor with fields or a native's `Outcome::Enter` (they use the same `enter!`, and no test makes a first call there); lazy functions for user scripts (not built); a prelude function that uses `super` (the loader compiles it at load, and there is none); the `op-count` feature of #766 (it is not in this tree); the browser (js2 is not wired in).
+
+### Open: the rest of the start cost
+
+4.01 M is not close to zero. 2.35 M is the pre-parse of the whole prelude, which still reads every function body. A prototype (not in the PR) that parses the top level of the prelude with known facts and jumps over each function costs 12.4 K for that step. That is option B′ of the design document: the facts of the prelude as a generated file. Hypothesis: about 1.7 M. A compiled image (option B) is about 1.0 M, hypothesis. The questions for the owner are in section 6 of `docs/design-js2-prelude.md`.
 ## 2026-11-20: host handlers on the interface, D1: style, CSSOM and geometry (plan step S0.4 / D1)
 
 Status: the handlers of the files below run through the interface (`Scope`, `Local`, `Args`). Tests pass on Linux and Windows. The full matrix passes under the standing rule: no row is over +0.5% under both allocators. Base: PR #762 (`t3/convert-browser-host-handlers`, head `9f74a623`). The diff is about 2,200 changed lines.
