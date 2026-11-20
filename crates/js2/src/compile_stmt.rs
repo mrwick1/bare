@@ -2,6 +2,21 @@
 use super::expr::K;
 use super::pat::Bind;
 use super::*;
+use crate::bytecode::STR_EMPTY;
+use std::collections::HashSet;
+
+/// The fewest distinct integer cases for a jump table, and the largest `max - min + 1` for each case (V8 allows 3 for each clause and
+/// needs 6 cases; JSC needs 3 cases). The numbers are measured in `docs/progress.md`.
+const MIN_INT_CASES: usize = 3;
+const INT_SPAN: i64 = 3;
+/// The fewest distinct string cases for a hash table.
+const MIN_STR_CASES: usize = 3;
+
+/// The keys of a switch that a table dispatches: each key with the index of its case.
+enum Plan {
+    Int(Vec<(i32, usize)>),
+    Str(Vec<(u32, usize)>),
+}
 
 /// The names that a function (or a script) declares in its own scope, found before the code is compiled.
 #[derive(Default)]
@@ -981,14 +996,17 @@ impl<'a> Fc<'a> {
         };
         let labels: Vec<Lb> = cases.iter().map(|_| self.label()).collect();
         let end = self.label();
-        let mut default = None;
-        for (i, c) in cases.iter().enumerate() {
-            match c.test {
-                Some(t) => self.case_jump(d, t, labels[i])?,
-                None => default = Some(labels[i]),
+        let default = cases.iter().position(|c| c.test.is_none()).map_or(end, |i| labels[i]);
+        if let Some(plan) = self.table_plan(&cases)? {
+            self.switch_table(d, plan, &labels, default);
+        } else {
+            for (i, c) in cases.iter().enumerate() {
+                if let Some(t) = c.test {
+                    self.case_jump(d, t, labels[i])?;
+                }
             }
+            self.jmp(default);
         }
-        self.jmp(default.unwrap_or(end));
         let pend = std::mem::take(&mut self.pending);
         self.push_frame(pend, FrameKind::Block { brk: end, is_switch: true });
         for (i, c) in cases.iter().enumerate() {
@@ -1004,6 +1022,97 @@ impl<'a> Fc<'a> {
         }
         self.free(m);
         Ok(())
+    }
+
+    /// The keys of a switch that a table can dispatch: every case is an integer constant, or every case is a string constant (`MIN_INT_CASES`,
+    /// `MIN_STR_CASES`, `INT_SPAN`: the thresholds). A key has the index of the first case that has it, so a later duplicate gets no entry.
+    /// A case that is not a constant, or a mix of kinds, gives `None`: the chain keeps the order of evaluation and the strict equality.
+    fn table_plan(&mut self, cases: &[Case]) -> CR<Option<Plan>> {
+        let mut ints: Vec<(i32, usize)> = Vec::new();
+        let mut strs: Vec<(u32, usize)> = Vec::new();
+        let (mut seen_i, mut seen_s) = (HashSet::new(), HashSet::new());
+        for (i, c) in cases.iter().enumerate() {
+            let Some(t) = c.test else { continue };
+            match self.konst(t)? {
+                Some(K::Int(v)) if strs.is_empty() => {
+                    if seen_i.insert(v) {
+                        ints.push((v, i));
+                    }
+                }
+                Some(K::Str(a)) if ints.is_empty() => {
+                    if seen_s.insert(a) {
+                        strs.push((a, i));
+                    }
+                }
+                _ => return Ok(None),
+            }
+        }
+        let n = ints.len().max(strs.len());
+        if !ints.is_empty() {
+            let (lo, hi) = ints.iter().fold((i32::MAX, i32::MIN), |(lo, hi), &(v, _)| (lo.min(v), hi.max(v)));
+            let span = hi as i64 - lo as i64 + 1;
+            return Ok((n >= MIN_INT_CASES && span < INT_SPAN * n as i64).then_some(Plan::Int(ints)));
+        }
+        Ok((n >= MIN_STR_CASES).then_some(Plan::Str(strs)))
+    }
+
+    /// Jump by a table on `d` (`SwitchI` or `SwitchA`). The table goes to `Code::tables`; its targets are labels until `finish`.
+    fn switch_table(&mut self, d: u32, plan: Plan, labels: &[Lb], default: Lb) {
+        if self.dead {
+            return;
+        }
+        let at = self.tables.len();
+        let mut targets: Vec<Lb> = vec![default];
+        let op = match plan {
+            Plan::Int(keys) => {
+                let lo = keys.iter().map(|k| k.0).min().expect("a table has a case");
+                let len = keys.iter().map(|k| (k.0 as i64 - lo as i64) as usize).max().expect("a table has a case") + 1;
+                let mut by_value = vec![default; len];
+                for (v, i) in keys {
+                    by_value[(v as i64 - lo as i64) as usize] = labels[i];
+                }
+                self.tables.extend([lo as u32, 0, len as u32]);
+                self.table_fix.push((at + 1, default));
+                for l in by_value {
+                    self.table_fix.push((self.tables.len(), l));
+                    self.tables.push(0);
+                    targets.push(l);
+                }
+                Op::SwitchI
+            }
+            Plan::Str(keys) => {
+                // A power of two with at least 4/3 slots for each case (a load of at most 3/4): a probe ends at an empty slot.
+                let slots = (keys.len() * 4).div_ceil(3).next_power_of_two();
+                let mut place: Vec<Option<[u32; 3]>> = vec![None; slots];
+                for (a, i) in keys {
+                    let h = self.atom_tab[a as usize].cached_hash();
+                    let mut p = h as usize & (slots - 1);
+                    while place[p].is_some() {
+                        p = (p + 1) & (slots - 1);
+                    }
+                    place[p] = Some([h, a, i as u32]);
+                }
+                self.tables.extend([0, slots as u32 - 1]);
+                self.table_fix.push((at, default));
+                for slot in place {
+                    match slot {
+                        Some([h, a, i]) => {
+                            self.table_fix.push((self.tables.len() + 2, labels[i as usize]));
+                            self.tables.extend([h, a, 0]);
+                            targets.push(labels[i as usize]);
+                        }
+                        None => self.tables.extend([0, STR_EMPTY, 0]),
+                    }
+                }
+                Op::SwitchA
+            }
+        };
+        self.op(op, d, at as u32, 0);
+        targets.sort_by_key(|l| l.0);
+        targets.dedup();
+        for l in targets {
+            self.reach(l);
+        }
     }
 
     /// Jump to `to` when `d === test`.

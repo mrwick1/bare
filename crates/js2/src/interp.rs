@@ -48,8 +48,8 @@
 //! miss is in the realm, out of line.
 //!
 //! **Not here:** the generators and async functions, `with` and direct `eval`, regexp and BigInt (a literal throws a `TypeError`),
-//! `ToPrimitive`, the iterator protocol (an array and a string are iterated, anything else throws; `for-in` walks the own keys), and every
-//! built-in. They come with S2.7. The classes, `super`, private names, accessors, spread and rest, `arguments` and `new.target` are here
+//! the iterator protocol (an array and a string are iterated, anything else throws; `for-in` walks the own keys), `Symbol`, `Map`, `Set`,
+//! `JSON`, `Date` and `Promise`. The core built-ins (S2.7: `builtins.rs`) and `ToPrimitive` are here. The classes, `super`, private names, accessors, spread and rest, `arguments` and `new.target` are here
 //! (`interp_ops.rs` has the runtime side).
 //!
 //! `unsafe` is in five places, each with a `SAFETY` comment. (1) `r!`: a register is read or written with no bounds check. (2) `word!`:
@@ -60,7 +60,8 @@
 //! invariant that every pointer in a register or a cell is live (the roots above keep it). The gains of (1) to (3) are measured with the
 //! safe form of each, in `docs/progress.md` (S2.6): (1) and (2) together save 8 to 18% of the instructions of a micro loop, (3) another 6 to 9%.
 use crate::atoms::SharedAtoms;
-use crate::bytecode::{Asm, CF_ARGS, CF_LINK, Code, ITER_REGS, Ins, Op, decode};
+use crate::builtins::Outcome;
+use crate::bytecode::{Asm, CF_ARGS, CF_LINK, Code, ITER_REGS, Ins, Op, STR_EMPTY, STR_SLOT, decode};
 use crate::gc::Marker;
 use crate::interp_rt::{ErrKind, Feedback, Got, Key, Put, R, Realm};
 use crate::object::{F_DERIVED, Obj};
@@ -116,6 +117,46 @@ fn record(stack: &[Value], fp: usize, k: usize) -> Value {
 #[inline(always)]
 fn int_at(stack: &[Value], fp: usize, k: usize) -> i32 {
     stack[fp - REC + k].bits() as u32 as i32
+}
+
+/// The target of `SwitchI` for the table `t` (`lo`, the default, the length and the targets: `bytecode.rs`) and the value `v`. An integer
+/// and a double that is an integer value (`-0` is 0, `3.0` is 3) index the table; a NaN, a fraction, a value out of range and a
+/// non-number get the default (`f as i32` saturates, so the round trip tells the first group from the others).
+#[inline(always)]
+fn switch_int(t: &[u32], v: Value) -> usize {
+    let i = v.as_int().or_else(|| v.as_f64().filter(|f| *f == f64::from(*f as i32)).map(|f| f as i32));
+    // `lo + len - 1` fits an `i32` (the verifier), so a value below `lo` wraps past `len`.
+    let k = i.map_or(usize::MAX, |i| i.wrapping_sub(t[0] as i32) as u32 as usize);
+    (if k < t[2] as usize { t[3 + k] } else { t[1] }) as usize
+}
+
+/// The target of `SwitchA` for the table `t` and the value `v`. Out of line: the string probe is not part of the hot loop of an
+/// arithmetic or call path, and a function this size inside `run` costs those paths instructions.
+#[inline(never)]
+fn switch_str(heap: &mut crate::heap::Heap, code: &Code, t: &[u32], v: Value) -> usize {
+    let mut to = t[0];
+    if let Some(s) = Realm::str_of(v) {
+        // The hash of an atom or of a string that was a key before is in its cell; a rope or a new string computes it.
+        let h = match s.cached_hash() {
+            0 => s.hash(heap).expect("memory"),
+            h => h,
+        };
+        let mask = t[1] as usize;
+        let mut p = h as usize & mask;
+        // The verifier proved an empty slot, so the probe ends.
+        while let [slot_hash, atom, target] = t[2 + STR_SLOT * p..][..STR_SLOT] {
+            if atom == STR_EMPTY {
+                break;
+            }
+            let case = code.atoms[atom as usize];
+            if slot_hash == h && (case == s || crate::string::Str::equals(heap, s, case).expect("memory")) {
+                to = target;
+                break;
+            }
+            p = (p + 1) & mask;
+        }
+    }
+    to as usize
 }
 
 /// Mark the frames, from the top (`ci`, `fp`, `pc` of its safepoint) down to the frame of the host.
@@ -210,7 +251,8 @@ impl Vm {
     /// Run code `ci` (a function with no parameters and no context) as the main function.
     pub fn run_main(&mut self, ci: usize) -> Result<Value, Exit> {
         let f = self.function(ci);
-        self.call(f, Value::UNDEFINED, &[])
+        let g = self.realm.global.value();
+        self.call(f, g, &[])
     }
 
     /// Collect now, as the gate does (for tests and the host between tasks: the stack must be empty or stopped at a safepoint).
@@ -512,11 +554,41 @@ impl Vm {
                 }
             }};
         }
+        // Call the native function `$callee` (`builtins.rs`) with the `$argc` arguments at the stack index `$ab`; the result goes to
+        // register `$dst`. A native may ask for a call (`Outcome::Enter`), which is a frame as for any call. Ends with `continue`.
+        macro_rules! native_call {
+            ($callee:expr, $this:expr, $ab:expr, $argc:expr, $dst:expr, $next:expr) => {{
+                gate!();
+                let (callee, this): (Value, Value) = ($callee, $this);
+                let (ab, argc) = ($ab as usize, $argc as usize);
+                match tri!(realm.call_native(callee, this, &stack[ab..ab + argc])) {
+                    Outcome::Val(v) => {
+                        r!($dst) = v;
+                        pc = $next;
+                    }
+                    Outcome::Enter { f, this } => {
+                        let Some((ni, cctx)) = realm.function(f) else { call_err!(f) };
+                        let len = realm.tail_args.len();
+                        let nf = fp + code.nregs as usize + REC;
+                        ensure!(nf + len + 8);
+                        stack[nf..nf + len].copy_from_slice(&realm.tail_args);
+                        enter!(f, ni, cctx, this, undef, $dst as i32, pc, $next, nf, len);
+                        pc = 0;
+                    }
+                }
+                continue;
+            }};
+        }
         // Call with a frame record. `$argbase`: the first argument register. `$this`: the value of `this`.
         macro_rules! call {
             ($a:expr, $b:expr, $argbase:expr, $argc:expr, $this:expr, $next:expr) => {{
                 let callee: Value = r!($b);
-                let Some((ni, cctx)) = realm.function(callee) else { call_err!(callee) };
+                let Some((ni, cctx)) = realm.function(callee) else {
+                    if realm.native_id(callee).is_some() {
+                        native_call!(callee, $this, fp + $argbase as usize, $argc, $a, $next)
+                    }
+                    call_err!(callee)
+                };
                 enter!(callee, ni, cctx, $this, undef, $a as i32, pc, $next, fp + $argbase as usize, $argc);
                 pc = 0;
                 continue;
@@ -894,7 +966,15 @@ impl Vm {
                     Op::New => {
                         gate!();
                         let callee = r!(b!());
-                        let Some((ni, cctx)) = realm.function_new(callee) else { err!(ErrKind::Type, "not a constructor") };
+                        let Some((ni, cctx)) = realm.function_new(callee) else {
+                            if realm.native_id(callee).is_some() {
+                                let (ab, argc) = (fp + b!() + 1, c!());
+                                r!(a!()) = tri!(realm.construct_native(callee, &stack[ab..ab + argc], callee));
+                                pc = next;
+                                continue;
+                            }
+                            err!(ErrKind::Type, "not a constructor")
+                        };
                         construct!(callee, ni, cctx, callee, a!(), next, fp + b!() + 1, c!(), 0)
                     }
                     Op::Add | Op::AddI => {
@@ -1092,6 +1172,8 @@ impl Vm {
                     Op::JSNeNull => jump!(!r!(a!()).is_null(), next, sbx!()),
                     Op::JSEqUndef => jump!(r!(a!()).is_undefined(), next, sbx!()),
                     Op::JSNeUndef => jump!(!r!(a!()).is_undefined(), next, sbx!()),
+                    Op::SwitchI => pc = switch_int(&code.tables[bx!()..], r!(a!())),
+                    Op::SwitchA => pc = switch_str(&mut realm.heap, code, &code.tables[bx!()..], r!(a!())),
                     Op::Ret => ret!(r!(a!())),
                     Op::RetUndef => ret!(undef),
                     Op::Throw => throw!(r!(a!())),
@@ -1196,7 +1278,14 @@ impl Vm {
                     }
                     Op::CallSpread => {
                         let callee = r!(b!());
-                        let Some((ni, cctx)) = realm.function(callee) else { call_err!(callee) };
+                        let Some((ni, cctx)) = realm.function(callee) else {
+                            if realm.native_id(callee).is_some() {
+                                gate!();
+                                let (nf, len) = stage_array!(r!(b!() + 2));
+                                native_call!(callee, r!(b!() + 1), nf, len, a!(), next)
+                            }
+                            call_err!(callee)
+                        };
                         let (nf, len) = stage_array!(r!(b!() + 2));
                         enter!(callee, ni, cctx, r!(b!() + 1), undef, a!() as i32, pc, next, nf, len);
                         pc = 0;
@@ -1205,7 +1294,15 @@ impl Vm {
                     Op::NewSpread => {
                         gate!();
                         let callee = r!(b!());
-                        let Some((ni, cctx)) = realm.function_new(callee) else { err!(ErrKind::Type, "not a constructor") };
+                        let Some((ni, cctx)) = realm.function_new(callee) else {
+                            if realm.native_id(callee).is_some() {
+                                let (nf, len) = stage_array!(r!(b!() + 1));
+                                r!(a!()) = tri!(realm.construct_native(callee, &stack[nf..nf + len], callee));
+                                pc = next;
+                                continue;
+                            }
+                            err!(ErrKind::Type, "not a constructor")
+                        };
                         let (nf, len) = stage_array!(r!(b!() + 1));
                         construct!(callee, ni, cctx, callee, a!(), next, nf, len, 0)
                     }
@@ -1370,7 +1467,22 @@ impl Vm {
                         let Some(pv) = Realm::obj(class).and_then(|f| realm.proto_of(f)).map(|p| p.value()) else {
                             err!(ErrKind::Type, "super constructor is not a constructor")
                         };
-                        let Some((ni, cctx)) = realm.function_new(pv) else { err!(ErrKind::Type, "super constructor is not a constructor") };
+                        let Some((ni, cctx)) = realm.function_new(pv) else {
+                            if realm.native_id(pv).is_some() {
+                                // A class that extends a built-in: the built-in makes `this`, then the fields of the class run.
+                                let (ab, argc) = if opv == Op::CallSuper { (fp + b!(), c!()) } else { stage_array!(r!(b!())) };
+                                let v = tri!(realm.construct_native(pv, &stack[ab..ab + argc], nt));
+                                r!(a!()) = v;
+                                if let Some((fi, fctx, ff)) = realm.fields_of(class) {
+                                    enter!(ff, fi, fctx, v, undef, code.nregs as i32, pc, next, 0usize, 0usize);
+                                    pc = 0;
+                                } else {
+                                    pc = next;
+                                }
+                                continue;
+                            }
+                            err!(ErrKind::Type, "super constructor is not a constructor")
+                        };
                         let (ab, argc) = if opv == Op::CallSuper { (fp + b!(), c!()) } else { stage_array!(r!(b!())) };
                         construct!(pv, ni, cctx, nt, a!(), next, ab, argc, AFTER_SUPER)
                     }
@@ -1504,7 +1616,7 @@ fn imod(i: i32, j: i32) -> Value {
 }
 
 /// `x ** y` with the rules of JavaScript where Rust's `powf` differs.
-fn pow(x: f64, y: f64) -> f64 {
+pub(crate) fn pow(x: f64, y: f64) -> f64 {
     if y.is_nan() || (x.abs() == 1.0 && y.is_infinite()) { f64::NAN } else { x.powf(y) }
 }
 

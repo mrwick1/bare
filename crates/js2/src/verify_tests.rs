@@ -418,3 +418,115 @@ fn a_template_recipe_may_hold_an_undefined_cooked_string() {
     c.recipes.push(&[u32::MAX]);
     bad(&c, "recipe");
 }
+
+/// r0 = argument, r1 a result. pc 0 `op r0, t0`; pc 1 and 2 are one wide `LoadI r1, 100000` (so 2 is no instruction start); pc 3 `Ret r1`;
+/// pc 4 `RetUndef`; the code ends at 5. The tables are `tables`. A good target is 1 or 4; 3 is an instruction, but `r1` is not written on a path that goes there from the switch.
+fn switch_code(op: Op, tables: Vec<u32>) -> (SharedAtoms, Code) {
+    // `build` gives the atoms and the root maps; the words are written by hand, so that the `LoadI` has the wide form (a 17-bit immediate).
+    let (s, mut c) = build(2, 1, |a| _ = a.emit(ins(Op::RetUndef, 0, 0, 0)));
+    let mut words = Vec::new();
+    crate::bytecode::encode(&mut words, &ins(op, 0, 0, 0)).unwrap();
+    crate::bytecode::encode(&mut words, &ins(Op::LoadI, 1, 100_000, 0)).unwrap();
+    crate::bytecode::encode(&mut words, &ins(Op::Ret, 1, 0, 0)).unwrap();
+    crate::bytecode::encode(&mut words, &ins(Op::RetUndef, 0, 0, 0)).unwrap();
+    assert_eq!(words.len(), 5);
+    c.words = words;
+    c.tables = tables;
+    maps(&mut c, |_| vec![0]);
+    (s, c)
+}
+
+#[test]
+fn a_switch_table_passes_and_its_targets_are_the_successors() {
+    // lo 1, default 4, targets 1 4 1: the values 1 and 3 go to pc 1, and 2 goes to the default.
+    let (_s, c) = switch_code(Op::SwitchI, vec![1, 4, 3, 1, 4, 1]);
+    verify(&c).unwrap();
+    let (i, _) = decode(&c.words, 0).unwrap();
+    assert_eq!(c.switch_targets(&i).unwrap(), [1, 4, 1, 4]);
+    assert!(c.disassemble().contains("[1 -> 0001, 3 -> 0001, default -> 0004]"), "{}", c.disassemble());
+    // The data flow follows each target: r1 is written on the path to 1 and not on the path to 3.
+    let (_s, c) = switch_code(Op::SwitchI, vec![0, 4, 2, 1, 3]);
+    bad(&c, "reads r1, which a path has not written");
+}
+
+#[test]
+fn a_bad_integer_table_is_refused() {
+    for (t, what) in [
+        (vec![], "not inside the pool"),
+        (vec![0, 4], "not inside the pool"),
+        (vec![0, 4, 3, 1, 3], "not inside the pool"),
+        (vec![0, 4, 0], "an empty table"),
+        (vec![0, 2, 1, 1], "not a later instruction"),
+        (vec![0, 4, 1, 2], "not a later instruction"),
+        (vec![0, 4, 1, 0], "not a later instruction"),
+        (vec![0, 4, 1, 5], "not a later instruction"),
+        (vec![0, 9, 1, 1], "not a later instruction"),
+        (vec![i32::MAX as u32, 4, 2, 1, 3], "past the largest integer"),
+    ] {
+        let (_s, c) = switch_code(Op::SwitchI, t.clone());
+        bad(&c, what);
+    }
+    // The offset in the op names a table that is not there.
+    let (_s, mut c) = switch_code(Op::SwitchI, vec![0, 4, 1, 1]);
+    let mut words = Vec::new();
+    crate::bytecode::encode(&mut words, &ins(Op::SwitchI, 0, 7, 0)).unwrap();
+    c.words[0] = words[0];
+    bad(&c, "not inside the pool");
+    // The register of the discriminant is checked as any register is.
+    let (_s, mut c) = switch_code(Op::SwitchI, vec![0, 4, 1, 1]);
+    let mut words = Vec::new();
+    crate::bytecode::encode(&mut words, &ins(Op::SwitchI, 2, 0, 0)).unwrap();
+    c.words[0] = words[0];
+    bad(&c, "register out of range");
+}
+
+/// The words of a string table: the default, `slots - 1` and the slots. `at` gives each entry `(atom, target)` its slot; the hash is the
+/// hash of the atom.
+fn str_table(c: &Code, default: u32, slots: usize, at: &[(usize, u32, u32)]) -> Vec<u32> {
+    let mut t = vec![default, slots as u32 - 1];
+    for _ in 0..slots {
+        t.extend([0, crate::bytecode::STR_EMPTY, 0]);
+    }
+    for &(slot, atom, target) in at {
+        t[2 + 3 * slot..2 + 3 * slot + 3].copy_from_slice(&[c.atoms[atom as usize].cached_hash(), atom, target]);
+    }
+    t
+}
+
+#[test]
+fn a_string_table_passes_and_a_bad_one_is_refused() {
+    use crate::bytecode::STR_EMPTY;
+    let (_s, c) = switch_code(Op::SwitchA, vec![]);
+    let home = |a: u32, slots: usize| c.atoms[a as usize].cached_hash() as usize & (slots - 1);
+    // 8 slots, the atoms 0 and 1 each in its home slot or the next one.
+    let (p0, p1) = (home(0, 8), home(1, 8));
+    let p1 = if p1 == p0 { (p0 + 1) & 7 } else { p1 };
+    let ok = str_table(&c, 4, 8, &[(p0, 0, 1), (p1, 1, 4)]);
+    let lost = str_table(&c, 4, 8, &[((home(0, 8) + 1) & 7, 0, 1)]);
+    let (_s, mut c) = switch_code(Op::SwitchA, ok.clone());
+    verify(&c).unwrap();
+    let (i, _) = decode(&c.words, 0).unwrap();
+    let mut got = c.switch_targets(&i).unwrap();
+    got.sort_unstable();
+    assert_eq!(got, [1, 4, 4]);
+    assert!(c.disassemble().contains("[a0 -> 0001, a1 -> 0004, default -> 0004]"), "{}", c.disassemble());
+
+    let mut refuse = |mutate: &dyn Fn(&mut Vec<u32>), what: &str| {
+        let mut tab = ok.clone();
+        mutate(&mut tab);
+        c.tables = tab;
+        bad(&c, what);
+    };
+    // A slot count that is not a power of two, and a table that is cut off.
+    refuse(&|t| t[1] = 6, "power of two");
+    refuse(&|t| t.truncate(5), "power of two");
+    // No empty slot: every slot holds an atom.
+    refuse(&|t| (0..8).for_each(|s| t[2 + 3 * s + 1] = if t[2 + 3 * s + 1] == STR_EMPTY { 2 } else { t[2 + 3 * s + 1] }), "no empty slot");
+    // An atom out of range, a wrong hash, a bad target, a bad default.
+    refuse(&|t| t[2 + 3 * p0 + 1] = 9, "names no atom");
+    refuse(&|t| t[2 + 3 * p0] ^= 1, "not the hash of its atom");
+    refuse(&|t| t[2 + 3 * p0 + 2] = 2, "not a later instruction");
+    refuse(&|t| t[0] = 0, "not a later instruction");
+    // A slot that its own probe cannot find: its home slot is empty, and it sits in the slot after.
+    refuse(&|t| *t = lost.clone(), "meets an empty slot first");
+}

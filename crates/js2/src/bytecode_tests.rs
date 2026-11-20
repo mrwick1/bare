@@ -12,7 +12,7 @@ fn the_op_table_is_consistent() {
         assert!(names.insert(op.name()), "{} twice", op.name());
         let letters: Vec<char> = op.spec().chars().filter(|l| *l != ' ').collect();
         assert!(letters.len() <= op.form().fields(), "{}: more letters than fields", op.name());
-        assert!(letters.iter().all(|l| "wrWRiujzNAFHS-".contains(*l)), "{}: a letter", op.name());
+        assert!(letters.iter().all(|l| "wrWRiujzNAFHST-".contains(*l)), "{}: a letter", op.name());
         assert!(letters.iter().filter(|l| **l == 'j').count() <= 1, "{}: two jump fields", op.name());
         // The field `a` of the forms with three narrow fields is never signed, and a window letter is alone.
         assert!(!matches!(op.letter(0), 'i') || op.form() == Form::Sj, "{}", op.name());
@@ -26,6 +26,8 @@ fn the_op_table_is_consistent() {
     assert!(Op::JmpBack.is_safepoint() && Op::GetField.is_safepoint() && Op::Call.is_safepoint() && Op::Add.is_safepoint());
     assert!(!Op::Mov.is_safepoint() && !Op::JSEqNull.is_safepoint() && !Op::GetCtx.is_safepoint() && !Op::Ret.is_safepoint());
     assert!(!Op::Jmp.falls_through() && !Op::JmpBack.falls_through() && !Op::Throw.falls_through() && Op::JmpIf.falls_through());
+    // A switch ends the block (all its targets are in the table) and cannot allocate or throw.
+    assert!(!Op::SwitchI.falls_through() && !Op::SwitchA.falls_through() && !Op::SwitchI.is_safepoint() && !Op::SwitchA.is_safepoint());
 }
 
 /// An instruction with every field set to `v` (a field that the spec leaves out is 0).

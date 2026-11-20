@@ -277,6 +277,119 @@ code nregs=2 nparams=1 words=15 sites=0
 }
 
 #[test]
+fn switch_with_integer_cases_is_a_jump_table() {
+    // Fallthrough from 1 to 2, `break` at the end of 2, `default` before the last case. The value 3 has no case: the table gives the default.
+    golden(
+        r#"function f(a) { var r = 0; switch (a) { case 1: r += 1; case 2: r += 2; break; default: r += 9; case 4: r += 4; } return r; }"#,
+        0,
+        r#"
+code nregs=2 nparams=1 words=8 sites=0
+0000  LoadI       r1, 0
+0001  SwitchI     r0, t0
+      [1 -> 0002, 2 -> 0003, 4 -> 0006, default -> 0005]
+0002  AddI        r1, r1, 1
+0003  AddI        r1, r1, 2
+0004  Jmp         -> 0007
+0005  AddI        r1, r1, 9
+0006  AddI        r1, r1, 4
+0007  Ret         r1
+"#,
+    );
+    // The pool: lo 1, default pc 5, length 4, then the targets of 1, 2, 3 and 4.
+    assert_eq!(outer(r#"function f(a) { var r = 0; switch (a) { case 1: r += 1; case 2: r += 2; break; default: r += 9; case 4: r += 4; } return r; }"#).code.tables, [1, 5, 4, 2, 3, 5, 6]);
+}
+
+#[test]
+fn switch_with_string_cases_is_a_hash_table() {
+    golden(
+        r#"function g(x) { switch (x) { case 'a': return 1; case 'b': return 2; case 'c': return 3; } return 0; }"#,
+        0,
+        r#"
+code nregs=2 nparams=1 words=9 sites=0
+0000  SwitchA     r0, t0
+      [a0 -> 0001, a1 -> 0003, a2 -> 0005, default -> 0007]
+0001  LoadI       r1, 1
+0002  Ret         r1
+0003  LoadI       r1, 2
+0004  Ret         r1
+0005  LoadI       r1, 3
+0006  Ret         r1
+0007  LoadI       r1, 0
+0008  Ret         r1
+"#,
+    );
+    // 3 cases: 4 slots (a power of two, at least 4/3 for each case), so the pool is the default, the mask and 4 slots of 3 words.
+    let c = outer(r#"function g(x) { switch (x) { case 'a': return 1; case 'b': return 2; case 'c': return 3; } return 0; }"#);
+    assert_eq!((c.code.tables.len(), c.code.tables[0], c.code.tables[1]), (2 + 4 * 3, 7, 3));
+}
+
+#[test]
+fn a_duplicate_case_gets_no_table_entry() {
+    // The first `case 1` wins, as in a chain. The body of the second one is unreachable and is dropped.
+    golden(
+        r#"function h(x) { switch (x) { case 1: return 1; case 2: return 2; case 1: return 3; case 3: return 4; } return 0; }"#,
+        0,
+        r#"
+code nregs=2 nparams=1 words=9 sites=0
+0000  SwitchI     r0, t0
+      [1 -> 0001, 2 -> 0003, 3 -> 0005, default -> 0007]
+0001  LoadI       r1, 1
+0002  Ret         r1
+0003  LoadI       r1, 2
+0004  Ret         r1
+0005  LoadI       r1, 4
+0006  Ret         r1
+0007  LoadI       r1, 0
+0008  Ret         r1
+"#,
+    );
+}
+
+#[test]
+fn a_switch_keeps_the_chain_when_it_is_cheaper_or_cannot_be_a_table() {
+    // `Some(op)`: the table op; `None`: the chain.
+    let cases: &[(&str, Option<Op>)] = &[
+        // The number of cases: 3 is the least; the same value twice counts once.
+        ("switch (x) { case 1: return 1; case 2: return 2; case 3: return 3; }", Some(Op::SwitchI)),
+        ("switch (x) { case 1: return 1; case 2: return 2; }", None),
+        ("switch (x) { case 1: return 1; case 2: return 2; case 2: return 3; case 1: return 4; }", None),
+        ("switch (x) { case 'a': return 1; case 'b': return 2; case 'c': return 3; }", Some(Op::SwitchA)),
+        ("switch (x) { case 'a': return 1; case 'b': return 2; }", None),
+        ("switch (x) { case 'a': return 1; case 'b': return 2; case 'a': return 3; }", None),
+        // The density: the span (largest minus least plus 1) must be below 3 for each distinct case. Here 3 cases.
+        ("switch (x) { case 0: return 1; case 1: return 2; case 7: return 3; }", Some(Op::SwitchI)),
+        ("switch (x) { case 0: return 1; case 1: return 2; case 8: return 3; }", None),
+        ("switch (x) { case 1: return 1; case 10: return 2; case 100: return 3; case 1000: return 4; }", None),
+        // Negative values and the ends of the 32-bit range.
+        ("switch (x) { case -2: return 1; case -1: return 2; case 0: return 3; }", Some(Op::SwitchI)),
+        ("switch (x) { case -2147483647: return 1; case 2147483647: return 2; case 0: return 3; }", None),
+        ("switch (x) { case 2147483645: return 1; case 2147483646: return 2; case 2147483647: return 3; }", Some(Op::SwitchI)),
+        // A case that is not an integer or string constant keeps the whole chain, where it is.
+        ("switch (x) { case 1: return 1; case 2: return 2; case 3: return 3; case y: return 4; }", None),
+        ("switch (x) { case y: return 4; case 1: return 1; case 2: return 2; case 3: return 3; }", None),
+        ("switch (x) { case 1: return 1; case 2: return 2; case 3: return g(); case 4: return 4; case g(): return 5; }", None),
+        ("switch (x) { case 1: return 1; case 2: return 2; case 3 + 1: return 3; case 5: return 4; }", None),
+        ("switch (x) { case 1: return 1; case 2: return 2; case 1.5: return 3; case 3: return 4; }", None),
+        ("switch (x) { case 0: return 1; case 1: return 2; case -0: return 3; case 2: return 4; }", None),
+        ("switch (x) { case 1: return 1; case 2: return 2; case 'a': return 3; case 3: return 4; }", None),
+        ("switch (x) { case 1: return 1; case 2: return 2; case null: return 3; case 3: return 4; }", None),
+        ("switch (x) { case true: return 1; case false: return 2; case null: return 3; case undefined: return 4; }", None),
+        // `default` anywhere, and an empty case.
+        ("switch (x) { default: return 0; case 1: case 2: case 3: return 1; }", Some(Op::SwitchI)),
+        ("switch (x) { case 1: case 2: default: case 3: return 1; }", Some(Op::SwitchI)),
+        ("switch (x) { default: return 0; }", None),
+    ];
+    for (body, want) in cases {
+        let src = format!("function f(x, y) {{ {body} return 9; }}");
+        let c = outer(&src);
+        let dis = c.code.disassemble();
+        for op in [Op::SwitchI, Op::SwitchA] {
+            assert_eq!(dis.contains(op.name()), *want == Some(op), "{body}\n{dis}");
+        }
+    }
+}
+
+#[test]
 fn object_and_array_patterns() {
     golden(
         r#"function f(o) { var {a, b: {c}} = o; var [p, , q = 3, ...r] = o; return a + c + p + q; }"#,
