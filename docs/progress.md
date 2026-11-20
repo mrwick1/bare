@@ -16924,3 +16924,35 @@ Left (not fixed in group 1): the regular expression pattern errors (334 tests of
 Tests: 4 new tests in `parse_tests.rs` (each checks the full parse and the pre-parse): `use_strict_with_non_simple_parameters_fails_in_strict_code_too`, `a_label_named_arguments_is_allowed_in_a_field_initializer`, `a_function_in_a_static_block_may_bind_await`, `an_async_arrow_parameter_cannot_use_await_as_a_name`. `script_tests.rs` did not compile on the base (`compile_after` takes a sixth argument since #787): two calls got `None`. `cargo test --locked -p bare-js2 --lib`: 407 pass (including `a_scope_with_many_locals_compiles_in_linear_time`). `cargo test --locked -p bare-js-diff`: all pass (256 programs, no new difference, known list unchanged).
 
 Not tested: Windows; the browser (js2 is not wired in); the test262 `module` flag tests; `built-ins` tests beyond the scan.
+
+## 2026-11-20: js2 early errors, group 2 (regular expression patterns)
+
+Task: the second group of the early-error round. js2 checked the flags of a regular expression literal but not its pattern, so `/(/`, `/a{2,1}/`, `/[z-a]/` and the like were accepted. This group is stacked on group 1 (#789). Base: `ad895eae`.
+
+Change: new module `regexp_check.rs`. `check(pattern, flags)` reads the pattern once, builds nothing, and returns the first early error of ECMA-262 22.2.1 with the Annex B grammar (the grammar with `u` off). The parser calls it for each regular expression token (`check_regexp`, not inlined, so `parse_primary` does not grow). The full parse of one function (`Mode::Function`) skips it: the pre-parse of the text has checked that body. Rules covered:
+
+- Quantifiers: nothing to repeat, `{n,m}` with n > m, a quantifier after `^`, `$`, `\b`, `\B` or a lookbehind (and after a lookahead with `u`), a lone `{`, `}` or `]` and an incomplete `{` with `u`.
+- Groups: unmatched `(` and `)`, `(?x`, lookarounds, named groups (the name is read with escapes and surrogate pairs and must be ID_Start then ID_Continue; a duplicate name is an error unless the two groups are in different alternatives of one disjunction), `\k` (an error when the pattern has a named group, even one that comes later, or when `u` is on; the name must exist), modifiers `(?ims-ims:` (no repeat, no flag in both parts, not both parts empty).
+- Classes: a range out of order, a class escape as an end of a range with `u`; without `u` an astral character counts as two units, as in the engines.
+- Escapes: `u` mode accepts only syntax characters, `/`, `\0` not before a digit, `\x`, `\u` (with `{}` and pairs), `\c` and a letter; a backreference larger than the number of groups is an error with `u`; legacy octal escapes, `\c` and identity escapes without `u`.
+- Not checked: the names inside `\p{...}` (the shape is checked), and the inside of a class with the `v` flag (only the brackets are matched). `u` and `v` together is an error.
+
+Evidence of correctness. Differential against V8 (Deno 2.9.8, V8 15.0): 660,000 pairs of a random pattern (1 to 14 pieces from a list of 111 pieces that covers the rules above) and the flags none, `u` and `i`: accept or reject is the same on all (3 runs with different seeds: 60,000, 300,000 and 300,000 pairs, 0 differences; 18% to 32% of the pairs are accepted by both, depending on the length). Real code: the 15 files of `/data/bare-tmp/s25b/corpus` and `/data/bare-tmp/s24/progs` (jquery, lodash, react-dom, axios, clangd, tauri, ...) and 3,744 files of the global npm packages parse as before (no file gets a new error).
+
+Result on the runner: js2 passes 14,772 (#789) and 14,802 here: 30 tests of `language/literals/regexp` go from fail to pass, 0 from pass to fail (against the run of #789). All tests of `language/` and `annexB/language` that must fail at parse time now do, except the ones that need the Unicode property tables: the scan of every `negative: phase: parse|early` test in `language`, `annexB/language`, `built-ins`, `annexB/built-ins` and `staging` goes from 722 accepted (334 after group 1, 388 in the other directories) to 300 accepted. The 300 are 242 in `built-ins/RegExp/property-escapes` (non-existent property names and values; needs the tables), 54 in `built-ins/RegExp/prototype/unicodeSets` (class syntax of `v`) and 4 in `staging` (`staging/sm/module/await-restricted-nested.js` and `staging/sm/fields/await-identifier-module-2.js`; not looked at, probably module goal tests). The tests that remain in the runner for this directory fail on `RegExp is not defined`, `eval` or regular expression literals not supported (the engine is S3).
+
+Parse cost (instructions, `parse_load full|lazy file 1 PATH`, minimum of 3 runs, 3 runs each, machine archMachine). The default build moves every row by +0.7% to +1.3%, also on `prelude.js`, which has no regular expression: the codegen-unit split changed (a new module and a new function in `parse.rs`). By the standing rule the rows are measured again with `codegen-units=1` on all three trees (base `43b62b05`, #789 `ad895eae`, this change):
+
+| Row, full parse | Base | #789 | This change | vs base | vs #789 |
+| --------------- | ---: | ---: | ----------: | ------: | ------: |
+| `lodash.js`     | 18,055,304 | 18,109,981 | 18,149,365 | +0.52% | +0.22% |
+| `reactdom.js`   | 27,537,982 | 27,611,147 | 27,621,074 | +0.30% | +0.04% |
+| `clangd.js`     | 173,055,533 | 173,348,550 | 173,381,593 | +0.19% | +0.02% |
+| `axios.js`      | 11,032,800 | 11,058,021 | 11,075,484 | +0.39% | +0.16% |
+| `prelude.js`    | 2,336,500 | 2,341,981 | 2,341,969 | +0.24% | 0.00% |
+
+(The minimum of the 3 runs; the spread is under 0.02%.) Lazy parse (the path of a compiled script): `lodash.js` +0.25% vs base, +0.01% vs #789; `reactdom.js` +0.09%, -0.12%; `clangd.js` +0.08%, -0.07%; `axios.js` +0.20%, +0.01%; `prelude.js` +0.08%, -0.13%. The check costs about 40 instructions for each byte of pattern (callgrind on the 44 patterns of `lodash.js` that a text search finds, 961 bytes: 905 instructions for a pattern). The full parse of `lodash.js` is +0.52% over the base, 0.02% over the limit of +0.5%, and the increase of this group alone is +0.22%. That row has the most regular expressions of the five. The lazy parse, which is the path of a compiled script, is +0.25% there. I did not lower the cost further.
+
+Tests: `regexp_check_tests.rs` (10 tests: quantifiers, groups, ranges, escapes in `u` mode and without it, backreferences, named groups with duplicates in alternatives, modifiers, `u` with `v`); one test in `parse_tests.rs` checks that a bad literal fails in the full parse and in the pre-parse, also inside a function, an arrow and a class method. `cargo test --locked -p bare-js2 --lib`: 417 pass. `cargo test --locked -p bare-js-diff`: all pass. `tools/fixtures/js/test262-js2-baseline.txt` is regenerated.
+
+Not tested: patterns with the `v` flag (accepted without a check), property names, a pattern with lone surrogates (the source is UTF-8), Windows and the browser.

@@ -1075,3 +1075,17 @@ fn a_sequence_in_parentheses_spans_its_first_and_last_tokens() {
         assert_eq!((ex.span.start, ex.span.end), want, "{src}");
     }
 }
+
+#[test]
+fn a_regular_expression_literal_with_a_bad_pattern_is_an_early_error() {
+    for s in ["/(/", "/a**/", "/[z-a]/", "/a{2,1}/", "/(?<a>x)(?<a>y)/", "/\\k<b>(?<a>x)/", "/\\u{110000}/u", "/\\-/u", "/(?<=a)*/", "x = /(/;", "if (a) b = /+/;"] {
+        both(s, false);
+    }
+    // In a function body too: a lazy function is checked when its text is first read.
+    both("function f() { return /(/; }", false);
+    both("var f = () => /a{2,1}/;", false);
+    both("class A { m() { return /[z-a]/; } }", false);
+    for s in ["/(a)\\1/", "/a{/", "/[\\d-a]/", "/(?<a>x)|(?<a>y)/", "/\\k<a>/", "a / b / c", "function f() { return /a+?/giu; }", "x = /[/]/"] {
+        both(s, true);
+    }
+}

@@ -356,7 +356,7 @@ fn latin1_id(cp: u32, first: bool) -> bool {
 }
 
 /// Is `cp` (not ASCII) allowed in a name? ID_Start for the first character, ID_Continue after it (plus ZWNJ and ZWJ).
-fn id_char(cp: u32, first: bool) -> bool {
+pub(crate) fn id_char(cp: u32, first: bool) -> bool {
     use icu_properties::{props::{IdContinue, IdStart}, CodePointSetData};
     if cp < 0x100 {
         return latin1_id(cp, first);
