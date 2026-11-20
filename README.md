@@ -82,6 +82,7 @@ Linux is the first target. The core must also build and run on Windows and macOS
 | `crates/css/`       | CSS: tokenizer, parser, selectors, style cascade    |
 | `crates/layout/`    | Layout: box tree, text, block and inline layout     |
 | `crates/js/`        | JavaScript: parser, heap, tree-walking interpreter  |
+| `crates/js-diff/`   | test262 and differential runners for both engines   |
 | `crates/image/`     | PNG, JPEG and WebP decoders                         |
 | `crates/paint/`     | Display list, pixel buffer, PNG output              |
 | `crates/window/`    | Wayland window and input                            |

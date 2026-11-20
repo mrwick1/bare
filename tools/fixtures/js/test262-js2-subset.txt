@@ -1,0 +1,34 @@
+# The test262 directories (below test/) that tools/js/test262_js2.sh runs on both engines: the core census features and the built-ins of
+# plan step S2.7 (Object, Function, Array, Error and its subclasses). A line that starts with `-` leaves a directory out.
+# The commit is the one of tools/fixtures/js/test262-subset.txt (the same checkout).
+# Left out: modules, `eval` and `with` (the census has no `with` and no direct `eval`; plan section 8 builds `eval` only if the census shows it).
+language/arguments-object
+language/asi
+language/block-scope
+language/comments
+language/computed-property-names
+language/destructuring
+language/directive-prologue
+language/expressions
+language/function-code
+language/future-reserved-words
+language/global-code
+language/identifier-resolution
+language/identifiers
+language/keywords
+language/line-terminators
+language/literals
+language/punctuators
+language/reserved-words
+language/rest-parameters
+language/source-text
+language/statementList
+language/statements
+language/types
+language/white-space
+-language/statements/with
+built-ins/Object
+built-ins/Function
+built-ins/Array
+built-ins/Error
+built-ins/NativeErrors

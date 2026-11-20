@@ -1,0 +1,25 @@
+# Known differences of the differential runner (crates/js-diff/src/diff.rs): NAME<TAB>reason. A program here does not fail the run.
+# A program that is listed and no longer differs fails the run: remove its line. Later tasks take these (docs/progress.md).
+# script_tests:N is line N of crates/js2/src/script_tests.rs.
+script_tests:144	error message text differs ("Cannot read" against "cannot read")
+script_tests:146	error message text differs (js2 has no name of the callee)
+script_tests:149	old engine stops at its call-depth limit; js2 throws RangeError
+script_tests:401	old engine stops at its traversal-depth limit; js2 throws RangeError
+script_tests:180	regexp literal: js2 throws TypeError (not built)
+script_tests:181	BigInt literal: js2 throws TypeError (not built)
+script_tests:458	new String: js2 throws TypeError (no wrapper objects)
+script_tests:481	new Number: js2 throws TypeError (no wrapper objects)
+script_tests:336	Object(5) is not 5 in the old engine: js2 returns the primitive (no wrapper objects)
+script_tests:402	valueOf written in the script: js2 throws TypeError in ToPrimitive
+script_tests:360	a method has no prototype property; js2 makes one (bug)
+script_tests:384	Error.stack: js2 has none
+script_tests:400	Function.prototype.toString of a script function: js2 gives "[native code]"
+script_tests:467	toFixed(2) of -0.0001: js2 loses the sign of "-0.00"
+script_tests:478	self: the old engine has no global self
+script_tests:480	self: the old engine has no global self
+script_tests:479	Symbol: js2 has none
+corpus:array_gaps	Array.of and Array.prototype.flat: js2 has neither
+corpus:error_gaps	new of a bound function, the strict assignment to an undeclared name, Error cause: js2 has none of them
+corpus:function_gaps	Function.length is missing; a sloppy call has this === undefined (bug)
+corpus:key_order	integer keys of a plain object keep the order of insertion in js2 (ownKeys order, S3)
+corpus:number_format	Number to string never uses the exponent form in js2 (1e21, 1e-7, 5e-324)
