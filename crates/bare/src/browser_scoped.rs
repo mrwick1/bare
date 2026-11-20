@@ -1,7 +1,7 @@
 //! Host functions on the interface (`docs/design-host-handlers.md`, step H0). `Dom` has two registries. A handler of the old form (`H`:
 //! `Interp`, `Value`) is in `Dom::handlers` and runs through the old `Host::call`. A handler of the new form (`HS`: `Scope`, `Local`) is in
 //! `Dom::scoped` and runs through the interface `Host::call`. The engine tells them apart by `API_ID` in the function id, so the old path
-//! has no new branch beyond one test of that bit. Both entries run the same `Dom::dispatch_host`, so a handler sees the same hooks in either.
+//! has no new branch beyond one test of that bit. Both entries run the same hooks in the same order (`Dom::dispatch_host` for the old one; `Dom::call_scoped` spells them out with no closure, because it is the hot path), so a handler sees the same hooks in either.
 //!
 //! A test build can put every old handler on the interface too (`BARE_ALL_API=1`): the entry then converts `this` and the arguments to raw
 //! values, calls the old body and pushes the result. It proves that the interface entry does what the old entry does.

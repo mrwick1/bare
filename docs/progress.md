@@ -15428,3 +15428,45 @@ Judgment calls and known gaps:
 - `Code::disassemble` (S2.4) writes a space after an op name of 12 or more characters, so `JmpNotNullish r4` is readable.
 
 Not tested: execution of any compiled code (S2.6), so the semantics are checked by reading the disassembly and by the verifier, not by running; Miri; arm64; a modern React bundle; the cost matrix (js2 is not wired into the browser); the compile time of the compiler alone (the example times the pre-parse and parse of each function too).
+
+## 2026-11-20: host handlers on the interface, A1b: the call path of a converted call (plan step S0.4 / A1b)
+
+Status: the three rows pass and the full matrix passes. The per-call target (within 10 instructions of the old body) is NOT met: `hcn` +23 and `isc` +33. One design was built, with its levers. The owner decides whether a second design is worth it. Same PR (#758, branch `t3/scope-browser-dom-handlers`).
+
+Owner decision (2026-11-20): a converted host call must cost about the same as the old one. It is in `design-host-handlers.md`, "Decisions".
+
+Changes.
+
+- Arguments are read in place. `call_api_host` copies nothing and pushes nothing for `this` and the arguments. It links a `Win` (`this`, the pointer and length of the caller's `&[Value]`, the previous window) in its own frame. The handles are slot numbers from `1 << 31` up: `this` is `WIN`, argument `i` is `WIN + 1 + i`. `api_at` reads the stack first (one bounds check) and the window second (`api_win`). A slot that names nothing is a panic, never a read outside the slice.
+- `undefined`, `null` and `boolean` push nothing. The first four physical slots of the handle stack hold these values, with the slot numbers `u32::MAX - 3` to `u32::MAX`; a pushed slot of logical index `n` is at `n + 4`, so `stack_len` is still 0 for an empty stack. `values` (the roots) skips them. `escape_scope` keeps its slot with `number(0.0)`, which always pushes.
+- One scope for each host call. The scope of the bridge is the only one; nothing nests under it.
+- `call_api_host` borrows the interface host with a raw pointer instead of an `Rc` clone (SAFETY: `set_host` now asserts that no window is linked, and the `Rc` lives as long as the realm). It saves and restores `host_nt` only when `nt` or the running `host_nt` is set. The error mapping is the cold `api_unerr`.
+- `Dom::call_scoped` spells out the hooks of `dispatch_host` in the same order with no closure (the closure environment was built in memory before the branch to the custom element path). `dispatch_host` stays for the old entry.
+- `is_connected` takes `s.engine()` once before its loop.
+- `bare-js-api` docs: a slot number is private to the engine; `Args` are consecutive slot numbers; arguments and `this` are roots for the whole call. `docs/design-host-interface.md` has the same text. No signature changed.
+
+Rules of design 6.8, and how they hold. A handle into the arguments must not outlive the call: it is a `Local<'s>` of the call's scope, and the borrow checker stops it (the compile-fail tests of `bare-js-api` stand). The stack must not move under it: the arguments are not in the stack; they are the slice that the caller holds (`argv` from `arg_pool`, a bound function's `bargs`), and nothing writes it while the call runs. A collection inside the call must see them as roots: `ApiState::values` walks the chain of windows, so nested host calls keep every outer `this` and argument alive. `Interp::collect` refuses inside a call in this engine, so the tests collect with `Heap::collect(&Interp::roots())`.
+
+Tests (new). `bare-js` `eval_api_tests.rs`: a collection inside a host call keeps `this` and the arguments alive (they are reachable only through the call), nested host calls keep each window a root and restore the outer one, also with `BARE_GC_STRESS`; a handle that names no slot panics. Negative control: with the window removed from `values`, the first two fail. `bare` `browser_scoped_tests.rs`: a converted handler collects while it runs, under `set_gc_stress(true)`, with an argument object and a string alive only through the arguments.
+
+Method. Machine archMachine. Base: origin/main `2c0edc75` (the commit #758 merges), a fresh worktree and target directory; the branch built the same way. Micro-loop `host_call_load` (200,000 calls, `tools/js/instr.sh`, minimum of 3 runs, over the base with 0 calls to cancel start-up). Callgrind: 1 run, 20,000 calls, exclusive cost by function, with `--dump-instr=yes` and a script that sums the cost of each instruction of a function.
+
+Per call over the base (symbol build, 16 codegen units):
+
+| Step | `hcn` | `isc` | `get` | `has` | `match` |
+|---|---:|---:|---:|---:|---:|
+| Head of #758 (reproduced) | +86 | +83 | -91 | -82 | -72 |
+| Window, shared constant slots | +72 | +78 | -64 | | |
+| `call_scoped` with no closure, no `host_nt` swap when none | +34 | +43 | -85 | -85 | -72 |
+| Raw host pointer (no `Rc` clone), cold error mapping | +24 | +32 | -96 | -96 | -84 |
+| `is_connected` hoist, final | +23 | +33 | | | |
+
+Split of `hcn` now (callgrind, per call, exclusive, base then branch): `call_api_host` 85 against `call_host` 49 (+36); `call_scoped` 47 against `Host::call` 60 (-13); the handler 74 against 70 (+4); `call_fn_inner` -4. `isc`: the same bridge and `call_scoped`; the handler 125 against 112 (+13: the read of `this` through the window is 10 instructions, then one more in the result). In the 85 of the bridge (disassembly): 6 pushes and 6 pops, the window link and unlink (about 10), the scope (base, store, truncate: about 11), the `Local` to `Value` read of the result (about 12), the dynamic call setup. What is left is the price of the contract (a window, a scope, a handle result), not an unnecessary step. Tried and reverted: a table for the shared slots read in the bridge (+3), which was worse.
+
+Rows. `codegen-units=1` on both trees (glibc, minimum of 3 runs): `browser_load rel 10` +0.314% (was +0.655%), `rel 1` +0.221% (+0.539%), `svg 10` +0.365% (+0.528%), `svg 1` +0.333%, `svgparse 1` +0.351%, `svgparse 10` +0.179%. The jemalloc run was skipped (no row over the limit). Default flags, the full matrix (`tools/js/cost_matrix.sh -j4`, 817 rows, glibc, jemalloc only for a row over the limit): mean -0.017% glibc and -0.023% (5 rows) jemalloc; no row over +0.5% under both allocators. Over under glibc only (jemalloc under +0.001%): `resources_load small 10` +1.739% (glibc-only noise, known), `interact_load asyncpriv 1` +0.771% and `10` +0.529%, `gen_load finally 1` +0.583% and `10` +0.501%. The three rows at default flags: `rel 10` +0.255%, `rel 1` +0.188%, `svg 10` +0.213%. `parse_load deep 1` and `10` do not run on the base tree either.
+
+Tests. Linux: `cargo test --locked -p bare-js-api -p bare-js -p bare --lib`: 32, 1103 (1 ignored) and 1714 (6 ignored) pass. `bare --lib` filters `domexc exception dom attr custom mutation scoped` (128 pass, 1 ignored): pass plain, with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1`. `bare-js` filter `api_tests` (45): pass plain and with `BARE_GC_STRESS=1`. Windows 11 VM (`cargo xwin test --no-run`, exes through `winssh`): `bare-js-api` 32 pass, `bare-js` filter `api_tests` 45 pass, `bare` the same filters 128 pass.
+
+Levers left, not built (each saves a few instructions, none reaches 10): no `RefCell` borrow of `Dom::scoped` (about 5), a fast read of `this` first in `api_win` (about 3 for a handler that reads only `this`), a window that stores `this` by pointer (about 2). A design that removes the window link, the scope or the result read needs a different contract (for example a handler that returns a raw immediate); I did not build one.
+
+Not tested: `BARE_GC_STRESS=1` with the whole `bare --lib` run; the unfiltered `bare-js` and `bare` runs on Windows; jemalloc for the six `codegen-units=1` rows; RSS and wall time; a panic inside a host call (the window stays linked; no code uses the realm after a panic); `bare-js2` (it has no `Engine` yet).
