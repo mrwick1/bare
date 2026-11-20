@@ -7,62 +7,118 @@
 //! of its parent. `Code::funcs` of the compiler holds the id of the child in the facts; the driver replaces it by the index in the
 //! program (the facts id of a synthetic function is not always unique).
 use crate::atoms::SharedAtoms;
-use crate::bytecode::Code;
-use crate::compile::{Compiled, Input, compile_function, compile_script};
-use crate::facts::Facts;
-use crate::interp::{Exit, Program, Vm};
+use crate::bytecode::{CF_ARGS, CF_LINK, Code, Op};
+use crate::compile::{Child, Compiled, Input, compile_function, compile_script};
+use crate::facts::{Facts, SUPER};
+use crate::interp::{Exit, LazyCompile, Program, Vm, code_flags};
 use crate::interp_rt::Realm;
 use crate::parse::{Limits, parse_function, parse_script_lazy};
 use crate::shapes::A_E;
 use crate::value::Value;
 use std::sync::Arc;
 
+/// The stub of a function that waits for its first call: no parameters, all arguments in an array, and one instruction (`Op::Lazy`).
+fn stub() -> Code {
+    let mut c = Code::new(0, 0);
+    c.words = vec![Op::Lazy as u32];
+    c.flags = CF_ARGS;
+    c
+}
+
+/// The functions that wait for their first call: their stubs in `codes`, and what compiles them. The loader makes a stub for a function
+/// that no `super` reaches (`CF_LINK` is not known before the compile), and [`LazyCompile::compile`] fills it at the first call.
+pub struct Lazy {
+    source: &'static str,
+    facts: Facts,
+    atoms: Arc<SharedAtoms>,
+    limits: Limits,
+    /// `(index of the stub, the function)`, sorted by the index.
+    pending: Vec<(usize, Child)>,
+}
+
+impl LazyCompile for Lazy {
+    fn compile(&mut self, codes: &mut Vec<Code>, ci: usize) -> Result<(), String> {
+        let at = self.pending.binary_search_by_key(&ci, |p| p.0).map_err(|_| "no function waits at this code")?;
+        let ch = self.pending.remove(at).1;
+        let first = codes.len();
+        let (p, fid) = parse_function(self.source, &mut self.facts, ch.id, self.limits).map_err(|e| format!("parse fn {}: {}", ch.id, e.msg))?;
+        let sub = compile_function(&p, fid, ch.id, &self.facts, &self.atoms, &Input { chain: ch.chain.clone(), self_name: ch.self_name })
+            .map_err(|e| format!("compile fn {}: {e:?}", ch.id))?;
+        let mut pending = Vec::new();
+        let mut l = Loader { source: self.source, facts: &mut self.facts, atoms: &self.atoms, limits: self.limits, codes, lazy: Some(&mut pending) };
+        l.fill(ci, sub)?;
+        // The flags of the new codes: the children come after their parent, so the last come first (a stub has no `super`).
+        for i in (first..codes.len()).rev().chain([ci]) {
+            let f = code_flags(&codes[i]);
+            let from_children = codes[i].funcs.iter().any(|&k| codes.get(k as usize).is_some_and(|c| c.flags & CF_LINK != 0));
+            codes[i].flags = f | if from_children { CF_LINK } else { 0 };
+        }
+        debug_assert!(codes[ci].flags & CF_LINK == 0, "a lazy function must not use super");
+        self.pending.extend(pending);
+        Ok(())
+    }
+}
+
 struct Loader<'a> {
     source: &'a str,
-    facts: Facts,
+    facts: &'a mut Facts,
     atoms: &'a SharedAtoms,
     limits: Limits,
-    codes: Vec<Code>,
+    codes: &'a mut Vec<Code>,
+    /// Make a stub for each function that may wait (the `Child` goes here); `None`: compile every function now.
+    lazy: Option<&'a mut Vec<(usize, Child)>>,
 }
 
 impl Loader<'_> {
     /// Add `c` and, below it, its children. Gives the index of `c` in the program.
-    fn add(&mut self, mut c: Compiled) -> Result<usize, String> {
+    fn add(&mut self, c: Compiled) -> Result<usize, String> {
+        let at = self.codes.len();
+        self.codes.push(Code::new(0, 0));
+        self.fill(at, c)?;
+        Ok(at)
+    }
+
+    /// Put `c` at the index `at` (a placeholder or a stub) and add its children.
+    fn fill(&mut self, at: usize, mut c: Compiled) -> Result<(), String> {
         if !c.unsupported.is_empty() {
             return Err(format!("not supported yet: {:?}", c.unsupported));
         }
-        let at = self.codes.len();
-        self.codes.push(Code::new(0, 0));
         let mut inline: Vec<Option<Compiled>> = std::mem::take(&mut c.inline).into_iter().map(Some).collect();
         let children = std::mem::take(&mut c.children);
         for (i, ch) in children.iter().enumerate() {
             let sub = match ch.ready {
                 Some(r) => inline[r as usize].take().ok_or("a ready child is used twice")?,
+                None if self.lazy.is_some() && self.facts.get(ch.id).flags & SUPER == 0 => {
+                    c.code.funcs[i] = self.codes.len() as u32;
+                    self.lazy.as_mut().expect("lazy").push((self.codes.len(), ch.clone()));
+                    self.codes.push(stub());
+                    continue;
+                }
                 None => {
-                    let (p, fid) = parse_function(self.source, &mut self.facts, ch.id, self.limits).map_err(|e| format!("parse fn {}: {}", ch.id, e.msg))?;
-                    compile_function(&p, fid, ch.id, &self.facts, self.atoms, &Input { chain: ch.chain.clone(), self_name: ch.self_name }).map_err(|e| format!("compile fn {}: {e:?}", ch.id))?
+                    let (p, fid) = parse_function(self.source, self.facts, ch.id, self.limits).map_err(|e| format!("parse fn {}: {}", ch.id, e.msg))?;
+                    compile_function(&p, fid, ch.id, self.facts, self.atoms, &Input { chain: ch.chain.clone(), self_name: ch.self_name }).map_err(|e| format!("compile fn {}: {e:?}", ch.id))?
                 }
             };
             c.code.funcs[i] = self.add(sub)? as u32;
         }
         self.codes[at] = c.code;
-        Ok(at)
+        Ok(())
     }
 }
 
 /// Compile `source` as a script after the codes that `codes` has. The top level is the code at index `codes.len()` before the call.
-fn compile_after(codes: Vec<Code>, source: &str, atoms: &SharedAtoms, limits: Limits) -> Result<Vec<Code>, String> {
+/// With `lazy` the functions inside the top level are stubs, and `lazy` gets what makes them.
+fn compile_after(mut codes: Vec<Code>, source: &str, atoms: &SharedAtoms, limits: Limits, lazy: Option<&mut Vec<(usize, Child)>>) -> Result<(Vec<Code>, Facts), String> {
     let mut facts = Facts::new();
     let prog = parse_script_lazy(source, limits, &mut facts).map_err(|e| format!("SyntaxError: {}", e.msg))?;
     let script = compile_script(&prog, &facts, atoms).map_err(|e| format!("compile: {e:?}"))?;
-    let mut l = Loader { source, facts, atoms, limits, codes };
-    l.add(script)?;
-    Ok(l.codes)
+    Loader { source, facts: &mut facts, atoms, limits, codes: &mut codes, lazy }.add(script)?;
+    Ok((codes, facts))
 }
 
 /// Compile `source` as a script. The top level is `Program::codes[0]`.
 pub fn compile(source: &str, atoms: &SharedAtoms, limits: Limits) -> Result<Program, String> {
-    Ok(Program { codes: compile_after(Vec::new(), source, atoms, limits)? })
+    Ok(Program { codes: compile_after(Vec::new(), source, atoms, limits, None)?.0 })
 }
 
 /// An `eval_load` program (statements and then one expression) as a script: the value of the last expression goes to the global
@@ -104,12 +160,15 @@ pub fn load_with(host: &str, source: &str) -> Result<Vm, String> {
     let shared = Arc::new(SharedAtoms::default());
     let mut prog = compile(source, &shared, Limits::default())?;
     let pre = prog.codes.len();
-    prog.codes = compile_after(prog.codes, PRELUDE, &shared, Limits::default()).map_err(|e| format!("prelude: {e}"))?;
+    let mut pending = Vec::new();
+    let (codes, facts) = compile_after(prog.codes, PRELUDE, &shared, Limits::default(), Some(&mut pending)).map_err(|e| format!("prelude: {e}"))?;
+    prog.codes = codes;
     let at = prog.codes.len();
     if !host.is_empty() {
-        prog.codes = compile_after(prog.codes, host, &shared, Limits::default()).map_err(|e| format!("host script: {e}"))?;
+        prog.codes = compile_after(prog.codes, host, &shared, Limits::default(), None).map_err(|e| format!("host script: {e}"))?.0;
     }
-    let mut vm = Vm::new(prog, shared);
+    let mut vm = Vm::new(prog, shared.clone());
+    vm.lazy = Some(Box::new(Lazy { source: PRELUDE, facts, atoms: shared, limits: Limits::default(), pending }));
     if let Err(e) = vm.run_main(pre) {
         panic!("the prelude failed: {e:?}");
     }

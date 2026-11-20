@@ -722,3 +722,64 @@ fn array_methods_work_on_array_likes_and_follow_the_specification() {
         ("var r; try { Array.prototype.pop.call(''); } catch (e) { r = e.name; }", "r", "TypeError"),
     ]);
 }
+
+fn waiting(vm: &Vm) -> usize {
+    vm.prog.codes.iter().filter(|c| c.words == [crate::bytecode::Op::Lazy as u32]).count()
+}
+
+#[test]
+fn prelude_functions_are_compiled_at_their_first_call() {
+    let src = "var r = [3, 1, 2].sort().join(); var m = [1, 2].map(function (x) { return x * 2; }).join(); var s = [1, 2, 3].reduce(function (a, b) { return a + b; });";
+    let mut vm = load(src).unwrap();
+    let before = waiting(&vm);
+    assert!(before > 40, "the methods of the prelude wait: {before}");
+    vm.run_main(0).unwrap();
+    let after = waiting(&vm);
+    assert!(after < before && after > before - 25, "sort, map, reduce and the helpers they call were compiled: {before} -> {after}");
+    assert_eq!((vm.global_text("r"), vm.global_text("m"), vm.global_text("s")), ("1,2,3".into(), "2,4".into(), "6".into()));
+    // A second call compiles nothing.
+    let mut vm2 = load("var a = [2, 1]; a.sort(); a.sort(); a.sort();").unwrap();
+    vm2.run_main(0).unwrap();
+    let once = waiting(&vm2);
+    let mut vm3 = load("var a = [2, 1]; a.sort();").unwrap();
+    vm3.run_main(0).unwrap();
+    assert_eq!(waiting(&vm3), once);
+}
+
+#[test]
+fn a_lazy_function_gets_its_arguments_the_first_time_and_after() {
+    // `reduce` reads `arguments`; the callback of `forEach` gets 3 arguments; `Array.from` has parameters and reads `arguments`.
+    check(&[
+        ("var r = [1, 2, 3].reduce(function (a, b) { return a + b; }, 10);", "r", "16"),
+        ("var r = [1, 2, 3].reduce(function (a, b) { return a + b; });", "r", "6"),
+        ("var n = 0; [1, 2, 3].forEach(function (v, i, a) { n += v * 10 + i + a.length; });", "n", "72"),
+        ("var r = Array.from([1, 2, 3], function (x) { return x + 1; }).join();", "r", "2,3,4"),
+        ("var f = Array.prototype.map; var r = f.call([1, 2], function (x) { return x; }, undefined, 5, 6).join();", "r", "1,2"),
+        ("var r = Array.of(7, 8, 9).join(); var q = Array.of(1).join();", "q", "1"),
+    ]);
+}
+
+#[test]
+fn a_lazy_compile_that_fails_throws_a_syntax_error() {
+    struct Fails;
+    impl crate::interp::LazyCompile for Fails {
+        fn compile(&mut self, _: &mut Vec<crate::bytecode::Code>, _: usize) -> Result<(), String> {
+            Err("no compiler".into())
+        }
+    }
+    let mut vm = load("var e; try { [1].forEach(function () {}); } catch (x) { e = x.name + ': ' + x.message; }").unwrap();
+    vm.lazy = Some(Box::new(Fails));
+    vm.run_main(0).unwrap();
+    assert_eq!(vm.global_text("e"), "SyntaxError: no compiler");
+}
+
+#[test]
+fn the_names_of_typeof_are_shared_atoms_like_the_string_literals() {
+    // A literal is loaded as its shared atom, so `typeof x === 'object'` is a pointer test only if `typeof` gives the shared atom. A
+    // script that has none of these words must not change that (the prelude is compiled at the first call of its functions).
+    let vm = load("var x = 1;").unwrap();
+    for v in [Value::UNDEFINED, Value::NULL, Value::bool(true), Value::int(1), vm.realm.global.value()] {
+        let s = Realm::str_of(vm.realm.typeof_name(v)).expect("a string");
+        assert!(s.is_shared(), "{}", vm.realm.text(s));
+    }
+}

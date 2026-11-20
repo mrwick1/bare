@@ -88,6 +88,12 @@ pub struct Program {
     pub codes: Vec<Code>,
 }
 
+/// The compiler of the functions that wait for their first call. The code at `ci` is a stub (`Op::Lazy`): `compile` makes its real code in
+/// place and may add stubs for the functions inside it at the end of `codes`. The interpreter makes the feedback of the new codes.
+pub trait LazyCompile {
+    fn compile(&mut self, codes: &mut Vec<Code>, ci: usize) -> Result<(), String>;
+}
+
 /// Why `Vm::call` stopped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Exit {
@@ -103,6 +109,8 @@ pub struct Vm {
     pub stack: Vec<Value>,
     pub fbs: Vec<Feedback>,
     pub prog: Program,
+    /// The compiler of the stubs of `prog` (`Op::Lazy`), if it has any.
+    pub lazy: Option<Box<dyn LazyCompile>>,
     /// The code indexes of the default constructors (`DefaultCtor`): a base class and a derived class.
     pub dctor: [usize; 2],
     /// Back edges that may still run. At 0 the run stops with [`Exit::Fuel`].
@@ -214,7 +222,7 @@ impl Vm {
         prog.codes.extend(default_ctors());
         scan_flags(&mut prog.codes);
         let fbs = prog.codes.iter().map(|_| Feedback::default()).collect();
-        Vm { realm: Realm::new(shared), stack: Vec::new(), fbs, prog, dctor, fuel: u64::MAX }
+        Vm { realm: Realm::new(shared), stack: Vec::new(), fbs, prog, lazy: None, dctor, fuel: u64::MAX }
     }
 
     /// A function cell for code `code` with no context.
@@ -264,8 +272,7 @@ impl Vm {
 
     #[allow(unused_assignments)]
     fn run(&mut self, mut ci: usize, mut fp: usize) -> Result<Value, Exit> {
-        let Vm { realm, stack, fbs, prog, dctor, fuel } = self;
-        let prog: &Program = prog;
+        let Vm { realm, stack, fbs, prog, lazy, dctor, fuel } = self;
         let mut code: &Code = &prog.codes[ci];
         let mut words: &[u32] = &code.words;
         let mut fb: &mut Feedback = &mut fbs[ci];
@@ -1248,6 +1255,28 @@ impl Vm {
                         r!(a!()) = Obj::array(&mut realm.heap, &realm.shapes, realm.s_array, &vals).expect("memory").value();
                         pc = next;
                     }
+                    Op::Lazy => {
+                        let Some(l) = lazy.as_mut() else { err!(ErrKind::Plain, "a lazy function has no compiler") };
+                        if let Err(m) = l.compile(&mut prog.codes, ci) {
+                            err!(ErrKind::Syntax, "{m}")
+                        }
+                        fbs.resize_with(prog.codes.len(), Feedback::default);
+                        fbs[ci] = Feedback::default();
+                        // The frame was made for the stub (no parameters, all arguments in an array). Make it again for the code.
+                        let ncode = &prog.codes[ci];
+                        ensure!(fp + ncode.nregs as usize + 8);
+                        let all = Realm::obj(record(stack, fp, 9)).expect("the arguments of a stub");
+                        let (np, given) = (ncode.nparams as usize, (ncode.nparams as usize).min(all.len() as usize));
+                        for i in 0..given {
+                            stack[fp + i] = all.get_element(i as u32).unwrap_or(undef);
+                        }
+                        stack[fp + given..fp + np].fill(undef);
+                        if ncode.flags & CF_ARGS == 0 {
+                            stack[fp - REC + 9] = undef;
+                        }
+                        reload!();
+                        pc = 0;
+                    }
                     Op::LoadCallee => {
                         r!(a!()) = record(stack, fp, 0);
                         pc = next;
@@ -1587,20 +1616,25 @@ fn default_ctors() -> [Code; 2] {
     [base, derived]
 }
 
+/// The flags that the words of `c` give (`CF_LINK` of its children is not in them: see [`scan_flags`]).
+pub fn code_flags(c: &Code) -> u8 {
+    let (mut pc, mut f) = (0, 0);
+    while let Ok((ins, n)) = decode(&c.words, pc) {
+        match ins.op {
+            Op::CreateArgs | Op::CreateRest | Op::Lazy => f |= CF_ARGS,
+            Op::CallSuper | Op::CallSuperSpread | Op::GetSuper | Op::GetSuperElem | Op::SetSuper | Op::SetSuperElem => f |= CF_LINK,
+            _ => {}
+        }
+        pc += n;
+    }
+    f
+}
+
 /// Fill `Code::flags` of each code: `CF_ARGS` for a code that reads all its arguments, `CF_LINK` for one that uses `super` or holds a
 /// function that does.
 fn scan_flags(codes: &mut [Code]) {
     for c in codes.iter_mut() {
-        let (mut pc, mut f) = (0, 0);
-        while let Ok((ins, n)) = decode(&c.words, pc) {
-            match ins.op {
-                Op::CreateArgs | Op::CreateRest => f |= CF_ARGS,
-                Op::CallSuper | Op::CallSuperSpread | Op::GetSuper | Op::GetSuperElem | Op::SetSuper | Op::SetSuperElem => f |= CF_LINK,
-                _ => {}
-            }
-            pc += n;
-        }
-        c.flags = f;
+        c.flags = code_flags(c);
     }
     loop {
         let mut changed = false;
