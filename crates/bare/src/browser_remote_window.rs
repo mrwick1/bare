@@ -12,6 +12,9 @@
 //! - `postMessage` puts the message in the outbox of the page (`Kids::send`). The driver moves it to the other page, which checks the
 //!   target origin and queues a `message` event (`browser_child.rs`, "Messages"). A `MessagePort` in the transfer list crosses as an end
 //!   of the port hub (`Dom::export_ports`, `browser_child.rs` "Ports"). `blur`, `focus` and `close` do nothing yet.
+//! - GC: each window entry of `Kids::wins` holds persistent handles of its objects (target, proxy, `location` object), and `Kids` holds the
+//!   shared functions of `Common` the same way. `Kids::sync` drops the entries of a child that left, and so frees their handles. There is no
+//!   hook root for windows.
 //! - `length` is 0: the child frames of a child are not counted yet.
 //! - `location`: a write to `iframe.contentWindow.location` navigates the child. A read gives an object with `replace(url)` and a `href`
 //!   setter (the getter throws `SecurityError`). In a child, `parent.location = url` does nothing yet: the parent is not reachable
@@ -211,7 +214,7 @@ fn common(d: &Dom, it: &mut Interp<'_>) -> R<Common> {
     let kr = d.key(it, "revocable")?;
     let Value::Object(ctor) = it.get_value(px, kr)? else { return Err(it.type_error("Proxy is not available")) };
     let c = Common { handler, ctor, no_op, closed, replace, href_get, href_set };
-    d.kids.common.set(Some(c));
+    d.kids.set_common(it, c);
     Ok(c)
 }
 
@@ -242,8 +245,8 @@ pub(crate) fn make(d: &Dom, it: &mut Interp<'_>, side: Side, top: Option<Value>,
     d.define_accessor(it, loc, k, c.href_get, Some(c.href_set))?;
     let k = d.key(it, "location")?;
     it.define_data(target, k, Value::Object(loc), true, true, true)?;
-    d.kids.add_win(target, Win { side, proxy, location: false });
-    d.kids.add_win(loc, Win { side, proxy, location: true });
+    d.kids.add_win(it, target, Win { side, proxy, location: false });
+    d.kids.add_win(it, loc, Win { side, proxy, location: true });
     Ok(proxy)
 }
 

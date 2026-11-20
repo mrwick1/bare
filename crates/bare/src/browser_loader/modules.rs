@@ -36,6 +36,7 @@ use crate::resources::{self, Expect, JS_TYPES, Target};
 use bare_html::dom::NodeId;
 use bare_js::eval::{Error, PromiseStatus};
 use bare_js::value::{ObjId, Value};
+use bare_js_api::Persistent;
 use bare_url::Url;
 use std::collections::{HashMap, HashSet};
 
@@ -52,7 +53,7 @@ pub(crate) struct Modules {
     /// `None` until the first resolution.
     map: Option<ImportMap>,
     /// Promises of module evaluations that are not seen settled yet, with the label of the script.
-    evals: Vec<(ObjId, String)>,
+    evals: Vec<(Persistent, String)>,
     /// Script elements that a script added with `type=module`.
     pub(super) nodes: HashSet<NodeId>,
 }
@@ -72,8 +73,8 @@ fn is_data(spec: &str) -> bool {
 pub(super) enum Load {
     /// A download failed: the element gets `error`.
     Net(String),
-    /// A syntax error or a bad specifier: reported as an exception.
-    Throw(Value),
+    /// A syntax error or a bad specifier: reported as an exception. The value is held until it is reported or rejects an `import()`.
+    Throw(Persistent),
     Fatal(Error),
 }
 
@@ -366,11 +367,12 @@ impl Run<'_> {
     }
 
     /// A `TypeError` object (the value to throw).
-    fn type_error_value(&mut self, msg: &str) -> Value {
-        match self.b.it.type_error(msg) {
+    fn type_error_value(&mut self, msg: &str) -> Persistent {
+        let v = match self.b.it.type_error(msg) {
             Error::Throw(v) => v,
             _ => Value::Undefined,
-        }
+        };
+        self.b.it.persist_value(v)
     }
 
     fn resolve_spec(&mut self, spec: &str, referrer: &Url) -> Result<Url, Load> {
@@ -422,7 +424,7 @@ impl Run<'_> {
         let mut made = Vec::new();
         let id = match self.b.it.module_parse(text, &base.to_string()) {
             Ok(id) => id,
-            Err(Error::Throw(v)) => return Err(Load::Throw(v)),
+            Err(Error::Throw(v)) => return Err(Load::Throw(self.b.it.persist_value(v))),
             Err(e) => return Err(Load::Fatal(e)),
         };
         let r = self.load_deps(id, base, 0, &mut made).map(|()| id);
@@ -449,7 +451,7 @@ impl Run<'_> {
         };
         let id = match self.b.it.module_parse(&text, &key) {
             Ok(id) => id,
-            Err(Error::Throw(v)) => return Err(Load::Throw(v)),
+            Err(Error::Throw(v)) => return Err(Load::Throw(self.b.it.persist_value(v))),
             Err(e) => return Err(Load::Fatal(e)),
         };
         self.dom.scripts.modules.borrow_mut().ids.insert(key.clone(), id);
@@ -480,7 +482,7 @@ impl Run<'_> {
         let text = String::from_utf8_lossy(&bytes).into_owned();
         let id = match self.b.it.module_parse(&text, spec) {
             Ok(id) => id,
-            Err(Error::Throw(v)) => return Err(Load::Throw(v)),
+            Err(Error::Throw(v)) => return Err(Load::Throw(self.b.it.persist_value(v))),
             Err(e) => return Err(Load::Fatal(e)),
         };
         self.dom.scripts.modules.borrow_mut().ids.insert(spec.to_string(), id);
@@ -538,7 +540,10 @@ impl Run<'_> {
         let graph = if external { self.load_graph(url, Some(text)) } else { self.load_inline(url, &text) };
         match graph {
             Err(Load::Net(why)) => return self.module_failed(node, what, &why),
-            Err(Load::Throw(v)) => self.script_threw(v, what),
+            Err(Load::Throw(v)) => {
+                let v = self.b.it.persistent_value(&v);
+                self.script_threw(v, what);
+            }
             Err(Load::Fatal(e)) => return Err(self.fatal(e, what)),
             Ok(id) => self.run_graph(id, what)?,
         }
@@ -560,7 +565,10 @@ impl Run<'_> {
             Err(e) => return Err(self.fatal(e, what)),
         }
         match self.b.it.module_evaluate(id) {
-            Ok(p) => self.dom.scripts.modules.borrow_mut().evals.push((p, what.to_string())),
+            Ok(p) => {
+                let p = self.b.it.persist_value(Value::Object(p));
+                self.dom.scripts.modules.borrow_mut().evals.push((p, what.to_string()));
+            }
             Err(Error::Throw(v)) => self.script_threw(v, what),
             Err(e) => return Err(self.fatal(e, what)),
         }
@@ -582,7 +590,7 @@ impl Run<'_> {
         }
         let mut keep = Vec::new();
         for (p, what) in list {
-            match self.b.it.promise_status(Value::Object(p)) {
+            match self.b.it.promise_status(self.b.it.persistent_value(&p)) {
                 Some(PromiseStatus::Pending) => keep.push((p, what)),
                 Some(PromiseStatus::Rejected(v)) => self.script_threw(v, &what),
                 _ => {}
@@ -600,9 +608,15 @@ impl Run<'_> {
         }
     }
 
+    /// The promise object of an `import()` request. The handle is the only reference the host keeps: read it where it is used.
+    fn import_promise(&self, p: &Persistent) -> ObjId {
+        let Value::Object(o) = self.b.it.persistent_value(p) else { unreachable!("an import promise is an object") };
+        o
+    }
+
     /// Answer the `import()` calls that ran. True when there were any (the caller runs the microtasks again).
     pub(super) fn serve_imports(&mut self) -> Result<bool, Stop> {
-        let reqs = self.b.it.take_dynamic_imports();
+        let reqs = bare_js_api::Engine::take_dynamic_imports(&mut self.b.it);
         if reqs.is_empty() {
             return Ok(false);
         }
@@ -653,13 +667,14 @@ impl Run<'_> {
                     Err(e) => Err(e),
                 },
             };
+            let promise = self.import_promise(&r.promise);
             let done = match loaded {
-                Ok(id) => self.b.it.finish_dynamic_import(r.promise, id),
+                Ok(id) => self.b.it.finish_dynamic_import(promise, id),
                 Err(Load::Net(msg)) => {
                     self.diag(msg.clone());
-                    self.b.it.fail_dynamic_import(r.promise, &msg)
+                    self.b.it.fail_dynamic_import(promise, &msg)
                 }
-                Err(Load::Throw(v)) => self.b.it.reject_dynamic_import(r.promise, Error::Throw(v)),
+                Err(Load::Throw(v)) => self.b.it.reject_dynamic_import(promise, Error::Throw(self.b.it.persistent_value(&v))),
                 Err(Load::Fatal(e)) => return Err(self.fatal(e, "import()")),
             };
             if let Err(e) = done {

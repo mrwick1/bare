@@ -718,3 +718,65 @@ fn a_queued_message_that_holds_ports_is_dropped_with_one_warning_when_its_port_m
         assert!(p.contains(&"c got plain".to_string()) && !p.iter().any(|x| x.contains("has ports")), "{l:?}");
     });
 }
+
+/// Run `src` in the page of the session after the run ended.
+fn eval(s: &mut Session, src: &str) -> String {
+    let b = s.browser().unwrap();
+    let v = b.run_script(src).expect("script");
+    b.it.display(v)
+}
+
+fn collect3(s: &mut Session) {
+    for _ in 0..3 {
+        s.browser().unwrap().collect(&[]).unwrap();
+    }
+}
+
+/// The handles of the shared functions of `Common`: handler, `Proxy.revocable`, `closed`, `replace`, the two `href` functions and four no-ops.
+const COMMON: usize = 10;
+
+fn window_page(tail: &str) -> (Server, Server) {
+    let other = server(|| vec![("/child", html("<p>child</p>"))]);
+    let o = other.url("/child");
+    let tail = tail.to_string();
+    let srv = server(move || vec![("/", html(&format!("<iframe id=f src='{o}'></iframe><script>{tail}</script>")))]);
+    (srv, other)
+}
+
+#[test]
+fn a_remote_window_that_no_script_holds_is_reachable_while_its_page_lives() {
+    big(|| {
+        let (srv, _other) = window_page("var r = new WeakRef(document.getElementById('f').contentWindow); setTimeout(function () {}, 30);");
+        let (mut s, r) = run(srv.url("/"), |_| {});
+        assert_eq!(r.stop, SessionStop::Page(Stop::Settled), "{r:?}");
+        collect3(&mut s);
+        // The target and the proxy of the window, its `location` object and the 10 shared functions.
+        assert_eq!(s.browser().unwrap().dom.kids.handle_count(), 3 + COMMON);
+        assert_eq!(eval(&mut s, "typeof r.deref() + ',' + (r.deref() === document.getElementById('f').contentWindow) + ',' + typeof r.deref().postMessage"), "object,true,function");
+    });
+}
+
+#[test]
+fn closing_the_child_page_frees_the_handles_of_its_remote_window() {
+    big(|| {
+        let (srv, _other) = window_page("var r = new WeakRef(document.getElementById('f').contentWindow); setTimeout(function () { document.getElementById('f').remove() }, 30);");
+        let (mut s, r) = run(srv.url("/"), |_| {});
+        assert_eq!(r.stop, SessionStop::Page(Stop::Settled), "{r:?}");
+        // Only the shared functions stay: they live as long as the page.
+        assert_eq!(s.browser().unwrap().dom.kids.handle_count(), COMMON);
+        collect3(&mut s);
+        // No script holds the window and no handle does: it is collected.
+        assert_eq!(eval(&mut s, "typeof r.deref()"), "undefined");
+    });
+}
+
+#[test]
+fn a_remote_window_that_a_script_holds_survives_three_collections() {
+    big(|| {
+        let (srv, _other) = window_page("var w = document.getElementById('f').contentWindow; var l = w.location;");
+        let (mut s, r) = run(srv.url("/"), |_| {});
+        assert_eq!(r.stop, SessionStop::Page(Stop::Settled), "{r:?}");
+        collect3(&mut s);
+        assert_eq!(eval(&mut s, "[w === document.getElementById('f').contentWindow, w.closed, typeof w.postMessage, w.window === w, typeof l.replace].join()"), "true,false,function,true,function");
+    });
+}
