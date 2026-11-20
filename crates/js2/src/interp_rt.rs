@@ -40,10 +40,11 @@ use crate::cell::Layout;
 use crate::gc::{Marker, collect};
 use crate::heap::Heap;
 use crate::builtins::{Hint, Native};
-use crate::object::{Ctx, F_CLASS, F_NATIVE, Obj};
+use crate::object::{Ctx, F_CLASS, F_LAZY, F_NATIVE, Obj};
 use crate::shapes::{A_ACC, A_C, A_E, A_W, ShapeId, Shapes};
 use crate::string::{Chars, Str};
 use crate::value::{Kind, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// A thrown value (the result of a failed op).
@@ -187,6 +188,8 @@ pub enum Got {
 pub enum Put {
     Done,
     Set(Value),
+    /// The write did not happen (a read-only property, an accessor with no setter, a primitive): strict code throws a TypeError.
+    Fail,
 }
 
 /// What a property lookup found: a data value, or the getter and the setter of an accessor.
@@ -252,6 +255,8 @@ pub struct Realm {
     pub s_native: ShapeId,
     /// The built-ins written in Rust (`builtins.rs`).
     pub natives: Vec<Native>,
+    /// The shared atom of the `name` and the `length` of each code (`Code::fn_name`, `Code::fn_len`), for `Realm::fn_props`.
+    pub fn_info: Vec<(Option<Str>, u16)>,
     /// The index of the native that runs a bound function.
     pub(crate) bound_id: i32,
     /// While a native runs: the function cell that was called, and `new.target` (`undefined` for a plain call).
@@ -269,6 +274,9 @@ pub struct Realm {
     tnames: [Str; 8],
     /// Every value that the realm keeps and the collector must mark.
     consts: Vec<Value>,
+    /// The global lexical environment: the top-level `let`, `const` and `class` names of the scripts that ran, each with its context
+    /// and slot (`DeclLex`). A global read that the global object does not answer looks here. The collector marks the names and contexts.
+    pub(crate) lex: HashMap<u64, (Str, Value, u32, bool)>,
     /// Shapes that no object may have yet.
     pins: Vec<ShapeId>,
     /// The top frame when a collection runs: code index, frame pointer, `pc` of the safepoint.
@@ -359,6 +367,7 @@ impl Realm {
             error_protos,
             s_native,
             natives: Vec::new(),
+            fn_info: Vec::new(),
             bound_id: 0,
             callee: Value::UNDEFINED,
             nt: Value::UNDEFINED,
@@ -368,6 +377,7 @@ impl Realm {
             rng: 0,
             tnames,
             consts,
+            lex: HashMap::new(),
             pins,
             cur: (0, 0, 0),
             epoch,
@@ -386,10 +396,14 @@ impl Realm {
 
     /// Collect with the frames of the stack as roots. `walk_frames` marks them (see `interp.rs`); the realm adds its own.
     pub fn collect(&mut self, fbs: &mut [Feedback], walk_frames: impl FnOnce(&mut Marker)) {
-        let Realm { heap, shapes, atoms, consts, pins, .. } = self;
+        let Realm { heap, shapes, atoms, consts, pins, lex, .. } = self;
         let mut walk_frames = Some(walk_frames);
         let mut roots = |m: &mut Marker| {
             consts.iter().for_each(|v| m.value(*v));
+            lex.values().for_each(|(k, c, _, _)| {
+                m.value(k.value());
+                m.value(*c);
+            });
             pins.iter().for_each(|s| m.shape(*s));
             fbs.iter().for_each(|f| f.walk(m));
             if let Some(w) = walk_frames.take() {
@@ -577,8 +591,17 @@ impl Realm {
             if f > 0.0 { "Infinity".into() } else { "-Infinity".into() }
         } else if f == 0.0 {
             "0".into()
-        } else {
+        } else if (1e-6..1e21).contains(&f.abs()) {
             format!("{f}")
+        } else {
+            // The exponent form of Number::toString: the shortest digits, `n` is the place of the decimal point.
+            let e = format!("{:e}", f.abs());
+            let (m, x) = e.split_once('e').unwrap_or((&e, "0"));
+            let digits: String = m.chars().filter(|c| *c != '.').collect();
+            let n: i32 = x.parse::<i32>().unwrap_or(0) + 1;
+            let (sign, ex) = (if f < 0.0 { "-" } else { "" }, n - 1);
+            let es = format!("e{}{}", if ex < 0 { '-' } else { '+' }, ex.abs());
+            if digits.len() == 1 { format!("{sign}{digits}{es}") } else { format!("{sign}{}.{}{es}", &digits[..1], &digits[1..]) }
         }
     }
 
@@ -735,6 +758,7 @@ impl Realm {
 
     /// The value of an own or inherited data property. An accessor throws: use [`Realm::get_prop_g`] where the interpreter can call.
     pub(crate) fn lookup(&mut self, o: Obj, key: Str) -> R<Option<Value>> {
+        self.fn_props(o);
         match self.lookup_g(o, key) {
             Some(Slot::Data(v)) => Ok(Some(v)),
             Some(Slot::Acc(..)) => self.type_error("accessors are not supported here (the host needs a call)"),
@@ -752,7 +776,7 @@ impl Realm {
     }
 
     pub(crate) fn setter(s: Value) -> Put {
-        if s.is_undefined() { Put::Done } else { Put::Set(s) }
+        if s.is_undefined() { Put::Fail } else { Put::Set(s) }
     }
 
     fn undefined_read<T>(&mut self, recv: Value, name: &str) -> R<T> {
@@ -763,6 +787,7 @@ impl Realm {
     /// `recv[key]`; an accessor with a getter gives [`Got::Get`].
     pub fn get_prop_g(&mut self, recv: Value, key: Key) -> R<Got> {
         if let Some(o) = Realm::obj(recv) {
+            self.fn_props(o);
             return match key {
                 Key::Idx(i) => {
                     if o.is_indexed()
@@ -829,8 +854,9 @@ impl Realm {
             if recv.is_undefined() || recv.is_null() {
                 return self.type_error("cannot set properties of undefined or null");
             }
-            return Ok(Put::Done);
+            return Ok(Put::Fail);
         };
+        self.fn_props(o);
         match key {
             Key::Idx(i) if self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed => {
                 if o.set_element(&mut self.heap, i, v).is_none() {
@@ -859,7 +885,7 @@ impl Realm {
     /// `recv[key] = v` where a setter throws (the host and the tests have no frame to call from).
     pub fn set_prop(&mut self, recv: Value, key: Key, v: Value) -> R<()> {
         match self.set_prop_g(recv, key, v)? {
-            Put::Done => Ok(()),
+            Put::Done | Put::Fail => Ok(()),
             Put::Set(_) => self.type_error("accessors are not supported here (the host needs a call)"),
         }
     }
@@ -869,7 +895,10 @@ impl Realm {
         let mut p = self.proto_of(o)?;
         loop {
             if let Some(e) = self.shapes.find(p.shape(&self.shapes), k) {
-                return (e.attrs() & A_ACC != 0).then(|| Self::setter(p.slot(&self.shapes, e.slot() + 1)));
+                if e.attrs() & A_ACC != 0 {
+                    return Some(Self::setter(p.slot(&self.shapes, e.slot() + 1)));
+                }
+                return (e.attrs() & A_W == 0).then_some(Put::Fail);
             }
             p = self.proto_of(p)?;
         }
@@ -881,9 +910,10 @@ impl Realm {
         match self.shapes.find(id, k) {
             Some(e) if e.attrs() & A_ACC != 0 => Ok(Self::setter(o.slot(&self.shapes, e.slot() + 1))),
             Some(e) => {
-                if e.attrs() & A_W != 0 {
-                    o.set_slot(&self.shapes, e.slot(), v);
+                if e.attrs() & A_W == 0 {
+                    return Ok(Put::Fail);
                 }
+                o.set_slot(&self.shapes, e.slot(), v);
                 Ok(Put::Done)
             }
             None => {
@@ -938,9 +968,14 @@ impl Realm {
         }
     }
 
-    /// `GetGlobal`: the property of the global object, or a `ReferenceError` when it is not there. An own data property of a tree shape
-    /// gets a cache entry (the address of its slot, valid while the tag of the global object stays); the rest is looked up each time.
-    pub fn get_global_slow(&mut self, fb: &mut Feedback, site: usize, name: Str) -> R<Value> {
+    /// `GetGlobal`: the property of the global object, or a `ReferenceError` when it is not there. A global lexical binding comes first and
+    /// has no entry (`declare_lex` changes the tag, so an entry for a property that a binding now hides does not match). An own data
+    /// property of a tree shape gets a cache entry (the address of its slot, valid while the tag of the global object stays); an accessor
+    /// and the rest are looked up each time.
+    pub fn get_global_slow(&mut self, fb: &mut Feedback, site: usize, name: Str) -> R<Got> {
+        if let Some(v) = self.lex_get(name) {
+            return Ok(Got::Val(v?));
+        }
         let o = self.global;
         let id = o.shape(&self.shapes);
         if self.shapes.cacheable(id)
@@ -948,22 +983,28 @@ impl Realm {
             && e.attrs() & A_ACC == 0
         {
             self.fill_global(fb, site, e.slot());
-            return Ok(o.slot(&self.shapes, e.slot()));
+            return Ok(Got::Val(o.slot(&self.shapes, e.slot())));
         }
         let g = o.value();
-        let v = match self.get_prop_g(g, Key::Name(name))? {
-            Got::Val(v) => v,
-            Got::Get(_) => return self.type_error("a global accessor needs a call"),
-        };
-        if v.is_undefined() && !self.has_prop(g, Key::Name(name))? {
+        let got = self.get_prop_g(g, Key::Name(name))?;
+        if let Got::Val(v) = got
+            && v.is_undefined()
+            && !self.has_prop(g, Key::Name(name))?
+        {
             let n = self.text(name);
             return Err(self.error(ErrKind::Reference, &format!("{n} is not defined")));
         }
-        Ok(v)
+        Ok(got)
     }
 
-    /// `SetGlobal`: as `get_global_slow`, for a writable own data property. An add, a setter and the rest are `set_prop_g`.
-    pub fn set_global_slow(&mut self, fb: &mut Feedback, site: usize, name: Str, v: Value) -> R<Put> {
+    /// `SetGlobal` (`strict` false) and `SetGlobalS`: a global lexical binding first; then a writable own data property of a tree shape
+    /// gets a cache entry as in `get_global_slow`. In strict code a name that is not there is a `ReferenceError`. An add, a setter and
+    /// the rest are `set_prop_g`.
+    pub fn set_global_slow(&mut self, fb: &mut Feedback, site: usize, name: Str, v: Value, strict: bool) -> R<Put> {
+        if let Some(res) = self.lex_put(name, v) {
+            res?;
+            return Ok(Put::Done);
+        }
         let o = self.global;
         let id = o.shape(&self.shapes);
         if self.shapes.cacheable(id)
@@ -974,12 +1015,17 @@ impl Realm {
             self.fill_global(fb, site, e.slot());
             return Ok(Put::Done);
         }
+        if strict && !self.has_prop(o.value(), Key::Name(name))? {
+            let t = self.text(name);
+            return Err(self.error(ErrKind::Reference, &format!("{t} is not defined")));
+        }
         self.set_prop_g(o.value(), Key::Name(name), v)
     }
 
     /// `recv.name = v` at a site.
     pub fn set_field_slow(&mut self, fb: &mut Feedback, site: usize, name: Str, recv: Value, v: Value) -> R<Put> {
         let Some(o) = Realm::obj(recv) else { return self.set_prop_g(recv, Key::Name(name), v) };
+        self.fn_props(o);
         let id = o.shape(&self.shapes);
         if fb.caches[site].state == POLY
             && let Some((loc, to)) = fb.poly_find(site, id.raw())
@@ -998,7 +1044,7 @@ impl Realm {
             Some(e) if e.attrs() & A_ACC != 0 => Ok(Self::setter(o.slot(&self.shapes, e.slot() + 1))),
             Some(e) => {
                 if e.attrs() & A_W == 0 {
-                    return Ok(Put::Done);
+                    return Ok(Put::Fail);
                 }
                 if layout_ok {
                     let loc = o.loc(&self.shapes, e.slot());
@@ -1035,6 +1081,7 @@ impl Realm {
 
     /// Define the own data property `key` of `o` (an object literal or a computed key): add it, or overwrite it.
     pub fn define(&mut self, o: Obj, key: Key, v: Value) -> R<()> {
+        self.fn_props(o);
         match key {
             Key::Idx(i) if self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed => {
                 if o.set_element(&mut self.heap, i, v).is_none() {
@@ -1049,6 +1096,7 @@ impl Realm {
             Key::Name(k) => {
                 let id = o.shape(&self.shapes);
                 match self.shapes.find(id, k) {
+                    Some(e) if e.attrs() & A_C == 0 => self.type_error("cannot redefine a property that is not configurable"),
                     Some(e) if e.attrs() & A_ACC == 0 => {
                         o.set_slot(&self.shapes, e.slot(), v);
                         Ok(())
@@ -1066,6 +1114,7 @@ impl Realm {
     pub fn has_prop(&mut self, recv: Value, key: Key) -> R<bool> {
         let Some(mut o) = Realm::obj(recv) else { return self.type_error("cannot use 'in' on a primitive") };
         loop {
+            self.fn_props(o);
             let found = match key {
                 Key::Idx(i) => (o.is_indexed() && o.get_element(i).is_some()) || {
                     let k = self.idx_atom(i);
@@ -1087,6 +1136,7 @@ impl Realm {
 
     pub fn delete_prop(&mut self, recv: Value, key: Key) -> R<bool> {
         let Some(o) = Realm::obj(recv) else { return Ok(true) };
+        self.fn_props(o);
         match key {
             Key::Idx(i) if self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed => {
                 o.delete_element(i);
@@ -1127,6 +1177,7 @@ impl Realm {
     pub fn own_keys(&mut self, recv: Value) -> R<Value> {
         let mut keys: Vec<Value> = Vec::new();
         if let Some(o) = Realm::obj(recv) {
+            self.fn_props(o);
             if self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed {
                 for i in 0..o.len() {
                     if o.get_element(i).is_some() {
@@ -1153,7 +1204,44 @@ impl Realm {
         f.set_slot(&self.shapes, 0, Value::int(code as i32));
         f.set_slot(&self.shapes, 1, ctx);
         f.set_callable();
+        f.set_flag(F_LAZY);
         f.value()
+    }
+
+    /// Give a function cell its own `length` and `name` now (not writable, not enumerable, configurable). It runs before any look at the
+    /// own properties of the cell; a cell that nothing inspects never pays for them.
+    #[inline]
+    pub(crate) fn fn_props(&mut self, o: Obj) {
+        if o.has_flag(F_LAZY) {
+            self.fn_props_slow(o);
+        }
+    }
+
+    #[cold]
+    fn fn_props_slow(&mut self, o: Obj) {
+        o.clear_flag(F_LAZY);
+        let (name, len) = o.slot(&self.shapes, 0).as_int().and_then(|c| self.fn_info.get(c as usize).copied()).unwrap_or((None, 0));
+        let name = match name {
+            Some(s) => self.atoms.adopt(s),
+            None => self.intern(""),
+        };
+        self.define_attrs(o, Key::Name(self.k_length), A_C, Value::int(len as i32)).expect("memory");
+        self.define_attrs(o, Key::Name(self.k_name), A_C, name.value()).expect("memory");
+    }
+
+    /// `SetFunctionName(f, key, prefix)` of a computed key: `prefix` 1 is `get `, 2 is `set `.
+    pub fn name_function(&mut self, f: Value, key: Key, prefix: u32) -> R<()> {
+        let Some(o) = Realm::obj(f).filter(|o| o.is_callable()) else { return Ok(()) };
+        self.fn_props(o);
+        let mut t = match key {
+            Key::Idx(i) => i.to_string(),
+            Key::Name(k) => self.text(k),
+        };
+        if prefix != 0 {
+            t.insert_str(0, if prefix == 1 { "get " } else { "set " });
+        }
+        let n = self.intern(&t);
+        self.define_attrs(o, Key::Name(self.k_name), A_C, n.value())
     }
 
     /// The code index and the context of a function cell; `None` when the value is not callable.

@@ -511,6 +511,45 @@ fn a_host_script_runs_before_the_script_and_the_directive_prologue_stays() {
 }
 
 #[test]
+fn a_top_level_let_const_and_class_are_visible_to_the_next_script() {
+    let host = "let a = 1; const b = 2; class C { m() { return 3; } } let later; let o = { k: 5 };";
+    let src = "var r = a + b + new C().m(); a = 10; var s = a; var t; try { b = 1; } catch (e) { t = e.name; }
+               var u = typeof later + typeof C + typeof nothing; later = 4; var w = (function () { return a + later; })();
+               var junk; for (var i = 0; i < 3000; i++) { junk = [i, { i: i }]; } var x = o.k + (this.a === undefined ? 'g' : 'p');
+               var y; try { zzz; } catch (e) { y = e.name; }";
+    let mut vm = load_with(host, src).unwrap();
+    vm.run_main(0).unwrap();
+    let got: Vec<String> = ["r", "s", "t", "u", "w", "x", "y"].iter().map(|n| vm.global_text(n)).collect();
+    assert_eq!(got, ["6", "10", "TypeError", "undefinedfunctionundefined", "14", "5g", "ReferenceError"]);
+    // The names are not properties of the global object, and a name that is declared twice is a SyntaxError.
+    let mut vm = load_with("let a = 1;", "let a = 2;").unwrap();
+    assert!(vm.run_main(0).is_err());
+    let mut vm = load_with("var a = 1;", "let a = 2;").unwrap();
+    assert!(vm.run_main(0).is_err());
+    // The check comes before the first statement of the script.
+    let mut vm = load_with("let a = 1;", "var side = 1; let a = 2;").unwrap();
+    assert!(vm.run_main(0).is_err());
+    assert_eq!(vm.global_text("side"), "undefined");
+    let mut vm = load_with("let a = 1;", "var a = 2;").unwrap();
+    assert!(vm.run_main(0).is_err());
+    let mut vm = load_with("let a = 1;", "var r = typeof globalThis.a + delete a;").unwrap();
+    vm.run_main(0).unwrap();
+    assert_eq!(vm.global_text("r"), "undefinedfalse");
+}
+
+#[test]
+fn a_parenthesized_optional_member_call_keeps_this() {
+    let o = "var o = { m() { return this.v; }, v: 7 }; var n = null; ";
+    check(&[
+        (&format!("{o} var r = (o?.m)();"), "r", "7"),
+        (&format!("{o} var r = (o?.m)?.();"), "r", "7"),
+        (&format!("{o} var r = (o.m)?.();"), "r", "7"),
+        (&format!("{o} var r = 0; try {{ (n?.m)(); }} catch (e) {{ r = e.name; }}"), "r", "TypeError"),
+        (&format!("{o} var r = (n?.m)?.();"), "r", "undefined"),
+    ]);
+}
+
+#[test]
 fn built_ins_survive_constant_collection_with_many_live_values() {
     // Run in Miri too (one program): sort, map, filter, split, join, slice, splice, concat, bind and Object.entries, all holding many
     // fresh cells while the collector runs at nearly every allocation.
@@ -737,4 +776,50 @@ fn a_constant_of_32_bits_and_a_jump_to_a_return_give_the_same_values() {
 #[test]
 fn every_shape_of_callee_gives_its_value() {
     check(&[(r#"function none() { return 1 } function two(a, b) { return a + ',' + b } function args() { return arguments.length + ':' + arguments[0] + arguments[2] } function rest(a, ...r) { return a + ':' + r.length + r.join('') } function def(a, b = a + 1) { return a + b } function nat(a, b) { return Math.max(a, b) } function Ctor(a) { this.a = a; this.n = arguments.length } function ctorRet(a) { this.a = a; return { z: 9 } } var o = { get g() { return this.v + 1 }, set g(x) { this.v = x * 2 }, v: 1, m(a) { return this.v + a } }; var arrow = (a, b) => a * b; var cl = (function () { var c = 0; return function (d) { c += d; return c } })(); var out = [none(9, 9, 9), two(1), two(1, 2, 3), args(7, 8, 9, 10), args(), rest(1), rest(1, 2, 3), def(1), def(1, 5), nat(3, 8), new Ctor(4).a + '/' + new Ctor(4, 5, 6).n, new ctorRet(1).z, (o.g = 5, o.g), o.m(3), arrow(6, 7), arrow(6), cl(1), cl(2), (function () { return this === undefined || this === globalThis })()]; var r = out.join('|');"#, "r", "1|1,undefined|1,2|4:79|0:undefinedundefined|1:0|1:223|3|6|8|4/3|9|11|13|42|NaN|1|3|true")]);
+}
+
+/// The cache of a global site and the other ways to reach a global name: strict writes (`SetGlobalS`), `delete` of a name
+/// (`DeleteGlobal`), a `var` that cannot be deleted, a property that becomes read-only, a getter and a setter that grow the stack.
+#[test]
+fn a_global_cache_agrees_with_strict_writes_delete_and_attributes() {
+    check(&[
+        // A strict write to a name that was deleted is a ReferenceError at a site that had an entry; the name added again works.
+        ("'use strict'; globalThis.s = 0; function ws(x) { s = x; } for (var i = 0; i < 4; i++) ws(i); delete globalThis.s; var r; try { ws(4); r = 'no'; } catch (e) { r = e.name; } globalThis.s = 9; ws(5); r += ',' + s;", "r", "ReferenceError,5"),
+        // A read-only global: the store of a site that had an entry throws in strict code and is dropped in sloppy code.
+        ("'use strict'; globalThis.n = 0; function wn(x) { n = x; } wn(1); wn(2); wn(3); Object.defineProperty(globalThis, 'n', { writable: false }); var r; try { wn(4); r = 'no'; } catch (e) { r = e.name; } r += ',' + n;", "r", "TypeError,3"),
+        ("globalThis.n = 0; function wn(x) { n = x; } wn(1); wn(2); wn(3); Object.defineProperty(globalThis, 'n', { writable: false }); wn(4); var r = n;", "r", "3"),
+        // `delete name` (DeleteGlobal) of a property that a site has an entry for: the next read is a ReferenceError.
+        ("globalThis.d = 1; function rd() { try { return d; } catch (e) { return e.name; } } rd(); rd(); var r = rd() + ',' + delete d + ',' + rd();", "r", "1,true,ReferenceError"),
+        // A `var` cannot be deleted: the entry stays right.
+        ("var nv = 1; function rn() { return nv; } rn(); rn(); var r = rn() + ',' + delete nv + ',' + rn();", "r", "1,false,1"),
+        // A getter and a setter of the global that run a deep recursion (the stack grows while the frame of `use` is live).
+        ("var gv; function rec(n) { var a = n; return n == 0 ? 0 : rec(n - 1) + a; } Object.defineProperty(globalThis, 'gg', { get: function () { return rec(300); }, set: function (v) { gv = rec(300) + v; }, configurable: true }); function use() { var p = 1, q = 2; var t = gg; gg = 5; return p + q + t + gv; } var r = use();", "r", "90308"),
+    ]);
+}
+
+/// A global lexical binding (a `let`, `const` or `class` of an earlier or later script) hides a property of the global object of the same
+/// name. A site that has an entry for the property must not give it (`declare_lex` changes the tag of the global object).
+#[test]
+fn a_global_lexical_binding_hides_the_property_that_a_site_cached() {
+    // The host makes the globals that the script writes (`var a, b, e, d`), so the script adds nothing to the global object after its
+    // `let` and `const` are declared: only `declare_lex` can end the entries of `rd`, `wr` and `wc`.
+    let host = "var a, b, e, d; globalThis.v = 1; function rd() { return v; } function wr(x) { v = x; } rd(); rd(); rd(); wr(1); wr(1); wr(1); globalThis.c = 1; function wc(x) { c = x; } wc(1); wc(1); wc(1);";
+    // A function expression uses the names, so they are slots of a context and are declared before the first statement.
+    let src = "let v = 2; const c = 3; (function () { return v + c; }); a = rd(); wr(5); b = v + ',' + globalThis.v; try { wc(4); } catch (x) { e = x.name; } d = c + ',' + globalThis.c;";
+    let mut vm = load_with(host, src).unwrap();
+    vm.run_main(0).unwrap();
+    let got: Vec<String> = ["a", "b", "e", "d"].iter().map(|n| vm.global_text(n)).collect();
+    assert_eq!(got, ["2", "5,1", "TypeError", "3,1"]);
+}
+
+/// A frozen global object: a site that had an entry for a property stores nothing after `Object.freeze(globalThis)`.
+#[test]
+fn a_frozen_global_object_stops_the_stores_of_the_sites() {
+    let host = "globalThis.fz = 1; function wf(x) { fz = x; } function rf() { return fz; } wf(2); wf(3); wf(3); rf(); rf(); Object.freeze(globalThis);";
+    let mut vm = load_with(host, "wf(9);").unwrap();
+    vm.run_main(0).unwrap();
+    assert_eq!(vm.global_text("fz"), "3");
+    let mut vm = load_with(&format!("'use strict'; {host}"), "'use strict'; var t; try { wf(9); } catch (e) { t = e.name; }").unwrap();
+    // The `var t` of the script is not possible on a frozen object, so the script cannot report: the throw is the exit.
+    assert!(vm.run_main(0).is_err() || vm.global_text("fz") == "3");
 }
