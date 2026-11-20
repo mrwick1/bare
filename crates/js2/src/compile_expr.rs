@@ -479,8 +479,13 @@ impl<'a> Fc<'a> {
         if (self.is_arrow || self.derived) && !matches!(self.resolve("this", 0), Res::Global) {
             return self.read_var("this", 0, dst);
         }
-        self.op(Op::LoadThis, dst, 0, 0);
+        self.op(self.load_this_op(), dst, 0, 0);
         Ok(())
+    }
+
+    /// `LoadThis` in strict code and in the top level of a script (its `this` is the global object already).
+    pub(crate) fn load_this_op(&self) -> Op {
+        if self.strict || self.is_script { Op::LoadThis } else { Op::LoadThisS }
     }
 
     /// `this` in a new temporary register (live).
@@ -609,6 +614,21 @@ impl<'a> Fc<'a> {
     }
 
     /// The static name of a property key that a slot can hold, or `None` for a computed key or an index.
+    /// The value of the number literal that is a property key (`0x10`, `0b1`, `017`, `1_0`).
+    pub(crate) fn num_key(&self, s: Span) -> f64 {
+        use crate::lex::NumberBase as B;
+        let t = self.prog.text(s).as_bytes();
+        let base = match t {
+            [b'0', b'x' | b'X', ..] => B::Hex,
+            [b'0', b'o' | b'O', ..] => B::Octal,
+            [b'0', b'b' | b'B', ..] => B::Binary,
+            [b'0', b'0'..=b'7', ..] if t.iter().all(|c| (b'0'..=b'7').contains(c)) => B::LegacyOctal,
+            [b'0', b'0'..=b'9', ..] => B::NonOctalDecimal,
+            _ => B::Decimal,
+        };
+        self.prog.number(s, base).unwrap_or(0.0)
+    }
+
     fn static_key(&self, key: Key) -> Option<Cow<'a, str>> {
         let prog = self.prog;
         match key {
@@ -657,7 +677,7 @@ impl<'a> Fc<'a> {
             }
             (Some(n), _) => self.load_number(kt, n.parse::<f64>().unwrap_or(0.0)),
             (_, Key::Num(s)) => {
-                let v = self.prog.number(s, crate::lex::NumberBase::Decimal).unwrap_or(0.0);
+                let v = self.num_key(s);
                 self.load_number(kt, v);
             }
             _ => {

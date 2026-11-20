@@ -228,7 +228,7 @@ impl<'a> Fc<'a> {
                 }
                 Key::Num(s) => {
                     let k = slot.unwrap_or_else(|| self.alloc());
-                    let n = prog.number(s, crate::lex::NumberBase::Decimal).unwrap_or(0.0);
+                    let n = self.num_key(s);
                     self.load_number(k, n);
                     self.set_live(k);
                     self.bind_src(pp.value, Src::Elem(v, k), mode)?;

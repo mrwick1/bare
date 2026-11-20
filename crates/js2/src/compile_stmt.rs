@@ -259,7 +259,7 @@ impl<'a> Fc<'a> {
         if uses_this && !self.derived && let Some(Var { home: Home::Ctx { level, slot }, .. }) = self.find_var("this") {
             let (level, slot) = (*level, *slot);
             let t = self.alloc();
-            self.op(Op::LoadThis, t, 0, 0);
+            self.op(self.load_this_op(), t, 0, 0);
             self.op(Op::InitCtx, t, self.depth - level, slot);
             self.free(t);
         }

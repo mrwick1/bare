@@ -735,6 +735,11 @@ impl Vm {
                         r!(a!()) = record(stack, fp, 1);
                         pc = next;
                     }
+                    Op::LoadThisS => {
+                        let t = record(stack, fp, 1);
+                        r!(a!()) = if t.is_undefined() || t.is_null() { realm.global.value() } else { t };
+                        pc = next;
+                    }
                     Op::LoadHole => {
                         r!(a!()) = Value::HOLE;
                         pc = next;

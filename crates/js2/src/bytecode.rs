@@ -135,6 +135,7 @@ ops! {
     LoadTrue Abc "w" "`a = true`.",
     LoadFalse Abc "w" "`a = false`.",
     LoadThis Abc "w" "`a = this`.",
+    LoadThisS Abc "w" "`a = this` in sloppy code: `undefined` and `null` give the global object.",
     LoadHole Abc "w" "`a` = the hole value (a variable in its temporal dead zone).",
     LoadI AsBx "w i" "`a` = the integer `sbx`.",
     LoadN Abx "w N" "`a` = the number `numbers[bx]`.",
