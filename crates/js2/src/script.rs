@@ -227,7 +227,7 @@ pub fn load_with(host: &str, source: &str) -> Result<Vm, String> {
     lazy.add(Cow::Owned(source.to_owned()), facts, pending);
     let pre = codes.len();
     let mut pending = Vec::new();
-    let (codes, facts) = compile_after(codes, PRELUDE, &shared, Limits::default(), Some(&mut pending), Some(crate::prelude_facts::facts())).map_err(|e| format!("prelude: {e}"))?;
+    let (codes, facts) = compile_after(codes, PRELUDE, &shared, Limits::default(), Some(&mut pending), Some(crate::prelude_facts::facts())).map_err(|e| format!("prelude: {e} (is prelude_facts.rs out of date? run `BLESS_PRELUDE_FACTS=1 cargo test -p bare-js2 --lib prelude_facts`)"))?;
     lazy.add(Cow::Borrowed(PRELUDE), facts, pending);
     let at = codes.len();
     let mut prog = Program { codes };
@@ -239,10 +239,12 @@ pub fn load_with(host: &str, source: &str) -> Result<Vm, String> {
     if let Err(e) = vm.run_main(pre) {
         panic!("the prelude failed: {e:?}");
     }
-    let g = vm.realm.global.value();
+    // Hide the names of the prelude, do not delete them: a delete of a property that is not the last one puts the global object in dictionary
+    // mode, and then no global access can be cached. A property is not enumerable; its value is `undefined`, so a script cannot reach the function.
+    let g = vm.realm.global;
     for name in ["__def", "__helper", "__set"] {
         let k = vm.realm.intern(name);
-        let _ = vm.realm.delete_prop(g, crate::interp_rt::Key::Name(k));
+        vm.realm.define(g, crate::interp_rt::Key::Name(k), Value::UNDEFINED).expect("define");
     }
     if !host.is_empty()
         && let Err(e) = vm.run_main(at)

@@ -1568,6 +1568,8 @@ impl Vm {
         loop {
             let w = word!(pc);
             let op = w as u8;
+            #[cfg(feature = "op-count")]
+            crate::opcount::tick(code, pc, if op == Op::Wide as u8 { (w >> 8) as u8 } else { op }, op == Op::Wide as u8);
             if op != Op::Wide as u8 {
                 step!(
                     op,
