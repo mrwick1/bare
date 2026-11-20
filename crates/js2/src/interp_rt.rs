@@ -327,6 +327,7 @@ impl Realm {
         let epoch = shapes.epoch();
         let probe = Obj::new(&mut heap, &shapes, s_func).expect("memory");
         let (func_shape, loc_code, loc_ctx) = (s_func.raw(), probe.loc(&shapes, 0), probe.loc(&shapes, 1));
+        assert!(loc_code >> 9 == 0 && loc_ctx >> 9 == 0, "the code and the context of a function are inline slots");
         let mut rt = Realm {
             heap,
             shapes,
@@ -1163,7 +1164,7 @@ impl Realm {
             && shape == self.func_shape
         {
             // SAFETY: an object of the shape `s_func` has its two slots at these places (found in `new`).
-            let (code, ctx) = unsafe { (o.read_loc(self.loc_code), o.read_loc(self.loc_ctx)) };
+            let (code, ctx) = unsafe { (o.read_inline(self.loc_code), o.read_inline(self.loc_ctx)) };
             return Some((code.as_int()? as usize, ctx));
         }
         let f = Realm::obj(v).filter(|o| o.is_callable() && !o.has_flag(F_CLASS | F_NATIVE))?;

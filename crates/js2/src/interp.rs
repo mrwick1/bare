@@ -282,15 +282,28 @@ impl Vm {
         // Make the locals of the frame `(ci, fp)`.
         macro_rules! reload {
             () => {{
+                reload_to!(&prog.codes[ci])
+            }};
+        }
+        // The same, when the caller has the code `$c` of `ci` already (it is `&prog.codes[ci]`, so `ci` is in range).
+        macro_rules! reload_to {
+            ($c:expr) => {{
                 // SAFETY: as above, the frame `fp` is inside the stack.
                 regs = unsafe { stack.as_mut_ptr().add(fp) };
-                code = &prog.codes[ci];
+                code = $c;
                 words = &code.words;
                 fb = &mut fbs[ci];
                 if !fb.ready {
                     fb.init(code);
                 }
             }};
+        }
+        // The integer word `$k` of the frame record of the current frame (see `int_at`).
+        macro_rules! rec_int {
+            ($k:expr) => {
+                // SAFETY: the record `REC` words below `fp` is in the stack.
+                (unsafe { *regs.sub(REC - $k) }.bits() as u32 as i32)
+            };
         }
         // SAFETY (`r!` and `word!`): `verify` bounds every register by `nregs` and every pc by the code, and a call or `Vm::call` makes
         // the stack hold `fp + nregs` words (`need` in `call!`). `regs` is the base of the frame (see its declaration).
@@ -533,7 +546,7 @@ impl Vm {
         // of the caller that gets the result, and the flags. `$callpc`: the key of the caller's root map. `$next`: where the caller goes on.
         macro_rules! enter {
             ($callee:expr, $ni:expr, $cctx:expr, $this:expr, $nt:expr, $dstw:expr, $callpc:expr, $next:expr, $ab:expr, $argc:expr) => {{
-                let ncode = &prog.codes[$ni];
+                let ncode: &Code = &prog.codes[$ni];
                 let new_fp = fp + code.nregs as usize + REC;
                 ensure!(new_fp + ncode.nregs as usize + 8);
                 let (np, argc, ab) = (ncode.nparams as usize, $argc as usize, $ab as usize);
@@ -544,13 +557,36 @@ impl Vm {
                 };
                 let given = np.min(argc);
                 let (callee, this, nt): (Value, Value, Value) = ($callee, $this, $nt);
-                let rec = &mut stack[new_fp - REC..new_fp];
-                rec.copy_from_slice(&[callee, this, $cctx, Value::int($callpc as i32), Value::int($next as i32), Value::int(ci as i32), Value::int(0), Value::int($dstw as i32), nt, argsw]);
-                stack.copy_within(ab..ab + given, new_fp);
-                stack[new_fp + given..new_fp + np].fill(undef);
+                // SAFETY: `ensure!` made the stack hold `new_fp + nregs + 8` words, so the record, the `np` parameters and the registers
+                // are inside it. The arguments are at `ab..ab + given`, which ends below `new_fp - REC` (the registers of the caller) or
+                // is at `new_fp` itself (staged); a forward copy is right in both cases.
+                unsafe {
+                    let base = stack.as_mut_ptr();
+                    let rec = base.add(new_fp - REC);
+                    rec.write(callee);
+                    rec.add(1).write(this);
+                    rec.add(2).write($cctx);
+                    rec.add(3).write(Value::int($callpc as i32));
+                    rec.add(4).write(Value::int($next as i32));
+                    rec.add(5).write(Value::int(ci as i32));
+                    rec.add(6).write(Value::int(0));
+                    rec.add(7).write(Value::int($dstw as i32));
+                    rec.add(8).write(nt);
+                    rec.add(9).write(argsw);
+                    let (dst, src) = (base.add(new_fp), base.add(ab));
+                    let mut i = 0;
+                    while i < given {
+                        dst.add(i).write(src.add(i).read());
+                        i += 1;
+                    }
+                    while i < np {
+                        dst.add(i).write(undef);
+                        i += 1;
+                    }
+                }
                 ci = $ni;
                 fp = new_fp;
-                reload!();
+                reload_to!(ncode);
             }};
         }
         macro_rules! call_err {
@@ -662,20 +698,21 @@ impl Vm {
         macro_rules! ret {
             ($v:expr) => {{
                 let mut v: Value = $v;
-                let caller = int_at(stack, fp, 5);
-                let dst = int_at(stack, fp, 7);
+                let caller = rec_int!(5);
+                let dst = rec_int!(7);
                 if dst & CONSTRUCT != 0 && Realm::obj(v).is_none() {
                     v = record(stack, fp, 1);
                 }
                 if caller == ENTRY {
                     return Ok(v);
                 }
-                pc = int_at(stack, fp, 4) as usize;
-                let callpc = int_at(stack, fp, 3);
+                pc = rec_int!(4) as usize;
+                let callpc = rec_int!(3);
                 ci = caller as usize;
-                fp -= REC + prog.codes[ci].nregs as usize;
-                stack[fp + (dst & 0xffff) as usize] = v;
-                reload!();
+                let ccode: &Code = &prog.codes[ci];
+                fp -= REC + ccode.nregs as usize;
+                reload_to!(ccode);
+                r!(dst & 0xffff) = v;
                 if dst & AFTER_SUPER != 0
                     && let Some((class, _)) = super_info(realm, stack, fp)
                     && let Some((fi, fctx, ff)) = realm.fields_of(class)
@@ -1016,6 +1053,10 @@ impl Vm {
                         let y = if opv == Op::ModI { Value::int(sc!()) } else { r!(c!()) };
                         op_mod!(a!(), r!(b!()), y, next)
                     }
+                    Op::AddX => op_add!(a!(), r!(b!()), Value::int($x as i32), nextx!()),
+                    Op::SubX => op_sub!(a!(), r!(b!()), Value::int($x as i32), nextx!()),
+                    Op::MulX => op_mul!(a!(), r!(b!()), Value::int($x as i32), nextx!()),
+                    Op::ModX => op_mod!(a!(), r!(b!()), Value::int($x as i32), nextx!()),
                     Op::Exp => op_exp!(a!(), r!(b!()), r!(c!()), next),
                     Op::BitAnd | Op::BitAndI => {
                         let y = if opv == Op::BitAndI { Value::int(sc!()) } else { r!(c!()) };

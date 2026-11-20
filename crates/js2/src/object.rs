@@ -305,6 +305,17 @@ impl Obj {
         }
     }
 
+    /// The value at a place made by [`Obj::loc`] that is an inline slot (the bits above 9 are 0): no test, no record.
+    ///
+    /// # Safety
+    /// As for [`Obj::read_loc`], and `loc >> 9 == 0`.
+    #[inline]
+    pub unsafe fn read_inline(self, loc: u32) -> Value {
+        debug_assert!(loc >> 9 == 0);
+        // SAFETY: by the contract, the word is an inline slot of this cell.
+        unsafe { self.0.as_ptr().wrapping_add(loc as usize).cast::<Value>().read() }
+    }
+
     /// Write the value at a place made by [`Obj::loc`].
     ///
     /// # Safety

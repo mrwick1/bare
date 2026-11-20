@@ -720,3 +720,21 @@ fn a_global_cache_follows_every_change_of_the_global_object() {
         ("var p = 1; function rp() { return typeof q === 'undefined' ? 'no' : q; } rp(); rp(); Object.setPrototypeOf(globalThis, { q: 'proto' }); var r = rp() + p;", "r", "proto1"),
     ]);
 }
+
+/// `AddX`, `SubX`, `MulX` and `ModX` hold a 32-bit constant in the word `x` (a constant that does not fit the 16-bit immediate): the
+/// result is that of the register form for an int, a double that is not an int, a string, an object, `-0` and an overflow. A `Jmp` to a
+/// `Ret` is that `Ret`: a `return` of a conditional, inside `try` with `finally`, in a `for-of`, in a `catch`.
+#[test]
+fn a_constant_of_32_bits_and_a_jump_to_a_return_give_the_same_values() {
+    check(&[
+        (r#"var out=[]; function k1(x){ return [x+100000, x-100000, x*100000, x%100003, 100000*x, 3000000-x].join(); } out.push(k1(5)+"|"+k1("7")+"|"+k1(2147483647)+"|"+k1(-4.5)+"|"+k1(-2147483648)+"|"+k1(null)+"|"+k1(true)); out.push(String((-100003)%100003)+","+1/(-100003 % 100003)+","+(function(a){return 1/(a%100003)})(-100003)+","+(function(a){return a+100000})("s")); out.push((function(a){return -(a*70000)})(0)+","+(function(a){return 1/(a*70000)})(-0)+","+(function(a){return 1/(a*70000)})(-0));  var r = out.join('|');"#, "r", "100005,-99995,500000,5,500000,2999995|7100000,-99993,700000,7,700000,2999993|2147583647,2147383647,214748364700000,19225,214748364700000,-2144483647|99995.5,-100004.5,-450000,-4.5,-450000,3000004.5|-2147383648,-2147583648,-214748364800000,-19226,-214748364800000,2150483648|100000,-100000,0,0,0,3000000|100001,-99999,100000,1,100000,2999999|0,-Infinity,-Infinity,s100000|0,-Infinity,-Infinity"),
+        (r#"var out = []; function t1(c){ try { return c ? 1 : 2 } finally { out.push("f"+c) } } function t2(c){ var r; if (c) { r = 'a' } else { r = 'b' } return r } function t3(c){ for (var x of [1,2,3]) { if (c == x) return x*10 } return c ? 'n' : 'z' } function t4(c){ try { if (c) throw 1; return c ? 7 : 8 } catch (e) { return c ? 'c1' : 'c0' } } out.push([t1(true),t1(false),t2(1),t2(0),t3(2),t3(9),t3(0),t4(0),t4(1)].join()); var r = out.join('|'); "#, "r", "ftrue|ffalse|1,2,a,b,20,n,z,8,c1"),
+    ]);
+}
+
+/// Every shape of callee through the call path of `Vm::run` (`enter!`, `ret!`): fewer and more arguments than parameters, `arguments`,
+/// a rest parameter, a default value, a native tail call, `new` (with an object as the result), a getter and a setter, an arrow, a closure.
+#[test]
+fn every_shape_of_callee_gives_its_value() {
+    check(&[(r#"function none() { return 1 } function two(a, b) { return a + ',' + b } function args() { return arguments.length + ':' + arguments[0] + arguments[2] } function rest(a, ...r) { return a + ':' + r.length + r.join('') } function def(a, b = a + 1) { return a + b } function nat(a, b) { return Math.max(a, b) } function Ctor(a) { this.a = a; this.n = arguments.length } function ctorRet(a) { this.a = a; return { z: 9 } } var o = { get g() { return this.v + 1 }, set g(x) { this.v = x * 2 }, v: 1, m(a) { return this.v + a } }; var arrow = (a, b) => a * b; var cl = (function () { var c = 0; return function (d) { c += d; return c } })(); var out = [none(9, 9, 9), two(1), two(1, 2, 3), args(7, 8, 9, 10), args(), rest(1), rest(1, 2, 3), def(1), def(1, 5), nat(3, 8), new Ctor(4).a + '/' + new Ctor(4, 5, 6).n, new ctorRet(1).z, (o.g = 5, o.g), o.m(3), arrow(6, 7), arrow(6), cl(1), cl(2), (function () { return this === undefined || this === globalThis })()]; var r = out.join('|');"#, "r", "1|1,undefined|1,2|4:79|0:undefinedundefined|1:0|1:223|3|6|8|4/3|9|11|13|42|NaN|1|3|true")]);
+}
