@@ -1041,6 +1041,8 @@ fn a_global_cache_follows_the_attributes_that_the_object_built_ins_give() {
     let mut vm = load_with(&format!("'use strict'; {host}"), "'use strict'; wf(9);").unwrap();
     assert!(vm.run_main(0).is_err(), "a strict store to a frozen global throws");
     assert_eq!(vm.global_text("fz"), "3");
+}
+
 // ---- Lazy compile of the functions of a user script (`Lazy`, `Op::Lazy`): a function is compiled at its first call.
 
 #[test]
