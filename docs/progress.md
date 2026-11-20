@@ -16184,6 +16184,39 @@ Engine bugs that the run found (not fixed here):
 
 Not tested: Windows and macOS (the shell tool needs GNU `find` and `timeout`; the cargo test is portable but not run there); the old engine in `auto` and `byte` modes (only `tree`); Miri on `load_with` (safe code); the `script_tests` programs that span several lines; a second test262 checkout revision; the old engine's modules and async tests (skipped on both); how the counts move when js2 gets a step budget of another size (20,000,000 back edges, the old engine 20,000,000 steps: not the same unit).
 
+## 2026-11-20: host handlers on the interface, D1: style, CSSOM and geometry (plan step S0.4 / D1)
+
+Status: the handlers of the files below run through the interface (`Scope`, `Local`, `Args`). Tests pass on Linux and Windows. The full matrix passes under the standing rule: no row is over +0.5% under both allocators. Base: PR #762 (`t3/convert-browser-host-handlers`, head `9f74a623`). The diff is about 2,200 changed lines.
+
+Files converted: `browser_style.rs`, `browser_computed.rs`, `browser_css_ns.rs`, `browser_geom.rs`, `browser_matrix.rs`, `browser_point.rs`, `browser_geometry.rs`, `browser_fonts.rs`, and `browser_cssom.rs` (the getters, `item`, `length` and the `CSSStyleSheet` constructor). `browser_rects.rs`: `client_rects`.
+
+Not converted, and why:
+
+- `browser_cssom.rs`: `insertRule`, `deleteRule`, `replace`, `replaceSync`, `selectorText` and `keyText` setters, `disabled` setter, group `insertRule` and `deleteRule`, `styleSheets`, `adoptedStyleSheets`. Each body is a chain of helpers of the old form (`publish`, `refresh`, `parsed_rules`, `set_text_content`, promises, `array_from`). A first build of them on the interface was slower than the old form. `cssom_load adopted 1` went from +0.83% (a bridge that copies `this` and the arguments) to +1.72% (written in place), because `Scope::new_array` and `Scope::get_str` cost more than `array_from` and `d.key`. They stay on the old registry. The old form costs the same as the base.
+- `browser_rects.rs`: `range_client_rects` and `range_bounding_rect` are registered by `browser_range.rs` (group A2). `range_client_rects` calls the new `rect_list_s` through `run_v`.
+- `browser_used.rs`: it has no handler, only `used_for` helpers that take `it`. `browser_fontface.rs`: JavaScript source only. `browser_style_block.rs`: no host code.
+- The install functions, the lazy global definers, the tables keyed by `ObjId` (`d.geom.slots`) and the GC hooks stay in the old form, as in A1c. `Dom::old` helpers (`with_geo`, `style_read`, `style_get`, `computed_value`, `caret_range`, `element_rects`, the cascade) take `it` and run through `old` and `old_v`.
+
+Changes.
+
+- `browser_scoped.rs`: `Dom::style_html_el_s` moves to `browser_style.rs` (a native form). New `Dom::add_fn_s_raw` makes a function inside a scope that the caller holds. `call_scoped` asks `bad_new_s` for the message of a constructor called without `new`.
+- `browser_geom.rs`: HS helpers (`new_obj_s`, `put_s`, `num_s`, `rect_object_s`, `layout_rect_s`, `rect_list_s`, `point_object_s`, `make_s`, `finish_s`). The old `rect_object` and `layout_rect` stay for callers of the old form (intersection and resize observers, scroll). `needs_new` compares HS pointers; the geometry fixture checks the message "Please use the 'new' operator".
+- `browser_style.rs` and `browser_computed.rs`: the 500 accessors of `ensure` and `fill` are made in one scope. A scope for each of them cost +100 instructions for each function (`sheets_load linked 1` +0.56%, `imports 1` +0.57%). `current` reads its id as `style.cur & !CUR_NEW`; the ids come from `Dom::scoped`. `rule_declaration` is now `rule_declaration_s`.
+- Dead code of the old form is removed (`wrap_all`, `new_obj`, `put`, `num`, `read_dict`, `rect_list`, `point_object`, the old style and computed helpers of arguments).
+
+Grep gate (`\bbare_js::(value|eval::Interp)|\bObjId\b|\bInterp\b|\.engine\(\)|\.heap\.`, lines for each file, base then now): cssom 113 to 96, computed 43 to 28, style 50 to 30, css_ns 10 to 5, geom 62 to 33, matrix 35 to 8, point 7 to 0, geometry 8 to 5, rects 10 to 9, used 2 to 2, fonts 6 to 5, style_block 0, fontface 0. Handlers of the old form (`fn x(d: &Dom, it: &mut Interp, this: Value ...)`): 0 in each converted file, except cssom 15 (listed above, with their helpers) and rects 3 (two are group A2).
+
+Measurements. Machine archMachine, loaded. Instruction counts (`perf stat -e instructions:u`, minimum of 3 runs, `tools/js/cost_matrix.sh -j4`, 817 rows, base tree built from the head of #762).
+
+- First matrix (everything converted, `adopted*` on a bridge): over +0.5% under both allocators: `cssom_load adopted 1` and `10` (+0.83% to +0.92%), `sheets_load imports 1` and `linked 1` (+0.56% to +0.95%), `dataset_load keys 1000 50` and `10000 50` (+0.55% to +0.64%, not a file of this group; the row was not over again after the change below).
+- Changes after that: one scope for the accessors of `ensure` and `fill` (the `sheets_load` rows); the `adopted*` handlers and the other handlers that only bridged back to the old form went back to the old registry.
+- Callgrind of `cssom_load adopted 1` (symbol builds of both trees): the call path of the interface is not the cause. `call_api_plain` and `call_scoped` together are about 1,000 instructions for 11,000 calls against about 1,250 for `call_host` and `Host::call`. The extra cost was in `new_array` and `get_str` of the bodies written in place.
+- Full matrix, final tree: mean -0.001% glibc and +0.321% jemalloc. Over under both allocators: none. Over under one allocator only: `cssom_load computed 1` (+0.511% glibc, +0.437% jemalloc), `computed 10` (+0.525%, +0.462%), `fetch_load bytes 10` (+0.597%, +0.064%). `parse_load deep 1` and `10` do not run on the base tree either. The `codegen-units=1` check was not needed, as no row is over under both allocators.
+- Lever left: `cssom_load computed` is 0.01% over the limit under glibc. Each `getComputedStyle` read goes through `current` (a hash lookup in `style.fns`) and `computed_value` as before. A table indexed by the id would remove the lookup. Not built.
+
+Tests. Linux: `cargo test --locked -p bare-js-api -p bare-js -p bare --lib`: 32, 1104 (1 ignored) and 1714 (6 ignored) pass. `bare --lib` with the filters `browser_geom_tests browser_geometry_tests browser_point_tests browser_css_ns_tests browser_fonts_tests browser_style browser_computed browser_cssom_tests browser_scoped browser_dom browser_attr browser_custom browser_mutation browser_range matrix rects svg` (295 pass, 4 ignored): pass plain, with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1`. Windows 11 VM (`cargo xwin test --no-run`, `winssh`): the same filters, 295 pass, 4 ignored.
+
+Not tested: the whole `bare --lib` with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1`; the whole `bare --lib` on Windows; macOS; RSS and wall time; the `codegen-units=1` and callgrind numbers of each row that was only slightly over under one allocator (`cssom_load computed`, `fetch_load bytes 10`).
 ## 2026-11-20: host handlers on the interface, D2: media, image and canvas (plan step S0.4 / D2)
 
 Status: the handlers of the three files run through the interface (`Scope`, `Local`, `Args`). Tests pass on Linux and Windows. The matrix has no row over the limit. The PR is open without auto-merge.

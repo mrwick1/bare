@@ -46,12 +46,12 @@
 //! Not done: `getBoundingClientRect`, `offsetParent`, `offsetLeft`, `offsetTop`, `ResizeObserver`, a cache, transformed geometry.
 
 use crate::browser::*;
-use crate::browser_platform::V;
+use crate::browser_scoped::*;
+use bare_js_api::{Args, Local};
 use bare_css::cascade::Styles;
 use bare_css::values::{Keyword, Property, Value as Cv};
 use bare_html::dom::{Document, FlatChildren, NodeData, NodeId};
 use bare_js::eval::Interp;
-use bare_js::value::Value;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -375,20 +375,22 @@ pub(crate) fn border_box(layout: &bare_layout::fragment::Layout, el: NodeId) -> 
     any.then_some(bare_layout::fragment::Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
 }
 
-fn offset_width(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let el = d.style_html_el(it, this)?;
-    Ok(Value::Number(d.offset_size(it, el)?.0 as f64))
+fn offset_width<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = d.style_html_el_s(s, this)?;
+    let (w, _) = old(s, |it| d.offset_size(it, el))?;
+    Ok(s.number(w as f64))
 }
 
-fn offset_height(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let el = d.style_html_el(it, this)?;
-    Ok(Value::Number(d.offset_size(it, el)?.1 as f64))
+fn offset_height<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = d.style_html_el_s(s, this)?;
+    let (_, h) = old(s, |it| d.offset_size(it, el))?;
+    Ok(s.number(h as f64))
 }
 
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     let html = d.p().html;
-    d.def_get(it, html, "offsetWidth", offset_width, None)?;
-    d.def_get(it, html, "offsetHeight", offset_height, None)
+    d.def_get_s(it, html, "offsetWidth", offset_width, None)?;
+    d.def_get_s(it, html, "offsetHeight", offset_height, None)
 }
 
 impl Browser {
