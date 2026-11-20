@@ -78,4 +78,8 @@ allow:array-find-from-last
 allow:change-array-by-copy
 allow:stable-array-sort
 allow:error-cause
+# RegExp (design-js2-regexp, step R1): the features that the matcher and the parse-time check serve. The others come with R3.
+allow:regexp-dotall
+allow:regexp-lookbehind
+allow:regexp-unicode-property-escapes
 allow:error-stack-accessor

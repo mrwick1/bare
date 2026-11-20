@@ -74,6 +74,8 @@ pub const F_SLOWIDX: u32 = 1024;
 /// Object header flag: a wrapper object (`new String`, `new Number`, `new Boolean`, `Object(1)`). The value is in the hidden property
 /// `Realm::k_prim` (`bi_wrap.rs`). The flag, not the shape, tells a wrapper: a property that a script adds changes the shape.
 pub const F_WRAP: u32 = 4096;
+/// Object header flag: a `RegExp` object (`regexp_rt.rs`). Its slots 0 to 3 are the pattern, the flag bits, the program and `lastIndex`.
+pub const F_REGEXP: u32 = 8192;
 /// `Elements` header flag: the record is sparse.
 const F_SPARSE: u32 = 1;
 /// A write at an index this far above the capacity of a dense record makes it sparse.

@@ -812,7 +812,16 @@ impl Vm {
             ($g:expr, $this:expr, $dst:expr, $next:expr) => {{
                 let g: Value = $g;
                 let this: Value = $this;
-                let Some((ni, cctx)) = realm.function(g) else { err!(ErrKind::Type, "a getter is not a function") };
+                let Some((ni, cctx)) = realm.function(g) else {
+                    std::hint::cold_path();
+                    // A getter written in Rust (the flag getters of `RegExp.prototype`): a nested call, no frame.
+                    if realm.native_id(g).is_none() {
+                        err!(ErrKind::Type, "a getter is not a function")
+                    }
+                    r!($dst) = tri!(realm.call_function(g, this, &[]));
+                    pc = $next;
+                    continue;
+                };
                 enter!(g, ni, cctx, this, undef, $dst as i32, pc, $next, fp, 0usize);
                 pc = 0;
                 continue;
@@ -1063,7 +1072,12 @@ impl Vm {
                         let g = realm.global.value();
                         let v = match realm.lex_get(n) {
                             Some(res) => tri!(res),
-                            None => tri!(realm.get_prop(g, Key::Name(n))),
+                            None => {
+                                if realm.is_lazy_regexp(n) {
+                                    realm.rx();
+                                }
+                                tri!(realm.get_prop(g, Key::Name(n)))
+                            }
                         };
                         r!(a!()) = realm.typeof_name(v);
                         pc = next;
@@ -1569,7 +1583,12 @@ impl Vm {
                         r!(a!()) = record(stack, fp, 8);
                         pc = next;
                     }
-                    Op::NewRegExp => { std::hint::cold_path(); err!(ErrKind::Type, "regular expression literals are not supported yet (js2 has no RegExp engine: S2.7)") }
+                    Op::NewRegExp => {
+                        std::hint::cold_path();
+                        gate!();
+                        r!(a!()) = tri!(realm.regexp_literal(atom!(b!()), atom!(c!())));
+                        pc = next;
+                    }
                     Op::LoadBigInt => { std::hint::cold_path(); err!(ErrKind::Type, "BigInt literals are not supported yet (js2 has no BigInt: S2.7)") }
                     Op::GetTemplate => {
                         std::hint::cold_path();

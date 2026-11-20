@@ -303,6 +303,8 @@ pub struct Realm {
     pub collections: u32,
     /// What the last collection counted.
     pub last_gc: crate::gc::Stats,
+    /// `RegExp`: `None` until the first use (`regexp_rt.rs`).
+    pub(crate) rx: Option<Box<crate::regexp_rt::Rx>>,
 }
 
 const TYPEOF: [&str; 8] = ["undefined", "object", "boolean", "number", "string", "function", "symbol", "bigint"];
@@ -413,6 +415,7 @@ impl Realm {
             epoch,
             collections: 0,
             last_gc: Default::default(),
+            rx: None,
         };
         rt.install_builtins();
         rt
@@ -428,7 +431,7 @@ impl Realm {
     pub fn collect(&mut self, fbs: &mut [Feedback], walk_frames: impl FnOnce(&mut Marker)) {
         // A nested call holds the collector (`Realm::call_function`), so no machine is in use now: the idle ones keep their feedback.
         debug_assert!(self.nest == 0, "a collection inside a nested call");
-        let Realm { heap, shapes, atoms, consts, pins, lex, pool, .. } = self;
+        let Realm { heap, shapes, atoms, consts, pins, lex, pool, rx, .. } = self;
         let mut walk_frames = Some(walk_frames);
         let mut roots = |m: &mut Marker| {
             consts.iter().for_each(|v| m.value(*v));
@@ -437,6 +440,9 @@ impl Realm {
                 m.value(*c);
             });
             pins.iter().for_each(|s| m.shape(*s));
+            if let Some(rx) = rx {
+                rx.mark(m);
+            }
             fbs.iter().for_each(|f| f.walk(m));
             pool.iter().flat_map(|p| p.fbs.iter()).for_each(|f| f.walk(m));
             if let Some(w) = walk_frames.take() {
@@ -467,6 +473,13 @@ impl Realm {
     pub fn str_of(v: Value) -> Option<Str> {
         // SAFETY: by the invariant above.
         unsafe { Str::from_value(v) }
+    }
+
+    /// The program blob of a value, if it is one (`regexp_rt.rs`).
+    #[inline]
+    pub(crate) fn blob_of(v: Value) -> Option<crate::blob::Blob> {
+        // SAFETY: by the invariant of `Realm::obj`.
+        unsafe { crate::blob::Blob::from_value(v) }
     }
 
     #[inline]
@@ -1055,6 +1068,10 @@ impl Realm {
         {
             self.fill_global(fb, site, e.slot());
             return Ok(Got::Val(o.slot(&self.shapes, e.slot())));
+        }
+        if self.is_lazy_regexp(name) {
+            self.rx();
+            return self.get_global_slow(fb, site, name);
         }
         let g = o.value();
         let got = self.get_prop_g(g, Key::Name(name))?;

@@ -1047,6 +1047,8 @@ pub(crate) fn object_to_string(rt: &mut Realm, this: Value, _args: &[Value]) -> 
             "Array"
         } else if rt.is_error(this) {
             "Error"
+        } else if o.has_flag(crate::object::F_REGEXP) {
+            "RegExp"
         } else if o.is_indexed() {
             "Arguments"
         } else {

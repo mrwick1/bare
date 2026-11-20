@@ -671,18 +671,25 @@ impl Checker<'_> {
         if !self.eat(b'{') {
             return bad;
         }
-        let (mut name, mut value, mut eq) = (0, 0, false);
+        let start = self.i;
+        let mut eq = None;
         loop {
             match self.byte(self.i) {
                 Some(b'}') => break,
-                Some(b'=') if !eq => eq = true,
-                Some(c) if c.is_ascii_alphanumeric() || c == b'_' => *if eq { &mut value } else { &mut name } += 1,
+                Some(b'=') if eq.is_none() => eq = Some(self.i),
+                Some(c) if c.is_ascii_alphanumeric() || c == b'_' => {}
                 _ => return bad,
             }
             self.i += 1;
         }
+        let text: String = (start..self.i).filter_map(|i| self.byte(i)).map(char::from).collect();
         self.i += 1;
-        if name == 0 || (eq && value == 0) { bad } else { Ok(()) }
+        let (name, value) = match eq {
+            Some(e) => (&text[..e - start], Some(&text[e - start + 1..])),
+            None => (text.as_str(), None),
+        };
+        // The names are those of ECMA-262; a property of strings (`RGI_Emoji`) is not known here, as in the matcher.
+        if name.is_empty() || value == Some("") || bare_unicode::property::property_ranges(name, value).is_none() { bad } else { Ok(()) }
     }
 
     /// After `[`.

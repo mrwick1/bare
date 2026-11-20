@@ -379,3 +379,7 @@ mod tests;
 #[cfg(test)]
 #[path = "conversion_tests.rs"]
 mod conversion_tests;
+
+#[cfg(test)]
+#[path = "regexp_rt_tests.rs"]
+mod regexp_rt_tests;

@@ -17608,3 +17608,46 @@ Results.
 | One zone load, `find` + `Zone::parse`, against `metadata` + `read` + `Zone::parse` of the system file (best of 5 batches of 200,000, 3 runs, machine not idle) | `America/New_York`: 402, 517, 406 ns against 1,982, 2,420, 1,970 ns. `Asia/Kolkata`: 361, 174, 165 ns against 4,040, 1,693, 1,603 ns. `Pacific/Auckland`: 384, 323, 305 ns against 2,702, 1,988, 1,851 ns. The system files on this machine are fat; the embedded files are slim. |
 
 Not tested: macOS and a macOS build of the new code beyond the existing cross check; Windows 10 and ARM; the Windows release binary size; a Windows zone id with no CLDR row on the VM (`tzutil` refuses the two retired ids; the unit test covers the offset); the `bare-drive` journey of the design (check 4: `getTimezoneOffset` and `resolvedOptions().timeZone` through the whole browser on the VM); RSS of the whole browser; wall time on an idle machine; `tools/portable_check.sh` without `--scan` (the scan fails on three older files of main: `downloads/run.rs`, `force.rs`, `mcp/src/main.rs`; none is touched here); the stale-`known` check of the scan, which runs after that failure.
+
+## js2 RegExp, steps R0 and R1: the backtracker behind a `Blob` (2026-11-21)
+
+Design: `design-js2-regexp.md` (PR #797), "Decisions (owner, 2026-11-21)". Base: `fd9c749b` (js2 main). Machine: archMachine (AMD Ryzen 9 5900HX), not idle (other sessions ran). Cost rows are instruction counts (`tools/js/instr.sh`, minimum of 3 runs).
+
+What changed.
+
+1. `crates/js2/src/regexp.rs`: the parser, emitter and matcher of the old engine (`crates/js/src/regexp.rs`), over a flat program image (`Vec<u64>`) that a `Blob` cell holds. The matcher is generic over `u8` and `u16` input. It writes the spans to a caller slice. It has no `AtomicU64`. One decode step per instruction: the loop matches on the opcode byte, not on a decoded enum.
+2. `Layout::Blob = 21` (`cell.rs`, `gc.rs`): a leaf cell. The collector marks it and does not trace it. `crates/js2/src/blob.rs` holds the only `unsafe` (the cell read and write). It is in the Miri list of `Cargo.toml`. js2 now depends on `bare-unicode`.
+3. Steps: each matcher step is counted down in a block of 256 steps. A block costs `FUEL_PER_BLOCK` (16) units of `Realm::fuel`. One run also has the cap `MAX_STEPS` (50 M). Fuel out, the cap, the stack limit or an input over 16 M units make the native return `Err(STOP)`: the script ends with `Exit::Fuel`, as the old engine's `Error::Limit` did. `FUEL_PER_BLOCK` is a placeholder. It is not calibrated against `loopfn` yet.
+4. `crates/js2/src/regexp_rt.rs`: `RegExp` objects (flag `F_REGEXP`, slots `\0src`, `\0fl`, `\0prog`, `lastIndex`), the constructor, `exec`, `test`, `toString`, and the getters `source`, `flags` and the 8 flag getters. `Op::NewRegExp` builds the object. The constructor checks the syntax. The program compiles at the first `exec` or `test`. A cache of 32 programs, keyed by (source cell, flags), is a root of the collector. A native getter now runs through `call_function` in `call_get!` (cold arm).
+5. Lazy install: `Realm::rx` is `None` at start. The first literal, or the first read of the global name `RegExp` that misses (`get_global_slow`, `TypeofGlobal`), builds the constructor and the prototype. Known gap: `globalThis.RegExp`, `hasOwnProperty("RegExp")` and a list of the globals do not see `RegExp` before that first use (test262 `built-ins/RegExp/prop-desc.js` fails because of it).
+6. `regexp_check.rs` checks `\p{...}` names against `bare_unicode::property::property_ranges`. A property of strings (`\p{RGI_Emoji}`) is a `SyntaxError`, as in the matcher.
+7. `test262-js2-subset.txt` has `built-ins/RegExp`, `annexB/built-ins/RegExp` and the six String regex-method directories. `test262-js2-skip.txt` allows `regexp-dotall`, `regexp-lookbehind` and `regexp-unicode-property-escapes`. The baseline is regenerated.
+8. `crates/js-diff/examples/regexp_row.rs` (data in `examples/data/regexp/`): the regex rows, both engines, same patterns and inputs. `diff-known.txt` loses `script_tests:180` (a regexp literal no longer throws).
+
+Results.
+
+| Check | Result |
+| --- | --- |
+| Regex row, 47 staging patterns, 20 inputs, `exec` with all spans (940 runs for each rep) | old 1,627 instructions per run; new 1,666 (+2.4%) |
+| Regex row, 19 Porter rules, 2,000 words (38,000 runs for each rep) | old 3,801; new 3,653 (-3.9%) |
+| Checksum of all spans on both rows | equal on both engines |
+| Compile, 66 patterns, per pattern | old 25,474; new about 25,764 (+1.1%) |
+| Compiled bytes for each pattern (66 patterns) | new 308 B (blob cell, rounded to 16); the design gives 916 B for the old engine |
+| `(a+)+b`, n = 28 | both end with a budget error; new stops at the cap of 50 M steps (about 120 ms); old about 140 to 250 ms |
+| test262 (`tools/js/test262_js2.sh -u`, checkout `e4fbf577`) | js2 passes 16,865 (base baseline 15,854); no directory has fewer passes than the base baseline |
+| test262, `built-ins/RegExp` against the old engine | old passes 603, js2 723; 22 tests pass on the old engine and fail on js2 (below) |
+| test262, String regex methods | 128 tests pass on the old engine and fail on js2: they need the String methods with a RegExp argument (R3) |
+| `cargo test --locked -p bare-js2 --lib` | 479 pass |
+| `cargo test --locked -p bare-js-diff` | all pass (363 programs, no new difference) |
+| Startup, `script_run` with `var x = 1;` | base 1,795,527; new 1,805,177 (+0.54%); at `codegen-units=1`: 1,789,488 and 1,796,190 (+0.37%) |
+| Micro rows, default build (`interp_load`, base then new) | loopfn +0.002%, calls -0.509%, fib +0.004%, closures -0.104%, objects -0.419% |
+| Micro rows, `codegen-units=1` (information) | loopfn +1.77%, calls -0.69%, fib +1.77%, closures +1.04%, objects +2.10% |
+| Binary, `script_run`, release | 2,210,848 B (base) to 2,620,904 B (new): +410,056 B (+18.5%) |
+
+The 22 tests of `built-ins/RegExp` that the old engine passes and js2 does not: 16 `lookBehind` tests and `lookahead-quantifier-match-groups` (they call `String.prototype.match`; R3), 4 tests that call a String method with a RegExp (R3), `prop-desc.js` (the lazy global, above) and `exec/u-captured-value.js`. The last one fails because of a bug that is not in this change: on the base, `'𝌆'[0]` is U+FFFD, not the lone surrogate.
+
+How the regex row moved. The first port was +26.6% (staging) and +14.7% (Porter). Three changes closed it: a countdown step counter instead of a counter with a block test on each step (the first-set skip charges once for the skipped run), a match on the opcode byte instead of decode then match, and no reset of the span buffer for each run.
+
+Not done in this change: String methods, the Symbol protocol, named groups in the result, `d`, and `\p{}` matching in the String methods (R3); the linear side (R2); the calibration of `FUEL_PER_BLOCK`.
+
+Not tested: Windows; the browser; peak RSS on `rust-book-search` and `substack-home` (no journey run); a V8 comparison of the new glue; the cost matrix of the whole repo; Miri on the whole js2 suite (the Blob and RegExp tests only; see the PR).

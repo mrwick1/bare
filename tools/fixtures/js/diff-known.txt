@@ -5,7 +5,6 @@ script_tests:144	error message text differs ("Cannot read" against "cannot read"
 script_tests:146	error message text differs (js2 has no name of the callee)
 script_tests:149	old engine stops at its call-depth limit; js2 throws RangeError
 script_tests:401	old engine stops at its traversal-depth limit; js2 throws RangeError
-script_tests:180	regexp literal: js2 throws TypeError (not built)
 script_tests:181	BigInt literal: js2 throws TypeError (not built)
 script_tests:360	a method has no prototype property; js2 makes one (bug)
 script_tests:384	Error.stack: js2 has none
