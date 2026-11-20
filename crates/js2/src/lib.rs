@@ -50,6 +50,7 @@ mod bi_object;
 mod bi_number;
 mod bi_wrap;
 mod bi_string;
+pub mod promise;
 #[rustfmt::skip]
 mod prelude_facts;
 pub mod script;

@@ -238,6 +238,8 @@ pub struct Realm {
     pub k_message: Str,
     pub k_value_of: Str,
     pub k_to_string: Str,
+    /// The `Promise` built-ins, the job queue and the rejections (`promise.rs`).
+    pub(crate) pr: crate::promise::Promises,
     pub string_proto: Obj,
     pub number_proto: Obj,
     pub boolean_proto: Obj,
@@ -305,6 +307,7 @@ impl Realm {
         let (k_code, k_ctx, k_prototype, k_length, k_name, k_message) = (atom("\0code"), atom("\0ctx"), atom("prototype"), atom("length"), atom("name"), atom("message"));
         let (k_home, k_fields, k_link, k_constructor, k_raw) = (atom("\0home"), atom("\0fields"), atom("\0link"), atom("constructor"), atom("raw"));
         let (k_value_of, k_to_string, k_prim) = (atom("valueOf"), atom("toString"), atom("\0prim"));
+        let (k_then, k_pstate, k_presult) = (atom("then"), atom("\0pstate"), atom("\0presult"));
         let hidden = ["\0native", "\0n1", "\0n2", "\0n3"].map(&mut atom);
         let root = shapes.root(Layout::Object, None, 4);
         let object_proto = Obj::new(&mut heap, &shapes, root).expect("memory");
@@ -324,6 +327,7 @@ impl Realm {
         let s_args = shapes.root(Layout::Indexed, Some(object_proto.cell()), 0);
         let mk = |heap: &mut Heap| Obj::new(heap, &shapes, s_object).expect("memory");
         let (string_proto, number_proto, boolean_proto) = (mk(&mut heap), mk(&mut heap), mk(&mut heap));
+        let pr = crate::promise::Promises::new(&mut heap, &mut shapes, s_object, k_then, k_pstate, k_presult);
         // The prototypes of `TypeError` and the others inherit from `Error.prototype`.
         let eshape = shapes.root(Layout::Object, Some(error_proto.cell()), 4);
         let mut error_protos = [error_proto; 7];
@@ -338,7 +342,7 @@ impl Realm {
         consts.extend(hidden.iter().map(|s| s.value()));
         consts.extend([k_prim, k_code, k_ctx, k_prototype, k_length, k_name, k_message, k_home, k_fields, k_link, k_constructor, k_raw, k_value_of, k_to_string].iter().map(|s| s.value()));
         consts.extend(tnames.iter().map(|s| s.value()));
-        let pins = vec![s_object, s_array, s_func, s_args, s_native];
+        let pins = vec![s_object, s_array, s_func, s_args, s_native, pr.shape];
         let epoch = shapes.epoch();
         let probe = Obj::new(&mut heap, &shapes, s_func).expect("memory");
         let (func_shape, loc_code, loc_ctx) = (s_func.raw(), probe.loc(&shapes, 0), probe.loc(&shapes, 1));
@@ -368,6 +372,7 @@ impl Realm {
             k_message,
             k_value_of,
             k_to_string,
+            pr,
             string_proto,
             number_proto,
             boolean_proto,
@@ -412,22 +417,37 @@ impl Realm {
     pub fn collect(&mut self, fbs: &mut [Feedback], walk_frames: impl FnOnce(&mut Marker)) {
         // A nested call holds the collector (`Realm::call_function`), so no machine is in use now: the idle ones keep their feedback.
         debug_assert!(self.nest == 0, "a collection inside a nested call");
-        let Realm { heap, shapes, atoms, consts, pins, lex, pool, .. } = self;
+        let Realm { heap, shapes, atoms, consts, pins, lex, pool, pr, .. } = self;
         let mut walk_frames = Some(walk_frames);
-        let mut roots = |m: &mut Marker| {
-            consts.iter().for_each(|v| m.value(*v));
-            lex.values().for_each(|(k, c, _, _)| {
-                m.value(k.value());
-                m.value(*c);
-            });
-            pins.iter().for_each(|s| m.shape(*s));
-            fbs.iter().for_each(|f| f.walk(m));
-            pool.iter().flat_map(|p| p.fbs.iter()).for_each(|f| f.walk(m));
-            if let Some(w) = walk_frames.take() {
-                w(m);
+        let stats = {
+            // The promise state is marked in the walk; its weak list is cleared after the marking.
+            struct Rr<'a, F: FnMut(&mut Marker)>(F, &'a mut crate::promise::Promises);
+            impl<F: FnMut(&mut Marker)> crate::gc::Roots for Rr<'_, F> {
+                fn walk(&mut self, m: &mut Marker) {
+                    (self.0)(m);
+                    self.1.walk(m);
+                }
+                fn weak(&mut self, live: &crate::gc::Live) {
+                    // SAFETY: the list holds cells of this heap that the last collection did not free: a dead one is dropped here.
+                    self.1.weak_list().retain(|v| unsafe { live.value(*v) });
+                }
             }
+            let roots = |m: &mut Marker| {
+                consts.iter().for_each(|v| m.value(*v));
+                lex.values().for_each(|(k, c, _, _)| {
+                    m.value(k.value());
+                    m.value(*c);
+                });
+                pins.iter().for_each(|s| m.shape(*s));
+                fbs.iter().for_each(|f| f.walk(m));
+                pool.iter().flat_map(|p| p.fbs.iter()).for_each(|f| f.walk(m));
+                if let Some(w) = walk_frames.take() {
+                    w(m);
+                }
+            };
+            pr.collected();
+            collect(heap, shapes, atoms, &mut Rr(roots, pr))
         };
-        let stats = collect(heap, shapes, atoms, &mut roots);
         self.last_gc = stats;
         self.collections += 1;
         if self.shapes.epoch() != self.epoch {
