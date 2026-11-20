@@ -1591,7 +1591,7 @@ pub(crate) fn create_element_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>,
     let name = new_name(d, s, a0)?;
     let v = if d.ce.on.get() || a.len() > 1 {
         let o = arg_s(s, a, 1);
-        custom_create_s(d, s, &name, o)?
+        crate::browser_custom::create_s(d, s, &name, o)?
     } else {
         make_element_s(d, s, &name)?
     };

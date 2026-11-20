@@ -82,12 +82,12 @@ fn all_on_api() -> bool {
 }
 
 impl Dom {
-    /// One host call: the hooks around a handler, for both entries. `bad_new` is a call of a constructor without `new`; `h` names it.
+    /// One host call: the hooks around a handler, for both entries. `bad_new` is a call of a constructor without `new`.
     #[inline(always)]
-    pub(crate) fn dispatch_host<'p, X: Entry<'p>, T>(&self, x: &mut X, cur: u32, bad_new: bool, h: Option<H>, body: impl FnOnce(&mut X) -> Result<T, X::Err>) -> Result<T, X::Err> {
+    pub(crate) fn dispatch_host<'p, X: Entry<'p>, T>(&self, x: &mut X, cur: u32, bad_new: bool, body: impl FnOnce(&mut X) -> Result<T, X::Err>) -> Result<T, X::Err> {
         self.style.cur.set(cur);
         if bad_new {
-            return Err(self.bad_new(x, h));
+            return Err(self.bad_new(x));
         }
         let r = if self.ce.on.get() { self.dispatch_ce(x, body) } else { body(x) };
         if self.mo.armed() {
@@ -98,18 +98,19 @@ impl Dom {
 
     #[cold]
     #[inline(never)]
-    fn bad_new<'p, X: Entry<'p>>(&self, x: &mut X, h: Option<H>) -> X::Err {
-        let e = crate::browser_custom::needs_new(x.it(), h);
+    fn bad_new<'p, X: Entry<'p>>(&self, x: &mut X) -> X::Err {
+        let e = crate::browser_custom::needs_new(x.it());
         x.err(e)
     }
 
-    /// `bad_new` for a handler of the new form: the constructors of `browser_geom` have their own message.
+    /// `bad_new` for a handler of the new form: the constructors of `browser_geom` and `browser_custom` have their own message.
     #[cold]
     #[inline(never)]
     fn bad_new_s<'s, 'p>(&self, s: &mut Sc<'s, 'p>, f: HS) -> bare_js_api::Error<'s> {
-        match crate::browser_geom::needs_new(s.engine(), f) {
+        let it = s.engine();
+        match crate::browser_geom::needs_new(it, f).or_else(|| crate::browser_custom::needs_new_s(it, f)) {
             Some(e) => s.engine().api_err(e),
-            None => self.bad_new(s, None),
+            None => self.bad_new(s),
         }
     }
 
@@ -145,7 +146,7 @@ impl Dom {
             return Err(match f {
                 Fun::New(f) => self.bad_new_s(s, f),
                 #[cfg(test)]
-                Fun::Old(h) => self.bad_new(s, Some(h)),
+                Fun::Old(_) => self.bad_new(s),
             });
         }
         let r = if self.ce.on.get() { self.call_scoped_ce(s, f, this, args) } else { self.run_fun(s, f, this, args) };
@@ -424,17 +425,21 @@ pub(crate) fn run_v<'p>(it: &mut Interp<'p>, f: impl for<'s> FnOnce(&mut Sc<'s, 
     })
 }
 
-/// A handler of the new form called as one of the old form (for the callers that have not moved).
-pub(crate) fn via(d: &Dom, it: &mut Interp<'_>, h: HS, this: Value, a: &[Value]) -> R<Value> {
-    run_v(it, |s| {
-        let e = s.engine();
-        let this = e.raw_local(&this);
-        let base = e.stack_len();
-        for v in a {
-            e.raw_local(v);
-        }
-        h(d, s, this, Args::from_slots(base, a.len() as u32))
-    })
+/// The arguments of a call to a handler of the new form: copies of `vals` in new slots. For code that runs rarely.
+fn args_of<'s>(s: &mut Sc<'s, '_>, vals: &[Local<'s>]) -> Args<'s> {
+    let e = s.engine();
+    let base = e.stack_len();
+    for &v in vals {
+        let r = e.raw(v);
+        e.raw_local(&r);
+    }
+    Args::from_slots(base, vals.len() as u32)
+}
+
+/// `h(this, vals)`: a call to a handler of the new form from code of the new form.
+pub(crate) fn call_hs<'s>(d: &Dom, s: &mut Sc<'s, '_>, h: HS, this: Local<'s>, vals: &[Local<'s>]) -> Res<'s, Local<'s>> {
+    let a = args_of(s, vals);
+    h(d, s, this, a)
 }
 
 impl Dom {
@@ -567,11 +572,6 @@ pub(crate) fn note_owner_s(d: &Dom, s: &mut Sc<'_, '_>, this: Local<'_>, made: L
     let it = s.engine();
     let (this, made) = (it.raw(this), it.raw(made));
     crate::browser_frames::note_owner(d, it, this, made);
-}
-
-pub(crate) fn custom_create_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, name: &str, options: Local<'s>) -> Res<'s, Local<'s>> {
-    let o = s.engine().raw(options);
-    old_v(s, |it| crate::browser_custom::create(d, it, name, o))
 }
 
 pub(crate) fn ns_put_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId, existing: Option<bare_html::dom::Atom>, qname: &str, value: &str) -> Res<'s, ()> {

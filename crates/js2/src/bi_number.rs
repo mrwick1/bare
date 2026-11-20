@@ -9,9 +9,9 @@ use crate::value::Value;
 impl Realm {
     pub(crate) fn install_number(&mut self) {
         let proto = self.number_proto;
-        let c = self.ctor("Number", number_ctor, proto);
-        for (n, f) in [("isInteger", is_integer as NativeFn), ("isFinite", number_is_finite), ("isNaN", number_is_nan), ("isSafeInteger", is_safe_integer), ("parseFloat", parse_float), ("parseInt", parse_int)] {
-            self.method(c, n, f);
+        let c = self.ctor("Number", 1, number_ctor, proto);
+        for (n, len, f) in [("isInteger", 1, is_integer as NativeFn), ("isFinite", 1, number_is_finite), ("isNaN", 1, number_is_nan), ("isSafeInteger", 1, is_safe_integer), ("parseFloat", 1, parse_float), ("parseInt", 2, parse_int)] {
+            self.method(c, n, len, f);
         }
         for (n, v) in [
             ("MAX_SAFE_INTEGER", 9007199254740991.0),
@@ -26,16 +26,16 @@ impl Realm {
             let k = self.intern(n);
             self.define_attrs(c, crate::interp_rt::Key::Name(k), 0, Value::number(v)).expect("define");
         }
-        for (n, f) in [("toString", number_to_string as NativeFn), ("toFixed", to_fixed), ("valueOf", number_value_of)] {
-            self.method(proto, n, f);
+        for (n, len, f) in [("toString", 0, number_to_string as NativeFn), ("toFixed", 1, to_fixed), ("valueOf", 0, number_value_of)] {
+            self.method(proto, n, len, f);
         }
         let b = self.boolean_proto;
-        self.ctor("Boolean", boolean_ctor, b);
-        self.method(b, "toString", boolean_to_string);
-        self.method(b, "valueOf", boolean_value_of);
+        self.ctor("Boolean", 1, boolean_ctor, b);
+        self.method(b, "toString", 0, boolean_to_string);
+        self.method(b, "valueOf", 0, boolean_value_of);
         let g = self.global;
-        for (n, f) in [("parseInt", parse_int as NativeFn), ("parseFloat", parse_float), ("isNaN", global_is_nan), ("isFinite", global_is_finite)] {
-            self.method(g, n, f);
+        for (n, len, f) in [("parseInt", 2, parse_int as NativeFn), ("parseFloat", 1, parse_float), ("isNaN", 1, global_is_nan), ("isFinite", 1, global_is_finite)] {
+            self.method(g, n, len, f);
         }
         let m = Obj::new_plain(self);
         self.hidden(g, "Math", m.value());
@@ -43,35 +43,35 @@ impl Realm {
             let k = self.intern(n);
             self.define_attrs(m, crate::interp_rt::Key::Name(k), 0, Value::number(v)).expect("define");
         }
-        for (n, f) in [
-            ("floor", floor as NativeFn),
-            ("ceil", ceil),
-            ("round", round),
-            ("trunc", trunc),
-            ("abs", abs),
-            ("sign", sign),
-            ("sqrt", sqrt),
-            ("cbrt", cbrt),
-            ("exp", exp),
-            ("log", log),
-            ("log2", log2),
-            ("log10", log10),
-            ("sin", sin),
-            ("cos", cos),
-            ("tan", tan),
-            ("asin", asin),
-            ("acos", acos),
-            ("atan", atan),
-            ("atan2", atan2),
-            ("pow", pow),
-            ("max", max),
-            ("min", min),
-            ("hypot", hypot),
-            ("imul", imul),
-            ("fround", fround),
-            ("random", random),
+        for (n, len, f) in [
+            ("floor", 1, floor as NativeFn),
+            ("ceil", 1, ceil),
+            ("round", 1, round),
+            ("trunc", 1, trunc),
+            ("abs", 1, abs),
+            ("sign", 1, sign),
+            ("sqrt", 1, sqrt),
+            ("cbrt", 1, cbrt),
+            ("exp", 1, exp),
+            ("log", 1, log),
+            ("log2", 1, log2),
+            ("log10", 1, log10),
+            ("sin", 1, sin),
+            ("cos", 1, cos),
+            ("tan", 1, tan),
+            ("asin", 1, asin),
+            ("acos", 1, acos),
+            ("atan", 1, atan),
+            ("atan2", 2, atan2),
+            ("pow", 2, pow),
+            ("max", 2, max),
+            ("min", 2, min),
+            ("hypot", 2, hypot),
+            ("imul", 2, imul),
+            ("fround", 1, fround),
+            ("random", 0, random),
         ] {
-            self.method(m, n, f);
+            self.method(m, n, len, f);
         }
     }
 }

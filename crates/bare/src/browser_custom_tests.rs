@@ -263,3 +263,62 @@ fn a_dropped_whendefined_promise_settles_after_collections() {
     b.drain().unwrap();
     assert_eq!(js(&mut b, "got.join()"), "XB");
 }
+
+/// The registry and the constructors that no Chrome case reads: argument errors, `getName`, `get`, `whenDefined`, `upgrade`, `importNode`,
+/// `adoptNode`, a constructor without `new`, and the interface objects.
+#[test]
+fn registry_and_constructor_members_keep_their_answers_and_errors() {
+    let mut b = page("<x-a id=a></x-a><div id=d><x-b id=b></x-b></div><template id=t><x-a></x-a></template>");
+    let cases: [(&str, &str); 46] = [
+        ("class A extends HTMLElement { constructor() { super(); this.made = 1 } } class B extends HTMLElement {} [typeof customElements, customElements === window.customElements, Object.getPrototypeOf(customElements) === CustomElementRegistry.prototype].join()", "object,true,true"),
+        ("customElements.define('x-a', A, undefined) === undefined", "true"),
+        ("customElements.get('x-a') === A && customElements.get('x-z') === undefined", "true"),
+        ("[customElements.getName(A), customElements.getName(B), customElements.getName(HTMLElement)].join()", "x-a,,"),
+        ("try { customElements.getName(5) } catch (e) { e.name + ': ' + e.message }", "TypeError: Failed to execute 'getName' on 'CustomElementRegistry': parameter 1 is not of type 'Function'."),
+        ("try { customElements.get() } catch (e) { e.name + ': ' + e.message }", "TypeError: Failed to execute 'get' on 'CustomElementRegistry': 1 argument required, but only 0 present."),
+        ("try { customElements.define('x-a', B) } catch (e) { e.name + ': ' + e.message }", "NotSupportedError: Failed to execute 'define' on 'CustomElementRegistry': the name \"x-a\" has already been used with this registry"),
+        ("try { customElements.define('x-c', A) } catch (e) { e.name + ': ' + e.message }", "NotSupportedError: Failed to execute 'define' on 'CustomElementRegistry': this constructor has already been used with this registry"),
+        ("try { customElements.define('bad', B) } catch (e) { e.name + ': ' + e.message }", "SyntaxError: Failed to execute 'define' on 'CustomElementRegistry': \"bad\" is not a valid custom element name"),
+        ("try { customElements.define('x-d', 5) } catch (e) { e.name + ': ' + e.message }", "TypeError: Failed to execute 'define' on 'CustomElementRegistry': parameter 2 is not of type 'Function'."),
+        ("try { customElements.define('x-d', () => 1) } catch (e) { e.name + ': ' + e.message }", "TypeError: Failed to execute 'define' on 'CustomElementRegistry': constructor argument is not a constructor"),
+        ("try { customElements.define('x-d', B, 5) } catch (e) { e.name + ': ' + e.message }", "TypeError: Failed to execute 'define' on 'CustomElementRegistry': The provided value is not of type 'ElementDefinitionOptions'."),
+        ("try { customElements.define('x-d', B, { extends: 'x-e' }) } catch (e) { e.name + ': ' + e.message }", "NotSupportedError: Failed to execute 'define' on 'CustomElementRegistry': \"x-e\" is a valid custom element name"),
+        ("try { customElements.define('x-d', B, { extends: 'blink' }) } catch (e) { e.name + ': ' + e.message }", "NotSupportedError: Failed to execute 'define' on 'CustomElementRegistry': \"blink\" is an HTMLUnknownElement"),
+        ("try { customElements.define('x-d') } catch (e) { e.name + ': ' + e.message }", "TypeError: Failed to execute 'define' on 'CustomElementRegistry': 2 arguments required, but only 1 present."),
+        ("class P extends HTMLElement {} P.prototype.attributeChangedCallback = 3; try { customElements.define('x-p', P) } catch (e) { e.name + ': ' + e.message }", "TypeError: Failed to execute 'define' on 'CustomElementRegistry': \"attributeChangedCallback\" is not a function"),
+        ("class O extends HTMLElement { static get observedAttributes() { return 5 } attributeChangedCallback() {} } try { customElements.define('x-o', O) } catch (e) { e.name + ': ' + e.message }", "TypeError: Failed to execute 'define' on 'CustomElementRegistry': The provided value cannot be converted to a sequence."),
+        ("class Q extends HTMLElement { static get observedAttributes() { return ['k', 'm'] } attributeChangedCallback(n, o, v) { (globalThis.q = globalThis.q || []).push(n + o + v) } } customElements.define('x-q', Q); var e = document.createElement('x-q'); e.setAttribute('k', 1); e.setAttribute('z', 1); e.setAttribute('m', 2); q.join()", "knull1,mnull2"),
+        ("customElements.define('x-b', B); [document.getElementById('b') instanceof B, customElements.upgrade(document.getElementById('d')) === undefined].join()", "true,true"),
+        ("var p1 = customElements.whenDefined('x-w'), p2 = customElements.whenDefined('x-w'); [p1 === p2, p1 instanceof Promise, customElements.whenDefined('x-a') === p1].join()", "true,true,false"),
+        ("customElements.define('x-w', class extends HTMLElement {}); 1", "1"),
+        ("var wp = customElements.whenDefined('x-w'); wp.then(function (c) { globalThis.wd = typeof c }); 1", "1"),
+        ("[document.createElement('x-a').made, new A().made, document.createElement('x-a') instanceof A].join()", "1,1,true"),
+        ("try { HTMLElement() } catch (e) { e.name + ': ' + e.message }", "TypeError: Failed to construct 'HTMLElement': Please use the 'new' operator, this DOM object constructor cannot be called as a function."),
+        ("try { HTMLInputElement() } catch (e) { e.name + ': ' + e.message }", "TypeError: Failed to construct 'HTMLInputElement': Please use the 'new' operator, this DOM object constructor cannot be called as a function."),
+        ("try { new HTMLElement() } catch (e) { e.name + ': ' + e.message }", "TypeError: Failed to construct 'HTMLElement': Illegal constructor"),
+        ("try { new HTMLUnknownElement() } catch (e) { e.name + ': ' + e.message }", "TypeError: Failed to construct 'HTMLUnknownElement': Illegal constructor"),
+        ("try { HTMLUnknownElement() } catch (e) { e.name + ': ' + e.message }", "TypeError: Illegal constructor"),
+        ("try { new (class extends HTMLInputElement {})() } catch (e) { e.name + ': ' + e.message }", "TypeError: Failed to construct 'HTMLInputElement': Illegal constructor"),
+        ("[HTMLElement.length, HTMLElement.name, HTMLUnknownElement.name, Object.getPrototypeOf(HTMLUnknownElement) === HTMLElement, document.createElement('blink') instanceof HTMLUnknownElement].join()", "0,HTMLElement,HTMLUnknownElement,true,true"),
+        ("var t = document.getElementById('t'); var c = document.importNode(t.content.firstChild, true); [c.made, c instanceof A, c.ownerDocument === document].join()", "1,true,true"),
+        ("var ad = document.adoptNode(t.content.firstChild); [ad === t.content.firstChild, ad.parentNode, ad.ownerDocument === document].join()", "false,,true"),
+        ("try { document.importNode(document) } catch (e) { e.name + ': ' + e.message }", "NotSupportedError: Failed to execute 'importNode' on 'Document': The node provided is a document, which may not be imported."),
+        ("try { document.adoptNode(document) } catch (e) { e.name + ': ' + e.message }", "NotSupportedError: Failed to execute 'adoptNode' on 'Document': The node provided is of type '#document', which may not be adopted."),
+        ("try { document.adoptNode() } catch (e) { e.name + ': ' + e.message }", "TypeError: Failed to execute 'adoptNode' on 'Document': 1 argument required, but only 0 present."),
+        ("try { document.importNode(3) } catch (e) { e.name + ': ' + e.message }", "TypeError: Failed to execute 'importNode' on 'Document': parameter 1 is not of type 'Node'."),
+        ("try { document.importNode.call({}, document.body) } catch (e) { e.name + ': ' + e.message }", "TypeError: Illegal invocation"),
+        ("var sr = document.createElement('div').attachShadow({ mode: 'open' }); try { document.adoptNode(sr) } catch (e) { e.name + ': ' + e.message }", "HierarchyRequestError: Failed to execute 'adoptNode' on 'Document': The node provided is a shadow root, which may not be adopted."),
+        ("var sr2 = document.createElement('div').attachShadow({ mode: 'open' }); try { document.importNode(sr2) } catch (e) { e.name + ': ' + e.message }", "NotSupportedError: Failed to execute 'importNode' on 'Document': The node provided is a shadow root, which may not be imported."),
+        ("[document.importNode.length, document.adoptNode.length, customElements.define.length, customElements.get.name, Object.keys(CustomElementRegistry.prototype).join()].join()", "1,1,2,get,define,get,getName,whenDefined,upgrade"),
+        ("try { Object.getOwnPropertyDescriptor(window, 'customElements').get.call(1) === customElements } catch (e) { e.name + ': ' + e.message }", "true"),
+        ("customElements.define('x-bad', class extends HTMLElement { constructor() { super(); throw new Error('boom') } }); var bad = document.createElement('x-bad'); [bad instanceof HTMLUnknownElement, bad.localName].join()", "true,x-bad"),
+        ("customElements.define('x-ret', class extends HTMLElement { constructor() { super(); return document.createElement('div') } }); var r = document.createElement('x-ret'); [r instanceof HTMLUnknownElement, r.localName].join()", "true,x-ret"),
+        ("customElements.define('x-ex', class extends HTMLButtonElement {}, { extends: 'button' }); var ex = document.createElement('button', { is: 'x-ex' }); [ex.localName, ex instanceof HTMLButtonElement, ex.getAttribute('is')].join()", "button,true,"),
+        ("try { customElements.define('x-bx', class extends HTMLInputElement {}, { extends: 'button' }); new (customElements.get('x-bx'))() } catch (e) { e.name + ': ' + e.message }", "TypeError: Failed to construct 'HTMLInputElement': Illegal constructor: localName does not match the HTML element interface"),
+        ("wd", "function"),
+    ];
+    for (src, want) in cases {
+        assert_eq!(js(&mut b, src), want, "{src}");
+        b.drain().unwrap();
+    }
+}
