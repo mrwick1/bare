@@ -33,10 +33,12 @@
 //! - The list and the walk follow `Document::name_revision`, which moves only for changes of named elements. A miss after other
 //!   changes (a text edit, a bare element added) costs no walk.
 use crate::browser::*;
+use crate::browser_scoped::*;
 use bare_html::dom::{Atom, NodeData, NodeId};
 use bare_js::eval::Interp;
 use bare_js::heap::{Heap, HeapError};
 use bare_js::value::{ObjId, Value};
+use bare_js_api::{Args, Local, Type};
 use std::cell::{Cell, OnceCell, Ref, RefCell, RefMut};
 use std::collections::{HashMap, HashSet};
 
@@ -291,9 +293,9 @@ pub(crate) fn activate(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     {
         return Ok(());
     }
-    d.def_get(it, d.p().iframe, "contentWindow", content_window, None)?;
-    d.def_get(it, d.p().iframe, "contentDocument", content_document, None)?;
-    d.def_get(it, d.p().iframe, "name", name, Some(set_name))?;
+    d.def_get_s(it, d.p().iframe, "contentWindow", content_window, None)?;
+    d.def_get_s(it, d.p().iframe, "contentDocument", content_document, None)?;
+    d.def_get_s(it, d.p().iframe, "name", name, Some(set_name))?;
     crate::browser_reflect::reflect!(d, it, d.p().iframe, &["iframe"], {
         "src" => "src": Url, "srcdoc" => "srcdoc": Str, "allow" => "allow": Str, "width" => "width": Str, "height" => "height": Str,
         "loading" => "loading": Enum(&["lazy", "eager"], "eager"), "referrerPolicy" => "referrerpolicy": Str,
@@ -558,15 +560,15 @@ fn context(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> R<Value> {
         .insert(n, o);
     Ok(Value::Object(o))
 }
-pub(crate) fn content_window(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    let n = d.el(it, this)?;
+pub(crate) fn content_window<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.el_s(s, this)?;
     if d.doc.borrow().element_name(n) != "iframe" {
-        return Err(it.type_error("Illegal invocation"));
+        return Err(s.type_error("Illegal invocation"));
     }
-    if !d.is_connected_node(it, n)? {
-        return Ok(Value::Null);
+    if !old(s, |it| d.is_connected_node(it, n))? {
+        return Ok(s.null());
     }
-    context(d, it, n)
+    old_v(s, |it| context(d, it, n))
 }
 /// Has the iframe `n` an initial `about:blank` document: no `src` (or an empty one) or `src="about:blank"`, and no `srcdoc`?
 fn initial_blank(d: &Dom, n: NodeId) -> bool {
@@ -575,35 +577,35 @@ fn initial_blank(d: &Dom, n: NodeId) -> bool {
     attr("srcdoc").is_none() && attr("src").is_none_or(|v| v.trim().is_empty() || v.trim().eq_ignore_ascii_case("about:blank"))
 }
 /// `iframe.contentDocument`: the initial `about:blank` document of `contentWindow`, else `null` (see the header).
-pub(crate) fn content_document(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    let w = content_window(d, it, this, a)?;
+pub(crate) fn content_document<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let w = content_window(d, s, this, a)?;
     // A child page has no document that the parent can read.
-    if d.kids.any() && let Value::Object(_) = w && let Ok(n) = d.el(it, this) && d.kids.id_of(n).is_some() {
-        return Ok(Value::Null);
+    if d.kids.any() && is_object(s, w) && let Some(n) = d.node_of_s(s, this).filter(|&n| d.is_element(n)) && d.kids.id_of(n).is_some() {
+        return Ok(s.null());
     }
-    if matches!(w, Value::Null) {
+    if s.type_of(w) == Type::Null {
         return Ok(w);
     }
-    let k = d.key(it, "document")?;
-    let v = it.get_value(w, k)?;
-    Ok(if matches!(v, Value::Object(_)) { v } else { Value::Null })
+    let v = s.get_str(w, "document")?;
+    Ok(if is_object(s, v) { v } else { s.null() })
 }
-pub(crate) fn length(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
-    it.charge(d.doc.borrow().len() as u64)?;
-    Ok(Value::Number(nodes(d).len() as f64))
+pub(crate) fn length<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    s.charge(d.doc.borrow().len() as u64)?;
+    Ok(s.number(nodes(d).len() as f64))
 }
-pub(crate) fn name(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    let n = d.el(it, this)?;
-    match crate::browser_dom::attr_get(d, it, n, "name")? {
-        Value::Null => d.js_str(it, ""),
-        v => Ok(v),
-    }
+pub(crate) fn name<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.el_s(s, this)?;
+    let v = {
+        let doc = d.doc.borrow();
+        doc.find_atom("name").and_then(|a| doc.attr(n, a)).map(str::to_string)
+    };
+    d.js_str_s(s, v.as_deref().unwrap_or(""))
 }
-pub(crate) fn set_name(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    let n = d.el(it, this)?;
-    let s = d.string_arg(it, a.first().copied().unwrap_or(Value::Undefined))?;
-    crate::browser_dom::attr_set(d, it, n, "name", &s)?;
-    Ok(Value::Undefined)
+pub(crate) fn set_name<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.el_s(s, this)?;
+    let t = d.arg_str_s(s, a, 0)?;
+    crate::browser_dom::attr_set_s(d, s, n, "name", &t)?;
+    Ok(s.undefined())
 }
 /// The window of the initial `about:blank` document `n` of a frame.
 pub(crate) fn window_of(d: &Dom, n: NodeId) -> Option<ObjId> {
@@ -631,11 +633,11 @@ pub(crate) fn owner_of(d: &Dom, n: NodeId) -> Option<NodeId> {
     if s.docs.contains_key(&cur) { Some(cur) } else { s.owned.get(&cur).copied() }
 }
 /// Record that `made` came from the method of the document `this`, when that is a frame document.
-pub(crate) fn note_owner(d: &Dom, it: &mut Interp<'_>, this: Value, made: Value) {
+pub(crate) fn note_owner(d: &Dom, s: &mut Sc<'_, '_>, this: Local<'_>, made: Local<'_>) {
     if !d.frames.active() {
         return;
     }
-    if let (Ok(t), Ok(m)) = (d.nd(it, this), d.nd(it, made))
+    if let (Some(t), Some(m)) = (d.node_of_s(s, this), d.node_of_s(s, made))
         && let Some(s) = d.frames.state_mut().as_mut().filter(|s| s.docs.contains_key(&t))
     {
         s.owned.insert(m, t);

@@ -13,7 +13,7 @@ use crate::compile::{Child, Compiled, Input, compile_function, compile_script};
 use crate::facts::{Facts, SUPER};
 use crate::interp::{Exit, LazyCompile, Program, Vm, code_flags};
 use crate::interp_rt::Realm;
-use crate::parse::{Limits, parse_function, parse_script_lazy};
+use crate::parse::{Limits, parse_function, parse_script_known, parse_script_lazy};
 use crate::shapes::A_E;
 use crate::value::Value;
 use std::sync::Arc;
@@ -122,10 +122,20 @@ impl Loader<'_> {
 }
 
 /// Compile `source` as a script after the codes that `codes` has. The top level is the code at index `codes.len()` before the call.
-/// With `lazy` the functions inside the top level are stubs, and `lazy` gets what makes them.
-fn compile_after(mut codes: Vec<Code>, source: &str, atoms: &SharedAtoms, limits: Limits, lazy: Option<&mut Vec<(usize, Child)>>) -> Result<(Vec<Code>, Facts), String> {
-    let mut facts = Facts::new();
-    let prog = parse_script_lazy(source, limits, &mut facts).map_err(|e| format!("SyntaxError: {}", e.msg))?;
+/// With `lazy` the functions inside the top level are stubs, and `lazy` gets what makes them. With `known` (the prelude) the facts of
+/// the text are not made by a pre-parse: they are the generated ones (`prelude_facts.rs`, a test keeps them equal to a pre-parse).
+fn compile_after(mut codes: Vec<Code>, source: &str, atoms: &SharedAtoms, limits: Limits, lazy: Option<&mut Vec<(usize, Child)>>, known: Option<Facts>) -> Result<(Vec<Code>, Facts), String> {
+    let (mut facts, prog) = match known {
+        Some(mut f) => {
+            let p = parse_script_known(source, limits, &mut f).map_err(|e| format!("SyntaxError: {}", e.msg))?;
+            (f, p)
+        }
+        None => {
+            let mut f = Facts::new();
+            let p = parse_script_lazy(source, limits, &mut f).map_err(|e| format!("SyntaxError: {}", e.msg))?;
+            (f, p)
+        }
+    };
     let script = compile_script(&prog, &facts, atoms).map_err(|e| format!("compile: {e:?}"))?;
     Loader { source, facts: &mut facts, atoms, limits, codes: &mut codes, lazy }.add(script)?;
     Ok((codes, facts))
@@ -133,7 +143,7 @@ fn compile_after(mut codes: Vec<Code>, source: &str, atoms: &SharedAtoms, limits
 
 /// Compile `source` as a script. The top level is `Program::codes[0]`.
 pub fn compile(source: &str, atoms: &SharedAtoms, limits: Limits) -> Result<Program, String> {
-    Ok(Program { codes: compile_after(Vec::new(), source, atoms, limits, None)?.0 })
+    Ok(Program { codes: compile_after(Vec::new(), source, atoms, limits, None, None)?.0 })
 }
 
 /// An `eval_load` program (statements and then one expression) as a script: the value of the last expression goes to the global
@@ -176,19 +186,19 @@ pub fn load_with(host: &str, source: &str) -> Result<Vm, String> {
     let mut prog = compile(source, &shared, Limits::default())?;
     let pre = prog.codes.len();
     let mut pending = Vec::new();
-    let (codes, facts) = compile_after(prog.codes, PRELUDE, &shared, Limits::default(), Some(&mut pending)).map_err(|e| format!("prelude: {e}"))?;
+    let (codes, facts) = compile_after(prog.codes, PRELUDE, &shared, Limits::default(), Some(&mut pending), Some(crate::prelude_facts::facts())).map_err(|e| format!("prelude: {e} (is prelude_facts.rs out of date? run `BLESS_PRELUDE_FACTS=1 cargo test -p bare-js2 --lib prelude_facts`)"))?;
     prog.codes = codes;
     let at = prog.codes.len();
     if !host.is_empty() {
-        prog.codes = compile_after(prog.codes, host, &shared, Limits::default(), None).map_err(|e| format!("host script: {e}"))?.0;
+        prog.codes = compile_after(prog.codes, host, &shared, Limits::default(), None, None).map_err(|e| format!("host script: {e}"))?.0;
     }
     let mut vm = Vm::new(prog, shared.clone());
     vm.lazy = Some(Box::new(Lazy { source: PRELUDE, facts, atoms: shared, limits: Limits::default(), pending }));
     if let Err(e) = vm.run_main(pre) {
         panic!("the prelude failed: {e:?}");
     }
-    // Hide the helpers, do not delete them: a delete of a property that is not the last one puts the global object in dictionary mode, and
-    // then no global access can be cached. The properties are not enumerable; their value is `undefined`, so a script cannot reach them.
+    // Hide the names of the prelude, do not delete them: a delete of a property that is not the last one puts the global object in dictionary
+    // mode, and then no global access can be cached. A property is not enumerable; its value is `undefined`, so a script cannot reach the function.
     let g = vm.realm.global;
     for name in ["__def", "__helper", "__set"] {
         let k = vm.realm.intern(name);

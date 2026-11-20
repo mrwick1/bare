@@ -133,3 +133,11 @@ Windows and macOS. Miri on the new `Op::Lazy` arm (it adds no `unsafe`). Wall ti
 - Lazy compile applies to user scripts too. One PR, measured on `eval_load` and the bundle-like program (instructions and peak RSS).
 - Shared lazy state and code across the realms of a session: decide later, with S2.8, when the browser slice shows how many realms a page makes.
 - Question 2 (start below 4.0 M for the S2 gate) was not asked. The gate stays the net slope.
+
+## 9. Built: option B′ (2026-11-20)
+
+Decision 1 of section 8 is built. The pre-parse facts of `prelude.js` are a generated, checked-in file: `crates/js2/src/prelude_facts.rs` (16 KB of Rust source, 43 `FnFacts`, 145 spans, `by_start`). `script::load_with` reads them (`prelude_facts::facts()`, a copy of the static tables) and calls `parse_script_known`. That function parses the top level of the text in the mode of the full parse of one function (`Mode::Function`) with no function as the one parsed in full, so the lexer jumps over each function at the top level by its facts. The prelude is one function expression at the top level, so the replay reads about ten tokens. It finds no early error: the generator found them.
+
+The file is made by the test helper, not by an example: `BLESS_PRELUDE_FACTS=1 cargo test -p bare-js2 --lib prelude_facts`. The test `prelude_facts_file_is_up_to_date` makes the file again from a pre-parse of `prelude.js` and fails when it differs from the checked-in file. `prelude_facts_equal_a_fresh_pre_parse` compares the loaded facts with a fresh pre-parse. A change of `prelude.js`, of the pre-parser or of the fields of `FnFacts` fails the first test until the file is made again. The text of the test file says how to recover when the old file no longer compiles.
+
+Measured (archMachine, release, `tools/js/instr.sh`, minimum of 3 runs): setup, `script_run` of `var x = 1;`, **4.01 M to 1.68 M** (hypothesis in section 3: 1.7 M). Peak RSS, 7 runs of each: 5084 to 5236 KiB before, 5088 to 5232 KiB after (no change beyond the noise; the facts are 3.4 KB and the pre-parse made no long-lived data). The first call of `a.forEach(f)` costs the same as before (357 K and 359 K over a later call): the full parse of the function and its compile did not change.
