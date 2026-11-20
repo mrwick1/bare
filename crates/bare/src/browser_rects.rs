@@ -29,6 +29,8 @@
 use crate::browser::*;
 use crate::browser_platform::V;
 use crate::browser_range::{bounds, utf16_len};
+use crate::browser_scoped::*;
+use bare_js_api::{Args, Local};
 use bare_css::values::{Keyword, Property, Value as Cv};
 use bare_html::dom::{Document, NodeData, NodeId};
 use bare_js::eval::{Error, Interp};
@@ -523,10 +525,10 @@ pub(crate) fn text_at(g: &Geo, s: &Scroll, x: f32, y: f32) -> Option<(NodeId, u3
     Some((f.node, utf16_len(&text[..at])))
 }
 
-fn client_rects(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let el = d.el(it, this)?;
-    let r = element_rects(d, it, el)?;
-    crate::browser_geom::rect_list(d, it, &r)
+fn client_rects<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = d.el_s(s, this)?;
+    let r = old(s, |it| element_rects(d, it, el))?;
+    crate::browser_geom::rect_list_s(d, s, &r)
 }
 
 fn range_rects(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<Vec<Rect>> {
@@ -550,7 +552,7 @@ fn range_rects(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<Vec<Rect>> {
 
 pub(crate) fn range_client_rects(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let r = range_rects(d, it, this)?;
-    crate::browser_geom::rect_list(d, it, &r)
+    run_v(it, |s| crate::browser_geom::rect_list_s(d, s, &r))
 }
 
 pub(crate) fn range_bounding_rect(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
@@ -564,5 +566,5 @@ pub(crate) fn element_bounding(d: &Dom, it: &mut Interp<'_>, el: NodeId) -> R<Re
 }
 
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    d.def_method(it, d.p().element, "getClientRects", 0, client_rects).map(|_| ())
+    d.def_method_s(it, d.p().element, "getClientRects", 0, client_rects).map(|_| ())
 }

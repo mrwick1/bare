@@ -25,9 +25,11 @@
 //! A lone surrogate in an argument is `Unsupported`, as for every DOM string (`string_arg`).
 
 use crate::browser::*;
+use crate::browser_scoped::*;
 use bare_js::eval::Interp;
 use bare_js::heap::PropertyDescriptor;
 use bare_js::value::{PropertyKey, Value};
+use bare_js_api::{Args, HostFn, Local, Type};
 
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     let g = it.global_object();
@@ -47,9 +49,9 @@ fn lazy(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
         return Ok(Value::Undefined);
     }
     let ns = d.obj(it, it.object_prototype())?;
-    for (name, h) in [("supports", supports as H), ("escape", escape), ("registerProperty", register_property)] {
+    for (name, h) in [("supports", supports as HS), ("escape", escape), ("registerProperty", register_property)] {
         let key = d.key(it, name)?;
-        let f = d.add_fn(it, h, name, 1, false)?;
+        let f = d.add_fn_s_obj(it, h, name, 1, HostFn::Method)?;
         it.define_data(ns, key, Value::Object(f), true, true, true)?;
     }
     let (ks, kt) = (d.key(it, "Symbol")?, d.key(it, "toStringTag")?);
@@ -82,48 +84,48 @@ fn ident(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || !c.is_ascii())
 }
 
-fn supports(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    let Some(&first) = a.first() else {
-        return Err(it.type_error("Failed to execute 'supports' on 'CSS': 1 argument required, but only 0 present."));
+fn supports<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let Some(first) = a.get(0) else {
+        return Err(s.type_error("Failed to execute 'supports' on 'CSS': 1 argument required, but only 0 present."));
     };
-    let first = d.string_arg(it, first)?;
+    let first = d.string_arg_s(s, first)?;
     let text = match a.get(1) {
-        Some(&v) => {
-            let value = d.string_arg(it, v)?;
+        Some(v) => {
+            let value = d.string_arg_s(s, v)?;
             if !ident(&first) || !balanced(&value) {
-                return Ok(Value::Bool(false));
+                return Ok(s.boolean(false));
             }
             format!("({first}: {value})")
         }
         None => first,
     };
     if text.len() > d.lim.max_selector_len {
-        return Err(d.lim("dom-selector"));
+        return Err(d.lim_s(s, "dom-selector"));
     }
-    it.charge(1 + (text.len() / 16) as u64)?;
+    s.charge(1 + (text.len() / 16) as u64)?;
     let mut doc = d.doc.borrow_mut();
     if doc.name_count() + text.len() > d.lim.max_names {
-        return Err(d.lim("dom-names"));
+        return Err(d.lim_s(s, "dom-names"));
     }
     let mut yes = bare_css::at_rules::supports_matches(&mut doc, &text);
     // `display: grid` is not a condition: try `(display: grid)`
     if !yes && a.len() == 1 && !text.starts_with('(') && text.contains(':') && balanced(&text) {
         yes = bare_css::at_rules::supports_matches(&mut doc, &format!("({text})"));
     }
-    Ok(Value::Bool(yes))
+    Ok(s.boolean(yes))
 }
 
 /// CSSOM "serialize an identifier".
-fn escape(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    let Some(&v) = a.first() else {
-        return Err(it.type_error("Failed to execute 'escape' on 'CSS': 1 argument required, but only 0 present."));
+fn escape<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let Some(v) = a.get(0) else {
+        return Err(s.type_error("Failed to execute 'escape' on 'CSS': 1 argument required, but only 0 present."));
     };
-    let s = d.string_arg(it, v)?;
-    it.charge(1 + (s.len() / 16) as u64)?;
-    let mut out = String::with_capacity(s.len());
-    let only = s.chars().count() == 1;
-    let first = s.chars().next();
-    for (i, c) in s.chars().enumerate() {
+    let text = d.string_arg_s(s, v)?;
+    s.charge(1 + (text.len() / 16) as u64)?;
+    let mut out = String::with_capacity(text.len());
+    let only = text.chars().count() == 1;
+    let first = text.chars().next();
+    for (i, c) in text.chars().enumerate() {
         match c {
             '\0' => out.push('\u{FFFD}'),
             '\u{1}'..='\u{1F}' | '\u{7F}' => out.push_str(&format!("\\{:x} ", c as u32)),
@@ -136,48 +138,48 @@ fn escape(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
             }
         }
     }
-    d.js_str(it, &out)
+    d.js_str_s(s, &out)
 }
 
-fn register_property(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    let Some(&dict) = a.first().filter(|v| matches!(v, Value::Object(_))) else {
-        return Err(it.type_error("Failed to execute 'registerProperty' on 'CSS': 1 argument required, but only 0 present."));
+fn register_property<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let Some(dict) = a.get(0).filter(|&v| is_object(s, v)) else {
+        return Err(s.type_error("Failed to execute 'registerProperty' on 'CSS': 1 argument required, but only 0 present."));
     };
-    let member = |it: &mut Interp<'_>, name: &str| -> R<Option<Value>> {
-        let k = d.key(it, name)?;
-        Ok(Some(it.get_value(dict, k)?).filter(|v| !matches!(v, Value::Undefined)))
+    let member = |s: &mut Sc<'s, '_>, name: &str| -> Res<'s, Option<Local<'s>>> {
+        let x = s.get_str(dict, name)?;
+        Ok(Some(x).filter(|&x| s.type_of(x) != Type::Undefined))
     };
-    let name = member(it, "name")?;
-    let syntax = member(it, "syntax")?;
-    let inherits = member(it, "inherits")?;
-    let initial = member(it, "initialValue")?;
+    let name = member(s, "name")?;
+    let syntax = member(s, "syntax")?;
+    let inherits = member(s, "inherits")?;
+    let initial = member(s, "initialValue")?;
     let (Some(name), Some(syntax), Some(inherits)) = (name, syntax, inherits) else {
-        return Err(it.type_error("Failed to execute 'registerProperty' on 'CSS': name, syntax and inherits are required."));
+        return Err(s.type_error("Failed to execute 'registerProperty' on 'CSS': name, syntax and inherits are required."));
     };
-    let (name, syntax) = (d.string_arg(it, name)?, d.string_arg(it, syntax)?);
-    let inherits = it.heap.to_boolean(inherits).map_err(|e| it.heap_error(e))?;
+    let (name, syntax) = (d.string_arg_s(s, name)?, d.string_arg_s(s, syntax)?);
+    let inherits = s.to_boolean(inherits);
     let initial = match initial {
-        Some(v) => Some(d.string_arg(it, v)?),
+        Some(v) => Some(d.string_arg_s(s, v)?),
         None => None,
     };
     let bad = |s: &str| s.contains(['{', '}', ';']);
     if !name.starts_with("--") || name.len() == 2 || name.contains(|c: char| c.is_whitespace() || c == '{' || c == '}' || c == ';') || bad(&syntax) || syntax.contains('"') {
-        return Err(d.dom_err(it, "SyntaxError", &format!("Failed to execute 'registerProperty' on 'CSS': Invalid property name or syntax '{name}'.")));
+        return Err(d.dom_err_s(s, "SyntaxError", &format!("Failed to execute 'registerProperty' on 'CSS': Invalid property name or syntax '{name}'.")));
     }
     if initial.as_deref().is_some_and(|v| bad(v) || v.trim().is_empty()) || (initial.is_none() && syntax.trim() != "*") {
-        return Err(d.dom_err(it, "SyntaxError", "Failed to execute 'registerProperty' on 'CSS': The initial value is missing or not valid."));
+        return Err(d.dom_err_s(s, "SyntaxError", "Failed to execute 'registerProperty' on 'CSS': The initial value is missing or not valid."));
     }
     if name.len() + syntax.len() + initial.as_ref().map_or(0, |v| v.len()) > d.lim.max_selector_len {
-        return Err(d.lim("dom-selector"));
+        return Err(d.lim_s(s, "dom-selector"));
     }
-    it.charge(1 + (name.len() / 16) as u64)?;
+    s.charge(1 + (name.len() / 16) as u64)?;
     let mut all = d.computed.registered.borrow_mut();
     if all.iter().any(|r| r.0 == name) {
-        return Err(d.dom_err(it, "InvalidModificationError", &format!("Failed to execute 'registerProperty' on 'CSS': The name '{name}' has already been registered.")));
+        return Err(d.dom_err_s(s, "InvalidModificationError", &format!("Failed to execute 'registerProperty' on 'CSS': The name '{name}' has already been registered.")));
     }
     let init = initial.map_or(String::new(), |v| format!("initial-value: {v};"));
     all.push((name.clone(), format!("@property {name} {{ syntax: \"{}\"; inherits: {inherits}; {init} }}\n", syntax.trim())));
     drop(all);
     d.computed.sheet_gen.set(d.computed.sheet_gen.get() + 1);
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }

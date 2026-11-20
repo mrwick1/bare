@@ -51,7 +51,9 @@
 
 use crate::browser::*;
 use crate::browser_dom::attr_set;
-use crate::browser_platform::{V, arg};
+use crate::browser_geom::illegal_s;
+use crate::browser_scoped::*;
+use bare_js_api::{Args, HostFn, Local, Type};
 use crate::browser_style_block::{Decl, Fail, Lim, custom, get, parse, priority, remove, serialize, set};
 use crate::browser_style_block as blk;
 use bare_css::values::{Property, SHORTHANDS};
@@ -377,31 +379,29 @@ impl Dom {
     }
 
 /// The element of a `CSSStyleDeclaration` object.
-    fn style_el(&self, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
-        if let Value::Object(o) = this
+    fn style_el_s<'s>(&self, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
+        if let Some(o) = obj_id(s, this)
             && let Some(&el) = self.style.s.borrow().objs.get(&o)
         {
             return Ok(el);
         }
-        Err(it.type_error("Illegal invocation"))
+        Err(illegal_s(s))
     }
 
     /// An HTML element (`style` is on `HTMLElement`, not on `Element`).
-    pub(crate) fn style_html_el(&self, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
-        let n = self.el(it, this)?;
-        let doc = self.doc.borrow();
-        if doc.is_foreign(n) {
-            drop(doc);
-            return Err(it.type_error("Illegal invocation"));
+    pub(crate) fn style_html_el_s<'s>(&self, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
+        let n = self.el_s(s, this)?;
+        if self.doc.borrow().is_foreign(n) {
+            return Err(illegal_s(s));
         }
         Ok(n)
     }
 
     /// An SVG element (`style` is also on `SVGElement`, not on `Element`).
-    fn style_svg_el(&self, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
-        let n = self.el(it, this)?;
+    fn style_svg_el_s<'s>(&self, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
+        let n = self.el_s(s, this)?;
         if self.doc.borrow().element_ns(n) != Ns::Svg {
-            return Err(it.type_error("Illegal invocation"));
+            return Err(illegal_s(s));
         }
         Ok(n)
     }
@@ -412,13 +412,13 @@ impl Dom {
 }
 
 /// WebIDL `[LegacyNullToEmptyString] DOMString`: `null` is `""`.
-fn null_empty(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<String> {
-    if matches!(v, Value::Null) { Ok(String::new()) } else { d.string_arg(it, v) }
+pub(crate) fn null_empty_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, v: Local<'s>) -> Res<'s, String> {
+    if s.type_of(v) == Type::Null { Ok(String::new()) } else { d.string_arg_s(s, v) }
 }
 
-fn required(it: &mut Interp<'_>, a: &[Value], n: usize, name: &str) -> R<()> {
+pub(crate) fn required_s<'s>(s: &mut Sc<'s, '_>, a: Args<'s>, n: usize, name: &str) -> Res<'s, ()> {
     if a.len() < n {
-        return Err(it.type_error(&format!(
+        return Err(s.type_error(&format!(
             "Failed to execute '{name}' on 'CSSStyleDeclaration': {n} argument{} required, but only {} present.",
             if n == 1 { "" } else { "s" },
             a.len()
@@ -427,69 +427,85 @@ fn required(it: &mut Interp<'_>, a: &[Value], n: usize, name: &str) -> R<()> {
     Ok(())
 }
 
+/// WebIDL `unsigned long`.
+pub(crate) fn to_u32_s<'s>(s: &mut Sc<'s, '_>, v: Local<'s>) -> Res<'s, u32> {
+    let n = s.to_number(v)?;
+    Ok(if n.is_finite() { n.trunc().rem_euclid(4294967296.0) as u32 } else { 0 })
+}
+
 // ------------------------------------------------------------------------------------------ JS side
 
 /// `HTMLElement.prototype.style` and `SVGElement.prototype.style`
-fn style_attr(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let el = d.style_html_el(it, this)?;
-    style_of(d, it, el)
+fn style_attr<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = d.style_html_el_s(s, this)?;
+    style_of(d, s, el)
 }
 
-fn style_attr_svg(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let el = d.style_svg_el(it, this)?;
-    style_of(d, it, el)
+fn style_attr_svg<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = d.style_svg_el_s(s, this)?;
+    style_of(d, s, el)
 }
 
-fn style_of(d: &Dom, it: &mut Interp<'_>, el: NodeId) -> V {
-    if let Some(&o) = d.style.s.borrow().by_el.get(&el) {
-        return Ok(Value::Object(o));
+fn style_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, el: NodeId) -> Res<'s, Local<'s>> {
+    let o = style_object(d, s, el)?;
+    Ok(d.obj_local(s, o))
+}
+
+fn style_object<'s>(d: &Dom, s: &mut Sc<'s, '_>, el: NodeId) -> Res<'s, ObjId> {
+    let known = d.style.s.borrow().by_el.get(&el).copied();
+    if let Some(o) = known {
+        return Ok(o);
     }
     if d.style.s.borrow().objs.len() >= d.style_lim().max_objects {
-        return Err(d.lim("style-objects"));
+        return Err(d.lim_s(s, "style-objects"));
     }
-    ensure(d, it)?;
-    let o = d.new_source(it, crate::browser_sources::Source::Style, Some(*d.style.proto.get().expect("ensured")))?;
-    let mut s = d.style.s.borrow_mut();
-    s.objs.insert(o, el);
-    s.by_el.insert(el, o);
-    Ok(Value::Object(o))
+    if d.style.proto.get().is_none() {
+        old(s, |it| ensure(d, it))?;
+    }
+    let o = d.new_source_s(s, crate::browser_sources::Source::Style, Some(*d.style.proto.get().expect("ensured")))?;
+    let mut st = d.style.s.borrow_mut();
+    st.objs.insert(o, el);
+    st.by_el.insert(el, o);
+    Ok(o)
 }
 
 impl Dom {
     /// The declaration of a CSSOM rule: the `style` object of a detached `span` that no script can reach, so it has no element wrapper.
-    pub(crate) fn rule_declaration(&self, it: &mut Interp<'_>, text: &str) -> R<ObjId> {
+    pub(crate) fn rule_declaration_s<'s>(&self, s: &mut Sc<'s, '_>, text: &str) -> Res<'s, ObjId> {
         let el = {
             let mut doc = self.doc.borrow_mut();
-            self.room(&doc, 1, 0)?;
+            self.room(&doc, 1, 0).map_err(|e| lift_err(s, e))?;
             if doc.find_atom("span").is_none() && doc.name_count() + 1 > self.lim.max_names {
-                return Err(self.lim("dom-names"));
+                return Err(self.lim_s(s, "dom-names"));
             }
             doc.create_element("span")
         };
-        let Value::Object(o) = style_of(self, it, el)? else { unreachable!("style_of makes an object") };
-        let css = self.js_str(it, text)?;
-        self.style_set_text(it, el, css)?;
+        let o = style_object(self, s, el)?;
+        old(s, |it| self.style_set_text(it, el, text))?;
         Ok(o)
     }
 }
 
-fn set_style_attr(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let el = d.style_html_el(it, this)?;
-    d.style_set_text(it, el, arg(a, 0))?;
-    Ok(Value::Undefined)
+fn set_style_attr<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = d.style_html_el_s(s, this)?;
+    let v = arg_s(s, a, 0);
+    let text = null_empty_s(d, s, v)?;
+    old(s, |it| d.style_set_text(it, el, &text))?;
+    Ok(s.undefined())
 }
 
-fn set_style_attr_svg(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let el = d.style_svg_el(it, this)?;
-    d.style_set_text(it, el, arg(a, 0))?;
-    Ok(Value::Undefined)
+fn set_style_attr_svg<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = d.style_svg_el_s(s, this)?;
+    let v = arg_s(s, a, 0);
+    let text = null_empty_s(d, s, v)?;
+    old(s, |it| d.style_set_text(it, el, &text))?;
+    Ok(s.undefined())
 }
 
 impl Dom {
     /// `cssText` setter: the attribute is set even when the block is empty (the standard always sets it).
-    fn style_set_text(&self, it: &mut Interp<'_>, el: NodeId, v: Value) -> R<()> {
-        let text = null_empty(self, it, v)?;
-        let (list, spent) = self.style_parse(it, &text)?;
+    fn style_set_text(&self, it: &mut Interp<'_>, el: NodeId, text: &str) -> R<()> {
+        let (list, spent) = self.style_parse(it, text)?;
         self.style.writes.set(self.style.writes.get() + 1);
         let mut buf = self.style.buf.take();
         let serialized = self.style_text(it, &list, &mut buf)?;
@@ -504,111 +520,140 @@ impl Dom {
     }
 }
 
-fn css_text(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let el = d.style_el(it, this)?;
-    let b = d.style_read(it, el)?;
+fn css_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = d.style_el_s(s, this)?;
     let mut buf = d.style.buf.take();
-    d.style_text(it, &b.list, &mut buf)?;
-    d.style_keep(el, b);
-    let v = d.js_str(it, &buf);
+    let r = old(s, |it| {
+        let b = d.style_read(it, el)?;
+        d.style_text(it, &b.list, &mut buf)?;
+        d.style_keep(el, b);
+        Ok(())
+    });
+    let v = match r {
+        Ok(()) => d.js_str_s(s, &buf),
+        Err(e) => Err(e),
+    };
     d.style.buf.replace(buf);
     v
 }
 
-fn set_css_text(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let el = d.style_el(it, this)?;
-    d.style_set_text(it, el, arg(a, 0))?;
-    crate::browser_cssom::declaration_written(d, it, this)?;
-    Ok(Value::Undefined)
+fn set_css_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = d.style_el_s(s, this)?;
+    let v = arg_s(s, a, 0);
+    let text = null_empty_s(d, s, v)?;
+    old(s, |it| d.style_set_text(it, el, &text))?;
+    written(d, s, this)?;
+    Ok(s.undefined())
 }
 
-fn length(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let el = d.style_el(it, this)?;
-    let b = d.style_read(it, el)?;
-    let n = blk::length(&b.list);
-    d.style_keep(el, b);
-    Ok(Value::Number(n as f64))
+/// A write through a rule declaration reaches the sheet text.
+fn written<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, ()> {
+    let t = obj_id(s, this).map_or(Value::Undefined, Value::Object);
+    old(s, |it| crate::browser_cssom::declaration_written(d, it, t))
 }
 
-fn parent_rule(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    d.style_el(it, this)?;
-    Ok(Value::Null)
+fn length<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = d.style_el_s(s, this)?;
+    let n = old(s, |it| {
+        let b = d.style_read(it, el)?;
+        let n = blk::length(&b.list);
+        d.style_keep(el, b);
+        Ok(n)
+    })?;
+    Ok(s.number(n as f64))
 }
 
-fn item(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let el = d.style_el(it, this)?;
-    required(it, a, 1, "item")?;
-    let i = crate::browser_platform_class::to_u32(it, a[0])? as usize;
-    let b = d.style_read(it, el)?;
-    let name = blk::item(&b.list, i).unwrap_or_default();
-    d.style_keep(el, b);
-    d.js_str(it, &name)
+fn parent_rule<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    d.style_el_s(s, this)?;
+    Ok(s.null())
 }
 
-fn get_property_value(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let el = d.style_el(it, this)?;
-    required(it, a, 1, "getPropertyValue")?;
-    let name = d.string_arg(it, a[0])?;
-    let v = d.style_get(it, el, &name)?.unwrap_or_default();
-    d.js_str(it, &v)
+fn item<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = d.style_el_s(s, this)?;
+    required_s(s, a, 1, "item")?;
+    let v = arg_s(s, a, 0);
+    let i = to_u32_s(s, v)? as usize;
+    let name = old(s, |it| {
+        let b = d.style_read(it, el)?;
+        let name = blk::item(&b.list, i).unwrap_or_default();
+        d.style_keep(el, b);
+        Ok(name)
+    })?;
+    d.js_str_s(s, &name)
 }
 
-fn get_property_priority(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let el = d.style_el(it, this)?;
-    required(it, a, 1, "getPropertyPriority")?;
-    let name = d.string_arg(it, a[0])?;
-    let b = d.style_read(it, el)?;
-    let imp = priority(&b.list, &key(&name));
-    d.style_keep(el, b);
-    d.js_str(it, if imp { "important" } else { "" })
+fn get_property_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = d.style_el_s(s, this)?;
+    required_s(s, a, 1, "getPropertyValue")?;
+    let v = arg_s(s, a, 0);
+    let name = d.string_arg_s(s, v)?;
+    let v = old(s, |it| Ok(d.style_get(it, el, &name)?.unwrap_or_default()))?;
+    d.js_str_s(s, &v)
 }
 
-fn set_property(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let el = d.style_el(it, this)?;
-    required(it, a, 2, "setProperty")?;
-    let name = d.string_arg(it, a[0])?;
-    let value = null_empty(d, it, a[1])?;
+fn get_property_priority<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = d.style_el_s(s, this)?;
+    required_s(s, a, 1, "getPropertyPriority")?;
+    let v = arg_s(s, a, 0);
+    let name = d.string_arg_s(s, v)?;
+    let imp = old(s, |it| {
+        let b = d.style_read(it, el)?;
+        let imp = priority(&b.list, &key(&name));
+        d.style_keep(el, b);
+        Ok(imp)
+    })?;
+    d.js_str_s(s, if imp { "important" } else { "" })
+}
+
+fn set_property<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = d.style_el_s(s, this)?;
+    required_s(s, a, 2, "setProperty")?;
+    let (n, v) = (arg_s(s, a, 0), arg_s(s, a, 1));
+    let name = d.string_arg_s(s, n)?;
+    let value = null_empty_s(d, s, v)?;
     let prio = match a.get(2) {
-        None | Some(Value::Undefined) => String::new(),
-        Some(&v) => null_empty(d, it, v)?,
+        Some(p) if s.type_of(p) != Type::Undefined => null_empty_s(d, s, p)?,
+        _ => String::new(),
     };
-    d.style_set(it, el, &name, &value, &prio)?;
-    crate::browser_cssom::declaration_written(d, it, this)?;
-    Ok(Value::Undefined)
+    old(s, |it| d.style_set(it, el, &name, &value, &prio))?;
+    written(d, s, this)?;
+    Ok(s.undefined())
 }
 
-fn remove_property(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let el = d.style_el(it, this)?;
-    required(it, a, 1, "removeProperty")?;
-    let name = d.string_arg(it, a[0])?;
-    let old = d.style_remove(it, el, &name)?;
-    crate::browser_cssom::declaration_written(d, it, this)?;
-    d.js_str(it, &old)
+fn remove_property<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = d.style_el_s(s, this)?;
+    required_s(s, a, 1, "removeProperty")?;
+    let v = arg_s(s, a, 0);
+    let name = d.string_arg_s(s, v)?;
+    let old_v = old(s, |it| d.style_remove(it, el, &name))?;
+    written(d, s, this)?;
+    d.js_str_s(s, &old_v)
 }
 
 /// The property of the named accessor that is running.
-pub(crate) fn current(d: &Dom, it: &mut Interp<'_>) -> R<&'static str> {
-    let i = d.style.fns.borrow().get(&d.style.cur.get()).copied();
+pub(crate) fn current<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, &'static str> {
+    let i = d.style.fns.borrow().get(&(d.style.cur.get() & !CUR_NEW)).copied();
     match (i, d.style.props.get()) {
         (Some(i), Some(p)) => Ok(p[i]),
-        _ => Err(it.type_error("Illegal invocation")),
+        _ => Err(illegal_s(s)),
     }
 }
 
-fn named_get(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let name = current(d, it)?;
-    let el = d.style_el(it, this)?;
-    let v = d.style_get(it, el, name)?.unwrap_or_default();
-    d.js_str(it, &v)
+fn named_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let name = current(d, s)?;
+    let el = d.style_el_s(s, this)?;
+    let v = old(s, |it| Ok(d.style_get(it, el, name)?.unwrap_or_default()))?;
+    d.js_str_s(s, &v)
 }
 
-fn named_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let name = current(d, it)?;
-    let el = d.style_el(it, this)?;
-    let value = null_empty(d, it, arg(a, 0))?;
-    d.style_set(it, el, name, &value, "")?;
-    crate::browser_cssom::declaration_written(d, it, this)?;
-    Ok(Value::Undefined)
+fn named_set<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let name = current(d, s)?;
+    let el = d.style_el_s(s, this)?;
+    let v = arg_s(s, a, 0);
+    let value = null_empty_s(d, s, v)?;
+    old(s, |it| d.style_set(it, el, name, &value, ""))?;
+    written(d, s, this)?;
+    Ok(s.undefined())
 }
 
 crate::browser_lazy::lazy_global!(lazy_ctor, "CSSStyleDeclaration", ensure, |d| d.style.fixed.borrow()[1]);
@@ -617,8 +662,8 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     // The prototype, its 250 accessors and the computed prototype wait for the first style object, the first `getComputedStyle` or the
     // first read of the global (`ensure`). A page that uses none of them never pays for them.
     crate::browser_lazy::install(d, it, &[("CSSStyleDeclaration", lazy_ctor as H)])?;
-    d.def_get(it, d.p().html, "style", style_attr, Some(set_style_attr))?;
-    d.def_get(it, d.p().svg, "style", style_attr_svg, Some(set_style_attr_svg))?;
+    d.def_get_s(it, d.p().html, "style", style_attr, Some(set_style_attr))?;
+    d.def_get_s(it, d.p().svg, "style", style_attr_svg, Some(set_style_attr_svg))?;
     Ok(())
 }
 
@@ -628,14 +673,14 @@ pub(crate) fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         return Ok(());
     }
     let proto = d.obj(it, it.object_prototype())?;
-    d.def_get(it, proto, "cssText", css_text, Some(set_css_text))?;
-    d.def_get(it, proto, "length", length, None)?;
-    d.def_get(it, proto, "parentRule", parent_rule, None)?;
-    d.def_method(it, proto, "item", 1, item)?;
-    d.def_method(it, proto, "getPropertyValue", 1, get_property_value)?;
-    d.def_method(it, proto, "getPropertyPriority", 1, get_property_priority)?;
-    d.def_method(it, proto, "setProperty", 2, set_property)?;
-    d.def_method(it, proto, "removeProperty", 1, remove_property)?;
+    d.def_get_s(it, proto, "cssText", css_text, Some(set_css_text))?;
+    d.def_get_s(it, proto, "length", length, None)?;
+    d.def_get_s(it, proto, "parentRule", parent_rule, None)?;
+    d.def_method_s(it, proto, "item", 1, item)?;
+    d.def_method_s(it, proto, "getPropertyValue", 1, get_property_value)?;
+    d.def_method_s(it, proto, "getPropertyPriority", 1, get_property_priority)?;
+    d.def_method_s(it, proto, "setProperty", 2, set_property)?;
+    d.def_method_s(it, proto, "removeProperty", 1, remove_property)?;
     // The value iterator of an interface with an indexed getter (WebIDL "iterable"): `Array.prototype.values`.
     let sym = d.plat.sym_iter.get().copied().expect("platform installed first");
     let values = it.get_value(Value::Object(it.array_prototype()), sym)?;
@@ -647,22 +692,27 @@ pub(crate) fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     // Legacy aliases have their own accessor names and share the canonical property.
     props.extend(["-webkit-user-select", "word-wrap"]);
     let mut nm = String::new();
-    for (i, css) in props.iter().enumerate() {
-        let keys = keys_of(css);
-        let (gid, sid) = (d.handlers.borrow().len() as u32, d.handlers.borrow().len() as u32 + 1);
-        // One buffer for both names (a `format!` for each of the 250 names cost more than the functions).
-        nm.clear();
-        nm.push_str("get ");
-        nm.push_str(&keys[0]);
-        let gf = d.add_fn(it, named_get, &nm, 0, false)?;
-        nm.replace_range(..3, "set");
-        let sf = d.add_fn(it, named_set, &nm, 1, false)?;
-        d.style.fns.borrow_mut().extend([(gid, i), (sid, i)]);
-        for k in &keys {
-            let key = d.key(it, k)?;
-            d.define_accessor(it, proto, key, gf, Some(sf))?;
+    // One scope for the 500 functions: a scope for each of them cost more than the functions.
+    bare_js_api::enter(it, |s| {
+        for (i, css) in props.iter().enumerate() {
+            let keys = keys_of(css);
+            let (gid, sid) = (d.scoped.borrow().len() as u32, d.scoped.borrow().len() as u32 + 1);
+            // One buffer for both names (a `format!` for each of the 250 names cost more than the functions).
+            nm.clear();
+            nm.push_str("get ");
+            nm.push_str(&keys[0]);
+            let gf = d.add_fn_s_raw(s, named_get, &nm, 0, HostFn::Method)?;
+            nm.replace_range(..3, "set");
+            let sf = d.add_fn_s_raw(s, named_set, &nm, 1, HostFn::Method)?;
+            d.style.fns.borrow_mut().extend([(gid, i), (sid, i)]);
+            let it = s.engine();
+            for k in &keys {
+                let key = d.key(it, k)?;
+                d.define_accessor(it, proto, key, gf, Some(sf))?;
+            }
         }
-    }
+        Ok(())
+    })?;
 
     // `constructor` comes after the accessors, as in `getOwnPropertyNames`.
     let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);

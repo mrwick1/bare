@@ -886,7 +886,7 @@ pub(crate) fn needs_new(it: &mut Interp<'_>, h: Option<H>) -> Error {
     match HANDLERS.iter().position(|&x| x as usize == h as usize) {
         Some(k) => it.type_error(&format!("Failed to construct '{}': Please use the 'new' operator, this DOM object constructor cannot be called as a function.", IFACES[k])),
         None if h as usize == unknown_ctor as *const () as usize => it.type_error("Illegal constructor"),
-        None => crate::browser_geom::needs_new(it, h).unwrap_or_else(|| it.type_error("Failed to construct: please use the 'new' operator")),
+        None => it.type_error("Failed to construct: please use the 'new' operator"),
     }
 }
 
@@ -1061,7 +1061,7 @@ fn define(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     d.ce.on.set(true);
     st(d).borrow_mut().stack.push(Vec::new());
     d.sync_watcher();
-    d.def_method(it, d.p().html, "attachInternals", 0, crate::browser_face::attach_internals)?;
+    d.def_method_s(it, d.p().html, "attachInternals", 0, crate::browser_face::attach_internals)?;
     let r = define_in(d, it, this, a);
     let q = d.ce_pop(it);
     r.and_then(|v| q.map(|()| v))

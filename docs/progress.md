@@ -15707,6 +15707,36 @@ Measurements. Machine archMachine. Instruction counts (`perf stat -e instruction
 Tests. Linux: `cargo test --locked -p bare-js-api -p bare-js -p bare --lib`: 32, 1104 (1 ignored) and 1714 (6 ignored) pass. The filters of the converted files and of `browser_scoped`, `custom`, `domexception`, `mutation`, `range`, `select`, `cookie`, `browser_tests` (436 tests, 1 ignored): pass plain, with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1`. Windows 11 VM (`cargo xwin test --no-run`, `winssh`): the same filters, 436 pass.
 
 Not tested: `BARE_GC_STRESS=1` and `BARE_ALL_API=1` with the whole `bare --lib`; the full `bare --lib` on Windows; the jemalloc run of the rows at `codegen-units=1` except the two noted; RSS and wall time; the files that are not converted.
+## 2026-11-20: host handlers on the interface, group C: the forms files (plan step S0.4 / C)
+
+Status: the handlers of the forms files run through the interface (`Scope`, `Local`, `Args`). Tests pass on Linux and Windows. The full matrix passes under the standing rule: no row is over +0.5% under both allocators. Base: PR #762 (A1c) merged with origin/main `ee8ba415`. The diff is 733 added and 685 removed lines in 9 files.
+
+Files converted: `browser_form.rs`, `browser_controls.rs`, `browser_select.rs`, `browser_submit.rs`, `browser_face.rs`. Registrations changed in `browser.rs` (the `DEFS` rows of the Input, Button, Form, Select and Submit interfaces, and the `SubmitEvent` constructor, which uses `add_fn_s_obj` with `HostFn::CtorNewTarget`), `browser_custom.rs` (`attachInternals` uses `def_method_s`) and `browser_nodelist.rs` (`members` reads a scope; `select_of` takes an `ObjId`).
+
+Not converted, and why:
+
+- Helpers that other files call stay in the old form: `form_owner`, `form_elements`, `is_connected_node`, `is_disabled_control`, `activation_target`, `user_click`, `activate`, `submit_form`, `button_state` (form); `will_validate`, `verdict`, `is_invalid`, `message_of`, `reset_form`, `reset_control` (controls); `owned_controls`, `entry_list`, `submit_with` (submit). Their callers are the event files (group B) and `browser_textarea.rs`. A new-form handler calls them through `old(...)`.
+- `reflect!` and `html_el` in `browser_select.rs` stay for `browser_textarea.rs`. The new macro `reflect_s!` serves the converted code. They go when the textarea moves.
+- Install code, the lazy definers, the tables keyed by `ObjId` (`made_validity`, `made_label`, `interface`, `link`, `held`, `forget`, `ints`, `face`) and `Host::fill_indexed` stay in the old form. They run once, or key tables by `ObjId`.
+- The calls of `new_event_proto`, `dispatch` and `focus_node` (group B files) go through `old(...)`. If group B changes their signatures, the second PR to merge needs a small fix.
+
+Changes.
+
+- Removed: `def_get_sh` (its only caller was `options.length`), `collection_*_index` and `collection_length_set` in `browser_select.rs`, the `V` aliases and the old `Error` import that became unused.
+- `browser_submit.rs`: `report_one` takes a scope (used by `browser_face.rs`). `browser_controls.rs`: `control`, `labels_of` and `validity_of` take a scope.
+
+Grep gate (`\bbare_js::(value|eval::Interp)|\bObjId\b|\bInterp\b|\.engine\(\)|\.heap\.`, lines for each file, before then now): form 28 to 9, controls 50 to 35, select 81 to 33, submit 17 to 8, face 40 to 7. The goal 0 is not met. What stays is the list above.
+
+Measurements. Machine archMachine. Instruction counts (`perf stat -e instructions:u`, minimum of 3 runs, `tools/js/cost_matrix.sh -j4`, 817 rows, base tree built from the base commit).
+
+- Full matrix at default flags: mean glibc +0.003%, jemalloc +0.495% (1 row measured). Over +0.5% under both allocators: none. Over under glibc only: `console_load format 10` +0.535% (three runs: +0.535%, +0.536%, +0.535%) with jemalloc +0.495%, +0.468%, +0.428%. This row does not call a forms handler (console, group B). Hypothesis: code layout.
+- `parse_load deep 1` and `10` do not run on either tree (known).
+- No row was over under both allocators, so the `codegen-units=1` rule and the callgrind per-call step were not needed.
+
+Tests. Linux: `cargo test --locked -p bare-js-api -p bare-js -p bare --lib`: 32, 1104 (1 ignored) and 1714 (6 ignored) pass. The filters `form control select submit face valid custom_ nodelist label internals reset browser_tests scoped` on `bare --lib` (345 tests, 1 ignored): pass plain, with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1`. The whole `bare --lib` with `BARE_ALL_API=1`: 1714 pass. The whole `bare --lib` with `BARE_GC_STRESS=1`: 1713 pass and 1 fails, `browser_reclaim_tests::parsed_documents_ask_for_a_collect_by_their_native_bytes` (line 137). It fails the same way on the base tree (`9f74a623`), so this change did not cause it. Windows 11 VM (`cargo xwin test --no-run`, exes through `winssh`): `bare-js-api` 32, `bare-js` filters `api_tests host_nt` 50, `bare` the same 345-test filters: pass.
+
+Not tested: the whole `bare --lib` on Windows; `BARE_GC_STRESS=1` and `BARE_ALL_API=1` on Windows; RSS and wall time; `codegen-units=1` and callgrind (no row needed them); a merge with the group B PR; the files that are not converted.
+
 ## 2026-11-20: core built-ins in js2 (plan step S2.7)
 
 Real scripts now run end to end on the js2 interpreter. This step adds `Object`, `Function.prototype`, `Error` and its subclasses, `ToPrimitive`, `Array`, `String.prototype`, `Number`, `Boolean`, `Math`, `parseInt`, `parseFloat`, `isNaN`, `isFinite`, `globalThis` and `self`. Base: PR #757 (`t3/js2-interpreter`), merged with the newest main.
@@ -16287,6 +16317,39 @@ Net slope (scale 10 minus scale 1), M instructions:
 
 
 Model of the design (section 5, step 3, hypothesis): `loop` 1.49 at scale 10, `calls` 1.37, `fib` 1.34, `closures` 0.55, `objects` 1.45, bundle-like 0.92. Measured: `loop` 1.45, `calls` 1.36, `fib` 1.33, `closures` 0.54, `objects` 1.43, bundle-like 0.91 (scale 1). The model matched within 0.04. The bundle-like program does not change (it has no top-level globals in its hot loop).
+## 2026-11-20: host handlers on the interface, D1: style, CSSOM and geometry (plan step S0.4 / D1)
+
+Status: the handlers of the files below run through the interface (`Scope`, `Local`, `Args`). Tests pass on Linux and Windows. The full matrix passes under the standing rule: no row is over +0.5% under both allocators. Base: PR #762 (`t3/convert-browser-host-handlers`, head `9f74a623`). The diff is about 2,200 changed lines.
+
+Files converted: `browser_style.rs`, `browser_computed.rs`, `browser_css_ns.rs`, `browser_geom.rs`, `browser_matrix.rs`, `browser_point.rs`, `browser_geometry.rs`, `browser_fonts.rs`, and `browser_cssom.rs` (the getters, `item`, `length` and the `CSSStyleSheet` constructor). `browser_rects.rs`: `client_rects`.
+
+Not converted, and why:
+
+- `browser_cssom.rs`: `insertRule`, `deleteRule`, `replace`, `replaceSync`, `selectorText` and `keyText` setters, `disabled` setter, group `insertRule` and `deleteRule`, `styleSheets`, `adoptedStyleSheets`. Each body is a chain of helpers of the old form (`publish`, `refresh`, `parsed_rules`, `set_text_content`, promises, `array_from`). A first build of them on the interface was slower than the old form. `cssom_load adopted 1` went from +0.83% (a bridge that copies `this` and the arguments) to +1.72% (written in place), because `Scope::new_array` and `Scope::get_str` cost more than `array_from` and `d.key`. They stay on the old registry. The old form costs the same as the base.
+- `browser_rects.rs`: `range_client_rects` and `range_bounding_rect` are registered by `browser_range.rs` (group A2). `range_client_rects` calls the new `rect_list_s` through `run_v`.
+- `browser_used.rs`: it has no handler, only `used_for` helpers that take `it`. `browser_fontface.rs`: JavaScript source only. `browser_style_block.rs`: no host code.
+- The install functions, the lazy global definers, the tables keyed by `ObjId` (`d.geom.slots`) and the GC hooks stay in the old form, as in A1c. `Dom::old` helpers (`with_geo`, `style_read`, `style_get`, `computed_value`, `caret_range`, `element_rects`, the cascade) take `it` and run through `old` and `old_v`.
+
+Changes.
+
+- `browser_scoped.rs`: `Dom::style_html_el_s` moves to `browser_style.rs` (a native form). New `Dom::add_fn_s_raw` makes a function inside a scope that the caller holds. `call_scoped` asks `bad_new_s` for the message of a constructor called without `new`.
+- `browser_geom.rs`: HS helpers (`new_obj_s`, `put_s`, `num_s`, `rect_object_s`, `layout_rect_s`, `rect_list_s`, `point_object_s`, `make_s`, `finish_s`). The old `rect_object` and `layout_rect` stay for callers of the old form (intersection and resize observers, scroll). `needs_new` compares HS pointers; the geometry fixture checks the message "Please use the 'new' operator".
+- `browser_style.rs` and `browser_computed.rs`: the 500 accessors of `ensure` and `fill` are made in one scope. A scope for each of them cost +100 instructions for each function (`sheets_load linked 1` +0.56%, `imports 1` +0.57%). `current` reads its id as `style.cur & !CUR_NEW`; the ids come from `Dom::scoped`. `rule_declaration` is now `rule_declaration_s`.
+- Dead code of the old form is removed (`wrap_all`, `new_obj`, `put`, `num`, `read_dict`, `rect_list`, `point_object`, the old style and computed helpers of arguments).
+
+Grep gate (`\bbare_js::(value|eval::Interp)|\bObjId\b|\bInterp\b|\.engine\(\)|\.heap\.`, lines for each file, base then now): cssom 113 to 96, computed 43 to 28, style 50 to 30, css_ns 10 to 5, geom 62 to 33, matrix 35 to 8, point 7 to 0, geometry 8 to 5, rects 10 to 9, used 2 to 2, fonts 6 to 5, style_block 0, fontface 0. Handlers of the old form (`fn x(d: &Dom, it: &mut Interp, this: Value ...)`): 0 in each converted file, except cssom 15 (listed above, with their helpers) and rects 3 (two are group A2).
+
+Measurements. Machine archMachine, loaded. Instruction counts (`perf stat -e instructions:u`, minimum of 3 runs, `tools/js/cost_matrix.sh -j4`, 817 rows, base tree built from the head of #762).
+
+- First matrix (everything converted, `adopted*` on a bridge): over +0.5% under both allocators: `cssom_load adopted 1` and `10` (+0.83% to +0.92%), `sheets_load imports 1` and `linked 1` (+0.56% to +0.95%), `dataset_load keys 1000 50` and `10000 50` (+0.55% to +0.64%, not a file of this group; the row was not over again after the change below).
+- Changes after that: one scope for the accessors of `ensure` and `fill` (the `sheets_load` rows); the `adopted*` handlers and the other handlers that only bridged back to the old form went back to the old registry.
+- Callgrind of `cssom_load adopted 1` (symbol builds of both trees): the call path of the interface is not the cause. `call_api_plain` and `call_scoped` together are about 1,000 instructions for 11,000 calls against about 1,250 for `call_host` and `Host::call`. The extra cost was in `new_array` and `get_str` of the bodies written in place.
+- Full matrix, final tree: mean -0.001% glibc and +0.321% jemalloc. Over under both allocators: none. Over under one allocator only: `cssom_load computed 1` (+0.511% glibc, +0.437% jemalloc), `computed 10` (+0.525%, +0.462%), `fetch_load bytes 10` (+0.597%, +0.064%). `parse_load deep 1` and `10` do not run on the base tree either. The `codegen-units=1` check was not needed, as no row is over under both allocators.
+- Lever left: `cssom_load computed` is 0.01% over the limit under glibc. Each `getComputedStyle` read goes through `current` (a hash lookup in `style.fns`) and `computed_value` as before. A table indexed by the id would remove the lookup. Not built.
+
+Tests. Linux: `cargo test --locked -p bare-js-api -p bare-js -p bare --lib`: 32, 1104 (1 ignored) and 1714 (6 ignored) pass. `bare --lib` with the filters `browser_geom_tests browser_geometry_tests browser_point_tests browser_css_ns_tests browser_fonts_tests browser_style browser_computed browser_cssom_tests browser_scoped browser_dom browser_attr browser_custom browser_mutation browser_range matrix rects svg` (295 pass, 4 ignored): pass plain, with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1`. Windows 11 VM (`cargo xwin test --no-run`, `winssh`): the same filters, 295 pass, 4 ignored.
+
+Not tested: the whole `bare --lib` with `BARE_GC_STRESS=1` and with `BARE_ALL_API=1`; the whole `bare --lib` on Windows; macOS; RSS and wall time; the `codegen-units=1` and callgrind numbers of each row that was only slightly over under one allocator (`cssom_load computed`, `fetch_load bytes 10`).
 ## 2026-11-20: host handlers on the interface, D2: media, image and canvas (plan step S0.4 / D2)
 
 Status: the handlers of the three files run through the interface (`Scope`, `Local`, `Args`). Tests pass on Linux and Windows. The matrix has no row over the limit. The PR is open without auto-merge.
