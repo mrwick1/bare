@@ -153,13 +153,18 @@ impl<'a> Fc<'a> {
         match x.kind {
             ExprKind::Member { obj, name, .. } => {
                 let nm = self.name_of(name);
-                let o = self.any(obj)?;
-                self.set_member(o, Some(&nm), None, v)
+                let (o, mode) = self.member_base(obj, None)?;
+                self.set_member(mode, o, Some(&nm), None, v)
             }
             ExprKind::Index { obj, index, .. } => {
-                let o = self.any(obj)?;
+                let (o, mode) = self.member_base(obj, Some(index))?;
                 let k = self.any(index)?;
-                self.set_member(o, None, Some(k), v)
+                self.set_member(mode, o, None, Some(k), v)
+            }
+            ExprKind::PrivateMember { obj, name, .. } => {
+                let o = self.any(obj)?;
+                let k = self.private_key(name)?;
+                self.set_member(Mode::Private, o, None, Some(k), v)
             }
             _ => {
                 self.unsup("this assignment target");
@@ -171,13 +176,26 @@ impl<'a> Fc<'a> {
     fn object_pattern(&mut self, list: List<PatProp>, v: u32, mode: Bind) -> CR {
         let prog = self.prog;
         let props: Vec<PatProp> = prog.list(list).map(|p| *prog.pat_prop(p)).collect();
-        for pp in props {
+        // With a rest property, the keys of the other properties go to a window of registers that `ObjRest` reads.
+        let nkeys = props.len() as u32 - props.iter().any(|p| matches!(p.key, Key::None)) as u32;
+        let base = props.iter().any(|p| matches!(p.key, Key::None)).then(|| self.window(nkeys));
+        for (i, pp) in props.into_iter().enumerate() {
             let m = self.mark();
+            let slot = base.map(|b| b + i as u32);
             match pp.key {
-                Key::None => self.unsup("a rest property in an object pattern"),
+                Key::None => {
+                    let PatKind::Rest(t) = prog.pat(pp.value).kind else { continue };
+                    let r = self.alloc();
+                    self.opx(Op::ObjRest, r, v, base.unwrap_or(0), nkeys);
+                    self.set_live(r);
+                    self.bind_src(t, Src::Reg(r), mode)?;
+                }
                 Key::Computed(k) => {
                     let kr = self.any(k)?;
-                    self.bind_src(pp.value, Src::Elem(v, kr), mode)?;
+                    let kt = slot.unwrap_or_else(|| self.alloc());
+                    self.op(Op::ToKey, kt, v, kr);
+                    self.set_live(kt);
+                    self.bind_src(pp.value, Src::Elem(v, kt), mode)?;
                 }
                 Key::Name(s) | Key::Str(s) => {
                     let name: Cow<str> = if matches!(pp.key, Key::Name(_)) {
@@ -188,16 +206,21 @@ impl<'a> Fc<'a> {
                         Cow::Owned(String::from_utf16_lossy(&b))
                     };
                     if super::expr::index_like(&name) {
-                        let k = self.alloc();
+                        let k = slot.unwrap_or_else(|| self.alloc());
                         self.load_number(k, name.parse::<f64>().unwrap_or(0.0));
                         self.set_live(k);
                         self.bind_src(pp.value, Src::Elem(v, k), mode)?;
                     } else {
+                        if let Some(sl) = slot {
+                            let a = self.atom(&name)?;
+                            self.op(Op::LoadAtom, sl, a, 0);
+                            self.set_live(sl);
+                        }
                         self.bind_src(pp.value, Src::Field(v, &name), mode)?;
                     }
                 }
                 Key::Num(s) => {
-                    let k = self.alloc();
+                    let k = slot.unwrap_or_else(|| self.alloc());
                     let n = prog.number(s, crate::lex::NumberBase::Decimal).unwrap_or(0.0);
                     self.load_number(k, n);
                     self.set_live(k);

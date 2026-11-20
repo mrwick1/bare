@@ -3,8 +3,8 @@
 //!   bc_hist [-v] [PATH...]
 //!
 //! With no path it compiles the sources of the `eval_load` cases (`examples/data/eval_*.js`, the same text as the old engine's
-//! `eval_load CASE 1 --source`). With paths it compiles those files. Every compiled function must pass the verifier, or the program
-//! exits with 1. `-v` also prints the disassembly. The old engine's counts (`tools/js/bc_hist.sh` counts executed ops; the old
+//! `eval_load CASE 1 --source`). With paths it compiles those files. Every complete function (one with no unbuilt construct) must pass the verifier, or the
+//! program exits with 1. `-v` also prints the disassembly. The old engine's counts (`tools/js/bc_hist.sh` counts executed ops; the old
 //! compiler dumps are static) are in `docs/progress.md`.
 
 use bare_js2::atoms::SharedAtoms;
@@ -44,7 +44,11 @@ struct Tally {
 
 impl Tally {
     fn add(&mut self, c: &Compiled, script: bool, verbose: bool, name: &str) {
-        if let Err(e) = verify(&c.code) {
+        // The code of a partial function is not complete (a register that an unbuilt construct would write is not written), so only a
+        // complete function must pass the verifier.
+        if c.unsupported.is_empty()
+            && let Err(e) = verify(&c.code)
+        {
             eprintln!("VERIFY FAILED in {name}: {e}\n{}", c.code.disassemble());
             std::process::exit(1);
         }

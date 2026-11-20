@@ -257,6 +257,43 @@ ops! {
     ForInOpen Abc "W r" "Open the keys of `b` (`for-in`). The record is in the 3 registers from `a`, as for `IterOpen`.",
     IterNext AsBxX "w j R" "`a` = the next value of the record in the 3 registers from `x`. When it is done, jump.",
     IterClose Abc "R" "Close the iterator whose record is in the 3 registers from `a` (a `break` or an exception out of the loop).",
+    CreateArgs Abc "w" "`a` = a new arguments object that holds every argument of this call (the frame keeps them, also those past `nparams`). Always unmapped: `arguments[i]` does not alias the parameter `i`. The first instruction of the function, before any parameter is written.",
+    CreateRest Abc "w u" "`a` = a new array of the arguments of this call from the index `b` on (a rest parameter; `b` is its position).",
+    LoadCallee Abc "w" "`a` = the function that runs (the name of a named function expression inside its own body).",
+    LoadNewTarget Abc "w" "`a` = `new.target` of this call.",
+    NewRegExp Abc "w A A" "`a` = a new RegExp object with the pattern `atoms[b]` and the flags `atoms[c]`.",
+    LoadBigInt Abx "w A" "`a` = the BigInt whose literal text (no `n`, no `_`, with its `0x`, `0o` or `0b` prefix) is `atoms[bx]`.",
+    ArraySpread Abc "r r" "Append every value that the iterator of `b` gives to the array `a` (`[...b]`, an argument `...b`).",
+    ArrayHole Abc "r" "Append a hole to the array `a` (`[1, , 2]`).",
+    CallSpread Abc "w R" "`a = b(...)` with the arguments in an array: the callee is in `b`, `this` in `b+1`, the array in `b+2`.",
+    NewSpread Abc "w R" "`a = new b(...)` with the arguments in an array: the constructor is in `b`, the array in `b+1`.",
+    CopyProps Abc "r r" "Copy the own enumerable properties of `b` to the object `a` (`{...b}`); `undefined` and `null` copy nothing.",
+    ObjRest AbcX "w r R u" "`a` = a new object with the own enumerable properties of `b` except the `x` keys in the registers from `c` (`{p, ...rest} = b`). `undefined` and `null` throw.",
+    SetProto Abc "r r" "Set the prototype of the object literal `a` to `b` when `b` is an object or `null` (`{__proto__: b}`).",
+    DefAccessor AbcX "r r S u" "Define an accessor of the site `c` on `a` with the function `b`. `x`: bit 0 set for a setter, bit 1 set for a property that is not enumerable (a class).",
+    DefAccessorElem AbcX "r r r u" "As `DefAccessor`, with the key in `b` (already a key, see `ToKey`) and the function in `c`.",
+    DefMethod Abc "r r S" "Define the method `b` on `a` as the property of the site `c`, not enumerable (a class member).",
+    DefMethodElem Abc "r r r" "As `DefMethod`, with the key in `b` (already a key) and the function in `c`.",
+    SetHome Abc "r r" "The home object of the function `a` is `b` (it uses `super.x`).",
+    GetTemplate Abc "w H S" "`a` = the template object of the tagged template at the site `c`: the same object each time. `recipes[b]` holds pairs of atoms: the cooked string and the raw string of each piece (`u32::MAX` as the cooked string: it is `undefined`).",
+    MakeClass Abc "r" "`a` is the constructor of a class that has no `extends`: give it a new prototype object (its `constructor` is `a`, its home object is that object).",
+    MakeDerived Abc "r r" "As `MakeClass` for a class with `extends`: `a` is the constructor, `b` the value of the `extends` clause. Throws a TypeError when it is no constructor and no `null`.",
+    DefaultCtor Abc "w u" "`a` = the default constructor of a class (`b` 1: a derived class, which calls `super(...args)`).",
+    SetFields Abc "r r" "The function `b` makes the fields of an instance of the class `a`. The constructor calls it with `this` (when it has no `super()`, at its start; else right after `super()` returns).",
+    NewPrivateName Abx "w A" "`a` = a new private name, whose description is `atoms[bx]` (one for each class evaluation).",
+    GetPrivate Abc "w r r" "`a = b.#name` where the register `c` holds the private name. A TypeError when `b` does not have it.",
+    SetPrivate Abc "r r r" "`a.#name = c` where the register `b` holds the private name. A TypeError when `a` does not have it, or it is a method.",
+    HasPrivate Abc "w r r" "`a = #name in b` where the register `c` holds the private name.",
+    DefPrivate Abc "r r r" "Add the private field `b` (a private name) with the value `c` to `a`. A TypeError when `a` has it.",
+    DefPrivateMethod Abc "r r r" "Add the private method `b` (a private name) with the function `c` to `a`: not writable.",
+    DefPrivateAccessor AbcX "r r r u" "Add a private accessor `b` (a private name) with the function `c` to `a`. `x` 0: getter, 1: setter.",
+    GetSuper Abc "w r S" "`a = super.name` for the site `c`, with `b` as `this`.",
+    GetSuperElem Abc "w r r" "`a = super[c]`, with `b` as `this`.",
+    SetSuper Abc "r r S" "`super.name = b` for the site `c`, with `a` as `this`.",
+    SetSuperElem Abc "r r r" "`super[b] = c`, with `a` as `this`.",
+    CallSuper Abc "w R u" "`a = super(...)`: the `c` arguments are in the registers from `b`. It constructs with the `new.target` of this call and runs the field initializers (`SetFields`) of the class. The compiler writes `a` to the variable `this`.",
+    CallSuperSpread Abc "w r" "As `CallSuper`, with the arguments in the array `b`.",
+    RetDerived Abc "r r" "Return from a derived constructor with the value `a` and the variable `this` in `b`: an object is returned as it is; `undefined` gives `this` (a ReferenceError when `this` is the hole); anything else is a TypeError.",
 }
 
 /// The registers of an iterator record (`IterOpen`, `ForInOpen`, `IterNext`, `IterClose`).
@@ -280,7 +317,7 @@ impl Op {
 
     /// Does control go on to the next instruction? (`Jmp`, `JmpBack`, the returns and the throws do not.)
     pub fn falls_through(self) -> bool {
-        !matches!(self, Op::Jmp | Op::JmpBack | Op::Ret | Op::RetUndef | Op::Throw | Op::ThrowConst)
+        !matches!(self, Op::Jmp | Op::JmpBack | Op::Ret | Op::RetUndef | Op::Throw | Op::ThrowConst | Op::RetDerived)
     }
 
     /// Can the instruction run JS, allocate or throw, so that a collection can happen in it? The compiler gives a root map to each one.
@@ -289,7 +326,7 @@ impl Op {
         use Op::*;
         !matches!(
             self,
-            Nop | Mov | LoadUndef | LoadNull | LoadTrue | LoadFalse | LoadThis | LoadHole | LoadI | LoadN | LoadAtom | GetCtx | SetCtx | InitCtx | PopCtx
+            Nop | Mov | LoadCallee | LoadNewTarget | LoadUndef | LoadNull | LoadTrue | LoadFalse | LoadThis | LoadHole | LoadI | LoadN | LoadAtom | GetCtx | SetCtx | InitCtx | PopCtx
                 | StrictEq | StrictNe | Not | Typeof | Jmp | JmpIf | JmpIfNot | JmpNullish | JmpNotNullish | JSEq | JSNe | JSEqI | JSNeI | JSEqA
                 | JSNeA | JSEqB | JSNeB | JSEqNull | JSNeNull | JSEqUndef | JSNeUndef | Ret | RetUndef | Throw
         )

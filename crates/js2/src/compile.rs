@@ -20,8 +20,12 @@
 //! names only registers that every path has written (the verifier checks this), and a frame needs no fill (design 6.10 item 4). A
 //! register that is dead but still in scope stays in the map until its scope ends: a superset, which is safe (it keeps garbage).
 //!
+//! **Classes.** A class makes its constructor, its prototype and its elements in the order of the text. The initializers of fields and
+//! the `static` blocks are functions that the parent compiles itself (their text is in its tree): see `compile_class.rs` and [`Child::ready`].
+//!
 //! **Not built** (each one is recorded in [`Compiled::unsupported`] and the code is not to be run; the driver throws the TypeError of
-//! design 6.12 that names it): see [`Fc::unsup`] and the PR text. The reason is mostly that the format of S2.4 has no op for it yet.
+//! design 6.12 that names it): generators, async functions, `await`, `yield`, `for await`, `with`, direct `eval`, `import()`,
+//! `import.meta`, `delete` of a global name. See [`Fc::unsup`] and the progress entry.
 use crate::ast::*;
 use crate::atoms::SharedAtoms;
 use crate::bytecode::{Asm, BcError, Code, Handler, Ins, Label, Op, Recipes};
@@ -87,6 +91,8 @@ impl Level {
 pub struct Input {
     /// The contexts around the function, innermost first. `None`: no outer function has a context.
     pub chain: Option<Rc<Level>>,
+    /// The function is a named function expression: its name is a variable inside it that holds the function ([`Child::self_name`]).
+    pub self_name: bool,
 }
 
 /// A function inside the compiled one: the entry of the facts, and the chain that its closure sees. Parallel to `Code::funcs`.
@@ -94,6 +100,12 @@ pub struct Input {
 pub struct Child {
     pub id: FnId,
     pub chain: Option<Rc<Level>>,
+    /// A named function expression. Its name is a binding in a scope of its own, inside the function and outside its parameters. The
+    /// child compiles it as a variable (`LoadCallee`) when its text uses the name. (A function declaration binds the name outside.)
+    pub self_name: bool,
+    /// The function has no tree to parse: the parent compiled it, and its code is `Compiled::inline[ready]` of the parent (the initializers
+    /// of the fields of a class and its `static` blocks: their text is in the tree of the function that holds the class).
+    pub ready: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -103,6 +115,8 @@ pub struct Compiled {
     pub strict: bool,
     /// The constructs that this compiler does not build. When it is not empty the code is not complete and must not run.
     pub unsupported: Vec<&'static str>,
+    /// The functions of the children with [`Child::ready`], in the order of those children.
+    pub inline: Vec<Compiled>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -114,6 +128,9 @@ pub(crate) enum VK {
     Param,
     Class,
     Catch,
+    /// The name of a named function expression, inside the function. Read only (an assignment throws in strict code; in sloppy code it
+    /// should do nothing, and here it assigns).
+    Callee,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -168,6 +185,16 @@ pub(crate) enum Res {
     Reg { reg: u32, tdz: bool, konst: bool },
     Ctx { hops: u32, slot: u32, tdz: bool, konst: bool },
     Global,
+}
+
+/// How a member of an assignment target or an update is read and written.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Mode {
+    Plain,
+    /// `super.x`: the object register holds `this`.
+    Super,
+    /// `o.#x`: the key register holds the private name.
+    Private,
 }
 
 /// A label with a flag: is there a jump to it? Code after an unconditional jump is dropped until a used label is bound.
@@ -236,6 +263,7 @@ pub(crate) struct Fc<'a> {
     pub num_ix: HashMap<u64, u32>,
     pub funcs: Vec<u32>,
     pub children: Vec<Child>,
+    pub inline: Vec<Compiled>,
     pub recipes: Recipes,
     pub unit_buf: Vec<u16>,
     // registers
@@ -261,6 +289,10 @@ pub(crate) struct Fc<'a> {
     pub is_script: bool,
     pub is_arrow: bool,
     pub fn_flags: u16,
+    pub fn_id: Option<FnId>,
+    pub self_name: bool,
+    /// The function is the constructor of a class with `extends`.
+    pub derived: bool,
     // control flow
     pub frames: Vec<Frame>,
     pub chain_short: Option<Lb>,
@@ -289,6 +321,7 @@ impl<'a> Fc<'a> {
             num_ix: HashMap::new(),
             funcs: Vec::new(),
             children: Vec::new(),
+            inline: Vec::new(),
             recipes: Recipes::default(),
             unit_buf: Vec::new(),
             next: 0,
@@ -311,6 +344,9 @@ impl<'a> Fc<'a> {
             is_script: false,
             is_arrow: false,
             fn_flags: 0,
+            fn_id: None,
+            self_name: input.self_name,
+            derived: false,
             frames: Vec::new(),
             chain_short: None,
             pending: Vec::new(),
@@ -587,7 +623,8 @@ impl<'a> Fc<'a> {
 
     /// Is a variable named `name`, declared in the scope `span`, used by a closure inside that scope?
     pub(crate) fn captured(&self, name: &str, span: Span) -> bool {
-        self.force_ctx || self.cap.get(name).is_some_and(|starts| starts.iter().any(|&s| s >= span.start && s < span.end))
+        // The names that a class makes (`#x`, `%...`) are no identifiers: a method or an initializer reads them, and the facts do not list them.
+        self.force_ctx || name.starts_with(['#', '%']) || self.cap.get(name).is_some_and(|starts| starts.iter().any(|&s| s >= span.start && s < span.end))
     }
 
     /// Declare the variables of a scope. Gives the scope's depth marker. A captured variable goes to a context slot, and when there is one
@@ -615,7 +652,7 @@ impl<'a> Fc<'a> {
             let tdz = matches!(kind, VK::Let | VK::Const | VK::Class);
             let home = if self.captured(name, span) {
                 let slot = slots.len() as u32;
-                slots.push(LevelVar { name: name.as_ref().into(), slot, tdz, konst: kind == VK::Const });
+                slots.push(LevelVar { name: name.as_ref().into(), slot, tdz, konst: kind == VK::Const || (kind == VK::Callee && self.strict) });
                 Home::Ctx { level, slot }
             } else {
                 let r = d.reg.unwrap_or_else(|| self.alloc());
@@ -658,7 +695,7 @@ impl<'a> Fc<'a> {
     pub(crate) fn resolve(&self, name: &str, at: u32) -> Res {
         if let Some(v) = self.find_var(name) {
             let tdz = matches!(v.kind, VK::Let | VK::Const | VK::Class) && (v.always_tdz || at < v.decl_end);
-            let konst = v.kind == VK::Const;
+            let konst = v.kind == VK::Const || (v.kind == VK::Callee && self.strict);
             return match v.home {
                 Home::Reg(reg) => Res::Reg { reg, tdz, konst },
                 Home::Ctx { level, slot } => Res::Ctx { hops: self.depth - level, slot, tdz, konst },
@@ -714,7 +751,7 @@ impl<'a> Fc<'a> {
     // ------------------------------------------------------------ children
 
     /// The child function whose body the pre-parser skipped. Gives its index in `Code::funcs`.
-    pub(crate) fn child(&mut self, f: FuncId) -> CR<u32> {
+    pub(crate) fn child(&mut self, f: FuncId, self_name: bool) -> CR<u32> {
         let func = self.prog.func(f);
         let id = match func.body {
             Body::Skipped(id) => id,
@@ -724,7 +761,7 @@ impl<'a> Fc<'a> {
             }
         };
         self.funcs.push(id);
-        self.children.push(Child { id, chain: self.cur_ctx.clone() });
+        self.children.push(Child { id, chain: self.cur_ctx.clone(), self_name, ready: None });
         if self.funcs.len() > u16::MAX as usize {
             return Err(CompileError::Limit("more than 65,535 child functions"));
         }
@@ -785,7 +822,7 @@ impl<'a> Fc<'a> {
         code.recipes = self.recipes;
         code.sites = self.sites;
         code.roots = roots;
-        Ok(Compiled { code, children: self.children, strict: self.strict, unsupported: self.unsupported })
+        Ok(Compiled { code, children: self.children, strict: self.strict, unsupported: self.unsupported, inline: self.inline })
     }
 }
 
@@ -819,6 +856,8 @@ pub fn compile_function(prog: &Program, fid: FuncId, id: FnId, facts: &Facts, at
     c.strict = prog.func(fid).strict;
     c.is_arrow = f.kind == FuncKind::Arrow;
     c.fn_flags = f.flags;
+    c.fn_id = Some(id);
+    c.derived = f.kind == FuncKind::DerivedConstructor;
     c.force_ctx = f.flags & facts::INNER_EVAL != 0;
     if f.flags & (facts::EVAL | facts::WITH | facts::IN_WITH) != 0 {
         c.unsup("direct eval or with");
@@ -841,8 +880,12 @@ impl<'a> Fc<'a> {
                 // `this` of an arrow is a flag, not a capture: it is the pseudo-name `this`.
                 self.cap.entry(name).or_default().push(start);
             }
-            if facts.get(k).kind == FuncKind::Arrow && facts.get(k).flags & facts::THIS != 0 {
+            // `super.x` and `super()` in an arrow read `this` of the function around it.
+            if facts.get(k).kind == FuncKind::Arrow && facts.get(k).flags & (facts::THIS | facts::SUPER) != 0 {
                 self.cap.entry(Cow::Borrowed("this")).or_default().push(start);
+            }
+            if facts.get(k).kind == FuncKind::Arrow && facts.get(k).flags & facts::NEW_TARGET != 0 {
+                self.cap.entry(Cow::Borrowed("new.target")).or_default().push(start);
             }
         }
     }
@@ -856,17 +899,30 @@ pub fn compile_all(source: &str, atoms: &SharedAtoms, limits: crate::parse::Limi
     let prog = parse_script_lazy(source, limits, &mut facts).map_err(|e| format!("parse: {}", e.msg))?;
     let script = compile_script(&prog, &facts, atoms).map_err(|e| format!("{e:?}"))?;
     let mut out: Vec<(FnId, Compiled)> = Vec::new();
-    let mut todo: Vec<Child> = script.children.clone();
-    while let Some(ch) = todo.pop() {
-        let (p, fid) = parse_function(source, &mut facts, ch.id, limits).map_err(|e| format!("parse fn {}: {}", ch.id, e.msg))?;
-        let c = compile_function(&p, fid, ch.id, &facts, atoms, &Input { chain: ch.chain.clone() }).map_err(|e| format!("{e:?}"))?;
-        todo.extend(c.children.iter().cloned());
+    // A child with `ready` takes the code that its parent made.
+    fn take(c: &mut Compiled) -> Vec<(Child, Option<Compiled>)> {
+        let mut inline: Vec<Option<Compiled>> = std::mem::take(&mut c.inline).into_iter().map(Some).collect();
+        c.children.iter().map(|ch| (ch.clone(), ch.ready.and_then(|i| inline[i as usize].take()))).collect()
+    }
+    let mut script = script;
+    let mut todo = take(&mut script);
+    while let Some((ch, ready)) = todo.pop() {
+        let mut c = match ready {
+            Some(c) => c,
+            None => {
+                let (p, fid) = parse_function(source, &mut facts, ch.id, limits).map_err(|e| format!("parse fn {}: {}", ch.id, e.msg))?;
+                compile_function(&p, fid, ch.id, &facts, atoms, &Input { chain: ch.chain.clone(), self_name: ch.self_name }).map_err(|e| format!("{e:?}"))?
+            }
+        };
+        todo.extend(take(&mut c));
         out.push((ch.id, c));
     }
     out.sort_by_key(|(id, _)| *id);
     Ok((script, out))
 }
 
+#[path = "compile_class.rs"]
+mod class;
 #[path = "compile_expr.rs"]
 mod expr;
 #[path = "compile_pat.rs"]

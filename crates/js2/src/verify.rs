@@ -33,7 +33,10 @@ fn window(ins: &Ins, recipes: &Recipes) -> Option<u32> {
     Some(match ins.op {
         Op::Call => 2 + ins.c,
         Op::CallU | Op::New => 1 + ins.c,
-        Op::Concat | Op::NewArrLit => ins.c,
+        Op::Concat | Op::NewArrLit | Op::CallSuper => ins.c,
+        Op::CallSpread => 3,
+        Op::NewSpread => 2,
+        Op::ObjRest => ins.x,
         Op::NewObjLit => recipes.get(ins.c as usize).map_or(0, |k| k.len() as u32),
         Op::IterOpen | Op::ForInOpen | Op::IterNext | Op::IterClose => ITER_REGS,
         _ => return None,
@@ -69,7 +72,17 @@ pub fn verify(code: &Code) -> Result<(), String> {
     if let Some((i, _)) = code.sites.iter().enumerate().find(|(_, a)| **a >= natoms) {
         return Err(format!("site {i} has no atom"));
     }
-    if (0..code.recipes.len()).any(|i| code.recipes.get(i).is_some_and(|k| k.iter().any(|a| *a >= natoms))) {
+    // The recipe of a `GetTemplate` is pairs (cooked, raw); a cooked string that is `undefined` is `u32::MAX`.
+    let mut templates = vec![false; code.recipes.len()];
+    for &(_, i, _) in &ins {
+        if i.op == Op::GetTemplate && let Some(t) = templates.get_mut(i.b as usize) {
+            *t = true;
+        }
+    }
+    let bad_recipe = |i: usize, k: &[u32]| {
+        k.iter().enumerate().any(|(j, a)| *a >= natoms && !(templates[i] && j % 2 == 0 && *a == u32::MAX)) || (templates[i] && !k.len().is_multiple_of(2))
+    };
+    if (0..code.recipes.len()).any(|i| code.recipes.get(i).is_some_and(|k| bad_recipe(i, k))) {
         return Err("a recipe names no atom".into());
     }
     let mut site_uses = vec![0u32; code.sites.len()];
