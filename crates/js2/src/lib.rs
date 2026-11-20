@@ -45,6 +45,7 @@ pub mod interp_ops;
 pub mod opcount;
 pub mod builtins;
 pub mod reenter;
+pub mod generator;
 mod bi_array;
 mod bi_object;
 mod bi_number;

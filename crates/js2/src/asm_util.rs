@@ -15,6 +15,10 @@ pub struct F {
     pub recipes: Recipes,
     pub sites: Vec<u32>,
     pub handlers: Vec<(usize, usize, Label, u16, u16)>,
+    /// The save lists of `GenInit` and `Yield` (`Code::tables`), and the kind of the function (`Code::gen_kind`).
+    pub tables: Vec<u32>,
+    pub gen_kind: u8,
+    pub gen_regs: u16,
     /// Registers that stay in the root map of each safepoint although the program does not read them (a test of the map).
     pub pin: Vec<usize>,
     pub shared: Arc<SharedAtoms>,
@@ -22,7 +26,7 @@ pub struct F {
 
 impl F {
     pub fn new(shared: &Arc<SharedAtoms>, nregs: u16, nparams: u16) -> F {
-        F { asm: Asm::default(), nregs, nparams, numbers: vec![], atoms: vec![], funcs: vec![], recipes: Recipes::default(), sites: vec![], handlers: vec![], pin: vec![], shared: shared.clone() }
+        F { asm: Asm::default(), nregs, nparams, numbers: vec![], atoms: vec![], funcs: vec![], recipes: Recipes::default(), sites: vec![], handlers: vec![], tables: vec![], gen_kind: 0, gen_regs: 0, pin: vec![], shared: shared.clone() }
     }
 
     pub fn e(&mut self, op: Op, a: u32, b: u32, c: u32) -> usize {
@@ -80,7 +84,39 @@ impl F {
         self.e(Op::SetField, obj, val, s)
     }
 
+    /// A save list in the table: the registers that the resume writes (`NO_REG`: none) and the registers that it keeps. Gives its offset.
+    pub fn save_list(&mut self, sent: u32, mode: u32, regs: &[u32]) -> u32 {
+        let at = self.tables.len() as u32;
+        self.gen_regs = self.gen_regs.max(regs.len() as u16);
+        self.tables.extend([sent, mode, regs.len() as u32]);
+        self.tables.extend_from_slice(regs);
+        at
+    }
+
+    /// `GenInit` with the save list `regs` (the parameters that the body reads).
+    pub fn gen_init(&mut self, regs: &[u32]) -> usize {
+        let t = self.save_list(NO_REG, NO_REG, regs);
+        self.gen_kind = GK_GEN;
+        self.e(Op::GenInit, 0, t, 0)
+    }
+
+    /// `Yield v` with the sent value in `sent`, the mode in `mode`, and the registers `regs` kept.
+    pub fn yield_(&mut self, v: u32, sent: u32, mode: u32, regs: &[u32]) -> usize {
+        let t = self.save_list(sent, mode, regs);
+        self.gen_kind = GK_GEN;
+        self.e(Op::Yield, v, t, 0)
+    }
+
     pub fn build(self) -> Code {
+        let code = self.build_unchecked();
+        if let Err(e) = verify(&code) {
+            panic!("the test program does not verify: {e}\n{}", code.disassemble());
+        }
+        code
+    }
+
+    /// The code as it is, for a test of the verifier.
+    pub fn build_unchecked(self) -> Code {
         let a = self.asm.finish().unwrap();
         let mut code = Code::new(self.nregs, self.nparams);
         code.words = a.words;
@@ -90,13 +126,16 @@ impl F {
         code.funcs = self.funcs;
         code.recipes = self.recipes;
         code.sites = self.sites;
+        code.tables = self.tables;
+        code.gen_kind = self.gen_kind;
+        if self.gen_kind != 0 {
+            code.noctor = true;
+            code.gen_regs = self.gen_regs;
+        }
         for (s, e, l, reg, depth) in self.handlers {
             code.handlers.push(Handler { start: a.pcs[s], end: a.pcs[e], target: a.label_pcs[l_idx(l)], reg, depth });
         }
         code.roots = roots(&code, &self.pin);
-        if let Err(e) = verify(&code) {
-            panic!("the test program does not verify: {e}\n{}", code.disassemble());
-        }
         code
     }
 }
@@ -146,6 +185,12 @@ pub fn roots(code: &Code, pin: &[usize]) -> RootMaps {
                 'W' => defs[x].extend(base.unwrap()..base.unwrap() + win.unwrap()),
                 _ => {}
             }
+        }
+        if matches!(i.op, Op::GenInit | Op::Yield) {
+            // A suspension reads the registers of its save list, and the resume writes the sent value and the mode.
+            let l = code.save_list(i.b).expect("a save list");
+            uses[x].extend(l.regs.iter().map(|r| *r as usize));
+            defs[x].extend([l.sent, l.mode].into_iter().filter(|r| *r != NO_REG).map(|r| r as usize));
         }
         if let Some(t) = i.target(pc, len) {
             succ[x].push((at(t), None));

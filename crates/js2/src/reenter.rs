@@ -70,6 +70,22 @@ impl Realm {
                 let a = std::mem::take(&mut self.tail_args);
                 self.call_script(f, this, &a)
             }
+            // `next`, `return` or `throw` of a generator that a native called.
+            Outcome::Resume { g } => self.resume_script(g),
+        }
+    }
+
+    fn resume_script(&mut self, g: Value) -> R<Value> {
+        let mut m = self.pool.pop().unwrap_or_else(|| Machine { stack: Vec::new(), fbs: Vec::new() });
+        let r = Vm::resume_start(self, &mut m.stack, &mut m.fbs, g);
+        self.pool.push(m);
+        match r {
+            Ok(v) => {
+                let done = self.gen_done(g);
+                Ok(self.iter_result(v, done))
+            }
+            Err(Exit::Throw(e)) => Err(e),
+            Err(Exit::Fuel) => Err(STOP),
         }
     }
 
