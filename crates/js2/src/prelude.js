@@ -1,7 +1,7 @@
 // The built-ins that call a script function (plan step S2.7). `script.rs` compiles this with each script and runs it once, before the
 // script. Each function is a plain script function, so a callback is an ordinary `Call` op: no re-entry from Rust, exceptions
 // propagate, and the root maps keep every live value. `__def(target, methods)` copies the methods as properties that are not
-// enumerable, and the loader removes `__def` afterwards.
+// enumerable, and the loader sets `__def` to `undefined` afterwards (it does not delete it: see `script::load`).
 (function (def) {
   var nativeReplace = String.prototype.replace;
   var nativeReplaceAll = String.prototype.replaceAll;

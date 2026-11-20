@@ -10,3 +10,11 @@ license = "(MIT OR Apache-2.0) AND Unicode-3.0"
 bare-os = { path = "../os" }
 # ID_Start and ID_Continue for the lexer (`lex.rs`); the compiled data of the property sets, as in `bare-js`
 icu_properties = { version = "2.4.0", default-features = false, features = ["compiled_data"] }
+
+[features]
+# Count the executed ops, pairs and triples (`src/opcount.rs`, example `op_count`). Off by default: the normal build has no call into it.
+op-count = []
+
+[[example]]
+name = "op_count"
+required-features = ["op-count"]

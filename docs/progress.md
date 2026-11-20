@@ -15840,6 +15840,179 @@ Known gaps:
 
 Not tested: Miri on the new arms (they are safe code in an `unsafe` module; the arms use the same string helpers as `JSEqA`); arm64; the effect on a real bundle (how many switches of jQuery or a React bundle become tables, and what it saves there); wall time; the cost matrix (js2 is not wired into the browser); the plain loops with `codegen-units=1`; a switch with more than 65,535 words of tables (the wide form of the op is covered by the encoder tests, not by a switch).
 
+## 2026-11-20: where the instructions go in js2 (plan step S2.9, measurement)
+
+Design: `docs/design-js2-superinstructions.md` (for the owner to review; nothing of it is built). This entry holds the measurements.
+
+Base: PR #763 (`t3/js2-core-builtins`, head b4ef182a). Machine: archMachine, AMD Ryzen 9 5900HX, Linux. Release builds. Instructions are `instructions:u` from `perf stat` through `tools/js/instr.sh` (minimum of 3 runs, `GLIBC_TUNABLES` tcache set by the script). QuickJS: `quickjs-2026-06-04` (`qjs`), the program is `console.log(String((0, eval)(SRC)))`. Inputs: the 9 `eval_load` programs at scale 1 and 10 (`eval_load CASE SCALE --source`), run with `script_run --eval`; and `crates/js2/examples/data/bundle_like.js` (new).
+
+### Counting code
+
+- Cargo feature `op-count` of `bare-js2` (off by default): `src/opcount.rs`, one `#[cfg]` call in `Vm::run`, example `op_count` (ops, pairs, fusable pairs and triples, greedy fusion on the recorded run), example `op_cost` (cost of one op in a loop of K=8 copies; `op_cost list` names the cases).
+- A/B of the normal build: I built the head of the branch without my edits (a separate worktree) and with them, both with default features, `--release`, for `script_run` and `interp_load`. The `.text` section is byte-identical in both (1,585,383 and 1,138,391 bytes), and so are `.rodata` and `.data`. Only the build id and `.data.rel.ro` differ (hypothesis: panic locations hold the path of the worktree). So the instruction count of the normal build does not change. `cargo test --locked -p bare-js2 --lib`: 376 pass with default features, 377 with `--features op-count` (one new test, `opcount::tests::the_counts_add_up`).
+- A bug found by the feature tests and fixed: the table of jump targets was keyed by the address of the words, and a freed code and a new one at the same address shared an entry (index out of bounds in 16 tests). It is keyed by address and length now, and `reset` clears it. A program that frees code while it runs is still not counted right.
+
+### Rows, whole process
+
+Variant A is #763 as it is. Variant B has the one line `delete_prop(__def)` of `script::load` removed (only for the measurement; not in this PR). Spread of the 3 runs, variant B: at most 0.095% (`concat`), 0.02% or less on the other rows; QuickJS: at most 0.175% (`closures`). Variant A is not stable: the same binary gives 519 M to 567 M on `loop` scale 1 (6 runs of two identical binaries: 519, 525, 555, 567, 567, 567), so its numbers are lower bounds of a noisy cost (hypothesis: the slow path of a dictionary object depends on addresses, which ASLR changes).
+
+| Row | Scale | js2, variant A (as in #763), min of 3 | js2, variant B (no `__def` delete), min of 3 | QuickJS, min of 3 | B / QuickJS | Dispatches js2 | Dispatches QuickJS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loop` | 1 | 531.1 | 152.14 | 64.69 | 2.35 | 2,600,012 | 3,800,023 |
+| `loop` | 10 | 5270.5 | 1480.54 | 635.29 | 2.33 | 26,000,012 | 38,000,023 |
+| `loopfn` | 1 | 68.2 | 68.16 | 44.10 | 1.55 | 1,400,012 | 2,800,026 |
+| `loopfn` | 10 | 640.6 | 640.56 | 429.30 | 1.49 | 14,000,012 | 28,000,026 |
+| `calls` | 1 | 344.7 | 115.48 | 60.62 | 1.90 | 1,600,015 | 2,400,025 |
+| `calls` | 10 | 3405.6 | 1113.58 | 594.33 | 1.87 | 16,000,015 | 24,000,025 |
+| `fib` | 1 | 11.8 | 8.84 | 4.37 | 2.02 | 54,353 | 91,983 |
+| `fib` | 10 | 83.4 | 52.17 | 35.54 | 1.47 | 602,784 | 1,020,097 |
+| `closures` | 1 | 44.1 | 22.21 | 26.12 | 0.85 | 180,026 | 235,037 |
+| `closures` | 10 | 388.2 | 179.61 | 279.91 | 0.64 | 1,800,026 | 2,350,037 |
+| `objects` | 1 | 182.7 | 91.11 | 53.72 | 1.70 | 769,031 | 831,022 |
+| `objects` | 10 | 1742.0 | 855.84 | 512.45 | 1.67 | 7,609,031 | 8,211,022 |
+| `webpack` | 1 | 10.2 | 9.75 | 5.48 | 1.78 | 5,566 | 8,157 |
+| `webpack` | 10 | 56.5 | 52.05 | 41.97 | 1.24 | 55,066 | 81,057 |
+| `throws` | 1 | 96.4 | 39.76 | 88.54 | 0.45 | 380,015 | 913,360 |
+| `throws` | 10 | 873.8 | 356.74 | 875.00 | 0.41 | 3,800,015 | 9,133,360 |
+| `concat` | 1 | 4.8 | 4.61 | 1.34 | 3.45 | 1,013 | 1,524 |
+| `concat` | 10 | 6.8 | 5.30 | 2.15 | 2.46 | 10,013 | 15,024 |
+
+Bundle-like program (`bundle_like.js`, result 125972, same as Node): js2 A 131.2 M, js2 B 128.0 M, QuickJS 136.5 M (B / QuickJS = 0.94); dispatches 907,069 and about 1.49 M. An empty program: js2 4.47 M, QuickJS 1.23 M. About 3.2 M of the difference is the compile (lex, parse, encode) of the prelude at each start.
+
+Finding (verified): `script::load` deletes the `__def` global after the prelude. That puts the global object in dictionary mode. A dictionary shape is never cached, so each `GetGlobal` and `SetGlobal` takes the slow paths (`Table::probe`, `Shapes::find`, `lookup_g`, `get_field_slow`, `set_field_slow`, `get_prop_g`, `get_global_slow`). `loop` scale 1 goes from 531 M (A) to 152 M (B). It is not fixed in this PR (design, question 2).
+
+### Cost of one op
+
+`op_cost CASE 8 N`, instructions for one op with its dispatch, release build of the head of #763, minimum of 3 runs (the 3 runs were equal):
+
+```
+nop              15.0
+mov              26.1
+loadi            26.0
+loadi_wide       37.0
+loadundef        23.0
+addi             53.1
+add              53.1
+add_dbl          58.1
+muli             56.1
+mod              62.1
+modi             62.1
+inc              49.1
+jlti_no          32.1
+jlti_yes         39.1
+jsne_null_no     29.0
+jmpifnot_no      37.0
+jmp              19.0
+getfield         65.1
+setfield         69.1
+getglobal        68.1
+setglobal        74.1
+getctx           57.0
+setctx           57.0
+getelemi        101.1
+getelem         100.1
+newobjlit       181.7
+call0           303.1
+call2           303.1
+callu0          302.1
+closure         208.5
+newobj          115.5
+strictneq        46.1
+```
+
+Pairs: `lt` + `jmpifnot` 80.1, the fused `jgt_no` 37.0, `getglobal` + `jgt` 105.1, `mov` + `mov` 52.1, `inc` + `jmp` 68.0, `getfield` + `getfield` 130.1.
+
+Dispatch (callgrind with `--dump-instr=yes`, then `objdump`): 15 instructions: 12 at the loop head and 3 at the arm tail. Registers: 4 more for each register operand (`fp`, shift, `&stack`, add). In e1af87b1 (the base of #757) the dispatch is 14. The extra one is a store of `words` at the head and a reload at the tail, because `lea r13,[rcx+2]` (the `nextx` of the next word) overwrites `words` in `r13`. This explains the +2.4% of `fib` after #763 with no change in the hot path (verified: per-op cost, base against head: `nop` 14 to 15, `mov` 25 to 26, `addi` 51 to 53, `mod` 56 to 62, `jlti` 29 to 32, `getglobal` 58 to 68, `call` 303 to 303).
+
+Call and return, 303: `Vm::run` 238, `Realm::function` 51, `memcpy` of the record 13.
+
+### Spike, not kept
+
+One local `regs: *mut Value` for the register base (set in `reload!` and after `stack.resize` in `ensure!`; `r!` reads `*regs.add(i)`). Cost of one op, head against spike: `mov` 26 to 23, `loadi` 26 to 23, `loadi_wide` 37 to 32, `addi` 53 to 45, `add` 53 to 44, `muli` 56 to 48, `mod` 62 to 52, `inc` 49 to 42, `jlti_no` 32 to 29, `getglobal` 68 to 64, `setglobal` 74 to 72, `getelem` 100 to 90, `lt` 51 to 44, `getfield`, `getctx`, `setctx`, `jmp`, `closure` unchanged, `call0` 303 to 310. Whole process, scale 10, variant B, M instructions: `loop` 1480.5 to 1356.5 (-8.4%), `loopfn` 640.6 to 556.6 (-13.1%), `calls` 1113.6 to 1054.6 (-5.3%), `fib` 52.2 to 50.9 (-2.5%), `closures` 179.6 to 174.1 (-3.1%), `objects` 855.8 to 825.2 (-3.6%). Tests were not run on the spike.
+
+### Histogram
+
+`op_count` on scale 10 of each row and on the bundle-like program. Mean share of the dispatches over the 10 programs, fusable pairs: `GetGlobal`+`Inc` 4.71, `Inc`+`SetGlobal` 4.71, `GetGlobal`+`JnLtI` 4.20, `SetGlobal`+`JmpBack` 4.19, `JnLtI`+`GetGlobal` 4.19, `SetGlobal`+`GetGlobal` 3.29, `GetGlobal`+`GetGlobal` 3.12, `LoadI`+`Mod` 2.91, `Add`+`LoadI` 2.89, `MulI`+`Add` 2.82. The first seven exist because the `eval_load` programs keep their variables in globals. Bundle-like: `GetField`+`JnLt` 6.0, `Inc`+`JmpBack` 4.5, `LoadAtom`+`Add` 3.0, `Mov`+`GetField` 2.8, `Add`+`Inc` 2.8, `Mov`+`Call` 2.6, `GetField`+`Mov` 2.6, `GetCtx`+`GetField` 2.3, `GetField`+`GetField` 2.2, `JnLt`+`Mov` 2.0. Dispatches removed by fusing the top 8 pairs, with the list of each program alone: `loop` 38.5%, `loopfn` 42.9%, `calls` 37.5%, `fib` 23.1%, `closures` 27.8%, `objects` 28.9%, `webpack` 15.4%, `throws` 31.6%, `concat` 49.9%, bundle-like 21.3%. With 8 pairs and 8 triples: 61.5, 57.1, 56.2, 46.2, 44.4, 39.4, 31.8, 45.6, 59.9, 28.6. The old figure in the design (17.7% for 8 pairs) was for the old compiler.
+
+### Model
+
+Each op costs its measured cost; fusion saves 21 instructions for each removed dispatch (hypothesis); the other steps are the changes in the design (section 5). The model predicts `loop`, `loopfn`, `calls` and `fib` within 2% of the measured totals. Columns after "now / QJS" are js2 / QuickJS, cumulative: the measured per-op change of the spike, then a global cell cache (`GetGlobal` 35, `SetGlobal` 38), then a call path of 173, a 32-bit constant operand and a jump to return, then fusion of 8 pairs and 8 triples (each program with its own list), then 16 and 16.
+
+```
+| Row | scale | js2 now | QuickJS | now / QJS | lean (measured spike deltas) | + global fast path | + call path | + constants, jump-to-ret | + fuse 8+8 | + fuse 16+16 |
+| loop | 1 | 152.1 M | 64.7 M | 2.35 | 2.16 | 1.53 | 1.53 | 1.42 | 0.90 | 0.90 | (fuse8 alone 1.83)
+| loop | 10 | 1480.5 M | 635.3 M | 2.33 | 2.14 | 1.49 | 1.49 | 1.38 | 0.85 | 0.85 | (fuse8 alone 1.80)
+| loopfn | 1 | 68.2 M | 44.1 M | 1.55 | 1.36 | 1.36 | 1.36 | 1.19 | 0.81 | 0.81 | (fuse8 alone 1.16)
+| loopfn | 10 | 640.6 M | 429.3 M | 1.49 | 1.30 | 1.30 | 1.30 | 1.12 | 0.73 | 0.73 | (fuse8 alone 1.10)
+| calls | 1 | 115.5 M | 60.6 M | 1.90 | 1.81 | 1.42 | 1.20 | 1.14 | 0.83 | 0.79 | (fuse8 alone 1.59)
+| calls | 10 | 1113.6 M | 594.3 M | 1.87 | 1.77 | 1.37 | 1.16 | 1.09 | 0.77 | 0.74 | (fuse8 alone 1.56)
+| fib | 1 | 8.8 M | 4.4 M | 2.02 | 2.00 | 1.93 | 1.68 | 1.64 | 1.52 | 1.52 | (fuse8 alone 1.90)
+| fib | 10 | 52.2 M | 35.5 M | 1.47 | 1.43 | 1.34 | 1.00 | 0.94 | 0.78 | 0.78 | (fuse8 alone 1.30)
+| closures | 1 | 22.2 M | 26.1 M | 0.85 | 0.83 | 0.75 | 0.67 | 0.67 | 0.60 | 0.58 | (fuse8 alone 0.79)
+| closures | 10 | 179.6 M | 279.9 M | 0.64 | 0.62 | 0.55 | 0.48 | 0.47 | 0.41 | 0.39 | (fuse8 alone 0.58)
+| objects | 1 | 91.1 M | 53.7 M | 1.70 | 1.65 | 1.48 | 1.39 | 1.37 | 1.25 | 1.22 | (fuse8 alone 1.58)
+| objects | 10 | 855.8 M | 512.4 M | 1.67 | 1.62 | 1.45 | 1.35 | 1.33 | 1.21 | 1.17 | (fuse8 alone 1.55)
+| webpack | 1 | 9.7 M | 5.5 M | 1.78 | 1.78 | 1.77 | 1.76 | 1.76 | 1.76 | 1.75 | (fuse8 alone 1.77)
+| webpack | 10 | 52.1 M | 42.0 M | 1.24 | 1.24 | 1.23 | 1.22 | 1.22 | 1.21 | 1.20 | (fuse8 alone 1.23)
+| throws | 1 | 39.8 M | 88.5 M | 0.45 | 0.43 | 0.37 | 0.37 | 0.37 | 0.33 | 0.32 | (fuse8 alone 0.41)
+| throws | 10 | 356.7 M | 875.0 M | 0.41 | 0.39 | 0.32 | 0.32 | 0.32 | 0.28 | 0.28 | (fuse8 alone 0.37)
+| concat | 1 | 4.6 M | 1.3 M | 3.45 | 3.44 | 3.43 | 3.43 | 3.43 | 3.42 | 3.42 | (fuse8 alone 3.44)
+| concat | 10 | 5.3 M | 2.2 M | 2.46 | 2.45 | 2.37 | 2.37 | 2.37 | 2.31 | 2.31 | (fuse8 alone 2.41)
+| bundle | 1 | 128.0 M | 136.5 M | 0.94 | 0.93 | 0.92 | 0.87 | 0.87 | 0.83 | 0.82 | (fuse8 alone 0.90)
+```
+
+Not tested: arm64; Windows (the counting code is behind a feature and the normal build is unchanged); wall time and branch misses (this entry counts instructions only); a shared fusion list for all programs (the numbers use the list of each program); the model values of steps 3 to 5 of the design (only the `regs` change was built, as a spike); Miri; the cost matrix (js2 is not wired into the browser).
+
+## 2026-11-20: js2 steps 1 to 4 of the superinstruction design (build)
+
+Design: `docs/design-js2-superinstructions.md`, section 5, with the owner decisions of section 10. One PR for each step, in order, each measured before the next. Fusion (step 5) waits for the histogram taken after step 4.
+
+Method of every step. Machine: archMachine, AMD Ryzen 9 5900HX, Linux. Release builds of `script_run` (a separate `CARGO_TARGET_DIR` for each step). Instructions are `instructions:u` of `perf stat`, with `GLIBC_TUNABLES=glibc.malloc.tcache_count=65535` as in `tools/js/instr.sh`, 3 runs of each cell; the table gives the minimum and the spread `(max - min) / min` of the 3 runs. Inputs: the 9 `eval_load` programs at scale 1 and 10 (`eval_load CASE SCALE --source`), run as `script_run --eval FILE EXPECTED`; the bundle-like program (`crates/js2/examples/data/bundle_like.js`); an empty program. QuickJS `quickjs-2026-06-04`, `qjs` with `console.log(String((0, eval)(SRC)))`, same inputs. All program files sit under one short path: the QuickJS count of `throws` depends on the length of the file path (it builds a stack string with it), 85.1 M here against 88.5 M in the S2.9 entry. The gate of S2 is the net slope: instructions at scale 10 minus instructions at scale 1, at or below QuickJS (design question 1).
+
+### Step 1: keep `__def` and hide it
+
+Bug: `script::load` deleted the `__def` global after the prelude. `__def` was the first property added to the global object, so the delete put the object in dictionary mode, and a dictionary shape is never cached (`Shapes::cacheable`). Every `GetGlobal` and `SetGlobal` took the slow path. Fix (owner decision, question 2): the loader keeps the property and sets its value to `undefined` (`Realm::define`; no shape change). The property was already not enumerable. A script sees `typeof __def === "undefined"`, `Object.keys(globalThis)` does not list it, and `var __def = 5` still works. Limit: `"__def" in globalThis` is `true`, and a read of `__def` gives `undefined` where a missing name gives a `ReferenceError`.
+
+Failing test first: `script::tests::load_keeps_the_global_object_in_the_shape_tree` failed on #765 ("the global object is in dictionary mode after load") and passes with the fix. `def_is_hidden_after_load` passes on both.
+
+The "#765" column is the unfixed head of #765 (variant A of the S2.9 entry). Its numbers vary from run to run of one binary (S2.9 entry), so read its `loop`, `calls` and `objects` rows as one sample. The new column is the same as variant B of the S2.9 entry.
+
+| Row | Scale | #765 (M) | new (M) | change | spread new % | QuickJS (M) | new / QuickJS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loop` | 1 | 531.14 | 152.14 | -71.4% | 0.001 | 64.69 | 2.35 |
+| `loop` | 10 | 5270.54 | 1480.54 | -71.9% | 0.000 | 635.29 | 2.33 |
+| `loopfn` | 1 | 68.16 | 68.16 | -0.0% | 0.007 | 44.10 | 1.55 |
+| `loopfn` | 10 | 640.56 | 640.56 | -0.0% | 0.001 | 429.30 | 1.49 |
+| `calls` | 1 | 335.68 | 115.48 | -65.6% | 0.001 | 60.62 | 1.91 |
+| `calls` | 10 | 3405.58 | 1113.58 | -67.3% | 0.000 | 594.33 | 1.87 |
+| `fib` | 1 | 11.66 | 8.84 | -24.2% | 0.029 | 4.37 | 2.02 |
+| `fib` | 10 | 83.42 | 52.17 | -37.5% | 0.006 | 35.54 | 1.47 |
+| `closures` | 1 | 42.98 | 22.21 | -48.3% | 0.005 | 26.11 | 0.85 |
+| `closures` | 10 | 398.65 | 179.62 | -54.9% | 0.001 | 279.90 | 0.64 |
+| `objects` | 1 | 181.11 | 91.11 | -49.7% | 0.003 | 53.72 | 1.70 |
+| `objects` | 10 | 1699.92 | 855.84 | -49.7% | 0.001 | 512.44 | 1.67 |
+| `webpack` | 1 | 10.17 | 9.74 | -4.2% | 0.041 | 5.47 | 1.78 |
+| `webpack` | 10 | 56.40 | 52.06 | -7.7% | 0.014 | 41.97 | 1.24 |
+| `throws` | 1 | 96.43 | 39.76 | -58.8% | 0.013 | 85.11 | 0.47 |
+| `throws` | 10 | 885.79 | 356.74 | -59.7% | 0.000 | 840.93 | 0.42 |
+| `concat` | 1 | 4.76 | 4.61 | -3.1% | 0.159 | 1.34 | 3.45 |
+| `concat` | 10 | 6.80 | 5.30 | -22.0% | 0.043 | 2.15 | 2.47 |
+| `bundle` | 1 | 131.21 | 128.00 | -2.4% | 0.005 | 134.42 | 0.95 |
+| `empty` | 1 | 4.48 | 4.48 | +0.0% | 0.087 | 1.23 | 3.63 |
+
+Net slope (scale 10 minus scale 1), M instructions:
+| Row | #765 | new | change | QuickJS | new / QuickJS | gate (<= 1.00) |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `loop` | 4739.4 | 1328.4 | -72.0% | 570.6 | 2.33 | no |
+| `loopfn` | 572.4 | 572.4 | +0.0% | 385.2 | 1.49 | no |
+| `calls` | 3069.9 | 998.1 | -67.5% | 533.7 | 1.87 | no |
+| `fib` | 71.8 | 43.3 | -39.6% | 31.2 | 1.39 | no |
+| `closures` | 355.7 | 157.4 | -55.7% | 253.8 | 0.62 | yes |
+| `objects` | 1518.8 | 764.7 | -49.6% | 458.7 | 1.67 | no |
+| `webpack` | 46.2 | 42.3 | -8.5% | 36.5 | 1.16 | no |
+| `throws` | 789.4 | 317.0 | -59.8% | 755.8 | 0.42 | yes |
+| `concat` | 2.0 | 0.7 | -66.2% | 0.8 | 0.85 | yes |
+
 ## 2026-11-20: test262 and differential runners for js2 (gate S2 tools)
 
 Two tools for the gate of stage S2 and the check of S3. A new crate `crates/js-diff` (`bare-js-diff`, `publish = false`) holds both engines in one process, so neither engine crate gets a new dependency. It adds no external dependency. Base: PR #763 (`t3/js2-core-builtins`, not merged yet) merged with the newest main. The only change in `bare-js2` is `script::load_with(host, source)`: a host script runs after the prelude and before the script, as its own script, so a test keeps its directive prologue (1 new test).
