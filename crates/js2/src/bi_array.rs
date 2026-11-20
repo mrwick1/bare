@@ -1,14 +1,22 @@
 //! `Array` and the `Array.prototype` methods that do not call a script function (plan step S2.7). `forEach`, `map`, `filter`, `reduce`,
-//! `some`, `every`, `find`, `findIndex` and `sort` call back, so they are in `prelude.js` (see `builtins.rs`).
+//! `some`, `every`, `find`, `findIndex`, `sort` and the others that call back are in `prelude.js` (see `builtins.rs`).
 //!
-//! A method works on an array or an arguments object (an indexed object); any other `this` throws a `TypeError` (the generic
-//! array-like form is a known gap). A hole is read as `undefined`, except in `join` (empty text), `indexOf` and `includes`.
+//! Each method follows the specification: `this` goes through `ToObject`, the length through `ToLength`, and the elements are read
+//! with `get`, `has`, `set` and `delete`, so a method works on an array-like object, on holes that a prototype fills, and on a frozen
+//! object (it throws). The helpers [`get_at`], [`has_at`], [`set_at`] and [`del_at`] take the direct path for an array with plain
+//! elements, so a real array pays one flag test. An accessor property of an array-like is not read here (it needs a call): known gap.
 //! `shift` and `unshift` move all the elements: O(n) each.
+use crate::bi_object::H_SEARCH;
 use crate::builtins::{NativeFn, arg};
-use crate::interp_rt::{ErrKind, R, Realm};
-use crate::object::Obj;
+use crate::interp_rt::{ErrKind, Key, R, Realm};
+use crate::object::{F_ELEMS_FIXED, F_ELEMS_RO, F_LEN_RO, F_NOEXT, F_SLOWIDX, Obj};
 use crate::string::Str;
 use crate::value::Value;
+
+/// The largest length of an array-like (2^53 - 1).
+const MAX_LEN: f64 = 9007199254740991.0;
+/// The flags that stop the direct path to the elements of an array.
+const PLAIN: u32 = F_NOEXT | F_SLOWIDX | F_ELEMS_RO | F_ELEMS_FIXED | F_LEN_RO;
 
 /// A relative index (`slice`, `splice`, `indexOf`): `v` is `ToIntegerOrInfinity`; a negative value counts from `len` when `neg` is true,
 /// else it is 0; the result is at most `len`. `default` stands for `undefined`.
@@ -19,53 +27,171 @@ pub(crate) fn rel_index(rt: &mut Realm, v: Value, default: f64, len: f64, neg: b
     Ok(n.min(len) as usize)
 }
 
+
+/// `ToIntegerOrInfinity` of `v` (`undefined` is `default`).
+fn to_int(rt: &mut Realm, v: Value, default: f64) -> R<f64> {
+    if v.is_undefined() {
+        return Ok(default);
+    }
+    let n = rt.to_number(v)?;
+    Ok(if n.is_nan() { 0.0 } else { n.trunc() + 0.0 })
+}
+
+/// A relative position (`slice`, `fill`, `at`, ...): a negative value counts from `len`; the result is in `0..=len`.
+fn rel(rt: &mut Realm, v: Value, default: f64, len: f64) -> R<f64> {
+    let n = to_int(rt, v, default)?;
+    Ok(if n < 0.0 { (len + n).max(0.0) } else { n.min(len) })
+}
+
+fn this_val(rt: &mut Realm, this: Value) -> R<Value> {
+    if this.is_undefined() || this.is_null() {
+        return rt.type_error("an Array method was called on undefined or null");
+    }
+    Ok(this)
+}
+
+/// The key of the position `i` (a number that is a non-negative integer).
+fn key_at(rt: &mut Realm, i: f64) -> Key {
+    if i < u32::MAX as f64 { Key::Idx(i as u32) } else { Key::Name(rt.intern(&format!("{}", i as u64))) }
+}
+
+/// Can the search methods read the elements of `v` without a call? An array or an arguments object whose elements are all data.
+fn direct(v: Value) -> bool {
+    Realm::obj(v).is_some_and(|o| o.is_indexed() && !o.has_flag(F_SLOWIDX))
+}
+
+/// An array whose elements the helpers may read and write directly.
+fn plain(o: Obj) -> bool {
+    o.is_indexed() && !o.has_flag(PLAIN)
+}
+
+/// `ToLength(Get(v, "length"))`.
+pub(crate) fn len_of(rt: &mut Realm, v: Value) -> R<f64> {
+    if let Some(o) = Realm::obj(v)
+        && rt.is_array(o)
+    {
+        return Ok(o.len() as f64);
+    }
+    let l = rt.get_prop(v, Key::Name(rt.k_length))?;
+    let n = rt.to_number(l)?;
+    Ok(if n.is_nan() || n <= 0.0 { 0.0 } else { n.trunc().min(MAX_LEN) })
+}
+
+pub(crate) fn get_at(rt: &mut Realm, v: Value, i: f64) -> R<Value> {
+    if let Some(o) = Realm::obj(v)
+        && o.is_indexed()
+        && i < u32::MAX as f64
+        && let Some(x) = o.get_element(i as u32)
+    {
+        return Ok(x);
+    }
+    let k = key_at(rt, i);
+    rt.get_prop(v, k)
+}
+
+/// `HasProperty(v, i)`.
+pub(crate) fn has_at(rt: &mut Realm, v: Value, i: f64) -> R<bool> {
+    if let Some(s) = Realm::str_of(v) {
+        return Ok(i < s.len() as f64);
+    }
+    if let Some(o) = Realm::obj(v)
+        && o.is_indexed()
+        && i < u32::MAX as f64
+        && o.get_element(i as u32).is_some()
+    {
+        return Ok(true);
+    }
+    if Realm::obj(v).is_none() {
+        return Ok(false);
+    }
+    let k = key_at(rt, i);
+    rt.has_prop(v, k)
+}
+
+/// `Set(v, i, x, true)`.
+pub(crate) fn set_at(rt: &mut Realm, v: Value, i: f64, x: Value) -> R<()> {
+    if let Some(s) = Realm::str_of(v) {
+        // The `String` object that `ToObject` makes: its index properties are read only.
+        return if i < s.len() as f64 { rt.type_error("cannot assign to a read only property of a string") } else { Ok(()) };
+    }
+    if let Some(o) = Realm::obj(v)
+        && plain(o)
+        && i < u32::MAX as f64 - 1.0
+    {
+        if o.set_element(&mut rt.heap, i as u32, x).is_none() {
+            return Err(rt.error(ErrKind::Range, "invalid array length"));
+        }
+        return Ok(());
+    }
+    let k = key_at(rt, i);
+    rt.set_checked(v, k, x, false)
+}
+
+/// `Set(v, "length", n, true)`.
+fn set_len(rt: &mut Realm, v: Value, n: f64) -> R<()> {
+    if Realm::str_of(v).is_some() {
+        return rt.type_error("cannot assign to a read only property of a string");
+    }
+    if let Some(o) = Realm::obj(v)
+        && rt.is_array(o)
+        && plain(o)
+        && n < u32::MAX as f64
+    {
+        o.set_len(&mut rt.heap, n as u32).expect("memory");
+        return Ok(());
+    }
+    rt.set_checked(v, Key::Name(rt.k_length), Realm::num(n), false)
+}
+
+/// `DeletePropertyOrThrow(v, i)`.
+fn del_at(rt: &mut Realm, v: Value, i: f64) -> R<()> {
+    let k = key_at(rt, i);
+    if rt.delete_prop(v, k)? { Ok(()) } else { rt.type_error("cannot delete a property that is not configurable") }
+}
+
+/// A new array of length 0 with room for `n` elements; a `RangeError` when `n` is not a valid length.
+fn new_arr(rt: &mut Realm, n: f64) -> R<Obj> {
+    if n > u32::MAX as f64 - 1.0 {
+        return Err(rt.error(ErrKind::Range, "invalid array length"));
+    }
+    Ok(Obj::array(&mut rt.heap, &rt.shapes, rt.s_array, &[]).expect("memory"))
+}
+
+/// `CreateDataPropertyOrThrow(a, i, x)` on a fresh array.
+fn put(rt: &mut Realm, a: Obj, i: f64, x: Value) -> R<()> {
+    let k = key_at(rt, i);
+    rt.define(a, k, x)
+}
+
 impl Realm {
     pub(crate) fn install_array(&mut self) {
         let proto = self.array_proto;
-        let c = self.ctor("Array", array_ctor, proto);
-        self.method(c, "isArray", is_array);
-        for (n, f) in [
-            ("push", push as NativeFn),
-            ("pop", pop),
-            ("shift", shift),
-            ("unshift", unshift),
-            ("slice", slice),
-            ("splice", splice),
-            ("concat", concat),
-            ("join", join),
-            ("indexOf", index_of),
-            ("lastIndexOf", last_index_of),
-            ("includes", includes),
-            ("reverse", reverse),
-            ("toString", to_string),
+        let c = self.ctor("Array", 1, array_ctor, proto);
+        self.method(c, "isArray", 1, is_array);
+        for (n, len, f) in [
+            ("at", 1, at as NativeFn),
+            ("concat", 1, concat),
+            ("copyWithin", 2, copy_within),
+            ("fill", 1, fill),
+            ("includes", 1, includes),
+            ("indexOf", 1, index_of),
+            ("join", 1, join),
+            ("lastIndexOf", 1, last_index_of),
+            ("pop", 0, pop),
+            ("push", 1, push),
+            ("reverse", 0, reverse),
+            ("shift", 0, shift),
+            ("slice", 2, slice),
+            ("splice", 2, splice),
+            ("toReversed", 0, to_reversed),
+            ("toSpliced", 2, to_spliced),
+            ("toString", 0, to_string),
+            ("unshift", 1, unshift),
+            ("with", 2, with),
         ] {
-            self.method(proto, n, f);
+            self.method(proto, n, len, f);
         }
     }
-}
-
-fn this_arr(rt: &mut Realm, this: Value) -> R<Obj> {
-    match Realm::obj(this).filter(|o| o.is_indexed()) {
-        Some(o) => Ok(o),
-        None => rt.type_error("an Array method was called on a value that is not an array"),
-    }
-}
-
-fn elems(o: Obj) -> Vec<Value> {
-    (0..o.len()).map(|i| o.get_element(i).unwrap_or(Value::HOLE)).collect()
-}
-
-/// Replace the elements of `o` by `vals`.
-fn set_all(rt: &mut Realm, o: Obj, vals: &[Value]) -> R<()> {
-    o.set_len(&mut rt.heap, 0).expect("memory");
-    for (i, &v) in vals.iter().enumerate() {
-        if v.is_hole() {
-            continue;
-        }
-        o.set_element(&mut rt.heap, i as u32, v).expect("memory");
-    }
-    o.set_len(&mut rt.heap, vals.len() as u32).expect("memory");
-    Ok(())
 }
 
 fn array_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
@@ -90,104 +216,237 @@ fn is_array(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     Ok(Value::bool(Realm::obj(arg(args, 0)).is_some_and(|o| rt.is_array(o))))
 }
 
+fn at(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+    let o = this_val(rt, this)?;
+    let len = len_of(rt, o)?;
+    let n = to_int(rt, arg(args, 0), 0.0)?;
+    let k = if n >= 0.0 { n } else { len + n };
+    if k < 0.0 || k >= len { Ok(Value::UNDEFINED) } else { get_at(rt, o, k) }
+}
+
 fn push(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
-    let o = this_arr(rt, this)?;
-    let mut n = o.len();
-    for &v in args {
-        if n >= u32::MAX - 1 || o.set_element(&mut rt.heap, n, v).is_none() {
-            return Err(rt.error(ErrKind::Range, "invalid array length"));
+    let o = this_val(rt, this)?;
+    // The hot case: an array with plain elements.
+    if let Some(a) = Realm::obj(o)
+        && rt.is_array(a)
+        && plain(a)
+    {
+        let mut n = a.len();
+        for &v in args {
+            if n >= u32::MAX - 1 || a.set_element(&mut rt.heap, n, v).is_none() {
+                return Err(rt.error(ErrKind::Range, "invalid array length"));
+            }
+            n += 1;
         }
-        n += 1;
+        return Ok(Realm::num(n as f64));
     }
-    Ok(Realm::num(n as f64))
+    let len = len_of(rt, o)?;
+    if len + args.len() as f64 > MAX_LEN {
+        return rt.type_error("the length of the array-like would be above 2^53 - 1");
+    }
+    for (j, &v) in args.iter().enumerate() {
+        set_at(rt, o, len + j as f64, v)?;
+    }
+    let n = len + args.len() as f64;
+    set_len(rt, o, n)?;
+    Ok(Realm::num(n))
 }
 
 fn pop(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
-    let o = this_arr(rt, this)?;
-    let n = o.len();
-    if n == 0 {
+    let o = this_val(rt, this)?;
+    let len = len_of(rt, o)?;
+    if len == 0.0 {
+        set_len(rt, o, 0.0)?;
         return Ok(Value::UNDEFINED);
     }
-    let v = o.get_element(n - 1).unwrap_or(Value::UNDEFINED);
-    o.set_len(&mut rt.heap, n - 1).expect("memory");
+    let v = get_at(rt, o, len - 1.0)?;
+    del_at(rt, o, len - 1.0)?;
+    set_len(rt, o, len - 1.0)?;
     Ok(v)
 }
 
 fn shift(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
-    let o = this_arr(rt, this)?;
-    let v = elems(o);
-    let Some((first, rest)) = v.split_first() else { return Ok(Value::UNDEFINED) };
-    set_all(rt, o, rest)?;
-    Ok(if first.is_hole() { Value::UNDEFINED } else { *first })
+    let o = this_val(rt, this)?;
+    let len = len_of(rt, o)?;
+    if len == 0.0 {
+        set_len(rt, o, 0.0)?;
+        return Ok(Value::UNDEFINED);
+    }
+    let first = get_at(rt, o, 0.0)?;
+    let mut k = 1.0;
+    while k < len {
+        if has_at(rt, o, k)? {
+            let v = get_at(rt, o, k)?;
+            set_at(rt, o, k - 1.0, v)?;
+        } else {
+            del_at(rt, o, k - 1.0)?;
+        }
+        k += 1.0;
+    }
+    del_at(rt, o, len - 1.0)?;
+    set_len(rt, o, len - 1.0)?;
+    Ok(first)
 }
 
 fn unshift(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
-    let o = this_arr(rt, this)?;
-    let all = [args, &elems(o)].concat();
-    set_all(rt, o, &all)?;
-    Ok(Realm::num(all.len() as f64))
+    let o = this_val(rt, this)?;
+    let len = len_of(rt, o)?;
+    let n = args.len() as f64;
+    if n > 0.0 {
+        if len + n > MAX_LEN {
+            return rt.type_error("the length of the array-like would be above 2^53 - 1");
+        }
+        let mut k = len;
+        while k > 0.0 {
+            if has_at(rt, o, k - 1.0)? {
+                let v = get_at(rt, o, k - 1.0)?;
+                set_at(rt, o, k + n - 1.0, v)?;
+            } else {
+                del_at(rt, o, k + n - 1.0)?;
+            }
+            k -= 1.0;
+        }
+        for (j, &v) in args.iter().enumerate() {
+            set_at(rt, o, j as f64, v)?;
+        }
+    }
+    set_len(rt, o, len + n)?;
+    Ok(Realm::num(len + n))
 }
 
 fn slice(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
-    let o = this_arr(rt, this)?;
-    let len = o.len() as f64;
-    let a = rel_index(rt, arg(args, 0), 0.0, len, true)?;
-    let b = rel_index(rt, arg(args, 1), len, len, true)?;
-    let v = elems(o);
-    Ok(rt.new_array(if a < b { &v[a..b] } else { &[] }))
+    let o = this_val(rt, this)?;
+    let len = len_of(rt, o)?;
+    let (mut k, fin) = (rel(rt, arg(args, 0), 0.0, len)?, rel(rt, arg(args, 1), len, len)?);
+    let a = new_arr(rt, (fin - k).max(0.0))?;
+    let mut n = 0.0;
+    while k < fin {
+        if has_at(rt, o, k)? {
+            let v = get_at(rt, o, k)?;
+            put(rt, a, n, v)?;
+        }
+        k += 1.0;
+        n += 1.0;
+    }
+    a.set_len(&mut rt.heap, n as u32).expect("memory");
+    Ok(a.value())
 }
 
 fn splice(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
-    let o = this_arr(rt, this)?;
-    let len = o.len() as f64;
-    let a = rel_index(rt, arg(args, 0), 0.0, len, true)?;
+    let o = this_val(rt, this)?;
+    let len = len_of(rt, o)?;
+    let start = rel(rt, arg(args, 0), 0.0, len)?;
+    let items = args.get(2..).unwrap_or(&[]);
     let count = match args.len() {
-        0 => 0,
-        1 => o.len() as usize - a,
-        _ => {
-            let n = rt.to_number(args[1])?;
-            let n = if n.is_nan() { 0.0 } else { n.trunc() };
-            n.max(0.0).min(len - a as f64) as usize
-        }
+        0 => 0.0,
+        1 => len - start,
+        _ => to_int(rt, args[1], 0.0)?.max(0.0).min(len - start),
     };
-    let mut v = elems(o);
-    let removed: Vec<Value> = v.splice(a..a + count, args.iter().skip(2).copied()).collect();
-    set_all(rt, o, &v)?;
-    Ok(rt.new_array(&removed))
+    let n = items.len() as f64;
+    if len + n - count > MAX_LEN {
+        return rt.type_error("the length of the array-like would be above 2^53 - 1");
+    }
+    let a = new_arr(rt, count)?;
+    let mut k = 0.0;
+    while k < count {
+        if has_at(rt, o, start + k)? {
+            let v = get_at(rt, o, start + k)?;
+            put(rt, a, k, v)?;
+        }
+        k += 1.0;
+    }
+    a.set_len(&mut rt.heap, count as u32).expect("memory");
+    if n < count {
+        let mut k = start;
+        while k < len - count {
+            if has_at(rt, o, k + count)? {
+                let v = get_at(rt, o, k + count)?;
+                set_at(rt, o, k + n, v)?;
+            } else {
+                del_at(rt, o, k + n)?;
+            }
+            k += 1.0;
+        }
+        let mut k = len;
+        while k > len - count + n {
+            del_at(rt, o, k - 1.0)?;
+            k -= 1.0;
+        }
+    } else if n > count {
+        let mut k = len - count;
+        while k > start {
+            if has_at(rt, o, k + count - 1.0)? {
+                let v = get_at(rt, o, k + count - 1.0)?;
+                set_at(rt, o, k + n - 1.0, v)?;
+            } else {
+                del_at(rt, o, k + n - 1.0)?;
+            }
+            k -= 1.0;
+        }
+    }
+    for (j, &v) in items.iter().enumerate() {
+        set_at(rt, o, start + j as f64, v)?;
+    }
+    set_len(rt, o, len - count + n)?;
+    Ok(a.value())
 }
 
 fn concat(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
-    let o = this_arr(rt, this)?;
-    let mut v = elems(o);
-    for &a in args {
-        match Realm::obj(a).filter(|x| rt.is_array(*x)) {
-            Some(x) => v.extend(elems(x)),
-            None => v.push(a),
+    let o = this_val(rt, this)?;
+    let a = new_arr(rt, 0.0)?;
+    let mut n = 0.0;
+    for e in std::iter::once(o).chain(args.iter().copied()) {
+        if Realm::obj(e).is_some_and(|x| rt.is_array(x)) {
+            let len = len_of(rt, e)?;
+            if n + len > MAX_LEN {
+                return rt.type_error("the length of the result would be above 2^53 - 1");
+            }
+            let mut k = 0.0;
+            while k < len {
+                if has_at(rt, e, k)? {
+                    let v = get_at(rt, e, k)?;
+                    put(rt, a, n, v)?;
+                }
+                k += 1.0;
+                n += 1.0;
+            }
+        } else {
+            if n >= MAX_LEN {
+                return rt.type_error("the length of the result would be above 2^53 - 1");
+            }
+            put(rt, a, n, e)?;
+            n += 1.0;
         }
     }
-    Ok(rt.new_array(&v))
+    if n > u32::MAX as f64 - 1.0 {
+        return Err(rt.error(ErrKind::Range, "invalid array length"));
+    }
+    a.set_len(&mut rt.heap, n as u32).expect("memory");
+    Ok(a.value())
 }
 
-fn join_with(rt: &mut Realm, o: Obj, sep: &[u16]) -> R<Value> {
+fn join_with(rt: &mut Realm, o: Value, sep: &[u16]) -> R<Value> {
+    let len = len_of(rt, o)?;
     let mut out: Vec<u16> = Vec::new();
-    for i in 0..o.len() {
-        if i > 0 {
+    let mut k = 0.0;
+    while k < len {
+        if k > 0.0 {
             out.extend(sep);
         }
-        match o.get_element(i) {
-            None => {}
-            Some(v) if v.is_undefined() || v.is_null() => {}
-            Some(v) => {
-                let s: Str = rt.to_str(v)?;
-                rt.push_units(&mut out, s);
-            }
+        let v = get_at(rt, o, k)?;
+        if !v.is_undefined() && !v.is_null() {
+            let s: Str = rt.to_str(v)?;
+            rt.push_units(&mut out, s);
         }
+        k += 1.0;
     }
     Ok(rt.make_units(&out))
 }
 
 fn join(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
-    let o = this_arr(rt, this)?;
+    let o = this_val(rt, this)?;
+    let len = len_of(rt, o)?;
+    let _ = len;
     let sep = if arg(args, 0).is_undefined() {
         vec![b',' as u16]
     } else {
@@ -197,64 +456,226 @@ fn join(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     join_with(rt, o, &sep)
 }
 
+/// `Array.prototype.toString`: `this.join()` when `join` is a function, else `Object.prototype.toString`.
 fn to_string(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
-    match Realm::obj(this).filter(|o| o.is_indexed()) {
-        Some(o) => join_with(rt, o, &[b',' as u16]),
-        None => crate::builtins::object_to_string(rt, this, &[]),
+    let o = this_val(rt, this)?;
+    let j = rt.get_named(o, "join")?;
+    if Realm::obj(j).is_some_and(|f| f.is_callable()) {
+        if rt.native_id(j).is_some_and(|id| rt.natives[id].f as usize == join as NativeFn as usize) {
+            return join_with(rt, o, &[b',' as u16]);
+        }
+        rt.tail_args.clear();
+        rt.tail = Some((j, o));
+        return Ok(Value::UNDEFINED);
     }
+    crate::bi_object::object_to_string(rt, this, &[])
 }
 
 fn index_of(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
-    let o = this_arr(rt, this)?;
-    let len = o.len() as f64;
-    let from = rel_index(rt, arg(args, 1), 0.0, len, true)?;
-    for i in from..o.len() as usize {
-        if let Some(v) = o.get_element(i as u32)
-            && rt.strict_eq(v, arg(args, 0))
-        {
-            return Ok(Value::int(i as i32));
+    let o = this_val(rt, this)?;
+    if !direct(o) {
+        return rt.helper(H_SEARCH, &[Value::int(0), o, arg(args, 0), arg(args, 1), Value::bool(args.len() > 1)]);
+    }
+    let len = len_of(rt, o)?;
+    if len == 0.0 {
+        return Ok(Value::int(-1));
+    }
+    let n = to_int(rt, arg(args, 1), 0.0)?;
+    if n == f64::INFINITY {
+        return Ok(Value::int(-1));
+    }
+    let mut k = if n >= 0.0 { n } else { (len + n).max(0.0) };
+    while k < len {
+        if has_at(rt, o, k)? {
+            let v = get_at(rt, o, k)?;
+            if rt.strict_eq(v, arg(args, 0)) {
+                return Ok(Realm::num(k));
+            }
         }
+        k += 1.0;
     }
     Ok(Value::int(-1))
 }
 
 fn last_index_of(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
-    let o = this_arr(rt, this)?;
-    if o.is_empty() {
+    let o = this_val(rt, this)?;
+    if !direct(o) {
+        return rt.helper(H_SEARCH, &[Value::int(1), o, arg(args, 0), arg(args, 1), Value::bool(args.len() > 1)]);
+    }
+    let len = len_of(rt, o)?;
+    if len == 0.0 {
         return Ok(Value::int(-1));
     }
-    let len = o.len() as f64;
-    let from = if args.len() > 1 { rel_index(rt, args[1], len - 1.0, len - 1.0, true)? } else { o.len() as usize - 1 };
-    for i in (0..=from.min(o.len() as usize - 1)).rev() {
-        if let Some(v) = o.get_element(i as u32)
-            && rt.strict_eq(v, arg(args, 0))
-        {
-            return Ok(Value::int(i as i32));
+    let n = if args.len() > 1 { to_int(rt, args[1], 0.0)? } else { len - 1.0 };
+    if n == f64::NEG_INFINITY {
+        return Ok(Value::int(-1));
+    }
+    let mut k = if n >= 0.0 { n.min(len - 1.0) } else { len + n };
+    while k >= 0.0 {
+        if has_at(rt, o, k)? {
+            let v = get_at(rt, o, k)?;
+            if rt.strict_eq(v, arg(args, 0)) {
+                return Ok(Realm::num(k));
+            }
         }
+        k -= 1.0;
     }
     Ok(Value::int(-1))
 }
 
 fn includes(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
-    let o = this_arr(rt, this)?;
-    let len = o.len() as f64;
-    let from = rel_index(rt, arg(args, 1), 0.0, len, true)?;
+    let o = this_val(rt, this)?;
+    if !direct(o) {
+        return rt.helper(H_SEARCH, &[Value::int(2), o, arg(args, 0), arg(args, 1), Value::bool(args.len() > 1)]);
+    }
+    let len = len_of(rt, o)?;
+    if len == 0.0 {
+        return Ok(Value::FALSE);
+    }
+    let n = to_int(rt, arg(args, 1), 0.0)?;
+    if n == f64::INFINITY {
+        return Ok(Value::FALSE);
+    }
     let x = arg(args, 0);
     let nan = x.as_f64().is_some_and(f64::is_nan);
-    for i in from..o.len() as usize {
+    let mut k = if n >= 0.0 { n } else { (len + n).max(0.0) };
+    while k < len {
         // `includes` reads a hole as `undefined` and counts `NaN` as equal to itself.
-        let v = o.get_element(i as u32).unwrap_or(Value::UNDEFINED);
+        let v = get_at(rt, o, k)?;
         if rt.strict_eq(v, x) || (nan && v.as_f64().is_some_and(f64::is_nan)) {
             return Ok(Value::TRUE);
         }
+        k += 1.0;
     }
     Ok(Value::FALSE)
 }
 
 fn reverse(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
-    let o = this_arr(rt, this)?;
-    let mut v = elems(o);
+    let o = this_val(rt, this)?;
+    let len = len_of(rt, o)?;
+    let mid = (len / 2.0).floor();
+    let mut lo = 0.0;
+    while lo != mid {
+        let hi = len - lo - 1.0;
+        let (le, he) = (has_at(rt, o, lo)?, has_at(rt, o, hi)?);
+        let lv = if le { get_at(rt, o, lo)? } else { Value::UNDEFINED };
+        let hv = if he { get_at(rt, o, hi)? } else { Value::UNDEFINED };
+        match (le, he) {
+            (true, true) => {
+                set_at(rt, o, lo, hv)?;
+                set_at(rt, o, hi, lv)?;
+            }
+            (false, true) => {
+                set_at(rt, o, lo, hv)?;
+                del_at(rt, o, hi)?;
+            }
+            (true, false) => {
+                del_at(rt, o, lo)?;
+                set_at(rt, o, hi, lv)?;
+            }
+            (false, false) => {}
+        }
+        lo += 1.0;
+    }
+    Ok(o)
+}
+
+fn fill(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+    let o = this_val(rt, this)?;
+    let len = len_of(rt, o)?;
+    let (mut k, fin) = (rel(rt, arg(args, 1), 0.0, len)?, rel(rt, arg(args, 2), len, len)?);
+    while k < fin {
+        set_at(rt, o, k, arg(args, 0))?;
+        k += 1.0;
+    }
+    Ok(o)
+}
+
+fn copy_within(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+    let o = this_val(rt, this)?;
+    let len = len_of(rt, o)?;
+    let (mut to, mut from) = (rel(rt, arg(args, 0), 0.0, len)?, rel(rt, arg(args, 1), 0.0, len)?);
+    let fin = rel(rt, arg(args, 2), len, len)?;
+    let mut count = (fin - from).min(len - to);
+    let dir = if from < to && to < from + count {
+        from += count - 1.0;
+        to += count - 1.0;
+        -1.0
+    } else {
+        1.0
+    };
+    while count > 0.0 {
+        if has_at(rt, o, from)? {
+            let v = get_at(rt, o, from)?;
+            set_at(rt, o, to, v)?;
+        } else {
+            del_at(rt, o, to)?;
+        }
+        from += dir;
+        to += dir;
+        count -= 1.0;
+    }
+    Ok(o)
+}
+
+/// The elements of an array-like as values, a hole as `undefined` (the `toX` copies).
+fn read_all(rt: &mut Realm, o: Value, len: f64) -> R<Vec<Value>> {
+    if len > u32::MAX as f64 - 1.0 {
+        return Err(rt.error(ErrKind::Range, "invalid array length"));
+    }
+    let mut v = Vec::with_capacity(len as usize);
+    let mut k = 0.0;
+    while k < len {
+        v.push(get_at(rt, o, k)?);
+        k += 1.0;
+    }
+    Ok(v)
+}
+
+fn to_reversed(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
+    let o = this_val(rt, this)?;
+    let len = len_of(rt, o)?;
+    let mut v = read_all(rt, o, len)?;
     v.reverse();
-    set_all(rt, o, &v)?;
-    Ok(this)
+    Ok(rt.new_array(&v))
+}
+
+fn to_spliced(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+    let o = this_val(rt, this)?;
+    let len = len_of(rt, o)?;
+    let start = rel(rt, arg(args, 0), 0.0, len)?;
+    let skip = match args.len() {
+        0 => 0.0,
+        1 => len - start,
+        _ => to_int(rt, args[1], 0.0)?.max(0.0).min(len - start),
+    };
+    let items = args.get(2..).unwrap_or(&[]);
+    let new_len = len + items.len() as f64 - skip;
+    if new_len > MAX_LEN {
+        return rt.type_error("the length of the result would be above 2^53 - 1");
+    }
+    if new_len > u32::MAX as f64 - 1.0 {
+        return Err(rt.error(ErrKind::Range, "invalid array length"));
+    }
+    let mut v = read_all(rt, o, start)?;
+    v.extend_from_slice(items);
+    let mut k = start + skip;
+    while k < len {
+        v.push(get_at(rt, o, k)?);
+        k += 1.0;
+    }
+    Ok(rt.new_array(&v))
+}
+
+fn with(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+    let o = this_val(rt, this)?;
+    let len = len_of(rt, o)?;
+    let n = to_int(rt, arg(args, 0), 0.0)?;
+    let at = if n >= 0.0 { n } else { len + n };
+    if at >= len || at < 0.0 {
+        return Err(rt.error(ErrKind::Range, "invalid index"));
+    }
+    let mut v = read_all(rt, o, len)?;
+    v[at as usize] = arg(args, 1);
+    Ok(rt.new_array(&v))
 }
