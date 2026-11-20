@@ -15962,3 +15962,54 @@ Each op costs its measured cost; fusion saves 21 instructions for each removed d
 ```
 
 Not tested: arm64; Windows (the counting code is behind a feature and the normal build is unchanged); wall time and branch misses (this entry counts instructions only); a shared fusion list for all programs (the numbers use the list of each program); the model values of steps 3 to 5 of the design (only the `regs` change was built, as a spike); Miri; the cost matrix (js2 is not wired into the browser).
+
+## 2026-11-20: js2 steps 1 to 4 of the superinstruction design (build)
+
+Design: `docs/design-js2-superinstructions.md`, section 5, with the owner decisions of section 10. One PR for each step, in order, each measured before the next. Fusion (step 5) waits for the histogram taken after step 4.
+
+Method of every step. Machine: archMachine, AMD Ryzen 9 5900HX, Linux. Release builds of `script_run` (a separate `CARGO_TARGET_DIR` for each step). Instructions are `instructions:u` of `perf stat`, with `GLIBC_TUNABLES=glibc.malloc.tcache_count=65535` as in `tools/js/instr.sh`, 3 runs of each cell; the table gives the minimum and the spread `(max - min) / min` of the 3 runs. Inputs: the 9 `eval_load` programs at scale 1 and 10 (`eval_load CASE SCALE --source`), run as `script_run --eval FILE EXPECTED`; the bundle-like program (`crates/js2/examples/data/bundle_like.js`); an empty program. QuickJS `quickjs-2026-06-04`, `qjs` with `console.log(String((0, eval)(SRC)))`, same inputs. All program files sit under one short path: the QuickJS count of `throws` depends on the length of the file path (it builds a stack string with it), 85.1 M here against 88.5 M in the S2.9 entry. The gate of S2 is the net slope: instructions at scale 10 minus instructions at scale 1, at or below QuickJS (design question 1).
+
+### Step 1: keep `__def` and hide it
+
+Bug: `script::load` deleted the `__def` global after the prelude. `__def` was the first property added to the global object, so the delete put the object in dictionary mode, and a dictionary shape is never cached (`Shapes::cacheable`). Every `GetGlobal` and `SetGlobal` took the slow path. Fix (owner decision, question 2): the loader keeps the property and sets its value to `undefined` (`Realm::define`; no shape change). The property was already not enumerable. A script sees `typeof __def === "undefined"`, `Object.keys(globalThis)` does not list it, and `var __def = 5` still works. Limit: `"__def" in globalThis` is `true`, and a read of `__def` gives `undefined` where a missing name gives a `ReferenceError`.
+
+Failing test first: `script::tests::load_keeps_the_global_object_in_the_shape_tree` failed on #765 ("the global object is in dictionary mode after load") and passes with the fix. `def_is_hidden_after_load` passes on both.
+
+The "#765" column is the unfixed head of #765 (variant A of the S2.9 entry). Its numbers vary from run to run of one binary (S2.9 entry), so read its `loop`, `calls` and `objects` rows as one sample. The new column is the same as variant B of the S2.9 entry.
+
+| Row | Scale | #765 (M) | new (M) | change | spread new % | QuickJS (M) | new / QuickJS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loop` | 1 | 531.14 | 152.14 | -71.4% | 0.001 | 64.69 | 2.35 |
+| `loop` | 10 | 5270.54 | 1480.54 | -71.9% | 0.000 | 635.29 | 2.33 |
+| `loopfn` | 1 | 68.16 | 68.16 | -0.0% | 0.007 | 44.10 | 1.55 |
+| `loopfn` | 10 | 640.56 | 640.56 | -0.0% | 0.001 | 429.30 | 1.49 |
+| `calls` | 1 | 335.68 | 115.48 | -65.6% | 0.001 | 60.62 | 1.91 |
+| `calls` | 10 | 3405.58 | 1113.58 | -67.3% | 0.000 | 594.33 | 1.87 |
+| `fib` | 1 | 11.66 | 8.84 | -24.2% | 0.029 | 4.37 | 2.02 |
+| `fib` | 10 | 83.42 | 52.17 | -37.5% | 0.006 | 35.54 | 1.47 |
+| `closures` | 1 | 42.98 | 22.21 | -48.3% | 0.005 | 26.11 | 0.85 |
+| `closures` | 10 | 398.65 | 179.62 | -54.9% | 0.001 | 279.90 | 0.64 |
+| `objects` | 1 | 181.11 | 91.11 | -49.7% | 0.003 | 53.72 | 1.70 |
+| `objects` | 10 | 1699.92 | 855.84 | -49.7% | 0.001 | 512.44 | 1.67 |
+| `webpack` | 1 | 10.17 | 9.74 | -4.2% | 0.041 | 5.47 | 1.78 |
+| `webpack` | 10 | 56.40 | 52.06 | -7.7% | 0.014 | 41.97 | 1.24 |
+| `throws` | 1 | 96.43 | 39.76 | -58.8% | 0.013 | 85.11 | 0.47 |
+| `throws` | 10 | 885.79 | 356.74 | -59.7% | 0.000 | 840.93 | 0.42 |
+| `concat` | 1 | 4.76 | 4.61 | -3.1% | 0.159 | 1.34 | 3.45 |
+| `concat` | 10 | 6.80 | 5.30 | -22.0% | 0.043 | 2.15 | 2.47 |
+| `bundle` | 1 | 131.21 | 128.00 | -2.4% | 0.005 | 134.42 | 0.95 |
+| `empty` | 1 | 4.48 | 4.48 | +0.0% | 0.087 | 1.23 | 3.63 |
+
+Net slope (scale 10 minus scale 1), M instructions:
+| Row | #765 | new | change | QuickJS | new / QuickJS | gate (<= 1.00) |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `loop` | 4739.4 | 1328.4 | -72.0% | 570.6 | 2.33 | no |
+| `loopfn` | 572.4 | 572.4 | +0.0% | 385.2 | 1.49 | no |
+| `calls` | 3069.9 | 998.1 | -67.5% | 533.7 | 1.87 | no |
+| `fib` | 71.8 | 43.3 | -39.6% | 31.2 | 1.39 | no |
+| `closures` | 355.7 | 157.4 | -55.7% | 253.8 | 0.62 | yes |
+| `objects` | 1518.8 | 764.7 | -49.6% | 458.7 | 1.67 | no |
+| `webpack` | 46.2 | 42.3 | -8.5% | 36.5 | 1.16 | no |
+| `throws` | 789.4 | 317.0 | -59.8% | 755.8 | 0.42 | yes |
+| `concat` | 2.0 | 0.7 | -66.2% | 0.8 | 0.85 | yes |
+
