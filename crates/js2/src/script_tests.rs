@@ -681,3 +681,16 @@ fn def_is_hidden_after_load() {
         ("var __def = 5; var r = __def;", "r", "5"),
     ]);
 }
+
+/// `Vm::run` keeps the base of the registers in a pointer (`regs`). The stack is a `Vec` that a deep call chain reallocates (it starts
+/// with 256 words), so the pointer must be set again after each growth. Each caller below has live registers before and after the call
+/// that grows the stack, and reads `this` and the arguments from registers right after it.
+#[test]
+fn a_stack_that_grows_in_a_callee_keeps_the_registers_of_the_callers() {
+    check(&[
+        ("function sum(n) { var a = n, b = 2 * n; if (n == 0) return 0; var r = sum(n - 1); return r + a + b; } var r = sum(200);", "r", "60300"),
+        ("function C(n) { this.n = n; this.k = n == 0 ? 0 : new C(n - 1).k + n; } var r = new C(200).k;", "r", "20100"),
+        ("var o = { f: function (n, acc) { var t = this; if (n == 0) return acc; return t.f(n - 1, acc + n); } }; var r = o.f(200, 0);", "r", "20100"),
+        ("function f(n, ...rest) { var x = n * 2; if (n == 0) return rest.length; var y = f(n - 1, n, n); return y + x - 2 * n; } var r = f(200);", "r", "2"),
+    ]);
+}

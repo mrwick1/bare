@@ -274,10 +274,16 @@ impl Vm {
         }
         let mut pc: usize = 0;
         let undef = Value::UNDEFINED;
+        // Register 0 of the current frame: `stack.as_mut_ptr().add(fp)`. Each time `fp` changes (`reload!`) or the stack is reallocated
+        // (`ensure!`, and any native that could re-enter the VM) it must be set again; a stale `regs` is a use after free.
+        // SAFETY: `fp` is in the stack: `Vm::call` and `enter!` make it hold `fp + nregs` words.
+        let mut regs: *mut Value = unsafe { stack.as_mut_ptr().add(fp) };
 
         // Make the locals of the frame `(ci, fp)`.
         macro_rules! reload {
             () => {{
+                // SAFETY: as above, the frame `fp` is inside the stack.
+                regs = unsafe { stack.as_mut_ptr().add(fp) };
                 code = &prog.codes[ci];
                 words = &code.words;
                 fb = &mut fbs[ci];
@@ -287,10 +293,10 @@ impl Vm {
             }};
         }
         // SAFETY (`r!` and `word!`): `verify` bounds every register by `nregs` and every pc by the code, and a call or `Vm::call` makes
-        // the stack hold `fp + nregs` words (`need` in `call!`). `stack` is not resized inside an op that reads a register after it.
+        // the stack hold `fp + nregs` words (`need` in `call!`). `regs` is the base of the frame (see its declaration).
         macro_rules! r {
             ($i:expr) => {
-                (*unsafe { &mut *stack.as_mut_ptr().add(fp + ($i as usize)) })
+                (*unsafe { &mut *regs.add($i as usize) })
             };
         }
         macro_rules! word {
@@ -517,6 +523,8 @@ impl Vm {
                     }
                     let grown = need.max(2 * stack.len()).min(MAX_STACK + 8);
                     stack.resize(grown, undef);
+                    // SAFETY: the stack was reallocated; the frame `fp` is inside it.
+                    regs = unsafe { stack.as_mut_ptr().add(fp) };
                 }
             }};
         }
@@ -695,8 +703,8 @@ impl Vm {
                 macro_rules! sc { () => { ($sc) } }
                 macro_rules! sj { () => { ($sj) } }
                 let next: usize = pc + $n;
-                let nextx: usize = next + 1;
-                let _ = nextx;
+                // The word after the extra word. A macro, not a variable: only the ops with an extra word compute it.
+                macro_rules! nextx { () => { (next + 1) } }
                 // SAFETY: `verify` accepted the code, and it rejects a byte that is no opcode; the loop reaches only the first word of
                 // an instruction (the start of the code, or a verified jump target, or the word after an instruction).
                 let opv: Op = unsafe { std::mem::transmute::<u8, Op>($op) };
@@ -756,7 +764,7 @@ impl Vm {
                         let v = ctx_hops!(b!()).get(1 + c!());
                         tdz!(v, $x);
                         r!(a!()) = v;
-                        pc = nextx;
+                        pc = nextx!();
                     }
                     Op::SetCtx => {
                         ctx_hops!(b!()).set(1 + c!(), r!(a!()));
@@ -766,7 +774,7 @@ impl Vm {
                         let cx = ctx_hops!(b!());
                         tdz!(cx.get(1 + c!()), $x);
                         cx.set(1 + c!(), r!(a!()));
-                        pc = nextx;
+                        pc = nextx!();
                     }
                     Op::InitCtx => {
                         ctx_hops!(b!()).set(1 + c!(), r!(a!()));
@@ -774,7 +782,7 @@ impl Vm {
                     }
                     Op::GetCtxField => {
                         let v = ctx_hops!(b!()).get(1 + c!());
-                        get_field!(a!(), v, $x as usize, nextx);
+                        get_field!(a!(), v, $x as usize, nextx!());
                     }
                     Op::PushCtx => {
                         gate!();
@@ -1128,46 +1136,46 @@ impl Vm {
                     Op::JmpIfNot => jump!(!Realm::truthy(r!(a!())), next, sbx!()),
                     Op::JmpNullish => jump!(r!(a!()).is_undefined() || r!(a!()).is_null(), next, sbx!()),
                     Op::JmpNotNullish => jump!(!(r!(a!()).is_undefined() || r!(a!()).is_null()), next, sbx!()),
-                    Op::JLt => jump!(cmp!(r!(a!()), r!(b!())) == Some(Ordering::Less), nextx, $x as i32),
-                    Op::JLe => jump!(matches!(cmp!(r!(a!()), r!(b!())), Some(Ordering::Less | Ordering::Equal)), nextx, $x as i32),
-                    Op::JGt => jump!(cmp!(r!(a!()), r!(b!())) == Some(Ordering::Greater), nextx, $x as i32),
-                    Op::JGe => jump!(matches!(cmp!(r!(a!()), r!(b!())), Some(Ordering::Greater | Ordering::Equal)), nextx, $x as i32),
-                    Op::JnLt => jump!(cmp!(r!(a!()), r!(b!())) != Some(Ordering::Less), nextx, $x as i32),
-                    Op::JnLe => jump!(!matches!(cmp!(r!(a!()), r!(b!())), Some(Ordering::Less | Ordering::Equal)), nextx, $x as i32),
-                    Op::JnGt => jump!(cmp!(r!(a!()), r!(b!())) != Some(Ordering::Greater), nextx, $x as i32),
-                    Op::JnGe => jump!(!matches!(cmp!(r!(a!()), r!(b!())), Some(Ordering::Greater | Ordering::Equal)), nextx, $x as i32),
+                    Op::JLt => jump!(cmp!(r!(a!()), r!(b!())) == Some(Ordering::Less), nextx!(), $x as i32),
+                    Op::JLe => jump!(matches!(cmp!(r!(a!()), r!(b!())), Some(Ordering::Less | Ordering::Equal)), nextx!(), $x as i32),
+                    Op::JGt => jump!(cmp!(r!(a!()), r!(b!())) == Some(Ordering::Greater), nextx!(), $x as i32),
+                    Op::JGe => jump!(matches!(cmp!(r!(a!()), r!(b!())), Some(Ordering::Greater | Ordering::Equal)), nextx!(), $x as i32),
+                    Op::JnLt => jump!(cmp!(r!(a!()), r!(b!())) != Some(Ordering::Less), nextx!(), $x as i32),
+                    Op::JnLe => jump!(!matches!(cmp!(r!(a!()), r!(b!())), Some(Ordering::Less | Ordering::Equal)), nextx!(), $x as i32),
+                    Op::JnGt => jump!(cmp!(r!(a!()), r!(b!())) != Some(Ordering::Greater), nextx!(), $x as i32),
+                    Op::JnGe => jump!(!matches!(cmp!(r!(a!()), r!(b!())), Some(Ordering::Greater | Ordering::Equal)), nextx!(), $x as i32),
                     Op::JEq => {
                         let e = tri!(realm.loose_eq(r!(a!()), r!(b!())));
-                        jump!(e, nextx, $x as i32)
+                        jump!(e, nextx!(), $x as i32)
                     }
                     Op::JNe => {
                         let e = tri!(realm.loose_eq(r!(a!()), r!(b!())));
-                        jump!(!e, nextx, $x as i32)
+                        jump!(!e, nextx!(), $x as i32)
                     }
-                    Op::JSEq => jump!(seq!(r!(a!()), r!(b!())), nextx, $x as i32),
-                    Op::JSNe => jump!(!seq!(r!(a!()), r!(b!())), nextx, $x as i32),
-                    Op::JLtI => jump!(cmp!(r!(a!()), Value::int($x as i32)) == Some(Ordering::Less), nextx, sbx!()),
-                    Op::JLeI => jump!(matches!(cmp!(r!(a!()), Value::int($x as i32)), Some(Ordering::Less | Ordering::Equal)), nextx, sbx!()),
-                    Op::JGtI => jump!(cmp!(r!(a!()), Value::int($x as i32)) == Some(Ordering::Greater), nextx, sbx!()),
-                    Op::JGeI => jump!(matches!(cmp!(r!(a!()), Value::int($x as i32)), Some(Ordering::Greater | Ordering::Equal)), nextx, sbx!()),
-                    Op::JnLtI => jump!(cmp!(r!(a!()), Value::int($x as i32)) != Some(Ordering::Less), nextx, sbx!()),
-                    Op::JnLeI => jump!(!matches!(cmp!(r!(a!()), Value::int($x as i32)), Some(Ordering::Less | Ordering::Equal)), nextx, sbx!()),
-                    Op::JnGtI => jump!(cmp!(r!(a!()), Value::int($x as i32)) != Some(Ordering::Greater), nextx, sbx!()),
-                    Op::JnGeI => jump!(!matches!(cmp!(r!(a!()), Value::int($x as i32)), Some(Ordering::Greater | Ordering::Equal)), nextx, sbx!()),
+                    Op::JSEq => jump!(seq!(r!(a!()), r!(b!())), nextx!(), $x as i32),
+                    Op::JSNe => jump!(!seq!(r!(a!()), r!(b!())), nextx!(), $x as i32),
+                    Op::JLtI => jump!(cmp!(r!(a!()), Value::int($x as i32)) == Some(Ordering::Less), nextx!(), sbx!()),
+                    Op::JLeI => jump!(matches!(cmp!(r!(a!()), Value::int($x as i32)), Some(Ordering::Less | Ordering::Equal)), nextx!(), sbx!()),
+                    Op::JGtI => jump!(cmp!(r!(a!()), Value::int($x as i32)) == Some(Ordering::Greater), nextx!(), sbx!()),
+                    Op::JGeI => jump!(matches!(cmp!(r!(a!()), Value::int($x as i32)), Some(Ordering::Greater | Ordering::Equal)), nextx!(), sbx!()),
+                    Op::JnLtI => jump!(cmp!(r!(a!()), Value::int($x as i32)) != Some(Ordering::Less), nextx!(), sbx!()),
+                    Op::JnLeI => jump!(!matches!(cmp!(r!(a!()), Value::int($x as i32)), Some(Ordering::Less | Ordering::Equal)), nextx!(), sbx!()),
+                    Op::JnGtI => jump!(cmp!(r!(a!()), Value::int($x as i32)) != Some(Ordering::Greater), nextx!(), sbx!()),
+                    Op::JnGeI => jump!(!matches!(cmp!(r!(a!()), Value::int($x as i32)), Some(Ordering::Greater | Ordering::Equal)), nextx!(), sbx!()),
                     Op::JEqI => {
                         let e = tri!(realm.loose_eq(r!(a!()), Value::int($x as i32)));
-                        jump!(e, nextx, sbx!())
+                        jump!(e, nextx!(), sbx!())
                     }
                     Op::JNeI => {
                         let e = tri!(realm.loose_eq(r!(a!()), Value::int($x as i32)));
-                        jump!(!e, nextx, sbx!())
+                        jump!(!e, nextx!(), sbx!())
                     }
-                    Op::JSEqI => jump!(seq!(r!(a!()), Value::int($x as i32)), nextx, sbx!()),
-                    Op::JSNeI => jump!(!seq!(r!(a!()), Value::int($x as i32)), nextx, sbx!()),
-                    Op::JSEqA => jump!(seq!(r!(a!()), code.atoms[$x as usize].value()), nextx, sbx!()),
-                    Op::JSNeA => jump!(!seq!(r!(a!()), code.atoms[$x as usize].value()), nextx, sbx!()),
-                    Op::JSEqB => jump!(r!(a!()) == Value::bool($x == 1), nextx, sbx!()),
-                    Op::JSNeB => jump!(r!(a!()) != Value::bool($x == 1), nextx, sbx!()),
+                    Op::JSEqI => jump!(seq!(r!(a!()), Value::int($x as i32)), nextx!(), sbx!()),
+                    Op::JSNeI => jump!(!seq!(r!(a!()), Value::int($x as i32)), nextx!(), sbx!()),
+                    Op::JSEqA => jump!(seq!(r!(a!()), code.atoms[$x as usize].value()), nextx!(), sbx!()),
+                    Op::JSNeA => jump!(!seq!(r!(a!()), code.atoms[$x as usize].value()), nextx!(), sbx!()),
+                    Op::JSEqB => jump!(r!(a!()) == Value::bool($x == 1), nextx!(), sbx!()),
+                    Op::JSNeB => jump!(r!(a!()) != Value::bool($x == 1), nextx!(), sbx!()),
                     Op::JSEqNull => jump!(r!(a!()).is_null(), next, sbx!()),
                     Op::JSNeNull => jump!(!r!(a!()).is_null(), next, sbx!()),
                     Op::JSEqUndef => jump!(r!(a!()).is_undefined(), next, sbx!()),
@@ -1207,9 +1215,9 @@ impl Vm {
                         if (i as u32) < arr.len() {
                             r!(a!()) = arr.get_element(i as u32).unwrap_or(undef);
                             r!(base + 1) = Value::int(i + 1);
-                            pc = nextx;
+                            pc = nextx!();
                         } else {
-                            jump!(true, nextx, sbx!())
+                            jump!(true, nextx!(), sbx!())
                         }
                     }
                     Op::IterClose => pc = next,
@@ -1316,7 +1324,7 @@ impl Vm {
                         gate!();
                         let keys: Vec<Value> = (0..$x as usize).map(|i| r!(c!() + i)).collect();
                         r!(a!()) = tri!(realm.obj_rest(r!(b!()), &keys));
-                        pc = nextx;
+                        pc = nextx!();
                     }
                     Op::SetProto => {
                         gate!();
@@ -1333,14 +1341,14 @@ impl Vm {
                         let n = name!(c!());
                         let o = Realm::obj(r!(a!())).expect("an object");
                         tri!(realm.define_accessor(o, Key::Name(n), r!(b!()), $x & 1 != 0, $x & 2 == 0));
-                        pc = nextx;
+                        pc = nextx!();
                     }
                     Op::DefAccessorElem => {
                         gate!();
                         let o = Realm::obj(r!(a!())).expect("an object");
                         let k = tri!(realm.key_of(r!(b!())));
                         tri!(realm.define_accessor(o, k, r!(c!()), $x & 1 != 0, $x & 2 == 0));
-                        pc = nextx;
+                        pc = nextx!();
                     }
                     Op::DefMethod => {
                         gate!();
@@ -1421,7 +1429,7 @@ impl Vm {
                     Op::DefPrivateAccessor => {
                         gate!();
                         tri!(realm.private_def_accessor(r!(a!()), r!(b!()), r!(c!()), $x == 1));
-                        pc = nextx;
+                        pc = nextx!();
                     }
                     Op::GetSuper => {
                         gate!();
