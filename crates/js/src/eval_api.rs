@@ -119,11 +119,13 @@ impl<'p> Interp<'p> {
         self.api.persistent.len()
     }
 
+    #[inline]
     fn api_push<'s>(&mut self, v: Value) -> bare_js_api::Local<'s> {
         self.api.stack.push(v);
         bare_js_api::Local::from_slot(self.api.stack.len() as u32 - 1)
     }
 
+    #[inline]
     fn api_at(&self, v: bare_js_api::Local<'_>) -> Value {
         self.api.stack[v.slot() as usize]
     }
@@ -137,6 +139,14 @@ impl<'p> Interp<'p> {
         match self.api_at(v) {
             Value::Object(o) => Ok(o),
             _ => Err(self.type_error("not an object")),
+        }
+    }
+
+    /// The result of the old engine as a local, or the error of the interface.
+    fn api_ret<'s>(&mut self, r: Result<Value, Error>) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
+        match r {
+            Ok(v) => Ok(self.api_push(v)),
+            Err(e) => Err(self.api_err(e)),
         }
     }
 
@@ -266,7 +276,8 @@ impl<'p> Interp<'p> {
         })
     }
 
-    /// `call_host` for a realm whose host came through the interface. Kept apart, so the old host path does not change.
+    /// `call_host` for a function of the interface host (`Callee::ApiHost`), or for a realm that has no old host. Kept apart, so the old
+    /// host path does not change.
     #[cold]
     fn call_api_host(&mut self, id: u32, this: Value, args: &[Value], is_new: bool, nt: Option<ObjId>) -> Result<Value, Error> {
         let Some(h) = self.api.host.clone() else { return Err(unsupported("host function without a host", Span::default())) };
@@ -299,13 +310,52 @@ impl<'p> Interp<'p> {
     }
 }
 
+/// The heap's element type of an interface element type. `Data` is no typed array.
+fn api_elem(e: bare_js_api::Elem) -> Option<Elem> {
+    use bare_js_api::Elem as A;
+    Some(match e {
+        A::I8 => Elem::I8,
+        A::U8 => Elem::U8,
+        A::U8C => Elem::U8C,
+        A::I16 => Elem::I16,
+        A::U16 => Elem::U16,
+        A::I32 => Elem::I32,
+        A::U32 => Elem::U32,
+        A::F32 => Elem::F32,
+        A::F64 => Elem::F64,
+        A::BI64 => Elem::BI64,
+        A::BU64 => Elem::BU64,
+        A::Data => return None,
+    })
+}
+
+fn api_elem_of(e: Elem) -> bare_js_api::Elem {
+    use bare_js_api::Elem as A;
+    match e {
+        Elem::I8 => A::I8,
+        Elem::U8 => A::U8,
+        Elem::U8C => A::U8C,
+        Elem::I16 => A::I16,
+        Elem::U16 => A::U16,
+        Elem::I32 => A::I32,
+        Elem::U32 => A::U32,
+        Elem::F32 => A::F32,
+        Elem::F64 => A::F64,
+        Elem::BI64 => A::BI64,
+        Elem::BU64 => A::BU64,
+        Elem::Data => A::Data,
+    }
+}
+
 impl<'p> bare_js_api::Engine for Interp<'p> {
     type Raw = Value;
 
+    #[inline]
     fn stack_len(&self) -> u32 {
         self.api.stack.len() as u32
     }
 
+    #[inline]
     fn stack_truncate(&mut self, len: u32) {
         self.api.stack.truncate(len as usize);
     }
@@ -326,24 +376,30 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
         &self.api.slots
     }
 
+    #[inline]
     fn undefined<'s>(&mut self) -> bare_js_api::Local<'s> {
         self.api_push(Value::Undefined)
     }
 
+    #[inline]
     fn null<'s>(&mut self) -> bare_js_api::Local<'s> {
         self.api_push(Value::Null)
     }
 
+    #[inline]
     fn boolean<'s>(&mut self, b: bool) -> bare_js_api::Local<'s> {
         self.api_push(Value::Bool(b))
     }
 
+    #[inline]
     fn number<'s>(&mut self, n: f64) -> bare_js_api::Local<'s> {
         self.api_push(Value::Number(n))
     }
 
+    #[inline]
     fn string<'s>(&mut self, text: &str) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
-        match self.heap.shared_text(text) {
+        // Below `SHARE_MIN` `shared_text` is `intern_str`: skip the call.
+        match if text.len() <= crate::heap::SHARE_MIN { self.heap.intern_str(text) } else { self.heap.shared_text(text) } {
             Ok(s) => Ok(self.api_push(Value::String(s))),
             Err(e) => {
                 let e = self.herr(e);
@@ -380,6 +436,7 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
         if let Value::Number(n) = self.api_at(v) { Some(n) } else { None }
     }
 
+    #[inline]
     fn as_str(&self, v: bare_js_api::Local<'_>) -> Option<bare_js_api::Str<'_>> {
         let Value::String(s) = self.api_at(v) else { return None };
         self.heap.str_units(s).ok().map(bare_js_api::Str::Utf16)
@@ -421,15 +478,28 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
     }
 
     fn call<'s>(&mut self, f: bare_js_api::Local<'_>, this: bare_js_api::Local<'_>, args: &[bare_js_api::Local<'_>]) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
-        let args: Vec<Value> = args.iter().map(|&a| self.api_at(a)).collect();
-        match Interp::call(self, self.api_at(f), self.api_at(this), &args) {
+        // Up to 8 arguments sit in an array: no allocation for the usual call.
+        let mut buf = [Value::Undefined; 8];
+        let heap_args: Vec<Value>;
+        let argv: &[Value] = if args.len() <= buf.len() {
+            for (d, &a) in buf.iter_mut().zip(args) {
+                *d = self.api_at(a);
+            }
+            &buf[..args.len()]
+        } else {
+            heap_args = args.iter().map(|&a| self.api_at(a)).collect();
+            &heap_args
+        };
+        match Interp::call(self, self.api_at(f), self.api_at(this), argv) {
             Ok(v) => Ok(self.api_push(v)),
             Err(e) => Err(self.api_err(e)),
         }
     }
 
-    fn host_function<'s>(&mut self, name: &str, id: u32, length: u32) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
-        match Interp::host_function(self, id, name, length, false) {
+    fn host_function<'s>(&mut self, name: &str, id: u32, length: u32, kind: bare_js_api::HostFn) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
+        use bare_js_api::HostFn;
+        let (ctor, nt) = (kind != HostFn::Method, kind == HostFn::CtorNewTarget);
+        match self.host_function_with(id, name, length, ctor, nt, true) {
             Ok(o) => Ok(self.api_push(Value::Object(o))),
             Err(e) => Err(self.api_err(e)),
         }
@@ -439,10 +509,12 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
         self.api.host = Some(host);
     }
 
+    #[inline]
     fn raw(&self, v: bare_js_api::Local<'_>) -> Value {
         self.api_at(v)
     }
 
+    #[inline]
     fn raw_local<'s>(&mut self, r: &Value) -> bare_js_api::Local<'s> {
         self.api_push(*r)
     }
@@ -604,6 +676,180 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
         Interp::charge(self, n).map_err(|e| self.api_err(e))
     }
 
+    fn host_key(&self, obj: bare_js_api::Local<'_>) -> Option<u32> {
+        match self.api_at(obj) {
+            Value::Object(o) => self.heap.host_key(o),
+            _ => None,
+        }
+    }
+
+    fn task<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> Result<R, bare_js_api::Abort> {
+        // The closure cannot fail: the only error of `host_scope` is a full call depth.
+        self.host_scope(|it| Ok(f(it))).map_err(|_| bare_js_api::Abort::Limit("call depth"))
+    }
+
+    fn construct<'s>(&mut self, f: bare_js_api::Local<'_>, args: &[bare_js_api::Local<'_>], new_target: Option<bare_js_api::Local<'_>>) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
+        let args: Vec<Value> = args.iter().map(|&a| self.api_at(a)).collect();
+        let r = new_target.map(|n| self.api_obj(n)).transpose().and_then(|nt| self.host_construct(self.api_at(f), &args, nt));
+        self.api_ret(r)
+    }
+
+    fn run_script<'s>(&mut self, source: &str) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
+        let r = Interp::run_script(self, source);
+        self.api_ret(r)
+    }
+
+    fn compile_function<'s>(&mut self, name: &str, params: &str, body: &str) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
+        let r = Interp::compile_function(self, name, params, body).map(Value::Object);
+        self.api_ret(r)
+    }
+
+    fn call_scoped<'s>(&mut self, f: bare_js_api::Local<'_>, this: bare_js_api::Local<'_>, args: &[bare_js_api::Local<'_>], scope: &[bare_js_api::Local<'_>]) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
+        let args: Vec<Value> = args.iter().map(|&a| self.api_at(a)).collect();
+        let r = scope.iter().map(|&l| self.api_obj(l)).collect::<Result<Vec<_>, _>>().and_then(|sc| Interp::call_scoped(self, self.api_at(f), self.api_at(this), &args, &sc));
+        self.api_ret(r)
+    }
+
+    fn eval_global<'s>(&mut self, src: bare_js_api::Local<'_>) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
+        let r = Interp::eval_global(self, self.api_at(src));
+        self.api_ret(r)
+    }
+
+    fn eval_function<'s>(&mut self) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
+        let r = Interp::eval_function(self).map(Value::Object);
+        self.api_ret(r)
+    }
+
+    fn new_array_buffer<'s>(&mut self, bytes: Vec<u8>) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
+        let r = Interp::new_array_buffer(self, bytes);
+        self.api_ret(r)
+    }
+
+    fn new_typed_array<'s>(&mut self, elem: bare_js_api::Elem, bytes: Vec<u8>) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
+        let r = match api_elem(elem) {
+            Some(ty) => Interp::new_typed_array(self, ty, bytes),
+            None => Err(unsupported("a typed array of type Data", Span::default())),
+        };
+        self.api_ret(r)
+    }
+
+    fn bytes(&self, v: bare_js_api::Local<'_>) -> Option<&[u8]> {
+        self.bytes_of(self.api_at(v))
+    }
+
+    fn bytes_mut(&mut self, v: bare_js_api::Local<'_>) -> Option<&mut [u8]> {
+        match self.api_at(v) {
+            Value::Object(o) => self.heap.bytes_mut(o),
+            _ => None,
+        }
+    }
+
+    fn view<'s>(&mut self, v: bare_js_api::Local<'_>) -> Option<bare_js_api::View<'s>> {
+        let Value::Object(o) = self.api_at(v) else { return None };
+        let (buffer, offset, len) = self.heap.view_parts(o)?;
+        let elem = api_elem_of(self.heap.view_type(o)?);
+        let buffer = self.api_push(Value::Object(buffer));
+        Some(bare_js_api::View { buffer, offset, len, elem })
+    }
+
+    fn is_detached(&self, v: bare_js_api::Local<'_>) -> bool {
+        matches!(self.api_at(v), Value::Object(o) if self.heap.buffer_detached(o) || self.heap.view_detached(o))
+    }
+
+    fn view_get(&self, v: bare_js_api::Local<'_>, i: usize) -> Option<f64> {
+        match self.api_at(v) {
+            Value::Object(o) => self.heap.view_load(o, i),
+            _ => None,
+        }
+    }
+
+    fn bigint_limbs(&self, v: bare_js_api::Local<'_>) -> usize {
+        self.heap.bigint_limbs(self.api_at(v))
+    }
+
+    fn new_host_indexed<'s>(&mut self, proto: Option<bare_js_api::Local<'_>>, key: u32) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
+        let r = proto.map(|p| self.api_obj(p)).transpose().and_then(|p| Ok(Value::Object(h!(self, self.heap.new_indexed(p, key)))));
+        self.api_ret(r)
+    }
+
+    fn new_host_named<'s>(&mut self, proto: Option<bare_js_api::Local<'_>>, key: u32, open: bool) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
+        let r = proto.map(|p| self.api_obj(p)).transpose().and_then(|p| Ok(Value::Object(h!(self, if open { self.heap.new_named_open(p, key) } else { self.heap.new_named(p, key) }))));
+        self.api_ret(r)
+    }
+
+    fn set_lazy<'s>(&mut self, obj: bare_js_api::Local<'_>, chain: bool) -> Result<(), bare_js_api::Error<'s>> {
+        let r = self.api_obj(obj).and_then(|o| Ok(h!(self, if chain { self.heap.set_lazy_chain(o) } else { self.heap.set_lazy_on(o) })));
+        r.map_err(|e| self.api_err(e))
+    }
+
+    fn clear_lazy(&mut self, obj: bare_js_api::Local<'_>) {
+        if let Value::Object(o) = self.api_at(obj) {
+            self.heap.clear_lazy_on(o);
+        }
+    }
+
+    fn own_kind<'s>(&mut self, obj: bare_js_api::Local<'_>, key: bare_js_api::Local<'_>) -> Result<Option<bare_js_api::Own<'s>>, bare_js_api::Error<'s>> {
+        use bare_js_api::Own;
+        let r = self.api_obj(obj).and_then(|o| {
+            let k = self.api_key(key)?;
+            match self.heap.peek_own_property(o, k) {
+                Ok(p) => Ok(p),
+                Err(HeapError::Proxy(_)) => Ok(None),
+                Err(e) => Err(self.herr(e)),
+            }
+        });
+        match r {
+            Ok(None) => Ok(None),
+            Ok(Some(Property::Data { value, .. })) => Ok(Some(Own::Data(self.api_push(value)))),
+            Ok(Some(Property::Accessor { get, set, .. })) => {
+                let get = get.map(|g| self.api_push(Value::Object(g)));
+                let set = set.map(|g| self.api_push(Value::Object(g)));
+                Ok(Some(Own::Accessor { get, set }))
+            }
+            Err(e) => Err(self.api_err(e)),
+        }
+    }
+
+    fn symbol_description<'s>(&mut self, v: bare_js_api::Local<'_>) -> Result<Option<bare_js_api::Local<'s>>, bare_js_api::Error<'s>> {
+        let Value::Symbol(sym) = self.api_at(v) else { let e = self.type_error("not a symbol"); return Err(self.api_err(e)) };
+        match self.heap.symbol_description(sym) {
+            Ok(d) => Ok(d.map(|d| self.api_push(Value::String(d)))),
+            Err(e) => {
+                let e = self.herr(e);
+                Err(self.api_err(e))
+            }
+        }
+    }
+
+    fn display(&self, v: bare_js_api::Local<'_>) -> String {
+        Interp::display(self, self.api_at(v))
+    }
+
+    fn inspect(&mut self, v: bare_js_api::Local<'_>, cap: usize, node: &dyn Fn(&Value) -> Option<String>) -> String {
+        Interp::inspect(self, self.api_at(v), cap, &|o| node(&Value::Object(o)))
+    }
+
+    fn set_integrity<'s>(&mut self, obj: bare_js_api::Local<'_>, frozen: bool) -> Result<bool, bare_js_api::Error<'s>> {
+        let r = self.api_obj(obj).and_then(|o| Ok(h!(self, self.heap.set_integrity(o, frozen))));
+        r.map_err(|e| self.api_err(e))
+    }
+
+    fn array_len<'s>(&mut self, v: bare_js_api::Local<'_>) -> Result<Option<u32>, bare_js_api::Error<'s>> {
+        let Value::Object(o) = self.api_at(v) else { return Ok(None) };
+        match self.heap.array_length(o) {
+            Ok(n) => Ok(n),
+            Err(e) => {
+                let e = self.herr(e);
+                Err(self.api_err(e))
+            }
+        }
+    }
+
+    fn new_error<'s>(&mut self, proto: bare_js_api::Local<'_>, msg: &str) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
+        let r = self.api_obj(proto).and_then(|p| Interp::new_error(self, p, msg)).map(Value::Object);
+        self.api_ret(r)
+    }
+
     fn clone_out<'s>(&mut self, v: bare_js_api::Local<'_>, o: &bare_js_api::CloneOpts<'_, '_>, h: &mut dyn bare_js_api::CloneHost<Self>) -> Result<bare_js_api::Cloned, bare_js_api::Error<'s>> {
         let v = self.api_at(v);
         self.clone_out_impl(v, o, h).map_err(|e| self.api_err(e))
@@ -668,6 +914,10 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
                 PropertyKey::Symbol(s) => Value::Symbol(s),
                 // The realm keeps `Symbol.iterator` as a symbol key.
                 _ => unreachable!("Symbol.iterator is a symbol"),
+            },
+            I::SymbolToStringTag => match self.sc.k_to_string_tag {
+                PropertyKey::Symbol(s) => Value::Symbol(s),
+                _ => unreachable!("Symbol.toStringTag is a symbol"),
             },
         };
         self.api_push(v)

@@ -72,7 +72,7 @@ fn setup() -> (Interp<'static>, Rc<H>) {
         s.set_host(h.clone());
         let g = s.global();
         for (i, name) in ["add", "callback", "fail", "keep", "kept", "describe"].into_iter().enumerate() {
-            let f = s.host_function(name, i as u32, 1).unwrap();
+            let f = s.host_function(name, i as u32, 1, bare_js_api::HostFn::Method).unwrap();
             let k = s.string(name).unwrap();
             s.define(g, k, f, Attrs::METHOD).unwrap();
         }
@@ -188,7 +188,7 @@ fn an_owner_keeps_its_traced_values_while_it_lives() {
         let h = Rc::new(Owners::default());
         enter(&mut it, |s| {
             s.set_host(h.clone());
-            let (g, f, k) = (s.global(), s.host_function("own", 0, 2).unwrap(), s.string("own").unwrap());
+            let (g, f, k) = (s.global(), s.host_function("own", 0, 2, bare_js_api::HostFn::Method).unwrap(), s.string("own").unwrap());
             s.define(g, k, f, Attrs::METHOD).unwrap();
         });
         // Key 0 has no weak reference to its value (a reached WeakRef target is a heap root). Key 1 shows the value go.
@@ -428,7 +428,7 @@ fn base_setup() -> Interp<'static> {
         s.set_host(Rc::new(Base));
         let g = s.global();
         for (i, name) in BASE_FNS.into_iter().enumerate() {
-            let f = s.host_function(name, i as u32, 1).unwrap();
+            let f = s.host_function(name, i as u32, 1, bare_js_api::HostFn::Method).unwrap();
             let k = s.string(name).unwrap();
             s.define(g, k, f, Attrs::METHOD).unwrap();
         }
@@ -727,7 +727,7 @@ fn a_checkpoint_inside_a_script_function_does_nothing() {
         let mut it = Interp::realm(Heap::default(), EvalLimits { max_steps: 100_000, ..Default::default() }).unwrap();
         enter(&mut it, |s| {
             s.set_host(Rc::new(Checkpointer));
-            let (g, f, k) = (s.global(), s.host_function("run", 0, 1).unwrap(), s.string("run").unwrap());
+            let (g, f, k) = (s.global(), s.host_function("run", 0, 1, bare_js_api::HostFn::Method).unwrap(), s.string("run").unwrap());
             s.define(g, k, f, Attrs::METHOD).unwrap();
         });
         assert_eq!(out(&mut it, "var n = 0; function outer() { return run(() => { n++ }) } var ran = outer(); ran + ',' + n"), "0,0", "a script function is running: no job runs");
@@ -1090,5 +1090,229 @@ fn a_persistent_import_promise_survives_a_collection_between_take_and_finish() {
         let mut live = 0;
         it.api.slots.for_each(|_| live += 1);
         assert_eq!(live, 0, "no handle is left");
+    });
+}
+
+// Handler bodies of the browser (`docs/design-host-handlers.md`, step H0): the methods of section 2, on the old engine.
+
+fn plain() -> Interp<'static> {
+    Interp::realm(Heap::default(), EvalLimits { max_steps: 1_000_000, ..Default::default() }).unwrap()
+}
+
+#[test]
+fn scripts_functions_and_constructors_run_through_the_interface() {
+    big(|| {
+        let mut it = plain();
+        enter(&mut it, |s| {
+            let v = s.run_script("var base = 40; base + 2").unwrap();
+            assert_eq!(s.as_number(v), Some(42.0));
+            // An event handler is compiled in the global environment and sees the names of the scope chain first.
+            let f = s.compile_function("onclick", "event", "return base + extra + event").unwrap();
+            let (this, one) = (s.undefined(), s.number(1.0));
+            let obj = s.new_object().unwrap();
+            let two = s.number(2.0);
+            s.define_str(obj, "extra", two, Attrs::ALL).unwrap();
+            let r = s.call_scoped(f, this, &[one], &[obj]).unwrap();
+            assert_eq!(s.as_number(r), Some(43.0), "base 40 + extra 2 (the scope object) + event 1");
+            // Indirect eval and `%eval%`.
+            let src = s.string("base * 2").unwrap();
+            let r = s.eval_global(src).unwrap();
+            assert_eq!(s.as_number(r), Some(80.0));
+            let ev = s.eval_function().unwrap();
+            let src = s.string("1 + 1").unwrap();
+            let r = s.call(ev, this, &[src]).unwrap();
+            assert_eq!(s.as_number(r), Some(2.0));
+            // `Construct` with the function itself and with another `new.target`.
+            let d = s.run_script("Date").unwrap();
+            let t = s.number(0.0);
+            let date = s.construct(d, &[t], None).unwrap();
+            assert_eq!(s.type_of(date), Type::Object);
+            let not = s.run_script("1").unwrap();
+            assert!(s.construct(not, &[], None).is_err(), "a number is no constructor");
+            let bad = s.compile_function("f", "", "}");
+            assert!(bad.is_err(), "a body that closes the function early is a SyntaxError");
+        });
+        assert_eq!(it.stack_len(), 0);
+    });
+}
+
+#[test]
+fn a_task_counts_one_call_level_and_gives_the_scope_back() {
+    big(|| {
+        let mut it = plain();
+        let n = bare_js_api::task(&mut it, |s| {
+            assert!(s.run_script("1").is_err(), "a task refuses run_script");
+            let f = s.compile_function("f", "a", "return a + 1").unwrap();
+            let (this, one) = (s.undefined(), s.number(1.0));
+            let v = s.call(f, this, &[one]).unwrap();
+            s.as_number(v).unwrap()
+        });
+        assert_eq!(n.unwrap(), 2.0);
+        assert_eq!(it.stack_len(), 0);
+        it.limits.max_call_depth = 0;
+        assert_eq!(bare_js_api::task(&mut it, |_| 1).unwrap_err(), bare_js_api::Abort::Limit("call depth"));
+    });
+}
+
+#[test]
+fn binary_data_is_read_and_written_in_place() {
+    big(|| {
+        let mut it = plain();
+        enter(&mut it, |s| {
+            let buf = s.new_array_buffer(vec![1, 2, 3, 4]).unwrap();
+            assert_eq!(s.bytes(buf), Some(&[1u8, 2, 3, 4][..]));
+            s.bytes_mut(buf).unwrap()[0] = 9;
+            assert_eq!(s.bytes(buf).unwrap()[0], 9);
+            assert!(s.view(buf).is_none(), "a buffer is no view");
+            let f = s.new_typed_array(bare_js_api::Elem::F64, 1.5f64.to_le_bytes().to_vec()).unwrap();
+            let v = s.view(f).unwrap();
+            assert_eq!((v.offset, v.len, v.elem), (0, 1, bare_js_api::Elem::F64));
+            assert_eq!(s.view_get(f, 0), Some(1.5));
+            assert_eq!(s.view_get(f, 1), None);
+            let u = s.new_uint8_array(vec![7, 8]).unwrap();
+            assert_eq!(s.view(u).unwrap().elem, bare_js_api::Elem::U8);
+            assert_eq!(s.bytes(u), Some(&[7u8, 8][..]));
+            assert!(!s.is_detached(buf));
+            assert!(s.new_typed_array(bare_js_api::Elem::Data, vec![]).is_err(), "a DataView is made by script");
+            let big = s.run_script("2n ** 130n").unwrap();
+            assert_eq!(s.bigint_limbs(big), 3);
+            let small = s.number(1.0);
+            assert_eq!(s.bigint_limbs(small), 0);
+            // A transferred buffer is detached, and so is its view.
+            let g = s.run_script("var b = new ArrayBuffer(8), a = new Uint8Array(b); b.transfer(); [b, a]").unwrap();
+            let (b, a) = (s.get_str(g, "0").unwrap(), s.get_str(g, "1").unwrap());
+            assert!(s.is_detached(b) && s.is_detached(a));
+            assert_eq!(s.bytes(b), Some(&[][..]));
+        });
+    });
+}
+
+#[test]
+fn host_filled_objects_have_a_key_and_own_properties_are_read_without_running_code() {
+    big(|| {
+        let mut it = plain();
+        enter(&mut it, |s| {
+            let proto = s.intrinsic(bare_js_api::Intrinsic::ObjectPrototype);
+            let (i, n, o) = (s.new_host_indexed(Some(proto), 7).unwrap(), s.new_host_named(Some(proto), 9, true).unwrap(), s.new_object().unwrap());
+            assert_eq!((s.host_key(i), s.host_key(n), s.host_key(o)), (Some(7), Some(9), None));
+            let k = s.string("x").unwrap();
+            let one = s.number(1.0);
+            s.define(o, k, one, Attrs::ALL).unwrap();
+            let g = s.run_script("({ get a() { throw new Error('ran'); }, set a(v) {} })").unwrap();
+            let a = s.string("a").unwrap();
+            match s.own_kind(g, a).unwrap() {
+                Some(bare_js_api::Own::Accessor { get: Some(_), set: Some(_) }) => {}
+                other => panic!("{other:?}"),
+            }
+            match s.own_kind(o, k).unwrap() {
+                Some(bare_js_api::Own::Data(v)) => assert_eq!(s.as_number(v), Some(1.0)),
+                other => panic!("{other:?}"),
+            }
+            let missing = s.string("nope").unwrap();
+            assert_eq!(s.own_kind(o, missing).unwrap(), None);
+            s.set_lazy(o, false).unwrap();
+            s.set_lazy(o, true).unwrap();
+            s.clear_lazy(o);
+        });
+    });
+}
+
+#[test]
+fn text_integrity_errors_and_small_calls() {
+    big(|| {
+        let mut it = plain();
+        enter(&mut it, |s| {
+            let v = s.run_script("({ a: 1, list: [1, 2, 3] })").unwrap();
+            assert_eq!(s.display(v), "object");
+            let n = s.number(2.5);
+            assert_eq!(s.display(n), "2.5");
+            assert_eq!(s.inspect(v, 100, &|_| None), "{\"a\":1,\"list\":[1,2,3]}");
+            let list = s.get_str(v, "list").unwrap();
+            assert_eq!(s.array_len(list).unwrap(), Some(3));
+            assert_eq!(s.array_len(v).unwrap(), None);
+            assert!(s.set_integrity(v, true).unwrap());
+            let frozen = s.run_script("Object.isFrozen").unwrap();
+            let this = s.undefined();
+            let r = s.call(frozen, this, &[v]).unwrap();
+            assert_eq!(s.as_bool(r), Some(true));
+            let proto = s.intrinsic(bare_js_api::Intrinsic::ErrorPrototype);
+            let e = s.new_error(proto, "boom").unwrap();
+            let m = s.get_str(e, "message").unwrap();
+            assert_eq!(s.display(m), "boom");
+            let tag = s.intrinsic(bare_js_api::Intrinsic::SymbolToStringTag);
+            let sym = s.run_script("Symbol.toStringTag").unwrap();
+            let same = s.run_script("(a, b) => a === b").unwrap();
+            let r = s.call(same, this, &[tag, sym]).unwrap();
+            assert_eq!(s.as_bool(r), Some(true));
+            let d = s.run_script("Symbol('why')").unwrap();
+            let desc = s.symbol_description(d).unwrap().unwrap();
+            assert_eq!(s.display(desc), "why");
+            // More than 8 arguments take the allocating path of `call`.
+            let sum = s.run_script("(...a) => a.length").unwrap();
+            let args: Vec<_> = (0..12).map(|i| s.number(i as f64)).collect();
+            let r = s.call(sum, this, &args).unwrap();
+            assert_eq!(s.as_number(r), Some(12.0));
+            let few = s.call(sum, this, &args[..3]).unwrap();
+            assert_eq!(s.as_number(few), Some(3.0));
+            // A key from Rust: set, define, accessor.
+            let o = s.new_object().unwrap();
+            let seven = s.number(7.0);
+            s.set_str(o, "k", seven).unwrap();
+            let getter = s.run_script("(function () { return 5 })").unwrap();
+            s.define_accessor_str(o, "g", Some(getter), None, Attrs::ALL).unwrap();
+            let r = s.get_str(o, "g").unwrap();
+            assert_eq!(s.as_number(r), Some(5.0));
+        });
+        assert_eq!(it.stack_len(), 0);
+    });
+}
+
+/// Host constructors of the interface: a plain one and one that reads `new.target`.
+struct Ctors;
+
+impl<'p> bare_js_api::Host<Interp<'p>> for Ctors {
+    fn call<'s>(&self, s: &mut Scope<'s, Interp<'p>>, id: u32, _this: Local<'s>, _args: Args<'s>, is_new: bool) -> Result<Local<'s>, bare_js_api::Error<'s>> {
+        let default = s.intrinsic(bare_js_api::Intrinsic::ObjectPrototype);
+        let proto = if id == 1 { s.proto_from_new_target(default)? } else { default };
+        let o = s.new_object()?;
+        s.set_prototype_of(o, Some(proto))?;
+        let b = s.boolean(is_new);
+        s.define_str(o, "isNew", b, Attrs::ALL)?;
+        Ok(o)
+    }
+}
+
+#[test]
+fn host_constructors_of_the_interface_take_new_target_as_declared() {
+    big(|| {
+        let mut it = plain();
+        enter(&mut it, |s| {
+            s.set_host(Rc::new(Ctors));
+            let g = s.global();
+            for (id, name, kind) in [(0, "Plain", bare_js_api::HostFn::Ctor), (1, "Nt", bare_js_api::HostFn::CtorNewTarget), (2, "Method", bare_js_api::HostFn::Method)] {
+                let f = s.host_function(name, id, 0, kind).unwrap();
+                let proto = s.new_object().unwrap();
+                s.define_str(f, "prototype", proto, Attrs { writable: false, enumerable: false, configurable: false }).unwrap();
+                s.define_str(g, name, f, Attrs::METHOD).unwrap();
+            }
+        });
+        assert_eq!(out(&mut it, "new Plain().isNew + ',' + Plain().isNew"), "true,false");
+        assert_eq!(out(&mut it, "try { new Method() } catch (e) { e.name }"), "TypeError", "a plain function is no constructor");
+        assert_eq!(out(&mut it, "Method().isNew"), "false");
+        assert_eq!(out(&mut it, "class B extends Nt {} Object.getPrototypeOf(new B()) === B.prototype"), "true", "the object takes the prototype of new.target");
+        assert_eq!(out(&mut it, "Object.getPrototypeOf(new Nt()) === Nt.prototype"), "false", "the host did not set the prototype itself: the default is Object.prototype");
+        assert!(out(&mut it, "class P extends Plain {} new P()").starts_with("other:"), "a constructor that does not read new.target refuses a subclass");
+        assert_eq!(it.stack_len(), 0);
+        enter(&mut it, |s| {
+            let nt = s.run_script("class C extends Nt {} C").unwrap();
+            let f = s.run_script("Nt").unwrap();
+            let o = s.construct(f, &[], Some(nt)).unwrap();
+            let p = s.get_prototype_of(o).unwrap().unwrap();
+            let want = s.get_str(nt, "prototype").unwrap();
+            let same = s.run_script("(a, b) => a === b").unwrap();
+            let this = s.undefined();
+            let r = s.call(same, this, &[p, want]).unwrap();
+            assert_eq!(s.as_bool(r), Some(true), "Scope::construct passes new.target");
+        });
     });
 }
