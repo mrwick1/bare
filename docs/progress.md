@@ -17441,13 +17441,13 @@ Removed (61 lines, 1 line added; 5 files):
 
 - `browser_scoped.rs`: `via`, the bridge that called a handler of the new form from the old form. It has no caller.
 - `browser.rs` and `browser_fetch.rs`: `Kind::Accessor` (an accessor pair of the old form), its match arms in the `DEFS` install loop and in the fetch table, and the `A` alias. Every accessor row is `AccessorS` now.
-- `browser_dom_old.rs`: `attr_get`, `clone_tree`, `body` and `html_child`. Their last callers moved in groups A1, A2 and C.
-- `browser_events.rs`: `Dom::event_of`. The last caller (`browser_form.rs`) moved in group C.
+- `browser_dom_old.rs`: `attr_get`, `clone_tree`, `body` and `html_child`. They have no caller.
+- `browser_events.rs`: `Dom::event_of`. It has no caller (A2 entry: the last caller was in `browser_form.rs`).
 
 Kept, and why. The plan lists these for Z, and each is still in use:
 
-- The old `eval::Host` impl of `Dom` and the old `H` alias: 77 functions of the form `fn ... &[Value]` are left in `crates/bare/src`, and `DEFS` rows of `Kind::Method` and `Kind::Get`, `add_fn` (13 calls) and `add_old` still register them. Every install function (`ensure`, `install`, the lazy globals, `browser_lazy`) uses the old form.
-- The wrappers of A1 (`old`, `old_v`, `run`, `run_v`, `*_s` adapters): they have callers. `run_v` has 6 (`browser_fetch.rs`, `browser_web.rs`, `browser_range.rs`, `browser_dom_old.rs`).
+- The old `eval::Host` impl of `Dom` and the old `H` alias: 77 functions of the form `fn ... &[Value]` are left in `crates/bare/src`, and `DEFS` rows of `Kind::Method` and `Kind::Get`, `add_fn` (28 calls) and `add_old` still register them. Every install function (`ensure`, `install`, the lazy globals, `browser_lazy`) uses the old form.
+- The wrappers of A1 (`old`, `old_v`, `run`, `run_v`, `*_s` adapters): they have callers. `run_v` has 5 (`browser_fetch.rs`, `browser_web.rs` twice, `browser_range.rs`, `browser_dom_old.rs`).
 - The 39 `roots`, `trace` and `prune` functions: the tables hold `ObjId` and raw `Value`. The plan moves them with the tables. That needs a design for host tables on `Persistent` and `Traced`, and it is not a removal.
 - `Browser::it` stays public: 396 `.it.` sites in `crates/bare/src`, plus the examples and `drive`. The plan moves them to the facade in separate PRs.
 - The grep gate is not added. The count is 1,820 lines over `crates/bare/src` (the gate in the design must be 0 except `browser_session.rs`).
