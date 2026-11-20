@@ -327,3 +327,11 @@ Each question has my recommended answer first.
 4. **Accept a gain in instruction counts as the first gate for step 2, with the wall-time check on an idle machine as the second?** Recommended: yes, and run the wall-time check before the full handler rewrite (step 2, item 1).
 5. **Direct-threaded code (c): drop it?** Recommended: drop it. It saves 9% more instructions than (b) in the toy and costs 4x bytecode memory (memory is a stated priority) and a rewrite of the verifier, the root maps and the jump encoding.
 6. **Wire js2 into the browser before step 2, so the browser slice can be measured?** Recommended: no. Step 2 is judged on the five rows and on wall time. The browser slice follows when js2 is wired.
+
+## Decisions (owner, 2026-11-21)
+
+1. Build step 1 (outline the cold arms of `Vm::run`) now.
+2. Step 2 uses stable Rust with LLVM tail calls in release builds. Keep the `loop { match }` engine for debug builds and tests, with a differential test on both. Switch to `become` when it is stable.
+3. Gate step 2 first on instruction counts from a real spike, then on a wall-time check on an idle machine, before the full rewrite.
+4. Drop direct-threaded code.
+5. Do not wire js2 into the browser only to measure step 2.
