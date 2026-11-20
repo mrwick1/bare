@@ -1517,7 +1517,7 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     d.def_method_s(it, g, "getSelection", 0, get_selection)?;
     d.def_method_s(it, d.p().document, "getSelection", 0, get_selection)?;
     d.def_method_s(it, d.p().document, "createRange", 0, create_range)?;
-    crate::browser_lazy::install(d, it, &[("Range", lazy_range as H), ("Selection", lazy_selection), ("AbstractRange", lazy_abstract)])
+    crate::browser_lazy::install(d, it, &[("Range", lazy_range as HS), ("Selection", lazy_selection), ("AbstractRange", lazy_abstract)])
 }
 
 /// The boundary points of a range: start container and offset, end container and offset.

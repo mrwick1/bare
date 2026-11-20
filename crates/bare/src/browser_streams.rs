@@ -1016,7 +1016,7 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>, stream_proto: ObjId, reader_
     }
     d.def_get_s(it, ctl_proto, "desiredSize", ctl_desired_size, None)?;
     let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
-    let ctor = d.add_fn(it, illegal_constructor, "ReadableStreamDefaultController", 0, false)?;
+    let ctor = d.add_fn_s_obj(it, illegal_constructor, "ReadableStreamDefaultController", 0, bare_js_api::HostFn::Method)?;
     it.define_data(ctor, kp, Value::Object(ctl_proto), false, false, false)?;
     it.define_data(ctl_proto, kc, Value::Object(ctor), true, false, true)?;
     let global = it.global_object();

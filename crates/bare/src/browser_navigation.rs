@@ -782,14 +782,6 @@ fn hist_set_scroll<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>
 
 // ------------------------------------------------------------------------------------------ install
 
-/// A function of the old form as a method (the two `URL` functions of `browser_web.rs` have not moved).
-fn def_fn(d: &Dom, it: &mut Interp<'_>, o: ObjId, name: &str, len: u32, h: H) -> R<ObjId> {
-    let f = d.add_fn(it, h, name, len, false)?;
-    let k = d.key(it, name)?;
-    it.define_data(o, k, Value::Object(f), true, false, true)?;
-    Ok(f)
-}
-
 macro_rules! parts {
     ($d:expr, $it:expr, $o:expr, $get:ident, $set:ident, [$(($name:expr, $part:expr)),*]) => {
         $( $d.def_get_s($it, $o, $name, |d, s, t, _| $get(d, s, t, $part), Some(|d, s, t, a| $set(d, s, t, a, $part)))?; )*
@@ -901,8 +893,8 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         it.define_data(g, k, Value::Object(f), true, false, true)?;
         if name == "URL" {
             d.def_method_s(it, f, "canParse", 1, pr::url_can_parse)?;
-            def_fn(d, it, f, "createObjectURL", 1, crate::browser_web::create_object_url)?;
-            def_fn(d, it, f, "revokeObjectURL", 1, crate::browser_web::revoke_object_url)?;
+            d.def_method_s(it, f, "createObjectURL", 1, crate::browser_web::create_object_url)?;
+            d.def_method_s(it, f, "revokeObjectURL", 1, crate::browser_web::revoke_object_url)?;
         }
         fixed.push(f);
     }

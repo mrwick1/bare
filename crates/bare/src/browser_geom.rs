@@ -61,10 +61,6 @@ pub(crate) struct Geom {
 
 // ------------------------------------------------------------------------------------------ helpers
 
-pub(crate) fn illegal(it: &mut Interp<'_>) -> Error {
-    it.type_error("Illegal invocation")
-}
-
 #[cold]
 pub(crate) fn illegal_s<'s>(s: &mut Sc<'s, '_>) -> bare_js_api::Error<'s> {
     s.type_error("Illegal invocation")
@@ -91,13 +87,6 @@ pub(crate) fn put_s<'s>(s: &mut Sc<'s, '_>, o: Local<'s>, name: &str, v: Local<'
 }
 
 /// An operation of an interface: a writable, enumerable, configurable method.
-pub(crate) fn method(d: &Dom, it: &mut Interp<'_>, target: ObjId, name: &str, len: u32, h: H) -> R<()> {
-    let k = d.key(it, name)?;
-    let f = d.add_fn(it, h, name, len, false)?;
-    it.define_data(target, k, Value::Object(f), true, true, true)
-}
-
-/// `method` for a function of the new form.
 pub(crate) fn method_s(d: &Dom, it: &mut Interp<'_>, target: ObjId, name: &str, len: u32, h: HS) -> R<()> {
     let k = d.key(it, name)?;
     let f = d.add_fn_s_obj(it, h, name, len, HostFn::Method)?;
@@ -105,13 +94,6 @@ pub(crate) fn method_s(d: &Dom, it: &mut Interp<'_>, target: ObjId, name: &str, 
 }
 
 /// A prototype and a constructor that are linked by `prototype`. Both are roots: the realm keeps them while the page can drop the global.
-pub(crate) fn make(d: &Dom, it: &mut Interp<'_>, parent: ObjId, name: &str, ctor: H, nt: bool) -> R<Iface> {
-    let proto = d.obj(it, parent)?;
-    let ctor = if nt { d.add_ctor_nt(it, ctor, name, 0)? } else { d.add_fn(it, ctor, name, 0, true)? };
-    link(d, it, proto, ctor)
-}
-
-/// `make` for a constructor of the new form.
 pub(crate) fn make_s(d: &Dom, it: &mut Interp<'_>, parent: ObjId, name: &str, ctor: HS, kind: HostFn) -> R<Iface> {
     let proto = d.obj(it, parent)?;
     let ctor = d.add_fn_s_obj(it, ctor, name, 0, kind)?;
@@ -126,16 +108,6 @@ fn link(d: &Dom, it: &mut Interp<'_>, proto: ObjId, ctor: ObjId) -> R<Iface> {
 }
 
 /// `proto.constructor`, then the members in `extra`, then `Symbol.toStringTag`: the order of Chrome's own keys.
-pub(crate) fn finish(d: &Dom, it: &mut Interp<'_>, i: Iface, name: &str, extra: &[(&str, u32, H)]) -> R<()> {
-    let kc = d.key(it, "constructor")?;
-    it.define_data(i.proto, kc, Value::Object(i.ctor), true, false, true)?;
-    for &(n, len, h) in extra {
-        method(d, it, i.proto, n, len, h)?;
-    }
-    browser_lazy::tag(d, it, i.proto, name)
-}
-
-/// `finish` for members of the new form.
 pub(crate) fn finish_s(d: &Dom, it: &mut Interp<'_>, i: Iface, name: &str, extra: &[(&str, u32, HS)]) -> R<()> {
     let kc = d.key(it, "constructor")?;
     it.define_data(i.proto, kc, Value::Object(i.ctor), true, false, true)?;
@@ -669,7 +641,7 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         d,
         it,
         &[
-            ("DOMQuad", lazy_quad as H),
+            ("DOMQuad", lazy_quad as HS),
             ("DOMPoint", lazy_point_rw),
             ("DOMPointReadOnly", lazy_point_ro),
             ("DOMRectList", lazy_rect_list),
