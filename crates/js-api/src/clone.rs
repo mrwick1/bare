@@ -91,7 +91,12 @@ impl Cloned {
         &mut self.moved
     }
 
-    /// For engines: take the moved items out, to build the objects of [`CloneIn`].
+    /// For engines: take the moved items out, to build the objects of [`CloneIn`]. A second call gives none.
+    pub fn take_moved(&mut self) -> Vec<Moved> {
+        std::mem::take(&mut self.moved)
+    }
+
+    /// For engines: take the record apart.
     pub fn into_parts(self) -> (Box<[u8]>, Vec<Moved>, usize) {
         (self.bytes, self.moved, self.cost)
     }

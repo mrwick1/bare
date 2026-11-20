@@ -439,7 +439,7 @@ fn an_engine_with_no_clone_says_unsupported() {
     let limits = CloneLimits { bytes: 1, depth: 1, nodes: 1, names: ["b", "d", "n"] };
     let opts = CloneOpts { limits, transfer: &[] };
     assert_eq!(e.clone_out(v, &opts, &mut NoClone).err(), Some(Error::Abort(Abort::Unsupported("clone_out"))));
-    let c = Cloned::new(Box::from([]), Vec::new(), 0);
-    assert_eq!(e.clone_in(c, &mut NoClone).err(), Some(Error::Abort(Abort::Unsupported("clone_in"))));
+    let mut c = Cloned::new(Box::from([]), Vec::new(), 0);
+    assert_eq!(e.clone_in(&mut c, &mut NoClone).err(), Some(Error::Abort(Abort::Unsupported("clone_in"))));
     assert_eq!(e.clone_copy(v, &limits, &mut NoClone).err(), Some(Error::Abort(Abort::Unsupported("clone_copy"))));
 }

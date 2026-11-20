@@ -738,8 +738,9 @@ pub trait Engine: Sized {
     fn clone_out<'s>(&mut self, _v: Local<'_>, _o: &CloneOpts<'_, '_>, _h: &mut dyn CloneHost<Self>) -> Result<Cloned, Error<'s>> {
         Err(Error::Abort(Abort::Unsupported("clone_out")))
     }
-    /// Build the object graph of a record, and the objects of its moved host items.
-    fn clone_in<'s>(&mut self, _c: Cloned, _h: &mut dyn CloneHost<Self>) -> Result<CloneIn<'s>, Error<'s>> {
+    /// Build the object graph of a record, and the objects of its moved host items. The engine takes the moved items out of `c`
+    /// ([`Cloned::take_moved`]), so a record with no moved item can be read again (a history entry), and one with moved items once.
+    fn clone_in<'s>(&mut self, _c: &mut Cloned, _h: &mut dyn CloneHost<Self>) -> Result<CloneIn<'s>, Error<'s>> {
         Err(Error::Abort(Abort::Unsupported("clone_in")))
     }
     /// Serialize and build in one pass, with no record and no transfer list: the copy and its byte cost.

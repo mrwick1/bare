@@ -181,7 +181,7 @@ impl<'p> Interp<'p> {
     }
 
     /// An error of the interface as an error of this engine: the inverse of `api_err`.
-    fn api_unerr(&mut self, e: bare_js_api::Error<'_>) -> Error {
+    pub fn api_unerr(&mut self, e: bare_js_api::Error<'_>) -> Error {
         match e {
             bare_js_api::Error::Throw(v) => Error::Throw(self.api_at(v)),
             bare_js_api::Error::Abort(a) => self.api.abort.take().unwrap_or(match a {
@@ -602,6 +602,21 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
 
     fn charge<'s>(&mut self, n: u64) -> Result<(), bare_js_api::Error<'s>> {
         Interp::charge(self, n).map_err(|e| self.api_err(e))
+    }
+
+    fn clone_out<'s>(&mut self, v: bare_js_api::Local<'_>, o: &bare_js_api::CloneOpts<'_, '_>, h: &mut dyn bare_js_api::CloneHost<Self>) -> Result<bare_js_api::Cloned, bare_js_api::Error<'s>> {
+        let v = self.api_at(v);
+        self.clone_out_impl(v, o, h).map_err(|e| self.api_err(e))
+    }
+
+    fn clone_in<'s>(&mut self, c: &mut bare_js_api::Cloned, h: &mut dyn bare_js_api::CloneHost<Self>) -> Result<bare_js_api::CloneIn<'s>, bare_js_api::Error<'s>> {
+        match self.clone_in_impl(c, h) {
+            Ok((v, hosts)) => {
+                let value = self.api_push(v);
+                Ok(bare_js_api::CloneIn { value, hosts: hosts.into_iter().map(|x| self.api_push(x)).collect() })
+            }
+            Err(e) => Err(self.api_err(e)),
+        }
     }
 
     fn to_number<'s>(&mut self, v: bare_js_api::Local<'_>) -> Result<f64, bare_js_api::Error<'s>> {

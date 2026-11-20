@@ -14420,3 +14420,42 @@ Windows: `RUSTFLAGS="-C target-feature=+crt-static" cargo xwin test --locked --n
 Cost matrix: not run. No engine or browser code changes, so no row can move. The new code is in a crate that no engine calls yet (the `Engine` default bodies add three methods that nothing calls).
 
 Not tested: the format against a real engine walk (step 3), cost of the writer and reader (no benchmark, no engine calls them yet), a real `Cloned` across two heaps, `jemalloc`. The step counts of the pin test are not measured against the browser.
+
+## 2026-11-20: clone on the record (design-host-clone.md step 3)
+
+Linux and Windows pass the filtered tests. The cost matrix has no row over the limit. PR is not merged and has no auto-merge. Base: origin/main `1aa1bc6a` (it includes #736, step 2).
+
+Changes. The old engine and the browser now use the byte record of `bare-js-api`'s `clone` module. Generic paths only: no fast path (step 4) and no `clone_copy` (step 5).
+
+- `crates/js/src/eval_clone.rs`: `Interp::clone_out_impl` and `clone_in_impl`. The walk keeps the order of the old walk: Ref, listed item, callable, host object, class, then the node meter. It also keeps the getter order, the Map and Set snapshot, the Error fields (`name`, `message`, `stack` if it is a string, `cause`), the buffers and views, and the order of the transfer stage (unused listed items, `can_transfer` checks, then the moves). The identity table is an `IdMap` with the key `(generation << 32) | index`. The step budget is flushed before a limit error, so the old order of step budget and byte limit stays.
+- `crates/js/src/eval_api.rs`: `Engine::clone_out` and `Engine::clone_in` for `Interp`. Handles are `Local`s on the api stack. `api_unerr` is now `pub`. It gives the original `Error` back from the one that `api_err` stashed.
+- `crates/bare/src/browser_navigation_state.rs`: 467 lines became a glue module: `Transfer` (`Port`, `End`), `CloneHost for &Dom` (`is_host_object`, `can_transfer`, `transfer_out`, `transfer_in`, `data_clone_error`), the limits and the names of the `NavLimits` errors. `State`, `walk`, `ser`, `props` and `materialize*` of the old walk are gone.
+- `Cloned` replaces `State` in `Entry` (`browser_navigation.rs`), `Wire` (`browser_port_hub.rs`), `Out` (`browser_child.rs`) and `clone_payload` and `export_ports` (`browser_scheduler.rs`, `browser_remote_window.rs`). The hub reads its ends from `Moved::Host(Transfer::End)`.
+- Tests: `crates/bare/src/browser_clone_tests.rs` holds the 65 cases and the 2 cap tests with their frozen text, from `55594ea6`. `crates/js/src/eval_clone_tests.rs` has 9 engine tests with a host that has no page.
+
+One deviation from the design page. `Engine::clone_in` takes `&mut Cloned` and not `Cloned`. A history entry is read again and again (a primitive state is never cached, and an object state is read once), so the record must survive a read. The engine takes the moved items out with the new `Cloned::take_moved`. A record with no moved item can be read again. `entry_state` takes the record out of the entry, reads it and puts it back, so no navigation borrow is held during the read.
+
+Gates. The 65 cases and the 2 cap tests give the same text as the frozen text on the first run. `state_bytes=17600` of `navigation_load history 1` is unchanged. Allocations of `history 1`: 72,255 before, 62,266 after (one run each).
+
+Cost matrix (archMachine, `tools/js/cost_matrix.sh -j4`, 3 runs a row, minimum of `instructions:u`, limit +0.5% under both allocators; base `1aa1bc6a` built in its own target dir): 819 rows, 817 measured. Mean change glibc -0.004%, jemalloc +0.000%. No row over the limit under one or both allocators, so the codegen-units=1 rule did not apply. The 2 rows `parse_load deep 1` and `deep 10` do not run on either tree (stack overflow; the known stale example). Rows of the brief (glibc, base → new):
+
+| Row | Base | New | Change |
+|---|---:|---:|---:|
+| `navigation_load history 1` | 79,449,667 | 79,467,793 | +0.023% |
+| `navigation_load history 10` | 745,770,558 | 747,264,819 | +0.200% |
+| `web_apis_load clone 1` | 175,350,553 | 170,173,120 | -2.953% |
+| `web_apis_load clone 10` | 1,689,283,873 | 1,636,621,482 | -3.117% |
+| `scheduler_load messages 1` | 26,818,793 | 26,792,290 | -0.099% |
+| `scheduler_load messages 10` | 208,124,164 | 207,855,798 | -0.129% |
+
+An earlier subset run with `-J` gave jemalloc `history 1/10` +0.111% and +0.205%, `clone 1/10` -1.943% and -2.041%, `messages 1/10` -0.077% and -0.123%. The generic path is flat on `history` by design. The gain of the spike (-10.93 M on `history 1`) needs the fast path of step 4.
+
+Tests. Linux: filters `clone`, `navigation`, `history`, `message`, `structured`, `port` and `scheduler` of `cargo test --locked -p bare --lib` pass with the same counts as Windows below, also with `BARE_GC_STRESS=1`. The 9 `clone` tests of `bare-js` pass. `cargo test --locked -p bare-js-api -p bare-js -p bare --lib` once: 31, 1086 (1 ignored) and 1709 (6 ignored) tests pass. Windows (VM `127.0.0.1:22220`, xwin build, exes in `C:\s0\clone3`): `clone` 26, `navigation` 89, `history` 17, `message` 36, `structured` 4, `port` 104, `scheduler` 42 (bare); `clone` 9 (bare-js); `clone` 25 (bare-js-api). All pass.
+
+Noticed, not changed:
+- The reader trusts the view range against its buffer. Our own walk writes the record, so the range is right. A record from another source would need a check.
+- `transfer_items` in `browser_scheduler.rs` uses a quadratic `contains` and a `clone_class` probe.
+- `Dom::is_host_object` runs 7 class probes for each object.
+- Peak RSS of `history 1` went from 12.0 to 12.4 MiB in single runs. I did not analyse it.
+
+Not tested: the oracle (the old walk of main on the 65 cases) in a separate run; the frozen text is the oracle. The fast path and `clone_copy`. Real two-heap messages under Windows beyond the unit tests. A callgrind split (not needed: `history 1/10` is under the limit).

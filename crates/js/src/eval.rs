@@ -4207,6 +4207,10 @@ mod host_tests;
 mod api_tests;
 
 #[cfg(test)]
+#[path = "eval_clone_tests.rs"]
+mod clone_tests;
+
+#[cfg(test)]
 #[path = "eval_host_nt_tests.rs"]
 mod host_nt_tests;
 

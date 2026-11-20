@@ -41,7 +41,8 @@
 
 use crate::browser::*;
 use crate::browser_navigation_params as pr;
-use crate::browser_navigation_state::{self as st, State};
+use crate::browser_navigation_state as st;
+use bare_js_api::Cloned;
 use crate::browser_navigation_storage as sto;
 pub use crate::browser_navigation_storage::{StorageLimits, StoreError, WebStorage};
 use crate::browser_navigation_url::{self as nu, Part, Rec, UErr};
@@ -50,7 +51,6 @@ use bare_js::eval::{Error, Interp};
 use bare_js::value::{ObjId, Value};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::VecDeque;
-use std::rc::Rc;
 
 /// Bounds of the navigation module. Each is checked before the thing grows (`Limit(Host(name))`).
 #[derive(Clone, Copy, Debug)]
@@ -146,14 +146,14 @@ pub struct NavigationStats {
 
 pub(crate) struct Entry {
     pub url: Rec,
-    pub state: Option<Rc<State>>,
+    pub state: Option<Cloned>,
     /// The object that `history.state` returned. A root while the entry lives: the handle goes with the entry.
     pub cache: Option<bare_js_api::Persistent>,
 }
 
 impl Entry {
     fn bytes(&self) -> usize {
-        self.state.as_ref().map_or(0, |s| s.bytes)
+        self.state.as_ref().map_or(0, Cloned::cost)
     }
 }
 
@@ -287,16 +287,18 @@ impl Dom {
 
     /// The value of `history.state` for entry `idx`.
     fn entry_state(&self, it: &mut Interp<'_>, idx: usize) -> R<Value> {
-        let (state, cache) = {
+        let cache = {
             let n = self.nav.s.borrow();
-            let e = &n.entries[idx];
-            (e.state.clone(), e.cache.as_ref().map(|p| it.persistent_value(p)))
+            n.entries[idx].cache.as_ref().map(|p| it.persistent_value(p))
         };
         if let Some(c) = cache {
             return Ok(c);
         }
-        let Some(state) = state else { return Ok(Value::Null) };
-        let v = st::materialize(self, it, &state)?;
+        // The record leaves the entry while the graph is built, so no borrow of the navigation state is held.
+        let Some(mut state) = self.nav.s.borrow_mut().entries[idx].state.take() else { return Ok(Value::Null) };
+        let v = st::materialize(self, it, &mut state);
+        self.nav.s.borrow_mut().entries[idx].state = Some(state);
+        let v = v?;
         if let Value::Object(_) = v {
             let h = it.persist_value(v);
             self.nav.s.borrow_mut().entries[idx].cache = Some(h);
@@ -343,7 +345,7 @@ impl Dom {
     }
 
     /// Make `rec` the current entry (`replace`) or a new one after it. Caps were checked by the caller.
-    fn commit(&self, rec: Rec, state: Option<Rc<State>>, replace: bool) {
+    fn commit(&self, rec: Rec, state: Option<Cloned>, replace: bool) {
         let lim = self.nav.lim.get();
         let mut n = self.nav.s.borrow_mut();
         let n = &mut *n;
@@ -709,11 +711,11 @@ fn push_replace(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], replace:
     {
         let n = d.nav.s.borrow();
         let old = if replace { n.entries[n.cur].bytes() } else { n.entries[n.cur + 1..].iter().map(Entry::bytes).sum() };
-        if n.state_bytes - old + state.bytes > lim.max_total_state_bytes {
+        if n.state_bytes - old + state.cost() > lim.max_total_state_bytes {
             return Err(d.dom_err(it, "DataCloneError", "The states of this document are over their size cap."));
         }
     }
-    d.commit(new, Some(Rc::new(state)), replace);
+    d.commit(new, Some(state), replace);
     Ok(Value::Undefined)
 }
 

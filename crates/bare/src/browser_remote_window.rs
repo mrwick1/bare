@@ -158,9 +158,9 @@ fn win_post(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> 
     if d.kids.outbox_len() >= d.max_messages() {
         return Err(d.lim("messages"));
     }
-    let (state, mut transfer) = crate::browser_navigation_state::clone_state_with(d, it, a[0], &list)?;
-    d.export_ports(it, &mut transfer)?;
-    d.kids.send(Out { to, target_origin, origin, state, transfer });
+    let mut cloned = crate::browser_navigation_state::clone_state_with(d, it, a[0], &list)?;
+    d.export_ports(it, &mut cloned)?;
+    d.kids.send(Out { to, target_origin, origin, cloned });
     Ok(Value::Undefined)
 }
 
