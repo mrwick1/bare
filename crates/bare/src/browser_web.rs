@@ -1438,11 +1438,5 @@ fn iter_next<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> R
             (v, false)
         }
     };
-    let op = s.engine().object_prototype();
-    let o = d.obj_s(s, op)?;
-    let o = d.obj_local(s, o);
-    s.define_str(o, "value", value, Attrs::ALL)?;
-    let done = s.boolean(done);
-    s.define_str(o, "done", done, Attrs::ALL)?;
-    Ok(o)
+    iter_result_s(s, value, done)
 }

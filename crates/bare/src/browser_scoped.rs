@@ -367,6 +367,12 @@ pub(crate) fn old_v<'s>(s: &mut Sc<'s, '_>, f: impl FnOnce(&mut Interp<'_>) -> R
     }
 }
 
+/// The iterator result `{ value, done }`.
+pub(crate) fn iter_result_s<'s>(s: &mut Sc<'s, '_>, value: Local<'s>, done: bool) -> Res<'s, Local<'s>> {
+    let value = s.engine().raw(value);
+    old_v(s, |it| it.host_iter_result(value, done))
+}
+
 /// Run code of the new form where the caller has an interpreter: a scope, the result as an old error.
 pub(crate) fn run<'p, T>(it: &mut Interp<'p>, f: impl for<'s> FnOnce(&mut Sc<'s, 'p>) -> Res<'s, T>) -> R<T> {
     bare_js_api::enter(it, |s| match f(s) {

@@ -87,7 +87,7 @@ use crate::browser_navigation_url::form_serialize;
 use crate::browser_streams as streams;
 use bare_js::eval::{Error, Interp, LimitKind};
 use bare_js::value::{ObjId, Value};
-use bare_js_api::{Args, Attrs, Engine, Error as AErr, HostFn, Local, Persistent, Traced, Type};
+use bare_js_api::{Args, Engine, Error as AErr, HostFn, Local, Persistent, Traced, Type};
 use bare_net::http::{Client, Cookies, Ctx, Method, Request as NetRequest};
 use bare_net::parallel::Task;
 use bare_url::{Scheme, Url};
@@ -1503,13 +1503,7 @@ fn headers_iter_next<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'
             }
         }
     };
-    let op = s.engine().object_prototype();
-    let r = d.obj_s(s, op)?;
-    let r = d.obj_local(s, r);
-    s.define_str(r, "value", value, Attrs::ALL)?;
-    let done = s.boolean(done);
-    s.define_str(r, "done", done, Attrs::ALL)?;
-    Ok(r)
+    iter_result_s(s, value, done)
 }
 
 // ---------------------------------------------------------------------------------------------- Request and Response
@@ -2082,13 +2076,7 @@ pub(crate) fn reader_read<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: A
                 (v, false)
             }
         };
-        let op = s.engine().object_prototype();
-        let res = d.obj_s(s, op)?;
-        let res = d.obj_local(s, res);
-        s.define_str(res, "value", value, Attrs::ALL)?;
-        let done = s.boolean(done);
-        s.define_str(res, "done", done, Attrs::ALL)?;
-        Ok(res)
+        iter_result_s(s, value, done)
     })();
     settle_s(s, p, r)
 }
