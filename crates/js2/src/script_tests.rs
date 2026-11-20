@@ -521,3 +521,136 @@ fn built_ins_survive_constant_collection_with_many_live_values() {
         "w0,w9,w135,23,L-R,w0,w1,24,48,14",
     )]);
 }
+
+// ---- switch with a jump table ----
+
+/// `src` with every `case LITERAL:` turned into `case (void 0, LITERAL):`, which is no constant: the compiler keeps the chain of compares.
+fn as_chain(src: &str) -> String {
+    let mut out = String::new();
+    let mut rest = src;
+    while let Some(i) = rest.find("case ") {
+        let after = &rest[i + 5..];
+        let end = after.find(':').expect("a case has a colon");
+        out.push_str(&rest[..i]);
+        out.push_str(&format!("case (void 0, {}):", &after[..end]));
+        rest = &after[end + 1..];
+    }
+    out + rest
+}
+
+/// The ops of the table switches in the code of `src` (the script and every function; all pass the verifier).
+fn table_ops(src: &str) -> usize {
+    // The atoms of the code live in `shared`: it must outlive the verifier.
+    let shared = crate::atoms::SharedAtoms::default();
+    let prog = crate::script::compile(src, &shared, Default::default()).expect("compile");
+    prog.codes
+        .iter()
+        .map(|c| {
+            crate::verify::verify(c).unwrap_or_else(|e| panic!("{e}\n{}", c.disassemble()));
+            c.disassemble().lines().filter(|l| l.contains(" SwitchI ") || l.contains(" SwitchA ")).count()
+        })
+        .sum()
+}
+
+/// A function `sw(v)` with the `switch` body `cases` (`r` is a string that it builds, `return r` follows), run on each of `vals`.
+/// The text of all the results is the same with the table, with the chain, and under constant collection.
+fn switch_same(cases: &str, vals: &str, want: &str) {
+    let src = format!(
+        "function sw(v) {{ var r = ''; switch (v) {{ {cases} }} return r; }} var vals = [{vals}]; var out = ''; for (var i = 0; i < vals.length; i++) out += sw(vals[i]) + ','; var result = out;"
+    );
+    let chain = as_chain(&src);
+    assert_eq!(table_ops(&src), 1, "no table: {src}");
+    assert_eq!(table_ops(&chain), 0, "a table in the chain version: {chain}");
+    check(&[(&src, "result", want)]);
+    check(&[(&chain, "result", want)]);
+}
+
+#[test]
+fn a_dense_integer_switch_dispatches_like_the_chain() {
+    // `default` in the middle, fallthrough from 0 to 1, a gap at 2 and 4, a `break`, and a case after the default.
+    let cases = "case 0: r += 'a'; case 1: r += 'b'; break; default: r += 'd'; case 5: r += 'e'; break; case 3: r += 'c';";
+    // Ints, doubles that are integers (`6 / 2`, `-0`), values out of range, fractions, NaN, other types.
+    let vals = "0, 1, 2, 3, 4, 5, 6, -1, 1.0, 6 / 2, -0, 0 / 0, 1.5, 2147483648, -2147483649, 1e300, -1e300, 1 / 0, '1', '0', null, undefined, true, false, {}";
+    // The first 11 values are 0, 1, 2, 3, 4, 5, 6, -1, 1.0, 3.0 and -0: 2, 4, 6 and -1 get the default and fall into `case 5`.
+    let want = format!("ab,b,de,c,de,e,de,de,b,c,ab,{}", "de,".repeat(14));
+    switch_same(cases, vals, &want);
+}
+
+#[test]
+fn a_switch_on_negative_and_shifted_integers() {
+    // A table that starts below 0, and one that ends at the top of the 32-bit range.
+    switch_same(
+        "case -2: r += 'a'; break; case -1: r += 'b'; break; case 1: r += 'c'; break;",
+        "-3, -2, -1, 0, 1, 2, -2.0, -0",
+        ",a,b,,c,,a,,",
+    );
+    switch_same(
+        "case 2147483645: r += 'a'; break; case 2147483646: r += 'b'; break; case 2147483647: r += 'c'; break; default: r += 'd';",
+        "2147483644, 2147483645, 2147483646, 2147483647, 2147483648, -2147483648, 2147483647.0, -1",
+        "d,a,b,c,d,d,c,d,",
+    );
+}
+
+#[test]
+fn a_string_switch_dispatches_like_the_chain() {
+    // One-byte and two-byte cases, an empty string, `default` in the middle and a case with a fallthrough.
+    let cases = "case 'a': r += 1; case 'bb': r += 2; break; default: r += 'd'; case 'ccc': r += 3; break; case 'é': r += 4; case '日本': r += 5; break; case '': r += 6;";
+    // A string made by `+` is not an atom (its hash is not known yet): 'b' + 'b' is the case 'bb', '日' + '本' is the case '日本'.
+    // `1` and `'1'` and objects are not any case. A string that differs in the last unit or in its width is not a case either.
+    let vals = "'a', 'bb', 'ccc', 'é', '日本', '', 'A', 'b', 'bbb', 'ab', 'b' + 'b', '日' + '本', '日' + '木', 1, null, undefined, {}, 'ccd', 'cc', 'e'";
+    // 'a' falls into 'bb' (1, 2). 'é' falls into '日本' (4, 5). The empty string is the last case: only 6.
+    let want = "12,2,3,45,5,6,d3,d3,d3,d3,2,5,d3,d3,d3,d3,d3,d3,d3,d3,";
+    switch_same(cases, vals, want);
+}
+
+#[test]
+fn a_string_switch_flattens_a_rope() {
+    // A string of 66 units made by `+` is a rope: the hash needs its units. The case has the same 66 units.
+    let long = "0123456789012345678901234567890123";
+    let cases = format!("case '{long}{long}': r += 'long'; break; case 'x': r += 'x'; break; case 'y': r += 'y'; break;");
+    let vals = format!("'{long}' + '{long}', '{long}', 'x', ('{long}' + '{long}') + 'z'");
+    switch_same(&cases, &vals, "long,,x,,");
+}
+
+#[test]
+fn a_switch_of_many_cases_finds_each_one() {
+    // 40 cases: the integer table has 40 entries; the string table has 64 slots (at most 3/4 full), so keys collide and the probe runs. Each key finds its own
+    // case and a key that is not a case gets the default. The names `'s' + k` are made at run time, so no atom is the discriminant.
+    let ints: String = (0..40).map(|k| format!("case {k}: r += {}; break; ", k * 7)).collect();
+    let strs: String = (0..40).map(|k| format!("case 's{k}': r += {}; break; ", k * 7)).collect();
+    for (cases, key) in [(ints, "k"), (strs, "'s' + k")] {
+        let src = format!(
+            "function sw(v) {{ var r = 0; switch (v) {{ {cases} default: r = -1; }} return r; }} var sum = 0, bad = 0; for (var k = 0; k < 45; k++) {{ var got = sw({key}); if (k < 40 ? got !== k * 7 : got !== -1) bad++; sum += got; }} var result = bad + ':' + sum;"
+        );
+        assert_eq!(table_ops(&src), 1);
+        check(&[(&src, "result", &format!("0:{}", (0..40).map(|k| k * 7).sum::<i32>() - 5))]);
+    }
+}
+
+#[test]
+fn a_switch_with_a_case_that_is_not_a_constant_keeps_the_order_of_evaluation() {
+    // The cases `t(1)` and `t(2)` run in order until one matches: the log is `12`, and `t(9)` after the match never runs.
+    let src = "var log = ''; function t(x) { log += x; return x; } function sw(v) { switch (v) { case 3: return 'c'; case 4: return 'd'; case 5: return 'e'; case t(1): return 'a'; case t(2): return 'b'; case t(9): return 'z'; } return '-'; } var result = sw(2) + ':' + log;";
+    assert_eq!(table_ops(src), 0);
+    check(&[(src, "result", "b:12")]);
+    // The discriminant is evaluated once, and before any case.
+    let src = "var n = 0; function d() { n++; return 3; } function sw() { switch (d()) { case 1: return 'a'; case 2: return 'b'; case 3: return 'c'; case 4: return 'd'; } } var result = sw() + n;";
+    assert_eq!(table_ops(src), 1);
+    check(&[(src, "result", "c1")]);
+}
+
+#[test]
+fn switch_in_loops_with_continue_break_labels_and_lexical_cases() {
+    // `continue` and `break` out of the switch, a nested switch, a labeled `break` out of two, and a `let` in a case that a closure keeps.
+    let src = "function f(v) { var out = ''; for (var i = 0; i < 6; i++) { switch (v + i) { case 1: out += 'a'; continue; case 2: out += 'b'; break; case 3: { let q = i; out += q; } case 4: out += 'c'; break; default: out += '-'; } out += '.'; } return out; } var result = f(0);";
+    assert_eq!(table_ops(src), 1);
+    // i = 0 gives 0: default `-.`; i = 1: `a` and continue (no `.`); i = 2: `b.`; i = 3: `3c.`; i = 4: `c.`; i = 5: `-.`.
+    check(&[(src, "result", "-.ab.3c.c.-.")]);
+    let src = "function f() { var out = ''; outer: for (var i = 0; i < 3; i++) { switch (i) { case 0: out += 'x'; break; case 1: switch ('k') { case 'a': out += 'a'; break; case 'b': out += 'b'; break; case 'k': out += 'K'; break outer; } case 2: out += 'two'; break; case 3: out += 'three'; } out += ';'; } return out; } var result = f();";
+    assert_eq!(table_ops(src), 2);
+    check(&[(src, "result", "x;K")]);
+    // A closure that captures a `let` of the switch scope, and a read of it before its case ran (the dead zone).
+    let src = "function f(v) { var g = null; switch (v) { case 1: let x = 10; g = () => x; break; case 2: let y = 20; g = () => y; break; case 3: try { x = 1; } catch (e) { g = () => 'tdz'; } break; case 4: break; } return g ? g() : 'none'; } var result = '' + f(1) + f(2) + f(3) + f(4) + f(5);";
+    assert_eq!(table_ops(src), 1);
+    check(&[(src, "result", "1020tdznonenone")]);
+}

@@ -6,6 +6,8 @@
 //!   of a table (numbers, atoms, functions, recipes, sites) is in range, and a field that the op does not use is 0;
 //! - each site has an atom, and exactly one instruction uses it;
 //! - each jump target is the first word of an instruction; `JmpBack` goes back and every other jump goes forward;
+//! - each switch table is inside the pool `Code::tables`, and all its targets are later instructions. A string table has a power of two
+//!   slots, an empty slot (so a probe ends), atoms in range with the hash of their atom, and every filled slot is found by the probe from its hash;
 //! - the loop table: headers are sorted and unique, each loop ends at a `JmpBack` that targets its header, every `JmpBack` is covered
 //!   by the loop of its target, and loops are nested or apart;
 //! - handlers: a valid range, an instruction as target, a register in range;
@@ -16,7 +18,7 @@
 //!   never below 0, and at least the depth of a handler in each instruction that can throw in its range; no instruction reads a register
 //!   that some path has not written, and a root map names only registers that every path has written. Registers `0..nparams` are
 //!   written at the entry, and a handler writes its register. Unreachable instructions are not checked by the data flow.
-use crate::bytecode::{Code, ITER_REGS, Ins, Op, Recipes, decode};
+use crate::bytecode::{Code, ITER_REGS, Ins, Op, Recipes, STR_EMPTY, STR_SLOT, decode};
 
 type Bits = Vec<u64>;
 
@@ -98,6 +100,11 @@ pub fn verify(code: &Code) -> Result<(), String> {
                 'A' if !in_range(code.atoms.len()) => return err("no such atom"),
                 'F' if !in_range(code.funcs.len()) => return err("no such function"),
                 'H' if !in_range(code.recipes.len()) => return err("no such recipe"),
+                'T' => {
+                    if let Err(why) = check_table(code, &i, pc, &start) {
+                        return err(why);
+                    }
+                }
                 'S' => match site_uses.get_mut(v as usize) {
                     Some(u) => *u += 1,
                     None => return err("no such site"),
@@ -151,6 +158,53 @@ pub fn verify(code: &Code) -> Result<(), String> {
         }
     }
     flow(code, &ins, &at)
+}
+
+/// Check the switch table of `i` (at `pc`). A target must be an instruction after the switch.
+fn check_table(code: &Code, i: &Ins, pc: usize, start: &dyn Fn(i64) -> bool) -> Result<(), &'static str> {
+    let ok = |t: u32| t as usize > pc && start(t as i64);
+    match i.op {
+        Op::SwitchI => {
+            let (lo, default, targets) = code.int_table(i.b).ok_or("the table is not inside the pool")?;
+            if targets.is_empty() {
+                return Err("an empty table");
+            }
+            if lo as i64 + targets.len() as i64 - 1 > i32::MAX as i64 {
+                return Err("the table runs past the largest integer");
+            }
+            if !ok(default) || !targets.iter().all(|&t| ok(t)) {
+                return Err("a target is not a later instruction");
+            }
+        }
+        Op::SwitchA => {
+            let (default, slots) = code.str_table(i.b).ok_or("the table is not inside the pool or its slot count is not a power of two")?;
+            let mask = slots.len() / STR_SLOT - 1;
+            if !ok(default) {
+                return Err("a target is not a later instruction");
+            }
+            if !slots.chunks(STR_SLOT).any(|c| c[1] == STR_EMPTY) {
+                return Err("the table has no empty slot");
+            }
+            for (p, c) in slots.chunks(STR_SLOT).enumerate().filter(|(_, c)| c[1] != STR_EMPTY) {
+                let atom = code.atoms.get(c[1] as usize).ok_or("a slot names no atom")?;
+                if atom.cached_hash() != c[0] {
+                    return Err("the hash of a slot is not the hash of its atom");
+                }
+                if !ok(c[2]) {
+                    return Err("a target is not a later instruction");
+                }
+                let mut q = c[0] as usize & mask;
+                while q != p {
+                    if slots[q * STR_SLOT + 1] == STR_EMPTY {
+                        return Err("the probe from the hash of a slot meets an empty slot first");
+                    }
+                    q = (q + 1) & mask;
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn check_loops(code: &Code, ins: &[(usize, Ins, usize)], at: &[usize], n: usize) -> Result<(), String> {
@@ -273,6 +327,9 @@ fn flow(code: &Code, ins: &[(usize, Ins, usize)], at: &[usize]) -> Result<(), St
         }
         // Successors.
         if let Some(t) = i.target(pc, len) {
+            meet(&mut state, &mut work, at[t as usize], k, depth, &set)?;
+        }
+        for t in code.switch_targets(&i).into_iter().flatten() {
             meet(&mut state, &mut work, at[t as usize], k, depth, &set)?;
         }
         if i.op.falls_through() {

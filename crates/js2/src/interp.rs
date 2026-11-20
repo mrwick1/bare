@@ -61,7 +61,7 @@
 //! safe form of each, in `docs/progress.md` (S2.6): (1) and (2) together save 8 to 18% of the instructions of a micro loop, (3) another 6 to 9%.
 use crate::atoms::SharedAtoms;
 use crate::builtins::Outcome;
-use crate::bytecode::{Asm, CF_ARGS, CF_LINK, Code, ITER_REGS, Ins, Op, decode};
+use crate::bytecode::{Asm, CF_ARGS, CF_LINK, Code, ITER_REGS, Ins, Op, STR_EMPTY, STR_SLOT, decode};
 use crate::gc::Marker;
 use crate::interp_rt::{ErrKind, Feedback, Got, Key, Put, R, Realm};
 use crate::object::{F_DERIVED, Obj};
@@ -117,6 +117,46 @@ fn record(stack: &[Value], fp: usize, k: usize) -> Value {
 #[inline(always)]
 fn int_at(stack: &[Value], fp: usize, k: usize) -> i32 {
     stack[fp - REC + k].bits() as u32 as i32
+}
+
+/// The target of `SwitchI` for the table `t` (`lo`, the default, the length and the targets: `bytecode.rs`) and the value `v`. An integer
+/// and a double that is an integer value (`-0` is 0, `3.0` is 3) index the table; a NaN, a fraction, a value out of range and a
+/// non-number get the default (`f as i32` saturates, so the round trip tells the first group from the others).
+#[inline(always)]
+fn switch_int(t: &[u32], v: Value) -> usize {
+    let i = v.as_int().or_else(|| v.as_f64().filter(|f| *f == f64::from(*f as i32)).map(|f| f as i32));
+    // `lo + len - 1` fits an `i32` (the verifier), so a value below `lo` wraps past `len`.
+    let k = i.map_or(usize::MAX, |i| i.wrapping_sub(t[0] as i32) as u32 as usize);
+    (if k < t[2] as usize { t[3 + k] } else { t[1] }) as usize
+}
+
+/// The target of `SwitchA` for the table `t` and the value `v`. Out of line: the string probe is not part of the hot loop of an
+/// arithmetic or call path, and a function this size inside `run` costs those paths instructions.
+#[inline(never)]
+fn switch_str(heap: &mut crate::heap::Heap, code: &Code, t: &[u32], v: Value) -> usize {
+    let mut to = t[0];
+    if let Some(s) = Realm::str_of(v) {
+        // The hash of an atom or of a string that was a key before is in its cell; a rope or a new string computes it.
+        let h = match s.cached_hash() {
+            0 => s.hash(heap).expect("memory"),
+            h => h,
+        };
+        let mask = t[1] as usize;
+        let mut p = h as usize & mask;
+        // The verifier proved an empty slot, so the probe ends.
+        while let [slot_hash, atom, target] = t[2 + STR_SLOT * p..][..STR_SLOT] {
+            if atom == STR_EMPTY {
+                break;
+            }
+            let case = code.atoms[atom as usize];
+            if slot_hash == h && (case == s || crate::string::Str::equals(heap, s, case).expect("memory")) {
+                to = target;
+                break;
+            }
+            p = (p + 1) & mask;
+        }
+    }
+    to as usize
 }
 
 /// Mark the frames, from the top (`ci`, `fp`, `pc` of its safepoint) down to the frame of the host.
@@ -1132,6 +1172,8 @@ impl Vm {
                     Op::JSNeNull => jump!(!r!(a!()).is_null(), next, sbx!()),
                     Op::JSEqUndef => jump!(r!(a!()).is_undefined(), next, sbx!()),
                     Op::JSNeUndef => jump!(!r!(a!()).is_undefined(), next, sbx!()),
+                    Op::SwitchI => pc = switch_int(&code.tables[bx!()..], r!(a!())),
+                    Op::SwitchA => pc = switch_str(&mut realm.heap, code, &code.tables[bx!()..], r!(a!())),
                     Op::Ret => ret!(r!(a!())),
                     Op::RetUndef => ret!(undef),
                     Op::Throw => throw!(r!(a!())),
