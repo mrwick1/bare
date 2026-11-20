@@ -42,6 +42,7 @@ pub mod interp_ops;
 pub mod opcount;
 pub mod builtins;
 mod bi_array;
+mod bi_object;
 mod bi_number;
 mod bi_string;
 pub mod script;

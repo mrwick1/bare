@@ -423,3 +423,34 @@ fn observer_target_element_brand_surface() {
     assert_eq!(js(&mut b,"var el=document.getElementById('t'); Object.prototype.toString.call(el)"),"[object HTMLElement]");
     assert_eq!(js(&mut b,"var ref=Object.prototype.toString.call(el)==='[object Object]'?new Proxy(el,{}):el; new IntersectionObserver(function(){}).observe(ref); 'ok'"),"ok");
 }
+
+/// The members of `HTMLScriptElement` and `HTMLLinkElement` that no Chrome case reads, and the `document` writers on a wrong `this`.
+#[test]
+fn script_and_link_members_keep_their_answers_and_errors() {
+    let mut b = browser("<base href='http://example.com/a/b'><link id=l href='x.css'><script id=s src='y.js' type='text/x' async>1</script>");
+    let cases: [(&str, &str); 20] = [
+        ("var s = document.getElementById('s'); [s.src, s.type, s.async, s.defer, s.noModule, s.text].join('|')", "y.js|text/x|true|false|false|1"),
+        ("s.src = '../z.js'; s.type = 'module'; s.async = false; s.defer = true; s.noModule = true; [s.src, s.getAttribute('src'), s.type, s.hasAttribute('async'), s.defer, s.noModule].join('|')", "../z.js|../z.js|module|false|true|true"),
+        ("s.text = 'a=1'; [s.text, s.textContent, s.childNodes.length].join('|')", "a=1|a=1|1"),
+        ("var l = document.getElementById('l'); l.href = 'q/r.css'; [l.href, l.getAttribute('href')].join('|')", "q/r.css|q/r.css"),
+        ("document.createElement('script').src + '|' + document.createElement('script').type + '|' + document.createElement('link').href", "||"),
+        ("var f = function () {}, g = function () {}; s.onload = f; s.onerror = g; [s.onload === f, s.onerror === g]. join()", "true,true"),
+        ("s.onload = g; s.onerror = 5; [s.onload === g, s.onerror].join()", "true,"),
+        ("s.onload = null; [s.onload, document.createElement('script').onerror].join()", ","),
+        ("var d = Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype, 'src'); [d.get.name, d.set.name, d.get.length, d.set.length, typeof d.enumerable].join()", "get src,set src,0,1,boolean"),
+        ("try { Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype, 'src').get.call({}) } catch (e) { e.name + ': ' + e.message }", "TypeError: Illegal invocation"),
+        ("try { Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype, 'onload').set.call(document, null) } catch (e) { e.name + ': ' + e.message }", "TypeError: Illegal invocation"),
+        ("try { Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype, 'noModule').set.call(5, 1) } catch (e) { e.name + ': ' + e.message }", "TypeError: Illegal invocation"),
+        ("try { Object.getOwnPropertyDescriptor(Document.prototype, 'readyState').get.call({}) } catch (e) { e.name + ': ' + e.message }", "TypeError: Illegal invocation"),
+        ("[document.readyState, document.currentScript].join()", "loading,"),
+        ("try { document.write.call(s, 'x') } catch (e) { e.name + ': ' + e.message }", "TypeError: Illegal invocation"),
+        ("try { document.open.call({}) } catch (e) { e.name + ': ' + e.message }", "TypeError: Illegal invocation"),
+        ("try { document.close.call(document.body) } catch (e) { e.name + ': ' + e.message }", "TypeError: Illegal invocation"),
+        ("document.open() === document", "true"),
+        ("document.write('<i id=w>1</i>', 2, null); document.writeln('x'); document.close(); document.body.textContent", "12nullx\n"),
+        ("[document.write.length, document.writeln.length, document.open.length, document.close.length, document.write.name].join()", "1,1,0,0,write"),
+    ];
+    for (src, want) in cases {
+        assert_eq!(js(&mut b, src), want, "{src}");
+    }
+}

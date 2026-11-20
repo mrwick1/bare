@@ -18,12 +18,12 @@ use bare_js::value::{ObjId, Value};
 
 type V = R<Value>;
 
-pub(crate) fn script_no_module(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    crate::browser_loader::flag(d, it, this, "nomodule")
+pub(crate) fn script_no_module<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    crate::browser_loader::flag(d, s, this, "nomodule")
 }
 
-pub(crate) fn set_script_no_module(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    crate::browser_loader::set_flag(d, it, this, a, "nomodule")
+pub(crate) fn set_script_no_module<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    crate::browser_loader::set_flag(d, s, this, a, "nomodule")
 }
 
 pub(crate) fn has_focus(_: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> V {

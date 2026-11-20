@@ -1015,7 +1015,7 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
 impl Host for Dom {
     fn call(&self, it: &mut Interp<'_>, id: u32, this: Value, args: &[Value], is_new: bool) -> R<Value> {
         let (h, needs_new) = self.handlers.borrow()[id as usize];
-        self.dispatch_host(it, id, needs_new && !is_new, Some(h), |it| h(self, it, this, args))
+        self.dispatch_host(it, id, needs_new && !is_new, |it| h(self, it, this, args))
     }
 
     fn roots(&self, out: &mut Vec<Value>) {
@@ -1608,13 +1608,13 @@ impl Dom {
             ("Window", win, None),
             ("Node", node, None),
             ("Element", element, None),
-            ("HTMLElement", html, Some(ce::HANDLERS[0])),
+            ("HTMLElement", html, None),
             ("SVGElement", svg, None),
-            ("HTMLInputElement", input, Some(ce::HANDLERS[6])),
-            ("HTMLIFrameElement", iframe, Some(ce::HANDLERS[5])),
-            ("HTMLLinkElement", link, Some(ce::HANDLERS[7])),
-            ("HTMLFormElement", form, Some(ce::HANDLERS[4])),
-            ("HTMLButtonElement", button, Some(ce::HANDLERS[3])),
+            ("HTMLInputElement", input, None),
+            ("HTMLIFrameElement", iframe, None),
+            ("HTMLLinkElement", link, None),
+            ("HTMLFormElement", form, None),
+            ("HTMLButtonElement", button, None),
             ("CharacterData", chardata, None),
             ("Text", text, None),
             ("Comment", comment, None),
@@ -1638,6 +1638,7 @@ impl Dom {
                 ("DocumentFragment", _) => self.add_fn_s_obj(it, nd::fragment_ctor_s, name, 0, HostFn::CtorNewTarget)?,
                 ("SubmitEvent", _) => self.add_fn_s_obj(it, fm::submit_event_ctor_s, name, 1, HostFn::CtorNewTarget)?,
                 (_, Some(h)) => self.add_ctor_nt(it, h, name, u32::from(name != "EventTarget" && !name.starts_with("HTML")))?,
+                (_, None) if name.starts_with("HTML") => ce::interface_ctor(self, it, name, false)?,
                 (_, None) => self.add_fn(it, illegal_constructor, name, 0, false)?,
             };
             it.define_data(f, kp, Value::Object(proto), false, false, false)?;
@@ -1860,7 +1861,7 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Input], name: "defaultValue", len: 0, kind: AS(nd::default_value, nd::set_default_value) },
     Def { on: &[Input], name: "defaultChecked", len: 0, kind: AS(nd::default_checked, nd::set_default_checked) },
     Def { on: &[Link], name: "rel", len: 0, kind: AS(nd::link_rel, nd::set_link_rel) },
-    Def { on: &[Link], name: "href", len: 0, kind: A(crate::browser_loader::link_href, crate::browser_loader::set_link_href) },
+    Def { on: &[Link], name: "href", len: 0, kind: AS(crate::browser_loader::link_href, crate::browser_loader::set_link_href) },
     Def { on: &[Link], name: "as", len: 0, kind: AS(nd::link_as, nd::set_link_as) },
     Def { on: &[Link], name: "crossOrigin", len: 0, kind: AS(nd::link_cross_origin, nd::set_link_cross_origin) },
     Def { on: &[Document], name: "scripts", len: 0, kind: G(crate::browser_platform_query::scripts) },
