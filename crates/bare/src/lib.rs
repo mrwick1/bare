@@ -203,6 +203,7 @@ mod browser_implementation;
 mod browser_perf_observer;
 mod browser_mutation;
 mod browser_custom;
+mod browser_scoped;
 mod browser_face;
 mod browser_geom;
 mod browser_basics;

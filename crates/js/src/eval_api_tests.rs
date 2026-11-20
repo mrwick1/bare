@@ -72,7 +72,7 @@ fn setup() -> (Interp<'static>, Rc<H>) {
         s.set_host(h.clone());
         let g = s.global();
         for (i, name) in ["add", "callback", "fail", "keep", "kept", "describe"].into_iter().enumerate() {
-            let f = s.host_function(name, i as u32, 1).unwrap();
+            let f = s.host_function(name, i as u32, 1, bare_js_api::HostFn::Method).unwrap();
             let k = s.string(name).unwrap();
             s.define(g, k, f, Attrs::METHOD).unwrap();
         }
@@ -188,7 +188,7 @@ fn an_owner_keeps_its_traced_values_while_it_lives() {
         let h = Rc::new(Owners::default());
         enter(&mut it, |s| {
             s.set_host(h.clone());
-            let (g, f, k) = (s.global(), s.host_function("own", 0, 2).unwrap(), s.string("own").unwrap());
+            let (g, f, k) = (s.global(), s.host_function("own", 0, 2, bare_js_api::HostFn::Method).unwrap(), s.string("own").unwrap());
             s.define(g, k, f, Attrs::METHOD).unwrap();
         });
         // Key 0 has no weak reference to its value (a reached WeakRef target is a heap root). Key 1 shows the value go.
@@ -428,7 +428,7 @@ fn base_setup() -> Interp<'static> {
         s.set_host(Rc::new(Base));
         let g = s.global();
         for (i, name) in BASE_FNS.into_iter().enumerate() {
-            let f = s.host_function(name, i as u32, 1).unwrap();
+            let f = s.host_function(name, i as u32, 1, bare_js_api::HostFn::Method).unwrap();
             let k = s.string(name).unwrap();
             s.define(g, k, f, Attrs::METHOD).unwrap();
         }
@@ -727,7 +727,7 @@ fn a_checkpoint_inside_a_script_function_does_nothing() {
         let mut it = Interp::realm(Heap::default(), EvalLimits { max_steps: 100_000, ..Default::default() }).unwrap();
         enter(&mut it, |s| {
             s.set_host(Rc::new(Checkpointer));
-            let (g, f, k) = (s.global(), s.host_function("run", 0, 1).unwrap(), s.string("run").unwrap());
+            let (g, f, k) = (s.global(), s.host_function("run", 0, 1, bare_js_api::HostFn::Method).unwrap(), s.string("run").unwrap());
             s.define(g, k, f, Attrs::METHOD).unwrap();
         });
         assert_eq!(out(&mut it, "var n = 0; function outer() { return run(() => { n++ }) } var ran = outer(); ran + ',' + n"), "0,0", "a script function is running: no job runs");

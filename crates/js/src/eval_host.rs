@@ -113,6 +113,10 @@ impl<'p> Interp<'p> {
     }
 
     fn call_host(&mut self, id: u32, this: Value, args: &[Value], is_new: bool, nt: Option<ObjId>) -> Res<Value> {
+        // A function made through the interface (`Engine::host_function`) has `API_ID` in its id (the dual registry of `Dom`).
+        if id & API_ID != 0 {
+            return self.call_api_host(id & !API_ID, this, args, is_new, nt);
+        }
         let Some(host) = self.host.clone() else { return self.call_api_host(id, this, args, is_new, nt) };
         // This call sees its own `new.target` (none for a plain call). The caller's comes back on every exit.
         let saved = std::mem::replace(&mut self.host_nt, nt);

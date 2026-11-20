@@ -116,7 +116,7 @@ impl Engine for Toy {
     fn call<'s>(&mut self, _f: Local<'_>, _this: Local<'_>, _args: &[Local<'_>]) -> Result<Local<'s>, Error<'s>> {
         Err(Error::Abort(Abort::Unsupported("calls")))
     }
-    fn host_function<'s>(&mut self, _name: &str, _id: u32, _length: u32) -> Result<Local<'s>, Error<'s>> {
+    fn host_function<'s>(&mut self, _name: &str, _id: u32, _length: u32, _kind: HostFn) -> Result<Local<'s>, Error<'s>> {
         Err(Error::Abort(Abort::Unsupported("host functions")))
     }
     fn set_host(&mut self, _host: Rc<dyn Host<Self>>) {}

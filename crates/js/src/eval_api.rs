@@ -27,6 +27,9 @@ impl ApiState<'_> {
     }
 }
 
+/// The bit of a host function id that marks a function made through the interface: its calls go to the interface host.
+pub(crate) const API_ID: u32 = 1 << 31;
+
 impl<'p> Interp<'p> {
     /// Note the owners in `seen` before a collection marks, so that marking an owner finds its key.
     pub(crate) fn api_owners(&self, seen: &mut Seen) {
@@ -266,8 +269,8 @@ impl<'p> Interp<'p> {
         })
     }
 
-    /// `call_host` for a realm whose host came through the interface. Kept apart, so the old host path does not change.
-    #[cold]
+    /// `call_host` for a function of the interface host: its id has `API_ID`, or the realm has no old host. Kept apart, so the old
+    /// host path does not change.
     fn call_api_host(&mut self, id: u32, this: Value, args: &[Value], is_new: bool, nt: Option<ObjId>) -> Result<Value, Error> {
         let Some(h) = self.api.host.clone() else { return Err(unsupported("host function without a host", Span::default())) };
         let saved = std::mem::replace(&mut self.host_nt, nt);
@@ -428,8 +431,11 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
         }
     }
 
-    fn host_function<'s>(&mut self, name: &str, id: u32, length: u32) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
-        match Interp::host_function(self, id, name, length, false) {
+    fn host_function<'s>(&mut self, name: &str, id: u32, length: u32, kind: bare_js_api::HostFn) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
+        use bare_js_api::HostFn;
+        assert!(id & API_ID == 0, "host function id too large");
+        let (ctor, nt) = (kind != HostFn::Method, kind == HostFn::CtorNewTarget);
+        match self.host_function_with(id | API_ID, name, length, ctor, nt) {
             Ok(o) => Ok(self.api_push(Value::Object(o))),
             Err(e) => Err(self.api_err(e)),
         }

@@ -415,6 +415,17 @@ pub enum Intrinsic {
     SymbolIterator,
 }
 
+/// How a host function takes a call ([`Scope::host_function`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostFn {
+    /// A plain function: `new` on it is a `TypeError`.
+    Method,
+    /// A constructor. A `new.target` that is not the function itself (`class extends`, `Reflect.construct`) is refused.
+    Ctor,
+    /// A constructor that reads `new.target` with [`Scope::proto_from_new_target`].
+    CtorNewTarget,
+}
+
 /// Why a call failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error<'s> {
@@ -600,8 +611,8 @@ pub trait Engine: Sized {
     /// `Object.defineProperty` of a data property.
     fn define<'s>(&mut self, obj: Local<'_>, key: Local<'_>, value: Local<'_>, attrs: Attrs) -> Result<(), Error<'s>>;
     fn call<'s>(&mut self, f: Local<'_>, this: Local<'_>, args: &[Local<'_>]) -> Result<Local<'s>, Error<'s>>;
-    /// A function whose calls go to [`Host::call`] with `id`.
-    fn host_function<'s>(&mut self, name: &str, id: u32, length: u32) -> Result<Local<'s>, Error<'s>>;
+    /// A function whose calls go to [`Host::call`] with `id`. `id` is below 2^31.
+    fn host_function<'s>(&mut self, name: &str, id: u32, length: u32, kind: HostFn) -> Result<Local<'s>, Error<'s>>;
     fn set_host(&mut self, host: Rc<dyn Host<Self>>);
 
     /// The raw value of a local, for a [`Traced`].
@@ -896,8 +907,8 @@ impl<'s, E: Engine> Scope<'s, E> {
         self.e.call(f, this, args)
     }
 
-    pub fn host_function(&mut self, name: &str, id: u32, length: u32) -> Result<Local<'s>, Error<'s>> {
-        self.e.host_function(name, id, length)
+    pub fn host_function(&mut self, name: &str, id: u32, length: u32, kind: HostFn) -> Result<Local<'s>, Error<'s>> {
+        self.e.host_function(name, id, length, kind)
     }
 
     pub fn set_host(&mut self, host: Rc<dyn Host<E>>) {
