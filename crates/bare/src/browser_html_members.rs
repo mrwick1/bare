@@ -19,11 +19,12 @@
 //! `output.defaultValue`, `dialog.requestClose()`.
 
 use crate::browser::*;
-use crate::browser_platform::arg;
+use crate::browser_scoped::*;
+use bare_js_api::{Args, Local, Type};
 use crate::browser_reflect::{parse_float, reflect, text, this_of};
 use bare_html::dom::NodeId;
 use bare_js::eval::Interp;
-use bare_js::value::{ObjId, Value};
+use bare_js::value::{ObjId};
 
 /// Fill the prototype of the interface `name` of `browser_html.rs`. Returns `true` when the interface has members of its own here.
 pub(crate) fn members(d: &Dom, it: &mut Interp<'_>, o: ObjId, name: &str) -> R<bool> {
@@ -34,14 +35,14 @@ pub(crate) fn members(d: &Dom, it: &mut Interp<'_>, o: ObjId, name: &str) -> R<b
         "HTMLTableRowElement" => table(d, it, o, Proto::Row)?,
         "HTMLTableCellElement" => table(d, it, o, Proto::Cell)?,
         "HTMLBaseElement" => {
-            d.def_get(it, o, "href", base_href, Some(|d, it, t, a| crate::browser_reflect::set(d, it, t, a, &["base"], "href", "href", crate::browser_reflect::Kind::Str)))?;
+            d.def_get_s(it, o, "href", base_href, Some(|d, it, t, a| crate::browser_reflect::set(d, it, t, a, &["base"], "href", "href", crate::browser_reflect::Kind::Str)))?;
             reflect!(d, it, o, &["base"], { "target" => "target": Str });
         }
         "HTMLDataElement" => reflect!(d, it, o, &["data"], { "value" => "value": Str }),
         "HTMLTimeElement" => reflect!(d, it, o, &["time"], { "dateTime" => "datetime": Str }),
         "HTMLHtmlElement" => reflect!(d, it, o, &["html"], { "version" => "version": Str }),
         "HTMLDetailsElement" => {
-            d.def_get(it, o, "open", crate::browser_details::open_get, Some(crate::browser_details::open_set))?;
+            d.def_get_s(it, o, "open", crate::browser_details::open_get, Some(crate::browser_details::open_set))?;
             reflect!(d, it, o, &["details"], { "name" => "name": Str });
         }
         "HTMLLIElement" => reflect!(d, it, o, &["li"], { "value" => "value": Long(0, i32::MIN) }),
@@ -51,56 +52,56 @@ pub(crate) fn members(d: &Dom, it: &mut Interp<'_>, o: ObjId, name: &str) -> R<b
         }),
         "HTMLFieldSetElement" => {
             reflect!(d, it, o, &["fieldset"], { "disabled" => "disabled": Bool, "name" => "name": Str });
-            d.def_get(it, o, "type", |d, it, t, _| { this_of(d, it, t, &["fieldset"])?; d.js_str(it, "fieldset") }, None)?;
-            d.def_get(it, o, "form", |d, it, t, _| form(d, it, t, "fieldset"), None)?;
+            d.def_get_s(it, o, "type", |d, s, t, _| { this_of(d, s, t, &["fieldset"])?; d.js_str_s(s, "fieldset") }, None)?;
+            d.def_get_s(it, o, "form", |d, s, t, _| form(d, s, t, "fieldset"), None)?;
         }
         "HTMLOutputElement" => {
             reflect!(d, it, o, &["output"], { "name" => "name": Str });
-            d.def_get(it, o, "type", |d, it, t, _| { this_of(d, it, t, &["output"])?; d.js_str(it, "output") }, None)?;
-            d.def_get(it, o, "form", |d, it, t, _| form(d, it, t, "output"), None)?;
-            d.def_get(it, o, "value", |d, it, t, a| { this_of(d, it, t, &["output"])?; crate::browser_dom::text_content(d, it, t, a) },
-                Some(|d, it, t, a| { this_of(d, it, t, &["output"])?; crate::browser_dom::set_text_content(d, it, t, a) }))?;
+            d.def_get_s(it, o, "type", |d, s, t, _| { this_of(d, s, t, &["output"])?; d.js_str_s(s, "output") }, None)?;
+            d.def_get_s(it, o, "form", |d, s, t, _| form(d, s, t, "output"), None)?;
+            d.def_get_s(it, o, "value", |d, s, t, a| { this_of(d, s, t, &["output"])?; crate::browser_dom::text_content_s(d, s, t, a) },
+                Some(|d, s, t, a| { this_of(d, s, t, &["output"])?; crate::browser_dom::set_text_content_s(d, s, t, a) }))?;
         }
         "HTMLProgressElement" => {
-            d.def_get(it, o, "value", |d, it, t, _| Ok(Value::Number(progress(d, it, t)?.0)), Some(|d, it, t, a| set_num(d, it, t, a, "progress", "value", false)))?;
-            d.def_get(it, o, "max", |d, it, t, _| Ok(Value::Number(progress(d, it, t)?.1)), Some(|d, it, t, a| set_num(d, it, t, a, "progress", "max", true)))?;
-            d.def_get(it, o, "position", |d, it, t, _| Ok(Value::Number(progress(d, it, t)?.2)), None)?;
+            d.def_get_s(it, o, "value", |d, s, t, _| { let n = progress(d, s, t)?.0; Ok(s.number(n)) }, Some(|d, s, t, a| set_num(d, s, t, a, "progress", "value", false)))?;
+            d.def_get_s(it, o, "max", |d, s, t, _| { let n = progress(d, s, t)?.1; Ok(s.number(n)) }, Some(|d, s, t, a| set_num(d, s, t, a, "progress", "max", true)))?;
+            d.def_get_s(it, o, "position", |d, s, t, _| { let n = progress(d, s, t)?.2; Ok(s.number(n)) }, None)?;
         }
         "HTMLMeterElement" => {
-            d.def_get(it, o, "value", meter_get::<0>, Some(meter_set::<0>))?;
-            d.def_get(it, o, "min", meter_get::<1>, Some(meter_set::<1>))?;
-            d.def_get(it, o, "max", meter_get::<2>, Some(meter_set::<2>))?;
-            d.def_get(it, o, "low", meter_get::<3>, Some(meter_set::<3>))?;
-            d.def_get(it, o, "high", meter_get::<4>, Some(meter_set::<4>))?;
-            d.def_get(it, o, "optimum", meter_get::<5>, Some(meter_set::<5>))?;
+            d.def_get_s(it, o, "value", meter_get::<0>, Some(meter_set::<0>))?;
+            d.def_get_s(it, o, "min", meter_get::<1>, Some(meter_set::<1>))?;
+            d.def_get_s(it, o, "max", meter_get::<2>, Some(meter_set::<2>))?;
+            d.def_get_s(it, o, "low", meter_get::<3>, Some(meter_set::<3>))?;
+            d.def_get_s(it, o, "high", meter_get::<4>, Some(meter_set::<4>))?;
+            d.def_get_s(it, o, "optimum", meter_get::<5>, Some(meter_set::<5>))?;
         }
         "HTMLDialogElement" => {
             reflect!(d, it, o, &["dialog"], { "open" => "open": Bool });
-            d.def_get(it, o, "returnValue", return_value, Some(set_return_value))?;
-            d.def_method(it, o, "show", 0, |d, it, t, _| open(d, it, t, false))?;
-            d.def_method(it, o, "showModal", 0, |d, it, t, _| open(d, it, t, true))?;
-            d.def_method(it, o, "close", 0, close)?;
+            d.def_get_s(it, o, "returnValue", return_value, Some(set_return_value))?;
+            d.def_method_s(it, o, "show", 0, |d, s, t, _| open(d, s, t, false))?;
+            d.def_method_s(it, o, "showModal", 0, |d, s, t, _| open(d, s, t, true))?;
+            d.def_method_s(it, o, "close", 0, close)?;
         }
         _ => return Ok(false),
     }
     Ok(true)
 }
 
-fn base_href(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    let n = this_of(d, it, this, &["base"])?;
+fn base_href<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = this_of(d, s, this, &["base"])?;
     let raw = text(d, n, "href").unwrap_or_default();
     let doc_url = d.cur_rec().ok();
-    let s = match crate::browser_navigation_url::parse(&raw, doc_url.as_ref()) {
+    let st = match crate::browser_navigation_url::parse(&raw, doc_url.as_ref()) {
         Ok(r) => r.href(),
         Err(_) => raw,
     };
-    d.js_str(it, &s)
+    d.js_str_s(s, &st)
 }
 
-fn form(d: &Dom, it: &mut Interp<'_>, this: Value, tag: &str) -> R<Value> {
-    let n = this_of(d, it, this, &[tag])?;
-    let f = d.form_owner(it, n)?;
-    d.wrap_opt(it, f)
+fn form<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, tag: &str) -> Res<'s, Local<'s>> {
+    let n = this_of(d, s, this, &[tag])?;
+    let f = old(s, |it| d.form_owner(it, n))?;
+    d.wrap_opt_s(s, f)
 }
 
 fn num(d: &Dom, n: NodeId, name: &str) -> Option<f64> {
@@ -108,8 +109,8 @@ fn num(d: &Dom, n: NodeId, name: &str) -> Option<f64> {
 }
 
 /// `(value, max, position)` of a `progress`.
-fn progress(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<(f64, f64, f64)> {
-    let n = this_of(d, it, this, &["progress"])?;
+fn progress<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, (f64, f64, f64)> {
+    let n = this_of(d, s, this, &["progress"])?;
     let max = num(d, n, "max").filter(|&m| m > 0.0).unwrap_or(1.0);
     Ok(match num(d, n, "value") {
         Some(v) => {
@@ -123,8 +124,8 @@ fn progress(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<(f64, f64, f64)> {
 const METER: [&str; 6] = ["value", "min", "max", "low", "high", "optimum"];
 
 /// Member `I` of `METER`. `I` is a constant parameter: one function is made for each value, like six copies of the function.
-fn meter_get<const I: usize>(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    let n = this_of(d, it, this, &["meter"])?;
+fn meter_get<'s, const I: usize>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = this_of(d, s, this, &["meter"])?;
     let min = num(d, n, "min").unwrap_or(0.0);
     let max = num(d, n, "max").unwrap_or(1.0).max(min);
     let low = num(d, n, "low").unwrap_or(min).clamp(min, max);
@@ -136,72 +137,75 @@ fn meter_get<const I: usize>(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Val
         4 => num(d, n, "high").unwrap_or(max).clamp(low, max),
         _ => num(d, n, "optimum").unwrap_or((min + max) / 2.0).clamp(min, max),
     };
-    Ok(Value::Number(v))
+    Ok(s.number(v))
 }
 
-fn meter_set<const I: usize>(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    set_num(d, it, this, a, "meter", METER[I], false)
+fn meter_set<'s, const I: usize>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    set_num(d, s, this, a, "meter", METER[I], false)
 }
 
 /// Write a `double` attribute. `positive`: a value that is not above 0 is ignored.
-fn set_num(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], tag: &str, name: &str, positive: bool) -> R<Value> {
-    let n = this_of(d, it, this, &[tag])?;
-    let x = it.to_js_number(arg(a, 0))?;
+fn set_num<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, tag: &str, name: &str, positive: bool) -> Res<'s, Local<'s>> {
+    let n = this_of(d, s, this, &[tag])?;
+    let arg0 = arg_s(s, a, 0);
+    let x = s.to_number(arg0)?;
     if !x.is_finite() {
-        return Err(it.type_error(&format!("Failed to set the '{name}' property: The provided double value is non-finite.")));
+        return Err(s.type_error(&format!("Failed to set the '{name}' property: The provided double value is non-finite.")));
     }
     if positive && x <= 0.0 {
-        return Ok(Value::Undefined);
+        return Ok(s.undefined());
     }
-    let s = d.string_arg(it, Value::Number(x))?;
-    crate::browser_dom::attr_set(d, it, n, name, &s)?;
-    Ok(Value::Undefined)
+    let xv = s.number(x);
+    let st = d.string_arg_s(s, xv)?;
+    crate::browser_dom::attr_set_s(d, s, n, name, &st)?;
+    Ok(s.undefined())
 }
 
 // ------------------------------------------------------------------------------------------ dialog
 
-fn return_value(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    let n = this_of(d, it, this, &["dialog"])?;
-    let s = d.dialogs.borrow().get(&n).map(|x| x.0.clone()).unwrap_or_default();
-    d.js_str(it, &s)
+fn return_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = this_of(d, s, this, &["dialog"])?;
+    let st = d.dialogs.borrow().get(&n).map(|x| x.0.clone()).unwrap_or_default();
+    d.js_str_s(s, &st)
 }
 
-fn set_return_value(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    let n = this_of(d, it, this, &["dialog"])?;
-    let s = d.string_arg(it, arg(a, 0))?;
-    d.dialogs.borrow_mut().entry(n).or_default().0 = s;
-    Ok(Value::Undefined)
+fn set_return_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = this_of(d, s, this, &["dialog"])?;
+    let st = d.arg_str_s(s, a, 0)?;
+    d.dialogs.borrow_mut().entry(n).or_default().0 = st;
+    Ok(s.undefined())
 }
 
 /// `show()` (`modal` false) and `showModal()`.
-fn open(d: &Dom, it: &mut Interp<'_>, this: Value, modal: bool) -> R<Value> {
-    let n = this_of(d, it, this, &["dialog"])?;
+fn open<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, modal: bool) -> Res<'s, Local<'s>> {
+    let n = this_of(d, s, this, &["dialog"])?;
     let is_open = text(d, n, "open").is_some();
     let was_modal = d.dialogs.borrow().get(&n).is_some_and(|x| x.1);
     let what = if modal { "showModal" } else { "show" };
     if is_open && was_modal == modal {
-        return Ok(Value::Undefined);
+        return Ok(s.undefined());
     }
     if is_open {
         let msg = if modal { "The dialog is already open as a non-modal dialog, and therefore cannot be opened as a modal dialog." } else { "The dialog is already open as a modal dialog, and therefore cannot be opened as a non-modal dialog." };
-        return Err(d.dom_err(it, "InvalidStateError", &format!("Failed to execute '{what}' on 'HTMLDialogElement': {msg}")));
+        return Err(d.dom_err_s(s, "InvalidStateError", &format!("Failed to execute '{what}' on 'HTMLDialogElement': {msg}")));
     }
-    if modal && !d.is_connected_node(it, n)? {
-        return Err(d.dom_err(it, "InvalidStateError", "Failed to execute 'showModal' on 'HTMLDialogElement': The element is not in a Document."));
+    if modal && !old(s, |it| d.is_connected_node(it, n))? {
+        return Err(d.dom_err_s(s, "InvalidStateError", "Failed to execute 'showModal' on 'HTMLDialogElement': The element is not in a Document."));
     }
-    crate::browser_dom::attr_set(d, it, n, "open", "")?;
+    crate::browser_dom::attr_set_s(d, s, n, "open", "")?;
     d.dialogs.borrow_mut().entry(n).or_default().1 = modal;
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-fn close(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    let n = this_of(d, it, this, &["dialog"])?;
+fn close<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = this_of(d, s, this, &["dialog"])?;
     if text(d, n, "open").is_none() {
-        return Ok(Value::Undefined);
+        return Ok(s.undefined());
     }
-    let result = match arg(a, 0) {
-        Value::Undefined => None,
-        v => Some(d.string_arg(it, v)?),
+    let v = arg_s(s, a, 0);
+    let result = match s.type_of(v) {
+        Type::Undefined => None,
+        _ => Some(d.string_arg_s(s, v)?),
     };
     d.doc.borrow_mut().remove_attr(n, "open");
     {
@@ -212,7 +216,7 @@ fn close(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
             e.0 = r;
         }
     }
-    let ev = d.new_event(it, "close", false, false, false, None)?;
-    d.dispatch(it, Target::Node(n), ev)?;
-    Ok(Value::Undefined)
+    let ev = old(s, |it| d.new_event(it, "close", false, false, false, None))?;
+    old(s, |it| d.dispatch(it, Target::Node(n), ev))?;
+    Ok(s.undefined())
 }

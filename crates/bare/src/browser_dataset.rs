@@ -35,14 +35,14 @@
 //! forced for an empty map. `new DOMStringMap()` is an illegal constructor. A map is not plain data for structured clone.
 
 use crate::browser::*;
+use crate::browser_scoped::*;
+use bare_js_api::{Args, Local};
 use crate::browser_dom::attr_set;
 use bare_html::dom::{NodeData, NodeId, Ns};
 use bare_js::eval::Interp;
 use bare_js::heap::{HeapError, NamedOp, NamedRequest};
 use bare_js::value::{ObjId, PropertyKey, Value};
 use std::cell::{Cell, OnceCell, RefCell};
-
-type V = R<Value>;
 
 /// An element with at most this many attributes is scanned by a read at no charge: the scan costs less than a step.
 const SCAN_FREE: usize = 32;
@@ -304,35 +304,35 @@ fn set(d: &Dom, it: &mut Interp<'_>, el: NodeId, key: PropertyKey, v: Value) -> 
 // ------------------------------------------------------------------------------------ the attribute
 
 /// `el.dataset` for an element of the right kind: `svg` for an SVG element, else an HTML one.
-fn dataset_of(d: &Dom, it: &mut Interp<'_>, this: Value, svg: bool) -> V {
-    let el = d.el(it, this)?;
+fn dataset_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, svg: bool) -> Res<'s, Local<'s>> {
+    let el = d.el_s(s, this)?;
     let right = {
         let doc = d.doc.borrow();
         if svg { doc.element_ns(el) == Ns::Svg } else { !doc.is_foreign(el) }
     };
     if !right {
-        return Err(it.type_error("Illegal invocation"));
+        return Err(s.type_error("Illegal invocation"));
     }
     if let Some(&o) = d.dataset.s.borrow().by_el.get(&el) {
-        return Ok(Value::Object(o));
+        return Ok(d.obj_local(s, o));
     }
     if d.dataset.s.borrow().objs.len() >= d.lim.max_wrappers {
-        return Err(d.lim("dom-wrappers"));
+        return Err(d.lim_s(s, "dom-wrappers"));
     }
     let proto = *d.dataset.proto.get().expect("installed");
-    let o = d.new_source(it, crate::browser_sources::Source::Dataset, Some(proto))?;
-    let mut s = d.dataset.s.borrow_mut();
-    s.objs.insert(o, el);
-    s.by_el.insert(el, o);
-    Ok(Value::Object(o))
+    let o = d.new_source_s(s, crate::browser_sources::Source::Dataset, Some(proto))?;
+    let mut st = d.dataset.s.borrow_mut();
+    st.objs.insert(o, el);
+    st.by_el.insert(el, o);
+    Ok(d.obj_local(s, o))
 }
 
-fn html_dataset(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    dataset_of(d, it, this, false)
+fn html_dataset<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    dataset_of(d, s, this, false)
 }
 
-fn svg_dataset(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    dataset_of(d, it, this, true)
+fn svg_dataset<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    dataset_of(d, s, this, true)
 }
 
 // ------------------------------------------------------------------------------------ install and GC hooks
@@ -356,8 +356,8 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         let tag = Value::String(it.heap.intern_str("DOMStringMap").map_err(|e| it.heap_error(e))?);
         it.define_data(proto, PropertyKey::Symbol(s), tag, false, false, true)?;
     }
-    d.def_get(it, p.html, "dataset", html_dataset, None)?;
-    d.def_get(it, p.svg, "dataset", svg_dataset, None)?;
+    d.def_get_s(it, p.html, "dataset", html_dataset, None)?;
+    d.def_get_s(it, p.svg, "dataset", svg_dataset, None)?;
     *d.dataset.fixed.borrow_mut() = vec![proto, f];
     Ok(())
 }
