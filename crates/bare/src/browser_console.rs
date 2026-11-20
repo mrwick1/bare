@@ -146,6 +146,13 @@ impl Vals {
         }
     }
 
+    fn into_vec(self) -> Vec<Value> {
+        match self {
+            Vals::Inline(n, a) => a[..n as usize].to_vec(),
+            Vals::Heap(v) => v,
+        }
+    }
+
     fn as_slice(&self) -> &[Value] {
         match self {
             Vals::Inline(n, a) => &a[..*n as usize],
@@ -498,7 +505,7 @@ impl Browser {
     pub fn take_console_records(&mut self) -> Vec<ConsoleRecord> {
         let mut st = self.dom.console.st.borrow_mut();
         st.values = 0;
-        st.q.drain(..).map(|r| ConsoleRecord { seq: r.seq, level: r.level, indent: r.indent, args: r.args.as_slice().to_vec() }).collect()
+        st.q.drain(..).map(|r| ConsoleRecord { seq: r.seq, level: r.level, indent: r.indent, args: r.args.into_vec() }).collect()
     }
 
     /// The text of a record (see the header for the gates). Runs no JavaScript. Returns the text to the caller only.
