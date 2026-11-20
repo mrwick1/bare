@@ -10,18 +10,20 @@
 //! Not here: `namedItem`, live collections, `IDBIndex` (see `browser_shims.rs` for `animate`, `Path2D` and `indexedDB`).
 
 use crate::browser::*;
+use crate::browser_scoped::*;
+use bare_js_api::{Args, HostFn, Local, Type};
 use bare_html::dom::NodeId;
 use bare_js::eval::Interp;
 use bare_js::value::{ObjId, Value};
 
 type V = R<Value>;
 
-pub(crate) fn script_no_module(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    crate::browser_loader::flag(d, it, this, "nomodule")
+pub(crate) fn script_no_module<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    crate::browser_loader::flag(d, s, this, "nomodule")
 }
 
-pub(crate) fn set_script_no_module(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    crate::browser_loader::set_flag(d, it, this, a, "nomodule")
+pub(crate) fn set_script_no_module<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    crate::browser_loader::set_flag(d, s, this, a, "nomodule")
 }
 
 pub(crate) fn has_focus(_: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
@@ -29,14 +31,17 @@ pub(crate) fn has_focus(_: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> V
 }
 
 /// The accessor `window.event`. The same function is the getter and the setter: a write has an argument.
-fn window_event(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
-    if let Some(&v) = a.first() {
-        let g = it.global_object();
-        let k = d.key(it, "event")?;
-        it.define_data(g, k, v, true, true, true)?;
-        return Ok(Value::Undefined);
+fn window_event<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    if let Some(v) = a.get(0) {
+        let g = s.global();
+        s.define_str(g, "event", v, bare_js_api::Attrs::ALL)?;
+        return Ok(s.undefined());
     }
-    Ok(d.st.borrow().hd.event.map_or(Value::Undefined, Value::Object))
+    let ev = d.st.borrow().hd.event;
+    Ok(match ev {
+        Some(o) => d.obj_local(s, o),
+        None => s.undefined(),
+    })
 }
 
 /// Define `window.event` (the first read of the name, `define_window`).
@@ -45,7 +50,7 @@ fn window_event(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
 pub(crate) fn define_event(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     let g = it.global_object();
     let k = d.key(it, "event")?;
-    let f = d.add_fn(it, window_event, "event", 0, false)?;
+    let f = d.add_fn_s_obj(it, window_event, "event", 0, HostFn::Method)?;
     let desc = bare_js::heap::PropertyDescriptor { get: Some(Some(f)), set: Some(Some(f)), enumerable: Some(true), configurable: Some(true), ..Default::default() };
     it.heap.define_own_property(g, k, &desc).map(|_| ()).map_err(|e| it.heap_error(e))
 }
@@ -71,22 +76,22 @@ fn coll_proto(d: &Dom, it: &mut Interp<'_>) -> R<ObjId> {
 #[inline(never)]
 fn make_coll_proto(d: &Dom, it: &mut Interp<'_>) -> R<ObjId> {
     let p = d.obj(it, it.array_prototype())?;
-    d.def_method(it, p, "item", 1, coll_item)?;
+    d.def_method_s(it, p, "item", 1, coll_item)?;
     d.plat.fixed.borrow_mut().push(p);
     let _ = d.plat.coll.set(p);
     Ok(p)
 }
 
 /// `item(index)`: the member at the index, else `null`.
-fn coll_item(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+fn coll_item<'s>(_d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     if a.is_empty() {
-        return Err(it.type_error("Failed to execute 'item': 1 argument required, but only 0 present."));
+        return Err(s.type_error("Failed to execute 'item': 1 argument required, but only 0 present."));
     }
-    let n = it.to_js_number(a[0])?;
+    let arg0 = arg_s(s, a, 0);
+    let n = s.to_number(arg0)?;
     let i = if n.is_finite() { n.trunc().rem_euclid(4294967296.0) } else { 0.0 };
-    let k = d.key(it, &i.to_string())?;
-    let v = it.get_value(this, k)?;
-    Ok(if matches!(v, Value::Undefined) { Value::Null } else { v })
+    let v = s.get_str(this, &i.to_string())?;
+    Ok(if matches!(s.type_of(v), Type::Undefined) { s.null() } else { v })
 }
 
 /// Set `window.event` and give the old value. Out of line, so `Dom::dispatch` (inlined into the scheduler loop) keeps its size.

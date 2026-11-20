@@ -105,9 +105,10 @@ impl Realm {
 
     /// Give a built-in function its own `length` and `name` before a script reads, changes or lists them. A function has them from its
     /// first use only, so installing a built-in costs no property. Call it with the key that is being used: nothing happens for another
-    /// key, so `f.call` does not make them.
+    /// key, so `f.call` does not make them. A script function cell gets its own (`Realm::fn_props`) at any key.
     #[inline]
     pub(crate) fn fn_prep(&mut self, o: Obj, k: Str) {
+        self.fn_props(o);
         if o.has_flag(F_NATIVE) && !o.has_flag(F_FNPROPS) && (k == self.k_length || k == self.k_name) {
             self.materialize(o);
         }
@@ -115,6 +116,7 @@ impl Realm {
 
     /// As [`Realm::fn_prep`] for an operation on all properties.
     pub(crate) fn fn_prep_all(&mut self, o: Obj) {
+        self.fn_props(o);
         if o.has_flag(F_NATIVE) && !o.has_flag(F_FNPROPS) {
             self.materialize(o);
         }
@@ -280,6 +282,10 @@ impl Realm {
         self.method(g, "__def", 2, prelude_def);
         self.hidden(g, "globalThis", g.value());
         self.hidden(g, "self", g.value());
+        for (n, v) in [("NaN", Value::number(f64::NAN)), ("Infinity", Value::number(f64::INFINITY)), ("undefined", Value::UNDEFINED)] {
+            let k = self.intern(n);
+            self.define_attrs(g, Key::Name(k), 0, v).expect("define");
+        }
         self.install_object();
         self.install_function();
         self.install_error();

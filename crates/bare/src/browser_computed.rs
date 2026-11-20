@@ -81,8 +81,10 @@
 //! pseudo-element (see above), no `@container`, `@import` inside a supplied part (the embedder flattens), `<style disabled>`.
 
 use crate::browser::*;
-use crate::browser_platform::{V, arg};
-use crate::browser_style::{current, keys_of};
+use crate::browser_geom::illegal_s;
+use crate::browser_scoped::*;
+use crate::browser_style::{current, keys_of, null_empty_s, required_s, to_u32_s};
+use bare_js_api::{Args, HostFn, Local, Type};
 use crate::browser_style_block::{self as blk, Fail, Lim, custom};
 use crate::browser_used::{Ctx, calc_of, calc_text, flow_text, grid_text};
 use crate::browser_ui::chains;
@@ -1060,25 +1062,25 @@ impl Dom {
         }
     }
 
-    /// 0 for the element, `PSEUDO` or `EMPTY` (see `computed_value`). Call it after `computed_el` accepted `this`.
-    fn computed_kind(&self, this: Value) -> u8 {
-        match this {
-            Value::Object(o) => self.computed.kinds.borrow().get(&o).copied().unwrap_or(0),
-            _ => 0,
+    /// 0 for the element, `PSEUDO` or `EMPTY` (see `computed_value`). Call it after `computed_el_s` accepted `this`.
+    fn computed_kind_s(&self, s: &mut Sc<'_, '_>, this: Local<'_>) -> u8 {
+        match obj_id(s, this) {
+            Some(o) => self.computed.kinds.borrow().get(&o).copied().unwrap_or(0),
+            None => 0,
         }
     }
 
-    fn computed_el(&self, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
-        if let Value::Object(o) = this
+    fn computed_el_s<'s>(&self, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
+        if let Some(o) = obj_id(s, this)
             && let Some(&el) = self.computed.objs.borrow().get(&o)
         {
             return Ok(el);
         }
-        Err(it.type_error("Illegal invocation"))
+        Err(illegal_s(s))
     }
 
-    fn read_only(&self, it: &mut Interp<'_>, what: &str) -> Error {
-        self.dom_err(it, "NoModificationAllowedError", &format!("Failed to execute '{what}' on 'CSSStyleDeclaration': these styles are computed, and therefore read-only."))
+    fn read_only_s<'s>(&self, s: &mut Sc<'s, '_>, what: &str) -> bare_js_api::Error<'s> {
+        self.dom_err_s(s, "NoModificationAllowedError", &format!("Failed to execute '{what}' on 'CSSStyleDeclaration': these styles are computed, and therefore read-only."))
     }
 }
 
@@ -1146,96 +1148,87 @@ fn elements_under(doc: &bare_html::dom::Document, node: NodeId, max: u64) -> u64
     n
 }
 
-fn required(it: &mut Interp<'_>, a: &[Value], n: usize, name: &str) -> R<()> {
-    if a.len() < n {
-        return Err(it.type_error(&format!(
-            "Failed to execute '{name}' on 'CSSStyleDeclaration': {n} argument{} required, but only {} present.",
-            if n == 1 { "" } else { "s" },
-            a.len()
-        )));
-    }
-    Ok(())
-}
-
-/// WebIDL `[LegacyNullToEmptyString] DOMString`.
-fn null_empty(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<String> {
-    if matches!(v, Value::Null) { Ok(String::new()) } else { d.string_arg(it, v) }
-}
-
 // ------------------------------------------------------------------------------------------ JS side
 
 /// `window.getComputedStyle(element, pseudoElt)`
-fn get_computed_style(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
+fn get_computed_style<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     if a.is_empty() {
-        return Err(it.type_error("Failed to execute 'getComputedStyle' on 'Window': 1 argument required, but only 0 present."));
+        return Err(s.type_error("Failed to execute 'getComputedStyle' on 'Window': 1 argument required, but only 0 present."));
     }
-    let el = match d.node_of(a[0]) {
+    let a0 = arg_s(s, a, 0);
+    let el = match d.node_of_s(s, a0) {
         Some(n) if d.is_element(n) => n,
-        _ => return Err(it.type_error("Failed to execute 'getComputedStyle' on 'Window': parameter 1 is not of type 'Element'.")),
+        _ => return Err(s.type_error("Failed to execute 'getComputedStyle' on 'Window': parameter 1 is not of type 'Element'.")),
     };
-    let pseudo = match arg(a, 1) {
-        Value::Undefined | Value::Null => String::new(),
-        v => d.string_arg(it, v)?,
-    };
+    let a1 = arg_s(s, a, 1);
+    let pseudo = if is_nullish(s, a1) { String::new() } else { d.string_arg_s(s, a1)? };
     let kind = if pseudo.starts_with(':') { pseudo_kind(&pseudo) } else { 0 };
     if d.computed.objs.borrow().len() >= d.computed.lim.get().max_objects {
-        return Err(d.lim("computed-objects"));
+        return Err(d.lim_s(s, "computed-objects"));
     }
-    d.wrap(it, el)?;
-    crate::browser_style::ensure(d, it)?;
-    let o = d.obj(it, *d.computed.proto.get().expect("ensured"))?;
+    d.wrap_s(s, el)?;
+    if d.computed.proto.get().is_none() {
+        old(s, |it| crate::browser_style::ensure(d, it))?;
+    }
+    let o = d.obj_s(s, *d.computed.proto.get().expect("ensured"))?;
     d.computed.objs.borrow_mut().insert(o, el);
     if kind != 0 {
         d.computed.kinds.borrow_mut().insert(o, kind);
     }
     // The object is the owner of its entries: its trace visits the element wrapper, and its prune drops the entries.
     let key = d.st.borrow_mut().owners.key(crate::browser::Owner::Computed(o));
-    it.set_host_owner_obj(o, key);
-    Ok(Value::Object(o))
+    s.engine().set_host_owner_obj(o, key);
+    Ok(d.obj_local(s, o))
 }
 
-fn get_property_value(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let el = d.computed_el(it, this)?;
-    required(it, a, 1, "getPropertyValue")?;
-    let name = d.string_arg(it, a[0])?;
-    let v = d.computed_value(it, el, &name, d.computed_kind(this))?;
-    d.js_str(it, &v)
+fn get_property_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = d.computed_el_s(s, this)?;
+    required_s(s, a, 1, "getPropertyValue")?;
+    let v = arg_s(s, a, 0);
+    let name = d.string_arg_s(s, v)?;
+    let kind = d.computed_kind_s(s, this);
+    let v = old(s, |it| d.computed_value(it, el, &name, kind))?;
+    d.js_str_s(s, &v)
 }
 
-fn get_property_priority(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    d.computed_el(it, this)?;
-    required(it, a, 1, "getPropertyPriority")?;
-    d.string_arg(it, a[0])?;
-    d.js_str(it, "")
+fn get_property_priority<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    d.computed_el_s(s, this)?;
+    required_s(s, a, 1, "getPropertyPriority")?;
+    let v = arg_s(s, a, 0);
+    d.string_arg_s(s, v)?;
+    d.js_str_s(s, "")
 }
 
-fn set_property(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    d.computed_el(it, this)?;
-    required(it, a, 2, "setProperty")?;
-    d.string_arg(it, a[0])?;
-    null_empty(d, it, a[1])?;
-    if let Some(&v) = a.get(2) && !matches!(v, Value::Undefined) {
-        null_empty(d, it, v)?;
+fn set_property<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    d.computed_el_s(s, this)?;
+    required_s(s, a, 2, "setProperty")?;
+    let (n, v) = (arg_s(s, a, 0), arg_s(s, a, 1));
+    d.string_arg_s(s, n)?;
+    null_empty_s(d, s, v)?;
+    if let Some(p) = a.get(2) && s.type_of(p) != Type::Undefined {
+        null_empty_s(d, s, p)?;
     }
-    Err(d.read_only(it, "setProperty"))
+    Err(d.read_only_s(s, "setProperty"))
 }
 
-fn remove_property(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    d.computed_el(it, this)?;
-    required(it, a, 1, "removeProperty")?;
-    d.string_arg(it, a[0])?;
-    Err(d.read_only(it, "removeProperty"))
+fn remove_property<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    d.computed_el_s(s, this)?;
+    required_s(s, a, 1, "removeProperty")?;
+    let v = arg_s(s, a, 0);
+    d.string_arg_s(s, v)?;
+    Err(d.read_only_s(s, "removeProperty"))
 }
 
-fn css_text(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    d.computed_el(it, this)?;
-    Err(Dom::gate(CSS_TEXT))
+fn css_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    d.computed_el_s(s, this)?;
+    Err(lift_err(s, Dom::gate(CSS_TEXT)))
 }
 
-fn set_css_text(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    d.computed_el(it, this)?;
-    null_empty(d, it, arg(a, 0))?;
-    Err(d.read_only(it, "cssText"))
+fn set_css_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    d.computed_el_s(s, this)?;
+    let v = arg_s(s, a, 0);
+    null_empty_s(d, s, v)?;
+    Err(d.read_only_s(s, "cssText"))
 }
 
 fn names(s: &Snap) -> Vec<&str> {
@@ -1245,55 +1238,62 @@ fn names(s: &Snap) -> Vec<&str> {
     names
 }
 
-fn length(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let el = d.computed_el(it, this)?;
-    if d.computed_kind(this) == EMPTY {
-        return Ok(Value::Number(0.0));
+fn length<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = d.computed_el_s(s, this)?;
+    if d.computed_kind_s(s, this) == EMPTY {
+        return Ok(s.number(0.0));
     }
-    let n = d.snapshot_with(it, el, true)?.map_or(0, |s| Property::LISTED.len() + s.styles.custom_properties(&s.style).len());
-    Ok(Value::Number(n as f64))
+    let n = old(s, |it| Ok(d.snapshot_with(it, el, true)?.map_or(0, |s| Property::LISTED.len() + s.styles.custom_properties(&s.style).len())))?;
+    Ok(s.number(n as f64))
 }
 
-fn parent_rule(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    d.computed_el(it, this)?;
-    Ok(Value::Null)
+fn parent_rule<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    d.computed_el_s(s, this)?;
+    Ok(s.null())
 }
 
-fn item(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let el = d.computed_el(it, this)?;
-    required(it, a, 1, "item")?;
-    let i = crate::browser_platform_class::to_u32(it, a[0])? as usize;
-    if d.computed_kind(this) == EMPTY {
-        return d.js_str(it, "");
+fn item<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = d.computed_el_s(s, this)?;
+    required_s(s, a, 1, "item")?;
+    let v = arg_s(s, a, 0);
+    let i = to_u32_s(s, v)? as usize;
+    if d.computed_kind_s(s, this) == EMPTY {
+        return d.js_str_s(s, "");
     }
-    let Some(s) = d.snapshot_with(it, el, true)? else { return d.js_str(it, "") };
-    it.charge((Property::LISTED.len() + s.styles.custom_properties(&s.style).len()) as u64)?;
-    d.js_str(it, names(&s).get(i).copied().unwrap_or(""))
+    let name = old(s, |it| {
+        let Some(sn) = d.snapshot_with(it, el, true)? else { return Ok(String::new()) };
+        it.charge((Property::LISTED.len() + sn.styles.custom_properties(&sn.style).len()) as u64)?;
+        Ok(names(&sn).get(i).copied().unwrap_or("").to_string())
+    })?;
+    d.js_str_s(s, &name)
 }
 
-fn named_get(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let name = current(d, it)?;
-    let el = d.computed_el(it, this)?;
-    let v = d.computed_value(it, el, name, d.computed_kind(this))?;
-    d.js_str(it, &v)
+fn named_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let name = current(d, s)?;
+    let el = d.computed_el_s(s, this)?;
+    let kind = d.computed_kind_s(s, this);
+    let v = old(s, |it| d.computed_value(it, el, name, kind))?;
+    d.js_str_s(s, &v)
 }
 
-fn transform_get(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let el = d.computed_el(it, this)?;
-    let v = d.computed_value(it, el, "transform", d.computed_kind(this))?;
-    d.js_str(it, &v)
+fn transform_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = d.computed_el_s(s, this)?;
+    let kind = d.computed_kind_s(s, this);
+    let v = old(s, |it| d.computed_value(it, el, "transform", kind))?;
+    d.js_str_s(s, &v)
 }
 
-fn named_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let name = current(d, it)?;
-    d.computed_el(it, this)?;
-    null_empty(d, it, arg(a, 0))?;
-    Err(d.read_only(it, name))
+fn named_set<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let name = current(d, s)?;
+    d.computed_el_s(s, this)?;
+    let v = arg_s(s, a, 0);
+    null_empty_s(d, s, v)?;
+    Err(d.read_only_s(s, name))
 }
 
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     let g = *d.global.get().expect("installed");
-    let f = d.def_method(it, g, "getComputedStyle", 1, get_computed_style)?;
+    let f = d.def_method_s(it, g, "getComputedStyle", 1, get_computed_style)?;
     // Window operations are enumerable.
     let k = d.key(it, "getComputedStyle")?;
     it.define_data(g, k, Value::Object(f), true, true, true)?;
@@ -1304,33 +1304,37 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 /// The computed prototype, made with the style prototype `sproto` (`browser_style::ensure`). `props` are its property names.
 pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, sproto: ObjId, props: &[&'static str]) -> R<()> {
     let proto = d.obj(it, sproto)?;
-    d.def_get(it, proto, "cssText", css_text, Some(set_css_text))?;
-    d.def_get(it, proto, "length", length, None)?;
-    d.def_get(it, proto, "parentRule", parent_rule, None)?;
-    d.def_method(it, proto, "item", 1, item)?;
-    d.def_method(it, proto, "getPropertyValue", 1, get_property_value)?;
-    d.def_method(it, proto, "getPropertyPriority", 1, get_property_priority)?;
-    d.def_method(it, proto, "setProperty", 2, set_property)?;
-    d.def_method(it, proto, "removeProperty", 1, remove_property)?;
+    d.def_get_s(it, proto, "cssText", css_text, Some(set_css_text))?;
+    d.def_get_s(it, proto, "length", length, None)?;
+    d.def_get_s(it, proto, "parentRule", parent_rule, None)?;
+    d.def_method_s(it, proto, "item", 1, item)?;
+    d.def_method_s(it, proto, "getPropertyValue", 1, get_property_value)?;
+    d.def_method_s(it, proto, "getPropertyPriority", 1, get_property_priority)?;
+    d.def_method_s(it, proto, "setProperty", 2, set_property)?;
+    d.def_method_s(it, proto, "removeProperty", 1, remove_property)?;
     let mut nm = String::new();
-    for (i, css) in props.iter().enumerate() {
-        let keys = keys_of(css);
-        let (gid, sid) = (d.handlers.borrow().len() as u32, d.handlers.borrow().len() as u32 + 1);
-        nm.clear();
-        nm.push_str("get ");
-        nm.push_str(&keys[0]);
-        let gf = d.add_fn(it, named_get, &nm, 0, false)?;
-        nm.replace_range(..3, "set");
-        let sf = d.add_fn(it, named_set, &nm, 1, false)?;
-        d.style.fns.borrow_mut().extend([(gid, i), (sid, i)]);
-        for k in &keys {
-            let key = d.key(it, k)?;
-            d.define_accessor(it, proto, key, gf, Some(sf))?;
+    bare_js_api::enter(it, |s| {
+        for (i, css) in props.iter().enumerate() {
+            let keys = keys_of(css);
+            let (gid, sid) = (d.scoped.borrow().len() as u32, d.scoped.borrow().len() as u32 + 1);
+            nm.clear();
+            nm.push_str("get ");
+            nm.push_str(&keys[0]);
+            let gf = d.add_fn_s_raw(s, named_get, &nm, 0, HostFn::Method)?;
+            nm.replace_range(..3, "set");
+            let sf = d.add_fn_s_raw(s, named_set, &nm, 1, HostFn::Method)?;
+            d.style.fns.borrow_mut().extend([(gid, i), (sid, i)]);
+            let it = s.engine();
+            for k in &keys {
+                let key = d.key(it, k)?;
+                d.define_accessor(it, proto, key, gf, Some(sf))?;
+            }
         }
-    }
+        Ok(())
+    })?;
     // The computed `transform` is the matrix of the list (`computed_transform`), so the computed object has its own accessor.
     for css in ["transform", "-webkit-transform"] {
-        let gf = d.add_fn(it, transform_get, &format!("get {}", keys_of(css)[0]), 0, false)?;
+        let gf = d.add_fn_s_obj(it, transform_get, &format!("get {}", keys_of(css)[0]), 0, HostFn::Method)?;
         for k in keys_of(css) {
             let key = d.key(it, &k)?;
             d.define_accessor(it, proto, key, gf, None)?;

@@ -43,16 +43,16 @@
 //! the step budget. No document or table borrow is held while JS runs (string conversion comes first).
 
 use crate::browser::*;
-use crate::browser_dom::{arg, valid_name};
+use crate::browser_scoped::*;
+use bare_js_api::{Args, Local, Type};
+use crate::browser_dom::{valid_name};
 use crate::browser_namespace as ns;
 use bare_html::dom::{Atom, NodeData, NodeId, RemovedAttr, Span};
-use bare_js::eval::{Error, Interp};
+use bare_js::eval::{Interp};
 use bare_js::heap::{HeapError, Slot};
 use bare_js::value::{ObjId, Value};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
-
-type V = R<Value>;
 
 /// What the host knows about one `Attr` object.
 pub(crate) struct AttrObj {
@@ -239,7 +239,7 @@ pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<
         }
     };
     if let Some(a) = atom {
-        wrapper_for(d, it, el, a)?;
+        run(it, |s| wrapper_for(d, s, el, a))?;
     }
     Ok(())
 }
@@ -281,13 +281,13 @@ fn room(d: &Dom) -> R<()> {
 }
 
 /// The `Attr` of the attached attribute `atom` of `el`: the same object while it is attached.
-fn wrapper_for(d: &Dom, it: &mut Interp<'_>, el: NodeId, atom: Atom) -> R<ObjId> {
+fn wrapper_for<'s>(d: &Dom, s: &mut Sc<'s, '_>, el: NodeId, atom: Atom) -> Res<'s, ObjId> {
     drain(d);
     if let Some(&(_, o)) = d.attr.s.borrow().by_el.get(&el).and_then(|l| l.iter().find(|(a, _)| *a == atom)) {
         return Ok(o);
     }
-    room(d)?;
-    let o = d.obj(it, protos(d).0)?;
+    lift(s, room(d))?;
+    let o = d.obj_s(s, protos(d).0)?;
     {
         let mut t = d.attr.s.borrow_mut();
         t.attrs.insert(o, AttrObj { atom, owner: Some(el), value: None });
@@ -299,40 +299,40 @@ fn wrapper_for(d: &Dom, it: &mut Interp<'_>, el: NodeId, atom: Atom) -> R<ObjId>
 }
 
 /// A new detached `Attr` with this name and value.
-fn new_detached(d: &Dom, it: &mut Interp<'_>, atom: Atom, value: Span) -> R<ObjId> {
-    room(d)?;
-    let o = d.obj(it, protos(d).0)?;
+fn new_detached<'s>(d: &Dom, s: &mut Sc<'s, '_>, atom: Atom, value: Span) -> Res<'s, ObjId> {
+    lift(s, room(d))?;
+    let o = d.obj_s(s, protos(d).0)?;
     d.attr.s.borrow_mut().attrs.insert(o, AttrObj { atom, owner: None, value: Some(value) });
     Ok(o)
 }
 
 /// The `Attr` object `this`, after the removal log is applied.
-fn attr_of(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<ObjId> {
-    if let Value::Object(o) = this {
+fn attr_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, ObjId> {
+    if let Some(o) = obj_id(s, this) {
         drain(d);
         if d.attr.s.borrow().attrs.contains_key(&o) {
             return Ok(o);
         }
     }
-    Err(it.type_error("Illegal invocation"))
+    Err(s.type_error("Illegal invocation"))
 }
 
-/// `v` as an `Attr` of this host, with the log of removed attributes applied first (so `state` is current).
-pub(crate) fn probe(d: &Dom, v: Value) -> Option<ObjId> {
-    let Value::Object(o) = v else { return None };
+/// `o` as an `Attr` of this host, with the log of removed attributes applied first (so `state` is current).
+pub(crate) fn probe_obj(d: &Dom, o: ObjId) -> Option<ObjId> {
     drain(d);
     d.attr.s.borrow().attrs.contains_key(&o).then_some(o)
 }
 
 /// An argument that must be an `Attr` of this host.
-fn attr_arg(d: &Dom, it: &mut Interp<'_>, a: &[Value], i: usize) -> R<ObjId> {
-    if let Value::Object(o) = arg(a, i) {
+fn attr_arg<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>, i: usize) -> Res<'s, ObjId> {
+    let argi = arg_s(s, a, i);
+    if let Some(o) = obj_id(s, argi) {
         drain(d);
         if d.attr.s.borrow().attrs.contains_key(&o) {
             return Ok(o);
         }
     }
-    Err(it.type_error(&format!("parameter {} is not of type 'Attr'", i + 1)))
+    Err(s.type_error(&format!("parameter {} is not of type 'Attr'", i + 1)))
 }
 
 pub(crate) fn state(d: &Dom, o: ObjId) -> (Atom, Option<NodeId>, Option<Span>) {
@@ -352,103 +352,110 @@ pub(crate) fn value_of(d: &Dom, o: ObjId) -> String {
     }
 }
 
-fn map_el(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
-    if let Value::Object(o) = this
+fn map_el<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
+    if let Some(o) = obj_id(s, this)
         && let Some(&el) = d.attr.s.borrow().maps.get(&o)
     {
         return Ok(el);
     }
-    Err(it.type_error("Illegal invocation"))
+    Err(s.type_error("Illegal invocation"))
 }
 
 // ------------------------------------------------------------------------------------ Element
 
-pub(crate) fn attributes(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let el = d.el(it, this)?;
+pub(crate) fn attributes<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = d.el_s(s, this)?;
     if let Some(&o) = d.attr.s.borrow().map_of.get(&el) {
-        return Ok(Value::Object(o));
+        return Ok(d.obj_local(s, o));
     }
-    room(d)?;
-    let o = d.new_source(it, crate::browser_sources::Source::AttrMap, Some(protos(d).1))?;
+    lift(s, room(d))?;
+    let o = d.new_source_s(s, crate::browser_sources::Source::AttrMap, Some(protos(d).1))?;
     let mut t = d.attr.s.borrow_mut();
     t.maps.insert(o, el);
     t.map_of.insert(el, o);
-    Ok(Value::Object(o))
+    Ok(d.obj_local(s, o))
 }
 
-pub(crate) fn has_attributes(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let el = d.el(it, this)?;
-    Ok(Value::Bool(d.doc.borrow().attr_count(el) != 0))
+pub(crate) fn has_attributes<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = d.el_s(s, this)?;
+    Ok(s.boolean(d.doc.borrow().attr_count(el) != 0))
 }
 
 /// The `Attr` for the first attribute with the qualified name `name`, or `null`.
-fn by_name(d: &Dom, it: &mut Interp<'_>, el: NodeId, name: &str) -> V {
+fn by_name<'s>(d: &Dom, s: &mut Sc<'s, '_>, el: NodeId, name: &str) -> Res<'s, Local<'s>> {
     let atom = {
         let doc = d.doc.borrow();
-        it.charge(doc.attr_count(el) as u64 + 1)?;
+        s.charge(doc.attr_count(el) as u64 + 1)?;
         doc.find_attr_qname(el, &ns::attr_key(&doc, el, name))
     };
     match atom {
-        Some(a) => Ok(Value::Object(wrapper_for(d, it, el, a)?)),
-        None => Ok(Value::Null),
+        Some(a) => {
+            let o = wrapper_for(d, s, el, a)?;
+            Ok(d.obj_local(s, o))
+        }
+        None => Ok(s.null()),
     }
 }
 
 /// The attribute atom for a namespace and a local name. `None` also for a namespace that no attribute can have.
-fn atom_ns(d: &Dom, it: &mut Interp<'_>, el: NodeId, namespace: Option<&str>, local: &str) -> R<Option<Atom>> {
+fn atom_ns<'s>(d: &Dom, s: &mut Sc<'s, '_>, el: NodeId, namespace: Option<&str>, local: &str) -> Res<'s, Option<Atom>> {
     let doc = d.doc.borrow();
-    it.charge(doc.attr_count(el) as u64 + 1)?;
+    s.charge(doc.attr_count(el) as u64 + 1)?;
     Ok(match ns::attr_ns_of(namespace) {
         Ok(kind) => doc.find_attr_ns(el, kind, local),
         Err(()) => None,
     })
 }
 
-fn by_ns(d: &Dom, it: &mut Interp<'_>, el: NodeId, a: &[Value]) -> V {
-    let namespace = ns::ns_arg(d, it, arg(a, 0))?;
-    let local = d.string_arg(it, arg(a, 1))?;
-    match atom_ns(d, it, el, namespace.as_deref(), &local)? {
-        Some(at) => Ok(Value::Object(wrapper_for(d, it, el, at)?)),
-        None => Ok(Value::Null),
+fn by_ns<'s>(d: &Dom, s: &mut Sc<'s, '_>, el: NodeId, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let arg0 = arg_s(s, a, 0);
+    let namespace = ns::ns_arg(d, s, arg0)?;
+    let local = d.arg_str_s(s, a, 1)?;
+    match atom_ns(d, s, el, namespace.as_deref(), &local)? {
+        Some(at) => {
+            let o = wrapper_for(d, s, el, at)?;
+            Ok(d.obj_local(s, o))
+        }
+        None => Ok(s.null()),
     }
 }
 
-pub(crate) fn get_attribute_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let el = d.el(it, this)?;
-    let name = d.string_arg(it, arg(a, 0))?;
-    by_name(d, it, el, &name)
+pub(crate) fn get_attribute_node<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = d.el_s(s, this)?;
+    let name = d.arg_str_s(s, a, 0)?;
+    by_name(d, s, el, &name)
 }
 
-pub(crate) fn get_attribute_node_ns(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let el = d.el(it, this)?;
-    by_ns(d, it, el, a)
+pub(crate) fn get_attribute_node_ns<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = d.el_s(s, this)?;
+    by_ns(d, s, el, a)
 }
 
 /// Remove the attribute `atom` of `el` and give its `Attr`, detached with the old value.
-fn remove_atom(d: &Dom, it: &mut Interp<'_>, el: NodeId, atom: Atom) -> V {
-    let o = wrapper_for(d, it, el, atom)?;
+fn remove_atom<'s>(d: &Dom, s: &mut Sc<'s, '_>, el: NodeId, atom: Atom) -> Res<'s, Local<'s>> {
+    let o = wrapper_for(d, s, el, atom)?;
     // The document logs the removal of a watched attribute; `drain` then detaches `o` with the old value.
     d.doc.borrow_mut().remove_attr_atom(el, atom);
     drain(d);
-    Ok(Value::Object(o))
+    Ok(d.obj_local(s, o))
 }
 
-pub(crate) fn remove_attribute_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let el = d.el(it, this)?;
-    let o = attr_arg(d, it, a, 0)?;
+pub(crate) fn remove_attribute_node<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = d.el_s(s, this)?;
+    let o = attr_arg(d, s, a, 0)?;
     let (atom, owner, _) = state(d, o);
     if owner != Some(el) {
-        return Err(d.dom_err(it, "NotFoundError", "Failed to execute 'removeAttributeNode' on 'Element': The node provided is not an attribute of this element."));
+        return Err(d.dom_err_s(s, "NotFoundError", "Failed to execute 'removeAttributeNode' on 'Element': The node provided is not an attribute of this element."));
     }
-    remove_atom(d, it, el, atom)
+    remove_atom(d, s, el, atom)
 }
 
 /// `setAttributeNode`: attach the detached `Attr` `o` to `el`. Gives the `Attr` that it replaced, or `null`.
-fn set_node(d: &Dom, it: &mut Interp<'_>, el: NodeId, o: ObjId) -> V {
+fn set_node<'s>(d: &Dom, s: &mut Sc<'s, '_>, el: NodeId, o: ObjId) -> Res<'s, Local<'s>> {
     let (atom, owner, span) = state(d, o);
     match owner {
-        Some(e) if e == el => return Ok(Value::Object(o)),
-        Some(_) => return Err(d.dom_err(it, "InUseAttributeError", "The attribute is in use by another element.")),
+        Some(e) if e == el => return Ok(d.obj_local(s, o)),
+        Some(_) => return Err(d.dom_err_s(s, "InUseAttributeError", "The attribute is in use by another element.")),
         None => {}
     }
     let (kind, local, qname, value, existing) = {
@@ -456,24 +463,24 @@ fn set_node(d: &Dom, it: &mut Interp<'_>, el: NodeId, o: ObjId) -> V {
         let kind = doc.attr_ns(atom);
         let local = doc.attr_local(atom).to_string();
         let existing = doc.find_attr_ns(el, kind, &local);
-        (kind, local, doc.atom_str(atom).to_string(), span.map_or(String::new(), |s| doc.text(s).to_string()), existing)
+        (kind, local, doc.atom_str(atom).to_string(), span.map_or(String::new(), |st| doc.text(st).to_string()), existing)
     };
     // The replaced attribute: its `Attr` is made first (it is the result), and its value is read before the write.
-    let old = match existing {
+    let prev = match existing {
         Some(old_atom) if old_atom != atom => {
-            return Err(Error::Unsupported(unsupported("setAttributeNode of an attribute with the namespace and local name of an existing one but another prefix")));
+            return Err(unsupp("setAttributeNode of an attribute with the namespace and local name of an existing one but another prefix"));
         }
         Some(_) => {
-            let old = wrapper_for(d, it, el, atom)?;
+            let old = wrapper_for(d, s, el, atom)?;
             let old_span = d.doc.borrow().attr_span(el, atom);
             Some((old, old_span))
         }
         None => None,
     };
-    ns::put(d, it, el, Some(atom), None, &qname, &value)?;
+    ns_put_s(d, s, el, Some(atom), &qname, &value)?;
     {
         let mut t = d.attr.s.borrow_mut();
-        if let Some((old, old_span)) = old {
+        if let Some((old, old_span)) = prev {
             if let Some(list) = t.by_el.get_mut(&el) {
                 list.retain(|(_, x)| *x != old);
             }
@@ -491,28 +498,32 @@ fn set_node(d: &Dom, it: &mut Interp<'_>, el: NodeId, o: ObjId) -> V {
     }
     d.doc.borrow_mut().watch_attr(el, atom);
     if kind.is_none() && local == "src" {
-        d.script_src_changed(it, el)?;
+        script_src_changed_s(d, s, el)?;
     }
-    Ok(old.map_or(Value::Null, |(o, _)| Value::Object(o)))
+    match prev {
+        Some((o, _)) => Ok(d.obj_local(s, o)),
+        None => Ok(s.null()),
+    }
 }
 
-pub(crate) fn set_attribute_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let el = d.el(it, this)?;
-    let o = attr_arg(d, it, a, 0)?;
-    set_node(d, it, el, o)
+pub(crate) fn set_attribute_node<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = d.el_s(s, this)?;
+    let o = attr_arg(d, s, a, 0)?;
+    set_node(d, s, el, o)
 }
 
 // ------------------------------------------------------------------------------------ NamedNodeMap
 
-pub(crate) fn map_length(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let el = map_el(d, it, this)?;
-    Ok(Value::Number(d.doc.borrow().attr_count(el) as f64))
+pub(crate) fn map_length<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = map_el(d, s, this)?;
+    Ok(s.number(d.doc.borrow().attr_count(el) as f64))
 }
 
-pub(crate) fn map_item(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let el = map_el(d, it, this)?;
+pub(crate) fn map_item<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = map_el(d, s, this)?;
     // WebIDL `unsigned long`: ToNumber, then modulo 2^32.
-    let n = it.to_js_number(arg(a, 0))?;
+    let arg0 = arg_s(s, a, 0);
+    let n = s.to_number(arg0)?;
     let i = if n.is_finite() { (n.trunc().rem_euclid(4294967296.0)) as u64 } else { 0 };
     let atom = {
         let doc = d.doc.borrow();
@@ -522,126 +533,132 @@ pub(crate) fn map_item(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -
         }
     };
     match atom {
-        Some(at) => Ok(Value::Object(wrapper_for(d, it, el, at)?)),
-        None => Ok(Value::Null),
+        Some(at) => {
+            let o = wrapper_for(d, s, el, at)?;
+            Ok(d.obj_local(s, o))
+        }
+        None => Ok(s.null()),
     }
 }
 
-pub(crate) fn get_named_item(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let el = map_el(d, it, this)?;
-    let name = d.string_arg(it, arg(a, 0))?;
-    by_name(d, it, el, &name)
+pub(crate) fn get_named_item<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = map_el(d, s, this)?;
+    let name = d.arg_str_s(s, a, 0)?;
+    by_name(d, s, el, &name)
 }
 
-pub(crate) fn get_named_item_ns(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let el = map_el(d, it, this)?;
-    by_ns(d, it, el, a)
+pub(crate) fn get_named_item_ns<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = map_el(d, s, this)?;
+    by_ns(d, s, el, a)
 }
 
-pub(crate) fn set_named_item(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let el = map_el(d, it, this)?;
-    let o = attr_arg(d, it, a, 0)?;
-    set_node(d, it, el, o)
+pub(crate) fn set_named_item<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = map_el(d, s, this)?;
+    let o = attr_arg(d, s, a, 0)?;
+    set_node(d, s, el, o)
 }
 
-pub(crate) fn remove_named_item(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let el = map_el(d, it, this)?;
-    let name = d.string_arg(it, arg(a, 0))?;
+pub(crate) fn remove_named_item<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = map_el(d, s, this)?;
+    let name = d.arg_str_s(s, a, 0)?;
     let atom = {
         let doc = d.doc.borrow();
-        it.charge(doc.attr_count(el) as u64 + 1)?;
+        s.charge(doc.attr_count(el) as u64 + 1)?;
         doc.find_attr_qname(el, &ns::attr_key(&doc, el, &name))
     };
     match atom {
-        Some(at) => remove_atom(d, it, el, at),
-        None => Err(d.dom_err(it, "NotFoundError", &format!("Failed to execute 'removeNamedItem' on 'NamedNodeMap': No item with name '{name}' was found."))),
+        Some(at) => remove_atom(d, s, el, at),
+        None => Err(d.dom_err_s(s, "NotFoundError", &format!("Failed to execute 'removeNamedItem' on 'NamedNodeMap': No item with name '{name}' was found."))),
     }
 }
 
-pub(crate) fn remove_named_item_ns(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let el = map_el(d, it, this)?;
-    let namespace = ns::ns_arg(d, it, arg(a, 0))?;
-    let local = d.string_arg(it, arg(a, 1))?;
-    match atom_ns(d, it, el, namespace.as_deref(), &local)? {
-        Some(at) => remove_atom(d, it, el, at),
-        None => Err(d.dom_err(it, "NotFoundError", &format!("Failed to execute 'removeNamedItemNS' on 'NamedNodeMap': No item with name '{local}' was found."))),
+pub(crate) fn remove_named_item_ns<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = map_el(d, s, this)?;
+    let arg0 = arg_s(s, a, 0);
+    let namespace = ns::ns_arg(d, s, arg0)?;
+    let local = d.arg_str_s(s, a, 1)?;
+    match atom_ns(d, s, el, namespace.as_deref(), &local)? {
+        Some(at) => remove_atom(d, s, el, at),
+        None => Err(d.dom_err_s(s, "NotFoundError", &format!("Failed to execute 'removeNamedItemNS' on 'NamedNodeMap': No item with name '{local}' was found."))),
     }
 }
 
 // ------------------------------------------------------------------------------------ Document
 
-pub(crate) fn create_attribute(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    d.nd(it, this)?;
-    let name = d.string_arg(it, arg(a, 0))?;
+pub(crate) fn create_attribute<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    d.nd_s(s, this)?;
+    let name = d.arg_str_s(s, a, 0)?;
     if !valid_name(&name) {
-        return Err(d.dom_err(it, "InvalidCharacterError", &format!("'{name}' is not a valid attribute name.")));
+        return Err(d.dom_err_s(s, "InvalidCharacterError", &format!("'{name}' is not a valid attribute name.")));
     }
     // The document is an HTML document: the name is lowercased, as `setAttribute` does for an HTML element.
-    make_detached(d, it, None, &name.to_ascii_lowercase())
+    make_detached(d, s, None, &name.to_ascii_lowercase())
 }
 
-pub(crate) fn create_attribute_ns(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    d.nd(it, this)?;
-    let namespace = ns::ns_arg(d, it, arg(a, 0))?;
-    let qname = d.string_arg(it, arg(a, 1))?;
-    ns::extract(d, it, namespace.as_deref(), &qname)?;
+pub(crate) fn create_attribute_ns<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    d.nd_s(s, this)?;
+    let arg0 = arg_s(s, a, 0);
+    let namespace = ns::ns_arg(d, s, arg0)?;
+    let qname = d.arg_str_s(s, a, 1)?;
+    ns::extract(d, s, namespace.as_deref(), &qname)?;
     let Ok(kind) = ns::attr_ns_of(namespace.as_deref()) else {
-        return Err(Error::Unsupported(unsupported("createAttributeNS with a namespace other than none, XML, XMLNS or XLink")));
+        return Err(unsupp("createAttributeNS with a namespace other than none, XML, XMLNS or XLink"));
     };
-    make_detached(d, it, kind, &qname)
+    make_detached(d, s, kind, &qname)
 }
 
-fn make_detached(d: &Dom, it: &mut Interp<'_>, kind: Option<bare_html::dom::Ns>, qname: &str) -> V {
-    room(d)?;
+fn make_detached<'s>(d: &Dom, s: &mut Sc<'s, '_>, kind: Option<bare_html::dom::Ns>, qname: &str) -> Res<'s, Local<'s>> {
+    lift(s, room(d))?;
     let (atom, span) = {
         let mut doc = d.doc.borrow_mut();
         if doc.find_ns_atom(kind, qname).is_none() && doc.name_count() + 1 > d.lim.max_names {
-            return Err(d.lim("dom-names"));
+            return Err(d.lim_s(s, "dom-names"));
         }
         let atom = doc.intern_ns(kind, qname);
         (atom, doc.new_span(""))
     };
-    Ok(Value::Object(new_detached(d, it, atom, span)?))
+    let o = new_detached(d, s, atom, span)?;
+    Ok(d.obj_local(s, o))
 }
 
 // ------------------------------------------------------------------------------------ Attr
 
-fn atom_str(d: &Dom, it: &mut Interp<'_>, this: Value, f: impl Fn(&bare_html::dom::Document, Atom) -> Option<String>) -> V {
-    let o = attr_of(d, it, this)?;
+fn atom_str<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, f: impl Fn(&bare_html::dom::Document, Atom) -> Option<String>) -> Res<'s, Local<'s>> {
+    let o = attr_of(d, s, this)?;
     let atom = state(d, o).0;
-    let s = f(&d.doc.borrow(), atom);
-    match s {
-        Some(s) => d.js_str(it, &s),
-        None => Ok(Value::Null),
+    let st = f(&d.doc.borrow(), atom);
+    match st {
+        Some(st) => d.js_str_s(s, &st),
+        None => Ok(s.null()),
     }
 }
 
-fn attr_name(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    atom_str(d, it, this, |doc, a| Some(doc.atom_str(a).to_string()))
+fn attr_name<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    atom_str(d, s, this, |doc, a| Some(doc.atom_str(a).to_string()))
 }
 
-fn attr_local_name(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    atom_str(d, it, this, |doc, a| Some(doc.attr_local(a).to_string()))
+fn attr_local_name<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    atom_str(d, s, this, |doc, a| Some(doc.attr_local(a).to_string()))
 }
 
-fn attr_prefix(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    atom_str(d, it, this, |doc, a| doc.attr_prefix(a).map(str::to_string))
+fn attr_prefix<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    atom_str(d, s, this, |doc, a| doc.attr_prefix(a).map(str::to_string))
 }
 
-fn attr_namespace_uri(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    atom_str(d, it, this, |doc, a| doc.attr_ns(a).map(|n| n.uri().to_string()))
+fn attr_namespace_uri<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    atom_str(d, s, this, |doc, a| doc.attr_ns(a).map(|n| n.uri().to_string()))
 }
 
-fn attr_value_get(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let o = attr_of(d, it, this)?;
-    let s = value_of(d, o);
-    d.js_str(it, &s)
+fn attr_value_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = attr_of(d, s, this)?;
+    let st = value_of(d, o);
+    d.js_str_s(s, &st)
 }
 
 /// Set the value of an `Attr`: through the normal attribute path when attached, in the text buffer when detached.
-fn set_value(d: &Dom, it: &mut Interp<'_>, this: Value, v: Value, null_is_empty: bool) -> V {
-    let o = attr_of(d, it, this)?;
-    let s = if null_is_empty && matches!(v, Value::Null) { String::new() } else { d.string_arg(it, v)? };
+fn set_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, v: Local<'s>, null_is_empty: bool) -> Res<'s, Local<'s>> {
+    let o = attr_of(d, s, this)?;
+    let st = if null_is_empty && matches!(s.type_of(v), Type::Null) { String::new() } else { d.string_arg_s(s, v)? };
     // Converting `v` ran JS: it can have removed the attribute, so read the state again.
     drain(d);
     let (atom, owner, _) = state(d, o);
@@ -651,68 +668,70 @@ fn set_value(d: &Dom, it: &mut Interp<'_>, this: Value, v: Value, null_is_empty:
                 let doc = d.doc.borrow();
                 (doc.atom_str(atom).to_string(), doc.attr_ns(atom), doc.attr_local(atom).to_string())
             };
-            ns::put(d, it, el, Some(atom), None, &qname, &s)?;
+            ns_put_s(d, s, el, Some(atom), &qname, &st)?;
             if kind.is_none() && local == "src" {
-                d.script_src_changed(it, el)?;
+                script_src_changed_s(d, s, el)?;
             }
         }
         None => {
             let span = {
                 let mut doc = d.doc.borrow_mut();
-                d.room(&doc, 0, s.len())?;
-                doc.new_span(&s)
+                d.room_s(s, &doc, 0, st.len())?;
+                doc.new_span(&st)
             };
             d.attr.s.borrow_mut().attrs.get_mut(&o).expect("checked").value = Some(span);
         }
     }
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-fn attr_value_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    set_value(d, it, this, arg(a, 0), false)
+fn attr_value_set<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let arg0 = arg_s(s, a, 0);
+    set_value(d, s, this, arg0, false)
 }
 
-fn attr_node_value_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    set_value(d, it, this, arg(a, 0), true)
+fn attr_node_value_set<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let arg0 = arg_s(s, a, 0);
+    set_value(d, s, this, arg0, true)
 }
 
-fn attr_owner_element(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let o = attr_of(d, it, this)?;
+fn attr_owner_element<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = attr_of(d, s, this)?;
     match state(d, o).1 {
-        Some(el) => d.wrap(it, el),
-        None => Ok(Value::Null),
+        Some(el) => d.wrap_s(s, el),
+        None => Ok(s.null()),
     }
 }
 
-fn attr_owner_document(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    attr_of(d, it, this)?;
+fn attr_owner_document<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    attr_of(d, s, this)?;
     let root = d.doc.borrow().root();
-    d.wrap(it, root)
+    d.wrap_s(s, root)
 }
 
-fn attr_node_type(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    attr_of(d, it, this)?;
-    Ok(Value::Number(2.0))
+fn attr_node_type<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    attr_of(d, s, this)?;
+    Ok(s.number(2.0))
 }
 
-fn attr_true(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    attr_of(d, it, this)?;
-    Ok(Value::Bool(true))
+fn attr_true<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    attr_of(d, s, this)?;
+    Ok(s.boolean(true))
 }
 
-fn attr_false(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    attr_of(d, it, this)?;
-    Ok(Value::Bool(false))
+fn attr_false<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    attr_of(d, s, this)?;
+    Ok(s.boolean(false))
 }
 
-fn attr_null(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    attr_of(d, it, this)?;
-    Ok(Value::Null)
+fn attr_null<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    attr_of(d, s, this)?;
+    Ok(s.null())
 }
 
-fn attr_no_children(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    attr_of(d, it, this)?;
-    it.array_from(&[])
+fn attr_no_children<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    attr_of(d, s, this)?;
+    s.new_array(&[])
 }
 
 // ------------------------------------------------------------------------------------ install
@@ -726,34 +745,34 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     let mut fixed = vec![attr, map];
 
     // Attr
-    d.def_get(it, attr, "name", attr_name, None)?;
-    d.def_get(it, attr, "localName", attr_local_name, None)?;
-    d.def_get(it, attr, "prefix", attr_prefix, None)?;
-    d.def_get(it, attr, "namespaceURI", attr_namespace_uri, None)?;
-    d.def_get(it, attr, "value", attr_value_get, Some(attr_value_set))?;
-    d.def_get(it, attr, "nodeValue", attr_value_get, Some(attr_node_value_set))?;
-    d.def_get(it, attr, "textContent", attr_value_get, Some(attr_node_value_set))?;
-    d.def_get(it, attr, "nodeName", attr_name, None)?;
-    d.def_get(it, attr, "nodeType", attr_node_type, None)?;
-    d.def_get(it, attr, "ownerElement", attr_owner_element, None)?;
-    d.def_get(it, attr, "ownerDocument", attr_owner_document, None)?;
-    d.def_get(it, attr, "specified", attr_true, None)?;
-    d.def_get(it, attr, "isConnected", attr_false, None)?;
+    d.def_get_s(it, attr, "name", attr_name, None)?;
+    d.def_get_s(it, attr, "localName", attr_local_name, None)?;
+    d.def_get_s(it, attr, "prefix", attr_prefix, None)?;
+    d.def_get_s(it, attr, "namespaceURI", attr_namespace_uri, None)?;
+    d.def_get_s(it, attr, "value", attr_value_get, Some(attr_value_set))?;
+    d.def_get_s(it, attr, "nodeValue", attr_value_get, Some(attr_node_value_set))?;
+    d.def_get_s(it, attr, "textContent", attr_value_get, Some(attr_node_value_set))?;
+    d.def_get_s(it, attr, "nodeName", attr_name, None)?;
+    d.def_get_s(it, attr, "nodeType", attr_node_type, None)?;
+    d.def_get_s(it, attr, "ownerElement", attr_owner_element, None)?;
+    d.def_get_s(it, attr, "ownerDocument", attr_owner_document, None)?;
+    d.def_get_s(it, attr, "specified", attr_true, None)?;
+    d.def_get_s(it, attr, "isConnected", attr_false, None)?;
     for name in ["parentNode", "parentElement", "firstChild", "lastChild", "previousSibling", "nextSibling"] {
-        d.def_get(it, attr, name, attr_null, None)?;
+        d.def_get_s(it, attr, name, attr_null, None)?;
     }
-    d.def_get(it, attr, "childNodes", attr_no_children, None)?;
-    d.def_method(it, attr, "hasChildNodes", 0, attr_false)?;
+    d.def_get_s(it, attr, "childNodes", attr_no_children, None)?;
+    d.def_method_s(it, attr, "hasChildNodes", 0, attr_false)?;
 
     // NamedNodeMap
-    d.def_get(it, map, "length", map_length, None)?;
-    d.def_method(it, map, "item", 1, map_item)?;
-    d.def_method(it, map, "getNamedItem", 1, get_named_item)?;
-    d.def_method(it, map, "getNamedItemNS", 2, get_named_item_ns)?;
-    d.def_method(it, map, "setNamedItem", 1, set_named_item)?;
-    d.def_method(it, map, "setNamedItemNS", 1, set_named_item)?;
-    d.def_method(it, map, "removeNamedItem", 1, remove_named_item)?;
-    d.def_method(it, map, "removeNamedItemNS", 2, remove_named_item_ns)?;
+    d.def_get_s(it, map, "length", map_length, None)?;
+    d.def_method_s(it, map, "item", 1, map_item)?;
+    d.def_method_s(it, map, "getNamedItem", 1, get_named_item)?;
+    d.def_method_s(it, map, "getNamedItemNS", 2, get_named_item_ns)?;
+    d.def_method_s(it, map, "setNamedItem", 1, set_named_item)?;
+    d.def_method_s(it, map, "setNamedItemNS", 1, set_named_item)?;
+    d.def_method_s(it, map, "removeNamedItem", 1, remove_named_item)?;
+    d.def_method_s(it, map, "removeNamedItemNS", 2, remove_named_item_ns)?;
     // `[Symbol.iterator]` is `Array.prototype[Symbol.iterator]`: the map has indices and a `length`.
     let sym = d.plat.sym_iter.get().copied().expect("platform installed first");
     let ap = it.array_prototype();

@@ -40,18 +40,18 @@
 //!   script or a reset checks one. A `checked` write unchecks the other radios of the group.
 
 use crate::browser::*;
-use crate::browser_dom::{arg, input_kind};
+use crate::browser_dom::input_kind;
 use crate::browser_lazy::lazy_global;
 use crate::browser_nodelist::Src;
-use crate::browser_select::{get, has, reflect};
+use crate::browser_scoped::*;
+use crate::browser_select::{get, has, reflect_s};
 use bare_html::dom::{Atom, Document, NodeId};
-use bare_js::eval::{Error, Interp};
+use bare_js::eval::Interp;
 use bare_js::value::{ObjId, Value};
+use bare_js_api::{Args, HostFn, Local};
 use std::borrow::Cow;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
-
-type V = R<Value>;
 
 // ------------------------------------------------------------------------------------------ sanitization
 
@@ -375,10 +375,6 @@ pub(crate) fn forget_labels(d: &Dom, n: NodeId, o: ObjId) {
     }
 }
 
-fn illegal(it: &mut Interp<'_>) -> Error {
-    it.type_error("Illegal invocation")
-}
-
 // ------------------------------------------------------------------------------------------ the check
 
 const MISSING: u16 = 1;
@@ -563,21 +559,22 @@ impl Dom {
 // ------------------------------------------------------------------------------------------ the members
 
 /// `this` is an `input`, `select`, `textarea` or `button`.
-pub(crate) fn control(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
-    let n = d.el(it, this)?;
+pub(crate) fn control<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
+    let n = d.el_s(s, this)?;
     let ok = tag_of(&d.doc.borrow(), n).is_some();
-    if ok { Ok(n) } else { Err(illegal(it)) }
+    if ok { Ok(n) } else { Err(s.type_error("Illegal invocation")) }
 }
 
-fn will_validate(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = control(d, it, this)?;
-    Ok(Value::Bool(d.will_validate(it, n)?))
+fn will_validate<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = control(d, s, this)?;
+    let w = old(s, |it| d.will_validate(it, n))?;
+    Ok(s.boolean(w))
 }
 
-fn validation_message(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = control(d, it, this)?;
-    let m = message_of(d, it, n)?;
-    d.js_str(it, &m)
+fn validation_message<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = control(d, s, this)?;
+    let m = old(s, |it| message_of(d, it, n))?;
+    d.js_str_s(s, &m)
 }
 
 /// The `validationMessage` of `n`.
@@ -585,57 +582,58 @@ pub(crate) fn message_of(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> R<String> {
     Ok(if d.will_validate(it, n)? { d.verdict(it, n)?.msg } else { String::new() })
 }
 
-fn set_custom_validity(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let n = control(d, it, this)?;
-    if a.is_empty() {
+fn set_custom_validity<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = control(d, s, this)?;
+    let Some(v) = a.get(0) else {
         let name = match tag_of(&d.doc.borrow(), n) {
             Some("input") => "HTMLInputElement",
             Some("select") => "HTMLSelectElement",
             Some("textarea") => "HTMLTextAreaElement",
             _ => "HTMLButtonElement",
         };
-        return Err(it.type_error(&format!("Failed to execute 'setCustomValidity' on '{name}': 1 argument required, but only 0 present.")));
-    }
-    let s = d.string_arg(it, a[0])?;
+        return Err(s.type_error(&format!("Failed to execute 'setCustomValidity' on '{name}': 1 argument required, but only 0 present.")));
+    };
+    let t = d.string_arg_s(s, v)?;
     let mut st = d.ctl.st.borrow_mut();
-    if s.is_empty() {
+    if t.is_empty() {
         st.custom.remove(&n);
     } else {
-        st.custom.insert(n, s);
+        st.custom.insert(n, t);
     }
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-fn validity(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = control(d, it, this)?;
-    validity_of(d, it, n)
+fn validity<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = control(d, s, this)?;
+    validity_of(d, s, n)
 }
 
 /// The `ValidityState` of `n`.
-pub(crate) fn validity_of(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> V {
+pub(crate) fn validity_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId) -> Res<'s, Local<'s>> {
     let cached = d.ctl.st.borrow().state.get(&n).copied();
     if let Some(o) = cached {
-        return Ok(Value::Object(o));
+        return Ok(d.obj_local(s, o));
     }
-    let [proto, _] = made_validity(d, it)?;
-    let o = d.obj(it, proto)?;
+    let [proto, _] = old(s, |it| made_validity(d, it))?;
+    let o = d.obj_s(s, proto)?;
+    let l = d.obj_local(s, o);
     // An owner: the collector prunes the two entries when `o` dies.
     let key = d.st.borrow_mut().owners.key(Owner::Source(o)) | crate::browser_sources::Source::Validity as u32;
-    it.set_host_owner_obj(o, key);
+    s.set_host_owner(l, key)?;
     let mut st = d.ctl.st.borrow_mut();
     st.state.insert(n, o);
     st.owner.insert(o, n);
-    Ok(Value::Object(o))
+    Ok(l)
 }
 
-fn flag<const I: u32>(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let owner = match this {
-        Value::Object(o) => d.ctl.st.borrow().owner.get(&o).copied(),
-        _ => None,
+fn flag<'s, const I: u32>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let owner = match obj_id(s, this) {
+        Some(o) => d.ctl.st.borrow().owner.get(&o).copied(),
+        None => None,
     };
-    let Some(n) = owner else { return Err(illegal(it)) };
-    let f = d.verdict(it, n)?.flags;
-    Ok(Value::Bool(if I == 10 { f == 0 } else { f & (1 << I) != 0 }))
+    let Some(n) = owner else { return Err(s.type_error("Illegal invocation")) };
+    let f = old(s, |it| d.verdict(it, n))?.flags;
+    Ok(s.boolean(if I == 10 { f == 0 } else { f & (1 << I) != 0 }))
 }
 
 fn made_validity(d: &Dom, it: &mut Interp<'_>) -> R<[ObjId; 2]> {
@@ -644,7 +642,7 @@ fn made_validity(d: &Dom, it: &mut Interp<'_>) -> R<[ObjId; 2]> {
     }
     let op = it.object_prototype();
     let proto = d.obj(it, op)?;
-    let getters: [(&str, H); 11] = [
+    let getters: [(&str, HS); 11] = [
         ("valueMissing", flag::<0>),
         ("typeMismatch", flag::<1>),
         ("patternMismatch", flag::<2>),
@@ -658,7 +656,7 @@ fn made_validity(d: &Dom, it: &mut Interp<'_>) -> R<[ObjId; 2]> {
         ("valid", flag::<10>),
     ];
     for (name, g) in getters {
-        d.def_get(it, proto, name, g, None)?;
+        d.def_get_s(it, proto, name, g, None)?;
     }
     let ctor = interface(d, it, proto, "ValidityState")?;
     hold(it, &d.ctl.keep, &[proto, ctor]);
@@ -673,8 +671,8 @@ fn interface(d: &Dom, it: &mut Interp<'_>, proto: ObjId, name: &str) -> R<ObjId>
 }
 
 /// The same with the constructor function `h`.
-pub(crate) fn interface_with(d: &Dom, it: &mut Interp<'_>, proto: ObjId, name: &str, h: H) -> R<ObjId> {
-    let f = d.add_fn(it, h, name, 0, true)?;
+pub(crate) fn interface_with(d: &Dom, it: &mut Interp<'_>, proto: ObjId, name: &str, h: HS) -> R<ObjId> {
+    let f = d.add_fn_s_obj(it, h, name, 0, HostFn::Ctor)?;
     link(d, it, proto, name, f)
 }
 
@@ -686,22 +684,22 @@ fn link(d: &Dom, it: &mut Interp<'_>, proto: ObjId, name: &str, f: ObjId) -> R<O
     Ok(f)
 }
 
-fn labels(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = control(d, it, this)?;
-    labels_of(d, it, n)
+fn labels<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = control(d, s, this)?;
+    labels_of(d, s, n)
 }
 
 /// The `labels` of `n`: `null` when it is not labelable.
-pub(crate) fn labels_of(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> V {
+pub(crate) fn labels_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId) -> Res<'s, Local<'s>> {
     if !labelable(d, &d.doc.borrow(), n) {
-        return Ok(Value::Null);
+        return Ok(s.null());
     }
     let cached = d.ctl.st.borrow().labels.get(&n).copied();
     if let Some(o) = cached {
-        return Ok(Value::Object(o));
+        return Ok(d.obj_local(s, o));
     }
-    let v = crate::browser_nodelist::make_list(d, it, crate::browser_nodelist::list_proto(d), Src::Labels(n))?;
-    let Value::Object(o) = v else { unreachable!() };
+    let v = old_v(s, |it| crate::browser_nodelist::make_list(d, it, crate::browser_nodelist::list_proto(d), Src::Labels(n)))?;
+    let Some(o) = obj_id(s, v) else { unreachable!() };
     d.ctl.st.borrow_mut().labels.insert(n, o);
     Ok(v)
 }
@@ -710,7 +708,7 @@ fn shared(d: &Dom, it: &mut Interp<'_>) -> R<[ObjId; 7]> {
     if let Some(&s) = d.ctl.shared.get() {
         return Ok(s);
     }
-    let hs: [(H, &str, u32); 7] = [
+    let hs: [(HS, &str, u32); 7] = [
         (will_validate, "get willValidate", 0),
         (validation_message, "get validationMessage", 0),
         (validity, "get validity", 0),
@@ -721,7 +719,7 @@ fn shared(d: &Dom, it: &mut Interp<'_>) -> R<[ObjId; 7]> {
     ];
     let mut v = Vec::with_capacity(7);
     for (h, name, len) in hs {
-        v.push(d.add_fn(it, h, name, len, false)?);
+        v.push(d.add_fn_s_obj(it, h, name, len, HostFn::Method)?);
     }
     let out: [ObjId; 7] = v.try_into().expect("seven");
     hold(it, &d.ctl.keep, &out);
@@ -748,12 +746,12 @@ pub(crate) fn decorate(d: &Dom, it: &mut Interp<'_>, proto: ObjId, check: bool) 
     Ok(())
 }
 
-reflect!("input", "required", input_required, set_input_required, bool);
+reflect_s!("input", "required", input_required, set_input_required, bool);
 
 /// `form.elements`: one live `HTMLCollection` of the form (`browser_table::FORM`).
-fn form_elements(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let f = d.html_el(it, this, "form")?;
-    crate::browser_nodelist::of(d, it, f, crate::browser_table::FORM)
+fn form_elements<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let f = d.html_el_s(s, this, "form")?;
+    old_v(s, |it| crate::browser_nodelist::of(d, it, f, crate::browser_table::FORM))
 }
 
 /// The prototype of a new wrapper of an HTML `input`, `button`, `form` or `label`. The first `input`, the first `button` and the first `form`
@@ -766,7 +764,7 @@ pub(crate) fn proto_for(d: &Dom, it: &mut Interp<'_>, tag: &str) -> R<ObjId> {
     if tag == "form" {
         let done = d.ctl.done.get();
         if done & 4 == 0 {
-            d.def_method(it, p.form, "reset", 0, form_reset)?;
+            d.def_method_s(it, p.form, "reset", 0, form_reset)?;
             crate::browser_reflect::reflect!(d, it, p.form, &["form"], {
                 "action" => "action": UrlOrDoc,
                 "method" => "method": Enum(&["get", "post", "dialog"], "get"),
@@ -776,10 +774,11 @@ pub(crate) fn proto_for(d: &Dom, it: &mut Interp<'_>, tag: &str) -> R<ObjId> {
                 "acceptCharset" => "accept-charset": Str,
                 "autocomplete" => "autocomplete": Enum(&["on", "off"], "on"),
             });
-            d.def_get(it, p.form, "elements", form_elements, None)?;
-            d.def_get(it, p.form, "length", |d, it, t, _| {
-                let f = d.html_el(it, t, "form")?;
-                Ok(Value::Number(d.form_elements(it, f)?.len() as f64))
+            d.def_get_s(it, p.form, "elements", form_elements, None)?;
+            d.def_get_s(it, p.form, "length", |d, s, t, _| {
+                let f = d.html_el_s(s, t, "form")?;
+                let n = old(s, |it| d.form_elements(it, f))?.len();
+                Ok(s.number(n as f64))
             }, None)?;
             d.ctl.done.set(done | 4);
         }
@@ -797,8 +796,8 @@ pub(crate) fn proto_for(d: &Dom, it: &mut Interp<'_>, tag: &str) -> R<ObjId> {
                     "maxLength" => "maxlength": Long(-1, 0), "minLength" => "minlength": Long(-1, 0), "size" => "size": Long(20, 1),
                 });
                 let k = d.key(it, "required")?;
-                let g = d.add_fn(it, input_required, "get required", 0, false)?;
-                let s = d.add_fn(it, set_input_required, "set required", 1, false)?;
+                let g = d.add_fn_s_obj(it, input_required, "get required", 0, HostFn::Method)?;
+                let s = d.add_fn_s_obj(it, set_input_required, "set required", 1, HostFn::Method)?;
                 hold(it, &d.ctl.keep, &[g, s]);
                 let _ = d.ctl.required.set([g, s]);
                 d.define_accessor(it, proto, k, g, Some(s))?;
@@ -886,35 +885,35 @@ pub(crate) fn label_ids(d: &Dom, it: &mut Interp<'_>, control: NodeId) -> R<Vec<
     Ok(out)
 }
 
-fn label_el(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
-    d.html_el(it, this, "label")
+fn label_el<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
+    d.html_el_s(s, this, "label")
 }
 
-fn label_control(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let l = label_el(d, it, this)?;
-    let c = d.label_control(it, l)?;
-    d.wrap_opt(it, c)
+fn label_control<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let l = label_el(d, s, this)?;
+    let c = old(s, |it| d.label_control(it, l))?;
+    d.wrap_opt_s(s, c)
 }
 
-fn label_form(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let l = label_el(d, it, this)?;
-    let f = match d.label_control(it, l)? {
-        Some(c) => d.form_owner(it, c)?,
-        None => None,
-    };
-    d.wrap_opt(it, f)
+fn label_form<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let l = label_el(d, s, this)?;
+    let f = old(s, |it| match d.label_control(it, l)? {
+        Some(c) => d.form_owner(it, c),
+        None => Ok(None),
+    })?;
+    d.wrap_opt_s(s, f)
 }
 
-reflect!("label", "for", html_for, set_html_for, str);
+reflect_s!("label", "for", html_for, set_html_for, str);
 
 fn made_label(d: &Dom, it: &mut Interp<'_>) -> R<[ObjId; 2]> {
     if let Some(&m) = d.ctl.label.get() {
         return Ok(m);
     }
     let proto = d.obj(it, d.p().html)?;
-    d.def_get(it, proto, "control", label_control, None)?;
-    d.def_get(it, proto, "htmlFor", html_for, Some(set_html_for))?;
-    d.def_get(it, proto, "form", label_form, None)?;
+    d.def_get_s(it, proto, "control", label_control, None)?;
+    d.def_get_s(it, proto, "htmlFor", html_for, Some(set_html_for))?;
+    d.def_get_s(it, proto, "form", label_form, None)?;
     let ctor = interface(d, it, proto, "HTMLLabelElement")?;
     hold(it, &d.ctl.keep, &[proto, ctor]);
     let _ = d.ctl.label.set([proto, ctor]);
@@ -981,10 +980,10 @@ impl Dom {
     }
 }
 
-pub(crate) fn form_reset(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let f = d.html_el(it, this, "form")?;
-    d.reset_form(it, f)?;
-    Ok(Value::Undefined)
+pub(crate) fn form_reset<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let f = d.html_el_s(s, this, "form")?;
+    old(s, |it| d.reset_form(it, f))?;
+    Ok(s.undefined())
 }
 
 // ------------------------------------------------------------------------------------------ install

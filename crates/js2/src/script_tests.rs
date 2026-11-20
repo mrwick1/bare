@@ -511,6 +511,45 @@ fn a_host_script_runs_before_the_script_and_the_directive_prologue_stays() {
 }
 
 #[test]
+fn a_top_level_let_const_and_class_are_visible_to_the_next_script() {
+    let host = "let a = 1; const b = 2; class C { m() { return 3; } } let later; let o = { k: 5 };";
+    let src = "var r = a + b + new C().m(); a = 10; var s = a; var t; try { b = 1; } catch (e) { t = e.name; }
+               var u = typeof later + typeof C + typeof nothing; later = 4; var w = (function () { return a + later; })();
+               var junk; for (var i = 0; i < 3000; i++) { junk = [i, { i: i }]; } var x = o.k + (this.a === undefined ? 'g' : 'p');
+               var y; try { zzz; } catch (e) { y = e.name; }";
+    let mut vm = load_with(host, src).unwrap();
+    vm.run_main(0).unwrap();
+    let got: Vec<String> = ["r", "s", "t", "u", "w", "x", "y"].iter().map(|n| vm.global_text(n)).collect();
+    assert_eq!(got, ["6", "10", "TypeError", "undefinedfunctionundefined", "14", "5g", "ReferenceError"]);
+    // The names are not properties of the global object, and a name that is declared twice is a SyntaxError.
+    let mut vm = load_with("let a = 1;", "let a = 2;").unwrap();
+    assert!(vm.run_main(0).is_err());
+    let mut vm = load_with("var a = 1;", "let a = 2;").unwrap();
+    assert!(vm.run_main(0).is_err());
+    // The check comes before the first statement of the script.
+    let mut vm = load_with("let a = 1;", "var side = 1; let a = 2;").unwrap();
+    assert!(vm.run_main(0).is_err());
+    assert_eq!(vm.global_text("side"), "undefined");
+    let mut vm = load_with("let a = 1;", "var a = 2;").unwrap();
+    assert!(vm.run_main(0).is_err());
+    let mut vm = load_with("let a = 1;", "var r = typeof globalThis.a + delete a;").unwrap();
+    vm.run_main(0).unwrap();
+    assert_eq!(vm.global_text("r"), "undefinedfalse");
+}
+
+#[test]
+fn a_parenthesized_optional_member_call_keeps_this() {
+    let o = "var o = { m() { return this.v; }, v: 7 }; var n = null; ";
+    check(&[
+        (&format!("{o} var r = (o?.m)();"), "r", "7"),
+        (&format!("{o} var r = (o?.m)?.();"), "r", "7"),
+        (&format!("{o} var r = (o.m)?.();"), "r", "7"),
+        (&format!("{o} var r = 0; try {{ (n?.m)(); }} catch (e) {{ r = e.name; }}"), "r", "TypeError"),
+        (&format!("{o} var r = (n?.m)?.();"), "r", "undefined"),
+    ]);
+}
+
+#[test]
 fn built_ins_survive_constant_collection_with_many_live_values() {
     // Run in Miri too (one program): sort, map, filter, split, join, slice, splice, concat, bind and Object.entries, all holding many
     // fresh cells while the collector runs at nearly every allocation.
@@ -747,6 +786,15 @@ fn prelude_functions_are_compiled_at_their_first_call() {
 }
 
 #[test]
+fn a_function_that_waits_has_its_name_and_length_before_and_after_its_first_call() {
+    check(&[
+        ("var r = Array.prototype.sort.name + Array.prototype.sort.length + Array.prototype.reduce.name + Array.prototype.reduce.length + Array.prototype.forEach.length;", "r", "sort1reduce11"),
+        ("var a = [3, 1, 2]; a.sort(); a.reduce(function (x, y) { return x + y; }); var r = Array.prototype.sort.name + Array.prototype.sort.length + Array.prototype.reduce.name + Array.prototype.reduce.length;", "r", "sort1reduce1"),
+        ("var d = Object.getOwnPropertyDescriptor(Array.prototype.map, 'name'); var r = d.value + ',' + d.writable + ',' + d.configurable;", "r", "map,false,true"),
+    ]);
+}
+
+#[test]
 fn a_lazy_function_gets_its_arguments_the_first_time_and_after() {
     // `reduce` reads `arguments`; the callback of `forEach` gets 3 arguments; `Array.from` has parameters and reads `arguments`.
     check(&[
@@ -800,6 +848,42 @@ fn def_is_hidden_after_load() {
     check(&[
         ("var r = typeof __def + Object.keys(globalThis).indexOf('__def');", "r", "undefined-1"),
         ("var __def = 5; var r = __def;", "r", "5"),
+        ("var r = typeof __helper + typeof __set + Object.keys(globalThis).indexOf('__helper') + Object.keys(globalThis).indexOf('__set');", "r", "undefinedundefined-1-1"),
+    ]);
+}
+
+/// A write that a frozen, sealed or non-extensible object refuses is silent in sloppy code and a `TypeError` in strict code, for a
+/// named property, an index, the `length` of an array and a new property.
+#[test]
+fn a_refused_write_throws_in_strict_code_only() {
+    let strict = |body: &str| format!("'use strict'; var r; try {{ {body}; r = 'no throw'; }} catch (e) {{ r = e.name; }}");
+    check(&[
+        (&strict("var o = Object.freeze({a: 1}); o.a = 2"), "r", "TypeError"),
+        (&strict("var o = Object.preventExtensions({a: 1}); o.b = 2"), "r", "TypeError"),
+        (&strict("var o = Object.preventExtensions({a: 1}); o.a = 2"), "r", "no throw"),
+        (&strict("var a = Object.freeze([1, 2]); a[0] = 5"), "r", "TypeError"),
+        (&strict("var a = Object.freeze([1, 2]); a[5] = 5"), "r", "TypeError"),
+        (&strict("var a = Object.freeze([1, 2]); a.length = 0"), "r", "TypeError"),
+        (&strict("var a = Object.freeze([1, 2]); a.push(3)"), "r", "TypeError"),
+        (&strict("var o = {}; Object.defineProperty(o, 'x', {value: 1}); o.x = 2"), "r", "TypeError"),
+        (&strict("var p = Object.freeze({x: 1}); var o = Object.create(p); o.x = 2"), "r", "TypeError"),
+        (&strict("var o = {get g() { return 1; }}; o.g = 2"), "r", "TypeError"),
+        (&strict("var o = Object.seal({a: 1}); o.a = 2; delete o.a"), "r", "TypeError"),
+        ("var o = Object.freeze({a: 1}); o.a = 2; o.b = 3; var a = Object.freeze([1]); a[0] = 2; a[3] = 1; a.length = 0; var r = o.a + ',' + o.b + ',' + a.join() + ',' + a.length;", "r", "1,undefined,1,1"),
+    ]);
+}
+
+/// A script function has its `length` and `name` made at the first look at its own properties, a built-in at the first use of one of
+/// them: `freeze`, `isFrozen`, `defineProperty` and the descriptors must see both.
+#[test]
+fn freeze_and_define_see_the_lazy_length_and_name_of_functions() {
+    check(&[
+        ("function f(a, b) {} Object.freeze(f); var d = Object.getOwnPropertyDescriptor(f, 'name'); var r = d.value + ',' + d.writable + ',' + d.configurable + ',' + Object.isFrozen(f) + ',' + f.length;", "r", "f,false,false,true,2"),
+        ("var m = Math.max; Object.freeze(m); var d = Object.getOwnPropertyDescriptor(m, 'length'); var r = d.value + ',' + d.configurable + ',' + Object.isFrozen(m) + ',' + Object.isFrozen(Math.min);", "r", "2,false,true,false"),
+        ("var g = function () {}; var r = Object.isFrozen(g) + ',' + Object.isSealed(Object.seal(g)) + ',' + Object.getOwnPropertyNames(g).slice(0, 2).join();", "r", "false,true,length,name"),
+        ("function f() {} Object.defineProperty(f, 'x', {value: 1}); var n = Object.getOwnPropertyNames(f); var r = n.slice(0, 2).join() + ',' + (n.indexOf('x') > 1);", "r", "length,name,true"),
+        ("function f() {} Object.preventExtensions(f); var r = f.name + ',' + f.length + ',' + Object.getOwnPropertyNames(f).slice(0, 2).join();", "r", "f,0,length,name"),
+        ("var f = Array.prototype.push; Object.preventExtensions(f); var r = f.name + ',' + f.length;", "r", "push,1"),
     ]);
 }
 
