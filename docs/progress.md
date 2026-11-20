@@ -16474,11 +16474,11 @@ Profile. Callgrind, symbol builds of both trees, `streams_load churn 10` (3,000 
 | `call_api_plain` + `call_api_host` + `call_scoped` (x2) + `Host::call` | +1,035      |      +1,035 |
 | `Dom::Host::call` (x2) + `call_host` (x2), the old entry            |          -972 |        -972 |
 | `brand_ctl` (new)                                                   |           +166 |        +166 |
-| `resolve_promise`, `promise_then`, `new_promise`, `bind`, `type_of`, `is_callable` (new wrappers) | +620 | +620 |
+| `resolve_promise`, `promise_then`, `new_promise`, `bind`, `type_of`, `is_callable`, `is_callable_value` (new wrappers) | +596 | +596 |
 | `host_resolve_promise`, `host_promise_then`, `host_new_promise` (old) |          -250 |        -250 |
 | `get_reader` + `invoke` + `bind_obj` + `obj_s` (own cost)           |           +450 |        +450 |
 
-The first column is the cost that #780 had. The call path itself is about +63 for each stream (15 calls), the same on both sides of this change. The rest was spread over about 30 small wrappers, as the earlier entry said. The key reads were the same on both trees (about 1,900 for each stream: 6.3 reads of `autoAllocateChunkSize`, `cancel`, `pull`, `start`, `type`, `highWaterMark` and `size`, each about 290 instructions in `atom_str`). So the lever was to remove the work, not to make the wrappers cheaper.
+The first column is the cost that #780 had. The call path itself is about +63 for each stream (15 calls), the same on both sides of this change. The rest was spread over about 30 small wrappers, as the earlier entry said. The key reads were the same on both trees: about 2,850 instructions for each stream in `key_from_str`, `str_from` and `intern_slice` (about 6.3 reads of `autoAllocateChunkSize`, `cancel`, `pull`, `start`, `type`, `highWaterMark` and `size`, so about 450 each; hypothesis for the read count: 5 reads with a source and 2 with a strategy, and 2 of 3 streams have one). So the lever was to remove the work, not to make the wrappers cheaper.
 
 Changes.
 

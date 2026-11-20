@@ -349,7 +349,7 @@ pub(crate) fn is_object(s: &Sc<'_, '_>, v: Local<'_>) -> bool {
 }
 
 /// Property names that a handler reads on every call, kept as strings that the engine holds (`Persistent`). The table is made at its
-/// first use. A read then costs one handle and a key check, not a lookup of the text in the atom table (about 290 instructions).
+/// first use. A read then costs one handle and a key check, not a lookup of the text in the atom table (several hundred instructions).
 #[derive(Default)]
 pub(crate) struct Names(std::cell::OnceCell<Box<[Persistent]>>);
 
