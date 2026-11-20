@@ -1,0 +1,12 @@
+var s = 'Hello, World';
+print(s.length, s.charAt(4), s.charCodeAt(1), s.indexOf('o'), s.lastIndexOf('o'), s.indexOf('zz'));
+print(s.slice(2, 5), s.slice(-5), s.substring(7, 2), s.substr(3, 4), s.toUpperCase(), s.toLowerCase());
+print(s.split(', ').join('|'), 'a,b,,c'.split(',').length, 'abc'.split('').join('-'));
+print(' \t x y \n'.trim() + '|', 'ab'.repeat(3), 'abc'.padStart(6, '-'), 'abc'.padEnd(6, '12'));
+print('x'.concat(1, 2), 'abc' < 'abd', 'a' + 1 + 2, 1 + 2 + 'a', 'abc'[1], 'abc'.at(-1));
+print('abcabc'.replace('b', 'X'), 'abcabc'.replaceAll('b', 'X'), 'a-b-c'.startsWith('a-'), 'a-b-c'.endsWith('c'), 'abc'.includes('bc'));
+var t = '';
+for (var i = 0; i < 40; i++) t += String.fromCharCode(97 + (i % 26));
+print(t, t.length);
+print('é'.length, '😀'.length, '😀'.charCodeAt(1));
+print(String(null), String(undefined), String(true), String([1, [2, 3]]), String({}), `a${1 + 1}b${'c'}`);
