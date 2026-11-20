@@ -75,7 +75,7 @@ pub const F_SLOWIDX: u32 = 1024;
 /// `Realm::k_prim` (`bi_wrap.rs`). The flag, not the shape, tells a wrapper: a property that a script adds changes the shape.
 pub const F_WRAP: u32 = 4096;
 /// Object header flag: a generator object (`gen.rs`): its hidden slots hold the state and the saved frame.
-pub const F_GEN: u32 = 8192;
+pub const F_GEN: u32 = 16384;
 /// `Elements` header flag: the record is sparse.
 const F_SPARSE: u32 = 1;
 /// A write at an index this far above the capacity of a dense record makes it sparse.
