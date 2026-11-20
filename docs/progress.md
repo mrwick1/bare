@@ -16927,11 +16927,11 @@ Not tested: Windows; the browser (js2 is not wired in); the test262 `module` fla
 
 ## 2026-11-20: `DECOMPOSE` without relocations (step 0 of `docs/design-js2-lazy-builtins.md`)
 
-Branch `t3/unicode-decomposition-offsets`, from `origin/main` at `0c56d4a1`. `DECOMPOSE` in `bare-unicode` was `&[(u32, &str)]` with 2,081 entries. Each `&str` is a pointer, so it was one `R_X86_64_RELATIVE` relocation, which `ld.so` applies at every process start.
+Branch `t3/unicode-decomposition-offsets`, from `origin/main` at `c808ab7f`. `DECOMPOSE` in `bare-unicode` was `&[(u32, &str)]` with 2,081 entries. Each `&str` is a pointer, so it was one `R_X86_64_RELATIVE` relocation, which `ld.so` applies at every process start.
 
 Change. `tools/gen_unicode_tables.py` now writes two arrays: `DECOMPOSE: [(u32, u16, u8); 2081]` (code point, first index, length) and `DECOMPOSE_DATA: [char; 3450]` (all the parts, one entry after the other). An array holds no pointer, so it needs no relocation. `decompose` in `lib.rs` copies the slice of `DECOMPOSE_DATA`. The public functions of the crate do not change. The `DECOMPOSE` static changes type; only `lib.rs` uses it. The regenerated `tables.rs` differs from the old file only in the `DECOMPOSE` block.
 
-Measurement. Machine archMachine (AMD Ryzen 9 5900HX), release builds, load average 3 to 17 from other jobs, so only instruction counts are used (`tools/js/instr.sh`, minimum of 3 runs; the table lists 3 rounds). Base is `origin/main` (for the browser rows) or `origin/t3/improve-js2-builtins-test262` (#791, `04f2c2f4`; main has no `bare-unicode` in js2 yet). New is the same tree with the two changed files of `crates/unicode/src`.
+Measurement. Machine archMachine (AMD Ryzen 9 5900HX), release builds, load average 3 to 17 from other jobs, so only instruction counts are used (`tools/js/instr.sh`, minimum of 3 runs; the table lists 3 rounds). Base is the parent commit (for the browser rows) or `origin/t3/improve-js2-builtins-test262` (#791, `04f2c2f4`; main has no `bare-unicode` in js2 yet). New is the same tree with the two changed files of `crates/unicode/src`.
 
 | Check | Base | New | Change |
 |---|---|---|---|
@@ -16942,7 +16942,7 @@ Measurement. Machine archMachine (AMD Ryzen 9 5900HX), release builds, load aver
 | binary size, `bare` | 17,065,632 | 16,991,744 | -73,888 bytes |
 | binary size, `script_run` | 2,329,360 | 2,252,104 | -77,256 bytes |
 
-The design document expected -33 K on `script_run`. The measured gain is -24 K. The count of relocations dropped by 2,077, not 2,110: the 2,081 entries are the cause of about all of them. The spread of the 3 rounds is at most 0.04%.
+The design document expected -33 K on `script_run`. The measured gain is -24 K. The count of relocations dropped by 2,077, not 2,110: the 2,081 entries are the cause of about all of them. The spread of the 3 rounds is at most 0.11%.
 
 Cost matrix (`tools/js/cost_matrix.sh -j6`, base and new built from the same commit apart from this change, glibc with the tcache tunable): 817 rows ran. Mean change -0.094%. The worst row is `select_load react 1000` at +0.17%. No row is over +0.5% under glibc, so the jemalloc runs and the `codegen-units=1` runs were not needed. Two rows did not run on either tree: `parse_load deep 1` and `parse_load deep 10` overflow the stack on the base too (also with `ulimit -s unlimited`). They are not caused by this change.
 
