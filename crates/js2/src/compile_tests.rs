@@ -148,17 +148,16 @@ fn for_loop_on_registers() {
         r#"function f() { var s = 0; for (var i = 0; i < 200000; i++) { s = (s + i * 3) % 1000003; } return s; }"#,
         0,
         r#"
-code nregs=4 nparams=0 words=12 sites=0
+code nregs=4 nparams=0 words=11 sites=0
 0000  LoadI       r0, 0
 0001  LoadI       r1, 0
-0002  JnLtI       r1, -> 0011, 200000
+0002  JnLtI       r1, -> 0010, 200000
 0004  MulI        r3, r1, 3
 0005  Add         r2, r0, r3
-0006  LoadI.w     r3, 1000003
-0008  Mod         r0, r2, r3
-0009  Inc         r1, r1
-0010  JmpBack     -> 0002
-0011  Ret         r0
+0006  ModX        r0, r2, 1000003
+0008  Inc         r1, r1
+0009  JmpBack     -> 0002
+0010  Ret         r0
 "#,
     );
 }
@@ -218,7 +217,7 @@ code nregs=4 nparams=1 words=11 sites=0
 0000  Mov         r3, r0
 0001  CallU       r2, 3, 0
 0002  LoadI       r0, 0
-0003  Jmp         -> 0010
+0003  Ret         r0
 0004  Mov         r2, r1
 0005  Mov         r3, r2
 0006  LoadI       r0, 0
@@ -241,7 +240,7 @@ code nregs=4 nparams=1 words=12 sites=0
 0001  JnLtI       r1, -> 0011, 3
 0003  JmpIfNot    r0, -> 0006
 0004  Inc         r0, r0
-0005  Jmp         -> 0011
+0005  RetUndef    
 0006  Mov         r3, r1
 0007  Inc         r0, r0
 0008  Ret         r3
@@ -289,7 +288,7 @@ code nregs=2 nparams=1 words=8 sites=0
       [1 -> 0002, 2 -> 0003, 4 -> 0006, default -> 0005]
 0002  AddI        r1, r1, 1
 0003  AddI        r1, r1, 2
-0004  Jmp         -> 0007
+0004  Ret         r1
 0005  AddI        r1, r1, 9
 0006  AddI        r1, r1, 4
 0007  Ret         r1
@@ -857,7 +856,7 @@ code nregs=6 nparams=1 words=9 sites=0
 0003  SubI        r5, r0, 1
 0004  CallU       r3, 4, 1
 0005  Mul         r2, r0, r3
-0006  Jmp         -> 0008
+0006  Ret         r2
 0007  LoadI       r2, 1
 0008  Ret         r2
 "#,

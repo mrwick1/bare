@@ -70,6 +70,18 @@ fn arith(op: BinaryOp) -> Option<(Op, Option<Op>, bool)> {
     })
 }
 
+/// The op with a 32-bit constant in the word `x`, for a constant that does not fit the immediate.
+fn xarith(op: BinaryOp) -> Option<Op> {
+    use BinaryOp::*;
+    Some(match op {
+        Add => Op::AddX,
+        Sub => Op::SubX,
+        Mul => Op::MulX,
+        Mod => Op::ModX,
+        _ => return None,
+    })
+}
+
 fn compare_op(op: BinaryOp) -> Option<Op> {
     use BinaryOp::*;
     Some(match op {
@@ -953,6 +965,12 @@ impl<'a> Fc<'a> {
             } else if let (Some(iop), true, Some(v)) = (iop, commute, imm(self, left)) {
                 let r = self.any(right)?;
                 self.op(iop, dst, r, v as u32);
+            } else if let (Some(xop), Some(v)) = (xarith(op), self.int_const(right)) {
+                let l = self.any(left)?;
+                self.opx(xop, dst, l, 0, v as u32);
+            } else if let (Some(xop), true, Some(v)) = (xarith(op), commute, self.int_const(left)) {
+                let r = self.any(right)?;
+                self.opx(xop, dst, r, 0, v as u32);
             } else {
                 let l = self.any_before(left, right)?;
                 let r = self.any(right)?;
@@ -1327,6 +1345,10 @@ impl<'a> Fc<'a> {
             let shift = matches!(op, BinaryOp::Shl | BinaryOp::Shr | BinaryOp::UShr);
             if let Some(v) = self.int_const(right).filter(|v| fits_i16(*v) && (!shift || (0..32).contains(v))) {
                 self.op(iop, dst, left, v as u32);
+                return Ok(());
+            }
+            if let (Some(xop), Some(v)) = (xarith(op), self.int_const(right)) {
+                self.opx(xop, dst, left, 0, v as u32);
                 return Ok(());
             }
             let r = self.any(right)?;

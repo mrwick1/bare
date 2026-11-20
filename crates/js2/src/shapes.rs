@@ -32,7 +32,7 @@
 use crate::cell::{CellHeader, Layout};
 use crate::heap::Heap;
 use crate::string::Str;
-use std::cell::OnceCell;
+use std::cell::{Cell, OnceCell};
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
 use std::ptr::NonNull;
@@ -54,6 +54,8 @@ pub const SCAN_MAX: usize = 8;
 pub const MAX_INLINE: u16 = 30;
 
 const NONE: u32 = u32::MAX;
+/// The first value of the tag of the watched object. A shape id is below `SHAPE_CAP` (2^20), so a tag never equals a shape id.
+const WATCH_TAG0: u32 = 1 << 31;
 const F_DICT: u8 = 1;
 const F_FREE: u8 = 2;
 /// The tag of a prototype edge in the child map; an attribute byte never has it.
@@ -345,15 +347,41 @@ pub struct Shapes {
     live: Vec<u64>,
     scratch: Vec<bool>,
     epoch: u32,
+    /// The address of the watched object (the global object of the realm), or 0. `Obj::set_shape` changes `watch_tag` when this
+    /// object gets another shape: a cache of the address of one of its slots then stops matching (see [`Shapes::watch_tag`]).
+    watch: usize,
+    watch_tag: Cell<u32>,
 }
 
 impl Default for Shapes {
     fn default() -> Self {
-        Shapes { nodes: vec![Shape::new(Layout::OneByte, 0, 0)], tables: vec![Some(Table::new(Vec::new(), false))], free_nodes: Vec::new(), free_tables: Vec::new(), roots: Map::default(), live: vec![0], scratch: Vec::new(), epoch: 0 }
+        Shapes { nodes: vec![Shape::new(Layout::OneByte, 0, 0)], tables: vec![Some(Table::new(Vec::new(), false))], free_nodes: Vec::new(), free_tables: Vec::new(), roots: Map::default(), live: vec![0], scratch: Vec::new(), epoch: 0, watch: 0, watch_tag: Cell::new(WATCH_TAG0) }
     }
 }
 
 impl Shapes {
+    /// Watch the object at `addr` (the global object). One object at a time.
+    pub fn watch(&mut self, addr: usize) {
+        self.watch = addr;
+    }
+
+    /// The tag of the watched object: a number that changes each time the object gets another shape (`Obj::set_shape`: an add, a
+    /// delete, an attribute change, a new prototype). Those are the only changes that move a slot of the object or replace its
+    /// overflow record, so the address of a slot stays right while the tag is the same. A global-variable cache (`GetGlobal`,
+    /// `SetGlobal`) holds the tag and the address. The tag is never 0 and never a shape id.
+    #[inline]
+    pub fn watch_tag(&self) -> u32 {
+        self.watch_tag.get()
+    }
+
+    /// Called when the object at `addr` got another shape.
+    #[inline]
+    pub(crate) fn changed(&self, addr: usize) {
+        if addr == self.watch {
+            self.watch_tag.set(self.watch_tag.get() + 1);
+        }
+    }
+
     #[inline]
     fn node(&self, id: ShapeId) -> &Shape {
         &self.nodes[id.0 as usize]
