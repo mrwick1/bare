@@ -2958,7 +2958,7 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         let target = protos[def.on as usize];
         let key = d.key(it, def.name)?;
         match def.kind {
-            Kind::MethodS(_) => return Err(Error::Unsupported(unsupported("a method of the new form in the fetch table"))),
+            Kind::MethodS(_) | Kind::GetS(_) | Kind::AccessorS(..) => return Err(Error::Unsupported(unsupported("a method of the new form in the fetch table"))),
             Kind::Method(h) => {
                 let f = d.add_fn(it, h, def.name, def.len, false)?;
                 it.define_data(target, key, Value::Object(f), true, false, true)?;

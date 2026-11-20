@@ -161,6 +161,7 @@ impl<'p> Interp<'p> {
 
     /// Charge `n` steps of work (a traversal the host does for JavaScript). `Limit(Steps)` when the budget ends.
     /// Outside a call it uses the budget of the next `run`, so call it only while a host method runs.
+    #[inline]
     pub fn charge(&mut self, n: u64) -> Result<(), Error> {
         self.steps = self.steps.saturating_add(n);
         if self.steps > self.step_limit { Err(Error::Limit(LimitKind::Steps)) } else { Ok(()) }
