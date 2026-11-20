@@ -144,6 +144,12 @@ pub(crate) fn item(d: &Dom, owner: ObjId, index: usize) -> Option<Result<Slot, H
     })())
 }
 
+/// Does `prepare` have nothing to do for `l`? (No scan of the document: the cache is of the current revision. A list by name always goes through `prepare`.)
+#[inline]
+fn is_fresh(d: &Dom, l: &List) -> bool {
+    !matches!(l.src, Src::Name(_)) && l.rev == Some(d.doc.borrow().revision())
+}
+
 fn fresh(d: &Dom, l: &List) -> Result<bool, HeapError> {
     let doc = d.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
     Ok(l.rev == Some(doc.revision()))
@@ -154,7 +160,7 @@ pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<
     // A list that is fresh needs no scope: `prepare` would return at once.
     let fresh = match d.nl.s.borrow().lists.get(&owner) {
         None => return Ok(false),
-        Some(l) => !matches!(l.src, Src::Name(_)) && l.rev == Some(d.doc.borrow().revision()),
+        Some(l) => is_fresh(d, l),
     };
     if !fresh {
         run(it, |s| prepare(d, s, owner))?;
@@ -262,7 +268,15 @@ fn list_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, ObjId> {
 }
 
 pub(crate) fn length<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
-    let o = list_of(d, s, this)?;
+    // One lookup of the list when its cache is fresh (the common read, `i < list.length`); a stale list costs the lookups that it cost before.
+    let Some(o) = obj_id(s, this) else { return Err(s.type_error("Illegal invocation")) };
+    let fresh = match d.nl.s.borrow().lists.get(&o) {
+        None => return Err(s.type_error("Illegal invocation")),
+        Some(l) => is_fresh(d, l).then(|| l.ids.len()),
+    };
+    if let Some(n) = fresh {
+        return Ok(s.number(n as f64));
+    }
     prepare(d, s, o)?;
     Ok(s.number(d.nl.s.borrow().lists[&o].ids.len() as f64))
 }

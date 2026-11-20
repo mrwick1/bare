@@ -37,6 +37,9 @@ pub(crate) struct ApiState<'p> {
     persistent: Vec<Value>,
     slots: Rc<bare_js_api::Slots>,
     host: Option<Rc<dyn bare_js_api::Host<Interp<'p>>>>,
+    /// The address of the value in `host`, for `call_api_host`: it skips the offset of an `Rc` to a trait object (that offset reads the
+    /// alignment from the vtable). Set only by `set_host`, with `host`.
+    host_ptr: Option<std::ptr::NonNull<dyn bare_js_api::Host<Interp<'p>>>>,
     abort: Option<Error>,
     /// The objects with a host key (`set_host_owner`), in no order. `collect` calls the interface host's `trace` for the reached
     /// ones, and its `prune` with the keys of the dead ones. A list, not a map: a new owner is one push. `collect` writes the keys
@@ -52,6 +55,7 @@ impl Default for ApiState<'_> {
             persistent: Vec::new(),
             slots: Default::default(),
             host: None,
+            host_ptr: None,
             abort: None,
             owners: Vec::new(),
         }
@@ -350,14 +354,26 @@ impl<'p> Interp<'p> {
     /// and `ApiState::values` reads the whole chain, so a collection inside the call finds `this` and the arguments as roots.
     #[cold]
     fn call_api_host(&mut self, id: u32, this: Value, args: &[Value], is_new: bool, nt: Option<ObjId>) -> Result<Value, Error> {
-        let Some(h) = self.api.host.as_deref().map(|h| h as *const dyn bare_js_api::Host<Interp<'p>>) else {
+        let swap = nt.is_some() || self.host_nt.is_some();
+        self.call_api_with(id, this, args, is_new, nt, swap)
+    }
+
+    /// `call_api_host` for a plain call (no `new`, no `new.target`), the common one: the checks of the others fold away.
+    #[inline(never)]
+    fn call_api_plain(&mut self, id: u32, this: Value, args: &[Value]) -> Result<Value, Error> {
+        let swap = self.host_nt.is_some();
+        self.call_api_with(id, this, args, false, None, swap)
+    }
+
+    #[inline(always)]
+    fn call_api_with(&mut self, id: u32, this: Value, args: &[Value], is_new: bool, nt: Option<ObjId>, swap: bool) -> Result<Value, Error> {
+        let Some(h) = self.api.host_ptr else {
             return Err(unsupported("host function without a host", Span::default()));
         };
         // SAFETY: `h` points into the `Rc` of `api.host`, which `set_host` does not replace while a host call runs (it checks `win`), and
         // which lives as long as the realm. So no `Rc` clone is needed for the call.
-        let h = unsafe { &*h };
+        let h = unsafe { h.as_ref() };
         // The common call has no `new.target` and runs under none: nothing to save, set or restore.
-        let swap = nt.is_some() || self.host_nt.is_some();
         let saved = if swap { std::mem::replace(&mut self.host_nt, nt) } else { None };
         debug_assert!(args.len() < (1 << 30));
         let win = Win { this, args: args.as_ptr(), len: args.len() as u32, prev: self.api.win };
@@ -592,6 +608,7 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
     fn set_host(&mut self, host: Rc<dyn bare_js_api::Host<Self>>) {
         // `call_api_host` borrows the host without a clone, so it must not change under a running call.
         assert!(self.api.win.is_null(), "set_host inside a host call");
+        self.api.host_ptr = Some(std::ptr::NonNull::from(&*host));
         self.api.host = Some(host);
     }
 
