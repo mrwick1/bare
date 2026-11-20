@@ -221,6 +221,20 @@ impl Heap {
         new
     }
 
+    /// True when the cell at `p` is marked in this collection. A weak table calls it after the marking, before [`Heap::finish_mark`].
+    ///
+    /// # Safety
+    /// As for [`Heap::mark`].
+    #[inline]
+    pub unsafe fn is_marked(&self, p: NonNull<u8>) -> bool {
+        let h = p.as_ptr().map_addr(|a| a & !(BLOCK - 1)).cast::<Header>();
+        // SAFETY: a cell lies in the first block of its mapping, after the header.
+        let cell = unsafe { (*h).cell as usize };
+        let i = if cell == 0 { 0 } else { (p.as_ptr() as usize - h as usize - FIRST) / cell };
+        // SAFETY: as above; `i` is a cell of the block.
+        unsafe { (*h).marks[i / 64] >> (i % 64) & 1 != 0 }
+    }
+
     /// End a collection: unmarked large objects go back to the OS, and every block of cells waits for its lazy sweep.
     pub fn finish_mark(&mut self) {
         for c in 0..NCLASS {

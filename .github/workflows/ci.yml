@@ -41,7 +41,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --locked -p bare-mcp -p bare-drive
-  # The new engine (crates/js2): only its `value` and `heap` modules may hold
+  # The new engine (crates/js2): only its `value`, `heap`, `string` and `atoms` modules may hold
   # `unsafe` code, so its tests run under Miri.
   miri:
     runs-on: ubuntu-24.04
