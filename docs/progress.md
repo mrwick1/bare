@@ -14885,6 +14885,69 @@ Tests. Linux: `cargo test --locked -p bare-js-api -p bare-js -p bare --lib` once
 
 Not tested: `clone_copy` on a graph with a getter on a Map, Set, Error, wrapper or view as the parent (they take the generic path, and the generator uses Map and Date only as values); a differential run of the engine tests under `BARE_GC_STRESS=1` (only the browser filters ran under it); a heap that collects during the walk (the old engine does not collect in a call, and js2 has no `clone_copy`); the Windows release build and its cost; peak RSS; the full jemalloc matrix (jemalloc ran on the 6 rows above and on rows over the limit under glibc, which are none); `window.postMessage` and `MessagePort.postMessage` with a cross-page target (they keep the record path).
 
+## 2026-11-20: objects (plan step S1.9)
+
+`bare-js2` has objects (`crates/js2/src/object.rs`; design 6.4, 6.9 items 5 and 8, 6.11 item 14). The collector traces them (`gc.rs`); the stub `Object` layout of S1.4 is gone. Base: origin/main after #745 (S1.8 shapes joined with the S1.5 collector).
+
+What it has:
+- Object cell. The header of `cell.rs` (shape id, layout code, flags), then inline value words. The layout `Object` has `cap` inline words, `cap` odd and at least `shape.inline()`; the layout `Indexed` (arrays, `arguments`) has the elements word after the header and an even `cap`. `cap` is `inline` rounded up so that the cell is a multiple of 16 bytes, which the allocator needs anyway: the rounding is free room. An empty object is 16 bytes; an object of 8 inline slots is 80 bytes and has 9 slots.
+- Overflow record, only for an object that grows. No cell has a pointer word that it does not use. When an object gets more slots than `cap`, its last inline word holds the pointer to a `Slots` record and the value that was there moves to the record's first value (header flag `F_OVER`). Slot `i` is inline for `i < cap - 1` and `record[i - (cap - 1)]` after. For a tree shape the flag is set exactly when `shape.slots > cap`, so a cache that holds the shape knows where a slot is (S2 needs no flag read). A dictionary object may hold a record early. This is the answer to 6.11 item 14 (a pointer in every object, or reserved only in layouts that grow): it costs no byte in an object that does not grow, and it needs no choice of layout per allocation site. Growth is by half (first record: 4 values, at least what is needed), `Obj::new` for a shape that has the slots gives an exact record. A failed allocation leaves the object as it was.
+- `Obj`: `new`, `slot`, `set_slot`, `add` (a transition, or a dictionary shape; accessors use 2 slots), `remove` (uses `Removed::shifts` of S1.8: the later slots move down; an object that fits its inline words again drops its record), `reconfigure` (attributes, data to accessor moves the property to fresh slots), `set_proto`.
+- Elements in one tagged layout. The elements word points to an `Elements` record: header (capacity), `len`, `count`, then values. Every element is a `Value`, so integers, doubles and pointers need no other kind (6.9 item 8: no numeric-only store until an element census asks). A missing element is the new `Value::HOLE`. Dense form: value `i` is element `i`; `len` and `cap` are independent (`new Array(1e6)` is a record of capacity 0). Sparse form: sorted pairs (index, value), binary search. A write more than `DENSE_GAP` = 1,024 above the capacity makes it sparse; a sparse record that has one element in four of the indexes up to its last goes back to dense. Growth by half, literals exact. A plain `Object` has no elements word: its integer keys are properties of its shape (`ownKeys` order is for S3).
+- Collector. The `Object` and `Indexed` arm scans the value words after the header (`object::words`); the pointer to the record and the elements word are ordinary edges. The arm `Slots | Elements` scans the capacity of a record (unused room holds holes and `undefined`, so every word is a valid value). A record of more than `SLICE` = 1,024 values is scanned in slices: the rest of the range waits in a small stack (`Marker::big`, 24 bytes per range) and the marker takes the next slice only when the work list is empty. `Stats::work_bytes` counts the stack.
+- Small changes outside: `Layout::{Indexed, Slots, Elements}` and `CellHeader::record` (a record has no shape; the shape word holds its capacity) in `cell.rs`; one arm in `string.rs`; `Value::HOLE` in `value.rs`; the comment of the unsafe modules in `lib.rs`, `Cargo.toml` and `.github/workflows/ci.yml` (it listed `value`, `heap`, `string`, `atoms`; it now lists the modules that have `#[allow(unsafe_code)]`: `cell`, `heap`, `string`, `atoms`, `shapes`, `object`, `gc`; `value` has none). `gc_tests.rs` makes its objects with `Obj::new` (shapes of 8 inline slots; the wide-object test is now the slice test); `examples/gc_load.rs` does the same. `heap.rs` is not touched.
+
+Layout census (M3), the same synthetic workload as S1.8 (`tools/js/shape_trace.js`, the React-like trace; 22,000 objects, all alive; deterministic, so 1 run each; archMachine). New: `object_census trace 1` makes the objects with `Obj::add`, `Site`, `Obj::remove`, and holds them in one array `keep` (as the script does). It sums size classes by kind and checks the sum against the live bytes of one collection (they are equal). Old: `BARE_JS_STATS=1 BARE_JS_EXEC=auto eval_check -e 'var SCALE = N; <shape_trace.js>'` (`tools/js/layout_census.sh` names the census; the numbers are the layout line at the end with SCALE 1 minus SCALE 0; `EVAL_CHECK_STEPS=4000000000`). Old buckets here were counted again and agree with S1.8.
+
+New bytes per object, by kind (size classes of the cell and its record): props 79.9 (8,000 objects; 4.5 slots on average), element 64.0 (8,000; 6 slots), hook 48.0 (4,000; 5 slots), fiber 255.9 (2,000; 24 slots; 100 in dictionary mode). The old census has no split by kind.
+
+| Per object (22,000) | New | Old, `auto` | Old, `tree` |
+| --- | ---: | ---: | ---: |
+| objects, slots, dictionaries | 84.3 | 293.2 | 291.2 |
+| plus the array `keep` (new: 262,144 bytes, capacity 27,310; old: `elements`, 524,288 bytes) | 96.2 | 317.0 | 314.1 |
+| plus the shapes (new: 276,451 bytes, 1,663 shapes; old: 184,581 and 184,043) | 108.8 | 325.4 | 322.5 |
+
+- The new object side is 3.3 times smaller than the old one with the array (96.2 against 317.0) and 3.0 times with the shapes (108.8 against 325.4). The numbers of S1.8 were a model; the real objects give the same bytes (84.3 per object; props 79.9, element 64.0, hook 48.0, fiber 255.9), so the model was right. 8 fibers and 2 props objects have an overflow record (the first objects of their sites); the rest fit their inline words.
+- Slack, not changed: a props object has 4.5 of its 9 words in use on average, so about 36 of its 80 bytes are empty. Hypothesis, not built: a percentile of the first 8 objects instead of their maximum would cut the inline words and add overflow records of at least 32 bytes.
+- Shapes cost more than in the old engine (166 bytes each against 126, and 1,663 shapes against 1,466); the S1.8 notes on this are unchanged.
+
+Arrays (`object_census array N`; old: `tools/js/array_trace.js` with `var KIND`, same method; N = 100,000 for both; the new engine also at N = 1,000,000):
+
+| Workload | New, bytes per item | Old, `auto` | Old, `tree` |
+| --- | ---: | ---: | ---: |
+| N arrays `[i, i+1, i+2]` in one array | 91.1 (cell 32, record 48, and the slot in the outer array) | 235.8 | 219.8 |
+| N integers pushed to one array | 11.1 (capacity 138,255: 1.5 growth) | 21.0 | 21.0 |
+| N empty objects in one array | 27.1 (object 16, slot in the array) | 171.8 | 171.8 |
+
+At N = 1,000,000 the new rows are 88.5, 8.45 and 24.45 bytes per item. The mapping of a large cell is a multiple of 64 KiB, so the pushed-integer array at N = 1,000,000 (capacity 1,049,869) has 8,454,176 live bytes: a record of 129 blocks and the 32-byte cell.
+
+Work list on a 1M-element array (`object_census array 1000000`, one array of 1,000,000 object elements, 24,454,176 live bytes): with slices (`SLICE` = 1,024) `work_bytes` is 10,264 (0.04% of the live bytes); with the slicing switched off (a scratch build, `SLICE` = `usize::MAX / 2`, not kept) it is 8,001,536 (32.7%), the 8 bytes for each element that the record pushes at once. The slice test in `gc_tests.rs` asserts the bound for a record of 16,394 values.
+
+Collector rows (`gc_load`, release, `tools/js/instr.sh` minimum of 3 runs, 10 collections minus 0, divided by 10 and by N = 100,000 objects of 4 slots; both objects are 48-byte cells; base = the head of #745 built from its own checkout):
+
+| Row | Before (stub arm) | After (object arm) | Change |
+| --- | ---: | ---: | ---: |
+| `chain` | 284.3 per object | 255.3 | -10.2% |
+| `tree` | 201.5 | 196.5 | -2.5% |
+
+The setup rows (R = 0) are 11.7 M and 33.6 M for `chain` (the new setup makes the objects through `Obj::new` and `set_slot`), so the rows are not comparable in setup, only in the collection. Why the collection is cheaper is not known (hypothesis: the stub arm read `shapes.of(h).slots` and the new one reads the inline capacity of the same record; not measured by a profile). Peak work list is unchanged (2,048 bytes for `tree`).
+
+Micro rows (`crates/js2/examples/object_load.rs`; release; user instructions from `perf stat` through `tools/js/instr.sh`, N = 1,000,000 minus N = 0; the instruction counts do not vary between runs):
+
+| Row | Instructions per op |
+| --- | ---: |
+| `new` (alloc, header, 5 words filled; no collection) | 88 |
+| `add` (a property of an object whose transitions exist; `(add row - new row) / 4`) | 170 |
+| `slot`, inline (loop with no object: 16, so about 30) | 46 |
+| `slot`, in the record (24 properties, 8 inline; about 48 net) | 64 |
+| `get_element`, dense (about 41 net) | 57 |
+| `set_element` at the end (push; growth included) | 58 |
+
+These are for native reads and writes. A cache hit in S2 does not call `slot`: it compares the shape id and loads the word at a fixed offset (for a record slot, one more load). `add` includes a shape transition (about 28), the check for room, the header write and the slot write; not tuned.
+
+Checks: `bare-js2` has 93 tests: Linux 93 pass; Windows 11 VM 93 pass (`cargo xwin test`, `bare_js2` exe through `winssh`); Miri (nightly): 93 pass in 567 s of test time (the one known integer-to-pointer warning of `Value::as_pointer`). 24 new tests in `object_tests.rs`: geometry; the free room of the rounding; every value across the inline/record boundary at every step for 5 capacities; record growth; an accessor that straddles the boundary; delete of the last key, of a middle key (the shape equals that of an object that never had the key), and the fall back into the inline words; a dictionary object with slot reuse; attribute change and data to accessor; prototype change; elements (literal, push, holes, delete, length, `new Array(1e6)`, sparse and dense again); a random test of 6 seeds against a `BTreeMap` (writes, deletes, length changes, pushes, indexes in three ranges); the collector (inline slots, record, dense and sparse elements, a record that the object outgrew, a long array in slices with truncation, a sparse record longer than a slice); `from_value` refuses a record. 1 test of `gc_tests.rs` changed (the wide object is scanned in slices); the others only changed their object maker.
+
+Not tested: arm64; a 32-bit target; the cost matrix (js2 is not wired into the browser); a collection inside a task (S1.6); a cache that uses the layout (S2); typed arrays, `arguments` and exotic objects (no layout for them yet); an element census on a real page (the arrays here are synthetic; no numeric-only elements store was built, as 6.9 item 8 says); an allocation failure (`Heap::alloc` returning `None` has no hook to force it); `Obj::add` and `remove` under a shape cap; a dictionary object that holds a record early (tested only through slot reuse); the examples on the Windows VM; wall time.
 ## 2026-11-20: handler bodies design (plan step S0.4)
 
 Document: `docs/design-host-handlers.md`, for owner review. No code. Static counts with `rg` over `crates/bare/src` at origin/main `1cfb3807`; the commands are in the document. No instruction counts: the costs it cites are the earlier measurements.

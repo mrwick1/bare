@@ -6,7 +6,7 @@
 //! | --- | --- | --- |
 //! | below `0xFFF9` | a double | (part of the double) |
 //! | `0xFFF9` | a 32-bit integer | the integer in the low 32 bits |
-//! | `0xFFFA` | `undefined`, `null`, `false`, `true` | 0, 1, 2, 3 |
+//! | `0xFFFA` | `undefined`, `null`, `false`, `true`, a hole | 0, 1, 2, 3, 4 |
 //! | `0xFFFB` to `0xFFFE` | a string, symbol, BigInt or object | the address of the cell |
 //!
 //! So "is a double" is one unsigned compare. A NaN whose bits reach `0xFFF9` would look like a tagged value, so [`Value::number`]
@@ -45,6 +45,8 @@ impl Value {
     pub const NULL: Value = Value(TAG_SPECIAL << TAG_SHIFT | 1);
     pub const FALSE: Value = Value(TAG_SPECIAL << TAG_SHIFT | 2);
     pub const TRUE: Value = Value(TAG_SPECIAL << TAG_SHIFT | 3);
+    /// The value of an array element that does not exist (a hole). It is not a number or a pointer, and no script sees it.
+    pub const HOLE: Value = Value(TAG_SPECIAL << TAG_SHIFT | 4);
 
     /// A double. A NaN that would reach the tag space becomes [`CANONICAL_NAN`].
     #[inline]
@@ -118,6 +120,11 @@ impl Value {
     }
 
     #[inline]
+    pub fn is_hole(self) -> bool {
+        self == Value::HOLE
+    }
+
+    #[inline]
     pub fn is_null(self) -> bool {
         self == Value::NULL
     }
@@ -149,7 +156,8 @@ impl std::fmt::Debug for Value {
                 0 => f.write_str("Undefined"),
                 1 => f.write_str("Null"),
                 2 => f.write_str("False"),
-                _ => f.write_str("True"),
+                3 => f.write_str("True"),
+                _ => f.write_str("Hole"),
             }
         }
     }

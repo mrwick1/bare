@@ -28,9 +28,13 @@
 //!
 //! - `OneByte`, `TwoByte`: no edge.
 //! - `Rope`, `Indirect`: the children that [`Str::children`] names.
-//! - `Object`: the stub layout of S1.4 until S1.9: the header, then one value slot for each slot of its shape (`Shapes::of`, the
-//!   `slots` field). The marker also marks the prototype of the shape, once for each shape in a collection. Every slot holds a value
-//!   from the moment the cell is allocated: the collector reads them all.
+//! - `Object`, `Indexed`: the header, then value words (`object.rs`): the inline slots, and for an `Indexed` object the elements
+//!   word first. The pointer to the overflow record and the elements word are values like the others, so the records are marked and
+//!   pushed as ordinary cells. The marker also marks the prototype of the shape, once for each shape in a collection.
+//! - `Slots`, `Elements`: a record of values; the header holds the capacity, and the marker scans all of it (the unused room holds
+//!   holes and `undefined`). A long record is scanned in slices of [`SLICE`] values: after a slice the rest of the range waits in a
+//!   small stack, and the marker takes the next slice only when the work list is empty. So an array of a million objects puts at most
+//!   [`SLICE`] cells on the work list at a time, not a million.
 //! - `WeakTable`: the stub of an ephemeron table (below).
 //!
 //! Ephemerons (a `WeakMap` entry): the value of an entry is alive only when its key is. The table cell is marked and traced like any
@@ -54,6 +58,7 @@
 use crate::atoms::Atoms;
 use crate::cell::{CellHeader, Layout, Shapes};
 use crate::heap::Heap;
+use crate::object;
 use crate::shapes::ShapeId;
 use crate::string::{FLAG_SHARED, Str};
 use crate::value::Value;
@@ -63,6 +68,9 @@ use std::ptr::NonNull;
 
 /// Entries of one chunk of the work list (2 KiB).
 pub const CHUNK: usize = 256;
+/// Values of a record that the marker scans before it goes back to the work list: a record of a million elements puts at most this
+/// many cells on the list at a time.
+pub const SLICE: usize = 1024;
 /// The offset of the first entry of a `WeakTable` stub, and the offset of its length.
 const TABLE_ENTRIES: usize = 16;
 const TABLE_LEN: usize = CellHeader::SIZE;
@@ -214,6 +222,9 @@ pub struct Marker<'a> {
     waiting: Waiting,
     /// Marked weak tables: after the marking, the entries with a dead key are cleared.
     tables: Vec<NonNull<u8>>,
+    /// The ranges of long records that wait for their next slice: the first value, the next index and the end.
+    big: Vec<(*mut Value, usize, usize)>,
+    big_peak: usize,
     marked: u64,
     waited: u64,
     released: u64,
@@ -267,8 +278,15 @@ impl Marker<'_> {
 
     /// Mark each cell that the work list holds, and what those cells name, until it is empty.
     fn drain(&mut self) {
-        while let Some(p) = self.work.pop() {
-            self.trace(p);
+        loop {
+            while let Some(p) = self.work.pop() {
+                self.trace(p);
+            }
+            // The work list is empty: scan one more slice of the last long record that waits.
+            match self.big.pop() {
+                Some((base, from, end)) => self.scan(base, from, end),
+                None => break,
+            }
         }
     }
 
@@ -287,23 +305,47 @@ impl Marker<'_> {
                     self.cell(c.cell());
                 }
             }
-            Layout::Object => self.object(p, h),
+            Layout::Object | Layout::Indexed => self.object(p, h),
+            Layout::Slots | Layout::Elements => self.record(p, h),
             Layout::WeakTable => self.weak_table(p),
         }
     }
 
-    /// The stub object: one value slot for each slot of its shape, after the header. The first object of a shape in a collection also
-    /// marks the prototype of the shape: a prototype that only a shape names must live.
+    /// An object (`object.rs`): the words after its header are values, including the elements word and the pointer to the overflow
+    /// record, so those two are ordinary edges. The first object of a shape in a collection also marks the prototype of the shape: a
+    /// prototype that only a shape names must live.
     fn object(&mut self, p: NonNull<u8>, h: CellHeader) {
-        if let Some(proto) = self.shapes.note_live(self.heap, h) {
+        let s = self.shapes.note_live(self.heap, h);
+        if let Some(proto) = s {
             self.cell(proto);
         }
-        let n = self.shapes.of(h).slots as usize;
-        let slots = p.as_ptr().wrapping_add(CellHeader::SIZE).cast::<Value>();
+        let n = object::words(h.layout(), self.shapes.of(h).inline());
+        let words = p.as_ptr().wrapping_add(CellHeader::SIZE).cast::<Value>();
         for i in 0..n {
-            // SAFETY: the cell has `n` slots after its header, and each holds a value (a new cell is filled before a collection).
-            let v = unsafe { slots.add(i).read() };
+            // SAFETY: the cell has `n` value words after its header, and each holds a value (`Obj::new` fills them).
+            let v = unsafe { words.add(i).read() };
             self.value(v);
+        }
+    }
+
+    /// A record of values (`Slots` or `Elements`): scan its capacity. A long record is scanned in slices of [`SLICE`] values (below).
+    fn record(&mut self, p: NonNull<u8>, h: CellHeader) {
+        let at = if h.layout() == Layout::Elements { object::ELEMS_AT } else { object::SLOTS_AT };
+        self.scan(p.as_ptr().wrapping_add(at).cast(), 0, h.cap() as usize);
+    }
+
+    /// Mark the values `from..end` after `base`, at most [`SLICE`] of them, and keep the rest of the range for later. Each value that
+    /// is a new cell goes on the work list, so a slice adds at most [`SLICE`] entries however long the record is.
+    fn scan(&mut self, base: *mut Value, from: usize, end: usize) {
+        let stop = end.min(from + SLICE);
+        for i in from..stop {
+            // SAFETY: the record has `end` values from `base`, and each is initialized.
+            let v = unsafe { base.add(i).read() };
+            self.value(v);
+        }
+        if stop < end {
+            self.big.push((base, stop, end));
+            self.big_peak = self.big_peak.max(self.big.len());
         }
     }
 
@@ -351,7 +393,7 @@ fn table(p: NonNull<u8>) -> (usize, *mut Value) {
 /// The caller keeps the invariant of the roots: each pointer in a root or a cell is a live cell of `heap` or a shared atom.
 pub fn collect(heap: &mut Heap, shapes: &mut Shapes, atoms: &mut Atoms, roots: &mut impl Roots) -> Stats {
     heap.start_mark();
-    let mut m = Marker { heap, shapes, work: Work::default(), waiting: Waiting::default(), tables: Vec::new(), marked: 0, waited: 0, released: 0, weak_peak: 0 };
+    let mut m = Marker { heap, shapes, work: Work::default(), waiting: Waiting::default(), tables: Vec::new(), big: Vec::new(), big_peak: 0, marked: 0, waited: 0, released: 0, weak_peak: 0 };
     roots.walk(&mut m);
     m.drain();
     m.shapes.finish_marks(m.heap);
@@ -373,9 +415,9 @@ pub fn collect(heap: &mut Heap, shapes: &mut Shapes, atoms: &mut Atoms, roots: &
     }
     let atoms_dropped = atoms.sweep(m.heap);
     roots.weak(&Live(m.heap));
-    let Marker { heap, work, marked, waited, released, weak_peak, .. } = m;
+    let Marker { heap, work, big_peak, marked, waited, released, weak_peak, .. } = m;
     heap.finish_mark();
-    Stats { marked, live_bytes: heap.marked_bytes(), work_bytes: work.peak * CHUNK * std::mem::size_of::<NonNull<u8>>(), weak_bytes: weak_peak, waited, released, cleared, atoms_dropped }
+    Stats { marked, live_bytes: heap.marked_bytes(), work_bytes: work.peak * CHUNK * std::mem::size_of::<NonNull<u8>>() + big_peak * std::mem::size_of::<(*mut Value, usize, usize)>(), weak_bytes: weak_peak, waited, released, cleared, atoms_dropped }
 }
 
 #[cfg(test)]
