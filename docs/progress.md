@@ -16116,7 +16116,7 @@ Invariant: `regs` must be set again each time `fp` changes or the stack is reall
 
 Checks: test `a_stack_that_grows_in_a_callee_keeps_the_registers_of_the_callers` (deep recursion by `call`, `new`, a method call and a rest parameter: each caller has live registers and reads `this` and its arguments after the call that grows the stack). It passes without the fix in `ensure!` in a normal run (the freed block still holds the old data), so a normal test cannot see the bug. Under Miri, with the line in `ensure!` removed, it fails: "pointer is dangling". With the line it passes under Miri (`interp::` and the new test; the CI job runs the whole crate).
 
-Instructions of the whole process, same method as step 1. "Step 1" is the head of PR #766 merged with the design branch, built again for this table (so the step 1 column differs from the step 1 table above in no row).
+Instructions of the whole process, same method as step 1. "Step 1" is the head of PR #766 merged with the design branch, built again for this table (it differs from the step 1 table above by 0.13% at most, in `concat`).
 
 | Row | Scale | step 1 (M) | step 2 (M) | change | spread new % | QuickJS (M) | step 2 / QuickJS |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
