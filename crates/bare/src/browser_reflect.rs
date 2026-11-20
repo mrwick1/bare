@@ -19,10 +19,9 @@
 //! Each getter checks that `this` is an HTML element of one of the listed tags, else `TypeError: Illegal invocation`, as a browser does.
 
 use crate::browser::*;
-use crate::browser_platform::arg;
+use crate::browser_scoped::*;
+use bare_js_api::{Args, Local, Type};
 use bare_html::dom::NodeId;
-use bare_js::eval::Interp;
-use bare_js::value::Value;
 
 /// How a property reads its attribute. See the header. `Copy`: a small value that is copied like a JS number, not moved.
 #[derive(Clone, Copy)]
@@ -43,22 +42,22 @@ pub(crate) enum Kind {
 macro_rules! reflect {
     ($d:expr, $it:expr, $o:expr, $tags:expr, { $($prop:literal => $attr:literal : $($kind:tt)::+ $(($($k:expr),*))?),* $(,)? }) => {{
         $(
-            $d.def_get($it, $o, $prop,
-                |d, it, t, _| $crate::browser_reflect::get(d, it, t, $tags, $attr, $crate::browser_reflect::Kind::$($kind)::+$(($($k),*))?),
-                Some(|d, it, t, a| $crate::browser_reflect::set(d, it, t, a, $tags, $prop, $attr, $crate::browser_reflect::Kind::$($kind)::+$(($($k),*))?)))?;
+            $d.def_get_s($it, $o, $prop,
+                |d, s, t, _| $crate::browser_reflect::get(d, s, t, $tags, $attr, $crate::browser_reflect::Kind::$($kind)::+$(($($k),*))?),
+                Some(|d, s, t, a| $crate::browser_reflect::set(d, s, t, a, $tags, $prop, $attr, $crate::browser_reflect::Kind::$($kind)::+$(($($k),*))?)))?;
         )*
     }};
 }
 pub(crate) use reflect;
 
 /// The HTML element `this`, when it is one of `tags`.
-pub(crate) fn this_of(d: &Dom, it: &mut Interp<'_>, this: Value, tags: &[&str]) -> R<NodeId> {
-    let n = d.el(it, this)?;
+pub(crate) fn this_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, tags: &[&str]) -> Res<'s, NodeId> {
+    let n = d.el_s(s, this)?;
     let ok = {
         let doc = d.doc.borrow();
         tags.iter().any(|t| doc.is_html(n, t))
     };
-    if ok { Ok(n) } else { Err(it.type_error("Illegal invocation")) }
+    if ok { Ok(n) } else { Err(s.type_error("Illegal invocation")) }
 }
 
 /// The attribute `name` of `n` as an owned string.
@@ -83,84 +82,84 @@ pub(crate) fn parse_float(s: &str) -> Option<f64> {
 }
 
 /// The URL in the attribute `name` of `n`, resolved (see `Kind::Url`). `None`: no attribute.
-pub(crate) fn url(d: &Dom, it: &mut Interp<'_>, n: NodeId, name: &str) -> R<Option<String>> {
+pub(crate) fn url<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId, name: &str) -> Res<'s, Option<String>> {
     let Some(raw) = text(d, n, name) else { return Ok(None) };
-    it.charge(raw.len() as u64 / 32)?;
+    s.charge(raw.len() as u64 / 32)?;
     Ok(Some(match crate::browser_navigation_url::parse(&raw, crate::browser_elements::base(d).as_ref()) {
         Ok(r) => r.href(),
         Err(_) => raw,
     }))
 }
 
-pub(crate) fn get(d: &Dom, it: &mut Interp<'_>, this: Value, tags: &[&str], attr: &str, kind: Kind) -> R<Value> {
-    let n = this_of(d, it, this, tags)?;
+pub(crate) fn get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, tags: &[&str], attr: &str, kind: Kind) -> Res<'s, Local<'s>> {
+    let n = this_of(d, s, this, tags)?;
     match kind {
-        Kind::Bool => Ok(Value::Bool(text(d, n, attr).is_some())),
-        Kind::Long(def, lo) => Ok(Value::Number(text(d, n, attr).and_then(|s| crate::browser_element::parse_int(&s)).filter(|&v| v >= lo).unwrap_or(def) as f64)),
+        Kind::Bool => Ok(s.boolean(text(d, n, attr).is_some())),
+        Kind::Long(def, lo) => Ok(s.number(text(d, n, attr).and_then(|st| crate::browser_element::parse_int(&st)).filter(|&v| v >= lo).unwrap_or(def) as f64)),
         Kind::Clamp(def, lo, hi) => {
-            let v = text(d, n, attr).and_then(|s| crate::browser_element::parse_int(&s)).filter(|&v| v >= 0);
-            Ok(Value::Number(v.map_or(def, |v| (v as u32).clamp(lo, hi)) as f64))
+            let v = text(d, n, attr).and_then(|st| crate::browser_element::parse_int(&st)).filter(|&v| v >= 0);
+            Ok(s.number(v.map_or(def, |v| (v as u32).clamp(lo, hi)) as f64))
         }
         Kind::Cors => match text(d, n, attr) {
-            None => Ok(Value::Null),
-            Some(s) => d.js_str(it, if s.eq_ignore_ascii_case("use-credentials") { "use-credentials" } else { "anonymous" }),
+            None => Ok(s.null()),
+            Some(st) => d.js_str_s(s, if st.eq_ignore_ascii_case("use-credentials") { "use-credentials" } else { "anonymous" }),
         },
         Kind::Enum(words, def) => {
-            let s = text(d, n, attr).unwrap_or_default();
-            let w = words.iter().find(|w| w.eq_ignore_ascii_case(&s)).copied().unwrap_or(def);
-            d.js_str(it, w)
+            let st = text(d, n, attr).unwrap_or_default();
+            let w = words.iter().find(|w| w.eq_ignore_ascii_case(&st)).copied().unwrap_or(def);
+            d.js_str_s(s, w)
         }
         Kind::Url => {
-            let s = url(d, it, n, attr)?.unwrap_or_default();
-            d.js_str(it, &s)
+            let st = url(d, s, n, attr)?.unwrap_or_default();
+            d.js_str_s(s, &st)
         }
         Kind::UrlOrDoc => {
-            let s = match url(d, it, n, attr)? {
-                Some(s) if !s.is_empty() => s,
-                _ => d.cur_rec()?.href(),
+            let st = match url(d, s, n, attr)? {
+                Some(st) if !st.is_empty() => st,
+                _ => lift(s, d.cur_rec())?.href(),
             };
-            d.js_str(it, &s)
+            d.js_str_s(s, &st)
         }
         Kind::Str => {
-            let s = text(d, n, attr).unwrap_or_default();
-            d.js_str(it, &s)
+            let st = text(d, n, attr).unwrap_or_default();
+            d.js_str_s(s, &st)
         }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], tags: &[&str], prop: &str, attr: &str, kind: Kind) -> R<Value> {
-    let n = this_of(d, it, this, tags)?;
-    let v = arg(a, 0);
-    let s = match kind {
+pub(crate) fn set<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, tags: &[&str], prop: &str, attr: &str, kind: Kind) -> Res<'s, Local<'s>> {
+    let n = this_of(d, s, this, tags)?;
+    let v = arg_s(s, a, 0);
+    let st = match kind {
         Kind::Bool => {
-            if !it.to_js_bool(v)? {
+            if !s.to_boolean(v) {
                 d.doc.borrow_mut().remove_attr(n, attr);
-                return Ok(Value::Undefined);
+                return Ok(s.undefined());
             }
             String::new()
         }
-        Kind::Cors if matches!(v, Value::Null) => {
+        Kind::Cors if matches!(s.type_of(v), Type::Null) => {
             d.doc.borrow_mut().remove_attr(n, attr);
-            return Ok(Value::Undefined);
+            return Ok(s.undefined());
         }
         Kind::Long(_, lo) => {
-            let x = bare_js::value::to_int32(it.to_js_number(v)?);
+            let x = bare_js::value::to_int32(s.to_number(v)?);
             if lo >= 0 && x < lo {
                 let tag = d.doc.borrow().element_name(n).to_string();
                 let why = if lo == 0 { format!("The value provided ({x}) is negative.") } else { format!("The value provided ({x}) is not positive.") };
-                return Err(d.dom_err(it, "IndexSizeError", &format!("Failed to set the '{prop}' property on '{}': {why}", interface(&tag))));
+                return Err(d.dom_err_s(s, "IndexSizeError", &format!("Failed to set the '{prop}' property on '{}': {why}", interface(&tag))));
             }
             x.to_string()
         }
-        Kind::Clamp(..) => bare_js::value::to_uint32(it.to_js_number(v)?).to_string(),
-        _ => d.string_arg(it, v)?,
+        Kind::Clamp(..) => bare_js::value::to_uint32(s.to_number(v)?).to_string(),
+        _ => d.string_arg_s(s, v)?,
     };
-    crate::browser_dom::attr_set(d, it, n, attr, &s)?;
+    crate::browser_dom::attr_set_s(d, s, n, attr, &st)?;
     if attr == "src" {
-        d.frame_src(it, n);
+        d.frame_src(s.engine(), n);
     }
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
 /// The interface name of the tags that use an error message here.

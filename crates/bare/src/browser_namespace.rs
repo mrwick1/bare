@@ -29,12 +29,11 @@
 //! (the local name and the prefix are two names), `max_nodes`, `max_attr_slots` and `max_text_bytes`, checked before any write.
 
 use crate::browser::*;
-use crate::browser_dom::{arg, valid_name};
+use crate::browser_scoped::*;
+use bare_js_api::{Args, Local, Type};
+use crate::browser_dom::{valid_name};
 use bare_html::dom::{Atom, NodeId, Ns};
-use bare_js::eval::{Error, Interp};
-use bare_js::value::Value;
-
-type V = R<Value>;
+use bare_js::eval::{Interp};
 
 /// The qualified name of an element: `prefix:local`, or the local name.
 pub(crate) fn qualified(doc: &bare_html::dom::Document, el: NodeId) -> String {
@@ -70,25 +69,25 @@ fn qname_parts(q: &str) -> Option<(Option<&str>, &str)> {
 
 /// "Validate and extract" of the DOM Standard. Gives the prefix and the local name. `ns` is the namespace string as the page gave it
 /// (`None` for null; an empty string is null too).
-pub(crate) fn extract<'a>(d: &Dom, it: &mut Interp<'_>, ns: Option<&str>, qname: &'a str) -> R<(Option<&'a str>, &'a str)> {
+pub(crate) fn extract<'s, 'a>(d: &Dom, s: &mut Sc<'s, '_>, ns: Option<&str>, qname: &'a str) -> Res<'s, (Option<&'a str>, &'a str)> {
     let Some((prefix, local)) = qname_parts(qname) else {
-        return Err(d.dom_err(it, "InvalidCharacterError", &format!("The qualified name provided ('{qname}') is not a valid name.")));
+        return Err(d.dom_err_s(s, "InvalidCharacterError", &format!("The qualified name provided ('{qname}') is not a valid name.")));
     };
     let bad = (prefix.is_some() && ns.is_none())
         || (prefix == Some("xml") && ns != Some(Ns::Xml.uri()))
         || ((qname == "xmlns" || prefix == Some("xmlns")) && ns != Some(Ns::Xmlns.uri()))
         || (ns == Some(Ns::Xmlns.uri()) && qname != "xmlns" && prefix != Some("xmlns"));
     if bad {
-        return Err(d.dom_err(it, "NamespaceError", &format!("The namespace URI provided ('{}') is not valid for the qualified name provided ('{qname}').", ns.unwrap_or(""))));
+        return Err(d.dom_err_s(s, "NamespaceError", &format!("The namespace URI provided ('{}') is not valid for the qualified name provided ('{qname}').", ns.unwrap_or(""))));
     }
     Ok((prefix, local))
 }
 
 /// A namespace argument: `null`, `undefined` and the empty string are no namespace.
-pub(crate) fn ns_arg(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<Option<String>> {
-    Ok(match v {
-        Value::Null | Value::Undefined => None,
-        v => Some(d.string_arg(it, v)?).filter(|s| !s.is_empty()),
+pub(crate) fn ns_arg<'s>(d: &Dom, s: &mut Sc<'s, '_>, v: Local<'s>) -> Res<'s, Option<String>> {
+    Ok(match s.type_of(v) {
+        Type::Null | Type::Undefined => None,
+        _ => Some(d.string_arg_s(s, v)?).filter(|st| !st.is_empty()),
     })
 }
 
@@ -105,50 +104,51 @@ pub(crate) fn attr_ns_of(ns: Option<&str>) -> Result<Option<Ns>, ()> {
     }
 }
 
-pub(crate) fn namespace_uri(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = d.el(it, this)?;
+pub(crate) fn namespace_uri<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.el_s(s, this)?;
     let uri = d.doc.borrow().element_ns(n).uri();
-    d.js_str(it, uri)
+    d.js_str_s(s, uri)
 }
 
-pub(crate) fn prefix(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = d.el(it, this)?;
+pub(crate) fn prefix<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.el_s(s, this)?;
     let p = d.doc.borrow().element_prefix(n).map(str::to_string);
     match p {
-        Some(p) => d.js_str(it, &p),
-        None => Ok(Value::Null),
+        Some(p) => d.js_str_s(s, &p),
+        None => Ok(s.null()),
     }
 }
 
-pub(crate) fn create_element_ns(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    d.nd(it, this)?;
-    let ns = ns_arg(d, it, arg(a, 0))?;
-    let qname = d.string_arg(it, arg(a, 1))?;
-    let (prefix, local) = extract(d, it, ns.as_deref(), &qname)?;
+pub(crate) fn create_element_ns<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    d.nd_s(s, this)?;
+    let arg0 = arg_s(s, a, 0);
+    let ns = ns_arg(d, s, arg0)?;
+    let qname = d.arg_str_s(s, a, 1)?;
+    let (prefix, local) = extract(d, s, ns.as_deref(), &qname)?;
     match ns.as_deref().map(Ns::from_uri) {
-        None => Err(Error::Unsupported(unsupported("createElementNS with a null namespace"))),
+        None => Err(unsupp("createElementNS with a null namespace")),
         Some(Some(Ns::Html)) => {
             if prefix.is_some() || qname.bytes().any(|b| b.is_ascii_uppercase()) {
-                return Err(Error::Unsupported(unsupported("createElementNS in the HTML namespace with a prefix or capital letters (names are lowercase in the native document)")));
+                return Err(unsupp("createElementNS in the HTML namespace with a prefix or capital letters (names are lowercase in the native document)"));
             }
-            if d.ce.on.get() || a.len() > 2 { crate::browser_custom::create(d, it, &qname, arg(a, 2)) } else { crate::browser_dom::make_element(d, it, &qname) }
+            if d.ce.on.get() || a.len() > 2 { { let o = arg_s(s, a, 2); custom_create_s(d, s, &qname, o) } } else { crate::browser_dom::make_element_s(d, s, &qname) }
         }
         Some(Some(ns @ (Ns::Svg | Ns::MathMl))) => {
             let node = {
                 let mut doc = d.doc.borrow_mut();
-                d.room(&doc, 1, 0)?;
+                d.room_s(s, &doc, 1, 0)?;
                 let mut new = [Some(local), prefix].into_iter().flatten().filter(|n| doc.find_atom(n).is_none()).count();
                 if prefix == Some(local) && new == 2 {
                     new = 1;
                 }
                 if doc.name_count() + new > d.lim.max_names {
-                    return Err(d.lim("dom-names"));
+                    return Err(d.lim_s(s, "dom-names"));
                 }
                 doc.create_element_ns(ns, prefix, local)
             };
-            d.wrap(it, node)
+            d.wrap_s(s, node)
         }
-        Some(_) => Err(Error::Unsupported(unsupported("createElementNS with a namespace other than HTML, SVG or MathML"))),
+        Some(_) => Err(unsupp("createElementNS with a namespace other than HTML, SVG or MathML")),
     }
 }
 
@@ -173,51 +173,54 @@ pub(crate) fn put(d: &Dom, it: &mut Interp<'_>, n: NodeId, existing: Option<Atom
     Ok(())
 }
 
-pub(crate) fn set_attribute_ns(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let n = d.el(it, this)?;
-    let ns = ns_arg(d, it, arg(a, 0))?;
-    let qname = d.string_arg(it, arg(a, 1))?;
-    let value = d.string_arg(it, arg(a, 2))?;
-    let (_, local) = extract(d, it, ns.as_deref(), &qname)?;
-    let Ok(kind) = attr_ns_of(ns.as_deref()) else { return Err(Error::Unsupported(unsupported(ATTR_NS))) };
+pub(crate) fn set_attribute_ns<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.el_s(s, this)?;
+    let arg0 = arg_s(s, a, 0);
+    let ns = ns_arg(d, s, arg0)?;
+    let qname = d.arg_str_s(s, a, 1)?;
+    let value = d.arg_str_s(s, a, 2)?;
+    let (_, local) = extract(d, s, ns.as_deref(), &qname)?;
+    let Ok(kind) = attr_ns_of(ns.as_deref()) else { return Err(unsupp(ATTR_NS)) };
     let existing = d.doc.borrow().find_attr_ns(n, kind, local);
-    put(d, it, n, existing, kind, &qname, &value)?;
+    old(s, |it| put(d, it, n, existing, kind, &qname, &value))?;
     if kind.is_none() && local == "src" {
-        d.script_src_changed(it, n)?;
+        script_src_changed_s(d, s, n)?;
     }
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
 /// The atom of the attribute for the `*AttributeNS` readers. `None` also for a namespace that no attribute can have.
-fn find(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<(NodeId, Option<Atom>)> {
-    let n = d.el(it, this)?;
-    let ns = ns_arg(d, it, arg(a, 0))?;
-    let local = d.string_arg(it, arg(a, 1))?;
+fn find<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, (NodeId, Option<Atom>)> {
+    let n = d.el_s(s, this)?;
+    let arg0 = arg_s(s, a, 0);
+    let ns = ns_arg(d, s, arg0)?;
+    let local = d.arg_str_s(s, a, 1)?;
     let doc = d.doc.borrow();
-    it.charge(doc.attr_count(n) as u64 + 1)?;
+    s.charge(doc.attr_count(n) as u64 + 1)?;
     Ok(match attr_ns_of(ns.as_deref()) {
         Ok(kind) => (n, doc.find_attr_ns(n, kind, &local)),
         Err(()) => (n, None),
     })
 }
 
-pub(crate) fn get_attribute_ns(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let (n, atom) = find(d, it, this, a)?;
-    let s = atom.and_then(|at| d.doc.borrow().attr(n, at).map(str::to_string));
-    match s {
-        Some(s) => d.js_str(it, &s),
-        None => Ok(Value::Null),
+pub(crate) fn get_attribute_ns<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (n, atom) = find(d, s, this, a)?;
+    let st = atom.and_then(|at| d.doc.borrow().attr(n, at).map(str::to_string));
+    match st {
+        Some(st) => d.js_str_s(s, &st),
+        None => Ok(s.null()),
     }
 }
 
-pub(crate) fn has_attribute_ns(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    Ok(Value::Bool(find(d, it, this, a)?.1.is_some()))
+pub(crate) fn has_attribute_ns<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let found = find(d, s, this, a)?.1.is_some();
+    Ok(s.boolean(found))
 }
 
-pub(crate) fn remove_attribute_ns(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let (n, atom) = find(d, it, this, a)?;
+pub(crate) fn remove_attribute_ns<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (n, atom) = find(d, s, this, a)?;
     if let Some(at) = atom {
         d.doc.borrow_mut().remove_attr_atom(n, at);
     }
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }

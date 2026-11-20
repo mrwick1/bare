@@ -33,13 +33,14 @@
 //! contents, as for any inserted script.
 
 use crate::browser::*;
+use crate::browser_scoped::*;
+use bare_js_api::{Args, Local};
 use crate::browser_dom as nd;
 use crate::browser_lazy::lazy_global;
 use crate::browser_navigation_url::{Part, Rec, UErr, clean, parse, scheme_of};
-use crate::browser_platform::{V, arg};
 use crate::browser_reflect::{reflect, this_of};
 use bare_html::dom::NodeId;
-use bare_js::eval::{Error, Interp};
+use bare_js::eval::{Interp};
 use bare_js::value::{ObjId, Value};
 use std::cell::Cell;
 
@@ -116,7 +117,7 @@ fn make(d: &Dom, it: &mut Interp<'_>) -> R<[ObjId; 10]> {
     d.def_get(it, o[0], "relList", crate::browser_platform_class::rel_list::<1>, Some(crate::browser_platform_class::set_rel_list::<1>))?;
     d.def_get(it, o[1], "relList", crate::browser_platform_class::rel_list::<2>, Some(crate::browser_platform_class::set_rel_list::<2>))?;
     members::<false>(d, it, o[0])?;
-    d.def_get(it, o[0], "download", download, Some(set_download))?;
+    d.def_get_s(it, o[0], "download", download, Some(set_download))?;
     members::<true>(d, it, o[1])?;
     for p in [o[0], o[1]] {
         reflect!(d, it, p, &["a", "area"], {
@@ -124,9 +125,9 @@ fn make(d: &Dom, it: &mut Interp<'_>) -> R<[ObjId; 10]> {
         });
     }
     reflect!(d, it, o[0], &["a"], { "hreflang" => "hreflang": Str, "type" => "type": Str });
-    d.def_get(it, o[0], "text", |d, it, t, a| { this_of(d, it, t, &["a"])?; nd::text_content(d, it, t, a) },
-        Some(|d, it, t, a| { this_of(d, it, t, &["a"])?; nd::set_text_content(d, it, t, a) }))?;
-    d.def_get(it, o[2], "content", content, None)?;
+    d.def_get_s(it, o[0], "text", |d, s, t, a| { this_of(d, s, t, &["a"])?; nd::text_content_s(d, s, t, a) },
+        Some(|d, s, t, a| { this_of(d, s, t, &["a"])?; nd::set_text_content_s(d, s, t, a) }))?;
+    d.def_get_s(it, o[2], "content", content, None)?;
     image_members(d, it, o[3])?;
     crate::browser_slot::members(d, it, o[4])?;
     d.els.objs.set(Some(o));
@@ -136,12 +137,12 @@ fn make(d: &Dom, it: &mut Interp<'_>) -> R<[ObjId; 10]> {
 /// Getter and setter of one part, for `a` (`AREA` false) or `area`.
 macro_rules! part {
     ($d:expr, $it:expr, $o:expr, $name:literal, $p:expr) => {
-        $d.def_get($it, $o, $name, |d, it, t, _| get(d, it, t, AREA, Some($p)), Some(|d, it, t, a| set(d, it, t, a, AREA, $p)))?;
+        $d.def_get_s($it, $o, $name, |d, s, t, _| get(d, s, t, AREA, Some($p)), Some(|d, s, t, a| set(d, s, t, a, AREA, $p)))?;
     };
 }
 
 fn members<const AREA: bool>(d: &Dom, it: &mut Interp<'_>, o: ObjId) -> R<()> {
-    d.def_get(it, o, "href", |d, it, t, _| get(d, it, t, AREA, Some(Part::Href)), Some(set_href::<AREA>))?;
+    d.def_get_s(it, o, "href", |d, it, t, _| get(d, it, t, AREA, Some(Part::Href)), Some(set_href::<AREA>))?;
     part!(d, it, o, "protocol", Part::Protocol);
     part!(d, it, o, "host", Part::Host);
     part!(d, it, o, "hostname", Part::Hostname);
@@ -149,15 +150,15 @@ fn members<const AREA: bool>(d: &Dom, it: &mut Interp<'_>, o: ObjId) -> R<()> {
     part!(d, it, o, "pathname", Part::Pathname);
     part!(d, it, o, "search", Part::Search);
     part!(d, it, o, "hash", Part::Hash);
-    d.def_get(it, o, "origin", |d, it, t, _| get(d, it, t, AREA, None), None)?;
-    d.def_method(it, o, "toString", 0, |d, it, t, _| get(d, it, t, AREA, Some(Part::Href)))?;
+    d.def_get_s(it, o, "origin", |d, s, t, _| get(d, s, t, AREA, None), None)?;
+    d.def_method_s(it, o, "toString", 0, |d, s, t, _| get(d, s, t, AREA, Some(Part::Href)))?;
     Ok(())
 }
 
 /// The native `a` (or `area`) element of `this`, else `Illegal invocation`. An SVG `a` is not one.
-fn element(d: &Dom, it: &mut Interp<'_>, this: Value, area: bool) -> R<NodeId> {
-    let n = d.el(it, this)?;
-    if d.doc.borrow().is_html(n, if area { "area" } else { "a" }) { Ok(n) } else { Err(it.type_error("Illegal invocation")) }
+fn element<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, area: bool) -> Res<'s, NodeId> {
+    let n = d.el_s(s, this)?;
+    if d.doc.borrow().is_html(n, if area { "area" } else { "a" }) { Ok(n) } else { Err(s.type_error("Illegal invocation")) }
 }
 
 /// What the `href` attribute parses to.
@@ -218,82 +219,82 @@ fn opaque(p: Part, scheme: &str, rest: &str) -> String {
 }
 
 /// The part `p` of the URL, or its `origin` (`None`).
-fn get(d: &Dom, it: &mut Interp<'_>, this: Value, area: bool, p: Option<Part>) -> V {
-    let n = element(d, it, this, area)?;
-    let s = match link(d, it, n)? {
+fn get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, area: bool, p: Option<Part>) -> Res<'s, Local<'s>> {
+    let n = element(d, s, this, area)?;
+    let st = match old(s, |it| link(d, it, n))? {
         None => if p == Some(Part::Protocol) { ":".into() } else { String::new() },
         Some((_, Url::Hier(r))) => p.map_or_else(|| r.origin(), |p| p.get(&r)),
-        Some((_, Url::Opaque(s, rest))) => p.map_or_else(|| "null".into(), |p| opaque(p, &s, &rest)),
+        Some((_, Url::Opaque(st, rest))) => p.map_or_else(|| "null".into(), |p| opaque(p, &st, &rest)),
         Some((raw, Url::Null | Url::Gate(_))) if p == Some(Part::Href) => raw,
         Some((_, Url::Null)) => if p == Some(Part::Protocol) { ":".into() } else { String::new() },
-        Some((_, Url::Gate(w))) => return Err(Error::Unsupported(unsupported(w))),
+        Some((_, Url::Gate(w))) => return Err(unsupp(w)),
     };
-    d.js_str(it, &s)
+    d.js_str_s(s, &st)
 }
 
 /// `a.download`: the `download` attribute (the suggested file name), an empty string without it.
-fn download(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = element(d, it, this, false)?;
+fn download<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = element(d, s, this, false)?;
     let v = { let doc = d.doc.borrow(); doc.find_atom("download").and_then(|a| doc.attr(n, a)).unwrap_or("").to_string() };
-    d.js_str(it, &v)
+    d.js_str_s(s, &v)
 }
 
-fn set_download(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let n = element(d, it, this, false)?;
-    let s = d.string_arg(it, arg(a, 0))?;
-    nd::attr_set(d, it, n, "download", &s)?;
-    Ok(Value::Undefined)
+fn set_download<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = element(d, s, this, false)?;
+    let st = d.arg_str_s(s, a, 0)?;
+    nd::attr_set_s(d, s, n, "download", &st)?;
+    Ok(s.undefined())
 }
 
-fn set_href<const AREA: bool>(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let n = element(d, it, this, AREA)?;
-    let s = d.string_arg(it, arg(a, 0))?;
-    nd::attr_set(d, it, n, "href", &s)?;
-    Ok(Value::Undefined)
+fn set_href<'s, const AREA: bool>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = element(d, s, this, AREA)?;
+    let st = d.arg_str_s(s, a, 0)?;
+    nd::attr_set_s(d, s, n, "href", &st)?;
+    Ok(s.undefined())
 }
 
 /// Change one part of the resolved URL and write the whole URL to `href`. Nothing happens without a URL.
-fn set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], area: bool, p: Part) -> V {
-    let n = element(d, it, this, area)?;
-    let v = d.string_arg(it, arg(a, 0))?;
-    match link(d, it, n)? {
+fn set<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, area: bool, p: Part) -> Res<'s, Local<'s>> {
+    let n = element(d, s, this, area)?;
+    let v = d.arg_str_s(s, a, 0)?;
+    match old(s, |it| link(d, it, n))? {
         Some((_, Url::Hier(mut r))) => match p.set(&mut r, &v) {
-            Ok(()) => nd::attr_set(d, it, n, "href", &r.href())?,
-            Err(UErr::Gate(w)) => return Err(Error::Unsupported(unsupported(w))),
+            Ok(()) => nd::attr_set_s(d, s, n, "href", &r.href())?,
+            Err(UErr::Gate(w)) => return Err(unsupp(w)),
             Err(_) => {}
         },
-        Some((_, Url::Gate(w))) => return Err(Error::Unsupported(unsupported(w))),
+        Some((_, Url::Gate(w))) => return Err(unsupp(w)),
         _ => {}
     }
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
 /// `HTMLTemplateElement.content`: the contents fragment, made empty on the first read of a template that has none.
-fn content(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = d.el(it, this)?;
+fn content<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.el_s(s, this)?;
     let c = {
         let mut doc = d.doc.borrow_mut();
         if !doc.is_html(n, "template") {
             drop(doc);
-            return Err(it.type_error("Illegal invocation"));
+            return Err(s.type_error("Illegal invocation"));
         }
         match doc.template_content(n) {
             Some(c) => c,
             None => {
-                d.room(&doc, 1, 0)?;
+                d.room_s(s, &doc, 1, 0)?;
                 doc.make_template_content(n)
             }
         }
     };
-    d.wrap(it, c)
+    d.wrap_s(s, c)
 }
 
 // ---------------------------------------------------------------------------------------------- HTMLImageElement
 
 /// The native `img` element of `this`, else `Illegal invocation`.
-fn image(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
-    let n = d.el(it, this)?;
-    if d.doc.borrow().is_html(n, "img") { Ok(n) } else { Err(it.type_error("Illegal invocation")) }
+fn image<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
+    let n = d.el_s(s, this)?;
+    if d.doc.borrow().is_html(n, "img") { Ok(n) } else { Err(s.type_error("Illegal invocation")) }
 }
 
 fn attr_text(d: &Dom, n: NodeId, name: &str) -> Option<String> {
@@ -301,30 +302,30 @@ fn attr_text(d: &Dom, n: NodeId, name: &str) -> Option<String> {
     doc.find_atom(name).and_then(|a| doc.attr(n, a)).map(str::to_string)
 }
 
-fn img_str(d: &Dom, it: &mut Interp<'_>, this: Value, name: &str) -> V {
-    let n = image(d, it, this)?;
-    let s = attr_text(d, n, name).unwrap_or_default();
-    d.js_str(it, &s)
+fn img_str<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, name: &str) -> Res<'s, Local<'s>> {
+    let n = image(d, s, this)?;
+    let st = attr_text(d, n, name).unwrap_or_default();
+    d.js_str_s(s, &st)
 }
 
-fn img_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], name: &str) -> V {
-    let n = image(d, it, this)?;
-    let s = d.string_arg(it, arg(a, 0))?;
-    nd::attr_set(d, it, n, name, &s)?;
-    Ok(Value::Undefined)
+fn img_set<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, name: &str) -> Res<'s, Local<'s>> {
+    let n = image(d, s, this)?;
+    let st = d.arg_str_s(s, a, 0)?;
+    nd::attr_set_s(d, s, n, name, &st)?;
+    Ok(s.undefined())
 }
 
 /// The `src` attribute resolved against the base URL; the attribute text when it does not parse; `""` without the attribute.
-fn img_url(d: &Dom, it: &mut Interp<'_>, this: Value, current: bool) -> V {
-    let n = image(d, it, this)?;
-    let Some(raw) = attr_text(d, n, "src") else { return d.js_str(it, "") };
-    it.charge(raw.len() as u64 / 32)?;
-    let s = match parse(&raw, base(d).as_ref()) {
+fn img_url<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, current: bool) -> Res<'s, Local<'s>> {
+    let n = image(d, s, this)?;
+    let Some(raw) = attr_text(d, n, "src") else { return d.js_str_s(s, "") };
+    s.charge(raw.len() as u64 / 32)?;
+    let st = match parse(&raw, base(d).as_ref()) {
         Ok(r) => r.href(),
         Err(_) if current => String::new(),
         Err(_) => raw,
     };
-    d.js_str(it, &s)
+    d.js_str_s(s, &st)
 }
 
 /// The size of the decoded picture, `(0, 0)` while there is none.
@@ -333,35 +334,36 @@ fn natural(d: &Dom, n: NodeId) -> (u32, u32) {
 }
 
 /// `width` (`HEIGHT` false) or `height`: the attribute as an unsigned number, else the natural size.
-fn img_size<const HEIGHT: bool>(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = image(d, it, this)?;
+fn img_size<'s, const HEIGHT: bool>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = image(d, s, this)?;
     let attr = attr_text(d, n, if HEIGHT { "height" } else { "width" });
-    let v = attr.and_then(|s| s.trim().parse::<u32>().ok()).unwrap_or_else(|| if HEIGHT { natural(d, n).1 } else { natural(d, n).0 });
-    Ok(Value::Number(v as f64))
+    let v = attr.and_then(|st| st.trim().parse::<u32>().ok()).unwrap_or_else(|| if HEIGHT { natural(d, n).1 } else { natural(d, n).0 });
+    Ok(s.number(v as f64))
 }
 
-fn img_set_size<const HEIGHT: bool>(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let n = image(d, it, this)?;
-    let v = it.to_js_number(arg(a, 0))?;
+fn img_set_size<'s, const HEIGHT: bool>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = image(d, s, this)?;
+    let arg0 = arg_s(s, a, 0);
+    let v = s.to_number(arg0)?;
     let v = if v.is_finite() && v >= 0.0 { (v.trunc() % 4294967296.0) as u32 } else { 0 };
-    nd::attr_set(d, it, n, if HEIGHT { "height" } else { "width" }, &v.to_string())?;
-    Ok(Value::Undefined)
+    nd::attr_set_s(d, s, n, if HEIGHT { "height" } else { "width" }, &v.to_string())?;
+    Ok(s.undefined())
 }
 
 /// Getter and setter of a reflected string attribute of `img`.
 macro_rules! img_attr {
     ($d:expr, $it:expr, $o:expr, $name:literal) => {
-        $d.def_get($it, $o, $name, |d, it, t, _| img_str(d, it, t, $name), Some(|d, it, t, a| img_set(d, it, t, a, $name)))?;
+        $d.def_get_s($it, $o, $name, |d, s, t, _| img_str(d, s, t, $name), Some(|d, s, t, a| img_set(d, s, t, a, $name)))?;
     };
 }
 
 fn image_members(d: &Dom, it: &mut Interp<'_>, o: ObjId) -> R<()> {
-    d.def_get(it, o, "src", |d, it, t, _| img_url(d, it, t, false), Some(|d, it, t, a| {
-        let r = img_set(d, it, t, a, "src");
-        crate::browser_img::src_changed(d, image(d, it, t)?);
+    d.def_get_s(it, o, "src", |d, s, t, _| img_url(d, s, t, false), Some(|d, s, t, a| {
+        let r = img_set(d, s, t, a, "src");
+        crate::browser_img::src_changed(d, image(d, s, t)?);
         r
     }))?;
-    d.def_get(it, o, "currentSrc", |d, it, t, _| img_url(d, it, t, true), None)?;
+    d.def_get_s(it, o, "currentSrc", |d, s, t, _| img_url(d, s, t, true), None)?;
     img_attr!(d, it, o, "alt");
     img_attr!(d, it, o, "srcset");
     img_attr!(d, it, o, "sizes");
@@ -370,13 +372,13 @@ fn image_members(d: &Dom, it: &mut Interp<'_>, o: ObjId) -> R<()> {
     reflect!(d, it, o, &["img"], {
         "crossOrigin" => "crossorigin": Cors, "useMap" => "usemap": Str, "isMap" => "ismap": Bool, "referrerPolicy" => "referrerpolicy": Str,
     });
-    d.def_get(it, o, "width", img_size::<false>, Some(img_set_size::<false>))?;
-    d.def_get(it, o, "height", img_size::<true>, Some(img_set_size::<true>))?;
-    d.def_get(it, o, "naturalWidth", |d, it, t, _| Ok(Value::Number(natural(d, image(d, it, t)?).0 as f64)), None)?;
-    d.def_get(it, o, "naturalHeight", |d, it, t, _| Ok(Value::Number(natural(d, image(d, it, t)?).1 as f64)), None)?;
-    d.def_get(it, o, "complete", |d, it, t, _| {
-        let n = image(d, it, t)?;
-        Ok(Value::Bool(!d.img.pending.borrow().contains(&n)))
+    d.def_get_s(it, o, "width", img_size::<false>, Some(img_set_size::<false>))?;
+    d.def_get_s(it, o, "height", img_size::<true>, Some(img_set_size::<true>))?;
+    d.def_get_s(it, o, "naturalWidth", |d, s, t, _| { let n = natural(d, image(d, s, t)?).0 as f64; Ok(s.number(n)) }, None)?;
+    d.def_get_s(it, o, "naturalHeight", |d, s, t, _| { let n = natural(d, image(d, s, t)?).1 as f64; Ok(s.number(n)) }, None)?;
+    d.def_get_s(it, o, "complete", |d, s, t, _| {
+        let n = image(d, s, t)?;
+        Ok(s.boolean(!d.img.pending.borrow().contains(&n)))
     }, None)?;
     crate::browser_img::members(d, it, o)
 }

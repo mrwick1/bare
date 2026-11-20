@@ -7,42 +7,47 @@
 //! `range_merge`, see `browser_range.rs`); when no range exists it does no more work for that.
 
 use crate::browser::*;
-use crate::browser_dom::arg;
+use crate::browser_scoped::*;
+use bare_js_api::{Args, Local};
 use crate::browser_range::utf16_len;
 use bare_html::dom::NodeData;
-use bare_js::eval::{Error, Interp};
+use bare_js::eval::{Interp};
 use bare_js::value::{to_uint32, Value};
 
 type V = R<Value>;
 
 /// The node and its text, for a Text or a Comment.
-fn data_of(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<(bare_html::dom::NodeId, String)> {
-    let n = d.nd(it, this)?;
+fn data_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, (bare_html::dom::NodeId, String)> {
+    let n = d.nd_s(s, this)?;
     let doc = d.doc.borrow();
     match *doc.data(n) {
-        NodeData::Text(s) | NodeData::Comment(s) => Ok((n, doc.text(s).to_string())),
-        _ => Err(it.type_error("Illegal invocation")),
+        NodeData::Text(st) | NodeData::Comment(st) => Ok((n, doc.text(st).to_string())),
+        _ => Err(s.type_error("Illegal invocation")),
     }
 }
 
-fn args(it: &mut Interp<'_>, who: &str, iface: &str, a: &[Value], need: usize) -> R<()> {
+fn args<'s>(s: &mut Sc<'s, '_>, who: &str, iface: &str, a: Args<'s>, need: usize) -> Res<'s, ()> {
     if a.len() < need {
-        return Err(it.type_error(&format!("Failed to execute '{who}' on '{iface}': {need} argument{} required, but only {} present.", if need == 1 { "" } else { "s" }, a.len())));
+        return Err(s.type_error(&format!("Failed to execute '{who}' on '{iface}': {need} argument{} required, but only {} present.", if need == 1 { "" } else { "s" }, a.len())));
     }
     Ok(())
 }
 
-fn offset(it: &mut Interp<'_>, a: &[Value], i: usize) -> R<u32> {
-    Ok(to_uint32(it.to_js_number(arg(a, i))?))
+fn offset<'s>(s: &mut Sc<'s, '_>, a: Args<'s>, i: usize) -> Res<'s, u32> {
+    let argi = arg_s(s, a, i);
+    Ok(to_uint32(s.to_number(argi)?))
 }
 
-fn out_of_range(d: &Dom, it: &mut Interp<'_>, who: &str, iface: &str, off: u32, len: u32) -> Error {
-    let m = if iface == "Text" {
+fn out_of_range<'s>(d: &Dom, s: &mut Sc<'s, '_>, who: &str, iface: &str, off: u32, len: u32) -> bare_js_api::Error<'s> {
+    d.dom_err_s(s, "IndexSizeError", &out_of_range_msg(who, iface, off, len))
+}
+
+fn out_of_range_msg(who: &str, iface: &str, off: u32, len: u32) -> String {
+    if iface == "Text" {
         format!("Failed to execute '{who}' on 'Text': The offset {off} is larger than the Text node's length.")
     } else {
         format!("Failed to execute '{who}' on '{iface}': The offset {off} is greater than the node's length ({len}).")
-    };
-    d.dom_err(it, "IndexSizeError", &m)
+    }
 }
 
 /// `replaceData(offset, count, data)` on the text of `n`: the live ranges first, then the text.
@@ -50,7 +55,7 @@ pub(crate) fn replace(d: &Dom, it: &mut Interp<'_>, who: &str, (n, text): (bare_
     let u: Vec<u16> = text.encode_utf16().collect();
     let len = u.len() as u32;
     if off > len {
-        return Err(out_of_range(d, it, who, "CharacterData", off, len));
+        return Err(d.dom_err(it, "IndexSizeError", &out_of_range_msg(who, "CharacterData", off, len)));
     }
     let count = count.min(len - off);
     let data16: Vec<u16> = data.encode_utf16().collect();
@@ -64,57 +69,57 @@ pub(crate) fn replace(d: &Dom, it: &mut Interp<'_>, who: &str, (n, text): (bare_
     Ok(Value::Undefined)
 }
 
-pub(crate) fn substring_data(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let (_, text) = data_of(d, it, this)?;
-    args(it, "substringData", "CharacterData", a, 2)?;
-    let (off, count) = (offset(it, a, 0)?, offset(it, a, 1)?);
+pub(crate) fn substring_data<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (_, text) = data_of(d, s, this)?;
+    args(s, "substringData", "CharacterData", a, 2)?;
+    let (off, count) = (offset(s, a, 0)?, offset(s, a, 1)?);
     let u: Vec<u16> = text.encode_utf16().collect();
     if off as usize > u.len() {
-        return Err(out_of_range(d, it, "substringData", "CharacterData", off, u.len() as u32));
+        return Err(out_of_range(d, s, "substringData", "CharacterData", off, u.len() as u32));
     }
     let end = (off as usize).saturating_add(count as usize).min(u.len());
-    d.js_str(it, &String::from_utf16_lossy(&u[off as usize..end]))
+    d.js_str_s(s, &String::from_utf16_lossy(&u[off as usize..end]))
 }
 
-pub(crate) fn append_data(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let (n, text) = data_of(d, it, this)?;
-    args(it, "appendData", "CharacterData", a, 1)?;
-    let data = d.string_arg(it, arg(a, 0))?;
-    replace(d, it, "appendData", (n, &text), utf16_len(&text), 0, &data)
+pub(crate) fn append_data<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (n, text) = data_of(d, s, this)?;
+    args(s, "appendData", "CharacterData", a, 1)?;
+    let data = d.arg_str_s(s, a, 0)?;
+    old_v(s, |it| replace(d, it, "appendData", (n, &text), utf16_len(&text), 0, &data))
 }
 
-pub(crate) fn insert_data(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let (n, text) = data_of(d, it, this)?;
-    args(it, "insertData", "CharacterData", a, 2)?;
-    let off = offset(it, a, 0)?;
-    let data = d.string_arg(it, arg(a, 1))?;
-    replace(d, it, "insertData", (n, &text), off, 0, &data)
+pub(crate) fn insert_data<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (n, text) = data_of(d, s, this)?;
+    args(s, "insertData", "CharacterData", a, 2)?;
+    let off = offset(s, a, 0)?;
+    let data = d.arg_str_s(s, a, 1)?;
+    old_v(s, |it| replace(d, it, "insertData", (n, &text), off, 0, &data))
 }
 
-pub(crate) fn delete_data(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let (n, text) = data_of(d, it, this)?;
-    args(it, "deleteData", "CharacterData", a, 2)?;
-    let (off, count) = (offset(it, a, 0)?, offset(it, a, 1)?);
-    replace(d, it, "deleteData", (n, &text), off, count, "")
+pub(crate) fn delete_data<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (n, text) = data_of(d, s, this)?;
+    args(s, "deleteData", "CharacterData", a, 2)?;
+    let (off, count) = (offset(s, a, 0)?, offset(s, a, 1)?);
+    old_v(s, |it| replace(d, it, "deleteData", (n, &text), off, count, ""))
 }
 
-pub(crate) fn replace_data(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let (n, text) = data_of(d, it, this)?;
-    args(it, "replaceData", "CharacterData", a, 3)?;
-    let (off, count) = (offset(it, a, 0)?, offset(it, a, 1)?);
-    let data = d.string_arg(it, arg(a, 2))?;
-    replace(d, it, "replaceData", (n, &text), off, count, &data)
+pub(crate) fn replace_data<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (n, text) = data_of(d, s, this)?;
+    args(s, "replaceData", "CharacterData", a, 3)?;
+    let (off, count) = (offset(s, a, 0)?, offset(s, a, 1)?);
+    let data = d.arg_str_s(s, a, 2)?;
+    old_v(s, |it| replace(d, it, "replaceData", (n, &text), off, count, &data))
 }
 
-pub(crate) fn split_text(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let (n, text) = data_of(d, it, this)?;
-    args(it, "splitText", "Text", a, 1)?;
-    let off = offset(it, a, 0)?;
+pub(crate) fn split_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (n, text) = data_of(d, s, this)?;
+    args(s, "splitText", "Text", a, 1)?;
+    let off = offset(s, a, 0)?;
     if off > utf16_len(&text) {
-        return Err(out_of_range(d, it, "splitText", "Text", off, utf16_len(&text)));
+        return Err(out_of_range(d, s, "splitText", "Text", off, utf16_len(&text)));
     }
-    let new = split_at(d, n, &text, off)?;
-    d.wrap(it, new)
+    let new = lift(s, split_at(d, n, &text, off))?;
+    d.wrap_s(s, new)
 }
 
 /// Split the text node `n` (its text is `text`) at `off` UTF-16 units, which are in range. The order is Chrome's: the data of `n` first (one record),
@@ -138,14 +143,14 @@ pub(crate) fn split_at(d: &Dom, n: bare_html::dom::NodeId, text: &str, off: u32)
 }
 
 /// `Node.normalize()`: the runs of Text nodes below `this` become one node each, and the empty ones go.
-pub(crate) fn normalize(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let root = d.nd(it, this)?;
+pub(crate) fn normalize<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let root = d.nd_s(s, this)?;
     let mut doc = d.doc.borrow_mut();
     let mut texts = Vec::new();
     let mut stack: Vec<_> = doc.children(root).collect();
     stack.reverse();
     while let Some(n) = stack.pop() {
-        it.charge(1)?;
+        s.charge(1)?;
         if matches!(doc.data(n), NodeData::Text(_)) {
             texts.push(n);
         }
@@ -167,29 +172,29 @@ pub(crate) fn normalize(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) 
         let mut run = Vec::new();
         let mut cur = doc.next_sibling(t);
         while let Some(c) = cur
-            && let NodeData::Text(s) = *doc.data(c)
+            && let NodeData::Text(st) = *doc.data(c)
         {
-            run.push((c, s));
+            run.push((c, st));
             cur = doc.next_sibling(c);
         }
         if run.is_empty() {
             continue;
         }
         let mut joined = doc.text(sp).to_string();
-        d.room(&doc, 0, joined.len() + run.iter().map(|&(_, s)| doc.text(s).len()).sum::<usize>())?;
-        for &(c, s) in &run {
+        d.room_s(s, &doc, 0, joined.len() + run.iter().map(|&(_, st)| doc.text(st).len()).sum::<usize>())?;
+        for &(c, st) in &run {
             // As in Chrome, an empty text only leaves (the standard also moves the points that sit on it).
-            if doc.text(s).is_empty() {
+            if doc.text(st).is_empty() {
                 continue;
             }
             d.range_merge(&doc, t, c, len);
-            joined += doc.text(s);
-            len += utf16_len(doc.text(s));
+            joined += doc.text(st);
+            len += utf16_len(doc.text(st));
         }
         doc.set_text(t, &joined);
         for (c, _) in run {
             doc.detach(c);
         }
     }
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
