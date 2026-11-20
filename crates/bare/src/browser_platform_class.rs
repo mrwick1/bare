@@ -27,12 +27,14 @@
 //! no `Symbol.toStringTag`. A bad `classList` call on a wrong `this` is `TypeError: Illegal invocation`.
 
 use crate::browser::*;
-use crate::browser_dom::attr_set;
-use crate::browser_platform::{TokIter, V, arg};
+use crate::browser_dom::attr_set_s;
+use crate::browser_platform::TokIter;
+use crate::browser_scoped::*;
 use bare_html::dom::{Atom, Document, NodeId};
 use bare_js::eval::Interp;
 use bare_js::heap::{HeapError, Slot};
 use bare_js::value::{ObjId, PropertyKey, StrId, Value};
+use bare_js_api::{Args, Attrs, Engine, Local, Type};
 use std::collections::HashSet;
 
 /// The indexes of one token list: the attribute text they were made from, and the token strings (the ordered set).
@@ -42,37 +44,37 @@ pub(crate) struct Toks {
 }
 
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>, list: ObjId, iter: ObjId, sym: PropertyKey) -> R<()> {
-    d.def_method(it, list, "item", 1, item)?;
-    d.def_method(it, list, "contains", 1, contains)?;
-    d.def_method(it, list, "add", 0, add)?;
-    d.def_method(it, list, "remove", 0, remove)?;
-    d.def_method(it, list, "toggle", 1, toggle)?;
-    d.def_method(it, list, "replace", 2, replace)?;
-    d.def_method(it, list, "supports", 1, supports)?;
-    d.def_method(it, list, "toString", 0, value_get)?;
-    d.def_method(it, list, "forEach", 1, for_each)?;
-    d.def_method(it, list, "keys", 0, keys)?;
-    d.def_method(it, list, "entries", 0, entries)?;
-    let values = d.def_method(it, list, "values", 0, values)?;
+    d.def_method_s(it, list, "item", 1, item)?;
+    d.def_method_s(it, list, "contains", 1, contains)?;
+    d.def_method_s(it, list, "add", 0, add)?;
+    d.def_method_s(it, list, "remove", 0, remove)?;
+    d.def_method_s(it, list, "toggle", 1, toggle)?;
+    d.def_method_s(it, list, "replace", 2, replace)?;
+    d.def_method_s(it, list, "supports", 1, supports)?;
+    d.def_method_s(it, list, "toString", 0, value_get)?;
+    d.def_method_s(it, list, "forEach", 1, for_each)?;
+    d.def_method_s(it, list, "keys", 0, keys)?;
+    d.def_method_s(it, list, "entries", 0, entries)?;
+    let values = d.def_method_s(it, list, "values", 0, values)?;
     it.define_data(list, sym, Value::Object(values), true, false, true)?;
-    d.def_get(it, list, "length", length, None)?;
-    d.def_get(it, list, "value", value_get, Some(value_set))?;
-    d.def_method(it, iter, "next", 0, iter_next)?;
+    d.def_get_s(it, list, "length", length, None)?;
+    d.def_get_s(it, list, "value", value_get, Some(value_set))?;
+    d.def_method_s(it, iter, "next", 0, iter_next)?;
     Ok(())
 }
 
-fn element(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
-    let n = d.nd(it, this)?;
-    if d.is_element(n) { Ok(n) } else { Err(it.type_error("Illegal invocation")) }
+fn element<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
+    let n = d.nd_s(s, this)?;
+    if d.is_element(n) { Ok(n) } else { Err(s.type_error("Illegal invocation")) }
 }
 
-fn list_of(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<(ObjId, (NodeId, &'static str))> {
-    if let Value::Object(o) = this
+fn list_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, (ObjId, (NodeId, &'static str))> {
+    if let Some(o) = obj_id(s, this)
         && let Some(&el) = d.plat.s.borrow().lists.get(&o)
     {
         return Ok((o, el));
     }
-    Err(it.type_error("Illegal invocation"))
+    Err(s.type_error("Illegal invocation"))
 }
 
 fn attribute<'a>(doc: &'a Document, el: (NodeId, &str)) -> Option<&'a str> {
@@ -87,15 +89,15 @@ fn set(v: &str) -> Vec<String> {
 }
 
 /// The ordered set of the backing attribute now.
-fn tokens(d: &Dom, it: &mut Interp<'_>, el: (NodeId, &str)) -> R<Vec<String>> {
+fn tokens<'s>(d: &Dom, s: &mut Sc<'s, '_>, el: (NodeId, &str)) -> Res<'s, Vec<String>> {
     let doc = d.doc.borrow();
     let v = attribute(&doc, el).unwrap_or("");
-    it.charge(1 + (v.len() / 8) as u64)?;
+    s.charge(1 + (v.len() / 8) as u64)?;
     Ok(set(v))
 }
 
 /// The update steps: write the serialized set back.
-fn write(d: &Dom, it: &mut Interp<'_>, el: (NodeId, &str), toks: &[String]) -> R<()> {
+fn write<'s>(d: &Dom, s: &mut Sc<'s, '_>, el: (NodeId, &str), toks: &[String]) -> Res<'s, ()> {
     let new = toks.join(" ");
     {
         let doc = d.doc.borrow();
@@ -105,107 +107,113 @@ fn write(d: &Dom, it: &mut Interp<'_>, el: (NodeId, &str), toks: &[String]) -> R
             _ => {}
         }
     }
-    attr_set(d, it, el.0, el.1, &new)
+    attr_set_s(d, s, el.0, el.1, &new)
 }
 
-fn required(it: &mut Interp<'_>, a: &[Value], n: usize, name: &str) -> R<()> {
+fn required<'s>(s: &mut Sc<'s, '_>, a: Args<'s>, n: usize, name: &str) -> Res<'s, ()> {
     if a.len() < n {
-        return Err(it.type_error(&format!("Failed to execute '{name}' on 'DOMTokenList': {n} argument{} required, but only {} present.", if n == 1 { "" } else { "s" }, a.len())));
+        return Err(s.type_error(&format!("Failed to execute '{name}' on 'DOMTokenList': {n} argument{} required, but only {} present.", if n == 1 { "" } else { "s" }, a.len())));
     }
     Ok(())
 }
 
 /// `ToString` of every argument, in order (user code may run here).
-fn strings(d: &Dom, it: &mut Interp<'_>, a: &[Value]) -> R<Vec<String>> {
+fn strings<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>) -> Res<'s, Vec<String>> {
     if a.len() > d.pl_limits().max_class_tokens {
-        return Err(d.lim("class-tokens"));
+        return Err(d.lim_s(s, "class-tokens"));
     }
-    a.iter().map(|&v| d.string_arg(it, v)).collect()
+    let mut out = Vec::with_capacity(a.len());
+    for v in a.iter() {
+        out.push(d.string_arg_s(s, v)?);
+    }
+    Ok(out)
 }
 
-fn check_empty(d: &Dom, it: &mut Interp<'_>, t: &str) -> R<()> {
-    if t.is_empty() { Err(d.dom_err(it, "SyntaxError", "The token provided must not be empty.")) } else { Ok(()) }
+fn check_empty<'s>(d: &Dom, s: &mut Sc<'s, '_>, t: &str) -> Res<'s, ()> {
+    if t.is_empty() { Err(d.dom_err_s(s, "SyntaxError", "The token provided must not be empty.")) } else { Ok(()) }
 }
 
-fn check_space(d: &Dom, it: &mut Interp<'_>, t: &str) -> R<()> {
+fn check_space<'s>(d: &Dom, s: &mut Sc<'s, '_>, t: &str) -> Res<'s, ()> {
     if t.contains(|c: char| c.is_ascii_whitespace()) {
-        Err(d.dom_err(it, "InvalidCharacterError", &format!("The token provided ('{t}') contains HTML space characters, which are not valid in tokens.")))
+        Err(d.dom_err_s(s, "InvalidCharacterError", &format!("The token provided ('{t}') contains HTML space characters, which are not valid in tokens.")))
     } else {
         Ok(())
     }
 }
 
-fn validate(d: &Dom, it: &mut Interp<'_>, toks: &[String]) -> R<()> {
+fn validate<'s>(d: &Dom, s: &mut Sc<'s, '_>, toks: &[String]) -> Res<'s, ()> {
     for t in toks {
-        check_empty(d, it, t)?;
-        check_space(d, it, t)?;
+        check_empty(d, s, t)?;
+        check_space(d, s, t)?;
     }
     Ok(())
 }
 
-pub(crate) fn class_list(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    token_list(d, it, this, "class")
+pub(crate) fn class_list<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    token_list(d, s, this, "class")
 }
 
-pub(crate) fn rel_list<const KIND: usize>(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    rel_element::<KIND>(d, it, this)?;
-    token_list(d, it, this, "rel")
+pub(crate) fn rel_list<'s, const KIND: usize>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    rel_element::<KIND>(d, s, this)?;
+    token_list(d, s, this, "rel")
 }
 
-fn rel_element<const KIND: usize>(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
-    let el = element(d, it, this)?;
+fn rel_element<'s, const KIND: usize>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
+    let el = element(d, s, this)?;
     if d.doc.borrow().is_html(el, ["link", "a", "area"][KIND]) {
         Ok(el)
-    } else { Err(it.type_error("Illegal invocation")) }
+    } else { Err(s.type_error("Illegal invocation")) }
 }
 
-pub(crate) fn set_rel_list<const KIND: usize>(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let el = rel_element::<KIND>(d, it, this)?;
-    let v = d.string_arg(it, arg(a, 0))?;
-    attr_set(d, it, el, "rel", &v)?;
-    Ok(Value::Undefined)
+pub(crate) fn set_rel_list<'s, const KIND: usize>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = rel_element::<KIND>(d, s, this)?;
+    let v = d.arg_str_s(s, a, 0)?;
+    attr_set_s(d, s, el, "rel", &v)?;
+    Ok(s.undefined())
 }
 
-pub(crate) fn sandbox_list(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    sandbox_element(d, it, this)?;
-    token_list(d, it, this, "sandbox")
+pub(crate) fn sandbox_list<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    sandbox_element(d, s, this)?;
+    token_list(d, s, this, "sandbox")
 }
 
-fn sandbox_element(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
-    let el = element(d, it, this)?;
+fn sandbox_element<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
+    let el = element(d, s, this)?;
     if d.doc.borrow().is_html(el, "iframe") {
         Ok(el)
-    } else { Err(it.type_error("Illegal invocation")) }
+    } else { Err(s.type_error("Illegal invocation")) }
 }
 
-pub(crate) fn set_sandbox_list(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let el = sandbox_element(d, it, this)?;
-    let v = d.string_arg(it, arg(a, 0))?;
-    attr_set(d, it, el, "sandbox", &v)?;
-    Ok(Value::Undefined)
+pub(crate) fn set_sandbox_list<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = sandbox_element(d, s, this)?;
+    let v = d.arg_str_s(s, a, 0)?;
+    attr_set_s(d, s, el, "sandbox", &v)?;
+    Ok(s.undefined())
 }
 
-fn token_list(d: &Dom, it: &mut Interp<'_>, this: Value, attr: &'static str) -> V {
-    let el = (element(d, it, this)?, attr);
-    if let Some(&o) = d.plat.s.borrow().by_el.get(&el) {
-        return Ok(Value::Object(o));
+fn token_list<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, attr: &'static str) -> Res<'s, Local<'s>> {
+    let el = (element(d, s, this)?, attr);
+    let known = d.plat.s.borrow().by_el.get(&el).copied();
+    if let Some(o) = known {
+        return Ok(d.obj_local(s, o));
     }
     if d.plat.s.borrow().lists.len() >= d.pl_limits().max_token_lists {
-        return Err(d.lim("token-lists"));
+        return Err(d.lim_s(s, "token-lists"));
     }
     let proto = d.plat.p.get().expect("installed").list;
-    let o = d.new_source(it, crate::browser_sources::Source::TokenList, Some(proto))?;
-    let mut s = d.plat.s.borrow_mut();
-    s.lists.insert(o, el);
-    s.by_el.insert(el, o);
-    Ok(Value::Object(o))
+    let o = d.new_source_s(s, crate::browser_sources::Source::TokenList, Some(proto))?;
+    let mut m = d.plat.s.borrow_mut();
+    m.lists.insert(o, el);
+    m.by_el.insert(el, o);
+    drop(m);
+    Ok(d.obj_local(s, o))
 }
 
-pub(crate) fn set_class_list(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let el = (element(d, it, this)?, "class");
-    let v = d.string_arg(it, arg(a, 0))?;
-    attr_set(d, it, el.0, el.1, &v)?;
-    Ok(Value::Undefined)
+pub(crate) fn set_class_list<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let el = (element(d, s, this)?, "class");
+    let v = d.arg_str_s(s, a, 0)?;
+    attr_set_s(d, s, el.0, el.1, &v)?;
+    Ok(s.undefined())
 }
 
 /// The cache of token list `owner`, read by `f`, when it is fresh. `None`: `owner` is not a token list. A stale cache answers
@@ -257,115 +265,112 @@ pub(crate) fn indexed_fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId) -> R<bool
     Ok(true)
 }
 
-fn length(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let (_, el) = list_of(d, it, this)?;
-    Ok(Value::Number(tokens(d, it, el)?.len() as f64))
+fn length<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let (_, el) = list_of(d, s, this)?;
+    let n = tokens(d, s, el)?.len();
+    Ok(s.number(n as f64))
 }
 
-fn value_get(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let (_, el) = list_of(d, it, this)?;
-    let s = {
+fn value_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let (_, el) = list_of(d, s, this)?;
+    let text = {
         let doc = d.doc.borrow();
         attribute(&doc, el).unwrap_or("").to_string()
     };
-    d.js_str(it, &s)
+    d.js_str_s(s, &text)
 }
 
-fn value_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let (_, el) = list_of(d, it, this)?;
-    let v = d.string_arg(it, arg(a, 0))?;
-    attr_set(d, it, el.0, el.1, &v)?;
-    Ok(Value::Undefined)
+fn value_set<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (_, el) = list_of(d, s, this)?;
+    let v = d.arg_str_s(s, a, 0)?;
+    attr_set_s(d, s, el.0, el.1, &v)?;
+    Ok(s.undefined())
 }
 
-/// WebIDL `unsigned long`: ToNumber, then modulo 2^32.
-pub(crate) fn to_u32(it: &mut Interp<'_>, v: Value) -> R<u32> {
-    let n = it.to_js_number(v)?;
-    Ok(if n.is_finite() { n.trunc().rem_euclid(4294967296.0) as u32 } else { 0 })
-}
-
-fn item(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let (_, el) = list_of(d, it, this)?;
-    required(it, a, 1, "item")?;
-    let i = to_u32(it, a[0])? as usize;
-    match tokens(d, it, el)?.get(i) {
-        Some(t) => d.js_str(it, t),
-        None => Ok(Value::Null),
+fn item<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (_, el) = list_of(d, s, this)?;
+    required(s, a, 1, "item")?;
+    let v = arg_s(s, a, 0);
+    let i = bare_js::value::to_uint32(s.to_number(v)?) as usize;
+    match tokens(d, s, el)?.get(i) {
+        Some(t) => d.js_str_s(s, t),
+        None => Ok(s.null()),
     }
 }
 
-fn contains(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let (_, el) = list_of(d, it, this)?;
-    required(it, a, 1, "contains")?;
-    let t = d.string_arg(it, a[0])?;
-    let doc = d.doc.borrow();
-    it.charge(1 + (attribute(&doc, el).map_or(0, str::len) / 32) as u64)?;
-    Ok(Value::Bool(if el.1 == "class" { doc.has_class(el.0, &t) } else { attribute(&doc, el).is_some_and(|v| v.split_ascii_whitespace().any(|x| x == t)) }))
+fn contains<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (_, el) = list_of(d, s, this)?;
+    required(s, a, 1, "contains")?;
+    let t = d.arg_str_s(s, a, 0)?;
+    let hit = {
+        let doc = d.doc.borrow();
+        s.charge(1 + (attribute(&doc, el).map_or(0, str::len) / 32) as u64)?;
+        if el.1 == "class" { doc.has_class(el.0, &t) } else { attribute(&doc, el).is_some_and(|v| v.split_ascii_whitespace().any(|x| x == t)) }
+    };
+    Ok(s.boolean(hit))
 }
 
-fn add(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let (_, el) = list_of(d, it, this)?;
-    let new = strings(d, it, a)?;
-    validate(d, it, &new)?;
-    let mut cur = tokens(d, it, el)?;
+fn add<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (_, el) = list_of(d, s, this)?;
+    let new = strings(d, s, a)?;
+    validate(d, s, &new)?;
+    let mut cur = tokens(d, s, el)?;
     let mut have: HashSet<String> = cur.iter().cloned().collect();
     for t in new {
         if have.insert(t.clone()) {
             cur.push(t);
         }
     }
-    write(d, it, el, &cur)?;
-    Ok(Value::Undefined)
+    write(d, s, el, &cur)?;
+    Ok(s.undefined())
 }
 
-fn remove(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let (_, el) = list_of(d, it, this)?;
-    let gone = strings(d, it, a)?;
-    validate(d, it, &gone)?;
+fn remove<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (_, el) = list_of(d, s, this)?;
+    let gone = strings(d, s, a)?;
+    validate(d, s, &gone)?;
     let gone: HashSet<String> = gone.into_iter().collect();
-    let mut cur = tokens(d, it, el)?;
+    let mut cur = tokens(d, s, el)?;
     cur.retain(|t| !gone.contains(t));
-    write(d, it, el, &cur)?;
-    Ok(Value::Undefined)
+    write(d, s, el, &cur)?;
+    Ok(s.undefined())
 }
 
-fn toggle(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let (_, el) = list_of(d, it, this)?;
-    required(it, a, 1, "toggle")?;
-    let t = d.string_arg(it, a[0])?;
-    validate(d, it, std::slice::from_ref(&t))?;
-    let force = match arg(a, 1) {
-        Value::Undefined => None,
-        v => Some(it.to_js_bool(v)?),
-    };
-    let mut cur = tokens(d, it, el)?;
+fn toggle<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (_, el) = list_of(d, s, this)?;
+    required(s, a, 1, "toggle")?;
+    let t = d.arg_str_s(s, a, 0)?;
+    validate(d, s, std::slice::from_ref(&t))?;
+    let f = arg_s(s, a, 1);
+    let force = if s.type_of(f) == Type::Undefined { None } else { Some(s.to_boolean(f)) };
+    let mut cur = tokens(d, s, el)?;
     if let Some(i) = cur.iter().position(|x| *x == t) {
         if force == Some(true) {
-            return Ok(Value::Bool(true));
+            return Ok(s.boolean(true));
         }
         cur.remove(i);
-        write(d, it, el, &cur)?;
-        return Ok(Value::Bool(false));
+        write(d, s, el, &cur)?;
+        return Ok(s.boolean(false));
     }
     if force == Some(false) {
-        return Ok(Value::Bool(false));
+        return Ok(s.boolean(false));
     }
     cur.push(t);
-    write(d, it, el, &cur)?;
-    Ok(Value::Bool(true))
+    write(d, s, el, &cur)?;
+    Ok(s.boolean(true))
 }
 
-fn replace(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let (_, el) = list_of(d, it, this)?;
-    required(it, a, 2, "replace")?;
-    let (old, new) = (d.string_arg(it, a[0])?, d.string_arg(it, a[1])?);
-    check_empty(d, it, &old)?;
-    check_empty(d, it, &new)?;
-    check_space(d, it, &old)?;
-    check_space(d, it, &new)?;
-    let cur = tokens(d, it, el)?;
+fn replace<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (_, el) = list_of(d, s, this)?;
+    required(s, a, 2, "replace")?;
+    let (old, new) = (d.arg_str_s(s, a, 0)?, d.arg_str_s(s, a, 1)?);
+    check_empty(d, s, &old)?;
+    check_empty(d, s, &new)?;
+    check_space(d, s, &old)?;
+    check_space(d, s, &new)?;
+    let cur = tokens(d, s, el)?;
     if !cur.contains(&old) {
-        return Ok(Value::Bool(false));
+        return Ok(s.boolean(false));
     }
     let mut out = Vec::with_capacity(cur.len());
     let mut placed = false;
@@ -379,20 +384,20 @@ fn replace(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
             out.push(x);
         }
     }
-    write(d, it, el, &out)?;
-    Ok(Value::Bool(true))
+    write(d, s, el, &out)?;
+    Ok(s.boolean(true))
 }
 
-fn supports(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let (_, el) = list_of(d, it, this)?;
-    required(it, a, 1, "supports")?;
-    let token = d.string_arg(it, a[0])?;
+fn supports<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (_, el) = list_of(d, s, this)?;
+    required(s, a, 1, "supports")?;
+    let token = d.arg_str_s(s, a, 0)?;
     if el.1 == "rel" {
         let token = token.to_ascii_lowercase();
         // Report only link processing implemented by this browser. Navigation and
         // the other resource-hint lifecycles are not implemented.
         let supported = d.doc.borrow().is_html(el.0, "link") && matches!(token.as_str(), "preload" | "stylesheet");
-        return Ok(Value::Bool(supported));
+        return Ok(s.boolean(supported));
     }
     if el.1 == "sandbox" {
         let token = token.to_ascii_lowercase();
@@ -401,80 +406,88 @@ fn supports(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
             "allow-popups-to-escape-sandbox", "allow-presentation", "allow-same-origin", "allow-scripts", "allow-top-navigation",
             "allow-top-navigation-by-user-activation", "allow-top-navigation-to-custom-protocols",
         ].contains(&token.as_str());
-        return Ok(Value::Bool(supported));
+        return Ok(s.boolean(supported));
     }
-    Err(it.type_error("Failed to execute 'supports' on 'DOMTokenList': DOMTokenList has no supported tokens."))
+    Err(s.type_error("Failed to execute 'supports' on 'DOMTokenList': DOMTokenList has no supported tokens."))
 }
 
-fn for_each(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let (_, el) = list_of(d, it, this)?;
-    required(it, a, 1, "forEach")?;
-    let cb = a[0];
-    if !it.is_callable_value(cb) {
-        return Err(it.type_error("Failed to execute 'forEach' on 'DOMTokenList': parameter 1 is not of type 'Function'."));
+fn for_each<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (_, el) = list_of(d, s, this)?;
+    required(s, a, 1, "forEach")?;
+    let cb = arg_s(s, a, 0);
+    if !s.is_callable(cb) {
+        return Err(s.type_error("Failed to execute 'forEach' on 'DOMTokenList': parameter 1 is not of type 'Function'."));
     }
+    let this_arg = arg_s(s, a, 1);
     let mut i = 0usize;
+    // The locals of one step are dropped before the next one.
+    let base = s.engine().stack_len();
     loop {
-        let t = match tokens(d, it, el)?.get(i) {
-            Some(t) => d.js_str(it, t)?,
-            None => return Ok(Value::Undefined),
+        let t = match tokens(d, s, el)?.get(i) {
+            Some(t) => d.js_str_s(s, t)?,
+            None => return Ok(s.undefined()),
         };
-        it.call(cb, arg(a, 1), &[t, Value::Number(i as f64), this])?;
+        let n = s.number(i as f64);
+        s.call(cb, this_arg, &[t, n, this])?;
+        s.engine().stack_truncate(base);
         i += 1;
     }
 }
 
-fn make_iter(d: &Dom, it: &mut Interp<'_>, this: Value, kind: u8) -> V {
-    let (list, _) = list_of(d, it, this)?;
+fn make_iter<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, kind: u8) -> Res<'s, Local<'s>> {
+    let (list, _) = list_of(d, s, this)?;
     if d.plat.s.borrow().iters.len() >= d.pl_limits().max_token_iters {
-        return Err(d.lim("token-iterators"));
+        return Err(d.lim_s(s, "token-iterators"));
     }
-    let o = d.obj(it, d.plat.p.get().expect("installed").iter)?;
+    let o = d.obj_s(s, d.plat.p.get().expect("installed").iter)?;
     d.plat.s.borrow_mut().iters.insert(o, TokIter { list, idx: 0, kind, done: false });
-    Ok(Value::Object(o))
+    Ok(d.obj_local(s, o))
 }
 
-fn keys(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    make_iter(d, it, this, 1)
+fn keys<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    make_iter(d, s, this, 1)
 }
 
-fn values(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    make_iter(d, it, this, 0)
+fn values<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    make_iter(d, s, this, 0)
 }
 
-fn entries(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    make_iter(d, it, this, 2)
+fn entries<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    make_iter(d, s, this, 2)
 }
 
-fn result(d: &Dom, it: &mut Interp<'_>, value: Value, done: bool) -> V {
-    let o = d.obj(it, it.object_prototype())?;
-    let (kv, kd) = (d.key(it, "value")?, d.key(it, "done")?);
-    it.define_data(o, kv, value, true, true, true)?;
-    it.define_data(o, kd, Value::Bool(done), true, true, true)?;
-    Ok(Value::Object(o))
+fn result<'s>(s: &mut Sc<'s, '_>, value: Local<'s>, done: bool) -> Res<'s, Local<'s>> {
+    let o = s.new_object()?;
+    let all = Attrs { writable: true, enumerable: true, configurable: true };
+    s.define_str(o, "value", value, all)?;
+    let done = s.boolean(done);
+    s.define_str(o, "done", done, all)?;
+    Ok(o)
 }
 
-fn iter_next(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let Value::Object(o) = this else { return Err(it.type_error("Illegal invocation")) };
-    let (list, idx, kind, done) = match d.plat.s.borrow().iters.get(&o) {
-        Some(i) => (i.list, i.idx, i.kind, i.done),
-        None => return Err(it.type_error("Illegal invocation")),
-    };
+fn iter_next<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let Some(o) = obj_id(s, this) else { return Err(s.type_error("Illegal invocation")) };
+    let found = d.plat.s.borrow().iters.get(&o).map(|i| (i.list, i.idx, i.kind, i.done));
+    let Some((list, idx, kind, done)) = found else { return Err(s.type_error("Illegal invocation")) };
     let el = d.plat.s.borrow().lists.get(&list).copied();
     let tok = match (done, el) {
-        (false, Some(el)) => tokens(d, it, el)?.into_iter().nth(idx),
+        (false, Some(el)) => tokens(d, s, el)?.into_iter().nth(idx),
         _ => None,
     };
     let Some(tok) = tok else {
         d.plat.s.borrow_mut().iters.get_mut(&o).expect("checked").done = true;
-        return result(d, it, Value::Undefined, true);
+        let u = s.undefined();
+        return result(s, u, true);
     };
     d.plat.s.borrow_mut().iters.get_mut(&o).expect("checked").idx = idx + 1;
-    let s = d.js_str(it, &tok)?;
+    let text = d.js_str_s(s, &tok)?;
     let v = match kind {
-        0 => s,
-        1 => Value::Number(idx as f64),
-        _ => it.array_from(&[Value::Number(idx as f64), s])?,
+        0 => text,
+        1 => s.number(idx as f64),
+        _ => {
+            let n = s.number(idx as f64);
+            s.new_array(&[n, text])?
+        }
     };
-    result(d, it, v, false)
+    result(s, v, false)
 }

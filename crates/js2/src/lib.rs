@@ -27,6 +27,7 @@ pub mod object;
 pub mod roots;
 pub mod parse_ahead;
 pub mod lex;
+pub mod regexp_check;
 pub mod ast;
 pub mod facts;
 pub mod parse;

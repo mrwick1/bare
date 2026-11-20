@@ -37,10 +37,10 @@ use bare_layout::fragment::{Kind as FragKind, Rect};
 use bare_html::dom::{Document, NodeId};
 use bare_js::eval::{Error, Interp};
 use bare_js::value::{ObjId, Value};
+use bare_js_api::{Args, Engine, HostFn, Local, Type};
+use crate::browser_scoped::*;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
-
-type V = R<Value>;
 
 /// Bounds of the module. Each is checked before the thing grows.
 #[derive(Clone, Copy, Debug)]
@@ -125,50 +125,56 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     let g = it.global_object();
     let (kc, kp) = (d.key(it, "constructor")?, d.key(it, "prototype")?);
     for (name, proto, ctor, len) in [
-        ("ResizeObserver", observer, Some(construct as H), 1),
+        ("ResizeObserver", observer, Some(construct as HS), 1),
         ("ResizeObserverEntry", entry, None, 0),
         ("ResizeObserverSize", size, None, 0),
     ] {
-        let f = d.add_fn(it, ctor.unwrap_or(illegal_constructor), name, len, true)?;
+        let f = d.add_fn_s_obj(it, ctor.unwrap_or(illegal_ctor), name, len, HostFn::Ctor)?;
         it.define_data(f, kp, Value::Object(proto), false, false, false)?;
         it.define_data(proto, kc, Value::Object(f), true, false, true)?;
         let k = d.key(it, name)?;
         it.define_data(g, k, Value::Object(f), true, false, true)?;
     }
-    d.def_method(it, observer, "observe", 1, observe)?;
-    d.def_method(it, observer, "unobserve", 1, unobserve)?;
-    d.def_method(it, observer, "disconnect", 0, disconnect)?;
-    d.def_get(it, entry, "devicePixelContentBoxSize", device_sizes, None)
+    d.def_method_s(it, observer, "observe", 1, observe)?;
+    d.def_method_s(it, observer, "unobserve", 1, unobserve)?;
+    d.def_method_s(it, observer, "disconnect", 0, disconnect)?;
+    d.def_get_s(it, entry, "devicePixelContentBoxSize", device_sizes, None)
 }
 
-fn construct(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
-    let cb = a.first().copied().unwrap_or(Value::Undefined);
-    if !it.is_callable_value(cb) {
-        return Err(it.type_error("Failed to construct 'ResizeObserver': parameter 1 is not of type 'Function'."));
+fn illegal_ctor<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    Err(s.type_error("Illegal constructor"))
+}
+
+fn construct<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let cb = arg_s(s, a, 0);
+    if !s.is_callable(cb) {
+        return Err(s.type_error("Failed to construct 'ResizeObserver': parameter 1 is not of type 'Function'."));
     }
+    let cb = s.engine().raw(cb);
     let proto = d.resize.s.borrow().protos.expect("installed").observer;
     if d.resize.s.borrow().observers.len() >= d.resize.lim.get().max_observers {
-        return Err(d.lim("resize-observers"));
+        return Err(d.lim_s(s, "resize-observers"));
     }
-    let o = d.obj(it, proto)?;
-    let mut s = d.resize.s.borrow_mut();
-    s.observers.insert(o, Observer { cb, obs: Vec::new(), targets: HashSet::new(), active: Vec::new(), skipped: false });
-    s.order.push(o);
-    Ok(Value::Object(o))
+    let o = d.obj_s(s, proto)?;
+    let mut m = d.resize.s.borrow_mut();
+    m.observers.insert(o, Observer { cb, obs: Vec::new(), targets: HashSet::new(), active: Vec::new(), skipped: false });
+    m.order.push(o);
+    drop(m);
+    Ok(d.obj_local(s, o))
 }
 
-fn observer_of(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<ObjId> {
-    match this {
-        Value::Object(o) if d.resize.s.borrow().observers.contains_key(&o) => Ok(o),
-        _ => Err(it.type_error("Illegal invocation")),
+fn observer_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, ObjId> {
+    match obj_id(s, this) {
+        Some(o) if d.resize.s.borrow().observers.contains_key(&o) => Ok(o),
+        _ => Err(s.type_error("Illegal invocation")),
     }
 }
 
-fn target_arg(d: &Dom, it: &mut Interp<'_>, a: &[Value], method: &str) -> R<(NodeId, ObjId)> {
-    let v = a.first().copied().unwrap_or(Value::Undefined);
-    match (d.node_of(v), v) {
-        (Some(n), Value::Object(o)) if d.is_element(n) => Ok((n, o)),
-        _ => Err(it.type_error(&format!("Failed to execute '{method}' on 'ResizeObserver': parameter 1 is not of type 'Element'."))),
+fn target_arg<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>, method: &str) -> Res<'s, (NodeId, ObjId)> {
+    let v = arg_s(s, a, 0);
+    match (d.node_of_s(s, v), obj_id(s, v)) {
+        (Some(n), Some(o)) if d.is_element(n) => Ok((n, o)),
+        _ => Err(s.type_error(&format!("Failed to execute '{method}' on 'ResizeObserver': parameter 1 is not of type 'Element'."))),
     }
 }
 
@@ -185,64 +191,68 @@ fn remove(d: &Dom, o: ObjId, target: NodeId) {
     s.observations -= before - ob.obs.len();
 }
 
-fn observe(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let o = observer_of(d, it, this)?;
-    let (target, wrapper) = target_arg(d, it, a, "observe")?;
+fn observe<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = observer_of(d, s, this)?;
+    let (target, wrapper) = target_arg(d, s, a, "observe")?;
     // The options dictionary: `box` is read once, after the target check (WebIDL order).
-    let observed = match a.get(1).copied().unwrap_or(Value::Undefined) {
-        Value::Undefined | Value::Null => Boxes::Content,
-        Value::Object(_) => {
-            let k = d.key(it, "box")?;
-            match it.get_value(a[1], k)? {
-                Value::Undefined => Boxes::Content,
-                v => match d.string_arg(it, v)?.as_str() {
-                    "content-box" => Boxes::Content,
-                    "border-box" => Boxes::Border,
-                    "device-pixel-content-box" => return Err(Dom::gate(DEVICE)),
-                    other => {
-                        let m = format!("Failed to execute 'observe' on 'ResizeObserver': The provided value '{other}' is not a valid enum value of type ResizeObserverBoxOptions.");
-                        return Err(it.type_error(&m));
-                    }
-                },
+    let opts = arg_s(s, a, 1);
+    let observed = if is_nullish(s, opts) {
+        Boxes::Content
+    } else if is_object(s, opts) {
+        let b = s.get_str(opts, "box")?;
+        if s.type_of(b) == Type::Undefined {
+            Boxes::Content
+        } else {
+            match d.string_arg_s(s, b)?.as_str() {
+                "content-box" => Boxes::Content,
+                "border-box" => Boxes::Border,
+                "device-pixel-content-box" => return Err(lift_err(s, Dom::gate(DEVICE))),
+                other => {
+                    let m = format!("Failed to execute 'observe' on 'ResizeObserver': The provided value '{other}' is not a valid enum value of type ResizeObserverBoxOptions.");
+                    return Err(s.type_error(&m));
+                }
             }
         }
-        _ => return Err(it.type_error("Failed to execute 'observe' on 'ResizeObserver': The provided value is not of type 'ResizeObserverOptions'.")),
+    } else {
+        return Err(s.type_error("Failed to execute 'observe' on 'ResizeObserver': The provided value is not of type 'ResizeObserverOptions'."));
     };
     // Observing a target again replaces its observation (the standard calls `unobserve` first).
     remove(d, o, target);
-    let mut s = d.resize.s.borrow_mut();
-    if s.observations >= d.resize.lim.get().max_observations {
-        return Err(d.lim("resize-observations"));
+    let mut m = d.resize.s.borrow_mut();
+    if m.observations >= d.resize.lim.get().max_observations {
+        drop(m);
+        return Err(d.lim_s(s, "resize-observations"));
     }
-    s.observations += 1;
-    let ob = s.observers.get_mut(&o).expect("checked");
+    m.observations += 1;
+    let ob = m.observers.get_mut(&o).expect("checked");
     ob.targets.insert(target);
     ob.obs.push(Observation { target, wrapper, observed, last: (-1.0, -1.0) });
-    s.last_key = None;
-    Ok(Value::Undefined)
+    m.last_key = None;
+    drop(m);
+    Ok(s.undefined())
 }
 
-fn unobserve(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let o = observer_of(d, it, this)?;
-    let (target, _) = target_arg(d, it, a, "unobserve")?;
+fn unobserve<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = observer_of(d, s, this)?;
+    let (target, _) = target_arg(d, s, a, "unobserve")?;
     remove(d, o, target);
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-fn disconnect(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let o = observer_of(d, it, this)?;
-    let mut s = d.resize.s.borrow_mut();
-    let s = &mut *s;
-    let ob = s.observers.get_mut(&o).expect("checked");
-    s.observations -= ob.obs.len();
+fn disconnect<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = observer_of(d, s, this)?;
+    let mut m = d.resize.s.borrow_mut();
+    let m = &mut *m;
+    let ob = m.observers.get_mut(&o).expect("checked");
+    m.observations -= ob.obs.len();
     ob.obs.clear();
     ob.targets.clear();
     ob.active.clear();
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-fn device_sizes(_: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
-    Err(Dom::gate(DEVICE))
+fn device_sizes<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    Err(lift_err(s, Dom::gate(DEVICE)))
 }
 
 /// A padding side in px. Only an absolute length is known without the containing block.
