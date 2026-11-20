@@ -736,7 +736,7 @@ fn has_accessor(rt: &mut Realm, v: Value) -> bool {
 }
 
 fn object_assign(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    let target = to_obj(rt, arg(args, 0))?;
+    let target = rt.to_object(arg(args, 0))?.value();
     let slow = args.iter().skip(1).any(|&s| has_accessor(rt, s)) || {
         // A setter on the target or its prototypes, or a getter on the keys, needs the helper.
         let mut chain = Realm::obj(target);
@@ -847,6 +847,7 @@ fn object_get_prototype_of(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Va
     } else if v.as_bool().is_some() {
         rt.boolean_proto.value()
     } else if Realm::sym_of(v).is_some() {
+        rt.fn_props(rt.symbol_proto);
         rt.symbol_proto.value()
     } else {
         return rt.type_error("cannot convert undefined or null to an object");

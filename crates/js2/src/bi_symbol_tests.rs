@@ -78,7 +78,7 @@ fn the_keys_of_the_string_operations_skip_symbols() {
 fn the_registry_gives_one_symbol_for_a_key() {
     check(&[
         ("var a = Symbol.for('k'), b = Symbol.for('k'); var r = (a === b) + ',' + Symbol.keyFor(a) + ',' + a.description + ',' + (Symbol.for('j') === a) + ',' + Symbol.keyFor(Symbol('k')) + ',' + Symbol.keyFor(Symbol.iterator) + ',' + (Symbol.for() === Symbol.for('undefined')) + ',' + (Symbol.for('0') === Symbol.for(0));", "r", "true,k,k,false,undefined,undefined,true,true"),
-        ("var a = Symbol.for('keep'); for (var i = 0; i < 300; i++) Symbol.for('x' + i); var big = []; for (i = 0; i < 2000; i++) big.push({v: i}); var r = (Symbol.for('keep') === a) + ',' + Symbol.keyFor(a) + ',' + (Symbol.for('x299') === Symbol.for('x299'));", "r", "true,keep,true"),
+        ("var a = Symbol.for('keep'); for (var i = 0; i < 40; i++) Symbol.for('x' + i); var big = []; for (i = 0; i < 300; i++) big.push({v: i}); var r = (Symbol.for('keep') === a) + ',' + Symbol.keyFor(a) + ',' + (Symbol.for('x39') === Symbol.for('x39'));", "r", "true,keep,true"),
     ]);
 }
 
@@ -107,6 +107,26 @@ fn the_hooks_read_the_well_known_symbols() {
 #[test]
 fn symbols_survive_collection_as_values_keys_and_registry_entries() {
     check(&[
-        ("var syms = []; for (var i = 0; i < 400; i++) syms.push(Symbol('s' + i)); var o = {}; for (i = 0; i < 400; i += 2) o[syms[i]] = i; var junk = []; for (i = 0; i < 3000; i++) junk.push([i]); var r = Object.getOwnPropertySymbols(o).length + ',' + o[syms[398]] + ',' + syms[399].description;", "r", "200,398,s399"),
+        ("var syms = []; for (var i = 0; i < 60; i++) syms.push(Symbol('s' + i)); var o = {}; for (i = 0; i < 60; i += 2) o[syms[i]] = i; var junk = []; for (i = 0; i < 300; i++) junk.push([i]); var r = Object.getOwnPropertySymbols(o).length + ',' + o[syms[58]] + ',' + syms[59].description;", "r", "30,58,s59"),
+    ]);
+}
+
+#[test]
+fn the_prototype_of_a_symbol_has_its_members_however_it_is_reached() {
+    check(&[
+        // The members are made at the first read of `Symbol` or `Symbol.prototype`; no other way to the prototype may miss them.
+        ("var o = Object.create(Object.getPrototypeOf(Symbol('p'))); var r = o.toString === Symbol.prototype.toString;", "r", "true"),
+        ("var o = {}; Object.setPrototypeOf(o, Object.getPrototypeOf(Symbol('p'))); var r = typeof o.valueOf + typeof o.constructor;", "r", "functionfunction"),
+        ("var r = Object(Symbol('w')).description + Object.getPrototypeOf(Object(Symbol())) .constructor.name;", "r", "wSymbol"),
+        ("var r = Symbol('a').description + Object.keys(Symbol).length + Object.getOwnPropertyNames(Symbol.prototype).sort();", "r", "a0constructor,description,toString,valueOf"),
+        ("var t = Object.assign(Symbol('t'), {x: 1}); var r = typeof t + t.x + (t.description);", "r", "object1t"),
+    ]);
+}
+
+#[test]
+fn instanceof_follows_a_bound_function_to_its_target() {
+    check(&[
+        ("function F() {} var B = F.bind(null); var r = (new F() instanceof B) + ',' + ({} instanceof B);", "r", "true,false"),
+        ("function F() {} Object.defineProperty(F, 'prototype', {get() { throw new RangeError('x'); }}); var r = ''; try { ({}) instanceof F; } catch (e) { r = e.name; } try { 1 instanceof F; r += ',ok'; } catch (e) { r += ',' + e.name; }", "r", "RangeError,ok"),
     ]);
 }

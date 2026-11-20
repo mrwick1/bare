@@ -628,7 +628,8 @@ impl Realm {
             let p = self.to_primitive(v, Hint::Number)?;
             return self.to_number(p);
         }
-        self.type_error("cannot convert a value to a number")
+        let what = if Realm::sym_of(v).is_some() { "a Symbol value" } else { "a value" };
+        self.type_error(&format!("cannot convert {what} to a number"))
     }
 
     pub fn to_int32(f: f64) -> i32 {
@@ -682,7 +683,8 @@ impl Realm {
             let p = self.to_primitive(v, Hint::String)?;
             return self.to_str(p);
         } else {
-            return self.type_error("cannot convert a value to a string");
+            let what = if Realm::sym_of(v).is_some() { "a Symbol value" } else { "a value" };
+            return self.type_error(&format!("cannot convert {what} to a string"));
         };
         Ok(Str::from_str(&mut self.heap, &t).expect("memory"))
     }
@@ -1318,8 +1320,16 @@ impl Realm {
 
     /// `OrdinaryHasInstance(fo, x)`.
     pub(crate) fn ordinary_has_instance(&mut self, fo: Obj, x: Value) -> R<bool> {
-        let Some(mut o) = Realm::obj(x).filter(|_| fo.is_callable()) else { return Ok(false) };
-        let Some(p) = self.lookup(fo, self.k_prototype)? else { return Ok(false) };
+        if !fo.is_callable() {
+            return Ok(false);
+        }
+        // A bound function asks its target (`BoundTargetFunction`).
+        if self.native_id(fo.value()) == Some(self.bound_id as usize) {
+            let target = fo.slot(&self.shapes, 1);
+            return self.instance_of(x, target);
+        }
+        let Some(mut o) = Realm::obj(x) else { return Ok(false) };
+        let p = self.get_prop(fo.value(), Key::Name(self.k_prototype))?;
         let Some(po) = Realm::obj(p) else { return self.type_error("function has non-object prototype in instanceof check") };
         while let Some(n) = self.proto_of(o) {
             if n == po {

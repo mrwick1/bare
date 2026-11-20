@@ -6,7 +6,6 @@
   'use strict';
   var nativeReplace = String.prototype.replace;
   var nativeReplaceAll = String.prototype.replaceAll;
-  var getSyms = Object.getOwnPropertySymbols;
   var rawDefine = Object.defineProperty, keys = Object.keys, getProto = Object.getPrototypeOf, setProto = Object.setPrototypeOf;
   // The descriptor object `d` as a plain object, read with ordinary property reads (a field of `d` may be an accessor).
   function toDesc(d) {
@@ -30,10 +29,11 @@
   });
   helper(2, function assign(t) {
     if (t === undefined || t === null) throw new TypeError('cannot convert undefined or null to an object');
+    t = Object(t);
     for (var i = 1; i < arguments.length; i++) {
       var s = arguments[i];
       if (s === undefined || s === null) continue;
-      var ks = keys(s), ss = getSyms(Object(s)), j;
+      var ks = keys(s), ss = Object.getOwnPropertySymbols(Object(s)), j;
       for (j = 0; j < ks.length; j++) set(t, ks[j], s[ks[j]]);
       for (j = 0; j < ss.length; j++) if (getOwn(s, ss[j]).enumerable) set(t, ss[j], s[ss[j]]);
     }
@@ -62,7 +62,7 @@
   var getOwn = Object.getOwnPropertyDescriptor, ownNames = Object.getOwnPropertyNames;
   // `{...src}` into `dst` and `{a, ...rest} = src` when `src` has an accessor: the interpreter hands over (`interp.rs`).
   function copyData(dst, src, excluded) {
-    var s = Object(src), ks = ownNames(s), ss = getSyms(s), i;
+    var s = Object(src), ks = ownNames(s), ss = Object.getOwnPropertySymbols(s), i;
     for (i = 0; i < ss.length; i++) ks[ks.length] = ss[i];
     for (i = 0; i < ks.length; i++) {
       var k = ks[i];

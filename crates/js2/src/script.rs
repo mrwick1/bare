@@ -352,7 +352,7 @@ impl Vm {
         }
         let mut parts: Vec<String> = Vec::new();
         let indexed = r.shapes.get(id).layout == crate::cell::Layout::Indexed;
-        let entries: Vec<_> = r.shapes.entries(id).filter(|e| e.attrs() & A_E != 0).map(|e| (r.text(e.key()), o.slot(&r.shapes, e.slot()))).collect();
+        let entries: Vec<_> = r.shapes.entries(id).filter(|e| e.attrs() & A_E != 0 && !e.key().is_symbol()).map(|e| (r.text(e.key()), o.slot(&r.shapes, e.slot()))).collect();
         let elems: Vec<Value> = if indexed { (0..o.len()).map(|i| o.get_element(i).unwrap_or(Value::HOLE)).collect() } else { vec![] };
         for e in elems {
             parts.push(if e.is_hole() { String::new() } else { self.display_at(e, true, depth + 1) });
