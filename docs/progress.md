@@ -14939,3 +14939,88 @@ Cost of the trigger on the allocation fast path (`crates/js2/examples/heap_load.
 - `task` mode (new): 20,000,000 objects of 2 slots through `alloc_in_task`, the last 1,000 in a native frame, the trigger collects (38 collections): 67.2 instructions per allocation, of which the loop itself (shape header, 3 stores, the frame write) is most. `perf record` (1 run): `finish_mark`, `Marker::cell`, `alloc_slow` and `sweep` together are 0.9% of the samples. A collection costs little here because only 1,000 objects are live; this row does not size the root walk of a deep stack. `alloc_in_task` and `Frames::regs` are not inlined across crates without `#[inline]`: the first build of the row had 106 instructions per allocation for that reason; both are `#[inline]` now.
 
 Not tested: a real interpreter, compiler root maps or deep stacks (S2); a collection that a host function causes while JS frames are below it (the handle scopes of design 6.8 are one native frame here); the cost of a walk of a deep stack; the trigger on `eval_load throws` or on the journeys (the new engine runs no script, so the peak of 16 MiB there is arithmetic); a second realm; arm64; the cost matrix (js2 is not wired into the browser); wall time.
+
+## 2026-11-20: sticky-mark young generation, experiment not kept (plan step S1.10)
+
+The experiment is built and measured. It is **not kept in main**. The code is on branch `t3/js2-sticky-mark-minor-gc` (head `1f0a3eeb`, on top of the S1.9 branch `t3/js2-object-layout` at `bf367cb6`, PR #749). This entry is the only change in this PR.
+
+What the experiment builds (`crates/js2`):
+- Sticky marks. A collection no longer clears the mark bits of live cells. `Heap::sweep` keeps them. A marked cell is old. A full collection clears all marks first.
+- Header flags `F_OLD` and `F_REM` (bits 22 and 23). The marker sets `F_OLD` on each non-leaf cell that it marks. The barrier tests it.
+- Write barrier: `heap::barrier(holder, header, value, at)`. A store of a pointer into an old cell remembers the cell. A small cell gets `F_REM` (once) and a bit in a new `dirty` map in its block header (512 bytes more for each 64 KiB block). A long record (a large cell) has no flag. It gets a dirty bit for the card of the store (512 bytes, more for records over 2 MiB).
+- Barrier sites: `Obj::set_slot`, element stores (`put_b`), the elements word, the overflow record pointer in `reserve`, the move in `remove`, a shape change (`set_shape`: the shape holds a prototype cell), and the rope flatten in `string.rs`.
+- `gc::collect_minor`: roots, the prototype of every shape, the remembered cells and cards, then the mark loop. It marks only cells that are not marked. Shapes, runtime atoms and old cells are not freed. A full collection does that. `Shapes::clear_live` runs at the start of a full collection (a stale bit from a minor would skip the prototype mark). A new atom is marked when it is made, so a minor needs no walk of the atom table or of the shape keys.
+- 4 new tests in `gc_tests.rs`: a store into an old object; records, elements, ropes and shape changes; cards of a long record (5,000 and 300,000 elements); a random graph of 8 seeds with minor and full collections and a model (freed cells are overwritten before the check). With the barrier switched off, 3 of them fail. `bare-js2` has 110 tests: Linux 110 pass. Miri (nightly 2026-11-17) on the 4 new tests: 4 pass, 262 s (the one known integer-to-pointer warning).
+- Rows: `examples/barrier_load.rs` and `examples/gen_load.rs`.
+
+Machine: archMachine, AMD Ryzen 9 5900HX, release builds, load 5 to 6. Counts are user instructions from `perf stat -e instructions:u` (3 runs; the spread is under 0.003% on every row below, so one number is given). Base tree: `bf367cb6` built in its own checkout.
+
+### (a) Barrier cost for each store
+
+`barrier_load`, N = 1,000,000 minus N = 0, instructions per operation including the loop (4):
+
+| Row | Base | Experiment | Change |
+| --- | ---: | ---: | ---: |
+| `Obj::set_slot`, young object, pointer | 42 | 62 | +20 |
+| `Obj::set_slot`, old object, integer | 45 | 69 | +24 |
+| `Obj::set_slot`, old object, pointer, already remembered | 42 | 62 | +20 |
+| first pointer store into an old object (the object is remembered) | 38 | 91 | +53 |
+| `set_element`, young array, pointer | 59 | 62 | +3 |
+| `set_element`, old array of 4,096, pointer (every store records its card) | 59 | 104 | +45 |
+
+- The check in the code is 3 instructions (flag test and branch). The `set_slot` rows grow by 20 because the function is not inlined into the loop, and the header and the value must stay in registers across `geometry`. In `gen_load` the function is inlined: the difference of 4,000,000 objects with 4 stores each (no collection) is 20.2 M instructions, 1.26 for each store. A record store is +2 to +3 when the array is young.
+- Hypothesis: an inline cache hit in S2 pays the 3 to 5 instructions of the inline case and not the 20. Not measured.
+- The record row is the weak point: a long record has no `F_REM`, so each store into an old record calls `remember`. A precomputed shift in the block header would cut it. Not built.
+
+### (b) Collections and totals
+
+Workload (`gen_load`, 200 rounds of 20,000 objects of 4 slots, 48 bytes each, 4 stores each, 200 stores of a young pointer into a kept object for each round): a share SURV of the new objects is kept in a ring array. A kept object dies when its ring slot is overwritten, LIFE rounds later. STATIC objects (a binary tree) are old data from the start.
+- Survival rate used: 22% (the typing page, 96,567 of 438,033 young objects in the first collect) and 34% (the staging journey, 32.2% to 34.0%), both from the P0.2 entry (2026-11-18). Two more rows: 5% (the textbook case) and 34% with LIFE 40 (survivors live long).
+- P0.2 measured only the first collect, not how long the survivors live. LIFE 3 means a survivor of a 2 MiB nursery dies a round or two after it is promoted. This is an assumption, not a measurement.
+- Old data: the typing page has 12.6 MiB of live heap after load in the old engine (`progress.md`, entry on the shape work: "Alloc live after load: 17.0 MiB to 12.6 MiB"). The S1.9 layout is about 3.3 times smaller, so about 3.8 MiB. STATIC = 100,000 objects (4.8 MB) is the nearest row. STATIC = 0 and 400,000 (19 MB) bound it.
+- Base policy: a full collection between rounds when `Heap::due()` (8 MiB, 1.75 times the live bytes). Experiment policy `gen`: a minor collection each 2 MiB of growth (nursery), a full one when the old bytes plus a nursery pass the limit of `due()`. The mutator code is the same.
+
+Total instructions (millions), base `full` against experiment `gen`; "collection" is the total minus the same run with no collection (base) so the experiment's number includes the barrier and the sticky overhead:
+
+| SURV, LIFE | STATIC | Base `full` | Experiment `gen` | Change | Collection, base to experiment | Minors / fulls | Peak mapped MiB, base / experiment |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 22%, 3 | 0 | 1,150.1 | 1,379.4 | +19.9% | 72.2 to 301.5 | 61 / 6 | 8.9 / 10.1 |
+| 22%, 3 | 100,000 | 1,886.8 | 1,683.9 | -10.7% | 768.5 to 565.7 | 54 / 13 | 10.8 / 10.8 |
+| 22%, 3 | 400,000 | 2,060.1 | 2,008.3 | -2.5% | 820.9 to 769.1 | 64 / 3 | 34.8 / 35.2 |
+| 34%, 3 | 0 | 1,211.2 | 1,524.0 | +25.8% | 103.5 to 416.3 | 58 / 9 | 9.3 / 9.9 |
+| 34%, 3 | 100,000 | 1,965.3 | 1,907.8 | -2.9% | 817.3 to 759.8 | 50 / 17 | 11.1 / 11.6 |
+| 34%, 3 | 400,000 | 2,104.6 | 2,217.7 | +5.4% | 835.7 to 948.8 | 63 / 4 | 35.1 / 35.9 |
+| 34%, 40 | 0 | 1,903.4 | 1,946.8 | +2.3% | 794.9 to 838.3 | 62 / 7 | 27.0 / 27.4 |
+| 34%, 40 | 100,000 | 2,054.8 | 2,143.9 | +4.3% | 906.1 to 995.1 | 63 / 7 | 34.4 / 35.9 |
+| 34%, 40 | 400,000 | 2,155.0 | 2,417.7 | +12.2% | 885.3 to 1,148.0 | 66 / 3 | 59.3 / 60.2 |
+| 5%, 3 | 0 | 1,061.3 | 1,174.7 | +10.7% | 25.5 to 138.9 | 66 / 1 | 9.2 / 9.7 |
+| 5%, 3 | 100,000 | 1,947.6 | 1,345.9 | -30.9% | 871.5 to 269.8 | 62 / 5 | 9.2 / 9.6 |
+| 5%, 3 | 400,000 | 1,996.6 | 1,608.8 | -19.4% | 799.6 to 411.8 | 67 / 0 | 34.1 / 31.4 |
+
+Nursery size, STATIC = 100,000 (total against base `full`): 1 MiB: -9.9%, -3.1%, +8.0%, -32.0%; 2 MiB: -10.8%, -2.9%, +4.3%, -30.9%; 4 MiB: -9.1%, -7.2%, -2.0%, -1.6% (rows in the order 22%/3, 34%/3, 34%/40, 5%/3; at 4 MiB the 5% row runs 40 full collections and no minor, so it is the base policy plus the barrier).
+
+Cost of one collection at the same cadence (a collection each 2 MiB of growth; `minor` policy never runs a full collection):
+
+| Row | Full collection | Minor collection |
+| --- | ---: | ---: |
+| 22%, 3, STATIC 100,000 | 22.9 M (113,138 cells marked) | 8.1 M (13,023 marked, 396 remembered) |
+| 34%, 3, STATIC 100,000 | 24.6 M (120,302) | 11.8 M (20,141) |
+| 34%, 40, STATIC 100,000 | 69.4 M (338,684) | 11.7 M (19,307) |
+| 5%, 3, STATIC 100,000 | 20.3 M (102,991) | 3.0 M (2,968) |
+| 22%, 3, STATIC 0 | 3.8 M (13,138) | 7.3 M (13,023) |
+| 5%, 3, STATIC 0 | 1.3 M (2,991) | 2.1 M (2,968) |
+
+- With old data of 4.8 MB a minor is 2 to 7 times cheaper than a full collection. With no old data a minor is 1.7 to 1.9 times dearer: it marks the same cells and pays for more bookkeeping. Hypothesis, from the sample counts of one `perf record`: the `minor` policy never frees old garbage (9 to 74 MiB at the end), and the lazy sweep then walks old blocks that have no free cell each time the allocator needs cells. Not isolated.
+- A full collection costs more than in the base tree. `perf record` of `full`, 22%, 3, STATIC 100,000 (1 run): the mark functions 812 M samples against 723 M (+12%). The header write of `F_OLD` made `Marker::cell` too big to inline (+20% before `#[inline(always)]`). The rest of the excess in the `full` rows is the barrier on the old ring record (`remember`: 65 M).
+- Whole-record remembering first gave +31% on 34%, 40 (a dirty record of 272,000 elements was scanned in each minor: `drain` 879 M). Cards cut it to +4%. The table has the card build only; the whole-record numbers are from one earlier run of the same matrix.
+- Peak bytes: with STATIC 100,000 or more the experiment peaks 0 to 4.5% above the base, and in one row 8% below (5%, 400,000). With STATIC 0 it peaks 1.5% to 13% above. The end state holds floating garbage: at the end of 22%, 3, STATIC 100,000 the old bytes are 7.2 MiB against 5.4 MiB live. The dirty map takes 512 bytes of each 64 KiB block (0.8% fewer cells).
+
+### Decision
+
+Not kept. The rule was: keep it only if the barrier on all stores plus the collections cost less on workloads shaped like P0.2. The total is lower in 5 of 12 rows (all at 22% to 5% survival with old data of 4.8 MB or more, up to -30.9%) and higher in 7 (up to +25.8%). At the survival of the P0.2 rows (22% and 34%) the gain is 2.5% to 10.7% where it exists, on a toy mutator where collection is half of all instructions. A real mutator makes the share of the gain smaller. With no old data the 22% and 34% rows lose 20% and 26%. Costs that are not in the totals: a barrier on every store of S2 and of any later tier, a flag write per marked cell, a dirty map in each block, and the rule that every pointer store site needs the barrier. There are more sites than slot and element stores: the move in `remove`, `set_shape`, the rope flatten and the overflow pointer all needed one.
+
+What would change the answer: a measured lifetime of survivors (how many of the 22% to 34% die in the next collect), and the old-data size of the real journeys on the new engine. Both need S2 or S3 to run script. Until then the base design (non-generational, lazy sweep) stays.
+
+Findings, not changed in main: (1) A block with no free cell is swept again in each cycle; a minor collection could keep such blocks aside. Not built. (2) `remember` for a long record can be about 3 instructions with the shift kept in the block header. Not built. (3) The division in `Heap::mark` (S1.5 finding) is on every mark, minor or full. Not built.
+
+Not tested: Windows (the experiment is not in main, so no VM run); a real interpreter or a JIT (the barrier in an inline cache, 3 to 5 instructions, is not measured); lifetimes of real survivors; the old-data size of the real journeys; arm64; wall time and cycles; weak tables in a minor collection beyond the stub (a table is traced when remembered; no test writes one after it is old); `Obj::add` under a shape cap with a remembered object; the cost matrix (js2 is not wired into the browser).
