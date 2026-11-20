@@ -1,5 +1,5 @@
-// End-to-end tests (S2.6): real JavaScript goes through the lexer, the parser, the compiler and the interpreter, and the test reads a
-// global that the script set. There are no built-ins yet, so the scripts use plain syntax (no `Math`, `push` or `Error`).
+// End-to-end tests (S2.6, S2.7): real JavaScript goes through the lexer, the parser, the compiler and the interpreter, and the test reads
+// a global that the script set. The built-ins of S2.7 (`builtins.rs` and the `bi_*` files, `prelude.js`) have their tests at the end.
 use super::*;
 use crate::heap::Trigger;
 
@@ -107,7 +107,7 @@ fn functions_closures_and_scope() {
         ("function f() { const k = 1; try { k = 2; } catch (e) { return e.name; } } var r = f();", "r", "TypeError"),
         ("var f = function fact(n) { return n <= 1 ? 1 : n * fact(n - 1); }; var r = f(6);", "r", "720"),
         ("function f(a, b = a + 1, c = b * 2) { return [a, b, c]; } var r = [f(1), f(1, 5)];", "r", "[[1,2,4],[1,5,10]]"),
-        ("function f() { return this; } var r = typeof f.call;", "r", "undefined"),
+        ("function f() { return this; } var r = typeof f.call;", "r", "function"),
         ("var r = (function () { return typeof arguments; })();", "r", "object"),
         ("function f(a, b) { return arguments.length + a + arguments[1]; } var r = f(1, 2, 3);", "r", "6"),
         ("function f(a, ...r) { return r; } var r = f(1, 2, 3, 4);", "r", "[2,3,4]"),
@@ -306,6 +306,220 @@ fn many_objects_survive_collections_through_getters_classes_and_spread() {
     let want = (0..n).map(|_| 435 + 3 + 1).sum::<i32>().to_string();
     assert_eq!(ev(&src, "total"), want);
     assert_eq!(ev_gc(&src, "total"), want);
+}
+
+// ---- S2.7: the core built-ins. Each group runs normally and under constant collection (`check`). Under Miri a group runs only its first
+// cases: each run compiles the prelude too, and Miri is slow. ----
+
+fn check_builtins(cases: &[(&str, &str, &str)]) {
+    check(if MIRI { &cases[..cases.len().min(3)] } else { cases });
+}
+
+#[test]
+fn object_and_object_prototype() {
+    check_builtins(&[
+        ("var o = {a: 1, b: 2}; var r = Object.keys(o).join();", "r", "a,b"),
+        ("var r = Object.values({a: 1, b: 'x'}).join('|');", "r", "1|x"),
+        ("var r = Object.entries({a: 1, b: 2}).map(function (e) { return e[0] + e[1]; }).join();", "r", "a1,b2"),
+        ("var t = Object.assign({a: 1}, {b: 2}, {a: 3}); var r = t.a + ',' + t.b;", "r", "3,2"),
+        ("var p = {hi: 5}; var o = Object.create(p); o.own = 1; var r = o.hi + ',' + Object.keys(o).join() + ',' + (Object.getPrototypeOf(o) === p);", "r", "5,own,true"),
+        ("var o = Object.create(null); o.k = 1; var r = Object.getPrototypeOf(o) + ',' + o.k + ',' + typeof o.toString;", "r", "null,1,undefined"),
+        ("var o = {}; Object.defineProperty(o, 'x', {value: 7}); o.x = 9; var r = o.x + ',' + Object.keys(o).length;", "r", "7,0"),
+        ("var o = {}; Object.defineProperty(o, 'g', {get: function () { return 42; }, enumerable: true}); var r = o.g + ',' + Object.keys(o).join();", "r", "42,g"),
+        ("var o = {}; Object.defineProperties(o, {a: {value: 1, enumerable: true}, b: {value: 2}}); var r = Object.keys(o).join() + Object.getOwnPropertyNames(o).join();", "r", "aa,b"),
+        ("var o = {a: 1}; var d = Object.getOwnPropertyDescriptor(o, 'a'); var r = d.value + ',' + d.writable + ',' + d.enumerable + ',' + d.configurable;", "r", "1,true,true,true"),
+        ("var o = Object.freeze({a: 1}); o.a = 2; var r = o.a + ',' + Object.isFrozen(o) + ',' + Object.isFrozen({a: 1});", "r", "1,true,false"),
+        ("var o = {}; Object.setPrototypeOf(o, {z: 3}); var r = o.z;", "r", "3"),
+        ("var o = {a: 1}; var r = o.hasOwnProperty('a') + ',' + o.hasOwnProperty('toString') + ',' + ('toString' in o) + ',' + [1].hasOwnProperty(0) + ',' + [1].hasOwnProperty('length');", "r", "true,false,true,true,true"),
+        ("var t = Object.prototype.toString; var r = [t.call([]), t.call(null), t.call(undefined), t.call({}), t.call(function () {}), t.call(1), t.call('s'), t.call(true), t.call(new Error())].join();", "r", "[object Array],[object Null],[object Undefined],[object Object],[object Function],[object Number],[object String],[object Boolean],[object Error]"),
+        ("var o = {}; var r = (o.valueOf() === o) + ',' + Object.prototype.isPrototypeOf.call(Object.prototype, o) + ',' + o.propertyIsEnumerable('x');", "r", "true,true,false"),
+        ("var o = new Object(); o.q = 1; var r = typeof o + o.q + (Object(5) === 5) + (Object(o) === o);", "r", "object1truetrue"),
+        ("var r = typeof Object + typeof Object.keys + (Object.prototype.constructor === Object) + (({}).constructor === Object);", "r", "functionfunctiontruetrue"),
+        ("var a = [3, 4]; var r = Object.keys(a).join() + Object.entries('ab').join('/');", "r", "0,10,a/1,b"),
+    ]);
+}
+
+#[test]
+fn function_prototype_and_plain_function_prototypes() {
+    check_builtins(&[
+        ("function f(a, b) { return this.k + a + b; } var r = f.call({k: 1}, 2, 3);", "r", "6"),
+        ("function f(a, b) { return this.k + a + b; } var r = f.apply({k: 1}, [2, 3]);", "r", "6"),
+        ("function f(a, b) { return this.k * 10 + a + b; } var g = f.bind({k: 2}, 5); var r = g(1);", "r", "26"),
+        ("function f() { return g.apply(null, arguments); } function g(a, b) { return a + b; } var r = f(2, 3);", "r", "5"),
+        ("var r = Math.max.apply(null, [3, 9, 4]) + Math.min.call(null, 5, 2);", "r", "11"),
+        ("var arr = []; var p = arr.push.bind(arr); p(1); p(2, 3); var r = arr.length + ',' + arr.join('');", "r", "3,123"),
+        ("var r = Object.prototype.hasOwnProperty.call({a: 1}, 'a') + ',' + Array.prototype.slice.call([1, 2, 3], 1).join('');", "r", "true,23"),
+        ("function f(a, b, c) { return a + b + c; } var g = f.bind(null, 1).bind(null, 2); var r = g(3);", "r", "6"),
+        ("function f() { return typeof f.toString() + typeof f.call + typeof f.apply + typeof f.bind; } var r = f();", "r", "stringfunctionfunctionfunction"),
+        ("try { Object.prototype.hasOwnProperty.call.call(1); } catch (e) { var r = e.name; }", "r", "TypeError"),
+        ("function F() { this.x = 1; } F.prototype.get = function () { return this.x; }; var r = new F().get();", "r", "1"),
+        ("function F() {} var r = (new F() instanceof F) + ',' + (F.prototype.constructor === F) + ',' + (Object.getPrototypeOf(new F()) === F.prototype);", "r", "true,true,true"),
+        ("function F() {} F.prototype = {m: function () { return 'm'; }}; var r = new F().m();", "r", "m"),
+        ("function A(v) { this.v = v; } function B(v) { A.call(this, v); } B.prototype = Object.create(A.prototype); var r = new B(4).v + ',' + (new B(1) instanceof A);", "r", "4,true"),
+        ("function F() { this.a = 1; } F.prototype.hi = function () { return 'hi'; }; class G extends F { } var g = new G(); var r = g.a + g.hi();", "r", "1hi"),
+        ("var m = {a() { return 1; }}; var r = typeof m.a.prototype + typeof (function () {}).prototype;", "r", "objectobject"),
+        ("var f = function () {}; f.x = 1; var r = f() === undefined && f.x === 1 && typeof f.prototype === 'object';", "r", "true"),
+        ("var bound = function (a) { return this.v + a; }.bind({v: 1}); var o = {m: bound}; var r = o.m(2) + ',' + [5, 6].map(bound).join();", "r", "3,6,7"),
+        ("var r = typeof Function + (function () {} instanceof Function) + (Function.prototype === Object.getPrototypeOf(function () {}));", "r", "functiontruetrue"),
+    ]);
+}
+
+#[test]
+fn errors_and_their_subclasses() {
+    check_builtins(&[
+        ("var e = new Error('boom'); var r = e.message + ',' + e.name + ',' + (e instanceof Error) + ',' + String(e);", "r", "boom,Error,true,Error: boom"),
+        ("var e = new TypeError('t'); var r = (e instanceof TypeError) + ',' + (e instanceof Error) + ',' + e.name + ',' + e.toString();", "r", "true,true,TypeError,TypeError: t"),
+        ("try { null.x; } catch (e) { var r = (e instanceof TypeError) + ',' + e.name + ',' + (e instanceof RangeError); }", "r", "true,TypeError,false"),
+        ("try { undefinedVar; } catch (e) { var r = (e instanceof ReferenceError) + ',' + (e instanceof Error) + ',' + e.message; }", "r", "true,true,undefinedVar is not defined"),
+        ("try { new Array(-1); } catch (e) { var r = e.name + ',' + (e instanceof RangeError); }", "r", "RangeError,true"),
+        ("var r = new SyntaxError('s').name + new RangeError('x').name + new ReferenceError('y').name;", "r", "SyntaxErrorRangeErrorReferenceError"),
+        ("var e = Error('no new'); var r = e.message + (e instanceof Error);", "r", "no newtrue"),
+        ("var e = new Error(); var r = e.message === '' && !e.hasOwnProperty('message') && Object.keys(new Error('x')).length === 0;", "r", "true"),
+        ("class E1 extends Error { constructor(m) { super(m); this.code = 5; } } try { throw new E1('x'); } catch (e) { var r = e.message + e.code + (e instanceof E1) + (e instanceof Error) + e.name; }", "r", "x5truetrueError"),
+        ("class E2 extends TypeError {} var e = new E2('q'); var r = (e instanceof E2) + ',' + (e instanceof TypeError) + ',' + e.message + ',' + e.name;", "r", "true,true,q,TypeError"),
+        ("class E3 extends Error { f = 7; constructor(m) { super(m); } } var r = new E3('m').f;", "r", "7"),
+        ("var r = Error.prototype.toString.call({name: 'N', message: 'M'}) + '|' + Error.prototype.toString.call({}) + '|' + Error.prototype.toString.call({name: '', message: 'only'});", "r", "N: M|Error|only"),
+        ("var e = new Error('a'); e.message = 'b'; e.extra = 1; var r = e.message + Object.keys(e).join();", "r", "bextra"),
+        ("var c = 0; for (var i = 0; i < 30; i++) { try { throw new Error('e' + i); } catch (e) { c += e.message.length; } } var r = c;", "r", "80"),
+        ("try { throw new Error('x'); } catch (e) { var r = typeof e.stack + (Object.getPrototypeOf(e) === Error.prototype); }", "r", "undefinedtrue"),
+    ]);
+}
+
+#[test]
+fn to_primitive() {
+    check_builtins(&[
+        ("var r = '' + [1];", "r", "1"),
+        ("var r = '' + [1, [2, 3]] + '|' + ({});", "r", "1,2,3|[object Object]"),
+        ("var r = [] + [] + 'x';", "r", "x"),
+        ("var r = [5] * 2 + [3] - 1;", "r", "102"),
+        ("var r = ([1, 2] == '1,2') + ',' + ({} == '[object Object]') + ',' + ([2] > 1) + ',' + ([2] == 2) + ',' + (null == []);", "r", "true,true,true,true,false"),
+        ("var r = String([1, [2]]) + String({}) + String(null) + String(undefined);", "r", "1,2[object Object]nullundefined"),
+        ("var r = `${[1, 2]}-${{}}`;", "r", "1,2-[object Object]"),
+        ("var o = {}; o[[1]] = 'x'; var r = o['1'];", "r", "x"),
+        ("var r = +[] + ',' + +[7] + ',' + +[1, 2] + ',' + (-[3]);", "r", "0,7,NaN,-3"),
+        ("var r = (function () {}) + '';", "r", "function () { [native code] }"),
+        ("var a = []; a.push(a); try { '' + a; } catch (e) { var r = e.name; }", "r", "RangeError"),
+        ("var o = {valueOf: function () { return 3; }}; try { var r = o + 1; } catch (e) { r = e.name; }", "r", "TypeError"),
+        ("var e = new Error('m'); var r = '' + e + (e + '' === String(e));", "r", "Error: mtrue"),
+    ]);
+}
+
+#[test]
+fn array_constructor_and_methods() {
+    check_builtins(&[
+        ("var a = []; var n = a.push(1, 2, 3); var r = n + ',' + a.length + ',' + a.pop() + ',' + a.length;", "r", "3,3,3,2"),
+        ("var a = [1, 2, 3]; var s = a.shift(); a.unshift(7, 8); var r = s + ',' + a.join() + ',' + a.length;", "r", "1,7,8,2,3,4"),
+        ("var r = [1, 2, 3, 4, 5].slice(1, 3).join() + '|' + [1, 2, 3].slice(-2).join() + '|' + [1, 2, 3].slice().join() + '|' + [1, 2, 3].slice(5).length;", "r", "2,3|2,3|1,2,3|0"),
+        ("var a = [1, 2, 3, 4, 5]; var d = a.splice(1, 2, 'x', 'y', 'z'); var r = d.join() + '|' + a.join();", "r", "2,3|1,x,y,z,4,5"),
+        ("var a = [1, 2, 3]; a.splice(1, 0, 9); var b = [1, 2, 3, 4]; b.splice(-1); var c = [1, 2, 3]; c.splice(1); var r = a.join() + '|' + b.join() + '|' + c.join();", "r", "1,9,2,3|1,2,3|1"),
+        ("var r = [1, 2].concat([3, 4], 5, [[6]]).length + ',' + [1].concat([2], [3]).join('-');", "r", "6,1-2-3"),
+        ("var r = [1, null, undefined, 'a', [2, 3]].join('-') + '|' + [].join() + '|' + [1, 2, 3].join('') + '|' + ['x'].join(', ');", "r", "1---a-2,3||123|x"),
+        ("var a = [1, 2, 3, 2, NaN]; var r = a.indexOf(2) + ',' + a.indexOf(2, 2) + ',' + a.lastIndexOf(2) + ',' + a.indexOf(9) + ',' + a.indexOf(NaN) + ',' + a.includes(NaN) + ',' + a.includes(3) + ',' + a.includes(7) + ',' + ['a'].indexOf('a');", "r", "1,3,3,-1,-1,true,true,false,0"),
+        ("var a = [1, 2, 3]; a.reverse(); var r = a.join() + ',' + Array.isArray(a) + ',' + Array.isArray({}) + ',' + Array.isArray('s');", "r", "3,2,1,true,false,false"),
+        ("var r = new Array(3).length + ',' + new Array(1, 2).join() + ',' + Array(2, 3).length + ',' + new Array('3').length + ',' + Array().length;", "r", "3,1,2,2,1,0"),
+        ("var r = [1, 2, 3].forEach(function () {}) + '|' + [1, 2, 3].map(function (x) { return x * 2; }).join() + '|' + [1, 2, 3, 4].filter(function (x) { return x % 2; }).join();", "r", "undefined|2,4,6|1,3"),
+        ("var t = 0; [1, 2, 3].forEach(function (v, i, a) { t += v * 10 + i + a.length; }); var r = t;", "r", "72"),
+        ("var r = [1, 2, 3].reduce(function (a, b) { return a + b; }) + ',' + [1, 2, 3].reduce(function (a, b) { return a + b; }, 10) + ',' + [[1], [2]].reduceRight(function (a, b) { return a.concat(b); }).join();", "r", "6,16,2,1"),
+        ("try { [].reduce(function () {}); } catch (e) { var r = e.name; }", "r", "TypeError"),
+        ("var r = [1, 2, 3].some(function (x) { return x > 2; }) + ',' + [1, 2, 3].every(function (x) { return x > 2; }) + ',' + [].every(function () { return false; }) + ',' + [].some(function () { return true; });", "r", "true,false,true,false"),
+        ("var r = [5, 6, 7].find(function (x) { return x > 5; }) + ',' + [5, 6, 7].findIndex(function (x) { return x > 5; }) + ',' + [5].find(function (x) { return x > 9; }) + ',' + [5].findIndex(function (x) { return x > 9; });", "r", "6,1,undefined,-1"),
+        ("var r = [3, 1, 2].sort().join() + '|' + [10, 9, 1, 100].sort().join() + '|' + [10, 9, 1, 100].sort(function (a, b) { return a - b; }).join() + '|' + ['b', undefined, 'a'].sort().join();", "r", "1,2,3|1,10,100,9|1,9,10,100|a,b,"),
+        ("var a = [5, 2, 8, 1, 9, 3, 7, 4, 6, 0]; a.sort(function (x, y) { return y - x; }); var r = a.join('');", "r", "9876543210"),
+        ("var p = [{k: 1, v: 'a'}, {k: 0, v: 'b'}, {k: 1, v: 'c'}, {k: 0, v: 'd'}]; p.sort(function (x, y) { return x.k - y.k; }); var r = p.map(function (e) { return e.v; }).join('');", "r", "bdac"),
+        ("var r = [1, 2, 3].map(function (x) { return this.m * x; }, {m: 3}).join() + Array.from('abc').join('-') + Array.from({length: 3}, function (v, i) { return i * i; }).join();", "r", "3,6,9a-b-c0,1,4"),
+        ("var o = {}; var a = [1, 2]; a.x = 5; var r = a.map(function (v) { return v + 1; }).length + ',' + a.length;", "r", "2,2"),
+        ("class Stack extends Array { top() { return this[this.length - 1]; } } var s = new Stack(); s.push(1); s.push(2); var r = s.top() + ',' + s.length + ',' + (s instanceof Array) + ',' + (s instanceof Stack) + ',' + Array.isArray(s);", "r", "2,2,true,true,true"),
+        ("var r = [1, [2, [3]]].toString() + '|' + [1, 2].toString() + '|' + typeof [].forEach + typeof [].sort;", "r", "1,2,3|1,2|functionfunction"),
+        ("try { [].forEach(1); } catch (e) { var r = e.name; }", "r", "TypeError"),
+        ("function f() { return Array.prototype.slice.call(arguments, 1).join(); } var r = f(1, 2, 3);", "r", "2,3"),
+        ("var a = [1, 2, 3]; var out = []; for (var k in a) out.push(k); var r = out.join();", "r", "0,1,2"),
+    ]);
+}
+
+#[test]
+fn string_prototype() {
+    check_builtins(&[
+        ("var s = 'hello'; var r = s.charAt(1) + s.charAt(9) + '|' + s.charCodeAt(0) + ',' + s.charCodeAt(9) + ',' + s.at(-1) + ',' + s.codePointAt(1);", "r", "e|104,NaN,o,101"),
+        ("var r = 'abcabc'.indexOf('c') + ',' + 'abcabc'.indexOf('c', 3) + ',' + 'abcabc'.lastIndexOf('b') + ',' + 'abc'.indexOf('z') + ',' + 'abc'.indexOf('') + ',' + 'abc'.includes('bc') + ',' + 'abc'.includes('bc', 2);", "r", "2,5,4,-1,0,true,false"),
+        ("var r = 'abc'.startsWith('ab') + ',' + 'abc'.startsWith('b', 1) + ',' + 'abc'.endsWith('bc') + ',' + 'abc'.endsWith('b', 2) + ',' + 'abc'.endsWith('x');", "r", "true,true,true,true,false"),
+        ("var s = 'abcdef'; var r = s.slice(1, 3) + '|' + s.slice(-2) + '|' + s.slice(2, -1) + '|' + s.slice(4, 1) + '|' + s.substring(4, 1) + '|' + s.substring(-3, 2) + '|' + s.substr(1, 2) + '|' + s.substr(-2);", "r", "bc|ef|cde||bcd|ab|bc|ef"),
+        ("var r = 'a,b,,c'.split(',').length + ',' + 'abc'.split('').join('-') + ',' + 'abc'.split().length + ',' + 'a-b-c'.split('-', 2).join('+') + ',' + ''.split(',').length + ',' + 'ab'.split('ab').length;", "r", "4,a-b-c,1,a+b,1,2"),
+        ("var r = 'Hello'.toUpperCase() + 'WORLD'.toLowerCase() + 'straße'.toUpperCase();", "r", "HELLOworldSTRASSE"),
+        ("var r = '[' + '  a b  '.trim() + '][' + '  a '.trimStart() + '][' + '  a '.trimEnd() + '][' + '   '.trim() + ']';", "r", "[a b][a ][  a][]"),
+        ("var r = 'ab'.concat('c', 1, null) + 'ab'.repeat(3) + '|' + 'ab'.repeat(0) + '|' + '5'.padStart(3, '0') + 'x'.padEnd(3, 'ab') + '|' + 'abc'.padStart(2);", "r", "abc1nullababab||005xab|abc"),
+        ("var r = 'a-b-c'.replace('-', '+') + ',' + 'a-b-c'.replaceAll('-', '+') + ',' + 'abc'.replace('z', 'y') + ',' + 'abc'.replace('b', '[$&]') + ',' + 'abc'.replace('b', '$$') + ',' + 'abc'.replace('b', \"$`|$'\");", "r", "a+b-c,a+b+c,abc,a[b]c,a$c,aa|cc"),
+        ("var r = 'abc'.replace('b', function (m, i, s) { return m.toUpperCase() + i + s.length; }) + ',' + 'aXbX'.replaceAll('X', function (m, i) { return i; });", "r", "aB13c,a1b3"),
+        ("var r = 'ab'.replaceAll('', '-') + ',' + 'abc'.replace('', '_');", "r", "-a-b-,_abc"),
+        ("var r = 'b'.localeCompare('a') + ',' + 'a'.localeCompare('a') + ',' + 'a'.localeCompare('b') + ',' + 'x'.toString() + 'y'.valueOf();", "r", "1,0,-1,xy"),
+        ("var r = String.fromCharCode(72, 105) + String(12) + String(true) + String() + 'x'.length + typeof String;", "r", "Hi12true1function"),
+        ("var s = ''; for (var i = 0; i < 40; i++) s += String.fromCharCode(97 + i % 26); var r = s.length + s.slice(26, 30) + s.toUpperCase().indexOf('Z');", "r", "40abcd25"),
+        ("var r = 'é'.length + 'é'.toUpperCase() + '日本'.charAt(1) + '日本'.charCodeAt(0) + '日本語'.slice(1) + '\\u{1F600}'.length;", "r", "1É本26085本語2"),
+        ("try { String.prototype.trim.call(null); } catch (e) { var r = e.name; }", "r", "TypeError"),
+        ("try { new String('a'); } catch (e) { var r = e.name; }", "r", "TypeError"),
+    ]);
+}
+
+#[test]
+fn number_boolean_math_and_global_functions() {
+    check_builtins(&[
+        ("var r = Number('12') + Number('') + Number(null) + Number(true) + Number([5]) + ',' + Number(undefined) + ',' + Number('x') + ',' + Number();", "r", "18,NaN,NaN,0"),
+        ("var r = (255).toString(16) + ',' + (255).toString(2) + ',' + (-255).toString(36) + ',' + (0.5).toString(2) + ',' + (10).toString() + ',' + (1.5).toString();", "r", "ff,11111111,-73,0.1,10,1.5"),
+        ("var r = (1.005).toFixed(2) + ',' + (2).toFixed(2) + ',' + (-0.0001).toFixed(2) + ',' + (123.456).toFixed(1) + ',' + (0).toFixed(0);", "r", "1.00,2.00,0.00,123.5,0"),
+        ("var r = Number.isInteger(5) + ',' + Number.isInteger(5.5) + ',' + Number.isInteger('5') + ',' + Number.isFinite(1 / 0) + ',' + Number.isNaN(NaN) + ',' + Number.isNaN('x') + ',' + Number.isSafeInteger(2 ** 53) + ',' + Number.MAX_SAFE_INTEGER;", "r", "true,false,false,false,true,false,false,9007199254740991"),
+        ("var r = parseInt('42px') + ',' + parseInt('0x1f') + ',' + parseInt('  -7') + ',' + parseInt('z', 36) + ',' + parseInt('101', 2) + ',' + parseInt('x') + ',' + parseInt('3.9') + ',' + parseInt('') + ',' + parseInt('12', 1);", "r", "42,31,-7,35,5,NaN,3,NaN,NaN"),
+        ("var r = parseFloat('3.14abc') + ',' + parseFloat('.5') + ',' + parseFloat('-1e3x') + ',' + parseFloat('abc') + ',' + parseFloat('1e') + ',' + parseFloat('Infinity') + ',' + Number.parseFloat('2.5') + ',' + Number.parseInt('8');", "r", "3.14,0.5,-1000,NaN,1,Infinity,2.5,8"),
+        ("var r = isNaN('x') + ',' + isNaN('5') + ',' + isFinite('5') + ',' + isFinite(Infinity) + ',' + isNaN(undefined);", "r", "true,false,true,false,true"),
+        ("var r = Boolean(0) + ',' + Boolean('a') + ',' + Boolean([]) + ',' + Boolean() + ',' + true.toString() + ',' + false.valueOf() + ',' + (5).valueOf();", "r", "false,true,true,false,true,false,5"),
+        ("var r = Math.floor(2.7) + ',' + Math.floor(-2.1) + ',' + Math.ceil(2.1) + ',' + Math.ceil(-2.7) + ',' + Math.round(2.5) + ',' + Math.round(-2.5) + ',' + Math.round(2.4) + ',' + Math.trunc(-2.9) + ',' + Math.round(-0.4);", "r", "2,-3,3,-2,3,-2,2,-2,0"),
+        ("var r = Math.abs(-3) + ',' + Math.sign(-5) + ',' + Math.sign(0) + ',' + Math.sqrt(16) + ',' + Math.cbrt(27) + ',' + Math.pow(2, 10) + ',' + Math.pow(2, -1) + ',' + Math.hypot(3, 4) + ',' + Math.imul(65536, 65536) + ',' + Math.imul(3, 4);", "r", "3,-1,0,4,3,1024,0.5,5,0,12"),
+        ("var r = Math.max(1, 5, 3) + ',' + Math.min(4, 2, 8) + ',' + Math.max() + ',' + Math.min() + ',' + Math.max(1, NaN) + ',' + Math.max('7', 2) + ',' + Math.max.apply(null, [1, 9, 4]);", "r", "5,2,-Infinity,Infinity,NaN,7,9"),
+        ("var r = Math.PI.toFixed(5) + ',' + Math.E.toFixed(3) + ',' + Math.log(1) + ',' + Math.exp(0) + ',' + Math.log2(8) + ',' + Math.log10(1000) + ',' + Math.sin(0) + ',' + Math.cos(0) + ',' + Math.atan2(0, 1) + ',' + Math.fround(5.5);", "r", "3.14159,2.718,0,1,3,3,0,1,0,5.5"),
+        ("var ok = true; for (var i = 0; i < 20; i++) { var x = Math.random(); if (!(x >= 0 && x < 1)) ok = false; } var r = ok + ',' + (Math.random() !== Math.random());", "r", "true,true"),
+        ("var r = typeof globalThis + (globalThis === self) + (globalThis.Math === Math) + (this === globalThis) + typeof self.Object;", "r", "objecttruetruetruefunction"),
+        ("var r = typeof __def + typeof Symbol + typeof undefined;", "r", "undefinedundefinedundefined"),
+        ("var g = 1; var r = globalThis.g + ',' + self.parseInt('9') + ',' + (Number.NaN !== Number.NaN) + ',' + Number.EPSILON.toFixed(0) + ',' + (Number.MIN_VALUE > 0);", "r", "1,9,true,0,true"),
+        ("try { new Number(1); } catch (e) { var r = e.name; }", "r", "TypeError"),
+        ("try { (5).toString(1); } catch (e) { var r = e.name; }", "r", "RangeError"),
+        ("try { Number.prototype.toString.call('x'); } catch (e) { var r = e.name; }", "r", "TypeError"),
+    ]);
+}
+
+#[test]
+fn eval_load_programs_give_the_result_of_the_old_engine() {
+    // The expected text is what the old engine gives (`eval_load CASE 1`, checked in the S2.7 step).
+    let cases = [
+        (include_str!("../examples/data/eval_closures.js"), "23222546"),
+        (include_str!("../examples/data/eval_objects.js"), "19442497,119979"),
+        (include_str!("../examples/data/eval_throws.js"), "69629"),
+        (include_str!("../examples/data/eval_webpack.js"), "3890,150,50"),
+    ];
+    for (src, want) in cases {
+        let src = eval_program(src);
+        assert_eq!(ev(&src, "__result"), want, "{src:.80}");
+        if !MIRI {
+            assert_eq!(ev_gc(&src, "__result"), want, "under collection: {src:.80}");
+        }
+    }
+}
+
+#[test]
+fn built_ins_survive_constant_collection_with_many_live_values() {
+    // Run in Miri too (one program): sort, map, filter, split, join, slice, splice, concat, bind and Object.entries, all holding many
+    // fresh cells while the collector runs at nearly every allocation.
+    check_gc(&[(
+        "var words = []; for (var i = 0; i < 24; i++) words.push('w' + ((i * 7) % 24));
+         var sorted = words.slice().sort();
+         var lens = sorted.map(function (w) { return w.length; }).filter(function (n) { return n == 3; }).length;
+         var parts = sorted.join('/').split('/');
+         var o = {}; parts.forEach(function (p, i) { o[p] = i; });
+         var e = Object.entries(o).map(function (kv) { return kv[0] + kv[1]; });
+         var sp = e.slice(); sp.splice(2, 3, 'x', 'y'); var all = e.concat(sp, [sorted]);
+         var add = function (a, b) { return a + this.k + b; }; var bound = add.bind({k: '-'}, 'L');
+         var tail = [bound('R'), String(sorted.slice(0, 2)), Object.keys(o).length, all.length, lens].join();
+         var r = parts[0] + ',' + parts[23] + ',' + e[5] + ',' + sp.length + ',' + tail;",
+        "r",
+        "w0,w9,w135,23,L-R,w0,w1,24,48,14",
+    )]);
 }
 
 // ---- switch with a jump table ----

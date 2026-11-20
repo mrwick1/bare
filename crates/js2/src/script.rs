@@ -50,21 +50,63 @@ impl Loader<'_> {
     }
 }
 
-/// Compile `source` as a script. The top level is `Program::codes[0]`.
-pub fn compile(source: &str, atoms: &SharedAtoms, limits: Limits) -> Result<Program, String> {
+/// Compile `source` as a script after the codes that `codes` has. The top level is the code at index `codes.len()` before the call.
+fn compile_after(codes: Vec<Code>, source: &str, atoms: &SharedAtoms, limits: Limits) -> Result<Vec<Code>, String> {
     let mut facts = Facts::new();
     let prog = parse_script_lazy(source, limits, &mut facts).map_err(|e| format!("SyntaxError: {}", e.msg))?;
     let script = compile_script(&prog, &facts, atoms).map_err(|e| format!("compile: {e:?}"))?;
-    let mut l = Loader { source, facts, atoms, limits, codes: Vec::new() };
+    let mut l = Loader { source, facts, atoms, limits, codes };
     l.add(script)?;
-    Ok(Program { codes: l.codes })
+    Ok(l.codes)
 }
 
-/// Compile `source` and make a [`Vm`] that can run it (`Vm::run_main(0)`).
+/// Compile `source` as a script. The top level is `Program::codes[0]`.
+pub fn compile(source: &str, atoms: &SharedAtoms, limits: Limits) -> Result<Program, String> {
+    Ok(Program { codes: compile_after(Vec::new(), source, atoms, limits)? })
+}
+
+/// An `eval_load` program (statements and then one expression) as a script: the value of the last expression goes to the global
+/// `__result`. The last statement boundary is the last `;` or `}` at brace depth 0; quotes are skipped.
+pub fn eval_program(src: &str) -> String {
+    let t = src.trim_end();
+    let (mut depth, mut quote, mut at) = (0i32, None, 0);
+    for (k, c) in t.char_indices() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '\'' | '"') => quote = Some(c),
+            (None, '{' | '(' | '[') => depth += 1,
+            (None, '}' | ')' | ']') => {
+                depth -= 1;
+                if c == '}' && depth == 0 {
+                    at = k + 1;
+                }
+            }
+            (None, ';') if depth == 0 => at = k + 1,
+            _ => {}
+        }
+    }
+    format!("{}\nvar __result = ({});", &t[..at], t[at..].trim())
+}
+
+/// The built-ins that call script functions (`builtins.rs`), written in JavaScript.
+pub const PRELUDE: &str = include_str!("prelude.js");
+
+/// Compile `source` and make a [`Vm`] that can run it (`Vm::run_main(0)`). The prelude is compiled after the script, and it has run
+/// when this returns, so `Array.prototype.forEach` and the others are there.
 pub fn load(source: &str) -> Result<Vm, String> {
     let shared = Arc::new(SharedAtoms::default());
-    let prog = compile(source, &shared, Limits::default())?;
-    Ok(Vm::new(prog, shared))
+    let mut prog = compile(source, &shared, Limits::default())?;
+    let pre = prog.codes.len();
+    prog.codes = compile_after(prog.codes, PRELUDE, &shared, Limits::default()).map_err(|e| format!("prelude: {e}"))?;
+    let mut vm = Vm::new(prog, shared);
+    if let Err(e) = vm.run_main(pre) {
+        panic!("the prelude failed: {e:?}");
+    }
+    let k = vm.realm.intern("__def");
+    let g = vm.realm.global.value();
+    let _ = vm.realm.delete_prop(g, crate::interp_rt::Key::Name(k));
+    Ok(vm)
 }
 
 /// Compile and run `source`. On `Ok` the [`Vm`] holds the globals that the script made. An uncaught exception is `Err` with its text.
@@ -127,7 +169,7 @@ impl Vm {
             return "...".into();
         }
         let id = o.shape(&r.shapes);
-        if o.proto(&r.shapes) == Some(r.error_proto.cell()) {
+        if r.is_error(v) {
             return r.error_text(v);
         }
         let mut parts: Vec<String> = Vec::new();

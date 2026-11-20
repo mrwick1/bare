@@ -31,14 +31,16 @@
 //! After a collection that freed a shape (`Shapes::epoch` changed) [`Realm::collect`] clears every record, because an id may name
 //! another shape now.
 //!
-//! **Not here (S2.7):** accessors, `ToPrimitive` (an object in an arithmetic op throws a `TypeError`), `Symbol`, `BigInt`, the full
-//! `Number` to string rules (a number prints with Rust's rules, so `1e21` differs), and any built-in.
+//! **Not here:** `Symbol`, `BigInt`, the full `Number` to string rules (a number prints with Rust's rules, so `1e21` differs), and the
+//! built-ins past the core (`Map`, `Set`, `JSON`, `Date`, `Promise`, `RegExp`). `ToPrimitive` calls only native `valueOf` and `toString`
+//! (`builtins.rs`).
 use crate::atoms::{Atoms, SharedAtoms};
 use crate::bytecode::Code;
 use crate::cell::Layout;
 use crate::gc::{Marker, collect};
 use crate::heap::Heap;
-use crate::object::{Ctx, F_CLASS, Obj};
+use crate::builtins::{Hint, Native};
+use crate::object::{Ctx, F_CLASS, F_NATIVE, Obj};
 use crate::shapes::{A_ACC, A_C, A_E, A_W, ShapeId, Shapes};
 use crate::string::{Chars, Str};
 use crate::value::{Kind, Value};
@@ -187,12 +189,14 @@ pub enum Key {
     Name(Str),
 }
 
-/// The kinds of error that the interpreter throws.
+/// The kinds of error that the interpreter throws. The value is the index in `Realm::error_protos`.
 #[derive(Clone, Copy, Debug)]
 pub enum ErrKind {
     Type,
     Reference,
     Range,
+    Syntax,
+    Plain,
 }
 
 /// The realm: heap, tables, global object and prototypes.
@@ -219,12 +223,36 @@ pub struct Realm {
     func_shape: u32,
     loc_code: u32,
     loc_ctx: u32,
-    pub s_error: ShapeId,
     pub k_prototype: Str,
     pub k_length: Str,
+    pub k_name: Str,
+    pub k_message: Str,
+    pub k_value_of: Str,
+    pub k_to_string: Str,
+    pub string_proto: Obj,
+    pub number_proto: Obj,
+    pub boolean_proto: Obj,
+    /// `TypeError.prototype` and the others, by `ErrKind`.
+    pub error_protos: [Obj; 5],
+    /// The shape of a built-in function cell: slot 0 is the index in `natives`, slots 1 to 3 are free for the function (a bound function).
+    pub s_native: ShapeId,
+    /// The built-ins written in Rust (`builtins.rs`).
+    pub natives: Vec<Native>,
+    /// The index of the native that runs a bound function.
+    pub(crate) bound_id: i32,
+    /// While a native runs: the function cell that was called, and `new.target` (`undefined` for a plain call).
+    pub callee: Value,
+    pub nt: Value,
+    /// A native that asks the interpreter to call a function (`call`, `apply`, a bound function): the function and `this`. The
+    /// arguments are in `tail_args`.
+    pub tail: Option<(Value, Value)>,
+    pub tail_args: Vec<Value>,
+    /// Nesting of conversions that call built-ins (`toString` of an array of arrays): a cycle ends with a `RangeError`.
+    pub(crate) depth: u32,
+    /// The state of `Math.random` (0: not seeded yet).
+    pub(crate) rng: u64,
     /// `typeof` results: undefined, object, boolean, number, string, function, symbol, bigint.
     tnames: [Str; 8],
-    ename: [Str; 3],
     /// Every value that the realm keeps and the collector must mark.
     consts: Vec<Value>,
     /// Shapes that no object may have yet.
@@ -238,7 +266,6 @@ pub struct Realm {
 }
 
 const TYPEOF: [&str; 8] = ["undefined", "object", "boolean", "number", "string", "function", "symbol", "bigint"];
-const ERRORS: [&str; 3] = ["TypeError", "ReferenceError", "RangeError"];
 
 impl Realm {
     pub fn new(shared: Arc<SharedAtoms>) -> Realm {
@@ -248,8 +275,9 @@ impl Realm {
         let mut atom = |s: &str| atoms.intern(&mut heap, Chars::One(s.as_bytes())).expect("memory");
         let (k_code, k_ctx, k_prototype, k_length, k_name, k_message) = (atom("\0code"), atom("\0ctx"), atom("prototype"), atom("length"), atom("name"), atom("message"));
         let (k_home, k_fields, k_link, k_constructor, k_raw) = (atom("\0home"), atom("\0fields"), atom("\0link"), atom("constructor"), atom("raw"));
+        let (k_value_of, k_to_string) = (atom("valueOf"), atom("toString"));
+        let hidden = ["\0native", "\0n1", "\0n2", "\0n3"].map(&mut atom);
         let tnames = TYPEOF.map(&mut atom);
-        let ename = ERRORS.map(&mut atom);
         let root = shapes.root(Layout::Object, None, 4);
         let object_proto = Obj::new(&mut heap, &shapes, root).expect("memory");
         let proto = Some(object_proto.cell());
@@ -266,15 +294,25 @@ impl Realm {
         let f = shapes.add(f, k_fields, 0).expect("shape");
         let s_func = shapes.add(f, k_link, 0).expect("shape");
         let s_args = shapes.root(Layout::Indexed, Some(object_proto.cell()), 0);
-        let s_error = shapes.literal(Layout::Object, Some(error_proto.cell()), &[k_name, k_message]).expect("shape");
-        let mut consts: Vec<Value> = [object_proto, function_proto, array_proto, error_proto, global].iter().map(|o| o.value()).collect();
-        consts.extend([k_code, k_ctx, k_prototype, k_length, k_name, k_message, k_home, k_fields, k_link, k_constructor, k_raw].iter().map(|s| s.value()));
-        consts.extend(tnames.iter().chain(ename.iter()).map(|s| s.value()));
-        let pins = vec![s_object, s_array, s_func, s_error, s_args];
+        let mk = |heap: &mut Heap| Obj::new(heap, &shapes, s_object).expect("memory");
+        let (string_proto, number_proto, boolean_proto) = (mk(&mut heap), mk(&mut heap), mk(&mut heap));
+        // The prototypes of `TypeError` and the others inherit from `Error.prototype`.
+        let eshape = shapes.root(Layout::Object, Some(error_proto.cell()), 4);
+        let mut error_protos = [error_proto; 5];
+        for p in error_protos.iter_mut().take(4) {
+            *p = Obj::new(&mut heap, &shapes, eshape).expect("memory");
+        }
+        let s_native = hidden.iter().fold(shapes.root(Layout::Object, Some(function_proto.cell()), 4), |f, k| shapes.add(f, *k, 0).expect("shape"));
+        let mut consts: Vec<Value> = [object_proto, function_proto, array_proto, error_proto, global, string_proto, number_proto, boolean_proto].iter().map(|o| o.value()).collect();
+        consts.extend(error_protos.iter().map(|o| o.value()));
+        consts.extend(hidden.iter().map(|s| s.value()));
+        consts.extend([k_code, k_ctx, k_prototype, k_length, k_name, k_message, k_home, k_fields, k_link, k_constructor, k_raw, k_value_of, k_to_string].iter().map(|s| s.value()));
+        consts.extend(tnames.iter().map(|s| s.value()));
+        let pins = vec![s_object, s_array, s_func, s_args, s_native];
         let epoch = shapes.epoch();
         let probe = Obj::new(&mut heap, &shapes, s_func).expect("memory");
         let (func_shape, loc_code, loc_ctx) = (s_func.raw(), probe.loc(&shapes, 0), probe.loc(&shapes, 1));
-        Realm {
+        let mut rt = Realm {
             heap,
             shapes,
             atoms,
@@ -293,18 +331,35 @@ impl Realm {
             func_shape,
             loc_code,
             loc_ctx,
-            s_error,
             k_prototype,
             k_length,
+            k_name,
+            k_message,
+            k_value_of,
+            k_to_string,
+            string_proto,
+            number_proto,
+            boolean_proto,
+            error_protos,
+            s_native,
+            natives: Vec::new(),
+            bound_id: 0,
+            callee: Value::UNDEFINED,
+            nt: Value::UNDEFINED,
+            tail: None,
+            tail_args: Vec::new(),
+            depth: 0,
+            rng: 0,
             tnames,
-            ename,
             consts,
             pins,
             cur: (0, 0, 0),
             epoch,
             collections: 0,
             last_gc: Default::default(),
-        }
+        };
+        rt.install_builtins();
+        rt
     }
 
     /// Does an op that allocates have to collect first? See the module comment.
@@ -359,22 +414,34 @@ impl Realm {
     // ---- errors ----
 
     pub fn error(&mut self, kind: ErrKind, msg: &str) -> Value {
-        let o = Obj::new(&mut self.heap, &self.shapes, self.s_error).expect("memory");
         let m = Str::from_str(&mut self.heap, msg).expect("memory");
-        o.set_slot(&self.shapes, 0, self.ename[kind as usize].value());
-        o.set_slot(&self.shapes, 1, m.value());
-        o.value()
+        self.make_error(self.error_protos[kind as usize], Some(m.value()))
     }
 
     pub fn type_error<T>(&mut self, msg: &str) -> R<T> {
         Err(self.error(ErrKind::Type, msg))
     }
 
-    /// The text of an error value made by [`Realm::error`], for tests: `Name: message`.
+    /// The text of an error value, for tests and for the host: `Name: message`.
     pub fn error_text(&self, v: Value) -> String {
         let Some(o) = Realm::obj(v) else { return format!("{v:?}") };
-        let s = |i| Realm::str_of(o.slot(&self.shapes, i)).map(|s| self.text(s)).unwrap_or_default();
-        format!("{}: {}", s(0), s(1))
+        let s = |k| match self.lookup_g(o, k) {
+            Some(Slot::Data(x)) => Realm::str_of(x).map(|s| self.text(s)).unwrap_or_default(),
+            _ => String::new(),
+        };
+        format!("{}: {}", s(self.k_name), s(self.k_message))
+    }
+
+    /// Is `v` an object that has `Error.prototype` in its chain?
+    pub fn is_error(&self, v: Value) -> bool {
+        let Some(mut o) = Realm::obj(v) else { return false };
+        while let Some(p) = self.proto_of(o) {
+            if p == self.error_proto {
+                return true;
+            }
+            o = p;
+        }
+        false
     }
 
     // ---- strings ----
@@ -438,7 +505,7 @@ impl Realm {
         }
     }
 
-    /// `ToNumber`. An object throws (no `ToPrimitive` yet).
+    /// `ToNumber`.
     pub fn to_number(&mut self, v: Value) -> R<f64> {
         if let Some(f) = v.as_f64() {
             return Ok(f);
@@ -469,7 +536,11 @@ impl Realm {
                 f64::NAN
             });
         }
-        self.type_error("cannot convert a value to a number (ToPrimitive is S2.7)")
+        if Realm::obj(v).is_some() {
+            let p = self.to_primitive(v, Hint::Number)?;
+            return self.to_number(p);
+        }
+        self.type_error("cannot convert a value to a number")
     }
 
     pub fn to_int32(f: f64) -> i32 {
@@ -495,7 +566,7 @@ impl Realm {
         }
     }
 
-    /// `ToString` for a primitive. An object throws.
+    /// `ToString`.
     pub fn to_str(&mut self, v: Value) -> R<Str> {
         if let Some(s) = Realm::str_of(v) {
             return Ok(s);
@@ -510,8 +581,11 @@ impl Realm {
             "null".into()
         } else if let Some(b) = v.as_bool() {
             b.to_string()
+        } else if Realm::obj(v).is_some() {
+            let p = self.to_primitive(v, Hint::String)?;
+            return self.to_str(p);
         } else {
-            return self.type_error("cannot convert a value to a string (ToPrimitive is S2.7)");
+            return self.type_error("cannot convert a value to a string");
         };
         Ok(Str::from_str(&mut self.heap, &t).expect("memory"))
     }
@@ -551,7 +625,13 @@ impl Realm {
     // ---- operators ----
 
     /// `a + b` when the fast path (two numbers) did not apply.
-    pub fn add_slow(&mut self, x: Value, y: Value) -> R<Value> {
+    pub fn add_slow(&mut self, mut x: Value, mut y: Value) -> R<Value> {
+        if Realm::obj(x).is_some() {
+            x = self.to_primitive(x, Hint::Default)?;
+        }
+        if Realm::obj(y).is_some() {
+            y = self.to_primitive(y, Hint::Default)?;
+        }
         if let (Some(a), Some(b)) = (Realm::str_of(x), Realm::str_of(y)) {
             return Ok(Str::concat(&mut self.heap, a, b).expect("memory").value());
         }
@@ -564,7 +644,13 @@ impl Realm {
     }
 
     /// The abstract relational comparison: `Some(ordering)` or `None` for a NaN.
-    pub fn compare(&mut self, x: Value, y: Value) -> R<Option<std::cmp::Ordering>> {
+    pub fn compare(&mut self, mut x: Value, mut y: Value) -> R<Option<std::cmp::Ordering>> {
+        if Realm::obj(x).is_some() {
+            x = self.to_primitive(x, Hint::Number)?;
+        }
+        if Realm::obj(y).is_some() {
+            y = self.to_primitive(y, Hint::Number)?;
+        }
         if let (Some(a), Some(b)) = (Realm::str_of(x), Realm::str_of(y)) {
             let (a, b) = (self.flat(a), self.flat(b));
             let (ca, cb) = (a.chars().expect("flat"), b.chars().expect("flat"));
@@ -587,15 +673,20 @@ impl Realm {
         }
     }
 
-    /// `==`. An object against a primitive is false (no `ToPrimitive` yet).
-    pub fn loose_eq(&mut self, x: Value, y: Value) -> R<bool> {
+    /// `==`.
+    pub fn loose_eq(&mut self, mut x: Value, mut y: Value) -> R<bool> {
         let nullish = |v: Value| v.is_undefined() || v.is_null();
         if nullish(x) || nullish(y) {
             return Ok(nullish(x) && nullish(y));
         }
         let (ox, oy) = (Realm::obj(x).is_some(), Realm::obj(y).is_some());
-        if ox || oy {
+        if ox && oy {
             return Ok(x == y);
+        }
+        if ox {
+            x = self.to_primitive(x, Hint::Default)?;
+        } else if oy {
+            y = self.to_primitive(y, Hint::Default)?;
         }
         if let (Some(_), Some(_)) = (Realm::str_of(x), Realm::str_of(y)) {
             return Ok(self.strict_eq(x, y));
@@ -631,6 +722,7 @@ impl Realm {
         match self.lookup_g(o, key) {
             Some(Slot::Data(v)) => Ok(Some(v)),
             Some(Slot::Acc(..)) => self.type_error("accessors are not supported here (the host needs a call)"),
+            None if key == self.k_prototype && self.needs_prototype(o) => self.make_prototype(o).map(Some),
             None => Ok(None),
         }
     }
@@ -669,23 +761,33 @@ impl Realm {
                     if k == self.k_length && self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed {
                         return Ok(Got::Val(Realm::num(o.len() as f64)));
                     }
-                    Ok(Self::got(self.lookup_g(o, k)))
+                    match self.lookup_g(o, k) {
+                        None if k == self.k_prototype && self.needs_prototype(o) => self.make_prototype(o).map(Got::Val),
+                        s => Ok(Self::got(s)),
+                    }
                 }
             };
         }
         if let Some(s) = Realm::str_of(recv) {
             let s = self.flat(s);
-            return Ok(Got::Val(match key {
-                Key::Name(k) if k == self.k_length => Realm::num(s.len() as f64),
-                Key::Idx(i) => match s.unit_at(i as usize) {
+            return Ok(match key {
+                Key::Name(k) if k == self.k_length => Got::Val(Realm::num(s.len() as f64)),
+                Key::Idx(i) => Got::Val(match s.unit_at(i as usize) {
                     Some(u) => {
                         let t = String::from_utf16_lossy(&[u]);
                         self.string(&t)
                     }
                     None => Value::UNDEFINED,
-                },
-                _ => Value::UNDEFINED,
-            }));
+                }),
+                Key::Name(k) => Self::got(self.lookup_g(self.string_proto, k)),
+            });
+        }
+        if recv.is_number() || recv.as_bool().is_some() {
+            let proto = if recv.is_number() { self.number_proto } else { self.boolean_proto };
+            return Ok(match key {
+                Key::Name(k) => Self::got(self.lookup_g(proto, k)),
+                Key::Idx(_) => Got::Val(Value::UNDEFINED),
+            });
         }
         if recv.is_undefined() || recv.is_null() {
             let name = match key {
@@ -1012,13 +1114,13 @@ impl Realm {
             let (code, ctx) = unsafe { (o.read_loc(self.loc_code), o.read_loc(self.loc_ctx)) };
             return Some((code.as_int()? as usize, ctx));
         }
-        let f = Realm::obj(v).filter(|o| o.is_callable() && !o.has_flag(F_CLASS))?;
+        let f = Realm::obj(v).filter(|o| o.is_callable() && !o.has_flag(F_CLASS | F_NATIVE))?;
         Some((f.slot(&self.shapes, 0).as_int()? as usize, f.slot(&self.shapes, 1)))
     }
 
     /// As [`Realm::function`], for a construct call: a class constructor is allowed.
     pub fn function_new(&self, v: Value) -> Option<(usize, Value)> {
-        let f = Realm::obj(v).filter(|o| o.is_callable())?;
+        let f = Realm::obj(v).filter(|o| o.is_callable() && !o.has_flag(F_NATIVE))?;
         Some((f.slot(&self.shapes, 0).as_int()? as usize, f.slot(&self.shapes, 1)))
     }
 
