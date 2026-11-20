@@ -41,6 +41,7 @@
 
 use crate::browser::*;
 use crate::browser_navigation_params as pr;
+use crate::browser_scoped::*;
 use crate::browser_navigation_state as st;
 use bare_js_api::Cloned;
 use crate::browser_navigation_storage as sto;
@@ -49,6 +50,7 @@ use crate::browser_navigation_url::{self as nu, Part, Rec, UErr};
 use bare_html::dom::NodeData;
 use bare_js::eval::{Error, Interp};
 use bare_js::value::{ObjId, Value};
+use bare_js_api::{Args, Engine as _, HostFn, Local};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::VecDeque;
 
@@ -211,10 +213,6 @@ pub(crate) struct Nav {
 }
 
 pub(crate) const NOURL: &str = "document URL is not configured (call Browser::set_document_url)";
-
-fn arg(a: &[Value], i: usize) -> Value {
-    a.get(i).copied().unwrap_or(Value::Undefined)
-}
 
 // ------------------------------------------------------------------------------------------ Host hooks
 
@@ -548,22 +546,18 @@ pub(crate) fn frame_location(d: &Dom, it: &mut Interp<'_>) -> R<ObjId> {
     d.obj(it, proto.expect("Location.prototype"))
 }
 
-fn loc_check(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<()> {
-    match (this, d.nav.p.get()) {
-        (Value::Object(o), Some(p)) if o == p.location => Ok(()),
-        (Value::Object(o), _) if crate::browser_frames::is_location(d, o) => Ok(()),
-        _ => Err(it.type_error("Illegal invocation")),
+/// Is `this` a `Location`? `true` for the `Location` of a frame window (it reads `about:blank` and does not navigate).
+fn loc_check<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, bool> {
+    match (obj_id(s, this), d.nav.p.get()) {
+        (Some(o), Some(p)) if o == p.location => Ok(false),
+        (Some(o), _) if crate::browser_frames::is_location(d, o) => Ok(true),
+        _ => Err(s.type_error("Illegal invocation")),
     }
 }
 
-/// Is `this` the `Location` of a frame window?
-fn loc_is_frame(d: &Dom, this: Value) -> bool {
-    matches!(this, Value::Object(o) if crate::browser_frames::is_location(d, o))
-}
-
-fn loc_get(d: &Dom, it: &mut Interp<'_>, this: Value, part: Part) -> R<Value> {
-    loc_check(d, it, this)?;
-    let s = if loc_is_frame(d, this) {
+fn loc_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, part: Part) -> Res<'s, Local<'s>> {
+    let frame = loc_check(d, s, this)?;
+    let text = if frame {
         // `about:blank`: the URL parser here takes http and https only, so the parts are fixed.
         match part {
             Part::Href => "about:blank",
@@ -573,213 +567,222 @@ fn loc_get(d: &Dom, it: &mut Interp<'_>, this: Value, part: Part) -> R<Value> {
         }
         .to_string()
     } else {
-        part.get(&d.cur_rec()?)
+        part.get(&lift(s, d.cur_rec())?)
     };
-    d.js_str(it, &s)
+    d.js_str_s(s, &text)
 }
 
-fn resolve(d: &Dom, it: &mut Interp<'_>, s: &str) -> R<Rec> {
-    let cur = d.cur_rec()?;
-    nu::parse(s, Some(&cur)).map_err(|e| pr::uerr(d, it, e, &format!("'{s}' is not a valid URL."), true))
-}
-
-fn loc_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], part: Part) -> R<Value> {
-    loc_check(d, it, this)?;
-    if loc_is_frame(d, this) {
-        return Err(it.type_error("Navigating the location of a frame window is not supported"));
+fn resolve<'s>(d: &Dom, s: &mut Sc<'s, '_>, text: &str) -> Res<'s, Rec> {
+    let cur = lift(s, d.cur_rec())?;
+    match nu::parse(text, Some(&cur)) {
+        Ok(r) => Ok(r),
+        Err(e) => Err(pr::uerr(d, s, e, &format!("'{text}' is not a valid URL."), true)),
     }
-    d.cur_rec()?;
-    let v = pr::usv(d, it, arg(a, 0))?;
+}
+
+fn loc_set<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, part: Part) -> Res<'s, Local<'s>> {
+    if loc_check(d, s, this)? {
+        return Err(s.type_error("Navigating the location of a frame window is not supported"));
+    }
+    lift(s, d.cur_rec())?;
+    let v = arg_s(s, a, 0);
+    let v = pr::usv(d, s, v)?;
     let new = if part == Part::Href {
-        resolve(d, it, &v)?
+        resolve(d, s, &v)?
     } else {
-        let mut c = d.cur_rec()?;
+        let mut c = lift(s, d.cur_rec())?;
         let before = c.clone();
         if part == Part::Hash {
             // unlike `URL.hash`, an empty value gives an empty fragment, not none
             c.set_fragment(&v);
-        } else {
-            part.set(&mut c, &v).map_err(|e| pr::uerr(d, it, e, "Invalid URL", true))?;
+        } else if let Err(e) = part.set(&mut c, &v) {
+            return Err(pr::uerr(d, s, e, "Invalid URL", true));
         }
         if part == Part::Hash && c.frag == before.frag {
-            return Ok(Value::Undefined);
+            return Ok(s.undefined());
         }
         c
     };
-    d.navigate(it, new, false)?;
-    Ok(Value::Undefined)
+    old(s, |it| d.navigate(it, new, false))?;
+    Ok(s.undefined())
 }
 
-fn loc_go(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], replace: bool) -> R<Value> {
-    loc_check(d, it, this)?;
-    if loc_is_frame(d, this) {
-        return Err(it.type_error("Navigating the location of a frame window is not supported"));
+fn loc_go<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, replace: bool) -> Res<'s, Local<'s>> {
+    if loc_check(d, s, this)? {
+        return Err(s.type_error("Navigating the location of a frame window is not supported"));
     }
-    d.cur_rec()?;
-    if a.is_empty() {
+    lift(s, d.cur_rec())?;
+    let Some(arg0) = a.get(0) else {
         let name = if replace { "replace" } else { "assign" };
-        return Err(it.type_error(&format!("Failed to execute '{name}' on 'Location': 1 argument required, but only 0 present.")));
+        return Err(s.type_error(&format!("Failed to execute '{name}' on 'Location': 1 argument required, but only 0 present.")));
+    };
+    let text = pr::usv(d, s, arg0)?;
+    let new = resolve(d, s, &text)?;
+    old(s, |it| d.navigate(it, new, replace))?;
+    Ok(s.undefined())
+}
+
+fn loc_reload<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    if loc_check(d, s, this)? {
+        return Err(s.type_error("Navigating the location of a frame window is not supported"));
     }
-    let s = pr::usv(d, it, arg(a, 0))?;
-    let new = resolve(d, it, &s)?;
-    d.navigate(it, new, replace)?;
-    Ok(Value::Undefined)
+    lift(s, d.reload_request())?;
+    Ok(s.undefined())
 }
 
-fn loc_reload(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    loc_check(d, it, this)?;
-    if loc_is_frame(d, this) {
-        return Err(it.type_error("Navigating the location of a frame window is not supported"));
-    }
-    d.reload_request()?;
-    Ok(Value::Undefined)
+fn win_set_location<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let loc = d.obj_local(s, d.nav.p.get().expect("installed").location);
+    loc_set(d, s, loc, a, Part::Href)
 }
 
-fn win_set_location(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    let loc = Value::Object(d.nav.p.get().expect("installed").location);
-    loc_set(d, it, loc, a, Part::Href)
+fn loc_obj<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    Ok(d.obj_local(s, d.nav.p.get().expect("installed").location))
 }
 
-fn loc_obj(d: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
-    Ok(Value::Object(d.nav.p.get().expect("installed").location))
-}
-
-fn doc_url(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
+fn doc_url<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     // A document made outside the tree (`createHTMLDocument`, a blank frame) is `about:blank`.
-    if d.nd(it, this).is_ok_and(|n| matches!(d.data(n), NodeData::Document) && n != d.doc.borrow().root()) {
-        return d.js_str(it, "about:blank");
+    if d.node_of_s(s, this).is_some_and(|n| matches!(d.data(n), NodeData::Document) && n != d.doc.borrow().root()) {
+        return d.js_str_s(s, "about:blank");
     }
-    let s = d.cur_rec()?.href();
-    d.js_str(it, &s)
+    let text = lift(s, d.cur_rec())?.href();
+    d.js_str_s(s, &text)
 }
 
 /// `document.domain` (HTML "effective domain"): the host of the origin, `""` for an opaque origin, an IPv6 address in brackets.
-fn doc_domain(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
-    let s = d.cur_rec()?.hostname();
-    d.js_str(it, &s)
+fn doc_domain<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let text = lift(s, d.cur_rec())?.hostname();
+    d.js_str_s(s, &text)
 }
 
 /// Relaxing the origin is gone from browsers (origin-keyed agent clusters). Like Chrome, the setter ignores any value.
-fn doc_set_domain(_: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
-    Ok(Value::Undefined)
+fn doc_set_domain<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    Ok(s.undefined())
 }
 
-fn win_origin(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
-    let s = d.cur_rec()?.origin();
-    d.js_str(it, &s)
+fn win_origin<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let text = lift(s, d.cur_rec())?.origin();
+    d.js_str_s(s, &text)
 }
 
 // ------------------------------------------------------------------------------------------ History
 
-fn hist_check(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<()> {
-    match (this, d.nav.p.get()) {
-        (Value::Object(o), Some(p)) if o == p.history => d.cur_rec().map(drop),
-        _ => Err(it.type_error("Illegal invocation")),
+fn hist_check<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, ()> {
+    match (obj_id(s, this), d.nav.p.get()) {
+        (Some(o), Some(p)) if o == p.history => lift(s, d.cur_rec().map(drop)),
+        _ => Err(s.type_error("Illegal invocation")),
     }
 }
 
-fn sec_err(d: &Dom, it: &mut Interp<'_>, name: &str, url: &str, cur: &Rec) -> Error {
-    d.dom_err(it, "SecurityError", &format!("Failed to execute '{name}' on 'History': A history state object with URL '{url}' cannot be created in a document with origin '{}'.", cur.origin()))
+fn sec_err<'s>(d: &Dom, s: &mut Sc<'s, '_>, name: &str, url: &str, cur: &Rec) -> bare_js_api::Error<'s> {
+    d.dom_err_s(s, "SecurityError", &format!("Failed to execute '{name}' on 'History': A history state object with URL '{url}' cannot be created in a document with origin '{}'.", cur.origin()))
 }
 
-fn push_replace(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], replace: bool) -> R<Value> {
+fn push_replace<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, replace: bool) -> Res<'s, Local<'s>> {
     let name = if replace { "replaceState" } else { "pushState" };
-    hist_check(d, it, this)?;
+    hist_check(d, s, this)?;
     if a.len() < 2 {
-        return Err(it.type_error(&format!("Failed to execute '{name}' on 'History': 2 arguments required, but only {} present.", a.len())));
+        return Err(s.type_error(&format!("Failed to execute '{name}' on 'History': 2 arguments required, but only {} present.", a.len())));
     }
-    it.to_js_string(a[1])?;
-    let url = match arg(a, 2) {
-        Value::Undefined | Value::Null => None,
-        v => Some(pr::usv(d, it, v)?),
+    s.to_string(a.get(1).expect("checked"))?;
+    let url = match a.get(2) {
+        Some(v) if !is_nullish(s, v) => Some(pr::usv(d, s, v)?),
+        _ => None,
     };
     let lim = d.nav.lim.get();
-    let state = st::serialize(d, it, a[0])?;
+    let state = {
+        let v = s.engine().raw(a.get(0).expect("checked"));
+        old(s, |it| st::serialize(d, it, v))?
+    };
     // The URL is read after the state getters ran: they may have navigated.
-    let cur = d.cur_rec()?;
+    let cur = lift(s, d.cur_rec())?;
     let new = match &url {
         None => cur.clone(),
-        Some(s) => match nu::parse(s, Some(&cur)) {
+        Some(text) => match nu::parse(text, Some(&cur)) {
             Ok(r) => r,
-            Err(UErr::Invalid | UErr::Scheme) => return Err(sec_err(d, it, name, s, &cur)),
-            Err(UErr::Gate(w)) => return Err(Error::Unsupported(unsupported(w))),
+            Err(UErr::Invalid | UErr::Scheme) => return Err(sec_err(d, s, name, text, &cur)),
+            Err(UErr::Gate(w)) => return Err(lift_err(s, Error::Unsupported(unsupported(w)))),
         },
     };
     if new.origin() != cur.origin() || new.userinfo.as_deref().filter(|i| !i.0.is_empty() || !i.1.is_empty()) != cur.userinfo.as_deref().filter(|i| !i.0.is_empty() || !i.1.is_empty()) {
-        return Err(sec_err(d, it, name, &new.href(), &cur));
+        return Err(sec_err(d, s, name, &new.href(), &cur));
     }
     {
         let n = d.nav.s.borrow();
         let old = if replace { n.entries[n.cur].bytes() } else { n.entries[n.cur + 1..].iter().map(Entry::bytes).sum() };
         if n.state_bytes - old + state.cost() > lim.max_total_state_bytes {
-            return Err(d.dom_err(it, "DataCloneError", "The states of this document are over their size cap."));
+            drop(n);
+            return Err(d.dom_err_s(s, "DataCloneError", "The states of this document are over their size cap."));
         }
     }
     d.commit(new, Some(state), replace);
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-fn go(d: &Dom, it: &mut Interp<'_>, delta: f64) -> R<Value> {
+fn go<'s>(d: &Dom, s: &mut Sc<'s, '_>, delta: f64) -> Res<'s, Local<'s>> {
     let delta = bare_js::value::to_int32(delta);
     if delta == 0 {
-        d.reload_request()?;
-        return Ok(Value::Undefined);
+        lift(s, d.reload_request())?;
+        return Ok(s.undefined());
     }
     if d.nav.s.borrow().tasks.len() >= d.nav.lim.get().max_tasks {
-        return Err(d.lim("nav-tasks"));
+        return Err(d.lim_s(s, "nav-tasks"));
     }
-    it.charge(1)?;
+    s.charge(1)?;
     d.nav.s.borrow_mut().tasks.push_back(Task::Traverse(delta));
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
-fn hist_go(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    hist_check(d, it, this)?;
-    let n = it.to_js_number(arg(a, 0))?;
-    go(d, it, n)
+fn hist_go<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    hist_check(d, s, this)?;
+    let v = arg_s(s, a, 0);
+    let n = s.to_number(v)?;
+    go(d, s, n)
 }
 
-fn hist_back(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    hist_check(d, it, this)?;
-    go(d, it, -1.0)
+fn hist_back<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    hist_check(d, s, this)?;
+    go(d, s, -1.0)
 }
 
-fn hist_forward(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    hist_check(d, it, this)?;
-    go(d, it, 1.0)
+fn hist_forward<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    hist_check(d, s, this)?;
+    go(d, s, 1.0)
 }
 
-fn hist_length(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    hist_check(d, it, this)?;
-    Ok(Value::Number(d.nav.s.borrow().entries.len() as f64))
+fn hist_length<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    hist_check(d, s, this)?;
+    let n = d.nav.s.borrow().entries.len();
+    Ok(s.number(n as f64))
 }
 
-fn hist_state(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    hist_check(d, it, this)?;
+fn hist_state<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    hist_check(d, s, this)?;
     let idx = d.nav.s.borrow().cur;
-    d.entry_state(it, idx)
+    old_v(s, |it| d.entry_state(it, idx))
 }
 
-fn hist_scroll(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    hist_check(d, it, this)?;
-    let s = if d.nav.s.borrow().manual_scroll { "manual" } else { "auto" };
-    d.js_str(it, s)
+fn hist_scroll<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    hist_check(d, s, this)?;
+    let text = if d.nav.s.borrow().manual_scroll { "manual" } else { "auto" };
+    d.js_str_s(s, text)
 }
 
-fn hist_set_scroll(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    hist_check(d, it, this)?;
-    let s = it.to_js_string(arg(a, 0))?;
-    let s = it.heap.to_string_lossy(s).map_err(Error::Heap)?;
-    match s.as_str() {
+fn hist_set_scroll<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    hist_check(d, s, this)?;
+    let v = arg_s(s, a, 0);
+    let t = if s.as_str(v).is_some() { v } else { s.to_string(v)? };
+    let text = s.as_str(t).map(|t| t.to_string_lossy()).unwrap_or_default();
+    match text.as_str() {
         "auto" => d.nav.s.borrow_mut().manual_scroll = false,
         "manual" => d.nav.s.borrow_mut().manual_scroll = true,
         _ => {}
     }
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
 // ------------------------------------------------------------------------------------------ install
 
+/// A function of the old form as a method (the two `URL` functions of `browser_web.rs` have not moved).
 fn def_fn(d: &Dom, it: &mut Interp<'_>, o: ObjId, name: &str, len: u32, h: H) -> R<ObjId> {
     let f = d.add_fn(it, h, name, len, false)?;
     let k = d.key(it, name)?;
@@ -787,19 +790,9 @@ fn def_fn(d: &Dom, it: &mut Interp<'_>, o: ObjId, name: &str, len: u32, h: H) ->
     Ok(f)
 }
 
-fn def_acc(d: &Dom, it: &mut Interp<'_>, o: ObjId, name: &str, get: H, set: Option<H>) -> R<()> {
-    let g = d.add_fn(it, get, &format!("get {name}"), 0, false)?;
-    let s = match set {
-        Some(h) => Some(d.add_fn(it, h, &format!("set {name}"), 1, false)?),
-        None => None,
-    };
-    let k = d.key(it, name)?;
-    d.define_accessor(it, o, k, g, s)
-}
-
 macro_rules! parts {
     ($d:expr, $it:expr, $o:expr, $get:ident, $set:ident, [$(($name:expr, $part:expr)),*]) => {
-        $( def_acc($d, $it, $o, $name, |d, it, t, _| $get(d, it, t, $part), Some(|d, it, t, a| $set(d, it, t, a, $part)))?; )*
+        $( $d.def_get_s($it, $o, $name, |d, s, t, _| $get(d, s, t, $part), Some(|d, s, t, a| $set(d, s, t, a, $part)))?; )*
     };
 }
 
@@ -820,18 +813,18 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         ("href", Part::Href), ("protocol", Part::Protocol), ("host", Part::Host), ("hostname", Part::Hostname),
         ("port", Part::Port), ("pathname", Part::Pathname), ("search", Part::Search), ("hash", Part::Hash), ("username", Part::Username), ("password", Part::Password)
     ]);
-    def_acc(d, it, url, "origin", pr::url_origin, None)?;
-    def_acc(d, it, url, "searchParams", pr::url_search_params, None)?;
-    def_fn(d, it, url, "toString", 0, pr::url_to_string)?;
-    def_fn(d, it, url, "toJSON", 0, pr::url_to_string)?;
+    d.def_get_s(it, url, "origin", pr::url_origin, None)?;
+    d.def_get_s(it, url, "searchParams", pr::url_search_params, None)?;
+    d.def_method_s(it, url, "toString", 0, pr::url_to_string)?;
+    d.def_method_s(it, url, "toJSON", 0, pr::url_to_string)?;
 
     // URLSearchParams
     for (name, len, h) in [
-        ("append", 2, pr::p_append as H), ("delete", 1, pr::p_delete), ("get", 1, pr::p_get), ("getAll", 1, pr::p_get_all),
+        ("append", 2, pr::p_append as HS), ("delete", 1, pr::p_delete), ("get", 1, pr::p_get), ("getAll", 1, pr::p_get_all),
         ("has", 1, pr::p_has), ("set", 2, pr::p_set), ("sort", 0, pr::p_sort), ("toString", 0, pr::p_to_string),
         ("forEach", 1, pr::p_for_each), ("keys", 0, pr::p_keys), ("values", 0, pr::p_values), ("entries", 0, pr::p_entries),
     ] {
-        let f = def_fn(d, it, params, name, len, h)?;
+        let f = d.def_method_s(it, params, name, len, h)?;
         // `[Symbol.iterator]` is the same function object as `entries`. The key is the realm's own symbol.
         if name == "entries" {
             it.define_data(params, it.symbol_iterator(), Value::Object(f), true, false, true)?;
@@ -841,74 +834,73 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     if let Err(e) = it.heap.set_prototype_of(iter, Some(it.iterator_prototype())) {
         return Err(it.heap_error(e));
     }
-    def_acc(d, it, params, "size", pr::p_size, None)?;
-    def_fn(d, it, iter, "next", 0, pr::iter_next)?;
+    d.def_get_s(it, params, "size", pr::p_size, None)?;
+    d.def_method_s(it, iter, "next", 0, pr::iter_next)?;
 
     // Location
     parts!(d, it, loc_proto, loc_get, loc_set, [
         ("href", Part::Href), ("protocol", Part::Protocol), ("host", Part::Host), ("hostname", Part::Hostname),
         ("port", Part::Port), ("pathname", Part::Pathname), ("search", Part::Search), ("hash", Part::Hash)
     ]);
-    def_acc(d, it, loc_proto, "origin", |d, it, t, _| loc_check(d, it, t).and_then(|_| if loc_is_frame(d, t) { d.js_str(it, "null") } else { win_origin(d, it, t, &[]) }), None)?;
-    def_fn(d, it, loc_proto, "assign", 1, |d, it, t, a| loc_go(d, it, t, a, false))?;
-    def_fn(d, it, loc_proto, "replace", 1, |d, it, t, a| loc_go(d, it, t, a, true))?;
-    def_fn(d, it, loc_proto, "reload", 0, loc_reload)?;
-    def_fn(d, it, loc_proto, "toString", 0, |d, it, t, _| loc_get(d, it, t, Part::Href))?;
+    d.def_get_s(it, loc_proto, "origin", |d, s, t, a| if loc_check(d, s, t)? { d.js_str_s(s, "null") } else { win_origin(d, s, t, a) }, None)?;
+    d.def_method_s(it, loc_proto, "assign", 1, |d, s, t, a| loc_go(d, s, t, a, false))?;
+    d.def_method_s(it, loc_proto, "replace", 1, |d, s, t, a| loc_go(d, s, t, a, true))?;
+    d.def_method_s(it, loc_proto, "reload", 0, loc_reload)?;
+    d.def_method_s(it, loc_proto, "toString", 0, |d, s, t, _| loc_get(d, s, t, Part::Href))?;
 
     // History
-    def_fn(d, it, hist_proto, "pushState", 2, |d, it, t, a| push_replace(d, it, t, a, false))?;
-    def_fn(d, it, hist_proto, "replaceState", 2, |d, it, t, a| push_replace(d, it, t, a, true))?;
-    def_fn(d, it, hist_proto, "go", 0, hist_go)?;
-    def_fn(d, it, hist_proto, "back", 0, hist_back)?;
-    def_fn(d, it, hist_proto, "forward", 0, hist_forward)?;
-    def_acc(d, it, hist_proto, "length", hist_length, None)?;
-    def_acc(d, it, hist_proto, "state", hist_state, None)?;
-    def_acc(d, it, hist_proto, "scrollRestoration", hist_scroll, Some(hist_set_scroll))?;
+    d.def_method_s(it, hist_proto, "pushState", 2, |d, s, t, a| push_replace(d, s, t, a, false))?;
+    d.def_method_s(it, hist_proto, "replaceState", 2, |d, s, t, a| push_replace(d, s, t, a, true))?;
+    d.def_method_s(it, hist_proto, "go", 0, hist_go)?;
+    d.def_method_s(it, hist_proto, "back", 0, hist_back)?;
+    d.def_method_s(it, hist_proto, "forward", 0, hist_forward)?;
+    d.def_get_s(it, hist_proto, "length", hist_length, None)?;
+    d.def_get_s(it, hist_proto, "state", hist_state, None)?;
+    d.def_get_s(it, hist_proto, "scrollRestoration", hist_scroll, Some(hist_set_scroll))?;
 
     // Storage
     // The order of Chrome (a `for in` over a `Storage` lists them so).
-    def_acc(d, it, storage_proto, "length", sto::length, None)?;
-    for (name, len, h) in [("clear", 0, sto::clear as H), ("getItem", 1, sto::get_item), ("key", 1, sto::key), ("removeItem", 1, sto::remove_item), ("setItem", 2, sto::set_item)] {
+    d.def_get_s(it, storage_proto, "length", sto::length, None)?;
+    for (name, len, h) in [("clear", 0, sto::clear as HS), ("getItem", 1, sto::get_item), ("key", 1, sto::key), ("removeItem", 1, sto::remove_item), ("setItem", 2, sto::set_item)] {
         // WebIDL operations are enumerable (a `for in` over a `Storage` lists them).
-        let f = def_fn(d, it, storage_proto, name, len, h)?;
+        let f = d.def_method_s(it, storage_proto, name, len, h)?;
         let k = d.key(it, name)?;
         it.define_data(storage_proto, k, Value::Object(f), true, true, true)?;
     }
 
     // document and window
     let p = d.p();
-    def_acc(d, it, p.document, "URL", doc_url, None)?;
-    def_acc(d, it, p.document, "documentURI", doc_url, None)?;
+    d.def_get_s(it, p.document, "URL", doc_url, None)?;
+    d.def_get_s(it, p.document, "documentURI", doc_url, None)?;
     d.def_get_s(it, p.document, "cookie", crate::browser_cookie::doc_cookie_get, Some(crate::browser_cookie::doc_cookie_set))?;
-    def_acc(d, it, p.document, "domain", doc_domain, Some(doc_set_domain))?;
-    def_acc(d, it, p.node, "baseURI", doc_url, None)?;
-    def_acc(d, it, p.document, "location", loc_obj, Some(win_set_location))?;
-    def_acc(d, it, g, "location", loc_obj, Some(win_set_location))?;
-    def_acc(d, it, g, "origin", win_origin, None)?;
+    d.def_get_s(it, p.document, "domain", doc_domain, Some(doc_set_domain))?;
+    d.def_get_s(it, p.node, "baseURI", doc_url, None)?;
+    d.def_get_s(it, p.document, "location", loc_obj, Some(win_set_location))?;
+    d.def_get_s(it, g, "location", loc_obj, Some(win_set_location))?;
+    d.def_get_s(it, g, "origin", win_origin, None)?;
 
     // constructors and globals
     let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
     let mut fixed = vec![loc_proto, hist_proto];
-    let ifaces: [(&str, ObjId, H, bool); 5] = [
-        ("URL", url, pr::url_ctor, true),
-        ("URLSearchParams", params, pr::params_ctor, true),
-        ("Location", loc_proto, illegal, false),
-        ("History", hist_proto, illegal, false),
-        ("Storage", storage_proto, illegal, true),
+    let ifaces: [(&str, ObjId, HS, HostFn); 5] = [
+        ("URL", url, pr::url_ctor, HostFn::CtorNewTarget),
+        ("URLSearchParams", params, pr::params_ctor, HostFn::CtorNewTarget),
+        ("Location", loc_proto, illegal, HostFn::Method),
+        ("History", hist_proto, illegal, HostFn::Method),
+        ("Storage", storage_proto, illegal, HostFn::Ctor),
     ];
-    for (name, proto, h, ctor) in ifaces {
-        let f = match name {
-            "URL" => d.add_ctor_nt(it, h, name, 1)?,
-            "URLSearchParams" => d.add_ctor_nt(it, h, name, 0)?,
-            "Storage" => d.add_fn(it, h, name, 0, ctor)?,
-            _ => d.add_fn(it, h, name, 1, ctor)?,
+    for (name, proto, h, kind) in ifaces {
+        let len = match name {
+            "URL" | "Location" | "History" => 1,
+            _ => 0,
         };
+        let f = d.add_fn_s_obj(it, h, name, len, kind)?;
         it.define_data(f, kp, Value::Object(proto), false, false, false)?;
         it.define_data(proto, kc, Value::Object(f), true, false, true)?;
         let k = d.key(it, name)?;
         it.define_data(g, k, Value::Object(f), true, false, true)?;
         if name == "URL" {
-            def_fn(d, it, f, "canParse", 1, pr::url_can_parse)?;
+            d.def_method_s(it, f, "canParse", 1, pr::url_can_parse)?;
             def_fn(d, it, f, "createObjectURL", 1, crate::browser_web::create_object_url)?;
             def_fn(d, it, f, "revokeObjectURL", 1, crate::browser_web::revoke_object_url)?;
         }
@@ -925,22 +917,22 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     it.define_data(g, k, Value::Object(history), true, true, true)?;
     // The two areas are host named objects (`localStorage.x` is `getItem('x')`). Each is made on its first read: a page that reads
     // neither keeps `Heap::has_exotics` false, and every property write skips the exotic checks.
-    def_acc(d, it, g, "localStorage", |d, it, _, _| sto::area_get(d, it, false), None)?;
-    def_acc(d, it, g, "sessionStorage", |d, it, _, _| sto::area_get(d, it, true), None)?;
+    d.def_get_s(it, g, "localStorage", |d, s, _, _| sto::area_get(d, s, false), None)?;
+    d.def_get_s(it, g, "sessionStorage", |d, s, _, _| sto::area_get(d, s, true), None)?;
     d.fixed.borrow_mut().extend(fixed);
     Ok(())
 }
 
-fn url_get_h(d: &Dom, it: &mut Interp<'_>, t: Value, part: Part) -> R<Value> {
-    pr::url_get(d, it, t, part)
+fn url_get_h<'s>(d: &Dom, s: &mut Sc<'s, '_>, t: Local<'s>, part: Part) -> Res<'s, Local<'s>> {
+    pr::url_get(d, s, t, part)
 }
 
-fn url_set_h(d: &Dom, it: &mut Interp<'_>, t: Value, a: &[Value], part: Part) -> R<Value> {
-    pr::url_set(d, it, t, a, part)
+fn url_set_h<'s>(d: &Dom, s: &mut Sc<'s, '_>, t: Local<'s>, a: Args<'s>, part: Part) -> Res<'s, Local<'s>> {
+    pr::url_set(d, s, t, a, part)
 }
 
-fn illegal(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
-    Err(it.type_error("Illegal constructor"))
+fn illegal<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    Err(s.type_error("Illegal constructor"))
 }
 
 // ------------------------------------------------------------------------------------------ Browser API

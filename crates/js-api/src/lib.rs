@@ -385,7 +385,14 @@ impl Str<'_> {
     pub fn to_string_lossy(&self) -> String {
         match self {
             Str::Latin1(b) => b.iter().map(|&c| c as char).collect(),
-            Str::Utf16(u) => String::from_utf16_lossy(u),
+            Str::Utf16(u) => {
+                // An explicit loop with the room set at the start: `from_utf16_lossy` starts with half the room and grows.
+                let mut out = String::with_capacity(u.len().max(8));
+                for r in char::decode_utf16(u.iter().copied()) {
+                    out.push(r.unwrap_or('\u{FFFD}'));
+                }
+                out
+            }
         }
     }
 }
@@ -651,6 +658,16 @@ pub trait Engine: Sized {
     fn set<'s>(&mut self, obj: Local<'_>, key: Local<'_>, value: Local<'_>) -> Result<(), Error<'s>>;
     /// `Object.defineProperty` of a data property.
     fn define<'s>(&mut self, obj: Local<'_>, key: Local<'_>, value: Local<'_>, attrs: Attrs) -> Result<(), Error<'s>>;
+    /// `get` with a key from Rust. An engine can skip the string value of the key.
+    fn get_str<'s>(&mut self, obj: Local<'_>, key: &str) -> Result<Local<'s>, Error<'s>> {
+        let k = self.string(key)?;
+        self.get(obj, k)
+    }
+    /// `define` with a key from Rust. An engine can skip the string value of the key.
+    fn define_str<'s>(&mut self, obj: Local<'_>, key: &str, value: Local<'_>, attrs: Attrs) -> Result<(), Error<'s>> {
+        let k = self.string(key)?;
+        self.define(obj, k, value, attrs)
+    }
     fn call<'s>(&mut self, f: Local<'_>, this: Local<'_>, args: &[Local<'_>]) -> Result<Local<'s>, Error<'s>>;
     /// A function whose calls go to [`Host::call`] with `id`. `id` is below 2^31.
     fn host_function<'s>(&mut self, name: &str, id: u32, length: u32, kind: HostFn) -> Result<Local<'s>, Error<'s>>;
@@ -1048,8 +1065,7 @@ impl<'s, E: Engine> Scope<'s, E> {
 
     /// `obj[key]` with a key from Rust.
     pub fn get_str(&mut self, obj: Local<'_>, key: &str) -> Result<Local<'s>, Error<'s>> {
-        let k = self.string(key)?;
-        self.get(obj, k)
+        self.e.get_str(obj, key)
     }
 
     pub fn set(&mut self, obj: Local<'_>, key: Local<'_>, value: Local<'_>) -> Result<(), Error<'s>> {
@@ -1376,8 +1392,7 @@ impl<'s, E: Engine> Scope<'s, E> {
 
     /// `define` with a key from Rust.
     pub fn define_str(&mut self, obj: Local<'_>, key: &str, value: Local<'_>, attrs: Attrs) -> Result<(), Error<'s>> {
-        let k = self.string(key)?;
-        self.define(obj, k, value, attrs)
+        self.e.define_str(obj, key, value, attrs)
     }
 
     /// `set` with a key from Rust.

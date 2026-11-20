@@ -460,7 +460,7 @@ impl<'a> Fc<'a> {
         for d in &decls {
             if let Some(v) = self.find_var(&d.name)
                 && let (VK::Let | VK::Const | VK::Class, Home::Reg(r)) = (v.kind, v.home)
-                && self.early_use(d, 0)
+                && (self.early_use(d, 0) || in_regs.iter().any(|x| x.0 == r))
             {
                 self.op(Op::LoadHole, r, 0, 0);
                 self.set_live(r);
@@ -478,25 +478,47 @@ impl<'a> Fc<'a> {
         for (f, name) in &h.funcs {
             self.declare_function(*f, name)?;
         }
+        // A name in a register is in its dead zone (a hole) until its declaration runs. A throw out of the script hands the names over as
+        // they are: the global lexical binding exists after an abrupt completion, in its dead zone or with its value.
+        let (live0, from, depth0) = (self.live.clone(), self.asm.len(), self.depth);
         for s in self.prog.list(list) {
             self.stmt(s)?;
         }
         if !in_regs.is_empty() {
-            for (r, ..) in &in_regs {
-                self.set_live(*r);
-            }
-            self.op(Op::PushCtx, 0, in_regs.len() as u32, 0);
-            for (i, (r, n, konst)) in in_regs.iter().enumerate() {
-                let (r, konst) = (*r, *konst);
-                let s = self.site_of(n)?;
-                self.op(Op::InitCtx, r, 0, i as u32);
-                self.op(if konst { Op::DeclLexC } else { Op::DeclLex }, i as u32, s, 0);
-            }
-            self.op(Op::PopCtx, 0, 0, 0);
+            // The exception goes to a register that is free here: the temporaries of the statements are dead when a throw lands.
+            let (to, done, ex) = (self.asm.len(), self.label(), self.alloc());
+            self.mark_used(done);
+            self.jmp(done);
+            let lb = self.label();
+            self.mark_used(lb);
+            self.bind(lb);
+            self.live = live0;
+            self.set_live(ex);
+            self.hand_over(&in_regs)?;
+            self.op(Op::Throw, ex, 0, 0);
+            self.handlers.push(HandlerRec { start: from, end: to, target: lb, reg: ex, depth: depth0 });
+            self.bind(done);
+            self.hand_over(&in_regs)?;
         }
         if let Some(m) = mark {
             self.leave(m);
         }
+        Ok(())
+    }
+
+    /// Declare the script-level names that live in registers as global lexical bindings: a context holds the values, and the realm
+    /// keeps the context.
+    fn hand_over(&mut self, in_regs: &[(u32, Cow<'a, str>, bool)]) -> CR {
+        for (r, ..) in in_regs {
+            self.set_live(*r);
+        }
+        self.op(Op::PushCtx, 0, in_regs.len() as u32, 0);
+        for (i, (r, n, konst)) in in_regs.iter().enumerate() {
+            let s = self.site_of(n)?;
+            self.op(Op::InitCtx, *r, 0, i as u32);
+            self.op(if *konst { Op::DeclLexC } else { Op::DeclLex }, i as u32, s, 0);
+        }
+        self.op(Op::PopCtx, 0, 0, 0);
         Ok(())
     }
 

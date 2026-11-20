@@ -537,6 +537,51 @@ fn a_top_level_let_const_and_class_are_visible_to_the_next_script() {
     assert_eq!(vm.global_text("r"), "undefinedfalse");
 }
 
+/// Run the script `a` (it may throw), then the script `b`, in one realm; read the global `name` as text. `gc`: constant collection.
+fn two_scripts(a: &str, b: &str, name: &str, gc: bool) -> Result<String, String> {
+    let shared = Arc::new(SharedAtoms::default());
+    let mut prog = compile(b, &shared, Limits::default())?;
+    let pre = prog.codes.len();
+    prog.codes = compile_after(prog.codes, PRELUDE, &shared, Limits::default(), None, None)?.0;
+    let at = prog.codes.len();
+    prog.codes = compile_after(prog.codes, a, &shared, Limits::default(), None, None)?.0;
+    let mut vm = Vm::new(prog, shared);
+    vm.run_main(pre).expect("the prelude");
+    if gc {
+        vm.realm.heap.set_trigger(Trigger { min: 1 << 10, slack: 1 << 10 });
+    }
+    assert!(vm.run_main(at).is_err(), "script a must throw: {a}");
+    vm.run_main(0).map_err(|e| format!("{e:?}"))?;
+    Ok(vm.global_text(name))
+}
+
+#[test]
+fn a_top_level_name_stays_after_the_script_throws() {
+    let catch = "var r; try { NAME; r = 'value'; } catch (e) { r = e.name; }";
+    for gc in [false, true] {
+        let ok = |a: &str, b: &str| two_scripts(a, b, "r", gc).unwrap();
+        // A name that is initialized before the throw keeps its value (`let`, `const`, `class`, and a heap value).
+        assert_eq!(ok("let x = 1; throw 0;", "var r = x;"), "1");
+        assert_eq!(ok("let y; throw 0; y = 2;", "var r = typeof y;"), "undefined");
+        assert_eq!(ok("const k = 5; throw 0;", "var r = k; try { k = 1; } catch (e) { r += e.name; }"), "5TypeError");
+        assert_eq!(ok("class C { m() { return 3; } } throw 0;", "var r = new C().m();"), "3");
+        assert_eq!(ok("let o = { a: [1, 2, 3] }; for (var i = 0; i < 2000; i++) { var j = [i]; } throw 0;", "var r = o.a.length;"), "3");
+        // A name that is declared after the throw is in its dead zone.
+        assert_eq!(ok("throw 0; let z = 2;", &catch.replace("NAME", "z")), "ReferenceError");
+        assert_eq!(ok("let a = 1; throw 0; const b = 2;", "var r = a; try { b; } catch (e) { r += e.name; }"), "1ReferenceError");
+        assert_eq!(ok("throw 0; class D {}", &catch.replace("NAME", "D")), "ReferenceError");
+        // A throw inside a function that the script calls, and a throw that a `try` of the script does not catch.
+        assert_eq!(ok("let x = 1; function f() { throw 0; } f();", "var r = x;"), "1");
+        assert_eq!(ok("let x = 1; try { throw 0; } finally { x = 2; }", "var r = x;"), "2");
+        // The name is declared: a later `let`, `var` or function of the name is a SyntaxError, also for a name in its dead zone.
+        for a in ["let x = 1; throw 0;", "throw 0; let x = 1;"] {
+            for b in ["let x = 2;", "var x = 2;", "function x() {}"] {
+                assert!(two_scripts(a, b, "r", gc).is_err(), "{a} then {b}");
+            }
+        }
+    }
+}
+
 #[test]
 fn a_parenthesized_optional_member_call_keeps_this() {
     let o = "var o = { m() { return this.v; }, v: 7 }; var n = null; ";
@@ -763,7 +808,7 @@ fn array_methods_work_on_array_likes_and_follow_the_specification() {
 }
 
 fn waiting(vm: &Vm) -> usize {
-    vm.prog.codes.iter().filter(|c| c.words == [crate::bytecode::Op::Lazy as u32]).count()
+    vm.prog.codes.iter().filter(|c| c.words.first().is_some_and(|w| *w as u8 == crate::bytecode::Op::Lazy as u8)).count()
 }
 
 #[test]
@@ -808,7 +853,7 @@ fn a_lazy_function_gets_its_arguments_the_first_time_and_after() {
 }
 
 #[test]
-fn a_lazy_compile_that_fails_throws_a_syntax_error() {
+fn a_lazy_compile_that_fails_throws_a_plain_error() {
     struct Fails;
     impl crate::interp::LazyCompile for Fails {
         fn compile(&mut self, _: &mut Vec<crate::bytecode::Code>, _: usize) -> Result<(), String> {
@@ -818,7 +863,7 @@ fn a_lazy_compile_that_fails_throws_a_syntax_error() {
     let mut vm = load("var e; try { [1].forEach(function () {}); } catch (x) { e = x.name + ': ' + x.message; }").unwrap();
     vm.lazy = Some(Box::new(Fails));
     vm.run_main(0).unwrap();
-    assert_eq!(vm.global_text("e"), "SyntaxError: no compiler");
+    assert_eq!(vm.global_text("e"), "Error: no compiler");
 }
 
 #[test]
@@ -988,4 +1033,131 @@ fn a_frozen_global_object_stops_the_stores_of_the_sites() {
     let mut vm = load_with(&format!("'use strict'; {host}"), "'use strict'; var t; try { wf(9); } catch (e) { t = e.name; }").unwrap();
     // The `var t` of the script is not possible on a frozen object, so the script cannot report: the throw is the exit.
     assert!(vm.run_main(0).is_err() || vm.global_text("fz") == "3");
+// ---- Lazy compile of the functions of a user script (`Lazy`, `Op::Lazy`): a function is compiled at its first call.
+
+#[test]
+fn the_functions_of_a_user_script_are_compiled_at_their_first_call() {
+    let src = "function a() { return 1; } function b() { return function inner() { return 2; }; } function c() { return 3; } var r = a() + b()();";
+    let mut vm = load(src).unwrap();
+    let before = waiting(&vm);
+    vm.run_main(0).unwrap();
+    // a and b are compiled at their first call, and `inner` is made as a stub in b and compiled at its call; c waits.
+    assert_eq!(vm.global_text("r"), "3");
+    assert_eq!(waiting(&vm), before - 2, "a and b were compiled; c waits; inner was added and compiled");
+    // A second call compiles nothing more.
+    let mut vm2 = load("function a() { return 1; } a(); a(); a();").unwrap();
+    vm2.run_main(0).unwrap();
+    let mut vm3 = load("function a() { return 1; } a();").unwrap();
+    vm3.run_main(0).unwrap();
+    assert_eq!(waiting(&vm2), waiting(&vm3));
+}
+
+#[test]
+fn a_function_that_is_never_called_is_never_compiled() {
+    // A construct that the compiler does not build (`with`) inside a function: the load works and the call fails.
+    let src = "function bad() { with ({}) { return 1; } } function good() { return 2; } var r = good();";
+    let vm = run(src).unwrap();
+    let mut vm = vm;
+    assert_eq!(vm.global_text("r"), "2");
+}
+
+#[test]
+fn an_unbuilt_construct_in_a_function_fails_at_its_first_call_not_at_load() {
+    let src = "function bad() { with ({}) { return 1; } } var e; try { bad(); } catch (x) { e = x.name + ': ' + x.message.slice(0, 17); } try { bad(); } catch (x) { e += '|' + x.name; }";
+    assert_eq!(ev(src, "e"), "Error: not supported yet|Error");
+    // The top level has the construct: the load fails, as before.
+    assert!(load("with ({}) {}").err().unwrap().starts_with("not supported yet"));
+    // A generator at the top level of the script is found when its parent is compiled, so the load fails (not a lazy case).
+    assert!(load("function* g() {}").err().unwrap().starts_with("not supported yet"));
+}
+
+#[test]
+fn early_errors_in_a_function_that_is_never_called_still_fail_the_load() {
+    for src in [
+        "function f() { let a; let a; }",
+        "function f() { return 1 + ; }",
+        "function f() { 'use strict'; var yield; }",
+        "var o = { m() { break; } };",
+        "function f() { function g() { new.target = 1; } }",
+        "class C { m() { return this.#x; } }",
+    ] {
+        let e = load(src).err().unwrap_or_else(|| panic!("{src} loaded"));
+        assert!(e.starts_with("SyntaxError"), "{src}: {e}");
+    }
+}
+
+#[test]
+fn a_first_call_from_a_getter_a_setter_a_constructor_and_a_native_works() {
+    check(&[
+        // Getter and setter, in an object literal and in a class, each first called by a property access.
+        ("var o = { k: 1, get x() { return this.k + 1; }, set x(v) { this.k = v * 2; } }; o.x = 5; var r = o.x;", "r", "11"),
+        ("class A { k = 1; get x() { return this.k + 1; } set x(v) { this.k = v * 2; } static get s() { return 's'; } } var a = new A(); a.x = 3; var r = a.x + A.s;", "r", "7s"),
+        // A constructor with fields (the initializers are inline children of the constructor), a base class and a derived class.
+        ("class C { a = 1; b = this.a + 1; constructor(x) { this.c = x + 10; } } var o = new C(5); var r = o.a + ',' + o.b + ',' + o.c;", "r", "1,2,15"),
+        ("class C { a = 1; constructor() { this.c = 2; } } class D extends C { d = 3; constructor() { super(); this.e = 4; } } var o = new D(); var r = [o.a, o.c, o.d, o.e].join();", "r", "1,2,3,4"),
+        ("class C { static n = 1; static { C.m = C.n + 1; } static f() { return C.m; } } var r = C.f();", "r", "2"),
+        // A native that asks the interpreter to call a function (`Outcome::Enter`): call, apply, bind, and a callback of the prelude.
+        ("function f(a, b) { return this.k + a + b; } var r = f.call({ k: 1 }, 2, 3);", "r", "6"),
+        ("function f(a, b) { return this.k + a + b; } var r = f.apply({ k: 1 }, [2, 3]);", "r", "6"),
+        ("function f(a, b) { return this.k + a + b; } var g = f.bind({ k: 1 }, 2); var r = g(3);", "r", "6"),
+        ("function f(x) { return x * 2; } var r = [1, 2, 3].map(f).join();", "r", "2,4,6"),
+        // A function inside a function that waits, an arrow that reads `arguments` and `this`, and a rest parameter.
+        ("function f() { var g = () => arguments.length + this.k; return g(); } var r = f.call({ k: 1 }, 7, 8);", "r", "3"),
+        ("function f(a, ...r) { return a + r.length; } var r = f(10, 1, 2, 3);", "r", "13"),
+        // A closure over a variable that the first compile must find in the chain.
+        ("function mk() { var n = 0; return function () { return ++n; }; } var c = mk(); c(); c(); var r = c();", "r", "3"),
+        // A method with `super` is compiled at load (its code may need `CF_LINK`), and a lazy function around it works.
+        ("class A { v() { return 1; } } function wrap() { class B extends A { v() { return super.v() + 1; } } return new B().v(); } var r = wrap();", "r", "2"),
+    ]);
+}
+
+#[test]
+fn a_function_that_is_called_from_rust_is_compiled_at_that_call() {
+    let mut vm = load("function add(a, b) { return a + b; } function get() { return 'g'; }").unwrap();
+    vm.run_main(0).unwrap();
+    let f = vm.global("add");
+    let v = vm.call(f, Value::UNDEFINED, &[Value::int(2), Value::int(3)]).unwrap();
+    assert_eq!(vm.display(v, false), "5");
+    // A function with fewer arguments than parameters.
+    let v = vm.call(f, Value::UNDEFINED, &[Value::int(2)]).unwrap();
+    assert_eq!(vm.display(v, false), "NaN");
+    let g = vm.global("get");
+    let v = vm.call(g, Value::UNDEFINED, &[]).unwrap();
+    assert_eq!(vm.display(v, false), "g");
+}
+
+#[test]
+fn the_stubs_of_user_functions_keep_a_program_that_is_not_called_small() {
+    let mut src = String::new();
+    for i in 0..200 {
+        src.push_str(&format!("function f{i}(a) {{ var s = 0; for (var i = 0; i < a; i++) s += i * {i}; return s; }}\n"));
+    }
+    src.push_str("var r = f7(4);");
+    let mut vm = load(&src).unwrap();
+    assert!(waiting(&vm) >= 200 + 40, "the 200 functions and the prelude wait: {}", waiting(&vm));
+    vm.run_main(0).unwrap();
+    assert_eq!(vm.global_text("r"), "42");
+    let words: usize = vm.prog.codes.iter().map(|c| c.words.len()).sum();
+    assert!(words < 4000, "only the script, the wrapper of the prelude and f7 hold code: {words} words");
+}
+
+#[test]
+fn a_stub_that_keeps_the_arguments_in_registers_and_a_stub_with_an_array_agree() {
+    // Plain parameters and no `arguments`: the stub has the parameter registers (no array). Anything else: the array. Each first call
+    // must give the same result for fewer, equal and more arguments.
+    check(&[
+        ("function f(a, b) { return a + ',' + b; } var r = f(1) + '|' + f(1, 2, 3);", "r", "1,undefined|1,2"),
+        ("function f(a, b) { return a + ',' + b; } var r = f(1, 2, 3);", "r", "1,2"),
+        ("function f(a, b) { return a + ',' + b; } var r = f();", "r", "undefined,undefined"),
+        ("function f(a, a2, a3, a4, a5, a6, a7, a8, a9) { return a9 + a; } var r = f(1, 2, 3, 4, 5, 6, 7, 8, 9);", "r", "10"),
+        ("function f(a, a) { return a; } var r = f(1, 2);", "r", "2"),
+        ("function f(a) { return arguments.length + a; } var r = f(1, 2, 3);", "r", "4"),
+        ("function f(a, b = 5) { return a + b; } var r = f(1) + f(1, 2);", "r", "9"),
+        ("function f(a, ...r) { return a + r.length; } var r = f(1, 2, 3);", "r", "3"),
+        ("function f({ x }, [y]) { return x + y; } var r = f({ x: 1 }, [2]);", "r", "3"),
+        ("function f(a) { var g = () => arguments[1]; return g(); } var r = f(1, 7);", "r", "7"),
+        ("function f(a) { 'use strict'; var arguments2 = a; return arguments2; } var r = f(4);", "r", "4"),
+        ("function f(a) { return function (b) { return a + b; }; } var r = f(1)(2) + f(10)(20);", "r", "33"),
+        ("var o = { m(a, b) { return this.k + a + b; }, k: 1 }; var r = o.m(2, 3) + '|' + o.m(2);", "r", "6|NaN"),
+    ]);
 }
