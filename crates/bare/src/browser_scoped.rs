@@ -414,6 +414,29 @@ impl Dom {
         old(s, |it| self.obj(it, proto))
     }
 
+    /// `Dom::obj` into a local: a new object with the prototype `proto`.
+    pub(crate) fn obj_with_s<'s>(&self, s: &mut Sc<'s, '_>, proto: ObjId) -> Res<'s, Local<'s>> {
+        let o = self.obj_s(s, proto)?;
+        Ok(self.obj_local(s, o))
+    }
+
+    /// `def_method` on an object that a handler made: a function of the new form as a method of `target`. `enumerable` is false for an
+    /// ordinary method and true for a WebIDL one.
+    pub(crate) fn def_method_l<'s>(&self, s: &mut Sc<'s, '_>, target: Local<'s>, name: &str, len: u32, h: HS, enumerable: bool) -> Res<'s, ()> {
+        let f = self.add_fn_s(s, h, name, len, HostFn::Method)?;
+        s.define_str(target, name, f, Attrs { writable: true, enumerable, configurable: true })
+    }
+
+    /// `def_get` on an object that a handler made: an accessor of functions of the new form.
+    pub(crate) fn def_get_l<'s>(&self, s: &mut Sc<'s, '_>, target: Local<'s>, name: &str, get: HS, set: Option<HS>) -> Res<'s, ()> {
+        let g = self.add_fn_s(s, get, &format!("get {name}"), 0, HostFn::Method)?;
+        let st = match set {
+            Some(h) => Some(self.add_fn_s(s, h, &format!("set {name}"), 1, HostFn::Method)?),
+            None => None,
+        };
+        s.define_accessor_str(target, name, Some(g), st, Attrs { writable: false, enumerable: true, configurable: true })
+    }
+
     /// `Dom::new_source`.
     pub(crate) fn new_source_s<'s>(&self, s: &mut Sc<'s, '_>, k: crate::browser_sources::Source, proto: Option<ObjId>) -> Res<'s, ObjId> {
         old(s, |it| self.new_source(it, k, proto))
@@ -515,7 +538,7 @@ pub(crate) fn ns_put_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId, existing: Opt
 }
 
 pub(crate) fn media_src_changed_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId) -> Res<'s, ()> {
-    old(s, |it| crate::browser_media::src_changed(d, it, n))
+    crate::browser_media::src_changed(d, s, n)
 }
 
 pub(crate) fn script_src_changed_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId) -> Res<'s, ()> {
