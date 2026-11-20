@@ -15672,3 +15672,51 @@ Not built, design only. Each needs an interpreter change, and none is cheap enou
 Check. `cargo test --locked -p bare-js2 --lib`: 282 pass on Linux (260 on main). `compile::tests`: 54 (34 on main): 14 new golden tests (one for each of: `arguments`, rest and spread call, spread in `new` and arrays, own-name function expression, regexp and BigInt, tagged template, object accessors and `__proto__` and spread, object rest, class with fields and static members, derived class with `super()` in an arrow, `super` property access, private names, `new.target`, class expression name), `field_initializers_and_static_blocks_are_ready_children_of_the_class`, `every_construct_of_a_class_passes_the_verifier` (12 sources), the gaps (script var, iterator close, `break` closes once, 60,000 locals in linear time), and the updated list of unsupported constructs (async, generator, `with`, direct eval, `delete` of a global). I read each golden against the JS meaning. Windows 11 VM: the whole lib run is 280 pass and 2 fail (the same two parser corpus tests as before: `parse::tests::corpus_status_matches_acorn` and `parse::lazy_tests::a_lazy_parse_finds_the_same_errors_as_a_full_parse_on_the_corpus`; they do not find the corpus on the VM); `compile::tests` 54 pass. `cargo clippy -p bare-js2 --all-targets`: no warning in the files of this change (old warnings remain in `heap.rs`, `object_census.rs` and `bare-os`).
 
 Not tested: running any compiled code, so the semantics of the 38 new ops are checked by reading the disassembly and by the verifier only; class, `super`, private-name and spread behavior in an interpreter (S2.6); the S2.6 driver's use of `Child::ready`; mapped `arguments`; function names of methods and classes; Miri; arm64; a React bundle with classes beyond the clangd and tauri bundles; the cost matrix (js2 is not wired into the browser); the `bc_hist` example on Windows.
+
+## 2026-11-20: switch jump tables in js2 (follow-up of S2.5 and S2.6)
+
+Branch `t3/js2-switch-jump-tables`, on `t3/js2-interpreter` (PR #757, `9934d6d0`). Task: a `switch` whose cases are all integer constants or all string constants compiles to one table op, not a chain of compare-jumps. The chain stays when it is cheaper.
+
+### Design (written before the code)
+
+What other engines do (read in their sources on 2026-11-20, `main` of each; not in this repository):
+
+| Engine | Integers | Strings | Where the table is |
+| --- | --- | --- | --- |
+| V8 (Ignition) | `SwitchOnSmiNoFeedback` when there are at least 6 Smi cases (`switch_table_min_cases`) and the spread is below 3 times the number of clauses (`switch_table_spread_threshold`). Before the op, bytecode checks that the value is a number in the Smi range and that `x\|0 === x`. Other cases stay a compare chain, behind the table. | A compare chain. | A jump table in the constant pool: base value, size, one target per value. |
+| JSC | `switch_imm` for 3 or more cases. A dense table when the range is at most 1000 and range / cases is below 15; else a sorted list. Any non-constant case turns the table off. | `switch_string`: a hash map from the string to the offset, for 3 or more cases. | Side tables of the code block (`UnlinkedSimpleJumpTable`, `UnlinkedStringSwitchJumpTable`). |
+| QuickJS (quickjs-ng) | No table op. The code is `dup`, the case, `strict_eq`, `if_true` for each case. | The same. | — |
+
+Choice:
+
+1. Integers: a dense table, like V8 and JSC. A sparse switch keeps the chain. A sorted list with binary search (JSC's second form) is not built: a case set that is both large and sparse is rare, and the chain is correct for it.
+2. Strings: a hash table keyed by the 32-bit string hash. A sorted table with binary search would compare string content in each step, and a compare of a rope or of a string of another width is the expensive part of a chain step today. The hash is cached in the string cell (`Str::hash`), and an atom has it from the start. One probe and one equality test replace the whole chain. A discriminant that is not an atom pays one hash of its units the first time (O(length)); the cell caches it.
+3. Both are one op each: `SwitchI a, t` and `SwitchA a, t`. `a` is the register of the discriminant and `t` is the offset of the table in the word pool `Code::tables`.
+4. The table does not live in the instruction stream. `decode` and the verifier keep fixed-size instructions. A jump table needs no `Wide` form. The targets are absolute `pc`s (not offsets): the compiler fills them after the assembler fixed the widths, and the interpreter sets `pc` from the table with no add.
+5. Semantics:
+   - The discriminant is evaluated once, before the table (as before). Every case is a constant, so no case expression can have a side effect and no order of evaluation can be seen. A switch with one case that is not a constant, or two kinds of constants, keeps the whole chain.
+   - The bodies stay in source order, so fallthrough and `default` in any position are unchanged. The table holds the target of each value, and `default` (or the end of the switch) for the gaps and for a value that no case has.
+   - Duplicate case values: the first case wins, as in a chain. The later duplicate keeps its body (it can be reached by fallthrough) and no table entry.
+   - `===` on integers: an `Int` value indexes the table. A double that is an integer value in the 32-bit range (`3.0`, `-0`) indexes it too, since `-0 === 0`. A NaN, a fraction, a value out of range, and any non-number go to `default`: a string `"1"` never matches `case 1`. A case written `-0` is not an integer constant for the compiler (`int_const`), so a switch that has it keeps the chain.
+   - A string discriminant that is a rope is flattened by `Str::hash`, as `===` does today.
+
+Memory layout. `Code::tables: Vec<u32>`, one pool for all the tables of a function. Each table starts at the offset in the op:
+
+| Table | Words |
+| --- | --- |
+| Integer | `lo` (as `u32`), `default`, `len`, then `len` targets. The target of `v` is `targets[v - lo]`. |
+| String | `default`, `mask`, then `mask + 1` slots of 3 words: `hash`, `atom`, `target`. An empty slot has `atom = u32::MAX`. The first probe is `hash & mask`; the next is the slot after (linear probing). |
+
+A string table has a power of two slots, with at least 1.5 slots for each case (load factor at most 2/3), so a probe ends at an empty slot. The verifier checks this.
+
+Thresholds (from the V8 and JSC rules; the numbers of this engine are in the measurement below):
+
+- Integers: at least `MIN_INT_CASES` distinct values, and `span < 3 * cases` where `span = max - min + 1`. The table is then at most 3 words for each case, against 2 words for each case of a chain.
+- Strings: at least `MIN_STR_CASES` distinct strings.
+
+Check, defined before the code:
+
+- Compile golden tests: the disassembly of a dense integer switch, a string switch, a small switch (chain), a sparse switch (chain), a mixed one (chain), a case with a side effect (chain), `default` in the middle, and duplicate values.
+- Verifier: accepts what the compiler makes; rejects a table out of the pool, a target that is not an instruction or that goes back, a string table with no empty slot, a slot with an atom out of range or a wrong hash, and a table length that disagrees with the pool.
+- Script tests (`check`: each runs normally and under constant collection): dense, sparse, strings, `default` in the middle, fallthrough, `-0`, NaN, a double that is an integer, a number against a string, a rope as the discriminant, duplicates, a `break` out of nested `switch` and loops, a `let` in a case. Each result equals what the chain gives (the old compiler's result, by reading the source and by running the same program with a case made non-constant).
+- Measure: a 16-case integer switch and an 8-case string switch in a loop, instructions before and after, 3 runs; the loops `loopfn` and `fib` must not move.
