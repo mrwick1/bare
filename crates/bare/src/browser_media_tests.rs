@@ -291,3 +291,23 @@ fn a_dropped_play_promise_settles_after_collections() {
     b.advance_time(400.0, 10_000).unwrap();
     assert_eq!(js(&mut b, "out.join()"), "NotSupportedError");
 }
+
+#[test]
+fn the_members_that_the_cases_do_not_read_keep_their_answers_and_errors() {
+    let mut b = browser("<video id=v><track id=t></video>");
+    js(&mut b, "var v=document.getElementById('v'),t=document.getElementById('t'),r=v.buffered,i=new Image(2,3);1");
+    assert_eq!(js(&mut b, "[r.length,Object.prototype.toString.call(r),v.played!==r].join('|')"), "0|[object TimeRanges]|true");
+    assert_eq!(js(&mut b, "try{r.end(0)}catch(x){x.name+':'+x.message}"), "IndexSizeError:Failed to execute 'end' on 'TimeRanges': The index provided (0) is greater than or equal to the maximum bound (0).");
+    assert_eq!(js(&mut b, "try{r.start(3)}catch(x){x.message}"), "Failed to execute 'start' on 'TimeRanges': The index provided (3) is greater than the maximum bound (0).");
+    assert_eq!(js(&mut b, "try{r.start()}catch(x){x.name}"), "TypeError");
+    assert_eq!(js(&mut b, "try{r.start.call({},0)}catch(x){x.message}"), "Illegal invocation");
+    assert_eq!(js(&mut b, "[v.currentTime,v.playbackRate,v.defaultPlaybackRate,v.crossOrigin,v.srcObject,v.videoWidth,v.poster,v.width,v.height].join('|')"), "0|1|1|||0||0|0");
+    js(&mut b, "v.crossOrigin='use-credentials';v.width=7;v.playbackRate=2;v.currentTime=3;v.onerror=function(){};1");
+    assert_eq!(js(&mut b, "[v.crossOrigin,v.width,v.playbackRate,v.currentTime,typeof v.onerror,String(v.onplay)].join('|')"), "use-credentials|7|2|3|function|null");
+    assert_eq!(js(&mut b, "try{v.volume=2}catch(x){x.name}"), "IndexSizeError");
+    assert_eq!(js(&mut b, "try{v.currentTime=NaN}catch(x){x.name}"), "TypeError");
+    assert_eq!(js(&mut b, "try{v.srcObject={}}catch(x){x.name}"), "TypeError");
+    assert_eq!(js(&mut b, "try{Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype,'volume').get.call(document.body)}catch(x){x.message}"), "Illegal invocation");
+    assert_eq!(js(&mut b, "[t.track.activeCues,t.track.cues,v.textTracks.length,v.textTracks===v.textTracks].join('|')"), "||1|true");
+    assert_eq!(js(&mut b, "[i.width,i.height,i.onload,i.onerror,typeof (i.onload=function(){},i.onload)].join('|')"), "2|3|||function");
+}
