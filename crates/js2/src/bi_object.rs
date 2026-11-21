@@ -446,12 +446,24 @@ impl Realm {
     }
 
     /// `ArraySetLength` for a descriptor of `length`.
-    fn define_length(&mut self, o: Obj, d: &Desc) -> R<bool> {
+    pub(crate) fn define_length(&mut self, o: Obj, d: &Desc) -> R<bool> {
+        let n = if let Some(v) = d.value {
+            let first = self.to_number(v)?;
+            let n = Self::to_int32(first) as u32;
+            // Two abstract conversions can call the object's conversion methods twice.
+            let second = if Realm::obj(v).is_some() { self.to_number(v)? } else { first };
+            if second != n as f64 {
+                return Err(self.error(ErrKind::Range, "invalid array length"));
+            }
+            Some(n)
+        } else {
+            None
+        };
         if d.c == Some(true) || d.e == Some(true) || d.is_accessor() {
             return Ok(false);
         }
         let ro = o.has_flag(F_LEN_RO);
-        let Some(v) = d.value else {
+        let Some(n) = n else {
             if d.w == Some(true) && ro {
                 return Ok(false);
             }
@@ -460,14 +472,9 @@ impl Realm {
             }
             return Ok(true);
         };
-        let n = self.to_number(v)?;
-        if n < 0.0 || n.fract() != 0.0 || n >= 4294967296.0 || n.is_nan() {
-            return Err(self.error(ErrKind::Range, "invalid array length"));
-        }
-        let n = n as u32;
         let ok = if n == o.len() {
             !(ro && d.w == Some(true))
-        } else if ro || (d.w == Some(true) && ro) {
+        } else if ro {
             false
         } else {
             self.truncate(o, n)

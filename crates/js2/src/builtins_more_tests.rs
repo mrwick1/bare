@@ -266,3 +266,12 @@ fn number_parses_prefixed_integers_and_flattened_strings() {
         ("return [Number('\\u00851'), 1 / Number('\\uFEFF-0'), Number('0x1000000000000081') === 1152921504606847200].join();", "NaN,-Infinity,true"),
     ]);
 }
+
+#[test]
+fn array_length_set_and_define_preserve_attributes_and_conversion_order() {
+    check(&[
+        ("var a = []; Object.defineProperty(a, 'length', {writable: false}); var n = 0; a.length = {valueOf() { n++; throw 'coerced'; }}; return n + ':' + a.length;", "0:0"),
+        ("var a = [0, 1]; Object.defineProperty(a, '1', {configurable: false}); function f() { 'use strict'; a.length = 1; } try { f(); } catch (e) { return e.name + ':' + a.length; }", "TypeError:2"),
+        ("var a = [], seen = 0; Object.defineProperty(a, 'length', {value: {valueOf() { seen++; return 4294967295; }}}); return seen + ':' + a.length;", "2:4294967295"),
+    ]);
+}
