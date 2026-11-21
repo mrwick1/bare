@@ -1,7 +1,7 @@
 //! Generators: the suspended frame (`docs/design-js2-async.md` 5.1 and 6, plan step G1). Safe code over [`Realm`]; the loop of `interp.rs`
 //! calls it from its cold arms.
 //!
-//! **The generator object** (the *activation*) is an object with the flag [`F_GEN`] and four hidden slots (names that start with `\0`, so
+//! **The generator object** (the *activation*) is an object of the kind `K_GEN` and four hidden slots (names that start with `\0`, so
 //! no script sees them): the state, the saved frame, the value that the last `next` sent, and the mode of the last resume.
 //!
 //! | Slot | Holds |
@@ -32,7 +32,7 @@ use crate::codes::Codes;
 use crate::interp::{GEN, MAX_STACK, REC};
 use crate::interp_rt::{ErrKind, Key, R, Realm};
 use crate::shapes::A_C;
-use crate::object::{F_AGEN, F_GEN, Obj};
+use crate::object::{K_AGEN, K_GEN, Obj};
 use crate::shapes::ShapeId;
 use crate::value::Value;
 
@@ -88,13 +88,13 @@ pub(crate) struct GenRealm {
 impl Realm {
     /// The activation of a generator, an async function or an async generator (the frame side).
     pub(crate) fn activation(v: Value) -> Option<Obj> {
-        Realm::obj(v).filter(|o| o.has_flag(F_GEN | F_AGEN))
+        Realm::obj(v).filter(|o| matches!(o.kind(), K_GEN | K_AGEN))
     }
 
     /// Is `v` a generator object or the activation of an async function? (`for-of` steps a generator itself: the intrinsic path of the
     /// iterator protocol.) An async generator is not one: it has no `next` that gives a result.
     pub(crate) fn is_generator(v: Value) -> bool {
-        Realm::obj(v).is_some_and(|o| o.has_flag(F_GEN))
+        Realm::obj(v).is_some_and(|o| o.is_kind(K_GEN))
     }
 
     fn gen_state(a: Obj) -> i32 {
@@ -131,7 +131,7 @@ impl Realm {
             shape = self.shapes.add(shape, k, 0).expect("shape");
         }
         let act = Obj::new(&mut self.heap, &self.shapes, shape).expect("memory");
-        act.set_flag(if ag { F_AGEN } else { F_GEN });
+        act.set_kind(if ag { K_AGEN } else { K_GEN });
         let fr = crate::object::Ctx::new(&mut self.heap, FR_HDR + code.gen_regs as usize, Value::UNDEFINED).expect("memory");
         act.set_inline_slot(0, Value::int(G_START));
         act.set_inline_slot(1, fr.value());
@@ -176,7 +176,7 @@ impl Realm {
             }
         };
         let act = Obj::new(&mut self.heap, &self.shapes, shape).expect("memory");
-        act.set_flag(F_GEN);
+        act.set_kind(K_GEN);
         let p = self.new_promise();
         act.set_inline_slot(0, Value::int(G_RUNNING));
         act.set_inline_slot(3, Value::int(MODE_NEXT));
@@ -203,7 +203,7 @@ impl Realm {
         };
         save(stack, fp, ci, code, tbl, resume, fr);
         // An async generator is still executing for its callers while it waits; its frame goes to the caller of `next()` with that promise.
-        if act.has_flag(F_AGEN) {
+        if act.is_kind(K_AGEN) {
             act.set_inline_slot(0, Value::int(G_AWAIT));
             return Ok(act.inline_slot(5));
         }
@@ -214,7 +214,7 @@ impl Realm {
     /// An async function that cannot go on (a throw out of its frame): reject its promise with `e`.
     pub(crate) fn async_abort(&mut self, act: Value, e: Value) {
         let Some(a) = Realm::activation(act) else { return };
-        if a.has_flag(F_AGEN) {
+        if a.is_kind(K_AGEN) {
             return self.agen_abort(a, e);
         }
         let p = a.inline_slot(4);
@@ -240,7 +240,7 @@ impl Realm {
 
     /// A request to the generator `g` (`next`, `throw`, `return`; `v` is the argument). See [`Step`].
     pub(crate) fn gen_request(&mut self, g: Value, mode: i32, v: Value) -> R<Step> {
-        let Some(act) = Realm::obj(g).filter(|o| o.has_flag(F_GEN)) else { return self.type_error("not a generator") };
+        let Some(act) = Realm::obj(g).filter(|o| o.is_kind(K_GEN)) else { return self.type_error("not a generator") };
         match Realm::gen_state(act) {
             G_RUNNING => return self.type_error("the generator is already running"),
             G_DONE => {

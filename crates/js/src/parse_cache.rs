@@ -188,12 +188,14 @@ pub fn parse(kind: Kind, source: &str, limits: Limits) -> Result<Rc<Program<'sta
             (r, used, limits.max_nodes)
         }
     };
-    let (res, bytes) = match &r {
-        Ok(p) => (Res::Ok(p.clone()), p.source.len() + p.stats().bytes),
-        Err(e) => (Res::Err(*e, source.into()), source.len()),
-    };
     CACHE.with_borrow_mut(|c| {
         c.counts.parses += 1;
+        let (res, bytes) = match &r {
+            Ok(p) => (Res::Ok(p.clone()), p.source.len() + p.stats().bytes),
+            // A caller with more stack can parse the same source.
+            Err(e) if e.kind == ErrorKind::Limit(LimitKind::Depth) => return,
+            Err(e) => (Res::Err(*e, source.into()), source.len()),
+        };
         if bytes > MAX_BYTES {
             return;
         }
