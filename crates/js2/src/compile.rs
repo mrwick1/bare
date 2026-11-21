@@ -29,6 +29,7 @@
 use crate::ast::*;
 use crate::atoms::SharedAtoms;
 use crate::bytecode::{Asm, BcError, Code, GK_ASYNC, GK_ASYNCGEN, GK_GEN, Handler, Ins, Label, NO_NAME, Op, Recipes};
+use crate::data_lit::DataLiteral;
 use crate::facts::{self, Facts, FnId};
 use crate::roots::RootMaps;
 use crate::string::{Chars, Str};
@@ -287,6 +288,7 @@ pub(crate) struct Fc<'a> {
     pub children: Vec<Child>,
     pub inline: Vec<Compiled>,
     pub recipes: Recipes,
+    pub data: Vec<DataLiteral>,
     /// The switch tables (`Code::tables`). A target is 0 until `finish`, which fills each `(index, label)` of `table_fix` with the `pc`.
     pub tables: Vec<u32>,
     pub table_fix: Vec<(usize, Lb)>,
@@ -375,6 +377,7 @@ impl<'a> Fc<'a> {
             children: Vec::new(),
             inline: Vec::new(),
             recipes: Recipes::default(),
+            data: Vec::new(),
             tables: Vec::new(),
             table_fix: Vec::new(),
             unit_buf: Vec::new(),
@@ -936,6 +939,7 @@ impl<'a> Fc<'a> {
         code.atoms = self.atom_tab;
         code.funcs = self.funcs;
         code.recipes = self.recipes;
+        code.data = self.data;
         code.tables = self.tables;
         code.sites = self.sites;
         code.roots = roots;

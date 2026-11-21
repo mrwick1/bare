@@ -652,7 +652,7 @@ pub(crate) fn install_onabort<E: Eng>(d: &Dom<E>, it: &mut E::Vm, proto: E::Obj)
 pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
     let p = d.p();
     let g = s.global();
-    for o in [g, d.obj_local(s, p.document), d.obj_local(s, p.html), d.obj_local(s, p.svg)] {
+    for o in [g, d.obj_local(s, p.document), d.obj_local(s, p.shadow), d.obj_local(s, p.html), d.obj_local(s, p.svg)] {
         s.set_lazy(o, false)?;
     }
     let et = d.obj_local(s, p.et);

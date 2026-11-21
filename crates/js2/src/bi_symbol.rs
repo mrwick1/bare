@@ -17,9 +17,7 @@
 //! and `[Symbol.toStringTag]`, the symbols as keys of the property operations and of the object literal and class, `ToPrimitive`
 //! (`Symbol.toPrimitive`), `instanceof` (`Symbol.hasInstance`), `Object.prototype.toString` (`Symbol.toStringTag`),
 //! `Object.getOwnPropertySymbols`, `Object.assign` and the spread of an object (symbols are copied), `Object.getOwnPropertyDescriptors`,
-//! `Object.defineProperties`. **Later:** `Symbol.match`, `matchAll`, `replace`, `search`, `split`, `unscopables` and `isConcatSpreadable`
-//! (they need `RegExp`, `with` and `Array.prototype.concat` to read them); `Symbol.iterator`, `asyncIterator` and `species` are values
-//! that no built-in reads yet (the iterator protocol is step G3 and `species` is step P3).
+//! `Object.defineProperties`, and the symbols for the iterator and RegExp protocols.
 use crate::builtins::{HIDDEN, NativeFn, arg};
 use crate::heap::Heap;
 use crate::interp_rt::{Key, R, Realm};
@@ -29,7 +27,7 @@ use crate::string::{Chars, FLAG_REGISTERED, Str};
 use crate::value::Value;
 
 /// The number of well-known symbols that `Symbol` has, and their places in `Realm::wk`.
-pub(crate) const WK: usize = 6;
+pub(crate) const WK: usize = 11;
 #[allow(dead_code)] // `iterator`, `asyncIterator` and `species` are read by steps G3 and P3.
 pub(crate) const ITERATOR: usize = 0;
 #[allow(dead_code)]
@@ -39,8 +37,14 @@ pub(crate) const SPECIES: usize = 2;
 pub(crate) const TO_STRING_TAG: usize = 3;
 pub(crate) const HAS_INSTANCE: usize = 4;
 pub(crate) const TO_PRIMITIVE: usize = 5;
+pub(crate) const MATCH: usize = 6;
+pub(crate) const MATCH_ALL: usize = 7;
+pub(crate) const REPLACE: usize = 8;
+pub(crate) const SEARCH: usize = 9;
+pub(crate) const SPLIT: usize = 10;
 /// The descriptions of the well-known symbols: `"Symbol."` and the name of the property of `Symbol`.
-const WK_DESC: [&str; WK] = ["Symbol.iterator", "Symbol.asyncIterator", "Symbol.species", "Symbol.toStringTag", "Symbol.hasInstance", "Symbol.toPrimitive"];
+const WK_DESC: [&str; WK] = ["Symbol.iterator", "Symbol.asyncIterator", "Symbol.species", "Symbol.toStringTag", "Symbol.hasInstance", "Symbol.toPrimitive",
+    "Symbol.match", "Symbol.matchAll", "Symbol.replace", "Symbol.search", "Symbol.split"];
 /// The name of the native `Function.prototype[Symbol.hasInstance]`: `Realm::instance_of` skips the call for it.
 pub(crate) const HAS_INSTANCE_NAME: &str = "[Symbol.hasInstance]";
 
