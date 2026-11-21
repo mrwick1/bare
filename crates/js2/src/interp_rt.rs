@@ -51,7 +51,7 @@ use crate::codes::Codes;
 use crate::interp::LazyCompile;
 use crate::reenter::Machine;
 use crate::builtins::{Hint, Native};
-use crate::object::{Ctx, F_CLASS, F_ELEMS_FIXED, F_ELEMS_RO, F_HOST, F_LAZY, F_LEN_RO, F_NATIVE, F_NOEXT, F_PROTO, F_SLOWIDX, F_WRAP, Obj};
+use crate::object::{Ctx, F_CLASS, F_ELEMS_FIXED, F_ELEMS_RO, F_HOST, F_LAZY, F_LEN_RO, F_NATIVE, F_NOEXT, F_PROTO, F_SLOWIDX, K_WRAP, Obj};
 use crate::shapes::{A_ACC, A_C, A_E, A_W, ShapeId, Shapes};
 use crate::string::{Chars, Str};
 use crate::value::{Kind, Value};
@@ -297,6 +297,8 @@ pub struct Realm {
     pub s_func: ShapeId,
     /// The shape of an arguments object: an array with the prototype of `Object`.
     pub s_args: ShapeId,
+    /// `%Array.prototype.values%`, the value of `Symbol.iterator` of each arguments object; made at the first one (`Realm::new_args`).
+    pub(crate) args_iter: Value,
     pub k_constructor: Str,
     pub k_raw: Str,
     /// Counter of the private names (`NewPrivateName`).
@@ -423,10 +425,12 @@ impl Realm {
         let f = shapes.add(f, k_home, 0).expect("shape");
         let f = shapes.add(f, k_fields, 0).expect("shape");
         let s_func = shapes.add(f, k_link, 0).expect("shape");
-        let s_args = shapes.root(Layout::Indexed, Some(object_proto.cell()), 0);
         let mk = |heap: &mut Heap| Obj::new(heap, &shapes, s_object).expect("memory");
         let (string_proto, number_proto, boolean_proto, symbol_proto) = (mk(&mut heap), mk(&mut heap), mk(&mut heap), mk(&mut heap));
         let wk = crate::bi_symbol::well_known(&mut heap);
+        // An arguments object has the own property `Symbol.iterator` (slot 0): `%Array.prototype.values%`, set when the object is made.
+        let s_args = shapes.root(Layout::Indexed, Some(object_proto.cell()), 1);
+        let s_args = shapes.add(s_args, wk[crate::bi_symbol::ITERATOR], crate::builtins::HIDDEN).expect("shape");
         let pr = crate::promise::Promises::new(&mut heap, &mut shapes, s_object, k_then, k_pstate, k_presult);
         // The prototypes of `TypeError` and the others inherit from `Error.prototype`.
         let eshape = shapes.root(Layout::Object, Some(error_proto.cell()), 4);
@@ -468,6 +472,7 @@ impl Realm {
             s_array,
             s_func,
             s_args,
+            args_iter: Value::UNDEFINED,
             k_constructor,
             k_raw,
             private_n: 0,
@@ -1325,7 +1330,7 @@ impl Realm {
     /// prototype chain of the receiver.
     fn fill_proto(&mut self, fb: &mut Feedback, site: usize, o: Obj, name: Str) {
         // `prototype` of a function, `length` of an array and of a wrapper, and the indexes of a wrapper are not in the shape or the chain only.
-        if name == self.k_prototype || o.has_flag(F_WRAP) {
+        if name == self.k_prototype || o.is_kind(K_WRAP) {
             return;
         }
         // The shape after the read: the read may have given a function its own properties.

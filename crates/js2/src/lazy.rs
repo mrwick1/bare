@@ -4,7 +4,7 @@
 //! records the table; a property is made at the first lookup that needs it, with the same attributes, the same native and the same lazy
 //! `length` and `name` as an eager install. So a realm pays for the properties that a script uses, and no more.
 //!
-//! **The flag.** An object that has a table with entries left has [`F_LAZYTAB`]. The flag is the only cost on the paths that do not
+//! **The flag.** An object that has a table with entries left has [`F_LAZYTAB`] (`object.rs`). The flag is the only cost on the paths that do not
 //! look at a name of such an object. Each place that reads, tests, defines, deletes or lists an own property of an object calls
 //! [`Realm::lazy_prep`] (one name) or [`Realm::lazy_all`] (all names) first. Both are called from `fn_prep` and `fn_prep_all`
 //! (`builtins.rs`), from the walks along a prototype chain (`lookup_g`, `proto_setter`, `proto_target`), and from `define_attrs`.
@@ -24,14 +24,10 @@
 //! the rest in table order after a listing. ECMA-262 does not fix this order (owner decision 2, 2026-11-20).
 use crate::builtins::{HIDDEN, NativeFn};
 use crate::interp_rt::{Key, Realm};
-use crate::object::Obj;
+use crate::object::{F_LAZYTAB, Obj};
 use crate::bi_object::Desc;
 use crate::string::{Chars, Str};
 use crate::value::Value;
-
-/// Object header flag: the object has a lazy table with entries left. Bits 16 to 18 are `F_COLL`, bit 19 is `F_DATE` or `F_HOST`, bit 20 is
-/// `F_LAZYM`, bit 23 is `F_PROTO`.
-pub const F_LAZYTAB: u32 = 1 << 21;
 
 /// What a table entry makes.
 #[derive(Clone, Copy)]
@@ -314,6 +310,29 @@ impl Realm {
             self.keep(v);
         }
         self.define_attrs(o, k, HIDDEN, v).expect("define");
+    }
+
+    /// An arguments object that holds `args`, with the own `Symbol.iterator` that is `%Array.prototype.values%`.
+    #[inline(never)]
+    pub(crate) fn new_args(&mut self, args: &[Value]) -> Value {
+        if self.args_iter.is_undefined() {
+            self.args_iter = self.array_values();
+        }
+        let o = Obj::array(&mut self.heap, &self.shapes, self.s_args, args).expect("memory");
+        o.set_slot(&self.shapes, 0, self.args_iter);
+        o.value()
+    }
+
+    /// `%Array.prototype.values%`: made now if it is not, and the same function whatever a script did to the property since. A realm with
+    /// no compiler cannot make it (it is a function of the prelude): the property is `undefined` there.
+    #[cold]
+    fn array_values(&mut self) -> Value {
+        if self.lazy.is_none() {
+            return Value::UNDEFINED;
+        }
+        let (ap, k) = (self.array_proto, self.intern("values"));
+        self.lazy_prep(ap, k);
+        self.shared_fn(ap, "values")
     }
 
     /// The function that the method `name` of `o` was made as.
