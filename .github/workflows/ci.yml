@@ -57,7 +57,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
         with: { components: miri }
-      - run: 'cargo miri test --locked -p bare-js2 --lib -- cell:: heap:: string:: atoms:: shapes:: blob:: gc:: object:: codes:: interp_rt:: interp:: api::'
+      - run: 'cargo miri test --locked -p bare-js2 --lib -- cell:: heap:: string:: atoms:: shapes:: blob:: bi_collections:: gc:: object:: codes:: interp_rt:: interp:: api::'
   # Automatic fix runs push autofix/* branches. They must not change the
   # workflows, because the workflows are the merge gate.
   guard:
