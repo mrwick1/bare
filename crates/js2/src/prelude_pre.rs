@@ -53,8 +53,7 @@ pub(crate) const PRE: &[(&str, Pd)] = &[
     ("mergeSort", Func("mergeSort")),
     ("sortList", Func("sortList")),
     ("flatten", Func("flatten")),
-    ("arrayIterator", Func("arrayIterator")),
-    ("arrayIteratorNext", Func("arrayIteratorNext")),
+    ("arrayIterator", Native(crate::bi_typed::array_iterator, 2, "arrayIterator")),
     ("arrayIteratorProto", ArrayIter),
     ("rawDefine", Native(crate::bi_object::object_define_property, 3, "defineProperty")),
     ("keys", Native(crate::bi_object::object_keys, 1, "keys")),
@@ -92,7 +91,7 @@ impl Realm {
         let v = match &PRE[i].1 {
             Func(top) => self.pre_fn(top, top)?,
             Native(f, len, name) => self.new_native(*f, false, *len, name).value(),
-            ArrayIter => self.array_iterator_proto()?,
+            ArrayIter => return self.array_iterator_proto(),
         };
         self.pre[i] = v;
         self.keep(v);
@@ -100,18 +99,24 @@ impl Realm {
     }
 
     /// `%ArrayIteratorPrototype%`: an object with `next` and the tag `Array Iterator`, below `%IteratorPrototype%`.
-    fn array_iterator_proto(&mut self) -> R<Value> {
+    pub(crate) fn array_iterator_proto(&mut self) -> R<Value> {
+        // The prelude slot also holds the prototype for typed array iterators.
+        let slot = slot("arrayIteratorProto").expect("prelude slot") as usize;
+        if !self.pre[slot].is_undefined() {
+            return Ok(self.pre[slot]);
+        }
         let ip = Realm::obj(self.iterator_prototype()).expect("an object");
         let proto = Obj::new(&mut self.heap, &self.shapes, self.s_object).expect("memory");
         proto.set_proto(&mut self.shapes, Some(ip.cell()));
-        // A root while the next function is made.
-        self.keep(proto.value());
-        let next = self.pre_fn("arrayIteratorNext", "next")?;
+        let next = self.new_native(crate::bi_typed::iterator_next, false, 0, "next");
         let k = self.intern("next");
-        self.define_attrs(proto, Key::Name(k), HIDDEN, next)?;
+        self.define_attrs(proto, Key::Name(k), HIDDEN, next.value())?;
         let tag = self.string("Array Iterator");
         self.define_attrs(proto, Key::Name(self.wk[TO_STRING_TAG]), A_C, tag)?;
-        Ok(proto.value())
+        let value = proto.value();
+        self.pre[slot] = value;
+        self.keep(value);
+        Ok(value)
     }
 }
 

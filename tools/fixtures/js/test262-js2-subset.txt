@@ -54,3 +54,9 @@ built-ins/Number
 built-ins/Math
 built-ins/JSON
 built-ins/Date
+
+# Buffer and view built-ins.
+built-ins/ArrayBuffer
+built-ins/TypedArray
+built-ins/TypedArrayConstructors
+built-ins/DataView

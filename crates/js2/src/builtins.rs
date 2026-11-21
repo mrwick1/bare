@@ -335,6 +335,7 @@ impl Realm {
         self.install_collections();
         self.install_date();
         self.install_reflect();
+        self.lazy_table(g, crate::bi_buffer::GLOBALS);
     }
 
     fn install_function(&mut self) {

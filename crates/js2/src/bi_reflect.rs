@@ -112,6 +112,11 @@ fn get(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let recv = if args.len() > 2 { args[2] } else { o.value() };
     let mut p = Some(o);
     while let Some(c) = p {
+        if c.is_kind(crate::object::K_TYPED)
+            && let Some(i) = crate::bi_typed::numeric_key(key)
+        {
+            return Ok(i.and_then(|i| rt.typed_get(c, i)).unwrap_or(Value::UNDEFINED));
+        }
         match rt.get_own(c, key) {
             Some(Own::Data(v, _)) => return Ok(v),
             Some(Own::Acc(g, ..)) => {
@@ -161,8 +166,7 @@ fn own_keys(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
 
 fn prevent_extensions(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let o = target(rt, arg(args, 0), "preventExtensions")?;
-    rt.prevent_extensions(o);
-    Ok(Value::TRUE)
+    Ok(Value::bool(rt.prevent_extensions(o)))
 }
 
 /// `Reflect.set(target, key, v, receiver)`: `OrdinarySet`. The result is false where `Object.assign` and strict code would throw.
@@ -172,6 +176,17 @@ fn set(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let (v, recv) = (arg(args, 2), if args.len() > 3 { args[3] } else { o.value() });
     let mut p = Some(o);
     while let Some(c) = p {
+        if c.is_kind(crate::object::K_TYPED)
+            && let Some(i) = crate::bi_typed::numeric_key(key)
+        {
+            if c.value() == recv {
+                rt.typed_set(c, i, v)?;
+                return Ok(Value::TRUE);
+            }
+            if !i.is_some_and(|i| i < rt.typed_len(c)) {
+                return Ok(Value::TRUE);
+            }
+        }
         match rt.get_own(c, key) {
             Some(Own::Acc(_, s, _)) => {
                 if s.is_undefined() {
