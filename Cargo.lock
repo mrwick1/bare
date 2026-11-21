@@ -175,6 +175,7 @@ dependencies = [
  "bare-tzdata",
  "bare-unicode",
  "icu_properties",
+ "stacker",
 ]
 
 [[package]]

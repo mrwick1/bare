@@ -1089,3 +1089,11 @@ fn a_regular_expression_literal_with_a_bad_pattern_is_an_early_error() {
         both(s, true);
     }
 }
+
+#[test]
+fn deep_classes_respect_the_caller_stack() {
+    std::thread::Builder::new().stack_size(2 << 20).spawn(|| {
+        let src = format!("{}{}", "class A { m(){".repeat(5000), "}}".repeat(5000));
+        assert_eq!(parse_script(&src, Limits::default()).unwrap_err().kind, ErrorKind::Limit(LimitKind::Depth));
+    }).unwrap().join().unwrap();
+}
