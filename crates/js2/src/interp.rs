@@ -1032,7 +1032,12 @@ impl Vm {
         macro_rules! call_set {
             ($f:expr, $this:expr, $v:expr, $next:expr) => {{
                 let (f, this, v): (Value, Value, Value) = ($f, $this, $v);
-                let Some((ni, cctx)) = realm.function(f) else { err!(ErrKind::Type, "a setter is not a function") };
+                let Some((ni, cctx)) = realm.function(f) else {
+                    // A setter written in Rust (a host function), or no function: the nested call runs it or throws.
+                    std::hint::cold_path();
+                    tri!(realm.call_setter_slow(f, this, v));
+                    return M::go(ci, fp, $next);
+                };
                 let nf = fp + code.nregs as usize + REC;
                 ensure!(nf + 8);
                 stack[nf] = v;

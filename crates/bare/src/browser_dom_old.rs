@@ -8,6 +8,7 @@ use crate::browser_scoped::*;
 use bare_html::dom::NodeId;
 use bare_js::eval::Interp;
 use bare_js::value::{ObjId, Value};
+use bare_js_api::Attrs;
 
 type V = R<Value>;
 
@@ -76,23 +77,28 @@ pub(crate) fn link_proto(d: &Dom, it: &mut Interp<'_>) -> R<ObjId> {
 
 /// `before`, `after`, `replaceWith`, `replaceChildren`, `insertAdjacent*`, `createDocumentFragment`: installed after every other global, so their function ids do not move a host function that came before.
 /// Deviation, for the cost of a realm: `Element` and `CharacterData` share one function object for each ChildNode method (Chrome has two).
-pub(crate) fn install_late(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    d.def_method_s(it, d.p().document, "createDocumentFragment", 0, create_document_fragment)?;
+pub(crate) fn install_late<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+    d.def_method_at(s, d.p().document, "createDocumentFragment", 0, create_document_fragment)?;
     let hs: [(&str, HS); 3] = [("before", |d, s, t, a| child_node(d, s, t, a, 0)), ("after", |d, s, t, a| child_node(d, s, t, a, 1)), ("replaceWith", |d, s, t, a| child_node(d, s, t, a, 2))];
     for (name, h) in hs {
-        let f = d.def_method_s(it, d.p().element, name, 0, h)?;
-        let k = d.key(it, name)?;
-        it.define_data(d.p().chardata, k, Value::Object(f), true, false, true)?;
+        let f = d.def_method_at(s, d.p().element, name, 0, h)?;
+        let chardata = d.obj_local(s, d.p().chardata);
+        s.define_str(chardata, name, f, Attrs::METHOD)?;
     }
     // `replaceChildren` is one function object on Element, DocumentFragment and Document (a deviation, for the cost of a realm: Chrome has two).
-    let f = d.def_method_s(it, d.p().element, "replaceChildren", 0, replace_children)?;
-    let k = d.key(it, "replaceChildren")?;
-    it.define_data(d.p().fragment, k, Value::Object(f), true, false, true)?;
-    it.define_data(d.p().document, k, Value::Object(f), true, false, true)?;
-    d.def_method_s(it, d.p().element, "insertAdjacentElement", 2, insert_adjacent_element)?;
-    d.def_method_s(it, d.p().element, "insertAdjacentText", 2, insert_adjacent_text)?;
-    d.def_method_s(it, d.p().element, "insertAdjacentHTML", 2, crate::browser_fragment::insert_adjacent_html)?;
-    crate::browser_implementation::install(d, it)
+    let f = d.def_method_at(s, d.p().element, "replaceChildren", 0, replace_children)?;
+    for o in [d.p().fragment, d.p().document] {
+        let o = d.obj_local(s, o);
+        s.define_str(o, "replaceChildren", f, Attrs::METHOD)?;
+    }
+    table!(rows1 = [
+        Row::method(1, "insertAdjacentElement", 2, insert_adjacent_element),
+        Row::method(1, "insertAdjacentText", 2, insert_adjacent_text),
+        Row::method(1, "insertAdjacentHTML", 2, crate::browser_fragment::insert_adjacent_html),
+    ]);
+    let targets = [d.obj_local(s, d.p().element)];
+    d.install_rows(s, &targets, &rows1::T)?;
+    crate::browser_implementation::install(d, s)
 }
 
 pub(crate) fn new_fragment(d: &Dom, it: &mut Interp<'_>, proto: Option<ObjId>) -> V {

@@ -570,6 +570,6 @@ pub(crate) fn element_bounding(d: &Dom, it: &mut Interp<'_>, el: NodeId) -> R<Re
     Ok(union(&element_rects(d, it, el)?))
 }
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    d.def_method_s(it, d.p().element, "getClientRects", 0, client_rects).map(|_| ())
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+    d.def_method_at(s, d.p().element, "getClientRects", 0, client_rects).map(|_| ())
 }

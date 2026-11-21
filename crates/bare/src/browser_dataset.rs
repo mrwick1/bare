@@ -337,27 +337,19 @@ fn svg_dataset<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) ->
 
 // ------------------------------------------------------------------------------------ install and GC hooks
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    let g = *d.global.get().expect("installed");
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
     let p = d.p();
-    let proto = d.obj(it, it.object_prototype())?;
+    let proto = d.plain_s(s)?;
     let _ = d.dataset.proto.set(proto);
-    let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
-    let f = d.add_fn_s_obj(it, illegal_constructor, "DOMStringMap", 0, bare_js_api::HostFn::Ctor)?;
-    it.define_data(f, kp, Value::Object(proto), false, false, false)?;
-    it.define_data(proto, kc, Value::Object(f), true, false, true)?;
-    let k = d.key(it, "DOMStringMap")?;
-    it.define_data(g, k, Value::Object(f), true, false, true)?;
+    let f = d.interface_s(s, proto, "DOMStringMap", illegal_constructor, 0, HostFn::Ctor)?;
     // `DOMStringMap.prototype[Symbol.toStringTag]` is "DOMStringMap".
-    let (ks, kt) = (d.key(it, "Symbol")?, d.key(it, "toStringTag")?);
-    let sy = it.get_value(Value::Object(g), ks)?;
-    if let Value::Symbol(s) = it.get_value(sy, kt)? {
-        // Not `js_str`: a constant of the setup is not script data, and a small `max_string_bytes` must not stop the browser.
-        let tag = Value::String(it.heap.intern_str("DOMStringMap").map_err(|e| it.heap_error(e))?);
-        it.define_data(proto, PropertyKey::Symbol(s), tag, false, false, true)?;
-    }
-    d.def_get_s(it, p.html, "dataset", html_dataset, None)?;
-    d.def_get_s(it, p.svg, "dataset", svg_dataset, None)?;
+    d.tag_s(s, proto, "DOMStringMap")?;
+    table!(rows1 = [
+        Row::get(1, "dataset", html_dataset, None),
+        Row::get(2, "dataset", svg_dataset, None),
+    ]);
+    let targets = [d.obj_local(s, p.html), d.obj_local(s, p.svg)];
+    d.install_rows(s, &targets, &rows1::T)?;
     *d.dataset.fixed.borrow_mut() = vec![proto, f];
     Ok(())
 }

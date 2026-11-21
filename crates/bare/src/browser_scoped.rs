@@ -8,7 +8,8 @@ use bare_html::dom::{Document, NodeId};
 use std::rc::Rc;
 use bare_js::eval::{Error, Interp};
 use bare_js::value::{ObjId, Value};
-use bare_js_api::{Abort, Args, Attrs, Engine, HostFn, Local, Persistent, Scope, Type};
+pub(crate) use bare_js_api::{Attrs, HostFn, Intrinsic};
+use bare_js_api::{Abort, Args, Engine, Local, Persistent, Scope, Type};
 
 /// A host method of the new form: the DOM, the scope, `this`, the arguments.
 pub(crate) type HS = for<'s, 'p> fn(&Dom, &mut Sc<'s, 'p>, Local<'s>, Args<'s>) -> Res<'s, Local<'s>>;
@@ -25,6 +26,128 @@ pub(crate) struct Scoped {
     /// What `call_scoped` stores in `style.cur`.
     cur: u32,
 }
+
+/// What a row of a table makes (see [`Row`]).
+#[derive(Clone, Copy)]
+pub(crate) enum Mem {
+    /// A method with this `length`.
+    Method(HS, u32),
+    /// A getter, and a setter when there is one.
+    Get(HS, Option<HS>),
+    /// One function that is the getter and the setter: a lazy global.
+    Both(HS),
+}
+
+/// A member of a static table of host members. `on` is a mask of the targets that the install call names (bit `i` is `targets[i]`).
+#[derive(Clone, Copy)]
+pub(crate) struct Row {
+    on: u32,
+    name: &'static str,
+    mem: Mem,
+    attrs: Attrs,
+}
+
+impl Row {
+    /// A method (not enumerable).
+    pub(crate) const fn method(on: u32, name: &'static str, len: u32, h: HS) -> Row {
+        Row { on, name, mem: Mem::Method(h, len), attrs: Attrs::METHOD }
+    }
+
+    /// An accessor of a WebIDL attribute (enumerable), or a getter when `set` is `None`.
+    pub(crate) const fn get(on: u32, name: &'static str, get: HS, set: Option<HS>) -> Row {
+        Row { on, name, mem: Mem::Get(get, set), attrs: Attrs { writable: false, enumerable: true, configurable: true } }
+    }
+
+    /// A lazy global: one function is the getter and the setter (not enumerable).
+    pub(crate) const fn both(on: u32, name: &'static str, h: HS) -> Row {
+        Row { on, name, mem: Mem::Both(h), attrs: Attrs { writable: false, enumerable: false, configurable: true } }
+    }
+
+    /// The same row with `enumerable` set.
+    pub(crate) const fn enumerable(mut self) -> Row {
+        self.attrs.enumerable = true;
+        self
+    }
+}
+
+fn no_handler<'s>(_: &Dom, _: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    unreachable!("a placeholder of a table")
+}
+
+/// How many handlers the rows hold (a getter with a setter holds two).
+pub(crate) const fn handlers(rows: &[Row]) -> usize {
+    let (mut i, mut n) = (0, 0);
+    while i < rows.len() {
+        n += match rows[i].mem {
+            Mem::Get(_, Some(_)) => 2,
+            _ => 1,
+        };
+        i += 1;
+    }
+    n
+}
+
+/// The rows of a table as the table of `Engine::install_table` and the handlers that its ids name. Both are made at compile time, so a
+/// window pays for neither. Row `i` of `defs` has the ids of its handlers in `hs`.
+pub(crate) struct Table<const N: usize, const H: usize> {
+    defs: [bare_js_api::Def; N],
+    hs: [HS; H],
+}
+
+impl<const N: usize, const H: usize> Table<N, H> {
+    pub(crate) const fn new(rows: &[Row]) -> Self {
+        assert!(rows.len() == N && handlers(rows) == H);
+        let mut defs = [bare_js_api::Def::number("", 0, 0.0); N];
+        let mut hs: [HS; H] = [no_handler; H];
+        let (mut i, mut h) = (0, 0);
+        while i < N {
+            let r = rows[i];
+            defs[i] = match r.mem {
+                Mem::Method(f, len) => {
+                    hs[h] = f;
+                    h += 1;
+                    bare_js_api::Def::method(r.name, r.on, h as u32 - 1, len)
+                }
+                Mem::Get(g, set) => {
+                    hs[h] = g;
+                    h += 1;
+                    let st = match set {
+                        Some(f) => {
+                            hs[h] = f;
+                            h += 1;
+                            Some(h as u32 - 1)
+                        }
+                        None => None,
+                    };
+                    bare_js_api::Def::accessor(r.name, r.on, if st.is_some() { h as u32 - 2 } else { h as u32 - 1 }, st)
+                }
+                Mem::Both(f) => {
+                    hs[h] = f;
+                    h += 1;
+                    bare_js_api::Def::both(r.name, r.on, h as u32 - 1)
+                }
+            }
+            .with(r.attrs);
+            i += 1;
+        }
+        Table { defs, hs }
+    }
+}
+
+/// A static table of host members: `table!(name = [Row::method(1, "item", 1, item), ...])` makes the module `name` with the table
+/// `name::T`. The handlers are in scope of the module as in the file.
+macro_rules! table {
+    ($name:ident = [$($row:expr),* $(,)?]) => {
+        mod $name {
+            #[allow(unused_imports)]
+            use super::*;
+            use $crate::browser_scoped::{handlers, Row, Table};
+            pub(super) const ROWS: &[Row] = &[$($row),*];
+            pub(super) static T: Table<{ ROWS.len() }, { handlers(ROWS) }> = Table::new(ROWS);
+        }
+    };
+}
+pub(crate) use table;
 
 /// What a scope gives to the hooks around a handler: the engine, and the way to give it an error of the old engine.
 pub(crate) trait Entry<'p> {
@@ -106,6 +229,17 @@ impl Dom {
     #[inline(never)]
     fn call_scoped_ce<'s, 'p>(&self, s: &mut Sc<'s, 'p>, f: HS, this: Local<'s>, args: Args<'s>) -> Res<'s, Local<'s>> {
         self.dispatch_ce(s, |s| f(self, s, this, args))
+    }
+
+    /// Install a static table (`Engine::install_table`): the handlers of the table get the next ids of `Dom::scoped`.
+    pub(crate) fn install_rows<'s, const N: usize, const H: usize>(&self, s: &mut Sc<'s, '_>, targets: &[Local<'s>], t: &'static Table<N, H>) -> Res<'s, ()> {
+        let base = {
+            let mut v = self.scoped.borrow_mut();
+            let base = v.len() as u32;
+            v.extend(t.hs.iter().enumerate().map(|(i, &f)| Scoped { f, needs_new: false, cur: (base + i as u32) | CUR_NEW }));
+            base
+        };
+        s.install_table(targets, base, &t.defs)
     }
 
     /// Make a function of the new form. Its id is its index in `Dom::scoped`.
@@ -347,20 +481,52 @@ impl Dom {
 
     /// `Dom::obj`: a new object of the host with the prototype `proto`.
     pub(crate) fn obj_s<'s>(&self, s: &mut Sc<'s, '_>, proto: ObjId) -> Res<'s, ObjId> {
-        old(s, |it| self.obj(it, proto))
+        let o = self.obj_with_s(s, proto)?;
+        Ok(obj_of(s, o))
+    }
+
+    /// `Dom::obj(it, it.object_prototype())`: a new ordinary object.
+    pub(crate) fn plain_s<'s>(&self, s: &mut Sc<'s, '_>) -> Res<'s, ObjId> {
+        let o = s.new_object()?;
+        Ok(obj_of(s, o))
     }
 
     /// `Dom::obj` into a local: a new object with the prototype `proto`.
     pub(crate) fn obj_with_s<'s>(&self, s: &mut Sc<'s, '_>, proto: ObjId) -> Res<'s, Local<'s>> {
-        let o = self.obj_s(s, proto)?;
-        Ok(self.obj_local(s, o))
+        let p = self.obj_local(s, proto);
+        s.new_object_with(p)
+    }
+
+    /// An interface object: a function `name` with the prototype `proto`, linked both ways, and a property of `window`. Gives the function.
+    pub(crate) fn interface_s<'s>(&self, s: &mut Sc<'s, '_>, proto: ObjId, name: &str, h: HS, len: u32, kind: HostFn) -> Res<'s, ObjId> {
+        let f = self.add_fn_s(s, h, name, len, kind)?;
+        self.link_s(s, f, proto, name)
+    }
+
+    /// `interface_s` for a function that is made already.
+    pub(crate) fn link_s<'s>(&self, s: &mut Sc<'s, '_>, f: Local<'s>, proto: ObjId, name: &str) -> Res<'s, ObjId> {
+        let p = self.obj_local(s, proto);
+        s.define_str(f, "prototype", p, Attrs { writable: false, enumerable: false, configurable: false })?;
+        s.define_str(p, "constructor", f, Attrs::METHOD)?;
+        let g = s.global();
+        s.define_str(g, name, f, Attrs::METHOD)?;
+        Ok(obj_of(s, f))
+    }
+
+    /// `proto[Symbol.toStringTag] = name`, so `Object.prototype.toString` says `[object name]`.
+    pub(crate) fn tag_s<'s>(&self, s: &mut Sc<'s, '_>, proto: ObjId, name: &str) -> Res<'s, ()> {
+        let p = self.obj_local(s, proto);
+        let key = s.intrinsic(Intrinsic::SymbolToStringTag);
+        let t = s.string(name)?;
+        s.define(p, key, t, Attrs { writable: false, enumerable: false, configurable: true })
     }
 
     /// `def_method` on an object that a handler made: a function of the new form as a method of `target`. `enumerable` is false for an
     /// ordinary method and true for a WebIDL one.
-    pub(crate) fn def_method_l<'s>(&self, s: &mut Sc<'s, '_>, target: Local<'s>, name: &str, len: u32, h: HS, enumerable: bool) -> Res<'s, ()> {
+    pub(crate) fn def_method_l<'s>(&self, s: &mut Sc<'s, '_>, target: Local<'s>, name: &str, len: u32, h: HS, enumerable: bool) -> Res<'s, Local<'s>> {
         let f = self.add_fn_s(s, h, name, len, HostFn::Method)?;
-        s.define_str(target, name, f, Attrs { writable: true, enumerable, configurable: true })
+        s.define_str(target, name, f, Attrs { writable: true, enumerable, configurable: true })?;
+        Ok(f)
     }
 
     /// `def_get` on an object that a handler made: an accessor of functions of the new form.
@@ -371,6 +537,18 @@ impl Dom {
             None => None,
         };
         s.define_accessor_str(target, name, Some(g), st, Attrs { writable: false, enumerable: true, configurable: true })
+    }
+
+    /// `def_method_s` for a scope: a function of the new form as a method of the object `target`.
+    pub(crate) fn def_method_at<'s>(&self, s: &mut Sc<'s, '_>, target: ObjId, name: &str, len: u32, h: HS) -> Res<'s, Local<'s>> {
+        let t = self.obj_local(s, target);
+        self.def_method_l(s, t, name, len, h, false)
+    }
+
+    /// `def_get_s` for a scope: an accessor of functions of the new form on the object `target`.
+    pub(crate) fn def_get_at<'s>(&self, s: &mut Sc<'s, '_>, target: ObjId, name: &str, get: HS, set: Option<HS>) -> Res<'s, ()> {
+        let t = self.obj_local(s, target);
+        self.def_get_l(s, t, name, get, set)
     }
 
     /// `Dom::new_source`.

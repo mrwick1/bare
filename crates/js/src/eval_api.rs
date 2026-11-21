@@ -234,6 +234,58 @@ impl<'p> Interp<'p> {
         }
     }
 
+    /// `Engine::install_table`: one pass over the rows. The name of a row is interned once and serves as the key and as the name of a method.
+    fn api_install_table(&mut self, targets: &[bare_js_api::Local<'_>], id_base: u32, defs: &'static [bare_js_api::Def]) -> Result<(), Error> {
+        use bare_js_api::DefKind;
+        assert!(id_base < 1 << 31 && targets.len() <= 32, "a host id is below 2^31, and a table has at most 32 targets");
+        let mut objs = [None; 32];
+        for (o, &t) in objs.iter_mut().zip(targets) {
+            *o = Some(self.api_obj(t)?);
+        }
+        let mut text = String::new();
+        let host_fn = |it: &mut Self, id: u32, len: u32, name: StrId| -> Result<ObjId, Error> {
+            let f = it.new_func_object(Callee::ApiHost { id, ctor: false, nt: false })?;
+            h!(it, it.heap.init_function(f, (it.k_length, len as f64), (it.k_name, name)));
+            Ok(f)
+        };
+        for d in defs {
+            let name = h!(self, self.heap.atom_str(d.name));
+            let key = h!(self, self.heap.key_from_string(name));
+            let a = d.attrs;
+            let (mut f, mut st) = (None, None);
+            match d.kind {
+                DefKind::Method { id, len } => f = Some(host_fn(self, id_base + id, len, name)?),
+                DefKind::Accessor { get, set } => {
+                    text.clear();
+                    text.push_str("get ");
+                    text.push_str(d.name);
+                    let n = h!(self, self.heap.intern_str(&text));
+                    f = Some(host_fn(self, id_base + get, 0, n)?);
+                    if let Some(id) = set {
+                        text.replace_range(..3, "set");
+                        let n = h!(self, self.heap.intern_str(&text));
+                        st = Some(host_fn(self, id_base + id, 1, n)?);
+                    }
+                }
+                DefKind::Both { id } => f = Some(host_fn(self, id_base + id, 0, name)?),
+                DefKind::Number(_) => {}
+            }
+            for (i, o) in objs.iter().enumerate() {
+                let (true, Some(o)) = (d.on >> i & 1 != 0, *o) else { continue };
+                match d.kind {
+                    DefKind::Method { .. } => self.define_data(o, key, Value::Object(f.expect("a method")), a.writable, a.enumerable, a.configurable)?,
+                    DefKind::Number(n) => self.define_data(o, key, Value::Number(n), a.writable, a.enumerable, a.configurable)?,
+                    DefKind::Accessor { .. } | DefKind::Both { .. } => {
+                        let st = if matches!(d.kind, DefKind::Both { .. }) { f } else { st };
+                        let desc = PropertyDescriptor { get: Some(f), set: Some(st), enumerable: Some(a.enumerable), configurable: Some(a.configurable), ..Default::default() };
+                        h!(self, self.heap.define_own_property(o, key, &desc));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// The result of the old engine as a local, or the error of the interface.
     fn api_ret<'s>(&mut self, r: Result<Value, Error>) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
         match r {
@@ -646,6 +698,14 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
         }
     }
 
+    fn new_object_with<'s>(&mut self, proto: bare_js_api::Local<'_>) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
+        let r = self.api_obj(proto).and_then(|p| self.heap.new_object(Some(p)).map_err(|e| self.herr(e)));
+        match r {
+            Ok(o) => Ok(self.api_push(Value::Object(o))),
+            Err(e) => Err(self.api_err(e)),
+        }
+    }
+
     fn get<'s>(&mut self, obj: bare_js_api::Local<'_>, key: bare_js_api::Local<'_>) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
         let r = self.api_key(key).and_then(|k| self.get_value(self.api_at(obj), k));
         match r {
@@ -728,6 +788,11 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
             Ok(o) => Ok(self.api_push(Value::Object(o))),
             Err(e) => Err(self.api_err(e)),
         }
+    }
+
+    fn install_table<'s>(&mut self, targets: &[bare_js_api::Local<'_>], id_base: u32, defs: &'static [bare_js_api::Def]) -> Result<(), bare_js_api::Error<'s>> {
+        let r = self.api_install_table(targets, id_base, defs);
+        r.map_err(|e| self.api_err(e))
     }
 
     fn set_host(&mut self, host: Rc<dyn bare_js_api::Host<Self>>) {
@@ -1171,6 +1236,17 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
         let r = self.api_obj(obj).and_then(|o| {
             let p = proto.map(|p| self.api_obj(p)).transpose()?;
             self.o_set_prototype_of(o, p)
+        });
+        r.map_err(|e| self.api_err(e))
+    }
+
+    fn define_accessor_named<'s>(&mut self, obj: bare_js_api::Local<'_>, key: &str, get: Option<bare_js_api::Local<'_>>, set: Option<bare_js_api::Local<'_>>, a: bare_js_api::Attrs) -> Result<(), bare_js_api::Error<'s>> {
+        let r = self.api_obj(obj).and_then(|o| {
+            let k = self.heap.key_from_str(key).map_err(|e| self.herr(e))?;
+            let get = get.map(|f| self.api_obj(f)).transpose()?;
+            let set = set.map(|f| self.api_obj(f)).transpose()?;
+            let d = PropertyDescriptor { get: Some(get), set: Some(set), enumerable: Some(a.enumerable), configurable: Some(a.configurable), ..Default::default() };
+            self.heap.define_own_property(o, k, &d).map(|_| ()).map_err(|e| self.herr(e))
         });
         r.map_err(|e| self.api_err(e))
     }

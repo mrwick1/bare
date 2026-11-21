@@ -6,7 +6,7 @@
 //!
 //! Scripts are written so that the value of the last statement is an expression.
 
-use crate::{Args, Attrs, Engine, Error, Host, HostFn, Intrinsic, Item, Lazy, Local, Named, Pending, Persistent, PromiseState, Scope, Str, Traced, Tracer, Type, Write, enter, task};
+use crate::{Args, Attrs, Def, Engine, Error, Host, HostFn, Intrinsic, Item, Lazy, Local, Named, Pending, Persistent, PromiseState, Scope, Str, Traced, Tracer, Type, Write, enter, task};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -430,6 +430,93 @@ pub fn handles_survive_a_top_level_call_that_allocates<H: Harness>(stress: bool)
         assert_eq!(s.as_str(t).unwrap().to_string_lossy(), "live");
     });
     assert_eq!(depth(&mut h), 0);
+}
+
+/// The host of the table test: function `TABLE_BASE + i` is row id `i`.
+struct TableHost;
+
+const TABLE_BASE: u32 = 100;
+
+static TABLE: [Def; 7] = [
+    Def::method("twice", 0b01, 0, 1),
+    Def::method("both", 0b11, 1, 2),
+    Def::accessor("size", 0b01, 2, Some(3)),
+    Def::accessor("ro", 0b10, 4, None),
+    Def::number("LIMIT", 0b01, 7.0),
+    Def::method("shown", 0b10, 5, 0).with(Attrs::ALL),
+    Def::both("lazy", 0b01, 6),
+];
+
+impl<E: Engine> Host<E> for TableHost {
+    fn call<'s>(&self, s: &mut Scope<'s, E>, id: u32, this: Local<'s>, args: Args<'s>, _is_new: bool) -> Result<Local<'s>, Error<'s>> {
+        match id - TABLE_BASE {
+            0 => {
+                let n = args.get(0).and_then(|a| s.as_number(a)).unwrap_or(f64::NAN);
+                Ok(s.number(n * 2.0))
+            }
+            1 => Ok(s.number(1.0)),
+            2 => s.get_str(this, "n"),
+            3 => {
+                let v = args.get(0).unwrap_or_else(|| s.undefined());
+                s.define_str(this, "n", v, Attrs::METHOD)?;
+                Ok(s.undefined())
+            }
+            4 => s.string("ro"),
+            5 => s.string("shown"),
+            _ => {
+                let n = args.len();
+                Ok(s.number(n as f64))
+            }
+        }
+    }
+}
+
+/// Install `TABLE` on two objects `A` and `B` of the realm of `h`.
+fn install_table_on<H: Harness>(h: &mut H) {
+    enter(h.engine(), |s| {
+        s.set_host(Rc::new(TableHost));
+        let (a, b, g) = (s.new_object().unwrap(), s.new_object().unwrap(), s.global());
+        s.install_table(&[a, b], TABLE_BASE, &TABLE).unwrap();
+        s.define_str(g, "A", a, Attrs::METHOD).unwrap();
+        s.define_str(g, "B", b, Attrs::METHOD).unwrap();
+    });
+}
+
+pub fn a_table_installs_methods_accessors_and_constants<H: Harness>(stress: bool) {
+    let mut h = H::new(stress);
+    install_table_on(&mut h);
+    // A method: callable, with the name and the length of its row, and the id plus the base.
+    assert_eq!(h.eval("A.twice(21)"), "42");
+    assert_eq!(h.eval("A.twice.name + A.twice.length"), "twice1");
+    assert_eq!(h.eval("var d = Object.getOwnPropertyDescriptor(A, 'twice'); [d.writable, d.enumerable, d.configurable].join()"), "true,false,true");
+    assert_eq!(h.eval("(function () { try { new A.twice(1); return 'allowed' } catch (e) { return e.name } })()"), "TypeError");
+    // A row of two targets makes one function object.
+    assert_eq!(h.eval("[A.both === B.both, A.both.length, B.both()].join()"), "true,2,1");
+    // An accessor: a getter named `get size` of length 0, a setter named `set size` of length 1.
+    assert_eq!(h.eval("A.size = 5; A.size"), "5");
+    assert_eq!(h.eval("var d = Object.getOwnPropertyDescriptor(A, 'size'); [d.get.name, d.get.length, d.set.name, d.set.length, d.enumerable, d.configurable].join()"), "get size,0,set size,1,true,true");
+    assert_eq!(h.eval("var d = Object.getOwnPropertyDescriptor(B, 'ro'); [B.ro, d.set === undefined, d.get.name].join()"), "ro,true,get ro");
+    assert_eq!(h.eval("'ro' in A || 'size' in B"), "false", "a row reaches only its targets");
+    // A constant, and the attributes of a row.
+    assert_eq!(h.eval("var d = Object.getOwnPropertyDescriptor(A, 'LIMIT'); [A.LIMIT, d.writable, d.enumerable, d.configurable].join()"), "7,false,true,false");
+    assert_eq!(h.eval("var d = Object.getOwnPropertyDescriptor(B, 'shown'); [B.shown(), d.writable, d.enumerable, d.configurable].join()"), "shown,true,true,true");
+    assert_eq!(h.eval("Object.keys(A).join()"), "size,LIMIT");
+    // A lazy global: one function is the getter and the setter, named like the row.
+    assert_eq!(h.eval("var d = Object.getOwnPropertyDescriptor(A, 'lazy'); [d.get === d.set, d.get.name, d.get.length, d.enumerable, d.configurable, A.lazy].join()"), "true,lazy,0,false,true,0");
+    assert_eq!(h.eval("A.lazy = 1; 'set'"), "set");
+    assert_eq!(depth(&mut h), 0);
+}
+
+pub fn two_realms_install_the_same_table<H: Harness>(stress: bool) {
+    let (mut h1, mut h2) = (H::new(stress), H::new(stress));
+    install_table_on(&mut h1);
+    install_table_on(&mut h2);
+    assert_eq!(h1.eval("A.twice(4)"), "8");
+    assert_eq!(h2.eval("A.size = 'two'; A.twice(5) + A.size"), "10two");
+    assert_eq!(h1.eval("A.size = 'one'; A.size"), "one");
+    assert_eq!(h2.eval("A.size"), "two");
+    assert_eq!(depth(&mut h1), 0);
+    assert_eq!(depth(&mut h2), 0);
 }
 
 /// The text of a value, by its string conversion (`Engine::display` is not built in every engine).

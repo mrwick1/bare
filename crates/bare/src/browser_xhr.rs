@@ -1017,14 +1017,12 @@ fn make(d: &Dom, it: &mut Interp<'_>) -> R<Made> {
     Ok(m)
 }
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    run(it, |s| {
-        let g = s.global();
-        let hs: [HS; 4] = [lazy::<0>, lazy::<1>, lazy::<2>, lazy::<3>];
-        for (name, h) in NAMES.into_iter().zip(hs) {
-            let f = d.add_fn_s(s, h, name, 0, HostFn::Method)?;
-            s.define_accessor_str(g, name, Some(f), Some(f), Attrs { writable: false, enumerable: false, configurable: true })?;
-        }
-        Ok(())
-    })
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+    let g = s.global();
+    let hs: [HS; 4] = [lazy::<0>, lazy::<1>, lazy::<2>, lazy::<3>];
+    for (name, h) in NAMES.into_iter().zip(hs) {
+        let f = d.add_fn_s(s, h, name, 0, HostFn::Method)?;
+        s.define_accessor_str(g, name, Some(f), Some(f), Attrs { writable: false, enumerable: false, configurable: true })?;
+    }
+    Ok(())
 }
