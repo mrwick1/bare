@@ -74,7 +74,7 @@ language/expressions/class/method-static/forbidden-ext/b1 2 0 0 2 0 0
 language/expressions/class/method-static/forbidden-ext/b2 3 0 0 3 0 0
 language/expressions/class/method/forbidden-ext/b1 2 0 0 2 0 0
 language/expressions/class/method/forbidden-ext/b2 3 0 0 3 0 0
-language/expressions/class/subclass-builtins 16 0 20 14 2 20
+language/expressions/class/subclass-builtins 17 0 19 15 2 19
 language/expressions/coalesce 22 0 2 22 0 2
 language/expressions/comma 4 1 1 4 1 1
 language/expressions/compound-assignment 411 44 0 379 76 0

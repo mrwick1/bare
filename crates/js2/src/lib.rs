@@ -59,6 +59,7 @@ mod bi_number;
 mod bi_wrap;
 mod bi_string;
 pub mod promise;
+mod promise_statics;
 mod bi_symbol;
 mod bi_string_more;
 #[rustfmt::skip]

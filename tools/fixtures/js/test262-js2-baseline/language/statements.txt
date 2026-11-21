@@ -61,7 +61,7 @@ language/statements/class/method/forbidden-ext/b2 3 0 0 3 0 0
 language/statements/class/name-binding 6 0 0 6 0 0
 language/statements/class/strict-mode 1 1 0 1 1 0
 language/statements/class/subclass 34 0 5 27 7 5
-language/statements/class/subclass-builtins 16 0 20 14 2 20
+language/statements/class/subclass-builtins 17 0 19 15 2 19
 language/statements/class/subclass/builtin-objects/Array 5 0 0 5 0 0
 language/statements/class/subclass/builtin-objects/ArrayBuffer 2 0 0 0 2 0
 language/statements/class/subclass/builtin-objects/Boolean 2 0 0 2 0 0

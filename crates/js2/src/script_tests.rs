@@ -945,6 +945,18 @@ fn a_stack_that_grows_in_a_callee_keeps_the_registers_of_the_callers() {
     ]);
 }
 
+/// The ops of the cold function (`Vm::exec::<Cold>`) enter frames, grow the stack and unwind. The hot loop sets `regs`, `code`, `words`
+/// and `fb` again when the cold function returns: each caller below has live registers that it reads after the cold op. The stack starts
+/// with 256 words, so the recursion grows it inside `CallSuper` and `CallSpread`, and `ThrowConst` unwinds 150 frames.
+#[test]
+fn a_cold_op_that_grows_the_stack_or_unwinds_keeps_the_registers_of_the_caller() {
+    check(&[
+        ("class A { constructor(n) { this.k = n; } } class B extends A { constructor(n) { var a = n, b = 2 * n; super(n); this.d = n == 0 ? 0 : new B(n - 1).d + a + b; } } var r = new B(200).d;", "r", "60300"),
+        ("function f(n) { var a = n; if (n == 0) return 0; var r = f(...[n - 1]); return r + a; } var r = f(300);", "r", "45150"),
+        ("function f(n) { var a = n; if (n == 0) { const c = 1; c = 2; return 0; } if (n == 150) { try { return f(n - 1); } catch (e) { return -a; } } return f(n - 1) + a; } var r = f(300);", "r", "33675"),
+    ]);
+}
+
 /// A `GetGlobal` or `SetGlobal` site holds the address of the slot of the global (`Shapes::watch_tag`). Each case changes the global
 /// object between two runs of one site: an add that grows its overflow record many times, a delete that goes back to an older shape
 /// (the record of that shape is not the one that the old address pointed into), an attribute change, an accessor, a new prototype.

@@ -1,12 +1,18 @@
 # test262 counts of tools/js/test262_js2.sh for each directory: directory, old pass, old fail, old skip, new pass, new fail, new skip.
 # old = bare-js, new = bare-js2. Commit: e4fbf57745c6aae3d1f12f181ecef78b1665d812. Written by tools/js/test262_js2.sh -u. Do not edit by hand.
-built-ins/Promise 51 0 7 46 5 7
-built-ins/Promise/Symbol.species 5 0 0 0 5 0
-built-ins/Promise/prototype 6 0 0 5 1 0
+built-ins/Promise 51 0 7 51 0 7
+built-ins/Promise/Symbol.species 5 0 0 5 0 0
+built-ins/Promise/all 95 2 1 95 2 1
+built-ins/Promise/allKeyed 0 0 45 0 0 45
+built-ins/Promise/allSettled 101 2 1 101 2 1
+built-ins/Promise/allSettledKeyed 0 0 44 0 0 44
+built-ins/Promise/any 92 1 1 91 2 1
+built-ins/Promise/prototype 6 0 0 6 0 0
 built-ins/Promise/prototype/catch 13 0 1 13 0 1
-built-ins/Promise/prototype/finally 0 0 29 0 0 29
-built-ins/Promise/prototype/then 74 0 1 69 5 1
-built-ins/Promise/reject 13 1 1 7 7 1
-built-ins/Promise/resolve 28 1 1 21 8 1
-built-ins/Promise/try 0 0 15 0 0 15
-built-ins/Promise/withResolvers 0 0 6 0 0 6
+built-ins/Promise/prototype/finally 25 0 4 24 1 4
+built-ins/Promise/prototype/then 74 0 1 74 0 1
+built-ins/Promise/race 92 1 1 91 2 1
+built-ins/Promise/reject 13 1 1 13 1 1
+built-ins/Promise/resolve 28 1 1 28 1 1
+built-ins/Promise/try 2 12 1 13 1 1
+built-ins/Promise/withResolvers 5 1 0 5 1 0

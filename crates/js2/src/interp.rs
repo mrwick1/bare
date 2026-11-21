@@ -116,6 +116,60 @@ pub enum Exit {
     Fuel,
 }
 
+/// How a copy of `Vm::exec` ends: the run is over, or the loop stops at a rare event that it did not run in its own `match` and goes on at `(ci, fp, pc)`
+/// (the cold function after its one instruction; the hot loop after a generator resume or a getter written in Rust).
+enum Flow {
+    Done(Result<Value, Exit>),
+    Go(usize, usize, usize),
+}
+
+/// The two copies of `Vm::exec`.
+trait Mode {
+    const COLD: bool;
+    type Out;
+    fn done(r: Result<Value, Exit>) -> Self::Out;
+    fn go(ci: usize, fp: usize, pc: usize) -> Self::Out;
+}
+struct Hot;
+struct Cold;
+impl Mode for Hot {
+    const COLD: bool = false;
+    type Out = Flow;
+    #[inline(always)]
+    fn done(r: Result<Value, Exit>) -> Self::Out {
+        Flow::Done(r)
+    }
+    #[inline(always)]
+    fn go(ci: usize, fp: usize, pc: usize) -> Self::Out {
+        Flow::Go(ci, fp, pc)
+    }
+}
+impl Mode for Cold {
+    const COLD: bool = true;
+    type Out = Flow;
+    #[inline(always)]
+    fn done(r: Result<Value, Exit>) -> Self::Out {
+        Flow::Done(r)
+    }
+    #[inline(always)]
+    fn go(ci: usize, fp: usize, pc: usize) -> Self::Out {
+        Flow::Go(ci, fp, pc)
+    }
+}
+
+/// The ops that the cold function runs: the arms of the cold `match` of `Vm::exec`. The hot `match` has no arm for them but this one.
+macro_rules! cold_ops {
+    () => {
+        Op::TypeofGlobal | Op::TypeofName | Op::DeleteGlobal | Op::Delete | Op::Exp | Op::ThrowConst | Op::DeclGlobal |
+        Op::CheckLex | Op::DeclLex | Op::DeclLexC | Op::CreateRest | Op::Lazy | Op::NewRegExp | Op::LoadBigInt | Op::GetTemplate |
+        Op::ArraySpread | Op::ArrayHole | Op::CallSpread | Op::NewSpread | Op::CopyProps | Op::ObjRest | Op::SetProto |
+        Op::DefAccessor | Op::DefAccessorElem | Op::DefMethod | Op::DefMethodElem | Op::SetHome | Op::MakeClass | Op::MakeDerived |
+        Op::SetFnName | Op::DefaultCtor | Op::SetFields | Op::NewPrivateName | Op::GetPrivate | Op::SetPrivate | Op::HasPrivate |
+        Op::DefPrivate | Op::DefPrivateMethod | Op::DefPrivateAccessor | Op::GetSuper | Op::GetSuperElem | Op::SetSuper |
+        Op::SetSuperElem | Op::CallSuper | Op::CallSuperSpread | Op::RetDerived | Op::GenInit | Op::Yield | Op::RetGen
+    };
+}
+
 /// A realm with the JS stack and the feedback of the code that it runs.
 pub struct Vm {
     pub realm: Realm,
@@ -377,6 +431,21 @@ impl Vm {
             let e = realm.error(ErrKind::Type, "not a function");
             return Err(Exit::Throw(e));
         };
+        Vm::start_at(realm, stack, fbs, (f, ci, ctx), this, (Value::UNDEFINED, 0), args)
+    }
+
+    /// As [`Vm::start`] for a construct call of the class or function `f` (`Realm::construct_script`): `nt` is `new.target`, and a
+    /// result that is not an object is the `this` of the frame.
+    pub(crate) fn start_new(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, f: Value, this: Value, nt: Value, args: &[Value]) -> Result<Value, Exit> {
+        let Some((ci, ctx)) = realm.function_new(f) else {
+            let e = realm.error(ErrKind::Type, "not a constructor");
+            return Err(Exit::Throw(e));
+        };
+        Vm::start_at(realm, stack, fbs, (f, ci, ctx), this, (nt, CONSTRUCT), args)
+    }
+
+    #[inline(always)]
+    fn start_at(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, (f, ci, ctx): (Value, usize, Value), this: Value, (nt, dstw): (Value, i32), args: &[Value]) -> Result<Value, Exit> {
         let prog = realm.prog.clone();
         let code = &prog[ci];
         let fp = REC;
@@ -389,7 +458,7 @@ impl Vm {
         } else {
             Value::UNDEFINED
         };
-        let rec = [f, this, ctx, Value::int(0), Value::int(0), Value::int(ENTRY), Value::int(0), Value::int(0), Value::UNDEFINED, args_obj];
+        let rec = [f, this, ctx, Value::int(0), Value::int(0), Value::int(ENTRY), Value::int(0), Value::int(dstw), nt, args_obj];
         stack[..REC].copy_from_slice(&rec);
         for i in 0..code.nparams as usize {
             stack[fp + i] = args.get(i).copied().unwrap_or(Value::UNDEFINED);
@@ -452,8 +521,46 @@ impl Vm {
         realm.collect(fbs, |_| {});
     }
 
-    #[allow(unused_assignments, clippy::ptr_arg)]
     fn run(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, prog: &Codes, mut ci: usize, mut fp: usize, mut pc: usize) -> Result<Value, Exit> {
+        loop {
+            match Vm::exec::<Hot>(realm, stack, fbs, prog, ci, fp, pc) {
+                Flow::Done(r) => return r,
+                Flow::Go(c, f, p) => (ci, fp, pc) = (c, f, p),
+            }
+        }
+    }
+
+    /// The call of the hot loop to the cold function. `#[cold]` makes LLVM treat the call as unlikely, so the spills around it stay out of
+    /// the hot arms.
+    #[cold]
+    #[inline(never)]
+    fn run_cold(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, prog: &Codes, ci: usize, fp: usize, pc: usize) -> Flow {
+        Vm::exec::<Cold>(realm, stack, fbs, prog, ci, fp, pc)
+    }
+
+    /// The interpreter loop, in two copies. `exec::<Hot>` is the hot loop: it runs from `pc` of the frame `(ci, fp)` (0, or the resume point of a generator) until the entry
+    /// frame returns. `exec::<Cold>` is the cold function: it runs the one instruction at `pc` of a cold op (`cold_ops!`) and returns
+    /// `Flow::Go` with the new `(ci, fp, pc)`. The macros below serve both, so an arm has one text. `M::COLD` is a constant: each copy has
+    /// only its own `match`.
+    ///
+    /// **Where a new op goes.** A new op that is not on a hot row goes into the cold `match` (the one under `if M::COLD`) and into
+    /// `cold_ops!`, by default. The hot `match` keeps the ops that run in a loop in the micro rows (`interp_load`: `loopfn`, `calls`,
+    /// `fib`, `closures`, `objects`) and in the programs of the op counts (`--features op-count`, example `op_count`: `bundle_like.js` and
+    /// the `eval_*.js` files). Rule of the split: the call costs about 110 to 125 instructions (measured on one cold op in a loop,
+    /// `docs/progress.md`, "Cold arms of `Vm::run`"), and the hot `match` gains about 0.5 to 2 instructions on each dispatch of any op. So an
+    /// op that is 1 dispatch in 100 or more in one of those programs stays hot, with `cold_path()` as its first statement: `In`,
+    /// `InstanceOf`, `ForInOpen`, `CreateArgs` and `Throw` (0.7% to 1.8%). An op that runs once for each function, class or declaration
+    /// (`Lazy`, `DeclGlobal`, `SetFnName`, `MakeClass`, ...), a spread, a private name, `super` and an error path go cold.
+    /// Why a second function: LLVM weighs every arm of one `match` the same, so the spills and the reloads that a call in a rare arm needs
+    /// also hit `pc`, `fp`, `words` and `regs` in the hot arms. An arm in the cold function cannot move the hot code. Do not add a `_ =>`
+    /// arm to the hot `match`: it adds a bounds check to each jump table (+9% on `loopfn`).
+    ///
+    /// The rules of the state across the call: the cold function gets and returns `ci`, `fp` and `pc` by value (a `&mut` would put them
+    /// in memory in the hot loop). It may grow the stack, compile a function (`Op::Lazy`), enter a frame or unwind, so the hot loop calls
+    /// `reload!()` after it (`regs`, `code`, `words` and `fb`). `ret!` moves `fp` first, then calls `reload!`.
+    #[allow(unused_assignments, clippy::ptr_arg)]
+    #[inline(never)]
+    fn exec<M: Mode>(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, prog: &Codes, mut ci: usize, mut fp: usize, pc0: usize) -> M::Out {
         let mut code: &Code = &prog[ci];
         let mut words: &[u32] = &code.words;
         let mut fb: &mut Feedback = if ci < fbs.len() {
@@ -465,6 +572,7 @@ impl Vm {
         if !fb.ready {
             fb.init(code);
         }
+        let mut pc: usize = pc0;
         let undef = Value::UNDEFINED;
         // Register 0 of the current frame: `stack.as_mut_ptr().add(fp)`. Each time `fp` changes (`reload!`) or the stack is reallocated
         // (`ensure!`, and any native that could re-enter the VM) it must be set again; a stale `regs` is a use after free.
@@ -523,7 +631,7 @@ impl Vm {
                         reload!();
                         continue;
                     }
-                    Err(e) => return Err(Exit::Throw(e)),
+                    Err(e) => return M::done(Err(Exit::Throw(e))),
                 }
             }};
         }
@@ -843,11 +951,7 @@ impl Vm {
                         let Some((ni, cctx)) = realm.function(f) else {
                             // `next`, `return` or `throw` of a generator (the hole as `this`): its frame goes on top of this one. Else not a function.
                             match gen_resume(realm, stack, prog, ci, fp, ($dst as i32) | ITER, pc, $next, f, this) {
-                                Ok((nci, nfp, rpc)) => {
-                                    (ci, fp, pc) = (nci, nfp, rpc);
-                                    reload!();
-                                    continue;
-                                }
+                                Ok((nci, nfp, rpc)) => return M::go(nci, nfp, rpc),
                                 Err(e) => throw!(e),
                             }
                         };
@@ -917,8 +1021,7 @@ impl Vm {
                     // A getter written in Rust (`Symbol.prototype.description`, the flag getters of `RegExp.prototype`), or no function: the nested call runs it or throws.
                     std::hint::cold_path();
                     r!($dst) = tri!(realm.call_function(g, this, &[]));
-                    pc = $next;
-                    continue;
+                    return M::go(ci, fp, $next);
                 };
                 enter!(g, ni, cctx, this, undef, $dst as i32, pc, $next, fp, 0usize);
                 pc = 0;
@@ -966,7 +1069,7 @@ impl Vm {
                     v = record(stack, fp, 1);
                 }
                 if caller == ENTRY {
-                    return Ok(v);
+                    return M::done(Ok(v));
                 }
                 pc = rec_int!(4) as usize;
                 let callpc = rec_int!(3);
@@ -1012,6 +1115,468 @@ impl Vm {
                 // spills and reloads that a call in a rare arm needs also hit the loop state (`pc`, `fp`, `words`, the stack base) of the hot
                 // arms. An arm of a rare op starts with `cold_path()`, as do the `throw!` and `gate!` slow paths. Then an edit in such an arm
                 // does not move the hot rows. Put `cold_path()` first in each new arm of a rare op, and measure `objects` after a change here.
+                // The rare ops that run once for each function, class or declaration are in the cold `match` under `if M::COLD`, and `cold_ops!`
+                // names them: see `Vm::exec` for the rule of the split. Put a new rare op there.
+                if M::COLD {
+                    match opv {
+                        Op::TypeofGlobal | Op::TypeofName => {
+                            std::hint::cold_path();
+                            gate!();
+                            let n = name!(bx!());
+                            let g = realm.global.value();
+                            let v = match realm.lex_get(n) {
+                                Some(res) => tri!(res),
+                                None => {
+                                    if realm.is_lazy_regexp(n) {
+                                        realm.rx();
+                                    }
+                                    tri!(realm.get_prop(g, Key::Name(n)))
+                                }
+                            };
+                            r!(a!()) = realm.typeof_name(v);
+                            pc = next;
+                        }
+                        Op::DeleteGlobal => {
+                            std::hint::cold_path();
+                            gate!();
+                            let (g, n) = (realm.global.value(), name!(bx!()));
+                            r!(a!()) = Value::bool(!realm.has_lex(n) && tri!(realm.delete_prop(g, Key::Name(n))));
+                            pc = next;
+                        }
+                        Op::Delete => {
+                            std::hint::cold_path();
+                            let o = r!(b!());
+                            if o.is_undefined() || o.is_null() {
+                                err!(ErrKind::Type, "cannot delete a property of undefined or null")
+                            }
+                            let k = tri!(realm.key_of(r!(c!())));
+                            let ok = tri!(realm.delete_prop(r!(b!()), k));
+                            if !ok && code.strict {
+                                err!(ErrKind::Type, "cannot delete a property that is not configurable")
+                            }
+                            r!(a!()) = Value::bool(ok);
+                            pc = next;
+                        }
+                        Op::Exp => { std::hint::cold_path(); op_exp!(a!(), r!(b!()), r!(c!()), next) }
+                        Op::ThrowConst => {
+                            std::hint::cold_path();
+                            let n = realm.text(code.atoms[bx!()]);
+                            err!(ErrKind::Type, "assignment to constant variable '{}'", n)
+                        }
+                        Op::DeclGlobal => {
+                            std::hint::cold_path();
+                            gate!();
+                            let n = name!(bx!());
+                            let g = realm.global;
+                            if realm.has_lex(n) {
+                                let t = realm.text(n);
+                                err!(ErrKind::Syntax, "Identifier '{t}' has already been declared")
+                            }
+                            // An own property of the global object: an inherited one (`__proto__`) does not count.
+                            if realm.get_own(g, Key::Name(n)).is_none() {
+                                tri!(realm.define_attrs(g, Key::Name(n), A_W | A_E, undef));
+                            }
+                            pc = next;
+                        }
+                        Op::CheckLex => {
+                            std::hint::cold_path();
+                            gate!();
+                            let n = name!(bx!());
+                            tri!(realm.check_lex(n));
+                            pc = next;
+                        }
+                        Op::DeclLex | Op::DeclLexC => {
+                            std::hint::cold_path();
+                            gate!();
+                            let n = name!(bx!());
+                            let cx = stack[fp - REC + 2];
+                            tri!(realm.declare_lex(n, cx, a!() as u32, opv == Op::DeclLexC));
+                            pc = next;
+                        }
+                        Op::CreateRest => {
+                            std::hint::cold_path();
+                            gate!();
+                            let all = Realm::obj(record(stack, fp, 9)).expect("the arguments of a function with CF_ARGS");
+                            let vals: Vec<Value> = (b!() as u32..all.len()).map(|i| all.get_element(i).unwrap_or(undef)).collect();
+                            r!(a!()) = Obj::array(&mut realm.heap, &realm.shapes, realm.s_array, &vals).expect("memory").value();
+                            pc = next;
+                        }
+                        Op::Lazy => {
+                            std::hint::cold_path();
+                            // Compile the function and run its code from pc 0, in this frame. The compile adds to `prog` and may grow the
+                            // stack and `fbs`: `reload!` makes the locals again. No collection runs here (no `gate!`).
+                            if let Err(m) = realm.compile_stub(prog, stack, fbs, ci, fp, a!() == 0, code.nparams as usize) {
+                                // A plain `Error`, not a `SyntaxError`: the text has no early error (the pre-parse found none), and a script (or a
+                                // test262 test that expects a `SyntaxError`) must not take a limit of the compiler for one.
+                                err!(ErrKind::Plain, "{m}")
+                            }
+                            reload!();
+                            pc = 0;
+                            continue;
+                        }
+                        Op::GenInit | Op::Yield | Op::RetGen => {
+                            std::hint::cold_path();
+                            match gen_op(realm, stack, fbs, prog, ci, fp, pc, opv, a!(), bx!() as u32, next) {
+                                Ok(GenExit::Back(nci, nfp, npc)) => {
+                                    (ci, fp, pc) = (nci, nfp, npc);
+                                    reload!();
+                                    continue;
+                                }
+                                Ok(GenExit::Done(v)) => return M::done(Ok(v)),
+                                Err(e) => throw!(e),
+                            }
+                        }
+                        Op::NewRegExp => {
+                            std::hint::cold_path();
+                            gate!();
+                            r!(a!()) = tri!(realm.regexp_literal(atom!(b!()), atom!(c!())));
+                            pc = next;
+                        }
+                        Op::LoadBigInt => { std::hint::cold_path(); err!(ErrKind::Type, "BigInt literals are not supported yet (js2 has no BigInt: S2.7)") }
+                        Op::GetTemplate => {
+                            std::hint::cold_path();
+                            gate!();
+                            r!(a!()) = match fb.tmpl.iter().find(|t| t.0 == c!() as u32) {
+                                Some(t) => t.1,
+                                None => {
+                                    let rec: Vec<u32> = code.recipes.get(b!()).expect("a recipe").to_vec();
+                                    let (mut cooked, mut raw) = (Vec::new(), Vec::new());
+                                    for p in rec.chunks(2) {
+                                        cooked.push(if p[0] == u32::MAX { undef } else { atom!(p[0]).value() });
+                                        raw.push(atom!(p[1]).value());
+                                    }
+                                    let t = realm.make_template(&cooked, &raw);
+                                    fb.tmpl.push((c!() as u32, t));
+                                    t
+                                }
+                            };
+                            pc = next;
+                        }
+                        Op::ArraySpread => {
+                            std::hint::cold_path();
+                            gate!();
+                            let vals = tri!(realm.iter_values(r!(b!())));
+                            let o = Realm::obj(r!(a!())).expect("an array");
+                            for v in vals {
+                                o.set_element(&mut realm.heap, o.len(), v).expect("memory");
+                            }
+                            pc = next;
+                        }
+                        Op::ArrayHole => {
+                            std::hint::cold_path();
+                            gate!();
+                            let o = Realm::obj(r!(a!())).expect("an array");
+                            o.set_len(&mut realm.heap, o.len() + 1).expect("memory");
+                            pc = next;
+                        }
+                        Op::CallSpread => {
+                            std::hint::cold_path();
+                            let callee = r!(b!());
+                            let Some((ni, cctx)) = realm.function(callee) else {
+                                if realm.native_id(callee).is_some() {
+                                    gate!();
+                                    let (nf, len) = stage_array!(r!(b!() + 2));
+                                    native_call!(callee, r!(b!() + 1), nf, len, a!(), next)
+                                }
+                                call_err!(callee)
+                            };
+                            let (nf, len) = stage_array!(r!(b!() + 2));
+                            enter!(callee, ni, cctx, r!(b!() + 1), undef, a!() as i32, pc, next, nf, len);
+                            pc = 0;
+                            continue;
+                        }
+                        Op::NewSpread => {
+                            std::hint::cold_path();
+                            gate!();
+                            let callee = r!(b!());
+                            let Some((ni, cctx)) = realm.function_new(callee) else {
+                                if realm.native_id(callee).is_some() {
+                                    let (nf, len) = stage_array!(r!(b!() + 1));
+                                    r!(a!()) = tri!(realm.construct_native(callee, &stack[nf..nf + len], callee));
+                                    pc = next;
+                                    continue;
+                                }
+                                err!(ErrKind::Type, "not a constructor")
+                            };
+                            let (nf, len) = stage_array!(r!(b!() + 1));
+                            construct!(callee, ni, cctx, callee, a!(), next, nf, len, 0)
+                        }
+                        Op::CopyProps => {
+                            std::hint::cold_path();
+                            gate!();
+                            let o = Realm::obj(r!(a!())).expect("an object literal");
+                            if tri!(realm.copy_props(o, r!(b!()))) {
+                                pc = next;
+                            } else {
+                                // An accessor: the helper copies; it returns the object, which goes back to the register of the object.
+                                enter_helper!(crate::bi_object::H_SPREAD, a!(), next);
+                            }
+                        }
+                        Op::ObjRest => {
+                            std::hint::cold_path();
+                            gate!();
+                            let keys: Vec<Value> = (0..$x as usize).map(|i| r!(c!() + i)).collect();
+                            match tri!(realm.obj_rest(r!(b!()), &keys)) {
+                                Some(v) => {
+                                    r!(a!()) = v;
+                                    pc = nextx!();
+                                }
+                                None => enter_helper!(crate::bi_object::H_REST, a!(), nextx!()),
+                            }
+                        }
+                        Op::SetProto => {
+                            std::hint::cold_path();
+                            gate!();
+                            let (o, v) = (Realm::obj(r!(a!())).expect("an object literal"), r!(b!()));
+                            if let Some(p) = Realm::obj(v) {
+                                o.set_proto(&mut realm.shapes, Some(p.cell()));
+                            } else if v.is_null() {
+                                o.set_proto(&mut realm.shapes, None);
+                            }
+                            pc = next;
+                        }
+                        Op::DefAccessor => {
+                            std::hint::cold_path();
+                            gate!();
+                            let n = name!(c!());
+                            let o = Realm::obj(r!(a!())).expect("an object");
+                            tri!(realm.define_accessor(o, Key::Name(n), r!(b!()), $x & 1 != 0, $x & 2 == 0));
+                            pc = nextx!();
+                        }
+                        Op::DefAccessorElem => {
+                            std::hint::cold_path();
+                            gate!();
+                            let o = Realm::obj(r!(a!())).expect("an object");
+                            let k = tri!(realm.key_of(r!(b!())));
+                            tri!(realm.define_accessor(o, k, r!(c!()), $x & 1 != 0, $x & 2 == 0));
+                            pc = nextx!();
+                        }
+                        Op::DefMethod => {
+                            std::hint::cold_path();
+                            gate!();
+                            let n = name!(c!());
+                            let o = Realm::obj(r!(a!())).expect("an object");
+                            tri!(realm.define_attrs(o, Key::Name(n), A_W | A_C, r!(b!())));
+                            pc = next;
+                        }
+                        Op::DefMethodElem => {
+                            std::hint::cold_path();
+                            gate!();
+                            let o = Realm::obj(r!(a!())).expect("an object");
+                            let k = tri!(realm.key_of(r!(b!())));
+                            tri!(realm.define_attrs(o, k, A_W | A_C, r!(c!())));
+                            pc = next;
+                        }
+                        Op::SetHome => {
+                            std::hint::cold_path();
+                            Realm::obj(r!(a!())).expect("a function").set_slot(&realm.shapes, 2, r!(b!()));
+                            pc = next;
+                        }
+                        Op::MakeClass => {
+                            std::hint::cold_path();
+                            gate!();
+                            tri!(realm.make_class(r!(a!()), None));
+                            pc = next;
+                        }
+                        Op::MakeDerived => {
+                            std::hint::cold_path();
+                            gate!();
+                            if let Some((ni, _)) = realm.function_new(r!(b!()))
+                                && prog[ni].noctor
+                            {
+                                err!(ErrKind::Type, "class extends value is not a constructor or null")
+                            }
+                            tri!(realm.make_class(r!(a!()), Some(r!(b!()))));
+                            pc = next;
+                        }
+                        Op::SetFnName => {
+                            std::hint::cold_path();
+                            gate!();
+                            let k = tri!(realm.key_of(r!(b!())));
+                            tri!(realm.name_function(r!(a!()), k, c!() as u32));
+                            pc = next;
+                        }
+                        Op::DefaultCtor => {
+                            std::hint::cold_path();
+                            gate!();
+                            r!(a!()) = realm.new_function(realm.dctor[b!() & 1], undef);
+                            pc = next;
+                        }
+                        Op::SetFields => {
+                            std::hint::cold_path();
+                            Realm::obj(r!(a!())).expect("a constructor").set_slot(&realm.shapes, 3, r!(b!()));
+                            pc = next;
+                        }
+                        Op::NewPrivateName => {
+                            std::hint::cold_path();
+                            gate!();
+                            let d = atom!(bx!());
+                            r!(a!()) = realm.new_private_name(d);
+                            pc = next;
+                        }
+                        Op::GetPrivate => {
+                            std::hint::cold_path();
+                            gate!();
+                            match tri!(realm.private_get(r!(b!()), r!(c!()))) {
+                                Got::Val(v) => {
+                                    r!(a!()) = v;
+                                    pc = next;
+                                }
+                                Got::Get(g) => call_get!(g, r!(b!()), a!(), next),
+                            }
+                        }
+                        Op::SetPrivate => {
+                            std::hint::cold_path();
+                            gate!();
+                            match tri!(realm.private_set(r!(a!()), r!(b!()), r!(c!()))) {
+                                Put::Done => pc = next,
+                                Put::Set(f) => call_set!(f, r!(a!()), r!(c!()), next),
+                                Put::Fail => {
+                                if code.strict {
+                                    err!(ErrKind::Type, "cannot assign to a read-only property or a property with no setter")
+                                }
+                                pc = next;
+                        }
+                            }
+                        }
+                        Op::HasPrivate => {
+                            std::hint::cold_path();
+                            gate!();
+                            let h = tri!(realm.private_has(r!(b!()), r!(c!())));
+                            r!(a!()) = Value::bool(h);
+                            pc = next;
+                        }
+                        Op::DefPrivate => {
+                            std::hint::cold_path();
+                            gate!();
+                            tri!(realm.private_def(r!(a!()), r!(b!()), A_W, r!(c!())));
+                            pc = next;
+                        }
+                        Op::DefPrivateMethod => {
+                            std::hint::cold_path();
+                            gate!();
+                            tri!(realm.private_def(r!(a!()), r!(b!()), 0, r!(c!())));
+                            pc = next;
+                        }
+                        Op::DefPrivateAccessor => {
+                            std::hint::cold_path();
+                            gate!();
+                            tri!(realm.private_def_accessor(r!(a!()), r!(b!()), r!(c!()), $x == 1));
+                            pc = nextx!();
+                        }
+                        Op::GetSuper => {
+                            std::hint::cold_path();
+                            gate!();
+                            let n = name!(c!());
+                            match tri!(realm.super_get(home!(), Key::Name(n))) {
+                                Got::Val(v) => {
+                                    r!(a!()) = v;
+                                    pc = next;
+                                }
+                                Got::Get(g) => call_get!(g, r!(b!()), a!(), next),
+                            }
+                        }
+                        Op::GetSuperElem => {
+                            std::hint::cold_path();
+                            gate!();
+                            let k = tri!(realm.key_of(r!(c!())));
+                            match tri!(realm.super_get(home!(), k)) {
+                                Got::Val(v) => {
+                                    r!(a!()) = v;
+                                    pc = next;
+                                }
+                                Got::Get(g) => call_get!(g, r!(b!()), a!(), next),
+                            }
+                        }
+                        Op::SetSuper => {
+                            std::hint::cold_path();
+                            gate!();
+                            let n = name!(c!());
+                            match tri!(realm.super_set(home!(), r!(a!()), Key::Name(n), r!(b!()))) {
+                                Put::Done => pc = next,
+                                Put::Set(f) => call_set!(f, r!(a!()), r!(b!()), next),
+                                Put::Fail => {
+                                if code.strict {
+                                    err!(ErrKind::Type, "cannot assign to a read-only property or a property with no setter")
+                                }
+                                pc = next;
+                        }
+                            }
+                        }
+                        Op::SetSuperElem => {
+                            std::hint::cold_path();
+                            gate!();
+                            let k = tri!(realm.key_of(r!(b!())));
+                            match tri!(realm.super_set(home!(), r!(a!()), k, r!(c!()))) {
+                                Put::Done => pc = next,
+                                Put::Set(f) => call_set!(f, r!(a!()), r!(c!()), next),
+                                Put::Fail => {
+                                if code.strict {
+                                    err!(ErrKind::Type, "cannot assign to a read-only property or a property with no setter")
+                                }
+                                pc = next;
+                        }
+                            }
+                        }
+                        Op::CallSuper | Op::CallSuperSpread => {
+                            std::hint::cold_path();
+                            gate!();
+                            let Some((class, nt)) = super_info(realm, stack, fp) else { err!(ErrKind::Reference, "'super' keyword unexpected here") };
+                            let Some(pv) = Realm::obj(class).and_then(|f| realm.proto_of(f)).map(|p| p.value()) else {
+                                err!(ErrKind::Type, "super constructor is not a constructor")
+                            };
+                            let Some((ni, cctx)) = realm.function_new(pv) else {
+                                if realm.native_id(pv).is_some() {
+                                    // A class that extends a built-in: the built-in makes `this`, then the fields of the class run.
+                                    let (ab, argc) = if opv == Op::CallSuper { (fp + b!(), c!()) } else { stage_array!(r!(b!())) };
+                                    let v = tri!(realm.construct_native(pv, &stack[ab..ab + argc], nt));
+                                    r!(a!()) = v;
+                                    if let Some((fi, fctx, ff)) = realm.fields_of(class) {
+                                        enter!(ff, fi, fctx, v, undef, code.nregs as i32, pc, next, 0usize, 0usize);
+                                        pc = 0;
+                                    } else {
+                                        pc = next;
+                                    }
+                                    continue;
+                                }
+                                err!(ErrKind::Type, "super constructor is not a constructor")
+                            };
+                            let (ab, argc) = if opv == Op::CallSuper { (fp + b!(), c!()) } else { stage_array!(r!(b!())) };
+                            construct!(pv, ni, cctx, nt, a!(), next, ab, argc, AFTER_SUPER)
+                        }
+                        Op::RetDerived => {
+                            std::hint::cold_path();
+                            let (v, t) = (r!(a!()), r!(b!()));
+                            let bad = if Realm::obj(v).is_some() {
+                                None
+                            } else if !v.is_undefined() {
+                                Some((ErrKind::Type, "derived constructors may only return object or undefined"))
+                            } else if t.is_hole() {
+                                Some((ErrKind::Reference, "must call super constructor in derived class before returning from derived constructor"))
+                            } else {
+                                None
+                            };
+                            if let Some((kind, msg)) = bad {
+                                // The error is for the caller of the constructor: a `catch` inside the constructor does not see it.
+                                let e = realm.error(kind, msg);
+                                let caller = int_at(stack, fp, 5);
+                                if caller == ENTRY {
+                                    return M::done(Err(Exit::Throw(e)));
+                                }
+                                pc = int_at(stack, fp, 3) as usize;
+                                ci = caller as usize;
+                                // SAFETY: as in `ret!`.
+                                let ccode = unsafe { prog.at(ci) };
+                                fp -= REC + ccode.nregs as usize;
+                                reload!(ccode);
+                                throw!(e)
+                            }
+                            ret!(if v.is_undefined() { t } else { v })
+                        }
+                        _ => unreachable!("an op of the hot match reached the cold function"),
+                    }
+                    continue;
+                }
                 match opv {
                     Op::Nop => pc = next,
                     Op::Wide => unreachable!("a!() Wide prefix is decoded before the dispatch"),
@@ -1163,23 +1728,6 @@ impl Vm {
                         }
                         set_global!(true, r!(a!()), bx!(), next);
                     }
-                    Op::TypeofGlobal | Op::TypeofName => {
-                        std::hint::cold_path();
-                        gate!();
-                        let n = name!(bx!());
-                        let g = realm.global.value();
-                        let v = match realm.lex_get(n) {
-                            Some(res) => tri!(res),
-                            None => {
-                                if realm.is_lazy_regexp(n) {
-                                    realm.rx();
-                                }
-                                tri!(realm.get_prop(g, Key::Name(n)))
-                            }
-                        };
-                        r!(a!()) = realm.typeof_name(v);
-                        pc = next;
-                    }
                     Op::GetField => get_field!(a!(), r!(b!()), c!(), next),
                     Op::SetField => set_field!(r!(a!()), r!(b!()), c!(), next),
                     Op::SetFieldK => {
@@ -1264,27 +1812,6 @@ impl Vm {
                         let o = Realm::obj(r!(a!())).expect("an object literal");
                         let k = tri!(realm.key_of(r!(b!())));
                         tri!(realm.define(o, k, r!(c!())));
-                        pc = next;
-                    }
-                    Op::DeleteGlobal => {
-                        std::hint::cold_path();
-                        gate!();
-                        let (g, n) = (realm.global.value(), name!(bx!()));
-                        r!(a!()) = Value::bool(!realm.has_lex(n) && tri!(realm.delete_prop(g, Key::Name(n))));
-                        pc = next;
-                    }
-                    Op::Delete => {
-                        std::hint::cold_path();
-                        let o = r!(b!());
-                        if o.is_undefined() || o.is_null() {
-                            err!(ErrKind::Type, "cannot delete a property of undefined or null")
-                        }
-                        let k = tri!(realm.key_of(r!(c!())));
-                        let ok = tri!(realm.delete_prop(r!(b!()), k));
-                        if !ok && code.strict {
-                            err!(ErrKind::Type, "cannot delete a property that is not configurable")
-                        }
-                        r!(a!()) = Value::bool(ok);
                         pc = next;
                     }
                     Op::NewObject => {
@@ -1388,7 +1915,6 @@ impl Vm {
                     Op::SubX => op_sub!(a!(), r!(b!()), Value::int($x as i32), nextx!()),
                     Op::MulX => op_mul!(a!(), r!(b!()), Value::int($x as i32), nextx!()),
                     Op::ModX => op_mod!(a!(), r!(b!()), Value::int($x as i32), nextx!()),
-                    Op::Exp => { std::hint::cold_path(); op_exp!(a!(), r!(b!()), r!(c!()), next) }
                     Op::BitAnd | Op::BitAndI => {
                         let y = if opv == Op::BitAndI { Value::int(sc!()) } else { r!(c!()) };
                         bitop!(a!(), r!(b!()), y, next, |i, j| Value::int(i & j))
@@ -1442,22 +1968,6 @@ impl Vm {
                     }
                     Op::Ge => {
                         r!(a!()) = Value::bool(matches!(cmp!(r!(b!()), r!(c!())), Some(Ordering::Greater | Ordering::Equal)));
-                        pc = next;
-                    }
-                    Op::In => {
-                        std::hint::cold_path();
-                        if Realm::obj(r!(c!())).is_none() {
-                            err!(ErrKind::Type, "cannot use 'in' on a non-object")
-                        }
-                        let k = tri!(realm.key_of(r!(b!())));
-                        let v = tri!(realm.has_prop(r!(c!()), k));
-                        r!(a!()) = Value::bool(v);
-                        pc = next;
-                    }
-                    Op::InstanceOf => {
-                        std::hint::cold_path();
-                        let v = tri!(realm.instance_of(r!(b!()), r!(c!())));
-                        r!(a!()) = Value::bool(v);
                         pc = next;
                     }
                     Op::Neg => {
@@ -1515,7 +2025,7 @@ impl Vm {
                     Op::Jmp => jump!(true, next, sj!()),
                     Op::JmpBack => {
                         if realm.fuel == 0 {
-                            return Err(Exit::Fuel);
+                            return M::done(Err(Exit::Fuel));
                         }
                         realm.fuel -= 1;
                         jump!(true, next, sj!())
@@ -1572,12 +2082,6 @@ impl Vm {
                     Op::SwitchA => pc = switch_str(&mut realm.heap, code, &code.tables[bx!()..], r!(a!())),
                     Op::Ret => ret!(r!(a!())),
                     Op::RetUndef => ret!(undef),
-                    Op::Throw => { std::hint::cold_path(); throw!(r!(a!())) }
-                    Op::ThrowConst => {
-                        std::hint::cold_path();
-                        let n = realm.text(code.atoms[bx!()]);
-                        err!(ErrKind::Type, "assignment to constant variable '{}'", n)
-                    }
                     Op::IterOpen => {
                         let mut it = r!(b!());
                         if Realm::str_of(it).is_some() {
@@ -1595,15 +2099,6 @@ impl Vm {
                         r!(a!() + 2) = Value::int(0);
                         pc = next;
                     }
-                    Op::ForInOpen => {
-                        std::hint::cold_path();
-                        gate!();
-                        let keys = tri!(realm.own_keys(r!(b!())));
-                        r!(a!()) = keys;
-                        r!(a!() + 1) = Value::int(0);
-                        r!(a!() + 2) = Value::int(1);
-                        pc = next;
-                    }
                     Op::IterNext => {
                         let base = $x as usize;
                         let arr = Realm::obj(r!(base)).expect("an array");
@@ -1617,74 +2112,6 @@ impl Vm {
                         }
                     }
                     Op::IterClose => pc = next,
-                    Op::DeclGlobal => {
-                        std::hint::cold_path();
-                        gate!();
-                        let n = name!(bx!());
-                        let g = realm.global;
-                        if realm.has_lex(n) {
-                            let t = realm.text(n);
-                            err!(ErrKind::Syntax, "Identifier '{t}' has already been declared")
-                        }
-                        // An own property of the global object: an inherited one (`__proto__`) does not count.
-                        if realm.get_own(g, Key::Name(n)).is_none() {
-                            tri!(realm.define_attrs(g, Key::Name(n), A_W | A_E, undef));
-                        }
-                        pc = next;
-                    }
-                    Op::CheckLex => {
-                        std::hint::cold_path();
-                        gate!();
-                        let n = name!(bx!());
-                        tri!(realm.check_lex(n));
-                        pc = next;
-                    }
-                    Op::DeclLex | Op::DeclLexC => {
-                        std::hint::cold_path();
-                        gate!();
-                        let n = name!(bx!());
-                        let cx = stack[fp - REC + 2];
-                        tri!(realm.declare_lex(n, cx, a!() as u32, opv == Op::DeclLexC));
-                        pc = next;
-                    }
-                    Op::CreateArgs => {
-                        std::hint::cold_path();
-                        r!(a!()) = record(stack, fp, 9);
-                        pc = next;
-                    }
-                    Op::CreateRest => {
-                        std::hint::cold_path();
-                        gate!();
-                        let all = Realm::obj(record(stack, fp, 9)).expect("the arguments of a function with CF_ARGS");
-                        let vals: Vec<Value> = (b!() as u32..all.len()).map(|i| all.get_element(i).unwrap_or(undef)).collect();
-                        r!(a!()) = Obj::array(&mut realm.heap, &realm.shapes, realm.s_array, &vals).expect("memory").value();
-                        pc = next;
-                    }
-                    Op::Lazy => {
-                        std::hint::cold_path();
-                        // Compile the function and run its code from pc 0, in this frame. The compile adds to `prog` and may grow the
-                        // stack and `fbs`: `reload!` makes the locals again. No collection runs here (no `gate!`).
-                        if let Err(m) = realm.compile_stub(prog, stack, fbs, ci, fp, a!() == 0, code.nparams as usize) {
-                            // A plain `Error`, not a `SyntaxError`: the text has no early error (the pre-parse found none), and a script (or a
-                            // test262 test that expects a `SyntaxError`) must not take a limit of the compiler for one.
-                            err!(ErrKind::Plain, "{m}")
-                        }
-                        reload!();
-                        pc = 0;
-                        continue;
-                    }
-                    Op::GenInit | Op::Yield | Op::RetGen => {
-                        std::hint::cold_path();
-                        match gen_op(realm, stack, fbs, prog, ci, fp, pc, opv, a!(), bx!() as u32, next) {
-                            Ok(GenExit::Back(nci, nfp, npc)) => {
-                                (ci, fp, pc) = (nci, nfp, npc);
-                                reload!();
-                                continue;
-                            }
-                            Ok(GenExit::Done(v)) => return Ok(v),
-                            Err(e) => throw!(e),
-                        }
-                    }
                     Op::LoadCallee => {
                         r!(a!()) = record(stack, fp, 0);
                         pc = next;
@@ -1693,362 +2120,68 @@ impl Vm {
                         r!(a!()) = record(stack, fp, 8);
                         pc = next;
                     }
-                    Op::NewRegExp => {
+                    Op::In => {
                         std::hint::cold_path();
-                        gate!();
-                        r!(a!()) = tri!(realm.regexp_literal(atom!(b!()), atom!(c!())));
-                        pc = next;
-                    }
-                    Op::LoadBigInt => { std::hint::cold_path(); err!(ErrKind::Type, "BigInt literals are not supported yet (js2 has no BigInt: S2.7)") }
-                    Op::GetTemplate => {
-                        std::hint::cold_path();
-                        gate!();
-                        r!(a!()) = match fb.tmpl.iter().find(|t| t.0 == c!() as u32) {
-                            Some(t) => t.1,
-                            None => {
-                                let rec: Vec<u32> = code.recipes.get(b!()).expect("a recipe").to_vec();
-                                let (mut cooked, mut raw) = (Vec::new(), Vec::new());
-                                for p in rec.chunks(2) {
-                                    cooked.push(if p[0] == u32::MAX { undef } else { atom!(p[0]).value() });
-                                    raw.push(atom!(p[1]).value());
-                                }
-                                let t = realm.make_template(&cooked, &raw);
-                                fb.tmpl.push((c!() as u32, t));
-                                t
-                            }
-                        };
-                        pc = next;
-                    }
-                    Op::ArraySpread => {
-                        std::hint::cold_path();
-                        gate!();
-                        let vals = tri!(realm.iter_values(r!(b!())));
-                        let o = Realm::obj(r!(a!())).expect("an array");
-                        for v in vals {
-                            o.set_element(&mut realm.heap, o.len(), v).expect("memory");
+                        if Realm::obj(r!(c!())).is_none() {
+                            err!(ErrKind::Type, "cannot use 'in' on a non-object")
                         }
+                        let k = tri!(realm.key_of(r!(b!())));
+                        let v = tri!(realm.has_prop(r!(c!()), k));
+                        r!(a!()) = Value::bool(v);
                         pc = next;
                     }
-                    Op::ArrayHole => {
+                    Op::InstanceOf => {
+                        std::hint::cold_path();
+                        let v = tri!(realm.instance_of(r!(b!()), r!(c!())));
+                        r!(a!()) = Value::bool(v);
+                        pc = next;
+                    }
+                    Op::Throw => { std::hint::cold_path(); throw!(r!(a!())) }
+                    Op::ForInOpen => {
                         std::hint::cold_path();
                         gate!();
-                        let o = Realm::obj(r!(a!())).expect("an array");
-                        o.set_len(&mut realm.heap, o.len() + 1).expect("memory");
+                        let keys = tri!(realm.own_keys(r!(b!())));
+                        r!(a!()) = keys;
+                        r!(a!() + 1) = Value::int(0);
+                        r!(a!() + 2) = Value::int(1);
                         pc = next;
                     }
-                    Op::CallSpread => {
+                    Op::CreateArgs => {
                         std::hint::cold_path();
-                        let callee = r!(b!());
-                        let Some((ni, cctx)) = realm.function(callee) else {
-                            if realm.native_id(callee).is_some() {
-                                gate!();
-                                let (nf, len) = stage_array!(r!(b!() + 2));
-                                native_call!(callee, r!(b!() + 1), nf, len, a!(), next)
-                            }
-                            call_err!(callee)
+                        r!(a!()) = record(stack, fp, 9);
+                        pc = next;
+                    }
+                    cold_ops!() => {
+                        let flow = Vm::run_cold(realm, stack, fbs, prog, ci, fp, pc);
+                        let (nci, nfp, npc) = match flow {
+                            Flow::Go(c, f, p) => (c, f, p),
+                            Flow::Done(r) => return M::done(r),
                         };
-                        let (nf, len) = stage_array!(r!(b!() + 2));
-                        enter!(callee, ni, cctx, r!(b!() + 1), undef, a!() as i32, pc, next, nf, len);
-                        pc = 0;
+                        (ci, fp, pc) = (nci, nfp, npc);
+                        // The cold function may have grown the stack, compiled a function or entered a frame: every cached local is stale.
+                        reload!();
                         continue;
-                    }
-                    Op::NewSpread => {
-                        std::hint::cold_path();
-                        gate!();
-                        let callee = r!(b!());
-                        let Some((ni, cctx)) = realm.function_new(callee) else {
-                            if realm.native_id(callee).is_some() {
-                                let (nf, len) = stage_array!(r!(b!() + 1));
-                                r!(a!()) = tri!(realm.construct_native(callee, &stack[nf..nf + len], callee));
-                                pc = next;
-                                continue;
-                            }
-                            err!(ErrKind::Type, "not a constructor")
-                        };
-                        let (nf, len) = stage_array!(r!(b!() + 1));
-                        construct!(callee, ni, cctx, callee, a!(), next, nf, len, 0)
-                    }
-                    Op::CopyProps => {
-                        std::hint::cold_path();
-                        gate!();
-                        let o = Realm::obj(r!(a!())).expect("an object literal");
-                        if tri!(realm.copy_props(o, r!(b!()))) {
-                            pc = next;
-                        } else {
-                            // An accessor: the helper copies; it returns the object, which goes back to the register of the object.
-                            enter_helper!(crate::bi_object::H_SPREAD, a!(), next);
-                        }
-                    }
-                    Op::ObjRest => {
-                        std::hint::cold_path();
-                        gate!();
-                        let keys: Vec<Value> = (0..$x as usize).map(|i| r!(c!() + i)).collect();
-                        match tri!(realm.obj_rest(r!(b!()), &keys)) {
-                            Some(v) => {
-                                r!(a!()) = v;
-                                pc = nextx!();
-                            }
-                            None => enter_helper!(crate::bi_object::H_REST, a!(), nextx!()),
-                        }
-                    }
-                    Op::SetProto => {
-                        std::hint::cold_path();
-                        gate!();
-                        let (o, v) = (Realm::obj(r!(a!())).expect("an object literal"), r!(b!()));
-                        if let Some(p) = Realm::obj(v) {
-                            o.set_proto(&mut realm.shapes, Some(p.cell()));
-                        } else if v.is_null() {
-                            o.set_proto(&mut realm.shapes, None);
-                        }
-                        pc = next;
-                    }
-                    Op::DefAccessor => {
-                        std::hint::cold_path();
-                        gate!();
-                        let n = name!(c!());
-                        let o = Realm::obj(r!(a!())).expect("an object");
-                        tri!(realm.define_accessor(o, Key::Name(n), r!(b!()), $x & 1 != 0, $x & 2 == 0));
-                        pc = nextx!();
-                    }
-                    Op::DefAccessorElem => {
-                        std::hint::cold_path();
-                        gate!();
-                        let o = Realm::obj(r!(a!())).expect("an object");
-                        let k = tri!(realm.key_of(r!(b!())));
-                        tri!(realm.define_accessor(o, k, r!(c!()), $x & 1 != 0, $x & 2 == 0));
-                        pc = nextx!();
-                    }
-                    Op::DefMethod => {
-                        std::hint::cold_path();
-                        gate!();
-                        let n = name!(c!());
-                        let o = Realm::obj(r!(a!())).expect("an object");
-                        tri!(realm.define_attrs(o, Key::Name(n), A_W | A_C, r!(b!())));
-                        pc = next;
-                    }
-                    Op::DefMethodElem => {
-                        std::hint::cold_path();
-                        gate!();
-                        let o = Realm::obj(r!(a!())).expect("an object");
-                        let k = tri!(realm.key_of(r!(b!())));
-                        tri!(realm.define_attrs(o, k, A_W | A_C, r!(c!())));
-                        pc = next;
-                    }
-                    Op::SetHome => {
-                        std::hint::cold_path();
-                        Realm::obj(r!(a!())).expect("a function").set_slot(&realm.shapes, 2, r!(b!()));
-                        pc = next;
-                    }
-                    Op::MakeClass => {
-                        std::hint::cold_path();
-                        gate!();
-                        tri!(realm.make_class(r!(a!()), None));
-                        pc = next;
-                    }
-                    Op::MakeDerived => {
-                        std::hint::cold_path();
-                        gate!();
-                        if let Some((ni, _)) = realm.function_new(r!(b!()))
-                            && prog[ni].noctor
-                        {
-                            err!(ErrKind::Type, "class extends value is not a constructor or null")
-                        }
-                        tri!(realm.make_class(r!(a!()), Some(r!(b!()))));
-                        pc = next;
-                    }
-                    Op::SetFnName => {
-                        std::hint::cold_path();
-                        gate!();
-                        let k = tri!(realm.key_of(r!(b!())));
-                        tri!(realm.name_function(r!(a!()), k, c!() as u32));
-                        pc = next;
-                    }
-                    Op::DefaultCtor => {
-                        std::hint::cold_path();
-                        gate!();
-                        r!(a!()) = realm.new_function(realm.dctor[b!() & 1], undef);
-                        pc = next;
-                    }
-                    Op::SetFields => {
-                        std::hint::cold_path();
-                        Realm::obj(r!(a!())).expect("a constructor").set_slot(&realm.shapes, 3, r!(b!()));
-                        pc = next;
-                    }
-                    Op::NewPrivateName => {
-                        std::hint::cold_path();
-                        gate!();
-                        let d = atom!(bx!());
-                        r!(a!()) = realm.new_private_name(d);
-                        pc = next;
-                    }
-                    Op::GetPrivate => {
-                        std::hint::cold_path();
-                        gate!();
-                        match tri!(realm.private_get(r!(b!()), r!(c!()))) {
-                            Got::Val(v) => {
-                                r!(a!()) = v;
-                                pc = next;
-                            }
-                            Got::Get(g) => call_get!(g, r!(b!()), a!(), next),
-                        }
-                    }
-                    Op::SetPrivate => {
-                        std::hint::cold_path();
-                        gate!();
-                        match tri!(realm.private_set(r!(a!()), r!(b!()), r!(c!()))) {
-                            Put::Done => pc = next,
-                            Put::Set(f) => call_set!(f, r!(a!()), r!(c!()), next),
-                            Put::Fail => {
-                            if code.strict {
-                                err!(ErrKind::Type, "cannot assign to a read-only property or a property with no setter")
-                            }
-                            pc = next;
-                    }
-                        }
-                    }
-                    Op::HasPrivate => {
-                        std::hint::cold_path();
-                        gate!();
-                        let h = tri!(realm.private_has(r!(b!()), r!(c!())));
-                        r!(a!()) = Value::bool(h);
-                        pc = next;
-                    }
-                    Op::DefPrivate => {
-                        std::hint::cold_path();
-                        gate!();
-                        tri!(realm.private_def(r!(a!()), r!(b!()), A_W, r!(c!())));
-                        pc = next;
-                    }
-                    Op::DefPrivateMethod => {
-                        std::hint::cold_path();
-                        gate!();
-                        tri!(realm.private_def(r!(a!()), r!(b!()), 0, r!(c!())));
-                        pc = next;
-                    }
-                    Op::DefPrivateAccessor => {
-                        std::hint::cold_path();
-                        gate!();
-                        tri!(realm.private_def_accessor(r!(a!()), r!(b!()), r!(c!()), $x == 1));
-                        pc = nextx!();
-                    }
-                    Op::GetSuper => {
-                        std::hint::cold_path();
-                        gate!();
-                        let n = name!(c!());
-                        match tri!(realm.super_get(home!(), Key::Name(n))) {
-                            Got::Val(v) => {
-                                r!(a!()) = v;
-                                pc = next;
-                            }
-                            Got::Get(g) => call_get!(g, r!(b!()), a!(), next),
-                        }
-                    }
-                    Op::GetSuperElem => {
-                        std::hint::cold_path();
-                        gate!();
-                        let k = tri!(realm.key_of(r!(c!())));
-                        match tri!(realm.super_get(home!(), k)) {
-                            Got::Val(v) => {
-                                r!(a!()) = v;
-                                pc = next;
-                            }
-                            Got::Get(g) => call_get!(g, r!(b!()), a!(), next),
-                        }
-                    }
-                    Op::SetSuper => {
-                        std::hint::cold_path();
-                        gate!();
-                        let n = name!(c!());
-                        match tri!(realm.super_set(home!(), r!(a!()), Key::Name(n), r!(b!()))) {
-                            Put::Done => pc = next,
-                            Put::Set(f) => call_set!(f, r!(a!()), r!(b!()), next),
-                            Put::Fail => {
-                            if code.strict {
-                                err!(ErrKind::Type, "cannot assign to a read-only property or a property with no setter")
-                            }
-                            pc = next;
-                    }
-                        }
-                    }
-                    Op::SetSuperElem => {
-                        std::hint::cold_path();
-                        gate!();
-                        let k = tri!(realm.key_of(r!(b!())));
-                        match tri!(realm.super_set(home!(), r!(a!()), k, r!(c!()))) {
-                            Put::Done => pc = next,
-                            Put::Set(f) => call_set!(f, r!(a!()), r!(c!()), next),
-                            Put::Fail => {
-                            if code.strict {
-                                err!(ErrKind::Type, "cannot assign to a read-only property or a property with no setter")
-                            }
-                            pc = next;
-                    }
-                        }
-                    }
-                    Op::CallSuper | Op::CallSuperSpread => {
-                        std::hint::cold_path();
-                        gate!();
-                        let Some((class, nt)) = super_info(realm, stack, fp) else { err!(ErrKind::Reference, "'super' keyword unexpected here") };
-                        let Some(pv) = Realm::obj(class).and_then(|f| realm.proto_of(f)).map(|p| p.value()) else {
-                            err!(ErrKind::Type, "super constructor is not a constructor")
-                        };
-                        let Some((ni, cctx)) = realm.function_new(pv) else {
-                            if realm.native_id(pv).is_some() {
-                                // A class that extends a built-in: the built-in makes `this`, then the fields of the class run.
-                                let (ab, argc) = if opv == Op::CallSuper { (fp + b!(), c!()) } else { stage_array!(r!(b!())) };
-                                let v = tri!(realm.construct_native(pv, &stack[ab..ab + argc], nt));
-                                r!(a!()) = v;
-                                if let Some((fi, fctx, ff)) = realm.fields_of(class) {
-                                    enter!(ff, fi, fctx, v, undef, code.nregs as i32, pc, next, 0usize, 0usize);
-                                    pc = 0;
-                                } else {
-                                    pc = next;
-                                }
-                                continue;
-                            }
-                            err!(ErrKind::Type, "super constructor is not a constructor")
-                        };
-                        let (ab, argc) = if opv == Op::CallSuper { (fp + b!(), c!()) } else { stage_array!(r!(b!())) };
-                        construct!(pv, ni, cctx, nt, a!(), next, ab, argc, AFTER_SUPER)
-                    }
-                    Op::RetDerived => {
-                        std::hint::cold_path();
-                        let (v, t) = (r!(a!()), r!(b!()));
-                        let bad = if Realm::obj(v).is_some() {
-                            None
-                        } else if !v.is_undefined() {
-                            Some((ErrKind::Type, "derived constructors may only return object or undefined"))
-                        } else if t.is_hole() {
-                            Some((ErrKind::Reference, "must call super constructor in derived class before returning from derived constructor"))
-                        } else {
-                            None
-                        };
-                        if let Some((kind, msg)) = bad {
-                            // The error is for the caller of the constructor: a `catch` inside the constructor does not see it.
-                            let e = realm.error(kind, msg);
-                            let caller = int_at(stack, fp, 5);
-                            if caller == ENTRY {
-                                return Err(Exit::Throw(e));
-                            }
-                            pc = int_at(stack, fp, 3) as usize;
-                            ci = caller as usize;
-                            // SAFETY: as in `ret!`.
-                            let ccode = unsafe { prog.at(ci) };
-                            fp -= REC + ccode.nregs as usize;
-                            reload!(ccode);
-                            throw!(e)
-                        }
-                        ret!(if v.is_undefined() { t } else { v })
                     }
                 }
             }};
         }
         let _ = ITER_REGS;
+        let mut ran = false;
         loop {
+            if M::COLD {
+                // One instruction: `continue` in an arm comes here, and the arms that fall out of the `match` come here.
+                if ran {
+                    return M::go(ci, fp, pc);
+                }
+                ran = true;
+            }
             let w = word!(pc);
             let op = w as u8;
+            // The hot loop counted this op before it called the cold function.
             #[cfg(feature = "op-count")]
-            crate::opcount::tick(code, pc, if op == Op::Wide as u8 { (w >> 8) as u8 } else { op }, op == Op::Wide as u8);
+            if !M::COLD {
+                crate::opcount::tick(code, pc, if op == Op::Wide as u8 { (w >> 8) as u8 } else { op }, op == Op::Wide as u8);
+            }
             if op != Op::Wide as u8 {
                 step!(
                     op,
