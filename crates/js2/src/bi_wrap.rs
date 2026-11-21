@@ -66,6 +66,9 @@ impl Realm {
             self.number_proto
         } else if v.as_bool().is_some() {
             self.boolean_proto
+        } else if Realm::sym_of(v).is_some() {
+            self.fn_props(self.symbol_proto);
+            self.symbol_proto
         } else {
             return self.type_error("cannot convert undefined or null to an object");
         };

@@ -914,11 +914,8 @@ impl Vm {
                 let g: Value = $g;
                 let this: Value = $this;
                 let Some((ni, cctx)) = realm.function(g) else {
+                    // A getter written in Rust (`Symbol.prototype.description`, the flag getters of `RegExp.prototype`), or no function: the nested call runs it or throws.
                     std::hint::cold_path();
-                    // A getter written in Rust (the flag getters of `RegExp.prototype`): a nested call, no frame.
-                    if realm.native_id(g).is_none() {
-                        err!(ErrKind::Type, "a getter is not a function")
-                    }
                     r!($dst) = tri!(realm.call_function(g, this, &[]));
                     pc = $next;
                     continue;
@@ -1258,7 +1255,7 @@ impl Vm {
                         }
                         r!(a!()) = match tri!(realm.key_of(r!(c!()))) {
                             Key::Idx(i) => Realm::num(i as f64),
-                            Key::Name(s) => s.value(),
+                            Key::Name(s) => s.key_value(),
                         };
                         pc = next;
                     }

@@ -296,3 +296,27 @@ fn a_partial_snapshot_does_not_discard_unreported_removals() {
     let next = s.diff("main", json!({}));
     assert!(next.contains("removed:"), "{next}");
 }
+
+const LIST: &str = "<!doctype html><body><button id=b onclick=\"var u=document.createElement('ul');u.setAttribute('role','listbox');\
+for(var i=0;i<700;i++){var l=document.createElement('li');l.setAttribute('role','option');l.textContent='Country number '+i;u.append(l)}\
+document.body.append(u)\">Open</button><button id=z onclick=\"document.querySelector('ul').remove()\">Close</button></body>";
+
+/// A dropdown that adds 700 options gives a short diff: the first options, then one line that counts the rest.
+#[test]
+fn a_long_run_of_new_siblings_is_summarized() {
+    let base = pages(&[("/", LIST)]);
+    let mut s = Server::start();
+    s.open("m", &format!("{base}/"));
+    let (r, error) = s.tool("act", json!({"session": "m", "op": "click", "loc": "css=\"#b\""}));
+    assert!(!error, "{r}");
+    eprintln!("open diff: {} chars\n{}", r.len(), &r[..r.len().min(3000)]);
+    assert!(r.contains("Country number 0"), "{r}");
+    assert!(!r.contains("Country number 300"), "{r}");
+    assert!(r.contains("more option"), "{r}");
+    assert!(r.len() < 3000, "{} chars", r.len());
+    // The summarized options are known now: the next diff does not list them again.
+    assert!(!r.contains("text: \"Country number"), "{r}");
+    let (r, error) = s.tool("act", json!({"session": "m", "op": "scroll", "dy": 0}));
+    assert!(!error, "{r}");
+    assert!(!r.contains("Country number 400"), "{r}");
+}

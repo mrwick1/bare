@@ -58,6 +58,8 @@ pub enum Locator {
     Placeholder(Text),
     /// A ref from a snapshot (`ref=e7`): the run resolves it, not `find`.
     Ref(u32),
+    /// The rendered match number N (from 0, in tree order) of a locator: `css="a.title" nth=0`.
+    Nth(Box<Locator>, usize),
 }
 
 impl std::fmt::Display for Locator {
@@ -70,6 +72,7 @@ impl std::fmt::Display for Locator {
             Locator::Text(t) => write!(f, "text{t}"),
             Locator::Placeholder(t) => write!(f, "placeholder{t}"),
             Locator::Ref(r) => write!(f, "ref=e{r}"),
+            Locator::Nth(l, n) => write!(f, "{l} nth={n}"),
         }
     }
 }
@@ -92,6 +95,10 @@ pub fn find(page: &mut Page, loc: &Locator) -> Result<Found, String> {
 
 /// The elements that `loc` names, and with `scope` only those that are inside an element of that CSS selector (or are one).
 pub fn find_in(page: &mut Page, loc: &Locator, scope: Option<&str>) -> Result<Found, String> {
+    if let Locator::Nth(l, n) = loc {
+        let f = find_in(page, l, scope)?;
+        return Ok(Found { shown: f.shown.get(*n).copied().into_iter().collect(), hidden: f.hidden });
+    }
     if let Locator::Css(sel) = loc {
         return Ok(Found { shown: page.query_all(sel)?, hidden: 0 });
     }
@@ -284,6 +291,7 @@ impl<'a> Cx<'a> {
     fn wanted(&self, n: NodeId, loc: &Locator) -> bool {
         match loc {
             Locator::Css(_) => true,
+            Locator::Nth(l, _) => self.wanted(n, l),
             Locator::Role(r, name) => self.role(n).is_some_and(|x| x.eq_ignore_ascii_case(r)) && name.as_ref().is_none_or(|t| t.matches(&self.name(n))),
             Locator::Label(t) => self.label(n).is_some_and(|l| t.matches(&l)),
             Locator::Placeholder(t) => matches!(self.tag(n), "input" | "textarea") && self.attr(n, "placeholder").is_some_and(|p| t.matches(p)),

@@ -17633,6 +17633,61 @@ Tests: `cargo test --locked -p bare-js2 --lib`: 418 pass (the new test above). `
 
 Not tested: Windows; the browser; the `v` flag; the `u` fast paths of the full check against real `u` patterns (only random pieces); the 3,744 npm files of #790 again (only the five files above); no V8 run of the patterns of the five files themselves (they take `simple`, which the random test covers by the rule "yes implies full yes"); a `Token` field for the end of the pattern (not built).
 
+## 2026-11-21: js2 promises and the microtask queue (steps P0 and P1 of `docs/design-js2-async.md`)
+
+### P0 gate
+
+The P0 spike ran inside `crates/js2` (it is the first version of `promise.rs`, not a separate scratch crate). The cost rows are in `crates/js2/examples/promise_load.rs`. Machine: archMachine, release build, `perf stat -e instructions:u`, 3 runs of each scale (20,000 and 40,000 steps), step = (I(40,000) - I(20,000)) / 20,000. The 3 runs gave the same number in every row (spread under 1 instruction).
+
+| Row | Instructions per step |
+| --- | ---: |
+| `then` (script `p = p.then(f)` on a pending chain: read of `then`, call, derived promise, reaction, settle, job, resolve of the derived promise) | 1,849 |
+| of which the read of `p.then` (`get` 585 minus `loop` 112) | 473 |
+| `then` without the read of `then`, with the loop turn | 1,376 |
+| `then` without the read of `then` and without the loop turn | 1,264 |
+| `then_hit` (own property `then`, the site cache hits) | 1,633 |
+| `thenable` (the handler returns a promise: one thenable job for each step) | 2,806 |
+| `new Promise(function (res) { res(i); })` | 2,616 |
+| `queueMicrotask(f)` and its job | 949 |
+
+Bytes: a promise is 32 bytes (test `a_promise_is_32_bytes_and_a_reaction_48` checks it with `live_bytes`). A reaction is 48 bytes. A pending `then` keeps a reaction and the derived promise: 80 bytes (test `a_pending_then_costs_a_reaction_of_48_bytes_and_a_derived_promise_of_32`).
+
+Gate (`then` step 1,500 or less, promise 40 bytes or less): the promise is 32 bytes, so it passes. The `then` step is 1,849 as a script runs it. That is over 1,500 if the read of `p.then` counts. The read is 473 instructions, and it is not a cost of the promise design: the interpreter looks up a property that the prototype gives (`get_field_slow`) at each execution, because a site has no cache for a property of the prototype chain. The step without the read is 1,264 to 1,376, so the gate passes for the design of 7.1 and 7.2. I read the gate as the cost of the promise work. Proposed follow-up in the engine, not in sections 7.1 and 7.2: a cache for a property of the prototype chain in the site (a validity cell on the prototype). It also helps every method call on a built-in (`push`, `map`). Three changes took the step from 2,317 to 1,849: direct slot access for the two hidden slots, one 32-byte allocation for a promise, and a cache of the `constructor` read of `then` (valid while the promise has the default shape).
+
+### P1
+
+New: `crates/js2/src/promise.rs`, `promise_tests.rs`. Changed: `object.rs` (flag `F_PROMISE`, `Spot`, the two hidden slots), `interp_rt.rs` (the `Promises` state in the realm and its roots), `builtins.rs`, `lib.rs`. The driver of `bare-js-diff` runs the jobs at the end of a script and runs `async` tests of test262.
+
+- A promise is an `Object` cell with the flag `F_PROMISE` and two hidden slots: the state word (state, handled bit) and the result, or the list of reactions while it is pending. The hidden keys start with `\0`, so `Object.keys` and `getOwnPropertyNames` do not show them.
+- A reaction is a 5-word record in the queue or in a pending list. A job is a reaction. The queue is a linked list through the `NEXT` slot, with `head` and `tail` in the realm. The job that runs is rooted in `pr.cur`.
+- The host runs the jobs: `Vm::drain_microtasks(on_error)`. `Vm::call` never drains. A reaction is a data record, so activations as reactions (A1) can add a kind later: `run_job` takes the kind from the record.
+- Resolving functions, `then`, `catch`, the thenable job, `Promise.resolve`, `Promise.reject`, `queueMicrotask`, `Promise` constructor and prototype are in. `Symbol.species` is not (js2 has no `Symbol`): `then` uses `constructor` when it is `Promise` or inherits from it, else `Promise`. `finally` and the static combinators are not in this step. The combinators will be Rust, not prelude (owner decision).
+- Limits (`PromiseLimits`): `max_queue` (a `RangeError` at the call that queues), `max_reactions` (a `RangeError` at a `then` on a pending promise), `max_jobs_per_drain` (the drain returns `DrainStop::Limit` and fails until `clear_failed_job`).
+- Rejection tracking: `Realm::take_rejections` gives the promises that were rejected with no handler (once) and the ones that got a handler after the host saw them. The list of reported promises is weak (a collection removes a promise that nothing holds).
+
+Tests (`cargo test --locked -p bare-js2 --lib`: 450 pass; `-p bare-js-diff`: all pass): 35 order cases (each result was made by Node 22 and copied into `CASES`), run normally and under constant collection; the 3 limits; callbacks of `queueMicrotask` that throw; 100,000 pending reactions that survive collection (trigger 64 KiB) and run in order; the rejection list; a reported promise that nothing holds; the sizes above.
+
+test262 (`TEST262=/data/claude-tmp/test262 tools/js/test262_js2.sh -j 6`, checkout at `e4fbf577`): the subset gets `built-ins/Promise` without `all`, `allKeyed`, `allSettled`, `allSettledKeyed`, `any` and `race`, and the skip file gets `allow:Promise`. The runner no longer skips `async` tests. It adds `doneprintHandle.js`, and the engine runs the jobs when the script ends. I ran the base (`15157cbe`) and this branch with the same runner and compared them test by test. New engine, whole list: base 15,854 pass (29,763 tests), branch 16,015 pass (30,016 tests). No test that passes on the base fails on the branch (0 tests). 161 tests newly pass: 156 in `built-ins/Promise` and 5 elsewhere (`built-ins/Object/seal/seal-promise.js`, the two `subclass-Promise.js` tests that were skipped before, and the two `subclass/builtin-objects/Promise` tests). `built-ins/Promise` on the branch: 156 pass, 23 fail, 74 skip (the skips are tests with a feature that no `allow:` line names: `Symbol`, `finally`, `try`, `withResolvers`). 21 of the 23 failures need a script function as a constructor that a built-in calls with `new` (`NewPromiseCapability(C)` with a script `C`). `Realm::call_function` does not construct, so these throw a `TypeError` with that text, or fail the check that the executor ran. The other 2 (`resolve/ctx-non-ctor.js`, `reject/ctx-non-ctor.js`) call `eval`, which js2 does not have. A fix for the 21 needs a construct path for script functions in `reenter.rs`. It belongs with A1. The baseline file has the new counts.
+
+### Cost
+
+`interp_load`, release, `tools/js/instr.sh` (minimum of 3 runs), count at N minus count at N = 0, base `15157cbe` (the merge base; `origin/main` is 3 merges ahead and `git diff` of `crates/js2` between the two is empty) against this branch, default profile, 2 rounds in the order base, branch, base, branch:
+
+| Row | Base | Branch | Change |
+| --- | ---: | ---: | ---: |
+| `loopfn 3000000` | 832,500,320 | 832,500,695 | +0.00% |
+| `calls 1000000` | 618,500,372 | 618,500,498 | +0.00% |
+| `fib 27` | 312,963,492 | 312,964,071 | +0.00% |
+| `closures 1000000` | 2,045,235,151 | 2,045,449,131 | +0.01% |
+| `objects 1000000` | 697,273,036 | 697,275,678 | +0.00% |
+
+No row is over +0.5%, so the `codegen-units=1` rule is not needed. The promise code adds no arm to `Vm::run`, so no `cold_path` is needed.
+
+Start-up (`script_run` of `var x = 1;`): 1,793,513 (base, round 1; 1,794,107 in round 2) and 1,800,802 (branch, round 1; 1,801,947 in round 2): +7.3 K to +7.8 K, +0.41%. The lazy built-ins design (`docs/design-js2-lazy-builtins.md`) is not in the tree, so `install_promise` runs at each start. The cost is the `Promise` constructor, the prototype, 3 methods, 2 statics, the global `queueMicrotask` and the shape of a promise. When lazy built-ins land, `install_promise` must move behind the first read of the global `Promise`.
+
+### Not tested
+
+Windows and macOS; Miri; `Symbol.species` and `Symbol.toStringTag` (no `Symbol`); a subclass with a script constructor that calls `then` (`TypeError`, see above); `finally`, `withResolvers`, `try` and the combinators (not in this step, skipped by test262 features); a rejected promise reported by the host in a real browser loop (the host side of `take_rejections` is not built); a second test262 revision; the base measurement against the newest `origin/main`.
 ## 2026-11-21: js2 on the host interface, steps 1 to 3 (plan step S2.8, `docs/design-js2-host-api.md`)
 
 What is built. `Realm` implements `bare_js_api::Engine` (`crates/js2/src/api.rs`). The state is one field of the realm, `ApiState`: the handle stack, the table of persistent handles, the host, and the window of the running host call. `this` and the arguments of a host call are named in place (the slots from `WIN`), so a call copies and pushes nothing. `Realm::collect` marks the handle stack, the live persistent slots and the whole chain of windows. A host function is a native: all host functions share two `Native` entries (plain and constructor), and the cell keeps the host id, the kind with the `length`, and the name in its three free slots. A call into script from a host function goes through `Realm::call_function` (the collector is held). A call from the host with no native on the Rust stack runs on a pooled machine and may collect. An abort (`Unsupported`, or a limit that the host raised with `charge`) is `STOP` with the reason in `ApiState::abort`. Promises, microtasks, iteration, modules, buffers, owners, host-filled objects, clone and `run_script` answer `Abort::Unsupported(name)` (`run_script` needs a completion value, which the compiler does not make yet). `Realm::run_text` runs a script text for tests and tools; `LazyCompile::script` adds a script to a program that runs.
@@ -17703,6 +17758,33 @@ Results.
 
 Not tested: macOS and a macOS build of the new code beyond the existing cross check; Windows 10 and ARM; the Windows release binary size; a Windows zone id with no CLDR row on the VM (`tzutil` refuses the two retired ids; the unit test covers the offset); the `bare-drive` journey of the design (check 4: `getTimezoneOffset` and `resolvedOptions().timeZone` through the whole browser on the VM); RSS of the whole browser; wall time on an idle machine; `tools/portable_check.sh` without `--scan` (the scan fails on three older files of main: `downloads/run.rs`, `force.rs`, `mcp/src/main.rs`; none is touched here); the stale-`known` check of the scan, which runs after that failure.
 
+## js2: the Symbol primitive (2026-11-21)
+
+Design: [design-js2-async.md](design-js2-async.md), decision 2. Base: `351f9b72` (`origin/main`, with #791 JSON and the String, Array, Number and Math built-ins merged in). Machine: archMachine, not idle; instruction counts only.
+
+What changed.
+
+1. A symbol is a cell with the layout of a flat string and the flag `FLAG_SYMBOL` (`string.rs`). Its units are the description. `FLAG_NO_DESC` marks `Symbol()`. `FLAG_REGISTERED` marks `Symbol.for`. The `Value` kind `Symbol` already existed. The collector marks the cell as a leaf string.
+2. A symbol is a property key with no new key type. A shape key is a cell address, and a symbol is a different cell from every atom. `for-in`, `Object.keys`, `Object.getOwnPropertyNames` and the script display skip symbols. `Object.getOwnPropertySymbols` lists them.
+3. The members of `Symbol` and `Symbol.prototype` are lazy (`F_LAZY`, as the `length` of a function). `Realm::new` makes the six well-known symbols and one native cell.
+4. `ToPrimitive` reads `Symbol.toPrimitive`. `instanceof` reads `Symbol.hasInstance` (the native default is not called). `Object.prototype.toString` reads `Symbol.toStringTag`. `Object.assign`, the object spread, `getOwnPropertyDescriptors` and `defineProperties` include symbols. Implicit string or number conversion of a symbol throws `TypeError`.
+5. `call_get!` in `Vm::run` calls a native getter through a cold arm (the `description` getter needs it).
+
+Wired: `typeof`, `Symbol()`, `Symbol.for`, `keyFor`, `toString`, `valueOf`, `description`, the six symbols `iterator`, `asyncIterator`, `species`, `toStringTag`, `hasInstance`, `toPrimitive`, and the hooks above.
+Later: `match`, `matchAll`, `replace`, `search`, `split`, `unscopables`, `isConcatSpreadable` (they need `RegExp`, `with` and `concat`); `iterator` and `asyncIterator` are values that no built-in reads until step G3; `species` waits for step P3; `Array.prototype[Symbol.iterator]`; `new` of a bound function (a known gap).
+
+Results.
+
+| Check | Result |
+| --- | --- |
+| test262 (`tools/js/test262_js2.sh -u`, `built-ins/Symbol` added to the subset, `allow:` lines for the Symbol features) | new engine: 17,775 pass, 2,444 fail. Main with the same rules: 17,365 pass. 0 tests pass on main and fail here. 410 tests gain. Main with its own rules passes 17,324. `built-ins/Symbol` (all its directories): 61 pass, 4 fail, 33 skipped for other features. The 4 fail on `Proxy`, `Date`, `RegExp` or a `Symbol.species` getter. |
+| `cargo test --locked -p bare-js2 --lib` | 467 pass (10 new in `bi_symbol_tests.rs`, each run plain and under constant collection) |
+| `cargo test --locked -p bare-js-diff` | pass (`script_tests:479` now expects `typeof Symbol` to be `function`; its `diff-known.txt` entry is gone) |
+| Micro rows, `tools/js/instr.sh` (min of 3, instructions:u, N minus N=0), default build, base then new | `loopfn 3000000` 817,500,160 to 838,501,178 (+2.57%); `calls 1000000` 586,501,612 to 589,500,937 (+0.51%); `fib 27` 260,525,190 to 260,842,044 (+0.12%); `closures 1000000` 1,947,254,460 to 1,954,254,550 (+0.36%); `objects 1000000` 710,282,673 to 708,284,276 (-0.28%) |
+| Same rows, `codegen-units=1`, base then new | `loopfn` 847,500,974 to 847,500,193 (0.00%); `calls` 579,500,062 to 579,499,993 (0.00%); `fib` 251,308,742 to 251,307,790 (0.00%); `closures` 1,942,176,229 to 1,943,178,410 (+0.05%); `objects` 720,284,311 to 720,285,602 (0.00%). All within +0.5%, so the two default-build rows over +0.5% pass by the cost rule. Hypothesis: the `loopfn` default-build swing is code layout, because it is 0.00% at `codegen-units=1`. |
+| Start-up, `script_run` on `var x = 1;` (min of 3, three samples each) | default build: base 1,941,215 / 1,941,369 / 1,939,068; new 1,947,111 / 1,947,746 / 1,947,912 (+5.9K to +8.8K, +0.30% to +0.45%). `codegen-units=1`: base 1,932,659 / 1,932,999 / 1,933,199; new 1,941,212 / 1,942,605 / 1,940,830 (+7.6K to +9.6K, +0.39% to +0.50%). The Rust-side install alone is about +1K. The rest is the `assign`, `copyData` and `rest` helpers of `prelude.js` (symbols are copied). A new top-level `var` in the prelude cost +45K, so none was added. |
+
+Not tested: Windows; the browser and the old engine with symbols (the old engine has none); Miri locally (the tests use small loops for the CI Miri job); `Symbol.species`, `iterator` and `asyncIterator` reads (no built-in reads them yet); the whole-browser cost; wall time on an idle machine; the `cost_matrix.sh` rows other than the five micro rows and start-up.
 ## js2 RegExp, steps R0 and R1: the backtracker behind a `Blob` (2026-11-21)
 
 Design: `design-js2-regexp.md` (PR #797), "Decisions (owner, 2026-11-21)". Base: `fd9c749b` (js2 main). Machine: archMachine (AMD Ryzen 9 5900HX), not idle (other sessions ran). Cost rows are instruction counts (`tools/js/instr.sh`, minimum of 3 runs).
@@ -17749,6 +17831,24 @@ Not done in this change: String methods, the Symbol protocol, named groups in th
 Miri (`cargo +nightly miri test`): the 3 `blob` tests, `regexp::tests::basics`, `a_one_byte_input_gives_the_same_spans_as_a_two_byte_input` and `regexp_rt_tests::last_index` pass. The full suite under Miri did not finish in 50 minutes here (`regexp::tests::compile_bounds` is slow); CI runs it.
 
 Not tested: Windows; the browser; peak RSS on `rust-book-search` and `substack-home` (no journey run); a V8 comparison of the new glue; the cost matrix of the whole repo; Miri on the whole js2 suite (the Blob and RegExp tests only; see the PR).
+
+Merge with `origin/main` at `8875c60a` (#800 promises, #804 Symbol, generators, host adapter). Conflicts: `interp.rs` (`call_get!`: one cold arm for a native getter, as for `Symbol.prototype.description` and the flag getters), `interp_rt.rs` (`collect` marks `rx` in the roots of the promise walk; `blob_of` and `sym_of` both stay), `test262-js2-subset.txt` (`built-ins/RegExp` and `built-ins/Promise`, `Symbol` both listed) and the baseline (regenerated). All `F_*` bits are distinct (`F_PROMISE` 8192, `F_GEN` 16384, `F_REGEXP` 32768; Symbol has no flag). Measured on the merged tree against `8875c60a`, archMachine, load average 11 to 16, instruction counts only (`tools/js/instr.sh`, minimum of 3). test262 (`tools/js/test262_js2.sh -u`, checkout `e4fbf577`, a fresh run of each tree): `origin/main` passes 17,941 and the merge passes 19,229; 0 tests that pass on main fail on the merge; 1,288 new passes. `cargo test --locked -p bare-js2 --lib`: 545 pass; `-p bare-js-diff --lib`: 2 pass. Micro rows, default build, base then new (`interp_load`, N minus N=0, loopfn 1,000,000, calls 1,000,000, fib 30, closures 200,000, objects 200,000): loopfn 266,500,200 to 266,500,274 (0.00%); calls 571,500,735 to 571,500,787 (0.00%); fib 1,090,130,726 to 1,090,134,014 (0.00%); closures 365,701,254 to 365,699,724 (0.00%); objects 143,393,037 to 143,392,696 (0.00%). Start-up (`script_run` on `var x = 1;`, 3 samples): base 1,967,848 / 1,969,396 / 1,969,520; new 1,979,990 / 1,980,137 / 1,978,521 (+0.54% on the minimum), so the row is over +0.5% at the default build. At `codegen-units=1` on both trees: base 1,962,603 / 1,962,867 / 1,962,473; new 1,972,167 / 1,972,951 / 1,972,767 (+0.49% on the minimum), so the rule passes, narrowly. Micro rows at `codegen-units=1` (information): loopfn -3.2%, calls -1.9%, fib +0.9%, closures -0.7%, objects -1.5%; `fib` is 0.00% at the default build, which is the build that the rule uses for the micro rows. Regex rows, new engine (the base has no RegExp): staging 1,658 per run (old engine 1,627, +1.9%), Porter 3,644 (old 3,801, -4.1%); the span checksums are equal on both engines.
+
+## 2026-11-21: design of the js2 dispatch (`docs/design-js2-dispatch.md`)
+
+Design document for owner review. No engine code changed. Base `fd9c749b` (its `crates/js2` equals the head of #775). Machine: archMachine, load average 17, so instruction counts only.
+
+| Measure | Result |
+| --- | --- |
+| `loopfn` turn, `Vm::run` only (callgrind) | 262 instructions on `f3cfa8f8`, 257 on main. 40 stack reads and writes per turn. `Vm::run` is 255,676 bytes on main. |
+| #775 on the rows (default build) | `fib` -16.7%, `calls` -5.2%, `closures` -5.1%, `loopfn` -1.8%, `objects` +1.9%. |
+| Spike: 48 cold arms in a second function (corrected jump table) | Default build: `loopfn` -1.1%, `calls` -3.6%, `fib` -3.8%, `closures` -2.4%, `objects` -3.9%. `codegen-units=1`: -2.1%, -4.1%, -0.6%, -2.5%, -1.5%. `Vm::run` is 158,800 bytes. 445 lib tests pass. |
+| Spike: `unwind` by value | No gain (rows 0% to +3%). `pc` stays in a stack slot. |
+| Toy loop, 7 ops of `loopfn`, instructions per turn | `loop { match }` 219. Stable tail calls 175. `become` (nightly) 167. Direct threaded 159. |
+
+Recommendation: outline the cold arms first, then tail-call handlers for the hot ops after the owner chooses stable or nightly. Questions for the owner are in section 11 of the design.
+
+Not tested: wall time, Windows, macOS, arm64, Miri on the real engine, test262 on the spikes, a real tail-call engine (toy only).
 ### G0 and G1: resumable frames for generators (option A)
 
 Task: steps G0 and G1 of `docs/design-js2-async.md` (PR #796). A suspended frame is a heap record that holds only the registers of a save list. The compiler part (`function*`, `yield`) is G2 and is not in this change. Every generator in the tests is hand-built bytecode. Machine archMachine, rustc 1.96.0, `perf stat -e instructions:u`, `GLIBC_TUNABLES=glibc.malloc.tcache_count=65535`, minimum of 3 runs, net = count(N) - count(0). Each tree has its own `CARGO_TARGET_DIR`.
@@ -17944,3 +18044,33 @@ Measurements. Machine archMachine (loaded: only instruction counts are used). Ba
 Tests. Linux, debug: `cargo test --locked -p bare --lib -p bare-js -p bare-js-api`: 1718 pass (6 ignored), 1106 pass (1 ignored), 32 pass. `BARE_GC_STRESS=1` on the tests with `browser_fetch`, `browser_basics`, `browser_streams`, `browser_clone`, `browser_xhr` and `browser_select` in the name, and on the tests with `fetch`, `headers`, `response`, `request`, `navigator`, `beacon`, `textarea`, `message`, `window`, `plugins`, `stream` in the name: all pass. `cargo xwin check -p bare --target x86_64-pc-windows-msvc`: passes. `cargo check --locked -p bare --all-targets`: no warning.
 
 Not tested: the Windows tests (only `cargo xwin check`, no VM run); `BARE_GC_STRESS=1` over the whole `bare` crate; the removed `BARE_ALL_API` mode (it has no handler left to run); `codegen-units=1` (no row was over +0.5%); RSS and wall time; the journeys and `tools/suite/run.py`; macOS; a direct test of the textarea `readOnly`, `dirName`, `wrap` and `autocomplete` properties (the Chrome fixture `textarea` covers some of them).
+
+## 2026-11-21: structured clone and transfer on the interface (plan step S0.4, PR 3)
+
+Status: PR 3 of the plan in "what blocks `Dom<E: Engine>`". Base: `origin/main` `29aee409` (the head of #811). The PR is open without auto-merge.
+
+Changed. The cluster uses `Scope` and `Engine` methods, and no direct `Interp` call:
+
+- `browser_navigation_state.rs`: `out`, `serialize`, `clone_with`, `clone_state_with`, `materialize` and `materialize_with` take a `Sc` and `Local`s and give `Res`. `make_hosts` and the `CloneHost` hooks (`transfer_in`, `data_clone_error`) use `Dom::dom_err_s` and `obj_local`. `clone_err` is removed.
+- `browser_scheduler.rs`: `clone_payload`, `transfer_arg`, `transfer_list`, `transfer_items`, `make_ports`, `export_ports`, `import_ends`, `take_wires`, `take_end` and `post_remote` take a `Sc`. The transfer list reads an iterable with `iter_open` and `iter_next`. A buffer is a value with `bytes` and no `view`. A detached buffer is `is_detached`. The scalar cases of `clone_payload` use `type_of`, `as_str`, `bigint_limbs` and `is_callable`. `type V` is removed.
+- `browser_basics.rs`: `post_args`, `target_origin` and `post_message`. `browser_remote_window.rs`: `win_post` and `post`. `browser_encoding.rs`: `structuredClone`. `browser_navigation.rs`: `pushState` and `entry_state`. `browser_child.rs`: `deliver` and the two `take_wires` calls. The last three still start from an `Interp`, so they call `run`.
+- `bare-js` `api_err`: a `LimitKind::Host(name)` crosses the interface as `Abort::Limit(name)`. It was `Abort::Limit("a limit of the old engine")`, so a host could not tell the history state cap from another limit. `serialize` needs the name to turn the size cap into a `DataCloneError`. The old error is still in `ApiState::abort`, so `api_unerr` gives it back unchanged. Test: `a_host_limit_keeps_its_name_across_the_interface`.
+- A thrown error is a local above the base of the walk. `out` drops its locals only when the walk succeeded. The first version dropped them always and 11 tests panicked on a dangling handle.
+
+The interface keeps the default `Abort::Unsupported` answer of `clone_out`, `clone_in` and `clone_copy`, as the host-API design says for js2. Every message and `structuredClone` call reaches the engine only through those three methods.
+
+Kept for PR 4 to 6. `Msg::data`, `MsgEvent::data` and `Port` hold raw `Value` and `ObjId`; the cluster converts at the table with `raw` and `raw_local` (PR 5 moves the tables). The install functions, `old`, `old_v`, `run` and `run_v` (the new `run` callers are 3) and `Browser::it` are as in the plan. `send_beacon` (the old-form `send_beacon_old`) has no clone code; I left it. The `CloneHost` impl is for `Interp`; PR 6 makes it generic with `Sc`.
+
+Measurements. Machine archMachine, idle (load 0.5 at the start). Both trees are release builds in separate target directories; the base is `origin/main` `29aee409`.
+
+| Check | Base | New | Change |
+| --- | --- | --- | --- |
+| `tools/js/cost_matrix.sh -j4`, 817 rows (minimum of 3 runs; `parse_load deep 1` and `deep 10` fail on both trees, known) | | | mean glibc -0.002%; 0 rows over +0.5% (so no jemalloc run and no `codegen-units=1` run); largest `style_load churn 10` +0.279%; smallest `scheduler_load timers 10` -0.655%; `web_apis_load clone` +0.044%, `scheduler_load messages` -0.08%, `navigation_load history` -0.07% |
+| `bare --run http://127.0.0.1:PORT/` of a small page (one script), instructions, 3 rounds of `instr.sh` (each the minimum of 3 runs) | 5,192,293 / 5,191,892 / 5,192,613 | 5,194,800 / 5,194,288 / 5,194,082 | +2.2 K (+0.04%) |
+| Release `bare` binary | 17,201,872 B | 17,201,712 B | -160 B |
+
+The clone rows do not run a handler that reads options by name. `post_args` and `structuredClone` read `targetOrigin` and `transfer` with `get_str` and no longer with the interned `Dom::key`. No row measures that path with an options object; hypothesis: the cost is a string made for each call, a few hundred instructions. I did not measure it.
+
+Tests. Linux, debug: `cargo test --locked -p bare --lib`: 1719 pass (6 ignored). `-p bare-js`: 1107 pass with the new test (1 ignored). `-p bare-js-api`: 32 pass, and `--features suite`: pass. `BARE_GC_STRESS=1` on the 295 tests of `bare` with `clone`, `message`, `transfer`, `port`, `channel`, `history`, `navigation_tests`, `state`, `browser_child`, `worker`, `array_buffer` or `basics` in the name: all pass. `cargo xwin check -p bare --target x86_64-pc-windows-msvc`: passes. `cargo check --locked -p bare --all-targets`: no warning.
+
+Not tested: the Windows tests (only `cargo xwin check`, no VM run); `BARE_GC_STRESS=1` over the whole `bare` crate; `codegen-units=1` (no row was over +0.5%); an options object on the `postMessage` and `structuredClone` hot path; RSS and wall time; the journeys and `tools/suite/run.py`; macOS.

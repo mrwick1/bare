@@ -29,11 +29,13 @@
   });
   helper(2, function assign(t) {
     if (t === undefined || t === null) throw new TypeError('cannot convert undefined or null to an object');
+    t = Object(t);
     for (var i = 1; i < arguments.length; i++) {
       var s = arguments[i];
       if (s === undefined || s === null) continue;
-      var ks = keys(s);
-      for (var j = 0; j < ks.length; j++) set(t, ks[j], s[ks[j]]);
+      var ks = keys(s), ss = Object.getOwnPropertySymbols(Object(s)), j;
+      for (j = 0; j < ks.length; j++) set(t, ks[j], s[ks[j]]);
+      for (j = 0; j < ss.length; j++) if (getOwn(s, ss[j]).enumerable) set(t, ss[j], s[ss[j]]);
     }
     return t;
   });
@@ -60,8 +62,9 @@
   var getOwn = Object.getOwnPropertyDescriptor, ownNames = Object.getOwnPropertyNames;
   // `{...src}` into `dst` and `{a, ...rest} = src` when `src` has an accessor: the interpreter hands over (`interp.rs`).
   function copyData(dst, src, excluded) {
-    var s = Object(src), ks = ownNames(s);
-    for (var i = 0; i < ks.length; i++) {
+    var s = Object(src), ks = ownNames(s), ss = Object.getOwnPropertySymbols(s), i;
+    for (i = 0; i < ss.length; i++) ks[ks.length] = ss[i];
+    for (i = 0; i < ks.length; i++) {
       var k = ks[i];
       if (excluded !== undefined && excluded.indexOf(k) >= 0) continue;
       var d = getOwn(s, k);
@@ -72,7 +75,7 @@
   helper(4, function spread(dst, src) { return copyData(dst, src); });
   helper(5, function rest(src) {
     var ex = [];
-    for (var i = 1; i < arguments.length; i++) ex[i - 1] = '' + arguments[i];
+    for (var i = 1; i < arguments.length; i++) ex[i - 1] = typeof arguments[i] === 'symbol' ? arguments[i] : '' + arguments[i];
     return copyData({}, src, ex);
   });
   // `Object.values` (0) and `Object.entries` (1) of an object with a getter.
