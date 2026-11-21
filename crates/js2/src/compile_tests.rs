@@ -1551,15 +1551,22 @@ fn a_scope_with_many_locals_compiles_in_linear_time() {
         src.push_str("return v0 + v1; }");
         src
     };
+    let (small_src, big_src) = (src(6_000), src(60_000));
     let atoms = SharedAtoms::default();
-    let t = std::time::Instant::now();
-    let (_, fs) = compile_all(&src(60_000), &atoms, Limits::default()).expect("compile");
+    let timed_compile = |src: &str| {
+        let start = std::time::Instant::now();
+        let (_, fs) = compile_all(src, &atoms, Limits::default()).expect("compile");
+        (start.elapsed(), fs[0].1.code.nregs)
+    };
+    let (small, _) = timed_compile(&small_src);
+    let (big, nregs) = timed_compile(&big_src);
     // The verifier keeps a register set for each instruction: too much for 60,000 registers, so it is not run here.
-    assert!((60_000..=60_010).contains(&fs[0].1.code.nregs), "{}", fs[0].1.code.nregs);
-    // More than the format has registers for: refused, and not after minutes.
+    assert!((60_000..=60_010).contains(&nregs), "{nregs}");
+    // Ten times the input costs about 10 times as much for linear work and 32 times as much for O(n^1.5) work.
+    assert!(big < (small * 20).max(std::time::Duration::from_millis(25)), "6,000 locals: {small:?}, 60,000 locals: {big:?}");
+    // The bytecode format allows at most 65,535 registers.
     let r = compile_all(&src(70_000), &atoms, Limits::default());
     assert!(matches!(r, Err(ref e) if e.contains("Limit")), "{:?}", r.map(|_| ()));
-    assert!(t.elapsed().as_secs() < 20, "{:?}", t.elapsed());
 }
 
 #[test]
