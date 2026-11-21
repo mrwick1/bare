@@ -180,6 +180,11 @@ pub enum RunError {
 }
 
 impl Realm {
+    /// The value of a persistent handle (`Engine::persistent` for `&self`).
+    pub fn raw_persistent(&self, id: u32) -> Value {
+        self.api.persistent[id as usize]
+    }
+
     /// The step budget of a task: a top-level call outside [`Engine::task`] starts with this many back edges (default: no limit).
     pub fn set_budget(&mut self, steps: u64) {
         self.api.budget = steps;

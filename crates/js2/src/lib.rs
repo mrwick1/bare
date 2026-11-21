@@ -50,6 +50,7 @@ pub mod interp;
 pub mod api;
 #[allow(unsafe_code)]
 pub mod api_host;
+pub mod api_raw;
 pub mod interp_ops;
 #[cfg(feature = "op-count")]
 pub mod opcount;
