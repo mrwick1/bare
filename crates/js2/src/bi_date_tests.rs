@@ -141,8 +141,8 @@ fn the_properties_of_the_built_ins() {
 fn a_class_can_extend_date() {
     check_in("UTC", &[
         ("class D extends Date { x() { return this.getUTCFullYear(); } } var d = new D(2020, 5); var r = d.x() + ' ' + (d instanceof D) + ' ' + (d instanceof Date) + ' ' + Object.prototype.toString.call(d) + ' ' + d.toISOString();", "r", "2020 true true [object Date] 2020-06-01T00:00:00.000Z"),
-        // a constructor whose `prototype` is not an object: the `Date.prototype` of the constructor (`Reflect.construct` tests this once it is on main)
-        ("class A extends Date {} A.prototype = null; var r = 0;", "r", "0"),
+        ("function F() {} F.prototype = null; var d = Reflect.construct(Date, [0], F); var r = (Object.getPrototypeOf(d) === Date.prototype) + ' ' + d.getTime();", "r", "true 0"),
+        ("function F() {} F.prototype = Array.prototype; var d = Reflect.construct(Date, [5], F); var r = (Object.getPrototypeOf(d) === Array.prototype) + ' ' + Date.prototype.getTime.call(d);", "r", "true 5"),
     ]);
 }
 
