@@ -541,12 +541,9 @@ fn a_top_level_let_const_and_class_are_visible_to_the_next_script() {
 fn two_scripts(a: &str, b: &str, name: &str, gc: bool) -> Result<String, String> {
     let shared = Arc::new(SharedAtoms::default());
     let mut prog = compile(b, &shared, Limits::default())?;
-    let pre = prog.codes.len();
-    prog.codes = compile_after(prog.codes, PRELUDE, &shared, Limits::default(), None, None)?.0;
     let at = prog.codes.len();
-    prog.codes = compile_after(prog.codes, a, &shared, Limits::default(), None, None)?.0;
+    prog.codes = compile_after(prog.codes, a, &shared, Limits::default(), None)?.0;
     let mut vm = Vm::new(prog, shared);
-    vm.run_main(pre).expect("the prelude");
     if gc {
         vm.realm.heap.set_trigger(Trigger { min: 1 << 10, slack: 1 << 10 });
     }
@@ -812,22 +809,22 @@ fn waiting(vm: &Vm) -> usize {
 }
 
 #[test]
-fn prelude_functions_are_compiled_at_their_first_call() {
+fn prelude_functions_are_made_at_their_first_lookup_and_compiled_at_their_first_call() {
     let src = "var r = [3, 1, 2].sort().join(); var m = [1, 2].map(function (x) { return x * 2; }).join(); var s = [1, 2, 3].reduce(function (a, b) { return a + b; });";
     let mut vm = load(src).unwrap();
-    let before = waiting(&vm);
-    assert!(before > 40, "the methods of the prelude wait: {before}");
+    let before = vm.realm.prog.len();
+    assert!(before < 10, "the prelude adds no code at the start: {before}");
     vm.run_main(0).unwrap();
-    let after = waiting(&vm);
-    assert!(after < before && after > before - 25, "sort, map, reduce and the helpers they call were compiled: {before} -> {after}");
+    let after = vm.realm.prog.len();
+    assert!(after > before + 5 && after < before + 40, "sort, map, reduce and the helpers they call have code: {before} -> {after}");
     assert_eq!((vm.global_text("r"), vm.global_text("m"), vm.global_text("s")), ("1,2,3".into(), "2,4".into(), "6".into()));
-    // A second call compiles nothing.
+    // A second call makes and compiles nothing.
     let mut vm2 = load("var a = [2, 1]; a.sort(); a.sort(); a.sort();").unwrap();
     vm2.run_main(0).unwrap();
-    let once = waiting(&vm2);
+    let once = vm2.realm.prog.len();
     let mut vm3 = load("var a = [2, 1]; a.sort();").unwrap();
     vm3.run_main(0).unwrap();
-    assert_eq!(waiting(&vm3), once);
+    assert_eq!(vm3.realm.prog.len(), once);
 }
 
 #[test]
@@ -860,9 +857,13 @@ fn a_lazy_compile_that_fails_throws_a_plain_error() {
             Err("no compiler".into())
         }
     }
-    let mut vm = load("var e; try { [1].forEach(function () {}); } catch (x) { e = x.name + ': ' + x.message; }").unwrap();
-    vm.realm.lazy = Some(Box::new(Fails));
+    // `forEach` is looked up before the compiler changes (its stub is made then); its compile fails at the call.
+    let mut vm = load("var f = [].forEach, e; function t(go) { if (go) try { f.call([1], function () {}); } catch (x) { e = x.name + ': ' + x.message; } }").unwrap();
     vm.run_main(0).unwrap();
+    let t = vm.global("t");
+    vm.call(t, Value::UNDEFINED, &[Value::bool(false)]).unwrap();
+    vm.realm.lazy = Some(Box::new(Fails));
+    vm.call(t, Value::UNDEFINED, &[Value::bool(true)]).unwrap();
     assert_eq!(vm.global_text("e"), "Error: no compiler");
 }
 
@@ -1196,11 +1197,11 @@ fn the_stubs_of_user_functions_keep_a_program_that_is_not_called_small() {
     }
     src.push_str("var r = f7(4);");
     let mut vm = load(&src).unwrap();
-    assert!(waiting(&vm) >= 200 + 40, "the 200 functions and the prelude wait: {}", waiting(&vm));
+    assert!(waiting(&vm) >= 200, "the 200 functions wait: {}", waiting(&vm));
     vm.run_main(0).unwrap();
     assert_eq!(vm.global_text("r"), "42");
     let words: usize = vm.realm.prog.iter().map(|c| c.words.len()).sum();
-    assert!(words < 4000, "only the script, the wrapper of the prelude and f7 hold code: {words} words");
+    assert!(words < 4000, "only the script and f7 hold code: {words} words");
 }
 
 #[test]

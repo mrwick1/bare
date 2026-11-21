@@ -1,4 +1,5 @@
-//! The generated pre-parse facts of `prelude.js` (`prelude_facts.rs`) must be the facts that a pre-parse of the current text gives.
+//! The generated pre-parse facts of `prelude.js` (`prelude_facts.rs`) must be the facts that a pre-parse of the current text gives. The file
+//! also has `TOP`: the name and the fact id of each top-level function, which `Lazy::prelude_fn` reads.
 //! After a change of `prelude.js`, of the parser, or of the fields of `FnFacts` or `Facts`, make the file again:
 //!
 //!     BLESS_PRELUDE_FACTS=1 cargo test -p bare-js2 --lib prelude_facts
@@ -38,6 +39,13 @@ fn render() -> String {
         writeln!(s, "    S {{ start: {}, end: {} }},", c.start, c.end).unwrap();
     }
     s.push_str("];\n\n");
+    let tops: Vec<_> = facts.children(None).map(|id| (PRELUDE[facts.get(id).name.expect("a top-level function has a name").start as usize..facts.get(id).name.unwrap().end as usize].to_string(), id)).collect();
+    s.push_str("/// The top-level functions of `prelude.js`: the name and the id of its facts.\n");
+    writeln!(s, "pub static TOP: [(&str, u32); {}] = [", tops.len()).unwrap();
+    for (n, id) in tops.iter().rev() {
+        writeln!(s, "    ({n:?}, {id}),").unwrap();
+    }
+    s.push_str("];\n\n");
     writeln!(s, "static BY_START: [u32; {}] = {:?};\n", facts.by_start.len(), facts.by_start).unwrap();
     s.push_str("/// The facts of `prelude.js`, as a lazy pre-parse of it gives them.\n");
     writeln!(
@@ -60,6 +68,17 @@ fn prelude_facts_file_is_up_to_date() {
         include_str!("prelude_facts.rs") == want,
         "crates/js2/src/prelude_facts.rs is out of date with prelude.js: run `BLESS_PRELUDE_FACTS=1 cargo test -p bare-js2 --lib prelude_facts` and commit the file"
     );
+}
+
+/// Each name in `prelude_pre.rs` and in a lazy table that asks for a top-level function must be one.
+#[test]
+fn every_prelude_slot_function_exists() {
+    for (name, pd) in crate::prelude_pre::PRE {
+        if let crate::prelude_pre::Pd::Func(top) = pd {
+            assert_eq!(name, top);
+            assert!(crate::prelude_facts::TOP.iter().any(|(n, _)| n == top), "prelude.js has no function {top}");
+        }
+    }
 }
 
 #[test]

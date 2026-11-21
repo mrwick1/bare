@@ -6,7 +6,7 @@
 //! object (it throws). The helpers [`get_at`], [`has_at`], [`set_at`] and [`del_at`] take the direct path for an array with plain
 //! elements, so a real array pays one flag test. An accessor property of an array-like is not read here (it needs a call): known gap.
 //! `shift` and `unshift` move all the elements: O(n) each.
-use crate::lazy::{Ent, m};
+use crate::lazy::{Ent, m, script, sym_same};
 use crate::bi_object::H_SEARCH;
 use crate::builtins::{NativeFn, arg};
 use crate::interp_rt::{ErrKind, Key, R, Realm};
@@ -180,9 +180,29 @@ impl Realm {
     pub(crate) fn install_array(&mut self) {
         let proto = self.array_proto;
         let c = self.ctor("Array", 1, array_ctor, proto);
-        static ARRAY_STATICS: &[Ent] = &[m("isArray", 1, is_array)];
+        static ARRAY_STATICS: &[Ent] = &[script("of", "array_of"), script("from", "array_from"), m("isArray", 1, is_array)];
         self.lazy_table(c, ARRAY_STATICS);
         static ARRAY_PROTO: &[Ent] = &[
+            script("keys", "array_keys"),
+            script("values", "array_values"),
+            script("entries", "array_entries"),
+            script("forEach", "array_forEach"),
+            script("map", "array_map"),
+            script("filter", "array_filter"),
+            script("reduce", "array_reduce"),
+            script("reduceRight", "array_reduceRight"),
+            script("some", "array_some"),
+            script("every", "array_every"),
+            script("find", "array_find"),
+            script("findIndex", "array_findIndex"),
+            script("findLast", "array_findLast"),
+            script("findLastIndex", "array_findLastIndex"),
+            script("flat", "array_flat"),
+            script("flatMap", "array_flatMap"),
+            script("sort", "array_sort"),
+            script("toSorted", "array_toSorted"),
+            script("toLocaleString", "array_toLocaleString"),
+            sym_same("[Symbol.iterator]", crate::bi_symbol::ITERATOR, "values"),
             m("at", 1, at),
             m("concat", 1, concat),
             m("copyWithin", 2, copy_within),

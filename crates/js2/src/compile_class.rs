@@ -19,7 +19,7 @@ use super::*;
 impl<'a> Fc<'a> {
     /// A new compiler for a function that has no tree of its own: it sees the variables of the scopes that are open here.
     fn inline_fc(&self, id: FnId, flags: u16) -> Fc<'a> {
-        let mut c = Fc::new(self.prog, self.facts, self.atoms, &Input { chain: self.cur_ctx.clone(), self_name: false, name: None, scoped: self.scoped });
+        let mut c = Fc::new(self.prog, self.facts, self.atoms, &Input { chain: self.cur_ctx.clone(), self_name: false, name: None, scoped: self.scoped, pre: self.pre });
         c.strict = true;
         c.noctor = true;
         c.fn_id = Some(id);

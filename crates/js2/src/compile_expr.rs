@@ -177,6 +177,12 @@ impl<'a> Fc<'a> {
                     self.op(Op::LoadUndef, dst, 0, 0);
                 }
                 _ => {
+                    if self.pre
+                        && let Some(slot) = crate::prelude_pre::slot(name)
+                    {
+                        self.op(Op::GetPre, dst, slot, 0);
+                        return Ok(());
+                    }
                     let s = self.site_of(name)?;
                     self.op(if self.scoped { Op::GetName } else { Op::GetGlobal }, dst, s, 0);
                 }
@@ -233,6 +239,9 @@ impl<'a> Fc<'a> {
                 }
             }
             Res::Global => {
+                if self.pre && crate::prelude_pre::slot(name).is_some() {
+                    self.unsup("an assignment to a slot of the prelude");
+                }
                 let s = self.site_of(name)?;
                 self.op(if self.scoped { Op::SetName } else if self.strict && !init { Op::SetGlobalS } else { Op::SetGlobal }, src, s, 0);
             }

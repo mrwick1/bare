@@ -27,7 +27,6 @@ use crate::ast::StmtKind;
 use crate::facts::Facts;
 use crate::compile::ScriptMode;
 use crate::parse::{Limits, parse_script_lazy};
-use crate::bi_object::Own;
 use crate::interp_rt::{ErrKind, Key, R, Realm};
 use crate::object::{F_CALLABLE, F_CLASS, F_FNPROPS, F_NATIVE, Obj};
 use crate::shapes::{A_C, A_W};
@@ -315,7 +314,6 @@ impl Realm {
         self.natives.push(Native { f: bound_call, ctor: false, len: 0, name: "" });
         self.bound_id = 0;
         let g = self.global;
-        self.method(g, "__def", 2, prelude_def);
         self.hidden(g, "globalThis", g.value());
         self.hidden(g, "self", g.value());
         for (n, v) in [("NaN", Value::number(f64::NAN)), ("Infinity", Value::number(f64::INFINITY)), ("undefined", Value::UNDEFINED)] {
@@ -518,25 +516,6 @@ fn bound_call(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
 fn fn_to_string(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
     callable_this(rt, this, "toString")?;
     Ok(rt.string("function () { [native code] }"))
-}
-
-/// `__def(target, methods)` for `prelude.js`: copy the own enumerable properties of `methods` to `target`, not enumerable.
-fn prelude_def(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    let Some(t) = Realm::obj(arg(args, 0)) else { return rt.type_error("__def needs an object") };
-    let Some(m) = Realm::obj(arg(args, 1)) else { return rt.type_error("__def needs an object") };
-    let lens = Realm::obj(arg(args, 2));
-    for k in rt.own_key_list(m, true) {
-        let key = rt.key_of(k)?;
-        let Some(Own::Data(v, _)) = rt.get_own(m, key) else { continue };
-        rt.define_attrs(t, key, HIDDEN, v)?;
-        // The functions of the prelude are script functions: they get their own `length` and `name` here.
-        if let Some(f) = Realm::obj(v).filter(|f| f.is_callable()) {
-            let len = lens.and_then(|l| rt.get_own(l, key)).map_or(0, |p| if let Own::Data(n, _) = p { n.as_int().unwrap_or(0) } else { 0 });
-            rt.define_attrs(f, Key::Name(rt.k_length), A_C, Value::int(len))?;
-            rt.define_attrs(f, Key::Name(rt.k_name), A_C, k)?;
-        }
-    }
-    Ok(Value::UNDEFINED)
 }
 
 // ---- Error ----

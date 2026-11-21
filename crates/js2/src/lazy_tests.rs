@@ -238,10 +238,12 @@ var r = paths.map(function (p) {
 }).join('\\n');";
 
 fn dump(eager: bool) -> String {
-    crate::lazy::EAGER.with(|e| e.set(eager));
-    let out = ev(DUMP, "r");
-    crate::lazy::EAGER.with(|e| e.set(false));
-    out
+    let mut vm = load(DUMP).expect("loads");
+    if eager {
+        vm.realm.lazy_everything();
+    }
+    vm.run_main(0).expect("runs");
+    vm.global_text("r")
 }
 
 #[test]
