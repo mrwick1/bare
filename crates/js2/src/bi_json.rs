@@ -20,6 +20,8 @@ impl Realm {
         let j = Obj::new_plain(self);
         let g = self.global;
         self.hidden(g, "JSON", j.value());
+        let tag = self.string("JSON");
+        self.define_attrs(j, Key::Name(self.wk[crate::bi_symbol::TO_STRING_TAG]), crate::shapes::A_C, tag).expect("define");
         static JSON_METHODS: &[Ent] = &[m("parse", 2, parse), m("stringify", 3, stringify)];
         self.lazy_table(j, JSON_METHODS);
     }
