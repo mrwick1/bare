@@ -1,10 +1,6 @@
-//! Host functions on the interface (`docs/design-host-handlers.md`, step H0). `Dom` has two registries. A handler of the old form (`H`:
-//! `Interp`, `Value`) is in `Dom::handlers` and runs through the old `Host::call`. A handler of the new form (`HS`: `Scope`, `Local`) is in
-//! `Dom::scoped` and runs through the interface `Host::call`. The engine tells them apart by `API_ID` in the function id, so the old path
-//! has no new branch beyond one test of that bit. Both entries run the same hooks in the same order (`Dom::dispatch_host` for the old one; `Dom::call_scoped` spells them out with no closure, because it is the hot path), so a handler sees the same hooks in either.
-//!
-//! A test build can put every old handler on the interface too (`BARE_ALL_API=1`): the entry then converts `this` and the arguments to raw
-//! values, calls the old body and pushes the result. It proves that the interface entry does what the old entry does.
+//! Host functions on the interface (`docs/design-host-handlers.md`, step H0). A host function is a handler of the form `HS` (`Scope`,
+//! `Local`). It is in `Dom::scoped` and runs through the interface `Host::call` (`Dom::call_scoped`). `Dom::call_scoped` spells the hooks
+//! out with no closure, because it is the hot path.
 
 use crate::browser::*;
 use bare_css::selector::Selector;
@@ -23,38 +19,18 @@ pub(crate) type Res<'s, T> = Result<T, bare_js_api::Error<'s>>;
 pub(crate) const CUR_NEW: u32 = 1 << 31;
 
 #[derive(Clone, Copy)]
-pub(crate) enum Fun {
-    New(HS),
-    /// An old handler that a test build put on the interface.
-    #[cfg(test)]
-    Old(H),
-}
-
-#[derive(Clone, Copy)]
 pub(crate) struct Scoped {
-    f: Fun,
+    f: HS,
     needs_new: bool,
-    /// What `Dom::dispatch_host` stores in `style.cur`.
+    /// What `call_scoped` stores in `style.cur`.
     cur: u32,
 }
 
-/// What an entry gives to `Dom::dispatch_host`: the engine, and the way to give it an error of the old engine.
+/// What a scope gives to the hooks around a handler: the engine, and the way to give it an error of the old engine.
 pub(crate) trait Entry<'p> {
     type Err;
     fn it(&mut self) -> &mut Interp<'p>;
     fn err(&mut self, e: Error) -> Self::Err;
-}
-
-impl<'p> Entry<'p> for Interp<'p> {
-    type Err = Error;
-    #[inline(always)]
-    fn it(&mut self) -> &mut Interp<'p> {
-        self
-    }
-    #[inline(always)]
-    fn err(&mut self, e: Error) -> Error {
-        e
-    }
 }
 
 impl<'s, 'p> Entry<'p> for Sc<'s, 'p> {
@@ -69,33 +45,7 @@ impl<'s, 'p> Entry<'p> for Sc<'s, 'p> {
     }
 }
 
-/// Is every old handler on the interface (a test build with `BARE_ALL_API` set)?
-#[cfg(test)]
-fn all_on_api() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("BARE_ALL_API").is_some())
-}
-#[cfg(not(test))]
-#[inline(always)]
-fn all_on_api() -> bool {
-    false
-}
-
 impl Dom {
-    /// One host call: the hooks around a handler, for both entries. `bad_new` is a call of a constructor without `new`.
-    #[inline(always)]
-    pub(crate) fn dispatch_host<'p, X: Entry<'p>, T>(&self, x: &mut X, cur: u32, bad_new: bool, body: impl FnOnce(&mut X) -> Result<T, X::Err>) -> Result<T, X::Err> {
-        self.style.cur.set(cur);
-        if bad_new {
-            return Err(self.bad_new(x));
-        }
-        let r = if self.ce.on.get() { self.dispatch_ce(x, body) } else { body(x) };
-        if self.mo.armed() {
-            self.mo_done(x)?;
-        }
-        r
-    }
-
     #[cold]
     #[inline(never)]
     fn bad_new<'p, X: Entry<'p>>(&self, x: &mut X) -> X::Err {
@@ -136,57 +86,32 @@ impl Dom {
         }
     }
 
-    /// The entry of the interface `Host::call`. It runs the hooks of `dispatch_host` in the same order, with no closure: the call
-    /// path of a handler is the hot path, and a closure that both the plain and the custom element branch use sits in memory first.
+    /// The entry of the interface `Host::call`: the hooks around a handler, with no closure. The call path of a handler is the hot path,
+    /// and a closure that both the plain and the custom element branch use sits in memory first.
     pub(crate) fn call_scoped<'s, 'p>(&self, s: &mut Sc<'s, 'p>, id: u32, this: Local<'s>, args: Args<'s>, is_new: bool) -> Res<'s, Local<'s>> {
         // SAFETY: the entry is copied out at once. Nothing runs between the read and the copy, so no push (`add_fn_s`) can move the vector under it.
         let Scoped { f, needs_new, cur } = unsafe { &*self.scoped.as_ptr() }[id as usize];
         self.style.cur.set(cur);
         if needs_new && !is_new {
-            return Err(match f {
-                Fun::New(f) => self.bad_new_s(s, f),
-                #[cfg(test)]
-                Fun::Old(_) => self.bad_new(s),
-            });
+            return Err(self.bad_new_s(s, f));
         }
-        let r = if self.ce.on.get() { self.call_scoped_ce(s, f, this, args) } else { self.run_fun(s, f, this, args) };
+        let r = if self.ce.on.get() { self.call_scoped_ce(s, f, this, args) } else { f(self, s, this, args) };
         if self.mo.armed() {
             self.mo_done(s)?;
         }
         r
     }
 
-    #[inline(always)]
-    fn run_fun<'s, 'p>(&self, s: &mut Sc<'s, 'p>, f: Fun, this: Local<'s>, args: Args<'s>) -> Res<'s, Local<'s>> {
-        match f {
-            Fun::New(f) => f(self, s, this, args),
-            #[cfg(test)]
-            Fun::Old(h) => self.call_old(s, h, this, args),
-        }
-    }
-
     /// `call_scoped` with a scope of custom element reactions around the handler.
     #[inline(never)]
-    fn call_scoped_ce<'s, 'p>(&self, s: &mut Sc<'s, 'p>, f: Fun, this: Local<'s>, args: Args<'s>) -> Res<'s, Local<'s>> {
-        self.dispatch_ce(s, |s| self.run_fun(s, f, this, args))
-    }
-
-    #[cfg(test)]
-    /// An old handler through the interface: `this` and the arguments as raw values, the result as a local.
-    fn call_old<'s, 'p>(&self, s: &mut Sc<'s, 'p>, h: H, this: Local<'s>, args: Args<'s>) -> Res<'s, Local<'s>> {
-        let it = s.engine();
-        let this = it.raw(this);
-        let args: Vec<Value> = args.iter().map(|a| it.raw(a)).collect();
-        match h(self, it, this, &args) {
-            Ok(v) => Ok(it.raw_local(&v)),
-            Err(e) => Err(it.api_err(e)),
-        }
+    fn call_scoped_ce<'s, 'p>(&self, s: &mut Sc<'s, 'p>, f: HS, this: Local<'s>, args: Args<'s>) -> Res<'s, Local<'s>> {
+        self.dispatch_ce(s, |s| f(self, s, this, args))
     }
 
     /// Make a function of the new form. Its id is its index in `Dom::scoped`.
     pub(crate) fn add_fn_s<'s, 'p>(&self, s: &mut Sc<'s, 'p>, f: HS, name: &str, len: u32, kind: HostFn) -> Res<'s, Local<'s>> {
         let id = self.scoped.borrow().len() as u32;
-        self.scoped.borrow_mut().push(Scoped { f: Fun::New(f), needs_new: kind != HostFn::Method, cur: id | CUR_NEW });
+        self.scoped.borrow_mut().push(Scoped { f, needs_new: kind != HostFn::Method, cur: id | CUR_NEW });
         s.host_function(name, id, len, kind)
     }
 
@@ -201,41 +126,6 @@ impl Dom {
             Ok(l) => Ok(obj_of(s, l)),
             Err(e) => Err(s.engine().api_unerr(e)),
         }
-    }
-
-    /// An old handler on the interface (a test build with `BARE_ALL_API`): the same ids as the old registry, in `Dom::handlers`.
-    #[cfg(test)]
-    fn add_old_on_api(&self, it: &mut Interp<'_>, h: H, name: &str, len: u32, kind: HostFn) -> R<ObjId> {
-        let (cur, needs_new) = (self.handlers.borrow().len() as u32, kind != HostFn::Method);
-        self.handlers.borrow_mut().push((h, needs_new));
-        let id = self.scoped.borrow().len() as u32;
-        self.scoped.borrow_mut().push(Scoped { f: Fun::Old(h), needs_new, cur });
-        bare_js_api::enter(it, |s| match s.host_function(name, id, len, kind) {
-            Ok(l) => Ok(obj_of(s, l)),
-            Err(e) => Err(s.engine().api_unerr(e)),
-        })
-    }
-
-    /// Make a function of the old form: on the old registry, or on the interface in a test build with `BARE_ALL_API`.
-    #[inline]
-    pub(crate) fn add_old(&self, it: &mut Interp<'_>, h: H, name: &str, len: u32, kind: HostFn) -> R<ObjId> {
-        #[cfg(test)]
-        if all_on_api() {
-            return self.add_old_on_api(it, h, name, len, kind);
-        }
-        let id = self.handlers.borrow().len() as u32;
-        self.handlers.borrow_mut().push((h, kind != HostFn::Method));
-        match kind {
-            HostFn::Method => it.host_function(id, name, len, false),
-            HostFn::Ctor => it.host_function(id, name, len, true),
-            HostFn::CtorNewTarget => it.host_ctor_with_new_target(id, name, len),
-        }
-    }
-
-    /// Does the table of methods put the methods on the interface? (A test build with `BARE_ALL_API` does, with the interned name lost.)
-    #[inline(always)]
-    pub(crate) fn methods_on_api(&self) -> bool {
-        all_on_api()
     }
 
     /// The node of `this`, or `None`.

@@ -5,3 +5,11 @@ name = "bare-js-api"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[features]
+# `suite`: the tests that every engine must pass (`src/suite.rs`). `crates/js-api/tests/engines.rs` runs them on `bare-js` and `bare-js2`.
+suite = []
+
+[dev-dependencies]
+bare-js = { path = "../js" }
+bare-js2 = { path = "../js2" }

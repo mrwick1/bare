@@ -21,7 +21,7 @@ use crate::browser::*;
 use crate::browser_geom::Iface;
 use crate::browser_scoped::*;
 use bare_js::eval::Interp;
-use bare_js::value::{ObjId, Value};
+use bare_js::value::ObjId;
 use bare_js_api::{Args, Attrs, HostFn, Local, Type};
 
 const MAX_ENTRIES: usize = 50_000;
@@ -40,14 +40,14 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<Ifaces> {
     if let Some(i) = d.perf_ifaces.get() {
         return Ok(i);
     }
-    let entry = crate::browser_geom::make(d, it, it.object_prototype(), "PerformanceEntry", crate::browser::illegal_constructor, false)?;
-    let sub = |it: &mut Interp<'_>, name: &str| crate::browser_geom::make(d, it, entry.proto, name, crate::browser::illegal_constructor, false);
+    let entry = crate::browser_geom::make_s(d, it, it.object_prototype(), "PerformanceEntry", crate::browser::illegal_constructor, HostFn::Ctor)?;
+    let sub = |it: &mut Interp<'_>, name: &str| crate::browser_geom::make_s(d, it, entry.proto, name, crate::browser::illegal_constructor, HostFn::Ctor);
     let (resource, navigation, mark, measure) = (sub(it, "PerformanceResourceTiming")?, sub(it, "PerformanceNavigationTiming")?, sub(it, "PerformanceMark")?, sub(it, "PerformanceMeasure")?);
-    crate::browser_geom::finish(d, it, entry, "PerformanceEntry", &[("toJSON", 0, entry_json as H)])?;
-    crate::browser_geom::finish(d, it, resource, "PerformanceResourceTiming", &[])?;
-    crate::browser_geom::finish(d, it, navigation, "PerformanceNavigationTiming", &[])?;
-    crate::browser_geom::finish(d, it, mark, "PerformanceMark", &[("toJSON", 0, detail_json as H)])?;
-    crate::browser_geom::finish(d, it, measure, "PerformanceMeasure", &[("toJSON", 0, detail_json as H)])?;
+    crate::browser_geom::finish_s(d, it, entry, "PerformanceEntry", &[("toJSON", 0, entry_json as HS)])?;
+    crate::browser_geom::finish_s(d, it, resource, "PerformanceResourceTiming", &[])?;
+    crate::browser_geom::finish_s(d, it, navigation, "PerformanceNavigationTiming", &[])?;
+    crate::browser_geom::finish_s(d, it, mark, "PerformanceMark", &[("toJSON", 0, detail_json as HS)])?;
+    crate::browser_geom::finish_s(d, it, measure, "PerformanceMeasure", &[("toJSON", 0, detail_json as HS)])?;
     let i = Ifaces { entry, resource, navigation, mark, measure };
     d.perf_ifaces.set(Some(i));
     Ok(i)
@@ -64,36 +64,31 @@ fn ensure_unit(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 }
 
 pub(crate) fn install_interfaces(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    crate::browser_lazy::install(d, it, &[("PerformanceEntry", lazy_entry as H), ("PerformanceResourceTiming", lazy_resource), ("PerformanceNavigationTiming", lazy_navigation), ("PerformanceMark", lazy_mark), ("PerformanceMeasure", lazy_measure)])
+    crate::browser_lazy::install(d, it, &[("PerformanceEntry", lazy_entry as HS), ("PerformanceResourceTiming", lazy_resource), ("PerformanceNavigationTiming", lazy_navigation), ("PerformanceMark", lazy_mark), ("PerformanceMeasure", lazy_measure)])
 }
 
 /// `PerformanceEntry.prototype.toJSON`: the four members of an entry.
-fn entry_json(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    json(d, it, this, false)
+fn entry_json<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    json(d, s, this, false)
 }
 
 /// `toJSON` of a mark and a measure: the four members and `detail`.
-fn detail_json(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    json(d, it, this, true)
+fn detail_json<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    json(d, s, this, true)
 }
 
-fn json(d: &Dom, it: &mut Interp<'_>, this: Value, detail: bool) -> R<Value> {
-    if !matches!(this, Value::Object(_)) {
-        return Err(crate::browser_geom::illegal(it));
+fn json<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, detail: bool) -> Res<'s, Local<'s>> {
+    if !is_object(s, this) {
+        return Err(crate::browser_geom::illegal_s(s));
     }
-    let o = d.obj(it, it.object_prototype())?;
+    let proto = s.engine().object_prototype();
+    let o = d.obj_with_s(s, proto)?;
     let names: &[&str] = if detail { &["name", "entryType", "startTime", "duration", "detail"] } else { &["name", "entryType", "startTime", "duration"] };
     for &name in names {
-        let v = member(d, it, this, name)?;
-        let k = d.key(it, name)?;
-        it.define_data(o, k, v, true, true, true)?;
+        let v = s.get_str(this, name)?;
+        s.define_str(o, name, v, Attrs::ALL)?;
     }
-    Ok(Value::Object(o))
-}
-
-fn member(d: &Dom, it: &mut Interp<'_>, o: Value, name: &str) -> R<Value> {
-    let k = d.key(it, name)?;
-    it.get_value(o, k)
+    Ok(o)
 }
 
 pub(crate) struct Entry {

@@ -74,6 +74,8 @@ pub const F_SLOWIDX: u32 = 1024;
 /// Object header flag: a wrapper object (`new String`, `new Number`, `new Boolean`, `Object(1)`). The value is in the hidden property
 /// `Realm::k_prim` (`bi_wrap.rs`). The flag, not the shape, tells a wrapper: a property that a script adds changes the shape.
 pub const F_WRAP: u32 = 4096;
+/// Object header flag: a generator object (`gen.rs`): its hidden slots hold the state and the saved frame.
+pub const F_GEN: u32 = 16384;
 /// `Elements` header flag: the record is sparse.
 const F_SPARSE: u32 = 1;
 /// A write at an index this far above the capacity of a dense record makes it sparse.
@@ -506,6 +508,24 @@ impl Obj {
         unsafe { self.slot_ptr(shapes, i).write(v) }
     }
 
+    /// Slot `i` of an object of layout `Object` whose slots are all inline (its shape has at most `inline` properties, so it has no overflow
+    /// record): one load, with no shape lookup. For the objects of `generator.rs`, whose shape is fixed. The caller made the object with a
+    /// shape that has the slot.
+    #[inline]
+    pub fn inline_slot(self, i: usize) -> Value {
+        debug_assert!(self.head().layout() == Layout::Object && self.head().flags() & F_OVER == 0);
+        // SAFETY: by the contract of this function the slot is an inline word of the cell.
+        unsafe { self.0.as_ptr().wrapping_add(CellHeader::SIZE + WORD * i).cast::<Value>().read() }
+    }
+
+    /// Write slot `i` (see [`Obj::inline_slot`]).
+    #[inline]
+    pub fn set_inline_slot(self, i: usize, v: Value) {
+        debug_assert!(self.head().layout() == Layout::Object && self.head().flags() & F_OVER == 0);
+        // SAFETY: as in `inline_slot`.
+        unsafe { self.0.as_ptr().wrapping_add(CellHeader::SIZE + WORD * i).cast::<Value>().write(v) }
+    }
+
     /// Make room for `to` slots. The object keeps its shape: the caller changes it next. Nothing changes when this fails.
     fn reserve(self, heap: &mut Heap, shapes: &Shapes, to: usize) -> Option<()> {
         let h = self.head();
@@ -862,6 +882,14 @@ impl Ctx {
         assert!(i < r.cap(), "slot {i} of {}", r.cap());
         // SAFETY: as in `get`.
         unsafe { r.slots().add(i).write(v) }
+    }
+
+    /// Run `f` on the slots as a slice. A collection cannot run inside `f` (it has no realm).
+    #[inline]
+    pub fn with<T>(self, f: impl FnOnce(&mut [Value]) -> T) -> T {
+        let r = Rec(self.0);
+        // SAFETY: the record has `cap` initialized values after its header, and `f` gets the only reference to them for its duration.
+        f(unsafe { std::slice::from_raw_parts_mut(r.slots(), r.cap()) })
     }
 
     /// A copy of the context (`CopyCtx`). `None` when out of memory.
