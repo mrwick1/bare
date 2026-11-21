@@ -130,6 +130,79 @@ fn a_rule_declaration_is_made_when_a_script_needs_it() {
 }
 
 #[test]
+fn constructed_sheet_edits_parse_only_new_rules_and_publish_on_read() {
+    use crate::browser_cssom::take_work;
+
+    big(|| {
+        let measure = |n: usize| {
+            let mut b = browser("<p id=p>x</p>");
+            assert_eq!(js(&mut b, "var sh = new CSSStyleSheet(), r = sh.cssRules, p = document.getElementById('p'); sh.replaceSync('#p { color: red }'); document.adoptedStyleSheets = [sh]; r.length + '|' + getComputedStyle(p).color"), "1|rgb(255, 0, 0)");
+            take_work();
+            let builds = b.computed_stats().builds;
+            assert_eq!(js(&mut b, &format!("for (var i = 0; i < {n}; i++) sh.insertRule('#p {{ color: blue; top: ' + i + 'px }}', r.length); r.length")), (n + 1).to_string());
+            let insert = take_work();
+            assert_eq!(b.computed_stats().builds, builds);
+            assert_eq!(js(&mut b, "getComputedStyle(p).color"), "rgb(0, 0, 255)");
+            let read_after_insert = take_work();
+            assert_eq!(b.computed_stats().builds, builds + 1);
+            assert_eq!(js(&mut b, "while (r.length > 1) sh.deleteRule(r.length - 1); r.length"), "1");
+            let delete = take_work();
+            assert_eq!(b.computed_stats().builds, builds + 1);
+            assert_eq!(js(&mut b, "getComputedStyle(p).color"), "rgb(255, 0, 0)");
+            (insert, read_after_insert, delete, take_work())
+        };
+        let (small, large) = (measure(64_usize), measure(128_usize));
+        assert_eq!(
+            (small, large),
+            (((64, 0), (0, 65), (0, 0), (0, 1)), ((128, 0), (0, 129), (0, 0), (0, 1))),
+        );
+    });
+}
+
+#[test]
+fn reading_constructed_rules_preserves_the_adopted_text_and_live_indexes() {
+    big(|| {
+        let mut b = browser("<p id=p>x</p>");
+        assert_eq!(js(&mut b, "var sh = new CSSStyleSheet(), r = sh.cssRules, p = document.getElementById('p'); sh.replaceSync('#p { color: red }'); document.adoptedStyleSheets = [sh]; sh.insertRule('#p{color:blue}', 1)"), "1");
+        assert_eq!(js(&mut b, "var blue = r[1]; [blue === r.item(1), getComputedStyle(p).color].join('|')"), "true|rgb(0, 0, 255)");
+        assert_eq!(js(&mut b, "sh.insertRule('#p{color:green}', 0); [blue === r[2], getComputedStyle(p).color].join('|')"), "true|rgb(0, 0, 255)");
+        assert_eq!(js(&mut b, "sh.deleteRule(2); [blue.parentStyleSheet === null, r.length, getComputedStyle(p).color].join('|')"), "true|2|rgb(255, 0, 0)");
+        assert_eq!(js(&mut b, "sh.insertRule('#p{color:blue}', 2); var other = r[2]; sh.deleteRule(2); [blue !== other, other.parentStyleSheet === null, getComputedStyle(p).color].join('|')"), "true|true|rgb(255, 0, 0)");
+    });
+}
+
+#[test]
+fn compacting_a_constructed_sheet_preserves_its_remaining_rules() {
+    big(|| {
+        let mut b = browser("<p id=p>x</p>");
+        assert_eq!(js(&mut b, "var sh = new CSSStyleSheet(), r = sh.cssRules, p = document.getElementById('p'); sh.replaceSync('#p{color:red}'); document.adoptedStyleSheets = [sh]; for (var i = 0; i < 512; i++) sh.insertRule('.other{top:' + i + 'px}', r.length); sh.insertRule('#p{color:blue}', r.length); r.length"), "514");
+        assert_eq!(js(&mut b, "while (r.length > 3) sh.deleteRule(1); [r.length, r[1].style.top, r[2].selectorText, getComputedStyle(p).color].join('|')"), "3|511px|#p|rgb(0, 0, 255)");
+    });
+}
+
+#[test]
+fn a_style_read_during_serialization_keeps_pending_rule_spans_valid() {
+    big(|| {
+        let mut b = browser("<p id=p>x</p>");
+        let result = js(&mut b, r#"
+            var sh = new CSSStyleSheet(), r = sh.cssRules, p = document.getElementById('p');
+            sh.replaceSync('#p{color:red}');
+            document.adoptedStyleSheets = [sh];
+            sh.insertRule('#p{color:blue}', 0);
+            var blue = r[0];
+            var proto = CSSStyleDeclaration.prototype;
+            var get = Object.getOwnPropertyDescriptor(proto, 'cssText').get, reads = 0;
+            Object.defineProperty(proto, 'cssText', {
+                get: function () { getComputedStyle(p).color; reads++; return get.call(this); }
+            });
+            sh.insertRule('.other{top:1px}', 1);
+            [reads, r[0] === blue, r[1].selectorText, getComputedStyle(p).color].join('|')
+        "#);
+        assert_eq!(result, "1|true|.other|rgb(255, 0, 0)");
+    });
+}
+
+#[test]
 fn a_constructed_sheet_makes_rule_objects_on_demand_too() {
     big(|| {
         let mut b = browser("<p class=c3>x</p>");
