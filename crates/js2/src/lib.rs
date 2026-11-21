@@ -60,6 +60,8 @@ pub mod generator;
 mod asyncgen;
 mod iter;
 mod bi_array;
+mod bi_bigint;
+mod bigint;
 mod bi_json;
 mod bi_date;
 mod bi_date_calc;

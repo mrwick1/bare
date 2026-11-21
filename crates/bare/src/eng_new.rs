@@ -101,7 +101,7 @@ impl Eng for New {
         s.0
     }
     fn is_bigint(v: Value) -> bool {
-        matches!(v.as_pointer(), Some((Kind::BigInt, _)))
+        v.is_bigint()
     }
     fn sym_key(s: NV) -> NV {
         s

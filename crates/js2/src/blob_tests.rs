@@ -46,3 +46,26 @@ fn the_collector_keeps_a_marked_blob_and_does_not_trace_it() {
     assert_eq!(s.marked, 1);
     assert_eq!(b.words(), &[u64::MAX, 0x7FF8_0000_0000_0001, 12345]);
 }
+
+
+#[test]
+fn gc_marks_bigint_words_as_a_leaf() {
+    use crate::atoms::{Atoms, SharedAtoms};
+    use crate::bigint::Sv;
+    use crate::gc::collect;
+    use crate::shapes::Shapes;
+    use std::sync::Arc;
+
+    let mut h = Heap::default();
+    let mut shapes = Shapes::default();
+    let mut atoms = Atoms::new(Arc::new(SharedAtoms::default()));
+    let words = [u64::MAX, 0xFFFE_0000_0000_0001];
+    let v = Blob::new_bigint(&mut h, Sv { neg: true, mag: &words }).unwrap();
+    let mut roots = |m: &mut crate::gc::Marker| m.value(v);
+    let stats = collect(&mut h, &mut shapes, &mut atoms, &mut roots);
+    assert_eq!(stats.marked, 1);
+    // SAFETY: the value is a BigInt that the root kept alive.
+    let b = unsafe { Blob::from_bigint(v) }.unwrap();
+    assert!(b.bigint().neg);
+    assert_eq!(b.bigint().mag, words);
+}
