@@ -145,10 +145,10 @@ pub(crate) fn item<E: Eng>(d: &Dom<E>, owner: E::Obj, index: usize) -> Option<Re
     })())
 }
 
-/// Does `prepare` have nothing to do for `l`? (No scan of the document: the cache is of the current revision. A list by name always goes through `prepare`.)
+/// Does `prepare` have nothing to do for `l`?
 #[inline]
 fn is_fresh<E: Eng>(d: &Dom<E>, l: &List) -> bool {
-    !matches!(l.src, Src::Name(_)) && l.rev == Some(d.doc.borrow().revision())
+    l.rev == Some(d.doc.borrow().revision())
 }
 
 fn fresh<E: Eng>(d: &Dom<E>, l: &List) -> Result<bool, Pending> {
