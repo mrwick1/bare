@@ -8,6 +8,7 @@
 //! `shift` and `unshift` move all the elements: O(n) each.
 use crate::lazy::{Ent, m, script, sym_same};
 use crate::bi_object::H_SEARCH;
+use crate::bi_symbol::SPECIES;
 use crate::builtins::{NativeFn, arg};
 use crate::interp_rt::{ErrKind, Key, R, Realm};
 use crate::object::{F_ELEMS_FIXED, F_ELEMS_RO, F_LEN_RO, F_NOEXT, F_SLOWIDX, Obj};
@@ -150,24 +151,30 @@ fn del_at(rt: &mut Realm, v: Value, i: f64) -> R<()> {
     if rt.delete_prop(v, k)? { Ok(()) } else { rt.type_error("cannot delete a property that is not configurable") }
 }
 
-/// The check of `ArraySpeciesCreate` that js2 can make without `Symbol.species`: the `constructor` of an array must be `undefined` or an
-/// object (any object gives a plain array). Reading it runs a getter.
-fn species_check(rt: &mut Realm, o: Value) -> R<()> {
+/// Create the result of an array method, using the original array's species when present.
+fn species_create(rt: &mut Realm, o: Value, n: f64) -> R<Obj> {
     if Realm::obj(o).is_some_and(|x| rt.is_array(x)) {
-        let c = rt.get_prop(o, Key::Name(rt.k_constructor))?;
-        if c.is_null() || !c.is_undefined() && Realm::obj(c).is_none() {
-            return rt.type_error("the constructor of the array is not an object");
+        let mut c = rt.get_prop(o, Key::Name(rt.k_constructor))?;
+        if Realm::obj(c).is_some() {
+            c = rt.get_prop(c, Key::Name(rt.wk[SPECIES]))?;
+            if c.is_null() {
+                c = Value::UNDEFINED;
+            }
+        }
+        if !c.is_undefined() && c != rt.array_ctor {
+            if !rt.is_constructor(c) {
+                return rt.type_error("the array species is not a constructor");
+            }
+            let v = rt.construct_value(c, &[Realm::num(n + 0.0)])?;
+            return Realm::obj(v).ok_or_else(|| rt.error(ErrKind::Type, "the array species did not return an object"));
         }
     }
-    Ok(())
-}
-
-/// A new array of length 0 with room for `n` elements; a `RangeError` when `n` is not a valid length.
-fn new_arr(rt: &mut Realm, n: f64) -> R<Obj> {
-    if n > u32::MAX as f64 - 1.0 {
+    if n > u32::MAX as f64 {
         return Err(rt.error(ErrKind::Range, "invalid array length"));
     }
-    Ok(Obj::array(&mut rt.heap, &rt.shapes, rt.s_array, &[]).expect("memory"))
+    let a = Obj::array(&mut rt.heap, &rt.shapes, rt.s_array, &[]).expect("memory");
+    a.set_len(&mut rt.heap, n as u32).expect("memory");
+    Ok(a)
 }
 
 /// `CreateDataPropertyOrThrow(a, i, x)` on a fresh array.
@@ -176,10 +183,30 @@ fn put(rt: &mut Realm, a: Obj, i: f64, x: Value) -> R<()> {
     rt.define(a, k, x)
 }
 
+pub(crate) fn prelude_species(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+    let n = arg(args, 1).as_f64().expect("length");
+    species_create(rt, arg(args, 0), n).map(Obj::value)
+}
+
+pub(crate) fn prelude_array_put(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+    let a = Realm::obj(arg(args, 0)).expect("species result");
+    let i = arg(args, 1).as_f64().expect("index");
+    put(rt, a, i, arg(args, 2))?;
+    Ok(Value::UNDEFINED)
+}
+
+fn array_species_get(_rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
+    Ok(this)
+}
+
 impl Realm {
     pub(crate) fn install_array(&mut self) {
         let proto = self.array_proto;
         let c = self.ctor("Array", 1, array_ctor, proto);
+        self.array_ctor = c.value();
+        self.keep(c.value());
+        let get = self.new_native(array_species_get, false, 0, "get [Symbol.species]");
+        self.define_accessor(c, Key::Name(self.wk[SPECIES]), get.value(), false, false).expect("define");
         static ARRAY_STATICS: &[Ent] = &[script("of", "array_of"), script("from", "array_from"), m("isArray", 1, is_array)];
         self.lazy_table(c, ARRAY_STATICS);
         static ARRAY_PROTO: &[Ent] = &[
@@ -233,7 +260,7 @@ fn array_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let o = match args {
         [n] if n.is_number() => {
             let f = n.as_f64().expect("a number");
-            if f < 0.0 || f.fract() != 0.0 || f >= u32::MAX as f64 {
+            if f < 0.0 || f.fract() != 0.0 || f > u32::MAX as f64 {
                 return Err(rt.error(ErrKind::Range, "invalid array length"));
             }
             let o = Obj::array(&mut rt.heap, &rt.shapes, shape, &[]).expect("memory");
@@ -351,8 +378,7 @@ fn slice(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let o = this_val(rt, this)?;
     let len = len_of(rt, o)?;
     let (mut k, fin) = (rel(rt, arg(args, 0), 0.0, len)?, rel(rt, arg(args, 1), len, len)?);
-    species_check(rt, o)?;
-    let a = new_arr(rt, (fin - k).max(0.0))?;
+    let a = species_create(rt, o, (fin - k).max(0.0))?;
     let mut n = 0.0;
     while k < fin {
         if has_at(rt, o, k)? {
@@ -362,7 +388,7 @@ fn slice(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
         k += 1.0;
         n += 1.0;
     }
-    a.set_len(&mut rt.heap, n as u32).expect("memory");
+    set_len(rt, a.value(), n)?;
     Ok(a.value())
 }
 
@@ -380,8 +406,7 @@ fn splice(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     if len + n - count > MAX_LEN {
         return rt.type_error("the length of the array-like would be above 2^53 - 1");
     }
-    species_check(rt, o)?;
-    let a = new_arr(rt, count)?;
+    let a = species_create(rt, o, count)?;
     let mut k = 0.0;
     while k < count {
         if has_at(rt, o, start + k)? {
@@ -390,7 +415,7 @@ fn splice(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
         }
         k += 1.0;
     }
-    a.set_len(&mut rt.heap, count as u32).expect("memory");
+    set_len(rt, a.value(), count)?;
     if n < count {
         let mut k = start;
         while k < len - count {
@@ -428,8 +453,7 @@ fn splice(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
 
 fn concat(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let o = this_val(rt, this)?;
-    species_check(rt, o)?;
-    let a = new_arr(rt, 0.0)?;
+    let a = species_create(rt, o, 0.0)?;
     let mut n = 0.0;
     for e in std::iter::once(o).chain(args.iter().copied()) {
         if Realm::obj(e).is_some_and(|x| rt.is_array(x)) {
@@ -454,10 +478,7 @@ fn concat(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
             n += 1.0;
         }
     }
-    if n > u32::MAX as f64 - 1.0 {
-        return Err(rt.error(ErrKind::Range, "invalid array length"));
-    }
-    a.set_len(&mut rt.heap, n as u32).expect("memory");
+    set_len(rt, a.value(), n)?;
     Ok(a.value())
 }
 

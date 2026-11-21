@@ -64,6 +64,8 @@ pub(crate) const PRE: &[(&str, Pd)] = &[
     ("ownNames", Native(crate::bi_object::object_own_names, 1, "getOwnPropertyNames")),
     ("set", Native(crate::bi_object::set_strict, 3, "set")),
     ("bind", Native(crate::builtins::bind_callback, 2, "bind")),
+    ("arraySpecies", Native(crate::bi_array::prelude_species, 2, "arraySpecies")),
+    ("arrayPut", Native(crate::bi_array::prelude_array_put, 3, "arrayPut")),
 ];
 
 /// The number of slots.
