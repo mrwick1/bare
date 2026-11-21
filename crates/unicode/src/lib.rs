@@ -10,7 +10,7 @@ pub mod props;
 pub mod tables;
 // The generated data in `tables.rs`. `pub` lets other crates use it.
 
-use crate::tables::{CASE_FOLD, COMBINING_CLASS, COMPOSE, DECOMPOSE, DECOMPOSE_DATA};
+use crate::tables::{CASE_FOLD, COMBINING_CLASS, COMPOSE, DECOMPOSE, DECOMPOSE_DATA, COMPAT_DECOMPOSE, COMPAT_DECOMPOSE_DATA};
 // `crate` means the root of this crate.
 use std::cmp::Ordering;
 
@@ -65,15 +65,20 @@ const S_COUNT: u32 = L_COUNT * V_COUNT * T_COUNT;
 
 /// Normalize `text` to NFD: split every character into its letter and accents, then put the accents in order.
 pub fn nfd(text: &str) -> String {
-    decomposed(text).into_iter().collect()
+    decomposed::<false>(text).into_iter().collect()
+}
+
+/// Normalize to NFKD.
+pub fn nfkd(text: &str) -> String {
+    decomposed::<true>(text).into_iter().collect()
 }
 
 /// Steps 1 and 2 of NFC and the whole of NFD.
-fn decomposed(text: &str) -> Vec<char> {
+fn decomposed<const COMPAT: bool>(text: &str) -> Vec<char> {
     // Step 1: split every character into its letter and accents: "é" becomes "e" + "´".
     let mut chars: Vec<char> = Vec::new();
     for c in text.chars() {
-        decompose(c, &mut chars);
+        decompose::<COMPAT>(c, &mut chars);
     }
 
     // Step 2: put the accents after each letter in a fixed order, by their number.
@@ -95,8 +100,15 @@ fn decomposed(text: &str) -> Vec<char> {
 
 /// Normalize `text` to NFC.
 pub fn nfc(text: &str) -> String {
-    let chars = decomposed(text);
+    composed(decomposed::<false>(text))
+}
 
+/// Normalize to NFKC.
+pub fn nfkc(text: &str) -> String {
+    composed(decomposed::<true>(text))
+}
+
+fn composed(chars: Vec<char>) -> String {
     // Step 3: join a letter with an accent after it, when one character exists for both.
     let mut out: Vec<char> = Vec::new();
     let mut starter: Option<usize> = None;
@@ -123,8 +135,13 @@ pub fn nfc(text: &str) -> String {
 }
 
 /// Split `c` into its letter and accents, and add them to `out`.
-fn decompose(c: char, out: &mut Vec<char>) {
+fn decompose<const COMPAT: bool>(c: char, out: &mut Vec<char>) {
     let cp = c as u32;
+    if COMPAT && let Ok(i) = COMPAT_DECOMPOSE.binary_search_by_key(&cp, |&(key, ..)| key) {
+        let (_, start, len) = COMPAT_DECOMPOSE[i];
+        out.extend_from_slice(&COMPAT_DECOMPOSE_DATA[start as usize..start as usize + len as usize]);
+        return;
+    }
     if (S_BASE..S_BASE + S_COUNT).contains(&cp) {
         // A Korean syllable: compute its parts.
         let s = cp - S_BASE;
@@ -231,7 +248,7 @@ mod tests {
             }
             let (mut want, mut got) = (Vec::new(), Vec::new());
             full(cp, &maps, &mut want);
-            decompose(c, &mut got);
+            decompose::<false>(c, &mut got);
             assert_eq!(got, want, "U+{cp:04X}");
         }
     }
