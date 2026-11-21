@@ -281,13 +281,20 @@ impl Realm {
 
     // ---- spread and rest ----
 
-    /// The values that the iterator of `v` gives. An array and a string are read directly; any other value goes through `Symbol.iterator`
-    /// (`iter.rs`). The values are read at the start: a spread holds them in a list while the iterator runs script (the collector is held).
+    /// The values that the iterator of `v` gives. A string and an array with the default iterator are read directly.
     pub fn iter_values(&mut self, v: Value) -> R<Vec<Value>> {
         if let Some(o) = Realm::obj(v)
-            && self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed
+            && self.plain_array_iterator(o)
         {
-            return Ok((0..o.len()).map(|i| o.get_element(i).unwrap_or(Value::UNDEFINED)).collect());
+            let mut out = Vec::with_capacity(o.len() as usize);
+            while (out.len() as u32) < o.len() {
+                let i = out.len() as u32;
+                out.push(match o.get_element(i) {
+                    Some(v) => v,
+                    None => self.get_prop(v, Key::Idx(i))?,
+                });
+            }
+            return Ok(out);
         }
         if let Some(s) = Realm::str_of(v) {
             let s = self.flat(s);
@@ -303,14 +310,8 @@ impl Realm {
         }
         let (it, kind) = self.iter_open_generic(v)?;
         let mut out = Vec::new();
-        if kind.is_undefined() {
-            while let (x, false) = self.gen_nested(it, crate::generator::MODE_NEXT, Value::UNDEFINED)? {
-                out.push(x);
-            }
-        } else {
-            while let Some(x) = self.iter_step(it, kind)? {
-                out.push(x);
-            }
+        while let Some(x) = self.iter_step(it, kind)? {
+            out.push(x);
         }
         Ok(out)
     }

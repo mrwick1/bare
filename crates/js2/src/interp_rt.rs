@@ -272,6 +272,16 @@ pub enum Key {
     Name(Str),
 }
 
+impl Key {
+    /// Encode a converted key in a register for a later property access.
+    pub(crate) fn as_value(self) -> Value {
+        match self {
+            Key::Idx(i) => Realm::num(i as f64),
+            Key::Name(s) => s.key_value(),
+        }
+    }
+}
+
 /// The kinds of error that the interpreter throws. The value is the index in `Realm::error_protos`.
 #[derive(Clone, Copy, Debug)]
 pub enum ErrKind {
@@ -591,6 +601,7 @@ impl Realm {
         self.pool.iter_mut().flat_map(|p| p.fbs.iter_mut()).for_each(Feedback::collected);
         if self.shapes.epoch() != self.epoch {
             self.epoch = self.shapes.epoch();
+            self.ltab.array_iter_spot = None;
             fbs.iter_mut().for_each(Feedback::clear);
             self.pool.iter_mut().flat_map(|p| p.fbs.iter_mut()).for_each(Feedback::clear);
         }

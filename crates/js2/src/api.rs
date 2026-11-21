@@ -92,7 +92,7 @@ pub(crate) struct ApiState {
     handlers: std::collections::HashMap<String, usize>,
     /// `%eval%` and `%IteratorPrototype%`, made at the first ask (`undefined` before).
     eval_fn: Value,
-    iter_proto: Value,
+    pub(crate) iter_proto: Value,
     /// The index in `Realm::natives` of the trampoline of a plain host function and of a host constructor (`usize::MAX`: not made).
     natives: [usize; 2],
     /// The step budget of a task, and the nesting of [`Engine::task`].

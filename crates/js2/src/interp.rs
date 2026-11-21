@@ -174,7 +174,7 @@ macro_rules! cold_ops {
         Op::ArraySpread | Op::ArrayHole | Op::CallSpread | Op::NewSpread | Op::CopyProps | Op::ObjRest | Op::SetProto |
         Op::DefAccessor | Op::DefAccessorElem | Op::DefMethod | Op::DefMethodElem | Op::SetHome | Op::MakeClass | Op::MakeDerived |
         Op::SetFnName | Op::DefaultCtor | Op::SetFields | Op::NewPrivateName | Op::GetPrivate | Op::SetPrivate | Op::HasPrivate |
-        Op::DefPrivate | Op::DefPrivateMethod | Op::DefPrivateAccessor | Op::GetSuper | Op::GetSuperElem | Op::SetSuper |
+        Op::DefPrivate | Op::DefPrivateMethod | Op::DefPrivateAccessor | Op::GetSuper | Op::GetSuperElem | Op::GetSuperElemRef | Op::SetSuper |
         Op::SetSuperElem | Op::CallSuper | Op::CallSuperSpread | Op::RetDerived | Op::GenInit | Op::Yield | Op::RetGen | Op::IterClose | Op::YieldStarStep | Op::AsyncInit | Op::Await | Op::RetAsync |
         Op::AIterOpen | Op::AIterNext | Op::AIterUnpack | Op::AYsUnpack | Op::AIterClose | Op::AIterCloseT | Op::AIterCheck | Op::AYsCall
     };
@@ -1330,7 +1330,11 @@ impl Vm {
                         Op::IterClose => {
                             std::hint::cold_path();
                             // The loop leaves early (`c` = 1: with a throw): `return()` of the iterator, so a generator runs its `finally` blocks.
-                            if r!(a!() + 1).as_int().is_none() {
+                            if let Some(i) = r!(a!() + 1).as_int() {
+                                if r!(a!() + 2) == Value::bool(true) {
+                                    tri!(realm.close_array_iterator(r!(a!()), i, c!() != 0));
+                                }
+                            } else {
                                 tri!(realm.iter_close(r!(a!()), r!(a!() + 1), c!() != 0));
                             }
                             pc = next;
@@ -1680,10 +1684,13 @@ impl Vm {
                                 Got::Get(g) => call_get!(g, r!(b!()), a!(), next),
                             }
                         }
-                        Op::GetSuperElem => {
+                        Op::GetSuperElem | Op::GetSuperElemRef => {
                             std::hint::cold_path();
                             gate!();
                             let k = tri!(realm.key_of(r!(c!())));
+                            if opv == Op::GetSuperElemRef {
+                                r!(c!()) = k.as_value();
+                            }
                             match tri!(realm.super_get(home!(), k)) {
                                 Got::Val(v) => {
                                     r!(a!()) = v;
@@ -1959,7 +1966,7 @@ impl Vm {
                         tri!(realm.define(o, Key::Name(n), r!(b!())));
                         pc = next;
                     }
-                    Op::GetElem | Op::GetElemI => {
+                    Op::GetElem | Op::GetElemI | Op::GetElemRef => {
                         let key = if opv == Op::GetElemI { Value::int(c!() as i32) } else { r!(c!()) };
                         let recv = r!(b!());
                         // SAFETY: the registers hold live values.
@@ -1978,6 +1985,9 @@ impl Vm {
                             err!(ErrKind::Type, "cannot read properties of undefined or null")
                         }
                         let k = tri!(realm.key_of(key));
+                        if opv == Op::GetElemRef {
+                            r!(c!()) = k.as_value();
+                        }
                         match tri!(realm.get_prop_g(recv, k)) {
                             Got::Val(v) => {
                                 r!(a!()) = v;
@@ -2017,10 +2027,7 @@ impl Vm {
                         if recv.is_undefined() || recv.is_null() {
                             err!(ErrKind::Type, "cannot read properties of undefined or null")
                         }
-                        r!(a!()) = match tri!(realm.key_of(r!(c!()))) {
-                            Key::Idx(i) => Realm::num(i as f64),
-                            Key::Name(s) => s.key_value(),
-                        };
+                        r!(a!()) = tri!(realm.key_of(r!(c!()))).as_value();
                         pc = next;
                     }
                     Op::DefElem => {
@@ -2305,27 +2312,29 @@ impl Vm {
                     Op::RetUndef => ret!(undef),
                     Op::IterOpen => {
                         let mut it = r!(b!());
-                        if Realm::str_of(it).is_some() {
+                        let string = Realm::str_of(it).is_some();
+                        if string {
                             // A string is iterated by code points: walk an array of them.
                             gate!();
                             let vals = tri!(realm.iter_values(it));
                             it = Obj::array(&mut realm.heap, &realm.shapes, realm.s_array, &vals).expect("memory").value();
                         }
-                        let is_array = Realm::obj(it).is_some_and(|o| realm.shapes.get(o.shape(&realm.shapes)).layout == crate::cell::Layout::Indexed);
+                        let fast_array = !string && c!() == 0 && Realm::obj(it).is_some_and(|o| realm.plain_array_iterator(o));
                         // A generator is stepped by `IterNext` itself (`undefined` where an array has its index): see `generator.rs`.
-                        let index = if is_array {
+                        let index = if string || fast_array {
                             Value::int(0)
                         } else if Realm::is_generator(it) {
                             undef
                         } else {
                             std::hint::cold_path();
+                            gate!();
                             let (i, k) = tri!(realm.iter_open_generic(it));
                             it = i;
                             k
                         };
                         r!(a!()) = it;
                         r!(a!() + 1) = index;
-                        r!(a!() + 2) = Value::int(0);
+                        r!(a!() + 2) = Value::bool(fast_array);
                         pc = next;
                     }
                     Op::IterNext => {
@@ -2343,8 +2352,14 @@ impl Vm {
                         };
                         let arr = Realm::obj(r!(base)).expect("an array");
                         if (i as u32) < arr.len() {
-                            r!(a!()) = arr.get_element(i as u32).unwrap_or(undef);
                             r!(base + 1) = Value::int(i + 1);
+                            r!(a!()) = if let Some(v) = arr.get_element(i as u32) {
+                                v
+                            } else {
+                                std::hint::cold_path();
+                                gate!();
+                                tri!(realm.get_prop(arr.value(), Key::Idx(i as u32)))
+                            };
                             pc = nextx!();
                         } else {
                             jump!(true, nextx!(), sbx!())
@@ -2483,7 +2498,7 @@ pub fn code_flags(c: &Code) -> u8 {
         match ins.op {
             Op::CreateArgs | Op::CreateRest => f |= CF_ARGS,
             Op::Lazy if ins.a != 0 => f |= CF_ARGS,
-            Op::CallSuper | Op::CallSuperSpread | Op::GetSuper | Op::GetSuperElem | Op::SetSuper | Op::SetSuperElem => f |= CF_LINK,
+            Op::CallSuper | Op::CallSuperSpread | Op::GetSuper | Op::GetSuperElem | Op::GetSuperElemRef | Op::SetSuper | Op::SetSuperElem => f |= CF_LINK,
             _ => {}
         }
         pc += n;

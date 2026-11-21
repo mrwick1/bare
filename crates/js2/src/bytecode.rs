@@ -284,7 +284,7 @@ ops! {
     RetUndef Abc "" "Return `undefined`.",
     Throw Abc "r" "Throw `a`.",
     ThrowConst Abx "- A" "Throw the TypeError of an assignment to the constant named by `atoms[bx]`.",
-    IterOpen Abc "W r" "Open the iterator of `b`. The iterator record (iterator, `next`, state) is in the 3 registers from `a`.",
+    IterOpen Abc "W r u" "Open the iterator of `b`. The iterator record (iterator, `next`, state) is in the 3 registers from `a`. With `c` = 1, use a full array iterator for `yield*`.",
     ForInOpen Abc "W r" "Open the keys of `b` (`for-in`). The record is in the 3 registers from `a`, as for `IterOpen`.",
     IterNext AsBxX "w j R" "`a` = the next value of the record in the 3 registers from `x`. When it is done, jump.",
     IterClose Abc "R - u" "Close the iterator whose record is in the 3 registers from `a` (a `break` or an exception out of the loop). `c` is 1 for an exception: the error of `return()` is then dropped.",
@@ -343,6 +343,8 @@ ops! {
     AYsCall AsBxX "w j R" "`yield*` in an async generator: the record at `x` is the iterator record, the sent value and the mode (`YS_REGS`). `a` = the result of `next`, `throw` or `return` of the iterator for the mode (not awaited). When the iterator has no `throw`: the mode register is 3 and jump. When it has no `return`: `a` = the sent value, the mode register is 2 and jump.",
     NewDataLit Abx "w D" "`a` = a fresh tree of objects and arrays made from `data[bx]`.",
     Lazy Abc "u" "The only instruction of the stub of a function that is compiled at its first call (`script::Lazy`): compile the function into this code, then run it from the start with the same arguments. With `a` = 1 the stub has `CF_ARGS`, so the frame record holds all arguments in an array. With `a` = 0 the stub has the parameter registers of the real code, and the arguments are in them (a function with plain parameters that does not read `arguments`): no array is made. The compiler never emits it.",
+    GetElemRef Abc "w r r" "As `GetElem`, but replace the key in temporary register `c` with its converted property key before the read.",
+    GetSuperElemRef Abc "w r r" "As `GetSuperElem`, but replace the key in temporary register `c` with its converted property key before the read.",
 }
 
 /// Words of a slot of a string switch table: the hash, the atom and the target.

@@ -1305,3 +1305,24 @@ fn the_arguments_object_has_the_array_values_iterator() {
         ("function f() { delete arguments[Symbol.iterator]; return typeof arguments[Symbol.iterator]; } var r = f();", "r", "undefined"),
     ]);
 }
+
+#[test]
+fn computed_read_write_operations_convert_the_key_once() {
+    check(&[
+        ("var n = 0, o = {x: 2, y: 8}, k = {toString() { return ++n === 1 ? 'x' : 'y'; }}; o[k] += 3; var r = [n, o.x, o.y].join();", "r", "1,5,8"),
+        ("var n = 0, o = {x: 2}, k = {toString() { n++; return 'x'; }}; o[k] &&= (k = 'y', 4); var r = [n, o.x, o.y].join();", "r", "1,4,"),
+        ("var n = 0, x = Symbol(), o = {[x]: 2}, k = {[Symbol.toPrimitive]() { n++; return x; }}; var v = o[k]++; var r = [n, v, o[x]].join();", "r", "1,2,3"),
+        ("var n = 0, k = {toString() { n++; return 'x'; }}; class A { get x() { return this.v; } set x(v) { this.v = v; } } class B extends A { f() { this.v = 3; return ++super[k]; } } var o = new B(); var r = [o.f(), o.v, n].join();", "r", "4,4,1"),
+    ]);
+}
+
+#[test]
+fn array_iteration_respects_overrides_and_inherited_elements() {
+    check(&[
+        ("Array.prototype[Symbol.iterator] = function*() { yield 42; }; class C { m([a]) { return a; } } var r = new C().m([1]);", "r", "42"),
+        ("var a = [1]; a[Symbol.iterator] = null; var r; try { var [x] = a; } catch (e) { r = e.name; }", "r", "TypeError"),
+        ("var a = [1], p = Object.getPrototypeOf(a.values()); p.next = function() { return {value: 7, done: false}; }; var [r] = a;", "r", "7"),
+        ("var a = [,2]; Array.prototype[0] = 5; var [r] = a;", "r", "5"),
+        ("var a = [undefined, 2], n = 0; function install() { var p = Object.getPrototypeOf(a.values()); p.return = function() { n = this.next().value; return {}; }; } var [x = install()] = a; var r = n;", "r", "2"),
+    ]);
+}

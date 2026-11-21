@@ -81,10 +81,8 @@ fn json_stringify_calls_to_json_with_the_key() {
 }
 
 #[test]
-fn json_calls_that_need_the_script_call_are_type_errors_for_now() {
+fn json_ignores_a_non_callable_to_json() {
     check(&[
-        ("try { JSON.parse('1', function () {}); } catch (e) { return e.name; }", "TypeError"),
-        ("try { JSON.stringify({}, function () {}); } catch (e) { return e.name; }", "TypeError"),
         ("return JSON.stringify({toJSON: 5, a: 1});", "{\"toJSON\":5,\"a\":1}"),
     ]);
 }
@@ -219,5 +217,15 @@ fn bind_constructs_with_the_bound_arguments_and_reads_metadata_at_bind_time() {
         ("function f(x) {} Object.defineProperty(f, 'name', {get() { throw 'name'; }}); try { f.bind(); } catch (e) { return e; }", "name"),
         ("function f(x) {} var b = f.bind(); Object.defineProperty(f, 'name', {value: 'later'}); Object.defineProperty(f, 'length', {value: 8}); return b.name + ':' + b.length;", "bound f:1"),
         ("function f(v) { return this.offset + v; } Object.defineProperty(f, 'length', {get() { throw 'length'; }}); Object.defineProperty(f, 'name', {get() { throw 'name'; }}); return [3].map(f, {offset: 4})[0];", "7"),
+    ]);
+}
+
+#[test]
+fn json_callbacks_see_the_holder_and_visit_properties_in_order() {
+    check(&[
+        (r#"var seen = []; var o = JSON.parse('{"a":[1,2],"b":3}', function (k,v) { seen.push(k); if (k === '0') { this[1] = 7; return undefined; } return v; }); return seen.join('|') + ':' + JSON.stringify(o);"#, "0|1|a|b|:{\"a\":[null,7],\"b\":3}"),
+        (r#"var seen = []; var o = { a: {toJSON() { return 5; }}, b: 2 }; var s = JSON.stringify(o, function(k,v) { seen.push(this[k] === o.a ? k + '=' + v : k); if (k === 'a') delete this.b; return v; }); return seen.join('|') + ':' + s;"#, "|a=5|b:{\"a\":5}"),
+        (r#"return JSON.stringify([new Number(2), new Boolean(false), new String('x')]);"#, "[2,false,\"x\"]"),
+        (r#"try { JSON.parse('[', function() { throw 'wrong'; }); } catch (e) { return e.name; }"#, "SyntaxError"),
     ]);
 }
