@@ -431,6 +431,21 @@ impl Vm {
             let e = realm.error(ErrKind::Type, "not a function");
             return Err(Exit::Throw(e));
         };
+        Vm::start_at(realm, stack, fbs, (f, ci, ctx), this, (Value::UNDEFINED, 0), args)
+    }
+
+    /// As [`Vm::start`] for a construct call of the class or function `f` (`Realm::construct_script`): `nt` is `new.target`, and a
+    /// result that is not an object is the `this` of the frame.
+    pub(crate) fn start_new(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, f: Value, this: Value, nt: Value, args: &[Value]) -> Result<Value, Exit> {
+        let Some((ci, ctx)) = realm.function_new(f) else {
+            let e = realm.error(ErrKind::Type, "not a constructor");
+            return Err(Exit::Throw(e));
+        };
+        Vm::start_at(realm, stack, fbs, (f, ci, ctx), this, (nt, CONSTRUCT), args)
+    }
+
+    #[inline(always)]
+    fn start_at(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, (f, ci, ctx): (Value, usize, Value), this: Value, (nt, dstw): (Value, i32), args: &[Value]) -> Result<Value, Exit> {
         let prog = realm.prog.clone();
         let code = &prog[ci];
         let fp = REC;
@@ -443,7 +458,7 @@ impl Vm {
         } else {
             Value::UNDEFINED
         };
-        let rec = [f, this, ctx, Value::int(0), Value::int(0), Value::int(ENTRY), Value::int(0), Value::int(0), Value::UNDEFINED, args_obj];
+        let rec = [f, this, ctx, Value::int(0), Value::int(0), Value::int(ENTRY), Value::int(0), Value::int(dstw), nt, args_obj];
         stack[..REC].copy_from_slice(&rec);
         for i in 0..code.nparams as usize {
             stack[fp + i] = args.get(i).copied().unwrap_or(Value::UNDEFINED);

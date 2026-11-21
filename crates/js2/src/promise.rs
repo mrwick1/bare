@@ -38,10 +38,8 @@
 //! The reaction count is set to 0 at each collection, because a promise that died with reactions on it cannot give them back, so it
 //! counts the reactions that were added since the last collection and are still pending.
 //!
-//! **Not here:** `Symbol.species` (no `Symbol` yet: `then` reads `constructor` and uses it as it is), `Promise.prototype.finally` and the
-//! static combinators (step P3), `Symbol.toStringTag`. A constructor that is a script function or class cannot be called from a
-//! native with `new` yet (`Realm::call_function` does not construct), so `then` on a promise whose `constructor` is a script subclass
-//! throws a `TypeError`; a native constructor works.
+//! **Not here:** the statics and `finally` are in `promise_statics.rs`. `SpeciesConstructor` is there too (`then` calls it). A constructor
+//! that is a script function or class is constructed by `Realm::construct_script`.
 use crate::builtins::{Native, NativeFn, arg};
 use crate::cell::Layout;
 use crate::gc::Marker;
@@ -143,7 +141,13 @@ pub(crate) struct Promises {
     /// The indexes in `Realm::natives` of the resolving functions and of the executor of a capability.
     id_resolve: usize,
     id_reject: usize,
-    id_executor: usize,
+    pub(crate) id_executor: usize,
+    /// The natives of `promise_statics` (`N_ALL` and the others), the built-in getter of `Promise[Symbol.species]` (a root) and
+    /// `AggregateError.prototype` (a root).
+    pub(crate) ids: [usize; crate::promise_statics::N_IDS],
+    pub(crate) species_fn: Value,
+    pub(crate) species_spot: Option<Spot>,
+    pub(crate) agg_proto: Obj,
 }
 
 impl Promises {
@@ -173,6 +177,10 @@ impl Promises {
             id_resolve: 0,
             id_reject: 0,
             id_executor: 0,
+            ids: [0; crate::promise_statics::N_IDS],
+            species_fn: Value::UNDEFINED,
+            species_spot: None,
+            agg_proto: proto,
         }
     }
 
@@ -418,7 +426,7 @@ impl Realm {
     }
 
     /// The two resolving functions of `p`.
-    fn resolving_functions(&mut self, p: Obj) -> (Obj, Obj) {
+    pub(crate) fn resolving_functions(&mut self, p: Obj) -> (Obj, Obj) {
         let res = self.native_cell(self.pr.id_resolve);
         let rej = self.native_cell(self.pr.id_reject);
         res.set_slot(&self.shapes, 1, p.value());
@@ -448,7 +456,7 @@ impl Realm {
 
     /// `p.constructor`. A promise with the default shape (no own property, prototype `Promise.prototype`) reads it from the spot of
     /// `Promise.prototype`; the spot is made again when a script changed the shape of the prototype.
-    fn promise_constructor(&mut self, p: Obj) -> R<Value> {
+    pub(crate) fn promise_constructor(&mut self, p: Obj) -> R<Value> {
         let default = p.shape(&self.shapes) == self.pr.shape;
         if default && let Some(v) = self.pr.ctor_spot.and_then(|s| self.pr.proto.read_spot(s)) {
             return Ok(v);
@@ -464,18 +472,6 @@ impl Realm {
             }
             _ => self.get_prop(p.value(), Key::Name(kc)),
         }
-    }
-
-    /// Whether `Promise` is on the prototype chain of the constructor `c` (`class P extends Promise`).
-    fn inherits_promise(&self, c: Obj) -> bool {
-        let mut o = self.proto_of(c);
-        while let Some(x) = o {
-            if x.value() == self.pr.ctor {
-                return true;
-            }
-            o = self.proto_of(x);
-        }
-        false
     }
 
     /// `PerformPromiseThen`: `derived` is a promise, a capability record or `undefined`.
@@ -514,11 +510,8 @@ impl Realm {
         if !is_callable(c) {
             return self.type_error("not a constructor");
         }
-        if self.native_id(c).is_none_or(|i| !self.natives[i].ctor) {
-            return self.type_error("a constructor that is a script function cannot be called from a built-in yet");
-        }
         let ex = self.native_cell(self.pr.id_executor);
-        let promise = self.construct_native(c, &[ex.value()], c)?;
+        let promise = self.construct_value(c, &[ex.value()])?;
         let (res, rej) = (ex.slot(&self.shapes, 1), ex.slot(&self.shapes, 2));
         if !is_callable(res) || !is_callable(rej) {
             return self.type_error("the promise capability functions are not callable");
@@ -587,6 +580,7 @@ impl Realm {
         self.method(c, "reject", 1, promise_reject);
         let g = self.global;
         self.method(g, "queueMicrotask", 1, queue_microtask);
+        self.install_promise_statics();
     }
 }
 
@@ -641,15 +635,7 @@ fn promise_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
 
 fn promise_then(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let Some(p) = promise_of(this) else { return rt.type_error("Promise.prototype.then called on a value that is not a promise") };
-    // `SpeciesConstructor`: the `constructor` of the promise. Only `Promise` has a `Symbol.species` (there is no `Symbol` yet), and
-    // a subclass inherits it, so `constructor` is used when it is `Promise` or inherits from it, and else the default is used.
-    let c = rt.promise_constructor(p)?;
-    let c = match Realm::obj(c) {
-        _ if c.is_undefined() => rt.pr.ctor,
-        None => return rt.type_error("the constructor of a promise is not an object"),
-        Some(o) if c == rt.pr.ctor || rt.inherits_promise(o) => c,
-        Some(_) => rt.pr.ctor,
-    };
+    let c = rt.species_constructor(p)?;
     let derived = rt.new_capability(c)?;
     rt.perform_then(p, handler(arg(args, 0)), handler(arg(args, 1)), derived)?;
     Ok(Realm::derived_promise(derived))
@@ -667,23 +653,29 @@ fn promise_catch(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     Ok(Value::UNDEFINED)
 }
 
-/// `Promise.resolve(x)`: `x` itself when it is a promise made by the same constructor, else a new promise resolved with `x`.
+/// `Promise.resolve(x)`.
 fn promise_resolve(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     if Realm::obj(this).is_none() {
         return rt.type_error("Promise.resolve called on a value that is not an object");
     }
-    let x = arg(args, 0);
-    if promise_of(x).is_some() && rt.get_prop(x, Key::Name(rt.k_constructor))? == this {
-        return Ok(x);
-    }
-    let cap = rt.new_capability(this)?;
-    match Realm::ctx(cap) {
-        None => rt.resolve_promise(promise_of(cap).expect("a promise"), x)?,
-        Some(c) => {
-            rt.call_function(c.get(1), Value::UNDEFINED, &[x])?;
+    rt.promise_resolve_c(this, arg(args, 0))
+}
+
+impl Realm {
+    /// `PromiseResolve(c, x)`: `x` itself when it is a promise made by the same constructor, else a new promise resolved with `x`.
+    pub(crate) fn promise_resolve_c(&mut self, c: Value, x: Value) -> R<Value> {
+        if promise_of(x).is_some() && self.get_prop(x, Key::Name(self.k_constructor))? == c {
+            return Ok(x);
         }
+        let cap = self.new_capability(c)?;
+        match Realm::ctx(cap) {
+            None => self.resolve_promise(promise_of(cap).expect("a promise"), x)?,
+            Some(c) => {
+                self.call_function(c.get(1), Value::UNDEFINED, &[x])?;
+            }
+        }
+        Ok(Realm::derived_promise(cap))
     }
-    Ok(Realm::derived_promise(cap))
 }
 
 fn promise_reject(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
@@ -819,11 +811,12 @@ impl Realm {
     fn thenable_job(&mut self, r: Ctx) -> R<()> {
         let (x, then, d) = (r.get(A), r.get(B), r.get(D));
         let p = promise_of(d).expect("the promise of a thenable job");
-        // A native promise with the built-in `then` and a `constructor` that is `%Promise%` by plain data: the reaction does the work
-        // of `then` (`SpeciesConstructor` reads nothing that a script can see).
+        // A native promise with the built-in `then`, a `constructor` that is `%Promise%` by plain data and the built-in
+        // `Promise[Symbol.species]`: the reaction does the work of `then` (`SpeciesConstructor` reads nothing that a script can see).
         if then == self.pr.then_fn
             && let Some(xp) = promise_of(x)
             && matches!(self.lookup_g(xp, self.k_constructor), Some(Slot::Data(c)) if c == self.pr.ctor)
+            && self.plain_species(Realm::obj(self.pr.ctor).expect("Promise"))
         {
             // The queue is full: the promise is rejected, as the call of `then` would have thrown.
             if let Err(e) = self.perform_then(xp, Value::UNDEFINED, Value::UNDEFINED, d) {
