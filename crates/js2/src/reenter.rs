@@ -102,7 +102,8 @@ impl Realm {
     /// `Err`; a frame that cannot be entered (the stack limit) rejects the promise.
     pub(crate) fn async_resume(&mut self, act: Value, v: Value, reject: bool) -> R<()> {
         let mode = if reject { crate::generator::MODE_THROW } else { crate::generator::MODE_NEXT };
-        let r = match self.gen_request(act, mode, v) {
+        let r = if Realm::is_generator(act) { self.gen_request(act, mode, v) } else { self.agen_job(act, v, reject).map(|()| crate::generator::Step::Result(Value::UNDEFINED, true)) };
+        let r = match r {
             Ok(crate::generator::Step::Enter) => self.resume_raw(act).map(drop),
             Ok(crate::generator::Step::Result(..)) => Ok(()),
             Err(e) => Err(e),
@@ -118,11 +119,14 @@ impl Realm {
 
     fn resume_script(&mut self, g: Value) -> R<Value> {
         let v = self.resume_raw(g)?;
+        if let Some(p) = Realm::agen_entry_promise(g) {
+            return Ok(p);
+        }
         let done = self.gen_done(g);
         Ok(self.iter_result(v, done))
     }
 
-    fn resume_raw(&mut self, g: Value) -> R<Value> {
+    pub(crate) fn resume_raw(&mut self, g: Value) -> R<Value> {
         let mut m = self.pool.pop().unwrap_or_else(|| Machine { stack: Vec::new(), fbs: Vec::new() });
         let r = Vm::resume_start(self, &mut m.stack, &mut m.fbs, g);
         self.pool.push(m);

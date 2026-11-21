@@ -51,6 +51,8 @@ fn stub(atoms: &SharedAtoms, f: &FnFacts, name: Option<&str>) -> Result<Code, St
         (c.gen_kind, c.noctor) = (crate::bytecode::GK_GEN, true);
     } else if f.mode == crate::ast::FuncMode::Async {
         (c.gen_kind, c.noctor) = (crate::bytecode::GK_ASYNC, true);
+    } else if f.mode == crate::ast::FuncMode::AsyncGen {
+        (c.gen_kind, c.noctor) = (crate::bytecode::GK_ASYNCGEN, true);
     }
     if let Some(n) = name {
         let units: Vec<u16> = n.encode_utf16().collect();

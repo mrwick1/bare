@@ -857,9 +857,6 @@ impl<'a> Fc<'a> {
             Some(n) => Some(Box::from(&*self.prog.name(n))),
             None => self.hint_for_func(f),
         };
-        if func.mode == FuncMode::AsyncGen {
-            self.unsup("an async generator");
-        }
         let self_name = expr && func.name.is_some() && func.kind == FuncKind::Normal;
         let i = self.child(f, self_name, name)?;
         self.op(Op::Closure, dst, i, 0);

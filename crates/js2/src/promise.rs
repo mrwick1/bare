@@ -771,7 +771,7 @@ impl Realm {
             K_FULFIL | K_REJECT => {
                 let (h, v, d) = (r.get(A), r.get(B), r.get(D));
                 // The handler of an `await` is the activation of the async function (it has no derived promise): resume it (`reenter.rs`).
-                if d.is_undefined() && Realm::is_generator(h) {
+                if d.is_undefined() && Realm::activation(h).is_some() {
                     return self.async_resume(h, v, kind == K_REJECT);
                 }
                 let res = if h.is_undefined() { if kind == K_FULFIL { Ok(v) } else { Err(v) } } else { self.job_call(h, Value::UNDEFINED, &[v]) };

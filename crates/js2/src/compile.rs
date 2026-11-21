@@ -28,7 +28,7 @@
 //! `delete` of a global name. See [`Fc::unsup`] and the progress entry.
 use crate::ast::*;
 use crate::atoms::SharedAtoms;
-use crate::bytecode::{Asm, BcError, Code, GK_ASYNC, GK_GEN, Handler, Ins, Label, NO_NAME, Op, Recipes};
+use crate::bytecode::{Asm, BcError, Code, GK_ASYNC, GK_ASYNCGEN, GK_GEN, Handler, Ins, Label, NO_NAME, Op, Recipes};
 use crate::facts::{self, Facts, FnId};
 use crate::roots::RootMaps;
 use crate::string::{Chars, Str};
@@ -342,6 +342,8 @@ pub(crate) struct Fc<'a> {
     pub async_h: Option<(usize, u32, u32)>,
     /// The head of a `for-of` is being bound: its loop frame is not pushed yet, but a throw of a pattern there closes the iterator.
     pub of_head: bool,
+    /// The iterator records (`rec` registers) of the `for await` loops that are open now: their exits wait for `return()` (`compile_asyncgen.rs`).
+    pub await_recs: Vec<u32>,
     /// While the default of parameter `i` is compiled and it names a parameter that is not set yet: `(i, number of parameters, register
     /// of the hole)`. A read of such a parameter reads the hole, so it throws.
     pub param_dz: Option<(u32, u32, u32)>,
@@ -410,6 +412,7 @@ impl<'a> Fc<'a> {
             async_h: None,
             gen_regs: 0,
             of_head: false,
+            await_recs: Vec::new(),
             param_dz: None,
         }
     }
@@ -997,6 +1000,8 @@ pub fn compile_function(prog: &Program, fid: FuncId, id: FnId, facts: &Facts, at
         (c.gen_kind, c.noctor) = (GK_GEN, true);
     } else if f.mode == FuncMode::Async {
         (c.gen_kind, c.noctor) = (GK_ASYNC, true);
+    } else if f.mode == FuncMode::AsyncGen {
+        (c.gen_kind, c.noctor) = (GK_ASYNCGEN, true);
     }
     c.fn_len = prog.list(prog.func(fid).params).take_while(|&p| !matches!(prog.pat(p).kind, PatKind::Assign { .. } | PatKind::Rest(_))).count().min(u16::MAX as usize) as u16;
     c.force_ctx = f.flags & facts::INNER_EVAL != 0;
@@ -1068,6 +1073,8 @@ mod class;
 mod async_code;
 #[path = "compile_gen.rs"]
 mod gen_code;
+#[path = "compile_asyncgen.rs"]
+mod asyncgen_code;
 #[path = "compile_expr.rs"]
 mod expr;
 #[path = "compile_module.rs"]

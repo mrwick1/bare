@@ -329,7 +329,7 @@ impl<'a> Fc<'a> {
             self.declare_function(*f, name)?;
         }
         // A generator binds its parameters at the call and runs its body at the first `next()`.
-        if self.gen_kind == crate::bytecode::GK_GEN {
+        if self.gen_kind == crate::bytecode::GK_GEN || self.gen_kind == crate::bytecode::GK_ASYNCGEN {
             self.gen_init();
         }
         match f.body {
@@ -683,13 +683,8 @@ impl<'a> Fc<'a> {
                 self.bind(brk);
             }
             StmtKind::For { init, test, update, body } => self.for_stmt(st.span, init, test, update, body)?,
-            StmtKind::ForIn { left, right, body } => self.for_in_of(left, right, body, false)?,
-            StmtKind::ForOf { left, right, body, is_await } => {
-                if is_await {
-                    self.unsup("for await");
-                }
-                self.for_in_of(left, right, body, true)?
-            }
+            StmtKind::ForIn { left, right, body } => self.for_in_of(left, right, body, false, false)?,
+            StmtKind::ForOf { left, right, body, is_await } => self.for_in_of(left, right, body, true, is_await)?,
             StmtKind::Break(label) => self.jump_out(label, true)?,
             StmtKind::Continue(label) => self.jump_out(label, false)?,
             StmtKind::Throw(e) => {
@@ -831,7 +826,7 @@ impl<'a> Fc<'a> {
                         self.pause(k);
                         paused.push(k);
                     }
-                    self.op(Op::IterClose, rec, 0, 0);
+                    self.iter_close_op(rec, false)?;
                 }
                 FrameKind::Try { fin: Some(fin), .. } => {
                     let fin = *fin;
@@ -912,7 +907,7 @@ impl<'a> Fc<'a> {
                         // A `return()` that throws is not for the handler of this loop: it would close the iterator twice.
                         let was_open = self.frames[k].open.is_some();
                         self.pause(k);
-                        self.op(Op::IterClose, rec, 0, 0);
+                        self.iter_close_op(rec, false)?;
                         if was_open {
                             self.resume(&[k]);
                         }
@@ -946,6 +941,14 @@ impl<'a> Fc<'a> {
             None => {
                 self.unwind(0)?;
                 self.ret_undef();
+            }
+            Some(e) if self.gen_kind == crate::bytecode::GK_ASYNCGEN => {
+                // `return x` in an async generator waits for `x` first.
+                let t = self.await_operand(e)?;
+                if cleanup {
+                    self.unwind(0)?;
+                }
+                self.ret_op(t);
             }
             Some(e) if !cleanup => {
                 let r = self.any(e)?;
@@ -1012,22 +1015,29 @@ impl<'a> Fc<'a> {
         Ok(())
     }
 
-    fn for_in_of(&mut self, left: ForLeft, right: ExprId, body: StmtId, of: bool) -> CR {
+    fn for_in_of(&mut self, left: ForLeft, right: ExprId, body: StmtId, of: bool, is_await: bool) -> CR {
         let prog = self.prog;
         let labels = std::mem::take(&mut self.pending);
         let m = self.mark();
         let v = self.any(right)?;
         let rec = self.window(3);
         self.line(prog.expr(right).span.start);
-        self.op(if of { Op::IterOpen } else { Op::ForInOpen }, rec, v, 0);
+        self.op(if is_await { Op::AIterOpen } else if of { Op::IterOpen } else { Op::ForInOpen }, rec, v, 0);
         (0..3).for_each(|i| self.set_live(rec + i));
+        if is_await {
+            self.await_recs.push(rec);
+        }
         let (head, cont, brk) = (self.label(), self.label(), self.label());
         // An exception in the body of a `for-of` closes the iterator: a handler for the body that does it and throws again.
         let ex = of.then(|| self.alloc());
         self.bind(head);
         self.mark_used(head);
         let t = self.alloc();
-        self.jmp_rx(Op::IterNext, t, rec, brk);
+        if is_await {
+            self.aiter_step(rec, t, brk)?;
+        } else {
+            self.jmp_rx(Op::IterNext, t, rec, brk);
+        }
         self.set_live(t);
         let guard = ex.map(|ex| (ex, self.live.clone(), self.asm.len(), self.depth));
         // The binding of `let` and `const` is new in each iteration.
@@ -1078,13 +1088,16 @@ impl<'a> Fc<'a> {
             self.bind(lb);
             self.live = live;
             self.set_live(ex);
-            self.op(Op::IterClose, rec, 0, 1);
+            self.iter_close_op(rec, true)?;
             self.op(Op::Throw, ex, 0, 0);
             for (start, end) in pieces {
                 self.handlers.push(HandlerRec { start, end, target: lb, reg: ex, depth });
             }
         }
         self.bind(brk);
+        if is_await {
+            self.await_recs.pop();
+        }
         self.free(m);
         Ok(())
     }
