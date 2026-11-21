@@ -171,13 +171,10 @@ impl LazyCompile for Lazy {
     }
 
     /// The top level of a module that joins a program that runs: its code is the last one that this adds. As `script`, with the facts of
-    /// the module. A module with a top-level `await` is refused (`Err("unsupported: top-level await")`): js2 has no async functions.
+    /// the module.
     fn module(&mut self, codes: &Codes, src: &str) -> Result<(usize, ModInfo), String> {
         let mut facts = Facts::new();
         let prog = parse_module_lazy(src, self.limits, &mut facts).map_err(|e| format!("SyntaxError: {}", e.msg))?;
-        if prog.module.as_ref().is_some_and(|m| m.has_tla) {
-            return Err("unsupported: top-level await".into());
-        }
         let (top, info) = compile_module(&prog, &facts, &self.atoms).map_err(|e| format!("compile: {e:?}"))?;
         let (base, mut new, mut pending) = (codes.len(), Vec::new(), Vec::new());
         let at = Loader { source: src, facts: &mut facts, atoms: &self.atoms, limits: self.limits, base, codes: &mut new, lazy: Some(&mut pending), scoped: false }.add(top)?;

@@ -22,6 +22,8 @@ enum St {
     New,
     Linked,
     Evaluating,
+    /// Done with the sync part, and waiting for a top-level `await` of itself or of a module that it needs (16.2.1.5.3).
+    EvaluatingAsync,
     Evaluated,
 }
 
@@ -38,6 +40,14 @@ struct ModRec {
     /// The error of a failed evaluation, and the promise of `module_evaluate`.
     error: Option<Value>,
     done: Value,
+    /// Cyclic module record fields of the async evaluation: the order number of a module that waits (0: it does not), the number of
+    /// modules that it waits for, the modules that wait for it, the root of its strongly connected set, and the depth-first numbers.
+    async_eval: u32,
+    pending: u32,
+    parents: Vec<u32>,
+    cycle_root: u32,
+    dfs: u32,
+    anc: u32,
 }
 
 #[derive(Default)]
@@ -47,6 +57,11 @@ pub(crate) struct Modules {
     /// The indexes in `Realm::natives` of the getter of a view, the getter of a namespace and `%import`.
     id_view: usize,
     id_ns: usize,
+    /// The natives that settle a module (`async_ok`, `async_err`: slot 1 is the module number) and a dynamic import (`import_ok`,
+    /// `import_err`: slot 1 is the promise, slot 2 the module number).
+    id_async: [usize; 4],
+    /// The last order number of an async evaluation.
+    async_count: u32,
 }
 
 /// What `ResolveExport` finds.
@@ -77,6 +92,12 @@ impl Realm {
             ns: Value::UNDEFINED,
             error: None,
             done: Value::UNDEFINED,
+            async_eval: 0,
+            pending: 0,
+            parents: Vec::new(),
+            cycle_root: id,
+            dfs: 0,
+            anc: 0,
         });
         id
     }
@@ -195,6 +216,11 @@ impl Realm {
 
     fn md_call(&mut self, f: Value, phase: i32) -> R<()> {
         self.api_call(f, Value::UNDEFINED, &[Value::int(phase)]).map(|_| ())
+    }
+
+    /// Call the code of a module with a top-level `await`: it gives its promise.
+    fn md_call_async(&mut self, f: Value, phase: i32) -> R<Value> {
+        self.api_call(f, Value::UNDEFINED, &[Value::int(phase)])
     }
 
     /// A bad import or re-export is a `SyntaxError`.
@@ -345,8 +371,13 @@ impl Realm {
 
     // ---- evaluate ----
 
-    /// `module_evaluate`: run the graph of `m` and give the promise of the evaluation (settled already).
+    /// `module_evaluate`: run the graph of `m` and give the promise of the evaluation (`Evaluate` of 16.2.1.5.3). It is settled already
+    /// when no module of the graph has a top-level `await`; else it settles when the jobs of the graph have run.
     pub(crate) fn md_evaluate(&mut self, m: u32) -> R<Value> {
+        let m = match self.md.mods[m as usize].state {
+            St::EvaluatingAsync | St::Evaluated => self.md.mods[m as usize].cycle_root,
+            _ => m,
+        };
         let done = self.md.mods[m as usize].done;
         if !done.is_undefined() {
             return Ok(done);
@@ -354,55 +385,184 @@ impl Realm {
         let p = self.new_promise();
         self.keep(p.value());
         self.md.mods[m as usize].done = p.value();
-        match self.md_run(m) {
-            Ok(()) => {
-                self.resolve_promise(p, Value::UNDEFINED)?;
+        let mut stack = Vec::new();
+        match self.md_inner(m, &mut stack, 0) {
+            Ok(_) => {
+                if self.md.mods[m as usize].async_eval == 0 {
+                    self.resolve_promise(p, Value::UNDEFINED)?;
+                }
             }
-            Err(STOP) => return Err(STOP),
-            Err(e) => self.reject_promise(p, e),
+            Err(e) => {
+                let stopped = e == STOP;
+                let e = if stopped { self.error(ErrKind::Type, "the evaluation of the module was stopped") } else { e };
+                self.keep(e);
+                for s in stack {
+                    let rec = &mut self.md.mods[s as usize];
+                    (rec.state, rec.error) = (St::Evaluated, Some(e));
+                }
+                if stopped {
+                    return Err(STOP);
+                }
+                self.reject_promise(p, e);
+            }
         }
         Ok(p.value())
     }
 
-    fn md_run(&mut self, m: u32) -> R<()> {
+    /// `InnerModuleEvaluation`: run the sync modules of the graph in order and start the async ones. Gives the next depth-first number.
+    fn md_inner(&mut self, m: u32, stack: &mut Vec<u32>, mut index: u32) -> R<u32> {
         match self.md.mods[m as usize].state {
-            St::Evaluated => return self.md.mods[m as usize].error.map_or(Ok(()), Err),
-            St::Evaluating => return Ok(()),
+            St::EvaluatingAsync | St::Evaluated => return self.md.mods[m as usize].error.map_or(Ok(index), Err),
+            St::Evaluating => return Ok(index),
             St::New => return self.type_error("the module is not linked"),
             St::Linked => {}
         }
-        self.md.mods[m as usize].state = St::Evaluating;
-        let mut r = Ok(());
+        let rec = &mut self.md.mods[m as usize];
+        (rec.state, rec.dfs, rec.anc, rec.pending) = (St::Evaluating, index, index, 0);
+        index += 1;
+        stack.push(m);
         for d in self.md.mods[m as usize].requested.clone() {
-            r = self.md_run(d);
-            if r.is_err() {
-                break;
+            index = self.md_inner(d, stack, index)?;
+            let mut req = d;
+            if self.md.mods[d as usize].state == St::Evaluating {
+                let a = self.md.mods[d as usize].anc;
+                let rec = &mut self.md.mods[m as usize];
+                rec.anc = rec.anc.min(a);
+            } else {
+                req = self.md.mods[d as usize].cycle_root;
+                if let Some(e) = self.md.mods[req as usize].error {
+                    return Err(e);
+                }
+            }
+            if self.md.mods[req as usize].async_eval != 0 {
+                self.md.mods[m as usize].pending += 1;
+                self.md.mods[req as usize].parents.push(m);
             }
         }
-        if r.is_ok() {
-            let f = self.md.mods[m as usize].func;
-            r = self.md_call(f, 0);
-        }
-        self.md.mods[m as usize].state = St::Evaluated;
-        match r {
-            Ok(()) => Ok(()),
-            Err(STOP) => {
-                let e = self.error(ErrKind::Type, "the evaluation of the module was stopped");
-                self.keep(e);
-                self.md.mods[m as usize].error = Some(e);
-                Err(STOP)
+        let f = self.md.mods[m as usize].func;
+        if self.md.mods[m as usize].pending > 0 || self.md.mods[m as usize].info.has_tla {
+            self.md.async_count += 1;
+            self.md.mods[m as usize].async_eval = self.md.async_count;
+            if self.md.mods[m as usize].pending == 0 {
+                self.md_exec_async(m)?;
             }
-            Err(e) => {
-                self.keep(e);
-                self.md.mods[m as usize].error = Some(e);
-                Err(e)
+        } else {
+            self.md_call(f, 0)?;
+        }
+        let rec = &self.md.mods[m as usize];
+        if rec.anc == rec.dfs {
+            while let Some(r) = stack.pop() {
+                let rec = &mut self.md.mods[r as usize];
+                rec.state = if rec.async_eval == 0 { St::Evaluated } else { St::EvaluatingAsync };
+                rec.cycle_root = m;
+                if r == m {
+                    break;
+                }
+            }
+        }
+        Ok(index)
+    }
+
+    /// `ExecuteAsyncModule`: call the code of `m`. It gives a promise, and the two natives settle the module when the promise settles.
+    fn md_exec_async(&mut self, m: u32) -> R<()> {
+        let f = self.md.mods[m as usize].func;
+        let v = self.md_call_async(f, 0)?;
+        let Some(p) = Realm::promise_obj(v) else { return self.md_async_fulfilled(m) };
+        let [ok, err, ..] = self.md.id_async;
+        let (ok, err) = (self.native_cell(ok), self.native_cell(err));
+        ok.set_slot(&self.shapes, 1, Value::int(m as i32));
+        err.set_slot(&self.shapes, 1, Value::int(m as i32));
+        if let Err(e) = self.perform_then(p, ok.value(), err.value(), Value::UNDEFINED) {
+            self.md_async_rejected(m, e)?;
+        }
+        Ok(())
+    }
+
+    /// `AsyncModuleExecutionFulfilled`: `m` is done. The modules that waited only for it run next, in the order that they started.
+    fn md_async_fulfilled(&mut self, m: u32) -> R<()> {
+        if self.md.mods[m as usize].state == St::Evaluated {
+            return Ok(());
+        }
+        let rec = &mut self.md.mods[m as usize];
+        (rec.async_eval, rec.state) = (0, St::Evaluated);
+        self.md_settle_done(m, None)?;
+        let mut list = Vec::new();
+        self.md_gather(m, &mut list);
+        list.sort_by_key(|&x| self.md.mods[x as usize].async_eval);
+        for x in list {
+            if self.md.mods[x as usize].state == St::Evaluated {
+                continue;
+            }
+            if self.md.mods[x as usize].info.has_tla {
+                if let Err(e) = self.md_exec_async(x) {
+                    if e == STOP {
+                        return Err(STOP);
+                    }
+                    self.md_async_rejected(x, e)?;
+                }
+            } else {
+                let f = self.md.mods[x as usize].func;
+                match self.md_call(f, 0) {
+                    Err(STOP) => return Err(STOP),
+                    Err(e) => self.md_async_rejected(x, e)?,
+                    Ok(()) => {
+                        let rec = &mut self.md.mods[x as usize];
+                        (rec.async_eval, rec.state) = (0, St::Evaluated);
+                        self.md_settle_done(x, None)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// `GatherAvailableAncestors`.
+    fn md_gather(&mut self, m: u32, list: &mut Vec<u32>) {
+        for p in self.md.mods[m as usize].parents.clone() {
+            let root = self.md.mods[p as usize].cycle_root;
+            if list.contains(&p) || self.md.mods[root as usize].error.is_some() {
+                continue;
+            }
+            let rec = &mut self.md.mods[p as usize];
+            rec.pending -= 1;
+            if rec.pending == 0 {
+                list.push(p);
+                if !rec.info.has_tla {
+                    self.md_gather(p, list);
+                }
             }
         }
     }
 
+    /// `AsyncModuleExecutionRejected`: `m` and the modules that wait for it fail with `e`.
+    fn md_async_rejected(&mut self, m: u32, e: Value) -> R<()> {
+        if self.md.mods[m as usize].state == St::Evaluated {
+            return Ok(());
+        }
+        self.keep(e);
+        let rec = &mut self.md.mods[m as usize];
+        (rec.error, rec.state) = (Some(e), St::Evaluated);
+        self.md_settle_done(m, Some(e))?;
+        for p in self.md.mods[m as usize].parents.clone() {
+            self.md_async_rejected(p, e)?;
+        }
+        Ok(())
+    }
+
+    /// Settle the promise of `module_evaluate` of `m`, if it was asked.
+    fn md_settle_done(&mut self, m: u32, error: Option<Value>) -> R<()> {
+        let Some(p) = Realm::promise_obj(self.md.mods[m as usize].done) else { return Ok(()) };
+        match error {
+            Some(e) => self.reject_promise(p, e),
+            None => self.resolve_promise(p, Value::UNDEFINED)?,
+        }
+        Ok(())
+    }
+
     // ---- import() ----
 
-    /// `finish_dynamic_import`: link and evaluate the graph of `m`, then settle `p` with the namespace or the error.
+    /// `finish_dynamic_import`: link and evaluate the graph of `m`, then settle `p` with the namespace or the error. When the evaluation
+    /// waits for a top-level `await`, `p` settles when it ends.
     pub(crate) fn md_finish(&mut self, p: Obj, m: u32) -> R<()> {
         let r = self.md_link(m).and_then(|()| self.md_evaluate(m));
         match r {
@@ -416,6 +576,19 @@ impl Realm {
                     self.reject_promise(p, e);
                     Ok(())
                 }
+                Some((0, _)) => {
+                    let [.., ok, err] = self.md.id_async;
+                    let (ok, err) = (self.native_cell(ok), self.native_cell(err));
+                    for f in [ok, err] {
+                        f.set_slot(&self.shapes, 1, p.value());
+                        f.set_slot(&self.shapes, 2, Value::int(m as i32));
+                    }
+                    let dp = Realm::promise_obj(done).expect("a promise");
+                    if let Err(e) = self.perform_then(dp, ok.value(), err.value(), Value::UNDEFINED) {
+                        self.reject_promise(p, e);
+                    }
+                    Ok(())
+                }
                 _ => {
                     let ns = self.md_namespace(m);
                     self.resolve_promise(p, ns)
@@ -425,11 +598,12 @@ impl Realm {
     }
 
     pub(crate) fn install_modules(&mut self) {
-        for f in [view_get as crate::builtins::NativeFn, ns_get] {
+        for f in [view_get as crate::builtins::NativeFn, ns_get, async_ok, async_err, import_ok, import_err] {
             self.natives.push(Native { f, ctor: false, len: 0, name: "" });
         }
         let n = self.natives.len();
-        (self.md.id_view, self.md.id_ns) = (n - 2, n - 1);
+        (self.md.id_view, self.md.id_ns) = (n - 6, n - 5);
+        self.md.id_async = [n - 4, n - 3, n - 2, n - 1];
         let g = self.global;
         self.method(g, "%import", 2, import_fn);
     }
@@ -456,6 +630,43 @@ fn ns_get(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
         return Err(rt.error(ErrKind::Reference, &format!("Cannot access '{name}' before initialization")));
     }
     Ok(v)
+}
+
+/// The module number in slot 1 of the running native (`async_ok`, `async_err`).
+fn module_of(rt: &Realm) -> u32 {
+    let f = Realm::obj(rt.callee).expect("a module native");
+    f.slot(&rt.shapes, 1).as_int().expect("a module number") as u32
+}
+
+/// The promise of a module that has a top-level `await` was fulfilled.
+fn async_ok(rt: &mut Realm, _this: Value, _args: &[Value]) -> R<Value> {
+    let m = module_of(rt);
+    rt.md_async_fulfilled(m)?;
+    Ok(Value::UNDEFINED)
+}
+
+/// The promise of a module that has a top-level `await` was rejected with `args[0]`.
+fn async_err(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+    let m = module_of(rt);
+    rt.md_async_rejected(m, arg(args, 0))?;
+    Ok(Value::UNDEFINED)
+}
+
+/// The evaluation of a dynamic import ended: `import()` gives the namespace. Slot 1 is its promise, slot 2 the module.
+fn import_ok(rt: &mut Realm, _this: Value, _args: &[Value]) -> R<Value> {
+    let f = Realm::obj(rt.callee).expect("a native");
+    let (p, m) = (f.slot(&rt.shapes, 1), f.slot(&rt.shapes, 2).as_int().expect("a module number") as u32);
+    let ns = rt.md_namespace(m);
+    rt.resolve_promise(Realm::promise_obj(p).expect("a promise"), ns)?;
+    Ok(Value::UNDEFINED)
+}
+
+/// The evaluation of a dynamic import failed with `args[0]`.
+fn import_err(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+    let f = Realm::obj(rt.callee).expect("a native");
+    let p = f.slot(&rt.shapes, 1);
+    rt.reject_promise(Realm::promise_obj(p).expect("a promise"), arg(args, 0));
+    Ok(Value::UNDEFINED)
 }
 
 /// `import(specifier)` (the compiler calls `%import(specifier, referrer)`): a promise that the host settles.

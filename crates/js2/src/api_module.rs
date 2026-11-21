@@ -15,7 +15,6 @@ impl Realm {
                 self.fn_info.extend((self.fn_info.len()..self.prog.len()).map(|i| crate::interp::code_info(&self.prog[i])));
                 Ok(self.md_add(url, ci, info))
             }
-            Err(m) if m.starts_with("unsupported: ") => Err(self.a_unsup("top-level await")),
             Err(m) => {
                 let (kind, text) = match m.strip_prefix("SyntaxError: ") {
                     Some(t) => (ErrKind::Syntax, t),
