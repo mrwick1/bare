@@ -373,7 +373,7 @@ fn a_named_object_answers_its_names_first() {
     assert_eq!(js(&mut r, "Object.keys(ds).join()"), "a,b");
     assert_eq!(js(&mut r, "String(ds.zz) + ds.foo"), "undefined5");
     assert_eq!(js(&mut r, "(ds.a = 'q', ds.a)"), "alpha", "a name that the host has cannot be written");
-    assert_eq!(js(&mut r, "(ds.other = 'q', ds.other)"), "q", "another name is an ordinary property");
+    assert_eq!(js(&mut r, "(ds.other = 'q', String(ds.other))"), "undefined", "a host with no named_write refuses every name; the write goes to the host, not to an ordinary property");
     assert_eq!(js(&mut r, "ds[0]"), "beta", "an index is the name of the same text");
     assert_eq!(js(&mut r, "delete ds.a"), "false");
     assert_eq!(js(&mut r, "ds.hasOwnProperty('b') + ',' + ds.hasOwnProperty('zz')"), "true,false");

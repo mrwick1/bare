@@ -998,8 +998,8 @@ impl Realm {
             }
             return Ok(Put::Fail);
         };
-        if self.api.hs.active && o.has_flag(F_HOST) && self.hs_write_blocked(o, key)? {
-            return Ok(Put::Fail);
+        if self.api.hs.active && o.has_flag(F_HOST) && let Some(ok) = self.hs_write(o, key, crate::api_host::HsWrite::Set(v))? {
+            return Ok(if ok { Put::Done } else { Put::Fail });
         }
         self.fn_props(o);
         match key {
@@ -1333,8 +1333,8 @@ impl Realm {
 
     pub fn delete_prop(&mut self, recv: Value, key: Key) -> R<bool> {
         let Some(o) = Realm::obj(recv) else { return Ok(true) };
-        if self.api.hs.active && o.has_flag(F_HOST) && self.hs_write_blocked(o, key)? {
-            return Ok(false);
+        if self.api.hs.active && o.has_flag(F_HOST) && let Some(ok) = self.hs_write(o, key, crate::api_host::HsWrite::Delete)? {
+            return Ok(ok);
         }
         self.fn_props(o);
         match key {

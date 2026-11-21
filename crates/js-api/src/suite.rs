@@ -6,7 +6,7 @@
 //!
 //! Scripts are written so that the value of the last statement is an expression.
 
-use crate::{Args, Attrs, Engine, Error, Host, HostFn, Intrinsic, Item, Lazy, Local, Named, Pending, Persistent, PromiseState, Scope, Str, Traced, Tracer, Type, enter, task};
+use crate::{Args, Attrs, Engine, Error, Host, HostFn, Intrinsic, Item, Lazy, Local, Named, Pending, Persistent, PromiseState, Scope, Str, Traced, Tracer, Type, Write, enter, task};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -650,9 +650,18 @@ pub fn the_rejections_over_the_bound_are_counted<H: Harness>(stress: bool) {
 /// (`Fill<E::Raw>` is a `Host<E>` for every `E` with that raw value).
 ///
 /// Host functions: 0 `mkIndexed(proto)`, 1 `mkNamed(proto, open)`, 2 `own(obj, key, ...held)`, 3 `setLazy(obj, chain)`,
-/// 4 `clearLazy(obj)`, 5 `hostKey(obj)`, 6 `pruned()`, 7 `held(key, i)`, 8 `traced()`, 9 `asked()`.
-/// An indexed object has the items `i0`, `i1`, `i2` (key 10). A named object has the names `a` (`alpha`) and `b` (`beta`) (key 20 for
+/// 4 `clearLazy(obj)`, 5 `hostKey(obj)`, 6 `pruned()`, 7 `held(key, i)`, 8 `traced()`, 9 `asked()`, 10 `mkList(proto)`, 11 `setList(text)`,
+/// 12 `fills()`, 13 `writes()`.
+/// An indexed object has the items `i0`, `i1`, `i2` (key 10). A named object starts with the names `a` (`alpha`) and `b` (`beta`) (key 20 for
 /// closed, 21 for open). A lazy object gets the property `onlazy` (7) when the host is asked for that name.
+///
+/// A list (key 11) is a live collection: its items are the comma-separated parts of the text of `setList`. Its cache is stale after
+/// each `setList`, so the host answers `Pending::Fill` until the fill step rebuilds it, and it makes the item strings only in the fill
+/// step (`Item::Missing` until then). `fills()` gives the indices of the fill steps (`MAX` is 4294967295).
+///
+/// The named objects keep their names in the host. A write of `ro...` is refused, of `boom` throws a `TypeError`, of another name stores
+/// its `ToString`. A define with an accessor, or with neither `value` nor `writable`, is refused. A delete removes the name. `writes()`
+/// logs each call as `set:name`, `define:name` or `delete:name`.
 pub struct Fill<R> {
     items: RefCell<Vec<R>>,
     keep: RefCell<Vec<Persistent>>,
@@ -660,15 +669,36 @@ pub struct Fill<R> {
     traced: RefCell<Vec<u32>>,
     pruned: RefCell<Vec<u32>>,
     asked: RefCell<Vec<String>>,
+    names: RefCell<Vec<(Vec<u16>, Vec<u16>)>>,
+    wrote: RefCell<Vec<String>>,
+    /// The text of the list (`setList`), its cache (`None`: no item object yet) and whether the cache is stale.
+    list: RefCell<Vec<String>>,
+    cache: RefCell<Vec<Option<R>>>,
+    stale: Cell<bool>,
+    filled: RefCell<Vec<u32>>,
 }
 
 impl<R> Default for Fill<R> {
     fn default() -> Self {
-        Fill { items: Default::default(), keep: Default::default(), held: Default::default(), traced: Default::default(), pruned: Default::default(), asked: Default::default() }
+        Fill {
+            items: Default::default(),
+            keep: Default::default(),
+            held: Default::default(),
+            traced: Default::default(),
+            pruned: Default::default(),
+            asked: Default::default(),
+            names: RefCell::new(vec![(units("a"), units("alpha")), (units("b"), units("beta"))]),
+            wrote: Default::default(),
+            list: Default::default(),
+            cache: Default::default(),
+            stale: Cell::new(true),
+            filled: Default::default(),
+        }
     }
 }
 
-const FILL: [&str; 10] = ["mkIndexed", "mkNamed", "own", "setLazy", "clearLazy", "hostKey", "pruned", "held", "traced", "asked"];
+const FILL: [&str; 14] =
+    ["mkIndexed", "mkNamed", "own", "setLazy", "clearLazy", "hostKey", "pruned", "held", "traced", "asked", "mkList", "setList", "fills", "writes"];
 
 fn units(s: &str) -> Vec<u16> {
     s.encode_utf16().collect()
@@ -736,7 +766,19 @@ impl<E: Engine> Host<E> for Fill<E::Raw> {
                 t.dedup();
                 s.string(&t.iter().map(u32::to_string).collect::<Vec<_>>().join(","))
             }
-            _ => s.string(&self.asked.borrow().join(",")),
+            9 => s.string(&self.asked.borrow().join(",")),
+            10 => {
+                let proto = (s.type_of(a) == Type::Object).then_some(a);
+                s.new_host_indexed(proto, 11)
+            }
+            11 => {
+                let text = s.as_str(a).map(|t| t.to_string_lossy()).unwrap_or_default();
+                *self.list.borrow_mut() = text.split(',').filter(|p| !p.is_empty()).map(String::from).collect();
+                self.stale.set(true);
+                Ok(s.undefined())
+            }
+            12 => s.string(&self.filled.borrow().iter().map(u32::to_string).collect::<Vec<_>>().join(",")),
+            _ => s.string(&self.wrote.borrow().join(",")),
         }
     }
 
@@ -755,27 +797,98 @@ impl<E: Engine> Host<E> for Fill<E::Raw> {
     }
 
     fn indexed_len(&self, _object: &E::Raw, key: u32) -> Result<usize, Pending> {
-        Ok(if key == 10 { self.items.borrow().len() } else { 0 })
+        match key {
+            10 => Ok(self.items.borrow().len()),
+            11 if self.stale.get() => Err(Pending::Fill(u32::MAX)),
+            11 => Ok(self.cache.borrow().len()),
+            _ => Ok(0),
+        }
     }
 
-    fn indexed_item(&self, _object: &E::Raw, _key: u32, index: usize) -> Result<Item<E::Raw>, Pending> {
+    fn indexed_item(&self, _object: &E::Raw, key: u32, index: usize) -> Result<Item<E::Raw>, Pending> {
+        if key == 11 {
+            if self.stale.get() {
+                return Err(Pending::Fill(index as u32));
+            }
+            return Ok(match self.cache.borrow().get(index) {
+                None => Item::Absent,
+                Some(None) => Item::Missing,
+                Some(Some(r)) => Item::Value(r.clone()),
+            });
+        }
         Ok(self.items.borrow().get(index).cloned().map_or(Item::Absent, Item::Value))
     }
 
     fn named_has(&self, _object: &E::Raw, _key: u32, name: &[u16]) -> Result<bool, Pending> {
-        Ok(name == units("a") || name == units("b"))
+        Ok(self.names.borrow().iter().any(|(n, _)| n == name))
     }
 
     fn named_get(&self, _object: &E::Raw, _key: u32, name: &[u16]) -> Result<Option<Named<E::Raw>>, Pending> {
-        Ok(Some(Named::Text(units(if name == units("a") { "alpha" } else { "beta" }))))
+        Ok(self.names.borrow().iter().find(|(n, _)| n == name).map(|(_, v)| Named::Text(v.clone())))
     }
 
     fn named_len(&self, _object: &E::Raw, _key: u32) -> Result<usize, Pending> {
-        Ok(2)
+        Ok(self.names.borrow().len())
     }
 
     fn named_keys(&self, _object: &E::Raw, _key: u32) -> Result<Vec<Vec<u16>>, Pending> {
-        Ok(vec![units("a"), units("b")])
+        Ok(self.names.borrow().iter().map(|(n, _)| n.clone()).collect())
+    }
+
+    fn fill<'s>(&self, s: &mut Scope<'s, E>, _object: Local<'s>, _key: u32, index: u32) -> Result<(), Error<'s>> {
+        self.filled.borrow_mut().push(index);
+        if self.stale.replace(false) {
+            self.keep.borrow_mut().clear();
+            *self.cache.borrow_mut() = self.list.borrow().iter().map(|_| None).collect();
+        }
+        let text = self.list.borrow().get(index as usize).cloned();
+        let missing = self.cache.borrow().get(index as usize).is_some_and(Option::is_none);
+        if let (Some(text), true) = (text, missing) {
+            let l = s.string(&text)?;
+            let raw = s.engine().raw(l);
+            self.keep.borrow_mut().push(s.persist(l));
+            self.cache.borrow_mut()[index as usize] = Some(raw);
+        }
+        Ok(())
+    }
+
+    fn named_write<'s>(&self, s: &mut Scope<'s, E>, _object: Local<'s>, _key: u32, name: &[u16], op: Write<'s>) -> Result<bool, Error<'s>> {
+        let text = String::from_utf16_lossy(name);
+        let value = match op {
+            Write::Delete => {
+                self.wrote.borrow_mut().push(format!("delete:{text}"));
+                self.names.borrow_mut().retain(|(n, _)| n != name);
+                return Ok(true);
+            }
+            Write::Set(v) => {
+                self.wrote.borrow_mut().push(format!("set:{text}"));
+                Some(v)
+            }
+            Write::Define(d) => {
+                self.wrote.borrow_mut().push(format!("define:{text}"));
+                if d.get.is_some() || d.set.is_some() || (d.value.is_none() && d.writable.is_none()) {
+                    return Ok(false);
+                }
+                d.value
+            }
+        };
+        if text.starts_with("ro") {
+            return Ok(false);
+        }
+        if text == "boom" {
+            return Err(s.type_error("boom"));
+        }
+        let v = match value {
+            Some(v) => s.to_string(v)?,
+            None => s.string("undefined")?,
+        };
+        let v = s.as_str(v).map(|t| t.to_string_lossy()).unwrap_or_default();
+        let mut names = self.names.borrow_mut();
+        match names.iter_mut().find(|(n, _)| n == name) {
+            Some((_, old)) => *old = units(&v),
+            None => names.push((name.to_vec(), units(&v))),
+        }
+        Ok(true)
     }
 
     fn lazy_member<'s>(&self, s: &mut Scope<'s, E>, object: Local<'s>, what: Lazy<'_>) -> Result<(), Error<'s>> {
@@ -856,6 +969,70 @@ pub fn a_host_named_object_reads_the_host<H: Harness>(stress: bool) {
     assert_eq!(h.eval("op.a"), "alpha");
     assert_eq!(h.eval("hostKey(ds) + ',' + hostKey(op)"), "20,21");
     assert_eq!(h.eval("(proto.b = 'pb', ds.b + ',' + op.b)"), "beta,pb", "a closed object answers its names first, an open one after its chain");
+    assert_eq!(depth(&mut h), 0);
+}
+
+/// A live list answers `Pending::Fill` while its cache is stale and `Item::Missing` for an item that is not made yet. The engine runs the
+/// fill step and reads again, so each read sees the host's state of that moment.
+pub fn a_live_list_asks_the_fill_step_and_reads_again<H: Harness>(stress: bool) {
+    let (mut h, _) = setup_fill::<H>(stress);
+    h.eval("var L = mkList({ foo: 5 }); setList('x,y'); 0");
+    h.collect();
+    assert_eq!(h.eval("Object.keys(L).join()"), "0,1", "the stale length asks the fill step (index MAX), then the keys are read again");
+    assert!(h.eval("fills()").starts_with("4294967295"), "the first fill step is the stale length");
+    assert_eq!(h.eval("L[0] + L[1]"), "xy", "an item that is not made yet is made by the fill step for its index");
+    let fills = h.eval("fills()");
+    assert!(fills.split(',').any(|i| i == "0") && fills.split(',').any(|i| i == "1"), "{fills}");
+    assert_eq!(h.eval("L[0] + L[1] + L.foo"), "xy5", "made items are read with no new fill");
+    assert_eq!(h.eval("fills()"), fills);
+    h.collect();
+    assert_eq!(h.eval("L[1]"), "y", "the same after a collection");
+    // A live update between two reads.
+    assert_eq!(h.eval("setList('p,q,r'); Object.keys(L).length + L[2]"), "3r");
+    assert_eq!(h.eval("setList('z'); String(L[1]) + L[0]"), "undefinedz", "a shorter list: the missing index is absent, and the prototype has no 1");
+    assert_eq!(h.eval("setList('m,n'); (1 in L) + ',' + (2 in L) + ',' + L.hasOwnProperty(0) + ',' + Object.getOwnPropertyDescriptor(L, 1).value"), "true,false,true,n");
+    assert_eq!(h.eval("setList(''); String(L[0]) + Object.keys(L).length"), "undefined0");
+    assert_eq!(depth(&mut h), 0);
+}
+
+/// A write to a host named object goes to the host. It is accepted, refused (a strict write throws a `TypeError`, a sloppy one does
+/// nothing, `Object.defineProperty` throws), or throws an error of the host. A define and a delete go to the host too.
+pub fn a_named_write_is_accepted_refused_or_throws<H: Harness>(stress: bool) {
+    let (mut h, _) = setup_fill::<H>(stress);
+    h.eval("var ds = mkNamed({}, false); var op = mkNamed({}, true); 0");
+    h.collect();
+    assert_eq!(h.eval("(ds.a = 5, ds.a + typeof ds.a)"), "5string", "accepted: the host stores the ToString of the value, and every read sees it");
+    assert_eq!(h.eval("(ds.c = { toString() { return 'obj'; } }, ds.c + ',' + Object.keys(ds).join())"), "obj,a,b,c", "a new name, and the script of ToString ran");
+    assert_eq!(h.eval("(op.d = 1, op.d + ',' + Object.keys(op).join())"), "1,a,b,c,d", "an open object asks the host for a new name too (the store is shared)");
+    assert_eq!(h.eval("(function () { 'use strict'; try { ds.ro1 = 1; return 'no throw'; } catch (e) { return e instanceof TypeError; } })()"), "true", "refused, strict");
+    assert_eq!(h.eval("(ds.ro1 = 1, String(ds.ro1) + ',' + ('ro1' in ds))"), "undefined,false", "refused, sloppy: silent");
+    assert_eq!(h.eval("(ds.ok = 1, ds.ok)"), "1");
+    assert_eq!(h.eval("(function () { try { ds.boom = 1; return 'no throw'; } catch (e) { return e instanceof TypeError && e.message; } })()"), "boom", "an error of the host reaches the script");
+    assert_eq!(h.eval("Object.defineProperty(ds, 'e', { value: 'v', enumerable: false }); ds.e"), "v", "a data descriptor runs the setter, its flags are not kept");
+    let refused = |d: &str| format!("(function () {{ try {{ Object.defineProperty(ds, 'f', {d}); return 'defined'; }} catch (e) {{ return e instanceof TypeError; }} }})()");
+    assert_eq!(h.eval(&refused("{ get() { return 1; } }")), "true", "an accessor descriptor is the host's to refuse");
+    assert_eq!(h.eval(&refused("{ enumerable: true }")), "true", "no value and no writable: refused");
+    assert_eq!(h.eval("delete ds.a + ',' + ('a' in ds) + ',' + delete ds.nothing"), "true,false,true");
+    assert_eq!(h.eval("writes()"), "set:a,set:c,set:d,set:ro1,set:ro1,set:ok,set:boom,define:e,define:f,define:f,delete:a");
+    assert_eq!(depth(&mut h), 0);
+}
+
+/// Some writes do not go to the host: a symbol key, an own property or a chain property of an open object with that name, a write with
+/// another receiver, a delete of a name that the host has not. They follow the ordinary rules, next to the host names.
+pub fn a_named_write_falls_through_to_an_ordinary_property<H: Harness>(stress: bool) {
+    let (mut h, _) = setup_fill::<H>(stress);
+    h.eval("var proto = { p: 'chain' }; var ds = mkNamed(proto, false); var op = mkNamed(proto, true); var sy = Symbol('s'); 0");
+    h.collect();
+    assert_eq!(h.eval("(ds[sy] = 7, op[sy] = 8, ds[sy] + ',' + op[sy] + ',' + ds.a)"), "7,8,alpha", "a symbol is never a name");
+    assert_eq!(h.eval("Object.keys(ds).join() + ',' + Object.getOwnPropertySymbols(ds).length"), "a,b,1");
+    assert_eq!(h.eval("(op.p = 'own', op.p + ',' + proto.p + ',' + Object.keys(op).join())"), "own,chain,a,b,p", "a name of the chain is an ordinary property of an open object");
+    assert_eq!(h.eval("writes()"), "", "the host was asked for none of these");
+    assert_eq!(h.eval("(ds.p = 'mine', ds.p)"), "mine", "a closed object asks the host first for every name");
+    assert_eq!(h.eval("writes()"), "set:p");
+    assert_eq!(h.eval("var kid = Object.create(ds); kid.a = 'own'; kid.a + ',' + ds.a + ',' + Object.keys(kid).join()"), "own,alpha,a", "a host object as a prototype: the ordinary rules make an own property");
+    assert_eq!(h.eval("writes()"), "set:p", "the receiver was not the host object");
+    assert_eq!(h.eval("delete op.p + ',' + String(op.p) + ',' + delete op.zz"), "true,chain,true", "a delete of an own property or of a name that the host has not is ordinary");
+    assert_eq!(h.eval("writes()"), "set:p");
     assert_eq!(depth(&mut h), 0);
 }
 

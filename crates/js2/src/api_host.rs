@@ -8,13 +8,14 @@
 //!
 //! **Host-filled objects.** `new_host_indexed` and `new_host_named` make a plain object with `F_HOST` and one hidden property
 //! (`\0host`, slot 0, no attributes) that holds `kind << 32 | key`. The slow paths of property access ask the host through
-//! [`Realm::hs_walk`] (reads and `in`), [`Realm::get_own_h`], [`Realm::own_key_list_h`] and [`Realm::hs_write_blocked`]. None of them
-//! costs anything while `HostState::active` is false. An inline cache never fills for a host object (`get_field_slow`,
-//! `set_field_slow`), and the shape of such an object has the hidden key, so no other object shares it.
+//! [`Realm::hs_walk`] (reads and `in`), [`Realm::get_own_h`], [`Realm::own_key_list_h`] and [`Realm::hs_write`] (the host's `named_write`).
+//! A read that stops with `Pending::Fill` or `Item::Missing` runs `Host::fill` and reads again (`Realm::hs_ask`). None of them costs
+//! anything while `HostState::active` is false. An inline cache never fills for a host object (`get_field_slow`, `set_field_slow`), and
+//! the shape of such an object has the hidden key, so no other object shares it.
 //!
 //! **Lazy members.** `set_lazy` sets `F_LAZYM`. A read that misses on a marked object asks `Host::lazy_member` once for each (object,
 //! name) until the next collection, and then reads again.
-use crate::bi_object::Own;
+use crate::bi_object::{Desc, Own};
 use crate::cell::Layout;
 use crate::gc::{AddrHasher, Live, Marker};
 use crate::interp::STOP;
@@ -23,7 +24,7 @@ use crate::object::{F_HOST, F_LAZYM, Obj};
 use crate::shapes::{A_ACC, A_C, A_E, A_W};
 use crate::string::{Chars, Str};
 use crate::value::{Kind, Value};
-use bare_js_api::{Abort, Engine, Error, Host, Item, Lazy, Local, Named, Pending};
+use bare_js_api::{Abort, Descriptor, Engine, Error, Host, Item, Lazy, Local, Named, Pending, Scope, Write};
 use std::collections::{HashMap, HashSet};
 use std::hash::BuildHasherDefault;
 use std::ptr::NonNull;
@@ -31,6 +32,8 @@ use std::ptr::NonNull;
 const INDEXED: u64 = 1;
 const NAMED: u64 = 2;
 const NAMED_OPEN: u64 = 3;
+/// The asks of one read: the receiver, a prototype and a lazy name (as `MAX_FILLS` of the old engine). One more is a host bug.
+const MAX_FILLS: u32 = 3;
 
 /// What the interface keeps for owners, host-filled objects and lazy members.
 #[derive(Default)]
@@ -92,6 +95,14 @@ impl HostState {
     }
 }
 
+/// What a script does to a host-filled object ([`Realm::hs_write`]).
+#[derive(Clone, Copy)]
+pub(crate) enum HsWrite<'a> {
+    Set(Value),
+    Define(&'a Desc),
+    Delete,
+}
+
 /// What a walk of the prototype chain found.
 pub(crate) enum Walk {
     /// No object of the chain is host-filled or lazy: the ordinary lookup answers.
@@ -111,20 +122,56 @@ impl Realm {
         self.api.host_ptr().map(|h| unsafe { h.as_ref() })
     }
 
-    /// The host stopped a read: the reason is recorded and the run stops (`STOP`), never an empty answer.
-    fn hs_pend<T>(&mut self, r: Result<T, Pending>) -> R<T> {
-        r.map_err(|p| {
-            self.api.set_abort(match p {
-                Pending::Busy => Abort::Limit("the host is busy"),
-                Pending::Fill(_) => Abort::Unsupported("the host fill step"),
-            });
-            STOP
-        })
+    /// Run the hook of the host `f`. While it answers `Pending::Fill`, run the fill step for `o` and ask again. `Pending::Busy` stops the
+    /// run (`STOP`), never an empty answer, and so does a host that is still not ready after `MAX_FILLS` fills.
+    fn hs_ask<T>(&mut self, o: Obj, hk: u32, mut f: impl FnMut() -> Result<T, Pending>) -> R<T> {
+        for fills in 0..=MAX_FILLS {
+            match f() {
+                Ok(v) => return Ok(v),
+                Err(Pending::Fill(i)) if fills < MAX_FILLS => self.hs_fill(o, hk, i)?,
+                Err(Pending::Fill(_)) => break,
+                Err(Pending::Busy) => {
+                    self.api.set_abort(Abort::Limit("the host is busy"));
+                    return Err(STOP);
+                }
+            }
+        }
+        self.hs_unfilled()
     }
 
-    fn hs_fill_missing<T>(&mut self) -> R<T> {
-        self.api.set_abort(Abort::Unsupported("the host fill step"));
+    #[cold]
+    fn hs_unfilled<T>(&mut self) -> R<T> {
+        self.api.set_abort(Abort::Limit("the host fill step made nothing"));
         Err(STOP)
+    }
+
+    /// Run a hook of the host that may run script, with the values `vals` on the handle stack from slot `base`. No collection runs meanwhile.
+    fn hs_scope<T>(&mut self, vals: &[Value], f: impl for<'s> FnOnce(&mut Scope<'s, Realm>, u32) -> Result<T, Error<'s>>) -> R<T> {
+        let base = self.stack_len();
+        for &v in vals {
+            self.a_push(v);
+        }
+        self.nest += 1;
+        let held = self.heap.hold_task();
+        let r = bare_js_api::enter(&mut *self, |s| match f(s, base) {
+            Ok(x) => Ok(x),
+            Err(Error::Throw(l)) => Err(s.engine().a_at(l)),
+            Err(Error::Abort(a)) => {
+                s.engine().api.set_abort(a);
+                Err(STOP)
+            }
+        });
+        self.heap.release_task(held);
+        self.nest -= 1;
+        self.stack_truncate(base);
+        r
+    }
+
+    /// The fill step of the host for `index` of the object `o`.
+    #[cold]
+    fn hs_fill(&mut self, o: Obj, hk: u32, index: u32) -> R<()> {
+        let Some(h) = self.hs_host() else { return self.hs_unfilled() };
+        self.hs_scope(&[o.value()], |s, base| h.fill(s, Local::from_slot(base), hk, index))
     }
 
     /// The kind and the host key of a host-filled object.
@@ -240,27 +287,30 @@ impl Realm {
     /// The property at `index` of the indexed object `c`.
     fn hs_item(&mut self, c: Obj, hk: u32, index: u32, want: bool) -> R<Option<Value>> {
         let Some(h) = self.hs_host() else { return Ok(None) };
-        let r = h.indexed_item(&c.value(), hk, index as usize);
-        match self.hs_pend(r)? {
-            Item::Absent => Ok(None),
-            Item::Value(v) => Ok(Some(v)),
-            Item::Missing if want => self.hs_fill_missing(),
-            Item::Missing => Ok(Some(Value::UNDEFINED)),
+        let v = c.value();
+        for fills in 0..=MAX_FILLS {
+            match self.hs_ask(c, hk, || h.indexed_item(&v, hk, index as usize))? {
+                Item::Absent => return Ok(None),
+                Item::Value(x) => return Ok(Some(x)),
+                Item::Missing if !want => return Ok(Some(Value::UNDEFINED)),
+                Item::Missing if fills < MAX_FILLS => self.hs_fill(c, hk, index)?,
+                Item::Missing => break,
+            }
         }
+        self.hs_unfilled()
     }
 
     /// The named property `key` of the named object `c`.
     fn hs_named(&mut self, c: Obj, hk: u32, key: Key, want: bool) -> R<Option<Value>> {
         let (Some(h), Some(u)) = (self.hs_host(), self.hs_units(key)) else { return Ok(None) };
-        let r = h.named_has(&c.value(), hk, &u);
-        if !self.hs_pend(r)? {
+        let v = c.value();
+        if !self.hs_ask(c, hk, || h.named_has(&v, hk, &u))? {
             return Ok(None);
         }
         if !want {
             return Ok(Some(Value::UNDEFINED));
         }
-        let r = h.named_get(&c.value(), hk, &u);
-        Ok(match self.hs_pend(r)? {
+        Ok(match self.hs_ask(c, hk, || h.named_get(&v, hk, &u))? {
             Some(Named::Text(t)) => Some(self.hs_str(&t)),
             Some(Named::Value(v)) => Some(v),
             None => None,
@@ -273,8 +323,8 @@ impl Realm {
         if self.hs_plain_chain(c, key) {
             return Ok(None);
         }
-        let r = h.indexed_name(&c.value(), hk, &u);
-        self.hs_pend(r)
+        let v = c.value();
+        self.hs_ask(c, hk, || h.indexed_name(&v, hk, &u))
     }
 
     /// Ask `Host::lazy_member` for `what` on `c`, once for each (object, name) until the next collection. True when the host was asked.
@@ -432,19 +482,16 @@ impl Realm {
             let v = o.value();
             match kind {
                 INDEXED => {
-                    let n = h.indexed_len(&v, hk);
-                    let n = self.hs_pend(n)?;
+                    let n = self.hs_ask(o, hk, || h.indexed_len(&v, hk))?;
                     out.extend((0..n).map(|i| self.hs_str(&i.to_string().encode_utf16().collect::<Vec<_>>())));
                     if !enumerable {
-                        let names = h.indexed_names(&v, hk);
-                        for u in self.hs_pend(names)? {
+                        for u in self.hs_ask(o, hk, || h.indexed_names(&v, hk))? {
                             out.push(self.hs_str(&u));
                         }
                     }
                 }
                 _ => {
-                    let names = h.named_keys(&v, hk);
-                    for u in self.hs_pend(names)? {
+                    for u in self.hs_ask(o, hk, || h.named_keys(&v, hk))? {
                         out.push(self.hs_str(&u));
                     }
                 }
@@ -454,15 +501,51 @@ impl Realm {
         Ok(out)
     }
 
-    /// Does the host refuse a write, define or delete of `key` on the host-filled object `o`? An indexed object has no setter, so any
-    /// index is refused; a named object refuses a name that it has (the trait has no write hook).
-    pub(crate) fn hs_write_blocked(&mut self, o: Obj, key: Key) -> R<bool> {
-        let Some((kind, hk)) = self.hs_info(o) else { return Ok(false) };
-        Ok(match kind {
-            INDEXED => matches!(key, Key::Idx(_)),
-            NAMED_OPEN if self.hs_plain_chain(o, key) => false,
-            _ => self.hs_named(o, hk, key, false)?.is_some(),
+    /// A write, define or delete of `key` on the host-filled object `o` (the receiver). `Some(answer)`: the host handled it (`false`: it refused).
+    /// `None`: the ordinary rules run (a symbol, an open object with an ordinary property of that name, a delete of a name the host has not).
+    /// An indexed object has no write hook: its indices are refused.
+    pub(crate) fn hs_write(&mut self, o: Obj, key: Key, op: HsWrite<'_>) -> R<Option<bool>> {
+        let Some((kind, hk)) = self.hs_info(o) else { return Ok(None) };
+        if kind == INDEXED {
+            return Ok(matches!(key, Key::Idx(_)).then_some(false));
+        }
+        let (Some(h), Some(u)) = (self.hs_host(), self.hs_units(key)) else { return Ok(None) };
+        if kind == NAMED_OPEN && self.hs_plain_chain(o, key) {
+            return Ok(None);
+        }
+        let v = o.value();
+        if matches!(op, HsWrite::Delete) && !self.hs_ask(o, hk, || h.named_has(&v, hk, &u))? {
+            return Ok(None);
+        }
+        let vals: Vec<Value> = match op {
+            HsWrite::Set(x) => vec![v, x],
+            HsWrite::Define(d) => [Some(v), d.value, d.get, d.set].into_iter().flatten().collect(),
+            HsWrite::Delete => vec![v],
+        };
+        let flags = match op {
+            HsWrite::Define(d) => Some((d.w, d.e, d.c, d.value.is_some(), d.get.is_some(), d.set.is_some())),
+            _ => None,
+        };
+        let is_set = matches!(op, HsWrite::Set(_));
+        self.hs_scope(&vals, |s, base| {
+            let mut next = base;
+            let mut take = |on: bool| {
+                on.then(|| {
+                    next += 1;
+                    Local::from_slot(next)
+                })
+            };
+            let object = Local::from_slot(base);
+            let w = match flags {
+                Some((writable, enumerable, configurable, value, get, set)) => {
+                    Write::Define(Descriptor { value: take(value), get: take(get), set: take(set), writable, enumerable, configurable })
+                }
+                None if is_set => Write::Set(Local::from_slot(base + 1)),
+                None => Write::Delete,
+            };
+            h.named_write(s, object, hk, &u, w)
         })
+        .map(Some)
     }
 
     /// `clear_lazy`.

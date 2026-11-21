@@ -128,4 +128,7 @@ both!(
     a_host_indexed_object_reads_the_host,
     a_host_named_object_reads_the_host,
     a_lazy_member_is_made_at_the_first_miss,
+    a_live_list_asks_the_fill_step_and_reads_again,
+    a_named_write_is_accepted_refused_or_throws,
+    a_named_write_falls_through_to_an_ordinary_property,
 );

@@ -332,8 +332,8 @@ impl Realm {
         {
             return self.define_length(o, d);
         }
-        if self.api.hs.active && o.has_flag(crate::object::F_HOST) && self.hs_write_blocked(o, key)? {
-            return Ok(false);
+        if self.api.hs.active && o.has_flag(crate::object::F_HOST) && let Some(ok) = self.hs_write(o, key, crate::api_host::HsWrite::Define(d))? {
+            return Ok(ok);
         }
         let cur = self.get_own(o, key);
         let Some(cur) = cur else {
