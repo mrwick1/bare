@@ -8,7 +8,7 @@ Three shared spots made parallel PRs conflict. No behavior change.
 
 Checks (archMachine):
 - `tools/js/test262_js2.sh -g 'built-ins/Symbol'` runs. A full `-j 8 -u` run (279 s) on the unchanged tree leaves the 37 files identical to the migrated ones.
-- `cargo test --locked -p bare-js2 --lib`: 545 pass. `cargo check -p bare-js2`: pass.
+- `cargo test --locked -p bare-js2 --lib`: 545 pass (552 after the merge with main). `cargo check -p bare-js2`: pass.
 - Startup, `script_run` on `var result = 1;`, `perf stat -e instructions:u`, 3 runs each, base vs this tree: 2,011,652 vs 2,012,591 mean, +0.047%. Run spread 0.1%.
 
-Not tested: Windows; the full cost matrix; test262 after the final merge with main.
+Not tested: Windows; the full cost matrix. After the merge with main the baseline was split again from the main version and a full `-u` run left the tree clean.
