@@ -1130,15 +1130,11 @@ impl Realm {
             }
             Key::Name(k) => {
                 if k == self.k_length && self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed {
-                    let n = self.to_number(v)?;
-                    if n < 0.0 || n.fract() != 0.0 || n >= u32::MAX as f64 {
-                        return Err(self.error(ErrKind::Range, "invalid array length"));
-                    }
                     if o.has_flag(F_LEN_RO) {
                         return Ok(Put::Fail);
                     }
-                    self.truncate(o, n as u32);
-                    return Ok(Put::Done);
+                    let d = crate::bi_object::Desc { value: Some(v), ..Default::default() };
+                    return Ok(if self.define_length(o, &d)? { Put::Done } else { Put::Fail });
                 }
                 self.set_named(o, k, v)
             }
