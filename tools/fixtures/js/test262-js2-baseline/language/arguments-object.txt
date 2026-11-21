@@ -1,5 +1,5 @@
 # test262 counts of tools/js/test262_js2.sh for each directory: directory, old pass, old fail, old skip, new pass, new fail, new skip.
 # old = bare-js, new = bare-js2. Commit: e4fbf57745c6aae3d1f12f181ecef78b1665d812. Written by tools/js/test262_js2.sh -u. Do not edit by hand.
-language/arguments-object 139 16 60 136 19 60
+language/arguments-object 139 16 60 139 16 60
 language/arguments-object/mapped 22 21 0 22 21 0
 language/arguments-object/unmapped 5 0 0 5 0 0

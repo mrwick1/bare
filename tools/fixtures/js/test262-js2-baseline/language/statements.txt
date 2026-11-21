@@ -98,7 +98,7 @@ language/statements/for 86 9 5 85 10 5
 language/statements/for-await-of 0 0 1234 0 0 1234
 language/statements/for-in 66 18 2 66 18 2
 language/statements/for-in/dstr 33 0 0 33 0 0
-language/statements/for-of 134 13 35 131 16 35
+language/statements/for-of 134 13 35 133 14 35
 language/statements/for-of/dstr 536 33 0 548 21 0
 language/statements/for/dstr 285 0 0 285 0 0
 language/statements/function 194 60 2 191 63 2
