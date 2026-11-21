@@ -13,11 +13,10 @@
 //! nothing. `indexedDB` keeps its data in the realm only and runs the requests of a transaction one after another in
 //! microtasks. Not compared with a real browser.
 
+use crate::eng::{Eng, Ops};
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_js_api::{Args, HostFn, Local, Type};
-use bare_js::eval::Interp;
-use bare_js::value::Value;
 
 /// `(names that ask for it, the global that the source defines first, source)`.
 const SHIMS: [(&[&str], &str, &str); 9] = [
@@ -37,18 +36,18 @@ const STREAM_NAMES: [&str; 7] = ["WritableStream", "WritableStreamDefaultWriter"
 
 /// Make the shim that `name` asks for. Gives whether `name` is one of them.
 #[cold]
-pub(crate) fn define(d: &Dom, it: &mut Interp<'_>, name: &str) -> R<bool> {
+pub(crate) fn define<E: Eng>(d: &Dom<E>, it: &mut E::Vm, name: &str) -> R<E, bool> {
     let Some(&(_, sentinel, src)) = SHIMS.iter().find(|s| s.0.contains(&name) || (name.starts_with("IDB") && s.1 == "indexedDB")) else { return Ok(false) };
     let g = it.global_object();
     let k = d.key(it, sentinel)?;
-    if it.heap.peek_own_property(g, k).map_err(|e| it.heap_error(e))?.is_none() {
+    if it.h_peek_own(g, k)?.is_none() {
         // Not `js_str`: the source is part of the host, not script data, and a small `max_string_bytes` must not stop the browser.
-        let s = it.heap.intern_str(src).map_err(|e| it.heap_error(e))?;
-        let made = it.eval_global(Value::String(s))?;
+        let s = it.h_intern(src)?;
+        let made = it.eval_global_o(E::str_raw(s))?;
         if sentinel == "CompressionStream" {
             // The source gives its install function. It takes the native codec.
             let f = d.add_fn_s_obj(it, codec, "codec", 3, HostFn::Method)?;
-            it.call(made, Value::Undefined, &[Value::Object(f)])?;
+            it.call_o(made, E::undef(), &[E::obj_raw(f)])?;
         }
     }
     Ok(true)
@@ -60,7 +59,7 @@ const MAX_OUTPUT: usize = 256 << 20;
 /// `codec(mode, format, bytes)` of `shims/compression.js`: mode 0 compresses, 1 decompresses. Formats: 0 gzip (RFC 1952), 1 deflate
 /// (zlib, RFC 1950), 2 deflate-raw (RFC 1951). Bad, cut or too big data, and bytes after the end of the stream, are a `TypeError`, as
 /// the Compression Standard says.
-fn codec<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn codec<'s, E: Eng>(_: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let mut num = |i: usize| match a.get(i) {
         Some(v) if matches!(s.type_of(v), Type::Number) => s.to_number(v).map_or(0, |n| n as u8),
         _ => 0,

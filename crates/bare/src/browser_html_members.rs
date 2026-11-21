@@ -18,16 +18,15 @@
 //! Absent: `progress.labels` and `meter.labels`, `fieldset.elements` and the validity members of `fieldset` and `output`, `output.htmlFor`,
 //! `output.defaultValue`, `dialog.requestClose()`.
 
+use crate::eng::Eng;
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_js_api::{Args, Local, Type};
 use crate::browser_reflect::{parse_float, reflect, text, this_of};
 use bare_html::dom::NodeId;
-use bare_js::eval::Interp;
-use bare_js::value::{ObjId};
 
 /// Fill the prototype of the interface `name` of `browser_html.rs`. Returns `true` when the interface has members of its own here.
-pub(crate) fn members(d: &Dom, it: &mut Interp<'_>, o: ObjId, name: &str) -> R<bool> {
+pub(crate) fn members<E: Eng>(d: &Dom<E>, it: &mut E::Vm, o: E::Obj, name: &str) -> R<E, bool> {
     use crate::browser_table::{Proto, members as table};
     match name {
         "HTMLTableElement" => table(d, it, o, Proto::Table)?,
@@ -68,12 +67,12 @@ pub(crate) fn members(d: &Dom, it: &mut Interp<'_>, o: ObjId, name: &str) -> R<b
             d.def_get_s(it, o, "position", |d, s, t, _| { let n = progress(d, s, t)?.2; Ok(s.number(n)) }, None)?;
         }
         "HTMLMeterElement" => {
-            d.def_get_s(it, o, "value", meter_get::<0>, Some(meter_set::<0>))?;
-            d.def_get_s(it, o, "min", meter_get::<1>, Some(meter_set::<1>))?;
-            d.def_get_s(it, o, "max", meter_get::<2>, Some(meter_set::<2>))?;
-            d.def_get_s(it, o, "low", meter_get::<3>, Some(meter_set::<3>))?;
-            d.def_get_s(it, o, "high", meter_get::<4>, Some(meter_set::<4>))?;
-            d.def_get_s(it, o, "optimum", meter_get::<5>, Some(meter_set::<5>))?;
+            d.def_get_s(it, o, "value", meter_get::<0, _>, Some(meter_set::<0, _>))?;
+            d.def_get_s(it, o, "min", meter_get::<1, _>, Some(meter_set::<1, _>))?;
+            d.def_get_s(it, o, "max", meter_get::<2, _>, Some(meter_set::<2, _>))?;
+            d.def_get_s(it, o, "low", meter_get::<3, _>, Some(meter_set::<3, _>))?;
+            d.def_get_s(it, o, "high", meter_get::<4, _>, Some(meter_set::<4, _>))?;
+            d.def_get_s(it, o, "optimum", meter_get::<5, _>, Some(meter_set::<5, _>))?;
         }
         "HTMLDialogElement" => {
             reflect!(d, it, o, &["dialog"], { "open" => "open": Bool });
@@ -87,7 +86,7 @@ pub(crate) fn members(d: &Dom, it: &mut Interp<'_>, o: ObjId, name: &str) -> R<b
     Ok(true)
 }
 
-fn base_href<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn base_href<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = this_of(d, s, this, &["base"])?;
     let raw = text(d, n, "href").unwrap_or_default();
     let doc_url = d.cur_rec().ok();
@@ -98,18 +97,18 @@ fn base_href<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> R
     d.js_str_s(s, &st)
 }
 
-fn form<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, tag: &str) -> Res<'s, Local<'s>> {
+fn form<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, tag: &str) -> Res<'s, Local<'s>> {
     let n = this_of(d, s, this, &[tag])?;
-    let f = old(s, |it| d.form_owner(it, n))?;
+    let f = old::<E, _>(s, |it| d.form_owner(it, n))?;
     d.wrap_opt_s(s, f)
 }
 
-fn num(d: &Dom, n: NodeId, name: &str) -> Option<f64> {
+fn num<E: Eng>(d: &Dom<E>, n: NodeId, name: &str) -> Option<f64> {
     text(d, n, name).and_then(|s| parse_float(&s))
 }
 
 /// `(value, max, position)` of a `progress`.
-fn progress<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, (f64, f64, f64)> {
+fn progress<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, (f64, f64, f64)> {
     let n = this_of(d, s, this, &["progress"])?;
     let max = num(d, n, "max").filter(|&m| m > 0.0).unwrap_or(1.0);
     Ok(match num(d, n, "value") {
@@ -124,7 +123,7 @@ fn progress<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, (f64, f
 const METER: [&str; 6] = ["value", "min", "max", "low", "high", "optimum"];
 
 /// Member `I` of `METER`. `I` is a constant parameter: one function is made for each value, like six copies of the function.
-fn meter_get<'s, const I: usize>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn meter_get<'s, const I: usize, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = this_of(d, s, this, &["meter"])?;
     let min = num(d, n, "min").unwrap_or(0.0);
     let max = num(d, n, "max").unwrap_or(1.0).max(min);
@@ -140,14 +139,14 @@ fn meter_get<'s, const I: usize>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _
     Ok(s.number(v))
 }
 
-fn meter_set<'s, const I: usize>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn meter_set<'s, const I: usize, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     set_num(d, s, this, a, "meter", METER[I], false)
 }
 
 /// Write a `double` attribute. `positive`: a value that is not above 0 is ignored.
-fn set_num<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, tag: &str, name: &str, positive: bool) -> Res<'s, Local<'s>> {
+fn set_num<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>, tag: &str, name: &str, positive: bool) -> Res<'s, Local<'s>> {
     let n = this_of(d, s, this, &[tag])?;
-    let arg0 = arg_s(s, a, 0);
+    let arg0 = arg_s::<E>(s, a, 0);
     let x = s.to_number(arg0)?;
     if !x.is_finite() {
         return Err(s.type_error(&format!("Failed to set the '{name}' property: The provided double value is non-finite.")));
@@ -163,13 +162,13 @@ fn set_num<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, tag: &
 
 // ------------------------------------------------------------------------------------------ dialog
 
-fn return_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn return_value<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = this_of(d, s, this, &["dialog"])?;
     let st = d.dialogs.borrow().get(&n).map(|x| x.0.clone()).unwrap_or_default();
     d.js_str_s(s, &st)
 }
 
-fn set_return_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_return_value<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = this_of(d, s, this, &["dialog"])?;
     let st = d.arg_str_s(s, a, 0)?;
     d.dialogs.borrow_mut().entry(n).or_default().0 = st;
@@ -177,7 +176,7 @@ fn set_return_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s
 }
 
 /// `show()` (`modal` false) and `showModal()`.
-fn open<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, modal: bool) -> Res<'s, Local<'s>> {
+fn open<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, modal: bool) -> Res<'s, Local<'s>> {
     let n = this_of(d, s, this, &["dialog"])?;
     let is_open = text(d, n, "open").is_some();
     let was_modal = d.dialogs.borrow().get(&n).is_some_and(|x| x.1);
@@ -189,7 +188,7 @@ fn open<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, modal: bool) -> Res<'s
         let msg = if modal { "The dialog is already open as a non-modal dialog, and therefore cannot be opened as a modal dialog." } else { "The dialog is already open as a modal dialog, and therefore cannot be opened as a non-modal dialog." };
         return Err(d.dom_err_s(s, "InvalidStateError", &format!("Failed to execute '{what}' on 'HTMLDialogElement': {msg}")));
     }
-    if modal && !old(s, |it| d.is_connected_node(it, n))? {
+    if modal && !old::<E, _>(s, |it| d.is_connected_node(it, n))? {
         return Err(d.dom_err_s(s, "InvalidStateError", "Failed to execute 'showModal' on 'HTMLDialogElement': The element is not in a Document."));
     }
     crate::browser_dom::attr_set_s(d, s, n, "open", "")?;
@@ -197,12 +196,12 @@ fn open<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, modal: bool) -> Res<'s
     Ok(s.undefined())
 }
 
-fn close<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn close<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = this_of(d, s, this, &["dialog"])?;
     if text(d, n, "open").is_none() {
         return Ok(s.undefined());
     }
-    let v = arg_s(s, a, 0);
+    let v = arg_s::<E>(s, a, 0);
     let result = match s.type_of(v) {
         Type::Undefined => None,
         _ => Some(d.string_arg_s(s, v)?),
@@ -216,7 +215,7 @@ fn close<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'
             e.0 = r;
         }
     }
-    let ev = old(s, |it| d.new_event(it, "close", false, false, false, None))?;
-    old(s, |it| d.dispatch(it, Target::Node(n), ev))?;
+    let ev = old::<E, _>(s, |it| d.new_event(it, "close", false, false, false, None))?;
+    old::<E, _>(s, |it| d.dispatch(it, Target::Node(n), ev))?;
     Ok(s.undefined())
 }

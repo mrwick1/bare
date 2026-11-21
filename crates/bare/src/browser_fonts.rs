@@ -1,26 +1,25 @@
 //! Lazy document font sets. Native Set storage supplies bounds and live iteration.
+use crate::eng::{Eng, Ops};
 use crate::browser::*;
 use crate::browser_scoped::*;
-use bare_js::eval::Interp;
-use bare_js::value::Value;
 use bare_js_api::{Args, HostFn, Local};
 
 #[cold]
-pub(crate) fn define(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+pub(crate) fn define<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
     let key = d.key(it, "fonts")?;
-    if it.heap.peek_own_property(d.p().document, key).map_err(|e| it.heap_error(e))?.is_some() {
+    if it.h_peek_own(d.p().document, key)?.is_some() {
         return Ok(());
     }
     let source = format!("{}{}", crate::browser_fontface::SOURCE, SOURCE);
-    let s = it.heap.intern_str(&source).map_err(|e| it.heap_error(e))?;
-    let factory = it.eval_global(Value::String(s))?;
+    let s = it.h_intern(&source)?;
+    let factory = it.eval_global_o(E::str_raw(s))?;
     let validate = d.add_fn_s_obj(it, is_document, "isDocument", 1, HostFn::Method)?;
-    it.call(factory, Value::Undefined, &[Value::Object(validate)])?;
+    it.call_o(factory, E::undef(), &[E::obj_raw(validate)])?;
     Ok(())
 }
 
-fn is_document<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    let v = arg_s(s, a, 0);
+fn is_document<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let v = arg_s::<E>(s, a, 0);
     let yes = d.node_of_s(s, v).is_some_and(|n| matches!(d.doc.borrow().data(n), bare_html::dom::NodeData::Document));
     Ok(s.boolean(yes))
 }

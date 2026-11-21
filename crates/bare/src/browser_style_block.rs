@@ -23,16 +23,16 @@
 //! - Caps are checked before the thing grows: bytes of the text, declarations while parsing (the parser stops at the
 //!   cap), bytes of the output before each piece is added.
 
+use crate::eng::{Eng, Fault};
 use bare_css::parser::{components, parse_declarations_capped};
 use bare_css::values::{Declared, Property, SHORTHANDS, Side, Value, parse_declaration, shorthand_longhands};
 use bare_css::var::has_var;
-use bare_js::eval::Error;
 use std::borrow::Cow;
 
 const _: () = assert!(Property::COUNT <= 128, "a declaration owns its longhands as bits of a u128");
 
 /// Why an operation stopped. The caller turns it into an error (a cap is `Limit(Host(..))`, never catchable).
-pub(crate) enum Fail {
+pub(crate) enum Fail<E: Eng> {
     /// `style-bytes`
     Bytes,
     /// `style-decls`
@@ -40,19 +40,19 @@ pub(crate) enum Fail {
     /// A value that the model cannot write back faithfully.
     Unsupported(&'static str),
     /// A step or heap limit, or any other error of the interpreter.
-    Err(Error),
+    Err(Fault<E>),
 }
 
-impl From<Error> for Fail {
-    fn from(e: Error) -> Fail {
+impl<E: Eng> From<Fault<E>> for Fail<E> {
+    fn from(e: Fault<E>) -> Fail<E> {
         Fail::Err(e)
     }
 }
 
-type F<T> = Result<T, Fail>;
+type F<T, E> = Result<T, Fail<E>>;
 
 /// Charge work to the step budget before it is done.
-pub(crate) type Charge<'a> = &'a mut dyn FnMut(u64) -> Result<(), Error>;
+pub(crate) type Charge<'a, E> = &'a mut dyn FnMut(u64) -> Result<(), Fault<E>>;
 
 #[derive(Clone, Copy)]
 pub(crate) struct Lim {
@@ -197,7 +197,7 @@ type Texts<'a> = Vec<(Property, Option<Cow<'a, str>>)>;
 /// The most top-level pieces of a shorthand value that we look at to find longhand text.
 const MAX_PIECES: usize = 16;
 
-fn texts<'a>(d: &'a Decl, charge: Charge) -> F<Texts<'a>> {
+fn texts<'a, E: Eng>(d: &'a Decl, charge: Charge<E>) -> F<Texts<'a>, E> {
     if d.kind == Kind::Long {
         return Ok(owned(d).map(|p| (p, Some(Cow::Borrowed(d.value.as_str())))).collect());
     }
@@ -337,7 +337,7 @@ fn rank(d: &Decl, mask: u128) -> usize {
 }
 
 /// Read a block of declarations (the attribute, or `cssText`).
-pub(crate) fn parse(text: &str, lim: Lim, charge: Charge) -> F<Vec<Decl>> {
+pub(crate) fn parse<E: Eng>(text: &str, lim: Lim, charge: Charge<E>) -> F<Vec<Decl>, E> {
     if text.len() > lim.bytes {
         return Err(Fail::Bytes);
     }
@@ -376,7 +376,7 @@ fn owner(list: &[Decl], p: Property) -> Option<usize> {
 }
 
 /// The `value` of longhand `p` in `d`, from the texts of `d`.
-fn long_text<'a>(d: &'a Decl, p: Property, charge: Charge) -> F<Option<Cow<'a, str>>> {
+fn long_text<'a, E: Eng>(d: &'a Decl, p: Property, charge: Charge<E>) -> F<Option<Cow<'a, str>>, E> {
     if d.kind == Kind::Long {
         return Ok(Some(Cow::Borrowed(d.value.as_str())));
     }
@@ -402,8 +402,8 @@ const BUILD: &[(&str, Join)] = &[
     ("border-bottom", Join::Seq), ("border-left", Join::Seq), ("border", Join::Border),
 ];
 
-fn join(how: Join, t: &[&str], max: usize) -> F<Option<String>> {
-    let joined = |parts: &[&str]| -> F<Option<String>> {
+fn join<E: Eng>(how: Join, t: &[&str], max: usize) -> F<Option<String>, E> {
+    let joined = |parts: &[&str]| -> F<Option<String>, E> {
         let len = parts.iter().try_fold(parts.len().saturating_sub(1), |n, p| n.checked_add(p.len()));
         if len.is_none_or(|n| n > max) { return Err(Fail::Bytes); }
         Ok(Some(parts.join(" ")))
@@ -430,7 +430,7 @@ fn join(how: Join, t: &[&str], max: usize) -> F<Option<String>> {
 
 /// The value of a shorthand written from its longhands. `None` when a longhand is missing, the priorities differ, or the
 /// longhands cannot be joined.
-fn build(list: &[Decl], name: &str, how: Join, max: usize, charge: Charge) -> F<Option<(String, bool)>> {
+fn build<E: Eng>(list: &[Decl], name: &str, how: Join, max: usize, charge: Charge<E>) -> F<Option<(String, bool)>, E> {
     let mut cache: Vec<(usize, Texts)> = Vec::new();
     let mut owners = Vec::new();
     let mut important = None;
@@ -456,7 +456,7 @@ fn build(list: &[Decl], name: &str, how: Join, max: usize, charge: Charge) -> F<
 }
 
 /// `getPropertyValue`. `None`: nothing to read (the property is not set, or a shorthand that cannot be written).
-pub(crate) fn get(list: &[Decl], name: &str, max: usize, charge: Charge) -> F<Option<String>> {
+pub(crate) fn get<E: Eng>(list: &[Decl], name: &str, max: usize, charge: Charge<E>) -> F<Option<String>, E> {
     if by_name(name) {
         return Ok(list.iter().find(|d| named(d.kind) && d.name == name).map(|d| d.value.clone()));
     }
@@ -494,7 +494,7 @@ pub(crate) fn priority(list: &[Decl], name: &str) -> bool {
 // ------------------------------------------------------------------------------------------------ writes
 
 /// `setProperty` with a non-empty value. `Ok(false)`: the name, the value or nothing is acceptable, and the list is as it was.
-pub(crate) fn set(list: &mut Vec<Decl>, name: &str, value: &str, important: bool, lim: Lim, probe: &mut String, charge: Charge) -> F<bool> {
+pub(crate) fn set<E: Eng>(list: &mut Vec<Decl>, name: &str, value: &str, important: bool, lim: Lim, probe: &mut String, charge: Charge<E>) -> F<bool, E> {
     if !custom(name) && !supported(name) {
         return Ok(false);
     }
@@ -530,7 +530,7 @@ pub(crate) fn set(list: &mut Vec<Decl>, name: &str, value: &str, important: bool
 }
 
 /// `removeProperty`: the old value, and whether the list changed.
-pub(crate) fn remove(list: &mut Vec<Decl>, name: &str, max: usize, charge: Charge) -> F<(String, bool)> {
+pub(crate) fn remove<E: Eng>(list: &mut Vec<Decl>, name: &str, max: usize, charge: Charge<E>) -> F<(String, bool), E> {
     let old = get(list, name, max, charge)?.unwrap_or_default();
     charge(1 + list.len() as u64)?;
     let before = (list.len(), length(list));
@@ -556,7 +556,7 @@ pub(crate) fn inputs(list: &[Decl]) -> Vec<bare_css::cascade::InputDeclaration> 
 // ------------------------------------------------------------------------------------------------ output
 
 /// An identifier as CSS text: what is not a name character is written as a hex escape.
-fn ident(name: &str, max: usize) -> F<Cow<'_, str>> {
+fn ident<E: Eng>(name: &str, max: usize) -> F<Cow<'_, str>, E> {
     let mut len = 0usize;
     let mut escape = false;
     for c in name.chars() {
@@ -584,7 +584,7 @@ struct Out<'a> {
 }
 
 impl Out<'_> {
-    fn decl(&mut self, name: &str, value: &str, important: bool) -> F<()> {
+    fn decl<E: Eng>(&mut self, name: &str, value: &str, important: bool) -> F<(), E> {
         let tail = if important { " !important;" } else { ";" };
         let rest = usize::from(!self.s.is_empty()).checked_add(2).and_then(|n| n.checked_add(value.len())).and_then(|n| n.checked_add(tail.len())).ok_or(Fail::Bytes)?;
         let room = self.max.checked_sub(self.s.len()).and_then(|n| n.checked_sub(rest)).ok_or(Fail::Bytes)?;
@@ -622,7 +622,7 @@ pub(crate) struct Serialized {
 }
 
 /// Serialize into `s`, which is cleared first. Pending longhands expose empty values.
-pub(crate) fn serialize(list: &[Decl], lim: Lim, s: &mut String, charge: Charge) -> F<Serialized> {
+pub(crate) fn serialize<E: Eng>(list: &[Decl], lim: Lim, s: &mut String, charge: Charge<E>) -> F<Serialized, E> {
     charge(1 + list.len() as u64)?;
     s.clear();
     let mut out = Out { s, max: lim.bytes, exact: true };
@@ -678,7 +678,7 @@ mod modern_colors {
     #[test]
     fn a_shorthand_keeps_its_deferred_color_when_another_longhand_changes() {
         let limits = Lim { bytes:10000, decls:100 };
-        let mut charge = |_| Ok(());
+        let mut charge = |_| Ok::<(), crate::eng::Fault<crate::eng_old::Old>>(());
         let mut list = parse("background: color-mix(in srgb, currentColor, blue)", limits, &mut charge).ok().unwrap();
         let mut output = String::new();
         set(&mut list, "background-image", "none", false, limits, &mut output, &mut charge).ok().unwrap();

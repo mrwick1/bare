@@ -1,19 +1,18 @@
 //! SVG attribute reads and shape metrics. Matrices use the untransformed identity.
+use crate::eng::{Eng, Ops, Val};
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_js_api::{Args, Attrs, Local};
 use bare_html::dom::{NodeId, Ns};
-use bare_js::eval::Interp;
-use bare_js::value::{ObjId, Value};
 
-fn node<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
+fn node<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, NodeId> {
     let n = d.el_s(s, this)?;
     if d.doc.borrow().element_ns(n) != Ns::Svg {
         return Err(s.type_error("Illegal invocation"));
     }
     Ok(n)
 }
-fn num(d: &Dom, n: NodeId, name: &str) -> f64 {
+fn num<E: Eng>(d: &Dom<E>, n: NodeId, name: &str) -> f64 {
     {
         let doc = d.doc.borrow();
         doc.find_atom(name)
@@ -22,7 +21,7 @@ fn num(d: &Dom, n: NodeId, name: &str) -> f64 {
             .unwrap_or(0.0)
     }
 }
-fn object<'s>(_d: &Dom, s: &mut Sc<'s, '_>, fields: &[(&str, f64)]) -> Res<'s, Local<'s>> {
+fn object<'s, E: Eng>(_d: &Dom<E>, s: &mut Sc<'s, E>, fields: &[(&str, f64)]) -> Res<'s, Local<'s>> {
     let o = s.new_object()?;
     for &(name, v) in fields {
         let v = s.number(v);
@@ -46,19 +45,19 @@ pub(crate) fn layout_box(g: &crate::browser_scroll::Geo, n: NodeId) -> Option<ba
     Some(bare_layout::fragment::Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
 }
 /// `getBBox()`: the bounds of what the element draws, in its own user space (before its `transform`).
-fn bbox<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn bbox<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = node(d, s, this)?;
-    let styles = old(s, |it| d.cascade_now(it))?;
+    let styles = old::<E, _>(s, |it| d.cascade_now(it))?;
     let [x0, y0, x1, y1] = bare_paint::svg::user_box::<SoftwareMath>(&d.doc.borrow(), &styles, n).unwrap_or([0.0; 4]);
     let f = |v: f32| v as f64;
     object(d, s, &[("x", f(x0)), ("y", f(y0)), ("width", f(x1 - x0)), ("height", f(y1 - y0))])
 }
-fn ctm<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn ctm<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     node(d, s, this)?;
     let u = s.undefined();
     crate::browser_matrix::rw_ctor(d, s, u, Args::from_slots(0, 0))
 }
-fn animated<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, name: &str) -> Res<'s, Local<'s>> {
+fn animated<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, name: &str) -> Res<'s, Local<'s>> {
     let n = node(d, s, this)?;
     let v = if name == "viewBox" {
         let text = {
@@ -93,7 +92,7 @@ fn animated<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, name: &str) -> Res
 }
 #[cold]
 #[inline(never)]
-pub(crate) fn define(d: &Dom, it: &mut Interp<'_>, name: &str) -> R<bool> {
+pub(crate) fn define<E: Eng>(d: &Dom<E>, it: &mut E::Vm, name: &str) -> R<E, bool> {
     let p = d.p().svg;
     if let Some(i) = name
         .starts_with("SVG")
@@ -103,7 +102,7 @@ pub(crate) fn define(d: &Dom, it: &mut Interp<'_>, name: &str) -> R<bool> {
         enable_classes(d, it)?;
         let (_, f) = interface(d, it, i)?;
         let k = d.key(it, name)?;
-        it.define_data(it.global_object(), k, Value::Object(f), true, false, true)?;
+        it.define_data(it.global_object(), k, E::obj_raw(f), true, false, true)?;
         return Ok(true);
     }
     match name {
@@ -111,11 +110,11 @@ pub(crate) fn define(d: &Dom, it: &mut Interp<'_>, name: &str) -> R<bool> {
             let proto = d.obj(it, it.object_prototype())?;
             let f = crate::browser_custom::interface_ctor(d, it, name, false)?;
             let kp = d.key(it, "prototype")?;
-            it.define_data(f, kp, Value::Object(proto), false, false, false)?;
+            it.define_data(f, kp, E::obj_raw(proto), false, false, false)?;
             let kc = d.key(it, "constructor")?;
-            it.define_data(proto, kc, Value::Object(f), true, false, true)?;
+            it.define_data(proto, kc, E::obj_raw(f), true, false, true)?;
             let k = d.key(it, name)?;
-            it.define_data(it.global_object(), k, Value::Object(f), true, false, true)?;
+            it.define_data(it.global_object(), k, E::obj_raw(f), true, false, true)?;
             d.def_get_s(it, p, "className", class_name, None)?;
             d.fixed.borrow_mut().extend([proto, f]);
         }
@@ -131,9 +130,9 @@ pub(crate) fn define(d: &Dom, it: &mut Interp<'_>, name: &str) -> R<bool> {
         "transform" => {
             // A miss of `transform` on any host object asks once more: install the getter only once.
             let k = d.key(it, name)?;
-            if it.heap.peek_own_property(p, k).map_err(|e| it.heap_error(e))?.is_none() {
-                let src = it.heap.intern_str(include_str!("shims/svgtransform.js")).map_err(|e| it.heap_error(e))?;
-                let Value::Object(get) = it.eval_global(Value::String(src))? else { return Err(it.type_error("svgtransform.js")) };
+            if it.h_peek_own(p, k)?.is_none() {
+                let src = it.h_intern(include_str!("shims/svgtransform.js"))?;
+                let Val::Object(get) = E::kind(it.eval_global_o(E::str_raw(src))?) else { return Err(it.type_error_o("svgtransform.js")) };
                 d.define_accessor(it, p, k, get, None)?;
             }
         }
@@ -166,11 +165,11 @@ pub(crate) fn define(d: &Dom, it: &mut Interp<'_>, name: &str) -> R<bool> {
     Ok(true)
 }
 /// `getComputedTextLength()` and `getSubStringLength(start, n)` of a `text` or a `tspan`: the advance of the letters in user units.
-fn text_length<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, sub: bool) -> Res<'s, Local<'s>> {
+fn text_length<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>, sub: bool) -> Res<'s, Local<'s>> {
     let n = node(d, s, this)?;
     // WebIDL `unsigned long`: NaN and infinity are 0, and -1 is the biggest number.
-    let ulong = |s: &mut Sc<'s, '_>, i| -> Res<'s, usize> {
-        let v = arg_s(s, a, i);
+    let ulong = |s: &mut Sc<'s, E>, i| -> Res<'s, usize> {
+        let v = arg_s::<E>(s, a, i);
         let x = s.to_number(v)?;
         Ok(if x.is_finite() { x.trunc().rem_euclid(4294967296.0) as usize } else { 0 })
     };
@@ -187,7 +186,7 @@ fn text_length<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, su
             _ => return Err(s.type_error("Illegal invocation")),
         }
     };
-    let Some(snap) = old(s, |it| d.snapshot_with(it, text, true))? else { return Ok(s.number(0.0)) };
+    let Some(snap) = old::<E, _>(s, |it| d.snapshot_with(it, text, true))? else { return Ok(s.number(0.0)) };
     let m = bare_layout::font::Metrics::of(&snap.style);
     let width = bare_paint::svg::text_length(&d.doc.borrow(), text, n, &m, start, count);
     match width {
@@ -196,11 +195,11 @@ fn text_length<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, su
         None => Err(d.dom_err_s(s, "IndexSizeError", "The start index is out of range")),
     }
 }
-fn metrics<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, point: bool) -> Res<'s, Local<'s>> {
+fn metrics<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>, point: bool) -> Res<'s, Local<'s>> {
     let n = node(d, s, this)?;
     let mut at = if point {
         {
-            let v = arg_s(s, a, 0);
+            let v = arg_s::<E>(s, a, 0);
             s.to_number(v)?.max(0.0)
         }
     } else {
@@ -242,21 +241,21 @@ fn metrics<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, point:
     }
 }
 
-fn class_name<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn class_name<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = node(d, s, this)?;
-    let ctor = old_v(s, |it| {
+    let ctor = old_v::<E>(s, |it| {
         let k = d.key(it, "SVGAnimatedString")?;
         let g = it.global_object();
-        if it.heap.peek_own_property(g, k).map_err(|e| it.heap_error(e))?.is_none() {
+        if it.h_peek_own(g, k)?.is_none() {
             define(d, it, "SVGAnimatedString")?;
         }
-        Ok(match it.heap.peek_own_property(g, k).map_err(|e| it.heap_error(e))? {
-            Some(bare_js::heap::Property::Data { value, .. }) => value,
-            _ => Value::Undefined,
+        Ok(match it.h_peek_own(g, k)? {
+            Some(crate::eng::Prop::Data { value, .. }) => value,
+            _ => E::undef(),
         })
     })?;
     let proto = s.get_str(ctor, "prototype")?;
-    let Some(p) = obj_id(s, proto) else {
+    let Some(p) = obj_id::<E>(s, proto) else {
         return Err(s.type_error("Invalid SVGAnimatedString prototype"));
     };
     let o = d.obj_s(s, p)?;
@@ -277,7 +276,7 @@ fn class_name<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> 
 
 #[cold]
 #[inline(never)]
-fn init_class_name(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+fn init_class_name<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
     d.def_get_s(it, d.p().svg, "className", class_name, None)?;
     d.els.tagged.set(d.els.tagged.get() | 2);
     Ok(())
@@ -300,7 +299,7 @@ const CLASSES: &[(&str, usize)] = &[
 ];
 #[cold]
 #[inline(never)]
-fn interface(d: &Dom, it: &mut Interp<'_>, i: usize) -> R<(ObjId, ObjId)> {
+fn interface<E: Eng>(d: &Dom<E>, it: &mut E::Vm, i: usize) -> R<E, (E::Obj, E::Obj)> {
     const OFFSET: usize = crate::browser_html::INTERFACE_COUNT;
     if let Some(Some(pair)) = d.html_ifaces.borrow().get(OFFSET + i) {
         return Ok(*pair);
@@ -310,30 +309,25 @@ fn interface(d: &Dom, it: &mut Interp<'_>, i: usize) -> R<(ObjId, ObjId)> {
         let k = d.key(it, "SVGElement")?;
         (
             d.p().svg,
-            match it
-                .heap
-                .peek_own_property(it.global_object(), k)
-                .map_err(|e| it.heap_error(e))?
+            match it.h_peek_own(it.global_object(), k)?
             {
-                Some(bare_js::heap::Property::Data { value, .. }) => value,
-                _ => Value::Undefined,
+                Some(crate::eng::Prop::Data { value, .. }) => value,
+                _ => E::undef(),
             },
         )
     } else {
         let (p, f) = interface(d, it, parent)?;
-        (p, Value::Object(f))
+        (p, E::obj_raw(f))
     };
     let proto = d.obj(it, p)?;
     let f = crate::browser_custom::interface_ctor(d, it, name, false)?;
-    if let Value::Object(parent) = parent_ctor {
-        it.heap
-            .set_prototype_of(f, Some(parent))
-            .map_err(|e| it.heap_error(e))?;
+    if let Val::Object(parent) = E::kind(parent_ctor) {
+        it.h_set_proto(f, Some(parent))?;
     }
     let kp = d.key(it, "prototype")?;
-    it.define_data(f, kp, Value::Object(proto), false, false, false)?;
+    it.define_data(f, kp, E::obj_raw(proto), false, false, false)?;
     let kc = d.key(it, "constructor")?;
-    it.define_data(proto, kc, Value::Object(f), true, false, true)?;
+    it.define_data(proto, kc, E::obj_raw(f), true, false, true)?;
     crate::browser_lazy::tag(d, it, proto, name)?;
     d.fixed.borrow_mut().extend([proto, f]);
     let mut classes = d.html_ifaces.borrow_mut();
@@ -344,7 +338,7 @@ fn interface(d: &Dom, it: &mut Interp<'_>, i: usize) -> R<(ObjId, ObjId)> {
     Ok((proto, f))
 }
 #[inline]
-pub(crate) fn wrapper_proto(d: &Dom, it: &mut Interp<'_>, tag: &str) -> R<ObjId> {
+pub(crate) fn wrapper_proto<E: Eng>(d: &Dom<E>, it: &mut E::Vm, tag: &str) -> R<E, E::Obj> {
     let flags = d.els.tagged.get();
     if flags & 2 == 0 {
         init_class_name(d, it)?;
@@ -371,14 +365,14 @@ pub(crate) fn wrapper_proto(d: &Dom, it: &mut Interp<'_>, tag: &str) -> R<ObjId>
 
 #[cold]
 #[inline(never)]
-fn enable_classes(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+fn enable_classes<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
     if d.els.tagged.get() & 4 != 0 {
         return Ok(());
     }
     d.els.tagged.set(d.els.tagged.get() | 4);
     let nodes: Vec<_> =
         d.st.borrow().wrappers().collect();
-    it.charge(nodes.len() as u64)?;
+    it.charge_o(nodes.len() as u64)?;
     for (n, o) in nodes {
         let tag = {
             let doc = d.doc.borrow();
@@ -387,11 +381,9 @@ fn enable_classes(d: &Dom, it: &mut Interp<'_>) -> R<()> {
             }
             doc.element_name(n).to_string()
         };
-        if it.heap.get_prototype_of(o).map_err(|e| it.heap_error(e))? == Some(d.p().svg) {
+        if it.h_get_proto(o)? == Some(d.p().svg) {
             let p = wrapper_proto(d, it, &tag)?;
-            it.heap
-                .set_prototype_of(o, Some(p))
-                .map_err(|e| it.heap_error(e))?;
+            it.h_set_proto(o, Some(p))?;
         }
     }
     Ok(())

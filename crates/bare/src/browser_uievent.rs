@@ -17,13 +17,12 @@
 //! - `UIEvent` and `WheelEvent` are not built: `view` and `detail` live on the four interfaces. `initMouseEvent` and the other `init*Event`
 //!   methods are not built. A `PointerEvent` of the window has `width`, `height` 1 and `pressure` 0.5 while a button is down.
 
+use crate::eng::{Eng, Ops, Val};
 use crate::browser::*;
 use crate::browser_events::init_flag_s;
 use crate::browser_mouse_legacy as lg;
 use crate::browser_scoped::*;
 use crate::browser_ui::{PointerData, Ui, coord, with_ui};
-use bare_js::eval::Interp;
-use bare_js::value::{ObjId, PropertyKey, Value};
 use bare_js_api::{Args, HostFn, Local, Type};
 
 const MOUSE: u8 = 0;
@@ -45,82 +44,82 @@ const INPUT_TYPES: [&str; 39] = [
     "formatJustifyLeft", "formatIndent", "formatOutdent", "formatRemove", "formatSetBlockTextDirection",
 ];
 
-fn bad<'s>(s: &mut Sc<'s, '_>, iface: &str, what: &str) -> bare_js_api::Error<'s> {
+fn bad<'s, E: Eng>(s: &mut Sc<'s, E>, iface: &str, what: &str) -> bare_js_api::Error<'s> {
     s.type_error(&format!("Failed to construct '{iface}': {what}"))
 }
 
 /// The member `name` of the init dictionary: `None` when it is `undefined`.
-fn member<'s>(s: &mut Sc<'s, '_>, init: Local<'s>, name: &str) -> Res<'s, Option<Local<'s>>> {
+fn member<'s, E: Eng>(s: &mut Sc<'s, E>, init: Local<'s>, name: &str) -> Res<'s, Option<Local<'s>>> {
     let v = s.get_str(init, name)?;
     Ok(if s.type_of(v) == Type::Undefined { None } else { Some(v) })
 }
 
 /// A `double` member: `ToNumber`, and a TypeError for NaN and the infinities.
-fn dbl<'s>(s: &mut Sc<'s, '_>, init: Local<'s>, name: &str, iface: &str, dict: &str, default: f64) -> Res<'s, f64> {
-    let Some(v) = member(s, init, name)? else { return Ok(default) };
+fn dbl<'s, E: Eng>(s: &mut Sc<'s, E>, init: Local<'s>, name: &str, iface: &str, dict: &str, default: f64) -> Res<'s, f64> {
+    let Some(v) = member::<E>(s, init, name)? else { return Ok(default) };
     let n = s.to_number(v)?;
     if !n.is_finite() {
-        return Err(bad(s, iface, &format!("Failed to read the '{name}' property from '{dict}': The provided double value is non-finite.")));
+        return Err(bad::<E>(s, iface, &format!("Failed to read the '{name}' property from '{dict}': The provided double value is non-finite.")));
     }
     Ok(n)
 }
 
 /// A `long`, `short` or `unsigned short` member: `ToNumber`, cut to the integer, wrapped to the type by the caller's `as`.
-fn int<'s>(s: &mut Sc<'s, '_>, init: Local<'s>, name: &str) -> Res<'s, i64> {
-    let Some(v) = member(s, init, name)? else { return Ok(0) };
+fn int<'s, E: Eng>(s: &mut Sc<'s, E>, init: Local<'s>, name: &str) -> Res<'s, i64> {
+    let Some(v) = member::<E>(s, init, name)? else { return Ok(0) };
     let n = s.to_number(v)?;
     Ok(if n.is_finite() { n.trunc() as i64 } else { 0 })
 }
 
-fn text<'s>(d: &Dom, s: &mut Sc<'s, '_>, init: Local<'s>, name: &str) -> Res<'s, Option<String>> {
-    match member(s, init, name)? {
+fn text<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, init: Local<'s>, name: &str) -> Res<'s, Option<String>> {
+    match member::<E>(s, init, name)? {
         Some(v) => Ok(Some(d.string_arg_s(s, v)?)),
         None => Ok(None),
     }
 }
 
 /// The constructor of interface `K`.
-pub(crate) fn ctor<'s, const K: u8>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn ctor<'s, const K: u8, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let (iface, dict) = (IFACE[K as usize], format!("{}Init", IFACE[K as usize]));
     if a.is_empty() {
-        return Err(bad(s, iface, "1 argument required, but only 0 present."));
+        return Err(bad::<E>(s, iface, "1 argument required, but only 0 present."));
     }
     let ty = d.arg_str_s(s, a, 0)?;
-    let init = arg_s(s, a, 1);
-    if !is_nullish(s, init) && !is_object(s, init) {
-        return Err(bad(s, iface, &format!("The provided value is not of type '{dict}'.")));
+    let init = arg_s::<E>(s, a, 1);
+    if !is_nullish::<E>(s, init) && !is_object::<E>(s, init) {
+        return Err(bad::<E>(s, iface, &format!("The provided value is not of type '{dict}'.")));
     }
-    build::<K>(d, s, ty, init)
+    build::<K, _>(d, s, ty, init)
 }
 
 /// `ctor` with an empty type and no init dictionary (`document.createEvent`).
-pub(crate) fn ctor_empty<'s, const K: u8>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, Local<'s>> {
+pub(crate) fn ctor_empty<'s, const K: u8, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, Local<'s>> {
     let init = s.undefined();
-    build::<K>(d, s, String::new(), init)
+    build::<K, _>(d, s, String::new(), init)
 }
 
-fn build<'s, const K: u8>(d: &Dom, s: &mut Sc<'s, '_>, ty: String, init: Local<'s>) -> Res<'s, Local<'s>> {
-    let (iface, init_obj) = (IFACE[K as usize], is_object(s, init));
-    old(s, |it| d.ensure_ui_ext(it))?;
+fn build<'s, const K: u8, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, ty: String, init: Local<'s>) -> Res<'s, Local<'s>> {
+    let (iface, init_obj) = (IFACE[K as usize], is_object::<E>(s, init));
+    old::<E, _>(s, |it| d.ensure_ui_ext(it))?;
     let mut ui = Ui { frac: K == POINTER, ..Ui::default() };
     let (mut bubbles, mut cancelable, mut composed, mut related) = (false, false, false, s.null());
     if init_obj {
-        bubbles = init_flag_s(s, init, "bubbles")?;
-        cancelable = init_flag_s(s, init, "cancelable")?;
-        composed = init_flag_s(s, init, "composed")?;
-        match member(s, init, "view")? {
+        bubbles = init_flag_s::<E>(s, init, "bubbles")?;
+        cancelable = init_flag_s::<E>(s, init, "cancelable")?;
+        composed = init_flag_s::<E>(s, init, "composed")?;
+        match member::<E>(s, init, "view")? {
             None => {}
-            Some(v) if is_nullish(s, v) => {}
+            Some(v) if is_nullish::<E>(s, v) => {}
             Some(v) if d.is_obj_s(s, v, *d.global.get().expect("installed")) => ui.view = true,
-            Some(_) => return Err(bad(s, iface, "Failed to read the 'view' property from 'UIEventInit': Failed to convert value to 'Window'.")),
+            Some(_) => return Err(bad::<E>(s, iface, "Failed to read the 'view' property from 'UIEventInit': Failed to convert value to 'Window'.")),
         }
-        ui.detail = int(s, init, "detail")? as i32;
+        ui.detail = int::<E>(s, init, "detail")? as i32;
         if K != INPUT {
             for (name, on) in [("ctrlKey", &mut ui.mods.ctrl), ("shiftKey", &mut ui.mods.shift), ("altKey", &mut ui.mods.alt), ("metaKey", &mut ui.mods.meta)] {
-                *on = init_flag_s(s, init, name)?;
+                *on = init_flag_s::<E>(s, init, name)?;
             }
             for (i, m) in EXTRA_MODS.iter().enumerate() {
-                if init_flag_s(s, init, &format!("modifier{m}"))? {
+                if init_flag_s::<E>(s, init, &format!("modifier{m}"))? {
                     ui.extra |= 1 << i;
                 }
             }
@@ -128,49 +127,49 @@ fn build<'s, const K: u8>(d: &Dom, s: &mut Sc<'s, '_>, ty: String, init: Local<'
         match K {
             MOUSE | POINTER => {
                 let mouse = "MouseEventInit";
-                ui.screen = (dbl(s, init, "screenX", iface, mouse, 0.0)?, dbl(s, init, "screenY", iface, mouse, 0.0)?);
-                ui.x = dbl(s, init, "clientX", iface, mouse, 0.0)?;
-                ui.y = dbl(s, init, "clientY", iface, mouse, 0.0)?;
-                ui.movement = (dbl(s, init, "movementX", iface, mouse, 0.0)?, dbl(s, init, "movementY", iface, mouse, 0.0)?);
-                ui.button = int(s, init, "button")? as i16;
-                ui.buttons = int(s, init, "buttons")? as u16;
-                match member(s, init, "relatedTarget")? {
+                ui.screen = (dbl::<E>(s, init, "screenX", iface, mouse, 0.0)?, dbl::<E>(s, init, "screenY", iface, mouse, 0.0)?);
+                ui.x = dbl::<E>(s, init, "clientX", iface, mouse, 0.0)?;
+                ui.y = dbl::<E>(s, init, "clientY", iface, mouse, 0.0)?;
+                ui.movement = (dbl::<E>(s, init, "movementX", iface, mouse, 0.0)?, dbl::<E>(s, init, "movementY", iface, mouse, 0.0)?);
+                ui.button = int::<E>(s, init, "button")? as i16;
+                ui.buttons = int::<E>(s, init, "buttons")? as u16;
+                match member::<E>(s, init, "relatedTarget")? {
                     None => {}
-                    Some(v) if is_nullish(s, v) => {}
-                    Some(v) if obj_id(s, v).is_some_and(|o| d.st.borrow().by_obj.contains_key(&o)) => related = v,
-                    Some(_) => return Err(bad(s, iface, "Failed to read the 'relatedTarget' property from 'MouseEventInit': Failed to convert value to 'EventTarget'.")),
+                    Some(v) if is_nullish::<E>(s, v) => {}
+                    Some(v) if obj_id::<E>(s, v).is_some_and(|o| d.st.borrow().by_obj.contains_key(&o)) => related = v,
+                    Some(_) => return Err(bad::<E>(s, iface, "Failed to read the 'relatedTarget' property from 'MouseEventInit': Failed to convert value to 'EventTarget'.")),
                 }
                 if K == POINTER {
                     let p = "PointerEventInit";
                     let mut pd = PointerData { width: 1.0, height: 1.0, id: 0, primary: false, ..PointerData::MOUSE };
-                    pd.id = int(s, init, "pointerId")? as i32;
-                    pd.width = dbl(s, init, "width", iface, p, 1.0)?;
-                    pd.height = dbl(s, init, "height", iface, p, 1.0)?;
-                    pd.pressure = dbl(s, init, "pressure", iface, p, 0.0)?;
-                    pd.tangential = dbl(s, init, "tangentialPressure", iface, p, 0.0)?;
-                    pd.tilt = (int(s, init, "tiltX")? as i32, int(s, init, "tiltY")? as i32);
-                    pd.twist = int(s, init, "twist")? as i32;
+                    pd.id = int::<E>(s, init, "pointerId")? as i32;
+                    pd.width = dbl::<E>(s, init, "width", iface, p, 1.0)?;
+                    pd.height = dbl::<E>(s, init, "height", iface, p, 1.0)?;
+                    pd.pressure = dbl::<E>(s, init, "pressure", iface, p, 0.0)?;
+                    pd.tangential = dbl::<E>(s, init, "tangentialPressure", iface, p, 0.0)?;
+                    pd.tilt = (int::<E>(s, init, "tiltX")? as i32, int::<E>(s, init, "tiltY")? as i32);
+                    pd.twist = int::<E>(s, init, "twist")? as i32;
                     pd.kind = text(d, s, init, "pointerType")?.unwrap_or_default();
-                    pd.primary = init_flag_s(s, init, "isPrimary")?;
+                    pd.primary = init_flag_s::<E>(s, init, "isPrimary")?;
                     ui.pointer = Some(Box::new(pd));
                 }
             }
             KEYBOARD => {
                 ui.key = text(d, s, init, "key")?.unwrap_or_default();
                 ui.code = text(d, s, init, "code")?.unwrap_or_default();
-                ui.location = int(s, init, "location")? as u32;
-                ui.repeat = init_flag_s(s, init, "repeat")?;
-                ui.composing = init_flag_s(s, init, "isComposing")?;
-                ui.char_code = int(s, init, "charCode")? as u32;
-                ui.key_code = int(s, init, "keyCode")? as u32;
+                ui.location = int::<E>(s, init, "location")? as u32;
+                ui.repeat = init_flag_s::<E>(s, init, "repeat")?;
+                ui.composing = init_flag_s::<E>(s, init, "isComposing")?;
+                ui.char_code = int::<E>(s, init, "charCode")? as u32;
+                ui.key_code = int::<E>(s, init, "keyCode")? as u32;
             }
             _ => {
-                ui.data = match member(s, init, "data")? {
+                ui.data = match member::<E>(s, init, "data")? {
                     None => None,
-                    Some(v) if is_nullish(s, v) => None,
+                    Some(v) if is_nullish::<E>(s, v) => None,
                     Some(v) => Some(d.string_arg_s(s, v)?),
                 };
-                ui.composing = init_flag_s(s, init, "isComposing")?;
+                ui.composing = init_flag_s::<E>(s, init, "isComposing")?;
                 let t = text(d, s, init, "inputType")?.unwrap_or_default();
                 ui.input_type = if INPUT_TYPES.contains(&t.as_str()) { t } else { String::new() };
             }
@@ -185,8 +184,8 @@ fn build<'s, const K: u8>(d: &Dom, s: &mut Sc<'s, '_>, ty: String, init: Local<'
     let p = d.p();
     let default = d.obj_local(s, [p.mouse, p.pointer, p.keyboard, p.inputev][K as usize]);
     let proto = s.proto_from_new_target(default)?;
-    let proto = obj_id(s, proto).expect("a prototype is an object");
-    let e = old(s, |it| d.new_event_proto(it, &ty, bubbles, cancelable, composed, proto))?;
+    let proto = obj_id::<E>(s, proto).expect("a prototype is an object");
+    let e = old::<E, _>(s, |it| d.new_event_proto(it, &ty, bubbles, cancelable, composed, proto))?;
     let mut st = d.st.borrow_mut();
     let ev = st.events.get_mut(&e).expect("just made");
     ev.ui = Some(Box::new(ui));
@@ -199,7 +198,7 @@ fn build<'s, const K: u8>(d: &Dom, s: &mut Sc<'s, '_>, ty: String, init: Local<'
 
 macro_rules! num {
     ($name:ident, |$u:ident| $e:expr) => {
-        fn $name<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+        fn $name<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
             let n = with_ui(d, s, this, |_, $u| $e as f64)?;
             Ok(s.number(n))
         }
@@ -232,33 +231,33 @@ num!(tilt_y, |u| pd(u).tilt.1);
 num!(twist, |u| pd(u).twist);
 num!(char_code, |u| u.char_code);
 
-fn view<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn view<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let on = with_ui(d, s, this, |_, u| u.view)?;
     Ok(if on { s.global() } else { s.null() })
 }
 
-fn offset<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, y: bool) -> Res<'s, Local<'s>> {
+fn offset<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, y: bool) -> Res<'s, Local<'s>> {
     let _caller = crate::force::tag("event offsetX/Y");
     let target = crate::browser_ui::ui_value(d, s, this, |e| Some(&e.target))?;
     let u = with_ui(d, s, this, |_, u| u.clone())?;
     let (client, page) = if y { (u.y, u.page.1) } else { (u.x, u.page.0) };
     let mut v = page;
-    if let Some(n) = d.node_of_s(s, target).filter(|&n| d.is_element(n)) && old(s, |it| d.in_document(it, n))?
-        && let Some(r) = old(s, |it| d.with_geo(it, |g, st| g.client_rect(st, n)))? {
+    if let Some(n) = d.node_of_s(s, target).filter(|&n| d.is_element(n)) && old::<E, _>(s, |it| d.in_document(it, n))?
+        && let Some(r) = old::<E, _>(s, |it| d.with_geo(it, |g, st| g.client_rect(st, n)))? {
         v = client - if y { r.y } else { r.x } as f64;
     }
     Ok(s.number(if u.frac { v } else { v.floor() }))
 }
 
-fn offset_x<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn offset_x<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     offset(d, s, this, false)
 }
 
-fn offset_y<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn offset_y<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     offset(d, s, this, true)
 }
 
-fn modifier_state<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, iface: &str) -> Res<'s, Local<'s>> {
+fn modifier_state<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>, iface: &str) -> Res<'s, Local<'s>> {
     if a.is_empty() {
         return Err(s.type_error(&format!("Failed to execute 'getModifierState' on '{iface}': 1 argument required, but only 0 present.")));
     }
@@ -273,21 +272,21 @@ fn modifier_state<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>,
     Ok(s.boolean(on))
 }
 
-fn mouse_modifier_state<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn mouse_modifier_state<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     modifier_state(d, s, this, a, "MouseEvent")
 }
 
-fn key_modifier_state<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn key_modifier_state<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     modifier_state(d, s, this, a, "KeyboardEvent")
 }
 
 /// `[]`: the events that Chrome coalesces or predicts are never made here.
-fn no_events<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn no_events<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     with_ui(d, s, this, |_, _| ())?;
     s.new_array(&[])
 }
 
-fn null<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn null<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     with_ui(d, s, this, |_, _| ())?;
     Ok(s.null())
 }
@@ -295,7 +294,7 @@ fn null<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s
 // ------------------------------------------------------------------------------------------ pointer capture
 
 /// The pointer id argument. Only the id 1 (the mouse) is active.
-fn pointer_id<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>, method: &str) -> Res<'s, ()> {
+fn pointer_id<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, a: Args<'s>, method: &str) -> Res<'s, ()> {
     let Some(v) = a.get(0) else {
         return Err(s.type_error(&format!("Failed to execute '{method}' on 'Element': 1 argument required, but only 0 present.")));
     };
@@ -306,10 +305,10 @@ fn pointer_id<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>, method: &str) -> Res
     Ok(())
 }
 
-fn set_pointer_capture<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_pointer_capture<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let el = d.el_s(s, this)?;
     pointer_id(d, s, a, "setPointerCapture")?;
-    if !old(s, |it| d.in_document(it, el))? {
+    if !old::<E, _>(s, |it| d.in_document(it, el))? {
         return Err(d.dom_err_s(s, "InvalidStateError", "Failed to execute 'setPointerCapture' on 'Element': InvalidStateError"));
     }
     let mut st = d.st.borrow_mut();
@@ -319,7 +318,7 @@ fn set_pointer_capture<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args
     Ok(s.undefined())
 }
 
-fn release_pointer_capture<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn release_pointer_capture<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let el = d.el_s(s, this)?;
     pointer_id(d, s, a, "releasePointerCapture")?;
     let mut st = d.st.borrow_mut();
@@ -329,7 +328,7 @@ fn release_pointer_capture<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: 
     Ok(s.undefined())
 }
 
-fn has_pointer_capture<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn has_pointer_capture<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let el = d.el_s(s, this)?;
     let Some(v) = a.get(0) else {
         return Err(s.type_error("Failed to execute 'hasPointerCapture' on 'Element': 1 argument required, but only 0 present."));
@@ -342,20 +341,20 @@ fn has_pointer_capture<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args
 
 // ------------------------------------------------------------------------------------------ install
 
-enum To {
-    Get(HS),
-    Method(HS, u32),
+enum To<E: Eng> {
+    Get(HS<E>),
+    Method(HS<E>, u32),
 }
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// Define the members that the window events did not need (once). See the header.
-    pub(crate) fn ensure_ui_ext(&self, it: &mut Interp<'_>) -> R<()> {
+    pub(crate) fn ensure_ui_ext(&self, it: &mut E::Vm) -> R<E, ()> {
         if std::mem::replace(&mut self.st.borrow_mut().ui.ext, true) {
             return Ok(());
         }
         let p = self.p();
         let (m, pt, k, i, el) = (p.mouse, p.pointer, p.keyboard, p.inputev, p.element);
-        let rows: &[(&[ObjId], &str, To)] = &[
+        let rows: &[(&[E::Obj], &str, To<E>)] = &[
             (&[m, k, i], "view", To::Get(view)),
             (&[m], "offsetX", To::Get(offset_x)),
             (&[m], "offsetY", To::Get(offset_y)),
@@ -399,18 +398,18 @@ impl Dom {
                 To::Method(h, len) => {
                     let f = self.add_fn_s_obj(it, h, name, len, HostFn::Method)?;
                     for &o in *on {
-                        it.define_data(o, key, Value::Object(f), true, false, true)?;
+                        it.define_data(o, key, E::obj_raw(f), true, false, true)?;
                     }
                 }
             }
         }
         // `KeyboardEvent.DOM_KEY_LOCATION_*`, on the interface and its prototype.
         let kc = self.key(it, "constructor")?;
-        if let Value::Object(ctor) = it.get_value(Value::Object(k), kc)? {
+        if let Val::Object(ctor) = E::kind(it.get_value(E::obj_raw(k), kc)?) {
             for (n, v) in [("DOM_KEY_LOCATION_STANDARD", 0.0), ("DOM_KEY_LOCATION_LEFT", 1.0), ("DOM_KEY_LOCATION_RIGHT", 2.0), ("DOM_KEY_LOCATION_NUMPAD", 3.0)] {
-                let key: PropertyKey = self.key(it, n)?;
-                it.define_data(ctor, key, Value::Number(v), false, true, false)?;
-                it.define_data(k, key, Value::Number(v), false, true, false)?;
+                let key: E::Key = self.key(it, n)?;
+                it.define_data(ctor, key, E::num(v), false, true, false)?;
+                it.define_data(k, key, E::num(v), false, true, false)?;
             }
         }
         Ok(())

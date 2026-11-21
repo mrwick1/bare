@@ -49,6 +49,7 @@
 //! - Computed style is `browser_computed.rs`. It has its own read-only prototype under this one.
 //! - `new CSSStyleDeclaration()` and a subclass of it throw `TypeError: Illegal constructor`.
 
+use crate::eng::{Eng, Fault, Ops, Val};
 use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_dom::attr_set;
@@ -58,12 +59,9 @@ use bare_js_api::{Args, HostFn, Local, Type};
 use crate::browser_style_block::{Decl, Fail, Lim, custom, get, parse, priority, remove, serialize, set};
 use crate::browser_style_block as blk;
 use bare_css::values::{Property, SHORTHANDS};
-use bare_js::eval::Error;
 use std::borrow::Cow;
 use bare_html::dom::{NodeId, Ns};
-use bare_js::eval::Interp;
-use bare_js::heap::{HeapError, Slot};
-use bare_js::value::{ObjId, StrId, Value};
+use crate::eng::Slot;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 
@@ -113,20 +111,20 @@ pub struct StyleStats {
 }
 
 /// The longhand names of one `CSSStyleDeclaration`, for its indexes. Valid for one attribute text and one write count.
-struct Names {
+struct Names<E: Eng> {
     text: String,
     writes: u64,
-    vals: Vec<StrId>,
+    vals: Vec<E::Str>,
 }
 
 #[derive(Default)]
-struct SState {
+struct SState<E: Eng> {
     /// `CSSStyleDeclaration` object -> the names of its indexes.
-    names: IdMap<ObjId, Names>,
+    names: IdMap<<E as Eng>::Obj, Names<E>>,
     /// `CSSStyleDeclaration` object -> its element.
-    objs: IdMap<ObjId, NodeId>,
+    objs: IdMap<<E as Eng>::Obj, NodeId>,
     /// element -> its `style` object (`SameObject`).
-    by_el: HashMap<NodeId, ObjId>,
+    by_el: HashMap<NodeId, <E as Eng>::Obj>,
     /// element -> the parse of its `style` attribute at the last call.
     blocks: HashMap<NodeId, Block>,
     // Boxed on purpose: the field is one pointer wide, and most documents have none.
@@ -135,12 +133,12 @@ struct SState {
 }
 
 #[derive(Default)]
-pub(crate) struct Style {
+pub(crate) struct Style<E: Eng> {
     lim: Cell<StyleLimits>,
     pub(crate) has_pending: Cell<bool>,
-    s: RefCell<SState>,
-    pub(crate) proto: OnceCell<ObjId>,
-    fixed: RefCell<Vec<ObjId>>,
+    s: RefCell<SState<E>>,
+    pub(crate) proto: OnceCell<<E as Eng>::Obj>,
+    fixed: RefCell<Vec<<E as Eng>::Obj>>,
     /// The host function id of the call in progress (set by `Dom::call`; the named accessors read it first).
     pub(crate) cur: Cell<u32>,
     /// Function id of a named getter or setter -> index in `props`.
@@ -197,7 +195,7 @@ fn key(name: &str) -> Cow<'_, str> {
     if custom(name) || !name.bytes().any(|b| b.is_ascii_uppercase()) { Cow::Borrowed(name) } else { Cow::Owned(name.to_ascii_lowercase()) }
 }
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     fn style_lim(&self) -> StyleLimits {
         self.style.lim.get()
     }
@@ -208,25 +206,25 @@ impl Dom {
     }
 
     /// The error of a block operation. A cap is `Limit(Host(name))`.
-    fn style_fail(&self, f: Fail) -> Error {
+    fn style_fail(&self, f: Fail<E>) -> Fault<E> {
         match f {
             Fail::Bytes => self.lim("style-bytes"),
             Fail::Decls => self.lim("style-decls"),
-            Fail::Unsupported(what) => Error::Unsupported(unsupported(what)),
+            Fail::Unsupported(what) => Fault::Unsupported(what),
             Fail::Err(e) => e,
         }
     }
 
     /// Parse a block of declarations (an attribute value or `cssText`).
-    fn style_parse(&self, it: &mut Interp<'_>, text: &str) -> R<(Vec<Decl>, u64)> {
+    fn style_parse(&self, it: &mut E::Vm, text: &str) -> R<E, (Vec<Decl>, u64)> {
         let mut spent = 0;
-        let list = parse(text, self.blim(), &mut |n| { spent += n; it.charge(n) }).map_err(|f| self.style_fail(f))?;
+        let list = parse(text, self.blim(), &mut |n| { spent += n; it.charge_o(n) }).map_err(|f| self.style_fail(f))?;
         Ok((list, spent))
     }
 
     /// The block of the `style` attribute now: the kept one when the text is the same, else a parse. Give it back with
     /// `style_keep` when it still is the parse of the attribute; a block that is dropped is only parsed again.
-    fn style_read(&self, it: &mut Interp<'_>, el: NodeId) -> R<Block> {
+    fn style_read(&self, it: &mut E::Vm, el: NodeId) -> R<E, Block> {
         let doc = self.doc.borrow();
         let text = doc.find_atom("style").and_then(|a| doc.attr(el, a)).unwrap_or("");
         if self.style.has_pending.get() {
@@ -235,7 +233,7 @@ impl Dom {
                 let span = doc.find_atom("style").and_then(|a| doc.attr_span(el, a));
                 if pending.get(&el).is_some_and(|p| p.span != span) { pending.remove(&el); }
                 if let Some(b) = pending.get_mut(&el).and_then(|p| p.block.take()) {
-                    it.charge(b.spent)?;
+                    it.charge_o(b.spent)?;
                     return Ok(b);
                 }
             }
@@ -243,15 +241,15 @@ impl Dom {
         if let Some(b) = self.style.s.borrow_mut().blocks.remove(&el)
             && b.text == text
         {
-            it.charge(b.spent)?;
+            it.charge_o(b.spent)?;
             self.style.hits.set(self.style.hits.get() + 1);
-            debug_assert!(parse(text, self.blim(), &mut |_| Ok(())).ok().is_some_and(|l| l == b.list), "kept style block is stale");
+            debug_assert!(parse::<E>(text, self.blim(), &mut |_| Ok(())).ok().is_some_and(|l| l == b.list), "kept style block is stale");
             return Ok(b);
         }
         let mut spent = 0;
         let list = parse(text, self.blim(), &mut |n| {
             spent += n;
-            it.charge(n)
+            it.charge_o(n)
         })
         .map_err(|f| self.style_fail(f))?;
         Ok(Block { text: text.to_string(), list, spent })
@@ -274,18 +272,18 @@ impl Dom {
     }
 
     /// Serialize into the call buffer. The caller returns it with `style.buf.replace`.
-    fn style_text(&self, it: &mut Interp<'_>, list: &[Decl], buf: &mut String) -> R<blk::Serialized> {
-        serialize(list, self.blim(), buf, &mut |n| it.charge(n)).map_err(|f| self.style_fail(f))
+    fn style_text(&self, it: &mut E::Vm, list: &[Decl], buf: &mut String) -> R<E, blk::Serialized> {
+        serialize(list, self.blim(), buf, &mut |n| it.charge_o(n)).map_err(|f| self.style_fail(f))
     }
 
     #[cold]
-    fn style_check_pending(&self, it: &mut Interp<'_>, el: NodeId, list: &[Decl]) -> R<()> {
+    fn style_check_pending(&self, it: &mut E::Vm, el: NodeId, list: &[Decl]) -> R<E, ()> {
         let bytes = list.iter().try_fold(0usize, |n, d| n.checked_add(d.name.len() + d.value.len())).ok_or_else(|| self.lim("style-bytes"))?;
         if bytes > self.style_lim().max_bytes { return Err(self.lim("style-bytes")); }
         let s = self.style.s.borrow();
         if let Some(m) = &s.pending
             && m.len() >= self.style_lim().max_objects && !m.contains_key(&el) { return Err(self.lim("style-objects")); }
-        it.charge(1 + list.len() as u64 + bytes as u64 / 4)
+        it.charge_o(1 + list.len() as u64 + bytes as u64 / 4)
     }
 
     #[cold]
@@ -297,7 +295,7 @@ impl Dom {
     }
 
     /// Write exposed text, and retain pending state independently of the parse cache.
-    fn style_write(&self, it: &mut Interp<'_>, el: NodeId, mut b: Block) -> R<()> {
+    fn style_write(&self, it: &mut E::Vm, el: NodeId, mut b: Block) -> R<E, ()> {
         self.style.writes.set(self.style.writes.get() + 1);
         let mut buf = self.style.buf.take();
         let serialized = self.style_text(it, &b.list, &mut buf)?;
@@ -314,7 +312,7 @@ impl Dom {
         Ok(())
     }
 
-    fn style_set(&self, it: &mut Interp<'_>, el: NodeId, name: &str, value: &str, priority: &str) -> R<()> {
+    fn style_set(&self, it: &mut E::Vm, el: NodeId, name: &str, value: &str, priority: &str) -> R<E, ()> {
         let name = key(name);
         if value.is_empty() {
             return self.style_remove(it, el, &name).map(|_| ());
@@ -328,7 +326,7 @@ impl Dom {
         };
         let mut b = self.style_read(it, el)?;
         let mut probe = self.style.buf.take();
-        let changed = set(&mut b.list, &name, value, important, self.blim(), &mut probe, &mut |n| it.charge(n)).map_err(|f| self.style_fail(f))?;
+        let changed = set(&mut b.list, &name, value, important, self.blim(), &mut probe, &mut |n| it.charge_o(n)).map_err(|f| self.style_fail(f))?;
         self.style.buf.replace(probe);
         if !changed {
             self.style_keep(el, b);
@@ -338,9 +336,9 @@ impl Dom {
     }
 
     /// `removeProperty`: the old value of the property (`""` if none).
-    fn style_remove(&self, it: &mut Interp<'_>, el: NodeId, name: &str) -> R<String> {
+    fn style_remove(&self, it: &mut E::Vm, el: NodeId, name: &str) -> R<E, String> {
         let mut b = self.style_read(it, el)?;
-        let (old, changed) = remove(&mut b.list, &key(name), self.style_lim().max_bytes, &mut |n| it.charge(n)).map_err(|f| self.style_fail(f))?;
+        let (old, changed) = remove(&mut b.list, &key(name), self.style_lim().max_bytes, &mut |n| it.charge_o(n)).map_err(|f| self.style_fail(f))?;
         if changed {
             self.style_write(it, el, b)?;
         } else {
@@ -349,14 +347,14 @@ impl Dom {
         Ok(old)
     }
 
-    fn style_get(&self, it: &mut Interp<'_>, el: NodeId, name: &str) -> R<Option<String>> {
+    fn style_get(&self, it: &mut E::Vm, el: NodeId, name: &str) -> R<E, Option<String>> {
         let b = self.style_read(it, el)?;
-        let v = get(&b.list, &key(name), self.style_lim().max_bytes, &mut |n| it.charge(n)).map_err(|f| self.style_fail(f))?;
+        let v = get(&b.list, &key(name), self.style_lim().max_bytes, &mut |n| it.charge_o(n)).map_err(|f| self.style_fail(f))?;
         self.style_keep(el, b);
         Ok(v)
     }
 
-    pub(crate) fn style_inputs(&self, it: &mut Interp<'_>, doc: &bare_html::dom::Document) -> R<HashMap<NodeId, Vec<bare_css::cascade::InputDeclaration>>> {
+    pub(crate) fn style_inputs(&self, it: &mut E::Vm, doc: &bare_html::dom::Document) -> R<E, HashMap<NodeId, Vec<bare_css::cascade::InputDeclaration>>> {
         let mut s = self.style.s.borrow_mut();
         let atom = doc.find_atom("style");
         let mut out = HashMap::new();
@@ -364,14 +362,14 @@ impl Dom {
             pending.retain(|&el, b| b.span == atom.and_then(|a| doc.attr_span(el, a)));
             for (&el, p) in pending.iter() {
                 let Some(b) = &p.block else { continue };
-                it.charge(1 + b.list.len() as u64 + b.list.iter().map(|d| d.name.len() + d.value.len()).sum::<usize>() as u64 / 4)?;
+                it.charge_o(1 + b.list.len() as u64 + b.list.iter().map(|d| d.name.len() + d.value.len()).sum::<usize>() as u64 / 4)?;
                 out.insert(el, blk::inputs(&b.list));
             }
         }
         Ok(out)
     }
 
-    pub(crate) fn style_object_inputs(&self, doc: &bare_html::dom::Document, style: ObjId) -> Option<Vec<bare_css::cascade::InputDeclaration>> {
+    pub(crate) fn style_object_inputs(&self, doc: &bare_html::dom::Document, style: E::Obj) -> Option<Vec<bare_css::cascade::InputDeclaration>> {
         let s = self.style.s.borrow();
         let el = s.objs.get(&style)?;
         let b = s.pending.as_ref()?.get(el)?;
@@ -380,44 +378,44 @@ impl Dom {
     }
 
 /// The element of a `CSSStyleDeclaration` object.
-    fn style_el_s<'s>(&self, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
-        if let Some(o) = obj_id(s, this)
+    fn style_el_s<'s>(&self, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, NodeId> {
+        if let Some(o) = obj_id::<E>(s, this)
             && let Some(&el) = self.style.s.borrow().objs.get(&o)
         {
             return Ok(el);
         }
-        Err(illegal_s(s))
+        Err(illegal_s::<E>(s))
     }
 
     /// An HTML element (`style` is on `HTMLElement`, not on `Element`).
-    pub(crate) fn style_html_el_s<'s>(&self, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
+    pub(crate) fn style_html_el_s<'s>(&self, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, NodeId> {
         let n = self.el_s(s, this)?;
         if self.doc.borrow().is_foreign(n) {
-            return Err(illegal_s(s));
+            return Err(illegal_s::<E>(s));
         }
         Ok(n)
     }
 
     /// An SVG element (`style` is also on `SVGElement`, not on `Element`).
-    fn style_svg_el_s<'s>(&self, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
+    fn style_svg_el_s<'s>(&self, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, NodeId> {
         let n = self.el_s(s, this)?;
         if self.doc.borrow().element_ns(n) != Ns::Svg {
-            return Err(illegal_s(s));
+            return Err(illegal_s::<E>(s));
         }
         Ok(n)
     }
 
-    pub(crate) fn is_style_object(&self, o: ObjId) -> bool {
+    pub(crate) fn is_style_object(&self, o: E::Obj) -> bool {
         self.style.s.borrow().objs.contains_key(&o)
     }
 }
 
 /// WebIDL `[LegacyNullToEmptyString] DOMString`: `null` is `""`.
-pub(crate) fn null_empty_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, v: Local<'s>) -> Res<'s, String> {
+pub(crate) fn null_empty_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>) -> Res<'s, String> {
     if s.type_of(v) == Type::Null { Ok(String::new()) } else { d.string_arg_s(s, v) }
 }
 
-pub(crate) fn required_s<'s>(s: &mut Sc<'s, '_>, a: Args<'s>, n: usize, name: &str) -> Res<'s, ()> {
+pub(crate) fn required_s<'s, E: Eng>(s: &mut Sc<'s, E>, a: Args<'s>, n: usize, name: &str) -> Res<'s, ()> {
     if a.len() < n {
         return Err(s.type_error(&format!(
             "Failed to execute '{name}' on 'CSSStyleDeclaration': {n} argument{} required, but only {} present.",
@@ -429,7 +427,7 @@ pub(crate) fn required_s<'s>(s: &mut Sc<'s, '_>, a: Args<'s>, n: usize, name: &s
 }
 
 /// WebIDL `unsigned long`.
-pub(crate) fn to_u32_s<'s>(s: &mut Sc<'s, '_>, v: Local<'s>) -> Res<'s, u32> {
+pub(crate) fn to_u32_s<'s, E: Eng>(s: &mut Sc<'s, E>, v: Local<'s>) -> Res<'s, u32> {
     let n = s.to_number(v)?;
     Ok(if n.is_finite() { n.trunc().rem_euclid(4294967296.0) as u32 } else { 0 })
 }
@@ -437,22 +435,22 @@ pub(crate) fn to_u32_s<'s>(s: &mut Sc<'s, '_>, v: Local<'s>) -> Res<'s, u32> {
 // ------------------------------------------------------------------------------------------ JS side
 
 /// `HTMLElement.prototype.style` and `SVGElement.prototype.style`
-fn style_attr<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn style_attr<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let el = d.style_html_el_s(s, this)?;
     style_of(d, s, el)
 }
 
-fn style_attr_svg<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn style_attr_svg<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let el = d.style_svg_el_s(s, this)?;
     style_of(d, s, el)
 }
 
-fn style_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, el: NodeId) -> Res<'s, Local<'s>> {
+fn style_of<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, el: NodeId) -> Res<'s, Local<'s>> {
     let o = style_object(d, s, el)?;
     Ok(d.obj_local(s, o))
 }
 
-fn style_object<'s>(d: &Dom, s: &mut Sc<'s, '_>, el: NodeId) -> Res<'s, ObjId> {
+fn style_object<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, el: NodeId) -> Res<'s, E::Obj> {
     let known = d.style.s.borrow().by_el.get(&el).copied();
     if let Some(o) = known {
         return Ok(o);
@@ -461,7 +459,7 @@ fn style_object<'s>(d: &Dom, s: &mut Sc<'s, '_>, el: NodeId) -> Res<'s, ObjId> {
         return Err(d.lim_s(s, "style-objects"));
     }
     if d.style.proto.get().is_none() {
-        old(s, |it| ensure(d, it))?;
+        old::<E, _>(s, |it| ensure(d, it))?;
     }
     let o = d.new_source_s(s, crate::browser_sources::Source::Style, Some(*d.style.proto.get().expect("ensured")))?;
     let mut st = d.style.s.borrow_mut();
@@ -470,42 +468,42 @@ fn style_object<'s>(d: &Dom, s: &mut Sc<'s, '_>, el: NodeId) -> Res<'s, ObjId> {
     Ok(o)
 }
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// The declaration of a CSSOM rule: the `style` object of a detached `span` that no script can reach, so it has no element wrapper.
-    pub(crate) fn rule_declaration_s<'s>(&self, s: &mut Sc<'s, '_>, text: &str) -> Res<'s, ObjId> {
+    pub(crate) fn rule_declaration_s<'s>(&self, s: &mut Sc<'s, E>, text: &str) -> Res<'s, E::Obj> {
         let el = {
             let mut doc = self.doc.borrow_mut();
-            self.room(&doc, 1, 0).map_err(|e| lift_err(s, e))?;
+            self.room(&doc, 1, 0).map_err(|e| lift_err::<E>(s, e))?;
             if doc.find_atom("span").is_none() && doc.name_count() + 1 > self.lim.max_names {
                 return Err(self.lim_s(s, "dom-names"));
             }
             doc.create_element("span")
         };
         let o = style_object(self, s, el)?;
-        old(s, |it| self.style_set_text(it, el, text))?;
+        old::<E, _>(s, |it| self.style_set_text(it, el, text))?;
         Ok(o)
     }
 }
 
-fn set_style_attr<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_style_attr<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let el = d.style_html_el_s(s, this)?;
-    let v = arg_s(s, a, 0);
+    let v = arg_s::<E>(s, a, 0);
     let text = null_empty_s(d, s, v)?;
-    old(s, |it| d.style_set_text(it, el, &text))?;
+    old::<E, _>(s, |it| d.style_set_text(it, el, &text))?;
     Ok(s.undefined())
 }
 
-fn set_style_attr_svg<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_style_attr_svg<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let el = d.style_svg_el_s(s, this)?;
-    let v = arg_s(s, a, 0);
+    let v = arg_s::<E>(s, a, 0);
     let text = null_empty_s(d, s, v)?;
-    old(s, |it| d.style_set_text(it, el, &text))?;
+    old::<E, _>(s, |it| d.style_set_text(it, el, &text))?;
     Ok(s.undefined())
 }
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// `cssText` setter: the attribute is set even when the block is empty (the standard always sets it).
-    fn style_set_text(&self, it: &mut Interp<'_>, el: NodeId, text: &str) -> R<()> {
+    fn style_set_text(&self, it: &mut E::Vm, el: NodeId, text: &str) -> R<E, ()> {
         let (list, spent) = self.style_parse(it, text)?;
         self.style.writes.set(self.style.writes.get() + 1);
         let mut buf = self.style.buf.take();
@@ -521,10 +519,10 @@ impl Dom {
     }
 }
 
-fn css_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn css_text<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let el = d.style_el_s(s, this)?;
     let mut buf = d.style.buf.take();
-    let r = old(s, |it| {
+    let r = old::<E, _>(s, |it| {
         let b = d.style_read(it, el)?;
         d.style_text(it, &b.list, &mut buf)?;
         d.style_keep(el, b);
@@ -538,24 +536,24 @@ fn css_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Re
     v
 }
 
-fn set_css_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_css_text<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let el = d.style_el_s(s, this)?;
-    let v = arg_s(s, a, 0);
+    let v = arg_s::<E>(s, a, 0);
     let text = null_empty_s(d, s, v)?;
-    old(s, |it| d.style_set_text(it, el, &text))?;
+    old::<E, _>(s, |it| d.style_set_text(it, el, &text))?;
     written(d, s, this)?;
     Ok(s.undefined())
 }
 
 /// A write through a rule declaration reaches the sheet text.
-fn written<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, ()> {
-    let t = obj_id(s, this).map_or(Value::Undefined, Value::Object);
-    old(s, |it| crate::browser_cssom::declaration_written(d, it, t))
+fn written<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, ()> {
+    let t = obj_id::<E>(s, this).map_or(E::undef(), E::obj_raw);
+    old::<E, _>(s, |it| crate::browser_cssom::declaration_written(d, it, t))
 }
 
-fn length<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn length<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let el = d.style_el_s(s, this)?;
-    let n = old(s, |it| {
+    let n = old::<E, _>(s, |it| {
         let b = d.style_read(it, el)?;
         let n = blk::length(&b.list);
         d.style_keep(el, b);
@@ -564,17 +562,17 @@ fn length<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<
     Ok(s.number(n as f64))
 }
 
-fn parent_rule<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn parent_rule<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     d.style_el_s(s, this)?;
     Ok(s.null())
 }
 
-fn item<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn item<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let el = d.style_el_s(s, this)?;
-    required_s(s, a, 1, "item")?;
-    let v = arg_s(s, a, 0);
-    let i = to_u32_s(s, v)? as usize;
-    let name = old(s, |it| {
+    required_s::<E>(s, a, 1, "item")?;
+    let v = arg_s::<E>(s, a, 0);
+    let i = to_u32_s::<E>(s, v)? as usize;
+    let name = old::<E, _>(s, |it| {
         let b = d.style_read(it, el)?;
         let name = blk::item(&b.list, i).unwrap_or_default();
         d.style_keep(el, b);
@@ -583,21 +581,21 @@ fn item<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s
     d.js_str_s(s, &name)
 }
 
-fn get_property_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn get_property_value<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let el = d.style_el_s(s, this)?;
-    required_s(s, a, 1, "getPropertyValue")?;
-    let v = arg_s(s, a, 0);
+    required_s::<E>(s, a, 1, "getPropertyValue")?;
+    let v = arg_s::<E>(s, a, 0);
     let name = d.string_arg_s(s, v)?;
-    let v = old(s, |it| Ok(d.style_get(it, el, &name)?.unwrap_or_default()))?;
+    let v = old::<E, _>(s, |it| Ok(d.style_get(it, el, &name)?.unwrap_or_default()))?;
     d.js_str_s(s, &v)
 }
 
-fn get_property_priority<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn get_property_priority<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let el = d.style_el_s(s, this)?;
-    required_s(s, a, 1, "getPropertyPriority")?;
-    let v = arg_s(s, a, 0);
+    required_s::<E>(s, a, 1, "getPropertyPriority")?;
+    let v = arg_s::<E>(s, a, 0);
     let name = d.string_arg_s(s, v)?;
-    let imp = old(s, |it| {
+    let imp = old::<E, _>(s, |it| {
         let b = d.style_read(it, el)?;
         let imp = priority(&b.list, &key(&name));
         d.style_keep(el, b);
@@ -606,78 +604,78 @@ fn get_property_priority<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Ar
     d.js_str_s(s, if imp { "important" } else { "" })
 }
 
-fn set_property<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_property<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let el = d.style_el_s(s, this)?;
-    required_s(s, a, 2, "setProperty")?;
-    let (n, v) = (arg_s(s, a, 0), arg_s(s, a, 1));
+    required_s::<E>(s, a, 2, "setProperty")?;
+    let (n, v) = (arg_s::<E>(s, a, 0), arg_s::<E>(s, a, 1));
     let name = d.string_arg_s(s, n)?;
     let value = null_empty_s(d, s, v)?;
     let prio = match a.get(2) {
         Some(p) if s.type_of(p) != Type::Undefined => null_empty_s(d, s, p)?,
         _ => String::new(),
     };
-    old(s, |it| d.style_set(it, el, &name, &value, &prio))?;
+    old::<E, _>(s, |it| d.style_set(it, el, &name, &value, &prio))?;
     written(d, s, this)?;
     Ok(s.undefined())
 }
 
-fn remove_property<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn remove_property<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let el = d.style_el_s(s, this)?;
-    required_s(s, a, 1, "removeProperty")?;
-    let v = arg_s(s, a, 0);
+    required_s::<E>(s, a, 1, "removeProperty")?;
+    let v = arg_s::<E>(s, a, 0);
     let name = d.string_arg_s(s, v)?;
-    let old_v = old(s, |it| d.style_remove(it, el, &name))?;
+    let old_v = old::<E, _>(s, |it| d.style_remove(it, el, &name))?;
     written(d, s, this)?;
     d.js_str_s(s, &old_v)
 }
 
 /// The property of the named accessor that is running.
-pub(crate) fn current<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, &'static str> {
+pub(crate) fn current<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, &'static str> {
     let i = d.style.fns.borrow().get(&(d.style.cur.get() & !CUR_NEW)).copied();
     match (i, d.style.props.get()) {
         (Some(i), Some(p)) => Ok(p[i]),
-        _ => Err(illegal_s(s)),
+        _ => Err(illegal_s::<E>(s)),
     }
 }
 
-fn named_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn named_get<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let name = current(d, s)?;
     let el = d.style_el_s(s, this)?;
-    let v = old(s, |it| Ok(d.style_get(it, el, name)?.unwrap_or_default()))?;
+    let v = old::<E, _>(s, |it| Ok(d.style_get(it, el, name)?.unwrap_or_default()))?;
     d.js_str_s(s, &v)
 }
 
-fn named_set<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn named_set<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let name = current(d, s)?;
     let el = d.style_el_s(s, this)?;
-    let v = arg_s(s, a, 0);
+    let v = arg_s::<E>(s, a, 0);
     let value = null_empty_s(d, s, v)?;
-    old(s, |it| d.style_set(it, el, name, &value, ""))?;
+    old::<E, _>(s, |it| d.style_set(it, el, name, &value, ""))?;
     written(d, s, this)?;
     Ok(s.undefined())
 }
 
 crate::browser_lazy::lazy_global!(lazy_ctor, "CSSStyleDeclaration", ensure, |d| d.style.fixed.borrow()[1]);
 
-pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
     // The prototype, its 250 accessors and the computed prototype wait for the first style object, the first `getComputedStyle` or the
     // first read of the global (`ensure`). A page that uses none of them never pays for them.
     table!(lazy = [
         Row::both(1, "CSSStyleDeclaration", lazy_ctor),
     ]);
     let g = s.global();
-    d.install_rows(s, &[g], &lazy::T)?;
+    d.install_rows(s, &[g], &lazy::T::<E>::V)?;
     table!(rows1 = [
         Row::get(1, "style", style_attr, Some(set_style_attr)),
         Row::get(2, "style", style_attr_svg, Some(set_style_attr_svg)),
     ]);
     let targets = [d.obj_local(s, d.p().html), d.obj_local(s, d.p().svg)];
-    d.install_rows(s, &targets, &rows1::T)?;
+    d.install_rows(s, &targets, &rows1::T::<E>::V)?;
     Ok(())
 }
 
 /// Make the `CSSStyleDeclaration` prototype and the computed prototype, once. `style.proto` is the flag, set last.
-pub(crate) fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+pub(crate) fn ensure<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
     if d.style.proto.get().is_some() {
         return Ok(());
     }
@@ -692,7 +690,7 @@ pub(crate) fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     d.def_method_s(it, proto, "removeProperty", 1, remove_property)?;
     // The value iterator of an interface with an indexed getter (WebIDL "iterable"): `Array.prototype.values`.
     let sym = d.plat.sym_iter.get().copied().expect("platform installed first");
-    let values = it.get_value(Value::Object(it.array_prototype()), sym)?;
+    let values = it.get_value(E::obj_raw(it.array_prototype()), sym)?;
     it.define_data(proto, sym, values, true, false, true)?;
 
     let mut props: Vec<&'static str> = Property::LISTED.iter().map(|p| p.name()).collect();
@@ -726,8 +724,8 @@ pub(crate) fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     // `constructor` comes after the accessors, as in `getOwnPropertyNames`.
     let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
     let f = d.add_fn_s_obj(it, illegal_constructor, "CSSStyleDeclaration", 0, bare_js_api::HostFn::Method)?;
-    it.define_data(f, kp, Value::Object(proto), false, false, false)?;
-    it.define_data(proto, kc, Value::Object(f), true, false, true)?;
+    it.define_data(f, kp, E::obj_raw(proto), false, false, false)?;
+    it.define_data(proto, kc, E::obj_raw(f), true, false, true)?;
     crate::browser_computed::fill(d, it, proto, &props)?;
     *d.style.fixed.borrow_mut() = vec![proto, f];
     let _ = d.style.props.set(props);
@@ -741,29 +739,29 @@ pub(crate) fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 
 /// The names of `owner`, read by `f`, when they are fresh. `None`: `owner` is not a style object. Stale names answer
 /// `NeedsHost` (index 0: `fill` makes all of them), so the evaluator fills them and repeats the read.
-fn fresh<T>(d: &Dom, owner: ObjId, f: impl FnOnce(&[StrId]) -> T) -> Option<Result<T, HeapError>> {
-    let Ok(s) = d.style.s.try_borrow() else { return Some(Err(HeapError::HostUnavailable)) };
+fn fresh<T, E: Eng>(d: &Dom<E>, owner: E::Obj, f: impl FnOnce(&[E::Str]) -> T) -> Option<Result<T, bare_js_api::Pending>> {
+    let Ok(s) = d.style.s.try_borrow() else { return Some(Err(bare_js_api::Pending::Busy)) };
     let el = *s.objs.get(&owner)?;
-    let Ok(doc) = d.doc.try_borrow() else { return Some(Err(HeapError::HostUnavailable)) };
+    let Ok(doc) = d.doc.try_borrow() else { return Some(Err(bare_js_api::Pending::Busy)) };
     let now = doc.find_atom("style").and_then(|a| doc.attr(el, a)).unwrap_or("");
     Some(match s.names.get(&owner) {
         Some(n) if n.text == now && n.writes == d.style.writes.get() => Ok(f(&n.vals)),
-        _ => Err(HeapError::NeedsHost { owner, index: 0 }),
+        _ => Err(bare_js_api::Pending::Fill(0)),
     })
 }
 
 /// `IndexedSource::indexed_len` for a style object. `None`: `owner` is not one.
-pub(crate) fn indexed_len(d: &Dom, owner: ObjId) -> Option<Result<usize, HeapError>> {
+pub(crate) fn indexed_len<E: Eng>(d: &Dom<E>, owner: E::Obj) -> Option<Result<usize, bare_js_api::Pending>> {
     fresh(d, owner, |v| v.len())
 }
 
 /// `IndexedSource::indexed_item` for a style object. `None`: `owner` is not one.
-pub(crate) fn indexed_item(d: &Dom, owner: ObjId, index: usize) -> Option<Result<Slot, HeapError>> {
+pub(crate) fn indexed_item<E: Eng>(d: &Dom<E>, owner: E::Obj, index: usize) -> Option<Result<Slot<E>, bare_js_api::Pending>> {
     fresh(d, owner, |v| v.get(index).map_or(Slot::Absent, |&s| Slot::Str(s)))
 }
 
 /// `Host::fill` for a style object: make its names fresh. `Ok(false)`: `owner` is not a style object.
-pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId) -> R<bool> {
+pub(crate) fn fill<E: Eng>(d: &Dom<E>, it: &mut E::Vm, owner: E::Obj) -> R<E, bool> {
     let el = d.style.s.borrow().objs.get(&owner).copied();
     let Some(el) = el else { return Ok(false) };
     // The read charges the parse, like `item` and `length`.
@@ -771,8 +769,8 @@ pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId) -> R<bool> {
     let mut vals = Vec::new();
     for i in 0..blk::length(&b.list) {
         let name = blk::item(&b.list, i).unwrap_or_default();
-        match d.js_str(it, &name)? {
-            Value::String(s) => vals.push(s),
+        match E::kind(d.js_str(it, &name)?) {
+            Val::String(s) => vals.push(s),
             _ => unreachable!("js_str makes a string"),
         }
     }
@@ -783,35 +781,35 @@ pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId) -> R<bool> {
     Ok(true)
 }
 
-pub(crate) fn roots(d: &Dom, out: &mut Roots<'_, '_>) {
-    out.extend(d.style.fixed.borrow().iter().map(|&o| Value::Object(o)));
+pub(crate) fn roots<E: Eng>(d: &Dom<E>, out: &mut Roots<'_, '_, E>) {
+    out.extend(d.style.fixed.borrow().iter().map(|&o| E::obj_raw(o)));
 }
 
 /// The references of the style object `o` (its owner entry, `browser_sources.rs`): the wrapper of its element and its strings.
-pub(crate) fn trace_obj(d: &Dom, o: ObjId, t: &mut bare_js_api::Tracer<'_, Value>) {
+pub(crate) fn trace_obj<E: Eng>(d: &Dom<E>, o: E::Obj, t: &mut bare_js_api::Tracer<'_, E::Raw>) {
     let s = d.style.s.borrow();
     if let Some(&el) = s.objs.get(&o) {
         if let Some(w) = d.st.borrow().by_node.get(&el) {
             t.visit(w);
         }
         for &v in s.names.get(&o).into_iter().flat_map(|n| &n.vals) {
-            crate::browser_sources::visit(t, Value::String(v));
+            crate::browser_sources::visit::<E>(t, E::str_raw(v));
         }
     }
 }
 
 /// The references of the wrapper of the element `n`: its style object.
-pub(crate) fn trace_node(d: &Dom, n: NodeId, t: &mut bare_js_api::Tracer<'_, Value>) {
+pub(crate) fn trace_node<E: Eng>(d: &Dom<E>, n: NodeId, t: &mut bare_js_api::Tracer<'_, E::Raw>) {
     let s = d.style.s.borrow();
     if !s.by_el.is_empty()
         && let Some(&o) = s.by_el.get(&n)
     {
-        crate::browser_sources::visit(t, Value::Object(o));
+        crate::browser_sources::visit::<E>(t, E::obj_raw(o));
     }
 }
 
 /// Drop the entries of the style object `o`, which the collector freed, and the kept block of its element.
-pub(crate) fn prune_obj(d: &Dom, o: ObjId) {
+pub(crate) fn prune_obj<E: Eng>(d: &Dom<E>, o: E::Obj) {
     let mut s = d.style.s.borrow_mut();
     s.names.remove(&o);
     if let Some(el) = s.objs.remove(&o)
@@ -822,7 +820,7 @@ pub(crate) fn prune_obj(d: &Dom, o: ObjId) {
     }
 }
 
-impl Browser {
+impl<E: Eng> Browser<E> {
     /// Replace the bounds of this module. Call it before scripts run.
     pub fn set_style_limits(&mut self, l: StyleLimits) {
         self.dom.style.lim.set(l);
@@ -838,7 +836,7 @@ impl Browser {
 // ------------------------------------------------------------------------------------ arena reclaim (`browser_reclaim.rs`)
 
 /// The elements that `style` objects and kept blocks name.
-pub(crate) fn held(d: &Dom, out: &mut Vec<NodeId>) {
+pub(crate) fn held<E: Eng>(d: &Dom<E>, out: &mut Vec<NodeId>) {
     let s = d.style.s.borrow();
     out.extend(s.objs.values().copied());
     out.extend(s.by_el.keys().copied());
@@ -847,7 +845,7 @@ pub(crate) fn held(d: &Dom, out: &mut Vec<NodeId>) {
 }
 
 /// The spans of the pending blocks: the reclaim moves them when it builds the text list again.
-pub(crate) fn pins(d: &Dom, f: &mut dyn FnMut(&mut bare_html::dom::Span)) {
+pub(crate) fn pins<E: Eng>(d: &Dom<E>, f: &mut dyn FnMut(&mut bare_html::dom::Span)) {
     for p in d.style.s.borrow_mut().pending.iter_mut().flat_map(|m| m.values_mut()) {
         if let Some(sp) = p.span.as_mut() {
             f(sp);

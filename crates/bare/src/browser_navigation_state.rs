@@ -23,10 +23,9 @@
 //! cap, `pushState` throws a `DataCloneError`; over the depth cap it stops with a `Limit`.
 //! `structuredClone` has its own: depth 256, 2^20 nodes, 64 MiB.
 
+use crate::eng::{Eng, Val};
 use crate::browser::*;
 use crate::browser_scoped::*;
-use bare_js::eval::Interp;
-use bare_js::value::{ObjId, Value};
 use bare_js_api::{Abort, CloneHost, CloneLimits, CloneOpts, Cloned, Engine, Local, Refused, Scope};
 use std::any::Any;
 
@@ -40,26 +39,26 @@ pub(crate) enum Transfer {
 }
 
 /// What the engine asks of this page during a clone.
-impl<'q> CloneHost<Interp<'q>> for &Dom {
-    fn is_host_object(&self, o: &Value) -> bool {
-        matches!(o, Value::Object(o) if Dom::is_host_object(self, *o))
+impl<'q, E: Eng> CloneHost<E::Vm> for &Dom<E> {
+    fn is_host_object(&self, o: &E::Raw) -> bool {
+        matches!(E::kind(*o), Val::Object(o) if Dom::is_host_object(self, o))
     }
 
-    fn can_transfer(&self, o: &Value) -> bool {
-        matches!(o, Value::Object(o) if self.port_movable(*o))
+    fn can_transfer(&self, o: &E::Raw) -> bool {
+        matches!(E::kind(*o), Val::Object(o) if self.port_movable(o))
     }
 
-    fn transfer_out(&mut self, o: &Value) -> Box<dyn Any> {
-        let Value::Object(o) = o else { unreachable!("a listed object") };
-        Box::new(Transfer::Port(self.park_port(*o)))
+    fn transfer_out(&mut self, o: &E::Raw) -> Box<dyn Any> {
+        let Val::Object(o) = E::kind(*o) else { unreachable!("a listed object") };
+        Box::new(Transfer::Port(self.park_port(o)))
     }
 
-    fn transfer_in<'s>(&mut self, s: &mut Scope<'s, Interp<'q>>, items: Vec<Box<dyn Any>>) -> Result<Vec<Local<'s>>, bare_js_api::Error<'s>> {
+    fn transfer_in<'s>(&mut self, s: &mut Scope<'s, E::Vm>, items: Vec<Box<dyn Any>>) -> Result<Vec<Local<'s>>, bare_js_api::Error<'s>> {
         let os = make_hosts(self, s, items)?;
         Ok(os.into_iter().map(|o| self.obj_local(s, o)).collect())
     }
 
-    fn data_clone_error<'s>(&mut self, s: &mut Scope<'s, Interp<'q>>, what: Refused) -> bare_js_api::Error<'s> {
+    fn data_clone_error<'s>(&mut self, s: &mut Scope<'s, E::Vm>, what: Refused) -> bare_js_api::Error<'s> {
         let what = match what {
             Refused::Function => "A function",
             Refused::Symbol => "Symbol",
@@ -72,7 +71,7 @@ impl<'q> CloneHost<Interp<'q>> for &Dom {
 }
 
 /// The new ports of the host items of a record, in list order.
-fn make_hosts<'s>(d: &Dom, s: &mut Sc<'s, '_>, items: Vec<Box<dyn Any>>) -> Res<'s, Vec<ObjId>> {
+fn make_hosts<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, items: Vec<Box<dyn Any>>) -> Res<'s, Vec<E::Obj>> {
     let xf: Vec<Transfer> = items.into_iter().map(|b| *b.downcast::<Transfer>().expect("a port")).collect();
     let keys: Vec<u64> = xf.iter().filter_map(|t| if let Transfer::Port(k) = t { Some(*k) } else { None }).collect();
     let ports = d.make_ports(s, &keys)?;
@@ -84,7 +83,7 @@ fn make_hosts<'s>(d: &Dom, s: &mut Sc<'s, '_>, items: Vec<Box<dyn Any>>) -> Res<
 
 /// The record of `v` with these limits and this transfer list. The listed buffers are detached and the listed ports are parked after
 /// the walk succeeded.
-fn out<'s>(d: &Dom, s: &mut Sc<'s, '_>, v: Local<'s>, limits: CloneLimits, list: &[ObjId]) -> Res<'s, Cloned> {
+fn out<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>, limits: CloneLimits, list: &[E::Obj]) -> Res<'s, Cloned> {
     let base = s.engine().stack_len();
     let items: Vec<Local<'s>> = list.iter().map(|&o| d.obj_local(s, o)).collect();
     let mut host = d;
@@ -97,7 +96,7 @@ fn out<'s>(d: &Dom, s: &mut Sc<'s, '_>, v: Local<'s>, limits: CloneLimits, list:
 }
 
 /// The state of `pushState`.
-pub(crate) fn serialize<'s>(d: &Dom, s: &mut Sc<'s, '_>, v: Local<'s>) -> Res<'s, Cloned> {
+pub(crate) fn serialize<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>) -> Res<'s, Cloned> {
     let l = d.nav.lim.get();
     let limits = CloneLimits { bytes: l.max_state_bytes, depth: l.max_state_depth.min(128), nodes: l.max_state_nodes, names: ["history-state-bytes", "history-state-depth", "history-state-nodes"] };
     match out(d, s, v, limits, &[]) {
@@ -114,7 +113,7 @@ fn clone_limits() -> CloneLimits {
 
 /// `structuredClone(v, { transfer })` and a message: the copy, the new ports of the transfer list (in list order) and the byte cost.
 /// `list` comes from `Dom::transfer_list`. With no list the engine copies in one pass and makes no record (`Engine::clone_copy`).
-pub(crate) fn clone_with<'s>(d: &Dom, s: &mut Sc<'s, '_>, v: Local<'s>, list: &[ObjId]) -> Res<'s, (Local<'s>, Vec<ObjId>, usize)> {
+pub(crate) fn clone_with<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>, list: &[E::Obj]) -> Res<'s, (Local<'s>, Vec<E::Obj>, usize)> {
     if list.is_empty() {
         let mut host = d;
         let (copy, cost) = s.engine().clone_copy(v, &clone_limits(), &mut host)?;
@@ -128,20 +127,20 @@ pub(crate) fn clone_with<'s>(d: &Dom, s: &mut Sc<'s, '_>, v: Local<'s>, list: &[
 /// A record with structured-clone limits, and the transfer list as data. Resource limits remain uncatchable. The listed buffers
 /// are detached and the listed ports are parked after the walk succeeded. A listed item that changed during the walk (a getter
 /// detached it) throws `DataCloneError` before any item moves.
-pub(crate) fn clone_state_with<'s>(d: &Dom, s: &mut Sc<'s, '_>, v: Local<'s>, list: &[ObjId]) -> Res<'s, Cloned> {
+pub(crate) fn clone_state_with<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>, list: &[E::Obj]) -> Res<'s, Cloned> {
     out(d, s, v, clone_limits(), list)
 }
 
 /// A new object graph for `c`. No JS runs (the objects are new, so no setter can be hit). A record with no moved item can be read again.
-pub(crate) fn materialize<'s>(d: &Dom, s: &mut Sc<'s, '_>, c: &mut Cloned) -> Res<'s, Local<'s>> {
+pub(crate) fn materialize<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, c: &mut Cloned) -> Res<'s, Local<'s>> {
     materialize_with(d, s, c).map(|r| r.0)
 }
 
 /// `materialize` with a transfer list: the graph and the new ports of the list, in list order. A listed buffer that no node uses is dropped.
 /// The moved items leave `c`.
-pub(crate) fn materialize_with<'s>(d: &Dom, s: &mut Sc<'s, '_>, c: &mut Cloned) -> Res<'s, (Local<'s>, Vec<ObjId>)> {
+pub(crate) fn materialize_with<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, c: &mut Cloned) -> Res<'s, (Local<'s>, Vec<E::Obj>)> {
     let mut host = d;
     let ci = s.engine().clone_in(c, &mut host)?;
-    let ports = ci.hosts.iter().filter_map(|&l| obj_id(s, l)).collect();
+    let ports = ci.hosts.iter().filter_map(|&l| obj_id::<E>(s, l)).collect();
     Ok((ci.value, ports))
 }

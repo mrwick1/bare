@@ -32,14 +32,13 @@
 //! request here is in flight from the call until the network pump sends it). A URL that does not resolve, or is not http(s), is a
 //! `TypeError`. The reply is ignored and a failure is silent.
 
+use crate::eng::{Eng, Ops, Val};
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_js_api::{Args, Engine, Local, Type};
 use crate::browser_platform::arg;
 use bare_html::dom::{Document, NodeData};
-use bare_js::eval::Interp;
 use bare_js_api::HostFn;
-use bare_js::value::{ObjId, Value};
 use std::cell::Cell;
 
 /// The keepalive quota: bytes of request bodies in flight (Fetch Standard, "keepalive").
@@ -49,16 +48,16 @@ const QUOTA: usize = 65536;
 pub(crate) const MESSAGE_COST: usize = 1024;
 
 #[derive(Default)]
-pub(crate) struct Basics {
+pub(crate) struct Basics<E: Eng> {
     /// The wall clock when the realm was made: `lastModified`.
     loaded: Cell<f64>,
     /// The callback that makes a beacon promise handled. Made by the first beacon, then kept in `Dom::fixed`.
-    noop: Cell<Option<bare_js::value::ObjId>>,
+    noop: Cell<Option<<E as Eng>::Obj>>,
     /// The page closes (`Browser::hide`): `document.visibilityState` is "hidden" and `document.hidden` is true.
     pub(crate) hidden: Cell<bool>,
 }
 
-pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
     d.basics.loaded.set(s.wall_now_ms());
     Ok(())
 }
@@ -70,24 +69,24 @@ const DOCUMENT: [&str; 12] = ["hidden", "referrer", "visibilityState", "contentT
 
 /// The ask of the heap for `key` (`browser_handlers::lazy_key`): define it when it is one of the names above. The name `open` is also a
 /// method of `document` (`browser_loader.rs`), so it is defined here and the caller goes on.
-pub(crate) fn define(d: &Dom, it: &mut Interp<'_>, key: &str) -> R<()> {
+pub(crate) fn define<E: Eng>(d: &Dom<E>, it: &mut E::Vm, key: &str) -> R<E, ()> {
     let (g, doc) = (*d.global.get().expect("installed"), d.p().document);
-    let data = |it: &mut Interp<'_>, o, v| -> R<()> {
+    let data = |it: &mut E::Vm, o, v| -> R<E, ()> {
         let k = d.key(it, key)?;
         it.define_data(o, k, v, true, true, true)
     };
-    let hidden = |it: &mut Interp<'_>, h: HS| -> R<()> {
+    let hidden = |it: &mut E::Vm, h: HS<E>| -> R<E, ()> {
         let f = d.add_fn_s_obj(it, h, key, 0, HostFn::Method)?;
         let k = d.key(it, key)?;
-        it.define_data(g, k, Value::Object(f), true, false, true)
+        it.define_data(g, k, E::obj_raw(f), true, false, true)
     };
     match key {
         "DOMException" => crate::browser::define_window(d, it, key).map(|_| ()),
         "fonts" | "FontFace" => crate::browser_fonts::define(d, it),
-        "devicePixelRatio" => data(it, g, Value::Number(1.0)),
-        "screenX" | "screenY" => data(it, g, Value::Number(0.0)),
-        "crossOriginIsolated" | "closed" => data(it, g, Value::Bool(false)),
-        "opener" | "frameElement" => data(it, g, Value::Null),
+        "devicePixelRatio" => data(it, g, E::num(1.0)),
+        "screenX" | "screenY" => data(it, g, E::num(0.0)),
+        "crossOriginIsolated" | "closed" => data(it, g, E::bool_raw(false)),
+        "opener" | "frameElement" => data(it, g, E::null()),
         "postMessage" => d.def_method_s(it, g, "postMessage", 1, post_message).map(|_| ()),
         "print" | "focus" | "blur" => hidden(it, nothing),
         "alert" => hidden(it, alert),
@@ -115,11 +114,11 @@ pub(crate) fn define(d: &Dom, it: &mut Interp<'_>, key: &str) -> R<()> {
 }
 
 /// Every name of `owner` (`Object.keys(window)` and the like ask for all names of an owner).
-pub(crate) fn define_all(d: &Dom, it: &mut Interp<'_>, owner: bare_js::value::ObjId) -> R<()> {
+pub(crate) fn define_all<E: Eng>(d: &Dom<E>, it: &mut E::Vm, owner: E::Obj) -> R<E, ()> {
     let names: &[&str] = if owner == *d.global.get().expect("installed") { &WINDOW } else if owner == d.p().document { &DOCUMENT } else { return Ok(()) };
     for n in names.iter() {
         let k = d.key(it, n)?;
-        if !it.heap.has_own_property(owner, k).map_err(|e| it.heap_error(e))? {
+        if !it.h_has_own(owner, k)? {
             define(d, it, n)?;
         }
     }
@@ -128,7 +127,7 @@ pub(crate) fn define_all(d: &Dom, it: &mut Interp<'_>, owner: bare_js::value::Ob
 
 /// An accessor of `target` for each of `names`, all with one function (named as the first key, which the heap has already). With
 /// `set` the same function is the setter: it runs as one when it gets an argument.
-pub(crate) fn getter(d: &Dom, it: &mut Interp<'_>, target: bare_js::value::ObjId, names: &[&str], h: HS, set: bool) -> R<()> {
+pub(crate) fn getter<E: Eng>(d: &Dom<E>, it: &mut E::Vm, target: E::Obj, names: &[&str], h: HS<E>, set: bool) -> R<E, ()> {
     let f = d.add_fn_s_obj(it, h, names[0], 0, HostFn::Method)?;
     for name in names {
         let k = d.key(it, name)?;
@@ -137,32 +136,32 @@ pub(crate) fn getter(d: &Dom, it: &mut Interp<'_>, target: bare_js::value::ObjId
     Ok(())
 }
 
-fn nothing<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn nothing<'s, E: Eng>(_: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     Ok(s.undefined())
 }
 
 /// The argument `i` as text; a missing one is "".
-fn text_arg<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>, i: usize) -> Res<'s, String> {
+fn text_arg<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, a: Args<'s>, i: usize) -> Res<'s, String> {
     if i >= a.len() {
         return Ok(String::new());
     }
-    let v = arg_s(s, a, i);
+    let v = arg_s::<E>(s, a, i);
     d.string_arg_s(s, v)
 }
 
 /// The dialogs answer from the policy of a driver (`agent.rs`). With no policy: `alert` does nothing, `confirm` gives false and `prompt` null.
-fn alert<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn alert<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let m = text_arg(d, s, a, 0)?;
     crate::agent::dialog("alert", &m, "");
     Ok(s.undefined())
 }
 
-fn confirm<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn confirm<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let m = text_arg(d, s, a, 0)?;
     Ok(s.boolean(crate::agent::dialog("confirm", &m, "").is_some_and(|(ok, _)| ok)))
 }
 
-fn prompt<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn prompt<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let (m, dflt) = (text_arg(d, s, a, 0)?, text_arg(d, s, a, 1)?);
     match crate::agent::dialog("prompt", &m, &dflt) {
         Some((true, Some(t))) => d.js_str_s(s, &t),
@@ -171,7 +170,7 @@ fn prompt<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s,
 }
 
 /// `window.open(url)`: a tab for a driver (`agent.rs`); else null, a blocked popup. It always gives null: the page gets no window.
-fn open<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn open<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let u = text_arg(d, s, a, 0)?;
     if let Some(url) = d.resolve_http(&u) {
         crate::agent::tab(&url);
@@ -213,7 +212,7 @@ fn charset(doc: &Document) -> &'static str {
 }
 
 /// `document.dir`: the `dir` of `<html>` when it is `ltr`, `rtl` or `auto` (any case), else "". The setter writes the attribute.
-fn dir<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn dir<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     if let Some(v) = a.get(0) {
         let v = d.string_arg_s(s, v)?;
         let html = html_of(&d.doc.borrow());
@@ -248,12 +247,12 @@ fn last_modified(ms: f64) -> String {
 // ---------------------------------------------------------------------------------------------- window
 
 /// Is the document a secure context? https, or a loopback host (Secure Contexts, "potentially trustworthy origin").
-pub(crate) fn secure(d: &Dom) -> bool {
+pub(crate) fn secure<E: Eng>(d: &Dom<E>) -> bool {
     d.fetch_base().is_some_and(|u| u.scheme == bare_url::Scheme::Https || crate::browser_fetch::potentially_trustworthy(&u))
 }
 
 /// The origin of the document, serialized: "null" while no URL is configured.
-fn doc_origin(d: &Dom) -> String {
+fn doc_origin<E: Eng>(d: &Dom<E>) -> String {
     let nav = d.nav.s.borrow();
     if let Some(e) = nav.entries.get(nav.cur) {
         return e.url.origin();
@@ -262,7 +261,7 @@ fn doc_origin(d: &Dom) -> String {
     d.fetch_base().and_then(|u| crate::browser_navigation_url::parse(&u.to_string(), None).ok()).map_or_else(|| "null".into(), |r| r.origin())
 }
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// The origin that a `message` event of the window reports.
     pub(crate) fn window_origin(&self) -> String {
         doc_origin(self)
@@ -271,18 +270,18 @@ impl Dom {
 
 /// The arguments of `window.postMessage`, own or remote: the target origin as given ("/" when absent) and the transfer list.
 /// `postMessage(message, targetOrigin, transfer)` or `postMessage(message, { targetOrigin, transfer })`.
-pub(crate) fn post_args<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>) -> Res<'s, (String, Vec<ObjId>)> {
+pub(crate) fn post_args<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, a: Args<'s>) -> Res<'s, (String, Vec<E::Obj>)> {
     if a.is_empty() {
         return Err(s.type_error("Failed to execute 'postMessage' on 'Window': 1 argument required, but only 0 present."));
     }
-    let options = arg_s(s, a, 1);
+    let options = arg_s::<E>(s, a, 1);
     let (target, transfer) = match s.type_of(options) {
         Type::Undefined | Type::Null => (s.undefined(), s.undefined()),
         Type::Object | Type::Function => {
             let target = s.get_str(options, "targetOrigin")?;
             (target, s.get_str(options, "transfer")?)
         }
-        _ => (options, arg_s(s, a, 2)),
+        _ => (options, arg_s::<E>(s, a, 2)),
     };
     let target = match s.type_of(target) {
         Type::Undefined => "/".to_string(),
@@ -296,7 +295,7 @@ pub(crate) fn post_args<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>) -> Res<'s,
 }
 
 /// The origin that a target origin names: `None` for "*" and "/", else the origin of the URL (`SyntaxError` when it does not parse).
-pub(crate) fn target_origin<'s>(s: &mut Sc<'s, '_>, d: &Dom, target: &str) -> Res<'s, Option<String>> {
+pub(crate) fn target_origin<'s, E: Eng>(s: &mut Sc<'s, E>, d: &Dom<E>, target: &str) -> Res<'s, Option<String>> {
     if target == "*" || target == "/" {
         return Ok(None);
     }
@@ -306,13 +305,13 @@ pub(crate) fn target_origin<'s>(s: &mut Sc<'s, '_>, d: &Dom, target: &str) -> Re
     }
 }
 
-fn post_message<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn post_message<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let this = s.engine().raw(this);
     // The window of a blank frame has no message listeners that run here, so a message to it is dropped.
-    if matches!(this, Value::Object(o) if crate::browser_frames::is_blank_window(d, o)) {
+    if matches!(E::kind(this), Val::Object(o) if crate::browser_frames::is_blank_window(d, o)) {
         return Ok(s.undefined());
     }
-    if !matches!(this, Value::Undefined | Value::Null) && !matches!(this, Value::Object(o) if Some(&o) == d.global.get()) {
+    if !matches!(E::kind(this), Val::Undefined | Val::Null) && !matches!(E::kind(this), Val::Object(o) if Some(&o) == d.global.get()) {
         return Err(s.type_error("Illegal invocation"));
     }
     let (target, list) = post_args(d, s, a)?;
@@ -321,24 +320,24 @@ fn post_message<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -
     {
         return Ok(s.undefined());
     }
-    let msg = arg_s(s, a, 0);
+    let msg = arg_s::<E>(s, a, 0);
     let (data, ports, _) = crate::browser_navigation_state::clone_with(d, s, msg, &list)?;
     let data = s.engine().raw(data);
-    lift(s, d.post_window(data, ports.into_boxed_slice()))?;
+    lift::<E, _>(s, d.post_window(data, ports.into_boxed_slice()))?;
     Ok(s.undefined())
 }
 
 // ---------------------------------------------------------------------------------------------- navigator
 
 /// The names of `navigator` that this file adds, on its prototype `np`. `this` is checked with `check` (the one of `browser_web.rs`).
-pub(crate) fn navigator(d: &Dom, it: &mut Interp<'_>, np: bare_js::value::ObjId) -> R<()> {
+pub(crate) fn navigator<E: Eng>(d: &Dom<E>, it: &mut E::Vm, np: E::Obj) -> R<E, ()> {
     // Read-only data properties, not getters: a write fails as it does for an accessor with no setter.
     let strings = [("vendor", "Google Inc."), ("appName", "Netscape"), ("appVersion", crate::browser_web::USER_AGENT.trim_start_matches("Mozilla/")), ("product", "Gecko"), ("productSub", "20030107"), ("vendorSub", "")];
     for (name, v) in strings {
         let (k, v) = (d.key(it, name)?, d.js_str(it, v)?);
         it.define_data(np, k, v, false, true, true)?;
     }
-    for (name, v) in [("maxTouchPoints", Value::Number(0.0)), ("webdriver", Value::Bool(false)), ("pdfViewerEnabled", Value::Bool(true)), ("doNotTrack", Value::Null)] {
+    for (name, v) in [("maxTouchPoints", E::num(0.0)), ("webdriver", E::bool_raw(false)), ("pdfViewerEnabled", E::bool_raw(true)), ("doNotTrack", E::null())] {
         let k = d.key(it, name)?;
         it.define_data(np, k, v, false, true, true)?;
     }
@@ -346,7 +345,7 @@ pub(crate) fn navigator(d: &Dom, it: &mut Interp<'_>, np: bare_js::value::ObjId)
     d.def_get_s(it, np, "mimeTypes", |d, s, t, _| plugins(d, s, t, 1), None)?;
     d.def_method_s(it, np, "javaEnabled", 0, |d, s, t, _| {
         let t = s.engine().raw(t);
-        old(s, |it| crate::browser_web::nav_this(d, it, t))?;
+        old::<E, _>(s, |it| crate::browser_web::nav_this(d, it, t))?;
         Ok(s.boolean(false))
     })?;
     d.def_method_s(it, np, "sendBeacon", 1, send_beacon)?;
@@ -358,16 +357,16 @@ const MIMES: [(&str, &str); 2] = [("application/pdf", "Portable Document Format"
 
 /// `navigator.plugins` (`which` 0) or `navigator.mimeTypes` (1): both arrays are made on the first read of either and become own data
 /// properties of `navigator`, so the second read is the same object.
-fn plugins<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, which: usize) -> Res<'s, Local<'s>> {
+fn plugins<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, which: usize) -> Res<'s, Local<'s>> {
     let this = s.engine().raw(this);
-    old_v(s, |it| plugins_old(d, it, this, which))
+    old_v::<E>(s, |it| plugins_old(d, it, this, which))
 }
 
-fn plugins_old(d: &Dom, it: &mut Interp<'_>, this: Value, which: usize) -> R<Value> {
+fn plugins_old<E: Eng>(d: &Dom<E>, it: &mut E::Vm, this: E::Raw, which: usize) -> R<E, E::Raw> {
     crate::browser_web::nav_this(d, it, this)?;
-    let Value::Object(nav) = this else { unreachable!() };
+    let Val::Object(nav) = E::kind(this) else { unreachable!() };
     let op = it.object_prototype();
-    let mk = |it: &mut Interp<'_>, props: &[(&str, Value)]| -> R<bare_js::value::ObjId> {
+    let mk = |it: &mut E::Vm, props: &[(&str, E::Raw)]| -> R<E, E::Obj> {
         let o = d.obj(it, op)?;
         for &(k, v) in props {
             let k = d.key(it, k)?;
@@ -378,21 +377,21 @@ fn plugins_old(d: &Dom, it: &mut Interp<'_>, this: Value, which: usize) -> R<Val
     let mut mimes = Vec::new();
     for (t, desc) in MIMES {
         let (t, desc, sfx) = (d.js_str(it, t)?, d.js_str(it, desc)?, d.js_str(it, "pdf")?);
-        mimes.push(Value::Object(mk(it, &[("type", t), ("suffixes", sfx), ("description", desc)])?));
+        mimes.push(E::obj_raw(mk(it, &[("type", t), ("suffixes", sfx), ("description", desc)])?));
     }
     let mut plugs = Vec::new();
     for name in PLUGINS {
         let (n, f, desc) = (d.js_str(it, name)?, d.js_str(it, "internal-pdf-viewer")?, d.js_str(it, "Portable Document Format")?);
-        let p = mk(it, &[("name", n), ("filename", f), ("description", desc), ("length", Value::Number(MIMES.len() as f64))])?;
+        let p = mk(it, &[("name", n), ("filename", f), ("description", desc), ("length", E::num(MIMES.len() as f64))])?;
         for (i, &m) in mimes.iter().enumerate() {
             let k = d.key(it, &i.to_string())?;
             it.define_data(p, k, m, false, true, true)?;
         }
-        plugs.push(Value::Object(p));
+        plugs.push(E::obj_raw(p));
     }
     for &m in &mimes {
         let (k, v) = (d.key(it, "enabledPlugin")?, plugs[0]);
-        let Value::Object(m) = m else { unreachable!() };
+        let Val::Object(m) = E::kind(m) else { unreachable!() };
         it.define_data(m, k, v, false, true, true)?;
     }
     let (plugs, mimes) = (it.array_from(&plugs)?, it.array_from(&mimes)?);
@@ -403,52 +402,52 @@ fn plugins_old(d: &Dom, it: &mut Interp<'_>, this: Value, which: usize) -> R<Val
     Ok([plugs, mimes][which])
 }
 
-fn send_beacon<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn send_beacon<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let this = s.engine().raw(this);
-    old(s, |it| crate::browser_web::nav_this(d, it, this))?;
+    old::<E, _>(s, |it| crate::browser_web::nav_this(d, it, this))?;
     if a.is_empty() {
         return Err(s.type_error("Failed to execute 'sendBeacon' on 'Navigator': 1 argument required, but only 0 present."));
     }
-    let a: Vec<Value> = a.iter().map(|v| s.engine().raw(v)).collect();
-    let queued = old(s, |it| send_beacon_old(d, it, &a))?;
+    let a: Vec<E::Raw> = a.iter().map(|v| s.engine().raw(v)).collect();
+    let queued = old::<E, _>(s, |it| send_beacon_old(d, it, &a))?;
     Ok(s.boolean(queued))
 }
 
 /// The rest of `sendBeacon`: whether the beacon was queued.
-fn send_beacon_old(d: &Dom, it: &mut Interp<'_>, a: &[Value]) -> R<bool> {
+fn send_beacon_old<E: Eng>(d: &Dom<E>, it: &mut E::Vm, a: &[E::Raw]) -> R<E, bool> {
     let s = it.to_js_string(a[0])?;
-    let url = it.heap.to_string_lossy(s).map_err(|e| it.heap_error(e))?;
+    let url = it.h_to_string_lossy(s)?;
     if let Some(base) = d.fetch_base() {
         match base.join(&url) {
             Ok(u) if matches!(u.scheme, bare_url::Scheme::Http | bare_url::Scheme::Https) => {}
-            Ok(_) => return Err(it.type_error("Failed to execute 'sendBeacon' on 'Navigator': Beacons are only supported over HTTP(S).")),
-            Err(_) => return Err(it.type_error(&format!("Failed to execute 'sendBeacon' on 'Navigator': The URL '{url}' is invalid."))),
+            Ok(_) => return Err(it.type_error_o("Failed to execute 'sendBeacon' on 'Navigator': Beacons are only supported over HTTP(S).")),
+            Err(_) => return Err(it.type_error_o(&format!("Failed to execute 'sendBeacon' on 'Navigator': The URL '{url}' is invalid."))),
         }
     }
-    let data = arg(a, 1);
-    let n = match data {
-        Value::Undefined | Value::Null => 0,
-        Value::Object(_) if d.web_body_len(data).is_some() => d.web_body_len(data).unwrap_or(0),
-        Value::Object(o) if it.heap.bytes(o).is_some() => it.heap.bytes(o).map_or(0, <[u8]>::len),
-        v => {
-            let s = it.to_js_string(v)?;
-            it.heap.to_string_lossy(s).map_err(|e| it.heap_error(e))?.len()
+    let data = arg::<E>(a, 1);
+    let n = match E::kind(data) {
+        Val::Undefined | Val::Null => 0,
+        Val::Object(_) if d.web_body_len(data).is_some() => d.web_body_len(data).unwrap_or(0),
+        Val::Object(o) if it.h_bytes(o).is_some() => it.h_bytes(o).map_or(0, <[u8]>::len),
+        _ => {
+            let s = it.to_js_string(data)?;
+            it.h_to_string_lossy(s)?.len()
         }
     };
     if d.queued_body_bytes().saturating_add(n) > QUOTA {
         return Ok(false);
     }
     let init = d.obj(it, it.object_prototype())?;
-    for (k, v) in [("method", d.js_str(it, "POST")?), ("credentials", d.js_str(it, "include")?), ("keepalive", Value::Bool(true))] {
+    for (k, v) in [("method", d.js_str(it, "POST")?), ("credentials", d.js_str(it, "include")?), ("keepalive", E::bool_raw(true))] {
         let k = d.key(it, k)?;
         it.define_data(init, k, v, true, true, true)?;
     }
-    if n > 0 || !matches!(data, Value::Undefined | Value::Null) {
+    if n > 0 || !matches!(E::kind(data), Val::Undefined | Val::Null) {
         let k = d.key(it, "body")?;
         it.define_data(init, k, data, true, true, true)?;
     }
     // Make the promise handled: a beacon has no reply, so a failure is silent.
-    let p = crate::browser_fetch::fetch_args(d, it, &[a[0], Value::Object(init)])?;
+    let p = crate::browser_fetch::fetch_args(d, it, &[a[0], E::obj_raw(init)])?;
     let noop = match d.basics.noop.get() {
         Some(f) => f,
         None => {
@@ -458,6 +457,6 @@ fn send_beacon_old(d: &Dom, it: &mut Interp<'_>, a: &[Value]) -> R<bool> {
             f
         }
     };
-    it.host_promise_then(p, Value::Undefined, Value::Object(noop))?;
+    it.host_promise_then(p, E::undef(), E::obj_raw(noop))?;
     Ok(true)
 }

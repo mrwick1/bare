@@ -71,6 +71,7 @@
 //! Removal. A sweep before each turn drops the child of an iframe that left the document. A navigation of the parent drops the `Browser`
 //! of the parent and with it all its children. `src` or `location` change on the frame: the old child is dropped before the new
 //! document is requested.
+use crate::eng::{Eng, Ops, Val};
 use crate::browser::{Browser, BrowserLimits, Dom};
 use crate::browser_console::ConsoleLevel;
 use crate::browser_fetch::FetchLimits;
@@ -85,9 +86,8 @@ use crate::browser_session::{SessionLimits, load_document};
 use crate::downloads::{Downloads, Grab};
 use bare_html::dom::{Document, NodeId};
 use bare_html::tree;
-use bare_js::eval::{EvalLimits, Interp};
+use bare_js::eval::EvalLimits;
 use bare_js::heap::HeapLimits;
-use bare_js::value::{ObjId, Value};
 use bare_net::http::Client;
 use bare_net::parallel::Task;
 use bare_url::Url;
@@ -131,27 +131,27 @@ pub(crate) struct Cfg {
     hub: Rc<PortHub>,
 }
 
-struct Slot {
+struct Slot<E: Eng> {
     node: NodeId,
     url: String,
     /// The document must be requested (new slot, or `src` or `location` changed).
     dirty: bool,
     /// The `RemoteWindow` of this child, once a script read it.
-    win: Option<ObjId>,
+    win: Option<E::Obj>,
 }
 
 type Fetched = Task<Result<(String, String, u16), String>>;
 
-enum State {
+enum State<E: Eng> {
     /// The document is on its way.
     Loading(Fetched),
-    Run(Box<Browser>),
+    Run(Box<Browser<E>>),
     /// The load failed, the child stopped, or the download was saved. Nothing runs.
     Empty,
 }
 
-struct Child {
-    state: State,
+struct Child<E: Eng> {
+    state: State<E>,
     /// `run_page` ran.
     started: bool,
     /// The iframe element has got its `load`.
@@ -175,18 +175,18 @@ pub(crate) struct Out {
 
 /// The children of one page: the slots (what a script sees), the states (what the driver runs), and the windows.
 #[derive(Default)]
-pub(crate) struct Kids {
+pub(crate) struct Kids<E: Eng> {
     cfg: RefCell<Option<Rc<Cfg>>>,
     env: RefCell<Option<KidEnv>>,
-    slots: RefCell<Vec<Option<Slot>>>,
-    kids: RefCell<Vec<Option<Child>>>,
+    slots: RefCell<Vec<Option<Slot<E>>>>,
+    kids: RefCell<Vec<Option<Child<E>>>>,
     /// The remote windows by target. Each entry holds the handles of its objects: they are roots exactly while the entry lives.
-    wins: RefCell<HashMap<ObjId, (Win, Vec<bare_js_api::Persistent>)>>,
+    wins: RefCell<HashMap<<E as Eng>::Obj, (Win<E>, Vec<bare_js_api::Persistent>)>>,
     /// The handles of the shared host functions of `Common`. They live as long as the page.
     common_held: RefCell<Vec<bare_js_api::Persistent>>,
     /// Messages to other pages, in post order.
     outbox: RefCell<Vec<Out>>,
-    pub(crate) common: Cell<Option<Common>>,
+    pub(crate) common: Cell<Option<Common<E>>>,
     /// The number of this page in the port hub (0: the top page).
     pub(crate) page: Cell<u32>,
     /// This page is a child page: a round of `run_page` returns after one pass and never waits.
@@ -195,7 +195,7 @@ pub(crate) struct Kids {
     pub(crate) poll_to: Cell<Option<f64>>,
 }
 
-impl Drop for Kids {
+impl<E: Eng> Drop for Kids<E> {
     fn drop(&mut self) {
         if let Some(cfg) = self.cfg.get_mut() {
             let live = self.slots.get_mut().iter().flatten().count();
@@ -218,7 +218,7 @@ fn connected(doc: &Document, n: NodeId) -> bool {
 }
 
 /// The document URL without its fragment, for the initiator of a load.
-fn base_url(d: &Dom) -> String {
+fn base_url<E: Eng>(d: &Dom<E>) -> String {
     d.cur_rec().map(|r| r.href()).unwrap_or_default().split('#').next().unwrap_or("").to_string()
 }
 
@@ -231,7 +231,7 @@ fn start_load(cfg: &Cfg, url: String, from: String) -> Fetched {
     c.spawn(move |c| load_document(c, &url, Some(&from), None, &lim, deadline, grab.as_ref(), false, None, true))
 }
 
-impl Kids {
+impl<E: Eng> Kids<E> {
     /// Does this page have a child page, or a slot for one, or does a wire wait in the port hub? The driver gives such a page a turn.
     #[inline]
     pub(crate) fn any(&self) -> bool {
@@ -256,13 +256,13 @@ impl Kids {
         self.cfg.borrow().clone()
     }
 
-    pub(crate) fn win_of(&self, target: ObjId) -> Option<Win> {
+    pub(crate) fn win_of(&self, target: E::Obj) -> Option<Win<E>> {
         self.wins.borrow().get(&target).map(|e| e.0)
     }
 
     /// Keep the window `w` with its `target` (and, for a window, its proxy) in persistent handles until `sync` drops the child.
-    pub(crate) fn add_win(&self, it: &mut Interp<'_>, target: ObjId, w: Win) {
-        let held = [Some(target), (!w.location).then_some(w.proxy)].into_iter().flatten().map(|o| it.persist_value(Value::Object(o))).collect();
+    pub(crate) fn add_win(&self, it: &mut E::Vm, target: E::Obj, w: Win<E>) {
+        let held = [Some(target), (!w.location).then_some(w.proxy)].into_iter().flatten().map(|o| it.persist_value(E::obj_raw(o))).collect();
         self.wins.borrow_mut().insert(target, (w, held));
     }
 
@@ -273,9 +273,9 @@ impl Kids {
     }
 
     /// Keep the shared host functions of `c` for the life of the page.
-    pub(crate) fn set_common(&self, it: &mut Interp<'_>, c: Common) {
+    pub(crate) fn set_common(&self, it: &mut E::Vm, c: Common<E>) {
         let objs = [c.handler, c.ctor, c.closed, c.replace, c.href_get, c.href_set].into_iter().chain(c.no_op);
-        *self.common_held.borrow_mut() = objs.map(|o| it.persist_value(Value::Object(o))).collect();
+        *self.common_held.borrow_mut() = objs.map(|o| it.persist_value(E::obj_raw(o))).collect();
         self.common.set(Some(c));
     }
 
@@ -296,20 +296,20 @@ impl Kids {
     }
 
     /// The window of `side` in this heap, if a script or the setup made it.
-    fn proxy_of(&self, side: Side) -> Option<ObjId> {
+    fn proxy_of(&self, side: Side) -> Option<E::Obj> {
         self.wins.borrow().values().find(|e| e.0.side == side && !e.0.location).map(|e| e.0.proxy)
     }
 
     /// The target of the window `proxy` (not of its location).
-    pub(crate) fn target_of(&self, proxy: ObjId) -> Option<ObjId> {
+    pub(crate) fn target_of(&self, proxy: E::Obj) -> Option<E::Obj> {
         self.wins.borrow().iter().find(|(_, e)| e.0.proxy == proxy && !e.0.location).map(|(&t, _)| t)
     }
 
-    pub(crate) fn window_of(&self, id: FrameId) -> Option<ObjId> {
+    pub(crate) fn window_of(&self, id: FrameId) -> Option<E::Obj> {
         self.slots.borrow().get(id as usize)?.as_ref()?.win
     }
 
-    pub(crate) fn set_window(&self, id: FrameId, w: ObjId) {
+    pub(crate) fn set_window(&self, id: FrameId, w: E::Obj) {
         if let Some(Some(s)) = self.slots.borrow_mut().get_mut(id as usize) {
             s.win = Some(w);
         }
@@ -339,7 +339,7 @@ impl Kids {
     }
 
     /// The iframe element `n` has `url` as its document (`None`: no child page: blank, or a `src` that is not http(s)).
-    pub(crate) fn request(&self, d: &Dom, it: &mut Interp<'_>, n: NodeId, url: Option<String>) {
+    pub(crate) fn request(&self, d: &Dom<E>, it: &mut E::Vm, n: NodeId, url: Option<String>) {
         let Some(cfg) = self.cfg() else { return };
         let mut slots = self.slots.borrow_mut();
         let at = slots.iter().position(|s| s.as_ref().is_some_and(|s| s.node == n));
@@ -368,7 +368,7 @@ impl Kids {
     }
 
     /// `location` of the window of child `id` was set.
-    pub(crate) fn navigate(&self, d: &Dom, id: FrameId, url: &str) {
+    pub(crate) fn navigate(&self, d: &Dom<E>, id: FrameId, url: &str) {
         let Some(url) = d.resolve_http(url).filter(|u| !u.starts_with("about:")) else { return };
         if let Some(Some(s)) = self.slots.borrow_mut().get_mut(id as usize) {
             s.url = url;
@@ -382,7 +382,7 @@ impl Kids {
     }
 
     /// Drop the children of iframes that left the document, and request the documents that are marked.
-    fn sync(&self, d: &Dom, cfg: &Cfg) {
+    fn sync(&self, d: &Dom<E>, cfg: &Cfg) {
         let from = base_url(d);
         let mut slots = self.slots.borrow_mut();
         let mut kids = self.kids.borrow_mut();
@@ -412,7 +412,7 @@ impl Kids {
     }
 
     /// Have all the children that are frames of this page now got their `load`?
-    pub(crate) fn loaded(&self, d: &Dom) -> bool {
+    pub(crate) fn loaded(&self, d: &Dom<E>) -> bool {
         let slots = self.slots.borrow();
         if slots.is_empty() {
             return true;
@@ -425,7 +425,7 @@ impl Kids {
     }
 
     /// Does a child keep the page from settling (a queued task of it, due by `limit` on the page clock, that blocks; or a load)?
-    pub(crate) fn blocks(&self, d: &Dom, limit: f64) -> bool {
+    pub(crate) fn blocks(&self, d: &Dom<E>, limit: f64) -> bool {
         // A wire in the hub waits for a page to take it.
         if self.hub_busy() {
             return true;
@@ -446,7 +446,7 @@ impl Kids {
     }
 
     /// Does a live child still load its document?
-    pub(crate) fn loading(&self, d: &Dom) -> bool {
+    pub(crate) fn loading(&self, d: &Dom<E>) -> bool {
         let slots = self.slots.borrow();
         let (kids, doc) = (self.kids.borrow(), d.doc.borrow());
         kids.iter().enumerate().any(|(i, k)| {
@@ -493,16 +493,16 @@ pub(crate) struct Turn {
     pub diags: Vec<String>,
 }
 
-impl Browser {
+impl<E: Eng> Browser<E> {
     /// The environment that this page gives its children. Call before `run_page`.
     pub fn set_child_env(&mut self, env: KidEnv) {
         self.dom.kids.set_env(env);
     }
 
     /// Make the child `Browser` for a document that came in.
-    fn child_browser(&self, cfg: &Cfg, node: NodeId, url: &str, html: &str) -> Result<(Browser, f64), String> {
+    fn child_browser(&self, cfg: &Cfg, node: NodeId, url: &str, html: &str) -> Result<(Browser<E>, f64), String> {
         let doc = tree::parse(html);
-        let mut b = Browser::new(doc, cfg.browser, cfg.env.eval, cfg.env.heap).map_err(|_| "the realm could not be made".to_string())?;
+        let mut b = Browser::<E>::make(doc, cfg.browser, cfg.env.eval, cfg.env.heap).map_err(|_| "the realm could not be made".to_string())?;
         // The size of the iframe box in the parent when a layout exists, else the size of a default iframe.
         let (w, h) = self.dom.cached_box_size(node).unwrap_or((300.0, 150.0));
         b.set_viewport(w, h).map_err(|_| "the viewport is invalid".to_string())?;
@@ -522,7 +522,7 @@ impl Browser {
         b.dom.kids.page.set(cfg.hub.new_page());
         b.dom.kids.poll.set(true);
         let dom = b.dom.clone();
-        b.it.host_scope(|it| crate::browser_remote_window::install_up(&dom, it, depth)).map_err(|_| "the window could not be set up".to_string())?;
+        b.it.host_scope_o(|it| crate::browser_remote_window::install_up(&dom, it, depth)).map_err(|_| "the window could not be set up".to_string())?;
         Ok((b, delta))
     }
 
@@ -537,7 +537,7 @@ impl Browser {
         let block = wait || !self.live();
         // The wires for the ports of this page (a page that has no split port has no end: the call does nothing).
         if cfg.hub.busy() {
-            match self.it.host_scope(|it| run(it, |s| self.dom.take_wires(s))) {
+            match self.it.host_scope_o(|it| run::<E, _>(it, |s| self.dom.take_wires(s))) {
                 Ok(k) => t.work += k,
                 Err(e) => t.diags.push(format!("a message was dropped: {e:?}")),
             }
@@ -546,7 +546,7 @@ impl Browser {
             let Some(mut ch) = self.dom.kids.kids.borrow_mut().get_mut(i).and_then(|k| k.take()) else { continue };
             let Some(node) = self.dom.kids.slots.borrow().get(i).and_then(|s| s.as_ref()).map(|s| s.node) else { continue };
             let mut down = if self.dom.kids.outbox_len() > 0 { self.dom.kids.take_out(|m| m.to == Side::Child(i as FrameId)) } else { Vec::new() };
-            let fail = |ch: &mut Child, t: &mut Turn, why: String| {
+            let fail = |ch: &mut Child<E>, t: &mut Turn, why: String| {
                 t.diags.push(format!("frame {}: {why}", ch.label));
                 if !ch.notified {
                     ch.notified = true;
@@ -575,14 +575,14 @@ impl Browser {
                 State::Run(mut b) => {
                     let parent = b.dom.kids.proxy_of(Side::Parent);
                     if cfg.hub.busy() {
-                        match b.it.host_scope(|it| run(it, |s| b.dom.take_wires(s))) {
+                        match b.it.host_scope_o(|it| run::<E, _>(it, |s| b.dom.take_wires(s))) {
                             Ok(k) => t.work += k,
                             Err(e) => t.diags.push(format!("frame {}: a message was dropped: {e:?}", ch.label)),
                         }
                     }
                     for m in std::mem::take(&mut down) {
                         t.work += 1;
-                        if let Err(e) = b.it.host_scope(|it| b.dom.deliver(it, m, parent)) {
+                        if let Err(e) = b.it.host_scope_o(|it| b.dom.deliver(it, m, parent)) {
                             t.diags.push(format!("frame {}: a message was dropped: {e:?}", ch.label));
                         }
                     }
@@ -671,10 +671,10 @@ impl Browser {
         }
         // The top page sees only its own children as windows, so a deeper sender has no `source`.
         let from_child = m.to == Side::Parent;
-        let r = self.it.host_scope(|it| {
+        let r = self.it.host_scope_o(|it| {
             let source = if from_child {
-                match self.dom.child_window(it, i)? {
-                    Value::Object(o) => Some(o),
+                match E::kind(self.dom.child_window(it, i)?) {
+                    Val::Object(o) => Some(o),
                     _ => None,
                 }
             } else {
@@ -688,7 +688,7 @@ impl Browser {
     }
 
     /// Move the console records and the reports of a child into this page, with the label of the child as their source.
-    fn take_child_output(&mut self, child: &mut Browser, label: &str) {
+    fn take_child_output(&mut self, child: &mut Browser<E>, label: &str) {
         for rec in child.take_console_records() {
             let text = child.format_console_record(&rec).unwrap_or_default();
             crate::browser_console::push_text(&self.dom, &mut self.it, rec.level, &format!("{label}: {text}"));
@@ -705,10 +705,10 @@ impl Browser {
     }
 }
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// A message from another page reaches this page: drop it if the target origin does not match, else queue a `message` event for the
     /// window. `source` is the window of the sender in this heap.
-    fn deliver(&self, it: &mut Interp<'_>, mut m: Out, source: Option<ObjId>) -> R<()> {
+    fn deliver(&self, it: &mut E::Vm, mut m: Out, source: Option<E::Obj>) -> R<E, ()> {
         if m.target_origin != "*" && m.target_origin != self.window_origin() {
             if let Some(h) = self.kids.hub() {
                 h.release(m.cloned.moved());
@@ -716,7 +716,7 @@ impl Dom {
             return Ok(());
         }
         let bytes = 16usize.saturating_add(m.cloned.cost());
-        let (data, ports) = run(it, |s| {
+        let (data, ports) = run::<E, _>(it, |s| {
             let (data, ports) = crate::browser_navigation_state::materialize_with(self, s, &mut m.cloned)?;
             Ok((s.engine().raw(data), ports))
         })?;
