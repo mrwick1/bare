@@ -33,8 +33,8 @@ fn ensure_unit(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 
 crate::browser_lazy::lazy_global!(lazy_error_event, "ErrorEvent", ensure_unit, |d| d.hh.err.get().expect("made")[1]);
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    crate::browser_lazy::install(d, it, &[("ErrorEvent", lazy_error_event as HS)])
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+    crate::browser_lazy::install(d, s, &[("ErrorEvent", lazy_error_event as HS)])
 }
 
 /// The fields of an `ErrorEvent`.

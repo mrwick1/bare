@@ -689,10 +689,10 @@ fn ensure_iter(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 
 lazy_global!(lazy_iterator, "NodeIterator", ensure_iter, |d| state(d).borrow().made_iter.expect("made").1);
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    d.def_method_s(it, d.p().document, "createTreeWalker", 1, create_tree_walker)?;
-    d.def_method_s(it, d.p().document, "createNodeIterator", 1, create_node_iterator)?;
-    crate::browser_lazy::install(d, it, &[("TreeWalker", lazy_walker as HS), ("NodeFilter", lazy_filter), ("NodeIterator", lazy_iterator)])
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+    d.def_method_at(s, d.p().document, "createTreeWalker", 1, create_tree_walker)?;
+    d.def_method_at(s, d.p().document, "createNodeIterator", 1, create_node_iterator)?;
+    crate::browser_lazy::install(d, s, &[("TreeWalker", lazy_walker as HS), ("NodeFilter", lazy_filter), ("NodeIterator", lazy_iterator)])
 }
 
 impl Dom {

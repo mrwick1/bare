@@ -8,7 +8,8 @@ use bare_html::dom::{Document, NodeId};
 use std::rc::Rc;
 use bare_js::eval::{Error, Interp};
 use bare_js::value::{ObjId, Value};
-use bare_js_api::{Abort, Args, Attrs, Engine, HostFn, Local, Persistent, Scope, Type};
+pub(crate) use bare_js_api::{Attrs, HostFn, Intrinsic};
+use bare_js_api::{Abort, Args, Engine, Local, Persistent, Scope, Type};
 
 /// A host method of the new form: the DOM, the scope, `this`, the arguments.
 pub(crate) type HS = for<'s, 'p> fn(&Dom, &mut Sc<'s, 'p>, Local<'s>, Args<'s>) -> Res<'s, Local<'s>>;
@@ -347,20 +348,52 @@ impl Dom {
 
     /// `Dom::obj`: a new object of the host with the prototype `proto`.
     pub(crate) fn obj_s<'s>(&self, s: &mut Sc<'s, '_>, proto: ObjId) -> Res<'s, ObjId> {
-        old(s, |it| self.obj(it, proto))
+        let o = self.obj_with_s(s, proto)?;
+        Ok(obj_of(s, o))
+    }
+
+    /// `Dom::obj(it, it.object_prototype())`: a new ordinary object.
+    pub(crate) fn plain_s<'s>(&self, s: &mut Sc<'s, '_>) -> Res<'s, ObjId> {
+        let o = s.new_object()?;
+        Ok(obj_of(s, o))
     }
 
     /// `Dom::obj` into a local: a new object with the prototype `proto`.
     pub(crate) fn obj_with_s<'s>(&self, s: &mut Sc<'s, '_>, proto: ObjId) -> Res<'s, Local<'s>> {
-        let o = self.obj_s(s, proto)?;
-        Ok(self.obj_local(s, o))
+        let p = self.obj_local(s, proto);
+        s.new_object_with(p)
+    }
+
+    /// An interface object: a function `name` with the prototype `proto`, linked both ways, and a property of `window`. Gives the function.
+    pub(crate) fn interface_s<'s>(&self, s: &mut Sc<'s, '_>, proto: ObjId, name: &str, h: HS, len: u32, kind: HostFn) -> Res<'s, ObjId> {
+        let f = self.add_fn_s(s, h, name, len, kind)?;
+        self.link_s(s, f, proto, name)
+    }
+
+    /// `interface_s` for a function that is made already.
+    pub(crate) fn link_s<'s>(&self, s: &mut Sc<'s, '_>, f: Local<'s>, proto: ObjId, name: &str) -> Res<'s, ObjId> {
+        let p = self.obj_local(s, proto);
+        s.define_str(f, "prototype", p, Attrs { writable: false, enumerable: false, configurable: false })?;
+        s.define_str(p, "constructor", f, Attrs::METHOD)?;
+        let g = s.global();
+        s.define_str(g, name, f, Attrs::METHOD)?;
+        Ok(obj_of(s, f))
+    }
+
+    /// `proto[Symbol.toStringTag] = name`, so `Object.prototype.toString` says `[object name]`.
+    pub(crate) fn tag_s<'s>(&self, s: &mut Sc<'s, '_>, proto: ObjId, name: &str) -> Res<'s, ()> {
+        let p = self.obj_local(s, proto);
+        let key = s.intrinsic(Intrinsic::SymbolToStringTag);
+        let t = s.string(name)?;
+        s.define(p, key, t, Attrs { writable: false, enumerable: false, configurable: true })
     }
 
     /// `def_method` on an object that a handler made: a function of the new form as a method of `target`. `enumerable` is false for an
     /// ordinary method and true for a WebIDL one.
-    pub(crate) fn def_method_l<'s>(&self, s: &mut Sc<'s, '_>, target: Local<'s>, name: &str, len: u32, h: HS, enumerable: bool) -> Res<'s, ()> {
+    pub(crate) fn def_method_l<'s>(&self, s: &mut Sc<'s, '_>, target: Local<'s>, name: &str, len: u32, h: HS, enumerable: bool) -> Res<'s, Local<'s>> {
         let f = self.add_fn_s(s, h, name, len, HostFn::Method)?;
-        s.define_str(target, name, f, Attrs { writable: true, enumerable, configurable: true })
+        s.define_str(target, name, f, Attrs { writable: true, enumerable, configurable: true })?;
+        Ok(f)
     }
 
     /// `def_get` on an object that a handler made: an accessor of functions of the new form.
@@ -371,6 +404,18 @@ impl Dom {
             None => None,
         };
         s.define_accessor_str(target, name, Some(g), st, Attrs { writable: false, enumerable: true, configurable: true })
+    }
+
+    /// `def_method_s` for a scope: a function of the new form as a method of the object `target`.
+    pub(crate) fn def_method_at<'s>(&self, s: &mut Sc<'s, '_>, target: ObjId, name: &str, len: u32, h: HS) -> Res<'s, Local<'s>> {
+        let t = self.obj_local(s, target);
+        self.def_method_l(s, t, name, len, h, false)
+    }
+
+    /// `def_get_s` for a scope: an accessor of functions of the new form on the object `target`.
+    pub(crate) fn def_get_at<'s>(&self, s: &mut Sc<'s, '_>, target: ObjId, name: &str, get: HS, set: Option<HS>) -> Res<'s, ()> {
+        let t = self.obj_local(s, target);
+        self.def_get_l(s, t, name, get, set)
     }
 
     /// `Dom::new_source`.

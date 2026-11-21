@@ -63,8 +63,8 @@ fn ensure_unit(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     ensure(d, it).map(|_| ())
 }
 
-pub(crate) fn install_interfaces(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    crate::browser_lazy::install(d, it, &[("PerformanceEntry", lazy_entry as HS), ("PerformanceResourceTiming", lazy_resource), ("PerformanceNavigationTiming", lazy_navigation), ("PerformanceMark", lazy_mark), ("PerformanceMeasure", lazy_measure)])
+pub(crate) fn install_interfaces<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+    crate::browser_lazy::install(d, s, &[("PerformanceEntry", lazy_entry as HS), ("PerformanceResourceTiming", lazy_resource), ("PerformanceNavigationTiming", lazy_navigation), ("PerformanceMark", lazy_mark), ("PerformanceMeasure", lazy_measure)])
 }
 
 /// `PerformanceEntry.prototype.toJSON`: the four members of an entry.
@@ -318,7 +318,7 @@ fn clear_measures<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) ->
 }
 
 /// Define the methods on `perf`, the prototype of the `performance` object.
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>, perf: ObjId) -> R<()> {
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>, perf: ObjId) -> Res<'s, ()> {
     for (name, len, h) in [
         ("mark", 1, mark as HS),
         ("measure", 1, measure),
@@ -328,13 +328,12 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>, perf: ObjId) -> R<()> {
         ("clearMarks", 0, clear_marks),
         ("clearMeasures", 0, clear_measures),
     ] {
-        d.def_method_s(it, perf, name, len, h)?;
+        d.def_method_at(s, perf, name, len, h)?;
     }
+    let po = d.obj_local(s, perf);
     for (name, h) in [("timing", timing as HS), ("navigation", navigation as HS), ("timeOrigin", time_origin as HS)] {
-        let f = d.add_fn_s_obj(it, h, name, 0, HostFn::Method)?;
-        let k = d.key(it, name)?;
-        let desc = bare_js::heap::PropertyDescriptor { get: Some(Some(f)), enumerable: Some(true), configurable: Some(true), ..Default::default() };
-        it.heap.define_own_property(perf, k, &desc).map_err(|e| it.heap_error(e))?;
+        let f = d.add_fn_s(s, h, name, 0, HostFn::Method)?;
+        s.define_accessor_str(po, name, Some(f), None, Attrs { writable: false, enumerable: true, configurable: true })?;
     }
     Ok(())
 }

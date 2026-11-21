@@ -118,27 +118,20 @@ const DEVICE: &str = "ResizeObserver device-pixel-content-box (the device pixel 
 const PADDING: &str = "ResizeObserver content box with a padding that is not an absolute length (it needs the containing block)";
 const LOOP: &str = "ResizeObserver loop completed with undelivered notifications.";
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    let op = it.object_prototype();
-    let (observer, entry, size) = (d.obj(it, op)?, d.obj(it, op)?, d.obj(it, op)?);
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+    let (observer, entry, size) = (d.plain_s(s)?, d.plain_s(s)?, d.plain_s(s)?);
     d.resize.s.borrow_mut().protos = Some(Protos { observer, entry, size });
-    let g = it.global_object();
-    let (kc, kp) = (d.key(it, "constructor")?, d.key(it, "prototype")?);
     for (name, proto, ctor, len) in [
         ("ResizeObserver", observer, Some(construct as HS), 1),
         ("ResizeObserverEntry", entry, None, 0),
         ("ResizeObserverSize", size, None, 0),
     ] {
-        let f = d.add_fn_s_obj(it, ctor.unwrap_or(illegal_ctor), name, len, HostFn::Ctor)?;
-        it.define_data(f, kp, Value::Object(proto), false, false, false)?;
-        it.define_data(proto, kc, Value::Object(f), true, false, true)?;
-        let k = d.key(it, name)?;
-        it.define_data(g, k, Value::Object(f), true, false, true)?;
+        d.interface_s(s, proto, name, ctor.unwrap_or(illegal_ctor), len, HostFn::Ctor)?;
     }
-    d.def_method_s(it, observer, "observe", 1, observe)?;
-    d.def_method_s(it, observer, "unobserve", 1, unobserve)?;
-    d.def_method_s(it, observer, "disconnect", 0, disconnect)?;
-    d.def_get_s(it, entry, "devicePixelContentBoxSize", device_sizes, None)
+    d.def_method_at(s, observer, "observe", 1, observe)?;
+    d.def_method_at(s, observer, "unobserve", 1, unobserve)?;
+    d.def_method_at(s, observer, "disconnect", 0, disconnect)?;
+    d.def_get_at(s, entry, "devicePixelContentBoxSize", device_sizes, None)
 }
 
 fn illegal_ctor<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {

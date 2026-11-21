@@ -19,15 +19,14 @@ use crate::browser::*;
 use crate::browser_dom::next_in;
 use crate::browser_scoped::*;
 use bare_html::dom::NodeData;
-use bare_js::eval::Interp;
 use bare_js_api::{Args, Local};
 use std::collections::HashSet;
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
     let p = d.p();
     for target in [p.element, p.document] {
-        d.def_method_s(it, target, "getElementsByTagName", 1, by_tag)?;
-        d.def_method_s(it, target, "getElementsByClassName", 1, by_class)?;
+        d.def_method_at(s, target, "getElementsByTagName", 1, by_tag)?;
+        d.def_method_at(s, target, "getElementsByClassName", 1, by_class)?;
     }
     Ok(())
 }

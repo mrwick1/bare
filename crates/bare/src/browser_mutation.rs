@@ -655,8 +655,8 @@ lazy_global!(lazy_observer, "MutationObserver", ensure, |d| state(d).borrow().ct
 lazy_global!(lazy_record, "MutationRecord", ensure, |d| state(d).borrow().ctors.expect("made").1);
 use crate::browser_lazy::lazy_global;
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    crate::browser_lazy::install(d, it, &[("MutationObserver", lazy_observer as HS), ("MutationRecord", lazy_record as HS)])
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+    crate::browser_lazy::install(d, s, &[("MutationObserver", lazy_observer as HS), ("MutationRecord", lazy_record as HS)])
 }
 
 // ------------------------------------------------------------------------------------------ arena reclaim (`browser_reclaim.rs`)

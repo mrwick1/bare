@@ -654,6 +654,12 @@ pub trait Engine: Sized {
 
     fn global<'s>(&mut self) -> Local<'s>;
     fn new_object<'s>(&mut self) -> Result<Local<'s>, Error<'s>>;
+    /// A new ordinary object whose prototype is `proto`. An engine can make it in one step.
+    fn new_object_with<'s>(&mut self, proto: Local<'_>) -> Result<Local<'s>, Error<'s>> {
+        let o = self.new_object()?;
+        self.set_prototype_of(o, Some(proto))?;
+        Ok(o)
+    }
     /// `obj[key]`, with getters and proxies.
     fn get<'s>(&mut self, obj: Local<'_>, key: Local<'_>) -> Result<Local<'s>, Error<'s>>;
     /// `obj[key] = value`, with setters, in strict mode.
@@ -674,6 +680,11 @@ pub trait Engine: Sized {
     fn define_named<'s>(&mut self, obj: Local<'_>, key: &str, value: Local<'_>, attrs: Attrs) -> Result<(), Error<'s>> {
         let k = self.string(key)?;
         self.define(obj, k, value, attrs)
+    }
+    /// `define_accessor` with a key from Rust. An engine can skip the string value of the key.
+    fn define_accessor_named<'s>(&mut self, obj: Local<'_>, key: &str, get: Option<Local<'_>>, set: Option<Local<'_>>, attrs: Attrs) -> Result<(), Error<'s>> {
+        let k = self.string(key)?;
+        self.define_accessor(obj, k, get, set, attrs)
     }
     fn call<'s>(&mut self, f: Local<'_>, this: Local<'_>, args: &[Local<'_>]) -> Result<Local<'s>, Error<'s>>;
     /// A function whose calls go to [`Host::call`] with `id`. `id` is below 2^31.
@@ -1066,6 +1077,10 @@ impl<'s, E: Engine> Scope<'s, E> {
         self.e.new_object()
     }
 
+    pub fn new_object_with(&mut self, proto: Local<'_>) -> Result<Local<'s>, Error<'s>> {
+        self.e.new_object_with(proto)
+    }
+
     pub fn get(&mut self, obj: Local<'_>, key: Local<'_>) -> Result<Local<'s>, Error<'s>> {
         self.e.get(obj, key)
     }
@@ -1415,8 +1430,7 @@ impl<'s, E: Engine> Scope<'s, E> {
 
     /// `define_accessor` with a key from Rust.
     pub fn define_accessor_str(&mut self, obj: Local<'_>, key: &str, get: Option<Local<'_>>, set: Option<Local<'_>>, attrs: Attrs) -> Result<(), Error<'s>> {
-        let k = self.string(key)?;
-        self.define_accessor(obj, k, get, set, attrs)
+        self.e.define_accessor_named(obj, key, get, set, attrs)
     }
 }
 

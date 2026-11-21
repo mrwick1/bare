@@ -736,57 +736,50 @@ fn attr_no_children<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s
 
 // ------------------------------------------------------------------------------------ install
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    let g = *d.global.get().expect("installed");
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
     let p = d.p();
-    let op = it.object_prototype();
-    let (attr, map) = (d.obj(it, p.node)?, d.obj(it, op)?);
+    let (attr, map) = (d.obj_s(s, p.node)?, d.plain_s(s)?);
     let _ = d.attr.protos.set((attr, map));
     let mut fixed = vec![attr, map];
 
     // Attr
-    d.def_get_s(it, attr, "name", attr_name, None)?;
-    d.def_get_s(it, attr, "localName", attr_local_name, None)?;
-    d.def_get_s(it, attr, "prefix", attr_prefix, None)?;
-    d.def_get_s(it, attr, "namespaceURI", attr_namespace_uri, None)?;
-    d.def_get_s(it, attr, "value", attr_value_get, Some(attr_value_set))?;
-    d.def_get_s(it, attr, "nodeValue", attr_value_get, Some(attr_node_value_set))?;
-    d.def_get_s(it, attr, "textContent", attr_value_get, Some(attr_node_value_set))?;
-    d.def_get_s(it, attr, "nodeName", attr_name, None)?;
-    d.def_get_s(it, attr, "nodeType", attr_node_type, None)?;
-    d.def_get_s(it, attr, "ownerElement", attr_owner_element, None)?;
-    d.def_get_s(it, attr, "ownerDocument", attr_owner_document, None)?;
-    d.def_get_s(it, attr, "specified", attr_true, None)?;
-    d.def_get_s(it, attr, "isConnected", attr_false, None)?;
+    d.def_get_at(s, attr, "name", attr_name, None)?;
+    d.def_get_at(s, attr, "localName", attr_local_name, None)?;
+    d.def_get_at(s, attr, "prefix", attr_prefix, None)?;
+    d.def_get_at(s, attr, "namespaceURI", attr_namespace_uri, None)?;
+    d.def_get_at(s, attr, "value", attr_value_get, Some(attr_value_set))?;
+    d.def_get_at(s, attr, "nodeValue", attr_value_get, Some(attr_node_value_set))?;
+    d.def_get_at(s, attr, "textContent", attr_value_get, Some(attr_node_value_set))?;
+    d.def_get_at(s, attr, "nodeName", attr_name, None)?;
+    d.def_get_at(s, attr, "nodeType", attr_node_type, None)?;
+    d.def_get_at(s, attr, "ownerElement", attr_owner_element, None)?;
+    d.def_get_at(s, attr, "ownerDocument", attr_owner_document, None)?;
+    d.def_get_at(s, attr, "specified", attr_true, None)?;
+    d.def_get_at(s, attr, "isConnected", attr_false, None)?;
     for name in ["parentNode", "parentElement", "firstChild", "lastChild", "previousSibling", "nextSibling"] {
-        d.def_get_s(it, attr, name, attr_null, None)?;
+        d.def_get_at(s, attr, name, attr_null, None)?;
     }
-    d.def_get_s(it, attr, "childNodes", attr_no_children, None)?;
-    d.def_method_s(it, attr, "hasChildNodes", 0, attr_false)?;
+    d.def_get_at(s, attr, "childNodes", attr_no_children, None)?;
+    d.def_method_at(s, attr, "hasChildNodes", 0, attr_false)?;
 
     // NamedNodeMap
-    d.def_get_s(it, map, "length", map_length, None)?;
-    d.def_method_s(it, map, "item", 1, map_item)?;
-    d.def_method_s(it, map, "getNamedItem", 1, get_named_item)?;
-    d.def_method_s(it, map, "getNamedItemNS", 2, get_named_item_ns)?;
-    d.def_method_s(it, map, "setNamedItem", 1, set_named_item)?;
-    d.def_method_s(it, map, "setNamedItemNS", 1, set_named_item)?;
-    d.def_method_s(it, map, "removeNamedItem", 1, remove_named_item)?;
-    d.def_method_s(it, map, "removeNamedItemNS", 2, remove_named_item_ns)?;
+    d.def_get_at(s, map, "length", map_length, None)?;
+    d.def_method_at(s, map, "item", 1, map_item)?;
+    d.def_method_at(s, map, "getNamedItem", 1, get_named_item)?;
+    d.def_method_at(s, map, "getNamedItemNS", 2, get_named_item_ns)?;
+    d.def_method_at(s, map, "setNamedItem", 1, set_named_item)?;
+    d.def_method_at(s, map, "setNamedItemNS", 1, set_named_item)?;
+    d.def_method_at(s, map, "removeNamedItem", 1, remove_named_item)?;
+    d.def_method_at(s, map, "removeNamedItemNS", 2, remove_named_item_ns)?;
     // `[Symbol.iterator]` is `Array.prototype[Symbol.iterator]`: the map has indices and a `length`.
-    let sym = d.plat.sym_iter.get().copied().expect("platform installed first");
-    let ap = it.array_prototype();
-    let values = it.get_value(Value::Object(ap), sym)?;
-    it.define_data(map, sym, values, true, false, true)?;
+    let ap = s.intrinsic(Intrinsic::ArrayPrototype);
+    let sym = s.intrinsic(Intrinsic::SymbolIterator);
+    let values = s.get(ap, sym)?;
+    let m = d.obj_local(s, map);
+    s.define(m, sym, values, Attrs::METHOD)?;
 
-    let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
     for (name, proto) in [("Attr", attr), ("NamedNodeMap", map)] {
-        let f = d.add_fn_s_obj(it, illegal_constructor, name, 0, bare_js_api::HostFn::Method)?;
-        it.define_data(f, kp, Value::Object(proto), false, false, false)?;
-        it.define_data(proto, kc, Value::Object(f), true, false, true)?;
-        let k = d.key(it, name)?;
-        it.define_data(g, k, Value::Object(f), true, false, true)?;
-        fixed.push(f);
+        fixed.push(d.interface_s(s, proto, name, illegal_constructor, 0, HostFn::Method)?);
     }
     *d.attr.fixed.borrow_mut() = fixed;
     Ok(())

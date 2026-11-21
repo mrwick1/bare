@@ -71,6 +71,6 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 
 crate::browser_lazy::lazy_global!(lazy_observer, "PerformanceObserver", ensure, |d| d.perf_observer_ctor.get().expect("made"));
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    crate::browser_lazy::install(d, it, &[("PerformanceObserver", lazy_observer as HS)])
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+    crate::browser_lazy::install(d, s, &[("PerformanceObserver", lazy_observer as HS)])
 }

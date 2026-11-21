@@ -6,7 +6,7 @@
 //! read, `Object.getOwnPropertyDescriptor(window, 'X')` shows an accessor, not a data property.
 
 use crate::browser::*;
-use crate::browser_scoped::{old, run, Res, Sc, HS};
+use crate::browser_scoped::{old, Res, Sc, HS};
 use bare_js::eval::Interp;
 use bare_js::value::{ObjId, Value};
 use bare_js_api::{Args, Attrs, HostFn, Local};
@@ -26,15 +26,13 @@ pub(crate) fn lazy<'s>(d: &Dom, s: &mut Sc<'s, '_>, name: &str, a: Args<'s>, ens
 }
 
 /// Define each name as a lazy accessor of `window`.
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>, list: &[(&str, HS)]) -> R<()> {
-    run(it, |s| {
-        let g = s.global();
-        for &(name, h) in list {
-            let f = d.add_fn_s(s, h, name, 0, HostFn::Method)?;
-            s.define_accessor_str(g, name, Some(f), Some(f), Attrs { writable: false, enumerable: false, configurable: true })?;
-        }
-        Ok(())
-    })
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>, list: &[(&str, HS)]) -> Res<'s, ()> {
+    let g = s.global();
+    for &(name, h) in list {
+        let f = d.add_fn_s(s, h, name, 0, HostFn::Method)?;
+        s.define_accessor_str(g, name, Some(f), Some(f), Attrs { writable: false, enumerable: false, configurable: true })?;
+    }
+    Ok(())
 }
 
 /// `fn $f` is the accessor body of the global `$name`: `$ensure` makes the interface, `$pick` gives its constructor.

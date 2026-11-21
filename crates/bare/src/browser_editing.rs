@@ -1181,15 +1181,15 @@ fn content_editable<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s
     Ok(s.undefined())
 }
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
     let doc = d.p().document;
-    d.def_method_s(it, doc, "execCommand", 1, exec_command)?;
-    d.def_method_s(it, doc, "queryCommandSupported", 1, query_supported)?;
-    d.def_method_s(it, doc, "queryCommandEnabled", 1, query_enabled)?;
-    d.def_method_s(it, doc, "queryCommandState", 1, query_state)?;
-    d.def_method_s(it, doc, "queryCommandIndeterm", 1, query_indeterm)?;
-    d.def_method_s(it, doc, "queryCommandValue", 1, query_value)?;
-    d.def_get_s(it, d.p().html, "isContentEditable", is_content_editable, None)?;
-    d.def_get_s(it, d.p().html, "contentEditable", content_editable, Some(content_editable))?;
+    d.def_method_at(s, doc, "execCommand", 1, exec_command)?;
+    d.def_method_at(s, doc, "queryCommandSupported", 1, query_supported)?;
+    d.def_method_at(s, doc, "queryCommandEnabled", 1, query_enabled)?;
+    d.def_method_at(s, doc, "queryCommandState", 1, query_state)?;
+    d.def_method_at(s, doc, "queryCommandIndeterm", 1, query_indeterm)?;
+    d.def_method_at(s, doc, "queryCommandValue", 1, query_value)?;
+    d.def_get_at(s, d.p().html, "isContentEditable", is_content_editable, None)?;
+    d.def_get_at(s, d.p().html, "contentEditable", content_editable, Some(content_editable))?;
     Ok(())
 }

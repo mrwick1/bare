@@ -33,7 +33,7 @@ use crate::browser_scoped::*;
 use bare_html::dom::{Atom, Document, NodeId};
 use bare_js::eval::Interp;
 use bare_js::heap::{HeapError, Slot};
-use bare_js::value::{ObjId, PropertyKey, StrId, Value};
+use bare_js::value::{ObjId, StrId, Value};
 use bare_js_api::{Args, Attrs, Engine, Local, Type};
 use std::collections::HashSet;
 
@@ -43,23 +43,24 @@ pub(crate) struct Toks {
     pub vals: Vec<StrId>,
 }
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>, list: ObjId, iter: ObjId, sym: PropertyKey) -> R<()> {
-    d.def_method_s(it, list, "item", 1, item)?;
-    d.def_method_s(it, list, "contains", 1, contains)?;
-    d.def_method_s(it, list, "add", 0, add)?;
-    d.def_method_s(it, list, "remove", 0, remove)?;
-    d.def_method_s(it, list, "toggle", 1, toggle)?;
-    d.def_method_s(it, list, "replace", 2, replace)?;
-    d.def_method_s(it, list, "supports", 1, supports)?;
-    d.def_method_s(it, list, "toString", 0, value_get)?;
-    d.def_method_s(it, list, "forEach", 1, for_each)?;
-    d.def_method_s(it, list, "keys", 0, keys)?;
-    d.def_method_s(it, list, "entries", 0, entries)?;
-    let values = d.def_method_s(it, list, "values", 0, values)?;
-    it.define_data(list, sym, Value::Object(values), true, false, true)?;
-    d.def_get_s(it, list, "length", length, None)?;
-    d.def_get_s(it, list, "value", value_get, Some(value_set))?;
-    d.def_method_s(it, iter, "next", 0, iter_next)?;
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>, list: ObjId, iter: ObjId, sym: Local<'s>) -> Res<'s, ()> {
+    d.def_method_at(s, list, "item", 1, item)?;
+    d.def_method_at(s, list, "contains", 1, contains)?;
+    d.def_method_at(s, list, "add", 0, add)?;
+    d.def_method_at(s, list, "remove", 0, remove)?;
+    d.def_method_at(s, list, "toggle", 1, toggle)?;
+    d.def_method_at(s, list, "replace", 2, replace)?;
+    d.def_method_at(s, list, "supports", 1, supports)?;
+    d.def_method_at(s, list, "toString", 0, value_get)?;
+    d.def_method_at(s, list, "forEach", 1, for_each)?;
+    d.def_method_at(s, list, "keys", 0, keys)?;
+    d.def_method_at(s, list, "entries", 0, entries)?;
+    let values = d.def_method_at(s, list, "values", 0, values)?;
+    let lo = d.obj_local(s, list);
+    s.define(lo, sym, values, Attrs::METHOD)?;
+    d.def_get_at(s, list, "length", length, None)?;
+    d.def_get_at(s, list, "value", value_get, Some(value_set))?;
+    d.def_method_at(s, iter, "next", 0, iter_next)?;
     Ok(())
 }
 

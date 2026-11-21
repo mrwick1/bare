@@ -581,6 +581,14 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
         }
     }
 
+    fn new_object_with<'s>(&mut self, proto: bare_js_api::Local<'_>) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
+        let r = self.api_obj(proto).and_then(|p| self.heap.new_object(Some(p)).map_err(|e| self.herr(e)));
+        match r {
+            Ok(o) => Ok(self.api_push(Value::Object(o))),
+            Err(e) => Err(self.api_err(e)),
+        }
+    }
+
     fn get<'s>(&mut self, obj: bare_js_api::Local<'_>, key: bare_js_api::Local<'_>) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
         let r = self.api_key(key).and_then(|k| self.get_value(self.api_at(obj), k));
         match r {
@@ -1106,6 +1114,17 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
         let r = self.api_obj(obj).and_then(|o| {
             let p = proto.map(|p| self.api_obj(p)).transpose()?;
             self.o_set_prototype_of(o, p)
+        });
+        r.map_err(|e| self.api_err(e))
+    }
+
+    fn define_accessor_named<'s>(&mut self, obj: bare_js_api::Local<'_>, key: &str, get: Option<bare_js_api::Local<'_>>, set: Option<bare_js_api::Local<'_>>, a: bare_js_api::Attrs) -> Result<(), bare_js_api::Error<'s>> {
+        let r = self.api_obj(obj).and_then(|o| {
+            let k = self.heap.key_from_str(key).map_err(|e| self.herr(e))?;
+            let get = get.map(|f| self.api_obj(f)).transpose()?;
+            let set = set.map(|f| self.api_obj(f)).transpose()?;
+            let d = PropertyDescriptor { get: Some(get), set: Some(set), enumerable: Some(a.enumerable), configurable: Some(a.configurable), ..Default::default() };
+            self.heap.define_own_property(o, k, &d).map(|_| ()).map_err(|e| self.herr(e))
         });
         r.map_err(|e| self.api_err(e))
     }

@@ -682,10 +682,10 @@ fn doc_current_script<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<
     d.wrap_opt_s(s, d.scripts.current.get())
 }
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    let proto = d.obj(it, d.p().html)?;
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+    let proto = d.obj_s(s, d.p().html)?;
     let _ = d.scripts.proto.set(proto);
-    for (name, g, s) in [
+    for (name, g, st) in [
         ("src", script_src as HS, set_script_src as HS),
         ("type", script_type, set_script_type),
         ("async", script_async, set_script_async),
@@ -695,18 +695,13 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         ("onload", handler_get::<false>, handler_set::<false>),
         ("onerror", handler_get::<true>, handler_set::<true>),
     ] {
-        d.def_get_s(it, proto, name, g, Some(s))?;
+        d.def_get_at(s, proto, name, g, Some(st))?;
     }
     let document = d.p().document;
-    d.def_get_s(it, document, "readyState", doc_ready_state, None)?;
-    d.def_get_s(it, document, "currentScript", doc_current_script, None)?;
-    let f = crate::browser_custom::interface_ctor(d, it, "HTMLScriptElement", false)?;
-    let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
-    it.define_data(f, kp, Value::Object(proto), false, false, false)?;
-    it.define_data(proto, kc, Value::Object(f), true, false, true)?;
-    let k = d.key(it, "HTMLScriptElement")?;
-    let g = it.global_object();
-    it.define_data(g, k, Value::Object(f), true, false, true)?;
+    d.def_get_at(s, document, "readyState", doc_ready_state, None)?;
+    d.def_get_at(s, document, "currentScript", doc_current_script, None)?;
+    let f = crate::browser_custom::interface_ctor_s(d, s, "HTMLScriptElement", false)?;
+    let f = d.link_s(s, f, proto, "HTMLScriptElement")?;
     *d.scripts.fixed.borrow_mut() = vec![proto, f];
     Ok(())
 }
