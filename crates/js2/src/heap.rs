@@ -330,6 +330,46 @@ impl Heap {
         unsafe { (*h).marks[i / 64] >> (i % 64) & 1 != 0 }
     }
 
+    /// Visit allocated, unmarked cells after marking and before the lazy sweep.
+    pub(crate) fn visit_dead(&self, mut visit: impl FnMut(crate::cell::CellHeader)) {
+        for c in 0..NCLASS {
+            debug_assert!(self.unswept[c].is_empty(), "start_mark swept all blocks");
+            let mut free = self.free[c];
+            // A block joins swept when its free cells are prepended to the list. Within the block they follow address order.
+            for &b in self.swept[c].iter().rev() {
+                // SAFETY: this block belongs to the heap. The free list separates cells with no object header from allocated cells.
+                unsafe {
+                    let h = b.as_ref();
+                    let base = b.as_ptr().cast::<u8>().add(FIRST);
+                    let cells = h.cells as usize;
+                    for word in 0..cells.div_ceil(64) {
+                        let first = word * 64;
+                        let mut unmarked = !h.marks[word] & (u64::MAX >> (64 - (cells - first).min(64)));
+                        while unmarked != 0 {
+                            let i = first + unmarked.trailing_zeros() as usize;
+                            unmarked &= unmarked - 1;
+                            let p = base.add(i * h.cell as usize);
+                            if p == free {
+                                free = p.cast::<*mut u8>().read();
+                            } else {
+                                visit(p.cast::<crate::cell::CellHeader>().read());
+                            }
+                        }
+                    }
+                }
+            }
+            debug_assert!(free.is_null());
+        }
+        for &b in &self.large {
+            // SAFETY: a large block has one allocated cell.
+            unsafe {
+                if b.as_ref().marks[0] & 1 == 0 {
+                    visit(b.as_ptr().cast::<u8>().add(FIRST).cast::<crate::cell::CellHeader>().read());
+                }
+            }
+        }
+    }
+
     /// End a collection: unmarked large objects go back to the OS, and every block of cells waits for its lazy sweep.
     pub fn finish_mark(&mut self) {
         for c in 0..NCLASS {

@@ -169,10 +169,10 @@ built-ins/Function/internals/Construct 2 0 4 2 0 4
 built-ins/Function/length 13 0 0 13 0 0
 built-ins/Function/prototype 12 5 0 7 10 0
 built-ins/Function/prototype/Symbol.hasInstance 9 1 1 10 0 1
-built-ins/Function/prototype/apply 43 3 2 40 6 2
+built-ins/Function/prototype/apply 43 3 2 43 3 2
 built-ins/Function/prototype/arguments 0 1 0 0 1 0
 built-ins/Function/prototype/bind 88 9 3 90 7 3
-built-ins/Function/prototype/call 47 2 0 44 5 0
+built-ins/Function/prototype/call 47 2 0 47 2 0
 built-ins/Function/prototype/caller 0 1 0 0 1 0
 built-ins/Function/prototype/caller-arguments 0 1 0 0 1 0
 built-ins/Function/prototype/constructor 1 0 0 1 0 0
@@ -362,7 +362,7 @@ built-ins/RegExp/lookBehind 17 0 0 17 0 0
 built-ins/RegExp/match-indices 0 0 14 0 0 14
 built-ins/RegExp/named-groups 0 0 36 0 0 36
 built-ins/RegExp/property-escapes 2 142 0 144 0 0
-built-ins/RegExp/property-escapes/generated 0 441 0 350 91 0
+built-ins/RegExp/property-escapes/generated 0 441 0 351 90 0
 built-ins/RegExp/property-escapes/generated/strings 0 0 28 0 0 28
 built-ins/RegExp/prototype 10 0 0 10 0 0
 built-ins/RegExp/prototype/Symbol.match 0 0 53 0 0 53
@@ -822,7 +822,7 @@ language/expressions/unary-plus 14 2 1 14 2 1
 language/expressions/unsigned-right-shift 38 1 6 38 1 6
 language/expressions/void 8 1 0 8 1 0
 language/expressions/yield 61 2 0 57 6 0
-language/function-code 204 13 0 200 17 0
+language/function-code 204 13 0 204 13 0
 language/future-reserved-words 55 0 0 55 0 0
 language/global-code 28 0 14 28 0 14
 language/identifier-resolution 12 1 1 7 6 1

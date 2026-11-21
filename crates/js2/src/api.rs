@@ -32,6 +32,7 @@
 //! none yet). Each of these answers `Abort::Unsupported(name)`.
 use crate::bi_object::{Desc, Own};
 use crate::builtins::Native;
+use crate::cell::Layout;
 use crate::interp::STOP;
 use crate::interp_rt::{ErrKind, Key, R, Realm};
 use crate::gc::Marker;
@@ -54,6 +55,8 @@ pub enum RawOwn {
 // A child module, so that it reads the private state and helpers of this one.
 #[path = "api_script.rs"]
 mod api_script;
+#[path = "api_inspect.rs"]
+mod api_inspect;
 
 /// The shared slots at the start of the handle stack. They have the numbers `u32::MAX - 3..=u32::MAX`, so a pushed value of logical
 /// index `n` is at the physical index `n + 4` and `stack_len` is 0 for an empty stack.
@@ -98,8 +101,19 @@ pub(crate) struct ApiState {
     /// The step budget of a task, and the nesting of [`Engine::task`].
     budget: u64,
     tasks: u32,
+    pub(crate) external_live: usize,
+    pub(crate) external_since: usize,
+    pub(crate) freed: Option<crate::api_raw::RawCollected>,
+    pub(crate) clock: Clock,
     /// Owners, host-filled objects and lazy members (`api_host.rs`).
     pub(crate) hs: crate::api_host::HostState,
+}
+
+/// The wall clock source of this realm.
+pub enum Clock {
+    System,
+    Virtual(f64),
+    Host(Option<Box<dyn Fn() -> f64>>),
 }
 
 impl Default for ApiState {
@@ -119,6 +133,10 @@ impl Default for ApiState {
             natives: [usize::MAX; 2],
             budget: u64::MAX,
             tasks: 0,
+            external_live: 0,
+            external_since: 0,
+            freed: None,
+            clock: Clock::System,
             hs: Default::default(),
         }
     }
@@ -170,6 +188,14 @@ impl ApiState {
 
     /// Drop the owners that the marking did not reach and give their keys to the host (`gc::Roots::weak`).
     pub(crate) fn prune_owners(&mut self, live: &crate::gc::Live) {
+        if let Some(count) = &mut self.freed {
+            live.visit_dead(|h| match h.layout() {
+                Layout::Object | Layout::Indexed => count.objects += 1,
+                Layout::OneByte | Layout::TwoByte if h.flags() & crate::string::FLAG_SYMBOL != 0 => count.symbols += 1,
+                Layout::OneByte | Layout::TwoByte | Layout::Rope | Layout::Indirect => count.strings += 1,
+                _ => {}
+            });
+        }
         let dead = self.hs.prune(live);
         if let (false, Some(h)) = (dead.is_empty(), self.host_ptr) {
             // SAFETY: as in `trace_owners`.
@@ -252,6 +278,25 @@ impl Realm {
             Some(i) if i < w.len => unsafe { *w.args.add(i as usize) },
             Some(_) => panic!("an argument handle past the arguments of the call"),
         }
+    }
+
+    /// Borrow a range of arguments from the current host call.
+    pub fn raw_args_slice(&self, a: Args<'_>, from: usize, to: usize) -> Option<&[Value]> {
+        let n = to.min(a.len()).saturating_sub(from);
+        let k = a.get(from)?.slot().checked_sub(WIN + 1)? as usize;
+        // SAFETY: the window and its arguments live for the host call, as in ApiState::mark.
+        let w = unsafe { self.api.win.as_ref() }?;
+        if n == 0 || k >= w.len as usize || n > w.len as usize - k {
+            return None;
+        }
+        // SAFETY: the range was checked against the slice held by the caller.
+        Some(unsafe { std::slice::from_raw_parts(w.args.add(k), n) })
+    }
+
+    /// Is idle collection due after heap or external allocation?
+    pub fn raw_gc_due(&self) -> bool {
+        self.nest == 0 && self.api.tasks == 0
+            && (self.heap.due() || self.api.external_since > (4usize << 20).max(self.api.external_live / 4))
     }
 
     /// An error of the engine as an error of the interface: a thrown value is a local, the stop marker is the abort that was recorded.
@@ -698,6 +743,9 @@ impl Engine for Realm {
 
     fn set_host(&mut self, host: Rc<dyn Host<Realm>>) {
         assert!(self.api.win.is_null(), "set_host inside a host call");
+        if self.api.host.as_ref().is_some_and(|current| Rc::ptr_eq(current, &host)) {
+            return;
+        }
         self.api.host_ptr = NonNull::new(Rc::as_ptr(&host) as *mut dyn Host<Realm>);
         self.api.host = Some(host);
     }
@@ -1056,7 +1104,7 @@ impl Engine for Realm {
     }
 
     fn wall_now_ms(&self) -> f64 {
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_millis() as f64)
+        self.clock_now_ms()
     }
 
     fn own_kind<'s>(&mut self, obj: Local<'_>, key: Local<'_>) -> Result<Option<ApiOwn<'s>>, Error<'s>> {
