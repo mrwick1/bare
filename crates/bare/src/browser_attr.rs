@@ -151,13 +151,14 @@ pub(crate) fn forget(d: &Dom, dead: &[ObjId]) {
             && let Some(el) = a.owner
         {
             unwatch.push((el, a.atom));
+            if let Some(l) = t.by_el.get_mut(&el) {
+                l.retain(|(_, x)| x != o);
+                if l.is_empty() {
+                    t.by_el.remove(&el);
+                }
+            }
         }
     }
-    let attrs = &t.attrs;
-    t.by_el.retain(|_, l| {
-        l.retain(|(_, o)| attrs.contains_key(o));
-        !l.is_empty()
-    });
     if !unwatch.is_empty() {
         let mut doc = d.doc.borrow_mut();
         for (el, atom) in unwatch {
