@@ -323,7 +323,7 @@ ops! {
     GetSuperElem Abc "w r r" "`a = super[c]`, with `b` as `this`.",
     SetSuper Abc "r r S" "`super.name = b` for the site `c`, with `a` as `this`.",
     SetSuperElem Abc "r r r" "`super[b] = c`, with `a` as `this`.",
-    CallSuper Abc "w R u" "`a = super(...)`: the `c` arguments are in the registers from `b`. It constructs with the `new.target` of this call and runs the field initializers (`SetFields`) of the class. The compiler writes `a` to the variable `this`.",
+    CallSuper Abc "w R u" "`a = super(...)`: the `c` arguments are in the registers from `b`. It constructs with the `new.target` of this call. The compiler binds `this` before it initializes the derived fields.",
     CallSuperSpread Abc "w r" "As `CallSuper`, with the arguments in the array `b`.",
     RetDerived Abc "r r" "Return from a derived constructor with the value `a` and the variable `this` in `b`: an object is returned as it is; `undefined` gives `this` (a ReferenceError when `this` is the hole); anything else is a TypeError.",
     GenInit Abx "- T" "The first suspension of a generator: the parameters are bound and the defaults are evaluated, and the body has not run. Make the generator object and the record that keeps the frame, save the registers of the list at `tables[bx..]` (see \"Suspension\" above), and return the generator object to the caller. The first `next()` goes on at the instruction after this one.",
@@ -345,6 +345,8 @@ ops! {
     Lazy Abc "u" "The only instruction of the stub of a function that is compiled at its first call (`script::Lazy`): compile the function into this code, then run it from the start with the same arguments. With `a` = 1 the stub has `CF_ARGS`, so the frame record holds all arguments in an array. With `a` = 0 the stub has the parameter registers of the real code, and the arguments are in them (a function with plain parameters that does not read `arguments`): no array is made. The compiler never emits it.",
     GetElemRef Abc "w r r" "As `GetElem`, but replace the key in temporary register `c` with its converted property key before the read.",
     GetSuperElemRef Abc "w r r" "As `GetSuperElem`, but replace the key in temporary register `c` with its converted property key before the read.",
+    InitSuperFields Abc "r" "Initialize the fields of the derived class on the newly bound receiver in `a`.",
+    ThrowSuperDelete Abc "" "Throw a ReferenceError on deletion of a super property.",
     ForInNext AsBxX "w j R" "`a` = the next enumerable key of the for-in record in the 3 registers from `x`, or jump at the end.",
 }
 
@@ -377,7 +379,7 @@ impl Op {
 
     /// Does control go on to the next instruction? (`Jmp`, `JmpBack`, the returns and the throws do not.)
     pub fn falls_through(self) -> bool {
-        !matches!(self, Op::Jmp | Op::JmpBack | Op::Ret | Op::RetUndef | Op::RetGen | Op::RetAsync | Op::Throw | Op::ThrowConst | Op::RetDerived | Op::SwitchI | Op::SwitchA)
+        !matches!(self, Op::Jmp | Op::JmpBack | Op::Ret | Op::RetUndef | Op::RetGen | Op::RetAsync | Op::Throw | Op::ThrowConst | Op::ThrowSuperDelete | Op::RetDerived | Op::SwitchI | Op::SwitchA)
     }
 
     /// Can the instruction run JS, allocate or throw, so that a collection can happen in it? The compiler gives a root map to each one.
