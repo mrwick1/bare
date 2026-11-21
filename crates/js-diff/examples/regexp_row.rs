@@ -57,7 +57,7 @@ fn run(e: &Eng, input: &[u16], s: &mut Run) -> u64 {
             }
             let mut fuel = u64::MAX;
             match bare_js2::regexp::exec(img, input, 0, &mut s.new, &mut fuel, &mut s.out) {
-                Ok(true) => s.out.chunks(2).fold(1, |h, p| mix(h, (p[0] != u32::MAX).then(|| (p[0] as usize, p[1] as usize)))),
+                Ok(true) => s.out[..n].chunks(2).fold(1, |h, p| mix(h, (p[0] != u32::MAX).then(|| (p[0] as usize, p[1] as usize)))),
                 Ok(false) => 0,
                 Err(_) => 7,
             }

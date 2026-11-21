@@ -17722,21 +17722,23 @@ Results.
 
 | Check | Result |
 | --- | --- |
-| Regex row, 47 staging patterns, 20 inputs, `exec` with all spans (940 runs for each rep) | old 1,627 instructions per run; new 1,666 (+2.4%) |
-| Regex row, 19 Porter rules, 2,000 words (38,000 runs for each rep) | old 3,801; new 3,653 (-3.9%) |
-| Checksum of all spans on both rows | equal on both engines |
+| Regex row, 47 staging patterns, 20 inputs, `exec` with all spans (940 runs for each rep) | old 1,627 instructions per run; new 1,657 (+1.8%) |
+| Regex row, 19 Porter rules, 2,000 words (38,000 runs for each rep) | old 3,801; new 3,644 (-4.1%) |
+| Checksum of all spans on both rows | equal on both engines (after the fix of the row, see the merge note below) |
 | Compile, 66 patterns, per pattern | old 25,474; new about 25,764 (+1.1%) |
 | Compiled bytes for each pattern (66 patterns) | new 308 B (blob cell, rounded to 16); the design gives 916 B for the old engine |
 | `(a+)+b`, n = 28 | both end with a budget error; new stops at the cap of 50 M steps (about 120 ms); old about 140 to 250 ms |
-| test262 (`tools/js/test262_js2.sh -u`, checkout `e4fbf577`) | js2 passes 18,604 (baseline of `origin/main` at `a54b7df2`: 17,324); no directory has fewer passes than that baseline |
+| test262 (`tools/js/test262_js2.sh -u`, checkout `e4fbf577`) | js2 passes 18,604 (baseline of `origin/main` at `29aee409`: 17,324); no test that passes on `origin/main` fails (per-test comparison of a fresh run of each tree); 1,280 tests pass that did not |
 | test262, `built-ins/RegExp` against the old engine | old passes 603, js2 723; 22 tests pass on the old engine and fail on js2 (below) |
 | test262, String regex methods | the String directories still have 127 tests that pass on the old engine and fail on js2 (the String methods with a RegExp argument, R3) |
-| `cargo test --locked -p bare-js2 --lib` | 491 pass (after the merge of `origin/main`) |
+| `cargo test --locked -p bare-js2 --lib` | 523 pass (after the merge of `origin/main` at `29aee409`) |
 | `cargo test --locked -p bare-js-diff` | all pass (363 programs, no new difference) |
-| Startup, `script_run` with `var x = 1;` | base 1,795,527; new 1,805,177 (+0.54%); at `codegen-units=1`: 1,789,488 and 1,796,190 (+0.37%) |
-| Micro rows, default build (`interp_load`, base then new) | loopfn +0.002%, calls -0.509%, fib +0.004%, closures -0.104%, objects -0.419% |
-| Micro rows, `codegen-units=1` (information) | loopfn +1.77%, calls -0.69%, fib +1.77%, closures +1.04%, objects +2.10% |
+| Startup, `script_run` with `var x = 1;` | base 1,941,522; new 1,956,532 (+0.77%); at `codegen-units=1`: 1,936,844 and 1,943,616 (+0.35%), so the rule passes |
+| Micro rows, default build (`interp_load`, base then new) | loopfn +0.005%, calls +0.002%, fib +0.001%, closures +0.004%, objects +0.009% |
+| Micro rows, `codegen-units=1` (information) | loopfn -0.35%, calls -1.21%, fib +0.26%, closures -0.79%, objects -0.96% |
 | Binary, `script_run`, release | 2,210,848 B (base) to 2,620,904 B (new): +410,056 B (+18.5%) |
+
+Merge with `origin/main` at `29aee409` (host adapter, generators, handler groups). Conflicts: `Cargo.toml` and `lib.rs` (the lists of the modules with `unsafe`: both `blob` and `api`), `interp_rt.rs` (`collect` marks `api` and `rx`), `object.rs` (`F_GEN` keeps 16384; `F_REGEXP` moved to 32768, because 8192 is for `F_PROMISE` of #800). The cost numbers above were measured again on the merged tree against `29aee409`: `interp_load` at loopfn 1,000,000, calls 1,000,000, fib 30, closures 200,000, objects 200,000; `tools/js/instr.sh`, 3 rounds, the load average was 10 to 19 (instruction counts only). The spread of the 3 rounds is under 0.001%. `regexp_row.rs` summed the whole output buffer of the new engine, with stale entries of earlier patterns. It now sums the spans of the pattern only, and the checksum is equal on both engines (the old row had been different, which the first version of this note did not say).
 
 The 22 tests of `built-ins/RegExp` that the old engine passes and js2 does not: 16 `lookBehind` tests and `lookahead-quantifier-match-groups` (they call `String.prototype.match`; R3), 4 tests that call a String method with a RegExp (R3), `prop-desc.js` (the lazy global, above) and `exec/u-captured-value.js`. The last one fails because of a bug that is not in this change: on the base, `'𝌆'[0]` is U+FFFD, not the lone surrogate.
 
