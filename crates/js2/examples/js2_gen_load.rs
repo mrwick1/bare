@@ -1,6 +1,6 @@
 //! Cost of a suspended frame (`docs/design-js2-async.md` 5.1 and G0), written as bytecode by hand (there is no compiler for `function*`
 //! yet). A generator keeps 5 live registers across each `yield`. Each case checks its result and exits with status 1 on a mismatch.
-//!   gen_load CASE N        CASE: next | call | host        N: turns
+//!   js2_gen_load CASE N        CASE: next | call | host        N: turns
 //! - `next`: a loop that calls `g.next()` and reads `.value` (one native call, one resume, one `Yield`, one result object).
 //! - `call`: the same loop with a plain function in place of the generator (the cost of a call and a return, to subtract).
 //! - `host`: a Rust loop that resumes the generator through `Vm::resume`, with no result object (one `Yield` and one resume).
@@ -118,7 +118,7 @@ fn main_make(sh: &Arc<SharedAtoms>, n: i32) -> Code {
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
-    let (Some(name), Some(n)) = (a.get(1), a.get(2).and_then(|s| s.parse::<i32>().ok())) else { die("usage: gen_load CASE N".into()) };
+    let (Some(name), Some(n)) = (a.get(1), a.get(2).and_then(|s| s.parse::<i32>().ok())) else { die("usage: js2_gen_load CASE N".into()) };
     let sh = Arc::new(SharedAtoms::default());
     let expect: f64 = (0..n as u64).sum::<u64>() as f64;
     match name.as_str() {
