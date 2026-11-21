@@ -42,6 +42,7 @@ pub mod parse;
 pub mod bytecode;
 pub mod verify;
 pub mod compile;
+mod data_lit;
 #[allow(unsafe_code)]
 pub mod interp_rt;
 #[allow(unsafe_code)]

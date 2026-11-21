@@ -287,9 +287,9 @@ fn to_lower(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
     map_text(rt, this, "toLowerCase", |s| s.to_lowercase())
 }
 
-/// The white space of the language: `char::is_whitespace` and the byte order mark.
-fn is_space(c: u16) -> bool {
-    char::from_u32(c as u32).is_some_and(|c| c.is_whitespace() || c == '\u{feff}')
+/// ECMAScript WhiteSpace and LineTerminator code units.
+pub(crate) fn is_space(c: u16) -> bool {
+    matches!(c, 9..=13 | 0x20 | 0xA0 | 0x1680 | 0x2000..=0x200A | 0x2028 | 0x2029 | 0x202F | 0x205F | 0x3000 | 0xFEFF)
 }
 
 fn trim_with(rt: &mut Realm, this: Value, name: &str, start: bool, end: bool) -> R<Value> {

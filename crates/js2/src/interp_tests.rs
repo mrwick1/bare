@@ -784,7 +784,7 @@ fn for_of_walks_an_array_and_for_in_walks_the_own_keys() {
     f.e(Op::ForInOpen, 1, 6, 0);
     f.e(Op::LoadAtom, 7, empty, 0);
     f.bind(h2);
-    f.ji(Op::IterNext, 4, 1, d2);
+    f.ji(Op::ForInNext, 4, 1, d2);
     f.e(Op::Add, 7, 7, 4);
     f.j(Op::JmpBack, 0, 0, h2);
     f.bind(d2);

@@ -135,6 +135,7 @@ impl LazyCompile for Lazy {
         let mut sub = sub;
         l.children(&mut sub)?;
         let mut code = sub.code;
+        code.noctor |= codes[ci].noctor;
         // The flags of the new codes: the children come after their parent, so the last come first (a stub has no `super`).
         let link = |new: &[Code], c: &Code| c.funcs.iter().any(|&k| k as usize >= base && new[k as usize - base].flags & CF_LINK != 0);
         for i in (0..new.len()).rev() {
@@ -162,6 +163,8 @@ impl LazyCompile for Lazy {
         };
         let id = crate::prelude_facts::TOP.iter().find(|(n, _)| *n == top).map(|&(_, id)| id).ok_or_else(|| format!("the prelude has no function {top} (is prelude_facts.rs out of date? run `BLESS_PRELUDE_FACTS=1 cargo test -p bare-js2 --lib prelude_facts`)"))?;
         let mut code = stub(&self.atoms, self.units[u].facts.get(id), Some(name))?;
+        // A built-in has no construct slot, even when its body is a function declaration in the prelude.
+        code.noctor = true;
         code.flags = code_flags(&code);
         let ci = codes.push_all(vec![code]);
         self.pending.push(Wait { ci, unit: u, child: Some(Child { id, chain: None, self_name: false, name: Some(name.into()), ready: None }) });

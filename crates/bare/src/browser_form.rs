@@ -127,15 +127,19 @@ impl<E: Eng> Dom<E> {
         if !tag_is(&doc, n, &["button", "fieldset", "input", "object", "output", "select", "textarea"]) && !self.is_face(n) {
             return Ok(None);
         }
+        let form = doc.find_atom("form");
+        let is_form = |el| {
+            matches!(*doc.data(el), NodeData::Element { name, .. } if Some(name) == form) && !doc.is_foreign(el)
+        };
         let (mut nearest, mut top) = (None, n);
         while let Some(p) = doc.parent(top) {
             it.charge_o(1)?;
-            if nearest.is_none() && tag_is(&doc, p, &["form"]) {
+            if nearest.is_none() && is_form(p) {
                 nearest = Some(p);
             }
             top = p;
         }
-        let Some(want) = attr(&doc, n, "form") else { return Ok(nearest) };
+        let Some(want) = form.and_then(|a| doc.attr(n, a)) else { return Ok(nearest) };
         if top != doc.root() {
             return Ok(nearest);
         }
@@ -148,7 +152,7 @@ impl<E: Eng> Dom<E> {
             it.charge_o(1)?;
             (cur, depth) = (c, d);
             if doc.attr(c, Atom::ID) == Some(want) {
-                return Ok(tag_is(&doc, c, &["form"]).then_some(c));
+                return Ok(is_form(c).then_some(c));
             }
         }
         Ok(None)
@@ -192,13 +196,14 @@ impl<E: Eng> Dom<E> {
         if !tag_is(&doc, n, &["button", "input", "select", "textarea"]) && !self.is_face(n) {
             return Ok(false);
         }
-        if attr(&doc, n, "disabled").is_some() {
+        let disabled = doc.find_atom("disabled");
+        if disabled.is_some_and(|a| doc.attr(n, a).is_some()) {
             return Ok(true);
         }
         let (mut prev, mut cur) = (n, doc.parent(n));
         while let Some(a) = cur {
             it.charge_o(1)?;
-            if tag_is(&doc, a, &["fieldset"]) && attr(&doc, a, "disabled").is_some() {
+            if disabled.is_some_and(|name| tag_is(&doc, a, &["fieldset"]) && doc.attr(a, name).is_some()) {
                 let first_legend = doc.children(a).find(|&c| tag_is(&doc, c, &["legend"]));
                 if first_legend != Some(prev) {
                     return Ok(true);

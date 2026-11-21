@@ -28,7 +28,7 @@ use crate::facts::Facts;
 use crate::compile::ScriptMode;
 use crate::parse::{Limits, parse_script_lazy};
 use crate::interp_rt::{ErrKind, Key, R, Realm};
-use crate::object::{F_CALLABLE, F_CLASS, F_FNPROPS, F_NATIVE, Obj};
+use crate::object::{F_ARGS, F_CALLABLE, F_CLASS, F_FNPROPS, F_NATIVE, Obj};
 use crate::shapes::{A_C, A_W};
 use crate::string::Str;
 use crate::value::Value;
@@ -189,12 +189,47 @@ impl Realm {
     /// `new callee(...args)` for a native constructor. `nt` is `new.target`.
     #[inline(never)]
     pub fn construct_native(&mut self, callee: Value, args: &[Value], nt: Value) -> R<Value> {
-        let Some(id) = self.native_id(callee).filter(|i| self.natives[*i].ctor) else { return self.type_error("not a constructor") };
+        let Some(id) = self.native_id(callee) else { return self.type_error("not a constructor") };
+        if id == self.bound_id as usize {
+            return self.construct_bound(callee, args, nt);
+        }
+        if !self.natives[id].ctor {
+            return self.type_error("not a constructor");
+        }
         let f = self.natives[id].f;
         (self.callee, self.nt) = (callee, nt);
         let v = f(self, Value::UNDEFINED, args);
         self.nt = Value::UNDEFINED;
         v
+    }
+
+    /// Follow the bound targets and prepend their arguments from innermost to outermost.
+    fn construct_bound(&mut self, mut callee: Value, args: &[Value], mut nt: Value) -> R<Value> {
+        let mut bound_args = Vec::new();
+        while let Some(b) = self.bound_function(callee) {
+            let target = b.slot(&self.shapes, 1);
+            if callee == nt {
+                nt = target;
+            }
+            if let Some(a) = Realm::obj(b.slot(&self.shapes, 3)) {
+                bound_args.push(a);
+            }
+            callee = target;
+        }
+        let mut all = Vec::new();
+        for a in bound_args.into_iter().rev() {
+            all.extend((0..a.len()).map(|i| a.get_element(i).unwrap_or(Value::UNDEFINED)));
+        }
+        all.extend_from_slice(args);
+        if self.native_id(callee).is_some() {
+            self.construct_native(callee, &all, nt)
+        } else {
+            self.construct_script(callee, &all, nt)
+        }
+    }
+
+    pub(crate) fn bound_function(&self, f: Value) -> Option<Obj> {
+        (self.native_id(f) == Some(self.bound_id as usize)).then(|| Realm::obj(f).expect("bound function"))
     }
 
     /// The prototype of an object that a native constructor makes: `new.target.prototype` for a `new` (a class that extends the
@@ -370,9 +405,9 @@ impl Realm {
 }
 
 impl Realm {
-    /// An array (not an arguments object): an indexed object with a shape other than `s_args`.
+    /// An indexed object with array property semantics.
     pub(crate) fn is_array(&self, o: Obj) -> bool {
-        o.is_indexed() && o.shape(&self.shapes) != self.s_args
+        o.is_indexed() && !o.has_flag(F_ARGS)
     }
 }
 
@@ -468,22 +503,10 @@ fn fn_call(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
 fn fn_apply(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     callable_this(rt, this, "apply")?;
     let list = arg(args, 1);
-    rt.tail_args.clear();
-    if let Some(o) = Realm::obj(list) {
-        if o.is_indexed() {
-            let mut a = std::mem::take(&mut rt.tail_args);
-            a.extend((0..o.len()).map(|i| o.get_element(i).unwrap_or(Value::UNDEFINED)));
-            rt.tail_args = a;
-        } else {
-            let n = rt.get_named(list, "length")?;
-            let n = rt.to_number(n)?;
-            for i in 0..(n.max(0.0) as u32) {
-                let v = rt.get_prop(list, Key::Idx(i))?;
-                rt.tail_args.push(v);
-            }
-        }
-    } else if !list.is_undefined() && !list.is_null() {
-        return rt.type_error("CreateListFromArrayLike called on a non-object");
+    if list.is_undefined() || list.is_null() {
+        rt.tail_args.clear();
+    } else {
+        rt.tail_args = crate::bi_reflect::list_from(rt, list)?;
     }
     rt.tail = Some((this, arg(args, 0)));
     Ok(Value::UNDEFINED)
@@ -491,12 +514,41 @@ fn fn_apply(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
 
 fn fn_bind(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     callable_this(rt, this, "bind")?;
+    let target = Realm::obj(this).expect("function");
+    let proto = rt.proto_of(target);
+    let (length, name) = (Key::Name(rt.k_length), Key::Name(rt.k_name));
+    let len = if rt.get_own_h(target, length)?.is_some() {
+        let n = rt.get_prop(this, length)?.as_f64().unwrap_or(0.0);
+        (n.trunc() - args.len().saturating_sub(1) as f64).max(0.0)
+    } else {
+        0.0
+    };
+    let tn = rt.get_prop(this, name)?;
+    let mut bound_name = rt.string("bound ");
+    if let Some(s) = Realm::str_of(tn) {
+        let prefix = Realm::str_of(bound_name).expect("string");
+        bound_name = Str::concat(&mut rt.heap, prefix, s).expect("memory").value();
+    }
     let rest = if args.len() > 1 { rt.new_array(&args[1..]) } else { Value::UNDEFINED };
-    let b = rt.native_cell(rt.bound_id as usize);
-    b.set_slot(&rt.shapes, 1, this);
-    b.set_slot(&rt.shapes, 2, arg(args, 0));
-    b.set_slot(&rt.shapes, 3, rest);
+    let b = make_bound(rt, this, arg(args, 0), rest);
+    b.set_proto(&mut rt.shapes, proto.map(|p| p.cell()));
+    b.set_flag(F_FNPROPS);
+    rt.define_attrs(b, length, A_C, Realm::num(len))?;
+    rt.define_attrs(b, name, A_C, bound_name)?;
     Ok(b.value())
+}
+
+fn make_bound(rt: &mut Realm, target: Value, this: Value, args: Value) -> Obj {
+    let b = rt.native_cell(rt.bound_id as usize);
+    b.set_slot(&rt.shapes, 1, target);
+    b.set_slot(&rt.shapes, 2, this);
+    b.set_slot(&rt.shapes, 3, args);
+    b
+}
+
+/// Bind a callback for a prelude operation. The callback's metadata has no part in the call.
+pub(crate) fn bind_callback(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+    Ok(make_bound(rt, arg(args, 0), arg(args, 1), Value::UNDEFINED).value())
 }
 
 /// The call of a bound function: the target, with the bound `this` and the bound arguments before the arguments of the call.

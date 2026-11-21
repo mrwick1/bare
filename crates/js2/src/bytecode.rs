@@ -54,6 +54,7 @@
 //! every op that can allocate, call JS (a getter, `valueOf`) or throw, and `JmpBack`. The key of a map is the `pc` of the first word of
 //! the instruction. The verifier checks that each safepoint has a map, that each map names only registers that every path has written,
 //! and that no instruction reads a register that is not written (so a frame needs no fill, 6.10 item 4).
+use crate::data_lit::DataLiteral;
 use crate::roots::RootMaps;
 use crate::string::Str;
 use std::fmt::Write;
@@ -104,6 +105,7 @@ impl Form {
 ///
 /// `w` a register that the op writes. `r` a register that it reads. `i` a signed immediate. `u` an unsigned number (a count, a
 /// depth, a slot). `j` a jump offset in words from the word after the instruction. `z` a special constant (0 to 3, see above).
+/// `D` an index of the data literals.
 /// `N` an index of the numbers, `A` of the atoms, `F` of the child functions, `H` of the recipes, `S` of the sites, `T` the offset of a switch table in [`Code::tables`]. `-` a field that is 0.
 /// `R` is the first register of a window that the op reads (a call, a literal, an iterator record), and `W` of a window that it writes:
 /// the size of a window comes from the op ([`crate::verify`]).
@@ -141,7 +143,7 @@ ops! {
     LoadTrue Abc "w" "`a = true`.",
     LoadFalse Abc "w" "`a = false`.",
     LoadThis Abc "w" "`a = this`.",
-    LoadThisS Abc "w" "`a = this` in sloppy code: `undefined` and `null` give the global object.",
+    LoadThisS Abc "w" "`a = this` in sloppy code: `undefined` and `null` give the global object, and other primitives are boxed once per frame.",
     LoadHole Abc "w" "`a` = the hole value (a variable in its temporal dead zone).",
     LoadI AsBx "w i" "`a` = the integer `sbx`.",
     LoadN Abx "w N" "`a` = the number `numbers[bx]`.",
@@ -282,7 +284,7 @@ ops! {
     RetUndef Abc "" "Return `undefined`.",
     Throw Abc "r" "Throw `a`.",
     ThrowConst Abx "- A" "Throw the TypeError of an assignment to the constant named by `atoms[bx]`.",
-    IterOpen Abc "W r" "Open the iterator of `b`. The iterator record (iterator, `next`, state) is in the 3 registers from `a`.",
+    IterOpen Abc "W r u" "Open the iterator of `b`. The iterator record (iterator, `next`, state) is in the 3 registers from `a`. With `c` = 1, use a full array iterator for `yield*`.",
     ForInOpen Abc "W r" "Open the keys of `b` (`for-in`). The record is in the 3 registers from `a`, as for `IterOpen`.",
     IterNext AsBxX "w j R" "`a` = the next value of the record in the 3 registers from `x`. When it is done, jump.",
     IterClose Abc "R - u" "Close the iterator whose record is in the 3 registers from `a` (a `break` or an exception out of the loop). `c` is 1 for an exception: the error of `return()` is then dropped.",
@@ -339,7 +341,11 @@ ops! {
     AIterCloseT AsBxX "w j R" "As `AIterClose`, for an exception that leaves the loop: an error of the getter or of the call is dropped (the jump is taken).",
     AIterCheck Abc "r u" "A TypeError when `a` is no object: the awaited result of `return()` (`b` 0), or the iterator that has no `throw` (`b` 1, `a` is `null`).",
     AYsCall AsBxX "w j R" "`yield*` in an async generator: the record at `x` is the iterator record, the sent value and the mode (`YS_REGS`). `a` = the result of `next`, `throw` or `return` of the iterator for the mode (not awaited). When the iterator has no `throw`: the mode register is 3 and jump. When it has no `return`: `a` = the sent value, the mode register is 2 and jump.",
+    NewDataLit Abx "w D" "`a` = a fresh tree of objects and arrays made from `data[bx]`.",
     Lazy Abc "u" "The only instruction of the stub of a function that is compiled at its first call (`script::Lazy`): compile the function into this code, then run it from the start with the same arguments. With `a` = 1 the stub has `CF_ARGS`, so the frame record holds all arguments in an array. With `a` = 0 the stub has the parameter registers of the real code, and the arguments are in them (a function with plain parameters that does not read `arguments`): no array is made. The compiler never emits it.",
+    GetElemRef Abc "w r r" "As `GetElem`, but replace the key in temporary register `c` with its converted property key before the read.",
+    GetSuperElemRef Abc "w r r" "As `GetSuperElem`, but replace the key in temporary register `c` with its converted property key before the read.",
+    ForInNext AsBxX "w j R" "`a` = the next enumerable key of the for-in record in the 3 registers from `x`, or jump at the end.",
 }
 
 /// Words of a slot of a string switch table: the hash, the atom and the target.
@@ -615,6 +621,8 @@ pub struct Code {
     /// The child functions, as numbers of the script.
     pub funcs: Vec<u32>,
     pub recipes: Recipes,
+    /// Constant trees for `NewDataLit`.
+    pub(crate) data: Vec<DataLiteral>,
     /// The jump tables of `SwitchI` and `SwitchA` (see the module comment for the layout).
     pub tables: Vec<u32>,
     /// The name of each site, as an index of `atoms`. Each site has exactly one instruction.
@@ -673,6 +681,7 @@ impl Code {
             atoms: Vec::new(),
             funcs: Vec::new(),
             recipes: Recipes::default(),
+            data: Vec::new(),
             tables: Vec::new(),
             sites: Vec::new(),
             loops: Vec::new(),
@@ -769,7 +778,7 @@ impl Code {
                         'w' | 'r' => format!("r{v}"),
                         'i' => format!("{}", v as i32),
                         'j' => format!("-> {:04}", (pc + n) as i64 + v as i32 as i64),
-                        l @ ('N' | 'A' | 'F' | 'H' | 'S' | 'T') => format!("{}{v}", l.to_ascii_lowercase()),
+                        l @ ('N' | 'A' | 'F' | 'H' | 'S' | 'T' | 'D') => format!("{}{v}", l.to_ascii_lowercase()),
                         _ => format!("{v}"),
                     }
                 })

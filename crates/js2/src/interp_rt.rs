@@ -49,8 +49,8 @@ use crate::codes::Codes;
 use crate::interp::LazyCompile;
 use crate::reenter::Machine;
 use crate::builtins::{Hint, Native};
-use crate::object::{Ctx, F_CLASS, F_ELEMS_FIXED, F_ELEMS_RO, F_HOST, F_LAZY, F_LEN_RO, F_NATIVE, F_NOEXT, F_PROTO, F_SLOWIDX, K_WRAP, Obj};
-use crate::shapes::{A_ACC, A_C, A_E, A_W, ShapeId, Shapes};
+use crate::object::{Ctx, F_CLASS, F_ELEMS_FIXED, F_ELEMS_RO, F_HOST, F_LAZY, F_LAZYM, F_LEN_RO, F_NATIVE, F_NOEXT, F_PROTO, F_SLOWIDX, K_WRAP, Obj};
+use crate::shapes::{A_ACC, A_C, A_E, A_W, Entry, ShapeId, Shapes};
 use crate::string::{Chars, Str};
 use crate::value::{Kind, Value};
 use std::rc::Rc;
@@ -270,6 +270,16 @@ pub enum Key {
     Name(Str),
 }
 
+impl Key {
+    /// Encode a converted key in a register for a later property access.
+    pub(crate) fn as_value(self) -> Value {
+        match self {
+            Key::Idx(i) => Realm::num(i as f64),
+            Key::Name(s) => s.key_value(),
+        }
+    }
+}
+
 /// The kinds of error that the interpreter throws. The value is the index in `Realm::error_protos`.
 #[derive(Clone, Copy, Debug)]
 pub enum ErrKind {
@@ -289,6 +299,7 @@ pub struct Realm {
     pub object_proto: Obj,
     pub function_proto: Obj,
     pub array_proto: Obj,
+    pub(crate) array_ctor: Value,
     pub error_proto: Obj,
     pub s_object: ShapeId,
     pub s_array: ShapeId,
@@ -408,12 +419,14 @@ impl Realm {
         let hidden = ["\0native", "\0n1", "\0n2", "\0n3"].map(&mut atom);
         let (k_value, k_done) = (atom("value"), atom("done"));
         let gkeys = ["\0gstate", "\0gframe", "\0gsent", "\0gmode", "\0gpromise", "\0gentry"].map(&mut atom);
+        let empty = atom("");
         let root = shapes.root(Layout::Object, None, 4);
         let object_proto = Obj::new(&mut heap, &shapes, root).expect("memory");
         let proto = Some(object_proto.cell());
         let s_object = shapes.root(Layout::Object, proto, 4);
         let function_proto = Obj::new(&mut heap, &shapes, s_object).expect("memory");
-        let array_proto = Obj::new(&mut heap, &shapes, s_object).expect("memory");
+        let array_proto_shape = shapes.root(Layout::Indexed, proto, 0);
+        let array_proto = Obj::array(&mut heap, &shapes, array_proto_shape, &[]).expect("memory");
         let error_proto = Obj::new(&mut heap, &shapes, s_object).expect("memory");
         let global = Obj::new(&mut heap, &shapes, s_object).expect("memory");
         shapes.watch(global.cell().as_ptr() as usize);
@@ -424,11 +437,14 @@ impl Realm {
         let f = shapes.add(f, k_home, 0).expect("shape");
         let f = shapes.add(f, k_fields, 0).expect("shape");
         let s_func = shapes.add(f, k_link, 0).expect("shape");
-        let mk = |heap: &mut Heap| Obj::new(heap, &shapes, s_object).expect("memory");
-        let (string_proto, number_proto, boolean_proto, symbol_proto) = (mk(&mut heap), mk(&mut heap), mk(&mut heap), mk(&mut heap));
+        let wrapper = shapes.add(s_object, k_prim, 0).expect("shape");
+        let [string_proto, number_proto, boolean_proto] =
+            [empty.value(), Value::int(0), Value::bool(false)].map(|v| Obj::new_wrapper(&mut heap, &shapes, wrapper, v));
+        let symbol_proto = Obj::new(&mut heap, &shapes, s_object).expect("memory");
         let wk = crate::bi_symbol::well_known(&mut heap);
-        // An arguments object has the own property `Symbol.iterator` (slot 0): `%Array.prototype.values%`, set when the object is made.
-        let s_args = shapes.root(Layout::Indexed, Some(object_proto.cell()), 1);
+        // Arguments objects have ordinary own properties for length and the iterator.
+        let s_args = shapes.root(Layout::Indexed, Some(object_proto.cell()), 2);
+        let s_args = shapes.add(s_args, k_length, crate::builtins::HIDDEN).expect("shape");
         let s_args = shapes.add(s_args, wk[crate::bi_symbol::ITERATOR], crate::builtins::HIDDEN).expect("shape");
         let pr = crate::promise::Promises::new(&mut heap, &mut shapes, s_object, k_then, k_pstate, k_presult);
         // The prototypes of `TypeError` and the others inherit from `Error.prototype`.
@@ -466,6 +482,7 @@ impl Realm {
             object_proto,
             function_proto,
             array_proto,
+            array_ctor: Value::UNDEFINED,
             error_proto,
             s_object,
             s_array,
@@ -588,6 +605,7 @@ impl Realm {
         self.pool.iter_mut().flat_map(|p| p.fbs.iter_mut()).for_each(Feedback::collected);
         if self.shapes.epoch() != self.epoch {
             self.epoch = self.shapes.epoch();
+            self.ltab.array_iter_spot = None;
             fbs.iter_mut().for_each(Feedback::clear);
             self.pool.iter_mut().flat_map(|p| p.fbs.iter_mut()).for_each(Feedback::clear);
         }
@@ -751,21 +769,7 @@ impl Realm {
         }
         if let Some(s) = Realm::str_of(v) {
             let s = self.flat(s);
-            let t = self.text(s);
-            let t = t.trim_matches(|c| crate::bigint::is_js_space(c as u32));
-            return Ok(if t.is_empty() {
-                0.0
-            } else if matches!(t.as_bytes(), [b'0', b'x' | b'X' | b'o' | b'O' | b'b' | b'B', ..]) {
-                crate::bigint::parse_digits(t.as_bytes()).map_or(f64::NAN, |n| crate::bigint::to_f64(n.sv()))
-            } else if matches!(t, "Infinity" | "+Infinity") {
-                f64::INFINITY
-            } else if t == "-Infinity" {
-                f64::NEG_INFINITY
-            } else if t.chars().all(|c| c.is_ascii_digit() || matches!(c, '+' | '-' | '.' | 'e' | 'E')) {
-                t.parse().unwrap_or(f64::NAN)
-            } else {
-                f64::NAN
-            });
+            return Ok(crate::bi_number::string_to_number(&self.text(s)));
         }
         if Realm::obj(v).is_some() {
             let p = self.to_primitive(v, Hint::Number)?;
@@ -994,6 +998,39 @@ impl Realm {
         }
     }
 
+    /// An index can be a named property, an array element, or a character of a String wrapper.
+    #[cold]
+    fn lookup_index_g(&mut self, mut o: Obj, index: u32) -> Option<Slot> {
+        let key = self.idx_atom(index);
+        loop {
+            if let Some(s) = self.slot_at(o, key) {
+                return Some(s);
+            }
+            o = self.proto_of(o)?;
+            if let Some(v) = if o.is_indexed() {
+                o.get_element(index)
+            } else if let Some(s) = self.string_wrapper(o) {
+                self.string_own(s, Key::Idx(index))
+            } else {
+                None
+            } {
+                return Some(Slot::Data(v));
+            }
+        }
+    }
+
+    /// An array or String wrapper can supply a length outside its shape.
+    #[cold]
+    fn lookup_length_g(&mut self, mut o: Obj) -> Option<Slot> {
+        loop {
+            match self.get_own(o, Key::Name(self.k_length)) {
+                Some(crate::bi_object::Own::Data(v, _)) => return Some(Slot::Data(v)),
+                Some(crate::bi_object::Own::Acc(g, s, _)) => return Some(Slot::Acc(g, s)),
+                None => o = self.proto_of(o)?,
+            }
+        }
+    }
+
     /// [`Realm::lookup_g`] for a name that no lazy table has (`name`, `message`), where the realm is not mutable.
     fn lookup_ro(&self, mut o: Obj, key: Str) -> Option<Slot> {
         loop {
@@ -1055,12 +1092,14 @@ impl Realm {
                     {
                         return Ok(Got::Val(v));
                     }
-                    let k = self.idx_atom(i);
-                    Ok(Self::got(self.lookup_g(o, k)))
+                    Ok(Self::got(self.lookup_index_g(o, i)))
                 }
                 Key::Name(k) => {
-                    if k == self.k_length && self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed {
-                        return Ok(Got::Val(Realm::num(o.len() as f64)));
+                    if k == self.k_length {
+                        if self.is_array(o) {
+                            return Ok(Got::Val(Realm::num(o.len() as f64)));
+                        }
+                        return Ok(Self::got(self.lookup_length_g(o)));
                     }
                     self.fn_prep(o, k);
                     match self.lookup_g(o, k) {
@@ -1133,13 +1172,21 @@ impl Realm {
         if self.api.hs.active && o.has_flag(F_HOST) && let Some(ok) = self.hs_write(o, key, crate::api_host::HsWrite::Set(v))? {
             return Ok(if ok { Put::Done } else { Put::Fail });
         }
+        if self.has_string_own(o, key) {
+            return Ok(Put::Fail);
+        }
         self.fn_props(o);
         match key {
             Key::Idx(i) if self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed && !o.has_flag(F_SLOWIDX) => {
-                if o.has_flag(F_NOEXT | F_ELEMS_RO | F_LEN_RO) {
-                    let exists = o.get_element(i).is_some();
-                    let refuse = if exists { o.has_flag(F_ELEMS_RO) } else { o.has_flag(F_NOEXT) || (i >= o.len() && o.has_flag(F_LEN_RO)) };
-                    if refuse {
+                if o.get_element(i).is_some() {
+                    if o.has_flag(F_ELEMS_RO) {
+                        return Ok(Put::Fail);
+                    }
+                } else {
+                    if let Some(put) = self.index_proto_setter(o, i) {
+                        return Ok(put);
+                    }
+                    if o.has_flag(F_NOEXT) || (o.has_flag(F_LEN_RO) && i >= o.len()) {
                         return Ok(Put::Fail);
                     }
                 }
@@ -1150,26 +1197,28 @@ impl Realm {
             }
             Key::Idx(i) => {
                 let k = self.idx_atom(i);
-                if self.shapes.find(o.shape(&self.shapes), k).is_none() && o.is_indexed() && o.has_flag(F_LEN_RO) && i >= o.len() {
+                if self.store_entry(o, k)?.is_some() {
+                    return self.set_named(o, k, v);
+                }
+                if let Some(put) = self.index_proto_setter(o, i) {
+                    return Ok(put);
+                }
+                if !o.extensible() || (o.is_indexed() && o.has_flag(F_LEN_RO) && i >= o.len()) {
                     return Ok(Put::Fail);
                 }
-                let r = self.set_named(o, k, v)?;
-                if o.is_indexed() && i >= o.len() && self.shapes.find(o.shape(&self.shapes), k).is_some() {
-                    o.set_len(&mut self.heap, i + 1);
+                self.add_named(o, k, v)?;
+                if o.is_indexed() && i >= o.len() {
+                    o.set_len(&mut self.heap, i + 1).expect("memory");
                 }
-                Ok(r)
+                Ok(Put::Done)
             }
             Key::Name(k) => {
-                if k == self.k_length && self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed {
-                    let n = self.to_number(v)?;
-                    if n < 0.0 || n.fract() != 0.0 || n >= u32::MAX as f64 {
-                        return Err(self.error(ErrKind::Range, "invalid array length"));
-                    }
+                if k == self.k_length && self.is_array(o) {
                     if o.has_flag(F_LEN_RO) {
                         return Ok(Put::Fail);
                     }
-                    self.truncate(o, n as u32);
-                    return Ok(Put::Done);
+                    let d = crate::bi_object::Desc { value: Some(v), ..Default::default() };
+                    return Ok(if self.define_length(o, &d)? { Put::Done } else { Put::Fail });
                 }
                 self.set_named(o, k, v)
             }
@@ -1184,31 +1233,62 @@ impl Realm {
         }
     }
 
-    /// The setter that the prototype chain of `o` gives for `k`, when the first property that it finds there is an accessor.
-    pub(crate) fn proto_setter(&mut self, o: Obj, k: Str) -> Option<Put> {
-        let mut p = self.proto_of(o)?;
-        loop {
+    /// An inherited index can supply a setter or prevent creation of an own element.
+    #[cold]
+    fn index_proto_setter(&mut self, o: Obj, i: u32) -> Option<Put> {
+        let mut proto = self.proto_of(o);
+        while let Some(p) = proto {
+            match self.get_own(p, Key::Idx(i)) {
+                Some(crate::bi_object::Own::Acc(_, set, _)) => return Some(Self::setter(set)),
+                Some(crate::bi_object::Own::Data(_, attrs)) => return (attrs & A_W == 0).then_some(Put::Fail),
+                None => proto = self.proto_of(p),
+            }
+        }
+        None
+    }
+
+    /// Find the descriptor for a store. Ask the host for a lazy member before treating the key as absent.
+    fn store_entry(&mut self, o: Obj, k: Str) -> R<Option<Entry>> {
+        let mut entry = self.shapes.find(o.shape(&self.shapes), k);
+        if entry.is_none() && o.has_flag(F_LAZYM) && self.hs_lazy(o, Some(Key::Name(k)))? {
+            entry = self.shapes.find(o.shape(&self.shapes), k);
+        }
+        Ok(entry)
+    }
+
+    /// A setter or a rejected write from the first descriptor on the prototype chain.
+    fn proto_setter(&mut self, o: Obj, k: Str) -> R<Option<Put>> {
+        let mut proto = self.proto_of(o);
+        while let Some(p) = proto {
+            if k == self.k_length {
+                if self.is_array(p) {
+                    return Ok(p.has_flag(F_LEN_RO).then_some(Put::Fail));
+                }
+                if self.has_string_own(p, Key::Name(k)) {
+                    return Ok(Some(Put::Fail));
+                }
+            }
             self.lazy_prep(p, k);
-            if let Some(e) = self.shapes.find(p.shape(&self.shapes), k) {
+            if let Some(e) = self.store_entry(p, k)? {
                 // An accessor: its setter. A data property that is not writable: nothing is written (`Put::Fail`).
-                return if e.attrs() & A_ACC != 0 {
+                return Ok(if e.attrs() & A_ACC != 0 {
                     Some(Self::setter(p.slot(&self.shapes, e.slot() + 1)))
                 } else if e.attrs() & A_W == 0 {
                     Some(Put::Fail)
                 } else {
                     None
-                };
+                });
             }
-            p = self.proto_of(p)?;
+            proto = self.proto_of(p);
         }
+        Ok(None)
     }
 
     /// Set an own named property: write it if it is there and writable, else call the setter that a prototype gives, else add it (when
     /// the object is extensible).
     fn set_named(&mut self, o: Obj, k: Str, v: Value) -> R<Put> {
         self.fn_prep(o, k);
-        let id = o.shape(&self.shapes);
-        match self.shapes.find(id, k) {
+        match self.store_entry(o, k)? {
             Some(e) if e.attrs() & A_ACC != 0 => Ok(Self::setter(o.slot(&self.shapes, e.slot() + 1))),
             Some(e) => {
                 if e.attrs() & A_W == 0 {
@@ -1218,7 +1298,7 @@ impl Realm {
                 Ok(Put::Done)
             }
             None => {
-                if let Some(p) = self.proto_setter(o, k) {
+                if let Some(p) = self.proto_setter(o, k)? {
                     return Ok(p);
                 }
                 if !o.extensible() {
@@ -1316,6 +1396,9 @@ impl Realm {
         let start = start?;
         let mut o = start;
         let (holder, slot) = loop {
+            if name == self.k_length && (o.is_indexed() || o.is_kind(K_WRAP)) {
+                return None;
+            }
             self.lazy_prep(o, name);
             if let Some(e) = self.shapes.find(o.shape(&self.shapes), name) {
                 if e.attrs() & A_ACC != 0 {
@@ -1451,7 +1534,7 @@ impl Realm {
     /// `recv.name = v` at a site.
     pub fn set_field_slow(&mut self, fb: &mut Feedback, site: usize, name: Str, recv: Value, v: Value) -> R<Put> {
         let Some(o) = Realm::obj(recv) else { return self.set_prop_g(recv, Key::Name(name), v) };
-        if o.has_flag(F_HOST) {
+        if o.has_flag(F_HOST) || (name == self.k_length && o.is_kind(K_WRAP)) {
             return self.set_prop_g(recv, Key::Name(name), v);
         }
         self.fn_prep(o, name);
@@ -1486,19 +1569,20 @@ impl Realm {
                 Ok(Put::Done)
             }
             None => {
-                if name == self.k_length && self.shapes.get(id).layout == Layout::Indexed {
+                if o.has_flag(F_LAZYM) || (name == self.k_length && self.shapes.get(id).layout == Layout::Indexed) {
                     return self.set_prop_g(recv, Key::Name(name), v);
                 }
-                if let Some(p) = self.proto_setter(o, name) {
+                if let Some(p) = self.proto_setter(o, name)? {
                     return Ok(p);
                 }
                 if !o.extensible() {
                     return Ok(Put::Fail);
                 }
+                let cache_add = layout_ok && o.shape(&self.shapes) == id;
                 let slot = self.add_named(o, name, v)?;
                 let new = o.shape(&self.shapes);
                 // The global object gets no add entry: a hit would change its shape with no change of its tag (`Shapes::watch_tag`).
-                if layout_ok && self.shapes.cacheable(new) && o != self.global {
+                if cache_add && self.shapes.cacheable(new) && o != self.global {
                     let loc = o.loc(&self.shapes, slot);
                     // Only an inline slot: the hit then needs no allocation.
                     if loc >> 9 == 0 {
@@ -1566,10 +1650,10 @@ impl Realm {
                 },
                 Key::Name(k) => {
                     self.fn_prep(o, k);
-                    self.shapes.find(o.shape(&self.shapes), k).is_some() || (k == self.k_length && self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed)
+                    self.shapes.find(o.shape(&self.shapes), k).is_some() || (k == self.k_length && self.is_array(o))
                 }
             };
-            if found {
+            if found || self.has_string_own(o, key) {
                 return Ok(true);
             }
             match self.proto_of(o) {
@@ -1583,6 +1667,9 @@ impl Realm {
         let Some(o) = Realm::obj(recv) else { return Ok(true) };
         if self.api.hs.active && o.has_flag(F_HOST) && let Some(ok) = self.hs_write(o, key, crate::api_host::HsWrite::Delete)? {
             return Ok(ok);
+        }
+        if self.has_string_own(o, key) {
+            return Ok(false);
         }
         self.fn_props(o);
         match key {

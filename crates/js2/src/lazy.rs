@@ -24,7 +24,7 @@
 //! the rest in table order after a listing. ECMA-262 does not fix this order (owner decision 2, 2026-11-20).
 use crate::builtins::{HIDDEN, NativeFn};
 use crate::interp_rt::{Key, Realm};
-use crate::object::{F_LAZYTAB, Obj};
+use crate::object::{F_LAZYTAB, F_ARGS, Obj, Spot};
 use crate::bi_object::Desc;
 use crate::string::{Chars, Str};
 use crate::value::Value;
@@ -153,13 +153,15 @@ pub(crate) struct Lazy {
     shared: Vec<(Obj, &'static str, Value)>,
     /// `%StringIteratorPrototype%` and the shape of its iterators (`bi_string_iter.rs`), made at the first call of `String.prototype[Symbol.iterator]`.
     pub(crate) str_iter: Option<crate::bi_string_iter::StrIter>,
+    pub(crate) array_iter_spot: Option<Spot>,
+    pub(crate) array_iter_next: Option<(Obj, Str, Value)>,
     /// The entries of kind [`Kind::Sym`] that are not made: the object, the index in `Realm::wk`, the table and the entry.
     syms: Vec<(Obj, usize, usize, usize)>,
 }
 
 impl Default for Lazy {
     fn default() -> Self {
-        Lazy { tabs: Vec::new(), done: Vec::new(), bits: Vec::new(), shared: Vec::new(), str_iter: None, syms: Vec::new() }
+        Lazy { tabs: Vec::new(), done: Vec::new(), bits: Vec::new(), shared: Vec::new(), str_iter: None, array_iter_spot: None, array_iter_next: None, syms: Vec::new() }
     }
 }
 
@@ -327,14 +329,16 @@ impl Realm {
             self.args_iter = self.array_values();
         }
         let o = Obj::array(&mut self.heap, &self.shapes, self.s_args, args).expect("memory");
-        o.set_slot(&self.shapes, 0, self.args_iter);
+        o.set_slot(&self.shapes, 0, Realm::num(args.len() as f64));
+        o.set_slot(&self.shapes, 1, self.args_iter);
+        o.set_flag(F_ARGS);
         o.value()
     }
 
     /// `%Array.prototype.values%`: made now if it is not, and the same function whatever a script did to the property since. A realm with
     /// no compiler cannot make it (it is a function of the prelude): the property is `undefined` there.
     #[cold]
-    fn array_values(&mut self) -> Value {
+    pub(crate) fn array_values(&mut self) -> Value {
         if self.lazy.is_none() {
             return Value::UNDEFINED;
         }

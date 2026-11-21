@@ -11,20 +11,28 @@
 //! [`Realm::string_wrapper`] gives the string, and `get_prop_g`, `own_keys` and the `Object` built-ins ask it. Nothing about a
 //! primitive changes: a method of a string, a number or a boolean still runs with the primitive as `this` and no object is made.
 use crate::cell::Layout;
+use crate::heap::Heap;
 use crate::interp_rt::{Key, R, Realm};
 use crate::object::{K_WRAP, Obj};
+use crate::shapes::{ShapeId, Shapes};
 use crate::string::Str;
 use crate::value::Value;
+
+impl Obj {
+    pub(crate) fn new_wrapper(heap: &mut Heap, shapes: &Shapes, shape: ShapeId, prim: Value) -> Obj {
+        let o = Obj::new(heap, shapes, shape).expect("memory");
+        o.set_slot(shapes, 0, prim);
+        o.set_kind(K_WRAP);
+        o
+    }
+}
 
 impl Realm {
     /// A wrapper object for the primitive `prim` with prototype `proto`.
     pub(crate) fn wrap(&mut self, proto: Obj, prim: Value) -> Obj {
         let root = self.shapes.root(Layout::Object, Some(proto.cell()), 4);
         let shape = self.shapes.add(root, self.k_prim, 0).expect("shape");
-        let o = Obj::new(&mut self.heap, &self.shapes, shape).expect("memory");
-        o.set_slot(&self.shapes, 0, prim);
-        o.set_kind(K_WRAP);
-        o
+        Obj::new_wrapper(&mut self.heap, &self.shapes, shape, prim)
     }
 
     /// The primitive of a wrapper object, or `None` for any other value.
@@ -40,6 +48,13 @@ impl Realm {
             return None;
         }
         self.prim_of(o.value()).and_then(Realm::str_of)
+    }
+
+    pub(crate) fn has_string_own(&self, o: Obj, key: Key) -> bool {
+        self.string_wrapper(o).is_some_and(|s| match key {
+            Key::Idx(i) => (i as usize) < s.len(),
+            Key::Name(k) => k == self.k_length,
+        })
     }
 
     /// The own property `key` of a `String` wrapper that is not in its shape: `length`, or the unit at an index below it.
