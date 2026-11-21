@@ -1559,3 +1559,43 @@ fn a_scope_with_many_locals_compiles_in_linear_time() {
     assert!(matches!(r, Err(ref e) if e.contains("Limit")), "{:?}", r.map(|_| ()));
     assert!(t.elapsed().as_secs() < 20, "{:?}", t.elapsed());
 }
+
+#[test]
+fn a_large_object_literal_compiles_in_linear_time() {
+    if cfg!(miri) {
+        return;
+    }
+    use std::fmt::Write;
+    let time = |n| {
+        let mut src = String::from("var x = 0; var o = {dynamic: x,");
+        for i in 0..n {
+            write!(src, "'key{i:05}':{i},").unwrap();
+        }
+        src.push_str("};");
+        (0..3).map(|_| {
+            let atoms = SharedAtoms::default();
+            let start = std::time::Instant::now();
+            let (script, _) = compile_all(&src, &atoms, Limits::default()).expect("compile");
+            let elapsed = start.elapsed();
+            assert!(script.unsupported.is_empty());
+            elapsed
+        }).min().unwrap()
+    };
+    let small = time(2_500);
+    let large = time(20_000);
+    assert!(large < small * 16, "2,500 keys: {small:?}, 20,000 keys: {large:?}");
+}
+
+#[test]
+fn object_literal_duplicates_keep_source_order() {
+    for padding in [String::new(), (0..64).map(|i| format!("key{i}: 0,")).collect()] {
+        let src = format!(
+            r#"var o = {{{padding} a: 1, b: 2, a: 3, __proto__: {{p: 4}},
+                get c() {{ return this.p; }}, get d() {{ return 5; }}, d: 6 }};
+                var r = [o.a, o.c, o.d, Object.getPrototypeOf(o).p,
+                    Object.keys(o).slice(-4).join(',')].join(':');"#
+        );
+        let mut vm = crate::script::run(&src).expect("run");
+        assert_eq!(vm.global_text("r"), "3:4:6:4:a,b,c,d");
+    }
+}
