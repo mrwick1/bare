@@ -261,10 +261,10 @@ impl Steps<'_> {
 //
 // Words of an image, all `u64`:
 //   0: instructions | classes << 32          1: groups | registers << 32       2: tmp_base | mark_base << 32
-//   3: flags bits | anchored << 8 | has first set << 9 | class ranges << 32
+//   3: flags bits | anchored << 8 | has first set << 9 | has names << 10 | class ranges << 32
 //   then: the first-unit set (2 words, only when word 3 says so), the instructions, the class table, the class ranges.
 // An instruction is `op | a << 8 | b << 36` (`Inst::enc`). A class table entry is `first range | length << 32 | negated << 63`.
-// A class range is `lo << 32 | hi`.
+// A class range is `lo << 32 | hi`. A name follows the ranges as index | length << 32 and packed UTF-16 units.
 
 /// A compiled pattern, read from its image.
 struct Prog<'a> {
@@ -348,13 +348,20 @@ pub fn compile(pattern: &[u16], flags: &str) -> Result<Vec<u64>, CompileError> {
     w.push(e.prog.len() as u64 | (ctab.len() as u64) << 32);
     w.push(groups as u64 | (nregs as u64) << 32);
     w.push(tmp_base as u64 | (mark_base as u64) << 32);
-    w.push(flags.bits() as u64 | (anchored as u64) << 8 | (first.is_some() as u64) << 9 | (ranges.len() as u64) << 32);
+    w.push(flags.bits() as u64 | (anchored as u64) << 8 | (first.is_some() as u64) << 9 | (!p.names.is_empty() as u64) << 10 | (ranges.len() as u64) << 32);
     if let Some(f) = first {
         w.extend(f);
     }
     w.extend(e.prog.iter().map(|i| i.enc()));
     w.extend(ctab);
     w.extend(ranges);
+    for (name, index) in p.names {
+        let units: Vec<_> = name.encode_utf16().collect();
+        w.push(index as u64 | (units.len() as u64) << 32);
+        w.extend(units.chunks(4).map(|chunk| {
+            chunk.iter().enumerate().fold(0, |word, (i, &u)| word | (u as u64) << (16 * i))
+        }));
+    }
     Ok(w)
 }
 
@@ -372,6 +379,25 @@ pub fn check(pattern: &[u16], flags: &str) -> Result<(), CompileError> {
 /// The flags of an image.
 pub fn image_flags(img: &[u64]) -> Flags {
     Flags::from_bits(img[3] as u8)
+}
+
+/// Whether a match result needs named properties or an indices array.
+#[inline]
+pub(crate) fn image_extra_groups(w: &[u64]) -> bool {
+    w[3] & (1 | 1 << 10) != 0
+}
+
+/// The names in capture order, with their group numbers.
+pub(crate) fn image_names(w: &[u64]) -> impl Iterator<Item = (Vec<u16>, usize)> + '_ {
+    let end = 4 + 2 * ((w[3] >> 9 & 1) as usize) + w[0] as u32 as usize + (w[0] >> 32) as usize + (w[3] >> 32) as usize;
+    let mut words = &w[end..];
+    std::iter::from_fn(move || {
+        let (&head, rest) = words.split_first()?;
+        let len = (head >> 32) as usize;
+        let (name, tail) = rest.split_at(len.div_ceil(4));
+        words = tail;
+        Some(((0..len).map(|i| (name[i / 4] >> (16 * (i % 4))) as u16).collect(), head as u32 as usize))
+    })
 }
 
 /// The number of capture groups of an image, not counting group 0.
@@ -1135,6 +1161,7 @@ enum Node {
     End,
     WordB(bool),
     BackRef(u32),
+    NamedRef(Vec<u32>),
     Group(u32, Box<Node>),
     Look(bool, bool, Box<Node>),
     Cat(Vec<Node>),
@@ -1147,6 +1174,7 @@ enum Esc {
     Set(Vec<(u32, u32)>),
     WordB(bool),
     BackRef(u32),
+    NamedRef(Vec<u32>),
 }
 
 struct Parser<'a> {
@@ -1166,7 +1194,7 @@ struct Parser<'a> {
 }
 
 /// A group name at `p[i..]` up to its `>`: the name and the index after the `>`. The name is `$`, `_` or a letter, then those and digits
-/// (and ZWNJ, ZWJ). `\uXXXX` and `\u{X}` escapes are read; a pair of `\u` surrogate escapes is not.
+/// (and ZWNJ, ZWJ). It also accepts Unicode escapes.
 fn group_name(p: &[u16], mut i: usize) -> Option<(String, usize)> {
     let mut name = String::new();
     loop {
@@ -1189,9 +1217,15 @@ fn group_name(p: &[u16], mut i: usize) -> Option<(String, usize)> {
                     }
                     i += 1;
                 } else {
-                    for _ in 0..4 {
-                        v = v * 16 + hex(*p.get(i)?)?;
-                        i += 1;
+                    v = hex4(p.get(i..i + 4)?)?;
+                    i += 4;
+                    if (0xD800..=0xDBFF).contains(&v) && p.get(i..i + 2) == Some(&[0x5C, 0x75]) {
+                        let lo = hex4(p.get(i + 2..i + 6)?)?;
+                        if !(0xDC00..=0xDFFF).contains(&lo) {
+                            return None;
+                        }
+                        v = 0x10000 + ((v - 0xD800) << 10) + (lo - 0xDC00);
+                        i += 6;
                     }
                 }
                 v
@@ -1204,7 +1238,11 @@ fn group_name(p: &[u16], mut i: usize) -> Option<(String, usize)> {
             c => c as u32,
         };
         let ch = char::from_u32(cp)?;
-        let ok = ch == '$' || ch == '_' || if name.is_empty() { ch.is_alphabetic() } else { ch.is_alphanumeric() || ch == '\u{200c}' || ch == '\u{200d}' };
+        let ok = if ch.is_ascii() {
+            ch == '$' || ch == '_' || ch.is_ascii_alphabetic() || (!name.is_empty() && ch.is_ascii_digit())
+        } else {
+            crate::lex::id_char(cp, name.is_empty())
+        };
         if !ok {
             return None;
         }
@@ -1227,6 +1265,10 @@ fn syn<T>(msg: &'static str, at: usize) -> Result<T, CompileError> {
 
 fn hex(c: u16) -> Option<u32> {
     char::from_u32(c as u32)?.to_digit(16)
+}
+
+fn hex4(units: &[u16]) -> Option<u32> {
+    units.iter().try_fold(0, |v, &u| Some(v * 16 + hex(u)?))
 }
 
 impl<'a> Parser<'a> {
@@ -1278,7 +1320,21 @@ impl<'a> Parser<'a> {
         if self.ncap as usize > MAX_GROUPS {
             return Err(CompileError::Limit("too many groups"));
         }
+        if self.names.len() > 1 {
+            self.check_duplicate_names()?;
+        }
         Ok(n)
+    }
+
+    /// Duplicate names must occur on separate paths through a disjunction.
+    #[cold]
+    fn check_duplicate_names(&self) -> Result<(), CompileError> {
+        if self.names.iter().enumerate().any(|(i, (name, _))| self.names[..i].iter().any(|(n, _)| n == name)) {
+            let flags = if self.flags.unicode_sets { "v" } else if self.flags.unicode { "u" } else { "" };
+            crate::regexp_check::check(&String::from_utf16_lossy(self.p), flags)
+                .map_err(|msg| CompileError::Syntax { msg, at: 0 })?;
+        }
+        Ok(())
     }
 
     fn parse_alt(&mut self) -> Result<Node, CompileError> {
@@ -1397,6 +1453,7 @@ impl<'a> Parser<'a> {
                 Esc::WordB(neg) => return self.no_quant(Node::WordB(neg)),
                 Esc::BackRef(n) if self.open.contains(&n) => Node::Empty,
                 Esc::BackRef(n) => Node::BackRef(n),
+                Esc::NamedRef(groups) => Node::NamedRef(groups),
             },
             '*' | '+' | '?' => return syn("Nothing to repeat", at),
             '{' => {
@@ -1612,10 +1669,7 @@ impl<'a> Parser<'a> {
     #[cold]
     #[inline(never)]
     fn named_group(&mut self, at: usize) -> Result<u32, CompileError> {
-        let Some((name, end)) = group_name(self.p, self.i + 1) else { return syn("Invalid capture group name", at) };
-        if self.names.iter().filter(|(n, _)| *n == name).count() > 1 {
-            return syn("Duplicate capture group name", at);
-        }
+        let Some((_, end)) = group_name(self.p, self.i + 1) else { return syn("Invalid capture group name", at) };
         self.i = end;
         self.ncap += 1;
         Ok(self.ncap)
@@ -1627,9 +1681,12 @@ impl<'a> Parser<'a> {
     fn named_ref(&mut self, at: usize, in_class: bool) -> Result<Esc, CompileError> {
         let named = if self.peek() == Some(b'<' as u16) { group_name(self.p, self.i + 1) } else { None };
         let Some((name, end)) = named.filter(|_| !in_class) else { return syn("Invalid named reference", at) };
-        let Some(&(_, n)) = self.names.iter().find(|(x, _)| *x == name) else { return syn("Invalid named capture referenced", at) };
+        let mut groups = self.names.iter().filter(|(x, _)| *x == name).map(|&(_, n)| n);
+        let Some(n) = groups.next() else { return syn("Invalid named capture referenced", at) };
         self.i = end;
-        Ok(Esc::BackRef(n))
+        let Some(second) = groups.next() else { return Ok(Esc::BackRef(n)) };
+        let closed = [n, second].into_iter().chain(groups).filter(|n| !self.open.contains(n)).collect();
+        Ok(Esc::NamedRef(closed))
     }
 
     /// After `\p` or `\P` in `u` mode: `{Name}` or `{Name=Value}` and the code points of the property.
@@ -2088,7 +2145,7 @@ impl Emitter {
     /// Smallest number of code units the node can match (0 means it may match empty).
     fn can_be_empty(n: &Node) -> bool {
         match n {
-            Node::Empty | Node::Start | Node::End | Node::WordB(_) | Node::BackRef(_) | Node::Look(..) => true,
+            Node::Empty | Node::Start | Node::End | Node::WordB(_) | Node::BackRef(_) | Node::NamedRef(_) | Node::Look(..) => true,
             Node::Char(_) | Node::Any | Node::Class(_) => false,
             Node::Group(_, b) => Self::can_be_empty(b),
             Node::Cat(v) => v.iter().all(Self::can_be_empty),
@@ -2110,7 +2167,7 @@ impl Emitter {
     fn emit_inner(&mut self, n: &Node) -> Result<(), CompileError> {
         match n {
             Node::Empty => {}
-            Node::Char(_) | Node::Any | Node::Class(_) | Node::BackRef(_) | Node::WordB(_) => {
+            Node::Char(_) | Node::Any | Node::Class(_) | Node::BackRef(_) | Node::NamedRef(_) | Node::WordB(_) => {
                 let start = self.prog.len();
                 self.emit_leaf(n)?;
                 if self.backwards && !matches!(n, Node::WordB(_)) {
@@ -2225,6 +2282,15 @@ impl Emitter {
             Node::BackRef(g) => {
                 self.push(Inst::BackRef(*g))?;
                 if self.flags.unicode {
+                    self.push(Inst::NotInPair)?;
+                }
+            }
+            Node::NamedRef(groups) => {
+                // At most one alternative captures this name. Each unset reference consumes nothing.
+                for &g in groups {
+                    self.push(Inst::BackRef(g))?;
+                }
+                if self.flags.unicode && !groups.is_empty() {
                     self.push(Inst::NotInPair)?;
                 }
             }

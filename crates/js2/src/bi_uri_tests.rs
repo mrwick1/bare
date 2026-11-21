@@ -13,3 +13,12 @@ fn encode_and_decode() {
         ("var r = []; ['%', '%E0%A4%A', '%C0%80', '%ZZ', '%80'].forEach(function (s) { try { decodeURIComponent(s); r.push('ok'); } catch (e) { r.push(e instanceof URIError); } }); r = r.join();", "r", "true,true,true,true,true"),
     ]);
 }
+
+#[test]
+fn annex_b_escape_and_unescape() {
+    check(&[
+        ("var r = escape('@*_+-./ !é\\u{1f600}\\ud800');", "r", "@*_+-./%20%21%E9%uD83D%uDE00%uD800"),
+        ("var r = unescape('%u0041%62%zz%U0041%uZZZZ%2%2520');", "r", "Ab%zz%U0041%uZZZZ%2%20"),
+        ("var r = unescape('%uD800').charCodeAt(0) + ',' + escape() + ',' + unescape();", "r", "55296,undefined,undefined"),
+    ]);
+}
