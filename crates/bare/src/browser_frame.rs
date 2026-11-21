@@ -24,11 +24,11 @@
 //! Handles are numbers from 1, never reused. Gates: none. Bound: `animation-frame-callbacks` (live callbacks).
 //! The two globals are plain data properties of `window`. `requestIdleCallback` is in `browser_idle.rs`. Not here: `document.timeline`, `Animation`.
 
+use crate::eng::{Eng, Fault, Ops};
 use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_scoped::*;
-use bare_js::eval::{Error, Interp};
-use bare_js::value::{Value, to_uint32};
+use bare_js::value::to_uint32;
 use bare_js_api::{Args, Attrs, Engine, HostFn, Local};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -38,9 +38,9 @@ pub(crate) const FRAME_MS: f64 = 1000.0 / 60.0;
 const MAX_CALLBACKS: usize = 1 << 16;
 
 #[derive(Default)]
-pub(crate) struct Frame {
+pub(crate) struct Frame<E: Eng> {
     /// Live callbacks by handle: the order of the handles is the order of the calls.
-    cbs: RefCell<BTreeMap<u32, Value>>,
+    cbs: RefCell<BTreeMap<u32, <E as Eng>::Raw>>,
     next: Cell<u32>,
     /// A `Task::Render` is queued.
     pub(crate) queued: Cell<bool>,
@@ -48,15 +48,15 @@ pub(crate) struct Frame {
     pub(crate) due: Cell<f64>,
 }
 
-pub(crate) fn window_this<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, ()> {
-    let ok = match obj_id(s, this) {
+pub(crate) fn window_this<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, ()> {
+    let ok = match obj_id::<E>(s, this) {
         Some(o) => Some(&o) == d.global.get() || crate::browser_frames::is_blank_window(d, o),
-        None => is_nullish(s, this),
+        None => is_nullish::<E>(s, this),
     };
     if ok { Ok(()) } else { Err(s.type_error("Illegal invocation")) }
 }
 
-fn request<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn request<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     window_this(d, s, this)?;
     let Some(cb) = a.get(0) else {
         return Err(s.type_error("Failed to execute 'requestAnimationFrame' on 'Window': 1 argument required, but only 0 present."));
@@ -70,13 +70,13 @@ fn request<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res
         return Err(d.lim_s(s, "animation-frame-callbacks"));
     }
     let Some(id) = f.next.get().checked_add(1) else { return Err(d.lim_s(s, "animation-frame-handles")) };
-    lift(s, d.want_frame())?;
+    lift::<E, _>(s, d.want_frame())?;
     f.next.set(id);
     f.cbs.borrow_mut().insert(id, cb);
     Ok(s.number(id as f64))
 }
 
-fn cancel<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn cancel<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     window_this(d, s, this)?;
     let Some(v) = a.get(0) else {
         return Err(s.type_error("Failed to execute 'cancelAnimationFrame' on 'Window': 1 argument required, but only 0 present."));
@@ -86,17 +86,17 @@ fn cancel<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<
     Ok(s.undefined())
 }
 
-pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
     let g = s.global();
-    for (name, h) in [("requestAnimationFrame", request as HS), ("cancelAnimationFrame", cancel)] {
+    for (name, h) in [("requestAnimationFrame", request as HS<E>), ("cancelAnimationFrame", cancel)] {
         let f = d.add_fn_s(s, h, name, 1, HostFn::Method)?;
         s.define_str(g, name, f, Attrs::ALL)?;
     }
     Ok(())
 }
 
-impl Dom {
-    pub(crate) fn frame_roots(&self, out: &mut Roots<'_, '_>) {
+impl<E: Eng> Dom<E> {
+    pub(crate) fn frame_roots(&self, out: &mut Roots<'_, '_, E>) {
         out.extend(self.frame.cbs.borrow().values().copied());
     }
 
@@ -106,8 +106,8 @@ impl Dom {
     }
 
     /// The rendering step: callbacks, then the observers, in the order of the standard (see the header).
-    pub(crate) fn frame_run(&self, it: &mut Interp<'_>) -> R<()> {
-        let ts = Value::Number(self.now_ms());
+    pub(crate) fn frame_run(&self, it: &mut E::Vm) -> R<E, ()> {
+        let ts = E::num(self.now_ms());
         // Handles below `upto` were queued before this frame.
         let upto = self.frame.next.get();
         loop {
@@ -118,10 +118,10 @@ impl Dom {
                     _ => break,
                 }
             };
-            it.charge(1)?;
-            match it.call(cb, Value::Undefined, &[ts]) {
+            it.charge_o(1)?;
+            match it.call_o(cb, E::undef(), &[ts]) {
                 Ok(_) => {}
-                Err(Error::Throw(v)) => self.report(it, v, "animationframe", Target::Window),
+                Err(Fault::Throw(v)) => self.report(it, v, "animationframe", Target::Window),
                 Err(e) => return Err(e),
             }
             it.host_checkpoint()?;

@@ -24,20 +24,21 @@
 //! `selector()` term is not parsed when it would take the document past `max_names`. Each call is charged by its text size.
 //! A lone surrogate in an argument is `Unsupported`, as for every DOM string (`string_arg`).
 
+use crate::eng::{Eng, Ops};
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_js_api::{Args, Attrs, HostFn, Intrinsic, Local, Type};
 
-pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
     table!(lazy = [
         Row::both(1, "CSS", lazy),
     ]);
     let g = s.global();
-    d.install_rows(s, &[g], &lazy::T)
+    d.install_rows(s, &[g], &lazy::T::<E>::V)
 }
 
 /// The getter (no argument) and the setter (the new value) of the global.
-fn lazy<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn lazy<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let g = s.global();
     let attrs = Attrs { writable: true, enumerable: false, configurable: true };
     if let Some(v) = a.get(0) {
@@ -46,7 +47,7 @@ fn lazy<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, L
     }
     let proto = s.engine().object_prototype();
     let ns = d.obj_with_s(s, proto)?;
-    for (name, h) in [("supports", supports as HS), ("escape", escape), ("registerProperty", register_property)] {
+    for (name, h) in [("supports", supports as HS<E>), ("escape", escape), ("registerProperty", register_property)] {
         let f = d.add_fn_s(s, h, name, 1, HostFn::Method)?;
         s.define_str(ns, name, f, Attrs::ALL)?;
     }
@@ -77,7 +78,7 @@ fn ident(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || !c.is_ascii())
 }
 
-fn supports<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn supports<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let Some(first) = a.get(0) else {
         return Err(s.type_error("Failed to execute 'supports' on 'CSS': 1 argument required, but only 0 present."));
     };
@@ -109,7 +110,7 @@ fn supports<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'
 }
 
 /// CSSOM "serialize an identifier".
-fn escape<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn escape<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let Some(v) = a.get(0) else {
         return Err(s.type_error("Failed to execute 'escape' on 'CSS': 1 argument required, but only 0 present."));
     };
@@ -134,11 +135,11 @@ fn escape<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s,
     d.js_str_s(s, &out)
 }
 
-fn register_property<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    let Some(dict) = a.get(0).filter(|&v| is_object(s, v)) else {
+fn register_property<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let Some(dict) = a.get(0).filter(|&v| is_object::<E>(s, v)) else {
         return Err(s.type_error("Failed to execute 'registerProperty' on 'CSS': 1 argument required, but only 0 present."));
     };
-    let member = |s: &mut Sc<'s, '_>, name: &str| -> Res<'s, Option<Local<'s>>> {
+    let member = |s: &mut Sc<'s, E>, name: &str| -> Res<'s, Option<Local<'s>>> {
         let x = s.get_str(dict, name)?;
         Ok(Some(x).filter(|&x| s.type_of(x) != Type::Undefined))
     };

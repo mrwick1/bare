@@ -954,9 +954,9 @@ fn thrown_value(b: &mut bare::browser::Browser, v: bare_js::value::Value) -> Str
 }
 
 /// A script error as text: a thrown value by `thrown_value`, else the engine's own text.
-fn thrown(b: &mut bare::browser::Browser, e: &bare_js::eval::Error) -> String {
+fn thrown(b: &mut bare::browser::Browser, e: &bare::eng_old::OldFault) -> String {
     match e {
-        bare_js::eval::Error::Throw(v) => thrown_value(b, *v),
+        bare::eng::Fault::Throw(v) => thrown_value(b, *v),
         e => format!("{e:?}"),
     }
 }

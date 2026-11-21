@@ -16,14 +16,14 @@
 //! Gaps: `calc()` and `var()` in the string are a syntax error (Chrome resolves `calc()` of absolute lengths). `perspective(none)` is not accepted.
 //! The getters of `DOMMatrix.prototype` also accept a `DOMMatrixReadOnly` (the setters do not).
 
+use crate::eng::{Eng, Ops};
 use crate::browser::*;
 use crate::browser_geom::{Iface, Slot, finish_s, illegal_s, make_s, method_s, new_obj_s, num_s, point_init, point_object_s, put_s};
 use crate::browser_lazy::lazy_global;
 use crate::browser_scoped::*;
-use bare_js::eval::Interp;
 use bare_js_api::{Args, Elem, HostFn, Local, Type};
 use bare_js::{atan2, cos, sin, tan};
-use bare_js::value::{ObjId, number_to_string};
+use bare_js::value::number_to_string;
 use std::f64::consts::PI;
 
 #[derive(Clone, Copy)]
@@ -548,18 +548,18 @@ fn parse(text: &str, rw: bool) -> Result<Mat, Fail> {
 
 // ------------------------------------------------------------------------------------------ the objects
 
-fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<[Iface; 2]> {
+fn ensure<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, [Iface<E>; 2]> {
     if let Some(m) = d.geom.m.get() {
         return Ok(*m);
     }
     make_all(d, it)
 }
 
-fn ensure_s<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, [Iface; 2]> {
+fn ensure_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, [Iface<E>; 2]> {
     if let Some(m) = d.geom.m.get() {
         return Ok(*m);
     }
-    old(s, |it| make_all(d, it))
+    old::<E, _>(s, |it| make_all(d, it))
 }
 
 /// The names of the 22 number attributes, in order: a..f, then m11..m44.
@@ -573,47 +573,47 @@ const fn at(k: usize) -> usize {
 }
 
 macro_rules! handlers {
-    ($f:ident; $($k:literal)*) => { [$($f::<$k>),*] };
+    ($f:ident; $($k:literal)*) => { [$($f::<$k, E>),*] };
 }
 
 #[cold]
 #[inline(never)]
-fn make_all(d: &Dom, it: &mut Interp<'_>) -> R<[Iface; 2]> {
+fn make_all<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, [Iface<E>; 2]> {
     let base = it.object_prototype();
     let ro = make_s(d, it, base, "DOMMatrixReadOnly", ro_ctor, HostFn::CtorNewTarget)?;
     let rw = make_s(d, it, ro.proto, "DOMMatrix", rw_ctor, HostFn::CtorNewTarget)?;
-    it.heap.set_prototype_of(rw.ctor, Some(ro.ctor)).map_err(|e| it.heap_error(e))?;
-    method_s(d, it, ro.ctor, "fromFloat32Array", 1, from_array::<false, false>)?;
-    method_s(d, it, ro.ctor, "fromFloat64Array", 1, from_array::<false, true>)?;
-    method_s(d, it, ro.ctor, "fromMatrix", 0, from_matrix::<false>)?;
-    method_s(d, it, rw.ctor, "fromFloat32Array", 1, from_array::<true, false>)?;
-    method_s(d, it, rw.ctor, "fromFloat64Array", 1, from_array::<true, true>)?;
-    method_s(d, it, rw.ctor, "fromMatrix", 0, from_matrix::<true>)?;
-    let getters: [HS; 22] = handlers!(get; 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21);
-    let setters: [HS; 22] = handlers!(set; 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21);
+    it.h_set_proto(rw.ctor, Some(ro.ctor))?;
+    method_s(d, it, ro.ctor, "fromFloat32Array", 1, from_array::<false, false, _>)?;
+    method_s(d, it, ro.ctor, "fromFloat64Array", 1, from_array::<false, true, _>)?;
+    method_s(d, it, ro.ctor, "fromMatrix", 0, from_matrix::<false, _>)?;
+    method_s(d, it, rw.ctor, "fromFloat32Array", 1, from_array::<true, false, _>)?;
+    method_s(d, it, rw.ctor, "fromFloat64Array", 1, from_array::<true, true, _>)?;
+    method_s(d, it, rw.ctor, "fromMatrix", 0, from_matrix::<true, _>)?;
+    let getters: [HS<E>; 22] = handlers!(get; 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21);
+    let setters: [HS<E>; 22] = handlers!(set; 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21);
     for (k, name) in ATTRS.into_iter().enumerate() {
         d.def_get_s(it, ro.proto, name, getters[k], None)?;
     }
     d.def_get_s(it, ro.proto, "is2D", get_is_2d, None)?;
     d.def_get_s(it, ro.proto, "isIdentity", get_is_identity, None)?;
-    let ops: [(&str, u32, HS); 17] = [
+    let ops: [(&str, u32, HS<E>); 17] = [
         ("flipX", 0, flip_x),
         ("flipY", 0, flip_y),
-        ("inverse", 0, op::<false, INVERT>),
-        ("multiply", 0, op::<false, MULTIPLY>),
-        ("rotate", 0, op::<false, ROTATE>),
-        ("rotateAxisAngle", 0, op::<false, ROTATE_AXIS>),
-        ("rotateFromVector", 0, op::<false, ROTATE_VECTOR>),
-        ("scale", 0, op::<false, SCALE>),
-        ("scale3d", 0, op::<false, SCALE3D>),
+        ("inverse", 0, op::<false, INVERT, _>),
+        ("multiply", 0, op::<false, MULTIPLY, _>),
+        ("rotate", 0, op::<false, ROTATE, _>),
+        ("rotateAxisAngle", 0, op::<false, ROTATE_AXIS, _>),
+        ("rotateFromVector", 0, op::<false, ROTATE_VECTOR, _>),
+        ("scale", 0, op::<false, SCALE, _>),
+        ("scale3d", 0, op::<false, SCALE3D, _>),
         ("scaleNonUniform", 0, scale_non_uniform),
-        ("skewX", 0, op::<false, SKEW_X>),
-        ("skewY", 0, op::<false, SKEW_Y>),
-        ("toFloat32Array", 0, to_array::<false>),
-        ("toFloat64Array", 0, to_array::<true>),
+        ("skewX", 0, op::<false, SKEW_X, _>),
+        ("skewY", 0, op::<false, SKEW_Y, _>),
+        ("toFloat32Array", 0, to_array::<false, _>),
+        ("toFloat64Array", 0, to_array::<true, _>),
         ("toJSON", 0, to_json),
         ("transformPoint", 0, transform_point),
-        ("translate", 0, op::<false, TRANSLATE>),
+        ("translate", 0, op::<false, TRANSLATE, _>),
     ];
     for (n, len, h) in ops {
         method_s(d, it, ro.proto, n, len, h)?;
@@ -621,18 +621,18 @@ fn make_all(d: &Dom, it: &mut Interp<'_>) -> R<[Iface; 2]> {
     for (k, name) in ATTRS.into_iter().enumerate() {
         d.def_get_s(it, rw.proto, name, getters[k], Some(setters[k]))?;
     }
-    let selves: [(&str, u32, HS); 11] = [
-        ("invertSelf", 0, op::<true, INVERT>),
-        ("multiplySelf", 0, op::<true, MULTIPLY>),
-        ("preMultiplySelf", 0, op::<true, PRE_MULTIPLY>),
-        ("rotateAxisAngleSelf", 0, op::<true, ROTATE_AXIS>),
-        ("rotateFromVectorSelf", 0, op::<true, ROTATE_VECTOR>),
-        ("rotateSelf", 0, op::<true, ROTATE>),
-        ("scale3dSelf", 0, op::<true, SCALE3D>),
-        ("scaleSelf", 0, op::<true, SCALE>),
-        ("skewXSelf", 0, op::<true, SKEW_X>),
-        ("skewYSelf", 0, op::<true, SKEW_Y>),
-        ("translateSelf", 0, op::<true, TRANSLATE>),
+    let selves: [(&str, u32, HS<E>); 11] = [
+        ("invertSelf", 0, op::<true, INVERT, _>),
+        ("multiplySelf", 0, op::<true, MULTIPLY, _>),
+        ("preMultiplySelf", 0, op::<true, PRE_MULTIPLY, _>),
+        ("rotateAxisAngleSelf", 0, op::<true, ROTATE_AXIS, _>),
+        ("rotateFromVectorSelf", 0, op::<true, ROTATE_VECTOR, _>),
+        ("rotateSelf", 0, op::<true, ROTATE, _>),
+        ("scale3dSelf", 0, op::<true, SCALE3D, _>),
+        ("scaleSelf", 0, op::<true, SCALE, _>),
+        ("skewXSelf", 0, op::<true, SKEW_X, _>),
+        ("skewYSelf", 0, op::<true, SKEW_Y, _>),
+        ("translateSelf", 0, op::<true, TRANSLATE, _>),
     ];
     for (n, len, h) in selves {
         method_s(d, it, rw.proto, n, len, h)?;
@@ -644,7 +644,7 @@ fn make_all(d: &Dom, it: &mut Interp<'_>) -> R<[Iface; 2]> {
     Ok(m)
 }
 
-fn ensure_unit(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+fn ensure_unit<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
     ensure(d, it).map(|_| ())
 }
 
@@ -652,42 +652,42 @@ lazy_global!(lazy_ro, "DOMMatrixReadOnly", ensure_unit, |d| d.geom.m.get().expec
 lazy_global!(lazy_rw, "DOMMatrix", ensure_unit, |d| d.geom.m.get().expect("made")[1].ctor);
 
 #[inline(never)]
-pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
     table!(lazy = [
         Row::both(1, "DOMMatrixReadOnly", lazy_ro),
         Row::both(1, "DOMMatrix", lazy_rw),
     ]);
     let g = s.global();
-    d.install_rows(s, &[g], &lazy::T)
+    d.install_rows(s, &[g], &lazy::T::<E>::V)
 }
 
-fn mat_of(d: &Dom, s: &mut Sc<'_, '_>, this: Local<'_>) -> Option<Mat> {
-    let o = obj_id(s, this)?;
+fn mat_of<E: Eng>(d: &Dom<E>, s: &mut Sc<'_, E>, this: Local<'_>) -> Option<Mat> {
+    let o = obj_id::<E>(s, this)?;
     match d.geom.slots.borrow().get(&o) {
         Some(Slot::Matrix(m)) => Some(**m),
         _ => None,
     }
 }
 
-fn new_matrix<'s>(d: &Dom, s: &mut Sc<'s, '_>, m: Mat) -> Res<'s, ObjId> {
+fn new_matrix<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, m: Mat) -> Res<'s, E::Obj> {
     let proto = ensure_s(d, s)?[m.rw as usize].proto;
     new_obj_s(d, s, proto, Slot::Matrix(Box::new(m)))
 }
 
 /// The matrix of the constructor argument: undefined (identity), a string, or a sequence of 6 or 16 numbers.
-fn ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>, rw: bool) -> Res<'s, Local<'s>> {
+fn ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, a: Args<'s>, rw: bool) -> Res<'s, Local<'s>> {
     let who = if rw { "Failed to construct 'DOMMatrix'" } else { "Failed to construct 'DOMMatrixReadOnly'" };
-    let v = arg_s(s, a, 0);
+    let v = arg_s::<E>(s, a, 0);
     let mut m = if s.type_of(v) == Type::Undefined {
         Mat::new(rw)
     } else {
-        let seq = if is_object(s, v) { s.iter_open(v)? } else { None };
+        let seq = if is_object::<E>(s, v) { s.iter_open(v)? } else { None };
         match seq {
             Some(mut iter) => {
                 let mut xs = Vec::new();
                 loop {
                     match s.iter_next(&mut iter) {
-                        Ok(Some(x)) => match num_s(s, x, &|| who.to_string()) {
+                        Ok(Some(x)) => match num_s::<E>(s, x, &|| who.to_string()) {
                             Ok(n) => xs.push(n),
                             Err(e) => return Err(s.iter_fail(&mut iter, e)),
                         },
@@ -695,7 +695,7 @@ fn ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>, rw: bool) -> Res<'s, Local
                         Err(e) => return Err(e),
                     }
                 }
-                from_numbers(s, &xs, rw, who)?
+                from_numbers::<E>(s, &xs, rw, who)?
             }
             None => {
                 let t = d.string_arg_s(s, v)?;
@@ -707,20 +707,20 @@ fn ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>, rw: bool) -> Res<'s, Local
     let default = ensure_s(d, s)?[rw as usize].proto;
     let default = d.obj_local(s, default);
     let proto = s.proto_from_new_target(default)?;
-    let proto = obj_id(s, proto).expect("a prototype");
+    let proto = obj_id::<E>(s, proto).expect("a prototype");
     let o = new_obj_s(d, s, proto, Slot::Matrix(Box::new(m)))?;
     Ok(d.obj_local(s, o))
 }
 
-pub(crate) fn ro_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn ro_ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     ctor(d, s, a, false)
 }
 
-pub(crate) fn rw_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn rw_ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     ctor(d, s, a, true)
 }
 
-fn from_numbers<'s>(s: &mut Sc<'s, '_>, xs: &[f64], rw: bool, who: &str) -> Res<'s, Mat> {
+fn from_numbers<'s, E: Eng>(s: &mut Sc<'s, E>, xs: &[f64], rw: bool, who: &str) -> Res<'s, Mat> {
     match xs.len() {
         6 => Ok(Mat::affine([xs[0], xs[1], xs[2], xs[3], xs[4], xs[5]], rw)),
         16 => {
@@ -732,7 +732,7 @@ fn from_numbers<'s>(s: &mut Sc<'s, '_>, xs: &[f64], rw: bool, who: &str) -> Res<
     }
 }
 
-fn parse_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, text: &str, rw: bool, who: &str) -> Res<'s, Mat> {
+fn parse_text<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, text: &str, rw: bool, who: &str) -> Res<'s, Mat> {
     match parse(text, rw) {
         Ok(m) => Ok(m),
         Err(Fail::Syntax) => Err(d.dom_err_s(s, "SyntaxError", &format!("{who}: Failed to parse '{text}'."))),
@@ -741,11 +741,11 @@ fn parse_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, text: &str, rw: bool, who: &str) 
 }
 
 /// The matrix of a `DOMMatrixInit`: the members are read in the order of Chrome and checked ("validate and fixup").
-pub(crate) fn init_matrix<'s>(_: &Dom, s: &mut Sc<'s, '_>, v: Local<'s>, who: &str) -> Res<'s, Mat> {
-    init_mat(s, v, who, false)
+pub(crate) fn init_matrix<'s, E: Eng>(_: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>, who: &str) -> Res<'s, Mat> {
+    init_mat::<E>(s, v, who, false)
 }
 
-fn init_mat<'s>(s: &mut Sc<'s, '_>, v: Local<'s>, who: &str, rw: bool) -> Res<'s, Mat> {
+fn init_mat<'s, E: Eng>(s: &mut Sc<'s, E>, v: Local<'s>, who: &str, rw: bool) -> Res<'s, Mat> {
     let names = ["a", "b", "c", "d", "e", "f", "m11", "m12", "m21", "m22", "m41", "m42", "is2D", "m13", "m14", "m23", "m24", "m31", "m32", "m33", "m34", "m43", "m44"];
     // `is2D` (member 12) is a boolean; the other members are numbers.
     let dict = |i: usize| if i < 12 { "DOMMatrix2DInit" } else { "DOMMatrixInit" };
@@ -762,7 +762,7 @@ fn init_mat<'s>(s: &mut Sc<'s, '_>, v: Local<'s>, who: &str, rw: bool) -> Res<'s
                 if i == 12 {
                     is2d_given = Some(s.to_boolean(x));
                 } else {
-                    r[i] = Some(num_s(s, x, &|| format!("{who}: Failed to read the '{name}' property from '{}'", dict(i)))?);
+                    r[i] = Some(num_s::<E>(s, x, &|| format!("{who}: Failed to read the '{name}' property from '{}'", dict(i)))?);
                 }
             }
         }
@@ -800,18 +800,18 @@ fn init_mat<'s>(s: &mut Sc<'s, '_>, v: Local<'s>, who: &str, rw: bool) -> Res<'s
 
 // The attributes.
 
-fn get<'s, const K: usize>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn get<'s, const K: usize, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     match mat_of(d, s, this) {
         Some(m) => Ok(s.number(m.m[at(K)])),
-        None => Err(illegal_s(s)),
+        None => Err(illegal_s::<E>(s)),
     }
 }
 
-fn set<'s, const K: usize>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    let Some(Mat { rw: true, .. }) = mat_of(d, s, this) else { return Err(illegal_s(s)) };
-    let x = arg_s(s, a, 0);
-    let x = num_s(s, x, &|| format!("Failed to set the '{}' property on 'DOMMatrix'", ATTRS[K]))?;
-    if let Some(o) = obj_id(s, this)
+fn set<'s, const K: usize, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let Some(Mat { rw: true, .. }) = mat_of(d, s, this) else { return Err(illegal_s::<E>(s)) };
+    let x = arg_s::<E>(s, a, 0);
+    let x = num_s::<E>(s, x, &|| format!("Failed to set the '{}' property on 'DOMMatrix'", ATTRS[K]))?;
+    if let Some(o) = obj_id::<E>(s, this)
         && let Some(Slot::Matrix(m)) = d.geom.slots.borrow_mut().get_mut(&o)
     {
         let i = at(K);
@@ -824,17 +824,17 @@ fn set<'s, const K: usize>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args
     Ok(s.undefined())
 }
 
-fn get_is_2d<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn get_is_2d<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     match mat_of(d, s, this) {
         Some(m) => Ok(s.boolean(m.is2d)),
-        None => Err(illegal_s(s)),
+        None => Err(illegal_s::<E>(s)),
     }
 }
 
-fn get_is_identity<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn get_is_identity<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     match mat_of(d, s, this) {
         Some(m) => Ok(s.boolean(m.is_identity())),
-        None => Err(illegal_s(s)),
+        None => Err(illegal_s::<E>(s)),
     }
 }
 
@@ -853,17 +853,17 @@ const MULTIPLY: u8 = 9;
 const PRE_MULTIPLY: u8 = 10;
 
 /// The number at `a[i]`, or `default` when it is undefined.
-fn opt<'s>(s: &mut Sc<'s, '_>, a: Args<'s>, i: usize, who: &dyn Fn() -> String) -> Res<'s, Option<f64>> {
+fn opt<'s, E: Eng>(s: &mut Sc<'s, E>, a: Args<'s>, i: usize, who: &dyn Fn() -> String) -> Res<'s, Option<f64>> {
     match a.get(i) {
-        Some(x) if s.type_of(x) != Type::Undefined => Ok(Some(num_s(s, x, who)?)),
+        Some(x) if s.type_of(x) != Type::Undefined => Ok(Some(num_s::<E>(s, x, who)?)),
         _ => Ok(None),
     }
 }
 
 /// Keep the result: into the object (`SELF`), or into a new `DOMMatrix`.
-fn done<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, m: Mat, is_self: bool) -> Res<'s, Local<'s>> {
+fn done<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, m: Mat, is_self: bool) -> Res<'s, Local<'s>> {
     if is_self {
-        if let Some(o) = obj_id(s, this)
+        if let Some(o) = obj_id::<E>(s, this)
             && let Some(Slot::Matrix(slot)) = d.geom.slots.borrow_mut().get_mut(&o)
         {
             **slot = m;
@@ -876,10 +876,10 @@ fn done<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, m: Mat, is_self: bool)
     Ok(d.obj_local(s, o))
 }
 
-fn op<'s, const SELF: bool, const OP: u8>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    let Some(mut m) = mat_of(d, s, this) else { return Err(illegal_s(s)) };
+fn op<'s, const SELF: bool, const OP: u8, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let Some(mut m) = mat_of(d, s, this) else { return Err(illegal_s::<E>(s)) };
     if SELF && !m.rw {
-        return Err(illegal_s(s));
+        return Err(illegal_s::<E>(s));
     }
     let name = match OP {
         TRANSLATE => "translate",
@@ -897,7 +897,7 @@ fn op<'s, const SELF: bool, const OP: u8>(d: &Dom, s: &mut Sc<'s, '_>, this: Loc
     let iface = if SELF { "DOMMatrix" } else { "DOMMatrixReadOnly" };
     let suffix = if SELF && OP != PRE_MULTIPLY { "Self" } else { "" };
     let who = || format!("Failed to execute '{name}{suffix}' on '{iface}'");
-    let n = |s: &mut Sc<'s, '_>, i: usize, default: f64| -> Res<'s, f64> { Ok(opt(s, a, i, &who)?.unwrap_or(default)) };
+    let n = |s: &mut Sc<'s, E>, i: usize, default: f64| -> Res<'s, f64> { Ok(opt::<E>(s, a, i, &who)?.unwrap_or(default)) };
     match OP {
         TRANSLATE => {
             let (x, y, z) = (n(s, 0, 0.0)?, n(s, 1, 0.0)?, n(s, 2, 0.0)?);
@@ -905,9 +905,9 @@ fn op<'s, const SELF: bool, const OP: u8>(d: &Dom, s: &mut Sc<'s, '_>, this: Loc
         }
         SCALE => {
             let sx = n(s, 0, 1.0)?;
-            let sy = opt(s, a, 1, &who)?;
-            let sz = opt(s, a, 2, &who)?.unwrap_or(1.0);
-            let o = [opt(s, a, 3, &who)?.unwrap_or(0.0), opt(s, a, 4, &who)?.unwrap_or(0.0), opt(s, a, 5, &who)?.unwrap_or(0.0)];
+            let sy = opt::<E>(s, a, 1, &who)?;
+            let sz = opt::<E>(s, a, 2, &who)?.unwrap_or(1.0);
+            let o = [opt::<E>(s, a, 3, &who)?.unwrap_or(0.0), opt::<E>(s, a, 4, &who)?.unwrap_or(0.0), opt::<E>(s, a, 5, &who)?.unwrap_or(0.0)];
             // `scaleY` has no default: an undefined one is NaN when a later argument is given, else it is `scaleX`.
             let sy = sy.unwrap_or(if a.iter().skip(2).any(|v| s.type_of(v) != Type::Undefined) { f64::NAN } else { sx });
             if sz != 1.0 || o[2] != 0.0 {
@@ -924,7 +924,7 @@ fn op<'s, const SELF: bool, const OP: u8>(d: &Dom, s: &mut Sc<'s, '_>, this: Loc
             m.scale_about(k, k, k, o);
         }
         ROTATE => {
-            let (x, y, z) = (opt(s, a, 0, &who)?, opt(s, a, 1, &who)?, opt(s, a, 2, &who)?);
+            let (x, y, z) = (opt::<E>(s, a, 0, &who)?, opt::<E>(s, a, 1, &who)?, opt::<E>(s, a, 2, &who)?);
             // `rotY` has no default: an undefined one is NaN when `rotZ` is given. With neither, the angle turns about z.
             let (rx, ry, rz) = match (y, z) {
                 (None, None) => (0.0, 0.0, x.unwrap_or(0.0)),
@@ -945,8 +945,8 @@ fn op<'s, const SELF: bool, const OP: u8>(d: &Dom, s: &mut Sc<'s, '_>, this: Loc
         SKEW_Y => m.skew_y(n(s, 0, 0.0)?),
         INVERT => m.invert(),
         _ => {
-            let v = arg_s(s, a, 0);
-            let other = init_mat(s, v, &who(), false)?;
+            let v = arg_s::<E>(s, a, 0);
+            let other = init_mat::<E>(s, v, &who(), false)?;
             m = if OP == MULTIPLY { m.mul(&other) } else { other.mul(&m) };
             m.rw = true;
         }
@@ -954,36 +954,36 @@ fn op<'s, const SELF: bool, const OP: u8>(d: &Dom, s: &mut Sc<'s, '_>, this: Loc
     done(d, s, this, m, SELF)
 }
 
-fn flip_x<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
-    let Some(mut m) = mat_of(d, s, this) else { return Err(illegal_s(s)) };
+fn flip_x<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let Some(mut m) = mat_of(d, s, this) else { return Err(illegal_s::<E>(s)) };
     m.scale(-1.0, 1.0, 1.0);
     done(d, s, this, m, false)
 }
 
-fn flip_y<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
-    let Some(mut m) = mat_of(d, s, this) else { return Err(illegal_s(s)) };
+fn flip_y<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let Some(mut m) = mat_of(d, s, this) else { return Err(illegal_s::<E>(s)) };
     m.scale(1.0, -1.0, 1.0);
     done(d, s, this, m, false)
 }
 
-fn scale_non_uniform<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    let Some(mut m) = mat_of(d, s, this) else { return Err(illegal_s(s)) };
+fn scale_non_uniform<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let Some(mut m) = mat_of(d, s, this) else { return Err(illegal_s::<E>(s)) };
     let who = || "Failed to execute 'scaleNonUniform' on 'DOMMatrixReadOnly'".to_string();
-    let (x, y) = (opt(s, a, 0, &who)?.unwrap_or(1.0), opt(s, a, 1, &who)?.unwrap_or(1.0));
+    let (x, y) = (opt::<E>(s, a, 0, &who)?.unwrap_or(1.0), opt::<E>(s, a, 1, &who)?.unwrap_or(1.0));
     m.scale(x, y, 1.0);
     done(d, s, this, m, false)
 }
 
-fn transform_point<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    let Some(m) = mat_of(d, s, this) else { return Err(illegal_s(s)) };
-    let v = arg_s(s, a, 0);
-    let p = point_init(s, v, "Failed to execute 'transformPoint' on 'DOMMatrixReadOnly'")?;
+fn transform_point<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let Some(m) = mat_of(d, s, this) else { return Err(illegal_s::<E>(s)) };
+    let v = arg_s::<E>(s, a, 0);
+    let p = point_init::<E>(s, v, "Failed to execute 'transformPoint' on 'DOMMatrixReadOnly'")?;
     let o = point_object_s(d, s, m.transform(p), true)?;
     Ok(d.obj_local(s, o))
 }
 
-fn to_array<'s, const F64: bool>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
-    let Some(m) = mat_of(d, s, this) else { return Err(illegal_s(s)) };
+fn to_array<'s, const F64: bool, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let Some(m) = mat_of(d, s, this) else { return Err(illegal_s::<E>(s)) };
     if F64 {
         s.new_typed_array(Elem::F64, m.m.iter().flat_map(|v| v.to_le_bytes()).collect())
     } else {
@@ -991,22 +991,22 @@ fn to_array<'s, const F64: bool>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _
     }
 }
 
-fn to_json<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
-    let Some(m) = mat_of(d, s, this) else { return Err(illegal_s(s)) };
+fn to_json<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let Some(m) = mat_of(d, s, this) else { return Err(illegal_s::<E>(s)) };
     let o = s.new_object()?;
     for (k, name) in ATTRS.into_iter().enumerate() {
         let n = s.number(m.m[at(k)]);
-        put_s(s, o, name, n)?;
+        put_s::<E>(s, o, name, n)?;
     }
     let b = s.boolean(m.is2d);
-    put_s(s, o, "is2D", b)?;
+    put_s::<E>(s, o, "is2D", b)?;
     let b = s.boolean(m.is_identity());
-    put_s(s, o, "isIdentity", b)?;
+    put_s::<E>(s, o, "isIdentity", b)?;
     Ok(o)
 }
 
-fn to_string<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
-    let Some(m) = mat_of(d, s, this) else { return Err(illegal_s(s)) };
+fn to_string<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let Some(m) = mat_of(d, s, this) else { return Err(illegal_s::<E>(s)) };
     if !m.finite() {
         return Err(d.dom_err_s(s, "InvalidStateError", "Failed to execute 'toString' on 'DOMMatrixReadOnly': DOMMatrix cannot be serialized with NaN or Infinity values."));
     }
@@ -1015,8 +1015,8 @@ fn to_string<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> R
     d.js_str_s(s, &text)
 }
 
-fn set_matrix_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    let Some(Mat { rw: true, .. }) = mat_of(d, s, this) else { return Err(illegal_s(s)) };
+fn set_matrix_value<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let Some(Mat { rw: true, .. }) = mat_of(d, s, this) else { return Err(illegal_s::<E>(s)) };
     let Some(v) = a.get(0) else {
         return Err(s.type_error("Failed to execute 'setMatrixValue' on 'DOMMatrix': 1 argument required, but only 0 present."));
     };
@@ -1027,16 +1027,16 @@ fn set_matrix_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s
 
 // The statics.
 
-fn from_matrix<'s, const RW: bool>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn from_matrix<'s, const RW: bool, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let who = if RW { "Failed to execute 'fromMatrix' on 'DOMMatrix'" } else { "Failed to execute 'fromMatrix' on 'DOMMatrixReadOnly'" };
-    let v = arg_s(s, a, 0);
-    let mut m = init_mat(s, v, who, RW)?;
+    let v = arg_s::<E>(s, a, 0);
+    let mut m = init_mat::<E>(s, v, who, RW)?;
     m.rw = RW;
     let o = new_matrix(d, s, m)?;
     Ok(d.obj_local(s, o))
 }
 
-fn from_array<'s, const RW: bool, const F64: bool>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn from_array<'s, const RW: bool, const F64: bool, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let (name, ty) = if F64 { ("fromFloat64Array", Elem::F64) } else { ("fromFloat32Array", Elem::F32) };
     let class = if F64 { "Float64Array" } else { "Float32Array" };
     let who = format!("Failed to execute '{name}' on '{}'", if RW { "DOMMatrix" } else { "DOMMatrixReadOnly" });
@@ -1046,7 +1046,7 @@ fn from_array<'s, const RW: bool, const F64: bool>(d: &Dom, s: &mut Sc<'s, '_>, 
         _ => return Err(s.type_error(&format!("{who}: parameter 1 is not of type '{class}'."))),
     };
     let xs: Vec<f64> = (0..len).map(|i| s.view_get(v, i).unwrap_or(0.0)).collect();
-    let mut m = from_numbers(s, &xs, RW, &who)?;
+    let mut m = from_numbers::<E>(s, &xs, RW, &who)?;
     m.rw = RW;
     let o = new_matrix(d, s, m)?;
     Ok(d.obj_local(s, o))

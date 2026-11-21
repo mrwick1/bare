@@ -4,11 +4,11 @@
 //! - Read JS arguments first (`string_arg` may run `toString`), then borrow the document. No JS runs under a borrow.
 //! - Every walk charges `it.charge` for each node it visits, and every result is capped before it grows.
 
+use crate::eng::{Eng, Fault};
 use crate::browser::*;
 use bare_css::matching::{matches, subject_matches};
 use bare_css::selector::{Combinator, Compound, Selector, Simple};
 use bare_html::dom::{Atom, Document, NodeData, NodeId};
-use bare_js::eval::Error;
 use crate::browser_scoped::*;
 use bare_js_api::{Args, Local, Type};
 pub(crate) use crate::browser_dom_old::*;
@@ -141,9 +141,9 @@ pub(crate) fn valid_name(s: &str) -> bool {
         && !s.contains(|c: char| c.is_ascii_whitespace() || matches!(c, '/' | '>' | '=' | '"' | '\'' | '<' | '\0'))
 }
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// Room for `nodes` more nodes and `text` more bytes of text in the native arena.
-    pub(crate) fn room(&self, doc: &Document, nodes: usize, text: usize) -> R<()> {
+    pub(crate) fn room(&self, doc: &Document, nodes: usize, text: usize) -> R<E, ()> {
         if doc.live_len() + nodes > self.lim.max_nodes {
             return Err(self.lim("dom-nodes"));
         }
@@ -154,7 +154,7 @@ impl Dom {
     }
 
     /// Room for a new attribute (name, slot, value).
-    pub(crate) fn attr_room(&self, doc: &Document, el: NodeId, name: &str, value: &str) -> R<()> {
+    pub(crate) fn attr_room(&self, doc: &Document, el: NodeId, name: &str, value: &str) -> R<E, ()> {
         self.room(doc, 0, value.len())?;
         if doc.live_attr_slots() + doc.attr_count(el) + 1 > self.lim.max_attr_slots {
             return Err(self.lim("dom-attrs"));
@@ -166,7 +166,7 @@ impl Dom {
     }
 
     /// The number of steps up to the top of the shadow-including tree: a step is a parent link, or a root to its host.
-    pub(crate) fn depth_of_s<'s>(&self, s: &mut Sc<'s, '_>, n: NodeId) -> Res<'s, usize> {
+    pub(crate) fn depth_of_s<'s>(&self, s: &mut Sc<'s, E>, n: NodeId) -> Res<'s, usize> {
         let doc = self.doc.borrow();
         let (mut d, mut cur) = (0, n);
         while let Some(p) = doc.parent_or_host(cur) {
@@ -178,7 +178,7 @@ impl Dom {
     }
 
     /// How deep the subtree of `n` goes, counting the shadow trees of its hosts (a root is one level below its host).
-    fn height_of_s<'s>(&self, s: &mut Sc<'s, '_>, n: NodeId) -> Res<'s, usize> {
+    fn height_of_s<'s>(&self, s: &mut Sc<'s, E>, n: NodeId) -> Res<'s, usize> {
         let doc = self.doc.borrow();
         let (mut cur, mut d, mut max) = (n, 0, 0);
         while let Some((c, cd)) = next_composed(&doc, n, cur, d) {
@@ -189,7 +189,7 @@ impl Dom {
         Ok(max)
     }
 
-    pub(crate) fn kids_s<'s>(&self, s: &mut Sc<'s, '_>, n: NodeId, only_elements: bool) -> Res<'s, Vec<NodeId>> {
+    pub(crate) fn kids_s<'s>(&self, s: &mut Sc<'s, E>, n: NodeId, only_elements: bool) -> Res<'s, Vec<NodeId>> {
         let doc = self.doc.borrow();
         let mut v = Vec::new();
         for c in doc.children(n) {
@@ -205,7 +205,7 @@ impl Dom {
         Ok(v)
     }
 
-    fn first_el_s<'s>(&self, s: &mut Sc<'s, '_>, n: NodeId, last: bool) -> Res<'s, Option<NodeId>> {
+    fn first_el_s<'s>(&self, s: &mut Sc<'s, E>, n: NodeId, last: bool) -> Res<'s, Option<NodeId>> {
         let doc = self.doc.borrow();
         let mut cur = if last { doc.last_child(n) } else { doc.children(n).next() };
         while let Some(c) = cur {
@@ -218,7 +218,7 @@ impl Dom {
         Ok(None)
     }
 
-    fn sibling_el_s<'s>(&self, s: &mut Sc<'s, '_>, n: NodeId, prev: bool) -> Res<'s, Option<NodeId>> {
+    fn sibling_el_s<'s>(&self, s: &mut Sc<'s, E>, n: NodeId, prev: bool) -> Res<'s, Option<NodeId>> {
         let doc = self.doc.borrow();
         let mut cur = if prev { doc.prev_sibling(n) } else { doc.next_sibling(n) };
         while let Some(c) = cur {
@@ -232,7 +232,7 @@ impl Dom {
     }
 
     /// The elements under `scope` (not `scope`) that match, in tree order. `all` false stops at the first.
-    pub(crate) fn query_s<'s>(&self, s: &mut Sc<'s, '_>, scope: NodeId, text: &str, all: bool) -> Res<'s, Vec<NodeId>> {
+    pub(crate) fn query_s<'s>(&self, s: &mut Sc<'s, E>, scope: NodeId, text: &str, all: bool) -> Res<'s, Vec<NodeId>> {
         let sels = self.selectors_at_s(s, text, scope)?;
         let base = self.depth_of_s(s, scope)?;
         let doc = self.doc.borrow();
@@ -268,7 +268,7 @@ impl Dom {
     }
 
     /// The error of a refused insert. `op` puts the name of the call in front, as Chrome does: "Failed to execute 'append' on 'Document': ...".
-    pub(crate) fn refuse_s<'s>(&self, s: &mut Sc<'s, '_>, op: Op, parent: NodeId, name: &str, reason: &str) -> bare_js_api::Error<'s> {
+    pub(crate) fn refuse_s<'s>(&self, s: &mut Sc<'s, E>, op: Op, parent: NodeId, name: &str, reason: &str) -> bare_js_api::Error<'s> {
         if op.0.is_empty() {
             return self.dom_err_s(s, name, reason);
         }
@@ -286,7 +286,7 @@ impl Dom {
     /// the children as they are, in order (the first refusal wins, so a text after a bad element is not reported); then, when there are several items,
     /// all of them together, one after the other. With several nodes in the list, the ones that are children now do not count: Chrome has moved them out.
     /// Deviation: Chrome has moved them out (and has emptied a fragment) even when it refuses. Here a refusal changes nothing.
-    fn check_doc_s<'s>(&self, s: &mut Sc<'s, '_>, parent: NodeId, nodes: &[NodeId], before: Option<NodeId>, old: Option<NodeId>, op: Op) -> Res<'s, ()> {
+    fn check_doc_s<'s>(&self, s: &mut Sc<'s, E>, parent: NodeId, nodes: &[NodeId], before: Option<NodeId>, old: Option<NodeId>, op: Op) -> Res<'s, ()> {
         let bad: Option<String> = {
             let doc = self.doc.borrow();
             if let ([n], Some(o)) = (nodes, old)
@@ -391,7 +391,7 @@ impl Dom {
     }
 
     /// The depth cap for `node` (and what it holds) as a child of `parent`.
-    fn check_depth_s<'s>(&self, s: &mut Sc<'s, '_>, parent: NodeId, node: NodeId) -> Res<'s, ()> {
+    fn check_depth_s<'s>(&self, s: &mut Sc<'s, E>, parent: NodeId, node: NodeId) -> Res<'s, ()> {
         let height = if self.doc.borrow().children(node).next().is_some() || self.doc.borrow().shadow_root(node).is_some() { self.height_of_s(s, node)? } else { 0 };
         if self.depth_of_s(s, parent)? + 1 + height > self.lim.max_tree_depth {
             return Err(self.lim_s(s, "dom-depth"));
@@ -400,7 +400,7 @@ impl Dom {
     }
 
     /// Check a node insertion (DOM Standard "ensure pre-insertion validity", the parts that apply to this tree). True: `node` is a plain fragment (`is_plain_fragment`).
-    pub(crate) fn check_insert_s<'s>(&self, s: &mut Sc<'s, '_>, parent: NodeId, node: NodeId, before: Option<NodeId>, replacing: Option<NodeId>, op: Op) -> Res<'s, bool> {
+    pub(crate) fn check_insert_s<'s>(&self, s: &mut Sc<'s, E>, parent: NodeId, node: NodeId, before: Option<NodeId>, replacing: Option<NodeId>, op: Op) -> Res<'s, bool> {
         #[derive(PartialEq, Clone, Copy)]
         enum K {
             Doc,
@@ -470,7 +470,7 @@ impl Dom {
     /// `append`, `prepend`, `before`, `after`, `replaceWith` and `replaceChild` with more than one node: the standard makes one fragment of the nodes and
     /// inserts it, so the changes are one group (one `MutationObserver` record) and the inserted scripts run after all nodes are in. `old` leaves in the same
     /// group. One plain node is `insert_checked`.
-    fn insert_many_s<'s>(&self, s: &mut Sc<'s, '_>, parent: NodeId, nodes: &[NodeId], before: Option<NodeId>, old: Option<NodeId>, op: Op) -> Res<'s, ()> {
+    fn insert_many_s<'s>(&self, s: &mut Sc<'s, E>, parent: NodeId, nodes: &[NodeId], before: Option<NodeId>, old: Option<NodeId>, op: Op) -> Res<'s, ()> {
         if let ([n], None) = (nodes, old) {
             return self.insert_checked_s(s, parent, *n, before, op);
         }
@@ -481,7 +481,7 @@ impl Dom {
     /// the caller), so a refusal changes nothing. Several are checked as they go in: each one changes what the next may do. The Document judges all of them
     /// first (`check_doc`), as Chrome does.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn place_s<'s>(&self, s: &mut Sc<'s, '_>, parent: NodeId, nodes: &[NodeId], before: Option<NodeId>, old: Option<NodeId>, checked: bool, op: Op) -> Res<'s, ()> {
+    pub(crate) fn place_s<'s>(&self, s: &mut Sc<'s, E>, parent: NodeId, nodes: &[NodeId], before: Option<NodeId>, old: Option<NodeId>, checked: bool, op: Op) -> Res<'s, ()> {
         let one = nodes.len() == 1;
         let in_doc = matches!(self.data(parent), NodeData::Document);
         if in_doc && !checked {
@@ -528,13 +528,13 @@ impl Dom {
         matches!(doc.data(n), NodeData::ShadowRoot) && doc.shadow_host(n).is_none()
     }
 
-    pub(crate) fn insert_checked_s<'s>(&self, s: &mut Sc<'s, '_>, parent: NodeId, node: NodeId, before: Option<NodeId>, op: Op) -> Res<'s, ()> {
+    pub(crate) fn insert_checked_s<'s>(&self, s: &mut Sc<'s, E>, parent: NodeId, node: NodeId, before: Option<NodeId>, op: Op) -> Res<'s, ()> {
         let frag = self.check_insert_s(s, parent, node, before, None, op)?;
         self.insert_valid_s(s, parent, node, before, frag, op)
     }
 
     /// The insertion of `insert_checked`, for a node that `check_insert` accepted (`frag`: what it gave).
-    pub(crate) fn insert_valid_s<'s>(&self, s: &mut Sc<'s, '_>, parent: NodeId, node: NodeId, before: Option<NodeId>, frag: bool, op: Op) -> Res<'s, ()> {
+    pub(crate) fn insert_valid_s<'s>(&self, s: &mut Sc<'s, E>, parent: NodeId, node: NodeId, before: Option<NodeId>, frag: bool, op: Op) -> Res<'s, ()> {
         if frag {
             return self.place_s(s, parent, &[node], before, None, true, op);
         }
@@ -545,13 +545,13 @@ impl Dom {
         script_inserted_s(self, s, node)
     }
 
-    fn opt_node_s<'s>(&self, s: &mut Sc<'s, '_>, a: Args<'s>, i: usize) -> Res<'s, Option<NodeId>> {
-        let v = arg_s(s, a, i);
-        if is_nullish(s, v) { Ok(None) } else { self.arg_node_s(s, a, i).map(Some) }
+    fn opt_node_s<'s>(&self, s: &mut Sc<'s, E>, a: Args<'s>, i: usize) -> Res<'s, Option<NodeId>> {
+        let v = arg_s::<E>(s, a, i);
+        if is_nullish::<E>(s, v) { Ok(None) } else { self.arg_node_s(s, a, i).map(Some) }
     }
 
     /// Nodes or strings (as for `append`) to nodes. A string becomes a new text node.
-    fn nodes_from_s<'s>(&self, s: &mut Sc<'s, '_>, a: Args<'s>) -> Res<'s, Vec<NodeId>> {
+    fn nodes_from_s<'s>(&self, s: &mut Sc<'s, E>, a: Args<'s>) -> Res<'s, Vec<NodeId>> {
         let mut out = Vec::new();
         for v in a.iter() {
             s.charge(1)?;
@@ -590,7 +590,7 @@ impl Dom {
     }
 
     /// The bytes that all dirty values hold stay under `max_text_bytes` when the value of `n` has `len` bytes.
-    pub(crate) fn value_room(&self, n: NodeId, len: usize) -> R<()> {
+    pub(crate) fn value_room(&self, n: NodeId, len: usize) -> R<E, ()> {
         let old = self.st.borrow().inputs.get(&n).and_then(|i| i.value.as_ref()).map_or(0, String::len);
         if self.st.borrow().input_bytes - old + len > self.lim.max_text_bytes {
             return Err(self.lim("dom-input-bytes"));
@@ -599,7 +599,7 @@ impl Dom {
     }
 
     /// Store the dirty value of a text control. `reset_caret`: a changed value puts the caret at the end (HTML: setting `value`).
-    pub(crate) fn write_value(&self, n: NodeId, v: String, reset_caret: bool) -> R<()> {
+    pub(crate) fn write_value(&self, n: NodeId, v: String, reset_caret: bool) -> R<E, ()> {
         self.value_room(n, v.len())?;
         let mut st = self.st.borrow_mut();
         let old = st.inputs.get(&n).and_then(|i| i.value.as_ref()).map_or(0, String::len);
@@ -626,18 +626,18 @@ impl Dom {
     }
 
     /// The test driver sets native input state (no event). `text` for text-like inputs, `checked` for checkbox and radio.
-    pub(crate) fn driver_input(&self, n: NodeId, text: Option<&str>, checked: Option<bool>) -> R<()> {
+    pub(crate) fn driver_input(&self, n: NodeId, text: Option<&str>, checked: Option<bool>) -> R<E, ()> {
         let kind = {
             let doc = self.doc.borrow();
             match *doc.data(n) {
                 NodeData::Element { name, .. } if doc.atom_str(name) == "input" && !doc.is_foreign(n) => input_kind(&doc, n),
-                _ => return Err(Error::Unsupported(unsupported("test driver: not an <input> element"))),
+                _ => return Err(Fault::Unsupported("test driver: not an <input> element")),
             }
         };
         let is_check = matches!(kind, "checkbox" | "radio");
         if let Some(t) = text {
             if is_check || matches!(kind, "file" | "button" | "submit" | "reset" | "image") {
-                return Err(Error::Unsupported(unsupported("test driver: type_text needs a text-like <input>")));
+                return Err(Fault::Unsupported("test driver: type_text needs a text-like <input>"));
             }
             if t.len() > self.lim.max_string_bytes {
                 return Err(self.lim("dom-string"));
@@ -646,7 +646,7 @@ impl Dom {
         }
         if let Some(c) = checked {
             if !is_check {
-                return Err(Error::Unsupported(unsupported("test driver: set_checked needs a checkbox or radio")));
+                return Err(Fault::Unsupported("test driver: set_checked needs a checkbox or radio"));
             }
             self.st.borrow_mut().inputs.entry(n).or_default().checked = Some(c);
             self.sync_ui(n);
@@ -669,7 +669,7 @@ pub(crate) fn input_kind(doc: &Document, n: NodeId) -> &'static str {
 
 // ------------------------------------------------------------------------------------------ Node
 
-pub(crate) fn node_type<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn node_type<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.nd_s(s, this)?;
     Ok(s.number(match d.data(n) {
         NodeData::Element { .. } => 1.0,
@@ -693,24 +693,24 @@ pub(crate) fn name_of(doc: &Document, n: NodeId) -> String {
     }
 }
 
-pub(crate) fn node_name<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn node_name<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.nd_s(s, this)?;
     let name = name_of(&d.doc.borrow(), n);
     d.js_str_s(s, &name)
 }
 
-pub(crate) fn node_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn node_value<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.nd_s(s, this)?;
     if matches!(d.data(n), NodeData::Text(_) | NodeData::Comment(_)) { node_value_text(d, s, this, a) } else { Ok(s.null()) }
 }
 
-pub(crate) fn set_node_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn set_node_value<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.nd_s(s, this)?;
     if matches!(d.data(n), NodeData::Text(_) | NodeData::Comment(_)) { set_node_value_text(d, s, this, a) } else { Ok(s.undefined()) }
 }
 
 /// `data` of a text node or comment.
-pub(crate) fn node_value_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn node_value_text<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.nd_s(s, this)?;
     let text = {
         let doc = d.doc.borrow();
@@ -722,12 +722,12 @@ pub(crate) fn node_value_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, 
     d.js_str_s(s, &text)
 }
 
-pub(crate) fn set_node_value_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn set_node_value_text<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.nd_s(s, this)?;
     if !matches!(d.data(n), NodeData::Text(_) | NodeData::Comment(_)) {
         return Err(s.type_error("Illegal invocation"));
     }
-    let v = arg_s(s, a, 0);
+    let v = arg_s::<E>(s, a, 0);
     let text = if s.type_of(v) == Type::Null { String::new() } else { d.string_arg_s(s, v)? };
     let mut doc = d.doc.borrow_mut();
     d.room_s(s, &doc, 0, text.len())?;
@@ -736,7 +736,7 @@ pub(crate) fn set_node_value_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'
     Ok(s.undefined())
 }
 
-pub(crate) fn data_length<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn data_length<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.nd_s(s, this)?;
     let doc = d.doc.borrow();
     match *doc.data(n) {
@@ -748,37 +748,37 @@ pub(crate) fn data_length<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: A
     }
 }
 
-fn rel<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, f: impl FnOnce(&Document, NodeId) -> Option<NodeId>) -> Res<'s, Local<'s>> {
+fn rel<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, f: impl FnOnce(&Document, NodeId) -> Option<NodeId>) -> Res<'s, Local<'s>> {
     let n = d.nd_s(s, this)?;
     let r = f(&d.doc.borrow(), n);
     d.wrap_opt_s(s, r)
 }
 
-pub(crate) fn parent_node<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn parent_node<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     rel(d, s, this, |doc, n| doc.parent(n))
 }
 
-pub(crate) fn parent_element<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn parent_element<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     rel(d, s, this, |doc, n| doc.parent(n).filter(|&p| matches!(doc.data(p), NodeData::Element { .. })))
 }
 
-pub(crate) fn first_child<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn first_child<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     rel(d, s, this, |doc, n| doc.children(n).next())
 }
 
-pub(crate) fn last_child<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn last_child<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     rel(d, s, this, |doc, n| doc.last_child(n))
 }
 
-pub(crate) fn previous_sibling<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn previous_sibling<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     rel(d, s, this, |doc, n| doc.prev_sibling(n))
 }
 
-pub(crate) fn next_sibling<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn next_sibling<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     rel(d, s, this, |doc, n| doc.next_sibling(n))
 }
 
-pub(crate) fn owner_document<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn owner_document<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.nd_s(s, this)?;
     if matches!(d.data(n), NodeData::Document) {
         return Ok(s.null());
@@ -790,7 +790,7 @@ pub(crate) fn owner_document<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _
     d.wrap_s(s, root)
 }
 
-pub(crate) fn is_connected<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn is_connected<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.nd_s(s, this)?;
     let doc = d.doc.borrow();
     let mut cur = n;
@@ -806,16 +806,16 @@ pub(crate) fn is_connected<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: 
 /// `Node.getRootNode(options)`: the topmost ancestor, or the node itself when it has no parent. A shadow root is the root of its own tree; with
 /// `composed` true the walk goes on from a shadow root to its host. The options are read before the walk (the getter runs once), so a
 /// getter that moves the node is seen by the walk. More than `max_tree_depth` steps is a limit, not a wrong root.
-pub(crate) fn get_root_node<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn get_root_node<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let attr = is_attr_node_s(d, s, this);
     let n = if attr { None } else { Some(d.nd_s(s, this)?) };
     let mut composed = false;
-    let opts = arg_s(s, a, 0);
+    let opts = arg_s::<E>(s, a, 0);
     // WebIDL dictionary: undefined and null are an empty dictionary; any other primitive is a TypeError.
-    if is_object(s, opts) {
+    if is_object::<E>(s, opts) {
         let v = s.get_str(opts, "composed")?;
         composed = s.to_boolean(v);
-    } else if !is_nullish(s, opts) {
+    } else if !is_nullish::<E>(s, opts) {
         return Err(s.type_error("Failed to execute 'getRootNode' on 'Node': The provided value is not of type 'GetRootNodeOptions'."));
     }
     // Attr nodes have no parent, including when attached to an element.
@@ -836,13 +836,13 @@ pub(crate) fn get_root_node<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a:
     d.wrap_s(s, root)
 }
 
-pub(crate) fn child_nodes<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn child_nodes<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.nd_s(s, this)?;
     let kids = d.kids_s(s, n, false)?;
     wrap_coll_s(d, s, &kids)
 }
 
-pub(crate) fn wrap_all_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, ids: &[NodeId]) -> Res<'s, Local<'s>> {
+pub(crate) fn wrap_all_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, ids: &[NodeId]) -> Res<'s, Local<'s>> {
     let mut vals = Vec::with_capacity(ids.len());
     for &k in ids {
         vals.push(d.wrap_s(s, k)?);
@@ -850,37 +850,37 @@ pub(crate) fn wrap_all_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, ids: &[NodeId]) -> Res
     s.new_array(&vals)
 }
 
-pub(crate) fn children<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn children<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.nd_s(s, this)?;
     let kids = d.kids_s(s, n, true)?;
     wrap_coll_s(d, s, &kids)
 }
 
-pub(crate) fn first_element_child<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn first_element_child<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.nd_s(s, this)?;
     let r = d.first_el_s(s, n, false)?;
     d.wrap_opt_s(s, r)
 }
 
-pub(crate) fn last_element_child<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn last_element_child<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.nd_s(s, this)?;
     let r = d.first_el_s(s, n, true)?;
     d.wrap_opt_s(s, r)
 }
 
-pub(crate) fn previous_element_sibling<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn previous_element_sibling<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.el_s(s, this)?;
     let r = d.sibling_el_s(s, n, true)?;
     d.wrap_opt_s(s, r)
 }
 
-pub(crate) fn next_element_sibling<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn next_element_sibling<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.el_s(s, this)?;
     let r = d.sibling_el_s(s, n, false)?;
     d.wrap_opt_s(s, r)
 }
 
-pub(crate) fn child_element_count<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn child_element_count<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.nd_s(s, this)?;
     let doc = d.doc.borrow();
     let mut c = 0usize;
@@ -892,13 +892,13 @@ pub(crate) fn child_element_count<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'
     Ok(s.number(c as f64))
 }
 
-pub(crate) fn has_child_nodes<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn has_child_nodes<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.nd_s(s, this)?;
     let has = d.doc.borrow().children(n).next().is_some();
     Ok(s.boolean(has))
 }
 
-pub(crate) fn text_content_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn text_content_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.nd_s(s, this)?;
     let out = {
         let doc = d.doc.borrow();
@@ -926,10 +926,10 @@ pub(crate) fn text_content_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _
     d.js_str_s(s, &out)
 }
 
-pub(crate) fn set_text_content_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn set_text_content_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.nd_s(s, this)?;
-    let v = arg_s(s, a, 0);
-    let text = if is_nullish(s, v) { String::new() } else { d.string_arg_s(s, v)? };
+    let v = arg_s::<E>(s, a, 0);
+    let text = if is_nullish::<E>(s, v) { String::new() } else { d.string_arg_s(s, v)? };
     match d.data(n) {
         NodeData::Element { .. } | NodeData::ShadowRoot => {
             let r = d.mo_group(Some(n), || {
@@ -961,32 +961,32 @@ pub(crate) fn set_text_content_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s
     Ok(s.undefined())
 }
 
-pub(crate) fn append_child_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn append_child_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let parent = d.nd_s(s, this)?;
     let node = d.arg_node_s(s, a, 0)?;
     d.insert_checked_s(s, parent, node, None, Op("appendChild", "Node"))?;
-    Ok(arg_s(s, a, 0))
+    Ok(arg_s::<E>(s, a, 0))
 }
 
-pub(crate) fn insert_before<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn insert_before<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let parent = d.nd_s(s, this)?;
     let node = d.arg_node_s(s, a, 0)?;
     let before = d.opt_node_s(s, a, 1)?;
     d.insert_checked_s(s, parent, node, before, Op("insertBefore", "Node"))?;
-    Ok(arg_s(s, a, 0))
+    Ok(arg_s::<E>(s, a, 0))
 }
 
-pub(crate) fn remove_child<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn remove_child<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let parent = d.nd_s(s, this)?;
     let child = d.arg_node_s(s, a, 0)?;
     if d.doc.borrow().parent(child) != Some(parent) {
         return Err(d.dom_err_s(s, "NotFoundError", "The node to be removed is not a child of this node."));
     }
     d.doc.borrow_mut().detach(child);
-    Ok(arg_s(s, a, 0))
+    Ok(arg_s::<E>(s, a, 0))
 }
 
-pub(crate) fn replace_child<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn replace_child<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let parent = d.nd_s(s, this)?;
     let new = d.arg_node_s(s, a, 0)?;
     let old = d.arg_node_s(s, a, 1)?;
@@ -994,21 +994,21 @@ pub(crate) fn replace_child<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a:
         return Err(d.refuse_s(s, Op("replaceChild", "Node"), parent, "NotFoundError", "The node to be replaced is not a child of this node."));
     }
     if new == old {
-        return Ok(arg_s(s, a, 1));
+        return Ok(arg_s::<E>(s, a, 1));
     }
     let before = d.doc.borrow().next_sibling(old);
     d.insert_many_s(s, parent, &[new], before, Some(old), Op("replaceChild", "Node"))?;
-    Ok(arg_s(s, a, 1))
+    Ok(arg_s::<E>(s, a, 1))
 }
 
-pub(crate) fn append<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn append<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let parent = d.nd_s(s, this)?;
     let nodes = d.nodes_from_s(s, a)?;
     d.insert_many_s(s, parent, &nodes, None, None, Op("append", ""))?;
     Ok(s.undefined())
 }
 
-pub(crate) fn prepend<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn prepend<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let parent = d.nd_s(s, this)?;
     let nodes = d.nodes_from_s(s, a)?;
     let first = {
@@ -1024,21 +1024,21 @@ pub(crate) fn prepend<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<
     Ok(s.undefined())
 }
 
-pub(crate) fn remove<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn remove<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.nd_s(s, this)?;
     d.doc.borrow_mut().detach(n);
     Ok(s.undefined())
 }
 
 /// `before`, `after` and `replaceWith` (`how` 0, 1, 2) of ChildNode. A node that is also a sibling in the list does not count as the viable sibling.
-pub(crate) fn child_node<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, how: u8) -> Res<'s, Local<'s>> {
+pub(crate) fn child_node<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>, how: u8) -> Res<'s, Local<'s>> {
     let me = d.nd_s(s, this)?;
     let nodes = d.nodes_from_s(s, a)?;
     let Some(parent) = d.doc.borrow().parent(me) else { return Ok(s.undefined()) };
     let mut old = None;
     let before = {
         let doc = d.doc.borrow();
-        let skip = |s: &mut Sc<'s, '_>, mut cur: Option<NodeId>| -> Res<'s, Option<NodeId>> {
+        let skip = |s: &mut Sc<'s, E>, mut cur: Option<NodeId>| -> Res<'s, Option<NodeId>> {
             while let Some(c) = cur.filter(|c| nodes.contains(c)) {
                 s.charge(nodes.len() as u64)?;
                 cur = doc.next_sibling(c);
@@ -1071,7 +1071,7 @@ pub(crate) fn child_node<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Ar
 
 /// `replaceChildren` of Element and DocumentFragment: every node is checked first, so a refusal changes nothing. Then all children go and the nodes
 /// come in as one change group (one record; a live range and an iterator are told once).
-pub(crate) fn replace_children<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn replace_children<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let parent = d.nd_s(s, this)?;
     let nodes = d.nodes_from_s(s, a)?;
     let op = Op("replaceChildren", "");
@@ -1120,7 +1120,7 @@ pub(crate) fn replace_children<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>,
 }
 
 /// The start of `insertAdjacentElement/Text/HTML`: the receiver and the position text, after the argument count check.
-pub(crate) fn adjacent_start_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, name: &str) -> Res<'s, (NodeId, String)> {
+pub(crate) fn adjacent_start_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>, name: &str) -> Res<'s, (NodeId, String)> {
     let me = d.el_s(s, this)?;
     if a.len() < 2 {
         return Err(s.type_error(&format!("Failed to execute '{name}' on 'Element': 2 arguments required, but only {} present.", a.len())));
@@ -1129,7 +1129,7 @@ pub(crate) fn adjacent_start_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>,
 }
 
 /// `beforebegin`, `afterbegin`, `beforeend`, `afterend` (any case) as 0 to 3.
-pub(crate) fn adjacent_pos_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, name: &str, pos: &str) -> Res<'s, u8> {
+pub(crate) fn adjacent_pos_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, name: &str, pos: &str) -> Res<'s, u8> {
     match ["beforebegin", "afterbegin", "beforeend", "afterend"].iter().position(|p| pos.eq_ignore_ascii_case(p)) {
         Some(i) => Ok(i as u8),
         None => Err(d.dom_err_s(s, "SyntaxError", &format!("Failed to execute '{name}' on 'Element': The value provided ('{pos}') is not one of 'beforeBegin', 'afterBegin', 'beforeEnd', or 'afterEnd'."))),
@@ -1137,7 +1137,7 @@ pub(crate) fn adjacent_pos_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, name: &str, pos: &
 }
 
 /// The parent and the node that a new node goes before, for position `pos` of `me`. None: the position is next to `me` and `me` has no parent.
-pub(crate) fn adjacent_place(d: &Dom, me: NodeId, pos: u8) -> Option<(NodeId, Option<NodeId>)> {
+pub(crate) fn adjacent_place<E: Eng>(d: &Dom<E>, me: NodeId, pos: u8) -> Option<(NodeId, Option<NodeId>)> {
     let doc = d.doc.borrow();
     match pos {
         0 => doc.parent(me).map(|p| (p, Some(me))),
@@ -1148,10 +1148,10 @@ pub(crate) fn adjacent_place(d: &Dom, me: NodeId, pos: u8) -> Option<(NodeId, Op
 }
 
 /// `insertAdjacentElement(where, element)`: the element, or null when there is no parent for `beforebegin` or `afterend`.
-pub(crate) fn insert_adjacent_element<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn insert_adjacent_element<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     const NAME: &str = "insertAdjacentElement";
     let (me, ps) = adjacent_start_s(d, s, this, a, NAME)?;
-    let a1 = arg_s(s, a, 1);
+    let a1 = arg_s::<E>(s, a, 1);
     let node = match d.node_of_s(s, a1).filter(|&n| d.is_element(n)) {
         Some(n) => n,
         None => return Err(s.type_error("Failed to execute 'insertAdjacentElement' on 'Element': parameter 2 is not of type 'Element'.")),
@@ -1163,7 +1163,7 @@ pub(crate) fn insert_adjacent_element<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Loc
 }
 
 /// `insertAdjacentText(where, data)`: a new text node, which does not join its neighbours.
-pub(crate) fn insert_adjacent_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn insert_adjacent_text<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     const NAME: &str = "insertAdjacentText";
     let (me, ps) = adjacent_start_s(d, s, this, a, NAME)?;
     let text = d.arg_str_s(s, a, 1)?;
@@ -1179,20 +1179,20 @@ pub(crate) fn insert_adjacent_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<
 }
 
 /// `document.createDocumentFragment()`.
-pub(crate) fn create_document_fragment<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn create_document_fragment<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     d.nd_s(s, this)?;
     new_fragment_s(d, s, None)
 }
 
 /// `new DocumentFragment()`.
-pub(crate) fn fragment_ctor_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn fragment_ctor_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let default = d.obj_local(s, d.p().fragment);
     let proto = s.proto_from_new_target(default)?;
     new_fragment_s(d, s, Some(proto))
 }
 
 /// An empty fragment of the document. `proto`: the prototype of a subclass.
-pub(crate) fn new_fragment_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, proto: Option<Local<'s>>) -> Res<'s, Local<'s>> {
+pub(crate) fn new_fragment_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, proto: Option<Local<'s>>) -> Res<'s, Local<'s>> {
     tag_fragments_s(d, s)?;
     let n = {
         let mut doc = d.doc.borrow_mut();
@@ -1208,9 +1208,9 @@ pub(crate) fn new_fragment_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, proto: Option<Loca
     Ok(w)
 }
 
-pub(crate) fn clone_node<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn clone_node<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.nd_s(s, this)?;
-    let arg0 = arg_s(s, a, 0);
+    let arg0 = arg_s::<E>(s, a, 0);
     let deep = s.to_boolean(arg0);
     if matches!(d.data(n), NodeData::Document) {
         return Err(d.dom_err_s(s, "NotSupportedError", "Cloning a Document is not supported."));
@@ -1225,7 +1225,7 @@ pub(crate) fn clone_node<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Ar
 
 /// The clone of `n` (and of what it holds, when `deep`): a new tree, not linked. The Document and a shadow root are the caller's to refuse.
 /// `import`: the clone belongs to the document even when `n` is in the inert tree of a template (`importNode`).
-pub(crate) fn clone_tree_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId, deep: bool, import: bool) -> Res<'s, NodeId> {
+pub(crate) fn clone_tree_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, n: NodeId, deep: bool, import: bool) -> Res<'s, NodeId> {
     // Count first, so a clone that does not fit makes no node at all.
     let (mut count, mut bytes, mut attrs, mut input_bytes) = (1usize, 0usize, 0usize, 0usize);
     {
@@ -1335,13 +1335,13 @@ pub(crate) fn clone_tree_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId, deep: boo
 
 // ------------------------------------------------------------------------------------------ Element
 
-pub(crate) fn tag_name<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn tag_name<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.el_s(s, this)?;
     let name = crate::browser_namespace::tag(&d.doc.borrow(), n);
     d.js_str_s(s, &name)
 }
 
-pub(crate) fn local_name<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn local_name<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.el_s(s, this)?;
     let name = {
         let doc = d.doc.borrow();
@@ -1351,7 +1351,7 @@ pub(crate) fn local_name<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Ar
     d.js_str_s(s, &name)
 }
 
-pub(crate) fn attr_set_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId, name: &str, value: &str) -> Res<'s, ()> {
+pub(crate) fn attr_set_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, n: NodeId, name: &str, value: &str) -> Res<'s, ()> {
     let mut doc = d.doc.borrow_mut();
     d.attr_room_s(s, &doc, n, name, value)?;
     s.charge(doc.attr_count(n) as u64 + 1)?;
@@ -1359,7 +1359,7 @@ pub(crate) fn attr_set_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId, name: &str,
     Ok(())
 }
 
-fn reflect_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, name: &str) -> Res<'s, Local<'s>> {
+fn reflect_get<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, name: &str) -> Res<'s, Local<'s>> {
     let n = d.el_s(s, this)?;
     let v = {
         let doc = d.doc.borrow();
@@ -1368,40 +1368,40 @@ fn reflect_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, name: &str) -> 
     d.js_str_s(s, v.as_deref().unwrap_or(""))
 }
 
-fn reflect_set<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, name: &str) -> Res<'s, Local<'s>> {
+fn reflect_set<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>, name: &str) -> Res<'s, Local<'s>> {
     let n = d.el_s(s, this)?;
     let text = d.arg_str_s(s, a, 0)?;
     attr_set_s(d, s, n, name, &text)?;
     Ok(s.undefined())
 }
 
-pub(crate) fn id<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn id<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     reflect_get(d, s, this, "id")
 }
 
-pub(crate) fn set_id<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn set_id<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     reflect_set(d, s, this, a, "id")
 }
 
-pub(crate) fn class_name<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn class_name<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     reflect_get(d, s, this, "class")
 }
 
-pub(crate) fn set_class_name<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn set_class_name<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     reflect_set(d, s, this, a, "class")
 }
 
-pub(crate) fn lang<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn lang<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     reflect_get(d, s, this, "lang")
 }
 
-pub(crate) fn set_lang<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn set_lang<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     reflect_set(d, s, this, a, "lang")
 }
 
-pub(crate) fn get_attribute_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn get_attribute_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.el_s(s, this)?;
-    let arg0 = arg_s(s, a, 0);
+    let arg0 = arg_s::<E>(s, a, 0);
     let name = d.string_arg_s(s, arg0)?;
     let v = {
         let doc = d.doc.borrow();
@@ -1414,9 +1414,9 @@ pub(crate) fn get_attribute_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, 
     }
 }
 
-pub(crate) fn has_attribute_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn has_attribute_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.el_s(s, this)?;
-    let arg0 = arg_s(s, a, 0);
+    let arg0 = arg_s::<E>(s, a, 0);
     let name = d.string_arg_s(s, arg0)?;
     let has = {
         let doc = d.doc.borrow();
@@ -1425,16 +1425,16 @@ pub(crate) fn has_attribute_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, 
     Ok(s.boolean(has))
 }
 
-pub(crate) fn matches_selector_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn matches_selector_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.el_s(s, this)?;
-    let arg0 = arg_s(s, a, 0);
+    let arg0 = arg_s::<E>(s, a, 0);
     let text = d.string_arg_s(s, arg0)?;
     let sels = d.selectors_at_s(s, &text, n)?;
     let b = match_here(d, s, n, &sels)?;
     Ok(s.boolean(b))
 }
 
-pub(crate) fn set_attribute<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn set_attribute<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.el_s(s, this)?;
     let name = d.arg_str_s(s, a, 0)?;
     let value = d.arg_str_s(s, a, 1)?;
@@ -1459,7 +1459,7 @@ pub(crate) fn set_attribute<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a:
     Ok(s.undefined())
 }
 
-pub(crate) fn remove_attribute_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn remove_attribute_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.el_s(s, this)?;
     let name = d.arg_str_s(s, a, 0)?;
     let mut doc = d.doc.borrow_mut();
@@ -1472,10 +1472,10 @@ pub(crate) fn remove_attribute_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s
 }
 
 /// `Element.toggleAttribute(name, force)`.
-pub(crate) fn toggle_attribute_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn toggle_attribute_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.el_s(s, this)?;
     let name = d.arg_str_s(s, a, 0)?;
-    let f = arg_s(s, a, 1);
+    let f = arg_s::<E>(s, a, 1);
     let force = if s.type_of(f) == Type::Undefined { None } else { Some(s.to_boolean(f)) };
     let (name, existing) = {
         let doc = d.doc.borrow();
@@ -1505,7 +1505,7 @@ pub(crate) fn toggle_attribute_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s
     }
 }
 
-pub(crate) fn get_attribute_names<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn get_attribute_names<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.el_s(s, this)?;
     let names: Vec<String> = {
         let doc = d.doc.borrow();
@@ -1524,14 +1524,14 @@ fn attrs_len(doc: &Document, n: NodeId) -> usize {
     doc.attr_count(n)
 }
 
-pub(crate) fn query_selector<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn query_selector<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.nd_s(s, this)?;
     let text = d.arg_str_s(s, a, 0)?;
     let r = d.query_s(s, n, &text, false)?;
     d.wrap_opt_s(s, r.first().copied())
 }
 
-pub(crate) fn query_selector_all<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn query_selector_all<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.nd_s(s, this)?;
     let text = d.arg_str_s(s, a, 0)?;
     let r = d.query_s(s, n, &text, true)?;
@@ -1539,7 +1539,7 @@ pub(crate) fn query_selector_all<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s
 }
 
 /// Does the selector match `n`? The cost charged is an upper bound of the matcher's work.
-fn match_here<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId, sels: &[Selector]) -> Res<'s, bool> {
+fn match_here<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, n: NodeId, sels: &[Selector]) -> Res<'s, bool> {
     let depth = d.depth_of_s(s, n)?;
     let doc = d.doc.borrow();
     s.charge(match_work(&doc, depth, sels))?;
@@ -1549,7 +1549,7 @@ fn match_here<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId, sels: &[Selector]) -> 
     Ok(sels.iter().any(|sel| matches(&doc, n, sel)))
 }
 
-pub(crate) fn closest<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn closest<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.el_s(s, this)?;
     let text = d.arg_str_s(s, a, 0)?;
     let sels = d.selectors_at_s(s, &text, n)?;
@@ -1565,7 +1565,7 @@ pub(crate) fn closest<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<
 
 // ------------------------------------------------------------------------------------------ Document
 
-fn new_name<'s>(d: &Dom, s: &mut Sc<'s, '_>, v: Local<'s>) -> Res<'s, String> {
+fn new_name<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>) -> Res<'s, String> {
     let name = d.string_arg_s(s, v)?;
     if !valid_name(&name) {
         return Err(d.dom_err_s(s, "InvalidCharacterError", &format!("The tag name provided ('{name}') is not a valid name.")));
@@ -1573,7 +1573,7 @@ fn new_name<'s>(d: &Dom, s: &mut Sc<'s, '_>, v: Local<'s>) -> Res<'s, String> {
     Ok(lower(&name))
 }
 
-pub(crate) fn make_element_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, name: &str) -> Res<'s, Local<'s>> {
+pub(crate) fn make_element_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, name: &str) -> Res<'s, Local<'s>> {
     let n = {
         let mut doc = d.doc.borrow_mut();
         d.room_s(s, &doc, 1, 0)?;
@@ -1585,12 +1585,12 @@ pub(crate) fn make_element_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, name: &str) -> Res
     d.wrap_s(s, n)
 }
 
-pub(crate) fn create_element_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn create_element_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     d.nd_s(s, this)?;
-    let a0 = arg_s(s, a, 0);
+    let a0 = arg_s::<E>(s, a, 0);
     let name = new_name(d, s, a0)?;
     let v = if d.ce.on.get() || a.len() > 1 {
-        let o = arg_s(s, a, 1);
+        let o = arg_s::<E>(s, a, 1);
         crate::browser_custom::create_s(d, s, &name, o)?
     } else {
         make_element_s(d, s, &name)?
@@ -1599,7 +1599,7 @@ pub(crate) fn create_element_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>,
     Ok(v)
 }
 
-pub(crate) fn create_text_node<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn create_text_node<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     d.nd_s(s, this)?;
     let text = d.arg_str_s(s, a, 0)?;
     let n = {
@@ -1612,7 +1612,7 @@ pub(crate) fn create_text_node<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>,
     Ok(v)
 }
 
-pub(crate) fn create_comment<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn create_comment<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     d.nd_s(s, this)?;
     let text = d.arg_str_s(s, a, 0)?;
     let n = {
@@ -1625,7 +1625,7 @@ pub(crate) fn create_comment<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a
     Ok(v)
 }
 
-pub(crate) fn get_element_by_id<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn get_element_by_id<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let root = d.nd_s(s, this)?;
     let want = d.arg_str_s(s, a, 0)?;
     if want.is_empty() {
@@ -1647,7 +1647,7 @@ pub(crate) fn get_element_by_id<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>
     d.wrap_opt_s(s, found)
 }
 
-fn doc_child<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, pick: impl Fn(&Document, NodeId) -> bool) -> Res<'s, Local<'s>> {
+fn doc_child<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, pick: impl Fn(&Document, NodeId) -> bool) -> Res<'s, Local<'s>> {
     let root = d.nd_s(s, this)?;
     let r = {
         let doc = d.doc.borrow();
@@ -1660,11 +1660,11 @@ pub(crate) fn is_named(doc: &Document, n: NodeId, names: &[&str]) -> bool {
     matches!(*doc.data(n), NodeData::Element { name, .. } if names.contains(&doc.atom_str(name))) && !doc.is_foreign(n)
 }
 
-pub(crate) fn document_element_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn document_element_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     doc_child(d, s, this, |doc, c| matches!(doc.data(c), NodeData::Element { .. }))
 }
 
-fn html_child<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, names: &[&str]) -> Res<'s, Local<'s>> {
+fn html_child<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, names: &[&str]) -> Res<'s, Local<'s>> {
     let root = d.nd_s(s, this)?;
     let r = {
         let doc = d.doc.borrow();
@@ -1673,16 +1673,16 @@ fn html_child<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, names: &[&str]) 
     d.wrap_opt_s(s, r)
 }
 
-pub(crate) fn head<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn head<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     html_child(d, s, this, &["head"])
 }
 
-pub(crate) fn body_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn body_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     html_child(d, s, this, &["body", "frameset"])
 }
 
 /// The first HTML `title` element of the document, in tree order.
-fn title_element<'s>(d: &Dom, s: &mut Sc<'s, '_>, root: NodeId) -> Res<'s, Option<NodeId>> {
+fn title_element<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, root: NodeId) -> Res<'s, Option<NodeId>> {
     let doc = d.doc.borrow();
     let (mut cur, mut depth) = (root, 0);
     while let Some((c, cd)) = next_in(&doc, root, cur, depth) {
@@ -1696,7 +1696,7 @@ fn title_element<'s>(d: &Dom, s: &mut Sc<'s, '_>, root: NodeId) -> Res<'s, Optio
 }
 
 /// `document.title`: the text of the first `title` element with ASCII white space stripped and collapsed.
-pub(crate) fn document_title<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn document_title<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let root = d.nd_s(s, this)?;
     let Some(t) = title_element(d, s, root)? else { return d.js_str_s(s, "") };
     let text: String = {
@@ -1710,7 +1710,7 @@ pub(crate) fn document_title<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _
 }
 
 /// `document.title = v`: set the text of the first `title` element. Without one, a new `title` goes at the end of `head` (no `head`: nothing).
-pub(crate) fn set_document_title<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn set_document_title<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let root = d.nd_s(s, this)?;
     let text = d.arg_str_s(s, a, 0)?;
     let existing = title_element(d, s, root)?;
@@ -1749,11 +1749,11 @@ pub(crate) fn set_document_title<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s
     Ok(s.undefined())
 }
 
-pub(crate) fn doctype<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn doctype<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     doc_child(d, s, this, |doc, c| matches!(doc.data(c), NodeData::Doctype(_)))
 }
 
-pub(crate) fn default_view<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn default_view<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.nd_s(s, this)?;
     if n != d.doc.borrow().root() {
         return Ok(match window_of_s(d, s, n) {
@@ -1766,21 +1766,21 @@ pub(crate) fn default_view<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: 
 
 // ------------------------------------------------------------------------------------------ <input>
 
-pub(crate) fn input_el_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
+pub(crate) fn input_el_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, NodeId> {
     let n = d.el_s(s, this)?;
     let is_input = is_named(&d.doc.borrow(), n, &["input"]);
     if is_input { Ok(n) } else { Err(s.type_error("Illegal invocation")) }
 }
 
-pub(crate) fn input_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn input_value<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = input_el_s(d, s, this)?;
     let text = d.input_value_of(n).unwrap_or_default();
     d.js_str_s(s, &text)
 }
 
-pub(crate) fn set_input_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn set_input_value<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = input_el_s(d, s, this)?;
-    let v = arg_s(s, a, 0);
+    let v = arg_s::<E>(s, a, 0);
     let text = if s.type_of(v) == Type::Null { String::new() } else { d.string_arg_s(s, v)? };
     let kind = input_kind(&d.doc.borrow(), n);
     match kind {
@@ -1802,7 +1802,7 @@ pub(crate) fn set_input_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, 
 }
 
 /// `input.files`: an array of the Files (read from disk now), `null` for another kind of input. It is an array, not a FileList.
-pub(crate) fn input_files<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn input_files<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = input_el_s(d, s, this)?;
     if input_kind(&d.doc.borrow(), n) != "file" {
         return Ok(s.null());
@@ -1815,7 +1815,7 @@ pub(crate) fn input_files<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: A
     s.new_array(&files)
 }
 
-pub(crate) fn input_checked<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn input_checked<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = input_el_s(d, s, this)?;
     if let Some(c) = d.st.borrow().inputs.get(&n).and_then(|i| i.checked) {
         return Ok(s.boolean(c));
@@ -1824,9 +1824,9 @@ pub(crate) fn input_checked<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _:
     Ok(s.boolean(doc.find_atom("checked").and_then(|a| doc.attr(n, a)).is_some()))
 }
 
-pub(crate) fn set_input_checked<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn set_input_checked<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = input_el_s(d, s, this)?;
-    let a0 = arg_s(s, a, 0);
+    let a0 = arg_s::<E>(s, a, 0);
     let b = s.to_boolean(a0);
     // A radio that gets checked unchecks the others of its group.
     if b && input_kind(&d.doc.borrow(), n) == "radio" {
@@ -1840,53 +1840,53 @@ pub(crate) fn set_input_checked<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>
     Ok(s.undefined())
 }
 
-pub(crate) fn input_indeterminate<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn input_indeterminate<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = input_el_s(d, s, this)?;
     let b = d.st.borrow().inputs.get(&n).is_some_and(|i| i.indeterminate);
     Ok(s.boolean(b))
 }
 
-pub(crate) fn set_input_indeterminate<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn set_input_indeterminate<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = input_el_s(d, s, this)?;
-    let a0 = arg_s(s, a, 0);
+    let a0 = arg_s::<E>(s, a, 0);
     let b = s.to_boolean(a0);
     d.st.borrow_mut().inputs.entry(n).or_default().indeterminate = b;
     d.sync_ui(n);
     Ok(s.undefined())
 }
 
-pub(crate) fn input_type<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn input_type<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = input_el_s(d, s, this)?;
     let k = input_kind(&d.doc.borrow(), n);
     d.js_str_s(s, k)
 }
 
-pub(crate) fn set_input_type<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn set_input_type<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     input_el_s(d, s, this)?;
     reflect_set(d, s, this, a, "type")
 }
 
-pub(crate) fn default_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn default_value<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     input_el_s(d, s, this)?;
     reflect_get(d, s, this, "value")
 }
 
-pub(crate) fn set_default_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn set_default_value<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = input_el_s(d, s, this)?;
     let text = d.arg_str_s(s, a, 0)?;
     set_value_attr_s(d, s, n, &text)?;
     Ok(s.undefined())
 }
 
-pub(crate) fn default_checked<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn default_checked<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = input_el_s(d, s, this)?;
     let doc = d.doc.borrow();
     Ok(s.boolean(doc.find_atom("checked").and_then(|a| doc.attr(n, a)).is_some()))
 }
 
-pub(crate) fn set_default_checked<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn set_default_checked<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = input_el_s(d, s, this)?;
-    let a0 = arg_s(s, a, 0);
+    let a0 = arg_s::<E>(s, a, 0);
     if s.to_boolean(a0) {
         attr_set_s(d, s, n, "checked", "")?;
     } else {
@@ -1896,19 +1896,19 @@ pub(crate) fn set_default_checked<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'
 }
 
 /// An HTML `link` in the HTML namespace. An SVG or MathML `link` is not one (`is_named` skips foreign elements).
-pub(crate) fn link_el_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
+pub(crate) fn link_el_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, NodeId> {
     let n = d.el_s(s, this)?;
     if is_named(&d.doc.borrow(), n, &["link"]) { Ok(n) } else { Err(s.type_error("Illegal invocation")) }
 }
 
-pub(crate) fn link_rel<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn link_rel<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = link_el_s(d, s, this)?;
     let doc = d.doc.borrow();
     let value = doc.find_atom("rel").and_then(|a| doc.attr(n, a)).unwrap_or("");
     d.js_str_s(s, value)
 }
 
-pub(crate) fn set_link_rel<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn set_link_rel<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     link_el_s(d, s, this)?;
     reflect_set(d, s, this, a, "rel")
 }
@@ -1920,7 +1920,7 @@ pub(crate) const LINK_AS: [&str; 23] = [
 ];
 
 /// A known `as` value is given in lower case. An unknown one is the empty string (an enumerated attribute with no default).
-pub(crate) fn link_as<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn link_as<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = link_el_s(d, s, this)?;
     let doc = d.doc.borrow();
     let raw = doc.find_atom("as").and_then(|a| doc.attr(n, a)).unwrap_or("");
@@ -1928,13 +1928,13 @@ pub(crate) fn link_as<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<
     d.js_str_s(s, known.copied().unwrap_or(""))
 }
 
-pub(crate) fn set_link_as<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn set_link_as<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     link_el_s(d, s, this)?;
     reflect_set(d, s, this, a, "as")
 }
 
 /// `null` when the attribute is absent, `use-credentials` when it says so (any case), else `anonymous`.
-pub(crate) fn link_cross_origin<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn link_cross_origin<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = link_el_s(d, s, this)?;
     let doc = d.doc.borrow();
     let Some(raw) = doc.find_atom("crossorigin").and_then(|a| doc.attr(n, a)) else { return Ok(s.null()) };
@@ -1942,9 +1942,9 @@ pub(crate) fn link_cross_origin<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>
 }
 
 /// `null` removes the attribute. Any other value is converted to a string and written.
-pub(crate) fn set_link_cross_origin<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn set_link_cross_origin<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = link_el_s(d, s, this)?;
-    let a0 = arg_s(s, a, 0);
+    let a0 = arg_s::<E>(s, a, 0);
     if s.type_of(a0) == Type::Null {
         d.doc.borrow_mut().remove_attr(n, "crossorigin");
         return Ok(s.undefined());

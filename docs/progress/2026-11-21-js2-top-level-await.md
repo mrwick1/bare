@@ -49,15 +49,15 @@ Base: tree `a6b61871` (before G2). Release builds, own `CARGO_TARGET_DIR` for ea
 | ---------------------------- | -------------: | -----------: |
 | `interp_load loopfn 3000000` |        +0.009% |      +0.009% |
 | `interp_load calls 1000000`  |        +0.013% |      +0.014% |
-| `gen_load next 100000`       |        -0.013% |      +0.290% |
-| `promise_load then 100000`   |        +0.654% |      +0.118% |
+| `js2_gen_load next 100000`       |        -0.013% |      +0.290% |
+| `js2_promise_load then 100000`   |        +0.654% |      +0.118% |
 
-The rows are over the whole stack (G2, G3, A1 and this change) because the base is the tree before G2. The `promise_load then` row is over +0.5% in the default build and within it at `codegen-units=1`: the rule allows this. It is the same layout effect as in A1.
+The rows are over the whole stack (G2, G3, A1 and this change) because the base is the tree before G2. The `js2_promise_load then` row is over +0.5% in the default build and within it at `codegen-units=1`: the rule allows this. It is the same layout effect as in A1.
 
 ## Not built and not tested
 
 - Async generators and `for await`: not built. They cause 45 of the 51 lost module tests.
 - `with` in a module: not built in js2 (6 tests).
-- Not run: Windows, Miri, the browser, jemalloc, the full cost matrix, the rows of `parse_load` (the parser does not change).
+- Not run: Windows, Miri, the browser, jemalloc, the full cost matrix, the rows of `js2_parse_load` (the parser does not change).
 - `tools/fixtures/js/test262-js2-baseline.txt` is not regenerated. The classic-script test262 run (`test262_js2.sh`) was not run again: the compiler for scripts does not change.
 - The spread of the 3 runs of each cost row was not recorded.

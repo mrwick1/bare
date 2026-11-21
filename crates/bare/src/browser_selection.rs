@@ -61,11 +61,11 @@
 //! - A drag that goes on after the pointer left the window, a drag by word or line after a double or triple click, and a drag that starts in
 //!   the text of a textarea scrolled by the page are not done.
 
+use crate::eng::{Eng, Ops};
 use crate::browser::*;
 use crate::browser_dom::{attr_set, input_kind};
 use crate::browser_scoped::*;
 use bare_html::dom::{Document, NodeData, NodeId};
-use bare_js::eval::Interp;
 use bare_js::value::to_uint32;
 use bare_js_api::{Args, Local, Type};
 
@@ -140,7 +140,7 @@ fn within(stored: Option<Sel>, len: u32) -> Sel {
     stored.map_or(Sel { start: 0, end: 0, dir: Dir::Forward }, |s| Sel { start: s.start.min(len), end: s.end.min(len), dir: s.dir })
 }
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// True when selection applies to this `<input>` now (the HTML "does not apply" test).
     pub(crate) fn selection_applies(&self, n: NodeId) -> bool {
         let doc = self.doc.borrow();
@@ -163,20 +163,20 @@ impl Dom {
     /// The value is borrowed, never copied. A JS caller (`it`) pays `bytes / 256` steps before the one scan, so a
     /// huge value under a small budget fails first. The no-JS driver (`it` is `None`) has no budget to charge: its
     /// scan is bounded by `max_text_bytes`, which caps both a dirty value and an attribute.
-    pub(crate) fn effective(&self, it: Option<&mut Interp<'_>>, n: NodeId) -> R<Option<(Sel, u32)>> {
+    pub(crate) fn effective(&self, it: Option<&mut E::Vm>, n: NodeId) -> R<E, Option<(Sel, u32)>> {
         if self.applies(&self.doc.borrow(), n).is_none() {
             return Ok(None);
         }
         let Some(bytes) = self.with_input_value(n, str::len) else { return Ok(None) };
         if let Some(it) = it {
-            it.charge((bytes / 256) as u64)?;
+            it.charge_o((bytes / 256) as u64)?;
         }
         let Some(len) = self.with_input_value(n, utf16_len) else { return Ok(None) };
         Ok(Some((within(self.stored_sel(n), len), len)))
     }
 
     /// `effective` for a handler: the charge goes to the scope.
-    fn effective_s<'s>(&self, s: &mut Sc<'s, '_>, n: NodeId) -> Res<'s, Option<(Sel, u32)>> {
+    fn effective_s<'s>(&self, s: &mut Sc<'s, E>, n: NodeId) -> Res<'s, Option<(Sel, u32)>> {
         if self.applies(&self.doc.borrow(), n).is_none() {
             return Ok(None);
         }
@@ -188,7 +188,7 @@ impl Dom {
 
     /// The range that typing replaces. A field that selection does not apply to (`email`, `number`) still has one inside, kept only
     /// here: the caret at the end, or all of the text after `select_text`. `None`: not a field that the user can edit.
-    pub(crate) fn edit_sel(&self, n: NodeId) -> R<Option<Sel>> {
+    pub(crate) fn edit_sel(&self, n: NodeId) -> R<E, Option<Sel>> {
         if let Some((s, _)) = self.effective(None, n)? {
             return Ok(Some(s));
         }
@@ -197,7 +197,7 @@ impl Dom {
     }
 
     /// Put the caret at `at` (UTF-16 units) in a field, or select all its text when `at` is `None`. Works for the fields of `edit_sel`.
-    pub(crate) fn select_text(&self, it: &mut Interp<'_>, n: NodeId, at: Option<u32>) -> R<()> {
+    pub(crate) fn select_text(&self, it: &mut E::Vm, n: NodeId, at: Option<u32>) -> R<E, ()> {
         if self.selection_applies(n) {
             return self.set_user_selection(it, n, Some(at.unwrap_or(0)), Some(at.unwrap_or(u32::MAX)), Dir::Forward);
         }
@@ -207,10 +207,10 @@ impl Dom {
 
     /// Would the value `new` move the selection of this text control? Used before a value write. Pays for the
     /// scan of the old value and of `new` (see `effective`). False when selection does not apply.
-    pub(crate) fn selection_after_value(&self, mut it: Option<&mut Interp<'_>>, n: NodeId, new: &str) -> R<bool> {
+    pub(crate) fn selection_after_value(&self, mut it: Option<&mut E::Vm>, n: NodeId, new: &str) -> R<E, bool> {
         let Some((old, _)) = self.effective(it.as_deref_mut(), n)? else { return Ok(false) };
         if let Some(it) = it {
-            it.charge((new.len() / 256) as u64)?;
+            it.charge_o((new.len() / 256) as u64)?;
         }
         Ok(old != caret_end(new))
     }
@@ -218,7 +218,7 @@ impl Dom {
     /// Focus moved into `n`. A text control that selection applies to takes the page selection, and its caret has no direction. When the page
     /// selection was elsewhere (nowhere, the document, or another control), Chrome sends `selectionchange` to it. Focusing a button or a link
     /// moves nothing.
-    pub(crate) fn focus_selection(&self, n: NodeId) -> R<()> {
+    pub(crate) fn focus_selection(&self, n: NodeId) -> R<E, ()> {
         if !self.selection_applies(n) {
             return Ok(());
         }
@@ -237,11 +237,11 @@ impl Dom {
 
     /// `defaultValue = s`: the `value` attribute. A not-dirty input shows it, so the selection read in it can move
     /// (the caret at the end follows the length, a stored range is clamped). A dirty input shows its own value.
-    pub(crate) fn set_value_attr(&self, it: &mut Interp<'_>, n: NodeId, s: &str) -> R<()> {
+    pub(crate) fn set_value_attr(&self, it: &mut E::Vm, n: NodeId, s: &str) -> R<E, ()> {
         let dirty = self.st.borrow().inputs.get(&n).is_some_and(|i| i.value.is_some());
         let mut moved = false;
         if !dirty && let Some((old, _)) = self.effective(Some(&mut *it), n)? {
-            it.charge((s.len() / 256) as u64)?;
+            it.charge_o((s.len() / 256) as u64)?;
             moved = within(self.stored_sel(n), utf16_len(s)) != old;
         }
         self.selection_room(n, moved, false)?;
@@ -253,23 +253,23 @@ impl Dom {
     /// Chrome sends `select` only for a range, before `selectionchange`, and not at the next frame. When the range or the direction
     /// changed, it queues `selectionchange` (coalesced) and `select`. Every cap is checked before the state changes. The caller has
     /// checked `selection_applies` after its conversions.
-    pub(crate) fn set_user_selection(&self, it: &mut Interp<'_>, n: NodeId, start: Option<u32>, end: Option<u32>, dir: Dir) -> R<()> {
+    pub(crate) fn set_user_selection(&self, it: &mut E::Vm, n: NodeId, start: Option<u32>, end: Option<u32>, dir: Dir) -> R<E, ()> {
         self.update_selection(it, n, true, |_| (start, end, dir))
     }
 
     /// Like `set_user_selection`, from the current selection (one scan of the value for the read and the write).
-    fn update_selection(&self, it: &mut Interp<'_>, n: NodeId, user: bool, f: impl FnOnce(Sel) -> (Option<u32>, Option<u32>, Dir)) -> R<()> {
+    fn update_selection(&self, it: &mut E::Vm, n: NodeId, user: bool, f: impl FnOnce(Sel) -> (Option<u32>, Option<u32>, Dir)) -> R<E, ()> {
         let Some(cur) = self.effective(Some(it), n)? else { return Ok(()) };
         self.apply_selection(n, user, cur, f)
     }
 
     /// `update_selection` for a handler.
-    fn update_selection_s<'s>(&self, s: &mut Sc<'s, '_>, n: NodeId, user: bool, f: impl FnOnce(Sel) -> (Option<u32>, Option<u32>, Dir)) -> Res<'s, ()> {
+    fn update_selection_s<'s>(&self, s: &mut Sc<'s, E>, n: NodeId, user: bool, f: impl FnOnce(Sel) -> (Option<u32>, Option<u32>, Dir)) -> Res<'s, ()> {
         let Some(cur) = self.effective_s(s, n)? else { return Ok(()) };
-        lift(s, self.apply_selection(n, user, cur, f))
+        lift::<E, _>(s, self.apply_selection(n, user, cur, f))
     }
 
-    fn apply_selection(&self, n: NodeId, user: bool, (old, len): (Sel, u32), f: impl FnOnce(Sel) -> (Option<u32>, Option<u32>, Dir)) -> R<()> {
+    fn apply_selection(&self, n: NodeId, user: bool, (old, len): (Sel, u32), f: impl FnOnce(Sel) -> (Option<u32>, Option<u32>, Dir)) -> R<E, ()> {
         let (start, end, dir) = f(old);
         let end = end.unwrap_or(0).min(len);
         let start = start.unwrap_or(0).min(end);
@@ -284,7 +284,7 @@ impl Dom {
         Ok(())
     }
 
-    fn require_selection<'s>(&self, s: &mut Sc<'s, '_>, n: NodeId) -> Res<'s, ()> {
+    fn require_selection<'s>(&self, s: &mut Sc<'s, E>, n: NodeId) -> Res<'s, ()> {
         if self.selection_applies(n) {
             return Ok(());
         }
@@ -293,16 +293,16 @@ impl Dom {
     }
 
     /// WebIDL `unsigned long?`.
-    fn nullable_ulong<'s>(&self, s: &mut Sc<'s, '_>, v: Local<'s>) -> Res<'s, Option<u32>> {
-        if is_nullish(s, v) {
+    fn nullable_ulong<'s>(&self, s: &mut Sc<'s, E>, v: Local<'s>) -> Res<'s, Option<u32>> {
+        if is_nullish::<E>(s, v) {
             return Ok(None);
         }
         Ok(Some(to_uint32(s.to_number(v)?)))
     }
 
     /// The direction string: `forward` or `backward` exactly, else `none`. A null or undefined is `none`.
-    fn direction_arg<'s>(&self, s: &mut Sc<'s, '_>, v: Local<'s>) -> Res<'s, Dir> {
-        if is_nullish(s, v) {
+    fn direction_arg<'s>(&self, s: &mut Sc<'s, E>, v: Local<'s>) -> Res<'s, Dir> {
+        if is_nullish::<E>(s, v) {
             return Ok(Dir::Forward);
         }
         let l = s.to_string(v)?;
@@ -313,27 +313,27 @@ impl Dom {
     }
 
     /// Fire `select` or `selectionchange` (both bubble, neither is cancelable) at the input when its task runs.
-    pub(crate) fn fire_at_input(&self, it: &mut Interp<'_>, n: NodeId, ty: &str) -> R<()> {
+    pub(crate) fn fire_at_input(&self, it: &mut E::Vm, n: NodeId, ty: &str) -> R<E, ()> {
         self.fire_selection_event(it, n, ty, true)
     }
 
     /// Fire `selectionchange` at the document (it does not bubble), for a change of the Range and Selection API.
-    pub(crate) fn fire_at_document(&self, it: &mut Interp<'_>, ty: &str) -> R<()> {
+    pub(crate) fn fire_at_document(&self, it: &mut E::Vm, ty: &str) -> R<E, ()> {
         let root = self.doc.borrow().root();
         self.fire_selection_event(it, root, ty, false)
     }
 
     /// Nothing is made when no listener is on the event path. A control that is not in the document gets its event too (Chrome), and so do
     /// the nodes above it; the window is on the path only when the node is in the document.
-    fn fire_selection_event(&self, it: &mut Interp<'_>, n: NodeId, ty: &str, bubbles: bool) -> R<()> {
+    fn fire_selection_event(&self, it: &mut E::Vm, n: NodeId, ty: &str, bubbles: bool) -> R<E, ()> {
         crate::browser_handlers::sync_path(self, n, ty);
         let listens = {
             let (doc, st) = (self.doc.borrow(), self.st.borrow());
-            let on = |t: Target| st.listeners.get(&t).is_some_and(|v| v.iter().any(|l| &*l.ty == ty));
+            let on = |t: Target<E>| st.listeners.get(&t).is_some_and(|v| v.iter().any(|l| &*l.ty == ty));
             let mut cur = n;
             let mut found = on(Target::Node(cur));
             while let Some(p) = doc.parent(cur) {
-                it.charge(1)?;
+                it.charge_o(1)?;
                 cur = p;
                 found |= on(Target::Node(cur));
             }
@@ -349,41 +349,41 @@ impl Dom {
 }
 
 /// `this` of a selection accessor: an `<input>` or a `<textarea>`.
-fn input_el<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
+fn input_el<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, NodeId> {
     let n = d.el_s(s, this)?;
     let ok = text_control(&d.doc.borrow(), n).is_some();
     if ok { Ok(n) } else { Err(s.type_error("Illegal invocation")) }
 }
 
-fn with_selection<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, Option<Sel>> {
+fn with_selection<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, Option<Sel>> {
     let n = input_el(d, s, this)?;
     Ok(d.effective_s(s, n)?.map(|x| x.0))
 }
 
-pub(crate) fn selection_start<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn selection_start<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     Ok(match with_selection(d, s, this)? {
         Some(x) => s.number(x.start as f64),
         None => s.null(),
     })
 }
 
-pub(crate) fn selection_end<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn selection_end<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     Ok(match with_selection(d, s, this)? {
         Some(x) => s.number(x.end as f64),
         None => s.null(),
     })
 }
 
-pub(crate) fn selection_direction<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn selection_direction<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     match with_selection(d, s, this)? {
         Some(x) => d.js_str_s(s, x.dir.name()),
         None => Ok(s.null()),
     }
 }
 
-pub(crate) fn set_selection_start<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn set_selection_start<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = input_el(d, s, this)?;
-    let v = arg_s(s, a, 0);
+    let v = arg_s::<E>(s, a, 0);
     let new = d.nullable_ulong(s, v)?;
     d.require_selection(s, n)?;
     let start = new.unwrap_or(0);
@@ -391,51 +391,51 @@ pub(crate) fn set_selection_start<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'
     Ok(s.undefined())
 }
 
-pub(crate) fn set_selection_end<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn set_selection_end<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = input_el(d, s, this)?;
-    let v = arg_s(s, a, 0);
+    let v = arg_s::<E>(s, a, 0);
     let new = d.nullable_ulong(s, v)?;
     d.require_selection(s, n)?;
     d.update_selection_s(s, n, false, |cur| (Some(cur.start), new, cur.dir))?;
     Ok(s.undefined())
 }
 
-pub(crate) fn set_selection_direction<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn set_selection_direction<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = input_el(d, s, this)?;
-    let v = arg_s(s, a, 0);
+    let v = arg_s::<E>(s, a, 0);
     let dir = d.direction_arg(s, v)?;
     d.require_selection(s, n)?;
     d.update_selection_s(s, n, false, |cur| (Some(cur.start), Some(cur.end), dir))?;
     Ok(s.undefined())
 }
 
-pub(crate) fn set_selection_range_method<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn set_selection_range_method<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = input_el(d, s, this)?;
     if a.len() < 2 {
         return Err(s.type_error(&format!("Failed to execute 'setSelectionRange': 2 arguments required, but only {} present.", a.len())));
     }
-    let (v0, v1) = (arg_s(s, a, 0), arg_s(s, a, 1));
+    let (v0, v1) = (arg_s::<E>(s, a, 0), arg_s::<E>(s, a, 1));
     let start = to_uint32(s.to_number(v0)?);
     let end = to_uint32(s.to_number(v1)?);
-    let v2 = arg_s(s, a, 2);
+    let v2 = arg_s::<E>(s, a, 2);
     let dir = d.direction_arg(s, v2)?;
     d.require_selection(s, n)?;
     d.update_selection_s(s, n, false, |_| (Some(start), Some(end), dir))?;
     Ok(s.undefined())
 }
 
-pub(crate) fn select_method<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn select_method<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = input_el(d, s, this)?;
     if d.selection_applies(n) {
         // Chrome focuses the control first (a control that cannot take focus is still selected).
-        old(s, |it| d.focus_node(it, n))?;
+        old::<E, _>(s, |it| d.focus_node(it, n))?;
         d.update_selection_s(s, n, false, |_| (Some(0), Some(u32::MAX), Dir::Forward))?;
     }
     Ok(s.undefined())
 }
 
 /// The `TypeError` of `setRangeText` for the interface `iface`.
-fn range_text_error<'s>(s: &mut Sc<'s, '_>, iface: &str, m: &str) -> bare_js_api::Error<'s> {
+fn range_text_error<'s, E: Eng>(s: &mut Sc<'s, E>, iface: &str, m: &str) -> bare_js_api::Error<'s> {
     s.type_error(&format!("Failed to execute 'setRangeText' on '{iface}': {m}"))
 }
 
@@ -444,20 +444,20 @@ fn range_text_error<'s>(s: &mut Sc<'s, '_>, iface: &str, m: &str) -> bare_js_api
 /// The value is dirty after it, and no `input` or `change` event is sent. The conversions run first, then the type is tested (a conversion
 /// may run JS that changes it). The new selection is a change like any other: `selectionchange` and `select` when the range or the
 /// direction differs from the one before. The direction after is `forward`.
-fn set_range_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, area: bool) -> Res<'s, Local<'s>> {
+fn set_range_text<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>, area: bool) -> Res<'s, Local<'s>> {
     let n = d.el_s(s, this)?;
     if text_control(&d.doc.borrow(), n) != Some(area) {
         return Err(s.type_error("Illegal invocation"));
     }
     let iface = if area { "HTMLTextAreaElement" } else { "HTMLInputElement" };
     match a.len() {
-        0 => return Err(range_text_error(s, iface, "1 argument required, but only 0 present.")),
-        2 => return Err(range_text_error(s, iface, "Overload resolution failed.")),
+        0 => return Err(range_text_error::<E>(s, iface, "1 argument required, but only 0 present.")),
+        2 => return Err(range_text_error::<E>(s, iface, "Overload resolution failed.")),
         _ => {}
     }
     let rep = d.arg_str_s(s, a, 0)?;
     let range = if a.len() > 2 {
-        let (v1, v2) = (arg_s(s, a, 1), arg_s(s, a, 2));
+        let (v1, v2) = (arg_s::<E>(s, a, 1), arg_s::<E>(s, a, 2));
         Some((to_uint32(s.to_number(v1)?), to_uint32(s.to_number(v2)?)))
     } else {
         None
@@ -467,7 +467,7 @@ fn set_range_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>,
             let m = d.string_arg_s(s, v)?;
             match ["select", "start", "end", "preserve"].iter().position(|k| *k == m) {
                 Some(i) => i,
-                None => return Err(range_text_error(s, iface, &format!("The provided value '{m}' is not a valid enum value of type SelectionMode."))),
+                None => return Err(range_text_error::<E>(s, iface, &format!("The provided value '{m}' is not a valid enum value of type SelectionMode."))),
             }
         }
         _ => 3,
@@ -502,22 +502,22 @@ fn set_range_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>,
     };
     let new = Sel { start: ns, end: ne, dir: Dir::Forward };
     let changed = new != old;
-    lift(s, d.selection_room(n, changed, changed))?;
-    lift(s, d.write_value(n, text, false))?;
-    lift(s, d.queue_selection_tasks(n, changed, changed, false))?;
+    lift::<E, _>(s, d.selection_room(n, changed, changed))?;
+    lift::<E, _>(s, d.write_value(n, text, false))?;
+    lift::<E, _>(s, d.queue_selection_tasks(n, changed, changed, false))?;
     d.st.borrow_mut().inputs.entry(n).or_default().sel = Some(new);
     Ok(s.undefined())
 }
 
-pub(crate) fn set_range_text_input<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn set_range_text_input<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     set_range_text(d, s, this, a, false)
 }
 
-pub(crate) fn set_range_text_area<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn set_range_text_area<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     set_range_text(d, s, this, a, true)
 }
 
-impl Browser {
+impl<E: Eng> Browser<E> {
     /// The native selection of an `<input>`: `(start, end, direction)` in UTF-16 offsets, read without JS. `None`
     /// when the node is not an `<input>` or selection does not apply to its type.
     pub fn input_selection(&self, input: NodeId) -> Option<(u32, u32, &'static str)> {

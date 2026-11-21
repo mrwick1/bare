@@ -32,12 +32,13 @@
 //!   defines it before the element can answer.
 //! - The list and the walk follow `Document::name_revision`, which moves only for changes of named elements. A miss after other
 //!   changes (a text edit, a bare element added) costs no walk.
+use crate::eng_old::Old;
+use crate::eng::{Eng, Fault, Ops, Val};
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_html::dom::{Atom, NodeData, NodeId};
-use bare_js::eval::Interp;
-use bare_js::heap::{Heap, HeapError};
-use bare_js::value::{ObjId, Value};
+use bare_js::heap::Heap;
+use bare_js_api::Pending;
 use bare_js_api::{Args, Local, Type};
 use std::cell::{Cell, OnceCell, Ref, RefCell, RefMut};
 use std::collections::{HashMap, HashSet};
@@ -46,17 +47,17 @@ pub(crate) const FILL: u32 = u32::MAX - 8;
 /// Walks at one name revision before a list is built: a walk is about 1/20 of a build, so the list pays back after this many.
 const WALKS: u32 = 16;
 #[derive(Default)]
-pub(crate) struct Frames(OnceCell<Box<RefCell<State>>>);
-const _: () = assert!(std::mem::size_of::<Frames>() == std::mem::size_of::<usize>());
-impl Frames {
+pub(crate) struct Frames<E: Eng>(OnceCell<Box<RefCell<State<E>>>>);
+const _: () = assert!(std::mem::size_of::<Frames<Old>>() == std::mem::size_of::<usize>());
+impl<E: Eng> Frames<E> {
     #[inline]
     pub(crate) fn active(&self) -> bool {
         self.0.get().is_some()
     }
-    fn state(&self) -> Option<Ref<'_, State>> {
+    fn state(&self) -> Option<Ref<'_, State<E>>> {
         self.0.get().map(|s| s.borrow())
     }
-    fn state_mut(&self) -> Option<RefMut<'_, State>> {
+    fn state_mut(&self) -> Option<RefMut<'_, State<E>>> {
         self.0.get().map(|s| s.borrow_mut())
     }
     /// Lists built so far, and nodes that walks visited.
@@ -70,16 +71,16 @@ impl Frames {
         self.state().map_or(0, |s| s.locs.len())
     }
 }
-struct State {
-    owner: ObjId,
-    document_owner: ObjId,
-    contexts: IdMap<NodeId, ObjId>,
+struct State<E: Eng> {
+    owner: E::Obj,
+    document_owner: E::Obj,
+    contexts: IdMap<NodeId, E::Obj>,
     /// The initial `about:blank` document node of a frame, and its window (`defaultView`).
-    docs: IdMap<NodeId, ObjId>,
+    docs: IdMap<NodeId, E::Obj>,
     /// A node made by the `createX` method of a frame document, and that document.
     owned: IdMap<NodeId, NodeId>,
     /// The `Location` objects of frame windows.
-    locs: HashSet<ObjId>,
+    locs: HashSet<E::Obj>,
     /// The node whose wrapper (`false`) or inert window (`true`) the next fill makes.
     pending: Cell<Option<(NodeId, bool)>>,
     /// The names, built by a fill for the document name revision `rev` and revision `full` (`u64::MAX` before the first fill). A
@@ -123,7 +124,7 @@ struct List {
     docs: HashMap<Vec<u16>, NodeId>,
 }
 
-fn nodes(d: &Dom) -> Vec<NodeId> {
+fn nodes<E: Eng>(d: &Dom<E>) -> Vec<NodeId> {
     let doc = d.doc.borrow();
     let root = doc.root();
     let (mut cur, mut depth) = (root, 0);
@@ -149,7 +150,7 @@ fn add(map: &mut HashMap<Vec<u16>, NodeId>, keys: &mut Vec<Vec<u16>>, v: &str, n
 /// What `build` would answer for `key` (not an index of the window), by one walk that stops at the first answer: the node, whether
 /// it is the inert window of an iframe, and the nodes visited. Without an iframe in the document the first match is final, as an
 /// iframe wins over an element that came first.
-fn walk(d: &Dom, key: &[u16], document: bool) -> (Option<(NodeId, bool)>, u64) {
+fn walk<E: Eng>(d: &Dom<E>, key: &[u16], document: bool) -> (Option<(NodeId, bool)>, u64) {
     let doc = d.doc.borrow();
     let name_atom = doc.find_atom("name");
     let frames = doc.find_atom("iframe").is_some();
@@ -186,7 +187,7 @@ fn walk(d: &Dom, key: &[u16], document: bool) -> (Option<(NodeId, bool)>, u64) {
     }
     (first.map(|n| (n, false)), seen)
 }
-fn build(d: &Dom) -> List {
+fn build<E: Eng>(d: &Dom<E>) -> List {
     if let Some(s) = d.frames.state() {
         s.builds.set(s.builds.get() + 1);
     }
@@ -251,7 +252,7 @@ fn index_key(key: &[u16]) -> Option<usize> {
         n.checked_mul(10)?.checked_add(usize::from(d))
     })
 }
-impl State {
+impl<E: Eng> State<E> {
     /// Is the list out of date? `index`: the query reads iframe indices.
     fn stale(&self, doc: &bare_html::dom::Document, index: bool) -> bool {
         self.rev != doc.name_revision() || index && self.full != doc.revision()
@@ -280,14 +281,14 @@ impl List {
 }
 
 /// Make the two named objects once per realm. Define the iframe getters only after the document has seen an iframe.
-pub(crate) fn activate(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+pub(crate) fn activate<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
     if !d.frames.active() {
         install(d, it)?;
     }
     if d.frames.state().is_some_and(|s| s.iframes)
         || d.doc
             .try_borrow()
-            .map_err(|_| it.heap_error(HeapError::HostUnavailable))?
+            .map_err(|_| Fault::Heap("HostUnavailable"))?
             .find_atom("iframe")
             .is_none()
     {
@@ -308,19 +309,15 @@ pub(crate) fn activate(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     }
     Ok(())
 }
-fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+fn install<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
     let owner = d.new_source(it, crate::browser_sources::Source::Frames, Some(d.p().et))?;
     let document_owner = d.new_source(it, crate::browser_sources::Source::Frames, Some(d.p().document))?;
     // The chain is `window -> Window.prototype -> owner -> EventTarget.prototype`, as in the standard.
     let g = it.global_object();
-    let win = it.heap.get_prototype_of(g).map_err(|e| it.heap_error(e))?.expect("Window.prototype");
-    it.heap
-        .set_prototype_of(win, Some(owner))
-        .map_err(|e| it.heap_error(e))?;
+    let win = it.h_get_proto(g)?.expect("Window.prototype");
+    it.h_set_proto(win, Some(owner))?;
     let doc = *d.doc_wrapper.get().expect("installed");
-    it.heap
-        .set_prototype_of(doc, Some(document_owner))
-        .map_err(|e| it.heap_error(e))?;
+    it.h_set_proto(doc, Some(document_owner))?;
     d.frames
         .0
         .set(Box::new(RefCell::new(State {
@@ -347,7 +344,7 @@ fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     Ok(())
 }
 
-pub(crate) fn has(d: &Dom, owner: ObjId, key: &[u16]) -> Result<Option<bool>, HeapError> {
+pub(crate) fn has<E: Eng>(d: &Dom<E>, owner: E::Obj, key: &[u16]) -> Result<Option<bool>, Pending> {
     let state = d.frames.state();
     let Some(s) = state
         .as_ref()
@@ -356,7 +353,7 @@ pub(crate) fn has(d: &Dom, owner: ObjId, key: &[u16]) -> Result<Option<bool>, He
         return Ok(None);
     };
     let document = owner == s.document_owner;
-    let doc = d.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
+    let doc = d.doc.try_borrow().map_err(|_| Pending::Busy)?;
     let found = s.find(&doc, key, document);
     let Some(found) = found else {
         // No element ever had this `id` or `name`: a miss, with no walk (a window index is no name).
@@ -364,7 +361,7 @@ pub(crate) fn has(d: &Dom, owner: ObjId, key: &[u16]) -> Result<Option<bool>, He
             return Ok(Some(false));
         }
         *s.want.borrow_mut() = key.to_vec();
-        return Err(HeapError::NeedsHost { owner, index: FILL });
+        return Err(Pending::Fill(FILL));
     };
     let Some((n, window)) = found else {
         return Ok(Some(false));
@@ -373,32 +370,32 @@ pub(crate) fn has(d: &Dom, owner: ObjId, key: &[u16]) -> Result<Option<bool>, He
     if !window && Heap::lazy_chain_name(key) && !s.lazy_tried.borrow().contains(key) {
         *s.want.borrow_mut() = key.to_vec();
         s.lazy.set(true);
-        return Err(HeapError::NeedsHost { owner, index: FILL });
+        return Err(Pending::Fill(FILL));
     }
     let ready = if window {
         s.contexts.contains_key(&n)
     } else {
-        d.st.try_borrow().map_err(|_| HeapError::HostUnavailable)?.by_node.contains_key(&n)
+        d.st.try_borrow().map_err(|_| Pending::Busy)?.by_node.contains_key(&n)
     };
     if !ready {
         s.pending.set(Some((n, window)));
-        return Err(HeapError::NeedsHost { owner, index: FILL });
+        return Err(Pending::Fill(FILL));
     }
     Ok(Some(true))
 }
-pub(crate) fn value(d: &Dom, owner: ObjId, key: &[u16]) -> Option<Value> {
+pub(crate) fn value<E: Eng>(d: &Dom<E>, owner: E::Obj, key: &[u16]) -> Option<E::Raw> {
     let state = d.frames.state();
     let s = state
         .as_ref()
         .filter(|s| owner == s.owner || owner == s.document_owner)?;
     let (n, window) = s.find(&d.doc.borrow(), key, owner == s.document_owner)??;
     if window {
-        s.contexts.get(&n).copied().map(Value::Object)
+        s.contexts.get(&n).copied().map(E::obj_raw)
     } else {
-        d.st.borrow().wrapper(n).map(Value::Object)
+        d.st.borrow().wrapper(n).map(E::obj_raw)
     }
 }
-pub(crate) fn len(d: &Dom, owner: ObjId) -> Result<Option<usize>, HeapError> {
+pub(crate) fn len<E: Eng>(d: &Dom<E>, owner: E::Obj) -> Result<Option<usize>, Pending> {
     let state = d.frames.state();
     let Some(s) = state
         .as_ref()
@@ -408,11 +405,11 @@ pub(crate) fn len(d: &Dom, owner: ObjId) -> Result<Option<usize>, HeapError> {
     };
     if s.stale(&d.doc.borrow(), owner == s.owner) {
         s.want.borrow_mut().clear();
-        return Err(HeapError::NeedsHost { owner, index: FILL });
+        return Err(Pending::Fill(FILL));
     }
     Ok(Some(if owner == s.owner { s.list.win_keys.len() } else { s.list.doc_keys.len() }))
 }
-pub(crate) fn keys(d: &Dom, owner: ObjId) -> Option<Vec<Vec<u16>>> {
+pub(crate) fn keys<E: Eng>(d: &Dom<E>, owner: E::Obj) -> Option<Vec<Vec<u16>>> {
     let state = d.frames.state();
     let s = state
         .as_ref()
@@ -426,7 +423,7 @@ pub(crate) fn keys(d: &Dom, owner: ObjId) -> Option<Vec<Vec<u16>>> {
     };
     Some(if owner == s.owner { l.win_keys.clone() } else { l.doc_keys.clone() })
 }
-pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<bool> {
+pub(crate) fn fill<E: Eng>(d: &Dom<E>, it: &mut E::Vm, owner: E::Obj, index: u32) -> R<E, bool> {
     if index != FILL {
         return Ok(false);
     }
@@ -446,7 +443,7 @@ pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<
     match plan {
         Some((true, Some((key, document, walks)))) => {
             let (hit, seen) = walk(d, &key, document);
-            it.charge(seen)?;
+            it.charge_o(seen)?;
             if let Some(s) = d.frames.state() {
                 s.visited.set(s.visited.get() + seen);
                 *s.one.borrow_mut() = One { rev, key, document, hit };
@@ -454,7 +451,7 @@ pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<
             }
         }
         Some((true, None)) => {
-            it.charge(d.doc.borrow().len() as u64)?;
+            it.charge_o(d.doc.borrow().len() as u64)?;
             let list = build(d);
             if let Some(s) = d.frames.state_mut().as_mut() {
                 (s.list, s.rev, s.full) = (list, rev, full);
@@ -486,12 +483,12 @@ pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<
     }
     Ok(true)
 }
-fn context(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> R<Value> {
+fn context<E: Eng>(d: &Dom<E>, it: &mut E::Vm, n: NodeId) -> R<E, E::Raw> {
     activate(d, it)?;
     // A child page (`browser_child.rs`): its window is a `RemoteWindow`.
     if let Some(id) = d.kids.id_of(n) {
         let w = d.child_window(it, id)?;
-        if let (Value::Object(o), Some(mut s)) = (w, d.frames.state_mut()) {
+        if let (Val::Object(o), Some(mut s)) = (E::kind(w), d.frames.state_mut()) {
             s.contexts.insert(n, o);
             d.wrapper_edges.set(true);
         }
@@ -504,7 +501,7 @@ fn context(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> R<Value> {
         .and_then(|s| s.contexts.get(&n))
         .copied()
     {
-        return Ok(Value::Object(o));
+        return Ok(E::obj_raw(o));
     }
     if d.frames.state().as_ref().map_or(0, |s| s.contexts.len()) >= d.lim.max_wrappers {
         return Err(d.lim("dom-wrappers"));
@@ -516,14 +513,14 @@ fn context(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> R<Value> {
     // The frame window is an `EventTarget` (`Target::Obj`, as a worker or an abort signal is).
     let o = d.obj(it, d.p().et)?;
     d.st.borrow_mut().add_target(it, o, crate::browser::Owner::Frame(o));
-    let g = Value::Object(it.global_object());
+    let g = E::obj_raw(it.global_object());
     for (name, v) in [
-        ("window", Value::Object(o)),
-        ("self", Value::Object(o)),
-        ("frames", Value::Object(o)),
+        ("window", E::obj_raw(o)),
+        ("self", E::obj_raw(o)),
+        ("frames", E::obj_raw(o)),
         ("parent", g),
         ("top", g),
-        ("length", Value::Number(0.0)),
+        ("length", E::num(0.0)),
         ("frameElement", element),
     ] {
         let k = d.key(it, name)?;
@@ -537,9 +534,9 @@ fn context(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> R<Value> {
         let dn = d.nd(it, doc)?;
         let loc = crate::browser_navigation::frame_location(d, it)?;
         let k = d.key(it, "location")?;
-        it.define_data(o, k, Value::Object(loc), false, true, true)?;
+        it.define_data(o, k, E::obj_raw(loc), false, true, true)?;
         // Same-origin approximation: bare has one realm, so a global the frame window does not own is the parent's (`w.Array === Array`).
-        it.heap.set_prototype_of(o, Some(it.global_object())).map_err(|e| it.heap_error(e))?;
+        it.h_set_proto(o, Some(it.global_object()))?;
         let mut s = d.frames.state_mut().expect("activated");
         s.docs.insert(dn, o);
         d.wrapper_edges.set(true);
@@ -549,7 +546,7 @@ fn context(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> R<Value> {
         it.set_host_owner_obj(loc, k);
     } else {
         // The parent global must not answer for a frame with a child document that is never loaded.
-        it.define_data(o, k, Value::Undefined, false, true, true)?;
+        it.define_data(o, k, E::undef(), false, true, true)?;
     }
     d.wrapper_edges.set(true);
     d.frames
@@ -558,42 +555,42 @@ fn context(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> R<Value> {
         .expect("activated")
         .contexts
         .insert(n, o);
-    Ok(Value::Object(o))
+    Ok(E::obj_raw(o))
 }
-pub(crate) fn content_window<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn content_window<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.el_s(s, this)?;
     if d.doc.borrow().element_name(n) != "iframe" {
         return Err(s.type_error("Illegal invocation"));
     }
-    if !old(s, |it| d.is_connected_node(it, n))? {
+    if !old::<E, _>(s, |it| d.is_connected_node(it, n))? {
         return Ok(s.null());
     }
-    old_v(s, |it| context(d, it, n))
+    old_v::<E>(s, |it| context(d, it, n))
 }
 /// Has the iframe `n` an initial `about:blank` document: no `src` (or an empty one) or `src="about:blank"`, and no `srcdoc`?
-fn initial_blank(d: &Dom, n: NodeId) -> bool {
+fn initial_blank<E: Eng>(d: &Dom<E>, n: NodeId) -> bool {
     let doc = d.doc.borrow();
     let attr = |name: &str| doc.find_atom(name).and_then(|a| doc.attr(n, a));
     attr("srcdoc").is_none() && attr("src").is_none_or(|v| v.trim().is_empty() || v.trim().eq_ignore_ascii_case("about:blank"))
 }
 /// `iframe.contentDocument`: the initial `about:blank` document of `contentWindow`, else `null` (see the header).
-pub(crate) fn content_document<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn content_document<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let w = content_window(d, s, this, a)?;
     // A child page has no document that the parent can read.
-    if d.kids.any() && is_object(s, w) && let Some(n) = d.node_of_s(s, this).filter(|&n| d.is_element(n)) && d.kids.id_of(n).is_some() {
+    if d.kids.any() && is_object::<E>(s, w) && let Some(n) = d.node_of_s(s, this).filter(|&n| d.is_element(n)) && d.kids.id_of(n).is_some() {
         return Ok(s.null());
     }
     if s.type_of(w) == Type::Null {
         return Ok(w);
     }
     let v = s.get_str(w, "document")?;
-    Ok(if is_object(s, v) { v } else { s.null() })
+    Ok(if is_object::<E>(s, v) { v } else { s.null() })
 }
-pub(crate) fn length<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn length<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     s.charge(d.doc.borrow().len() as u64)?;
     Ok(s.number(nodes(d).len() as f64))
 }
-pub(crate) fn name<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn name<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.el_s(s, this)?;
     let v = {
         let doc = d.doc.borrow();
@@ -601,26 +598,26 @@ pub(crate) fn name<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>
     };
     d.js_str_s(s, v.as_deref().unwrap_or(""))
 }
-pub(crate) fn set_name<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn set_name<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.el_s(s, this)?;
     let t = d.arg_str_s(s, a, 0)?;
     crate::browser_dom::attr_set_s(d, s, n, "name", &t)?;
     Ok(s.undefined())
 }
 /// The window of the initial `about:blank` document `n` of a frame.
-pub(crate) fn window_of(d: &Dom, n: NodeId) -> Option<ObjId> {
+pub(crate) fn window_of<E: Eng>(d: &Dom<E>, n: NodeId) -> Option<E::Obj> {
     d.frames.state()?.docs.get(&n).copied()
 }
 /// Is `o` the window of a blank frame (it inherits the parent's globals)?
-pub(crate) fn is_blank_window(d: &Dom, o: ObjId) -> bool {
+pub(crate) fn is_blank_window<E: Eng>(d: &Dom<E>, o: E::Obj) -> bool {
     d.frames.state().is_some_and(|s| s.docs.values().any(|&w| w == o))
 }
 /// Is `o` the `Location` of a frame window?
-pub(crate) fn is_location(d: &Dom, o: ObjId) -> bool {
+pub(crate) fn is_location<E: Eng>(d: &Dom<E>, o: E::Obj) -> bool {
     d.frames.state().is_some_and(|s| s.locs.contains(&o))
 }
 /// The frame document that owns `n`, if any: the root of its tree, or the document whose method made it.
-pub(crate) fn owner_of(d: &Dom, n: NodeId) -> Option<NodeId> {
+pub(crate) fn owner_of<E: Eng>(d: &Dom<E>, n: NodeId) -> Option<NodeId> {
     let s = d.frames.state()?;
     if let Some(&o) = s.owned.get(&n) {
         return Some(o);
@@ -633,7 +630,7 @@ pub(crate) fn owner_of(d: &Dom, n: NodeId) -> Option<NodeId> {
     if s.docs.contains_key(&cur) { Some(cur) } else { s.owned.get(&cur).copied() }
 }
 /// Record that `made` came from the method of the document `this`, when that is a frame document.
-pub(crate) fn note_owner(d: &Dom, s: &mut Sc<'_, '_>, this: Local<'_>, made: Local<'_>) {
+pub(crate) fn note_owner<E: Eng>(d: &Dom<E>, s: &mut Sc<'_, E>, this: Local<'_>, made: Local<'_>) {
     if !d.frames.active() {
         return;
     }
@@ -645,22 +642,22 @@ pub(crate) fn note_owner(d: &Dom, s: &mut Sc<'_, '_>, this: Local<'_>, made: Loc
 }
 /// The references of the wrapper of the node `n`: the window and the document of its frame.
 #[cold]
-pub(crate) fn trace_node(d: &Dom, n: NodeId, t: &mut bare_js_api::Tracer<'_, Value>) {
+pub(crate) fn trace_node<E: Eng>(d: &Dom<E>, n: NodeId, t: &mut bare_js_api::Tracer<'_, E::Raw>) {
     if let Some(s) = d.frames.state().as_ref() {
         for &o in s.contexts.get(&n).into_iter().chain(s.docs.get(&n)) {
-            crate::browser_sources::visit(t, Value::Object(o));
+            crate::browser_sources::visit::<E>(t, E::obj_raw(o));
         }
     }
 }
 /// The window object `o` of a frame is dead: drop its entries.
-pub(crate) fn forget_window(d: &Dom, o: ObjId) {
+pub(crate) fn forget_window<E: Eng>(d: &Dom<E>, o: E::Obj) {
     if let Some(s) = d.frames.state_mut().as_mut() {
         s.contexts.retain(|_, w| *w != o);
         s.docs.retain(|_, w| *w != o);
     }
 }
 /// The `Location` object `o` of a frame window is dead: drop its entry.
-pub(crate) fn prune_loc(d: &Dom, o: ObjId) {
+pub(crate) fn prune_loc<E: Eng>(d: &Dom<E>, o: E::Obj) {
     if let Some(s) = d.frames.state_mut().as_mut() {
         s.locs.remove(&o);
     }
@@ -670,7 +667,7 @@ pub(crate) fn prune_loc(d: &Dom, o: ObjId) {
 
 /// The nodes of iframes with a window, and the nodes that frame documents made. The name list and the answer of the last walk are of the
 /// tree of the document: a node that left it moved `Document::name_revision` first.
-pub(crate) fn held(d: &Dom, out: &mut Vec<NodeId>) {
+pub(crate) fn held<E: Eng>(d: &Dom<E>, out: &mut Vec<NodeId>) {
     let Some(s) = d.frames.state() else { return };
     out.extend(s.contexts.keys().copied());
     out.extend(s.docs.keys().copied());

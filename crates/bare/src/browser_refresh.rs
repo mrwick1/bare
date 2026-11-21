@@ -7,6 +7,7 @@
 //! resolved against the document URL, as `location.replace` does). `Session::run` settles when a timer is more than `PageLimits::quiet`
 //! away, so a refresh later than that does not hold a run to the settle; a live page does wait.
 
+use crate::eng::Eng;
 use crate::browser::Browser;
 use bare_html::dom::NodeData;
 use bare_url::Url;
@@ -55,7 +56,7 @@ fn parse(input: &str) -> Option<(u64, Option<&str>)> {
     Some((seconds, Some(url)))
 }
 
-impl Browser {
+impl<E: Eng> Browser<E> {
     /// Queue the refresh of the first `meta` that asks for one. Reads the `head` only (a walk that skips `body`).
     pub(crate) fn start_refresh(&mut self) {
         let Some((seconds, target)) = self.find_refresh() else { return };

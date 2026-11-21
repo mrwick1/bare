@@ -28,11 +28,11 @@
 //! `length`). There is no `storage` event, and no sharing of a live area between two `Browser`s except through a shared `WebStorage`.
 //! Without a document URL a read finds nothing and a write is `Unsupported`.
 
+use crate::eng::{Eng, Fault, Ops};
 use crate::browser::*;
 use crate::browser_scoped::*;
-use bare_js::eval::{Error, Interp};
-use bare_js::heap::{HeapError, NamedOp};
-use bare_js::value::{ObjId, Value};
+use crate::eng::NamedOp;
+use bare_js_api::Pending;
 use bare_js_api::{Args, Engine as _, Local, Str, Type};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -275,23 +275,23 @@ impl WebStorage {
 
 /// Which area `this` is (`true`: `sessionStorage`). A method of another receiver throws "Illegal invocation".
 #[inline(always)]
-fn area<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, bool> {
-    match obj_id(s, this).and_then(|o| d.storage_area(o)) {
+fn area<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, bool> {
+    match obj_id::<E>(s, this).and_then(|o| d.storage_area(o)) {
         Some(a) => Ok(a),
         None => Err(s.type_error("Illegal invocation")),
     }
 }
 
 /// The getter of `window.localStorage` and `window.sessionStorage`. It makes the object on the first read.
-pub(crate) fn area_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, session: bool) -> Res<'s, Local<'s>> {
+pub(crate) fn area_get<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, session: bool) -> Res<'s, Local<'s>> {
     let cell = &d.nav.areas[session as usize];
     let o = match cell.get() {
         Some(o) => o,
-        None => old(s, |it| {
+        None => old::<E, _>(s, |it| {
             let proto = d.nav.p.get().map(|p| p.storage_proto);
             let o = d.new_source(it, crate::browser_sources::Source::Storage, proto)?;
             cell.set(Some(o));
-            d.nav.area_held.borrow_mut().push(it.persist_value(Value::Object(o)));
+            d.nav.area_held.borrow_mut().push(it.persist_value(E::obj_raw(o)));
             Ok(o)
         })?,
     };
@@ -299,38 +299,38 @@ pub(crate) fn area_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, session: bool) -> Res<'s
 }
 
 /// `area`, and the origin of the document. `Unsupported` while the document URL is not configured.
-fn target<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, (bool, String)> {
+fn target<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, (bool, String)> {
     let a = area(d, s, this)?;
-    Ok((a, lift(s, origin_of(d))?))
+    Ok((a, lift::<E, _>(s, origin_of(d))?))
 }
 
 /// The origin of the document. `Unsupported` while the document URL is not configured.
-fn origin_of(d: &Dom) -> R<String> {
+fn origin_of<E: Eng>(d: &Dom<E>) -> R<E, String> {
     let origin = d.nav.s.borrow().entries.get(d.nav.s.borrow().cur).map(|e| e.url.origin());
-    origin.ok_or_else(|| Error::Unsupported(unsupported(crate::browser_navigation::NOURL)))
+    origin.ok_or_else(|| Fault::Unsupported(crate::browser_navigation::NOURL))
 }
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// Which area `o` is (`true`: `sessionStorage`), or `None` when `o` is no `Storage` object.
-    pub(crate) fn storage_area(&self, o: ObjId) -> Option<bool> {
+    pub(crate) fn storage_area(&self, o: E::Obj) -> Option<bool> {
         if self.nav.areas[0].get() == Some(o) { Some(false) } else if self.nav.areas[1].get() == Some(o) { Some(true) } else { None }
     }
 
     /// `f` with the store and the origin of the document. `None` while the document URL is not configured.
-    fn storage_with<T>(&self, f: impl FnOnce(&WebStorage, &str) -> T) -> Result<Option<T>, HeapError> {
-        let s = self.nav.s.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
+    fn storage_with<T>(&self, f: impl FnOnce(&WebStorage, &str) -> T) -> Result<Option<T>, Pending> {
+        let s = self.nav.s.try_borrow().map_err(|_| Pending::Busy)?;
         Ok(s.entries.get(s.cur).map(|e| f(&s.store, &e.url.origin())))
     }
 
-    pub(crate) fn storage_get(&self, session: bool, key: &[u16]) -> Result<Option<Vec<u16>>, HeapError> {
+    pub(crate) fn storage_get(&self, session: bool, key: &[u16]) -> Result<Option<Vec<u16>>, Pending> {
         Ok(self.storage_with(|st, o| st.get(session, o, key))?.flatten().map(Vec::from))
     }
 
-    pub(crate) fn storage_len(&self, session: bool) -> Result<usize, HeapError> {
+    pub(crate) fn storage_len(&self, session: bool) -> Result<usize, Pending> {
         Ok(self.storage_with(|st, o| st.len(session, o))?.unwrap_or(0))
     }
 
-    pub(crate) fn storage_keys(&self, session: bool) -> Result<Vec<Vec<u16>>, HeapError> {
+    pub(crate) fn storage_keys(&self, session: bool) -> Result<Vec<Vec<u16>>, Pending> {
         Ok(self.storage_with(|st, o| st.keys(session, o))?.unwrap_or_default().into_iter().map(Vec::from).collect())
     }
 }
@@ -342,20 +342,20 @@ fn lossy(u: &[u16]) -> String {
 
 /// `Host::named_write` for `localStorage` and `sessionStorage`: the named setter, deleter and `[[DefineOwnProperty]]`.
 /// `Ok(false)` when `req.owner` is no `Storage` object (`Dom::named_write` calls this for `Storage` objects only).
-pub(crate) fn write(d: &Dom, it: &mut Interp<'_>, owner: ObjId, key: &[u16], op: NamedOp) -> R<bool> {
+pub(crate) fn write<E: Eng>(d: &Dom<E>, it: &mut E::Vm, owner: E::Obj, key: &[u16], op: NamedOp<E>) -> R<E, bool> {
     let Some(session) = d.storage_area(owner) else { return Ok(false) };
     let named = format!("Failed to set a named property '{}' on 'Storage'", lossy(key));
     let value = match op {
         NamedOp::Set(v) => v,
         NamedOp::Define(desc) => {
             if desc.get.is_some() || desc.set.is_some() {
-                return Err(it.type_error(&format!("{named}: Accessor properties are not allowed.")));
+                return Err(it.type_error_o(&format!("{named}: Accessor properties are not allowed.")));
             }
             // WebIDL: only a data descriptor (a `value` or a `writable` field) runs the setter. Its flags are ignored.
             if desc.value.is_none() && desc.writable.is_none() {
                 return Ok(false);
             }
-            desc.value.unwrap_or(Value::Undefined)
+            desc.value.unwrap_or(E::undef())
         }
         NamedOp::Delete => {
             let origin = origin_of(d)?;
@@ -364,10 +364,10 @@ pub(crate) fn write(d: &Dom, it: &mut Interp<'_>, owner: ObjId, key: &[u16], op:
             return Ok(true);
         }
     };
-    run(it, |s| {
+    run::<E, _>(it, |s| {
         let v = s.engine().raw_local(&value);
         let Some(v) = units(d, s, v, &named)? else { return Err(over(d, s, &key, &named, "storage-item")) };
-        let origin = lift(s, origin_of(d))?;
+        let origin = lift::<E, _>(s, origin_of(d))?;
         store_set(d, s, session, &origin, &key, &v, &named)
     })
     .map(|()| true)
@@ -375,14 +375,14 @@ pub(crate) fn write(d: &Dom, it: &mut Interp<'_>, owner: ObjId, key: &[u16], op:
 
 /// The `QuotaExceededError` of a write that does not fit. A sandbox bound of bare (`bound`) fails the one call in the same way: a browser
 /// throws this error from a full store and never stops the page. The message names the bound, so an agent sees which one it was.
-fn over<'s>(d: &Dom, s: &mut Sc<'s, '_>, k: &[u16], who: &str, bound: &str) -> bare_js_api::Error<'s> {
+fn over<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, k: &[u16], who: &str, bound: &str) -> bare_js_api::Error<'s> {
     let k = lossy(k);
     let why = if bound.is_empty() { String::new() } else { format!(" (bare bound {bound})") };
     d.dom_err_s(s, "QuotaExceededError", &format!("{who}: Setting the value of '{k}' exceeded the quota{why}."))
 }
 
 /// The write of `setItem` and of the named setter. `who` starts the quota message.
-fn store_set<'s>(d: &Dom, s: &mut Sc<'s, '_>, session: bool, origin: &str, k: &[u16], v: &[u16], who: &str) -> Res<'s, ()> {
+fn store_set<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, session: bool, origin: &str, k: &[u16], v: &[u16], who: &str) -> Res<'s, ()> {
     let store = d.nav.s.borrow().store.clone();
     s.charge(1 + store.len(session, origin) as u64 / 16)?;
     match store.set(session, origin, k, v) {
@@ -397,7 +397,7 @@ fn at<'s>(a: Args<'s>, i: usize) -> Local<'s> {
     a.get(i).expect("checked by need")
 }
 
-fn need<'s>(s: &mut Sc<'s, '_>, a: Args<'s>, n: usize, name: &str) -> Res<'s, ()> {
+fn need<'s, E: Eng>(s: &mut Sc<'s, E>, a: Args<'s>, n: usize, name: &str) -> Res<'s, ()> {
     if a.len() < n {
         return Err(s.type_error(&format!("Failed to execute '{name}' on 'Storage': {n} argument{} required, but only {} present.", if n == 1 { "" } else { "s" }, a.len())));
     }
@@ -406,13 +406,13 @@ fn need<'s>(s: &mut Sc<'s, '_>, a: Args<'s>, n: usize, name: &str) -> Res<'s, ()
 
 /// `ToString(v)` as UTF-16 units (lone surrogates are kept). `None` when the text is longer than one item may be: no store holds it.
 /// (`Option` is a value or nothing, as `T | undefined` in TypeScript.)
-fn units<'s>(d: &Dom, s: &mut Sc<'s, '_>, v: Local<'s>, who: &str) -> Res<'s, Option<Vec<u16>>> {
+fn units<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>, who: &str) -> Res<'s, Option<Vec<u16>>> {
     if s.type_of(v) == Type::Symbol {
         return Err(s.type_error(&format!("{who}: Cannot convert a Symbol value to a string")));
     }
     // A string is read in place: `to_string` pushes a local for another value only.
     let max = d.nav.lim.get().max_item_units;
-    let read = |s: &Sc<'_, '_>, t| {
+    let read = |s: &Sc<'_, E>, t| {
         s.as_str(t).map(|t| {
             let len = t.len();
             let u = (len <= max).then(|| match t {
@@ -434,11 +434,11 @@ fn units<'s>(d: &Dom, s: &mut Sc<'s, '_>, v: Local<'s>, who: &str) -> Res<'s, Op
     Ok(Some(u))
 }
 
-pub(crate) fn get_item<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn get_item<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let session = area(d, s, this)?;
-    need(s, a, 1, "getItem")?;
+    need::<E>(s, a, 1, "getItem")?;
     let Some(k) = units(d, s, at(a, 0), "Failed to execute 'getItem' on 'Storage'")? else { return Ok(s.null()) };
-    let origin = lift(s, origin_of(d))?;
+    let origin = lift::<E, _>(s, origin_of(d))?;
     let store = d.nav.s.borrow().store.clone();
     s.charge(1 + store.len(session, &origin) as u64 / 16)?;
     match store.get(session, &origin, &k) {
@@ -447,41 +447,41 @@ pub(crate) fn get_item<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args
     }
 }
 
-pub(crate) fn set_item<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn set_item<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let session = area(d, s, this)?;
-    need(s, a, 2, "setItem")?;
+    need::<E>(s, a, 2, "setItem")?;
     let who = "Failed to execute 'setItem' on 'Storage'";
     let Some(k) = units(d, s, at(a, 0), who)? else { return Err(over(d, s, &[0x2026], who, "storage-item")) };
     let Some(v) = units(d, s, at(a, 1), who)? else { return Err(over(d, s, &k, who, "storage-item")) };
     // A script may have changed the document URL while it coerced the arguments: read the origin now.
-    let origin = lift(s, origin_of(d))?;
+    let origin = lift::<E, _>(s, origin_of(d))?;
     store_set(d, s, session, &origin, &k, &v, "Failed to execute 'setItem' on 'Storage'")?;
     Ok(s.undefined())
 }
 
-pub(crate) fn remove_item<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn remove_item<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let session = area(d, s, this)?;
-    need(s, a, 1, "removeItem")?;
+    need::<E>(s, a, 1, "removeItem")?;
     let Some(k) = units(d, s, at(a, 0), "Failed to execute 'removeItem' on 'Storage'")? else { return Ok(s.undefined()) };
-    let origin = lift(s, origin_of(d))?;
+    let origin = lift::<E, _>(s, origin_of(d))?;
     let store = d.nav.s.borrow().store.clone();
     s.charge(1 + store.len(session, &origin) as u64 / 16)?;
     store.remove(session, &origin, &k);
     Ok(s.undefined())
 }
 
-pub(crate) fn clear<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn clear<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let (session, origin) = target(d, s, this)?;
     let store = d.nav.s.borrow().store.clone();
     store.clear(session, &origin);
     Ok(s.undefined())
 }
 
-pub(crate) fn key<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn key<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let session = area(d, s, this)?;
-    need(s, a, 1, "key")?;
+    need::<E>(s, a, 1, "key")?;
     let n = s.to_number(at(a, 0))?;
-    let origin = lift(s, origin_of(d))?;
+    let origin = lift::<E, _>(s, origin_of(d))?;
     // WebIDL `unsigned long`: NaN is 0, the rest wraps modulo 2^32.
     let i = if n.is_finite() { n.trunc().rem_euclid(4294967296.0) as usize } else { 0 };
     let store = d.nav.s.borrow().store.clone();
@@ -491,7 +491,7 @@ pub(crate) fn key<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>)
     }
 }
 
-pub(crate) fn length<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn length<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let (session, origin) = target(d, s, this)?;
     let n = d.nav.s.borrow().store.len(session, &origin);
     Ok(s.number(n as f64))

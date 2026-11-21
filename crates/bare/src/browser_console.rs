@@ -13,7 +13,7 @@
 //!   `Debug` of a record, of the stats and of the limits shows only counts, never an argument.
 //!
 //! Bounds (`ConsoleLimits`, checked before anything is allocated)
-//! - `max_args`: arguments of one call. More is `Error::Limit(Host("console-args"))`, fatal, like every other host cap.
+//! - `max_args`: arguments of one call. More is `Fault::Limit(Host("console-args"))`, fatal, like every other host cap.
 //! - `max_records`: kept records. When the sink is full the oldest record is dropped and `dropped` goes up by one.
 //!   With 0 nothing is kept and every call counts as dropped.
 //! - Each call charges `1 + args` steps. `max_format_bytes` bounds UTF-8 output bytes and UTF-16 text input units
@@ -54,13 +54,12 @@
 //!
 //! Not compared with a real browser.
 
+use crate::eng::{Eng, Ops, Prop, Val};
 use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_js_api::{Args, Attrs, Local};
-use bare_js::eval::{Error, Interp};
-use bare_js::heap::Property;
-use bare_js::value::{ObjId, PropertyKey, StrId, Value, is_js_space, number_to_string, string_to_number};
+use bare_js::value::{is_js_space, number_to_string, string_to_number};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -91,16 +90,16 @@ pub enum ConsoleLevel {
 
 /// One call. `args` are the raw values the page passed. `Debug` shows no argument.
 #[derive(Clone)]
-pub struct ConsoleRecord {
+pub struct ConsoleRecord<E: Eng> {
     /// 0 for the first call of the realm. A gap between two records means drops.
     pub seq: u64,
     pub level: ConsoleLevel,
     /// The depth of `console.group` when the call was made (at most `MAX_GROUP_DEPTH`).
     pub indent: u8,
-    pub args: Vec<Value>,
+    pub args: Vec<E::Raw>,
 }
 
-impl fmt::Debug for ConsoleRecord {
+impl<E: Eng> fmt::Debug for ConsoleRecord<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "ConsoleRecord {{ seq: {}, level: {:?}, args: {} }}", self.seq, self.level, self.args.len())
     }
@@ -125,36 +124,36 @@ const MAX_LABEL_BYTES: usize = 256;
 const MAX_GROUP_DEPTH: u8 = 64;
 
 /// A kept call. One or two values sit in the record: the common call allocates nothing, and a dropped record frees nothing.
-struct Rec {
+struct Rec<E: Eng> {
     seq: u64,
     level: ConsoleLevel,
     indent: u8,
-    args: Vals,
+    args: Vals<E>,
 }
 
-enum Vals {
-    Inline(u8, [Value; 2]),
-    Heap(Vec<Value>),
+enum Vals<E: Eng> {
+    Inline(u8, [E::Raw; 2]),
+    Heap(Vec<E::Raw>),
 }
 
-impl Vals {
-    fn new(v: &[Value]) -> Self {
+impl<E: Eng> Vals<E> {
+    fn new(v: &[E::Raw]) -> Self {
         match *v {
-            [] => Vals::Inline(0, [Value::Undefined; 2]),
-            [a] => Vals::Inline(1, [a, Value::Undefined]),
+            [] => Vals::Inline(0, [E::undef(); 2]),
+            [a] => Vals::Inline(1, [a, E::undef()]),
             [a, b] => Vals::Inline(2, [a, b]),
             _ => Vals::Heap(v.to_vec()),
         }
     }
 
-    fn into_vec(self) -> Vec<Value> {
+    fn into_vec(self) -> Vec<E::Raw> {
         match self {
             Vals::Inline(n, a) => a[..n as usize].to_vec(),
             Vals::Heap(v) => v,
         }
     }
 
-    fn as_slice(&self) -> &[Value] {
+    fn as_slice(&self) -> &[E::Raw] {
         match self {
             Vals::Inline(n, a) => &a[..*n as usize],
             Vals::Heap(v) => v,
@@ -163,8 +162,8 @@ impl Vals {
 }
 
 #[derive(Default)]
-struct CState {
-    q: VecDeque<Rec>,
+struct CState<E: Eng> {
+    q: VecDeque<Rec<E>>,
     values: usize,
     calls: u64,
     dropped: u64,
@@ -181,26 +180,26 @@ struct Labels {
     counts: HashMap<String, u64>,
 }
 
-impl CState {
+impl<E: Eng> CState<E> {
     fn lab(&mut self) -> &mut Labels {
         self.labels.get_or_insert_with(Default::default)
     }
 }
 
 #[derive(Default)]
-pub(crate) struct Console {
+pub(crate) struct Console<E: Eng> {
     lim: Cell<ConsoleLimits>,
-    st: RefCell<CState>,
+    st: RefCell<CState<E>>,
 }
 
-impl Console {
-    pub(crate) fn roots(&self, out: &mut Roots<'_, '_>) {
+impl<E: Eng> Console<E> {
+    pub(crate) fn roots(&self, out: &mut Roots<'_, '_, E>) {
         for r in &self.st.borrow().q {
             out.extend_from_slice(r.args.as_slice());
         }
     }
 
-    fn drop_oldest(&self, st: &mut CState) {
+    fn drop_oldest(&self, st: &mut CState<E>) {
         if let Some(r) = st.q.pop_front() {
             st.values -= r.args.as_slice().len();
         }
@@ -208,9 +207,9 @@ impl Console {
     }
 }
 
-impl Console {
+impl<E: Eng> Console<E> {
     /// Keep a call of `args`. The caller has checked `max_args` and charged the steps.
-    fn push(&self, level: ConsoleLevel, args: &[Value]) {
+    fn push(&self, level: ConsoleLevel, args: &[E::Raw]) {
         let lim = self.lim.get();
         let mut st = self.st.borrow_mut();
         let seq = st.calls;
@@ -228,7 +227,7 @@ impl Console {
     }
 }
 
-fn record_vec<'s>(d: &Dom, s: &mut Sc<'s, '_>, level: ConsoleLevel, args: &[Value]) -> Res<'s, Local<'s>> {
+fn record_vec<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, level: ConsoleLevel, args: &[E::Raw]) -> Res<'s, Local<'s>> {
     if args.len() > d.console.lim.get().max_args {
         return Err(d.lim_s(s, "console-args"));
     }
@@ -238,7 +237,7 @@ fn record_vec<'s>(d: &Dom, s: &mut Sc<'s, '_>, level: ConsoleLevel, args: &[Valu
 }
 
 /// `record_vec` of the arguments `from..to` of a call. The cap is checked before anything is copied, and the arguments are read in place.
-fn record<'s>(d: &Dom, s: &mut Sc<'s, '_>, level: ConsoleLevel, a: Args<'s>, from: usize, to: usize) -> Res<'s, Local<'s>> {
+fn record<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, level: ConsoleLevel, a: Args<'s>, from: usize, to: usize) -> Res<'s, Local<'s>> {
     let n = to.min(a.len()).saturating_sub(from);
     if n > d.console.lim.get().max_args {
         return Err(d.lim_s(s, "console-args"));
@@ -258,9 +257,9 @@ fn record<'s>(d: &Dom, s: &mut Sc<'s, '_>, level: ConsoleLevel, a: Args<'s>, fro
 
 /// Record a console call from the host with one string argument. It charges no step: the host uses it right after a task ended
 /// on the step budget (`Browser::survive`), when a charge would fail.
-pub(crate) fn push_text(d: &Dom, it: &mut Interp<'_>, level: ConsoleLevel, text: &str) {
+pub(crate) fn push_text<E: Eng>(d: &Dom<E>, it: &mut E::Vm, level: ConsoleLevel, text: &str) {
     let lim = d.console.lim.get();
-    let Ok(s) = it.heap.intern_str(text) else { return };
+    let Ok(s) = it.h_intern(text) else { return };
     let mut st = d.console.st.borrow_mut();
     let seq = st.calls;
     st.calls += 1;
@@ -272,27 +271,27 @@ pub(crate) fn push_text(d: &Dom, it: &mut Interp<'_>, level: ConsoleLevel, text:
         d.console.drop_oldest(&mut st);
     }
     st.values += 1;
-    st.q.push_back(Rec { seq, level, indent: 0, args: Vals::Inline(1, [Value::String(s), Value::Undefined]) });
+    st.q.push_back(Rec { seq, level, indent: 0, args: Vals::Inline(1, [E::str_raw(s), E::undef()]) });
 }
 
-fn log<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn log<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     record(d, s, ConsoleLevel::Log, a, 0, usize::MAX)
 }
-fn warn<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn warn<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     record(d, s, ConsoleLevel::Warn, a, 0, usize::MAX)
 }
-fn error<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn error<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     record(d, s, ConsoleLevel::Error, a, 0, usize::MAX)
 }
 /// `dir` and `table`: the first argument only (no options, no layout).
-fn first<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn first<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     record(d, s, ConsoleLevel::Log, a, 0, 1)
 }
-fn nothing<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn nothing<'s, E: Eng>(_: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     Ok(s.undefined())
 }
 
-fn assert<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn assert<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     if let Some(c) = a.get(0)
         && s.to_boolean(c)
     {
@@ -301,7 +300,7 @@ fn assert<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s,
     say(d, s, ConsoleLevel::Error, "Assertion failed", Some(a), 1)
 }
 
-fn group<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn group<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     if a.len() > 0 {
         record(d, s, ConsoleLevel::Log, a, 0, usize::MAX)?;
     }
@@ -310,33 +309,34 @@ fn group<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, 
     Ok(s.undefined())
 }
 
-fn group_end<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn group_end<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let mut st = d.console.st.borrow_mut();
     st.depth = st.depth.saturating_sub(1);
     Ok(s.undefined())
 }
 
 /// A one-string record of the host (`label: 1.234 ms`, a warning) followed by the arguments `from..` of `rest`.
-fn say<'s>(d: &Dom, s: &mut Sc<'s, '_>, level: ConsoleLevel, text: &str, rest: Option<Args<'s>>, from: usize) -> Res<'s, Local<'s>> {
+fn say<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, level: ConsoleLevel, text: &str, rest: Option<Args<'s>>, from: usize) -> Res<'s, Local<'s>> {
     let l = d.js_str_s(s, text)?;
     let n = rest.map_or(0, |a| a.len().saturating_sub(from));
     if n + 1 > d.console.lim.get().max_args {
         return Err(d.lim_s(s, "console-args"));
     }
-    let mut args = vec![bare_js_api::Engine::raw(s.engine(), l)];
+    let mut args: Vec<E::Raw> = vec![bare_js_api::Engine::raw(s.engine(), l)];
     if let Some(a) = rest {
-        args.extend((from..a.len()).map(|i| raw_arg(s, a, i).expect("in range")));
+        args.extend((from..a.len()).map(|i| raw_arg::<E>(s, a, i).expect("in range")));
     }
     record_vec(d, s, level, &args)
 }
 
 /// The label of a call: `default` for undefined, else a string, a primitive as `%s` prints it, or `[object]`. `None` after the
 /// warning for a label over `MAX_LABEL_BYTES` (nothing is kept).
-fn label<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>, name: &str) -> Res<'s, Option<String>> {
-    let v = raw_arg(s, a, 0);
+fn label<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, a: Args<'s>, name: &str) -> Res<'s, Option<String>> {
+    let v = raw_arg::<E>(s, a, 0);
     let t = match v {
-        None | Some(Value::Undefined) => Some("default".to_string()),
-        Some(v) => old(s, |it| label_text(d, it, v))?,
+        None => Some("default".to_string()),
+        Some(v) if matches!(E::kind(v), Val::Undefined) => Some("default".to_string()),
+        Some(v) => old::<E, _>(s, |it| label_text(d, it, v))?,
     };
     if t.is_none() {
         say(d, s, ConsoleLevel::Warn, &format!("console.{name}: the label is longer than {MAX_LABEL_BYTES} bytes and is not kept"), None, 0)?;
@@ -345,25 +345,25 @@ fn label<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>, name: &str) -> Res<'s, Op
 }
 
 /// The text of a label value, or `None` over `MAX_LABEL_BYTES`.
-fn label_text(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<Option<String>> {
-    let t = match v {
-        Value::String(s) => {
-            if it.heap.str_len(s).map_err(Error::Heap)? > MAX_LABEL_BYTES {
+fn label_text<E: Eng>(d: &Dom<E>, it: &mut E::Vm, v: E::Raw) -> R<E, Option<String>> {
+    let t = match E::kind(v) {
+        Val::String(s) => {
+            if it.h_str_len(s)? > MAX_LABEL_BYTES {
                 return Ok(None);
             }
             text(d, it, s, MAX_LABEL_BYTES)?
         }
-        Value::Object(_) => "[object]".to_string(),
-        v => it.display(v),
+        Val::Object(_) => "[object]".to_string(),
+        _ => it.display_o(v),
     };
     Ok((t.len() <= MAX_LABEL_BYTES).then_some(t))
 }
 
-fn full<'s>(d: &Dom, s: &mut Sc<'s, '_>, name: &str) -> Res<'s, Local<'s>> {
+fn full<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, name: &str) -> Res<'s, Local<'s>> {
     say(d, s, ConsoleLevel::Warn, &format!("console.{name}: {MAX_LABELS} labels are in use, so this label is not kept"), None, 0)
 }
 
-fn time<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn time<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let Some(l) = label(d, s, a, "time")? else { return Ok(s.undefined()) };
     let now = d.now_ms();
     let mut st = d.console.st.borrow_mut();
@@ -379,7 +379,7 @@ fn time<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, L
     Ok(s.undefined())
 }
 
-fn time_log_or_end<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>, end: bool) -> Res<'s, Local<'s>> {
+fn time_log_or_end<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, a: Args<'s>, end: bool) -> Res<'s, Local<'s>> {
     let name = if end { "timeEnd" } else { "timeLog" };
     let Some(l) = label(d, s, a, name)? else { return Ok(s.undefined()) };
     let now = d.now_ms();
@@ -393,14 +393,14 @@ fn time_log_or_end<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>, end: bool) -> R
     }
 }
 
-fn time_log<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn time_log<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     time_log_or_end(d, s, a, false)
 }
-fn time_end<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn time_end<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     time_log_or_end(d, s, a, true)
 }
 
-fn count<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn count<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let Some(l) = label(d, s, a, "count")? else { return Ok(s.undefined()) };
     let mut st = d.console.st.borrow_mut();
     if st.lab().counts.len() >= MAX_LABELS && !st.lab().counts.contains_key(&l) {
@@ -414,7 +414,7 @@ fn count<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, 
     say(d, s, ConsoleLevel::Log, &format!("{l}: {n}"), None, 0)
 }
 
-fn count_reset<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn count_reset<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let Some(l) = label(d, s, a, "countReset")? else { return Ok(s.undefined()) };
     let known = d.console.st.borrow_mut().lab().counts.get_mut(&l).map(|n| *n = 0).is_some();
     if known {
@@ -425,28 +425,28 @@ fn count_reset<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Re
 
 /// The global `console` is an accessor until the first read or write (as `CSS`, `crypto` and `Intl`): a page that never reads
 /// it does not pay for 19 functions. The first read makes the object and replaces the accessor with a data property.
-pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
     let g = s.global();
     let f = d.add_fn_s(s, lazy, "console", 0, bare_js_api::HostFn::Method)?;
     s.define_accessor_str(g, "console", Some(f), Some(f), Attrs { writable: false, enumerable: false, configurable: true })
 }
 
 /// The getter (no argument) and the setter (the new value) of the global.
-fn lazy<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    let v = raw_arg(s, a, 0);
-    old_v(s, |it| make_console(d, it, v))
+fn lazy<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let v = raw_arg::<E>(s, a, 0);
+    old_v::<E>(s, |it| make_console(d, it, v))
 }
 
-fn make_console(d: &Dom, it: &mut Interp<'_>, set: Option<Value>) -> R<Value> {
+fn make_console<E: Eng>(d: &Dom<E>, it: &mut E::Vm, set: Option<E::Raw>) -> R<E, E::Raw> {
     let g = *d.global.get().expect("installed");
     let k = d.key(it, "console")?;
     if let Some(v) = set {
         it.define_data(g, k, v, true, false, true)?;
-        return Ok(Value::Undefined);
+        return Ok(E::undef());
     }
     let console = d.obj(it, it.object_prototype())?;
     for (name, h) in [
-        ("log", log as HS),
+        ("log", log as HS<E>),
         ("warn", warn),
         ("error", error),
         ("info", log),
@@ -468,22 +468,22 @@ fn make_console(d: &Dom, it: &mut Interp<'_>, set: Option<Value>) -> R<Value> {
     ] {
         let key = d.key(it, name)?;
         let f = d.add_fn_s_obj(it, h, name, 0, bare_js_api::HostFn::Method)?;
-        it.define_data(console, key, Value::Object(f), true, true, true)?;
+        it.define_data(console, key, E::obj_raw(f), true, true, true)?;
     }
     // `console[Symbol.toStringTag]` is "console".
     let (ks, kt) = (d.key(it, "Symbol")?, d.key(it, "toStringTag")?);
-    let sym = it.get_value(Value::Object(g), ks)?;
-    if let Value::Symbol(s) = it.get_value(sym, kt)? {
+    let sym = it.get_value(E::obj_raw(g), ks)?;
+    if let Val::Symbol(s) = E::kind(it.get_value(sym, kt)?) {
         let tag = d.js_str(it, "console")?;
-        it.define_data(console, PropertyKey::Symbol(s), tag, false, false, true)?;
+        it.define_data(console, E::sym_key(s), tag, false, false, true)?;
     }
-    it.define_data(g, k, Value::Object(console), true, false, true)?;
-    Ok(Value::Object(console))
+    it.define_data(g, k, E::obj_raw(console), true, false, true)?;
+    Ok(E::obj_raw(console))
 }
 
 // ------------------------------------------------------------------------------------------ driver API
 
-impl Browser {
+impl<E: Eng> Browser<E> {
     /// Replace the bounds. Call it before scripts run. A smaller `max_records` drops the oldest records now.
     pub fn set_console_limits(&mut self, l: ConsoleLimits) {
         let c = &self.dom.console;
@@ -500,20 +500,20 @@ impl Browser {
     }
 
     /// The kept records, oldest first. Empties the sink. The values are no longer rooted: see the header.
-    pub fn take_console_records(&mut self) -> Vec<ConsoleRecord> {
+    pub fn take_console_records(&mut self) -> Vec<ConsoleRecord<E>> {
         let mut st = self.dom.console.st.borrow_mut();
         st.values = 0;
         st.q.drain(..).map(|r| ConsoleRecord { seq: r.seq, level: r.level, indent: r.indent, args: r.args.into_vec() }).collect()
     }
 
     /// The text of a record (see the header for the gates). Runs no JavaScript. Returns the text to the caller only.
-    pub fn format_console_record(&mut self, r: &ConsoleRecord) -> R<String> {
+    pub fn format_console_record(&mut self, r: &ConsoleRecord<E>) -> R<E, String> {
         let (dom, max) = (self.dom.clone(), self.dom.console.lim.get().max_format_bytes);
         if r.indent == 0 {
-            return self.it.host_scope(|it| format(&dom, it, &r.args, max));
+            return self.it.host_scope_o(|it| format(&dom, it, &r.args, max));
         }
         let pad = " ".repeat(2 * r.indent as usize);
-        let text = self.it.host_scope(|it| format(&dom, it, &r.args, max.saturating_sub(pad.len())))?;
+        let text = self.it.host_scope_o(|it| format(&dom, it, &r.args, max.saturating_sub(pad.len())))?;
         Ok(pad + &text)
     }
 }
@@ -526,7 +526,7 @@ struct Out {
 }
 
 impl Out {
-    fn push(&mut self, d: &Dom, t: &str) -> R<()> {
+    fn push<E: Eng>(&mut self, d: &Dom<E>, t: &str) -> R<E, ()> {
         if self.s.len().saturating_add(t.len()) > self.max {
             return Err(d.lim("console-format"));
         }
@@ -536,23 +536,23 @@ impl Out {
 }
 
 /// Check UTF-8 size and work before allocating a display string. Lone surrogates use U+FFFD.
-fn text(d: &Dom, it: &mut Interp<'_>, s: StrId, max: usize) -> R<String> {
-    let len = it.heap.str_len(s).map_err(Error::Heap)?;
+fn text<E: Eng>(d: &Dom<E>, it: &mut E::Vm, s: E::Str, max: usize) -> R<E, String> {
+    let len = it.h_str_len(s)?;
     if len > max { return Err(d.lim("console-format")); }
-    it.charge(1 + (len / 16) as u64)?;
+    it.charge_o(1 + (len / 16) as u64)?;
     let mut bytes = 0usize;
-    for c in char::decode_utf16(it.heap.str_units(s).map_err(Error::Heap)?.iter().copied()) {
+    for c in char::decode_utf16(it.h_str_units(s)?.iter().copied()) {
         bytes = bytes.saturating_add(c.unwrap_or(char::REPLACEMENT_CHARACTER).len_utf8());
         if bytes > max { return Err(d.lim("console-format")); }
     }
-    it.heap.to_string_lossy(s).map_err(Error::Heap)
+    it.h_to_string_lossy(s)
 }
 
 /// A primitive as `%s` prints it. An object is a fixed tag: no user code runs.
-fn plain(d: &Dom, it: &mut Interp<'_>, v: Value, quote: bool, out: &mut Out) -> R<()> {
-    it.charge(1)?;
-    match v {
-        Value::String(s) => {
+fn plain<E: Eng>(d: &Dom<E>, it: &mut E::Vm, v: E::Raw, quote: bool, out: &mut Out) -> R<E, ()> {
+    it.charge_o(1)?;
+    match E::kind(v) {
+        Val::String(s) => {
             let room = out.max.saturating_sub(out.s.len());
             let t = text(d, it, s, room.saturating_sub(if quote { 2 } else { 0 }))?;
             if quote {
@@ -561,8 +561,8 @@ fn plain(d: &Dom, it: &mut Interp<'_>, v: Value, quote: bool, out: &mut Out) -> 
                 out.push(d, "\"")
             } else { out.push(d, &t) }
         }
-        Value::Symbol(s) => {
-            let desc = it.heap.symbol_description(s).map_err(Error::Heap)?;
+        Val::Symbol(s) => {
+            let desc = it.h_symbol_description(s)?;
             out.push(d, "Symbol(")?;
             if let Some(desc) = desc {
                 let t = text(d, it, desc, out.max.saturating_sub(out.s.len()).saturating_sub(1))?;
@@ -570,25 +570,27 @@ fn plain(d: &Dom, it: &mut Interp<'_>, v: Value, quote: bool, out: &mut Out) -> 
             }
             out.push(d, ")")
         }
-        Value::Number(0.0) => out.push(d, "0"),
-        Value::BigInt(_) | Value::BigHeap(_) => {
-            out.push(d, &it.display(v))?;
+        Val::Number(0.0) => out.push(d, "0"),
+        Val::BigInt => {
+            out.push(d, &it.display_o(v))?;
             out.push(d, "n")
         }
-        Value::Object(_) if it.is_callable_value(v) => out.push(d, "[function]"),
-        Value::Object(o) => match error_text(d, it, o, out.max.saturating_sub(out.s.len()))? {
+        Val::Object(_) if it.is_callable_value(v) => out.push(d, "[function]"),
+        Val::Object(o) => match error_text(d, it, o, out.max.saturating_sub(out.s.len()))? {
             Some(t) => out.push(d, &t),
             None => out.push(d, "[object]"),
         },
-        v => out.push(d, &it.display(v)),
+        _ => out.push(d, &it.display_o(v)),
     }
 }
 
 /// The own data string `stack`, else `message`, of an object (an error). A getter or a non-string gives `None`: no user code runs.
-fn error_text(d: &Dom, it: &mut Interp<'_>, o: ObjId, room: usize) -> R<Option<String>> {
+fn error_text<E: Eng>(d: &Dom<E>, it: &mut E::Vm, o: E::Obj, room: usize) -> R<E, Option<String>> {
     for k in ["stack", "message"] {
         let key = d.key(it, k)?;
-        if let Some(Property::Data { value: Value::String(s), .. }) = it.heap.peek_own_property(o, key).map_err(Error::Heap)? {
+        if let Some(Prop::Data { value, .. }) = it.h_peek_own(o, key)?
+            && let Val::String(s) = E::kind(value)
+        {
             return text(d, it, s, room).map(Some);
         }
     }
@@ -622,25 +624,25 @@ fn numeric_prefix(units: &[u16], float: bool) -> f64 {
 }
 
 /// Numeric formatting stays data-only. Scan borrowed strings within the format-input and step caps.
-fn numeric(d: &Dom, it: &mut Interp<'_>, v: Value, float: bool, max: usize) -> R<f64> {
-    Ok(match v {
-        Value::Number(n) if float => n,
-        Value::Number(n) => numeric_prefix(&number_to_string(n).encode_utf16().collect::<Vec<_>>(), false),
-        Value::String(s) => {
-            let len = it.heap.str_len(s).map_err(Error::Heap)?;
+fn numeric<E: Eng>(d: &Dom<E>, it: &mut E::Vm, v: E::Raw, float: bool, max: usize) -> R<E, f64> {
+    Ok(match E::kind(v) {
+        Val::Number(n) if float => n,
+        Val::Number(n) => numeric_prefix(&number_to_string(n).encode_utf16().collect::<Vec<_>>(), false),
+        Val::String(s) => {
+            let len = it.h_str_len(s)?;
             if len > max { return Err(d.lim("console-format")); }
-            it.charge(1 + (len / 16) as u64)?;
-            numeric_prefix(it.heap.str_units(s).map_err(Error::Heap)?, float)
+            it.charge_o(1 + (len / 16) as u64)?;
+            numeric_prefix(it.h_str_units(s)?, float)
         }
         _ => f64::NAN,
     })
 }
 
-fn format(d: &Dom, it: &mut Interp<'_>, args: &[Value], max: usize) -> R<String> {
+fn format<E: Eng>(d: &Dom<E>, it: &mut E::Vm, args: &[E::Raw], max: usize) -> R<E, String> {
     let mut out = Out { s: String::new(), max };
     let Some((&first, rest)) = args.split_first() else { return Ok(out.s) };
-    let target = match first {
-        Value::String(s) if !rest.is_empty() => {
+    let target = match E::kind(first) {
+        Val::String(s) if !rest.is_empty() => {
             Some(text(d, it, s, max)?)
         }
         _ => None,
@@ -674,16 +676,16 @@ fn format(d: &Dom, it: &mut Interp<'_>, args: &[Value], max: usize) -> R<String>
                 's' => plain(d, it, v, false, &mut out)?,
                 'o' | 'O' => plain(d, it, v, true, &mut out)?,
                 // `%d` and `%i` print a BigInt with its `n`, as Node does. `%f` is parseFloat of its digits.
-                'd' | 'i' if v.is_bigint() => plain(d, it, v, false, &mut out)?,
+                'd' | 'i' if E::is_bigint(v) => plain(d, it, v, false, &mut out)?,
                 _ => {
-                    let n = if matches!(v, Value::Symbol(_) | Value::Object(_)) {
+                    let n = if matches!(E::kind(v), Val::Symbol(_) | Val::Object(_)) {
                         f64::NAN
-                    } else if v.is_bigint() {
-                        numeric_prefix(&it.display(v).encode_utf16().collect::<Vec<_>>(), true)
+                    } else if E::is_bigint(v) {
+                        numeric_prefix(&it.display_o(v).encode_utf16().collect::<Vec<_>>(), true)
                     } else {
                         numeric(d, it, v, spec == 'f', max)?
                     };
-                    plain(d, it, Value::Number(n), false, &mut out)?;
+                    plain(d, it, E::num(n), false, &mut out)?;
                 }
             }
         }

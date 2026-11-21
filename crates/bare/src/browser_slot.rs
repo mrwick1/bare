@@ -4,15 +4,14 @@
 //! nothing gives its fallback children (elements and text). `assignedSlot` is `null` when the shadow root is closed.
 //! Not built: `assign()` and manual slot assignment (`attachShadow` refuses `slotAssignment: "manual"`), and `slotchange` events.
 
+use crate::eng::Eng;
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_js_api::{Args, Local, Type};
 use crate::browser_dom as nd;
 use bare_html::dom::{NodeData, NodeId};
-use bare_js::eval::Interp;
-use bare_js::value::{ObjId};
 
-pub(crate) fn members(d: &Dom, it: &mut Interp<'_>, o: ObjId) -> R<()> {
+pub(crate) fn members<E: Eng>(d: &Dom<E>, it: &mut E::Vm, o: E::Obj) -> R<E, ()> {
     d.def_get_s(it, o, "name", name, Some(set_name))?;
     d.def_method_s(it, o, "assignedNodes", 0, |d, s, t, a| assigned(d, s, t, a, false))?;
     d.def_method_s(it, o, "assignedElements", 0, |d, s, t, a| assigned(d, s, t, a, true))?;
@@ -20,12 +19,12 @@ pub(crate) fn members(d: &Dom, it: &mut Interp<'_>, o: ObjId) -> R<()> {
 }
 
 /// The `<slot>` of `this`, else `Illegal invocation`.
-fn slot<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
+fn slot<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, NodeId> {
     let n = d.el_s(s, this)?;
     if d.doc.borrow().is_html(n, "slot") { Ok(n) } else { Err(s.type_error("Illegal invocation")) }
 }
 
-fn name<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn name<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = slot(d, s, this)?;
     let st = {
         let doc = d.doc.borrow();
@@ -34,7 +33,7 @@ fn name<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s
     d.js_str_s(s, &st)
 }
 
-fn set_name<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_name<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = slot(d, s, this)?;
     let st = d.arg_str_s(s, a, 0)?;
     nd::attr_set_s(d, s, n, "name", &st)?;
@@ -42,9 +41,9 @@ fn set_name<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Re
 }
 
 /// `assignedNodes` and `assignedElements` (`only_elements`).
-fn assigned<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, only_elements: bool) -> Res<'s, Local<'s>> {
+fn assigned<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>, only_elements: bool) -> Res<'s, Local<'s>> {
     let n = slot(d, s, this)?;
-    let opts = arg_s(s, a, 0);
+    let opts = arg_s::<E>(s, a, 0);
     let flatten = match s.type_of(opts) {
         Type::Undefined | Type::Null => false,
         Type::Object | Type::Function => {
@@ -80,7 +79,7 @@ fn assigned<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, only_
 }
 
 /// `Element.assignedSlot` and `Text.assignedSlot`: the slot that takes the node, `null` for a closed shadow root and for a node that no slot takes.
-pub(crate) fn assigned_slot<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn assigned_slot<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.nd_s(s, this)?;
     let st = {
         let doc = d.doc.borrow();
