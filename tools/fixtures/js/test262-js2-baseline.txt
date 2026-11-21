@@ -143,9 +143,9 @@ built-ins/GeneratorPrototype/return 23 0 0 23 0 0
 built-ins/GeneratorPrototype/throw 22 0 0 22 0 0
 built-ins/JSON 6 0 0 5 1 0
 built-ins/JSON/isRawJSON 0 0 6 0 0 6
-built-ins/JSON/parse 63 0 14 53 10 14
+built-ins/JSON/parse 63 0 14 63 0 14
 built-ins/JSON/rawJSON 0 0 10 0 0 10
-built-ins/JSON/stringify 50 0 17 35 15 17
+built-ins/JSON/stringify 50 0 17 50 0 17
 built-ins/Map 27 0 3 27 0 3
 built-ins/Map/Symbol.species 4 0 0 4 0 0
 built-ins/Map/groupBy 0 0 14 0 0 14
