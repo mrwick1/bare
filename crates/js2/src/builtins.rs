@@ -323,6 +323,7 @@ impl Realm {
         self.install_symbol();
         self.install_generator();
         self.install_json();
+        self.install_collections();
     }
 
     fn install_function(&mut self) {
