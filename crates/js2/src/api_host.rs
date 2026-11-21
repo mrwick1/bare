@@ -256,7 +256,7 @@ impl Realm {
                 self.idx_atom(i)
             }
             Key::Name(k) => {
-                if k == self.k_length && self.shapes.get(c.shape(&self.shapes)).layout == Layout::Indexed {
+                if k == self.k_length && Realm::is_array(self, c) {
                     return Some(Slot::Data(Realm::num(c.len() as f64)));
                 }
                 self.fn_prep(c, k);

@@ -64,7 +64,7 @@ impl Realm {
     }
 
     /// Make the iterator at the current index if an early exit might call its `return`.
-    pub(crate) fn close_array_iterator(&mut self, array: Value, index: i32, throwing: bool) -> R<()> {
+    pub(crate) fn close_array_iterator(&mut self, array: Value, index: u32, throwing: bool) -> R<()> {
         let proto = self.ltab.array_iter_next.map_or(self.api.iter_proto, |(p, _, _)| p.value());
         if proto.is_undefined() || self.args_iter.is_undefined() {
             return Ok(());
@@ -74,7 +74,7 @@ impl Realm {
             if self.has_prop(proto, Key::Name(ret))? {
                 let it = self.call_function(self.args_iter, array, &[])?;
                 let pos = self.intern("\0i");
-                self.set_prop(it, Key::Name(pos), Value::int(index))?;
+                self.set_prop(it, Key::Name(pos), Realm::num(index as f64))?;
                 self.iter_close_inner(it, Value::NULL)?;
             }
             Ok(())
@@ -92,7 +92,11 @@ impl Realm {
         if !Realm::obj(m).is_some_and(|o| o.is_callable()) {
             return self.type_error("the value is not iterable");
         }
-        let it = self.call_function(m, v, &[])?;
+        self.iter_open_method(v, m)
+    }
+
+    pub(crate) fn iter_open_method(&mut self, v: Value, method: Value) -> R<(Value, Value)> {
+        let it = self.call_function(method, v, &[])?;
         if Realm::obj(it).is_none() {
             return self.type_error("the result of Symbol.iterator is not an object");
         }

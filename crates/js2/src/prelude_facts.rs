@@ -5,7 +5,7 @@
 use crate::ast::{FuncKind as K, FuncMode as M, Span as S};
 use crate::facts::{FnFacts as F, Facts};
 
-static FNS: [F; 42] = [
+static FNS: [F; 40] = [
     F { start: 791, parse_at: 806, end: 1239, name: Some(S { start: 800, end: 806 }), kind: K::Normal, mode: M::Plain, flags: 0, strict: true, strict_out: true, simple: true, no_in: false, ctx: 0, length: 1, sub: 0, caps: 0, ncaps: 1 },
     F { start: 1240, parse_at: 1269, end: 1317, name: Some(S { start: 1249, end: 1269 }), kind: K::Normal, mode: M::Plain, flags: 0, strict: true, strict_out: true, simple: true, no_in: false, ctx: 0, length: 3, sub: 1, caps: 1, ncaps: 2 },
     F { start: 1318, parse_at: 1349, end: 1537, name: Some(S { start: 1327, end: 1349 }), kind: K::Normal, mode: M::Plain, flags: 0, strict: true, strict_out: true, simple: true, no_in: false, ctx: 0, length: 2, sub: 2, caps: 3, ncaps: 3 },
@@ -46,11 +46,9 @@ static FNS: [F; 42] = [
     F { start: 10904, parse_at: 10923, end: 11307, name: Some(S { start: 10913, end: 10923 }), kind: K::Normal, mode: M::Plain, flags: 1, strict: true, strict_out: true, simple: true, no_in: false, ctx: 0, length: 1, sub: 37, caps: 125, ncaps: 6 },
     F { start: 11308, parse_at: 11331, end: 11935, name: Some(S { start: 11317, end: 11331 }), kind: K::Normal, mode: M::Plain, flags: 1, strict: true, strict_out: true, simple: true, no_in: false, ctx: 0, length: 1, sub: 38, caps: 131, ncaps: 8 },
     F { start: 11936, parse_at: 11965, end: 12167, name: Some(S { start: 11945, end: 11965 }), kind: K::Normal, mode: M::Plain, flags: 1, strict: true, strict_out: true, simple: true, no_in: false, ctx: 0, length: 0, sub: 39, caps: 139, ncaps: 3 },
-    F { start: 12168, parse_at: 12185, end: 12443, name: Some(S { start: 12177, end: 12185 }), kind: K::Normal, mode: M::Plain, flags: 3, strict: true, strict_out: true, simple: true, no_in: false, ctx: 0, length: 0, sub: 40, caps: 142, ncaps: 2 },
-    F { start: 12444, parse_at: 12463, end: 13733, name: Some(S { start: 12453, end: 12463 }), kind: K::Normal, mode: M::Plain, flags: 2, strict: true, strict_out: true, simple: true, no_in: false, ctx: 0, length: 1, sub: 41, caps: 144, ncaps: 10 },
 ];
 
-static CAPS: [S; 154] = [
+static CAPS: [S; 142] = [
     S { start: 892, end: 901 },
     S { start: 1288, end: 1297 },
     S { start: 1304, end: 1310 },
@@ -193,22 +191,10 @@ static CAPS: [S; 154] = [
     S { start: 11995, end: 11998 },
     S { start: 11980, end: 11983 },
     S { start: 12100, end: 12109 },
-    S { start: 12265, end: 12270 },
-    S { start: 12318, end: 12327 },
-    S { start: 12773, end: 12778 },
-    S { start: 13043, end: 13049 },
-    S { start: 12653, end: 12659 },
-    S { start: 12565, end: 12574 },
-    S { start: 12714, end: 12719 },
-    S { start: 13620, end: 13625 },
-    S { start: 13610, end: 13613 },
-    S { start: 12629, end: 12633 },
-    S { start: 13596, end: 13599 },
-    S { start: 12528, end: 12537 },
 ];
 
 /// The top-level functions of `prelude.js`: the name and the id of its facts.
-pub static TOP: [(&str, u32); 42] = [
+pub static TOP: [(&str, u32); 40] = [
     ("toDesc", 0),
     ("helperDefineProperty", 1),
     ("helperDefineProperties", 2),
@@ -249,13 +235,11 @@ pub static TOP: [(&str, u32); 42] = [
     ("array_sort", 37),
     ("array_toSorted", 38),
     ("array_toLocaleString", 39),
-    ("array_of", 40),
-    ("array_from", 41),
 ];
 
-static BY_START: [u32; 42] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41];
+static BY_START: [u32; 40] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39];
 
 /// The facts of `prelude.js`, as a lazy pre-parse of it gives them.
 pub fn facts() -> Facts {
-    Facts { fns: FNS.to_vec(), caps: CAPS.to_vec(), by_start: BY_START.to_vec(), preparsed: 42, module: false }
+    Facts { fns: FNS.to_vec(), caps: CAPS.to_vec(), by_start: BY_START.to_vec(), preparsed: 40, module: false }
 }

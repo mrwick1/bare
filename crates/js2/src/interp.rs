@@ -1332,7 +1332,7 @@ impl Vm {
                             // The loop leaves early (`c` = 1: with a throw): `return()` of the iterator, so a generator runs its `finally` blocks.
                             if let Some(i) = r!(a!() + 1).as_int() {
                                 if r!(a!() + 2) == Value::bool(true) {
-                                    tri!(realm.close_array_iterator(r!(a!()), i, c!() != 0));
+                                    tri!(realm.close_array_iterator(r!(a!()), i as u32, c!() != 0));
                                 }
                             } else {
                                 tri!(realm.iter_close(r!(a!()), r!(a!() + 1), c!() != 0));
