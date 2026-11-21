@@ -232,9 +232,8 @@ pub fn text(page: &mut Page, h: Handle) -> Option<String> {
 /// `document.title`: the text of the first `<title>` element, or what a script set. Empty when the page has none.
 pub fn title(page: &mut Page) -> Option<String> {
     let b = page.browser()?;
-    let r = b.run_script("document.title");
-    let title = match r {
-        Ok(v @ bare_js::value::Value::String(_)) => Some(b.it.display(v)),
+    let title = match b.script_text("document.title") {
+        Ok((true, s)) => Some(s),
         _ => None,
     };
     page.touched();

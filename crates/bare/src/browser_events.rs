@@ -361,7 +361,7 @@ impl<E: Eng> Dom<E> {
                 && let Val::String(s) = E::kind(v)
                 && let Ok(units) = it.h_str_units(s)
             {
-                append(out, units);
+                append(out, &units);
             }
         };
         let mut message = String::new();
@@ -375,7 +375,7 @@ impl<E: Eng> Dom<E> {
                 append(&mut message, &[58, 32]);
                 text(it, &mut message, o, "message");
             }
-            Val::String(s) => if let Ok(units) = it.h_str_units(s) { append(&mut message, units); },
+            Val::String(s) => if let Ok(units) = it.h_str_units(s) { append(&mut message, &units); },
             Val::Symbol(_) => append(&mut message, &[83, 121, 109, 98, 111, 108]),
             _ => append(&mut message, &it.display_o(thrown).encode_utf16().collect::<Vec<_>>()),
         }

@@ -11,6 +11,7 @@
 mod test_server;
 
 use bare::Input;
+use bare::browser_any::AnyBrowser;
 use bare::browser_session::{Session, SessionConfig, SessionStop};
 use bare::Stop;
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -64,7 +65,7 @@ fn mem(s: &mut Session, what: &str) {
     if std::env::var_os("MEM").is_none() {
         return;
     }
-    if let Some(b) = s.browser() {
+    if let Some(AnyBrowser::Old(b)) = s.browser() {
         let (e, m) = (b.it.stats(), |b: usize| b as f64 / 1048576.0);
         eprintln!("  interpreter {what}: syntax trees {:.2} (with source), their caches {:.2}, environments {:.2}, function table {:.2} MiB", m(e.ast_bytes), m(e.script_cache_bytes), m(e.env_bytes), m(e.func_bytes));
         let f = b.it.heap.footprint();
@@ -88,7 +89,10 @@ fn mem(s: &mut Session, what: &str) {
         );
     }
     let mib = |b: usize| b as f64 / 1048576.0;
-    let (heap, ev) = s.browser().map_or(Default::default(), |b| (b.it.heap.stats(), b.it.stats()));
+    let (heap, ev) = match s.browser() {
+        Some(AnyBrowser::Old(b)) => (b.it.heap.stats(), b.it.stats()),
+        _ => Default::default(),
+    };
     eprintln!(
         "mem {what}: rss {:.1} peak {:.1} MiB; alloc live {:.1} peak {:.1} MiB; js heap {:.1} MiB accounted ({} objects, {} strings), slabs {:.1} MiB; envs {}/{}, functions {}, scripts {} ({:.1} MiB source, {} nodes), {} collections",
         status_kib("VmRSS:") as f64 / 1024.0, status_kib("VmHWM:") as f64 / 1024.0, mib(LIVE.load(Relaxed)), mib(PEAK.load(Relaxed)),
@@ -121,16 +125,34 @@ fn run(dir: &str, sel: &str, n: usize, virt: bool) {
     let mut cfg = SessionConfig::new(&server.url("/"));
     cfg.virtual_clock = virt;
     cfg.eval.max_steps = u64::MAX / 2;
-    cfg.eval.exec = exec::mode();
+    if !cfg.js2 {
+        cfg.eval.exec = exec::mode();
+    }
     let t = Instant::now();
     let mut s = Session::new(cfg);
     let r = s.run();
     let load = t.elapsed();
     mem(&mut s, "after load");
+    // `LOGS=1`: the console, the errors of listeners and the failed requests of the page.
+    if std::env::var_os("LOGS").is_some()
+        && let Some(b) = s.browser()
+    {
+        for (level, text) in b.take_console() {
+            eprintln!("console {level}: {text}");
+        }
+        for r in b.take_reports() {
+            eprintln!("error in {}: {}", r.event_type, r.message);
+        }
+        for d in b.take_fetch_diagnostics() {
+            eprintln!("fetch: {d}");
+        }
+    }
     if std::env::var_os("MEM").is_some() {
         let b = s.browser().expect("browser");
         let t = Instant::now();
-        let _ = b.collect(&[]);
+        if let AnyBrowser::Old(b) = b {
+            let _ = b.collect(&[]);
+        }
         eprintln!("collect: {:.2} ms", t.elapsed().as_secs_f64() * 1000.0);
         mem(&mut s, "after load + collect");
     }
@@ -138,7 +160,7 @@ fn run(dir: &str, sel: &str, n: usize, virt: bool) {
         die(format!("load stopped: {:?}", r.stop));
     }
     let text: String = (0..n).map(|i| (b'a' + (i % 26) as u8) as char).collect();
-    let steps0 = s.browser().map_or(0, |b| b.it.stats().steps);
+    let steps0 = s.browser().map_or(0, |b| if let AnyBrowser::Old(b) = b { b.it.stats().steps } else { 0 });
     let t = Instant::now();
     let r = if n == 0 { None } else { Some(s.resume(&[Input::Type(sel, &text)])) };
     let typed = t.elapsed();
@@ -148,12 +170,12 @@ fn run(dir: &str, sel: &str, n: usize, virt: bool) {
         die(format!("typing stopped: {:?}", r.stop));
     }
     if let Some(b) = s.browser() {
-        let _ = b.run_script("localStorage.setItem('counts', JSON.stringify(window.__c || {}))");
+        let _ = b.script("localStorage.setItem('counts', JSON.stringify(window.__c || {}))");
     }
     let origin = server.url("");
     let counts = s.storage().get_item(false, &origin, "counts").unwrap_or_default();
     let len = s.browser().and_then(|b| b.query(sel).ok().flatten().and_then(|e| b.input_value(e))).map_or(0, |v| v.len());
-    let steps = s.browser().map_or(0, |b| b.it.stats().steps) - steps0;
+    let steps = s.browser().map_or(0, |b| if let AnyBrowser::Old(b) = b { b.it.stats().steps } else { 0 }) - steps0;
     let (tasks, rounds) = r.map_or((0, 0), |r| (r.tasks, r.rounds));
     println!("type_load {sel} x{n}{}: load {:.0} ms, type {:.0} ms ({:.1} ms/key), tasks {tasks} rounds {rounds}, {} evaluator steps/key, value {len} chars, renders {counts}", if virt { " virtual" } else { "" }, load.as_secs_f64() * 1000.0, typed.as_secs_f64() * 1000.0, typed.as_secs_f64() * 1000.0 / n.max(1) as f64, steps / n.max(1) as u64);
     if len != n {
@@ -161,7 +183,7 @@ fn run(dir: &str, sel: &str, n: usize, virt: bool) {
     }
     // `BC_SCOPE_CHECK=1`: compare the scope data of the code generator with every identifier site that the tree walker resolved.
     if std::env::var_os("BC_SCOPE_CHECK").is_some()
-        && let Some(b) = s.browser()
+        && let Some(AnyBrowser::Old(b)) = s.browser()
     {
         let c = b.it.bc_scope_check();
         println!("scope check: {} sites, {} indexed, {} global or dynamic, {} hops only, {} unresolved, {} in frames, {} static; {} mismatches", c.sites, c.indexed, c.global_or_dynamic, c.hops_only, c.unresolved, c.frame, c.static_checked, c.mismatches.len());
@@ -171,7 +193,7 @@ fn run(dir: &str, sel: &str, n: usize, virt: bool) {
     }
     // `BC_GEN_CHECK=1`: compile every function of the page to bytecode and verify the code (the coverage number of step B2).
     if std::env::var_os("BC_GEN_CHECK").is_some()
-        && let Some(b) = s.browser()
+        && let Some(AnyBrowser::Old(b)) = s.browser()
     {
         let c = b.it.bc_gen_check();
         println!("bytecode: {} functions, {} compile ({:.1}%), {} words; unsupported: {:?}", c.functions, c.compiled, 100.0 * c.compiled as f64 / c.functions.max(1) as f64, c.words, c.unsupported);

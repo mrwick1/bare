@@ -28,8 +28,9 @@
 //! Gaps: no drag, no right button, no modifier keys on a click; `type_text` sends one key for each character (no IME, no
 //! paste); the viewport of a new document is the one of `open_with` (a resize of a real window is not given to the next document).
 
-use crate::eng::Ops;
-use crate::eng_old::Old;
+use crate::eng::{Eng, Ops};
+use crate::browser_any::AnyFault;
+use crate::eng::Fault;
 use crate::browser::Browser;
 use crate::browser_navigation::WebStorage;
 use crate::browser_scroll::Align;
@@ -158,9 +159,9 @@ pub fn key_events(spec: &str) -> Option<Vec<Event>> {
     Some(down)
 }
 
-impl Browser<Old> {
+impl<E: Eng> Browser<E> {
     /// Every element in tree order that matches `selector` (the native matcher of `querySelectorAll`; JS does not run).
-    pub fn query_all(&mut self, selector: &str) -> crate::browser::R<Old, Vec<NodeId>> {
+    pub fn query_all(&mut self, selector: &str) -> crate::browser::R<E, Vec<NodeId>> {
         let dom = self.dom.clone();
         self.it.host_scope_o(|it| {
             let root = dom.doc.borrow().root();
@@ -241,7 +242,7 @@ impl Page {
         let b = self.browser().expect("checked");
         match b.query_all(selector) {
             Ok(list) => Ok(list.into_iter().map(|node| Handle { doc, node }).collect()),
-            Err(crate::eng::Fault::Throw(_)) => Err(format!("the selector is not valid: {selector}")),
+            Err(AnyFault::Old(Fault::Throw(_)) | AnyFault::New(Fault::Throw(_))) => Err(format!("the selector is not valid: {selector}")),
             Err(e) => Err(format!("the query failed: {e:?}")),
         }
     }
@@ -283,8 +284,7 @@ impl Page {
     /// Is the element disabled: HTML `disabled` (also by a `fieldset`), or `aria-disabled="true"` on it or an ancestor?
     pub fn disabled(&mut self, h: Handle) -> bool {
         let Some(b) = self.browser() else { return false };
-        let dom = b.dom.clone();
-        if b.it.host_scope_o(|it| dom.is_disabled_control(it, h.node)).unwrap_or(false) {
+        if b.is_disabled_control(h.node) {
             return true;
         }
         let doc = b.document();
@@ -446,7 +446,7 @@ impl Page {
         let (mut x, mut y) = self.actionable(h)?;
         // A driver click is one click: two driver clicks at one point are not a double click (as the CDP click of Playwright).
         if let Some(b) = self.browser() {
-            b.dom.st.borrow_mut().ui.last = None;
+            b.forget_pointer();
         }
         let mods = Mods::default();
         self.handle(Event::PointerMove { x, y, buttons: 0, mods });
@@ -480,7 +480,7 @@ impl Page {
     pub fn dblclick(&mut self, h: Handle) -> Result<(f64, f64), Refusal> {
         let (x, y) = self.actionable(h)?;
         if let Some(b) = self.browser() {
-            b.dom.st.borrow_mut().ui.last = None;
+            b.forget_pointer();
         }
         let mods = Mods::default();
         self.handle(Event::PointerMove { x, y, buttons: 0, mods });
@@ -805,13 +805,7 @@ impl Page {
     pub fn take_logs(&mut self) -> Vec<Log> {
         let mut out: Vec<Log> = self.errors.drain(..).map(|text| Log { level: if text.starts_with("listener") { "exception" } else { "page" }, text }).collect();
         if let Some(b) = self.browser() {
-            for r in b.take_console_records() {
-                let level = match r.level {
-                    crate::browser_console::ConsoleLevel::Log => "log",
-                    crate::browser_console::ConsoleLevel::Warn => "warn",
-                    crate::browser_console::ConsoleLevel::Error => "error",
-                };
-                let text = b.format_console_record(&r).unwrap_or_else(|e| format!("(not formatted: {e:?})"));
+            for (level, text) in b.take_console() {
                 out.push(Log { level, text });
             }
             for text in b.take_fetch_diagnostics() {

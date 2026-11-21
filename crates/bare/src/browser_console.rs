@@ -632,7 +632,7 @@ fn numeric<E: Eng>(d: &Dom<E>, it: &mut E::Vm, v: E::Raw, float: bool, max: usiz
             let len = it.h_str_len(s)?;
             if len > max { return Err(d.lim("console-format")); }
             it.charge_o(1 + (len / 16) as u64)?;
-            numeric_prefix(it.h_str_units(s)?, float)
+            numeric_prefix(&it.h_str_units(s)?, float)
         }
         _ => f64::NAN,
     })
