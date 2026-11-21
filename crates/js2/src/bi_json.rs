@@ -2,15 +2,13 @@
 //! `\u0000` survive. `parse` makes plain objects and arrays with `Realm::define`, so the key `__proto__` is an own property and a
 //! repeated key keeps the last value. Nesting is limited to [`MAX_DEPTH`] (a `RangeError`).
 //!
-//! `toJSON` of an object is called with `Realm::call_function` (the key is the second argument), so a `Date` serializes.
-//!
-//! **Known gaps** (each needs a call of a script function from a native, or a wrapper object): a `reviver`, a function `replacer`, a
-//! getter on a value that `stringify` reads, and the unwrapping of `Number`, `String` and `Boolean` objects (there are none). Each of
-//! the first three throws a `TypeError` that says so, and a wrapper object is serialized as a plain object.
+//! The parser visits children before it calls the reviver. The writer calls `toJSON` before the replacer.
 use crate::lazy::{Ent, m};
 use crate::bi_array::{get_at, len_of};
+use crate::bi_object::Desc;
 use crate::builtins::arg;
-use crate::interp_rt::{ErrKind, R, Realm};
+use crate::interp::STOP;
+use crate::interp_rt::{ErrKind, Key, R, Realm};
 use crate::object::Obj;
 use crate::value::Value;
 
@@ -236,9 +234,6 @@ impl Parser<'_> {
 
 fn parse(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let t = rt.to_str(arg(args, 0))?;
-    if callable(arg(args, 1)) {
-        return rt.type_error("JSON.parse with a reviver needs a call of a script function from native code (not built yet)");
-    }
     let u = rt.units(t);
     let mut p = Parser { s: &u, i: 0 };
     let v = p.value(rt, 0)?;
@@ -246,7 +241,51 @@ fn parse(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     if p.i < u.len() {
         return p.fail(rt);
     }
+    let reviver = arg(args, 1);
+    if callable(reviver) {
+        let root = Obj::new_plain(rt);
+        let key = Key::Name(rt.intern(""));
+        rt.define(root, key, v)?;
+        return revive(rt, root, key, reviver, 0);
+    }
     Ok(v)
+}
+
+/// Internalize one property and pass its holder to the reviver.
+fn revive(rt: &mut Realm, holder: Obj, key: Key, callback: Value, depth: usize) -> R<Value> {
+    rt.fuel = rt.fuel.checked_sub(1).ok_or(STOP)?;
+    let value = rt.get_prop(holder.value(), key)?;
+    if let Some(o) = Realm::obj(value) {
+        if depth >= MAX_DEPTH || (depth >= 32 && depth % 16 == 0 && stacker::remaining_stack().is_some_and(|n| n < 128 << 10)) {
+            return Err(rt.error(ErrKind::Range, "JSON is nested too deeply"));
+        }
+        if rt.is_array(o) {
+            for i in 0..o.len() {
+                revive_child(rt, o, Key::Idx(i), callback, depth + 1)?;
+            }
+        } else {
+            for name in rt.own_key_list_h(o, true)? {
+                let key = rt.key_of(name)?;
+                revive_child(rt, o, key, callback, depth + 1)?;
+            }
+        }
+    }
+    let name = match key {
+        Key::Idx(i) => rt.idx_atom(i),
+        Key::Name(s) => s,
+    };
+    rt.call_function(callback, holder.value(), &[name.value(), value])
+}
+
+fn revive_child(rt: &mut Realm, holder: Obj, key: Key, callback: Value, depth: usize) -> R<()> {
+    let v = revive(rt, holder, key, callback, depth)?;
+    if v.is_undefined() {
+        rt.delete_prop(holder.value(), key)?;
+    } else {
+        let d = Desc { value: Some(v), w: Some(true), e: Some(true), c: Some(true), ..Desc::default() };
+        rt.define_own(holder, key, &d)?;
+    }
+    Ok(())
 }
 
 // ---- stringify ----
@@ -256,6 +295,7 @@ struct Writer {
     gap: Vec<u16>,
     /// The `replacer` array: the keys to write, in order. `None` writes every own enumerable key.
     keys: Option<Vec<Value>>,
+    replacer: Value,
     /// The objects that are being written (to find a cycle).
     stack: Vec<Obj>,
 }
@@ -300,14 +340,26 @@ impl Writer {
         }
     }
 
-    /// `SerializeJSONProperty` for the value `v` (already read from its holder, under `key`: a string or a number, made a string only
-    /// for a `toJSON` call). Returns false when nothing was written (`undefined`, a function), so the caller drops the key.
-    fn value(&mut self, rt: &mut Realm, mut v: Value, key: Value, indent: &[u16]) -> R<bool> {
+    /// `SerializeJSONProperty` for the value `v` read from `holder[key]`. Returns false when nothing was written.
+    fn value(&mut self, rt: &mut Realm, mut v: Value, holder: Value, key: Value, indent: &[u16]) -> R<bool> {
         if Realm::obj(v).is_some() {
             let to_json = rt.get_named(v, "toJSON")?;
             if callable(to_json) {
                 let k = rt.to_str(key)?.value();
                 v = rt.call_function(to_json, v, &[k])?;
+            }
+        }
+        if !self.replacer.is_undefined() {
+            let k = rt.to_str(key)?.value();
+            v = rt.call_function(self.replacer, holder, &[k, v])?;
+        }
+        if let Some(p) = rt.prim_of(v) {
+            if p.is_number() {
+                v = Realm::num(rt.to_number(v)?);
+            } else if Realm::str_of(p).is_some() {
+                v = rt.to_str(v)?.value();
+            } else if p.as_bool().is_some() {
+                v = p;
             }
         }
         if let Some(o) = Realm::obj(v) {
@@ -354,7 +406,7 @@ impl Writer {
             }
             self.newline(&inner);
             let v = get_at(rt, o.value(), i)?;
-            if !self.value(rt, v, Realm::num(i), &inner)? {
+            if !self.value(rt, v, o.value(), Realm::num(i), &inner)? {
                 push_ascii(&mut self.out, "null");
             }
             i += 1.0;
@@ -391,7 +443,7 @@ impl Writer {
             if !self.gap.is_empty() {
                 self.out.push(0x20);
             }
-            if self.value(rt, v, k, &inner)? {
+            if self.value(rt, v, o.value(), k, &inner)? {
                 any = true;
             } else {
                 self.out.truncate(mark);
@@ -407,20 +459,18 @@ impl Writer {
 }
 
 fn stringify(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    let (replacer, space) = (arg(args, 1), arg(args, 2));
+    let (replacer, mut space) = (arg(args, 1), arg(args, 2));
     let mut keys = None;
-    if callable(replacer) {
-        return rt.type_error("JSON.stringify with a replacer function needs a call of a script function from native code (not built yet)");
-    }
     if let Some(r) = Realm::obj(replacer).filter(|r| rt.is_array(*r)) {
         let n = len_of(rt, r.value())?;
         let mut list: Vec<Value> = Vec::new();
         let mut i = 0.0;
         while i < n {
             let e = get_at(rt, r.value(), i)?;
+            let p = rt.prim_of(e).unwrap_or(e);
             let item = if Realm::str_of(e).is_some() {
                 Some(e)
-            } else if e.is_number() {
+            } else if p.is_number() || Realm::str_of(p).is_some() {
                 Some(rt.to_str(e)?.value())
             } else {
                 None
@@ -444,6 +494,13 @@ fn stringify(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
         }
         keys = Some(list);
     }
+    if let Some(p) = rt.prim_of(space) {
+        if p.is_number() {
+            space = Realm::num(rt.to_number(space)?);
+        } else if Realm::str_of(p).is_some() {
+            space = rt.to_str(space)?.value();
+        }
+    }
     let gap: Vec<u16> = if let Some(n) = space.as_f64() {
         let n = if n.is_nan() { 0.0 } else { n.trunc().min(10.0) };
         vec![0x20; n.max(0.0) as usize]
@@ -452,7 +509,16 @@ fn stringify(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     } else {
         Vec::new()
     };
-    let mut w = Writer { out: Vec::new(), gap, keys, stack: Vec::new() };
-    let key = rt.string("");
-    if w.value(rt, arg(args, 0), key, &[])? { Ok(rt.make_units(&w.out)) } else { Ok(Value::UNDEFINED) }
+    let replacer = if callable(replacer) { replacer } else { Value::UNDEFINED };
+    let mut w = Writer { out: Vec::new(), gap, keys, replacer, stack: Vec::new() };
+    let key = rt.intern("");
+    let value = arg(args, 0);
+    let holder = if replacer.is_undefined() {
+        Value::UNDEFINED
+    } else {
+        let o = Obj::new_plain(rt);
+        rt.define(o, Key::Name(key), value)?;
+        o.value()
+    };
+    if w.value(rt, value, holder, key.value(), &[])? { Ok(rt.make_units(&w.out)) } else { Ok(Value::UNDEFINED) }
 }
