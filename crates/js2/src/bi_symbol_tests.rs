@@ -88,7 +88,7 @@ fn the_well_known_symbols_are_values_with_their_descriptions() {
     check(&[
         ("var r = [Symbol.iterator, Symbol.asyncIterator, Symbol.species, Symbol.toStringTag, Symbol.hasInstance, Symbol.toPrimitive].map(function (s) { return s.description + ':' + typeof s; }).join();", "r", "Symbol.iterator:symbol,Symbol.asyncIterator:symbol,Symbol.species:symbol,Symbol.toStringTag:symbol,Symbol.hasInstance:symbol,Symbol.toPrimitive:symbol"),
         ("var d = Object.getOwnPropertyDescriptor(Symbol, 'iterator'); var r = d.writable + ',' + d.enumerable + ',' + d.configurable + ',' + (Symbol.iterator === Symbol.iterator);", "r", "false,false,false,true"),
-        ("var r = Object.getOwnPropertyNames(Symbol).sort().join();", "r", "asyncIterator,for,hasInstance,iterator,keyFor,length,match,matchAll,name,prototype,replace,search,species,split,toPrimitive,toStringTag"),
+        ("var r = Object.getOwnPropertyNames(Symbol).sort().join();", "r", "asyncIterator,for,hasInstance,iterator,keyFor,length,match,matchAll,name,prototype,replace,search,species,split,toPrimitive,toStringTag,unscopables"),
         ("var d = Object.getOwnPropertyDescriptor(Symbol.prototype, 'description'); var r = typeof d.get + ',' + d.set + ',' + d.enumerable + ',' + d.configurable;", "r", "function,undefined,false,true"),
     ]);
 }
@@ -128,6 +128,6 @@ fn the_prototype_of_a_symbol_has_its_members_however_it_is_reached() {
 fn instanceof_follows_a_bound_function_to_its_target() {
     check(&[
         ("function F() {} var B = F.bind(null); var r = (new F() instanceof B) + ',' + ({} instanceof B);", "r", "true,false"),
-        ("function F() {} Object.defineProperty(F, 'prototype', {get() { throw new RangeError('x'); }}); var r = ''; try { ({}) instanceof F; } catch (e) { r = e.name; } try { 1 instanceof F; r += ',ok'; } catch (e) { r += ',' + e.name; }", "r", "RangeError,ok"),
+        ("const F = () => {}; Object.defineProperty(F, 'prototype', {get() { throw new RangeError('x'); }}); var r = ''; try { ({}) instanceof F; } catch (e) { r = e.name; } try { 1 instanceof F; r += ',ok'; } catch (e) { r += ',' + e.name; }", "r", "RangeError,ok"),
     ]);
 }
