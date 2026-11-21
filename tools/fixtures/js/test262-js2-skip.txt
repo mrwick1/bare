@@ -80,6 +80,12 @@ allow:stable-array-sort
 allow:error-cause
 allow:error-stack-accessor
 allow:Promise
+allow:Promise.allSettled
+allow:Promise.any
+allow:Promise.prototype.finally
+allow:promise-with-resolvers
+allow:promise-try
+allow:AggregateError
 allow:Symbol
 allow:Symbol.prototype.description
 allow:Symbol.toPrimitive
