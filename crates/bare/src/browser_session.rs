@@ -1005,7 +1005,7 @@ impl Session {
                     let (bl, ev, hp) = (self.cfg.browser, self.cfg.eval, self.cfg.heap);
                     let started = if self.cfg.js2 {
                         match Browser::<New>::make(dom, bl, ev, hp) {
-                            Ok(b) => self.load(b, AnyBrowser::New, url, scroll, &mut base, &page, &lim, &mut scan),
+                            Ok(b) => self.load(b.with_session_wall_clock(self.cfg.virtual_clock), AnyBrowser::New, url, scroll, &mut base, &page, &lim, &mut scan),
                             Err(_) => Err(SessionStop::LoadFailed("the realm could not be made".into())),
                         }
                     } else {

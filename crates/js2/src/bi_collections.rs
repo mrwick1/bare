@@ -336,6 +336,19 @@ impl Realm {
         self.type_error(&format!("Method {what} called on incompatible receiver"))
     }
 
+    /// Copy live Map or Set entries in insertion order before inspection can run getters.
+    pub(crate) fn inspect_collection(&self, o: Obj, limit: usize) -> Option<(bool, Vec<(Value, Value)>)> {
+        let kind = o.kind();
+        if !matches!(kind, K_MAP | K_SET) {
+            return None;
+        }
+        let c = Realm::ctx(o.slot(&self.shapes, 0))?;
+        let is_map = kind == K_MAP;
+        let mut cur = Cur { t: Tab { c, w: if is_map { 3 } else { 2 } }, i: 0 };
+        let entries = std::iter::from_fn(|| cur.next()).take(limit).collect();
+        Some((is_map, entries))
+    }
+
     fn this_weak(&mut self, this: Value, kind: u32, what: &str) -> R<(Obj, WeakTab)> {
         if let Some(o) = Realm::obj(this).filter(|o| o.is_kind(kind))
             && let Some(t) = weaktab_of(o.slot(&self.shapes, 0))
