@@ -188,6 +188,10 @@ pub(crate) fn prelude_array_put(rt: &mut Realm, _this: Value, args: &[Value]) ->
     Ok(Value::UNDEFINED)
 }
 
+pub(crate) fn prelude_array_string(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+    rt.to_str(arg(args, 0)).map(Str::value)
+}
+
 fn array_species_get(_rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
     Ok(this)
 }
