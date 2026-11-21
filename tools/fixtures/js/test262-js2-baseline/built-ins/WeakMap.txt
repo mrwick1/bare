@@ -1,0 +1,10 @@
+# test262 counts of tools/js/test262_js2.sh for each directory: directory, old pass, old fail, old skip, new pass, new fail, new skip.
+# old = bare-js, new = bare-js2. Commit: e4fbf57745c6aae3d1f12f181ecef78b1665d812. Written by tools/js/test262_js2.sh -u. Do not edit by hand.
+built-ins/WeakMap 22 0 2 22 0 2
+built-ins/WeakMap/prototype 3 0 0 3 0 0
+built-ins/WeakMap/prototype/delete 19 0 3 19 0 3
+built-ins/WeakMap/prototype/get 11 0 2 11 0 2
+built-ins/WeakMap/prototype/getOrInsert 0 0 17 0 0 17
+built-ins/WeakMap/prototype/getOrInsertComputed 0 0 22 0 0 22
+built-ins/WeakMap/prototype/has 18 0 2 18 0 2
+built-ins/WeakMap/prototype/set 19 0 1 19 0 1
