@@ -27,41 +27,31 @@
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_js::eval::Interp;
-use bare_js::heap::PropertyDescriptor;
-use bare_js::value::{PropertyKey, Value};
-use bare_js_api::{Args, HostFn, Local, Type};
+use bare_js_api::{Args, Attrs, HostFn, Intrinsic, Local, Type};
 
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    let g = it.global_object();
-    let f = d.add_fn(it, lazy, "CSS", 0, false)?;
-    let k = d.key(it, "CSS")?;
-    let desc = PropertyDescriptor { get: Some(Some(f)), set: Some(Some(f)), enumerable: Some(false), configurable: Some(true), ..Default::default() };
-    it.heap.define_own_property(g, k, &desc).map_err(|e| it.heap_error(e))?;
-    Ok(())
+    crate::browser_lazy::install(d, it, &[("CSS", lazy)])
 }
 
 /// The getter (no argument) and the setter (the new value) of the global.
-fn lazy(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    let g = it.global_object();
-    let k = d.key(it, "CSS")?;
-    if let Some(&v) = a.first() {
-        it.define_data(g, k, v, true, false, true)?;
-        return Ok(Value::Undefined);
+fn lazy<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let g = s.global();
+    let attrs = Attrs { writable: true, enumerable: false, configurable: true };
+    if let Some(v) = a.get(0) {
+        s.define_str(g, "CSS", v, attrs)?;
+        return Ok(s.undefined());
     }
-    let ns = d.obj(it, it.object_prototype())?;
+    let proto = s.engine().object_prototype();
+    let ns = d.obj_with_s(s, proto)?;
     for (name, h) in [("supports", supports as HS), ("escape", escape), ("registerProperty", register_property)] {
-        let key = d.key(it, name)?;
-        let f = d.add_fn_s_obj(it, h, name, 1, HostFn::Method)?;
-        it.define_data(ns, key, Value::Object(f), true, true, true)?;
+        let f = d.add_fn_s(s, h, name, 1, HostFn::Method)?;
+        s.define_str(ns, name, f, Attrs::ALL)?;
     }
-    let (ks, kt) = (d.key(it, "Symbol")?, d.key(it, "toStringTag")?);
-    let sym = it.get_value(Value::Object(g), ks)?;
-    if let Value::Symbol(s) = it.get_value(sym, kt)? {
-        let tag = d.js_str(it, "CSS")?;
-        it.define_data(ns, PropertyKey::Symbol(s), tag, false, false, true)?;
-    }
-    it.define_data(g, k, Value::Object(ns), true, false, true)?;
-    Ok(Value::Object(ns))
+    let key = s.intrinsic(Intrinsic::SymbolToStringTag);
+    let tag = d.js_str_s(s, "CSS")?;
+    s.define(ns, key, tag, Attrs { writable: false, enumerable: false, configurable: true })?;
+    s.define_str(g, "CSS", ns, attrs)?;
+    Ok(ns)
 }
 
 /// True when every `(` has its `)` and none comes first.

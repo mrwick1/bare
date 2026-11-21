@@ -227,3 +227,15 @@ Each PR is at most about 400 changed lines of code (the rule of `plan-engine-rew
 5. The build waits for #785 to merge.
 6. The shared suite lives in `bare-js-api` behind a feature (5.1).
 7. The trait keeps `as_str(&self)`. Ropes are flattened on push and at window entry (3.6).
+
+## 10. Built (2026-11-21)
+
+Steps 1 to 3 of section 6 are one change (`progress.md`, entry of 2026-11-21). What differs from the text above:
+
+- `run_script` stays unsupported. js2 has no completion value (the compiler makes none: `script::eval_program` puts the last expression in a global for the same reason). `Realm::run_text(src)` runs a script and gives no value; the shared suite harness reads the value from `__result`. `LazyCompile::script` is the new method that adds a script to a running program.
+- The suite runs from an integration test of `bare-js-api` (`tests/engines.rs`), with `bare-js` and `bare-js2` as dev-dependencies, so `cargo test -p bare-js-api --features suite` runs both engines. The old engine needs the scope test inside `bare_js_api::task`, and answers `unsupported:` where js2 throws a `TypeError` for `class extends` of a `HostFn::Ctor` function.
+- The cost example is `crates/js-api/examples/host_call_load.rs` (both engines in one file), not `crates/js2/examples/`.
+- The `unsafe` sites of `api.rs` are four reads: the chain of windows in `ApiState::mark`, the slot of a window in `a_win`, the two lifetime casts of `as_str`, and the host pointer in `host_call`. Each has a `SAFETY` comment, and `api_tests.rs` covers them (a collection with a window and no script under it, a panic in a host function, a slot that names nothing).
+- A collection never runs inside a host call today: a host function runs inside a native, and a native never collects, and a nested call holds the collector. The window is a root all the same, because the first safepoint that a later step adds needs it.
+- The `Intrinsic` values `IteratorPrototype`, `SymbolIterator` and `SymbolToStringTag` answer `undefined` (js2 has no symbols and no iterator protocol).
+

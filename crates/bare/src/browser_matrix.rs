@@ -23,7 +23,7 @@ use crate::browser_scoped::*;
 use bare_js::eval::Interp;
 use bare_js_api::{Args, Elem, HostFn, Local, Type};
 use bare_js::{atan2, cos, sin, tan};
-use bare_js::value::{ObjId, Value, number_to_string};
+use bare_js::value::{ObjId, number_to_string};
 use std::f64::consts::PI;
 
 #[derive(Clone, Copy)]
@@ -653,7 +653,7 @@ lazy_global!(lazy_rw, "DOMMatrix", ensure_unit, |d| d.geom.m.get().expect("made"
 
 #[inline(never)]
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    browser_lazy::install(d, it, &[("DOMMatrixReadOnly", lazy_ro as H), ("DOMMatrix", lazy_rw)])
+    browser_lazy::install(d, it, &[("DOMMatrixReadOnly", lazy_ro as HS), ("DOMMatrix", lazy_rw)])
 }
 
 fn mat_of(d: &Dom, s: &mut Sc<'_, '_>, this: Local<'_>) -> Option<Mat> {

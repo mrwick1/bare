@@ -173,7 +173,7 @@ A running activation is an ordinary frame. Its safepoints have root maps as any 
 
 #773 `regs`. A resume goes through the same `ensure!` and `reload!` that a call does, so `regs` is set after the stack may have grown. A suspend ends with the same frame pop as `ret!`. No new place keeps a `regs` pointer.
 
-#785 nested runs. The saved state does not name a stack. A generator that suspends on a pooled `Machine` resumes on any other machine or on the main stack. A resume that a native starts (for example `gen.next()` through `call_function`) takes a machine, builds the frame there and runs. The collector stays held in that nested call, as for any nested call. A resume that script starts goes through `Outcome::Resume` (below) and stays in the same `run`: no nested call, no hold, no Rust recursion.
+#785 nested runs. The saved state does not name a stack. A generator that suspends on a pooled `Machine` resumes on any other machine or on the main stack. A resume that a native starts (for example `gen.next()` through `call_function`) takes a machine, builds the frame there and runs. The collector stays held in that nested call, as for any nested call. A resume that script starts goes through `Outcome::Enter` with the hole as `this` (below) and stays in the same `run`: no nested call, no hold, no Rust recursion.
 
 `Op::Lazy`. A generator function has a stub like any function. `Lazy` compiles it into the same code index and runs it from pc 0, and the first suspension is in the real code. The code index in the record stays valid because the table does not move. Bytecode flushing (not built) must pin the code of a function that has a suspended activation. Section 11 lists it.
 

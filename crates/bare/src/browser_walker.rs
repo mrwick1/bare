@@ -692,7 +692,7 @@ lazy_global!(lazy_iterator, "NodeIterator", ensure_iter, |d| state(d).borrow().m
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     d.def_method_s(it, d.p().document, "createTreeWalker", 1, create_tree_walker)?;
     d.def_method_s(it, d.p().document, "createNodeIterator", 1, create_node_iterator)?;
-    crate::browser_lazy::install(d, it, &[("TreeWalker", lazy_walker as H), ("NodeFilter", lazy_filter), ("NodeIterator", lazy_iterator)])
+    crate::browser_lazy::install(d, it, &[("TreeWalker", lazy_walker as HS), ("NodeFilter", lazy_filter), ("NodeIterator", lazy_iterator)])
 }
 
 impl Dom {

@@ -397,13 +397,6 @@ impl Dom {
 
 // ------------------------------------------------------------------------------------------ constructors
 
-pub(crate) fn init_flag(d: &Dom, it: &mut Interp<'_>, init: Value, name: &str) -> R<bool> {
-    let k = d.key(it, name)?;
-    let v = it.get_value(init, k)?;
-    it.to_js_bool(v)
-}
-
-/// `init_flag` on a local.
 pub(crate) fn init_flag_s<'s>(s: &mut Sc<'s, '_>, init: Local<'s>, name: &str) -> Res<'s, bool> {
     s.get_bool_str(init, name)
 }

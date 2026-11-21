@@ -343,7 +343,7 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     let proto = d.obj(it, it.object_prototype())?;
     let _ = d.dataset.proto.set(proto);
     let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
-    let f = d.add_fn(it, illegal_constructor, "DOMStringMap", 0, true)?;
+    let f = d.add_fn_s_obj(it, illegal_constructor, "DOMStringMap", 0, bare_js_api::HostFn::Ctor)?;
     it.define_data(f, kp, Value::Object(proto), false, false, false)?;
     it.define_data(proto, kc, Value::Object(f), true, false, true)?;
     let k = d.key(it, "DOMStringMap")?;
