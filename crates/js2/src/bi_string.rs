@@ -240,13 +240,16 @@ fn substr(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
 }
 
 fn split(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+    let (sep, limit) = (arg(args, 0), arg(args, 1));
+    use crate::regexp_rt::protocol::{split_limit, string_hook};
+    if Realm::obj(sep).is_some()
+        && let Some(value) = string_hook(rt, this, sep, crate::bi_symbol::SPLIT, &[this, limit])?
+    {
+        return Ok(value);
+    }
     let s = rt.this_str(this, "split")?;
     let u = rt.units(s);
-    let limit = if arg(args, 1).is_undefined() { u32::MAX } else { Realm::to_int32(rt.to_number(arg(args, 1))?) as u32 };
-    let sep = arg(args, 0);
-    if let Some(re) = Realm::obj(sep).filter(|o| o.is_kind(crate::object::K_REGEXP)) {
-        return crate::bi_string_regexp::split(rt, re, s, limit);
-    }
+    let limit = split_limit(rt, limit)?;
     let mut out: Vec<Value> = Vec::new();
     if sep.is_undefined() {
         out.push(s.value());
@@ -284,9 +287,9 @@ fn to_lower(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
     map_text(rt, this, "toLowerCase", |s| s.to_lowercase())
 }
 
-/// The white space of the language: `char::is_whitespace` and the byte order mark.
-fn is_space(c: u16) -> bool {
-    char::from_u32(c as u32).is_some_and(|c| c.is_whitespace() || c == '\u{feff}')
+/// ECMAScript WhiteSpace and LineTerminator code units.
+pub(crate) fn is_space(c: u16) -> bool {
+    matches!(c, 9..=13 | 0x20 | 0xA0 | 0x1680 | 0x2000..=0x200A | 0x2028 | 0x2029 | 0x202F | 0x205F | 0x3000 | 0xFEFF)
 }
 
 fn trim_with(rt: &mut Realm, this: Value, name: &str, start: bool, end: bool) -> R<Value> {

@@ -2,10 +2,11 @@
 // makes is a non-enumerable global. The one name `__engine` is a plain global that `lib.rs` puts after it ('old' or 'new').
 (function (g) {
   // The tests change the built-ins (`Array.prototype.join` has a test that deletes it), so the host keeps its own.
-  var join = Array.prototype.join, push = Array.prototype.push;
+  var join = Array.prototype.join, define = Object.defineProperty;
+  function append(a, v) { define(a, a.length, { value: v, writable: true, enumerable: true, configurable: true }); }
   function hide(name, value) { Object.defineProperty(g, name, { value: value, writable: true, configurable: true }); }
   hide('__log', []);
-  hide('print', function print() { push.call(g.__log, join.call(arguments, ' ')); });
+  hide('print', function print() { append(g.__log, join.call(arguments, ' ')); });
   hide('$262', { global: g, gc: function () {}, agent: {} });
   // A value as text. The same code runs on both engines, so a difference in the text is a difference in the engines.
   function show(v, d) {
@@ -19,11 +20,11 @@
     var out = [], i;
     if (v instanceof Error) return 'Error(' + v.name + ': ' + v.message + ')';
     if (Array.isArray(v)) {
-      for (i = 0; i < v.length; i++) push.call(out, i in v ? show(v[i], d + 1) : '<hole>');
+      for (i = 0; i < v.length; i++) append(out, i in v ? show(v[i], d + 1) : '<hole>');
       return '[' + join.call(out, ',') + ']';
     }
     var keys = Object.keys(v);
-    for (i = 0; i < keys.length; i++) push.call(out, keys[i] + ':' + show(v[keys[i]], d + 1));
+    for (i = 0; i < keys.length; i++) append(out, keys[i] + ':' + show(v[keys[i]], d + 1));
     return '{' + join.call(out, ',') + '}';
   }
   // What `print` collected, then the value of the global that `__name` names (the differential runner sets `__name`).

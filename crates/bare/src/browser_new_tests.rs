@@ -66,3 +66,51 @@ fn deleting_a_cached_global_reveals_the_window_named_property() {
         "#), "a,5,6,a");
     })
 }
+
+#[test]
+fn assignment_adopts_a_constructed_stylesheet() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(
+            js(&mut b, "var sheet = new CSSStyleSheet(); sheet.replaceSync('#a { color: red }'); document.adoptedStyleSheets = [sheet]; [getComputedStyle(document.getElementById('a')).color, Object.hasOwn(document, 'adoptedStyleSheets')].join('|')"),
+            "rgb(255, 0, 0)|false",
+        );
+    });
+}
+
+#[test]
+fn assignment_updates_the_dom_through_inherited_setters() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(
+            js(&mut b, "var a = document.getElementById('a'); a.className = 'changed'; document['title'] = 'updated'; [a.getAttribute('class'), document.querySelector('title').textContent, Object.hasOwn(a, 'className'), Object.hasOwn(document, 'title')].join()"),
+            "changed,updated,false,false",
+        );
+        assert_eq!(
+            js(&mut b, "document.dir = 'rtl'; document.designMode = 'on'; [document.documentElement.getAttribute('dir'), document.designMode, Object.hasOwn(document, 'dir'), Object.hasOwn(document, 'designMode')].join()"),
+            "rtl,off,false,false",
+        );
+    });
+}
+
+#[test]
+fn assignment_registers_a_lazy_event_handler() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(
+            js(&mut b, "var hits = 0; document.onchange = function () { hits++; }; document.dispatchEvent(new Event('change')); [hits, Object.hasOwn(document, 'onchange')].join()"),
+            "1,false",
+        );
+    });
+}
+
+#[test]
+fn assignment_adopts_a_constructed_stylesheet_in_a_shadow_root() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(
+            js(&mut b, "var root = document.getElementById('a').attachShadow({ mode: 'open' }); var sheet = new CSSStyleSheet(); root.adoptedStyleSheets = [sheet]; [root.adoptedStyleSheets[0] === sheet, Object.hasOwn(root, 'adoptedStyleSheets')].join()"),
+            "true,false",
+        );
+    });
+}
