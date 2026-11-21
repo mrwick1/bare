@@ -1,6 +1,6 @@
 //! Parse-only load rows for the pre-parser (S2.2). One mode and one case per process:
 //!
-//!   parse_load MODE CASE SCALE      MODE: full | lazy | fns      CASE: stmts | chain | bodies | file PATH
+//!   js2_parse_load MODE CASE SCALE      MODE: full | lazy | fns      CASE: stmts | chain | bodies | file PATH
 //!
 //! - `full`: `parse_script`, one tree of the whole text (the old parser's work, as ported).
 //! - `lazy`: `parse_script_lazy`, the pre-parse: the top-level tree and the facts of every function.
@@ -98,7 +98,7 @@ fn bodies_src(n: usize) -> String {
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
-    let (Some(mode), Some(case)) = (a.get(1), a.get(2)) else { die("usage: parse_load MODE CASE SCALE [PATH]".into()) };
+    let (Some(mode), Some(case)) = (a.get(1), a.get(2)) else { die("usage: js2_parse_load MODE CASE SCALE [PATH]".into()) };
     let scale: usize = a.get(3).and_then(|s| s.parse().ok()).unwrap_or_else(|| die("scale".into()));
     let src = match case.as_str() {
         "stmts" => stmts_src(2000 * scale),

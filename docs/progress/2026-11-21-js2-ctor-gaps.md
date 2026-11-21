@@ -38,11 +38,11 @@ Same method as the previous change (release builds, `tools/js/instr.sh`, glibc a
 | --- | ---: | ---: | ---: | ---: |
 | `interp_load loopfn 3000000` | -0.000% | +0.003% | +0.000% | +0.004% |
 | `interp_load calls 1000000` | +0.000% | -0.000% | +0.000% | +0.000% |
-| `gen_load next 100000` | +0.001% | +0.001% | +0.001% | +0.001% |
-| `promise_load then 100000` | +0.991% | +0.969% | +0.000% | +0.000% |
+| `js2_gen_load next 100000` | +0.001% | +0.001% | +0.001% | +0.001% |
+| `js2_promise_load then 100000` | +0.991% | +0.969% | +0.000% | +0.000% |
 | startup (`script_run`, `var x = 1;`) | -0.115% | -0.055% | -0.006% | -0.002% |
 
-`promise_load then` is over +0.5% in the default build (+1,496,590 instructions) and within it at `codegen-units=1` (+661). The rule allows it. The change does not touch the code of this row, so this is a layout effect (hypothesis; the same row moved the same way in A1 and in the previous change).
+`js2_promise_load then` is over +0.5% in the default build (+1,496,590 instructions) and within it at `codegen-units=1` (+661). The rule allows it. The change does not touch the code of this row, so this is a layout effect (hypothesis; the same row moved the same way in A1 and in the previous change).
 
 ## Not tested
 

@@ -42,8 +42,8 @@ Base: `287805fe`. Release builds, own `CARGO_TARGET_DIR` for each tree, `tools/j
 | `interp_load fib 27` | 260,843,934 | 260,525,663 | -0.122% | 248,752,897 | 249,070,365 | +0.128% |
 | `interp_load closures 1000000` | 1,964,380,304 | 1,949,808,510 | -0.742% | 1,934,829,875 | 1,924,401,215 | -0.539% |
 | `interp_load objects 1000000` | 722,258,735 | 716,324,612 | -0.822% | 731,305,085 | 717,238,883 | -1.923% |
-| `gen_load next 100000` | 170,286,614 | 170,355,585 | +0.041% | 166,309,179 | 165,047,600 | -0.759% |
-| `gen_load host 100000` | 101,267,978 | 101,571,357 | +0.300% | 99,246,253 | 98,949,655 | -0.299% |
+| `js2_gen_load next 100000` | 170,286,614 | 170,355,585 | +0.041% | 166,309,179 | 165,047,600 | -0.759% |
+| `js2_gen_load host 100000` | 101,267,978 | 101,571,357 | +0.300% | 99,246,253 | 98,949,655 | -0.299% |
 
 `loopfn` is +0.71% in the default build (exactly 2 instructions per turn, and the loop has no op that this change touches) and 0.000% at `codegen-units=1`. So it is a code layout effect and it passes the rule (within +0.5% at `codegen-units=1`). I did not run the jemalloc counts or the full cost matrix; the rows above are the js2 micro rows only (hypothesis: the `bare` rows are not affected, because `crates/bare` links no code of this change; not compared).
 
@@ -55,7 +55,7 @@ Base: `287805fe`. Release builds, own `CARGO_TARGET_DIR` for each tree, `tools/j
 | `o.next().value` of a plain method that returns an object | 101,077,775 | 1,011 |
 | `for (v of g(N))` over the same generator | 135,650,177 | 1,357 |
 
-So a `next()` call costs about 1,500 more than a plain method that returns an object. The `for-of` path is 45% cheaper than the method path, because it makes no result object and no native call. The hand-written `gen_load host` row (a Rust loop on `Vm::resume`, no result object) is about 990 per resume. A plan for G3: run the generator frame of `for-of` in the same machine (no nested `run`), with the end signalled by the jump of `IterNext`. I did not do it here.
+So a `next()` call costs about 1,500 more than a plain method that returns an object. The `for-of` path is 45% cheaper than the method path, because it makes no result object and no native call. The hand-written `js2_gen_load host` row (a Rust loop on `Vm::resume`, no result object) is about 990 per resume. A plan for G3: run the generator frame of `for-of` in the same machine (no nested `run`), with the end signalled by the jump of `IterNext`. I did not do it here.
 
 ## Not tested
 
