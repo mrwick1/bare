@@ -237,3 +237,14 @@ fn prelude_builtins_have_no_construct_slot_before_or_after_call() {
         ("var f = Array.from; try { new f(); } catch (e) { return e.name; }", "TypeError"),
     ]);
 }
+
+#[test]
+fn array_species_constructs_results_and_defines_own_elements() {
+    check(&[
+        ("var a = [1, 2]; function S(n) { this.requested = n; } a.constructor = {[Symbol.species]: S}; var r = a.map(function(x) { return x * 2; }); return [r instanceof S, r.requested, r[0], r[1], r.length].join();", "true,2,2,4,"),
+        ("var a = [1]; function S(n) { this.requested = n; } a.constructor = {[Symbol.species]: S}; var r = a.slice(); return [r instanceof S, r.requested, r[0], r.length].join();", "true,1,1,1"),
+        ("var a = [1]; a.constructor = {[Symbol.species]: function() { return Object.preventExtensions({}); }}; try { a.concat([2]); } catch (e) { return e.name; }", "TypeError"),
+        ("var a = [1]; a.constructor = {get [Symbol.species]() { throw 'species'; }}; try { a.flatMap(function(x) { return x; }); } catch (e) { return e; }", "species"),
+        ("return Object.getOwnPropertyDescriptor(Array, Symbol.species).get.call(7);", "7"),
+    ]);
+}
