@@ -1315,3 +1315,14 @@ fn computed_read_write_operations_convert_the_key_once() {
         ("var n = 0, k = {toString() { n++; return 'x'; }}; class A { get x() { return this.v; } set x(v) { this.v = v; } } class B extends A { f() { this.v = 3; return ++super[k]; } } var o = new B(); var r = [o.f(), o.v, n].join();", "r", "4,4,1"),
     ]);
 }
+
+#[test]
+fn array_iteration_respects_overrides_and_inherited_elements() {
+    check(&[
+        ("Array.prototype[Symbol.iterator] = function*() { yield 42; }; class C { m([a]) { return a; } } var r = new C().m([1]);", "r", "42"),
+        ("var a = [1]; a[Symbol.iterator] = null; var r; try { var [x] = a; } catch (e) { r = e.name; }", "r", "TypeError"),
+        ("var a = [1], p = Object.getPrototypeOf(a.values()); p.next = function() { return {value: 7, done: false}; }; var [r] = a;", "r", "7"),
+        ("var a = [,2]; Array.prototype[0] = 5; var [r] = a;", "r", "5"),
+        ("var a = [undefined, 2], n = 0; function install() { var p = Object.getPrototypeOf(a.values()); p.return = function() { n = this.next().value; return {}; }; } var [x = install()] = a; var r = n;", "r", "2"),
+    ]);
+}

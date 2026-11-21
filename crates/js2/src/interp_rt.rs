@@ -601,6 +601,7 @@ impl Realm {
         self.pool.iter_mut().flat_map(|p| p.fbs.iter_mut()).for_each(Feedback::collected);
         if self.shapes.epoch() != self.epoch {
             self.epoch = self.shapes.epoch();
+            self.ltab.array_iter_spot = None;
             fbs.iter_mut().for_each(Feedback::clear);
             self.pool.iter_mut().flat_map(|p| p.fbs.iter_mut()).for_each(Feedback::clear);
         }
