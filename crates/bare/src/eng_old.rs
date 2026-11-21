@@ -407,8 +407,8 @@ impl Ops<Old> for Interp<'static> {
         (self.heap.key_from_str(s).map_err(|e| Interp::heap_error(self, e))).map_err(Fault::from)
     }
     #[inline(always)]
-    fn h_str_units(& self, s: StrId) -> Result<&[u16], Fault<Old>> {
-        (self.heap.str_units(s).map_err(Error::Heap)).map_err(Fault::from)
+    fn h_str_units(& self, s: StrId) -> Result<std::borrow::Cow<'_, [u16]>, Fault<Old>> {
+        (self.heap.str_units(s).map(std::borrow::Cow::Borrowed).map_err(Error::Heap)).map_err(Fault::from)
     }
     #[inline(always)]
     fn h_str_len(& self, s: StrId) -> Result<usize, Fault<Old>> {

@@ -53,7 +53,6 @@ pub(crate) const PRE: &[(&str, Pd)] = &[
     ("mergeSort", Func("mergeSort")),
     ("sortList", Func("sortList")),
     ("flatten", Func("flatten")),
-    ("replaceWith", Func("replaceWith")),
     ("arrayIterator", Native(crate::bi_typed::array_iterator, 2, "arrayIterator")),
     ("arrayIteratorProto", ArrayIter),
     ("rawDefine", Native(crate::bi_object::object_define_property, 3, "defineProperty")),
@@ -63,8 +62,6 @@ pub(crate) const PRE: &[(&str, Pd)] = &[
     ("getOwn", Native(crate::bi_object::object_own_descriptor, 2, "getOwnPropertyDescriptor")),
     ("ownNames", Native(crate::bi_object::object_own_names, 1, "getOwnPropertyNames")),
     ("set", Native(crate::bi_object::set_strict, 3, "set")),
-    ("nativeReplace", Native(crate::bi_string::replace, 2, "replace")),
-    ("nativeReplaceAll", Native(crate::bi_string::replace_all, 2, "replaceAll")),
 ];
 
 /// The number of slots.

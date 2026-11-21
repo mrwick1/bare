@@ -136,22 +136,6 @@ function mergeSort(a, n, cmp) {
   }
   return src;
 }
-function replaceWith(native, s, p, r) {
-  if (typeof r !== 'function') return native.call(s, p, r);
-  s = '' + s;
-  if (typeof p !== 'string') throw new TypeError('a RegExp pattern is not supported');
-  var out = '', at = 0, i;
-  while ((i = s.indexOf(p, at)) >= 0) {
-    out += s.slice(at, i) + r(p, i, s);
-    at = i + p.length;
-    if (native === nativeReplace) break;
-    if (p.length === 0) {
-      if (at >= s.length) break;
-      out += s[at++];
-    }
-  }
-  return out + s.slice(at);
-}
 function sortList(a, n, cmp) {
   var vals = [], k = 0, undefs = 0;
   for (var i = 0; i < n; i++) {
@@ -390,5 +374,3 @@ function array_from(src) {
   r.length = n;
   return r;
 }
-function string_replace(p, r) { return replaceWith(nativeReplace, this, p, r); }
-function string_replaceAll(p, r) { return replaceWith(nativeReplaceAll, this, p, r); }

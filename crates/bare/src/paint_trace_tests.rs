@@ -21,7 +21,7 @@ fn window_paint_fixture() {
             let mut b = Browser::new(tree::parse(html), BrowserLimits::default(), EvalLimits::default(), HeapLimits::default()).unwrap();
             b.set_viewport(400.0, 300.0).unwrap();
             b.set_document_url("http://localhost/trace.html").unwrap();
-            let mut page = Page::new(Source::Browser(Box::new(b)), (400, 300));
+            let mut page = Page::new(Source::Browser(Box::new(b.into())), (400, 300));
             page.quiet = true;
             for _ in 0..2 {
                 assert!(page.capture_tall(300, false).is_some());

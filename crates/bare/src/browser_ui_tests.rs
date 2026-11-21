@@ -35,7 +35,7 @@ fn page_of(html: &str) -> Page {
     if !script.is_empty() {
         b.run_script(script).expect("script");
     }
-    Page::new(Source::Browser(Box::new(b)), (400, 400))
+    Page::new(Source::Browser(Box::new(b.into())), (400, 400))
 }
 
 fn chrome() -> BTreeMap<&'static str, Vec<&'static str>> {

@@ -40,7 +40,7 @@ fn run(n: usize, steps: usize) {
     b.set_viewport(800.0, 600.0).expect("viewport");
     b.set_document_url("http://localhost/sticky.html").expect("url");
     drop(html);
-    let mut p = Page::new(Source::Browser(Box::new(b)), (800, 600));
+    let mut p = Page::new(Source::Browser(Box::new(b.into())), (800, 600));
     let t = Instant::now();
     p.paint();
     let first = t.elapsed();

@@ -80,7 +80,7 @@ fn run(lines: usize, steps: usize) {
     b.set_viewport(800.0, 600.0).expect("viewport");
     b.set_document_url("http://localhost/long.html").expect("url");
     drop(html);
-    let mut p = Page::new(Source::Browser(Box::new(b)), (800, 600));
+    let mut p = Page::new(Source::Browser(Box::new(b.into())), (800, 600));
     let parse = t.elapsed();
     let (a0, by0) = (ALLOCS.load(Relaxed), BYTES.load(Relaxed));
     let t = Instant::now();
