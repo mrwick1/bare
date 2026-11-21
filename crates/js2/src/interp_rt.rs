@@ -51,6 +51,7 @@ use crate::codes::Codes;
 use crate::interp::LazyCompile;
 use crate::reenter::Machine;
 use crate::builtins::{Hint, Native};
+use crate::object::K_PROXY;
 use crate::object::{Ctx, F_CLASS, F_ELEMS_FIXED, F_ELEMS_RO, F_HOST, F_LAZY, F_LAZYM, F_LEN_RO, F_NATIVE, F_NOEXT, F_PROTO, F_SLOWIDX, K_WRAP, Obj};
 use crate::shapes::{A_ACC, A_C, A_E, A_W, Entry, ShapeId, Shapes};
 use crate::string::{Chars, Str};
@@ -261,6 +262,7 @@ pub enum Put {
 /// What a property lookup found: a data value, or the getter and the setter of an accessor.
 #[derive(Clone, Copy, Debug)]
 pub enum Slot {
+    Proxy(Obj),
     Data(Value),
     Acc(Value, Value),
 }
@@ -347,6 +349,8 @@ pub struct Realm {
     pub error_protos: [Obj; 7],
     /// The shape of a built-in function cell: slot 0 is the index in `natives`, slots 1 to 3 are free for the function (a bound function).
     pub s_native: ShapeId,
+    pub(crate) proxy_natives: Option<usize>,
+    pub(crate) proxy_depth: u32,
     /// The built-ins written in Rust (`builtins.rs`).
     pub natives: Vec<Native>,
     /// The shared atom of the `name` and the `length` of each code (`Code::fn_name`, `Code::fn_len`), for `Realm::fn_props`.
@@ -513,6 +517,8 @@ impl Realm {
             registry: None,
             error_protos,
             s_native,
+            proxy_natives: None,
+            proxy_depth: 0,
             genr: crate::generator::GenRealm { proto: gen_proto, s_iter, keys: gkeys, func_proto: None, async_proto: None, async_shape: None, ag: Default::default() },
             natives: Vec::new(),
             fn_info: Vec::new(),
@@ -960,6 +966,9 @@ impl Realm {
     /// that is not made yet is made on the way.
     pub fn lookup_g(&mut self, mut o: Obj, key: Str) -> Option<Slot> {
         loop {
+            if o.is_kind(K_PROXY) {
+                return Some(Slot::Proxy(o));
+            }
             self.lazy_prep(o, key);
             if let Some(s) = self.slot_at(o, key) {
                 return Some(s);
@@ -984,17 +993,24 @@ impl Realm {
         match self.lookup_g(o, key) {
             Some(Slot::Data(v)) => Ok(Some(v)),
             Some(Slot::Acc(..)) => self.type_error("accessors are not supported here (the host needs a call)"),
+            Some(Slot::Proxy(proxy)) => self.proxy_get(proxy, Key::Name(key), o.value()).map(Some),
             None if key == self.k_prototype && self.needs_prototype(o) => self.make_prototype(o).map(Some),
             None => Ok(None),
         }
     }
 
-    pub(crate) fn got(s: Option<Slot>) -> Got {
-        match s {
+    pub(crate) fn got(&mut self, s: Option<Slot>, key: Key, receiver: Value) -> R<Got> {
+        Ok(match s {
             Some(Slot::Data(v)) => Got::Val(v),
             Some(Slot::Acc(g, _)) if !g.is_undefined() => Got::Get(g),
+            Some(Slot::Proxy(proxy)) => Got::Val(self.proxy_get(proxy, key, receiver)?),
             _ => Got::Val(Value::UNDEFINED),
-        }
+        })
+    }
+
+    fn get_named_g(&mut self, o: Obj, key: Str, receiver: Value) -> R<Got> {
+        let slot = self.lookup_g(o, key);
+        self.got(slot, Key::Name(key), receiver)
     }
 
     pub(crate) fn setter(s: Value) -> Put {
@@ -1009,6 +1025,9 @@ impl Realm {
     /// `recv[key]`; an accessor with a getter gives [`Got::Get`].
     pub fn get_prop_g(&mut self, recv: Value, key: Key) -> R<Got> {
         if let Some(o) = Realm::obj(recv) {
+            if o.is_kind(K_PROXY) {
+                return self.proxy_get(o, key, recv).map(Got::Val);
+            }
             if let Some(s) = self.string_wrapper(o)
                 && let Some(v) = self.string_own(s, key)
             {
@@ -1030,7 +1049,8 @@ impl Realm {
                         return Ok(Got::Val(v));
                     }
                     let k = self.idx_atom(i);
-                    Ok(Self::got(self.lookup_g(o, k)))
+                    let slot = self.lookup_g(o, k);
+                    self.got(slot, key, recv)
                 }
                 Key::Name(k) => {
                     if k == self.k_length && self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed {
@@ -1039,7 +1059,7 @@ impl Realm {
                     self.fn_prep(o, k);
                     match self.lookup_g(o, k) {
                         None if k == self.k_prototype && self.needs_prototype(o) => self.make_prototype(o).map(Got::Val),
-                        s => Ok(Self::got(s)),
+                        s => self.got(s, key, recv),
                     }
                 }
             };
@@ -1055,20 +1075,20 @@ impl Realm {
                     }
                     None => Value::UNDEFINED,
                 }),
-                Key::Name(k) => Self::got(self.lookup_g(self.string_proto, k)),
+                Key::Name(k) => return self.get_named_g(self.string_proto, k, recv),
             });
         }
         if recv.is_number() || recv.as_bool().is_some() {
             let proto = if recv.is_number() { self.number_proto } else { self.boolean_proto };
             return Ok(match key {
-                Key::Name(k) => Self::got(self.lookup_g(proto, k)),
+                Key::Name(k) => return self.get_named_g(proto, k, recv),
                 Key::Idx(_) => Got::Val(Value::UNDEFINED),
             });
         }
         if recv.as_pointer().is_some_and(|p| p.0 == Kind::Symbol) {
             self.fn_props(self.symbol_proto);
             return Ok(match key {
-                Key::Name(k) => Self::got(self.lookup_g(self.symbol_proto, k)),
+                Key::Name(k) => return self.get_named_g(self.symbol_proto, k, recv),
                 Key::Idx(_) => Got::Val(Value::UNDEFINED),
             });
         }
@@ -1109,14 +1129,20 @@ impl Realm {
         if self.has_string_own(o, key) {
             return Ok(Put::Fail);
         }
+        if o.is_kind(K_PROXY) {
+            return self.proxy_set(o, key, v, recv).map(|ok| if ok { Put::Done } else { Put::Fail });
+        }
         if self.api.hs.active && o.has_flag(F_HOST) && let Some(ok) = self.hs_write(o, key, crate::api_host::HsWrite::Set(v))? {
             return Ok(if ok { Put::Done } else { Put::Fail });
         }
         self.fn_props(o);
         match key {
             Key::Idx(i) if self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed && !o.has_flag(F_SLOWIDX) => {
+                let exists = o.get_element(i).is_some();
+                if !exists && let Some(p) = self.proto_of(o) && p != self.array_proto && p != self.object_proto {
+                    return self.set_from(p, key, v, recv).map(|ok| if ok { Put::Done } else { Put::Fail });
+                }
                 if o.has_flag(F_NOEXT | F_ELEMS_RO | F_LEN_RO) {
-                    let exists = o.get_element(i).is_some();
                     let refuse = if exists { o.has_flag(F_ELEMS_RO) } else { o.has_flag(F_NOEXT) || (i >= o.len() && o.has_flag(F_LEN_RO)) };
                     if refuse {
                         return Ok(Put::Fail);
@@ -1169,9 +1195,12 @@ impl Realm {
     }
 
     /// A setter or a rejected write from the first descriptor on the prototype chain.
-    fn proto_setter(&mut self, o: Obj, k: Str) -> R<Option<Put>> {
+    fn proto_setter(&mut self, o: Obj, k: Str, value: Value) -> R<Option<Put>> {
         let mut proto = self.proto_of(o);
         while let Some(p) = proto {
+            if p.is_kind(K_PROXY) {
+                return self.proxy_set(p, Key::Name(k), value, o.value()).map(|ok| Some(if ok { Put::Done } else { Put::Fail }));
+            }
             self.lazy_prep(p, k);
             if let Some(e) = self.store_entry(p, k)? {
                 // An accessor: its setter. A data property that is not writable: nothing is written (`Put::Fail`).
@@ -1202,7 +1231,7 @@ impl Realm {
                 Ok(Put::Done)
             }
             None => {
-                if let Some(p) = self.proto_setter(o, k)? {
+                if let Some(p) = self.proto_setter(o, k, v)? {
                     return Ok(p);
                 }
                 if !o.extensible() {
@@ -1232,7 +1261,7 @@ impl Realm {
     /// `get_field_slow` for an object.
     #[inline(never)]
     fn get_obj_field(&mut self, fb: &mut Feedback, site: usize, name: Str, o: Obj, recv: Value) -> R<Got> {
-        if o.has_flag(F_HOST) {
+        if o.has_flag(F_HOST) || o.is_kind(K_PROXY) {
             return self.get_prop_g(recv, Key::Name(name));
         }
         self.lazy_prep(o, name);
@@ -1300,6 +1329,9 @@ impl Realm {
         let start = start?;
         let mut o = start;
         let (holder, slot) = loop {
+            if o.is_kind(K_PROXY) {
+                return None;
+            }
             self.lazy_prep(o, name);
             if let Some(e) = self.shapes.find(o.shape(&self.shapes), name) {
                 if e.attrs() & A_ACC != 0 {
@@ -1435,7 +1467,7 @@ impl Realm {
     /// `recv.name = v` at a site.
     pub fn set_field_slow(&mut self, fb: &mut Feedback, site: usize, name: Str, recv: Value, v: Value) -> R<Put> {
         let Some(o) = Realm::obj(recv) else { return self.set_prop_g(recv, Key::Name(name), v) };
-        if o.has_flag(F_HOST) || o.is_kind(K_WRAP) {
+        if o.has_flag(F_HOST) || o.is_kind(K_WRAP) || o.is_kind(K_PROXY) {
             return self.set_prop_g(recv, Key::Name(name), v);
         }
         self.fn_prep(o, name);
@@ -1473,7 +1505,7 @@ impl Realm {
                 if o.has_flag(F_LAZYM) || (name == self.k_length && self.shapes.get(id).layout == Layout::Indexed) {
                     return self.set_prop_g(recv, Key::Name(name), v);
                 }
-                if let Some(p) = self.proto_setter(o, name)? {
+                if let Some(p) = self.proto_setter(o, name, v)? {
                     return Ok(p);
                 }
                 if !o.extensible() {
@@ -1543,6 +1575,9 @@ impl Realm {
             }
         }
         loop {
+            if o.is_kind(K_PROXY) {
+                return self.proxy_has(o, key);
+            }
             if self.has_string_own(o, key) {
                 return Ok(true);
             }
@@ -1569,6 +1604,10 @@ impl Realm {
 
     pub fn delete_prop(&mut self, recv: Value, key: Key) -> R<bool> {
         let Some(o) = Realm::obj(recv) else { return Ok(true) };
+        if o.is_kind(K_PROXY) {
+            return self.proxy_delete(o, key);
+        }
+        self.prepare_own_prototype(o, key)?;
         if self.has_string_own(o, key) {
             return Ok(false);
         }
@@ -1613,11 +1652,12 @@ impl Realm {
     pub fn instance_of(&mut self, x: Value, f: Value) -> R<bool> {
         let Some(fo) = Realm::obj(f) else { return self.type_error("the right side of instanceof is not an object") };
         self.fn_props(fo);
-        match self.lookup_g(fo, self.wk[crate::bi_symbol::HAS_INSTANCE]) {
+        let key = self.wk[crate::bi_symbol::HAS_INSTANCE];
+        match self.lookup_g(fo, key) {
             None => {}
             Some(Slot::Data(h)) if self.native_id(h).is_some_and(|i| self.natives[i].name == crate::bi_symbol::HAS_INSTANCE_NAME) => {}
             Some(s) => {
-                let h = match Self::got(Some(s)) {
+                let h = match self.got(Some(s), Key::Name(key), f)? {
                     Got::Val(h) => h,
                     Got::Get(g) => self.call_function(g, f, &[])?,
                 };
@@ -1653,7 +1693,7 @@ impl Realm {
         let Some(mut o) = Realm::obj(x) else { return Ok(false) };
         let p = self.get_prop(fo.value(), Key::Name(self.k_prototype))?;
         let Some(po) = Realm::obj(p) else { return self.type_error("function has non-object prototype in instanceof check") };
-        while let Some(n) = self.proto_of(o) {
+        while let Some(n) = self.get_proto_internal(o)? {
             if n == po {
                 return Ok(true);
             }

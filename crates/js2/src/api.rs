@@ -938,7 +938,7 @@ impl Engine for Realm {
     }
 
     fn is_array<'s>(&mut self, v: Local<'_>) -> Result<bool, Error<'s>> {
-        Ok(Realm::obj(self.a_at(v)).is_some_and(|o| Realm::is_array(self, o)))
+        self.is_array_value(self.a_at(v)).map_err(|e| self.a_err(e))
     }
 
     fn intrinsic<'s>(&mut self, which: Intrinsic) -> Local<'s> {
@@ -955,7 +955,8 @@ impl Engine for Realm {
 
     fn get_prototype_of<'s>(&mut self, obj: Local<'_>) -> Result<Option<Local<'s>>, Error<'s>> {
         let o = self.a_obj(obj)?;
-        Ok(self.proto_of(o).map(|p| self.a_push(p.value())))
+        let p = self.get_proto_internal(o).map_err(|e| self.a_err(e))?;
+        Ok(p.map(|p| self.a_push(p.value())))
     }
 
     fn set_prototype_of<'s>(&mut self, obj: Local<'_>, proto: Option<Local<'_>>) -> Result<bool, Error<'s>> {

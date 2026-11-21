@@ -1738,7 +1738,7 @@ impl Vm {
                             std::hint::cold_path();
                             gate!();
                             let n = name!(c!());
-                            match tri!(realm.super_get(home!(), Key::Name(n))) {
+                            match tri!(realm.super_get(home!(), Key::Name(n), r!(b!()))) {
                                 Got::Val(v) => {
                                     r!(a!()) = v;
                                     pc = next;
@@ -1753,7 +1753,7 @@ impl Vm {
                             if opv == Op::GetSuperElemRef {
                                 r!(c!()) = k.as_value();
                             }
-                            match tri!(realm.super_get(home!(), k)) {
+                            match tri!(realm.super_get(home!(), k, r!(b!()))) {
                                 Got::Val(v) => {
                                     r!(a!()) = v;
                                     pc = next;

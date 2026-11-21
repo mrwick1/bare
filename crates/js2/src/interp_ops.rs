@@ -8,6 +8,7 @@
 //! gap: a script that builds the string `"\0#x\0<n>"` can reach the property. A symbol cell (S2.7) removes the gap.
 use crate::cell::Layout;
 use crate::interp_rt::{ErrKind, Got, Key, Put, R, Realm, Slot};
+use crate::object::K_PROXY;
 use crate::object::{F_CLASS, F_DERIVED, Obj};
 use crate::shapes::{A_ACC, A_C, A_E, A_W};
 use crate::string::Str;
@@ -314,22 +315,22 @@ impl Realm {
     }
 
     /// `super[key]` read: the lookup starts at the prototype of the home object. A getter runs with the `this` of the caller.
-    pub fn super_get(&mut self, home: Value, key: Key) -> R<Got> {
+    pub fn super_get(&mut self, home: Value, key: Key, receiver: Value) -> R<Got> {
         let k = self.key_atom(key);
-        Ok(match self.super_base(home)? {
-            None => return self.type_error("cannot read properties of null (the prototype of the home object)"),
-            Some(b) => Self::got(self.lookup_g(b, k)),
-        })
+        let Some(b) = self.super_base(home)? else { return self.type_error("cannot read properties of null (the prototype of the home object)") };
+        let slot = self.lookup_g(b, k);
+        self.got(slot, key, receiver)
     }
 
     /// `super[key] = v`: a setter that the prototype chain gives runs with `this`; else the value is set on `this`.
     pub fn super_set(&mut self, home: Value, this: Value, key: Key, v: Value) -> R<Put> {
         let k = self.key_atom(key);
         let Some(b) = self.super_base(home)? else { return self.type_error("cannot set properties of null (the prototype of the home object)") };
-        if let Some(Slot::Acc(_, s)) = self.lookup_g(b, k) {
-            return Ok(Self::setter(s));
+        match self.lookup_g(b, k) {
+            Some(Slot::Acc(_, s)) => Ok(Self::setter(s)),
+            Some(Slot::Proxy(proxy)) => self.proxy_set(proxy, key, v, this).map(|ok| if ok { Put::Done } else { Put::Fail }),
+            _ => self.set_prop_g(this, key, v),
         }
-        self.set_prop_g(this, key, v)
     }
 
     // ---- spread and rest ----
@@ -383,7 +384,17 @@ impl Realm {
             }
         }
         let mut out = Vec::new();
-        if let Some(o) = Realm::obj(src) {
+        if let Some(o) = Realm::obj(src).filter(|o| o.is_kind(K_PROXY)) {
+            for value in self.proxy_keys(o)? {
+                let k = self.key_of(value)?;
+                if skip.iter().any(|s| k.as_value() == s.as_value()) {
+                    continue;
+                }
+                if self.get_own_h(o, k)?.is_some_and(|d| d.attrs() & A_E != 0) {
+                    out.push((k, self.get_prop(src, k)?));
+                }
+            }
+        } else if let Some(o) = Realm::obj(src) {
             if self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed {
                 for i in 0..o.len() {
                     if let Some(v) = o.get_element(i)

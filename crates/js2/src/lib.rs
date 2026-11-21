@@ -75,6 +75,7 @@ mod promise_statics;
 mod bi_symbol;
 mod bi_collections;
 mod bi_reflect;
+mod bi_proxy;
 mod bi_string_more;
 mod bi_string_regexp;
 mod bi_uri;
