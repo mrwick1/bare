@@ -18,7 +18,7 @@
 
 use crate::browser::*;
 use crate::browser_geom::{Iface, Slot, finish_s, illegal_s, make_s, method_s, new_obj_s, num_s, point_init, point_object_s, put_s};
-use crate::browser_lazy::{self, lazy_global};
+use crate::browser_lazy::lazy_global;
 use crate::browser_scoped::*;
 use bare_js::eval::Interp;
 use bare_js_api::{Args, Elem, HostFn, Local, Type};
@@ -652,8 +652,13 @@ lazy_global!(lazy_ro, "DOMMatrixReadOnly", ensure_unit, |d| d.geom.m.get().expec
 lazy_global!(lazy_rw, "DOMMatrix", ensure_unit, |d| d.geom.m.get().expect("made")[1].ctor);
 
 #[inline(never)]
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    browser_lazy::install(d, it, &[("DOMMatrixReadOnly", lazy_ro as HS), ("DOMMatrix", lazy_rw)])
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+    table!(lazy = [
+        Row::both(1, "DOMMatrixReadOnly", lazy_ro),
+        Row::both(1, "DOMMatrix", lazy_rw),
+    ]);
+    let g = s.global();
+    d.install_rows(s, &[g], &lazy::T)
 }
 
 fn mat_of(d: &Dom, s: &mut Sc<'_, '_>, this: Local<'_>) -> Option<Mat> {

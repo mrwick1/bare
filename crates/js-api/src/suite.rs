@@ -6,7 +6,7 @@
 //!
 //! Scripts are written so that the value of the last statement is an expression.
 
-use crate::{Args, Attrs, Engine, Error, Host, HostFn, Intrinsic, Local, Persistent, PromiseState, Scope, Str, Type, enter, task};
+use crate::{Args, Attrs, Def, Engine, Error, Host, HostFn, Intrinsic, Local, Persistent, PromiseState, Scope, Str, Type, enter, task};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -425,6 +425,254 @@ pub fn handles_survive_a_top_level_call_that_allocates<H: Harness>(stress: bool)
         let q = s.local(&p);
         let t = s.get_str(q, "tag").unwrap();
         assert_eq!(s.as_str(t).unwrap().to_string_lossy(), "live");
+    });
+    assert_eq!(depth(&mut h), 0);
+}
+
+/// The host of the table test: function `TABLE_BASE + i` is row id `i`.
+struct TableHost;
+
+const TABLE_BASE: u32 = 100;
+
+static TABLE: [Def; 7] = [
+    Def::method("twice", 0b01, 0, 1),
+    Def::method("both", 0b11, 1, 2),
+    Def::accessor("size", 0b01, 2, Some(3)),
+    Def::accessor("ro", 0b10, 4, None),
+    Def::number("LIMIT", 0b01, 7.0),
+    Def::method("shown", 0b10, 5, 0).with(Attrs::ALL),
+    Def::both("lazy", 0b01, 6),
+];
+
+impl<E: Engine> Host<E> for TableHost {
+    fn call<'s>(&self, s: &mut Scope<'s, E>, id: u32, this: Local<'s>, args: Args<'s>, _is_new: bool) -> Result<Local<'s>, Error<'s>> {
+        match id - TABLE_BASE {
+            0 => {
+                let n = args.get(0).and_then(|a| s.as_number(a)).unwrap_or(f64::NAN);
+                Ok(s.number(n * 2.0))
+            }
+            1 => Ok(s.number(1.0)),
+            2 => s.get_str(this, "n"),
+            3 => {
+                let v = args.get(0).unwrap_or_else(|| s.undefined());
+                s.define_str(this, "n", v, Attrs::METHOD)?;
+                Ok(s.undefined())
+            }
+            4 => s.string("ro"),
+            5 => s.string("shown"),
+            _ => {
+                let n = args.len();
+                Ok(s.number(n as f64))
+            }
+        }
+    }
+}
+
+/// Install `TABLE` on two objects `A` and `B` of the realm of `h`.
+fn install_table_on<H: Harness>(h: &mut H) {
+    enter(h.engine(), |s| {
+        s.set_host(Rc::new(TableHost));
+        let (a, b, g) = (s.new_object().unwrap(), s.new_object().unwrap(), s.global());
+        s.install_table(&[a, b], TABLE_BASE, &TABLE).unwrap();
+        s.define_str(g, "A", a, Attrs::METHOD).unwrap();
+        s.define_str(g, "B", b, Attrs::METHOD).unwrap();
+    });
+}
+
+pub fn a_table_installs_methods_accessors_and_constants<H: Harness>(stress: bool) {
+    let mut h = H::new(stress);
+    install_table_on(&mut h);
+    // A method: callable, with the name and the length of its row, and the id plus the base.
+    assert_eq!(h.eval("A.twice(21)"), "42");
+    assert_eq!(h.eval("A.twice.name + A.twice.length"), "twice1");
+    assert_eq!(h.eval("var d = Object.getOwnPropertyDescriptor(A, 'twice'); [d.writable, d.enumerable, d.configurable].join()"), "true,false,true");
+    assert_eq!(h.eval("(function () { try { new A.twice(1); return 'allowed' } catch (e) { return e.name } })()"), "TypeError");
+    // A row of two targets makes one function object.
+    assert_eq!(h.eval("[A.both === B.both, A.both.length, B.both()].join()"), "true,2,1");
+    // An accessor: a getter named `get size` of length 0, a setter named `set size` of length 1.
+    assert_eq!(h.eval("A.size = 5; A.size"), "5");
+    assert_eq!(h.eval("var d = Object.getOwnPropertyDescriptor(A, 'size'); [d.get.name, d.get.length, d.set.name, d.set.length, d.enumerable, d.configurable].join()"), "get size,0,set size,1,true,true");
+    assert_eq!(h.eval("var d = Object.getOwnPropertyDescriptor(B, 'ro'); [B.ro, d.set === undefined, d.get.name].join()"), "ro,true,get ro");
+    assert_eq!(h.eval("'ro' in A || 'size' in B"), "false", "a row reaches only its targets");
+    // A constant, and the attributes of a row.
+    assert_eq!(h.eval("var d = Object.getOwnPropertyDescriptor(A, 'LIMIT'); [A.LIMIT, d.writable, d.enumerable, d.configurable].join()"), "7,false,true,false");
+    assert_eq!(h.eval("var d = Object.getOwnPropertyDescriptor(B, 'shown'); [B.shown(), d.writable, d.enumerable, d.configurable].join()"), "shown,true,true,true");
+    assert_eq!(h.eval("Object.keys(A).join()"), "size,LIMIT");
+    // A lazy global: one function is the getter and the setter, named like the row.
+    assert_eq!(h.eval("var d = Object.getOwnPropertyDescriptor(A, 'lazy'); [d.get === d.set, d.get.name, d.get.length, d.enumerable, d.configurable, A.lazy].join()"), "true,lazy,0,false,true,0");
+    assert_eq!(h.eval("A.lazy = 1; 'set'"), "set");
+    assert_eq!(depth(&mut h), 0);
+}
+
+pub fn two_realms_install_the_same_table<H: Harness>(stress: bool) {
+    let (mut h1, mut h2) = (H::new(stress), H::new(stress));
+    install_table_on(&mut h1);
+    install_table_on(&mut h2);
+    assert_eq!(h1.eval("A.twice(4)"), "8");
+    assert_eq!(h2.eval("A.size = 'two'; A.twice(5) + A.size"), "10two");
+    assert_eq!(h1.eval("A.size = 'one'; A.size"), "one");
+    assert_eq!(h2.eval("A.size"), "two");
+    assert_eq!(depth(&mut h1), 0);
+    assert_eq!(depth(&mut h2), 0);
+}
+
+/// The text of a value, by its string conversion (`Engine::display` is not built in every engine).
+fn text<'s, E: Engine>(s: &mut Scope<'s, E>, v: Local<'s>) -> String {
+    match s.to_string(v) {
+        Ok(t) => s.as_str(t).map(|t| t.to_string_lossy()).unwrap_or_default(),
+        Err(_) => "<error>".into(),
+    }
+}
+
+pub fn run_script_gives_the_completion_value<H: Harness>(stress: bool) {
+    let (mut h, _) = setup::<H>(stress);
+    let mut run = |src: &str| {
+        enter(h.engine(), |s| match s.run_script(src) {
+            Ok(v) => text(s, v),
+            Err(Error::Throw(e)) => format!("throw:{}", text(s, e)),
+            Err(Error::Abort(_)) => "abort".into(),
+        })
+    };
+    assert_eq!(run("1; 2"), "2");
+    assert_eq!(run("var rs = 5; rs * 2"), "10");
+    assert_eq!(run("rs"), "5", "the next script sees the globals of the first");
+    assert_eq!(run("1; if (true) { 2 }"), "2");
+    assert_eq!(run("1; if (true) {}"), "undefined");
+    assert_eq!(run("var i = 0; while (i < 3) { i++ }"), "2");
+    assert_eq!(run("1; throw new TypeError('x')"), "throw:TypeError: x");
+    assert!(run("1 +").starts_with("throw:SyntaxError"));
+    assert_eq!(run("add(1, 2)"), "3", "a host function runs from a script that run_script started");
+    assert_eq!(depth(&mut h), 0);
+}
+
+pub fn eval_runs_in_the_global_environment<H: Harness>(stress: bool) {
+    let (mut h, _) = setup::<H>(stress);
+    enter(h.engine(), |s| {
+        let ev = s.eval_function().unwrap();
+        let this = s.undefined();
+        let eval = |s: &mut Scope<'_, H::E>, src: &str| {
+            let x = s.string(src).unwrap();
+            match s.call(ev, this, &[x]) {
+                Ok(v) => text(s, v),
+                Err(Error::Throw(e)) => format!("throw:{}", text(s, e)),
+                Err(Error::Abort(_)) => "abort".into(),
+            }
+        };
+        assert_eq!(eval(s, "var ev1 = 4; ev1 + 1"), "5");
+        assert_eq!(eval(s, "typeof ev1"), "number");
+        assert_eq!(eval(s, "function evf() { return 8 } evf()"), "8");
+        assert!(eval(s, "1 +").starts_with("throw:SyntaxError"));
+        let n = s.number(3.0);
+        let r = s.eval_global(n).unwrap();
+        assert_eq!(s.as_number(r), Some(3.0), "a value that is not a string is the result");
+        let src = s.string("var ev2 = 6; ev2 * 7").unwrap();
+        let r = s.eval_global(src).unwrap();
+        assert_eq!(s.as_number(r), Some(42.0));
+    });
+    assert_eq!(h.eval("ev1 + ev2"), "10");
+    assert_eq!(depth(&mut h), 0);
+}
+
+pub fn handler_functions_look_names_up_in_the_scope<H: Harness>(stress: bool) {
+    let (mut h, _) = setup::<H>(stress);
+    h.eval("var holder = { v: 1, get g() { return this === holder }, m() { return this === holder }, set w(x) { this.v = x } }; var v = 'global'; var other = { v: 'other' }; function plain() { return typeof m } 0");
+    enter(h.engine(), |s| {
+        let g = s.global();
+        let (holder, other) = (s.get_str(g, "holder").unwrap(), s.get_str(g, "other").unwrap());
+        let f = s.compile_function("h", "event", "w = 5; return [v, g, m(), typeof nope, typeof m, plain()].join()").unwrap();
+        let this = s.undefined();
+        let r = s.call_scoped(f, this, &[], &[holder, other]).unwrap();
+        assert_eq!(text(s, r), "5,true,true,undefined,function,undefined");
+        let v = s.get_str(holder, "v").unwrap();
+        assert_eq!(s.as_number(v), Some(5.0));
+        let (n, l) = (s.get_str(f, "name").unwrap(), s.get_str(f, "length").unwrap());
+        assert_eq!((text(s, n), text(s, l)), ("h".to_string(), "1".to_string()));
+        // With no scope the global is used.
+        let p = s.compile_function("h", "", "return typeof g + v").unwrap();
+        let r = s.call_scoped(p, this, &[], &[]).unwrap();
+        assert_eq!(text(s, r), "undefinedglobal");
+        // The same text makes a new function.
+        let f2 = s.compile_function("h", "event", "w = 5; return [v, g, m(), typeof nope, typeof m, plain()].join()").unwrap();
+        assert_eq!(s.type_of(f2), Type::Function);
+        // A body that closes the function is a SyntaxError.
+        for body in ["}); globalThis.bad = 1; (function () {", "}, function () { globalThis.bad = 2", "} } {"] {
+            assert!(matches!(s.compile_function("h", "event", body), Err(Error::Throw(_))), "{body}");
+        }
+    });
+    assert_eq!(h.eval("typeof bad"), "undefined");
+    assert_eq!(depth(&mut h), 0);
+}
+
+pub fn the_host_walks_iterables<H: Harness>(stress: bool) {
+    let (mut h, _) = setup::<H>(stress);
+    let mut take = |src: &str| -> String {
+        enter(h.engine(), |s| {
+            let v = match s.run_script(src) {
+                Ok(v) => v,
+                Err(_) => return "script failed".into(),
+            };
+            let mut it = match s.iter_open(v) {
+                Ok(Some(it)) => it,
+                Ok(None) => return "none".into(),
+                Err(Error::Throw(e)) => return format!("throw:{}", text(s, e)),
+                Err(Error::Abort(_)) => return "abort".into(),
+            };
+            let mut out = Vec::new();
+            loop {
+                match s.iter_next(&mut it) {
+                    Ok(Some(x)) => out.push(text(s, x)),
+                    Ok(None) => break,
+                    Err(Error::Throw(e)) => return format!("throw:{}", text(s, e)),
+                    Err(Error::Abort(_)) => return "abort".into(),
+                }
+            }
+            assert!(matches!(s.iter_next(&mut it), Ok(None)), "an iteration that ended stays ended");
+            out.join(",")
+        })
+    };
+    assert_eq!(take("[1, 2, 3]"), "1,2,3");
+    assert_eq!(take("'a\u{1F600}b'"), "a,\u{1F600},b");
+    assert_eq!(take("({ [Symbol.iterator]() { var i = 0; return { next() { return i < 3 ? { value: i++, done: false } : { done: true } } } } })"), "0,1,2");
+    assert_eq!(take("undefined"), "none");
+    assert_eq!(take("({})"), "none");
+    assert_eq!(take("({ [Symbol.iterator]() { return { next() { throw 'boom' } } } })"), "throw:boom");
+    // `iter_fail` calls `return` and keeps the error.
+    h.eval("var closed = 0; var it1 = { [Symbol.iterator]() { return { next() { return { value: 1, done: false } }, return() { closed++; return {} } } } }; 0");
+    enter(h.engine(), |s| {
+        let g = s.global();
+        let v = s.get_str(g, "it1").unwrap();
+        let mut it = s.iter_open(v).unwrap().unwrap();
+        assert!(s.iter_next(&mut it).unwrap().is_some());
+        let e = s.type_error("stop");
+        assert!(matches!(s.iter_fail(&mut it, e), Error::Throw(_)));
+        assert!(matches!(s.iter_next(&mut it), Ok(None)));
+    });
+    assert_eq!(h.eval("closed"), "1");
+    assert_eq!(depth(&mut h), 0);
+}
+
+pub fn symbols_and_the_iterator_intrinsics<H: Harness>(stress: bool) {
+    let (mut h, _) = setup::<H>(stress);
+    enter(h.engine(), |s| {
+        let i = s.intrinsic(Intrinsic::SymbolIterator);
+        assert_eq!(s.type_of(i), Type::Symbol);
+        let t = s.intrinsic(Intrinsic::SymbolToStringTag);
+        assert_eq!(s.type_of(t), Type::Symbol);
+        let g = s.global();
+        s.define_str(g, "symIter", i, Attrs::ALL).unwrap();
+        s.define_str(g, "symTag", t, Attrs::ALL).unwrap();
+        let same = s.run_script("symIter === Symbol.iterator && symTag === Symbol.toStringTag").unwrap();
+        assert_eq!(s.as_bool(same), Some(true));
+        let d = s.run_script("Symbol('why')").unwrap();
+        let why = s.symbol_description(d).unwrap().unwrap();
+        assert_eq!(s.as_str(why).unwrap().to_string_lossy(), "why");
+        let nd = s.run_script("Symbol()").unwrap();
+        assert!(s.symbol_description(nd).unwrap().is_none());
+        let p = s.intrinsic(Intrinsic::IteratorPrototype);
+        assert_eq!(s.type_of(p), Type::Object);
+        s.define_str(g, "itProto", p, Attrs::ALL).unwrap();
+        let r = s.run_script("var o = Object.create(itProto); o[Symbol.iterator]() === o").unwrap();
+        assert_eq!(s.as_bool(r), Some(true), "an iterator inherits the method that returns this");
     });
     assert_eq!(depth(&mut h), 0);
 }

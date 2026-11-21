@@ -65,7 +65,8 @@ const WORD: usize = 8;
 //   13    8192  F_PROMISE      promises (promise.rs)
 //   14   16384  F_GEN          generators (gen.rs)
 //   15   32768  F_REGEXP       regexp objects (regexp_rt.rs)
-// Bits 16 to 23 are free: 8 of the 24 flag bits. `F_SPARSE` is a flag of the `Elements` record, not of an object header.
+//   16-18  7<<16 F_COLL         collection kind field (bi_collections.rs)
+// Bits 19 to 23 are free: 5 of the 24 flag bits. `F_SPARSE` is a flag of the `Elements` record, not of an object header.
 /// Object header flag: the last inline word holds the pointer to a `Slots` record.
 const F_OVER: u32 = 1;
 /// Object header flag: a script can call the object (a function cell, S2.6). A shape change keeps it.
@@ -101,15 +102,21 @@ pub const F_PROMISE: u32 = 8192;
 pub const F_GEN: u32 = 16384;
 /// Object header flag: a `RegExp` object (`regexp_rt.rs`). Its slots 0 to 3 are the pattern, the flag bits, the program and `lastIndex`. Bit 8192 is for `F_PROMISE`.
 pub const F_REGEXP: u32 = 32768;
-const ALL_FLAGS: [u32; 16] =
-    [F_OVER, F_CALLABLE, F_CLASS, F_DERIVED, F_NATIVE, F_NOEXT, F_FNPROPS, F_ELEMS_RO, F_ELEMS_FIXED, F_LEN_RO, F_SLOWIDX, F_LAZY, F_WRAP, F_PROMISE, F_GEN, F_REGEXP];
-/// Compile-time check: every flag is one bit, no two flags share a bit, and all fit the 24 flag bits of a cell header.
+/// Object header flag bits 16 to 18: the kind of a collection object (`bi_collections.rs`), 1 `Map`, 2 `Set`, 3 `WeakMap`, 4 `WeakSet`,
+/// 5 a `Map` iterator, 6 a `Set` iterator; 0 for any other object. Set once, by the constructor. A shape change keeps it.
+pub const F_COLL: u32 = 7 << 16;
+/// The shift of the kind in [`F_COLL`].
+pub const COLL_SHIFT: u32 = 16;
+const ALL_FLAGS: [u32; 17] =
+    [F_COLL, F_OVER, F_CALLABLE, F_CLASS, F_DERIVED, F_NATIVE, F_NOEXT, F_FNPROPS, F_ELEMS_RO, F_ELEMS_FIXED, F_LEN_RO, F_SLOWIDX, F_LAZY, F_WRAP, F_PROMISE, F_GEN, F_REGEXP];
+/// Compile-time check: no two flags share a bit, every flag is one bit or a field of bits (`F_COLL`), and all fit the 24 flag bits of a
+/// cell header.
 const _: () = {
     let mut seen = 0u32;
     let mut i = 0;
     while i < ALL_FLAGS.len() {
         let f = ALL_FLAGS[i];
-        assert!(f.is_power_of_two() && f <= crate::cell::FLAG_MAX && seen & f == 0);
+        assert!(f != 0 && f <= crate::cell::FLAG_MAX && seen & f == 0);
         seen |= f;
         i += 1;
     }
@@ -324,6 +331,12 @@ impl Obj {
 
     pub fn set_callable(self) {
         self.set_flag(F_CALLABLE);
+    }
+
+    /// The flag bits of the header.
+    #[inline]
+    pub fn flags(self) -> u32 {
+        self.head().flags()
     }
 
     /// Does the header have the flag bit `f` (`F_CLASS`, `F_DERIVED`)?

@@ -382,8 +382,13 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 lazy_global!(lazy_observer, "IntersectionObserver", ensure, |d| state(d).borrow().protos.expect("made").ctors.0);
 lazy_global!(lazy_entry, "IntersectionObserverEntry", ensure, |d| state(d).borrow().protos.expect("made").ctors.1);
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    crate::browser_lazy::install(d, it, &[("IntersectionObserver", lazy_observer as HS), ("IntersectionObserverEntry", lazy_entry)])
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+    table!(lazy = [
+        Row::both(1, "IntersectionObserver", lazy_observer),
+        Row::both(1, "IntersectionObserverEntry", lazy_entry),
+    ]);
+    let g = s.global();
+    d.install_rows(s, &[g], &lazy::T)
 }
 
 // ---------------------------------------------------------------------------------------------- geometry

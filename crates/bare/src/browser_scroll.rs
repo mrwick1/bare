@@ -749,31 +749,43 @@ fn scrolling_element<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>)
     d.wrap_opt_s(s, d.root_element())
 }
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
     let p = d.p();
-    d.def_get_s(it, p.element, "scrollTop", get_top, Some(set_top))?;
-    d.def_get_s(it, p.element, "scrollLeft", get_left, Some(set_left))?;
+    table!(rows1 = [
+        Row::get(1, "scrollTop", get_top, Some(set_top)),
+        Row::get(1, "scrollLeft", get_left, Some(set_left)),
+    ]);
+    let targets = [d.obj_local(s, p.element)];
+    d.install_rows(s, &targets, &rows1::T)?;
     for (name, h) in [("scrollWidth", scroll_width as HS), ("scrollHeight", scroll_height), ("clientWidth", client_width), ("clientHeight", client_height), ("clientTop", client_top), ("clientLeft", client_left)] {
-        d.def_get_s(it, p.element, name, h, None)?;
+        d.def_get_at(s, p.element, name, h, None)?;
     }
-    d.def_method_s(it, p.element, "getBoundingClientRect", 0, bounding_rect)?;
-    d.def_method_s(it, p.element, "scrollTo", 2, el_scroll_to)?;
-    d.def_method_s(it, p.element, "scroll", 2, el_scroll_to)?;
-    d.def_method_s(it, p.element, "scrollBy", 2, el_scroll_by)?;
-    d.def_method_s(it, p.element, "scrollIntoView", 0, scroll_into_view)?;
-    d.def_get_s(it, p.document, "scrollingElement", scrolling_element, None)?;
-    let g = *d.global.get().expect("installed");
+    table!(rows2 = [
+        Row::method(1, "getBoundingClientRect", 0, bounding_rect),
+        Row::method(1, "scrollTo", 2, el_scroll_to),
+        Row::method(1, "scroll", 2, el_scroll_to),
+        Row::method(1, "scrollBy", 2, el_scroll_by),
+        Row::method(1, "scrollIntoView", 0, scroll_into_view),
+        Row::get(2, "scrollingElement", scrolling_element, None),
+    ]);
+    let targets = [d.obj_local(s, p.element), d.obj_local(s, p.document)];
+    d.install_rows(s, &targets, &rows2::T)?;
+    let g = s.global();
     for name in ["scrollX", "pageXOffset"] {
-        d.def_get_s(it, g, name, win_scroll_x, None)?;
+        d.def_get_l(s, g, name, win_scroll_x, None)?;
     }
     for name in ["scrollY", "pageYOffset"] {
-        d.def_get_s(it, g, name, win_scroll_y, None)?;
+        d.def_get_l(s, g, name, win_scroll_y, None)?;
     }
-    d.def_get_s(it, g, "innerWidth", win_inner_width, None)?;
-    d.def_get_s(it, g, "innerHeight", win_inner_height, None)?;
-    d.def_method_s(it, g, "scrollTo", 2, win_scroll_to)?;
-    d.def_method_s(it, g, "scroll", 2, win_scroll_to)?;
-    d.def_method_s(it, g, "scrollBy", 2, win_scroll_by)?;
+    table!(rows3 = [
+        Row::get(1, "innerWidth", win_inner_width, None),
+        Row::get(1, "innerHeight", win_inner_height, None),
+        Row::method(1, "scrollTo", 2, win_scroll_to),
+        Row::method(1, "scroll", 2, win_scroll_to),
+        Row::method(1, "scrollBy", 2, win_scroll_by),
+    ]);
+    let targets = [g];
+    d.install_rows(s, &targets, &rows3::T)?;
     Ok(())
 }
 

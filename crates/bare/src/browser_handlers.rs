@@ -645,14 +645,20 @@ pub(crate) fn install_onabort(d: &Dom, it: &mut Interp<'_>, proto: ObjId) -> R<(
     d.def_get_s(it, proto, "onabort", sig_get, Some(sig_set))
 }
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
     let p = d.p();
-    let g = *d.global.get().expect("installed");
-    for o in [g, p.document, p.html, p.svg] {
-        it.heap.set_lazy_on(o).map_err(|e| it.heap_error(e))?;
+    let g = s.global();
+    for o in [g, d.obj_local(s, p.document), d.obj_local(s, p.html), d.obj_local(s, p.svg)] {
+        s.set_lazy(o, false)?;
     }
-    it.heap.set_lazy_chain(p.et).map_err(|e| it.heap_error(e))?;
-    crate::browser_lazy::install(d, it, &[("HTMLBodyElement", lazy_body as HS), ("HTMLFrameSetElement", lazy_frameset)])
+    let et = d.obj_local(s, p.et);
+    s.set_lazy(et, true)?;
+    table!(lazy = [
+        Row::both(1, "HTMLBodyElement", lazy_body),
+        Row::both(1, "HTMLFrameSetElement", lazy_frameset),
+    ]);
+    let g = s.global();
+    d.install_rows(s, &[g], &lazy::T)
 }
 
 // ------------------------------------------------------------------------------------------ body and frameset

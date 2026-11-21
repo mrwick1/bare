@@ -318,6 +318,8 @@ pub struct Realm {
     pub last_gc: crate::gc::Stats,
     /// `RegExp`: `None` until the first use (`regexp_rt.rs`).
     pub(crate) rx: Option<Box<crate::regexp_rt::Rx>>,
+    /// `Map`, `Set`, `WeakMap` and `WeakSet` (`bi_collections.rs`).
+    pub(crate) coll: Option<Box<crate::bi_collections::Colls>>,
 }
 
 const TYPEOF: [&str; 8] = ["undefined", "object", "boolean", "number", "string", "function", "symbol", "bigint"];
@@ -449,6 +451,7 @@ impl Realm {
             collections: 0,
             last_gc: Default::default(),
             rx: None,
+            coll: None,
         };
         rt.install_builtins();
         rt

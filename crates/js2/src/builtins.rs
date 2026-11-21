@@ -319,10 +319,12 @@ impl Realm {
         self.install_error();
         // One line for each built-in module. Add one line, keep sorted.
         self.install_array();
+        self.install_collections();
         self.install_generator();
         self.install_json();
         self.install_number();
         self.install_promise();
+        self.install_reflect();
         self.install_string();
         self.install_symbol();
     }
