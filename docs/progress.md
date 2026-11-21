@@ -17940,3 +17940,33 @@ Measurements. Machine archMachine (loaded: only instruction counts are used). Ba
 Tests. Linux, debug: `cargo test --locked -p bare --lib -p bare-js -p bare-js-api`: 1718 pass (6 ignored), 1106 pass (1 ignored), 32 pass. `BARE_GC_STRESS=1` on the tests with `browser_fetch`, `browser_basics`, `browser_streams`, `browser_clone`, `browser_xhr` and `browser_select` in the name, and on the tests with `fetch`, `headers`, `response`, `request`, `navigator`, `beacon`, `textarea`, `message`, `window`, `plugins`, `stream` in the name: all pass. `cargo xwin check -p bare --target x86_64-pc-windows-msvc`: passes. `cargo check --locked -p bare --all-targets`: no warning.
 
 Not tested: the Windows tests (only `cargo xwin check`, no VM run); `BARE_GC_STRESS=1` over the whole `bare` crate; the removed `BARE_ALL_API` mode (it has no handler left to run); `codegen-units=1` (no row was over +0.5%); RSS and wall time; the journeys and `tools/suite/run.py`; macOS; a direct test of the textarea `readOnly`, `dirName`, `wrap` and `autocomplete` properties (the Chrome fixture `textarea` covers some of them).
+
+## 2026-11-21: structured clone and transfer on the interface (plan step S0.4, PR 3)
+
+Status: PR 3 of the plan in "what blocks `Dom<E: Engine>`". Base: `origin/main` `29aee409` (the head of #811). The PR is open without auto-merge.
+
+Changed. The cluster uses `Scope` and `Engine` methods, and no direct `Interp` call:
+
+- `browser_navigation_state.rs`: `out`, `serialize`, `clone_with`, `clone_state_with`, `materialize` and `materialize_with` take a `Sc` and `Local`s and give `Res`. `make_hosts` and the `CloneHost` hooks (`transfer_in`, `data_clone_error`) use `Dom::dom_err_s` and `obj_local`. `clone_err` is removed.
+- `browser_scheduler.rs`: `clone_payload`, `transfer_arg`, `transfer_list`, `transfer_items`, `make_ports`, `export_ports`, `import_ends`, `take_wires`, `take_end` and `post_remote` take a `Sc`. The transfer list reads an iterable with `iter_open` and `iter_next`. A buffer is a value with `bytes` and no `view`. A detached buffer is `is_detached`. The scalar cases of `clone_payload` use `type_of`, `as_str`, `bigint_limbs` and `is_callable`. `type V` is removed.
+- `browser_basics.rs`: `post_args`, `target_origin` and `post_message`. `browser_remote_window.rs`: `win_post` and `post`. `browser_encoding.rs`: `structuredClone`. `browser_navigation.rs`: `pushState` and `entry_state`. `browser_child.rs`: `deliver` and the two `take_wires` calls. The last three still start from an `Interp`, so they call `run`.
+- `bare-js` `api_err`: a `LimitKind::Host(name)` crosses the interface as `Abort::Limit(name)`. It was `Abort::Limit("a limit of the old engine")`, so a host could not tell the history state cap from another limit. `serialize` needs the name to turn the size cap into a `DataCloneError`. The old error is still in `ApiState::abort`, so `api_unerr` gives it back unchanged. Test: `a_host_limit_keeps_its_name_across_the_interface`.
+- A thrown error is a local above the base of the walk. `out` drops its locals only when the walk succeeded. The first version dropped them always and 11 tests panicked on a dangling handle.
+
+The interface keeps the default `Abort::Unsupported` answer of `clone_out`, `clone_in` and `clone_copy`, as the host-API design says for js2. Every message and `structuredClone` call reaches the engine only through those three methods.
+
+Kept for PR 4 to 6. `Msg::data`, `MsgEvent::data` and `Port` hold raw `Value` and `ObjId`; the cluster converts at the table with `raw` and `raw_local` (PR 5 moves the tables). The install functions, `old`, `old_v`, `run` and `run_v` (the new `run` callers are 3) and `Browser::it` are as in the plan. `send_beacon` (the old-form `send_beacon_old`) has no clone code; I left it. The `CloneHost` impl is for `Interp`; PR 6 makes it generic with `Sc`.
+
+Measurements. Machine archMachine, idle (load 0.5 at the start). Both trees are release builds in separate target directories; the base is `origin/main` `29aee409`.
+
+| Check | Base | New | Change |
+| --- | --- | --- | --- |
+| `tools/js/cost_matrix.sh -j4`, 817 rows (minimum of 3 runs; `parse_load deep 1` and `deep 10` fail on both trees, known) | | | mean glibc -0.002%; 0 rows over +0.5% (so no jemalloc run and no `codegen-units=1` run); largest `style_load churn 10` +0.279%; smallest `scheduler_load timers 10` -0.655%; `web_apis_load clone` +0.044%, `scheduler_load messages` -0.08%, `navigation_load history` -0.07% |
+| `bare --run http://127.0.0.1:PORT/` of a small page (one script), instructions, 3 rounds of `instr.sh` (each the minimum of 3 runs) | 5,192,293 / 5,191,892 / 5,192,613 | 5,194,800 / 5,194,288 / 5,194,082 | +2.2 K (+0.04%) |
+| Release `bare` binary | 17,201,872 B | 17,201,712 B | -160 B |
+
+The clone rows do not run a handler that reads options by name. `post_args` and `structuredClone` read `targetOrigin` and `transfer` with `get_str` and no longer with the interned `Dom::key`. No row measures that path with an options object; hypothesis: the cost is a string made for each call, a few hundred instructions. I did not measure it.
+
+Tests. Linux, debug: `cargo test --locked -p bare --lib`: 1719 pass (6 ignored). `-p bare-js`: 1107 pass with the new test (1 ignored). `-p bare-js-api`: 32 pass, and `--features suite`: pass. `BARE_GC_STRESS=1` on the 295 tests of `bare` with `clone`, `message`, `transfer`, `port`, `channel`, `history`, `navigation_tests`, `state`, `browser_child`, `worker`, `array_buffer` or `basics` in the name: all pass. `cargo xwin check -p bare --target x86_64-pc-windows-msvc`: passes. `cargo check --locked -p bare --all-targets`: no warning.
+
+Not tested: the Windows tests (only `cargo xwin check`, no VM run); `BARE_GC_STRESS=1` over the whole `bare` crate; `codegen-units=1` (no row was over +0.5%); an options object on the `postMessage` and `structuredClone` hot path; RSS and wall time; the journeys and `tools/suite/run.py`; macOS.

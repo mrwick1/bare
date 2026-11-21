@@ -77,6 +77,8 @@ use crate::browser_fetch::FetchLimits;
 use crate::browser_loader::{PageConfig, PageLimits, Stop, deadline_after, label};
 use crate::browser::R;
 use crate::browser_remote_window::{Common, Side, Win};
+use crate::browser_scoped::run;
+use bare_js_api::Engine as _;
 use crate::browser_port_hub::PortHub;
 use crate::browser_scheduler::Sender;
 use crate::browser_session::{SessionLimits, load_document};
@@ -535,7 +537,7 @@ impl Browser {
         let block = wait || !self.live();
         // The wires for the ports of this page (a page that has no split port has no end: the call does nothing).
         if cfg.hub.busy() {
-            match self.it.host_scope(|it| self.dom.take_wires(it)) {
+            match self.it.host_scope(|it| run(it, |s| self.dom.take_wires(s))) {
                 Ok(k) => t.work += k,
                 Err(e) => t.diags.push(format!("a message was dropped: {e:?}")),
             }
@@ -573,7 +575,7 @@ impl Browser {
                 State::Run(mut b) => {
                     let parent = b.dom.kids.proxy_of(Side::Parent);
                     if cfg.hub.busy() {
-                        match b.it.host_scope(|it| b.dom.take_wires(it)) {
+                        match b.it.host_scope(|it| run(it, |s| b.dom.take_wires(s))) {
                             Ok(k) => t.work += k,
                             Err(e) => t.diags.push(format!("frame {}: a message was dropped: {e:?}", ch.label)),
                         }
@@ -714,7 +716,10 @@ impl Dom {
             return Ok(());
         }
         let bytes = 16usize.saturating_add(m.cloned.cost());
-        let (data, ports) = crate::browser_navigation_state::materialize_with(self, it, &mut m.cloned)?;
+        let (data, ports) = run(it, |s| {
+            let (data, ports) = crate::browser_navigation_state::materialize_with(self, s, &mut m.cloned)?;
+            Ok((s.engine().raw(data), ports))
+        })?;
         self.queue_window(data, ports.into_boxed_slice(), bytes, Some(Box::new(Sender { origin: m.origin, source })))
     }
 
