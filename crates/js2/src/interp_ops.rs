@@ -36,6 +36,7 @@ impl Realm {
     pub fn define_attrs(&mut self, o: Obj, key: Key, attrs: u8, v: Value) -> R<()> {
         self.fn_props(o);
         let k = self.key_atom(key);
+        self.lazy_prep(o, k);
         match self.shapes.find(o.shape(&self.shapes), k) {
             Some(e) if e.attrs() == attrs => {
                 o.set_slot(&self.shapes, e.slot(), v);
@@ -50,6 +51,7 @@ impl Realm {
     pub fn define_accessor(&mut self, o: Obj, key: Key, f: Value, setter: bool, enumerable: bool) -> R<()> {
         self.fn_props(o);
         let k = self.key_atom(key);
+        self.lazy_prep(o, k);
         let attrs = A_ACC | A_C | if enumerable { A_E } else { 0 };
         let mut vals = [Value::UNDEFINED; 2];
         vals[setter as usize] = f;

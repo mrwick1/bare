@@ -68,7 +68,7 @@ impl Table {
 
     /// Add an atom that is not in the table. `hash` is its hash.
     fn insert(&mut self, s: Str, hash: u32) {
-        if (self.len + 1) * 4 > self.slots.len() * 3 {
+        if (self.len + 1) * 2 > self.slots.len() {
             self.rebuild((self.len + 1).next_power_of_two().max(8) * 2, |_| true);
         }
         self.put(Table::entry(s, hash));

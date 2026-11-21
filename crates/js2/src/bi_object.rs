@@ -11,7 +11,8 @@
 //! **A native does not call a script function** (`builtins.rs`). A built-in that meets an accessor (a getter of a descriptor, a setter
 //! of the target of `Object.assign`) hands the work to a JavaScript helper of `prelude.js` through the tail channel (`Realm::helper`).
 //! The common case, data properties, stays in Rust.
-use crate::builtins::{NativeFn, arg};
+use crate::lazy::{Ent, m};
+use crate::builtins::arg;
 use crate::cell::Layout;
 use crate::interp_rt::{ErrKind, Key, R, Realm, Slot};
 use crate::object::{F_ELEMS_FIXED, F_ELEMS_RO, F_LEN_RO, F_SLOWIDX, Obj};
@@ -246,6 +247,7 @@ impl Realm {
     // ---- extensibility, seal, freeze ----
 
     pub(crate) fn prevent_extensions(&mut self, o: Obj) {
+        self.lazy_all(o);
         if o.extensible() {
             o.prevent_extensions(&mut self.shapes);
         }
@@ -615,46 +617,44 @@ impl Realm {
     pub(crate) fn install_object(&mut self) {
         let proto = self.object_proto;
         let c = self.ctor("Object", 1, object_ctor, proto);
-        for (n, len, f) in [
-            ("assign", 2, object_assign as NativeFn),
-            ("getOwnPropertyDescriptor", 2, object_own_descriptor),
-            ("getOwnPropertyDescriptors", 1, object_own_descriptors),
-            ("getOwnPropertyNames", 1, object_own_names),
-            ("getOwnPropertySymbols", 1, object_own_symbols),
-            ("is", 2, object_is),
-            ("preventExtensions", 1, object_prevent_extensions),
-            ("seal", 1, object_seal),
-            ("create", 2, object_create),
-            ("defineProperties", 2, object_define_properties),
-            ("defineProperty", 3, object_define_property),
-            ("freeze", 1, object_freeze),
-            ("getPrototypeOf", 1, object_get_prototype_of),
-            ("setPrototypeOf", 2, object_set_prototype_of),
-            ("isExtensible", 1, object_is_extensible),
-            ("isFrozen", 1, object_is_frozen),
-            ("isSealed", 1, object_is_sealed),
-            ("keys", 1, object_keys),
-            ("entries", 1, object_entries),
-            ("fromEntries", 1, object_from_entries),
-            ("values", 1, object_values),
-            ("hasOwn", 2, object_has_own),
-        ] {
-            self.method(c, n, len, f);
-        }
-        for (n, len, f) in [
-            ("__defineGetter__", 2, define_getter as NativeFn),
-            ("__defineSetter__", 2, define_setter),
-            ("hasOwnProperty", 1, has_own),
-            ("__lookupGetter__", 1, lookup_getter),
-            ("__lookupSetter__", 1, lookup_setter),
-            ("isPrototypeOf", 1, is_prototype_of),
-            ("propertyIsEnumerable", 1, property_is_enumerable),
-            ("toString", 0, object_to_string),
-            ("valueOf", 0, object_value_of),
-            ("toLocaleString", 0, to_locale_string),
-        ] {
-            self.method(proto, n, len, f);
-        }
+        static OBJECT_STATICS: &[Ent] = &[
+            m("assign", 2, object_assign),
+            m("getOwnPropertyDescriptor", 2, object_own_descriptor),
+            m("getOwnPropertyDescriptors", 1, object_own_descriptors),
+            m("getOwnPropertyNames", 1, object_own_names),
+            m("getOwnPropertySymbols", 1, object_own_symbols),
+            m("is", 2, object_is),
+            m("preventExtensions", 1, object_prevent_extensions),
+            m("seal", 1, object_seal),
+            m("create", 2, object_create),
+            m("defineProperties", 2, object_define_properties),
+            m("defineProperty", 3, object_define_property),
+            m("freeze", 1, object_freeze),
+            m("getPrototypeOf", 1, object_get_prototype_of),
+            m("setPrototypeOf", 2, object_set_prototype_of),
+            m("isExtensible", 1, object_is_extensible),
+            m("isFrozen", 1, object_is_frozen),
+            m("isSealed", 1, object_is_sealed),
+            m("keys", 1, object_keys),
+            m("entries", 1, object_entries),
+            m("fromEntries", 1, object_from_entries),
+            m("values", 1, object_values),
+            m("hasOwn", 2, object_has_own),
+        ];
+        self.lazy_table(c, OBJECT_STATICS);
+        static OBJECT_PROTO: &[Ent] = &[
+            m("__defineGetter__", 2, define_getter),
+            m("__defineSetter__", 2, define_setter),
+            m("hasOwnProperty", 1, has_own),
+            m("__lookupGetter__", 1, lookup_getter),
+            m("__lookupSetter__", 1, lookup_setter),
+            m("isPrototypeOf", 1, is_prototype_of),
+            m("propertyIsEnumerable", 1, property_is_enumerable),
+            m("toString", 0, object_to_string),
+            m("valueOf", 0, object_value_of),
+            m("toLocaleString", 0, to_locale_string),
+        ];
+        self.lazy_table(proto, OBJECT_PROTO);
         let g = self.global;
         self.method(g, "__helper", 2, register_helper);
         self.method(g, "__set", 3, set_strict);

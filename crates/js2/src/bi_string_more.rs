@@ -1,8 +1,9 @@
 //! The rest of `String` and `String.prototype`: `raw`, `fromCodePoint`, `normalize`, the locale case methods, `isWellFormed`,
 //! `toWellFormed`, and `match`, `matchAll` and `search`. js2 has no `RegExp`, so the last three check `this` and throw a `TypeError`.
 //! `normalize` does NFC and NFD with `bare-unicode`; NFKC and NFKD need the compatibility data of ICU (`bare-js` bakes it) and throw a `TypeError`.
+use crate::lazy::{Ent, m};
 use crate::bi_array::len_of;
-use crate::builtins::{NativeFn, arg};
+use crate::builtins::arg;
 use crate::interp_rt::{ErrKind, Key, R, Realm};
 use crate::value::Value;
 
@@ -10,20 +11,19 @@ impl Realm {
     pub(crate) fn install_string_more(&mut self) {
         let proto = self.string_proto;
         let c = self.global_string_ctor();
-        self.method(c, "raw", 1, raw);
-        self.method(c, "fromCodePoint", 1, from_code_point);
-        for (n, len, f) in [
-            ("normalize", 0, normalize as NativeFn),
-            ("toLocaleLowerCase", 0, to_locale_lower),
-            ("toLocaleUpperCase", 0, to_locale_upper),
-            ("isWellFormed", 0, is_well_formed),
-            ("toWellFormed", 0, to_well_formed),
-            ("match", 1, no_regexp_match),
-            ("matchAll", 1, no_regexp_match),
-            ("search", 1, no_regexp_search),
-        ] {
-            self.method(proto, n, len, f);
-        }
+        static STRING_STATICS_MORE: &[Ent] = &[m("raw", 1, raw), m("fromCodePoint", 1, from_code_point)];
+        self.lazy_table(c, STRING_STATICS_MORE);
+        static STRING_PROTO_MORE: &[Ent] = &[
+            m("normalize", 0, normalize),
+            m("toLocaleLowerCase", 0, to_locale_lower),
+            m("toLocaleUpperCase", 0, to_locale_upper),
+            m("isWellFormed", 0, is_well_formed),
+            m("toWellFormed", 0, to_well_formed),
+            m("match", 1, no_regexp_match),
+            m("matchAll", 1, no_regexp_match),
+            m("search", 1, no_regexp_search),
+        ];
+        self.lazy_table(proto, STRING_PROTO_MORE);
     }
 
     /// The `String` constructor (the global).

@@ -7,8 +7,9 @@
 //! **Known gaps** (each needs a call of a script function from a native, or a wrapper object): a `reviver`, a function `replacer`, a
 //! getter on a value that `stringify` reads, and the unwrapping of `Number`, `String` and `Boolean` objects (there are none). Each of
 //! the first three throws a `TypeError` that says so, and a wrapper object is serialized as a plain object.
+use crate::lazy::{Ent, m};
 use crate::bi_array::{get_at, len_of};
-use crate::builtins::{NativeFn, arg};
+use crate::builtins::arg;
 use crate::interp_rt::{ErrKind, R, Realm};
 use crate::object::Obj;
 use crate::value::Value;
@@ -21,9 +22,8 @@ impl Realm {
         let j = Obj::new_plain(self);
         let g = self.global;
         self.hidden(g, "JSON", j.value());
-        for (n, len, f) in [("parse", 2, parse as NativeFn), ("stringify", 3, stringify)] {
-            self.method(j, n, len, f);
-        }
+        static JSON_METHODS: &[Ent] = &[m("parse", 2, parse), m("stringify", 3, stringify)];
+        self.lazy_table(j, JSON_METHODS);
     }
 
     fn json_syntax(&mut self, msg: &str, at: usize) -> Value {

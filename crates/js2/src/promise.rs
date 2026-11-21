@@ -40,6 +40,7 @@
 //!
 //! **Not here:** the statics and `finally` are in `promise_statics.rs`. `SpeciesConstructor` is there too (`then` calls it). A constructor
 //! that is a script function or class is constructed by `Realm::construct_script`.
+use crate::lazy::{Ent, m};
 use crate::builtins::{Native, NativeFn, arg};
 use crate::cell::Layout;
 use crate::gc::Marker;
@@ -575,11 +576,13 @@ impl Realm {
         let then = self.new_native(promise_then, false, 2, "then");
         self.define_attrs(proto, Key::Name(self.pr.k_then), crate::builtins::HIDDEN, then.value()).expect("define");
         self.pr.then_fn = then.value();
-        self.method(proto, "catch", 1, promise_catch);
-        self.method(c, "resolve", 1, promise_resolve);
-        self.method(c, "reject", 1, promise_reject);
+        static PROMISE_PROTO: &[Ent] = &[m("catch", 1, promise_catch)];
+        self.lazy_table(proto, PROMISE_PROTO);
+        static PROMISE_STATICS: &[Ent] = &[m("resolve", 1, promise_resolve), m("reject", 1, promise_reject)];
+        self.lazy_table(c, PROMISE_STATICS);
         let g = self.global;
-        self.method(g, "queueMicrotask", 1, queue_microtask);
+        static GLOBAL_PROMISE: &[Ent] = &[m("queueMicrotask", 1, queue_microtask)];
+        self.lazy_table(g, GLOBAL_PROMISE);
         self.install_promise_statics();
     }
 }
