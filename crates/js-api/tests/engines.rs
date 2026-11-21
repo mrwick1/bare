@@ -123,4 +123,13 @@ both!(
     handler_functions_look_names_up_in_the_scope,
     the_host_walks_iterables,
     symbols_and_the_iterator_intrinsics,
+    a_promise_of_the_host_settles_and_its_reactions_run_on_the_drain,
+    a_second_settle_by_the_host_changes_nothing,
+    promises_cross_between_script_and_host,
+    a_microtask_runs_once_on_the_drain,
+    a_checkpoint_inside_a_script_function_does_nothing,
+    a_promise_survives_collections_as_a_local_and_as_a_persistent_handle,
+    between_jobs_runs_before_each_job_and_an_error_ends_the_drain,
+    the_host_hears_thrown_callbacks_and_rejections,
+    the_rejections_over_the_bound_are_counted,
 );

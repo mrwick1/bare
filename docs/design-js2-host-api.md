@@ -134,7 +134,6 @@ Unsupported, with the reason:
 
 | Methods                                                                                                                                                                              | Reason                                                                                                                                                                  |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `new_promise`, `resolve_promise`, `reject_promise`, `promise_then`, `promise_react`, `promise_status`, `queue_microtask`, `checkpoint`, `drain_microtasks`; `pending_jobs` answers 0 | js2 has no `Promise` and no job queue                                                                                                                                   |
 | `module_*`, `take_dynamic_imports`, `finish_dynamic_import`, `reject_dynamic_import`, `fail_dynamic_import`                                                                          | no modules                                                                                                                                                              |
 | `new_array_buffer`, `new_typed_array`, `bytes`, `bytes_mut`, `view`, `is_detached`, `view_get`, `bigint_limbs`                                                                       | no buffers, no BigInt                                                                                                                                                   |
 | `set_host_owner`, `host_key`, `new_host_indexed`, `new_host_named`, `set_lazy`, `clear_lazy`                                                                                         | need collector hooks (3.9) and host-filled objects                                                                                                                      |
@@ -236,7 +235,18 @@ Steps 1 to 3 of section 6 are one change (`progress.md`, entry of 2026-11-21). W
 - A collection never runs inside a host call today: a host function runs inside a native, and a native never collects, and a nested call holds the collector. The window is a root all the same, because the first safepoint that a later step adds needs it.
 - The `Intrinsic` values `IteratorPrototype`, `SymbolIterator` and `SymbolToStringTag` answer `undefined` (js2 has no symbols and no iterator protocol).
 
-## 11. Built (2026-11-21): scripts, eval, handlers, iterators
+## 11. Built: promises and microtasks (2026-11-21, plan step P2 of `design-js2-async.md`)
+
+The promise methods, `queue_microtask`, `checkpoint`, `drain_microtasks`, `pending_jobs`, `clear_failed_job` and the three hooks (`between_jobs`, `report_exception`, `promise_rejections`) are built on the job queue of `promise.rs`. What differs from the text above:
+
+- The job runner moved from `Vm` to `Realm::drain_jobs`: each job is a `call_held` on a pooled machine, so `Engine::drain_microtasks` (which has only `&mut Realm`) and `Vm::drain_microtasks` (tools) share it.
+- A stop of a drain is sticky until `clear_failed_job`: a budget stop, `max_jobs_per_drain` and an error of `between_jobs`. The old engine does the same. An error of `promise_rejections` is not sticky.
+- `drain_microtasks` inside a `task` works (js2 has no call depth to refuse it); inside a host call or a native it is `Unsupported`. `checkpoint` there answers 0.
+- A script that `between_jobs` runs gets its own budget, and the budget of the checkpoint comes back after. The two other hooks run as a task level, so a script in them shares the budget of the checkpoint.
+- `promise_then` makes a derived promise that nobody holds, so a throw of the handler is an unhandled rejection that the host hears (as in the old engine).
+- The shared suite has the promise tests (`suite.rs`), run on both engines with and without constant collection.
+
+## 12. Built (2026-11-21): scripts, eval, handlers, iterators
 
 `docs/progress/2026-11-21-js2-script-api.md` has the measurements. The methods `run_script`, `compile_function`, `call_scoped`, `eval_global`, `eval_function`, `iter_open`, `iter_next`, `iter_fail` and `symbol_description` work now, and the three intrinsics are real. Their code is in `crates/js2/src/api_script.rs`, a child module of `api.rs`. What differs from section 3.8:
 

@@ -1,5 +1,5 @@
 # Gate tools of the engine rewrite (docs/plan-engine-rewrite.md, gate S2 and the check of S3): both engines in one process, so the test262
-# runner and the differential runner run the same script on the old engine (`bare-js`) and on the new one (`bare-js2`). No other dependency.
+# runner and the differential runner run the same script on the old engine (`bare-js`) and on the new one (`bare-js2`). No other dependency except the host interface (`bare-js-api`) for the module runner.
 [package]
 name = "bare-js-diff"
 version.workspace = true
@@ -10,3 +10,4 @@ publish = false
 [dependencies]
 bare-js = { path = "../js" }
 bare-js2 = { path = "../js2" }
+bare-js-api = { path = "../js-api" }
