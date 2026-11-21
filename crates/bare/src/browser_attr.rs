@@ -66,7 +66,7 @@ pub(crate) struct AttrObj {
 
 #[derive(Default)]
 pub(crate) struct Tables {
-    pub attrs: IdMap<ObjId, AttrObj>,
+    pub attrs: IdTab<ObjId, AttrObj>,
     /// The attached `Attr`s of an element, by name atom. A short list: an element has few attributes.
     pub by_el: HashMap<NodeId, Vec<(Atom, ObjId)>>,
     pub maps: IdMap<ObjId, NodeId>,
@@ -159,6 +159,8 @@ pub(crate) fn forget(d: &Dom, dead: &[ObjId]) {
             }
         }
     }
+    // Free the empty pages of the table (`IdTab::remove`).
+    t.attrs.retain(|_, _| true);
     if !unwatch.is_empty() {
         let mut doc = d.doc.borrow_mut();
         for (el, atom) in unwatch {
@@ -338,7 +340,7 @@ fn attr_arg<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>, i: usize) -> Res<'s, O
 
 pub(crate) fn state(d: &Dom, o: ObjId) -> (Atom, Option<NodeId>, Option<Span>) {
     let t = d.attr.s.borrow();
-    let a = &t.attrs[&o];
+    let a = t.attrs.get(&o).expect("checked");
     (a.atom, a.owner, a.value)
 }
 
@@ -820,7 +822,7 @@ impl Browser {
 /// The nodes that `Attr` objects and `NamedNodeMap`s name.
 pub(crate) fn held(d: &Dom, out: &mut Vec<NodeId>) {
     let t = d.attr.s.borrow();
-    out.extend(t.attrs.values().filter_map(|a| a.owner));
+    out.extend(t.attrs.iter().filter_map(|(_, a)| a.owner));
     out.extend(t.by_el.keys().copied());
     out.extend(t.maps.values().copied());
     out.extend(t.map_of.keys().copied());
@@ -828,7 +830,7 @@ pub(crate) fn held(d: &Dom, out: &mut Vec<NodeId>) {
 
 /// The spans of detached `Attr` values: the reclaim moves them when it builds the text list again.
 pub(crate) fn pins(d: &Dom, f: &mut dyn FnMut(&mut Span)) {
-    for a in d.attr.s.borrow_mut().attrs.values_mut() {
+    for (_, a) in d.attr.s.borrow_mut().attrs.iter_mut() {
         if let Some(v) = a.value.as_mut() {
             f(v);
         }

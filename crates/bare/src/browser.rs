@@ -218,6 +218,9 @@ impl<K: SlotKey, V> IdTab<K, V> {
         self.len += old.is_none() as usize;
         old.filter(|(kk, _)| *kk == k).map(|(_, v)| v)
     }
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&K, &mut V)> {
+        self.pages.iter_mut().flatten().flat_map(|p| p.iter_mut().flatten().map(|(k, v)| (&*k, v)))
+    }
     /// The value of `k`; `v` is stored first if there is none.
     pub fn get_or_insert(&mut self, k: K, v: V) -> &mut V {
         if !self.contains_key(&k) {
