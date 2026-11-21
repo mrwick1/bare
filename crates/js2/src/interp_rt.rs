@@ -758,21 +758,8 @@ impl Realm {
             return Ok(b as u8 as f64);
         }
         if let Some(s) = Realm::str_of(v) {
-            let t = self.text(s);
-            let t = t.trim();
-            return Ok(if t.is_empty() {
-                0.0
-            } else if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
-                u64::from_str_radix(h, 16).map_or(f64::NAN, |n| n as f64)
-            } else if matches!(t, "Infinity" | "+Infinity") {
-                f64::INFINITY
-            } else if t == "-Infinity" {
-                f64::NEG_INFINITY
-            } else if t.chars().all(|c| c.is_ascii_digit() || matches!(c, '+' | '-' | '.' | 'e' | 'E')) {
-                t.parse().unwrap_or(f64::NAN)
-            } else {
-                f64::NAN
-            });
+            let s = self.flat(s);
+            return Ok(crate::bi_number::string_to_number(&self.text(s)));
         }
         if Realm::obj(v).is_some() {
             let p = self.to_primitive(v, Hint::Number)?;
