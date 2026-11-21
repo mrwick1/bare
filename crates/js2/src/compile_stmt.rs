@@ -420,6 +420,12 @@ impl<'a> Fc<'a> {
 
     /// The top level of a script: function declarations become globals first.
     pub(crate) fn script_body(&mut self, list: List<Stmt>) -> CR {
+        if self.value.is_some() {
+            let c = self.alloc();
+            self.op(Op::LoadUndef, c, 0, 0);
+            self.set_live(c);
+            self.value = Some(c);
+        }
         let mut h = Hoist::default();
         self.hoist_list(list, true, &mut h);
         // The top-level `let`, `const` and `class` names are variables of the script (a register, or a context slot when a function
@@ -434,8 +440,9 @@ impl<'a> Fc<'a> {
         // The scripts that run later read these names through the global lexical environment of the realm. A name in a context slot is
         // declared now (`DeclLex`). A name in a register stays there, so a loop at the top level keeps its speed: the script checks the
         // name now (`CheckLex`) and hands its value over at the end.
-        let mut in_regs = Vec::new();
-        for (n, k, _) in &h.lex {
+        // The code of an `eval` has its own lexical names: nothing is declared for the scripts that run later.
+        let (mut in_regs, global_lex) = (Vec::new(), if self.eval { &[][..] } else { &h.lex[..] });
+        for (n, k, _) in global_lex {
             let s = self.site_of(n)?;
             match self.find_var(n) {
                 Some(Var { home: Home::Ctx { slot, .. }, .. }) => {
@@ -502,6 +509,9 @@ impl<'a> Fc<'a> {
         }
         if let Some(m) = mark {
             self.leave(m);
+        }
+        if let Some(c) = self.value {
+            self.op(Op::Ret, c, 0, 0);
         }
         Ok(())
     }
@@ -600,7 +610,15 @@ impl<'a> Fc<'a> {
         let prog = self.prog;
         let st = *prog.stmt(s);
         let m = self.mark();
+        // The completion value of a script (`ScriptMode::value`): an expression statement writes it, and a statement that has a body
+        // starts from `undefined`, as in the old engine (not the full UpdateEmpty).
+        if let Some(c) = self.value
+            && matches!(st.kind, StmtKind::If { .. } | StmtKind::While { .. } | StmtKind::DoWhile { .. } | StmtKind::For { .. } | StmtKind::ForIn { .. } | StmtKind::ForOf { .. } | StmtKind::Try { .. } | StmtKind::Switch { .. })
+        {
+            self.op(Op::LoadUndef, c, 0, 0);
+        }
         match st.kind {
+            StmtKind::Expr(e) | StmtKind::Directive(e) if let Some(c) = self.value => self.to(e, c)?,
             StmtKind::Expr(e) => self.effect(e)?,
             StmtKind::Directive(_) | StmtKind::Empty | StmtKind::Debugger | StmtKind::Function(_) => {}
             StmtKind::Var { kind, decls } => self.var_decls(kind, decls)?,

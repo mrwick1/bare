@@ -178,7 +178,7 @@ impl<'a> Fc<'a> {
                 }
                 _ => {
                     let s = self.site_of(name)?;
-                    self.op(Op::GetGlobal, dst, s, 0);
+                    self.op(if self.scoped { Op::GetName } else { Op::GetGlobal }, dst, s, 0);
                 }
             },
         }
@@ -234,7 +234,7 @@ impl<'a> Fc<'a> {
             }
             Res::Global => {
                 let s = self.site_of(name)?;
-                self.op(if self.strict && !init { Op::SetGlobalS } else { Op::SetGlobal }, src, s, 0);
+                self.op(if self.scoped { Op::SetName } else if self.strict && !init { Op::SetGlobalS } else { Op::SetGlobal }, src, s, 0);
             }
         }
         Ok(())
@@ -882,7 +882,7 @@ impl<'a> Fc<'a> {
                 match name {
                     Some(n) if matches!(self.resolve(&n, a.span.start), Res::Global) && n != "undefined" => {
                         let s = self.site_of(&n)?;
-                        self.op(Op::TypeofGlobal, dst, s, 0);
+                        self.op(if self.scoped { Op::TypeofName } else { Op::TypeofGlobal }, dst, s, 0);
                     }
                     _ => {
                         let r = self.any(arg)?;
