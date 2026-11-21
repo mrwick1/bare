@@ -59,7 +59,7 @@ built-ins/Array/prototype/toString 9 1 1 10 0 1
 built-ins/Array/prototype/unshift 21 1 0 20 2 0
 built-ins/Array/prototype/values 9 0 3 8 1 3
 built-ins/Array/prototype/with 21 0 0 19 2 0
-built-ins/AsyncFunction 16 1 1 10 7 1
+built-ins/AsyncFunction 16 1 1 16 1 1
 built-ins/Date 70 6 3 70 6 3
 built-ins/Date/UTC 17 0 0 17 0 0
 built-ins/Date/now 6 0 0 6 0 0
@@ -132,9 +132,9 @@ built-ins/Function/prototype/call 47 2 0 44 5 0
 built-ins/Function/prototype/caller 0 1 0 0 1 0
 built-ins/Function/prototype/caller-arguments 0 1 0 0 1 0
 built-ins/Function/prototype/constructor 1 0 0 1 0 0
-built-ins/Function/prototype/toString 33 28 19 57 4 19
-built-ins/GeneratorFunction 13 2 2 5 10 2
-built-ins/GeneratorFunction/prototype 6 0 0 5 1 0
+built-ins/Function/prototype/toString 33 28 19 58 3 19
+built-ins/GeneratorFunction 13 2 2 13 2 2
+built-ins/GeneratorFunction/prototype 6 0 0 6 0 0
 built-ins/GeneratorPrototype 2 0 0 2 0 0
 built-ins/GeneratorPrototype/next 14 0 0 14 0 0
 built-ins/GeneratorPrototype/return 23 0 0 23 0 0
@@ -467,7 +467,7 @@ language/directive-prologue 52 10 0 52 10 0
 language/expressions 0 0 1 0 0 1
 language/expressions/addition 41 1 6 41 1 6
 language/expressions/array 52 0 0 52 0 0
-language/expressions/arrow-function 41 12 2 44 9 2
+language/expressions/arrow-function 41 12 2 45 8 2
 language/expressions/arrow-function/arrow 3 4 0 2 5 0
 language/expressions/arrow-function/dstr 231 0 0 227 4 0
 language/expressions/arrow-function/forbidden-ext/b1 2 0 0 2 0 0
@@ -494,7 +494,7 @@ language/expressions/bitwise-not 13 1 2 13 1 2
 language/expressions/bitwise-or 23 1 6 23 1 6
 language/expressions/bitwise-xor 23 1 6 23 1 6
 language/expressions/call 75 10 7 73 12 7
-language/expressions/class 214 31 16 222 23 16
+language/expressions/class 214 31 16 223 22 16
 language/expressions/class/accessor-name-inst 21 0 0 21 0 0
 language/expressions/class/accessor-name-static 21 0 0 21 0 0
 language/expressions/class/async-gen-method 0 0 94 0 0 94
@@ -591,7 +591,7 @@ language/expressions/new 56 2 1 56 2 1
 language/expressions/new.target 14 0 0 14 0 0
 language/expressions/object 269 29 8 275 23 8
 language/expressions/object/dstr 372 0 189 364 8 189
-language/expressions/object/method-definition 153 24 106 173 4 106
+language/expressions/object/method-definition 153 24 106 174 3 106
 language/expressions/object/method-definition/forbidden-ext/b1 6 0 2 6 0 2
 language/expressions/object/method-definition/forbidden-ext/b2 9 0 3 9 0 3
 language/expressions/optional-chaining 37 1 0 37 1 0
@@ -705,7 +705,7 @@ language/statements/class/subclass/builtin-objects/DataView 2 0 0 0 2 0
 language/statements/class/subclass/builtin-objects/Date 2 0 0 2 0 0
 language/statements/class/subclass/builtin-objects/Error 3 0 0 3 0 0
 language/statements/class/subclass/builtin-objects/Function 4 0 0 4 0 0
-language/statements/class/subclass/builtin-objects/GeneratorFunction 5 0 0 3 2 0
+language/statements/class/subclass/builtin-objects/GeneratorFunction 5 0 0 5 0 0
 language/statements/class/subclass/builtin-objects/Map 2 0 0 2 0 0
 language/statements/class/subclass/builtin-objects/NativeError 18 0 0 18 0 0
 language/statements/class/subclass/builtin-objects/Number 2 0 0 2 0 0

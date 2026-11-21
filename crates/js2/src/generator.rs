@@ -303,8 +303,8 @@ impl Realm {
     }
 
     /// `Closure` made the generator function `f`: it inherits `%GeneratorFunction.prototype%`, which is made now if it is not yet. That object
-    /// holds `prototype` (`%GeneratorPrototype%`) and the tag; `%GeneratorPrototype%` holds `constructor` and its tag. The `GeneratorFunction`
-    /// constructor is not built (js2 has no `Function` constructor).
+    /// holds `prototype` (`%GeneratorPrototype%`) and the tag; `%GeneratorPrototype%` holds `constructor` and its tag. `GeneratorFunction` is
+    /// `%GeneratorFunction.prototype%.constructor` (`dynamic_ctor`).
     #[cold]
     pub(crate) fn make_generator_function(&mut self, f: Value) {
         match self.function(f).map(|(ci, _)| self.prog[ci].gen_kind) {
@@ -330,6 +330,7 @@ impl Realm {
                 // `%IteratorPrototype%` (made for the host API too) is the prototype of `%GeneratorPrototype%`.
                 let ip = Realm::obj(self.iterator_prototype()).expect("an object");
                 gp.set_proto(&mut self.shapes, Some(ip.cell()));
+                self.dynamic_ctor(p, "GeneratorFunction", crate::builtins::generator_function_ctor);
                 p
             }
         };
@@ -337,8 +338,7 @@ impl Realm {
         o.set_proto(&mut self.shapes, Some(fp.cell()));
     }
 
-    /// `Closure` made the async function `f`: it inherits `%AsyncFunction.prototype%`, which holds the tag `AsyncFunction`. The `AsyncFunction`
-    /// constructor is not built (js2 has no `Function` constructor).
+    /// `Closure` made the async function `f`: it inherits `%AsyncFunction.prototype%`, which holds the tag `AsyncFunction`. `AsyncFunction` is its `constructor`.
     #[cold]
     fn make_async_function(&mut self, f: Value) {
         let ap = match self.genr.async_proto {
@@ -351,6 +351,7 @@ impl Realm {
                 let tag = Key::Name(self.wk[crate::bi_symbol::TO_STRING_TAG]);
                 let t = self.string("AsyncFunction");
                 self.define_attrs(p, tag, A_C, t).expect("define");
+                self.dynamic_ctor(p, "AsyncFunction", crate::builtins::async_function_ctor);
                 p
             }
         };

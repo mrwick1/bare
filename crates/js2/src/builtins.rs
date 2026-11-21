@@ -381,9 +381,43 @@ impl Realm {
 
 /// `Function(p1, ..., body)` and `new Function(...)`: CreateDynamicFunction for the normal kind. The text is one function expression
 /// compiled as a script of this realm, so the function has the global scope. The parameters and the body must parse alone, so a
-/// comment or a brace cannot reach across. js2 has no `GeneratorFunction` and no `AsyncFunction` constructors, so there are no
-/// other kinds.
+/// comment or a brace cannot reach across. `GeneratorFunction`, `AsyncFunction` and `AsyncGeneratorFunction` use the same code with
+/// another keyword (`dynamic_function`).
 fn function_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+    dynamic_function(rt, args, "function")
+}
+
+pub(crate) fn generator_function_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+    dynamic_function(rt, args, "function*")
+}
+
+pub(crate) fn async_function_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+    dynamic_function(rt, args, "async function")
+}
+
+pub(crate) fn async_generator_function_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+    dynamic_function(rt, args, "async function*")
+}
+
+impl Realm {
+    /// Make the constructor `name` of the function kind whose prototype object is `fp`. `fp.constructor` is it (not writable), its
+    /// `prototype` is `fp`, and it inherits `Function`. There is no global of this name.
+    #[cold]
+    pub(crate) fn dynamic_ctor(&mut self, fp: Obj, name: &'static str, f: NativeFn) {
+        let c = self.new_native(f, true, 1, name);
+        self.define_attrs(c, Key::Name(self.k_prototype), 0, fp.value()).expect("define");
+        self.define_attrs(fp, Key::Name(self.k_constructor), A_C, c.value()).expect("define");
+        let fv = self.function_proto.value();
+        if let Ok(base) = self.get_named(fv, "constructor")
+            && let Some(base) = Realm::obj(base)
+        {
+            c.set_proto(&mut self.shapes, Some(base.cell()));
+        }
+    }
+}
+
+/// CreateDynamicFunction: `keyword` is `function`, `function*`, `async function` or `async function*`.
+fn dynamic_function(rt: &mut Realm, args: &[Value], keyword: &str) -> R<Value> {
     let last = args.len().saturating_sub(1);
     let mut params = String::new();
     for (i, &a) in args[..last].iter().enumerate() {
@@ -401,14 +435,14 @@ fn function_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
         None => String::new(),
     };
     // Each part is checked as the text of one function declaration: a brace in the body cannot close the function and go on.
-    for part in [format!("function anonymous({params}\n) {{\n}}"), format!("function anonymous(\n) {{\n{body}\n}}")] {
+    for part in [format!("{keyword} anonymous({params}\n) {{\n}}"), format!("{keyword} anonymous(\n) {{\n{body}\n}}")] {
         match parse_script_lazy(&part, Limits::default(), &mut Facts::new()) {
             Ok(p) if matches!(p.list(p.body).collect::<Vec<_>>()[..], [s] if matches!(p.stmt(s).kind, StmtKind::Function(_))) => {}
             Ok(_) => return Err(rt.error(ErrKind::Syntax, "Unexpected token '}'")),
             Err(e) => return Err(rt.error(ErrKind::Syntax, &e.msg)),
         }
     }
-    let ci = rt.script_code(&format!("(function ({params}\n) {{\n{body}\n}})"), ScriptMode { value: true, ..ScriptMode::default() })?;
+    let ci = rt.script_code(&format!("({keyword} ({params}\n) {{\n{body}\n}})"), ScriptMode { value: true, ..ScriptMode::default() })?;
     let (top, global) = (rt.new_function(ci, Value::UNDEFINED), rt.global.value());
     let f = rt.call_function(top, global, &[])?;
     let anonymous = rt.intern("anonymous");
