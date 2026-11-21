@@ -44,12 +44,12 @@ built-ins/Array/prototype/map 205 2 9 206 1 9
 built-ins/Array/prototype/pop 23 0 0 23 0 0
 built-ins/Array/prototype/push 24 0 0 24 0 0
 built-ins/Array/prototype/reduce 255 1 4 256 0 4
-built-ins/Array/prototype/reduceRight 255 1 4 255 1 4
+built-ins/Array/prototype/reduceRight 255 1 4 256 0 4
 built-ins/Array/prototype/reverse 15 2 1 16 1 1
 built-ins/Array/prototype/shift 20 0 0 20 0 0
 built-ins/Array/prototype/slice 63 0 8 62 1 8
 built-ins/Array/prototype/some 213 2 4 214 1 4
-built-ins/Array/prototype/sort 49 0 5 47 2 5
+built-ins/Array/prototype/sort 49 0 5 49 0 5
 built-ins/Array/prototype/splice 73 2 6 74 1 6
 built-ins/Array/prototype/toLocaleString 9 0 3 9 0 3
 built-ins/Array/prototype/toReversed 17 0 0 17 0 0
