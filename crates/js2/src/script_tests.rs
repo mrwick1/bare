@@ -277,10 +277,8 @@ fn private_names_and_accessors() {
 
 #[test]
 fn unbuilt_constructs_stop_the_load_and_the_rest_is_clear() {
-    for src in ["with ({}) {}"] {
-        let e = run(src).err().unwrap_or_else(|| panic!("{src} ran"));
-        assert!(e.starts_with("not supported yet"), "{src}: {e}");
-    }
+    let e = run("delete ({})?.x;").err().expect("optional delete is unsupported");
+    assert!(e.starts_with("not supported yet"), "{e}");
     assert!(run("var = ;").err().unwrap().starts_with("SyntaxError"));
     assert_eq!(run("throw {a: 1};").err().unwrap(), "{a:1}");
     assert_eq!(run("throw 'x';").err().unwrap(), "x");
@@ -1096,8 +1094,8 @@ fn the_functions_of_a_user_script_are_compiled_at_their_first_call() {
 
 #[test]
 fn a_function_that_is_never_called_is_never_compiled() {
-    // A construct that the compiler does not build (`with`) inside a function: the load works and the call fails.
-    let src = "function bad() { with ({}) { return 1; } } function good() { return 2; } var r = good();";
+    // The compiler does not build optional delete. Loading the function still works.
+    let src = "function bad() { return delete ({})?.x; } function good() { return 2; } var r = good();";
     let vm = run(src).unwrap();
     let mut vm = vm;
     assert_eq!(vm.global_text("r"), "2");
@@ -1105,10 +1103,10 @@ fn a_function_that_is_never_called_is_never_compiled() {
 
 #[test]
 fn an_unbuilt_construct_in_a_function_fails_at_its_first_call_not_at_load() {
-    let src = "function bad() { with ({}) { return 1; } } var e; try { bad(); } catch (x) { e = x.name + ': ' + x.message.slice(0, 17); } try { bad(); } catch (x) { e += '|' + x.name; }";
+    let src = "function bad() { return delete ({})?.x; } var e; try { bad(); } catch (x) { e = x.name + ': ' + x.message.slice(0, 17); } try { bad(); } catch (x) { e += '|' + x.name; }";
     assert_eq!(ev(src, "e"), "Error: not supported yet|Error");
     // The top level has the construct: the load fails, as before.
-    assert!(load("with ({}) {}").err().unwrap().starts_with("not supported yet"));
+    assert!(load("delete ({})?.x;").err().unwrap().starts_with("not supported yet"));
 }
 
 #[test]
