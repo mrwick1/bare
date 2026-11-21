@@ -224,7 +224,7 @@ built-ins/NativeErrors/TypeError 9 0 1 9 0 1
 built-ins/NativeErrors/TypeError/prototype 5 0 0 5 0 0
 built-ins/NativeErrors/URIError 9 0 1 9 0 1
 built-ins/NativeErrors/URIError/prototype 5 0 0 5 0 0
-built-ins/Number 118 0 2 115 3 2
+built-ins/Number 118 0 2 118 0 2
 built-ins/Number/MAX_VALUE 4 0 0 4 0 0
 built-ins/Number/MIN_VALUE 4 0 0 4 0 0
 built-ins/Number/NEGATIVE_INFINITY 4 0 0 4 0 0
@@ -249,7 +249,7 @@ built-ins/Object/defineProperties 622 7 3 623 6 3
 built-ins/Object/defineProperty 1115 12 4 1109 18 4
 built-ins/Object/entries 20 0 1 20 0 1
 built-ins/Object/freeze 49 0 4 48 1 4
-built-ins/Object/fromEntries 25 0 0 19 6 0
+built-ins/Object/fromEntries 25 0 0 25 0 0
 built-ins/Object/getOwnPropertyDescriptor 308 2 0 309 1 0
 built-ins/Object/getOwnPropertyDescriptors 15 0 3 13 2 3
 built-ins/Object/getOwnPropertyNames 40 1 4 40 1 4
