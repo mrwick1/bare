@@ -27,6 +27,12 @@ impl Eng for Old {
         Ok(Interp::realm(heap, eval)?)
     }
 
+    // Keep the host and source vtables in bare when a caller builds a child realm.
+    #[inline(never)]
+    fn install_dom(vm: &mut Interp<'static>, dom: &std::rc::Rc<crate::browser::Dom<Self>>) -> Result<(), Fault<Self>> {
+        dom.install_on(vm)
+    }
+
     fn kind(v: Value) -> Val<Old> {
         match v {
             Value::Undefined => Val::Undefined,

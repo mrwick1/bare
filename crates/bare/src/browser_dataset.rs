@@ -102,6 +102,32 @@ fn prop_of(attr: &str) -> Option<String> {
     Some(out)
 }
 
+/// Encode a short ASCII dataset name as its attribute name. Other names use the general conversion.
+fn ascii_attr<'a>(key: &[u16], buf: &'a mut [u8; 64]) -> Option<&'a str> {
+    if key.len() > (buf.len() - 5) / 2 {
+        return None;
+    }
+    buf[..5].copy_from_slice(b"data-");
+    let mut len = 5;
+    for &u in key {
+        let b = u8::try_from(u).ok()?;
+        match b {
+            b'A'..=b'Z' => {
+                buf[len] = b'-';
+                buf[len + 1] = b.to_ascii_lowercase();
+                len += 2;
+            }
+            b'a'..=b'z' if len != 5 && buf[len - 1] == b'-' => return None,
+            b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b':' | b'_' => {
+                buf[len] = b;
+                len += 1;
+            }
+            _ => return None,
+        }
+    }
+    std::str::from_utf8(&buf[..len]).ok()
+}
+
 /// Does the attribute `attr` have the property name `key` (UTF-16)? Same as `prop_of(attr)` equals `key`, with no allocation.
 #[inline]
 fn matches(attr: &str, key: &[u16]) -> bool {
@@ -203,7 +229,11 @@ fn units(cs: impl Iterator<Item = char>, cap: usize) -> Vec<u16> {
 pub(crate) fn has<E: Eng>(d: &Dom<E>, owner: E::Obj, key: &[u16]) -> Result<bool, Pending> {
     let Some(el) = d.dataset_el(owner)? else { return Ok(false) };
     let doc = d.doc.try_borrow().map_err(|_| Pending::Busy)?;
-    d.dataset_gate(owner, doc.attr_count(el))?;
+    let count = doc.attr_count(el);
+    d.dataset_gate(owner, count)?;
+    if count > SCAN_FREE && let Some(name) = ascii_attr(key, &mut [0; 64]) {
+        return Ok(doc.find_attr_qname(el, name).is_some());
+    }
     let NodeData::Element { attrs, .. } = *doc.data(el) else { return Ok(false) };
     Ok(doc.attrs(attrs).iter().any(|a| matches(doc.atom_str(a.name), key)))
 }
@@ -213,6 +243,9 @@ pub(crate) fn has<E: Eng>(d: &Dom<E>, owner: E::Obj, key: &[u16]) -> Result<bool
 pub(crate) fn get<E: Eng>(d: &Dom<E>, owner: E::Obj, key: &[u16]) -> Result<Option<bare_js_api::Named<E::Raw>>, Pending> {
     let Some(el) = d.dataset_el(owner)? else { return Ok(None) };
     let doc = d.doc.try_borrow().map_err(|_| Pending::Busy)?;
+    if doc.attr_count(el) > SCAN_FREE && let Some(name) = ascii_attr(key, &mut [0; 64]) {
+        return Ok(doc.find_attr_qname(el, name).and_then(|a| doc.attr(el, a)).map(|t| bare_js_api::Named::Text(units(t.chars(), t.len()))));
+    }
     let NodeData::Element { attrs, .. } = *doc.data(el) else { return Ok(None) };
     Ok(doc.attrs(attrs).iter().find(|a| matches(doc.atom_str(a.name), key)).map(|a| {
         let t = doc.text(a.value);
@@ -253,8 +286,6 @@ pub(crate) fn fill<E: Eng>(d: &Dom<E>, it: &mut E::Vm, owner: E::Obj) -> R<E, bo
 
 // ------------------------------------------------------------------------------------ writes
 
-/// The text of a property key (a string key, or an array index as its digits).
-
 /// `Host::named_write` for a map: the setter, the deleter and `[[DefineOwnProperty]]` of the Standard.
 pub(crate) fn write<E: Eng>(d: &Dom<E>, it: &mut E::Vm, owner: E::Obj, name: &[u16], op: NamedOp<E>) -> R<E, bool> {
     let Some(&el) = d.dataset.s.borrow().objs.get(&owner) else { return Ok(false) };
@@ -286,6 +317,9 @@ pub(crate) fn write<E: Eng>(d: &Dom<E>, it: &mut E::Vm, owner: E::Obj, name: &[u
 /// The named setter: the value first (`ToString` can run script), then the name, then the attribute.
 fn set<E: Eng>(d: &Dom<E>, it: &mut E::Vm, el: NodeId, name: &[u16], v: E::Raw) -> R<E, ()> {
     let value = d.string_arg(it, v)?;
+    if let Some(attr) = ascii_attr(name, &mut [0; 64]) {
+        return attr_set(d, it, el, attr, &value);
+    }
     let name = String::from_utf16_lossy(name);
     let b = name.as_bytes();
     if b.windows(2).any(|w| w[0] == b'-' && w[1].is_ascii_lowercase()) {

@@ -119,6 +119,7 @@ pub fn verify(code: &Code) -> Result<(), String> {
                 'A' if !in_range(code.atoms.len()) => return err("no such atom"),
                 'F' if !in_range(code.funcs.len()) => return err("no such function"),
                 'H' if !in_range(code.recipes.len()) => return err("no such recipe"),
+                'D' if !in_range(code.data.len()) => return err("no such data literal"),
                 'T' => {
                     if let Err(why) = check_table(code, &i, pc, &start) {
                         return err(why);

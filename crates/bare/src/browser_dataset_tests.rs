@@ -275,6 +275,7 @@ fn long_attribute_lists_work_and_are_charged() {
         let mut b = browser_with(&html, BrowserLimits::default(), 5_000_000);
         // More than 32 attributes: the heap asks the evaluator to charge, then the read repeats.
         ok(&mut b, "var ds = document.getElementById('p').dataset; [ds.a0, ds.a99, ds.a100, 'a50' in ds, 'a100' in ds, Object.keys(ds).length, Object.keys(ds)[99], delete ds.a5, Object.keys(ds).length, (ds.zz = 1, ds.zz)].join()", "v0,v99,,true,false,100,a99,true,99,1");
+        ok(&mut b, "ds['-A'] = 2; ds['éName'] = 3; ds[''] = 4; [ds['-A'], ds['éName'], ds[''], 'é-name' in ds, Object.keys(ds).slice(-3)].join('|')", "2|3|4|false|-A,éName,");
         let steps = |n: usize| {
             let mut html = String::from("<!doctype html><body><p id=p");
             for i in 0..n {
