@@ -8,7 +8,7 @@
 //! `shift` and `unshift` move all the elements: O(n) each.
 use crate::lazy::{Ent, m, script, sym_same};
 use crate::bi_object::{Desc, H_SEARCH};
-use crate::bi_symbol::SPECIES;
+use crate::bi_symbol::{ITERATOR, SPECIES};
 use crate::builtins::{NativeFn, arg};
 use crate::interp_rt::{ErrKind, Key, R, Realm};
 use crate::object::{F_ELEMS_FIXED, F_ELEMS_RO, F_LEN_RO, F_NOEXT, F_SLOWIDX, Obj};
@@ -154,6 +154,10 @@ fn species_create(rt: &mut Realm, o: Value, n: f64) -> R<Obj> {
             return Realm::obj(v).ok_or_else(|| rt.error(ErrKind::Type, "the array species did not return an object"));
         }
     }
+    array_create(rt, n)
+}
+
+fn array_create(rt: &mut Realm, n: f64) -> R<Obj> {
     if n > u32::MAX as f64 {
         return Err(rt.error(ErrKind::Range, "invalid array length"));
     }
@@ -196,7 +200,7 @@ impl Realm {
         self.keep(c.value());
         let get = self.new_native(array_species_get, false, 0, "get [Symbol.species]");
         self.define_accessor(c, Key::Name(self.wk[SPECIES]), get.value(), false, false).expect("define");
-        static ARRAY_STATICS: &[Ent] = &[script("of", "array_of"), script("from", "array_from"), m("isArray", 1, is_array)];
+        static ARRAY_STATICS: &[Ent] = &[m("of", 0, array_of), m("from", 1, array_from), m("isArray", 1, is_array)];
         self.lazy_table(c, ARRAY_STATICS);
         static ARRAY_PROTO: &[Ent] = &[
             script("keys", "array_keys"),
@@ -259,6 +263,91 @@ fn array_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
         _ => Obj::array(&mut rt.heap, &rt.shapes, shape, args).expect("memory"),
     };
     Ok(o.value())
+}
+
+/// Construct a result with the caller's constructor or use the intrinsic array.
+fn factory_result(rt: &mut Realm, ctor: Value, len: Option<f64>) -> R<Obj> {
+    if ctor != rt.array_ctor && rt.is_constructor(ctor) {
+        let v = match len {
+            Some(n) => rt.construct_value(ctor, &[Realm::num(n)])?,
+            None => rt.construct_value(ctor, &[])?,
+        };
+        return Ok(Realm::obj(v).expect("a constructor returns an object"));
+    }
+    array_create(rt, len.unwrap_or(0.0))
+}
+
+fn array_of(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+    let n = args.len() as f64;
+    let result = factory_result(rt, this, Some(n))?;
+    for (i, &value) in args.iter().enumerate() {
+        put(rt, result, i as f64, value)?;
+    }
+    set_len(rt, result.value(), n)?;
+    Ok(result.value())
+}
+
+fn array_from(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+    let (items, mapper, receiver) = (arg(args, 0), arg(args, 1), arg(args, 2));
+    let mapping = !mapper.is_undefined();
+    if mapping && !Realm::obj(mapper).is_some_and(|f| f.is_callable()) {
+        return rt.type_error("the mapper is not a function");
+    }
+    let method = rt.get_prop(items, Key::Name(rt.wk[ITERATOR]))?;
+    let map = |rt: &mut Realm, value, i| {
+        if mapping { rt.call_function(mapper, receiver, &[value, Realm::num(i)]) } else { Ok(value) }
+    };
+    let result;
+    let mut i = 0.0;
+    if method.is_null() || method.is_undefined() {
+        let source = rt.to_object(items)?.value();
+        let n = len_of(rt, source)?;
+        result = factory_result(rt, this, Some(n))?;
+        while i < n {
+            rt.fuel = rt.fuel.checked_sub(1).ok_or(crate::interp::STOP)?;
+            let value = get_at(rt, source, i)?;
+            let value = map(rt, value, i)?;
+            put(rt, result, i, value)?;
+            i += 1.0;
+        }
+    } else {
+        if !Realm::obj(method).is_some_and(|f| f.is_callable()) {
+            return rt.type_error("the iterator method is not a function");
+        }
+        result = factory_result(rt, this, None)?;
+        let array = Realm::obj(items).filter(|o| rt.plain_array_iterator(*o) && method == rt.args_iter);
+        let (iter, next) = if array.is_some() { (items, Value::UNDEFINED) } else { rt.iter_open_method(items, method)? };
+        loop {
+            rt.fuel = rt.fuel.checked_sub(1).ok_or(crate::interp::STOP)?;
+            if i == MAX_LEN {
+                let e = rt.error(ErrKind::Type, "the result has too many elements");
+                rt.iter_close(iter, next, true)?;
+                return Err(e);
+            }
+            let value = if let Some(array) = array {
+                if i >= array.len() as f64 {
+                    break;
+                }
+                get_at(rt, items, i)?
+            } else {
+                let Some(value) = rt.iter_step(iter, next)? else { break };
+                value
+            };
+            if let Err(e) = map(rt, value, i).and_then(|value| put(rt, result, i, value)) {
+                if e != crate::interp::STOP {
+                    if array.is_some() {
+                        rt.close_array_iterator(items, i as u32 + 1, true)?;
+                    } else {
+                        rt.iter_close(iter, next, true)?;
+                    }
+                }
+                return Err(e);
+            }
+            i += 1.0;
+        }
+    }
+    set_len(rt, result.value(), i)?;
+    Ok(result.value())
 }
 
 fn is_array(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
