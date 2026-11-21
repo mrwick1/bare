@@ -446,13 +446,6 @@ fn make<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, Made> {
     Ok(Made { glob: [crypto, navigator, blob, file, form, subtle_ctor], subtle, langs, uad, brands, blob_p: bp, file_p: fp, form_p: fo, iter_p: ip })
 }
 
-fn need_old(it: &mut Interp<'_>, a: &[Value], n: usize, what: &str) -> R<()> {
-    if a.len() < n {
-        return Err(it.type_error(&format!("Failed to execute '{what}': {n} argument{} required, but only {} present.", if n == 1 { "" } else { "s" }, a.len())));
-    }
-    Ok(())
-}
-
 fn need<'s>(s: &mut Sc<'s, '_>, a: Args<'s>, n: usize, what: &str) -> Res<'s, ()> {
     if a.len() < n {
         return Err(s.type_error(&format!("Failed to execute '{what}': {n} argument{} required, but only {} present.", if n == 1 { "" } else { "s" }, a.len())));
@@ -489,7 +482,7 @@ fn random_failed<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> AErr<'s> {
     d.dom_err_s(s, "OperationError", "The operating system random source failed.")
 }
 
-/// The old form of `random_failed`, for `boundary` and `createObjectURL`.
+/// The old form of `random_failed`, for `boundary`.
 fn random_failed_old(d: &Dom, it: &mut Interp<'_>) -> Error {
     d.dom_err(it, "OperationError", "The operating system random source failed.")
 }
@@ -788,30 +781,32 @@ fn hint<'s>(d: &Dom, s: &mut Sc<'s, '_>, out: Local<'s>, name: &str) -> Res<'s, 
 /// `URL.createObjectURL(blob)`.
 #[cold]
 #[inline(never)]
-pub(crate) fn create_object_url(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
-    need_old(it, a, 1, "createObjectURL' on 'URL")?;
-    let blob = match a[0] {
-        Value::Object(o) if d.web.s.borrow().blobs.contains_key(&o) => o,
-        _ => return Err(it.type_error("Failed to execute 'createObjectURL' on 'URL': Overload resolution failed.")),
+pub(crate) fn create_object_url<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    need(s, a, 1, "createObjectURL' on 'URL")?;
+    let v = arg_s(s, a, 0);
+    let blob = match obj_id(s, v) {
+        Some(o) if d.web.s.borrow().blobs.contains_key(&o) => o,
+        _ => return Err(s.type_error("Failed to execute 'createObjectURL' on 'URL': Overload resolution failed.")),
     };
     if d.web.s.borrow().urls.len() >= MAX_URLS {
-        return Err(d.lim("web-objects"));
+        return Err(d.lim_s(s, "web-objects"));
     }
-    let Some(id) = uuid_v4() else { return Err(random_failed_old(d, it)) };
+    let Some(id) = uuid_v4() else { return Err(random_failed(d, s)) };
     let origin = d.cur_rec().map_or_else(|_| "null".to_string(), |r| r.origin());
     let url = format!("blob:{origin}/{id}");
     d.web.s.borrow_mut().urls.insert(url.clone(), blob);
-    d.js_str(it, &url)
+    d.js_str_s(s, &url)
 }
 
 /// `URL.revokeObjectURL(url)`. A URL that is not in the store is ignored.
 #[cold]
 #[inline(never)]
-pub(crate) fn revoke_object_url(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
-    need_old(it, a, 1, "revokeObjectURL' on 'URL")?;
-    let url = d.string_arg(it, a[0])?;
+pub(crate) fn revoke_object_url<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    need(s, a, 1, "revokeObjectURL' on 'URL")?;
+    let v = arg_s(s, a, 0);
+    let url = d.string_arg_s(s, v)?;
     d.web.s.borrow_mut().urls.remove(url.trim_matches(|c: char| c <= ' ').split('#').next().unwrap_or(""));
-    Ok(Value::Undefined)
+    Ok(s.undefined())
 }
 
 /// Is `s` a `blob:` URL (any case, after leading and trailing control and space characters)?

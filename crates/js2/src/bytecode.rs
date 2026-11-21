@@ -44,6 +44,12 @@
 //! `mask + 1` slots of `hash`, `atom`, `target`, probed linearly from `hash & mask`; a slot with `atom == u32::MAX` is empty and ends a
 //! probe. Both ops end the basic block: they do not fall through.
 //!
+//! **Suspension.** `GenInit` and `Yield` leave the frame and keep it in the heap (`generator.rs`, `docs/design-js2-async.md` 5.1). Each names a *save
+//! list* in [`Code::tables`]: `sent`, `mode`, `len` and then `len` registers (see [`SaveList`]). The registers of the list are copied into the
+//! record of the generator and copied back at a resume, and no other register survives it. So after a suspension a register is written only
+//! if it is in the list, or it is `sent` or `mode` (the resume writes the value that was sent and the mode of the resume: 0 `next`,
+//! 1 `throw`, 2 `return`; [`NO_REG`]: none). The verifier checks that a path reads no register that the resume did not restore.
+//!
 //! **Root maps.** [`Code::roots`] holds the root maps of S1.6. The safepoints are the instructions where [`Op::is_safepoint`] is true:
 //! every op that can allocate, call JS (a getter, `valueOf`) or throw, and `JmpBack`. The key of a map is the `pc` of the first word of
 //! the instruction. The verifier checks that each safepoint has a map, that each map names only registers that every path has written,
@@ -317,6 +323,9 @@ ops! {
     CallSuper Abc "w R u" "`a = super(...)`: the `c` arguments are in the registers from `b`. It constructs with the `new.target` of this call and runs the field initializers (`SetFields`) of the class. The compiler writes `a` to the variable `this`.",
     CallSuperSpread Abc "w r" "As `CallSuper`, with the arguments in the array `b`.",
     RetDerived Abc "r r" "Return from a derived constructor with the value `a` and the variable `this` in `b`: an object is returned as it is; `undefined` gives `this` (a ReferenceError when `this` is the hole); anything else is a TypeError.",
+    GenInit Abx "- T" "The first suspension of a generator: the parameters are bound and the defaults are evaluated, and the body has not run. Make the generator object and the record that keeps the frame, save the registers of the list at `tables[bx..]` (see \"Suspension\" above), and return the generator object to the caller. The first `next()` goes on at the instruction after this one.",
+    Yield Abx "r T" "Suspend the generator: save the registers of the list at `tables[bx..]`, and give the value `a` to the caller of `next()`. A resume goes on at the instruction after this one with the sent value and the mode in the registers that the list names.",
+    RetGen Abc "r" "Return `a` from a generator: the generator is done. The only return of the code of a generator (`Ret` is not allowed there).",
     Lazy Abc "u" "The only instruction of the stub of a function that is compiled at its first call (`script::Lazy`): compile the function into this code, then run it from the start with the same arguments. With `a` = 1 the stub has `CF_ARGS`, so the frame record holds all arguments in an array. With `a` = 0 the stub has the parameter registers of the real code, and the arguments are in them (a function with plain parameters that does not read `arguments`): no array is made. The compiler never emits it.",
 }
 
@@ -346,7 +355,7 @@ impl Op {
 
     /// Does control go on to the next instruction? (`Jmp`, `JmpBack`, the returns and the throws do not.)
     pub fn falls_through(self) -> bool {
-        !matches!(self, Op::Jmp | Op::JmpBack | Op::Ret | Op::RetUndef | Op::Throw | Op::ThrowConst | Op::RetDerived | Op::SwitchI | Op::SwitchA)
+        !matches!(self, Op::Jmp | Op::JmpBack | Op::Ret | Op::RetUndef | Op::RetGen | Op::Throw | Op::ThrowConst | Op::RetDerived | Op::SwitchI | Op::SwitchA)
     }
 
     /// Can the instruction run JS, allocate or throw, so that a collection can happen in it? The compiler gives a root map to each one.
@@ -608,6 +617,25 @@ pub struct Code {
     pub strict: bool,
     /// The function is an arrow, a method, a getter or a setter: `new` on it throws a `TypeError`.
     pub noctor: bool,
+    /// [`GK_NONE`], or the kind of function whose frame can be suspended (`GenInit`, `Yield`, `RetGen`).
+    pub gen_kind: u8,
+    /// The length of the longest save list of the code: the number of registers that its record has room for.
+    pub gen_regs: u16,
+}
+
+/// `Code::gen_kind` of a function that has no suspension.
+pub const GK_NONE: u8 = 0;
+/// `Code::gen_kind` of a generator function.
+pub const GK_GEN: u8 = 1;
+/// The register field of a save list that names no register.
+pub const NO_REG: u32 = u32::MAX;
+
+/// A save list (see "Suspension" above): where a resume writes the sent value and the mode, and the registers that the suspension keeps.
+#[derive(Clone, Copy, Debug)]
+pub struct SaveList<'a> {
+    pub sent: u32,
+    pub mode: u32,
+    pub regs: &'a [u32],
 }
 
 /// `Code::fn_name` of a function that has no name.
@@ -634,7 +662,16 @@ impl Code {
             fn_len: 0,
             strict: false,
             noctor: false,
+            gen_kind: GK_NONE,
+            gen_regs: 0,
         }
+    }
+
+    /// The save list at `t` of `tables`. `None` when it is not inside the pool.
+    pub fn save_list(&self, t: u32) -> Option<SaveList<'_>> {
+        let rest = self.tables.get(t as usize..)?;
+        let &[sent, mode, len] = rest.get(..3)? else { return None };
+        Some(SaveList { sent, mode, regs: rest.get(3..)?.get(..len as usize)? })
     }
 
     /// The handler for an exception thrown at word `pc`.

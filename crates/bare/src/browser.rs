@@ -2,7 +2,7 @@
 //!
 //! How it fits together
 //! - The DOM is the native `bare_html::dom::Document` behind `Rc<RefCell<Document>>`. JS never sees a copy.
-//! - `Dom` implements `bare_js::eval::Host`. JS calls reach it as numbered methods (`handlers`). Getters and setters
+//! - `Dom` implements `bare_js::eval::Host`. JS calls reach it as numbered methods (`Dom::scoped`). Getters and setters
 //!   are ordinary accessor properties on the prototypes, so `el.id` runs through the same call path and obeys the
 //!   same step and 100-call guards.
 //! - A JS node is a wrapper object. There is one wrapper for each native node while it is alive, so `a === a`.
@@ -94,6 +94,7 @@ use bare_js::eval::{Error, EvalLimits, Host, Interp, LimitKind};
 use bare_js::heap::{Heap, HeapLimits, PropertyDescriptor};
 use bare_js::value::{ObjId, PropertyKey, Value};
 use bare_js_api::HostFn;
+use crate::browser_scoped::{HS, run};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::hash::{BuildHasherDefault, Hasher};
@@ -255,7 +256,6 @@ impl<K: SlotKey, V> IdTab<K, V> {
     }
 }
 /// A host method: the DOM, the interpreter, `this`, the arguments.
-pub(crate) type H = fn(&Dom, &mut Interp<'_>, Value, &[Value]) -> R<Value>;
 
 /// Hard bounds of one browser. Every one is checked before the thing grows.
 #[derive(Clone, Copy, Debug)]
@@ -705,13 +705,11 @@ pub(crate) enum P {
 }
 
 pub(crate) enum Kind {
-    Method(H),
-    /// A method of the new form, on the interface registry (`browser_scoped.rs`).
+    /// A method, on the interface registry (`browser_scoped.rs`).
     MethodS(crate::browser_scoped::HS),
-    Get(H),
-    /// A getter of the new form.
+    /// A getter.
     GetS(crate::browser_scoped::HS),
-    /// A getter and a setter of the new form.
+    /// A getter and a setter.
     AccessorS(crate::browser_scoped::HS, crate::browser_scoped::HS),
 }
 
@@ -736,7 +734,6 @@ pub struct Dom {
     /// object is stored: `Dom::new_source`, the `Attr` tables and the frame tables.
     pub(crate) wrapper_edges: Cell<bool>,
     /// `(handler, needs new)` for each host function id.
-    pub(crate) handlers: RefCell<Vec<(H, bool)>>,
     /// The functions of the new form (and, in a test build, every old one): the registry of the interface `Host::call`.
     pub(crate) scoped: RefCell<Vec<crate::browser_scoped::Scoped>>,
     /// Prototypes and interface objects: permanent roots.
@@ -1012,9 +1009,9 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
 }
 
 impl Host for Dom {
-    fn call(&self, it: &mut Interp<'_>, id: u32, this: Value, args: &[Value], is_new: bool) -> R<Value> {
-        let (h, needs_new) = self.handlers.borrow()[id as usize];
-        self.dispatch_host(it, id, needs_new && !is_new, |it| h(self, it, this, args))
+    /// Every host function is on the interface (`Dom::call_scoped`), so the engine never calls this.
+    fn call(&self, _: &mut Interp<'_>, _: u32, _: Value, _: &[Value], _: bool) -> R<Value> {
+        Err(Error::Unsupported(unsupported("a host function of the old registry")))
     }
 
     fn roots(&self, out: &mut Vec<Value>) {
@@ -1194,7 +1191,7 @@ pub(crate) fn define_window(d: &Dom, it: &mut Interp<'_>, name: &str) -> R<bool>
         return Ok(true);
     }
     if name == "event" { crate::browser_gaps::define_event(d, it)?; return Ok(true); }
-    if name == "DocumentType" { crate::browser_implementation::doctype_global(d, it, Value::Undefined, &[])?; return Ok(true); }
+    if name == "DocumentType" { run(it, |s| crate::browser_implementation::doctype_define(d, s, None).map(|_| ()))?; return Ok(true); }
     if !matches!(name,"frames"|"parent"|"top"|"length"|"name"|"screen"){return Ok(false);}
     let g = it.global_object();
     let key=d.key(it,name)?;
@@ -1208,7 +1205,7 @@ pub(crate) fn define_window(d: &Dom, it: &mut Interp<'_>, name: &str) -> R<bool>
         "frames" | "parent" | "top" => Value::Object(g),
         "length" => Value::Number(0.0),
         "name" => d.js_str(it, "")?,
-        "screen" => { window_screen(d,it,Value::Undefined,&[])?; return Ok(true); },
+        "screen" => { window_screen(d,it)?; return Ok(true); },
         _ => unreachable!(),
     };
     it.define_data(g,key,value,!matches!(name,"top"|"length"),true,name!="top")?;
@@ -1220,8 +1217,8 @@ fn screen_iface(d: &Dom, it: &mut Interp<'_>) -> R<crate::browser_geom::Iface> {
     if let Some(i) = d.screen_iface.get() {
         return Ok(i);
     }
-    let i = crate::browser_geom::make(d, it, it.object_prototype(), "Screen", illegal_constructor, false)?;
-    crate::browser_geom::finish(d, it, i, "Screen", &[])?;
+    let i = crate::browser_geom::make_s(d, it, it.object_prototype(), "Screen", illegal_constructor, HostFn::Ctor)?;
+    crate::browser_geom::finish_s(d, it, i, "Screen", &[])?;
     d.screen_iface.set(Some(i));
     Ok(i)
 }
@@ -1234,22 +1231,16 @@ crate::browser_lazy::lazy_global!(lazy_screen, "Screen", ensure_screen, |d| d.sc
 
 // The virtual display has the default headless dimensions. Viewport resizing does not resize it.
 #[cold]
-fn window_screen(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    let value = if let Some(&v) = a.first() {
-        v
-    } else {
-        let proto = screen_iface(d, it)?.proto;
-        let o = d.obj(it, proto)?;
-        crate::browser_lazy::tag(d, it, o, "Screen")?;
-        for (name, value) in [("width", 1280.0), ("height", 800.0), ("availWidth", 1280.0), ("availHeight", 800.0), ("availLeft", 0.0), ("availTop", 0.0), ("colorDepth", 24.0), ("pixelDepth", 24.0)] {
-            let k = d.key(it, name)?;
-            it.define_data(o, k, Value::Number(value), false, true, true)?;
-        }
-        Value::Object(o)
-    };
+fn window_screen(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+    let proto = screen_iface(d, it)?.proto;
+    let o = d.obj(it, proto)?;
+    crate::browser_lazy::tag(d, it, o, "Screen")?;
+    for (name, value) in [("width", 1280.0), ("height", 800.0), ("availWidth", 1280.0), ("availHeight", 800.0), ("availLeft", 0.0), ("availTop", 0.0), ("colorDepth", 24.0), ("pixelDepth", 24.0)] {
+        let k = d.key(it, name)?;
+        it.define_data(o, k, Value::Number(value), false, true, true)?;
+    }
     let k = d.key(it, "screen")?;
-    it.define_data(it.global_object(), k, value, true, false, true)?;
-    Ok(value)
+    it.define_data(it.global_object(), k, Value::Object(o), true, false, true)
 }
 
 impl Dom {
@@ -1500,15 +1491,6 @@ impl Dom {
         }
     }
 
-    pub(crate) fn add_fn(&self, it: &mut Interp<'_>, h: H, name: &str, len: u32, ctor: bool) -> R<ObjId> {
-        self.add_old(it, h, name, len, if ctor { HostFn::Ctor } else { HostFn::Method })
-    }
-
-    /// A constructor that takes a different `new.target`: it reads it with `host_proto_from_new_target`.
-    pub(crate) fn add_ctor_nt(&self, it: &mut Interp<'_>, h: H, name: &str, len: u32) -> R<ObjId> {
-        self.add_old(it, h, name, len, HostFn::CtorNewTarget)
-    }
-
     pub(crate) fn install(&self, it: &mut Interp<'_>) -> R<()> {
         let g = it.global_object();
         let _ = self.global.set(g);
@@ -1564,17 +1546,6 @@ impl Dom {
             let key = self.key(it, d.name)?;
             let (f, s) = match d.kind {
                 Kind::MethodS(h) => (self.add_fn_s_obj(it, h, d.name, d.len, HostFn::Method)?, None),
-                Kind::Method(h) if self.methods_on_api() => (self.add_old(it, h, d.name, d.len, HostFn::Method)?, None),
-                Kind::Method(h) => {
-                    let id = self.handlers.borrow().len() as u32;
-                    self.handlers.borrow_mut().push((h, false));
-                    let PropertyKey::String(name) = key else { unreachable!("a method name is not an index") };
-                    (it.host_function_interned(id, name, d.len, false)?, None)
-                }
-                Kind::Get(h) => {
-                    named(&mut nm, "get ", d.name);
-                    (self.add_fn(it, h, &nm, 0, false)?, None)
-                }
                 Kind::GetS(h) => {
                     named(&mut nm, "get ", d.name);
                     (self.add_fn_s_obj(it, h, &nm, 0, HostFn::Method)?, None)
@@ -1589,14 +1560,14 @@ impl Dom {
             for &on in d.on {
                 let target = self.pick(on);
                 match d.kind {
-                    Kind::Method(_) | Kind::MethodS(_) => it.define_data(target, key, Value::Object(f), true, false, true)?,
+                    Kind::MethodS(_) => it.define_data(target, key, Value::Object(f), true, false, true)?,
                     _ => self.define_accessor(it, target, key, f, s)?,
                 }
             }
         }
 
         // interface objects
-        let ifaces: [(&str, ObjId, Option<H>); 26] = [
+        let ifaces: [(&str, ObjId, Option<HS>); 26] = [
             ("EventTarget", et, None),
             ("Window", win, None),
             ("Node", node, None),
@@ -1618,7 +1589,7 @@ impl Dom {
             ("CustomEvent", custom, None),
             ("FocusEvent", focus, None),
             ("SubmitEvent", submit, None),
-            ("ToggleEvent", toggle, Some(crate::browser_details::toggle_event_ctor as H)),
+            ("ToggleEvent", toggle, Some(crate::browser_details::toggle_event_ctor as HS)),
             ("MouseEvent", mouse, None),
             ("PointerEvent", pointer, None),
             ("KeyboardEvent", keyboard, None),
@@ -1630,11 +1601,11 @@ impl Dom {
             let f = match (name, ctor) {
                 ("DocumentFragment", _) => self.add_fn_s_obj(it, nd::fragment_ctor_s, name, 0, HostFn::CtorNewTarget)?,
                 ("SubmitEvent", _) => self.add_fn_s_obj(it, fm::submit_event_ctor_s, name, 1, HostFn::CtorNewTarget)?,
-                (_, Some(h)) => self.add_ctor_nt(it, h, name, u32::from(name != "EventTarget" && !name.starts_with("HTML")))?,
+                (_, Some(h)) => self.add_fn_s_obj(it, h, name, u32::from(name != "EventTarget" && !name.starts_with("HTML")), HostFn::CtorNewTarget)?,
                 (_, None) if name.starts_with("HTML") => ce::interface_ctor(self, it, name, false)?,
                 (_, None) => match ctor_s(name) {
                     Some(h) => self.add_fn_s_obj(it, h, name, u32::from(name != "EventTarget"), HostFn::CtorNewTarget)?,
-                    None => self.add_fn(it, illegal_constructor, name, 0, false)?,
+                    None => self.add_fn_s_obj(it, illegal_constructor, name, 0, HostFn::Method)?,
                 },
             };
             it.define_data(f, kp, Value::Object(proto), false, false, false)?;
@@ -1701,7 +1672,7 @@ impl Dom {
         crate::browser_rejection::install(self, it)?;
         crate::browser_perf_observer::install(self, it)?;
         crate::browser_perf::install_interfaces(self, it)?;
-        crate::browser_lazy::install(self, it, &[("Screen", lazy_screen as H)])?;
+        crate::browser_lazy::install(self, it, &[("Screen", lazy_screen as HS)])?;
         crate::browser_select::install(self, it)?;
         // Last: a new host function earlier in this list moves the id of every one after it.
         crate::browser_elements::install(self, it)?;
@@ -1742,8 +1713,8 @@ fn ctor_s(name: &str) -> Option<crate::browser_scoped::HS> {
     })
 }
 
-pub(crate) fn illegal_constructor(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
-    Err(it.type_error("Illegal constructor"))
+pub(crate) fn illegal_constructor<'s>(_: &Dom, s: &mut crate::browser_scoped::Sc<'s, '_>, _: bare_js_api::Local<'s>, _: bare_js_api::Args<'s>) -> crate::browser_scoped::Res<'s, bare_js_api::Local<'s>> {
+    Err(s.type_error("Illegal constructor"))
 }
 
 use Kind::{AccessorS as AS, GetS as GS, MethodS as MS};
@@ -2009,7 +1980,6 @@ impl Browser {
             selector_scope: Default::default(),
             doc_wrapper: OnceCell::new(),
             wrapper_edges: Cell::new(false),
-            handlers: RefCell::default(),
             scoped: RefCell::default(),
             fixed: RefCell::default(),
             start: Instant::now(),

@@ -7,7 +7,7 @@
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_js::eval::Interp;
-use bare_js::value::{ObjId, Value};
+use bare_js::value::ObjId;
 use bare_js_api::{Args, Attrs, Elem, HostFn, Local};
 
 /// The most bytes (`width * height * 4`) of one `ImageData`.
@@ -33,26 +33,18 @@ fn ensure_s<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, Local<'s>> {
     Ok(f)
 }
 
-fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<ObjId> {
-    run(it, |s| {
-        let f = ensure_s(d, s)?;
-        Ok(obj_id(s, f).expect("an object"))
-    })
-}
-
-fn lazy_image_data(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    let g = it.global_object();
-    let k = d.key(it, "ImageData")?;
-    let v = match a.first() {
-        Some(&v) => v,
-        None => Value::Object(ensure(d, it)?),
+fn lazy_image_data<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let v = match a.get(0) {
+        Some(v) => v,
+        None => ensure_s(d, s)?,
     };
-    it.define_data(g, k, v, true, false, true)?;
-    Ok(if a.is_empty() { v } else { Value::Undefined })
+    let g = s.global();
+    s.define_str(g, "ImageData", v, Attrs { writable: true, enumerable: false, configurable: true })?;
+    Ok(if a.is_empty() { v } else { s.undefined() })
 }
 
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    crate::browser_lazy::install(d, it, &[("ImageData", lazy_image_data as H)])
+    crate::browser_lazy::install(d, it, &[("ImageData", lazy_image_data as HS)])
 }
 
 /// An `unsigned long` of the constructor (`[EnforceRange]`): a `TypeError` when it is not finite or out of range.

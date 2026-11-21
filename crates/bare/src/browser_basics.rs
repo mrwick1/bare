@@ -34,7 +34,7 @@
 
 use crate::browser::*;
 use crate::browser_scoped::*;
-use bare_js_api::{Args, Local};
+use bare_js_api::{Args, Engine, Local};
 use crate::browser_platform::arg;
 use bare_html::dom::{Document, NodeData};
 use bare_js::eval::Interp;
@@ -88,7 +88,7 @@ pub(crate) fn define(d: &Dom, it: &mut Interp<'_>, key: &str) -> R<()> {
         "screenX" | "screenY" => data(it, g, Value::Number(0.0)),
         "crossOriginIsolated" | "closed" => data(it, g, Value::Bool(false)),
         "opener" | "frameElement" => data(it, g, Value::Null),
-        "postMessage" => d.def_method(it, g, "postMessage", 1, post_message).map(|_| ()),
+        "postMessage" => d.def_method_s(it, g, "postMessage", 1, post_message).map(|_| ()),
         "print" | "focus" | "blur" => hidden(it, nothing),
         "alert" => hidden(it, alert),
         "confirm" => hidden(it, confirm),
@@ -305,23 +305,27 @@ pub(crate) fn target_origin(it: &mut Interp<'_>, d: &Dom, target: &str) -> R<Opt
     }
 }
 
-fn post_message(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
+fn post_message<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let this = s.engine().raw(this);
     // The window of a blank frame has no message listeners that run here, so a message to it is dropped.
     if matches!(this, Value::Object(o) if crate::browser_frames::is_blank_window(d, o)) {
-        return Ok(Value::Undefined);
+        return Ok(s.undefined());
     }
     if !matches!(this, Value::Undefined | Value::Null) && !matches!(this, Value::Object(o) if Some(&o) == d.global.get()) {
-        return Err(it.type_error("Illegal invocation"));
+        return Err(s.type_error("Illegal invocation"));
     }
-    let (target, list) = post_args(d, it, a)?;
-    if let Some(origin) = target_origin(it, d, &target)?
-        && origin != doc_origin(d)
-    {
-        return Ok(Value::Undefined);
-    }
-    let (data, ports, _) = crate::browser_navigation_state::clone_with(d, it, a[0], &list)?;
-    d.post_window(data, ports.into_boxed_slice())?;
-    Ok(Value::Undefined)
+    let a: Vec<Value> = a.iter().map(|v| s.engine().raw(v)).collect();
+    old(s, |it| {
+        let (target, list) = post_args(d, it, &a)?;
+        if let Some(origin) = target_origin(it, d, &target)?
+            && origin != doc_origin(d)
+        {
+            return Ok(());
+        }
+        let (data, ports, _) = crate::browser_navigation_state::clone_with(d, it, a[0], &list)?;
+        d.post_window(data, ports.into_boxed_slice())
+    })?;
+    Ok(s.undefined())
 }
 
 // ---------------------------------------------------------------------------------------------- navigator
@@ -338,10 +342,14 @@ pub(crate) fn navigator(d: &Dom, it: &mut Interp<'_>, np: bare_js::value::ObjId)
         let k = d.key(it, name)?;
         it.define_data(np, k, v, false, true, true)?;
     }
-    d.def_get(it, np, "plugins", |d, it, t, _| plugins(d, it, t, 0), None)?;
-    d.def_get(it, np, "mimeTypes", |d, it, t, _| plugins(d, it, t, 1), None)?;
-    d.def_method(it, np, "javaEnabled", 0, |d, it, t, _| crate::browser_web::nav_this(d, it, t).map(|_| Value::Bool(false)))?;
-    d.def_method(it, np, "sendBeacon", 1, send_beacon)?;
+    d.def_get_s(it, np, "plugins", |d, s, t, _| plugins(d, s, t, 0), None)?;
+    d.def_get_s(it, np, "mimeTypes", |d, s, t, _| plugins(d, s, t, 1), None)?;
+    d.def_method_s(it, np, "javaEnabled", 0, |d, s, t, _| {
+        let t = s.engine().raw(t);
+        old(s, |it| crate::browser_web::nav_this(d, it, t))?;
+        Ok(s.boolean(false))
+    })?;
+    d.def_method_s(it, np, "sendBeacon", 1, send_beacon)?;
     Ok(())
 }
 
@@ -350,7 +358,12 @@ const MIMES: [(&str, &str); 2] = [("application/pdf", "Portable Document Format"
 
 /// `navigator.plugins` (`which` 0) or `navigator.mimeTypes` (1): both arrays are made on the first read of either and become own data
 /// properties of `navigator`, so the second read is the same object.
-fn plugins(d: &Dom, it: &mut Interp<'_>, this: Value, which: usize) -> R<Value> {
+fn plugins<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, which: usize) -> Res<'s, Local<'s>> {
+    let this = s.engine().raw(this);
+    old_v(s, |it| plugins_old(d, it, this, which))
+}
+
+fn plugins_old(d: &Dom, it: &mut Interp<'_>, this: Value, which: usize) -> R<Value> {
     crate::browser_web::nav_this(d, it, this)?;
     let Value::Object(nav) = this else { unreachable!() };
     let op = it.object_prototype();
@@ -390,11 +403,19 @@ fn plugins(d: &Dom, it: &mut Interp<'_>, this: Value, which: usize) -> R<Value> 
     Ok([plugs, mimes][which])
 }
 
-fn send_beacon(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    crate::browser_web::nav_this(d, it, this)?;
+fn send_beacon<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let this = s.engine().raw(this);
+    old(s, |it| crate::browser_web::nav_this(d, it, this))?;
     if a.is_empty() {
-        return Err(it.type_error("Failed to execute 'sendBeacon' on 'Navigator': 1 argument required, but only 0 present."));
+        return Err(s.type_error("Failed to execute 'sendBeacon' on 'Navigator': 1 argument required, but only 0 present."));
     }
+    let a: Vec<Value> = a.iter().map(|v| s.engine().raw(v)).collect();
+    let queued = old(s, |it| send_beacon_old(d, it, &a))?;
+    Ok(s.boolean(queued))
+}
+
+/// The rest of `sendBeacon`: whether the beacon was queued.
+fn send_beacon_old(d: &Dom, it: &mut Interp<'_>, a: &[Value]) -> R<bool> {
     let s = it.to_js_string(a[0])?;
     let url = it.heap.to_string_lossy(s).map_err(|e| it.heap_error(e))?;
     if let Some(base) = d.fetch_base() {
@@ -415,7 +436,7 @@ fn send_beacon(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Valu
         }
     };
     if d.queued_body_bytes().saturating_add(n) > QUOTA {
-        return Ok(Value::Bool(false));
+        return Ok(false);
     }
     let init = d.obj(it, it.object_prototype())?;
     for (k, v) in [("method", d.js_str(it, "POST")?), ("credentials", d.js_str(it, "include")?), ("keepalive", Value::Bool(true))] {
@@ -427,7 +448,7 @@ fn send_beacon(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Valu
         it.define_data(init, k, data, true, true, true)?;
     }
     // Make the promise handled: a beacon has no reply, so a failure is silent.
-    let p = crate::browser_fetch::fetch(d, it, Value::Undefined, &[a[0], Value::Object(init)])?;
+    let p = crate::browser_fetch::fetch_args(d, it, &[a[0], Value::Object(init)])?;
     let noop = match d.basics.noop.get() {
         Some(f) => f,
         None => {
@@ -438,5 +459,5 @@ fn send_beacon(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Valu
         }
     };
     it.host_promise_then(p, Value::Undefined, Value::Object(noop))?;
-    Ok(Value::Bool(true))
+    Ok(true)
 }
