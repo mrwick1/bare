@@ -18,3 +18,16 @@ archMachine, release profile, minimum of three instruction-count runs with perf.
 | `objects` | 705,194,979 | 705,195,407 | +0.000% | 708,994,997 | 708,995,245 | +0.000% |
 
 Not tested: Windows, Miri or browser journeys.
+
+## Cost against #882
+
+The release profile uses one codegen unit. The minimum of three runs for each allocator shows one stack row above the limit. Hypothesis: the additional prototype shapes and metadata increase realm initialization work. Record the startup row in [cost debt](cost-debt.md).
+
+| Row | glibc base | glibc new | Change | jemalloc base | jemalloc new | Change |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `startup` | 726,975 | 734,860 | +1.085% | 4,429,351 | 4,475,217 | +1.036% |
+| `loopfn` | 821,296,086 | 779,302,770 | -5.113% | 825,058,555 | 783,105,172 | -5.085% |
+| `calls` | 552,346,228 | 536,353,724 | -2.895% | 556,076,353 | 540,123,163 | -2.869% |
+| `fib` | 247,393,810 | 240,089,851 | -2.952% | 251,155,003 | 243,891,178 | -2.892% |
+| `closures` | 1,896,665,038 | 1,869,667,875 | -1.423% | 1,900,282,315 | 1,873,345,003 | -1.418% |
+| `objects` | 710,186,343 | 705,194,653 | -0.703% | 713,946,903 | 708,994,243 | -0.694% |
