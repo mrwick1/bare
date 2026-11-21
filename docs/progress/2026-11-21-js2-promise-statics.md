@@ -53,7 +53,7 @@ Base for the micro rows: the P2 branch `380cf408` (this PR is stacked on it). Re
 
 **Startup (eager natives; no laziness built, as asked).** The setup rows (N = 0) of all these programs grow by 14,000 to 16,000 instructions: `interp_load ... 0` +1.3% to +1.7% (of about 0.9M), `host_call_load new ... 0` +0.6% to +0.75% (of 2.2M), and `script_run` of `var x = 1;` 1,969,288 to 1,984,148 (+14,860, +0.755%). This is the cost of 8 element natives, 7 methods (`all`, `allSettled`, `any`, `race`, `withResolvers`, `try`, `finally`), the species getter, the `toStringTag`, and the `AggregateError` constructor and prototype, made at each `Realm`. The host call rows at N = 100000 are +0.05% to +0.30%. Their call step (row at 100,000 minus row at 0, divided by 100,000) is 731.05 base and 733.03 branch for `host` (+2.0 instructions, +0.27%), and no change for `none` (248.02 on both). I did not find the cause of the 2 instructions (hypothesis: the inlined `start_at` changes the layout of the host entry; to verify with callgrind).
 
-The `Promise` rows of js2 (`promise_load`, step = difference of two scales / difference of the scales):
+The `Promise` rows of js2 (`js2_promise_load`, step = difference of two scales / difference of the scales):
 
 | Row | Base (step) | Branch (step) | Change |
 | --- | ---: | ---: | ---: |
@@ -64,7 +64,7 @@ The `Promise` rows of js2 (`promise_load`, step = difference of two scales / dif
 
 `then` is slower because `SpeciesConstructor` now reads `Promise[Symbol.species]` (one lookup of a cached slot, about 25 instructions) and `thenable` has it twice (the `then` and the fast path of the thenable job). That is new work, not a codegen-unit effect. With `RUSTFLAGS="-C codegen-units=1"` on both trees: `then` +3.7%, `thenable` +4.7%, `microtask` +0.1%, `new` +0.6%. A first version of the entry point (`start` calling a non-inlined `start_at`) made `microtask` +2.4%; `#[inline(always)]` on `start_at` removed it and gave `microtask` back about 10 instructions for each job over P2.
 
-**Against the old engine** (`crates/js/examples/promise_load` and `promise_all_load` for the old engine, `crates/js2/examples/promise_all_load.rs` for js2, new: the same programs; instructions for each item, scale 100 minus scale 10, divided by 90,000; the case `pthenable` is `thenable` of `promise_load`):
+**Against the old engine** (`crates/js/examples/promise_load` and `promise_all_load` for the old engine, `crates/js2/examples/promise_all_load.rs` for js2, new: the same programs; instructions for each item, scale 100 minus scale 10, divided by 90,000; the case `pthenable` is `thenable` of `js2_promise_load`):
 
 | Case | Old engine | js2 | js2 / old |
 | --- | ---: | ---: | ---: |
@@ -92,4 +92,4 @@ New entries: [progress/](progress/README.md).
 
 ### Cost decision (main session, 2026-11-21)
 
-The js2 `promise_load` rows `then` and `thenable` are over +0.5% (species reads), and startup is +0.755% (eager natives). js2 does not run in the browser yet, so the rows do not reach a user (the rule of #757). Lazy built-ins (step 1 of `docs/design-js2-lazy-builtins.md`) pay the startup back. The `then` cost waits for a profile of the journeys on js2.
+The js2 `js2_promise_load` rows `then` and `thenable` are over +0.5% (species reads), and startup is +0.755% (eager natives). js2 does not run in the browser yet, so the rows do not reach a user (the rule of #757). Lazy built-ins (step 1 of `docs/design-js2-lazy-builtins.md`) pay the startup back. The `then` cost waits for a profile of the journeys on js2.

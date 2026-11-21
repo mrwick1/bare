@@ -1,6 +1,6 @@
 //! Load harness for the lexer (S2). One case per process, in release mode:
 //!
-//!   cargo run --release -p bare-js2 --example lex_load -- <case> <scale> [runs] [decode]
+//!   cargo run --release -p bare-js2 --example js2_lex_load -- <case> <scale> [runs] [decode]
 //!
 //! Cases (scale 1, 10 or 100; the source is scale x 512 KiB, so 100x is 50 MiB, under the 64 MiB cap):
 //!   small      many short tokens: names, operators, numbers, strings, `?.`
@@ -160,7 +160,7 @@ fn lex_only(src: &str, spec: &[Tok]) -> u64 {
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
     let (Some(case), Some(scale)) = (a.first(), a.get(1).and_then(|s| s.parse::<usize>().ok())) else {
-        eprintln!("usage: lex_load small|repeat|comments|strings|malformed <scale> [runs] [decode]");
+        eprintln!("usage: js2_lex_load small|repeat|comments|strings|malformed <scale> [runs] [decode]");
         std::process::exit(2)
     };
     let runs: usize = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(5);
