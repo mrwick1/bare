@@ -320,3 +320,20 @@ fn a_long_run_of_new_siblings_is_summarized() {
     assert!(!error, "{r}");
     assert!(!r.contains("Country number 400"), "{r}");
 }
+
+
+/// An action without a snapshot that starts no navigation does not wait for the page to go quiet. A page with a timer that always runs
+/// made every fill wait 300 ms.
+#[test]
+fn an_action_without_snapshot_does_not_wait_for_a_busy_page() {
+    let base = pages(&[("/", "<!doctype html><body><input id=q aria-label=Search><script>setInterval(() => document.title = Date.now(), 5)</script></body>")]);
+    let mut s = Server::start();
+    s.open("b", &format!("{base}/"));
+    let t = std::time::Instant::now();
+    let (r, error) = s.tool("act", json!({"session": "b", "op": "fill", "loc": "label=\"Search\"", "text": "rust", "snapshot": false}));
+    let ms = t.elapsed().as_millis();
+    assert!(!error, "{r}");
+    assert!(ms < 150, "fill took {ms} ms: {r}");
+    let (v, _) = s.tool("eval", json!({"session": "b", "js": "document.getElementById('q').value"}));
+    assert!(v.contains("rust"), "{v}");
+}
