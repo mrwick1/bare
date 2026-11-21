@@ -5,7 +5,7 @@
 //! silently turned into another URL (checked against Node's `URL` by `tools/js/navigation_check.sh`):
 //! - it drops the fragment, so `Rec` keeps it (`frag`);
 //! - `parse` does not remove dot segments (`join` does): the path always goes through `join`;
-//! - HTTP user info is retained separately; no backslash normalization, shorthand HTTP forms or escaped dot segments;
+//! - HTTP user info is retained separately; no backslash normalization or escaped dot segments;
 //! - HTTP host names use the IDNA conversion of `bare_url`; other schemes keep their host gates;
 //! - `parse` accepts only `http` and `https`. Any other scheme is `UErr::Scheme` (a script may still see it as a cross-origin
 //!   refusal, as `pushState` does). `parse_any` is for the `URL` class: it also reads other schemes into an `Alt` (see there).
@@ -137,22 +137,30 @@ pub(crate) fn parse(input: &str, base: Option<&Rec>) -> Result<Rec, UErr> {
         }
         match after.strip_prefix("//") {
             Some(a) => absolute(&low, a)?,
-            None => return Err(UErr::Gate("http(s) URL without //")),
+            // No `//`: against a base of the same scheme the rest is a relative reference (`https:/x`, `https:x`). Otherwise the
+            // first slash is ignored and the host follows (`http:/h/x` is `http://h/x`).
+            None if base.is_some_and(|b| b.u.scheme.to_string() == low) => relative(after, base)?,
+            None => absolute(&low, after.strip_prefix('/').unwrap_or(after))?,
         }
     } else if let Some(a) = rest.strip_prefix("//") {
         absolute(&base.ok_or(UErr::Invalid)?.u.scheme.to_string(), a)?
     } else {
-        let b = base.ok_or(UErr::Invalid)?;
-        if rest.split(['/', '?']).next().unwrap_or("").contains(':') {
-            return Err(UErr::Gate("colon in the first relative path segment"));
-        }
-        if dot_escape(rest) {
-            return Err(UErr::Gate("percent-encoded dot segment"));
-        }
-        Rec { u: b.u.join(rest).map_err(|_| UErr::Invalid)?, frag: None, userinfo: b.userinfo.clone() }
+        relative(rest, base)?
     };
     rec.frag = frag;
     Ok(rec)
+}
+
+/// `rest` (no scheme, no `//` and no fragment) against `base`.
+fn relative(rest: &str, base: Option<&Rec>) -> Result<Rec, UErr> {
+    let b = base.ok_or(UErr::Invalid)?;
+    if rest.split(['/', '?']).next().unwrap_or("").contains(':') {
+        return Err(UErr::Gate("colon in the first relative path segment"));
+    }
+    if dot_escape(rest) {
+        return Err(UErr::Gate("percent-encoded dot segment"));
+    }
+    Ok(Rec { u: b.u.join(rest).map_err(|_| UErr::Invalid)?, frag: None, userinfo: b.userinfo.clone() })
 }
 
 /// The path and query `p` (it starts with `/`) with the dot segments removed and the characters encoded, by the parser of `http` URLs.

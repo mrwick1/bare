@@ -1,5 +1,5 @@
 # JavaScript: the new engine (docs/design-engine-rewrite.md, docs/plan-engine-rewrite.md). It runs no scripts yet (the interpreter runs hand-written bytecode).
-# Only the `cell`, `heap`, `string`, `atoms`, `shapes`, `object`, `blob`, `gc`, `codes`, `interp_rt` and `interp` modules may hold `unsafe` code; CI runs them under Miri.
+# Only the `cell`, `heap`, `string`, `atoms`, `shapes`, `object`, `blob`, `gc`, `interp_rt`, `interp` and `api` modules may hold `unsafe` code; CI runs them under Miri.
 [package]
 name = "bare-js2"
 version.workspace = true
@@ -8,6 +8,7 @@ license = "(MIT OR Apache-2.0) AND Unicode-3.0"
 
 [dependencies]
 bare-os = { path = "../os" }
+bare-js-api = { path = "../js-api" }
 # NFC and NFD for `String.prototype.normalize`; case folding and the property sets of `\p{}` for the RegExp engine (`regexp.rs`)
 bare-unicode = { path = "../unicode" }
 # ID_Start and ID_Continue for the lexer (`lex.rs`); the compiled data of the property sets, as in `bare-js`

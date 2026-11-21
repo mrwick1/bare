@@ -94,6 +94,7 @@ use bare_js::eval::{Error, EvalLimits, Host, Interp, LimitKind};
 use bare_js::heap::{Heap, HeapLimits, PropertyDescriptor};
 use bare_js::value::{ObjId, PropertyKey, Value};
 use bare_js_api::HostFn;
+use crate::browser_scoped::{HS, run};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::hash::{BuildHasherDefault, Hasher};
@@ -1194,7 +1195,7 @@ pub(crate) fn define_window(d: &Dom, it: &mut Interp<'_>, name: &str) -> R<bool>
         return Ok(true);
     }
     if name == "event" { crate::browser_gaps::define_event(d, it)?; return Ok(true); }
-    if name == "DocumentType" { crate::browser_implementation::doctype_global(d, it, Value::Undefined, &[])?; return Ok(true); }
+    if name == "DocumentType" { run(it, |s| crate::browser_implementation::doctype_define(d, s, None).map(|_| ()))?; return Ok(true); }
     if !matches!(name,"frames"|"parent"|"top"|"length"|"name"|"screen"){return Ok(false);}
     let g = it.global_object();
     let key=d.key(it,name)?;
@@ -1208,7 +1209,7 @@ pub(crate) fn define_window(d: &Dom, it: &mut Interp<'_>, name: &str) -> R<bool>
         "frames" | "parent" | "top" => Value::Object(g),
         "length" => Value::Number(0.0),
         "name" => d.js_str(it, "")?,
-        "screen" => { window_screen(d,it,Value::Undefined,&[])?; return Ok(true); },
+        "screen" => { window_screen(d,it)?; return Ok(true); },
         _ => unreachable!(),
     };
     it.define_data(g,key,value,!matches!(name,"top"|"length"),true,name!="top")?;
@@ -1220,8 +1221,8 @@ fn screen_iface(d: &Dom, it: &mut Interp<'_>) -> R<crate::browser_geom::Iface> {
     if let Some(i) = d.screen_iface.get() {
         return Ok(i);
     }
-    let i = crate::browser_geom::make(d, it, it.object_prototype(), "Screen", illegal_constructor, false)?;
-    crate::browser_geom::finish(d, it, i, "Screen", &[])?;
+    let i = crate::browser_geom::make_s(d, it, it.object_prototype(), "Screen", illegal_constructor, HostFn::Ctor)?;
+    crate::browser_geom::finish_s(d, it, i, "Screen", &[])?;
     d.screen_iface.set(Some(i));
     Ok(i)
 }
@@ -1234,22 +1235,16 @@ crate::browser_lazy::lazy_global!(lazy_screen, "Screen", ensure_screen, |d| d.sc
 
 // The virtual display has the default headless dimensions. Viewport resizing does not resize it.
 #[cold]
-fn window_screen(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    let value = if let Some(&v) = a.first() {
-        v
-    } else {
-        let proto = screen_iface(d, it)?.proto;
-        let o = d.obj(it, proto)?;
-        crate::browser_lazy::tag(d, it, o, "Screen")?;
-        for (name, value) in [("width", 1280.0), ("height", 800.0), ("availWidth", 1280.0), ("availHeight", 800.0), ("availLeft", 0.0), ("availTop", 0.0), ("colorDepth", 24.0), ("pixelDepth", 24.0)] {
-            let k = d.key(it, name)?;
-            it.define_data(o, k, Value::Number(value), false, true, true)?;
-        }
-        Value::Object(o)
-    };
+fn window_screen(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+    let proto = screen_iface(d, it)?.proto;
+    let o = d.obj(it, proto)?;
+    crate::browser_lazy::tag(d, it, o, "Screen")?;
+    for (name, value) in [("width", 1280.0), ("height", 800.0), ("availWidth", 1280.0), ("availHeight", 800.0), ("availLeft", 0.0), ("availTop", 0.0), ("colorDepth", 24.0), ("pixelDepth", 24.0)] {
+        let k = d.key(it, name)?;
+        it.define_data(o, k, Value::Number(value), false, true, true)?;
+    }
     let k = d.key(it, "screen")?;
-    it.define_data(it.global_object(), k, value, true, false, true)?;
-    Ok(value)
+    it.define_data(it.global_object(), k, Value::Object(o), true, false, true)
 }
 
 impl Dom {
@@ -1596,7 +1591,7 @@ impl Dom {
         }
 
         // interface objects
-        let ifaces: [(&str, ObjId, Option<H>); 26] = [
+        let ifaces: [(&str, ObjId, Option<HS>); 26] = [
             ("EventTarget", et, None),
             ("Window", win, None),
             ("Node", node, None),
@@ -1618,7 +1613,7 @@ impl Dom {
             ("CustomEvent", custom, None),
             ("FocusEvent", focus, None),
             ("SubmitEvent", submit, None),
-            ("ToggleEvent", toggle, Some(crate::browser_details::toggle_event_ctor as H)),
+            ("ToggleEvent", toggle, Some(crate::browser_details::toggle_event_ctor as HS)),
             ("MouseEvent", mouse, None),
             ("PointerEvent", pointer, None),
             ("KeyboardEvent", keyboard, None),
@@ -1630,11 +1625,11 @@ impl Dom {
             let f = match (name, ctor) {
                 ("DocumentFragment", _) => self.add_fn_s_obj(it, nd::fragment_ctor_s, name, 0, HostFn::CtorNewTarget)?,
                 ("SubmitEvent", _) => self.add_fn_s_obj(it, fm::submit_event_ctor_s, name, 1, HostFn::CtorNewTarget)?,
-                (_, Some(h)) => self.add_ctor_nt(it, h, name, u32::from(name != "EventTarget" && !name.starts_with("HTML")))?,
+                (_, Some(h)) => self.add_fn_s_obj(it, h, name, u32::from(name != "EventTarget" && !name.starts_with("HTML")), HostFn::CtorNewTarget)?,
                 (_, None) if name.starts_with("HTML") => ce::interface_ctor(self, it, name, false)?,
                 (_, None) => match ctor_s(name) {
                     Some(h) => self.add_fn_s_obj(it, h, name, u32::from(name != "EventTarget"), HostFn::CtorNewTarget)?,
-                    None => self.add_fn(it, illegal_constructor, name, 0, false)?,
+                    None => self.add_fn_s_obj(it, illegal_constructor, name, 0, HostFn::Method)?,
                 },
             };
             it.define_data(f, kp, Value::Object(proto), false, false, false)?;
@@ -1701,7 +1696,7 @@ impl Dom {
         crate::browser_rejection::install(self, it)?;
         crate::browser_perf_observer::install(self, it)?;
         crate::browser_perf::install_interfaces(self, it)?;
-        crate::browser_lazy::install(self, it, &[("Screen", lazy_screen as H)])?;
+        crate::browser_lazy::install(self, it, &[("Screen", lazy_screen as HS)])?;
         crate::browser_select::install(self, it)?;
         // Last: a new host function earlier in this list moves the id of every one after it.
         crate::browser_elements::install(self, it)?;
@@ -1742,8 +1737,8 @@ fn ctor_s(name: &str) -> Option<crate::browser_scoped::HS> {
     })
 }
 
-pub(crate) fn illegal_constructor(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
-    Err(it.type_error("Illegal constructor"))
+pub(crate) fn illegal_constructor<'s>(_: &Dom, s: &mut crate::browser_scoped::Sc<'s, '_>, _: bare_js_api::Local<'s>, _: bare_js_api::Args<'s>) -> crate::browser_scoped::Res<'s, bare_js_api::Local<'s>> {
+    Err(s.type_error("Illegal constructor"))
 }
 
 use Kind::{AccessorS as AS, GetS as GS, MethodS as MS};

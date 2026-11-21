@@ -589,7 +589,7 @@ pub(crate) fn lazy_key(d: &Dom, it: &mut Interp<'_>, owner: ObjId, key: &str) ->
     match key {
         "write" => {d.def_method_s(it,d.p().document,"write",1,crate::browser_loader::document_write)?; return Ok(());},
         "writeln" => {d.def_method_s(it,d.p().document,"writeln",1,crate::browser_loader::document_writeln)?; return Ok(());},
-        "hasFocus" => {d.def_method(it,d.p().document,"hasFocus",0,crate::browser_gaps::has_focus)?; return Ok(());},
+        "hasFocus" => {d.def_method_s(it,d.p().document,"hasFocus",0,crate::browser_gaps::has_focus)?; return Ok(());},
         "open" => {d.def_method_s(it,d.p().document,"open",0,crate::browser_loader::document_open)?; return Ok(());},
         "close" => {d.def_method_s(it,d.p().document,"close",0,crate::browser_loader::document_close)?; return Ok(());},
         _=>{}
@@ -652,7 +652,7 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         it.heap.set_lazy_on(o).map_err(|e| it.heap_error(e))?;
     }
     it.heap.set_lazy_chain(p.et).map_err(|e| it.heap_error(e))?;
-    crate::browser_lazy::install(d, it, &[("HTMLBodyElement", lazy_body as H), ("HTMLFrameSetElement", lazy_frameset)])
+    crate::browser_lazy::install(d, it, &[("HTMLBodyElement", lazy_body as HS), ("HTMLFrameSetElement", lazy_frameset)])
 }
 
 // ------------------------------------------------------------------------------------------ body and frameset
@@ -666,7 +666,7 @@ pub(crate) fn body_proto(d: &Dom, it: &mut Interp<'_>, i: usize) -> R<[ObjId; 2]
     }
     let name = BODY_TAGS[i];
     let proto = d.obj(it, d.p().html)?;
-    let f = d.add_fn(it, illegal_constructor, name, 0, false)?;
+    let f = d.add_fn_s_obj(it, illegal_constructor, name, 0, bare_js_api::HostFn::Method)?;
     let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
     it.define_data(f, kp, Value::Object(proto), false, false, false)?;
     it.define_data(proto, kc, Value::Object(f), true, false, true)?;

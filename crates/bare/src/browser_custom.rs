@@ -886,7 +886,7 @@ fn html_ctor<'s, const K: usize>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: A
 pub(crate) fn interface_ctor(d: &Dom, it: &mut Interp<'_>, name: &str, new_ok: bool) -> R<ObjId> {
     match IFACES.iter().position(|&n| n == name) {
         Some(k) => d.add_fn_s_obj(it, HANDLERS[k], name, 0, HostFn::CtorNewTarget),
-        None => d.add_fn(it, illegal_constructor, name, 0, new_ok),
+        None => d.add_fn_s_obj(it, illegal_constructor, name, 0, if new_ok { bare_js_api::HostFn::Ctor } else { bare_js_api::HostFn::Method }),
     }
 }
 
@@ -1414,7 +1414,7 @@ fn make(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     let op = it.object_prototype();
     let proto = d.obj(it, op)?;
     let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
-    let f = d.add_fn(it, illegal_constructor, "CustomElementRegistry", 0, true)?;
+    let f = d.add_fn_s_obj(it, illegal_constructor, "CustomElementRegistry", 0, bare_js_api::HostFn::Ctor)?;
     it.define_data(f, kp, Value::Object(proto), false, false, false)?;
     it.define_data(proto, kc, Value::Object(f), true, false, true)?;
     crate::browser_lazy::tag(d, it, proto, "CustomElementRegistry")?;
@@ -1448,7 +1448,7 @@ crate::browser_lazy::lazy_global!(lazy_registry, "CustomElementRegistry", ensure
 
 /// Install last: a new host function earlier in the list of `Dom::install` moves the id of each one after it.
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    crate::browser_lazy::install(d, it, &[&[("CustomElementRegistry", lazy_registry as H), ("HTMLUnknownElement", lazy_unknown)], &crate::browser_face::LAZY[..]].concat())?;
+    crate::browser_lazy::install(d, it, &[&[("CustomElementRegistry", lazy_registry as HS), ("HTMLUnknownElement", lazy_unknown)], &crate::browser_face::LAZY[..]].concat())?;
     // As in Chrome, `customElements` stays an accessor of `window` with no setter.
     let g = *d.global.get().expect("installed");
     let key = d.key(it, "customElements")?;
