@@ -249,3 +249,29 @@ fn array_species_constructs_results_and_defines_own_elements() {
         ("var a = [2]; function S() { Object.defineProperty(this, '0', {value: 1, configurable: true}); } a.constructor = {[Symbol.species]: S}; var d = Object.getOwnPropertyDescriptor(a.flat(), '0'); return [d.value, d.enumerable, d.writable, d.configurable].join();", "2,true,true,true"),
     ]);
 }
+
+#[test]
+fn from_entries_processes_one_entry_before_reading_the_next() {
+    check(&[
+        ("var log = ''; function* entries() { log += 'a'; yield {get 0() { log += 'k'; return 'x'; }, get 1() { log += 'v'; return 3; }}; log += 'b'; yield ['y', 4]; } var o = Object.fromEntries(entries()); return [log, o.x, o.y].join();", "akvb,3,4"),
+        ("var log = ''; function* entries() { try { yield {get 0() { throw 'key'; }}; log += 'next'; } finally { log += 'close'; throw 'close'; } } try { Object.fromEntries(entries()); } catch (e) { return log + ':' + e; }", "close:key"),
+    ]);
+}
+
+#[test]
+fn number_parses_prefixed_integers_and_flattened_strings() {
+    check(&[
+        ("return [Number('0b101'), Number('0O17'), Number('0x10000000000000000'), Number('0x+1'), Number('0b'), Number('-0o1')].join();", "5,15,18446744073709552000,NaN,NaN,NaN"),
+        ("var left = '\\u2028 \\u1680'.repeat(30) + '12345'; var right = '67890' + '\\u2001 \\uFEFF'.repeat(30); return Number(left + right);", "1234567890"),
+        ("return [Number('\\u00851'), 1 / Number('\\uFEFF-0'), Number('0x1000000000000081') === 1152921504606847200].join();", "NaN,-Infinity,true"),
+    ]);
+}
+
+#[test]
+fn array_length_set_and_define_preserve_attributes_and_conversion_order() {
+    check(&[
+        ("var a = []; Object.defineProperty(a, 'length', {writable: false}); var n = 0; a.length = {valueOf() { n++; throw 'coerced'; }}; return n + ':' + a.length;", "0:0"),
+        ("var a = [0, 1]; Object.defineProperty(a, '1', {configurable: false}); function f() { 'use strict'; a.length = 1; } try { f(); } catch (e) { return e.name + ':' + a.length; }", "TypeError:2"),
+        ("var a = [], seen = 0; Object.defineProperty(a, 'length', {value: {valueOf() { seen++; return 4294967295; }}}); return seen + ':' + a.length;", "2:4294967295"),
+    ]);
+}
