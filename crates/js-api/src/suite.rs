@@ -6,8 +6,8 @@
 //!
 //! Scripts are written so that the value of the last statement is an expression.
 
-use crate::{Args, Attrs, Def, Engine, Error, Host, HostFn, Intrinsic, Local, Persistent, Scope, Str, Type, enter, task};
-use std::cell::RefCell;
+use crate::{Args, Attrs, Def, Engine, Error, Host, HostFn, Intrinsic, Local, Persistent, PromiseState, Scope, Str, Type, enter, task};
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 /// What an engine gives the suite.
@@ -24,15 +24,30 @@ pub trait Harness: Sized {
     fn collect(&mut self);
 }
 
-const NAMES: [&str; 29] = [
+const NAMES: [&str; 31] = [
     "add", "callback", "fail", "keep", "kept", "describe", "typeErr", "rangeErr", "charge", "num", "str", "bool", "arr", "isArr", "protoOf", "setProto",
-    "accessor", "Point", "PointNT", "utf16", "hasOwn", "ownKeys", "ownData", "isCallable", "bind", "echoAfter", "thisOf", "intrinsic", "isNew",
+    "accessor", "Point", "PointNT", "utf16", "hasOwn", "ownKeys", "ownData", "isCallable", "bind", "echoAfter", "thisOf", "intrinsic", "isNew", "runJobs", "queue",
 ];
 
 /// The host of the suite: function `i` of `NAMES` is host function `i`.
 #[derive(Default)]
 struct Suite {
     kept: RefCell<Vec<Persistent>>,
+    /// The calls of `between_jobs`, and the call that fails (0: none).
+    between: Cell<usize>,
+    fail_between_at: Cell<usize>,
+    /// The texts of the values that `report_exception` and `promise_rejections` got.
+    reported: RefCell<Vec<String>>,
+    rejections: RefCell<Vec<String>>,
+}
+
+/// The text of a string or a number, for the logs of the hooks.
+fn show<'s, E: Engine>(s: &mut Scope<'s, E>, v: Local<'s>) -> String {
+    match (s.as_str(v), s.as_number(v)) {
+        (Some(t), _) => t.to_string_lossy(),
+        (_, Some(n)) => n.to_string(),
+        _ => "?".to_string(),
+    }
 }
 
 impl<E: Engine> Host<E> for Suite {
@@ -155,8 +170,49 @@ impl<E: Engine> Host<E> for Suite {
                 let which = [Intrinsic::ObjectPrototype, Intrinsic::ArrayPrototype, Intrinsic::ErrorPrototype][s.as_number(a).unwrap_or(0.0) as usize];
                 Ok(s.intrinsic(which))
             }
+            // runJobs(f): queue `f` as a microtask, run a checkpoint from the host and give the number of jobs that ran.
+            29 => {
+                s.queue_microtask(a)?;
+                let n = s.checkpoint()?;
+                Ok(s.number(n as f64))
+            }
+            // queue(f): queue `f` as a microtask (the old engine has no global `queueMicrotask`).
+            30 => {
+                s.queue_microtask(a)?;
+                Ok(s.undefined())
+            }
             _ => Ok(s.boolean(is_new)),
         }
+    }
+
+    fn between_jobs<'s>(&self, s: &mut Scope<'s, E>) -> Result<(), Error<'s>> {
+        self.between.set(self.between.get() + 1);
+        if self.between.get() == self.fail_between_at.get() {
+            return Err(s.type_error("between"));
+        }
+        Ok(())
+    }
+
+    fn report_exception<'s>(&self, s: &mut Scope<'s, E>, thrown: Local<'s>) {
+        let t = show(s, thrown);
+        self.reported.borrow_mut().push(t);
+    }
+
+    fn promise_rejections<'s>(&self, s: &mut Scope<'s, E>, unhandled: &[Local<'s>], handled: &[Local<'s>], dropped: u32) -> Result<(), Error<'s>> {
+        for &p in unhandled {
+            let t = match s.promise_status(p) {
+                Some(PromiseState::Rejected(v)) => show(s, v),
+                _ => "not rejected".to_string(),
+            };
+            self.rejections.borrow_mut().push(format!("unhandled:{t}"));
+        }
+        for _ in handled {
+            self.rejections.borrow_mut().push("handled".to_string());
+        }
+        if dropped > 0 {
+            self.rejections.borrow_mut().push(format!("dropped:{dropped}"));
+        }
+        Ok(())
     }
 }
 
@@ -458,4 +514,218 @@ pub fn two_realms_install_the_same_table<H: Harness>(stress: bool) {
     assert_eq!(h2.eval("A.size"), "two");
     assert_eq!(depth(&mut h1), 0);
     assert_eq!(depth(&mut h2), 0);
+}
+
+fn global<'s, E: Engine>(s: &mut Scope<'s, E>, name: &str) -> Local<'s> {
+    let g = s.global();
+    s.get_str(g, name).unwrap()
+}
+
+/// A promise that the host makes settles with a value, and its reactions run on the drain, in the order they were added. A value that
+/// is no promise is wrapped by `promise_react`; `promise_status` says no. The handler allocates, so the stress setting collects inside a job.
+pub fn a_promise_of_the_host_settles_and_its_reactions_run_on_the_drain<H: Harness>(stress: bool) {
+    let (mut h, _) = setup::<H>(stress);
+    h.eval(
+        "var log = []; var churn = () => { var a = []; for (var i = 0; i < 200; i++) a.push({ i: i, s: 'x' + i }); return a.length };
+         var ok = v => { churn(); log.push('ok:' + (v && v.tag ? v.tag : v)) }; var bad = v => log.push('bad:' + v); 0",
+    );
+    enter(h.engine(), |s| {
+        let (ok, bad) = (global(s, "ok"), global(s, "bad"));
+        let p = s.new_promise().unwrap();
+        assert_eq!(s.promise_status(p), Some(PromiseState::Pending));
+        s.promise_then(p, ok, bad).unwrap();
+        let value = s.new_object().unwrap();
+        let tag = s.string("kept").unwrap();
+        s.define_str(value, "tag", tag, Attrs::ALL).unwrap();
+        s.resolve_promise(p, value).unwrap();
+        let Some(PromiseState::Fulfilled(v)) = s.promise_status(p) else { panic!("fulfilled") };
+        let t = s.get_str(v, "tag").unwrap();
+        assert_eq!(s.as_str(t).unwrap().to_string_lossy(), "kept");
+        assert_eq!(s.pending_jobs(), 1, "the reaction waits for the drain");
+        // A promise that is settled already: the reaction is queued by `promise_then`.
+        let q = s.new_promise().unwrap();
+        let why = s.string("no").unwrap();
+        s.reject_promise(q, why).unwrap();
+        s.promise_then(q, ok, bad).unwrap();
+        let Some(PromiseState::Rejected(r)) = s.promise_status(q) else { panic!("rejected") };
+        assert_eq!(s.as_str(r).unwrap().to_string_lossy(), "no");
+        // A value that is not a promise: `react` wraps it, `status` says no, and a settle is refused.
+        let n = s.number(3.0);
+        assert_eq!(s.promise_status(n), None);
+        s.promise_react(n, ok, bad).unwrap();
+        assert!(matches!(s.resolve_promise(n, n), Err(Error::Abort(crate::Abort::Unsupported(_)))));
+        assert!(matches!(s.promise_then(n, ok, bad), Err(Error::Abort(crate::Abort::Unsupported(_)))));
+        // A native promise goes through `react` as it is.
+        let r = s.new_promise().unwrap();
+        s.promise_react(r, ok, bad).unwrap();
+        let eight = s.number(8.0);
+        s.resolve_promise(r, eight).unwrap();
+        assert_eq!(s.drain_microtasks().unwrap(), 4);
+        assert_eq!(s.pending_jobs(), 0);
+    });
+    assert_eq!(h.eval("log.join()"), "ok:kept,bad:no,ok:3,ok:8");
+    assert_eq!(depth(&mut h), 0);
+}
+
+/// The host settles a promise once: a second settle does nothing.
+pub fn a_second_settle_by_the_host_changes_nothing<H: Harness>(stress: bool) {
+    let (mut h, _) = setup::<H>(stress);
+    enter(h.engine(), |s| {
+        let p = s.new_promise().unwrap();
+        let (one, two) = (s.number(1.0), s.number(2.0));
+        s.resolve_promise(p, one).unwrap();
+        s.resolve_promise(p, two).unwrap();
+        s.reject_promise(p, two).unwrap();
+        let Some(PromiseState::Fulfilled(v)) = s.promise_status(p) else { panic!("fulfilled") };
+        assert_eq!(s.as_number(v), Some(1.0));
+    });
+}
+
+/// A promise that a script holds is read by the host, and one that the host makes is read by the script.
+pub fn promises_cross_between_script_and_host<H: Harness>(stress: bool) {
+    let (mut h, _) = setup::<H>(stress);
+    assert_eq!(
+        h.eval("var out = []; var pr = Promise.resolve(5); pr.then(v => out.push('a' + v)); queue(() => out.push('m')); 0"),
+        "0"
+    );
+    enter(h.engine(), |s| {
+        let pr = global(s, "pr");
+        let Some(PromiseState::Fulfilled(v)) = s.promise_status(pr) else { panic!("fulfilled") };
+        assert_eq!(s.as_number(v), Some(5.0));
+        assert_eq!(s.pending_jobs(), 2);
+        // A thenable that a script made is assimilated in a job.
+        let out = global(s, "out");
+        let push = s.get_str(out, "push").unwrap();
+        let (this, tag) = (out, s.string("t").unwrap());
+        s.call(push, this, &[tag]).unwrap();
+        assert_eq!(s.drain_microtasks().unwrap(), 2);
+    });
+    assert_eq!(h.eval("out.join()"), "t,a5,m");
+}
+
+/// A microtask runs once, in the checkpoint; one that is no function is a `TypeError`.
+pub fn a_microtask_runs_once_on_the_drain<H: Harness>(stress: bool) {
+    let (mut h, _) = setup::<H>(stress);
+    h.eval("var n = 0; var tick = () => { n++ }; 0");
+    enter(h.engine(), |s| {
+        let tick = global(s, "tick");
+        assert_eq!(s.pending_jobs(), 0);
+        s.queue_microtask(tick).unwrap();
+        assert_eq!(s.pending_jobs(), 1);
+        let not_a_function = s.number(1.0);
+        assert!(matches!(s.queue_microtask(not_a_function), Err(Error::Throw(_))));
+        assert_eq!(s.drain_microtasks().unwrap(), 1);
+        assert_eq!(s.drain_microtasks().unwrap(), 0);
+        assert_eq!(s.pending_jobs(), 0);
+    });
+    assert_eq!(h.eval("n"), "1");
+    assert_eq!(depth(&mut h), 0);
+}
+
+/// A checkpoint from a host call that a script function called does nothing (the HTML rule); the job runs in the next one.
+pub fn a_checkpoint_inside_a_script_function_does_nothing<H: Harness>(stress: bool) {
+    let (mut h, _) = setup::<H>(stress);
+    assert_eq!(h.eval("var n = 0; function outer() { return runJobs(() => { n++ }) } var ran = outer(); ran + ',' + n"), "0,0");
+    assert_eq!(h.engine().pending_jobs(), 1);
+    task(h.engine(), |s| assert_eq!(s.checkpoint().unwrap(), 1)).unwrap();
+    assert_eq!(h.eval("n"), "1");
+    assert_eq!(depth(&mut h), 0);
+}
+
+/// A promise survives collections when the host holds it as a local that it settled in the call, or as a persistent handle that it
+/// settles in a later call. The value of a queued reaction lives in the queue only.
+pub fn a_promise_survives_collections_as_a_local_and_as_a_persistent_handle<H: Harness>(stress: bool) {
+    let (mut h, _) = setup::<H>(stress);
+    h.eval("var log = []; var ok = v => { var a = []; for (var i = 0; i < 200; i++) a.push({ i: i }); log.push('ok:' + v.tag) }; var bad = () => log.push('bad'); 0");
+    let kept = enter(h.engine(), |s| {
+        let (ok, bad) = (global(s, "ok"), global(s, "bad"));
+        let p = s.new_promise().unwrap();
+        s.promise_then(p, ok, bad).unwrap();
+        s.persist(p)
+    });
+    h.collect();
+    enter(h.engine(), |s| {
+        let p = s.local(&kept);
+        assert_eq!(s.promise_status(p), Some(PromiseState::Pending));
+        let value = s.new_object().unwrap();
+        let tag = s.string("later").unwrap();
+        s.define_str(value, "tag", tag, Attrs::ALL).unwrap();
+        s.resolve_promise(p, value).unwrap();
+        assert_eq!(s.pending_jobs(), 1);
+    });
+    h.collect();
+    enter(h.engine(), |s| {
+        assert_eq!(s.drain_microtasks().unwrap(), 1);
+        // A promise that was settled in the call, and whose reaction runs in a drain that allocates.
+        let (ok, bad) = (global(s, "ok"), global(s, "bad"));
+        let p = s.new_promise().unwrap();
+        let value = s.new_object().unwrap();
+        let tag = s.string("now").unwrap();
+        s.define_str(value, "tag", tag, Attrs::ALL).unwrap();
+        s.promise_then(p, ok, bad).unwrap();
+        s.resolve_promise(p, value).unwrap();
+        assert_eq!(s.drain_microtasks().unwrap(), 1);
+        let Some(PromiseState::Fulfilled(v)) = s.promise_status(p) else { panic!("fulfilled") };
+        let t = s.get_str(v, "tag").unwrap();
+        assert_eq!(s.as_str(t).unwrap().to_string_lossy(), "now");
+    });
+    assert_eq!(h.eval("log.join()"), "ok:later,ok:now");
+    assert_eq!(depth(&mut h), 0);
+}
+
+/// `between_jobs` runs before each job and once when the queue is empty. An error of it ends the drain like a failed job: the same error
+/// comes again until `clear_failed_job`, and the jobs that were left run then.
+pub fn between_jobs_runs_before_each_job_and_an_error_ends_the_drain<H: Harness>(stress: bool) {
+    let (mut h, host) = setup::<H>(stress);
+    h.eval("var n = 0; var f = () => { n++ }; 0");
+    enter(h.engine(), |s| {
+        let f = global(s, "f");
+        for _ in 0..3 {
+            s.queue_microtask(f).unwrap();
+        }
+        assert_eq!(s.drain_microtasks().unwrap(), 3);
+    });
+    assert_eq!(host.between.get(), 4, "one call before each of 3 jobs, one when the queue is empty");
+    assert_eq!(depth(&mut h), 0);
+    host.between.set(0);
+    host.fail_between_at.set(2);
+    enter(h.engine(), |s| {
+        let f = global(s, "f");
+        for _ in 0..3 {
+            s.queue_microtask(f).unwrap();
+        }
+        assert!(matches!(s.drain_microtasks(), Err(Error::Throw(_))));
+        assert!(matches!(s.drain_microtasks(), Err(Error::Throw(_))), "the failure is sticky");
+        assert_eq!(s.pending_jobs(), 2);
+        s.clear_failed_job();
+        assert_eq!(s.drain_microtasks().unwrap(), 2);
+    });
+    assert_eq!(h.eval("n"), "6", "3 jobs, then 1, then the 2 that were left");
+    assert_eq!(depth(&mut h), 0);
+}
+
+/// The host hears a throw of a `queueMicrotask` callback, an unhandled rejection once, and a late handler once. The drain goes on.
+pub fn the_host_hears_thrown_callbacks_and_rejections<H: Harness>(stress: bool) {
+    let (mut h, host) = setup::<H>(stress);
+    h.eval("var log = []; queue(() => { throw 'boom' }); queue(() => log.push('after')); var p = Promise.reject('nope'); 0");
+    enter(h.engine(), |s| assert_eq!(s.drain_microtasks().unwrap(), 2));
+    assert_eq!(*host.reported.borrow(), ["boom"]);
+    assert_eq!(*host.rejections.borrow(), ["unhandled:nope"]);
+    assert_eq!(h.eval("log.join()"), "after");
+    h.eval("p.catch(() => {}); 0");
+    enter(h.engine(), |s| assert_eq!(s.drain_microtasks().unwrap(), 1));
+    assert_eq!(*host.rejections.borrow(), ["unhandled:nope", "handled"]);
+    enter(h.engine(), |s| assert_eq!(s.drain_microtasks().unwrap(), 0));
+    assert_eq!(host.rejections.borrow().len(), 2, "each is told once");
+    assert_eq!(depth(&mut h), 0);
+}
+
+/// At most `MAX_PENDING_REJECTIONS` rejections are kept; the rest are counted.
+pub fn the_rejections_over_the_bound_are_counted<H: Harness>(stress: bool) {
+    let (mut h, host) = setup::<H>(stress);
+    h.eval("for (var i = 0; i < 1100; i++) Promise.reject(i); 0");
+    enter(h.engine(), |s| assert_eq!(s.drain_microtasks().unwrap(), 0));
+    let r = host.rejections.borrow();
+    assert_eq!(r.iter().filter(|t| t.starts_with("unhandled:")).count(), crate::MAX_PENDING_REJECTIONS);
+    assert_eq!(r.last().unwrap(), &format!("dropped:{}", 1100 - crate::MAX_PENDING_REJECTIONS));
 }
