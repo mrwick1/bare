@@ -12,7 +12,7 @@ fn the_op_table_is_consistent() {
         assert!(names.insert(op.name()), "{} twice", op.name());
         let letters: Vec<char> = op.spec().chars().filter(|l| *l != ' ').collect();
         assert!(letters.len() <= op.form().fields(), "{}: more letters than fields", op.name());
-        assert!(letters.iter().all(|l| "wrWRiujzNAFHST-".contains(*l)), "{}: a letter", op.name());
+        assert!(letters.iter().all(|l| "wrWRiujzNAFHSTD-".contains(*l)), "{}: a letter", op.name());
         assert!(letters.iter().filter(|l| **l == 'j').count() <= 1, "{}: two jump fields", op.name());
         // The field `a` of the forms with three narrow fields is never signed, and a window letter is alone.
         assert!(!matches!(op.letter(0), 'i') || op.form() == Form::Sj, "{}", op.name());
