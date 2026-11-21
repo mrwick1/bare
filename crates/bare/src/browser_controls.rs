@@ -999,8 +999,13 @@ fn ens_label(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 lazy_global!(lazy_validity, "ValidityState", ens_validity, |d| d.ctl.validity.get().expect("made")[1]);
 lazy_global!(lazy_label, "HTMLLabelElement", ens_label, |d| d.ctl.label.get().expect("made")[1]);
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    crate::browser_lazy::install(d, it, &[("ValidityState", lazy_validity as HS), ("HTMLLabelElement", lazy_label)])
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+    table!(lazy = [
+        Row::both(1, "ValidityState", lazy_validity),
+        Row::both(1, "HTMLLabelElement", lazy_label),
+    ]);
+    let g = s.global();
+    d.install_rows(s, &[g], &lazy::T)
 }
 
 #[cfg(test)]

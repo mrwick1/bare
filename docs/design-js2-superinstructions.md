@@ -233,7 +233,7 @@ Model: `loop` 2.14 to 1.49 against QuickJS (after option 4), `calls` 1.77 to 1.3
 
 7b. The `__def` delete (section 7) is a bug, not a design choice.
 
-7c. A prototype-chain cache for `GetField`. In the bundle-like profile, 17% of the instructions are the property slow paths (`get_prop_g`, `get_field_slow`, `Shapes::find`, `lookup_g`), because a get that finds the property on the prototype is not cached. This is the largest item that is left in `objects` and the bundle. It is a design of its own (invalidation of a prototype shape) and it is not part of S2.9.
+7c. A prototype-chain cache for `GetField`. In the bundle-like profile, 17% of the instructions are the property slow paths (`get_prop_g`, `get_field_slow`, `Shapes::find`, `lookup_g`), because a get that finds the property on the prototype is not cached. This is the largest item that is left in `objects` and the bundle. It is a design of its own (invalidation of a prototype shape) and it is not part of S2.9. Built later: `docs/design-js2-proto-ic.md`.
 
 7d. The prelude compile at start (3.2 M instructions), as in 2.5. Fix: encode the prelude at build time or keep a snapshot. Design of its own.
 

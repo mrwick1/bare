@@ -387,10 +387,10 @@ fn offset_height<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) 
     Ok(s.number(h as f64))
 }
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
     let html = d.p().html;
-    d.def_get_s(it, html, "offsetWidth", offset_width, None)?;
-    d.def_get_s(it, html, "offsetHeight", offset_height, None)
+    d.def_get_at(s, html, "offsetWidth", offset_width, None)?;
+    d.def_get_at(s, html, "offsetHeight", offset_height, None)
 }
 
 impl Browser {

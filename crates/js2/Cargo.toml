@@ -8,6 +8,8 @@ license = "(MIT OR Apache-2.0) AND Unicode-3.0"
 
 [dependencies]
 bare-os = { path = "../os" }
+# The embedded time zone files for the local zone of `Date` (`bi_date_tz.rs`)
+bare-tzdata = { path = "../tzdata" }
 bare-js-api = { path = "../js-api" }
 # NFC and NFD for `String.prototype.normalize`; case folding and the property sets of `\p{}` for the RegExp engine (`regexp.rs`)
 bare-unicode = { path = "../unicode" }

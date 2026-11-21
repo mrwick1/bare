@@ -156,7 +156,7 @@ Three points for bare:
 
 Common facts about js2 that bound all designs:
 
-- A property that a script reads is found in the shape of an object (`Shapes::find`). The inline caches (`Feedback`) store only own hits (shape id and slot). A prototype hit has no cache yet; it walks the chain at every read through `get_prop_g`. So a built-in method read costs a chain walk today, and a lazy test on a miss adds no cost to a hit.
+- A property that a script reads is found in the shape of an object (`Shapes::find`). The inline caches (`Feedback`) store only own hits (shape id and slot). A prototype hit has no cache yet; it walks the chain at every read through `get_prop_g`. So a built-in method read costs a chain walk today, and a lazy test on a miss adds no cost to a hit. Update 2026-11-21: a prototype hit has a cache entry now (`docs/design-js2-proto-ic.md`).
 - A property cannot hold a placeholder value. The inline-cache hit path reads the slot with no test, and the S2.9 work counts every extra instruction there.
 - A native is a cell with `F_NATIVE` and the index of its `Native` in slot 0. Its `length` and `name` are made at the first use.
 - `Vm::call` needs an empty stack, and a native cannot enter script code until #785 is merged. So a lookup, which a native can make, must not run script code.

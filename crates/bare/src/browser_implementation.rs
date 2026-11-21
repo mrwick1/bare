@@ -105,9 +105,15 @@ fn implementation_global<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Ar
 }
 
 /// Installed with the late members of `Document` (`browser_dom::install_late`).
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    d.def_get_s(it, d.p().document, "implementation", implementation, None)?;
-    crate::browser_lazy::install(d, it, &[("DOMImplementation", implementation_global), ("DOMParser", parser_global), ("XMLSerializer", serializer_global)])
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+    d.def_get_at(s, d.p().document, "implementation", implementation, None)?;
+    table!(lazy = [
+        Row::both(1, "DOMImplementation", implementation_global),
+        Row::both(1, "DOMParser", parser_global),
+        Row::both(1, "XMLSerializer", serializer_global),
+    ]);
+    let g = s.global();
+    d.install_rows(s, &[g], &lazy::T)
 }
 
 // XML MIME types use the HTML parser. Case, namespaces, errors and serialization
