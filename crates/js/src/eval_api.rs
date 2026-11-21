@@ -581,6 +581,14 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
         }
     }
 
+    fn new_object_with<'s>(&mut self, proto: bare_js_api::Local<'_>) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
+        let r = self.api_obj(proto).and_then(|p| self.heap.new_object(Some(p)).map_err(|e| self.herr(e)));
+        match r {
+            Ok(o) => Ok(self.api_push(Value::Object(o))),
+            Err(e) => Err(self.api_err(e)),
+        }
+    }
+
     fn get<'s>(&mut self, obj: bare_js_api::Local<'_>, key: bare_js_api::Local<'_>) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
         let r = self.api_key(key).and_then(|k| self.get_value(self.api_at(obj), k));
         match r {

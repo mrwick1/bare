@@ -1647,26 +1647,26 @@ impl Dom {
         old(s, |it| crate::browser_fetch::install(self, it))?;
         old(s, |it| crate::browser_loader::install(self, it))?;
         old(s, |it| self.install_platform(it))?;
-        old(s, |it| at::install(self, it))?;
-        old(s, |it| crate::browser_nodelist::install(self, it))?;
-        old(s, |it| crate::browser_dataset::install(self, it))?;
+        at::install(self, s)?;
+        crate::browser_nodelist::install(self, s)?;
+        crate::browser_dataset::install(self, s)?;
         crate::browser_abort::install(self, s)?;
-        old(s, |it| crate::browser_editing::install(self, it))?;
+        crate::browser_editing::install(self, s)?;
         crate::browser_worker::install(self, s)?;
         crate::browser_xhr::install(self, s)?;
         crate::browser_encoding::install(self, s)?;
         crate::browser_web::install(self, s)?;
-        old(s, |it| crate::browser_console::install(self, it))?;
+        crate::browser_console::install(self, s)?;
         crate::browser_css_ns::install(self, s)?;
         crate::browser_style::install(self, s)?;
-        old(s, |it| crate::browser_computed::install(self, it))?;
-        old(s, |it| crate::browser_geometry::install(self, it))?;
-        old(s, |it| crate::browser_element::install(self, it))?;
-        old(s, |it| crate::browser_scroll::install(self, it))?;
-        old(s, |it| crate::browser_rects::install(self, it))?;
-        old(s, |it| crate::browser_resize::install(self, it))?;
-        old(s, |it| crate::browser_frame::install(self, it))?;
-        old(s, |it| crate::browser_idle::install(self, it))?;
+        crate::browser_computed::install(self, s)?;
+        crate::browser_geometry::install(self, s)?;
+        crate::browser_element::install(self, s)?;
+        crate::browser_scroll::install(self, s)?;
+        crate::browser_rects::install(self, s)?;
+        crate::browser_resize::install(self, s)?;
+        crate::browser_frame::install(self, s)?;
+        crate::browser_idle::install(self, s)?;
         crate::browser_mutation::install(self, s)?;
         crate::browser_intersection::install(self, s)?;
         crate::browser_walker::install(self, s)?;
@@ -1687,7 +1687,7 @@ impl Dom {
         crate::browser_img::install(self, s)?;
         crate::browser_custom::install(self, s)?;
         crate::browser_geom::install(self, s)?;
-        old(s, |it| crate::browser_basics::install(self, it))
+        crate::browser_basics::install(self, s)
     }
 
     pub(crate) fn define_accessor(&self, it: &mut Interp<'_>, o: ObjId, key: PropertyKey, get: ObjId, set: Option<ObjId>) -> R<()> {

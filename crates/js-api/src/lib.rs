@@ -654,6 +654,12 @@ pub trait Engine: Sized {
 
     fn global<'s>(&mut self) -> Local<'s>;
     fn new_object<'s>(&mut self) -> Result<Local<'s>, Error<'s>>;
+    /// A new ordinary object whose prototype is `proto`. An engine can make it in one step.
+    fn new_object_with<'s>(&mut self, proto: Local<'_>) -> Result<Local<'s>, Error<'s>> {
+        let o = self.new_object()?;
+        self.set_prototype_of(o, Some(proto))?;
+        Ok(o)
+    }
     /// `obj[key]`, with getters and proxies.
     fn get<'s>(&mut self, obj: Local<'_>, key: Local<'_>) -> Result<Local<'s>, Error<'s>>;
     /// `obj[key] = value`, with setters, in strict mode.
@@ -1064,6 +1070,10 @@ impl<'s, E: Engine> Scope<'s, E> {
 
     pub fn new_object(&mut self) -> Result<Local<'s>, Error<'s>> {
         self.e.new_object()
+    }
+
+    pub fn new_object_with(&mut self, proto: Local<'_>) -> Result<Local<'s>, Error<'s>> {
+        self.e.new_object_with(proto)
     }
 
     pub fn get(&mut self, obj: Local<'_>, key: Local<'_>) -> Result<Local<'s>, Error<'s>> {
