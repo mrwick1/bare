@@ -368,7 +368,6 @@ impl Realm {
         }
         self.install_object();
         self.install_function();
-        self.install_eval();
         self.install_error();
         self.install_array();
         self.install_string();
@@ -381,7 +380,6 @@ impl Realm {
         self.install_collections();
         self.install_date();
         self.install_reflect();
-        self.install_proxy();
     }
 
     fn install_function(&mut self) {

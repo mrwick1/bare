@@ -34,6 +34,8 @@ use crate::value::Value;
 pub(crate) enum Kind {
     /// A method: a native function, not enumerable, writable and configurable.
     Method(NativeFn),
+    /// A native constructor with lazy static members.
+    Ctor(NativeFn, &'static [Ent]),
     /// A constant: a number, not writable, not enumerable and not configurable.
     Num(f64),
     /// A method whose native has `i` in slot 1 (one native for many methods: `Date.prototype`, `bi_date.rs`).
@@ -81,6 +83,11 @@ const fn hash(s: &str) -> u32 {
 /// A method `name` with the function `length` `len`.
 pub(crate) const fn m(name: &'static str, len: u8, f: NativeFn) -> Ent {
     Ent { hash: hash(name), name, len, kind: Kind::Method(f) }
+}
+
+/// A constructor `name` with the function `length` `len` and static members.
+pub(crate) const fn ctor(name: &'static str, len: u8, f: NativeFn, members: &'static [Ent]) -> Ent {
+    Ent { hash: hash(name), name, len, kind: Kind::Ctor(f, members) }
 }
 
 /// A constant `name`.
@@ -187,8 +194,10 @@ impl Realm {
     /// A test switch: make every entry of every table now, as an eager install did.
     #[cfg(test)]
     pub(crate) fn lazy_everything(&mut self) {
-        for o in self.ltab.tabs.iter().map(|t| t.obj).collect::<Vec<_>>() {
-            self.lazy_all(o);
+        let mut i = 0;
+        while let Some(t) = self.ltab.tabs.get(i) {
+            self.lazy_all(t.obj);
+            i += 1;
         }
     }
 
@@ -283,6 +292,11 @@ impl Realm {
         let keep = o == self.global || self.ltab.tabs[ti].has_same;
         let v = match e.kind {
             Kind::Method(f) | Kind::Sym(f, _) => self.new_native(f, false, e.len, e.name).value(),
+            Kind::Ctor(f, members) => {
+                let c = self.new_native(f, true, e.len, e.name);
+                self.lazy_table(c, members);
+                c.value()
+            }
             Kind::Indexed(f, i) => {
                 let c = self.new_native(f, false, e.len, e.name);
                 c.set_slot(&self.shapes, 1, Value::int(i));
@@ -292,12 +306,12 @@ impl Realm {
             Kind::Alias => {
                 let g = self.global;
                 self.lazy_prep(g, ka);
-                self.shared_fn(g, e.name)
+                self.shared_fn(g, e.name).expect("the entry that an alias names")
             }
             Kind::Same(of) | Kind::SymSame(_, of) => {
                 let ko = self.intern(of);
                 self.lazy_prep(o, ko);
-                self.shared_fn(o, of)
+                self.shared_fn(o, of).expect("the entry that an alias names")
             }
             Kind::Script(top) => self.pre_fn(top, e.name).expect("a function of the prelude"),
             Kind::Acc(get, set) => {
@@ -307,7 +321,7 @@ impl Realm {
                 return;
             }
         };
-        if keep && !matches!(e.kind, Kind::Alias | Kind::Same(_) | Kind::SymSame(..)) {
+        if keep && !matches!(e.kind, Kind::Alias | Kind::Same(_) | Kind::SymSame(..) | Kind::Ctor(..)) {
             self.ltab.shared.push((o, e.name, v));
             self.keep(v);
         }
@@ -334,12 +348,12 @@ impl Realm {
         }
         let (ap, k) = (self.array_proto, self.intern("values"));
         self.lazy_prep(ap, k);
-        self.shared_fn(ap, "values")
+        self.shared_fn(ap, "values").expect("the array values entry")
     }
 
     /// The function that the method `name` of `o` was made as.
-    fn shared_fn(&self, o: Obj, name: &str) -> Value {
-        self.ltab.shared.iter().find(|(x, n, _)| *x == o && *n == name).expect("the entry that an alias names").2
+    pub(crate) fn shared_fn(&self, o: Obj, name: &str) -> Option<Value> {
+        self.ltab.shared.iter().find(|(x, n, _)| *x == o && *n == name).map(|&(_, _, v)| v)
     }
 }
 

@@ -40,7 +40,7 @@ fn this_fn(_rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
 }
 
 /// `%eval%`: indirect eval.
-fn eval_native(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+pub(crate) fn eval_native(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     rt.eval_code(args.first().copied().unwrap_or(Value::UNDEFINED), true)
 }
 
@@ -128,14 +128,14 @@ impl Realm {
         self.a_ret(r)
     }
 
-    pub(crate) fn install_eval(&mut self) {
-        let eval = self.new_native(eval_native, false, 1, "eval").value();
-        self.api.eval_fn = eval;
-        self.hidden(self.global, "eval", eval);
+    pub(crate) fn is_eval(&self, callee: Value) -> bool {
+        self.shared_fn(self.global, "eval") == Some(callee)
     }
 
     pub(crate) fn a_eval_function<'s>(&mut self) -> Local<'s> {
-        self.a_push(self.api.eval_fn)
+        let k = self.intern("eval");
+        self.lazy_prep(self.global, k);
+        self.a_push(self.shared_fn(self.global, "eval").expect("the eval intrinsic"))
     }
 
     pub(crate) fn direct_eval(

@@ -343,6 +343,7 @@ pub struct Realm {
     /// The lazy tables of the built-in objects (`lazy.rs`).
     pub(crate) ltab: crate::lazy::Lazy,
     pub(crate) wk: [Str; crate::bi_symbol::WK],
+    pub(crate) unscopables: Option<Str>,
     /// The registry of `Symbol.for`: an object with no prototype, made at the first call. It is a root.
     pub(crate) registry: Option<Obj>,
     /// `TypeError.prototype` and the others, by `ErrKind`.
@@ -515,6 +516,7 @@ impl Realm {
             symbol_ctor: None,
             ltab: Default::default(),
             wk,
+            unscopables: None,
             registry: None,
             error_protos,
             s_native,
