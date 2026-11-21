@@ -158,6 +158,8 @@ impl Realm {
                 for k in self.genr.keys {
                     s = self.shapes.add(s, k, 0).expect("shape");
                 }
+                // The collector frees a shape that nothing holds: pin it.
+                self.pins.push(s);
                 self.genr.async_shape = Some(s);
                 s
             }

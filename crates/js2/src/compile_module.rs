@@ -45,6 +45,8 @@ pub struct ModInfo {
     pub this_slot: u32,
     pub id_slot: u32,
     pub meta_slot: u32,
+    /// The code has a top-level `await`: it is an async function, and both phases give a promise (`compile_async.rs`).
+    pub has_tla: bool,
 }
 
 /// Compile the top level of a module (`parse_module_lazy`).
@@ -52,9 +54,12 @@ pub fn compile_module(prog: &Program, facts: &Facts, atoms: &SharedAtoms) -> CR<
     let mi = prog.module.as_ref().expect("a module");
     let mut c = Fc::new(prog, facts, atoms, &Input::default());
     c.strict = true;
+    if mi.has_tla {
+        (c.gen_kind, c.noctor) = (crate::bytecode::GK_ASYNC, true);
+    }
     let mut h = Hoist::default();
     c.hoist_list(prog.body, true, &mut h);
-    let mut info = ModInfo { requests: mi.requests.to_vec(), stars: mi.stars.clone(), ..Default::default() };
+    let mut info = ModInfo { requests: mi.requests.to_vec(), stars: mi.stars.clone(), has_tla: mi.has_tla, ..Default::default() };
     // The export names of each local binding. The first one names the property of the environment object.
     let mut keys: HashMap<Box<str>, Box<str>> = HashMap::new();
     let mut has_default = false;
@@ -135,12 +140,13 @@ pub fn compile_module(prog: &Program, facts: &Facts, atoms: &SharedAtoms) -> CR<
     // The phase is the one parameter.
     let phase = c.alloc();
     c.set_live(phase);
+    c.async_init();
     let init = c.label();
     c.jmp_r(Op::JmpIf, phase, init);
     for s in prog.list(prog.body) {
         c.stmt(s)?;
     }
-    c.op(Op::RetUndef, 0, 0, 0);
+    c.ret_undef();
     c.bind(init);
     for (f, name) in &h.funcs {
         c.declare_function(*f, name)?;

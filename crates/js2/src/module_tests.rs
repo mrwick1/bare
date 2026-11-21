@@ -219,10 +219,146 @@ fn exports_of_all_kinds() {
     assert_eq!(o, "[K,a string,alias,alias2,c,default,f,l,v]");
 }
 
+/// Load, link and evaluate the graph of `files[0]`, run the jobs, and give `out` and the state of the promise of the evaluation:
+/// `out|fulfilled`, `out|pending` or `out|rejected:reason`. With `gc` a collection runs at almost every allocation.
+fn out_async(files: &[(&str, &str)], gc: bool) -> String {
+    let mut vm = script::load("globalThis.out = [];").expect("load");
+    if gc {
+        let k = if cfg!(miri) { 4 << 10 } else { 1 << 10 };
+        vm.realm.heap.set_trigger(crate::heap::Trigger { min: k, slack: k });
+    }
+    vm.run_main(0).expect("run");
+    let r = &mut vm.realm;
+    let mut h = Host { files, done: Vec::new() };
+    let m = h.load(r, files[0].0).expect("load");
+    Engine::module_link(r, m).map_err(|e| text(r, e)).expect("link");
+    let p = r.md_evaluate(m).map_err(|e| r.error_text(e)).expect("evaluate");
+    vm.drain_microtasks(&mut |_, _| {}).expect("the jobs run");
+    let state = match Realm::promise_status(&vm.realm, p) {
+        Some((0, _)) => "pending".to_string(),
+        Some((1, _)) => "fulfilled".to_string(),
+        Some((_, e)) => format!("rejected:{}", vm.display(e, false)),
+        None => "no promise".to_string(),
+    };
+    format!("{}|{state}", vm.global_text("out").replace('"', ""))
+}
+
+fn check_async(cases: &[(&[(&str, &str)], &str)]) {
+    for (files, want) in cases {
+        assert_eq!(out_async(files, false), *want, "{files:?}");
+        if !cfg!(miri) {
+            assert_eq!(out_async(files, true), *want, "under collection: {files:?}");
+        }
+    }
+}
+
 #[test]
-fn top_level_await_is_unsupported() {
-    let e = run(&[("a.js", "await 1;")]).err().unwrap();
-    assert_eq!(e, "unsupported:top-level await");
+fn top_level_await_waits_in_the_module_and_the_importer_waits_for_it() {
+    check_async(&[
+        (&[("a.js", "out.push(1); await 0; out.push(2);")], "[1,2]|fulfilled"),
+        (&[("a.js", "import './b.js'; out.push('a');"), ("b.js", "out.push('b1'); await null; out.push('b2');")], "[b1,b2,a]|fulfilled"),
+        (&[("a.js", "import {v} from './b.js'; out.push(v);"), ("b.js", "export let v = 1; v = await Promise.resolve(5);")], "[5]|fulfilled"),
+        (&[("a.js", "var x = await new Promise(function (r) { r(3); }); var y = await x; out.push(x + y);")], "[6]|fulfilled"),
+        (&[("a.js", "for (var i = 0; i < 3; i++) { out.push(await i); } try { await Promise.reject('r'); } catch (e) { out.push(e); }")], "[0,1,2,r]|fulfilled"),
+    ]);
+}
+
+#[test]
+fn a_sync_sibling_runs_before_an_async_one_ends() {
+    check_async(&[
+        (
+            &[("a.js", "import './b.js'; import './c.js'; out.push('a');"), ("b.js", "out.push('b1'); await 0; out.push('b2');"), ("c.js", "out.push('c');")],
+            "[b1,c,b2,a]|fulfilled",
+        ),
+        (
+            &[
+                ("a.js", "import './b.js'; import './c.js'; out.push('a');"),
+                ("b.js", "out.push('b1'); await 0; out.push('b2');"),
+                ("c.js", "out.push('c1'); await 0; out.push('c2');"),
+            ],
+            "[b1,c1,b2,c2,a]|fulfilled",
+        ),
+        // `d` needs the async `b`, so it waits; `c` does not, so it runs.
+        (
+            &[
+                ("a.js", "import './b.js'; import './d.js'; import './c.js'; out.push('a');"),
+                ("b.js", "out.push('b1'); await 0; out.push('b2');"),
+                ("d.js", "import './b.js'; out.push('d');"),
+                ("c.js", "out.push('c');"),
+            ],
+            "[b1,c,b2,d,a]|fulfilled",
+        ),
+    ]);
+}
+
+#[test]
+fn a_rejected_top_level_await_fails_the_graph() {
+    check_async(&[
+        (&[("a.js", "import './b.js'; out.push('a');"), ("b.js", "out.push('b'); await Promise.reject('no'); out.push('b2');")], "[b]|rejected:no"),
+        (&[("a.js", "out.push('a'); throw 'sync';"), ("b.js", "")], "[a]|rejected:sync"),
+        (&[("a.js", "import './b.js'; out.push('a');"), ("b.js", "await 0; throw 'late';")], "[]|rejected:late"),
+    ]);
+}
+
+#[test]
+fn a_dynamic_import_of_a_module_with_top_level_await_waits() {
+    let o = run_script_with_imports(
+        "import('./b.js').then(function (ns) { out.push(ns.v); }); out.push('a');",
+        &[("b.js", "export var v = 1; out.push('b1'); await 0; v = 2; out.push('b2');")],
+    );
+    assert_eq!(o, "[a,b1,b2,2]");
+}
+
+#[test]
+fn a_second_graph_that_needs_a_module_still_waiting_waits_for_it() {
+    let files: &[(&str, &str)] = &[
+        ("x.js", "import './b.js'; out.push('x');"),
+        ("y.js", "import './b.js'; out.push('y');"),
+        ("b.js", "out.push('b'); await globalThis.gate; out.push('b2');"),
+    ];
+    for fail in [false, true] {
+        let mut vm = script::load("globalThis.out = []; globalThis.gate = new Promise(function (ok, no) { globalThis.open = function () { ok(1); }; globalThis.shut = function () { no('bad'); }; });").expect("load");
+        vm.run_main(0).expect("run");
+        let mut h = Host { files, done: Vec::new() };
+        let mut ps = Vec::new();
+        for f in ["x.js", "y.js"] {
+            let r = &mut vm.realm;
+            let m = h.load(r, f).expect("load");
+            Engine::module_link(r, m).map_err(|e| text(r, e)).expect("link");
+            ps.push(r.md_evaluate(m).map_err(|e| r.error_text(e)).expect("evaluate"));
+            vm.drain_microtasks(&mut |_, _| {}).expect("the jobs run");
+        }
+        vm.realm.run_text(if fail { "shut()" } else { "open()" }).unwrap_or_else(|_| panic!("settle"));
+        vm.drain_microtasks(&mut |_, _| {}).expect("the jobs run");
+        let st: Vec<_> = ps.iter().map(|p| Realm::promise_status(&vm.realm, *p).map(|s| s.0)).collect();
+        let want = if fail { vec![Some(2), Some(2)] } else { vec![Some(1), Some(1)] };
+        assert_eq!(st, want, "fail={fail}: {}", vm.global_text("out"));
+    }
+}
+
+#[test]
+fn rejection_order_of_two_dynamic_imports_of_one_waiting_module() {
+    let files: &[(&str, &str)] = &[
+        ("m.js", "import { p1, pa, pb } from './s.js'; let logs = []; \
+          const all = Promise.all([ pb.promise.then(() => import('./a.js').finally(() => logs.push('A'))).catch(() => {}), import('./b.js').finally(() => logs.push('B')).catch(() => {}) ]); \
+          Promise.all([pa.promise, pb.promise]).then(p1.reject); await all; out.push(logs.join());"),
+        ("s.js", "export const p1 = Promise.withResolvers(); export const pa = Promise.withResolvers(); export const pb = Promise.withResolvers();"),
+        ("a.js", "import './as.js'; import './b.js';"),
+        ("b.js", "import './bs.js'; import { p1 } from './s.js'; await p1.promise;"),
+        ("as.js", "import { pa } from './s.js'; pa.resolve();"),
+        ("bs.js", "import { pb } from './s.js'; pb.resolve();"),
+    ];
+    let mut vm = script::load("globalThis.out = [];").expect("load");
+    vm.run_main(0).expect("run");
+    let mut h = Host { files, done: Vec::new() };
+    let r = &mut vm.realm;
+    let m = h.load(r, "m.js").expect("load");
+    Engine::module_link(r, m).map_err(|e| text(r, e)).expect("link");
+    let p = r.md_evaluate(m).map_err(|e| r.error_text(e)).expect("evaluate");
+    serve(&mut vm, files, &mut h);
+    vm.drain_microtasks(&mut |_, _| {}).expect("the jobs run");
+    let st = Realm::promise_status(&vm.realm, p).map(|s| s.0);
+    assert_eq!((st, vm.global_text("out")), (Some(1), "[\"B,A\"]".to_string()));
 }
 
 #[test]

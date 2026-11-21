@@ -179,3 +179,14 @@ fn an_async_function_in_a_block_is_not_hoisted_to_the_function() {
         ("var r; { function f() {} } r = typeof f;", "r", "function"),
     ]);
 }
+
+#[test]
+fn the_shape_of_the_activation_survives_a_collection_with_no_activation_alive() {
+    let mut vm = load("async function f() { return 1; } var r = 0; f(); ").expect("load");
+    vm.run_main(0).expect("run");
+    vm.collect_idle();
+    let g = vm.global("f");
+    vm.call(g, crate::value::Value::UNDEFINED, &[]).expect("call");
+    vm.collect_idle();
+    vm.call(g, crate::value::Value::UNDEFINED, &[]).expect("call");
+}
