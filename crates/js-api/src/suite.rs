@@ -372,3 +372,84 @@ pub fn handles_survive_a_top_level_call_that_allocates<H: Harness>(stress: bool)
     });
     assert_eq!(depth(&mut h), 0);
 }
+
+/// Load the graph of `url` from `files` (a request `./x.js` is the file `x.js`) and give its module number.
+fn load_graph<'s, E: Engine>(s: &mut Scope<'s, E>, files: &[(&str, &str)], url: &str, done: &mut Vec<(String, u32)>) -> Result<u32, String> {
+    if let Some((_, m)) = done.iter().find(|(u, _)| u == url) {
+        return Ok(*m);
+    }
+    let (_, src) = files.iter().find(|(u, _)| *u == url).ok_or_else(|| format!("no file {url}"))?;
+    let m = s.module_parse(src, url).map_err(|e| error_text(s, e))?;
+    done.push((url.to_owned(), m));
+    let mut deps = Vec::new();
+    for r in s.module_requests(m) {
+        deps.push(load_graph(s, files, r.trim_start_matches("./"), done)?);
+    }
+    s.module_set_requested(m, &deps);
+    Ok(m)
+}
+
+fn error_text<'s, E: Engine>(s: &mut Scope<'s, E>, e: Error<'s>) -> String {
+    match e {
+        Error::Throw(v) => s.to_string(v).ok().and_then(|t| s.as_str(t).map(|t| t.to_string_lossy())).unwrap_or_default(),
+        Error::Abort(a) => format!("{a:?}"),
+    }
+}
+
+/// Parse, link and evaluate `root` of `files`. `Err` is the text of the first error.
+fn run_modules<H: Harness>(h: &mut H, files: &[(&str, &str)], root: &str) -> Result<(), String> {
+    enter(h.engine(), |s| {
+        let m = load_graph(s, files, root, &mut Vec::new())?;
+        s.module_link(m).map_err(|e| error_text(s, e))?;
+        s.module_evaluate(m).map_err(|e| error_text(s, e))?;
+        Ok(())
+    })
+}
+
+/// Static modules: the order of evaluation, live bindings, default exports, re-exports, a namespace object and a cycle.
+pub fn modules_link_and_run_in_order_with_live_bindings<H: Harness>(stress: bool) {
+    let (mut h, _) = setup::<H>(stress);
+    h.eval("globalThis.out = []; 0");
+    let files = [
+        ("a.js", "import d, { x, inc } from './b.js'; import * as ns from './c.js'; import { g } from './e.js'; out.push('a', d, x); inc(); out.push(x, ns.y, ns.z, Object.keys(ns).join('|'), g());"),
+        ("b.js", "import './c.js'; export let x = 1; export function inc() { x++ } export default 'dflt'; out.push('b');"),
+        ("c.js", "export { x as y } from './b.js'; export * from './d.js'; out.push('c');"),
+        ("d.js", "export const z = 'zed'; out.push('d');"),
+        ("e.js", "import { f } from './a2.js'; export function g() { return f() + 'g' }"),
+        ("a2.js", "import { g } from './e.js'; export function f() { return typeof g } "),
+    ];
+    run_modules(&mut h, &files, "a.js").unwrap();
+    assert_eq!(h.eval("out.join()"), "d,c,b,a,dflt,1,2,2,zed,y|z,functiong");
+    assert_eq!(depth(&mut h), 0);
+}
+
+/// An error of the graph is found before any module runs, and the parse of a bad module is a `SyntaxError`.
+pub fn modules_report_link_and_parse_errors<H: Harness>(stress: bool) {
+    let (mut h, _) = setup::<H>(stress);
+    h.eval("globalThis.out = []; 0");
+    let files = [("a.js", "out.push('ran'); import { nope } from './b.js';"), ("b.js", "export let x = 1;"), ("bad.js", "export let = ;")];
+    let e = run_modules(&mut h, &files, "a.js").unwrap_err();
+    assert!(e.starts_with("SyntaxError"), "{e}");
+    assert_eq!(h.eval("out.length"), "0", "nothing ran");
+    let e = run_modules(&mut h, &files, "bad.js").unwrap_err();
+    assert!(e.starts_with("SyntaxError"), "{e}");
+    let files = [("a.js", "import { x } from './b.js'; x = 2;"), ("b.js", "export let x = 1;")];
+    // An assignment to an import is a `TypeError` when the code runs: the evaluation gives a rejected promise or a throw.
+    let _ = run_modules(&mut h, &files, "a.js");
+    assert_eq!(depth(&mut h), 0);
+}
+
+/// `import()` in a script reaches the host as a request. The host answers it; the answer settles the promise.
+pub fn dynamic_import_reaches_the_host<H: Harness>(stress: bool) {
+    let (mut h, _) = setup::<H>(stress);
+    h.eval("var p = import('./b.js'); 0");
+    enter(h.engine(), |s| {
+        let reqs = s.take_dynamic_imports();
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0].specifier, "./b.js");
+        assert_eq!(reqs[0].referrer, None);
+        assert!(s.take_dynamic_imports().is_empty());
+        s.fail_dynamic_import(&reqs[0].promise, "no such file").unwrap();
+    });
+    assert_eq!(depth(&mut h), 0);
+}

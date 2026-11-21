@@ -111,4 +111,7 @@ both!(
     own_properties_are_read_without_running_code_except_getters,
     strings_from_code_units_keep_lone_surrogates,
     handles_survive_a_top_level_call_that_allocates,
+    modules_link_and_run_in_order_with_live_bindings,
+    modules_report_link_and_parse_errors,
+    dynamic_import_reaches_the_host,
 );

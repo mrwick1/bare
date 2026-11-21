@@ -320,6 +320,7 @@ impl Realm {
         self.install_string();
         self.install_number();
         self.install_promise();
+        self.install_modules();
         self.install_symbol();
         self.install_generator();
         self.install_json();

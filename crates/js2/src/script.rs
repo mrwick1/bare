@@ -16,11 +16,11 @@ use crate::atoms::SharedAtoms;
 use crate::string::Chars;
 use crate::bytecode::{CF_ARGS, CF_LINK, Code, Ins, Op};
 use crate::codes::Codes;
-use crate::compile::{Child, Compiled, Input, compile_function, compile_script};
+use crate::compile::{Child, Compiled, Input, ModInfo, compile_function, compile_module, compile_script};
 use crate::facts::{ARGS, EVAL, Facts, FnFacts, FnId, INNER_EVAL, SUPER};
 use crate::interp::{Exit, LazyCompile, Program, Vm, code_flags};
 use crate::interp_rt::Realm;
-use crate::parse::{Limits, parse_function, parse_script_known, parse_script_lazy};
+use crate::parse::{Limits, parse_function, parse_module_lazy, parse_script_known, parse_script_lazy};
 use crate::shapes::A_E;
 use crate::value::Value;
 use std::borrow::Cow;
@@ -151,6 +151,29 @@ impl LazyCompile for Lazy {
         self.units.push(Unit { source: Cow::Owned(src.to_owned()), facts });
         self.wait(u, pending);
         Ok(at)
+    }
+
+    /// The top level of a module that joins a program that runs: its code is the last one that this adds. As `script`, with the facts of
+    /// the module. A module with a top-level `await` is refused (`Err("unsupported: top-level await")`): js2 has no async functions.
+    fn module(&mut self, codes: &Codes, src: &str) -> Result<(usize, ModInfo), String> {
+        let mut facts = Facts::new();
+        let prog = parse_module_lazy(src, self.limits, &mut facts).map_err(|e| format!("SyntaxError: {}", e.msg))?;
+        if prog.module.as_ref().is_some_and(|m| m.has_tla) {
+            return Err("unsupported: top-level await".into());
+        }
+        let (top, info) = compile_module(&prog, &facts, &self.atoms).map_err(|e| format!("compile: {e:?}"))?;
+        let (base, mut new, mut pending) = (codes.len(), Vec::new(), Vec::new());
+        let at = Loader { source: src, facts: &mut facts, atoms: &self.atoms, limits: self.limits, base, codes: &mut new, lazy: Some(&mut pending) }.add(top)?;
+        let link = |new: &[Code], c: &Code| c.funcs.iter().any(|&k| k as usize >= base && new[k as usize - base].flags & CF_LINK != 0);
+        for i in (0..new.len()).rev() {
+            new[i].flags = code_flags(&new[i]) | if link(&new, &new[i]) { CF_LINK } else { 0 };
+        }
+        debug_assert_eq!(at, base);
+        codes.push_all(new);
+        let u = self.units.len();
+        self.units.push(Unit { source: Cow::Owned(src.to_owned()), facts });
+        self.wait(u, pending);
+        Ok((at, info))
     }
 }
 

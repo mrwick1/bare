@@ -105,6 +105,10 @@ pub trait LazyCompile {
     fn script(&mut self, _codes: &Codes, _src: &str) -> Result<usize, String> {
         Err("this compiler cannot add a script".into())
     }
+    /// Compile `src` as a module (`compile_module`) and add it at the end of `codes`. Gives the index of its code and its facts.
+    fn module(&mut self, _codes: &Codes, _src: &str) -> Result<(usize, crate::compile::ModInfo), String> {
+        Err("this compiler cannot add a module".into())
+    }
 }
 
 /// Why `Vm::call` stopped.

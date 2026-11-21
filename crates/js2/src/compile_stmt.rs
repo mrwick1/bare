@@ -20,13 +20,13 @@ enum Plan {
 
 /// The names that a function (or a script) declares in its own scope, found before the code is compiled.
 #[derive(Default)]
-struct Hoist<'a> {
+pub(super) struct Hoist<'a> {
     /// `var` names, also those in nested blocks, and the names of sloppy-mode functions in blocks (Annex B).
-    vars: Vec<Cow<'a, str>>,
+    pub(super) vars: Vec<Cow<'a, str>>,
     /// The function declarations of the top level, in order.
-    funcs: Vec<(FuncId, Cow<'a, str>)>,
+    pub(super) funcs: Vec<(FuncId, Cow<'a, str>)>,
     /// The `let`, `const` and `class` declarations of the top level, with the end of the declaration.
-    lex: Vec<(Cow<'a, str>, VK, u32)>,
+    pub(super) lex: Vec<(Cow<'a, str>, VK, u32)>,
 }
 
 /// A function declaration of a block: its name and whether the name is a binding of the block (strict code) or a variable of the function.
@@ -35,7 +35,7 @@ type BlockFn<'a> = (FuncId, Cow<'a, str>, bool);
 impl<'a> Fc<'a> {
     // ------------------------------------------------------------ hoisting
 
-    fn hoist_list(&self, list: List<Stmt>, top: bool, h: &mut Hoist<'a>) {
+    pub(super) fn hoist_list(&self, list: List<Stmt>, top: bool, h: &mut Hoist<'a>) {
         for s in self.prog.list(list) {
             self.hoist_stmt(s, top, h);
         }
@@ -405,7 +405,7 @@ impl<'a> Fc<'a> {
     }
 
     /// Make the closure of a function declaration and store it in its variable.
-    fn declare_function(&mut self, f: FuncId, name: &str) -> CR {
+    pub(super) fn declare_function(&mut self, f: FuncId, name: &str) -> CR {
         let m = self.mark();
         let t = match self.find_var(name).map(|v| v.home) {
             Some(Home::Reg(r)) => r,
@@ -693,7 +693,7 @@ impl<'a> Fc<'a> {
             }
             StmtKind::Block(list) => self.block(list, st.span)?,
             StmtKind::With { .. } => self.unsup("with"),
-            StmtKind::ExportDefault(..) => self.unsup("a module"),
+            StmtKind::ExportDefault(e, hoisted) => self.export_default(e, hoisted, false)?,
         }
         self.free(m);
         Ok(())
