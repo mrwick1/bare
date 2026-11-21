@@ -94,7 +94,7 @@ use bare_js::eval::{Error, EvalLimits, Host, Interp, LimitKind};
 use bare_js::heap::{Heap, HeapLimits, PropertyDescriptor};
 use bare_js::value::{ObjId, PropertyKey, Value};
 use bare_js_api::HostFn;
-use crate::browser_scoped::{HS, run};
+use crate::browser_scoped::{old, run, Res, Sc, HS};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::hash::{BuildHasherDefault, Hasher};
@@ -1638,51 +1638,56 @@ impl Dom {
             let k = self.key(it, name)?;
             it.define_data(g, k, v, true, true, true)?;
         }
-        crate::browser_navigation::install(self, it)?;
-        crate::browser_fetch::install(self, it)?;
-        crate::browser_loader::install(self, it)?;
-        self.install_platform(it)?;
-        at::install(self, it)?;
-        crate::browser_nodelist::install(self, it)?;
-        crate::browser_dataset::install(self, it)?;
-        crate::browser_abort::install(self, it)?;
-        crate::browser_editing::install(self, it)?;
-        crate::browser_worker::install(self, it)?;
-        crate::browser_xhr::install(self, it)?;
-        crate::browser_encoding::install(self, it)?;
-        crate::browser_web::install(self, it)?;
-        crate::browser_console::install(self, it)?;
-        crate::browser_css_ns::install(self, it)?;
-        crate::browser_style::install(self, it)?;
-        crate::browser_computed::install(self, it)?;
-        crate::browser_geometry::install(self, it)?;
-        crate::browser_element::install(self, it)?;
-        crate::browser_scroll::install(self, it)?;
-        crate::browser_rects::install(self, it)?;
-        crate::browser_resize::install(self, it)?;
-        crate::browser_frame::install(self, it)?;
-        crate::browser_idle::install(self, it)?;
-        crate::browser_mutation::install(self, it)?;
-        crate::browser_intersection::install(self, it)?;
-        crate::browser_walker::install(self, it)?;
-        crate::browser_range::install(self, it)?;
-        crate::browser_handlers::install(self, it)?;
-        crate::browser_error_event::install(self, it)?;
-        crate::browser_canvas::install(self, it)?;
-        crate::browser_rejection::install(self, it)?;
-        crate::browser_perf_observer::install(self, it)?;
-        crate::browser_perf::install_interfaces(self, it)?;
-        crate::browser_lazy::install(self, it, &[("Screen", lazy_screen as HS)])?;
-        crate::browser_select::install(self, it)?;
+        run(it, |s| self.install_rest(s))
+    }
+
+    /// The part of `install` that runs in a scope. Keep the order: a new host function moves the id of every one after it.
+    fn install_rest<'s>(&self, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+        old(s, |it| crate::browser_navigation::install(self, it))?;
+        old(s, |it| crate::browser_fetch::install(self, it))?;
+        old(s, |it| crate::browser_loader::install(self, it))?;
+        old(s, |it| self.install_platform(it))?;
+        old(s, |it| at::install(self, it))?;
+        old(s, |it| crate::browser_nodelist::install(self, it))?;
+        old(s, |it| crate::browser_dataset::install(self, it))?;
+        crate::browser_abort::install(self, s)?;
+        old(s, |it| crate::browser_editing::install(self, it))?;
+        crate::browser_worker::install(self, s)?;
+        crate::browser_xhr::install(self, s)?;
+        crate::browser_encoding::install(self, s)?;
+        crate::browser_web::install(self, s)?;
+        old(s, |it| crate::browser_console::install(self, it))?;
+        crate::browser_css_ns::install(self, s)?;
+        crate::browser_style::install(self, s)?;
+        old(s, |it| crate::browser_computed::install(self, it))?;
+        old(s, |it| crate::browser_geometry::install(self, it))?;
+        old(s, |it| crate::browser_element::install(self, it))?;
+        old(s, |it| crate::browser_scroll::install(self, it))?;
+        old(s, |it| crate::browser_rects::install(self, it))?;
+        old(s, |it| crate::browser_resize::install(self, it))?;
+        old(s, |it| crate::browser_frame::install(self, it))?;
+        old(s, |it| crate::browser_idle::install(self, it))?;
+        crate::browser_mutation::install(self, s)?;
+        crate::browser_intersection::install(self, s)?;
+        crate::browser_walker::install(self, s)?;
+        crate::browser_range::install(self, s)?;
+        crate::browser_handlers::install(self, s)?;
+        crate::browser_error_event::install(self, s)?;
+        crate::browser_canvas::install(self, s)?;
+        crate::browser_rejection::install(self, s)?;
+        crate::browser_perf_observer::install(self, s)?;
+        crate::browser_perf::install_interfaces(self, s)?;
+        crate::browser_lazy::install(self, s, &[("Screen", lazy_screen as HS)])?;
+        crate::browser_select::install(self, s)?;
         // Last: a new host function earlier in this list moves the id of every one after it.
-        crate::browser_elements::install(self, it)?;
-        nd::install_late(self, it)?;
-        crate::browser_controls::install(self, it)?;
-        crate::browser_media::install(self, it)?;
-        crate::browser_img::install(self, it)?;
-        crate::browser_custom::install(self, it)?;
-        crate::browser_geom::install(self, it)?;
-        crate::browser_basics::install(self, it)
+        crate::browser_elements::install(self, s)?;
+        nd::install_late(self, s)?;
+        crate::browser_controls::install(self, s)?;
+        crate::browser_media::install(self, s)?;
+        crate::browser_img::install(self, s)?;
+        crate::browser_custom::install(self, s)?;
+        crate::browser_geom::install(self, s)?;
+        old(s, |it| crate::browser_basics::install(self, it))
     }
 
     pub(crate) fn define_accessor(&self, it: &mut Interp<'_>, o: ObjId, key: PropertyKey, get: ObjId, set: Option<ObjId>) -> R<()> {

@@ -1512,12 +1512,12 @@ lazy_global!(lazy_range, "Range", ensure, |d| state(d).borrow().made.expect("mad
 lazy_global!(lazy_abstract, "AbstractRange", ensure, |d| state(d).borrow().made.expect("made")[5]);
 lazy_global!(lazy_selection, "Selection", ensure, |d| state(d).borrow().made.expect("made")[3]);
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    let g = it.global_object();
-    d.def_method_s(it, g, "getSelection", 0, get_selection)?;
-    d.def_method_s(it, d.p().document, "getSelection", 0, get_selection)?;
-    d.def_method_s(it, d.p().document, "createRange", 0, create_range)?;
-    crate::browser_lazy::install(d, it, &[("Range", lazy_range as HS), ("Selection", lazy_selection), ("AbstractRange", lazy_abstract)])
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+    let g = s.global();
+    d.def_method_l(s, g, "getSelection", 0, get_selection, false)?;
+    d.def_method_at(s, d.p().document, "getSelection", 0, get_selection)?;
+    d.def_method_at(s, d.p().document, "createRange", 0, create_range)?;
+    crate::browser_lazy::install(d, s, &[("Range", lazy_range as HS), ("Selection", lazy_selection), ("AbstractRange", lazy_abstract)])
 }
 
 /// The boundary points of a range: start container and offset, end container and offset.

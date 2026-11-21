@@ -43,8 +43,8 @@ fn lazy_image_data<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -
     Ok(if a.is_empty() { v } else { s.undefined() })
 }
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    crate::browser_lazy::install(d, it, &[("ImageData", lazy_image_data as HS)])
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+    crate::browser_lazy::install(d, s, &[("ImageData", lazy_image_data as HS)])
 }
 
 /// An `unsigned long` of the constructor (`[EnforceRange]`): a `TypeError` when it is not finite or out of range.

@@ -636,10 +636,10 @@ fn quad_to_json<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -
 // ------------------------------------------------------------------------------------------ the realm
 
 #[inline(never)]
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
     browser_lazy::install(
         d,
-        it,
+        s,
         &[
             ("DOMQuad", lazy_quad as HS),
             ("DOMPoint", lazy_point_rw),
@@ -649,7 +649,7 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
             ("DOMRectReadOnly", lazy_rect_ro),
         ],
     )?;
-    crate::browser_matrix::install(d, it)
+    crate::browser_matrix::install(d, s)
 }
 
 /// The points of every quad are roots, not traced from the quad: a trace hook runs for every object of a collection, and a root list runs once.

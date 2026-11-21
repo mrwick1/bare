@@ -1137,10 +1137,10 @@ lazy_global!(lazy_collection, "HTMLCollection", ens, |d| pick(d, 4));
 lazy_global!(lazy_textarea, "HTMLTextAreaElement", ens_area, |d| pick(d, 5));
 lazy_global!(lazy_option, "Option", ens, |d| pick(d, 6));
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
     crate::browser_lazy::install(
         d,
-        it,
+        s,
         &[("HTMLSelectElement", lazy_select as HS), ("HTMLOptionElement", lazy_option_el), ("HTMLOptGroupElement", lazy_optgroup), ("HTMLOptionsCollection", lazy_options), ("HTMLCollection", lazy_collection), ("HTMLTextAreaElement", lazy_textarea), ("Option", lazy_option)],
     )
 }

@@ -26,11 +26,10 @@
 
 use crate::browser::*;
 use crate::browser_scoped::*;
-use bare_js::eval::Interp;
 use bare_js_api::{Args, Attrs, HostFn, Intrinsic, Local, Type};
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    crate::browser_lazy::install(d, it, &[("CSS", lazy)])
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+    crate::browser_lazy::install(d, s, &[("CSS", lazy)])
 }
 
 /// The getter (no argument) and the setter (the new value) of the global.

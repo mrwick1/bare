@@ -190,8 +190,8 @@ lazy_global!(lazy_ranges, "TimeRanges", ens, |d| pick(d, 3));
 lazy_global!(lazy_error, "MediaError", ens, |d| pick(d, 4));
 lazy_global!(lazy_audio, "Audio", ens, |d| pick(d, 5));
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    crate::browser_lazy::install(d, it, &[("HTMLMediaElement", lazy_media as HS), ("HTMLAudioElement", lazy_audio_el), ("HTMLVideoElement", lazy_video_el), ("TimeRanges", lazy_ranges), ("MediaError", lazy_error), ("Audio", lazy_audio)])
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+    crate::browser_lazy::install(d, s, &[("HTMLMediaElement", lazy_media as HS), ("HTMLAudioElement", lazy_audio_el), ("HTMLVideoElement", lazy_video_el), ("TimeRanges", lazy_ranges), ("MediaError", lazy_error), ("Audio", lazy_audio)])
 }
 
 /// `new HTMLMediaElement()` and the like: `Failed to construct 'X': Illegal constructor`.

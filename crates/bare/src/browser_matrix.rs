@@ -652,8 +652,8 @@ lazy_global!(lazy_ro, "DOMMatrixReadOnly", ensure_unit, |d| d.geom.m.get().expec
 lazy_global!(lazy_rw, "DOMMatrix", ensure_unit, |d| d.geom.m.get().expect("made")[1].ctor);
 
 #[inline(never)]
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    browser_lazy::install(d, it, &[("DOMMatrixReadOnly", lazy_ro as HS), ("DOMMatrix", lazy_rw)])
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+    browser_lazy::install(d, s, &[("DOMMatrixReadOnly", lazy_ro as HS), ("DOMMatrix", lazy_rw)])
 }
 
 fn mat_of(d: &Dom, s: &mut Sc<'_, '_>, this: Local<'_>) -> Option<Mat> {

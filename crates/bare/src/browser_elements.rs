@@ -96,8 +96,8 @@ lazy_global!(lazy_template, "HTMLTemplateElement", ensure, |d| d.els.objs.get().
 lazy_global!(lazy_img, "HTMLImageElement", ensure, |d| d.els.objs.get().expect("made")[8]);
 lazy_global!(lazy_slot, "HTMLSlotElement", ensure, |d| d.els.objs.get().expect("made")[9]);
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    crate::browser_lazy::install(d, it, &[("HTMLAnchorElement", lazy_a as HS), ("HTMLAreaElement", lazy_area), ("HTMLTemplateElement", lazy_template), ("HTMLImageElement", lazy_img), ("HTMLSlotElement", lazy_slot)])
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+    crate::browser_lazy::install(d, s, &[("HTMLAnchorElement", lazy_a as HS), ("HTMLAreaElement", lazy_area), ("HTMLTemplateElement", lazy_template), ("HTMLImageElement", lazy_img), ("HTMLSlotElement", lazy_slot)])
 }
 
 #[cold]

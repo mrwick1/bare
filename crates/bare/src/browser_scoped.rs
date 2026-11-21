@@ -358,9 +358,10 @@ impl Dom {
 
     /// `def_method` on an object that a handler made: a function of the new form as a method of `target`. `enumerable` is false for an
     /// ordinary method and true for a WebIDL one.
-    pub(crate) fn def_method_l<'s>(&self, s: &mut Sc<'s, '_>, target: Local<'s>, name: &str, len: u32, h: HS, enumerable: bool) -> Res<'s, ()> {
+    pub(crate) fn def_method_l<'s>(&self, s: &mut Sc<'s, '_>, target: Local<'s>, name: &str, len: u32, h: HS, enumerable: bool) -> Res<'s, Local<'s>> {
         let f = self.add_fn_s(s, h, name, len, HostFn::Method)?;
-        s.define_str(target, name, f, Attrs { writable: true, enumerable, configurable: true })
+        s.define_str(target, name, f, Attrs { writable: true, enumerable, configurable: true })?;
+        Ok(f)
     }
 
     /// `def_get` on an object that a handler made: an accessor of functions of the new form.
@@ -371,6 +372,18 @@ impl Dom {
             None => None,
         };
         s.define_accessor_str(target, name, Some(g), st, Attrs { writable: false, enumerable: true, configurable: true })
+    }
+
+    /// `def_method_s` for a scope: a function of the new form as a method of the object `target`.
+    pub(crate) fn def_method_at<'s>(&self, s: &mut Sc<'s, '_>, target: ObjId, name: &str, len: u32, h: HS) -> Res<'s, Local<'s>> {
+        let t = self.obj_local(s, target);
+        self.def_method_l(s, t, name, len, h, false)
+    }
+
+    /// `def_get_s` for a scope: an accessor of functions of the new form on the object `target`.
+    pub(crate) fn def_get_at<'s>(&self, s: &mut Sc<'s, '_>, target: ObjId, name: &str, get: HS, set: Option<HS>) -> Res<'s, ()> {
+        let t = self.obj_local(s, target);
+        self.def_get_l(s, t, name, get, set)
     }
 
     /// `Dom::new_source`.
