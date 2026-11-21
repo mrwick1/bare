@@ -240,13 +240,16 @@ fn substr(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
 }
 
 fn split(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+    let (sep, limit) = (arg(args, 0), arg(args, 1));
+    use crate::regexp_rt::protocol::{split_limit, string_hook};
+    if Realm::obj(sep).is_some()
+        && let Some(value) = string_hook(rt, this, sep, crate::bi_symbol::SPLIT, &[this, limit])?
+    {
+        return Ok(value);
+    }
     let s = rt.this_str(this, "split")?;
     let u = rt.units(s);
-    let limit = if arg(args, 1).is_undefined() { u32::MAX } else { Realm::to_int32(rt.to_number(arg(args, 1))?) as u32 };
-    let sep = arg(args, 0);
-    if let Some(re) = Realm::obj(sep).filter(|o| o.has_flag(crate::object::F_REGEXP)) {
-        return crate::bi_string_regexp::split(rt, re, s, limit);
-    }
+    let limit = split_limit(rt, limit)?;
     let mut out: Vec<Value> = Vec::new();
     if sep.is_undefined() {
         out.push(s.value());
