@@ -198,11 +198,6 @@ fn date_slot(rt: &Realm, v: Value) -> Option<(Obj, u32)> {
     Some((o, rt.shapes.find(o.shape(&rt.shapes), rt.k_prim)?.slot()))
 }
 
-/// Is `v` a `Date`? A host object has the same flag bit, so the test is the time value.
-pub(crate) fn is_date(rt: &Realm, v: Value) -> bool {
-    date_slot(rt, v).is_some()
-}
-
 fn this_date(rt: &mut Realm, this: Value) -> R<(Obj, u32, f64)> {
     match date_slot(rt, this) {
         Some((o, s)) => Ok((o, s, o.slot(&rt.shapes, s).as_f64().unwrap_or(f64::NAN))),
