@@ -116,13 +116,14 @@ pub enum Exit {
     Fuel,
 }
 
-/// How the cold function ends (`Vm::exec::<Cold>`): the run is over, or the instruction is done and the hot loop goes on at `(ci, fp, pc)`.
+/// How a copy of `Vm::exec` ends: the run is over, or the loop stops at a rare event that it did not run in its own `match` and goes on at `(ci, fp, pc)`
+/// (the cold function after its one instruction; the hot loop after a generator resume or a getter written in Rust).
 enum Flow {
     Done(Result<Value, Exit>),
     Go(usize, usize, usize),
 }
 
-/// The two copies of `Vm::exec`. The hot loop returns the result of the run, as `Vm::run` does: its return type is not wider than that.
+/// The two copies of `Vm::exec`.
 trait Mode {
     const COLD: bool;
     type Out;
@@ -133,13 +134,14 @@ struct Hot;
 struct Cold;
 impl Mode for Hot {
     const COLD: bool = false;
-    type Out = Result<Value, Exit>;
+    type Out = Flow;
     #[inline(always)]
     fn done(r: Result<Value, Exit>) -> Self::Out {
-        r
+        Flow::Done(r)
     }
-    fn go(_: usize, _: usize, _: usize) -> Self::Out {
-        unreachable!("the hot loop never stops at one instruction")
+    #[inline(always)]
+    fn go(ci: usize, fp: usize, pc: usize) -> Self::Out {
+        Flow::Go(ci, fp, pc)
     }
 }
 impl Mode for Cold {
@@ -504,8 +506,13 @@ impl Vm {
         realm.collect(fbs, |_| {});
     }
 
-    fn run(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, prog: &Codes, ci: usize, fp: usize, pc: usize) -> Result<Value, Exit> {
-        Vm::exec::<Hot>(realm, stack, fbs, prog, ci, fp, pc)
+    fn run(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, prog: &Codes, mut ci: usize, mut fp: usize, mut pc: usize) -> Result<Value, Exit> {
+        loop {
+            match Vm::exec::<Hot>(realm, stack, fbs, prog, ci, fp, pc) {
+                Flow::Done(r) => return r,
+                Flow::Go(c, f, p) => (ci, fp, pc) = (c, f, p),
+            }
+        }
     }
 
     /// The call of the hot loop to the cold function. `#[cold]` makes LLVM treat the call as unlikely, so the spills around it stay out of
@@ -929,11 +936,7 @@ impl Vm {
                         let Some((ni, cctx)) = realm.function(f) else {
                             // `next`, `return` or `throw` of a generator (the hole as `this`): its frame goes on top of this one. Else not a function.
                             match gen_resume(realm, stack, prog, ci, fp, ($dst as i32) | ITER, pc, $next, f, this) {
-                                Ok((nci, nfp, rpc)) => {
-                                    (ci, fp, pc) = (nci, nfp, rpc);
-                                    reload!();
-                                    continue;
-                                }
+                                Ok((nci, nfp, rpc)) => return M::go(nci, nfp, rpc),
                                 Err(e) => throw!(e),
                             }
                         };
@@ -1003,8 +1006,7 @@ impl Vm {
                     // A getter written in Rust (`Symbol.prototype.description`), or no function: the nested call runs it or throws.
                     std::hint::cold_path();
                     r!($dst) = tri!(realm.call_function(g, this, &[]));
-                    pc = $next;
-                    continue;
+                    return M::go(ci, fp, $next);
                 };
                 enter!(g, ni, cctx, this, undef, $dst as i32, pc, $next, fp, 0usize);
                 pc = 0;

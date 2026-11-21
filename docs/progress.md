@@ -17955,6 +17955,30 @@ Tests. `cargo test --locked -p bare-js2 --lib`: 458 pass (main 457; the new test
 
 Not tested: the whole crate under Miri (only `interp::tests` and 2 `script_tests`); Windows run (only the build); arm64; wall time, branch misses (machine not idle); the hot-arm stability edit; a class-heavy loop with all `super` ops hot (the design's cost of the cold call is measured above only for single ops and for one `super.m()` call); the browser (js2 is not wired in); a differential run on the `bare-js-diff` corpus beyond its tests.
 
+### Cold arms of `Vm::run`: merge with main at `8875c60a` (2026-11-21)
+
+After the merge with main (#801 generators, #800 promises, #804 Symbol) the cost rule failed. The row that failed was `fib`: +0.86% at the default build and +2.66% at `codegen-units=1`. (`objects` passed on this main.) The hot loop (`Vm::exec::<Hot>`) was 160,347 B, as before the merge.
+
+Cause. Main added two rare paths inside the loop. Both continue the loop after the rare work: the `next`, `return` or `throw` of a generator in `native_call!` (`gen_resume`, then `reload!()` and `continue`), and a getter written in Rust in `call_get!` (`call_function`, then `continue`). Each is a new edge into the loop head, so the allocator must reconcile more register states there. With `callgrind` on `fib`, the extra instructions are register moves (`mov` +230 K of 7.6 M; spills fewer). Diagnostic builds (not kept): both paths replaced by an error: `loopfn` 290.5 to 278.5 (the figure of the tree before the merge). One path replaced: `loopfn` 285.5. No effect on `loopfn` (290.5 each): `cold_path()` in the generator branch, a constant `pc` at the start of the hot copy, the getter call moved into a `#[cold]` function. Why the allocator reacts to the edges is a hypothesis.
+
+Fix. The two paths now leave the hot loop and do not continue it. `Hot::Out` is `Flow` (as `Cold::Out`); both arms do `return M::go(ci, fp, pc)`; `Vm::run` loops over `exec::<Hot>` and starts it again at the `(ci, fp, pc)` that it returns. The start costs one prologue (the feedback lookup), only on these rare paths. The cold function already ended this way.
+
+`interp_load`, `tools/js/instr.sh` (3 runs, spread 0.002 M), net of N = 0, M instructions, archMachine (not idle). Main `8875c60a` and this tree, built in the same session with symbols kept, `CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1` for the cgu1 columns.
+
+| Row | Main default | Merge, no fix | Fixed | | Main cgu1 | Merge, no fix | Fixed | |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loopfn` | 266.50 | 290.50 | 280.50 | +5.2% | 282.50 | 281.50 | 280.50 | -0.7% |
+| `calls` | 571.50 | 586.50 | 586.50 | +2.6% | 578.50 | 570.50 | 562.50 | -2.8% |
+| `fib` | 1,090.13 | 1,099.56 | 1,100.90 | +1.0% | 1,061.86 | 1,090.13 | 1,048.40 | -1.3% |
+| `closures` | 365.70 | 366.90 | 370.10 | +1.2% | 365.96 | 368.56 | 360.56 | -1.5% |
+| `objects` | 143.39 | 141.39 | 143.73 | +0.2% | 143.33 | 146.59 | 142.59 | -0.5% |
+
+By the standing rule every row passes: `loopfn`, `calls`, `fib` and `closures` are over +0.5% at the default build and below main at `codegen-units=1`; `objects` is within +0.5% at both. The default build of `loopfn` is still above main: main is 266.5 here and was 272.5 at `351f9b72`, and this tree did not follow it down.
+
+Tests. `cargo test --locked -p bare-js2 --lib`: 512 pass; with `--features op-count`: 513.
+
+Not tested: `script_run` start-up and rows with many nested runs (each nested run now returns a `Flow`, 32 B, and not a `Result`); test262; Windows; Miri.
+
 ## 2026-11-21: what blocks `Dom<E: Engine>`, and PR 1 of the plan (S0.4 after Z)
 
 Goal. The browser switch to js2 (S2.8 step 4) needs `Dom<E: Engine>`. This entry measures what is left of S0.4 and sets the order of the PRs. It also holds PR 1 (handlers of the lazy globals and of small families).
