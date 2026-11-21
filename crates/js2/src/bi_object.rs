@@ -922,17 +922,15 @@ pub(crate) fn object_own_descriptor(rt: &mut Realm, _this: Value, args: &[Value]
 }
 
 fn object_own_descriptors(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    let v = to_obj(rt, arg(args, 0))?;
+    let o = rt.to_object(arg(args, 0))?;
     let out = Obj::new(&mut rt.heap, &rt.shapes, rt.s_object).expect("memory");
-    if let Some(o) = Realm::obj(v) {
-        let mut keys = rt.own_key_list_h(o, false)?;
-        keys.extend(rt.own_symbol_list(o, false));
-        for k in keys {
-            let key = rt.key_of(k)?;
-            if let Some(p) = rt.get_own_h(o, key)? {
-                let d = rt.from_own(p);
-                rt.define(out, key, d)?;
-            }
+    let mut keys = rt.own_key_list_h(o, false)?;
+    keys.extend(rt.own_symbol_list(o, false));
+    for k in keys {
+        let key = rt.key_of(k)?;
+        if let Some(p) = rt.get_own_h(o, key)? {
+            let d = rt.from_own(p);
+            rt.define(out, key, d)?;
         }
     }
     Ok(out.value())

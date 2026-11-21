@@ -114,8 +114,8 @@ function bound(cb, t) {
   return t === undefined ? cb : bind(cb,t);
 }
 function defaultCompare(x, y) {
-  x = '' + x;
-  y = '' + y;
+  x = arrayString(x);
+  y = arrayString(y);
   return x < y ? -1 : x > y ? 1 : 0;
 }
 // A stable merge sort of the first `n` elements of `a`. Returns the array that holds the result.
@@ -191,8 +191,7 @@ function array_forEach(cb) {
   need(cb);
   var f = bound(cb, arguments[1]);
   for (var i = 0; i < n; i++) {
-    var v = a[i];
-    if (v !== undefined || i in a) f(v, i, a);
+    if (i in a) f(a[i], i, a);
   }
 }
 function array_map(cb) {
@@ -200,8 +199,7 @@ function array_map(cb) {
   need(cb);
   var r = arraySpecies(a, n), f = bound(cb, arguments[1]);
   for (var i = 0; i < n; i++) {
-    var v = a[i];
-    if (v !== undefined || i in a) arrayPut(r, i, f(v, i, a));
+    if (i in a) arrayPut(r, i, f(a[i], i, a));
   }
   return r;
 }
@@ -210,8 +208,9 @@ function array_filter(cb) {
   need(cb);
   var r = arraySpecies(a, 0), f = bound(cb, arguments[1]), k = 0;
   for (var i = 0; i < n; i++) {
+    if (!(i in a)) continue;
     var v = a[i];
-    if ((v !== undefined || i in a) && f(v, i, a)) arrayPut(r, k++, v);
+    if (f(v, i, a)) arrayPut(r, k++, v);
   }
   return r;
 }
@@ -225,8 +224,7 @@ function array_reduce(cb) {
     acc = a[i++];
   }
   for (; i < n; i++) {
-    var v = a[i];
-    if (v !== undefined || i in a) acc = cb(acc, v, i, a);
+    if (i in a) acc = cb(acc, a[i], i, a);
   }
   return acc;
 }
@@ -240,8 +238,7 @@ function array_reduceRight(cb) {
     acc = a[i--];
   }
   for (; i >= 0; i--) {
-    var v = a[i];
-    if (v !== undefined || i in a) acc = cb(acc, v, i, a);
+    if (i in a) acc = cb(acc, a[i], i, a);
   }
   return acc;
 }
@@ -250,8 +247,7 @@ function array_some(cb) {
   need(cb);
   var f = bound(cb, arguments[1]);
   for (var i = 0; i < n; i++) {
-    var v = a[i];
-    if ((v !== undefined || i in a) && f(v, i, a)) return true;
+    if (i in a && f(a[i], i, a)) return true;
   }
   return false;
 }
@@ -260,8 +256,7 @@ function array_every(cb) {
   need(cb);
   var f = bound(cb, arguments[1]);
   for (var i = 0; i < n; i++) {
-    var v = a[i];
-    if ((v !== undefined || i in a) && !f(v, i, a)) return false;
+    if (i in a && !f(a[i], i, a)) return false;
   }
   return true;
 }
