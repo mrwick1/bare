@@ -1552,12 +1552,18 @@ fn a_scope_with_many_locals_compiles_in_linear_time() {
         src
     };
     let atoms = SharedAtoms::default();
+    // Compare two sizes on the same machine, not a wall-time limit: a loaded machine slows both. Linear work gives a ratio near 10,
+    // quadratic work near 100.
+    let t = std::time::Instant::now();
+    compile_all(&src(6_000), &atoms, Limits::default()).expect("compile");
+    let small = t.elapsed();
     let t = std::time::Instant::now();
     let (_, fs) = compile_all(&src(60_000), &atoms, Limits::default()).expect("compile");
+    let big = t.elapsed();
     // The verifier keeps a register set for each instruction: too much for 60,000 registers, so it is not run here.
     assert!((60_000..=60_010).contains(&fs[0].1.code.nregs), "{}", fs[0].1.code.nregs);
     // More than the format has registers for: refused, and not after minutes.
     let r = compile_all(&src(70_000), &atoms, Limits::default());
     assert!(matches!(r, Err(ref e) if e.contains("Limit")), "{:?}", r.map(|_| ()));
-    assert!(t.elapsed().as_secs() < 20, "{:?}", t.elapsed());
+    assert!(big < small * 40 + std::time::Duration::from_millis(200), "6,000 locals: {small:?}, 60,000 locals: {big:?}");
 }
