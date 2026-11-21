@@ -1118,6 +1118,17 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
         r.map_err(|e| self.api_err(e))
     }
 
+    fn define_accessor_named<'s>(&mut self, obj: bare_js_api::Local<'_>, key: &str, get: Option<bare_js_api::Local<'_>>, set: Option<bare_js_api::Local<'_>>, a: bare_js_api::Attrs) -> Result<(), bare_js_api::Error<'s>> {
+        let r = self.api_obj(obj).and_then(|o| {
+            let k = self.heap.key_from_str(key).map_err(|e| self.herr(e))?;
+            let get = get.map(|f| self.api_obj(f)).transpose()?;
+            let set = set.map(|f| self.api_obj(f)).transpose()?;
+            let d = PropertyDescriptor { get: Some(get), set: Some(set), enumerable: Some(a.enumerable), configurable: Some(a.configurable), ..Default::default() };
+            self.heap.define_own_property(o, k, &d).map(|_| ()).map_err(|e| self.herr(e))
+        });
+        r.map_err(|e| self.api_err(e))
+    }
+
     fn define_accessor<'s>(&mut self, obj: bare_js_api::Local<'_>, key: bare_js_api::Local<'_>, get: Option<bare_js_api::Local<'_>>, set: Option<bare_js_api::Local<'_>>, a: bare_js_api::Attrs) -> Result<(), bare_js_api::Error<'s>> {
         let r = self.api_obj(obj).and_then(|o| {
             let k = self.api_key(key)?;

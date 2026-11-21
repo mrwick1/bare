@@ -1555,11 +1555,12 @@ impl Dom {
                     (f, Some(self.add_fn_s(s, sh, &nm, 1, HostFn::Method)?))
                 }
             };
+            let key = s.string(d.name)?;
             for &on in d.on {
                 let target = self.obj_local(s, self.pick(on));
                 match d.kind {
-                    Kind::MethodS(_) => s.define_str(target, d.name, f, Attrs::METHOD)?,
-                    _ => s.define_accessor_str(target, d.name, Some(f), st, Attrs { writable: false, enumerable: true, configurable: true })?,
+                    Kind::MethodS(_) => s.define(target, key, f, Attrs::METHOD)?,
+                    _ => s.define_accessor(target, key, Some(f), st, Attrs { writable: false, enumerable: true, configurable: true })?,
                 }
             }
         }
