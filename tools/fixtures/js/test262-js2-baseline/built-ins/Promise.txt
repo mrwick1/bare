@@ -2,9 +2,9 @@
 # old = bare-js, new = bare-js2. Commit: e4fbf57745c6aae3d1f12f181ecef78b1665d812. Written by tools/js/test262_js2.sh -u. Do not edit by hand.
 built-ins/Promise 57 0 1 57 0 1
 built-ins/Promise/Symbol.species 5 0 0 5 0 0
-built-ins/Promise/all 96 2 0 96 2 0
+built-ins/Promise/all 97 1 0 96 2 0
 built-ins/Promise/allKeyed 0 0 45 0 0 45
-built-ins/Promise/allSettled 102 2 0 102 2 0
+built-ins/Promise/allSettled 103 1 0 102 2 0
 built-ins/Promise/allSettledKeyed 0 0 44 0 0 44
 built-ins/Promise/any 93 1 0 92 2 0
 built-ins/Promise/prototype 6 0 0 6 0 0
