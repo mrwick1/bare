@@ -146,6 +146,16 @@ impl Heap {
         Some(unsafe { NonNull::new_unchecked(p) })
     }
 
+    /// Allocate a zeroed cell. A large cell comes from a new zeroed mapping.
+    pub(crate) fn alloc_zeroed(&mut self, size: usize) -> Option<NonNull<u8>> {
+        let p = self.alloc(size)?;
+        if size <= MAX_SMALL {
+            // SAFETY: alloc returned a cell with room for size bytes.
+            unsafe { p.as_ptr().write_bytes(0, size) };
+        }
+        Some(p)
+    }
+
     /// Like [`Heap::alloc`], for code that can collect: `None` when the task limit has passed (see [`Heap::task_due`]) or the OS gives no
     /// memory. The limit is tested on the slow path only, so this costs the same as `alloc` while the free list has cells. After a
     /// refusal at the limit, collect and call [`Heap::alloc`].

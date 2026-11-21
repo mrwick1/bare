@@ -51,6 +51,10 @@ pub(crate) enum Kind {
     SymSame(usize, &'static str),
     /// An accessor of two natives, not enumerable and configurable: the getter has `length` 0 and the setter 1 (`Object.prototype.__proto__`).
     Acc(NativeFn, NativeFn),
+    /// A read-only accessor, optionally keyed by a well-known symbol.
+    Getter(NativeFn, Option<usize>, &'static str),
+    /// A buffer constructor and its prototype, all made at the first use.
+    BufferCtor(i32),
 }
 
 /// One entry of a table: a name, the `length` of its function, and what it makes.
@@ -79,6 +83,7 @@ const fn hash(s: &str) -> u32 {
 }
 
 /// A method `name` with the function `length` `len`.
+#[inline(never)]
 pub(crate) const fn m(name: &'static str, len: u8, f: NativeFn) -> Ent {
     Ent { hash: hash(name), name, len, kind: Kind::Method(f) }
 }
@@ -89,6 +94,7 @@ pub(crate) const fn num(name: &'static str, v: f64) -> Ent {
 }
 
 /// A method `name` of the native `f` with `i` in its slot 1.
+#[inline(never)]
 pub(crate) const fn indexed(name: &'static str, len: u8, f: NativeFn, i: i32) -> Ent {
     Ent { hash: hash(name), name, len, kind: Kind::Indexed(f, i) }
 }
@@ -114,6 +120,7 @@ pub(crate) const fn script(name: &'static str, top: &'static str) -> Ent {
 }
 
 /// A method with the key `wk[i]` that is the same function as the entry `of` of the same table.
+#[inline(never)]
 pub(crate) const fn sym_same(name: &'static str, i: usize, of: &'static str) -> Ent {
     Ent { hash: hash(name), name, len: 0, kind: Kind::SymSame(i, of) }
 }
@@ -122,6 +129,31 @@ pub(crate) const fn sym_same(name: &'static str, i: usize, of: &'static str) -> 
 pub(crate) const fn acc(name: &'static str, get: NativeFn, set: NativeFn) -> Ent {
     Ent { hash: hash(name), name, len: 0, kind: Kind::Acc(get, set) }
 }
+
+#[inline(never)]
+pub(crate) const fn getter(name: &'static str, fn_name: &'static str, f: NativeFn) -> Ent {
+    Ent { hash: hash(name), name, len: 0, kind: Kind::Getter(f, None, fn_name) }
+}
+
+#[inline(never)]
+pub(crate) const fn sym_getter(i: usize, fn_name: &'static str, f: NativeFn) -> Ent {
+    Ent { hash: 0, name: "", len: 0, kind: Kind::Getter(f, Some(i), fn_name) }
+}
+
+pub(crate) const fn buffer_ctor(name: &'static str, len: u8, id: i32) -> Ent {
+    Ent { hash: hash(name), name, len, kind: Kind::BufferCtor(id) }
+}
+
+/// Make a cold family's native tables at first use. Materializing the
+/// entries here avoids dynamic-loader relocations for their pointer fields.
+macro_rules! late_table {
+    ($($f:ident($($arg:expr),*)),* $(,)?) => {{
+        const N: usize = [$(stringify!($f)),*].len();
+        static TABLE: std::sync::OnceLock<[$crate::lazy::Ent; N]> = std::sync::OnceLock::new();
+        TABLE.get_or_init(|| [$($f($($arg),*)),*])
+    }};
+}
+pub(crate) use late_table;
 
 /// A table of one object, and its place in `Lazy::done`.
 struct Tab {
@@ -148,11 +180,13 @@ pub(crate) struct Lazy {
     pub(crate) str_iter: Option<crate::bi_string_iter::StrIter>,
     /// The entries of kind [`Kind::Sym`] that are not made: the object, the index in `Realm::wk`, the table and the entry.
     syms: Vec<(Obj, usize, usize, usize)>,
+    pub(crate) buffer_keys: Option<[Str; 4]>,
+    pub(crate) typed_base: Option<Obj>,
 }
 
 impl Default for Lazy {
     fn default() -> Self {
-        Lazy { tabs: Vec::new(), done: Vec::new(), bits: Vec::new(), shared: Vec::new(), str_iter: None, syms: Vec::new() }
+        Lazy { tabs: Vec::new(), done: Vec::new(), bits: Vec::new(), shared: Vec::new(), str_iter: None, syms: Vec::new(), buffer_keys: None, typed_base: None }
     }
 }
 
@@ -169,12 +203,12 @@ impl Realm {
         if l.bits.is_empty() {
             l.bits = vec![0; 64];
         }
-        let base = l.tabs.iter().map(|t| t.ents.len()).sum::<usize>();
+        let base = l.tabs.last().map_or(0, |t| t.base + t.ents.len());
         l.done.resize((base + ents.len()).div_ceil(64), 0);
         let ti = l.tabs.len();
         for (j, e) in ents.iter().enumerate() {
             l.bits[(e.hash >> 6) as usize & 63] |= 1 << (e.hash & 63);
-            if let Kind::Sym(_, i) | Kind::SymSame(i, _) = e.kind {
+            if let Kind::Sym(_, i) | Kind::SymSame(i, _) | Kind::Getter(_, Some(i), _) = e.kind {
                 l.syms.push((o, i, ti, j));
             }
         }
@@ -271,7 +305,7 @@ impl Realm {
             o.clear_flag(F_LAZYTAB);
         }
         let ka = match e.kind {
-            Kind::Sym(_, i) | Kind::SymSame(i, _) => {
+            Kind::Sym(_, i) | Kind::SymSame(i, _) | Kind::Getter(_, Some(i), _) => {
                 self.ltab.syms.retain(|&(_, _, t, n)| (t, n) != (ti, j));
                 self.wk[i]
             }
@@ -298,6 +332,12 @@ impl Realm {
                 self.shared_fn(o, of)
             }
             Kind::Script(top) => self.pre_fn(top, e.name).expect("a function of the prelude"),
+            Kind::BufferCtor(id) => self.make_buffer_ctor(e.name, e.len, id),
+            Kind::Getter(get, _, name) => {
+                let f = self.new_native(get, false, 0, name).value();
+                self.define_accessor(o, k, f, false, false).expect("define");
+                return;
+            }
             Kind::Acc(get, set) => {
                 let (g, s) = (self.new_native(get, false, 0, "get").value(), self.new_native(set, false, 1, "set").value());
                 let d = Desc { get: Some(g), set: Some(s), e: Some(false), c: Some(true), ..Desc::default() };
@@ -336,7 +376,7 @@ impl Realm {
     }
 
     /// The function that the method `name` of `o` was made as.
-    fn shared_fn(&self, o: Obj, name: &str) -> Value {
+    pub(crate) fn shared_fn(&self, o: Obj, name: &str) -> Value {
         self.ltab.shared.iter().find(|(x, n, _)| *x == o && *n == name).expect("the entry that an alias names").2
     }
 }

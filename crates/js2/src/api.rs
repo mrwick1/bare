@@ -957,6 +957,62 @@ impl Engine for Realm {
         self.a_define(o, k, &d)
     }
 
+    fn new_array_buffer<'s>(&mut self, bytes: Vec<u8>) -> Result<Local<'s>, Error<'s>> {
+        let proto = self.buffer_intrinsic("ArrayBuffer");
+        let r = self.new_buffer(proto, bytes.len(), None).map(|o| {
+            self.buffer_bytes_mut(o).expect("buffer").copy_from_slice(&bytes);
+            o.value()
+        });
+        self.a_ret(r)
+    }
+
+    fn new_typed_array<'s>(&mut self, elem: bare_js_api::Elem, bytes: Vec<u8>) -> Result<Local<'s>, Error<'s>> {
+        let Some(elem) = crate::bi_typed::Element::from_api(elem) else {
+            return Err(Error::Abort(Abort::Unsupported("typed array element type")));
+        };
+        let width = elem.width();
+        let r = if bytes.len() % width != 0 {
+            crate::bi_buffer::range(self, "unaligned typed array byte length")
+        } else {
+            let p = self.buffer_intrinsic(elem.name());
+            self.alloc_typed(p, elem, bytes.len() / width).map(|o| {
+                let view = crate::bi_buffer::View::of(o).expect("typed array");
+                self.buffer_bytes_mut(view.buffer).expect("buffer").copy_from_slice(&bytes);
+                o.value()
+            })
+        };
+        self.a_ret(r)
+    }
+
+    fn bytes(&self, value: Local<'_>) -> Option<&[u8]> {
+        let (b, span) = self.byte_range(Self::obj(self.a_at(value))?)?;
+        self.buffer_bytes(b)?.get(span)
+    }
+
+    fn bytes_mut(&mut self, value: Local<'_>) -> Option<&mut [u8]> {
+        let (b, span) = self.byte_range(Self::obj(self.a_at(value))?)?;
+        self.buffer_bytes_mut(b)?.get_mut(span)
+    }
+
+    fn view<'s>(&mut self, value: Local<'_>) -> Option<bare_js_api::View<'s>> {
+        let v = crate::bi_buffer::View::of(Self::obj(self.a_at(value))?)?;
+        let len = v.len();
+        Some(bare_js_api::View {
+            buffer: self.a_push(v.buffer.value()),
+            offset: len.map_or(0, |_| v.offset),
+            len: len.unwrap_or(0),
+            elem: v.elem.map_or(bare_js_api::Elem::Data, crate::bi_typed::Element::api),
+        })
+    }
+
+    fn is_detached(&self, value: Local<'_>) -> bool {
+        Self::obj(self.a_at(value)).is_some_and(|o| self.buffer_detached(o))
+    }
+
+    fn view_get(&self, value: Local<'_>, i: usize) -> Option<f64> {
+        crate::bi_buffer::View::of(Self::obj(self.a_at(value))?)?.read(self, i)
+    }
+
     fn proto_from_new_target<'s>(&mut self, default: Local<'_>) -> Result<Local<'s>, Error<'s>> {
         let (callee, nt) = (self.callee, self.nt);
         if nt.is_undefined() || nt == callee {
