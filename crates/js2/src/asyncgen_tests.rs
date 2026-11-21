@@ -157,3 +157,21 @@ fn an_async_from_sync_iterator_closes_the_sync_iterator() {
         ("var args = []; var it0 = { [Symbol.iterator]() { return { next() { args.push(arguments.length); return { value: 1, done: args.length > 1 }; } }; } }; var r; (async function () { for await (var x of it0) ; r = args.join(); })();", "r", "0,0"),
     ]);
 }
+
+#[test]
+fn the_async_function_constructors_build_functions_that_run() {
+    check(&[
+        (
+            "var A = Object.getPrototypeOf(async function () {}).constructor; var f = A('x', 'return await x + 1;'); var r = ''; \
+             f(1).then(v => r = f.name + v);",
+            "r",
+            "anonymous2",
+        ),
+        (
+            "var AG = Object.getPrototypeOf(async function* () {}).constructor; var f = AG('yield 1; yield 2;'); var r = []; \
+             (async () => { for await (var v of f()) r.push(v); r = r.join(); })();",
+            "r",
+            "1,2",
+        ),
+    ]);
+}

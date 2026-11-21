@@ -268,6 +268,7 @@ impl Realm {
         self.define_attrs(fp, tag, A_C, t1).expect("define");
         self.define_attrs(gp, Key::Name(k_ctor), A_C, fp.value()).expect("define");
         self.define_attrs(gp, tag, A_C, t2).expect("define");
+        self.dynamic_ctor(fp, "AsyncGeneratorFunction", crate::builtins::async_generator_function_ctor);
         self.consts.extend([ai.value(), gp.value(), fp.value()]);
         (self.genr.ag.proto, self.genr.ag.func_proto, self.genr.ag.iter_proto) = (Some(gp), Some(fp), Some(ai));
     }
