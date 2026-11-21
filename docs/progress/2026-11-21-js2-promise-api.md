@@ -37,7 +37,7 @@ Base: `origin/main` `8875c60a` (no engine change since the merge base). Release 
 
 No row is over +0.5% (the setup counts at N = 0 are within +0.05% too), so the `codegen-units=1` rule is not needed. The adapter row (`tools/js/adapter_load.sh` builds `crates/js/examples/adapter_load`): the binary of the branch is byte-identical to the base (`cmp`), because this change touches no code that `bare-js` links, so its counts are the base counts. `crates/bare` links `bare-js2` for one constant (`NOT_READY`) only. I did not run the full cost matrix: its rows are binaries of `bare-js`, `bare` and `bare-stress`, which this change leaves as they are. This is a hypothesis for `bare` and `bare-stress` (not compared byte by byte).
 
-The promise rows of js2 (`promise_load`, `Vm::drain_microtasks`) got slower, because a job now starts on a pooled machine instead of on the stack of the `Vm` (a pop and a push of a 48-byte record, and the result mapping). The step is the difference of two scales divided by the difference of the scales:
+The promise rows of js2 (`js2_promise_load`, `Vm::drain_microtasks`) got slower, because a job now starts on a pooled machine instead of on the stack of the `Vm` (a pop and a push of a 48-byte record, and the result mapping). The step is the difference of two scales divided by the difference of the scales:
 
 | Row | Base | Branch | Change |
 | --- | ---: | ---: | ---: |
@@ -54,4 +54,4 @@ Windows and macOS; Miri (no new `unsafe`); the full cost matrix (see above); a r
 
 ### Cost decision (main session, 2026-11-21)
 
-The js2 `promise_load` steps are +2.4% to +3.5%. js2 does not run in the browser yet, so these rows do not reach a user. The same rule held for #757. The fix waits for a profile of the journeys on js2.
+The js2 `js2_promise_load` steps are +2.4% to +3.5%. js2 does not run in the browser yet, so these rows do not reach a user. The same rule held for #757. The fix waits for a profile of the journeys on js2.

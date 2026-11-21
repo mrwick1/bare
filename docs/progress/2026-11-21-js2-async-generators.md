@@ -42,12 +42,12 @@ Release builds, own `CARGO_TARGET_DIR` for each tree and profile, `tools/js/inst
 | ------------------------------------------------ | -----------: | --------------: | ----------: | -------------: |
 | `interp_load loopfn 3000000`                     |      +0.000% |         +0.000% |     +0.000% |        +0.000% |
 | `interp_load calls 1000000`                      |      +0.504% |         +0.501% |     +0.000% |        +0.000% |
-| `gen_load next 100000`                           |      +0.528% |         +0.518% |     +0.244% |        +0.240% |
-| `promise_load then 100000`                       |      +0.199% |         +0.195% |     +0.265% |        +0.260% |
+| `js2_gen_load next 100000`                           |      +0.528% |         +0.518% |     +0.244% |        +0.240% |
+| `js2_promise_load then 100000`                       |      +0.199% |         +0.195% |     +0.265% |        +0.260% |
 | startup (`script_run`, `var x = 1;`)             |      +0.073% |         +0.022% |     -0.012% |        +0.015% |
-| `parse_load full stmts 10` (glibc, default only) |      +0.003% |                 |             |                |
+| `js2_parse_load full stmts 10` (glibc, default only) |      +0.003% |                 |             |                |
 
-The spread of the 3 minimums is under 0.001% on the `interp_load`, `gen_load` and `promise_load` rows, and under 0.15% on the startup row. Two rows are over +0.5% in the default build: `interp_load calls` (+3,000,000 instructions, 3 for each call) and `gen_load next` (+900,000, 9 for each turn). Both are within +0.5% at `codegen-units=1` on both trees, so the rule allows them. Hypothesis: a layout effect of the new ops in the loop (the `calls` row does not move at `codegen-units=1`). The `gen_load` row keeps +0.24% at `codegen-units=1`; the `gen_kind` check in `Yield` and `RetGen` may cause it (to verify). This is the same layout effect as in A1 and top-level await.
+The spread of the 3 minimums is under 0.001% on the `interp_load`, `js2_gen_load` and `js2_promise_load` rows, and under 0.15% on the startup row. Two rows are over +0.5% in the default build: `interp_load calls` (+3,000,000 instructions, 3 for each call) and `js2_gen_load next` (+900,000, 9 for each turn). Both are within +0.5% at `codegen-units=1` on both trees, so the rule allows them. Hypothesis: a layout effect of the new ops in the loop (the `calls` row does not move at `codegen-units=1`). The `js2_gen_load` row keeps +0.24% at `codegen-units=1`; the `gen_kind` check in `Yield` and `RetGen` may cause it (to verify). This is the same layout effect as in A1 and top-level await.
 
 ## Not tested
 
