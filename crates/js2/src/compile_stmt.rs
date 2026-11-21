@@ -161,12 +161,12 @@ impl<'a> Fc<'a> {
             }
         }
         // In a derived constructor `this` is a variable that is the hole until `super()` returns.
-        let uses_this = !self.is_arrow && (self.cap.contains_key("this") || self.derived);
+        let uses_this = !self.is_arrow && (self.cap.contains_key("this") || self.derived || self.force_ctx);
         if uses_this {
             let (kind, end) = if self.derived { (VK::Let, u32::MAX) } else { (VK::Var, 0) };
             decls.push(Decl { name: Cow::Borrowed("this"), kind, end, reg: None });
         }
-        let uses_nt = !self.is_arrow && self.cap.contains_key("new.target");
+        let uses_nt = !self.is_arrow && (self.cap.contains_key("new.target") || self.force_ctx);
         if uses_nt {
             decls.push(Decl { name: Cow::Borrowed("new.target"), kind: VK::Var, end: 0, reg: None });
         }
@@ -174,7 +174,7 @@ impl<'a> Fc<'a> {
         decls.extend(h.funcs.iter().map(|(_, n)| Decl { name: n.clone(), kind: VK::Func, end: 0, reg: None }));
         decls.extend(h.lex.iter().map(|(n, k, e)| Decl { name: n.clone(), kind: *k, end: *e, reg: None }));
         // `arguments`: a variable that holds the arguments object. A declaration of that name (a parameter, a `var`) comes first.
-        let uses_args = !self.is_arrow && (self.fn_flags & facts::ARGS != 0 || self.cap.contains_key("arguments")) && !decls.iter().any(|d| d.name == "arguments");
+        let uses_args = !self.is_arrow && (self.fn_flags & facts::ARGS != 0 || self.cap.contains_key("arguments") || self.force_ctx) && !decls.iter().any(|d| d.name == "arguments");
         if uses_args {
             decls.push(Decl { name: Cow::Borrowed("arguments"), kind: VK::Var, end: 0, reg: None });
         }
@@ -184,15 +184,29 @@ impl<'a> Fc<'a> {
         {
             let name = prog.name(n);
             let ff = self.facts.get(id);
-            if !decls.iter().any(|d| d.name == name) && self.may_occur(&name, ff.parse_at, ff.end) {
+            if !decls.iter().any(|d| d.name == name) && (self.force_ctx || self.may_occur(&name, ff.parse_at, ff.end)) {
                 decls.push(Decl { name, kind: VK::Callee, end: 0, reg: None });
             }
         }
         let inited = match stmts {
-            Some(l) => self.top_inits(l, f.span.start),
-            None => Default::default(),
+            Some(l) if !self.force_ctx => self.top_inits(l, f.span.start),
+            _ => Default::default(),
         };
         let span = Span { start: 0, end: u32::MAX };
+        let extension = if !self.strict && self.fn_flags & facts::EVAL != 0 {
+            let mark = self.enter(span, &[Decl {
+                name: Cow::Borrowed("%scope:eval"), kind: VK::Var, end: 0, reg: None,
+            }], false)?;
+            let t = self.alloc();
+            self.op(Op::NewObject, t, 0, 0);
+            self.set_live(t);
+            self.op(Op::InitEvalScope, t, 0, 0);
+            self.op(Op::InitCtx, t, 0, 0);
+            self.free(t);
+            Some(mark)
+        } else {
+            None
+        };
         let mark = self.enter(span, &decls, false)?;
         // Variables that no path has written yet: `var` is `undefined`, a `let` that can be read early is the hole.
         for d in &decls {
@@ -350,6 +364,9 @@ impl<'a> Fc<'a> {
             self.derived_return(None)?;
         }
         self.leave(mark);
+        if let Some(mark) = extension {
+            self.leave(mark);
+        }
         Ok(())
     }
 
@@ -438,6 +455,11 @@ impl<'a> Fc<'a> {
         // The top-level `let`, `const` and `class` names are variables of the script (a register, or a context slot when a function
         // uses them), not properties of the global object: they have a dead zone, and a `const` cannot be assigned.
         let mut decls: Vec<Decl<'a>> = h.lex.iter().map(|(n, k, e)| Decl { name: n.clone(), kind: *k, end: *e, reg: None }).collect();
+        let local_vars = self.eval && self.strict;
+        if local_vars {
+            decls.extend(h.vars.iter().map(|n| Decl { name: n.clone(), kind: VK::Var, end: 0, reg: None }));
+            decls.extend(h.funcs.iter().map(|(_, n)| Decl { name: n.clone(), kind: VK::Var, end: 0, reg: None }));
+        }
         // An arrow function at the top level reads the `this` of the script, not the one of its call.
         let this_captured = self.cap.contains_key("this");
         if this_captured {
@@ -484,13 +506,35 @@ impl<'a> Fc<'a> {
         // initializer is not lost.
         let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for n in h.vars.iter().chain(h.funcs.iter().map(|(_, n)| n)) {
-            if seen.insert(n) {
+            if !seen.insert(n) {
+                continue;
+            }
+            if local_vars {
+                let t = self.alloc();
+                self.op(Op::LoadUndef, t, 0, 0);
+                self.store_var(n, u32::MAX, t, true)?;
+                self.free(t);
+            } else if self.eval {
+                if let Some(target) = self.eval_var_target(n)? {
+                    let s = self.site_of(n)?;
+                    self.op(Op::DeclEval, target, s, 0);
+                }
+            } else {
                 let s = self.site_of(n)?;
                 self.op(Op::DeclGlobal, 0, s, 0);
             }
         }
         for (f, name) in &h.funcs {
-            self.declare_function(*f, name)?;
+            if self.eval && !local_vars && let Some(target) = self.eval_var_target(name)? {
+                let t = self.alloc();
+                self.function(*f, t, false)?;
+                self.set_live(t);
+                let s = self.site_of(name)?;
+                self.op(Op::InitEval, t, target, s);
+                self.free(t);
+            } else {
+                self.declare_function(*f, name)?;
+            }
         }
         // A name in a register is in its dead zone (a hole) until its declaration runs. A throw out of the script hands the names over as
         // they are: the global lexical binding exists after an abrupt completion, in its dead zone or with its value.
@@ -521,6 +565,29 @@ impl<'a> Fc<'a> {
             self.op(Op::Ret, c, 0, 0);
         }
         Ok(())
+    }
+
+    /// The caller's variable environment. An existing slot needs no new binding.
+    fn eval_var_target(&self, name: &str) -> CR<Option<u32>> {
+        let mut level = self.outer.as_deref();
+        let mut target = 0;
+        let mut existing = false;
+        let mut hops = self.depth;
+        while let Some(l) = level {
+            if l.find("%scope:eval").is_some() {
+                target = hops + 1;
+                break;
+            }
+            if let Some(v) = l.find(name) {
+                if v.tdz {
+                    return Err(CompileError::Syntax(format!("Identifier '{name}' has already been declared")));
+                }
+                existing = true;
+            }
+            level = l.parent.as_deref();
+            hops += 1;
+        }
+        Ok(if existing && target != 0 { None } else { Some(target) })
     }
 
     /// Declare the script-level names that live in registers as global lexical bindings: a context holds the values, and the realm
@@ -713,7 +780,17 @@ impl<'a> Fc<'a> {
                 }
             }
             StmtKind::Block(list) => self.block(list, st.span)?,
-            StmtKind::With { .. } => self.unsup("with"),
+            StmtKind::With { obj, body } => {
+                let value = self.alloc();
+                self.to(obj, value)?;
+                self.op(Op::ScopeObject, value, value, 0);
+                let scope = self.enter(st.span, &[Decl {
+                    name: Cow::Borrowed("%scope:with"), kind: VK::Var, end: 0, reg: None,
+                }], false)?;
+                self.op(Op::InitCtx, value, 0, 0);
+                self.stmt(body)?;
+                self.leave(scope);
+            }
             StmtKind::ExportDefault(e, hoisted) => self.export_default(e, hoisted, false)?,
         }
         self.free(m);
@@ -730,6 +807,11 @@ impl<'a> Fc<'a> {
                 (PatKind::Ident, Some(init)) => {
                     let name = prog.name(t.span);
                     self.name_hint(init, &name);
+                    if kind == VarKind::Var && !self.dynamic_hops(&name).is_empty() {
+                        self.assign_ident(AssignOp::Assign, &name, t.span.start, init, None)?;
+                        self.free(m);
+                        continue;
+                    }
                     match self.find_var(&name).map(|v| v.home) {
                         Some(Home::Reg(r)) => {
                             self.to(init, r)?;

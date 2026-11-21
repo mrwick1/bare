@@ -579,6 +579,7 @@ pub struct Program<'a> {
     pub body: List<Stmt>,
     /// The script starts with a `"use strict"` directive.
     pub strict: bool,
+    pub(crate) flags: u16,
     /// Set when the source was parsed as a module (see [`ModuleInfo`]).
     pub module: Option<Box<ModuleInfo>>,
     pub(crate) exprs: Vec<Expr>,
@@ -651,6 +652,7 @@ impl<'a> Program<'a> {
             source,
             body: List::new(0, 0),
             strict: false,
+            flags: 0,
             module: None,
             exprs: Vec::new(),
             stmts: Vec::new(),

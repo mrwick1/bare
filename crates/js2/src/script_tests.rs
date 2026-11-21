@@ -1326,3 +1326,116 @@ fn array_iteration_respects_overrides_and_inherited_elements() {
         ("var a = [undefined, 2], n = 0; function install() { var p = Object.getPrototypeOf(a.values()); p.return = function() { n = this.next().value; return {}; }; } var [x = install()] = a; var r = n;", "r", "2"),
     ]);
 }
+
+#[test]
+fn dynamic_scope_keeps_the_with_receiver_across_effects() {
+    check(&[
+        (r#"
+            let x = 1;
+            let o = { x: 2, method() { return this === o; } };
+            let get, called;
+            with (o) {
+                get = () => x;
+                called = method();
+                x += (delete o.x, 3);
+            }
+            let first = get();
+            o[Symbol.unscopables] = {x: true};
+            var result = [first, get(), o.x, called];
+        "#, "result", "[5,1,5,true]"),
+        (r#"
+            let o = { x: 2 };
+            with (o) {
+                (() => { "use strict"; try { x = (delete o.x, 3) } catch (e) { o.err = e instanceof ReferenceError; } })();
+            }
+            var result = [o.err, 'x' in o];
+        "#, "result", "[true,false]"),
+    ]);
+}
+
+#[test]
+fn dynamic_scope_eval_binds_in_the_callers_environment() {
+    check(&[
+        (r#"
+            function outer(a) {
+                let x = 2;
+                const read = () => [a, x, typeof y];
+                (eval)('a += arguments[0]; x = this.value; var y = 5;');
+                let value = read();
+                let deleted = delete y;
+                return [value, deleted, read()];
+            }
+            var result = outer.call({ value: 4 }, 3);
+        "#, "result", r#"[[6,4,"number"],true,[6,4,"undefined"]]"#),
+        (r#"
+            let x = 4;
+            function f() {
+                'use strict';
+                let x = 3;
+                const a = eval('var x = 7; x;');
+                const b = (0, eval)('x');
+                return [a, b, x];
+            }
+            var result = [f(), ((eval) => eval(9))(a => a * 2)];
+        "#, "result", "[[7,4,3],18]"),
+    ]);
+}
+
+#[test]
+fn proxy_uses_traps_at_a_warm_property_site() {
+    check(&[(r#"
+        let hits = 0;
+        const read = o => o.x;
+        const write = (o, v) => { o.x = v; };
+        const target = { x: 1 };
+        for (let i = 0; i < 10; ++i) {
+            read(target);
+            write(target, i);
+        }
+        const p = new Proxy(target, {
+            get(t, k, r) { ++hits; return Reflect.get(t, k, r) + 1; },
+            set(t, k, v, r) { ++hits; return Reflect.set(t, k, v * 2, r); }
+        });
+        const child = Object.create(p);
+        const old = read(p);
+        write(p, 6);
+        const value = read(p);
+        const inherited = read(child);
+        var result = [old, value, inherited, target.x, hits];
+    "#, "result", "[10,13,13,12,4]")]);
+}
+
+#[test]
+fn proxy_validates_keys_and_fixed_properties() {
+    check(&[(r#"
+        const t = Object.freeze({ x: 1 });
+        let fixed = false, duplicate = false, revoked = false;
+        try { new Proxy(t, { get: () => 2 }).x; }
+        catch (e) { fixed = e instanceof TypeError; }
+        try { Reflect.ownKeys(new Proxy(t, { ownKeys: () => ['x', 'x'] })); }
+        catch (e) { duplicate = e instanceof TypeError; }
+        const r = Proxy.revocable([], {});
+        const array = Array.isArray(r.proxy);
+        r.revoke();
+        r.revoke();
+        try { Array.isArray(r.proxy); } catch (e) { revoked = e instanceof TypeError; }
+        var result = [fixed, duplicate, array, revoked];
+    "#, "result", "[true,true,true,true]")]);
+}
+
+#[test]
+fn proxy_preserves_call_and_construct_receivers() {
+    check(&[(r#"
+        function F(v) { this.value = v; }
+        const p = new Proxy(F, {
+            apply(t, that, args) { return that.n + args[0]; },
+            construct(t, args, newTarget) {
+                return { value: args[0], same: newTarget === p };
+            }
+        });
+        const obj = { n: 2, p };
+        const x = new p(7);
+        const chained = new (new Proxy(F, {}))(5);
+        var result = [typeof p, obj.p(3), x.value, x.same, chained.value, chained instanceof F];
+    "#, "result", "[\"function\",5,7,true,5,true]")]);
+}

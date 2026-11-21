@@ -144,8 +144,9 @@ pub const K_AGEN: u32 = 11;
 pub const K_REGEXP: u32 = 12;
 /// A `Date` object (`bi_date.rs`): the hidden property `Realm::k_prim` holds the time value.
 pub const K_DATE: u32 = 13;
-/// The largest kind: 14 and 15 are free.
-const K_LAST: u32 = K_DATE;
+pub(crate) const K_PROXY: u32 = 14;
+/// The largest kind.
+const K_LAST: u32 = K_PROXY;
 const ALL_FLAGS: [u32; 18] = [
     F_OVER, F_CALLABLE, F_CLASS, F_DERIVED, F_NATIVE, F_NOEXT, F_FNPROPS, F_ELEMS_RO, F_ELEMS_FIXED, F_LEN_RO, F_SLOWIDX, F_LAZY, F_KIND, F_HOST,
     F_LAZYM, F_LAZYTAB, F_ARGS, F_PROTO,

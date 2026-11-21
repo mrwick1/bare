@@ -15,5 +15,6 @@ Rows that merged over the cost rule (CLAUDE.md, "Cost gate"). One line per row. 
 | `observer_load mo 1` | #849 | +1.527% | +0.680% | Out-of-line DOM helpers. | [Fixed](2026-11-21-cost-debt-849.md#849-rows). |
 | `observer_load mo 10` | #849 | +1.759% | +0.786% | Out-of-line DOM helpers. | [Fixed](2026-11-21-cost-debt-849.md#849-rows). |
 | `preload_load script 10` | #849 | +0.943% | +0.569% | Duplicate old DOM installation code and relocations. | [Fixed](2026-11-21-cost-debt-849.md#849-rows). |
-| `interp_load loopfn` | #876 | +2.780% | +1.483% | The iterator branches can change register allocation in the shared dispatch loop. | open |
-| `interp_load calls` | #876 | +1.175% | +1.098% | The iterator branches can change register allocation in the shared dispatch loop. | open |
+| `interp_load loopfn` | #876 | +2.780% | +1.483% | The iterator branches can change register allocation in the shared dispatch loop. | [Fixed](2026-11-21-cost-debt-js2-startup-loop.md#instruction-counts). |
+| `interp_load calls` | #876 | +1.175% | +1.098% | The iterator branches can change register allocation in the shared dispatch loop. | [Fixed](2026-11-21-cost-debt-js2-startup-loop.md#instruction-counts). |
+| `js2 startup` (combined) | #890 | +1.247% glibc / +0.984% jemalloc | +1.618% glibc / +1.029% jemalloc | Eager eval and Proxy registration and the additional well-known symbol. | [Fixed](2026-11-21-cost-debt-js2-startup-loop.md#instruction-counts). |

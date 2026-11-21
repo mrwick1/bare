@@ -8,6 +8,7 @@
 //! gap: a script that builds the string `"\0#x\0<n>"` can reach the property. A symbol cell (S2.7) removes the gap.
 use crate::cell::Layout;
 use crate::interp_rt::{ErrKind, Got, Key, Put, R, Realm, Slot};
+use crate::object::K_PROXY;
 use crate::object::{F_CLASS, F_DERIVED, Obj};
 use crate::shapes::{A_ACC, A_C, A_E, A_W};
 use crate::string::Str;
@@ -106,6 +107,60 @@ impl Realm {
         self.lex.insert(name.value().bits(), (name, ctx, slot, konst));
         // A binding hides a property of the global object of that name: the cache of the global sites must not give the property.
         self.shapes.changed(self.global.cell().as_ptr() as usize);
+        Ok(())
+    }
+
+    pub(crate) fn scope_binding(&mut self, object: Value, name: Str, declarative: bool) -> R<Value> {
+        let key = Key::Name(name);
+        if declarative {
+            return Ok(if self.get_own(Self::obj(object).expect("eval scope"), key).is_some() { object } else { Value::UNDEFINED });
+        }
+        if !self.has_prop(object, key)? {
+            return Ok(Value::UNDEFINED);
+        }
+        let unscopables = self.symbol_unscopables();
+        let excluded = self.get_prop(object, Key::Name(unscopables))?;
+        if Self::obj(excluded).is_some() && Self::truthy(self.get_prop(excluded, key)?) {
+            return Ok(Value::UNDEFINED);
+        }
+        Ok(object)
+    }
+
+    pub(crate) fn get_scope_binding(&mut self, recv: Value, name: Str, strict: bool) -> R<Value> {
+        let key = Key::Name(name);
+        if self.has_prop(recv, key)? {
+            self.get_prop(recv, key)
+        } else if strict {
+            Err(self.error(ErrKind::Reference, &format!("{} is not defined", self.text(name))))
+        } else {
+            Ok(Value::UNDEFINED)
+        }
+    }
+
+    pub(crate) fn set_scope_binding(&mut self, recv: Value, name: Str, value: Value, strict: bool) -> R<()> {
+        let key = Key::Name(name);
+        if !self.has_prop(recv, key)? && strict {
+            return Err(self.error(ErrKind::Reference, &format!("{} is not defined", self.text(name))));
+        }
+        match self.set_prop_g(recv, key, value)? {
+            Put::Fail if strict => self.type_error("cannot assign to scope property"),
+            Put::Set(f) => self.call_function(f, recv, &[value]).map(drop),
+            _ => Ok(()),
+        }
+    }
+
+    pub(crate) fn declare_eval(&mut self, recv: Value, name: Str, global: bool) -> R<()> {
+        if global && self.has_lex(name) {
+            return Err(self.error(ErrKind::Syntax, &format!("Identifier '{}' has already been declared", self.text(name))));
+        }
+        let o = Self::obj(recv).expect("the eval variable environment");
+        let key = Key::Name(name);
+        if self.get_own(o, key).is_none() {
+            if o.has_flag(crate::object::F_NOEXT) {
+                return self.type_error("cannot declare a variable on a non-extensible global object");
+            }
+            self.define_attrs(o, key, A_W | A_E | A_C, Value::UNDEFINED)?;
+        }
         Ok(())
     }
 
@@ -261,22 +316,22 @@ impl Realm {
     }
 
     /// `super[key]` read: the lookup starts at the prototype of the home object. A getter runs with the `this` of the caller.
-    pub fn super_get(&mut self, home: Value, key: Key) -> R<Got> {
+    pub fn super_get(&mut self, home: Value, key: Key, receiver: Value) -> R<Got> {
         let k = self.key_atom(key);
-        Ok(match self.super_base(home)? {
-            None => return self.type_error("cannot read properties of null (the prototype of the home object)"),
-            Some(b) => Self::got(self.lookup_g(b, k)),
-        })
+        let Some(b) = self.super_base(home)? else { return self.type_error("cannot read properties of null (the prototype of the home object)") };
+        let slot = self.lookup_g(b, k);
+        self.got(slot, key, receiver)
     }
 
     /// `super[key] = v`: a setter that the prototype chain gives runs with `this`; else the value is set on `this`.
     pub fn super_set(&mut self, home: Value, this: Value, key: Key, v: Value) -> R<Put> {
         let k = self.key_atom(key);
         let Some(b) = self.super_base(home)? else { return self.type_error("cannot set properties of null (the prototype of the home object)") };
-        if let Some(Slot::Acc(_, s)) = self.lookup_g(b, k) {
-            return Ok(Self::setter(s));
+        match self.lookup_g(b, k) {
+            Some(Slot::Acc(_, s)) => Ok(Self::setter(s)),
+            Some(Slot::Proxy(proxy)) => self.proxy_set(proxy, key, v, this).map(|ok| if ok { Put::Done } else { Put::Fail }),
+            _ => self.set_prop_g(this, key, v),
         }
-        self.set_prop_g(this, key, v)
     }
 
     // ---- spread and rest ----
@@ -330,7 +385,17 @@ impl Realm {
             }
         }
         let mut out = Vec::new();
-        if let Some(o) = Realm::obj(src) {
+        if let Some(o) = Realm::obj(src).filter(|o| o.is_kind(K_PROXY)) {
+            for value in self.proxy_keys(o)? {
+                let k = self.key_of(value)?;
+                if skip.iter().any(|s| k.as_value() == s.as_value()) {
+                    continue;
+                }
+                if self.get_own_h(o, k)?.is_some_and(|d| d.attrs() & A_E != 0) {
+                    out.push((k, self.get_prop(src, k)?));
+                }
+            }
+        } else if let Some(o) = Realm::obj(src) {
             if self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed {
                 for i in 0..o.len() {
                     if let Some(v) = o.get_element(i)
