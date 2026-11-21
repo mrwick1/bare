@@ -24,8 +24,8 @@
 //!
 //! A hit is the compare of the shape id of the receiver with `Cache::shape`, then one load or store at `Cache::loc` (`Obj::loc`).
 //! A set that adds a property is a hit too: the entry has the shape after the add, and the hit stores the value and the new shape id.
-//! That entry is made only when the new slot is inline, so no allocation is needed. A dictionary shape (`Shapes::cacheable`) never
-//! gets an entry.
+//! That entry is made only when the new slot is inline, so no allocation is needed. A cache guarded by shape ID does not take
+//! dictionary shapes (`Shapes::cacheable`). Global sites instead guard the address of an own data slot with the global mutation tag.
 //!
 //! **Prototype entries** (`docs/design-js2-proto-ic.md`). A read that finds a data property on the prototype chain makes an entry too.
 //! The record keeps `shape` 0 (the own-property hit never matches), the shape of the receiver in `to` (a shape id is never 0), and the
@@ -1427,8 +1427,6 @@ impl Realm {
         }
     }
 
-    /// `GetGlobal`: the property of the global object, or a `ReferenceError` when it is not there.
-
     /// Make the entry of the global site `site` for the own data property in slot `slot` of the global object. The first run only marks
     /// the site (as for a property site), the second makes the entry.
     fn fill_global(&mut self, fb: &mut Feedback, site: usize, slot: u32) {
@@ -1441,17 +1439,16 @@ impl Realm {
     }
 
     /// `GetGlobal`: the property of the global object, or a `ReferenceError` when it is not there. A global lexical binding comes first and
-    /// has no entry (`declare_lex` changes the tag, so an entry for a property that a binding now hides does not match). An own data
-    /// property of a tree shape gets a cache entry (the address of its slot, valid while the tag of the global object stays); an accessor
-    /// and the rest are looked up each time.
+    /// has no entry (`declare_lex` changes the tag). The global is an ordinary object. Its own data properties come before lazy
+    /// and inherited host properties. The cache guards the slot address with the global mutation tag, which also covers changes
+    /// to a dictionary shape in place. Accessors and inherited properties use the slow lookup.
     pub fn get_global_slow(&mut self, fb: &mut Feedback, site: usize, name: Str) -> R<Got> {
         if let Some(v) = self.lex_get(name) {
             return Ok(Got::Val(v?));
         }
         let o = self.global;
         let id = o.shape(&self.shapes);
-        if self.shapes.cacheable(id)
-            && let Some(e) = self.shapes.find(id, name)
+        if let Some(e) = self.shapes.find(id, name)
             && e.attrs() & A_ACC == 0
         {
             self.fill_global(fb, site, e.slot());
@@ -1473,7 +1470,7 @@ impl Realm {
         Ok(got)
     }
 
-    /// `SetGlobal` (`strict` false) and `SetGlobalS`: a global lexical binding first; then a writable own data property of a tree shape
+    /// `SetGlobal` (`strict` false) and `SetGlobalS`: a global lexical binding first; then a writable own data property
     /// gets a cache entry as in `get_global_slow`. In strict code a name that is not there is a `ReferenceError`. An add, a setter and
     /// the rest are `set_prop_g`.
     pub fn set_global_slow(&mut self, fb: &mut Feedback, site: usize, name: Str, v: Value, strict: bool) -> R<Put> {
@@ -1483,8 +1480,7 @@ impl Realm {
         }
         let o = self.global;
         let id = o.shape(&self.shapes);
-        if self.shapes.cacheable(id)
-            && let Some(e) = self.shapes.find(id, name)
+        if let Some(e) = self.shapes.find(id, name)
             && e.attrs() & (A_ACC | A_W) == A_W
         {
             o.set_slot(&self.shapes, e.slot(), v);
