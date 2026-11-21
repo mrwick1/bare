@@ -32,6 +32,22 @@ fn check(cases: &[(&str, &str)]) {
 const DESC: &str = "function d(o, k) { var x = Object.getOwnPropertyDescriptor(o, k); return x ? [typeof x.value, x.writable, x.enumerable, x.configurable].join() : 'none'; }";
 
 #[test]
+fn eval_and_proxy_materialize_on_first_use() {
+    let mut vm = load("var x = 1;").expect("loads");
+    vm.run_main(0).expect("runs");
+    for name in ["eval", "Proxy"] {
+        let k = vm.realm.intern(name);
+        assert!(vm.realm.shapes.find(vm.realm.global.shape(&vm.realm.shapes), k).is_none());
+    }
+    assert!(vm.realm.unscopables.is_none());
+    check(&[
+        ("var d = Object.getOwnPropertyDescriptor(globalThis, 'Proxy'); var p = d.value; var r = [p.name, p.length, p.revocable.length, d.writable, d.enumerable, d.configurable, 'prototype' in p].join();", "Proxy,2,2,true,false,true,false"),
+        ("var r; try { ((eval) => eval('42'))(undefined); } catch (e) { r = e.name; }", "TypeError"),
+        ("var original = globalThis.eval; delete globalThis.eval; var r = (function(eval) { var x = 42; return eval('x'); })(original);", "42"),
+    ]);
+}
+
+#[test]
 fn has_own_property_and_in_see_a_name_that_is_not_made() {
     check(&[
         ("var r = Object.hasOwn(Math, 'floor') + ',' + Object.hasOwn(Math, 'nope');", "true,false"),

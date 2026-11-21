@@ -1155,13 +1155,6 @@ impl Realm {
         }
     }
 
-    fn has_string_own(&self, o: Obj, key: Key) -> bool {
-        self.string_wrapper(o).is_some_and(|s| match key {
-            Key::Name(k) => k == self.k_length,
-            Key::Idx(i) => (i as usize) < s.len(),
-        })
-    }
-
     /// `recv[key] = v`. A write to a primitive does nothing. A setter gives [`Put::Set`]. A write that the object refuses (not writable,
     /// not extensible) gives [`Put::Fail`]: sloppy code goes on, strict code throws. [`Realm::set_checked`] throws always.
     pub fn set_prop_g(&mut self, recv: Value, key: Key, v: Value) -> R<Put> {
@@ -1171,9 +1164,6 @@ impl Realm {
             }
             return Ok(Put::Fail);
         };
-        if self.has_string_own(o, key) {
-            return Ok(Put::Fail);
-        }
         if o.is_kind(K_PROXY) {
             return self.proxy_set(o, key, v, recv).map(|ok| if ok { Put::Done } else { Put::Fail });
         }
@@ -1660,9 +1650,6 @@ impl Realm {
             if o.is_kind(K_PROXY) {
                 return self.proxy_has(o, key);
             }
-            if self.has_string_own(o, key) {
-                return Ok(true);
-            }
             self.fn_props(o);
             let found = match key {
                 Key::Idx(i) => (o.is_indexed() && o.get_element(i).is_some()) || {
@@ -1690,9 +1677,6 @@ impl Realm {
             return self.proxy_delete(o, key);
         }
         self.prepare_own_prototype(o, key)?;
-        if self.has_string_own(o, key) {
-            return Ok(false);
-        }
         if self.api.hs.active && o.has_flag(F_HOST) && let Some(ok) = self.hs_write(o, key, crate::api_host::HsWrite::Delete)? {
             return Ok(ok);
         }
