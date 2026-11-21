@@ -524,15 +524,11 @@ impl<'a> Fc<'a> {
         Self::below(&mut self.is_var, m);
     }
 
-    /// Clear the bits from `m` up.
-    fn below(v: &mut [u64], m: u32) {
-        for (w, word) in v.iter_mut().enumerate() {
-            let lo = w as u32 * 64;
-            if lo >= m {
-                *word = 0;
-            } else if lo + 64 > m {
-                *word &= (1u64 << (m - lo)) - 1;
-            }
+    /// Clear the bits from `m` up. Words beyond the end of the vector are zero.
+    fn below(v: &mut Vec<u64>, m: u32) {
+        v.truncate(m.div_ceil(64) as usize);
+        if let Some(word) = v.get_mut((m / 64) as usize) {
+            *word &= (1u64 << (m % 64)) - 1;
         }
     }
 
