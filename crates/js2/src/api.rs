@@ -275,6 +275,16 @@ impl Realm {
         self.api.natives[i]
     }
 
+    /// A setter that the interpreter cannot enter (a host function): run it in a nested call. Not a function: a `TypeError`.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn call_setter_slow(&mut self, f: Value, this: Value, v: Value) -> R<()> {
+        if !Realm::obj(f).is_some_and(|o| o.is_callable()) {
+            return self.type_error("a setter is not a function");
+        }
+        self.call_function(f, this, &[v]).map(|_| ())
+    }
+
     /// The function object of host id `id`, named `name` (a string value).
     fn host_cell(&mut self, name: Value, id: u32, length: u32, kind: HostFn) -> Obj {
         let nid = self.host_native(kind != HostFn::Method);

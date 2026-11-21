@@ -1020,7 +1020,7 @@ impl Vm {
                 let Some((ni, cctx)) = realm.function(f) else {
                     // A setter written in Rust (a host function), or no function: the nested call runs it or throws.
                     std::hint::cold_path();
-                    tri!(realm.call_function(f, this, &[v]));
+                    tri!(realm.call_setter_slow(f, this, v));
                     return M::go(ci, fp, $next);
                 };
                 let nf = fp + code.nregs as usize + REC;
