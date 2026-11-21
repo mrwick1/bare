@@ -8,7 +8,7 @@
 //! `shift` and `unshift` move all the elements: O(n) each.
 use crate::lazy::{Ent, m, script, sym_same};
 use crate::bi_object::{Desc, H_SEARCH};
-use crate::bi_symbol::SPECIES;
+use crate::bi_symbol::{ITERATOR, SPECIES};
 use crate::builtins::{NativeFn, arg};
 use crate::interp_rt::{ErrKind, Key, R, Realm};
 use crate::object::{F_ELEMS_FIXED, F_ELEMS_RO, F_LEN_RO, F_NOEXT, F_SLOWIDX, Obj};
@@ -46,10 +46,7 @@ fn rel(rt: &mut Realm, v: Value, default: f64, len: f64) -> R<f64> {
 }
 
 fn this_val(rt: &mut Realm, this: Value) -> R<Value> {
-    if this.is_undefined() || this.is_null() {
-        return rt.type_error("an Array method was called on undefined or null");
-    }
-    Ok(this)
+    rt.to_object(this).map(Obj::value)
 }
 
 /// The key of the position `i` (a number that is a non-negative integer).
@@ -93,9 +90,6 @@ pub(crate) fn get_at(rt: &mut Realm, v: Value, i: f64) -> R<Value> {
 
 /// `HasProperty(v, i)`.
 pub(crate) fn has_at(rt: &mut Realm, v: Value, i: f64) -> R<bool> {
-    if let Some(s) = Realm::str_of(v) {
-        return Ok(i < s.len() as f64);
-    }
     if let Some(o) = Realm::obj(v)
         && o.is_indexed()
         && i < u32::MAX as f64
@@ -103,22 +97,16 @@ pub(crate) fn has_at(rt: &mut Realm, v: Value, i: f64) -> R<bool> {
     {
         return Ok(true);
     }
-    if Realm::obj(v).is_none() {
-        return Ok(false);
-    }
     let k = key_at(rt, i);
     rt.has_prop(v, k)
 }
 
 /// `Set(v, i, x, true)`.
 pub(crate) fn set_at(rt: &mut Realm, v: Value, i: f64, x: Value) -> R<()> {
-    if let Some(s) = Realm::str_of(v) {
-        // The `String` object that `ToObject` makes: its index properties are read only.
-        return if i < s.len() as f64 { rt.type_error("cannot assign to a read only property of a string") } else { Ok(()) };
-    }
     if let Some(o) = Realm::obj(v)
         && plain(o)
-        && i < u32::MAX as f64 - 1.0
+        && i < u32::MAX as f64
+        && o.get_element(i as u32).is_some()
     {
         if o.set_element(&mut rt.heap, i as u32, x).is_none() {
             return Err(rt.error(ErrKind::Range, "invalid array length"));
@@ -131,13 +119,10 @@ pub(crate) fn set_at(rt: &mut Realm, v: Value, i: f64, x: Value) -> R<()> {
 
 /// `Set(v, "length", n, true)`.
 fn set_len(rt: &mut Realm, v: Value, n: f64) -> R<()> {
-    if Realm::str_of(v).is_some() {
-        return rt.type_error("cannot assign to a read only property of a string");
-    }
     if let Some(o) = Realm::obj(v)
         && rt.is_array(o)
         && plain(o)
-        && n < u32::MAX as f64
+        && n <= u32::MAX as f64
     {
         o.set_len(&mut rt.heap, n as u32).expect("memory");
         return Ok(());
@@ -169,6 +154,10 @@ fn species_create(rt: &mut Realm, o: Value, n: f64) -> R<Obj> {
             return Realm::obj(v).ok_or_else(|| rt.error(ErrKind::Type, "the array species did not return an object"));
         }
     }
+    array_create(rt, n)
+}
+
+fn array_create(rt: &mut Realm, n: f64) -> R<Obj> {
     if n > u32::MAX as f64 {
         return Err(rt.error(ErrKind::Range, "invalid array length"));
     }
@@ -211,7 +200,7 @@ impl Realm {
         self.keep(c.value());
         let get = self.new_native(array_species_get, false, 0, "get [Symbol.species]");
         self.define_accessor(c, Key::Name(self.wk[SPECIES]), get.value(), false, false).expect("define");
-        static ARRAY_STATICS: &[Ent] = &[script("of", "array_of"), script("from", "array_from"), m("isArray", 1, is_array)];
+        static ARRAY_STATICS: &[Ent] = &[m("of", 0, array_of), m("from", 1, array_from), m("isArray", 1, is_array)];
         self.lazy_table(c, ARRAY_STATICS);
         static ARRAY_PROTO: &[Ent] = &[
             script("keys", "array_keys"),
@@ -276,6 +265,91 @@ fn array_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     Ok(o.value())
 }
 
+/// Construct a result with the caller's constructor or use the intrinsic array.
+fn factory_result(rt: &mut Realm, ctor: Value, len: Option<f64>) -> R<Obj> {
+    if ctor != rt.array_ctor && rt.is_constructor(ctor) {
+        let v = match len {
+            Some(n) => rt.construct_value(ctor, &[Realm::num(n)])?,
+            None => rt.construct_value(ctor, &[])?,
+        };
+        return Ok(Realm::obj(v).expect("a constructor returns an object"));
+    }
+    array_create(rt, len.unwrap_or(0.0))
+}
+
+fn array_of(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+    let n = args.len() as f64;
+    let result = factory_result(rt, this, Some(n))?;
+    for (i, &value) in args.iter().enumerate() {
+        put(rt, result, i as f64, value)?;
+    }
+    set_len(rt, result.value(), n)?;
+    Ok(result.value())
+}
+
+fn array_from(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+    let (items, mapper, receiver) = (arg(args, 0), arg(args, 1), arg(args, 2));
+    let mapping = !mapper.is_undefined();
+    if mapping && !Realm::obj(mapper).is_some_and(|f| f.is_callable()) {
+        return rt.type_error("the mapper is not a function");
+    }
+    let method = rt.get_prop(items, Key::Name(rt.wk[ITERATOR]))?;
+    let map = |rt: &mut Realm, value, i| {
+        if mapping { rt.call_function(mapper, receiver, &[value, Realm::num(i)]) } else { Ok(value) }
+    };
+    let result;
+    let mut i = 0.0;
+    if method.is_null() || method.is_undefined() {
+        let source = rt.to_object(items)?.value();
+        let n = len_of(rt, source)?;
+        result = factory_result(rt, this, Some(n))?;
+        while i < n {
+            rt.fuel = rt.fuel.checked_sub(1).ok_or(crate::interp::STOP)?;
+            let value = get_at(rt, source, i)?;
+            let value = map(rt, value, i)?;
+            put(rt, result, i, value)?;
+            i += 1.0;
+        }
+    } else {
+        if !Realm::obj(method).is_some_and(|f| f.is_callable()) {
+            return rt.type_error("the iterator method is not a function");
+        }
+        result = factory_result(rt, this, None)?;
+        let array = Realm::obj(items).filter(|o| rt.plain_array_iterator(*o) && method == rt.args_iter);
+        let (iter, next) = if array.is_some() { (items, Value::UNDEFINED) } else { rt.iter_open_method(items, method)? };
+        loop {
+            rt.fuel = rt.fuel.checked_sub(1).ok_or(crate::interp::STOP)?;
+            if i == MAX_LEN {
+                let e = rt.error(ErrKind::Type, "the result has too many elements");
+                rt.iter_close(iter, next, true)?;
+                return Err(e);
+            }
+            let value = if let Some(array) = array {
+                if i >= array.len() as f64 {
+                    break;
+                }
+                get_at(rt, items, i)?
+            } else {
+                let Some(value) = rt.iter_step(iter, next)? else { break };
+                value
+            };
+            if let Err(e) = map(rt, value, i).and_then(|value| put(rt, result, i, value)) {
+                if e != crate::interp::STOP {
+                    if array.is_some() {
+                        rt.close_array_iterator(items, i as u32 + 1, true)?;
+                    } else {
+                        rt.iter_close(iter, next, true)?;
+                    }
+                }
+                return Err(e);
+            }
+            i += 1.0;
+        }
+    }
+    set_len(rt, result.value(), i)?;
+    Ok(result.value())
+}
+
 fn is_array(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     Ok(Value::bool(Realm::obj(arg(args, 0)).is_some_and(|o| rt.is_array(o))))
 }
@@ -290,20 +364,6 @@ fn at(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
 
 fn push(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let o = this_val(rt, this)?;
-    // The hot case: an array with plain elements.
-    if let Some(a) = Realm::obj(o)
-        && rt.is_array(a)
-        && plain(a)
-    {
-        let mut n = a.len();
-        for &v in args {
-            if n >= u32::MAX - 1 || a.set_element(&mut rt.heap, n, v).is_none() {
-                return Err(rt.error(ErrKind::Range, "invalid array length"));
-            }
-            n += 1;
-        }
-        return Ok(Realm::num(n as f64));
-    }
     let len = len_of(rt, o)?;
     if len + args.len() as f64 > MAX_LEN {
         return rt.type_error("the length of the array-like would be above 2^53 - 1");
@@ -618,8 +678,9 @@ fn reverse(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
     let mut lo = 0.0;
     while lo != mid {
         let hi = len - lo - 1.0;
-        let (le, he) = (has_at(rt, o, lo)?, has_at(rt, o, hi)?);
+        let le = has_at(rt, o, lo)?;
         let lv = if le { get_at(rt, o, lo)? } else { Value::UNDEFINED };
+        let he = has_at(rt, o, hi)?;
         let hv = if he { get_at(rt, o, hi)? } else { Value::UNDEFINED };
         match (le, he) {
             (true, true) => {
@@ -679,11 +740,16 @@ fn copy_within(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     Ok(o)
 }
 
+fn check_array_len(rt: &mut Realm, len: f64) -> R<()> {
+    if len > crate::object::MAX_DENSE as f64 {
+        return Err(rt.error(ErrKind::Range, "array length exceeds the dense array limit"));
+    }
+    Ok(())
+}
+
 /// The elements of an array-like as values, a hole as `undefined` (the `toX` copies).
 fn read_all(rt: &mut Realm, o: Value, len: f64) -> R<Vec<Value>> {
-    if len > u32::MAX as f64 - 1.0 {
-        return Err(rt.error(ErrKind::Range, "invalid array length"));
-    }
+    check_array_len(rt, len)?;
     let mut v = Vec::with_capacity(len as usize);
     let mut k = 0.0;
     while k < len {
@@ -696,8 +762,11 @@ fn read_all(rt: &mut Realm, o: Value, len: f64) -> R<Vec<Value>> {
 fn to_reversed(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
     let o = this_val(rt, this)?;
     let len = len_of(rt, o)?;
-    let mut v = read_all(rt, o, len)?;
-    v.reverse();
+    check_array_len(rt, len)?;
+    let mut v = Vec::with_capacity(len as usize);
+    for i in (0..len as u32).rev() {
+        v.push(get_at(rt, o, i as f64)?);
+    }
     Ok(rt.new_array(&v))
 }
 
@@ -715,9 +784,7 @@ fn to_spliced(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     if new_len > MAX_LEN {
         return rt.type_error("the length of the result would be above 2^53 - 1");
     }
-    if new_len > u32::MAX as f64 - 1.0 {
-        return Err(rt.error(ErrKind::Range, "invalid array length"));
-    }
+    check_array_len(rt, new_len)?;
     let mut v = read_all(rt, o, start)?;
     v.extend_from_slice(items);
     let mut k = start + skip;
@@ -736,7 +803,10 @@ fn with(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     if at >= len || at < 0.0 {
         return Err(rt.error(ErrKind::Range, "invalid index"));
     }
-    let mut v = read_all(rt, o, len)?;
-    v[at as usize] = arg(args, 1);
+    check_array_len(rt, len)?;
+    let mut v = Vec::with_capacity(len as usize);
+    for i in 0..len as u32 {
+        v.push(if i as f64 == at { arg(args, 1) } else { get_at(rt, o, i as f64)? });
+    }
     Ok(rt.new_array(&v))
 }
