@@ -179,11 +179,17 @@ impl Realm {
     }
 
     /// The program of the regexp `o`: compiled now if it is not.
-    fn program(&mut self, o: Obj) -> R<Blob> {
+    #[inline(always)]
+    pub(crate) fn program(&mut self, o: Obj) -> R<Blob> {
         let Some(ps) = self.rx_slot(o, PROG) else { return self.type_error("invalid RegExp object") };
-        if let Some(b) = Realm::blob_of(o.slot(&self.shapes, ps)) {
-            return Ok(b);
+        match Realm::blob_of(o.slot(&self.shapes, ps)) {
+            Some(b) => Ok(b),
+            None => self.compile_program(o, ps),
         }
+    }
+
+    #[inline(never)]
+    fn compile_program(&mut self, o: Obj, ps: u32) -> R<Blob> {
         let (Some(ss), Some(fs)) = (self.rx_slot(o, SRC), self.rx_slot(o, FL)) else { return self.type_error("invalid RegExp object") };
         let (Some(src), Some(bits)) = (Realm::str_of(o.slot(&self.shapes, ss)), o.slot(&self.shapes, fs).as_int()) else {
             return self.type_error("invalid RegExp object");
@@ -218,7 +224,8 @@ impl Realm {
     }
 
     /// `ToLength(lastIndex)` of the regexp `o`.
-    fn last_index(&mut self, o: Obj) -> R<f64> {
+    #[inline(always)]
+    pub(crate) fn last_index(&mut self, o: Obj) -> R<f64> {
         let Some(s) = self.rx_slot(o, LAST) else {
             let k = self.rx().keys[LAST];
             let v = self.get_prop(o.value(), Key::Name(k))?;
@@ -236,7 +243,7 @@ impl Realm {
         Ok(if n.is_nan() || n <= 0.0 { 0.0 } else { n.trunc().min(9007199254740991.0) })
     }
 
-    fn set_last_index(&mut self, o: Obj, n: usize) -> R<()> {
+    pub(crate) fn set_last_index(&mut self, o: Obj, n: usize) -> R<()> {
         let v = Realm::num(n as f64);
         if o.shape(&self.shapes) == self.rx().shape {
             o.set_slot(&self.shapes, LAST as u32, v);
@@ -247,10 +254,9 @@ impl Realm {
     }
 
     /// `RegExpBuiltinExec` without the result object: the spans of the match go to `Rx::out`. `Ok(true)` is a match.
-    fn regexp_run(&mut self, o: Obj, s: Str) -> R<bool> {
+    pub(crate) fn regexp_run(&mut self, o: Obj, s: Str) -> R<bool> {
         let blob = self.program(o)?;
-        let img = blob.words();
-        let flags = regexp::image_flags(img);
+        let flags = regexp::image_flags(blob.words());
         let sticky_or_global = flags.global || flags.sticky;
         let li = self.last_index(o)?;
         let from = if sticky_or_global { li } else { 0.0 };
@@ -261,6 +267,19 @@ impl Realm {
             }
             return Ok(false);
         }
+        let hit = self.run_at(blob, s, from as usize)?;
+        if sticky_or_global {
+            let end = if hit { self.rx().out[1] as usize } else { 0 };
+            self.set_last_index(o, end)?;
+        }
+        Ok(hit)
+    }
+
+    /// Run the program `blob` on the flat string `s` from `from` (at `from` only for a sticky program); the spans go to `Rx::out`. It
+    /// reads and writes no `lastIndex`.
+    #[inline(always)]
+    pub(crate) fn run_at(&mut self, blob: Blob, s: Str, from: usize) -> R<bool> {
+        let img = blob.words();
         let n = 2 * (regexp::image_groups(img) + 1);
         let rx = self.rx.as_mut().expect("installed");
         rx.nspans = n;
@@ -271,9 +290,9 @@ impl Realm {
         }
         let mut fuel = self.fuel;
         let r = match s.chars() {
-            Some(Chars::Two(u)) => regexp::exec(img, u, from as usize, &mut sc, &mut fuel, &mut out),
-            Some(Chars::One(b)) => regexp::exec(img, b, from as usize, &mut sc, &mut fuel, &mut out),
-            None => regexp::exec::<u8>(img, &[], from as usize, &mut sc, &mut fuel, &mut out),
+            Some(Chars::Two(u)) => regexp::exec(img, u, from, &mut sc, &mut fuel, &mut out),
+            Some(Chars::One(b)) => regexp::exec(img, b, from, &mut sc, &mut fuel, &mut out),
+            None => regexp::exec::<u8>(img, &[], from, &mut sc, &mut fuel, &mut out),
         };
         self.fuel = fuel;
         let rx = self.rx.as_mut().expect("installed");
@@ -285,24 +304,57 @@ impl Realm {
                 self.fuel = 0;
                 Err(STOP)
             }
-            Ok(false) => {
-                if sticky_or_global {
-                    self.set_last_index(o, 0)?;
-                }
-                Ok(false)
-            }
-            Ok(true) => {
-                if sticky_or_global {
-                    let end = self.rx().out[1] as usize;
-                    self.set_last_index(o, end)?;
-                }
-                Ok(true)
-            }
+            Ok(hit) => Ok(hit),
         }
     }
 
+    /// The spans of the last match: two words for each group, from group 0. `u32::MAX` is a group that did not take part.
+    pub(crate) fn spans(&mut self) -> Vec<u32> {
+        let rx = self.rx();
+        rx.out[..rx.nspans].to_vec()
+    }
+
+    /// The flags of the regexp `o` (its program is compiled now if it is not).
+    pub(crate) fn regexp_flags_of(&mut self, o: Obj) -> R<Flags> {
+        Ok(regexp::image_flags(self.program(o)?.words()))
+    }
+
+    /// The regexp that `String.prototype.match`, `matchAll` and `search` use for the argument `v`: `v` itself when it is a regexp, else
+    /// `new RegExp(v, flags)`.
+    pub(crate) fn regexp_for(&mut self, v: Value, flags: &str) -> R<Obj> {
+        if let Some(o) = Realm::obj(v).filter(|o| o.has_flag(F_REGEXP)) {
+            return Ok(o);
+        }
+        let src = if v.is_undefined() { self.intern("") } else { self.to_str(v)? };
+        let r = self.new_regexp(None, src, flags)?;
+        Ok(Realm::obj(r).expect("an object"))
+    }
+
+    /// `new RegExp(o, flags of o)` with the `lastIndex` of `o`: the copy that `matchAll` runs on.
+    pub(crate) fn regexp_clone(&mut self, o: Obj) -> R<Obj> {
+        let (Some(ss), Some(fs)) = (self.rx_slot(o, SRC), self.rx_slot(o, FL)) else { return self.type_error("invalid RegExp object") };
+        let src = Realm::str_of(o.slot(&self.shapes, ss)).expect("a string");
+        let bits = o.slot(&self.shapes, fs).as_int().unwrap_or(0) as u8;
+        let li = self.last_index(o)?;
+        let c = Realm::obj(self.new_regexp(None, src, &letters(bits))?).expect("an object");
+        self.set_last_index(c, li as usize)?;
+        Ok(c)
+    }
+
+    /// `lastIndex` of the regexp `o` as a value, and the write that puts it back (`search`).
+    pub(crate) fn last_index_value(&mut self, o: Obj) -> R<Value> {
+        let k = self.rx().keys[LAST];
+        self.get_prop(o.value(), Key::Name(k))
+    }
+
+    pub(crate) fn put_last_index(&mut self, o: Obj, v: Value) -> R<()> {
+        let k = self.rx().keys[LAST];
+        self.set_checked(o.value(), Key::Name(k), v, false)
+    }
+
     /// The substring of `s` from `a` to `b`.
-    fn substring(&mut self, s: Str, a: usize, b: usize) -> Value {
+    #[inline(always)]
+    pub(crate) fn substring(&mut self, s: Str, a: usize, b: usize) -> Value {
         let heap = &mut self.heap;
         let r = match s.chars() {
             Some(Chars::One(c)) => Str::new(heap, Chars::One(&c[a..b])),
@@ -313,7 +365,8 @@ impl Realm {
     }
 
     /// The result array of the match in `Rx::out`: the groups, then `index`, `input` and `groups`.
-    fn match_result(&mut self, s: Str) -> R<Value> {
+    #[inline(always)]
+    pub(crate) fn match_result(&mut self, s: Str) -> R<Value> {
         let (out, n) = (std::mem::take(&mut self.rx().out), self.rx().nspans);
         let mut vals = Vec::with_capacity(n / 2);
         for p in out[..n].chunks(2) {

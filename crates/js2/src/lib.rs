@@ -75,6 +75,8 @@ mod bi_symbol;
 mod bi_collections;
 mod bi_reflect;
 mod bi_string_more;
+mod bi_string_regexp;
+mod bi_uri;
 mod bi_string_iter;
 mod lazy;
 #[rustfmt::skip]
