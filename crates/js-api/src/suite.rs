@@ -6,8 +6,9 @@
 //!
 //! Scripts are written so that the value of the last statement is an expression.
 
-use crate::{Args, Attrs, Engine, Error, Host, HostFn, Intrinsic, Local, Persistent, PromiseState, Scope, Str, Type, enter, task};
+use crate::{Args, Attrs, Engine, Error, Host, HostFn, Intrinsic, Item, Lazy, Local, Named, Pending, Persistent, PromiseState, Scope, Str, Traced, Tracer, Type, enter, task};
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 /// What an engine gives the suite.
@@ -22,6 +23,8 @@ pub trait Harness: Sized {
     fn eval(&mut self, src: &str) -> String;
     /// Collect now, with no script running (between tasks).
     fn collect(&mut self);
+    /// Let the engine answer for host-filled objects through `host` (an engine that needs a call besides `Engine::set_host`).
+    fn attach(&mut self, _host: &Rc<Fill<<Self::E as Engine>::Raw>>) {}
 }
 
 const NAMES: [&str; 31] = [
@@ -641,4 +644,237 @@ pub fn the_rejections_over_the_bound_are_counted<H: Harness>(stress: bool) {
     let r = host.rejections.borrow();
     assert_eq!(r.iter().filter(|t| t.starts_with("unhandled:")).count(), crate::MAX_PENDING_REJECTIONS);
     assert_eq!(r.last().unwrap(), &format!("dropped:{}", 1100 - crate::MAX_PENDING_REJECTIONS));
+}
+
+/// The host of the owner, host-filled and lazy tests. It is generic over the raw value of the engine, so one value serves each engine
+/// (`Fill<E::Raw>` is a `Host<E>` for every `E` with that raw value).
+///
+/// Host functions: 0 `mkIndexed(proto)`, 1 `mkNamed(proto, open)`, 2 `own(obj, key, ...held)`, 3 `setLazy(obj, chain)`,
+/// 4 `clearLazy(obj)`, 5 `hostKey(obj)`, 6 `pruned()`, 7 `held(key, i)`, 8 `traced()`, 9 `asked()`.
+/// An indexed object has the items `i0`, `i1`, `i2` (key 10). A named object has the names `a` (`alpha`) and `b` (`beta`) (key 20 for
+/// closed, 21 for open). A lazy object gets the property `onlazy` (7) when the host is asked for that name.
+pub struct Fill<R> {
+    items: RefCell<Vec<R>>,
+    keep: RefCell<Vec<Persistent>>,
+    held: RefCell<HashMap<u32, Vec<Traced<R>>>>,
+    traced: RefCell<Vec<u32>>,
+    pruned: RefCell<Vec<u32>>,
+    asked: RefCell<Vec<String>>,
+}
+
+impl<R> Default for Fill<R> {
+    fn default() -> Self {
+        Fill { items: Default::default(), keep: Default::default(), held: Default::default(), traced: Default::default(), pruned: Default::default(), asked: Default::default() }
+    }
+}
+
+const FILL: [&str; 10] = ["mkIndexed", "mkNamed", "own", "setLazy", "clearLazy", "hostKey", "pruned", "held", "traced", "asked"];
+
+fn units(s: &str) -> Vec<u16> {
+    s.encode_utf16().collect()
+}
+
+impl<E: Engine> Host<E> for Fill<E::Raw> {
+    fn call<'s>(&self, s: &mut Scope<'s, E>, id: u32, _this: Local<'s>, args: Args<'s>, _is_new: bool) -> Result<Local<'s>, Error<'s>> {
+        let arg = |s: &mut Scope<'s, E>, i| match args.get(i) {
+            Some(v) => v,
+            None => s.undefined(),
+        };
+        let (a, b) = (arg(s, 0), arg(s, 1));
+        let key_of = |s: &Scope<'s, E>, v| s.as_number(v).unwrap_or(0.0) as u32;
+        match id {
+            0 | 1 => {
+                if self.items.borrow().is_empty() {
+                    for t in ["i0", "i1", "i2"] {
+                        let l = s.string(t)?;
+                        let raw = s.engine().raw(l);
+                        self.keep.borrow_mut().push(s.persist(l));
+                        self.items.borrow_mut().push(raw);
+                    }
+                }
+                let proto = (s.type_of(a) == Type::Object).then_some(a);
+                if id == 0 {
+                    s.new_host_indexed(proto, 10)
+                } else {
+                    let open = s.to_boolean(b);
+                    s.new_host_named(proto, 20 + open as u32, open)
+                }
+            }
+            2 => {
+                let key = key_of(s, b);
+                s.set_host_owner(a, key)?;
+                let held: Vec<_> = args.iter().skip(2).map(|v| s.trace_ref(v)).collect();
+                self.held.borrow_mut().insert(key, held);
+                Ok(s.undefined())
+            }
+            3 => {
+                let chain = s.to_boolean(b);
+                s.set_lazy(a, chain)?;
+                Ok(s.undefined())
+            }
+            4 => {
+                s.clear_lazy(a);
+                Ok(s.undefined())
+            }
+            5 => {
+                let k = s.host_key(a).map_or(-1.0, f64::from);
+                Ok(s.number(k))
+            }
+            6 => {
+                let mut p = self.pruned.borrow().clone();
+                p.sort();
+                s.string(&p.iter().map(u32::to_string).collect::<Vec<_>>().join(","))
+            }
+            7 => {
+                let (key, i) = (key_of(s, a), key_of(s, b) as usize);
+                let held = self.held.borrow();
+                Ok(s.traced(&held[&key][i]))
+            }
+            8 => {
+                let mut t = self.traced.borrow().clone();
+                t.sort();
+                t.dedup();
+                s.string(&t.iter().map(u32::to_string).collect::<Vec<_>>().join(","))
+            }
+            _ => s.string(&self.asked.borrow().join(",")),
+        }
+    }
+
+    fn trace(&self, key: u32, t: &mut Tracer<'_, E::Raw>) {
+        self.traced.borrow_mut().push(key);
+        for v in self.held.borrow().get(&key).into_iter().flatten() {
+            t.visit(v);
+        }
+    }
+
+    fn prune(&self, dead: &[u32]) {
+        self.pruned.borrow_mut().extend_from_slice(dead);
+        for k in dead {
+            self.held.borrow_mut().remove(k);
+        }
+    }
+
+    fn indexed_len(&self, _object: &E::Raw, key: u32) -> Result<usize, Pending> {
+        Ok(if key == 10 { self.items.borrow().len() } else { 0 })
+    }
+
+    fn indexed_item(&self, _object: &E::Raw, _key: u32, index: usize) -> Result<Item<E::Raw>, Pending> {
+        Ok(self.items.borrow().get(index).cloned().map_or(Item::Absent, Item::Value))
+    }
+
+    fn named_has(&self, _object: &E::Raw, _key: u32, name: &[u16]) -> Result<bool, Pending> {
+        Ok(name == units("a") || name == units("b"))
+    }
+
+    fn named_get(&self, _object: &E::Raw, _key: u32, name: &[u16]) -> Result<Option<Named<E::Raw>>, Pending> {
+        Ok(Some(Named::Text(units(if name == units("a") { "alpha" } else { "beta" }))))
+    }
+
+    fn named_len(&self, _object: &E::Raw, _key: u32) -> Result<usize, Pending> {
+        Ok(2)
+    }
+
+    fn named_keys(&self, _object: &E::Raw, _key: u32) -> Result<Vec<Vec<u16>>, Pending> {
+        Ok(vec![units("a"), units("b")])
+    }
+
+    fn lazy_member<'s>(&self, s: &mut Scope<'s, E>, object: Local<'s>, what: Lazy<'_>) -> Result<(), Error<'s>> {
+        if let Lazy::Name("onlazy") = what {
+            self.asked.borrow_mut().push("onlazy".into());
+            let v = s.number(7.0);
+            s.define_str(object, "onlazy", v, Attrs::ALL)?;
+        }
+        Ok(())
+    }
+}
+
+fn setup_fill<H: Harness>(stress: bool) -> (H, Rc<Fill<<H::E as Engine>::Raw>>) {
+    let mut h = H::new(stress);
+    let host = Rc::new(Fill::default());
+    h.attach(&host);
+    enter(h.engine(), |s| {
+        s.set_host(host.clone());
+        let g = s.global();
+        for (i, name) in FILL.into_iter().enumerate() {
+            let f = s.host_function(name, i as u32, 1, HostFn::Method).unwrap();
+            s.define_str(g, name, f, Attrs::METHOD).unwrap();
+        }
+    });
+    (h, host)
+}
+
+/// An owner keeps the values of its host alive through `trace`, a dead owner is pruned once, and a cycle through an owner is freed.
+pub fn owners_are_traced_while_alive_and_pruned_once<H: Harness>(stress: bool) {
+    let (mut h, _) = setup_fill::<H>(stress);
+    h.eval("var keep = {}; own(keep, 6, { n: 2 }); own({}, 5, { n: 1 }); var c = {}; own(c, 7, { back: c }); c = null; 0");
+    h.collect();
+    h.collect();
+    assert_eq!(h.eval("pruned()"), "5,7", "an unreachable owner is pruned, also one in a cycle with its held value");
+    assert_eq!(h.eval("held(6, 0).n"), "2", "a live owner keeps what it holds");
+    assert!(h.eval("traced()").contains('6'));
+    h.collect();
+    assert_eq!(h.eval("pruned()"), "5,7", "each dead owner is pruned once");
+    assert_eq!(h.eval("keep = null; 0"), "0");
+    h.collect();
+    assert_eq!(h.eval("pruned()"), "5,6,7");
+    // A chain of owners: each is reached only through the one before.
+    h.eval("var a = {}, b = {}, d = {}; own(d, 3, { tag: 'end' }); own(b, 2, d); own(a, 1, b); var root = a; a = b = d = null; 0");
+    h.collect();
+    assert_eq!(h.eval("held(3, 0).tag"), "end");
+    assert_eq!(h.eval("traced().indexOf('3') >= 0 && traced().indexOf('2') >= 0"), "true");
+    assert_eq!(depth(&mut h), 0);
+}
+
+/// An object made by `new_host_indexed` reads its items from the host, and the host key can be read back.
+pub fn a_host_indexed_object_reads_the_host<H: Harness>(stress: bool) {
+    let (mut h, _) = setup_fill::<H>(stress);
+    h.eval("var proto = { foo: 5 }; var nl = mkIndexed(proto); 0");
+    h.collect();
+    assert_eq!(h.eval("nl[0] + nl[2]"), "i0i2");
+    assert_eq!(h.eval("String(nl[3])"), "undefined");
+    assert_eq!(h.eval("nl.foo"), "5");
+    assert_eq!(h.eval("(1 in nl) + ',' + (3 in nl)"), "true,false");
+    assert_eq!(h.eval("Object.keys(nl).join()"), "0,1,2");
+    assert_eq!(h.eval("nl.hasOwnProperty(1) + ',' + nl.hasOwnProperty(5)"), "true,false");
+    assert_eq!(h.eval("(nl[0] = 'x', nl[0])"), "i0", "an index of an indexed getter with no setter cannot be written");
+    assert_eq!(h.eval("hostKey(nl) + ',' + hostKey({})"), "10,-1");
+    h.collect();
+    assert_eq!(h.eval("nl[1]"), "i1", "the same after a collection");
+    assert_eq!(depth(&mut h), 0);
+}
+
+/// An object made by `new_host_named` answers its names from the host.
+pub fn a_host_named_object_reads_the_host<H: Harness>(stress: bool) {
+    let (mut h, _) = setup_fill::<H>(stress);
+    h.eval("var proto = { foo: 5 }; var ds = mkNamed(proto, false); var op = mkNamed(proto, true); 0");
+    h.collect();
+    assert_eq!(h.eval("ds.a + ds.b"), "alphabeta");
+    assert_eq!(h.eval("('a' in ds) + ',' + ('zz' in ds)"), "true,false");
+    assert_eq!(h.eval("Object.keys(ds).join()"), "a,b");
+    assert_eq!(h.eval("String(ds.zz) + ds.foo"), "undefined5");
+    assert_eq!(h.eval("ds.hasOwnProperty('b') + ',' + ds.hasOwnProperty('zz')"), "true,false");
+    assert_eq!(h.eval("op.a"), "alpha");
+    assert_eq!(h.eval("hostKey(ds) + ',' + hostKey(op)"), "20,21");
+    assert_eq!(h.eval("(proto.b = 'pb', ds.b + ',' + op.b)"), "beta,pb", "a closed object answers its names first, an open one after its chain");
+    assert_eq!(depth(&mut h), 0);
+}
+
+/// A lazy object lets the host define a member at the first own-property lookup that misses (`set_lazy(false)`) or at a read that
+/// misses through the chain to it (`set_lazy(true)`); the host is asked once per name. `clear_lazy` stops the asks.
+pub fn a_lazy_member_is_made_at_the_first_miss<H: Harness>(stress: bool) {
+    let (mut h, _) = setup_fill::<H>(stress);
+    h.eval("var lz = {}; setLazy(lz, false); 0");
+    h.collect();
+    assert_eq!(h.eval("Object.getOwnPropertyDescriptor(lz, 'onlazy').value"), "7");
+    assert_eq!(h.eval("lz.onlazy + Object.getOwnPropertyDescriptor(lz, 'onlazy').value"), "14");
+    assert_eq!(h.eval("asked()"), "onlazy", "asked once");
+    h.eval("var other = {}; setLazy(other, false); clearLazy(other); 0");
+    assert_eq!(h.eval("String(Object.getOwnPropertyDescriptor(other, 'onlazy'))"), "undefined");
+    assert_eq!(h.eval("asked()"), "onlazy", "a cleared mark asks nothing");
+    // A chain mark: a read through a child that misses reaches the marked prototype.
+    h.eval("var lp = {}; setLazy(lp, true); var child = Object.create(lp); 0");
+    h.collect();
+    assert_eq!(h.eval("child.onlazy"), "7");
+    assert_eq!(h.eval("asked()"), "onlazy,onlazy");
+    assert_eq!(depth(&mut h), 0);
 }

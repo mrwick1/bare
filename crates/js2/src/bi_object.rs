@@ -161,7 +161,7 @@ impl Realm {
     /// The own property `key` of any value (`ToObject` for a string: its characters and `length`).
     fn get_own_of(&mut self, v: Value, key: Key) -> R<Option<Own>> {
         if let Some(o) = Realm::obj(v) {
-            return Ok(self.get_own(o, key));
+            return self.get_own_h(o, key);
         }
         if let Some(s) = Realm::str_of(v) {
             let s = self.flat(s);
@@ -331,6 +331,9 @@ impl Realm {
             && self.is_array(o)
         {
             return self.define_length(o, d);
+        }
+        if self.api.hs.active && o.has_flag(crate::object::F_HOST) && self.hs_write_blocked(o, key)? {
+            return Ok(false);
         }
         let cur = self.get_own(o, key);
         let Some(cur) = cur else {
@@ -899,7 +902,7 @@ fn object_own_names(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
         return Ok(rt.new_array(&out));
     }
     let Some(o) = Realm::obj(v) else { return Ok(rt.new_array(&[])) };
-    let out = rt.own_key_list(o, false);
+    let out = rt.own_key_list_h(o, false)?;
     Ok(rt.new_array(&out))
 }
 
@@ -916,11 +919,11 @@ fn object_own_descriptors(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Val
     let v = to_obj(rt, arg(args, 0))?;
     let out = Obj::new(&mut rt.heap, &rt.shapes, rt.s_object).expect("memory");
     if let Some(o) = Realm::obj(v) {
-        let mut keys = rt.own_key_list(o, false);
+        let mut keys = rt.own_key_list_h(o, false)?;
         keys.extend(rt.own_symbol_list(o, false));
         for k in keys {
             let key = rt.key_of(k)?;
-            if let Some(p) = rt.get_own(o, key) {
+            if let Some(p) = rt.get_own_h(o, key)? {
                 let d = rt.from_own(p);
                 rt.define(out, key, d)?;
             }

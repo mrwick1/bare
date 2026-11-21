@@ -43,7 +43,7 @@ use crate::codes::Codes;
 use crate::interp::LazyCompile;
 use crate::reenter::Machine;
 use crate::builtins::{Hint, Native};
-use crate::object::{Ctx, F_CLASS, F_ELEMS_FIXED, F_ELEMS_RO, F_LAZY, F_LEN_RO, F_NATIVE, F_NOEXT, F_SLOWIDX, Obj};
+use crate::object::{Ctx, F_CLASS, F_ELEMS_FIXED, F_ELEMS_RO, F_HOST, F_LAZY, F_LEN_RO, F_NATIVE, F_NOEXT, F_SLOWIDX, Obj};
 use crate::shapes::{A_ACC, A_C, A_E, A_W, ShapeId, Shapes};
 use crate::string::{Chars, Str};
 use crate::value::{Kind, Value};
@@ -468,15 +468,20 @@ impl Realm {
         let mut walk_frames = Some(walk_frames);
         let stats = {
             // The promise state is marked in the walk; its weak list is cleared after the marking.
-            struct Rr<'a, F: FnMut(&mut Marker)>(F, &'a mut crate::promise::Promises);
+            struct Rr<'a, F: FnMut(&mut Marker)>(F, &'a mut crate::promise::Promises, &'a mut crate::api::ApiState);
             impl<F: FnMut(&mut Marker)> crate::gc::Roots for Rr<'_, F> {
                 fn walk(&mut self, m: &mut Marker) {
                     (self.0)(m);
                     self.1.walk(m);
+                    self.2.mark(m);
+                }
+                fn owners(&mut self, live: &crate::gc::Live, round: u32, out: &mut Vec<Value>) -> usize {
+                    self.2.trace_owners(live, round, out)
                 }
                 fn weak(&mut self, live: &crate::gc::Live) {
                     // SAFETY: the list holds cells of this heap that the last collection did not free: a dead one is dropped here.
                     self.1.weak_list().retain(|v| unsafe { live.value(*v) });
+                    self.2.prune_owners(live);
                 }
             }
             let roots = |m: &mut Marker| {
@@ -486,7 +491,6 @@ impl Realm {
                     m.value(*c);
                 });
                 pins.iter().for_each(|s| m.shape(*s));
-                api.mark(m);
                 if let Some(rx) = rx {
                     rx.mark(m);
                 }
@@ -497,7 +501,7 @@ impl Realm {
                 }
             };
             pr.collected();
-            collect(heap, shapes, atoms, &mut Rr(roots, pr))
+            collect(heap, shapes, atoms, &mut Rr(roots, pr, api))
         };
         self.last_gc = stats;
         self.collections += 1;
@@ -909,6 +913,13 @@ impl Realm {
             {
                 return Ok(Got::Val(v));
             }
+            if self.api.hs.active {
+                match self.hs_walk(o, key, true)? {
+                    crate::api_host::Walk::Hit(g) => return Ok(g),
+                    crate::api_host::Walk::Miss => return Ok(Got::Val(Value::UNDEFINED)),
+                    crate::api_host::Walk::NoHost => {}
+                }
+            }
             self.fn_props(o);
             return match key {
                 Key::Idx(i) => {
@@ -987,6 +998,9 @@ impl Realm {
             }
             return Ok(Put::Fail);
         };
+        if self.api.hs.active && o.has_flag(F_HOST) && self.hs_write_blocked(o, key)? {
+            return Ok(Put::Fail);
+        }
         self.fn_props(o);
         match key {
             Key::Idx(i) if self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed && !o.has_flag(F_SLOWIDX) => {
@@ -1092,6 +1106,9 @@ impl Realm {
     /// `recv.name` at a site, with the cache work of the module comment. The loop tried the hit already.
     pub fn get_field_slow(&mut self, fb: &mut Feedback, site: usize, name: Str, recv: Value) -> R<Got> {
         let Some(o) = Realm::obj(recv) else { return self.get_prop_g(recv, Key::Name(name)) };
+        if o.has_flag(F_HOST) {
+            return self.get_prop_g(recv, Key::Name(name));
+        }
         let id = o.shape(&self.shapes);
         if fb.caches[site].state == POLY
             && let Some((loc, _)) = fb.poly_find(site, id.raw())
@@ -1186,6 +1203,9 @@ impl Realm {
     /// `recv.name = v` at a site.
     pub fn set_field_slow(&mut self, fb: &mut Feedback, site: usize, name: Str, recv: Value, v: Value) -> R<Put> {
         let Some(o) = Realm::obj(recv) else { return self.set_prop_g(recv, Key::Name(name), v) };
+        if o.has_flag(F_HOST) {
+            return self.set_prop_g(recv, Key::Name(name), v);
+        }
         self.fn_prep(o, name);
         self.fn_props(o);
         let id = o.shape(&self.shapes);
@@ -1282,6 +1302,13 @@ impl Realm {
 
     pub fn has_prop(&mut self, recv: Value, key: Key) -> R<bool> {
         let Some(mut o) = Realm::obj(recv) else { return self.type_error("cannot use 'in' on a primitive") };
+        if self.api.hs.active {
+            match self.hs_walk(o, key, false)? {
+                crate::api_host::Walk::Hit(_) => return Ok(true),
+                crate::api_host::Walk::Miss => return Ok(false),
+                crate::api_host::Walk::NoHost => {}
+            }
+        }
         loop {
             self.fn_props(o);
             let found = match key {
@@ -1306,6 +1333,9 @@ impl Realm {
 
     pub fn delete_prop(&mut self, recv: Value, key: Key) -> R<bool> {
         let Some(o) = Realm::obj(recv) else { return Ok(true) };
+        if self.api.hs.active && o.has_flag(F_HOST) && self.hs_write_blocked(o, key)? {
+            return Ok(false);
+        }
         self.fn_props(o);
         match key {
             Key::Idx(i) if self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed && !o.has_flag(F_SLOWIDX) => {
@@ -1397,7 +1427,7 @@ impl Realm {
     /// specification: array indexes ascending, then the names as they were added.
     pub fn own_keys(&mut self, recv: Value) -> R<Value> {
         let keys: Vec<Value> = if let Some(o) = Realm::obj(recv) {
-            self.own_key_list(o, true)
+            self.own_key_list_h(o, true)?
         } else if let Some(s) = Realm::str_of(recv) {
             (0..s.len()).map(|i| self.string(&i.to_string())).collect()
         } else {

@@ -248,3 +248,28 @@ The promise methods, `queue_microtask`, `checkpoint`, `drain_microtasks`, `pendi
 - A script that `between_jobs` runs gets its own budget, and the budget of the checkpoint comes back after. The two other hooks run as a task level, so a script in them shares the budget of the checkpoint.
 - `promise_then` makes a derived promise that nobody holds, so a throw of the handler is an unhandled rejection that the host hears (as in the old engine).
 - The shared suite has the promise tests (`suite.rs`), run on both engines with and without constant collection.
+
+## 12. Owners, trace and prune (2026-11-21)
+
+This section builds 3.9 and the host-filled methods of 3.8 that it left out: `set_host_owner`, `host_key`, `new_host_indexed`, `new_host_named`, `set_lazy`, `clear_lazy`. The code is `gc.rs` (the owner loop), the new file `api_host.rs` (the methods and the property hooks) and a few dispatch lines in the property paths of `interp_rt.rs` and `bi_object.rs`.
+
+### 12.1 Owners
+
+- `HostState::owners: HashMap<NonNull<u8>, u32>` maps the address of an owner cell to its host key. `set_host_owner` inserts, so a new key replaces the old one of the same object. The map is the only place where the key lives: no slot, no hidden property, no header flag.
+- The marker has no test for owners. A first design (3.9) tested a header flag in `Marker::object`. It cost 3 instructions for each marked object (`gc_load chain 200000 20`: +1.10%, `tree`: +1.43%), so it broke the cost rule. The marker now stays as it was.
+- `collect` runs rounds between the mark loop and `Shapes::finish_marks`. Round 0 copies the owner map to a list of waiting owners. Each round walks that list, removes each owner that `Live` says is marked, and calls `Host::trace(key, Tracer::new(out))` for it (`Roots::owners`, which `Realm` implements with the host pointer that `set_host` stored). The collector marks each value of `out`, drains the work list, and starts the next round. It stops at a round that finds no marked owner. Ephemeron entries that wait for a key that an owner marks are released by the normal `drain`, so the weak tables stay correct.
+- `Roots::weak` (after the mark) prunes: for each entry of `owners` whose cell is not marked, remove it and collect its key; then call `Host::prune(&dead)` once, with all the dead keys. A key is given to `prune` once, because the entry is gone.
+
+Complexity. Each owner is traced once. A round costs O(owners that wait): one mark-bit read each. The rounds are as many as the longest chain of owners that are reached only through the `trace` of the owner before (for a DOM, the wrappers that a wrapper keeps alive), plus one. So the total is O(owners x rounds + values traced + cells newly marked). It never scans the heap, and an object that is not an owner costs nothing. The prune is O(owners) for each collection (the old engine does the same: `retain` over its list).
+
+### 12.2 Host-filled objects
+
+- `new_host_indexed` and `new_host_named` make a plain `Object` cell with the flag `F_HOST`. Its shape is a tree shape with the hidden property `\0host` (not writable, not enumerable, not configurable; as `F_WRAP` objects do with `\0prim`). The slot holds one number, `kind << 32 | key`, where `kind` is 1 for indexed, 2 for named and 3 for named-open. `host_key` reads it. Objects with the same prototype share the shape, so a wrapper costs one extra slot.
+- The property paths test `F_HOST` on the receiver only in their slow part (`get_prop_g`, `has_prop`, `get_own`, `own_key_list`, `set_prop_g`, `define_own`, `delete_prop`). An inline cache never holds a host-filled name or index (it caches own properties of the shape only), so the hooks run on every read of such a name. An ordinary own property of a host object may still be cached (not host-first); this is a known gap for a closed named object that has an own property with the name of a host name.
+- Reads follow the old engine (`heap_binary.rs`, `heap_named.rs`): an index below `indexed_len` is an own, enumerable, configurable, **not writable** data property whose value comes from `indexed_item`; an `Absent` index goes on to the prototype chain. A string key that `indexed_name` maps to an index is a non-enumerable alias, visible only when no object of the chain has the name. A closed named object answers its names first (`named_has`, then `named_get`); an open one answers them after its chain. Names come before the ordinary keys in `own_keys`. A symbol key is never a name.
+- Writes. The `bare-js-api` trait has no write hook. So `set`, `define` and `delete` of an index of an indexed object, and of a name that `named_has` says is there, are rejected (`Put::Fail`, `false`), as WebIDL says for a getter with no setter. Other keys follow the ordinary rules. The old engine's `Host::named_write` and the fill step (`Pending::Fill`, `Item::Missing`) are not in the trait: they answer `Abort::Unsupported`.
+- `Pending::Busy` is an error that stops the read (`Abort::Limit("the host is busy")`), never an empty answer.
+
+### 12.3 Lazy members
+
+`set_lazy(obj, chain)` sets the flag `F_LAZYM` on `obj` (and on each object of its prototype chain when `chain` is true). A miss of a string key on a marked object calls `Host::lazy_member(obj, Lazy::Name)` once for each (object, name) until the next collection, then reads again; a listing of the own keys calls it with `Lazy::All` once; a miss of a symbol key calls it with `Lazy::Symbols` once. `clear_lazy` clears the flag. The "asked" set is dropped at each collection, so an address that is reused is never taken for an object that was asked.

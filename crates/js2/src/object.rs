@@ -80,6 +80,10 @@ pub const F_PROMISE: u32 = 8192;
 pub const F_GEN: u32 = 16384;
 /// Object header flag: a `RegExp` object (`regexp_rt.rs`). Its slots 0 to 3 are the pattern, the flag bits, the program and `lastIndex`. Bit 8192 is for `F_PROMISE`.
 pub const F_REGEXP: u32 = 32768;
+/// Object header flag: a host-filled object (`api_host.rs`): its hidden property `\0host` holds the kind and the host key.
+pub const F_HOST: u32 = 65536;
+/// Object header flag: the host defines members of the object on demand (`Engine::set_lazy`).
+pub const F_LAZYM: u32 = 131072;
 /// `Elements` header flag: the record is sparse.
 const F_SPARSE: u32 = 1;
 /// A write at an index this far above the capacity of a dense record makes it sparse.

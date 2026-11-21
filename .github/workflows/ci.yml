@@ -48,7 +48,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --locked -p bare-mcp -p bare-drive
   # The new engine (crates/js2): only its `cell`, `heap`, `string`, `atoms`, `shapes`, `object`, `gc`,
-  # `interp_rt`, `interp`, `api`, `codes` and `blob` modules may hold `unsafe` code, so the tests of these modules run under Miri.
+  # `interp_rt`, `interp`, `api`, `api_host`, `codes` and `blob` modules may hold `unsafe` code, so the tests of these modules run under Miri.
   # A filter is a substring of the test path, so a few tests of other modules (for example `bi_object::`) also run.
   miri:
     if: github.event.action != 'closed'
@@ -57,7 +57,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
         with: { components: miri }
-      - run: 'cargo miri test --locked -p bare-js2 --lib -- cell:: heap:: string:: atoms:: shapes:: blob:: gc:: object:: codes:: interp_rt:: interp:: api::'
+      - run: 'cargo miri test --locked -p bare-js2 --lib -- cell:: heap:: string:: atoms:: shapes:: blob:: gc:: object:: codes:: interp_rt:: interp:: api:: api_host::'
   # Automatic fix runs push autofix/* branches. They must not change the
   # workflows, because the workflows are the merge gate.
   guard:
