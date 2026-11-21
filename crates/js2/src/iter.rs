@@ -24,7 +24,7 @@ pub const YS_RETURN: i32 = 2;
 impl Realm {
     /// `GetIterator(v, sync)` for a value that is no array and no string: the iterator and its kind word (see the module comment).
     #[cold]
-    pub(crate) fn iter_record(&mut self, v: Value) -> R<(Value, Value)> {
+    pub(crate) fn iter_open_generic(&mut self, v: Value) -> R<(Value, Value)> {
         let m = if v.is_undefined() || v.is_null() { Value::UNDEFINED } else { self.get_prop(v, Key::Name(self.wk[crate::bi_symbol::ITERATOR]))? };
         if !Realm::obj(m).is_some_and(|o| o.is_callable()) {
             return self.type_error("the value is not iterable");

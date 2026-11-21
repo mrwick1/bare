@@ -299,7 +299,7 @@ impl Realm {
             }
             return Ok(out);
         }
-        let (it, kind) = self.iter_record(v)?;
+        let (it, kind) = self.iter_open_generic(v)?;
         let mut out = Vec::new();
         if kind.is_undefined() {
             while let (x, false) = self.gen_nested(it, crate::generator::MODE_NEXT, Value::UNDEFINED)? {

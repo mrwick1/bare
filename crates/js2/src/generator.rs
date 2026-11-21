@@ -227,11 +227,8 @@ impl Realm {
                 self.define_attrs(p, tag, A_C, t1).expect("define");
                 self.define_attrs(gp, Key::Name(k_ctor), A_C, p.value()).expect("define");
                 self.define_attrs(gp, tag, A_C, t2).expect("define");
-                // `%IteratorPrototype%`: `[Symbol.iterator]() { return this }`, the prototype of `%GeneratorPrototype%`.
-                let ip = Obj::new(&mut self.heap, &self.shapes, self.s_object).expect("memory");
-                let f = self.new_native(iter_this, false, 0, "[Symbol.iterator]");
-                self.define_attrs(ip, Key::Name(self.wk[crate::bi_symbol::ITERATOR]), crate::builtins::HIDDEN, f.value()).expect("define");
-                self.consts.push(ip.value());
+                // `%IteratorPrototype%` (made for the host API too) is the prototype of `%GeneratorPrototype%`.
+                let ip = Realm::obj(self.iterator_prototype()).expect("an object");
                 gp.set_proto(&mut self.shapes, Some(ip.cell()));
                 p
             }
@@ -293,10 +290,6 @@ fn request(rt: &mut Realm, this: Value, mode: i32, v: Value) -> R<Value> {
             Ok(Value::UNDEFINED)
         }
     }
-}
-
-fn iter_this(_: &mut Realm, this: Value, _: &[Value]) -> R<Value> {
-    Ok(this)
 }
 
 fn gen_next(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {

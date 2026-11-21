@@ -2179,7 +2179,7 @@ impl Vm {
                             undef
                         } else {
                             std::hint::cold_path();
-                            let (i, k) = tri!(realm.iter_record(it));
+                            let (i, k) = tri!(realm.iter_open_generic(it));
                             it = i;
                             k
                         };
