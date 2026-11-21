@@ -46,6 +46,10 @@ fn stub(atoms: &SharedAtoms, f: &FnFacts, name: Option<&str>) -> Result<Code, St
     c.words = vec![w[!kept as usize]];
     c.flags = if kept { 0 } else { CF_ARGS };
     c.fn_len = f.length.min(u16::MAX as u32) as u16;
+    // `prototype` of a generator function inherits the generator prototype, and `new` on it throws: both are read before the first call.
+    if f.mode == crate::ast::FuncMode::Generator {
+        (c.gen_kind, c.noctor) = (crate::bytecode::GK_GEN, true);
+    }
     if let Some(n) = name {
         let units: Vec<u16> = n.encode_utf16().collect();
         let bytes: Option<Vec<u8>> = units.iter().map(|&u| u8::try_from(u).ok()).collect();

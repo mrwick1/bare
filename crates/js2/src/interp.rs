@@ -61,7 +61,7 @@
 //! safe form of each, in `docs/progress.md` (S2.6): (1) and (2) together save 8 to 18% of the instructions of a micro loop, (3) another 6 to 9%.
 use crate::atoms::SharedAtoms;
 use crate::builtins::Outcome;
-use crate::bytecode::{Asm, CF_ARGS, CF_LINK, Code, ITER_REGS, Ins, Op, STR_EMPTY, STR_SLOT, decode};
+use crate::bytecode::{Asm, CF_ARGS, CF_GEN, CF_LINK, Code, ITER_REGS, Ins, Op, STR_EMPTY, STR_SLOT, decode};
 use crate::codes::Codes;
 use crate::gc::Marker;
 use crate::interp_rt::{ErrKind, Feedback, Got, Key, Put, R, Realm};
@@ -166,7 +166,7 @@ macro_rules! cold_ops {
         Op::DefAccessor | Op::DefAccessorElem | Op::DefMethod | Op::DefMethodElem | Op::SetHome | Op::MakeClass | Op::MakeDerived |
         Op::SetFnName | Op::DefaultCtor | Op::SetFields | Op::NewPrivateName | Op::GetPrivate | Op::SetPrivate | Op::HasPrivate |
         Op::DefPrivate | Op::DefPrivateMethod | Op::DefPrivateAccessor | Op::GetSuper | Op::GetSuperElem | Op::SetSuper |
-        Op::SetSuperElem | Op::CallSuper | Op::CallSuperSpread | Op::RetDerived | Op::GenInit | Op::Yield | Op::RetGen
+        Op::SetSuperElem | Op::CallSuper | Op::CallSuperSpread | Op::RetDerived | Op::GenInit | Op::Yield | Op::RetGen | Op::IterClose
     };
 }
 
@@ -1264,6 +1264,14 @@ impl Vm {
                                 Err(e) => throw!(e),
                             }
                         }
+                        Op::IterClose => {
+                            std::hint::cold_path();
+                            // A generator that the loop leaves early runs its `finally` blocks: `return()`.
+                            if r!(a!() + 1).as_int().is_none() {
+                                tri!(realm.gen_nested(r!(a!()), crate::generator::MODE_RETURN, undef));
+                            }
+                            pc = next;
+                        }
                         Op::NewRegExp => {
                             std::hint::cold_path();
                             gate!();
@@ -1898,7 +1906,12 @@ impl Vm {
                         let ctx = stack[fp - REC + 2];
                         let child = code.funcs[bx!()] as usize;
                         let f = realm.new_function(child, ctx);
-                        if prog[child].flags & CF_LINK != 0 {
+                        let child_flags = prog[child].flags;
+                        if child_flags & CF_GEN != 0 {
+                            std::hint::cold_path();
+                            realm.make_generator_function(f);
+                        }
+                        if child_flags & CF_LINK != 0 {
                             // The function uses `super` (or holds one that does): it gets the home object and the constructor link.
                             let (cur, nt) = (record(stack, fp, 0), record(stack, fp, 8));
                             let (co, fo) = (Realm::obj(cur).expect("a function"), Realm::obj(f).expect("a function"));
@@ -2129,18 +2142,33 @@ impl Vm {
                             it = Obj::array(&mut realm.heap, &realm.shapes, realm.s_array, &vals).expect("memory").value();
                         }
                         let is_array = Realm::obj(it).is_some_and(|o| realm.shapes.get(o.shape(&realm.shapes)).layout == crate::cell::Layout::Indexed);
-                        if !is_array {
+                        // A generator is stepped by `IterNext` itself (`undefined` where an array has its index): see `generator.rs`.
+                        let index = if is_array {
+                            Value::int(0)
+                        } else if Realm::is_generator(it) {
+                            undef
+                        } else {
                             err!(ErrKind::Type, "the value is not iterable (the iterator protocol is S2.7)")
-                        }
+                        };
                         r!(a!()) = it;
-                        r!(a!() + 1) = Value::int(0);
+                        r!(a!() + 1) = index;
                         r!(a!() + 2) = Value::int(0);
                         pc = next;
                     }
                     Op::IterNext => {
                         let base = $x as usize;
+                        let Some(i) = r!(base + 1).as_int() else {
+                            std::hint::cold_path();
+                            let (v, done) = tri!(realm.gen_nested(r!(base), crate::generator::MODE_NEXT, undef));
+                            if done {
+                                jump!(true, nextx!(), sbx!())
+                            } else {
+                                r!(a!()) = v;
+                                pc = nextx!();
+                            }
+                            continue;
+                        };
                         let arr = Realm::obj(r!(base)).expect("an array");
-                        let i = r!(base + 1).as_int().expect("an index");
                         if (i as u32) < arr.len() {
                             r!(a!()) = arr.get_element(i as u32).unwrap_or(undef);
                             r!(base + 1) = Value::int(i + 1);
@@ -2149,7 +2177,6 @@ impl Vm {
                             jump!(true, nextx!(), sbx!())
                         }
                     }
-                    Op::IterClose => pc = next,
                     Op::LoadCallee => {
                         r!(a!()) = record(stack, fp, 0);
                         pc = next;
@@ -2287,6 +2314,10 @@ pub fn code_flags(c: &Code) -> u8 {
             _ => {}
         }
         pc += n;
+    }
+    // A stub has the kind of its function too (`script.rs`: `stub`).
+    if c.gen_kind != 0 {
+        f |= CF_GEN;
     }
     f
 }

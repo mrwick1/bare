@@ -245,12 +245,12 @@ impl<'a> Fc<'a> {
         if uses_nt && let Some(home) = self.find_var("new.target").map(|v| v.home) {
             match home {
                 Home::Reg(r) => {
-                    self.op(Op::LoadNewTarget, r, 0, 0);
+                    self.load_new_target(r);
                     self.set_live(r);
                 }
                 Home::Ctx { level, slot } => {
                     let t = self.alloc();
-                    self.op(Op::LoadNewTarget, t, 0, 0);
+                    self.load_new_target(t);
                     self.op(Op::InitCtx, t, self.depth - level, slot);
                     self.free(t);
                 }
@@ -324,6 +324,10 @@ impl<'a> Fc<'a> {
         // Function declarations are made before the first statement.
         for (f, name) in &h.funcs {
             self.declare_function(*f, name)?;
+        }
+        // A generator binds its parameters at the call and runs its body at the first `next()`.
+        if self.gen_kind != 0 {
+            self.gen_init();
         }
         match f.body {
             Body::Block(l) => {
@@ -809,7 +813,7 @@ impl<'a> Fc<'a> {
 
     /// Run what a jump out of the frames above `to` must run: close iterators and repeat the finalizers (innermost first). The contexts
     /// are popped down to the context of each finalizer. Gives the depth that the code is at when it returns.
-    fn unwind(&mut self, to: usize) -> CR<u32> {
+    pub(crate) fn unwind(&mut self, to: usize) -> CR<u32> {
         let (d0, c0) = (self.depth, self.cur_ctx.clone());
         let mut rt = self.depth;
         let mut paused: Vec<usize> = Vec::new();
@@ -937,18 +941,18 @@ impl<'a> Fc<'a> {
             }
             None => {
                 self.unwind(0)?;
-                self.op(Op::RetUndef, 0, 0, 0);
+                self.ret_undef();
             }
             Some(e) if !cleanup => {
                 let r = self.any(e)?;
-                self.op(Op::Ret, r, 0, 0);
+                self.ret_op(r);
             }
             Some(e) => {
                 // The value is kept in a temporary: a finalizer can change a variable.
                 let t = self.alloc();
                 self.to(e, t)?;
                 self.unwind(0)?;
-                self.op(Op::Ret, t, 0, 0);
+                self.ret_op(t);
             }
         }
         Ok(())

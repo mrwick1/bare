@@ -28,7 +28,7 @@
 //! `import.meta`, `delete` of a global name. See [`Fc::unsup`] and the progress entry.
 use crate::ast::*;
 use crate::atoms::SharedAtoms;
-use crate::bytecode::{Asm, BcError, Code, Handler, Ins, Label, NO_NAME, Op, Recipes};
+use crate::bytecode::{Asm, BcError, Code, GK_GEN, Handler, Ins, Label, NO_NAME, Op, Recipes};
 use crate::facts::{self, Facts, FnId};
 use crate::roots::RootMaps;
 use crate::string::{Chars, Str};
@@ -330,6 +330,9 @@ pub(crate) struct Fc<'a> {
     /// Labels of the statement that is about to be compiled (`a: b: for (...)`).
     pub pending: Vec<String>,
     pub unsupported: Vec<&'static str>,
+    /// [`GK_GEN`] while a generator is compiled, else 0 (`compile_gen.rs`), and the longest save list that it made.
+    pub gen_kind: u8,
+    pub gen_regs: u16,
     /// While the default of parameter `i` is compiled and it names a parameter that is not set yet: `(i, number of parameters, register
     /// of the hole)`. A read of such a parameter reads the hole, so it throws.
     pub param_dz: Option<(u32, u32, u32)>,
@@ -394,6 +397,8 @@ impl<'a> Fc<'a> {
             chain_short: None,
             pending: Vec::new(),
             unsupported: Vec::new(),
+            gen_kind: 0,
+            gen_regs: 0,
             param_dz: None,
         }
     }
@@ -841,7 +846,7 @@ impl<'a> Fc<'a> {
 
     pub(crate) fn finish(mut self, nparams: u32) -> CR<Compiled> {
         if !self.dead {
-            self.op(Op::RetUndef, 0, 0, 0);
+            self.ret_undef();
         }
         for c in std::mem::take(&mut self.cold) {
             self.bind(c.label);
@@ -869,6 +874,8 @@ impl<'a> Fc<'a> {
         code.fn_len = self.fn_len;
         code.strict = self.strict;
         code.noctor = self.noctor;
+        code.gen_kind = self.gen_kind;
+        code.gen_regs = self.gen_regs;
         let mut roots = RootMaps::new(nregs as usize);
         for (k, &(idx, start)) in self.root_at.iter().enumerate() {
             let end = self.root_at.get(k + 1).map_or(self.root_regs.len(), |n| n.1);
@@ -958,6 +965,10 @@ pub fn compile_function(prog: &Program, fid: FuncId, id: FnId, facts: &Facts, at
     c.fn_flags = f.flags;
     c.fn_id = Some(id);
     c.derived = f.kind == FuncKind::DerivedConstructor;
+    if f.mode == FuncMode::Generator {
+        // A generator is no constructor, and `new.target` is `undefined` in it (`compile_gen.rs`).
+        (c.gen_kind, c.noctor) = (GK_GEN, true);
+    }
     c.fn_len = prog.list(prog.func(fid).params).take_while(|&p| !matches!(prog.pat(p).kind, PatKind::Assign { .. } | PatKind::Rest(_))).count().min(u16::MAX as usize) as u16;
     c.force_ctx = f.flags & facts::INNER_EVAL != 0;
     if f.flags & (facts::EVAL | facts::WITH | facts::IN_WITH) != 0 {
@@ -1024,6 +1035,8 @@ pub fn compile_all(source: &str, atoms: &SharedAtoms, limits: crate::parse::Limi
 
 #[path = "compile_class.rs"]
 mod class;
+#[path = "compile_gen.rs"]
+mod gen_code;
 #[path = "compile_expr.rs"]
 mod expr;
 #[path = "compile_pat.rs"]

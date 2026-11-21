@@ -486,7 +486,7 @@ impl Realm {
             registry: None,
             error_protos,
             s_native,
-            genr: crate::generator::GenRealm { proto: gen_proto, s_iter, keys: gkeys },
+            genr: crate::generator::GenRealm { proto: gen_proto, s_iter, keys: gkeys, func_proto: None },
             natives: Vec::new(),
             fn_info: Vec::new(),
             bound_id: 0,
@@ -1624,6 +1624,10 @@ impl Realm {
         };
         self.define_attrs(o, Key::Name(self.k_length), A_C, Value::int(len as i32)).expect("memory");
         self.define_attrs(o, Key::Name(self.k_name), A_C, name.value()).expect("memory");
+        // A generator function has its own `prototype` (a plain function makes it at the first read of it).
+        if o.slot(&self.shapes, 0).as_int().is_some_and(|c| self.prog[c as usize].gen_kind != 0) {
+            self.make_prototype(o).expect("memory");
+        }
     }
 
     /// `SetFunctionName(f, key, prefix)` of a computed key: `prefix` 1 is `get `, 2 is `set `.

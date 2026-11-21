@@ -465,11 +465,11 @@ impl<'a> Fc<'a> {
                 if self.is_arrow && !matches!(self.resolve("new.target", 0), Res::Global) {
                     self.read_var("new.target", 0, dst)?;
                 } else {
-                    self.op(Op::LoadNewTarget, dst, 0, 0);
+                    self.load_new_target(dst);
                 }
             }
             ExprKind::Await(_) => self.not_built(dst, "await"),
-            ExprKind::Yield { .. } => self.not_built(dst, "yield"),
+            ExprKind::Yield { arg, delegate } => self.yield_expr(arg, delegate, dst)?,
             ExprKind::Spread(_) => self.not_built(dst, "spread"),
             ExprKind::Hole => self.op(Op::LoadUndef, dst, 0, 0),
             ExprKind::ImportCall { .. } => self.not_built(dst, "import()"),
@@ -858,8 +858,8 @@ impl<'a> Fc<'a> {
         if func.is_async() {
             self.unsup("an async function");
         }
-        if func.is_generator() {
-            self.unsup("a generator");
+        if func.mode == FuncMode::AsyncGen {
+            self.unsup("an async generator");
         }
         let self_name = expr && func.name.is_some() && func.kind == FuncKind::Normal;
         let i = self.child(f, self_name, name)?;
