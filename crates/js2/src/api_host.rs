@@ -13,7 +13,7 @@
 //! anything while `HostState::active` is false. An inline cache never fills for a host object (`get_field_slow`, `set_field_slow`), and
 //! the shape of such an object has the hidden key, so no other object shares it.
 //!
-//! **Lazy members.** `set_lazy` sets `F_LAZYM`. A read that misses on a marked object asks `Host::lazy_member` once for each (object,
+//! **Lazy members.** `set_lazy` sets `F_LAZYM`. A property lookup that misses on a marked object asks `Host::lazy_member` once for each (object,
 //! name) until the next collection, and then reads again.
 use crate::bi_object::{Desc, Own};
 use crate::cell::Layout;
@@ -328,7 +328,7 @@ impl Realm {
     }
 
     /// Ask `Host::lazy_member` for `what` on `c`, once for each (object, name) until the next collection. True when the host was asked.
-    fn hs_lazy(&mut self, c: Obj, key: Option<Key>) -> R<bool> {
+    pub(crate) fn hs_lazy(&mut self, c: Obj, key: Option<Key>) -> R<bool> {
         let (kind, tag, name) = match key {
             None => (0, 0, String::new()),
             Some(Key::Idx(i)) => (1, i as u64, i.to_string()),
