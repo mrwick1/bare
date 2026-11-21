@@ -47,6 +47,7 @@ pub const G_AWAIT_RET: i32 = 5;
 pub const MODE_NEXT: i32 = 0;
 pub const MODE_THROW: i32 = 1;
 pub const MODE_RETURN: i32 = 2;
+const MODE_YIELDED_RESULT: i32 = 3;
 
 const FR_CALLEE: usize = 0;
 const FR_THIS: usize = 1;
@@ -106,6 +107,10 @@ impl Realm {
         Realm::activation(g).is_some_and(|a| Realm::gen_state(a) == G_DONE)
     }
 
+    pub(crate) fn yielded_result(g: Value) -> bool {
+        Realm::activation(g).is_some_and(|a| a.inline_slot(3).as_int() == Some(MODE_YIELDED_RESULT))
+    }
+
     /// `{ value, done }`.
     pub fn iter_result(&mut self, value: Value, done: bool) -> Value {
         let o = Obj::new(&mut self.heap, &self.shapes, self.genr.s_iter).expect("memory");
@@ -143,12 +148,19 @@ impl Realm {
     /// `Yield`: save the frame `(stack, fp)` into the record of its activation and say that the generator waits. Gives what the caller
     /// receives: the value, or `{ value, done: false }` when the frame has [`ITER`].
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn gen_yield(&mut self, stack: &[Value], fp: usize, ci: usize, code: &Code, tbl: u32, resume: usize, v: Value, iter: bool) -> Value {
+    pub(crate) fn gen_yield(&mut self, stack: &[Value], fp: usize, ci: usize, code: &Code, tbl: u32, resume: usize, v: Value, iter: bool, raw: bool) -> Value {
         let act = Realm::activation(stack[fp - REC + 8]).expect("the activation of a generator frame");
         let fr = Realm::ctx(act.inline_slot(1)).expect("the record of a generator");
         save(stack, fp, ci, code, tbl, resume, fr);
         act.set_inline_slot(0, Value::int(G_SUSPENDED));
-        if iter { self.iter_result(v, false) } else { v }
+        if raw {
+            act.set_inline_slot(3, Value::int(MODE_YIELDED_RESULT));
+            v
+        } else if iter {
+            self.iter_result(v, false)
+        } else {
+            v
+        }
     }
 
     /// `RetGen`: the generator is done. Gives the result of the call as [`Realm::gen_yield`] does, with `done: true`.
