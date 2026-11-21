@@ -1010,7 +1010,7 @@ fn one(p: &mut Page, m: &mut Memo, loc: &Locator) -> Result<Handle, Try> {
         }),
         many => {
             let list: Vec<String> = many.iter().take(5).map(|&h| p.describe(h)).collect();
-            Err(Try::Stop(fail("duplicate", format!("{loc} matches {} elements: {}{}", many.len(), list.join(", "), if many.len() > 5 { ", …" } else { "" }))))
+            Err(Try::Stop(fail("duplicate", format!("{loc} matches {} elements: {}{}; add nth=0 for the first, or use a ref", many.len(), list.join(", "), if many.len() > 5 { ", …" } else { "" }))))
         }
     }
 }

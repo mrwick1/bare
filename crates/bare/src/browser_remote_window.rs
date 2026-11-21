@@ -27,7 +27,7 @@ use crate::browser_scoped::*;
 use crate::browser_child::{FrameId, Out};
 use bare_js::eval::Interp;
 use bare_js::value::{ObjId, Value};
-use bare_js_api::{Args, Engine as _, HostFn, Local};
+use bare_js_api::{Args, HostFn, Local};
 
 /// Which page a window stands for, seen from the page that holds it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -141,16 +141,14 @@ fn win_closed<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> 
 fn win_post<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let win = obj_id(s, this).and_then(|p| d.kids.target_of(p)).and_then(|t| d.kids.win_of(t));
     let Some(Win { side: to, .. }) = win else { return Err(s.type_error("Illegal invocation")) };
-    // The message walk and the port export take the old engine.
-    let args: Vec<Value> = a.iter().map(|l| s.engine().raw(l)).collect();
-    old(s, |it| post(d, it, to, &args))?;
+    post(d, s, to, a)?;
     Ok(s.undefined())
 }
 
-fn post(d: &Dom, it: &mut Interp<'_>, to: Side, a: &[Value]) -> R<()> {
-    let (target, list) = crate::browser_basics::post_args(d, it, a)?;
+fn post<'s>(d: &Dom, s: &mut Sc<'s, '_>, to: Side, a: Args<'s>) -> Res<'s, ()> {
+    let (target, list) = crate::browser_basics::post_args(d, s, a)?;
     let origin = d.window_origin();
-    let target_origin = match crate::browser_basics::target_origin(it, d, &target)? {
+    let target_origin = match crate::browser_basics::target_origin(s, d, &target)? {
         Some(o) => o,
         None if target == "*" => target,
         None => origin.clone(),
@@ -159,10 +157,11 @@ fn post(d: &Dom, it: &mut Interp<'_>, to: Side, a: &[Value]) -> R<()> {
         return Ok(());
     }
     if d.kids.outbox_len() >= d.max_messages() {
-        return Err(d.lim("messages"));
+        return Err(d.lim_s(s, "messages"));
     }
-    let mut cloned = crate::browser_navigation_state::clone_state_with(d, it, a[0], &list)?;
-    d.export_ports(it, &mut cloned)?;
+    let msg = arg_s(s, a, 0);
+    let mut cloned = crate::browser_navigation_state::clone_state_with(d, s, msg, &list)?;
+    d.export_ports(s, &mut cloned)?;
     d.kids.send(Out { to, target_origin, origin, cloned });
     Ok(())
 }

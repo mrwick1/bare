@@ -111,6 +111,14 @@ fn an_engine_error_crosses_the_host_unchanged() {
 }
 
 #[test]
+fn a_host_limit_keeps_its_name_across_the_interface() {
+    let (mut it, _) = setup();
+    let e = it.api_err(Error::Limit(LimitKind::Host("messages")));
+    assert_eq!(e, bare_js_api::Error::Abort(bare_js_api::Abort::Limit("messages")));
+    assert!(matches!(it.api_unerr(e), Error::Limit(LimitKind::Host("messages"))));
+}
+
+#[test]
 fn a_persistent_handle_keeps_its_value_through_a_collection() {
     big(|| {
         let (mut it, h) = setup();
