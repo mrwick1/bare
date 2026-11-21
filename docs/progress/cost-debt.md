@@ -17,5 +17,5 @@ Rows that merged over the cost rule (CLAUDE.md, "Cost gate"). One line per row. 
 | `preload_load script 10` | #849 | +0.943% | +0.569% | Duplicate old DOM installation code and relocations. | [Fixed](2026-11-21-cost-debt-849.md#849-rows). |
 | `interp_load loopfn` | #876 | +2.780% | +1.483% | The iterator branches can change register allocation in the shared dispatch loop. | open |
 | `interp_load calls` | #876 | +1.175% | +1.098% | The iterator branches can change register allocation in the shared dispatch loop. | open |
-| `script_run startup` (stack since #882) | #901 | +1.085% glibc, +1.036% jemalloc | +1.085% glibc, +1.036% jemalloc | The stack adds realm initialization for prototype shapes and function metadata. | open |
+| `script_run startup` (stack since #882) | #901 | +1.085% glibc, +1.036% jemalloc | Same release build with one codegen unit for js2 | Eager array prototype properties, arguments shape and function metadata. | [Fixed](2026-11-21-cost-debt-js2-startup-parity3.md#instruction-counts). |
 | `raw_collect 10000 1000 10` | #864 | +1.361% | +1.231% glibc, +1.121% jemalloc | The count visits unmarked cells and skips free slots after marking. | open |
