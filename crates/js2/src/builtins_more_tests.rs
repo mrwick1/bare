@@ -209,3 +209,14 @@ fn primitive_prototypes_have_their_own_wrapped_values() {
         ("try { return Object.create(Number.prototype).valueOf(); } catch (e) { return e.name; }", "TypeError"),
     ]);
 }
+
+#[test]
+fn bind_constructs_with_the_bound_arguments_and_reads_metadata_at_bind_time() {
+    check(&[
+        ("function A(x, y, z) { this.v = [x, y, z, new.target === A]; } var B = A.bind(null, 1); var C = B.bind(null, 2); return [new C(3).v.join(), new C() instanceof B, C.length, C.name].join('|');", "1,2,3,true|true|1|bound bound A"),
+        ("function A() { this.target = new.target; } function B() {} var C = A.bind(null); return Reflect.construct(C, [], B).target === B;", "true"),
+        ("var f = () => {}; try { new (f.bind(null))(); } catch (e) { return e.name; }", "TypeError"),
+        ("function f(x) {} Object.defineProperty(f, 'name', {get() { throw 'name'; }}); try { f.bind(); } catch (e) { return e; }", "name"),
+        ("function f(x) {} var b = f.bind(); Object.defineProperty(f, 'name', {value: 'later'}); Object.defineProperty(f, 'length', {value: 8}); return b.name + ':' + b.length;", "bound f:1"),
+    ]);
+}

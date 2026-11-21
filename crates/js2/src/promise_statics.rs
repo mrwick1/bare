@@ -70,9 +70,12 @@ impl Realm {
     // ---- constructors and species ----
 
     /// Is `v` a constructor (a native one, a plain function or a class)?
-    pub(crate) fn is_constructor(&self, v: Value) -> bool {
-        if let Some(i) = self.native_id(v) {
-            return self.natives[i].ctor;
+    pub(crate) fn is_constructor(&self, mut v: Value) -> bool {
+        while let Some(i) = self.native_id(v) {
+            if i != self.bound_id as usize {
+                return self.natives[i].ctor;
+            }
+            v = Realm::obj(v).expect("bound function").slot(&self.shapes, 1);
         }
         self.function_new(v).is_some_and(|(ci, _)| !self.prog[ci].noctor)
     }
