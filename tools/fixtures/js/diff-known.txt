@@ -6,7 +6,6 @@ script_tests:146	error message text differs (js2 has no name of the callee)
 script_tests:149	old engine stops at its call-depth limit; js2 throws RangeError
 script_tests:401	old engine stops at its traversal-depth limit; js2 throws RangeError
 script_tests:181	BigInt literal: js2 throws TypeError (not built)
-script_tests:360	a method has no prototype property; js2 makes one (bug)
 script_tests:384	Error.stack: js2 has none
 script_tests:400	Function.prototype.toString of a script function: js2 gives "[native code]"
 script_tests:467	toFixed(2) of -0.0001: js2 loses the sign of "-0.00"

@@ -175,3 +175,23 @@ fn the_async_function_constructors_build_functions_that_run() {
         ),
     ]);
 }
+
+#[test]
+fn an_async_generator_is_not_a_lazy_table_object_and_a_lazy_built_in_is_not_an_async_generator() {
+    check(&[
+        // A listing of the names of the generator must not clear its kind.
+        (
+            "async function* g() { yield 1; } var a = g(); var n = Object.getOwnPropertyNames(a).length + Object.keys(a).length; Object.defineProperty(a, 'x', { value: 1 }); \
+             var r; a.next().then(function (x) { r = n + ':' + x.value + ':' + a.x; });",
+            "r",
+            "0:1:1",
+        ),
+        // A built-in with a lazy table is not an async generator: `next` rejects it.
+        (
+            "async function* g() {} var next = Object.getPrototypeOf(g.prototype).next; var r; Object.keys(Math); \
+             next.call(Math).then(function () { r = 'resolved'; }, function (e) { r = e instanceof TypeError; });",
+            "r",
+            "true",
+        ),
+    ]);
+}

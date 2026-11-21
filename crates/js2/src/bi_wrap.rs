@@ -12,7 +12,7 @@
 //! primitive changes: a method of a string, a number or a boolean still runs with the primitive as `this` and no object is made.
 use crate::cell::Layout;
 use crate::interp_rt::{Key, R, Realm};
-use crate::object::{F_WRAP, Obj};
+use crate::object::{K_WRAP, Obj};
 use crate::string::Str;
 use crate::value::Value;
 
@@ -23,20 +23,20 @@ impl Realm {
         let shape = self.shapes.add(root, self.k_prim, 0).expect("shape");
         let o = Obj::new(&mut self.heap, &self.shapes, shape).expect("memory");
         o.set_slot(&self.shapes, 0, prim);
-        o.set_flag(F_WRAP);
+        o.set_kind(K_WRAP);
         o
     }
 
     /// The primitive of a wrapper object, or `None` for any other value.
     pub(crate) fn prim_of(&self, v: Value) -> Option<Value> {
-        let o = Realm::obj(v).filter(|o| o.has_flag(F_WRAP))?;
+        let o = Realm::obj(v).filter(|o| o.is_kind(K_WRAP))?;
         let e = self.shapes.find(o.shape(&self.shapes), self.k_prim)?;
         Some(o.slot(&self.shapes, e.slot()))
     }
 
     /// The string of a `String` wrapper object.
     pub(crate) fn string_wrapper(&self, o: Obj) -> Option<Str> {
-        if !o.has_flag(F_WRAP) {
+        if !o.is_kind(K_WRAP) {
             return None;
         }
         self.prim_of(o.value()).and_then(Realm::str_of)

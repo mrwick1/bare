@@ -1,8 +1,8 @@
 //! `Date` (plan phase 2: the census group `Date`, 19 of 50 workloads call `Date.now`, 12 make dates). Safe code over [`Realm`].
 //!
-//! **The object.** A plain `Object` cell with the flag [`F_DATE`] and one hidden property, `Realm::k_prim`, that holds the time value
+//! **The object.** A plain `Object` cell of the kind [`K_DATE`](crate::object::K_DATE) and one hidden property, `Realm::k_prim`, that holds the time value
 //! (`[[DateValue]]`): a number, whole milliseconds since 1970-01-01T00:00:00Z within +-8.64e15, or NaN. It is the shape of a wrapper
-//! (`bi_wrap.rs`) with another flag, so a script cannot make or move it, and a class that extends `Date` gets the same cell over its own
+//! (`bi_wrap.rs`) with another kind, so a script cannot make or move it, and a class that extends `Date` gets the same cell over its own
 //! prototype. A `Date` costs one 24-byte cell.
 //!
 //! **The arithmetic** is `bi_date_calc.rs` (UTC only, the parser, the formatter) and the zone is `bi_date_tz.rs` (TZif rules of
@@ -29,14 +29,11 @@ use crate::bi_symbol::TO_PRIMITIVE;
 use crate::builtins::{Hint, arg};
 use crate::cell::Layout;
 use crate::interp_rt::{ErrKind, Key, R, Realm};
-use crate::object::Obj;
+use crate::object::{K_DATE, Obj};
 use crate::shapes::A_C;
 use crate::value::Value;
 use std::cell::RefCell;
 use std::rc::Rc;
-
-/// Object header flag bit 19: a `Date` object (bits 0 to 18 are taken, `object.rs`).
-pub(crate) const F_DATE: u32 = 1 << 19;
 
 /// What a prototype method does.
 #[derive(Clone, Copy)]
@@ -184,13 +181,13 @@ fn new_date(rt: &mut Realm, proto: Obj, t: f64) -> Value {
     let shape = rt.shapes.add(root, rt.k_prim, 0).expect("shape");
     let o = Obj::new(&mut rt.heap, &rt.shapes, shape).expect("memory");
     o.set_slot(&rt.shapes, 0, Value::number(t));
-    o.set_flag(F_DATE);
+    o.set_kind(K_DATE);
     o.value()
 }
 
 /// The object and the slot of the time value of a `Date`, or `None` for any other value.
 pub(crate) fn date_slot(rt: &Realm, v: Value) -> Option<(Obj, u32)> {
-    let o = Realm::obj(v).filter(|o| o.has_flag(F_DATE))?;
+    let o = Realm::obj(v).filter(|o| o.is_kind(K_DATE))?;
     Some((o, rt.shapes.find(o.shape(&rt.shapes), rt.k_prim)?.slot()))
 }
 
