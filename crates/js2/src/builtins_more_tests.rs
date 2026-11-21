@@ -249,3 +249,11 @@ fn array_species_constructs_results_and_defines_own_elements() {
         ("var a = [2]; function S() { Object.defineProperty(this, '0', {value: 1, configurable: true}); } a.constructor = {[Symbol.species]: S}; var d = Object.getOwnPropertyDescriptor(a.flat(), '0'); return [d.value, d.enumerable, d.writable, d.configurable].join();", "2,true,true,true"),
     ]);
 }
+
+#[test]
+fn from_entries_processes_one_entry_before_reading_the_next() {
+    check(&[
+        ("var log = ''; function* entries() { log += 'a'; yield {get 0() { log += 'k'; return 'x'; }, get 1() { log += 'v'; return 3; }}; log += 'b'; yield ['y', 4]; } var o = Object.fromEntries(entries()); return [log, o.x, o.y].join();", "akvb,3,4"),
+        ("var log = ''; function* entries() { try { yield {get 0() { throw 'key'; }}; log += 'next'; } finally { log += 'close'; throw 'close'; } } try { Object.fromEntries(entries()); } catch (e) { return log + ':' + e; }", "close:key"),
+    ]);
+}
