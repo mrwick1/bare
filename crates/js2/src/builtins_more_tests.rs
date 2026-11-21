@@ -229,3 +229,11 @@ fn json_callbacks_see_the_holder_and_visit_properties_in_order() {
         (r#"try { JSON.parse('[', function() { throw 'wrong'; }); } catch (e) { return e.name; }"#, "SyntaxError"),
     ]);
 }
+
+#[test]
+fn prelude_builtins_have_no_construct_slot_before_or_after_call() {
+    check(&[
+        ("var f = Array.prototype.map; function tryNew() { try { Reflect.construct(Object, [], f); return 'yes'; } catch (e) { return e.name; } } var before = tryNew(); [].map(function () {}); return before + ':' + tryNew() + ':' + Object.hasOwn(f, 'prototype');", "TypeError:TypeError:false"),
+        ("var f = Array.from; try { new f(); } catch (e) { return e.name; }", "TypeError"),
+    ]);
+}
