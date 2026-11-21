@@ -29,6 +29,7 @@
 //!
 //! Bounds (`Limit(Host(name))`): `resize-observers` (live observers), `resize-observations` (all observations together).
 
+use crate::browser_sources::Roots;
 use crate::browser::*;
 use bare_css::cascade::Styles;
 use bare_css::values::{Length, Property, Value as Cv};
@@ -157,6 +158,7 @@ fn construct<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<
     m.observers.insert(o, Observer { cb, obs: Vec::new(), targets: HashSet::new(), active: Vec::new(), skipped: false });
     m.order.push(o);
     drop(m);
+    d.own_obj(s.engine(), o, crate::browser::Owner::Resize(o));
     Ok(d.obj_local(s, o))
 }
 
@@ -455,7 +457,7 @@ impl Dom {
         Ok(())
     }
 
-    pub(crate) fn resize_roots(&self, out: &mut Vec<Value>) {
+    pub(crate) fn resize_roots(&self, out: &mut Roots<'_, '_>) {
         let s = self.resize.s.borrow();
         if let Some(p) = s.protos {
             out.extend([p.observer, p.entry, p.size].map(Value::Object));
@@ -463,17 +465,27 @@ impl Dom {
         out.extend(s.observers.iter().filter(|(_, ob)| !ob.obs.is_empty()).map(|(&o, _)| Value::Object(o)));
     }
 
-    pub(crate) fn resize_trace(&self, owner: ObjId, out: &mut Vec<Value>) {
+    pub(crate) fn resize_trace(&self, owner: ObjId, t: &mut bare_js_api::Tracer<'_, Value>) {
+        let out = &mut Roots(t);
         if let Some(ob) = self.resize.s.borrow().observers.get(&owner) {
             out.push(ob.cb);
             out.extend(ob.obs.iter().map(|x| Value::Object(x.wrapper)));
         }
     }
 
-    pub(crate) fn resize_prune(&self, live: &dyn Fn(ObjId) -> bool) {
+    /// The entries of the observer table (tests).
+    #[cfg(test)]
+    pub(crate) fn resize_entries(&self) -> usize {
+        self.resize.s.borrow().observers.len()
+    }
+
+    /// The observers `dead` were collected: drop their entries.
+    pub(crate) fn resize_forget(&self, dead: &[ObjId]) {
         let mut s = self.resize.s.borrow_mut();
-        s.observers.retain(|&o, _| live(o));
         let s = &mut *s;
+        for o in dead {
+            s.observers.remove(o);
+        }
         let observers = &s.observers;
         s.order.retain(|o| observers.contains_key(o));
     }
