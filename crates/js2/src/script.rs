@@ -403,3 +403,5 @@ mod conversion_tests;
 #[cfg(test)]
 #[path = "proto_ic_tests.rs"]
 mod proto_ic_tests;
+#[path = "regexp_rt_tests.rs"]
+mod regexp_rt_tests;

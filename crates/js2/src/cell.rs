@@ -36,6 +36,9 @@ pub enum Layout {
     Slots = 19,
     /// A record of the indexed elements of an object (`object.rs`). The header holds its capacity.
     Elements = 20,
+    /// A record of plain 64-bit words that no script can reach (a compiled RegExp program, `blob.rs`). It has no edge. The header holds its
+    /// length in words.
+    Blob = 21,
 }
 
 impl Layout {
@@ -51,6 +54,7 @@ impl Layout {
             18 => Layout::Indexed,
             19 => Layout::Slots,
             20 => Layout::Elements,
+            21 => Layout::Blob,
             // A header of this crate never holds another code.
             _ => unreachable!(),
         }
@@ -123,6 +127,19 @@ impl CellHeader {
     pub(crate) fn record(layout: Layout, flags: u32, cap: u32) -> CellHeader {
         debug_assert!(flags <= FLAG_MAX && matches!(layout, Layout::Slots | Layout::Elements));
         CellHeader { shape: cap, bits: flags << 8 | layout as u32 }
+    }
+
+    /// The header of a `Blob` cell of `words` 64-bit words: the shape word holds the length.
+    #[inline]
+    pub(crate) fn blob(words: u32) -> CellHeader {
+        CellHeader { shape: words, bits: Layout::Blob as u32 }
+    }
+
+    /// The length in words of a header made by [`CellHeader::blob`].
+    #[inline]
+    pub(crate) fn blob_len(self) -> u32 {
+        debug_assert!(self.layout() == Layout::Blob);
+        self.shape
     }
 
     /// The capacity in values of a record header made by [`CellHeader::record`].

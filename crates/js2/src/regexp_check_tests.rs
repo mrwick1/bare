@@ -167,3 +167,16 @@ fn the_fast_path_accepts_only_what_the_full_check_accepts() {
     }
     assert!(fast > total / 20, "the fast path took only {fast} of {total}");
 }
+
+#[test]
+fn property_names_are_checked_against_the_tables() {
+    for p in ["\\p{Foo}", "\\P{Script=Nope}", "\\p{gc=Lx}", "\\p{Lu=Lu}", "\\p{RGI_Emoji}", "\\p{script=Latn}"] {
+        bad(p, "u");
+        bad(p, "v");
+    }
+    for p in ["\\p{Script=Greek}", "\\p{sc=Grek}", "\\p{General_Category=Lu}", "\\p{Alphabetic}", "\\P{Any}"] {
+        ok(p, "u");
+    }
+    // Without `u` or `v` the text is not a property: `\p` is the letter p.
+    ok("\\p{Foo}", "");
+}
