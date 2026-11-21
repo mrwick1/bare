@@ -51,8 +51,8 @@ use crate::codes::Codes;
 use crate::interp::LazyCompile;
 use crate::reenter::Machine;
 use crate::builtins::{Hint, Native};
-use crate::object::{Ctx, F_CLASS, F_ELEMS_FIXED, F_ELEMS_RO, F_HOST, F_LAZY, F_LEN_RO, F_NATIVE, F_NOEXT, F_PROTO, F_SLOWIDX, K_WRAP, Obj};
-use crate::shapes::{A_ACC, A_C, A_E, A_W, ShapeId, Shapes};
+use crate::object::{Ctx, F_CLASS, F_ELEMS_FIXED, F_ELEMS_RO, F_HOST, F_LAZY, F_LAZYM, F_LEN_RO, F_NATIVE, F_NOEXT, F_PROTO, F_SLOWIDX, K_WRAP, Obj};
+use crate::shapes::{A_ACC, A_C, A_E, A_W, Entry, ShapeId, Shapes};
 use crate::string::{Chars, Str};
 use crate::value::{Kind, Value};
 use std::rc::Rc;
@@ -1163,31 +1163,40 @@ impl Realm {
         }
     }
 
-    /// The setter that the prototype chain of `o` gives for `k`, when the first property that it finds there is an accessor.
-    pub(crate) fn proto_setter(&mut self, o: Obj, k: Str) -> Option<Put> {
-        let mut p = self.proto_of(o)?;
-        loop {
+    /// Find the descriptor for a store. Ask the host for a lazy member before treating the key as absent.
+    fn store_entry(&mut self, o: Obj, k: Str) -> R<Option<Entry>> {
+        let mut entry = self.shapes.find(o.shape(&self.shapes), k);
+        if entry.is_none() && o.has_flag(F_LAZYM) && self.hs_lazy(o, Some(Key::Name(k)))? {
+            entry = self.shapes.find(o.shape(&self.shapes), k);
+        }
+        Ok(entry)
+    }
+
+    /// A setter or a rejected write from the first descriptor on the prototype chain.
+    fn proto_setter(&mut self, o: Obj, k: Str) -> R<Option<Put>> {
+        let mut proto = self.proto_of(o);
+        while let Some(p) = proto {
             self.lazy_prep(p, k);
-            if let Some(e) = self.shapes.find(p.shape(&self.shapes), k) {
+            if let Some(e) = self.store_entry(p, k)? {
                 // An accessor: its setter. A data property that is not writable: nothing is written (`Put::Fail`).
-                return if e.attrs() & A_ACC != 0 {
+                return Ok(if e.attrs() & A_ACC != 0 {
                     Some(Self::setter(p.slot(&self.shapes, e.slot() + 1)))
                 } else if e.attrs() & A_W == 0 {
                     Some(Put::Fail)
                 } else {
                     None
-                };
+                });
             }
-            p = self.proto_of(p)?;
+            proto = self.proto_of(p);
         }
+        Ok(None)
     }
 
     /// Set an own named property: write it if it is there and writable, else call the setter that a prototype gives, else add it (when
     /// the object is extensible).
     fn set_named(&mut self, o: Obj, k: Str, v: Value) -> R<Put> {
         self.fn_prep(o, k);
-        let id = o.shape(&self.shapes);
-        match self.shapes.find(id, k) {
+        match self.store_entry(o, k)? {
             Some(e) if e.attrs() & A_ACC != 0 => Ok(Self::setter(o.slot(&self.shapes, e.slot() + 1))),
             Some(e) => {
                 if e.attrs() & A_W == 0 {
@@ -1197,7 +1206,7 @@ impl Realm {
                 Ok(Put::Done)
             }
             None => {
-                if let Some(p) = self.proto_setter(o, k) {
+                if let Some(p) = self.proto_setter(o, k)? {
                     return Ok(p);
                 }
                 if !o.extensible() {
@@ -1465,19 +1474,20 @@ impl Realm {
                 Ok(Put::Done)
             }
             None => {
-                if name == self.k_length && self.shapes.get(id).layout == Layout::Indexed {
+                if o.has_flag(F_LAZYM) || (name == self.k_length && self.shapes.get(id).layout == Layout::Indexed) {
                     return self.set_prop_g(recv, Key::Name(name), v);
                 }
-                if let Some(p) = self.proto_setter(o, name) {
+                if let Some(p) = self.proto_setter(o, name)? {
                     return Ok(p);
                 }
                 if !o.extensible() {
                     return Ok(Put::Fail);
                 }
+                let cache_add = layout_ok && o.shape(&self.shapes) == id;
                 let slot = self.add_named(o, name, v)?;
                 let new = o.shape(&self.shapes);
                 // The global object gets no add entry: a hit would change its shape with no change of its tag (`Shapes::watch_tag`).
-                if layout_ok && self.shapes.cacheable(new) && o != self.global {
+                if cache_add && self.shapes.cacheable(new) && o != self.global {
                     let loc = o.loc(&self.shapes, slot);
                     // Only an inline slot: the hit then needs no allocation.
                     if loc >> 9 == 0 {
