@@ -1311,6 +1311,18 @@ fn window_screen<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
 }
 
 impl<E: Eng> Dom<E> {
+    pub(crate) fn install_on(self: &Rc<Self>, it: &mut E::Vm) -> R<E, ()> {
+        bare_js_api::Engine::set_host(it, self.clone());
+        it.set_sources(self.clone());
+        it.host_scope_o(|it| {
+            run(it, |s| {
+                self.install(s)?;
+                self.install_scheduler(s)
+            })?;
+            crate::browser_frames::activate(self, it)
+        })
+    }
+
     pub(crate) fn p(&self) -> Protos<E> {
         *self.p.get().expect("installed")
     }
@@ -1319,15 +1331,18 @@ impl<E: Eng> Dom<E> {
         Fault::Limit(LimitKind::Host(what))
     }
 
+    #[inline(always)]
     pub(crate) fn obj(&self, it: &mut E::Vm, proto: E::Obj) -> R<E, E::Obj> {
         it.h_new_object(Some(proto))
     }
 
+    #[inline(always)]
     pub(crate) fn key(&self, it: &mut E::Vm, name: &str) -> R<E, E::Key> {
         it.h_key(name)
     }
 
     /// A string value (the JS string has the same UTF-16 as `s`).
+    #[inline]
     pub(crate) fn js_str(&self, it: &mut E::Vm, s: &str) -> R<E, E::Raw> {
         if s.len() > self.lim.max_string_bytes { return Err(self.lim("dom-string")); }
         it.charge_o((s.len() / 32) as u64)?;
@@ -2105,15 +2120,7 @@ impl<E: Eng> Browser<E> {
             worker: Default::default(),
             reclaim: Default::default(),
         });
-        bare_js_api::Engine::set_host(&mut it, dom.clone());
-        it.set_sources(dom.clone());
-        it.host_scope_o(|it| {
-            run(it, |s| {
-                dom.install(s)?;
-                dom.install_scheduler(s)
-            })?;
-            crate::browser_frames::activate(&dom, it)
-        })?;
+        E::install_dom(&mut it, &dom)?;
         #[cfg(test)]
         if let Some(mode) = std::env::var_os("BARE_RECLAIM_STRESS") {
             dom.reclaim.set_each(true);

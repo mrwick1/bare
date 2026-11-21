@@ -247,7 +247,10 @@ impl<E: Eng> Dom<E> {
             s.charge(1)?;
             // The matcher stops at once when the last compound does not fit: only a selector that fits has to search up or back.
             let mut hit = false;
-            for sel in sels.iter().filter(|x| subject_matches(&doc, c, x)) {
+            for sel in sels.iter() {
+                if !subject_matches(&doc, c, sel) {
+                    continue;
+                }
                 s.charge(match_work(&doc, base + d, std::slice::from_ref(sel)))?;
                 if matches(&doc, c, sel) {
                     hit = true;

@@ -174,7 +174,15 @@ impl<E: Eng> Dom<E> {
             }
             list
         };
-        if snapshot.is_empty() || self.st.borrow().events[&ev].stop {
+        if snapshot.is_empty() {
+            return Ok(());
+        }
+        self.fire_snapshot(it, ev, ty, t, phase, snapshot)
+    }
+
+    #[inline(never)]
+    fn fire_snapshot(&self, it: &mut E::Vm, ev: E::Obj, ty: &str, t: Target<E>, phase: u8, snapshot: Vec<Turn>) -> R<E, ()> {
+        if self.st.borrow().events[&ev].stop {
             return Ok(());
         }
         let cur = self.target_value(it, t)?;
