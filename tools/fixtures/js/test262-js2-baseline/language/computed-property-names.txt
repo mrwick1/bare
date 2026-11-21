@@ -1,0 +1,10 @@
+# test262 counts of tools/js/test262_js2.sh for each directory: directory, old pass, old fail, old skip, new pass, new fail, new skip.
+# old = bare-js, new = bare-js2. Commit: e4fbf57745c6aae3d1f12f181ecef78b1665d812. Written by tools/js/test262_js2.sh -u. Do not edit by hand.
+language/computed-property-names/basics 3 0 0 3 0 0
+language/computed-property-names/class/accessor 4 0 0 4 0 0
+language/computed-property-names/class/method 11 0 0 9 2 0
+language/computed-property-names/class/static 10 4 0 9 5 0
+language/computed-property-names/object/accessor 4 2 0 6 0 0
+language/computed-property-names/object/method 4 1 0 4 1 0
+language/computed-property-names/object/property 1 0 0 1 0 0
+language/computed-property-names/to-name-side-effects 4 0 0 4 0 0

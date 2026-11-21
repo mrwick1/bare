@@ -9,7 +9,8 @@
 # directory process that dies or runs for more than T262_DIR_TIMEOUT seconds (default 120) fails the test that it ran.
 #   -j JOBS   directories in parallel (default 4)
 #   -g REGEX  only the directories that match (grep -E)
-#   -u        write counts.txt as tools/fixtures/js/test262-js2-baseline.txt (not with -g)
+#   -u        write counts.txt as one file for each area (first two path parts) in tools/fixtures/js/test262-js2-baseline/AREA.txt,
+#             only the files whose content changed (not with -g)
 #   -o DIR    keep the results in DIR (default $TMPDIR/test262-js2-out): old.txt and new.txt have one line for each test,
 #             counts.txt the table, regress.txt the tests that pass on the old engine and fail on the new one with their cause (regress-by-cause.txt: sorted by cause)
 # The exit status is 0 when the run finished; this tool reports, it does not gate. Needs GNU find and timeout.
@@ -126,8 +127,22 @@ cat "$outdir/groups.txt"
 echo "causes (top 40; count, cause):"
 cut -f2 "$outdir/regress.txt" | sort | uniq -c | sort -rn | head -40
 if [ -n "$update" ]; then
-  { echo "# test262 counts of tools/js/test262_js2.sh for each directory: directory, old pass, old fail, old skip, new pass, new fail, new skip."
-    echo "# old = bare-js, new = bare-js2. Commit: $pin. Written by tools/js/test262_js2.sh -u. Do not edit by hand."
-    cat "$outdir/counts.txt"; } > "$fix/test262-js2-baseline.txt"
+  # One file for each area (the first two path parts, e.g. built-ins/Promise), so that PRs on different areas never touch the same file.
+  base=$fix/test262-js2-baseline
+  rm -rf "$outdir/baseline"; mkdir -p "$outdir/baseline"
+  awk -v o="$outdir/baseline" -v pin="$pin" '{ split($1, a, "/"); f = o "/" a[1] "/" a[2] ".txt"
+    if (!(f in seen)) { seen[f] = 1; system("mkdir -p " o "/" a[1])
+      print "# test262 counts of tools/js/test262_js2.sh for each directory: directory, old pass, old fail, old skip, new pass, new fail, new skip." > f
+      print "# old = bare-js, new = bare-js2. Commit: " pin ". Written by tools/js/test262_js2.sh -u. Do not edit by hand." > f }
+    print > f }' "$outdir/counts.txt"
+  mkdir -p "$base"
+  (cd "$outdir/baseline" && find . -name '*.txt' | sort) > "$outdir/baseline.list"
+  (cd "$base" && find . -name '*.txt' | sort) | while read -r f; do
+    grep -qxF "$f" "$outdir/baseline.list" || rm -f "$base/$f"
+  done
+  while read -r f; do
+    mkdir -p "$base/$(dirname "$f")"
+    cmp -s "$outdir/baseline/$f" "$base/$f" || cp "$outdir/baseline/$f" "$base/$f"
+  done < "$outdir/baseline.list"
 fi
 echo "finished in $secs s; results in $outdir"

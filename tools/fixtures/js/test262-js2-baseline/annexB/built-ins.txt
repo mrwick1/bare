@@ -1,0 +1,13 @@
+# test262 counts of tools/js/test262_js2.sh for each directory: directory, old pass, old fail, old skip, new pass, new fail, new skip.
+# old = bare-js, new = bare-js2. Commit: e4fbf57745c6aae3d1f12f181ecef78b1665d812. Written by tools/js/test262_js2.sh -u. Do not edit by hand.
+annexB/built-ins/RegExp 6 2 2 6 2 2
+annexB/built-ins/RegExp/legacy-accessors/index 0 0 4 0 0 4
+annexB/built-ins/RegExp/legacy-accessors/input 0 0 4 0 0 4
+annexB/built-ins/RegExp/legacy-accessors/lastMatch 0 0 4 0 0 4
+annexB/built-ins/RegExp/legacy-accessors/lastParen 0 0 4 0 0 4
+annexB/built-ins/RegExp/legacy-accessors/leftContext 0 0 4 0 0 4
+annexB/built-ins/RegExp/legacy-accessors/rightContext 0 0 4 0 0 4
+annexB/built-ins/RegExp/named-groups 0 0 2 0 0 2
+annexB/built-ins/RegExp/prototype/Symbol.split 0 0 2 0 0 2
+annexB/built-ins/RegExp/prototype/compile 0 20 3 0 20 3
+annexB/built-ins/RegExp/prototype/flags 0 1 0 0 1 0

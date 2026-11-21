@@ -45,6 +45,27 @@ use crate::value::{Kind, Value};
 use std::ptr::{self, NonNull};
 
 const WORD: usize = 8;
+
+// Object header flags (`F_*` below). They are bits of the 24 flag bits of `CellHeader` (`FLAG_MAX` in `cell.rs`). Add a flag at the
+// next free bit, add its row here and its name to `ALL_FLAGS`: the compile-time check below fails on a bit that two flags share.
+//   bit  value  flag            owner
+//    0       1  F_OVER          objects (inline overflow record)
+//    1       2  F_CALLABLE      functions
+//    2       4  F_CLASS         classes
+//    3       8  F_DERIVED       classes
+//    4      16  F_NATIVE        built-ins (builtins.rs)
+//    5      32  F_NOEXT        objects (preventExtensions)
+//    6      64  F_FNPROPS      built-ins (builtins.rs)
+//    7     128  F_ELEMS_RO     arrays
+//    8     256  F_ELEMS_FIXED  arrays
+//    9     512  F_LEN_RO       arrays
+//   10    1024  F_SLOWIDX      arrays
+//   11    2048  F_LAZY         functions (interp_rt.rs)
+//   12    4096  F_WRAP         wrappers (bi_wrap.rs)
+//   13    8192  F_PROMISE      promises (promise.rs)
+//   14   16384  F_GEN          generators (gen.rs)
+//   15   32768  F_REGEXP       regexp objects (regexp_rt.rs)
+// Bits 16 to 23 are free: 8 of the 24 flag bits. `F_SPARSE` is a flag of the `Elements` record, not of an object header.
 /// Object header flag: the last inline word holds the pointer to a `Slots` record.
 const F_OVER: u32 = 1;
 /// Object header flag: a script can call the object (a function cell, S2.6). A shape change keeps it.
@@ -80,6 +101,19 @@ pub const F_PROMISE: u32 = 8192;
 pub const F_GEN: u32 = 16384;
 /// Object header flag: a `RegExp` object (`regexp_rt.rs`). Its slots 0 to 3 are the pattern, the flag bits, the program and `lastIndex`. Bit 8192 is for `F_PROMISE`.
 pub const F_REGEXP: u32 = 32768;
+const ALL_FLAGS: [u32; 16] =
+    [F_OVER, F_CALLABLE, F_CLASS, F_DERIVED, F_NATIVE, F_NOEXT, F_FNPROPS, F_ELEMS_RO, F_ELEMS_FIXED, F_LEN_RO, F_SLOWIDX, F_LAZY, F_WRAP, F_PROMISE, F_GEN, F_REGEXP];
+/// Compile-time check: every flag is one bit, no two flags share a bit, and all fit the 24 flag bits of a cell header.
+const _: () = {
+    let mut seen = 0u32;
+    let mut i = 0;
+    while i < ALL_FLAGS.len() {
+        let f = ALL_FLAGS[i];
+        assert!(f.is_power_of_two() && f <= crate::cell::FLAG_MAX && seen & f == 0);
+        seen |= f;
+        i += 1;
+    }
+};
 /// `Elements` header flag: the record is sparse.
 const F_SPARSE: u32 = 1;
 /// A write at an index this far above the capacity of a dense record makes it sparse.
