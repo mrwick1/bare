@@ -325,6 +325,8 @@ pub struct Realm {
     /// the prototype are made at the first use of either (`Realm::fn_props`).
     pub symbol_proto: Obj,
     pub symbol_ctor: Option<Obj>,
+    /// The lazy tables of the built-in objects (`lazy.rs`).
+    pub(crate) ltab: crate::lazy::Lazy,
     pub(crate) wk: [Str; crate::bi_symbol::WK],
     /// The registry of `Symbol.for`: an object with no prototype, made at the first call. It is a root.
     pub(crate) registry: Option<Obj>,
@@ -485,6 +487,7 @@ impl Realm {
             boolean_proto,
             symbol_proto,
             symbol_ctor: None,
+            ltab: Default::default(),
             wk,
             registry: None,
             error_protos,
@@ -634,7 +637,7 @@ impl Realm {
     /// The text of an error value, for tests and for the host: `Name: message`.
     pub fn error_text(&self, v: Value) -> String {
         let Some(o) = Realm::obj(v) else { return format!("{v:?}") };
-        let s = |k| match self.lookup_g(o, k) {
+        let s = |k| match self.lookup_ro(o, k) {
             Some(Slot::Data(x)) => Realm::str_of(x).map(|s| self.text(s)).unwrap_or_default(),
             _ => String::new(),
         };
@@ -934,16 +937,33 @@ impl Realm {
         o.proto(&self.shapes).and_then(|p| Realm::obj(Value::pointer(Kind::Object, p)))
     }
 
-    /// Look up `key` along the prototype chain: what the first object that has it holds.
-    pub fn lookup_g(&self, mut o: Obj, key: Str) -> Option<Slot> {
+    /// What `o` itself holds for `key`.
+    fn slot_at(&self, o: Obj, key: Str) -> Option<Slot> {
+        let e = self.shapes.find(o.shape(&self.shapes), key)?;
+        Some(if e.attrs() & A_ACC != 0 {
+            Slot::Acc(o.slot(&self.shapes, e.slot()), o.slot(&self.shapes, e.slot() + 1))
+        } else {
+            Slot::Data(o.slot(&self.shapes, e.slot()))
+        })
+    }
+
+    /// Look up `key` along the prototype chain: what the first object that has it holds. A name that a lazy table (`lazy.rs`) has and
+    /// that is not made yet is made on the way.
+    pub fn lookup_g(&mut self, mut o: Obj, key: Str) -> Option<Slot> {
         loop {
-            let id = o.shape(&self.shapes);
-            if let Some(e) = self.shapes.find(id, key) {
-                return Some(if e.attrs() & A_ACC != 0 {
-                    Slot::Acc(o.slot(&self.shapes, e.slot()), o.slot(&self.shapes, e.slot() + 1))
-                } else {
-                    Slot::Data(o.slot(&self.shapes, e.slot()))
-                });
+            self.lazy_prep(o, key);
+            if let Some(s) = self.slot_at(o, key) {
+                return Some(s);
+            }
+            o = self.proto_of(o)?;
+        }
+    }
+
+    /// [`Realm::lookup_g`] for a name that no lazy table has (`name`, `message`), where the realm is not mutable.
+    fn lookup_ro(&self, mut o: Obj, key: Str) -> Option<Slot> {
+        loop {
+            if let Some(s) = self.slot_at(o, key) {
+                return Some(s);
             }
             o = self.proto_of(o)?;
         }
@@ -1125,9 +1145,10 @@ impl Realm {
     }
 
     /// The setter that the prototype chain of `o` gives for `k`, when the first property that it finds there is an accessor.
-    pub(crate) fn proto_setter(&self, o: Obj, k: Str) -> Option<Put> {
+    pub(crate) fn proto_setter(&mut self, o: Obj, k: Str) -> Option<Put> {
         let mut p = self.proto_of(o)?;
         loop {
+            self.lazy_prep(p, k);
             if let Some(e) = self.shapes.find(p.shape(&self.shapes), k) {
                 // An accessor: its setter. A data property that is not writable: nothing is written (`Put::Fail`).
                 return if e.attrs() & A_ACC != 0 {
@@ -1190,6 +1211,7 @@ impl Realm {
         if o.has_flag(F_HOST) {
             return self.get_prop_g(recv, Key::Name(name));
         }
+        self.lazy_prep(o, name);
         let id = o.shape(&self.shapes);
         if fb.caches[site].state == POLY
             && let Some((loc, 0)) = fb.poly_find(site, id.raw())
@@ -1250,10 +1272,11 @@ impl Realm {
     /// The data property `name` that the chain from `start` gives: the holder and the place of the slot. It marks the objects that the
     /// walk passed with `F_PROTO` (so a change of one of them bumps `Shapes::proto_epoch`). `None` when no object has the key, or the
     /// first one that has it holds an accessor.
-    fn proto_target(&self, start: Option<Obj>, name: Str) -> Option<(Obj, u32)> {
+    fn proto_target(&mut self, start: Option<Obj>, name: Str) -> Option<(Obj, u32)> {
         let start = start?;
         let mut o = start;
         let (holder, slot) = loop {
+            self.lazy_prep(o, name);
             if let Some(e) = self.shapes.find(o.shape(&self.shapes), name) {
                 if e.attrs() & A_ACC != 0 {
                     return None;

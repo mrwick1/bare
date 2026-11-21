@@ -73,6 +73,7 @@ mod bi_symbol;
 mod bi_collections;
 mod bi_reflect;
 mod bi_string_more;
+mod lazy;
 #[rustfmt::skip]
 mod prelude_facts;
 pub mod script;

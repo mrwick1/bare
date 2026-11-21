@@ -17,6 +17,7 @@
 //!
 //! **Iteration.** The iterator protocol is step G3. Until then [`Realm::open_iter`] follows it for an iterable that has
 //! `Symbol.iterator`, and an array or a string without it goes through `Realm::iter_values` (the values of an array are read at the start).
+use crate::lazy::{Ent, m};
 use crate::bi_symbol::{ITERATOR, SPECIES};
 use crate::builtins::{Native, NativeFn, arg};
 use crate::interp::STOP;
@@ -356,13 +357,17 @@ impl Realm {
             self.pr.ids[i] = n - N_IDS + i;
         }
         let (c, proto) = (Realm::obj(self.pr.ctor).expect("Promise"), self.pr.proto);
-        self.method(c, "all", 1, promise_all);
-        self.method(c, "allSettled", 1, promise_all_settled);
-        self.method(c, "any", 1, promise_any);
-        self.method(c, "race", 1, promise_race);
-        self.method(c, "withResolvers", 0, promise_with_resolvers);
-        self.method(c, "try", 1, promise_try);
-        self.method(proto, "finally", 1, promise_finally);
+        static PROMISE_COMBINATORS: &[Ent] = &[
+            m("all", 1, promise_all),
+            m("allSettled", 1, promise_all_settled),
+            m("any", 1, promise_any),
+            m("race", 1, promise_race),
+            m("withResolvers", 0, promise_with_resolvers),
+            m("try", 1, promise_try),
+        ];
+        self.lazy_table(c, PROMISE_COMBINATORS);
+        static PROMISE_FINALLY: &[Ent] = &[m("finally", 1, promise_finally)];
+        self.lazy_table(proto, PROMISE_FINALLY);
         let getter = self.new_native(species_get, false, 0, "get [Symbol.species]");
         self.pr.species_fn = getter.value();
         self.keep(getter.value());

@@ -22,10 +22,11 @@
 //! - `toLocaleString`, `toLocaleDateString` and `toLocaleTimeString` write the `en-US` form (`1/2/2020, 3:04:05 PM`, with a plain space
 //!   before `AM`) in the local zone, and ignore the locale and the options: js2 has no `Intl` yet. The old engine forwards to `Intl`.
 //! - `Date.now` and `new Date()` read the system clock (no virtual clock).
+use crate::lazy::{Ent, indexed, m, same};
 use crate::bi_date_calc::{self as calc, Fields, LocalText, Parsed};
 use crate::bi_date_tz::{self as tz, Zone};
 use crate::bi_symbol::TO_PRIMITIVE;
-use crate::builtins::{HIDDEN, Hint, NativeFn, arg};
+use crate::builtins::{Hint, arg};
 use crate::cell::Layout;
 use crate::interp_rt::{ErrKind, Key, R, Realm};
 use crate::object::Obj;
@@ -408,24 +409,26 @@ fn set(rt: &mut Realm, (o, slot, t): (Obj, u32, f64), i: u8, local: bool, args: 
     Ok(put(rt, o, slot, v))
 }
 
+/// The table of `Date.prototype`: a row of [`OPS`] each, and `toGMTString`.
+const fn date_table() -> [Ent; OPS.len() + 1] {
+    let mut a = [same("toGMTString", "toUTCString"); OPS.len() + 1];
+    let mut i = 0;
+    while i < OPS.len() {
+        a[i] = indexed(OPS[i].0, OPS[i].1, date_method, i as i32);
+        i += 1;
+    }
+    a
+}
+
 impl Realm {
     pub(crate) fn install_date(&mut self) {
         let proto = Obj::new(&mut self.heap, &self.shapes, self.s_object).expect("memory");
         let c = self.ctor("Date", 7, date_ctor, proto);
-        for (n, len, f) in [("now", 0, date_now as NativeFn), ("parse", 1, date_parse), ("UTC", 7, date_utc)] {
-            self.method(c, n, len, f);
-        }
-        for (i, &(name, len, _)) in OPS.iter().enumerate() {
-            let f = self.new_native(date_method, false, len, name);
-            f.set_slot(&self.shapes, 1, Value::int(i as i32));
-            let k = self.intern(name);
-            self.define_attrs(proto, Key::Name(k), HIDDEN, f.value()).expect("define");
-            if name == "toUTCString" {
-                // `toGMTString` is the same function object.
-                let k = self.intern("toGMTString");
-                self.define_attrs(proto, Key::Name(k), HIDDEN, f.value()).expect("define");
-            }
-        }
+        static DATE_STATICS: &[Ent] = &[m("now", 0, date_now), m("parse", 1, date_parse), m("UTC", 7, date_utc)];
+        self.lazy_table(c, DATE_STATICS);
+        // `toGMTString` is the same function object as `toUTCString`.
+        static DATE_PROTO: [Ent; OPS.len() + 1] = date_table();
+        self.lazy_table(proto, &DATE_PROTO);
         let tp = self.new_native(date_to_prim, false, 1, "[Symbol.toPrimitive]");
         self.define_attrs(proto, Key::Name(self.wk[TO_PRIMITIVE]), A_C, tp.value()).expect("define");
     }

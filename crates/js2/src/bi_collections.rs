@@ -31,6 +31,7 @@
 //!
 //! **Weak ones.** The slot holds a [`WeakTab`] (an ephemeron table keyed by address). The collector keeps a value only while its key is
 //! alive (`gc.rs`). Only an object is a key: a symbol is a leaf cell, and the collector would never release a value that waits for one.
+use crate::lazy::{Ent, m};
 use crate::builtins::{NativeFn, arg};
 use crate::bi_symbol::{ITERATOR, SPECIES, TO_STRING_TAG};
 use crate::cell::Layout;
@@ -775,28 +776,37 @@ impl Realm {
             let g = self.new_native(return_this, false, 0, n);
             self.define_accessor(c, Key::Name(self.wk[SPECIES]), g.value(), false, false).expect("define");
         }
+        // The functions that the constructors and the iterator aliases hold are made now; the other methods are lazy (`lazy.rs`).
         let mut cells = Vec::new();
-        for (o, ms) in [
-            (map, &[("get", 1, map_get as NativeFn), ("set", 2, map_set), ("has", 1, map_has), ("delete", 1, map_delete), ("clear", 0, map_clear), ("forEach", 1, map_for_each), ("keys", 0, map_keys), ("values", 0, map_values), ("entries", 0, map_entries)][..]),
-            (set, &[("add", 1, set_add as NativeFn), ("has", 1, set_has), ("delete", 1, set_delete), ("clear", 0, set_clear), ("forEach", 1, set_for_each), ("values", 0, set_values), ("entries", 0, set_entries)][..]),
-            (wmap, &[("get", 1, wm_get as NativeFn), ("set", 2, wm_set), ("has", 1, wm_has), ("delete", 1, wm_delete)][..]),
-            (wset, &[("add", 1, ws_add as NativeFn), ("has", 1, ws_has), ("delete", 1, ws_delete)][..]),
-            (miter, &[("next", 0, map_iter_next as NativeFn)][..]),
-            (siter, &[("next", 0, set_iter_next as NativeFn)][..]),
+        for (o, n, len, f) in [
+            (map, "set", 2, map_set as NativeFn),
+            (set, "add", 1, set_add),
+            (wmap, "set", 2, wm_set),
+            (wset, "add", 1, ws_add),
+            (map, "entries", 0, map_entries),
+            (set, "values", 0, set_values),
         ] {
-            for &(n, len, f) in ms {
-                self.method(o, n, len, f);
-                cells.push(self.get_named(o.value(), n).expect("method"));
-            }
+            self.method(o, n, len, f);
+            cells.push(self.get_named(o.value(), n).expect("method"));
         }
-        // `cells` is in the order above: map 0..9, set 9..16, weak map 16..20, weak set 20..23.
+        static MAP_PROTO: &[Ent] =
+            &[m("get", 1, map_get), m("has", 1, map_has), m("delete", 1, map_delete), m("clear", 0, map_clear), m("forEach", 1, map_for_each), m("keys", 0, map_keys), m("values", 0, map_values)];
+        static SET_PROTO: &[Ent] = &[m("has", 1, set_has), m("delete", 1, set_delete), m("clear", 0, set_clear), m("forEach", 1, set_for_each), m("entries", 0, set_entries)];
+        static WEAKMAP_PROTO: &[Ent] = &[m("get", 1, wm_get), m("has", 1, wm_has), m("delete", 1, wm_delete)];
+        static WEAKSET_PROTO: &[Ent] = &[m("has", 1, ws_has), m("delete", 1, ws_delete)];
+        for (o, t) in [(map, MAP_PROTO), (set, SET_PROTO), (wmap, WEAKMAP_PROTO), (wset, WEAKSET_PROTO)] {
+            self.lazy_table(o, t);
+        }
+        for (o, n, len, f) in [(miter, "next", 0, map_iter_next as NativeFn), (siter, "next", 0, set_iter_next)] {
+            self.method(o, n, len, f);
+        }
         for (o, g, name) in [(map, map_size as NativeFn, "get size"), (set, set_size, "get size")] {
             let f = self.new_native(g, false, 0, name);
             let k = self.intern("size");
             self.define_accessor(o, Key::Name(k), f.value(), false, false).expect("define");
         }
         // `Map.prototype[Symbol.iterator]` is `entries`, and the `Set` ones are `values`; `Set.prototype.keys` is `values` too.
-        let (entries, values) = (cells[8], cells[9 + 5]);
+        let (entries, values) = (cells[4], cells[5]);
         let it = Key::Name(self.wk[ITERATOR]);
         self.define_attrs(map, it, crate::builtins::HIDDEN, entries).expect("define");
         self.define_attrs(set, it, crate::builtins::HIDDEN, values).expect("define");
@@ -808,7 +818,7 @@ impl Realm {
         }
         self.keep(me.value());
         let c = self.coll.as_mut().expect("installed");
-        c.adders = [cells[1], cells[9], cells[17], cells[20]];
+        c.adders = [cells[0], cells[1], cells[2], cells[3]];
         c.iters = [entries, values];
         cells.iter().for_each(|v| self.consts.push(*v));
     }

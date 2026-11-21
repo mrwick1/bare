@@ -2,7 +2,8 @@
 //! object (`bi_wrap.rs`); a method of a primitive runs with the primitive as `this`, and the methods also accept a wrapper.
 //! Known gaps: `toFixed` rounds the exact binary value half to even where the language rounds half up; `toString(radix)` of a fraction
 //! gives at most 52 digits; `toPrecision`, `toExponential` and `Intl` are missing; a number prints with Rust's rules (`Realm::num_to_string`).
-use crate::builtins::{NativeFn, arg};
+use crate::builtins::arg;
+use crate::lazy::{Ent, alias, m, num};
 use crate::interp_rt::{ErrKind, R, Realm};
 use crate::value::Value;
 
@@ -10,90 +11,89 @@ impl Realm {
     pub(crate) fn install_number(&mut self) {
         let proto = self.number_proto;
         let c = self.ctor("Number", 1, number_ctor, proto);
-        for (n, len, f) in [("isInteger", 1, is_integer as NativeFn), ("isFinite", 1, number_is_finite), ("isNaN", 1, number_is_nan), ("isSafeInteger", 1, is_safe_integer)] {
-            self.method(c, n, len, f);
-        }
-        for (n, v) in [
-            ("MAX_SAFE_INTEGER", 9007199254740991.0),
-            ("MIN_SAFE_INTEGER", -9007199254740991.0),
-            ("EPSILON", f64::EPSILON),
-            ("MAX_VALUE", f64::MAX),
-            ("MIN_VALUE", 5e-324),
-            ("NaN", f64::NAN),
-            ("POSITIVE_INFINITY", f64::INFINITY),
-            ("NEGATIVE_INFINITY", f64::NEG_INFINITY),
-        ] {
-            let k = self.intern(n);
-            self.define_attrs(c, crate::interp_rt::Key::Name(k), 0, Value::number(v)).expect("define");
-        }
-        for (n, len, f) in [
-            ("toString", 1, number_to_string as NativeFn),
-            ("toFixed", 1, to_fixed),
-            ("toExponential", 1, to_exponential),
-            ("toPrecision", 1, to_precision),
-            ("toLocaleString", 0, to_locale_string),
-            ("valueOf", 0, number_value_of),
-        ] {
-            self.method(proto, n, len, f);
-        }
+        // The table of the global functions comes first: `Number.parseInt` is one of them (`Kind::Alias`).
+        let g = self.global;
+        static GLOBAL_FUNCTIONS: &[Ent] = &[m("parseInt", 2, parse_int), m("parseFloat", 1, parse_float), m("isNaN", 1, global_is_nan), m("isFinite", 1, global_is_finite)];
+        self.lazy_table(g, GLOBAL_FUNCTIONS);
+        static NUMBER_STATICS: &[Ent] = &[
+            m("isInteger", 1, is_integer),
+            m("isFinite", 1, number_is_finite),
+            m("isNaN", 1, number_is_nan),
+            m("isSafeInteger", 1, is_safe_integer),
+            num("MAX_SAFE_INTEGER", 9007199254740991.0),
+            num("MIN_SAFE_INTEGER", -9007199254740991.0),
+            num("EPSILON", f64::EPSILON),
+            num("MAX_VALUE", f64::MAX),
+            num("MIN_VALUE", 5e-324),
+            num("NaN", f64::NAN),
+            num("POSITIVE_INFINITY", f64::INFINITY),
+            num("NEGATIVE_INFINITY", f64::NEG_INFINITY),
+            // `Number.parseInt` and `Number.parseFloat` are the same function objects as the globals.
+            alias("parseFloat"),
+            alias("parseInt"),
+        ];
+        self.lazy_table(c, NUMBER_STATICS);
+        static NUMBER_PROTO: &[Ent] = &[
+            m("toString", 1, number_to_string),
+            m("toFixed", 1, to_fixed),
+            m("toExponential", 1, to_exponential),
+            m("toPrecision", 1, to_precision),
+            m("toLocaleString", 0, to_locale_string),
+            m("valueOf", 0, number_value_of),
+        ];
+        self.lazy_table(proto, NUMBER_PROTO);
         let b = self.boolean_proto;
         self.ctor("Boolean", 1, boolean_ctor, b);
-        self.method(b, "toString", 0, boolean_to_string);
-        self.method(b, "valueOf", 0, boolean_value_of);
-        let g = self.global;
-        for (n, len, f) in [("parseInt", 2, parse_int as NativeFn), ("parseFloat", 1, parse_float), ("isNaN", 1, global_is_nan), ("isFinite", 1, global_is_finite)] {
-            self.method(g, n, len, f);
-        }
-        // `Number.parseInt` and `Number.parseFloat` are the same function objects as the globals.
-        for n in ["parseFloat", "parseInt"] {
-            let v = self.get_named(g.value(), n).expect("a global");
-            self.hidden(c, n, v);
-        }
-        let m = Obj::new_plain(self);
-        self.hidden(g, "Math", m.value());
-        for (n, v) in [("PI", std::f64::consts::PI), ("E", std::f64::consts::E), ("LN2", std::f64::consts::LN_2), ("LN10", std::f64::consts::LN_10), ("LOG2E", std::f64::consts::LOG2_E), ("LOG10E", std::f64::consts::LOG10_E), ("SQRT2", std::f64::consts::SQRT_2), ("SQRT1_2", std::f64::consts::FRAC_1_SQRT_2)] {
-            let k = self.intern(n);
-            self.define_attrs(m, crate::interp_rt::Key::Name(k), 0, Value::number(v)).expect("define");
-        }
-        for (n, len, f) in [
-            ("floor", 1, floor as NativeFn),
-            ("ceil", 1, ceil),
-            ("round", 1, round),
-            ("trunc", 1, trunc),
-            ("abs", 1, abs),
-            ("sign", 1, sign),
-            ("sqrt", 1, sqrt),
-            ("cbrt", 1, cbrt),
-            ("exp", 1, exp),
-            ("log", 1, log),
-            ("log2", 1, log2),
-            ("log10", 1, log10),
-            ("sin", 1, sin),
-            ("cos", 1, cos),
-            ("tan", 1, tan),
-            ("asin", 1, asin),
-            ("acos", 1, acos),
-            ("atan", 1, atan),
-            ("atan2", 2, atan2),
-            ("pow", 2, pow),
-            ("max", 2, max),
-            ("min", 2, min),
-            ("hypot", 2, hypot),
-            ("imul", 2, imul),
-            ("fround", 1, fround),
-            ("clz32", 1, clz32),
-            ("sinh", 1, sinh),
-            ("cosh", 1, cosh),
-            ("tanh", 1, tanh),
-            ("asinh", 1, asinh),
-            ("acosh", 1, acosh),
-            ("atanh", 1, atanh),
-            ("expm1", 1, expm1),
-            ("log1p", 1, log1p),
-            ("random", 0, random),
-        ] {
-            self.method(m, n, len, f);
-        }
+        static BOOLEAN_PROTO: &[Ent] = &[m("toString", 0, boolean_to_string), m("valueOf", 0, boolean_value_of)];
+        self.lazy_table(b, BOOLEAN_PROTO);
+        let math = Obj::new_plain(self);
+        self.hidden(g, "Math", math.value());
+        static MATH: &[Ent] = &[
+            num("PI", std::f64::consts::PI),
+            num("E", std::f64::consts::E),
+            num("LN2", std::f64::consts::LN_2),
+            num("LN10", std::f64::consts::LN_10),
+            num("LOG2E", std::f64::consts::LOG2_E),
+            num("LOG10E", std::f64::consts::LOG10_E),
+            num("SQRT2", std::f64::consts::SQRT_2),
+            num("SQRT1_2", std::f64::consts::FRAC_1_SQRT_2),
+            m("floor", 1, floor),
+            m("ceil", 1, ceil),
+            m("round", 1, round),
+            m("trunc", 1, trunc),
+            m("abs", 1, abs),
+            m("sign", 1, sign),
+            m("sqrt", 1, sqrt),
+            m("cbrt", 1, cbrt),
+            m("exp", 1, exp),
+            m("log", 1, log),
+            m("log2", 1, log2),
+            m("log10", 1, log10),
+            m("sin", 1, sin),
+            m("cos", 1, cos),
+            m("tan", 1, tan),
+            m("asin", 1, asin),
+            m("acos", 1, acos),
+            m("atan", 1, atan),
+            m("atan2", 2, atan2),
+            m("pow", 2, pow),
+            m("max", 2, max),
+            m("min", 2, min),
+            m("hypot", 2, hypot),
+            m("imul", 2, imul),
+            m("fround", 1, fround),
+            m("clz32", 1, clz32),
+            m("sinh", 1, sinh),
+            m("cosh", 1, cosh),
+            m("tanh", 1, tanh),
+            m("asinh", 1, asinh),
+            m("acosh", 1, acosh),
+            m("atanh", 1, atanh),
+            m("expm1", 1, expm1),
+            m("log1p", 1, log1p),
+            m("random", 0, random),
+        ];
+        self.lazy_table(math, MATH);
     }
 }
 
