@@ -1,6 +1,6 @@
 # Progress
 
-This file records what is built, what comes next and what is missing. Update it after each merged PR.
+This file records what is built, what comes next and what is missing. Since 2026-11-21, each PR writes its entry to its own file in [progress/](progress/README.md). Do not append new entries to this file.
 
 The reasons for the design are in [decisions.md](decisions.md). Time and memory numbers for each module are in [resources.md](resources.md).
 
@@ -18068,3 +18068,15 @@ The clone rows do not run a handler that reads options by name. `post_args` and 
 Tests. Linux, debug: `cargo test --locked -p bare --lib`: 1719 pass (6 ignored). `-p bare-js`: 1107 pass with the new test (1 ignored). `-p bare-js-api`: 32 pass, and `--features suite`: pass. `BARE_GC_STRESS=1` on the 295 tests of `bare` with `clone`, `message`, `transfer`, `port`, `channel`, `history`, `navigation_tests`, `state`, `browser_child`, `worker`, `array_buffer` or `basics` in the name: all pass. `cargo xwin check -p bare --target x86_64-pc-windows-msvc`: passes. `cargo check --locked -p bare --all-targets`: no warning.
 
 Not tested: the Windows tests (only `cargo xwin check`, no VM run); `BARE_GC_STRESS=1` over the whole `bare` crate; `codegen-units=1` (no row was over +0.5%); an options object on the `postMessage` and `structuredClone` hot path; RSS and wall time; the journeys and `tools/suite/run.py`; macOS.
+
+## Engine rewrite: status (index, from 2026-11-21)
+
+Order (owner, 2026-11-21): first the browser runs pages on js2 (`BARE_JS_EXEC=new`), then the daily journeys on js2 decide the work, then js2 becomes the default.
+
+| Phase | Goal | State |
+| ----- | ---- | ----- |
+| 1 | The typing page runs on `BARE_JS_EXEC=new`: S0.4 PR 4 to PR 6, `Dom<E: Engine>`, the js2 adapter gaps, the browser switch | in progress |
+| 2 | Every daily journey on js2. A script lists the failures; agents work only from that list | not started |
+| 3 | Measure, profile, make js2 the default (S5.3 to S5.5) | not started |
+
+New entries: [progress/](progress/README.md).

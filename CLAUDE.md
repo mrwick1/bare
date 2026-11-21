@@ -20,7 +20,7 @@ Do not patch hot spots one by one. A 10% gain on one benchmark row is not the go
 2. Study the design, not the symptom. Write down the current data structures and algorithms, and their time and memory complexity. Read how real engines solve the same problem (Chrome, Firefox and Servo, WebKit, Ladybird) and what research gives.
 3. Compare options. List at least two other designs. For each, give the data structures, the algorithm, the complexity, the memory layout and the expected gain on our benchmark. Prefer a design that makes the work unneeded over one that makes the work cheaper.
 4. Write a design document per subsystem in `docs/`. The owner reviews it before any code is built.
-5. Build the chosen design. Run the same benchmark again on the whole browser, not only single rows. Record the numbers in `docs/progress.md`.
+5. Build the chosen design. Run the same benchmark again on the whole browser, not only single rows. Record the numbers in a new file in `docs/progress/` (see its README).
 
 A limit or a budget that protects against a slow algorithm is a sign of a design problem. Fix the algorithm, then remove or lower the limit.
 
@@ -31,3 +31,8 @@ A limit or a budget that protects against a slow algorithm is a sign of a design
 - Trust instruction counts under load. Trust wall time only on an idle machine.
 - Run each case at least 3 times. Give the machine, the inputs, the run count and the spread.
 - Mark an unverified cause as "hypothesis".
+
+## Cost gate (owner, 2026-11-21)
+
+- A PR runs only the rows of the code it changes: the js2 micro rows (`interp_load`) for a js2 change, and the `cost_rows.txt` rows of the touched subsystem (`cost_matrix.sh -g`). The rule per row stays: +0.5% under both allocators, or within +0.5% at `codegen-units=1`.
+- The full matrix runs on main after about every 6 merged PRs. A row that grew there is bisected to its PR, and a fix PR follows at once.
