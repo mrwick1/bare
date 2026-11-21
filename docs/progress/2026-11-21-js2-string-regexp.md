@@ -30,7 +30,7 @@ The exact calls (counted with a temporary log of each compile and each method ca
 - `split` with a RegExp does not run a sticky copy at each index (the spec text). It searches forward from `q` and applies the same rule for an empty match at `p`. A sticky RegExp is tried at `q` only.
 - `regexp_rt.rs`: `regexp_run` is split in two: `run_at` (the matcher call and the budget and limit handling, no `lastIndex`) and the `lastIndex` rules. New small helpers for the String side (`spans`, `regexp_flags_of`, `regexp_for`, `regexp_clone`, `last_index_value`, `put_last_index`). `program`, `last_index`, `substring` and `match_result` are `pub(crate)` and `#[inline(always)]`: a second caller made the compiler stop inlining them, and that cost 1.5% of the `test` row (see Cost). `compile_program` is the cold part of `program`.
 - New `bi_uri.rs`: `encodeURI`, `encodeURIComponent`, `decodeURI`, `decodeURIComponent` as lazy entries of the global table. The code is that of `crates/js/src/value.rs`. A lone surrogate and a bad escape throw `URIError`. `escape` and `unescape` (Annex B) are not done.
-- Tests: `bi_string_regexp_tests.rs` (6 tests, 40 cases, with the patterns above) and `bi_uri_tests.rs` (1 test, 6 cases), each normally and under constant collection. `builtins_more_tests.rs`: the case that asserted that `'a'.match('a')` throws now expects only the three `call(undefined)` errors.
+- Tests: `bi_string_regexp_tests.rs` (6 tests, 41 cases, with the patterns above) and `bi_uri_tests.rs` (1 test, 6 cases), each normally and under constant collection. `builtins_more_tests.rs`: the case that asserted that `'a'.match('a')` throws now expects only the three `call(undefined)` errors.
 
 ## Known gaps (not done)
 
@@ -51,7 +51,7 @@ Journeys (`tools/journeys/triage.sh -e new -j 3`, live sites, archMachine, one r
 
 The 3 that still fail also fail on the old engine ([journey triage](2026-11-21-journey-triage.md): the live site changed). `staging` is skipped (no login set).
 
-Tests: `cargo test --locked -p bare-js2 --lib` 749 passed; `cargo test --locked -p bare-js-api` 32 + 1 + 5 passed. The 7 new tests fail on the base tree (6 of the 7 fail; the one that passes, `replace_with_a_string_pattern`, covers behavior that did not change).
+Tests: `cargo test --locked -p bare-js2 --lib` 749 passed; `cargo test --locked -p bare-js-api` 32 + 1 + 5 passed. On the base tree 6 of the 7 new tests fail (the one that passes, `replace_with_a_string_pattern`, covers behavior that did not change).
 
 test262 (`TEST262=/data/claude-tmp/test262 tools/js/test262_js2.sh -g 'RegExp|built-ins/String'`, js2 column against `tools/fixtures/js/test262-js2-baseline.txt`): no directory lost a pass. 1,941 to 2,078 passes in these directories (+137):
 
