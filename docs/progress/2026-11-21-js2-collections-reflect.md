@@ -70,7 +70,7 @@ Total js2 passes: 19,738 against 19,229 in `test262-js2-baseline.txt` (+509). Lo
 
 ## Tests
 
-- `cargo test --locked -p bare-js2 --lib` (Linux): 558 tests, 557 passed on the first run. The one failure, `compile::tests::a_scope_with_many_locals_compiles_in_linear_time`, is a wall-time test that I did not touch. It failed with other sessions loading the machine and passed alone (9 s). 12 new tests in `bi_collections_tests.rs`. Each script runs once normally and once under GC stress (`set_trigger`). The weak tests use `collect_idle` and the `last_gc` counters (cleared, released, live bytes).
+- `cargo test --locked -p bare-js2 --lib` (Linux, after the rebase on e23fe584): 564 tests, 563 passed on the full run. The one failure, `compile::tests::a_scope_with_many_locals_compiles_in_linear_time`, is a wall-time test that I did not touch. It failed in both full runs (load average 31) and passed alone each time (8 to 9 s). 12 new tests in `bi_collections_tests.rs`. Each script runs once normally and once under GC stress (`set_trigger`). The weak tests use `collect_idle` and the `last_gc` counters (cleared, released, live bytes).
 - Covered: SameValueZero keys (`-0`, `NaN`), insertion order, the protocol of the iterators, an iterator over a delete, an add, a copy (grow and shrink) and a `clear`, `forEach` with changes during the loop, the constructors with iterables and bad input, the property shape of the built-ins, objects-only weak keys, a dead key that drops its entry, a chain and a cycle through weak maps, and a weak map under constant collection.
 
 ## Not tested
