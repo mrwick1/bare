@@ -216,7 +216,7 @@ pub trait Ops<E: Eng>: Sized {
     fn h_has_own(&mut self, o: E::Obj, key: E::Key) -> Result<bool, Fault<E>>;
     fn h_intern(&mut self, s: &str) -> Result<E::Str, Fault<E>>;
     fn h_key(&mut self, s: &str) -> Result<E::Key, Fault<E>>;
-    fn h_str_units(& self, s: E::Str) -> Result<&[u16], Fault<E>>;
+    fn h_str_units(& self, s: E::Str) -> Result<std::borrow::Cow<'_, [u16]>, Fault<E>>;
     fn h_str_len(& self, s: E::Str) -> Result<usize, Fault<E>>;
     fn h_to_string_lossy(& self, s: E::Str) -> Result<String, Fault<E>>;
     fn h_symbol_description(& self, s: E::Sym) -> Result<Option<E::Str>, Fault<E>>;

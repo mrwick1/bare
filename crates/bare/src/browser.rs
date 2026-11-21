@@ -138,7 +138,9 @@ pub(crate) type IdMap<K, V> = HashMap<K, V, BuildHasherDefault<IdHash>>;
 
 /// A key that is a slot number of the engine: `ObjId` (its slot is reused, so the whole handle tells a dead object from a new one)
 /// or `NodeId` (the reclaim reuses a freed slot, so a holder of a `NodeId` is a root or is forgotten at once: `browser_reclaim.rs`).
-pub trait SlotKey: Copy + Eq {
+pub trait SlotKey: Copy + Eq + std::hash::Hash {
+    /// The slots are small numbers (`IdTab` indexes pages by them). A key that is a pointer says `false`: its table is a hash map.
+    const DENSE: bool = true;
     fn slot(self) -> usize;
 }
 impl SlotKey for NodeId {
@@ -159,18 +161,20 @@ type Page<K, V> = [Option<(K, V)>; 1 << PAGE_BITS];
 pub(crate) struct IdTab<K, V> {
     pages: Vec<Option<Box<Page<K, V>>>>,
     len: usize,
+    /// The entries of a key that is no dense slot (`SlotKey::DENSE`). Empty for the other keys.
+    sparse: HashMap<K, V, BuildHasherDefault<IdHash>>,
 }
 impl<K, V> Default for IdTab<K, V> {
     fn default() -> Self {
-        IdTab { pages: Vec::new(), len: 0 }
+        IdTab { pages: Vec::new(), len: 0, sparse: HashMap::default() }
     }
 }
 impl<K: SlotKey, V> IdTab<K, V> {
     pub fn len(&self) -> usize {
-        self.len
+        if K::DENSE { self.len } else { self.sparse.len() }
     }
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.len() == 0
     }
     /// The length of the directory and the number of pages that exist.
     #[cfg(test)]
@@ -178,6 +182,9 @@ impl<K: SlotKey, V> IdTab<K, V> {
         (self.pages.len(), self.pages.iter().flatten().count())
     }
     pub fn get(&self, k: &K) -> Option<&V> {
+        if !K::DENSE {
+            return self.sparse.get(k);
+        }
         let s = k.slot();
         match self.pages.get(s >> PAGE_BITS)? {
             Some(p) => match &p[s & ((1 << PAGE_BITS) - 1)] {
@@ -188,6 +195,9 @@ impl<K: SlotKey, V> IdTab<K, V> {
         }
     }
     pub fn get_mut(&mut self, k: &K) -> Option<&mut V> {
+        if !K::DENSE {
+            return self.sparse.get_mut(k);
+        }
         let s = k.slot();
         match self.pages.get_mut(s >> PAGE_BITS)? {
             Some(p) => match &mut p[s & ((1 << PAGE_BITS) - 1)] {
@@ -201,10 +211,13 @@ impl<K: SlotKey, V> IdTab<K, V> {
         self.get(k).is_some()
     }
     pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
-        self.pages.iter().flatten().flat_map(|p| p.iter().flatten().map(|(k, v)| (k, v)))
+        self.pages.iter().flatten().flat_map(|p| p.iter().flatten().map(|(k, v)| (k, v))).chain(self.sparse.iter())
     }
     /// The entry of `k` is `v` from now on. The old value comes back if `k` had one.
     pub fn insert(&mut self, k: K, v: V) -> Option<V> {
+        if !K::DENSE {
+            return self.sparse.insert(k, v);
+        }
         let s = k.slot();
         if self.pages.len() <= s >> PAGE_BITS {
             self.pages.resize_with((s >> PAGE_BITS) + 1, || None);
@@ -215,7 +228,7 @@ impl<K: SlotKey, V> IdTab<K, V> {
         old.filter(|(kk, _)| *kk == k).map(|(_, v)| v)
     }
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (&K, &mut V)> {
-        self.pages.iter_mut().flatten().flat_map(|p| p.iter_mut().flatten().map(|(k, v)| (&*k, v)))
+        self.pages.iter_mut().flatten().flat_map(|p| p.iter_mut().flatten().map(|(k, v)| (&*k, v))).chain(self.sparse.iter_mut())
     }
     /// The value of `k`; `v` is stored first if there is none.
     pub fn get_or_insert(&mut self, k: K, v: V) -> &mut V {
@@ -227,6 +240,9 @@ impl<K: SlotKey, V> IdTab<K, V> {
     /// Drop the entry of `k`. The page stays: a test for an empty page reads the whole page, so `retain(|_, _| true)` frees the empty
     /// pages after a batch of removes.
     pub fn remove(&mut self, k: &K) -> Option<V> {
+        if !K::DENSE {
+            return self.sparse.remove(k);
+        }
         let s = k.slot();
         let p = self.pages.get_mut(s >> PAGE_BITS)?.as_mut()?;
         let e = &mut p[s & ((1 << PAGE_BITS) - 1)];
@@ -237,6 +253,10 @@ impl<K: SlotKey, V> IdTab<K, V> {
         e.take().map(|(_, v)| v)
     }
     pub fn retain(&mut self, mut keep: impl FnMut(&K, &mut V) -> bool) {
+        if !K::DENSE {
+            self.sparse.retain(|k, v| keep(k, v));
+            return;
+        }
         for slot in &mut self.pages {
             let Some(p) = slot else { continue };
             for e in p.iter_mut() {
@@ -1366,7 +1386,7 @@ impl<E: Eng> Dom<E> {
         if bytes > self.lim.max_string_bytes {
             return Err(self.lim("dom-string"));
         }
-        String::from_utf16(units).map_err(|_| Fault::Unsupported("lone surrogate in a DOM string (the native document is UTF-8)"))
+        String::from_utf16(&units).map_err(|_| Fault::Unsupported("lone surrogate in a DOM string (the native document is UTF-8)"))
     }
 
     /// A DOMException-like error to throw: an object that inherits from `Error.prototype`, with `name`, `message`, `code`.

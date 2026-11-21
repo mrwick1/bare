@@ -1,7 +1,7 @@
 //! `String` and `String.prototype` (plan step S2.7). A string is read as a list of 16-bit units: a flat string is a slice, so a read does
 //! not copy (a rope is flattened first, once). The methods that make a new string build a `Vec<u16>` and give it to [`Realm::make_units`],
-//! which picks the narrow form when it can. There is no regular expression: `split`, `replace` and the others take a string pattern.
-//! A call with a `RegExp` is a `TypeError` (the literal is one already). `replace` with a function replacer is in `prelude.js`.
+//! which picks the narrow form when it can. `split` takes a string or a `RegExp`; `replace`, `match` and the others with a `RegExp` are in
+//! `bi_string_regexp.rs`.
 use crate::lazy::{Ent, m};
 use crate::bi_array::rel_index;
 use crate::builtins::arg;
@@ -30,7 +30,7 @@ impl Realm {
     }
 
     /// `ToString(this)` of a string method: `undefined` and `null` throw.
-    fn this_str(&mut self, this: Value, name: &str) -> R<Str> {
+    pub(crate) fn this_str(&mut self, this: Value, name: &str) -> R<Str> {
         if this.is_undefined() || this.is_null() {
             return self.type_error(&format!("String.prototype.{name} called on null or undefined"));
         }
@@ -43,8 +43,8 @@ impl Realm {
         static STRING_STATICS: &[Ent] = &[m("fromCharCode", 1, from_char_code)];
         self.lazy_table(c, STRING_STATICS);
         static STRING_PROTO: &[Ent] = &[
-            crate::lazy::script("replace", "string_replace"),
-            crate::lazy::script("replaceAll", "string_replaceAll"),
+            m("replace", 2, crate::bi_string_regexp::replace),
+            m("replaceAll", 2, crate::bi_string_regexp::replace_all),
             m("charAt", 1, char_at),
             m("charCodeAt", 1, char_code_at),
             m("codePointAt", 1, code_point_at),
@@ -74,6 +74,7 @@ impl Realm {
         ];
         self.lazy_table(proto, STRING_PROTO);
         self.install_string_more();
+        self.install_uri();
     }
 }
 
@@ -148,7 +149,7 @@ fn at(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     }
 }
 
-fn find(h: &[u16], n: &[u16], from: usize) -> Option<usize> {
+pub(crate) fn find(h: &[u16], n: &[u16], from: usize) -> Option<usize> {
     if n.is_empty() {
         return (from <= h.len()).then_some(from);
     }
@@ -158,7 +159,7 @@ fn find(h: &[u16], n: &[u16], from: usize) -> Option<usize> {
     (from..=h.len() - n.len()).find(|&i| h[i..i + n.len()] == *n)
 }
 
-fn pattern(rt: &mut Realm, v: Value) -> R<Vec<u16>> {
+pub(crate) fn pattern(rt: &mut Realm, v: Value) -> R<Vec<u16>> {
     let s = rt.to_str(v)?;
     Ok(rt.units(s))
 }
@@ -243,6 +244,9 @@ fn split(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let u = rt.units(s);
     let limit = if arg(args, 1).is_undefined() { u32::MAX } else { Realm::to_int32(rt.to_number(arg(args, 1))?) as u32 };
     let sep = arg(args, 0);
+    if let Some(re) = Realm::obj(sep).filter(|o| o.has_flag(crate::object::F_REGEXP)) {
+        return crate::bi_string_regexp::split(rt, re, s, limit);
+    }
     let mut out: Vec<Value> = Vec::new();
     if sep.is_undefined() {
         out.push(s.value());
@@ -356,76 +360,6 @@ fn pad_start(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
 
 fn pad_end(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     pad(rt, this, args, false)
-}
-
-/// The replacement text for a match at `at` (`$$`, `$&`, `` $` `` and `$'`).
-fn expand(rep: &[u16], h: &[u16], at: usize, len: usize) -> Vec<u16> {
-    let mut out = Vec::with_capacity(rep.len());
-    let mut i = 0;
-    while i < rep.len() {
-        let c = rep[i];
-        let next = rep.get(i + 1).copied().unwrap_or(0);
-        if c == b'$' as u16 && next != 0 {
-            match next as u8 as char {
-                '$' if next < 128 => out.push(c),
-                '&' if next < 128 => out.extend(&h[at..at + len]),
-                '`' if next < 128 => out.extend(&h[..at]),
-                '\'' if next < 128 => out.extend(&h[at + len..]),
-                _ => {
-                    out.push(c);
-                    out.push(next);
-                }
-            }
-            i += 2;
-        } else {
-            out.push(c);
-            i += 1;
-        }
-    }
-    out
-}
-
-fn replace_with(rt: &mut Realm, this: Value, args: &[Value], all: bool) -> R<Value> {
-    let name = if all { "replaceAll" } else { "replace" };
-    let s = rt.this_str(this, name)?;
-    if Realm::obj(arg(args, 0)).is_some() {
-        return rt.type_error("a RegExp pattern is not supported (js2 has no RegExp engine)");
-    }
-    let pat = pattern(rt, arg(args, 0))?;
-    if Realm::obj(arg(args, 1)).is_some_and(|o| o.is_callable()) {
-        return rt.type_error("a function replacer needs the script wrapper of prelude.js");
-    }
-    let rep = pattern(rt, arg(args, 1))?;
-    let h = rt.units(s);
-    let mut out = Vec::with_capacity(h.len());
-    let (mut at, mut from) = (0, 0);
-    while let Some(i) = find(&h, &pat, from) {
-        out.extend(&h[at..i]);
-        out.extend(expand(&rep, &h, i, pat.len()));
-        at = i + pat.len();
-        if !all {
-            break;
-        }
-        if pat.is_empty() {
-            // An empty pattern matches between every two units: copy one unit and go on.
-            if at >= h.len() {
-                break;
-            }
-            out.push(h[at]);
-            at += 1;
-        }
-        from = at;
-    }
-    out.extend(&h[at..]);
-    Ok(rt.make_units(&out))
-}
-
-pub(crate) fn replace(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
-    replace_with(rt, this, args, false)
-}
-
-pub(crate) fn replace_all(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
-    replace_with(rt, this, args, true)
 }
 
 fn locale_compare(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
