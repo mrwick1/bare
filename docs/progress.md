@@ -18012,9 +18012,9 @@ The owner paused the work on 2026-11-21. No agent runs. This section is the stat
 
 | PR                                | State                                         | Next step                                                                                                                                                                                                |
 | --------------------------------- | --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| #800 promises P0/P1               | auto-merge on, merged with main (beb29b3b)    | none; test262 17,941 pass (main 17,775), no directory drops                                                                                                                                              |
+| #800 promises P0/P1               | merged (8875c60a)                             | none; test262 17,941 pass (main before: 17,775), no directory drops                                                                                                                                      |
 | #810 RegExp R0/R1                 | auto-merge on, conflicts with main after #800 | merge main, regenerate the test262 baseline                                                                                                                                                              |
-| #816 S0.4 PR 3 (structured clone) | auto-merge on                                 | none                                                                                                                                                                                                     |
+| #816 S0.4 PR 3 (structured clone) | merged (4465b004)                             | none                                                                                                                                                                                                     |
 | #809 dispatch step 1              | held                                          | after the merge of #801, `objects` is +0.84% (default) and +0.74% (`codegen-units=1`). It fails the cost rule. A local merge is in `/data/bare-tmp/wt-809` (commit 7eaad7a1). Find the cause, then push. |
 | #808 prototype-chain inline cache | held                                          | waits for #809. Then merge main and measure again.                                                                                                                                                       |
 
@@ -18037,6 +18037,8 @@ The subset grows when a step adds directories, so compare passes only on the sam
 4. RegExp: R2 (own linear engine, +40 KB limit), R3 (String methods, Symbol protocol, `\p{}`).
 5. Lazy built-ins step 1 and step 2 (startup must not scale with the built-in count).
 6. Dispatch step 2 (tail-call handlers): spike, then a wall-time check on an idle machine.
+
+The owner resumed the work on 2026-11-21, after #800 and #816 merged.
 ## 2026-11-21: structured clone and transfer on the interface (plan step S0.4, PR 3)
 
 Status: PR 3 of the plan in "what blocks `Dom<E: Engine>`". Base: `origin/main` `29aee409` (the head of #811). The PR is open without auto-merge.
