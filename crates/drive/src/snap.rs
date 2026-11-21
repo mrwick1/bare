@@ -572,6 +572,48 @@ fn diff(rows: &[Row]) -> (Vec<usize>, Vec<String>) {
     (idx, lines)
 }
 
+/// The most rows of one run of new sibling elements with the same role that a diff lists. One line counts the others.
+/// A changed element that the last snapshot showed is always listed.
+const RUN: usize = 10;
+
+/// The role word of a row: `option` in `[e4] option "x"`.
+fn row_role(r: &Row) -> Option<&str> {
+    r.node?;
+    r.text.split_once("] ").map(|(_, t)| t.split(' ').next().unwrap_or(""))
+}
+
+/// Cut each run of more than `RUN` new sibling rows with the same role (the options of a dropdown that opened) to its first `RUN`
+/// rows and one line that counts the rest. `new` says that a row is an element that the last snapshot did not show. Gives, for each
+/// line, the rows that it stands for.
+fn collapse(rows: &[Row], idx: Vec<usize>, lines: Vec<String>, new: impl Fn(&Row) -> bool) -> (Vec<Vec<usize>>, Vec<String>) {
+    let (mut groups, mut out) = (Vec::new(), Vec::new());
+    let mut k = 0;
+    while k < idx.len() {
+        let first = &rows[idx[k]];
+        let mut end = k + 1;
+        if new(first) && row_role(first).is_some() {
+            while end < idx.len() && new(&rows[idx[end]]) && rows[idx[end]].depth == first.depth && row_role(&rows[idx[end]]) == row_role(first) {
+                end += 1;
+            }
+        }
+        let keep = if end - k > RUN { k + RUN } else { end };
+        for j in k..keep {
+            groups.push(vec![idx[j]]);
+            out.push(lines[j].clone());
+        }
+        if keep < end {
+            let rest: Vec<usize> = idx[keep..end].to_vec();
+            let span = |i: usize| rows[i].text.split_once(']').map_or("", |(a, _)| a).trim_start_matches('[').to_string();
+            let parent = out.iter().rev().find(|l| l.len() - l.trim_start().len() < first.depth).and_then(|l| l.split_once("[e")).map(|(_, t)| t.split(']').next().unwrap_or(""));
+            let how = parent.map_or("use find".to_string(), |e| format!("use find, or snapshot with root=e{e}"));
+            out.push(format!("{} … {} more {} rows ({}–{}); {how}", indent(first.depth), rest.len(), row_role(first).unwrap_or(""), span(rest[0]), span(rest[rest.len() - 1])));
+            groups.push(rest);
+        }
+        k = end;
+    }
+    (groups, out)
+}
+
 /// The most refs that a diff lists as removed. The others stay in the baseline, so the next diff lists them.
 const REMOVED: usize = 20;
 
@@ -639,16 +681,23 @@ pub fn snapshot(p: &mut Page, refs: &mut Refs, mode: Mode, root: Option<u32>, of
     let out = if diff_only && full && refs_had_prev {
         let changed = rows.iter().filter(|r| r.changed).count();
         let (idx, lines) = diff(&rows);
+        let (groups, lines) = collapse(&rows, idx, lines, |r| r.changed && r.node.is_some_and(|n| prev.as_ref().is_some_and(|s| !s.els.contains_key(&n))));
         // A text that a changed line already shows as its name adds nothing.
         new_text.retain(|t| !lines.iter().any(|l| l.contains(&format!("{t:?}"))));
+        // Nor does the name of a row that a summary line counts.
+        let summed: HashSet<&str> = groups.iter().filter(|g| g.len() > 1).flatten().filter_map(|&i| rows[i].text.split_once(" \"").map(|(_, n)| n.split('"').next().unwrap_or(""))).collect();
+        new_text.retain(|t| !summed.contains(t.as_str()));
         if changed == 0 && new_text.is_empty() && removed.is_empty() {
             format!("no change ({} lines)\n{}", rows.len(), refs.doc_line())
         } else {
             let mut out = String::new();
             if changed > 0 {
                 let (body, shown) = budget(lines, max, None);
-                for (k, &i) in idx.iter().enumerate() {
-                    delivered[i] = shown[k] || !rows[i].changed;
+                // The rows that a summary line counts are delivered with it: the next diff does not list them again.
+                for (k, g) in groups.iter().enumerate() {
+                    for &i in g {
+                        delivered[i] = shown[k] || !rows[i].changed;
+                    }
                 }
                 out = format!("{body}\n({changed} of {} lines changed)", rows.len());
             }
