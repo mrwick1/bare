@@ -174,7 +174,7 @@ macro_rules! cold_ops {
         Op::DefAccessor | Op::DefAccessorElem | Op::DefMethod | Op::DefMethodElem | Op::SetHome | Op::MakeClass | Op::MakeDerived |
         Op::SetFnName | Op::DefaultCtor | Op::SetFields | Op::NewPrivateName | Op::GetPrivate | Op::SetPrivate | Op::HasPrivate |
         Op::DefPrivate | Op::DefPrivateMethod | Op::DefPrivateAccessor | Op::GetSuper | Op::GetSuperElem | Op::GetSuperElemRef | Op::SetSuper |
-        Op::SetSuperElem | Op::InitSuperFields | Op::ThrowSuperDelete | Op::CallSuper | Op::CallSuperSpread | Op::RetDerived | Op::GenInit | Op::Yield | Op::YieldResult | Op::RetGen | Op::IterClose | Op::ForInNext | Op::YieldStarStep | Op::AsyncInit | Op::Await | Op::RetAsync |
+        Op::SetSuperElem | Op::InitSuperFields | Op::ThrowSuperDelete | Op::CallSuper | Op::CallSuperSpread | Op::RetDerived | Op::GenInit | Op::Yield | Op::YieldResult | Op::RetGen | Op::IterClose | Op::ForInNext | Op::YieldStarStep | Op::YieldOpen | Op::AsyncInit | Op::Await | Op::RetAsync |
         Op::AIterOpen | Op::AIterNext | Op::AIterUnpack | Op::AYsUnpack | Op::AIterClose | Op::AIterCloseT | Op::AIterCheck | Op::AYsCall
     };
 }
@@ -1428,6 +1428,14 @@ impl Vm {
                             }
                             jump!(!found, nextx!(), sbx!());
                         }
+                        Op::YieldOpen => {
+                            gate!();
+                            let (iter, next_method) = tri!(realm.iter_open_generic(r!(b!())));
+                            r!(a!()) = iter;
+                            r!(a!() + 1) = next_method;
+                            r!(a!() + 2) = Value::FALSE;
+                            pc = next;
+                        }
                         Op::YieldStarStep => {
                             std::hint::cold_path();
                             gate!();
@@ -2326,7 +2334,7 @@ impl Vm {
                     Op::RetUndef => ret!(undef),
                     Op::IterOpen => {
                         let mut it = r!(b!());
-                        let string = c!() == 0 && Realm::str_of(it).is_some();
+                        let string = Realm::str_of(it).is_some();
                         if string {
                             // A string is iterated by code points: walk an array of them.
                             gate!();
@@ -2337,7 +2345,7 @@ impl Vm {
                         // A generator is stepped by `IterNext` itself (`undefined` where an array has its index): see `generator.rs`.
                         let index = if string || fast_array {
                             Value::int(0)
-                        } else if c!() == 0 && Realm::is_generator(it) {
+                        } else if Realm::is_generator(it) {
                             undef
                         } else {
                             std::hint::cold_path();

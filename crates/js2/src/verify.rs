@@ -45,7 +45,7 @@ fn window(ins: &Ins, recipes: &Recipes) -> Option<u32> {
         Op::NewSpread => 2,
         Op::ObjRest => ins.x,
         Op::NewObjLit => recipes.get(ins.c as usize).map_or(0, |k| k.len() as u32),
-        Op::IterOpen | Op::ForInOpen | Op::ForInNext | Op::IterNext | Op::IterClose | Op::AIterOpen | Op::AIterNext | Op::AIterClose | Op::AIterCloseT => ITER_REGS,
+        Op::IterOpen | Op::YieldOpen | Op::ForInOpen | Op::ForInNext | Op::IterNext | Op::IterClose | Op::AIterOpen | Op::AIterNext | Op::AIterClose | Op::AIterCloseT => ITER_REGS,
         Op::YieldStarStep | Op::AYsCall => YS_REGS,
         _ => return None,
     })
