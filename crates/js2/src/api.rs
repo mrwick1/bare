@@ -830,42 +830,44 @@ impl Engine for Realm {
         self.a_symbol_description(v)
     }
 
-    fn module_parse<'s>(&mut self, _source: &str, _url: &str) -> Result<u32, Error<'s>> {
-        Err(self.a_unsup("module_parse"))
+    fn module_parse<'s>(&mut self, source: &str, url: &str) -> Result<u32, Error<'s>> {
+        self.api_module_parse(source, url)
     }
 
-    fn module_requests(&self, _m: u32) -> Vec<String> {
-        Vec::new()
+    fn module_requests(&self, m: u32) -> Vec<String> {
+        self.md_requests(m)
     }
 
-    fn module_set_requested(&mut self, _m: u32, _deps: &[u32]) {}
-
-    fn module_url(&self, _m: u32) -> &str {
-        ""
+    fn module_set_requested(&mut self, m: u32, deps: &[u32]) {
+        self.md_set_requested(m, deps);
     }
 
-    fn module_link<'s>(&mut self, _root: u32) -> Result<(), Error<'s>> {
-        Err(self.a_unsup("module_link"))
+    fn module_url(&self, m: u32) -> &str {
+        self.md_url(m)
     }
 
-    fn module_evaluate<'s>(&mut self, _m: u32) -> Result<Local<'s>, Error<'s>> {
-        Err(self.a_unsup("module_evaluate"))
+    fn module_link<'s>(&mut self, root: u32) -> Result<(), Error<'s>> {
+        self.api_module_link(root)
+    }
+
+    fn module_evaluate<'s>(&mut self, m: u32) -> Result<Local<'s>, Error<'s>> {
+        self.api_module_evaluate(m)
     }
 
     fn take_dynamic_imports(&mut self) -> Vec<bare_js_api::ImportRequest> {
-        Vec::new()
+        self.api_take_imports()
     }
 
-    fn finish_dynamic_import<'s>(&mut self, _p: &bare_js_api::Persistent, _m: u32) -> Result<(), Error<'s>> {
-        Err(self.a_unsup("finish_dynamic_import"))
+    fn finish_dynamic_import<'s>(&mut self, p: &bare_js_api::Persistent, m: u32) -> Result<(), Error<'s>> {
+        self.api_finish_import(p, m)
     }
 
-    fn reject_dynamic_import<'s>(&mut self, _p: &bare_js_api::Persistent, _reason: Local<'_>) -> Result<(), Error<'s>> {
-        Err(self.a_unsup("reject_dynamic_import"))
+    fn reject_dynamic_import<'s>(&mut self, p: &bare_js_api::Persistent, reason: Local<'_>) -> Result<(), Error<'s>> {
+        self.api_reject_import(p, reason)
     }
 
-    fn fail_dynamic_import<'s>(&mut self, _p: &bare_js_api::Persistent, _message: &str) -> Result<(), Error<'s>> {
-        Err(self.a_unsup("fail_dynamic_import"))
+    fn fail_dynamic_import<'s>(&mut self, p: &bare_js_api::Persistent, message: &str) -> Result<(), Error<'s>> {
+        self.api_fail_import(p, message)
     }
 
     /// Nothing yet: a safepoint needs the frames of the caller to be walkable, and a host function has none.
@@ -1056,6 +1058,9 @@ impl Realm {
         }
     }
 }
+
+#[path = "api_module.rs"]
+mod modules;
 
 #[cfg(test)]
 #[allow(unsafe_code)]

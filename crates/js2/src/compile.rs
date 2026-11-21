@@ -24,8 +24,8 @@
 //! the `static` blocks are functions that the parent compiles itself (their text is in its tree): see `compile_class.rs` and [`Child::ready`].
 //!
 //! **Not built** (each one is recorded in [`Compiled::unsupported`] and the code is not to be run; the driver throws the TypeError of
-//! design 6.12 that names it): generators, async functions, `await`, `yield`, `for await`, `with`, direct `eval`, `import()`,
-//! `import.meta`, `delete` of a global name. See [`Fc::unsup`] and the progress entry.
+//! design 6.12 that names it): generators, async functions, `await`, `yield`, `for await`, `with`, direct `eval`,
+//! `delete` of a global name. See [`Fc::unsup`] and the progress entry.
 use crate::ast::*;
 use crate::atoms::SharedAtoms;
 use crate::bytecode::{Asm, BcError, Code, GK_GEN, Handler, Ins, Label, NO_NAME, Op, Recipes};
@@ -71,6 +71,9 @@ pub struct LevelVar {
     pub konst: bool,
     /// The name of a named function expression, inside the function: an assignment throws in strict code and does nothing in sloppy code.
     pub callee: bool,
+    /// A module binding that lives in a property of an environment object (`docs/design-js2-host-api.md` section 12): the slot holds the
+    /// object and this is the name of the property. Only the `Level` of a module has such a variable.
+    pub env: Option<Box<str>>,
 }
 
 impl Level {
@@ -199,7 +202,8 @@ pub(crate) struct Decl<'a> {
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Res {
     Reg { reg: u32, tdz: bool, konst: bool },
-    Ctx { hops: u32, slot: u32, tdz: bool, konst: bool },
+    /// `env`: the slot holds an environment object and the value is its property ([`Fc::env_key`]).
+    Ctx { hops: u32, slot: u32, tdz: bool, konst: bool, env: bool },
     Global,
 }
 
@@ -709,7 +713,7 @@ impl<'a> Fc<'a> {
             let tdz = matches!(kind, VK::Let | VK::Const | VK::Class);
             let home = if self.captured(name, span) {
                 let slot = slots.len() as u32;
-                slots.push(LevelVar { name: name.as_ref().into(), slot, tdz, konst: kind == VK::Const || kind == VK::Callee, callee: kind == VK::Callee });
+                slots.push(LevelVar { name: name.as_ref().into(), slot, tdz, konst: kind == VK::Const || kind == VK::Callee, callee: kind == VK::Callee, env: None });
                 Home::Ctx { level, slot }
             } else {
                 let r = d.reg.unwrap_or_else(|| self.alloc());
@@ -760,19 +764,31 @@ impl<'a> Fc<'a> {
             let konst = matches!(v.kind, VK::Const | VK::Callee);
             return match v.home {
                 Home::Reg(reg) => Res::Reg { reg, tdz, konst },
-                Home::Ctx { level, slot } => Res::Ctx { hops: self.depth - level, slot, tdz, konst },
+                Home::Ctx { level, slot } => Res::Ctx { hops: self.depth - level, slot, tdz, konst, env: false },
             };
         }
         let mut l = self.outer.as_ref();
         let mut hops = self.depth;
         while let Some(level) = l {
             if let Some(v) = level.find(name) {
-                return Res::Ctx { hops, slot: v.slot, tdz: v.tdz, konst: v.konst };
+                return Res::Ctx { hops, slot: v.slot, tdz: v.tdz, konst: v.konst, env: v.env.is_some() };
             }
             hops += 1;
             l = level.parent.as_ref();
         }
         Res::Global
+    }
+
+    /// The property name of the module binding `name` that [`Res::Ctx`] marked with `env`.
+    pub(crate) fn env_key(&self, name: &str) -> Option<Box<str>> {
+        let mut l = self.outer.as_ref();
+        while let Some(level) = l {
+            if let Some(v) = level.find(name) {
+                return v.env.clone();
+            }
+            l = level.parent.as_ref();
+        }
+        None
     }
 
     /// Is `name` the name of a named function expression that is a variable of this function or of one around it?
@@ -957,6 +973,8 @@ pub fn compile_script_mode(prog: &Program, facts: &Facts, atoms: &SharedAtoms, m
     c.finish(0)
 }
 
+pub use module::{Exp, ExpSrc, Imp, ModInfo, compile_module};
+
 /// Compile function `id` of `facts`. `prog` and `fid` come from `parse_function(source, facts, id, ..)`. `input` is the chain that the
 /// parent recorded for this child ([`Child::chain`]).
 pub fn compile_function(prog: &Program, fid: FuncId, id: FnId, facts: &Facts, atoms: &SharedAtoms, input: &Input) -> CR<Compiled> {
@@ -1042,6 +1060,8 @@ mod class;
 mod gen_code;
 #[path = "compile_expr.rs"]
 mod expr;
+#[path = "compile_module.rs"]
+mod module;
 #[path = "compile_pat.rs"]
 mod pat;
 #[path = "compile_stmt.rs"]
