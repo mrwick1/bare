@@ -21,7 +21,7 @@ fn page(html: &str, w: u32, h: u32) -> Page {
     b.use_virtual_clock();
     b.set_viewport(w as f32, h as f32).expect("viewport");
     b.set_document_url("http://localhost/refresh.html").expect("url");
-    let mut p = Page::new(Source::Browser(Box::new(b)), (w, h));
+    let mut p = Page::new(Source::Browser(Box::new(b.into())), (w, h));
     p.whole = 0;
     p
 }
@@ -430,7 +430,7 @@ fn a_window_click_whose_job_or_listener_runs_away_does_not_stop_later_input_or_t
         b.use_virtual_clock();
         b.set_viewport(300.0, 200.0).expect("viewport");
         b.set_document_url("http://localhost/runaway.html").expect("url");
-        let mut p = Page::new(Source::Browser(Box::new(b)), (300, 200));
+        let mut p = Page::new(Source::Browser(Box::new(b.into())), (300, 200));
         p.whole = 0;
         p.quiet = true;
         js(&mut p, "var n = 0, t = 0, runaway = 2;

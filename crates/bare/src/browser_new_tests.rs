@@ -31,3 +31,20 @@ fn a_script_reads_the_document() {
         assert_eq!(js(&mut b, "document.querySelectorAll('p, span').length"), "2");
     })
 }
+
+#[test]
+fn a_script_function_has_a_prototype_in_a_host_realm() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(js(&mut b, "function C() { this.v = 7 } C.prototype.get = function () { return this.v }; new C().get()"), "7");
+    })
+}
+
+#[test]
+fn the_host_freezes_an_array_and_constructs_a_class() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(js(&mut b, "Object.isFrozen(navigator.languages)"), "true");
+        assert_eq!(js(&mut b, "class A extends HTMLElement {} customElements.define('x-a', A); document.createElement('x-a') instanceof A"), "true");
+    })
+}

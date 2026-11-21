@@ -61,6 +61,11 @@ impl Realm {
 }
 
 impl Realm {
+    /// Collect now. The host is between tasks: no script runs and no host call is on the stack. `extra` are values that the caller still holds.
+    pub fn raw_collect(&mut self, extra: &[Value]) {
+        self.collect(&mut [], |m| extra.iter().for_each(|v| m.value(*v)));
+    }
+
     /// The host key of a host-filled object (`Engine::host_key` for a value).
     pub fn raw_host_key(&self, v: Value) -> Option<u32> {
         self.hs_key(v)

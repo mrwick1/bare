@@ -505,16 +505,12 @@ impl Ops<New> for Realm {
         Ok(k.0)
     }
     fn h_get_own(&mut self, o: NV, key: NV) -> Result<Option<Prop<New>>, Fault<New>> {
-        // js2 does not tell the attributes of an own property through `Engine`: they read as all set (phase 2 queue).
+        use bare_js2::api::RawOwn;
         run(self, |r| {
-            let (ol, kl) = (lc(r, o.0), key_local(r, key));
-            Ok(match r.own_kind(ol, kl)? {
-                None => None,
-                Some(bare_js_api::Own::Data(l)) => Some(Prop::Data { value: r.raw(l), writable: true, enumerable: true, configurable: true }),
-                Some(bare_js_api::Own::Accessor { get, set }) => {
-                    Some(Prop::Accessor { get: get.map(|l| NV(r.raw(l))), set: set.map(|l| NV(r.raw(l))), enumerable: true, configurable: true })
-                }
-            })
+            Ok(r.raw_own(o.0, key.0)?.map(|p| match p {
+                RawOwn::Data { value, writable, enumerable, configurable } => Prop::Data { value, writable, enumerable, configurable },
+                RawOwn::Accessor { get, set, enumerable, configurable } => Prop::Accessor { get: get.map(NV), set: set.map(NV), enumerable, configurable },
+            }))
         })
     }
     fn h_define_own(&mut self, o: NV, key: NV, d: &Desc<New>) -> Result<bool, Fault<New>> {
@@ -624,8 +620,10 @@ impl Ops<New> for Realm {
     fn host_new_target(&self) -> Option<NV> {
         self.raw_new_target().map(NV)
     }
-    fn collect(&mut self, _extra: &[Value]) -> Result<Collected, Fault<New>> {
-        unsup("js2: a collection between tasks")
+    fn collect(&mut self, extra: &[Value]) -> Result<Collected, Fault<New>> {
+        // js2 does not count what it frees for the host: the counts are zero.
+        self.raw_collect(extra);
+        Ok(Collected { objects: 0, strings: 0, symbols: 0 })
     }
     fn set_sources(&mut self, _dom: std::rc::Rc<crate::browser::Dom<New>>) {}
     fn module_parse_o(&mut self, source: &str, url: &str) -> Result<u32, Fault<New>> {

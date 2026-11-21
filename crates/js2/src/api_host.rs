@@ -407,6 +407,10 @@ impl Realm {
             if p.is_some() {
                 return Ok(Walk::Hit(Realm::got(p)));
             }
+            // A plain function makes its `prototype` at the first read of it (as `lookup` and `get_prop_g` do).
+            if matches!(key, Key::Name(k) if k == self.k_prototype) && self.needs_prototype(x) {
+                return Ok(Walk::Hit(Got::Val(self.make_prototype(x)?)));
+            }
             c = self.proto_of(x);
         }
         for (x, hk) in open {
