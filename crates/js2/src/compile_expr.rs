@@ -159,6 +159,7 @@ impl<'a> Fc<'a> {
                     self.op(Op::Mov, dst, reg, 0);
                 }
             }
+            Res::Ctx { hops, slot, tdz, env: true, .. } => self.read_env(name, hops, slot, tdz, dst)?,
             Res::Ctx { hops, slot, tdz, .. } => {
                 if tdz {
                     let a = self.atom(name)?;
@@ -214,7 +215,8 @@ impl<'a> Fc<'a> {
                 }
                 self.set_live(reg);
             }
-            Res::Ctx { hops, slot, tdz, konst } => {
+            Res::Ctx { hops, slot, tdz, konst, env: true } => self.store_env(name, hops, slot, tdz, konst, src, init)?,
+            Res::Ctx { hops, slot, tdz, konst, .. } => {
                 if konst && !init {
                     let a = self.atom(name)?;
                     if tdz {
@@ -472,8 +474,8 @@ impl<'a> Fc<'a> {
             ExprKind::Yield { arg, delegate } => self.yield_expr(arg, delegate, dst)?,
             ExprKind::Spread(_) => self.not_built(dst, "spread"),
             ExprKind::Hole => self.op(Op::LoadUndef, dst, 0, 0),
-            ExprKind::ImportCall { .. } => self.not_built(dst, "import()"),
-            ExprKind::ImportMeta => self.not_built(dst, "import.meta"),
+            ExprKind::ImportCall { arg, opts } => self.import_call(arg, opts, dst)?,
+            ExprKind::ImportMeta => self.read_var("%meta", 0, dst)?,
         }
         Ok(())
     }

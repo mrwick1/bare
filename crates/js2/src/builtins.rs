@@ -22,6 +22,10 @@
 //! cell in a Rust local, and may allocate and call. A native that allocates more than the slack of the heap limit (8 MiB) only makes
 //! the next gate collect.
 use crate::cell::Layout;
+use crate::ast::StmtKind;
+use crate::facts::Facts;
+use crate::compile::ScriptMode;
+use crate::parse::{Limits, parse_script_lazy};
 use crate::bi_object::Own;
 use crate::interp_rt::{ErrKind, Key, R, Realm};
 use crate::object::{F_CALLABLE, F_CLASS, F_FNPROPS, F_NATIVE, Obj};
@@ -285,7 +289,7 @@ impl Realm {
         Ok(Some(r))
     }
 
-    fn ordinary_to_primitive(&mut self, v: Value, o: Obj, order: [Str; 2]) -> R<Value> {
+    pub(crate) fn ordinary_to_primitive(&mut self, v: Value, o: Obj, order: [Str; 2]) -> R<Value> {
         for k in order {
             let f = self.get_prop(o.value(), Key::Name(k))?;
             if !Realm::obj(f).is_some_and(|f| f.is_callable()) {
@@ -320,10 +324,12 @@ impl Realm {
         self.install_string();
         self.install_number();
         self.install_promise();
+        self.install_modules();
         self.install_symbol();
         self.install_generator();
         self.install_json();
         self.install_collections();
+        self.install_date();
         self.install_reflect();
     }
 
@@ -369,8 +375,41 @@ impl Realm {
 
 // ---- Function.prototype ----
 
-fn function_ctor(rt: &mut Realm, _this: Value, _args: &[Value]) -> R<Value> {
-    rt.type_error("the Function constructor is not supported (there is no eval)")
+/// `Function(p1, ..., body)` and `new Function(...)`: CreateDynamicFunction for the normal kind. The text is one function expression
+/// compiled as a script of this realm, so the function has the global scope. The parameters and the body must parse alone, so a
+/// comment or a brace cannot reach across. js2 has no `GeneratorFunction` and no `AsyncFunction` constructors, so there are no
+/// other kinds.
+fn function_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+    let last = args.len().saturating_sub(1);
+    let mut params = String::new();
+    for (i, &a) in args[..last].iter().enumerate() {
+        if i > 0 {
+            params.push(',');
+        }
+        let s = rt.to_str(a)?;
+        params.push_str(&rt.text(s));
+    }
+    let body = match args.last() {
+        Some(&b) => {
+            let s = rt.to_str(b)?;
+            rt.text(s)
+        }
+        None => String::new(),
+    };
+    // Each part is checked as the text of one function declaration: a brace in the body cannot close the function and go on.
+    for part in [format!("function anonymous({params}\n) {{\n}}"), format!("function anonymous(\n) {{\n{body}\n}}")] {
+        match parse_script_lazy(&part, Limits::default(), &mut Facts::new()) {
+            Ok(p) if matches!(p.list(p.body).collect::<Vec<_>>()[..], [s] if matches!(p.stmt(s).kind, StmtKind::Function(_))) => {}
+            Ok(_) => return Err(rt.error(ErrKind::Syntax, "Unexpected token '}'")),
+            Err(e) => return Err(rt.error(ErrKind::Syntax, &e.msg)),
+        }
+    }
+    let ci = rt.script_code(&format!("(function ({params}\n) {{\n{body}\n}})"), ScriptMode { value: true, ..ScriptMode::default() })?;
+    let (top, global) = (rt.new_function(ci, Value::UNDEFINED), rt.global.value());
+    let f = rt.call_function(top, global, &[])?;
+    let anonymous = rt.intern("anonymous");
+    rt.name_function(f, Key::Name(anonymous), 0)?;
+    Ok(f)
 }
 
 fn callable_this(rt: &mut Realm, this: Value, what: &str) -> R<()> {

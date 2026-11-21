@@ -110,7 +110,6 @@ fn what_the_realm_does_not_have_is_unsupported_and_never_a_panic() {
         let o = s.new_object().unwrap();
         let u = s.undefined();
         assert_eq!(s.queue_microtask(u).err().map(|e| matches!(e, Error::Throw(_))), Some(true), "a microtask that is no function is a TypeError");
-        assert_eq!(s.set_host_owner(o, 1).err(), Some(Error::Abort(Abort::Unsupported("set_host_owner"))));
         assert_eq!(s.promise_status(o), None);
         assert_eq!(s.engine().pending_jobs(), 0);
         assert_eq!(s.resolve_promise(o, o).err(), Some(Error::Abort(Abort::Unsupported("resolve_promise"))));

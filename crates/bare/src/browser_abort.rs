@@ -88,7 +88,7 @@ pub(crate) fn trace_ctl(d: &Dom, owner: ObjId, t: &mut bare_js_api::Tracer<'_, V
     }
 }
 
-/// Call after the dead keys are released, and after the old host's prune of the listener table. One pass over the signals: the
+/// Call after the dead keys are released. One pass over the signals: the
 /// entries of dead owners go (their key is free), a live signal drops the dead keys of its weak lists and the algorithms of a
 /// listener that is gone.
 pub(crate) fn prune(d: &Dom, st: &State) {

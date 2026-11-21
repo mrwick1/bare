@@ -49,3 +49,4 @@ built-ins/String
 built-ins/Number
 built-ins/Math
 built-ins/JSON
+built-ins/Date

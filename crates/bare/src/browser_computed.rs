@@ -80,6 +80,7 @@
 //! Not done: `document.styleSheets` does not exist (when it does, a pending sheet must not be in it, as in Chrome), no cache of `Styles` between reads (each read costs one pass over the document), no rule-based `getComputedStyle` of a
 //! pseudo-element (see above), no `@container`, `@import` inside a supplied part (the embedder flattens), `<style disabled>`.
 
+use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_geom::illegal_s;
 use crate::browser_scoped::*;
@@ -1345,7 +1346,7 @@ pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, sproto: ObjId, props: &[&'stati
 
 // ------------------------------------------------------------------------------------------ GC hooks
 
-pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
+pub(crate) fn roots(d: &Dom, out: &mut Roots<'_, '_>) {
     out.extend(d.computed.fixed.borrow().iter().map(|&o| Value::Object(o)));
 }
 

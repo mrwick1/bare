@@ -29,6 +29,7 @@
 //!
 //! Bounds (`Limit(Host(name))`): `mutation-observers`, `mutation-registrations`, `mutation-records` (queued records of all observers).
 
+use crate::browser_sources::Roots;
 use crate::browser::*;
 use bare_html::dom::{Atom, Change, Document, NodeId, Watcher};
 use crate::browser_scoped::*;
@@ -324,6 +325,7 @@ fn construct<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<
     s2.obs.insert(o, Obs { cb, recs: Vec::new(), regs: 0 });
     s2.order.push(o);
     drop(s2);
+    d.own_obj(s.engine(), o, crate::browser::Owner::Mo(o));
     Ok(d.obj_local(s, o))
 }
 
@@ -563,14 +565,15 @@ impl Dom {
         Ok(())
     }
 
-    pub(crate) fn mo_roots(&self, out: &mut Vec<Value>) {
+    pub(crate) fn mo_roots(&self, out: &mut Roots<'_, '_>) {
         let Some(st) = self.mo.st.get() else { return };
         let s = st.borrow();
         out.extend([s.observer, s.record, s.notify, s.ctors.map(|c| c.0), s.ctors.map(|c| c.1)].into_iter().flatten().map(Value::Object));
         out.extend(s.obs.iter().filter(|(_, o)| o.regs > 0 || !o.recs.is_empty()).map(|(&o, _)| Value::Object(o)));
     }
 
-    pub(crate) fn mo_trace(&self, owner: ObjId, out: &mut Vec<Value>) {
+    pub(crate) fn mo_trace(&self, owner: ObjId, t: &mut bare_js_api::Tracer<'_, Value>) {
+        let out = &mut Roots(t);
         if let Some(st) = self.mo.st.get()
             && let Some(o) = st.borrow().obs.get(&owner)
         {
@@ -578,11 +581,20 @@ impl Dom {
         }
     }
 
-    pub(crate) fn mo_prune(&self, live: &dyn Fn(ObjId) -> bool) {
+    /// The entries of the observer table (tests).
+    #[cfg(test)]
+    pub(crate) fn mo_entries(&self) -> usize {
+        self.mo.st.get().map_or(0, |s| s.borrow().obs.len())
+    }
+
+    /// The observers `dead` were collected: drop their entries.
+    pub(crate) fn mo_forget(&self, dead: &[ObjId]) {
         if let Some(st) = self.mo.st.get() {
             let mut s = st.borrow_mut();
-            s.obs.retain(|&o, _| live(o));
             let s = &mut *s;
+            for o in dead {
+                s.obs.remove(o);
+            }
             let obs = &s.obs;
             s.order.retain(|o| obs.contains_key(o));
         }

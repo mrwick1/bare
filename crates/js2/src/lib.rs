@@ -48,6 +48,8 @@ pub mod interp_rt;
 pub mod interp;
 #[allow(unsafe_code)]
 pub mod api;
+#[allow(unsafe_code)]
+pub mod api_host;
 pub mod interp_ops;
 #[cfg(feature = "op-count")]
 pub mod opcount;
@@ -57,11 +59,15 @@ pub mod generator;
 mod iter;
 mod bi_array;
 mod bi_json;
+mod bi_date;
+mod bi_date_calc;
+mod bi_date_tz;
 mod bi_object;
 mod bi_number;
 mod bi_wrap;
 mod bi_string;
 pub mod promise;
+mod module;
 mod promise_statics;
 mod bi_symbol;
 mod bi_collections;
