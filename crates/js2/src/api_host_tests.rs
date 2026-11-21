@@ -463,6 +463,55 @@ fn a_host_object_is_not_a_date_for_object_prototype_to_string() {
 }
 
 #[test]
+fn a_lazy_dictionary_global_caches_its_own_data() {
+    let (mut r, _) = filled();
+    enter(&mut r, |s| {
+        let g = s.global();
+        s.set_lazy(g, false).unwrap();
+    });
+    let source = "var sum = 0; for (var i = 0; i < 1000; i++) sum += i;";
+    let ci = r.script_code(source, Default::default()).unwrap();
+    r.run_text("implicit = 0; Object.defineProperty(globalThis, 'implicit', { enumerable: false });").unwrap();
+    assert!(r.shapes.get(r.global.shape(&r.shapes)).is_dict());
+    r.run_code(ci, false).unwrap();
+    let tag = r.shapes.watch_tag();
+    let caches = &r.pool.last().unwrap().fbs[ci].caches;
+    assert_eq!(caches.iter().filter(|c| c.shape == tag).count(), 6);
+    assert_eq!(js(&mut r, "sum + ',' + i"), "499500,1000");
+}
+
+#[test]
+fn cached_globals_follow_host_names_lazy_members_and_descriptors() {
+    let (mut r, h) = filled();
+    enter(&mut r, |s| {
+        let g = s.global();
+        let p = s.get_str(g, "op").unwrap();
+        s.set_prototype_of(g, Some(p)).unwrap();
+        s.set_lazy(g, false).unwrap();
+    });
+    r.run_text(r#"
+        implicit = 0;
+        Object.defineProperty(globalThis, 'implicit', { enumerable: false });
+        function read() { return a; }
+        function write(v) { 'use strict'; a = v; }
+        function lazy() { return lazyProp; }
+        var log = read() + ',';
+        a = 1;
+        write(2); write(3); write(4);
+        read(); read(); log += read() + ',';
+        Object.defineProperty(globalThis, 'a', { writable: false });
+        try { write(5); } catch (e) { log += e.name + ','; }
+        log += read() + ',';
+        Object.defineProperty(globalThis, 'a', { get: function () { return 6; }, configurable: true });
+        log += read() + ',';
+        delete a;
+        log += read() + ',' + lazy() + lazy() + lazy();
+    "#).unwrap();
+    assert_eq!(h.asked.borrow().iter().filter(|a| a.contains("lazyProp")).count(), 1);
+    assert_eq!(js(&mut r, "log"), "alpha,4,TypeError,4,6,alpha,777");
+}
+
+#[test]
 fn borrows_the_current_call_arguments() {
     struct ReadArgs;
 
