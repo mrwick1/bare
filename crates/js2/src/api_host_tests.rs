@@ -448,3 +448,10 @@ fn a_date_is_not_a_host_object_and_a_host_object_is_not_a_date() {
     assert_eq!(js(&mut r, "(function () { try { Date.prototype.getTime.call(nl); return 'no'; } catch (e) { return e instanceof TypeError; } })()"), "true");
     assert_eq!(js(&mut r, "(function () { try { Date.prototype.getTime.call(ds); return 'no'; } catch (e) { return e instanceof TypeError; } })()"), "true");
 }
+
+#[test]
+fn a_host_object_is_not_a_date_for_object_prototype_to_string() {
+    let (mut r, _h) = filled();
+    assert_eq!(js(&mut r, "[ds, nl, new Date(0)].map(x => Object.prototype.toString.call(x)).join()"), "[object Object],[object Object],[object Date]");
+    assert_eq!(js(&mut r, "[String(ds), String(op)].join()"), "[object Object],[object Object]");
+}
