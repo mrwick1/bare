@@ -246,6 +246,40 @@ impl Realm {
         matches!(k.resolve().chars(), Some(Chars::One(b)) if b.first() == Some(&0)) || matches!(k.resolve().chars(), Some(Chars::Two(u)) if u.first() == Some(&0))
     }
 
+    /// Snapshot the enumerable string keys, starting with the receiver and then its prototypes. A non-enumerable own key still
+    /// shadows a prototype property of the same name.
+    pub(crate) fn for_in_keys(&mut self, recv: Value) -> R<(Value, Value)> {
+        if recv.is_undefined() || recv.is_null() {
+            return Ok((Value::UNDEFINED, self.new_array(&[])));
+        }
+        let obj = self.to_object(recv)?;
+        let mut keys = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut cur = Some(obj);
+        while let Some(o) = cur {
+            for name in self.own_key_list_h(o, false)? {
+                let key = self.key_of(name)?;
+                if seen.insert(key.as_value().bits()) && self.get_own_h(o, key)?.is_some_and(|p| p.attrs() & A_E != 0) {
+                    keys.push(name);
+                }
+            }
+            cur = self.proto_of(o);
+        }
+        Ok((obj.value(), self.new_array(&keys)))
+    }
+
+    /// A key deleted before its turn is skipped.
+    pub(crate) fn for_in_has(&mut self, mut cur: Option<Obj>, name: Value) -> R<bool> {
+        let key = self.key_of(name)?;
+        while let Some(o) = cur {
+            if let Some(own) = self.get_own_h(o, key)? {
+                return Ok(own.attrs() & A_E != 0);
+            }
+            cur = self.proto_of(o);
+        }
+        Ok(false)
+    }
+
     // ---- extensibility, seal, freeze ----
 
     pub(crate) fn prevent_extensions(&mut self, o: Obj) {

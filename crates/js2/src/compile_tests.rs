@@ -185,7 +185,7 @@ code nregs=10 nparams=1 words=24 sites=0
 0000  LoadUndef   r2
 0001  LoadI       r1, 0
 0002  ForInOpen   3, r0
-0003  IterNext    r6, -> 0011, 3
+0003  ForInNext   r6, -> 0011, 3
 0005  Mov         r2, r6
 0006  GetElem     r7, r0, r2
 0007  Add         r1, r1, r7

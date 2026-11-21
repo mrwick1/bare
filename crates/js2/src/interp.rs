@@ -175,7 +175,7 @@ macro_rules! cold_ops {
         Op::DefAccessor | Op::DefAccessorElem | Op::DefMethod | Op::DefMethodElem | Op::SetHome | Op::MakeClass | Op::MakeDerived |
         Op::SetFnName | Op::DefaultCtor | Op::SetFields | Op::NewPrivateName | Op::GetPrivate | Op::SetPrivate | Op::HasPrivate |
         Op::DefPrivate | Op::DefPrivateMethod | Op::DefPrivateAccessor | Op::GetSuper | Op::GetSuperElem | Op::GetSuperElemRef | Op::SetSuper |
-        Op::SetSuperElem | Op::CallSuper | Op::CallSuperSpread | Op::RetDerived | Op::GenInit | Op::Yield | Op::RetGen | Op::IterClose | Op::YieldStarStep | Op::AsyncInit | Op::Await | Op::RetAsync |
+        Op::SetSuperElem | Op::CallSuper | Op::CallSuperSpread | Op::RetDerived | Op::GenInit | Op::Yield | Op::RetGen | Op::IterClose | Op::ForInNext | Op::YieldStarStep | Op::AsyncInit | Op::Await | Op::RetAsync |
         Op::AIterOpen | Op::AIterNext | Op::AIterUnpack | Op::AYsUnpack | Op::AIterClose | Op::AIterCloseT | Op::AIterCheck | Op::AYsCall
     };
 }
@@ -1404,6 +1404,24 @@ impl Vm {
                                 }
                             }
                         }
+                        Op::ForInNext => {
+                            gate!();
+                            let base = $x as usize;
+                            let keys = Realm::obj(r!(base)).expect("for-in keys");
+                            let source = Realm::obj(r!(base + 2));
+                            let mut i = r!(base + 1).as_int().expect("for-in index");
+                            let mut found = false;
+                            while let Some(key) = keys.get_element(i as u32) {
+                                i += 1;
+                                if tri!(realm.for_in_has(source, key)) {
+                                    r!(a!()) = key;
+                                    r!(base + 1) = Value::int(i);
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            jump!(!found, nextx!(), sbx!());
+                        }
                         Op::YieldStarStep => {
                             std::hint::cold_path();
                             gate!();
@@ -2393,10 +2411,10 @@ impl Vm {
                     Op::ForInOpen => {
                         std::hint::cold_path();
                         gate!();
-                        let keys = tri!(realm.own_keys(r!(b!())));
+                        let (source, keys) = tri!(realm.for_in_keys(r!(b!())));
                         r!(a!()) = keys;
                         r!(a!() + 1) = Value::int(0);
-                        r!(a!() + 2) = Value::int(1);
+                        r!(a!() + 2) = source;
                         pc = next;
                     }
                     Op::CreateArgs => {
