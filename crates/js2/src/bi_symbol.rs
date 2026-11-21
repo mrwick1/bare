@@ -27,7 +27,7 @@ use crate::string::{Chars, FLAG_REGISTERED, Str};
 use crate::value::Value;
 
 /// The number of well-known symbols that `Symbol` has, and their places in `Realm::wk`.
-pub(crate) const WK: usize = 12;
+pub(crate) const WK: usize = 11;
 #[allow(dead_code)] // `iterator`, `asyncIterator` and `species` are read by steps G3 and P3.
 pub(crate) const ITERATOR: usize = 0;
 #[allow(dead_code)]
@@ -42,10 +42,9 @@ pub(crate) const MATCH_ALL: usize = 7;
 pub(crate) const REPLACE: usize = 8;
 pub(crate) const SEARCH: usize = 9;
 pub(crate) const SPLIT: usize = 10;
-pub(crate) const UNSCOPABLES: usize = 11;
 /// The descriptions of the well-known symbols: `"Symbol."` and the name of the property of `Symbol`.
 const WK_DESC: [&str; WK] = ["Symbol.iterator", "Symbol.asyncIterator", "Symbol.species", "Symbol.toStringTag", "Symbol.hasInstance", "Symbol.toPrimitive",
-    "Symbol.match", "Symbol.matchAll", "Symbol.replace", "Symbol.search", "Symbol.split", "Symbol.unscopables"];
+    "Symbol.match", "Symbol.matchAll", "Symbol.replace", "Symbol.search", "Symbol.split"];
 /// The name of the native `Function.prototype[Symbol.hasInstance]`: `Realm::instance_of` skips the call for it.
 pub(crate) const HAS_INSTANCE_NAME: &str = "[Symbol.hasInstance]";
 
@@ -58,6 +57,17 @@ impl Realm {
     /// `Symbol(description)` for the text of a symbol: `Symbol.prototype.toString` and the message of an error.
     pub fn symbol_text(&self, s: Str) -> String {
         format!("Symbol({})", self.text(s))
+    }
+
+    /// The same symbol is used by `with` and the public `Symbol.unscopables` property.
+    pub(crate) fn symbol_unscopables(&mut self) -> Str {
+        if let Some(s) = self.unscopables {
+            return s;
+        }
+        let s = Str::new_symbol(&mut self.heap, Some(Chars::One(b"Symbol.unscopables"))).expect("memory");
+        self.keep(s.key_value());
+        self.unscopables = Some(s);
+        s
     }
 
     pub(crate) fn install_symbol(&mut self) {
@@ -86,6 +96,9 @@ impl Realm {
             let k = self.intern(&d["Symbol.".len()..]);
             self.define_attrs(c, Key::Name(k), 0, self.wk[i].key_value()).expect("define");
         }
+        let k = self.intern("unscopables");
+        let s = self.symbol_unscopables();
+        self.define_attrs(c, Key::Name(k), 0, s.key_value()).expect("define");
         self.method(p, "toString", 0, symbol_to_string);
         self.method(p, "valueOf", 0, symbol_value_of);
         let getter = self.new_native(symbol_description, false, 0, "get description");

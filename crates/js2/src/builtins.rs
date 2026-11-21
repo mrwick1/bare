@@ -28,7 +28,7 @@ use crate::facts::Facts;
 use crate::compile::ScriptMode;
 use crate::parse::{Limits, parse_script_lazy};
 use crate::interp_rt::{ErrKind, Key, R, Realm};
-use crate::object::{F_CALLABLE, F_CLASS, F_FNPROPS, F_NATIVE, Obj};
+use crate::object::{F_ARGS, F_CALLABLE, F_CLASS, F_FNPROPS, F_NATIVE, Obj};
 use crate::shapes::{A_C, A_W};
 use crate::string::Str;
 use crate::value::Value;
@@ -368,7 +368,6 @@ impl Realm {
         }
         self.install_object();
         self.install_function();
-        self.install_eval();
         self.install_error();
         self.install_array();
         self.install_string();
@@ -381,7 +380,6 @@ impl Realm {
         self.install_collections();
         self.install_date();
         self.install_reflect();
-        self.install_proxy();
     }
 
     fn install_function(&mut self) {
@@ -417,9 +415,9 @@ impl Realm {
 }
 
 impl Realm {
-    /// An array (not an arguments object): an indexed object with a shape other than `s_args`.
+    /// An indexed object with array property semantics.
     pub(crate) fn is_array(&self, o: Obj) -> bool {
-        o.is_indexed() && o.shape(&self.shapes) != self.s_args
+        o.is_indexed() && !o.has_flag(F_ARGS)
     }
 }
 
@@ -515,22 +513,10 @@ fn fn_call(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
 fn fn_apply(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     callable_this(rt, this, "apply")?;
     let list = arg(args, 1);
-    rt.tail_args.clear();
-    if let Some(o) = Realm::obj(list) {
-        if o.is_indexed() {
-            let mut a = std::mem::take(&mut rt.tail_args);
-            a.extend((0..o.len()).map(|i| o.get_element(i).unwrap_or(Value::UNDEFINED)));
-            rt.tail_args = a;
-        } else {
-            let n = rt.get_named(list, "length")?;
-            let n = rt.to_number(n)?;
-            for i in 0..(n.max(0.0) as u32) {
-                let v = rt.get_prop(list, Key::Idx(i))?;
-                rt.tail_args.push(v);
-            }
-        }
-    } else if !list.is_undefined() && !list.is_null() {
-        return rt.type_error("CreateListFromArrayLike called on a non-object");
+    if list.is_undefined() || list.is_null() {
+        rt.tail_args.clear();
+    } else {
+        rt.tail_args = crate::bi_reflect::list_from(rt, list)?;
     }
     rt.tail = Some((this, arg(args, 0)));
     Ok(Value::UNDEFINED)

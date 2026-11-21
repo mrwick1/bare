@@ -2,7 +2,7 @@
 use crate::bi_object::{Desc, Own, new_property};
 use crate::builtins::{Native, arg};
 use crate::interp_rt::{ErrKind, Key, R, Realm};
-use crate::lazy::m;
+use crate::lazy::{Ent, ctor, m};
 use crate::object::{F_CALLABLE, F_FNPROPS, F_NATIVE, K_PROXY, Obj};
 use crate::shapes::{A_C, A_E, A_W};
 use crate::value::Value;
@@ -11,14 +11,9 @@ use std::collections::HashSet;
 const TARGET: u32 = 1;
 const HANDLER: u32 = 2;
 
-impl Realm {
-    pub(crate) fn install_proxy(&mut self) {
-        let ctor = self.new_native(proxy_ctor, true, 2, "Proxy");
-        self.hidden(self.global, "Proxy", ctor.value());
-        static MEMBERS: &[crate::lazy::Ent] = &[m("revocable", 2, revocable)];
-        self.lazy_table(ctor, MEMBERS);
-    }
+pub(crate) const PROXY: Ent = ctor("Proxy", 2, proxy_ctor, &[m("revocable", 2, revocable)]);
 
+impl Realm {
     fn make_proxy(&mut self, target: Value, handler: Value) -> R<Obj> {
         let Some(t) = Self::obj(target) else { return self.type_error("Proxy target must be an object") };
         if Self::obj(handler).is_none() {

@@ -50,6 +50,13 @@ impl Realm {
         self.prim_of(o.value()).and_then(Realm::str_of)
     }
 
+    pub(crate) fn has_string_own(&self, o: Obj, key: Key) -> bool {
+        self.string_wrapper(o).is_some_and(|s| match key {
+            Key::Idx(i) => (i as usize) < s.len(),
+            Key::Name(k) => k == self.k_length,
+        })
+    }
+
     /// The own property `key` of a `String` wrapper that is not in its shape: `length`, or the unit at an index below it.
     pub(crate) fn string_own(&mut self, s: Str, key: Key) -> Option<Value> {
         let s = self.flat(s);

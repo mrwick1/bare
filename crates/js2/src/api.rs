@@ -54,6 +54,7 @@ pub enum RawOwn {
 // A child module, so that it reads the private state and helpers of this one.
 #[path = "api_script.rs"]
 mod api_script;
+pub(crate) use api_script::eval_native;
 
 /// The shared slots at the start of the handle stack. They have the numbers `u32::MAX - 3..=u32::MAX`, so a pushed value of logical
 /// index `n` is at the physical index `n + 4` and `stack_len` is 0 for an empty stack.
@@ -90,8 +91,7 @@ pub(crate) struct ApiState {
     /// `call_scoped`: the objects that the names of handler code are looked up in (`api_script.rs`), and the code of each handler text.
     scope: Vec<Obj>,
     handlers: std::collections::HashMap<String, usize>,
-    /// The realm's eval intrinsic, and its iterator prototype (made on demand).
-    pub(crate) eval_fn: Value,
+    /// The iterator prototype (made on demand).
     pub(crate) iter_proto: Value,
     /// The index in `Realm::natives` of the trampoline of a plain host function and of a host constructor (`usize::MAX`: not made).
     natives: [usize; 2],
@@ -114,7 +114,6 @@ impl Default for ApiState {
             abort: None,
             scope: Vec::new(),
             handlers: Default::default(),
-            eval_fn: Value::UNDEFINED,
             iter_proto: Value::UNDEFINED,
             natives: [usize::MAX; 2],
             budget: u64::MAX,
@@ -128,7 +127,6 @@ impl ApiState {
     /// Mark the roots of the interface: the handle stack, the live persistent slots and the windows of the running host calls.
     pub(crate) fn mark(&self, m: &mut Marker) {
         m.values(&self.stack[SEEDS..]);
-        m.value(self.eval_fn);
         m.value(self.iter_proto);
         for o in &self.scope {
             m.value(o.value());

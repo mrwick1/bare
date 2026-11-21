@@ -174,7 +174,7 @@ macro_rules! cold_ops {
         Op::DefAccessor | Op::DefAccessorElem | Op::DefMethod | Op::DefMethodElem | Op::SetHome | Op::MakeClass | Op::MakeDerived |
         Op::SetFnName | Op::DefaultCtor | Op::SetFields | Op::NewPrivateName | Op::GetPrivate | Op::SetPrivate | Op::HasPrivate |
         Op::DefPrivate | Op::DefPrivateMethod | Op::DefPrivateAccessor | Op::GetSuper | Op::GetSuperElem | Op::GetSuperElemRef | Op::SetSuper |
-        Op::SetSuperElem | Op::CallSuper | Op::CallSuperSpread | Op::RetDerived | Op::GenInit | Op::Yield | Op::RetGen | Op::IterClose | Op::YieldStarStep | Op::AsyncInit | Op::Await | Op::RetAsync |
+        Op::SetSuperElem | Op::CallSuper | Op::CallSuperSpread | Op::RetDerived | Op::GenInit | Op::Yield | Op::RetGen | Op::IterOpen | Op::IterClose | Op::ForInNext | Op::YieldStarStep | Op::AsyncInit | Op::Await | Op::RetAsync |
         Op::AIterOpen | Op::AIterNext | Op::AIterUnpack | Op::AYsUnpack | Op::AIterClose | Op::AIterCloseT | Op::AIterCheck | Op::AYsCall
     };
 }
@@ -1101,6 +1101,19 @@ impl Vm {
                 continue;
             }};
         }
+        macro_rules! run_cold {
+            () => {{
+                let flow = Vm::run_cold(realm, stack, fbs, prog, ci, fp, pc);
+                let (nci, nfp, npc) = match flow {
+                    Flow::Go(c, f, p) => (c, f, p),
+                    Flow::Done(r) => return M::done(r),
+                };
+                (ci, fp, pc) = (nci, nfp, npc);
+                // The cold function may have grown the stack, compiled a function or entered a frame: every cached local is stale.
+                reload!();
+                continue;
+            }};
+        }
         // The arguments of `CallSpread` and the like: the elements of the array `$arr`, staged where the new frame goes.
         macro_rules! stage_array {
             ($arr:expr) => {{
@@ -1223,7 +1236,7 @@ impl Vm {
                             gate!();
                             let callee = r!(b!());
                             let arr = r!(b!() + 2);
-                            let value = if callee == realm.api.eval_fn {
+                            let value = if realm.is_eval(callee) {
                                 let v = Realm::obj(arr).and_then(|a| a.get_element(0)).unwrap_or(undef);
                                 tri!(realm.direct_eval(v, record(stack, fp, 1), record(stack, fp, 2), code.eval_scopes[($x) as usize].clone(), code.strict, c!() != 0))
                             } else {
@@ -1389,12 +1402,48 @@ impl Vm {
                                 Err(e) => throw!(e),
                             }
                         }
+                        Op::IterOpen => {
+                            let mut it = r!(b!());
+                            let string = Realm::str_of(it).is_some();
+                            if string {
+                                // A string is iterated by code points: walk an array of them.
+                                gate!();
+                                let vals = tri!(realm.iter_values(it));
+                                it = Obj::array(&mut realm.heap, &realm.shapes, realm.s_array, &vals).expect("memory").value();
+                            }
+                            let fast_array = !string && c!() == 0 && Realm::obj(it).is_some_and(|o| realm.plain_array_iterator(o));
+                            // A generator is stepped by `IterNext` itself (`undefined` where an array has its index): see `generator.rs`.
+                            let index = if string || fast_array {
+                                Value::int(0)
+                            } else if Realm::is_generator(it) {
+                                undef
+                            } else {
+                                std::hint::cold_path();
+                                gate!();
+                                let (i, k) = tri!(realm.iter_open_generic(it));
+                                it = i;
+                                k
+                            };
+                            r!(a!()) = it;
+                            r!(a!() + 1) = index;
+                            r!(a!() + 2) = Value::bool(fast_array);
+                            pc = next;
+                        }
+                        Op::IterNext => {
+                            // The hot arm found a hole. Get the value from the prototype chain.
+                            let base = $x as usize;
+                            let i = r!(base + 1).as_int().expect("an array index");
+                            r!(base + 1) = Value::int(i + 1);
+                            gate!();
+                            r!(a!()) = tri!(realm.get_prop(r!(base), Key::Idx(i as u32)));
+                            pc = nextx!();
+                        }
                         Op::IterClose => {
                             std::hint::cold_path();
                             // The loop leaves early (`c` = 1: with a throw): `return()` of the iterator, so a generator runs its `finally` blocks.
                             if let Some(i) = r!(a!() + 1).as_int() {
                                 if r!(a!() + 2) == Value::bool(true) {
-                                    tri!(realm.close_array_iterator(r!(a!()), i, c!() != 0));
+                                    tri!(realm.close_array_iterator(r!(a!()), i as u32, c!() != 0));
                                 }
                             } else {
                                 tri!(realm.iter_close(r!(a!()), r!(a!() + 1), c!() != 0));
@@ -1465,6 +1514,24 @@ impl Vm {
                                     jump!(true, nextx!(), sbx!())
                                 }
                             }
+                        }
+                        Op::ForInNext => {
+                            gate!();
+                            let base = $x as usize;
+                            let keys = Realm::obj(r!(base)).expect("for-in keys");
+                            let source = Realm::obj(r!(base + 2));
+                            let mut i = r!(base + 1).as_int().expect("for-in index");
+                            let mut found = false;
+                            while let Some(key) = keys.get_element(i as u32) {
+                                i += 1;
+                                if tri!(realm.for_in_has(source, key)) {
+                                    r!(a!()) = key;
+                                    r!(base + 1) = Value::int(i);
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            jump!(!found, nextx!(), sbx!());
                         }
                         Op::YieldStarStep => {
                             std::hint::cold_path();
@@ -2372,33 +2439,6 @@ impl Vm {
                     Op::SwitchA => pc = switch_str(&mut realm.heap, code, &code.tables[bx!()..], r!(a!())),
                     Op::Ret => ret!(r!(a!())),
                     Op::RetUndef => ret!(undef),
-                    Op::IterOpen => {
-                        let mut it = r!(b!());
-                        let string = Realm::str_of(it).is_some();
-                        if string {
-                            // A string is iterated by code points: walk an array of them.
-                            gate!();
-                            let vals = tri!(realm.iter_values(it));
-                            it = Obj::array(&mut realm.heap, &realm.shapes, realm.s_array, &vals).expect("memory").value();
-                        }
-                        let fast_array = !string && c!() == 0 && Realm::obj(it).is_some_and(|o| realm.plain_array_iterator(o));
-                        // A generator is stepped by `IterNext` itself (`undefined` where an array has its index): see `generator.rs`.
-                        let index = if string || fast_array {
-                            Value::int(0)
-                        } else if Realm::is_generator(it) {
-                            undef
-                        } else {
-                            std::hint::cold_path();
-                            gate!();
-                            let (i, k) = tri!(realm.iter_open_generic(it));
-                            it = i;
-                            k
-                        };
-                        r!(a!()) = it;
-                        r!(a!() + 1) = index;
-                        r!(a!() + 2) = Value::bool(fast_array);
-                        pc = next;
-                    }
                     Op::IterNext => {
                         let base = $x as usize;
                         let Some(i) = r!(base + 1).as_int() else {
@@ -2414,14 +2454,9 @@ impl Vm {
                         };
                         let arr = Realm::obj(r!(base)).expect("an array");
                         if (i as u32) < arr.len() {
+                            let Some(v) = arr.get_element(i as u32) else { run_cold!() };
                             r!(base + 1) = Value::int(i + 1);
-                            r!(a!()) = if let Some(v) = arr.get_element(i as u32) {
-                                v
-                            } else {
-                                std::hint::cold_path();
-                                gate!();
-                                tri!(realm.get_prop(arr.value(), Key::Idx(i as u32)))
-                            };
+                            r!(a!()) = v;
                             pc = nextx!();
                         } else {
                             jump!(true, nextx!(), sbx!())
@@ -2455,10 +2490,10 @@ impl Vm {
                     Op::ForInOpen => {
                         std::hint::cold_path();
                         gate!();
-                        let keys = tri!(realm.own_keys(r!(b!())));
+                        let (source, keys) = tri!(realm.for_in_keys(r!(b!())));
                         r!(a!()) = keys;
                         r!(a!() + 1) = Value::int(0);
-                        r!(a!() + 2) = Value::int(1);
+                        r!(a!() + 2) = source;
                         pc = next;
                     }
                     Op::CreateArgs => {
@@ -2466,17 +2501,7 @@ impl Vm {
                         r!(a!()) = record(stack, fp, 9);
                         pc = next;
                     }
-                    cold_ops!() => {
-                        let flow = Vm::run_cold(realm, stack, fbs, prog, ci, fp, pc);
-                        let (nci, nfp, npc) = match flow {
-                            Flow::Go(c, f, p) => (c, f, p),
-                            Flow::Done(r) => return M::done(r),
-                        };
-                        (ci, fp, pc) = (nci, nfp, npc);
-                        // The cold function may have grown the stack, compiled a function or entered a frame: every cached local is stale.
-                        reload!();
-                        continue;
-                    }
+                    cold_ops!() => run_cold!(),
                 }
             }};
         }

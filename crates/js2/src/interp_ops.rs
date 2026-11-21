@@ -118,7 +118,8 @@ impl Realm {
         if !self.has_prop(object, key)? {
             return Ok(Value::UNDEFINED);
         }
-        let excluded = self.get_prop(object, Key::Name(self.wk[crate::bi_symbol::UNSCOPABLES]))?;
+        let unscopables = self.symbol_unscopables();
+        let excluded = self.get_prop(object, Key::Name(unscopables))?;
         if Self::obj(excluded).is_some() && Self::truthy(self.get_prop(excluded, key)?) {
             return Ok(Value::UNDEFINED);
         }
