@@ -152,6 +152,7 @@ fn window(i: &Ins, code: &Code) -> Option<usize> {
         Op::Concat | Op::NewArrLit => i.c as usize,
         Op::NewObjLit => code.recipes.get(i.c as usize).map_or(0, <[u32]>::len),
         Op::IterOpen | Op::ForInOpen | Op::IterNext | Op::IterClose => 3,
+        Op::YieldStarStep => 5,
         _ => return None,
     })
 }

@@ -23,7 +23,7 @@
 //!   root map names (a collection before the copy must not free them), and is no longer than `gen_regs`. After the suspension only the registers of
 //!   the list, the sent value and the mode are written: the resume restores no other. A handler whose range holds a suspension is
 //!   entered with that smaller set too.
-use crate::bytecode::{Code, GK_NONE, ITER_REGS, Ins, NO_REG, Op, Recipes, STR_EMPTY, STR_SLOT, decode};
+use crate::bytecode::{Code, GK_NONE, ITER_REGS, Ins, NO_REG, Op, Recipes, STR_EMPTY, STR_SLOT, YS_REGS, decode};
 
 type Bits = Vec<u64>;
 
@@ -46,6 +46,7 @@ fn window(ins: &Ins, recipes: &Recipes) -> Option<u32> {
         Op::ObjRest => ins.x,
         Op::NewObjLit => recipes.get(ins.c as usize).map_or(0, |k| k.len() as u32),
         Op::IterOpen | Op::ForInOpen | Op::IterNext | Op::IterClose => ITER_REGS,
+        Op::YieldStarStep => YS_REGS,
         _ => return None,
     })
 }

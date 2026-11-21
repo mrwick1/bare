@@ -52,6 +52,7 @@ pub mod opcount;
 pub mod builtins;
 pub mod reenter;
 pub mod generator;
+mod iter;
 mod bi_array;
 mod bi_json;
 mod bi_object;

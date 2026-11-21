@@ -324,6 +324,8 @@ pub(crate) struct Fc<'a> {
     /// [`GK_GEN`] while a generator is compiled, else 0 (`compile_gen.rs`), and the longest save list that it made.
     pub gen_kind: u8,
     pub gen_regs: u16,
+    /// The head of a `for-of` is being bound: its loop frame is not pushed yet, but a throw of a pattern there closes the iterator.
+    pub of_head: bool,
     /// While the default of parameter `i` is compiled and it names a parameter that is not set yet: `(i, number of parameters, register
     /// of the hole)`. A read of such a parameter reads the hole, so it throws.
     pub param_dz: Option<(u32, u32, u32)>,
@@ -387,6 +389,7 @@ impl<'a> Fc<'a> {
             unsupported: Vec::new(),
             gen_kind: 0,
             gen_regs: 0,
+            of_head: false,
             param_dz: None,
         }
     }
@@ -842,7 +845,7 @@ impl<'a> Fc<'a> {
             self.set_live(c.ex);
             let skip = self.label();
             self.jmp_r(Op::JmpIf, c.done, skip);
-            self.op(Op::IterClose, c.rec, 0, 0);
+            self.op(Op::IterClose, c.rec, 0, 1);
             self.bind(skip);
             self.op(Op::Throw, c.ex, 0, 0);
         }
