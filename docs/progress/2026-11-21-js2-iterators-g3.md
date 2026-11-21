@@ -52,8 +52,8 @@ Base: G2 head `c931a206`. Release builds, own `CARGO_TARGET_DIR` for each tree a
 | `interp_load fib 27` | 260,541,875 | 261,813,693 | +0.488% | 249,085,381 | 248,450,099 | -0.255% |
 | `interp_load closures 1000000` | 1,949,846,913 | 1,971,417,221 | +1.106% | 1,924,433,785 | 1,912,434,176 | -0.624% |
 | `interp_load objects 1000000` | 716,342,625 | 728,277,346 | +1.666% | 717,256,036 | 719,255,904 | +0.279% |
-| `gen_load next 100000` | 170,472,998 | 171,608,224 | +0.666% | 165,060,762 | 163,863,618 | -0.725% |
-| `gen_load host 100000` | 101,589,941 | 101,990,349 | +0.394% | 98,963,980 | 98,166,891 | -0.805% |
+| `js2_gen_load next 100000` | 170,472,998 | 171,608,224 | +0.666% | 165,060,762 | 163,863,618 | -0.725% |
+| `js2_gen_load host 100000` | 101,589,941 | 101,990,349 | +0.394% | 98,963,980 | 98,166,891 | -0.805% |
 
 At `codegen-units=1` no row is over +0.5% (the largest is +0.279%), so the rule holds (a row over +0.5% passes when it is within +0.5% at `codegen-units=1`). The default build moves by up to +4.6% on rows that run no op that this step changed. Two builds of the same source moved `loopfn` by +1.4% and +4.6%, so this is the layout of the code of `exec` (hypothesis: not checked with a disassembly). What this step puts in the hot loop: one arm (`IterOpen`) calls `iter_record` out of line; `IterNext` calls `iter_step_any` out of line; `IterClose` and `YieldStarStep` are in the cold copy. I did not run the jemalloc counts or the full cost matrix.
 

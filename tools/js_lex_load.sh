@@ -5,11 +5,14 @@
 set -eu
 # LEX_PKG=bare-js2 runs the lexer of the new engine (crates/js2/examples).
 pkg=${LEX_PKG:-bare-js}
+example=lex_load
+[ "$pkg" != bare-js2 ] || example=js2_lex_load
 runs=${1:-5}
-cargo build --release -q -p "$pkg" --example lex_load
+cargo build --release -q -p "$pkg" --example "$example"
+bin=${CARGO_TARGET_DIR:-target}/release/examples/$example
 for scale in 1 10 100; do
   for case in small repeat comments strings malformed; do
-    ( ulimit -v 1048576; timeout 120 "${CARGO_TARGET_DIR:-target}"/release/examples/lex_load $case $scale $runs )
+    ( ulimit -v 1048576; timeout 120 "$bin" $case $scale $runs )
   done
-  ( ulimit -v 1048576; timeout 120 "${CARGO_TARGET_DIR:-target}"/release/examples/lex_load strings $scale $runs decode )
+  ( ulimit -v 1048576; timeout 120 "$bin" strings $scale $runs decode )
 done

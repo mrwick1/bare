@@ -10,7 +10,7 @@ The cost gate (owner, 2026-11-21) says the full matrix runs on main after about 
 - Matrix: `tools/js/cost_matrix.sh -j4 -J` on all 819 rows of `tools/js/cost_rows.txt`. Each row is the minimum of 3 runs of `perf stat -e instructions:u` (`tools/js/instr.sh`), under glibc and jemalloc.
 - Rows over +0.5% under both allocators were measured again by hand: 3 runs each, default build and `RUSTFLAGS="-C codegen-units=1"` on both trees. The spread is the largest max-minus-min of the 3 runs.
 - js2 micro rows: `interp_load CASE N` minus `interp_load CASE 0`, 3 runs, both allocators.
-- Build note: `-p bare-js2 --examples` overwrites the bare-js examples `gen_load`, `lex_load`, `parse_load` and `promise_load` (same names). The first matrix run used such a build and was discarded. Build `interp_load` alone, after the bare-js examples.
+- Build note: At the measured commits, `-p bare-js2 --examples` overwrote the bare-js examples `gen_load`, `lex_load`, `parse_load` and `promise_load`. The first matrix run used that build. The reported run built `interp_load` alone after the bare-js examples. The [example rename](2026-11-21-js2-example-names.md) removes the clash in later builds.
 
 ## Result of the matrix
 
