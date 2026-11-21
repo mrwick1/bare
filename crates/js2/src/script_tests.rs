@@ -178,7 +178,27 @@ fn tagged_templates_regexp_and_bigint() {
         ("function id(s) { return s; } function t() { return id`x`; } var r = t() === t();", "r", "true"),
         ("function id(s) { return s; } var r = id`a\\n${0}` === id`a\\n${0}`;", "r", "false"),
         ("var r = /a+/g.test('caab');", "r", "true"),
-        ("try { var x = 10n; } catch (e) { var r = e.name; }", "r", "TypeError"),
+        ("var r = typeof 0x10_00n;", "r", "bigint"),
+    ]);
+}
+
+#[test]
+fn bigint_operators_and_builtins() {
+    check(&[
+        ("let x = 2n ** 130n; var r = [x / 3n, x % 3n, -5n >> 1n, 7n << -1n, ~2n, 0n << x];",
+         "r", "[453709822561251284617832809909024281941,1,-3,3,-3,0]"),
+        ("let x = Object(4n); var r = [x++, ++x, x !== 6, !0n, Number(9007199254740993n), 9007199254740993n > 9007199254740992];",
+         "r", "[4,6,true,true,9007199254740992,true]"),
+        ("var r = [9007199254740993n == '9007199254740993', 2n >= '2.0', 1n == true, 0n == null, -2n < -1.5, Object.is(1n, BigInt(1))];",
+         "r", "[true,false,true,false,true,true]"),
+        ("let x = BigInt('-0'); let y = Object(1000000000000000001n); var r = [x, BigInt.asIntN(64, '0xffffffffffffffff'), BigInt.asUintN(64, -1n), y.valueOf(), (255n).toString(16), y.toLocaleString()];",
+         "r", r#"[0,-1,18446744073709551615,1000000000000000001,"ff","1,000,000,000,000,000,001"]"#),
+        ("let n = 1n << 128n; let m = new Map([[n, 7], [1, 8], [1n, 9]]); let s = new Set([n, BigInt(n.toString())]); var r = [m.get(2n ** 128n), m.get(1n), m.get(1), s.size];",
+         "r", "[7,9,8,1]"),
+        ("var r = []; for (let f of [() => 1n + 1, () => +1n, () => 1n >>> 1n, () => BigInt.asIntN(8, 3), () => new BigInt(1), () => JSON.stringify(Object(1n)), () => 1n / 0n, () => 2n ** -1n, () => BigInt(0.5), () => BigInt('1e1')]) { try { f(); } catch (e) { r.push(e.name); } }",
+         "r", r#"["TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","RangeError","RangeError","RangeError","SyntaxError"]"#),
+        ("let o = {0x1_0n: 4, 9007199254740993n: 8}; let {16n: a, 9007199254740993n: b} = o; BigInt.prototype.toJSON = function () { return String(this); }; var r = [a, b, JSON.stringify([2n])];",
+         "r", r#"[4,8,"[\"2\"]"]"#),
     ]);
 }
 

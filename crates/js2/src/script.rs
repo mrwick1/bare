@@ -402,6 +402,9 @@ impl Vm {
         if let Some(b) = v.as_bool() {
             return b.to_string();
         }
+        if let Some(b) = Realm::big_of(v) {
+            return crate::bigint::to_string_radix(b.bigint(), 10);
+        }
         let Some(o) = Realm::obj(v) else { return format!("{v:?}") };
         if o.is_callable() {
             return "function".into();

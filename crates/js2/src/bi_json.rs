@@ -2,15 +2,12 @@
 //! `\u0000` survive. `parse` makes plain objects and arrays with `Realm::define`, so the key `__proto__` is an own property and a
 //! repeated key keeps the last value. Nesting is limited to [`MAX_DEPTH`] (a `RangeError`).
 //!
-//! `toJSON` of an object is called with `Realm::call_function` (the key is the second argument), so a `Date` serializes.
-//!
-//! **Known gaps** (each needs a call of a script function from a native, or a wrapper object): a `reviver`, a function `replacer`, a
-//! getter on a value that `stringify` reads, and the unwrapping of `Number`, `String` and `Boolean` objects (there are none). Each of
-//! the first three throws a `TypeError` that says so, and a wrapper object is serialized as a plain object.
+//! Run `toJSON` and the replacer in that order. Throw if the result is a BigInt or a BigInt wrapper.
+//! Number, String and Boolean wrappers serialize as objects.
 use crate::lazy::{Ent, m};
 use crate::bi_array::{get_at, len_of};
 use crate::builtins::arg;
-use crate::interp_rt::{ErrKind, R, Realm};
+use crate::interp_rt::{ErrKind, Key, R, Realm};
 use crate::object::Obj;
 use crate::value::Value;
 
@@ -252,6 +249,7 @@ fn parse(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
 // ---- stringify ----
 
 struct Writer {
+    replacer: Option<Value>,
     out: Vec<u16>,
     gap: Vec<u16>,
     /// The `replacer` array: the keys to write, in order. `None` writes every own enumerable key.
@@ -300,15 +298,22 @@ impl Writer {
         }
     }
 
-    /// `SerializeJSONProperty` for the value `v` (already read from its holder, under `key`: a string or a number, made a string only
-    /// for a `toJSON` call). Returns false when nothing was written (`undefined`, a function), so the caller drops the key.
-    fn value(&mut self, rt: &mut Realm, mut v: Value, key: Value, indent: &[u16]) -> R<bool> {
-        if Realm::obj(v).is_some() {
+    /// `SerializeJSONProperty` for the value already read from its holder. The key can be an index.
+    /// Return false if there is no JSON representation for the value.
+    fn value(&mut self, rt: &mut Realm, mut v: Value, holder: Value, key: Value, indent: &[u16]) -> R<bool> {
+        if v.is_bigint() || Realm::obj(v).is_some() {
             let to_json = rt.get_named(v, "toJSON")?;
             if callable(to_json) {
                 let k = rt.to_str(key)?.value();
                 v = rt.call_function(to_json, v, &[k])?;
             }
+        }
+        if let Some(f) = self.replacer {
+            let k = rt.to_str(key)?.value();
+            v = rt.call_function(f, holder, &[k, v])?;
+        }
+        if v.is_bigint() || rt.prim_of(v).is_some_and(Value::is_bigint) {
+            return rt.type_error("cannot serialize a BigInt");
         }
         if let Some(o) = Realm::obj(v) {
             if o.is_callable() {
@@ -354,7 +359,7 @@ impl Writer {
             }
             self.newline(&inner);
             let v = get_at(rt, o.value(), i)?;
-            if !self.value(rt, v, Realm::num(i), &inner)? {
+            if !self.value(rt, v, o.value(), Realm::num(i), &inner)? {
                 push_ascii(&mut self.out, "null");
             }
             i += 1.0;
@@ -391,7 +396,7 @@ impl Writer {
             if !self.gap.is_empty() {
                 self.out.push(0x20);
             }
-            if self.value(rt, v, k, &inner)? {
+            if self.value(rt, v, o.value(), k, &inner)? {
                 any = true;
             } else {
                 self.out.truncate(mark);
@@ -409,9 +414,6 @@ impl Writer {
 fn stringify(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let (replacer, space) = (arg(args, 1), arg(args, 2));
     let mut keys = None;
-    if callable(replacer) {
-        return rt.type_error("JSON.stringify with a replacer function needs a call of a script function from native code (not built yet)");
-    }
     if let Some(r) = Realm::obj(replacer).filter(|r| rt.is_array(*r)) {
         let n = len_of(rt, r.value())?;
         let mut list: Vec<Value> = Vec::new();
@@ -452,7 +454,16 @@ fn stringify(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     } else {
         Vec::new()
     };
-    let mut w = Writer { out: Vec::new(), gap, keys, stack: Vec::new() };
-    let key = rt.string("");
-    if w.value(rt, arg(args, 0), key, &[])? { Ok(rt.make_units(&w.out)) } else { Ok(Value::UNDEFINED) }
+    let replacer = callable(replacer).then_some(replacer);
+    let mut w = Writer { replacer, out: Vec::new(), gap, keys, stack: Vec::new() };
+    let key = rt.intern("");
+    let v = arg(args, 0);
+    let holder = if replacer.is_some() {
+        let o = Obj::new(&mut rt.heap, &rt.shapes, rt.s_object).expect("memory");
+        rt.define_attrs(o, Key::Name(key), crate::shapes::A_W | crate::shapes::A_E | crate::shapes::A_C, v)?;
+        o.value()
+    } else {
+        Value::UNDEFINED
+    };
+    if w.value(rt, v, holder, key.value(), &[])? { Ok(rt.make_units(&w.out)) } else { Ok(Value::UNDEFINED) }
 }

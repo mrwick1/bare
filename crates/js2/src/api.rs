@@ -916,6 +916,10 @@ impl Engine for Realm {
         }
     }
 
+    fn bigint_limbs(&self, v: Local<'_>) -> usize {
+        Realm::big_of(self.a_at(v)).map_or(0, |b| b.words().len())
+    }
+
     fn to_number<'s>(&mut self, v: Local<'_>) -> Result<f64, Error<'s>> {
         let v = self.a_at(v);
         Realm::to_number(self, v).map_err(|e| self.a_err(e))
