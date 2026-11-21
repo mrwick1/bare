@@ -109,13 +109,155 @@ fn what_the_realm_does_not_have_is_unsupported_and_never_a_panic() {
     enter(&mut r, |s| {
         let o = s.new_object().unwrap();
         let u = s.undefined();
-        assert_eq!(s.new_promise().err(), Some(Error::Abort(Abort::Unsupported("new_promise"))));
-        assert_eq!(s.queue_microtask(u).err(), Some(Error::Abort(Abort::Unsupported("queue_microtask"))));
+        assert_eq!(s.queue_microtask(u).err().map(|e| matches!(e, Error::Throw(_))), Some(true), "a microtask that is no function is a TypeError");
         assert_eq!(s.iter_open(o).err(), Some(Error::Abort(Abort::Unsupported("iter_open"))));
         assert_eq!(s.set_host_owner(o, 1).err(), Some(Error::Abort(Abort::Unsupported("set_host_owner"))));
         assert_eq!(s.promise_status(o), None);
         assert_eq!(s.engine().pending_jobs(), 0);
+        assert_eq!(s.resolve_promise(o, o).err(), Some(Error::Abort(Abort::Unsupported("resolve_promise"))));
     });
+}
+
+/// The text of the global `name` (a string, a number or an array of them).
+fn text(r: &mut Realm, name: &str) -> String {
+    let k = r.intern(name);
+    let g = r.global.value();
+    let v = r.get_prop(g, Key::Name(k)).unwrap();
+    let s = r.to_str(v).unwrap();
+    r.text(s)
+}
+
+fn global<'s>(s: &mut Scope<'s, Realm>, name: &str) -> Local<'s> {
+    let g = s.global();
+    s.get_str(g, name).unwrap()
+}
+
+/// A host whose `between_jobs` runs a script function `hook` and whose `report_exception` and `promise_rejections` count.
+#[derive(Default)]
+struct Hooks {
+    between: Cell<u32>,
+    reports: Cell<u32>,
+    rejections: Cell<u32>,
+    collect: bool,
+}
+
+impl Host<Realm> for Hooks {
+    fn call<'s>(&self, s: &mut Scope<'s, Realm>, _id: u32, _this: Local<'s>, _args: Args<'s>, _is_new: bool) -> Result<Local<'s>, Error<'s>> {
+        // `probe()`: a checkpoint from a host call is nothing, and a drain is refused.
+        assert_eq!(s.checkpoint().unwrap(), 0);
+        assert_eq!(s.drain_microtasks().err(), Some(Error::Abort(Abort::Unsupported("drain_microtasks during a call"))));
+        Ok(s.undefined())
+    }
+
+    fn between_jobs<'s>(&self, s: &mut Scope<'s, Realm>) -> Result<(), Error<'s>> {
+        self.between.set(self.between.get() + 1);
+        if self.collect {
+            s.engine().collect(&mut [], |_| {});
+            return Ok(());
+        }
+        let hook = global(s, "hook");
+        let this = s.undefined();
+        s.call(hook, this, &[]).map(|_| ())
+    }
+
+    fn report_exception<'s>(&self, _s: &mut Scope<'s, Realm>, _thrown: Local<'s>) {
+        self.reports.set(self.reports.get() + 1);
+    }
+
+    fn promise_rejections<'s>(&self, _s: &mut Scope<'s, Realm>, unhandled: &[Local<'s>], _handled: &[Local<'s>], _dropped: u32) -> Result<(), Error<'s>> {
+        self.rejections.set(self.rejections.get() + unhandled.len() as u32);
+        Ok(())
+    }
+}
+
+/// A script that a hook runs at the top gets a budget of its own, and the budget of the checkpoint comes back after it.
+#[test]
+fn between_jobs_runs_script_on_its_own_budget() {
+    let mut r = realm();
+    r.run_text("var spin = n => { for (var i = 0; i < n; i++); }; var hook = () => spin(6000); var job = () => spin(2000);").unwrap();
+    r.set_budget(10_000);
+    let h = Rc::new(Hooks::default());
+    r.set_host(h.clone());
+    enter(&mut r, |s| {
+        let job = global(s, "job");
+        for _ in 0..3 {
+            s.queue_microtask(job).unwrap();
+        }
+        // 3 jobs of 2,000 steps fit in the budget of the drain (10,000); the 4 hooks of 6,000 steps do not, unless they run on their own.
+        assert_eq!(s.drain_microtasks().unwrap(), 3);
+        assert_eq!(s.engine().api.abort, None);
+    });
+    assert_eq!(h.between.get(), 4);
+}
+
+/// A job that runs out of budget ends the drain as a limit. The failure stays until `clear_failed_job`; the job is lost, the next one is not.
+#[test]
+fn a_job_out_of_budget_fails_the_drain_until_it_is_cleared() {
+    let mut r = realm();
+    r.run_text("var n = 0; var forever = () => { for (;;); }; var next = () => { n++ };").unwrap();
+    r.set_budget(1_000);
+    enter(&mut r, |s| {
+        let (forever, next) = (global(s, "forever"), global(s, "next"));
+        s.queue_microtask(forever).unwrap();
+        s.queue_microtask(next).unwrap();
+        assert_eq!(s.drain_microtasks().err(), Some(Error::Abort(Abort::Limit("the step budget"))));
+        assert_eq!(s.drain_microtasks().err(), Some(Error::Abort(Abort::Limit("the step budget"))), "sticky");
+        assert_eq!(s.pending_jobs(), 1);
+        s.clear_failed_job();
+        assert_eq!(s.drain_microtasks().unwrap(), 1);
+    });
+    assert_eq!(text(&mut r, "n"), "1");
+}
+
+/// The drain collects inside the jobs (`between_jobs` collects too, with the promise held by a handle and its value held by the queue).
+#[test]
+fn the_drain_collects_and_the_values_of_the_host_survive() {
+    let mut r = realm();
+    r.run_text("var log = []; var ok = v => { var a = []; for (var i = 0; i < 500; i++) a.push({ i: i, s: 'x' + i }); log.push(v.tag) };").unwrap();
+    r.heap.set_trigger(crate::heap::Trigger { min: 1 << 10, slack: 1 << 10 });
+    let h = Rc::new(Hooks { collect: true, ..Default::default() });
+    r.set_host(h.clone());
+    let before = r.collections;
+    enter(&mut r, |s| {
+        let ok = global(s, "ok");
+        let none = s.undefined();
+        for tag in ["a", "b", "c"] {
+            let p = s.new_promise().unwrap();
+            s.promise_then(p, ok, none).unwrap();
+            let v = s.new_object().unwrap();
+            let t = s.string(tag).unwrap();
+            s.define_str(v, "tag", t, bare_js_api::Attrs::ALL).unwrap();
+            s.resolve_promise(p, v).unwrap();
+        }
+        assert_eq!(s.drain_microtasks().unwrap(), 3);
+    });
+    assert!(r.collections > before + 4, "collected between the jobs and inside them");
+    assert_eq!(text(&mut r, "log"), "a,b,c");
+    assert_eq!(r.stack_len(), 0);
+}
+
+/// A handler that the host gives to `promise_then` that throws makes its derived promise an unhandled rejection that the host hears.
+#[test]
+fn a_throw_of_a_host_reaction_is_an_unhandled_rejection() {
+    let mut r = realm();
+    r.run_text("var boom = () => { throw 1 }; var probeJob = () => probe(); var hook = () => {};").unwrap();
+    let h = Rc::new(Hooks::default());
+    r.set_host(h.clone());
+    enter(&mut r, |s| {
+        let f = s.host_function("probe", 0, 0, HostFn::Method).unwrap();
+        let g = s.global();
+        s.define_str(g, "probe", f, bare_js_api::Attrs::ALL).unwrap();
+        let (boom, none) = (global(s, "boom"), s.undefined());
+        let p = s.new_promise().unwrap();
+        s.promise_then(p, boom, none).unwrap();
+        s.resolve_promise(p, none).unwrap();
+        // A job that makes a host call: the checkpoint inside it is nothing, and the drain is refused.
+        let probe = global(s, "probeJob");
+        s.queue_microtask(probe).unwrap();
+        assert_eq!(s.drain_microtasks().unwrap(), 2);
+    });
+    assert_eq!(h.rejections.get(), 1);
+    assert_eq!(h.reports.get(), 0);
 }
 
 #[test]

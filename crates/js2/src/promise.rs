@@ -1,5 +1,5 @@
 //! `Promise`, the microtask queue and the tracking of rejections (`docs/design-js2-async.md` 7.1 to 7.4, plan step P1). Safe code over
-//! [`Realm`]; the one place that runs script is [`Vm::drain_microtasks`].
+//! [`Realm`]; the one place that runs script is [`Realm::drain_jobs`].
 //!
 //! **A promise** is an `Object` cell with the flag `F_PROMISE` and two hidden slots, 32 bytes in all. Slot 0 is the state: an int, the
 //! state in the low two bits (pending, fulfilled, rejected) and the `handled` bit (4). Slot 1 is the value of a settled promise, or,
@@ -18,9 +18,9 @@
 //! `then`) and `K_CALLBACK` (`queueMicrotask`). The hook for an `await` (design 7.3) is a new kind here: an activation that is its
 //! own reaction (step A1).
 //!
-//! **Who runs jobs.** The host: [`Vm::drain_microtasks`], called at the top with the JS stack empty. `Vm::call` and the end of a script
-//! never drain. Each job is a separate entry at the top (`Vm::call`, no nesting, no hold of the collector), so the collector may run
-//! inside a job. The job in progress is `Promises::cur`, a root: the handler, the argument and the derived promise stay reachable
+//! **Who runs jobs.** The host: `Engine::drain_microtasks` and `checkpoint` (`api.rs`), or [`Vm::drain_microtasks`] for tools, both
+//! called at the top with the JS stack empty. `Vm::call` and the end of a script never drain. Each job is a separate entry at the top
+//! (a pooled machine, no nesting, no hold of the collector), so the collector may run inside a job. The run is [`Realm::drain_jobs`]. The job in progress is `Promises::cur`, a root: the handler, the argument and the derived promise stay reachable
 //! through it. A handler that is a native (a resolving function, `Promise.resolve` as a handler) runs through `Realm::call_native`.
 //!
 //! **Resolving functions** are two native function cells that share the "already resolved" flag without a third cell: slot 1 of each
@@ -42,11 +42,11 @@
 //! static combinators (step P3), `Symbol.toStringTag`. A constructor that is a script function or class cannot be called from a
 //! native with `new` yet (`Realm::call_function` does not construct), so `then` on a promise whose `constructor` is a script subclass
 //! throws a `TypeError`; a native constructor works.
-use crate::builtins::{Native, NativeFn, Outcome, arg};
+use crate::builtins::{Native, NativeFn, arg};
 use crate::cell::Layout;
 use crate::gc::Marker;
 use crate::heap::Heap;
-use crate::interp::{Exit, STOP, Vm};
+use crate::interp::{STOP, Vm};
 use crate::interp_rt::{Key, R, Realm, Slot};
 use crate::object::{Ctx, F_PROMISE, Obj, Spot};
 use crate::shapes::{ShapeId, Shapes};
@@ -94,13 +94,15 @@ impl Default for PromiseLimits {
     }
 }
 
-/// What a drain gives to the host when it stops early.
+/// Why a drain stopped early. The failure is sticky: the drain fails the same way until [`Realm::clear_failed_job`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DrainStop {
-    /// The budget ran out in a job.
+    /// The budget ran out in a job (or the host gave an abort: `ApiState::abort`).
     Fuel,
-    /// `max_jobs_per_drain` ran out (the drain fails until `Realm::clear_failed_job`).
+    /// `max_jobs_per_drain` ran out.
     Limit,
+    /// `Host::between_jobs` threw this value. It is a root while the failure lasts.
+    Throw(Value),
 }
 
 /// What the host gets at the end of a task (HTML "notify about rejected promises").
@@ -110,7 +112,7 @@ pub struct Rejections {
     pub unhandled: Vec<Value>,
     /// Promises that were reported before and got a handler since.
     pub handled: Vec<Value>,
-    /// Rejections that no list had room for.
+    /// Rejections over the bound of the pending list (`MAX_REJECTED`) since the last call.
     pub dropped: u32,
 }
 
@@ -136,7 +138,7 @@ pub(crate) struct Promises {
     reported: Vec<Value>,
     handled: Vec<Value>,
     dropped: u32,
-    failed: bool,
+    failed: Option<DrainStop>,
     pub(crate) limits: PromiseLimits,
     /// The indexes in `Realm::natives` of the resolving functions and of the executor of a capability.
     id_resolve: usize,
@@ -166,7 +168,7 @@ impl Promises {
             reported: Vec::new(),
             handled: Vec::new(),
             dropped: 0,
-            failed: false,
+            failed: None,
             limits: PromiseLimits::default(),
             id_resolve: 0,
             id_reject: 0,
@@ -186,6 +188,9 @@ impl Promises {
         m.values(&[self.proto.value(), self.ctor, self.then_fn, self.head, self.cur]);
         m.values(&self.rejected);
         m.values(&self.handled);
+        if let Some(DrainStop::Throw(v)) = self.failed {
+            m.value(v);
+        }
         m.value(self.k_then.value());
         m.value(self.k_state.value());
         m.value(self.k_result.value());
@@ -251,6 +256,37 @@ impl Realm {
         Some((s, if s == PENDING { Value::UNDEFINED } else { p.pslot(1) }))
     }
 
+    /// The promise of a value (`None` when it is no native promise).
+    pub(crate) fn promise_obj(v: Value) -> Option<Obj> {
+        promise_of(v)
+    }
+
+    /// Does the host have rejections to hear (`take_rejections` gives something)?
+    pub(crate) fn rejections_wait(&self) -> bool {
+        !self.pr.rejected.is_empty() || !self.pr.handled.is_empty() || self.pr.dropped != 0
+    }
+
+    /// `PerformPromiseThen(p, ok, err)` for the host: handlers that are no functions are skipped, and the derived promise is a new one
+    /// that nobody holds (a throw of a handler is then an unhandled rejection). It reads no `then` and no `constructor`.
+    pub(crate) fn promise_then_host(&mut self, p: Obj, ok: Value, err: Value) -> R<()> {
+        let d = self.new_promise();
+        self.perform_then(p, handler(ok), handler(err), d.value())
+    }
+
+    /// `PromiseResolve(%Promise%, x)`: `x` when it is a native promise whose `constructor` is `%Promise%` (the read may run a getter), else
+    /// a new promise resolved with `x`.
+    pub(crate) fn promise_resolve_default(&mut self, x: Value) -> R<Obj> {
+        if let Some(xp) = promise_of(x) {
+            let c = self.get_prop(x, Key::Name(self.k_constructor))?;
+            if c == self.pr.ctor {
+                return Ok(xp);
+            }
+        }
+        let p = self.new_promise();
+        self.resolve_promise(p, x)?;
+        Ok(p)
+    }
+
     /// The number of jobs that wait in the queue.
     pub fn pending_jobs(&self) -> usize {
         self.pr.queued as usize
@@ -258,7 +294,7 @@ impl Realm {
 
     /// End the failure of a drain (a limit): the next drain runs.
     pub fn clear_failed_job(&mut self) {
-        self.pr.failed = false;
+        self.pr.failed = None;
     }
 
     // ---- reactions and the queue ----
@@ -291,6 +327,17 @@ impl Realm {
         }
         self.pr.queued -= 1;
         Some(r)
+    }
+
+    /// `queueMicrotask(f)`: `TypeError` when `f` is not callable, `RangeError` when the queue is full.
+    pub(crate) fn queue_callback(&mut self, f: Value) -> R<()> {
+        if !is_callable(f) {
+            return self.type_error("queueMicrotask needs a function");
+        }
+        self.room()?;
+        let r = self.reaction(K_CALLBACK, f, Value::UNDEFINED, Value::UNDEFINED);
+        self.push_job(r);
+        Ok(())
     }
 
     /// Room for one more job? `RangeError` when not.
@@ -512,10 +559,13 @@ impl Realm {
     /// The end of a task: the rejections that the host has not seen. The promises are not rooted: the host uses them at once.
     pub fn take_rejections(&mut self) -> Rejections {
         let unhandled = std::mem::take(&mut self.pr.rejected);
-        let room = MAX_REPORTED.saturating_sub(self.pr.reported.len());
-        self.pr.reported.extend(unhandled.iter().take(room));
-        let lost = unhandled.len().saturating_sub(room) as u32;
-        Rejections { unhandled, handled: std::mem::take(&mut self.pr.handled), dropped: std::mem::take(&mut self.pr.dropped) + lost }
+        let reported = &mut self.pr.reported;
+        // A full list drops its oldest entries (they just lose the later "handled" report), as the old engine does.
+        reported.extend(unhandled.iter().copied());
+        if reported.len() > MAX_REPORTED {
+            reported.drain(..reported.len() - MAX_REPORTED);
+        }
+        Rejections { unhandled, handled: std::mem::take(&mut self.pr.handled), dropped: std::mem::take(&mut self.pr.dropped) }
     }
 
     // ---- installation ----
@@ -651,131 +701,146 @@ fn promise_reject(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
 }
 
 fn queue_microtask(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    let f = arg(args, 0);
-    if !is_callable(f) {
-        return rt.type_error("queueMicrotask needs a function");
-    }
-    rt.room()?;
-    let r = rt.reaction(K_CALLBACK, f, Value::UNDEFINED, Value::UNDEFINED);
-    rt.push_job(r);
+    rt.queue_callback(arg(args, 0))?;
     Ok(Value::UNDEFINED)
 }
 
 // ---- running jobs ----
 
 impl Vm {
-    /// Call `f` from the top: a built-in through `call_native` (and the call that it ends in), a script function as a new entry.
-    fn job_call(&mut self, f: Value, this: Value, args: &[Value]) -> Result<Value, Exit> {
-        if self.realm.native_id(f).is_none() {
-            return self.call(f, this, args);
-        }
-        let out = self.realm.call_native(f, this, args).map_err(|e| if e == STOP { Exit::Fuel } else { Exit::Throw(e) })?;
-        match out {
-            Outcome::Val(v) => Ok(v),
-            Outcome::Enter { f, this } => {
-                let a = std::mem::take(&mut self.realm.tail_args);
-                self.job_call(f, this, &a)
-            }
-        }
-    }
-
     /// Run the jobs until the queue is empty. The host calls it at the top (the JS stack is empty), at the end of a task. `on_error`
     /// gets the value that a `queueMicrotask` callback threw (the host reports it) and the throw of a capability function; the drain
-    /// goes on. Gives the number of jobs that ran.
+    /// goes on. Gives the number of jobs that ran. The browser does not come here: it uses `Engine::drain_microtasks` (`api.rs`).
     pub fn drain_microtasks(&mut self, on_error: &mut dyn FnMut(&mut Realm, Value)) -> Result<u32, DrainStop> {
-        if self.realm.pr.failed {
-            return Err(DrainStop::Limit);
+        self.realm.fuel = self.fuel;
+        let mut n = 0;
+        let r = self.realm.drain_jobs(&mut n, None, on_error);
+        self.fuel = self.realm.fuel;
+        r.map(|()| n)
+    }
+}
+
+/// The hook that runs before each job and once when the queue is empty (`Host::between_jobs`).
+pub(crate) type Between<'a> = &'a mut dyn FnMut(&mut Realm) -> Result<(), DrainStop>;
+
+impl Realm {
+    /// Run the jobs at the top (no native on the Rust stack) until the queue is empty. Each job is its own entry on a pooled machine, with
+    /// no hold, so the collector may run inside it. `n` counts the jobs of the checkpoint across calls. Any stop is sticky.
+    pub(crate) fn drain_jobs(&mut self, n: &mut u32, mut between: Option<Between>, on_error: &mut dyn FnMut(&mut Realm, Value)) -> Result<(), DrainStop> {
+        if let Some(f) = self.pr.failed {
+            return Err(f);
         }
-        let mut n = 0u32;
-        while self.realm.pr.queued > 0 {
-            if n >= self.realm.pr.limits.max_jobs_per_drain {
-                self.realm.pr.failed = true;
+        loop {
+            if let Some(b) = between.as_mut()
+                && let Err(s) = b(self)
+            {
+                self.pr.failed = Some(s);
+                return Err(s);
+            }
+            if self.pr.queued == 0 {
+                return Ok(());
+            }
+            if *n >= self.pr.limits.max_jobs_per_drain {
+                self.pr.failed = Some(DrainStop::Limit);
                 return Err(DrainStop::Limit);
             }
-            let r = self.realm.pop_job().expect("a queued job");
-            n += 1;
-            self.realm.pr.cur = r.value();
+            let r = self.pop_job().expect("a queued job");
+            *n += 1;
+            self.pr.cur = r.value();
             let done = self.run_job(r, on_error);
-            self.realm.pr.cur = Value::UNDEFINED;
-            done.map_err(|_| DrainStop::Fuel)?;
+            self.pr.cur = Value::UNDEFINED;
+            if done.is_err() {
+                self.pr.failed = Some(DrainStop::Fuel);
+                return Err(DrainStop::Fuel);
+            }
         }
-        Ok(n)
     }
 
-    fn run_job(&mut self, r: Ctx, on_error: &mut dyn FnMut(&mut Realm, Value)) -> Result<(), Exit> {
+    /// Call the handler `f` of a job from the top. A script function (the usual one) starts on a pooled machine at once, with one read of
+    /// the function; a built-in or a bound function goes through `call_held`.
+    fn job_call(&mut self, f: Value, this: Value, args: &[Value]) -> R<Value> {
+        if self.native_id(f).is_some() {
+            return self.call_held(f, this, args);
+        }
+        match self.start_pooled(f, this, args) {
+            // A class constructor is callable but no function to run: say why (the message of `call_script`).
+            Err(e) if e != STOP && self.function(f).is_none() => self.call_held(f, this, args),
+            r => r,
+        }
+    }
+
+    /// Run one job. Only `STOP` (the budget) is an `Err`: a throw of a handler is the result of its derived promise.
+    fn run_job(&mut self, r: Ctx, on_error: &mut dyn FnMut(&mut Realm, Value)) -> R<()> {
         let kind = r.get(KIND).as_int().expect("a job kind");
         match kind {
             K_FULFIL | K_REJECT => {
                 let (h, v, d) = (r.get(A), r.get(B), r.get(D));
-                let res = if h.is_undefined() { if kind == K_FULFIL { Ok(v) } else { Err(Exit::Throw(v)) } } else { self.job_call(h, Value::UNDEFINED, &[v]) };
+                let res = if h.is_undefined() { if kind == K_FULFIL { Ok(v) } else { Err(v) } } else { self.job_call(h, Value::UNDEFINED, &[v]) };
                 match res {
                     Ok(v) => self.settle_derived(d, v, false, on_error),
-                    Err(Exit::Throw(e)) => self.settle_derived(d, e, true, on_error),
-                    Err(Exit::Fuel) => Err(Exit::Fuel),
+                    Err(STOP) => Err(STOP),
+                    Err(e) => self.settle_derived(d, e, true, on_error),
                 }
             }
-            K_THENABLE => self.thenable_job(r, on_error),
+            K_THENABLE => self.thenable_job(r),
             K_CALLBACK => match self.job_call(r.get(A), Value::UNDEFINED, &[]) {
                 Ok(_) => Ok(()),
-                Err(Exit::Throw(e)) => {
-                    on_error(&mut self.realm, e);
+                Err(STOP) => Err(STOP),
+                Err(e) => {
+                    on_error(self, e);
                     Ok(())
                 }
-                Err(Exit::Fuel) => Err(Exit::Fuel),
             },
             _ => unreachable!("a job kind"),
         }
     }
 
     /// Give the outcome of a handler to the derived value: resolve or reject the promise, or call the function of the capability.
-    fn settle_derived(&mut self, d: Value, v: Value, reject: bool, on_error: &mut dyn FnMut(&mut Realm, Value)) -> Result<(), Exit> {
+    fn settle_derived(&mut self, d: Value, v: Value, reject: bool, on_error: &mut dyn FnMut(&mut Realm, Value)) -> R<()> {
         if let Some(p) = promise_of(d) {
             if reject {
-                self.realm.reject_promise(p, v);
+                self.reject_promise(p, v);
                 return Ok(());
             }
-            return self.realm.resolve_promise(p, v).map_err(|_| Exit::Fuel);
+            return self.resolve_promise(p, v);
         }
         let Some(c) = Realm::ctx(d) else { return Ok(()) };
         match self.job_call(c.get(if reject { 2 } else { 1 }), Value::UNDEFINED, &[v]) {
             Ok(_) => Ok(()),
-            Err(Exit::Throw(e)) => {
-                on_error(&mut self.realm, e);
+            Err(STOP) => Err(STOP),
+            Err(e) => {
+                on_error(self, e);
                 Ok(())
             }
-            Err(Exit::Fuel) => Err(Exit::Fuel),
         }
     }
 
     /// `NewPromiseResolveThenableJob`: call `then` of the thenable with the resolving functions of the promise.
-    fn thenable_job(&mut self, r: Ctx, _on_error: &mut dyn FnMut(&mut Realm, Value)) -> Result<(), Exit> {
+    fn thenable_job(&mut self, r: Ctx) -> R<()> {
         let (x, then, d) = (r.get(A), r.get(B), r.get(D));
         let p = promise_of(d).expect("the promise of a thenable job");
         // A native promise with the built-in `then` and a `constructor` that is `%Promise%` by plain data: the reaction does the work
         // of `then` (`SpeciesConstructor` reads nothing that a script can see).
-        if then == self.realm.pr.then_fn
+        if then == self.pr.then_fn
             && let Some(xp) = promise_of(x)
-            && matches!(self.realm.lookup_g(xp, self.realm.k_constructor), Some(Slot::Data(c)) if c == self.realm.pr.ctor)
+            && matches!(self.lookup_g(xp, self.k_constructor), Some(Slot::Data(c)) if c == self.pr.ctor)
         {
-            return match self.realm.perform_then(xp, Value::UNDEFINED, Value::UNDEFINED, d) {
-                Ok(()) => Ok(()),
-                // The queue is full: the promise is rejected, as the call of `then` would have thrown.
-                Err(e) => {
-                    self.realm.reject_promise(p, e);
-                    Ok(())
-                }
-            };
+            // The queue is full: the promise is rejected, as the call of `then` would have thrown.
+            if let Err(e) = self.perform_then(xp, Value::UNDEFINED, Value::UNDEFINED, d) {
+                self.reject_promise(p, e);
+            }
+            return Ok(());
         }
-        let (res, rej) = self.realm.resolving_functions(p);
+        let (res, rej) = self.resolving_functions(p);
         // The collector may run in the call: keep `reject` in the job, which is rooted.
         r.set(B, rej.value());
         match self.job_call(then, x, &[res.value(), rej.value()]) {
             Ok(_) => Ok(()),
-            Err(Exit::Throw(e)) => {
+            Err(STOP) => Err(STOP),
+            Err(e) => {
                 let rej = Realm::obj(r.get(B)).expect("the reject function");
-                self.realm.resolving_call(rej, e, true).map_err(|_| Exit::Fuel)
+                self.resolving_call(rej, e, true)
             }
-            Err(Exit::Fuel) => Err(Exit::Fuel),
         }
     }
 }
