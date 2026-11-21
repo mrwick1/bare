@@ -750,12 +750,13 @@ impl Realm {
             return Ok(b as u8 as f64);
         }
         if let Some(s) = Realm::str_of(v) {
+            let s = self.flat(s);
             let t = self.text(s);
-            let t = t.trim();
+            let t = t.trim_matches(|c| crate::bigint::is_js_space(c as u32));
             return Ok(if t.is_empty() {
                 0.0
-            } else if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
-                u64::from_str_radix(h, 16).map_or(f64::NAN, |n| n as f64)
+            } else if matches!(t.as_bytes(), [b'0', b'x' | b'X' | b'o' | b'O' | b'b' | b'B', ..]) {
+                crate::bigint::parse_digits(t.as_bytes()).map_or(f64::NAN, |n| crate::bigint::to_f64(n.sv()))
             } else if matches!(t, "Infinity" | "+Infinity") {
                 f64::INFINITY
             } else if t == "-Infinity" {

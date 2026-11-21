@@ -191,7 +191,7 @@ fn bigint_operators_and_builtins() {
          "r", "[4,6,true,true,9007199254740992,true]"),
         ("var r = [9007199254740993n == '9007199254740993', 2n >= '2.0', 1n == true, 0n == null, -2n < -1.5, Object.is(1n, BigInt(1))];",
          "r", "[true,false,true,false,true,true]"),
-        ("let x = BigInt('-0'); let y = Object(1000000000000000001n); var r = [x, BigInt.asIntN(64, '0xffffffffffffffff'), BigInt.asUintN(64, -1n), y.valueOf(), (255n).toString(16), y.toLocaleString()];",
+        ("let x = BigInt('-0'); let y = Object(1000000000000000001n); var r = [x, BigInt.asIntN('0b1000000', '0xffffffffffffffff'), BigInt.asUintN('6' + '4', -1n), y.valueOf(), (255n).toString(16), y.toLocaleString()];",
          "r", r#"[0,-1,18446744073709551615,1000000000000000001,"ff","1,000,000,000,000,000,001"]"#),
         ("let n = 1n << 128n; let m = new Map([[n, 7], [1, 8], [1n, 9]]); let s = new Set([n, BigInt(n.toString())]); var r = [m.get(2n ** 128n), m.get(1n), m.get(1), s.size];",
          "r", "[7,9,8,1]"),

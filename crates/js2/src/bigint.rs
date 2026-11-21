@@ -778,12 +778,16 @@ pub fn parse_radix(digits: &[u8], radix: u32) -> Int {
     Int::new(false, mag)
 }
 
+/// ECMAScript WhiteSpace and LineTerminator code points.
+pub(crate) fn is_js_space(c: u32) -> bool {
+    matches!(c, 9..=13 | 0x20 | 0xA0 | 0x1680 | 0x2000..=0x200A | 0x2028 | 0x2029 | 0x202F | 0x205F | 0x3000 | 0xFEFF)
+}
+
 /// StringToBigInt (section 7.1.14): trim white space; empty is zero; `0x`, `0o` or `0b` and digits (no sign); or an optional
 /// sign and decimal digits. Anything else (a point, an exponent, a separator, a trailing `n`) is `None`.
 pub fn string_to_bigint(units: &[u16]) -> Option<Int> {
-    let is_js_space = |u| matches!(u, 9..=13 | 0x20 | 0xA0 | 0x1680 | 0x2000..=0x200A | 0x2028 | 0x2029 | 0x202F | 0x205F | 0x3000 | 0xFEFF);
-    let start = units.iter().position(|&u| !is_js_space(u)).unwrap_or(units.len());
-    let end = units.iter().rposition(|&u| !is_js_space(u)).map_or(start, |e| e + 1);
+    let start = units.iter().position(|&u| !is_js_space(u as u32)).unwrap_or(units.len());
+    let end = units.iter().rposition(|&u| !is_js_space(u as u32)).map_or(start, |e| e + 1);
     let t = &units[start..end];
     if t.is_empty() {
         return Some(Int::zero());
