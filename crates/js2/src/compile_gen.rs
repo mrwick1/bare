@@ -20,7 +20,7 @@
 //!
 //! A generator returns with `RetGen`, never with `Ret` (the verifier checks it). `new.target` is `undefined` in a generator.
 use super::*;
-use crate::bytecode::{GK_GEN, GK_NONE, ITER_REGS, NO_REG, YS_REGS};
+use crate::bytecode::{GK_ASYNCGEN, GK_GEN, GK_NONE, ITER_REGS, NO_REG, YS_REGS};
 use crate::generator::{MODE_NEXT, MODE_RETURN, MODE_THROW};
 
 impl<'a> Fc<'a> {
@@ -58,10 +58,18 @@ impl<'a> Fc<'a> {
         }
         let t = self.save_list(NO_REG, NO_REG, u32::MAX);
         self.op(Op::GenInit, 0, t, 0);
+        if self.gen_kind == GK_ASYNCGEN {
+            // The body of an async generator runs in the range of a catch-all handler: a throw rejects the request (`async_catch_all`).
+            let ex = self.alloc();
+            self.async_h = Some((self.asm.len(), ex, self.depth));
+        }
     }
 
     /// `yield arg` and `yield* arg` into `dst`.
     pub(crate) fn yield_expr(&mut self, arg: Option<ExprId>, delegate: bool, dst: u32) -> CR {
+        if self.gen_kind == GK_ASYNCGEN {
+            return self.agen_yield_expr(arg, delegate, dst);
+        }
         if delegate {
             return self.yield_star(arg.expect("yield* has an operand"), dst);
         }
@@ -152,7 +160,7 @@ impl<'a> Fc<'a> {
         self.op(
             match self.gen_kind {
                 GK_NONE => Op::Ret,
-                GK_GEN => Op::RetGen,
+                GK_GEN | GK_ASYNCGEN => Op::RetGen,
                 _ => Op::RetAsync,
             },
             r,

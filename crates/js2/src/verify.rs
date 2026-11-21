@@ -23,7 +23,7 @@
 //!   root map names (a collection before the copy must not free them), and is no longer than `gen_regs`. After the suspension only the registers of
 //!   the list, the sent value and the mode are written: the resume restores no other. A handler whose range holds a suspension is
 //!   entered with that smaller set too.
-use crate::bytecode::{Code, GK_ASYNC, GK_GEN, GK_NONE, ITER_REGS, Ins, NO_REG, Op, Recipes, STR_EMPTY, STR_SLOT, YS_REGS, decode};
+use crate::bytecode::{Code, GK_ASYNC, GK_ASYNCGEN, GK_GEN, GK_NONE, ITER_REGS, Ins, NO_REG, Op, Recipes, STR_EMPTY, STR_SLOT, YS_REGS, decode};
 
 type Bits = Vec<u64>;
 
@@ -45,8 +45,8 @@ fn window(ins: &Ins, recipes: &Recipes) -> Option<u32> {
         Op::NewSpread => 2,
         Op::ObjRest => ins.x,
         Op::NewObjLit => recipes.get(ins.c as usize).map_or(0, |k| k.len() as u32),
-        Op::IterOpen | Op::ForInOpen | Op::IterNext | Op::IterClose => ITER_REGS,
-        Op::YieldStarStep => YS_REGS,
+        Op::IterOpen | Op::ForInOpen | Op::IterNext | Op::IterClose | Op::AIterOpen | Op::AIterNext | Op::AIterClose | Op::AIterCloseT => ITER_REGS,
+        Op::YieldStarStep | Op::AYsCall => YS_REGS,
         _ => return None,
     })
 }
@@ -100,7 +100,10 @@ pub fn verify(code: &Code) -> Result<(), String> {
     for &(pc, i, len) in &ins {
         let err = |what: &str| Err(format!("{pc:04} {}: {what}", i.op.name()));
         let (gen_op, async_op) = (matches!(i.op, Op::GenInit | Op::Yield | Op::RetGen), matches!(i.op, Op::AsyncInit | Op::Await | Op::RetAsync));
-        if gen_op && code.gen_kind != GK_GEN || async_op && code.gen_kind != GK_ASYNC {
+        // An async generator has the ops of both: `Await` for `await`, and the generator ops.
+        let gk = code.gen_kind;
+        let ok = if i.op == Op::Await { gk == GK_ASYNC || gk == GK_ASYNCGEN } else if gen_op { gk == GK_GEN || gk == GK_ASYNCGEN } else { gk == GK_ASYNC };
+        if (gen_op || async_op) && !ok {
             return err("an op of generator or async code in a function that is not one");
         }
         if code.gen_kind != GK_NONE && matches!(i.op, Op::Ret | Op::RetUndef | Op::RetDerived | Op::LoadNewTarget) {

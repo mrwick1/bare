@@ -227,9 +227,11 @@ impl Realm {
     }
 
     pub(crate) fn make_prototype(&mut self, f: Obj) -> R<Value> {
-        if self.function(f.value()).is_some_and(|(ci, _)| self.prog[ci].gen_kind == crate::bytecode::GK_GEN) {
-            // A generator function: its `prototype` inherits `%GeneratorPrototype%` and has no `constructor`.
-            let shape = self.shapes.root(Layout::Object, Some(self.genr.proto.cell()), 4);
+        let kind = self.function(f.value()).map_or(0, |(ci, _)| self.prog[ci].gen_kind);
+        if kind == crate::bytecode::GK_GEN || kind == crate::bytecode::GK_ASYNCGEN {
+            // A generator function: its `prototype` inherits `%GeneratorPrototype%` (`%AsyncGeneratorPrototype%`) and has no `constructor`.
+            let proto = if kind == crate::bytecode::GK_GEN { self.genr.proto } else { self.ag_proto() };
+            let shape = self.shapes.root(Layout::Object, Some(proto.cell()), 4);
             let p = Obj::new(&mut self.heap, &self.shapes, shape).expect("memory");
             self.define_attrs(f, Key::Name(self.k_prototype), A_W, p.value())?;
             return Ok(p.value());
