@@ -114,7 +114,7 @@ impl Realm {
     }
 
     /// The description of a symbol as a string value: a copy of its units, or `undefined`.
-    fn symbol_description_value(&mut self, s: Str) -> Value {
+    pub(crate) fn symbol_description_value(&mut self, s: Str) -> Value {
         if s.symbol_has_no_desc() {
             return Value::UNDEFINED;
         }
