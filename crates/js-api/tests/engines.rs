@@ -4,7 +4,7 @@
 use bare_js::eval::{Error, EvalLimits, Interp};
 use bare_js::heap::Heap;
 use bare_js_api::suite::Harness;
-use bare_js2::api::RunError;
+use bare_js_api::Error as ApiError;
 use bare_js2::heap::Trigger;
 use bare_js2::interp::Vm;
 use bare_js2::script;
@@ -60,11 +60,18 @@ impl Harness for New {
     }
 
     fn eval(&mut self, src: &str) -> String {
-        match self.0.realm.run_text(&script::eval_program(src)) {
-            Ok(()) => self.0.global_text("__result"),
-            Err(RunError::Throw(v)) => format!("throw:{}", self.0.display(v, false)),
-            Err(RunError::Abort(bare_js_api::Abort::Limit(_))) => "limit".into(),
-            Err(RunError::Abort(bare_js_api::Abort::Unsupported(what))) => format!("unsupported:{what}"),
+        use bare_js_api::{Abort, Engine};
+        let vm = &mut self.0;
+        let r = bare_js_api::task(&mut vm.realm, |s| match s.run_script(src) {
+            Ok(v) => Ok(s.engine().raw(v)),
+            Err(ApiError::Throw(v)) => Err(Ok(s.engine().raw(v))),
+            Err(ApiError::Abort(a)) => Err(Err(a)),
+        });
+        match r.expect("a task") {
+            Ok(v) => vm.display(v, false),
+            Err(Ok(v)) => format!("throw:{}", vm.display(v, false)),
+            Err(Err(Abort::Limit(_))) => "limit".into(),
+            Err(Err(Abort::Unsupported(what))) => format!("unsupported:{what}"),
         }
     }
 
@@ -111,4 +118,9 @@ both!(
     own_properties_are_read_without_running_code_except_getters,
     strings_from_code_units_keep_lone_surrogates,
     handles_survive_a_top_level_call_that_allocates,
+    run_script_gives_the_completion_value,
+    eval_runs_in_the_global_environment,
+    handler_functions_look_names_up_in_the_scope,
+    the_host_walks_iterables,
+    symbols_and_the_iterator_intrinsics,
 );

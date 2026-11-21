@@ -111,7 +111,6 @@ fn what_the_realm_does_not_have_is_unsupported_and_never_a_panic() {
         let u = s.undefined();
         assert_eq!(s.new_promise().err(), Some(Error::Abort(Abort::Unsupported("new_promise"))));
         assert_eq!(s.queue_microtask(u).err(), Some(Error::Abort(Abort::Unsupported("queue_microtask"))));
-        assert_eq!(s.iter_open(o).err(), Some(Error::Abort(Abort::Unsupported("iter_open"))));
         assert_eq!(s.set_host_owner(o, 1).err(), Some(Error::Abort(Abort::Unsupported("set_host_owner"))));
         assert_eq!(s.promise_status(o), None);
         assert_eq!(s.engine().pending_jobs(), 0);
