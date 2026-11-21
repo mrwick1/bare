@@ -54,6 +54,7 @@ mod bi_object;
 mod bi_number;
 mod bi_wrap;
 mod bi_string;
+mod bi_symbol;
 mod bi_string_more;
 #[rustfmt::skip]
 mod prelude_facts;

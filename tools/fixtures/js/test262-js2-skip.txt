@@ -25,7 +25,7 @@ import-defer
 json-modules
 # Core census features: a test runs only when each of its features is named by an `allow:` line (a test with no feature runs).
 # The census (docs/census/2026-11-18.tsv) has these syntax kinds; the first group is plain syntax of ES2015 to ES2022, the second the
-# built-ins of S2.7. Left out until S3 and S4 build them: generators, async functions and iteration, Symbol and its well-known symbols,
+# built-ins of S2.7. Left out until S3 and S4 build them: generators, async functions and iteration, the well-known symbols that nothing reads yet (`match`, `replace`, `unscopables` and the others),
 # BigInt, Proxy and Reflect, typed arrays, RegExp features, Map and Set, Promise, modules and dynamic import, resource management.
 allow:arrow-function
 allow:class
@@ -79,3 +79,11 @@ allow:change-array-by-copy
 allow:stable-array-sort
 allow:error-cause
 allow:error-stack-accessor
+allow:Symbol
+allow:Symbol.prototype.description
+allow:Symbol.toPrimitive
+allow:Symbol.toStringTag
+allow:Symbol.hasInstance
+allow:Symbol.iterator
+allow:Symbol.asyncIterator
+allow:Symbol.species

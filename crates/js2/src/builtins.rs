@@ -247,8 +247,8 @@ impl Realm {
 
     // ---- ToPrimitive ----
 
-    /// `ToPrimitive` (`OrdinaryToPrimitive`: `valueOf` then `toString`, or the reverse for the hint `String`). There are no symbols, so
-    /// no `Symbol.toPrimitive`. The methods may be script functions, and a getter (`Realm::call_function`).
+    /// `ToPrimitive`: the method `Symbol.toPrimitive` of the value if it has one, else `OrdinaryToPrimitive` (`valueOf` then `toString`,
+    /// or the reverse for the hint `String`). The methods may be script functions, and a getter (`Realm::call_function`).
     pub fn to_primitive(&mut self, v: Value, hint: Hint) -> R<Value> {
         let Some(o) = Realm::obj(v) else { return Ok(v) };
         let order = if hint == Hint::String { [self.k_to_string, self.k_value_of] } else { [self.k_value_of, self.k_to_string] };
@@ -256,9 +256,33 @@ impl Realm {
             return Err(self.error(ErrKind::Range, "maximum call stack size exceeded"));
         }
         self.depth += 1;
-        let r = self.ordinary_to_primitive(v, o, order);
+        let r = self.exotic_to_primitive(v, hint).and_then(|e| match e {
+            Some(r) => Ok(r),
+            None => self.ordinary_to_primitive(v, o, order),
+        });
         self.depth -= 1;
         r
+    }
+
+    /// The step of `ToPrimitive` that calls `v[Symbol.toPrimitive](hint)`. `None` when there is no such method.
+    fn exotic_to_primitive(&mut self, v: Value, hint: Hint) -> R<Option<Value>> {
+        let f = self.get_prop(v, Key::Name(self.wk[crate::bi_symbol::TO_PRIMITIVE]))?;
+        if f.is_undefined() || f.is_null() {
+            return Ok(None);
+        }
+        if !Realm::obj(f).is_some_and(|f| f.is_callable()) {
+            return self.type_error("Symbol.toPrimitive is not a function");
+        }
+        let h = self.string(match hint {
+            Hint::Default => "default",
+            Hint::Number => "number",
+            Hint::String => "string",
+        });
+        let r = self.call_function(f, v, &[h])?;
+        if Realm::obj(r).is_some() {
+            return self.type_error("cannot convert an object to a primitive value");
+        }
+        Ok(Some(r))
     }
 
     fn ordinary_to_primitive(&mut self, v: Value, o: Obj, order: [Str; 2]) -> R<Value> {
@@ -295,6 +319,7 @@ impl Realm {
         self.install_array();
         self.install_string();
         self.install_number();
+        self.install_symbol();
         self.install_generator();
         self.install_json();
     }
@@ -305,6 +330,7 @@ impl Realm {
         for (n, len, f) in [("apply", 2, fn_apply as NativeFn), ("bind", 1, fn_bind), ("call", 1, fn_call), ("toString", 0, fn_to_string)] {
             self.method(proto, n, len, f);
         }
+        self.install_has_instance();
     }
 
     fn install_error(&mut self) {
