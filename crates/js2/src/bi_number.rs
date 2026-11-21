@@ -4,7 +4,7 @@
 //! gives at most 52 digits; `toPrecision`, `toExponential` and `Intl` are missing; a number prints with Rust's rules (`Realm::num_to_string`).
 use crate::builtins::arg;
 use crate::lazy::{Ent, alias, m, num};
-use crate::interp_rt::{ErrKind, R, Realm};
+use crate::interp_rt::{ErrKind, Key, R, Realm};
 use crate::value::Value;
 
 impl Realm {
@@ -48,6 +48,8 @@ impl Realm {
         self.lazy_table(b, BOOLEAN_PROTO);
         let math = Obj::new_plain(self);
         self.hidden(g, "Math", math.value());
+        let tag = self.string("Math");
+        self.define_attrs(math, Key::Name(self.wk[crate::bi_symbol::TO_STRING_TAG]), crate::shapes::A_C, tag).expect("define");
         static MATH: &[Ent] = &[
             num("PI", std::f64::consts::PI),
             num("E", std::f64::consts::E),
