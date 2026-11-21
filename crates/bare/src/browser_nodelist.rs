@@ -39,7 +39,7 @@ use crate::browser_dom::{next_in};
 use bare_html::dom::{NodeData, NodeId, Ns};
 use bare_js::eval::Interp;
 use bare_js::heap::{HeapError, Slot};
-use bare_js::value::{ObjId, PropertyKey, Value};
+use bare_js::value::{ObjId, Value};
 use std::cell::{OnceCell, RefCell};
 use std::rc::Rc;
 
@@ -367,37 +367,29 @@ pub(crate) fn list_proto(d: &Dom) -> ObjId {
 
 // ------------------------------------------------------------------------------------ install
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    let g = *d.global.get().expect("installed");
-    let proto = d.obj(it, it.object_prototype())?;
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+    let proto = d.plain_s(s)?;
     let _ = d.nl.proto.set(proto);
     let mut fixed = vec![proto];
-    d.def_get_s(it, proto, "length", length, None)?;
-    d.def_method_s(it, proto, "item", 1, item_method)?;
+    table!(rows1 = [
+        Row::get(1, "length", length, None),
+        Row::method(1, "item", 1, item_method),
+    ]);
+    let targets = [d.obj_local(s, proto)];
+    d.install_rows(s, &targets, &rows1::T)?;
     // The value iterator of an interface with an indexed getter: the `Array.prototype` functions (WebIDL "iterable").
-    let ap = Value::Object(it.array_prototype());
+    let ap = s.intrinsic(Intrinsic::ArrayPrototype);
+    let po = d.obj_local(s, proto);
     for name in ["entries", "keys", "values", "forEach"] {
-        let k = d.key(it, name)?;
-        let f = it.get_value(ap, k)?;
-        it.define_data(proto, k, f, true, true, true)?;
+        let f = s.get_str(ap, name)?;
+        s.define_str(po, name, f, Attrs::ALL)?;
     }
-    let sym = d.plat.sym_iter.get().copied().expect("platform installed first");
-    let values = it.get_value(ap, sym)?;
-    it.define_data(proto, sym, values, true, false, true)?;
+    let sym = s.intrinsic(Intrinsic::SymbolIterator);
+    let values = s.get(ap, sym)?;
+    s.define(po, sym, values, Attrs::METHOD)?;
     // `NodeList.prototype[Symbol.toStringTag]` is "NodeList".
-    let (ks, kt) = (d.key(it, "Symbol")?, d.key(it, "toStringTag")?);
-    let sy = it.get_value(Value::Object(g), ks)?;
-    if let Value::Symbol(s) = it.get_value(sy, kt)? {
-        let tag = d.js_str(it, "NodeList")?;
-        it.define_data(proto, PropertyKey::Symbol(s), tag, false, false, true)?;
-    }
-    let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
-    let f = d.add_fn_s_obj(it, illegal_constructor, "NodeList", 0, bare_js_api::HostFn::Ctor)?;
-    it.define_data(f, kp, Value::Object(proto), false, false, false)?;
-    it.define_data(proto, kc, Value::Object(f), true, false, true)?;
-    let k = d.key(it, "NodeList")?;
-    it.define_data(g, k, Value::Object(f), true, false, true)?;
-    fixed.push(f);
+    d.tag_s(s, proto, "NodeList")?;
+    fixed.push(d.interface_s(s, proto, "NodeList", illegal_constructor, 0, HostFn::Ctor)?);
     *d.nl.fixed.borrow_mut() = fixed;
     Ok(())
 }

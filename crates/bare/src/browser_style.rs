@@ -658,12 +658,20 @@ fn named_set<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> R
 
 crate::browser_lazy::lazy_global!(lazy_ctor, "CSSStyleDeclaration", ensure, |d| d.style.fixed.borrow()[1]);
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
     // The prototype, its 250 accessors and the computed prototype wait for the first style object, the first `getComputedStyle` or the
     // first read of the global (`ensure`). A page that uses none of them never pays for them.
-    crate::browser_lazy::install(d, it, &[("CSSStyleDeclaration", lazy_ctor as HS)])?;
-    d.def_get_s(it, d.p().html, "style", style_attr, Some(set_style_attr))?;
-    d.def_get_s(it, d.p().svg, "style", style_attr_svg, Some(set_style_attr_svg))?;
+    table!(lazy = [
+        Row::both(1, "CSSStyleDeclaration", lazy_ctor),
+    ]);
+    let g = s.global();
+    d.install_rows(s, &[g], &lazy::T)?;
+    table!(rows1 = [
+        Row::get(1, "style", style_attr, Some(set_style_attr)),
+        Row::get(2, "style", style_attr_svg, Some(set_style_attr_svg)),
+    ]);
+    let targets = [d.obj_local(s, d.p().html), d.obj_local(s, d.p().svg)];
+    d.install_rows(s, &targets, &rows1::T)?;
     Ok(())
 }
 

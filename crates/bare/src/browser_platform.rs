@@ -228,74 +228,57 @@ impl Dom {
 
     // ------------------------------------------------------------------------------------ install helpers
 
-    fn symbol_iterator(&self, it: &mut Interp<'_>) -> R<PropertyKey> {
-        let g = *self.global.get().expect("installed");
-        let (ks, ki) = (self.key(it, "Symbol")?, self.key(it, "iterator")?);
-        let sym = it.get_value(Value::Object(g), ks)?;
-        match it.get_value(sym, ki)? {
-            Value::Symbol(s) => Ok(PropertyKey::Symbol(s)),
-            _ => Err(Error::Unsupported(unsupported("Symbol.iterator is missing in this realm"))),
-        }
-    }
-
     /// `%IteratorPrototype%`, found from `[][Symbol.iterator]()` so that it is the realm's own object.
-    fn iterator_prototype(&self, it: &mut Interp<'_>, sym: PropertyKey) -> R<ObjId> {
-        let arr = it.array_from(&[])?;
-        let ap = it.array_prototype();
-        let f = it.get_value(Value::Object(ap), sym)?;
-        let iter = it.call(f, arr, &[])?;
-        let step = |it: &mut Interp<'_>, v: Value| -> R<ObjId> {
-            let Value::Object(o) = v else { return Err(Error::Unsupported(unsupported("array iterator is not an object"))) };
-            match it.heap.get_prototype_of(o) {
-                Ok(Some(p)) => Ok(p),
-                Ok(None) => Err(Error::Unsupported(unsupported("array iterator has no prototype"))),
-                Err(e) => Err(it.heap_error(e)),
-            }
-        };
-        let p1 = step(it, iter)?;
-        step(it, Value::Object(p1))
+    fn iterator_prototype_s<'s>(&self, s: &mut Sc<'s, '_>, sym: Local<'s>) -> Res<'s, ObjId> {
+        let arr = s.new_array(&[])?;
+        let ap = s.intrinsic(Intrinsic::ArrayPrototype);
+        let f = s.get(ap, sym)?;
+        let iter = s.call(f, arr, &[])?;
+        let Some(p1) = s.get_prototype_of(iter)? else { return Err(unsupp("array iterator has no prototype")) };
+        let Some(p2) = s.get_prototype_of(p1)? else { return Err(unsupp("array iterator has no prototype")) };
+        Ok(obj_id(s, p2).expect("an object"))
     }
 
-    pub(crate) fn install_platform(&self, it: &mut Interp<'_>) -> R<()> {
-        let g = *self.global.get().expect("installed");
+    pub(crate) fn install_platform<'s>(&self, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
         let p = self.p();
-        let op = it.object_prototype();
-        let sym = self.symbol_iterator(it)?;
-        let _ = self.plat.sym_iter.set(sym);
-        let iter_base = self.iterator_prototype(it, sym)?;
-        let (mql, list, iter) = (self.obj(it, p.et)?, self.obj(it, op)?, self.obj(it, iter_base)?);
+        let sym = s.intrinsic(Intrinsic::SymbolIterator);
+        let Value::Symbol(y) = s.engine().raw(sym) else { unreachable!("Symbol.iterator is a symbol") };
+        let _ = self.plat.sym_iter.set(PropertyKey::Symbol(y));
+        let iter_base = self.iterator_prototype_s(s, sym)?;
+        let (mql, list, iter) = (self.obj_s(s, p.et)?, self.plain_s(s)?, self.obj_s(s, iter_base)?);
         let _ = self.plat.p.set(PProtos { mql, list, iter });
         let mut fixed = vec![mql, list, iter];
 
         // MediaQueryList
-        self.def_get_s(it, mql, "media", media_get, None)?;
-        self.def_get_s(it, mql, "matches", matches_get, None)?;
-        self.def_get_s(it, mql, "onchange", onchange_get, Some(onchange_set))?;
-        self.def_method_s(it, mql, "addListener", 1, add_listener)?;
-        self.def_method_s(it, mql, "removeListener", 1, remove_listener)?;
+        table!(rows1 = [
+            Row::get(1, "media", media_get, None),
+            Row::get(1, "matches", matches_get, None),
+            Row::get(1, "onchange", onchange_get, Some(onchange_set)),
+            Row::method(1, "addListener", 1, add_listener),
+            Row::method(1, "removeListener", 1, remove_listener),
+        ]);
+        let targets = [self.obj_local(s, mql)];
+        self.install_rows(s, &targets, &rows1::T)?;
 
         // DOMTokenList and its iterator, then Element.classList
-        crate::browser_platform_class::install(self, it, list, iter, sym)?;
-        self.def_get_s(it, p.element, "classList", crate::browser_platform_class::class_list, Some(crate::browser_platform_class::set_class_list))?;
-        self.def_get_s(it, p.link, "relList", crate::browser_platform_class::rel_list::<0>, Some(crate::browser_platform_class::set_rel_list::<0>))?;
-        self.def_get_s(it, p.iframe, "sandbox", crate::browser_platform_class::sandbox_list, Some(crate::browser_platform_class::set_sandbox_list))?;
-        crate::browser_platform_query::install(self, it)?;
+        crate::browser_platform_class::install(self, s, list, iter, sym)?;
+        table!(rows2 = [
+            Row::get(1, "classList", crate::browser_platform_class::class_list, Some(crate::browser_platform_class::set_class_list)),
+            Row::get(2, "relList", crate::browser_platform_class::rel_list::<0>, Some(crate::browser_platform_class::set_rel_list::<0>)),
+            Row::get(4, "sandbox", crate::browser_platform_class::sandbox_list, Some(crate::browser_platform_class::set_sandbox_list)),
+        ]);
+        let targets = [self.obj_local(s, p.element), self.obj_local(s, p.link), self.obj_local(s, p.iframe)];
+        self.install_rows(s, &targets, &rows2::T)?;
+        crate::browser_platform_query::install(self, s)?;
 
         // interface objects and `matchMedia`
-        let (kp, kc) = (self.key(it, "prototype")?, self.key(it, "constructor")?);
         for (name, proto) in [("MediaQueryList", mql), ("DOMTokenList", list)] {
-            let f = self.add_fn_s_obj(it, illegal_constructor, name, 0, bare_js_api::HostFn::Method)?;
-            it.define_data(f, kp, Value::Object(proto), false, false, false)?;
-            it.define_data(proto, kc, Value::Object(f), true, false, true)?;
-            let k = self.key(it, name)?;
-            it.define_data(g, k, Value::Object(f), true, false, true)?;
-            fixed.push(f);
+            fixed.push(self.interface_s(s, proto, name, illegal_constructor, 0, HostFn::Method)?);
         }
-        let mm = self.def_method_s(it, g, "matchMedia", 1, match_media)?;
+        let g = s.global();
         // Window operations are enumerable.
-        let k = self.key(it, "matchMedia")?;
-        it.define_data(g, k, Value::Object(mm), true, true, true)?;
-        fixed.push(mm);
+        let mm = self.def_method_l(s, g, "matchMedia", 1, match_media, true)?;
+        fixed.push(obj_id(s, mm).expect("a function"));
         *self.plat.fixed.borrow_mut() = fixed;
         Ok(())
     }

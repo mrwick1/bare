@@ -351,11 +351,13 @@ pub struct Shapes {
     /// object gets another shape: a cache of the address of one of its slots then stops matching (see [`Shapes::watch_tag`]).
     watch: usize,
     watch_tag: Cell<u32>,
+    /// Bumped when an object that a prototype entry of a feedback record depends on (`F_PROTO`) changes, and at each collection.
+    proto_epoch: u64,
 }
 
 impl Default for Shapes {
     fn default() -> Self {
-        Shapes { nodes: vec![Shape::new(Layout::OneByte, 0, 0)], tables: vec![Some(Table::new(Vec::new(), false))], free_nodes: Vec::new(), free_tables: Vec::new(), roots: Map::default(), live: vec![0], scratch: Vec::new(), epoch: 0, watch: 0, watch_tag: Cell::new(WATCH_TAG0) }
+        Shapes { nodes: vec![Shape::new(Layout::OneByte, 0, 0)], tables: vec![Some(Table::new(Vec::new(), false))], free_nodes: Vec::new(), free_tables: Vec::new(), roots: Map::default(), live: vec![0], scratch: Vec::new(), epoch: 0, watch: 0, watch_tag: Cell::new(WATCH_TAG0), proto_epoch: 1 }
     }
 }
 
@@ -573,6 +575,18 @@ impl Shapes {
     /// Changes when a tree shape was freed: an id that a record kept from before may name another shape now.
     pub fn epoch(&self) -> u32 {
         self.epoch
+    }
+
+    /// The epoch of the prototype entries (`interp_rt.rs`): an entry is valid while it equals this. It starts at 1.
+    #[inline]
+    pub fn proto_epoch(&self) -> u64 {
+        self.proto_epoch
+    }
+
+    /// Drop every prototype entry. (A plain field, not a `Cell`: a `Cell` in `Shapes` would stop the compiler from keeping a shape in a
+    /// register across a store, which costs instructions in `Obj::new` and the loop.)
+    pub fn bump_proto_epoch(&mut self) {
+        self.proto_epoch += 1;
     }
 
     /// The shape of an object that is like `id` with prototype `proto`: the same table, the same slots and the same inline capacity.

@@ -58,8 +58,8 @@ pub(crate) struct Basics {
     pub(crate) hidden: Cell<bool>,
 }
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    d.basics.loaded.set(it.wall_now_ms());
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+    d.basics.loaded.set(s.wall_now_ms());
     Ok(())
 }
 

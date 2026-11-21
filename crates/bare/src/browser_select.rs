@@ -1137,12 +1137,18 @@ lazy_global!(lazy_collection, "HTMLCollection", ens, |d| pick(d, 4));
 lazy_global!(lazy_textarea, "HTMLTextAreaElement", ens_area, |d| pick(d, 5));
 lazy_global!(lazy_option, "Option", ens, |d| pick(d, 6));
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    crate::browser_lazy::install(
-        d,
-        it,
-        &[("HTMLSelectElement", lazy_select as HS), ("HTMLOptionElement", lazy_option_el), ("HTMLOptGroupElement", lazy_optgroup), ("HTMLOptionsCollection", lazy_options), ("HTMLCollection", lazy_collection), ("HTMLTextAreaElement", lazy_textarea), ("Option", lazy_option)],
-    )
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+    table!(lazy = [
+        Row::both(1, "HTMLSelectElement", lazy_select),
+        Row::both(1, "HTMLOptionElement", lazy_option_el),
+        Row::both(1, "HTMLOptGroupElement", lazy_optgroup),
+        Row::both(1, "HTMLOptionsCollection", lazy_options),
+        Row::both(1, "HTMLCollection", lazy_collection),
+        Row::both(1, "HTMLTextAreaElement", lazy_textarea),
+        Row::both(1, "Option", lazy_option),
+    ]);
+    let g = s.global();
+    d.install_rows(s, &[g], &lazy::T)
 }
 
 /// Forget the `options` or `selectedOptions` collection `o` of the select `s`, which the collector freed.

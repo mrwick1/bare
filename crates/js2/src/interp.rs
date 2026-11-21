@@ -102,7 +102,7 @@ pub trait LazyCompile {
     fn compile(&mut self, codes: &Codes, ci: usize) -> Result<(), String>;
     /// Compile `src` as a script and add it at the end of `codes`. Gives the index of its top level code: a function with no
     /// parameters (`api.rs`, `Realm::run_text`).
-    fn script(&mut self, _codes: &Codes, _src: &str) -> Result<usize, String> {
+    fn script(&mut self, _codes: &Codes, _src: &str, _mode: crate::compile::ScriptMode) -> Result<usize, String> {
         Err("this compiler cannot add a script".into())
     }
 }
@@ -160,7 +160,7 @@ impl Mode for Cold {
 /// The ops that the cold function runs: the arms of the cold `match` of `Vm::exec`. The hot `match` has no arm for them but this one.
 macro_rules! cold_ops {
     () => {
-        Op::TypeofGlobal | Op::TypeofName | Op::DeleteGlobal | Op::Delete | Op::Exp | Op::ThrowConst | Op::DeclGlobal |
+        Op::TypeofGlobal | Op::TypeofName | Op::GetName | Op::SetName | Op::DeleteGlobal | Op::Delete | Op::Exp | Op::ThrowConst | Op::DeclGlobal |
         Op::CheckLex | Op::DeclLex | Op::DeclLexC | Op::CreateRest | Op::Lazy | Op::NewRegExp | Op::LoadBigInt | Op::GetTemplate |
         Op::ArraySpread | Op::ArrayHole | Op::CallSpread | Op::NewSpread | Op::CopyProps | Op::ObjRest | Op::SetProto |
         Op::DefAccessor | Op::DefAccessorElem | Op::DefMethod | Op::DefMethodElem | Op::SetHome | Op::MakeClass | Op::MakeDerived |
@@ -693,6 +693,16 @@ impl Vm {
                         pc = $next;
                         continue;
                     }
+                    // A prototype entry (`interp_rt.rs`): the record has shape 0 and the receiver shape in `to`.
+                    if c.to == shape
+                        && let Some(h) = fb.protos.get(c.loc as usize)
+                        && h.epoch == realm.shapes.proto_epoch()
+                    {
+                        // SAFETY: the epoch is current, so `holder` is alive and `loc` is its slot (`Obj::loc_now`).
+                        r!($dst) = unsafe { h.holder.read_loc(h.loc) };
+                        pc = $next;
+                        continue;
+                    }
                 }
                 gate!();
                 let n = name!($site);
@@ -715,15 +725,16 @@ impl Vm {
                 if let Some((o, shape)) = unsafe { Obj::from_value_shape(recv) } {
                     let c = &fb.caches[$site];
                     if c.shape == shape {
-                        // SAFETY: the entry was made by `Obj::loc` for an object of this shape id; an add entry has an inline slot.
+                        // SAFETY: the entry was made by `Obj::loc` for an object of this shape id; an add entry has an inline slot. A write
+                        // of a slot that the shape does not have yet is harmless: the add that follows a refusal writes it again.
+                        // `set_shape_id` refuses an object that a prototype entry depends on (`F_PROTO`).
                         unsafe {
                             o.write_loc(c.loc, val);
-                            if c.to != 0 {
-                                o.set_shape_id(c.to);
+                            if c.to == 0 || o.set_shape_id(c.to) {
+                                pc = $next;
+                                continue;
                             }
                         }
-                        pc = $next;
-                        continue;
                     }
                 }
                 gate!();
@@ -1032,7 +1043,12 @@ impl Vm {
         macro_rules! call_set {
             ($f:expr, $this:expr, $v:expr, $next:expr) => {{
                 let (f, this, v): (Value, Value, Value) = ($f, $this, $v);
-                let Some((ni, cctx)) = realm.function(f) else { err!(ErrKind::Type, "a setter is not a function") };
+                let Some((ni, cctx)) = realm.function(f) else {
+                    // A setter written in Rust (a host function), or no function: the nested call runs it or throws.
+                    std::hint::cold_path();
+                    tri!(realm.call_setter_slow(f, this, v));
+                    return M::go(ci, fp, $next);
+                };
                 let nf = fp + code.nregs as usize + REC;
                 ensure!(nf + 8);
                 stack[nf] = v;
@@ -1119,7 +1135,29 @@ impl Vm {
                 // names them: see `Vm::exec` for the rule of the split. Put a new rare op there.
                 if M::COLD {
                     match opv {
-                        Op::TypeofGlobal | Op::TypeofName => {
+                        Op::GetName => {
+                            std::hint::cold_path();
+                            gate!();
+                            let n = name!(bx!());
+                            r!(a!()) = tri!(realm.get_name(n, false));
+                            pc = next;
+                        }
+                        Op::SetName => {
+                            std::hint::cold_path();
+                            gate!();
+                            let n = name!(bx!());
+                            tri!(realm.set_name(n, r!(a!())));
+                            pc = next;
+                        }
+                        Op::TypeofName => {
+                            std::hint::cold_path();
+                            gate!();
+                            let n = name!(bx!());
+                            let v = tri!(realm.get_name(n, true));
+                            r!(a!()) = realm.typeof_name(v);
+                            pc = next;
+                        }
+                        Op::TypeofGlobal => {
                             std::hint::cold_path();
                             gate!();
                             let n = name!(bx!());
@@ -1695,7 +1733,7 @@ impl Vm {
                         stack[fp - REC + 2] = cx.value();
                         pc = next;
                     }
-                    Op::GetGlobal | Op::GetName => {
+                    Op::GetGlobal => {
                         let cc = &fb.caches[bx!()];
                         if cc.shape == realm.shapes.watch_tag() {
                             // SAFETY: the entry has the address of a slot of the global object, made while the tag was the same, and
@@ -1714,7 +1752,7 @@ impl Vm {
                             Got::Get(f) => call_get!(f, realm.global.value(), a!(), next),
                         }
                     }
-                    Op::SetGlobal | Op::SetName => {
+                    Op::SetGlobal => {
                         let cc = &fb.caches[bx!()];
                         if cc.shape == realm.shapes.watch_tag() {
                             let v = r!(a!());

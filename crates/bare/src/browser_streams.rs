@@ -1001,27 +1001,23 @@ pub(crate) fn pipe_through<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: 
 
 /// Make the host reactions and the controller prototype. `fixed` gets every object that must live as long as the realm.
 /// `stream_proto` and `reader_proto` are the prototypes of `ReadableStream` and the default reader.
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>, stream_proto: ObjId, reader_proto: ObjId, fixed: &mut Vec<ObjId>) -> R<()> {
-    let f = |it: &mut Interp<'_>, h: HS, name: &str| d.add_fn_s_obj(it, h, name, 1, HostFn::Method);
-    let start_ok_f = f(it, start_ok, "startOk")?;
-    let start_err = f(it, error_reaction, "startErr")?;
-    let pull_ok_f = f(it, pull_ok, "pullOk")?;
-    let pull_err = f(it, error_reaction, "pullErr")?;
-    let cancel_ok_f = f(it, cancel_ok, "cancelOk")?;
-    let cancel_err_f = f(it, cancel_err, "cancelErr")?;
-    let op = it.object_prototype();
-    let ctl_proto = d.obj(it, op)?;
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>, stream_proto: ObjId, reader_proto: ObjId, fixed: &mut Vec<ObjId>) -> Res<'s, ()> {
+    let f = |s: &mut Sc<'s, '_>, h: HS, name: &str| -> Res<'s, ObjId> {
+        let l = d.add_fn_s(s, h, name, 1, HostFn::Method)?;
+        Ok(obj_id(s, l).expect("a function"))
+    };
+    let start_ok_f = f(s, start_ok, "startOk")?;
+    let start_err = f(s, error_reaction, "startErr")?;
+    let pull_ok_f = f(s, pull_ok, "pullOk")?;
+    let pull_err = f(s, error_reaction, "pullErr")?;
+    let cancel_ok_f = f(s, cancel_ok, "cancelOk")?;
+    let cancel_err_f = f(s, cancel_err, "cancelErr")?;
+    let ctl_proto = d.plain_s(s)?;
     for (name, h, len) in [("enqueue", ctl_enqueue as HS, 1), ("close", ctl_close, 0), ("error", ctl_error, 1)] {
-        d.def_method_s(it, ctl_proto, name, len, h)?;
+        d.def_method_at(s, ctl_proto, name, len, h)?;
     }
-    d.def_get_s(it, ctl_proto, "desiredSize", ctl_desired_size, None)?;
-    let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
-    let ctor = d.add_fn_s_obj(it, illegal_constructor, "ReadableStreamDefaultController", 0, bare_js_api::HostFn::Method)?;
-    it.define_data(ctor, kp, Value::Object(ctl_proto), false, false, false)?;
-    it.define_data(ctl_proto, kc, Value::Object(ctor), true, false, true)?;
-    let global = it.global_object();
-    let k = d.key(it, "ReadableStreamDefaultController")?;
-    it.define_data(global, k, Value::Object(ctor), true, false, true)?;
+    d.def_get_at(s, ctl_proto, "desiredSize", ctl_desired_size, None)?;
+    let ctor = d.interface_s(s, ctl_proto, "ReadableStreamDefaultController", illegal_constructor, 0, HostFn::Method)?;
     fixed.extend([ctl_proto, ctor, start_ok_f, start_err, pull_ok_f, pull_err, cancel_ok_f, cancel_err_f]);
     let _ = d.streams.fns.set(Fns { start_ok: start_ok_f, start_err, pull_ok: pull_ok_f, pull_err, cancel_ok: cancel_ok_f, cancel_err: cancel_err_f, stream_proto, reader_proto, ctl_proto });
     Ok(())

@@ -69,7 +69,7 @@ impl Realm {
     // ---- constructors and species ----
 
     /// Is `v` a constructor (a native one, a plain function or a class)?
-    fn is_constructor(&self, v: Value) -> bool {
+    pub(crate) fn is_constructor(&self, v: Value) -> bool {
         if let Some(i) = self.native_id(v) {
             return self.natives[i].ctor;
         }
