@@ -476,7 +476,7 @@ fn number_boolean_math_and_global_functions() {
         ("var r = Math.PI.toFixed(5) + ',' + Math.E.toFixed(3) + ',' + Math.log(1) + ',' + Math.exp(0) + ',' + Math.log2(8) + ',' + Math.log10(1000) + ',' + Math.sin(0) + ',' + Math.cos(0) + ',' + Math.atan2(0, 1) + ',' + Math.fround(5.5);", "r", "3.14159,2.718,0,1,3,3,0,1,0,5.5"),
         ("var ok = true; for (var i = 0; i < 20; i++) { var x = Math.random(); if (!(x >= 0 && x < 1)) ok = false; } var r = ok + ',' + (Math.random() !== Math.random());", "r", "true,true"),
         ("var r = typeof globalThis + (globalThis === self) + (globalThis.Math === Math) + (this === globalThis) + typeof self.Object;", "r", "objecttruetruetruefunction"),
-        ("var r = typeof __def + typeof Symbol + typeof undefined;", "r", "undefinedundefinedundefined"),
+        ("var r = typeof __def + typeof Symbol + typeof undefined;", "r", "undefinedfunctionundefined"),
         ("var g = 1; var r = globalThis.g + ',' + self.parseInt('9') + ',' + (Number.NaN !== Number.NaN) + ',' + Number.EPSILON.toFixed(0) + ',' + (Number.MIN_VALUE > 0);", "r", "1,9,true,0,true"),
         ("var r = typeof new Number(1) + (new Number(5) + 1);", "r", "object6"),
         ("try { (5).toString(1); } catch (e) { var r = e.name; }", "r", "RangeError"),

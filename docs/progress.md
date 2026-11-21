@@ -17703,6 +17703,48 @@ Results.
 
 Not tested: macOS and a macOS build of the new code beyond the existing cross check; Windows 10 and ARM; the Windows release binary size; a Windows zone id with no CLDR row on the VM (`tzutil` refuses the two retired ids; the unit test covers the offset); the `bare-drive` journey of the design (check 4: `getTimezoneOffset` and `resolvedOptions().timeZone` through the whole browser on the VM); RSS of the whole browser; wall time on an idle machine; `tools/portable_check.sh` without `--scan` (the scan fails on three older files of main: `downloads/run.rs`, `force.rs`, `mcp/src/main.rs`; none is touched here); the stale-`known` check of the scan, which runs after that failure.
 
+## js2: the Symbol primitive (2026-11-21)
+
+Design: [design-js2-async.md](design-js2-async.md), decision 2. Base: `351f9b72` (`origin/main`, with #791 JSON and the String, Array, Number and Math built-ins merged in). Machine: archMachine, not idle; instruction counts only.
+
+What changed.
+
+1. A symbol is a cell with the layout of a flat string and the flag `FLAG_SYMBOL` (`string.rs`). Its units are the description. `FLAG_NO_DESC` marks `Symbol()`. `FLAG_REGISTERED` marks `Symbol.for`. The `Value` kind `Symbol` already existed. The collector marks the cell as a leaf string.
+2. A symbol is a property key with no new key type. A shape key is a cell address, and a symbol is a different cell from every atom. `for-in`, `Object.keys`, `Object.getOwnPropertyNames` and the script display skip symbols. `Object.getOwnPropertySymbols` lists them.
+3. The members of `Symbol` and `Symbol.prototype` are lazy (`F_LAZY`, as the `length` of a function). `Realm::new` makes the six well-known symbols and one native cell.
+4. `ToPrimitive` reads `Symbol.toPrimitive`. `instanceof` reads `Symbol.hasInstance` (the native default is not called). `Object.prototype.toString` reads `Symbol.toStringTag`. `Object.assign`, the object spread, `getOwnPropertyDescriptors` and `defineProperties` include symbols. Implicit string or number conversion of a symbol throws `TypeError`.
+5. `call_get!` in `Vm::run` calls a native getter through a cold arm (the `description` getter needs it).
+
+Wired: `typeof`, `Symbol()`, `Symbol.for`, `keyFor`, `toString`, `valueOf`, `description`, the six symbols `iterator`, `asyncIterator`, `species`, `toStringTag`, `hasInstance`, `toPrimitive`, and the hooks above.
+Later: `match`, `matchAll`, `replace`, `search`, `split`, `unscopables`, `isConcatSpreadable` (they need `RegExp`, `with` and `concat`); `iterator` and `asyncIterator` are values that no built-in reads until step G3; `species` waits for step P3; `Array.prototype[Symbol.iterator]`; `new` of a bound function (a known gap).
+
+Results.
+
+| Check | Result |
+| --- | --- |
+| test262 (`tools/js/test262_js2.sh -u`, `built-ins/Symbol` added to the subset, `allow:` lines for the Symbol features) | new engine: 17,775 pass, 2,444 fail. Main with the same rules: 17,365 pass. 0 tests pass on main and fail here. 410 tests gain. Main with its own rules passes 17,324. `built-ins/Symbol` (all its directories): 61 pass, 4 fail, 33 skipped for other features. The 4 fail on `Proxy`, `Date`, `RegExp` or a `Symbol.species` getter. |
+| `cargo test --locked -p bare-js2 --lib` | 467 pass (10 new in `bi_symbol_tests.rs`, each run plain and under constant collection) |
+| `cargo test --locked -p bare-js-diff` | pass (`script_tests:479` now expects `typeof Symbol` to be `function`; its `diff-known.txt` entry is gone) |
+| Micro rows, `tools/js/instr.sh` (min of 3, instructions:u, N minus N=0), default build, base then new | `loopfn 3000000` 817,500,160 to 838,501,178 (+2.57%); `calls 1000000` 586,501,612 to 589,500,937 (+0.51%); `fib 27` 260,525,190 to 260,842,044 (+0.12%); `closures 1000000` 1,947,254,460 to 1,954,254,550 (+0.36%); `objects 1000000` 710,282,673 to 708,284,276 (-0.28%) |
+| Same rows, `codegen-units=1`, base then new | `loopfn` 847,500,974 to 847,500,193 (0.00%); `calls` 579,500,062 to 579,499,993 (0.00%); `fib` 251,308,742 to 251,307,790 (0.00%); `closures` 1,942,176,229 to 1,943,178,410 (+0.05%); `objects` 720,284,311 to 720,285,602 (0.00%). All within +0.5%, so the two default-build rows over +0.5% pass by the cost rule. Hypothesis: the `loopfn` default-build swing is code layout, because it is 0.00% at `codegen-units=1`. |
+| Start-up, `script_run` on `var x = 1;` (min of 3, three samples each) | default build: base 1,941,215 / 1,941,369 / 1,939,068; new 1,947,111 / 1,947,746 / 1,947,912 (+5.9K to +8.8K, +0.30% to +0.45%). `codegen-units=1`: base 1,932,659 / 1,932,999 / 1,933,199; new 1,941,212 / 1,942,605 / 1,940,830 (+7.6K to +9.6K, +0.39% to +0.50%). The Rust-side install alone is about +1K. The rest is the `assign`, `copyData` and `rest` helpers of `prelude.js` (symbols are copied). A new top-level `var` in the prelude cost +45K, so none was added. |
+
+Not tested: Windows; the browser and the old engine with symbols (the old engine has none); Miri locally (the tests use small loops for the CI Miri job); `Symbol.species`, `iterator` and `asyncIterator` reads (no built-in reads them yet); the whole-browser cost; wall time on an idle machine; the `cost_matrix.sh` rows other than the five micro rows and start-up.
+## 2026-11-21: design of the js2 dispatch (`docs/design-js2-dispatch.md`)
+
+Design document for owner review. No engine code changed. Base `fd9c749b` (its `crates/js2` equals the head of #775). Machine: archMachine, load average 17, so instruction counts only.
+
+| Measure | Result |
+| --- | --- |
+| `loopfn` turn, `Vm::run` only (callgrind) | 262 instructions on `f3cfa8f8`, 257 on main. 40 stack reads and writes per turn. `Vm::run` is 255,676 bytes on main. |
+| #775 on the rows (default build) | `fib` -16.7%, `calls` -5.2%, `closures` -5.1%, `loopfn` -1.8%, `objects` +1.9%. |
+| Spike: 48 cold arms in a second function (corrected jump table) | Default build: `loopfn` -1.1%, `calls` -3.6%, `fib` -3.8%, `closures` -2.4%, `objects` -3.9%. `codegen-units=1`: -2.1%, -4.1%, -0.6%, -2.5%, -1.5%. `Vm::run` is 158,800 bytes. 445 lib tests pass. |
+| Spike: `unwind` by value | No gain (rows 0% to +3%). `pc` stays in a stack slot. |
+| Toy loop, 7 ops of `loopfn`, instructions per turn | `loop { match }` 219. Stable tail calls 175. `become` (nightly) 167. Direct threaded 159. |
+
+Recommendation: outline the cold arms first, then tail-call handlers for the hot ops after the owner chooses stable or nightly. Questions for the owner are in section 11 of the design.
+
+Not tested: wall time, Windows, macOS, arm64, Miri on the real engine, test262 on the spikes, a real tail-call engine (toy only).
 ### G0 and G1: resumable frames for generators (option A)
 
 Task: steps G0 and G1 of `docs/design-js2-async.md` (PR #796). A suspended frame is a heap record that holds only the registers of a save list. The compiler part (`function*`, `yield`) is G2 and is not in this change. Every generator in the tests is hand-built bytecode. Machine archMachine, rustc 1.96.0, `perf stat -e instructions:u`, `GLIBC_TUNABLES=glibc.malloc.tcache_count=65535`, minimum of 3 runs, net = count(N) - count(0). Each tree has its own `CARGO_TARGET_DIR`.

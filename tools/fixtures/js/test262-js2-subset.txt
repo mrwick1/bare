@@ -32,6 +32,7 @@ built-ins/Function
 built-ins/Array
 built-ins/Error
 built-ins/NativeErrors
+built-ins/Symbol
 built-ins/String
 built-ins/Number
 built-ins/Math
