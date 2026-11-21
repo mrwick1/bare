@@ -387,7 +387,7 @@ built-ins/String/prototype/lastIndexOf 25 0 0 25 0 0
 built-ins/String/prototype/localeCompare 13 0 0 13 0 0
 built-ins/String/prototype/match 39 1 11 39 1 11
 built-ins/String/prototype/matchAll 0 0 25 0 0 25
-built-ins/String/prototype/normalize 14 0 0 13 1 0
+built-ins/String/prototype/normalize 14 0 0 14 0 0
 built-ins/String/prototype/padEnd 13 0 0 13 0 0
 built-ins/String/prototype/padStart 13 0 0 13 0 0
 built-ins/String/prototype/repeat 16 0 0 16 0 0
