@@ -110,6 +110,38 @@ fn num_arg(rt: &mut Realm, args: &[Value], i: usize) -> R<f64> {
     rt.to_number(arg(args, i))
 }
 
+pub(crate) fn string_to_number(t: &str) -> f64 {
+    let t = t.trim_matches(|c: char| u16::try_from(c as u32).is_ok_and(crate::bi_string::is_space));
+    match t.as_bytes() {
+        [] => 0.0,
+        [b'0', b'b' | b'B', rest @ ..] => radix_integer(rest, 1),
+        [b'0', b'o' | b'O', rest @ ..] => radix_integer(rest, 3),
+        [b'0', b'x' | b'X', rest @ ..] => radix_integer(rest, 4),
+        b"Infinity" | b"+Infinity" => f64::INFINITY,
+        b"-Infinity" => f64::NEG_INFINITY,
+        b if b.iter().all(|c| c.is_ascii_digit() || matches!(c, b'+' | b'-' | b'.' | b'e' | b'E')) => t.parse().unwrap_or(f64::NAN),
+        _ => f64::NAN,
+    }
+}
+
+/// Keep the high bits and a sticky bit so that the cast rounds only once.
+fn radix_integer(digits: &[u8], bits: u32) -> f64 {
+    if digits.is_empty() {
+        return f64::NAN;
+    }
+    let (mut high, mut dropped, mut sticky) = (0u64, 0u32, false);
+    for &b in digits {
+        let Some(d) = (b as char).to_digit(1 << bits) else { return f64::NAN };
+        if high >> (64 - bits) == 0 {
+            high = (high << bits) | d as u64;
+        } else {
+            dropped += bits;
+            sticky |= d != 0;
+        }
+    }
+    (high | sticky as u64) as f64 * 2f64.powi(dropped.min(2000) as i32)
+}
+
 fn number_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let n = if args.is_empty() { Value::int(0) } else { Realm::num(rt.to_number(args[0])?) };
     if Realm::obj(rt.nt).is_none() {

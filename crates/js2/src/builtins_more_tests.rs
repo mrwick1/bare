@@ -257,3 +257,12 @@ fn from_entries_processes_one_entry_before_reading_the_next() {
         ("var log = ''; function* entries() { try { yield {get 0() { throw 'key'; }}; log += 'next'; } finally { log += 'close'; throw 'close'; } } try { Object.fromEntries(entries()); } catch (e) { return log + ':' + e; }", "close:key"),
     ]);
 }
+
+#[test]
+fn number_parses_prefixed_integers_and_flattened_strings() {
+    check(&[
+        ("return [Number('0b101'), Number('0O17'), Number('0x10000000000000000'), Number('0x+1'), Number('0b'), Number('-0o1')].join();", "5,15,18446744073709552000,NaN,NaN,NaN"),
+        ("var left = '\\u2028 \\u1680'.repeat(30) + '12345'; var right = '67890' + '\\u2001 \\uFEFF'.repeat(30); return Number(left + right);", "1234567890"),
+        ("return [Number('\\u00851'), 1 / Number('\\uFEFF-0'), Number('0x1000000000000081') === 1152921504606847200].join();", "NaN,-Infinity,true"),
+    ]);
+}
