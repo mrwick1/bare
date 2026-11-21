@@ -17703,6 +17703,21 @@ Results.
 
 Not tested: macOS and a macOS build of the new code beyond the existing cross check; Windows 10 and ARM; the Windows release binary size; a Windows zone id with no CLDR row on the VM (`tzutil` refuses the two retired ids; the unit test covers the offset); the `bare-drive` journey of the design (check 4: `getTimezoneOffset` and `resolvedOptions().timeZone` through the whole browser on the VM); RSS of the whole browser; wall time on an idle machine; `tools/portable_check.sh` without `--scan` (the scan fails on three older files of main: `downloads/run.rs`, `force.rs`, `mcp/src/main.rs`; none is touched here); the stale-`known` check of the scan, which runs after that failure.
 
+## 2026-11-21: design of the js2 dispatch (`docs/design-js2-dispatch.md`)
+
+Design document for owner review. No engine code changed. Base `fd9c749b` (its `crates/js2` equals the head of #775). Machine: archMachine, load average 17, so instruction counts only.
+
+| Measure | Result |
+| --- | --- |
+| `loopfn` turn, `Vm::run` only (callgrind) | 262 instructions on `f3cfa8f8`, 257 on main. 40 stack reads and writes per turn. `Vm::run` is 255,676 bytes on main. |
+| #775 on the rows (default build) | `fib` -16.7%, `calls` -5.2%, `closures` -5.1%, `loopfn` -1.8%, `objects` +1.9%. |
+| Spike: 48 cold arms in a second function (corrected jump table) | Default build: `loopfn` -1.1%, `calls` -3.6%, `fib` -3.8%, `closures` -2.4%, `objects` -3.9%. `codegen-units=1`: -2.1%, -4.1%, -0.6%, -2.5%, -1.5%. `Vm::run` is 158,800 bytes. 445 lib tests pass. |
+| Spike: `unwind` by value | No gain (rows 0% to +3%). `pc` stays in a stack slot. |
+| Toy loop, 7 ops of `loopfn`, instructions per turn | `loop { match }` 219. Stable tail calls 175. `become` (nightly) 167. Direct threaded 159. |
+
+Recommendation: outline the cold arms first, then tail-call handlers for the hot ops after the owner chooses stable or nightly. Questions for the owner are in section 11 of the design.
+
+Not tested: wall time, Windows, macOS, arm64, Miri on the real engine, test262 on the spikes, a real tail-call engine (toy only).
 ### G0 and G1: resumable frames for generators (option A)
 
 Task: steps G0 and G1 of `docs/design-js2-async.md` (PR #796). A suspended frame is a heap record that holds only the registers of a save list. The compiler part (`function*`, `yield`) is G2 and is not in this change. Every generator in the tests is hand-built bytecode. Machine archMachine, rustc 1.96.0, `perf stat -e instructions:u`, `GLIBC_TUNABLES=glibc.malloc.tcache_count=65535`, minimum of 3 runs, net = count(N) - count(0). Each tree has its own `CARGO_TARGET_DIR`.
