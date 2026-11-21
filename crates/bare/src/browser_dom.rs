@@ -236,32 +236,56 @@ impl<E: Eng> Dom<E> {
         let sels = self.selectors_at_s(s, text, scope)?;
         let base = self.depth_of_s(s, scope)?;
         let doc = self.doc.borrow();
+        if let [sel] = sels.as_slice()
+            && sel.pseudo.is_none()
+            && let [compound] = sel.compounds.as_slice()
+            && let [Simple::Id(id)] = compound.simples.as_slice()
+        {
+            return self.query_walk(s, &doc, scope, all, |s, node, _| {
+                let hit = doc.attr(node, Atom::ID) == Some(id.as_ref());
+                if hit {
+                    s.charge(1)?;
+                }
+                Ok(hit)
+            });
+        }
         if sels.iter().any(needs_places) {
             // The first `:nth-child` after a change builds a table of the whole document.
             s.charge(doc.len() as u64)?;
         }
-        let mut out = Vec::new();
-        let (mut cur, mut d) = (scope, 0usize);
-        while let Some((c, cd)) = next_in(&doc, scope, cur, d) {
-            (cur, d) = (c, cd);
-            s.charge(1)?;
+        self.query_walk(s, &doc, scope, all, |s, node, depth| {
             // The matcher stops at once when the last compound does not fit: only a selector that fits has to search up or back.
-            let mut hit = false;
             for sel in sels.iter() {
-                if !subject_matches(&doc, c, sel) {
+                if !subject_matches(&doc, node, sel) {
                     continue;
                 }
-                s.charge(match_work(&doc, base + d, std::slice::from_ref(sel)))?;
-                if matches(&doc, c, sel) {
-                    hit = true;
-                    break;
+                s.charge(match_work(&doc, base + depth, std::slice::from_ref(sel)))?;
+                if matches(&doc, node, sel) {
+                    return Ok(true);
                 }
             }
-            if hit {
+            Ok(false)
+        })
+    }
+
+    fn query_walk<'s>(
+        &self,
+        s: &mut Sc<'s, E>,
+        doc: &Document,
+        scope: NodeId,
+        all: bool,
+        mut matches: impl FnMut(&mut Sc<'s, E>, NodeId, usize) -> Res<'s, bool>,
+    ) -> Res<'s, Vec<NodeId>> {
+        let mut out = Vec::new();
+        let (mut cur, mut depth) = (scope, 0);
+        while let Some((node, next_depth)) = next_in(doc, scope, cur, depth) {
+            (cur, depth) = (node, next_depth);
+            s.charge(1)?;
+            if matches(s, node, depth)? {
                 if out.len() >= self.lim.max_results {
                     return Err(self.lim_s(s, "dom-results"));
                 }
-                out.push(c);
+                out.push(node);
                 if !all {
                     break;
                 }
