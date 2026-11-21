@@ -1118,7 +1118,7 @@ impl<'a> Fc<'a> {
         if is_await {
             self.aiter_step(rec, t, brk)?;
         } else {
-            self.jmp_rx(Op::IterNext, t, rec, brk);
+            self.jmp_rx(if of { Op::IterNext } else { Op::ForInNext }, t, rec, brk);
         }
         self.set_live(t);
         let guard = ex.map(|ex| (ex, self.live.clone(), self.asm.len(), self.depth));
