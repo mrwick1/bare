@@ -6,7 +6,10 @@ use crate::script::{load, run};
 
 fn ev(src: &str) -> String {
     match run(src) {
-        Ok(mut vm) => vm.global_text("r"),
+        Ok(mut vm) => {
+            vm.drain_microtasks(&mut |_, _| {}).expect("the jobs run");
+            vm.global_text("r")
+        }
         Err(e) => panic!("{e}\n--- source:\n{src}"),
     }
 }
@@ -18,6 +21,7 @@ fn ev_gc(src: &str) -> String {
     if let Err(e) = vm.run_main(0) {
         panic!("uncaught {e:?}\n--- source:\n{src}");
     }
+    vm.drain_microtasks(&mut |_, _| {}).expect("the jobs run");
     vm.global_text("r")
 }
 
@@ -112,5 +116,13 @@ fn the_other_entry_points_use_symbol_iterator() {
         ("var r = Object.prototype.toString.call([][Symbol.iterator]());", "[object Array Iterator]"),
         ("var r = Object.hasOwn(Object.getPrototypeOf([][Symbol.iterator]()), Symbol.iterator);", "false"),
         ("var r = [][Symbol.iterator]()[Symbol.iterator] === Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()))[Symbol.iterator];", "true"),
+    ]);
+}
+
+#[test]
+fn for_await_and_yield_star_over_a_string() {
+    check(&[
+        ("var r = ''; (async function () { for await (var c of 'a\\u{1F600}') r += c.length; r += '!'; })();", "12!"),
+        ("var r = ''; async function* g() { yield* 'xy'; } (async function () { for await (var c of g()) r += c; })();", "xy"),
     ]);
 }
