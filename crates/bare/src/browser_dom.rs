@@ -236,6 +236,13 @@ impl<E: Eng> Dom<E> {
         let sels = self.selectors_at_s(s, text, scope)?;
         let base = self.depth_of_s(s, scope)?;
         let doc = self.doc.borrow();
+        if let [sel] = sels.as_slice()
+            && sel.pseudo.is_none()
+            && let [compound] = sel.compounds.as_slice()
+            && let [Simple::Id(id)] = compound.simples.as_slice()
+        {
+            return self.query_id_s(s, &doc, scope, id, all);
+        }
         if sels.iter().any(needs_places) {
             // The first `:nth-child` after a change builds a table of the whole document.
             s.charge(doc.len() as u64)?;
@@ -262,6 +269,27 @@ impl<E: Eng> Dom<E> {
                     return Err(self.lim_s(s, "dom-results"));
                 }
                 out.push(c);
+                if !all {
+                    break;
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Match the ID directly. The walk and each match use the same charges as a selector query.
+    fn query_id_s<'s>(&self, s: &mut Sc<'s, E>, doc: &Document, scope: NodeId, id: &str, all: bool) -> Res<'s, Vec<NodeId>> {
+        let mut out = Vec::new();
+        let (mut cur, mut depth) = (scope, 0);
+        while let Some((node, next_depth)) = next_in(doc, scope, cur, depth) {
+            (cur, depth) = (node, next_depth);
+            s.charge(1)?;
+            if doc.attr(node, Atom::ID) == Some(id) {
+                s.charge(1)?;
+                if out.len() >= self.lim.max_results {
+                    return Err(self.lim_s(s, "dom-results"));
+                }
+                out.push(node);
                 if !all {
                     break;
                 }
