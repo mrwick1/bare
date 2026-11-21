@@ -336,6 +336,8 @@ impl<'a> Fc<'a> {
                 self.op(Op::LoadAtom, dst, a, 0);
             }
             ExprKind::Template(t) => self.template(t, dst)?,
+            ExprKind::Array(_) | ExprKind::Object(_)
+                if x.span.end - x.span.start >= crate::data_lit::MIN_BYTES && self.try_data_literal(e, dst)? => {}
             ExprKind::Array(list) => self.array(list, dst)?,
             ExprKind::Object(list) => self.object(list, dst)?,
             ExprKind::Function(f) => self.function(f, dst, true)?,
@@ -721,12 +723,14 @@ impl<'a> Fc<'a> {
         let prog = self.prog;
         let props: Vec<Prop> = prog.list(list).map(|p| *prog.prop(p)).collect();
         let mut names: Vec<Cow<'a, str>> = Vec::new();
-        let mut simple = props.len() as u32 <= LIT_MAX;
-        for p in &props {
-            let ok_kind = matches!(p.kind, PropKind::Init | PropKind::Shorthand | PropKind::Method) && !self.uses_super(p.value);
-            match self.static_key(p.key) {
-                Some(n) if ok_kind && !(index_like(&n) || (n == "__proto__" && p.kind == PropKind::Init) || names.contains(&n)) => names.push(n),
-                _ => simple = false,
+        // Only the compact opcode needs unique keys. Its register window limits the scan to LIT_MAX entries.
+        if props.len() as u32 <= LIT_MAX {
+            for p in &props {
+                let ok_kind = matches!(p.kind, PropKind::Init | PropKind::Shorthand | PropKind::Method) && !self.uses_super(p.value);
+                match self.static_key(p.key) {
+                    Some(n) if ok_kind && !(index_like(&n) || (n == "__proto__" && p.kind == PropKind::Init) || names.contains(&n)) => names.push(n),
+                    _ => break,
+                }
             }
         }
         let m = self.mark();
@@ -734,7 +738,7 @@ impl<'a> Fc<'a> {
         let d = self.scratch(dst, &values);
         if props.is_empty() {
             self.op(Op::NewObject, d, 0, 0);
-        } else if simple {
+        } else if names.len() == props.len() {
             let base = self.window(props.len() as u32);
             let mut keys = Vec::with_capacity(props.len());
             for (i, p) in props.iter().enumerate() {
