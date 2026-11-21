@@ -39,6 +39,7 @@
 //!
 //! Bound (`Limit(Host(name))`): `ranges` (live ranges, set free by the collector).
 
+use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_scheduler::Task;
 use crate::browser_chardata::{replace, split_at};
@@ -343,6 +344,7 @@ fn new_range_o<'s>(d: &Dom, s: &mut Sc<'s, '_>, r: Rng) -> Res<'s, ObjId> {
     let proto = state(d).borrow().made.expect("made")[0];
     let o = d.obj_s(s, proto)?;
     set(d, o, r);
+    d.own_obj(s.engine(), o, crate::browser::Owner::Range(o));
     if state(d).borrow().ranges.len() == 1 {
         d.sync_watcher();
     }
@@ -991,6 +993,7 @@ fn selection_obj<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ObjId> {
     let proto = state(d).borrow().made.expect("made")[2];
     let o = d.obj_s(s, proto)?;
     state(d).borrow_mut().sel = Some((o, None));
+    d.own_obj(s.engine(), o, crate::browser::Owner::Sel(o));
     Ok(o)
 }
 
@@ -1531,7 +1534,7 @@ pub(crate) fn bounds(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<(NodeId, u3
 }
 
 impl Dom {
-    pub(crate) fn range_roots(&self, out: &mut Vec<Value>) {
+    pub(crate) fn range_roots(&self, out: &mut Roots<'_, '_>) {
         if let Some(st) = self.range.st.get() {
             let s = st.borrow();
             out.extend(s.made.iter().flatten().copied().map(Value::Object));
@@ -1539,20 +1542,30 @@ impl Dom {
         }
     }
 
-    pub(crate) fn range_trace(&self, owner: ObjId, out: &mut Vec<Value>) {
+    /// The reference of the selection object: its range.
+    pub(crate) fn range_trace(&self, owner: ObjId, t: &mut bare_js_api::Tracer<'_, Value>) {
         if let Some(st) = self.range.st.get()
             && let Some((o, Some(r))) = st.borrow().sel
             && o == owner
         {
-            out.push(Value::Object(r));
+            crate::browser_sources::visit(t, Value::Object(r));
         }
     }
 
-    pub(crate) fn range_prune(&self, live: &dyn Fn(ObjId) -> bool) {
+    /// The entries of the range table (tests).
+    #[cfg(test)]
+    pub(crate) fn range_entries(&self) -> usize {
+        self.range.st.get().map_or(0, |s| s.borrow().ranges.len())
+    }
+
+    /// The ranges `dead` were collected: drop their entries.
+    pub(crate) fn range_forget(&self, dead: &[ObjId]) {
         if let Some(st) = self.range.st.get() {
             let mut s = st.borrow_mut();
             let had = !s.ranges.is_empty();
-            s.ranges.retain(|&o, _| live(o));
+            for o in dead {
+                s.ranges.remove(o);
+            }
             let gone = had && s.ranges.is_empty();
             drop(s);
             if gone {

@@ -42,6 +42,7 @@
 //! names use the document caps (`dom-text`, `dom-attrs`, `dom-names`) through the same path as `setAttribute`. Scans charge
 //! the step budget. No document or table borrow is held while JS runs (string conversion comes first).
 
+use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_js_api::{Args, Local, Type};
@@ -93,18 +94,17 @@ impl AttrHost {
 
 // ------------------------------------------------------------------------------------ GC and heap hooks
 
-pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
+pub(crate) fn roots(d: &Dom, out: &mut Roots<'_, '_>) {
     out.extend(d.attr.fixed.borrow().iter().map(|&o| Value::Object(o)));
 }
 
-/// The references of an `Attr` object. The maps have owner entries (`trace_map`).
-pub(crate) fn trace(d: &Dom, owner: ObjId, out: &mut Vec<Value>) {
-    let t = d.attr.s.borrow();
-    if t.attrs.is_empty() {
-        return;
-    }
-    if let Some(a) = t.attrs.get(&owner) {
-        out.extend(a.owner.and_then(|el| d.st.borrow().wrapper(el)).map(Value::Object));
+/// The references of the `Attr` object `o`: the wrapper of its element. The maps have owner entries (`trace_map`).
+pub(crate) fn trace(d: &Dom, o: ObjId, t: &mut bare_js_api::Tracer<'_, Value>) {
+    let a = d.attr.s.borrow();
+    if let Some(a) = a.attrs.get(&o)
+        && let Some(w) = a.owner.and_then(|el| d.st.borrow().by_node.get(&el).map(|w| *w.raw()))
+    {
+        crate::browser_sources::visit(t, w);
     }
 }
 
@@ -141,20 +141,18 @@ pub(crate) fn prune_map(d: &Dom, o: ObjId) {
     }
 }
 
-pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
+/// The `Attr` objects `dead` were collected: drop their entries, and the watches of their elements.
+pub(crate) fn forget(d: &Dom, dead: &[ObjId]) {
     let mut t = d.attr.s.borrow_mut();
     let t = &mut *t;
-    if t.attrs.is_empty() {
-        return;
-    }
     let mut unwatch = Vec::new();
-    t.attrs.retain(|&o, a| {
-        let keep = live(o);
-        if !keep && let Some(el) = a.owner {
+    for o in dead {
+        if let Some(a) = t.attrs.remove(o)
+            && let Some(el) = a.owner
+        {
             unwatch.push((el, a.atom));
         }
-        keep
-    });
+    }
     let attrs = &t.attrs;
     t.by_el.retain(|_, l| {
         l.retain(|(_, o)| attrs.contains_key(o));
@@ -294,6 +292,7 @@ fn wrapper_for<'s>(d: &Dom, s: &mut Sc<'s, '_>, el: NodeId, atom: Atom) -> Res<'
         t.by_el.entry(el).or_default().push((atom, o));
         d.wrapper_edges.set(true);
     }
+    d.own_obj(s.engine(), o, crate::browser::Owner::Attr(o));
     d.doc.borrow_mut().watch_attr(el, atom);
     Ok(o)
 }
@@ -303,6 +302,7 @@ fn new_detached<'s>(d: &Dom, s: &mut Sc<'s, '_>, atom: Atom, value: Span) -> Res
     lift(s, room(d))?;
     let o = d.obj_s(s, protos(d).0)?;
     d.attr.s.borrow_mut().attrs.insert(o, AttrObj { atom, owner: None, value: Some(value) });
+    d.own_obj(s.engine(), o, crate::browser::Owner::Attr(o));
     Ok(o)
 }
 

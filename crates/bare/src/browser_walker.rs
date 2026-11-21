@@ -29,6 +29,7 @@
 //!
 //! Bound (`Limit(Host(name))`): `tree-walkers` (live walkers, set free by the collector).
 
+use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_lazy::lazy_global;
 use crate::browser_scoped::*;
@@ -462,6 +463,7 @@ fn create<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, iter: b
         st.iters += iter as usize;
         iter && st.iters == 1
     };
+    d.own_obj(s.engine(), w, crate::browser::Owner::Walk(w));
     if first {
         d.sync_watcher();
     }
@@ -696,7 +698,7 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 }
 
 impl Dom {
-    pub(crate) fn walk_roots(&self, out: &mut Vec<Value>) {
+    pub(crate) fn walk_roots(&self, out: &mut Roots<'_, '_>) {
         if let Some(st) = self.walk.st.get() {
             let s = st.borrow();
             let (a, b) = s.made_iter.unzip();
@@ -704,19 +706,28 @@ impl Dom {
         }
     }
 
-    pub(crate) fn walk_trace(&self, owner: ObjId, out: &mut Vec<Value>) {
+    pub(crate) fn walk_trace(&self, owner: ObjId, t: &mut bare_js_api::Tracer<'_, Value>) {
         if let Some(st) = self.walk.st.get()
             && let Some(w) = st.borrow().walkers.get(&owner)
         {
-            out.push(w.filter);
+            crate::browser_sources::visit(t, w.filter);
         }
     }
 
-    pub(crate) fn walk_prune(&self, live: &dyn Fn(ObjId) -> bool) {
+    /// The entries of the walker table (tests).
+    #[cfg(test)]
+    pub(crate) fn walk_entries(&self) -> usize {
+        self.walk.st.get().map_or(0, |s| s.borrow().walkers.len())
+    }
+
+    /// The walkers and iterators `dead` were collected: drop their entries.
+    pub(crate) fn walk_forget(&self, dead: &[ObjId]) {
         if let Some(st) = self.walk.st.get() {
             let mut s = st.borrow_mut();
             let had = s.iters;
-            s.walkers.retain(|&o, _| live(o));
+            for o in dead {
+                s.walkers.remove(o);
+            }
             s.iters = s.walkers.values().filter(|w| w.iter).count();
             let gone = had > 0 && s.iters == 0;
             drop(s);

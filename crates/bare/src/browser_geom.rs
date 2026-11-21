@@ -16,6 +16,7 @@
 //!   entries, not of the rectangle).
 //! - `structuredClone` of these objects is a `DataCloneError` (they are platform objects here); Chrome clones them.
 
+use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_lazy::{self, lazy_global};
 use crate::browser_matrix::Mat;
@@ -78,6 +79,7 @@ pub(crate) fn num_s<'s>(s: &mut Sc<'s, '_>, v: Local<'s>, ctx: &dyn Fn() -> Stri
 pub(crate) fn new_obj_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, proto: ObjId, slot: Slot) -> Res<'s, ObjId> {
     let o = d.obj_s(s, proto)?;
     d.geom.slots.borrow_mut().insert(o, slot);
+    d.own_obj(s.engine(), o, crate::browser::Owner::Geom(o));
     Ok(o)
 }
 
@@ -237,6 +239,7 @@ pub(crate) fn rect_object(d: &Dom, it: &mut Interp<'_>, v: [f64; 4], rw: bool) -
     let proto = ensure_r(d, it)?[rw as usize].proto;
     let o = d.obj(it, proto)?;
     d.geom.slots.borrow_mut().insert(o, Slot::Rect(v, rw));
+    d.own_obj(it, o, crate::browser::Owner::Geom(o));
     Ok(Value::Object(o))
 }
 
@@ -654,7 +657,7 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 
 /// The points of every quad are roots, not traced from the quad: a trace hook runs for every object of a collection, and a root list runs once.
 /// A dead quad keeps its points until the next collection (`prune` drops its slot after the mark).
-pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
+pub(crate) fn roots(d: &Dom, out: &mut Roots<'_, '_>) {
     if d.geom.quad.get() {
         for s in d.geom.slots.borrow().values() {
             if let Slot::Quad(p) = s {
@@ -664,11 +667,9 @@ pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
     }
 }
 
-pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
-    let mut s = d.geom.slots.borrow_mut();
-    if !s.is_empty() {
-        s.retain(|&o, _| live(o));
-    }
+/// The geometry object `o` is dead: drop its slot.
+pub(crate) fn forget(d: &Dom, o: ObjId) {
+    d.geom.slots.borrow_mut().remove(&o);
 }
 
 impl Dom {

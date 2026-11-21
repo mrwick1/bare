@@ -34,6 +34,7 @@
 //! names are refused (`TypeError`); the Standard says `[[PreventExtensions]]` of a legacy platform object is `false`, which is not
 //! forced for an empty map. `new DOMStringMap()` is an illegal constructor. A map is not plain data for structured clone.
 
+use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_js_api::{Args, Local};
@@ -362,7 +363,7 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     Ok(())
 }
 
-pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
+pub(crate) fn roots(d: &Dom, out: &mut Roots<'_, '_>) {
     out.extend(d.dataset.fixed.borrow().iter().map(|&o| Value::Object(o)));
 }
 

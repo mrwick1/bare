@@ -45,6 +45,7 @@
 //! GC: pending promises are persistent handles (the engine roots them); `MediaError` objects are roots. A queued event holds a node id, a generation and a step, nothing else. The number of
 //! queued media events is capped (`max_media_tasks`, `media-tasks`).
 
+use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_dom::attr_set_s;
 use crate::browser_lazy::lazy_global;
@@ -139,7 +140,7 @@ pub(crate) struct Media {
     track_proto: Cell<Option<ObjId>>,
 }
 
-pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
+pub(crate) fn roots(d: &Dom, out: &mut Roots<'_, '_>) {
     out.extend(d.media.track_proto.get().map(Value::Object));
     out.extend(d.media.lists.borrow().keys().copied().map(Value::Object));
     for t in d.media.tracks.borrow().values() {

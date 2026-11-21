@@ -72,6 +72,7 @@
 //! Not here: `window.onload`, `DOMContentLoaded` for scripts that were added late, `defer` on dynamic scripts,
 //! `integrity`, `crossorigin`, `nonce`, CSP, `<noscript>`, a service worker.
 
+use crate::browser_sources::Roots;
 use crate::browser::{Browser, Dom, IdHash, Listener, R, Survive, Target as EvTarget};
 use crate::browser_scoped::*;
 use crate::browser_dom as nd;
@@ -338,7 +339,7 @@ impl Dom {
         self.scripts.inline.borrow().len() + self.scripts.external.borrow().len()
     }
 
-    pub(crate) fn scripts_roots(&self, out: &mut Vec<Value>) {
+    pub(crate) fn scripts_roots(&self, out: &mut Roots<'_, '_>) {
         let s = &self.scripts;
         out.extend(s.fixed.borrow().iter().map(|&o| Value::Object(o)));
         let st = self.st.borrow();

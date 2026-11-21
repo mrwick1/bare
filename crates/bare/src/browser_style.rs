@@ -49,6 +49,7 @@
 //! - Computed style is `browser_computed.rs`. It has its own read-only prototype under this one.
 //! - `new CSSStyleDeclaration()` and a subclass of it throw `TypeError: Illegal constructor`.
 
+use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_dom::attr_set;
 use crate::browser_geom::illegal_s;
@@ -774,7 +775,7 @@ pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId) -> R<bool> {
     Ok(true)
 }
 
-pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
+pub(crate) fn roots(d: &Dom, out: &mut Roots<'_, '_>) {
     out.extend(d.style.fixed.borrow().iter().map(|&o| Value::Object(o)));
 }
 

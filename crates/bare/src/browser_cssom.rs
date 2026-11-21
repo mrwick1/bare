@@ -4,6 +4,7 @@
 //! declaration of a rule (`rule.style`) is the object of `browser_style` with the shared `CSSStyleDeclaration` prototype: no own accessors.
 //! External rules require a supplied sheet and a same-origin URL. `CSSRule` is the base interface of every rule object. The interface shape and the
 //! semantics follow Ladybird `LibWeb/CSS/CSSRule.cpp` (BSD-2).
+use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_geom::illegal_s;
 use crate::browser_scoped::*;
@@ -117,7 +118,7 @@ pub(crate) struct Cssom {
 fn state(d: &Dom) -> &RefCell<State> {
     d.cssom.state.get().expect("CSSOM initialized")
 }
-pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
+pub(crate) fn roots(d: &Dom, out: &mut Roots<'_, '_>) {
     out.extend(d.cssom.style_p.get().copied().map(Value::Object));
     let Some(cell) = d.cssom.state.get() else { return };
     out.extend(cell.borrow().roots.iter().copied().map(Value::Object));

@@ -39,6 +39,7 @@
 //! - Caps: a new slot counts against `max_listeners` and `max_listeners_per_target` before anything changes.
 //! - Not done: the special return value of `beforeunload` (no page leaves here), line and column of an `ErrorEvent` (0).
 
+use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_js_api::{Args, HostFn, Local, Type};
@@ -165,7 +166,7 @@ pub(crate) struct Hh {
     pub rej: Cell<Option<[ObjId; 2]>>,
 }
 
-pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
+pub(crate) fn roots(d: &Dom, out: &mut Roots<'_, '_>) {
     for c in d.hh.body.iter().chain([&d.hh.err, &d.hh.rej]) {
         if let Some(o) = c.get() {
             out.extend(o.map(Value::Object));

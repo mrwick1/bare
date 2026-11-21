@@ -26,6 +26,7 @@
 //! - Not here: `ServiceWorker`, `importScripts`, a real worker (it needs a second realm and a structured clone between
 //!   heaps), `Worker.prototype.postMessage` of an object that has a function inside, `ErrorEvent` for the `error` event.
 
+use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_console::ConsoleLevel;
 use crate::browser_handlers::{handler_get, handler_set};
@@ -57,16 +58,17 @@ pub(crate) struct WorkerHost {
     ports: RefCell<IdMap<ObjId, ObjId>>,
 }
 
-pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
+pub(crate) fn roots(d: &Dom, out: &mut Roots<'_, '_>) {
     for m in [d.worker.made.get(), d.worker.made_shared.get()].into_iter().flatten() {
         out.extend(m.map(Value::Object));
     }
     out.extend(d.worker.ports.borrow().values().map(|&p| Value::Object(p)));
 }
 
-pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
-    d.worker.objs.borrow_mut().retain(|&o, _| live(o));
-    d.worker.ports.borrow_mut().retain(|&o, _| live(o));
+/// The worker `o` is dead: drop its entries and its port.
+pub(crate) fn forget(d: &Dom, o: ObjId) {
+    d.worker.objs.borrow_mut().remove(&o);
+    d.worker.ports.borrow_mut().remove(&o);
 }
 
 fn lazy_dedicated<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
@@ -201,7 +203,7 @@ fn check_url<'s>(d: &Dom, s: &mut Sc<'s, '_>, who: &str, url: &str) -> Res<'s, S
 fn start(d: &Dom, it: &mut Interp<'_>, proto: ObjId, href: &str, shared: bool) -> R<Value> {
     let port = if shared { Some(d.new_port(it)?) } else { None };
     let o = d.obj(it, proto)?;
-    d.st.borrow_mut().by_obj.insert(o, Target::Obj(o));
+    d.st.borrow_mut().add_target(it, o, crate::browser::Owner::Worker(o));
     d.schedule(d.now_ms(), crate::browser_scheduler::Task::Worker(o))?;
     d.worker.objs.borrow_mut().insert(o, true);
     if let Some(p) = port {

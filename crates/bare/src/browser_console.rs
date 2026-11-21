@@ -54,6 +54,7 @@
 //!
 //! Not compared with a real browser.
 
+use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_js_api::{Args, Local};
@@ -193,7 +194,7 @@ pub(crate) struct Console {
 }
 
 impl Console {
-    pub(crate) fn roots(&self, out: &mut Vec<Value>) {
+    pub(crate) fn roots(&self, out: &mut Roots<'_, '_>) {
         for r in &self.st.borrow().q {
             out.extend_from_slice(r.args.as_slice());
         }

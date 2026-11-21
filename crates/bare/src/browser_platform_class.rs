@@ -441,6 +441,8 @@ fn make_iter<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, kind: u8) -> Res<
     }
     let o = d.obj_s(s, d.plat.p.get().expect("installed").iter)?;
     d.plat.s.borrow_mut().iters.insert(o, TokIter { list, idx: 0, kind, done: false });
+    let k = d.st.borrow_mut().owners.key(crate::browser::Owner::TokIter(o));
+    s.engine().set_host_owner_obj(o, k);
     Ok(d.obj_local(s, o))
 }
 

@@ -32,6 +32,7 @@
 //! `cloneNode(true)` of a template copies its contents. `content` has no setter. The inserted-script rules apply to a script that moves out of the
 //! contents, as for any inserted script.
 
+use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_js_api::{Args, Local};
@@ -51,7 +52,7 @@ pub(crate) struct Els {
     pub(crate) tagged: Cell<u8>,
 }
 
-pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
+pub(crate) fn roots(d: &Dom, out: &mut Roots<'_, '_>) {
     if let Some(o) = d.els.objs.get() {
         out.extend(o.map(Value::Object));
     }

@@ -36,6 +36,7 @@
 //!
 //! Bounds (`Limit(Host(name))`): `intersection-observers` (live observers), `intersection-observations` (all observations together).
 
+use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_lazy::lazy_global;
 use crate::browser_scoped::*;
@@ -258,6 +259,7 @@ fn construct<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<
     m.observers.insert(o, Observer { cb, root, doc, margin, margin_text, thresholds, thresholds_array, obs: Vec::new(), targets: HashSet::new(), queue: Vec::new() });
     m.order.push(o);
     drop(m);
+    d.own_obj(s.engine(), o, crate::browser::Owner::Io(o));
     Ok(d.obj_local(s, o))
 }
 
@@ -643,7 +645,7 @@ impl Dom {
         Ok(())
     }
 
-    pub(crate) fn io_roots(&self, out: &mut Vec<Value>) {
+    pub(crate) fn io_roots(&self, out: &mut Roots<'_, '_>) {
         let Some(st) = self.io.st.get() else { return };
         let s = st.borrow();
         if let Some(p) = s.protos {
@@ -652,7 +654,8 @@ impl Dom {
         out.extend(s.observers.iter().filter(|(_, ob)| !ob.obs.is_empty() || !ob.queue.is_empty()).map(|(&o, _)| Value::Object(o)));
     }
 
-    pub(crate) fn io_trace(&self, owner: ObjId, out: &mut Vec<Value>) {
+    pub(crate) fn io_trace(&self, owner: ObjId, t: &mut bare_js_api::Tracer<'_, Value>) {
+        let out = &mut Roots(t);
         if let Some(st) = self.io.st.get()
             && let Some(ob) = st.borrow().observers.get(&owner)
         {
@@ -663,11 +666,20 @@ impl Dom {
         }
     }
 
-    pub(crate) fn io_prune(&self, live: &dyn Fn(ObjId) -> bool) {
+    /// The entries of the observer table (tests).
+    #[cfg(test)]
+    pub(crate) fn io_entries(&self) -> usize {
+        self.io.st.get().map_or(0, |s| s.borrow().observers.len())
+    }
+
+    /// The observers `dead` were collected: drop their entries.
+    pub(crate) fn io_forget(&self, dead: &[ObjId]) {
         if let Some(st) = self.io.st.get() {
             let mut s = st.borrow_mut();
-            s.observers.retain(|&o, _| live(o));
             let s = &mut *s;
+            for o in dead {
+                s.observers.remove(o);
+            }
             let observers = &s.observers;
             s.order.retain(|o| observers.contains_key(o));
         }

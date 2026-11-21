@@ -24,6 +24,7 @@
 //! Deviations: Chrome waits for the end of the load before the first idle period, so a short `timeout` there fires before the callback of
 //! an earlier request with a longer one. Here the first period comes at once. Bound: `idle-callbacks` (live callbacks).
 
+use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_frame::window_this;
 use crate::browser_scheduler::{Key, Task};
@@ -160,15 +161,16 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 }
 
 impl Dom {
-    pub(crate) fn idle_roots(&self, out: &mut Vec<Value>) {
+    pub(crate) fn idle_roots(&self, out: &mut Roots<'_, '_>) {
         out.extend(self.idle.cbs.borrow().values().map(|c| c.0));
         if let Some((p, c)) = self.idle.made.get() {
             out.extend([Value::Object(p), Value::Object(c)]);
         }
     }
 
-    pub(crate) fn idle_prune(&self, live: &dyn Fn(ObjId) -> bool) {
-        self.idle.deadlines.borrow_mut().retain(|&o, _| live(o));
+    /// The `IdleDeadline` `o` is dead: drop its entry.
+    pub(crate) fn idle_forget(&self, o: ObjId) {
+        self.idle.deadlines.borrow_mut().remove(&o);
     }
 
     /// Queue the next idle period at `due` unless one is queued.
@@ -193,6 +195,7 @@ impl Dom {
         }
         let o = self.obj(it, proto)?;
         self.idle.deadlines.borrow_mut().insert(o, (end, timed_out));
+        self.own_obj(it, o, crate::browser::Owner::Idle(o));
         it.charge(1)?;
         match it.call(cb, Value::Undefined, &[Value::Object(o)]) {
             Ok(_) => {}

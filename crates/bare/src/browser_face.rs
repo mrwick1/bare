@@ -25,6 +25,7 @@
 //! - The anchor of `setValidity` is checked and not used (no message bubble). `form.elements`, `form.length` and named access do not exist for any control.
 //! - A move that takes an element out of the shadow-including tree of a form that its `form=` names is seen when the reaction runs, not at the removal.
 
+use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_custom::st;
 use crate::browser_scoped::*;
@@ -61,7 +62,7 @@ impl Face {
         Face { el, owner: None, disabled: false, value: None, flags: 0, msg: String::new(), ints: None, states: None, role: None }
     }
 
-    pub(crate) fn roots(&self, out: &mut Vec<Value>) {
+    pub(crate) fn roots(&self, out: &mut Roots<'_, '_>) {
         match &self.value {
             Some(FVal::B(o)) => out.push(Value::Object(*o)),
             Some(FVal::List(l)) => out.extend(l.iter().filter_map(|(_, e)| if let Ent::B(o) = e { Some(Value::Object(*o)) } else { None })),
