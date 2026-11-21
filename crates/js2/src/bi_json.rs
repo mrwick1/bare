@@ -372,7 +372,7 @@ impl Writer {
         let inner: Vec<u16> = [indent, &self.gap].concat();
         let keys = match &self.keys {
             Some(k) => k.clone(),
-            None => rt.own_key_list(o, true),
+            None => rt.own_key_list_h(o, true)?,
         };
         self.out.push(0x7b);
         let mut any = false;

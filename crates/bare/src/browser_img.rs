@@ -15,6 +15,7 @@
 //! - A picture that this engine cannot decode (GIF, AVIF, a file over the limits) fires `error`.
 //! - Only these attribute changes start a request: the `src` setter and `setAttribute('src')`. A `srcset` change does not.
 
+use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_dom::attr_set_s;
 use crate::browser_lazy::lazy_global;
@@ -44,7 +45,7 @@ pub(crate) struct Img {
     decodes: RefCell<HashMap<NodeId, Vec<bare_js_api::Persistent>>>,
 }
 
-pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
+pub(crate) fn roots(d: &Dom, out: &mut Roots<'_, '_>) {
     out.extend(d.img.made.get().map(Value::Object));
 }
 

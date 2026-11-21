@@ -284,7 +284,7 @@ ops! {
     IterOpen Abc "W r" "Open the iterator of `b`. The iterator record (iterator, `next`, state) is in the 3 registers from `a`.",
     ForInOpen Abc "W r" "Open the keys of `b` (`for-in`). The record is in the 3 registers from `a`, as for `IterOpen`.",
     IterNext AsBxX "w j R" "`a` = the next value of the record in the 3 registers from `x`. When it is done, jump.",
-    IterClose Abc "R" "Close the iterator whose record is in the 3 registers from `a` (a `break` or an exception out of the loop).",
+    IterClose Abc "R - u" "Close the iterator whose record is in the 3 registers from `a` (a `break` or an exception out of the loop). `c` is 1 for an exception: the error of `return()` is then dropped.",
     CreateArgs Abc "w" "`a` = a new arguments object that holds every argument of this call (the frame keeps them, also those past `nparams`). Always unmapped: `arguments[i]` does not alias the parameter `i`. The first instruction of the function, before any parameter is written.",
     CreateRest Abc "w u" "`a` = a new array of the arguments of this call from the index `b` on (a rest parameter; `b` is its position).",
     LoadCallee Abc "w" "`a` = the function that runs (the name of a named function expression inside its own body).",
@@ -325,6 +325,7 @@ ops! {
     RetDerived Abc "r r" "Return from a derived constructor with the value `a` and the variable `this` in `b`: an object is returned as it is; `undefined` gives `this` (a ReferenceError when `this` is the hole); anything else is a TypeError.",
     GenInit Abx "- T" "The first suspension of a generator: the parameters are bound and the defaults are evaluated, and the body has not run. Make the generator object and the record that keeps the frame, save the registers of the list at `tables[bx..]` (see \"Suspension\" above), and return the generator object to the caller. The first `next()` goes on at the instruction after this one.",
     Yield Abx "r T" "Suspend the generator: save the registers of the list at `tables[bx..]`, and give the value `a` to the caller of `next()`. A resume goes on at the instruction after this one with the sent value and the mode in the registers that the list names.",
+    YieldStarStep AsBxX "w j R" "`yield*`: the record at `x` is the iterator record (3 registers), then the sent value and the mode (`YS_REGS`). Send them to the iterator. If it gave a value, `a` = the value and the next instruction runs (it yields `a`). If it finished, `a` = its value, the mode register is 0 (the value of the expression) or 2 (`return` it), and jump.",
     RetGen Abc "r" "Return `a` from a generator: the generator is done. The only return of the code of a generator (`Ret` is not allowed there).",
     Lazy Abc "u" "The only instruction of the stub of a function that is compiled at its first call (`script::Lazy`): compile the function into this code, then run it from the start with the same arguments. With `a` = 1 the stub has `CF_ARGS`, so the frame record holds all arguments in an array. With `a` = 0 the stub has the parameter registers of the real code, and the arguments are in them (a function with plain parameters that does not read `arguments`): no array is made. The compiler never emits it.",
 }
@@ -336,6 +337,9 @@ pub const STR_EMPTY: u32 = u32::MAX;
 
 /// The registers of an iterator record (`IterOpen`, `ForInOpen`, `IterNext`, `IterClose`).
 pub const ITER_REGS: u32 = 3;
+
+/// The registers of the window of `YieldStarStep`: the iterator record, the sent value, the mode.
+pub const YS_REGS: u32 = 5;
 
 impl Op {
     /// The opcode of a byte, or `None` for a byte that is no opcode.
@@ -582,6 +586,8 @@ pub const CF_ARGS: u8 = 1;
 /// `Code::flags`: the function (or a function inside it) uses `super`, so `Closure` gives the new function the home object and the
 /// constructor link of the function that makes it.
 pub const CF_LINK: u8 = 2;
+/// `Code::flags`: the function is a generator, so `Closure` gives the new function the prototype `%GeneratorFunction.prototype%`.
+pub const CF_GEN: u8 = 4;
 
 /// The code of one function. It holds no pointer to a realm's heap: its atoms are shared atoms, so all realms of a session can use it.
 #[derive(Debug)]

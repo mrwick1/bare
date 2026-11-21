@@ -281,7 +281,8 @@ impl Realm {
 
     // ---- spread and rest ----
 
-    /// The values that the iterator of `v` gives. An array and a string are iterated (the protocol is S2.7).
+    /// The values that the iterator of `v` gives. An array and a string are read directly; any other value goes through `Symbol.iterator`
+    /// (`iter.rs`). The values are read at the start: a spread holds them in a list while the iterator runs script (the collector is held).
     pub fn iter_values(&mut self, v: Value) -> R<Vec<Value>> {
         if let Some(o) = Realm::obj(v)
             && self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed
@@ -300,7 +301,18 @@ impl Realm {
             }
             return Ok(out);
         }
-        self.type_error("the value is not iterable (the iterator protocol is S2.7)")
+        let (it, kind) = self.iter_open_generic(v)?;
+        let mut out = Vec::new();
+        if kind.is_undefined() {
+            while let (x, false) = self.gen_nested(it, crate::generator::MODE_NEXT, Value::UNDEFINED)? {
+                out.push(x);
+            }
+        } else {
+            while let Some(x) = self.iter_step(it, kind)? {
+                out.push(x);
+            }
+        }
+        Ok(out)
     }
 
     /// The own enumerable properties of `src`, minus the keys `skip`. `None` when `src` has an accessor: the copy needs calls, so the

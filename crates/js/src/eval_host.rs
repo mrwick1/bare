@@ -98,7 +98,12 @@ impl<'p> Interp<'p> {
 
     fn host_named(&mut self) -> Result<(), Error> {
         let Some(req) = self.heap.take_named_request() else { return Err(unsupported("named host object without a request", Span::default())) };
-        let Some(host) = self.host.clone() else { return Err(unsupported("named host object without a host", Span::default())) };
+        let Some(host) = self.host.clone() else {
+            let Some(h) = self.api.host.clone() else { return Err(unsupported("named host object without a host", Span::default())) };
+            let ok = self.api_named_write(&*h, req)?;
+            self.heap.complete_named(&req, ok);
+            return Ok(());
+        };
         let ok = host.named_write(self, req)?;
         self.heap.complete_named(&req, ok);
         Ok(())
@@ -108,7 +113,10 @@ impl<'p> Interp<'p> {
         if (crate::heap::LAZY_TAG..u32::MAX).contains(&index) && let Some(h) = self.api.host.clone() {
             return self.api_lazy(&*h, owner, index);
         }
-        let Some(host) = self.host.clone() else { return Err(unsupported("indexed host object without a host", Span::default())) };
+        let Some(host) = self.host.clone() else {
+            let Some(h) = self.api.host.clone() else { return Err(unsupported("indexed host object without a host", Span::default())) };
+            return self.api_fill(&*h, owner, index);
+        };
         host.fill_indexed(self, owner, index)
     }
 

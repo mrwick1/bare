@@ -20,13 +20,13 @@ enum Plan {
 
 /// The names that a function (or a script) declares in its own scope, found before the code is compiled.
 #[derive(Default)]
-struct Hoist<'a> {
+pub(super) struct Hoist<'a> {
     /// `var` names, also those in nested blocks, and the names of sloppy-mode functions in blocks (Annex B).
-    vars: Vec<Cow<'a, str>>,
+    pub(super) vars: Vec<Cow<'a, str>>,
     /// The function declarations of the top level, in order.
-    funcs: Vec<(FuncId, Cow<'a, str>)>,
+    pub(super) funcs: Vec<(FuncId, Cow<'a, str>)>,
     /// The `let`, `const` and `class` declarations of the top level, with the end of the declaration.
-    lex: Vec<(Cow<'a, str>, VK, u32)>,
+    pub(super) lex: Vec<(Cow<'a, str>, VK, u32)>,
 }
 
 /// A function declaration of a block: its name and whether the name is a binding of the block (strict code) or a variable of the function.
@@ -35,7 +35,7 @@ type BlockFn<'a> = (FuncId, Cow<'a, str>, bool);
 impl<'a> Fc<'a> {
     // ------------------------------------------------------------ hoisting
 
-    fn hoist_list(&self, list: List<Stmt>, top: bool, h: &mut Hoist<'a>) {
+    pub(super) fn hoist_list(&self, list: List<Stmt>, top: bool, h: &mut Hoist<'a>) {
         for s in self.prog.list(list) {
             self.hoist_stmt(s, top, h);
         }
@@ -245,12 +245,12 @@ impl<'a> Fc<'a> {
         if uses_nt && let Some(home) = self.find_var("new.target").map(|v| v.home) {
             match home {
                 Home::Reg(r) => {
-                    self.op(Op::LoadNewTarget, r, 0, 0);
+                    self.load_new_target(r);
                     self.set_live(r);
                 }
                 Home::Ctx { level, slot } => {
                     let t = self.alloc();
-                    self.op(Op::LoadNewTarget, t, 0, 0);
+                    self.load_new_target(t);
                     self.op(Op::InitCtx, t, self.depth - level, slot);
                     self.free(t);
                 }
@@ -324,6 +324,10 @@ impl<'a> Fc<'a> {
         // Function declarations are made before the first statement.
         for (f, name) in &h.funcs {
             self.declare_function(*f, name)?;
+        }
+        // A generator binds its parameters at the call and runs its body at the first `next()`.
+        if self.gen_kind != 0 {
+            self.gen_init();
         }
         match f.body {
             Body::Block(l) => {
@@ -405,7 +409,7 @@ impl<'a> Fc<'a> {
     }
 
     /// Make the closure of a function declaration and store it in its variable.
-    fn declare_function(&mut self, f: FuncId, name: &str) -> CR {
+    pub(super) fn declare_function(&mut self, f: FuncId, name: &str) -> CR {
         let m = self.mark();
         let t = match self.find_var(name).map(|v| v.home) {
             Some(Home::Reg(r)) => r,
@@ -711,7 +715,7 @@ impl<'a> Fc<'a> {
             }
             StmtKind::Block(list) => self.block(list, st.span)?,
             StmtKind::With { .. } => self.unsup("with"),
-            StmtKind::ExportDefault(..) => self.unsup("a module"),
+            StmtKind::ExportDefault(e, hoisted) => self.export_default(e, hoisted, false)?,
         }
         self.free(m);
         Ok(())
@@ -809,7 +813,7 @@ impl<'a> Fc<'a> {
 
     /// Run what a jump out of the frames above `to` must run: close iterators and repeat the finalizers (innermost first). The contexts
     /// are popped down to the context of each finalizer. Gives the depth that the code is at when it returns.
-    fn unwind(&mut self, to: usize) -> CR<u32> {
+    pub(crate) fn unwind(&mut self, to: usize) -> CR<u32> {
         let (d0, c0) = (self.depth, self.cur_ctx.clone());
         let mut rt = self.depth;
         let mut paused: Vec<usize> = Vec::new();
@@ -937,18 +941,18 @@ impl<'a> Fc<'a> {
             }
             None => {
                 self.unwind(0)?;
-                self.op(Op::RetUndef, 0, 0, 0);
+                self.ret_undef();
             }
             Some(e) if !cleanup => {
                 let r = self.any(e)?;
-                self.op(Op::Ret, r, 0, 0);
+                self.ret_op(r);
             }
             Some(e) => {
                 // The value is kept in a temporary: a finalizer can change a variable.
                 let t = self.alloc();
                 self.to(e, t)?;
                 self.unwind(0)?;
-                self.op(Op::Ret, t, 0, 0);
+                self.ret_op(t);
             }
         }
         Ok(())
@@ -1040,7 +1044,10 @@ impl<'a> Fc<'a> {
             let ds: Vec<Decl> = names.into_iter().map(|(name, _)| Decl { name, kind: if k == VarKind::Let { VK::Let } else { VK::Const }, end: 0, reg: None }).collect();
             scope = Some(self.enter(prog.stmt(body).span, &ds, false)?);
         }
-        self.bind_pattern(target, t, if kind.is_some() { Bind::Init } else { Bind::Assign })?;
+        self.of_head = of;
+        let bound = self.bind_pattern(target, t, if kind.is_some() { Bind::Init } else { Bind::Assign });
+        self.of_head = false;
+        bound?;
         self.pending = labels;
         self.push_loop(brk, cont, of.then_some(rec));
         {
@@ -1067,7 +1074,7 @@ impl<'a> Fc<'a> {
             self.bind(lb);
             self.live = live;
             self.set_live(ex);
-            self.op(Op::IterClose, rec, 0, 0);
+            self.op(Op::IterClose, rec, 0, 1);
             self.op(Op::Throw, ex, 0, 0);
             for (start, end) in pieces {
                 self.handlers.push(HandlerRec { start, end, target: lb, reg: ex, depth });

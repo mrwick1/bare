@@ -172,6 +172,7 @@
           return { value: undefined, done: true };
         }
       }, { next: 0 });
+      rawDefine(arrayIteratorProto, Symbol.iterator, { value: function() { return this; }, writable: true, configurable: true });
     }
     var it = Object.create(arrayIteratorProto);
     it['\0o'] = a;
@@ -396,6 +397,7 @@
       return r;
     }
   }, { keys: 0, values: 0, entries: 0, forEach: 1, map: 1, filter: 1, reduce: 1, reduceRight: 1, some: 1, every: 1, find: 1, findIndex: 1, findLast: 1, findLastIndex: 1, flat: 0, flatMap: 1, sort: 1, toSorted: 1, toLocaleString: 0 });
+  rawDefine(Array.prototype, Symbol.iterator, { value: Array.prototype.values, writable: true, configurable: true });
   def(Array, {
     of: function of() {
       var n = arguments.length, C = this, r = typeof C === 'function' && C !== Array ? new C(n) : [];

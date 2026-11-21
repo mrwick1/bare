@@ -28,8 +28,9 @@ use crate::object::Obj;
 use crate::string::{Chars, Str};
 use crate::value::Value;
 
-/// Object header flag: the object has a lazy table with entries left. Bit 19 is `F_DATE`, bits 16 to 18 are `F_COLL`.
-pub const F_LAZYTAB: u32 = 1 << 20;
+/// Object header flag: the object has a lazy table with entries left. Bits 16 to 18 are `F_COLL`, bit 19 is `F_DATE` or `F_HOST`, bit 20 is
+/// `F_LAZYM`, bit 23 is `F_PROTO`.
+pub const F_LAZYTAB: u32 = 1 << 21;
 
 /// What a table entry makes.
 #[derive(Clone, Copy)]

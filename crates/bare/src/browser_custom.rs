@@ -38,6 +38,7 @@
 //! - No `new CustomElementRegistry()`, `initialize` or scoped registries.
 //! - The `outerHTML` of an element made with `is` does not show the `is` value.
 
+use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_dom::{make_element_s, next_composed};
 use crate::browser_scoped::*;
@@ -813,7 +814,7 @@ impl Dom {
         }
     }
 
-    pub(crate) fn ce_roots(&self, out: &mut Vec<Value>) {
+    pub(crate) fn ce_roots(&self, out: &mut Roots<'_, '_>) {
         // A page that never uses the registry still makes these (an unknown element, a lazy global): they are roots without it.
         out.extend(self.ce.unk.get().into_iter().flatten().copied().map(Value::Object));
         out.extend(self.ce.int.get().into_iter().flatten().copied().map(Value::Object));
