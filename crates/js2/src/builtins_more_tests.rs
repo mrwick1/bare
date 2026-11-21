@@ -246,5 +246,6 @@ fn array_species_constructs_results_and_defines_own_elements() {
         ("var a = [1]; a.constructor = {[Symbol.species]: function() { return Object.preventExtensions({}); }}; try { a.concat([2]); } catch (e) { return e.name; }", "TypeError"),
         ("var a = [1]; a.constructor = {get [Symbol.species]() { throw 'species'; }}; try { a.flatMap(function(x) { return x; }); } catch (e) { return e; }", "species"),
         ("return Object.getOwnPropertyDescriptor(Array, Symbol.species).get.call(7);", "7"),
+        ("var a = [2]; function S() { Object.defineProperty(this, '0', {value: 1, configurable: true}); } a.constructor = {[Symbol.species]: S}; var d = Object.getOwnPropertyDescriptor(a.flat(), '0'); return [d.value, d.enumerable, d.writable, d.configurable].join();", "2,true,true,true"),
     ]);
 }
