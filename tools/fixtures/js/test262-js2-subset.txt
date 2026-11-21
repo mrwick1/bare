@@ -32,6 +32,9 @@ built-ins/Function
 built-ins/Array
 built-ins/Error
 built-ins/NativeErrors
+# RegExp (docs/design-js2-regexp.md, steps R0 to R3): the engine and the Annex B RegExp tests. The String methods that take a pattern are in built-ins/String.
+built-ins/RegExp
+annexB/built-ins/RegExp
 built-ins/Promise
 -built-ins/Promise/all
 -built-ins/Promise/allKeyed

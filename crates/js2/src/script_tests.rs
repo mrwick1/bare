@@ -27,7 +27,7 @@ fn ev_gc(src: &str, name: &str) -> String {
 /// Each case is `(source, global, expected text)`. Each runs normally and under constant collection. Under Miri it runs only
 /// normally (Miri is 100 times slower; `a_few_programs_under_constant_collection` and the stress test keep the collector covered), and
 /// a case with `**` is skipped (Miri adds a random error to the result of `pow`).
-fn check(cases: &[(&str, &str, &str)]) {
+pub(crate) fn check(cases: &[(&str, &str, &str)]) {
     for (src, name, want) in cases {
         if MIRI && src.contains("**") {
             continue;
@@ -177,7 +177,7 @@ fn tagged_templates_regexp_and_bigint() {
         ("function tag(s, v) { return s[0] + v + s.raw[1]; } var r = tag`a${1}b`;", "r", "a1b"),
         ("function id(s) { return s; } function t() { return id`x`; } var r = t() === t();", "r", "true"),
         ("function id(s) { return s; } var r = id`a\\n${0}` === id`a\\n${0}`;", "r", "false"),
-        ("try { /a+/g; } catch (e) { var r = e.name; }", "r", "TypeError"),
+        ("var r = /a+/g.test('caab');", "r", "true"),
         ("try { var x = 10n; } catch (e) { var r = e.name; }", "r", "TypeError"),
     ]);
 }
@@ -942,6 +942,18 @@ fn a_stack_that_grows_in_a_callee_keeps_the_registers_of_the_callers() {
         ("function C(n) { this.n = n; this.k = n == 0 ? 0 : new C(n - 1).k + n; } var r = new C(200).k;", "r", "20100"),
         ("var o = { f: function (n, acc) { var t = this; if (n == 0) return acc; return t.f(n - 1, acc + n); } }; var r = o.f(200, 0);", "r", "20100"),
         ("function f(n, ...rest) { var x = n * 2; if (n == 0) return rest.length; var y = f(n - 1, n, n); return y + x - 2 * n; } var r = f(200);", "r", "2"),
+    ]);
+}
+
+/// The ops of the cold function (`Vm::exec::<Cold>`) enter frames, grow the stack and unwind. The hot loop sets `regs`, `code`, `words`
+/// and `fb` again when the cold function returns: each caller below has live registers that it reads after the cold op. The stack starts
+/// with 256 words, so the recursion grows it inside `CallSuper` and `CallSpread`, and `ThrowConst` unwinds 150 frames.
+#[test]
+fn a_cold_op_that_grows_the_stack_or_unwinds_keeps_the_registers_of_the_caller() {
+    check(&[
+        ("class A { constructor(n) { this.k = n; } } class B extends A { constructor(n) { var a = n, b = 2 * n; super(n); this.d = n == 0 ? 0 : new B(n - 1).d + a + b; } } var r = new B(200).d;", "r", "60300"),
+        ("function f(n) { var a = n; if (n == 0) return 0; var r = f(...[n - 1]); return r + a; } var r = f(300);", "r", "45150"),
+        ("function f(n) { var a = n; if (n == 0) { const c = 1; c = 2; return 0; } if (n == 150) { try { return f(n - 1); } catch (e) { return -a; } } return f(n - 1) + a; } var r = f(300);", "r", "33675"),
     ]);
 }
 

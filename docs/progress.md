@@ -1,6 +1,6 @@
 # Progress
 
-This file records what is built, what comes next and what is missing. Update it after each merged PR.
+This file records what is built, what comes next and what is missing. Since 2026-11-21, each PR writes its entry to its own file in [progress/](progress/README.md). Do not append new entries to this file.
 
 The reasons for the design are in [decisions.md](decisions.md). Time and memory numbers for each module are in [resources.md](resources.md).
 
@@ -17785,6 +17785,55 @@ Results.
 | Start-up, `script_run` on `var x = 1;` (min of 3, three samples each) | default build: base 1,941,215 / 1,941,369 / 1,939,068; new 1,947,111 / 1,947,746 / 1,947,912 (+5.9K to +8.8K, +0.30% to +0.45%). `codegen-units=1`: base 1,932,659 / 1,932,999 / 1,933,199; new 1,941,212 / 1,942,605 / 1,940,830 (+7.6K to +9.6K, +0.39% to +0.50%). The Rust-side install alone is about +1K. The rest is the `assign`, `copyData` and `rest` helpers of `prelude.js` (symbols are copied). A new top-level `var` in the prelude cost +45K, so none was added. |
 
 Not tested: Windows; the browser and the old engine with symbols (the old engine has none); Miri locally (the tests use small loops for the CI Miri job); `Symbol.species`, `iterator` and `asyncIterator` reads (no built-in reads them yet); the whole-browser cost; wall time on an idle machine; the `cost_matrix.sh` rows other than the five micro rows and start-up.
+## js2 RegExp, steps R0 and R1: the backtracker behind a `Blob` (2026-11-21)
+
+Design: `design-js2-regexp.md` (PR #797), "Decisions (owner, 2026-11-21)". Base: `fd9c749b` (js2 main). Machine: archMachine (AMD Ryzen 9 5900HX), not idle (other sessions ran). Cost rows are instruction counts (`tools/js/instr.sh`, minimum of 3 runs).
+
+What changed.
+
+1. `crates/js2/src/regexp.rs`: the parser, emitter and matcher of the old engine (`crates/js/src/regexp.rs`), over a flat program image (`Vec<u64>`) that a `Blob` cell holds. The matcher is generic over `u8` and `u16` input. It writes the spans to a caller slice. It has no `AtomicU64`. One decode step per instruction: the loop matches on the opcode byte, not on a decoded enum.
+2. `Layout::Blob = 21` (`cell.rs`, `gc.rs`): a leaf cell. The collector marks it and does not trace it. `crates/js2/src/blob.rs` holds the only `unsafe` (the cell read and write). It is in the Miri list of `Cargo.toml`. js2 now depends on `bare-unicode`.
+3. Steps: each matcher step is counted down in a block of 256 steps. A block costs `FUEL_PER_BLOCK` (16) units of `Realm::fuel`. One run also has the cap `MAX_STEPS` (50 M). Fuel out, the cap, the stack limit or an input over 16 M units make the native return `Err(STOP)`: the script ends with `Exit::Fuel`, as the old engine's `Error::Limit` did. `FUEL_PER_BLOCK` is a placeholder. It is not calibrated against `loopfn` yet.
+4. `crates/js2/src/regexp_rt.rs`: `RegExp` objects (flag `F_REGEXP`, slots `\0src`, `\0fl`, `\0prog`, `lastIndex`), the constructor, `exec`, `test`, `toString`, and the getters `source`, `flags` and the 8 flag getters. `Op::NewRegExp` builds the object. The constructor checks the syntax. The program compiles at the first `exec` or `test`. A cache of 32 programs, keyed by (source cell, flags), is a root of the collector. A native getter now runs through `call_function` in `call_get!` (cold arm).
+5. Lazy install: `Realm::rx` is `None` at start. The first literal, or the first read of the global name `RegExp` that misses (`get_global_slow`, `TypeofGlobal`), builds the constructor and the prototype. Known gap: `globalThis.RegExp`, `hasOwnProperty("RegExp")` and a list of the globals do not see `RegExp` before that first use (test262 `built-ins/RegExp/prop-desc.js` fails because of it).
+6. `regexp_check.rs` checks `\p{...}` names against `bare_unicode::property::property_ranges`. A property of strings (`\p{RGI_Emoji}`) is a `SyntaxError`, as in the matcher.
+7. `test262-js2-subset.txt` has `built-ins/RegExp`, `annexB/built-ins/RegExp` and the six String regex-method directories. `test262-js2-skip.txt` allows `regexp-dotall`, `regexp-lookbehind` and `regexp-unicode-property-escapes`. The baseline is regenerated.
+8. `crates/js-diff/examples/regexp_row.rs` (data in `examples/data/regexp/`): the regex rows, both engines, same patterns and inputs. `diff-known.txt` loses `script_tests:180` (a regexp literal no longer throws).
+
+Results.
+
+| Check | Result |
+| --- | --- |
+| Regex row, 47 staging patterns, 20 inputs, `exec` with all spans (940 runs for each rep) | old 1,627 instructions per run; new 1,657 (+1.8%) |
+| Regex row, 19 Porter rules, 2,000 words (38,000 runs for each rep) | old 3,801; new 3,644 (-4.1%) |
+| Checksum of all spans on both rows | equal on both engines (after the fix of the row, see the merge note below) |
+| Compile, 66 patterns, per pattern | old 25,474; new about 25,764 (+1.1%) |
+| Compiled bytes for each pattern (66 patterns) | new 308 B (blob cell, rounded to 16); the design gives 916 B for the old engine |
+| `(a+)+b`, n = 28 | both end with a budget error; new stops at the cap of 50 M steps (about 120 ms); old about 140 to 250 ms |
+| test262 (`tools/js/test262_js2.sh -u`, checkout `e4fbf577`) | js2 passes 18,604 (baseline of `origin/main` at `29aee409`: 17,324); no test that passes on `origin/main` fails (per-test comparison of a fresh run of each tree); 1,280 tests pass that did not |
+| test262, `built-ins/RegExp` against the old engine | old passes 603, js2 723; 22 tests pass on the old engine and fail on js2 (below) |
+| test262, String regex methods | the String directories still have 127 tests that pass on the old engine and fail on js2 (the String methods with a RegExp argument, R3) |
+| `cargo test --locked -p bare-js2 --lib` | 523 pass (after the merge of `origin/main` at `29aee409`) |
+| `cargo test --locked -p bare-js-diff` | all pass (363 programs, no new difference) |
+| Startup, `script_run` with `var x = 1;` | base 1,941,522; new 1,956,532 (+0.77%); at `codegen-units=1`: 1,936,844 and 1,943,616 (+0.35%), so the rule passes |
+| Micro rows, default build (`interp_load`, base then new) | loopfn +0.005%, calls +0.002%, fib +0.001%, closures +0.004%, objects +0.009% |
+| Micro rows, `codegen-units=1` (information) | loopfn -0.35%, calls -1.21%, fib +0.26%, closures -0.79%, objects -0.96% |
+| Binary, `script_run`, release | 2,210,848 B (base) to 2,620,904 B (new): +410,056 B (+18.5%) |
+
+Merge with `origin/main` at `29aee409` (host adapter, generators, handler groups). Conflicts: `Cargo.toml` and `lib.rs` (the lists of the modules with `unsafe`: both `blob` and `api`), `interp_rt.rs` (`collect` marks `api` and `rx`), `object.rs` (`F_GEN` keeps 16384; `F_REGEXP` moved to 32768, because 8192 is for `F_PROMISE` of #800). The cost numbers above were measured again on the merged tree against `29aee409`: `interp_load` at loopfn 1,000,000, calls 1,000,000, fib 30, closures 200,000, objects 200,000; `tools/js/instr.sh`, 3 rounds, the load average was 10 to 19 (instruction counts only). The spread of the 3 rounds is under 0.001% for the micro rows and 0.13% for `script_run`. `regexp_row.rs` summed the whole output buffer of the new engine, with stale entries of earlier patterns. It now sums the spans of the pattern only, and the checksum is equal on both engines (the old row had been different, which the first version of this note did not say).
+
+The 22 tests of `built-ins/RegExp` that the old engine passes and js2 does not: 16 `lookBehind` tests and `lookahead-quantifier-match-groups` (they call `String.prototype.match`; R3), 4 tests that call a String method with a RegExp (R3), `prop-desc.js` (the lazy global, above) and `exec/u-captured-value.js`. The last one fails because of a bug that is not in this change: on the base, `'𝌆'[0]` is U+FFFD, not the lone surrogate.
+
+How the regex row moved. The first port was +26.6% (staging) and +14.7% (Porter). Three changes closed it: a countdown step counter instead of a counter with a block test on each step (the first-set skip charges once for the skipped run), a match on the opcode byte instead of decode then match, and no reset of the span buffer for each run.
+
+Not done in this change: String methods, the Symbol protocol, named groups in the result, `d`, and `\p{}` matching in the String methods (R3); the linear side (R2); the calibration of `FUEL_PER_BLOCK`.
+
+Miri (`cargo +nightly miri test`): the 3 `blob` tests, `regexp::tests::basics`, `a_one_byte_input_gives_the_same_spans_as_a_two_byte_input` and `regexp_rt_tests::last_index` pass. The full suite under Miri did not finish in 50 minutes here (`regexp::tests::compile_bounds` is slow); CI runs it.
+
+Not tested: Windows; the browser; peak RSS on `rust-book-search` and `substack-home` (no journey run); a V8 comparison of the new glue; the cost matrix of the whole repo; Miri on the whole js2 suite (the Blob and RegExp tests only; see the PR).
+
+Merge with `origin/main` at `8875c60a` (#800 promises, #804 Symbol, generators, host adapter). Conflicts: `interp.rs` (`call_get!`: one cold arm for a native getter, as for `Symbol.prototype.description` and the flag getters), `interp_rt.rs` (`collect` marks `rx` in the roots of the promise walk; `blob_of` and `sym_of` both stay), `test262-js2-subset.txt` (`built-ins/RegExp` and `built-ins/Promise`, `Symbol` both listed) and the baseline (regenerated). All `F_*` bits are distinct (`F_PROMISE` 8192, `F_GEN` 16384, `F_REGEXP` 32768; Symbol has no flag). Measured on the merged tree against `8875c60a`, archMachine, load average 11 to 16, instruction counts only (`tools/js/instr.sh`, minimum of 3). test262 (`tools/js/test262_js2.sh -u`, checkout `e4fbf577`, a fresh run of each tree): `origin/main` passes 17,941 and the merge passes 19,229; 0 tests that pass on main fail on the merge; 1,288 new passes. `cargo test --locked -p bare-js2 --lib`: 545 pass; `-p bare-js-diff --lib`: 2 pass. Micro rows, default build, base then new (`interp_load`, N minus N=0, loopfn 1,000,000, calls 1,000,000, fib 30, closures 200,000, objects 200,000): loopfn 266,500,200 to 266,500,274 (0.00%); calls 571,500,735 to 571,500,787 (0.00%); fib 1,090,130,726 to 1,090,134,014 (0.00%); closures 365,701,254 to 365,699,724 (0.00%); objects 143,393,037 to 143,392,696 (0.00%). Start-up (`script_run` on `var x = 1;`, 3 samples): base 1,967,848 / 1,969,396 / 1,969,520; new 1,979,990 / 1,980,137 / 1,978,521 (+0.54% on the minimum), so the row is over +0.5% at the default build. At `codegen-units=1` on both trees: base 1,962,603 / 1,962,867 / 1,962,473; new 1,972,167 / 1,972,951 / 1,972,767 (+0.49% on the minimum), so the rule passes, narrowly. Micro rows at `codegen-units=1` (information): loopfn -3.2%, calls -1.9%, fib +0.9%, closures -0.7%, objects -1.5%; `fib` is 0.00% at the default build, which is the build that the rule uses for the micro rows. Regex rows, new engine (the base has no RegExp): staging 1,658 per run (old engine 1,627, +1.9%), Porter 3,644 (old 3,801, -4.1%); the span checksums are equal on both engines.
+
 ## 2026-11-21: design of the js2 dispatch (`docs/design-js2-dispatch.md`)
 
 Design document for owner review. No engine code changed. Base `fd9c749b` (its `crates/js2` equals the head of #775). Machine: archMachine, load average 17, so instruction counts only.
@@ -17900,6 +17949,84 @@ The `codegen-units=1` rule was not needed: no row is over +0.5% at the default b
 Tests. Linux, debug: `cargo test --locked -p bare --lib -p bare-js -p bare-js-api`: 1718 (6 ignored), 1106 (1 ignored) and 32 pass (run before the merge of `origin/main`, which changes only tests and docs in the Windows fixes).
 
 Not tested: the Windows tests (only `cargo xwin check`, no VM run); `BARE_GC_STRESS=1` and `BARE_ALL_API=1` runs; `codegen-units=1`; RSS and wall time; the journeys and `tools/suite/run.py`; macOS; the `cfg` paths of other targets.
+## Cold arms of `Vm::run` (step 1 of the dispatch design, 2026-11-21)
+
+Design: [design-js2-dispatch.md](design-js2-dispatch.md), step 1 and "Decisions (owner, 2026-11-21)". Base: `a04014eb` (`origin/main`). Its `crates/js2` is the same as at `351f9b72`, where I built and measured main (`git diff 351f9b72 a04014eb -- crates/js2` is empty). Machine: archMachine, not idle (other sessions ran), so instruction counts only.
+
+What changed.
+
+1. `Vm::run` is a thin wrapper. The loop is `Vm::exec<M: Mode>`, built in two copies from one text, so the macros (`reload!`, `ret!`, `enter!`, `throw!`, ...) serve both. `exec::<Hot>` is the loop as before. `exec::<Cold>` runs the one instruction at `pc` of a cold op and returns `Flow::Go(ci, fp, pc)`, or `Flow::Done` when the run ends. `Mode::COLD` is a constant, so each copy keeps only its own `match`. The hot copy returns `Result<Value, Exit>`, as `run` did.
+2. 43 of the 48 cold arms moved, with their text unchanged, into the cold `match`. The hot `match` has one arm for them, `cold_ops!()`: no `_ =>` arm, so no bounds check before the jump tables. The hot copy calls them through `Vm::run_cold`, which is `#[cold]`: without it `loopfn` was +6.6% at the default build, with the same arms.
+3. After the call the hot loop does `(ci, fp, pc) = ...; reload!(); continue;`. So `regs`, `code`, `words` and `fb` are set again after a stack growth, a compile (`Op::Lazy`), a nested run, an enter or an unwind in the cold function (the rule of #773). `ret!` is unchanged: `fp` moves first, then `reload!`. `Op::Lazy` is a cold arm, unchanged. #785 is not touched.
+4. The op counts (`--features op-count`) tick in the hot copy only, so a cold op counts once.
+5. The rule of the split is a comment at `Vm::exec`: a new rare op goes into the cold `match` and `cold_ops!` by default.
+
+The split. Op counts (`op_count`, `--features op-count`; the micro rows as `eval_loopfn.js` and the other `eval_*.js`, `bundle_like.js`; and a quarter of the test262 files of the js2 subset, 8,000 files, 33.1 M dispatches). Cold ops that run in a loop: `InstanceOf` 1.0%, `ForInOpen` 0.7%, `CreateArgs` 0.7% of the dispatches of `bundle_like.js`; `Throw` 1.8% of `eval_throws.js`; `In` 12% of test262, from a few tests with a loop of 1 M turns. The micro rows (`loopfn`, `calls`, `fib`, `closures`, `objects`) run no cold op in their loops. `Lazy`, `DeclGlobal` and `SetFnName` run once for each function or declaration (1% of `eval_webpack.js`, a program of 5,600 ops).
+
+The cost of a cold op, measured: one op in a loop of 200,000 turns inside a function (script_run, net instructions for each turn, default build): `**` 366 to 490 (+124), `...` spread call 1,348 to 1,590 (+242, two cold ops), `super.m()` call in a class 3,350 to 3,805 (+455, several cold ops). That is about 110 to 125 instructions for each cold op. The hypothesis of the design (about 50) was low. The hot `match` gains 0.5 to 2 instructions for each dispatch of any op (loopfn 7 ops in a turn, calls about 10). Break-even is about 1 dispatch in 100. So `In`, `InstanceOf`, `ForInOpen`, `CreateArgs` and `Throw` stay in the hot `match` with `cold_path()` as before. The first build had all 48 cold: `instanceof` in a loop was +26% (485 to 611) and `bundle_like.js` +8% (estimate from the op counts, not run). With the 5 ops hot, each of the 5 loops below is 1% to 5% cheaper than main:
+
+| Loop (net instructions for each turn) | Main default | New default | Main cgu1 | New cgu1 |
+| --- | ---: | ---: | ---: | ---: |
+| `instanceof` | 485 | 481 | 487 | 484 |
+| `in` | 663 | 656 | 653 | 645 |
+| `arguments.length` call | 952 | 928 | 931 | 914 |
+| `for-in` of 2 keys | 1,391 | 1,379 | 1,402 | 1,382 |
+| `try { throw } catch` | 316 | 300 | 311 | 296 |
+
+Cost rows. `interp_load`, the method of `tools/js/instr.sh` (`perf stat -e instructions:u`, `GLIBC_TUNABLES=glibc.malloc.tcache_count=65535`, net = count(N) minus count(0)), N as in the design (1,000,000 for `loopfn` and `calls`, 30 for `fib`, 200,000 for `closures` and `objects`). 3 runs for each cell, the widest spread is 0.002 M. Main (`351f9b72`) and this tree, built in the same session from `git archive` copies with symbols kept (`CARGO_PROFILE_RELEASE_STRIP=false`), each with its own `CARGO_TARGET_DIR`. Lowest run, M instructions.
+
+| Row | Main default | New default | | Main cgu1 | New cgu1 | |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loopfn` | 272.50 | 278.50 | +2.2% | 282.50 | 277.50 | -1.8% |
+| `calls` | 586.50 | 577.50 | -1.5% | 579.50 | 556.50 | -4.0% |
+| `fib` | 1,103.59 | 1,088.79 | -1.3% | 1,064.55 | 1,057.82 | -0.6% |
+| `closures` | 366.90 | 364.50 | -0.7% | 365.96 | 356.76 | -2.5% |
+| `objects` | 141.53 | 139.19 | -1.7% | 143.53 | 141.39 | -1.5% |
+
+`loopfn` is over +0.5% at the default build. By the cost rule it passes: it is within +0.5% (it is -1.8%) at codegen-units=1. The spike `sx2` gave `loopfn` 269.50 at the default build. I built `sx2` again on this main and got the same 269.50, 565.50, 1,061.86, 358.10 and 135.99. At cgu1 this tree equals the spike (276.50, 555.50, 1,057.82, 356.75, 141.39 within 1 M, with the 5 hot ops back in). At the default build the hot loop of `loopfn` has the same ops as the spike with 9 more register moves for each turn (263 instructions for each turn, the spike 254; main 257). Hypothesis: it is register allocation by LLVM in a generic function, not a design cost. I tried the 3 shapes that I could think of (a wider `Flow` return type: `loopfn` 274.50 and `closures` +0.5%; without `#[cold]` on the call: 290.50; this shape). Each edit of `Vm::run` moves a row by a few percent, as the design says.
+
+Other programs (`script_run`, whole run with compile, M instructions, lowest of 3): `bundle_like.js` 123.42 to 121.63 (-1.5%) at default, 123.39 to 121.84 (-1.3%) at cgu1; `eval_webpack.js` 7.73 to 7.73 (+0.1%) and 7.75 to 7.76 (+0.1%); `eval_throws.js` 29.98 to 29.89 (-0.3%) and 29.87 to 29.68 (-0.6%).
+
+`callgrind` on `loopfn`, 20,000 turns, default build, `Vm::run` of main and the hot `Vm::exec` of this tree:
+
+| | Main | New |
+| --- | ---: | ---: |
+| Size of the hot function | 255,374 B | 158,710 B (-38%) |
+| Size of the cold function | none | 104,659 B |
+| Instructions in the hot function for each turn | 257 | 263 |
+| Stack ops (`[rsp+N]`) for each turn | 40 (25 reads, 15 writes) | 25 (15 reads, 10 writes) |
+
+At cgu1: size 286,606 B against 181,491 B; instructions for each turn 267 against 262; stack ops 40 against 29.
+
+Stability test. I edited the cold arm `GetSuper` in a copy of this tree: `ensure!(fp + 100_000)`, a `black_box` loop over all registers and a second `gate!()`. All 10 numbers (5 rows, 2 builds) equal the numbers of this tree to 0.002 M (default: 278.50, 577.50, 1,088.79, 364.50, 139.19; cgu1: 277.50, 556.50, 1,057.82, 356.76, 141.39). One edit of one cold arm is not a proof for all edits. I did not repeat the hot-arm edit of the design.
+
+Tests. `cargo test --locked -p bare-js2 --lib`: 458 pass (main 457; the new test is below). The same with `--features op-count`: 459 pass. `cargo test --locked -p bare-js-diff`: pass. New test `a_cold_op_that_grows_the_stack_or_unwinds_keeps_the_registers_of_the_caller`: recursion of 200 and 300 frames through `CallSuper`, `CallSpread` and a `ThrowConst` that unwinds 150 frames, with live registers read after each cold op. I did not run it against a hot loop with no `reload!()` after the call. test262 (`tools/js/test262_js2.sh -j 4`, checkout `e4fbf577`, runner of main and runner of this tree, one after the other): both write the same 31,819 lines in `new.txt` (`diff` empty): 17,324 pass, 2,067 fail, 12,428 skip. So no passing test fails and no new test passes. `cargo xwin build --locked -p bare-js2 --target x86_64-pc-windows-msvc` builds (dev profile).  Miri (`cargo +nightly miri test --locked -p bare-js2 --lib`, run in 9 parts because one process takes hours): the 38 `interp::tests` (37 pass, 1 is `#[ignore]`) and the two `script_tests` `a_cold_op_that_grows_the_stack_or_unwinds_keeps_the_registers_of_the_caller` and `a_stack_that_grows_in_a_callee_keeps_the_registers_of_the_callers` pass. Only the known integer-to-pointer cast warnings appear. The other modules of the crate were not run under Miri.  XWIN_PLACEHOLDER
+
+Not tested: the whole crate under Miri (only `interp::tests` and 2 `script_tests`); Windows run (only the build); arm64; wall time, branch misses (machine not idle); the hot-arm stability edit; a class-heavy loop with all `super` ops hot (the design's cost of the cold call is measured above only for single ops and for one `super.m()` call); the browser (js2 is not wired in); a differential run on the `bare-js-diff` corpus beyond its tests.
+
+### Cold arms of `Vm::run`: merge with main at `8875c60a` (2026-11-21)
+
+After the merge with main (#801 generators, #800 promises, #804 Symbol) the cost rule failed. The row that failed was `fib`: +0.86% at the default build and +2.66% at `codegen-units=1`. (`objects` passed on this main.) The hot loop (`Vm::exec::<Hot>`) was 160,347 B, as before the merge.
+
+Cause. Main added two rare paths inside the loop. Both continue the loop after the rare work: the `next`, `return` or `throw` of a generator in `native_call!` (`gen_resume`, then `reload!()` and `continue`), and a getter written in Rust in `call_get!` (`call_function`, then `continue`). Each is a new edge into the loop head, so the allocator must reconcile more register states there. With `callgrind` on `fib`, the extra instructions are register moves (`mov` +230 K of 7.6 M; spills fewer). Diagnostic builds (not kept): both paths replaced by an error: `loopfn` 290.5 to 278.5 (the figure of the tree before the merge). One path replaced: `loopfn` 285.5. No effect on `loopfn` (290.5 each): `cold_path()` in the generator branch, a constant `pc` at the start of the hot copy, the getter call moved into a `#[cold]` function. Why the allocator reacts to the edges is a hypothesis.
+
+Fix. The two paths now leave the hot loop and do not continue it. `Hot::Out` is `Flow` (as `Cold::Out`); both arms do `return M::go(ci, fp, pc)`; `Vm::run` loops over `exec::<Hot>` and starts it again at the `(ci, fp, pc)` that it returns. The start costs one prologue (the feedback lookup), only on these rare paths. The cold function already ended this way.
+
+`interp_load`, `tools/js/instr.sh` (3 runs, spread 0.002 M), net of N = 0, M instructions, archMachine (not idle). Main `8875c60a` and this tree, built in the same session with symbols kept, `CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1` for the cgu1 columns.
+
+| Row | Main default | Merge, no fix | Fixed | | Main cgu1 | Merge, no fix | Fixed | |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loopfn` | 266.50 | 290.50 | 280.50 | +5.2% | 282.50 | 281.50 | 280.50 | -0.7% |
+| `calls` | 571.50 | 586.50 | 586.50 | +2.6% | 578.50 | 570.50 | 562.50 | -2.8% |
+| `fib` | 1,090.13 | 1,099.56 | 1,100.90 | +1.0% | 1,061.86 | 1,090.13 | 1,048.40 | -1.3% |
+| `closures` | 365.70 | 366.90 | 370.10 | +1.2% | 365.96 | 368.56 | 360.56 | -1.5% |
+| `objects` | 143.39 | 141.39 | 143.73 | +0.2% | 143.33 | 146.59 | 142.59 | -0.5% |
+
+By the standing rule every row passes: `loopfn`, `calls`, `fib` and `closures` are over +0.5% at the default build and below main at `codegen-units=1`; `objects` is within +0.5% at both. The default build of `loopfn` is still above main: main is 266.5 here and was 272.5 at `351f9b72`, and this tree did not follow it down.
+
+Tests. `cargo test --locked -p bare-js2 --lib`: 512 pass; with `--features op-count`: 513.
+
+Not tested: `script_run` start-up and rows with many nested runs (each nested run now returns a `Flow`, 32 B, and not a `Result`); test262; Windows; Miri.
 
 ## 2026-11-21: what blocks `Dom<E: Engine>`, and PR 1 of the plan (S0.4 after Z)
 
@@ -18122,3 +18249,14 @@ A first version of the runner started a job through `call_held`, which read the 
 ### Not tested
 
 Windows and macOS; Miri (no new `unsafe`); the full cost matrix (see above); a real browser loop on js2 (`crates/bare` is not wired, step A3); `promise_react` with a subclass whose `constructor` is a getter that throws (no test); `Symbol.species` (P3); `between_jobs` that calls `set_host`.
+## Engine rewrite: status (index, from 2026-11-21)
+
+Order (owner, 2026-11-21): first the browser runs pages on js2 (`BARE_JS_EXEC=new`), then the daily journeys on js2 decide the work, then js2 becomes the default.
+
+| Phase | Goal | State |
+| ----- | ---- | ----- |
+| 1 | The typing page runs on `BARE_JS_EXEC=new`: S0.4 PR 4 to PR 6, `Dom<E: Engine>`, the js2 adapter gaps, the browser switch | in progress |
+| 2 | Every daily journey on js2. A script lists the failures; agents work only from that list | not started |
+| 3 | Measure, profile, make js2 the default (S5.3 to S5.5) | not started |
+
+New entries: [progress/](progress/README.md).
