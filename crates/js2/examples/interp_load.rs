@@ -8,7 +8,7 @@
 #![allow(dead_code)]
 mod prelude {
     pub use bare_js2::atoms::SharedAtoms;
-    pub use bare_js2::bytecode::{Asm, Code, Handler, Ins, Label, Op, Recipes, decode};
+    pub use bare_js2::bytecode::{Asm, Code, GK_GEN, Handler, Ins, Label, NO_REG, Op, Recipes, decode};
     pub use bare_js2::roots::RootMaps;
     pub use bare_js2::string::{Chars, Str};
     pub use bare_js2::verify::verify;

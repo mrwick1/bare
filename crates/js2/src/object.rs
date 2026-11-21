@@ -78,6 +78,10 @@ pub const F_WRAP: u32 = 4096;
 /// receiver and the holder). Each change of its shape, of its keys or of its prototype bumps `Shapes::proto_epoch`, which drops those
 /// entries. A cache entry that adds a property must not run on it (`SetField`), because that change is a shape change with no bump. Sticky.
 pub const F_PROTO: u32 = 1 << 23;
+/// Object header flag: a promise (`promise.rs`). Its slots 0 and 1 are the state and the value or the reactions; a shape change keeps the flag.
+pub const F_PROMISE: u32 = 8192;
+/// Object header flag: a generator object (`gen.rs`): its hidden slots hold the state and the saved frame.
+pub const F_GEN: u32 = 16384;
 /// `Elements` header flag: the record is sparse.
 const F_SPARSE: u32 = 1;
 /// A write at an index this far above the capacity of a dense record makes it sparse.
@@ -228,6 +232,13 @@ unsafe fn make_record(heap: &mut Heap, layout: Layout, flags: u32, cap: usize, f
         r.set_count(0);
     }
     Some(r)
+}
+
+/// The place of one slot for the objects of one tree shape: a one-entry inline cache that Rust code keeps ([`Obj::spot`], [`Obj::read_spot`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Spot {
+    shape: u32,
+    loc: u32,
 }
 
 /// An object cell. Copy it freely; see the type invariant in the module comment.
@@ -484,6 +495,52 @@ impl Obj {
         Some(o)
     }
 
+    /// A new promise: a cell of 32 bytes (`F_PROMISE`, two inline slots: the state `int(0)` and the value). `id` is a tree shape of
+    /// layout `Object` with inline capacity 2 (`promise.rs`), so the cell has the three words that `Obj::new` would give it.
+    #[inline]
+    pub fn new_promise(heap: &mut Heap, shapes: &Shapes, id: ShapeId) -> Option<Obj> {
+        debug_assert!(geometry(Layout::Object, shapes.get(id).inline()) == (CellHeader::SIZE, 3));
+        let p = heap.alloc(CellHeader::SIZE + 3 * WORD)?;
+        let o = Obj(p);
+        o.set_head(shapes.header(id).with_flags(F_PROMISE));
+        let v = p.as_ptr().wrapping_add(CellHeader::SIZE).cast::<Value>();
+        // SAFETY: the cell has the three words after its header.
+        unsafe {
+            v.write(Value::int(0));
+            v.add(1).write(Value::UNDEFINED);
+            v.add(2).write(Value::UNDEFINED);
+        }
+        Some(o)
+    }
+
+    /// Slot 0 or 1 of a promise (`Obj::new_promise`): inline in every shape of the cell, so there is no shape lookup.
+    #[inline]
+    pub fn pslot(self, i: usize) -> Value {
+        debug_assert!(i < 2 && self.has_flag(F_PROMISE));
+        // SAFETY: a promise has its first two slots in the inline words (the capacity of its shapes is 3), at these offsets.
+        unsafe { self.0.as_ptr().wrapping_add(CellHeader::SIZE + WORD * i).cast::<Value>().read() }
+    }
+
+    #[inline]
+    pub fn set_pslot(self, i: usize, v: Value) {
+        debug_assert!(i < 2 && self.has_flag(F_PROMISE));
+        // SAFETY: as in `pslot`.
+        unsafe { self.0.as_ptr().wrapping_add(CellHeader::SIZE + WORD * i).cast::<Value>().write(v) }
+    }
+
+    /// The place of slot `slot` for the objects that have the shape of `self` (see [`Spot`]); `None` for a dictionary shape.
+    pub fn spot(self, shapes: &Shapes, slot: u32) -> Option<Spot> {
+        let h = self.head();
+        (!shapes.of(h).is_dict()).then(|| Spot { shape: h.shape_id(), loc: self.loc(shapes, slot) })
+    }
+
+    /// The value at `spot` if the object has the shape that the spot was made for.
+    #[inline]
+    pub fn read_spot(self, spot: Spot) -> Option<Value> {
+        // SAFETY: a spot is made by `Obj::spot` from `Obj::loc`, for a tree shape with this id.
+        (self.head().shape_id() == spot.shape).then(|| unsafe { self.read_loc(spot.loc) })
+    }
+
     /// The shape of the object.
     pub fn shape(self, shapes: &Shapes) -> ShapeId {
         shapes.id_of(self.head())
@@ -535,6 +592,24 @@ impl Obj {
     pub fn set_slot(self, shapes: &Shapes, i: u32, v: Value) {
         // SAFETY: as in `slot`.
         unsafe { self.slot_ptr(shapes, i).write(v) }
+    }
+
+    /// Slot `i` of an object of layout `Object` whose slots are all inline (its shape has at most `inline` properties, so it has no overflow
+    /// record): one load, with no shape lookup. For the objects of `generator.rs`, whose shape is fixed. The caller made the object with a
+    /// shape that has the slot.
+    #[inline]
+    pub fn inline_slot(self, i: usize) -> Value {
+        debug_assert!(self.head().layout() == Layout::Object && self.head().flags() & F_OVER == 0);
+        // SAFETY: by the contract of this function the slot is an inline word of the cell.
+        unsafe { self.0.as_ptr().wrapping_add(CellHeader::SIZE + WORD * i).cast::<Value>().read() }
+    }
+
+    /// Write slot `i` (see [`Obj::inline_slot`]).
+    #[inline]
+    pub fn set_inline_slot(self, i: usize, v: Value) {
+        debug_assert!(self.head().layout() == Layout::Object && self.head().flags() & F_OVER == 0);
+        // SAFETY: as in `inline_slot`.
+        unsafe { self.0.as_ptr().wrapping_add(CellHeader::SIZE + WORD * i).cast::<Value>().write(v) }
     }
 
     /// Make room for `to` slots. The object keeps its shape: the caller changes it next. Nothing changes when this fails.
@@ -893,6 +968,14 @@ impl Ctx {
         assert!(i < r.cap(), "slot {i} of {}", r.cap());
         // SAFETY: as in `get`.
         unsafe { r.slots().add(i).write(v) }
+    }
+
+    /// Run `f` on the slots as a slice. A collection cannot run inside `f` (it has no realm).
+    #[inline]
+    pub fn with<T>(self, f: impl FnOnce(&mut [Value]) -> T) -> T {
+        let r = Rec(self.0);
+        // SAFETY: the record has `cap` initialized values after its header, and `f` gets the only reference to them for its duration.
+        f(unsafe { std::slice::from_raw_parts_mut(r.slots(), r.cap()) })
     }
 
     /// A copy of the context (`CopyCtx`). `None` when out of memory.

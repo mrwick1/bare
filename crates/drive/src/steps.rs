@@ -328,6 +328,20 @@ fn text_of(op: bool, v: String) -> Text {
 
 /// A locator at the start of `w`, and how many words it used.
 fn locator(w: &[Word], vars: &HashMap<String, String>) -> Result<(Locator, usize), String> {
+    let (loc, used) = locator_only(w, vars)?;
+    match w.get(used) {
+        Some(Word::Pair(k, false, v)) if k == "nth" => {
+            if matches!(loc, Locator::Ref(_)) {
+                return Err("nth does not apply to a ref: a ref names one element".into());
+            }
+            let n = expand(v, vars)?.parse().map_err(|_| format!("not a match number: nth={v} (use nth=0 for the first)"))?;
+            Ok((Locator::Nth(Box::new(loc), n), used + 1))
+        }
+        _ => Ok((loc, used)),
+    }
+}
+
+fn locator_only(w: &[Word], vars: &HashMap<String, String>) -> Result<(Locator, usize), String> {
     let Some(Word::Pair(k, op, v)) = w.first() else { return Err("a locator is missing (ref=, css=, role=, label=, text=, placeholder=)".into()) };
     let v = expand(v, vars)?;
     let t = text_of(*op, v.clone());

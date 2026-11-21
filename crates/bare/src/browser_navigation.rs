@@ -50,7 +50,7 @@ use crate::browser_navigation_url::{self as nu, Part, Rec, UErr};
 use bare_html::dom::NodeData;
 use bare_js::eval::{Error, Interp};
 use bare_js::value::{ObjId, Value};
-use bare_js_api::{Args, Engine as _, HostFn, Local};
+use bare_js_api::{Args, HostFn, Local};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::VecDeque;
 
@@ -294,7 +294,7 @@ impl Dom {
         }
         // The record leaves the entry while the graph is built, so no borrow of the navigation state is held.
         let Some(mut state) = self.nav.s.borrow_mut().entries[idx].state.take() else { return Ok(Value::Null) };
-        let v = st::materialize(self, it, &mut state);
+        let v = run_v(it, |s| st::materialize(self, s, &mut state));
         self.nav.s.borrow_mut().entries[idx].state = Some(state);
         let v = v?;
         if let Value::Object(_) = v {
@@ -689,10 +689,7 @@ fn push_replace<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, r
         _ => None,
     };
     let lim = d.nav.lim.get();
-    let state = {
-        let v = s.engine().raw(a.get(0).expect("checked"));
-        old(s, |it| st::serialize(d, it, v))?
-    };
+    let state = st::serialize(d, s, a.get(0).expect("checked"))?;
     // The URL is read after the state getters ran: they may have navigated.
     let cur = lift(s, d.cur_rec())?;
     let new = match &url {
@@ -781,14 +778,6 @@ fn hist_set_scroll<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>
 }
 
 // ------------------------------------------------------------------------------------------ install
-
-/// A function of the old form as a method (the two `URL` functions of `browser_web.rs` have not moved).
-fn def_fn(d: &Dom, it: &mut Interp<'_>, o: ObjId, name: &str, len: u32, h: H) -> R<ObjId> {
-    let f = d.add_fn(it, h, name, len, false)?;
-    let k = d.key(it, name)?;
-    it.define_data(o, k, Value::Object(f), true, false, true)?;
-    Ok(f)
-}
 
 macro_rules! parts {
     ($d:expr, $it:expr, $o:expr, $get:ident, $set:ident, [$(($name:expr, $part:expr)),*]) => {
@@ -901,8 +890,8 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         it.define_data(g, k, Value::Object(f), true, false, true)?;
         if name == "URL" {
             d.def_method_s(it, f, "canParse", 1, pr::url_can_parse)?;
-            def_fn(d, it, f, "createObjectURL", 1, crate::browser_web::create_object_url)?;
-            def_fn(d, it, f, "revokeObjectURL", 1, crate::browser_web::revoke_object_url)?;
+            d.def_method_s(it, f, "createObjectURL", 1, crate::browser_web::create_object_url)?;
+            d.def_method_s(it, f, "revokeObjectURL", 1, crate::browser_web::revoke_object_url)?;
         }
         fixed.push(f);
     }

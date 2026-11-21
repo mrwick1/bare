@@ -248,6 +248,7 @@ impl<'p> Interp<'p> {
         let a = match e {
             Error::Throw(v) => return bare_js_api::Error::Throw(self.api_push(v)),
             Error::Unsupported(u) => Abort::Unsupported(u.what),
+            Error::Limit(LimitKind::Host(name)) => Abort::Limit(name),
             Error::Limit(_) | Error::Heap(_) => Abort::Limit("a limit of the old engine"),
         };
         self.api.abort = Some(e);

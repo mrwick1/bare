@@ -76,7 +76,8 @@ fn run_old(code: &str, steps: u64) -> Out {
         let v = it.call(f, OldValue::Undefined, args).map_err(why)?;
         Ok(it.display(v))
     };
-    match it.run_script(code) {
+    // The host runs the jobs when the script ends: the stack is empty.
+    match it.run_script(code).and_then(|v| it.drain_microtasks().map(|_| v)) {
         Ok(_) => end(&mut it, "__finish", &[]).map_or_else(Out::Internal, Out::Done),
         Err(Error::Throw(v)) => end(&mut it, "__thrown", &[v]).map_or_else(Out::Internal, |t| threw(&t)),
         Err(Error::Unsupported(u)) => Out::Unsupported(u.what.to_string()),
@@ -99,7 +100,8 @@ fn run_new(code: &str, steps: u64) -> Out {
         let v = vm.call(f, NewValue::UNDEFINED, args).map_err(|e| format!("{name} {}", if matches!(e, Exit::Fuel) { "ran out of budget" } else { "threw" }))?;
         Ok(vm.display(v, false))
     };
-    match vm.run_main(0) {
+    // The host runs the jobs when the script ends: the stack is empty.
+    match vm.run_main(0).and_then(|v| vm.drain_microtasks(&mut |_, _| {}).map(|_| v).map_err(|_| Exit::Fuel)) {
         Ok(_) => end(&mut vm, "__finish", &[]).map_or_else(Out::Internal, Out::Done),
         // A function that holds an unbuilt construct fails at its first call (lazy compile): an Error of that text is "unsupported" too.
         Err(Exit::Throw(e)) => end(&mut vm, "__thrown", &[e]).map_or_else(Out::Internal, |t| match threw(&t) {

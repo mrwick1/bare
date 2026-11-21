@@ -18,7 +18,12 @@
 //!   never below 0, and at least the depth of a handler in each instruction that can throw in its range; no instruction reads a register
 //!   that some path has not written, and a root map names only registers that every path has written. Registers `0..nparams` are
 //!   written at the entry, and a handler writes its register. Unreachable instructions are not checked by the data flow.
-use crate::bytecode::{Code, ITER_REGS, Ins, Op, Recipes, STR_EMPTY, STR_SLOT, decode};
+//! - suspension (`GenInit`, `Yield`, `RetGen`): only code with `gen_kind` that is a constructor-less function has them, and it has no `Ret`
+//!   or `LoadNewTarget`. A save list is inside the pool, names registers that are written on every path to the suspension and that its
+//!   root map names (a collection before the copy must not free them), and is no longer than `gen_regs`. After the suspension only the registers of
+//!   the list, the sent value and the mode are written: the resume restores no other. A handler whose range holds a suspension is
+//!   entered with that smaller set too.
+use crate::bytecode::{Code, GK_NONE, ITER_REGS, Ins, NO_REG, Op, Recipes, STR_EMPTY, STR_SLOT, decode};
 
 type Bits = Vec<u64>;
 
@@ -88,8 +93,18 @@ pub fn verify(code: &Code) -> Result<(), String> {
         return Err("a recipe names no atom".into());
     }
     let mut site_uses = vec![0u32; code.sites.len()];
+    if code.gen_kind != GK_NONE && !code.noctor {
+        return Err("a generator that a script can construct".into());
+    }
     for &(pc, i, len) in &ins {
         let err = |what: &str| Err(format!("{pc:04} {}: {what}", i.op.name()));
+        let suspends = matches!(i.op, Op::GenInit | Op::Yield | Op::RetGen);
+        if suspends && code.gen_kind == GK_NONE {
+            return err("an op of generator code in a function that is not one");
+        }
+        if code.gen_kind != GK_NONE && matches!(i.op, Op::Ret | Op::RetUndef | Op::RetDerived | Op::LoadNewTarget) {
+            return err("not allowed in generator code (a generator returns with RetGen, and its frame keeps the generator where new.target is)");
+        }
         for k in 0..i.op.form().fields() {
             let v = i.field(k);
             let in_range = |count: usize| (v as usize) < count;
@@ -200,6 +215,24 @@ fn check_table(code: &Code, i: &Ins, pc: usize, start: &dyn Fn(i64) -> bool) -> 
                     }
                     q = (q + 1) & mask;
                 }
+            }
+        }
+        Op::GenInit | Op::Yield => {
+            let nregs = code.nregs as u32;
+            let l = code.save_list(i.b).ok_or("the save list is not inside the pool")?;
+            if l.regs.len() > code.gen_regs as usize {
+                return Err("the save list is longer than gen_regs");
+            }
+            if l.sent != NO_REG && l.sent >= nregs || l.mode != NO_REG && l.mode >= nregs || l.regs.iter().any(|r| *r >= nregs) {
+                return Err("the save list names a register out of range");
+            }
+            if l.sent != NO_REG && l.sent == l.mode || l.regs.iter().enumerate().any(|(k, r)| l.regs[..k].contains(r)) {
+                return Err("the save list names a register twice");
+            }
+            if let Some(map) = code.roots.find(pc as u32)
+                && l.regs.iter().any(|r| !map.slots().any(|m| m == *r as usize))
+            {
+                return Err("the save list names a register that the root map of the suspension does not");
             }
         }
         _ => {}
@@ -314,6 +347,28 @@ fn flow(code: &Code, ins: &[(usize, Ins, usize)], at: &[usize]) -> Result<(), St
             Op::PopCtx => depth.checked_sub(1).ok_or(format!("{pc:04}: PopCtx at depth 0"))?,
             _ => depth,
         };
+        // A suspension: a resume restores the registers of the list and writes the sent value and the mode, and nothing else.
+        if matches!(i.op, Op::GenInit | Op::Yield) {
+            let l = code.save_list(i.b).expect("a save list that the checks accepted");
+            if let Some(r) = l.regs.iter().find(|r| !has(&set, **r)) {
+                return err(format!("the save list names r{r}, which a path has not written"));
+            }
+            let mut kept = vec![0u64; words];
+            l.regs.iter().chain([&l.sent, &l.mode]).filter(|r| **r != NO_REG).for_each(|r| put(&mut kept, *r));
+            for (c, k) in set.iter_mut().zip(&kept) {
+                *c &= k;
+            }
+            for r in [l.sent, l.mode].into_iter().filter(|r| *r != NO_REG) {
+                put(&mut set, r);
+            }
+            for h in &code.handlers {
+                if (h.start as usize..h.end as usize).contains(&pc) {
+                    let mut hs = set.clone();
+                    put(&mut hs, h.reg as u32);
+                    meet(&mut state, &mut work, at[h.target as usize], k, h.depth as u32, &hs)?;
+                }
+            }
+        }
         // Writes.
         for f in 0..i.op.form().fields() {
             if i.op.letter(f) == 'w' {

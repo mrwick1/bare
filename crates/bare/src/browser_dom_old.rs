@@ -5,15 +5,11 @@
 use crate::browser::*;
 use crate::browser_dom::*;
 use crate::browser_scoped::*;
-use bare_html::dom::{NodeData, NodeId};
+use bare_html::dom::NodeId;
 use bare_js::eval::Interp;
 use bare_js::value::{ObjId, Value};
 
 type V = R<Value>;
-
-pub(crate) fn arg(a: &[Value], i: usize) -> Value {
-    a.get(i).copied().unwrap_or(Value::Undefined)
-}
 
 pub(crate) fn attr_set(d: &Dom, it: &mut Interp<'_>, n: NodeId, name: &str, value: &str) -> R<()> {
     let mut doc = d.doc.borrow_mut();
@@ -24,11 +20,6 @@ pub(crate) fn attr_set(d: &Dom, it: &mut Interp<'_>, n: NodeId, name: &str, valu
 }
 
 impl Dom {
-    pub(crate) fn el(&self, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
-        let n = self.nd(it, this)?;
-        if self.is_element(n) { Ok(n) } else { Err(it.type_error("Illegal invocation")) }
-    }
-
     /// Set the dirty value. A value that differs puts the caret at the end (HTML: setting `value`), and when that
     /// moves the selection of a text control, schedules its `selectionchange`. `it` is the JS caller that pays for
     /// the scans; the test driver has none (see `Dom::selection_after_value`).
@@ -59,14 +50,6 @@ impl Dom {
 }
 
 impl Dom {
-    /// `def_get` for a getter of the new form and a setter of the old form (the setter's file has not moved).
-    pub(crate) fn def_get_sh(&self, it: &mut Interp<'_>, target: ObjId, name: &str, get: HS, set: H) -> R<()> {
-        let key = self.key(it, name)?;
-        let g = self.add_fn_s_obj(it, get, &format!("get {name}"), 0, bare_js_api::HostFn::Method)?;
-        let s = self.add_fn(it, set, &format!("set {name}"), 1, false)?;
-        self.define_accessor(it, target, key, g, Some(s))
-    }
-
     /// `def_get` for functions of the new form.
     pub(crate) fn def_get_s(&self, it: &mut Interp<'_>, target: ObjId, name: &str, get: HS, set: Option<HS>) -> R<()> {
         let key = self.key(it, name)?;
@@ -117,80 +100,4 @@ pub(crate) fn new_fragment(d: &Dom, it: &mut Interp<'_>, proto: Option<ObjId>) -
         let p = proto.map(|p| d.obj_local(s, p));
         new_fragment_s(d, s, p)
     })
-}
-
-pub(crate) fn text_content(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = d.nd(it, this)?;
-    let s = {
-        let doc = d.doc.borrow();
-        match *doc.data(n) {
-            NodeData::Document | NodeData::Doctype(_) => return Ok(Value::Null),
-            NodeData::Text(sp) | NodeData::Comment(sp) => doc.text(sp).to_string(),
-            NodeData::Element { .. } | NodeData::ShadowRoot => {
-                let mut s = String::new();
-                let (mut cur, mut depth) = (n, 0);
-                while let Some((c, cd)) = next_in(&doc, n, cur, depth) {
-                    it.charge(1)?;
-                    (cur, depth) = (c, cd);
-                    if let NodeData::Text(sp) = *doc.data(c) {
-                        let text = doc.text(sp);
-                        if text.len() > d.lim.max_string_bytes.saturating_sub(s.len()) {
-                            return Err(d.lim("dom-string"));
-                        }
-                        s.push_str(text);
-                    }
-                }
-                s
-            }
-        }
-    };
-    d.js_str(it, &s)
-}
-
-pub(crate) fn set_text_content(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let n = d.nd(it, this)?;
-    let v = arg(a, 0);
-    let s = if matches!(v, Value::Null | Value::Undefined) { String::new() } else { d.string_arg(it, v)? };
-    match d.data(n) {
-        NodeData::Element { .. } | NodeData::ShadowRoot => {
-            let r = d.mo_group(Some(n), || {
-                let mut doc = d.doc.borrow_mut();
-                d.room(&doc, !s.is_empty() as usize, s.len())?;
-                // Charge before the tree changes: a step limit then leaves the old children, never half of them.
-                it.charge(doc.children(n).count() as u64)?;
-                d.iter_told_all(&doc, n);
-                while let Some(c) = doc.children(n).next() {
-                    doc.detach(c);
-                }
-                if !s.is_empty() {
-                    let t = doc.create_text(&s);
-                    doc.move_to(t, n, None);
-                }
-                Ok(())
-            });
-            d.iter_told_end();
-            r?;
-        }
-        NodeData::Text(_) | NodeData::Comment(_) => {
-            let mut doc = d.doc.borrow_mut();
-            d.room(&doc, 0, s.len())?;
-            d.range_set_data(&doc, n, &s);
-            doc.set_text(n, &s);
-        }
-        NodeData::Document | NodeData::Doctype(_) => {}
-    }
-    Ok(Value::Undefined)
-}
-
-
-pub(crate) fn remove_attribute(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let n = d.el(it, this)?;
-    let name = d.string_arg(it, arg(a, 0))?;
-    let mut doc = d.doc.borrow_mut();
-    it.charge(doc.attr_count(n) as u64 + 1)?;
-    let name = crate::browser_namespace::attr_key(&doc, n, &name);
-    if let Some(at) = doc.find_attr_qname(n, &name) {
-        doc.remove_attr_atom(n, at);
-    }
-    Ok(Value::Undefined)
 }

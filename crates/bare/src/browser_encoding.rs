@@ -12,7 +12,6 @@
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_js::eval::Interp;
-use bare_js::value::Value;
 use bare_js_api::{Args, Attrs, HostFn, Local, Str, Type};
 
 fn need<'s>(s: &mut Sc<'s, '_>, a: Args<'s>, f: &str) -> Res<'s, ()> {
@@ -24,20 +23,16 @@ fn need<'s>(s: &mut Sc<'s, '_>, a: Args<'s>, f: &str) -> Res<'s, ()> {
 
 fn structured_clone<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     need(s, a, "structuredClone")?;
-    let (value, options) = (raw_arg(s, a, 0).unwrap_or(Value::Undefined), raw_arg(s, a, 1).unwrap_or(Value::Undefined));
-    // `clone_with` and `transfer_list` take the old engine (the record format of `browser_navigation_state.rs`).
-    old_v(s, |it| {
-        let list = match options {
-            Value::Undefined | Value::Null => Vec::new(),
-            o @ Value::Object(_) => {
-                let k = d.key(it, "transfer")?;
-                let t = it.get_value(o, k)?;
-                d.transfer_list(it, t, None, "Failed to execute 'structuredClone' on 'Window'")?
-            }
-            _ => return Err(it.type_error("Failed to execute 'structuredClone' on 'Window': The provided value is not of type 'StructuredSerializeOptions'.")),
-        };
-        crate::browser_navigation_state::clone_with(d, it, value, &list).map(|r| r.0)
-    })
+    let (value, options) = (arg_s(s, a, 0), arg_s(s, a, 1));
+    let list = match s.type_of(options) {
+        Type::Undefined | Type::Null => Vec::new(),
+        Type::Object | Type::Function => {
+            let t = s.get_str(options, "transfer")?;
+            d.transfer_list(s, t, None, "Failed to execute 'structuredClone' on 'Window'")?
+        }
+        _ => return Err(s.type_error("Failed to execute 'structuredClone' on 'Window': The provided value is not of type 'StructuredSerializeOptions'.")),
+    };
+    crate::browser_navigation_state::clone_with(d, s, value, &list).map(|r| r.0)
 }
 
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

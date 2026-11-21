@@ -383,7 +383,7 @@ lazy_global!(lazy_observer, "IntersectionObserver", ensure, |d| state(d).borrow(
 lazy_global!(lazy_entry, "IntersectionObserverEntry", ensure, |d| state(d).borrow().protos.expect("made").ctors.1);
 
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    crate::browser_lazy::install(d, it, &[("IntersectionObserver", lazy_observer as H), ("IntersectionObserverEntry", lazy_entry)])
+    crate::browser_lazy::install(d, it, &[("IntersectionObserver", lazy_observer as HS), ("IntersectionObserverEntry", lazy_entry)])
 }
 
 // ---------------------------------------------------------------------------------------------- geometry

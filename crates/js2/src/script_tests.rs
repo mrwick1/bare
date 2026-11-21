@@ -476,7 +476,7 @@ fn number_boolean_math_and_global_functions() {
         ("var r = Math.PI.toFixed(5) + ',' + Math.E.toFixed(3) + ',' + Math.log(1) + ',' + Math.exp(0) + ',' + Math.log2(8) + ',' + Math.log10(1000) + ',' + Math.sin(0) + ',' + Math.cos(0) + ',' + Math.atan2(0, 1) + ',' + Math.fround(5.5);", "r", "3.14159,2.718,0,1,3,3,0,1,0,5.5"),
         ("var ok = true; for (var i = 0; i < 20; i++) { var x = Math.random(); if (!(x >= 0 && x < 1)) ok = false; } var r = ok + ',' + (Math.random() !== Math.random());", "r", "true,true"),
         ("var r = typeof globalThis + (globalThis === self) + (globalThis.Math === Math) + (this === globalThis) + typeof self.Object;", "r", "objecttruetruetruefunction"),
-        ("var r = typeof __def + typeof Symbol + typeof undefined;", "r", "undefinedundefinedundefined"),
+        ("var r = typeof __def + typeof Symbol + typeof undefined;", "r", "undefinedfunctionundefined"),
         ("var g = 1; var r = globalThis.g + ',' + self.parseInt('9') + ',' + (Number.NaN !== Number.NaN) + ',' + Number.EPSILON.toFixed(0) + ',' + (Number.MIN_VALUE > 0);", "r", "1,9,true,0,true"),
         ("var r = typeof new Number(1) + (new Number(5) + 1);", "r", "object6"),
         ("try { (5).toString(1); } catch (e) { var r = e.name; }", "r", "RangeError"),
@@ -942,6 +942,18 @@ fn a_stack_that_grows_in_a_callee_keeps_the_registers_of_the_callers() {
         ("function C(n) { this.n = n; this.k = n == 0 ? 0 : new C(n - 1).k + n; } var r = new C(200).k;", "r", "20100"),
         ("var o = { f: function (n, acc) { var t = this; if (n == 0) return acc; return t.f(n - 1, acc + n); } }; var r = o.f(200, 0);", "r", "20100"),
         ("function f(n, ...rest) { var x = n * 2; if (n == 0) return rest.length; var y = f(n - 1, n, n); return y + x - 2 * n; } var r = f(200);", "r", "2"),
+    ]);
+}
+
+/// The ops of the cold function (`Vm::exec::<Cold>`) enter frames, grow the stack and unwind. The hot loop sets `regs`, `code`, `words`
+/// and `fb` again when the cold function returns: each caller below has live registers that it reads after the cold op. The stack starts
+/// with 256 words, so the recursion grows it inside `CallSuper` and `CallSpread`, and `ThrowConst` unwinds 150 frames.
+#[test]
+fn a_cold_op_that_grows_the_stack_or_unwinds_keeps_the_registers_of_the_caller() {
+    check(&[
+        ("class A { constructor(n) { this.k = n; } } class B extends A { constructor(n) { var a = n, b = 2 * n; super(n); this.d = n == 0 ? 0 : new B(n - 1).d + a + b; } } var r = new B(200).d;", "r", "60300"),
+        ("function f(n) { var a = n; if (n == 0) return 0; var r = f(...[n - 1]); return r + a; } var r = f(300);", "r", "45150"),
+        ("function f(n) { var a = n; if (n == 0) { const c = 1; c = 2; return 0; } if (n == 150) { try { return f(n - 1); } catch (e) { return -a; } } return f(n - 1) + a; } var r = f(300);", "r", "33675"),
     ]);
 }
 

@@ -198,3 +198,34 @@ fn secrets_learned_during_a_step_are_redacted_in_its_failure() {
     assert!(!r.to_string().contains("learned-password-123"), "{r}");
     assert!(r.to_string().contains("[secret]"), "{r}");
 }
+
+#[test]
+fn a_locator_syntax_error_is_a_bad_argument() {
+    let mut s = Server::start();
+    open(&mut s);
+    let r = s.call("act", json!({"op": "click", "loc": "css=g.node[aria-label^=\"X\"] rect", "snapshot": false}));
+    let f = failure(&r);
+    assert_eq!(f["code"], "invalid_arguments", "{r}");
+    assert_eq!(f["next_action"], "correct_arguments", "{r}");
+    assert_eq!(f["input_dispatched"], "no", "{r}");
+    assert_eq!(r["structuredContent"]["action_status"], "not_started", "{r}");
+    let r = s.call("step", json!({"steps": "click css=a[x=\"y\"] b"}));
+    assert_eq!(failure(&r)["code"], "invalid_arguments", "{r}");
+}
+
+#[test]
+fn nth_picks_one_of_several_matches() {
+    let mut s = Server::start();
+    open(&mut s);
+    let r = s.call("act", json!({"op": "click", "loc": "role=button name=\"Save\"", "snapshot": false}));
+    assert!(failure(&r)["message"].as_str().unwrap().contains("nth="), "the duplicate failure does not name nth: {r}");
+    // The page covers its buttons with a dialog, so check the match, not a click.
+    let r = s.call("step", json!({"steps": "expect role=button name=\"Save\" nth=1 visible"}));
+    assert!(r["isError"] != true, "{r}");
+    let r = s.call("step", json!({"steps": "timeout 300\nexpect role=button name=\"Save\" nth=2 visible"}));
+    assert_eq!(r["structuredContent"]["failure"]["code"], "not_found", "{r}");
+    assert!(r.to_string().contains("nth=2"), "{r}");
+    let r = s.call("act", json!({"op": "click", "loc": "ref=e1 nth=0", "snapshot": false}));
+    assert!(failure(&r)["message"].as_str().unwrap().contains("nth does not apply to a ref"), "{r}");
+    assert_eq!(failure(&r)["code"], "invalid_arguments", "{r}");
+}
