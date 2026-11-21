@@ -189,7 +189,7 @@ impl Realm {
     /// completion value. A syntax error is a thrown `SyntaxError`.
     pub fn run_text(&mut self, src: &str) -> Result<(), RunError> {
         self.api.abort = None;
-        match self.script_code(src, Default::default()).and_then(|ci| self.run_code(ci)) {
+        match self.script_code(src, Default::default()).and_then(|ci| self.run_code(ci, false)) {
             Ok(_) => Ok(()),
             Err(STOP) => Err(RunError::Abort(self.api.abort.take().unwrap_or(Abort::Limit("the step budget")))),
             Err(e) => Err(RunError::Throw(e)),
