@@ -113,12 +113,9 @@ impl Realm {
 
     // ---- reading own properties ----
 
-    /// Is `o` an array (`length` is writable and not configurable) rather than an arguments object?
+    /// The attributes of the virtual length property of an array.
     fn array_like_length(&self, o: Obj) -> Option<u8> {
-        if !o.is_indexed() {
-            return None;
-        }
-        Some(if self.is_array(o) { if o.has_flag(F_LEN_RO) { 0 } else { A_W } } else { A_W | A_C })
+        self.is_array(o).then(|| if o.has_flag(F_LEN_RO) { 0 } else { A_W })
     }
 
     /// The own property `key` of `o`.
@@ -228,7 +225,7 @@ impl Realm {
             let units: Vec<Value> = (0..s.len()).map(|i| self.string(&i.to_string())).collect();
             out.splice(0..0, units);
         }
-        if !enumerable && (o.is_indexed() || wrapped.is_some()) {
+        if !enumerable && (self.is_array(o) || wrapped.is_some()) {
             out.push(self.k_length.value());
         }
         out.extend(names);

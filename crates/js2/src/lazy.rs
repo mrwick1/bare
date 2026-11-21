@@ -24,7 +24,7 @@
 //! the rest in table order after a listing. ECMA-262 does not fix this order (owner decision 2, 2026-11-20).
 use crate::builtins::{HIDDEN, NativeFn};
 use crate::interp_rt::{Key, Realm};
-use crate::object::{F_LAZYTAB, Obj, Spot};
+use crate::object::{F_LAZYTAB, F_ARGS, Obj, Spot};
 use crate::bi_object::Desc;
 use crate::string::{Chars, Str};
 use crate::value::Value;
@@ -335,7 +335,9 @@ impl Realm {
             self.args_iter = self.array_values();
         }
         let o = Obj::array(&mut self.heap, &self.shapes, self.s_args, args).expect("memory");
-        o.set_slot(&self.shapes, 0, self.args_iter);
+        o.set_slot(&self.shapes, 0, Realm::num(args.len() as f64));
+        o.set_slot(&self.shapes, 1, self.args_iter);
+        o.set_flag(F_ARGS);
         o.value()
     }
 
