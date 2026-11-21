@@ -6,7 +6,7 @@
 //! prototype ([`Realm::install_regexp`]). Known gap: `globalThis.RegExp`, `hasOwnProperty("RegExp")` and a list of the global
 //! properties do not see it before that first use.
 //!
-//! **The object.** A plain `Object` cell with kind `K_REGEXP` and four slots, in this order: the hidden `\0src` (the pattern
+//! **The object.** A plain `Object` cell with the kind `K_REGEXP` and four slots, in this order: the hidden `\0src` (the pattern
 //! string), the hidden `\0fl` (the flag bits of `Flags::bits`), the hidden `\0prog` (the [`Blob`] of the program, or `undefined`
 //! until the first match) and the own `lastIndex` (writable only). All objects start with one shape, `Rx::shape`. An object that a
 //! script gave another property has another shape, and the slots are found by name then.
