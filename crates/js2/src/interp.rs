@@ -105,6 +105,10 @@ pub trait LazyCompile {
     fn script(&mut self, _codes: &Codes, _src: &str, _mode: crate::compile::ScriptMode) -> Result<usize, String> {
         Err("this compiler cannot add a script".into())
     }
+    /// Compile `src` as a module (`compile_module`) and add it at the end of `codes`. Gives the index of its code and its facts.
+    fn module(&mut self, _codes: &Codes, _src: &str) -> Result<(usize, crate::compile::ModInfo), String> {
+        Err("this compiler cannot add a module".into())
+    }
 }
 
 /// Why `Vm::call` stopped.
@@ -166,7 +170,7 @@ macro_rules! cold_ops {
         Op::DefAccessor | Op::DefAccessorElem | Op::DefMethod | Op::DefMethodElem | Op::SetHome | Op::MakeClass | Op::MakeDerived |
         Op::SetFnName | Op::DefaultCtor | Op::SetFields | Op::NewPrivateName | Op::GetPrivate | Op::SetPrivate | Op::HasPrivate |
         Op::DefPrivate | Op::DefPrivateMethod | Op::DefPrivateAccessor | Op::GetSuper | Op::GetSuperElem | Op::SetSuper |
-        Op::SetSuperElem | Op::CallSuper | Op::CallSuperSpread | Op::RetDerived | Op::GenInit | Op::Yield | Op::RetGen | Op::IterClose
+        Op::SetSuperElem | Op::CallSuper | Op::CallSuperSpread | Op::RetDerived | Op::GenInit | Op::Yield | Op::RetGen | Op::IterClose | Op::YieldStarStep
     };
 }
 
@@ -1266,11 +1270,41 @@ impl Vm {
                         }
                         Op::IterClose => {
                             std::hint::cold_path();
-                            // A generator that the loop leaves early runs its `finally` blocks: `return()`.
+                            // The loop leaves early (`c` = 1: with a throw): `return()` of the iterator, so a generator runs its `finally` blocks.
                             if r!(a!() + 1).as_int().is_none() {
-                                tri!(realm.gen_nested(r!(a!()), crate::generator::MODE_RETURN, undef));
+                                tri!(realm.iter_close(r!(a!()), r!(a!() + 1), c!() != 0));
                             }
                             pc = next;
+                        }
+                        Op::YieldStarStep => {
+                            std::hint::cold_path();
+                            gate!();
+                            let base = $x as usize;
+                            let mode = r!(base + 4).as_int().expect("a mode");
+                            let sent = r!(base + 3);
+                            let (v, state) = if let Some(i) = r!(base + 1).as_int() {
+                                // An array has no `throw` and no `return`.
+                                let arr = Realm::obj(r!(base)).expect("an array");
+                                if mode == crate::generator::MODE_THROW {
+                                    err!(ErrKind::Type, "the iterator does not have a throw method")
+                                } else if mode == crate::generator::MODE_RETURN {
+                                    (sent, crate::iter::YS_RETURN)
+                                } else if (i as u32) < arr.len() {
+                                    r!(base + 1) = Value::int(i + 1);
+                                    (arr.get_element(i as u32).unwrap_or(undef), crate::iter::YS_YIELD)
+                                } else {
+                                    (undef, crate::iter::YS_DONE)
+                                }
+                            } else {
+                                tri!(realm.yield_star_step(r!(base), r!(base + 1), mode, sent))
+                            };
+                            r!(a!()) = v;
+                            if state == crate::iter::YS_YIELD {
+                                pc = nextx!();
+                            } else {
+                                r!(base + 4) = Value::int(if state == crate::iter::YS_RETURN { crate::generator::MODE_RETURN } else { crate::generator::MODE_NEXT });
+                                jump!(true, nextx!(), sbx!())
+                            }
                         }
                         Op::NewRegExp => {
                             std::hint::cold_path();
@@ -2148,7 +2182,10 @@ impl Vm {
                         } else if Realm::is_generator(it) {
                             undef
                         } else {
-                            err!(ErrKind::Type, "the value is not iterable (the iterator protocol is S2.7)")
+                            std::hint::cold_path();
+                            let (i, k) = tri!(realm.iter_open_generic(it));
+                            it = i;
+                            k
                         };
                         r!(a!()) = it;
                         r!(a!() + 1) = index;
@@ -2159,12 +2196,12 @@ impl Vm {
                         let base = $x as usize;
                         let Some(i) = r!(base + 1).as_int() else {
                             std::hint::cold_path();
-                            let (v, done) = tri!(realm.gen_nested(r!(base), crate::generator::MODE_NEXT, undef));
-                            if done {
-                                jump!(true, nextx!(), sbx!())
-                            } else {
-                                r!(a!()) = v;
-                                pc = nextx!();
+                            match tri!(realm.iter_step_any(r!(base), r!(base + 1))) {
+                                None => jump!(true, nextx!(), sbx!()),
+                                Some(v) => {
+                                    r!(a!()) = v;
+                                    pc = nextx!();
+                                }
                             }
                             continue;
                         };

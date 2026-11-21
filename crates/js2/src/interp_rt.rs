@@ -316,6 +316,8 @@ pub struct Realm {
     pub k_to_string: Str,
     /// The `Promise` built-ins, the job queue and the rejections (`promise.rs`).
     pub(crate) pr: crate::promise::Promises,
+    /// The module records and the `import()` calls that wait for the host (`module.rs`).
+    pub(crate) md: crate::module::Modules,
     pub string_proto: Obj,
     pub number_proto: Obj,
     pub boolean_proto: Obj,
@@ -477,6 +479,7 @@ impl Realm {
             k_value_of,
             k_to_string,
             pr,
+            md: Default::default(),
             string_proto,
             number_proto,
             boolean_proto,

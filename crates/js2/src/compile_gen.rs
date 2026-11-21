@@ -20,8 +20,8 @@
 //!
 //! A generator returns with `RetGen`, never with `Ret` (the verifier checks it). `new.target` is `undefined` in a generator.
 use super::*;
-use crate::bytecode::NO_REG;
-use crate::generator::{MODE_NEXT, MODE_THROW};
+use crate::bytecode::{ITER_REGS, NO_REG, YS_REGS};
+use crate::generator::{MODE_NEXT, MODE_RETURN, MODE_THROW};
 
 impl<'a> Fc<'a> {
     /// The registers below `below` that hold a value now, in increasing order.
@@ -63,9 +63,7 @@ impl<'a> Fc<'a> {
     /// `yield arg` and `yield* arg` into `dst`.
     pub(crate) fn yield_expr(&mut self, arg: Option<ExprId>, delegate: bool, dst: u32) -> CR {
         if delegate {
-            self.unsup("yield*");
-            self.op(Op::LoadUndef, dst, 0, 0);
-            return Ok(());
+            return self.yield_star(arg.expect("yield* has an operand"), dst);
         }
         let m0 = self.mark();
         let v = match arg {
@@ -102,6 +100,49 @@ impl<'a> Fc<'a> {
         if s != dst {
             self.op(Op::Mov, dst, s, 0);
         }
+        self.free(m0);
+        Ok(())
+    }
+
+    /// `yield* arg` into `dst` (see the module comment). The window holds the iterator record, the sent value and the mode; each turn of the
+    /// loop sends them on with `YieldStarStep`, which yields what the inner iterator gave and ends with its value (or its return).
+    fn yield_star(&mut self, arg: ExprId, dst: u32) -> CR {
+        let m0 = self.mark();
+        let w = self.window(YS_REGS);
+        let v = self.any(arg)?;
+        self.op(Op::IterOpen, w, v, 0);
+        // `v` is dead now, and a resume does not bring it back.
+        self.free(w + YS_REGS);
+        (0..ITER_REGS).for_each(|i| self.set_live(w + i));
+        let (sent, mode) = (w + ITER_REGS, w + ITER_REGS + 1);
+        self.op(Op::LoadUndef, sent, 0, 0);
+        self.op(Op::LoadI, mode, MODE_NEXT as u32, 0);
+        self.set_live(sent);
+        self.set_live(mode);
+        let out = self.alloc();
+        let (head, done, ret, end) = (self.label(), self.label(), self.label(), self.label());
+        self.bind(head);
+        self.mark_used(head);
+        self.jmp_rx(Op::YieldStarStep, out, w, done);
+        self.set_live(out);
+        if self.dead {
+            self.free(m0);
+            return Ok(());
+        }
+        let t = self.save_list(sent, mode, sent);
+        self.op(Op::Yield, out, t, 0);
+        // A resume does not bring `out` back: it holds no value at the back edge.
+        Self::bit(&mut self.live, out, false);
+        self.jmp_back(head);
+        self.bind(done);
+        self.set_live(out);
+        self.jmp_rx(Op::JSEqI, mode, MODE_RETURN as u32, ret);
+        self.op(Op::Mov, dst, out, 0);
+        self.jmp(end);
+        self.bind(ret);
+        self.unwind(0)?;
+        self.op(Op::RetGen, out, 0, 0);
+        self.bind(end);
         self.free(m0);
         Ok(())
     }
