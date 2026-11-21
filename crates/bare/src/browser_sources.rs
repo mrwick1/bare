@@ -121,6 +121,29 @@ pub(crate) fn visit(t: &mut Tracer<'_, Value>, v: Value) {
     t.visit(&bare_js_api::Traced::from_raw(v));
 }
 
+/// The roots of the page, as the trace of the window owner (`Dom::trace_roots`): a list that takes raw values. A subsystem keeps
+/// its prototypes, constructors and queued callbacks in raw tables and adds them here, as it added them to the roots list of the old host.
+pub(crate) struct Roots<'a, 'b>(pub &'a mut Tracer<'b, Value>);
+
+impl Roots<'_, '_> {
+    #[inline]
+    pub(crate) fn push(&mut self, v: Value) {
+        visit(self.0, v);
+    }
+
+    #[inline]
+    pub(crate) fn extend<I: IntoIterator<Item = Value>>(&mut self, it: I) {
+        for v in it {
+            self.push(v);
+        }
+    }
+
+    #[inline]
+    pub(crate) fn extend_from_slice(&mut self, s: &[Value]) {
+        self.extend(s.iter().copied());
+    }
+}
+
 /// `Host::trace` for the host-filled object `o` with host key `key`.
 pub(crate) fn trace(d: &Dom, key: u32, o: ObjId, t: &mut Tracer<'_, Value>) {
     match Source::of(key) {

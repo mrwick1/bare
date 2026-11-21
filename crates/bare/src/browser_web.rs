@@ -41,6 +41,7 @@
 //!
 //! GC: the made objects are roots. A form traces its Blobs and an iterator traces its form. Side tables are pruned at `collect`.
 
+use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_js::eval::{Error, Interp};
@@ -140,7 +141,7 @@ pub(crate) struct WebHost {
     pub(crate) boundary: RefCell<Option<String>>,
 }
 
-pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
+pub(crate) fn roots(d: &Dom, out: &mut Roots<'_, '_>) {
     let s = d.web.s.borrow();
     out.extend(s.urls.values().map(|&o| Value::Object(o)));
     if let Some(m) = s.made {
@@ -148,7 +149,8 @@ pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
     }
 }
 
-pub(crate) fn trace(d: &Dom, owner: ObjId, out: &mut Vec<Value>) {
+pub(crate) fn trace(d: &Dom, owner: ObjId, t: &mut bare_js_api::Tracer<'_, Value>) {
+    let out = &mut Roots(t);
     let s = d.web.s.borrow();
     if let Some(f) = s.forms.get(&owner) {
         out.extend(f.list.iter().filter_map(|(_, e)| if let Ent::B(o) = e { Some(Value::Object(*o)) } else { None }));
@@ -157,11 +159,21 @@ pub(crate) fn trace(d: &Dom, owner: ObjId, out: &mut Vec<Value>) {
     }
 }
 
-pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
+/// The entries of the blob, form and iterator tables (tests).
+#[cfg(test)]
+pub(crate) fn entries(d: &Dom) -> [usize; 3] {
+    let s = d.web.s.borrow();
+    [s.blobs.len(), s.forms.len(), s.iters.len()]
+}
+
+/// The `Blob`, `FormData` and iterator objects `dead` were collected: drop their entries.
+pub(crate) fn forget(d: &Dom, dead: &[ObjId]) {
     let mut s = d.web.s.borrow_mut();
-    s.blobs.retain(|&o, _| live(o));
-    s.forms.retain(|&o, _| live(o));
-    s.iters.retain(|&o, _| live(o));
+    for o in dead {
+        s.blobs.remove(o);
+        s.forms.remove(o);
+        s.iters.remove(o);
+    }
     d.web.active.set(!s.forms.is_empty() || !s.iters.is_empty());
     s.bytes = s.blobs.values().map(|b| b.bytes.len()).sum::<usize>() + s.forms.values().map(|f| f.bytes).sum::<usize>();
 }
@@ -842,6 +854,7 @@ fn new_blob_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, proto: ObjId, b: BlobData) -> Res
     w.bytes += n;
     w.blobs.insert(o, b);
     drop(w);
+    d.own_obj(s.engine(), o, crate::browser::Owner::Web(o));
     Ok(d.obj_local(s, o))
 }
 
@@ -917,6 +930,7 @@ pub(crate) fn form_from(d: &Dom, it: &mut Interp<'_>, bytes: &[u8], ct: &str) ->
     room(d, 0)?;
     let o = d.obj(it, m.form_p)?;
     d.web.s.borrow_mut().forms.insert(o, Form::default());
+    d.own_obj(it, o, crate::browser::Owner::Web(o));
     d.web.active.set(true);
     for (n, file, data) in list {
         let e = match file {
@@ -1153,6 +1167,7 @@ pub(crate) fn form_from_entries(d: &Dom, it: &mut Interp<'_>, list: Vec<(String,
 fn fill_form<'s>(d: &Dom, s: &mut Sc<'s, '_>, proto: ObjId, list: Vec<(String, Option<Ent>)>) -> Res<'s, Local<'s>> {
     let o = d.obj_s(s, proto)?;
     d.web.s.borrow_mut().forms.insert(o, Form::default());
+    d.own_obj(s.engine(), o, crate::browser::Owner::Web(o));
     d.web.active.set(true);
     for (n, v) in list {
         let e = match v {
@@ -1389,6 +1404,7 @@ fn make_iter<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, kind: u8) -> Res<
     let proto = d.web.s.borrow().made.expect("made").iter_p;
     let o = d.obj_s(s, proto)?;
     d.web.s.borrow_mut().iters.insert(o, IterObj { form, idx: 0, kind });
+    d.own_obj(s.engine(), o, crate::browser::Owner::Web(o));
     d.web.active.set(true);
     Ok(d.obj_local(s, o))
 }

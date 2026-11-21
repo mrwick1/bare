@@ -24,6 +24,7 @@
 //! Handles are numbers from 1, never reused. Gates: none. Bound: `animation-frame-callbacks` (live callbacks).
 //! The two globals are plain data properties of `window`. `requestIdleCallback` is in `browser_idle.rs`. Not here: `document.timeline`, `Animation`.
 
+use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_js::eval::{Error, Interp};
@@ -95,7 +96,7 @@ pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
 }
 
 impl Dom {
-    pub(crate) fn frame_roots(&self, out: &mut Vec<Value>) {
+    pub(crate) fn frame_roots(&self, out: &mut Roots<'_, '_>) {
         out.extend(self.frame.cbs.borrow().values().copied());
     }
 

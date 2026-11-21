@@ -448,7 +448,7 @@ pub(crate) fn event_target_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _
     let proto = s.proto_from_new_target(default)?;
     let proto = obj_id(s, proto).expect("a prototype is an object");
     let o = d.obj_s(s, proto)?;
-    d.st.borrow_mut().by_obj.insert(o, Target::Obj(o));
+    d.st.borrow_mut().add_target(s.engine(), o, crate::browser::Owner::Target(Target::Obj(o)));
     Ok(d.obj_local(s, o))
 }
 

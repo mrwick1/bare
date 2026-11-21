@@ -76,6 +76,7 @@
 //! with its queued messages, at the next `collect`. A parked port (`park_port`) lives only between the walk and `make_ports` of one call. Ids of ports are generation checked, so a reused slot never
 //! finds the state of an old port. Events are pruned by `collect` only: collect between pumps in a long run.
 
+use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_navigation_state::Transfer;
 use crate::browser_port_hub::Wire;
@@ -416,7 +417,7 @@ impl Dom {
     }
 
     /// The roots of the scheduler: prototypes and the ports with queued tasks. Timers hold persistent handles, which the engine roots.
-    pub(crate) fn sched_roots(&self, out: &mut Vec<Value>) {
+    pub(crate) fn sched_roots(&self, out: &mut Roots<'_, '_>) {
         let s = self.sched.borrow();
         if let Some(p) = s.protos {
             out.extend([p.port, p.channel, p.event, p.perf].map(Value::Object));
@@ -426,38 +427,59 @@ impl Dom {
         out.extend(s.tasks.values().filter_map(|t| if let Task::AbortTimeout(o) | Task::Worker(o) = t { Some(Value::Object(*o)) } else { None }));
     }
 
-    pub(crate) fn sched_trace(&self, owner: ObjId, out: &mut Vec<Value>) {
+    /// The references of the port `o`: its peer, and the data, ports and senders of its queued messages.
+    pub(crate) fn sched_trace_port(&self, o: ObjId, t: &mut bare_js_api::Tracer<'_, Value>) {
         let s = self.sched.borrow();
-        if let Some(p) = s.ports.get(&owner) {
-            out.extend(p.peer.map(Value::Object));
-            for m in &p.inbox {
-                out.push(m.data);
-                out.extend(m.ports.iter().map(|&o| Value::Object(o)));
-                out.extend(m.from.iter().filter_map(|f| f.source).map(Value::Object));
-            }
-        } else if let Some(e) = s.msg_events.get(&owner) {
-            out.push(e.data);
-            out.extend(e.moved.iter().map(|&o| Value::Object(o)));
-            out.extend(e.ports);
-            out.extend(e.from.iter().filter_map(|f| f.source).map(Value::Object));
+        let Some(p) = s.ports.get(&o) else { return };
+        let out = &mut Roots(t);
+        out.extend(p.peer.map(Value::Object));
+        for m in &p.inbox {
+            out.push(m.data);
+            out.extend(m.ports.iter().map(|&o| Value::Object(o)));
+            out.extend(m.from.iter().filter_map(|f| f.source).map(Value::Object));
         }
     }
 
-    pub(crate) fn sched_prune(&self, live: &dyn Fn(ObjId) -> bool) {
+    /// The references of the event `o`, if it is a `MessageEvent`: its data, its new ports and its sender.
+    pub(crate) fn sched_trace_event(&self, o: ObjId, t: &mut bare_js_api::Tracer<'_, Value>) {
+        let s = self.sched.borrow();
+        if s.msg_events.is_empty() {
+            return;
+        }
+        let Some(e) = s.msg_events.get(&o) else { return };
+        let out = &mut Roots(t);
+        out.push(e.data);
+        out.extend(e.moved.iter().map(|&o| Value::Object(o)));
+        out.extend(e.ports);
+        out.extend(e.from.iter().filter_map(|f| f.source).map(Value::Object));
+    }
+
+    /// The port `o` is dead: drop its entry and its end. Call `sched_after_ports` once after the dead ports.
+    pub(crate) fn sched_forget_port(&self, o: ObjId) {
+        let mut s = self.sched.borrow_mut();
+        let Some(p) = s.ports.remove(&o) else { return };
+        if let Some(e) = p.me
+            && s.ends.get(&e) == Some(&o)
+        {
+            s.ends.remove(&e);
+            if let Some(h) = self.kids.hub() {
+                h.remove_end(e);
+            }
+        }
+    }
+
+    /// The `MessageEvent` entry of the dead event `o`.
+    pub(crate) fn sched_forget_event(&self, o: ObjId) {
+        let mut s = self.sched.borrow_mut();
+        if !s.msg_events.is_empty() {
+            s.msg_events.remove(&o);
+        }
+    }
+
+    /// Ports died: the delivery tasks of dead ports go, and the totals are made again.
+    pub(crate) fn sched_after_ports(&self) {
         let mut s = self.sched.borrow_mut();
         let s = &mut *s;
-        if !s.ends.is_empty() {
-            let hub = self.kids.hub();
-            s.ends.retain(|&e, &mut o| {
-                let keep = live(o);
-                if !keep && let Some(h) = &hub {
-                    h.remove_end(e);
-                }
-                keep
-            });
-        }
-        s.ports.retain(|&o, _| live(o));
-        s.msg_events.retain(|&o, _| live(o));
         let ports = &s.ports;
         s.tasks.retain(|_, t| match t {
             Task::Deliver(o) => ports.contains_key(o),
@@ -1116,7 +1138,7 @@ impl Dom {
                     }
                 }
             }
-            st.by_obj.insert(new, Target::Obj(new));
+            st.add_target(s.engine(), new, Owner::Port(new));
             if let Some(e) = rec.me {
                 sc.ends.insert(e, new);
             }
@@ -1254,7 +1276,7 @@ fn message_channel_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'
     let mut st = d.st.borrow_mut();
     let mut sc = d.sched.borrow_mut();
     for (me, peer) in [(p1, p2), (p2, p1)] {
-        st.by_obj.insert(me, Target::Obj(me));
+        st.add_target(s.engine(), me, Owner::Port(me));
         sc.ports.insert(me, Port::new(Some(peer), false));
     }
     Ok(lc)
@@ -1362,6 +1384,7 @@ impl Dom {
         }
         let page = self.kids.page.get();
         {
+            let it = s.engine();
             let mut st = self.st.borrow_mut();
             let mut s = self.sched.borrow_mut();
             for (&(me, remote), &new) in ends.iter().zip(&news) {
@@ -1372,7 +1395,7 @@ impl Dom {
                     hub.set_owner(me, Some(page));
                     s.ends.insert(me, new);
                 }
-                st.by_obj.insert(new, Target::Obj(new));
+                st.add_target(it, new, Owner::Port(new));
                 s.ports.insert(new, p);
             }
         }
@@ -1437,7 +1460,7 @@ impl Dom {
         }
         let protos = self.sched.borrow().protos.expect("installed");
         let p = self.obj(it, protos.port)?;
-        self.st.borrow_mut().by_obj.insert(p, Target::Obj(p));
+        self.st.borrow_mut().add_target(it, p, Owner::Port(p));
         self.sched.borrow_mut().ports.insert(p, Port::new(None, false));
         Ok(p)
     }
