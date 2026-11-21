@@ -20,7 +20,7 @@
 //!
 //! A generator returns with `RetGen`, never with `Ret` (the verifier checks it). `new.target` is `undefined` in a generator.
 use super::*;
-use crate::bytecode::{ITER_REGS, NO_REG, YS_REGS};
+use crate::bytecode::{GK_GEN, GK_NONE, ITER_REGS, NO_REG, YS_REGS};
 use crate::generator::{MODE_NEXT, MODE_RETURN, MODE_THROW};
 
 impl<'a> Fc<'a> {
@@ -42,7 +42,7 @@ impl<'a> Fc<'a> {
 
     /// Put a save list in the pool: the live registers below `below`, and where a resume writes the sent value and the mode. Gives its
     /// offset in `Code::tables`.
-    fn save_list(&mut self, sent: u32, mode: u32, below: u32) -> u32 {
+    pub(crate) fn save_list(&mut self, sent: u32, mode: u32, below: u32) -> u32 {
         let at = self.tables.len() as u32;
         let regs = self.live_below(below);
         self.gen_regs = self.gen_regs.max(regs.len() as u16);
@@ -149,12 +149,21 @@ impl<'a> Fc<'a> {
 
     /// The return of the function with the value in `r`: `RetGen` in a generator, else `Ret`.
     pub(crate) fn ret_op(&mut self, r: u32) {
-        self.op(if self.gen_kind != 0 { Op::RetGen } else { Op::Ret }, r, 0, 0);
+        self.op(
+            match self.gen_kind {
+                GK_NONE => Op::Ret,
+                GK_GEN => Op::RetGen,
+                _ => Op::RetAsync,
+            },
+            r,
+            0,
+            0,
+        );
     }
 
     /// The return of `undefined`.
     pub(crate) fn ret_undef(&mut self) {
-        if self.gen_kind == 0 {
+        if self.gen_kind == GK_NONE {
             self.op(Op::RetUndef, 0, 0, 0);
             return;
         }
@@ -162,7 +171,7 @@ impl<'a> Fc<'a> {
         let t = self.alloc();
         self.op(Op::LoadUndef, t, 0, 0);
         self.set_live(t);
-        self.op(Op::RetGen, t, 0, 0);
+        self.ret_op(t);
         self.free(m);
     }
 

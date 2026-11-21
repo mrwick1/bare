@@ -475,7 +475,7 @@ impl Realm {
     }
 
     /// `PerformPromiseThen`: `derived` is a promise, a capability record or `undefined`.
-    fn perform_then(&mut self, p: Obj, on_ok: Value, on_err: Value, derived: Value) -> R<()> {
+    pub(crate) fn perform_then(&mut self, p: Obj, on_ok: Value, on_err: Value, derived: Value) -> R<()> {
         let word = self.state_word(p);
         match word & 3 {
             PENDING => {
@@ -767,6 +767,10 @@ impl Realm {
         match kind {
             K_FULFIL | K_REJECT => {
                 let (h, v, d) = (r.get(A), r.get(B), r.get(D));
+                // The handler of an `await` is the activation of the async function (it has no derived promise): resume it (`reenter.rs`).
+                if d.is_undefined() && Realm::is_generator(h) {
+                    return self.async_resume(h, v, kind == K_REJECT);
+                }
                 let res = if h.is_undefined() { if kind == K_FULFIL { Ok(v) } else { Err(v) } } else { self.job_call(h, Value::UNDEFINED, &[v]) };
                 match res {
                     Ok(v) => self.settle_derived(d, v, false, on_error),

@@ -39,6 +39,7 @@ built-ins/Promise
 built-ins/Symbol
 built-ins/GeneratorPrototype
 built-ins/GeneratorFunction
+built-ins/AsyncFunction
 built-ins/Map
 built-ins/Set
 built-ins/WeakMap

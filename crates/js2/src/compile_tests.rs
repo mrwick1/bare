@@ -1371,7 +1371,6 @@ fn every_construct_of_a_class_passes_the_verifier() {
 #[test]
 fn constructs_the_compiler_does_not_build_are_listed() {
     let cases = [
-        ("return async function() {};", "an async function"),
         ("return async function*() {};", "an async generator"),
         ("with (a) { b; }", "with"),
         ("eval('1');", "direct eval or with"),
