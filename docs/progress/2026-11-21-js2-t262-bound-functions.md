@@ -22,3 +22,5 @@ User-mode instruction counts from `perf stat` on archMachine. Each cell is the m
 ## Tests
 
 The constructor regression failed before the fix. An array callback with a throwing metadata getter returned 7 on the base, threw after the initial fix, and returned 7 after the prelude fix. The 16 tests in `builtins_more_tests`, the generated prelude facts check and the js2 typecheck pass. Windows, Miri and browser journeys were not run locally.
+
+The differential corpus now agrees on `corpus:error_gaps`. The known-difference list no longer has that entry.
