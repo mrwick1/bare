@@ -1,6 +1,6 @@
 # 2026-11-21: js2 script API: completion value, eval, handlers, iterators
 
-Branch `t3/js2-script-eval-iterators`, base `origin/main` `8875c60a` (code is the same as `52b560d4`, which adds docs only). Design: `docs/design-js2-host-api.md` section 11.
+Branch `t3/js2-script-eval-iterators`, measured against `52b560d4`; rebased on `c68ee0ef` (adds RegExp) before the PR. Design: `docs/design-js2-host-api.md` section 11.
 
 ## What changed
 
@@ -14,10 +14,10 @@ Branch `t3/js2-script-eval-iterators`, base `origin/main` `8875c60a` (code is th
 ## Checks
 
 - `cargo test --locked -p bare-js-api --features suite --test engines`: 68 pass (old, old_stress, new, new_stress).
-- `cargo test --locked -p bare-js2 -p bare-js-api --lib`: pass (js2: 517 tests, 6 are new, in `api_script_tests.rs`).
-- test262 js2 subset, `tools/js/test262_js2.sh -j4`, this tree against `8875c60a`: both 17,941 pass, 2,599 fail, 11,630 skip. 0 tests pass on main and fail here.
+- `cargo test --locked -p bare-js2 -p bare-js-api --lib`: pass (js2: 551 tests after the rebase on `c68ee0ef`, 6 are new, in `api_script_tests.rs`; the test262 and cost numbers were taken before that rebase).
+- test262 js2 subset, `tools/js/test262_js2.sh -j4`, this tree against `52b560d4`: both 17,941 pass, 2,599 fail, 11,630 skip. 0 tests pass on main and fail here.
 - Completion value on test262 (not in the committed tree): the test runner of `crates/js-diff` has no global `eval`, so the 72 `cptn-*` tests cannot run on js2 today. With a 6-line patch to `run_new` that defines `eval` from `Engine::eval_function` (kept in `/data/bare-tmp/r21/script-api/js-diff-eval.patch`, not committed: `crates/js-diff` is outside this lane), js2 passes 68 of the 72 `cptn-*` tests and 409 more tests in total, with 0 lost. The 4 that fail: `async-function/cptn-decl` (no async functions) and 3 `try/cptn-finally-*` (the old engine's rule gives the value of `finally`).
-- Cost, js2 micro rows of `interp_load` (instructions:u, net of the N=0 run, M instructions, min of 3 inside `tools/js/instr.sh`), machine archMachine, base `8875c60a`:
+- Cost, js2 micro rows of `interp_load` (instructions:u, net of the N=0 run, M instructions, min of 3 inside `tools/js/instr.sh`), machine archMachine, base `52b560d4`:
 
   | row | base default | new default | change | base cgu=1 | new cgu=1 | change |
   |---|---|---|---|---|---|---|
