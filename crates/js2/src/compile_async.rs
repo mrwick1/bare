@@ -40,7 +40,7 @@ impl<'a> Fc<'a> {
         self.bind(lb);
         self.live.iter_mut().for_each(|w| *w = 0);
         self.set_live(ex);
-        self.op(Op::RetAsync, ex, 0, 1);
+        self.op(if self.gen_kind == crate::bytecode::GK_ASYNCGEN { Op::RetGen } else { Op::RetAsync }, ex, 0, 1);
         self.handlers.push(HandlerRec { start, end, target: lb, reg: ex, depth });
     }
 
@@ -48,30 +48,41 @@ impl<'a> Fc<'a> {
     pub(crate) fn await_expr(&mut self, arg: ExprId, dst: u32) -> CR {
         let m0 = self.mark();
         let v = self.any(arg)?;
+        self.await_reg(v, dst, m0, true);
+        self.free(m0);
+        Ok(())
+    }
+
+    /// `Await v`: the settled value goes to `dst`, the registers from `m0` up hold no value afterwards (the caller frees them). A rejection
+    /// is thrown, or with `throws` false it is ignored (the close of an iterator after an exception).
+    pub(crate) fn await_reg(&mut self, v: u32, dst: u32, m0: u32, throws: bool) {
         // The settled value goes to `dst` when nothing reads `dst` after a rejection: a register that holds no value now.
         let direct = dst < m0 && !self.is_var_reg(dst) && self.live.get(dst as usize / 64).is_none_or(|w| w >> (dst % 64) & 1 == 0);
         let s = if direct { dst } else { self.alloc() };
         let m = self.alloc();
         if self.dead {
-            self.free(m0);
-            return Ok(());
+            return;
         }
-        let t = self.save_list(s, m, m0);
-        self.op(Op::Await, v, t, 0);
-        // A resume brings back the list, `s` and `m` only: the temporaries of the operand hold no value now.
-        (m0..self.next).for_each(|r| Self::bit(&mut self.live, r, false));
-        self.set_live(s);
-        self.set_live(m);
-        let cont = self.label();
-        self.jmp_rx(Op::JSEqI, m, MODE_NEXT as u32, cont);
-        debug_assert_eq!(MODE_THROW, 1);
-        self.op(Op::Throw, s, 0, 0);
-        self.bind(cont);
+        self.await_raw(v, s, m, m0);
+        if throws {
+            let cont = self.label();
+            self.jmp_rx(Op::JSEqI, m, MODE_NEXT as u32, cont);
+            debug_assert_eq!(MODE_THROW, 1);
+            self.op(Op::Throw, s, 0, 0);
+            self.bind(cont);
+        }
         if s != dst {
             self.op(Op::Mov, dst, s, 0);
         }
-        self.free(m0);
-        Ok(())
+    }
+
+    /// `Await v` with the sent value in `s` and the mode in `m`: only the registers that are live below `m0` come back from a resume.
+    pub(crate) fn await_raw(&mut self, v: u32, s: u32, m: u32, m0: u32) {
+        let t = self.save_list(s, m, m0);
+        self.op(Op::Await, v, t, 0);
+        (m0..self.next).for_each(|r| Self::bit(&mut self.live, r, false));
+        self.set_live(s);
+        self.set_live(m);
     }
 }
 

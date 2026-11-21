@@ -277,7 +277,7 @@ fn private_names_and_accessors() {
 
 #[test]
 fn unbuilt_constructs_stop_the_load_and_the_rest_is_clear() {
-    for src in ["async function* g() {}", "with ({}) {}"] {
+    for src in ["with ({}) {}"] {
         let e = run(src).err().unwrap_or_else(|| panic!("{src} ran"));
         assert!(e.starts_with("not supported yet"), "{src}: {e}");
     }
@@ -1107,8 +1107,6 @@ fn an_unbuilt_construct_in_a_function_fails_at_its_first_call_not_at_load() {
     assert_eq!(ev(src, "e"), "Error: not supported yet|Error");
     // The top level has the construct: the load fails, as before.
     assert!(load("with ({}) {}").err().unwrap().starts_with("not supported yet"));
-    // An async function at the top level of the script is found when its parent is compiled, so the load fails (not a lazy case).
-    assert!(load("async function* f() {}").err().unwrap().starts_with("not supported yet"));
 }
 
 #[test]
@@ -1223,5 +1221,58 @@ fn a_stub_that_keeps_the_arguments_in_registers_and_a_stub_with_an_array_agree()
         ("function f(a) { 'use strict'; var arguments2 = a; return arguments2; } var r = f(4);", "r", "4"),
         ("function f(a) { return function (b) { return a + b; }; } var r = f(1)(2) + f(10)(20);", "r", "33"),
         ("var o = { m(a, b) { return this.k + a + b; }, k: 1 }; var r = o.m(2, 3) + '|' + o.m(2);", "r", "6|NaN"),
+    ]);
+}
+
+#[test]
+fn new_on_an_arrow_function_a_method_or_an_accessor_is_a_type_error_before_the_first_call() {
+    // The stub of a function that was never called must already say that it is no constructor.
+    check(&[
+        ("var r; try { new (() => 1)(); r = 'no'; } catch (e) { r = e instanceof TypeError; }", "r", "true"),
+        ("var r; try { new ({ m() {} }).m(); r = 'no'; } catch (e) { r = e instanceof TypeError; }", "r", "true"),
+        ("var r; try { new (Object.getOwnPropertyDescriptor({ get a() { return 1; } }, 'a').get)(); r = 'no'; } catch (e) { r = e instanceof TypeError; }", "r", "true"),
+        ("var r; try { new (Object.getOwnPropertyDescriptor({ set a(v) {} }, 'a').set)(); r = 'no'; } catch (e) { r = e instanceof TypeError; }", "r", "true"),
+        ("var r; try { new (class { static m() {} }).m(); r = 'no'; } catch (e) { r = e instanceof TypeError; }", "r", "true"),
+        ("var r; try { Reflect.construct(function () {}, [], () => 1); r = 'no'; } catch (e) { r = e instanceof TypeError; }", "r", "true"),
+        ("var f = function () { this.a = 1; }; var r = new f().a;", "r", "1"),
+    ]);
+}
+
+#[test]
+fn the_generator_and_async_function_constructors_build_functions_of_their_kind() {
+    check(&[
+        // The constructors are reachable from a function of the kind, and have the spec properties.
+        (
+            "var G = Object.getPrototypeOf(function* () {}).constructor, A = Object.getPrototypeOf(async function () {}).constructor, \
+             AG = Object.getPrototypeOf(async function* () {}).constructor; \
+             var r = [G.name, A.name, AG.name, G.length, Object.getPrototypeOf(G) === Function, G.prototype === Object.getPrototypeOf(function* () {}), \
+             Object.getOwnPropertyDescriptor(G.prototype, 'constructor').writable, Object.getOwnPropertyDescriptor(G, 'prototype').writable].join();",
+            "r",
+            "GeneratorFunction,AsyncFunction,AsyncGeneratorFunction,1,true,true,false,false",
+        ),
+        (
+            "var G = Object.getPrototypeOf(function* () {}).constructor; var g = new G('a', 'b', 'yield a; yield b; return 3;'); \
+             var it = g(1, 2); var r = [g.name, g.length, Object.getPrototypeOf(g) === G.prototype, it.next().value, it.next().value, it.next().value].join();",
+            "r",
+            "anonymous,2,true,1,2,3",
+        ),
+        // A call without `new` is the same, and a bad text is a SyntaxError that does not reach the global scope.
+        (
+            "var G = Object.getPrototypeOf(function* () {}).constructor; var r = []; \
+             try { G('yield', ''); } catch (e) { r.push(e instanceof SyntaxError); } \
+             try { G('}) ; ({'); } catch (e) { r.push(e instanceof SyntaxError); } \
+             var A = Object.getPrototypeOf(async function () {}).constructor; \
+             try { A('await', ''); } catch (e) { r.push(e instanceof SyntaxError); } \
+             try { A('', 'super()'); } catch (e) { r.push(e instanceof SyntaxError); } \
+             r = r.join();",
+            "r",
+            "true,true,true,true",
+        ),
+        // The function has the global scope, not the scope of the caller.
+        (
+            "var x = 'global'; var r; (function () { var x = 'local'; var G = Object.getPrototypeOf(function* () {}).constructor; r = G('yield x')().next().value; })();",
+            "r",
+            "global",
+        ),
     ]);
 }
