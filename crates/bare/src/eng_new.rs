@@ -5,6 +5,7 @@
 
 use crate::eng::{Collected, Desc, Eng, Fault, Got, HeapStats, KeyKind, Ops, PState, Prop, Val, WallClock};
 use bare_js::eval::LimitKind;
+use bare_js2::api::Clock;
 use bare_js2::interp_rt::Realm;
 use bare_js2::value::{Kind, Value};
 use bare_js_api::{Abort, Args, Attrs, Engine, Error, Intrinsic, Iter, Local, Persistent, Traced};
@@ -56,7 +57,10 @@ impl Eng for New {
     type Key = NV;
 
     fn realm(_eval: bare_js::eval::EvalLimits, _heap: bare_js::heap::HeapLimits) -> Result<Realm, Fault<New>> {
-        bare_js2::script::load("").map(|vm| vm.realm).map_err(|_| Fault::Heap("the realm could not be made"))
+        bare_js2::script::load("").map(|mut vm| {
+            vm.realm.init_host_intrinsics();
+            vm.realm
+        }).map_err(|_| Fault::Heap("the realm could not be made"))
     }
 
     fn kind(v: Value) -> Val<New> {
@@ -160,10 +164,6 @@ fn run_v(r: &mut Realm, f: impl FnOnce(&mut Realm) -> Result<Local<'static>, Err
         let l = f(r)?;
         Ok(r.raw(l))
     })
-}
-
-fn unsup<T>(what: &'static str) -> Result<T, Fault<New>> {
-    Err(Fault::Unsupported(what))
 }
 
 fn key_local(r: &mut Realm, k: NV) -> Local<'static> {
@@ -405,12 +405,16 @@ impl Ops<New> for Realm {
         false
     }
     fn external_live(&self) -> usize {
-        0
+        self.raw_external_live()
     }
-    fn set_external_live(&mut self, _n: usize) {}
-    fn add_external(&mut self, _n: usize) {}
+    fn set_external_live(&mut self, n: usize) {
+        self.raw_set_external_live(n);
+    }
+    fn add_external(&mut self, n: usize) {
+        self.raw_add_external(n);
+    }
     fn gc_due(&self) -> bool {
-        self.due()
+        self.raw_gc_due()
     }
     fn api_err<'s>(&mut self, e: Fault<New>) -> bare_js_api::Error<'s> {
         error(self, e)
@@ -459,8 +463,8 @@ impl Ops<New> for Realm {
     fn h_to_string_lossy(&self, s: NV) -> Result<String, Fault<New>> {
         self.raw_units(s.0).map(|u| String::from_utf16_lossy(&u)).ok_or(Fault::Heap("Stale"))
     }
-    fn h_symbol_description(&self, _s: NV) -> Result<Option<NV>, Fault<New>> {
-        unsup("js2: symbol description of a `&self` read")
+    fn h_symbol_description(&self, s: NV) -> Result<Option<NV>, Fault<New>> {
+        self.raw_symbol_description(s.0).map(|d| d.map(NV)).ok_or(Fault::Heap("not a symbol"))
     }
     fn h_new_object(&mut self, proto: Option<NV>) -> Result<NV, Fault<New>> {
         run_v(self, |r| match proto {
@@ -587,16 +591,31 @@ impl Ops<New> for Realm {
         fault(self, e)
     }
     fn bytes_of(&self, _v: Value) -> Option<&[u8]> {
+        // js2 has no ArrayBuffer, TypedArray or DataView cells yet.
         None
     }
     fn set_wall_clock(&mut self, c: WallClock) -> Result<(), Fault<New>> {
-        match c {
-            WallClock::System => Ok(()),
-            _ => unsup("js2: a virtual wall clock"),
+        let clock = match c {
+            WallClock::System => Clock::System,
+            WallClock::Virtual(t) => Clock::Virtual(t),
+            WallClock::Host if bare_net::vclock::on() => Clock::Host(Some(Box::new(|| {
+                bare_net::vclock::advance_by(bare_net::vclock::READ_MS);
+                bare_net::vclock::epoch_ms()
+            }))),
+            WallClock::Host => Clock::Host(None),
+        };
+        if self.raw_set_clock(clock) {
+            Ok(())
+        } else {
+            Err(Fault::Unsupported("virtual wall clock must be a whole number of milliseconds within +-8.64e15"))
         }
     }
     fn wall_clock(&self) -> WallClock {
-        WallClock::System
+        match self.raw_clock() {
+            Clock::System => WallClock::System,
+            Clock::Virtual(t) => WallClock::Virtual(*t),
+            Clock::Host(_) => WallClock::Host,
+        }
     }
     fn wall_now_ms(&self) -> f64 {
         Engine::wall_now_ms(self)
@@ -611,21 +630,26 @@ impl Ops<New> for Realm {
     fn clear_failed_job(&mut self) {
         Engine::clear_failed_job(self)
     }
-    fn api_args_slice(&self, _a: Args<'_>, _from: usize, _to: usize) -> Option<&[Value]> {
-        None
+    fn api_args_slice(&self, a: Args<'_>, from: usize, to: usize) -> Option<&[Value]> {
+        self.raw_args_slice(a, from, to)
     }
     fn api_args(&self, a: Args<'_>, from: usize, to: usize) -> Vec<Value> {
-        (from..to.min(a.len())).filter_map(|i| a.get(i)).map(|l| self.raw(l)).collect()
+        if let Some(args) = self.raw_args_slice(a, from, to) {
+            return args.to_vec();
+        }
+        a.iter().skip(from).take(to.saturating_sub(from)).map(|l| self.raw(l)).collect()
     }
     fn host_new_target(&self) -> Option<NV> {
         self.raw_new_target().map(NV)
     }
     fn collect(&mut self, extra: &[Value]) -> Result<Collected, Fault<New>> {
-        // js2 does not count what it frees for the host: the counts are zero.
-        self.raw_collect(extra);
-        Ok(Collected { objects: 0, strings: 0, symbols: 0 })
+        let count = self.raw_collect(extra);
+        Ok(Collected { objects: count.objects, strings: count.strings, symbols: count.symbols })
     }
-    fn set_sources(&mut self, _dom: std::rc::Rc<crate::browser::Dom<New>>) {}
+    fn set_sources(&mut self, dom: std::rc::Rc<crate::browser::Dom<New>>) {
+        // js2 uses the same host for source reads, calls and owner tracing.
+        Engine::set_host(self, dom);
+    }
     fn module_parse_o(&mut self, source: &str, url: &str) -> Result<u32, Fault<New>> {
         run(self, |r| r.module_parse(source, url))
     }
@@ -670,11 +694,23 @@ impl Ops<New> for Realm {
         .map(NV)
     }
     fn is_constructor_value(&mut self, v: Value) -> Result<bool, Fault<New>> {
-        // A callable that is not an arrow or a method is taken as a constructor (phase 2 queue).
-        Ok(self.raw_callable(v))
+        Ok(self.raw_constructor(v))
     }
-    fn inspect_o(&mut self, v: Value, _cap: usize, _node: &dyn Fn(NV) -> Option<String>) -> String {
-        self.display_o(v)
+    fn inspect_o(&mut self, v: Value, cap: usize, node: &dyn Fn(NV) -> Option<String>) -> String {
+        self.raw_inspect(v, cap, &|o| node(NV(o)))
+    }
+}
+
+impl crate::browser::Browser<New> {
+    /// Anchor the wall clock to the scheduler of a virtual session without replay.
+    pub(crate) fn with_session_wall_clock(mut self, enabled: bool) -> Self {
+        if enabled && !bare_net::vclock::on() {
+            let Self { it: vm, dom, .. } = &mut self;
+            let dom = std::rc::Rc::clone(dom);
+            let origin = Engine::wall_now_ms(vm) - dom.now_ms();
+            vm.raw_set_clock(Clock::Host(Some(Box::new(move || (origin + dom.now_ms()).floor()))));
+        }
+        self
     }
 }
 
@@ -683,3 +719,7 @@ impl From<Value> for Val<New> {
         <New as Eng>::kind(v)
     }
 }
+
+#[cfg(test)]
+#[path = "eng_new_tests.rs"]
+mod browser_new_adapter_tests;
