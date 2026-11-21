@@ -29,10 +29,10 @@ use crate::interp::STOP;
 use crate::interp_rt::{ErrKind, Key, R, Realm};
 use crate::gc::Marker;
 use crate::object::{F_CLASS, Obj};
-use crate::shapes::A_E;
+use crate::shapes::{A_C, A_E, A_W};
 use crate::string::{Chars, Str};
 use crate::value::{Kind, Value};
-use bare_js_api::{Abort, Args, Attrs, Engine, Error, Host, HostFn, Intrinsic, Iter, Local, Slots, Type};
+use bare_js_api::{Abort, Args, Attrs, Def, DefKind, Engine, Error, Host, HostFn, Intrinsic, Iter, Local, Slots, Type};
 use std::ptr::NonNull;
 use std::rc::Rc;
 
@@ -274,6 +274,16 @@ impl Realm {
         }
         self.api.natives[i]
     }
+
+    /// The function object of host id `id`, named `name` (a string value).
+    fn host_cell(&mut self, name: Value, id: u32, length: u32, kind: HostFn) -> Obj {
+        let nid = self.host_native(kind != HostFn::Method);
+        let cell = self.native_cell(nid);
+        cell.set_slot(&self.shapes, 1, Value::int(id as i32));
+        cell.set_slot(&self.shapes, 2, Value::int(kind as i32 | (length.min(1 << 20) as i32) << 2));
+        cell.set_slot(&self.shapes, 3, name);
+        cell
+    }
 }
 
 /// Undoes the window link when the host call ends, by return or by panic: a caller that catches the panic keeps the realm, and a
@@ -473,13 +483,55 @@ impl Engine for Realm {
 
     fn host_function<'s>(&mut self, name: &str, id: u32, length: u32, kind: HostFn) -> Result<Local<'s>, Error<'s>> {
         assert!(id < 1 << 31, "a host id is below 2^31");
-        let nid = self.host_native(kind != HostFn::Method);
-        let cell = self.native_cell(nid);
         let name = self.string(name);
-        cell.set_slot(&self.shapes, 1, Value::int(id as i32));
-        cell.set_slot(&self.shapes, 2, Value::int(kind as i32 | (length.min(1 << 20) as i32) << 2));
-        cell.set_slot(&self.shapes, 3, name);
+        let cell = self.host_cell(name, id, length, kind);
         Ok(self.a_push(cell.value()))
+    }
+
+    fn install_table<'s>(&mut self, targets: &[Local<'_>], id_base: u32, defs: &'static [Def]) -> Result<(), Error<'s>> {
+        assert!(id_base < 1 << 31 && targets.len() <= 32, "a host id is below 2^31, and a table has at most 32 targets");
+        let mut objs = [None; 32];
+        for (o, &t) in objs.iter_mut().zip(targets) {
+            *o = Some(self.a_obj(t)?);
+        }
+        let mut text = String::new();
+        for d in defs {
+            let k = Key::Name(self.intern(d.name));
+            let bit = |on: bool, b: u8| if on { b } else { 0 };
+            let attrs = bit(d.attrs.writable, A_W) | bit(d.attrs.enumerable, A_E) | bit(d.attrs.configurable, A_C);
+            let fns = match d.kind {
+                DefKind::Method { id, len } => {
+                    let Key::Name(name) = k else { unreachable!() };
+                    [Some(self.host_cell(name.value(), id_base + id, len, HostFn::Method).value()), None]
+                }
+                DefKind::Accessor { get, set } => {
+                    text.clear();
+                    text.push_str("get ");
+                    text.push_str(d.name);
+                    let name = self.string(&text);
+                    let g = self.host_cell(name, id_base + get, 0, HostFn::Method).value();
+                    text.replace_range(..3, "set");
+                    let st = set.map(|id| {
+                        let name = self.string(&text);
+                        self.host_cell(name, id_base + id, 1, HostFn::Method).value()
+                    });
+                    [Some(g), st]
+                }
+                DefKind::Number(n) => [Some(Value::number(n)), None],
+            };
+            for (i, o) in objs.iter().enumerate() {
+                let (true, Some(o)) = (d.on >> i & 1 != 0, *o) else { continue };
+                let r = match d.kind {
+                    DefKind::Accessor { .. } => {
+                        let g = fns[0].map_or(Ok(()), |g| self.define_accessor(o, k, g, false, d.attrs.enumerable));
+                        g.and_then(|()| fns[1].map_or(Ok(()), |st| self.define_accessor(o, k, st, true, d.attrs.enumerable)))
+                    }
+                    _ => self.define_attrs(o, k, attrs, fns[0].expect("a value")),
+                };
+                r.map_err(|e| self.a_err(e))?;
+            }
+        }
+        Ok(())
     }
 
     fn set_host(&mut self, host: Rc<dyn Host<Realm>>) {

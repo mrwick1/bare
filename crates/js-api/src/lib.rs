@@ -440,6 +440,52 @@ pub enum HostFn {
     CtorNewTarget,
 }
 
+/// What a row of a [`Def`] table makes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DefKind {
+    /// A function that [`Host::call`] runs with the id `id` (plus the base of the table), named like the row.
+    Method { id: u32, len: u32 },
+    /// An accessor. The getter is named `get NAME` and has length 0; the setter is named `set NAME` and has length 1.
+    Accessor { get: u32, set: Option<u32> },
+    /// A data property with a number as its value.
+    Number(f64),
+}
+
+/// A row of a static table of members, for [`Engine::install_table`]. The engine reads the whole table in one pass, so the host
+/// pays for no call and no handle for each member.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Def {
+    pub name: &'static str,
+    /// The targets of the row: bit `i` selects `targets[i]`. A method or an accessor makes one function object for all of them.
+    pub on: u32,
+    /// The attributes of the property. An accessor has no `writable`.
+    pub attrs: Attrs,
+    pub kind: DefKind,
+}
+
+impl Def {
+    /// A method. `METHOD` attributes (not enumerable).
+    pub const fn method(name: &'static str, on: u32, id: u32, len: u32) -> Def {
+        Def { name, on, attrs: Attrs::METHOD, kind: DefKind::Method { id, len } }
+    }
+
+    /// An accessor of a WebIDL attribute: enumerable and configurable.
+    pub const fn accessor(name: &'static str, on: u32, get: u32, set: Option<u32>) -> Def {
+        Def { name, on, attrs: Attrs { writable: false, enumerable: true, configurable: true }, kind: DefKind::Accessor { get, set } }
+    }
+
+    /// A constant: read-only, enumerable, not configurable.
+    pub const fn number(name: &'static str, on: u32, n: f64) -> Def {
+        Def { name, on, attrs: Attrs { writable: false, enumerable: true, configurable: false }, kind: DefKind::Number(n) }
+    }
+
+    /// The same row with other attributes.
+    pub const fn with(mut self, attrs: Attrs) -> Def {
+        self.attrs = attrs;
+        self
+    }
+}
+
 /// The element type of a typed array ([`Scope::new_typed_array`], [`View`]). `Data` is a `DataView`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Elem {
@@ -686,6 +732,10 @@ pub trait Engine: Sized {
         let k = self.string(key)?;
         self.define_accessor(obj, k, get, set, attrs)
     }
+    /// Make every member of `defs` on `targets` in one pass: the same as a [`Engine::host_function`] and a define for each row, with
+    /// the function ids `id_base + id`, but with no handle for the functions and no work for a key twice. A row that names two targets
+    /// makes one function object for both. `targets` must hold an object for each bit that a row sets (at most 32 targets).
+    fn install_table<'s>(&mut self, targets: &[Local<'_>], id_base: u32, defs: &'static [Def]) -> Result<(), Error<'s>>;
     fn call<'s>(&mut self, f: Local<'_>, this: Local<'_>, args: &[Local<'_>]) -> Result<Local<'s>, Error<'s>>;
     /// A function whose calls go to [`Host::call`] with `id`. `id` is below 2^31.
     fn host_function<'s>(&mut self, name: &str, id: u32, length: u32, kind: HostFn) -> Result<Local<'s>, Error<'s>>;
@@ -1109,6 +1159,11 @@ impl<'s, E: Engine> Scope<'s, E> {
 
     pub fn host_function(&mut self, name: &str, id: u32, length: u32, kind: HostFn) -> Result<Local<'s>, Error<'s>> {
         self.e.host_function(name, id, length, kind)
+    }
+
+    /// See [`Engine::install_table`].
+    pub fn install_table(&mut self, targets: &[Local<'_>], id_base: u32, defs: &'static [Def]) -> Result<(), Error<'s>> {
+        self.e.install_table(targets, id_base, defs)
     }
 
     pub fn set_host(&mut self, host: Rc<dyn Host<E>>) {

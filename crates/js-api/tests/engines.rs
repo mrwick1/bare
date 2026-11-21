@@ -111,4 +111,6 @@ both!(
     own_properties_are_read_without_running_code_except_getters,
     strings_from_code_units_keep_lone_surrogates,
     handles_survive_a_top_level_call_that_allocates,
+    a_table_installs_methods_accessors_and_constants,
+    two_realms_install_the_same_table,
 );
