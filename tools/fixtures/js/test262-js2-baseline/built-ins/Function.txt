@@ -1,16 +1,16 @@
 # test262 counts of tools/js/test262_js2.sh for each directory: directory, old pass, old fail, old skip, new pass, new fail, new skip.
 # old = bare-js, new = bare-js2. Commit: e4fbf57745c6aae3d1f12f181ecef78b1665d812. Written by tools/js/test262_js2.sh -u. Do not edit by hand.
-built-ins/Function 144 30 5 73 101 5
+built-ins/Function 145 30 4 145 30 4
 built-ins/Function/internals/Call 1 0 1 1 0 1
 built-ins/Function/internals/Construct 2 0 4 2 0 4
-built-ins/Function/length 13 0 0 1 12 0
+built-ins/Function/length 13 0 0 13 0 0
 built-ins/Function/prototype 12 5 0 7 10 0
 built-ins/Function/prototype/Symbol.hasInstance 9 1 1 10 0 1
-built-ins/Function/prototype/apply 42 2 4 19 25 4
+built-ins/Function/prototype/apply 43 2 3 40 5 3
 built-ins/Function/prototype/arguments 0 1 0 0 1 0
-built-ins/Function/prototype/bind 84 9 7 66 27 7
-built-ins/Function/prototype/call 46 2 1 22 26 1
+built-ins/Function/prototype/bind 88 9 3 68 29 3
+built-ins/Function/prototype/call 47 2 0 44 5 0
 built-ins/Function/prototype/caller 0 1 0 0 1 0
 built-ins/Function/prototype/caller-arguments 0 1 0 0 1 0
 built-ins/Function/prototype/constructor 1 0 0 1 0 0
-built-ins/Function/prototype/toString 27 22 31 42 7 31
+built-ins/Function/prototype/toString 28 23 29 45 6 29

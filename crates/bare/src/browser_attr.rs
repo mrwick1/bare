@@ -11,7 +11,7 @@
 //!   (`Document::watch_attr`, `take_removed_attrs`). Before any `Attr` or map operation `drain` reads that log: the `Attr` of
 //!   a removed attribute becomes detached and keeps the value it had (a span in the text buffer, which never frees).
 //!   Adding the attribute back makes a new `Attr`: it never aliases the old one.
-//! - The index `i` of the map is the `i`-th native attribute. Its `Attr` is made the first time it is read (`fill_indexed`):
+//! - The index `i` of the map is the `i`-th native attribute. Its `Attr` is made the first time it is read (`Host::fill`):
 //!   the heap asks the host for the missing object and repeats the read. So a map of a thousand attributes costs nothing
 //!   until the page reads them.
 //! - Attached `Attr`s are traced from their element wrapper, and an `Attr` and a map trace the element wrapper. A detached
@@ -42,6 +42,7 @@
 //! names use the document caps (`dom-text`, `dom-attrs`, `dom-names`) through the same path as `setAttribute`. Scans charge
 //! the step budget. No document or table borrow is held while JS runs (string conversion comes first).
 
+use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_js_api::{Args, Local, Type};
@@ -65,7 +66,7 @@ pub(crate) struct AttrObj {
 
 #[derive(Default)]
 pub(crate) struct Tables {
-    pub attrs: IdMap<ObjId, AttrObj>,
+    pub attrs: IdTab<ObjId, AttrObj>,
     /// The attached `Attr`s of an element, by name atom. A short list: an element has few attributes.
     pub by_el: HashMap<NodeId, Vec<(Atom, ObjId)>>,
     pub maps: IdMap<ObjId, NodeId>,
@@ -93,18 +94,17 @@ impl AttrHost {
 
 // ------------------------------------------------------------------------------------ GC and heap hooks
 
-pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
+pub(crate) fn roots(d: &Dom, out: &mut Roots<'_, '_>) {
     out.extend(d.attr.fixed.borrow().iter().map(|&o| Value::Object(o)));
 }
 
-/// The references of an `Attr` object. The maps have owner entries (`trace_map`).
-pub(crate) fn trace(d: &Dom, owner: ObjId, out: &mut Vec<Value>) {
-    let t = d.attr.s.borrow();
-    if t.attrs.is_empty() {
-        return;
-    }
-    if let Some(a) = t.attrs.get(&owner) {
-        out.extend(a.owner.and_then(|el| d.st.borrow().wrapper(el)).map(Value::Object));
+/// The references of the `Attr` object `o`: the wrapper of its element. The maps have owner entries (`trace_map`).
+pub(crate) fn trace(d: &Dom, o: ObjId, t: &mut bare_js_api::Tracer<'_, Value>) {
+    let a = d.attr.s.borrow();
+    if let Some(a) = a.attrs.get(&o)
+        && let Some(w) = a.owner.and_then(|el| d.st.borrow().by_node.get(&el).map(|w| *w.raw()))
+    {
+        crate::browser_sources::visit(t, w);
     }
 }
 
@@ -141,25 +141,26 @@ pub(crate) fn prune_map(d: &Dom, o: ObjId) {
     }
 }
 
-pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
+/// The `Attr` objects `dead` were collected: drop their entries, and the watches of their elements.
+pub(crate) fn forget(d: &Dom, dead: &[ObjId]) {
     let mut t = d.attr.s.borrow_mut();
     let t = &mut *t;
-    if t.attrs.is_empty() {
-        return;
-    }
     let mut unwatch = Vec::new();
-    t.attrs.retain(|&o, a| {
-        let keep = live(o);
-        if !keep && let Some(el) = a.owner {
+    for o in dead {
+        if let Some(a) = t.attrs.remove(o)
+            && let Some(el) = a.owner
+        {
             unwatch.push((el, a.atom));
+            if let Some(l) = t.by_el.get_mut(&el) {
+                l.retain(|(_, x)| x != o);
+                if l.is_empty() {
+                    t.by_el.remove(&el);
+                }
+            }
         }
-        keep
-    });
-    let attrs = &t.attrs;
-    t.by_el.retain(|_, l| {
-        l.retain(|(_, o)| attrs.contains_key(o));
-        !l.is_empty()
-    });
+    }
+    // Free the empty pages of the table (`IdTab::remove`).
+    t.attrs.retain(|_, _| true);
     if !unwatch.is_empty() {
         let mut doc = d.doc.borrow_mut();
         for (el, atom) in unwatch {
@@ -212,7 +213,7 @@ pub(crate) fn item(d: &Dom, owner: ObjId, index: usize) -> Result<Slot, HeapErro
     let NodeData::Element { attrs, .. } = *doc.data(el) else { return Ok(Slot::Absent) };
     let Some(a) = doc.attrs(attrs).get(index) else { return Ok(Slot::Absent) };
     // A removal is waiting in the log: the table can still hold the `Attr` of an attribute that was removed and added back.
-    // `fill_indexed` drains the log, then the read repeats.
+    // `Host::fill` drains the log, then the read repeats.
     if doc.has_removed_attrs() {
         return Ok(Slot::Missing);
     }
@@ -222,7 +223,7 @@ pub(crate) fn item(d: &Dom, owner: ObjId, index: usize) -> Result<Slot, HeapErro
     })
 }
 
-/// `Host::fill_indexed`: make the `Attr` of attribute `index` of the map `owner`.
+/// `Host::fill`: make the `Attr` of attribute `index` of the map `owner`.
 pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<()> {
     drain(d);
     let Some(&el) = d.attr.s.borrow().maps.get(&owner) else { return Ok(()) };
@@ -294,6 +295,7 @@ fn wrapper_for<'s>(d: &Dom, s: &mut Sc<'s, '_>, el: NodeId, atom: Atom) -> Res<'
         t.by_el.entry(el).or_default().push((atom, o));
         d.wrapper_edges.set(true);
     }
+    d.own_obj(s.engine(), o, crate::browser::Owner::Attr(o));
     d.doc.borrow_mut().watch_attr(el, atom);
     Ok(o)
 }
@@ -303,6 +305,7 @@ fn new_detached<'s>(d: &Dom, s: &mut Sc<'s, '_>, atom: Atom, value: Span) -> Res
     lift(s, room(d))?;
     let o = d.obj_s(s, protos(d).0)?;
     d.attr.s.borrow_mut().attrs.insert(o, AttrObj { atom, owner: None, value: Some(value) });
+    d.own_obj(s.engine(), o, crate::browser::Owner::Attr(o));
     Ok(o)
 }
 
@@ -337,7 +340,7 @@ fn attr_arg<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>, i: usize) -> Res<'s, O
 
 pub(crate) fn state(d: &Dom, o: ObjId) -> (Atom, Option<NodeId>, Option<Span>) {
     let t = d.attr.s.borrow();
-    let a = &t.attrs[&o];
+    let a = t.attrs.get(&o).expect("checked");
     (a.atom, a.owner, a.value)
 }
 
@@ -824,7 +827,7 @@ impl Browser {
 /// The nodes that `Attr` objects and `NamedNodeMap`s name.
 pub(crate) fn held(d: &Dom, out: &mut Vec<NodeId>) {
     let t = d.attr.s.borrow();
-    out.extend(t.attrs.values().filter_map(|a| a.owner));
+    out.extend(t.attrs.iter().filter_map(|(_, a)| a.owner));
     out.extend(t.by_el.keys().copied());
     out.extend(t.maps.values().copied());
     out.extend(t.map_of.keys().copied());
@@ -832,7 +835,7 @@ pub(crate) fn held(d: &Dom, out: &mut Vec<NodeId>) {
 
 /// The spans of detached `Attr` values: the reclaim moves them when it builds the text list again.
 pub(crate) fn pins(d: &Dom, f: &mut dyn FnMut(&mut Span)) {
-    for a in d.attr.s.borrow_mut().attrs.values_mut() {
+    for (_, a) in d.attr.s.borrow_mut().attrs.iter_mut() {
         if let Some(v) = a.value.as_mut() {
             f(v);
         }

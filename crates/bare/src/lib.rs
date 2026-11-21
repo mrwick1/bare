@@ -270,6 +270,10 @@ mod browser_walker_tests;
 #[cfg(test)]
 mod browser_range_tests;
 #[cfg(test)]
+mod browser_owners_tests;
+#[cfg(test)]
+mod old_engine_gate_tests;
+#[cfg(test)]
 mod browser_reclaim_tests;
 #[cfg(test)]
 mod browser_resize_tests;

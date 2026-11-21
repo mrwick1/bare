@@ -34,6 +34,7 @@
 //! `classList` (see `browser_platform_class.rs`) and `getElementsBy*` (see `browser_platform_query.rs`) have their own
 //! headers. Nothing here is compared with Chrome.
 
+use crate::browser_sources::Roots;
 use crate::browser::*;
 use bare_js::eval::{Error, Interp};
 use crate::browser_scoped::*;
@@ -145,7 +146,7 @@ pub(crate) fn arg(a: &[Value], i: usize) -> Value {
 
 // ------------------------------------------------------------------------------------------ GC hooks
 
-pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
+pub(crate) fn roots(d: &Dom, out: &mut Roots<'_, '_>) {
     out.extend(d.plat.fixed.borrow().iter().map(|&o| Value::Object(o)));
     let s = d.plat.s.borrow();
     if s.mql.is_empty() {
@@ -155,11 +156,10 @@ pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
     out.extend(s.mql.keys().filter(|&&o| st.listeners.get(&Target::Obj(o)).is_some_and(|l| !l.is_empty())).map(|&o| Value::Object(o)));
 }
 
-/// The references of an iterator of a token list. The token lists have owner entries (`trace_list`).
-pub(crate) fn trace(d: &Dom, owner: ObjId, out: &mut Vec<Value>) {
-    let s = d.plat.s.borrow();
-    if let Some(i) = s.iters.get(&owner) {
-        out.push(Value::Object(i.list));
+/// The references of the iterator `o` of a token list: the list. The token lists have owner entries (`trace_list`).
+pub(crate) fn trace_iter(d: &Dom, o: ObjId, t: &mut bare_js_api::Tracer<'_, Value>) {
+    if let Some(i) = d.plat.s.borrow().iters.get(&o) {
+        crate::browser_sources::visit(t, Value::Object(i.list));
     }
 }
 
@@ -200,11 +200,14 @@ pub(crate) fn prune_list(d: &Dom, o: ObjId) {
     }
 }
 
-pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
-    let mut s = d.plat.s.borrow_mut();
-    let s = &mut *s;
-    s.mql.retain(|&o, _| live(o));
-    s.iters.retain(|&o, _| live(o));
+/// The media query list `o` is dead: drop its entry.
+pub(crate) fn forget_mql(d: &Dom, o: ObjId) {
+    d.plat.s.borrow_mut().mql.remove(&o);
+}
+
+/// The token list iterator `o` is dead: drop its entry.
+pub(crate) fn forget_iter(d: &Dom, o: ObjId) {
+    d.plat.s.borrow_mut().iters.remove(&o);
 }
 
 impl Dom {
@@ -324,7 +327,7 @@ fn match_media<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Re
     }
     let matches = old(s, |it| d.media_eval(it, &q))?;
     let o = d.obj_s(s, d.plat.p.get().expect("installed").mql)?;
-    d.st.borrow_mut().by_obj.insert(o, Target::Obj(o));
+    d.st.borrow_mut().add_target(s.engine(), o, crate::browser::Owner::Mql(o));
     let mut m = d.plat.s.borrow_mut();
     m.seq += 1;
     let seq = m.seq;

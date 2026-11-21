@@ -333,7 +333,23 @@ impl<'a> Fc<'a> {
             for (start, end) in pieces {
                 self.handlers.push(HandlerRec { start, end, target: label, reg: ex, depth });
             }
-            self.cold.push(Cold { label, live: snapshot, rec, done, ex });
+            // Inside a `try` or a `for-of`, the close and the new throw stay in the range of their handlers: after the code of the pattern,
+            // behind a jump. Elsewhere they go to the end of the function.
+            if self.of_head || self.frames.iter().any(|f| matches!(f.kind, FrameKind::Try { .. } | FrameKind::Loop { iter: Some(_), .. })) {
+                let (over, skip) = (self.label(), self.label());
+                let after = std::mem::replace(&mut self.live, snapshot);
+                self.jmp(over);
+                self.bind(label);
+                self.set_live(ex);
+                self.jmp_r(Op::JmpIf, done, skip);
+                self.op(Op::IterClose, rec, 0, 1);
+                self.bind(skip);
+                self.op(Op::Throw, ex, 0, 0);
+                self.bind(over);
+                self.live = after;
+            } else {
+                self.cold.push(Cold { label, live: snapshot, rec, done, ex });
+            }
         }
         self.free(m);
         Ok(())

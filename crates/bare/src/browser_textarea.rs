@@ -185,32 +185,34 @@ fn set_min_length<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>)
 
 /// Make the properties of the `HTMLTextAreaElement` prototype `proto`.
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>, proto: ObjId) -> R<()> {
-    for (name, g, st) in [
-        ("value", value as HS, Some(set_value as HS)),
-        ("defaultValue", default_value, Some(set_default_value)),
-        ("textLength", text_length, None),
-        ("rows", rows, Some(set_rows)),
-        ("cols", cols, Some(set_cols)),
-        ("maxLength", max_length, Some(set_max_length)),
-        ("minLength", min_length, Some(set_min_length)),
-        ("placeholder", placeholder, Some(set_placeholder)),
-        ("required", required, Some(set_required)),
-        ("readOnly", read_only, Some(set_read_only)),
-        ("disabled", disabled, Some(set_disabled)),
-        ("name", self::name, Some(set_name)),
-        ("wrap", wrap, Some(set_wrap)),
-        ("dirName", dir_name, Some(set_dir_name)),
-        ("autocomplete", autocomplete, Some(set_autocomplete)),
-        ("type", kind, None),
-        ("form", form, None),
-        ("selectionStart", sel::selection_start, Some(sel::set_selection_start)),
-        ("selectionEnd", sel::selection_end, Some(sel::set_selection_end)),
-        ("selectionDirection", sel::selection_direction, Some(sel::set_selection_direction)),
-    ] {
-        d.def_get_s(it, proto, name, g, st)?;
-    }
-    d.def_method_s(it, proto, "setSelectionRange", 2, sel::set_selection_range_method)?;
-    d.def_method_s(it, proto, "select", 0, sel::select_method)?;
-    d.def_method_s(it, proto, "setRangeText", 1, sel::set_range_text_area)?;
+    table!(members = [
+        Row::get(1, "value", value, Some(set_value)),
+        Row::get(1, "defaultValue", default_value, Some(set_default_value)),
+        Row::get(1, "textLength", text_length, None),
+        Row::get(1, "rows", rows, Some(set_rows)),
+        Row::get(1, "cols", cols, Some(set_cols)),
+        Row::get(1, "maxLength", max_length, Some(set_max_length)),
+        Row::get(1, "minLength", min_length, Some(set_min_length)),
+        Row::get(1, "placeholder", placeholder, Some(set_placeholder)),
+        Row::get(1, "required", required, Some(set_required)),
+        Row::get(1, "readOnly", read_only, Some(set_read_only)),
+        Row::get(1, "disabled", disabled, Some(set_disabled)),
+        Row::get(1, "name", self::name, Some(set_name)),
+        Row::get(1, "wrap", wrap, Some(set_wrap)),
+        Row::get(1, "dirName", dir_name, Some(set_dir_name)),
+        Row::get(1, "autocomplete", autocomplete, Some(set_autocomplete)),
+        Row::get(1, "type", kind, None),
+        Row::get(1, "form", form, None),
+        Row::get(1, "selectionStart", sel::selection_start, Some(sel::set_selection_start)),
+        Row::get(1, "selectionEnd", sel::selection_end, Some(sel::set_selection_end)),
+        Row::get(1, "selectionDirection", sel::selection_direction, Some(sel::set_selection_direction)),
+        Row::method(1, "setSelectionRange", 2, sel::set_selection_range_method),
+        Row::method(1, "select", 0, sel::select_method),
+        Row::method(1, "setRangeText", 1, sel::set_range_text_area),
+    ]);
+    run(it, |s| {
+        let p = d.obj_local(s, proto);
+        d.install_rows(s, &[p], &members::T)
+    })?;
     crate::browser_controls::decorate(d, it, proto, true)
 }

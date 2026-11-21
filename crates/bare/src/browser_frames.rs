@@ -515,7 +515,7 @@ fn context(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> R<Value> {
     let element = d.wrap(it, n)?;
     // The frame window is an `EventTarget` (`Target::Obj`, as a worker or an abort signal is).
     let o = d.obj(it, d.p().et)?;
-    d.st.borrow_mut().by_obj.insert(o, Target::Obj(o));
+    d.st.borrow_mut().add_target(it, o, crate::browser::Owner::Frame(o));
     let g = Value::Object(it.global_object());
     for (name, v) in [
         ("window", Value::Object(o)),
@@ -652,10 +652,11 @@ pub(crate) fn trace_node(d: &Dom, n: NodeId, t: &mut bare_js_api::Tracer<'_, Val
         }
     }
 }
-pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
+/// The window object `o` of a frame is dead: drop its entries.
+pub(crate) fn forget_window(d: &Dom, o: ObjId) {
     if let Some(s) = d.frames.state_mut().as_mut() {
-        s.contexts.retain(|_, o| live(*o));
-        s.docs.retain(|_, o| live(*o));
+        s.contexts.retain(|_, w| *w != o);
+        s.docs.retain(|_, w| *w != o);
     }
 }
 /// The `Location` object `o` of a frame window is dead: drop its entry.

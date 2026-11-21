@@ -197,10 +197,10 @@ code nregs=10 nparams=1 words=24 sites=0
 0015  Add         r1, r1, r8
 0016  JmpIf       r8, -> 0020
 0017  Mov         r9, r1
-0018  IterClose   3
+0018  IterClose   3, 0
 0019  Ret         r9
 0020  JmpBack     -> 0012
-0021  IterClose   3
+0021  IterClose   3, 1
 0022  Throw       r6
 0023  Ret         r1
 "#,
@@ -434,7 +434,7 @@ code nregs=13 nparams=1 words=48 sites=3
 0040  LoadTrue    r10
 0041  Mov         r5, r11
 0042  JmpIf       r10, -> 0044
-0043  IterClose   7
+0043  IterClose   7, 0
 0044  Add         r8, r1, r2
 0045  Add         r7, r8, r3
 0046  Add         r6, r7, r4
@@ -1371,8 +1371,7 @@ fn every_construct_of_a_class_passes_the_verifier() {
 #[test]
 fn constructs_the_compiler_does_not_build_are_listed() {
     let cases = [
-        ("return async function() {};", "an async function"),
-        ("return function*() {};", "a generator"),
+        ("return async function*() {};", "an async generator"),
         ("with (a) { b; }", "with"),
         ("eval('1');", "direct eval or with"),
     ];

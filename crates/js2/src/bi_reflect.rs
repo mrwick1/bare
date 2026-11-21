@@ -3,6 +3,7 @@
 //! The difference from `Object.*` is the result: a failed operation is `false`, not a `TypeError`. The receiver of `get` and `set` is a
 //! parameter, so they walk the prototype chain by hand and call the accessor with the receiver.
 //! `apply` leaves the call to the caller through the tail channel, so it adds no native frame.
+use crate::lazy::{Ent, m};
 use crate::bi_object::{Desc, Own};
 use crate::builtins::arg;
 use crate::interp_rt::{Key, R, Realm};
@@ -210,23 +211,22 @@ fn set_prototype_of(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
 impl Realm {
     pub(crate) fn install_reflect(&mut self) {
         let r = Obj::new(&mut self.heap, &self.shapes, self.s_object).expect("memory");
-        for (name, len, f) in [
-            ("apply", 3, apply as crate::builtins::NativeFn),
-            ("construct", 2, construct),
-            ("defineProperty", 3, define_property),
-            ("deleteProperty", 2, delete_property),
-            ("get", 2, get),
-            ("getOwnPropertyDescriptor", 2, get_own_property_descriptor),
-            ("getPrototypeOf", 1, get_prototype_of),
-            ("has", 2, has),
-            ("isExtensible", 1, is_extensible),
-            ("ownKeys", 1, own_keys),
-            ("preventExtensions", 1, prevent_extensions),
-            ("set", 3, set),
-            ("setPrototypeOf", 2, set_prototype_of),
-        ] {
-            self.method(r, name, len, f);
-        }
+        static REFLECT: &[Ent] = &[
+            m("apply", 3, apply),
+            m("construct", 2, construct),
+            m("defineProperty", 3, define_property),
+            m("deleteProperty", 2, delete_property),
+            m("get", 2, get),
+            m("getOwnPropertyDescriptor", 2, get_own_property_descriptor),
+            m("getPrototypeOf", 1, get_prototype_of),
+            m("has", 2, has),
+            m("isExtensible", 1, is_extensible),
+            m("ownKeys", 1, own_keys),
+            m("preventExtensions", 1, prevent_extensions),
+            m("set", 3, set),
+            m("setPrototypeOf", 2, set_prototype_of),
+        ];
+        self.lazy_table(r, REFLECT);
         let tag = Key::Name(self.wk[crate::bi_symbol::TO_STRING_TAG]);
         let name = self.string("Reflect");
         self.define_attrs(r, tag, A_C, name).expect("define");

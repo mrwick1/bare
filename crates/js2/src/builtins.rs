@@ -21,7 +21,12 @@
 //! the caller, which the root map of the call names. A nested call holds the collector too (`reenter.rs`). So a native may keep any
 //! cell in a Rust local, and may allocate and call. A native that allocates more than the slack of the heap limit (8 MiB) only makes
 //! the next gate collect.
+use crate::lazy::{Ent, m};
 use crate::cell::Layout;
+use crate::ast::StmtKind;
+use crate::facts::Facts;
+use crate::compile::ScriptMode;
+use crate::parse::{Limits, parse_script_lazy};
 use crate::bi_object::Own;
 use crate::interp_rt::{ErrKind, Key, R, Realm};
 use crate::object::{F_CALLABLE, F_CLASS, F_FNPROPS, F_NATIVE, Obj};
@@ -108,6 +113,7 @@ impl Realm {
     #[inline]
     pub(crate) fn fn_prep(&mut self, o: Obj, k: Str) {
         self.fn_props(o);
+        self.lazy_prep(o, k);
         if o.has_flag(F_NATIVE) && !o.has_flag(F_FNPROPS) && (k == self.k_length || k == self.k_name) {
             self.materialize(o);
         }
@@ -116,6 +122,7 @@ impl Realm {
     /// As [`Realm::fn_prep`] for an operation on all properties.
     pub(crate) fn fn_prep_all(&mut self, o: Obj) {
         self.fn_props(o);
+        self.lazy_all(o);
         if o.has_flag(F_NATIVE) && !o.has_flag(F_FNPROPS) {
             self.materialize(o);
         }
@@ -216,11 +223,11 @@ impl Realm {
     /// Does a read of `prototype` on `o` have to make it? A script function gets its `prototype` object at the first read, not when it
     /// is made: a closure that nobody uses as a constructor costs nothing.
     pub(crate) fn needs_prototype(&self, o: Obj) -> bool {
-        o.is_callable() && !o.has_flag(F_NATIVE | F_CLASS)
+        o.is_callable() && !o.has_flag(F_NATIVE | F_CLASS) && !self.function(o.value()).is_some_and(|(ci, _)| self.prog[ci].gen_kind == crate::bytecode::GK_ASYNC)
     }
 
     pub(crate) fn make_prototype(&mut self, f: Obj) -> R<Value> {
-        if self.function(f.value()).is_some_and(|(ci, _)| self.prog[ci].gen_kind != crate::bytecode::GK_NONE) {
+        if self.function(f.value()).is_some_and(|(ci, _)| self.prog[ci].gen_kind == crate::bytecode::GK_GEN) {
             // A generator function: its `prototype` inherits `%GeneratorPrototype%` and has no `constructor`.
             let shape = self.shapes.root(Layout::Object, Some(self.genr.proto.cell()), 4);
             let p = Obj::new(&mut self.heap, &self.shapes, shape).expect("memory");
@@ -285,7 +292,7 @@ impl Realm {
         Ok(Some(r))
     }
 
-    fn ordinary_to_primitive(&mut self, v: Value, o: Obj, order: [Str; 2]) -> R<Value> {
+    pub(crate) fn ordinary_to_primitive(&mut self, v: Value, o: Obj, order: [Str; 2]) -> R<Value> {
         for k in order {
             let f = self.get_prop(o.value(), Key::Name(k))?;
             if !Realm::obj(f).is_some_and(|f| f.is_callable()) {
@@ -320,8 +327,10 @@ impl Realm {
         // One line for each built-in module. Add one line, keep sorted.
         self.install_array();
         self.install_collections();
+        self.install_date();
         self.install_generator();
         self.install_json();
+        self.install_modules();
         self.install_number();
         self.install_promise();
         self.install_reflect();
@@ -332,9 +341,8 @@ impl Realm {
     fn install_function(&mut self) {
         let proto = self.function_proto;
         self.ctor("Function", 1, function_ctor, proto);
-        for (n, len, f) in [("apply", 2, fn_apply as NativeFn), ("bind", 1, fn_bind), ("call", 1, fn_call), ("toString", 0, fn_to_string)] {
-            self.method(proto, n, len, f);
-        }
+        static FUNCTION_PROTO: &[Ent] = &[m("apply", 2, fn_apply), m("bind", 1, fn_bind), m("call", 1, fn_call), m("toString", 0, fn_to_string)];
+        self.lazy_table(proto, FUNCTION_PROTO);
         self.install_has_instance();
     }
 
@@ -371,8 +379,41 @@ impl Realm {
 
 // ---- Function.prototype ----
 
-fn function_ctor(rt: &mut Realm, _this: Value, _args: &[Value]) -> R<Value> {
-    rt.type_error("the Function constructor is not supported (there is no eval)")
+/// `Function(p1, ..., body)` and `new Function(...)`: CreateDynamicFunction for the normal kind. The text is one function expression
+/// compiled as a script of this realm, so the function has the global scope. The parameters and the body must parse alone, so a
+/// comment or a brace cannot reach across. js2 has no `GeneratorFunction` and no `AsyncFunction` constructors, so there are no
+/// other kinds.
+fn function_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+    let last = args.len().saturating_sub(1);
+    let mut params = String::new();
+    for (i, &a) in args[..last].iter().enumerate() {
+        if i > 0 {
+            params.push(',');
+        }
+        let s = rt.to_str(a)?;
+        params.push_str(&rt.text(s));
+    }
+    let body = match args.last() {
+        Some(&b) => {
+            let s = rt.to_str(b)?;
+            rt.text(s)
+        }
+        None => String::new(),
+    };
+    // Each part is checked as the text of one function declaration: a brace in the body cannot close the function and go on.
+    for part in [format!("function anonymous({params}\n) {{\n}}"), format!("function anonymous(\n) {{\n{body}\n}}")] {
+        match parse_script_lazy(&part, Limits::default(), &mut Facts::new()) {
+            Ok(p) if matches!(p.list(p.body).collect::<Vec<_>>()[..], [s] if matches!(p.stmt(s).kind, StmtKind::Function(_))) => {}
+            Ok(_) => return Err(rt.error(ErrKind::Syntax, "Unexpected token '}'")),
+            Err(e) => return Err(rt.error(ErrKind::Syntax, &e.msg)),
+        }
+    }
+    let ci = rt.script_code(&format!("(function ({params}\n) {{\n{body}\n}})"), ScriptMode { value: true, ..ScriptMode::default() })?;
+    let (top, global) = (rt.new_function(ci, Value::UNDEFINED), rt.global.value());
+    let f = rt.call_function(top, global, &[])?;
+    let anonymous = rt.intern("anonymous");
+    rt.name_function(f, Key::Name(anonymous), 0)?;
+    Ok(f)
 }
 
 fn callable_this(rt: &mut Realm, this: Value, what: &str) -> R<()> {

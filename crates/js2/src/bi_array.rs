@@ -6,6 +6,7 @@
 //! object (it throws). The helpers [`get_at`], [`has_at`], [`set_at`] and [`del_at`] take the direct path for an array with plain
 //! elements, so a real array pays one flag test. An accessor property of an array-like is not read here (it needs a call): known gap.
 //! `shift` and `unshift` move all the elements: O(n) each.
+use crate::lazy::{Ent, m};
 use crate::bi_object::H_SEARCH;
 use crate::builtins::{NativeFn, arg};
 use crate::interp_rt::{ErrKind, Key, R, Realm};
@@ -179,30 +180,30 @@ impl Realm {
     pub(crate) fn install_array(&mut self) {
         let proto = self.array_proto;
         let c = self.ctor("Array", 1, array_ctor, proto);
-        self.method(c, "isArray", 1, is_array);
-        for (n, len, f) in [
-            ("at", 1, at as NativeFn),
-            ("concat", 1, concat),
-            ("copyWithin", 2, copy_within),
-            ("fill", 1, fill),
-            ("includes", 1, includes),
-            ("indexOf", 1, index_of),
-            ("join", 1, join),
-            ("lastIndexOf", 1, last_index_of),
-            ("pop", 0, pop),
-            ("push", 1, push),
-            ("reverse", 0, reverse),
-            ("shift", 0, shift),
-            ("slice", 2, slice),
-            ("splice", 2, splice),
-            ("toReversed", 0, to_reversed),
-            ("toSpliced", 2, to_spliced),
-            ("toString", 0, to_string),
-            ("unshift", 1, unshift),
-            ("with", 2, with),
-        ] {
-            self.method(proto, n, len, f);
-        }
+        static ARRAY_STATICS: &[Ent] = &[m("isArray", 1, is_array)];
+        self.lazy_table(c, ARRAY_STATICS);
+        static ARRAY_PROTO: &[Ent] = &[
+            m("at", 1, at),
+            m("concat", 1, concat),
+            m("copyWithin", 2, copy_within),
+            m("fill", 1, fill),
+            m("includes", 1, includes),
+            m("indexOf", 1, index_of),
+            m("join", 1, join),
+            m("lastIndexOf", 1, last_index_of),
+            m("pop", 0, pop),
+            m("push", 1, push),
+            m("reverse", 0, reverse),
+            m("shift", 0, shift),
+            m("slice", 2, slice),
+            m("splice", 2, splice),
+            m("toReversed", 0, to_reversed),
+            m("toSpliced", 2, to_spliced),
+            m("toString", 0, to_string),
+            m("unshift", 1, unshift),
+            m("with", 2, with),
+        ];
+        self.lazy_table(proto, ARRAY_PROTO);
     }
 }
 

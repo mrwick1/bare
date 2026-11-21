@@ -39,6 +39,7 @@
 //! - Caps: a new slot counts against `max_listeners` and `max_listeners_per_target` before anything changes.
 //! - Not done: the special return value of `beforeunload` (no page leaves here), line and column of an `ErrorEvent` (0).
 
+use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_js_api::{Args, HostFn, Local, Type};
@@ -165,7 +166,7 @@ pub(crate) struct Hh {
     pub rej: Cell<Option<[ObjId; 2]>>,
 }
 
-pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
+pub(crate) fn roots(d: &Dom, out: &mut Roots<'_, '_>) {
     for c in d.hh.body.iter().chain([&d.hh.err, &d.hh.rej]) {
         if let Some(o) = c.get() {
             out.extend(o.map(Value::Object));
@@ -642,7 +643,11 @@ fn define(d: &Dom, it: &mut Interp<'_>, owner: ObjId, k: u8, n: &'static str) ->
 
 /// `onabort` of `AbortSignal.prototype`, made with the lazy `AbortSignal` (`browser_abort.rs`).
 pub(crate) fn install_onabort(d: &Dom, it: &mut Interp<'_>, proto: ObjId) -> R<()> {
-    d.def_get_s(it, proto, "onabort", sig_get, Some(sig_set))
+    table!(members = [Row::get(1, "onabort", sig_get, Some(sig_set))]);
+    run(it, |s| {
+        let p = d.obj_local(s, proto);
+        d.install_rows(s, &[p], &members::T)
+    })
 }
 
 pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {

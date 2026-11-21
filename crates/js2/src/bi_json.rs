@@ -2,12 +2,14 @@
 //! `\u0000` survive. `parse` makes plain objects and arrays with `Realm::define`, so the key `__proto__` is an own property and a
 //! repeated key keeps the last value. Nesting is limited to [`MAX_DEPTH`] (a `RangeError`).
 //!
-//! **Known gaps** (each needs a call of a script function from a native, which js2 cannot do yet, or a wrapper object):
-//! a `reviver`, a function `replacer`, a script `toJSON`, a getter on a value that `stringify` reads, and the unwrapping of `Number`,
-//! `String` and `Boolean` objects (there are none). Each of the first four throws a `TypeError` that says so, and a wrapper
-//! object is serialized as a plain object.
+//! `toJSON` of an object is called with `Realm::call_function` (the key is the second argument), so a `Date` serializes.
+//!
+//! **Known gaps** (each needs a call of a script function from a native, or a wrapper object): a `reviver`, a function `replacer`, a
+//! getter on a value that `stringify` reads, and the unwrapping of `Number`, `String` and `Boolean` objects (there are none). Each of
+//! the first three throws a `TypeError` that says so, and a wrapper object is serialized as a plain object.
+use crate::lazy::{Ent, m};
 use crate::bi_array::{get_at, len_of};
-use crate::builtins::{NativeFn, arg};
+use crate::builtins::arg;
 use crate::interp_rt::{ErrKind, R, Realm};
 use crate::object::Obj;
 use crate::value::Value;
@@ -20,9 +22,8 @@ impl Realm {
         let j = Obj::new_plain(self);
         let g = self.global;
         self.hidden(g, "JSON", j.value());
-        for (n, len, f) in [("parse", 2, parse as NativeFn), ("stringify", 3, stringify)] {
-            self.method(j, n, len, f);
-        }
+        static JSON_METHODS: &[Ent] = &[m("parse", 2, parse), m("stringify", 3, stringify)];
+        self.lazy_table(j, JSON_METHODS);
     }
 
     fn json_syntax(&mut self, msg: &str, at: usize) -> Value {
@@ -299,14 +300,17 @@ impl Writer {
         }
     }
 
-    /// `SerializeJSONProperty` for the value `v` (already read from its holder). Returns false when nothing was written (`undefined`,
-    /// a function), so the caller drops the key.
-    fn value(&mut self, rt: &mut Realm, v: Value, indent: &[u16]) -> R<bool> {
-        if let Some(o) = Realm::obj(v) {
+    /// `SerializeJSONProperty` for the value `v` (already read from its holder, under `key`: a string or a number, made a string only
+    /// for a `toJSON` call). Returns false when nothing was written (`undefined`, a function), so the caller drops the key.
+    fn value(&mut self, rt: &mut Realm, mut v: Value, key: Value, indent: &[u16]) -> R<bool> {
+        if Realm::obj(v).is_some() {
             let to_json = rt.get_named(v, "toJSON")?;
             if callable(to_json) {
-                return rt.type_error("JSON.stringify with a toJSON method needs a call of a script function from native code (not built yet)");
+                let k = rt.to_str(key)?.value();
+                v = rt.call_function(to_json, v, &[k])?;
             }
+        }
+        if let Some(o) = Realm::obj(v) {
             if o.is_callable() {
                 return Ok(false);
             }
@@ -350,7 +354,7 @@ impl Writer {
             }
             self.newline(&inner);
             let v = get_at(rt, o.value(), i)?;
-            if !self.value(rt, v, &inner)? {
+            if !self.value(rt, v, Realm::num(i), &inner)? {
                 push_ascii(&mut self.out, "null");
             }
             i += 1.0;
@@ -368,7 +372,7 @@ impl Writer {
         let inner: Vec<u16> = [indent, &self.gap].concat();
         let keys = match &self.keys {
             Some(k) => k.clone(),
-            None => rt.own_key_list(o, true),
+            None => rt.own_key_list_h(o, true)?,
         };
         self.out.push(0x7b);
         let mut any = false;
@@ -387,7 +391,7 @@ impl Writer {
             if !self.gap.is_empty() {
                 self.out.push(0x20);
             }
-            if self.value(rt, v, &inner)? {
+            if self.value(rt, v, k, &inner)? {
                 any = true;
             } else {
                 self.out.truncate(mark);
@@ -449,5 +453,6 @@ fn stringify(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
         Vec::new()
     };
     let mut w = Writer { out: Vec::new(), gap, keys, stack: Vec::new() };
-    if w.value(rt, arg(args, 0), &[])? { Ok(rt.make_units(&w.out)) } else { Ok(Value::UNDEFINED) }
+    let key = rt.string("");
+    if w.value(rt, arg(args, 0), key, &[])? { Ok(rt.make_units(&w.out)) } else { Ok(Value::UNDEFINED) }
 }

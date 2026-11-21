@@ -32,6 +32,7 @@
 //! Gates: the lookup is on `Document` only (no `Element.getElementsByName` exists). `getElementsByTagName` and
 //! `getElementsByClassName` are still snapshot arrays. `NodeList` is not returned by `childNodes` or `querySelectorAll`.
 
+use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_js_api::{Args, Local};
@@ -87,7 +88,7 @@ pub(crate) struct NodeListHost {
 
 // ------------------------------------------------------------------------------------ GC and heap hooks
 
-pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
+pub(crate) fn roots(d: &Dom, out: &mut Roots<'_, '_>) {
     out.extend(d.nl.fixed.borrow().iter().map(|&o| Value::Object(o)));
 }
 

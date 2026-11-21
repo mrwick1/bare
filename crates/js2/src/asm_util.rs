@@ -152,6 +152,7 @@ fn window(i: &Ins, code: &Code) -> Option<usize> {
         Op::Concat | Op::NewArrLit => i.c as usize,
         Op::NewObjLit => code.recipes.get(i.c as usize).map_or(0, <[u32]>::len),
         Op::IterOpen | Op::ForInOpen | Op::IterNext | Op::IterClose => 3,
+        Op::YieldStarStep => 5,
         _ => return None,
     })
 }
@@ -186,7 +187,7 @@ pub fn roots(code: &Code, pin: &[usize]) -> RootMaps {
                 _ => {}
             }
         }
-        if matches!(i.op, Op::GenInit | Op::Yield) {
+        if matches!(i.op, Op::GenInit | Op::Yield | Op::Await) {
             // A suspension reads the registers of its save list, and the resume writes the sent value and the mode.
             let l = code.save_list(i.b).expect("a save list");
             uses[x].extend(l.regs.iter().map(|r| *r as usize));

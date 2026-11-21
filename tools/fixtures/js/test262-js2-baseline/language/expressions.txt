@@ -1,7 +1,7 @@
 # test262 counts of tools/js/test262_js2.sh for each directory: directory, old pass, old fail, old skip, new pass, new fail, new skip.
 # old = bare-js, new = bare-js2. Commit: e4fbf57745c6aae3d1f12f181ecef78b1665d812. Written by tools/js/test262_js2.sh -u. Do not edit by hand.
 language/expressions 0 0 1 0 0 1
-language/expressions/addition 41 1 6 40 2 6
+language/expressions/addition 41 1 6 41 1 6
 language/expressions/array 50 0 2 40 10 2
 language/expressions/arrow-function 40 12 3 43 9 3
 language/expressions/arrow-function/arrow 3 4 0 2 5 0
@@ -145,7 +145,7 @@ language/expressions/super 65 25 4 72 18 4
 language/expressions/tagged-template 21 3 3 16 8 3
 language/expressions/template-literal 56 1 0 56 1 0
 language/expressions/this 2 4 0 2 4 0
-language/expressions/typeof 13 1 2 9 5 2
+language/expressions/typeof 13 1 2 12 2 2
 language/expressions/unary-minus 11 1 2 11 1 2
 language/expressions/unary-plus 14 2 1 14 2 1
 language/expressions/unsigned-right-shift 38 1 6 38 1 6

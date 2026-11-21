@@ -34,14 +34,15 @@
 //! names are refused (`TypeError`); the Standard says `[[PreventExtensions]]` of a legacy platform object is `false`, which is not
 //! forced for an empty map. `new DOMStringMap()` is an illegal constructor. A map is not plain data for structured clone.
 
+use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_js_api::{Args, Local};
 use crate::browser_dom::attr_set;
 use bare_html::dom::{NodeData, NodeId, Ns};
 use bare_js::eval::Interp;
-use bare_js::heap::{HeapError, NamedOp, NamedRequest};
-use bare_js::value::{ObjId, PropertyKey, Value};
+use bare_js::heap::{HeapError, NamedOp};
+use bare_js::value::{ObjId, Value};
 use std::cell::{Cell, OnceCell, RefCell};
 
 /// An element with at most this many attributes is scanned by a read at no charge: the scan costs less than a step.
@@ -253,25 +254,21 @@ pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId) -> R<bool> {
 // ------------------------------------------------------------------------------------ writes
 
 /// The text of a property key (a string key, or an array index as its digits).
-fn key_text(d: &Dom, it: &mut Interp<'_>, key: PropertyKey) -> R<String> {
-    let v = it.heap.key_to_value(key).map_err(|e| it.heap_error(e))?;
-    d.string_arg(it, v)
-}
 
 /// `Host::named_write` for a map: the setter, the deleter and `[[DefineOwnProperty]]` of the Standard.
-pub(crate) fn write(d: &Dom, it: &mut Interp<'_>, req: NamedRequest) -> R<bool> {
-    let Some(&el) = d.dataset.s.borrow().objs.get(&req.owner) else { return Ok(false) };
-    match req.op {
-        NamedOp::Set(v) => set(d, it, el, req.key, v).map(|_| true),
+pub(crate) fn write(d: &Dom, it: &mut Interp<'_>, owner: ObjId, name: &[u16], op: NamedOp) -> R<bool> {
+    let Some(&el) = d.dataset.s.borrow().objs.get(&owner) else { return Ok(false) };
+    match op {
+        NamedOp::Set(v) => set(d, it, el, name, v).map(|_| true),
         NamedOp::Define(desc) => {
             // WebIDL: only a data descriptor (a `value` or a `writable` field) runs the setter. Its flags are ignored.
             if desc.value.is_none() && desc.writable.is_none() {
                 return Ok(false);
             }
-            set(d, it, el, req.key, desc.value.unwrap_or(Value::Undefined)).map(|_| true)
+            set(d, it, el, name, desc.value.unwrap_or(Value::Undefined)).map(|_| true)
         }
         NamedOp::Delete => {
-            let name = key_text(d, it, req.key)?;
+            let name = String::from_utf16_lossy(name);
             let mut doc = d.doc.borrow_mut();
             it.charge(1 + doc.attr_count(el) as u64 / 8)?;
             let attr = attr_of(&name);
@@ -287,9 +284,9 @@ pub(crate) fn write(d: &Dom, it: &mut Interp<'_>, req: NamedRequest) -> R<bool> 
 }
 
 /// The named setter: the value first (`ToString` can run script), then the name, then the attribute.
-fn set(d: &Dom, it: &mut Interp<'_>, el: NodeId, key: PropertyKey, v: Value) -> R<()> {
+fn set(d: &Dom, it: &mut Interp<'_>, el: NodeId, name: &[u16], v: Value) -> R<()> {
     let value = d.string_arg(it, v)?;
-    let name = key_text(d, it, key)?;
+    let name = String::from_utf16_lossy(name);
     let b = name.as_bytes();
     if b.windows(2).any(|w| w[0] == b'-' && w[1].is_ascii_lowercase()) {
         return Err(d.dom_err(it, "SyntaxError", &format!("'{name}' is not a valid property name.")));
@@ -354,7 +351,7 @@ pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
     Ok(())
 }
 
-pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
+pub(crate) fn roots(d: &Dom, out: &mut Roots<'_, '_>) {
     out.extend(d.dataset.fixed.borrow().iter().map(|&o| Value::Object(o)));
 }
 

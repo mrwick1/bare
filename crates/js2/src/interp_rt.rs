@@ -25,8 +25,16 @@
 //! A hit is the compare of the shape id of the receiver with `Cache::shape`, then one load or store at `Cache::loc` (`Obj::loc`).
 //! A set that adds a property is a hit too: the entry has the shape after the add, and the hit stores the value and the new shape id.
 //! That entry is made only when the new slot is inline, so no allocation is needed. A dictionary shape (`Shapes::cacheable`) never
-//! gets an entry. A property that the prototype chain gives is looked up each time (no entry): design 6.4 guards it with a validity
-//! cell of the prototype, and S1.9 has no such cell yet.
+//! gets an entry.
+//!
+//! **Prototype entries** (`docs/design-js2-proto-ic.md`). A read that finds a data property on the prototype chain makes an entry too.
+//! The record keeps `shape` 0 (the own-property hit never matches), the shape of the receiver in `to` (a shape id is never 0), and the
+//! index of a [`ProtoHit`] in `Feedback::protos` in `loc`. The hit compares the shape of the receiver, then the entry's epoch with
+//! `Shapes::proto_epoch`, then reads the slot of the holder. The shape of the receiver fixes its prototype, so the chain below the
+//! receiver changes only when an object on it changes: `fill_proto` marks the holder and each link with `F_PROTO`, and each shape
+//! change of a marked object bumps the epoch (`Obj::set_shape`). A read of a string, a number or a boolean uses the keys `K_STR`,
+//! `K_NUM` and `K_BOOL` in `to`, and the slow path only. A collection bumps the epoch too, so an entry never outlives a collection
+//! and no pointer of an entry is a root. A site that is stale `PROTO_REFILLS` times goes to `MEGA`.
 //!
 //! After a collection that freed a shape (`Shapes::epoch` changed) [`Realm::collect`] clears every record, because an id may name
 //! another shape now.
@@ -43,7 +51,7 @@ use crate::codes::Codes;
 use crate::interp::LazyCompile;
 use crate::reenter::Machine;
 use crate::builtins::{Hint, Native};
-use crate::object::{Ctx, F_CLASS, F_ELEMS_FIXED, F_ELEMS_RO, F_LAZY, F_LEN_RO, F_NATIVE, F_NOEXT, F_SLOWIDX, Obj};
+use crate::object::{Ctx, F_CLASS, F_ELEMS_FIXED, F_ELEMS_RO, F_HOST, F_LAZY, F_LEN_RO, F_NATIVE, F_NOEXT, F_PROTO, F_SLOWIDX, F_WRAP, Obj};
 use crate::shapes::{A_ACC, A_C, A_E, A_W, ShapeId, Shapes};
 use crate::string::{Chars, Str};
 use crate::value::{Kind, Value};
@@ -61,6 +69,14 @@ pub const POLY: u8 = 3;
 pub const MEGA: u8 = 4;
 /// Entries of a polymorphic site.
 const POLY_MAX: usize = 4;
+/// Bit of `to` in a pool entry of a read site: the entry is a prototype entry, and the other bits are its index in `Feedback::protos`.
+const PROTO: u32 = 1 << 31;
+/// The receiver keys of a prototype entry for a string, a number and a boolean. A shape id is below `SHAPE_CAP`, so none collides.
+const K_STR: u32 = u32::MAX - 1;
+const K_NUM: u32 = u32::MAX - 2;
+const K_BOOL: u32 = u32::MAX - 3;
+/// Times that a prototype entry may be made again after its epoch changed (between two collections) before the site goes to `MEGA`.
+const PROTO_REFILLS: u32 = 16;
 
 /// The hot part of a feedback record (design 6.10 item 12): 16 bytes. `shape` is the shape id of the receiver (0: no entry). `loc` is
 /// the place of the slot (`Obj::loc`). `to` is the shape id after an add (0: the property is there already). `poly` is the index of
@@ -86,6 +102,21 @@ impl Cache {
         let a = slot.expose_provenance() as u64;
         Cache { shape: tag, loc: a as u32, to: (a >> 32) as u32, state: MONO, poly: 0 }
     }
+
+    /// The record's entry as a pool entry (`Poly::e`): `(shape or receiver key, loc, to)`.
+    fn tuple(&self) -> (u32, u32, u32) {
+        if self.shape == 0 && self.to != 0 { (self.to, 0, PROTO | self.loc) } else { (self.shape, self.loc, self.to) }
+    }
+}
+
+/// A prototype entry: the object that holds the data property, the place of its slot (`Obj::loc_now`) and the epoch of `Shapes` at which
+/// the entry was made. It is valid while the epoch is the current one (see the module comment), and then the holder is alive.
+#[derive(Clone, Copy, Debug)]
+pub struct ProtoHit {
+    pub holder: Obj,
+    pub loc: u32,
+    pub epoch: u64,
+    refills: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -103,6 +134,8 @@ pub struct Feedback {
     /// The shape of each object literal recipe, made at the first use. It is pinned.
     pub lits: Box<[Option<ShapeId>]>,
     poly: Vec<Poly>,
+    /// The prototype entries of the sites. Nothing here is a root; an entry is read only while its epoch is current.
+    pub protos: Vec<ProtoHit>,
     /// The template object of each tagged template site (`GetTemplate`): the site and the object.
     pub tmpl: Vec<(u32, Value)>,
     pub ready: bool,
@@ -119,6 +152,12 @@ impl Feedback {
     fn clear(&mut self) {
         self.caches.iter_mut().for_each(|c| *c = Cache::default());
         self.poly.clear();
+        self.protos.clear();
+    }
+
+    /// A collection bumped the epoch: every entry is stale, and a site may fill again.
+    fn collected(&mut self) {
+        self.protos.iter_mut().for_each(|p| p.refills = 0);
     }
 
     /// Mark what the vector keeps alive: its atoms and literal shapes.
@@ -143,11 +182,11 @@ impl Feedback {
         let c = &mut self.caches[site];
         match c.state {
             FRESH => c.state = SEEN,
-            SEEN => *c = Cache { shape, loc, to, state: MONO, poly: 0 },
+            SEEN => *c = if to & PROTO != 0 { Cache { shape: 0, loc: to & !PROTO, to: shape, state: MONO, poly: 0 } } else { Cache { shape, loc, to, state: MONO, poly: 0 } },
             MONO => match u16::try_from(self.poly.len()) {
                 Ok(i) => {
                     let mut p = Poly { n: 2, ..Poly::default() };
-                    p.e[0] = (c.shape, c.loc, c.to);
+                    p.e[0] = c.tuple();
                     p.e[1] = (shape, loc, to);
                     self.poly.push(p);
                     c.poly = i;
@@ -165,6 +204,29 @@ impl Feedback {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// The index in `protos` of the prototype entry of the site for the receiver key `key` (a shape id or `K_STR`, ...).
+    #[inline]
+    fn proto_idx(&self, site: usize, key: u32) -> Option<usize> {
+        let c = &self.caches[site];
+        if c.shape == 0 && c.to == key {
+            return Some(c.loc as usize);
+        }
+        if c.state != POLY {
+            return None;
+        }
+        let p = &self.poly[c.poly as usize];
+        p.e[..p.n as usize].iter().find(|e| e.0 == key && e.2 & PROTO != 0).map(|e| (e.2 & !PROTO) as usize)
+    }
+
+    /// Record a prototype entry for the receiver key `key` of a read site (the site is `SEEN` or has entries).
+    fn add_proto(&mut self, site: usize, key: u32, hit: ProtoHit) {
+        let i = self.protos.len() as u32;
+        if i < PROTO >> 1 {
+            self.protos.push(hit);
+            self.fill(site, key, 0, PROTO | i);
         }
     }
 
@@ -254,6 +316,8 @@ pub struct Realm {
     pub k_to_string: Str,
     /// The `Promise` built-ins, the job queue and the rejections (`promise.rs`).
     pub(crate) pr: crate::promise::Promises,
+    /// The module records and the `import()` calls that wait for the host (`module.rs`).
+    pub(crate) md: crate::module::Modules,
     pub string_proto: Obj,
     pub number_proto: Obj,
     pub boolean_proto: Obj,
@@ -261,6 +325,8 @@ pub struct Realm {
     /// the prototype are made at the first use of either (`Realm::fn_props`).
     pub symbol_proto: Obj,
     pub symbol_ctor: Option<Obj>,
+    /// The lazy tables of the built-in objects (`lazy.rs`).
+    pub(crate) ltab: crate::lazy::Lazy,
     pub(crate) wk: [Str; crate::bi_symbol::WK],
     /// The registry of `Symbol.for`: an object with no prototype, made at the first call. It is a root.
     pub(crate) registry: Option<Obj>,
@@ -339,7 +405,7 @@ impl Realm {
         let (k_then, k_pstate, k_presult) = (atom("then"), atom("\0pstate"), atom("\0presult"));
         let hidden = ["\0native", "\0n1", "\0n2", "\0n3"].map(&mut atom);
         let (k_value, k_done) = (atom("value"), atom("done"));
-        let gkeys = ["\0gstate", "\0gframe", "\0gsent", "\0gmode"].map(&mut atom);
+        let gkeys = ["\0gstate", "\0gframe", "\0gsent", "\0gmode", "\0gpromise"].map(&mut atom);
         let root = shapes.root(Layout::Object, None, 4);
         let object_proto = Obj::new(&mut heap, &shapes, root).expect("memory");
         let proto = Some(object_proto.cell());
@@ -415,16 +481,18 @@ impl Realm {
             k_value_of,
             k_to_string,
             pr,
+            md: Default::default(),
             string_proto,
             number_proto,
             boolean_proto,
             symbol_proto,
             symbol_ctor: None,
+            ltab: Default::default(),
             wk,
             registry: None,
             error_protos,
             s_native,
-            genr: crate::generator::GenRealm { proto: gen_proto, s_iter, keys: gkeys },
+            genr: crate::generator::GenRealm { proto: gen_proto, s_iter, keys: gkeys, func_proto: None, async_proto: None, async_shape: None },
             natives: Vec::new(),
             fn_info: Vec::new(),
             bound_id: 0,
@@ -471,15 +539,20 @@ impl Realm {
         let mut walk_frames = Some(walk_frames);
         let stats = {
             // The promise state is marked in the walk; its weak list is cleared after the marking.
-            struct Rr<'a, F: FnMut(&mut Marker)>(F, &'a mut crate::promise::Promises);
+            struct Rr<'a, F: FnMut(&mut Marker)>(F, &'a mut crate::promise::Promises, &'a mut crate::api::ApiState);
             impl<F: FnMut(&mut Marker)> crate::gc::Roots for Rr<'_, F> {
                 fn walk(&mut self, m: &mut Marker) {
                     (self.0)(m);
                     self.1.walk(m);
+                    self.2.mark(m);
+                }
+                fn owners(&mut self, live: &crate::gc::Live, round: u32, out: &mut Vec<Value>) -> usize {
+                    self.2.trace_owners(live, round, out)
                 }
                 fn weak(&mut self, live: &crate::gc::Live) {
                     // SAFETY: the list holds cells of this heap that the last collection did not free: a dead one is dropped here.
                     self.1.weak_list().retain(|v| unsafe { live.value(*v) });
+                    self.2.prune_owners(live);
                 }
             }
             let roots = |m: &mut Marker| {
@@ -489,7 +562,6 @@ impl Realm {
                     m.value(*c);
                 });
                 pins.iter().for_each(|s| m.shape(*s));
-                api.mark(m);
                 if let Some(rx) = rx {
                     rx.mark(m);
                 }
@@ -500,10 +572,14 @@ impl Realm {
                 }
             };
             pr.collected();
-            collect(heap, shapes, atoms, &mut Rr(roots, pr))
+            collect(heap, shapes, atoms, &mut Rr(roots, pr, api))
         };
         self.last_gc = stats;
         self.collections += 1;
+        // A holder may be gone: every prototype entry is stale from now on (the module comment).
+        self.shapes.bump_proto_epoch();
+        fbs.iter_mut().for_each(Feedback::collected);
+        self.pool.iter_mut().flat_map(|p| p.fbs.iter_mut()).for_each(Feedback::collected);
         if self.shapes.epoch() != self.epoch {
             self.epoch = self.shapes.epoch();
             fbs.iter_mut().for_each(Feedback::clear);
@@ -561,7 +637,7 @@ impl Realm {
     /// The text of an error value, for tests and for the host: `Name: message`.
     pub fn error_text(&self, v: Value) -> String {
         let Some(o) = Realm::obj(v) else { return format!("{v:?}") };
-        let s = |k| match self.lookup_g(o, k) {
+        let s = |k| match self.lookup_ro(o, k) {
             Some(Slot::Data(x)) => Realm::str_of(x).map(|s| self.text(s)).unwrap_or_default(),
             _ => String::new(),
         };
@@ -861,16 +937,33 @@ impl Realm {
         o.proto(&self.shapes).and_then(|p| Realm::obj(Value::pointer(Kind::Object, p)))
     }
 
-    /// Look up `key` along the prototype chain: what the first object that has it holds.
-    pub fn lookup_g(&self, mut o: Obj, key: Str) -> Option<Slot> {
+    /// What `o` itself holds for `key`.
+    fn slot_at(&self, o: Obj, key: Str) -> Option<Slot> {
+        let e = self.shapes.find(o.shape(&self.shapes), key)?;
+        Some(if e.attrs() & A_ACC != 0 {
+            Slot::Acc(o.slot(&self.shapes, e.slot()), o.slot(&self.shapes, e.slot() + 1))
+        } else {
+            Slot::Data(o.slot(&self.shapes, e.slot()))
+        })
+    }
+
+    /// Look up `key` along the prototype chain: what the first object that has it holds. A name that a lazy table (`lazy.rs`) has and
+    /// that is not made yet is made on the way.
+    pub fn lookup_g(&mut self, mut o: Obj, key: Str) -> Option<Slot> {
         loop {
-            let id = o.shape(&self.shapes);
-            if let Some(e) = self.shapes.find(id, key) {
-                return Some(if e.attrs() & A_ACC != 0 {
-                    Slot::Acc(o.slot(&self.shapes, e.slot()), o.slot(&self.shapes, e.slot() + 1))
-                } else {
-                    Slot::Data(o.slot(&self.shapes, e.slot()))
-                });
+            self.lazy_prep(o, key);
+            if let Some(s) = self.slot_at(o, key) {
+                return Some(s);
+            }
+            o = self.proto_of(o)?;
+        }
+    }
+
+    /// [`Realm::lookup_g`] for a name that no lazy table has (`name`, `message`), where the realm is not mutable.
+    fn lookup_ro(&self, mut o: Obj, key: Str) -> Option<Slot> {
+        loop {
+            if let Some(s) = self.slot_at(o, key) {
+                return Some(s);
             }
             o = self.proto_of(o)?;
         }
@@ -911,6 +1004,13 @@ impl Realm {
                 && let Some(v) = self.string_own(s, key)
             {
                 return Ok(Got::Val(v));
+            }
+            if self.api.hs.active {
+                match self.hs_walk(o, key, true)? {
+                    crate::api_host::Walk::Hit(g) => return Ok(g),
+                    crate::api_host::Walk::Miss => return Ok(Got::Val(Value::UNDEFINED)),
+                    crate::api_host::Walk::NoHost => {}
+                }
             }
             self.fn_props(o);
             return match key {
@@ -990,6 +1090,9 @@ impl Realm {
             }
             return Ok(Put::Fail);
         };
+        if self.api.hs.active && o.has_flag(F_HOST) && let Some(ok) = self.hs_write(o, key, crate::api_host::HsWrite::Set(v))? {
+            return Ok(if ok { Put::Done } else { Put::Fail });
+        }
         self.fn_props(o);
         match key {
             Key::Idx(i) if self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed && !o.has_flag(F_SLOWIDX) => {
@@ -1042,9 +1145,10 @@ impl Realm {
     }
 
     /// The setter that the prototype chain of `o` gives for `k`, when the first property that it finds there is an accessor.
-    pub(crate) fn proto_setter(&self, o: Obj, k: Str) -> Option<Put> {
+    pub(crate) fn proto_setter(&mut self, o: Obj, k: Str) -> Option<Put> {
         let mut p = self.proto_of(o)?;
         loop {
+            self.lazy_prep(p, k);
             if let Some(e) = self.shapes.find(p.shape(&self.shapes), k) {
                 // An accessor: its setter. A data property that is not writable: nothing is written (`Put::Fail`).
                 return if e.attrs() & A_ACC != 0 {
@@ -1094,13 +1198,29 @@ impl Realm {
 
     /// `recv.name` at a site, with the cache work of the module comment. The loop tried the hit already.
     pub fn get_field_slow(&mut self, fb: &mut Feedback, site: usize, name: Str, recv: Value) -> R<Got> {
-        let Some(o) = Realm::obj(recv) else { return self.get_prop_g(recv, Key::Name(name)) };
+        let Some(o) = Realm::obj(recv) else {
+            // The `length` of a string is no property of the prototype chain.
+            return if name == self.k_length { self.get_prop_g(recv, Key::Name(name)) } else { self.get_prim_field(fb, site, name, recv) };
+        };
+        self.get_obj_field(fb, site, name, o, recv)
+    }
+
+    /// `get_field_slow` for an object.
+    #[inline(never)]
+    fn get_obj_field(&mut self, fb: &mut Feedback, site: usize, name: Str, o: Obj, recv: Value) -> R<Got> {
+        if o.has_flag(F_HOST) {
+            return self.get_prop_g(recv, Key::Name(name));
+        }
+        self.lazy_prep(o, name);
         let id = o.shape(&self.shapes);
         if fb.caches[site].state == POLY
-            && let Some((loc, _)) = fb.poly_find(site, id.raw())
+            && let Some((loc, 0)) = fb.poly_find(site, id.raw())
         {
             // SAFETY: the pool entry was made by `Obj::loc` for this shape id, and a cache holds tree shapes only.
             return Ok(Got::Val(unsafe { o.read_loc(loc) }));
+        }
+        if let Some(v) = self.proto_probe(fb, site, id.raw(), name, self.proto_of(o)) {
+            return Ok(Got::Val(v));
         }
         if fb.caches[site].state != MEGA
             && self.shapes.cacheable(id)
@@ -1111,11 +1231,113 @@ impl Realm {
             fb.fill(site, id.raw(), loc, 0);
             return Ok(Got::Val(o.slot(&self.shapes, e.slot())));
         }
-        if fb.caches[site].state == FRESH {
+        let was = fb.caches[site].state;
+        if was == FRESH {
             fb.caches[site].state = SEEN;
+        }
+        let got = self.get_prop_g(recv, Key::Name(name))?;
+        if was != FRESH && was != MEGA && matches!(got, Got::Val(_)) {
+            self.fill_proto(fb, site, o, name);
+        }
+        Ok(got)
+    }
+
+    /// `recv.name` for a string, a number or a boolean: the prototype entry of the site, else the plain read.
+    fn get_prim_field(&mut self, fb: &mut Feedback, site: usize, name: Str, recv: Value) -> R<Got> {
+        let (key, proto) = if Realm::str_of(recv).is_some() {
+            (K_STR, self.string_proto)
+        } else if recv.is_number() {
+            (K_NUM, self.number_proto)
+        } else if recv.as_bool().is_some() {
+            (K_BOOL, self.boolean_proto)
+        } else {
+            return self.get_prop_g(recv, Key::Name(name));
+        };
+        if let Some(v) = self.proto_probe(fb, site, key, name, Some(proto)) {
+            return Ok(Got::Val(v));
+        }
+        let was = fb.caches[site].state;
+        if was == FRESH {
+            fb.caches[site].state = SEEN;
+        }
+        if was != FRESH && was != MEGA && let Some((holder, loc)) = self.proto_target(Some(proto), name) {
+            let hit = ProtoHit { holder, loc, epoch: self.shapes.proto_epoch(), refills: 0 };
+            fb.add_proto(site, key, hit);
+            // SAFETY: `loc` was made by `Obj::loc_now` just now, and nothing ran in between.
+            return Ok(Got::Val(unsafe { holder.read_loc(loc) }));
         }
         self.get_prop_g(recv, Key::Name(name))
     }
+
+    /// The data property `name` that the chain from `start` gives: the holder and the place of the slot. It marks the objects that the
+    /// walk passed with `F_PROTO` (so a change of one of them bumps `Shapes::proto_epoch`). `None` when no object has the key, or the
+    /// first one that has it holds an accessor.
+    fn proto_target(&mut self, start: Option<Obj>, name: Str) -> Option<(Obj, u32)> {
+        let start = start?;
+        let mut o = start;
+        let (holder, slot) = loop {
+            self.lazy_prep(o, name);
+            if let Some(e) = self.shapes.find(o.shape(&self.shapes), name) {
+                if e.attrs() & A_ACC != 0 {
+                    return None;
+                }
+                break (o, e.slot());
+            }
+            o = self.proto_of(o)?;
+        };
+        let mut p = start;
+        loop {
+            if !p.has_flag(F_PROTO) {
+                p.set_flag(F_PROTO);
+            }
+            if p == holder {
+                break;
+            }
+            p = self.proto_of(p)?;
+        }
+        Some((holder, holder.loc_now(&self.shapes, slot)))
+    }
+
+    /// The value of the prototype entry of the site for the receiver key `key`, made again if its epoch is stale. `None`: no entry, or
+    /// the entry could not be made again (the site goes to `MEGA`).
+    #[inline]
+    fn proto_probe(&mut self, fb: &mut Feedback, site: usize, key: u32, name: Str, start: Option<Obj>) -> Option<Value> {
+        let i = fb.proto_idx(site, key)?;
+        let h = fb.protos[i];
+        let now = self.shapes.proto_epoch();
+        if h.epoch == now {
+            // SAFETY: the epoch is current, so no object changed and no collection ran since `loc` was made for `holder`.
+            return Some(unsafe { h.holder.read_loc(h.loc) });
+        }
+        if h.refills < PROTO_REFILLS
+            && let Some((holder, loc)) = self.proto_target(start, name)
+        {
+            fb.protos[i] = ProtoHit { holder, loc, epoch: now, refills: h.refills + 1 };
+            // SAFETY: as above, for the entry just made.
+            return Some(unsafe { holder.read_loc(loc) });
+        }
+        fb.caches[site] = Cache { state: MEGA, ..Cache::default() };
+        None
+    }
+
+    /// After a read of `o.name` that the own-property entries did not answer: make a prototype entry when the property comes from the
+    /// prototype chain of the receiver.
+    fn fill_proto(&mut self, fb: &mut Feedback, site: usize, o: Obj, name: Str) {
+        // `prototype` of a function, `length` of an array and of a wrapper, and the indexes of a wrapper are not in the shape or the chain only.
+        if name == self.k_prototype || o.has_flag(F_WRAP) {
+            return;
+        }
+        // The shape after the read: the read may have given a function its own properties.
+        let id = o.shape(&self.shapes);
+        if !self.shapes.cacheable(id) || self.shapes.find(id, name).is_some() || (name == self.k_length && self.shapes.get(id).layout == Layout::Indexed) {
+            return;
+        }
+        if let Some((holder, loc)) = self.proto_target(self.proto_of(o), name) {
+            fb.add_proto(site, id.raw(), ProtoHit { holder, loc, epoch: self.shapes.proto_epoch(), refills: 0 });
+        }
+    }
+
+    /// `GetGlobal`: the property of the global object, or a `ReferenceError` when it is not there.
 
     /// Make the entry of the global site `site` for the own data property in slot `slot` of the global object. The first run only marks
     /// the site (as for a property site), the second makes the entry.
@@ -1189,20 +1411,23 @@ impl Realm {
     /// `recv.name = v` at a site.
     pub fn set_field_slow(&mut self, fb: &mut Feedback, site: usize, name: Str, recv: Value, v: Value) -> R<Put> {
         let Some(o) = Realm::obj(recv) else { return self.set_prop_g(recv, Key::Name(name), v) };
+        if o.has_flag(F_HOST) {
+            return self.set_prop_g(recv, Key::Name(name), v);
+        }
         self.fn_prep(o, name);
         self.fn_props(o);
         let id = o.shape(&self.shapes);
         if fb.caches[site].state == POLY
             && let Some((loc, to)) = fb.poly_find(site, id.raw())
         {
-            // SAFETY: as in `get_field_slow`; an add entry was made for an object with room in its inline words.
+            // SAFETY: as in `get_field_slow`; an add entry was made for an object with room in its inline words. `set_shape_id` refuses
+            // an object that a prototype entry depends on; the write of the slot is harmless then (the add below writes it again).
             unsafe {
                 o.write_loc(loc, v);
-                if to != 0 {
-                    o.set_shape_id(to);
+                if to == 0 || o.set_shape_id(to) {
+                    return Ok(Put::Done);
                 }
             }
-            return Ok(Put::Done);
         }
         let layout_ok = self.shapes.cacheable(id) && fb.caches[site].state != MEGA && self.shapes.get(id).layout == Layout::Object;
         match self.shapes.find(id, name) {
@@ -1285,6 +1510,13 @@ impl Realm {
 
     pub fn has_prop(&mut self, recv: Value, key: Key) -> R<bool> {
         let Some(mut o) = Realm::obj(recv) else { return self.type_error("cannot use 'in' on a primitive") };
+        if self.api.hs.active {
+            match self.hs_walk(o, key, false)? {
+                crate::api_host::Walk::Hit(_) => return Ok(true),
+                crate::api_host::Walk::Miss => return Ok(false),
+                crate::api_host::Walk::NoHost => {}
+            }
+        }
         loop {
             self.fn_props(o);
             let found = match key {
@@ -1309,6 +1541,9 @@ impl Realm {
 
     pub fn delete_prop(&mut self, recv: Value, key: Key) -> R<bool> {
         let Some(o) = Realm::obj(recv) else { return Ok(true) };
+        if self.api.hs.active && o.has_flag(F_HOST) && let Some(ok) = self.hs_write(o, key, crate::api_host::HsWrite::Delete)? {
+            return Ok(ok);
+        }
         self.fn_props(o);
         match key {
             Key::Idx(i) if self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed && !o.has_flag(F_SLOWIDX) => {
@@ -1400,7 +1635,7 @@ impl Realm {
     /// specification: array indexes ascending, then the names as they were added.
     pub fn own_keys(&mut self, recv: Value) -> R<Value> {
         let keys: Vec<Value> = if let Some(o) = Realm::obj(recv) {
-            self.own_key_list(o, true)
+            self.own_key_list_h(o, true)?
         } else if let Some(s) = Realm::str_of(recv) {
             (0..s.len()).map(|i| self.string(&i.to_string())).collect()
         } else {
@@ -1445,6 +1680,10 @@ impl Realm {
         };
         self.define_attrs(o, Key::Name(self.k_length), A_C, Value::int(len as i32)).expect("memory");
         self.define_attrs(o, Key::Name(self.k_name), A_C, name.value()).expect("memory");
+        // A generator function has its own `prototype` (a plain function makes it at the first read of it).
+        if o.slot(&self.shapes, 0).as_int().is_some_and(|c| self.prog[c as usize].gen_kind == crate::bytecode::GK_GEN) {
+            self.make_prototype(o).expect("memory");
+        }
     }
 
     /// `SetFunctionName(f, key, prefix)` of a computed key: `prefix` 1 is `get `, 2 is `set `.

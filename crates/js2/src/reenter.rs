@@ -76,15 +76,58 @@ impl Realm {
         }
     }
 
+    /// Send `v` to the generator `g` from an op of the loop (`for-of`): the request of [`Realm::gen_request`], and the run of the body on a pooled
+    /// machine when the generator has to run. Gives the value and whether the generator is done. Called like [`Realm::call_function`].
+    pub(crate) fn gen_nested(&mut self, g: Value, mode: i32, v: Value) -> R<(Value, bool)> {
+        if self.nest >= MAX_NEST {
+            return Err(self.error(ErrKind::Range, "maximum call stack size exceeded"));
+        }
+        match self.gen_request(g, mode, v)? {
+            crate::generator::Step::Result(v, done) => Ok((v, done)),
+            crate::generator::Step::Enter => {
+                let saved = (self.callee, self.nt, self.tail.take(), std::mem::take(&mut self.tail_args));
+                self.nest += 1;
+                let held = self.heap.hold_task();
+                let r = self.resume_raw(g);
+                self.heap.release_task(held);
+                self.nest -= 1;
+                (self.callee, self.nt, self.tail, self.tail_args) = saved;
+                r.map(|v| (v, self.gen_done(g)))
+            }
+        }
+    }
+
+    /// The job of an `await`: send the settled value `v` of the promise (`reject`: the reason) to the async function with the activation `act`, and
+    /// run it on a pooled machine until it waits again or ends. What it gives back is dropped: its result is the promise. Only `STOP` is an
+    /// `Err`; a frame that cannot be entered (the stack limit) rejects the promise.
+    pub(crate) fn async_resume(&mut self, act: Value, v: Value, reject: bool) -> R<()> {
+        let mode = if reject { crate::generator::MODE_THROW } else { crate::generator::MODE_NEXT };
+        let r = match self.gen_request(act, mode, v) {
+            Ok(crate::generator::Step::Enter) => self.resume_raw(act).map(drop),
+            Ok(crate::generator::Step::Result(..)) => Ok(()),
+            Err(e) => Err(e),
+        };
+        match r {
+            Err(e) if e != STOP => {
+                self.async_abort(act, e);
+                Ok(())
+            }
+            r => r,
+        }
+    }
+
     fn resume_script(&mut self, g: Value) -> R<Value> {
+        let v = self.resume_raw(g)?;
+        let done = self.gen_done(g);
+        Ok(self.iter_result(v, done))
+    }
+
+    fn resume_raw(&mut self, g: Value) -> R<Value> {
         let mut m = self.pool.pop().unwrap_or_else(|| Machine { stack: Vec::new(), fbs: Vec::new() });
         let r = Vm::resume_start(self, &mut m.stack, &mut m.fbs, g);
         self.pool.push(m);
         match r {
-            Ok(v) => {
-                let done = self.gen_done(g);
-                Ok(self.iter_result(v, done))
-            }
+            Ok(v) => Ok(v),
             Err(Exit::Throw(e)) => Err(e),
             Err(Exit::Fuel) => Err(STOP),
         }

@@ -37,6 +37,9 @@ built-ins/RegExp
 annexB/built-ins/RegExp
 built-ins/Promise
 built-ins/Symbol
+built-ins/GeneratorPrototype
+built-ins/GeneratorFunction
+built-ins/AsyncFunction
 built-ins/Map
 built-ins/Set
 built-ins/WeakMap
@@ -46,3 +49,4 @@ built-ins/String
 built-ins/Number
 built-ins/Math
 built-ins/JSON
+built-ins/Date

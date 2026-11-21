@@ -36,6 +36,7 @@ impl Realm {
     pub fn define_attrs(&mut self, o: Obj, key: Key, attrs: u8, v: Value) -> R<()> {
         self.fn_props(o);
         let k = self.key_atom(key);
+        self.lazy_prep(o, k);
         match self.shapes.find(o.shape(&self.shapes), k) {
             Some(e) if e.attrs() == attrs => {
                 o.set_slot(&self.shapes, e.slot(), v);
@@ -50,6 +51,7 @@ impl Realm {
     pub fn define_accessor(&mut self, o: Obj, key: Key, f: Value, setter: bool, enumerable: bool) -> R<()> {
         self.fn_props(o);
         let k = self.key_atom(key);
+        self.lazy_prep(o, k);
         let attrs = A_ACC | A_C | if enumerable { A_E } else { 0 };
         let mut vals = [Value::UNDEFINED; 2];
         vals[setter as usize] = f;
@@ -279,7 +281,8 @@ impl Realm {
 
     // ---- spread and rest ----
 
-    /// The values that the iterator of `v` gives. An array and a string are iterated (the protocol is S2.7).
+    /// The values that the iterator of `v` gives. An array and a string are read directly; any other value goes through `Symbol.iterator`
+    /// (`iter.rs`). The values are read at the start: a spread holds them in a list while the iterator runs script (the collector is held).
     pub fn iter_values(&mut self, v: Value) -> R<Vec<Value>> {
         if let Some(o) = Realm::obj(v)
             && self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed
@@ -298,7 +301,18 @@ impl Realm {
             }
             return Ok(out);
         }
-        self.type_error("the value is not iterable (the iterator protocol is S2.7)")
+        let (it, kind) = self.iter_open_generic(v)?;
+        let mut out = Vec::new();
+        if kind.is_undefined() {
+            while let (x, false) = self.gen_nested(it, crate::generator::MODE_NEXT, Value::UNDEFINED)? {
+                out.push(x);
+            }
+        } else {
+            while let Some(x) = self.iter_step(it, kind)? {
+                out.push(x);
+            }
+        }
+        Ok(out)
     }
 
     /// The own enumerable properties of `src`, minus the keys `skip`. `None` when `src` has an accessor: the copy needs calls, so the

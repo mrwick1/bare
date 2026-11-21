@@ -42,7 +42,7 @@ fn this_fn(_rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
 
 /// `%eval%`: indirect eval.
 fn eval_native(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    rt.eval_code(args.first().copied().unwrap_or(Value::UNDEFINED))
+    rt.eval_code(args.first().copied().unwrap_or(Value::UNDEFINED), true)
 }
 
 impl Realm {
@@ -67,18 +67,20 @@ impl Realm {
         Ok(ci)
     }
 
-    /// Run the top level code `ci` of a script with the global object as `this`.
-    pub(crate) fn run_code(&mut self, ci: usize) -> R<Value> {
+    /// Run the top level code `ci` of a script with the global object as `this`. `native`: a native on the Rust stack calls this, with
+    /// no host call or nested call around it (`nest` is 0), so the run is a nested call that holds the collector. A run on a pooled
+    /// machine would collect with the stack of the caller out of the roots.
+    pub(crate) fn run_code(&mut self, ci: usize, native: bool) -> R<Value> {
         let (f, g) = (self.new_function(ci, Value::UNDEFINED), self.global.value());
-        self.a_call(f, g, &[])
+        if native { self.call_function(f, g, &[]) } else { self.a_call(f, g, &[]) }
     }
 
     /// Indirect eval: a value that is not a string is the result; a string runs as a script in the global environment.
-    pub(crate) fn eval_code(&mut self, v: Value) -> R<Value> {
+    pub(crate) fn eval_code(&mut self, v: Value, native: bool) -> R<Value> {
         let Some(s) = Realm::str_of(v) else { return Ok(v) };
         let src = self.text(s);
         let ci = self.script_code(&src, ScriptMode { value: true, eval: true, scoped: false })?;
-        self.run_code(ci)
+        self.run_code(ci, native)
     }
 
     pub(crate) fn a_run_script<'s>(&mut self, source: &str) -> Result<Local<'s>, Error<'s>> {
@@ -86,7 +88,7 @@ impl Realm {
         if self.a_nested() {
             return Err(self.a_unsup("run_script during a call"));
         }
-        let r = self.script_code(source, ScriptMode { value: true, ..ScriptMode::default() }).and_then(|ci| self.run_code(ci));
+        let r = self.script_code(source, ScriptMode { value: true, ..ScriptMode::default() }).and_then(|ci| self.run_code(ci, false));
         self.a_ret(r)
     }
 
@@ -98,7 +100,7 @@ impl Realm {
                 self.api.handlers.insert(src, ci);
             }),
         };
-        let r = ci.and_then(|ci| self.run_code(ci));
+        let r = ci.and_then(|ci| self.run_code(ci, false));
         self.a_ret(r)
     }
 
@@ -116,7 +118,7 @@ impl Realm {
 
     pub(crate) fn a_eval_global<'s>(&mut self, src: Local<'_>) -> Result<Local<'s>, Error<'s>> {
         let v = self.a_at(src);
-        let r = self.eval_code(v);
+        let r = self.eval_code(v, false);
         self.a_ret(r)
     }
 

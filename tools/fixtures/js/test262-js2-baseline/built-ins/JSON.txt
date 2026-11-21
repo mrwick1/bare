@@ -2,6 +2,6 @@
 # old = bare-js, new = bare-js2. Commit: e4fbf57745c6aae3d1f12f181ecef78b1665d812. Written by tools/js/test262_js2.sh -u. Do not edit by hand.
 built-ins/JSON 6 0 0 5 1 0
 built-ins/JSON/isRawJSON 0 0 6 0 0 6
-built-ins/JSON/parse 61 0 16 51 10 16
+built-ins/JSON/parse 63 0 14 53 10 14
 built-ins/JSON/rawJSON 0 0 10 0 0 10
-built-ins/JSON/stringify 48 0 19 30 18 19
+built-ins/JSON/stringify 50 0 17 35 15 17
