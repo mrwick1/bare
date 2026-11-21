@@ -1,0 +1,785 @@
+//! `Promise`, the microtask queue and the tracking of rejections (`docs/design-js2-async.md` 7.1 to 7.4, plan step P1). Safe code over
+//! [`Realm`]; the one place that runs script is [`Vm::drain_microtasks`].
+//!
+//! **A promise** is an `Object` cell with the flag `F_PROMISE` and two hidden slots, 32 bytes in all. Slot 0 is the state: an int, the
+//! state in the low two bits (pending, fulfilled, rejected) and the `handled` bit (4). Slot 1 is the value of a settled promise, or,
+//! while it is pending, the newest reaction (a list that grows at the head). There is no side table. The slots are the first two of
+//! every shape that a promise has (`Promises::shape`, a script that adds a property only appends), and the hidden keys cannot be
+//! deleted, so the slot numbers are fixed.
+//!
+//! **A reaction** is a `Slots` record (`Ctx`) of five values, 48 bytes: `next`, `kind`, `a`, `b` and `derived`. On a pending promise it
+//! is `K_THEN` with `a` = `onFulfilled` and `b` = `onRejected`. When the promise settles the reaction is changed in place into a job:
+//! `kind` is the new state, `a` is the handler that applies and `b` is the value to give it, and `next` becomes the queue link. So a
+//! `then` allocates the reaction and the derived promise and nothing else, and a settle allocates nothing. `derived` is the promise
+//! that the `then` returned, a capability record `[promise, resolve, reject]` for a constructor that is not `Promise`, or `undefined`.
+//!
+//! **The queue** is a FIFO of those records, linked by `next`: `head` and `tail` in [`Promises`]. The collector marks `head`, and the
+//! rest is reachable from it. The two other kinds of job are records too: `K_THENABLE` (the promise to resolve, the thenable, its
+//! `then`) and `K_CALLBACK` (`queueMicrotask`). The hook for an `await` (design 7.3) is a new kind here: an activation that is its
+//! own reaction (step A1).
+//!
+//! **Who runs jobs.** The host: [`Vm::drain_microtasks`], called at the top with the JS stack empty. `Vm::call` and the end of a script
+//! never drain. Each job is a separate entry at the top (`Vm::call`, no nesting, no hold of the collector), so the collector may run
+//! inside a job. The job in progress is `Promises::cur`, a root: the handler, the argument and the derived promise stay reachable
+//! through it. A handler that is a native (a resolving function, `Promise.resolve` as a handler) runs through `Realm::call_native`.
+//!
+//! **Resolving functions** are two native function cells that share the "already resolved" flag without a third cell: slot 1 of each
+//! is the promise, slot 2 is the other function. A call clears slot 1 of both. A thenable that is a native promise with the built-in
+//! `then` and an own-free `constructor` is followed with a reaction (no functions, no derived promise): the same ticks as the
+//! specification, no allocation but the reaction.
+//!
+//! **Rejections** follow the HTML hook `HostPromiseRejectionTracker`: a promise that is rejected with no handler goes to `rejected`
+//! (at most 1,024, the rest is counted in `dropped`). [`Realm::take_rejections`] hands them to the host, and keeps them in `reported`,
+//! a weak list (at most 256), so a handler that comes later is reported as `handled`.
+//!
+//! **Limits** (checked before anything grows, `RangeError`): `max_queue` on a push to the queue from a `then`, a `queueMicrotask` or a
+//! resolve, `max_reactions` on a reaction that waits on a pending promise, `max_jobs_per_drain` in the drain (it fails the drain until
+//! [`Realm::clear_failed_job`]). A settle moves the waiting reactions to the queue with no check: they were counted when they came.
+//! The reaction count is set to 0 at each collection, because a promise that died with reactions on it cannot give them back, so it
+//! counts the reactions that were added since the last collection and are still pending.
+//!
+//! **Not here:** `Symbol.species` (no `Symbol` yet: `then` reads `constructor` and uses it as it is), `Promise.prototype.finally` and the
+//! static combinators (step P3), `Symbol.toStringTag`. A constructor that is a script function or class cannot be called from a
+//! native with `new` yet (`Realm::call_function` does not construct), so `then` on a promise whose `constructor` is a script subclass
+//! throws a `TypeError`; a native constructor works.
+use crate::builtins::{Native, NativeFn, Outcome, arg};
+use crate::cell::Layout;
+use crate::gc::Marker;
+use crate::heap::Heap;
+use crate::interp::{Exit, STOP, Vm};
+use crate::interp_rt::{Key, R, Realm, Slot};
+use crate::object::{Ctx, F_PROMISE, Obj, Spot};
+use crate::shapes::{ShapeId, Shapes};
+use crate::string::Str;
+use crate::value::Value;
+
+const PENDING: i32 = 0;
+const FULFILLED: i32 = 1;
+const REJECTED: i32 = 2;
+const HANDLED: i32 = 4;
+
+/// Reaction record slots.
+const NEXT: usize = 0;
+const KIND: usize = 1;
+const A: usize = 2;
+const B: usize = 3;
+const D: usize = 4;
+const REACTION_WORDS: usize = 5;
+
+/// A reaction on a pending promise: `a` is `onFulfilled`, `b` is `onRejected`.
+const K_THEN: i32 = 0;
+/// A queued reaction: `kind` is the state of the promise (`FULFILLED` or `REJECTED`), `a` the handler and `b` the value.
+const K_FULFIL: i32 = FULFILLED;
+const K_REJECT: i32 = REJECTED;
+/// `NewPromiseResolveThenableJob`: `a` is the thenable, `b` its `then`, `derived` the promise to resolve.
+const K_THENABLE: i32 = 3;
+/// `queueMicrotask`: `a` is the callback.
+const K_CALLBACK: i32 = 4;
+
+/// The unhandled rejections that wait for the host, and the reported ones that wait for a handler.
+const MAX_REJECTED: usize = 1024;
+const MAX_REPORTED: usize = 256;
+
+/// The limits of a realm (`design-js2-async.md` 7.5). A test changes them.
+#[derive(Clone, Copy, Debug)]
+pub struct PromiseLimits {
+    pub max_queue: u32,
+    pub max_reactions: u32,
+    pub max_jobs_per_drain: u32,
+}
+
+impl Default for PromiseLimits {
+    fn default() -> Self {
+        PromiseLimits { max_queue: 1 << 18, max_reactions: 1 << 20, max_jobs_per_drain: 1 << 20 }
+    }
+}
+
+/// What a drain gives to the host when it stops early.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DrainStop {
+    /// The budget ran out in a job.
+    Fuel,
+    /// `max_jobs_per_drain` ran out (the drain fails until `Realm::clear_failed_job`).
+    Limit,
+}
+
+/// What the host gets at the end of a task (HTML "notify about rejected promises").
+#[derive(Debug, Default)]
+pub struct Rejections {
+    /// Promises that were rejected with no handler since the last call, and still have none.
+    pub unhandled: Vec<Value>,
+    /// Promises that were reported before and got a handler since.
+    pub handled: Vec<Value>,
+    /// Rejections that no list had room for.
+    pub dropped: u32,
+}
+
+/// The state of the promise built-ins in a realm.
+pub(crate) struct Promises {
+    pub(crate) proto: Obj,
+    pub(crate) shape: ShapeId,
+    /// `%Promise%` and the built-in `then` (both are also `consts`).
+    pub(crate) ctor: Value,
+    pub(crate) then_fn: Value,
+    pub(crate) k_then: Str,
+    pub(crate) k_state: Str,
+    pub(crate) k_result: Str,
+    /// Where `Promise.prototype.constructor` is, for the shape that `Promise.prototype` has now (a cache for `then`).
+    ctor_spot: Option<Spot>,
+    /// The job queue and the job that runs now.
+    head: Value,
+    tail: Value,
+    cur: Value,
+    queued: u32,
+    reactions: u32,
+    rejected: Vec<Value>,
+    reported: Vec<Value>,
+    handled: Vec<Value>,
+    dropped: u32,
+    failed: bool,
+    pub(crate) limits: PromiseLimits,
+    /// The indexes in `Realm::natives` of the resolving functions and of the executor of a capability.
+    id_resolve: usize,
+    id_reject: usize,
+    id_executor: usize,
+}
+
+impl Promises {
+    pub(crate) fn new(heap: &mut Heap, shapes: &mut Shapes, base: ShapeId, k_then: Str, k_state: Str, k_result: Str) -> Promises {
+        let proto = Obj::new(heap, shapes, base).expect("memory");
+        let shape = Promises::shape_of(shapes, proto, k_state, k_result);
+        Promises {
+            proto,
+            shape,
+            ctor: Value::UNDEFINED,
+            then_fn: Value::UNDEFINED,
+            k_then,
+            k_state,
+            k_result,
+            ctor_spot: None,
+            head: Value::UNDEFINED,
+            tail: Value::UNDEFINED,
+            cur: Value::UNDEFINED,
+            queued: 0,
+            reactions: 0,
+            rejected: Vec::new(),
+            reported: Vec::new(),
+            handled: Vec::new(),
+            dropped: 0,
+            failed: false,
+            limits: PromiseLimits::default(),
+            id_resolve: 0,
+            id_reject: 0,
+            id_executor: 0,
+        }
+    }
+
+    /// The shape of a promise whose prototype is `proto`: two hidden slots, state and value.
+    fn shape_of(shapes: &mut Shapes, proto: Obj, k_state: Str, k_result: Str) -> ShapeId {
+        let root = shapes.root(Layout::Object, Some(proto.cell()), 2);
+        let s = shapes.add(root, k_state, 0).expect("shape");
+        shapes.add(s, k_result, 0).expect("shape")
+    }
+
+    /// Mark what the realm keeps for promises. `reported` is weak: [`Promises::weak`].
+    pub(crate) fn walk(&self, m: &mut Marker) {
+        m.values(&[self.proto.value(), self.ctor, self.then_fn, self.head, self.cur]);
+        m.values(&self.rejected);
+        m.values(&self.handled);
+        m.value(self.k_then.value());
+        m.value(self.k_state.value());
+        m.value(self.k_result.value());
+    }
+
+    /// The weak list: `Realm::collect` drops the promises that died from it, after the marking.
+    pub(crate) fn weak_list(&mut self) -> &mut Vec<Value> {
+        &mut self.reported
+    }
+
+    /// The collector ran: the reactions that were counted may be dead.
+    pub(crate) fn collected(&mut self) {
+        self.reactions = 0;
+    }
+}
+
+/// The promise of a value.
+#[inline]
+fn promise_of(v: Value) -> Option<Obj> {
+    Realm::obj(v).filter(|o| o.has_flag(F_PROMISE))
+}
+
+fn is_callable(v: Value) -> bool {
+    Realm::obj(v).is_some_and(|o| o.is_callable())
+}
+
+/// A handler that is not callable is `undefined`.
+fn handler(v: Value) -> Value {
+    if is_callable(v) { v } else { Value::UNDEFINED }
+}
+
+impl Realm {
+    // ---- promise cells ----
+
+    /// A pending promise with `Promise.prototype`.
+    pub fn new_promise(&mut self) -> Obj {
+        self.promise_in(self.pr.shape)
+    }
+
+    fn promise_in(&mut self, shape: ShapeId) -> Obj {
+        Obj::new_promise(&mut self.heap, &self.shapes, shape).expect("memory")
+    }
+
+    /// A pending promise with the prototype `proto`.
+    fn promise_with_proto(&mut self, proto: Obj) -> Obj {
+        if proto == self.pr.proto {
+            return self.new_promise();
+        }
+        let shape = Promises::shape_of(&mut self.shapes, proto, self.pr.k_state, self.pr.k_result);
+        self.promise_in(shape)
+    }
+
+    #[inline]
+    fn state_word(&self, p: Obj) -> i32 {
+        p.pslot(0).as_int().expect("a promise state")
+    }
+
+    /// The state of a promise as the host sees it: `(state, value)` with state 0 pending, 1 fulfilled, 2 rejected. The value is
+    /// `undefined` while it is pending. `None` when `v` is not a promise.
+    pub fn promise_status(&self, v: Value) -> Option<(i32, Value)> {
+        let p = promise_of(v)?;
+        let s = self.state_word(p) & 3;
+        Some((s, if s == PENDING { Value::UNDEFINED } else { p.pslot(1) }))
+    }
+
+    /// The number of jobs that wait in the queue.
+    pub fn pending_jobs(&self) -> usize {
+        self.pr.queued as usize
+    }
+
+    /// End the failure of a drain (a limit): the next drain runs.
+    pub fn clear_failed_job(&mut self) {
+        self.pr.failed = false;
+    }
+
+    // ---- reactions and the queue ----
+
+    fn reaction(&mut self, kind: i32, a: Value, b: Value, derived: Value) -> Ctx {
+        let r = Ctx::new(&mut self.heap, REACTION_WORDS, Value::UNDEFINED).expect("memory");
+        r.set(KIND, Value::int(kind));
+        r.set(A, a);
+        r.set(B, b);
+        r.set(D, derived);
+        r
+    }
+
+    fn push_job(&mut self, r: Ctx) {
+        let pr = &mut self.pr;
+        r.set(NEXT, Value::UNDEFINED);
+        match Realm::ctx(pr.tail) {
+            Some(t) => t.set(NEXT, r.value()),
+            None => pr.head = r.value(),
+        }
+        pr.tail = r.value();
+        pr.queued += 1;
+    }
+
+    fn pop_job(&mut self) -> Option<Ctx> {
+        let r = Realm::ctx(self.pr.head)?;
+        self.pr.head = r.get(NEXT);
+        if self.pr.head.is_undefined() {
+            self.pr.tail = Value::UNDEFINED;
+        }
+        self.pr.queued -= 1;
+        Some(r)
+    }
+
+    /// Room for one more job? `RangeError` when not.
+    fn room(&mut self) -> R<()> {
+        if self.pr.queued >= self.pr.limits.max_queue {
+            return Err(self.error(crate::interp_rt::ErrKind::Range, "the microtask queue is full"));
+        }
+        Ok(())
+    }
+
+    // ---- settle and resolve ----
+
+    /// Settle the pending promise `p` with `v` and queue its reactions in the order they were added.
+    fn settle(&mut self, p: Obj, st: i32, v: Value) {
+        let word = self.state_word(p);
+        debug_assert!(word & 3 == PENDING, "settle of a settled promise");
+        let mut list = p.pslot(1);
+        p.set_pslot(0, Value::int(st | word & HANDLED));
+        p.set_pslot(1, v);
+        if st == REJECTED && word & HANDLED == 0 {
+            self.track_reject(p);
+        }
+        // The list has the newest first: reverse it, then queue.
+        let (mut rev, mut n) = (Value::UNDEFINED, 0u32);
+        while let Some(r) = Realm::ctx(list) {
+            let next = r.get(NEXT);
+            r.set(NEXT, rev);
+            (rev, list) = (list, next);
+            n += 1;
+        }
+        self.pr.reactions = self.pr.reactions.saturating_sub(n);
+        while let Some(r) = Realm::ctx(rev) {
+            let next = r.get(NEXT);
+            let h = if st == FULFILLED { r.get(A) } else { r.get(B) };
+            r.set(KIND, Value::int(st));
+            r.set(A, h);
+            r.set(B, v);
+            self.push_job(r);
+            rev = next;
+        }
+    }
+
+    pub(crate) fn reject_promise(&mut self, p: Obj, e: Value) {
+        self.settle(p, REJECTED, e);
+    }
+
+    /// The promise resolve function without its flag: `resolution` fulfills `p`, or `p` follows it when it is a thenable. A throw
+    /// is a rejection; only `STOP` (the budget ran out in a getter) is an `Err`.
+    pub(crate) fn resolve_promise(&mut self, p: Obj, x: Value) -> R<()> {
+        let Some(xo) = Realm::obj(x) else {
+            self.settle(p, FULFILLED, x);
+            return Ok(());
+        };
+        if xo == p {
+            let e = self.error(crate::interp_rt::ErrKind::Type, "chaining cycle detected for promise");
+            self.settle(p, REJECTED, e);
+            return Ok(());
+        }
+        let then = match self.get_prop(x, Key::Name(self.pr.k_then)) {
+            Ok(t) => t,
+            Err(e) if e == STOP => return Err(e),
+            Err(e) => {
+                self.settle(p, REJECTED, e);
+                return Ok(());
+            }
+        };
+        if !is_callable(then) {
+            self.settle(p, FULFILLED, x);
+            return Ok(());
+        }
+        if let Err(e) = self.room() {
+            self.settle(p, REJECTED, e);
+            return Ok(());
+        }
+        let r = self.reaction(K_THENABLE, x, then, p.value());
+        self.push_job(r);
+        Ok(())
+    }
+
+    /// The two resolving functions of `p`.
+    fn resolving_functions(&mut self, p: Obj) -> (Obj, Obj) {
+        let res = self.native_cell(self.pr.id_resolve);
+        let rej = self.native_cell(self.pr.id_reject);
+        res.set_slot(&self.shapes, 1, p.value());
+        res.set_slot(&self.shapes, 2, rej.value());
+        rej.set_slot(&self.shapes, 1, p.value());
+        rej.set_slot(&self.shapes, 2, res.value());
+        (res, rej)
+    }
+
+    /// The body of a resolving function `f`: nothing when the pair was used.
+    fn resolving_call(&mut self, f: Obj, v: Value, reject: bool) -> R<()> {
+        let Some(p) = promise_of(f.slot(&self.shapes, 1)) else { return Ok(()) };
+        let other = f.slot(&self.shapes, 2);
+        f.set_slot(&self.shapes, 1, Value::UNDEFINED);
+        if let Some(o) = Realm::obj(other) {
+            o.set_slot(&self.shapes, 1, Value::UNDEFINED);
+        }
+        if reject {
+            self.reject_promise(p, v);
+            Ok(())
+        } else {
+            self.resolve_promise(p, v)
+        }
+    }
+
+    // ---- then ----
+
+    /// `p.constructor`. A promise with the default shape (no own property, prototype `Promise.prototype`) reads it from the spot of
+    /// `Promise.prototype`; the spot is made again when a script changed the shape of the prototype.
+    fn promise_constructor(&mut self, p: Obj) -> R<Value> {
+        let default = p.shape(&self.shapes) == self.pr.shape;
+        if default && let Some(v) = self.pr.ctor_spot.and_then(|s| self.pr.proto.read_spot(s)) {
+            return Ok(v);
+        }
+        let kc = self.k_constructor;
+        match self.lookup_g(p, kc) {
+            Some(Slot::Data(v)) => {
+                if default {
+                    let proto = self.pr.proto;
+                    self.pr.ctor_spot = self.shapes.find(proto.shape(&self.shapes), kc).and_then(|e| proto.spot(&self.shapes, e.slot()));
+                }
+                Ok(v)
+            }
+            _ => self.get_prop(p.value(), Key::Name(kc)),
+        }
+    }
+
+    /// Whether `Promise` is on the prototype chain of the constructor `c` (`class P extends Promise`).
+    fn inherits_promise(&self, c: Obj) -> bool {
+        let mut o = self.proto_of(c);
+        while let Some(x) = o {
+            if x.value() == self.pr.ctor {
+                return true;
+            }
+            o = self.proto_of(x);
+        }
+        false
+    }
+
+    /// `PerformPromiseThen`: `derived` is a promise, a capability record or `undefined`.
+    fn perform_then(&mut self, p: Obj, on_ok: Value, on_err: Value, derived: Value) -> R<()> {
+        let word = self.state_word(p);
+        match word & 3 {
+            PENDING => {
+                if self.pr.reactions >= self.pr.limits.max_reactions {
+                    return Err(self.error(crate::interp_rt::ErrKind::Range, "too many promise reactions"));
+                }
+                let r = self.reaction(K_THEN, on_ok, on_err, derived);
+                r.set(NEXT, p.pslot(1));
+                p.set_pslot(1, r.value());
+                self.pr.reactions += 1;
+            }
+            st => {
+                self.room()?;
+                let h = if st == FULFILLED { on_ok } else { on_err };
+                let r = self.reaction(st, h, p.pslot(1), derived);
+                if st == REJECTED && word & HANDLED == 0 {
+                    self.track_handle(p);
+                }
+                self.push_job(r);
+            }
+        }
+        p.set_pslot(0, Value::int(self.state_word(p) | HANDLED));
+        Ok(())
+    }
+
+    /// `NewPromiseCapability(c)`: the derived value for `then` and the statics. `%Promise%` gives a plain promise; another constructor
+    /// is called with an executor that keeps the two functions, and the result is a record `[promise, resolve, reject]`.
+    fn new_capability(&mut self, c: Value) -> R<Value> {
+        if c == self.pr.ctor {
+            return Ok(self.new_promise().value());
+        }
+        if !is_callable(c) {
+            return self.type_error("not a constructor");
+        }
+        if self.native_id(c).is_none_or(|i| !self.natives[i].ctor) {
+            return self.type_error("a constructor that is a script function cannot be called from a built-in yet");
+        }
+        let ex = self.native_cell(self.pr.id_executor);
+        let promise = self.construct_native(c, &[ex.value()], c)?;
+        let (res, rej) = (ex.slot(&self.shapes, 1), ex.slot(&self.shapes, 2));
+        if !is_callable(res) || !is_callable(rej) {
+            return self.type_error("the promise capability functions are not callable");
+        }
+        let cap = Ctx::new(&mut self.heap, 3, Value::UNDEFINED).expect("memory");
+        cap.set(0, promise);
+        cap.set(1, res);
+        cap.set(2, rej);
+        Ok(cap.value())
+    }
+
+    /// The promise of a derived value (`then` returns it).
+    fn derived_promise(d: Value) -> Value {
+        Realm::ctx(d).map_or(d, |c| c.get(0))
+    }
+
+    // ---- rejections ----
+
+    fn track_reject(&mut self, p: Obj) {
+        if self.pr.rejected.len() >= MAX_REJECTED {
+            self.pr.dropped += 1;
+        } else {
+            self.pr.rejected.push(p.value());
+        }
+    }
+
+    /// A handler was added to the rejected promise `p` that had none.
+    fn track_handle(&mut self, p: Obj) {
+        let v = p.value();
+        if let Some(i) = self.pr.rejected.iter().rposition(|x| *x == v) {
+            self.pr.rejected.remove(i);
+        } else if let Some(i) = self.pr.reported.iter().rposition(|x| *x == v) {
+            self.pr.reported.remove(i);
+            self.pr.handled.push(v);
+        }
+    }
+
+    /// The end of a task: the rejections that the host has not seen. The promises are not rooted: the host uses them at once.
+    pub fn take_rejections(&mut self) -> Rejections {
+        let unhandled = std::mem::take(&mut self.pr.rejected);
+        let room = MAX_REPORTED.saturating_sub(self.pr.reported.len());
+        self.pr.reported.extend(unhandled.iter().take(room));
+        let lost = unhandled.len().saturating_sub(room) as u32;
+        Rejections { unhandled, handled: std::mem::take(&mut self.pr.handled), dropped: std::mem::take(&mut self.pr.dropped) + lost }
+    }
+
+    // ---- installation ----
+
+    pub(crate) fn install_promise(&mut self) {
+        for (f, len) in [(resolve_fn as NativeFn, 1), (reject_fn, 1), (executor_fn, 2)] {
+            self.natives.push(Native { f, ctor: false, len, name: "" });
+        }
+        let n = self.natives.len();
+        (self.pr.id_resolve, self.pr.id_reject, self.pr.id_executor) = (n - 3, n - 2, n - 1);
+        let proto = self.pr.proto;
+        let c = self.ctor("Promise", 1, promise_ctor, proto);
+        self.pr.ctor = c.value();
+        let then = self.new_native(promise_then, false, 2, "then");
+        self.define_attrs(proto, Key::Name(self.pr.k_then), crate::builtins::HIDDEN, then.value()).expect("define");
+        self.pr.then_fn = then.value();
+        self.method(proto, "catch", 1, promise_catch);
+        self.method(c, "resolve", 1, promise_resolve);
+        self.method(c, "reject", 1, promise_reject);
+        let g = self.global;
+        self.method(g, "queueMicrotask", 1, queue_microtask);
+    }
+}
+
+// ---- the built-ins ----
+
+/// A resolving function (slots 1 and 2 hold the promise and the other function).
+fn resolve_fn(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+    let f = Realm::obj(rt.callee).expect("a resolving function");
+    rt.resolving_call(f, arg(args, 0), false)?;
+    Ok(Value::UNDEFINED)
+}
+
+fn reject_fn(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+    let f = Realm::obj(rt.callee).expect("a resolving function");
+    rt.resolving_call(f, arg(args, 0), true)?;
+    Ok(Value::UNDEFINED)
+}
+
+/// The executor of `NewPromiseCapability`: it keeps `resolve` and `reject` in its slots 1 and 2.
+fn executor_fn(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+    let f = Realm::obj(rt.callee).expect("an executor");
+    if !f.slot(&rt.shapes, 1).is_undefined() || !f.slot(&rt.shapes, 2).is_undefined() {
+        return rt.type_error("the promise capability executor was called twice");
+    }
+    f.set_slot(&rt.shapes, 1, arg(args, 0));
+    f.set_slot(&rt.shapes, 2, arg(args, 1));
+    Ok(Value::UNDEFINED)
+}
+
+fn promise_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+    if Realm::obj(rt.nt).is_none() {
+        return rt.type_error("Promise constructor cannot be invoked without 'new'");
+    }
+    let ex = arg(args, 0);
+    if !is_callable(ex) {
+        return rt.type_error("Promise resolver is not a function");
+    }
+    let nt = rt.nt;
+    let proto = match Realm::obj(rt.get_prop(nt, Key::Name(rt.k_prototype))?) {
+        Some(p) => p,
+        None => rt.pr.proto,
+    };
+    let p = rt.promise_with_proto(proto);
+    let (res, rej) = rt.resolving_functions(p);
+    match rt.call_function(ex, Value::UNDEFINED, &[res.value(), rej.value()]) {
+        Ok(_) => {}
+        Err(e) if e == STOP => return Err(e),
+        Err(e) => rt.resolving_call(rej, e, true)?,
+    }
+    Ok(p.value())
+}
+
+fn promise_then(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+    let Some(p) = promise_of(this) else { return rt.type_error("Promise.prototype.then called on a value that is not a promise") };
+    // `SpeciesConstructor`: the `constructor` of the promise. Only `Promise` has a `Symbol.species` (there is no `Symbol` yet), and
+    // a subclass inherits it, so `constructor` is used when it is `Promise` or inherits from it, and else the default is used.
+    let c = rt.promise_constructor(p)?;
+    let c = match Realm::obj(c) {
+        _ if c.is_undefined() => rt.pr.ctor,
+        None => return rt.type_error("the constructor of a promise is not an object"),
+        Some(o) if c == rt.pr.ctor || rt.inherits_promise(o) => c,
+        Some(_) => rt.pr.ctor,
+    };
+    let derived = rt.new_capability(c)?;
+    rt.perform_then(p, handler(arg(args, 0)), handler(arg(args, 1)), derived)?;
+    Ok(Realm::derived_promise(derived))
+}
+
+/// `catch(onRejected)` is `this.then(undefined, onRejected)`: a tail call, so a script `then` runs in the same loop.
+fn promise_catch(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+    let then = rt.get_prop(this, Key::Name(rt.pr.k_then))?;
+    if !is_callable(then) {
+        return rt.type_error("then is not a function");
+    }
+    rt.tail_args.clear();
+    rt.tail_args.extend([Value::UNDEFINED, arg(args, 0)]);
+    rt.tail = Some((then, this));
+    Ok(Value::UNDEFINED)
+}
+
+/// `Promise.resolve(x)`: `x` itself when it is a promise made by the same constructor, else a new promise resolved with `x`.
+fn promise_resolve(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+    if Realm::obj(this).is_none() {
+        return rt.type_error("Promise.resolve called on a value that is not an object");
+    }
+    let x = arg(args, 0);
+    if promise_of(x).is_some() && rt.get_prop(x, Key::Name(rt.k_constructor))? == this {
+        return Ok(x);
+    }
+    let cap = rt.new_capability(this)?;
+    match Realm::ctx(cap) {
+        None => rt.resolve_promise(promise_of(cap).expect("a promise"), x)?,
+        Some(c) => {
+            rt.call_function(c.get(1), Value::UNDEFINED, &[x])?;
+        }
+    }
+    Ok(Realm::derived_promise(cap))
+}
+
+fn promise_reject(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+    if Realm::obj(this).is_none() {
+        return rt.type_error("Promise.reject called on a value that is not an object");
+    }
+    let cap = rt.new_capability(this)?;
+    match Realm::ctx(cap) {
+        None => rt.reject_promise(promise_of(cap).expect("a promise"), arg(args, 0)),
+        Some(c) => {
+            rt.call_function(c.get(2), Value::UNDEFINED, &[arg(args, 0)])?;
+        }
+    }
+    Ok(Realm::derived_promise(cap))
+}
+
+fn queue_microtask(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+    let f = arg(args, 0);
+    if !is_callable(f) {
+        return rt.type_error("queueMicrotask needs a function");
+    }
+    rt.room()?;
+    let r = rt.reaction(K_CALLBACK, f, Value::UNDEFINED, Value::UNDEFINED);
+    rt.push_job(r);
+    Ok(Value::UNDEFINED)
+}
+
+// ---- running jobs ----
+
+impl Vm {
+    /// Call `f` from the top: a built-in through `call_native` (and the call that it ends in), a script function as a new entry.
+    fn job_call(&mut self, f: Value, this: Value, args: &[Value]) -> Result<Value, Exit> {
+        if self.realm.native_id(f).is_none() {
+            return self.call(f, this, args);
+        }
+        let out = self.realm.call_native(f, this, args).map_err(|e| if e == STOP { Exit::Fuel } else { Exit::Throw(e) })?;
+        match out {
+            Outcome::Val(v) => Ok(v),
+            Outcome::Enter { f, this } => {
+                let a = std::mem::take(&mut self.realm.tail_args);
+                self.job_call(f, this, &a)
+            }
+        }
+    }
+
+    /// Run the jobs until the queue is empty. The host calls it at the top (the JS stack is empty), at the end of a task. `on_error`
+    /// gets the value that a `queueMicrotask` callback threw (the host reports it) and the throw of a capability function; the drain
+    /// goes on. Gives the number of jobs that ran.
+    pub fn drain_microtasks(&mut self, on_error: &mut dyn FnMut(&mut Realm, Value)) -> Result<u32, DrainStop> {
+        if self.realm.pr.failed {
+            return Err(DrainStop::Limit);
+        }
+        let mut n = 0u32;
+        while self.realm.pr.queued > 0 {
+            if n >= self.realm.pr.limits.max_jobs_per_drain {
+                self.realm.pr.failed = true;
+                return Err(DrainStop::Limit);
+            }
+            let r = self.realm.pop_job().expect("a queued job");
+            n += 1;
+            self.realm.pr.cur = r.value();
+            let done = self.run_job(r, on_error);
+            self.realm.pr.cur = Value::UNDEFINED;
+            done.map_err(|_| DrainStop::Fuel)?;
+        }
+        Ok(n)
+    }
+
+    fn run_job(&mut self, r: Ctx, on_error: &mut dyn FnMut(&mut Realm, Value)) -> Result<(), Exit> {
+        let kind = r.get(KIND).as_int().expect("a job kind");
+        match kind {
+            K_FULFIL | K_REJECT => {
+                let (h, v, d) = (r.get(A), r.get(B), r.get(D));
+                let res = if h.is_undefined() { if kind == K_FULFIL { Ok(v) } else { Err(Exit::Throw(v)) } } else { self.job_call(h, Value::UNDEFINED, &[v]) };
+                match res {
+                    Ok(v) => self.settle_derived(d, v, false, on_error),
+                    Err(Exit::Throw(e)) => self.settle_derived(d, e, true, on_error),
+                    Err(Exit::Fuel) => Err(Exit::Fuel),
+                }
+            }
+            K_THENABLE => self.thenable_job(r, on_error),
+            K_CALLBACK => match self.job_call(r.get(A), Value::UNDEFINED, &[]) {
+                Ok(_) => Ok(()),
+                Err(Exit::Throw(e)) => {
+                    on_error(&mut self.realm, e);
+                    Ok(())
+                }
+                Err(Exit::Fuel) => Err(Exit::Fuel),
+            },
+            _ => unreachable!("a job kind"),
+        }
+    }
+
+    /// Give the outcome of a handler to the derived value: resolve or reject the promise, or call the function of the capability.
+    fn settle_derived(&mut self, d: Value, v: Value, reject: bool, on_error: &mut dyn FnMut(&mut Realm, Value)) -> Result<(), Exit> {
+        if let Some(p) = promise_of(d) {
+            if reject {
+                self.realm.reject_promise(p, v);
+                return Ok(());
+            }
+            return self.realm.resolve_promise(p, v).map_err(|_| Exit::Fuel);
+        }
+        let Some(c) = Realm::ctx(d) else { return Ok(()) };
+        match self.job_call(c.get(if reject { 2 } else { 1 }), Value::UNDEFINED, &[v]) {
+            Ok(_) => Ok(()),
+            Err(Exit::Throw(e)) => {
+                on_error(&mut self.realm, e);
+                Ok(())
+            }
+            Err(Exit::Fuel) => Err(Exit::Fuel),
+        }
+    }
+
+    /// `NewPromiseResolveThenableJob`: call `then` of the thenable with the resolving functions of the promise.
+    fn thenable_job(&mut self, r: Ctx, _on_error: &mut dyn FnMut(&mut Realm, Value)) -> Result<(), Exit> {
+        let (x, then, d) = (r.get(A), r.get(B), r.get(D));
+        let p = promise_of(d).expect("the promise of a thenable job");
+        // A native promise with the built-in `then` and a `constructor` that is `%Promise%` by plain data: the reaction does the work
+        // of `then` (`SpeciesConstructor` reads nothing that a script can see).
+        if then == self.realm.pr.then_fn
+            && let Some(xp) = promise_of(x)
+            && matches!(self.realm.lookup_g(xp, self.realm.k_constructor), Some(Slot::Data(c)) if c == self.realm.pr.ctor)
+        {
+            return match self.realm.perform_then(xp, Value::UNDEFINED, Value::UNDEFINED, d) {
+                Ok(()) => Ok(()),
+                // The queue is full: the promise is rejected, as the call of `then` would have thrown.
+                Err(e) => {
+                    self.realm.reject_promise(p, e);
+                    Ok(())
+                }
+            };
+        }
+        let (res, rej) = self.realm.resolving_functions(p);
+        // The collector may run in the call: keep `reject` in the job, which is rooted.
+        r.set(B, rej.value());
+        match self.job_call(then, x, &[res.value(), rej.value()]) {
+            Ok(_) => Ok(()),
+            Err(Exit::Throw(e)) => {
+                let rej = Realm::obj(r.get(B)).expect("the reject function");
+                self.realm.resolving_call(rej, e, true).map_err(|_| Exit::Fuel)
+            }
+            Err(Exit::Fuel) => Err(Exit::Fuel),
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "promise_tests.rs"]
+mod tests;
