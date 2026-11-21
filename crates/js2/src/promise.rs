@@ -47,7 +47,7 @@ use crate::gc::Marker;
 use crate::heap::Heap;
 use crate::interp::{STOP, Vm};
 use crate::interp_rt::{Key, R, Realm, Slot};
-use crate::object::{Ctx, F_PROMISE, Obj, Spot};
+use crate::object::{Ctx, K_PROMISE, Obj, Spot};
 use crate::shapes::{ShapeId, Shapes};
 use crate::string::Str;
 use crate::value::Value;
@@ -219,7 +219,7 @@ impl Promises {
 /// The promise of a value.
 #[inline]
 fn promise_of(v: Value) -> Option<Obj> {
-    Realm::obj(v).filter(|o| o.has_flag(F_PROMISE))
+    Realm::obj(v).filter(|o| o.is_kind(K_PROMISE))
 }
 
 fn is_callable(v: Value) -> bool {
