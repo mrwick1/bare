@@ -105,6 +105,11 @@ pub trait LazyCompile {
     fn script(&mut self, _codes: &Codes, _src: &str, _mode: crate::compile::ScriptMode) -> Result<usize, String> {
         Err("this compiler cannot add a script".into())
     }
+    /// Add a stub for the top-level function `top` of the prelude, with the `name` that its `name` property gets, at the end of `codes`.
+    /// Gives its index. Nothing is parsed or compiled: the first call does that (`compile`).
+    fn prelude_fn(&mut self, _codes: &Codes, _top: &str, _name: &str) -> Result<usize, String> {
+        Err("this compiler has no prelude".into())
+    }
     /// Compile `src` as a module (`compile_module`) and add it at the end of `codes`. Gives the index of its code and its facts.
     fn module(&mut self, _codes: &Codes, _src: &str) -> Result<(usize, crate::compile::ModInfo), String> {
         Err("this compiler cannot add a module".into())
@@ -1019,7 +1024,8 @@ impl Vm {
         // Call the helper `$h` of the prelude with the arguments in `realm.tail_args`; the result goes to register `$dst`.
         macro_rules! enter_helper {
             ($h:expr, $dst:expr, $next:expr) => {{
-                let f = realm.helpers[$h];
+                let f = realm.pre[$h];
+                let f = if f.is_undefined() { tri!(realm.pre_make($h)) } else { f };
                 let Some((ni, cctx)) = realm.function(f) else { call_err!(f) };
                 let len = realm.tail_args.len();
                 let nf = fp + code.nregs as usize + REC;
@@ -1825,6 +1831,18 @@ impl Vm {
                     }
                     Op::CheckInit => {
                         tdz!(r!(a!()), bx!());
+                        pc = next;
+                    }
+                    Op::GetPre => {
+                        // A slot of the prelude (`prelude_pre.rs`): the value, or the first read of the slot makes it.
+                        let v = realm.pre[bx!()];
+                        if v.is_undefined() {
+                            std::hint::cold_path();
+                            gate!();
+                            r!(a!()) = tri!(realm.pre_make(bx!()));
+                        } else {
+                            r!(a!()) = v;
+                        }
                         pc = next;
                     }
                     Op::GetCtx => {

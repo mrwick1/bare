@@ -342,8 +342,9 @@ pub struct Realm {
     pub(crate) genr: crate::generator::GenRealm,
     /// The index of the native that runs a bound function.
     pub(crate) bound_id: i32,
-    /// The helpers of `prelude.js` that natives call through the tail channel (`bi_object.rs`).
-    pub(crate) helpers: [Value; crate::bi_object::HELPERS],
+    /// The slots of the prelude (`prelude_pre.rs`): `undefined` until the first read. The first slots are the helpers that natives call
+    /// through the tail channel (`bi_object.rs`).
+    pub(crate) pre: [Value; crate::prelude_pre::NPRE],
     /// While a native runs: the function cell that was called, and `new.target` (`undefined` for a plain call).
     pub callee: Value,
     pub nt: Value,
@@ -496,7 +497,7 @@ impl Realm {
             natives: Vec::new(),
             fn_info: Vec::new(),
             bound_id: 0,
-            helpers: [Value::UNDEFINED; crate::bi_object::HELPERS],
+            pre: [Value::UNDEFINED; crate::prelude_pre::NPRE],
             callee: Value::UNDEFINED,
             nt: Value::UNDEFINED,
             tail: None,

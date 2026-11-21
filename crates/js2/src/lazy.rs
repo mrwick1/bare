@@ -25,6 +25,7 @@
 use crate::builtins::{HIDDEN, NativeFn};
 use crate::interp_rt::{Key, Realm};
 use crate::object::Obj;
+use crate::bi_object::Desc;
 use crate::string::{Chars, Str};
 use crate::value::Value;
 
@@ -47,6 +48,13 @@ pub(crate) enum Kind {
     Same(&'static str),
     /// A method whose key is the well-known symbol `wk[i]` (`bi_symbol.rs`); the name of the entry is the name of the function.
     Sym(NativeFn, usize),
+    /// A method that is a top-level function of `prelude.js` of this name (`prelude_pre.rs`): a stub that the first call compiles. The
+    /// `length` is the one of the function.
+    Script(&'static str),
+    /// A method with the key `wk[i]` that is the same function as the entry `of` of the same table (`Array.prototype[Symbol.iterator]`).
+    SymSame(usize, &'static str),
+    /// An accessor of two natives, not enumerable and configurable: the getter has `length` 0 and the setter 1 (`Object.prototype.__proto__`).
+    Acc(NativeFn, NativeFn),
 }
 
 /// One entry of a table: a name, the `length` of its function, and what it makes.
@@ -104,6 +112,21 @@ pub(crate) const fn sym(name: &'static str, i: usize, f: NativeFn) -> Ent {
     Ent { hash: hash(name), name, len: 0, kind: Kind::Sym(f, i) }
 }
 
+/// A method `name` that is the top-level function `top` of `prelude.js`.
+pub(crate) const fn script(name: &'static str, top: &'static str) -> Ent {
+    Ent { hash: hash(name), name, len: 0, kind: Kind::Script(top) }
+}
+
+/// A method with the key `wk[i]` that is the same function as the entry `of` of the same table.
+pub(crate) const fn sym_same(name: &'static str, i: usize, of: &'static str) -> Ent {
+    Ent { hash: hash(name), name, len: 0, kind: Kind::SymSame(i, of) }
+}
+
+/// An accessor `name` of the natives `get` and `set`.
+pub(crate) const fn acc(name: &'static str, get: NativeFn, set: NativeFn) -> Ent {
+    Ent { hash: hash(name), name, len: 0, kind: Kind::Acc(get, set) }
+}
+
 /// A table of one object, and its place in `Lazy::done`.
 struct Tab {
     obj: Obj,
@@ -137,12 +160,6 @@ impl Default for Lazy {
     }
 }
 
-#[cfg(test)]
-thread_local! {
-    /// A test switch: a realm that makes every table entry at once, as the eager install did.
-    pub(crate) static EAGER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
 impl Realm {
     /// Give `o` the properties of `ents`, made at their first use. Call it after the eager properties of `o` are defined.
     pub(crate) fn lazy_table(&mut self, o: Obj, ents: &'static [Ent]) {
@@ -161,14 +178,18 @@ impl Realm {
         let ti = l.tabs.len();
         for (j, e) in ents.iter().enumerate() {
             l.bits[(e.hash >> 6) as usize & 63] |= 1 << (e.hash & 63);
-            if let Kind::Sym(_, i) = e.kind {
+            if let Kind::Sym(_, i) | Kind::SymSame(i, _) = e.kind {
                 l.syms.push((o, i, ti, j));
             }
         }
-        l.tabs.push(Tab { obj: o, ents, base, left: ents.len(), has_same: ents.iter().any(|e| matches!(e.kind, Kind::Same(_))) });
+        l.tabs.push(Tab { obj: o, ents, base, left: ents.len(), has_same: ents.iter().any(|e| matches!(e.kind, Kind::Same(_) | Kind::SymSame(..))) });
         o.set_flag(F_LAZYTAB);
-        #[cfg(test)]
-        if EAGER.with(|e| e.get()) {
+    }
+
+    /// A test switch: make every entry of every table now, as an eager install did.
+    #[cfg(test)]
+    pub(crate) fn lazy_everything(&mut self) {
+        for o in self.ltab.tabs.iter().map(|t| t.obj).collect::<Vec<_>>() {
             self.lazy_all(o);
         }
     }
@@ -254,7 +275,7 @@ impl Realm {
             o.clear_flag(F_LAZYTAB);
         }
         let ka = match e.kind {
-            Kind::Sym(_, i) => {
+            Kind::Sym(_, i) | Kind::SymSame(i, _) => {
                 self.ltab.syms.retain(|&(_, _, t, n)| (t, n) != (ti, j));
                 self.wk[i]
             }
@@ -275,13 +296,20 @@ impl Realm {
                 self.lazy_prep(g, ka);
                 self.shared_fn(g, e.name)
             }
-            Kind::Same(of) => {
+            Kind::Same(of) | Kind::SymSame(_, of) => {
                 let ko = self.intern(of);
                 self.lazy_prep(o, ko);
                 self.shared_fn(o, of)
             }
+            Kind::Script(top) => self.pre_fn(top, e.name).expect("a function of the prelude"),
+            Kind::Acc(get, set) => {
+                let (g, s) = (self.new_native(get, false, 0, "get").value(), self.new_native(set, false, 1, "set").value());
+                let d = Desc { get: Some(g), set: Some(s), e: Some(false), c: Some(true), ..Desc::default() };
+                self.define_own(o, k, &d).expect("define");
+                return;
+            }
         };
-        if keep && !matches!(e.kind, Kind::Alias | Kind::Same(_)) {
+        if keep && !matches!(e.kind, Kind::Alias | Kind::Same(_) | Kind::SymSame(..)) {
             self.ltab.shared.push((o, e.name, v));
             self.keep(v);
         }

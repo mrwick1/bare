@@ -43,6 +43,8 @@ impl Realm {
         static STRING_STATICS: &[Ent] = &[m("fromCharCode", 1, from_char_code)];
         self.lazy_table(c, STRING_STATICS);
         static STRING_PROTO: &[Ent] = &[
+            crate::lazy::script("replace", "string_replace"),
+            crate::lazy::script("replaceAll", "string_replaceAll"),
             m("charAt", 1, char_at),
             m("charCodeAt", 1, char_code_at),
             m("codePointAt", 1, code_point_at),
@@ -65,8 +67,6 @@ impl Realm {
             m("repeat", 1, repeat),
             m("padStart", 1, pad_start),
             m("padEnd", 1, pad_end),
-            m("replace", 2, replace),
-            m("replaceAll", 2, replace_all),
             m("localeCompare", 1, locale_compare),
             m("toString", 0, to_string),
             m("valueOf", 0, to_string),
@@ -420,11 +420,11 @@ fn replace_with(rt: &mut Realm, this: Value, args: &[Value], all: bool) -> R<Val
     Ok(rt.make_units(&out))
 }
 
-fn replace(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+pub(crate) fn replace(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     replace_with(rt, this, args, false)
 }
 
-fn replace_all(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+pub(crate) fn replace_all(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     replace_with(rt, this, args, true)
 }
 

@@ -169,6 +169,7 @@ ops! {
     GetName Abx "w S" "`a` = the name of the site `bx` by the full search (a function with `with` or direct `eval`).",
     SetName Abx "r S" "The name of the site `bx` = `a`, by the full search.",
     TypeofName Abx "w S" "`a` = `typeof` the name of the site `bx`, by the full search.",
+    GetPre Abx "w u" "`a` = the slot `bx` of the realm's prelude slots (`prelude_pre.rs`): a function of the prelude, a native or a state object. Only the compiler of the prelude emits it.",
     GetField Abc "w r S" "`a = b.name` for the site `c`.",
     SetField Abc "r r S" "`a.name = b` for the site `c`.",
     SetFieldK Abc "r z S" "`a.name` = the special constant `b` (0 `undefined`, 1 `null`, 2 `false`, 3 `true`).",
