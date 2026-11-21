@@ -38,4 +38,6 @@ The 8,000-key control took 7.48× the instructions of the 1,000-key control afte
 `cargo check --locked -p bare-js2` passed.
 test262 reported 26,122 js2 passes before and after on the same 779 directories. Two generated RegExp tests hit the directory timeout in the changed run. Both passed when run separately with the changed binary. The comparison lost zero passes after those checks.
 
+After the merge of #853, CI found three remaining RegExp checks that used the removed flag. These sites now use the existing object kind check.
+
 Windows and Miri were not run locally.
