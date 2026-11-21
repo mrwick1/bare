@@ -550,6 +550,7 @@ impl<E: Eng> Dom<E> {
     }
 
     /// The wrapper of `node` (`Dom::wrap`).
+    #[inline]
     pub(crate) fn wrap_s<'s>(&self, s: &mut Sc<'s, E>, node: NodeId) -> Res<'s, Local<'s>> {
         old_v::<E>(s, |it| self.wrap(it, node))
     }

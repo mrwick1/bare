@@ -151,7 +151,7 @@ fn window(i: &Ins, code: &Code) -> Option<usize> {
         Op::CallU | Op::New => 1 + i.c as usize,
         Op::Concat | Op::NewArrLit => i.c as usize,
         Op::NewObjLit => code.recipes.get(i.c as usize).map_or(0, <[u32]>::len),
-        Op::IterOpen | Op::ForInOpen | Op::IterNext | Op::IterClose | Op::AIterOpen | Op::AIterNext | Op::AIterClose | Op::AIterCloseT => 3,
+        Op::IterOpen | Op::ForInOpen | Op::ForInNext | Op::IterNext | Op::IterClose | Op::AIterOpen | Op::AIterNext | Op::AIterClose | Op::AIterCloseT => 3,
         Op::YieldStarStep | Op::AYsCall => 5,
         _ => return None,
     })

@@ -63,6 +63,9 @@ pub(crate) const PRE: &[(&str, Pd)] = &[
     ("getOwn", Native(crate::bi_object::object_own_descriptor, 2, "getOwnPropertyDescriptor")),
     ("ownNames", Native(crate::bi_object::object_own_names, 1, "getOwnPropertyNames")),
     ("set", Native(crate::bi_object::set_strict, 3, "set")),
+    ("bind", Native(crate::builtins::bind_callback, 2, "bind")),
+    ("arraySpecies", Native(crate::bi_array::prelude_species, 2, "arraySpecies")),
+    ("arrayPut", Native(crate::bi_array::prelude_array_put, 3, "arrayPut")),
 ];
 
 /// The number of slots.
@@ -109,6 +112,9 @@ impl Realm {
         let next = self.pre_fn("arrayIteratorNext", "next")?;
         let k = self.intern("next");
         self.define_attrs(proto, Key::Name(k), HIDDEN, next)?;
+        self.keep(next);
+        self.keep(k.value());
+        self.ltab.array_iter_next = Some((proto, k, next));
         let tag = self.string("Array Iterator");
         self.define_attrs(proto, Key::Name(self.wk[TO_STRING_TAG]), A_C, tag)?;
         Ok(proto.value())
