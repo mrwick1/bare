@@ -582,6 +582,8 @@ pub const CF_ARGS: u8 = 1;
 /// `Code::flags`: the function (or a function inside it) uses `super`, so `Closure` gives the new function the home object and the
 /// constructor link of the function that makes it.
 pub const CF_LINK: u8 = 2;
+/// `Code::flags`: the function is a generator, so `Closure` gives the new function the prototype `%GeneratorFunction.prototype%`.
+pub const CF_GEN: u8 = 4;
 
 /// The code of one function. It holds no pointer to a realm's heap: its atoms are shared atoms, so all realms of a session can use it.
 #[derive(Debug)]

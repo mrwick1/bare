@@ -30,7 +30,8 @@ use crate::builtins::{NativeFn, arg};
 use crate::bytecode::{Code, NO_REG};
 use crate::codes::Codes;
 use crate::interp::{GEN, MAX_STACK, REC};
-use crate::interp_rt::{ErrKind, R, Realm};
+use crate::interp_rt::{ErrKind, Key, R, Realm};
+use crate::shapes::A_C;
 use crate::object::{F_GEN, Obj};
 use crate::shapes::ShapeId;
 use crate::value::Value;
@@ -71,11 +72,18 @@ pub(crate) struct GenRealm {
     pub s_iter: ShapeId,
     /// The names of the four hidden slots.
     pub keys: [crate::string::Str; 4],
+    /// `%GeneratorFunction.prototype%`, made when the first generator function is (a rooted constant: `Realm::consts`).
+    pub func_proto: Option<Obj>,
 }
 
 impl Realm {
     fn activation(v: Value) -> Option<Obj> {
         Realm::obj(v).filter(|o| o.has_flag(F_GEN))
+    }
+
+    /// Is `v` a generator object? (`for-of` steps one itself: the intrinsic path of the iterator protocol, until G3.)
+    pub(crate) fn is_generator(v: Value) -> bool {
+        Realm::activation(v).is_some()
     }
 
     fn gen_state(a: Obj) -> i32 {
@@ -197,6 +205,33 @@ impl Realm {
             int(w[FR_PC]) as usize
         });
         Ok((ci, pc))
+    }
+
+    /// `Closure` made the generator function `f`: it inherits `%GeneratorFunction.prototype%`, which is made now if it is not yet. That object
+    /// holds `prototype` (`%GeneratorPrototype%`) and the tag; `%GeneratorPrototype%` holds `constructor` and its tag. The `GeneratorFunction`
+    /// constructor is not built (js2 has no `Function` constructor).
+    #[cold]
+    pub(crate) fn make_generator_function(&mut self, f: Value) {
+        let fp = match self.genr.func_proto {
+            Some(p) => p,
+            None => {
+                let shape = self.shapes.root(crate::cell::Layout::Object, Some(self.function_proto.cell()), 4);
+                let p = Obj::new(&mut self.heap, &self.shapes, shape).expect("memory");
+                let gp = self.genr.proto;
+                self.consts.push(p.value());
+                self.genr.func_proto = Some(p);
+                let tag = Key::Name(self.wk[crate::bi_symbol::TO_STRING_TAG]);
+                let (k_proto, k_ctor) = (self.k_prototype, self.k_constructor);
+                let (t1, t2) = (self.string("GeneratorFunction"), self.string("Generator"));
+                self.define_attrs(p, Key::Name(k_proto), A_C, gp.value()).expect("define");
+                self.define_attrs(p, tag, A_C, t1).expect("define");
+                self.define_attrs(gp, Key::Name(k_ctor), A_C, p.value()).expect("define");
+                self.define_attrs(gp, tag, A_C, t2).expect("define");
+                p
+            }
+        };
+        let o = Realm::obj(f).expect("a function");
+        o.set_proto(&mut self.shapes, Some(fp.cell()));
     }
 
     /// The prototype of generator objects and its three methods.
