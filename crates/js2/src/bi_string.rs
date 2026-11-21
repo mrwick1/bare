@@ -244,7 +244,7 @@ fn split(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let u = rt.units(s);
     let limit = if arg(args, 1).is_undefined() { u32::MAX } else { Realm::to_int32(rt.to_number(arg(args, 1))?) as u32 };
     let sep = arg(args, 0);
-    if let Some(re) = Realm::obj(sep).filter(|o| o.has_flag(crate::object::F_REGEXP)) {
+    if let Some(re) = Realm::obj(sep).filter(|o| o.is_kind(crate::object::K_REGEXP)) {
         return crate::bi_string_regexp::split(rt, re, s, limit);
     }
     let mut out: Vec<Value> = Vec::new();

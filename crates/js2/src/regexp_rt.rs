@@ -6,7 +6,7 @@
 //! prototype ([`Realm::install_regexp`]). Known gap: `globalThis.RegExp`, `hasOwnProperty("RegExp")` and a list of the global
 //! properties do not see it before that first use.
 //!
-//! **The object.** A plain `Object` cell with the flag `F_REGEXP` and four slots, in this order: the hidden `\0src` (the pattern
+//! **The object.** A plain `Object` cell with the kind `K_REGEXP` and four slots, in this order: the hidden `\0src` (the pattern
 //! string), the hidden `\0fl` (the flag bits of `Flags::bits`), the hidden `\0prog` (the [`Blob`] of the program, or `undefined`
 //! until the first match) and the own `lastIndex` (writable only). All objects start with one shape, `Rx::shape`. An object that a
 //! script gave another property has another shape, and the slots are found by name then.
@@ -322,7 +322,7 @@ impl Realm {
     /// The regexp that `String.prototype.match`, `matchAll` and `search` use for the argument `v`: `v` itself when it is a regexp, else
     /// `new RegExp(v, flags)`.
     pub(crate) fn regexp_for(&mut self, v: Value, flags: &str) -> R<Obj> {
-        if let Some(o) = Realm::obj(v).filter(|o| o.has_flag(F_REGEXP)) {
+        if let Some(o) = Realm::obj(v).filter(|o| o.is_kind(K_REGEXP)) {
             return Ok(o);
         }
         let src = if v.is_undefined() { self.intern("") } else { self.to_str(v)? };
