@@ -14,6 +14,7 @@
 - `cargo test --locked -p bare --lib browser_new` passed 15 tests on archMachine. The baseline run on the head of #854 reproduced six adapter failures.
 - The browser tests include a loopback session with virtual time and no replay. A 25 ms timer advances `Date.now()` and `performance.now()` by 25 ms.
 - `cargo test --locked -p bare-js2 --lib api` passed 38 tests. The tests cover a borrowed argument range and exact collection counts for rooted and dead objects, strings, and symbols.
+- Miri passed both new API tests for the borrowed range and counted collection.
 
 ## Cost
 
@@ -48,4 +49,4 @@ With `RUSTFLAGS="-C codegen-units=1"`, the counted row goes from 60,409,620 to 6
 
 ## Not tested
 
-The full test suite, Windows, Miri, test262, and a session with replay.
+The full test suite, Windows, the full Miri suite, test262, and a session with replay.
