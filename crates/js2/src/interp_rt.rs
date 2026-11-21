@@ -430,7 +430,8 @@ impl Realm {
         let proto = Some(object_proto.cell());
         let s_object = shapes.root(Layout::Object, proto, 4);
         let function_proto = Obj::new(&mut heap, &shapes, s_object).expect("memory");
-        let array_proto = Obj::new(&mut heap, &shapes, s_object).expect("memory");
+        let array_proto_shape = shapes.root(Layout::Indexed, proto, 0);
+        let array_proto = Obj::array(&mut heap, &shapes, array_proto_shape, &[]).expect("memory");
         let error_proto = Obj::new(&mut heap, &shapes, s_object).expect("memory");
         let global = Obj::new(&mut heap, &shapes, s_object).expect("memory");
         shapes.watch(global.cell().as_ptr() as usize);
@@ -977,6 +978,45 @@ impl Realm {
         }
     }
 
+    /// An index can be a named property, an array element, or a character of a String wrapper.
+    #[cold]
+    fn lookup_index_g(&mut self, mut o: Obj, index: u32) -> Option<Slot> {
+        let key = self.idx_atom(index);
+        loop {
+            if o.is_kind(K_PROXY) {
+                return Some(Slot::Proxy(o));
+            }
+            if let Some(s) = self.slot_at(o, key) {
+                return Some(s);
+            }
+            o = self.proto_of(o)?;
+            if let Some(v) = if o.is_indexed() {
+                o.get_element(index)
+            } else if let Some(s) = self.string_wrapper(o) {
+                self.string_own(s, Key::Idx(index))
+            } else {
+                None
+            } {
+                return Some(Slot::Data(v));
+            }
+        }
+    }
+
+    /// An array or String wrapper can supply a length outside its shape.
+    #[cold]
+    fn lookup_length_g(&mut self, mut o: Obj) -> Option<Slot> {
+        loop {
+            if o.is_kind(K_PROXY) {
+                return Some(Slot::Proxy(o));
+            }
+            match self.get_own(o, Key::Name(self.k_length)) {
+                Some(crate::bi_object::Own::Data(v, _)) => return Some(Slot::Data(v)),
+                Some(crate::bi_object::Own::Acc(g, s, _)) => return Some(Slot::Acc(g, s)),
+                None => o = self.proto_of(o)?,
+            }
+        }
+    }
+
     /// [`Realm::lookup_g`] for a name that no lazy table has (`name`, `message`), where the realm is not mutable.
     fn lookup_ro(&self, mut o: Obj, key: Str) -> Option<Slot> {
         loop {
@@ -1048,13 +1088,16 @@ impl Realm {
                     {
                         return Ok(Got::Val(v));
                     }
-                    let k = self.idx_atom(i);
-                    let slot = self.lookup_g(o, k);
+                    let slot = self.lookup_index_g(o, i);
                     self.got(slot, key, recv)
                 }
                 Key::Name(k) => {
-                    if k == self.k_length && self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed {
-                        return Ok(Got::Val(Realm::num(o.len() as f64)));
+                    if k == self.k_length {
+                        if o.is_indexed() {
+                            return Ok(Got::Val(Realm::num(o.len() as f64)));
+                        }
+                        let slot = self.lookup_length_g(o);
+                        return self.got(slot, key, recv);
                     }
                     self.fn_prep(o, k);
                     match self.lookup_g(o, k) {
@@ -1329,7 +1372,7 @@ impl Realm {
         let start = start?;
         let mut o = start;
         let (holder, slot) = loop {
-            if o.is_kind(K_PROXY) {
+            if o.is_kind(K_PROXY) || name == self.k_length && (o.is_indexed() || o.is_kind(K_WRAP)) {
                 return None;
             }
             self.lazy_prep(o, name);
@@ -1592,7 +1635,10 @@ impl Realm {
                     self.shapes.find(o.shape(&self.shapes), k).is_some() || (k == self.k_length && self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed)
                 }
             };
-            if found {
+            if found || self.string_wrapper(o).is_some_and(|s| match key {
+                Key::Idx(i) => (i as usize) < s.len(),
+                Key::Name(k) => k == self.k_length,
+            }) {
                 return Ok(true);
             }
             match self.proto_of(o) {
