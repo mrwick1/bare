@@ -84,3 +84,41 @@ fn split_with_a_regexp() {
         ("var r = 'asyncio, tasks.run'.split(/[^\\p{Letter}\\p{Number}_\\p{Emoji_Presentation}]+/u).join('|');", "r", "asyncio|tasks|run"),
     ]);
 }
+
+#[test]
+fn regexp_symbol_dispatch() {
+    check(&[
+        ("var o = {flags: 'g'}; o[Symbol.match] = o[Symbol.matchAll] = o[Symbol.search] = o[Symbol.replace] = o[Symbol.split] = function (s, x) { return s === 42 && this === o ? x || 'ok' : 'bad'; }; var p = String.prototype; var r = [p.match.call(42, o), p.matchAll.call(42, o), p.search.call(42, o), p.replace.call(42, o, 'x'), p.replaceAll.call(42, o, 'y'), p.split.call(42, o, 3)].join();", "r", "ok,ok,ok,x,y,3"),
+        ("var a = /a/; a.exec = function () { return {0: 'b', length: 1, index: 1}; }; var r = [a.test(''), 'ab'.match(a)[0], 'ab'.search(a), 'ab'.replace(a, 'c')].join();", "r", "true,b,1,ac"),
+        ("var a = /a/; var r = 'a'.search(a); RegExp.prototype.exec = function () { return {index: 9}; }; r += ',' + 'a'.search(a); RegExp.prototype[Symbol.search] = function () { return 8; }; r += ',' + 'a'.search(a);", "r", "0,9,8"),
+        ("var a = /a/; var log = ''; a.constructor = {}; a.constructor[Symbol.species] = function (re, flags) { log = (re === a) + flags; this.exec = function (s) { if (this.lastIndex !== 1) return null; this.lastIndex = 2; return {length: 2, 1: '!'}; }; }; var r = 'abc'.split(a).join('|') + ':' + log;", "r", "a|!|c:truey"),
+        ("var r = RegExp.prototype[Symbol.match].call({ flags: 'g', exec: function () { return null; } }, 'x');", "r", "null"),
+    ]);
+}
+
+#[test]
+fn named_groups_and_substitutions() {
+    check(&[
+        ("var m = /(?<x>a)(?<y>b)?\\k<x>/.exec('aa'); var r = [m.groups.x, m.groups.y, Object.getPrototypeOf(m.groups) === null, Object.keys(m.groups)].join();", "r", "a,,true,x,y"),
+        ("var r = 'ab'.replace(/(?<x>a)(?<y>z)?/, '$<x>-$<y>-$<missing>') + ':' + 'ab'.replace(/a/, '$<x>');", "r", "a--b:$<x>b"),
+        ("var r = 'ab'.replace(/(?<x>a)/g, function (m, x, i, s, g) { /(?<other>b)/.exec(s); return g.x + i; });", "r", "a0b"),
+        ("var m = /(?<x>a)/d.exec('ab'); var r = m.indices.groups.x === m.indices[1];", "r", "true"),
+    ]);
+}
+
+#[test]
+fn match_all_is_lazy() {
+    check(&[
+        ("var n = 0, a = /a/g; a.constructor = {}; a.constructor[Symbol.species] = function () { this.exec = function () { ++n; return n === 1 ? {0:'a'} : null; }; }; var i = 'aa'.matchAll(a); var r = [n, i[Symbol.iterator]() === i, Object.prototype.toString.call(i), i.next().value[0], n, i.next().done, i.next().done, n].join();", "r", "0,true,[object RegExp String Iterator],a,1,true,true,2"),
+        ("var i = /a/[Symbol.matchAll]('aa'); var r = [i.next().value.index, i.next().done].join();", "r", "0,true"),
+    ]);
+}
+
+#[test]
+fn duplicate_names_in_alternatives() {
+    check(&[
+        ("var m = /^(?:(?<x>a)|(?<x>b))\\k<x>$/d.exec('bb'); var r = m[0] + m.groups.x + ':' + (m.indices.groups.x === m.indices[2]);", "r", "bbb:true"),
+        ("var r = 'ab'.replace(/(?<x>a)|(?<x>b)/g, '<$<x>>');", "r", "<a><b>"),
+        ("var r; try { new RegExp('(?<x>a)(?<x>b)'); } catch (e) { r = e.name; }", "r", "SyntaxError"),
+    ]);
+}

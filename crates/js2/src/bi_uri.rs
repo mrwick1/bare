@@ -1,6 +1,6 @@
 //! The URI functions of the global object: `encodeURI`, `encodeURIComponent`, `decodeURI` and `decodeURIComponent` (ECMA-262 19.2.6).
 //! They are lazy entries of the global table, so a realm that never names one pays nothing. A lone surrogate in an encode and a bad
-//! escape in a decode throw a `URIError`. `escape` and `unescape` (Annex B) are not here yet.
+//! escape in a decode throw a `URIError`. Annex B escape and unescape operate on UTF-16 code units.
 use crate::builtins::arg;
 use crate::interp_rt::{ErrKind, R, Realm};
 use crate::lazy::{Ent, m};
@@ -17,6 +17,8 @@ impl Realm {
             m("encodeURIComponent", 1, encode_uri_component),
             m("decodeURI", 1, decode_uri),
             m("decodeURIComponent", 1, decode_uri_component),
+            m("escape", 1, escape),
+            m("unescape", 1, unescape),
         ];
         let g = self.global;
         self.lazy_table(g, URI_FUNCTIONS);
@@ -112,4 +114,56 @@ fn decode_uri(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
 
 fn decode_uri_component(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     run(rt, args, decode, "")
+}
+
+fn escape(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+    let s = rt.to_str(arg(args, 0))?;
+    let units = rt.units(s);
+    let mut out = Vec::with_capacity(units.len());
+    for u in units {
+        if u < 128 && ((u as u8).is_ascii_alphanumeric() || b"@*_+-./".contains(&(u as u8))) {
+            out.push(u);
+        } else {
+            let digits = if u <= 0xff { 2 } else { 4 };
+            out.push(b'%' as u16);
+            if digits == 4 {
+                out.push(b'u' as u16);
+            }
+            for i in (0..digits).rev() {
+                out.push(b"0123456789ABCDEF"[(u >> (i * 4) & 15) as usize] as u16);
+            }
+            if out.len() > MAX_LEN {
+                return Err(rt.error(ErrKind::Range, "invalid string length"));
+            }
+        }
+    }
+    if out.len() > MAX_LEN {
+        return Err(rt.error(ErrKind::Range, "invalid string length"));
+    }
+    Ok(rt.make_units(&out))
+}
+
+fn unescape(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+    let s = rt.to_str(arg(args, 0))?;
+    let units = rt.units(s);
+    let hex = |i: usize, n: usize| -> Option<u16> {
+        units.get(i..i + n)?.iter().try_fold(0u16, |v, &u| {
+            Some(v * 16 + char::from_u32(u as u32)?.to_digit(16)? as u16)
+        })
+    };
+    let mut out = Vec::with_capacity(units.len());
+    let mut i = 0;
+    while i < units.len() {
+        let (mut u, mut n) = (units[i], 1);
+        if u == b'%' as u16 {
+            if let Some(v) = (units.get(i + 1) == Some(&(b'u' as u16))).then(|| hex(i + 2, 4)).flatten() {
+                (u, n) = (v, 6);
+            } else if let Some(v) = hex(i + 1, 2) {
+                (u, n) = (v, 3);
+            }
+        }
+        out.push(u);
+        i += n;
+    }
+    Ok(rt.make_units(&out))
 }
