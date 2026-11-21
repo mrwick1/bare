@@ -87,6 +87,8 @@ impl<'a> Fc<'a> {
         }
         let t = self.save_list(s, m, m0);
         self.op(Op::Yield, v, t, 0);
+        // A resume brings back the list, `s` and `m` only: the temporaries of the operand hold no value now.
+        (m0..self.next).for_each(|r| Self::bit(&mut self.live, r, false));
         self.set_live(s);
         self.set_live(m);
         let (cont, thr) = (self.label(), self.label());

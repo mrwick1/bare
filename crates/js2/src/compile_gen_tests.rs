@@ -177,3 +177,15 @@ fn a_generator_function_has_the_prototypes_of_the_spec() {
         ("function f() {} function* g() {} var r = (Object.getPrototypeOf(f) === Function.prototype) + ',' + (Object.getPrototypeOf(g) !== Function.prototype);", "r", "true,true"),
     ]);
 }
+
+#[test]
+fn the_temporaries_of_a_yield_are_not_roots_after_a_resume() {
+    // The operand of `yield` is a temporary that a resume does not bring back. A `return()` runs a `finally` that allocates: a collection
+    // there must not read the stale register.
+    check(&[(
+        "var n = 0; function* g() { try { yield [1, 2, 3].map(x => ({ x })); } finally { for (var i = 0; i < 200; i++) n += ({ i }).i; } }
+         var it = g(); it.next(); var x = it.return(5); var r = n + '|' + x.value;",
+        "r",
+        "19900|5",
+    )]);
+}
