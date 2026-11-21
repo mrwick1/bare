@@ -186,6 +186,16 @@ impl Realm {
 
     // ---- iterators ----
 
+    /// Make the iterator intrinsic before a host can read it through a shared borrow.
+    pub fn init_host_intrinsics(&mut self) {
+        self.iterator_prototype();
+    }
+
+    pub(crate) fn host_iterator_prototype(&self) -> Value {
+        assert!(!self.api.iter_proto.is_undefined(), "initialize host intrinsics before reading them");
+        self.api.iter_proto
+    }
+
     /// `%IteratorPrototype%`: an object with `[Symbol.iterator]() { return this }`, made at the first ask.
     pub(crate) fn iterator_prototype(&mut self) -> Value {
         if self.api.iter_proto.is_undefined() {

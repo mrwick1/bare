@@ -128,6 +128,10 @@ impl<F: FnMut(&mut Marker)> Roots for F {
 pub struct Live<'a>(&'a Heap);
 
 impl Live<'_> {
+    pub(crate) fn visit_dead(&self, visit: impl FnMut(crate::cell::CellHeader)) {
+        self.0.visit_dead(visit);
+    }
+
     /// True for a value that is not a pointer, a shared atom, or a marked cell.
     ///
     /// # Safety

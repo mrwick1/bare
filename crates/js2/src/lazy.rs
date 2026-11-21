@@ -24,7 +24,7 @@
 //! the rest in table order after a listing. ECMA-262 does not fix this order (owner decision 2, 2026-11-20).
 use crate::builtins::{HIDDEN, NativeFn};
 use crate::interp_rt::{Key, Realm};
-use crate::object::{F_LAZYTAB, F_ARGS, Obj, Spot};
+use crate::object::{F_LAZYTAB, Obj, Spot};
 use crate::bi_object::Desc;
 use crate::string::{Chars, Str};
 use crate::value::Value;
@@ -36,6 +36,8 @@ pub(crate) enum Kind {
     Method(NativeFn),
     /// A constant: a number, not writable, not enumerable and not configurable.
     Num(f64),
+    /// A data property with explicit attributes.
+    Data(fn(&mut Realm) -> Value, u8),
     /// A method whose native has `i` in slot 1 (one native for many methods: `Date.prototype`, `bi_date.rs`).
     Indexed(NativeFn, i32),
     /// The global property of this name (`Number.parseInt` is the function `parseInt`), as a method.
@@ -86,6 +88,10 @@ pub(crate) const fn m(name: &'static str, len: u8, f: NativeFn) -> Ent {
 /// A constant `name`.
 pub(crate) const fn num(name: &'static str, v: f64) -> Ent {
     Ent { hash: hash(name), name, len: 0, kind: Kind::Num(v) }
+}
+
+pub(crate) const fn data(name: &'static str, get: fn(&mut Realm) -> Value, attrs: u8) -> Ent {
+    Ent { hash: hash(name), name, len: 0, kind: Kind::Data(get, attrs) }
 }
 
 /// A method `name` of the native `f` with `i` in its slot 1.
@@ -289,6 +295,10 @@ impl Realm {
                 c.value()
             }
             Kind::Num(n) => return self.define_attrs(o, k, 0, Value::number(n)).expect("define"),
+            Kind::Data(get, attrs) => {
+                let v = get(self);
+                return self.define_attrs(o, k, attrs, v).expect("define");
+            }
             Kind::Alias => {
                 let g = self.global;
                 self.lazy_prep(g, ka);
@@ -316,19 +326,6 @@ impl Realm {
             self.keep(v);
         }
         self.define_attrs(o, k, HIDDEN, v).expect("define");
-    }
-
-    /// An arguments object that holds `args`, with the own `Symbol.iterator` that is `%Array.prototype.values%`.
-    #[inline(never)]
-    pub(crate) fn new_args(&mut self, args: &[Value]) -> Value {
-        if self.args_iter.is_undefined() {
-            self.args_iter = self.array_values();
-        }
-        let o = Obj::array(&mut self.heap, &self.shapes, self.s_args, args).expect("memory");
-        o.set_slot(&self.shapes, 0, Realm::num(args.len() as f64));
-        o.set_slot(&self.shapes, 1, self.args_iter);
-        o.set_flag(F_ARGS);
-        o.value()
     }
 
     /// `%Array.prototype.values%`: made now if it is not, and the same function whatever a script did to the property since. A realm with

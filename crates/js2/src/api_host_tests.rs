@@ -463,6 +463,51 @@ fn a_host_object_is_not_a_date_for_object_prototype_to_string() {
 }
 
 #[test]
+fn borrows_the_current_call_arguments() {
+    struct ReadArgs;
+
+    impl Host<Realm> for ReadArgs {
+        fn call<'s>(&self, s: &mut Scope<'s, Realm>, _id: u32, this: Local<'s>, args: Args<'s>, _new: bool) -> Result<Local<'s>, Error<'s>> {
+            let rt = s.engine();
+            assert_eq!(rt.raw_args_slice(args, 1, usize::MAX), Some([Value::int(2), Value::int(3)].as_slice()));
+            assert_eq!(rt.raw_args_slice(args, 1, 1), None);
+            assert_eq!(rt.raw_args_slice(args, 3, 4), None);
+            assert_eq!(rt.raw_args_slice(Args::from_slots(this.slot(), 1), 0, 1), None);
+            assert_eq!(rt.raw_args_slice(Args::from_slots(args.get(2).unwrap().slot(), 2), 0, 2), None);
+            Ok(s.undefined())
+        }
+    }
+
+    let mut r = realm();
+    r.set_host(Rc::new(ReadArgs));
+    enter(&mut r, |s| {
+        let f = s.host_function("readArgs", 0, 3, HostFn::Method).unwrap();
+        let g = s.global();
+        s.define_str(g, "readArgs", f, Attrs::METHOD).unwrap();
+    });
+    r.run_text("readArgs(1, 2, 3)").unwrap();
+}
+
+#[test]
+fn a_counted_collection_skips_live_cells_and_free_slots() {
+    let mut r = realm();
+    r.raw_collect(&[]);
+    let (keep, dead) = enter(&mut r, |s| {
+        let keep = s.new_object().unwrap();
+        let dead = s.new_object().unwrap();
+        (s.engine().raw(keep), s.engine().raw(dead))
+    });
+    let text = r.string("a small string");
+    let long = r.string(&"x".repeat(16_384));
+    let symbol = Str::new_symbol(&mut r.heap, None).unwrap().key_value();
+
+    assert_eq!(r.raw_collect(&[keep, dead, text, long, symbol]), Default::default());
+    let freed = r.raw_collect(&[keep]);
+    assert_eq!((freed.objects, freed.strings, freed.symbols), (1, 2, 1));
+    assert_eq!(r.raw_collect(&[keep]), Default::default());
+}
+
+#[test]
 fn assignment_materializes_an_inherited_host_setter() {
     for assignment in ["lzc.lazySetter = 42", "(function (key) { lzc[key] = 42; })('lazySetter')"] {
         let (mut r, _) = filled();
