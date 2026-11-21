@@ -17955,6 +17955,26 @@ Cost rule (a row over +0.5% at the default build passes only if it is within +0.
 Tests. Linux, debug: `cargo test --locked -p bare-js2 --lib`: 471 of 472 pass in a run that shared the machine with 3 builds; the failing one is `compile::tests::a_scope_with_many_locals_compiles_in_linear_time` (a timing test, unrelated), which passes alone. `cargo test --locked --release -p bare-js-diff`: pass. test262 (`tools/js/test262_js2.sh -j 4`): the base `a04014eb` and the new tree give the same result for all 31,819 test lines (`diff` of `new.txt` is empty), so the baseline file is not changed. `proto_ic_tests.rs`: 15 tests (each normally and under constant collection); Before the rebase I broke the invalidation rules in the code on purpose, one at a time, and a test failed each time (not repeated after the rebase).
 
 Not tested: Windows, macOS, Miri and clippy; the browser (js2 is not wired in); a getter or an absent key on the chain (not cached, by design); a program that changes a prototype in a hot loop (the 16-refill budget is covered by a test, no timing); wall time and memory (RSS) of a whole run; a `then` step on a tree with the generator and Symbol changes (not merged yet).
+### Prototype-chain inline cache on top of the cold arms (#809), 2026-11-21
+
+The layout failure above was measured against a `Vm::run` of one function. #809 splits the loop into `Vm::exec::<Hot>` and `Vm::exec::<Cold>`. This branch is merged with the #809 head `ba35454d` (conflict only in `object.rs`: `F_PROTO` next to `F_PROMISE` and `F_GEN`, no overlap of values).
+
+`interp_load`, `tools/js/instr.sh` (3 runs, spread 0.002 M), net of N = 0, M instructions, archMachine (not idle). Base: `ba35454d`. New: this tree. Both built in the same session with symbols kept; the cgu1 columns use `CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1`.
+
+| Row | #809 default | This tree default | | #809 cgu1 | This tree cgu1 | |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loopfn` | 280.50 | 281.50 | +0.4% | 280.50 | 275.50 | -1.8% |
+| `calls` | 586.50 | 579.50 | -1.2% | 562.50 | 556.50 | -1.1% |
+| `fib` | 1,100.90 | 1,091.48 | -0.9% | 1,048.40 | 1,038.98 | -0.9% |
+| `closures` | 370.10 | 368.70 | -0.4% | 360.56 | 357.56 | -0.8% |
+| `objects` | 143.73 | 142.19 | -1.1% | 142.59 | 141.19 | -1.0% |
+
+No row is over +0.5% at the default build or at `codegen-units=1`: the layout change that the single function showed is gone. Hypothesis: the hot copy has fewer live values, so the added arm code does not move the registers of the loop as before.
+
+Tests. `cargo test --locked -p bare-js2 --lib`: 527 pass.
+
+Not tested: the rest of the cost matrix, start-up (`script_run`), test262, Windows.
+
 ## Cold arms of `Vm::run` (step 1 of the dispatch design, 2026-11-21)
 
 Design: [design-js2-dispatch.md](design-js2-dispatch.md), step 1 and "Decisions (owner, 2026-11-21)". Base: `a04014eb` (`origin/main`). Its `crates/js2` is the same as at `351f9b72`, where I built and measured main (`git diff 351f9b72 a04014eb -- crates/js2` is empty). Machine: archMachine, not idle (other sessions ran), so instruction counts only.
