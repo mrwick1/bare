@@ -285,7 +285,7 @@ impl Realm {
         Ok(Some(r))
     }
 
-    fn ordinary_to_primitive(&mut self, v: Value, o: Obj, order: [Str; 2]) -> R<Value> {
+    pub(crate) fn ordinary_to_primitive(&mut self, v: Value, o: Obj, order: [Str; 2]) -> R<Value> {
         for k in order {
             let f = self.get_prop(o.value(), Key::Name(k))?;
             if !Realm::obj(f).is_some_and(|f| f.is_callable()) {
@@ -324,6 +324,9 @@ impl Realm {
         self.install_symbol();
         self.install_generator();
         self.install_json();
+        self.install_collections();
+        self.install_date();
+        self.install_reflect();
     }
 
     fn install_function(&mut self) {

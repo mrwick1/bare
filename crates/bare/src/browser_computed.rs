@@ -1291,13 +1291,11 @@ fn named_set<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> R
     Err(d.read_only_s(s, name))
 }
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    let g = *d.global.get().expect("installed");
-    let f = d.def_method_s(it, g, "getComputedStyle", 1, get_computed_style)?;
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+    let g = s.global();
     // Window operations are enumerable.
-    let k = d.key(it, "getComputedStyle")?;
-    it.define_data(g, k, Value::Object(f), true, true, true)?;
-    *d.computed.fixed.borrow_mut() = vec![f];
+    let f = d.def_method_l(s, g, "getComputedStyle", 1, get_computed_style, true)?;
+    *d.computed.fixed.borrow_mut() = vec![obj_id(s, f).expect("a function")];
     Ok(())
 }
 

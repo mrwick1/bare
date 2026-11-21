@@ -112,6 +112,16 @@ impl CellHeader {
         CellHeader { shape, bits: flags << 8 | layout as u32 }
     }
 
+    /// Write the shape word of the header at `p` and nothing else (a cache hit that adds a property: the layout and the flags stay).
+    ///
+    /// # Safety
+    /// `p` points to a live object header.
+    #[inline]
+    pub(crate) unsafe fn write_shape(p: *mut CellHeader, shape: u32) {
+        // SAFETY: by the contract, `p` is valid for a write of the shape word.
+        unsafe { (&raw mut (*p).shape).write(shape) }
+    }
+
     /// The header of a record cell (`Slots`, `Elements`): it has no shape, so the shape word holds its capacity in values.
     #[inline]
     pub(crate) fn record(layout: Layout, flags: u32, cap: u32) -> CellHeader {

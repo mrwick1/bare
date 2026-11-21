@@ -121,6 +121,8 @@ both!(
     modules_link_and_run_in_order_with_live_bindings,
     modules_report_link_and_parse_errors,
     dynamic_import_reaches_the_host,
+    a_table_installs_methods_accessors_and_constants,
+    two_realms_install_the_same_table,
     run_script_gives_the_completion_value,
     eval_runs_in_the_global_environment,
     handler_functions_look_names_up_in_the_scope,

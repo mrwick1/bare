@@ -98,3 +98,12 @@ allow:Symbol.hasInstance
 allow:Symbol.iterator
 allow:Symbol.asyncIterator
 allow:Symbol.species
+# Map, Set, WeakMap and WeakSet (bi_collections.rs) and Reflect (bi_reflect.rs). The set methods, symbols as weak keys and WeakRef are not built.
+allow:Map
+allow:Set
+allow:WeakMap
+allow:WeakSet
+allow:Reflect
+allow:Reflect.construct
+allow:Reflect.set
+allow:Reflect.setPrototypeOf

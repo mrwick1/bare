@@ -2,7 +2,7 @@
 //! adds the compiler and the interpreter. [`script::run`] runs a script end to end with the core built-ins (`builtins.rs`, S2.7), and the engine
 //! is not wired into the browser: `BARE_JS_EXEC=new` still stops with [`NOT_READY`].
 //!
-//! Only the `cell`, `heap`, `string`, `atoms`, `shapes`, `object`, `blob`, `gc`, `codes`, `interp_rt`, `interp` and `api` modules may hold `unsafe` code. CI runs this crate under Miri.
+//! Only the `cell`, `heap`, `string`, `atoms`, `shapes`, `object`, `blob`, `weaktab`, `gc`, `codes`, `interp_rt`, `interp` and `api` modules may hold `unsafe` code. CI runs this crate under Miri.
 #![deny(unsafe_code)]
 
 /// The error of `BARE_JS_EXEC=new` until the new engine runs scripts (plan stage S2).
@@ -28,6 +28,8 @@ pub mod gc;
 pub mod object;
 #[allow(unsafe_code)]
 pub mod codes;
+#[allow(unsafe_code)]
+pub mod weaktab;
 pub mod roots;
 pub mod parse_ahead;
 pub mod lex;
@@ -54,6 +56,9 @@ pub mod reenter;
 pub mod generator;
 mod bi_array;
 mod bi_json;
+mod bi_date;
+mod bi_date_calc;
+mod bi_date_tz;
 mod bi_object;
 mod bi_number;
 mod bi_wrap;
@@ -62,6 +67,8 @@ pub mod promise;
 mod module;
 mod promise_statics;
 mod bi_symbol;
+mod bi_collections;
+mod bi_reflect;
 mod bi_string_more;
 #[rustfmt::skip]
 mod prelude_facts;

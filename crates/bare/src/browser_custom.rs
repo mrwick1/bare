@@ -44,7 +44,7 @@ use crate::browser_scoped::*;
 use bare_html::dom::{Change, Document, FAILED, NodeData, NodeId, Ns, PRECUSTOMIZED, valid_custom_name};
 use bare_js::eval::{Error, Interp};
 use bare_js::value::{ObjId, Value};
-use bare_js_api::{Args, Engine, HostFn, Local, Type};
+use bare_js_api::{Args, Attrs, Engine, HostFn, Local, Type};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
@@ -890,6 +890,14 @@ pub(crate) fn interface_ctor(d: &Dom, it: &mut Interp<'_>, name: &str, new_ok: b
     }
 }
 
+/// `interface_ctor` for a scope.
+pub(crate) fn interface_ctor_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, name: &str, new_ok: bool) -> Res<'s, Local<'s>> {
+    match IFACES.iter().position(|&n| n == name) {
+        Some(k) => d.add_fn_s(s, HANDLERS[k], name, 0, HostFn::CtorNewTarget),
+        None => d.add_fn_s(s, illegal_constructor, name, 0, if new_ok { HostFn::Ctor } else { HostFn::Method }),
+    }
+}
+
 /// The error of `HTMLElement()` without `new`.
 pub(crate) fn needs_new(it: &mut Interp<'_>) -> Error {
     it.type_error("Failed to construct: please use the 'new' operator")
@@ -1447,15 +1455,24 @@ fn customelements<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) ->
 crate::browser_lazy::lazy_global!(lazy_registry, "CustomElementRegistry", ensure, |d| st(d).borrow().reg.expect("made")[1]);
 
 /// Install last: a new host function earlier in the list of `Dom::install` moves the id of each one after it.
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    crate::browser_lazy::install(d, it, &[&[("CustomElementRegistry", lazy_registry as HS), ("HTMLUnknownElement", lazy_unknown)], &crate::browser_face::LAZY[..]].concat())?;
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+    table!(lazy = [
+        Row::both(1, "CustomElementRegistry", lazy_registry),
+        Row::both(1, "HTMLUnknownElement", lazy_unknown),
+        crate::browser_face::LAZY[0],
+        crate::browser_face::LAZY[1],
+    ]);
+    let g = s.global();
+    d.install_rows(s, &[g], &lazy::T)?;
     // As in Chrome, `customElements` stays an accessor of `window` with no setter.
-    let g = *d.global.get().expect("installed");
-    let key = d.key(it, "customElements")?;
-    let f = d.add_fn_s_obj(it, customelements, "get customElements", 0, HostFn::Method)?;
-    d.define_accessor(it, g, key, f, None)?;
-    d.def_method_s(it, d.p().element, "toggleAttribute", 1, crate::browser_dom::toggle_attribute_s)?;
-    d.def_method_s(it, d.p().document, "importNode", 1, import_node)?;
-    d.def_method_s(it, d.p().document, "adoptNode", 1, adopt_node)?;
+    let f = d.add_fn_s(s, customelements, "get customElements", 0, HostFn::Method)?;
+    s.define_accessor_str(g, "customElements", Some(f), None, Attrs { writable: false, enumerable: true, configurable: true })?;
+    table!(rows1 = [
+        Row::method(1, "toggleAttribute", 1, crate::browser_dom::toggle_attribute_s),
+        Row::method(2, "importNode", 1, import_node),
+        Row::method(2, "adoptNode", 1, adopt_node),
+    ]);
+    let targets = [d.obj_local(s, d.p().element), d.obj_local(s, d.p().document)];
+    d.install_rows(s, &targets, &rows1::T)?;
     Ok(())
 }
