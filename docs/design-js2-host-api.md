@@ -246,7 +246,47 @@ The promise methods, `queue_microtask`, `checkpoint`, `drain_microtasks`, `pendi
 - `promise_then` makes a derived promise that nobody holds, so a throw of the handler is an unhandled rejection that the host hears (as in the old engine).
 - The shared suite has the promise tests (`suite.rs`), run on both engines with and without constant collection.
 
-## 12. Built (2026-11-21): scripts, eval, handlers, iterators
+## 12. Owners, trace and prune (2026-11-21)
+
+This section builds 3.9 and the host-filled methods of 3.8 that it left out: `set_host_owner`, `host_key`, `new_host_indexed`, `new_host_named`, `set_lazy`, `clear_lazy`. The code is `gc.rs` (the owner loop), the new file `api_host.rs` (the methods and the property hooks) and a few dispatch lines in the property paths of `interp_rt.rs` and `bi_object.rs`.
+
+### 12.1 Owners
+
+- `HostState::owners: HashMap<NonNull<u8>, u32>` maps the address of an owner cell to its host key. `set_host_owner` inserts, so a new key replaces the old one of the same object. The map is the only place where the key lives: no slot, no hidden property, no header flag.
+- The marker has no test for owners. A first design (3.9) tested a header flag in `Marker::object`. It cost 3 instructions for each marked object (`gc_load chain 200000 20`: +1.10%, `tree`: +1.43%), so it broke the cost rule. The marker now stays as it was.
+- `collect` runs rounds between the mark loop and `Shapes::finish_marks`. Round 0 copies the owner map to a list of waiting owners. Each round walks that list, removes each owner that `Live` says is marked, and calls `Host::trace(key, Tracer::new(out))` for it (`Roots::owners`, which `Realm` implements with the host pointer that `set_host` stored). The collector marks each value of `out`, drains the work list, and starts the next round. It stops at a round that finds no marked owner. Ephemeron entries that wait for a key that an owner marks are released by the normal `drain`, so the weak tables stay correct.
+- `Roots::weak` (after the mark) prunes: for each entry of `owners` whose cell is not marked, remove it and collect its key; then call `Host::prune(&dead)` once, with all the dead keys. A key is given to `prune` once, because the entry is gone.
+
+Complexity. Each owner is traced once. A round costs O(owners that wait): one mark-bit read each. The rounds are as many as the longest chain of owners that are reached only through the `trace` of the owner before (for a DOM, the wrappers that a wrapper keeps alive), plus one. So the total is O(owners x rounds + values traced + cells newly marked). It never scans the heap, and an object that is not an owner costs nothing. The prune is O(owners) for each collection (the old engine does the same: `retain` over its list).
+
+### 12.2 Host-filled objects
+
+- `new_host_indexed` and `new_host_named` make a plain `Object` cell with the flag `F_HOST`. Its shape is a tree shape with the hidden property `\0host` (not writable, not enumerable, not configurable; as `F_WRAP` objects do with `\0prim`). The slot holds one number, `kind << 32 | key`, where `kind` is 1 for indexed, 2 for named and 3 for named-open. `host_key` reads it. Objects with the same prototype share the shape, so a wrapper costs one extra slot.
+- The property paths test `F_HOST` on the receiver only in their slow part (`get_prop_g`, `has_prop`, `get_own`, `own_key_list`, `set_prop_g`, `define_own`, `delete_prop`). An inline cache never holds a host-filled name or index (it caches own properties of the shape only), so the hooks run on every read of such a name. An ordinary own property of a host object may still be cached (not host-first); this is a known gap for a closed named object that has an own property with the name of a host name.
+- Reads follow the old engine (`heap_binary.rs`, `heap_named.rs`): an index below `indexed_len` is an own, enumerable, configurable, **not writable** data property whose value comes from `indexed_item`; an `Absent` index goes on to the prototype chain. A string key that `indexed_name` maps to an index is a non-enumerable alias, visible only when no object of the chain has the name. A closed named object answers its names first (`named_has`, then `named_get`); an open one answers them after its chain. Names come before the ordinary keys in `own_keys`. A symbol key is never a name.
+- Writes. A write, define or delete of a name goes to `Host::named_write`; an index of an indexed object is refused with no call (12.4). The fill step (`Pending::Fill`, `Item::Missing`) runs `Host::fill` and reads again (12.4).
+- `Pending::Busy` is an error that stops the read (`Abort::Limit("the host is busy")`), never an empty answer.
+
+### 12.3 Lazy members
+
+`set_lazy(obj, chain)` sets the flag `F_LAZYM` on `obj` (and on each object of its prototype chain when `chain` is true). A miss of a string key on a marked object calls `Host::lazy_member(obj, Lazy::Name)` once for each (object, name) until the next collection, then reads again; a listing of the own keys calls it with `Lazy::All` once; a miss of a symbol key calls it with `Lazy::Symbols` once. `clear_lazy` clears the flag. The "asked" set is dropped at each collection, so an address that is reused is never taken for an object that was asked.
+
+### 12.4 The fill step and named writes (2026-11-21, plan step S0.4 PR 6 prerequisite)
+
+The old engine has two more host hooks: `Host::fill_indexed` and `Host::named_write` (`crates/js/src/eval_host.rs`). `Dom<E: Engine>` needs both on `bare_js_api::Host`. This subsection fixes their contract. It is the old contract, so the browser tables move over without a change of behavior.
+
+**The fill step.** `fn fill(&self, s, object, key, index) -> Result<(), Error>`. The engine calls it when a read cannot finish: the host answered `Pending::Fill(index)` (its cache is stale; `u32::MAX` asks it to charge a long scan) or `Item::Missing` (the property exists, its object does not). `object` is the object that was asked (it can be a prototype of the object that the script touched), `key` its host key. The host makes what is missing. Then the engine repeats the read. It never changes anything before it asks, so a repeat is safe. The host may run script and allocate here, as in `lazy_member`. It returns `Ok` also when the index is gone: the repeat then finds no property. One read may ask up to 3 times (old engine `MAX_FILLS`: the receiver, a frames object, a lazy prototype); a fourth ask is `Abort::Limit`, never a loop. The default is `Abort::Unsupported("the host fill step")`, which is what both engines answered before.
+
+**Named writes.** `fn named_write(&self, s, object, key, name, op) -> Result<bool, Error>`, with `op` one of `Write::Set(value)`, `Write::Define(Descriptor)`, `Write::Delete`. `name` is the key as UTF-16 code units (an index is its digits). `Ok(true)` is success: `Set` is done, a define or delete gives `true`. `Ok(false)` is a refusal: a strict `Set` throws a `TypeError`, a sloppy one is silent, `Reflect.set` and `Reflect.defineProperty` give `false`. `Err(Throw)` is a host error (a `DOMException`, a cap). The host may run script (`ToString` of the value) and charges the budget.
+
+**When the engine asks.** Never for a symbol key. Never when the receiver is not the host object itself (a host object as a prototype: the ordinary rules run and make an own property on the receiver). For an open named object, never when `name` is an ordinary property of the object or its chain (it falls through to the ordinary rules; this is the one way a write falls through). `Set` and `Define` of every other name go to the host, also a name that is new: the host decides (a `dataset` makes an attribute). `Delete` goes to the host only for a name that `named_has` answers `true`; any other delete is the ordinary delete. An indexed object has no write hook: its indices stay not writable, so a write of an index is refused with no call.
+
+**Descriptor.** `Descriptor` has `value`, `get`, `set` (`Option<Local>`; an explicit `undefined` is `Some` of an undefined local), and `writable`, `enumerable`, `configurable` (`Option<bool>`). A host reads only what it needs (the browser: accessor or not, `value`, `writable`).
+
+**Default.** `named_write` refuses (`Ok(false)`). A host with named objects and no setter then has read-only names. One change for js2: before this step a closed named object answered a write of an unknown name with an ordinary own property. Now the host decides, and the default refuses it.
+
+**Cost.** Both hooks run only when `hs.active` and the object has `F_HOST` (js2), or behind the exotic flag of the heap (old engine). An ordinary object pays nothing.
+## 13. Built (2026-11-21): scripts, eval, handlers, iterators
 
 `docs/progress/2026-11-21-js2-script-api.md` has the measurements. The methods `run_script`, `compile_function`, `call_scoped`, `eval_global`, `eval_function`, `iter_open`, `iter_next`, `iter_fail` and `symbol_description` work now, and the three intrinsics are real. Their code is in `crates/js2/src/api_script.rs`, a child module of `api.rs`. What differs from section 3.8:
 

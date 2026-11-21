@@ -929,6 +929,44 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
         crate::browser_dataset::compact(self, datasets);
     }
 
+    /// The fill step and the named writes go to the old methods of the browser (`Host::fill_indexed`, `Host::named_write`) until the tables move.
+    fn fill<'s>(&self, s: &mut bare_js_api::Scope<'s, Interp<'p>>, object: bare_js_api::Local<'s>, _key: u32, index: u32) -> Result<(), bare_js_api::Error<'s>> {
+        use bare_js_api::Engine as _;
+        let Value::Object(o) = s.engine().raw(object) else { return Ok(()) };
+        let it = s.engine();
+        Host::fill_indexed(self, it, o, index).map_err(|e| it.api_err(e))
+    }
+
+    fn named_write<'s>(&self, s: &mut bare_js_api::Scope<'s, Interp<'p>>, object: bare_js_api::Local<'s>, _key: u32, name: &[u16], op: bare_js_api::Write<'s>) -> Result<bool, bare_js_api::Error<'s>> {
+        use bare_js::heap::{NamedOp, NamedRequest};
+        use bare_js_api::Engine as _;
+        let it = s.engine();
+        let Value::Object(owner) = it.raw(object) else { return Ok(false) };
+        let key = it.heap.intern_units(name).and_then(|n| it.heap.key_from_string(n));
+        let key = match key {
+            Ok(k) => k,
+            Err(e) => {
+                let e = it.heap_error(e);
+                return Err(it.api_err(e));
+            }
+        };
+        let val = |it: &Interp<'p>, l: Option<bare_js_api::Local<'s>>| l.map(|l| it.raw(l));
+        let accessor = |it: &Interp<'p>, l: Option<bare_js_api::Local<'s>>| val(it, l).map(|v| if let Value::Object(o) = v { Some(o) } else { None });
+        let op = match op {
+            bare_js_api::Write::Set(v) => NamedOp::Set(it.raw(v)),
+            bare_js_api::Write::Delete => NamedOp::Delete,
+            bare_js_api::Write::Define(d) => NamedOp::Define(PropertyDescriptor {
+                value: val(it, d.value),
+                writable: d.writable,
+                get: accessor(it, d.get),
+                set: accessor(it, d.set),
+                enumerable: d.enumerable,
+                configurable: d.configurable,
+            }),
+        };
+        Host::named_write(self, it, NamedRequest { owner, key, op }).map_err(|e| it.api_err(e))
+    }
+
     #[inline]
     fn indexed_len(&self, object: &Value, key: u32) -> Result<usize, bare_js_api::Pending> {
         crate::browser_sources::indexed_len(self, object, key)

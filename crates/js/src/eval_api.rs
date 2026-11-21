@@ -335,6 +335,71 @@ impl<'p> Interp<'p> {
         r
     }
 
+    /// The heap asked for the fill step (`NeedsHost`) and the realm has no old host: ask the interface host `h` (`Host::fill`).
+    #[cold]
+    fn api_fill(&mut self, h: &dyn bare_js_api::Host<Interp<'p>>, owner: ObjId, index: u32) -> Result<(), Error> {
+        let Some(key) = self.heap.host_key(owner) else { return Err(unsupported("fill of an object with no host key", Span::default())) };
+        self.api_host_scope(&[Value::Object(owner)], |s, base| h.fill(s, bare_js_api::Local::from_slot(base), key, index))
+    }
+
+    /// The heap asked for a write (`NeedsNamed`) and the realm has no old host: ask the interface host `h` (`Host::named_write`).
+    #[cold]
+    fn api_named_write(&mut self, h: &dyn bare_js_api::Host<Interp<'p>>, req: crate::heap::NamedRequest) -> Result<bool, Error> {
+        use crate::heap::NamedOp;
+        let Some(hk) = self.heap.host_key(req.owner) else { return Err(unsupported("named write of an object with no host key", Span::default())) };
+        let name: Vec<u16> = match req.key {
+            PropertyKey::Index(i) => i.to_string().encode_utf16().collect(),
+            PropertyKey::String(s) => h!(self, self.heap.str_units(s)).to_vec(),
+            PropertyKey::Symbol(_) => return Ok(false),
+        };
+        let obj = |o: Option<Option<ObjId>>| o.map(|o| o.map_or(Value::Undefined, Value::Object));
+        let (vals, d) = match req.op {
+            NamedOp::Set(v) => ([Some(v), None, None], None),
+            NamedOp::Define(d) => ([d.value, obj(d.get), obj(d.set)], Some(d)),
+            NamedOp::Delete => ([None; 3], None),
+        };
+        let vals: Vec<Value> = [Some(Value::Object(req.owner))].into_iter().chain(vals).flatten().collect();
+        let is_set = matches!(req.op, NamedOp::Set(_));
+        self.api_host_scope(&vals, |s, base| {
+            use bare_js_api::{Descriptor, Local, Write};
+            let mut next = base;
+            let mut take = |on: bool| {
+                on.then(|| {
+                    next += 1;
+                    Local::from_slot(next)
+                })
+            };
+            let op = match d {
+                Some(d) => Write::Define(Descriptor {
+                    value: take(d.value.is_some()),
+                    get: take(d.get.is_some()),
+                    set: take(d.set.is_some()),
+                    writable: d.writable,
+                    enumerable: d.enumerable,
+                    configurable: d.configurable,
+                }),
+                None if is_set => Write::Set(Local::from_slot(base + 1)),
+                None => Write::Delete,
+            };
+            h.named_write(s, Local::from_slot(base), hk, &name, op)
+        })
+    }
+
+    /// Run a hook of the interface host that may run script, with `vals` on the handle stack from slot `base`.
+    fn api_host_scope<T>(&mut self, vals: &[Value], f: impl for<'s> FnOnce(&mut bare_js_api::Scope<'s, Interp<'p>>, u32) -> Result<T, bare_js_api::Error<'s>>) -> Result<T, Error> {
+        let base = self.api.stack.len();
+        self.api.stack.extend_from_slice(vals);
+        let r = bare_js_api::enter(self, |s| match f(s, (base - SEEDS) as u32) {
+            Ok(x) => Ok(x),
+            Err(bare_js_api::Error::Throw(v)) => Err(Error::Throw(s.engine().api_at(v))),
+            Err(bare_js_api::Error::Abort(a)) => Err(s.engine().api.abort.take().unwrap_or(match a {
+                bare_js_api::Abort::Limit(w) | bare_js_api::Abort::Unsupported(w) => unsupported(w, Span::default()),
+            })),
+        });
+        self.api.stack.truncate(base);
+        r
+    }
+
     /// An error of the interface as an error of this engine: the inverse of `api_err`.
     #[cold]
     pub fn api_unerr(&mut self, e: bare_js_api::Error<'_>) -> Error {

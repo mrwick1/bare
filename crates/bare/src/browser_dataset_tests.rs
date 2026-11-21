@@ -300,3 +300,28 @@ fn freezing_a_map_with_names_is_refused() {
         ok(&mut b, "document.getElementById('d').dataset.x = 'still writable'; document.getElementById('d').dataset.x", "still writable");
     });
 }
+
+/// The hooks of `bare_js_api::Host` (`fill`, `named_write`) forward to the old methods. `Dom<E: Engine>` calls them in place of those.
+#[test]
+fn the_interface_hooks_forward_to_the_old_methods() {
+    big(|| {
+        use bare_js_api::{Descriptor, Engine, Host, Write, enter};
+        let mut b = browser();
+        let Value::Object(ds) = b.run_script("document.getElementById('d').dataset").unwrap() else { panic!("an object") };
+        let dom = b.dom.clone();
+        let name = |s: &str| s.encode_utf16().collect::<Vec<u16>>();
+        let r = enter(&mut b.it, |s| {
+            let obj = s.engine().raw_local(&Value::Object(ds));
+            let v = s.number(7.0);
+            let set = dom.named_write(s, obj, 0, &name("fresh"), Write::Set(v)).ok();
+            let accessor = dom.named_write(s, obj, 0, &name("acc"), Write::Define(Descriptor { get: Some(v), ..Default::default() })).ok();
+            let no_value = dom.named_write(s, obj, 0, &name("nov"), Write::Define(Descriptor::default())).ok();
+            let del = dom.named_write(s, obj, 0, &name("x"), Write::Delete).ok();
+            // The fill step of a map only charges the scan.
+            let fill = dom.fill(s, obj, 0, u32::MAX).is_ok();
+            (set, accessor, no_value, del, fill)
+        });
+        assert_eq!(r, (Some(true), Some(false), Some(false), Some(true), true), "set, an accessor (refused), no value, delete, fill");
+        ok(&mut b, "var e = document.getElementById('d'); e.getAttribute('data-fresh') + ',' + e.hasAttribute('data-x') + ',' + e.hasAttribute('data-nov')", "7,false,false");
+    });
+}
