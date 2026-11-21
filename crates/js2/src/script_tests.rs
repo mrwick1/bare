@@ -357,7 +357,7 @@ fn function_prototype_and_plain_function_prototypes() {
         ("function F() {} F.prototype = {m: function () { return 'm'; }}; var r = new F().m();", "r", "m"),
         ("function A(v) { this.v = v; } function B(v) { A.call(this, v); } B.prototype = Object.create(A.prototype); var r = new B(4).v + ',' + (new B(1) instanceof A);", "r", "4,true"),
         ("function F() { this.a = 1; } F.prototype.hi = function () { return 'hi'; }; class G extends F { } var g = new G(); var r = g.a + g.hi();", "r", "1hi"),
-        ("var m = {a() { return 1; }}; var r = typeof m.a.prototype + typeof (function () {}).prototype;", "r", "objectobject"),
+        ("var m = {a() { return 1; }}; var r = typeof m.a.prototype + typeof (function () {}).prototype;", "r", "undefinedobject"),
         ("var f = function () {}; f.x = 1; var r = f() === undefined && f.x === 1 && typeof f.prototype === 'object';", "r", "true"),
         ("var bound = function (a) { return this.v + a; }.bind({v: 1}); var o = {m: bound}; var r = o.m(2) + ',' + [5, 6].map(bound).join();", "r", "3,6,7"),
         ("var r = typeof Function + (function () {} instanceof Function) + (Function.prototype === Object.getPrototypeOf(function () {}));", "r", "functiontruetrue"),
@@ -857,8 +857,9 @@ fn a_lazy_compile_that_fails_throws_a_plain_error() {
             Err("no compiler".into())
         }
     }
-    // `forEach` is looked up before the compiler changes (its stub is made then); its compile fails at the call.
-    let mut vm = load("var f = [].forEach, e; function t(go) { if (go) try { f.call([1], function () {}); } catch (x) { e = x.name + ': ' + x.message; } }").unwrap();
+    // `forEach` is looked up before the compiler changes (its stub is made then); its compile fails at the call. So is `values`, which the
+    // arguments object of the stub holds.
+    let mut vm = load("var f = [].forEach, v = [].values, e; function t(go) { if (go) try { f.call([1], function () {}); } catch (x) { e = x.name + ': ' + x.message; } }").unwrap();
     vm.run_main(0).unwrap();
     let t = vm.global("t");
     vm.call(t, Value::UNDEFINED, &[Value::bool(false)]).unwrap();
@@ -1275,5 +1276,32 @@ fn the_generator_and_async_function_constructors_build_functions_of_their_kind()
             "r",
             "global",
         ),
+    ]);
+}
+
+#[test]
+fn an_arrow_function_a_method_and_an_accessor_have_no_own_prototype() {
+    check(&[
+        ("var r = [typeof (() => 1).prototype, Object.hasOwn(() => 1, 'prototype')].join();", "r", "undefined,false"),
+        ("var o = { m() {}, get a() { return 1; }, set a(v) {} }; var d = Object.getOwnPropertyDescriptor(o, 'a'); var r = [o.m.prototype, d.get.prototype, d.set.prototype, Object.hasOwn(o.m, 'prototype')].join();", "r", ",,,false"),
+        ("var r = [Object.hasOwn(async function () {}, 'prototype'), Object.hasOwn(async () => 1, 'prototype'), Object.hasOwn(({ async m() {} }).m, 'prototype')].join();", "r", "false,false,false"),
+        ("var r = [Object.hasOwn(class { static m() {} }.m, 'prototype'), Object.getOwnPropertyNames(() => 1).join()].join('|');", "r", "false|length,name"),
+        // Functions that are constructors, and the generator kinds, keep it.
+        ("var r = [typeof function () {}.prototype, typeof function* () {}.prototype, typeof ({ *g() {} }).g.prototype, typeof ({ async *g() {} }).g.prototype, typeof class {}.prototype].join();", "r", "object,object,object,object,object"),
+        // After the first call too.
+        ("var a = () => 1; a(); var o = { m() {} }; o.m(); var r = [Object.hasOwn(a, 'prototype'), Object.hasOwn(o.m, 'prototype')].join();", "r", "false,false"),
+        ("var a = () => 1; a.prototype = 3; var r = a.prototype;", "r", "3"),
+    ]);
+}
+
+#[test]
+fn the_arguments_object_has_the_array_values_iterator() {
+    check(&[
+        ("function f() { return arguments; } var a = f(1, 2); var d = Object.getOwnPropertyDescriptor(a, Symbol.iterator); var r = [a[Symbol.iterator] === Array.prototype.values, d.writable, d.enumerable, d.configurable].join();", "r", "true,true,false,true"),
+        ("function f(x) { 'use strict'; return arguments; } var r = (f(1)[Symbol.iterator] === Array.prototype.values) + ',' + Object.hasOwn(f(1), Symbol.iterator);", "r", "true,true"),
+        ("function f(x, y) { return [...arguments].join(); } var r = f(3, 4, 5);", "r", "3,4,5"),
+        ("function f() { var r = []; for (var v of arguments) r.push(v); return r.join(); } var r = f(7, 8);", "r", "7,8"),
+        ("function f() { return Reflect.ownKeys(arguments).map(String).join(); } var r = f(1);", "r", "0,length,Symbol(Symbol.iterator)"),
+        ("function f() { delete arguments[Symbol.iterator]; return typeof arguments[Symbol.iterator]; } var r = f();", "r", "undefined"),
     ]);
 }
