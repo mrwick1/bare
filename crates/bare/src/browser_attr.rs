@@ -11,7 +11,7 @@
 //!   (`Document::watch_attr`, `take_removed_attrs`). Before any `Attr` or map operation `drain` reads that log: the `Attr` of
 //!   a removed attribute becomes detached and keeps the value it had (a span in the text buffer, which never frees).
 //!   Adding the attribute back makes a new `Attr`: it never aliases the old one.
-//! - The index `i` of the map is the `i`-th native attribute. Its `Attr` is made the first time it is read (`fill_indexed`):
+//! - The index `i` of the map is the `i`-th native attribute. Its `Attr` is made the first time it is read (`Host::fill`):
 //!   the heap asks the host for the missing object and repeats the read. So a map of a thousand attributes costs nothing
 //!   until the page reads them.
 //! - Attached `Attr`s are traced from their element wrapper, and an `Attr` and a map trace the element wrapper. A detached
@@ -213,7 +213,7 @@ pub(crate) fn item(d: &Dom, owner: ObjId, index: usize) -> Result<Slot, HeapErro
     let NodeData::Element { attrs, .. } = *doc.data(el) else { return Ok(Slot::Absent) };
     let Some(a) = doc.attrs(attrs).get(index) else { return Ok(Slot::Absent) };
     // A removal is waiting in the log: the table can still hold the `Attr` of an attribute that was removed and added back.
-    // `fill_indexed` drains the log, then the read repeats.
+    // `Host::fill` drains the log, then the read repeats.
     if doc.has_removed_attrs() {
         return Ok(Slot::Missing);
     }
@@ -223,7 +223,7 @@ pub(crate) fn item(d: &Dom, owner: ObjId, index: usize) -> Result<Slot, HeapErro
     })
 }
 
-/// `Host::fill_indexed`: make the `Attr` of attribute `index` of the map `owner`.
+/// `Host::fill`: make the `Attr` of attribute `index` of the map `owner`.
 pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<()> {
     drain(d);
     let Some(&el) = d.attr.s.borrow().maps.get(&owner) else { return Ok(()) };

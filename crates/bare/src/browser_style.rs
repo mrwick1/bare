@@ -44,7 +44,7 @@
 //! - Indexes: the object is host-indexed (`Heap::new_indexed`, like `DOMTokenList`). `style[i]` is `item(i)`, `i` past `length`
 //!   is absent, and `[Symbol.iterator]` is `Array.prototype.values` (the WebIDL value iterator of an indexed getter). The names
 //!   are a cache of the attribute text and of the write count (`Names`), so no read is stale: a stale cache asks the host
-//!   first (`fill`, the `Host::fill_indexed` of this module).
+//!   first (`fill`, the `Host::fill` of this module).
 //! - No `getPropertyCSSValue`, `parentRule` is `null`. No SVG `style`, no `innerHTML`/`outerHTML` parse of `style`, no layout reads.
 //! - Computed style is `browser_computed.rs`. It has its own read-only prototype under this one.
 //! - `new CSSStyleDeclaration()` and a subclass of it throw `TypeError: Illegal constructor`.
@@ -762,7 +762,7 @@ pub(crate) fn indexed_item(d: &Dom, owner: ObjId, index: usize) -> Option<Result
     fresh(d, owner, |v| v.get(index).map_or(Slot::Absent, |&s| Slot::Str(s)))
 }
 
-/// `Host::fill_indexed` for a style object: make its names fresh. `Ok(false)`: `owner` is not a style object.
+/// `Host::fill` for a style object: make its names fresh. `Ok(false)`: `owner` is not a style object.
 pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId) -> R<bool> {
     let el = d.style.s.borrow().objs.get(&owner).copied();
     let Some(el) = el else { return Ok(false) };
