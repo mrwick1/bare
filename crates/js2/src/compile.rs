@@ -97,6 +97,9 @@ pub struct Input {
     pub self_name: bool,
     /// The `name` of the function ([`Child::name`]).
     pub name: Option<Box<str>>,
+    /// The function is in the code of an event handler (`compile_function`): a name that no scope declares is read by the full search
+    /// (`GetName`), which looks in the objects of `call_scoped` first.
+    pub scoped: bool,
 }
 
 /// A function inside the compiled one: the entry of the facts, and the chain that its closure sees. Parallel to `Code::funcs`.
@@ -303,6 +306,12 @@ pub(crate) struct Fc<'a> {
     pub force_ctx: bool,
     pub strict: bool,
     pub is_script: bool,
+    /// The register of the completion value of a script that is run for its value (`ScriptMode::value`).
+    pub value: Option<u32>,
+    /// The script is the code of an `eval`: its `let`, `const` and `class` names are not global bindings (`ScriptMode::eval`).
+    pub eval: bool,
+    /// Event handler code: free names go through `GetName`, `SetName` and `TypeofName` (`Input::scoped`).
+    pub scoped: bool,
     pub is_arrow: bool,
     /// The function cannot be a constructor (an arrow, a method, a getter or a setter).
     pub noctor: bool,
@@ -374,6 +383,9 @@ impl<'a> Fc<'a> {
             force_ctx: false,
             strict: false,
             is_script: false,
+            value: None,
+            eval: false,
+            scoped: input.scoped,
             is_arrow: false,
             noctor: false,
             fn_flags: 0,
@@ -915,9 +927,27 @@ pub(crate) struct ScopeMark {
 
 // ---------------------------------------------------------------- entry points
 
+/// What a script is compiled for. The default is a script that nobody asks for a value.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScriptMode {
+    /// The code returns the completion value of the script. The other code returns `undefined` and pays nothing for it.
+    pub value: bool,
+    /// The code of an `eval`: its `let`, `const` and `class` names stay in the code (the `var`s and functions are globals).
+    pub eval: bool,
+    /// The code of an event handler (`Input::scoped`), for the functions inside it too.
+    pub scoped: bool,
+}
+
 /// Compile the top level of a script (`parse_script_lazy`). Its `var`, `let`, `const` and functions are globals.
 pub fn compile_script(prog: &Program, facts: &Facts, atoms: &SharedAtoms) -> CR<Compiled> {
-    let mut c = Fc::new(prog, facts, atoms, &Input::default());
+    compile_script_mode(prog, facts, atoms, ScriptMode::default())
+}
+
+/// [`compile_script`] for a `mode`.
+pub fn compile_script_mode(prog: &Program, facts: &Facts, atoms: &SharedAtoms, mode: ScriptMode) -> CR<Compiled> {
+    let mut c = Fc::new(prog, facts, atoms, &Input { scoped: mode.scoped, ..Input::default() });
+    c.eval = mode.eval;
+    c.value = mode.value.then_some(0);
     c.is_script = true;
     c.strict = prog.strict;
     c.fn_flags = 0;
@@ -996,7 +1026,7 @@ pub fn compile_all(source: &str, atoms: &SharedAtoms, limits: crate::parse::Limi
             Some(c) => c,
             None => {
                 let (p, fid) = parse_function(source, &mut facts, ch.id, limits).map_err(|e| format!("parse fn {}: {}", ch.id, e.msg))?;
-                compile_function(&p, fid, ch.id, &facts, atoms, &Input { chain: ch.chain.clone(), self_name: ch.self_name, name: ch.name.clone() }).map_err(|e| format!("{e:?}"))?
+                compile_function(&p, fid, ch.id, &facts, atoms, &Input { chain: ch.chain.clone(), self_name: ch.self_name, name: ch.name.clone(), ..Default::default() }).map_err(|e| format!("{e:?}"))?
             }
         };
         todo.extend(take(&mut c));
