@@ -111,7 +111,7 @@ function check(n) {
 }
 // A callback with `thisArg` bound; with no `thisArg` the callback itself, so the common call is a direct call.
 function bound(cb, t) {
-  return t === undefined ? cb : cb.bind(t);
+  return t === undefined ? cb : bind(cb,t);
 }
 function defaultCompare(x, y) {
   x = '' + x;
