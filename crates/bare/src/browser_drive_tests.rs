@@ -196,13 +196,13 @@ fn type_needs_an_editable_field_and_replaces_its_text() {
         let mut b = browser("<p id=p>x</p><input id=r readonly value=ro><input id=c type=checkbox><input id=n type=number value=12>");
         for sel in ["#p", "#r", "#c"] {
             let n = node(&mut b, sel);
-            assert!(matches!(b.drive_type(n, "a"), Err(bare_js::eval::Error::Unsupported(_))), "{sel}");
+            assert!(matches!(b.drive_type(n, "a"), Err(crate::eng::Fault::Unsupported(_))), "{sel}");
         }
         let n = node(&mut b, "#n");
         b.drive_type(n, "7").unwrap();
         let v = b.run_script("document.getElementById('n').value").unwrap();
         assert_eq!(b.it.display(v), "7", "a number field has no selection API, but typing still replaces its text");
-        assert!(matches!(b.drive_key(None, "Nope"), Err(bare_js::eval::Error::Unsupported(_))));
+        assert!(matches!(b.drive_key(None, "Nope"), Err(crate::eng::Fault::Unsupported(_))));
     });
 }
 

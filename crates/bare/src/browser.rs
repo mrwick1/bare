@@ -14,7 +14,7 @@
 //! - No document borrow is ever held while JS runs (listeners, getters, `toString`).
 //!
 //! Caps (`BrowserLimits`): every JS-controlled growth is checked before it happens and ends with
-//! `Error::Limit(LimitKind::Host(name))` (never a catchable JS error): nodes, text bytes, attribute slots, names,
+//! `Fault::Limit(LimitKind::Host(name))` (never a catchable JS error): nodes, text bytes, attribute slots, names,
 //! wrappers, listeners, events, result arrays, tree depth, selector size, reports. Walks charge the step budget.
 //!
 //! Supported (tested):
@@ -77,6 +77,8 @@
 //! is tested against structural expectations written by hand. Only plain `EventTarget`/`Event` semantics have a Node
 //! oracle (`tools/js/browser_oracle.mjs`).
 
+use crate::eng_old::Old;
+use crate::eng::{Desc, Eng, Fault, NamedOp, Ops, Val};
 use crate::browser_sources::Roots;
 use crate::browser_dom as nd;
 use crate::browser_fragment as frag;
@@ -91,9 +93,8 @@ use crate::browser_custom as ce;
 pub use crate::browser_scheduler::{Pump, SchedLimits, SchedStats};
 use bare_css::selector::Selector;
 use bare_html::dom::{Document, NodeData, NodeId, Ns};
-use bare_js::eval::{Error, EvalLimits, Interp, LimitKind};
-use bare_js::heap::{Heap, HeapLimits, PropertyDescriptor};
-use bare_js::value::{ObjId, PropertyKey, Value};
+use bare_js::eval::{EvalLimits, LimitKind};
+use bare_js::heap::HeapLimits;
 use bare_js_api::HostFn;
 use crate::browser_scoped::{obj_id, run, table, Attrs, Intrinsic, Res, Row, Sc, HS};
 use std::cell::{Cell, OnceCell, RefCell};
@@ -102,7 +103,7 @@ use std::hash::{BuildHasherDefault, Hasher};
 use std::rc::Rc;
 use std::time::Instant;
 
-pub(crate) type R<T> = Result<T, Error>;
+pub(crate) type R<E, T> = Result<T, Fault<E>>;
 
 /// A multiply hash for maps whose keys the engine numbers (`ObjId`, `NodeId`). SipHash costs about 60 instructions for one
 /// key and these maps are read at each host property access. The page cannot choose these numbers.
@@ -137,13 +138,8 @@ pub(crate) type IdMap<K, V> = HashMap<K, V, BuildHasherDefault<IdHash>>;
 
 /// A key that is a slot number of the engine: `ObjId` (its slot is reused, so the whole handle tells a dead object from a new one)
 /// or `NodeId` (the reclaim reuses a freed slot, so a holder of a `NodeId` is a root or is forgotten at once: `browser_reclaim.rs`).
-pub(crate) trait SlotKey: Copy + Eq {
+pub trait SlotKey: Copy + Eq {
     fn slot(self) -> usize;
-}
-impl SlotKey for ObjId {
-    fn slot(self) -> usize {
-        ObjId::slot(self)
-    }
 }
 impl SlotKey for NodeId {
     fn slot(self) -> usize {
@@ -325,63 +321,63 @@ pub(crate) const SEL_CACHE_BYTES: usize = 128 << 10;
 /// What keeps traced values for a host key: the listeners of a target, the state of an event object, or a host-filled object
 /// (`browser_sources.rs`).
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum Owner {
-    Target(Target),
-    Event(ObjId),
+pub(crate) enum Owner<E: Eng> {
+    Target(Target<E>),
+    Event(E::Obj),
     /// A `getComputedStyle` object (`browser_computed.rs`).
-    Computed(ObjId),
+    Computed(E::Obj),
     /// An `XMLHttpRequest` or its upload object: an event target with an entry in `browser_xhr.rs`.
-    Xhr(ObjId),
+    Xhr(E::Obj),
     /// An `AbortSignal` (an event target), with an entry in `browser_abort.rs`.
-    Abort(ObjId),
+    Abort(E::Obj),
     /// An `AbortController`, with an entry in `browser_abort.rs`.
-    Ctl(ObjId),
+    Ctl(E::Obj),
     /// A host-filled object. Its kind is in the low bits of its key. `Reserved` is the entry between the key and the object.
-    Source(ObjId),
+    Source(E::Obj),
     Reserved,
     /// A `URL`, `URLSearchParams` or iterator object of the navigation module (`browser_navigation_params.rs`).
-    Url(ObjId),
-    Params(ObjId),
-    Iter(ObjId),
+    Url(E::Obj),
+    Params(E::Obj),
+    Iter(E::Obj),
     /// The `Location` of a frame window (`browser_frames.rs`).
-    Loc(ObjId),
+    Loc(E::Obj),
     /// A fetch object (`Headers`, `Request`, `Response`, a body stream, a reader or a headers iterator), with an entry in `browser_fetch.rs`.
-    Fetch(ObjId),
+    Fetch(E::Obj),
     /// A script-made `ReadableStream`, its controller or its reader, with an entry in `browser_streams.rs`.
-    Stream(ObjId),
+    Stream(E::Obj),
     /// A `MessagePort`, an event target with an entry in `browser_scheduler.rs`.
-    Port(ObjId),
+    Port(E::Obj),
     /// A `Worker`, an event target with entries in `browser_worker.rs`.
-    Worker(ObjId),
+    Worker(E::Obj),
     /// A `MediaQueryList`, an event target with an entry in `browser_platform.rs`.
-    Mql(ObjId),
+    Mql(E::Obj),
     /// The window object of a frame, an event target with entries in `browser_frames.rs`.
-    Frame(ObjId),
+    Frame(E::Obj),
     /// An iterator of a token list (`browser_platform_class.rs`).
-    TokIter(ObjId),
+    TokIter(E::Obj),
     /// A `ResizeObserver` (`browser_resize.rs`), a `MutationObserver` (`browser_mutation.rs`) or an `IntersectionObserver`
     /// (`browser_intersection.rs`): its callback and the wrappers of its targets.
-    Resize(ObjId),
-    Mo(ObjId),
-    Io(ObjId),
+    Resize(E::Obj),
+    Mo(E::Obj),
+    Io(E::Obj),
     /// A `TreeWalker` or `NodeIterator` (`browser_walker.rs`).
-    Walk(ObjId),
+    Walk(E::Obj),
     /// A `Range` (`browser_range.rs`), and the `Selection` object.
-    Range(ObjId),
-    Sel(ObjId),
+    Range(E::Obj),
+    Sel(E::Obj),
     /// An `Attr` object (`browser_attr.rs`).
-    Attr(ObjId),
+    Attr(E::Obj),
     /// A `Blob`, `File`, `FormData` or `FormData` iterator (`browser_web.rs`).
-    Web(ObjId),
+    Web(E::Obj),
     /// A rectangle, point, quad, list or matrix (`browser_geom.rs`). It keeps no reference: its slot goes with it.
-    Geom(ObjId),
+    Geom(E::Obj),
     /// An `IdleDeadline` (`browser_idle.rs`). It keeps no reference.
-    Idle(ObjId),
+    Idle(E::Obj),
 }
 
-impl Owner {
+impl<E: Eng> Owner<E> {
     /// The listener target that the owner stands for.
-    fn target(self) -> Option<Target> {
+    fn target(self) -> Option<Target<E>> {
         match self {
             Owner::Target(t) => Some(t),
             Owner::Xhr(o) | Owner::Abort(o) | Owner::Port(o) | Owner::Worker(o) | Owner::Mql(o) | Owner::Frame(o) => Some(Target::Obj(o)),
@@ -393,21 +389,21 @@ impl Owner {
 /// The owners of traced values, by host key (`docs/design-host-tracing.md`). A key is a slot index above `KIND_BITS` bits. The low bits
 /// are the kind of a host-filled object (`browser_sources::Source`), and 0 for any other owner. A free slot holds `None`.
 #[derive(Default)]
-pub(crate) struct Owners {
-    pub slots: Vec<Option<Owner>>,
+pub(crate) struct Owners<E: Eng> {
+    pub slots: Vec<Option<Owner<E>>>,
     free: Vec<u32>,
     /// The key of the global object, which `install` registers: its trace also visits the roots of the page (`Dom::trace_roots`).
     pub win: u32,
     /// The key of each event target object that `State::add_target` registered (`Dom::own` reads it).
-    pub objs: IdTab<ObjId, u32>,
+    pub objs: IdTab<<E as Eng>::Obj, u32>,
 }
 
 /// The bits of a host key below the slot index: the kind of a host-filled object.
 pub(crate) const KIND_BITS: u32 = 4;
 
-impl Owners {
+impl<E: Eng> Owners<E> {
     /// A free host key for `o`, with kind 0.
-    pub(crate) fn key(&mut self, o: Owner) -> u32 {
+    pub(crate) fn key(&mut self, o: Owner<E>) -> u32 {
         let slot = match self.free.pop() {
             Some(k) => {
                 self.slots[k as usize] = Some(o);
@@ -423,12 +419,12 @@ impl Owners {
 
     /// The owner of `key`.
     #[inline]
-    pub(crate) fn get(&self, key: u32) -> Option<Owner> {
+    pub(crate) fn get(&self, key: u32) -> Option<Owner<E>> {
         self.slots.get((key >> KIND_BITS) as usize).copied().flatten()
     }
 
     /// Set the owner of a key that is in use.
-    pub(crate) fn set(&mut self, key: u32, o: Owner) {
+    pub(crate) fn set(&mut self, key: u32, o: Owner<E>) {
         self.slots[(key >> KIND_BITS) as usize] = Some(o);
     }
 
@@ -439,9 +435,9 @@ impl Owners {
     }
 }
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// Make the object of `t` the owner of its listeners, once. Call it where a function goes into a listener.
-    pub(crate) fn own_listeners(&self, st: &mut State, it: &mut Interp<'_>, t: Target) {
+    pub(crate) fn own_listeners(&self, st: &mut State<E>, it: &mut E::Vm, t: Target<E>) {
         if let Some(l) = st.listeners.get_mut(&t) {
             self.own(&mut st.owners, it, t, l);
         }
@@ -451,7 +447,7 @@ impl Dom {
     /// owner took is not trusted. A node needs nothing: the key of its wrapper (`set_wrapper`) covers its listeners. A node without a
     /// wrapper has listeners that hold the global object until a wrapper exists (`browser_handlers.rs`).
     #[inline]
-    pub(crate) fn own(&self, owners: &mut Owners, it: &mut Interp<'_>, t: Target, l: &mut Listeners) {
+    pub(crate) fn own(&self, owners: &mut Owners<E>, it: &mut E::Vm, t: Target<E>, l: &mut Listeners<E>) {
         if l.key != NO_KEY && matches!(owners.get(l.key), Some(x) if x.target() == Some(t)) {
             return;
         }
@@ -478,26 +474,26 @@ impl Dom {
 
     /// Make `o` the wrapper of `n`. The wrapper is the owner of its node target: its trace visits the wrappers next to it in the tree
     /// and the listeners of the node.
-    pub(crate) fn set_wrapper(&self, st: &mut State, it: &mut Interp<'_>, n: NodeId, o: ObjId) {
+    pub(crate) fn set_wrapper(&self, st: &mut State<E>, it: &mut E::Vm, n: NodeId, o: E::Obj) {
         let key = st.owners.key(Owner::Target(Target::Node(n)));
-        st.by_node.insert(n, it.trace_value(Value::Object(o)));
+        st.by_node.insert(n, it.trace_value(E::obj_raw(o)));
         st.by_obj.insert(o, Target::Node(n));
         it.set_host_owner_obj(o, key);
     }
 }
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// Make `o` an owner of kind `w`: the collector calls `Host::trace` when it reaches `o`, and `Host::prune` when `o` is dead.
-    pub(crate) fn own_obj(&self, it: &mut Interp<'_>, o: ObjId, w: Owner) {
+    pub(crate) fn own_obj(&self, it: &mut E::Vm, o: E::Obj, w: Owner<E>) {
         let k = self.st.borrow_mut().owners.key(w);
         it.set_host_owner_obj(o, k);
     }
 }
 
-impl State {
+impl<E: Eng> State<E> {
     /// `o` is a new event target of the page (`Target::Obj`). It is an owner from its making, so its listeners, its entry in `by_obj` and
     /// the entries of its kind end with it (`Host::prune`).
-    pub(crate) fn add_target(&mut self, it: &mut Interp<'_>, o: ObjId, w: Owner) {
+    pub(crate) fn add_target(&mut self, it: &mut E::Vm, o: E::Obj, w: Owner<E>) {
         self.by_obj.insert(o, Target::Obj(o));
         let k = self.owners.key(w);
         self.owners.objs.insert(o, k);
@@ -506,17 +502,17 @@ impl State {
 
     /// The wrapper object of `n`. Transitional: it reads the raw value, for code that still keeps `ObjId`s.
     #[inline]
-    pub(crate) fn wrapper(&self, n: NodeId) -> Option<ObjId> {
-        match self.by_node.get(&n)?.raw() {
-            Value::Object(o) => Some(*o),
+    pub(crate) fn wrapper(&self, n: NodeId) -> Option<E::Obj> {
+        match E::kind(*self.by_node.get(&n)?.raw()) {
+            Val::Object(o) => Some(o),
             _ => None,
         }
     }
 
     /// Each node with a wrapper, and the wrapper object. Transitional, as `wrapper`.
-    pub(crate) fn wrappers(&self) -> impl Iterator<Item = (NodeId, ObjId)> + '_ {
-        self.by_node.iter().filter_map(|(&n, w)| match *w.raw() {
-            Value::Object(o) => Some((n, o)),
+    pub(crate) fn wrappers(&self) -> impl Iterator<Item = (NodeId, E::Obj)> + '_ {
+        self.by_node.iter().filter_map(|(&n, w)| match E::kind(*w.raw()) {
+            Val::Object(o) => Some((n, o)),
             _ => None,
         })
     }
@@ -527,40 +523,40 @@ pub(crate) const NO_KEY: u32 = u32::MAX;
 
 /// The listeners of one target, and the host key of their owner (`own_listeners`). An entry with a key stays when its list is empty,
 /// so the target keeps one key; it goes when its target dies.
-pub(crate) struct Listeners {
+pub(crate) struct Listeners<E: Eng> {
     pub key: u32,
-    pub list: Vec<Listener>,
+    pub list: Vec<Listener<E>>,
 }
 
-impl Default for Listeners {
+impl<E: Eng> Default for Listeners<E> {
     fn default() -> Self {
         Listeners { key: NO_KEY, list: Vec::new() }
     }
 }
 
-impl Listeners {
+impl<E: Eng> Listeners<E> {
     /// An empty list without an owner key.
     pub(crate) fn removable(&self) -> bool {
         self.list.is_empty() && self.key == NO_KEY
     }
 }
 
-impl std::ops::Deref for Listeners {
-    type Target = Vec<Listener>;
-    fn deref(&self) -> &Vec<Listener> {
+impl<E: Eng> std::ops::Deref for Listeners<E> {
+    type Target = Vec<Listener<E>>;
+    fn deref(&self) -> &Vec<Listener<E>> {
         &self.list
     }
 }
 
-impl std::ops::DerefMut for Listeners {
-    fn deref_mut(&mut self) -> &mut Vec<Listener> {
+impl<E: Eng> std::ops::DerefMut for Listeners<E> {
+    fn deref_mut(&mut self) -> &mut Vec<Listener<E>> {
         &mut self.list
     }
 }
 
-impl<'a> IntoIterator for &'a Listeners {
-    type Item = &'a Listener;
-    type IntoIter = std::slice::Iter<'a, Listener>;
+impl<'a, E: Eng> IntoIterator for &'a Listeners<E> {
+    type Item = &'a Listener<E>;
+    type IntoIter = std::slice::Iter<'a, Listener<E>>;
     fn into_iter(self) -> Self::IntoIter {
         self.list.iter()
     }
@@ -568,18 +564,18 @@ impl<'a> IntoIterator for &'a Listeners {
 
 /// What a JS event target is on the Rust side.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub(crate) enum Target {
+pub(crate) enum Target<E: Eng> {
     Window,
     Node(NodeId),
     /// A plain `new EventTarget()`.
-    Obj(ObjId),
+    Obj(E::Obj),
 }
 
-pub(crate) struct Listener {
+pub(crate) struct Listener<E: Eng> {
     pub id: u64,
     pub ty: Rc<str>,
     /// A function or an object with `handleEvent`. The owner of the target traces it (`own_listeners`).
-    pub cb: bare_js_api::Traced<Value>,
+    pub cb: bare_js_api::Traced<E::Raw>,
     pub capture: bool,
     pub once: bool,
     pub passive: bool,
@@ -587,7 +583,7 @@ pub(crate) struct Listener {
     pub handler: bool,
 }
 
-pub(crate) struct EventState {
+pub(crate) struct EventState<E: Eng> {
     /// An `ErrorEvent` (`browser_error_event.rs`).
     pub err: bool,
     pub ty: Rc<str>,
@@ -601,13 +597,13 @@ pub(crate) struct EventState {
     pub in_passive: bool,
     pub phase: u8,
     /// The event object is the owner of these (`Owner::Event`).
-    pub target: bare_js_api::Traced<Value>,
-    pub current: bare_js_api::Traced<Value>,
-    pub detail: bare_js_api::Traced<Value>,
-    pub path: Vec<Target>,
+    pub target: bare_js_api::Traced<E::Raw>,
+    pub current: bare_js_api::Traced<E::Raw>,
+    pub detail: bare_js_api::Traced<E::Raw>,
+    pub path: Vec<Target<E>>,
     pub time: f64,
     /// `FocusEvent.relatedTarget` (null for other events). Traced, so a saved event keeps the node.
-    pub related: bare_js_api::Traced<Value>,
+    pub related: bare_js_api::Traced<E::Raw>,
     pub is_focus: bool,
     /// `SubmitEvent.submitter` is in `related` (traced). Only a `SubmitEvent` has this set.
     pub is_submit: bool,
@@ -620,8 +616,8 @@ pub(crate) struct EventState {
 }
 
 /// Is `e` a task budget that aborts a task and not the page (see [`Browser::survive`])?
-pub(crate) fn is_budget(e: &Error) -> bool {
-    matches!(e, Error::Limit(LimitKind::Steps | LimitKind::CallDepth | LimitKind::TraversalDepth | LimitKind::StatementFrames | LimitKind::DrainJobs | LimitKind::Host("dom-selector")))
+pub(crate) fn is_budget<E: Eng>(e: &Fault<E>) -> bool {
+    matches!(e, Fault::Limit(LimitKind::Steps | LimitKind::CallDepth | LimitKind::TraversalDepth | LimitKind::StatementFrames | LimitKind::DrainJobs | LimitKind::Host("dom-selector")))
 }
 
 /// What [`Browser::survive`] decided about the error of a task.
@@ -674,19 +670,19 @@ pub(crate) struct FileRef {
 }
 
 #[derive(Default)]
-pub(crate) struct State {
+pub(crate) struct State<E: Eng> {
     /// The state override of a caret (`browser_editing.rs`): where the caret was and what bold, italic and underline are to be.
     #[allow(clippy::type_complexity)] // A one-off tuple: a named alias would add nothing.
     pub style_override: Option<((NodeId, u32), [Option<bool>; 3])>,
     /// The wrapper of each node that has one. The wrapper is the owner of its node target (`set_wrapper`). The table is not
     /// visited as a whole, so its entries are weak.
-    pub by_node: IdTab<NodeId, bare_js_api::Traced<Value>>,
-    pub by_obj: IdTab<ObjId, Target>,
-    pub listeners: IdMap<Target, Listeners>,
+    pub by_node: IdTab<NodeId, bare_js_api::Traced<<E as Eng>::Raw>>,
+    pub by_obj: IdTab<<E as Eng>::Obj, Target<E>>,
+    pub listeners: IdMap<Target<E>, Listeners<E>>,
     pub n_listeners: usize,
-    pub owners: Owners,
+    pub owners: Owners<E>,
     pub next_id: u64,
-    pub events: IdMap<ObjId, EventState>,
+    pub events: IdMap<<E as Eng>::Obj, EventState<E>>,
     pub inputs: IdMap<NodeId, Input>,
     /// Bytes of the dirty values in `inputs`.
     pub input_bytes: usize,
@@ -702,37 +698,37 @@ pub(crate) struct State {
     /// Pointer state and counters of the window input (`browser_ui.rs`).
     pub ui: crate::browser_ui::UiState,
     /// Event handler properties and attributes (`browser_handlers.rs`).
-    pub hd: crate::browser_handlers::Hd,
+    pub hd: crate::browser_handlers::Hd<E>,
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct Protos {
-    pub et: ObjId,
-    pub node: ObjId,
-    pub element: ObjId,
-    pub html: ObjId,
-    pub svg: ObjId,
-    pub input: ObjId,
-    pub iframe: ObjId,
-    pub link: ObjId,
-    pub form: ObjId,
-    pub button: ObjId,
-    pub submit: ObjId,
-    pub toggle: ObjId,
-    pub chardata: ObjId,
-    pub text: ObjId,
-    pub comment: ObjId,
-    pub document: ObjId,
-    pub fragment: ObjId,
-    pub shadow: ObjId,
-    pub event: ObjId,
-    pub custom: ObjId,
-    pub focus: ObjId,
-    pub mouse: ObjId,
-    pub pointer: ObjId,
-    pub keyboard: ObjId,
-    pub inputev: ObjId,
-    pub domexc: ObjId,
+pub(crate) struct Protos<E: Eng> {
+    pub et: E::Obj,
+    pub node: E::Obj,
+    pub element: E::Obj,
+    pub html: E::Obj,
+    pub svg: E::Obj,
+    pub input: E::Obj,
+    pub iframe: E::Obj,
+    pub link: E::Obj,
+    pub form: E::Obj,
+    pub button: E::Obj,
+    pub submit: E::Obj,
+    pub toggle: E::Obj,
+    pub chardata: E::Obj,
+    pub text: E::Obj,
+    pub comment: E::Obj,
+    pub document: E::Obj,
+    pub fragment: E::Obj,
+    pub shadow: E::Obj,
+    pub event: E::Obj,
+    pub custom: E::Obj,
+    pub focus: E::Obj,
+    pub mouse: E::Obj,
+    pub pointer: E::Obj,
+    pub keyboard: E::Obj,
+    pub inputev: E::Obj,
+    pub domexc: E::Obj,
 }
 
 #[derive(Clone, Copy)]
@@ -762,64 +758,64 @@ pub(crate) enum P {
 }
 
 /// The DOM host of one realm.
-pub struct Dom {
+pub struct Dom<E: Eng = Old> {
     pub(crate) doc: Rc<RefCell<Document>>,
-    pub(crate) st: RefCell<State>,
+    pub(crate) st: RefCell<State<E>>,
     pub(crate) lim: BrowserLimits,
-    pub(crate) p: OnceCell<Protos>,
-    pub(crate) global: OnceCell<ObjId>,
+    pub(crate) p: OnceCell<Protos<E>>,
+    pub(crate) global: OnceCell<E::Obj>,
     selector_scope: Rc<std::cell::Cell<Option<NodeId>>>,
-    pub(crate) doc_wrapper: OnceCell<ObjId>,
+    pub(crate) doc_wrapper: OnceCell<E::Obj>,
     /// Some element has an object that its wrapper must keep (`browser_sources::trace_node`), or some frame has a window. It starts
     /// `false` and is never reset, so the trace of a wrapper of a page without such objects tests one flag. Set it where such an
     /// object is stored: `Dom::new_source`, the `Attr` tables and the frame tables.
     pub(crate) wrapper_edges: Cell<bool>,
     /// `(handler, needs new)` for each host function id.
     /// The functions of the new form (and, in a test build, every old one): the registry of the interface `Host::call`.
-    pub(crate) scoped: RefCell<Vec<crate::browser_scoped::Scoped>>,
+    pub(crate) scoped: RefCell<Vec<crate::browser_scoped::Scoped<E>>>,
     /// Prototypes and interface objects: permanent roots.
-    pub(crate) fixed: RefCell<Vec<ObjId>>,
+    pub(crate) fixed: RefCell<Vec<E::Obj>>,
     pub(crate) start: Instant,
     /// The time on the virtual clock (`bare_net::vclock`) when this document began: its time origin. 0 when that clock is off.
     pub(crate) vorigin: f64,
-    pub(crate) sched: RefCell<crate::browser_scheduler::Sched>,
-    pub(crate) fetch: crate::browser_fetch::Fetch,
+    pub(crate) sched: RefCell<crate::browser_scheduler::Sched<E>>,
+    pub(crate) fetch: crate::browser_fetch::Fetch<E>,
     /// Script-made `ReadableStream`s (`browser_streams.rs`).
-    pub(crate) streams: crate::browser_streams::Streams,
+    pub(crate) streams: crate::browser_streams::Streams<E>,
     /// `console` and its bounded record sink (`browser_console.rs`).
-    pub(crate) console: crate::browser_console::Console,
+    pub(crate) console: crate::browser_console::Console<E>,
     /// Tasks that a script budget aborted so far (`Browser::survive`).
     pub(crate) aborted: std::cell::Cell<usize>,
     /// Navigation, history and storage state (`browser_navigation.rs`).
-    pub(crate) nav: crate::browser_navigation::Nav,
-    pub(crate) scripts: crate::browser_loader::Scripts,
+    pub(crate) nav: crate::browser_navigation::Nav<E>,
+    pub(crate) scripts: crate::browser_loader::Scripts<E>,
     /// `matchMedia`, `classList`, `getElementsBy*` (`browser_platform.rs`).
-    pub(crate) plat: crate::browser_platform::Platform,
+    pub(crate) plat: crate::browser_platform::Platform<E>,
     /// `HTMLElement.style` / `CSSStyleDeclaration` (`browser_style.rs`).
-    pub(crate) style: crate::browser_style::Style,
+    pub(crate) style: crate::browser_style::Style<E>,
     /// `getComputedStyle` and its sheet state (`browser_computed.rs`).
-    pub(crate) computed: crate::browser_computed::Computed,
-    pub(crate) cssom: crate::browser_cssom::Cssom,
+    pub(crate) computed: crate::browser_computed::Computed<E>,
+    pub(crate) cssom: crate::browser_cssom::Cssom<E>,
     /// `offsetWidth` and `offsetHeight` (`browser_geometry.rs`).
     pub(crate) geometry: crate::browser_geometry::Geometry,
     /// `document.implementation`, once read (`browser_implementation.rs`). It is also in `fixed`.
-    pub(crate) parsing_protos: std::cell::Cell<[Option<ObjId>; 3]>,
-    pub(crate) implementation: std::cell::Cell<Option<ObjId>>,
+    pub(crate) parsing_protos: std::cell::Cell<[Option<E::Obj>; 3]>,
+    pub(crate) implementation: std::cell::Cell<Option<E::Obj>>,
     /// The prototype and the constructor of `PerformanceObserver`, once read (`browser_perf_observer.rs`). Both are also in `fixed`.
-    pub(crate) perf_observer: std::cell::Cell<Option<ObjId>>,
-    pub(crate) perf_observer_ctor: std::cell::Cell<Option<ObjId>>,
+    pub(crate) perf_observer: std::cell::Cell<Option<E::Obj>>,
+    pub(crate) perf_observer_ctor: std::cell::Cell<Option<E::Obj>>,
     /// The timeline interfaces, once read (`browser_perf.rs`).
-    pub(crate) perf_ifaces: std::cell::Cell<Option<crate::browser_perf::Ifaces>>,
+    pub(crate) perf_ifaces: std::cell::Cell<Option<crate::browser_perf::Ifaces<E>>>,
     /// The interface `Screen`, once read or once `window.screen` is made (`screen_iface`).
-    pub(crate) screen_iface: std::cell::Cell<Option<crate::browser_geom::Iface>>,
+    pub(crate) screen_iface: std::cell::Cell<Option<crate::browser_geom::Iface<E>>>,
     /// The `mark` and `measure` entries of `performance` (`browser_perf.rs`).
-    pub(crate) frames: crate::browser_frames::Frames,
-    pub(crate) kids: crate::browser_child::Kids,
+    pub(crate) frames: crate::browser_frames::Frames<E>,
+    pub(crate) kids: crate::browser_child::Kids<E>,
     pub(crate) perf_entries: RefCell<Vec<crate::browser_perf::Entry>>,
     /// The times of the load of this document, for its navigation entry (`browser_perf.rs`).
     pub(crate) load_times: RefCell<crate::browser_perf::LoadTimes>,
     /// The prototype and constructor of each interface of `browser_html.rs`, once made.
-    pub(crate) html_ifaces: RefCell<Vec<Option<(ObjId, ObjId)>>>,
+    pub(crate) html_ifaces: RefCell<Vec<Option<(E::Obj, E::Obj)>>>,
     /// A global of `browser_html.rs` was read: new wrappers get their interface prototype.
     pub(crate) html_on: std::cell::Cell<bool>,
     /// The `returnValue` and the modal flag of each `<dialog>` that has one (`browser_html_members.rs`).
@@ -829,62 +825,62 @@ pub struct Dom {
     /// Scroll offsets, page bars and `scroll` events (`browser_scroll.rs`).
     pub(crate) scrolling: crate::browser_scroll::Scrolling,
     /// `ResizeObserver` and its rendering step (`browser_resize.rs`).
-    pub(crate) resize: crate::browser_resize::Resize,
+    pub(crate) resize: crate::browser_resize::Resize<E>,
     /// CSS transition and animation events (`browser_motion.rs`).
     pub(crate) motion: crate::browser_motion::MotionState,
     /// `requestAnimationFrame` (`browser_frame.rs`).
-    pub(crate) frame: crate::browser_frame::Frame,
+    pub(crate) frame: crate::browser_frame::Frame<E>,
     /// `requestIdleCallback` (`browser_idle.rs`).
-    pub(crate) idle: crate::browser_idle::Idle,
-    pub(crate) basics: crate::browser_basics::Basics,
+    pub(crate) idle: crate::browser_idle::Idle<E>,
+    pub(crate) basics: crate::browser_basics::Basics<E>,
     /// `MutationObserver` (`browser_mutation.rs`).
-    pub(crate) mo: crate::browser_mutation::Mo,
-    pub(crate) io: crate::browser_intersection::Io,
-    pub(crate) walk: crate::browser_walker::Walk,
-    pub(crate) range: crate::browser_range::Ranges,
+    pub(crate) mo: crate::browser_mutation::Mo<E>,
+    pub(crate) io: crate::browser_intersection::Io<E>,
+    pub(crate) walk: crate::browser_walker::Walk<E>,
+    pub(crate) range: crate::browser_range::Ranges<E>,
     /// The elements whose `click()` is running (`browser_element.rs`).
     pub(crate) clicking: RefCell<Vec<NodeId>>,
     /// `Element.attributes`, `NamedNodeMap` and `Attr` (`browser_attr.rs`).
-    pub(crate) attr: crate::browser_attr::AttrHost,
+    pub(crate) attr: crate::browser_attr::AttrHost<E>,
     /// `Document.getElementsByName` and the live `NodeList` (`browser_nodelist.rs`).
-    pub(crate) nl: crate::browser_nodelist::NodeListHost,
+    pub(crate) nl: crate::browser_nodelist::NodeListHost<E>,
     /// `HTMLSelectElement`, `HTMLOptionElement` and the option lists (`browser_select.rs`).
-    pub(crate) sel: crate::browser_select::SelHost,
+    pub(crate) sel: crate::browser_select::SelHost<E>,
     /// `HTMLElement.dataset` and `DOMStringMap` (`browser_dataset.rs`).
-    pub(crate) dataset: crate::browser_dataset::DatasetHost,
+    pub(crate) dataset: crate::browser_dataset::DatasetHost<E>,
     /// `AbortController` and `AbortSignal` (`browser_abort.rs`).
-    pub(crate) abort: crate::browser_abort::AbortHost,
+    pub(crate) abort: crate::browser_abort::AbortHost<E>,
     /// `XMLHttpRequest` and `ProgressEvent` (`browser_xhr.rs`).
-    pub(crate) xhr: crate::browser_xhr::XhrHost,
+    pub(crate) xhr: crate::browser_xhr::XhrHost<E>,
     /// `crypto`, `navigator`, `Blob`, `File` and `FormData` (`browser_web.rs`).
-    pub(crate) web: crate::browser_web::WebHost,
+    pub(crate) web: crate::browser_web::WebHost<E>,
     /// `HTMLAnchorElement`, `HTMLAreaElement` and `HTMLTemplateElement` (`browser_elements.rs`).
-    pub(crate) els: crate::browser_elements::Els,
+    pub(crate) els: crate::browser_elements::Els<E>,
     /// `HTMLMediaElement` and its kin (`browser_media.rs`).
-    pub(crate) media: crate::browser_media::Media,
+    pub(crate) media: crate::browser_media::Media<E>,
     /// `Image`, `decode()` and the picture requests of scripts (`browser_img.rs`).
-    pub(crate) img: crate::browser_img::Img,
+    pub(crate) img: crate::browser_img::Img<E>,
     /// `HTMLBodyElement`, `HTMLFrameSetElement` and `ErrorEvent` (`browser_handlers.rs`).
-    pub(crate) hh: crate::browser_handlers::Hh,
+    pub(crate) hh: crate::browser_handlers::Hh<E>,
     /// Constraint validation, `labels` and `form.reset()` (`browser_controls.rs`).
-    pub(crate) ctl: crate::browser_controls::CtlHost,
+    pub(crate) ctl: crate::browser_controls::CtlHost<E>,
     /// Custom elements (`browser_custom.rs`).
-    pub(crate) ce: crate::browser_custom::Ce,
+    pub(crate) ce: crate::browser_custom::Ce<E>,
     /// Rectangles, points, quads and matrices (`browser_geom.rs`, `browser_matrix.rs`).
-    pub(crate) geom: crate::browser_geom::Geom,
+    pub(crate) geom: crate::browser_geom::Geom<E>,
     /// `Worker` (`browser_worker.rs`).
-    pub(crate) worker: crate::browser_worker::WorkerHost,
+    pub(crate) worker: crate::browser_worker::WorkerHost<E>,
     /// Freeing the nodes of dead trees (`browser_reclaim.rs`).
     pub(crate) reclaim: crate::browser_reclaim::Reclaim,
 }
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// The values that live as long as the page: prototypes, constructors, queued callbacks. The trace of the global object visits them
     /// (`Owner::Target(Target::Window)`).
-    pub(crate) fn trace_roots(&self, t: &mut bare_js_api::Tracer<'_, Value>) {
-        let out = &mut Roots(t);
-        out.extend(self.fixed.borrow().iter().map(|&o| Value::Object(o)));
-        out.extend(self.doc_wrapper.get().map(|&o| Value::Object(o)));
+    pub(crate) fn trace_roots(&self, t: &mut bare_js_api::Tracer<'_, E::Raw>) {
+        let out = &mut Roots::<E>(t);
+        out.extend(self.fixed.borrow().iter().map(|&o| E::obj_raw(o)));
+        out.extend(self.doc_wrapper.get().map(|&o| E::obj_raw(o)));
         self.sched_roots(out);
         self.console.roots(out);
         self.scripts_roots(out);
@@ -916,13 +912,13 @@ impl Dom {
 /// The host of `bare-js-api`: the host functions, the references that owners keep and the entries that dead owners free
 /// (`docs/design-host-tracing.md`). The old `Host` below only fills host-indexed objects and writes host-named ones: the interface has no
 /// method for these two yet.
-impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
+impl<'p, E: Eng> bare_js_api::Host<E::Vm> for Dom<E> {
     #[inline]
-    fn call<'s>(&self, s: &mut bare_js_api::Scope<'s, Interp<'p>>, id: u32, this: bare_js_api::Local<'s>, args: bare_js_api::Args<'s>, is_new: bool) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
+    fn call<'s>(&self, s: &mut bare_js_api::Scope<'s, E::Vm>, id: u32, this: bare_js_api::Local<'s>, args: bare_js_api::Args<'s>, is_new: bool) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
         self.call_scoped(s, id, this, args, is_new)
     }
 
-    fn trace(&self, key: u32, t: &mut bare_js_api::Tracer<'_, Value>) {
+    fn trace(&self, key: u32, t: &mut bare_js_api::Tracer<'_, E::Raw>) {
         let st = self.st.borrow();
         let owner = st.owners.get(key);
         match owner {
@@ -1041,7 +1037,7 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
                 }
                 Some(Owner::Target(t @ Target::Node(n))) => {
                     if let Some(w) = st.by_node.remove(&n) {
-                        if let Value::Object(o) = *w.raw() {
+                        if let Val::Object(o) = E::kind(*w.raw()) {
                             st.by_obj.remove(&o);
                         }
                         if !st.listeners.is_empty()
@@ -1065,7 +1061,7 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
         if ports_died {
             self.sched_after_ports();
         }
-        for (dead, forget) in [(&resize, Self::resize_forget as fn(&Dom, &[ObjId])), (&mo, Self::mo_forget), (&io, Self::io_forget), (&walk, Self::walk_forget), (&range, Self::range_forget), (&attr, at::forget), (&web, crate::browser_web::forget)] {
+        for (dead, forget) in [(&resize, Self::resize_forget as fn(&Dom<E>, &[E::Obj])), (&mo, Self::mo_forget), (&io, Self::io_forget), (&walk, Self::walk_forget), (&range, Self::range_forget), (&attr, at::forget), (&web, crate::browser_web::forget)] {
             if !dead.is_empty() {
                 forget(self, dead);
             }
@@ -1078,9 +1074,9 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
     }
 
     /// The fill step of a host-indexed object. The tables that hold the entries still take the raw object (`Interp`, `ObjId`).
-    fn fill<'s>(&self, s: &mut bare_js_api::Scope<'s, Interp<'p>>, object: bare_js_api::Local<'s>, _key: u32, index: u32) -> Result<(), bare_js_api::Error<'s>> {
+    fn fill<'s>(&self, s: &mut bare_js_api::Scope<'s, E::Vm>, object: bare_js_api::Local<'s>, _key: u32, index: u32) -> Result<(), bare_js_api::Error<'s>> {
         use bare_js_api::Engine as _;
-        let Value::Object(owner) = s.engine().raw(object) else { return Ok(()) };
+        let Val::Object(owner) = E::kind(s.engine().raw(object)) else { return Ok(()) };
         let it = s.engine();
         let r = if index == crate::browser_frames::FILL {
             crate::browser_frames::fill(self, it, owner, index).map(|_| ())
@@ -1090,17 +1086,16 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
         r.map_err(|e| it.api_err(e))
     }
 
-    fn named_write<'s>(&self, s: &mut bare_js_api::Scope<'s, Interp<'p>>, object: bare_js_api::Local<'s>, _key: u32, name: &[u16], op: bare_js_api::Write<'s>) -> Result<bool, bare_js_api::Error<'s>> {
-        use bare_js::heap::NamedOp;
+    fn named_write<'s>(&self, s: &mut bare_js_api::Scope<'s, E::Vm>, object: bare_js_api::Local<'s>, _key: u32, name: &[u16], op: bare_js_api::Write<'s>) -> Result<bool, bare_js_api::Error<'s>> {
         use bare_js_api::Engine as _;
         let it = s.engine();
-        let Value::Object(owner) = it.raw(object) else { return Ok(false) };
-        let val = |it: &Interp<'p>, l: Option<bare_js_api::Local<'s>>| l.map(|l| it.raw(l));
-        let accessor = |it: &Interp<'p>, l: Option<bare_js_api::Local<'s>>| val(it, l).map(|v| if let Value::Object(o) = v { Some(o) } else { None });
+        let Val::Object(owner) = E::kind(it.raw(object)) else { return Ok(false) };
+        let val = |it: &E::Vm, l: Option<bare_js_api::Local<'s>>| l.map(|l| it.raw(l));
+        let accessor = |it: &E::Vm, l: Option<bare_js_api::Local<'s>>| val(it, l).map(|v| if let Val::Object(o) = E::kind(v) { Some(o) } else { None });
         let op = match op {
             bare_js_api::Write::Set(v) => NamedOp::Set(it.raw(v)),
             bare_js_api::Write::Delete => NamedOp::Delete,
-            bare_js_api::Write::Define(d) => NamedOp::Define(PropertyDescriptor {
+            bare_js_api::Write::Define(d) => NamedOp::Define(Desc::<E> {
                 value: val(it, d.value),
                 writable: d.writable,
                 get: accessor(it, d.get),
@@ -1114,41 +1109,41 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
     }
 
     #[inline]
-    fn indexed_len(&self, object: &Value, key: u32) -> Result<usize, bare_js_api::Pending> {
+    fn indexed_len(&self, object: &E::Raw, key: u32) -> Result<usize, bare_js_api::Pending> {
         crate::browser_sources::indexed_len(self, object, key)
     }
     #[inline]
-    fn indexed_item(&self, object: &Value, key: u32, index: usize) -> Result<bare_js_api::Item<Value>, bare_js_api::Pending> {
+    fn indexed_item(&self, object: &E::Raw, key: u32, index: usize) -> Result<bare_js_api::Item<E::Raw>, bare_js_api::Pending> {
         crate::browser_sources::indexed_item(self, object, key, index)
     }
     #[inline]
-    fn indexed_name(&self, object: &Value, key: u32, name: &[u16]) -> Result<Option<u32>, bare_js_api::Pending> {
+    fn indexed_name(&self, object: &E::Raw, key: u32, name: &[u16]) -> Result<Option<u32>, bare_js_api::Pending> {
         crate::browser_sources::indexed_name(self, object, key, name)
     }
     #[inline]
-    fn indexed_names(&self, object: &Value, key: u32) -> Result<Vec<Vec<u16>>, bare_js_api::Pending> {
+    fn indexed_names(&self, object: &E::Raw, key: u32) -> Result<Vec<Vec<u16>>, bare_js_api::Pending> {
         crate::browser_sources::indexed_names(self, object, key)
     }
     #[inline]
-    fn named_has(&self, object: &Value, key: u32, name: &[u16]) -> Result<bool, bare_js_api::Pending> {
+    fn named_has(&self, object: &E::Raw, key: u32, name: &[u16]) -> Result<bool, bare_js_api::Pending> {
         crate::browser_sources::named_has(self, object, key, name)
     }
     #[inline]
-    fn named_get(&self, object: &Value, key: u32, name: &[u16]) -> Result<Option<bare_js_api::Named<Value>>, bare_js_api::Pending> {
+    fn named_get(&self, object: &E::Raw, key: u32, name: &[u16]) -> Result<Option<bare_js_api::Named<E::Raw>>, bare_js_api::Pending> {
         crate::browser_sources::named_get(self, object, key, name)
     }
     #[inline]
-    fn named_len(&self, object: &Value, key: u32) -> Result<usize, bare_js_api::Pending> {
+    fn named_len(&self, object: &E::Raw, key: u32) -> Result<usize, bare_js_api::Pending> {
         crate::browser_sources::named_len(self, object, key)
     }
     #[inline]
-    fn named_keys(&self, object: &Value, key: u32) -> Result<Vec<Vec<u16>>, bare_js_api::Pending> {
+    fn named_keys(&self, object: &E::Raw, key: u32) -> Result<Vec<Vec<u16>>, bare_js_api::Pending> {
         crate::browser_sources::named_keys(self, object, key)
     }
 
-    fn lazy_member<'s>(&self, s: &mut bare_js_api::Scope<'s, Interp<'p>>, object: bare_js_api::Local<'s>, what: bare_js_api::Lazy<'_>) -> Result<(), bare_js_api::Error<'s>> {
+    fn lazy_member<'s>(&self, s: &mut bare_js_api::Scope<'s, E::Vm>, object: bare_js_api::Local<'s>, what: bare_js_api::Lazy<'_>) -> Result<(), bare_js_api::Error<'s>> {
         let it = s.engine();
-        let Value::Object(owner) = bare_js_api::Engine::raw(it, object) else { return Ok(()) };
+        let Val::Object(owner) = E::kind(bare_js_api::Engine::raw(it, object)) else { return Ok(()) };
         let r = match what {
             bare_js_api::Lazy::Name(n) => crate::browser_handlers::lazy_key(self, it, owner, n),
             bare_js_api::Lazy::All => crate::browser_handlers::lazy_all(self, it, owner),
@@ -1157,20 +1152,20 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
         r.map_err(|e| it.api_err(e))
     }
 
-    fn report_exception<'s>(&self, s: &mut bare_js_api::Scope<'s, Interp<'p>>, thrown: bare_js_api::Local<'s>) {
+    fn report_exception<'s>(&self, s: &mut bare_js_api::Scope<'s, E::Vm>, thrown: bare_js_api::Local<'s>) {
         let it = s.engine();
         let v = bare_js_api::Engine::raw(it, thrown);
         self.report(it, v, "microtask", Target::Window);
     }
 
-    fn between_jobs<'s>(&self, s: &mut bare_js_api::Scope<'s, Interp<'p>>) -> Result<(), bare_js_api::Error<'s>> {
+    fn between_jobs<'s>(&self, s: &mut bare_js_api::Scope<'s, E::Vm>) -> Result<(), bare_js_api::Error<'s>> {
         let it = s.engine();
         self.run_inline_scripts(it).map_err(|e| it.api_err(e))
     }
 
-    fn promise_rejections<'s>(&self, s: &mut bare_js_api::Scope<'s, Interp<'p>>, unhandled: &[bare_js_api::Local<'s>], handled: &[bare_js_api::Local<'s>], dropped: u32) -> Result<(), bare_js_api::Error<'s>> {
+    fn promise_rejections<'s>(&self, s: &mut bare_js_api::Scope<'s, E::Vm>, unhandled: &[bare_js_api::Local<'s>], handled: &[bare_js_api::Local<'s>], dropped: u32) -> Result<(), bare_js_api::Error<'s>> {
         let it = s.engine();
-        let raw = |it: &mut Interp<'p>, l: &[bare_js_api::Local<'s>]| l.iter().map(|&l| bare_js_api::Engine::raw(it, l)).collect::<Vec<_>>();
+        let raw = |it: &mut E::Vm, l: &[bare_js_api::Local<'s>]| l.iter().map(|&l| bare_js_api::Engine::raw(it, l)).collect::<Vec<_>>();
         let (unhandled, handled) = (raw(it, unhandled), raw(it, handled));
         crate::browser_rejection::notify(self, it, &unhandled, &handled, dropped).map_err(|e| it.api_err(e))
     }
@@ -1205,30 +1200,30 @@ pub(crate) fn domexc_codes(name: &str) -> u32 {
 }
 
 // Constants are defined only when the public constructor is first requested.
-fn domexception_global(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+fn domexception_global<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
     let g = it.global_object();
     let key = d.key(it, "DOMException")?;
-    if it.heap.peek_own_property(g, key).map_err(|e| it.heap_error(e))?.is_some() { return Ok(()); }
+    if it.h_peek_own(g, key)?.is_some() { return Ok(()); }
     let proto = d.p().domexc;
     let f = d.add_fn_s_obj(it, domexception_ctor_s, "DOMException", 0, HostFn::CtorNewTarget)?;
     let kp = d.key(it, "prototype")?;
-    it.define_data(f, kp, Value::Object(proto), false, false, false)?;
+    it.define_data(f, kp, E::obj_raw(proto), false, false, false)?;
     let kc = d.key(it, "constructor")?;
-    it.define_data(proto, kc, Value::Object(f), true, false, true)?;
+    it.define_data(proto, kc, E::obj_raw(f), true, false, true)?;
     crate::browser_lazy::tag(d, it, proto, "DOMException")?;
     for (i, name) in ["INDEX_SIZE_ERR", "DOMSTRING_SIZE_ERR", "HIERARCHY_REQUEST_ERR", "WRONG_DOCUMENT_ERR", "INVALID_CHARACTER_ERR", "NO_DATA_ALLOWED_ERR", "NO_MODIFICATION_ALLOWED_ERR", "NOT_FOUND_ERR", "NOT_SUPPORTED_ERR", "INUSE_ATTRIBUTE_ERR", "INVALID_STATE_ERR", "SYNTAX_ERR", "INVALID_MODIFICATION_ERR", "NAMESPACE_ERR", "INVALID_ACCESS_ERR", "VALIDATION_ERR", "TYPE_MISMATCH_ERR", "SECURITY_ERR", "NETWORK_ERR", "ABORT_ERR", "URL_MISMATCH_ERR", "QUOTA_EXCEEDED_ERR", "TIMEOUT_ERR", "INVALID_NODE_TYPE_ERR", "DATA_CLONE_ERR"].iter().enumerate() {
         let k = d.key(it, name)?;
-        for o in [f, proto] { it.define_data(o, k, Value::Number((i + 1) as f64), false, true, false)?; }
+        for o in [f, proto] { it.define_data(o, k, E::num((i + 1) as f64), false, true, false)?; }
     }
-    it.define_data(g, key, Value::Object(f), true, false, true)?;
+    it.define_data(g, key, E::obj_raw(f), true, false, true)?;
     d.fixed.borrow_mut().push(f);
     Ok(())
 }
 
-fn domexception_ctor_s<'s>(d: &Dom, s: &mut crate::browser_scoped::Sc<'s, '_>, _: bare_js_api::Local<'s>, a: bare_js_api::Args<'s>) -> crate::browser_scoped::Res<'s, bare_js_api::Local<'s>> {
+fn domexception_ctor_s<'s, E: Eng>(d: &Dom<E>, s: &mut crate::browser_scoped::Sc<'s, E>, _: bare_js_api::Local<'s>, a: bare_js_api::Args<'s>) -> crate::browser_scoped::Res<'s, bare_js_api::Local<'s>> {
     let mut values = [s.undefined(); 2];
     for (i, default) in ["", "Error"].iter().enumerate() {
-        let v = crate::browser_scoped::arg_s(s, a, i);
+        let v = crate::browser_scoped::arg_s::<E>(s, a, i);
         values[i] = if s.type_of(v) == bare_js_api::Type::Undefined { d.js_str_s(s, default)? } else {
             let t = s.to_string(v)?;
             let n = s.as_str(t).map_or(0, |x| x.len());
@@ -1251,15 +1246,15 @@ fn domexception_ctor_s<'s>(d: &Dom, s: &mut crate::browser_scoped::Sc<'s, '_>, _
 }
 
 #[cold]
-pub(crate) fn define_window(d: &Dom, it: &mut Interp<'_>, name: &str) -> R<bool> {
+pub(crate) fn define_window<E: Eng>(d: &Dom<E>, it: &mut E::Vm, name: &str) -> R<E, bool> {
     if name == "DOMException" {
         domexception_global(d, it)?;
         return Ok(true);
     }
     if name == "eval" {
         // The engine's own `%eval%`: a call `eval(x)` by that name is a direct eval.
-        let (f, k) = (it.eval_function()?, d.key(it, "eval")?);
-        it.define_data(it.global_object(), k, Value::Object(f), true, false, true)?;
+        let (f, k) = (it.eval_function_o()?, d.key(it, "eval")?);
+        it.define_data(it.global_object(), k, E::obj_raw(f), true, false, true)?;
         return Ok(true);
     }
     if name == "event" { crate::browser_gaps::define_event(d, it)?; return Ok(true); }
@@ -1267,15 +1262,15 @@ pub(crate) fn define_window(d: &Dom, it: &mut Interp<'_>, name: &str) -> R<bool>
     if !matches!(name,"frames"|"parent"|"top"|"length"|"name"|"screen"){return Ok(false);}
     let g = it.global_object();
     let key=d.key(it,name)?;
-    if it.heap.peek_own_property(g,key).map_err(|e|it.heap_error(e))?.is_some(){return Ok(true);}
+    if it.h_peek_own(g,key)?.is_some(){return Ok(true);}
     if name == "length" {
         let f = d.add_fn_s_obj(it, crate::browser_frames::length, "get length", 0, bare_js_api::HostFn::Method)?;
         d.define_accessor(it, g, key, f, None)?;
         return Ok(true);
     }
     let value = match name {
-        "frames" | "parent" | "top" => Value::Object(g),
-        "length" => Value::Number(0.0),
+        "frames" | "parent" | "top" => E::obj_raw(g),
+        "length" => E::num(0.0),
         "name" => d.js_str(it, "")?,
         "screen" => { window_screen(d,it)?; return Ok(true); },
         _ => unreachable!(),
@@ -1285,7 +1280,7 @@ pub(crate) fn define_window(d: &Dom, it: &mut Interp<'_>, name: &str) -> R<bool>
 }
 
 /// The interface `Screen`: no constructor, no members of its own. `window.screen` is its instance.
-fn screen_iface(d: &Dom, it: &mut Interp<'_>) -> R<crate::browser_geom::Iface> {
+fn screen_iface<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, crate::browser_geom::Iface<E>> {
     if let Some(i) = d.screen_iface.get() {
         return Ok(i);
     }
@@ -1295,7 +1290,7 @@ fn screen_iface(d: &Dom, it: &mut Interp<'_>) -> R<crate::browser_geom::Iface> {
     Ok(i)
 }
 
-fn ensure_screen(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+fn ensure_screen<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
     screen_iface(d, it).map(|_| ())
 }
 
@@ -1303,95 +1298,89 @@ crate::browser_lazy::lazy_global!(lazy_screen, "Screen", ensure_screen, |d| d.sc
 
 // The virtual display has the default headless dimensions. Viewport resizing does not resize it.
 #[cold]
-fn window_screen(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+fn window_screen<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
     let proto = screen_iface(d, it)?.proto;
     let o = d.obj(it, proto)?;
     crate::browser_lazy::tag(d, it, o, "Screen")?;
     for (name, value) in [("width", 1280.0), ("height", 800.0), ("availWidth", 1280.0), ("availHeight", 800.0), ("availLeft", 0.0), ("availTop", 0.0), ("colorDepth", 24.0), ("pixelDepth", 24.0)] {
         let k = d.key(it, name)?;
-        it.define_data(o, k, Value::Number(value), false, true, true)?;
+        it.define_data(o, k, E::num(value), false, true, true)?;
     }
     let k = d.key(it, "screen")?;
-    it.define_data(it.global_object(), k, Value::Object(o), true, false, true)
+    it.define_data(it.global_object(), k, E::obj_raw(o), true, false, true)
 }
 
-impl Dom {
-    pub(crate) fn p(&self) -> Protos {
+impl<E: Eng> Dom<E> {
+    pub(crate) fn p(&self) -> Protos<E> {
         *self.p.get().expect("installed")
     }
 
-    pub(crate) fn lim(&self, what: &'static str) -> Error {
-        Error::Limit(LimitKind::Host(what))
+    pub(crate) fn lim(&self, what: &'static str) -> Fault<E> {
+        Fault::Limit(LimitKind::Host(what))
     }
 
-    pub(crate) fn obj(&self, it: &mut Interp<'_>, proto: ObjId) -> R<ObjId> {
-        match it.heap.new_object(Some(proto)) {
-            Ok(o) => Ok(o),
-            Err(e) => Err(it.heap_error(e)),
-        }
+    pub(crate) fn obj(&self, it: &mut E::Vm, proto: E::Obj) -> R<E, E::Obj> {
+        it.h_new_object(Some(proto))
     }
 
-    pub(crate) fn key(&self, it: &mut Interp<'_>, name: &str) -> R<PropertyKey> {
-        match it.heap.key_from_str(name) {
-            Ok(k) => Ok(k),
-            Err(e) => Err(it.heap_error(e)),
-        }
+    pub(crate) fn key(&self, it: &mut E::Vm, name: &str) -> R<E, E::Key> {
+        it.h_key(name)
     }
 
     /// A string value (the JS string has the same UTF-16 as `s`).
-    pub(crate) fn js_str(&self, it: &mut Interp<'_>, s: &str) -> R<Value> {
+    pub(crate) fn js_str(&self, it: &mut E::Vm, s: &str) -> R<E, E::Raw> {
         if s.len() > self.lim.max_string_bytes { return Err(self.lim("dom-string")); }
-        it.charge((s.len() / 32) as u64)?;
-        match it.heap.intern_str(s) {
-            Ok(s) => Ok(Value::String(s)),
-            Err(e) => Err(it.heap_error(e)),
+        it.charge_o((s.len() / 32) as u64)?;
+        match it.h_intern(s) {
+            Ok(s) => Ok(E::str_raw(s)),
+            Err(e) => Err(e),
         }
     }
 
     /// Like `js_str`, for a body of text: an equal live text is the same string (`Heap::shared_text`).
-    pub(crate) fn js_text(&self, it: &mut Interp<'_>, s: &str) -> R<Value> {
+    pub(crate) fn js_text(&self, it: &mut E::Vm, s: &str) -> R<E, E::Raw> {
         if s.len() > self.lim.max_string_bytes { return Err(self.lim("dom-string")); }
-        it.charge((s.len() / 32) as u64)?;
-        match it.heap.shared_text(s) {
-            Ok(s) => Ok(Value::String(s)),
-            Err(e) => Err(it.heap_error(e)),
+        it.charge_o((s.len() / 32) as u64)?;
+        match it.h_shared_text(s) {
+            Ok(s) => Ok(E::str_raw(s)),
+            Err(e) => Err(e),
         }
     }
 
     /// `ToString(v)` as UTF-8. A lone surrogate cannot be stored: `Unsupported`, never a lossy copy.
-    pub(crate) fn string_arg(&self, it: &mut Interp<'_>, v: Value) -> R<String> {
+    pub(crate) fn string_arg(&self, it: &mut E::Vm, v: E::Raw) -> R<E, String> {
         let s = it.to_js_string(v)?;
-        let len = it.heap.str_len(s).map_err(Error::Heap)?;
+        let len = it.h_str_len(s)?;
         if len > self.lim.max_string_bytes { return Err(self.lim("dom-string")); }
-        it.charge((len / 32) as u64)?;
-        let units = match it.heap.str_units(s) {
+        it.charge_o((len / 32) as u64)?;
+        let units = match it.h_str_units(s) {
             Ok(u) => u,
-            Err(e) => return Err(it.heap_error(e)),
+            Err(e) => return Err(e),
         };
         if units.len() > self.lim.max_string_bytes {
             return Err(self.lim("dom-string"));
         }
         let bytes = char::decode_utf16(units.iter().copied()).try_fold(0usize, |n, c| {
             c.map(|c| n.saturating_add(c.len_utf8()))
-        }).map_err(|_| Error::Unsupported(unsupported("lone surrogate in a DOM string (the native document is UTF-8)")))?;
+        }).map_err(|_| Fault::Unsupported("lone surrogate in a DOM string (the native document is UTF-8)"))?;
         if bytes > self.lim.max_string_bytes {
             return Err(self.lim("dom-string"));
         }
-        String::from_utf16(units).map_err(|_| Error::Unsupported(unsupported("lone surrogate in a DOM string (the native document is UTF-8)")))
+        String::from_utf16(units).map_err(|_| Fault::Unsupported("lone surrogate in a DOM string (the native document is UTF-8)"))
     }
 
     /// A DOMException-like error to throw: an object that inherits from `Error.prototype`, with `name`, `message`, `code`.
-    pub(crate) fn dom_err(&self, it: &mut Interp<'_>, name: &str, msg: &str) -> Error {
-        let r = (|| -> R<Value> {
-            let o = it.new_error(self.p().domexc, msg)?;
+    pub(crate) fn dom_err(&self, it: &mut E::Vm, name: &str, msg: &str) -> Fault<E> {
+        let r = (|| -> R<E, E::Raw> {
+            let o = it.new_error_o(self.p().domexc, msg)?;
             let n = self.js_str(it, name)?;
             let (kn, kc) = (self.key(it, "name")?, self.key(it, "code")?);
             it.define_data(o, kn, n, true, false, true)?;
-            it.define_data(o, kc, Value::Number(domexc_codes(name) as f64), true, false, true)?;
-            Ok(Value::Object(o))
+            it.define_data(o, kc, E::num(domexc_codes(name) as f64), true, false, true)?;
+            Ok(E::obj_raw(o))
         })();
         match r {
-            Ok(v) => Error::Throw(v),
+            Ok(v) => Fault::Throw(v),
             Err(e) => e,
         }
     }
@@ -1399,9 +1388,9 @@ impl Dom {
     // ------------------------------------------------------------ wrappers
 
     /// The wrapper of `node`. It is made with the wrappers of all its ancestors (see the header).
-    pub(crate) fn wrap(&self, it: &mut Interp<'_>, node: NodeId) -> R<Value> {
+    pub(crate) fn wrap(&self, it: &mut E::Vm, node: NodeId) -> R<E, E::Raw> {
         if let Some(o) = self.st.borrow().wrapper(node) {
-            return Ok(Value::Object(o));
+            return Ok(E::obj_raw(o));
         }
         let mut chain = Vec::new();
         {
@@ -1411,7 +1400,7 @@ impl Dom {
                 if st.by_node.contains_key(&n) {
                     break;
                 }
-                it.charge(1)?;
+                it.charge_o(1)?;
                 chain.push(n);
                 cur = doc.parent(n);
             }
@@ -1458,28 +1447,28 @@ impl Dom {
             self.set_wrapper(&mut self.st.borrow_mut(), it, n, o);
             first.get_or_insert(o);
         }
-        Ok(Value::Object(first.expect("chain has the node")))
+        Ok(E::obj_raw(first.expect("chain has the node")))
     }
 
-    pub(crate) fn wrap_opt(&self, it: &mut Interp<'_>, n: Option<NodeId>) -> R<Value> {
+    pub(crate) fn wrap_opt(&self, it: &mut E::Vm, n: Option<NodeId>) -> R<E, E::Raw> {
         match n {
             Some(n) => self.wrap(it, n),
-            None => Ok(Value::Null),
+            None => Ok(E::null()),
         }
     }
 
-    pub(crate) fn node_of(&self, v: Value) -> Option<NodeId> {
-        let Value::Object(o) = v else { return None };
+    pub(crate) fn node_of(&self, v: E::Raw) -> Option<NodeId> {
+        let Val::Object(o) = E::kind(v) else { return None };
         match self.st.borrow().by_obj.get(&o) {
             Some(&Target::Node(n)) => Some(n),
             _ => None,
         }
     }
 
-    pub(crate) fn nd(&self, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
+    pub(crate) fn nd(&self, it: &mut E::Vm, this: E::Raw) -> R<E, NodeId> {
         match self.node_of(this) {
             Some(n) => Ok(n),
-            None => Err(it.type_error("Illegal invocation")),
+            None => Err(it.type_error_o("Illegal invocation")),
         }
     }
 
@@ -1494,7 +1483,7 @@ impl Dom {
     // ------------------------------------------------------------ selectors
 
     /// Parse (and cache) a selector list. The names it mentions go in the document name table: bounded first.
-    pub(crate) fn selectors(&self, it: &mut Interp<'_>, text: &str) -> R<Rc<Vec<Selector>>> {
+    pub(crate) fn selectors(&self, it: &mut E::Vm, text: &str) -> R<E, Rc<Vec<Selector>>> {
         if let Some(s) = self.st.borrow().sel_cache.get(text) {
             return Ok(s.clone());
         }
@@ -1502,7 +1491,7 @@ impl Dom {
             return Err(self.lim("dom-selector"));
         }
         // A parse costs up to about 1,050 instructions for each byte (a list of one-letter tags) and a step about 370, so 4 steps per byte.
-        it.charge(text.len() as u64 * 4)?;
+        it.charge_o(text.len() as u64 * 4)?;
         let parsed = {
             let mut doc = self.doc.borrow_mut();
             // Only tag and attribute names are new names, and each one needs a byte and a separator.
@@ -1528,14 +1517,14 @@ impl Dom {
         Ok(list)
     }
 
-    pub(crate) fn selectors_at(&self, it: &mut Interp<'_>, text: &str, scope: NodeId) -> R<Rc<Vec<Selector>>> {
+    pub(crate) fn selectors_at(&self, it: &mut E::Vm, text: &str, scope: NodeId) -> R<E, Rc<Vec<Selector>>> {
         self.selector_scope.set(Some(scope));
         self.selectors(it, text)
     }
 
     // ------------------------------------------------------------ install
 
-    fn pick(&self, p: P) -> ObjId {
+    fn pick(&self, p: P) -> E::Obj {
         let ps = self.p();
         match p {
             P::Et => ps.et,
@@ -1563,12 +1552,12 @@ impl Dom {
         }
     }
 
-    pub(crate) fn install<'s>(&self, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+    pub(crate) fn install<'s>(&self, s: &mut Sc<'s, E>) -> Res<'s, ()> {
         let g = s.global();
-        let go = obj_id(s, g).expect("the global is an object");
+        let go = obj_id::<E>(s, g).expect("the global is an object");
         let _ = self.global.set(go);
         let ep = s.intrinsic(Intrinsic::ErrorPrototype);
-        let ep = obj_id(s, ep).expect("an object");
+        let ep = obj_id::<E>(s, ep).expect("an object");
         let et = self.plain_s(s)?;
         let node = self.obj_s(s, et)?;
         let element = self.obj_s(s, node)?;
@@ -1612,10 +1601,10 @@ impl Dom {
         // methods and accessors. One function object serves every target of a row (`Element.prototype.append === DocumentFragment.prototype.append`,
         // unlike Chrome): a realm pays for each function it makes, and most rows of the table have 2 or 3 targets.
         let targets = ALL_P.map(|p| self.obj_local(s, self.pick(p)));
-        self.install_rows(s, &targets, &defs::T)?;
+        self.install_rows(s, &targets, &defs::T::<E>::V)?;
 
         // interface objects
-        let ifaces: [(&str, ObjId, Option<HS>); 26] = [
+        let ifaces: [(&str, E::Obj, Option<HS<E>>); 26] = [
             ("EventTarget", et, None),
             ("Window", win, None),
             ("Node", node, None),
@@ -1637,7 +1626,7 @@ impl Dom {
             ("CustomEvent", custom, None),
             ("FocusEvent", focus, None),
             ("SubmitEvent", submit, None),
-            ("ToggleEvent", toggle, Some(crate::browser_details::toggle_event_ctor as HS)),
+            ("ToggleEvent", toggle, Some(crate::browser_details::toggle_event_ctor as HS<E>)),
             ("MouseEvent", mouse, None),
             ("PointerEvent", pointer, None),
             ("KeyboardEvent", keyboard, None),
@@ -1678,7 +1667,7 @@ impl Dom {
 
         // globals: window, self, document
         let docw = self.wrap_s(s, self.doc.borrow().root())?;
-        let _ = self.doc_wrapper.set(obj_id(s, docw).expect("an object"));
+        let _ = self.doc_wrapper.set(obj_id::<E>(s, docw).expect("an object"));
         for (name, v) in [("window", g), ("self", g), ("document", docw)] {
             s.define_str(g, name, v, Attrs::ALL)?;
         }
@@ -1720,7 +1709,7 @@ impl Dom {
             Row::both(1, "Screen", lazy_screen),
         ]);
         let g = s.global();
-        self.install_rows(s, &[g], &lazy::T)?;
+        self.install_rows(s, &[g], &lazy::T::<E>::V)?;
         crate::browser_select::install(self, s)?;
         // Last: a new host function earlier in this list moves the id of every one after it.
         crate::browser_elements::install(self, s)?;
@@ -1733,35 +1722,31 @@ impl Dom {
         crate::browser_basics::install(self, s)
     }
 
-    pub(crate) fn define_accessor(&self, it: &mut Interp<'_>, o: ObjId, key: PropertyKey, get: ObjId, set: Option<ObjId>) -> R<()> {
-        let d = PropertyDescriptor { get: Some(Some(get)), set: Some(set), enumerable: Some(true), configurable: Some(true), ..Default::default() };
-        match it.heap.define_own_property(o, key, &d) {
+    pub(crate) fn define_accessor(&self, it: &mut E::Vm, o: E::Obj, key: E::Key, get: E::Obj, set: Option<E::Obj>) -> R<E, ()> {
+        let d = Desc::<E> { get: Some(Some(get)), set: Some(set), enumerable: Some(true), configurable: Some(true), ..Default::default() };
+        match it.h_define_own(o, key, &d) {
             Ok(_) => Ok(()),
-            Err(e) => Err(it.heap_error(e)),
+            Err(e) => Err(e),
         }
     }
 }
 
-pub(crate) fn unsupported(what: &'static str) -> bare_js::eval::Unsupported {
-    bare_js::eval::Unsupported { what, span: Default::default() }
-}
-
 /// The constructors of the interface objects that are on the interface form.
-fn ctor_s(name: &str) -> Option<crate::browser_scoped::HS> {
+fn ctor_s<E: Eng>(name: &str) -> Option<crate::browser_scoped::HS<E>> {
     Some(match name {
         "EventTarget" => ev::event_target_ctor,
         "Event" => ev::event_ctor,
         "CustomEvent" => ev::custom_event_ctor,
         "FocusEvent" => crate::browser_focus::focus_event_ctor,
-        "MouseEvent" => crate::browser_uievent::ctor::<0>,
-        "PointerEvent" => crate::browser_uievent::ctor::<1>,
-        "KeyboardEvent" => crate::browser_uievent::ctor::<2>,
-        "InputEvent" => crate::browser_uievent::ctor::<3>,
+        "MouseEvent" => crate::browser_uievent::ctor::<0, _>,
+        "PointerEvent" => crate::browser_uievent::ctor::<1, _>,
+        "KeyboardEvent" => crate::browser_uievent::ctor::<2, _>,
+        "InputEvent" => crate::browser_uievent::ctor::<3, _>,
         _ => return None,
     })
 }
 
-pub(crate) fn illegal_constructor<'s>(_: &Dom, s: &mut crate::browser_scoped::Sc<'s, '_>, _: bare_js_api::Local<'s>, _: bare_js_api::Args<'s>) -> crate::browser_scoped::Res<'s, bare_js_api::Local<'s>> {
+pub(crate) fn illegal_constructor<'s, E: Eng>(_: &Dom<E>, s: &mut crate::browser_scoped::Sc<'s, E>, _: bare_js_api::Local<'s>, _: bare_js_api::Args<'s>) -> crate::browser_scoped::Res<'s, bare_js_api::Local<'s>> {
     Err(s.type_error("Illegal constructor"))
 }
 
@@ -1780,15 +1765,15 @@ const fn mask(on: &[P]) -> u32 {
     m
 }
 
-const fn ms(on: &[P], name: &'static str, len: u32, h: HS) -> Row {
+const fn ms<E: Eng>(on: &[P], name: &'static str, len: u32, h: HS<E>) -> Row<E> {
     Row::method(mask(on), name, len, h)
 }
 
-const fn gs(on: &[P], name: &'static str, h: HS) -> Row {
+const fn gs<E: Eng>(on: &[P], name: &'static str, h: HS<E>) -> Row<E> {
     Row::get(mask(on), name, h, None)
 }
 
-const fn asr(on: &[P], name: &'static str, get: HS, set: HS) -> Row {
+const fn asr<E: Eng>(on: &[P], name: &'static str, get: HS<E>, set: HS<E>) -> Row<E> {
     Row::get(mask(on), name, get, Some(set))
 }
 
@@ -1866,10 +1851,10 @@ table!(defs = [
     ms(&[Element], "attachShadow", 1, sh::attach_shadow),
     gs(&[Element], "shadowRoot", sh::shadow_root),
     gs(&[Shadow], "mode", sh::mode),
-    gs(&[Shadow], "delegatesFocus", sh::flag_bit::<1>),
+    gs(&[Shadow], "delegatesFocus", sh::flag_bit::<1, _>),
     gs(&[Shadow], "slotAssignment", sh::slot_assignment),
-    gs(&[Shadow], "clonable", sh::flag_bit::<2>),
-    gs(&[Shadow], "serializable", sh::flag_bit::<4>),
+    gs(&[Shadow], "clonable", sh::flag_bit::<2, _>),
+    gs(&[Shadow], "serializable", sh::flag_bit::<4, _>),
     gs(&[Shadow], "host", sh::host),
     ms(&[Element], "matches", 1, nd::matches_selector_s),
     ms(&[Element], "closest", 1, nd::closest),
@@ -2001,10 +1986,10 @@ table!(defs = [
 // ---------------------------------------------------------------------------------------------- Browser
 
 /// One realm with a DOM. This is the type tests and tools use.
-pub struct Browser {
+pub struct Browser<E: Eng = Old> {
     pub(crate) observe_document: Option<u64>,
-    pub it: Interp<'static>,
-    pub(crate) dom: Rc<Dom>,
+    pub it: E::Vm,
+    pub(crate) dom: Rc<Dom<E>>,
 }
 
 /// What a dispatch from the test driver did.
@@ -2029,20 +2014,30 @@ pub struct BrowserStats {
     pub attr_slots: usize,
 }
 
-impl Browser {
+impl Browser<Old> {
     /// A realm over `doc` with `window`, `document` and the DOM interfaces installed.
-    pub fn new(doc: Document, limits: BrowserLimits, eval: EvalLimits, heap: HeapLimits) -> R<Browser> {
+    pub fn new(doc: Document, limits: BrowserLimits, eval: EvalLimits, heap: HeapLimits) -> R<Old, Browser<Old>> {
+        Browser::make(doc, limits, eval, heap)
+    }
+}
+
+impl<E: Eng> Browser<E> {
+    /// `new` on the engine `E`.
+    pub fn make(doc: Document, limits: BrowserLimits, eval: EvalLimits, heap: HeapLimits) -> R<E, Browser<E>> {
+        Browser::with_vm(E::realm(eval, heap)?, doc, limits)
+    }
+
+    /// A realm over `doc` with `window`, `document` and the DOM interfaces installed, on the engine `it`.
+    pub fn with_vm(mut it: E::Vm, doc: Document, limits: BrowserLimits) -> R<E, Browser<E>> {
         for (used, cap, name) in [
             (doc.len(), limits.max_nodes, "dom-nodes"),
             (doc.text_bytes(), limits.max_text_bytes, "dom-text"),
             (doc.attr_slots(), limits.max_attr_slots, "dom-attrs"),
             (doc.name_count(), limits.max_names, "dom-names"),
         ] {
-            if used > cap { return Err(Error::Limit(LimitKind::Host(name))); }
+            if used > cap { return Err(Fault::Limit(LimitKind::Host(name))); }
         }
         bare_css::rule_cache::new_document();
-        let heap = Heap::new(heap).map_err(Error::Heap)?;
-        let mut it = Interp::realm(heap, eval)?;
         let dom = Rc::new(Dom {
             doc: Rc::new(RefCell::new(doc)),
             st: RefCell::default(),
@@ -2111,8 +2106,8 @@ impl Browser {
             reclaim: Default::default(),
         });
         bare_js_api::Engine::set_host(&mut it, dom.clone());
-        it.set_api_sources(dom.clone());
-        it.host_scope(|it| {
+        it.set_sources(dom.clone());
+        it.host_scope_o(|it| {
             run(it, |s| {
                 dom.install(s)?;
                 dom.install_scheduler(s)
@@ -2142,8 +2137,8 @@ impl Browser {
     /// The DOM stays consistent because each native DOM operation completes before a budget is checked, and a budget is only
     /// charged before the work that it bounds. Host caps (`Limit(Host(..))`), heap and memory caps stay fatal: they can come from
     /// garbage that stays, or from a refusal that a retry would repeat.
-    pub fn survive(&mut self, e: Error, what: &str) -> Survive {
-        let Error::Limit(k) = e else { return Survive::Fatal };
+    pub fn survive(&mut self, e: Fault<E>, what: &str) -> Survive {
+        let Fault::Limit(k) = e else { return Survive::Fatal };
         if !is_budget(&e) {
             return Survive::Fatal;
         }
@@ -2158,22 +2153,22 @@ impl Browser {
         self.dom.clear_budget_halt_plat();
         self.dom.clear_budget_halt_fetch();
         // A new budget window: the steps of the aborted task must not make the next host call fail.
-        let _ = self.it.host_scope(|_| Ok(()));
+        let _ = self.it.host_scope_o(|_| Ok(()));
         crate::browser_console::push_text(&self.dom, &mut self.it, crate::browser_console::ConsoleLevel::Error, &format!("Script aborted: the {k:?} budget ended the {what}. The page goes on ({n} of {} aborts used)", self.dom.lim.max_task_aborts));
         Survive::Aborted
     }
 
-    pub fn run_script(&mut self, source: &str) -> R<Value> {
+    pub fn run_script(&mut self, source: &str) -> R<E, E::Raw> {
         let mut ids = bare_observe::process::context();
         ids.document = self.observe_document;
         let _context = bare_observe::process::enter(ids);
-        let r = self.it.run_script(source);
+        let r = self.it.run_script_o(source);
         self.observe_stats();
         // `BARE_RECLAIM_STRESS=1 cargo test`: collect and reclaim after each script, freed nodes poisoned (`browser_reclaim.rs`).
         #[cfg(test)]
         if self.dom.reclaim.each() {
             let keep = match &r {
-                Ok(v) | Err(Error::Throw(v)) => Some(*v),
+                Ok(v) | Err(Fault::Throw(v)) => Some(*v),
                 _ => None,
             };
             self.collect(keep.as_slice())?;
@@ -2182,11 +2177,11 @@ impl Browser {
     }
 
     /// The microtask checkpoint (Promise jobs).
-    pub fn drain(&mut self) -> R<usize> {
+    pub fn drain(&mut self) -> R<E, usize> {
         let mut ids = bare_observe::process::context();
         ids.document = self.observe_document;
         let _context = bare_observe::process::enter(ids);
-        let result = self.it.drain_microtasks();
+        let result = self.it.drain_microtasks_o();
         self.observe_stats();
         result
     }
@@ -2195,7 +2190,7 @@ impl Browser {
         bare_observe::process::emit("engine", "browser_stats", || {
             use bare_observe::{Field, Scalar::U64};
             let s = self.stats();
-            let h = self.it.heap.stats();
+            let h = self.it.h_stats();
             [Field("heap_accounted_bytes", U64(h.bytes as u64)), Field("live_objects", U64(h.live_objects as u64)), Field("collections", U64(h.collections)), Field("heap_slab_capacity_bytes", U64(h.slab_capacity_bytes as u64)), Field("text_bytes", U64(s.text_bytes as u64)), Field("attr_slots", U64(s.attr_slots as u64)), Field("nodes", U64(s.nodes as u64)), Field("wrappers", U64(s.wrappers as u64)), Field("listeners", U64(s.listeners as u64)), Field("events", U64(s.events as u64))]
         });
     }
@@ -2208,7 +2203,7 @@ impl Browser {
     }
 
     /// Collect the heap. Attached wrappers and their listeners live. `extra` are values the caller still holds.
-    pub fn collect(&mut self, extra: &[Value]) -> R<bare_js::heap::Collected> {
+    pub fn collect(&mut self, extra: &[E::Raw]) -> R<E, bare_js::heap::Collected> {
         let mut ids = bare_observe::process::context();
         ids.document = self.observe_document;
         let _context = bare_observe::process::enter(ids);
@@ -2243,20 +2238,20 @@ impl Browser {
     }
 
     /// The JS wrapper of a native node (made if needed). Keep it in `extra` of `collect` to keep a detached node.
-    pub fn wrapper(&mut self, node: NodeId) -> R<Value> {
+    pub fn wrapper(&mut self, node: NodeId) -> R<E, E::Raw> {
         let dom = self.dom.clone();
-        self.it.host_scope(|it| dom.wrap(it, node))
+        self.it.host_scope_o(|it| dom.wrap(it, node))
     }
 
     /// The native node of a wrapper value.
-    pub fn node(&self, v: Value) -> Option<NodeId> {
+    pub fn node(&self, v: E::Raw) -> Option<NodeId> {
         self.dom.node_of(v)
     }
 
     /// First element in tree order that matches `selector` (native lookup; JS does not run).
-    pub fn query(&mut self, selector: &str) -> R<Option<NodeId>> {
+    pub fn query(&mut self, selector: &str) -> R<E, Option<NodeId>> {
         let dom = self.dom.clone();
-        self.it.host_scope(|it| {
+        self.it.host_scope_o(|it| {
             let root = dom.doc.borrow().root();
             Ok(dom.query(it, root, selector, false)?.into_iter().next())
         })
@@ -2266,14 +2261,14 @@ impl Browser {
 
     /// Dispatch a new event of type `ty` at `node`. `isTrusted` is false. After each listener that the driver
     /// started, the microtask queue is drained (a checkpoint with an empty JS stack).
-    pub fn dispatch(&mut self, node: NodeId, ty: &str, bubbles: bool, cancelable: bool) -> R<Dispatched> {
+    pub fn dispatch(&mut self, node: NodeId, ty: &str, bubbles: bool, cancelable: bool) -> R<E, Dispatched> {
         let dom = self.dom.clone();
         let mark = {
             let st = dom.st.borrow();
             st.dropped_reports + st.reports.len() as u64
         };
         dom.st.borrow_mut().driver = true;
-        let r = self.it.host_scope(|it| {
+        let r = self.it.host_scope_o(|it| {
             let e = dom.new_event(it, ty, bubbles, cancelable, true, None)?;
             dom.dispatch(it, Target::Node(node), e)
         });
@@ -2289,43 +2284,43 @@ impl Browser {
     /// The tab closes: the document is hidden for good (`document.visibilityState` "hidden"), then `visibilitychange` fires at the
     /// document and `pagehide` (`persisted` false: bare keeps no back/forward cache) at the window, as in Chrome. Pages send their
     /// pending changes from these handlers. A second call does nothing.
-    pub fn hide(&mut self) -> R<()> {
+    pub fn hide(&mut self) -> R<E, ()> {
         let dom = self.dom.clone();
         if dom.basics.hidden.replace(true) {
             return Ok(());
         }
         let root = dom.doc.borrow().root();
-        self.it.host_scope(|it| {
+        self.it.host_scope_o(|it| {
             let e = dom.new_event(it, "visibilitychange", true, false, false, None)?;
             dom.dispatch(it, Target::Node(root), e)?;
             let e = dom.new_event(it, "pagehide", false, false, false, None)?;
             let k = dom.key(it, "persisted")?;
-            it.define_data(e, k, Value::Bool(false), false, false, true)?;
+            it.define_data(e, k, E::bool_raw(false), false, false, true)?;
             dom.dispatch(it, Target::Window, e)?;
             Ok(())
         })
     }
 
     /// `submit` at a form (bubbles, cancelable). No validation, no navigation.
-    pub fn submit(&mut self, form: NodeId) -> R<Dispatched> {
+    pub fn submit(&mut self, form: NodeId) -> R<E, Dispatched> {
         self.dispatch(form, "submit", true, true)
     }
 
     /// Like a user typing: set the native value of a text-like `<input>`, then dispatch `input` (bubbles).
-    pub fn type_text(&mut self, input: NodeId, text: &str) -> R<Dispatched> {
+    pub fn type_text(&mut self, input: NodeId, text: &str) -> R<E, Dispatched> {
         self.dom.driver_input(input, Some(text), None)?;
         self.dispatch(input, "input", true, false)
     }
 
     /// Like leaving a field: dispatch `change` (bubbles). The value was set by `type_text`.
-    pub fn commit_change(&mut self, input: NodeId) -> R<Dispatched> {
+    pub fn commit_change(&mut self, input: NodeId) -> R<E, Dispatched> {
         self.dom.driver_input(input, None, None)?;
         self.dispatch(input, "change", true, false)
     }
 
     /// Set the native checkedness of a checkbox or radio, then dispatch `input` and `change`.
     /// Radio groups are not modeled: other radios stay as they are.
-    pub fn set_checked(&mut self, input: NodeId, checked: bool) -> R<Dispatched> {
+    pub fn set_checked(&mut self, input: NodeId, checked: bool) -> R<E, Dispatched> {
         self.dom.driver_input(input, None, Some(checked))?;
         let mut a = self.dispatch(input, "input", true, false)?;
         let b = self.dispatch(input, "change", true, false)?;

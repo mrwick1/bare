@@ -26,14 +26,13 @@
 //! - A tab in `white-space: pre`, a `text-transform` that changes the number of letters, and the margin of an atomic box in a culled
 //!   inline are not measured as Chrome does: the tab counts as one letter and the margin as 0.
 
+use crate::eng::{Eng, Fault};
 use crate::browser::*;
 use crate::browser_range::{bounds, utf16_len};
 use crate::browser_scoped::*;
 use bare_js_api::{Args, Engine, Local};
 use bare_css::values::{Keyword, Property, Value as Cv};
 use bare_html::dom::{Document, NodeData, NodeId};
-use bare_js::eval::{Error, Interp};
-use bare_js::value::Value;
 use bare_layout::boxes::{Kind, Tree};
 use bare_layout::font::{self, Metrics};
 use bare_layout::fragment::{Fragment, Kind as Frag, Layout, Rect};
@@ -402,29 +401,29 @@ fn union(rects: &[Rect]) -> Rect {
 }
 
 /// Run `f` on the layout as it is, and again on the layout that keeps every inline box when `f` asks for it.
-fn with_pass(d: &Dom, it: &mut Interp<'_>, g: &Geo, s: &Scroll, f: impl Fn(&Pass) -> Rs) -> R<Vec<Rect>> {
+fn with_pass<E: Eng>(d: &Dom<E>, it: &mut E::Vm, g: &Geo, s: &Scroll, f: impl Fn(&Pass) -> Rs) -> R<E, Vec<Rect>> {
     fn pass<'a>(g: &'a Geo<'a>, s: &'a Scroll, plain: Option<&'a Layout>) -> Pass<'a> {
         Pass { g, s, tree: Tree::new(g.doc, g.styles), main: Idx::new(g.layout), plain: plain.map(Idx::new) }
     }
     match f(&pass(g, s, None)) {
         Ok(v) => return Ok(v),
-        Err(Need::Foreign) => return Err(gate(FOREIGN)),
+        Err(Need::Foreign) => return Err(gate::<E>(FOREIGN)),
         Err(Need::Plain) => {}
     }
     d.geometry.uncull.set(true);
     let plain = d.layout_at(it, g.styles, g.view(), None);
     d.geometry.uncull.set(false);
-    f(&pass(g, s, Some(&plain?))).or_else(|n| if matches!(n, Need::Foreign) { Err(gate(FOREIGN)) } else { Ok(Vec::new()) })
+    f(&pass(g, s, Some(&plain?))).or_else(|n| if matches!(n, Need::Foreign) { Err(gate::<E>(FOREIGN)) } else { Ok(Vec::new()) })
 }
 
 const FOREIGN: &str = "getClientRects of a MathML element, or of a range that holds an SVG or MathML element (no layout for it)";
 
-fn gate(what: &'static str) -> Error {
-    Error::Unsupported(unsupported(what))
+fn gate<E: Eng>(what: &'static str) -> Fault<E> {
+    Fault::Unsupported(what)
 }
 
 /// The rectangles of an element, in window coordinates.
-pub(crate) fn element_rects(d: &Dom, it: &mut Interp<'_>, el: NodeId) -> R<Vec<Rect>> {
+pub(crate) fn element_rects<E: Eng>(d: &Dom<E>, it: &mut E::Vm, el: NodeId) -> R<E, Vec<Rect>> {
         let _caller = crate::force::tag("getClientRects");
     if !d.in_document(it, el)? {
         return Ok(Vec::new());
@@ -524,13 +523,13 @@ pub(crate) fn text_at(g: &Geo, s: &Scroll, x: f32, y: f32) -> Option<(NodeId, u3
     Some((f.node, utf16_len(&text[..at])))
 }
 
-fn client_rects<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn client_rects<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let el = d.el_s(s, this)?;
-    let r = old(s, |it| element_rects(d, it, el))?;
+    let r = old::<E, _>(s, |it| element_rects(d, it, el))?;
     crate::browser_geom::rect_list_s(d, s, &r)
 }
 
-fn range_rects(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<Vec<Rect>> {
+fn range_rects<E: Eng>(d: &Dom<E>, it: &mut E::Vm, this: E::Raw) -> R<E, Vec<Rect>> {
         let _caller = crate::force::tag("range rects");
     let b = bounds(d, it, this)?;
     if !d.in_document(it, b.0)? || !d.in_document(it, b.2)? {
@@ -541,7 +540,7 @@ fn range_rects(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<Vec<Rect>> {
         let mut n = Some(b.0);
         while let Some(x) = n.filter(|&x| x != doc.root()) {
             if doc.is_foreign(x) {
-                return Err(gate(FOREIGN));
+                return Err(gate::<E>(FOREIGN));
             }
             n = doc.parent(x);
         }
@@ -550,26 +549,26 @@ fn range_rects(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<Vec<Rect>> {
 }
 
 /// `range_rects` for a handler: `this` is the range.
-fn range_rects_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, Vec<Rect>> {
+fn range_rects_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, Vec<Rect>> {
     let this = s.engine().raw(this);
-    old(s, |it| range_rects(d, it, this))
+    old::<E, _>(s, |it| range_rects(d, it, this))
 }
 
-pub(crate) fn range_client_rects<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn range_client_rects<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let r = range_rects_s(d, s, this)?;
     crate::browser_geom::rect_list_s(d, s, &r)
 }
 
-pub(crate) fn range_bounding_rect<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn range_bounding_rect<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let r = range_rects_s(d, s, this)?;
     crate::browser_geom::layout_rect_s(d, s, union(&r))
 }
 
 /// `getBoundingClientRect` of an element that has no box fragment: the union of its rectangles.
-pub(crate) fn element_bounding(d: &Dom, it: &mut Interp<'_>, el: NodeId) -> R<Rect> {
+pub(crate) fn element_bounding<E: Eng>(d: &Dom<E>, it: &mut E::Vm, el: NodeId) -> R<E, Rect> {
     Ok(union(&element_rects(d, it, el)?))
 }
 
-pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
     d.def_method_at(s, d.p().element, "getClientRects", 0, client_rects).map(|_| ())
 }

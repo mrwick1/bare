@@ -11,13 +11,12 @@
 //! - Cells reflect `colSpan` (clamped to 1..1000, default 1), `rowSpan` (0..65534, default 1), `headers`, `abbr` and `scope` (the four words,
 //!   else `""`).
 
+use crate::eng::Eng;
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_js_api::{Args, Local, Type};
 use crate::browser_reflect::{reflect, this_of};
 use bare_html::dom::{Document, NodeData, NodeId};
-use bare_js::eval::Interp;
-use bare_js::value::{ObjId};
 
 /// The kinds of `Src::Of` lists of this module. `FORM` is `form.elements` (`browser_form.rs`).
 const ROWS: u8 = 0;
@@ -52,9 +51,9 @@ fn table_rows(doc: &Document, t: NodeId) -> Vec<NodeId> {
 }
 
 /// The members of the list `kind` of `n` (`browser_nodelist.rs` calls it to rebuild a stale list).
-pub(crate) fn ids<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId, kind: u8) -> Res<'s, Vec<NodeId>> {
+pub(crate) fn ids<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, n: NodeId, kind: u8) -> Res<'s, Vec<NodeId>> {
     if kind == FORM {
-        return old(s, |it| d.form_elements(it, n));
+        return old::<E, _>(s, |it| d.form_elements(it, n));
     }
     let doc = d.doc.borrow();
     // A table walks its children and the children of its sections; charge both.
@@ -71,20 +70,20 @@ pub(crate) fn ids<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId, kind: u8) -> Res<'
 }
 
 /// The `long index` argument (default -1).
-fn index<'s>(s: &mut Sc<'s, '_>, a: Args<'s>) -> Res<'s, i32> {
-    let v = arg_s(s, a, 0);
+fn index<'s, E: Eng>(s: &mut Sc<'s, E>, a: Args<'s>) -> Res<'s, i32> {
+    let v = arg_s::<E>(s, a, 0);
     match s.type_of(v) {
         Type::Undefined => Ok(-1),
         _ => Ok(bare_js::value::to_int32(s.to_number(v)?)),
     }
 }
 
-fn range<'s>(d: &Dom, s: &mut Sc<'s, '_>, what: &str, on: &str, i: i32, len: usize, close: char) -> bare_js_api::Error<'s> {
+fn range<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, what: &str, on: &str, i: i32, len: usize, close: char) -> bare_js_api::Error<'s> {
     d.dom_err_s(s, "IndexSizeError", &format!("Failed to execute '{what}' on '{on}': The index provided ({i}) is outside the range [-1, {len}{close}."))
 }
 
 /// A new HTML element `name`, inserted into `parent` before `before`.
-fn add<'s>(d: &Dom, s: &mut Sc<'s, '_>, parent: NodeId, name: &str, before: Option<NodeId>) -> Res<'s, NodeId> {
+fn add<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, parent: NodeId, name: &str, before: Option<NodeId>) -> Res<'s, NodeId> {
     let n = {
         let mut doc = d.doc.borrow_mut();
         d.room_s(s, &doc, 1, 0)?;
@@ -96,8 +95,8 @@ fn add<'s>(d: &Dom, s: &mut Sc<'s, '_>, parent: NodeId, name: &str, before: Opti
 
 /// `insertRow` of a section and `insertCell`: a new `name` at `index` among `list`, children of `parent`.
 #[allow(clippy::too_many_arguments)]
-fn insert_at<'s>(d: &Dom, s: &mut Sc<'s, '_>, parent: NodeId, list: &[NodeId], a: Args<'s>, name: &str, what: &str, on: &str) -> Res<'s, Local<'s>> {
-    let i = index(s, a)?;
+fn insert_at<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, parent: NodeId, list: &[NodeId], a: Args<'s>, name: &str, what: &str, on: &str) -> Res<'s, Local<'s>> {
+    let i = index::<E>(s, a)?;
     if i < -1 || i > list.len() as i32 {
         return Err(range(d, s, what, on, i, list.len(), ']'));
     }
@@ -107,8 +106,8 @@ fn insert_at<'s>(d: &Dom, s: &mut Sc<'s, '_>, parent: NodeId, list: &[NodeId], a
 }
 
 /// `deleteRow` and `deleteCell`: remove member `index` of `list` (-1: the last one, if any).
-fn delete_at<'s>(d: &Dom, s: &mut Sc<'s, '_>, list: &[NodeId], a: Args<'s>, what: &str, on: &str) -> Res<'s, Local<'s>> {
-    let i = index(s, a)?;
+fn delete_at<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, list: &[NodeId], a: Args<'s>, what: &str, on: &str) -> Res<'s, Local<'s>> {
+    let i = index::<E>(s, a)?;
     let victim = if i == -1 { list.last().copied() } else if i < 0 || i >= list.len() as i32 { return Err(range(d, s, what, on, i, list.len(), ')')) } else { Some(list[i as usize]) };
     if let Some(v) = victim {
         d.doc.borrow_mut().detach(v);
@@ -118,19 +117,19 @@ fn delete_at<'s>(d: &Dom, s: &mut Sc<'s, '_>, list: &[NodeId], a: Args<'s>, what
 
 // ------------------------------------------------------------------------------------------ table
 
-fn table<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
+fn table<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, NodeId> {
     this_of(d, s, this, &["table"])
 }
 
-fn first<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, tag: &str) -> Res<'s, Local<'s>> {
+fn first<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, tag: &str) -> Res<'s, Local<'s>> {
     let t = table(d, s, this)?;
     let c = kids(&d.doc.borrow(), t, &[tag]).first().copied();
     d.wrap_opt_s(s, c)
 }
 
-fn insert_row<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn insert_row<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let t = table(d, s, this)?;
-    let i = index(s, a)?;
+    let i = index::<E>(s, a)?;
     let rows = ids(d, s, t, ROWS)?;
     if i < -1 || i > rows.len() as i32 {
         return Err(range(d, s, "insertRow", "HTMLTableElement", i, rows.len(), ']'));
@@ -157,14 +156,14 @@ fn insert_row<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> 
     d.wrap_s(s, n)
 }
 
-fn delete_row<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn delete_row<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let t = table(d, s, this)?;
     let rows = ids(d, s, t, ROWS)?;
     delete_at(d, s, &rows, a, "deleteRow", "HTMLTableElement")
 }
 
 /// `createTHead` (`FOOT` false) or `createTFoot`: the first such child, else a new one.
-fn create_section<'s, const FOOT: bool>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn create_section<'s, const FOOT: bool, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let t = table(d, s, this)?;
     let tag = if FOOT { "tfoot" } else { "thead" };
     let (found, before) = {
@@ -181,7 +180,7 @@ fn create_section<'s, const FOOT: bool>(d: &Dom, s: &mut Sc<'s, '_>, this: Local
     d.wrap_s(s, n)
 }
 
-fn create_tbody<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn create_tbody<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let t = table(d, s, this)?;
     let before = {
         let doc = d.doc.borrow();
@@ -191,7 +190,7 @@ fn create_tbody<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -
     d.wrap_s(s, n)
 }
 
-fn create_caption<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn create_caption<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let t = table(d, s, this)?;
     let (found, head) = {
         let doc = d.doc.borrow();
@@ -205,7 +204,7 @@ fn create_caption<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>)
 }
 
 /// `deleteTHead`, `deleteTFoot`, `deleteCaption`: remove the first child `tag`.
-fn delete_first<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, tag: &str) -> Res<'s, Local<'s>> {
+fn delete_first<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, tag: &str) -> Res<'s, Local<'s>> {
     let t = table(d, s, this)?;
     let c = kids(&d.doc.borrow(), t, &[tag]).first().copied();
     if let Some(c) = c {
@@ -216,25 +215,25 @@ fn delete_first<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, tag: &str) -> 
 
 // ------------------------------------------------------------------------------------------ section, row, cell
 
-fn section_insert_row<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn section_insert_row<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let st = this_of(d, s, this, SECTIONS)?;
     let rows = ids(d, s, st, SECTION_ROWS)?;
     insert_at(d, s, st, &rows, a, "tr", "insertRow", "HTMLTableSectionElement")
 }
 
-fn section_delete_row<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn section_delete_row<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let st = this_of(d, s, this, SECTIONS)?;
     let rows = ids(d, s, st, SECTION_ROWS)?;
     delete_at(d, s, &rows, a, "deleteRow", "HTMLTableSectionElement")
 }
 
-fn insert_cell<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn insert_cell<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let r = this_of(d, s, this, &["tr"])?;
     let cells = ids(d, s, r, CELLS)?;
     insert_at(d, s, r, &cells, a, "td", "insertCell", "HTMLTableRowElement")
 }
 
-fn delete_cell<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn delete_cell<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let r = this_of(d, s, this, &["tr"])?;
     let cells = ids(d, s, r, CELLS)?;
     delete_at(d, s, &cells, a, "deleteCell", "HTMLTableRowElement")
@@ -245,7 +244,7 @@ fn position(list: &[NodeId], n: NodeId) -> f64 {
 }
 
 /// `rowIndex` (`SECTION` false: in the rows of the table) or `sectionRowIndex` (in the rows of the parent).
-fn row_index<'s, const SECTION: bool>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn row_index<'s, const SECTION: bool, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let r = this_of(d, s, this, &["tr"])?;
     let (p, gp) = {
         let doc = d.doc.borrow();
@@ -269,7 +268,7 @@ fn row_index<'s, const SECTION: bool>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'
     Ok(s.number(position(&list, r)))
 }
 
-fn cell_index<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn cell_index<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let c = this_of(d, s, this, &["td", "th"])?;
     let p = d.doc.borrow().parent(c).filter(|&p| d.doc.borrow().is_html(p, "tr"));
     let Some(p) = p else { return Ok(s.number(-1.0)) };
@@ -287,18 +286,18 @@ pub(crate) enum Proto {
     Cell,
 }
 
-pub(crate) fn members(d: &Dom, it: &mut Interp<'_>, o: ObjId, which: Proto) -> R<()> {
+pub(crate) fn members<E: Eng>(d: &Dom<E>, it: &mut E::Vm, o: E::Obj, which: Proto) -> R<E, ()> {
     match which {
         Proto::Table => {
-            d.def_get_s(it, o, "rows", |d, s, t, _| { let n = table(d, s, t)?; old_v(s, |it| crate::browser_nodelist::of(d, it, n, ROWS)) }, None)?;
-            d.def_get_s(it, o, "tBodies", |d, s, t, _| { let n = table(d, s, t)?; old_v(s, |it| crate::browser_nodelist::of(d, it, n, BODIES)) }, None)?;
+            d.def_get_s(it, o, "rows", |d, s, t, _| { let n = table(d, s, t)?; old_v::<E>(s, |it| crate::browser_nodelist::of(d, it, n, ROWS)) }, None)?;
+            d.def_get_s(it, o, "tBodies", |d, s, t, _| { let n = table(d, s, t)?; old_v::<E>(s, |it| crate::browser_nodelist::of(d, it, n, BODIES)) }, None)?;
             d.def_get_s(it, o, "tHead", |d, s, t, _| first(d, s, t, "thead"), None)?;
             d.def_get_s(it, o, "tFoot", |d, s, t, _| first(d, s, t, "tfoot"), None)?;
             d.def_get_s(it, o, "caption", |d, s, t, _| first(d, s, t, "caption"), None)?;
             d.def_method_s(it, o, "insertRow", 0, insert_row)?;
             d.def_method_s(it, o, "deleteRow", 1, delete_row)?;
-            d.def_method_s(it, o, "createTHead", 0, create_section::<false>)?;
-            d.def_method_s(it, o, "createTFoot", 0, create_section::<true>)?;
+            d.def_method_s(it, o, "createTHead", 0, create_section::<false, _>)?;
+            d.def_method_s(it, o, "createTFoot", 0, create_section::<true, _>)?;
             d.def_method_s(it, o, "createTBody", 0, create_tbody)?;
             d.def_method_s(it, o, "createCaption", 0, create_caption)?;
             d.def_method_s(it, o, "deleteTHead", 0, |d, s, t, _| delete_first(d, s, t, "thead"))?;
@@ -306,14 +305,14 @@ pub(crate) fn members(d: &Dom, it: &mut Interp<'_>, o: ObjId, which: Proto) -> R
             d.def_method_s(it, o, "deleteCaption", 0, |d, s, t, _| delete_first(d, s, t, "caption"))?;
         }
         Proto::Section => {
-            d.def_get_s(it, o, "rows", |d, s, t, _| { let n = this_of(d, s, t, SECTIONS)?; old_v(s, |it| crate::browser_nodelist::of(d, it, n, SECTION_ROWS)) }, None)?;
+            d.def_get_s(it, o, "rows", |d, s, t, _| { let n = this_of(d, s, t, SECTIONS)?; old_v::<E>(s, |it| crate::browser_nodelist::of(d, it, n, SECTION_ROWS)) }, None)?;
             d.def_method_s(it, o, "insertRow", 0, section_insert_row)?;
             d.def_method_s(it, o, "deleteRow", 1, section_delete_row)?;
         }
         Proto::Row => {
-            d.def_get_s(it, o, "cells", |d, s, t, _| { let n = this_of(d, s, t, &["tr"])?; old_v(s, |it| crate::browser_nodelist::of(d, it, n, CELLS)) }, None)?;
-            d.def_get_s(it, o, "rowIndex", row_index::<false>, None)?;
-            d.def_get_s(it, o, "sectionRowIndex", row_index::<true>, None)?;
+            d.def_get_s(it, o, "cells", |d, s, t, _| { let n = this_of(d, s, t, &["tr"])?; old_v::<E>(s, |it| crate::browser_nodelist::of(d, it, n, CELLS)) }, None)?;
+            d.def_get_s(it, o, "rowIndex", row_index::<false, _>, None)?;
+            d.def_get_s(it, o, "sectionRowIndex", row_index::<true, _>, None)?;
             d.def_method_s(it, o, "insertCell", 0, insert_cell)?;
             d.def_method_s(it, o, "deleteCell", 1, delete_cell)?;
         }

@@ -15,6 +15,7 @@
 //!   attribute has every name (case-sensitive: the document is always in standards mode here, no quirks mode). No names:
 //!   empty result. More than `max_class_tokens` distinct names is a Limit.
 
+use crate::eng::Eng;
 use crate::browser::*;
 use crate::browser_dom::next_in;
 use crate::browser_scoped::*;
@@ -22,7 +23,7 @@ use bare_html::dom::NodeData;
 use bare_js_api::{Args, Local};
 use std::collections::HashSet;
 
-pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
     let p = d.p();
     for target in [p.element, p.document] {
         table!(rows1 = [
@@ -30,13 +31,13 @@ pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
             Row::method(1, "getElementsByClassName", 1, by_class),
         ]);
         let targets = [d.obj_local(s, target)];
-        d.install_rows(s, &targets, &rows1::T)?;
+        d.install_rows(s, &targets, &rows1::T::<E>::V)?;
     }
     Ok(())
 }
 
 /// The elements under `root` for which `keep` says yes, in tree order. `cost` is charged for each node.
-fn collect<'s>(d: &Dom, s: &mut Sc<'s, '_>, root: bare_html::dom::NodeId, mut keep: impl FnMut(&bare_html::dom::Document, bare_html::dom::NodeId) -> (bool, u64)) -> Res<'s, Vec<bare_html::dom::NodeId>> {
+fn collect<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, root: bare_html::dom::NodeId, mut keep: impl FnMut(&bare_html::dom::Document, bare_html::dom::NodeId) -> (bool, u64)) -> Res<'s, Vec<bare_html::dom::NodeId>> {
     let doc = d.doc.borrow();
     let mut out = Vec::new();
     let (mut cur, mut depth) = (root, 0usize);
@@ -58,7 +59,7 @@ fn collect<'s>(d: &Dom, s: &mut Sc<'s, '_>, root: bare_html::dom::NodeId, mut ke
     Ok(out)
 }
 
-fn by_tag<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn by_tag<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let root = d.nd_s(s, this)?;
     if a.is_empty() {
         return Err(s.type_error("Failed to execute 'getElementsByTagName': 1 argument required, but only 0 present."));
@@ -95,41 +96,41 @@ fn by_tag<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<
 }
 
 /// `document.scripts`: the HTML `script` elements of the document in tree order, as a snapshot array like `getElementsByTagName`.
-pub(crate) fn scripts<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn scripts<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     html_of_tag(d, s, this, "script")
 }
 
 /// `document.forms`: the same for `form` elements.
-pub(crate) fn forms<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn forms<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     html_of_tag(d, s, this, "form")
 }
 
 /// `document.images`, `embeds`: the HTML `img` and `embed` elements, like `scripts`.
-pub(crate) fn images<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn images<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     html_of_tag(d, s, this, "img")
 }
 
-pub(crate) fn embeds<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn embeds<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     html_of_tag(d, s, this, "embed")
 }
 
 /// `document.links`: the HTML `a` and `area` elements that have an `href`.
-pub(crate) fn links<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn links<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     html_with_attr(d, s, this, &["a", "area"], "href")
 }
 
 /// `document.anchors`: the HTML `a` elements that have a `name`.
-pub(crate) fn anchors<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn anchors<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     html_with_attr(d, s, this, &["a"], "name")
 }
 
-fn html_of_tag<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, tag: &str) -> Res<'s, Local<'s>> {
+fn html_of_tag<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, tag: &str) -> Res<'s, Local<'s>> {
     html_with_attr(d, s, this, &[tag], "")
 }
 
 /// The HTML elements of the document with one of `tags`, in tree order, that have the attribute `attr` (any, when it is empty).
 /// A snapshot array, as `getElementsByTagName` gives.
-fn html_with_attr<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, tags: &[&str], attr: &str) -> Res<'s, Local<'s>> {
+fn html_with_attr<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, tags: &[&str], attr: &str) -> Res<'s, Local<'s>> {
     let root = d.nd_s(s, this)?;
     if !matches!(d.data(root), NodeData::Document) {
         return Err(s.type_error("Illegal invocation"));
@@ -149,7 +150,7 @@ fn html_with_attr<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, tags: &[&str
     wrap_coll_s(d, s, &ids)
 }
 
-fn by_class<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn by_class<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let root = d.nd_s(s, this)?;
     if a.is_empty() {
         return Err(s.type_error("Failed to execute 'getElementsByClassName': 1 argument required, but only 0 present."));

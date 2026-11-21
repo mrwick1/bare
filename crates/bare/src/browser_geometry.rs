@@ -45,13 +45,13 @@
 //!
 //! Not done: `getBoundingClientRect`, `offsetParent`, `offsetLeft`, `offsetTop`, `ResizeObserver`, a cache, transformed geometry.
 
+use crate::eng::{Eng, Ops};
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_js_api::{Args, Local};
 use bare_css::cascade::Styles;
 use bare_css::values::{Keyword, Property, Value as Cv};
 use bare_html::dom::{Document, FlatChildren, NodeData, NodeId};
-use bare_js::eval::Interp;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -285,19 +285,19 @@ fn walk<const KEEP: bool>(doc: &Document, styles: &Styles, l: &GeometryLimits, s
     Ok(Bound { fragments: frags, seen: (nodes + text) as u64 })
 }
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// One bounded native layout of the whole page with these styles: the preflight walk refuses or reserves the work first (see the header).
     /// `offsetWidth`, `offsetHeight` and `ResizeObserver` share it.
-    pub(crate) fn layout_now(&self, it: &mut Interp<'_>, styles: &Rc<Styles>) -> R<Rc<Lay>> {
+    pub(crate) fn layout_now(&self, it: &mut E::Vm, styles: &Rc<Styles>) -> R<E, Rc<Lay>> {
         self.layout_shared(it, styles)
     }
 
     /// One bounded native layout at the size `vp` (the window minus the page bars, see `browser_scroll.rs`).
-    pub(crate) fn layout_at(&self, it: &mut Interp<'_>, styles: &Styles, vp: (f32, f32), keep: Option<(Option<bare_layout::keep::Kept>, Option<&[bool]>)>) -> R<bare_layout::fragment::Layout> {
+    pub(crate) fn layout_at(&self, it: &mut E::Vm, styles: &Styles, vp: (f32, f32), keep: Option<(Option<bare_layout::keep::Kept>, Option<&[bool]>)>) -> R<E, bare_layout::fragment::Layout> {
         let l = self.geometry.lim.get();
         let t0 = crate::force::start();
         let doc = self.doc.borrow();
-        it.charge(doc.len() as u64)?;
+        it.charge_o(doc.len() as u64)?;
         let incremental = keep.is_some();
         let walked = match &keep {
             Some((_, dirty)) => walk::<true>(&doc, styles, &l, Some(&mut self.geometry.sums.borrow_mut()), *dirty),
@@ -308,7 +308,7 @@ impl Dom {
             Err(Refuse::Limit(name)) => return Err(self.lim(name)),
         };
         // Layout cannot be interrupted, so it counts its own work and stops going deeper at `max_work`.
-        it.charge(bound.seen + 1)?;
+        it.charge_o(bound.seen + 1)?;
         let probe = self.geometry.probe.get();
         let layout = if self.geometry.uncull.get() {
             bare_layout::layout_uncull(&doc, styles, vp, l.max_work)
@@ -320,7 +320,7 @@ impl Dom {
         if layout.work > l.max_work {
             return Err(self.lim("geometry-work"));
         }
-        it.charge(layout.work)?;
+        it.charge_o(layout.work)?;
         let mut s = self.geometry.stats.get();
         s = GeometryStats { layouts: s.layouts + 1, last_bound: bound.fragments, last_fragments: layout.fragments.len() as u64, last_work: layout.work };
         self.geometry.stats.set(s);
@@ -329,7 +329,7 @@ impl Dom {
     }
 
     /// The border-box size of `el` in whole CSS pixels (width, height), zero when it has no box.
-    fn offset_size(&self, it: &mut Interp<'_>, el: NodeId) -> R<(i32, i32)> {
+    fn offset_size(&self, it: &mut E::Vm, el: NodeId) -> R<E, (i32, i32)> {
         let _caller = crate::force::tag("offsetWidth/Height");
         if !self.in_document(it, el)? {
             return Ok((0, 0));
@@ -375,25 +375,25 @@ pub(crate) fn border_box(layout: &bare_layout::fragment::Layout, el: NodeId) -> 
     any.then_some(bare_layout::fragment::Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
 }
 
-fn offset_width<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn offset_width<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let el = d.style_html_el_s(s, this)?;
-    let (w, _) = old(s, |it| d.offset_size(it, el))?;
+    let (w, _) = old::<E, _>(s, |it| d.offset_size(it, el))?;
     Ok(s.number(w as f64))
 }
 
-fn offset_height<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn offset_height<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let el = d.style_html_el_s(s, this)?;
-    let (_, h) = old(s, |it| d.offset_size(it, el))?;
+    let (_, h) = old::<E, _>(s, |it| d.offset_size(it, el))?;
     Ok(s.number(h as f64))
 }
 
-pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
     let html = d.p().html;
     d.def_get_at(s, html, "offsetWidth", offset_width, None)?;
     d.def_get_at(s, html, "offsetHeight", offset_height, None)
 }
 
-impl Browser {
+impl<E: Eng> Browser<E> {
     /// Replace the bounds of this module. Call it before scripts run.
     pub fn set_geometry_limits(&mut self, l: GeometryLimits) {
         self.dom.geometry.lim.set(l);

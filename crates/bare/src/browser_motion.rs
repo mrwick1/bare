@@ -33,6 +33,7 @@
 //!
 //! Bound (`Limit(Host(name))`): `motion-live` (transitions and animations that live, finished animations included).
 
+use crate::eng::{Eng, Fault, Ops};
 use crate::browser::*;
 use bare_css::cascade::{ComputedStyle, RuleSet, StyleMap, Styles};
 use bare_css::grid::Grid;
@@ -40,8 +41,6 @@ use bare_css::motion::{INFINITE, Motion};
 use bare_css::values::{Keyword, Length, Property, Value as Cv, all_longhands};
 use bare_html::dom::{NodeData, NodeId};
 use crate::browser_scheduler::Task;
-use bare_js::eval::{Error, Interp};
-use bare_js::value::Value;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
@@ -237,7 +236,7 @@ fn hidden(s: &ComputedStyle) -> bool {
     s.get(Property::Display) == Cv::Keyword(Keyword::None)
 }
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     pub(crate) fn motion_key_changed(&self, key: Key) -> bool {
         self.motion.s.borrow().last_key != Some(key)
     }
@@ -263,20 +262,20 @@ impl Dom {
     }
 
     /// The part of the rendering step: style the document, so that a change is seen.
-    pub(crate) fn motion_frame(&self, it: &mut Interp<'_>) -> R<()> {
+    pub(crate) fn motion_frame(&self, it: &mut E::Vm) -> R<E, ()> {
         let _caller = crate::force::tag("motion frame");
         self.motion.s.borrow_mut().pending = false;
         if !self.motion.s.borrow().armed {
             return Ok(());
         }
         match self.cascade_now(it) {
-            Err(Error::Unsupported(_)) => Ok(()),
+            Err(Fault::Unsupported(_)) => Ok(()),
             r => r.map(|_| ()),
         }
     }
 
     /// A cascade of the whole document is done: start and cancel what the change asks for.
-    pub(crate) fn motion_seen(&self, it: &mut Interp<'_>, styles: &Styles) -> R<()> {
+    pub(crate) fn motion_seen(&self, it: &mut E::Vm, styles: &Styles) -> R<E, ()> {
         let (keyframes, any) = {
             let cache = self.computed.cache.borrow();
             let Some(built) = cache.as_ref() else { return Ok(()) };
@@ -303,7 +302,7 @@ impl Dom {
         let mut begins: Vec<(NodeId, Anim)> = Vec::new();
         let mut stack = vec![doc.root()];
         while let Some(n) = stack.pop() {
-            it.charge(1)?;
+            it.charge_o(1)?;
             let kids: Vec<NodeId> = doc.children(n).collect();
             stack.extend(kids.into_iter().rev());
             if !matches!(doc.data(n), NodeData::Element { .. }) {
@@ -380,7 +379,7 @@ impl Dom {
         Ok(())
     }
 
-    fn motion_new(&self, live: Live) -> R<u64> {
+    fn motion_new(&self, live: Live) -> R<E, u64> {
         let mut s = self.motion.s.borrow_mut();
         if s.live.len() + s.animations.len() >= MAX_LIVE {
             return Err(self.lim("motion-live"));
@@ -391,7 +390,7 @@ impl Dom {
         Ok(id)
     }
 
-    fn motion_start_transition(&self, node: NodeId, item: &Item, to: String, now: f64) -> R<()> {
+    fn motion_start_transition(&self, node: NodeId, item: &Item, to: String, now: f64) -> R<E, ()> {
         let (dur_ms, delay_ms) = (item.dur as f64 / 1000.0, item.delay as f64 / 1000.0);
         let start = now + delay_ms.max(0.0);
         let id = self.motion_new(Live { node, kind: Kind::Transition { name: item.name.clone(), to }, start: now + delay_ms, delay_ms, dur_ms, iter: 0, cancelled: false })?;
@@ -402,7 +401,7 @@ impl Dom {
         Ok(())
     }
 
-    fn motion_start_animation(&self, node: NodeId, a: &Anim, now: f64) -> R<()> {
+    fn motion_start_animation(&self, node: NodeId, a: &Anim, now: f64) -> R<E, ()> {
         let (dur_ms, delay_ms) = (a.dur.max(0) as f64 / 1000.0, a.delay as f64 / 1000.0);
         let id = self.motion_new(Live { node, kind: Kind::Animation { name: a.name.clone(), dur_ms, count: a.count }, start: now + delay_ms, delay_ms, dur_ms, iter: 0, cancelled: false })?;
         self.motion.s.borrow_mut().animations.insert((node, a.name.clone()), Some(id));
@@ -411,7 +410,7 @@ impl Dom {
     }
 
     /// Mark `id` as cancelled and queue its `*cancel` event.
-    fn motion_cancel(&self, id: u64) -> R<()> {
+    fn motion_cancel(&self, id: u64) -> R<E, ()> {
         {
             let mut s = self.motion.s.borrow_mut();
             let Some(l) = s.live.get_mut(&id) else { return Ok(()) };
@@ -425,7 +424,7 @@ impl Dom {
     }
 
     /// Queue what follows an animation's start or iteration: the next iteration, or the end.
-    fn motion_next_iteration(&self, id: u64) -> R<()> {
+    fn motion_next_iteration(&self, id: u64) -> R<E, ()> {
         let (start, dur, k, count) = {
             let s = self.motion.s.borrow();
             let Some(l) = s.live.get(&id) else { return Ok(()) };
@@ -442,12 +441,12 @@ impl Dom {
     }
 
     /// Run one step of the task of a transition or an animation.
-    pub(crate) fn motion_task(&self, it: &mut Interp<'_>, id: u64, step: u8) -> R<()> {
+    pub(crate) fn motion_task(&self, it: &mut E::Vm, id: u64, step: u8) -> R<E, ()> {
         let _caller = crate::force::tag("motion task");
         if step != CANCEL {
             // The element may be gone: the cascade finds it and cancels.
             match self.cascade_now(it) {
-                Err(Error::Unsupported(_)) => {}
+                Err(Fault::Unsupported(_)) => {}
                 r => r.map(|_| ())?,
             }
         }
@@ -494,15 +493,15 @@ impl Dom {
         self.motion_fire(it, node, ty, if animation { "animationName" } else { "propertyName" }, &name, elapsed)
     }
 
-    fn motion_fire(&self, it: &mut Interp<'_>, n: NodeId, ty: &str, key: &str, name: &str, elapsed: f64) -> R<()> {
+    fn motion_fire(&self, it: &mut E::Vm, n: NodeId, ty: &str, key: &str, name: &str, elapsed: f64) -> R<E, ()> {
         crate::browser_handlers::sync_path(self, n, ty);
         let listens = {
             let (doc, st) = (self.doc.borrow(), self.st.borrow());
-            let on = |t: Target| st.listeners.get(&t).is_some_and(|v| v.iter().any(|l| &*l.ty == ty));
+            let on = |t: Target<E>| st.listeners.get(&t).is_some_and(|v| v.iter().any(|l| &*l.ty == ty));
             let mut cur = n;
             let mut found = on(Target::Node(cur));
             while let Some(p) = doc.parent(cur) {
-                it.charge(1)?;
+                it.charge_o(1)?;
                 cur = p;
                 found |= on(Target::Node(cur));
             }
@@ -515,7 +514,7 @@ impl Dom {
         self.st.borrow_mut().events.get_mut(&e).expect("just made").trusted = true;
         let s = self.js_str(it, name)?;
         let empty = self.js_str(it, "")?;
-        for (k, v) in [(key, s), ("elapsedTime", Value::Number(elapsed)), ("pseudoElement", empty)] {
+        for (k, v) in [(key, s), ("elapsedTime", E::num(elapsed)), ("pseudoElement", empty)] {
             let k = self.key(it, k)?;
             it.define_data(e, k, v, false, true, true)?;
         }
@@ -526,7 +525,7 @@ impl Dom {
 // ------------------------------------------------------------------------------------------ arena reclaim (`browser_reclaim.rs`)
 
 /// The nodes that running transitions and animations name.
-pub(crate) fn held(d: &Dom, out: &mut Vec<NodeId>) {
+pub(crate) fn held<E: Eng>(d: &Dom<E>, out: &mut Vec<NodeId>) {
     let s = d.motion.s.borrow();
     out.extend(s.live.values().map(|l| l.node));
     out.extend(s.transitions.keys().map(|k| k.0));

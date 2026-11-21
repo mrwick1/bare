@@ -1,7 +1,8 @@
 //! Tests of the CSSOM object model: the shape of a rule declaration, and rule objects that are made on demand.
 use crate::browser::*;
 use bare_html::tree;
-use bare_js::eval::{Error, EvalLimits};
+use crate::eng_old::OldFault as Error;
+use bare_js::eval::{EvalLimits};
 use bare_js::heap::HeapLimits;
 use bare_js::value::Value;
 

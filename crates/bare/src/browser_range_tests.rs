@@ -6,7 +6,8 @@ use crate::browser_loader::*;
 use crate::browser_topic_tests::topic_test;
 use crate::resources::test_server::{Reply, serve};
 use bare_html::tree;
-use bare_js::eval::{Error, EvalLimits};
+use crate::eng_old::OldFault as Error;
+use bare_js::eval::{EvalLimits};
 use bare_js::heap::HeapLimits;
 use bare_net::http::Client;
 use std::time::Duration;
@@ -23,7 +24,7 @@ fn page(body: &str) -> Browser {
 fn js(b: &mut Browser, src: &str) -> String {
     match b.run_script(src) {
         Ok(v) => b.it.display(v),
-        Err(Error::Unsupported(u)) => format!("unsupported:{}", u.what),
+        Err(Error::Unsupported(u)) => format!("unsupported:{}", u),
         Err(e) => format!("{e:?}"),
     }
 }
