@@ -1,110 +1,49 @@
-//! `String.prototype` methods that take a `RegExp` (design-js2-regexp, step R3): `match`, `matchAll`, `search`, `replace`, `replaceAll`
-//! and the `RegExp` branch of `split`. `replace` and `replaceAll` also do the string pattern and the function replacer (a nested call
-//! through [`Realm::call_function`]).
-//!
-//! **A fast path only.** An argument that is a regexp object (`F_REGEXP`) is matched by the runtime of `regexp_rt.rs` (`regexp_run`,
-//! `run_at`) with no property read. A script that gives a regexp its own `exec` or `Symbol.replace`, or that changes
-//! `RegExp.prototype`, is not seen: that is the generic path of the design (section 7.5), which is not built. Known gaps: no named
-//! groups (`$<name>` stays literal and a replacer has no `groups` argument), and `matchAll` runs all the matches at the call and
-//! returns an array iterator (the tag is `Array Iterator`, not `RegExp String Iterator`).
+//! String pattern methods and the span-based RegExp replace and split paths.
 use crate::bi_string::{find, pattern};
+use crate::bi_symbol::{MATCH, MATCH_ALL, REPLACE, SEARCH};
 use crate::builtins::arg;
-use crate::interp_rt::{R, Realm};
-use crate::object::{F_REGEXP, Obj};
-use crate::string::{Chars, Str};
+use crate::interp_rt::{ErrKind, R, Realm};
+use crate::object::Obj;
+use crate::regexp::Flags;
+use crate::regexp_rt::protocol::{check_global, string_hook};
+use crate::string::{Chars, MAX_LEN, Str};
 use crate::value::Value;
 
 const NONE: u32 = u32::MAX;
 
-/// The regexp object of `v`, if it is one.
-fn regexp_of(v: Value) -> Option<Obj> {
-    Realm::obj(v).filter(|o| o.has_flag(F_REGEXP))
-}
-
-/// `AdvanceStringIndex`: how far an empty match moves the index in `s` at `i`.
-fn step(s: Str, i: usize, unicode: bool) -> usize {
+/// AdvanceStringIndex moves by one code unit or one Unicode code point.
+pub(crate) fn step(s: Str, i: usize, unicode: bool) -> usize {
     match s.chars() {
         Some(Chars::Two(u)) if unicode && matches!(u.get(i), Some(0xD800..=0xDBFF)) && matches!(u.get(i + 1), Some(0xDC00..=0xDFFF)) => 2,
         _ => 1,
     }
 }
 
-/// After an empty match of the regexp `re`, move its `lastIndex` on by one code unit (one code point with `u`).
-fn advance(rt: &mut Realm, re: Obj, s: Str, unicode: bool) -> R<()> {
-    let li = rt.last_index(re)? as usize;
-    rt.set_last_index(re, li + step(s, li, unicode))
-}
-
-/// The span of group 0 of the last match.
-fn span(rt: &mut Realm) -> (usize, usize) {
-    let sp = rt.spans();
-    (sp[0] as usize, sp[1] as usize)
+fn match_or_search(rt: &mut Realm, this: Value, args: &[Value], symbol: usize, name: &str, flags: &str) -> R<Value> {
+    let pat = arg(args, 0);
+    if let Some(value) = string_hook(rt, this, pat, symbol, &[this])? {
+        return Ok(value);
+    }
+    let s = rt.this_str(this, name)?;
+    let re = rt.regexp_for(pat, flags)?;
+    rt.invoke_rx_symbol(re, symbol, &[s.value()])
 }
 
 pub(crate) fn match_(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
-    let s = rt.this_str(this, "match")?;
-    let s = rt.flat(s);
-    let re = rt.regexp_for(arg(args, 0), "")?;
-    let flags = rt.regexp_flags_of(re)?;
-    if !flags.global {
-        return if rt.regexp_run(re, s)? { rt.match_result(s) } else { Ok(Value::NULL) };
-    }
-    rt.set_last_index(re, 0)?;
-    let mut out = Vec::new();
-    while rt.regexp_run(re, s)? {
-        let (a, b) = span(rt);
-        out.push(rt.substring(s, a, b));
-        if a == b {
-            advance(rt, re, s, flags.unicode)?;
-        }
-    }
-    Ok(if out.is_empty() { Value::NULL } else { rt.new_array(&out) })
+    match_or_search(rt, this, args, MATCH, "match", "")
 }
 
 pub(crate) fn match_all(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
-    let s = rt.this_str(this, "matchAll")?;
-    let s = rt.flat(s);
-    let re = match regexp_of(arg(args, 0)) {
-        Some(o) => {
-            if !rt.regexp_flags_of(o)?.global {
-                return rt.type_error("String.prototype.matchAll called with a non-global RegExp argument");
-            }
-            rt.regexp_clone(o)?
-        }
-        None => rt.regexp_for(arg(args, 0), "g")?,
-    };
-    let unicode = rt.regexp_flags_of(re)?.unicode;
-    let mut out = Vec::new();
-    while rt.regexp_run(re, s)? {
-        out.push(rt.match_result(s)?);
-        let (a, b) = span(rt);
-        if a == b {
-            advance(rt, re, s, unicode)?;
-        }
-    }
-    let list = rt.new_array(&out);
-    let slot = crate::prelude_pre::PRE.iter().position(|p| p.0 == "arrayIterator").expect("a slot");
-    rt.helper(slot, &[list, Value::int(1)])
+    check_global(rt, this, arg(args, 0), "matchAll")?;
+    match_or_search(rt, this, args, MATCH_ALL, "matchAll", "g")
 }
 
 pub(crate) fn search(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
-    let s = rt.this_str(this, "search")?;
-    let s = rt.flat(s);
-    let re = rt.regexp_for(arg(args, 0), "")?;
-    let prev = rt.last_index_value(re)?;
-    if !rt.same_value(prev, Value::int(0)) {
-        rt.put_last_index(re, Value::int(0))?;
-    }
-    let hit = rt.regexp_run(re, s)?;
-    let cur = rt.last_index_value(re)?;
-    if !rt.same_value(cur, prev) {
-        rt.put_last_index(re, prev)?;
-    }
-    Ok(Value::int(if hit { span(rt).0 as i32 } else { -1 }))
+    match_or_search(rt, this, args, SEARCH, "search", "")
 }
 
 /// `RegExp.prototype[Symbol.split]` for a regexp object `re`: `lim` is `ToUint32(limit)`.
-pub(crate) fn split(rt: &mut Realm, re: Obj, s: Str, lim: u32) -> R<Value> {
+pub(crate) fn fast_split(rt: &mut Realm, re: Obj, s: Str, lim: u32) -> R<Value> {
     if lim == 0 {
         return Ok(rt.new_array(&[]));
     }
@@ -152,9 +91,18 @@ pub(crate) fn split(rt: &mut Realm, re: Obj, s: Str, lim: u32) -> R<Value> {
     Ok(rt.new_array(&out))
 }
 
-/// The replacement text for the match `sp` (the spans of its groups) in `h`, added to `out`: `$$`, `$&`, `` $` ``, `$'`, `$n` and `$nn`.
-fn expand(out: &mut Vec<u16>, rep: &[u16], h: &[u16], sp: &[u32]) {
-    let (at, end, m) = (sp[0] as usize, sp[1] as usize, sp.len() / 2 - 1);
+/// The match or one of the captures used in replacement text.
+pub(crate) enum Capture<'a> {
+    Number(usize),
+    Name(&'a [u16]),
+}
+
+/// GetSubstitution. The caller supplies the matched text and captures.
+#[inline]
+pub(crate) fn expand<E>(
+    out: &mut Vec<u16>, rep: &[u16], h: &[u16], at: usize, end: usize, count: usize, named: bool,
+    mut capture: impl FnMut(&mut Vec<u16>, Capture<'_>) -> Result<(), E>,
+) -> Result<(), E> {
     let digit = |u: u16| (0x30..=0x39).contains(&u).then(|| (u - 0x30) as usize);
     let mut i = 0;
     while i < rep.len() {
@@ -167,94 +115,125 @@ fn expand(out: &mut Vec<u16>, rep: &[u16], h: &[u16], sp: &[u32]) {
         }
         match next {
             0x24 => out.push(c),
-            0x26 => out.extend(&h[at..end]),
+            0x26 => capture(out, Capture::Number(0))?,
             0x60 => out.extend(&h[..at]),
             0x27 => out.extend(&h[end..]),
+            0x3c if named => {
+                let Some(n) = rep[i + 1..].iter().position(|&u| u == 0x3e) else {
+                    out.push(c);
+                    continue;
+                };
+                capture(out, Capture::Name(&rep[i + 1..i + 1 + n]))?;
+                i += n + 2;
+                continue;
+            }
             _ => {
                 let Some(d1) = digit(next) else {
                     out.push(c);
                     continue;
                 };
-                // `$nn` when nn is a group, else `$n`; `$0` and a group that does not exist stay literal.
-                let two = rep.get(i + 1).copied().and_then(digit).map(|d2| d1 * 10 + d2).filter(|n| (1..=m).contains(n));
+                let two = rep.get(i + 1).copied().and_then(digit).map(|d2| d1 * 10 + d2).filter(|n| (1..=count).contains(n));
                 let (n, used) = two.map_or((d1, 1), |n| (n, 2));
-                if !(1..=m).contains(&n) {
+                if !(1..=count).contains(&n) {
                     out.push(c);
                     continue;
                 }
-                if sp[2 * n] != NONE {
-                    out.extend(&h[sp[2 * n] as usize..sp[2 * n + 1] as usize]);
-                }
+                capture(out, Capture::Number(n))?;
                 i += used;
                 continue;
             }
         }
         i += 1;
     }
+    Ok(())
 }
 
-/// What a match is replaced with.
-enum Rep {
+pub(crate) enum Rep {
     Text(Vec<u16>),
     Func(Value),
 }
 
+impl Rep {
+    pub(crate) fn new(rt: &mut Realm, v: Value) -> R<Self> {
+        Ok(if Realm::obj(v).is_some_and(|o| o.is_callable()) { Self::Func(v) } else { Self::Text(pattern(rt, v)?) })
+    }
+}
+
 fn replace_with(rt: &mut Realm, this: Value, args: &[Value], all: bool) -> R<Value> {
+    let (pat, rv) = (arg(args, 0), arg(args, 1));
+    if Realm::obj(pat).is_some() {
+        if all {
+            check_global(rt, this, pat, "replaceAll")?;
+        }
+        if let Some(value) = string_hook(rt, this, pat, REPLACE, &[this, rv])? {
+            return Ok(value);
+        }
+    }
     let s = rt.this_str(this, if all { "replaceAll" } else { "replace" })?;
     let s = rt.flat(s);
     let h = rt.units(s);
-    let (pat, rv) = (arg(args, 0), arg(args, 1));
-    let re = regexp_of(pat);
-    let flags = match re {
-        Some(o) => rt.regexp_flags_of(o)?,
-        None => Default::default(),
-    };
-    if all && re.is_some() && !flags.global {
-        return rt.type_error("String.prototype.replaceAll called with a non-global RegExp argument");
+    let needle = pattern(rt, pat)?;
+    let rep = Rep::new(rt, rv)?;
+    let mut from = Some(0);
+    let mut found = std::iter::from_fn(|| {
+        let i = find(&h, &needle, from?)?;
+        from = all.then(|| i + needle.len().max(1));
+        Some([i as u32, (i + needle.len()) as u32])
+    }).peekable();
+    if found.peek().is_none() {
+        return Ok(s.value());
     }
-    let needle = if re.is_none() { Some(pattern(rt, pat)?) } else { None };
-    let rep = if Realm::obj(rv).is_some_and(|o| o.is_callable()) { Rep::Func(rv) } else { Rep::Text(pattern(rt, rv)?) };
-    // The spans of every match, `stride` words each.
-    let mut found: Vec<u32> = Vec::new();
+    replace_spans(rt, s, &h, rep, found)
+}
+
+pub(crate) fn fast_replace(rt: &mut Realm, re: Obj, s: Str, rep: Rep, flags: Flags) -> R<Value> {
+    let h = rt.units(s);
+    let mut found = Vec::new();
     let mut stride = 2;
-    if let Some(n) = &needle {
-        let mut from = 0;
-        while let Some(i) = find(&h, n, from) {
-            found.extend([i as u32, (i + n.len()) as u32]);
-            if !all {
-                break;
-            }
-            from = i + n.len().max(1);
+    if flags.global {
+        rt.set_last_index(re, 0)?;
+    }
+    while rt.regexp_run(re, s)? {
+        let sp = rt.spans();
+        stride = sp.len();
+        found.extend(&sp);
+        if !flags.global {
+            break;
         }
-    } else if let Some(re) = re {
-        if flags.global {
-            rt.set_last_index(re, 0)?;
-        }
-        while rt.regexp_run(re, s)? {
-            let sp = rt.spans();
-            stride = sp.len();
-            found.extend(&sp);
-            if !flags.global {
-                break;
-            }
-            if sp[0] == sp[1] {
-                advance(rt, re, s, flags.unicode)?;
-            }
+        if sp[0] == sp[1] {
+            let i = sp[1] as usize;
+            rt.set_last_index(re, i + step(s, i, flags.unicode))?;
         }
     }
+    if found.is_empty() {
+        return Ok(s.value());
+    }
+    replace_spans(rt, s, &h, rep, found.chunks_exact(stride))
+}
+
+fn replace_spans<T: AsRef<[u32]>>(rt: &mut Realm, s: Str, h: &[u16], rep: Rep, found: impl Iterator<Item = T>) -> R<Value> {
     let mut out = Vec::with_capacity(h.len());
     let mut next = 0;
-    for sp in found.chunks(stride) {
+    for sp in found {
+        let sp = sp.as_ref();
+        let stride = sp.len();
         let (pos, end) = (sp[0] as usize, sp[1] as usize);
-        if pos < next {
-            continue;
-        }
         out.extend(&h[next..pos]);
         match &rep {
-            Rep::Text(t) => expand(&mut out, t, &h, sp),
+            Rep::Text(t) => {
+                expand(&mut out, t, h, pos, end, stride / 2 - 1, false, |out, g| {
+                    if let Capture::Number(i) = g {
+                        let a = sp[2 * i];
+                        if a != NONE {
+                            out.extend(&h[a as usize..sp[2 * i + 1] as usize]);
+                        }
+                    }
+                    Ok::<_, std::convert::Infallible>(())
+                }).unwrap();
+            }
             Rep::Func(f) => {
                 let mut a = Vec::with_capacity(stride / 2 + 2);
-                for g in sp.chunks(2) {
+                for g in sp.chunks_exact(2) {
                     a.push(if g[0] == NONE { Value::UNDEFINED } else { rt.substring(s, g[0] as usize, g[1] as usize) });
                 }
                 a.push(Realm::num(pos as f64));
@@ -267,7 +246,14 @@ fn replace_with(rt: &mut Realm, this: Value, args: &[Value], all: bool) -> R<Val
         next = end;
     }
     out.extend(&h[next..]);
-    Ok(rt.make_units(&out))
+    replacement_string(rt, &out)
+}
+
+pub(crate) fn replacement_string(rt: &mut Realm, out: &[u16]) -> R<Value> {
+    if out.len() > MAX_LEN {
+        return Err(rt.error(ErrKind::Range, "invalid string length"));
+    }
+    Ok(rt.make_units(out))
 }
 
 pub(crate) fn replace(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {

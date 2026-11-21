@@ -17,15 +17,20 @@
 //! **Steps.** The matcher charges its steps to `Realm::fuel`. When the fuel is out, or the run passes the cap of one run, the native
 //! returns `Err(STOP)`: no handler runs, and the script ends with `Exit::Fuel` (the old engine's `Error::Limit` was as final).
 use crate::blob::Blob;
-use crate::builtins::{NativeFn, arg};
+use crate::bi_symbol::{MATCH, SPECIES};
+use crate::builtins::{HIDDEN, NativeFn, arg};
+use crate::cell::Layout;
 use crate::gc::Marker;
 use crate::interp::STOP;
-use crate::interp_rt::{ErrKind, Key, R, Realm};
+use crate::interp_rt::{ErrKind, Key, Put, R, Realm};
 use crate::object::{F_REGEXP, Obj};
 use crate::regexp::{self, CompileError, ExecError, FLAG_LETTERS, Flags, Scratch};
 use crate::shapes::{A_W, ShapeId};
 use crate::string::{Chars, Str};
 use crate::value::Value;
+
+#[path = "regexp_protocol.rs"]
+pub(crate) mod protocol;
 
 /// How many compiled programs the cache keeps.
 const CACHE: usize = 32;
@@ -34,6 +39,15 @@ const CACHE: usize = 32;
 pub struct Rx {
     proto: Obj,
     shape: ShapeId,
+    proto_shape: ShapeId,
+    ctor: Obj,
+    ctor_shape: ShapeId,
+    species_slot: u32,
+    species: Value,
+    exec: Value,
+    flags_getters: [Value; 9],
+    methods: [Value; 5],
+    iterator_shape: Option<ShapeId>,
     /// The property names `\0src`, `\0fl`, `\0prog`, `lastIndex`, `index`, `input`, `groups`.
     keys: [Str; 7],
     scratch: Scratch,
@@ -85,7 +99,8 @@ impl Realm {
 
     #[inline(never)]
     pub(crate) fn install_regexp(&mut self) {
-        let proto = Obj::new(&mut self.heap, &self.shapes, self.s_object).expect("memory");
+        let proto_root = self.shapes.root(Layout::Object, Some(self.object_proto.cell()), 29);
+        let proto = Obj::new(&mut self.heap, &self.shapes, proto_root).expect("memory");
         self.keep(proto.value());
         let ks = ["\0src", "\0fl", "\0prog", "lastIndex", "index", "input", "groups"].map(|n| self.intern(n));
         let root = self.shapes.root(crate::cell::Layout::Object, Some(proto.cell()), 4);
@@ -93,23 +108,91 @@ impl Realm {
         for (i, k) in ks[..4].iter().enumerate() {
             shape = self.shapes.add(shape, *k, if i == LAST { A_W } else { 0 }).expect("shape");
         }
-        self.rx = Some(Box::new(Rx { proto, shape, keys: ks, scratch: Scratch::new(), out: Vec::new(), nspans: 0, cache: Vec::new() }));
-        self.ctor("RegExp", 2, regexp_ctor, proto);
-        self.method(proto, "exec", 1, regexp_exec);
+        let ctor = self.ctor("RegExp", 2, regexp_ctor, proto);
+        let species_key = self.wk[SPECIES];
+        let species = self.new_native(regexp_species, false, 0, "get [Symbol.species]").value();
+        self.define_accessor(ctor, Key::Name(species_key), species, false, false).expect("define");
+        let ctor_shape = ctor.shape(&self.shapes);
+        let species_slot = self.shapes.find(ctor_shape, species_key).expect("species").slot();
+        let exec = self.new_native(regexp_exec, false, 1, "exec").value();
+        let exec_key = self.intern("exec");
+        self.define_attrs(proto, Key::Name(exec_key), HIDDEN, exec).expect("define");
         self.method(proto, "test", 1, regexp_test);
         self.method(proto, "toString", 0, regexp_to_string);
         self.getter(proto, "source", "get source", regexp_source);
-        self.getter(proto, "flags", "get flags", regexp_flags);
-        for (n, g) in FLAG_NAMES.into_iter().zip(GETTER_NAMES) {
-            self.getter(proto, n, g, regexp_flag);
+        let mut flags_getters = [Value::UNDEFINED; 9];
+        flags_getters[0] = self.getter(proto, "flags", "get flags", regexp_flags);
+        for (i, (n, g)) in FLAG_NAMES.into_iter().zip(GETTER_NAMES).enumerate() {
+            flags_getters[i + 1] = self.getter(proto, n, g, regexp_flag);
         }
+        let methods = protocol::METHODS.map(|(symbol, name, len, f)| {
+            let method = self.new_native(f, false, len, name).value();
+            self.define_attrs(proto, Key::Name(self.wk[symbol]), HIDDEN, method).expect("define");
+            method
+        });
+        let proto_shape = proto.shape(&self.shapes);
+        self.pins.extend([proto_shape, ctor_shape]);
+        // A replaced function must not be collected and have its address reused.
+        for v in [ctor.value(), species, exec].into_iter().chain(flags_getters).chain(methods) {
+            self.keep(v);
+        }
+        self.rx = Some(Box::new(Rx {
+            proto, shape, proto_shape, ctor, ctor_shape, species_slot, species, exec, flags_getters, methods, iterator_shape: None,
+            keys: ks, scratch: Scratch::new(), out: Vec::new(), nspans: 0, cache: Vec::new(),
+        }));
+    }
+
+    /// The original shape fixes the property slots and the prototype of the receiver.
+    #[inline(always)]
+    fn plain_rx(&self, o: Obj) -> Option<&Rx> {
+        let rx = self.rx.as_ref()?;
+        (o.shape(&self.shapes) == rx.shape && o.has_flag(F_REGEXP) && rx.proto.shape(&self.shapes) == rx.proto_shape).then_some(rx)
+    }
+
+    /// The original shape fixes the slots, but a same-shape write can still change a slot value.
+    #[inline(always)]
+    pub(crate) fn plain_rx_method(&self, o: Obj, symbol: usize) -> bool {
+        self.plain_rx(o).is_some_and(|rx| {
+            let i = symbol - MATCH;
+            rx.proto.inline_slot(24 + i) == rx.methods[i]
+        })
+    }
+
+    #[inline(always)]
+    fn plain_rx_exec(&self, o: Obj) -> bool {
+        self.plain_rx(o).is_some_and(|rx| rx.proto.inline_slot(1) == rx.exec)
+    }
+
+    #[inline]
+    fn plain_rx_flags(&self, o: Obj) -> bool {
+        self.plain_rx(o).is_some_and(|rx| {
+            rx.flags_getters.iter().enumerate().all(|(i, v)| rx.proto.inline_slot(6 + 2 * i) == *v)
+        })
+    }
+
+    fn plain_rx_species(&self, o: Obj) -> bool {
+        self.plain_rx(o).is_some_and(|rx| {
+            rx.proto.inline_slot(0) == rx.ctor.value()
+                && rx.ctor.shape(&self.shapes) == rx.ctor_shape
+                && rx.ctor.slot(&self.shapes, rx.species_slot) == rx.species
+        })
+    }
+
+    pub(crate) fn is_regexp(&mut self, v: Value) -> R<bool> {
+        let Some(o) = Realm::obj(v) else { return Ok(false) };
+        if self.plain_rx_method(o, MATCH) {
+            return Ok(true);
+        }
+        let m = self.get_prop(v, Key::Name(self.wk[MATCH]))?;
+        Ok(if m.is_undefined() { o.has_flag(F_REGEXP) } else { Realm::truthy(m) })
     }
 
     /// An accessor property `name` of `o` with a getter and no setter.
-    fn getter(&mut self, o: Obj, name: &str, fname: &'static str, f: NativeFn) {
+    fn getter(&mut self, o: Obj, name: &str, fname: &'static str, f: NativeFn) -> Value {
         let k = self.intern(name);
         let g = self.new_native(f, false, 0, fname);
         self.define_accessor(o, Key::Name(k), g.value(), false, false).expect("define");
+        g.value()
     }
 
     /// A new `RegExp` object. The syntax of `src` and `flags` is checked.
@@ -238,7 +321,7 @@ impl Realm {
         }
     }
 
-    fn to_length(&mut self, v: Value) -> R<f64> {
+    pub(crate) fn to_length(&mut self, v: Value) -> R<f64> {
         let n = self.to_number(v)?;
         Ok(if n.is_nan() || n <= 0.0 { 0.0 } else { n.trunc().min(9007199254740991.0) })
     }
@@ -249,13 +332,17 @@ impl Realm {
             o.set_slot(&self.shapes, LAST as u32, v);
             return Ok(());
         }
-        let k = self.rx().keys[LAST];
-        self.set_checked(o.value(), Key::Name(k), v, false)
+        self.put_last_index(o, v)
     }
 
     /// `RegExpBuiltinExec` without the result object: the spans of the match go to `Rx::out`. `Ok(true)` is a match.
     pub(crate) fn regexp_run(&mut self, o: Obj, s: Str) -> R<bool> {
         let blob = self.program(o)?;
+        self.regexp_run_program(o, s, blob)
+    }
+
+    #[inline(always)]
+    fn regexp_run_program(&mut self, o: Obj, s: Str, blob: Blob) -> R<bool> {
         let flags = regexp::image_flags(blob.words());
         let sticky_or_global = flags.global || flags.sticky;
         let li = self.last_index(o)?;
@@ -314,31 +401,15 @@ impl Realm {
         rx.out[..rx.nspans].to_vec()
     }
 
-    /// The flags of the regexp `o` (its program is compiled now if it is not).
-    pub(crate) fn regexp_flags_of(&mut self, o: Obj) -> R<Flags> {
-        Ok(regexp::image_flags(self.program(o)?.words()))
+    /// The internal flags of a RegExp on the fast path.
+    fn plain_flags(&self, o: Obj) -> Flags {
+        Flags::from_bits(o.inline_slot(FL).as_int().expect("flags") as u8)
     }
 
-    /// The regexp that `String.prototype.match`, `matchAll` and `search` use for the argument `v`: `v` itself when it is a regexp, else
-    /// `new RegExp(v, flags)`.
-    pub(crate) fn regexp_for(&mut self, v: Value, flags: &str) -> R<Obj> {
-        if let Some(o) = Realm::obj(v).filter(|o| o.has_flag(F_REGEXP)) {
-            return Ok(o);
-        }
+    /// RegExpCreate with the intrinsic prototype. Match, matchAll and search use it as their fallback.
+    pub(crate) fn regexp_for(&mut self, v: Value, flags: &str) -> R<Value> {
         let src = if v.is_undefined() { self.intern("") } else { self.to_str(v)? };
-        let r = self.new_regexp(None, src, flags)?;
-        Ok(Realm::obj(r).expect("an object"))
-    }
-
-    /// `new RegExp(o, flags of o)` with the `lastIndex` of `o`: the copy that `matchAll` runs on.
-    pub(crate) fn regexp_clone(&mut self, o: Obj) -> R<Obj> {
-        let (Some(ss), Some(fs)) = (self.rx_slot(o, SRC), self.rx_slot(o, FL)) else { return self.type_error("invalid RegExp object") };
-        let src = Realm::str_of(o.slot(&self.shapes, ss)).expect("a string");
-        let bits = o.slot(&self.shapes, fs).as_int().unwrap_or(0) as u8;
-        let li = self.last_index(o)?;
-        let c = Realm::obj(self.new_regexp(None, src, &letters(bits))?).expect("an object");
-        self.set_last_index(c, li as usize)?;
-        Ok(c)
+        self.new_regexp(None, src, flags)
     }
 
     /// `lastIndex` of the regexp `o` as a value, and the write that puts it back (`search`).
@@ -349,7 +420,11 @@ impl Realm {
 
     pub(crate) fn put_last_index(&mut self, o: Obj, v: Value) -> R<()> {
         let k = self.rx().keys[LAST];
-        self.set_checked(o.value(), Key::Name(k), v, false)
+        match self.set_prop_g(o.value(), Key::Name(k), v)? {
+            Put::Done => Ok(()),
+            Put::Fail => self.type_error("cannot set lastIndex"),
+            Put::Set(f) => self.call_function(f, o.value(), &[v]).map(|_| ()),
+        }
     }
 
     /// The substring of `s` from `a` to `b`.
@@ -366,13 +441,19 @@ impl Realm {
 
     /// The result array of the match in `Rx::out`: the groups, then `index`, `input` and `groups`.
     #[inline(always)]
-    pub(crate) fn match_result(&mut self, s: Str) -> R<Value> {
+    fn match_result(&mut self, s: Str, blob: Blob) -> R<Value> {
         let (out, n) = (std::mem::take(&mut self.rx().out), self.rx().nspans);
         let mut vals = Vec::with_capacity(n / 2);
         for p in out[..n].chunks(2) {
             vals.push(if p[0] == u32::MAX { Value::UNDEFINED } else { self.substring(s, p[0] as usize, p[1] as usize) });
         }
         let index = out[0];
+        let extra = regexp::image_extra_groups(blob.words());
+        let indices = if extra && regexp::image_flags(blob.words()).has_indices {
+            self.match_indices(&out[..n])
+        } else {
+            Vec::new()
+        };
         self.rx().out = out;
         let a = self.new_array(&vals);
         let ao = Realm::obj(a).expect("array");
@@ -380,58 +461,119 @@ impl Realm {
             let k = &self.rx().keys;
             [k[INDEX], k[INPUT], k[GROUPS]]
         };
-        for (k, v) in keys.into_iter().zip([Value::int(index as i32), s.value(), Value::UNDEFINED]) {
+        let groups = if extra { self.named_groups(blob, &vals)? } else { Value::UNDEFINED };
+        for (k, v) in keys.into_iter().zip([Value::int(index as i32), s.value(), groups]) {
             self.define(ao, Key::Name(k), v)?;
+        }
+        if !indices.is_empty() {
+            let array = Realm::obj(self.new_array(&indices)).expect("array");
+            let groups = self.named_groups(blob, &indices)?;
+            self.define(array, Key::Name(keys[2]), groups)?;
+            let key = self.intern("indices");
+            self.define(ao, Key::Name(key), array.value())?;
         }
         Ok(a)
     }
 
-    /// `ToString(v)` of the input of `exec` and `test`.
-    fn input_string(&mut self, args: &[Value]) -> R<Str> {
-        self.to_str(arg(args, 0))
+    #[cold]
+    fn match_indices(&mut self, out: &[u32]) -> Vec<Value> {
+        out.chunks_exact(2).map(|p| {
+            if p[0] == u32::MAX {
+                Value::UNDEFINED
+            } else {
+                self.new_array(&[Value::int(p[0] as i32), Value::int(p[1] as i32)])
+            }
+        }).collect()
+    }
+
+    #[cold]
+    fn named_groups(&mut self, blob: Blob, vals: &[Value]) -> R<Value> {
+        let mut names = regexp::image_names(blob.words()).peekable();
+        if names.peek().is_none() {
+            return Ok(Value::UNDEFINED);
+        }
+        let shape = self.shapes.root(Layout::Object, None, 4);
+        let o = Obj::new(&mut self.heap, &self.shapes, shape).expect("memory");
+        for (name, i) in names {
+            let key = self.make_units(&name);
+            let key = self.key_of(key)?;
+            if !vals[i].is_undefined() || self.get_own(o, key).is_none() {
+                self.define(o, key, vals[i])?;
+            }
+        }
+        Ok(o.value())
+    }
+
+    fn rx_builtin_exec(&mut self, o: Obj, s: Str) -> R<Value> {
+        let blob = self.program(o)?;
+        if self.regexp_run_program(o, s, blob)? {
+            let s = self.flat(s);
+            self.match_result(s, blob)
+        } else {
+            Ok(Value::NULL)
+        }
+    }
+
+    /// RegExpExec, including a script-defined exec and its result type check.
+    fn rx_exec(&mut self, o: Obj, s: Str) -> R<Value> {
+        let k = self.intern("exec");
+        let exec = self.get_prop(o.value(), Key::Name(k))?;
+        if Realm::obj(exec).is_some_and(|f| f.is_callable()) {
+            if self.rx.as_ref().is_some_and(|rx| rx.exec == exec) {
+                let o = self.this_regexp(o.value(), "exec")?;
+                return self.rx_builtin_exec(o, s);
+            }
+            let r = self.call_function(exec, o.value(), &[s.value()])?;
+            return if r.is_null() || Realm::obj(r).is_some() { Ok(r) } else { self.type_error("RegExp exec returned a non-object") };
+        }
+        let o = self.this_regexp(o.value(), "exec")?;
+        self.rx_builtin_exec(o, s)
     }
 }
 
 fn regexp_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let (p, f) = (arg(args, 0), arg(args, 1));
-    let from = Realm::obj(p).filter(|o| o.has_flag(F_REGEXP));
-    // `RegExp(r)` with no `new` and no flags gives `r` itself when its constructor is `RegExp`.
-    if let (Some(o), true, true) = (from, rt.nt.is_undefined(), f.is_undefined()) {
-        let c = rt.get_named(o.value(), "constructor")?;
+    let is_regexp = rt.is_regexp(p)?;
+    if is_regexp && rt.nt.is_undefined() && f.is_undefined() {
+        let c = rt.get_named(p, "constructor")?;
         if c == rt.callee {
             return Ok(p);
         }
     }
-    let proto = rt.new_proto()?;
-    let (src, flags) = match from {
-        Some(o) => {
-            let (Some(ss), Some(fs)) = (rt.rx_slot(o, SRC), rt.rx_slot(o, FL)) else { return rt.type_error("invalid RegExp object") };
-            let src = Realm::str_of(o.slot(&rt.shapes, ss)).expect("a string");
-            let bits = o.slot(&rt.shapes, fs).as_int().unwrap_or(0) as u8;
-            let letters: String = (0..8).filter(|i| bits >> i & 1 != 0).map(|i| FLAG_LETTERS[i] as char).collect();
-            (src, if f.is_undefined() { letters } else { rt.to_str(f).map(|s| rt.text(s))? })
-        }
-        None => {
-            let src = if p.is_undefined() { rt.intern("") } else { rt.to_str(p)? };
-            (src, if f.is_undefined() { String::new() } else { rt.to_str(f).map(|s| rt.text(s))? })
-        }
+    let (source, flags) = if let Some(o) = Realm::obj(p).filter(|o| o.has_flag(F_REGEXP)) {
+        let Some((src, bits)) = parts(rt, o.value(), "constructor")? else { unreachable!() };
+        (src.value(), if f.is_undefined() { rt.string(&letters(bits)) } else { f })
+    } else if is_regexp {
+        let src = rt.get_named(p, "source")?;
+        (src, if f.is_undefined() { rt.get_named(p, "flags")? } else { f })
+    } else {
+        (p, f)
     };
-    rt.new_regexp(Some(proto), src, &flags)
+    let target = if rt.nt.is_undefined() { rt.callee } else { rt.nt };
+    let proto = rt.get_prop(target, Key::Name(rt.k_prototype))?;
+    let proto = Realm::obj(proto);
+    let src = if source.is_undefined() { rt.intern("") } else { rt.to_str(source)? };
+    let flags = if flags.is_undefined() { String::new() } else { rt.to_str(flags).map(|s| rt.text(s))? };
+    rt.new_regexp(proto, src, &flags)
+}
+
+fn regexp_species(_rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
+    Ok(this)
 }
 
 fn regexp_exec(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let o = rt.this_regexp(this, "exec")?;
-    let s = rt.input_string(args)?;
-    if rt.regexp_run(o, s)? {
-        let s = rt.flat(s);
-        rt.match_result(s)
-    } else { Ok(Value::NULL) }
+    let s = rt.to_str(arg(args, 0))?;
+    rt.rx_builtin_exec(o, s)
 }
 
 fn regexp_test(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
-    let o = rt.this_regexp(this, "test")?;
-    let s = rt.input_string(args)?;
-    Ok(Value::bool(rt.regexp_run(o, s)?))
+    let Some(o) = Realm::obj(this) else { return rt.type_error("RegExp.prototype.test requires an object") };
+    let s = rt.to_str(arg(args, 0))?;
+    if rt.plain_rx_exec(o) {
+        return Ok(Value::bool(rt.regexp_run(o, s)?));
+    }
+    Ok(Value::bool(!rt.rx_exec(o, s)?.is_null()))
 }
 
 /// The pattern and the flag bits of a regexp object, or `None` for `RegExp.prototype` itself.
@@ -462,11 +604,16 @@ fn regexp_flag(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
 }
 
 fn regexp_flags(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
-    // The spec reads each flag getter; the built-in objects answer the same without the calls.
-    match parts(rt, this, "flags")? {
-        Some((_, bits)) => Ok(rt.string(&letters(bits))),
-        None => Ok(rt.string("")),
+    if Realm::obj(this).is_none() {
+        return rt.type_error("RegExp.prototype.flags requires an object");
     }
+    let mut bits = 0;
+    for (i, name) in FLAG_NAMES.iter().enumerate() {
+        if Realm::truthy(rt.get_named(this, name)?) {
+            bits |= 1 << i;
+        }
+    }
+    Ok(rt.string(&letters(bits)))
 }
 
 fn regexp_source(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
