@@ -229,3 +229,23 @@ fn json_callbacks_see_the_holder_and_visit_properties_in_order() {
         (r#"try { JSON.parse('[', function() { throw 'wrong'; }); } catch (e) { return e.name; }"#, "SyntaxError"),
     ]);
 }
+
+#[test]
+fn prelude_builtins_have_no_construct_slot_before_or_after_call() {
+    check(&[
+        ("var f = Array.prototype.map; function tryNew() { try { Reflect.construct(Object, [], f); return 'yes'; } catch (e) { return e.name; } } var before = tryNew(); [].map(function () {}); return before + ':' + tryNew() + ':' + Object.hasOwn(f, 'prototype');", "TypeError:TypeError:false"),
+        ("var f = Array.from; try { new f(); } catch (e) { return e.name; }", "TypeError"),
+    ]);
+}
+
+#[test]
+fn array_species_constructs_results_and_defines_own_elements() {
+    check(&[
+        ("var a = [1, 2]; function S(n) { this.requested = n; } a.constructor = {[Symbol.species]: S}; var r = a.map(function(x) { return x * 2; }); return [r instanceof S, r.requested, r[0], r[1], r.length].join();", "true,2,2,4,"),
+        ("var a = [1]; function S(n) { this.requested = n; } a.constructor = {[Symbol.species]: S}; var r = a.slice(); return [r instanceof S, r.requested, r[0], r.length].join();", "true,1,1,1"),
+        ("var a = [1]; a.constructor = {[Symbol.species]: function() { return Object.preventExtensions({}); }}; try { a.concat([2]); } catch (e) { return e.name; }", "TypeError"),
+        ("var a = [1]; a.constructor = {get [Symbol.species]() { throw 'species'; }}; try { a.flatMap(function(x) { return x; }); } catch (e) { return e; }", "species"),
+        ("return Object.getOwnPropertyDescriptor(Array, Symbol.species).get.call(7);", "7"),
+        ("var a = [2]; function S() { Object.defineProperty(this, '0', {value: 1, configurable: true}); } a.constructor = {[Symbol.species]: S}; var d = Object.getOwnPropertyDescriptor(a.flat(), '0'); return [d.value, d.enumerable, d.writable, d.configurable].join();", "2,true,true,true"),
+    ]);
+}
