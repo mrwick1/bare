@@ -217,18 +217,22 @@ fn parse_counted<'a>(source: &'a str, limits: Limits, used: &mut u32, module: bo
 /// Parse `source` as a script with lazy functions: the tree of the top level, and the facts of every function in `facts` (an empty
 /// `Facts`). The function bodies are checked, so every early error of the text is found now.
 pub fn parse_script_lazy<'a>(source: &'a str, limits: Limits, facts: &mut Facts) -> Result<Program<'a>, Error> {
-    parse_lazy(source, limits, facts, false)
+    parse_lazy(source, limits, facts, false, false, 0)
 }
 
 /// [`parse_script_lazy`] for a module.
 pub fn parse_module_lazy<'a>(source: &'a str, limits: Limits, facts: &mut Facts) -> Result<Program<'a>, Error> {
-    parse_lazy(source, limits, facts, true)
+    parse_lazy(source, limits, facts, true, false, 0)
 }
 
-fn parse_lazy<'a>(source: &'a str, limits: Limits, facts: &mut Facts, module: bool) -> Result<Program<'a>, Error> {
+pub(crate) fn parse_eval_lazy<'a>(source: &'a str, limits: Limits, facts: &mut Facts, strict: bool, new_target: bool) -> Result<Program<'a>, Error> {
+    parse_lazy(source, limits, facts, false, strict, if new_target { facts::C_NEW_TARGET } else { 0 })
+}
+
+fn parse_lazy<'a>(source: &'a str, limits: Limits, facts: &mut Facts, module: bool, strict: bool, ctx: u8) -> Result<Program<'a>, Error> {
     *facts = Facts::new();
     facts.module = module;
-    let mut p = match Parser::new(source, limits, module, Mode::Lazy, std::mem::take(facts), 0, false, 0, false) {
+    let mut p = match Parser::new(source, limits, module, Mode::Lazy, std::mem::take(facts), 0, strict, ctx, false) {
         Ok(p) => p,
         Err((f, e)) => {
             *facts = f;
@@ -1036,6 +1040,7 @@ impl<'a> Parser<'a> {
         }
         self.p.body = self.lend(base);
         self.p.strict = self.strict;
+        self.p.flags = self.flags;
         self.pop_scope();
         Ok(())
     }
@@ -1083,6 +1088,7 @@ impl<'a> Parser<'a> {
         let body = self.lend(base);
         self.p.body = body;
         self.p.strict = true;
+        self.p.flags = self.flags;
         self.finish_exports()?;
         self.pop_scope();
         let has_tla = self.mi().has_tla;
@@ -2670,9 +2676,9 @@ impl<'a> Parser<'a> {
                     base = self.mk_expr(ExprKind::Index { obj: base, index, optional: false }, start)?;
                 }
                 Kind::Punct(P::LParen) if !no_call => {
-                    // A direct eval: the callee is the name `eval` itself, not in parentheses (ECMA-262 13.3.6.1).
+                    // A bare identifier retains its reference through parentheses.
                     let b = self.ex(base);
-                    if matches!(b.kind, ExprKind::Ident) && !self.is_paren(base) && self.p.text(b.span) == "eval" {
+                    if matches!(b.kind, ExprKind::Ident) && (self.p.text(b.span) == "eval" || self.p.text(b.span).as_bytes().contains(&b'\\') && self.p.name(b.span) == "eval") {
                         self.flags |= facts::EVAL;
                     }
                     let args = self.parse_args()?;

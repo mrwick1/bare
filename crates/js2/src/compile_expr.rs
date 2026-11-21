@@ -133,6 +133,7 @@ impl<'a> Fc<'a> {
     fn is_undefined(&self, e: ExprId) -> bool {
         let x = self.prog.expr(e);
         matches!(x.kind, ExprKind::Ident) && self.name_of(x.span) == "undefined" && matches!(self.resolve("undefined", x.span.start), Res::Global)
+            && self.dynamic_hops("undefined").is_empty()
     }
 
     pub(crate) fn konst(&mut self, e: ExprId) -> CR<Option<K>> {
@@ -147,8 +148,67 @@ impl<'a> Fc<'a> {
 
     // ------------------------------------------------------------ variables
 
+    /// Keep the resolved object in a register. Later work may change the names the scope object contains.
+    fn dynamic_ref(&mut self, name: &str, this: Option<u32>) -> CR<Option<u32>> {
+        let hops = self.dynamic_hops(name);
+        if hops.is_empty() {
+            return Ok(None);
+        }
+        let obj = self.alloc();
+        let found = self.label();
+        for (hop, kind) in hops {
+            let s = self.site_of(name)?;
+            self.opx(Op::FindScope, obj, hop, kind, s);
+            self.set_live(obj);
+            if let Some(this) = this {
+                self.op(if kind == 0 { Op::Mov } else { Op::LoadUndef }, this, if kind == 0 { obj } else { 0 }, 0);
+                self.set_live(this);
+            }
+            self.jmp_r(Op::JSNeUndef, obj, found);
+        }
+        self.bind(found);
+        Ok(Some(obj))
+    }
+
+    fn use_dynamic(
+        &mut self,
+        object: Option<u32>,
+        when_found: impl FnOnce(&mut Self, u32) -> CR,
+        fallback: impl FnOnce(&mut Self) -> CR,
+    ) -> CR {
+        if let Some(object) = object {
+            let missing = self.label();
+            let done = self.label();
+            self.jmp_r(Op::JSEqUndef, object, missing);
+            when_found(self, object)?;
+            self.jmp(done);
+            self.bind(missing);
+            fallback(self)?;
+            self.bind(done);
+            Ok(())
+        } else {
+            fallback(self)
+        }
+    }
+
     /// Write the value of variable `name` (used at offset `at`) into `dst`.
     pub(crate) fn read_var(&mut self, name: &str, at: u32, dst: u32) -> CR {
+        let m = self.mark();
+        let object = self.dynamic_ref(name, None)?;
+        self.read_ref(name, at, dst, object)?;
+        self.free(m);
+        Ok(())
+    }
+
+    fn read_ref(&mut self, name: &str, at: u32, dst: u32, object: Option<u32>) -> CR {
+        self.use_dynamic(object, |c, o| {
+            let s = c.site_of(name)?;
+            c.op(Op::ScopeGet, dst, o, s);
+            Ok(())
+        }, |c| c.read_static(name, at, dst))
+    }
+
+    fn read_static(&mut self, name: &str, at: u32, dst: u32) -> CR {
         match self.resolve(name, at) {
             Res::Reg { reg, tdz, .. } => {
                 if tdz {
@@ -202,6 +262,26 @@ impl<'a> Fc<'a> {
 
     /// Store register `src` into variable `name`. `init`: the first write of a declaration (no dead-zone or constant check).
     pub(crate) fn store_var(&mut self, name: &str, at: u32, src: u32, init: bool) -> CR {
+        let m = self.mark();
+        if init {
+            self.store_static(name, at, src, true)?;
+        } else {
+            let object = self.dynamic_ref(name, None)?;
+            self.store_ref(name, at, src, object)?;
+        }
+        self.free(m);
+        Ok(())
+    }
+
+    fn store_ref(&mut self, name: &str, at: u32, src: u32, object: Option<u32>) -> CR {
+        self.use_dynamic(object, |c, o| {
+            let s = c.site_of(name)?;
+            c.op(Op::ScopeSet, o, src, s);
+            Ok(())
+        }, |c| c.store_static(name, at, src, false))
+    }
+
+    fn store_static(&mut self, name: &str, at: u32, src: u32, init: bool) -> CR {
         let res = self.resolve(name, at);
         // Sloppy code assigns the name of its own function expression with no effect.
         if !init && !self.strict && matches!(res, Res::Reg { konst: true, .. } | Res::Ctx { konst: true, .. }) && self.is_callee(name) {
@@ -273,7 +353,9 @@ impl<'a> Fc<'a> {
         let x = *self.prog.expr(e);
         if matches!(x.kind, ExprKind::Ident) {
             let name = self.name_of(x.span);
-            if let Res::Reg { reg, tdz, .. } = self.resolve(&name, x.span.start) {
+            if let Res::Reg { reg, tdz, .. } = self.resolve(&name, x.span.start)
+                && self.dynamic_hops(&name).is_empty()
+            {
                 if tdz {
                     let a = self.atom(&name)?;
                     self.op(Op::CheckInit, reg, a, 0);
@@ -475,7 +557,7 @@ impl<'a> Fc<'a> {
             ExprKind::Class(c) => self.class(c, dst)?,
             ExprKind::Super => self.not_built(dst, "super outside a call or a member access"),
             ExprKind::NewTarget => {
-                if self.is_arrow && !matches!(self.resolve("new.target", 0), Res::Global) {
+                if (self.is_arrow || self.eval) && !matches!(self.resolve("new.target", 0), Res::Global) {
                     self.read_var("new.target", 0, dst)?;
                 } else {
                     self.load_new_target(dst);
@@ -506,7 +588,7 @@ impl<'a> Fc<'a> {
     /// `this`. In an arrow, or in a derived constructor, it is a variable (in the derived constructor it is the hole until `super()`
     /// returns, so a read checks it); elsewhere it is the `this` of the frame.
     pub(crate) fn this(&mut self, dst: u32) -> CR {
-        if (self.is_arrow || self.derived) && !matches!(self.resolve("this", 0), Res::Global) {
+        if (self.is_arrow || self.derived || self.eval) && !matches!(self.resolve("this", 0), Res::Global) {
             return self.read_var("this", 0, dst);
         }
         self.op(self.load_this_op(), dst, 0, 0);
@@ -887,9 +969,20 @@ impl<'a> Fc<'a> {
                 let a = *self.prog.expr(arg);
                 let name = (matches!(a.kind, ExprKind::Ident)).then(|| self.name_of(a.span));
                 match name {
-                    Some(n) if matches!(self.resolve(&n, a.span.start), Res::Global) && n != "undefined" => {
-                        let s = self.site_of(&n)?;
-                        self.op(if self.scoped { Op::TypeofName } else { Op::TypeofGlobal }, dst, s, 0);
+                    Some(n) if matches!(self.resolve(&n, a.span.start), Res::Global) && (n != "undefined" || !self.dynamic_hops(&n).is_empty()) => {
+                        let object = self.dynamic_ref(&n, None)?;
+                        self.use_dynamic(object, |c, o| {
+                            let t = c.alloc();
+                            let s = c.site_of(&n)?;
+                            c.op(Op::ScopeGet, t, o, s);
+                            c.op(Op::Typeof, dst, t, 0);
+                            c.free(t);
+                            Ok(())
+                        }, |c| {
+                            let s = c.site_of(&n)?;
+                            c.op(if c.scoped { Op::TypeofName } else { Op::TypeofGlobal }, dst, s, 0);
+                            Ok(())
+                        })?;
                     }
                     _ => {
                         let r = self.any(arg)?;
@@ -943,12 +1036,24 @@ impl<'a> Fc<'a> {
             }
             ExprKind::Ident => {
                 let n = self.name_of(a.span);
-                if matches!(self.resolve(&n, a.span.start), Res::Global) {
-                    let s = self.site_of(&n)?;
-                    self.op(Op::DeleteGlobal, dst, s, 0);
-                } else {
-                    self.op(Op::LoadFalse, dst, 0, 0);
-                }
+                let object = self.dynamic_ref(&n, None)?;
+                self.use_dynamic(object, |c, o| {
+                    let k = c.alloc();
+                    let at = c.atom(&n)?;
+                    c.op(Op::LoadAtom, k, at, 0);
+                    c.set_live(k);
+                    c.op(Op::Delete, dst, o, k);
+                    c.free(k);
+                    Ok(())
+                }, |c| {
+                    if matches!(c.resolve(&n, a.span.start), Res::Global) {
+                        let s = c.site_of(&n)?;
+                        c.op(Op::DeleteGlobal, dst, s, 0);
+                    } else {
+                        c.op(Op::LoadFalse, dst, 0, 0);
+                    }
+                    Ok(())
+                })?;
             }
             ExprKind::Chain(_) => {
                 self.unsup("delete of an optional chain");
@@ -1032,14 +1137,17 @@ impl<'a> Fc<'a> {
             c = *prog.expr(inner);
             paren_chain = Some(self.label());
         }
-        let spread = args.iter().any(|&a| matches!(self.expr_kind(a), ExprKind::Spread(_)));
+        let direct = !optional && tpl.is_none() && matches!(c.kind, ExprKind::Ident) && self.name_of(c.span) == "eval";
+        let spread = direct || args.iter().any(|&a| matches!(self.expr_kind(a), ExprKind::Spread(_)));
         if matches!(c.kind, ExprKind::Super) {
             return self.super_call(e, &args, spread, dst);
         }
         let m = self.mark();
         let tn = tpl.is_some() as u32;
         let n = args.len() as u32 + tn;
-        let method = matches!(c.kind, ExprKind::Member { .. } | ExprKind::Index { .. } | ExprKind::PrivateMember { .. });
+        let name = matches!(c.kind, ExprKind::Ident).then(|| self.name_of(c.span));
+        let dynamic = name.as_deref().is_some_and(|n| !self.dynamic_hops(n).is_empty());
+        let method = dynamic || matches!(c.kind, ExprKind::Member { .. } | ExprKind::Index { .. } | ExprKind::PrivateMember { .. });
         let base = self.window(if spread { 3 } else if method { 2 + n } else { 1 + n });
         let outer_short = paren_chain.and_then(|l| self.chain_short.replace(l));
         match c.kind {
@@ -1090,6 +1198,14 @@ impl<'a> Fc<'a> {
                 self.set_live(base);
                 self.free(k);
             }
+            ExprKind::Ident if dynamic => {
+                let n = name.as_deref().unwrap();
+                let t = self.mark();
+                let object = self.dynamic_ref(n, Some(base + 1))?;
+                self.read_ref(n, c.span.start, base, object)?;
+                self.set_live(base);
+                self.free(t);
+            }
             _ => {
                 self.to(callee, base)?;
                 if spread {
@@ -1118,7 +1234,14 @@ impl<'a> Fc<'a> {
             self.set_live(arr);
             self.fill_array(arr, &args)?;
             self.line(prog.expr(e).span.start);
-            self.op(Op::CallSpread, dst, base, 0);
+            if direct {
+                let scope = self.eval_scopes.len() as u32;
+                self.eval_scopes.push(self.cur_ctx.clone());
+                let new_target = !self.is_script && !self.is_arrow || !matches!(self.resolve("new.target", 0), Res::Global);
+                self.opx(Op::EvalCall, dst, base, new_target as u32, scope);
+            } else {
+                self.op(Op::CallSpread, dst, base, 0);
+            }
         } else {
             let first = if method { base + 2 } else { base + 1 };
             if let Some(t) = tpl {
@@ -1258,14 +1381,15 @@ impl<'a> Fc<'a> {
         Ok(())
     }
 
-    fn assign_ident(&mut self, op: AssignOp, name: &str, at: u32, value: ExprId, dst: Option<u32>) -> CR {
+    pub(crate) fn assign_ident(&mut self, op: AssignOp, name: &str, at: u32, value: ExprId, dst: Option<u32>) -> CR {
+        let object = self.dynamic_ref(name, None)?;
         let res = self.resolve(name, at);
         if matches!(op, AssignOp::Assign | AssignOp::Logical(_)) {
             self.name_hint(value, name);
         }
         match op {
             AssignOp::Assign => {
-                if let Res::Reg { reg, tdz: false, konst: false } = res {
+                if let Res::Reg { reg, tdz: false, konst: false } = res && object.is_none() {
                     // The value goes straight into the variable's register.
                     self.to(value, reg)?;
                     if let Some(d) = dst
@@ -1281,31 +1405,32 @@ impl<'a> Fc<'a> {
                         }
                         None => self.any(value)?,
                     };
-                    self.store_var(name, at, v, false)?;
+                    self.set_live(v);
+                    self.store_ref(name, at, v, object)?;
                 }
             }
             AssignOp::Compound(bop) => {
                 // Read the variable first, as the language does: a copy if the right side can assign it.
                 let m = self.mark();
-                let in_place = matches!(res, Res::Reg { reg, tdz: false, konst: false } if !self.may_clobber(reg, value));
+                let in_place = object.is_none() && matches!(res, Res::Reg { reg, tdz: false, konst: false } if !self.may_clobber(reg, value));
                 let cur = match res {
                     Res::Reg { reg, .. } if in_place => reg,
                     _ => {
                         let cur = self.alloc();
-                        self.read_var(name, at, cur)?;
+                        self.read_ref(name, at, cur, object)?;
                         self.set_live(cur);
                         cur
                     }
                 };
                 let target = match res {
-                    Res::Reg { reg, tdz: false, konst: false } => reg,
+                    Res::Reg { reg, tdz: false, konst: false } if object.is_none() => reg,
                     _ => dst.filter(|d| !self.is_var_reg(*d)).unwrap_or(cur),
                 };
                 self.binary_regs(bop, cur, value, target)?;
-                if !matches!(res, Res::Reg { tdz: false, konst: false, .. }) {
+                if object.is_some() || !matches!(res, Res::Reg { tdz: false, konst: false, .. }) {
                     // The store is a safepoint and reads `target`, so its root map must name it.
                     self.set_live(target);
-                    self.store_var(name, at, target, false)?;
+                    self.store_ref(name, at, target, object)?;
                 }
                 if let Some(d) = dst
                     && d != target
@@ -1320,12 +1445,12 @@ impl<'a> Fc<'a> {
                     Some(d) if !self.is_var_reg(d) => d,
                     _ => self.alloc(),
                 };
-                self.read_var(name, at, cur)?;
+                self.read_ref(name, at, cur, object)?;
                 self.set_live(cur);
                 let end = self.label();
                 self.jump_on_logic(lop, cur, end);
                 self.to(value, cur)?;
-                self.store_var(name, at, cur, false)?;
+                self.store_ref(name, at, cur, object)?;
                 self.bind(end);
                 if let Some(d) = dst
                     && d != cur
@@ -1539,8 +1664,9 @@ impl<'a> Fc<'a> {
         match x.kind {
             ExprKind::Ident => {
                 let name = self.name_of(x.span);
+                let object = self.dynamic_ref(&name, None)?;
                 match self.resolve(&name, x.span.start) {
-                    Res::Reg { reg, tdz: false, konst: false } => match dst {
+                    Res::Reg { reg, tdz: false, konst: false } if object.is_none() => match dst {
                         None => self.op(iop, reg, reg, 0),
                         Some(d) if prefix => {
                             self.op(iop, reg, reg, 0);
@@ -1560,10 +1686,10 @@ impl<'a> Fc<'a> {
                     },
                     _ => {
                         let cur = self.alloc();
-                        self.read_var(&name, x.span.start, cur)?;
+                        self.read_ref(&name, x.span.start, cur, object)?;
                         self.set_live(cur);
                         self.update_value(iop, prefix, cur, dst);
-                        self.store_var(&name, x.span.start, if prefix || dst.is_none() { cur } else { cur + 1 }, false)?;
+                        self.store_ref(&name, x.span.start, if prefix || dst.is_none() { cur } else { cur + 1 }, object)?;
                         if let Some(d) = dst {
                             self.op(Op::Mov, d, cur, 0);
                         }
@@ -1671,7 +1797,7 @@ impl<'a> Fc<'a> {
                 // A read can throw (a global that does not exist, a dead zone), so it stays; a variable that cannot throw does not.
                 let name = self.name_of(x.span);
                 match self.resolve(&name, x.span.start) {
-                    Res::Reg { tdz: false, .. } | Res::Ctx { tdz: false, .. } => {}
+                    Res::Reg { tdz: false, .. } | Res::Ctx { tdz: false, .. } if self.dynamic_hops(&name).is_empty() => {}
                     _ => {
                         let t = self.alloc();
                         self.read_var(&name, x.span.start, t)?;

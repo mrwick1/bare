@@ -109,6 +109,59 @@ impl Realm {
         Ok(())
     }
 
+    pub(crate) fn scope_binding(&mut self, object: Value, name: Str, declarative: bool) -> R<Value> {
+        let key = Key::Name(name);
+        if declarative {
+            return Ok(if self.get_own(Self::obj(object).expect("eval scope"), key).is_some() { object } else { Value::UNDEFINED });
+        }
+        if !self.has_prop(object, key)? {
+            return Ok(Value::UNDEFINED);
+        }
+        let excluded = self.get_prop(object, Key::Name(self.wk[crate::bi_symbol::UNSCOPABLES]))?;
+        if Self::obj(excluded).is_some() && Self::truthy(self.get_prop(excluded, key)?) {
+            return Ok(Value::UNDEFINED);
+        }
+        Ok(object)
+    }
+
+    pub(crate) fn get_scope_binding(&mut self, recv: Value, name: Str, strict: bool) -> R<Value> {
+        let key = Key::Name(name);
+        if self.has_prop(recv, key)? {
+            self.get_prop(recv, key)
+        } else if strict {
+            Err(self.error(ErrKind::Reference, &format!("{} is not defined", self.text(name))))
+        } else {
+            Ok(Value::UNDEFINED)
+        }
+    }
+
+    pub(crate) fn set_scope_binding(&mut self, recv: Value, name: Str, value: Value, strict: bool) -> R<()> {
+        let key = Key::Name(name);
+        if !self.has_prop(recv, key)? && strict {
+            return Err(self.error(ErrKind::Reference, &format!("{} is not defined", self.text(name))));
+        }
+        match self.set_prop_g(recv, key, value)? {
+            Put::Fail if strict => self.type_error("cannot assign to scope property"),
+            Put::Set(f) => self.call_function(f, recv, &[value]).map(drop),
+            _ => Ok(()),
+        }
+    }
+
+    pub(crate) fn declare_eval(&mut self, recv: Value, name: Str, global: bool) -> R<()> {
+        if global && self.has_lex(name) {
+            return Err(self.error(ErrKind::Syntax, &format!("Identifier '{}' has already been declared", self.text(name))));
+        }
+        let o = Self::obj(recv).expect("the eval variable environment");
+        let key = Key::Name(name);
+        if self.get_own(o, key).is_none() {
+            if o.has_flag(crate::object::F_NOEXT) {
+                return self.type_error("cannot declare a variable on a non-extensible global object");
+            }
+            self.define_attrs(o, key, A_W | A_E | A_C, Value::UNDEFINED)?;
+        }
+        Ok(())
+    }
+
     /// `CheckLex`: the checks of `declare_lex`, without the declaration.
     pub fn check_lex(&mut self, name: Str) -> R<()> {
         let fixed = self.shapes.find(self.global.shape(&self.shapes), name).is_some_and(|e| e.attrs() & A_C == 0);

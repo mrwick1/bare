@@ -1326,3 +1326,57 @@ fn array_iteration_respects_overrides_and_inherited_elements() {
         ("var a = [undefined, 2], n = 0; function install() { var p = Object.getPrototypeOf(a.values()); p.return = function() { n = this.next().value; return {}; }; } var [x = install()] = a; var r = n;", "r", "2"),
     ]);
 }
+
+#[test]
+fn dynamic_scope_keeps_the_with_receiver_across_effects() {
+    check(&[
+        (r#"
+            let x = 1;
+            let o = { x: 2, method() { return this === o; } };
+            let get, called;
+            with (o) {
+                get = () => x;
+                called = method();
+                x += (delete o.x, 3);
+            }
+            let first = get();
+            o[Symbol.unscopables] = {x: true};
+            var result = [first, get(), o.x, called];
+        "#, "result", "[5,1,5,true]"),
+        (r#"
+            let o = { x: 2 };
+            with (o) {
+                (() => { "use strict"; try { x = (delete o.x, 3) } catch (e) { o.err = e instanceof ReferenceError; } })();
+            }
+            var result = [o.err, 'x' in o];
+        "#, "result", "[true,false]"),
+    ]);
+}
+
+#[test]
+fn dynamic_scope_eval_binds_in_the_callers_environment() {
+    check(&[
+        (r#"
+            function outer(a) {
+                let x = 2;
+                const read = () => [a, x, typeof y];
+                (eval)('a += arguments[0]; x = this.value; var y = 5;');
+                let value = read();
+                let deleted = delete y;
+                return [value, deleted, read()];
+            }
+            var result = outer.call({ value: 4 }, 3);
+        "#, "result", r#"[[6,4,"number"],true,[6,4,"undefined"]]"#),
+        (r#"
+            let x = 4;
+            function f() {
+                'use strict';
+                let x = 3;
+                const a = eval('var x = 7; x;');
+                const b = (0, eval)('x');
+                return [a, b, x];
+            }
+            var result = [f(), ((eval) => eval(9))(a => a * 2)];
+        "#, "result", "[[7,4,3],18]"),
+    ]);
+}

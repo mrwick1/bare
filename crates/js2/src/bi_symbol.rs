@@ -27,7 +27,7 @@ use crate::string::{Chars, FLAG_REGISTERED, Str};
 use crate::value::Value;
 
 /// The number of well-known symbols that `Symbol` has, and their places in `Realm::wk`.
-pub(crate) const WK: usize = 11;
+pub(crate) const WK: usize = 12;
 #[allow(dead_code)] // `iterator`, `asyncIterator` and `species` are read by steps G3 and P3.
 pub(crate) const ITERATOR: usize = 0;
 #[allow(dead_code)]
@@ -42,9 +42,10 @@ pub(crate) const MATCH_ALL: usize = 7;
 pub(crate) const REPLACE: usize = 8;
 pub(crate) const SEARCH: usize = 9;
 pub(crate) const SPLIT: usize = 10;
+pub(crate) const UNSCOPABLES: usize = 11;
 /// The descriptions of the well-known symbols: `"Symbol."` and the name of the property of `Symbol`.
 const WK_DESC: [&str; WK] = ["Symbol.iterator", "Symbol.asyncIterator", "Symbol.species", "Symbol.toStringTag", "Symbol.hasInstance", "Symbol.toPrimitive",
-    "Symbol.match", "Symbol.matchAll", "Symbol.replace", "Symbol.search", "Symbol.split"];
+    "Symbol.match", "Symbol.matchAll", "Symbol.replace", "Symbol.search", "Symbol.split", "Symbol.unscopables"];
 /// The name of the native `Function.prototype[Symbol.hasInstance]`: `Realm::instance_of` skips the call for it.
 pub(crate) const HAS_INSTANCE_NAME: &str = "[Symbol.hasInstance]";
 

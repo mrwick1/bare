@@ -90,8 +90,8 @@ pub(crate) struct ApiState {
     /// `call_scoped`: the objects that the names of handler code are looked up in (`api_script.rs`), and the code of each handler text.
     scope: Vec<Obj>,
     handlers: std::collections::HashMap<String, usize>,
-    /// `%eval%` and `%IteratorPrototype%`, made at the first ask (`undefined` before).
-    eval_fn: Value,
+    /// The realm's eval intrinsic, and its iterator prototype (made on demand).
+    pub(crate) eval_fn: Value,
     pub(crate) iter_proto: Value,
     /// The index in `Realm::natives` of the trampoline of a plain host function and of a host constructor (`usize::MAX`: not made).
     natives: [usize; 2],

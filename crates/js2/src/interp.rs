@@ -47,11 +47,6 @@
 //! of the site and then load or store at its place, inline (`interp_rt.rs`: the states and the transitions). Everything else about a
 //! miss is in the realm, out of line.
 //!
-//! **Not here:** the generators and async functions, `with` and direct `eval`, regexp and BigInt (a literal throws a `TypeError`),
-//! the iterator protocol (an array and a string are iterated, anything else throws; `for-in` walks the own keys), `Symbol`, `Map`, `Set`,
-//! `JSON`, `Date` and `Promise`. The core built-ins (S2.7: `builtins.rs`) and `ToPrimitive` are here. The classes, `super`, private names, accessors, spread and rest, `arguments` and `new.target` are here
-//! (`interp_ops.rs` has the runtime side).
-//!
 //! `unsafe` is in five places, each with a `SAFETY` comment. (1) `r!`: a register is read or written with no bounds check. (2) `word!`:
 //! an instruction word is read with no bounds check. (3) The `Op` of the opcode byte is a `transmute`, so the `match` is one jump table
 //! and no second table lookup. (1) to (3) rest on `verify` (registers below `nregs`, a pc that stays in the code, opcodes that exist)
@@ -102,7 +97,10 @@ pub trait LazyCompile {
     fn compile(&mut self, codes: &Codes, ci: usize) -> Result<(), String>;
     /// Compile `src` as a script and add it at the end of `codes`. Gives the index of its top level code: a function with no
     /// parameters (`api.rs`, `Realm::run_text`).
-    fn script(&mut self, _codes: &Codes, _src: &str, _mode: crate::compile::ScriptMode) -> Result<usize, String> {
+    fn script_in(
+        &mut self, _codes: &Codes, _src: &str, _mode: crate::compile::ScriptMode,
+        _chain: Option<std::rc::Rc<crate::compile::Level>>, _strict: bool, _new_target: bool,
+    ) -> Result<usize, String> {
         Err("this compiler cannot add a script".into())
     }
     /// Add a stub for the top-level function `top` of the prelude, with the `name` that its `name` property gets, at the end of `codes`.
@@ -170,6 +168,7 @@ impl Mode for Cold {
 macro_rules! cold_ops {
     () => {
         Op::TypeofGlobal | Op::TypeofName | Op::GetName | Op::SetName | Op::DeleteGlobal | Op::Delete | Op::Exp | Op::ThrowConst | Op::DeclGlobal |
+        Op::DeclEval | Op::InitEval | Op::InitEvalScope | Op::ScopeGet | Op::ScopeSet | Op::ScopeObject | Op::FindScope | Op::EvalCall |
         Op::CheckLex | Op::DeclLex | Op::DeclLexC | Op::CreateRest | Op::Lazy | Op::NewDataLit | Op::NewRegExp | Op::LoadBigInt | Op::GetTemplate |
         Op::ArraySpread | Op::ArrayHole | Op::CallSpread | Op::NewSpread | Op::CopyProps | Op::ObjRest | Op::SetProto |
         Op::DefAccessor | Op::DefAccessorElem | Op::DefMethod | Op::DefMethodElem | Op::SetHome | Op::MakeClass | Op::MakeDerived |
@@ -1185,6 +1184,69 @@ impl Vm {
                             gate!();
                             r!(a!()) = tri!(code.data[bx!()].build(realm));
                             pc = next;
+                        }
+                        Op::DeclEval => {
+                            std::hint::cold_path();
+                            gate!();
+                            let o = if a!() == 0 { realm.global.value() } else { ctx_hops!(a!() - 1).get(1) };
+                            tri!(realm.declare_eval(o, name!(bx!()), a!() == 0));
+                            pc = next;
+                        }
+                        Op::InitEval => {
+                            std::hint::cold_path();
+                            gate!();
+                            let o = if b!() == 0 { realm.global.value() } else { ctx_hops!(b!() - 1).get(1) };
+                            tri!(realm.set_prop(o, Key::Name(name!(c!())), r!(a!())));
+                            pc = next;
+                        }
+                        Op::InitEvalScope => {
+                            std::hint::cold_path();
+                            let o = Realm::obj(r!(a!())).expect("an eval scope");
+                            o.set_proto(&mut realm.shapes, None);
+                            pc = next;
+                        }
+                        Op::ScopeGet => {
+                            std::hint::cold_path();
+                            gate!();
+                            let value = tri!(realm.get_scope_binding(r!(b!()), name!(c!()), code.strict));
+                            r!(a!()) = value;
+                            pc = next;
+                        }
+                        Op::ScopeSet => {
+                            std::hint::cold_path();
+                            gate!();
+                            tri!(realm.set_scope_binding(r!(a!()), name!(c!()), r!(b!()), code.strict));
+                            pc = next;
+                        }
+                        Op::EvalCall => {
+                            std::hint::cold_path();
+                            gate!();
+                            let callee = r!(b!());
+                            let arr = r!(b!() + 2);
+                            let value = if callee == realm.api.eval_fn {
+                                let v = Realm::obj(arr).and_then(|a| a.get_element(0)).unwrap_or(undef);
+                                tri!(realm.direct_eval(v, record(stack, fp, 1), record(stack, fp, 2), code.eval_scopes[($x) as usize].clone(), code.strict, c!() != 0))
+                            } else {
+                                let this = r!(b!() + 1);
+                                let (nf, len) = stage_array!(arr);
+                                tri!(realm.call_function(callee, this, &stack[nf..nf + len]))
+                            };
+                            r!(a!()) = value;
+                            pc = nextx!();
+                        }
+                        Op::ScopeObject => {
+                            std::hint::cold_path();
+                            gate!();
+                            r!(a!()) = tri!(realm.to_object(r!(b!()))).value();
+                            pc = next;
+                        }
+                        Op::FindScope => {
+                            std::hint::cold_path();
+                            gate!();
+                            let o = ctx_hops!(b!()).get(1);
+                            let n = name!(($x) as usize);
+                            r!(a!()) = tri!(realm.scope_binding(o, n, c!() == 1));
+                            pc = nextx!();
                         }
                         Op::GetName => {
                             std::hint::cold_path();

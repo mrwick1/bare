@@ -5,10 +5,9 @@
 //! statement with a body; the old engine has the same rule, it is not the full UpdateEmpty). A script that nobody asks for a value
 //! (`Realm::run_text`) is compiled as before.
 //!
-//! **Eval.** The text of an indirect `eval` runs as a script of the realm, with `ScriptMode::eval`: its `var`s and functions are
-//! globals, and its `let`, `const` and `class` names stay inside the code (no global lexical binding, so the same text can run twice).
-//! Not built: a direct `eval` (a function that has one stays "not supported yet" at its first call), a strict `eval` that keeps its
-//! `var`s local, the `Function` constructor.
+//! **Eval.** Call the intrinsic with a string to compile a script. Direct eval starts with the caller's lexical chain.
+//! Sloppy eval declares vars and functions in the caller's variable environment, or at global scope for indirect eval.
+//! Strict eval keeps its declarations local.
 //!
 //! **Event handlers.** `compile_function` compiles `(function NAME(PARAMS) {\nBODY\n})` as a script with `ScriptMode::scoped`: the
 //! top level and every function inside it read, write and `typeof` a free name by `GetName`, `SetName` and `TypeofName`. Those look in
@@ -49,11 +48,18 @@ impl Realm {
     /// Compile `src` as a script of this realm and add it to the program. Gives the code index of its top level. A syntax error is a
     /// thrown `SyntaxError`; a realm with no compiler stops with an abort.
     pub(crate) fn script_code(&mut self, src: &str, mode: ScriptMode) -> R<usize> {
+        self.script_code_in(src, mode, None, false, false)
+    }
+
+    fn script_code_in(
+        &mut self, src: &str, mode: ScriptMode,
+        chain: Option<std::rc::Rc<crate::compile::Level>>, strict: bool, new_target: bool,
+    ) -> R<usize> {
         let Some(l) = self.lazy.as_mut() else {
             self.api.abort = Some(Abort::Unsupported("a realm with no compiler"));
             return Err(STOP);
         };
-        let ci = match l.script(&self.prog, src, mode) {
+        let ci = match l.script_in(&self.prog, src, mode, chain, strict, new_target) {
             Ok(ci) => ci,
             Err(m) => {
                 let (kind, text) = match m.strip_prefix("SyntaxError: ") {
@@ -122,11 +128,25 @@ impl Realm {
         self.a_ret(r)
     }
 
+    pub(crate) fn install_eval(&mut self) {
+        let eval = self.new_native(eval_native, false, 1, "eval").value();
+        self.api.eval_fn = eval;
+        self.hidden(self.global, "eval", eval);
+    }
+
     pub(crate) fn a_eval_function<'s>(&mut self) -> Local<'s> {
-        if self.api.eval_fn.is_undefined() {
-            self.api.eval_fn = self.new_native(eval_native, false, 1, "eval").value();
-        }
         self.a_push(self.api.eval_fn)
+    }
+
+    pub(crate) fn direct_eval(
+        &mut self, v: Value, this: Value, ctx: Value,
+        chain: Option<std::rc::Rc<crate::compile::Level>>, strict: bool, new_target: bool,
+    ) -> R<Value> {
+        let Some(s) = Realm::str_of(v) else { return Ok(v) };
+        let src = self.text(s);
+        let ci = self.script_code_in(&src, ScriptMode { value: true, eval: true, scoped: false }, chain, strict, new_target)?;
+        let f = self.new_function(ci, ctx);
+        self.call_function(f, this, &[])
     }
 
     // ---- the names of event handler code ----

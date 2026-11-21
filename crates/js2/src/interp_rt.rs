@@ -1103,6 +1103,13 @@ impl Realm {
         }
     }
 
+    fn has_string_own(&self, o: Obj, key: Key) -> bool {
+        self.string_wrapper(o).is_some_and(|s| match key {
+            Key::Name(k) => k == self.k_length,
+            Key::Idx(i) => (i as usize) < s.len(),
+        })
+    }
+
     /// `recv[key] = v`. A write to a primitive does nothing. A setter gives [`Put::Set`]. A write that the object refuses (not writable,
     /// not extensible) gives [`Put::Fail`]: sloppy code goes on, strict code throws. [`Realm::set_checked`] throws always.
     pub fn set_prop_g(&mut self, recv: Value, key: Key, v: Value) -> R<Put> {
@@ -1112,6 +1119,9 @@ impl Realm {
             }
             return Ok(Put::Fail);
         };
+        if self.has_string_own(o, key) {
+            return Ok(Put::Fail);
+        }
         if self.api.hs.active && o.has_flag(F_HOST) && let Some(ok) = self.hs_write(o, key, crate::api_host::HsWrite::Set(v))? {
             return Ok(if ok { Put::Done } else { Put::Fail });
         }
@@ -1442,7 +1452,7 @@ impl Realm {
     /// `recv.name = v` at a site.
     pub fn set_field_slow(&mut self, fb: &mut Feedback, site: usize, name: Str, recv: Value, v: Value) -> R<Put> {
         let Some(o) = Realm::obj(recv) else { return self.set_prop_g(recv, Key::Name(name), v) };
-        if o.has_flag(F_HOST) {
+        if o.has_flag(F_HOST) || o.is_kind(K_WRAP) {
             return self.set_prop_g(recv, Key::Name(name), v);
         }
         self.fn_prep(o, name);
@@ -1550,6 +1560,9 @@ impl Realm {
             }
         }
         loop {
+            if self.has_string_own(o, key) {
+                return Ok(true);
+            }
             self.fn_props(o);
             let found = match key {
                 Key::Idx(i) => (o.is_indexed() && o.get_element(i).is_some()) || {
@@ -1573,6 +1586,9 @@ impl Realm {
 
     pub fn delete_prop(&mut self, recv: Value, key: Key) -> R<bool> {
         let Some(o) = Realm::obj(recv) else { return Ok(true) };
+        if self.has_string_own(o, key) {
+            return Ok(false);
+        }
         if self.api.hs.active && o.has_flag(F_HOST) && let Some(ok) = self.hs_write(o, key, crate::api_host::HsWrite::Delete)? {
             return Ok(ok);
         }

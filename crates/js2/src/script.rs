@@ -3,8 +3,7 @@
 //! for its first call ([`Lazy`]): the pre-parse of the whole text finds every early error at load, and the full parse and the compile of
 //! one function happen at its first call. [`compile`] still compiles every function (the examples and the tests of the compiler use it).
 //!
-//! What a lazy function changes: a construct that the compiler does not build yet (direct `eval`, `with`, a generator or `async` function,
-//! ...) stops the load when the top level code of the script holds it (a generator declared there counts). In the code of a function
+//! An unsupported construct stops the load when the top level of the script contains it. In the code of a function
 //! it fails at the first call of the function that holds it: the call throws an `Error` ("not supported yet: ...") that a `try` can
 //! catch, and a function that nobody calls never fails. A function with `super` in it or in a function inside it is compiled at load
 //! (the `CF_LINK` flag of its code is not known before the compile).
@@ -17,11 +16,11 @@ use crate::atoms::SharedAtoms;
 use crate::string::Chars;
 use crate::bytecode::{CF_ARGS, CF_LINK, Code, Ins, Op};
 use crate::codes::Codes;
-use crate::compile::{Child, Compiled, Input, ModInfo, ScriptMode, compile_function, compile_module, compile_script, compile_script_mode};
+use crate::compile::{Child, Compiled, Input, ModInfo, ScriptMode, compile_function, compile_module, compile_script};
 use crate::facts::{ARGS, EVAL, Facts, FnFacts, FnId, INNER_EVAL, SUPER};
 use crate::interp::{Exit, LazyCompile, Program, Vm, code_flags};
 use crate::interp_rt::Realm;
-use crate::parse::{Limits, parse_function, parse_module_lazy, parse_script_lazy};
+use crate::parse::{Limits, parse_eval_lazy, parse_function, parse_module_lazy, parse_script_lazy};
 use crate::shapes::A_E;
 use crate::value::Value;
 use std::borrow::Cow;
@@ -173,9 +172,17 @@ impl LazyCompile for Lazy {
 
     /// The top level of a script that joins a program that runs: its code is the last one that this adds, and the functions inside are
     /// stubs. The flags are as `compile` makes them. A failure adds nothing.
-    fn script(&mut self, codes: &Codes, src: &str, mode: ScriptMode) -> Result<usize, String> {
+    fn script_in(
+        &mut self, codes: &Codes, src: &str, mode: ScriptMode,
+        chain: Option<std::rc::Rc<crate::compile::Level>>, strict: bool, new_target: bool,
+    ) -> Result<usize, String> {
         let mut facts = Facts::new();
-        let prog = parse_script_lazy(src, self.limits, &mut facts).map_err(|e| format!("SyntaxError: {}", e.msg))?;
+        let parsed = if mode.eval {
+            parse_eval_lazy(src, self.limits, &mut facts, strict, new_target)
+        } else {
+            parse_script_lazy(src, self.limits, &mut facts)
+        };
+        let prog = parsed.map_err(|e| format!("SyntaxError: {}", e.msg))?;
         // The text of an event handler is one function expression, so a body cannot close the function and go on (`compile_function`).
         if mode.scoped {
             let mut body = prog.list(prog.body);
@@ -184,7 +191,10 @@ impl LazyCompile for Lazy {
                 return Err("SyntaxError: Unexpected token '}'".into());
             }
         }
-        let top = compile_script_mode(&prog, &facts, &self.atoms, mode).map_err(|e| format!("compile: {e:?}"))?;
+        let top = crate::compile::compile_script_in(&prog, &facts, &self.atoms, mode, chain).map_err(|e| match e {
+            crate::compile::CompileError::Syntax(msg) => format!("SyntaxError: {msg}"),
+            _ => format!("compile: {e:?}"),
+        })?;
         let (base, mut new, mut pending) = (codes.len(), Vec::new(), Vec::new());
         let at = Loader { source: src, facts: &mut facts, atoms: &self.atoms, limits: self.limits, base, codes: &mut new, lazy: Some(&mut pending), scoped: mode.scoped, pre: false }.add(top)?;
         let link = |new: &[Code], c: &Code| c.funcs.iter().any(|&k| k as usize >= base && new[k as usize - base].flags & CF_LINK != 0);
