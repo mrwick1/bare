@@ -1835,7 +1835,18 @@ impl Vm {
                     }
                     Op::LoadThisS => {
                         let t = record(stack, fp, 1);
-                        r!(a!()) = if t.is_undefined() || t.is_null() { realm.global.value() } else { t };
+                        let t = if t.is_undefined() || t.is_null() {
+                            realm.global.value()
+                        } else if Realm::obj(t).is_some() {
+                            t
+                        } else {
+                            std::hint::cold_path();
+                            gate!();
+                            let object = tri!(realm.to_object(t)).value();
+                            stack[fp - REC + 1] = object;
+                            object
+                        };
+                        r!(a!()) = t;
                         pc = next;
                     }
                     Op::LoadHole => {
