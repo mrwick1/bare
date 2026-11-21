@@ -277,7 +277,7 @@ fn private_names_and_accessors() {
 
 #[test]
 fn unbuilt_constructs_stop_the_load_and_the_rest_is_clear() {
-    for src in ["async function* g() {}", "async function f() {}", "with ({}) {}"] {
+    for src in ["async function* g() {}", "with ({}) {}"] {
         let e = run(src).err().unwrap_or_else(|| panic!("{src} ran"));
         assert!(e.starts_with("not supported yet"), "{src}: {e}");
     }
@@ -1108,7 +1108,7 @@ fn an_unbuilt_construct_in_a_function_fails_at_its_first_call_not_at_load() {
     // The top level has the construct: the load fails, as before.
     assert!(load("with ({}) {}").err().unwrap().starts_with("not supported yet"));
     // An async function at the top level of the script is found when its parent is compiled, so the load fails (not a lazy case).
-    assert!(load("async function f() {}").err().unwrap().starts_with("not supported yet"));
+    assert!(load("async function* f() {}").err().unwrap().starts_with("not supported yet"));
 }
 
 #[test]

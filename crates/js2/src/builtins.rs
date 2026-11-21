@@ -216,11 +216,11 @@ impl Realm {
     /// Does a read of `prototype` on `o` have to make it? A script function gets its `prototype` object at the first read, not when it
     /// is made: a closure that nobody uses as a constructor costs nothing.
     pub(crate) fn needs_prototype(&self, o: Obj) -> bool {
-        o.is_callable() && !o.has_flag(F_NATIVE | F_CLASS)
+        o.is_callable() && !o.has_flag(F_NATIVE | F_CLASS) && !self.function(o.value()).is_some_and(|(ci, _)| self.prog[ci].gen_kind == crate::bytecode::GK_ASYNC)
     }
 
     pub(crate) fn make_prototype(&mut self, f: Obj) -> R<Value> {
-        if self.function(f.value()).is_some_and(|(ci, _)| self.prog[ci].gen_kind != crate::bytecode::GK_NONE) {
+        if self.function(f.value()).is_some_and(|(ci, _)| self.prog[ci].gen_kind == crate::bytecode::GK_GEN) {
             // A generator function: its `prototype` inherits `%GeneratorPrototype%` and has no `constructor`.
             let shape = self.shapes.root(Layout::Object, Some(self.genr.proto.cell()), 4);
             let p = Obj::new(&mut self.heap, &self.shapes, shape).expect("memory");

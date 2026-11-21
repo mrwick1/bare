@@ -327,6 +327,9 @@ ops! {
     Yield Abx "r T" "Suspend the generator: save the registers of the list at `tables[bx..]`, and give the value `a` to the caller of `next()`. A resume goes on at the instruction after this one with the sent value and the mode in the registers that the list names.",
     YieldStarStep AsBxX "w j R" "`yield*`: the record at `x` is the iterator record (3 registers), then the sent value and the mode (`YS_REGS`). Send them to the iterator. If it gave a value, `a` = the value and the next instruction runs (it yields `a`). If it finished, `a` = its value, the mode register is 0 (the value of the expression) or 2 (`return` it), and jump.",
     RetGen Abc "r" "Return `a` from a generator: the generator is done. The only return of the code of a generator (`Ret` is not allowed there).",
+    AsyncInit Abc "" "The first instruction of an async function: make its activation and its result promise, and keep the activation in the frame record where `new.target` is. The frame is an async frame from here on: it keeps no record yet, and the first `Await` makes it.",
+    Await Abx "r T" "`await a`: wait for the value `a` (`PromiseResolve`, then a reaction that resumes this frame). Save the registers of the list at `tables[bx..]` as `Yield` does, and return the result promise of the function to the caller. A resume goes on at the instruction after this one with the settled value in the `sent` register and the mode (0 fulfilled, 1 rejected) in the `mode` register of the list.",
+    RetAsync Abc "r - u" "Return from an async function: with `c` = 0 resolve the result promise with `a`, with `c` = 1 reject it with `a`. The function is done, and the caller gets the result promise (a resume from the job queue drops it). The only return of an async function.",
     Lazy Abc "u" "The only instruction of the stub of a function that is compiled at its first call (`script::Lazy`): compile the function into this code, then run it from the start with the same arguments. With `a` = 1 the stub has `CF_ARGS`, so the frame record holds all arguments in an array. With `a` = 0 the stub has the parameter registers of the real code, and the arguments are in them (a function with plain parameters that does not read `arguments`): no array is made. The compiler never emits it.",
 }
 
@@ -359,7 +362,7 @@ impl Op {
 
     /// Does control go on to the next instruction? (`Jmp`, `JmpBack`, the returns and the throws do not.)
     pub fn falls_through(self) -> bool {
-        !matches!(self, Op::Jmp | Op::JmpBack | Op::Ret | Op::RetUndef | Op::RetGen | Op::Throw | Op::ThrowConst | Op::RetDerived | Op::SwitchI | Op::SwitchA)
+        !matches!(self, Op::Jmp | Op::JmpBack | Op::Ret | Op::RetUndef | Op::RetGen | Op::RetAsync | Op::Throw | Op::ThrowConst | Op::RetDerived | Op::SwitchI | Op::SwitchA)
     }
 
     /// Can the instruction run JS, allocate or throw, so that a collection can happen in it? The compiler gives a root map to each one.
@@ -633,6 +636,8 @@ pub struct Code {
 pub const GK_NONE: u8 = 0;
 /// `Code::gen_kind` of a generator function.
 pub const GK_GEN: u8 = 1;
+/// `Code::gen_kind` of an async function.
+pub const GK_ASYNC: u8 = 2;
 /// The register field of a save list that names no register.
 pub const NO_REG: u32 = u32::MAX;
 

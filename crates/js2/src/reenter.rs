@@ -97,6 +97,25 @@ impl Realm {
         }
     }
 
+    /// The job of an `await`: send the settled value `v` of the promise (`reject`: the reason) to the async function with the activation `act`, and
+    /// run it on a pooled machine until it waits again or ends. What it gives back is dropped: its result is the promise. Only `STOP` is an
+    /// `Err`; a frame that cannot be entered (the stack limit) rejects the promise.
+    pub(crate) fn async_resume(&mut self, act: Value, v: Value, reject: bool) -> R<()> {
+        let mode = if reject { crate::generator::MODE_THROW } else { crate::generator::MODE_NEXT };
+        let r = match self.gen_request(act, mode, v) {
+            Ok(crate::generator::Step::Enter) => self.resume_raw(act).map(drop),
+            Ok(crate::generator::Step::Result(..)) => Ok(()),
+            Err(e) => Err(e),
+        };
+        match r {
+            Err(e) if e != STOP => {
+                self.async_abort(act, e);
+                Ok(())
+            }
+            r => r,
+        }
+    }
+
     fn resume_script(&mut self, g: Value) -> R<Value> {
         let v = self.resume_raw(g)?;
         let done = self.gen_done(g);

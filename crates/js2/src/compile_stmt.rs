@@ -65,7 +65,8 @@ impl<'a> Fc<'a> {
                 if let Some(n) = prog.func(f).name {
                     if top {
                         h.funcs.push((f, prog.name(n)));
-                    } else if !self.strict {
+                    } else if !self.strict && matches!(prog.func(f).mode, FuncMode::Plain | FuncMode::Env) {
+                        // Annex B.3.3: a plain function of a block is also a variable of the function; an async function or a generator is not.
                         h.vars.push(prog.name(n));
                     }
                 }
@@ -126,6 +127,8 @@ impl<'a> Fc<'a> {
             let r = self.alloc();
             self.set_live(r);
         }
+        // An async function makes its promise before anything else runs (`compile_async.rs`).
+        self.async_init();
         let mut h = Hoist::default();
         let stmts = match f.body {
             Body::Block(l) => Some(l),
@@ -326,7 +329,7 @@ impl<'a> Fc<'a> {
             self.declare_function(*f, name)?;
         }
         // A generator binds its parameters at the call and runs its body at the first `next()`.
-        if self.gen_kind != 0 {
+        if self.gen_kind == crate::bytecode::GK_GEN {
             self.gen_init();
         }
         match f.body {
@@ -338,7 +341,7 @@ impl<'a> Fc<'a> {
             Body::Expr(e) => {
                 let m = self.mark();
                 let r = self.any(e)?;
-                self.op(Op::Ret, r, 0, 0);
+                self.ret_op(r);
                 self.free(m);
             }
             Body::Skipped(_) => {}
@@ -563,10 +566,11 @@ impl<'a> Fc<'a> {
                 StmtKind::Function(f) => {
                     if let Some(n) = prog.func(f).name {
                         let name = prog.name(n);
-                        if self.strict {
+                        let block_name = self.strict || !matches!(prog.func(f).mode, FuncMode::Plain | FuncMode::Env);
+                        if block_name {
                             decls.push(Decl { name: name.clone(), kind: VK::Func, end: 0, reg: None });
                         }
-                        funcs.push((f, name, self.strict));
+                        funcs.push((f, name, block_name));
                     }
                 }
                 _ => {}

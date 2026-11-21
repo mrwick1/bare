@@ -468,7 +468,7 @@ impl<'a> Fc<'a> {
                     self.load_new_target(dst);
                 }
             }
-            ExprKind::Await(_) => self.not_built(dst, "await"),
+            ExprKind::Await(a) => self.await_expr(a, dst)?,
             ExprKind::Yield { arg, delegate } => self.yield_expr(arg, delegate, dst)?,
             ExprKind::Spread(_) => self.not_built(dst, "spread"),
             ExprKind::Hole => self.op(Op::LoadUndef, dst, 0, 0),
@@ -855,9 +855,6 @@ impl<'a> Fc<'a> {
             Some(n) => Some(Box::from(&*self.prog.name(n))),
             None => self.hint_for_func(f),
         };
-        if func.is_async() {
-            self.unsup("an async function");
-        }
         if func.mode == FuncMode::AsyncGen {
             self.unsup("an async generator");
         }

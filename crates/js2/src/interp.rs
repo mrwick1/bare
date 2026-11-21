@@ -166,7 +166,7 @@ macro_rules! cold_ops {
         Op::DefAccessor | Op::DefAccessorElem | Op::DefMethod | Op::DefMethodElem | Op::SetHome | Op::MakeClass | Op::MakeDerived |
         Op::SetFnName | Op::DefaultCtor | Op::SetFields | Op::NewPrivateName | Op::GetPrivate | Op::SetPrivate | Op::HasPrivate |
         Op::DefPrivate | Op::DefPrivateMethod | Op::DefPrivateAccessor | Op::GetSuper | Op::GetSuperElem | Op::SetSuper |
-        Op::SetSuperElem | Op::CallSuper | Op::CallSuperSpread | Op::RetDerived | Op::GenInit | Op::Yield | Op::RetGen | Op::IterClose | Op::YieldStarStep
+        Op::SetSuperElem | Op::CallSuper | Op::CallSuperSpread | Op::RetDerived | Op::GenInit | Op::Yield | Op::RetGen | Op::IterClose | Op::YieldStarStep | Op::AsyncInit | Op::Await | Op::RetAsync
     };
 }
 
@@ -353,6 +353,34 @@ fn grow_fbs(fbs: &mut Vec<Feedback>, n: usize) {
 enum GenExit {
     Back(usize, usize, usize),
     Done(Value),
+}
+
+/// `AsyncInit`, `Await` and `RetAsync` (`generator.rs`): as `gen_op`, in a function of their own so that `gen_op` keeps its shape.
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn async_op(realm: &mut Realm, stack: &mut [Value], fbs: &mut [Feedback], prog: &Codes, ci: usize, fp: usize, pc: usize, op: Op, a: usize, bx: u32, c: u32, next: usize) -> Result<GenExit, Value> {
+    if realm.due() {
+        realm.cur = (ci, fp, pc as u32);
+        let (cur, st) = (realm.cur, &stack[..]);
+        realm.collect(fbs, |m| walk_frames(m, prog, st, cur.0, cur.1, cur.2));
+    }
+    let v = match op {
+        Op::AsyncInit => {
+            realm.async_init(stack, fp);
+            // The same frame goes on at the next instruction.
+            return Ok(GenExit::Back(ci, fp, next));
+        }
+        Op::Await => realm.async_await(stack, fp, ci, &prog[ci], bx, next, stack[fp + a])?,
+        _ => realm.async_return(stack, fp, stack[fp + a], c != 0)?,
+    };
+    let (caller, dst) = (int_at(stack, fp, 5), int_at(stack, fp, 7));
+    if caller == ENTRY {
+        return Ok(GenExit::Done(v));
+    }
+    let nfp = fp - REC - prog[caller as usize].nregs as usize;
+    stack[nfp + (dst & 0xffff) as usize] = v;
+    Ok(GenExit::Back(caller as usize, nfp, int_at(stack, fp, 4) as usize))
 }
 
 /// `GenInit`, `Yield` and `RetGen` with the return to the caller, out of line so that the loop of `Vm::run` keeps its shape
@@ -1255,6 +1283,18 @@ impl Vm {
                         Op::GenInit | Op::Yield | Op::RetGen => {
                             std::hint::cold_path();
                             match gen_op(realm, stack, fbs, prog, ci, fp, pc, opv, a!(), bx!() as u32, next) {
+                                Ok(GenExit::Back(nci, nfp, npc)) => {
+                                    (ci, fp, pc) = (nci, nfp, npc);
+                                    reload!();
+                                    continue;
+                                }
+                                Ok(GenExit::Done(v)) => return M::done(Ok(v)),
+                                Err(e) => throw!(e),
+                            }
+                        }
+                        Op::AsyncInit | Op::Await | Op::RetAsync => {
+                            std::hint::cold_path();
+                            match async_op(realm, stack, fbs, prog, ci, fp, pc, opv, a!(), bx!() as u32, c!() as u32, next) {
                                 Ok(GenExit::Back(nci, nfp, npc)) => {
                                     (ci, fp, pc) = (nci, nfp, npc);
                                     reload!();
