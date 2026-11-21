@@ -38,7 +38,6 @@ use bare_js_api::{Args, Local, Type};
 use crate::browser_dom as nd;
 use bare_css::values::{Keyword, Property, Value as Cv};
 use bare_html::dom::{Document, NodeData, NodeId};
-use bare_js::eval::Interp;
 use bare_js::value::to_int32;
 
 /// The local name of an element of any namespace, `""` for other nodes.
@@ -733,19 +732,23 @@ fn check_visibility<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s
     Ok(s.boolean(true))
 }
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
     let (html, svg) = (d.p().html, d.p().svg);
-    d.def_get_s(it, html, "hidden", hidden, Some(set_hidden))?;
-    d.def_get_s(it, html, "inert", inert, Some(set_inert))?;
-    d.def_get_s(it, html, "draggable", draggable, Some(set_draggable))?;
-    d.def_method_s(it, d.p().element, "checkVisibility", 0, check_visibility)?;
-    d.def_get_s(it, html, "innerText", inner_text, Some(set_inner_text))?;
-    d.def_get_s(it, html, "offsetParent", offset_parent, None)?;
-    d.def_get_s(it, html, "offsetTop", offset_top, None)?;
-    d.def_get_s(it, html, "offsetLeft", offset_left, None)?;
-    d.def_method_s(it, html, "click", 0, click)?;
+    table!(rows1 = [
+        Row::get(1, "hidden", hidden, Some(set_hidden)),
+        Row::get(1, "inert", inert, Some(set_inert)),
+        Row::get(1, "draggable", draggable, Some(set_draggable)),
+        Row::method(2, "checkVisibility", 0, check_visibility),
+        Row::get(1, "innerText", inner_text, Some(set_inner_text)),
+        Row::get(1, "offsetParent", offset_parent, None),
+        Row::get(1, "offsetTop", offset_top, None),
+        Row::get(1, "offsetLeft", offset_left, None),
+        Row::method(1, "click", 0, click),
+    ]);
+    let targets = [d.obj_local(s, html), d.obj_local(s, d.p().element)];
+    d.install_rows(s, &targets, &rows1::T)?;
     for proto in [html, svg] {
-        d.def_get_s(it, proto, "tabIndex", tab_index, Some(set_tab_index))?;
+        d.def_get_at(s, proto, "tabIndex", tab_index, Some(set_tab_index))?;
     }
     Ok(())
 }

@@ -128,15 +128,13 @@ fn make(d: &Dom, it: &mut Interp<'_>, shared: bool) -> R<ObjId> {
     Ok(f)
 }
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    run(it, |s| {
-        let g = s.global();
-        for (name, lazy) in [("Worker", lazy_dedicated as HS), ("SharedWorker", lazy_shared)] {
-            let f = d.add_fn_s(s, lazy, name, 0, HostFn::Method)?;
-            s.define_accessor_str(g, name, Some(f), Some(f), Attrs { writable: false, enumerable: false, configurable: true })?;
-        }
-        Ok(())
-    })
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+    let g = s.global();
+    for (name, lazy) in [("Worker", lazy_dedicated as HS), ("SharedWorker", lazy_shared)] {
+        let f = d.add_fn_s(s, lazy, name, 0, HostFn::Method)?;
+        s.define_accessor_str(g, name, Some(f), Some(f), Attrs { writable: false, enumerable: false, configurable: true })?;
+    }
+    Ok(())
 }
 
 impl Dom {
