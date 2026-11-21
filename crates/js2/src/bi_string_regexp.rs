@@ -2,7 +2,7 @@
 //! and the `RegExp` branch of `split`. `replace` and `replaceAll` also do the string pattern and the function replacer (a nested call
 //! through [`Realm::call_function`]).
 //!
-//! **A fast path only.** An argument that is a regexp object (`F_REGEXP`) is matched by the runtime of `regexp_rt.rs` (`regexp_run`,
+//! **A fast path only.** An argument that is a regexp object (kind `K_REGEXP`) is matched by the runtime of `regexp_rt.rs` (`regexp_run`,
 //! `run_at`) with no property read. A script that gives a regexp its own `exec` or `Symbol.replace`, or that changes
 //! `RegExp.prototype`, is not seen: that is the generic path of the design (section 7.5), which is not built. Known gaps: no named
 //! groups (`$<name>` stays literal and a replacer has no `groups` argument), and `matchAll` runs all the matches at the call and
@@ -10,7 +10,7 @@
 use crate::bi_string::{find, pattern};
 use crate::builtins::arg;
 use crate::interp_rt::{R, Realm};
-use crate::object::{F_REGEXP, Obj};
+use crate::object::{K_REGEXP, Obj};
 use crate::string::{Chars, Str};
 use crate::value::Value;
 
@@ -18,7 +18,7 @@ const NONE: u32 = u32::MAX;
 
 /// The regexp object of `v`, if it is one.
 fn regexp_of(v: Value) -> Option<Obj> {
-    Realm::obj(v).filter(|o| o.has_flag(F_REGEXP))
+    Realm::obj(v).filter(|o| o.is_kind(K_REGEXP))
 }
 
 /// `AdvanceStringIndex`: how far an empty match moves the index in `s` at `i`.
