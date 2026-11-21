@@ -134,7 +134,6 @@ Unsupported, with the reason:
 
 | Methods                                                                                                                                                                              | Reason                                                                                                                                                                  |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `new_promise`, `resolve_promise`, `reject_promise`, `promise_then`, `promise_react`, `promise_status`, `queue_microtask`, `checkpoint`, `drain_microtasks`; `pending_jobs` answers 0 | js2 has no `Promise` and no job queue                                                                                                                                   |
 | `iter_open`, `iter_next`, `iter_fail`                                                                                                                                                | `Realm::iter_values` collects an array or a string at once and has no iterator protocol. A later step can step an array or a string by index, with the state in `Iter`. |
 | `module_*`, `take_dynamic_imports`, `finish_dynamic_import`, `reject_dynamic_import`, `fail_dynamic_import`                                                                          | no modules                                                                                                                                                              |
 | `run_script`, `compile_function`, `call_scoped`, `eval_global`, `eval_function`                                                                                                      | no `eval`; the program is fixed at load. They wait for #777.                                                                                                            |
@@ -239,8 +238,19 @@ Steps 1 to 3 of section 6 are one change (`progress.md`, entry of 2026-11-21). W
 - A collection never runs inside a host call today: a host function runs inside a native, and a native never collects, and a nested call holds the collector. The window is a root all the same, because the first safepoint that a later step adds needs it.
 - The `Intrinsic` values `IteratorPrototype`, `SymbolIterator` and `SymbolToStringTag` answer `undefined` (js2 has no symbols and no iterator protocol).
 
+## 11. Built: promises and microtasks (2026-11-21, plan step P2 of `design-js2-async.md`)
 
-## 12. Modules (2026-11-21)
+The promise methods, `queue_microtask`, `checkpoint`, `drain_microtasks`, `pending_jobs`, `clear_failed_job` and the three hooks (`between_jobs`, `report_exception`, `promise_rejections`) are built on the job queue of `promise.rs`. What differs from the text above:
+
+- The job runner moved from `Vm` to `Realm::drain_jobs`: each job is a `call_held` on a pooled machine, so `Engine::drain_microtasks` (which has only `&mut Realm`) and `Vm::drain_microtasks` (tools) share it.
+- A stop of a drain is sticky until `clear_failed_job`: a budget stop, `max_jobs_per_drain` and an error of `between_jobs`. The old engine does the same. An error of `promise_rejections` is not sticky.
+- `drain_microtasks` inside a `task` works (js2 has no call depth to refuse it); inside a host call or a native it is `Unsupported`. `checkpoint` there answers 0.
+- A script that `between_jobs` runs gets its own budget, and the budget of the checkpoint comes back after. The two other hooks run as a task level, so a script in them shares the budget of the checkpoint.
+- `promise_then` makes a derived promise that nobody holds, so a throw of the handler is an unhandled rejection that the host hears (as in the old engine).
+- The shared suite has the promise tests (`suite.rs`), run on both engines with and without constant collection.
+
+
+## 13. Modules (2026-11-21)
 
 Scope: static `import` and `export`, `import()` and `import.meta` behind the `module_*` methods of 3.8. Top-level `await` is not built: `module_parse` answers `Abort::Unsupported("top-level await")` for a module with one, because js2 has no async functions yet. No trait signature changes.
 

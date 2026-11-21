@@ -554,8 +554,8 @@ pub trait Host<E: Engine> {
     /// The owners with these keys died in the last collection. Their `Traced` values are dangling: drop them.
     fn prune(&self, _dead: &[u32]) {}
 
-    // Microtasks. The engine will call these hooks with the handles of its own scope: it pushes the locals before the call and drops
-    // them after it. (The old engine does not call them yet; it keeps its own hooks.)
+    // Microtasks. The engine calls these hooks with the handles of its own scope: it pushes the locals before the call and drops
+    // them after it.
 
     /// A `queueMicrotask` callback threw `thrown`. Record it without running script that can fail (read data properties only). The
     /// queue goes on.

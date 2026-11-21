@@ -114,4 +114,13 @@ both!(
     modules_link_and_run_in_order_with_live_bindings,
     modules_report_link_and_parse_errors,
     dynamic_import_reaches_the_host,
+    a_promise_of_the_host_settles_and_its_reactions_run_on_the_drain,
+    a_second_settle_by_the_host_changes_nothing,
+    promises_cross_between_script_and_host,
+    a_microtask_runs_once_on_the_drain,
+    a_checkpoint_inside_a_script_function_does_nothing,
+    a_promise_survives_collections_as_a_local_and_as_a_persistent_handle,
+    between_jobs_runs_before_each_job_and_an_error_ends_the_drain,
+    the_host_hears_thrown_callbacks_and_rejections,
+    the_rejections_over_the_bound_are_counted,
 );
