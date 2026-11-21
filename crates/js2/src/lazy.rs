@@ -45,6 +45,8 @@ pub(crate) enum Kind {
     Alias,
     /// The same function as the entry of this name in the same table (`Date.prototype.toGMTString` is `toUTCString`), as a method.
     Same(&'static str),
+    /// A method whose key is the well-known symbol `wk[i]` (`bi_symbol.rs`); the name of the entry is the name of the function.
+    Sym(NativeFn, usize),
 }
 
 /// One entry of a table: a name, the `length` of its function, and what it makes.
@@ -97,6 +99,11 @@ pub(crate) const fn alias(name: &'static str) -> Ent {
     Ent { hash: hash(name), name, len: 0, kind: Kind::Alias }
 }
 
+/// A method `name` with the key `wk[i]` (the symbol that `bi_symbol.rs` makes at index `i`), and `length` 0.
+pub(crate) const fn sym(name: &'static str, i: usize, f: NativeFn) -> Ent {
+    Ent { hash: hash(name), name, len: 0, kind: Kind::Sym(f, i) }
+}
+
 /// A table of one object, and its place in `Lazy::done`.
 struct Tab {
     obj: Obj,
@@ -118,11 +125,15 @@ pub(crate) struct Lazy {
     /// The function that each method of the global object (and each method of a table with a `Same` entry) was made as (a root), for an
     /// alias of it: a script may delete or replace the property, and `Number.parseInt` is still the original function.
     shared: Vec<(Obj, &'static str, Value)>,
+    /// `%StringIteratorPrototype%` and the shape of its iterators (`bi_string_iter.rs`), made at the first call of `String.prototype[Symbol.iterator]`.
+    pub(crate) str_iter: Option<crate::bi_string_iter::StrIter>,
+    /// The entries of kind [`Kind::Sym`] that are not made: the object, the index in `Realm::wk`, the table and the entry.
+    syms: Vec<(Obj, usize, usize, usize)>,
 }
 
 impl Default for Lazy {
     fn default() -> Self {
-        Lazy { tabs: Vec::new(), done: Vec::new(), bits: Vec::new(), shared: Vec::new() }
+        Lazy { tabs: Vec::new(), done: Vec::new(), bits: Vec::new(), shared: Vec::new(), str_iter: None, syms: Vec::new() }
     }
 }
 
@@ -147,8 +158,12 @@ impl Realm {
         }
         let base = l.tabs.iter().map(|t| t.ents.len()).sum::<usize>();
         l.done.resize((base + ents.len()).div_ceil(64), 0);
-        for e in ents {
+        let ti = l.tabs.len();
+        for (j, e) in ents.iter().enumerate() {
             l.bits[(e.hash >> 6) as usize & 63] |= 1 << (e.hash & 63);
+            if let Kind::Sym(_, i) = e.kind {
+                l.syms.push((o, i, ti, j));
+            }
         }
         l.tabs.push(Tab { obj: o, ents, base, left: ents.len(), has_same: ents.iter().any(|e| matches!(e.kind, Kind::Same(_))) });
         o.set_flag(F_LAZYTAB);
@@ -170,7 +185,7 @@ impl Realm {
     #[inline(never)]
     fn lazy_probe(&mut self, o: Obj, k: Str) {
         if k.is_symbol() {
-            return;
+            return self.lazy_probe_sym(o, k);
         }
         let h = match k.cached_hash() {
             0 => k.chars().map_or(0, |c| c.hash()),
@@ -189,6 +204,15 @@ impl Realm {
                 self.lazy_make(ti, j);
             }
             return;
+        }
+    }
+
+    /// The probe for a symbol key: the entries of kind [`Kind::Sym`] that are not made are in `Lazy::syms` (one or two), so a symbol that
+    /// is not one of them costs a short scan.
+    fn lazy_probe_sym(&mut self, o: Obj, k: Str) {
+        let hit = self.ltab.syms.iter().find(|&&(so, wi, _, _)| so == o && self.wk[wi] == k).map(|&(_, _, ti, j)| (ti, j));
+        if let Some((ti, j)) = hit {
+            self.lazy_make(ti, j);
         }
     }
 
@@ -229,11 +253,17 @@ impl Realm {
         if left == 0 && !self.ltab.tabs.iter().any(|t| t.obj == o && t.left > 0) {
             o.clear_flag(F_LAZYTAB);
         }
-        let ka = self.intern(e.name);
+        let ka = match e.kind {
+            Kind::Sym(_, i) => {
+                self.ltab.syms.retain(|&(_, _, t, n)| (t, n) != (ti, j));
+                self.wk[i]
+            }
+            _ => self.intern(e.name),
+        };
         let k = Key::Name(ka);
         let keep = o == self.global || self.ltab.tabs[ti].has_same;
         let v = match e.kind {
-            Kind::Method(f) => self.new_native(f, false, e.len, e.name).value(),
+            Kind::Method(f) | Kind::Sym(f, _) => self.new_native(f, false, e.len, e.name).value(),
             Kind::Indexed(f, i) => {
                 let c = self.new_native(f, false, e.len, e.name);
                 c.set_slot(&self.shapes, 1, Value::int(i));
