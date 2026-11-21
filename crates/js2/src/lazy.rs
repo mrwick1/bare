@@ -316,6 +316,29 @@ impl Realm {
         self.define_attrs(o, k, HIDDEN, v).expect("define");
     }
 
+    /// An arguments object that holds `args`, with the own `Symbol.iterator` that is `%Array.prototype.values%`.
+    #[inline(never)]
+    pub(crate) fn new_args(&mut self, args: &[Value]) -> Value {
+        if self.args_iter.is_undefined() {
+            self.args_iter = self.array_values();
+        }
+        let o = Obj::array(&mut self.heap, &self.shapes, self.s_args, args).expect("memory");
+        o.set_slot(&self.shapes, 0, self.args_iter);
+        o.value()
+    }
+
+    /// `%Array.prototype.values%`: made now if it is not, and the same function whatever a script did to the property since. A realm with
+    /// no compiler cannot make it (it is a function of the prelude): the property is `undefined` there.
+    #[cold]
+    fn array_values(&mut self) -> Value {
+        if self.lazy.is_none() {
+            return Value::UNDEFINED;
+        }
+        let (ap, k) = (self.array_proto, self.intern("values"));
+        self.lazy_prep(ap, k);
+        self.shared_fn(ap, "values")
+    }
+
     /// The function that the method `name` of `o` was made as.
     fn shared_fn(&self, o: Obj, name: &str) -> Value {
         self.ltab.shared.iter().find(|(x, n, _)| *x == o && *n == name).expect("the entry that an alias names").2

@@ -439,3 +439,12 @@ fn host_objects_survive_forced_collections_between_reads() {
         r.collect(&mut [], |_| {});
     }
 }
+
+#[test]
+fn a_host_object_is_not_a_date_for_object_prototype_to_string() {
+    // `F_HOST` and `F_DATE` are one bit: the tag must come from the time value, not from the flag.
+    let (mut r, _h) = filled();
+    assert_eq!(js(&mut r, "[ds, nl, new Date(0)].map(x => Object.prototype.toString.call(x)).join()"), "[object Object],[object Object],[object Date]");
+    assert_eq!(js(&mut r, "[String(ds), String(op)].join()"), "[object Object],[object Object]");
+    assert_eq!(js(&mut r, "(function () { try { Date.prototype.getTime.call(ds); return 'no'; } catch (e) { return e instanceof TypeError; } })()"), "true");
+}
