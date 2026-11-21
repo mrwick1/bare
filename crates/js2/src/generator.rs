@@ -227,6 +227,9 @@ impl Realm {
                 self.define_attrs(p, tag, A_C, t1).expect("define");
                 self.define_attrs(gp, Key::Name(k_ctor), A_C, p.value()).expect("define");
                 self.define_attrs(gp, tag, A_C, t2).expect("define");
+                // `%IteratorPrototype%` (made for the host API too) is the prototype of `%GeneratorPrototype%`.
+                let ip = Realm::obj(self.iterator_prototype()).expect("an object");
+                gp.set_proto(&mut self.shapes, Some(ip.cell()));
                 p
             }
         };

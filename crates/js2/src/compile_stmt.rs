@@ -1044,7 +1044,10 @@ impl<'a> Fc<'a> {
             let ds: Vec<Decl> = names.into_iter().map(|(name, _)| Decl { name, kind: if k == VarKind::Let { VK::Let } else { VK::Const }, end: 0, reg: None }).collect();
             scope = Some(self.enter(prog.stmt(body).span, &ds, false)?);
         }
-        self.bind_pattern(target, t, if kind.is_some() { Bind::Init } else { Bind::Assign })?;
+        self.of_head = of;
+        let bound = self.bind_pattern(target, t, if kind.is_some() { Bind::Init } else { Bind::Assign });
+        self.of_head = false;
+        bound?;
         self.pending = labels;
         self.push_loop(brk, cont, of.then_some(rec));
         {
@@ -1071,7 +1074,7 @@ impl<'a> Fc<'a> {
             self.bind(lb);
             self.live = live;
             self.set_live(ex);
-            self.op(Op::IterClose, rec, 0, 0);
+            self.op(Op::IterClose, rec, 0, 1);
             self.op(Op::Throw, ex, 0, 0);
             for (start, end) in pieces {
                 self.handlers.push(HandlerRec { start, end, target: lb, reg: ex, depth });
