@@ -11,6 +11,7 @@
 //! (`trace`), and its module gives the node as well (`held`).
 //! Not supported, so no node is freed while it is on: custom elements (their holders are not listed).
 
+use crate::eng::Eng;
 use crate::browser::*;
 use bare_html::dom::{Document, Free, NodeId, Span};
 use std::cell::{Cell, RefCell};
@@ -68,7 +69,7 @@ impl Reclaim {
     }
 }
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// Keep the tree of `n` for the life of the document: a holder outside the realm names it.
     pub(crate) fn pin(&self, n: NodeId) {
         self.reclaim.pins.borrow_mut().insert(n);
@@ -189,7 +190,7 @@ impl Dom {
     }
 }
 
-impl Browser {
+impl<E: Eng> Browser<E> {
     /// Keep the tree of `n` for the life of the document. A caller outside the realm (a page, a driver) that holds a `NodeId` across
     /// a call that can collect pins it: a freed node gives its slot to a new one.
     pub fn pin(&self, n: NodeId) {

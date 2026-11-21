@@ -41,6 +41,7 @@
 //! `Unsupported` before any listener runs. This includes the events of the test driver (`Browser::dispatch`, `click`, ...), which are composed.
 //! Events that start in the light tree are unchanged.
 
+use crate::eng::Eng;
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_js_api::{Args, Local, Type};
@@ -58,7 +59,7 @@ fn valid_host(doc: &Document, host: NodeId) -> bool {
 }
 
 /// The native root of `this`, or `Illegal invocation`.
-fn root_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
+fn root_of<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, NodeId> {
     match d.node_of_s(s, this) {
         Some(n) if matches!(d.data(n), NodeData::ShadowRoot) && d.doc.borrow().shadow_host(n).is_some() => Ok(n),
         _ => Err(s.type_error("Illegal invocation")),
@@ -66,7 +67,7 @@ fn root_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> 
 }
 
 /// The member `name` of the dictionary `init`, `undefined` when `init` is not an object. Runs the getter.
-fn member<'s>(_d: &Dom, s: &mut Sc<'s, '_>, init: Local<'s>, name: &str) -> Res<'s, Local<'s>> {
+fn member<'s, E: Eng>(_d: &Dom<E>, s: &mut Sc<'s, E>, init: Local<'s>, name: &str) -> Res<'s, Local<'s>> {
     if !matches!(s.type_of(init), Type::Object | Type::Function) {
         return Ok(s.undefined());
     }
@@ -74,13 +75,13 @@ fn member<'s>(_d: &Dom, s: &mut Sc<'s, '_>, init: Local<'s>, name: &str) -> Res<
 }
 
 /// A boolean member: the getter runs, then `ToBoolean` (no JS runs in it).
-fn flag<'s>(d: &Dom, s: &mut Sc<'s, '_>, init: Local<'s>, name: &str) -> Res<'s, bool> {
+fn flag<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, init: Local<'s>, name: &str) -> Res<'s, bool> {
     let v = member(d, s, init, name)?;
     Ok(s.to_boolean(v))
 }
 
 /// A member that is a WebIDL enumeration: `ToString`, then it must be one of `allowed`. `None` when it is `undefined`.
-fn enum_member<'s>(d: &Dom, s: &mut Sc<'s, '_>, init: Local<'s>, name: &str, ty: &str, allowed: &[&'static str]) -> Res<'s, Option<&'static str>> {
+fn enum_member<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, init: Local<'s>, name: &str, ty: &str, allowed: &[&'static str]) -> Res<'s, Option<&'static str>> {
     let v = member(d, s, init, name)?;
     if matches!(s.type_of(v), Type::Undefined) {
         return Ok(None);
@@ -92,12 +93,12 @@ fn enum_member<'s>(d: &Dom, s: &mut Sc<'s, '_>, init: Local<'s>, name: &str, ty:
     }
 }
 
-pub(crate) fn attach_shadow<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn attach_shadow<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let host = d.el_s(s, this)?;
     if a.is_empty() {
         return Err(s.type_error("Failed to execute 'attachShadow' on 'Element': 1 argument required, but only 0 present."));
     }
-    let init = arg_s(s, a, 0);
+    let init = arg_s::<E>(s, a, 0);
     if !matches!(s.type_of(init), Type::Undefined | Type::Null | Type::Object | Type::Function) {
         return Err(s.type_error("Failed to execute 'attachShadow' on 'Element': The provided value is not of type 'ShadowRootInit'."));
     }
@@ -148,7 +149,7 @@ pub(crate) fn attach_shadow<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a:
     Ok(d.obj_local(s, wrapper))
 }
 
-pub(crate) fn shadow_root<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn shadow_root<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let host = d.el_s(s, this)?;
     let root = {
         let doc = d.doc.borrow();
@@ -157,25 +158,25 @@ pub(crate) fn shadow_root<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: A
     d.wrap_opt_s(s, root)
 }
 
-pub(crate) fn host<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn host<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let root = root_of(d, s, this)?;
     let host = d.doc.borrow().shadow_host(root);
     d.wrap_opt_s(s, host)
 }
 
-pub(crate) fn mode<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn mode<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let root = root_of(d, s, this)?;
     let open = d.doc.borrow().shadow_is_open(root);
     d.js_str_s(s, if open { "open" } else { "closed" })
 }
 
 /// `delegatesFocus` (bit 0), `clonable` (bit 1) and `serializable` (bit 2): the values that `attachShadow` was given. They do nothing else here.
-pub(crate) fn flag_bit<'s, const BIT: u8>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn flag_bit<'s, const BIT: u8, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let root = root_of(d, s, this)?;
     Ok(s.boolean(d.doc.borrow().shadow_flags(root) & BIT != 0))
 }
 
-pub(crate) fn slot_assignment<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn slot_assignment<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     root_of(d, s, this)?;
     d.js_str_s(s, "named")
 }

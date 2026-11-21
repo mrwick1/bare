@@ -24,12 +24,11 @@
 //!
 //! Gaps: the hover settle after a click only; no modifier keys on a click; the left button only.
 
+use crate::eng::{Eng, Fault, Ops};
 use crate::browser::*;
 use crate::browser_scroll::Align;
 use crate::browser_ui::{KeyInput, Mods, Pointer, UiOutcome};
 use bare_html::dom::NodeId;
-use bare_js::eval::Error;
-use bare_js::value::Value;
 
 impl UiOutcome {
     fn add(&mut self, o: UiOutcome) {
@@ -39,8 +38,8 @@ impl UiOutcome {
     }
 }
 
-fn unsupported_input(what: &'static str) -> Error {
-    Error::Unsupported(unsupported(what))
+fn unsupported_input<E: Eng>(what: &'static str) -> Fault<E> {
+    Fault::Unsupported(what)
 }
 
 /// The key a character makes: `a` is `KeyA`, `5` is `Digit5`, a line feed is Enter. The code of another character is empty.
@@ -102,21 +101,21 @@ fn parse(spec: &str) -> Option<(Vec<KeyInput>, KeyInput)> {
     Some((keys, main))
 }
 
-impl Browser {
+impl<E: Eng> Browser<E> {
     /// The line rectangles of an element that has no box fragment (a plain inline), in window pixels. Empty for `display: none`.
     pub fn inline_rects(&mut self, node: NodeId) -> Vec<bare_layout::fragment::Rect> {
         let dom = self.dom.clone();
-        self.it.host_scope(|it| crate::browser_rects::element_rects(&dom, it, node)).unwrap_or_default()
+        self.it.host_scope_o(|it| crate::browser_rects::element_rects(&dom, it, node)).unwrap_or_default()
     }
 
     /// Where a user clicks on `node`, and the element that is on top there. The page scrolls so that `node` shows (if needed, as Chrome's
     /// `DOM.scrollIntoViewIfNeeded`), and the point is the center of the part of the border box that is in the window. `(0, 0)` and no
     /// element when `node` has no box, or when the page cannot be laid out yet (a style sheet that was not supplied): the click still
     /// happens, at `node`, as it did before layout was used. A hit inside a shadow tree is its outermost host: the events do not cross a shadow root here.
-    fn click_point(&mut self, node: NodeId) -> R<((f64, f64), Option<NodeId>)> {
+    fn click_point(&mut self, node: NodeId) -> R<E, ((f64, f64), Option<NodeId>)> {
         let _caller = crate::force::tag("drive click_point");
         let dom = self.dom.clone();
-        let r = self.it.host_scope(|it| {
+        let r = self.it.host_scope_o(|it| {
             if !dom.in_document(it, node)? {
                 return Ok(None);
             }
@@ -132,7 +131,7 @@ impl Browser {
         });
         match r {
             Ok(Some(p)) => Ok(p),
-            Ok(_) | Err(Error::Unsupported(_)) => Ok(((0.0, 0.0), None)),
+            Ok(_) | Err(Fault::Unsupported(_)) => Ok(((0.0, 0.0), None)),
             Err(e) => Err(e),
         }
     }
@@ -147,7 +146,7 @@ impl Browser {
     }
 
     /// The window point of the boundary `at` of the text of a field, or its center when it has no layout.
-    fn text_point(&mut self, node: NodeId, at: u32) -> R<(f64, f64)> {
+    fn text_point(&mut self, node: NodeId, at: u32) -> R<E, (f64, f64)> {
         if let Ok(frame) = self.render()
             && let Some(p) = crate::page::point_in(self, &frame, node, at)
         {
@@ -158,7 +157,7 @@ impl Browser {
 
     /// The button goes down in text field `node` at the boundary `at` of its text. `nth` is the number of the press in a row
     /// (1: a click, 2: a double click, 3: a triple click). The caller moves the clock between the presses.
-    pub fn drive_text_down(&mut self, node: NodeId, at: u32, nth: u32) -> R<UiOutcome> {
+    pub fn drive_text_down(&mut self, node: NodeId, at: u32, nth: u32) -> R<E, UiOutcome> {
         let (x, y) = self.text_point(node, at)?;
         if nth <= 1 {
             self.dom.st.borrow_mut().ui.last = None;
@@ -171,7 +170,7 @@ impl Browser {
     }
 
     /// The pointer moves to the boundary `at` of the text of `node`, with the button down: the selection of the press follows.
-    pub fn drive_text_move(&mut self, node: NodeId, at: u32) -> R<UiOutcome> {
+    pub fn drive_text_move(&mut self, node: NodeId, at: u32) -> R<E, UiOutcome> {
         let (x, y) = self.text_point(node, at)?;
         let p = Pointer { x, y, buttons: 1, ..Pointer::default() };
         let mut out = self.ui_pointer_move(Some(node), p)?;
@@ -182,7 +181,7 @@ impl Browser {
     }
 
     /// The button goes up in text field `node` at the boundary `at` of its text.
-    pub fn drive_text_up(&mut self, node: NodeId, at: u32) -> R<UiOutcome> {
+    pub fn drive_text_up(&mut self, node: NodeId, at: u32) -> R<E, UiOutcome> {
         let (x, y) = self.text_point(node, at)?;
         let up = Pointer { x, y, ..Pointer::default() };
         let mut out = self.ui_pointer_move(Some(node), up)?;
@@ -196,15 +195,15 @@ impl Browser {
     }
 
     /// Text of a script value for tools (`Interp::inspect`): a node is `<tag#id.class>`, an object is compact JSON of at most `cap` characters.
-    pub fn inspect(&mut self, v: Value, cap: usize) -> String {
+    pub fn inspect(&mut self, v: E::Raw, cap: usize) -> String {
         // `Rc::clone` copies the pointer, not the DOM, so the closure can read the DOM while `self.it` walks the value.
         let dom = self.dom.clone();
-        let node = |o| dom.node_of(Value::Object(o)).map(|n| format!("<{}>", describe_in(&dom.doc.borrow(), n)));
-        self.it.inspect(v, cap, &node)
+        let node = |o| dom.node_of(E::obj_raw(o)).map(|n| format!("<{}>", describe_in(&dom.doc.borrow(), n)));
+        self.it.inspect_o(v, cap, &node)
     }
 
     /// A user click on `node`. See the header.
-    pub fn drive_click(&mut self, node: NodeId) -> R<UiOutcome> {
+    pub fn drive_click(&mut self, node: NodeId) -> R<E, UiOutcome> {
         let ((x, y), top) = self.click_point(node)?;
         let hit = top.unwrap_or(node);
         let doc = self.document();
@@ -234,13 +233,13 @@ impl Browser {
 
     /// After a change of the page, Chrome tells the element under the pointer (a "fake mouse move": the boundary events, no move). Skipped
     /// when the page cannot be laid out, or when the pointer has no place yet.
-    fn settle_hover(&mut self, p: Pointer) -> R<UiOutcome> {
+    fn settle_hover(&mut self, p: Pointer) -> R<E, UiOutcome> {
         if self.dom.st.borrow().ui.last_pos.is_none() {
             return Ok(UiOutcome::default());
         }
         let frame = match self.render() {
             Ok(f) => f,
-            Err(Error::Unsupported(_)) => return Ok(UiOutcome::default()),
+            Err(Fault::Unsupported(_)) => return Ok(UiOutcome::default()),
             Err(e) => return Err(e),
         };
         let to = {
@@ -252,7 +251,7 @@ impl Browser {
     }
 
     /// Focus `node` the way `el.focus()` does, unless it already has focus.
-    fn drive_focus(&mut self, node: NodeId, out: &mut UiOutcome) -> R<()> {
+    fn drive_focus(&mut self, node: NodeId, out: &mut UiOutcome) -> R<E, ()> {
         if self.active_element()? != Some(node) {
             // The focus events of the window are trusted, as the ones of `el.focus()` are in Chrome.
             self.dom.st.borrow_mut().ui.active = true;
@@ -265,8 +264,8 @@ impl Browser {
     }
 
     /// A key, down and up, at the focused element (`node` is focused first). See the header.
-    pub fn drive_key(&mut self, node: Option<NodeId>, spec: &str) -> R<UiOutcome> {
-        let (mods, key) = parse(spec).ok_or_else(|| unsupported_input("test driver: unknown key name"))?;
+    pub fn drive_key(&mut self, node: Option<NodeId>, spec: &str) -> R<E, UiOutcome> {
+        let (mods, key) = parse(spec).ok_or_else(|| unsupported_input::<E>("test driver: unknown key name"))?;
         let mut out = UiOutcome::default();
         if let Some(n) = node {
             self.drive_focus(n, &mut out)?;
@@ -287,7 +286,7 @@ impl Browser {
 
     /// A pick in a `<select>`: the options that match `wanted` (label, else value) are selected, then `input` and `change` fire, as for a
     /// user pick. They fire only when the selection changed. `Err(why)` when no option matches.
-    pub fn drive_select(&mut self, node: NodeId, wanted: &[String]) -> R<Result<UiOutcome, String>> {
+    pub fn drive_select(&mut self, node: NodeId, wanted: &[String]) -> R<E, Result<UiOutcome, String>> {
         let mut bad = None;
         let out = self.ui_call(true, |d, it| {
             match d.sel_pick(it, node, wanted)? {
@@ -304,7 +303,7 @@ impl Browser {
     }
 
     /// The files of an `<input type=file>`: they are set, then `input` and `change` fire, as for a pick in the file dialog.
-    pub(crate) fn drive_files(&mut self, node: NodeId, files: Vec<FileRef>) -> R<UiOutcome> {
+    pub(crate) fn drive_files(&mut self, node: NodeId, files: Vec<FileRef>) -> R<E, UiOutcome> {
         self.dom.st.borrow_mut().inputs.entry(node).or_default().files = files;
         self.ui_call(true, |d, it| {
             d.fire_plain(it, node, "input")?;
@@ -314,7 +313,7 @@ impl Browser {
     }
 
     /// The value of a date or time `<input>`, set at once: then `input` and `change` fire, as for a pick in the date picker.
-    pub fn drive_value(&mut self, node: NodeId, value: String) -> R<UiOutcome> {
+    pub fn drive_value(&mut self, node: NodeId, value: String) -> R<E, UiOutcome> {
         self.ui_call(true, |d, it| {
             d.put_input_value(Some(it), node, value)?;
             d.fire_plain(it, node, "input")?;
@@ -324,15 +323,15 @@ impl Browser {
     }
 
     /// Typed text in a text `<input>` or a `<textarea>`. See the header.
-    pub fn drive_type(&mut self, node: NodeId, text: &str) -> R<UiOutcome> {
+    pub fn drive_type(&mut self, node: NodeId, text: &str) -> R<E, UiOutcome> {
         let host = self.is_editing_host(node);
         if !host && !self.is_text_input(node) {
-            return Err(unsupported_input("test driver: type needs an editable <input>, <textarea> or contenteditable element"));
+            return Err(unsupported_input::<E>("test driver: type needs an editable <input>, <textarea> or contenteditable element"));
         }
         let mut out = UiOutcome::default();
         self.drive_focus(node, &mut out)?;
         if self.active_element()? != Some(node) {
-            return Err(unsupported_input("test driver: the field cannot take focus"));
+            return Err(unsupported_input::<E>("test driver: the field cannot take focus"));
         }
         if host {
             // The caret goes to the end; old content is selected, and deleted for an empty text. A line feed is Enter.

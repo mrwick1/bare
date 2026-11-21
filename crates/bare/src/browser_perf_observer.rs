@@ -9,14 +9,13 @@
 //!   `disconnect()` does nothing and `takeRecords()` gives a new empty array.
 //! - Absent: `PerformanceObserverEntryList`. `PerformanceEntry` and its subclasses are in `browser_perf.rs`, with the entries of `performance.getEntries*`.
 
+use crate::eng::{Eng, Ops};
 use crate::browser::*;
-use bare_js::eval::Interp;
-use bare_js::value::Value;
 use crate::browser_scoped::*;
 use bare_js_api::{Args, HostFn, Local, Type};
 
-fn ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    let cb = arg_s(s, a, 0);
+fn ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let cb = arg_s::<E>(s, a, 0);
     if !s.is_callable(cb) {
         return Err(s.type_error("Failed to construct 'PerformanceObserver': The callback provided as parameter 1 is not a function."));
     }
@@ -25,9 +24,9 @@ fn ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, L
     Ok(d.obj_local(s, o))
 }
 
-fn observe<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    let o = arg_s(s, a, 0);
-    if !is_object(s, o) {
+fn observe<'s, E: Eng>(_: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = arg_s::<E>(s, a, 0);
+    if !is_object::<E>(s, o) {
         return Err(s.type_error("Failed to execute 'observe' on 'PerformanceObserver': parameter 1 is not of type 'PerformanceObserverInit'."));
     }
     let (t, e) = (s.get_str(o, "type")?, s.get_str(o, "entryTypes")?);
@@ -37,25 +36,25 @@ fn observe<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s
     Ok(s.undefined())
 }
 
-fn nothing<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn nothing<'s, E: Eng>(_: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     Ok(s.undefined())
 }
 
-fn take_records<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn take_records<'s, E: Eng>(_: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     s.new_array(&[])
 }
 
 #[cold]
 #[inline(never)]
-fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+fn ensure<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
     if d.perf_observer.get().is_some() {
         return Ok(());
     }
     let proto = d.obj(it, it.object_prototype())?;
     let f = d.add_fn_s_obj(it, ctor, "PerformanceObserver", 1, HostFn::Ctor)?;
     let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
-    it.define_data(f, kp, Value::Object(proto), false, false, false)?;
-    it.define_data(proto, kc, Value::Object(f), true, false, true)?;
+    it.define_data(f, kp, E::obj_raw(proto), false, false, false)?;
+    it.define_data(proto, kc, E::obj_raw(f), true, false, true)?;
     d.def_method_s(it, proto, "observe", 1, observe)?;
     d.def_method_s(it, proto, "disconnect", 0, nothing)?;
     d.def_method_s(it, proto, "takeRecords", 0, take_records)?;
@@ -71,10 +70,10 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 
 crate::browser_lazy::lazy_global!(lazy_observer, "PerformanceObserver", ensure, |d| d.perf_observer_ctor.get().expect("made"));
 
-pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
     table!(lazy = [
         Row::both(1, "PerformanceObserver", lazy_observer),
     ]);
     let g = s.global();
-    d.install_rows(s, &[g], &lazy::T)
+    d.install_rows(s, &[g], &lazy::T::<E>::V)
 }

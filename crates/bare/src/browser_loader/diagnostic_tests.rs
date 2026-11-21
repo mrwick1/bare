@@ -1,5 +1,6 @@
 //! Heap stop labels omit payloads and remain sticky across loader runs.
 use super::*;
+use crate::eng_old::Old;
 use bare_js::heap::{HeapError, HeapLimits};
 use bare_js::eval::EvalLimits;
 use std::mem::size_of;
@@ -19,7 +20,7 @@ fn heap_variant_labels_and_public_stop_text() {
         (NeedsNamed, "NeedsNamed"), (Proxy(owner), "Proxy"),
     ];
     for (error, name) in cases {
-        let Stop::Fatal(fatal) = fatal_of(Error::Heap(error)) else { panic!("expected fatal") };
+        let Stop::Fatal(fatal) = fatal_of::<Old>(bare_js::eval::Error::Heap(error).into()) else { panic!("expected fatal") };
         assert_eq!(format!("page stopped: {fatal:?}"), format!("page stopped: Heap({name:?})"));
     }
 }
@@ -33,9 +34,9 @@ fn constructed_heap_stop_starts_no_more_js_or_io() {
             bare_html::tree::parse("<script>var ran = true; fetch('/io')</script><script src='/later.js'></script>"),
             Default::default(), EvalLimits::default(), HeapLimits::default(),
         ).unwrap();
-        let Stop::Fatal(fatal) = fatal_of(Error::Heap(HeapError::NeedsHost {
+        let Stop::Fatal(fatal) = fatal_of::<Old>(bare_js::eval::Error::Heap(HeapError::NeedsHost {
             owner: bare_js::heap::Heap::default().new_object(None).unwrap(), index: 987654,
-        })) else { panic!("expected fatal") };
+        }).into()) else { panic!("expected fatal") };
         *b.dom.scripts.fatal.borrow_mut() = Some(fatal.clone());
         for _ in 0..3 {
             let r = b.run_page(PageConfig {
@@ -53,7 +54,7 @@ fn constructed_heap_stop_starts_no_more_js_or_io() {
 
 #[test]
 fn diagnostic_type_sizes() {
-    eprintln!("Fatal={} Stop={} Scripts={} PageResult={}", size_of::<Fatal>(), size_of::<Stop>(), size_of::<Scripts>(), size_of::<PageResult>());
+    eprintln!("Fatal={} Stop={} Scripts={} PageResult={}", size_of::<Fatal>(), size_of::<Stop>(), size_of::<Scripts<Old>>(), size_of::<PageResult>());
 }
 
 #[test]
@@ -65,7 +66,7 @@ fn public_page_exposes_heap_stop_label() {
         let srv = serve(|_| Reply::new(200, Some("text/html"), "<p>ok</p>"));
         let mut session = Session::new(SessionConfig::new(&srv.url("/")));
         session.run();
-        let Stop::Fatal(fatal) = fatal_of(Error::Heap(HeapError::Stale)) else { panic!("expected fatal") };
+        let Stop::Fatal(fatal) = fatal_of::<Old>(bare_js::eval::Error::Heap(HeapError::Stale).into()) else { panic!("expected fatal") };
         *session.browser().unwrap().dom.scripts.fatal.borrow_mut() = Some(fatal);
         session.resume(&[]);
         let page = Page::new(Source::Session(Box::new(session)), (800, 600));

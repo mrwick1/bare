@@ -44,12 +44,12 @@
 //! `focusVisible` is read and ignored: nothing matches `:focus-visible`. Other members are ignored, as in the standard.
 //! A non-object, non-null option is a `TypeError`.
 
+use crate::eng::{Eng, Fault, Ops};
 use crate::browser::*;
 use crate::browser_dom as nd;
 use crate::browser_events::init_flag_s;
 use crate::browser_scoped::*;
 use bare_html::dom::{NodeData, NodeId};
-use bare_js::eval::{Error, Interp};
 use bare_js_api::{Args, Local, Type};
 
 /// The deepest nest of focus transitions (a listener that moves focus again, and so on).
@@ -80,9 +80,9 @@ fn tabindex_valid(s: &str) -> bool {
     t.strip_prefix(['-', '+']).unwrap_or(t).starts_with(|c: char| c.is_ascii_digit())
 }
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// Is `n` a focusable area now? Walks the ancestors: one step is charged for each, and for each sibling looked at.
-    pub(crate) fn focusable(&self, it: &mut Interp<'_>, n: NodeId) -> R<bool> {
+    pub(crate) fn focusable(&self, it: &mut E::Vm, n: NodeId) -> R<E, bool> {
         let doc = self.doc.borrow();
         let tag = |e: NodeId| match *doc.data(e) {
             NodeData::Element { name, .. } if !doc.is_foreign(e) => doc.atom_str(name),
@@ -98,9 +98,9 @@ impl Dom {
             return Ok(false);
         }
         // The first child element that is named `name`.
-        let first = |it: &mut Interp<'_>, parent: NodeId, name: &str| -> R<Option<NodeId>> {
+        let first = |it: &mut E::Vm, parent: NodeId, name: &str| -> R<E, Option<NodeId>> {
             for c in doc.children(parent) {
-                it.charge(1)?;
+                it.charge_o(1)?;
                 if tag(c) == name {
                     return Ok(Some(c));
                 }
@@ -109,7 +109,7 @@ impl Dom {
         };
         let (mut cur, mut below) = (n, None);
         loop {
-            it.charge(1)?;
+            it.charge_o(1)?;
             if attr(cur, "hidden").is_some() || attr(cur, "inert").is_some() {
                 return Ok(false);
             }
@@ -162,7 +162,7 @@ impl Dom {
     }
 
     /// The focused element after the focus fixup rule. `None` means the viewport.
-    pub(crate) fn current_focus(&self, it: &mut Interp<'_>) -> R<Option<NodeId>> {
+    pub(crate) fn current_focus(&self, it: &mut E::Vm) -> R<E, Option<NodeId>> {
         let Some(n) = self.st.borrow().focus.node else { return Ok(None) };
         if self.focusable(it, n)? {
             return Ok(Some(n));
@@ -171,7 +171,7 @@ impl Dom {
         Ok(None)
     }
 
-    fn fire_focus(&self, it: &mut Interp<'_>, target: NodeId, ty: &str, bubbles: bool, related: Option<NodeId>) -> R<()> {
+    fn fire_focus(&self, it: &mut E::Vm, target: NodeId, ty: &str, bubbles: bool, related: Option<NodeId>) -> R<E, ()> {
         let ev = self.new_event_proto(it, ty, bubbles, false, true, self.p().focus)?;
         {
             let mut st = self.st.borrow_mut();
@@ -187,7 +187,7 @@ impl Dom {
     }
 
     /// Move focus to `to` (already checked as focusable) or to the viewport (`None`).
-    pub(crate) fn move_focus(&self, it: &mut Interp<'_>, to: Option<NodeId>) -> R<()> {
+    pub(crate) fn move_focus(&self, it: &mut E::Vm, to: Option<NodeId>) -> R<E, ()> {
         {
             let mut st = self.st.borrow_mut();
             if st.focus.depth >= MAX_DEPTH {
@@ -201,7 +201,7 @@ impl Dom {
         r
     }
 
-    fn move_focus_inner(&self, it: &mut Interp<'_>, to: Option<NodeId>) -> R<()> {
+    fn move_focus_inner(&self, it: &mut E::Vm, to: Option<NodeId>) -> R<E, ()> {
         // An element that is still connected but cannot take focus now (hidden, disabled) still gets its `blur` (Chrome 155, checked with
         // `tools/fixtures/ui/drive.html`): the fixup rule does not run before this move. A removed element does not (see the fixup above).
         let raw = self.st.borrow().focus.node;
@@ -239,7 +239,7 @@ impl Dom {
     }
 
     /// The focusing steps for `n`: nothing happens when it is not a focusable area.
-    pub(crate) fn focus_node(&self, it: &mut Interp<'_>, n: NodeId) -> R<()> {
+    pub(crate) fn focus_node(&self, it: &mut E::Vm, n: NodeId) -> R<E, ()> {
         if self.focusable(it, n)? {
             self.move_focus(it, Some(n))?;
         }
@@ -247,46 +247,46 @@ impl Dom {
     }
 }
 
-fn html_el<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
+fn html_el<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, NodeId> {
     let n = d.nd_s(s, this)?;
     if d.is_element(n) && !d.doc.borrow().is_foreign(n) { Ok(n) } else { Err(s.type_error("Illegal invocation")) }
 }
 
-pub(crate) fn focus<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn focus<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = html_el(d, s, this)?;
-    let o = arg_s(s, a, 0);
-    if is_object(s, o) {
-        init_flag_s(s, o, "focusVisible")?;
-        init_flag_s(s, o, "preventScroll")?;
-    } else if !is_nullish(s, o) {
+    let o = arg_s::<E>(s, a, 0);
+    if is_object::<E>(s, o) {
+        init_flag_s::<E>(s, o, "focusVisible")?;
+        init_flag_s::<E>(s, o, "preventScroll")?;
+    } else if !is_nullish::<E>(s, o) {
         return Err(s.type_error("Failed to execute 'focus' on 'HTMLElement': parameter 1 is not of type 'FocusOptions'."));
     }
-    old(s, |it| d.focus_node(it, n))?;
+    old::<E, _>(s, |it| d.focus_node(it, n))?;
     Ok(s.undefined())
 }
 
-pub(crate) fn blur<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn blur<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = html_el(d, s, this)?;
-    if old(s, |it| d.current_focus(it))? == Some(n) {
-        old(s, |it| d.move_focus(it, None))?;
+    if old::<E, _>(s, |it| d.current_focus(it))? == Some(n) {
+        old::<E, _>(s, |it| d.move_focus(it, None))?;
     }
     Ok(s.undefined())
 }
 
-pub(crate) fn active_element<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn active_element<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.nd_s(s, this)?;
     // A frame document has no focus of its own: its body is the active element.
     if n != d.doc.borrow().root() && !matches!(d.data(n), bare_html::dom::NodeData::Document) {
         return Err(s.type_error("Illegal invocation"));
     }
-    if n == d.doc.borrow().root() && let Some(f) = old(s, |it| d.current_focus(it))? {
+    if n == d.doc.borrow().root() && let Some(f) = old::<E, _>(s, |it| d.current_focus(it))? {
         return d.wrap_s(s, f);
     }
     let body = nd::body_s(d, s, this, a)?;
     if s.type_of(body) == Type::Null { nd::document_element_s(d, s, this, a) } else { Ok(body) }
 }
 
-pub(crate) fn related_target<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn related_target<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let o = d.event_of_s(s, this)?;
     let st = d.st.borrow();
     if !st.events[&o].is_focus {
@@ -296,30 +296,30 @@ pub(crate) fn related_target<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _
     Ok(s.traced(&st.events[&o].related))
 }
 
-pub(crate) fn focus_event_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn focus_event_ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     if a.is_empty() {
         return Err(s.type_error("Failed to construct 'FocusEvent': 1 argument required, but only 0 present."));
     }
     let ty = d.arg_str_s(s, a, 0)?;
-    let init = arg_s(s, a, 1);
+    let init = arg_s::<E>(s, a, 1);
     let (mut bubbles, mut cancelable, mut composed, mut related) = (false, false, false, s.null());
-    if is_object(s, init) {
-        bubbles = init_flag_s(s, init, "bubbles")?;
-        cancelable = init_flag_s(s, init, "cancelable")?;
-        composed = init_flag_s(s, init, "composed")?;
+    if is_object::<E>(s, init) {
+        bubbles = init_flag_s::<E>(s, init, "bubbles")?;
+        cancelable = init_flag_s::<E>(s, init, "cancelable")?;
+        composed = init_flag_s::<E>(s, init, "composed")?;
         let v = s.get_str(init, "relatedTarget")?;
-        if obj_id(s, v).is_some_and(|o| d.st.borrow().by_obj.contains_key(&o)) {
+        if obj_id::<E>(s, v).is_some_and(|o| d.st.borrow().by_obj.contains_key(&o)) {
             related = v;
         } else if s.type_of(v) != Type::Undefined && s.type_of(v) != Type::Null {
             return Err(s.type_error("Failed to construct 'FocusEvent': Failed to read the 'relatedTarget' property from 'FocusEventInit': The provided value is not of type 'EventTarget'."));
         }
-    } else if !is_nullish(s, init) {
+    } else if !is_nullish::<E>(s, init) {
         return Err(s.type_error("The event initializer is not an object."));
     }
     let default = d.obj_local(s, d.p().focus);
     let proto = s.proto_from_new_target(default)?;
-    let proto = obj_id(s, proto).expect("a prototype is an object");
-    let e = old(s, |it| d.new_event_proto(it, &ty, bubbles, cancelable, composed, proto))?;
+    let proto = obj_id::<E>(s, proto).expect("a prototype is an object");
+    let e = old::<E, _>(s, |it| d.new_event_proto(it, &ty, bubbles, cancelable, composed, proto))?;
     {
         let mut st = d.st.borrow_mut();
         let event = st.events.get_mut(&e).expect("just made");
@@ -340,16 +340,16 @@ pub struct FocusOutcome {
     pub reports: Vec<Report>,
 }
 
-impl Browser {
+impl<E: Eng> Browser<E> {
     /// Run `f` as a driver call: a microtask checkpoint follows each listener it starts.
-    pub(crate) fn driven<T>(&mut self, f: impl FnOnce(&Dom, &mut Interp<'_>) -> R<T>) -> R<(T, Vec<Report>)> {
+    pub(crate) fn driven<T>(&mut self, f: impl FnOnce(&Dom<E>, &mut E::Vm) -> R<E, T>) -> R<E, (T, Vec<Report>)> {
         let dom = self.dom.clone();
         let mark = {
             let st = dom.st.borrow();
             st.dropped_reports + st.reports.len() as u64
         };
         dom.st.borrow_mut().driver = true;
-        let r = self.it.host_scope(|it| f(&dom, it));
+        let r = self.it.host_scope_o(|it| f(&dom, it));
         dom.st.borrow_mut().driver = false;
         let v = r?;
         let st = dom.st.borrow();
@@ -359,9 +359,9 @@ impl Browser {
 
     /// The focusing steps for an element, as `el.focus()` runs them, through the ordinary event engine.
     /// An ineligible element changes nothing (`focused` is false). A node that is not an element is `Unsupported`.
-    pub fn focus(&mut self, node: NodeId) -> R<FocusOutcome> {
+    pub fn focus(&mut self, node: NodeId) -> R<E, FocusOutcome> {
         if !self.dom.is_element(node) {
-            return Err(Error::Unsupported(unsupported("test driver: focus needs an element")));
+            return Err(Fault::Unsupported("test driver: focus needs an element"));
         }
         let (focused, reports) = self.driven(|d, it| {
             d.focus_node(it, node)?;
@@ -371,7 +371,7 @@ impl Browser {
     }
 
     /// The unfocusing steps: blur the active element, if there is one (`focused` is false afterwards).
-    pub fn blur(&mut self) -> R<FocusOutcome> {
+    pub fn blur(&mut self) -> R<E, FocusOutcome> {
         let (_, reports) = self.driven(|d, it| {
             if d.current_focus(it)?.is_some() {
                 d.move_focus(it, None)?;
@@ -382,8 +382,8 @@ impl Browser {
     }
 
     /// The focused element, or `None` when the viewport is focused (`document.activeElement` is then the body).
-    pub fn active_element(&mut self) -> R<Option<NodeId>> {
+    pub fn active_element(&mut self) -> R<E, Option<NodeId>> {
         let dom = self.dom.clone();
-        self.it.host_scope(|it| dom.current_focus(it))
+        self.it.host_scope_o(|it| dom.current_focus(it))
     }
 }

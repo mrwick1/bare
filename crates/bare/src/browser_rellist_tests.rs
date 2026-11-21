@@ -1,6 +1,7 @@
 use crate::browser::*;
 use bare_html::tree;
-use bare_js::{eval::{Error, EvalLimits}, heap::HeapLimits, value::Value};
+use crate::eng_old::OldFault as Error;
+use bare_js::{eval::{EvalLimits}, heap::HeapLimits, value::Value};
 const ORIGIN: &str = "https://redis.io";
 fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     std::thread::Builder::new().stack_size(64 << 20).spawn(f).unwrap().join().unwrap()
@@ -22,7 +23,7 @@ fn show(b: &mut Browser, r: Result<Value, Error>) -> String {
         Err(Error::Throw(v)) if matches!(v, Value::Object(_)) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
         Err(Error::Throw(v)) => format!("throw-value:{}", b.it.display(v)),
         Err(Error::Limit(l)) => format!("limit:{l:?}"),
-        Err(Error::Unsupported(u)) => format!("unsupported:{}", u.what),
+        Err(Error::Unsupported(u)) => format!("unsupported:{}", u),
         Err(e) => format!("other:{e:?}"),
     }
 }

@@ -14,26 +14,24 @@
 //! - The globals are accessors until the first read (`lazy`), so a realm that never reads them pays for two functions.
 //! - Gates: a response body that is being read is not aborted (bodies are buffered). `request.signal` is a new signal that follows `init.signal`.
 
+use crate::eng::{Eng, Fault, Ops, Val};
 use crate::browser::*;
 use crate::browser_scoped::*;
-use bare_js::eval::Error;
-use bare_js::eval::Interp;
-use bare_js::value::{ObjId, Value};
 use bare_js_api::{Args, Attrs, Engine, HostFn, Intrinsic, Local};
 use std::cell::{Cell, RefCell};
 
-type V = R<Value>;
+type V<E: Eng> = R<E, E::Raw>;
 
-pub(crate) enum Algo {
+pub(crate) enum Algo<E: Eng> {
     /// Remove the listener `(target, id)`.
-    Remove(Target, u64),
+    Remove(Target<E>, u64),
     /// Reject the fetch promise if its request is still queued. The signal holds the promise: it is an edge of the signal.
-    Fetch(bare_js_api::Traced<Value>),
+    Fetch(bare_js_api::Traced<E::Raw>),
 }
 
-pub(crate) struct Sig {
+pub(crate) struct Sig<E: Eng> {
     aborted: bool,
-    reason: bare_js_api::Traced<Value>,
+    reason: bare_js_api::Traced<E::Raw>,
     dependent: bool,
     /// The host key of the owner (`Owner::Abort`).
     key: u32,
@@ -41,28 +39,28 @@ pub(crate) struct Sig {
     sources: Vec<u32>,
     /// Weak, by host key: the dependent signals of a source.
     deps: Vec<u32>,
-    algos: Vec<Algo>,
+    algos: Vec<Algo<E>>,
 }
 
-impl Sig {
-    fn new(it: &Interp<'_>, key: u32) -> Self {
-        Sig { aborted: false, reason: it.trace_value(Value::Undefined), dependent: false, key, sources: Vec::new(), deps: Vec::new(), algos: Vec::new() }
+impl<E: Eng> Sig<E> {
+    fn new(it: &E::Vm, key: u32) -> Self {
+        Sig { aborted: false, reason: it.trace_value(E::undef()), dependent: false, key, sources: Vec::new(), deps: Vec::new(), algos: Vec::new() }
     }
 }
 
 #[derive(Default)]
-pub(crate) struct Tables {
-    pub(crate) sigs: IdMap<ObjId, Sig>,
+pub(crate) struct Tables<E: Eng> {
+    pub(crate) sigs: IdMap<<E as Eng>::Obj, Sig<E>>,
     /// A controller: its host key (`Owner::Ctl`) and its signal (an edge of the controller).
-    ctls: IdMap<ObjId, (u32, bare_js_api::Traced<Value>)>,
+    ctls: IdMap<<E as Eng>::Obj, (u32, bare_js_api::Traced<<E as Eng>::Raw>)>,
 }
 
 #[derive(Default)]
-pub(crate) struct AbortHost {
-    pub(crate) s: RefCell<Tables>,
+pub(crate) struct AbortHost<E: Eng> {
+    pub(crate) s: RefCell<Tables<E>>,
     made: Cell<bool>,
     /// `(signal prototype, controller prototype, signal constructor, controller constructor)`.
-    objs: RefCell<Option<[ObjId; 4]>>,
+    objs: RefCell<Option<[<E as Eng>::Obj; 4]>>,
     /// Keep those objects alive for the life of the realm.
     held: RefCell<Vec<bare_js_api::Persistent>>,
 }
@@ -70,7 +68,7 @@ pub(crate) struct AbortHost {
 // ------------------------------------------------------------------------------------ GC hooks
 
 /// The references of the owner `Owner::Abort(owner)`, a signal.
-pub(crate) fn trace(d: &Dom, owner: ObjId, t: &mut bare_js_api::Tracer<'_, Value>) {
+pub(crate) fn trace<E: Eng>(d: &Dom<E>, owner: E::Obj, t: &mut bare_js_api::Tracer<'_, E::Raw>) {
     if let Some(s) = d.abort.s.borrow().sigs.get(&owner) {
         t.visit(&s.reason);
         for a in &s.algos {
@@ -82,7 +80,7 @@ pub(crate) fn trace(d: &Dom, owner: ObjId, t: &mut bare_js_api::Tracer<'_, Value
 }
 
 /// The references of the owner `Owner::Ctl(owner)`, a controller.
-pub(crate) fn trace_ctl(d: &Dom, owner: ObjId, t: &mut bare_js_api::Tracer<'_, Value>) {
+pub(crate) fn trace_ctl<E: Eng>(d: &Dom<E>, owner: E::Obj, t: &mut bare_js_api::Tracer<'_, E::Raw>) {
     if let Some((_, s)) = d.abort.s.borrow().ctls.get(&owner) {
         t.visit(s);
     }
@@ -91,7 +89,7 @@ pub(crate) fn trace_ctl(d: &Dom, owner: ObjId, t: &mut bare_js_api::Tracer<'_, V
 /// Call after the dead keys are released. One pass over the signals: the
 /// entries of dead owners go (their key is free), a live signal drops the dead keys of its weak lists and the algorithms of a
 /// listener that is gone.
-pub(crate) fn prune(d: &Dom, st: &State) {
+pub(crate) fn prune<E: Eng>(d: &Dom<E>, st: &State<E>) {
     let mut t = d.abort.s.borrow_mut();
     let alive = |k: u32| st.owners.get(k).is_some();
     t.ctls.retain(|_, (k, _)| alive(*k));
@@ -110,13 +108,13 @@ pub(crate) fn prune(d: &Dom, st: &State) {
 }
 
 /// The host key of `o` when it is a signal (`Dom::own`).
-pub(crate) fn key_of(d: &Dom, o: ObjId) -> Option<u32> {
+pub(crate) fn key_of<E: Eng>(d: &Dom<E>, o: E::Obj) -> Option<u32> {
     d.abort.s.borrow().sigs.get(&o).map(|s| s.key)
 }
 
 // ------------------------------------------------------------------------------------ signals
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// The entries of signals and controllers, and the keys in the weak lists of all signals.
     #[cfg(test)]
     pub(crate) fn abort_entries(&self) -> (usize, usize, usize) {
@@ -124,23 +122,23 @@ impl Dom {
         (t.sigs.len(), t.ctls.len(), t.sigs.values().map(|s| s.sources.len() + s.deps.len()).sum())
     }
 
-    pub(crate) fn is_signal(&self, o: ObjId) -> bool {
+    pub(crate) fn is_signal(&self, o: E::Obj) -> bool {
         self.abort.s.borrow().sigs.contains_key(&o)
     }
 
     /// Is `o` an `AbortController` (so not plain data for structured clone)?
-    pub(crate) fn is_abort_controller(&self, o: ObjId) -> bool {
+    pub(crate) fn is_abort_controller(&self, o: E::Obj) -> bool {
         self.abort.s.borrow().ctls.contains_key(&o)
     }
 
-    fn exc(&self, it: &mut Interp<'_>, name: &str, msg: &str) -> V {
+    fn exc(&self, it: &mut E::Vm, name: &str, msg: &str) -> V<E> {
         match self.dom_err(it, name, msg) {
-            Error::Throw(v) => Ok(v),
+            Fault::Throw(v) => Ok(v),
             e => Err(e),
         }
     }
 
-    fn new_signal(&self, it: &mut Interp<'_>) -> R<ObjId> {
+    fn new_signal(&self, it: &mut E::Vm) -> R<E, E::Obj> {
         let proto = self.abort.objs.borrow().expect("made")[0];
         if self.st.borrow().by_obj.len() >= self.lim.max_wrappers {
             return Err(self.lim("dom-wrappers"));
@@ -154,19 +152,19 @@ impl Dom {
     }
 
     /// Make `o` an owner with a new key.
-    fn abort_owner(&self, st: &mut State, it: &mut Interp<'_>, o: ObjId) -> u32 {
+    fn abort_owner(&self, st: &mut State<E>, it: &mut E::Vm, o: E::Obj) -> u32 {
         let k = st.owners.key(Owner::Abort(o));
         it.set_host_owner_obj(o, k);
         k
     }
 
     /// `(aborted, reason)` of a signal.
-    pub(crate) fn signal_state(&self, o: ObjId) -> Option<(bool, Value)> {
+    pub(crate) fn signal_state(&self, o: E::Obj) -> Option<(bool, E::Raw)> {
         self.abort.s.borrow().sigs.get(&o).map(|s| (s.aborted, *s.reason.raw()))
     }
 
     /// Add an abort algorithm. The signal must not be aborted (the caller checked).
-    pub(crate) fn signal_add_algo(&self, o: ObjId, a: Algo) -> R<()> {
+    pub(crate) fn signal_add_algo(&self, o: E::Obj, a: Algo<E>) -> R<E, ()> {
         let mut t = self.abort.s.borrow_mut();
         let st = self.st.borrow();
         let Some(s) = t.sigs.get_mut(&o) else { return Ok(()) };
@@ -186,10 +184,10 @@ impl Dom {
     }
 
     /// "Signal abort": the reason is `reason` or a new `AbortError`.
-    pub(crate) fn signal_abort(&self, it: &mut Interp<'_>, o: ObjId, reason: Value) -> R<()> {
-        let reason = match reason {
-            Value::Undefined => None,
-            v => Some(v),
+    pub(crate) fn signal_abort(&self, it: &mut E::Vm, o: E::Obj, reason: E::Raw) -> R<E, ()> {
+        let reason = match E::kind(reason) {
+            Val::Undefined => None,
+            _ => Some(reason),
         };
         if self.abort.s.borrow().sigs.get(&o).is_none_or(|s| s.aborted) {
             return Ok(());
@@ -198,7 +196,7 @@ impl Dom {
             Some(v) => v,
             None => self.exc(it, "AbortError", "signal is aborted without reason")?,
         };
-        let (mut fire, mut algos): (Vec<ObjId>, Vec<Algo>) = (vec![o], Vec::new());
+        let (mut fire, mut algos): (Vec<E::Obj>, Vec<Algo<E>>) = (vec![o], Vec::new());
         {
             let mut t = self.abort.s.borrow_mut();
             let deps = {
@@ -245,7 +243,7 @@ impl Dom {
     }
 
     /// The task of `AbortSignal.timeout`.
-    pub(crate) fn abort_timeout_fired(&self, it: &mut Interp<'_>, o: ObjId) -> R<()> {
+    pub(crate) fn abort_timeout_fired(&self, it: &mut E::Vm, o: E::Obj) -> R<E, ()> {
         let r = self.exc(it, "TimeoutError", "signal timed out")?;
         self.signal_abort(it, o, r)
     }
@@ -253,25 +251,25 @@ impl Dom {
 
 // ------------------------------------------------------------------------------------ methods
 
-fn signal_illegal<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn signal_illegal<'s, E: Eng>(_: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     Err(s.type_error("Failed to construct 'AbortSignal': Illegal constructor"))
 }
 
-impl Dom {
-    fn signal_of_s<'s>(&self, s: &mut Sc<'s, '_>, v: Local<'s>) -> Res<'s, ObjId> {
-        match obj_id(s, v) {
+impl<E: Eng> Dom<E> {
+    fn signal_of_s<'s>(&self, s: &mut Sc<'s, E>, v: Local<'s>) -> Res<'s, E::Obj> {
+        match obj_id::<E>(s, v) {
             Some(o) if self.is_signal(o) => Ok(o),
             _ => Err(s.type_error("Illegal invocation")),
         }
     }
 }
 
-fn aborted<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn aborted<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let o = d.signal_of_s(s, this)?;
     Ok(s.boolean(d.signal_state(o).is_some_and(|s| s.0)))
 }
 
-fn reason<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn reason<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let o = d.signal_of_s(s, this)?;
     match d.signal_state(o) {
         Some((true, r)) => Ok(s.engine().raw_local(&r)),
@@ -279,7 +277,7 @@ fn reason<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<
     }
 }
 
-fn throw_if_aborted<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn throw_if_aborted<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let o = d.signal_of_s(s, this)?;
     match d.signal_state(o) {
         Some((true, r)) => Err(bare_js_api::Error::Throw(s.engine().raw_local(&r))),
@@ -287,14 +285,14 @@ fn throw_if_aborted<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s
     }
 }
 
-fn static_abort<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    let o = old(s, |it| d.new_signal(it))?;
-    let r = raw_arg(s, a, 0).unwrap_or(Value::Undefined);
-    old(s, |it| d.signal_abort(it, o, r))?;
+fn static_abort<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = old::<E, _>(s, |it| d.new_signal(it))?;
+    let r = raw_arg::<E>(s, a, 0).unwrap_or(E::undef());
+    old::<E, _>(s, |it| d.signal_abort(it, o, r))?;
     Ok(d.obj_local(s, o))
 }
 
-fn static_timeout<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn static_timeout<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let Some(a0) = a.get(0) else {
         return Err(s.type_error("Failed to execute 'timeout' on 'AbortSignal': 1 argument required, but only 0 present."));
     };
@@ -302,16 +300,16 @@ fn static_timeout<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) ->
     if !n.is_finite() || !(0.0..=18446744073709551615.0).contains(&n) {
         return Err(s.type_error("Failed to execute 'timeout' on 'AbortSignal': Value is outside the range of an unsigned long long."));
     }
-    let o = old(s, |it| d.new_signal(it))?;
-    lift(s, d.queue_abort_timeout(o, n.trunc()))?;
+    let o = old::<E, _>(s, |it| d.new_signal(it))?;
+    lift::<E, _>(s, d.queue_abort_timeout(o, n.trunc()))?;
     Ok(d.obj_local(s, o))
 }
 
-fn static_any<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    let a0 = arg_s(s, a, 0);
+fn static_any<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let a0 = arg_s::<E>(s, a, 0);
     let a0 = s.engine().raw(a0);
     // The iterator of the old engine: one call for each item, with no handle for the iterator or the items.
-    let o = old(s, |it| {
+    let o = old::<E, _>(s, |it| {
         let inputs = any_inputs(d, it, a0)?;
         d.any_of(it, inputs)
     })?;
@@ -319,18 +317,20 @@ fn static_any<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res
 }
 
 /// The signals of the iterable `v` of `AbortSignal.any`.
-fn any_inputs(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<Vec<ObjId>> {
+fn any_inputs<E: Eng>(d: &Dom<E>, it: &mut E::Vm, v: E::Raw) -> R<E, Vec<E::Obj>> {
     let bad = "Failed to execute 'any' on 'AbortSignal': The provided value is not of type 'AbortSignal'.";
-    let Some(mut iter) = it.host_iter_open(v)? else { return Err(it.type_error("Failed to execute 'any' on 'AbortSignal': The provided value cannot be converted to a sequence.")) };
+    let Some(mut iter) = it.host_iter_open(v)? else { return Err(it.type_error_o("Failed to execute 'any' on 'AbortSignal': The provided value cannot be converted to a sequence.")) };
     let mut inputs = Vec::new();
     loop {
-        it.charge(1)?;
+        it.charge_o(1)?;
         match it.host_iter_next(&mut iter) {
-            Ok(Some(Value::Object(o))) if d.is_signal(o) => inputs.push(o),
-            Ok(Some(_)) => {
-                let e = it.type_error(bad);
-                return Err(it.host_iter_fail(&mut iter, e));
-            }
+            Ok(Some(x)) => match E::kind(x) {
+                Val::Object(o) if d.is_signal(o) => inputs.push(o),
+                _ => {
+                    let e = it.type_error_o(bad);
+                    return Err(it.host_iter_fail(&mut iter, e));
+                }
+            },
             Ok(None) => break,
             Err(e) => return Err(e),
         }
@@ -341,9 +341,9 @@ fn any_inputs(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<Vec<ObjId>> {
     Ok(inputs)
 }
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// `AbortSignal.any(inputs)`.
-    fn any_of(&self, it: &mut Interp<'_>, inputs: Vec<ObjId>) -> R<ObjId> {
+    fn any_of(&self, it: &mut E::Vm, inputs: Vec<E::Obj>) -> R<E, E::Obj> {
         let result = self.new_signal(it)?;
         let mut t = self.abort.s.borrow_mut();
         if let Some(&first) = inputs.iter().find(|&&i| t.sigs[&i].aborted) {
@@ -375,17 +375,17 @@ impl Dom {
     }
 
     /// A new signal that follows `s` (the `signal` of a `Request`).
-    pub(crate) fn follow_signal(&self, it: &mut Interp<'_>, s: ObjId) -> R<ObjId> {
+    pub(crate) fn follow_signal(&self, it: &mut E::Vm, s: E::Obj) -> R<E, E::Obj> {
         self.any_of(it, vec![s])
     }
 
     /// A new signal that nothing aborts yet.
-    pub(crate) fn fresh_signal(&self, it: &mut Interp<'_>) -> R<ObjId> {
+    pub(crate) fn fresh_signal(&self, it: &mut E::Vm) -> R<E, E::Obj> {
         self.ensure_abort(it)?;
         self.new_signal(it)
     }
 
-    fn ensure_abort(&self, it: &mut Interp<'_>) -> R<()> {
+    fn ensure_abort(&self, it: &mut E::Vm) -> R<E, ()> {
         if !self.abort.made.get() {
             make(self, it)?;
         }
@@ -393,47 +393,47 @@ impl Dom {
     }
 }
 
-fn controller_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn controller_ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let default = d.abort.objs.borrow().expect("made")[1];
-    let c = old(s, |it| {
+    let c = old::<E, _>(s, |it| {
         let proto = it.host_proto_from_new_target(default)?;
         let sig = d.new_signal(it)?;
         let c = d.obj(it, proto)?;
         let k = d.st.borrow_mut().owners.key(Owner::Ctl(c));
         it.set_host_owner_obj(c, k);
-        let sig = it.trace_value(Value::Object(sig));
+        let sig = it.trace_value(E::obj_raw(sig));
         d.abort.s.borrow_mut().ctls.insert(c, (k, sig));
         Ok(c)
     })?;
     Ok(d.obj_local(s, c))
 }
 
-fn controller_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, ObjId> {
-    if let Some(o) = obj_id(s, this)
+fn controller_of<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, E::Obj> {
+    if let Some(o) = obj_id::<E>(s, this)
         && let Some((_, sig)) = d.abort.s.borrow().ctls.get(&o)
-        && let Value::Object(sig) = *sig.raw()
+        && let Val::Object(sig) = E::kind(*sig.raw())
     {
         return Ok(sig);
     }
     Err(s.type_error("Illegal invocation"))
 }
 
-fn controller_signal<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn controller_signal<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let o = controller_of(d, s, this)?;
     Ok(d.obj_local(s, o))
 }
 
-fn controller_abort<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn controller_abort<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let o = controller_of(d, s, this)?;
-    let r = raw_arg(s, a, 0).unwrap_or(Value::Undefined);
-    old(s, |it| d.signal_abort(it, o, r))?;
+    let r = raw_arg::<E>(s, a, 0).unwrap_or(E::undef());
+    old::<E, _>(s, |it| d.signal_abort(it, o, r))?;
     Ok(s.undefined())
 }
 
 // ------------------------------------------------------------------------------------ install
 
 /// The two globals are accessors until one is read. A call with an argument is the setter.
-fn lazy<'s, const SIG: bool>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn lazy<'s, const SIG: bool, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let g = s.global();
     let name = if SIG { "AbortSignal" } else { "AbortController" };
     let attrs = Attrs { writable: true, enumerable: false, configurable: true };
@@ -441,7 +441,7 @@ fn lazy<'s, const SIG: bool>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<
         s.define_str(g, name, v, attrs)?;
         return Ok(s.undefined());
     }
-    old(s, |it| d.ensure_abort(it))?;
+    old::<E, _>(s, |it| d.ensure_abort(it))?;
     let ctor = d.abort.objs.borrow().expect("made")[if SIG { 2 } else { 3 }];
     let ctor = d.obj_local(s, ctor);
     s.define_str(g, name, ctor, attrs)?;
@@ -450,10 +450,10 @@ fn lazy<'s, const SIG: bool>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<
 
 #[cold]
 #[inline(never)]
-fn make(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+fn make<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
     let (op, et) = (it.object_prototype(), d.p().et);
     let (sp, cp) = (d.obj(it, et)?, d.obj(it, op)?);
-    let (sc, cc) = run(it, |s| {
+    let (sc, cc) = run::<E, _>(it, |s| {
         let sc = d.add_fn_s(s, signal_illegal, "AbortSignal", 0, HostFn::CtorNewTarget)?;
         let cc = d.add_fn_s(s, controller_ctor, "AbortController", 0, HostFn::CtorNewTarget)?;
         let attrs = |w, c| Attrs { writable: w, enumerable: false, configurable: c };
@@ -465,7 +465,7 @@ fn make(d: &Dom, it: &mut Interp<'_>) -> R<()> {
             let t = s.string(name)?;
             s.define(proto, tag, t, attrs(false, true))?;
         }
-        Ok((obj_id(s, sc).expect("a function"), obj_id(s, cc).expect("a function")))
+        Ok((obj_id::<E>(s, sc).expect("a function"), obj_id::<E>(s, cc).expect("a function")))
     })?;
     d.def_get_s(it, sp, "aborted", aborted, None)?;
     d.def_get_s(it, sp, "reason", reason, None)?;
@@ -476,15 +476,15 @@ fn make(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     d.def_method_s(it, sc, "any", 1, static_any)?;
     d.def_get_s(it, cp, "signal", controller_signal, None)?;
     d.def_method_s(it, cp, "abort", 0, controller_abort)?;
-    *d.abort.held.borrow_mut() = [sp, cp, sc, cc].map(|o| it.persist_value(Value::Object(o))).into();
+    *d.abort.held.borrow_mut() = [sp, cp, sc, cc].map(|o| it.persist_value(E::obj_raw(o))).into();
     *d.abort.objs.borrow_mut() = Some([sp, cp, sc, cc]);
     d.abort.made.set(true);
     Ok(())
 }
 
-pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
     let g = s.global();
-    for (name, f) in [("AbortController", lazy::<false> as HS), ("AbortSignal", lazy::<true> as HS)] {
+    for (name, f) in [("AbortController", lazy::<false, _> as HS<E>), ("AbortSignal", lazy::<true, _> as HS<E>)] {
         let f = d.add_fn_s(s, f, name, 0, HostFn::Method)?;
         s.define_accessor_str(g, name, Some(f), Some(f), Attrs { writable: false, enumerable: false, configurable: true })?;
     }

@@ -22,12 +22,12 @@
 //! two siblings' branches, the children of their common parent up to the first of the two. `isEqualNode` is iterative: its stack is on the heap,
 //! so a deep tree is no limit.
 
+use crate::eng::Eng;
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_js_api::{Args, Local, Type};
 use crate::browser_attr as at;
 use bare_html::dom::{Atom, NodeData, NodeId, Ns};
-use bare_js::value::ObjId;
 
 const DISCONNECTED: u16 = 1;
 const PRECEDING: u16 = 2;
@@ -38,17 +38,17 @@ const IMPL: u16 = 32;
 
 /// What a `Node` method can be called on or with: a tree node or an `Attr`.
 #[derive(Clone, Copy, PartialEq)]
-enum Ep {
+enum Ep<E: Eng> {
     N(NodeId),
-    A(ObjId),
+    A(E::Obj),
 }
 
-impl Dom {
-    fn ep(&self, s: &mut Sc<'_, '_>, v: Local<'_>) -> Option<Ep> {
-        self.node_of_s(s, v).map(Ep::N).or_else(|| obj_id(s, v).and_then(|o| at::probe_obj(self, o)).map(Ep::A))
+impl<E: Eng> Dom<E> {
+    fn ep(&self, s: &mut Sc<'_, E>, v: Local<'_>) -> Option<Ep<E>> {
+        self.node_of_s(s, v).map(Ep::N).or_else(|| obj_id::<E>(s, v).and_then(|o| at::probe_obj(self, o)).map(Ep::A))
     }
 
-    fn this_ep<'s>(&self, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, Ep> {
+    fn this_ep<'s>(&self, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, Ep<E>> {
         match self.ep(s, this) {
             Some(e) => Ok(e),
             None => Err(s.type_error("Illegal invocation")),
@@ -56,11 +56,11 @@ impl Dom {
     }
 
     /// Argument 0 as a node or `Attr`. A missing argument is a TypeError; `null` and `undefined` are `None` when `nullable`.
-    fn other_ep<'s>(&self, s: &mut Sc<'s, '_>, a: Args<'s>, name: &str, nullable: bool) -> Res<'s, Option<Ep>> {
+    fn other_ep<'s>(&self, s: &mut Sc<'s, E>, a: Args<'s>, name: &str, nullable: bool) -> Res<'s, Option<Ep<E>>> {
         if a.is_empty() {
             return Err(s.type_error(&format!("Failed to execute '{name}' on 'Node': 1 argument required, but only 0 present.")));
         }
-        let arg0 = arg_s(s, a, 0);
+        let arg0 = arg_s::<E>(s, a, 0);
         if nullable && matches!(s.type_of(arg0), Type::Null | Type::Undefined) {
             return Ok(None);
         }
@@ -71,16 +71,16 @@ impl Dom {
     }
 
     /// An optional string argument (`DOMString?`): `null`, `undefined` and the empty string are `None`.
-    fn opt_string<'s>(&self, s: &mut Sc<'s, '_>, a: Args<'s>, name: &str) -> Res<'s, Option<String>> {
+    fn opt_string<'s>(&self, s: &mut Sc<'s, E>, a: Args<'s>, name: &str) -> Res<'s, Option<String>> {
         if a.is_empty() {
             return Err(s.type_error(&format!("Failed to execute '{name}' on 'Node': 1 argument required, but only 0 present.")));
         }
-        let arg0 = arg_s(s, a, 0);
+        let arg0 = arg_s::<E>(s, a, 0);
         crate::browser_namespace::ns_arg(self, s, arg0)
     }
 
     /// The nodes from the root of the tree down to `n`.
-    fn path_to_root<'s>(&self, s: &mut Sc<'s, '_>, n: NodeId) -> Res<'s, Vec<NodeId>> {
+    fn path_to_root<'s>(&self, s: &mut Sc<'s, E>, n: NodeId) -> Res<'s, Vec<NodeId>> {
         let doc = self.doc.borrow();
         let mut up = vec![n];
         let mut cur = n;
@@ -97,7 +97,7 @@ impl Dom {
     }
 
     /// The element of `e` and, for an `Attr`, its name.
-    fn split(&self, e: Ep) -> (Option<NodeId>, Option<Atom>) {
+    fn split(&self, e: Ep<E>) -> (Option<NodeId>, Option<Atom>) {
         match e {
             Ep::N(n) => (Some(n), None),
             Ep::A(o) => {
@@ -109,7 +109,7 @@ impl Dom {
 }
 
 /// A number that puts any two nodes in one fixed order: the nodes by creation, then the attributes.
-fn key(e: Ep) -> (u8, usize) {
+fn key<E: Eng>(e: Ep<E>) -> (u8, usize) {
     match e {
         Ep::N(n) => (0, n.index()),
         Ep::A(o) => (1, o.slot()),
@@ -117,7 +117,7 @@ fn key(e: Ep) -> (u8, usize) {
 }
 
 /// `Node.prototype.compareDocumentPosition(other)`.
-pub(crate) fn compare_document_position<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn compare_document_position<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let this = d.this_ep(s, this)?;
     let other = d.other_ep(s, a, "compareDocumentPosition", false)?.expect("not nullable");
     if this == other {
@@ -128,7 +128,7 @@ pub(crate) fn compare_document_position<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: L
 }
 
 #[inline(never)]
-fn position<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Ep, other: Ep) -> Res<'s, u16> {
+fn position<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Ep<E>, other: Ep<E>) -> Res<'s, u16> {
     let ((n1, a1), (n2, a2)) = (d.split(other), d.split(this));
     // Two attributes of one element: the order of the attribute list.
     if let (Some(el), Some(x), Some(y), true) = (n1, a1, a2, n1 == n2) {
@@ -184,7 +184,7 @@ fn position<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Ep, other: Ep) -> Res<'s, u16
 }
 
 /// `Node.prototype.contains(other)`: `other` is `this` or one of its descendants. An `Attr` is not a descendant of anything.
-pub(crate) fn contains<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn contains<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let this = d.this_ep(s, this)?;
     let Some(other) = d.other_ep(s, a, "contains", true)? else { return Ok(s.boolean(false)) };
     let (Ep::N(n), Ep::N(o)) = (this, other) else { return Ok(s.boolean(this == other)) };
@@ -201,14 +201,14 @@ pub(crate) fn contains<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args
 }
 
 /// `Node.prototype.isSameNode(other)`.
-pub(crate) fn is_same_node<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn is_same_node<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let this = d.this_ep(s, this)?;
     let other = d.other_ep(s, a, "isSameNode", true)?;
     Ok(s.boolean(other == Some(this)))
 }
 
 /// `Node.prototype.isEqualNode(other)`.
-pub(crate) fn is_equal_node<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn is_equal_node<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let this = d.this_ep(s, this)?;
     let Some(other) = d.other_ep(s, a, "isEqualNode", true)? else { return Ok(s.boolean(false)) };
     let eq = match (this, other) {
@@ -225,7 +225,7 @@ pub(crate) fn is_equal_node<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a:
 
 /// The node-by-node test of the Standard, over an explicit stack.
 #[inline(never)]
-fn trees_equal<'s>(d: &Dom, s: &mut Sc<'s, '_>, x: NodeId, y: NodeId) -> Res<'s, bool> {
+fn trees_equal<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, x: NodeId, y: NodeId) -> Res<'s, bool> {
     let doc = d.doc.borrow();
     let mut stack = vec![(x, y)];
     while let Some((p, q)) = stack.pop() {
@@ -260,7 +260,7 @@ fn trees_equal<'s>(d: &Dom, s: &mut Sc<'s, '_>, x: NodeId, y: NodeId) -> Res<'s,
 
 /// The element where a lookup starts: the owner of an `Attr`, the document element of a `Document`, the parent element of a node that is below
 /// an element. `None` for a doctype, a fragment, a shadow root and a node with no element above it.
-fn start(d: &Dom, e: Ep) -> Option<NodeId> {
+fn start<E: Eng>(d: &Dom<E>, e: Ep<E>) -> Option<NodeId> {
     let doc = d.doc.borrow();
     let n = match e {
         Ep::A(o) => return at::state(d, o).1,
@@ -274,13 +274,13 @@ fn start(d: &Dom, e: Ep) -> Option<NodeId> {
     }
 }
 
-fn parent_element(d: &Dom, n: NodeId) -> Option<NodeId> {
+fn parent_element<E: Eng>(d: &Dom<E>, n: NodeId) -> Option<NodeId> {
     let doc = d.doc.borrow();
     doc.parent(n).filter(|&p| matches!(doc.data(p), NodeData::Element { .. }))
 }
 
 /// "Locate a namespace" for `prefix` (`None` is the default namespace), from `el` up.
-fn locate_namespace<'s>(d: &Dom, s: &mut Sc<'s, '_>, el: NodeId, prefix: Option<&str>) -> Res<'s, Option<String>> {
+fn locate_namespace<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, el: NodeId, prefix: Option<&str>) -> Res<'s, Option<String>> {
     if prefix == Some("xml") {
         return Ok(Some(Ns::Xml.uri().to_string()));
     }
@@ -316,7 +316,7 @@ fn locate_namespace<'s>(d: &Dom, s: &mut Sc<'s, '_>, el: NodeId, prefix: Option<
 }
 
 /// "Locate a namespace prefix" for `ns`, from `el` up.
-fn locate_prefix<'s>(d: &Dom, s: &mut Sc<'s, '_>, el: NodeId, ns: &str) -> Res<'s, Option<String>> {
+fn locate_prefix<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, el: NodeId, ns: &str) -> Res<'s, Option<String>> {
     let mut cur = Some(el);
     while let Some(e) = cur {
         s.charge(1)?;
@@ -337,7 +337,7 @@ fn locate_prefix<'s>(d: &Dom, s: &mut Sc<'s, '_>, el: NodeId, ns: &str) -> Res<'
     Ok(None)
 }
 
-fn opt_js<'s>(d: &Dom, s: &mut Sc<'s, '_>, st: Option<String>) -> Res<'s, Local<'s>> {
+fn opt_js<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, st: Option<String>) -> Res<'s, Local<'s>> {
     match st {
         Some(st) => d.js_str_s(s, &st),
         None => Ok(s.null()),
@@ -345,7 +345,7 @@ fn opt_js<'s>(d: &Dom, s: &mut Sc<'s, '_>, st: Option<String>) -> Res<'s, Local<
 }
 
 /// `Node.prototype.lookupNamespaceURI(prefix)`.
-pub(crate) fn lookup_namespace_uri<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn lookup_namespace_uri<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let this = d.this_ep(s, this)?;
     let prefix = d.opt_string(s, a, "lookupNamespaceURI")?;
     let found = match start(d, this) {
@@ -356,7 +356,7 @@ pub(crate) fn lookup_namespace_uri<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<
 }
 
 /// `Node.prototype.lookupPrefix(namespace)`.
-pub(crate) fn lookup_prefix<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn lookup_prefix<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let this = d.this_ep(s, this)?;
     let ns = d.opt_string(s, a, "lookupPrefix")?;
     let found = match (ns, start(d, this)) {
@@ -367,7 +367,7 @@ pub(crate) fn lookup_prefix<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a:
 }
 
 /// `Node.prototype.isDefaultNamespace(namespace)`.
-pub(crate) fn is_default_namespace<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn is_default_namespace<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let this = d.this_ep(s, this)?;
     let ns = d.opt_string(s, a, "isDefaultNamespace")?;
     let default = match start(d, this) {
