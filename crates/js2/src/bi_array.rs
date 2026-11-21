@@ -7,7 +7,7 @@
 //! elements, so a real array pays one flag test. An accessor property of an array-like is not read here (it needs a call): known gap.
 //! `shift` and `unshift` move all the elements: O(n) each.
 use crate::lazy::{Ent, m, script, sym_same};
-use crate::bi_object::H_SEARCH;
+use crate::bi_object::{Desc, H_SEARCH};
 use crate::bi_symbol::SPECIES;
 use crate::builtins::{NativeFn, arg};
 use crate::interp_rt::{ErrKind, Key, R, Realm};
@@ -180,7 +180,11 @@ fn species_create(rt: &mut Realm, o: Value, n: f64) -> R<Obj> {
 /// `CreateDataPropertyOrThrow(a, i, x)` on a fresh array.
 fn put(rt: &mut Realm, a: Obj, i: f64, x: Value) -> R<()> {
     let k = key_at(rt, i);
-    rt.define(a, k, x)
+    if a.is_indexed() {
+        return rt.define(a, k, x);
+    }
+    let d = Desc { value: Some(x), w: Some(true), e: Some(true), c: Some(true), ..Desc::default() };
+    if rt.define_own(a, k, &d)? { Ok(()) } else { rt.type_error("cannot define the property") }
 }
 
 pub(crate) fn prelude_species(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
