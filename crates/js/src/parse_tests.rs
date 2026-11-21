@@ -1031,3 +1031,11 @@ fn a_sequence_in_parentheses_spans_its_first_and_last_tokens() {
         assert_eq!((ex.span.start, ex.span.end), want, "{src}");
     }
 }
+
+#[test]
+fn deep_classes_respect_the_caller_stack() {
+    std::thread::Builder::new().stack_size(2 << 20).spawn(|| {
+        let src = format!("{}{}", "class A { m(){".repeat(5000), "}}".repeat(5000));
+        assert_eq!(parse_script(&src, Limits::default()).unwrap_err().kind, ErrorKind::Limit(LimitKind::Depth));
+    }).unwrap().join().unwrap();
+}
