@@ -91,6 +91,8 @@ pub(crate) struct ApiState {
     /// The step budget of a task, and the nesting of [`Engine::task`].
     budget: u64,
     tasks: u32,
+    /// Owners, host-filled objects and lazy members (`api_host.rs`).
+    pub(crate) hs: crate::api_host::HostState,
 }
 
 impl Default for ApiState {
@@ -110,6 +112,7 @@ impl Default for ApiState {
             natives: [usize::MAX; 2],
             budget: u64::MAX,
             tasks: 0,
+            hs: Default::default(),
         }
     }
 }
@@ -132,6 +135,39 @@ impl ApiState {
             w = x.prev;
         }
         self.slots.for_each(|id| m.value(self.persistent[id as usize]));
+        self.hs.mark(m);
+    }
+
+    /// The address of the host (`api_host.rs` reads it without an `Rc` clone).
+    pub(crate) fn host_ptr(&self) -> Option<NonNull<dyn Host<Realm>>> {
+        self.host_ptr
+    }
+
+    /// Record why the run stops (`Err(STOP)`).
+    pub(crate) fn set_abort(&mut self, a: Abort) {
+        self.abort.get_or_insert(a);
+    }
+
+    /// The host edges of the owners that the marking reached since the last round (`gc::Roots::owners`).
+    pub(crate) fn trace_owners(&mut self, live: &crate::gc::Live, round: u32, out: &mut Vec<Value>) -> usize {
+        let keys = self.hs.reached(live, round);
+        if let (false, Some(h)) = (keys.is_empty(), self.host_ptr) {
+            // SAFETY: as in `host_call`: the pointer is into the `Rc` of `host`, which lives as long as `self`.
+            let h = unsafe { h.as_ref() };
+            for &k in &keys {
+                h.trace(k, &mut bare_js_api::Tracer::new(out));
+            }
+        }
+        keys.len()
+    }
+
+    /// Drop the owners that the marking did not reach and give their keys to the host (`gc::Roots::weak`).
+    pub(crate) fn prune_owners(&mut self, live: &crate::gc::Live) {
+        let dead = self.hs.prune(live);
+        if let (false, Some(h)) = (dead.is_empty(), self.host_ptr) {
+            // SAFETY: as in `trace_owners`.
+            unsafe { h.as_ref() }.prune(&dead);
+        }
     }
 }
 
@@ -161,7 +197,7 @@ impl Realm {
     }
 
     #[inline]
-    fn a_push<'s>(&mut self, v: Value) -> Local<'s> {
+    pub(crate) fn a_push<'s>(&mut self, v: Value) -> Local<'s> {
         if let Some(s) = Realm::str_of(v)
             && s.is_rope()
         {
@@ -173,7 +209,7 @@ impl Realm {
 
     /// The value of a handle: a slot of the stack (one bounds check), else a slot of the running call.
     #[inline]
-    fn a_at(&self, l: Local<'_>) -> Value {
+    pub(crate) fn a_at(&self, l: Local<'_>) -> Value {
         match self.api.stack.get(l.slot().wrapping_add(SEEDS as u32) as usize) {
             Some(&x) => x,
             None => self.a_win(l.slot()),
@@ -194,7 +230,7 @@ impl Realm {
     }
 
     /// An error of the engine as an error of the interface: a thrown value is a local, the stop marker is the abort that was recorded.
-    fn a_err<'s>(&mut self, e: Value) -> Error<'s> {
+    pub(crate) fn a_err<'s>(&mut self, e: Value) -> Error<'s> {
         if e == STOP { Error::Abort(self.api.abort.take().unwrap_or(Abort::Limit("the step budget"))) } else { Error::Throw(self.a_push(e)) }
     }
 
@@ -210,12 +246,12 @@ impl Realm {
         Error::Abort(Abort::Unsupported(what))
     }
 
-    fn a_throw<'s>(&mut self, kind: ErrKind, msg: &str) -> Error<'s> {
+    pub(crate) fn a_throw<'s>(&mut self, kind: ErrKind, msg: &str) -> Error<'s> {
         let e = self.error(kind, msg);
         self.a_err(e)
     }
 
-    fn a_obj<'s>(&mut self, l: Local<'_>) -> Result<Obj, Error<'s>> {
+    pub(crate) fn a_obj<'s>(&mut self, l: Local<'_>) -> Result<Obj, Error<'s>> {
         match Realm::obj(self.a_at(l)) {
             Some(o) => Ok(o),
             None => Err(self.a_throw(ErrKind::Type, "not an object")),
@@ -649,8 +685,34 @@ impl Engine for Realm {
         self.a_push(*r)
     }
 
-    fn set_host_owner<'s>(&mut self, _obj: Local<'_>, _key: u32) -> Result<(), Error<'s>> {
-        Err(self.a_unsup("set_host_owner"))
+    fn set_host_owner<'s>(&mut self, obj: Local<'_>, key: u32) -> Result<(), Error<'s>> {
+        let o = self.a_obj(obj)?;
+        self.hs_owner(o, key);
+        Ok(())
+    }
+
+    fn host_key(&self, obj: Local<'_>) -> Option<u32> {
+        self.hs_key(self.a_at(obj))
+    }
+
+    fn new_host_indexed<'s>(&mut self, proto: Option<Local<'_>>, key: u32) -> Result<Local<'s>, Error<'s>> {
+        self.hs_new(proto, 1, key)
+    }
+
+    fn new_host_named<'s>(&mut self, proto: Option<Local<'_>>, key: u32, open: bool) -> Result<Local<'s>, Error<'s>> {
+        self.hs_new(proto, 2 + open as u64, key)
+    }
+
+    fn set_lazy<'s>(&mut self, obj: Local<'_>, chain: bool) -> Result<(), Error<'s>> {
+        let o = self.a_obj(obj)?;
+        self.hs_set_lazy(o, chain);
+        Ok(())
+    }
+
+    fn clear_lazy(&mut self, obj: Local<'_>) {
+        if let Some(o) = Realm::obj(self.a_at(obj)) {
+            self.hs_clear_lazy(o);
+        }
     }
 
     fn new_promise<'s>(&mut self) -> Result<Local<'s>, Error<'s>> {
@@ -916,18 +978,18 @@ impl Engine for Realm {
 
     fn has_own<'s>(&mut self, obj: Local<'_>, key: Local<'_>) -> Result<bool, Error<'s>> {
         let (o, k) = (self.a_obj(obj)?, self.a_key(key)?);
-        Ok(self.get_own(o, k).is_some())
+        self.get_own_h(o, k).map(|p| p.is_some()).map_err(|e| self.a_err(e))
     }
 
     fn own_keys<'s>(&mut self, obj: Local<'_>) -> Result<Vec<Local<'s>>, Error<'s>> {
         let o = self.a_obj(obj)?;
-        let keys = self.own_key_list(o, false);
+        let keys = self.own_key_list_h(o, false).map_err(|e| self.a_err(e))?;
         Ok(keys.into_iter().map(|k| self.a_push(k)).collect())
     }
 
     fn own_enumerable_data<'s>(&mut self, obj: Local<'_>, key: Local<'_>) -> Result<Option<Local<'s>>, Error<'s>> {
         let (o, k) = (self.a_obj(obj)?, self.a_key(key)?);
-        match self.get_own(o, k) {
+        match self.get_own_h(o, k).map_err(|e| self.a_err(e))? {
             Some(p) if p.attrs() & A_E != 0 => {
                 let r = self.get_prop(o.value(), k);
                 self.a_ret(r).map(Some)

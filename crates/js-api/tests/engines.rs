@@ -39,6 +39,10 @@ impl Harness for Old {
     fn collect(&mut self) {
         self.0.collect(&[]).unwrap();
     }
+
+    fn attach(&mut self, host: &std::rc::Rc<bare_js_api::suite::Fill<bare_js::value::Value>>) {
+        self.0.set_api_sources(host.clone());
+    }
 }
 
 struct New(Vm);
@@ -134,4 +138,11 @@ both!(
     between_jobs_runs_before_each_job_and_an_error_ends_the_drain,
     the_host_hears_thrown_callbacks_and_rejections,
     the_rejections_over_the_bound_are_counted,
+    owners_are_traced_while_alive_and_pruned_once,
+    a_host_indexed_object_reads_the_host,
+    a_host_named_object_reads_the_host,
+    a_lazy_member_is_made_at_the_first_miss,
+    a_live_list_asks_the_fill_step_and_reads_again,
+    a_named_write_is_accepted_refused_or_throws,
+    a_named_write_falls_through_to_an_ordinary_property,
 );

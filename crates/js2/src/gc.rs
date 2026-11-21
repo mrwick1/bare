@@ -10,6 +10,10 @@
 //!    it is pushed once, and a graph with cycles ends. A cell with no edge (a flat string) is marked and never pushed. A shared atom
 //!    (`FLAG_SHARED`) is in no heap of a realm and is skipped.
 //! 4. Ephemerons, in the same loop (below).
+//! 4b. Owners ([`Roots::owners`]): the marking has no test for them. After the mark loop `collect` asks the roots, in rounds, for the
+//!    edges of each owner that is marked and not traced yet, marks them, and drains the work list, until a round finds no owner. A
+//!    round looks at the owners that are not traced yet, so the cost is owners times rounds (the depth of a chain of owners), never
+//!    the heap, and the marking of an object costs nothing for it.
 //! 5. [`Shapes::finish_marks`]: free the shapes and tables that no marked object used, and mark the key atoms of the others. The
 //!    one cell that a shape names, its prototype, is marked in step 3: the first marked object of a shape gets it from
 //!    [`Shapes::note_live`], and the marker marks it and pushes it on the work list. So no shape is traced after the loop, and
@@ -93,12 +97,21 @@ pub struct Stats {
     pub cleared: u64,
     /// Entries that the runtime atom table dropped.
     pub atoms_dropped: usize,
+    /// Owners that the rounds of `Roots::owners` traced.
+    pub owners: u64,
 }
 
 /// The roots of a collection. The owner of the roots (a realm and the host) implements it.
 pub trait Roots {
     /// Call [`Marker::value`] for each root, where it is stored.
     fn walk(&mut self, m: &mut Marker);
+
+    /// Round `round` (0, 1, ...) of the owners: for each owner that `live` says is marked and that no earlier round traced, push the
+    /// values that the host keeps for it on `out`, and count it. The collector marks the values and calls again with the next round
+    /// until the count is 0. Round 0 starts the list of owners that wait. It runs no script and allocates nothing in the heap.
+    fn owners(&mut self, _live: &Live, _round: u32, _out: &mut Vec<Value>) -> usize {
+        0
+    }
 
     /// After the marking and before the sweep: clear the weak references that the host keeps (a `WeakRef` target, a table of DOM
     /// wrappers). [`Live::value`] says whether a cell survives.
@@ -177,7 +190,7 @@ impl Work {
 
 /// A hash of an address: the cells are 16-aligned, so drop 4 bits and multiply.
 #[derive(Default)]
-struct AddrHasher(u64);
+pub(crate) struct AddrHasher(u64);
 
 impl Hasher for AddrHasher {
     fn finish(&self) -> u64 {
@@ -396,6 +409,17 @@ pub fn collect(heap: &mut Heap, shapes: &mut Shapes, atoms: &mut Atoms, roots: &
     let mut m = Marker { heap, shapes, work: Work::default(), waiting: Waiting::default(), tables: Vec::new(), big: Vec::new(), big_peak: 0, marked: 0, waited: 0, released: 0, weak_peak: 0 };
     roots.walk(&mut m);
     m.drain();
+    let (mut traced, mut out) = (0, Vec::new());
+    for round in 0.. {
+        let n = roots.owners(&Live(m.heap), round, &mut out);
+        if n == 0 {
+            break;
+        }
+        traced += n as u64;
+        m.values(&out);
+        out.clear();
+        m.drain();
+    }
     m.shapes.finish_marks(m.heap);
     let mut cleared = 0;
     for &t in &m.tables {
@@ -417,7 +441,7 @@ pub fn collect(heap: &mut Heap, shapes: &mut Shapes, atoms: &mut Atoms, roots: &
     roots.weak(&Live(m.heap));
     let Marker { heap, work, big_peak, marked, waited, released, weak_peak, .. } = m;
     heap.finish_mark();
-    Stats { marked, live_bytes: heap.marked_bytes(), work_bytes: work.peak * CHUNK * std::mem::size_of::<NonNull<u8>>() + big_peak * std::mem::size_of::<(*mut Value, usize, usize)>(), weak_bytes: weak_peak, waited, released, cleared, atoms_dropped }
+    Stats { marked, live_bytes: heap.marked_bytes(), work_bytes: work.peak * CHUNK * std::mem::size_of::<NonNull<u8>>() + big_peak * std::mem::size_of::<(*mut Value, usize, usize)>(), weak_bytes: weak_peak, waited, released, cleared, atoms_dropped, owners: traced }
 }
 
 #[cfg(test)]

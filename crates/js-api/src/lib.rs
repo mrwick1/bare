@@ -305,6 +305,28 @@ pub enum Named<R> {
     Value(R),
 }
 
+/// A write to a host named property ([`Host::named_write`]).
+#[derive(Clone, Copy, Debug)]
+pub enum Write<'s> {
+    /// `object[name] = value`, with the object as the receiver.
+    Set(Local<'s>),
+    /// `[[DefineOwnProperty]]` of the name.
+    Define(Descriptor<'s>),
+    /// `delete object[name]`. The engine asks only for a name that [`Host::named_has`] answers `true` for.
+    Delete,
+}
+
+/// The fields of a property descriptor that a script gave. An explicit `undefined` in `get` or `set` is `Some` of an undefined local.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Descriptor<'s> {
+    pub value: Option<Local<'s>>,
+    pub get: Option<Local<'s>>,
+    pub set: Option<Local<'s>>,
+    pub writable: Option<bool>,
+    pub enumerable: Option<bool>,
+    pub configurable: Option<bool>,
+}
+
 /// What the engine asks of [`Host::lazy_member`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lazy<'a> {
@@ -663,6 +685,22 @@ pub trait Host<E: Engine> {
     /// The names of the object `key` now, in the host's order.
     fn named_keys(&self, _object: &E::Raw, _key: u32) -> Result<Vec<Vec<u16>>, Pending> {
         Ok(Vec::new())
+    }
+
+    /// The fill step. A read of the object `key` could not finish: the host answered [`Pending::Fill`] with `index`, or [`Item::Missing`] for
+    /// it. Make what is missing; the engine then reads again (at most 3 asks for one read, then `Abort::Limit`). `object` is the object that
+    /// was asked. Return `Ok` also when the index is gone: the read then finds no property. The host may run script and allocate here.
+    /// The default is `Abort::Unsupported`.
+    fn fill<'s>(&self, _s: &mut Scope<'s, E>, _object: Local<'s>, _key: u32, _index: u32) -> Result<(), Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("the host fill step")))
+    }
+    /// A script writes, defines or deletes the property `name` (UTF-16 code units; an index is its digits) of the named object `key`. The
+    /// engine asks for every non-symbol name when the object is the receiver, but not for a name that is an ordinary property of an open
+    /// object or its chain (the ordinary rules run), and for a delete only when `named_has` says the name is there. `Ok(true)` is success.
+    /// `Ok(false)` is a refusal: a strict write throws a `TypeError`, a sloppy one is silent, `Reflect` answers `false`. The host may run
+    /// script and charge the budget. The default refuses.
+    fn named_write<'s>(&self, _s: &mut Scope<'s, E>, _object: Local<'s>, _key: u32, _name: &[u16], _op: Write<'s>) -> Result<bool, Error<'s>> {
+        Ok(false)
     }
 
     /// A lazy member of `object`. The engine marks a prototype or a global object as lazy (`on*` accessors, interface tags) and asks
