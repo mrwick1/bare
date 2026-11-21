@@ -693,6 +693,16 @@ impl Vm {
                         pc = $next;
                         continue;
                     }
+                    // A prototype entry (`interp_rt.rs`): the record has shape 0 and the receiver shape in `to`.
+                    if c.to == shape
+                        && let Some(h) = fb.protos.get(c.loc as usize)
+                        && h.epoch == realm.shapes.proto_epoch()
+                    {
+                        // SAFETY: the epoch is current, so `holder` is alive and `loc` is its slot (`Obj::loc_now`).
+                        r!($dst) = unsafe { h.holder.read_loc(h.loc) };
+                        pc = $next;
+                        continue;
+                    }
                 }
                 gate!();
                 let n = name!($site);
@@ -715,15 +725,16 @@ impl Vm {
                 if let Some((o, shape)) = unsafe { Obj::from_value_shape(recv) } {
                     let c = &fb.caches[$site];
                     if c.shape == shape {
-                        // SAFETY: the entry was made by `Obj::loc` for an object of this shape id; an add entry has an inline slot.
+                        // SAFETY: the entry was made by `Obj::loc` for an object of this shape id; an add entry has an inline slot. A write
+                        // of a slot that the shape does not have yet is harmless: the add that follows a refusal writes it again.
+                        // `set_shape_id` refuses an object that a prototype entry depends on (`F_PROTO`).
                         unsafe {
                             o.write_loc(c.loc, val);
-                            if c.to != 0 {
-                                o.set_shape_id(c.to);
+                            if c.to == 0 || o.set_shape_id(c.to) {
+                                pc = $next;
+                                continue;
                             }
                         }
-                        pc = $next;
-                        continue;
                     }
                 }
                 gate!();
