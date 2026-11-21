@@ -41,6 +41,7 @@ built-ins/Map
 built-ins/Set
 built-ins/WeakMap
 built-ins/WeakSet
+built-ins/Reflect
 built-ins/String
 built-ins/Number
 built-ins/Math

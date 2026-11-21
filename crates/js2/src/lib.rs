@@ -64,6 +64,7 @@ pub mod promise;
 mod promise_statics;
 mod bi_symbol;
 mod bi_collections;
+mod bi_reflect;
 mod bi_string_more;
 #[rustfmt::skip]
 mod prelude_facts;
