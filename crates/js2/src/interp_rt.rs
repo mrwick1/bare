@@ -443,8 +443,9 @@ impl Realm {
             [empty.value(), Value::int(0), Value::bool(false)].map(|v| Obj::new_wrapper(&mut heap, &shapes, wrapper, v));
         let symbol_proto = Obj::new(&mut heap, &shapes, s_object).expect("memory");
         let wk = crate::bi_symbol::well_known(&mut heap);
-        // An arguments object has the own property `Symbol.iterator` (slot 0): `%Array.prototype.values%`, set when the object is made.
-        let s_args = shapes.root(Layout::Indexed, Some(object_proto.cell()), 1);
+        // Arguments objects have ordinary own properties for length and the iterator.
+        let s_args = shapes.root(Layout::Indexed, Some(object_proto.cell()), 2);
+        let s_args = shapes.add(s_args, k_length, crate::builtins::HIDDEN).expect("shape");
         let s_args = shapes.add(s_args, wk[crate::bi_symbol::ITERATOR], crate::builtins::HIDDEN).expect("shape");
         let pr = crate::promise::Promises::new(&mut heap, &mut shapes, s_object, k_then, k_pstate, k_presult);
         // The prototypes of `TypeError` and the others inherit from `Error.prototype`.
@@ -1067,7 +1068,7 @@ impl Realm {
                 }
                 Key::Name(k) => {
                     if k == self.k_length {
-                        if o.is_indexed() {
+                        if self.is_array(o) {
                             return Ok(Got::Val(Realm::num(o.len() as f64)));
                         }
                         return Ok(Self::got(self.lookup_length_g(o)));
@@ -1179,7 +1180,7 @@ impl Realm {
                 Ok(Put::Done)
             }
             Key::Name(k) => {
-                if k == self.k_length && self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed {
+                if k == self.k_length && self.is_array(o) {
                     if o.has_flag(F_LEN_RO) {
                         return Ok(Put::Fail);
                     }
@@ -1227,7 +1228,7 @@ impl Realm {
         let mut proto = self.proto_of(o);
         while let Some(p) = proto {
             if k == self.k_length {
-                if p.is_indexed() {
+                if self.is_array(p) {
                     return Ok(p.has_flag(F_LEN_RO).then_some(Put::Fail));
                 }
                 if self.has_string_own(p, Key::Name(k)) {
@@ -1616,7 +1617,7 @@ impl Realm {
                 },
                 Key::Name(k) => {
                     self.fn_prep(o, k);
-                    self.shapes.find(o.shape(&self.shapes), k).is_some() || (k == self.k_length && self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed)
+                    self.shapes.find(o.shape(&self.shapes), k).is_some() || (k == self.k_length && self.is_array(o))
                 }
             };
             if found || self.has_string_own(o, key) {
