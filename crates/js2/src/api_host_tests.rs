@@ -486,8 +486,11 @@ fn borrows_the_current_call_arguments() {
 fn a_counted_collection_skips_live_cells_and_free_slots() {
     let mut r = realm();
     r.raw_collect(&[]);
-    let keep = object(&mut r);
-    let dead = object(&mut r);
+    let (keep, dead) = enter(&mut r, |s| {
+        let keep = s.new_object().unwrap();
+        let dead = s.new_object().unwrap();
+        (s.engine().raw(keep), s.engine().raw(dead))
+    });
     let text = r.string("a small string");
     let long = r.string(&"x".repeat(16_384));
     let symbol = Str::new_symbol(&mut r.heap, None).unwrap().key_value();
