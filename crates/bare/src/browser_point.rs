@@ -18,6 +18,7 @@
 //!
 //! Gaps: no transforms (the engine has none), no border radius or `clip-path`; a page that has a gate in layout cannot answer.
 
+use crate::eng::Eng;
 use crate::browser::*;
 use crate::browser_dom::wrap_all_s;
 use crate::browser_scoped::*;
@@ -25,7 +26,7 @@ use bare_html::dom::{Document, NodeData, NodeId};
 use bare_js_api::{Args, Local};
 
 /// The context object, and the two numbers. The error text names the interface that the call is on.
-fn args<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, name: &str) -> Res<'s, (NodeId, f64, f64)> {
+fn args<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>, name: &str) -> Res<'s, (NodeId, f64, f64)> {
     let scope = d.nd_s(s, this)?;
     let iface = match d.data(scope) {
         NodeData::Document => "Document",
@@ -35,7 +36,7 @@ fn args<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, name: &st
     if a.len() < 2 {
         return Err(s.type_error(&format!("Failed to execute '{name}' on '{iface}': 2 arguments required, but only {} present.", a.len())));
     }
-    let (a0, a1) = (arg_s(s, a, 0), arg_s(s, a, 1));
+    let (a0, a1) = (arg_s::<E>(s, a, 0), arg_s::<E>(s, a, 1));
     let (x, y) = (s.to_number(a0)?, s.to_number(a1)?);
     if !x.is_finite() || !y.is_finite() {
         return Err(s.type_error(&format!("Failed to execute '{name}' on '{iface}': The provided double value is non-finite.")));
@@ -75,7 +76,7 @@ pub(crate) fn retarget(doc: &Document, mut n: NodeId, roots: &[NodeId]) -> NodeI
 }
 
 /// The elements under the point, the topmost first, retargeted against `scope`.
-fn under<'s>(d: &Dom, s: &mut Sc<'s, '_>, scope: NodeId, x: f64, y: f64) -> Res<'s, Vec<NodeId>> {
+fn under<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, scope: NodeId, x: f64, y: f64) -> Res<'s, Vec<NodeId>> {
     let _caller = crate::force::tag("elementFromPoint");
     let roots = roots_of(&d.doc.borrow(), scope);
     s.charge(roots.len() as u64)?;
@@ -85,7 +86,7 @@ fn under<'s>(d: &Dom, s: &mut Sc<'s, '_>, scope: NodeId, x: f64, y: f64) -> Res<
     // Blink keeps a point in 1/64 px and cuts the rest toward zero: -0.01 is 0.
     let q = |v: f64| ((v * 64.0).trunc() / 64.0) as f32;
     let (px, py) = (q(x), q(y));
-    let hits = old(s, |it| {
+    let hits = old::<E, _>(s, |it| {
         d.with_geo(it, |g, s| {
             let (w, h) = g.view();
             let (rx, ry) = (px.round(), py.round());
@@ -104,22 +105,22 @@ fn under<'s>(d: &Dom, s: &mut Sc<'s, '_>, scope: NodeId, x: f64, y: f64) -> Res<
     Ok(out)
 }
 
-pub(crate) fn element_from_point<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn element_from_point<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let (scope, x, y) = args(d, s, this, a, "elementFromPoint")?;
     let top = under(d, s, scope, x, y)?.first().copied();
     d.wrap_opt_s(s, top)
 }
 
-pub(crate) fn elements_from_point<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn elements_from_point<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let (scope, x, y) = args(d, s, this, a, "elementsFromPoint")?;
     let all = under(d, s, scope, x, y)?;
     wrap_all_s(d, s, &all)
 }
 
 /// `document.caretRangeFromPoint(x, y)`: a collapsed range at the text position under the point; `null` outside the window or over no text.
-pub(crate) fn caret_range_from_point<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn caret_range_from_point<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let (_, x, y) = args(d, s, this, a, "caretRangeFromPoint")?;
-    let at = old(s, |it| {
+    let at = old::<E, _>(s, |it| {
         d.with_geo(it, |g, s| {
             let (w, h) = g.view();
             let (px, py) = (x as f32, y as f32);
@@ -127,7 +128,7 @@ pub(crate) fn caret_range_from_point<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Loca
         })
     })?;
     match at {
-        Some((n, o)) => old_v(s, |it| d.caret_range(it, n, o)),
+        Some((n, o)) => old_v::<E>(s, |it| d.caret_range(it, n, o)),
         None => Ok(s.null()),
     }
 }

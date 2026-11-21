@@ -25,7 +25,7 @@ fn page() -> Page {
     let mut b = Browser::new(tree::parse(TREE), BrowserLimits::default(), EvalLimits { max_steps: 50_000_000, ..Default::default() }, HeapLimits::default()).expect("browser");
     b.set_viewport(400.0, 300.0).unwrap();
     b.run_script(TREE.split_once("<script>").unwrap().1.split_once("</script>").unwrap().0).unwrap();
-    let mut p = Page::new(Source::Browser(Box::new(b)), (400, 300));
+    let mut p = Page::new(Source::Browser(Box::new(b.into())), (400, 300));
     p.quiet = true;
     p
 }

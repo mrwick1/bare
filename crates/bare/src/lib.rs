@@ -3,7 +3,13 @@
 //! `browser` joins the DOM (`bare_html::dom::Document`) to the JavaScript evaluator (`bare_js`): `window`,
 //! `document`, nodes, events. Read its header for what works and what is gated.
 
+#![allow(type_alias_bounds)]
+
 pub mod browser;
+pub mod eng;
+pub mod browser_any;
+pub mod eng_new;
+pub mod eng_old;
 mod browser_dom;
 mod browser_dom_old;
 mod browser_fragment;
@@ -140,6 +146,8 @@ mod browser_shadow_tests;
 mod browser_fragment_tests;
 #[cfg(test)]
 mod browser_tests;
+#[cfg(test)]
+mod browser_new_tests;
 pub mod browser_platform;
 mod browser_platform_class;
 mod browser_platform_query;

@@ -105,6 +105,11 @@ pub trait LazyCompile {
     fn script(&mut self, _codes: &Codes, _src: &str, _mode: crate::compile::ScriptMode) -> Result<usize, String> {
         Err("this compiler cannot add a script".into())
     }
+    /// Add a stub for the top-level function `top` of the prelude, with the `name` that its `name` property gets, at the end of `codes`.
+    /// Gives its index. Nothing is parsed or compiled: the first call does that (`compile`).
+    fn prelude_fn(&mut self, _codes: &Codes, _top: &str, _name: &str) -> Result<usize, String> {
+        Err("this compiler has no prelude".into())
+    }
     /// Compile `src` as a module (`compile_module`) and add it at the end of `codes`. Gives the index of its code and its facts.
     fn module(&mut self, _codes: &Codes, _src: &str) -> Result<(usize, crate::compile::ModInfo), String> {
         Err("this compiler cannot add a module".into())
@@ -170,7 +175,8 @@ macro_rules! cold_ops {
         Op::DefAccessor | Op::DefAccessorElem | Op::DefMethod | Op::DefMethodElem | Op::SetHome | Op::MakeClass | Op::MakeDerived |
         Op::SetFnName | Op::DefaultCtor | Op::SetFields | Op::NewPrivateName | Op::GetPrivate | Op::SetPrivate | Op::HasPrivate |
         Op::DefPrivate | Op::DefPrivateMethod | Op::DefPrivateAccessor | Op::GetSuper | Op::GetSuperElem | Op::SetSuper |
-        Op::SetSuperElem | Op::CallSuper | Op::CallSuperSpread | Op::RetDerived | Op::GenInit | Op::Yield | Op::RetGen | Op::IterClose | Op::YieldStarStep | Op::AsyncInit | Op::Await | Op::RetAsync
+        Op::SetSuperElem | Op::CallSuper | Op::CallSuperSpread | Op::RetDerived | Op::GenInit | Op::Yield | Op::RetGen | Op::IterClose | Op::YieldStarStep | Op::AsyncInit | Op::Await | Op::RetAsync |
+        Op::AIterOpen | Op::AIterNext | Op::AIterUnpack | Op::AYsUnpack | Op::AIterClose | Op::AIterCloseT | Op::AIterCheck | Op::AYsCall
     };
 }
 
@@ -392,7 +398,7 @@ fn async_op(realm: &mut Realm, stack: &mut [Value], fbs: &mut [Feedback], prog: 
 #[cold]
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn gen_op(realm: &mut Realm, stack: &mut [Value], fbs: &mut [Feedback], prog: &Codes, ci: usize, fp: usize, pc: usize, op: Op, a: usize, bx: u32, next: usize) -> Result<GenExit, Value> {
+fn gen_op(realm: &mut Realm, stack: &mut [Value], fbs: &mut [Feedback], prog: &Codes, ci: usize, fp: usize, pc: usize, op: Op, a: usize, bx: u32, c: u32, next: usize) -> Result<GenExit, Value> {
     if realm.due() {
         realm.cur = (ci, fp, pc as u32);
         let (cur, st) = (realm.cur, &stack[..]);
@@ -402,7 +408,13 @@ fn gen_op(realm: &mut Realm, stack: &mut [Value], fbs: &mut [Feedback], prog: &C
     let code = &prog[ci];
     let v = match op {
         Op::GenInit => realm.gen_init(stack, fp, ci, code, bx, next)?,
+        // An async generator goes on in its own frame when another request waits; else its frame is saved and the caller gets a promise.
+        Op::Yield if code.gen_kind == crate::bytecode::GK_ASYNCGEN => match realm.agen_yield(stack, fp, ci, code, bx, next, stack[fp + a])? {
+            Some(v) => v,
+            None => return Ok(GenExit::Back(ci, fp, next)),
+        },
         Op::Yield => realm.gen_yield(stack, fp, ci, code, bx, next, stack[fp + a], iter),
+        _ if code.gen_kind == crate::bytecode::GK_ASYNCGEN => realm.agen_return(stack, fp, stack[fp + a], c != 0)?,
         _ => realm.gen_return(stack, fp, stack[fp + a], iter),
     };
     let (caller, dst) = (int_at(stack, fp, 5), int_at(stack, fp, 7));
@@ -486,7 +498,7 @@ impl Vm {
             stack.resize(need.max(256), Value::UNDEFINED);
         }
         let args_obj = if code.flags & CF_ARGS != 0 {
-            Obj::array(&mut realm.heap, &realm.shapes, realm.s_args, args).expect("memory").value()
+            realm.new_args(args)
         } else {
             Value::UNDEFINED
         };
@@ -931,7 +943,7 @@ impl Vm {
                 ensure!(new_fp + ncode.nregs as usize + 8);
                 let (np, argc, ab) = (ncode.nparams as usize, $argc as usize, $ab as usize);
                 let argsw = if ncode.flags & CF_ARGS != 0 {
-                    Obj::array(&mut realm.heap, &realm.shapes, realm.s_args, &stack[ab..ab + argc]).expect("memory").value()
+                    realm.new_args(&stack[ab..ab + argc])
                 } else {
                     undef
                 };
@@ -1012,7 +1024,8 @@ impl Vm {
         // Call the helper `$h` of the prelude with the arguments in `realm.tail_args`; the result goes to register `$dst`.
         macro_rules! enter_helper {
             ($h:expr, $dst:expr, $next:expr) => {{
-                let f = realm.helpers[$h];
+                let f = realm.pre[$h];
+                let f = if f.is_undefined() { tri!(realm.pre_make($h)) } else { f };
                 let Some((ni, cctx)) = realm.function(f) else { call_err!(f) };
                 let len = realm.tail_args.len();
                 let nf = fp + code.nregs as usize + REC;
@@ -1286,7 +1299,7 @@ impl Vm {
                         }
                         Op::GenInit | Op::Yield | Op::RetGen => {
                             std::hint::cold_path();
-                            match gen_op(realm, stack, fbs, prog, ci, fp, pc, opv, a!(), bx!() as u32, next) {
+                            match gen_op(realm, stack, fbs, prog, ci, fp, pc, opv, a!(), bx!() as u32, c!() as u32, next) {
                                 Ok(GenExit::Back(nci, nfp, npc)) => {
                                     (ci, fp, pc) = (nci, nfp, npc);
                                     reload!();
@@ -1315,6 +1328,71 @@ impl Vm {
                                 tri!(realm.iter_close(r!(a!()), r!(a!() + 1), c!() != 0));
                             }
                             pc = next;
+                        }
+                        Op::AIterOpen => {
+                            std::hint::cold_path();
+                            gate!();
+                            let (it, nx) = tri!(realm.aiter_open(r!(b!())));
+                            r!(a!()) = it;
+                            r!(a!() + 1) = nx;
+                            r!(a!() + 2) = Value::int(0);
+                            pc = next;
+                        }
+                        Op::AIterNext => {
+                            std::hint::cold_path();
+                            gate!();
+                            let base = b!();
+                            r!(a!()) = tri!(realm.aiter_call(r!(base), r!(base + 1), &[]));
+                            pc = next;
+                        }
+                        Op::AIterUnpack | Op::AYsUnpack => {
+                            std::hint::cold_path();
+                            gate!();
+                            let (v, done) = tri!(realm.aiter_unpack(r!($x as usize), opv == Op::AYsUnpack));
+                            r!(a!()) = v;
+                            jump!(done, nextx!(), sbx!())
+                        }
+                        Op::AIterClose | Op::AIterCloseT => {
+                            std::hint::cold_path();
+                            gate!();
+                            let base = $x as usize;
+                            match tri!(realm.aiter_close_call(r!(base), opv == Op::AIterCloseT)) {
+                                Some(v) => {
+                                    r!(a!()) = v;
+                                    pc = nextx!();
+                                }
+                                None => jump!(true, nextx!(), sbx!()),
+                            }
+                        }
+                        Op::AIterCheck => {
+                            std::hint::cold_path();
+                            if Realm::obj(r!(a!())).is_none() {
+                                if b!() == 1 {
+                                    err!(ErrKind::Type, "the iterator does not have a throw method")
+                                }
+                                err!(ErrKind::Type, "the result of return() is not an object")
+                            }
+                            pc = next;
+                        }
+                        Op::AYsCall => {
+                            std::hint::cold_path();
+                            gate!();
+                            let base = $x as usize;
+                            let mode = r!(base + 4).as_int().expect("a mode");
+                            match tri!(realm.ays_call(r!(base), r!(base + 1), mode, r!(base + 3))) {
+                                crate::asyncgen::YsCall::Call(v) => {
+                                    r!(a!()) = v;
+                                    pc = nextx!();
+                                }
+                                crate::asyncgen::YsCall::NoThrow => {
+                                    r!(base + 4) = Value::int(3);
+                                    jump!(true, nextx!(), sbx!())
+                                }
+                                crate::asyncgen::YsCall::NoReturn => {
+                                    r!(a!()) = r!(base + 3);
+                                    jump!(true, nextx!(), sbx!())
+                                }
+                            }
                         }
                         Op::YieldStarStep => {
                             std::hint::cold_path();
@@ -1753,6 +1831,18 @@ impl Vm {
                     }
                     Op::CheckInit => {
                         tdz!(r!(a!()), bx!());
+                        pc = next;
+                    }
+                    Op::GetPre => {
+                        // A slot of the prelude (`prelude_pre.rs`): the value, or the first read of the slot makes it.
+                        let v = realm.pre[bx!()];
+                        if v.is_undefined() {
+                            std::hint::cold_path();
+                            gate!();
+                            r!(a!()) = tri!(realm.pre_make(bx!()));
+                        } else {
+                            r!(a!()) = v;
+                        }
                         pc = next;
                     }
                     Op::GetCtx => {

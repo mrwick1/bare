@@ -51,8 +51,8 @@ use crate::codes::Codes;
 use crate::interp::LazyCompile;
 use crate::reenter::Machine;
 use crate::builtins::{Hint, Native};
-use crate::object::{Ctx, F_CLASS, F_ELEMS_FIXED, F_ELEMS_RO, F_HOST, F_LAZY, F_LEN_RO, F_NATIVE, F_NOEXT, F_PROTO, F_SLOWIDX, F_WRAP, Obj};
-use crate::shapes::{A_ACC, A_C, A_E, A_W, ShapeId, Shapes};
+use crate::object::{Ctx, F_CLASS, F_ELEMS_FIXED, F_ELEMS_RO, F_HOST, F_LAZY, F_LAZYM, F_LEN_RO, F_NATIVE, F_NOEXT, F_PROTO, F_SLOWIDX, K_WRAP, Obj};
+use crate::shapes::{A_ACC, A_C, A_E, A_W, Entry, ShapeId, Shapes};
 use crate::string::{Chars, Str};
 use crate::value::{Kind, Value};
 use std::rc::Rc;
@@ -297,6 +297,8 @@ pub struct Realm {
     pub s_func: ShapeId,
     /// The shape of an arguments object: an array with the prototype of `Object`.
     pub s_args: ShapeId,
+    /// `%Array.prototype.values%`, the value of `Symbol.iterator` of each arguments object; made at the first one (`Realm::new_args`).
+    pub(crate) args_iter: Value,
     pub k_constructor: Str,
     pub k_raw: Str,
     /// Counter of the private names (`NewPrivateName`).
@@ -342,8 +344,9 @@ pub struct Realm {
     pub(crate) genr: crate::generator::GenRealm,
     /// The index of the native that runs a bound function.
     pub(crate) bound_id: i32,
-    /// The helpers of `prelude.js` that natives call through the tail channel (`bi_object.rs`).
-    pub(crate) helpers: [Value; crate::bi_object::HELPERS],
+    /// The slots of the prelude (`prelude_pre.rs`): `undefined` until the first read. The first slots are the helpers that natives call
+    /// through the tail channel (`bi_object.rs`).
+    pub(crate) pre: [Value; crate::prelude_pre::NPRE],
     /// While a native runs: the function cell that was called, and `new.target` (`undefined` for a plain call).
     pub callee: Value,
     pub nt: Value,
@@ -405,7 +408,7 @@ impl Realm {
         let (k_then, k_pstate, k_presult) = (atom("then"), atom("\0pstate"), atom("\0presult"));
         let hidden = ["\0native", "\0n1", "\0n2", "\0n3"].map(&mut atom);
         let (k_value, k_done) = (atom("value"), atom("done"));
-        let gkeys = ["\0gstate", "\0gframe", "\0gsent", "\0gmode", "\0gpromise"].map(&mut atom);
+        let gkeys = ["\0gstate", "\0gframe", "\0gsent", "\0gmode", "\0gpromise", "\0gentry"].map(&mut atom);
         let root = shapes.root(Layout::Object, None, 4);
         let object_proto = Obj::new(&mut heap, &shapes, root).expect("memory");
         let proto = Some(object_proto.cell());
@@ -422,10 +425,12 @@ impl Realm {
         let f = shapes.add(f, k_home, 0).expect("shape");
         let f = shapes.add(f, k_fields, 0).expect("shape");
         let s_func = shapes.add(f, k_link, 0).expect("shape");
-        let s_args = shapes.root(Layout::Indexed, Some(object_proto.cell()), 0);
         let mk = |heap: &mut Heap| Obj::new(heap, &shapes, s_object).expect("memory");
         let (string_proto, number_proto, boolean_proto, symbol_proto) = (mk(&mut heap), mk(&mut heap), mk(&mut heap), mk(&mut heap));
         let wk = crate::bi_symbol::well_known(&mut heap);
+        // An arguments object has the own property `Symbol.iterator` (slot 0): `%Array.prototype.values%`, set when the object is made.
+        let s_args = shapes.root(Layout::Indexed, Some(object_proto.cell()), 1);
+        let s_args = shapes.add(s_args, wk[crate::bi_symbol::ITERATOR], crate::builtins::HIDDEN).expect("shape");
         let pr = crate::promise::Promises::new(&mut heap, &mut shapes, s_object, k_then, k_pstate, k_presult);
         // The prototypes of `TypeError` and the others inherit from `Error.prototype`.
         let eshape = shapes.root(Layout::Object, Some(error_proto.cell()), 4);
@@ -467,6 +472,7 @@ impl Realm {
             s_array,
             s_func,
             s_args,
+            args_iter: Value::UNDEFINED,
             k_constructor,
             k_raw,
             private_n: 0,
@@ -492,11 +498,11 @@ impl Realm {
             registry: None,
             error_protos,
             s_native,
-            genr: crate::generator::GenRealm { proto: gen_proto, s_iter, keys: gkeys, func_proto: None, async_proto: None, async_shape: None },
+            genr: crate::generator::GenRealm { proto: gen_proto, s_iter, keys: gkeys, func_proto: None, async_proto: None, async_shape: None, ag: Default::default() },
             natives: Vec::new(),
             fn_info: Vec::new(),
             bound_id: 0,
-            helpers: [Value::UNDEFINED; crate::bi_object::HELPERS],
+            pre: [Value::UNDEFINED; crate::prelude_pre::NPRE],
             callee: Value::UNDEFINED,
             nt: Value::UNDEFINED,
             tail: None,
@@ -1144,31 +1150,40 @@ impl Realm {
         }
     }
 
-    /// The setter that the prototype chain of `o` gives for `k`, when the first property that it finds there is an accessor.
-    pub(crate) fn proto_setter(&mut self, o: Obj, k: Str) -> Option<Put> {
-        let mut p = self.proto_of(o)?;
-        loop {
+    /// Find the descriptor for a store. Ask the host for a lazy member before treating the key as absent.
+    fn store_entry(&mut self, o: Obj, k: Str) -> R<Option<Entry>> {
+        let mut entry = self.shapes.find(o.shape(&self.shapes), k);
+        if entry.is_none() && o.has_flag(F_LAZYM) && self.hs_lazy(o, Some(Key::Name(k)))? {
+            entry = self.shapes.find(o.shape(&self.shapes), k);
+        }
+        Ok(entry)
+    }
+
+    /// A setter or a rejected write from the first descriptor on the prototype chain.
+    fn proto_setter(&mut self, o: Obj, k: Str) -> R<Option<Put>> {
+        let mut proto = self.proto_of(o);
+        while let Some(p) = proto {
             self.lazy_prep(p, k);
-            if let Some(e) = self.shapes.find(p.shape(&self.shapes), k) {
+            if let Some(e) = self.store_entry(p, k)? {
                 // An accessor: its setter. A data property that is not writable: nothing is written (`Put::Fail`).
-                return if e.attrs() & A_ACC != 0 {
+                return Ok(if e.attrs() & A_ACC != 0 {
                     Some(Self::setter(p.slot(&self.shapes, e.slot() + 1)))
                 } else if e.attrs() & A_W == 0 {
                     Some(Put::Fail)
                 } else {
                     None
-                };
+                });
             }
-            p = self.proto_of(p)?;
+            proto = self.proto_of(p);
         }
+        Ok(None)
     }
 
     /// Set an own named property: write it if it is there and writable, else call the setter that a prototype gives, else add it (when
     /// the object is extensible).
     fn set_named(&mut self, o: Obj, k: Str, v: Value) -> R<Put> {
         self.fn_prep(o, k);
-        let id = o.shape(&self.shapes);
-        match self.shapes.find(id, k) {
+        match self.store_entry(o, k)? {
             Some(e) if e.attrs() & A_ACC != 0 => Ok(Self::setter(o.slot(&self.shapes, e.slot() + 1))),
             Some(e) => {
                 if e.attrs() & A_W == 0 {
@@ -1178,7 +1193,7 @@ impl Realm {
                 Ok(Put::Done)
             }
             None => {
-                if let Some(p) = self.proto_setter(o, k) {
+                if let Some(p) = self.proto_setter(o, k)? {
                     return Ok(p);
                 }
                 if !o.extensible() {
@@ -1324,7 +1339,7 @@ impl Realm {
     /// prototype chain of the receiver.
     fn fill_proto(&mut self, fb: &mut Feedback, site: usize, o: Obj, name: Str) {
         // `prototype` of a function, `length` of an array and of a wrapper, and the indexes of a wrapper are not in the shape or the chain only.
-        if name == self.k_prototype || o.has_flag(F_WRAP) {
+        if name == self.k_prototype || o.is_kind(K_WRAP) {
             return;
         }
         // The shape after the read: the read may have given a function its own properties.
@@ -1446,19 +1461,20 @@ impl Realm {
                 Ok(Put::Done)
             }
             None => {
-                if name == self.k_length && self.shapes.get(id).layout == Layout::Indexed {
+                if o.has_flag(F_LAZYM) || (name == self.k_length && self.shapes.get(id).layout == Layout::Indexed) {
                     return self.set_prop_g(recv, Key::Name(name), v);
                 }
-                if let Some(p) = self.proto_setter(o, name) {
+                if let Some(p) = self.proto_setter(o, name)? {
                     return Ok(p);
                 }
                 if !o.extensible() {
                     return Ok(Put::Fail);
                 }
+                let cache_add = layout_ok && o.shape(&self.shapes) == id;
                 let slot = self.add_named(o, name, v)?;
                 let new = o.shape(&self.shapes);
                 // The global object gets no add entry: a hit would change its shape with no change of its tag (`Shapes::watch_tag`).
-                if layout_ok && self.shapes.cacheable(new) && o != self.global {
+                if cache_add && self.shapes.cacheable(new) && o != self.global {
                     let loc = o.loc(&self.shapes, slot);
                     // Only an inline slot: the hit then needs no allocation.
                     if loc >> 9 == 0 {
@@ -1681,7 +1697,7 @@ impl Realm {
         self.define_attrs(o, Key::Name(self.k_length), A_C, Value::int(len as i32)).expect("memory");
         self.define_attrs(o, Key::Name(self.k_name), A_C, name.value()).expect("memory");
         // A generator function has its own `prototype` (a plain function makes it at the first read of it).
-        if o.slot(&self.shapes, 0).as_int().is_some_and(|c| self.prog[c as usize].gen_kind == crate::bytecode::GK_GEN) {
+        if o.slot(&self.shapes, 0).as_int().is_some_and(|c| matches!(self.prog[c as usize].gen_kind, crate::bytecode::GK_GEN | crate::bytecode::GK_ASYNCGEN)) {
             self.make_prototype(o).expect("memory");
         }
     }

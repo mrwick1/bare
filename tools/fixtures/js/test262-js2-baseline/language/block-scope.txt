@@ -5,5 +5,5 @@ language/block-scope/return-from 2 0 0 2 0 0
 language/block-scope/shadowing 15 0 0 15 0 0
 language/block-scope/syntax/for-in 8 0 0 8 0 0
 language/block-scope/syntax/function-declarations 7 0 0 7 0 0
-language/block-scope/syntax/redeclaration 44 0 51 44 0 51
+language/block-scope/syntax/redeclaration 76 0 19 76 0 19
 language/block-scope/syntax/redeclaration-global 3 0 0 3 0 0

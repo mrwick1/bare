@@ -42,6 +42,7 @@
 //! Not done: `crossorigin`, `integrity`, `Link:` headers, `@import supports()`, a changed server text is not
 //! fetched again in the same document (the cache is by URL), a sheet that a script reads before the first pass ends `Ready` (it stops the page).
 
+use crate::eng::Eng;
 use super::{EvTarget, Fatal, Flow, Run, Stop, WS, fatal_of, label};
 use crate::browser_computed::{SheetPart, StyleAvailability, join_layer};
 use crate::resources::{self, Expect, LoadError};
@@ -134,7 +135,7 @@ fn why(e: &LoadError) -> String {
     }
 }
 
-impl Run<'_> {
+impl<E: Eng> Run<'_, E> {
     /// A pass if a task ran since the last one.
     pub(super) fn feed_if_ran(&mut self) -> Flow {
         if self.res.tasks != self.dom.scripts.sheets.borrow().fed_tasks && !self.still() {

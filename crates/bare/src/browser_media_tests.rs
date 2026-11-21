@@ -6,7 +6,8 @@
 use crate::browser::*;
 use crate::browser_topic_tests::topic_test;
 use bare_html::tree;
-use bare_js::eval::{Error, EvalLimits};
+use crate::eng_old::OldFault as Error;
+use bare_js::eval::{EvalLimits};
 use bare_js::heap::HeapLimits;
 use bare_js::value::Value;
 
@@ -23,7 +24,7 @@ fn js(b: &mut Browser, src: &str) -> String {
         Ok(v) => b.it.display(v),
         Err(Error::Throw(v)) if matches!(v, Value::Object(_)) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
         Err(Error::Limit(l)) => format!("limit:{l:?}"),
-        Err(Error::Unsupported(u)) => format!("unsupported:{}", u.what),
+        Err(Error::Unsupported(u)) => format!("unsupported:{}", u),
         Err(e) => format!("other:{e:?}"),
     }
 }

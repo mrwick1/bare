@@ -50,12 +50,14 @@ pub mod interp;
 pub mod api;
 #[allow(unsafe_code)]
 pub mod api_host;
+pub mod api_raw;
 pub mod interp_ops;
 #[cfg(feature = "op-count")]
 pub mod opcount;
 pub mod builtins;
 pub mod reenter;
 pub mod generator;
+mod asyncgen;
 mod iter;
 mod bi_array;
 mod bi_json;
@@ -73,9 +75,13 @@ mod bi_symbol;
 mod bi_collections;
 mod bi_reflect;
 mod bi_string_more;
+mod bi_string_regexp;
+mod bi_uri;
+mod bi_string_iter;
 mod lazy;
 #[rustfmt::skip]
 mod prelude_facts;
+mod prelude_pre;
 pub mod script;
 #[cfg(test)]
 #[path = "prelude_facts_tests.rs"]

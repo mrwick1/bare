@@ -5,7 +5,8 @@ use crate::browser::*;
 use crate::browser_computed::SheetPart;
 use bare_css::rule_cache;
 use bare_html::tree;
-use bare_js::eval::{Error, EvalLimits};
+use crate::eng_old::OldFault as Error;
+use bare_js::eval::{EvalLimits};
 use bare_js::heap::HeapLimits;
 
 const BLUE: &str = "rgb(0, 0, 255)";

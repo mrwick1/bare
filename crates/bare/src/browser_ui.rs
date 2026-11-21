@@ -48,6 +48,7 @@
 //! `Input::Type`, `Input::Key`) call this file through `browser_drive.rs`. A canceled `pointerdown` also skips the `mouseup`. A disabled
 //! control gets the pointer events and no mouse event. Pointer capture retargets the moves and the release to its holder.
 
+use crate::eng::{Eng, Ops};
 use crate::browser::*;
 use crate::browser_dom as nd;
 use crate::browser_scoped::*;
@@ -55,8 +56,6 @@ use crate::browser_selection::Dir;
 use bare_js_api::{Args, Local};
 use bare_css::cascade::Change;
 use bare_html::dom::{Document, Mark, NodeData, NodeId};
-use bare_js::eval::Interp;
-use bare_js::value::{ObjId, Value};
 
 /// Modifier keys held at the time of an event.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -163,7 +162,7 @@ pub(crate) struct UiState {
 // ------------------------------------------------------------------------------------------ getters
 
 /// A traced value of the UI event `this`, or `null` when `f` gives none.
-pub(crate) fn ui_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, f: impl for<'a> FnOnce(&'a EventState) -> Option<&'a bare_js_api::Traced<Value>>) -> Res<'s, Local<'s>> {
+pub(crate) fn ui_value<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, f: impl for<'a> FnOnce(&'a EventState<E>) -> Option<&'a bare_js_api::Traced<E::Raw>>) -> Res<'s, Local<'s>> {
     with_ui(d, s, this, |_, _| ())?;
     let o = d.event_of_s(s, this)?;
     let st = d.st.borrow();
@@ -173,7 +172,7 @@ pub(crate) fn ui_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, f: impl
     })
 }
 
-pub(crate) fn with_ui<'s, T>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, f: impl FnOnce(&EventState, &Ui) -> T) -> Res<'s, T> {
+pub(crate) fn with_ui<'s, T, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, f: impl FnOnce(&EventState<E>, &Ui) -> T) -> Res<'s, T> {
     let o = d.event_of_s(s, this)?;
     let st = d.st.borrow();
     let e = &st.events[&o];
@@ -188,7 +187,7 @@ pub(crate) fn with_ui<'s, T>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, f: im
 
 macro_rules! num {
     ($name:ident, |$u:ident| $e:expr) => {
-        pub(crate) fn $name<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+        pub(crate) fn $name<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
             let n = with_ui(d, s, this, |_, $u| $e as f64)?;
             Ok(s.number(n))
         }
@@ -196,7 +195,7 @@ macro_rules! num {
 }
 macro_rules! flag {
     ($name:ident, |$u:ident| $e:expr) => {
-        pub(crate) fn $name<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+        pub(crate) fn $name<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
             let b = with_ui(d, s, this, |_, $u| $e)?;
             Ok(s.boolean(b))
         }
@@ -233,33 +232,33 @@ impl PointerData {
     pub(crate) const MOUSE: PointerData = PointerData { id: 1, width: 1.0, height: 1.0, pressure: 0.0, tangential: 0.0, tilt: (0, 0), twist: 0, kind: String::new(), primary: true };
 }
 
-pub(crate) fn related<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn related<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     ui_value(d, s, this, |e| Some(&e.related))
 }
 
-pub(crate) fn pointer_type<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn pointer_type<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let k = with_ui(d, s, this, |_, u| u.pointer.as_ref().map_or("mouse".to_string(), |p| p.kind.clone()))?;
     d.js_str_s(s, &k)
 }
 
-fn text_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, f: impl FnOnce(&Ui) -> String) -> Res<'s, Local<'s>> {
+fn text_of<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, f: impl FnOnce(&Ui) -> String) -> Res<'s, Local<'s>> {
     let t = with_ui(d, s, this, |_, u| f(u))?;
     d.js_str_s(s, &t)
 }
 
-pub(crate) fn key<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn key<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     text_of(d, s, this, |u| u.key.clone())
 }
 
-pub(crate) fn code<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn code<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     text_of(d, s, this, |u| u.code.clone())
 }
 
-pub(crate) fn input_type<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn input_type<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     text_of(d, s, this, |u| u.input_type.clone())
 }
 
-pub(crate) fn data<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn data<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     match with_ui(d, s, this, |_, u| u.data.clone())? {
         Some(t) => d.js_str_s(s, &t),
         None => Ok(s.null()),
@@ -337,21 +336,21 @@ fn text_kind(kind: &str) -> bool {
     matches!(kind, "text" | "search" | "tel" | "url" | "email" | "password" | "number")
 }
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     fn bump(&self) {
         self.st.borrow_mut().ui.epoch += 1;
     }
 
     /// A `Ui` event at `target`. Gives whether it was not canceled.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn fire_ui(&self, it: &mut Interp<'_>, target: NodeId, ty: &str, proto: ObjId, bubbles: bool, cancelable: bool, mut ui: Ui, related: Option<NodeId>) -> R<bool> {
+    pub(crate) fn fire_ui(&self, it: &mut E::Vm, target: NodeId, ty: &str, proto: E::Obj, bubbles: bool, cancelable: bool, mut ui: Ui, related: Option<NodeId>) -> R<E, bool> {
         self.ensure_ui_ext(it)?;
         let sc = self.page_offset();
         (ui.screen, ui.page, ui.view) = ((ui.x, ui.y), (ui.x + sc.0, ui.y + sc.1), true);
         let ev = self.new_event_proto(it, ty, bubbles, cancelable, true, proto)?;
         let rel = match related {
             Some(r) => self.wrap(it, r)?,
-            None => Value::Null,
+            None => E::null(),
         };
         {
             let mut st = self.st.borrow_mut();
@@ -365,7 +364,7 @@ impl Dom {
 
     /// A pointer or mouse event. `ty` starts with `pointer` for a `PointerEvent`; `click` is one too (as in Chrome).
     #[allow(clippy::too_many_arguments)]
-    fn mouse_ev(&self, it: &mut Interp<'_>, target: NodeId, ty: &str, p: &Pointer, button: i16, buttons: u16, detail: u32, related: Option<NodeId>) -> R<bool> {
+    fn mouse_ev(&self, it: &mut E::Vm, target: NodeId, ty: &str, p: &Pointer, button: i16, buttons: u16, detail: u32, related: Option<NodeId>) -> R<E, bool> {
         let pointer = ty.starts_with("pointer") || matches!(ty, "click" | "auxclick");
         let enter_leave = ty.ends_with("enter") || ty.ends_with("leave");
         let proto = if pointer { self.p().pointer } else { self.p().mouse };
@@ -394,7 +393,7 @@ impl Dom {
         std::iter::successors(n, |&c| doc.parent(c)).collect()
     }
 
-    fn body_or_root(&self, it: &mut Interp<'_>) -> R<NodeId> {
+    fn body_or_root(&self, it: &mut E::Vm) -> R<E, NodeId> {
         let root = self.doc.borrow().root();
         Ok(self.query(it, root, "body", false)?.into_iter().next().unwrap_or(root))
     }
@@ -412,7 +411,7 @@ impl Dom {
 
     // ------------------------------------------------------------------ pointer
 
-    pub(crate) fn ui_move(&self, it: &mut Interp<'_>, to: Option<NodeId>, p: &Pointer) -> R<()> {
+    pub(crate) fn ui_move(&self, it: &mut E::Vm, to: Option<NodeId>, p: &Pointer) -> R<E, ()> {
         let (captured, old) = {
             let mut st = self.st.borrow_mut();
             let last = st.ui.last_pos.replace((p.x, p.y));
@@ -436,7 +435,7 @@ impl Dom {
     }
 
     /// The boundary events of a pointer that went from `old` to `to`, for the pointer and then the mouse: out, leave, over, enter.
-    fn pointer_boundary(&self, it: &mut Interp<'_>, old: Option<NodeId>, to: Option<NodeId>, p: &Pointer) -> R<()> {
+    fn pointer_boundary(&self, it: &mut E::Vm, old: Option<NodeId>, to: Option<NodeId>, p: &Pointer) -> R<E, ()> {
         let (oc, nc) = (self.chain(old), self.chain(to));
         for (out, over, leave, enter, move_button) in [("pointerout", "pointerover", "pointerleave", "pointerenter", -1), ("mouseout", "mouseover", "mouseleave", "mouseenter", 0)] {
             if let Some(o) = old {
@@ -460,7 +459,7 @@ impl Dom {
     }
 
     /// The pointer did not move, but the page under it changed: Chrome sends the boundary events (no move) to what is under it now.
-    pub(crate) fn ui_settle(&self, it: &mut Interp<'_>, to: Option<NodeId>, p: &Pointer) -> R<()> {
+    pub(crate) fn ui_settle(&self, it: &mut E::Vm, to: Option<NodeId>, p: &Pointer) -> R<E, ()> {
         let old = self.st.borrow().ui.hover;
         if old == to || self.st.borrow().ui.capture.is_some() {
             return Ok(());
@@ -479,7 +478,7 @@ impl Dom {
 
     /// The pointer capture steps (Pointer Events 3, "process pending pointer capture"): `lostpointercapture` at the old holder and
     /// `gotpointercapture` at the new one, before the next pointer event. They carry the fields of that event (`button`).
-    fn capture_events(&self, it: &mut Interp<'_>, p: &Pointer, button: i16) -> R<()> {
+    fn capture_events(&self, it: &mut E::Vm, p: &Pointer, button: i16) -> R<E, ()> {
         let (want, have) = {
             let st = self.st.borrow();
             (st.ui.capture, st.ui.captured)
@@ -497,7 +496,7 @@ impl Dom {
         Ok(())
     }
 
-    pub(crate) fn ui_leave(&self, it: &mut Interp<'_>, p: &Pointer) -> R<()> {
+    pub(crate) fn ui_leave(&self, it: &mut E::Vm, p: &Pointer) -> R<E, ()> {
         let old = self.st.borrow().ui.hover;
         self.hover_to(None);
         if let Some(o) = old {
@@ -513,7 +512,7 @@ impl Dom {
         Ok(())
     }
 
-    pub(crate) fn ui_button(&self, it: &mut Interp<'_>, target: Option<NodeId>, p: &Pointer, button: u8, pressed: bool, caret: Option<u32>) -> R<()> {
+    pub(crate) fn ui_button(&self, it: &mut E::Vm, target: Option<NodeId>, p: &Pointer, button: u8, pressed: bool, caret: Option<u32>) -> R<E, ()> {
         self.st.borrow_mut().ui.held = p.buttons;
         if !pressed && button == 0 {
             self.st.borrow_mut().ui.sel_drag = None;
@@ -590,7 +589,7 @@ impl Dom {
     }
 
     /// The focus change of a press: the nearest focusable ancestor gets focus, or the page loses it.
-    fn focus_by_press(&self, it: &mut Interp<'_>, t: NodeId, caret: Option<u32>, count: u32, at: (f64, f64)) -> R<()> {
+    fn focus_by_press(&self, it: &mut E::Vm, t: NodeId, caret: Option<u32>, count: u32, at: (f64, f64)) -> R<E, ()> {
         let mut to = None;
         for n in self.chain(Some(t)) {
             if self.focusable(it, n)? {
@@ -641,7 +640,7 @@ impl Dom {
     }
 
     /// The pointer moved with the button down after a press in a text field: the selection runs from the press to `caret`.
-    pub(crate) fn drag_select(&self, it: &mut Interp<'_>, caret: u32) -> R<()> {
+    pub(crate) fn drag_select(&self, it: &mut E::Vm, caret: u32) -> R<E, ()> {
         let Some((f, anchor)) = self.st.borrow().ui.sel_drag else { return Ok(()) };
         if self.current_focus(it)? != Some(f) {
             self.st.borrow_mut().ui.sel_drag = None;
@@ -652,7 +651,7 @@ impl Dom {
     }
 
     /// A field that the user edited gets its `change` event when focus leaves it (`to` is the new focus).
-    fn commit_if_edited(&self, it: &mut Interp<'_>, to: Option<NodeId>) -> R<()> {
+    fn commit_if_edited(&self, it: &mut E::Vm, to: Option<NodeId>) -> R<E, ()> {
         let Some(f) = self.current_focus(it)? else { return Ok(()) };
         if Some(f) != to {
             self.fire_change(it, f)?;
@@ -660,7 +659,7 @@ impl Dom {
         Ok(())
     }
 
-    fn fire_change(&self, it: &mut Interp<'_>, f: NodeId) -> R<()> {
+    fn fire_change(&self, it: &mut E::Vm, f: NodeId) -> R<E, ()> {
         let before = self.st.borrow_mut().inputs.get_mut(&f).and_then(|i| i.edited.take());
         if before.is_some_and(|b| self.input_value_of(f).as_deref() != Some(b.as_str())) {
             self.fire_plain(it, f, "change")?;
@@ -669,7 +668,7 @@ impl Dom {
     }
 
     /// A trusted plain `Event` that bubbles (`input` of a checkbox, `change`).
-    pub(crate) fn fire_plain(&self, it: &mut Interp<'_>, n: NodeId, ty: &str) -> R<bool> {
+    pub(crate) fn fire_plain(&self, it: &mut E::Vm, n: NodeId, ty: &str) -> R<E, bool> {
         let ev = self.new_event(it, ty, true, false, true, None)?;
         self.st.borrow_mut().events.get_mut(&ev).expect("just made").trusted = true;
         self.dispatch(it, Target::Node(n), ev)
@@ -679,7 +678,7 @@ impl Dom {
 
     /// Before the click event: a checkbox or a radio takes its new state (HTML "legacy-pre-activation behavior").
     /// Gives what undoes it.
-    pub(crate) fn pre_activate(&self, it: &mut Interp<'_>, t: NodeId) -> R<Option<Vec<(NodeId, bool)>>> {
+    pub(crate) fn pre_activate(&self, it: &mut E::Vm, t: NodeId) -> R<E, Option<Vec<(NodeId, bool)>>> {
         let kind = self.input_kind_of(t);
         if !matches!(kind, Some("checkbox" | "radio")) {
             return Ok(None);
@@ -699,7 +698,7 @@ impl Dom {
     }
 
     /// The other radios of the group of `t`: same `name`, same form owner, same tree.
-    pub(crate) fn radio_group(&self, it: &mut Interp<'_>, t: NodeId) -> R<Vec<NodeId>> {
+    pub(crate) fn radio_group(&self, it: &mut E::Vm, t: NodeId) -> R<E, Vec<NodeId>> {
         let (name, root) = {
             let doc = self.doc.borrow();
             let Some(name) = attr(&doc, t, "name").filter(|s| !s.is_empty()).map(str::to_string) else { return Ok(Vec::new()) };
@@ -728,7 +727,7 @@ impl Dom {
     }
 
     /// After the click event, for a click that the window made: the activation behavior of `t`.
-    pub(crate) fn ui_activate(&self, it: &mut Interp<'_>, t: NodeId, canceled: bool, undo: Option<Vec<(NodeId, bool)>>, ui: &Ui) -> R<()> {
+    pub(crate) fn ui_activate(&self, it: &mut E::Vm, t: NodeId, canceled: bool, undo: Option<Vec<(NodeId, bool)>>, ui: &Ui) -> R<E, ()> {
         if let Some(undo) = undo {
             if canceled {
                 for (n, c) in undo {
@@ -759,7 +758,7 @@ impl Dom {
 
     /// The activation behavior of a link `a` with `href`: save the target (`download`), hand a new tab to the driver, or navigate.
     /// False when `t` is not such a link.
-    pub(crate) fn follow_link(&self, it: &mut Interp<'_>, t: NodeId) -> R<bool> {
+    pub(crate) fn follow_link(&self, it: &mut E::Vm, t: NodeId) -> R<E, bool> {
         let (href, blank) = {
             let doc = self.doc.borrow();
             let a = is_tag(&doc, t, "a");
@@ -783,7 +782,7 @@ impl Dom {
 
     // ------------------------------------------------------------------ keyboard
 
-    fn key_ev(&self, it: &mut Interp<'_>, target: NodeId, ty: &str, k: &KeyInput) -> R<bool> {
+    fn key_ev(&self, it: &mut E::Vm, target: NodeId, ty: &str, k: &KeyInput) -> R<E, bool> {
         // keyCode: the legacy code of the key. A `keypress` carries the character instead (`charCode`, and `keyCode` the same).
         let char_code = if ty == "keypress" { k.text.as_deref().and_then(|t| t.chars().next()).map_or(13, |c| c as u32) } else { 0 };
         let key_code = if ty == "keypress" { char_code } else { key_code_of(&k.key, &k.code) };
@@ -798,7 +797,7 @@ impl Dom {
     }
 
     /// `beforeinput` (cancelable) or `input`.
-    fn input_ev(&self, it: &mut Interp<'_>, target: NodeId, ty: &str, kind: &str, data: Option<&str>) -> R<bool> {
+    fn input_ev(&self, it: &mut E::Vm, target: NodeId, ty: &str, kind: &str, data: Option<&str>) -> R<E, bool> {
         let ui = Ui { data: data.map(str::to_string), input_type: kind.to_string(), ..Ui::default() };
         self.fire_ui(it, target, ty, self.p().inputev, true, ty == "beforeinput", ui, None)
     }
@@ -807,14 +806,14 @@ impl Dom {
         Ui::default()
     }
 
-    fn focus_target(&self, it: &mut Interp<'_>) -> R<NodeId> {
+    fn focus_target(&self, it: &mut E::Vm) -> R<E, NodeId> {
         match self.current_focus(it)? {
             Some(f) => Ok(f),
             None => self.body_or_root(it),
         }
     }
 
-    pub(crate) fn ui_key(&self, it: &mut Interp<'_>, k: &KeyInput, down: bool) -> R<()> {
+    pub(crate) fn ui_key(&self, it: &mut E::Vm, k: &KeyInput, down: bool) -> R<E, ()> {
         let t = self.focus_target(it)?;
         if down {
             self.st.borrow_mut().ui.by_pointer = false;
@@ -835,7 +834,7 @@ impl Dom {
         Ok(())
     }
 
-    fn key_default(&self, it: &mut Interp<'_>, k: &KeyInput) -> R<()> {
+    fn key_default(&self, it: &mut E::Vm, k: &KeyInput) -> R<E, ()> {
         let focus = self.current_focus(it)?;
         let t = self.focus_target(it)?;
         let edit = focus.filter(|&f| self.editable(f));
@@ -928,7 +927,7 @@ impl Dom {
     /// A key at the focused element `f` inside an editing host (`contenteditable`): text, Enter, Backspace, Delete and Ctrl+A edit the
     /// tree at the selection (`browser_editing.rs`). `beforeinput` fires at the host first and can cancel; the edit fires `input`.
     /// False when the key is not an editing key, so that the other rules run.
-    fn host_key(&self, it: &mut Interp<'_>, f: NodeId, k: &KeyInput) -> R<bool> {
+    fn host_key(&self, it: &mut E::Vm, f: NodeId, k: &KeyInput) -> R<E, bool> {
         let m = k.mods;
         let host = self.editing_host(f).expect("checked");
         // Control+B, +I and +U (Meta on macOS) run the format command as the default action of the key.
@@ -996,7 +995,7 @@ impl Dom {
     /// Insert `text` at the focused element as one edit, as Chrome's `Input.insertText` does (the call of Playwright `fill`): no key events,
     /// `beforeinput` (cancelable), the change, then `input`, all with `inputType` `insertText` and the whole text as `data`. A line feed is text,
     /// not Enter. A field cuts the text to its `maxlength`. Nothing happens when no editable element has the focus.
-    fn insert_at_focus(&self, it: &mut Interp<'_>, text: &str) -> R<()> {
+    fn insert_at_focus(&self, it: &mut E::Vm, text: &str) -> R<E, ()> {
         let Some(f) = self.current_focus(it)? else { return Ok(()) };
         if let Some(host) = self.editing_host(f) {
             self.caret_into_host(it, f)?;
@@ -1010,7 +1009,7 @@ impl Dom {
     }
 
     /// Change the value of field `n` as `kind` says, with the events of Chrome.
-    fn edit(&self, it: &mut Interp<'_>, n: NodeId, kind: &str, text: Option<&str>) -> R<()> {
+    fn edit(&self, it: &mut E::Vm, n: NodeId, kind: &str, text: Option<&str>) -> R<E, ()> {
         let Some(sel) = self.edit_sel(n)? else { return Ok(()) };
         let value = self.input_value_of(n).unwrap_or_default();
         let (from, to) = match kind {
@@ -1059,7 +1058,7 @@ impl Dom {
         Ok(())
     }
 
-    fn move_caret(&self, it: &mut Interp<'_>, n: NodeId, key: &str, extend: bool, word: bool) -> R<()> {
+    fn move_caret(&self, it: &mut E::Vm, n: NodeId, key: &str, extend: bool, word: bool) -> R<E, ()> {
         let Some((sel, len)) = self.effective(None, n)? else { return Ok(()) };
         let value = self.input_value_of(n).unwrap_or_default();
         // The selection has an anchor and a focus end: Shift moves the focus end.
@@ -1085,7 +1084,7 @@ impl Dom {
     }
 
     /// Implicit submission: a click on the default button of the form of field `n`.
-    fn implicit_submit(&self, it: &mut Interp<'_>, n: NodeId) -> R<()> {
+    fn implicit_submit(&self, it: &mut E::Vm, n: NodeId) -> R<E, ()> {
         let Some(form) = self.form_owner(it, n)? else { return Ok(()) };
         let (button, fields) = {
             let doc = self.doc.borrow();
@@ -1109,7 +1108,7 @@ impl Dom {
     }
 
     /// Tab order: positive `tabindex` ascending, then the rest in tree order. Negative `tabindex` is skipped.
-    fn tab_order(&self, it: &mut Interp<'_>) -> R<Vec<NodeId>> {
+    fn tab_order(&self, it: &mut E::Vm) -> R<E, Vec<NodeId>> {
         let (mut positive, mut zero) = (Vec::<(i64, NodeId)>::new(), Vec::new());
         let root = self.doc.borrow().root();
         let nodes: Vec<NodeId> = {
@@ -1138,7 +1137,7 @@ impl Dom {
         Ok(positive.into_iter().map(|p| p.1).chain(zero).collect())
     }
 
-    fn tab(&self, it: &mut Interp<'_>, from: Option<NodeId>, back: bool) -> R<()> {
+    fn tab(&self, it: &mut E::Vm, from: Option<NodeId>, back: bool) -> R<E, ()> {
         let order = self.tab_order(it)?;
         if order.is_empty() {
             return Ok(());
@@ -1199,7 +1198,7 @@ pub(crate) fn chains(doc: &Document) -> [Vec<NodeId>; 3] {
     [u.hover, u.active, u.focus].map(|n| std::iter::successors(n, |&p| doc.parent(p).or_else(|| doc.shadow_host(p))).filter(|&p| matches!(doc.data(p), NodeData::Element { .. })).collect())
 }
 
-impl Browser {
+impl<E: Eng> Browser<E> {
     /// See `Dom::listened`.
     pub fn listened(&self, types: &[&str]) -> std::collections::HashSet<NodeId> {
         self.dom.listened(types)
@@ -1207,9 +1206,9 @@ impl Browser {
 
     /// Cascade and lay out the page now, with the caps of `getComputedStyle` and `offsetWidth` (a linked style sheet that
     /// was not supplied is `Unsupported`, as there).
-    pub fn render(&mut self) -> R<Frame> {
+    pub fn render(&mut self) -> R<E, Frame> {
         let dom = self.dom.clone();
-        self.it.host_scope(|it| {
+        self.it.host_scope_o(|it| {
             let styles = dom.cascade_now(it)?;
             let (layout, areas, bars) = dom.layout_areas(it, &styles, None)?;
             // A page that got shorter (or a box that is not a container now) puts its offsets back in range.
@@ -1219,9 +1218,9 @@ impl Browser {
     }
 
     /// The cascade of a window frame, with no layout. It keeps what `refresh` needs, and the document logs its changes from now on.
-    pub fn restyle(&mut self) -> R<std::rc::Rc<bare_css::cascade::Styles>> {
+    pub fn restyle(&mut self) -> R<E, std::rc::Rc<bare_css::cascade::Styles>> {
         let dom = self.dom.clone();
-        let styles = self.it.host_scope(|it| dom.cascade_frame(it))?;
+        let styles = self.it.host_scope_o(|it| dom.cascade_frame(it))?;
         let mut doc = dom.doc.borrow_mut();
         doc.track_damage(bare_html::dom::DAMAGE_FRAME);
         Ok(styles)
@@ -1229,7 +1228,7 @@ impl Browser {
 
     /// The window frame with `styles`, the cascade of the page now (`restyle`). Its layout keeps what the next `refresh` can use again.
     /// The new layout writes in the memory of `old`, the frame that this one replaces.
-    pub fn render_with(&mut self, styles: std::rc::Rc<bare_css::cascade::Styles>, old: Option<Frame>) -> R<Frame> {
+    pub fn render_with(&mut self, styles: std::rc::Rc<bare_css::cascade::Styles>, old: Option<Frame>) -> R<E, Frame> {
         let dom = self.dom.clone();
         let since = Some((dom.rule_builds(), chains(&dom.doc.borrow())));
         let kept = old.and_then(|f| {
@@ -1237,7 +1236,7 @@ impl Browser {
             k.recycle(f.layout.fragments);
             Some(k)
         });
-        self.it.host_scope(|it| {
+        self.it.host_scope_o(|it| {
             let (layout, areas, bars) = dom.layout_areas(it, &styles, Some((kept, None)))?;
             dom.clamp_scroll(&styles, &layout, &areas, bars);
             Ok(Frame { styles, layout, areas, bars, since })
@@ -1255,11 +1254,11 @@ impl Browser {
     /// that layout does not read: the layout stays) or `Layout`. Only the elements that the changes can reach are styled again
     /// (`Dom::restyle_frame`), and layout lays out again only the changed boxes and their ancestors (`bare_layout::layout_kept`).
     /// `None` when it cannot: `f` is as it was, and the caller makes a new frame. On an error `f` is not usable.
-    pub fn refresh(&mut self, f: &mut Frame) -> R<Option<Change>> {
+    pub fn refresh(&mut self, f: &mut Frame) -> R<E, Option<Change>> {
         let Some((builds, old)) = f.since.take() else { return Ok(None) };
         let dom = self.dom.clone();
         let Some(marks) = dom.doc.borrow_mut().take_damage(bare_html::dom::DAMAGE_FRAME) else { return Ok(None) };
-        self.it.host_scope(|it| {
+        self.it.host_scope_o(|it| {
             let new = chains(&dom.doc.borrow());
             let Some(changed) = dom.restyle_frame(it, &mut f.styles, builds, &marks, &old, &new)? else { return Ok(None) };
             f.since = Some((builds, new));
@@ -1346,7 +1345,7 @@ impl Browser {
         [doc.revision() - doc.ui_revision(), doc.text_revision(), vp, dom.computed.sheet_gen.get(), used(USES_HOVER, 0), used(USES_ACTIVE, 1), used(USES_FOCUS, 2), form]
     }
 
-    pub(crate) fn ui_call(&mut self, always: bool, f: impl FnOnce(&Dom, &mut Interp<'_>) -> R<()>) -> R<UiOutcome> {
+    pub(crate) fn ui_call(&mut self, always: bool, f: impl FnOnce(&Dom<E>, &mut E::Vm) -> R<E, ()>) -> R<E, UiOutcome> {
         let before = self.dom.st.borrow().ui.epoch;
         self.dom.st.borrow_mut().ui.active = true;
         let r = self.driven(f);
@@ -1365,33 +1364,33 @@ impl Browser {
     }
 
     /// The pointer moved over `target` (the element under it, from hit testing). `None`: no element.
-    pub fn ui_pointer_move(&mut self, target: Option<NodeId>, p: Pointer) -> R<UiOutcome> {
+    pub fn ui_pointer_move(&mut self, target: Option<NodeId>, p: Pointer) -> R<E, UiOutcome> {
         self.ui_call(false, |d, it| d.ui_move(it, target, &p))
     }
 
     /// Send the `scroll` events that wait (one for each target that moved).
-    pub fn ui_scroll_events(&mut self) -> R<UiOutcome> {
+    pub fn ui_scroll_events(&mut self) -> R<E, UiOutcome> {
         self.ui_call(false, |d, it| d.flush_scroll(it))
     }
 
     /// The pointer did not move, but the page under it changed: `to` is under it now.
-    pub fn ui_pointer_settle(&mut self, to: Option<NodeId>, p: Pointer) -> R<UiOutcome> {
+    pub fn ui_pointer_settle(&mut self, to: Option<NodeId>, p: Pointer) -> R<E, UiOutcome> {
         self.ui_call(false, |d, it| d.ui_settle(it, to, &p))
     }
 
     /// The pointer left the window.
-    pub fn ui_pointer_leave(&mut self, p: Pointer) -> R<UiOutcome> {
+    pub fn ui_pointer_leave(&mut self, p: Pointer) -> R<E, UiOutcome> {
         self.ui_call(false, |d, it| d.ui_leave(it, &p))
     }
 
     /// A button went down or up over `target`. `p.buttons` is the mask after the event. `caret` is the UTF-16 offset
     /// for a press in a text field (the caller measures the text).
-    pub fn ui_pointer_button(&mut self, target: Option<NodeId>, p: Pointer, button: u8, pressed: bool, caret: Option<u32>) -> R<UiOutcome> {
+    pub fn ui_pointer_button(&mut self, target: Option<NodeId>, p: Pointer, button: u8, pressed: bool, caret: Option<u32>) -> R<E, UiOutcome> {
         self.ui_call(true, |d, it| d.ui_button(it, target, &p, button, pressed, caret))
     }
 
     /// A key went down or up.
-    pub fn ui_key(&mut self, k: KeyInput, down: bool) -> R<UiOutcome> {
+    pub fn ui_key(&mut self, k: KeyInput, down: bool) -> R<E, UiOutcome> {
         // Only a key down and the Space key up have a default action that may change the page. A listener that runs says so itself.
         self.dom.scroll_key_set(true);
         let always = down || k.code == "Space";
@@ -1399,7 +1398,7 @@ impl Browser {
     }
 
     /// Insert `text` at the focused element as one edit (Chrome's `Input.insertText`). See `Dom::insert_at_focus`.
-    pub fn ui_insert_text(&mut self, text: &str) -> R<UiOutcome> {
+    pub fn ui_insert_text(&mut self, text: &str) -> R<E, UiOutcome> {
         self.ui_call(true, |d, it| d.insert_at_focus(it, text))
     }
 
@@ -1409,7 +1408,7 @@ impl Browser {
     }
 
     /// The pointer moved to `caret` of the text field that `selecting` gave, with the button down.
-    pub fn ui_drag_select(&mut self, caret: u32) -> R<UiOutcome> {
+    pub fn ui_drag_select(&mut self, caret: u32) -> R<E, UiOutcome> {
         self.ui_call(true, |d, it| d.drag_select(it, caret))
     }
 
@@ -1436,9 +1435,9 @@ impl Browser {
     }
 
     /// The tab order now, for tests and for a caller that draws a focus ring.
-    pub fn tab_order(&mut self) -> R<Vec<NodeId>> {
+    pub fn tab_order(&mut self) -> R<E, Vec<NodeId>> {
         let dom = self.dom.clone();
-        self.it.host_scope(|it| dom.tab_order(it))
+        self.it.host_scope_o(|it| dom.tab_order(it))
     }
 }
 
@@ -1503,7 +1502,7 @@ fn line_at(text: &str, c: u32, area: bool) -> (u32, u32) {
 // ------------------------------------------------------------------------------------------ arena reclaim (`browser_reclaim.rs`)
 
 /// The nodes that the pointer state names.
-pub(crate) fn held(d: &Dom, out: &mut Vec<NodeId>) {
+pub(crate) fn held<E: Eng>(d: &Dom<E>, out: &mut Vec<NodeId>) {
     let u = &d.st.borrow().ui;
     out.extend([u.hover, u.down, u.last.map(|l| l.0), u.capture, u.captured, u.sel_drag.map(|s| s.0)].into_iter().flatten());
 }

@@ -1,5 +1,5 @@
 //! The rest of `String` and `String.prototype`: `raw`, `fromCodePoint`, `normalize`, the locale case methods, `isWellFormed`,
-//! `toWellFormed`, and `match`, `matchAll` and `search`. js2 has no `RegExp`, so the last three check `this` and throw a `TypeError`.
+//! `toWellFormed`. (`match`, `matchAll` and `search` are in `bi_string_regexp.rs`.)
 //! `normalize` does NFC and NFD with `bare-unicode`; NFKC and NFKD need the compatibility data of ICU (`bare-js` bakes it) and throw a `TypeError`.
 use crate::lazy::{Ent, m};
 use crate::bi_array::len_of;
@@ -19,9 +19,9 @@ impl Realm {
             m("toLocaleUpperCase", 0, to_locale_upper),
             m("isWellFormed", 0, is_well_formed),
             m("toWellFormed", 0, to_well_formed),
-            m("match", 1, no_regexp_match),
-            m("matchAll", 1, no_regexp_match),
-            m("search", 1, no_regexp_search),
+            m("match", 1, crate::bi_string_regexp::match_),
+            m("matchAll", 1, crate::bi_string_regexp::match_all),
+            m("search", 1, crate::bi_string_regexp::search),
         ];
         self.lazy_table(proto, STRING_PROTO_MORE);
     }
@@ -174,14 +174,4 @@ fn to_well_formed(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
     let u = rt.units(s);
     let out: Vec<u16> = char::decode_utf16(u.iter().copied()).flat_map(|r| r.unwrap_or('\u{fffd}').encode_utf16(&mut [0; 2]).to_vec()).collect();
     Ok(rt.make_units(&out))
-}
-
-fn no_regexp_match(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
-    rt.coerce_this(this, "match")?;
-    rt.type_error("match and matchAll need a RegExp, and js2 has none yet")
-}
-
-fn no_regexp_search(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
-    rt.coerce_this(this, "search")?;
-    rt.type_error("search needs a RegExp, and js2 has none yet")
 }

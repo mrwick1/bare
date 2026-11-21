@@ -3,6 +3,7 @@
 #   tools/js/cost_matrix.sh [-j JOBS] [-g REGEX] [-t PERCENT] [-a] [-J] [-o RAWFILE] BASE_DIR NEW_DIR
 # BASE_DIR and NEW_DIR are CARGO_TARGET_DIR directories that hold `release/examples/*` and `release/bare-stress`.
 # Build each tree with: cargo build --release --examples -p bare-js -p bare && cargo build --release -p bare-stress
+# Build the js2 rows with: cargo build --release --examples -p bare-js2
 # Each row runs 3 times with tools/js/instr.sh (minimum of `perf stat -e instructions:u`) on both trees under glibc (with the
 # tcache tunable that instr.sh sets). The jemalloc runs (LD_PRELOAD=/usr/lib/libjemalloc.so.2) occur only for a row that is
 # over PERCENT under glibc, because the rule needs both. Counts of BASE_DIR are cached in BASE_DIR/cost-cache, keyed by the

@@ -400,20 +400,20 @@ impl Session {
             // Parse again only after a failure: the engine's error value has no line. A runtime error parses, so it gives `None`.
             let syntax = |src: &str| bare_js::parse::parse_script(src, Default::default()).err();
             let mut src = &forms[0];
-            let mut r = b.run_script(src);
+            let mut r = b.script(src);
             // The expression form fails to parse for statements with `await`: that needs no second look.
             let mut bad = if r.is_err() && !wait { syntax(src) } else { None };
             // A script goes on to the async form only for a top-level `return`.
             if r.is_err() && (wait || bad.is_some_and(|e| e.msg == "'return' outside of a function")) {
                 src = &forms[1];
-                r = b.run_script(src);
+                r = b.script(src);
                 bad = if r.is_err() { syntax(src) } else { None };
             }
             p.touched();
             let v = match r {
                 Ok(v) => v,
                 Err(e) => {
-                    let m = thrown(p.browser().expect("checked"), &e);
+                    let m = p.browser().expect("checked").fault_text(&e);
                     let line = bad.map(|e| format!(" (line {})", e.location(src).line)).unwrap_or_default();
                     return Err(format!("the script threw: {m}{line}"));
                 }
@@ -422,11 +422,11 @@ impl Session {
             let mut v = v;
             let out = loop {
                 let b = p.browser().ok_or("no document")?;
-                match b.it.promise_status(v) {
-                    None => break b.inspect(v, EVAL_MAX),
-                    Some(bare_js::eval::PromiseStatus::Fulfilled(x)) => v = x,
-                    Some(bare_js::eval::PromiseStatus::Rejected(x)) => return Err(format!("rejected: {}", thrown_value(b, x))),
-                    Some(bare_js::eval::PromiseStatus::Pending) => {
+                match b.promise_step(&v, EVAL_MAX) {
+                    bare::browser_any::Step::Done(s) => break s,
+                    bare::browser_any::Step::Next(x) => v = x,
+                    bare::browser_any::Step::Rejected(m) => return Err(format!("rejected: {m}")),
+                    bare::browser_any::Step::Pending => {
                         if cancelled() {
                             return Err("cancelled".into());
                         }
@@ -942,25 +942,6 @@ pub fn safe_url(u: &str) -> String {
 /// The most characters of an `eval` value; a longer value is cut, with its full length.
 const EVAL_MAX: usize = 4000;
 
-/// A thrown value as text: `Name: message` for an error object, else its string form.
-fn thrown_value(b: &mut bare::browser::Browser, v: bare_js::value::Value) -> String {
-    if matches!(v, bare_js::value::Value::Object(_)) {
-        let (n, m) = (b.it.get_str(v, "name"), b.it.get_str(v, "message"));
-        if n != "?" && !(n == "undefined" && m == "undefined") {
-            return if m.is_empty() || m == "undefined" { n } else { format!("{n}: {m}") };
-        }
-    }
-    b.it.display(v)
-}
-
-/// A script error as text: a thrown value by `thrown_value`, else the engine's own text.
-fn thrown(b: &mut bare::browser::Browser, e: &bare_js::eval::Error) -> String {
-    match e {
-        bare_js::eval::Error::Throw(v) => thrown_value(b, *v),
-        e => format!("{e:?}"),
-    }
-}
-
 /// True when `code` holds the word `await`.
 fn has_await(code: &str) -> bool {
     let id = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
@@ -1087,7 +1068,7 @@ fn ready(p: &mut Page, at_end: bool) -> Look {
     let (mut title, mut text) = (String::new(), String::new());
     if idle.is_ok() || at_end || stopped.is_some() {
         title = locate::title(p).unwrap_or_default();
-        text = match p.browser().map(|b| b.run_script(BODY_TEXT).map(|v| b.it.display(v))) {
+        text = match p.browser().map(|b| b.script_text(BODY_TEXT).map(|(_, t)| t)) {
             Some(Ok(t)) => locate::norm(&t),
             _ => String::new(),
         };
@@ -1382,13 +1363,13 @@ fn check(p: &mut Page, m: &mut Memo, c: &Check) -> Result<(), Try> {
                 return Err(Try::Again(fail("page", p.no_document())));
             }
             let b = p.browser().expect("checked");
-            let r = b.run_script(&format!("!!({code}\n)"));
+            let r = b.script_true(&format!("!!({code}\n)"));
             p.touched();
             match r {
-                Ok(bare_js::value::Value::Bool(true)) => {}
-                Ok(_) => return no(format!("the script gave false: {code}")),
+                Ok(true) => {}
+                Ok(false) => return no(format!("the script gave false: {code}")),
                 Err(e) => {
-                    let m = thrown(p.browser().expect("checked"), &e);
+                    let m = p.browser().expect("checked").fault_text(&e);
                     return no(format!("the script threw: {}", short(&m)));
                 }
             }

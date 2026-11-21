@@ -59,6 +59,10 @@
 //! is a chain of one-shots and blocks while it is within the window. A timer beyond the window never blocks, as before.
 //! Results and diagnostics name `scheme://host:port/path` only: no query, fragment, header, body or source.
 
+use crate::browser_any::AnyBrowser;
+use crate::eng::Eng;
+use crate::eng_new::New;
+use crate::eng_old::Old;
 use crate::browser::{Browser, BrowserLimits};
 use crate::browser_fetch::{FetchLimits, metadata_site, potentially_trustworthy};
 use crate::browser_loader::{Input, PageConfig, PageLimits, PageResult, SLICE, Scan, Stop, deadline_after, label};
@@ -125,15 +129,13 @@ pub struct SessionConfig {
     pub live: bool,
     /// Where downloads go (see `downloads.rs`). `None`: a response that the page cannot show is a failed load.
     pub downloads: Option<downloads::Downloads>,
+    /// Run the pages on js2 (`bare-js2`, `BARE_JS_EXEC=new`) and not on the old engine.
+    pub js2: bool,
 }
 
-/// The engine mode of `BARE_JS_EXEC`: `tree`, `auto` or `byte` for `bare-js`; other values give the default. `new` (`bare-js2`) is an
-/// error until the new engine runs scripts.
-fn exec_from(v: &str) -> Result<Exec, &'static str> {
-    if v == "new" {
-        return Err(bare_js2::NOT_READY);
-    }
-    Ok(Exec::from_name(v).unwrap_or_default())
+/// The engine mode of `BARE_JS_EXEC`: `tree`, `auto` or `byte` for `bare-js`; other values give the default.
+fn exec_from(v: &str) -> Exec {
+    Exec::from_name(v).unwrap_or_default()
 }
 
 impl SessionConfig {
@@ -146,10 +148,7 @@ impl SessionConfig {
             limits: SessionLimits::default(),
             browser: BrowserLimits::default(),
             eval: EvalLimits {
-                exec: exec_from(&std::env::var("BARE_JS_EXEC").unwrap_or_default()).unwrap_or_else(|e| {
-                    eprintln!("BARE_JS_EXEC=new: {e}");
-                    std::process::exit(2)
-                }),
+                exec: exec_from(&std::env::var("BARE_JS_EXEC").unwrap_or_default()),
                 ..EvalLimits::session()
             },
             heap: HeapLimits::default(),
@@ -158,6 +157,7 @@ impl SessionConfig {
             storage: None,
             live: false,
             downloads: None,
+            js2: std::env::var("BARE_JS_EXEC").is_ok_and(|v| v == "new"),
         }
     }
 }
@@ -226,7 +226,7 @@ pub struct Session {
     cfg: SessionConfig,
     store: WebStorage,
     /// The last document. Dropped before the next one is requested.
-    browser: Option<Browser>,
+    browser: Option<AnyBrowser>,
     /// What the session has used so far, shared by `run` and every `resume`.
     used: Used,
     /// The first client that `cfg.client` made. Each document and each `resume` gets a fork: they share the connections, as the
@@ -679,7 +679,7 @@ impl Session {
     }
 
     /// The last document, while its `Browser` is alive (after `run`).
-    pub fn browser(&mut self) -> Option<&mut Browser> {
+    pub fn browser(&mut self) -> Option<&mut AnyBrowser> {
         self.browser.as_mut()
     }
 
@@ -842,6 +842,46 @@ impl Session {
         out
     }
 
+    /// Start a document on the browser `b` of the engine that the session runs: set it up and run the page to its first stop.
+    #[allow(clippy::too_many_arguments)]
+    fn load<E: Eng>(&mut self, mut b: Browser<E>, wrap: fn(Browser<E>) -> AnyBrowser, url: String, scroll: (f32, f32), base: &mut Client, page: &PageLimits, lim: &SessionLimits, scan: &mut Option<Scan>) -> Result<(AnyBrowser, PageResult), SessionStop> {
+        bare_net::trace::mark(|| "realm made (parse + new)".into(), 0);
+        if let Some((w, h)) = self.cfg.viewport
+            && b.set_viewport(w, h).is_err() {
+            return Err(SessionStop::LoadFailed("the viewport is invalid".into()));
+        }
+        if self.cfg.virtual_clock {
+            b.use_virtual_clock();
+        }
+        b.attach_storage(self.store.clone());
+        if b.set_document_url(&url).is_err() {
+            return Err(SessionStop::LoadFailed("the document URL could not be configured".into()));
+        }
+        b.cross_document_history(true);
+        if self.cfg.downloads.is_some() {
+            b.enable_downloads();
+        }
+        b.start_refresh();
+        b.set_child_env(crate::browser_child::KidEnv { eval: self.cfg.eval, heap: self.cfg.heap, session: lim.clone(), downloads: self.cfg.downloads.clone() });
+        if scroll != (0.0, 0.0) {
+            b.set_scroll(bare_paint::Scroll { x: scroll.0, y: scroll.1, ..Default::default() });
+        }
+        self.used.documents += 1;
+        // The document, its scripts and its `fetch` calls share the connections and the TLS roots of one client.
+        let client = base.fork();
+        let fetch = (base.fork(), self.cfg.fetch);
+        if self.cfg.live {
+            b.dom.fetch.live.set(true);
+            b.dom.scripts.split.set(true);
+            if let Some(s) = scan.take() {
+                b.adopt_scan(s);
+            }
+        }
+        // Live: the document runs its scripts across turns and takes input between them.
+        let r = b.run_page(PageConfig { url, client, limits: page.clone(), fetch: Some(fetch) });
+        Ok((wrap(b), r))
+    }
+
     fn drive_loop(&mut self, mut next: Option<Next>, mut steps: &[Input], out: &mut SessionResult) -> SessionStop {
         let lim = self.cfg.limits.clone();
         let deadline = deadline_after(lim.max_time.saturating_sub(self.used.time));
@@ -962,44 +1002,22 @@ impl Session {
                             self.hist[i].scroll
                         }
                     };
-                    let Ok(mut b) = Browser::new(dom, self.cfg.browser, self.cfg.eval, self.cfg.heap) else {
-                        return SessionStop::LoadFailed("the realm could not be made".into());
-                    };
-                    bare_net::trace::mark(|| "realm made (parse + new)".into(), 0);
-                    if let Some((w, h)) = self.cfg.viewport
-                        && b.set_viewport(w, h).is_err() {
-                        return SessionStop::LoadFailed("the viewport is invalid".into());
-                    }
-                    if self.cfg.virtual_clock {
-                        b.use_virtual_clock();
-                    }
-                    b.attach_storage(self.store.clone());
-                    if b.set_document_url(&url).is_err() {
-                        return SessionStop::LoadFailed("the document URL could not be configured".into());
-                    }
-                    b.cross_document_history(true);
-                    if self.cfg.downloads.is_some() {
-                        b.enable_downloads();
-                    }
-                    b.start_refresh();
-                    b.set_child_env(crate::browser_child::KidEnv { eval: self.cfg.eval, heap: self.cfg.heap, session: lim.clone(), downloads: self.cfg.downloads.clone() });
-                    if scroll != (0.0, 0.0) {
-                        b.set_scroll(bare_paint::Scroll { x: scroll.0, y: scroll.1, ..Default::default() });
-                    }
-                    self.used.documents += 1;
-                    // The document, its scripts and its `fetch` calls share the connections and the TLS roots of one client.
-                    let client = base.fork();
-                    let fetch = (base.fork(), self.cfg.fetch);
-                    if self.cfg.live {
-                        b.dom.fetch.live.set(true);
-                        b.dom.scripts.split.set(true);
-                        if let Some(s) = scan.take() {
-                            b.adopt_scan(s);
+                    let (bl, ev, hp) = (self.cfg.browser, self.cfg.eval, self.cfg.heap);
+                    let started = if self.cfg.js2 {
+                        match Browser::<New>::make(dom, bl, ev, hp) {
+                            Ok(b) => self.load(b, AnyBrowser::New, url, scroll, &mut base, &page, &lim, &mut scan),
+                            Err(_) => Err(SessionStop::LoadFailed("the realm could not be made".into())),
                         }
+                    } else {
+                        match Browser::<Old>::make(dom, bl, ev, hp) {
+                            Ok(b) => self.load(b, AnyBrowser::Old, url, scroll, &mut base, &page, &lim, &mut scan),
+                            Err(_) => Err(SessionStop::LoadFailed("the realm could not be made".into())),
+                        }
+                    };
+                    match started {
+                        Ok(x) => x,
+                        Err(stop) => return stop,
                     }
-                    // Live: the document runs its scripts across turns and takes input between them.
-                    let r = b.run_page(PageConfig { url, client, limits: page.clone(), fetch: Some(fetch) });
-                    (b, r)
                 }
             };
             let page_url = b.document_url().and_then(|u| Url::parse(u.split('#').next().unwrap_or("")).ok()).map_or_else(|| "?".to_string(), |u| label(&u));
@@ -1055,10 +1073,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bare_js_exec_new_is_an_error_until_the_new_engine_runs() {
-        assert_eq!(exec_from("new"), Err(bare_js2::NOT_READY));
-        assert_eq!(exec_from("byte"), Ok(Exec::Byte));
-        assert_eq!(exec_from(""), Ok(Exec::default()));
+    fn bare_js_exec_names_the_mode_of_the_old_engine() {
+        assert_eq!(exec_from("byte"), Exec::Byte);
+        assert_eq!(exec_from("new"), Exec::default());
+        assert_eq!(exec_from(""), Exec::default());
     }
 
     fn saved_pages() -> Vec<String> {

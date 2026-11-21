@@ -80,6 +80,7 @@
 //! Not done: `document.styleSheets` does not exist (when it does, a pending sheet must not be in it, as in Chrome), no cache of `Styles` between reads (each read costs one pass over the document), no rule-based `getComputedStyle` of a
 //! pseudo-element (see above), no `@container`, `@import` inside a supplied part (the embedder flattens), `<style disabled>`.
 
+use crate::eng::{Eng, Fault, Ops};
 use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_geom::illegal_s;
@@ -93,8 +94,7 @@ use bare_css::cascade::{self, ComputedStyle, Origin, RuleSet, Scopes, Source, St
 use bare_css::rule_cache::{self, Part};
 use bare_css::values::{Keyword, Length, Property, SHORTHANDS, Value as Cv, shorthand_longhands};
 use bare_html::dom::{DAMAGE_STYLE, Mark, NodeData, NodeId};
-use bare_js::eval::{Error, Interp, LimitKind};
-use bare_js::value::{ObjId, Value};
+use bare_js::eval::LimitKind;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::rc::Rc;
 use std::collections::HashMap;
@@ -204,13 +204,13 @@ pub(crate) struct Built {
 }
 
 #[derive(Default)]
-pub(crate) struct Computed {
+pub(crate) struct Computed<E: Eng> {
     lim: Cell<ComputedLimits>,
-    objs: RefCell<IdMap<ObjId, NodeId>>,
+    objs: RefCell<IdMap<<E as Eng>::Obj, NodeId>>,
     /// The declarations that are not of the element itself: `PSEUDO` (a pseudo-element) or `EMPTY` (a colon string that is no pseudo-element).
-    pub(crate) kinds: RefCell<IdMap<ObjId, u8>>,
-    proto: OnceCell<ObjId>,
-    fixed: RefCell<Vec<ObjId>>,
+    pub(crate) kinds: RefCell<IdMap<<E as Eng>::Obj, u8>>,
+    proto: OnceCell<<E as Eng>::Obj>,
+    fixed: RefCell<Vec<<E as Eng>::Obj>>,
     pub(crate) ext: RefCell<HashMap<String, Vec<SheetPart>>>,
     ext_bytes: Cell<usize>,
     /// The driver loads a sheet that a script adds after the task (`Browser::set_pending_sheets`): until then the sheet adds no rules.
@@ -232,8 +232,8 @@ pub(crate) struct Computed {
 
 const MISSING: &str = "computed style needs an external stylesheet that the embedder has not supplied (Browser::style_availability lists them)";
 /// Is `e` the gate for a linked sheet that the embedder has not supplied (yet)?
-pub(crate) fn is_missing_sheet(e: &Error) -> bool {
-    matches!(e, Error::Unsupported(u) if u.what == MISSING)
+pub(crate) fn is_missing_sheet<E: Eng>(e: &Fault<E>) -> bool {
+    matches!(e, Fault::Unsupported(w) if *w == MISSING)
 }
 /// The kind of a computed declaration that is not of the element: a pseudo-element, or an empty declaration (CSSOM: a string that starts
 /// with a colon and is no pseudo-element).
@@ -360,14 +360,14 @@ impl Snap {
     }
 }
 
-impl Dom {
-    pub(crate) fn gate(what: &'static str) -> Error {
-        Error::Unsupported(unsupported(what))
+impl<E: Eng> Dom<E> {
+    pub(crate) fn gate(what: &'static str) -> Fault<E> {
+        Fault::Unsupported(what)
     }
 
     /// The sheets of one read, in cascade order, and the supplied external ones that are missing.
     /// With `record`, each `<link>` is bound to the sheet that it has now (`Computed::bound`).
-    fn plan(&self, doc: &mut bare_html::dom::Document, vp: (f32, f32), record: bool) -> R<Plan> {
+    fn plan(&self, doc: &mut bare_html::dom::Document, vp: (f32, f32), record: bool) -> R<E, Plan> {
         let l = self.computed.lim.get();
         let sources = cascade::sources_capped(doc, vp, l.max_sources, l.max_sheet_bytes, doc.has_shadow_roots());
         let ext = self.computed.ext.borrow();
@@ -375,7 +375,7 @@ impl Dom {
         let (pending_ok, bound) = (self.computed.pending_ok.get(), self.computed.bound.borrow());
         // With `record`: the links of this plan, and the bindings that change.
         let (mut seen, mut changes) = (Vec::new(), Vec::new());
-        fn add(d: &Dom, p: &mut Plan, scope: NodeId, layer: Option<String>, text: &str) -> R<()> {
+        fn add<E: Eng>(d: &Dom<E>, p: &mut Plan, scope: NodeId, layer: Option<String>, text: &str) -> R<E, ()> {
             let l = d.computed.lim.get();
             if text.len() > l.max_sheet_bytes.saturating_sub(p.bytes) || p.parts.len() >= l.max_sources {
                 return Ok(());
@@ -479,19 +479,19 @@ impl Dom {
     }
 
     /// Is `el` in the document tree? `false`: it is not connected (a detached tree, or a shadow tree that is not attached). A shadow tree of a connected host is connected.
-    pub(crate) fn in_document(&self, it: &mut Interp<'_>, el: NodeId) -> R<bool> {
+    pub(crate) fn in_document(&self, it: &mut E::Vm, el: NodeId) -> R<E, bool> {
         let doc = self.doc.borrow();
         let mut top = el;
         while let Some(p) = doc.parent(top) {
-            it.charge(1)?;
+            it.charge_o(1)?;
             top = p;
         }
-        it.charge(1)?;
+        it.charge_o(1)?;
         if top != doc.root() {
             if matches!(doc.data(top), NodeData::ShadowRoot) {
                 let mut including = top;
                 while let Some(p) = doc.parent_or_host(including) {
-                    it.charge(1)?;
+                    it.charge_o(1)?;
                     including = p;
                 }
                 if including == doc.root() {
@@ -509,12 +509,12 @@ impl Dom {
     }
 
     /// The styles of the whole document now (the cascade of one read). Charged and capped as described in the header.
-    pub(crate) fn cascade_now(&self, it: &mut Interp<'_>) -> R<Rc<Styles>> {
+    pub(crate) fn cascade_now(&self, it: &mut E::Vm) -> R<E, Rc<Styles>> {
         self.cascade_for(it, None)
     }
 
     /// `cascade_now` for a window frame: the styles keep what `restyle_frame` needs (`RuleSet::compute_kept`).
-    pub(crate) fn cascade_frame(&self, it: &mut Interp<'_>) -> R<Rc<Styles>> {
+    pub(crate) fn cascade_frame(&self, it: &mut E::Vm) -> R<E, Rc<Styles>> {
         self.cascade_with(it, None, true)
     }
 
@@ -536,11 +536,11 @@ impl Dom {
     }
 
     /// The same, and `want` is styled even inside `display:none` (`RuleSet::compute_for`).
-    fn cascade_for(&self, it: &mut Interp<'_>, want: Option<NodeId>) -> R<Rc<Styles>> {
+    fn cascade_for(&self, it: &mut E::Vm, want: Option<NodeId>) -> R<E, Rc<Styles>> {
         self.cascade_with(it, want, false)
     }
 
-    fn cascade_with(&self, it: &mut Interp<'_>, want: Option<NodeId>, keep: bool) -> R<Rc<Styles>> {
+    fn cascade_with(&self, it: &mut E::Vm, want: Option<NodeId>, keep: bool) -> R<E, Rc<Styles>> {
         let styles = self.cascade_inner(it, want, keep, None)?;
         if want.is_none() {
             let key = self.motion_key();
@@ -554,7 +554,7 @@ impl Dom {
 
     /// The styles for a read of `el` that needs no layout: the cascade of the whole document when one is kept and current (or when
     /// the chain cannot be used), else only the elements from the root down to `el` (`Styles::partial`).
-    fn cascade_lazy(&self, it: &mut Interp<'_>, el: NodeId) -> R<Rc<Styles>> {
+    fn cascade_lazy(&self, it: &mut E::Vm, el: NodeId) -> R<E, Rc<Styles>> {
         let styles = self.cascade_inner(it, None, false, Some(el))?;
         if !styles.partial() {
             let key = self.motion_key();
@@ -565,7 +565,7 @@ impl Dom {
         Ok(styles)
     }
 
-    fn cascade_inner(&self, it: &mut Interp<'_>, want: Option<NodeId>, keep: bool, lazy: Option<NodeId>) -> R<Rc<Styles>> {
+    fn cascade_inner(&self, it: &mut E::Vm, want: Option<NodeId>, keep: bool, lazy: Option<NodeId>) -> R<E, Rc<Styles>> {
         let l = self.computed.lim.get();
         let vp = self.plat.s.borrow().viewport;
         let t0 = crate::force::start();
@@ -585,12 +585,12 @@ impl Dom {
         // The same inputs as the plan of the rules in the cache: that plan was not strict, and its sheets are the rules' sheets.
         let same = self.computed.cache.borrow().as_ref().is_some_and(|b| b.vp == vp && b.stamp == stamp);
         if !same {
-            it.charge(doc.len() as u64 / 4 + 1)?;
+            it.charge_o(doc.len() as u64 / 4 + 1)?;
             let plan = self.plan(&mut doc, vp, false)?;
             if plan.strict {
                 return Err(Self::gate(MISSING));
             }
-            it.charge(plan.bytes as u64 / 32)?;
+            it.charge_o(plan.bytes as u64 / 32)?;
             let mut cache = self.computed.cache.borrow_mut();
             if !cache.as_ref().is_some_and(|b| b.vp == vp && b.key == plan.parts && b.inputs == plan.inputs) {
                 let root = doc.root();
@@ -671,7 +671,7 @@ impl Dom {
             && (*kept || !keep)
         {
             // The styles of the last read are still right: no cascade runs, so a read charges the check only.
-            it.charge(1)?;
+            it.charge_o(1)?;
             crate::force::style("hit", t0, 0);
             return Ok(styles.clone());
         }
@@ -693,7 +693,7 @@ impl Dom {
                     depth += 1;
                     up = p;
                 }
-                it.charge(depth / 8 + 1)?;
+                it.charge_o(depth / 8 + 1)?;
                 if depth.saturating_mul(built.rules.len() as u64 + 1) > l.max_work {
                     return Err(self.lim("computed-work"));
                 }
@@ -707,7 +707,7 @@ impl Dom {
                 // A style that starts a transition or an animation needs the cascade of the page before it, to compare with: the whole cascade.
                 && !styles.style(el).is_some_and(crate::browser_motion::has_motion)
             {
-                it.charge((built.rules.styled_elements() - styled).saturating_mul(STEPS_PER_RESTYLED_ELEMENT).saturating_add(built.rules.tested_candidates() - tested).saturating_add(1))?;
+                it.charge_o((built.rules.styled_elements() - styled).saturating_mul(STEPS_PER_RESTYLED_ELEMENT).saturating_add(built.rules.tested_candidates() - tested).saturating_add(1))?;
                 crate::force::style("chain", t0, built.rules.styled_elements() - styled);
                 self.computed.chains.set(self.computed.chains.get() + 1);
                 return Ok(styles);
@@ -740,7 +740,7 @@ impl Dom {
                 return Ok(styles.clone());
             }
         }
-        it.charge(doc.len() as u64 + 1)?;
+        it.charge_o(doc.len() as u64 + 1)?;
         self.computed.computes.set(self.computed.computes.get() + 1);
         // The cascade of a read keeps what `restyle` needs: the next read after a change updates it.
         let before = built.rules.tested_candidates();
@@ -748,7 +748,7 @@ impl Dom {
         // New styles may take the address of freed ones: the layout of a read (`layout_shared`, keyed by address) is not theirs.
         self.geometry.shared.borrow_mut().take();
         // The work cap bounds the compute. Charge the candidates the index tested, not nodes times all rules.
-        it.charge(built.rules.tested_candidates() - before)?;
+        it.charge_o(built.rules.tested_candidates() - before)?;
         built.last[slot] = Some((key, keep || read, styles.clone()));
         if t0.is_some() {
             crate::force::style("compute", t0, elements_under(&doc, doc.root(), u64::MAX));
@@ -777,7 +777,7 @@ impl Dom {
     /// whose style changed, with their old style number (`RuleSet::restyle`). `None` when only a new cascade is right: the rules were
     /// built again, `styles` is shared, or `restyle_marks` says so. Then `styles` is as it was, except for new styles at its end
     /// that no node uses.
-    pub(crate) fn restyle_frame(&self, it: &mut Interp<'_>, styles: &mut Rc<Styles>, builds: u64, marks: &[Mark], old: &[Vec<NodeId>; 3], new: &[Vec<NodeId>; 3]) -> R<Option<Vec<(NodeId, u32)>>> {
+    pub(crate) fn restyle_frame(&self, it: &mut E::Vm, styles: &mut Rc<Styles>, builds: u64, marks: &[Mark], old: &[Vec<NodeId>; 3], new: &[Vec<NodeId>; 3]) -> R<E, Option<Vec<(NodeId, u32)>>> {
         let vp = self.plat.s.borrow().viewport;
         let mut cache = self.computed.cache.borrow_mut();
         let Some(built) = cache.as_mut().filter(|b| b.vp == vp && self.computed.builds.get() == builds) else { return Ok(None) };
@@ -801,13 +801,13 @@ impl Dom {
                 return Ok(None);
             }
         }
-        restyle_marks(it, &built.rules, &doc, styles, marks, old, new)
+        restyle_marks::<E>(it, &built.rules, &doc, styles, marks, old, new)
     }
 
     /// `snapshot` of an element with no style in the cascade of the reads (it is inside `display: none`): the cascade of the reads,
     /// with the styles of the way down to `el` at its end (`RuleSet::style_hidden`), and the style of `el`. `None` when that cannot
     /// be done: then a walk with `want` (`cascade_for`) gives it.
-    fn style_hidden(&self, it: &mut Interp<'_>, el: NodeId) -> R<Option<(Rc<Styles>, ComputedStyle)>> {
+    fn style_hidden(&self, it: &mut E::Vm, el: NodeId) -> R<E, Option<(Rc<Styles>, ComputedStyle)>> {
         drop(self.cascade_for(it, None)?);
         let mut cache = self.computed.cache.borrow_mut();
         let Some(built) = cache.as_mut().filter(|b| b.read.is_some()) else { return Ok(None) };
@@ -820,12 +820,12 @@ impl Dom {
     }
 
     /// The style of `el` now, or `None` when the element is not connected (an empty declaration).
-    pub(crate) fn snapshot(&self, it: &mut Interp<'_>, el: NodeId) -> R<Option<Snap>> {
+    pub(crate) fn snapshot(&self, it: &mut E::Vm, el: NodeId) -> R<E, Option<Snap>> {
         self.snapshot_with(it, el, false)
     }
 
     /// `snapshot`. With `lazy`, the styles may be the chain of `el` only (`Snap::partial`): the caller reads no value that needs layout.
-    pub(crate) fn snapshot_with(&self, it: &mut Interp<'_>, el: NodeId, lazy: bool) -> R<Option<Snap>> {
+    pub(crate) fn snapshot_with(&self, it: &mut E::Vm, el: NodeId, lazy: bool) -> R<E, Option<Snap>> {
         let _caller = crate::force::tag("getComputedStyle");
         if !self.in_document(it, el)? {
             return Ok(None);
@@ -859,7 +859,7 @@ impl Dom {
             if let NodeData::Element { name, .. } = *doc.data(a) {
                 if Some(name) == template && !doc.is_foreign(a) {
                     drop(doc);
-                    it.charge(n / 8 + 1)?;
+                    it.charge_o(n / 8 + 1)?;
                     return Ok(None);
                 }
                 hidden |= styles.style(a).is_some_and(|s| s.get(Property::Display) == Cv::Keyword(Keyword::None));
@@ -867,24 +867,24 @@ impl Dom {
             up = doc.flat_parent(a);
         }
         drop(doc);
-        it.charge(n / 8 + 1)?;
+        it.charge_o(n / 8 + 1)?;
         let partial = styles.partial();
         Ok(Some(Snap { styles, style, hidden, partial }))
     }
 
-    fn connected(&self, it: &mut Interp<'_>, el: NodeId) -> R<bool> {
+    fn connected(&self, it: &mut E::Vm, el: NodeId) -> R<E, bool> {
         let doc = self.doc.borrow();
         let (mut top, mut n) = (el, 0u64);
         while let Some(p) = doc.parent(top) {
             top = p;
             n += 1;
         }
-        it.charge(n / 8 + 1)?;
+        it.charge_o(n / 8 + 1)?;
         Ok(top == doc.root())
     }
 
     /// Does the `direction` of `el` come from `dir=auto` or `<bdi>` (the text decides)? See the header.
-    fn direction_needs_text(&self, it: &mut Interp<'_>, el: NodeId) -> R<bool> {
+    fn direction_needs_text(&self, it: &mut E::Vm, el: NodeId) -> R<E, bool> {
         let doc = self.doc.borrow();
         let (dir, bdi) = (doc.find_atom("dir"), doc.find_atom("bdi"));
         let (mut cur, mut n) = (Some(el), 0u64);
@@ -908,13 +908,13 @@ impl Dom {
             cur = doc.parent(e);
         }
         drop(doc);
-        it.charge(n / 8 + 1)?;
+        it.charge_o(n / 8 + 1)?;
         Ok(auto)
     }
 
     /// `getPropertyValue(name)` of the computed declaration of `el`.
     /// `kind`: 0 for the element, `PSEUDO` for a pseudo-element (its inherited values are the element's, the rest is initial), `EMPTY` for no style.
-    fn computed_value(&self, it: &mut Interp<'_>, el: NodeId, name: &str, kind: u8) -> R<String> {
+    fn computed_value(&self, it: &mut E::Vm, el: NodeId, name: &str, kind: u8) -> R<E, String> {
         if kind == EMPTY {
             return Ok(String::new());
         }
@@ -987,7 +987,7 @@ impl Dom {
         // Chrome writes `transition` as `property duration timing-function delay` for each name, and repeats the shorter lists.
         if key == "transition" {
             use bare_css::motion::Motion;
-            let items = |p: Property| -> R<Vec<String>> {
+            let items = |p: Property| -> R<E, Vec<String>> {
                 let s = pick(p);
                 Ok(match s.style.value(p) {
                     Cv::Grid(i) => match s.styles.grid(i) {
@@ -1008,13 +1008,13 @@ impl Dom {
         }
         drop(doc);
         let lim = Lim { bytes: 64 << 10, decls: 256 };
-        let fail = |f: Fail| match f {
+        let fail = |f: Fail<E>| match f {
             Fail::Err(e) => e,
             Fail::Unsupported(w) => Self::gate(w),
             Fail::Bytes | Fail::Decls => self.lim("computed-shorthand"),
         };
-        let list = blk::parse(&text, lim, &mut |n| it.charge(n)).map_err(fail)?;
-        match blk::get(&list, &key, lim.bytes, &mut |n| it.charge(n)).map_err(fail)? {
+        let list = blk::parse(&text, lim, &mut |n| it.charge_o(n)).map_err(fail)?;
+        match blk::get(&list, &key, lim.bytes, &mut |n| it.charge_o(n)).map_err(fail)? {
             Some(t) if !t.is_empty() => Ok(t),
             _ => Err(Self::gate(NO_SHORT)),
         }
@@ -1022,7 +1022,7 @@ impl Dom {
 
     /// `transform`: `none`, or the 2D matrix of the list (`bare_css::transform`). A percent is of the border box, so a list with one runs the layout.
     /// A real 3D step (`rotateX`, `perspective`, a z move) has a `matrix3d(...)` in Chrome: it is gated.
-    fn computed_transform(&self, it: &mut Interp<'_>, el: NodeId, kind: u8) -> R<String> {
+    fn computed_transform(&self, it: &mut E::Vm, el: NodeId, kind: u8) -> R<E, String> {
         use bare_css::{grid::Grid, transform::{Func, resolve, text}};
         // `transform` is not inherited: a pseudo-element here has the initial value.
         if kind == PSEUDO {
@@ -1064,23 +1064,23 @@ impl Dom {
     }
 
     /// 0 for the element, `PSEUDO` or `EMPTY` (see `computed_value`). Call it after `computed_el_s` accepted `this`.
-    fn computed_kind_s(&self, s: &mut Sc<'_, '_>, this: Local<'_>) -> u8 {
-        match obj_id(s, this) {
+    fn computed_kind_s(&self, s: &mut Sc<'_, E>, this: Local<'_>) -> u8 {
+        match obj_id::<E>(s, this) {
             Some(o) => self.computed.kinds.borrow().get(&o).copied().unwrap_or(0),
             None => 0,
         }
     }
 
-    fn computed_el_s<'s>(&self, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
-        if let Some(o) = obj_id(s, this)
+    fn computed_el_s<'s>(&self, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, NodeId> {
+        if let Some(o) = obj_id::<E>(s, this)
             && let Some(&el) = self.computed.objs.borrow().get(&o)
         {
             return Ok(el);
         }
-        Err(illegal_s(s))
+        Err(illegal_s::<E>(s))
     }
 
-    fn read_only_s<'s>(&self, s: &mut Sc<'s, '_>, what: &str) -> bare_js_api::Error<'s> {
+    fn read_only_s<'s>(&self, s: &mut Sc<'s, E>, what: &str) -> bare_js_api::Error<'s> {
         self.dom_err_s(s, "NoModificationAllowedError", &format!("Failed to execute '{what}' on 'CSSStyleDeclaration': these styles are computed, and therefore read-only."))
     }
 }
@@ -1089,7 +1089,7 @@ impl Dom {
 /// Gives the elements whose style changed, with their old style number. `None` when only a new cascade is right: a change touched
 /// a `<style>`, `<link>` or `<base>` element, the rules read what changed in a way that `RuleSet::roots` does not bound, or
 /// `RuleSet::restyle` cannot.
-fn restyle_marks(it: &mut Interp<'_>, rules: &RuleSet, doc: &bare_html::dom::Document, styles: &mut Styles, marks: &[Mark], old: &[Vec<NodeId>; 3], new: &[Vec<NodeId>; 3]) -> R<Option<Vec<(NodeId, u32)>>> {
+fn restyle_marks<E: Eng>(it: &mut E::Vm, rules: &RuleSet, doc: &bare_html::dom::Document, styles: &mut Styles, marks: &[Mark], old: &[Vec<NodeId>; 3], new: &[Vec<NodeId>; 3]) -> R<E, Option<Vec<(NodeId, u32)>>> {
     let sheets = ["style", "link", "base"].map(|n| doc.find_atom(n));
     let sheet = |n: NodeId| matches!(*doc.data(n), NodeData::Element { name, .. } if sheets.contains(&Some(name)));
     let scopes = rules.scopes();
@@ -1101,7 +1101,7 @@ fn restyle_marks(it: &mut Interp<'_>, rules: &RuleSet, doc: &bare_html::dom::Doc
                     let mut stack = vec![node];
                     let mut found = false;
                     while let Some(n) = stack.pop() {
-                        it.charge(1)?;
+                        it.charge_o(1)?;
                         found |= sheet(n);
                         stack.extend(doc.children(n));
                     }
@@ -1119,14 +1119,14 @@ fn restyle_marks(it: &mut Interp<'_>, rules: &RuleSet, doc: &bare_html::dom::Doc
     Scopes::user_roots(scopes.hover, &old[0], &new[0], doc, &mut roots);
     Scopes::user_roots(scopes.active, &old[1], &new[1], doc, &mut roots);
     Scopes::user_roots(scopes.focus, &old[2], &new[2], doc, &mut roots);
-    it.charge(roots.len() as u64 + 1)?;
+    it.charge_o(roots.len() as u64 + 1)?;
     let mut changed = Vec::new();
     let (tested, styled) = (rules.tested_candidates(), rules.styled_elements());
     if !rules.restyle(doc, styles, &roots, &mut changed) {
         return Ok(None);
     }
     // The real work: the elements that `RuleSet::restyle` styled, and the candidates and look-ups of the index for them.
-    it.charge((rules.styled_elements() - styled).saturating_mul(STEPS_PER_RESTYLED_ELEMENT).saturating_add(rules.tested_candidates() - tested))?;
+    it.charge_o((rules.styled_elements() - styled).saturating_mul(STEPS_PER_RESTYLED_ELEMENT).saturating_add(rules.tested_candidates() - tested))?;
     Ok(Some(changed))
 }
 
@@ -1152,24 +1152,24 @@ fn elements_under(doc: &bare_html::dom::Document, node: NodeId, max: u64) -> u64
 // ------------------------------------------------------------------------------------------ JS side
 
 /// `window.getComputedStyle(element, pseudoElt)`
-fn get_computed_style<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn get_computed_style<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     if a.is_empty() {
         return Err(s.type_error("Failed to execute 'getComputedStyle' on 'Window': 1 argument required, but only 0 present."));
     }
-    let a0 = arg_s(s, a, 0);
+    let a0 = arg_s::<E>(s, a, 0);
     let el = match d.node_of_s(s, a0) {
         Some(n) if d.is_element(n) => n,
         _ => return Err(s.type_error("Failed to execute 'getComputedStyle' on 'Window': parameter 1 is not of type 'Element'.")),
     };
-    let a1 = arg_s(s, a, 1);
-    let pseudo = if is_nullish(s, a1) { String::new() } else { d.string_arg_s(s, a1)? };
+    let a1 = arg_s::<E>(s, a, 1);
+    let pseudo = if is_nullish::<E>(s, a1) { String::new() } else { d.string_arg_s(s, a1)? };
     let kind = if pseudo.starts_with(':') { pseudo_kind(&pseudo) } else { 0 };
     if d.computed.objs.borrow().len() >= d.computed.lim.get().max_objects {
         return Err(d.lim_s(s, "computed-objects"));
     }
     d.wrap_s(s, el)?;
     if d.computed.proto.get().is_none() {
-        old(s, |it| crate::browser_style::ensure(d, it))?;
+        old::<E, _>(s, |it| crate::browser_style::ensure(d, it))?;
     }
     let o = d.obj_s(s, *d.computed.proto.get().expect("ensured"))?;
     d.computed.objs.borrow_mut().insert(o, el);
@@ -1182,28 +1182,28 @@ fn get_computed_style<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>
     Ok(d.obj_local(s, o))
 }
 
-fn get_property_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn get_property_value<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let el = d.computed_el_s(s, this)?;
-    required_s(s, a, 1, "getPropertyValue")?;
-    let v = arg_s(s, a, 0);
+    required_s::<E>(s, a, 1, "getPropertyValue")?;
+    let v = arg_s::<E>(s, a, 0);
     let name = d.string_arg_s(s, v)?;
     let kind = d.computed_kind_s(s, this);
-    let v = old(s, |it| d.computed_value(it, el, &name, kind))?;
+    let v = old::<E, _>(s, |it| d.computed_value(it, el, &name, kind))?;
     d.js_str_s(s, &v)
 }
 
-fn get_property_priority<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn get_property_priority<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     d.computed_el_s(s, this)?;
-    required_s(s, a, 1, "getPropertyPriority")?;
-    let v = arg_s(s, a, 0);
+    required_s::<E>(s, a, 1, "getPropertyPriority")?;
+    let v = arg_s::<E>(s, a, 0);
     d.string_arg_s(s, v)?;
     d.js_str_s(s, "")
 }
 
-fn set_property<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_property<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     d.computed_el_s(s, this)?;
-    required_s(s, a, 2, "setProperty")?;
-    let (n, v) = (arg_s(s, a, 0), arg_s(s, a, 1));
+    required_s::<E>(s, a, 2, "setProperty")?;
+    let (n, v) = (arg_s::<E>(s, a, 0), arg_s::<E>(s, a, 1));
     d.string_arg_s(s, n)?;
     null_empty_s(d, s, v)?;
     if let Some(p) = a.get(2) && s.type_of(p) != Type::Undefined {
@@ -1212,22 +1212,22 @@ fn set_property<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -
     Err(d.read_only_s(s, "setProperty"))
 }
 
-fn remove_property<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn remove_property<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     d.computed_el_s(s, this)?;
-    required_s(s, a, 1, "removeProperty")?;
-    let v = arg_s(s, a, 0);
+    required_s::<E>(s, a, 1, "removeProperty")?;
+    let v = arg_s::<E>(s, a, 0);
     d.string_arg_s(s, v)?;
     Err(d.read_only_s(s, "removeProperty"))
 }
 
-fn css_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn css_text<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     d.computed_el_s(s, this)?;
-    Err(lift_err(s, Dom::gate(CSS_TEXT)))
+    Err(lift_err::<E>(s, Dom::<E>::gate(CSS_TEXT)))
 }
 
-fn set_css_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_css_text<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     d.computed_el_s(s, this)?;
-    let v = arg_s(s, a, 0);
+    let v = arg_s::<E>(s, a, 0);
     null_empty_s(d, s, v)?;
     Err(d.read_only_s(s, "cssText"))
 }
@@ -1239,69 +1239,69 @@ fn names(s: &Snap) -> Vec<&str> {
     names
 }
 
-fn length<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn length<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let el = d.computed_el_s(s, this)?;
     if d.computed_kind_s(s, this) == EMPTY {
         return Ok(s.number(0.0));
     }
-    let n = old(s, |it| Ok(d.snapshot_with(it, el, true)?.map_or(0, |s| Property::LISTED.len() + s.styles.custom_properties(&s.style).len())))?;
+    let n = old::<E, _>(s, |it| Ok(d.snapshot_with(it, el, true)?.map_or(0, |s| Property::LISTED.len() + s.styles.custom_properties(&s.style).len())))?;
     Ok(s.number(n as f64))
 }
 
-fn parent_rule<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn parent_rule<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     d.computed_el_s(s, this)?;
     Ok(s.null())
 }
 
-fn item<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn item<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let el = d.computed_el_s(s, this)?;
-    required_s(s, a, 1, "item")?;
-    let v = arg_s(s, a, 0);
-    let i = to_u32_s(s, v)? as usize;
+    required_s::<E>(s, a, 1, "item")?;
+    let v = arg_s::<E>(s, a, 0);
+    let i = to_u32_s::<E>(s, v)? as usize;
     if d.computed_kind_s(s, this) == EMPTY {
         return d.js_str_s(s, "");
     }
-    let name = old(s, |it| {
+    let name = old::<E, _>(s, |it| {
         let Some(sn) = d.snapshot_with(it, el, true)? else { return Ok(String::new()) };
-        it.charge((Property::LISTED.len() + sn.styles.custom_properties(&sn.style).len()) as u64)?;
+        it.charge_o((Property::LISTED.len() + sn.styles.custom_properties(&sn.style).len()) as u64)?;
         Ok(names(&sn).get(i).copied().unwrap_or("").to_string())
     })?;
     d.js_str_s(s, &name)
 }
 
-fn named_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn named_get<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let name = current(d, s)?;
     let el = d.computed_el_s(s, this)?;
     let kind = d.computed_kind_s(s, this);
-    let v = old(s, |it| d.computed_value(it, el, name, kind))?;
+    let v = old::<E, _>(s, |it| d.computed_value(it, el, name, kind))?;
     d.js_str_s(s, &v)
 }
 
-fn transform_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn transform_get<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let el = d.computed_el_s(s, this)?;
     let kind = d.computed_kind_s(s, this);
-    let v = old(s, |it| d.computed_value(it, el, "transform", kind))?;
+    let v = old::<E, _>(s, |it| d.computed_value(it, el, "transform", kind))?;
     d.js_str_s(s, &v)
 }
 
-fn named_set<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn named_set<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let name = current(d, s)?;
     d.computed_el_s(s, this)?;
-    let v = arg_s(s, a, 0);
+    let v = arg_s::<E>(s, a, 0);
     null_empty_s(d, s, v)?;
     Err(d.read_only_s(s, name))
 }
 
-pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
     let g = s.global();
     // Window operations are enumerable.
     let f = d.def_method_l(s, g, "getComputedStyle", 1, get_computed_style, true)?;
-    *d.computed.fixed.borrow_mut() = vec![obj_id(s, f).expect("a function")];
+    *d.computed.fixed.borrow_mut() = vec![obj_id::<E>(s, f).expect("a function")];
     Ok(())
 }
 
 /// The computed prototype, made with the style prototype `sproto` (`browser_style::ensure`). `props` are its property names.
-pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, sproto: ObjId, props: &[&'static str]) -> R<()> {
+pub(crate) fn fill<E: Eng>(d: &Dom<E>, it: &mut E::Vm, sproto: E::Obj, props: &[&'static str]) -> R<E, ()> {
     let proto = d.obj(it, sproto)?;
     d.def_get_s(it, proto, "cssText", css_text, Some(set_css_text))?;
     d.def_get_s(it, proto, "length", length, None)?;
@@ -1346,12 +1346,12 @@ pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, sproto: ObjId, props: &[&'stati
 
 // ------------------------------------------------------------------------------------------ GC hooks
 
-pub(crate) fn roots(d: &Dom, out: &mut Roots<'_, '_>) {
-    out.extend(d.computed.fixed.borrow().iter().map(|&o| Value::Object(o)));
+pub(crate) fn roots<E: Eng>(d: &Dom<E>, out: &mut Roots<'_, '_, E>) {
+    out.extend(d.computed.fixed.borrow().iter().map(|&o| E::obj_raw(o)));
 }
 
 /// The owner `o` (a computed declaration) keeps its element's wrapper alive, and so the element's tree, attached or not.
-pub(crate) fn trace_owner(d: &Dom, st: &crate::browser::State, o: ObjId, t: &mut bare_js_api::Tracer<'_, Value>) {
+pub(crate) fn trace_owner<E: Eng>(d: &Dom<E>, st: &crate::browser::State<E>, o: E::Obj, t: &mut bare_js_api::Tracer<'_, E::Raw>) {
     if let Some(&el) = d.computed.objs.borrow().get(&o)
         && let Some(w) = st.by_node.get(&el)
     {
@@ -1360,7 +1360,7 @@ pub(crate) fn trace_owner(d: &Dom, st: &crate::browser::State, o: ObjId, t: &mut
 }
 
 /// The owner `o` is dead: drop its entries.
-pub(crate) fn drop_owner(d: &Dom, o: ObjId) {
+pub(crate) fn drop_owner<E: Eng>(d: &Dom<E>, o: E::Obj) {
     d.computed.objs.borrow_mut().remove(&o);
     let mut kinds = d.computed.kinds.borrow_mut();
     if !kinds.is_empty() {
@@ -1370,7 +1370,7 @@ pub(crate) fn drop_owner(d: &Dom, o: ObjId) {
 
 // ------------------------------------------------------------------------------------------ Browser API
 
-impl Browser {
+impl<E: Eng> Browser<E> {
     /// Replace the bounds of this module. Call it before scripts run.
     pub fn set_computed_limits(&mut self, l: ComputedLimits) {
         self.dom.computed.lim.set(l);
@@ -1393,21 +1393,21 @@ impl Browser {
     /// flattened pieces in cascade order, imports first. It replaces an older entry of the same `href`. An empty list means "loaded,
     /// no rules" (use it for a sheet that failed, when the page should go on). Bounded: `computed-external`,
     /// `computed-external-bytes`, `computed-sources`. Nothing changes on an error.
-    pub fn set_external_stylesheet(&mut self, href: &str, parts: Vec<SheetPart>) -> R<()> {
+    pub fn set_external_stylesheet(&mut self, href: &str, parts: Vec<SheetPart>) -> R<E, ()> {
         let c = &self.dom.computed;
         let l = c.lim.get();
         let bytes = href.len() + parts.iter().map(|p| p.text.len() + p.layer.as_ref().map_or(0, |s| s.len())).sum::<usize>();
         if parts.len() > l.max_sources || bytes > l.max_sheet_bytes {
-            return Err(Error::Limit(LimitKind::Host("computed-sources")));
+            return Err(Fault::Limit(LimitKind::Host("computed-sources")));
         }
         let mut ext = c.ext.borrow_mut();
         let old = ext.get(href).map(|ps| href.len() + ps.iter().map(|p| p.text.len() + p.layer.as_ref().map_or(0, |s| s.len())).sum::<usize>());
         if old.is_none() && ext.len() >= l.max_external {
-            return Err(Error::Limit(LimitKind::Host("computed-external")));
+            return Err(Fault::Limit(LimitKind::Host("computed-external")));
         }
         let total = c.ext_bytes.get() - old.unwrap_or(0) + bytes;
         if total > l.max_external_bytes {
-            return Err(Error::Limit(LimitKind::Host("computed-external-bytes")));
+            return Err(Fault::Limit(LimitKind::Host("computed-external-bytes")));
         }
         ext.insert(href.to_string(), parts);
         c.ext_bytes.set(total);
@@ -1442,7 +1442,7 @@ impl Browser {
 
     /// Whether `getComputedStyle` can read now, or which external sheets are missing. Reads the document, runs no JS, charges no steps.
     /// Source caps are errors. The cascade node cap applies to computed reads, not sheet discovery.
-    pub fn style_availability(&self) -> R<StyleAvailability> {
+    pub fn style_availability(&self) -> R<E, StyleAvailability> {
         let d = &self.dom;
         let vp = d.plat.s.borrow().viewport;
         let mut doc = d.doc.borrow_mut();
@@ -1454,11 +1454,11 @@ impl Browser {
 // ------------------------------------------------------------------------------------------ arena reclaim (`browser_reclaim.rs`)
 
 /// The nodes that live computed declarations name.
-pub(crate) fn held(d: &Dom, out: &mut Vec<NodeId>) {
+pub(crate) fn held<E: Eng>(d: &Dom<E>, out: &mut Vec<NodeId>) {
     out.extend(d.computed.objs.borrow().values().copied());
 }
 
 /// Drop the state of the nodes that the reclaim freed.
-pub(crate) fn forget(d: &Dom, gone: &dyn Fn(NodeId) -> bool) {
+pub(crate) fn forget<E: Eng>(d: &Dom<E>, gone: &dyn Fn(NodeId) -> bool) {
     d.computed.bound.borrow_mut().retain(|&n, _| !gone(n));
 }

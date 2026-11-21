@@ -40,6 +40,7 @@
 //! Not done: `modulepreload`, `type`, `imagesrcset`, `integrity`, `crossorigin` (no CORS mode), `fetchpriority`, `Link:` headers,
 //! `<link rel=prefetch>`, `disabled`. A script text that was taken is not kept: a second script with the same URL fetches again.
 
+use crate::eng::Eng;
 use super::sheets::limit;
 use super::{EvTarget, Run, Stop, WS, download, label};
 use crate::browser_dom::LINK_AS;
@@ -139,7 +140,7 @@ fn connected(doc: &Document, mut n: NodeId) -> bool {
     n == doc.root()
 }
 
-impl Run<'_> {
+impl<E: Eng> Run<'_, E> {
     /// Text kept by the loader: parsed scripts that wait for a repeat, style sheets and preloaded scripts. The total cap counts it.
     pub(super) fn kept(&self) -> usize {
         self.retained + self.dom.scripts.sheets.borrow().retained + self.dom.scripts.preloads.borrow().retained

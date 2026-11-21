@@ -238,10 +238,12 @@ var r = paths.map(function (p) {
 }).join('\\n');";
 
 fn dump(eager: bool) -> String {
-    crate::lazy::EAGER.with(|e| e.set(eager));
-    let out = ev(DUMP, "r");
-    crate::lazy::EAGER.with(|e| e.set(false));
-    out
+    let mut vm = load(DUMP).expect("loads");
+    if eager {
+        vm.realm.lazy_everything();
+    }
+    vm.run_main(0).expect("runs");
+    vm.global_text("r")
 }
 
 #[test]
@@ -277,4 +279,14 @@ fn every_table_hash_is_the_hash_of_its_name() {
         }
     }
     assert!(seen > 0);
+}
+
+#[test]
+fn assignment_uses_inherited_descriptors() {
+    check(&[
+        ("var p = { set x(v) { this.y = v; } }; var o = Object.create(Object.create(p)); o.x = 7; o['x'] = 8; var r = [o.y, Object.hasOwn(o, 'x'), Object.hasOwn(p, 'y')].join();", "8,false,false"),
+        ("var p = { x: 7 }; var o = {}; o.__proto__ = p; var r = [o.x, Object.hasOwn(o, '__proto__')].join();", "7,false"),
+        ("var p = Object.defineProperty({}, 'x', { value: 7 }); var o = Object.create(p); o.x = 8; o['x'] = 9; var r = [o.x, Object.hasOwn(o, 'x')].join();", "7,false"),
+        ("'use strict'; var p = Object.defineProperty({}, 'x', { value: 7 }); var o = Object.create(p); var r; try { o.x = 8; } catch (e) { r = e.name; } r += ',' + Object.hasOwn(o, 'x');", "TypeError,false"),
+    ]);
 }

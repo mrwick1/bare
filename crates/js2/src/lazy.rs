@@ -4,7 +4,7 @@
 //! records the table; a property is made at the first lookup that needs it, with the same attributes, the same native and the same lazy
 //! `length` and `name` as an eager install. So a realm pays for the properties that a script uses, and no more.
 //!
-//! **The flag.** An object that has a table with entries left has [`F_LAZYTAB`]. The flag is the only cost on the paths that do not
+//! **The flag.** An object that has a table with entries left has [`F_LAZYTAB`] (`object.rs`). The flag is the only cost on the paths that do not
 //! look at a name of such an object. Each place that reads, tests, defines, deletes or lists an own property of an object calls
 //! [`Realm::lazy_prep`] (one name) or [`Realm::lazy_all`] (all names) first. Both are called from `fn_prep` and `fn_prep_all`
 //! (`builtins.rs`), from the walks along a prototype chain (`lookup_g`, `proto_setter`, `proto_target`), and from `define_attrs`.
@@ -24,13 +24,10 @@
 //! the rest in table order after a listing. ECMA-262 does not fix this order (owner decision 2, 2026-11-20).
 use crate::builtins::{HIDDEN, NativeFn};
 use crate::interp_rt::{Key, Realm};
-use crate::object::Obj;
+use crate::object::{F_LAZYTAB, Obj};
+use crate::bi_object::Desc;
 use crate::string::{Chars, Str};
 use crate::value::Value;
-
-/// Object header flag: the object has a lazy table with entries left. Bits 16 to 18 are `F_COLL`, bit 19 is `F_DATE` or `F_HOST`, bit 20 is
-/// `F_LAZYM`, bit 23 is `F_PROTO`.
-pub const F_LAZYTAB: u32 = 1 << 21;
 
 /// What a table entry makes.
 #[derive(Clone, Copy)]
@@ -45,6 +42,15 @@ pub(crate) enum Kind {
     Alias,
     /// The same function as the entry of this name in the same table (`Date.prototype.toGMTString` is `toUTCString`), as a method.
     Same(&'static str),
+    /// A method whose key is the well-known symbol `wk[i]` (`bi_symbol.rs`); the name of the entry is the name of the function.
+    Sym(NativeFn, usize),
+    /// A method that is a top-level function of `prelude.js` of this name (`prelude_pre.rs`): a stub that the first call compiles. The
+    /// `length` is the one of the function.
+    Script(&'static str),
+    /// A method with the key `wk[i]` that is the same function as the entry `of` of the same table (`Array.prototype[Symbol.iterator]`).
+    SymSame(usize, &'static str),
+    /// An accessor of two natives, not enumerable and configurable: the getter has `length` 0 and the setter 1 (`Object.prototype.__proto__`).
+    Acc(NativeFn, NativeFn),
 }
 
 /// One entry of a table: a name, the `length` of its function, and what it makes.
@@ -97,6 +103,26 @@ pub(crate) const fn alias(name: &'static str) -> Ent {
     Ent { hash: hash(name), name, len: 0, kind: Kind::Alias }
 }
 
+/// A method `name` with the key `wk[i]` (the symbol that `bi_symbol.rs` makes at index `i`), and `length` 0.
+pub(crate) const fn sym(name: &'static str, i: usize, f: NativeFn) -> Ent {
+    Ent { hash: hash(name), name, len: 0, kind: Kind::Sym(f, i) }
+}
+
+/// A method `name` that is the top-level function `top` of `prelude.js`.
+pub(crate) const fn script(name: &'static str, top: &'static str) -> Ent {
+    Ent { hash: hash(name), name, len: 0, kind: Kind::Script(top) }
+}
+
+/// A method with the key `wk[i]` that is the same function as the entry `of` of the same table.
+pub(crate) const fn sym_same(name: &'static str, i: usize, of: &'static str) -> Ent {
+    Ent { hash: hash(name), name, len: 0, kind: Kind::SymSame(i, of) }
+}
+
+/// An accessor `name` of the natives `get` and `set`.
+pub(crate) const fn acc(name: &'static str, get: NativeFn, set: NativeFn) -> Ent {
+    Ent { hash: hash(name), name, len: 0, kind: Kind::Acc(get, set) }
+}
+
 /// A table of one object, and its place in `Lazy::done`.
 struct Tab {
     obj: Obj,
@@ -118,18 +144,16 @@ pub(crate) struct Lazy {
     /// The function that each method of the global object (and each method of a table with a `Same` entry) was made as (a root), for an
     /// alias of it: a script may delete or replace the property, and `Number.parseInt` is still the original function.
     shared: Vec<(Obj, &'static str, Value)>,
+    /// `%StringIteratorPrototype%` and the shape of its iterators (`bi_string_iter.rs`), made at the first call of `String.prototype[Symbol.iterator]`.
+    pub(crate) str_iter: Option<crate::bi_string_iter::StrIter>,
+    /// The entries of kind [`Kind::Sym`] that are not made: the object, the index in `Realm::wk`, the table and the entry.
+    syms: Vec<(Obj, usize, usize, usize)>,
 }
 
 impl Default for Lazy {
     fn default() -> Self {
-        Lazy { tabs: Vec::new(), done: Vec::new(), bits: Vec::new(), shared: Vec::new() }
+        Lazy { tabs: Vec::new(), done: Vec::new(), bits: Vec::new(), shared: Vec::new(), str_iter: None, syms: Vec::new() }
     }
-}
-
-#[cfg(test)]
-thread_local! {
-    /// A test switch: a realm that makes every table entry at once, as the eager install did.
-    pub(crate) static EAGER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 impl Realm {
@@ -147,13 +171,21 @@ impl Realm {
         }
         let base = l.tabs.iter().map(|t| t.ents.len()).sum::<usize>();
         l.done.resize((base + ents.len()).div_ceil(64), 0);
-        for e in ents {
+        let ti = l.tabs.len();
+        for (j, e) in ents.iter().enumerate() {
             l.bits[(e.hash >> 6) as usize & 63] |= 1 << (e.hash & 63);
+            if let Kind::Sym(_, i) | Kind::SymSame(i, _) = e.kind {
+                l.syms.push((o, i, ti, j));
+            }
         }
-        l.tabs.push(Tab { obj: o, ents, base, left: ents.len(), has_same: ents.iter().any(|e| matches!(e.kind, Kind::Same(_))) });
+        l.tabs.push(Tab { obj: o, ents, base, left: ents.len(), has_same: ents.iter().any(|e| matches!(e.kind, Kind::Same(_) | Kind::SymSame(..))) });
         o.set_flag(F_LAZYTAB);
-        #[cfg(test)]
-        if EAGER.with(|e| e.get()) {
+    }
+
+    /// A test switch: make every entry of every table now, as an eager install did.
+    #[cfg(test)]
+    pub(crate) fn lazy_everything(&mut self) {
+        for o in self.ltab.tabs.iter().map(|t| t.obj).collect::<Vec<_>>() {
             self.lazy_all(o);
         }
     }
@@ -170,7 +202,7 @@ impl Realm {
     #[inline(never)]
     fn lazy_probe(&mut self, o: Obj, k: Str) {
         if k.is_symbol() {
-            return;
+            return self.lazy_probe_sym(o, k);
         }
         let h = match k.cached_hash() {
             0 => k.chars().map_or(0, |c| c.hash()),
@@ -189,6 +221,15 @@ impl Realm {
                 self.lazy_make(ti, j);
             }
             return;
+        }
+    }
+
+    /// The probe for a symbol key: the entries of kind [`Kind::Sym`] that are not made are in `Lazy::syms` (one or two), so a symbol that
+    /// is not one of them costs a short scan.
+    fn lazy_probe_sym(&mut self, o: Obj, k: Str) {
+        let hit = self.ltab.syms.iter().find(|&&(so, wi, _, _)| so == o && self.wk[wi] == k).map(|&(_, _, ti, j)| (ti, j));
+        if let Some((ti, j)) = hit {
+            self.lazy_make(ti, j);
         }
     }
 
@@ -229,11 +270,17 @@ impl Realm {
         if left == 0 && !self.ltab.tabs.iter().any(|t| t.obj == o && t.left > 0) {
             o.clear_flag(F_LAZYTAB);
         }
-        let ka = self.intern(e.name);
+        let ka = match e.kind {
+            Kind::Sym(_, i) | Kind::SymSame(i, _) => {
+                self.ltab.syms.retain(|&(_, _, t, n)| (t, n) != (ti, j));
+                self.wk[i]
+            }
+            _ => self.intern(e.name),
+        };
         let k = Key::Name(ka);
         let keep = o == self.global || self.ltab.tabs[ti].has_same;
         let v = match e.kind {
-            Kind::Method(f) => self.new_native(f, false, e.len, e.name).value(),
+            Kind::Method(f) | Kind::Sym(f, _) => self.new_native(f, false, e.len, e.name).value(),
             Kind::Indexed(f, i) => {
                 let c = self.new_native(f, false, e.len, e.name);
                 c.set_slot(&self.shapes, 1, Value::int(i));
@@ -245,17 +292,47 @@ impl Realm {
                 self.lazy_prep(g, ka);
                 self.shared_fn(g, e.name)
             }
-            Kind::Same(of) => {
+            Kind::Same(of) | Kind::SymSame(_, of) => {
                 let ko = self.intern(of);
                 self.lazy_prep(o, ko);
                 self.shared_fn(o, of)
             }
+            Kind::Script(top) => self.pre_fn(top, e.name).expect("a function of the prelude"),
+            Kind::Acc(get, set) => {
+                let (g, s) = (self.new_native(get, false, 0, "get").value(), self.new_native(set, false, 1, "set").value());
+                let d = Desc { get: Some(g), set: Some(s), e: Some(false), c: Some(true), ..Desc::default() };
+                self.define_own(o, k, &d).expect("define");
+                return;
+            }
         };
-        if keep && !matches!(e.kind, Kind::Alias | Kind::Same(_)) {
+        if keep && !matches!(e.kind, Kind::Alias | Kind::Same(_) | Kind::SymSame(..)) {
             self.ltab.shared.push((o, e.name, v));
             self.keep(v);
         }
         self.define_attrs(o, k, HIDDEN, v).expect("define");
+    }
+
+    /// An arguments object that holds `args`, with the own `Symbol.iterator` that is `%Array.prototype.values%`.
+    #[inline(never)]
+    pub(crate) fn new_args(&mut self, args: &[Value]) -> Value {
+        if self.args_iter.is_undefined() {
+            self.args_iter = self.array_values();
+        }
+        let o = Obj::array(&mut self.heap, &self.shapes, self.s_args, args).expect("memory");
+        o.set_slot(&self.shapes, 0, self.args_iter);
+        o.value()
+    }
+
+    /// `%Array.prototype.values%`: made now if it is not, and the same function whatever a script did to the property since. A realm with
+    /// no compiler cannot make it (it is a function of the prelude): the property is `undefined` there.
+    #[cold]
+    fn array_values(&mut self) -> Value {
+        if self.lazy.is_none() {
+            return Value::UNDEFINED;
+        }
+        let (ap, k) = (self.array_proto, self.intern("values"));
+        self.lazy_prep(ap, k);
+        self.shared_fn(ap, "values")
     }
 
     /// The function that the method `name` of `o` was made as.

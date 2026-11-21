@@ -45,6 +45,7 @@
 //! GC: pending promises are persistent handles (the engine roots them); `MediaError` objects are roots. A queued event holds a node id, a generation and a step, nothing else. The number of
 //! queued media events is capped (`max_media_tasks`, `media-tasks`).
 
+use crate::eng::{Eng, Ops, Slot};
 use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_dom::attr_set_s;
@@ -52,9 +53,7 @@ use crate::browser_lazy::lazy_global;
 use crate::browser_navigation_url::{UErr, clean, parse, scheme_of};
 use crate::browser_scoped::*;
 use bare_html::dom::NodeId;
-use bare_js::eval::Interp;
-use bare_js::value::{ObjId, Value};
-use bare_js_api::{Args, Error as AErr, HostFn, Local, Type};
+use bare_js_api::{Args, Error as AErr, HostFn, Local, Pending, Type};
 use std::cell::{Cell, RefCell};
 
 /// The events that this file fires. The index is the step of a queued task (and the `N` of a handler).
@@ -90,17 +89,17 @@ const NO_SUPPORTED_SOURCE: &str = "Failed to load because no supported source wa
 const NO_SUPPORTED_SOURCES: &str = "The element has no supported sources.";
 
 #[derive(Clone, Copy)]
-struct Made {
-    media: ObjId,
-    audio: ObjId,
-    video: ObjId,
-    ranges: ObjId,
-    error: ObjId,
+struct Made<E: Eng> {
+    media: E::Obj,
+    audio: E::Obj,
+    video: E::Obj,
+    ranges: E::Obj,
+    error: E::Obj,
     /// `HTMLMediaElement`, `HTMLAudioElement`, `HTMLVideoElement`, `TimeRanges`, `MediaError`, `Audio`.
-    ctors: [ObjId; 6],
+    ctors: [E::Obj; 6],
 }
 
-struct M {
+struct M<E: Eng> {
     ns: u8,
     paused: bool,
     /// `networkState` is `IDLE` because of `preload="none"`: `play()` or `preload` goes on.
@@ -118,48 +117,48 @@ struct M {
     current_src: String,
     /// The text of `error.message`.
     message: &'static str,
-    error: Option<ObjId>,
+    error: Option<E::Obj>,
     /// Promises of `play()` that nothing settled.
     pending: Vec<bare_js_api::Persistent>,
     /// Promises that a `pause()` took and a task rejects.
     aborting: Vec<bare_js_api::Persistent>,
 }
 
-impl M {
-    fn new(muted: bool) -> M {
+impl<E: Eng> M<E> {
+    fn new(muted: bool) -> M<E> {
         M { ns: EMPTY_NS, paused: true, suspended: false, eager: false, muted, volume: 1.0, rate: 1.0, default_rate: 1.0, time: 0.0, epoch: 0, current_src: String::new(), message: FORMAT, error: None, pending: Vec::new(), aborting: Vec::new() }
     }
 }
 
 #[derive(Default)]
-pub(crate) struct Media {
-    made: Cell<Option<Made>>,
-    st: RefCell<IdMap<NodeId, M>>,
-    tracks: RefCell<IdMap<NodeId, CaptionTrack>>,
-    lists: RefCell<IdMap<ObjId, CaptionList>>,
-    track_proto: Cell<Option<ObjId>>,
+pub(crate) struct Media<E: Eng> {
+    made: Cell<Option<Made<E>>>,
+    st: RefCell<IdMap<NodeId, M<E>>>,
+    tracks: RefCell<IdMap<NodeId, CaptionTrack<E>>>,
+    lists: RefCell<IdMap<<E as Eng>::Obj, CaptionList>>,
+    track_proto: Cell<Option<<E as Eng>::Obj>>,
 }
 
-pub(crate) fn roots(d: &Dom, out: &mut Roots<'_, '_>) {
-    out.extend(d.media.track_proto.get().map(Value::Object));
-    out.extend(d.media.lists.borrow().keys().copied().map(Value::Object));
+pub(crate) fn roots<E: Eng>(d: &Dom<E>, out: &mut Roots<'_, '_, E>) {
+    out.extend(d.media.track_proto.get().map(E::obj_raw));
+    out.extend(d.media.lists.borrow().keys().copied().map(E::obj_raw));
     for t in d.media.tracks.borrow().values() {
-        out.extend([Value::Object(t.object)]);
-        out.extend(t.cues.map(Value::Object));
-        out.extend(t.active.map(Value::Object));
-        out.extend(t.entries.iter().map(|c| Value::Object(c.object)));
+        out.extend([E::obj_raw(t.object)]);
+        out.extend(t.cues.map(E::obj_raw));
+        out.extend(t.active.map(E::obj_raw));
+        out.extend(t.entries.iter().map(|c| E::obj_raw(c.object)));
     }
 
     if let Some(m) = d.media.made.get() {
-        out.extend([m.media, m.audio, m.video, m.ranges, m.error].into_iter().chain(m.ctors).map(Value::Object));
+        out.extend([m.media, m.audio, m.video, m.ranges, m.error].into_iter().chain(m.ctors).map(E::obj_raw));
         for s in d.media.st.borrow().values() {
-            out.extend(s.error.map(Value::Object));
+            out.extend(s.error.map(E::obj_raw));
         }
     }
 }
 
 /// The prototype of the wrapper of an HTML `audio` or `video` element `n`. Makes the state of the element.
-pub(crate) fn proto(d: &Dom, it: &mut Interp<'_>, n: NodeId, tag: &str) -> R<ObjId> {
+pub(crate) fn proto<E: Eng>(d: &Dom<E>, it: &mut E::Vm, n: NodeId, tag: &str) -> R<E, E::Obj> {
     if tag == "track" {
         return caption_proto(d, it);
     }
@@ -169,18 +168,18 @@ pub(crate) fn proto(d: &Dom, it: &mut Interp<'_>, n: NodeId, tag: &str) -> R<Obj
     Ok(if tag == "audio" { m.audio } else { m.video })
 }
 
-fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<Made> {
+fn ensure<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, Made<E>> {
     match d.media.made.get() {
         Some(m) => Ok(m),
         None => make(d, it),
     }
 }
 
-fn ens(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+fn ens<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
     ensure(d, it).map(|_| ())
 }
 
-fn pick(d: &Dom, i: usize) -> ObjId {
+fn pick<E: Eng>(d: &Dom<E>, i: usize) -> E::Obj {
     d.media.made.get().expect("made").ctors[i]
 }
 
@@ -191,7 +190,7 @@ lazy_global!(lazy_ranges, "TimeRanges", ens, |d| pick(d, 3));
 lazy_global!(lazy_error, "MediaError", ens, |d| pick(d, 4));
 lazy_global!(lazy_audio, "Audio", ens, |d| pick(d, 5));
 
-pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
     table!(lazy = [
         Row::both(1, "HTMLMediaElement", lazy_media),
         Row::both(1, "HTMLAudioElement", lazy_audio_el),
@@ -201,52 +200,52 @@ pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
         Row::both(1, "Audio", lazy_audio),
     ]);
     let g = s.global();
-    d.install_rows(s, &[g], &lazy::T)
+    d.install_rows(s, &[g], &lazy::T::<E>::V)
 }
 
 /// `new HTMLMediaElement()` and the like: `Failed to construct 'X': Illegal constructor`.
-fn illegal_ctor<'s, const I: usize>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn illegal_ctor<'s, const I: usize, E: Eng>(_: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     Err(s.type_error(&format!("Failed to construct '{}': Illegal constructor", ["HTMLMediaElement", "HTMLAudioElement", "HTMLVideoElement", "TimeRanges", "MediaError"][I])))
 }
 
 /// The handler `on<EVENTS[N]>` of a media element.
-fn on_get<'s, const N: usize>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn on_get<'s, const N: usize, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = media_el(d, s, this, None)?;
-    old_v(s, |it| Ok(crate::browser_handlers::handler_get(d, it, Target::Node(n), EVENTS[N])))
+    old_v::<E>(s, |it| Ok(crate::browser_handlers::handler_get(d, it, Target::Node(n), EVENTS[N])))
 }
 
-fn on_set<'s, const N: usize>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn on_set<'s, const N: usize, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = media_el(d, s, this, None)?;
-    let v = raw_arg(s, a, 0);
-    old(s, |it| crate::browser_handlers::handler_set(d, it, Target::Node(n), EVENTS[N], v))?;
+    let v = raw_arg::<E>(s, a, 0);
+    old::<E, _>(s, |it| crate::browser_handlers::handler_set(d, it, Target::Node(n), EVENTS[N], v))?;
     Ok(s.undefined())
 }
 
 #[cold]
 #[inline(never)]
-fn make(d: &Dom, it: &mut Interp<'_>) -> R<Made> {
+fn make<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, Made<E>> {
     let op = it.object_prototype();
     let media = d.obj(it, d.p().html)?;
     let (audio, video, ranges, error) = (d.obj(it, media)?, d.obj(it, media)?, d.obj(it, op)?, d.obj(it, op)?);
     let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
     let mut ctors = [media; 6];
-    let ill: [HS; 5] = [illegal_ctor::<0>, illegal_ctor::<1>, illegal_ctor::<2>, illegal_ctor::<3>, illegal_ctor::<4>];
+    let ill: [HS<E>; 5] = [illegal_ctor::<0, _>, illegal_ctor::<1, _>, illegal_ctor::<2, _>, illegal_ctor::<3, _>, illegal_ctor::<4, _>];
     for (i, (name, proto)) in [("HTMLMediaElement", media), ("HTMLAudioElement", audio), ("HTMLVideoElement", video), ("TimeRanges", ranges), ("MediaError", error)].into_iter().enumerate() {
         let f = d.add_fn_s_obj(it, ill[i], name, 0, HostFn::Ctor)?;
-        it.define_data(f, kp, Value::Object(proto), false, false, false)?;
+        it.define_data(f, kp, E::obj_raw(proto), false, false, false)?;
         crate::browser_lazy::tag(d, it, proto, name)?;
         ctors[i] = f;
     }
     // `Audio` has the prototype of `HTMLAudioElement`.
     let f = d.add_fn_s_obj(it, audio_ctor, "Audio", 0, HostFn::Ctor)?;
-    it.define_data(f, kp, Value::Object(audio), false, false, false)?;
+    it.define_data(f, kp, E::obj_raw(audio), false, false, false)?;
     ctors[5] = f;
     let m = Made { media, audio, video, ranges, error, ctors };
     d.def_get_s(it, error, "code", error_code, None)?;
     d.def_get_s(it, error, "message", error_message, None)?;
     d.def_get_s(it, ranges, "length", ranges_length, None)?;
-    method(d, it, ranges, "end", 1, range_at::<true>)?;
-    method(d, it, ranges, "start", 1, range_at::<false>)?;
+    method(d, it, ranges, "end", 1, range_at::<true, _>)?;
+    method(d, it, ranges, "start", 1, range_at::<false, _>)?;
     // Set at once: the members below make no wrapper, but a failure half way must not leave a made interface with no state.
     for (i, consts) in [
         &[("NETWORK_EMPTY", 0.0), ("NETWORK_IDLE", 1.0), ("NETWORK_LOADING", 2.0), ("NETWORK_NO_SOURCE", 3.0), ("HAVE_NOTHING", 0.0), ("HAVE_METADATA", 1.0), ("HAVE_CURRENT_DATA", 2.0), ("HAVE_FUTURE_DATA", 3.0), ("HAVE_ENOUGH_DATA", 4.0)][..],
@@ -258,14 +257,14 @@ fn make(d: &Dom, it: &mut Interp<'_>) -> R<Made> {
         let (f, proto) = if i == 0 { (ctors[0], media) } else { (ctors[4], error) };
         for &(name, v) in consts {
             let k = d.key(it, name)?;
-            it.define_data(f, k, Value::Number(v), false, true, false)?;
-            it.define_data(proto, k, Value::Number(v), false, true, false)?;
+            it.define_data(f, k, E::num(v), false, true, false)?;
+            it.define_data(proto, k, E::num(v), false, true, false)?;
         }
     }
 
     for (name, g, s) in [
-        ("error", error_of as HS, None),
-        ("src", src_get, Some(src_set as HS)),
+        ("error", error_of as HS<E>, None),
+        ("src", src_get, Some(src_set as HS<E>)),
         ("currentSrc", current_src, None),
         ("crossOrigin", cross_origin, Some(set_cross_origin)),
         ("networkState", network_state, None),
@@ -281,12 +280,12 @@ fn make(d: &Dom, it: &mut Interp<'_>) -> R<Made> {
         ("played", empty_ranges, None),
         ("seekable", empty_ranges, None),
         ("ended", no, None),
-        ("autoplay", flag_get::<0>, Some(flag_set::<0> as HS)),
-        ("loop", flag_get::<1>, Some(flag_set::<1>)),
-        ("controls", flag_get::<2>, Some(flag_set::<2>)),
+        ("autoplay", flag_get::<0, _>, Some(flag_set::<0, _> as HS<E>)),
+        ("loop", flag_get::<1, _>, Some(flag_set::<1, _>)),
+        ("controls", flag_get::<2, _>, Some(flag_set::<2, _>)),
         ("volume", volume, Some(set_volume)),
         ("muted", muted, Some(set_muted)),
-        ("defaultMuted", flag_get::<3>, Some(flag_set::<3>)),
+        ("defaultMuted", flag_get::<3, _>, Some(flag_set::<3, _>)),
         ("srcObject", src_object, Some(set_src_object)),
     ] {
         d.def_get_s(it, media, name, g, s)?;
@@ -296,49 +295,49 @@ fn make(d: &Dom, it: &mut Interp<'_>) -> R<Made> {
     method(d, it, media, "play", 0, play)?;
     method(d, it, media, "pause", 0, pause)?;
     method(d, it, media, "canPlayType", 1, can_play_type)?;
-    let on: [(HS, HS); 11] = [
-        (on_get::<0>, on_set::<0>),
-        (on_get::<1>, on_set::<1>),
-        (on_get::<2>, on_set::<2>),
-        (on_get::<3>, on_set::<3>),
-        (on_get::<4>, on_set::<4>),
-        (on_get::<5>, on_set::<5>),
-        (on_get::<6>, on_set::<6>),
-        (on_get::<7>, on_set::<7>),
-        (on_get::<8>, on_set::<8>),
-        (on_get::<9>, on_set::<9>),
-        (on_get::<10>, on_set::<10>),
+    let on: [(HS<E>, HS<E>); 11] = [
+        (on_get::<0, _>, on_set::<0, _>),
+        (on_get::<1, _>, on_set::<1, _>),
+        (on_get::<2, _>, on_set::<2, _>),
+        (on_get::<3, _>, on_set::<3, _>),
+        (on_get::<4, _>, on_set::<4, _>),
+        (on_get::<5, _>, on_set::<5, _>),
+        (on_get::<6, _>, on_set::<6, _>),
+        (on_get::<7, _>, on_set::<7, _>),
+        (on_get::<8, _>, on_set::<8, _>),
+        (on_get::<9, _>, on_set::<9, _>),
+        (on_get::<10, _>, on_set::<10, _>),
     ];
     for (i, (g, s)) in on.into_iter().enumerate() {
         let name = format!("on{}", EVENTS[i]);
         d.def_get_s(it, media, &name, g, Some(s))?;
     }
     for (name, g, s) in [
-        ("width", video_size::<0> as HS, Some(set_video_size::<0> as HS)),
-        ("height", video_size::<1>, Some(set_video_size::<1>)),
+        ("width", video_size::<0, _> as HS<E>, Some(set_video_size::<0, _> as HS<E>)),
+        ("height", video_size::<1, _>, Some(set_video_size::<1, _>)),
         ("videoWidth", zero_video, None),
         ("videoHeight", zero_video, None),
         ("poster", poster, Some(set_poster)),
-        ("playsInline", flag_get::<4>, Some(flag_set::<4>)),
+        ("playsInline", flag_get::<4, _>, Some(flag_set::<4, _>)),
     ] {
         d.def_get_s(it, video, name, g, s)?;
     }
     // `constructor` comes last, as in Chrome.
     for (proto, f) in [media, audio, video, ranges, error].into_iter().zip(ctors) {
-        it.define_data(proto, kc, Value::Object(f), true, false, true)?;
+        it.define_data(proto, kc, E::obj_raw(f), true, false, true)?;
     }
     d.media.made.set(Some(m));
     Ok(m)
 }
 
 /// A method of an interface: enumerable, as WebIDL makes it.
-fn method(d: &Dom, it: &mut Interp<'_>, target: ObjId, name: &str, len: u32, h: HS) -> R<()> {
+fn method<E: Eng>(d: &Dom<E>, it: &mut E::Vm, target: E::Obj, name: &str, len: u32, h: HS<E>) -> R<E, ()> {
     let (key, f) = (d.key(it, name)?, d.add_fn_s_obj(it, h, name, len, HostFn::Method)?);
-    it.define_data(target, key, Value::Object(f), true, true, true)
+    it.define_data(target, key, E::obj_raw(f), true, true, true)
 }
 
 #[cfg(test)]
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// Have the media interfaces been made? (Tests: a page without media pays nothing.)
     pub(crate) fn media_made(&self) -> bool {
         self.media.made.get().is_some()
@@ -348,7 +347,7 @@ impl Dom {
 // ------------------------------------------------------------------------------------------ this
 
 /// The native `audio` or `video` (`tag`, or either) of `this`, else `Illegal invocation`. Makes the state of an element that has none.
-fn media_el<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, tag: Option<&str>) -> Res<'s, NodeId> {
+fn media_el<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, tag: Option<&str>) -> Res<'s, NodeId> {
     let n = d.el_s(s, this)?;
     let muted = {
         let doc = d.doc.borrow();
@@ -366,41 +365,41 @@ fn media_el<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, tag: Option<&str>)
     Ok(n)
 }
 
-fn with<T>(d: &Dom, n: NodeId, f: impl FnOnce(&mut M) -> T) -> T {
+fn with<T, E: Eng>(d: &Dom<E>, n: NodeId, f: impl FnOnce(&mut M<E>) -> T) -> T {
     f(d.media.st.borrow_mut().get_mut(&n).expect("state made with the wrapper"))
 }
 
-fn zero<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn zero<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     media_el(d, s, this, None)?;
     Ok(s.number(0.0))
 }
 
-fn no<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn no<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     media_el(d, s, this, None)?;
     Ok(s.boolean(false))
 }
 
-fn zero_video<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn zero_video<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     media_el(d, s, this, Some("video"))?;
     Ok(s.number(0.0))
 }
 
-fn duration<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn duration<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     media_el(d, s, this, None)?;
     Ok(s.number(f64::NAN))
 }
 
-fn network_state<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn network_state<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = media_el(d, s, this, None)?;
     Ok(s.number(with(d, n, |m| m.ns) as f64))
 }
 
-fn paused<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn paused<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = media_el(d, s, this, None)?;
     Ok(s.boolean(with(d, n, |m| m.paused)))
 }
 
-fn can_play_type<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn can_play_type<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     media_el(d, s, this, None)?;
     let Some(a0) = a.get(0) else {
         return Err(s.type_error("Failed to execute 'canPlayType' on 'HTMLMediaElement': 1 argument required, but only 0 present."));
@@ -411,22 +410,22 @@ fn can_play_type<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) 
 
 // ------------------------------------------------------------------------------------------ attributes
 
-fn attr_of(d: &Dom, n: NodeId, name: &str) -> Option<String> {
+fn attr_of<E: Eng>(d: &Dom<E>, n: NodeId, name: &str) -> Option<String> {
     let doc = d.doc.borrow();
     doc.find_atom(name).and_then(|a| doc.attr(n, a)).map(str::to_string)
 }
 
-/// The content attributes that a boolean member reflects, in the order of `flag_get::<N>`.
+/// The content attributes that a boolean member reflects, in the order of `flag_get::<N, _>`.
 const FLAGS: [&str; 5] = ["autoplay", "loop", "controls", "muted", "playsinline"];
 
-fn flag_get<'s, const N: usize>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn flag_get<'s, const N: usize, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = media_el(d, s, this, if N == 4 { Some("video") } else { None })?;
     Ok(s.boolean(attr_of(d, n, FLAGS[N]).is_some()))
 }
 
-fn flag_set<'s, const N: usize>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn flag_set<'s, const N: usize, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = media_el(d, s, this, if N == 4 { Some("video") } else { None })?;
-    let v = arg_s(s, a, 0);
+    let v = arg_s::<E>(s, a, 0);
     if s.to_boolean(v) {
         attr_set_s(d, s, n, FLAGS[N], "")?;
     } else {
@@ -435,14 +434,14 @@ fn flag_set<'s, const N: usize>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a:
     Ok(s.undefined())
 }
 
-fn muted<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn muted<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = media_el(d, s, this, None)?;
     Ok(s.boolean(with(d, n, |m| m.muted)))
 }
 
-fn set_muted<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_muted<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = media_el(d, s, this, None)?;
-    let v = arg_s(s, a, 0);
+    let v = arg_s::<E>(s, a, 0);
     let v = s.to_boolean(v);
     if with(d, n, |m| std::mem::replace(&mut m.muted, v)) != v {
         queue_event_s(d, s, n, VOLUMECHANGE)?;
@@ -451,7 +450,7 @@ fn set_muted<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> R
 }
 
 /// `preload` as the reflected enumerated attribute: none, metadata (missing or invalid), auto (empty).
-fn preload<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn preload<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = media_el(d, s, this, None)?;
     let t = match attr_of(d, n, "preload").map(|s| s.to_ascii_lowercase()).as_deref() {
         Some("none") => "none",
@@ -461,7 +460,7 @@ fn preload<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res
     d.js_str_s(s, t)
 }
 
-fn set_preload<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_preload<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = media_el(d, s, this, None)?;
     let t = d.arg_str_s(s, a, 0)?;
     attr_set_s(d, s, n, "preload", &t)?;
@@ -472,7 +471,7 @@ fn set_preload<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) ->
     Ok(s.undefined())
 }
 
-fn cross_origin<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn cross_origin<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = media_el(d, s, this, None)?;
     match attr_of(d, n, "crossorigin") {
         None => Ok(s.null()),
@@ -480,10 +479,10 @@ fn cross_origin<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -
     }
 }
 
-fn set_cross_origin<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_cross_origin<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = media_el(d, s, this, None)?;
-    let a0 = arg_s(s, a, 0);
-    if is_nullish(s, a0) {
+    let a0 = arg_s::<E>(s, a, 0);
+    if is_nullish::<E>(s, a0) {
         d.doc.borrow_mut().remove_attr(n, "crossorigin");
     } else {
         let t = d.string_arg_s(s, a0)?;
@@ -496,7 +495,7 @@ fn set_cross_origin<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s
 const MAX_UNSIGNED: u32 = i32::MAX as u32;
 
 /// `width` (`I` 0) and `height` of a `video`: an unsigned integer, 0 when missing or not a number.
-fn video_size<'s, const I: usize>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn video_size<'s, const I: usize, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = media_el(d, s, this, Some("video"))?;
     let t = attr_of(d, n, ["width", "height"][I]).unwrap_or_default();
     let t = t.trim_start_matches(|c: char| c.is_ascii_whitespace());
@@ -504,21 +503,21 @@ fn video_size<'s, const I: usize>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, 
     Ok(s.number(t[..digits].parse::<u32>().ok().filter(|&v| v <= MAX_UNSIGNED).unwrap_or(0) as f64))
 }
 
-fn set_video_size<'s, const I: usize>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_video_size<'s, const I: usize, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = media_el(d, s, this, Some("video"))?;
-    let a0 = arg_s(s, a, 0);
+    let a0 = arg_s::<E>(s, a, 0);
     let v = bare_js::value::to_uint32(s.to_number(a0)?);
     attr_set_s(d, s, n, ["width", "height"][I], &(if v > MAX_UNSIGNED { 0 } else { v }).to_string())?;
     Ok(s.undefined())
 }
 
-fn poster<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn poster<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = media_el(d, s, this, Some("video"))?;
     let t = attr_of(d, n, "poster").map_or_else(String::new, |r| resolved(d, &r));
     d.js_str_s(s, &t)
 }
 
-fn set_poster<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_poster<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = media_el(d, s, this, Some("video"))?;
     let t = d.arg_str_s(s, a, 0)?;
     attr_set_s(d, s, n, "poster", &t)?;
@@ -528,7 +527,7 @@ fn set_poster<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> 
 // ------------------------------------------------------------------------------------------ the URL
 
 /// The URL of an attribute value: parsed against the base; the text as it is when it does not parse; a scheme in lower case for an opaque one.
-pub(crate) fn resolved(d: &Dom, raw: &str) -> String {
+pub(crate) fn resolved<E: Eng>(d: &Dom<E>, raw: &str) -> String {
     match parse(raw, crate::browser_elements::base(d).as_ref()) {
         Ok(r) => r.href(),
         Err(UErr::Invalid) => raw.to_string(),
@@ -547,7 +546,7 @@ struct Source {
     message: &'static str,
 }
 
-fn classify(d: &Dom, raw: &str) -> Source {
+fn classify<E: Eng>(d: &Dom<E>, raw: &str) -> Source {
     let bad = |current: String, message| Source { ok: false, current, message };
     if raw.is_empty() {
         return bad(String::new(), "MEDIA_ELEMENT_ERROR: Empty src attribute");
@@ -568,13 +567,13 @@ fn classify(d: &Dom, raw: &str) -> Source {
     }
 }
 
-fn src_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn src_get<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = media_el(d, s, this, None)?;
     let t = attr_of(d, n, "src").map_or_else(String::new, |r| resolved(d, &r));
     d.js_str_s(s, &t)
 }
 
-fn src_set<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn src_set<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = media_el(d, s, this, None)?;
     let t = d.arg_str_s(s, a, 0)?;
     attr_set_s(d, s, n, "src", &t)?;
@@ -582,23 +581,23 @@ fn src_set<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res
     Ok(s.undefined())
 }
 
-fn current_src<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn current_src<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = media_el(d, s, this, None)?;
     let t = with(d, n, |m| m.current_src.clone());
     d.js_str_s(s, &t)
 }
 
-fn src_object<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn src_object<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     media_el(d, s, this, None)?;
     Ok(s.null())
 }
 
 /// `srcObject = null` runs the load algorithm. A value that is not `null` or `undefined` would be a `MediaStream` or a `MediaSourceHandle`: this
 /// engine has neither, so it is the `TypeError` of a value of another type.
-fn set_src_object<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_src_object<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = media_el(d, s, this, None)?;
-    let a0 = arg_s(s, a, 0);
-    if !is_nullish(s, a0) {
+    let a0 = arg_s::<E>(s, a, 0);
+    if !is_nullish::<E>(s, a0) {
         return Err(s.type_error("Failed to set the 'srcObject' property on 'HTMLMediaElement': The provided value is not of type '(MediaSourceHandle or MediaStream)'."));
     }
     load_algorithm(d, s, n)?;
@@ -606,7 +605,7 @@ fn set_src_object<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>)
 }
 
 /// `setAttribute('src', ...)` on any element: an `audio` or `video` runs the load algorithm.
-pub(crate) fn src_changed<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId) -> Res<'s, ()> {
+pub(crate) fn src_changed<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, n: NodeId) -> Res<'s, ()> {
     if d.media.tracks.borrow().contains_key(&n) {
         {
             let mut ts = d.media.tracks.borrow_mut();
@@ -616,7 +615,7 @@ pub(crate) fn src_changed<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId) -> Res<'s,
             t.cues = None;
             t.active = None;
         }
-        return lift(s, caption_start(d, n));
+        return lift::<E, _>(s, caption_start(d, n));
     }
     if d.media.made.get().is_some() && d.media.st.borrow().contains_key(&n) {
         load_algorithm(d, s, n)?;
@@ -627,20 +626,20 @@ pub(crate) fn src_changed<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId) -> Res<'s,
 // ------------------------------------------------------------------------------------------ numbers
 
 /// The finite number of a setter, or the `TypeError` of a `double`.
-fn finite<'s>(s: &mut Sc<'s, '_>, name: &str, v: Local<'s>) -> Res<'s, f64> {
+fn finite<'s, E: Eng>(s: &mut Sc<'s, E>, name: &str, v: Local<'s>) -> Res<'s, f64> {
     let x = s.to_number(v)?;
     if x.is_finite() { Ok(x) } else { Err(s.type_error(&format!("Failed to set the '{name}' property on 'HTMLMediaElement': The provided double value is non-finite."))) }
 }
 
-fn volume<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn volume<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = media_el(d, s, this, None)?;
     Ok(s.number(with(d, n, |m| m.volume)))
 }
 
-fn set_volume<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_volume<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = media_el(d, s, this, None)?;
-    let a0 = arg_s(s, a, 0);
-    let v = finite(s, "volume", a0)?;
+    let a0 = arg_s::<E>(s, a, 0);
+    let v = finite::<E>(s, "volume", a0)?;
     if !(0.0..=1.0).contains(&v) {
         return Err(d.dom_err_s(s, "IndexSizeError", &format!("Failed to set the 'volume' property on 'HTMLMediaElement': The volume provided ({v}) is outside the range [0, 1].")));
     }
@@ -650,15 +649,15 @@ fn set_volume<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> 
     Ok(s.undefined())
 }
 
-fn current_time<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn current_time<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = media_el(d, s, this, None)?;
     Ok(s.number(with(d, n, |m| m.time)))
 }
 
-fn set_current_time<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_current_time<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = media_el(d, s, this, None)?;
-    let a0 = arg_s(s, a, 0);
-    let v = finite(s, "currentTime", a0)?;
+    let a0 = arg_s::<E>(s, a, 0);
+    let v = finite::<E>(s, "currentTime", a0)?;
     with(d, n, |m| m.time = v);
     Ok(s.undefined())
 }
@@ -668,15 +667,15 @@ fn rate_ok(v: f64) -> bool {
     v == 0.0 || (0.0625..=16.0).contains(&v)
 }
 
-fn playback_rate<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn playback_rate<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = media_el(d, s, this, None)?;
     Ok(s.number(with(d, n, |m| m.rate)))
 }
 
-fn set_playback_rate<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_playback_rate<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = media_el(d, s, this, None)?;
-    let a0 = arg_s(s, a, 0);
-    let v = finite(s, "playbackRate", a0)?;
+    let a0 = arg_s::<E>(s, a, 0);
+    let v = finite::<E>(s, "playbackRate", a0)?;
     if !rate_ok(v) {
         return Err(d.dom_err_s(s, "NotSupportedError", &format!("Failed to set the 'playbackRate' property on 'HTMLMediaElement': The provided playback rate ({v}) is not in the supported playback range.")));
     }
@@ -686,16 +685,16 @@ fn set_playback_rate<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'
     Ok(s.undefined())
 }
 
-fn default_rate<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn default_rate<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = media_el(d, s, this, None)?;
     Ok(s.number(with(d, n, |m| m.default_rate)))
 }
 
 /// A value that is out of range is ignored, not an error (Chrome 155).
-fn set_default_rate<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_default_rate<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = media_el(d, s, this, None)?;
-    let a0 = arg_s(s, a, 0);
-    let v = finite(s, "defaultPlaybackRate", a0)?;
+    let a0 = arg_s::<E>(s, a, 0);
+    let v = finite::<E>(s, "defaultPlaybackRate", a0)?;
     if rate_ok(v) && with(d, n, |m| std::mem::replace(&mut m.default_rate, v)) != v {
         queue_event_s(d, s, n, RATECHANGE)?;
     }
@@ -705,28 +704,28 @@ fn set_default_rate<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s
 // ------------------------------------------------------------------------------------------ TimeRanges and MediaError
 
 /// Every `TimeRanges` is empty. The brand is the prototype.
-fn ranges_this<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, ()> {
+fn ranges_this<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, ()> {
     let want = d.media.made.get().map(|m| m.ranges);
-    let ok = is_object(s, this)
+    let ok = is_object::<E>(s, this)
         && match s.get_prototype_of(this) {
-            Ok(Some(p)) => obj_id(s, p) == want,
+            Ok(Some(p)) => obj_id::<E>(s, p) == want,
             _ => false,
         };
     if ok { Ok(()) } else { Err(s.type_error("Illegal invocation")) }
 }
 
-fn empty_ranges<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn empty_ranges<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     media_el(d, s, this, None)?;
     d.obj_with_s(s, d.media.made.get().expect("made").ranges)
 }
 
-fn ranges_length<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn ranges_length<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     ranges_this(d, s, this)?;
     Ok(s.number(0.0))
 }
 
 /// `end(i)` (`END`) and `start(i)`.
-fn range_at<'s, const END: bool>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn range_at<'s, const END: bool, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let name = if END { "end" } else { "start" };
     ranges_this(d, s, this)?;
     let Some(a0) = a.get(0) else {
@@ -736,7 +735,7 @@ fn range_at<'s, const END: bool>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a
     Err(d.dom_err_s(s, "IndexSizeError", &format!("Failed to execute '{name}' on 'TimeRanges': The index provided ({i}) is greater than {}the maximum bound (0).", if i == 0 { "or equal to " } else { "" })))
 }
 
-fn error_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn error_of<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = media_el(d, s, this, None)?;
     Ok(match with(d, n, |m| m.error) {
         Some(o) => d.obj_local(s, o),
@@ -745,20 +744,20 @@ fn error_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Re
 }
 
 /// The element that holds the `MediaError` `this`, as its message.
-fn error_this<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, &'static str> {
-    let found = obj_id(s, this).and_then(|o| d.media.st.borrow().values().find(|m| m.error == Some(o)).map(|m| m.message));
+fn error_this<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, &'static str> {
+    let found = obj_id::<E>(s, this).and_then(|o| d.media.st.borrow().values().find(|m| m.error == Some(o)).map(|m| m.message));
     match found {
         Some(m) => Ok(m),
         None => Err(s.type_error("Illegal invocation")),
     }
 }
 
-fn error_code<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn error_code<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     error_this(d, s, this)?;
     Ok(s.number(4.0))
 }
 
-fn error_message<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn error_message<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let m = error_this(d, s, this)?;
     d.js_str_s(s, m)
 }
@@ -766,22 +765,22 @@ fn error_message<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) 
 // ------------------------------------------------------------------------------------------ the algorithms
 
 /// Queue the step `step` of element `n`, `delay` ms after the tasks that are due now.
-fn queue(d: &Dom, n: NodeId, step: u8, delay: f64) -> R<()> {
+fn queue<E: Eng>(d: &Dom<E>, n: NodeId, step: u8, delay: f64) -> R<E, ()> {
     let epoch = with(d, n, |m| m.epoch);
     d.queue_media(n, epoch, step, delay)
 }
 
 /// `queue` for a handler: the failure as an error of the interface.
-fn queue_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId, step: u8, delay: f64) -> Res<'s, ()> {
-    lift(s, queue(d, n, step, delay))
+fn queue_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, n: NodeId, step: u8, delay: f64) -> Res<'s, ()> {
+    lift::<E, _>(s, queue(d, n, step, delay))
 }
 
-fn queue_event_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId, ev: u8) -> Res<'s, ()> {
+fn queue_event_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, n: NodeId, ev: u8) -> Res<'s, ()> {
     queue_s(d, s, n, ev, 0.0)
 }
 
 /// Reject each promise of `list` with a `DOMException`.
-fn reject_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, list: Vec<bare_js_api::Persistent>, name: &str, msg: &str) -> Res<'s, ()> {
+fn reject_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, list: Vec<bare_js_api::Persistent>, name: &str, msg: &str) -> Res<'s, ()> {
     for p in list {
         let p = s.local(&p);
         match d.dom_err_s(s, name, msg) {
@@ -793,12 +792,12 @@ fn reject_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, list: Vec<bare_js_api::Persistent>,
 }
 
 /// `reject_s` for a task.
-fn reject(d: &Dom, it: &mut Interp<'_>, list: Vec<bare_js_api::Persistent>, name: &str, msg: &str) -> R<()> {
-    run(it, |s| reject_s(d, s, list, name, msg))
+fn reject<E: Eng>(d: &Dom<E>, it: &mut E::Vm, list: Vec<bare_js_api::Persistent>, name: &str, msg: &str) -> R<E, ()> {
+    run::<E, _>(it, |s| reject_s(d, s, list, name, msg))
 }
 
 /// The media element load algorithm (see the header).
-fn load_algorithm<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId) -> Res<'s, ()> {
+fn load_algorithm<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, n: NodeId) -> Res<'s, ()> {
     let aborted = {
         let mut aborted = Vec::new();
         with(d, n, |m| m.epoch = m.epoch.wrapping_add(1));
@@ -836,14 +835,14 @@ fn load_algorithm<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId) -> Res<'s, ()> {
     reject_s(d, s, aborted, "AbortError", "The play() request was interrupted by a new load request. https://goo.gl/LdLk22")
 }
 
-fn load<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn load<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = media_el(d, s, this, None)?;
     load_algorithm(d, s, n)?;
     with(d, n, |m| m.eager = true);
     Ok(s.undefined())
 }
 
-fn pause<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn pause<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = media_el(d, s, this, None)?;
     if with(d, n, |m| m.ns == EMPTY_NS) {
         with(d, n, |m| m.ns = NO_SOURCE_NS);
@@ -866,7 +865,7 @@ fn pause<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'
 
 /// `play()` always gives a promise: a bad `this` is a rejected one (WebIDL). The promise of a source that failed rejects at once, and the one of a
 /// source that is loading rejects with the failure.
-fn play<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn play<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let r = (|| {
         let n = match media_el(d, s, this, None) {
             Ok(n) => n,
@@ -912,8 +911,8 @@ fn play<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s
 }
 
 /// `new Audio(src)`: an `audio` with `preload="auto"`, and `src` when the argument is not `undefined`.
-fn audio_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    let a0 = arg_s(s, a, 0);
+fn audio_ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let a0 = arg_s::<E>(s, a, 0);
     let src = if s.type_of(a0) == Type::Undefined { None } else { Some(d.string_arg_s(s, a0)?) };
     let n = {
         let mut doc = d.doc.borrow_mut();
@@ -934,15 +933,15 @@ fn audio_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res
 
 // ------------------------------------------------------------------------------------------ tasks
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// Does anything listen for `ty` at `n`, on the way up, or at the window?
-    fn media_heard(&self, it: &mut Interp<'_>, n: NodeId, ty: &str) -> R<bool> {
+    fn media_heard(&self, it: &mut E::Vm, n: NodeId, ty: &str) -> R<E, bool> {
         let (doc, st) = (self.doc.borrow(), self.st.borrow());
-        let on = |t: Target| st.listeners.get(&t).is_some_and(|v| v.iter().any(|l| &*l.ty == ty));
+        let on = |t: Target<E>| st.listeners.get(&t).is_some_and(|v| v.iter().any(|l| &*l.ty == ty));
         let mut cur = n;
         let mut found = on(Target::Node(cur));
         while let Some(p) = doc.parent(cur) {
-            it.charge(1)?;
+            it.charge_o(1)?;
             cur = p;
             found |= on(Target::Node(cur));
         }
@@ -950,7 +949,7 @@ impl Dom {
     }
 
     /// Fire the event `ev` at `n`: trusted, no bubbling, cancelable (Chrome 155 makes them so).
-    fn media_fire(&self, it: &mut Interp<'_>, n: NodeId, ev: u8) -> R<()> {
+    fn media_fire(&self, it: &mut E::Vm, n: NodeId, ev: u8) -> R<E, ()> {
         let ty = EVENTS[ev as usize];
         if !self.media_heard(it, n, ty)? {
             return Ok(());
@@ -961,7 +960,7 @@ impl Dom {
     }
 
     /// Run a queued step. A step of an older generation does nothing.
-    pub(crate) fn media_task(&self, it: &mut Interp<'_>, n: NodeId, epoch: u32, step: u8) -> R<()> {
+    pub(crate) fn media_task(&self, it: &mut E::Vm, n: NodeId, epoch: u32, step: u8) -> R<E, ()> {
         if step == 104 { return caption_load(self, it, n, epoch); }
         if step >= crate::browser_img::LOADED {
             return self.img_task(it, n, step);
@@ -983,7 +982,7 @@ impl Dom {
 }
 
 /// The resource selection, at the end of the script that asked for it: the state of the element. `loadstart` follows in a task (`start`).
-fn select(d: &Dom, n: NodeId) -> R<()> {
+fn select<E: Eng>(d: &Dom<E>, n: NodeId) -> R<E, ()> {
     let Some(raw) = attr_of(d, n, "src") else {
         with(d, n, |m| m.ns = EMPTY_NS);
         return Ok(());
@@ -1001,7 +1000,7 @@ fn select(d: &Dom, n: NodeId) -> R<()> {
 }
 
 /// `loadstart`, then the failure (or `suspend` for `preload="none"`).
-fn start(d: &Dom, it: &mut Interp<'_>, n: NodeId, epoch: u32) -> R<()> {
+fn start<E: Eng>(d: &Dom<E>, it: &mut E::Vm, n: NodeId, epoch: u32) -> R<E, ()> {
     d.media_fire(it, n, LOADSTART)?;
     let idle = with(d, n, |m| m.suspended);
     // A handler of `loadstart` may have run the load algorithm: the failure belongs to the old load.
@@ -1012,7 +1011,7 @@ fn start(d: &Dom, it: &mut Interp<'_>, n: NodeId, epoch: u32) -> R<()> {
 }
 
 /// The load failed: `error`, then the promises of `play()` reject. The list is taken before the event, so a `pause()` in a handler finds none.
-fn fail(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> R<()> {
+fn fail<E: Eng>(d: &Dom<E>, it: &mut E::Vm, n: NodeId) -> R<E, ()> {
     let e = d.obj(it, d.media.made.get().expect("made").error)?;
     let list = with(d, n, |m| {
         m.ns = NO_SOURCE_NS;
@@ -1033,23 +1032,23 @@ struct CaptionList {
     ids: Vec<NodeId>,
 }
 
-struct CaptionTrack {
-    object: ObjId,
+struct CaptionTrack<E: Eng> {
+    object: E::Obj,
     mode: String,
     epoch: u32,
     ready: u8,
-    cues: Option<ObjId>,
-    active: Option<ObjId>,
-    entries: Vec<CaptionCue>,
+    cues: Option<E::Obj>,
+    active: Option<E::Obj>,
+    entries: Vec<CaptionCue<E>>,
 }
 
-struct CaptionCue {
-    object: ObjId,
+struct CaptionCue<E: Eng> {
+    object: E::Obj,
     line: Option<f64>,
     size: f64,
 }
 
-fn caption_proto(d: &Dom, it: &mut Interp<'_>) -> R<ObjId> {
+fn caption_proto<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, E::Obj> {
     if let Some(p) = d.media.track_proto.get() { return Ok(p); }
     let p = d.obj(it, d.p().html)?;
     crate::browser_lazy::tag(d, it, p, "HTMLTrackElement")?;
@@ -1060,59 +1059,59 @@ fn caption_proto(d: &Dom, it: &mut Interp<'_>) -> R<ObjId> {
     Ok(p)
 }
 
-fn caption_node<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
+fn caption_node<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, NodeId> {
     let n = d.el_s(s, this)?;
     if !d.doc.borrow().is_html(n, "track") { return Err(s.type_error("Illegal invocation")); }
     Ok(n)
 }
 
-fn caption_track<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn caption_track<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = caption_node(d, s, this)?;
     caption_object(d, s, n)
 }
 
-fn caption_object<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId) -> Res<'s, Local<'s>> {
+fn caption_object<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, n: NodeId) -> Res<'s, Local<'s>> {
     let made = d.media.tracks.borrow().get(&n).map(|t| t.object);
     if let Some(o) = made { return Ok(d.obj_local(s, o)); }
     if d.media.tracks.borrow().len() >= d.lim.max_wrappers { return Err(d.lim_s(s, "dom-wrappers")); }
     let o = s.new_object()?;
-    let id = obj_id(s, o).expect("an object");
-    old(s, |it| crate::browser_lazy::tag(d, it, id, "TextTrack"))?;
+    let id = obj_id::<E>(s, o).expect("an object");
+    old::<E, _>(s, |it| crate::browser_lazy::tag(d, it, id, "TextTrack"))?;
     table!(rows1 = [
         Row::get(1, "mode", caption_mode, Some(caption_set_mode)),
         Row::get(1, "cues", caption_cues, None),
         Row::get(1, "activeCues", caption_active, None),
     ]);
     let targets = [o];
-    d.install_rows(s, &targets, &rows1::T)?;
+    d.install_rows(s, &targets, &rows1::T::<E>::V)?;
     d.media.tracks.borrow_mut().insert(n, CaptionTrack { object: id, mode: "disabled".into(), epoch: 0, ready: 0, cues: None, active: None, entries: Vec::new() });
-    lift(s, caption_start(d, n))?;
+    lift::<E, _>(s, caption_start(d, n))?;
     Ok(o)
 }
 
-fn caption_receiver<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
+fn caption_receiver<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, NodeId> {
     s.charge(d.media.tracks.borrow().len() as u64 + 1)?;
-    if let Some(o) = obj_id(s, this)
+    if let Some(o) = obj_id::<E>(s, this)
         && let Some((&n, _)) = d.media.tracks.borrow().iter().find(|(_, t)| t.object == o) { return Ok(n); }
     Err(s.type_error("Illegal invocation"))
 }
 
-fn caption_mode<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn caption_mode<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = caption_receiver(d, s, this)?;
     let mode = d.media.tracks.borrow()[&n].mode.clone();
     d.js_str_s(s, &mode)
 }
 
-fn caption_set_mode<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn caption_set_mode<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = caption_receiver(d, s, this)?;
     let mode = d.arg_str_s(s, a, 0)?;
     if !["disabled", "hidden", "showing"].contains(&mode.as_str()) { return Ok(s.undefined()); }
     d.media.tracks.borrow_mut().get_mut(&n).expect("receiver checked").mode = mode;
-    lift(s, caption_start(d, n))?;
+    lift::<E, _>(s, caption_start(d, n))?;
     Ok(s.undefined())
 }
 
-fn caption_cues<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn caption_cues<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = caption_receiver(d, s, this)?;
     let cues = {
         let ts = d.media.tracks.borrow();
@@ -1122,22 +1121,22 @@ fn caption_cues<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -
     Ok(match cues { Some(o) => d.obj_local(s, o), None => s.null() })
 }
 
-fn text_tracks<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn text_tracks<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = media_el(d, s, this, None)?;
     s.charge(d.media.lists.borrow().len() as u64 + 1)?;
     let found = d.media.lists.borrow().iter().find(|(_, l)| l.node == n).map(|(&o, _)| o);
     if let Some(o) = found { return Ok(d.obj_local(s, o)); }
     if d.media.lists.borrow().len() >= d.lim.max_wrappers { return Err(d.lim_s(s, "dom-wrappers")); }
     let p = s.new_object()?;
-    let pid = obj_id(s, p).expect("an object");
-    old(s, |it| crate::browser_lazy::tag(d, it, pid, "TextTrackList"))?;
+    let pid = obj_id::<E>(s, p).expect("an object");
+    old::<E, _>(s, |it| crate::browser_lazy::tag(d, it, pid, "TextTrackList"))?;
     d.def_get_l(s, p, "length", caption_list_length, None)?;
     let o = d.new_source_s(s, crate::browser_sources::Source::Captions, Some(pid))?;
     d.media.lists.borrow_mut().insert(o, CaptionList { node: n, revision: None, ids: Vec::new() });
     Ok(d.obj_local(s, o))
 }
 
-fn caption_prepare<'s>(d: &Dom, s: &mut Sc<'s, '_>, owner: ObjId) -> Res<'s, ()> {
+fn caption_prepare<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, owner: E::Obj) -> Res<'s, ()> {
     let (node, old) = { let ls = d.media.lists.borrow(); let l = &ls[&owner]; (l.node, l.revision) };
     let revision = d.doc.borrow().revision();
     if old == Some(revision) { return Ok(()); }
@@ -1159,33 +1158,32 @@ fn caption_prepare<'s>(d: &Dom, s: &mut Sc<'s, '_>, owner: ObjId) -> Res<'s, ()>
     Ok(())
 }
 
-fn caption_list_length<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
-    let Some(o) = obj_id(s, this).filter(|o| d.media.lists.borrow().contains_key(o)) else { return Err(s.type_error("Illegal invocation")); };
+fn caption_list_length<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let Some(o) = obj_id::<E>(s, this).filter(|o| d.media.lists.borrow().contains_key(o)) else { return Err(s.type_error("Illegal invocation")); };
     caption_prepare(d, s, o)?;
     let len = d.media.lists.borrow()[&o].ids.len();
     Ok(s.number(len as f64))
 }
 
-pub(crate) fn caption_len(d: &Dom, owner: ObjId) -> Option<Result<usize, bare_js::heap::HeapError>> {
+pub(crate) fn caption_len<E: Eng>(d: &Dom<E>, owner: E::Obj) -> Option<Result<usize, Pending>> {
     let ls = d.media.lists.borrow();
     let l = ls.get(&owner)?;
-    Some(if l.revision == Some(d.doc.borrow().revision()) { Ok(l.ids.len()) } else { Err(bare_js::heap::HeapError::NeedsHost { owner, index: 0 }) })
+    Some(if l.revision == Some(d.doc.borrow().revision()) { Ok(l.ids.len()) } else { Err(Pending::Fill(0)) })
 }
 
-pub(crate) fn caption_item(d: &Dom, owner: ObjId, index: usize) -> Option<Result<bare_js::heap::Slot, bare_js::heap::HeapError>> {
-    use bare_js::heap::{Slot, HeapError};
+pub(crate) fn caption_item<E: Eng>(d: &Dom<E>, owner: E::Obj, index: usize) -> Option<Result<Slot<E>, Pending>> {
     let ls = d.media.lists.borrow();
     let l = ls.get(&owner)?;
-    if l.revision != Some(d.doc.borrow().revision()) { return Some(Err(HeapError::NeedsHost { owner, index: index.min(u32::MAX as usize) as u32 })); }
+    if l.revision != Some(d.doc.borrow().revision()) { return Some(Err(Pending::Fill(index.min(u32::MAX as usize) as u32))); }
     Some(Ok(match l.ids.get(index) {
         None => Slot::Absent,
         Some(n) => match d.media.tracks.borrow().get(n) { Some(t) => Slot::Ready(t.object), None => Slot::Missing },
     }))
 }
 
-pub(crate) fn caption_fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<bool> {
+pub(crate) fn caption_fill<E: Eng>(d: &Dom<E>, it: &mut E::Vm, owner: E::Obj, index: u32) -> R<E, bool> {
     if !d.media.lists.borrow().contains_key(&owner) { return Ok(false); }
-    run(it, |s| {
+    run::<E, _>(it, |s| {
         caption_prepare(d, s, owner)?;
         let n = d.media.lists.borrow()[&owner].ids.get(index as usize).copied();
         if let Some(n) = n { caption_object(d, s, n)?; }
@@ -1193,18 +1191,18 @@ pub(crate) fn caption_fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId, index: u3
     })
 }
 
-fn caption_ready<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn caption_ready<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = caption_node(d, s, this)?;
     let ready = d.media.tracks.borrow().get(&n).map_or(0, |t| t.ready);
     Ok(s.number(ready as f64))
 }
 
-fn caption_src<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn caption_src<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = caption_node(d, s, this)?;
     d.js_str_s(s, &attr_of(d, n, "src").unwrap_or_default())
 }
 
-fn caption_set_src<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn caption_set_src<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = caption_node(d, s, this)?;
     let src = d.arg_str_s(s, a, 0)?;
     attr_set_s(d, s, n, "src", &src)?;
@@ -1212,7 +1210,7 @@ fn caption_set_src<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>
     Ok(s.undefined())
 }
 
-fn caption_start(d: &Dom, n: NodeId) -> R<()> {
+fn caption_start<E: Eng>(d: &Dom<E>, n: NodeId) -> R<E, ()> {
     let mut ts = d.media.tracks.borrow_mut();
     let t = ts.get_mut(&n).expect("track made");
     if t.mode == "disabled" || t.ready != 0 || attr_of(d, n, "src").is_none_or(|s| s.is_empty()) { return Ok(()); }
@@ -1221,11 +1219,11 @@ fn caption_start(d: &Dom, n: NodeId) -> R<()> {
     Ok(())
 }
 
-fn caption_load(d: &Dom, it: &mut Interp<'_>, n: NodeId, epoch: u32) -> R<()> {
+fn caption_load<E: Eng>(d: &Dom<E>, it: &mut E::Vm, n: NodeId, epoch: u32) -> R<E, ()> {
     if d.media.tracks.borrow().get(&n).is_none_or(|t| t.epoch != epoch || t.ready != 1) { return Ok(()); }
     let src = attr_of(d, n, "src").unwrap_or_default();
     if src.len() > d.lim.max_string_bytes { return Err(d.lim("dom-string")); }
-    it.charge(src.len() as u64 + 1)?;
+    it.charge_o(src.len() as u64 + 1)?;
     // Only in-memory WebVTT is supported. Other resources fail rather than claim loaded captions.
     let payload = crate::images::data_url(&src);
     let parsed = payload.as_deref().and_then(|b| std::str::from_utf8(b).ok()).and_then(parse_captions);
@@ -1235,7 +1233,7 @@ fn caption_load(d: &Dom, it: &mut Interp<'_>, n: NodeId, epoch: u32) -> R<()> {
         let mut entries = Vec::new();
         for (i, (start, end, text)) in cues.into_iter().enumerate() {
             let o = d.obj(it, it.object_prototype())?;
-            for (key, value) in [("startTime", Value::Number(start)), ("endTime", Value::Number(end))] {
+            for (key, value) in [("startTime", E::num(start)), ("endTime", E::num(end))] {
                 let k = d.key(it, key)?;
                 it.define_data(o, k, value, true, true, true)?;
             }
@@ -1245,14 +1243,14 @@ fn caption_load(d: &Dom, it: &mut Interp<'_>, n: NodeId, epoch: u32) -> R<()> {
             d.def_get_s(it, o, "line", cue_line, Some(set_cue_line))?;
             d.def_get_s(it, o, "size", cue_size, Some(set_cue_size))?;
             let k = d.key(it, &i.to_string())?;
-            it.define_data(list, k, Value::Object(o), false, true, false)?;
+            it.define_data(list, k, E::obj_raw(o), false, true, false)?;
             entries.push(CaptionCue { object: o, line: None, size: 100.0 });
         }
         let k = d.key(it, "length")?;
-        it.define_data(list, k, Value::Number(entries.len() as f64), false, false, false)?;
+        it.define_data(list, k, E::num(entries.len() as f64), false, false, false)?;
         let active = d.obj(it, it.object_prototype())?;
         let k = d.key(it, "length")?;
-        it.define_data(active, k, Value::Number(0.0), false, false, false)?;
+        it.define_data(active, k, E::num(0.0), false, false, false)?;
         let mut ts = d.media.tracks.borrow_mut();
         let t = ts.get_mut(&n).expect("track");
         t.active = Some(active);
@@ -1300,10 +1298,10 @@ fn caption_timestamp(s: &str) -> Option<f64> {
     Some(hours as f64 * 3600.0 + minutes as f64 * 60.0 + seconds as f64 + fraction.parse::<u32>().ok()? as f64 / 1000.0)
 }
 
-fn with_cue<'s, T>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, f: impl FnOnce(&mut CaptionCue) -> T) -> Res<'s, T> {
+fn with_cue<'s, T, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, f: impl FnOnce(&mut CaptionCue<E>) -> T) -> Res<'s, T> {
     s.charge(d.media.tracks.borrow().len() as u64 + 1)?;
     s.charge(d.media.tracks.borrow().values().map(|t| t.entries.len() as u64 + 1).sum::<u64>())?;
-    if let Some(o) = obj_id(s, this) {
+    if let Some(o) = obj_id::<E>(s, this) {
         for t in d.media.tracks.borrow_mut().values_mut() {
             if let Some(c) = t.entries.iter_mut().find(|c| c.object == o) { return Ok(f(c)); }
         }
@@ -1311,30 +1309,30 @@ fn with_cue<'s, T>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, f: impl FnOnce(
     Err(s.type_error("Illegal invocation"))
 }
 
-fn cue_line<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn cue_line<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     match with_cue(d, s, this, |c| c.line)? { Some(n) => Ok(s.number(n)), None => d.js_str_s(s, "auto") }
 }
-fn set_cue_line<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_cue_line<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     with_cue(d, s, this, |_| ())?;
-    let v = arg_s(s, a, 0);
-    let line = if s.type_of(v) == Type::String && d.string_arg_s(s, v)? == "auto" { None } else { Some(finite(s, "line", v)?) };
+    let v = arg_s::<E>(s, a, 0);
+    let line = if s.type_of(v) == Type::String && d.string_arg_s(s, v)? == "auto" { None } else { Some(finite::<E>(s, "line", v)?) };
     with_cue(d, s, this, |c| c.line = line)?;
     Ok(s.undefined())
 }
-fn cue_size<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn cue_size<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let size = with_cue(d, s, this, |c| c.size)?;
     Ok(s.number(size))
 }
-fn set_cue_size<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_cue_size<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     with_cue(d, s, this, |_| ())?;
-    let a0 = arg_s(s, a, 0);
-    let size = finite(s, "size", a0)?;
+    let a0 = arg_s::<E>(s, a, 0);
+    let size = finite::<E>(s, "size", a0)?;
     if !(0.0..=100.0).contains(&size) { return Err(d.dom_err_s(s, "IndexSizeError", "Size must be between 0 and 100")); }
     with_cue(d, s, this, |c| c.size = size)?;
     Ok(s.undefined())
 }
 
-fn caption_active<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn caption_active<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = caption_receiver(d, s, this)?;
     let active = {
         let ts = d.media.tracks.borrow();
@@ -1347,7 +1345,7 @@ fn caption_active<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>)
 // ------------------------------------------------------------------------------------------ arena reclaim (`browser_reclaim.rs`)
 
 /// The media elements, their caption tracks and caption lists.
-pub(crate) fn held(d: &Dom, out: &mut Vec<NodeId>) {
+pub(crate) fn held<E: Eng>(d: &Dom<E>, out: &mut Vec<NodeId>) {
     out.extend(d.media.st.borrow().keys().copied());
     out.extend(d.media.tracks.borrow().keys().copied());
     for l in d.media.lists.borrow().values() {

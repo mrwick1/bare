@@ -41,16 +41,15 @@
 //! Known deviations: nested `table` and `select` are read by the page rules of the tree builder (no table or select insertion modes). A temporary
 //! text buffer that grew by joining texts counts the wasted bytes against the text cap. Cloning preserves the "already started" flag.
 
+use crate::eng::{Eng, Fault, Ops};
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_js_api::{Args, Local, Type};
 use crate::browser_dom::{next_in};
 use bare_html::dom::{Document, NodeData, NodeId, Ns};
 use bare_html::tree::{FragmentError, FragmentLimits, parse_fragment};
-use bare_js::eval::{Error, Interp};
-use bare_js::value::Value;
 
-type V = R<Value>;
+type V<E: Eng> = R<E, E::Raw>;
 
 /// Elements whose text is written as it is.
 const RAW_PARENTS: &[&str] = &["style", "script", "xmp", "iframe", "noembed", "noframes", "plaintext", "noscript"];
@@ -59,7 +58,7 @@ const RAW_PARENTS: &[&str] = &["style", "script", "xmp", "iframe", "noembed", "n
 const VOID: &[&str] = &["area", "base", "basefont", "bgsound", "br", "col", "embed", "frame", "hr", "img", "input", "keygen", "link", "meta", "param", "source", "track", "wbr"];
 
 /// Append `piece` to `out`, if the result stays under `cap`.
-fn put(d: &Dom, out: &mut String, piece: &str) -> R<()> {
+fn put<E: Eng>(d: &Dom<E>, out: &mut String, piece: &str) -> R<E, ()> {
     if piece.len() > d.lim.max_string_bytes.saturating_sub(out.len()) {
         return Err(d.lim("dom-string"));
     }
@@ -68,7 +67,7 @@ fn put(d: &Dom, out: &mut String, piece: &str) -> R<()> {
 }
 
 /// Append `text` with `&`, no-break space, `<` and `>` escaped, and `"` too for an attribute value.
-fn escape(d: &Dom, out: &mut String, text: &str, attr: bool) -> R<()> {
+fn escape<E: Eng>(d: &Dom<E>, out: &mut String, text: &str, attr: bool) -> R<E, ()> {
     let special = |c: char| matches!(c, '&' | '\u{a0}' | '<' | '>') || (attr && c == '"');
     let mut rest = text;
     while let Some(i) = rest.find(special) {
@@ -104,7 +103,7 @@ fn attr_name(doc: &Document, name: bare_html::dom::Atom) -> String {
 }
 
 /// The children of `n` as HTML text, or `n` itself when `outer`. Walks with the parent links, so the depth is not a limit.
-pub(crate) fn serialize<'s>(d: &Dom, s: &mut Sc<'s, '_>, doc: &Document, n: NodeId, outer: bool) -> Res<'s, String> {
+pub(crate) fn serialize<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, doc: &Document, n: NodeId, outer: bool) -> Res<'s, String> {
     let mut out = String::new();
     // The children of a `template` are its contents. `tpls` holds the templates that are open, to close them on the way up.
     let mut tpls = Vec::new();
@@ -119,29 +118,29 @@ pub(crate) fn serialize<'s>(d: &Dom, s: &mut Sc<'s, '_>, doc: &Document, n: Node
             NodeData::Text(sp) => {
                 s.charge(doc.text(sp).len() as u64 / 16 + 1)?;
                 let raw = doc.parent(node).is_some_and(|p| !doc.is_foreign(p) && RAW_PARENTS.contains(&doc.element_name(p)) && (doc.element_name(p) != "noscript" || !inert(&tpls)));
-                if raw { lift(s, put(d, &mut out, doc.text(sp)))? } else { lift(s, escape(d, &mut out, doc.text(sp), false))? }
+                if raw { lift::<E, _>(s, put(d, &mut out, doc.text(sp)))? } else { lift::<E, _>(s, escape(d, &mut out, doc.text(sp), false))? }
             }
             NodeData::Comment(sp) => {
                 s.charge(doc.text(sp).len() as u64 / 16 + 1)?;
-                lift(s, put(d, &mut out, "<!--"))?;
-                lift(s, put(d, &mut out, doc.text(sp)))?;
-                lift(s, put(d, &mut out, "-->"))?;
+                lift::<E, _>(s, put(d, &mut out, "<!--"))?;
+                lift::<E, _>(s, put(d, &mut out, doc.text(sp)))?;
+                lift::<E, _>(s, put(d, &mut out, "-->"))?;
             }
             NodeData::Doctype(_) | NodeData::Document | NodeData::ShadowRoot => {}
             NodeData::Element { name, attrs } => {
                 let tag = doc.atom_str(name);
                 let html = !doc.is_foreign(node);
-                lift(s, put(d, &mut out, "<"))?;
-                lift(s, put(d, &mut out, tag))?;
+                lift::<E, _>(s, put(d, &mut out, "<"))?;
+                lift::<E, _>(s, put(d, &mut out, tag))?;
                 for a in doc.attrs(attrs) {
                     s.charge(1 + doc.text(a.value).len() as u64 / 16)?;
-                    lift(s, put(d, &mut out, " "))?;
-                    lift(s, put(d, &mut out, &attr_name(doc, a.name)))?;
-                    lift(s, put(d, &mut out, "=\""))?;
-                    lift(s, escape(d, &mut out, doc.text(a.value), true))?;
-                    lift(s, put(d, &mut out, "\""))?;
+                    lift::<E, _>(s, put(d, &mut out, " "))?;
+                    lift::<E, _>(s, put(d, &mut out, &attr_name(doc, a.name)))?;
+                    lift::<E, _>(s, put(d, &mut out, "=\""))?;
+                    lift::<E, _>(s, escape(d, &mut out, doc.text(a.value), true))?;
+                    lift::<E, _>(s, put(d, &mut out, "\""))?;
                 }
-                lift(s, put(d, &mut out, ">"))?;
+                lift::<E, _>(s, put(d, &mut out, ">"))?;
                 if !(html && VOID.contains(&tag)) {
                     let tpl = html && tag == "template";
                     let holder = if tpl { doc.template_content(node) } else { Some(node) };
@@ -152,9 +151,9 @@ pub(crate) fn serialize<'s>(d: &Dom, s: &mut Sc<'s, '_>, doc: &Document, n: Node
                         node = first;
                         open = true;
                     } else {
-                        lift(s, put(d, &mut out, "</"))?;
-                        lift(s, put(d, &mut out, tag))?;
-                        lift(s, put(d, &mut out, ">"))?;
+                        lift::<E, _>(s, put(d, &mut out, "</"))?;
+                        lift::<E, _>(s, put(d, &mut out, tag))?;
+                        lift::<E, _>(s, put(d, &mut out, ">"))?;
                     }
                 }
             }
@@ -179,16 +178,16 @@ pub(crate) fn serialize<'s>(d: &Dom, s: &mut Sc<'s, '_>, doc: &Document, n: Node
             if matches!(doc.data(p), NodeData::ShadowRoot) {
                 p = tpls.pop().expect("an open template");
             }
-            lift(s, put(d, &mut out, "</"))?;
-            lift(s, put(d, &mut out, doc.element_name(p)))?;
-            lift(s, put(d, &mut out, ">"))?;
+            lift::<E, _>(s, put(d, &mut out, "</"))?;
+            lift::<E, _>(s, put(d, &mut out, doc.element_name(p)))?;
+            lift::<E, _>(s, put(d, &mut out, ">"))?;
             node = p;
         }
     }
 }
 
 /// The target of `innerHTML`: an element, or a shadow root (the context of its parse is the host).
-fn inner_target<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, (NodeId, Option<NodeId>)> {
+fn inner_target<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, (NodeId, Option<NodeId>)> {
     let n = d.nd_s(s, this)?;
     let doc = d.doc.borrow();
     match (doc.data(n), doc.shadow_host(n)) {
@@ -198,13 +197,13 @@ fn inner_target<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, (No
     }
 }
 
-pub(crate) fn inner_html<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn inner_html<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let (n, _) = inner_target(d, s, this)?;
     let st = serialize(d, s, &d.doc.borrow(), n, false)?;
     d.js_str_s(s, &st)
 }
 
-pub(crate) fn outer_html<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn outer_html<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.el_s(s, this)?;
     let st = serialize(d, s, &d.doc.borrow(), n, true)?;
     d.js_str_s(s, &st)
@@ -212,9 +211,9 @@ pub(crate) fn outer_html<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Ar
 
 /// `el.outerHTML = value`: parse in the context of the parent, then put the result in the place of `el`.
 /// No parent: nothing happens. A Document parent: `NoModificationAllowedError`. A DocumentFragment parent: the context is `body`.
-pub(crate) fn set_outer_html<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn set_outer_html<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.el_s(s, this)?;
-    let v = arg_s(s, a, 0);
+    let v = arg_s::<E>(s, a, 0);
     let html = if matches!(s.type_of(v), Type::Null) { String::new() } else { d.string_arg_s(s, v)? };
     let parent = {
         let doc = d.doc.borrow();
@@ -223,16 +222,16 @@ pub(crate) fn set_outer_html<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a
     match parent {
         None => Ok(s.undefined()),
         Some((_, true, _)) => Err(d.dom_err_s(s, "NoModificationAllowedError", "Failed to set the 'outerHTML' property on 'Element': This element's parent is of type '#document'.")),
-        Some((p, _, frag)) => old_v(s, |it| replace(d, it, &html, p, frag, Put::Over(n), None)),
+        Some((p, _, frag)) => old_v::<E>(s, |it| replace(d, it, &html, p, frag, Put::Over(n), None)),
     }
 }
 
-pub(crate) fn set_inner_html<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn set_inner_html<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let (n, ctx) = inner_target(d, s, this)?;
-    let v = arg_s(s, a, 0);
+    let v = arg_s::<E>(s, a, 0);
     // ToString may run page code; the target is read after it.
     let html = if matches!(s.type_of(v), Type::Null) { String::new() } else { d.string_arg_s(s, v)? };
-    old_v(s, |it| replace(d, it, &html, n, false, Put::All, ctx))
+    old_v::<E>(s, |it| replace(d, it, &html, n, false, Put::All, ctx))
 }
 
 /// Where the parsed nodes go: instead of all the children of `n`, instead of one child of `n`, or in `n` before a node (None: last), keeping the rest.
@@ -244,10 +243,10 @@ enum Put {
 }
 
 /// `insertAdjacentHTML(where, html)`: parse in the context of the element (`afterbegin`, `beforeend`) or of its parent, then put the nodes in place. No text joins.
-pub(crate) fn insert_adjacent_html<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn insert_adjacent_html<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     const NAME: &str = "insertAdjacentHTML";
     let (me, ps) = crate::browser_dom::adjacent_start_s(d, s, this, a, NAME)?;
-    let arg1 = arg_s(s, a, 1);
+    let arg1 = arg_s::<E>(s, a, 1);
     let html = d.string_arg_s(s, arg1)?;
     let pos = crate::browser_dom::adjacent_pos_s(d, s, NAME, &ps)?;
     // A parent that is a Document gives no context, as no parent.
@@ -255,13 +254,13 @@ pub(crate) fn insert_adjacent_html<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<
     let Some((n, before)) = at else {
         return Err(d.dom_err_s(s, "NoModificationAllowedError", "Failed to execute 'insertAdjacentHTML' on 'Element': The element has no parent."));
     };
-    old_v(s, |it| replace(d, it, &html, n, matches!(d.data(n), NodeData::ShadowRoot), Put::At(before), None))
+    old_v::<E>(s, |it| replace(d, it, &html, n, matches!(d.data(n), NodeData::ShadowRoot), Put::At(before), None))
 }
 
 /// The size of the contents of the templates in the tree under `root`, nested ones too: (nodes, bytes, attributes, height). A template's contents hang
 /// one level below it. The tree of `root` itself is measured by the caller.
 #[cold]
-fn measure_templates(it: &mut Interp<'_>, doc: &Document, root: NodeId) -> R<(usize, usize, usize, usize)> {
+fn measure_templates<E: Eng>(it: &mut E::Vm, doc: &Document, root: NodeId) -> R<E, (usize, usize, usize, usize)> {
     let (mut count, mut bytes, mut attrs, mut height) = (0usize, 0usize, 0usize, 0usize);
     let mut jobs = vec![(root, 0usize)];
     while let Some((top, below)) = jobs.pop() {
@@ -270,7 +269,7 @@ fn measure_templates(it: &mut Interp<'_>, doc: &Document, root: NodeId) -> R<(us
             (cur, depth) = (c, cd);
             let own = top != root;
             if own {
-                it.charge(1)?;
+                it.charge_o(1)?;
                 count += 1;
                 height = height.max(below + cd);
             }
@@ -296,7 +295,7 @@ fn measure_templates(it: &mut Interp<'_>, doc: &Document, root: NodeId) -> R<(us
 
 /// Parse `html` in the context of `n` (`body` when `in_frag`: `n` is a DocumentFragment). `put`: where the nodes go. `ctx` (`createContextualFragment`): the
 /// context is that node, not `n`, which only holds the result; the scripts of the result are not marked as started, so they run when they go in a page.
-fn replace(d: &Dom, it: &mut Interp<'_>, html: &str, n: NodeId, in_frag: bool, put: Put, ctx: Option<NodeId>) -> V {
+fn replace<E: Eng>(d: &Dom<E>, it: &mut E::Vm, html: &str, n: NodeId, in_frag: bool, put: Put, ctx: Option<NodeId>) -> V<E> {
     let c0 = ctx.unwrap_or(n);
     let this = if let Put::Over(t) = put { Some(t) } else { None };
     let all = matches!(put, Put::All);
@@ -305,7 +304,7 @@ fn replace(d: &Dom, it: &mut Interp<'_>, html: &str, n: NodeId, in_frag: bool, p
         let mut in_form = false;
         let mut cur = if in_frag { None } else { Some(c0) };
         while let Some(c) = cur {
-            it.charge(1)?;
+            it.charge_o(1)?;
             if doc.is_html(c, "form") {
                 in_form = true;
                 break;
@@ -331,9 +330,9 @@ fn replace(d: &Dom, it: &mut Interp<'_>, html: &str, n: NodeId, in_frag: bool, p
         }
     };
     // The parse is native code that cannot be stopped from outside: the input is charged first, and each token's nodes as they are made.
-    it.charge(html.len() as u64 / 16 + 1)?;
+    it.charge_o(html.len() as u64 / 16 + 1)?;
     let mut stop = None;
-    let parsed = parse_fragment(html, &context, ns, in_form, scripting, &lim, &mut |units| match it.charge(units) {
+    let parsed = parse_fragment(html, &context, ns, in_form, scripting, &lim, &mut |units| match it.charge_o(units) {
         Ok(()) => true,
         Err(e) => {
             stop = Some(e);
@@ -342,7 +341,7 @@ fn replace(d: &Dom, it: &mut Interp<'_>, html: &str, n: NodeId, in_frag: bool, p
     });
     let frag = match parsed {
         Ok(f) => f,
-        Err(FragmentError::Unsupported(what)) => return Err(Error::Unsupported(unsupported(what))),
+        Err(FragmentError::Unsupported(what)) => return Err(Fault::Unsupported(what)),
         Err(FragmentError::Limit(name)) => return Err(d.lim(name)),
         Err(FragmentError::Stopped) => return Err(stop.expect("the budget error")),
     };
@@ -353,7 +352,7 @@ fn replace(d: &Dom, it: &mut Interp<'_>, html: &str, n: NodeId, in_frag: bool, p
     {
         let (mut cur, mut depth) = (frag.root, 0usize);
         while let Some((c, cd)) = next_in(&frag.doc, frag.root, cur, depth) {
-            it.charge(1)?;
+            it.charge_o(1)?;
             (cur, depth) = (c, cd);
             count += 1;
             height = height.max(cd);
@@ -377,7 +376,7 @@ fn replace(d: &Dom, it: &mut Interp<'_>, html: &str, n: NodeId, in_frag: bool, p
         let mut old = 0u64;
         let holder = if all && tpl_ctx { doc.template_content(n) } else { Some(n) };
         for _ in holder.into_iter().flat_map(|h| doc.children(h)).take(if all { usize::MAX } else { 0 }) {
-            it.charge(1)?;
+            it.charge_o(1)?;
             old += 1;
         }
         old += u64::from(this.is_some());
@@ -395,7 +394,7 @@ fn replace(d: &Dom, it: &mut Interp<'_>, html: &str, n: NodeId, in_frag: bool, p
     if count > 0 && base + height > d.lim.max_tree_depth {
         return Err(d.lim("dom-depth"));
     }
-    it.charge(old + count as u64)?;
+    it.charge_o(old + count as u64)?;
 
     // Commit. Nothing below runs page code or can fail.
     let group = if all && tpl_ctx { d.doc.borrow().template_content(n) } else { all.then_some(n) };
@@ -458,7 +457,7 @@ fn replace(d: &Dom, it: &mut Interp<'_>, html: &str, n: NodeId, in_frag: bool, p
     Ok(())
     })?;
     if frag.doc.find_atom("iframe").is_some() { crate::browser_frames::activate(d, it)?; }
-    Ok(Value::Undefined)
+    Ok(E::undef())
 }
 
 /// If `a` and its next sibling are both text, put the text of the second in the first and remove the second.
@@ -474,7 +473,7 @@ fn join_text(doc: &mut Document, a: NodeId) {
 /// `Range.prototype.createContextualFragment(markup)` (DOM Parsing standard): parse `markup` in the context of the start container of the range, into a new
 /// fragment. The context is the start node when it is an element, its parent for a Text or a Comment, and a new `body` when that is not an element or
 /// is `html`. The scripts of the fragment are not marked as started (Chrome runs them when they go in a page). No record, no range moves.
-pub(crate) fn contextual_fragment(d: &Dom, it: &mut Interp<'_>, start: NodeId, html: &str) -> V {
+pub(crate) fn contextual_fragment<E: Eng>(d: &Dom<E>, it: &mut E::Vm, start: NodeId, html: &str) -> V<E> {
     let ctx = {
         let doc = d.doc.borrow();
         let up = if matches!(doc.data(start), NodeData::Element { .. }) { Some(start) } else if matches!(doc.data(start), NodeData::Text(_) | NodeData::Comment(_)) { doc.parent(start) } else { None };
@@ -487,6 +486,6 @@ pub(crate) fn contextual_fragment(d: &Dom, it: &mut Interp<'_>, start: NodeId, h
 }
 
 
-pub(crate) fn write_at(d: &Dom,it: &mut Interp<'_>,text: &str,parent: NodeId,before: Option<NodeId>)->V {
+pub(crate) fn write_at<E: Eng>(d: &Dom<E>,it: &mut E::Vm,text: &str,parent: NodeId,before: Option<NodeId>)->V<E> {
     replace(d,it,text,parent,false,Put::At(before),None)
 }

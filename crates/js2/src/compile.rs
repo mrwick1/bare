@@ -28,7 +28,7 @@
 //! `delete` of a global name. See [`Fc::unsup`] and the progress entry.
 use crate::ast::*;
 use crate::atoms::SharedAtoms;
-use crate::bytecode::{Asm, BcError, Code, GK_ASYNC, GK_GEN, Handler, Ins, Label, NO_NAME, Op, Recipes};
+use crate::bytecode::{Asm, BcError, Code, GK_ASYNC, GK_ASYNCGEN, GK_GEN, Handler, Ins, Label, NO_NAME, Op, Recipes};
 use crate::facts::{self, Facts, FnId};
 use crate::roots::RootMaps;
 use crate::string::{Chars, Str};
@@ -103,6 +103,8 @@ pub struct Input {
     /// The function is in the code of an event handler (`compile_function`): a name that no scope declares is read by the full search
     /// (`GetName`), which looks in the objects of `call_scoped` first.
     pub scoped: bool,
+    /// The function is in the text of the prelude (`prelude.js`): a free name that is a slot of `prelude_pre.rs` is read by `GetPre`.
+    pub pre: bool,
 }
 
 /// A function inside the compiled one: the entry of the facts, and the chain that its closure sees. Parallel to `Code::funcs`.
@@ -316,6 +318,8 @@ pub(crate) struct Fc<'a> {
     pub eval: bool,
     /// Event handler code: free names go through `GetName`, `SetName` and `TypeofName` (`Input::scoped`).
     pub scoped: bool,
+    /// The function is in the prelude (`Input::pre`).
+    pub pre: bool,
     pub is_arrow: bool,
     /// The function cannot be a constructor (an arrow, a method, a getter or a setter).
     pub noctor: bool,
@@ -342,6 +346,8 @@ pub(crate) struct Fc<'a> {
     pub async_h: Option<(usize, u32, u32)>,
     /// The head of a `for-of` is being bound: its loop frame is not pushed yet, but a throw of a pattern there closes the iterator.
     pub of_head: bool,
+    /// The iterator records (`rec` registers) of the `for await` loops that are open now: their exits wait for `return()` (`compile_asyncgen.rs`).
+    pub await_recs: Vec<u32>,
     /// While the default of parameter `i` is compiled and it names a parameter that is not set yet: `(i, number of parameters, register
     /// of the hole)`. A read of such a parameter reads the hole, so it throws.
     pub param_dz: Option<(u32, u32, u32)>,
@@ -393,6 +399,7 @@ impl<'a> Fc<'a> {
             value: None,
             eval: false,
             scoped: input.scoped,
+            pre: input.pre,
             is_arrow: false,
             noctor: false,
             fn_flags: 0,
@@ -410,6 +417,7 @@ impl<'a> Fc<'a> {
             async_h: None,
             gen_regs: 0,
             of_head: false,
+            await_recs: Vec::new(),
             param_dz: None,
         }
     }
@@ -997,6 +1005,8 @@ pub fn compile_function(prog: &Program, fid: FuncId, id: FnId, facts: &Facts, at
         (c.gen_kind, c.noctor) = (GK_GEN, true);
     } else if f.mode == FuncMode::Async {
         (c.gen_kind, c.noctor) = (GK_ASYNC, true);
+    } else if f.mode == FuncMode::AsyncGen {
+        (c.gen_kind, c.noctor) = (GK_ASYNCGEN, true);
     }
     c.fn_len = prog.list(prog.func(fid).params).take_while(|&p| !matches!(prog.pat(p).kind, PatKind::Assign { .. } | PatKind::Rest(_))).count().min(u16::MAX as usize) as u16;
     c.force_ctx = f.flags & facts::INNER_EVAL != 0;
@@ -1068,6 +1078,8 @@ mod class;
 mod async_code;
 #[path = "compile_gen.rs"]
 mod gen_code;
+#[path = "compile_asyncgen.rs"]
+mod asyncgen_code;
 #[path = "compile_expr.rs"]
 mod expr;
 #[path = "compile_module.rs"]

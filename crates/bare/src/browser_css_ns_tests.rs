@@ -2,7 +2,8 @@
 
 use crate::browser::*;
 use bare_html::tree;
-use bare_js::eval::{Error, EvalLimits};
+use crate::eng_old::OldFault as Error;
+use bare_js::eval::{EvalLimits};
 use bare_js::heap::HeapLimits;
 use bare_js::value::Value;
 

@@ -27,7 +27,6 @@ use crate::ast::StmtKind;
 use crate::facts::Facts;
 use crate::compile::ScriptMode;
 use crate::parse::{Limits, parse_script_lazy};
-use crate::bi_object::Own;
 use crate::interp_rt::{ErrKind, Key, R, Realm};
 use crate::object::{F_CALLABLE, F_CLASS, F_FNPROPS, F_NATIVE, Obj};
 use crate::shapes::{A_C, A_W};
@@ -221,15 +220,18 @@ impl Realm {
     // ---- prototype of a plain function ----
 
     /// Does a read of `prototype` on `o` have to make it? A script function gets its `prototype` object at the first read, not when it
-    /// is made: a closure that nobody uses as a constructor costs nothing.
+    /// is made: a closure that nobody uses as a constructor costs nothing. An arrow function, a method, an accessor and an async function
+    /// have none (`noctor` with no generator kind); a generator method has one.
     pub(crate) fn needs_prototype(&self, o: Obj) -> bool {
-        o.is_callable() && !o.has_flag(F_NATIVE | F_CLASS) && !self.function(o.value()).is_some_and(|(ci, _)| self.prog[ci].gen_kind == crate::bytecode::GK_ASYNC)
+        o.is_callable() && !o.has_flag(F_NATIVE | F_CLASS) && !self.function(o.value()).is_some_and(|(ci, _)| self.prog[ci].gen_kind == crate::bytecode::GK_ASYNC || (self.prog[ci].noctor && self.prog[ci].gen_kind == crate::bytecode::GK_NONE))
     }
 
     pub(crate) fn make_prototype(&mut self, f: Obj) -> R<Value> {
-        if self.function(f.value()).is_some_and(|(ci, _)| self.prog[ci].gen_kind == crate::bytecode::GK_GEN) {
-            // A generator function: its `prototype` inherits `%GeneratorPrototype%` and has no `constructor`.
-            let shape = self.shapes.root(Layout::Object, Some(self.genr.proto.cell()), 4);
+        let kind = self.function(f.value()).map_or(0, |(ci, _)| self.prog[ci].gen_kind);
+        if kind == crate::bytecode::GK_GEN || kind == crate::bytecode::GK_ASYNCGEN {
+            // A generator function: its `prototype` inherits `%GeneratorPrototype%` (`%AsyncGeneratorPrototype%`) and has no `constructor`.
+            let proto = if kind == crate::bytecode::GK_GEN { self.genr.proto } else { self.ag_proto() };
+            let shape = self.shapes.root(Layout::Object, Some(proto.cell()), 4);
             let p = Obj::new(&mut self.heap, &self.shapes, shape).expect("memory");
             self.define_attrs(f, Key::Name(self.k_prototype), A_W, p.value())?;
             return Ok(p.value());
@@ -313,7 +315,6 @@ impl Realm {
         self.natives.push(Native { f: bound_call, ctor: false, len: 0, name: "" });
         self.bound_id = 0;
         let g = self.global;
-        self.method(g, "__def", 2, prelude_def);
         self.hidden(g, "globalThis", g.value());
         self.hidden(g, "self", g.value());
         for (n, v) in [("NaN", Value::number(f64::NAN)), ("Infinity", Value::number(f64::INFINITY)), ("undefined", Value::UNDEFINED)] {
@@ -381,9 +382,43 @@ impl Realm {
 
 /// `Function(p1, ..., body)` and `new Function(...)`: CreateDynamicFunction for the normal kind. The text is one function expression
 /// compiled as a script of this realm, so the function has the global scope. The parameters and the body must parse alone, so a
-/// comment or a brace cannot reach across. js2 has no `GeneratorFunction` and no `AsyncFunction` constructors, so there are no
-/// other kinds.
+/// comment or a brace cannot reach across. `GeneratorFunction`, `AsyncFunction` and `AsyncGeneratorFunction` use the same code with
+/// another keyword (`dynamic_function`).
 fn function_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+    dynamic_function(rt, args, "function")
+}
+
+pub(crate) fn generator_function_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+    dynamic_function(rt, args, "function*")
+}
+
+pub(crate) fn async_function_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+    dynamic_function(rt, args, "async function")
+}
+
+pub(crate) fn async_generator_function_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+    dynamic_function(rt, args, "async function*")
+}
+
+impl Realm {
+    /// Make the constructor `name` of the function kind whose prototype object is `fp`. `fp.constructor` is it (not writable), its
+    /// `prototype` is `fp`, and it inherits `Function`. There is no global of this name.
+    #[cold]
+    pub(crate) fn dynamic_ctor(&mut self, fp: Obj, name: &'static str, f: NativeFn) {
+        let c = self.new_native(f, true, 1, name);
+        self.define_attrs(c, Key::Name(self.k_prototype), 0, fp.value()).expect("define");
+        self.define_attrs(fp, Key::Name(self.k_constructor), A_C, c.value()).expect("define");
+        let fv = self.function_proto.value();
+        if let Ok(base) = self.get_named(fv, "constructor")
+            && let Some(base) = Realm::obj(base)
+        {
+            c.set_proto(&mut self.shapes, Some(base.cell()));
+        }
+    }
+}
+
+/// CreateDynamicFunction: `keyword` is `function`, `function*`, `async function` or `async function*`.
+fn dynamic_function(rt: &mut Realm, args: &[Value], keyword: &str) -> R<Value> {
     let last = args.len().saturating_sub(1);
     let mut params = String::new();
     for (i, &a) in args[..last].iter().enumerate() {
@@ -401,14 +436,14 @@ fn function_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
         None => String::new(),
     };
     // Each part is checked as the text of one function declaration: a brace in the body cannot close the function and go on.
-    for part in [format!("function anonymous({params}\n) {{\n}}"), format!("function anonymous(\n) {{\n{body}\n}}")] {
+    for part in [format!("{keyword} anonymous({params}\n) {{\n}}"), format!("{keyword} anonymous(\n) {{\n{body}\n}}")] {
         match parse_script_lazy(&part, Limits::default(), &mut Facts::new()) {
             Ok(p) if matches!(p.list(p.body).collect::<Vec<_>>()[..], [s] if matches!(p.stmt(s).kind, StmtKind::Function(_))) => {}
             Ok(_) => return Err(rt.error(ErrKind::Syntax, "Unexpected token '}'")),
             Err(e) => return Err(rt.error(ErrKind::Syntax, &e.msg)),
         }
     }
-    let ci = rt.script_code(&format!("(function ({params}\n) {{\n{body}\n}})"), ScriptMode { value: true, ..ScriptMode::default() })?;
+    let ci = rt.script_code(&format!("({keyword} ({params}\n) {{\n{body}\n}})"), ScriptMode { value: true, ..ScriptMode::default() })?;
     let (top, global) = (rt.new_function(ci, Value::UNDEFINED), rt.global.value());
     let f = rt.call_function(top, global, &[])?;
     let anonymous = rt.intern("anonymous");
@@ -484,25 +519,6 @@ fn bound_call(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
 fn fn_to_string(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
     callable_this(rt, this, "toString")?;
     Ok(rt.string("function () { [native code] }"))
-}
-
-/// `__def(target, methods)` for `prelude.js`: copy the own enumerable properties of `methods` to `target`, not enumerable.
-fn prelude_def(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    let Some(t) = Realm::obj(arg(args, 0)) else { return rt.type_error("__def needs an object") };
-    let Some(m) = Realm::obj(arg(args, 1)) else { return rt.type_error("__def needs an object") };
-    let lens = Realm::obj(arg(args, 2));
-    for k in rt.own_key_list(m, true) {
-        let key = rt.key_of(k)?;
-        let Some(Own::Data(v, _)) = rt.get_own(m, key) else { continue };
-        rt.define_attrs(t, key, HIDDEN, v)?;
-        // The functions of the prelude are script functions: they get their own `length` and `name` here.
-        if let Some(f) = Realm::obj(v).filter(|f| f.is_callable()) {
-            let len = lens.and_then(|l| rt.get_own(l, key)).map_or(0, |p| if let Own::Data(n, _) = p { n.as_int().unwrap_or(0) } else { 0 });
-            rt.define_attrs(f, Key::Name(rt.k_length), A_C, Value::int(len))?;
-            rt.define_attrs(f, Key::Name(rt.k_name), A_C, k)?;
-        }
-    }
-    Ok(Value::UNDEFINED)
 }
 
 // ---- Error ----

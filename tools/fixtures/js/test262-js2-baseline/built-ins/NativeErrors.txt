@@ -1,15 +1,15 @@
 # test262 counts of tools/js/test262_js2.sh for each directory: directory, old pass, old fail, old skip, new pass, new fail, new skip.
 # old = bare-js, new = bare-js2. Commit: e4fbf57745c6aae3d1f12f181ecef78b1665d812. Written by tools/js/test262_js2.sh -u. Do not edit by hand.
 built-ins/NativeErrors 4 0 0 4 0 0
-built-ins/NativeErrors/EvalError 8 0 2 8 0 2
+built-ins/NativeErrors/EvalError 9 0 1 9 0 1
 built-ins/NativeErrors/EvalError/prototype 5 0 0 5 0 0
-built-ins/NativeErrors/RangeError 8 0 2 8 0 2
+built-ins/NativeErrors/RangeError 9 0 1 9 0 1
 built-ins/NativeErrors/RangeError/prototype 5 0 0 5 0 0
-built-ins/NativeErrors/ReferenceError 8 0 2 8 0 2
+built-ins/NativeErrors/ReferenceError 9 0 1 9 0 1
 built-ins/NativeErrors/ReferenceError/prototype 5 0 0 5 0 0
-built-ins/NativeErrors/SyntaxError 8 0 2 8 0 2
+built-ins/NativeErrors/SyntaxError 9 0 1 9 0 1
 built-ins/NativeErrors/SyntaxError/prototype 5 0 0 5 0 0
-built-ins/NativeErrors/TypeError 8 0 2 8 0 2
+built-ins/NativeErrors/TypeError 9 0 1 9 0 1
 built-ins/NativeErrors/TypeError/prototype 5 0 0 5 0 0
-built-ins/NativeErrors/URIError 8 0 2 8 0 2
+built-ins/NativeErrors/URIError 9 0 1 9 0 1
 built-ins/NativeErrors/URIError/prototype 5 0 0 5 0 0

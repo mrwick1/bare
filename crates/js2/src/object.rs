@@ -46,31 +46,30 @@ use std::ptr::{self, NonNull};
 
 const WORD: usize = 8;
 
-// Object header flags (`F_*` below). They are bits of the 24 flag bits of `CellHeader` (`FLAG_MAX` in `cell.rs`). Add a flag at the
-// next free bit, add its row here and its name to `ALL_FLAGS`: the compile-time check below fails on a bit that two flags share.
-//   bit  value  flag            owner
-//    0       1  F_OVER          objects (inline overflow record)
-//    1       2  F_CALLABLE      functions
-//    2       4  F_CLASS         classes
-//    3       8  F_DERIVED       classes
-//    4      16  F_NATIVE        built-ins (builtins.rs)
-//    5      32  F_NOEXT        objects (preventExtensions)
-//    6      64  F_FNPROPS      built-ins (builtins.rs)
-//    7     128  F_ELEMS_RO     arrays
-//    8     256  F_ELEMS_FIXED  arrays
-//    9     512  F_LEN_RO       arrays
-//   10    1024  F_SLOWIDX      arrays
-//   11    2048  F_LAZY         functions (interp_rt.rs)
-//   12    4096  F_WRAP         wrappers (bi_wrap.rs)
-//   13    8192  F_PROMISE      promises (promise.rs)
-//   14   16384  F_GEN          generators (gen.rs)
-//   15   32768  F_REGEXP       regexp objects (regexp_rt.rs)
-//   16-18  7<<16 F_COLL         collection kind field (bi_collections.rs)
-//   19    1<<19 F_HOST         host-filled objects (api_host.rs)
-//   20    1<<20 F_LAZYM        lazy host members (api_host.rs)
-//   21    1<<21 F_LAZYTAB      lazy built-in tables (lazy.rs)
-//   23    1<<23 F_PROTO        prototypes that an inline cache depends on (interp_rt.rs)
-// Bit 22 is free: 1 of the 24 flag bits. `F_SPARSE` is a flag of the `Elements` record, not of an object header.
+// Object header flags (`F_*` below). They are bits of the 24 flag bits of `CellHeader` (`FLAG_MAX` in `cell.rs`). Add a flag at the next
+// free bit, add its row here and its name to `ALL_FLAGS`: the compile-time check below fails on a bit that two flags share. An object
+// that is of a special kind (a promise, a `Date`) does not get a flag: the kinds exclude each other, so they share the field `F_KIND`.
+//   bit    value   flag            owner
+//    0         1   F_OVER          objects (inline overflow record)
+//    1         2   F_CALLABLE      functions
+//    2         4   F_CLASS         classes
+//    3         8   F_DERIVED       classes
+//    4        16   F_NATIVE        built-ins (builtins.rs)
+//    5        32   F_NOEXT         objects (preventExtensions)
+//    6        64   F_FNPROPS       built-ins (builtins.rs)
+//    7       128   F_ELEMS_RO      arrays
+//    8       256   F_ELEMS_FIXED   arrays
+//    9       512   F_LEN_RO        arrays
+//   10      1024   F_SLOWIDX       arrays
+//   11      2048   F_LAZY          functions (interp_rt.rs)
+//   12-15  15<<12  F_KIND          the kind field: K_MAP .. K_DATE (13 kinds, 0 is none)
+//   16   1<<16     F_HOST          host-filled objects (api_host.rs)
+//   17   1<<17     F_LAZYM         lazy host members (api_host.rs)
+//   18   1<<18     F_LAZYTAB       lazy built-in tables (lazy.rs)
+//   19-22                          free (4 bits)
+//   23   1<<23     F_PROTO         prototypes that an inline cache depends on (interp_rt.rs)
+// `F_SPARSE` is a flag of the `Elements` record, not of an object header.
+
 /// Object header flag: the last inline word holds the pointer to a `Slots` record.
 const F_OVER: u32 = 1;
 /// Object header flag: a script can call the object (a function cell, S2.6). A shape change keeps it.
@@ -97,32 +96,58 @@ pub const F_LEN_RO: u32 = 512;
 /// Object header flag: the array keeps its index properties in its shape, with the names `"0"`, `"1"`, ... (an element has attributes
 /// other than writable, enumerable and configurable, or is an accessor). The elements record is empty.
 pub const F_SLOWIDX: u32 = 1024;
-/// Object header flag: a wrapper object (`new String`, `new Number`, `new Boolean`, `Object(1)`). The value is in the hidden property
-/// `Realm::k_prim` (`bi_wrap.rs`). The flag, not the shape, tells a wrapper: a property that a script adds changes the shape.
-pub const F_WRAP: u32 = 4096;
 /// Object header flag: a feedback record of `interp_rt.rs` cached a read through this object (it is the holder, or a link between the
 /// receiver and the holder). Each change of its shape, of its keys or of its prototype bumps `Shapes::proto_epoch`, which drops those
 /// entries. A cache entry that adds a property must not run on it (`SetField`), because that change is a shape change with no bump. Sticky.
 pub const F_PROTO: u32 = 1 << 23;
-/// Object header flag: a promise (`promise.rs`). Its slots 0 and 1 are the state and the value or the reactions; a shape change keeps the flag.
-pub const F_PROMISE: u32 = 8192;
-/// Object header flag: a generator object (`gen.rs`): its hidden slots hold the state and the saved frame.
-pub const F_GEN: u32 = 16384;
-/// Object header flag: a `RegExp` object (`regexp_rt.rs`). Its slots 0 to 3 are the pattern, the flag bits, the program and `lastIndex`. Bit 8192 is for `F_PROMISE`.
-pub const F_REGEXP: u32 = 32768;
-/// Object header flag (bit 19): a host-filled object (`api_host.rs`): its hidden property `\0host` holds the kind and the host key.
-pub const F_HOST: u32 = 1 << 19;
-/// Object header flag (bit 20): the host defines members of the object on demand (`Engine::set_lazy`).
-pub const F_LAZYM: u32 = 1 << 20;
-/// Object header flag bits 16 to 18: the kind of a collection object (`bi_collections.rs`), 1 `Map`, 2 `Set`, 3 `WeakMap`, 4 `WeakSet`,
-/// 5 a `Map` iterator, 6 a `Set` iterator; 0 for any other object. Set once, by the constructor. A shape change keeps it.
-pub const F_COLL: u32 = 7 << 16;
-/// The shift of the kind in [`F_COLL`].
-pub const COLL_SHIFT: u32 = 16;
-const ALL_FLAGS: [u32; 21] =
-    [F_COLL, F_HOST, F_LAZYM, crate::lazy::F_LAZYTAB, F_PROTO, F_OVER, F_CALLABLE, F_CLASS, F_DERIVED, F_NATIVE, F_NOEXT, F_FNPROPS, F_ELEMS_RO, F_ELEMS_FIXED, F_LEN_RO, F_SLOWIDX, F_LAZY, F_WRAP, F_PROMISE, F_GEN, F_REGEXP];
-/// Compile-time check: no two flags share a bit, every flag is one bit or a field of bits (`F_COLL`), and all fit the 24 flag bits of a
-/// cell header.
+/// Object header flag: a host-filled object (`api_host.rs`): its hidden property `\0host` holds the kind and the host key.
+pub const F_HOST: u32 = 1 << 16;
+/// Object header flag: the host defines members of the object on demand (`Engine::set_lazy`).
+pub const F_LAZYM: u32 = 1 << 17;
+/// Object header flag: the object has a lazy built-in table with entries left (`lazy.rs`).
+pub const F_LAZYTAB: u32 = 1 << 18;
+/// Object header bits 12 to 15: the kind of the object, one of the `K_*` numbers below. The kinds exclude each other, and an object of no
+/// kind has 0. Set once, by the constructor of the object; a shape change keeps it. Read it with [`Obj::kind`] or [`Obj::is_kind`].
+pub const F_KIND: u32 = 15 << KIND_SHIFT;
+/// The shift of the kind in [`F_KIND`].
+pub const KIND_SHIFT: u32 = 12;
+/// No kind: a plain object, an array, a function.
+pub const K_NONE: u32 = 0;
+/// A `Map` (`bi_collections.rs`). The collection kinds are 1 to 7 and the code of `bi_collections.rs` counts on that.
+pub const K_MAP: u32 = 1;
+/// A `Set`.
+pub const K_SET: u32 = 2;
+/// A `WeakMap`.
+pub const K_WMAP: u32 = 3;
+/// A `WeakSet`.
+pub const K_WSET: u32 = 4;
+/// A `Map` iterator.
+pub const K_MITER: u32 = 5;
+/// A `Set` iterator.
+pub const K_SITER: u32 = 6;
+/// A string iterator (`bi_string_iter.rs`).
+pub const K_SITER_STR: u32 = 7;
+/// A wrapper object (`new String`, `new Number`, `new Boolean`, `Object(1)`). The value is in the hidden property `Realm::k_prim`
+/// (`bi_wrap.rs`). The kind, not the shape, tells a wrapper: a property that a script adds changes the shape.
+pub const K_WRAP: u32 = 8;
+/// A promise (`promise.rs`). Its slots 0 and 1 are the state and the value or the reactions.
+pub const K_PROMISE: u32 = 9;
+/// A generator object (`generator.rs`): its hidden slots hold the state and the saved frame.
+pub const K_GEN: u32 = 10;
+/// An async generator object (`asyncgen.rs`): the hidden slots of a generator, the queue of requests and the promise of the call that entered the frame.
+pub const K_AGEN: u32 = 11;
+/// A `RegExp` object (`regexp_rt.rs`). Its slots 0 to 3 are the pattern, the flag bits, the program and `lastIndex`.
+pub const K_REGEXP: u32 = 12;
+/// A `Date` object (`bi_date.rs`): the hidden property `Realm::k_prim` holds the time value.
+pub const K_DATE: u32 = 13;
+/// The largest kind: 14 and 15 are free.
+const K_LAST: u32 = K_DATE;
+const ALL_FLAGS: [u32; 17] = [
+    F_OVER, F_CALLABLE, F_CLASS, F_DERIVED, F_NATIVE, F_NOEXT, F_FNPROPS, F_ELEMS_RO, F_ELEMS_FIXED, F_LEN_RO, F_SLOWIDX, F_LAZY, F_KIND, F_HOST,
+    F_LAZYM, F_LAZYTAB, F_PROTO,
+];
+/// Compile-time check: every flag is a bit or the kind field, all fit the 24 flag bits of a cell header, no two share a bit, and the
+/// largest kind fits the kind field.
 const _: () = {
     let mut seen = 0u32;
     let mut i = 0;
@@ -132,6 +157,7 @@ const _: () = {
         seen |= f;
         i += 1;
     }
+    assert!(K_LAST << KIND_SHIFT <= F_KIND);
 };
 /// `Elements` header flag: the record is sparse.
 const F_SPARSE: u32 = 1;
@@ -357,6 +383,25 @@ impl Obj {
         self.head().flags() & f != 0
     }
 
+    /// The kind of the object (`K_NONE`, `K_MAP`, ..., `K_DATE`).
+    #[inline]
+    pub fn kind(self) -> u32 {
+        (self.head().flags() & F_KIND) >> KIND_SHIFT
+    }
+
+    /// Is the object of the kind `k`? One mask and one compare.
+    #[inline]
+    pub fn is_kind(self, k: u32) -> bool {
+        self.head().flags() & F_KIND == k << KIND_SHIFT
+    }
+
+    /// Make the object of the kind `k`. A shape change keeps it.
+    pub fn set_kind(self, k: u32) {
+        debug_assert!(k <= K_LAST);
+        let h = self.head();
+        self.set_head(h.with_flags(h.flags() & !F_KIND | k << KIND_SHIFT));
+    }
+
     /// Set the flag bit `f`. A shape change keeps it.
     pub fn set_flag(self, f: u32) {
         let h = self.head();
@@ -552,14 +597,14 @@ impl Obj {
         Some(o)
     }
 
-    /// A new promise: a cell of 32 bytes (`F_PROMISE`, two inline slots: the state `int(0)` and the value). `id` is a tree shape of
+    /// A new promise: a cell of 32 bytes (kind `K_PROMISE`, two inline slots: the state `int(0)` and the value). `id` is a tree shape of
     /// layout `Object` with inline capacity 2 (`promise.rs`), so the cell has the three words that `Obj::new` would give it.
     #[inline]
     pub fn new_promise(heap: &mut Heap, shapes: &Shapes, id: ShapeId) -> Option<Obj> {
         debug_assert!(geometry(Layout::Object, shapes.get(id).inline()) == (CellHeader::SIZE, 3));
         let p = heap.alloc(CellHeader::SIZE + 3 * WORD)?;
         let o = Obj(p);
-        o.set_head(shapes.header(id).with_flags(F_PROMISE));
+        o.set_head(shapes.header(id).with_flags(K_PROMISE << KIND_SHIFT));
         let v = p.as_ptr().wrapping_add(CellHeader::SIZE).cast::<Value>();
         // SAFETY: the cell has the three words after its header.
         unsafe {
@@ -573,14 +618,14 @@ impl Obj {
     /// Slot 0 or 1 of a promise (`Obj::new_promise`): inline in every shape of the cell, so there is no shape lookup.
     #[inline]
     pub fn pslot(self, i: usize) -> Value {
-        debug_assert!(i < 2 && self.has_flag(F_PROMISE));
+        debug_assert!(i < 2 && self.is_kind(K_PROMISE));
         // SAFETY: a promise has its first two slots in the inline words (the capacity of its shapes is 3), at these offsets.
         unsafe { self.0.as_ptr().wrapping_add(CellHeader::SIZE + WORD * i).cast::<Value>().read() }
     }
 
     #[inline]
     pub fn set_pslot(self, i: usize, v: Value) {
-        debug_assert!(i < 2 && self.has_flag(F_PROMISE));
+        debug_assert!(i < 2 && self.is_kind(K_PROMISE));
         // SAFETY: as in `pslot`.
         unsafe { self.0.as_ptr().wrapping_add(CellHeader::SIZE + WORD * i).cast::<Value>().write(v) }
     }

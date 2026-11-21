@@ -18,6 +18,7 @@
 //!
 //! Each getter checks that `this` is an HTML element of one of the listed tags, else `TypeError: Illegal invocation`, as a browser does.
 
+use crate::eng::Eng;
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_js_api::{Args, Local, Type};
@@ -51,7 +52,7 @@ macro_rules! reflect {
 pub(crate) use reflect;
 
 /// The HTML element `this`, when it is one of `tags`.
-pub(crate) fn this_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, tags: &[&str]) -> Res<'s, NodeId> {
+pub(crate) fn this_of<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, tags: &[&str]) -> Res<'s, NodeId> {
     let n = d.el_s(s, this)?;
     let ok = {
         let doc = d.doc.borrow();
@@ -61,7 +62,7 @@ pub(crate) fn this_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, tags: &[
 }
 
 /// The attribute `name` of `n` as an owned string.
-pub(crate) fn text(d: &Dom, n: NodeId, name: &str) -> Option<String> {
+pub(crate) fn text<E: Eng>(d: &Dom<E>, n: NodeId, name: &str) -> Option<String> {
     let doc = d.doc.borrow();
     doc.find_atom(name).and_then(|k| doc.attr(n, k)).map(str::to_string)
 }
@@ -82,7 +83,7 @@ pub(crate) fn parse_float(s: &str) -> Option<f64> {
 }
 
 /// The URL in the attribute `name` of `n`, resolved (see `Kind::Url`). `None`: no attribute.
-pub(crate) fn url<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId, name: &str) -> Res<'s, Option<String>> {
+pub(crate) fn url<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, n: NodeId, name: &str) -> Res<'s, Option<String>> {
     let Some(raw) = text(d, n, name) else { return Ok(None) };
     s.charge(raw.len() as u64 / 32)?;
     Ok(Some(match crate::browser_navigation_url::parse(&raw, crate::browser_elements::base(d).as_ref()) {
@@ -91,7 +92,7 @@ pub(crate) fn url<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId, name: &str) -> Res
     }))
 }
 
-pub(crate) fn get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, tags: &[&str], attr: &str, kind: Kind) -> Res<'s, Local<'s>> {
+pub(crate) fn get<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, tags: &[&str], attr: &str, kind: Kind) -> Res<'s, Local<'s>> {
     let n = this_of(d, s, this, tags)?;
     match kind {
         Kind::Bool => Ok(s.boolean(text(d, n, attr).is_some())),
@@ -116,7 +117,7 @@ pub(crate) fn get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, tags: &[&str
         Kind::UrlOrDoc => {
             let st = match url(d, s, n, attr)? {
                 Some(st) if !st.is_empty() => st,
-                _ => lift(s, d.cur_rec())?.href(),
+                _ => lift::<E, _>(s, d.cur_rec())?.href(),
             };
             d.js_str_s(s, &st)
         }
@@ -128,9 +129,9 @@ pub(crate) fn get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, tags: &[&str
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn set<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, tags: &[&str], prop: &str, attr: &str, kind: Kind) -> Res<'s, Local<'s>> {
+pub(crate) fn set<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>, tags: &[&str], prop: &str, attr: &str, kind: Kind) -> Res<'s, Local<'s>> {
     let n = this_of(d, s, this, tags)?;
-    let v = arg_s(s, a, 0);
+    let v = arg_s::<E>(s, a, 0);
     let st = match kind {
         Kind::Bool => {
             if !s.to_boolean(v) {

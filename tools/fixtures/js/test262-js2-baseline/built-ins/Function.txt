@@ -13,4 +13,4 @@ built-ins/Function/prototype/call 47 2 0 44 5 0
 built-ins/Function/prototype/caller 0 1 0 0 1 0
 built-ins/Function/prototype/caller-arguments 0 1 0 0 1 0
 built-ins/Function/prototype/constructor 1 0 0 1 0 0
-built-ins/Function/prototype/toString 28 23 29 45 6 29
+built-ins/Function/prototype/toString 33 28 19 58 3 19

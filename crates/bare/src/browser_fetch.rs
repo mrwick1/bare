@@ -42,7 +42,7 @@
 //! - A failed network request rejects with `TypeError: Failed to fetch`. Errors and diagnostics never hold a header value, a
 //!   body byte, a path or a query. [`Browser::take_fetch_diagnostics`] gives fixed labels and the origin.
 //!
-//! Resource caps (`FetchLimits`) end the call with `Error::Limit(LimitKind::Host(name))`, never a JS exception: queued requests (1024, and 8 MiB of URL and header text),
+//! Resource caps (`FetchLimits`) end the call with `Fault::Limit(LimitKind::Host(name))`, never a JS exception: queued requests (1024, and 8 MiB of URL and header text),
 //! requests started, URL length, response body bytes, aggregate retained body bytes, live objects, live readers, header
 //! count and bytes, redirects. Copies and decoding charge the step budget. Objects count until the embedder collects them
 //! (`Browser::collect`): the VM never collects by itself. A request body over `max_request_body` is a `TypeError` instead: the page
@@ -81,12 +81,12 @@
 //!
 //! Not browser-verified except against Node for the pure parts (`tools/js/fetch_oracle.mjs`).
 
-use crate::browser::{Browser, Dom, IdMap, Owner, R, unsupported};
+use crate::eng::{Eng, Fault, KeyKind, Ops, Val};
+use crate::browser::{Browser, Dom, IdMap, Owner, R};
 use crate::browser_scoped::*;
 use crate::browser_navigation_url::form_serialize;
 use crate::browser_streams as streams;
-use bare_js::eval::{Error, Interp, LimitKind};
-use bare_js::value::{ObjId, Value};
+use bare_js::eval::LimitKind;
 use bare_js_api::{Args, Engine, Error as AErr, HostFn, Local, Persistent, Traced, Type};
 use bare_net::http::{Client, Cookies, Ctx, Method, Request as NetRequest};
 use bare_net::parallel::Task;
@@ -107,7 +107,7 @@ fn meta_bytes(url: &Url, headers: &[(String, String)]) -> usize {
 }
 
 /// Does one more request fit the byte bound of the queue? Only a queue of `FREE_PENDING` requests or more sums its bytes.
-fn pending_fits(st: &FetchState, lim: &FetchLimits, add: usize) -> bool {
+fn pending_fits<E: Eng>(st: &FetchState<E>, lim: &FetchLimits, add: usize) -> bool {
     st.queue.len() < FREE_PENDING || st.queue.iter().map(Pending::meta_bytes).sum::<usize>().saturating_add(add) <= lim.max_pending_bytes
 }
 
@@ -386,51 +386,51 @@ impl Cors {
     }
 }
 
-struct Common {
-    headers: Traced<Value>,
+struct Common<E: Eng> {
+    headers: Traced<E::Raw>,
     body: Body,
 }
 
-struct ReqData {
-    c: Common,
+struct ReqData<E: Eng> {
+    c: Common<E>,
     method: String,
     url: Url,
     redirect: Redirect,
     credentials: &'static str,
     mode: &'static str,
     /// The signal that follows `init.signal`, made on the first read of `request.signal` or at construction.
-    signal: Option<Traced<Value>>,
+    signal: Option<Traced<E::Raw>>,
 }
 
-struct RespData {
-    c: Common,
+struct RespData<E: Eng> {
+    c: Common<E>,
     status: u16,
     status_text: String,
     url: String,
     redirected: bool,
     ty: &'static str,
-    stream: Option<Traced<Value>>,
+    stream: Option<Traced<E::Raw>>,
 }
 
 /// An entry of a fetch object: the object's host key (`Owner::Fetch`) and its data.
-struct Ent {
+struct Ent<E: Eng> {
     key: u32,
-    f: F,
+    f: F<E>,
 }
 
-enum F {
+enum F<E: Eng> {
     Headers(HeaderList),
-    Request(ReqData),
-    Response(RespData),
+    Request(ReqData<E>),
+    Response(RespData<E>),
     /// The `body` of a response. Holds the response.
-    Stream(Traced<Value>),
-    Reader { stream: Traced<Value>, released: bool },
+    Stream(Traced<E::Raw>),
+    Reader { stream: Traced<E::Raw>, released: bool },
     /// A live iterator of a Headers: the position in the sorted, combined list, read again at each step.
-    HeadersIter { headers: Traced<Value>, idx: usize, kind: u8 },
+    HeadersIter { headers: Traced<E::Raw>, idx: usize, kind: u8 },
 }
 
 /// A request that waits for `run_network_tasks`. Plain Rust data and one persistent handle, which is a root until the request ends.
-struct Pending {
+struct Pending<E: Eng> {
     /// The promise of a `fetch`, or the `XMLHttpRequest` object of `xhr`.
     root: Persistent,
     method: Method,
@@ -440,7 +440,7 @@ struct Pending {
     redirect: Redirect,
     cors: Cors,
     /// An `XMLHttpRequest` and its request generation (`browser_xhr.rs`). Then `root` holds the object.
-    xhr: Option<(ObjId, u64)>,
+    xhr: Option<(E::Obj, u64)>,
     /// When it was queued: its age for `Page::pending`, and its queue wait for the trace. `None` for a `blob:` reply (no I/O).
     queued: Option<std::time::Instant>,
     /// Its I/O, started on a worker thread before its turn (see `start_queued`). The outcome and the diagnostics. `None`: the job
@@ -476,7 +476,7 @@ impl Wire {
     }
 }
 
-impl Pending {
+impl<E: Eng> Pending<E> {
     /// Bytes of the URL and the headers (the body counts in `FetchState::queued_bytes`).
     fn meta_bytes(&self) -> usize {
         meta_bytes(&self.url, &self.headers)
@@ -492,9 +492,9 @@ impl Pending {
 }
 
 #[derive(Default)]
-struct FetchState {
-    objs: IdMap<ObjId, Ent>,
-    queue: VecDeque<Pending>,
+struct FetchState<E: Eng> {
+    objs: IdMap<<E as Eng>::Obj, Ent<E>>,
+    queue: VecDeque<Pending<E>>,
     base: Option<Url>,
     retained: usize,
     queued_bytes: usize,
@@ -502,14 +502,14 @@ struct FetchState {
     started: u64,
     diag: VecDeque<String>,
     dropped_diag: u64,
-    halted: Option<Error>,
+    halted: Option<Fault<E>>,
     /// Body bytes of the replies that workers read and that wait for their turn. `usize::MAX` once the page is gone.
     done: Arc<AtomicUsize>,
     /// Open event streams (`queue_xhr_stream`). They are not in `queue`.
-    streams: Vec<OpenStream>,
+    streams: Vec<OpenStream<E>>,
     /// Live: started GETs that waited for their reply longer than `DETACH_AFTER` (a long-poll). They left `queue` so that they do not
     /// hold the requests behind them or the settle (`sync_detached`). A reply that came goes back to the front of `queue`.
-    detached: Vec<Pending>,
+    detached: Vec<Pending<E>>,
 }
 
 /// What the thread of an event stream (`run_stream`) sends to the page.
@@ -524,8 +524,8 @@ pub(crate) enum StreamMsg {
 
 /// An event stream: an `XMLHttpRequest` whose body is read on its own thread and given to the page as it comes. Dropping it drops
 /// the receiver, so the thread ends at its next chunk (or at the read timeout of the connection).
-struct OpenStream {
-    x: (ObjId, u64),
+struct OpenStream<E: Eng> {
+    x: (E::Obj, u64),
     /// Keeps the `XMLHttpRequest` object alive while the stream is open.
     _root: Persistent,
     url: Url,
@@ -537,8 +537,8 @@ struct OpenStream {
 }
 
 /// The position of the request to settle next: the first one, or on a live page the first that is ready (not started, or its reply is in).
-fn next_ready(queue: &VecDeque<Pending>, live: bool) -> Option<usize> {
-    let ready = |p: &Pending| p.started.as_ref().is_none_or(|t| t.done());
+fn next_ready<E: Eng>(queue: &VecDeque<Pending<E>>, live: bool) -> Option<usize> {
+    let ready = |p: &Pending<E>| p.started.as_ref().is_none_or(|t| t.done());
     if live { queue.iter().position(ready) } else { queue.front().map(|_| 0) }
 }
 
@@ -560,11 +560,11 @@ enum Pr {
 }
 
 /// The fetch state of one `Dom`.
-pub(crate) struct Fetch {
-    st: RefCell<FetchState>,
+pub(crate) struct Fetch<E: Eng> {
+    st: RefCell<FetchState<E>>,
     lim: Cell<FetchLimits>,
     pub(crate) client: RefCell<Client>,
-    protos: OnceCell<[ObjId; 6]>,
+    protos: OnceCell<[E::Obj; 6]>,
     /// The prototypes, constructors and templates of this realm. Handles keep them alive; `protos` and the other fields hold their ids.
     fixed: RefCell<Vec<Persistent>>,
     pub(crate) json_parse: OnceCell<Persistent>,
@@ -576,15 +576,15 @@ pub(crate) struct Fetch {
     pub(crate) live: Cell<bool>,
 }
 
-impl Default for Fetch {
-    fn default() -> Fetch {
+impl<E: Eng> Default for Fetch<E> {
+    fn default() -> Fetch<E> {
         let mut client = Client::new();
         client.set_identity(crate::browser_web::wire_identity());
         Fetch { st: RefCell::default(), lim: Cell::new(FetchLimits::default()), client: RefCell::new(client), protos: OnceCell::new(), fixed: RefCell::default(), json_parse: OnceCell::new(), json_stringify: OnceCell::new(), drain: OnceCell::new(), live: Cell::new(false) }
     }
 }
 
-impl Drop for Fetch {
+impl<E: Eng> Drop for Fetch<E> {
     /// A queued job that has not begun does not send its request: the page is gone, and the workers serve the next document.
     fn drop(&mut self) {
         self.st.borrow().done.store(usize::MAX, Ordering::Relaxed);
@@ -595,19 +595,19 @@ impl Drop for Fetch {
 const AHEAD: usize = 32;
 
 /// A traced reference to the object `o`.
-fn edge(it: &Interp<'_>, o: ObjId) -> Traced<Value> {
-    it.trace_value(Value::Object(o))
+fn edge<E: Eng>(it: &E::Vm, o: E::Obj) -> Traced<E::Raw> {
+    it.trace_value(E::obj_raw(o))
 }
 
 /// `edge` for code of the new form, which holds no `Interp`.
-fn edge_of(o: ObjId) -> Traced<Value> {
-    Traced::from_raw(Value::Object(o))
+fn edge_of<E: Eng>(o: E::Obj) -> Traced<E::Raw> {
+    Traced::from_raw(E::obj_raw(o))
 }
 
 /// The object of a traced reference that `edge` made.
-fn oid(t: &Traced<Value>) -> ObjId {
-    match *t.raw() {
-        Value::Object(o) => o,
+fn oid<E: Eng>(t: &Traced<E::Raw>) -> E::Obj {
+    match E::kind(*t.raw()) {
+        Val::Object(o) => o,
         _ => unreachable!("an edge of a fetch object is an object"),
     }
 }
@@ -615,7 +615,7 @@ fn oid(t: &Traced<Value>) -> ObjId {
 // ------------------------------------------------------------------------------------ GC hooks
 
 /// The references of the owner `Owner::Fetch(owner)`.
-pub(crate) fn trace(d: &Dom, owner: ObjId, t: &mut bare_js_api::Tracer<'_, Value>) {
+pub(crate) fn trace<E: Eng>(d: &Dom<E>, owner: E::Obj, t: &mut bare_js_api::Tracer<'_, E::Raw>) {
     match d.fetch.st.borrow().f_get(&owner) {
         Some(F::Request(r)) => {
             t.visit(&r.c.headers);
@@ -636,7 +636,7 @@ pub(crate) fn trace(d: &Dom, owner: ObjId, t: &mut bare_js_api::Tracer<'_, Value
 
 /// Call after the dead keys are released. One pass over the entries: the entries of dead owners go, and their bytes and readers
 /// leave the totals.
-pub(crate) fn prune(d: &Dom, st: &crate::browser::State) {
+pub(crate) fn prune<E: Eng>(d: &Dom<E>, st: &crate::browser::State<E>) {
     let mut f = d.fetch.st.borrow_mut();
     let f = &mut *f;
     let (retained, readers) = (&mut f.retained, &mut f.readers);
@@ -654,12 +654,12 @@ pub(crate) fn prune(d: &Dom, st: &crate::browser::State) {
     });
 }
 
-impl FetchState {
-    fn f_get(&self, o: &ObjId) -> Option<&F> {
+impl<E: Eng> FetchState<E> {
+    fn f_get(&self, o: &E::Obj) -> Option<&F<E>> {
         self.objs.get(o).map(|e| &e.f)
     }
 
-    fn f_get_mut(&mut self, o: &ObjId) -> Option<&mut F> {
+    fn f_get_mut(&mut self, o: &E::Obj) -> Option<&mut F<E>> {
         self.objs.get_mut(o).map(|e| &mut e.f)
     }
 
@@ -688,7 +688,7 @@ fn origin(u: &Url) -> String {
 
 // ---------------------------------------------------------------------------------------------- Dom side
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// The body bytes of the requests that wait in the queue (`navigator.sendBeacon` checks its quota against them).
     pub(crate) fn queued_body_bytes(&self) -> usize {
         self.fetch.st.borrow().queued_bytes
@@ -795,12 +795,12 @@ impl Dom {
         self.fetch.lim.get()
     }
 
-    fn fproto(&self, p: Pr) -> ObjId {
+    fn fproto(&self, p: Pr) -> E::Obj {
         self.fetch.protos.get().expect("installed")[p as usize]
     }
 
     /// Reserve room for a new object (and `bytes` of body) before it is made.
-    fn reserve(&self, it: &mut Interp<'_>, objects: usize, bytes: usize) -> R<()> {
+    fn reserve(&self, it: &mut E::Vm, objects: usize, bytes: usize) -> R<E, ()> {
         let lim = self.fl();
         let st = self.fetch.st.borrow();
         if st.objs.len() + objects > lim.max_objects {
@@ -810,15 +810,15 @@ impl Dom {
             return Err(self.lim("fetch-retained"));
         }
         drop(st);
-        it.charge(objects as u64 + (bytes / 64) as u64)
+        it.charge_o(objects as u64 + (bytes / 64) as u64)
     }
 
-    fn add_obj(&self, it: &mut Interp<'_>, p: Pr, f: F) -> R<ObjId> {
+    fn add_obj(&self, it: &mut E::Vm, p: Pr, f: F<E>) -> R<E, E::Obj> {
         self.add_obj_in(it, self.fproto(p), f)
     }
 
     /// Like `add_obj` with the prototype `proto` (a subclass instance).
-    fn add_obj_in(&self, it: &mut Interp<'_>, proto: ObjId, f: F) -> R<ObjId> {
+    fn add_obj_in(&self, it: &mut E::Vm, proto: E::Obj, f: F<E>) -> R<E, E::Obj> {
         let o = self.obj(it, proto)?;
         let k = self.st.borrow_mut().owners.key(Owner::Fetch(o));
         it.set_host_owner_obj(o, k);
@@ -833,58 +833,58 @@ impl Dom {
         Ok(o)
     }
 
-    fn headers_obj(&self, it: &mut Interp<'_>, list: HeaderList) -> R<ObjId> {
+    fn headers_obj(&self, it: &mut E::Vm, list: HeaderList) -> R<E, E::Obj> {
         self.headers_obj_in(it, self.fproto(Pr::Headers), list)
     }
 
-    fn headers_obj_in(&self, it: &mut Interp<'_>, proto: ObjId, list: HeaderList) -> R<ObjId> {
+    fn headers_obj_in(&self, it: &mut E::Vm, proto: E::Obj, list: HeaderList) -> R<E, E::Obj> {
         self.reserve(it, 1, 0)?;
         self.add_obj_in(it, proto, F::Headers(list))
     }
 
-    fn herr(&self, it: &mut Interp<'_>, e: HErr) -> Error {
+    fn herr(&self, it: &mut E::Vm, e: HErr) -> Fault<E> {
         match e {
-            HErr::Immutable => it.type_error("Headers are immutable"),
+            HErr::Immutable => it.type_error_o("Headers are immutable"),
             HErr::Limit(n) => self.lim(n),
         }
     }
 
-    fn header_name(&self, it: &mut Interp<'_>, v: Value) -> R<String> {
+    fn header_name(&self, it: &mut E::Vm, v: E::Raw) -> R<E, String> {
         let s = self.string_arg(it, v)?;
         self.normalize_header_name(it, s)
     }
 
-    fn normalize_header_name(&self, it: &mut Interp<'_>, s: String) -> R<String> {
+    fn normalize_header_name(&self, it: &mut E::Vm, s: String) -> R<E, String> {
         if s.is_empty() || !s.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)) {
-            return Err(it.type_error("Invalid header name"));
+            return Err(it.type_error_o("Invalid header name"));
         }
         Ok(s.to_ascii_lowercase())
     }
 
-    fn normalize_header_value(&self, it: &mut Interp<'_>, s: String) -> R<String> {
+    fn normalize_header_value(&self, it: &mut E::Vm, s: String) -> R<E, String> {
         let t = s.trim_matches(['\t', '\n', '\r', ' ']);
         if t.chars().any(|c| matches!(c, '\0' | '\r' | '\n') || c as u32 > 0xFF) {
-            return Err(it.type_error("Invalid header value"));
+            return Err(it.type_error_o("Invalid header value"));
         }
         if !t.is_ascii() {
-            return Err(Error::Unsupported(unsupported("non-ASCII header value (the wire encoding is not Latin-1 safe)")));
+            return Err(Fault::Unsupported("non-ASCII header value (the wire encoding is not Latin-1 safe)"));
         }
         Ok(t.to_string())
     }
 
     /// One element of a sequence init: an object that is iterable and holds exactly two values, a name and a value. Each is
     /// checked when it is read. At most three values are read (a longer or endless iterable is a `TypeError`).
-    fn init_pair(&self, it: &mut Interp<'_>, x: Value) -> R<(String, String)> {
+    fn init_pair(&self, it: &mut E::Vm, x: E::Raw) -> R<E, (String, String)> {
         const BAD: &str = "Invalid header pair: a header is [name, value]";
-        if !matches!(x, Value::Object(_)) {
-            return Err(it.type_error("Invalid header pair"));
+        if !matches!(E::kind(x), Val::Object(_)) {
+            return Err(it.type_error_o("Invalid header pair"));
         }
-        let Some(mut inner) = it.host_iter_open(x)? else { return Err(it.type_error(BAD)) };
+        let Some(mut inner) = it.host_iter_open(x)? else { return Err(it.type_error_o(BAD)) };
         let (mut name, mut value, mut n) = (None, None, 0);
         loop {
             let step = match it.host_iter_next(&mut inner) {
                 Ok(Some(_)) if n == 2 => {
-                    let e = it.type_error(BAD);
+                    let e = it.type_error_o(BAD);
                     return Err(e);
                 }
                 Ok(Some(v)) if n == 0 => self.string_arg(it, v).map(|s| {
@@ -906,12 +906,12 @@ impl Dom {
         }
         match (name, value) {
             (Some(a), Some(b)) => Ok((a, b)),
-            _ => Err(it.type_error(BAD)),
+            _ => Err(it.type_error_o(BAD)),
         }
     }
 
     /// The caps of a `HeadersInit` that is being read, before the next pair is made: entries, then bytes.
-    fn init_room(&self, out: &[(String, String)], bytes: usize, add: usize) -> R<()> {
+    fn init_room(&self, out: &[(String, String)], bytes: usize, add: usize) -> R<E, ()> {
         let lim = self.fl();
         if add == 0 && out.len() >= lim.max_headers {
             return Err(self.lim("fetch-headers"));
@@ -924,8 +924,8 @@ impl Dom {
 
     /// `(name, value)` pairs of a `HeadersInit`: a Headers, a sequence of pairs (anything with `Symbol.iterator`, read once)
     /// or a record. Nothing is stored yet. Existing Headers use the same iterator path.
-    fn init_pairs(&self, it: &mut Interp<'_>, init: Value) -> R<Vec<(String, String)>> {
-        let Value::Object(o) = init else { return Err(it.type_error("Headers init is not an object or a sequence")) };
+    fn init_pairs(&self, it: &mut E::Vm, init: E::Raw) -> R<E, Vec<(String, String)>> {
+        let Val::Object(o) = E::kind(init) else { return Err(it.type_error_o("Headers init is not an object or a sequence")) };
         let (mut out, mut bytes) = (Vec::new(), 0usize);
         if let Some(mut outer) = it.host_iter_open(init)? {
             loop {
@@ -946,23 +946,23 @@ impl Dom {
             }
         }
         // A byte view lists one key for each byte: refuse a long one before the list is made.
-        if it.heap.view_parts(o).is_some_and(|(_, _, len)| len > self.fl().max_headers) {
+        if it.h_view_parts(o).is_some_and(|(_, _, len)| len > self.fl().max_headers) {
             return Err(self.lim("fetch-headers"));
         }
-        let keys = it.heap.own_keys(o).map_err(|e| it.heap_error(e))?;
+        let keys = it.h_own_keys(o)?;
         if keys.len() > self.fl().max_headers {
             return Err(self.lim("fetch-headers"));
         }
         for k in keys {
-            it.charge(1)?;
-            let enumerable = it.heap.peek_own_property(o, k).map_err(|e| it.heap_error(e))?.is_some_and(|p| p.enumerable());
+            it.charge_o(1)?;
+            let enumerable = it.h_peek_own(o, k)?.is_some_and(|p| p.enumerable());
             if !enumerable {
                 continue;
             }
-            if matches!(k, bare_js::value::PropertyKey::Symbol(_)) {
-                return Err(it.type_error("Cannot convert a Symbol value to a string"));
+            if matches!(E::key_kind(k), KeyKind::Symbol(_)) {
+                return Err(it.type_error_o("Cannot convert a Symbol value to a string"));
             }
-            let name = it.heap.key_to_value(k).map_err(|e| it.heap_error(e))?;
+            let name = it.h_key_to_value(k)?;
             let v = it.get_value(init, k)?;
             let (n, v) = (self.header_name(it, name)?, self.string_arg(it, v)?);
             self.init_room(&out, bytes, n.len() + v.len())?;
@@ -972,8 +972,8 @@ impl Dom {
         Ok(out)
     }
 
-    fn fill(&self, it: &mut Interp<'_>, list: &mut HeaderList, init: Value) -> R<()> {
-        if matches!(init, Value::Undefined) {
+    fn fill(&self, it: &mut E::Vm, list: &mut HeaderList, init: E::Raw) -> R<E, ()> {
+        if matches!(E::kind(init), Val::Undefined) {
             return Ok(());
         }
         let lim = self.fl();
@@ -985,21 +985,21 @@ impl Dom {
         Ok(())
     }
 
-    fn brand(&self, it: &mut Interp<'_>, this: Value) -> R<ObjId> {
-        match this {
-            Value::Object(o) if self.fetch.st.borrow().objs.contains_key(&o) => Ok(o),
-            _ => Err(it.type_error("Illegal invocation")),
+    fn brand(&self, it: &mut E::Vm, this: E::Raw) -> R<E, E::Obj> {
+        match E::kind(this) {
+            Val::Object(o) if self.fetch.st.borrow().objs.contains_key(&o) => Ok(o),
+            _ => Err(it.type_error_o("Illegal invocation")),
         }
     }
 
-    fn list_len(&self, o: ObjId) -> usize {
+    fn list_len(&self, o: E::Obj) -> usize {
         match self.fetch.st.borrow().f_get(&o) {
             Some(F::Headers(h)) => h.list.len(),
             _ => 0,
         }
     }
 
-    fn list_of(&self, o: ObjId) -> HeaderList {
+    fn list_of(&self, o: E::Obj) -> HeaderList {
         match self.fetch.st.borrow().f_get(&o) {
             Some(F::Headers(h)) => h.clone(),
             _ => HeaderList::new(Guard::None),
@@ -1012,7 +1012,7 @@ impl Dom {
         Some(nav.entries.get(nav.cur).map(|e| dup(&e.url.u)).unwrap_or(configured))
     }
 
-    fn resolve_url(&self, it: &mut Interp<'_>, s: &str) -> R<Url> {
+    fn resolve_url(&self, it: &mut E::Vm, s: &str) -> R<E, Url> {
         if s.len() > self.fl().max_url_bytes {
             return Err(self.lim("fetch-url"));
         }
@@ -1025,19 +1025,19 @@ impl Dom {
             Ok(u) if u.to_string().len() <= self.fl().max_url_bytes => Ok(u),
             Ok(_) => Err(self.lim("fetch-url")),
             // Another scheme (`ftp:`, `mailto:`, `blob:`) is a network error for this request: the promise rejects, the script goes on.
-            Err(_) if crate::browser_navigation_url::scheme_of(s).is_some_and(|(sch, _)| !sch.eq_ignore_ascii_case("http") && !sch.eq_ignore_ascii_case("https")) => Err(it.type_error("Failed to fetch")),
-            Err(_) => Err(it.type_error("Failed to parse URL")),
+            Err(_) if crate::browser_navigation_url::scheme_of(s).is_some_and(|(sch, _)| !sch.eq_ignore_ascii_case("http") && !sch.eq_ignore_ascii_case("https")) => Err(it.type_error_o("Failed to fetch")),
+            Err(_) => Err(it.type_error_o("Failed to parse URL")),
         }
     }
 
     /// The bytes of a body init, and its default content type. A copy is charged and bounded before it is made. A body over
     /// `max_request_body` is a `TypeError` (`body_over`): the page made it, so the refusal must not stop the page.
     /// `who` names the call in the error text, e.g. "construct 'Request'".
-    pub(crate) fn extract_body(&self, it: &mut Interp<'_>, v: Value, who: &str) -> R<Option<BodyInit>> {
+    pub(crate) fn extract_body(&self, it: &mut E::Vm, v: E::Raw, who: &str) -> R<E, Option<BodyInit>> {
         let lim = self.fl();
-        let (bytes, ty): (Vec<u8>, Option<Cow<'static, str>>) = match v {
-            Value::Undefined | Value::Null => return Ok(None),
-            Value::Object(_) if it.bytes_of(v).is_some() => {
+        let (bytes, ty): (Vec<u8>, Option<Cow<'static, str>>) = match E::kind(v) {
+            Val::Undefined | Val::Null => return Ok(None),
+            Val::Object(_) if it.bytes_of(v).is_some() => {
                 let n = it.bytes_of(v).map_or(0, <[u8]>::len);
                 if n > lim.max_request_body {
                     return Err(body_over(it, who, lim.max_request_body));
@@ -1045,18 +1045,18 @@ impl Dom {
                 self.reserve(it, 0, n)?;
                 (it.bytes_of(v).map(<[u8]>::to_vec).unwrap_or_default(), None)
             }
-            Value::Object(_) if let Some(n) = self.web_body_len(v) => {
+            Val::Object(_) if let Some(n) = self.web_body_len(v) => {
                 if n > lim.max_request_body {
                     return Err(body_over(it, who, lim.max_request_body));
                 }
                 self.reserve(it, 0, n)?;
                 let (bytes, ty) = self.web_body(it, v, lim.max_request_body).map_err(|e| match e {
-                    Error::Limit(LimitKind::Host("fetch-request-body")) => body_over(it, who, lim.max_request_body),
+                    Fault::Limit(LimitKind::Host("fetch-request-body")) => body_over(it, who, lim.max_request_body),
                     e => e,
                 })?;
                 (bytes, ty.map(Cow::Owned))
             }
-            Value::Object(o) if self.nav.s.borrow().params.contains_key(&o) => {
+            Val::Object(o) if self.nav.s.borrow().params.contains_key(&o) => {
                 let s = form_serialize(&self.nav.s.borrow().params[&o].list);
                 if s.len() > lim.max_request_body {
                     return Err(body_over(it, who, lim.max_request_body));
@@ -1064,7 +1064,7 @@ impl Dom {
                 self.reserve(it, 0, s.len())?;
                 (s.into_bytes(), Some(Cow::Borrowed("application/x-www-form-urlencoded;charset=UTF-8")))
             }
-            Value::Object(_) => {
+            Val::Object(_) => {
                 let kg = self.key(it, "getReader")?;
                 let g = it.get_value(v, kg)?;
                 if it.is_callable_value(g) {
@@ -1074,7 +1074,7 @@ impl Dom {
                     } else {
                         "a ReadableStream body is not supported. bare sends a request body in one piece: pass a string, Blob, ArrayBuffer or FormData"
                     };
-                    return Err(it.type_error(&format!("Failed to {who}: {why}.")));
+                    return Err(it.type_error_o(&format!("Failed to {who}: {why}.")));
                 }
                 self.text_body(it, v, who)?
             }
@@ -1084,7 +1084,7 @@ impl Dom {
     }
 
     /// A body that is converted to a string (UTF-8, `text/plain`).
-    fn text_body(&self, it: &mut Interp<'_>, v: Value, who: &str) -> R<(Vec<u8>, Option<Cow<'static, str>>)> {
+    fn text_body(&self, it: &mut E::Vm, v: E::Raw, who: &str) -> R<E, (Vec<u8>, Option<Cow<'static, str>>)> {
         let s = self.string_arg(it, v)?;
         let max = self.fl().max_request_body;
         if s.len() > max {
@@ -1094,28 +1094,28 @@ impl Dom {
         Ok((s.into_bytes(), Some(Cow::Borrowed("text/plain;charset=UTF-8"))))
     }
 
-    fn prop(&self, it: &mut Interp<'_>, o: Value, name: &str) -> R<Value> {
+    fn prop(&self, it: &mut E::Vm, o: E::Raw, name: &str) -> R<E, E::Raw> {
         let k = self.key(it, name)?;
         it.get_value(o, k)
     }
 
     /// An enum-like string option: `None` when absent, else one of `allowed` (a `TypeError` otherwise).
-    fn choice(&self, it: &mut Interp<'_>, o: Value, name: &str, allowed: &[&'static str]) -> R<Option<&'static str>> {
+    fn choice(&self, it: &mut E::Vm, o: E::Raw, name: &str, allowed: &[&'static str]) -> R<E, Option<&'static str>> {
         let v = self.prop(it, o, name)?;
-        if matches!(v, Value::Undefined) {
+        if matches!(E::kind(v), Val::Undefined) {
             return Ok(None);
         }
         let s = self.string_arg(it, v)?;
         match allowed.iter().find(|a| **a == s) {
             Some(a) => Ok(Some(a)),
-            None => Err(it.type_error(&format!("The provided value is not a valid enum value of type {name}"))),
+            None => Err(it.type_error_o(&format!("The provided value is not a valid enum value of type {name}"))),
         }
     }
 }
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// `reserve` for a handler of the new form.
-    fn reserve_s<'s>(&self, s: &mut Sc<'s, '_>, objects: usize, bytes: usize) -> Res<'s, ()> {
+    fn reserve_s<'s>(&self, s: &mut Sc<'s, E>, objects: usize, bytes: usize) -> Res<'s, ()> {
         let lim = self.fl();
         {
             let st = self.fetch.st.borrow();
@@ -1132,7 +1132,7 @@ impl Dom {
     }
 
     /// `add_obj` for a handler of the new form.
-    fn add_obj_s<'s>(&self, s: &mut Sc<'s, '_>, p: Pr, f: F) -> Res<'s, ObjId> {
+    fn add_obj_s<'s>(&self, s: &mut Sc<'s, E>, p: Pr, f: F<E>) -> Res<'s, E::Obj> {
         let o = self.obj_s(s, self.fproto(p))?;
         let k = self.st.borrow_mut().owners.key(Owner::Fetch(o));
         let l = self.obj_local(s, o);
@@ -1148,14 +1148,14 @@ impl Dom {
         Ok(o)
     }
 
-    fn herr_s<'s>(&self, s: &mut Sc<'s, '_>, e: HErr) -> AErr<'s> {
+    fn herr_s<'s>(&self, s: &mut Sc<'s, E>, e: HErr) -> AErr<'s> {
         match e {
             HErr::Immutable => s.type_error("Headers are immutable"),
             HErr::Limit(n) => self.lim_s(s, n),
         }
     }
 
-    fn header_name_s<'s>(&self, s: &mut Sc<'s, '_>, v: Local<'s>) -> Res<'s, String> {
+    fn header_name_s<'s>(&self, s: &mut Sc<'s, E>, v: Local<'s>) -> Res<'s, String> {
         let t = self.string_arg_s(s, v)?;
         if t.is_empty() || !t.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)) {
             return Err(s.type_error("Invalid header name"));
@@ -1163,7 +1163,7 @@ impl Dom {
         Ok(t.to_ascii_lowercase())
     }
 
-    fn header_value_s<'s>(&self, s: &mut Sc<'s, '_>, v: Local<'s>) -> Res<'s, String> {
+    fn header_value_s<'s>(&self, s: &mut Sc<'s, E>, v: Local<'s>) -> Res<'s, String> {
         let t = self.string_arg_s(s, v)?;
         let t = t.trim_matches(['\t', '\n', '\r', ' ']);
         if t.chars().any(|c| matches!(c, '\0' | '\r' | '\n') || c as u32 > 0xFF) {
@@ -1175,15 +1175,15 @@ impl Dom {
         Ok(t.to_string())
     }
 
-    fn brand_s<'s>(&self, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, ObjId> {
-        match obj_id(s, this).filter(|o| self.fetch.st.borrow().objs.contains_key(o)) {
+    fn brand_s<'s>(&self, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, E::Obj> {
+        match obj_id::<E>(s, this).filter(|o| self.fetch.st.borrow().objs.contains_key(o)) {
             Some(o) => Ok(o),
             None => Err(s.type_error("Illegal invocation")),
         }
     }
 
     /// Run `f` on the header list of `this` (a Headers). `f` cannot run JS: it holds the borrow.
-    fn on_headers_s<'s, T>(&self, s: &mut Sc<'s, '_>, this: Local<'s>, f: impl FnOnce(&mut HeaderList) -> Result<T, HErr>) -> Res<'s, T> {
+    fn on_headers_s<'s, T>(&self, s: &mut Sc<'s, E>, this: Local<'s>, f: impl FnOnce(&mut HeaderList) -> Result<T, HErr>) -> Res<'s, T> {
         let o = self.brand_s(s, this)?;
         let r = match self.fetch.st.borrow_mut().f_get_mut(&o) {
             Some(F::Headers(h)) => f(h),
@@ -1198,7 +1198,7 @@ impl Dom {
 
 // ---------------------------------------------------------------------------------------------- Request core
 
-struct Core {
+struct Core<E: Eng> {
     method: String,
     url: Url,
     headers: HeaderList,
@@ -1207,21 +1207,21 @@ struct Core {
     credentials: &'static str,
     mode: &'static str,
     /// The `AbortSignal` of `init.signal`, or the one of the `Request` input.
-    signal: Option<ObjId>,
+    signal: Option<E::Obj>,
 }
 
 /// Build the data of a request from `input` and `init`, the way `new Request(input, init)` and `fetch(input, init)` do.
-fn make_core(d: &Dom, it: &mut Interp<'_>, input: Value, init: Value) -> R<Core> {
+fn make_core<E: Eng>(d: &Dom<E>, it: &mut E::Vm, input: E::Raw, init: E::Raw) -> R<E, Core<E>> {
     let lim = d.fl();
-    let mut transfer: Option<ObjId> = None;
-    let mut core = match input {
-        Value::Object(o) if matches!(d.fetch.st.borrow().f_get(&o), Some(F::Request(_))) => {
+    let mut transfer: Option<E::Obj> = None;
+    let mut core = match E::kind(input) {
+        Val::Object(o) if matches!(d.fetch.st.borrow().f_get(&o), Some(F::Request(_))) => {
             let (method, url, redirect, credentials, mode, hdr, body, used, signal) = match d.fetch.st.borrow().f_get(&o) {
-                Some(F::Request(r)) => (r.method.clone(), dup(&r.url), r.redirect, r.credentials, r.mode, oid(&r.c.headers), r.c.body.bytes.clone(), r.c.body.used || r.c.body.locked, r.signal.as_ref().map(oid)),
+                Some(F::Request(r)) => (r.method.clone(), dup(&r.url), r.redirect, r.credentials, r.mode, oid::<E>(&r.c.headers), r.c.body.bytes.clone(), r.c.body.used || r.c.body.locked, r.signal.as_ref().map(oid::<E>)),
                 _ => unreachable!(),
             };
             if used {
-                return Err(it.type_error("Cannot construct a Request with a Request object that has already been used"));
+                return Err(it.type_error_o("Cannot construct a Request with a Request object that has already been used"));
             }
             transfer = body.is_some().then_some(o);
             let mut headers = d.list_of(hdr);
@@ -1234,18 +1234,18 @@ fn make_core(d: &Dom, it: &mut Interp<'_>, input: Value, init: Value) -> R<Core>
             Core { method: "GET".into(), url, headers: HeaderList::new(Guard::Request), body: None, redirect: Redirect::Follow, credentials: "same-origin", mode: "cors", signal: None }
         }
     };
-    if !matches!(init, Value::Undefined | Value::Null) {
-        if !matches!(init, Value::Object(_)) {
-            return Err(it.type_error("The request init is not an object"));
+    if !matches!(E::kind(init), Val::Undefined | Val::Null) {
+        if !matches!(E::kind(init), Val::Object(_)) {
+            return Err(it.type_error_o("The request init is not an object"));
         }
         let m = d.prop(it, init, "method")?;
-        if !matches!(m, Value::Undefined) {
+        if !matches!(E::kind(m), Val::Undefined) {
             let s = d.string_arg(it, m)?;
             if s.is_empty() || !s.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)) {
-                return Err(it.type_error("'method' is not a valid HTTP method"));
+                return Err(it.type_error_o("'method' is not a valid HTTP method"));
             }
             if ["CONNECT", "TRACE", "TRACK"].iter().any(|f| s.eq_ignore_ascii_case(f)) {
-                return Err(it.type_error(&format!("'{s}' HTTP method is unsupported")));
+                return Err(it.type_error_o(&format!("'{s}' HTTP method is unsupported")));
             }
             core.method = if ["DELETE", "GET", "HEAD", "OPTIONS", "POST", "PUT"].iter().any(|f| s.eq_ignore_ascii_case(f)) { s.to_ascii_uppercase() } else { s };
         }
@@ -1261,25 +1261,25 @@ fn make_core(d: &Dom, it: &mut Interp<'_>, input: Value, init: Value) -> R<Core>
         }
         if let Some(m) = d.choice(it, init, "mode", &["same-origin", "cors", "no-cors", "navigate"])? {
             match m {
-                "navigate" => return Err(it.type_error("Request constructor: invalid request mode navigate")),
+                "navigate" => return Err(it.type_error_o("Request constructor: invalid request mode navigate")),
                 _ => core.mode = m,
             }
         }
         if d.choice(it, init, "cache", &["default", "no-store", "reload", "no-cache", "force-cache", "only-if-cached"])? == Some("only-if-cached") {
-            return Err(Error::Unsupported(unsupported("fetch cache: only-if-cached")));
+            return Err(Fault::Unsupported("fetch cache: only-if-cached"));
         }
-        match d.prop(it, init, "signal")? {
-            Value::Undefined => {}
-            Value::Null => core.signal = None,
-            Value::Object(o) if d.is_signal(o) => core.signal = Some(o),
-            _ => return Err(it.type_error("Failed to construct 'Request': Failed to read the 'signal' property from 'RequestInit': Failed to convert value to 'AbortSignal'.")),
+        match E::kind(d.prop(it, init, "signal")?) {
+            Val::Undefined => {}
+            Val::Null => core.signal = None,
+            Val::Object(o) if d.is_signal(o) => core.signal = Some(o),
+            _ => return Err(it.type_error_o("Failed to construct 'Request': Failed to read the 'signal' property from 'RequestInit': Failed to convert value to 'AbortSignal'.")),
         }
         let integrity = d.prop(it, init, "integrity")?;
-        if !matches!(integrity, Value::Undefined) && !d.string_arg(it, integrity)?.is_empty() {
-            return Err(Error::Unsupported(unsupported("fetch option integrity")));
+        if !matches!(E::kind(integrity), Val::Undefined) && !d.string_arg(it, integrity)?.is_empty() {
+            return Err(Fault::Unsupported("fetch option integrity"));
         }
         let h = d.prop(it, init, "headers")?;
-        if !matches!(h, Value::Undefined) {
+        if !matches!(E::kind(h), Val::Undefined) {
             let mut list = HeaderList::new(Guard::Request);
             d.fill(it, &mut list, h)?;
             core.headers = list;
@@ -1295,13 +1295,13 @@ fn make_core(d: &Dom, it: &mut Interp<'_>, input: Value, init: Value) -> R<Core>
     }
     if core.mode == "no-cors" {
         if !matches!(core.method.as_str(), "GET" | "HEAD" | "POST") {
-            return Err(it.type_error(&format!("'{}' is unsupported in no-cors mode.", core.method)));
+            return Err(it.type_error_o(&format!("'{}' is unsupported in no-cors mode.", core.method)));
         }
         // The headers of a no-cors request: only the safelisted ones stay (the guard "request-no-cors").
         core.headers.list.retain(|(n, v)| safelisted_request_header(n, v));
     }
     if core.body.is_some() && (core.method == "GET" || core.method == "HEAD") {
-        return Err(it.type_error("Request with GET/HEAD method cannot have body."));
+        return Err(it.type_error_o("Request with GET/HEAD method cannot have body."));
     }
     if let Some(o) = transfer {
         // The body moves to the new request: the old one is used up.
@@ -1317,7 +1317,7 @@ fn make_core(d: &Dom, it: &mut Interp<'_>, input: Value, init: Value) -> R<Core>
 }
 
 /// The wire method for a normalized method. A token method (`FOO`) and a lower-case `patch` have no `Method` variant: `Unsupported`.
-fn wire_method(m: &str) -> R<Method> {
+fn wire_method<E: Eng>(m: &str) -> R<E, Method> {
     match m {
         "GET" => Ok(Method::Get),
         "POST" => Ok(Method::Post),
@@ -1326,29 +1326,29 @@ fn wire_method(m: &str) -> R<Method> {
         "DELETE" => Ok(Method::Delete),
         "HEAD" => Ok(Method::Head),
         "OPTIONS" => Ok(Method::Options),
-        _ => Err(Error::Unsupported(unsupported("fetch method other than GET, POST, PUT, PATCH, DELETE, HEAD and OPTIONS"))),
+        _ => Err(Fault::Unsupported("fetch method other than GET, POST, PUT, PATCH, DELETE, HEAD and OPTIONS")),
     }
 }
 
 // ---------------------------------------------------------------------------------------------- settle helpers
 
 /// The refusal of a body over `max` bytes. `who` names the call, e.g. "construct 'Request'".
-fn body_over(it: &mut Interp<'_>, who: &str, max: usize) -> Error {
-    it.type_error(&format!("Failed to {who}: the body is over the limit of {max} bytes."))
+fn body_over<E: Eng>(it: &mut E::Vm, who: &str, max: usize) -> Fault<E> {
+    it.type_error_o(&format!("Failed to {who}: the body is over the limit of {max} bytes."))
 }
 
 /// Settle `p` with the outcome of `r`: a value fulfills, a thrown value rejects, any other error is the result.
-pub(crate) fn settle(it: &mut Interp<'_>, p: Value, r: R<Value>) -> R<Value> {
+pub(crate) fn settle<E: Eng>(it: &mut E::Vm, p: E::Raw, r: R<E, E::Raw>) -> R<E, E::Raw> {
     match r {
         Ok(v) => it.host_resolve_promise(p, v)?,
-        Err(Error::Throw(v)) => it.host_reject_promise(p, v)?,
+        Err(Fault::Throw(v)) => it.host_reject_promise(p, v)?,
         Err(e) => return Err(e),
     }
     Ok(p)
 }
 
 /// `settle` for a handler of the new form.
-pub(crate) fn settle_s<'s>(s: &mut Sc<'s, '_>, p: Local<'s>, r: Res<'s, Local<'s>>) -> Res<'s, Local<'s>> {
+pub(crate) fn settle_s<'s, E: Eng>(s: &mut Sc<'s, E>, p: Local<'s>, r: Res<'s, Local<'s>>) -> Res<'s, Local<'s>> {
     match r {
         Ok(v) => s.resolve_promise(p, v)?,
         Err(AErr::Throw(v)) => s.reject_promise(p, v)?,
@@ -1358,10 +1358,10 @@ pub(crate) fn settle_s<'s>(s: &mut Sc<'s, '_>, p: Local<'s>, r: Res<'s, Local<'s
 }
 
 /// The abort algorithm of a queued request: reject its promise with `reason`. A request that already left the queue is not touched.
-pub(crate) fn abort_queued(d: &Dom, it: &mut Interp<'_>, promise: Value, reason: Value) -> R<()> {
+pub(crate) fn abort_queued<E: Eng>(d: &Dom<E>, it: &mut E::Vm, promise: E::Raw, reason: E::Raw) -> R<E, ()> {
     let found = {
         let mut st = d.fetch.st.borrow_mut();
-        match st.queue.iter().position(|t| matches!((it.persistent_value(&t.root), promise), (Value::Object(a), Value::Object(b)) if a == b)) {
+        match st.queue.iter().position(|t| matches!((E::kind(it.persistent_value(&t.root)), E::kind(promise)), (Val::Object(a), Val::Object(b)) if a == b)) {
             Some(i) => {
                 let t = st.queue.remove(i).expect("position");
                 st.queued_bytes -= t.body.as_ref().map_or(0, |b| b.len());
@@ -1376,9 +1376,9 @@ pub(crate) fn abort_queued(d: &Dom, it: &mut Interp<'_>, promise: Value, reason:
     Ok(())
 }
 
-fn thrown_value(e: Error) -> R<Value> {
+fn thrown_value<E: Eng>(e: Fault<E>) -> R<E, E::Raw> {
     match e {
-        Error::Throw(v) => Ok(v),
+        Fault::Throw(v) => Ok(v),
         e => Err(e),
     }
 }
@@ -1386,55 +1386,55 @@ fn thrown_value(e: Error) -> R<Value> {
 // ---------------------------------------------------------------------------------------------- Headers methods
 
 /// The prototype for a constructor that reads `new.target`: the one of `new.target`, or the default of `p`.
-fn new_target_proto<'s>(d: &Dom, s: &mut Sc<'s, '_>, p: Pr) -> Res<'s, ObjId> {
+fn new_target_proto<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, p: Pr) -> Res<'s, E::Obj> {
     let default = d.obj_local(s, d.fproto(p));
     let proto = s.proto_from_new_target(default)?;
-    Ok(obj_id(s, proto).expect("a prototype"))
+    Ok(obj_id::<E>(s, proto).expect("a prototype"))
 }
 
-fn headers_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn headers_ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let proto = new_target_proto(d, s, Pr::Headers)?;
-    let init = arg_s(s, a, 0);
+    let init = arg_s::<E>(s, a, 0);
     if s.type_of(init) == Type::Null {
         return Err(s.type_error("Failed to construct 'Headers': The provided value is not of type 'HeadersInit'"));
     }
     let init = s.engine().raw(init);
-    old_v(s, |it| {
+    old_v::<E>(s, |it| {
         let mut list = HeaderList::new(Guard::None);
         d.fill(it, &mut list, init)?;
-        Ok(Value::Object(d.headers_obj_in(it, proto, list)?))
+        Ok(E::obj_raw(d.headers_obj_in(it, proto, list)?))
     })
 }
 
-fn arg(a: &[Value], i: usize) -> Value {
-    a.get(i).copied().unwrap_or(Value::Undefined)
+fn arg<E: Eng>(a: &[E::Raw], i: usize) -> E::Raw {
+    a.get(i).copied().unwrap_or(E::undef())
 }
 
-fn headers_append<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    let (x, y) = (arg_s(s, a, 0), arg_s(s, a, 1));
+fn headers_append<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (x, y) = (arg_s::<E>(s, a, 0), arg_s::<E>(s, a, 1));
     let (n, v) = (d.header_name_s(s, x)?, d.header_value_s(s, y)?);
     let lim = d.fl();
     d.on_headers_s(s, this, |h| h.append(&lim, n, v))?;
     Ok(s.undefined())
 }
 
-fn headers_set<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    let (x, y) = (arg_s(s, a, 0), arg_s(s, a, 1));
+fn headers_set<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (x, y) = (arg_s::<E>(s, a, 0), arg_s::<E>(s, a, 1));
     let (n, v) = (d.header_name_s(s, x)?, d.header_value_s(s, y)?);
     let lim = d.fl();
     d.on_headers_s(s, this, |h| h.set(&lim, n, v))?;
     Ok(s.undefined())
 }
 
-fn headers_delete<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    let x = arg_s(s, a, 0);
+fn headers_delete<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let x = arg_s::<E>(s, a, 0);
     let n = d.header_name_s(s, x)?;
     d.on_headers_s(s, this, |h| h.delete(&n))?;
     Ok(s.undefined())
 }
 
-fn headers_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    let x = arg_s(s, a, 0);
+fn headers_get<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let x = arg_s::<E>(s, a, 0);
     let n = d.header_name_s(s, x)?;
     match d.on_headers_s(s, this, |h| Ok(h.get(&n)))? {
         Some(v) => d.js_str_s(s, &v),
@@ -1442,20 +1442,20 @@ fn headers_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) ->
     }
 }
 
-fn headers_has<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    let x = arg_s(s, a, 0);
+fn headers_has<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let x = arg_s::<E>(s, a, 0);
     let n = d.header_name_s(s, x)?;
     let has = d.on_headers_s(s, this, |h| Ok(h.get(&n).is_some()))?;
     Ok(s.boolean(has))
 }
 
-fn headers_get_set_cookie<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn headers_get_set_cookie<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     d.on_headers_s(s, this, |_| Ok(()))?;
     s.new_array(&[])
 }
 
-fn headers_for_each<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    let (cb, this_arg) = (arg_s(s, a, 0), arg_s(s, a, 1));
+fn headers_for_each<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (cb, this_arg) = (arg_s::<E>(s, a, 0), arg_s::<E>(s, a, 1));
     if !s.is_callable(cb) {
         return Err(s.type_error("Failed to execute 'forEach' on 'Headers': parameter 1 is not of type 'Function'."));
     }
@@ -1468,28 +1468,28 @@ fn headers_for_each<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s
     Ok(s.undefined())
 }
 
-fn make_iter<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, kind: u8) -> Res<'s, Local<'s>> {
+fn make_iter<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, kind: u8) -> Res<'s, Local<'s>> {
     d.on_headers_s(s, this, |_| Ok(()))?;
-    let Some(headers) = obj_id(s, this) else { return Err(s.type_error("Illegal invocation")) };
+    let Some(headers) = obj_id::<E>(s, this) else { return Err(s.type_error("Illegal invocation")) };
     d.reserve_s(s, 1, 0)?;
-    let o = d.add_obj_s(s, Pr::HeadersIter, F::HeadersIter { headers: edge_of(headers), idx: 0, kind })?;
+    let o = d.add_obj_s(s, Pr::HeadersIter, F::HeadersIter { headers: edge_of::<E>(headers), idx: 0, kind })?;
     Ok(d.obj_local(s, o))
 }
 
-fn headers_keys<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn headers_keys<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     make_iter(d, s, this, 0)
 }
-fn headers_values<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn headers_values<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     make_iter(d, s, this, 1)
 }
-fn headers_entries<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn headers_entries<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     make_iter(d, s, this, 2)
 }
 
-fn headers_iter_next<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn headers_iter_next<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let o = d.brand_s(s, this)?;
     let (headers, idx, kind) = match d.fetch.st.borrow().f_get(&o) {
-        Some(F::HeadersIter { headers, idx, kind }) => (oid(headers), *idx, *kind),
+        Some(F::HeadersIter { headers, idx, kind }) => (oid::<E>(headers), *idx, *kind),
         _ => return Err(s.type_error("Illegal invocation")),
     };
     s.charge(1 + d.list_len(headers) as u64)?;
@@ -1513,12 +1513,12 @@ fn headers_iter_next<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'
             }
         }
     };
-    iter_result_s(s, value, done)
+    iter_result_s::<E>(s, value, done)
 }
 
 // ---------------------------------------------------------------------------------------------- Request and Response
 
-fn common(st: &mut FetchState, o: ObjId) -> Option<&mut Common> {
+fn common<E: Eng>(st: &mut FetchState<E>, o: E::Obj) -> Option<&mut Common<E>> {
     match st.f_get_mut(&o)? {
         F::Request(r) => Some(&mut r.c),
         F::Response(r) => Some(&mut r.c),
@@ -1526,7 +1526,7 @@ fn common(st: &mut FetchState, o: ObjId) -> Option<&mut Common> {
     }
 }
 
-fn new_request_obj(d: &Dom, it: &mut Interp<'_>, core: Core, proto: ObjId) -> R<ObjId> {
+fn new_request_obj<E: Eng>(d: &Dom<E>, it: &mut E::Vm, core: Core<E>, proto: E::Obj) -> R<E, E::Obj> {
     let n = core.body.as_ref().map_or(0, |b| b.len());
     d.reserve(it, 2, n)?;
     let h = d.headers_obj(it, core.headers)?;
@@ -1534,19 +1534,19 @@ fn new_request_obj(d: &Dom, it: &mut Interp<'_>, core: Core, proto: ObjId) -> R<
         Some(s) => Some(d.follow_signal(it, s)?),
         None => None,
     };
-    d.add_obj_in(it, proto, F::Request(ReqData { c: Common { headers: edge(it, h), body: Body::new(core.body) }, method: core.method, url: core.url, redirect: core.redirect, credentials: core.credentials, mode: core.mode, signal: signal.map(|s| edge(it, s)) }))
+    d.add_obj_in(it, proto, F::Request(ReqData { c: Common { headers: edge::<E>(it, h), body: Body::new(core.body) }, method: core.method, url: core.url, redirect: core.redirect, credentials: core.credentials, mode: core.mode, signal: signal.map(|s| edge::<E>(it, s)) }))
 }
 
-fn request_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn request_ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let proto = new_target_proto(d, s, Pr::Request)?;
     if a.is_empty() {
         return Err(s.type_error("Failed to construct 'Request': 1 argument required, but only 0 present."));
     }
-    let (input, init) = (arg_s(s, a, 0), arg_s(s, a, 1));
+    let (input, init) = (arg_s::<E>(s, a, 0), arg_s::<E>(s, a, 1));
     let (input, init) = (s.engine().raw(input), s.engine().raw(init));
-    old_v(s, |it| {
+    old_v::<E>(s, |it| {
         let core = make_core(d, it, input, init)?;
-        Ok(Value::Object(new_request_obj(d, it, core, proto)?))
+        Ok(E::obj_raw(new_request_obj(d, it, core, proto)?))
     })
 }
 
@@ -1554,72 +1554,72 @@ fn status_null_body(s: u16) -> bool {
     matches!(s, 101 | 103 | 204 | 205 | 304)
 }
 
-fn response_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn response_ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let proto = new_target_proto(d, s, Pr::Response)?;
-    let (body, init) = (arg_s(s, a, 0), arg_s(s, a, 1));
+    let (body, init) = (arg_s::<E>(s, a, 0), arg_s::<E>(s, a, 1));
     let (body, init) = (s.engine().raw(body), s.engine().raw(init));
-    old_v(s, |it| init_response(d, it, proto, body, init, "construct 'Response'", false))
+    old_v::<E>(s, |it| init_response(d, it, proto, body, init, "construct 'Response'", false))
 }
 
 /// `Response.json(data, init)`: the body is `data` as JSON text, typed `application/json` unless `init` sets a Content-Type.
 /// It uses the intrinsic `JSON.stringify`, as `json()` uses the intrinsic `JSON.parse`.
-fn response_json<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    let (data, init) = (arg_s(s, a, 0), arg_s(s, a, 1));
+fn response_json<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (data, init) = (arg_s::<E>(s, a, 0), arg_s::<E>(s, a, 1));
     let (data, init) = (s.engine().raw(data), s.engine().raw(init));
-    old_v(s, |it| {
-        let Some(stringify) = d.fetch.json_stringify.get().map(|p| it.persistent_value(p)) else { return Err(Error::Unsupported(unsupported("Response.json without JSON.stringify"))) };
-        let text = it.call(stringify, Value::Undefined, &[data])?;
-        if !matches!(text, Value::String(_)) {
-            return Err(it.type_error("Failed to execute 'json' on 'Response': Value is not JSON serializable"));
+    old_v::<E>(s, |it| {
+        let Some(stringify) = d.fetch.json_stringify.get().map(|p| it.persistent_value(p)) else { return Err(Fault::Unsupported("Response.json without JSON.stringify")) };
+        let text = it.call_o(stringify, E::undef(), &[data])?;
+        if !matches!(E::kind(text), Val::String(_)) {
+            return Err(it.type_error_o("Failed to execute 'json' on 'Response': Value is not JSON serializable"));
         }
         init_response(d, it, d.fproto(Pr::Response), text, init, "execute 'json' on 'Response'", true)
     })
 }
 
 /// A Response with the body `body` (a body init, or the JSON text) and the status, statusText and headers of `init`.
-fn init_response(d: &Dom, it: &mut Interp<'_>, proto: ObjId, body: Value, init: Value, who: &str, json: bool) -> R<Value> {
+fn init_response<E: Eng>(d: &Dom<E>, it: &mut E::Vm, proto: E::Obj, body: E::Raw, init: E::Raw, who: &str, json: bool) -> R<E, E::Raw> {
     let lim = d.fl();
     let (mut status, mut text, mut list) = (200u16, String::new(), HeaderList::new(Guard::Response));
-    if !matches!(init, Value::Undefined | Value::Null) {
-        if !matches!(init, Value::Object(_)) {
-            return Err(it.type_error("The response init is not an object"));
+    if !matches!(E::kind(init), Val::Undefined | Val::Null) {
+        if !matches!(E::kind(init), Val::Object(_)) {
+            return Err(it.type_error_o("The response init is not an object"));
         }
         let s = d.prop(it, init, "status")?;
-        if !matches!(s, Value::Undefined) {
+        if !matches!(E::kind(s), Val::Undefined) {
             let n = it.to_js_number(s)?;
             if !(200.0..=599.0).contains(&n) {
-                return Err(it.range_error("init[\"status\"] must be in the range of 200 to 599, inclusive."));
+                return Err(it.range_error_o("init[\"status\"] must be in the range of 200 to 599, inclusive."));
             }
             status = n as u16;
         }
         let t = d.prop(it, init, "statusText")?;
-        if !matches!(t, Value::Undefined) {
+        if !matches!(E::kind(t), Val::Undefined) {
             text = d.string_arg(it, t)?;
             if text.chars().any(|c| matches!(c, '\r' | '\n') || c as u32 > 0xFF) {
-                return Err(it.type_error("Invalid statusText"));
+                return Err(it.type_error_o("Invalid statusText"));
             }
         }
         let h = d.prop(it, init, "headers")?;
         d.fill(it, &mut list, h)?;
     }
     // A ReadableStream body stays a stream: the body methods read it to the end (`consume`), and `body` gives it back.
-    let src = match body {
-        Value::Object(o) => lock_state(d, o).map(|ld| (o, ld)),
+    let src = match E::kind(body) {
+        Val::Object(o) => lock_state(d, o).map(|ld| (o, ld)),
         _ => None,
     };
     if let Some((_, (locked, disturbed))) = src {
         if locked || disturbed {
-            return Err(it.type_error("Failed to construct 'Response': Response body object should not be disturbed or locked"));
+            return Err(it.type_error_o("Failed to construct 'Response': Response body object should not be disturbed or locked"));
         }
         if status_null_body(status) {
-            return Err(it.type_error("Response with null body status cannot have body"));
+            return Err(it.type_error_o("Response with null body status cannot have body"));
         }
     }
     let init_body = if src.is_some() { None } else { d.extract_body(it, body, who)? };
     let body = match init_body {
         Some((bytes, ty)) => {
             if status_null_body(status) {
-                return Err(it.type_error("Response with null body status cannot have body"));
+                return Err(it.type_error_o("Response with null body status cannot have body"));
             }
             let ty = if json { Some(Cow::Borrowed("application/json")) } else { ty };
             if let Some(ty) = ty && list.get("content-type").is_none() {
@@ -1631,15 +1631,15 @@ fn init_response(d: &Dom, it: &mut Interp<'_>, proto: ObjId, body: Value, init: 
     };
     d.reserve(it, 2, body.as_ref().map_or(0, |b| b.len()))?;
     let h = d.headers_obj(it, list)?;
-    let r = RespData { c: Common { headers: edge(it, h), body: Body::new(body) }, status, status_text: text, url: String::new(), redirected: false, ty: "default", stream: src.map(|s| edge(it, s.0)) };
-    Ok(Value::Object(d.add_obj_in(it, proto, F::Response(r))?))
+    let r = RespData { c: Common { headers: edge::<E>(it, h), body: Body::new(body) }, status, status_text: text, url: String::new(), redirected: false, ty: "default", stream: src.map(|s| edge::<E>(it, s.0)) };
+    Ok(E::obj_raw(d.add_obj_in(it, proto, F::Response(r))?))
 }
 
 /// A ReadableStream of `bytes` (`Blob.stream()`): the `body` of a response that script cannot reach. The stream holds it.
-pub(crate) fn bytes_stream(d: &Dom, it: &mut Interp<'_>, bytes: Vec<u8>) -> R<Value> {
+pub(crate) fn bytes_stream<E: Eng>(d: &Dom<E>, it: &mut E::Vm, bytes: Vec<u8>) -> R<E, E::Raw> {
     d.reserve(it, 2, bytes.len())?;
     let h = d.headers_obj(it, HeaderList::new(Guard::Immutable))?;
-    let r = RespData { c: Common { headers: edge(it, h), body: Body::new(Some(Rc::new(bytes))) }, status: 200, status_text: String::new(), url: String::new(), redirected: false, ty: "default", stream: None };
+    let r = RespData { c: Common { headers: edge::<E>(it, h), body: Body::new(Some(Rc::new(bytes))) }, status: 200, status_text: String::new(), url: String::new(), redirected: false, ty: "default", stream: None };
     let o = d.add_obj(it, Pr::Response, F::Response(r))?;
     run_v(it, |s| {
         let l = d.obj_local(s, o);
@@ -1648,13 +1648,13 @@ pub(crate) fn bytes_stream(d: &Dom, it: &mut Interp<'_>, bytes: Vec<u8>) -> R<Va
 }
 
 /// `(locked, disturbed)` of a ReadableStream: one made by script, or the `body` of a response. `None` if `o` is not a stream.
-fn lock_state(d: &Dom, o: ObjId) -> Option<(bool, bool)> {
+fn lock_state<E: Eng>(d: &Dom<E>, o: E::Obj) -> Option<(bool, bool)> {
     if let Some(ld) = streams::lock_state(d, o) {
         return Some(ld);
     }
     let st = d.fetch.st.borrow();
     match st.f_get(&o) {
-        Some(F::Stream(r)) => match st.f_get(&oid(r)) {
+        Some(F::Stream(r)) => match st.f_get(&oid::<E>(r)) {
             Some(F::Response(r)) => Some((r.c.body.locked, r.c.body.used)),
             _ => None,
         },
@@ -1663,56 +1663,56 @@ fn lock_state(d: &Dom, o: ObjId) -> Option<(bool, bool)> {
 }
 
 /// The ReadableStream that `new Response(stream)` got, if `o` is such a response. Its own `body` stream holds `o`; this one does not.
-fn stream_src(d: &Dom, o: ObjId) -> Option<ObjId> {
+fn stream_src<E: Eng>(d: &Dom<E>, o: E::Obj) -> Option<E::Obj> {
     let st = d.fetch.st.borrow();
     match st.f_get(&o) {
-        Some(F::Response(r)) => r.stream.as_ref().map(oid).filter(|s| !matches!(st.f_get(s), Some(F::Stream(owner)) if oid(owner) == o)),
+        Some(F::Response(r)) => r.stream.as_ref().map(oid::<E>).filter(|s| !matches!(st.f_get(s), Some(F::Stream(owner)) if oid::<E>(owner) == o)),
         _ => None,
     }
 }
 
 /// `text()` and the other body methods of a stream body: `shims/drain.js` reads it to the end. Gives its promise.
-fn drain_stream(d: &Dom, it: &mut Interp<'_>, this: ObjId, src: ObjId, kind: &str) -> R<Value> {
+fn drain_stream<E: Eng>(d: &Dom<E>, it: &mut E::Vm, this: E::Obj, src: E::Obj, kind: &str) -> R<E, E::Raw> {
     let (locked, disturbed) = lock_state(d, src).unwrap_or((false, false));
     if locked || disturbed {
         let p = it.host_new_promise()?;
         let msg = if disturbed { "Body has already been consumed." } else { "Body is locked." };
-        let e = it.type_error(msg);
+        let e = it.type_error_o(msg);
         return settle(it, p, Err(e));
     }
     let f = match d.fetch.drain.get() {
         Some(p) => it.persistent_value(p),
         None => {
             // Not `js_str`: the source is part of the host, not script data.
-            let s = it.heap.intern_str(include_str!("shims/drain.js")).map_err(|e| it.heap_error(e))?;
-            let f = it.eval_global(Value::String(s))?;
+            let s = it.h_intern(include_str!("shims/drain.js"))?;
+            let f = it.eval_global_o(E::str_raw(s))?;
             let _ = d.fetch.drain.set(it.persist_value(f));
             f
         }
     };
-    let h = common(&mut d.fetch.st.borrow_mut(), this).map(|c| oid(&c.headers));
+    let h = common(&mut d.fetch.st.borrow_mut(), this).map(|c| oid::<E>(&c.headers));
     let ct = h.and_then(|h| d.list_of(h).get("content-type")).unwrap_or_default();
     let (kind, ct) = (d.js_str(it, kind)?, d.js_str(it, &ct)?);
-    it.call(f, Value::Undefined, &[Value::Object(src), Value::Number(d.fl().max_request_body as f64), kind, ct])
+    it.call_o(f, E::undef(), &[E::obj_raw(src), E::num(d.fl().max_request_body as f64), kind, ct])
 }
 
-fn with_req<T>(d: &Dom, it: &mut Interp<'_>, this: Value, f: impl FnOnce(&ReqData) -> T) -> R<T> {
+fn with_req<T, E: Eng>(d: &Dom<E>, it: &mut E::Vm, this: E::Raw, f: impl FnOnce(&ReqData<E>) -> T) -> R<E, T> {
     let o = d.brand(it, this)?;
     match d.fetch.st.borrow().f_get(&o) {
         Some(F::Request(r)) => Ok(f(r)),
-        _ => Err(it.type_error("Illegal invocation")),
+        _ => Err(it.type_error_o("Illegal invocation")),
     }
 }
 
-fn with_resp<T>(d: &Dom, it: &mut Interp<'_>, this: Value, f: impl FnOnce(&RespData) -> T) -> R<T> {
+fn with_resp<T, E: Eng>(d: &Dom<E>, it: &mut E::Vm, this: E::Raw, f: impl FnOnce(&RespData<E>) -> T) -> R<E, T> {
     let o = d.brand(it, this)?;
     match d.fetch.st.borrow().f_get(&o) {
         Some(F::Response(r)) => Ok(f(r)),
-        _ => Err(it.type_error("Illegal invocation")),
+        _ => Err(it.type_error_o("Illegal invocation")),
     }
 }
 
-fn with_req_s<'s, T>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, f: impl FnOnce(&ReqData) -> T) -> Res<'s, T> {
+fn with_req_s<'s, T, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, f: impl FnOnce(&ReqData<E>) -> T) -> Res<'s, T> {
     let o = d.brand_s(s, this)?;
     match d.fetch.st.borrow().f_get(&o) {
         Some(F::Request(r)) => Ok(f(r)),
@@ -1720,7 +1720,7 @@ fn with_req_s<'s, T>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, f: impl FnOnc
     }
 }
 
-fn with_resp_s<'s, T>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, f: impl FnOnce(&RespData) -> T) -> Res<'s, T> {
+fn with_resp_s<'s, T, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, f: impl FnOnce(&RespData<E>) -> T) -> Res<'s, T> {
     let o = d.brand_s(s, this)?;
     match d.fetch.st.borrow().f_get(&o) {
         Some(F::Response(r)) => Ok(f(r)),
@@ -1728,119 +1728,119 @@ fn with_resp_s<'s, T>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, f: impl FnOn
     }
 }
 
-fn req_method<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn req_method<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let v = with_req_s(d, s, this, |r| r.method.clone())?;
     d.js_str_s(s, &v)
 }
-fn req_url<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn req_url<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let v = with_req_s(d, s, this, |r| r.url.to_string())?;
     d.js_str_s(s, &v)
 }
-fn req_headers<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
-    let o = with_req_s(d, s, this, |r| oid(&r.c.headers))?;
+fn req_headers<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = with_req_s(d, s, this, |r| oid::<E>(&r.c.headers))?;
     Ok(d.obj_local(s, o))
 }
-fn req_redirect<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn req_redirect<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let v = with_req_s(d, s, this, |r| match r.redirect { Redirect::Follow => "follow", Redirect::Error => "error", Redirect::Manual => "manual" })?;
     d.js_str_s(s, v)
 }
-fn req_credentials<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn req_credentials<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let v = with_req_s(d, s, this, |r| r.credentials)?;
     d.js_str_s(s, v)
 }
-fn req_mode<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn req_mode<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let v = with_req_s(d, s, this, |r| r.mode)?;
     d.js_str_s(s, v)
 }
-fn req_body_used<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn req_body_used<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let v = with_req_s(d, s, this, |r| r.c.body.used)?;
     Ok(s.boolean(v))
 }
-fn req_clone<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn req_clone<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let this = s.engine().raw(this);
-    old_v(s, |it| req_clone_old(d, it, this))
+    old_v::<E>(s, |it| req_clone_old(d, it, this))
 }
-fn req_clone_old(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<Value> {
-    let (method, url, redirect, credentials, mode, hdr, body, used, signal) = with_req(d, it, this, |r| (r.method.clone(), dup(&r.url), r.redirect, r.credentials, r.mode, oid(&r.c.headers), r.c.body.bytes.clone(), r.c.body.used || r.c.body.locked, r.signal.as_ref().map(oid)))?;
+fn req_clone_old<E: Eng>(d: &Dom<E>, it: &mut E::Vm, this: E::Raw) -> R<E, E::Raw> {
+    let (method, url, redirect, credentials, mode, hdr, body, used, signal) = with_req(d, it, this, |r| (r.method.clone(), dup(&r.url), r.redirect, r.credentials, r.mode, oid::<E>(&r.c.headers), r.c.body.bytes.clone(), r.c.body.used || r.c.body.locked, r.signal.as_ref().map(oid::<E>)))?;
     if used {
-        return Err(it.type_error("Failed to execute 'clone' on 'Request': Request body is already used"));
+        return Err(it.type_error_o("Failed to execute 'clone' on 'Request': Request body is already used"));
     }
     let mut headers = d.list_of(hdr);
     headers.guard = Guard::Request;
-    Ok(Value::Object(new_request_obj(d, it, Core { method, url, headers, body, redirect, credentials, mode, signal }, d.fproto(Pr::Request))?))
+    Ok(E::obj_raw(new_request_obj(d, it, Core { method, url, headers, body, redirect, credentials, mode, signal }, d.fproto(Pr::Request))?))
 }
-fn req_signal<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn req_signal<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let this = s.engine().raw(this);
-    old_v(s, |it| req_signal_old(d, it, this))
+    old_v::<E>(s, |it| req_signal_old(d, it, this))
 }
-fn req_signal_old(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<Value> {
+fn req_signal_old<E: Eng>(d: &Dom<E>, it: &mut E::Vm, this: E::Raw) -> R<E, E::Raw> {
     let o = d.brand(it, this)?;
     if let Some(F::Request(ReqData { signal: Some(s), .. })) = d.fetch.st.borrow().f_get(&o) {
-        return Ok(Value::Object(oid(s)));
+        return Ok(E::obj_raw(oid::<E>(s)));
     }
     let s = d.fresh_signal(it)?;
     if let Some(F::Request(r)) = d.fetch.st.borrow_mut().f_get_mut(&o) {
-        r.signal = Some(edge(it, s));
+        r.signal = Some(edge::<E>(it, s));
     }
-    Ok(Value::Object(s))
+    Ok(E::obj_raw(s))
 }
-fn gate_request_body<'s>(_: &Dom, _: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn gate_request_body<'s, E: Eng>(_: &Dom<E>, _: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     Err(unsupp("Request.body (a request body stream)"))
 }
 
-fn resp_status<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn resp_status<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let v = with_resp_s(d, s, this, |r| r.status)?;
     Ok(s.number(v as f64))
 }
-fn resp_ok<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn resp_ok<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let v = with_resp_s(d, s, this, |r| (200..300).contains(&r.status))?;
     Ok(s.boolean(v))
 }
-fn resp_status_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn resp_status_text<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let v = with_resp_s(d, s, this, |r| r.status_text.clone())?;
     d.js_str_s(s, &v)
 }
-fn resp_url<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn resp_url<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let v = with_resp_s(d, s, this, |r| r.url.clone())?;
     d.js_str_s(s, &v)
 }
-fn resp_redirected<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn resp_redirected<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let v = with_resp_s(d, s, this, |r| r.redirected)?;
     Ok(s.boolean(v))
 }
-fn resp_type<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn resp_type<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let v = with_resp_s(d, s, this, |r| r.ty)?;
     d.js_str_s(s, v)
 }
-fn resp_headers<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
-    let o = with_resp_s(d, s, this, |r| oid(&r.c.headers))?;
+fn resp_headers<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let o = with_resp_s(d, s, this, |r| oid::<E>(&r.c.headers))?;
     Ok(d.obj_local(s, o))
 }
-fn resp_body_used<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn resp_body_used<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let used = with_resp_s(d, s, this, |r| r.c.body.used)?;
     let src = d.brand_s(s, this).ok().and_then(|o| stream_src(d, o));
     let v = used || src.and_then(|x| lock_state(d, x)).is_some_and(|ld| ld.1);
     Ok(s.boolean(v))
 }
-fn resp_clone<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn resp_clone<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let this = s.engine().raw(this);
-    old_v(s, |it| resp_clone_old(d, it, this))
+    old_v::<E>(s, |it| resp_clone_old(d, it, this))
 }
-fn resp_clone_old(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<Value> {
+fn resp_clone_old<E: Eng>(d: &Dom<E>, it: &mut E::Vm, this: E::Raw) -> R<E, E::Raw> {
     let (c_hdr, body, used, status, text, url, redirected, ty) =
-        with_resp(d, it, this, |r| (oid(&r.c.headers), r.c.body.bytes.clone(), r.c.body.used || r.c.body.locked, r.status, r.status_text.clone(), r.url.clone(), r.redirected, r.ty))?;
+        with_resp(d, it, this, |r| (oid::<E>(&r.c.headers), r.c.body.bytes.clone(), r.c.body.used || r.c.body.locked, r.status, r.status_text.clone(), r.url.clone(), r.redirected, r.ty))?;
     if d.brand(it, this).ok().and_then(|o| stream_src(d, o)).is_some() {
-        return Err(Error::Unsupported(unsupported("Response.clone with a ReadableStream body (it needs tee)")));
+        return Err(Fault::Unsupported("Response.clone with a ReadableStream body (it needs tee)"));
     }
     if used {
-        return Err(it.type_error("Failed to execute 'clone' on 'Response': Response body is already used"));
+        return Err(it.type_error_o("Failed to execute 'clone' on 'Response': Response body is already used"));
     }
     let mut list = d.list_of(c_hdr);
     list.guard = if ty == "basic" { Guard::Immutable } else { Guard::Response };
     d.reserve(it, 2, body.as_ref().map_or(0, |b| b.len()))?;
     let h = d.headers_obj(it, list)?;
-    let r = RespData { c: Common { headers: edge(it, h), body: Body::new(body) }, status, status_text: text, url, redirected, ty, stream: None };
-    Ok(Value::Object(d.add_obj(it, Pr::Response, F::Response(r))?))
+    let r = RespData { c: Common { headers: edge::<E>(it, h), body: Body::new(body) }, status, status_text: text, url, redirected, ty, stream: None };
+    Ok(E::obj_raw(d.add_obj(it, Pr::Response, F::Response(r))?))
 }
 
 enum As {
@@ -1851,7 +1851,7 @@ enum As {
     Buffer,
 }
 
-fn take_body<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, Option<Rc<Vec<u8>>>> {
+fn take_body<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, Option<Rc<Vec<u8>>>> {
     let o = d.brand_s(s, this)?;
     let mut st = d.fetch.st.borrow_mut();
     let Some(c) = common(&mut st, o) else { return Err(s.type_error("Illegal invocation")) };
@@ -1867,8 +1867,8 @@ fn take_body<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, Option
     Ok(bytes)
 }
 
-fn consume<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, how: As) -> Res<'s, Local<'s>> {
-    if let Some(o) = obj_id(s, this) && let Some(src) = stream_src(d, o) {
+fn consume<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, how: As) -> Res<'s, Local<'s>> {
+    if let Some(o) = obj_id::<E>(s, this) && let Some(src) = stream_src(d, o) {
         let kind = match how {
             As::Blob => "blob",
             As::Form => "formData",
@@ -1876,14 +1876,14 @@ fn consume<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, how: As) -> Res<'s,
             As::Json => "json",
             As::Buffer => "arrayBuffer",
         };
-        return old_v(s, |it| drain_stream(d, it, o, src, kind));
+        return old_v::<E>(s, |it| drain_stream(d, it, o, src, kind));
     }
     let p = s.new_promise()?;
     let r = (|| -> Res<'s, Local<'s>> {
         let ct = match how {
             As::Blob | As::Form => {
                 let o = d.brand_s(s, this)?;
-                let h = common(&mut d.fetch.st.borrow_mut(), o).map(|c| oid(&c.headers));
+                let h = common(&mut d.fetch.st.borrow_mut(), o).map(|c| oid::<E>(&c.headers));
                 h.and_then(|h| d.list_of(h).get("content-type")).unwrap_or_default()
             }
             _ => String::new(),
@@ -1894,11 +1894,11 @@ fn consume<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, how: As) -> Res<'s,
         match how {
             As::Blob => {
                 s.charge((n / 64) as u64)?;
-                old_v(s, |it| crate::browser_web::blob_from_bytes(d, it, Rc::try_unwrap(bytes).unwrap_or_else(|rc| (*rc).clone()), ct))
+                old_v::<E>(s, |it| crate::browser_web::blob_from_bytes(d, it, Rc::try_unwrap(bytes).unwrap_or_else(|rc| (*rc).clone()), ct))
             }
             As::Form => {
                 s.charge((n / 16) as u64)?;
-                match old(s, |it| crate::browser_web::form_from(d, it, &bytes, &ct))? {
+                match old::<E, _>(s, |it| crate::browser_web::form_from(d, it, &bytes, &ct))? {
                     Some(v) => Ok(s.engine().raw_local(&v)),
                     None => Err(s.type_error("Failed to fetch")),
                 }
@@ -1913,7 +1913,7 @@ fn consume<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, how: As) -> Res<'s,
                 let body = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&bytes);
                 let text = String::from_utf8_lossy(body);
                 // `js_text`: an equal live text is the same string.
-                let text = old_v(s, |it| d.js_text(it, &text))?;
+                let text = old_v::<E>(s, |it| d.js_text(it, &text))?;
                 if let As::Text = how {
                     return Ok(text);
                 }
@@ -1924,31 +1924,31 @@ fn consume<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, how: As) -> Res<'s,
             }
         }
     })();
-    settle_s(s, p, r)
+    settle_s::<E>(s, p, r)
 }
 
-fn body_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn body_text<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     consume(d, s, this, As::Text)
 }
-fn body_json<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn body_json<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     consume(d, s, this, As::Json)
 }
-fn body_array_buffer<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn body_array_buffer<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     consume(d, s, this, As::Buffer)
 }
-fn body_blob<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn body_blob<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     consume(d, s, this, As::Blob)
 }
-fn body_form_data<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn body_form_data<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     consume(d, s, this, As::Form)
 }
 
 // ---------------------------------------------------------------------------------------------- streams
 
-fn resp_body<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn resp_body<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let o = d.brand_s(s, this)?;
     let (stream, has_body) = match d.fetch.st.borrow().f_get(&o) {
-        Some(F::Response(r)) => (r.stream.as_ref().map(oid), r.c.body.bytes.is_some() || r.c.body.used),
+        Some(F::Response(r)) => (r.stream.as_ref().map(oid::<E>), r.c.body.bytes.is_some() || r.c.body.used),
         _ => return Err(s.type_error("Illegal invocation")),
     };
     if let Some(x) = stream {
@@ -1958,22 +1958,22 @@ fn resp_body<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> R
         return Ok(s.null());
     }
     d.reserve_s(s, 1, 0)?;
-    let x = d.add_obj_s(s, Pr::Stream, F::Stream(edge_of(o)))?;
+    let x = d.add_obj_s(s, Pr::Stream, F::Stream(edge_of::<E>(o)))?;
     if let Some(F::Response(r)) = d.fetch.st.borrow_mut().f_get_mut(&o) {
-        r.stream = Some(edge_of(x));
+        r.stream = Some(edge_of::<E>(x));
     }
     Ok(d.obj_local(s, x))
 }
 
-fn stream_owner<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, (ObjId, ObjId)> {
+fn stream_owner<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, (E::Obj, E::Obj)> {
     let o = d.brand_s(s, this)?;
     match d.fetch.st.borrow().f_get(&o) {
-        Some(F::Stream(r)) => Ok((o, oid(r))),
+        Some(F::Stream(r)) => Ok((o, oid::<E>(r))),
         _ => Err(s.type_error("Illegal invocation")),
     }
 }
 
-pub(crate) fn stream_locked<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn stream_locked<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let (_, r) = stream_owner(d, s, this)?;
     let locked = match d.fetch.st.borrow().f_get(&r) {
         Some(F::Response(r)) => r.c.body.locked,
@@ -1982,9 +1982,9 @@ pub(crate) fn stream_locked<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _:
     Ok(s.boolean(locked))
 }
 
-pub(crate) fn stream_get_reader<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn stream_get_reader<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let (x, r) = stream_owner(d, s, this)?;
-    let opts = arg_s(s, a, 0);
+    let opts = arg_s::<E>(s, a, 0);
     if s.type_of(opts) != Type::Undefined {
         let mode = s.get_str(opts, "mode")?;
         if s.type_of(mode) != Type::Undefined {
@@ -2005,11 +2005,11 @@ pub(crate) fn stream_get_reader<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>
             }
         }
     }
-    let o = d.add_obj_s(s, Pr::Reader, F::Reader { stream: edge_of(x), released: false })?;
+    let o = d.add_obj_s(s, Pr::Reader, F::Reader { stream: edge_of::<E>(x), released: false })?;
     Ok(d.obj_local(s, o))
 }
 
-pub(crate) fn stream_cancel<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn stream_cancel<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let p = s.new_promise()?;
     let r = (|| -> Res<'s, Local<'s>> {
         let (_, resp) = stream_owner(d, s, this)?;
@@ -2026,11 +2026,11 @@ pub(crate) fn stream_cancel<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _:
         drop(st);
         Ok(s.undefined())
     })();
-    settle_s(s, p, r)
+    settle_s::<E>(s, p, r)
 }
 
 /// Mark the body used and free its bytes.
-fn drop_body(st: &mut FetchState, o: ObjId) {
+fn drop_body<E: Eng>(st: &mut FetchState<E>, o: E::Obj) {
     if let Some(c) = common(st, o) {
         c.body.used = true;
         let n = c.body.len();
@@ -2039,20 +2039,20 @@ fn drop_body(st: &mut FetchState, o: ObjId) {
     }
 }
 
-fn reader_parts<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, (ObjId, ObjId, bool)> {
+fn reader_parts<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, (E::Obj, E::Obj, bool)> {
     let o = d.brand_s(s, this)?;
     let (stream, released) = match d.fetch.st.borrow().f_get(&o) {
-        Some(F::Reader { stream, released }) => (oid(stream), *released),
+        Some(F::Reader { stream, released }) => (oid::<E>(stream), *released),
         _ => return Err(s.type_error("Illegal invocation")),
     };
     let resp = match d.fetch.st.borrow().f_get(&stream) {
-        Some(F::Stream(r)) => oid(r),
+        Some(F::Stream(r)) => oid::<E>(r),
         _ => return Err(s.type_error("Illegal invocation")),
     };
     Ok((o, resp, released))
 }
 
-pub(crate) fn reader_read<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn reader_read<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let p = s.new_promise()?;
     let r = (|| -> Res<'s, Local<'s>> {
         let (_, resp, released) = reader_parts(d, s, this)?;
@@ -2104,12 +2104,12 @@ pub(crate) fn reader_read<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: A
                 (v, false)
             }
         };
-        iter_result_s(s, value, done)
+        iter_result_s::<E>(s, value, done)
     })();
-    settle_s(s, p, r)
+    settle_s::<E>(s, p, r)
 }
 
-pub(crate) fn reader_cancel<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn reader_cancel<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let p = s.new_promise()?;
     let r = (|| -> Res<'s, Local<'s>> {
         let (_, resp, released) = reader_parts(d, s, this)?;
@@ -2119,10 +2119,10 @@ pub(crate) fn reader_cancel<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _:
         drop_body(&mut d.fetch.st.borrow_mut(), resp);
         Ok(s.undefined())
     })();
-    settle_s(s, p, r)
+    settle_s::<E>(s, p, r)
 }
 
-pub(crate) fn reader_release<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn reader_release<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let (o, resp, released) = reader_parts(d, s, this)?;
     if !released {
         let mut st = d.fetch.st.borrow_mut();
@@ -2136,20 +2136,20 @@ pub(crate) fn reader_release<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _
     Ok(s.undefined())
 }
 
-pub(crate) fn gate_reader_closed<'s>(_: &Dom, _: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn gate_reader_closed<'s, E: Eng>(_: &Dom<E>, _: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     Err(unsupp("ReadableStreamDefaultReader.closed"))
 }
 
 // ---------------------------------------------------------------------------------------------- fetch
 
-pub(crate) fn fetch<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    let (input, init) = (arg_s(s, a, 0), arg_s(s, a, 1));
+pub(crate) fn fetch<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (input, init) = (arg_s::<E>(s, a, 0), arg_s::<E>(s, a, 1));
     let args = [s.engine().raw(input), s.engine().raw(init)];
-    old_v(s, |it| fetch_args(d, it, &args))
+    old_v::<E>(s, |it| fetch_args(d, it, &args))
 }
 
 /// `fetch(a[0], a[1])` for code of the old form.
-pub(crate) fn fetch_args(d: &Dom, it: &mut Interp<'_>, a: &[Value]) -> R<Value> {
+pub(crate) fn fetch_args<E: Eng>(d: &Dom<E>, it: &mut E::Vm, a: &[E::Raw]) -> R<E, E::Raw> {
     let p = it.host_new_promise()?;
     match prepare(d, it, p, a) {
         Ok(()) => Ok(p),
@@ -2158,8 +2158,8 @@ pub(crate) fn fetch_args(d: &Dom, it: &mut Interp<'_>, a: &[Value]) -> R<Value> 
 }
 
 /// Validate, apply the policy and queue. A `TypeError` rejects the promise; every other error ends the call.
-fn prepare(d: &Dom, it: &mut Interp<'_>, promise: Value, a: &[Value]) -> R<()> {
-    if let Some(url) = data_input(d, it, arg(a, 0))? {
+fn prepare<E: Eng>(d: &Dom<E>, it: &mut E::Vm, promise: E::Raw, a: &[E::Raw]) -> R<E, ()> {
+    if let Some(url) = data_input(d, it, arg::<E>(a, 0))? {
         let r = if crate::browser_web::is_blob_url(&url) { blob_response(d, it, &url)? } else { data_response(d, it, &url)? };
         return settle(it, promise, Ok(r)).map(|_| ());
     }
@@ -2173,9 +2173,9 @@ fn prepare(d: &Dom, it: &mut Interp<'_>, promise: Value, a: &[Value]) -> R<()> {
             return Err(d.lim("fetch-requests"));
         }
     }
-    let core = make_core(d, it, arg(a, 0), arg(a, 1))?;
+    let core = make_core(d, it, arg::<E>(a, 0), arg::<E>(a, 1))?;
     if let Some((true, reason)) = core.signal.and_then(|s| d.signal_state(s)) {
-        return Err(Error::Throw(reason));
+        return Err(Fault::Throw(reason));
     }
     // Policy: no DNS and no socket before this passes.
     let method = wire_method(&core.method)?;
@@ -2216,12 +2216,12 @@ fn prepare(d: &Dom, it: &mut Interp<'_>, promise: Value, a: &[Value]) -> R<()> {
 
 /// The origin policy: a configured document origin. A request to the document origin returns at once (`Cors::same`). A request to another
 /// origin keeps the document origin, for the CORS protocol in `run_one`, or a text that blocks it before DNS or a socket.
-fn policy(d: &Dom, lim: &FetchLimits, url: &Url, mode: Mode, api: &'static str) -> R<Cors> {
+fn policy<E: Eng>(d: &Dom<E>, lim: &FetchLimits, url: &Url, mode: Mode, api: &'static str) -> R<E, Cors> {
     let base = d.fetch_base();
     let mut st = d.fetch.st.borrow_mut();
     let Some(base) = base else {
         st.diag(lim, "blocked: no document origin is configured".into());
-        return Err(Error::Unsupported(unsupported("fetch without a configured document origin (Browser::configure_fetch)")));
+        return Err(Fault::Unsupported("fetch without a configured document origin (Browser::configure_fetch)"));
     };
     let mut cors = Cors { mode, ..Cors::same(api) };
     if base.same_origin(url) {
@@ -2247,7 +2247,7 @@ pub(crate) fn potentially_trustworthy(u: &Url) -> bool {
 
 /// Queue the request of an `XMLHttpRequest` with the policy, the caps and the queue of `fetch`. `headers` are combined by name.
 #[allow(clippy::too_many_arguments)] // The request parts; `it` makes the handle of the XHR object.
-pub(crate) fn queue_xhr(d: &Dom, it: &mut Interp<'_>, x: (ObjId, u64), method: &str, url: Url, mut headers: Vec<(String, String)>, body: Option<Rc<Vec<u8>>>, with_credentials: bool) -> R<()> {
+pub(crate) fn queue_xhr<E: Eng>(d: &Dom<E>, it: &mut E::Vm, x: (E::Obj, u64), method: &str, url: Url, mut headers: Vec<(String, String)>, body: Option<Rc<Vec<u8>>>, with_credentials: bool) -> R<E, ()> {
     let lim = d.fl();
     {
         let st = d.fetch.st.borrow();
@@ -2274,7 +2274,7 @@ pub(crate) fn queue_xhr(d: &Dom, it: &mut Interp<'_>, x: (ObjId, u64), method: &
     if !pending_fits(&st, &lim, meta_bytes(&url, &headers)) {
         return Err(d.lim("fetch-queue"));
     }
-    st.queue.push_back(Pending { root: it.persist_value(Value::Object(x.0)), method, url, headers, body, redirect: Redirect::Follow, cors, xhr: Some(x), queued: Some(std::time::Instant::now()), started: None });
+    st.queue.push_back(Pending { root: it.persist_value(E::obj_raw(x.0)), method, url, headers, body, redirect: Redirect::Follow, cors, xhr: Some(x), queued: Some(std::time::Instant::now()), started: None });
     drop(st);
     d.queue_now();
     Ok(())
@@ -2284,7 +2284,7 @@ pub(crate) fn queue_xhr(d: &Dom, it: &mut Interp<'_>, x: (ObjId, u64), method: &
 /// the store (a network error). `url` is a stand-in for `responseURL` (the document URL). The reply settles in its turn, as any other.
 #[cold]
 #[inline(never)]
-pub(crate) fn queue_xhr_blob(d: &Dom, it: &mut Interp<'_>, x: (ObjId, u64), url: Url, found: Option<(Vec<u8>, String)>) -> R<()> {
+pub(crate) fn queue_xhr_blob<E: Eng>(d: &Dom<E>, it: &mut E::Vm, x: (E::Obj, u64), url: Url, found: Option<(Vec<u8>, String)>) -> R<E, ()> {
     let lim = d.fl();
     let mut st = d.fetch.st.borrow_mut();
     if st.queue.len() >= lim.max_pending {
@@ -2310,14 +2310,14 @@ pub(crate) fn queue_xhr_blob(d: &Dom, it: &mut Interp<'_>, x: (ObjId, u64), url:
     };
     st.started += 1;
     let started = Some(d.fetch.client.borrow().spawn(move |_| Some((out, Vec::new(), std::time::Instant::now()))));
-    st.queue.push_back(Pending { root: it.persist_value(Value::Object(x.0)), method: Method::Get, url, headers: Vec::new(), body: None, redirect: Redirect::Follow, cors: Cors::same("XMLHttpRequest"), xhr: Some(x), queued: None, started });
+    st.queue.push_back(Pending { root: it.persist_value(E::obj_raw(x.0)), method: Method::Get, url, headers: Vec::new(), body: None, redirect: Redirect::Follow, cors: Cors::same("XMLHttpRequest"), xhr: Some(x), queued: None, started });
     Ok(())
 }
 
 /// Start an `XMLHttpRequest` GET as an event stream: its own thread reads the body and the page gets each chunk as it comes
 /// (`Browser::run_streams`). The request is not in the queue, so a stream that never ends does not hold back the requests after it.
 /// The same policy, CORS and cookies as `queue_xhr`.
-pub(crate) fn queue_xhr_stream(d: &Dom, it: &mut Interp<'_>, x: (ObjId, u64), url: Url, headers: Vec<(String, String)>, with_credentials: bool) -> R<()> {
+pub(crate) fn queue_xhr_stream<E: Eng>(d: &Dom<E>, it: &mut E::Vm, x: (E::Obj, u64), url: Url, headers: Vec<(String, String)>, with_credentials: bool) -> R<E, ()> {
     let lim = d.fl();
     let mut cors = policy(d, &lim, &url, Mode::Cors, "XMLHttpRequest")?;
     cors.include = with_credentials;
@@ -2337,7 +2337,7 @@ pub(crate) fn queue_xhr_stream(d: &Dom, it: &mut Interp<'_>, x: (ObjId, u64), ur
             let _ = fail.send(StreamMsg::Head(Outcome::Failed("no thread for the event stream")));
         }
     }
-    st.streams.push(OpenStream { x, _root: it.persist_value(Value::Object(x.0)), url, rx, got: VecDeque::new(), since: std::time::Instant::now() });
+    st.streams.push(OpenStream { x, _root: it.persist_value(E::obj_raw(x.0)), url, rx, got: VecDeque::new(), since: std::time::Instant::now() });
     Ok(())
 }
 
@@ -2374,7 +2374,7 @@ fn run_stream(client: &mut Client, lim: &FetchLimits, wire: &Wire, tx: &std::syn
 }
 
 /// Take the request of an `XMLHttpRequest` out of the queue, if it is still there.
-pub(crate) fn dequeue_xhr(d: &Dom, x: ObjId) {
+pub(crate) fn dequeue_xhr<E: Eng>(d: &Dom<E>, x: E::Obj) {
     let mut st = d.fetch.st.borrow_mut();
     st.streams.retain(|s| s.x.0 != x);
     st.detached.retain(|t| t.xhr.is_none_or(|(o, _)| o != x));
@@ -2697,10 +2697,10 @@ fn unwrap_arc(a: std::sync::Arc<bare_net::http::Response>) -> bare_net::http::Re
     std::sync::Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone())
 }
 
-fn finish(d: &Dom, it: &mut Interp<'_>, promise: Value, outcome: Outcome) -> R<()> {
+fn finish<E: Eng>(d: &Dom<E>, it: &mut E::Vm, promise: E::Raw, outcome: Outcome) -> R<E, ()> {
     let r = match outcome {
         Outcome::Failed(_) | Outcome::Net(_) | Outcome::Blocked(_) => {
-            let e = it.type_error("Failed to fetch");
+            let e = it.type_error_o("Failed to fetch");
             Err(e)
         }
         Outcome::TooBig => return Err(d.lim("fetch-response-body")),
@@ -2710,18 +2710,18 @@ fn finish(d: &Dom, it: &mut Interp<'_>, promise: Value, outcome: Outcome) -> R<(
 }
 
 /// The text of a `fetch` input that is a string or a `URL` object, when it is a `data:` or a `blob:` URL.
-fn data_input(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<Option<String>> {
-    let s = match v {
+fn data_input<E: Eng>(d: &Dom<E>, it: &mut E::Vm, v: E::Raw) -> R<E, Option<String>> {
+    let s = match E::kind(v) {
         // A string that does not start with `data:` costs no copy.
-        Value::String(id) => {
-            let Ok(u) = it.heap.str_units(id) else { return Ok(None) };
+        Val::String(id) => {
+            let Ok(u) = it.h_str_units(id) else { return Ok(None) };
             let u = &u[u.iter().take_while(|&&c| c <= 32).count()..];
             if !u.get(..5).is_some_and(|p| [b"data:", b"blob:"].iter().any(|t| p.iter().zip(*t).all(|(&c, &b)| c < 128 && (c as u8).eq_ignore_ascii_case(&b)))) {
                 return Ok(None);
             }
             d.string_arg(it, v)?
         }
-        Value::Object(o) if d.nav.s.borrow().urls.contains_key(&o) => d.string_arg(it, v)?,
+        Val::Object(o) if d.nav.s.borrow().urls.contains_key(&o) => d.string_arg(it, v)?,
         _ => return Ok(None),
     };
     let t = s.trim_matches(|c: char| c <= ' ');
@@ -2730,9 +2730,9 @@ fn data_input(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<Option<String>> {
 
 /// The response of `fetch('data:...')`: status 200, the media type of the URL as `content-type`, the decoded body. No network, no CORS.
 /// A URL with no comma or bad base64 is a network error (`TypeError`). The fragment is not part of the body.
-fn data_response(d: &Dom, it: &mut Interp<'_>, url: &str) -> R<Value> {
+fn data_response<E: Eng>(d: &Dom<E>, it: &mut E::Vm, url: &str) -> R<E, E::Raw> {
     let bare = url.split_once('#').map_or(url, |u| u.0);
-    let Some(body) = crate::images::data_url(bare) else { return Err(it.type_error("Failed to fetch")) };
+    let Some(body) = crate::images::data_url(bare) else { return Err(it.type_error_o("Failed to fetch")) };
     let head = bare[5..].split_once(',').map_or("", |h| h.0).trim();
     let head = match head.len().checked_sub(7).filter(|&i| head.is_char_boundary(i) && head[i..].eq_ignore_ascii_case(";base64")) {
         Some(i) => &head[..i],
@@ -2746,13 +2746,13 @@ fn data_response(d: &Dom, it: &mut Interp<'_>, url: &str) -> R<Value> {
 /// no CORS. A URL that is not in the store (never made, revoked) is a network error (`TypeError`).
 #[cold]
 #[inline(never)]
-fn blob_response(d: &Dom, it: &mut Interp<'_>, url: &str) -> R<Value> {
-    let Some((body, ty)) = crate::browser_web::blob_url_read(d, url) else { return Err(it.type_error("Failed to fetch")) };
-    it.charge((body.len() / 64) as u64)?;
+fn blob_response<E: Eng>(d: &Dom<E>, it: &mut E::Vm, url: &str) -> R<E, E::Raw> {
+    let Some((body, ty)) = crate::browser_web::blob_url_read(d, url) else { return Err(it.type_error_o("Failed to fetch")) };
+    it.charge_o((body.len() / 64) as u64)?;
     plain_response(d, it, url, (!ty.is_empty()).then_some(ty), body)
 }
 
-fn plain_response(d: &Dom, it: &mut Interp<'_>, url: &str, mime: Option<String>, body: Vec<u8>) -> R<Value> {
+fn plain_response<E: Eng>(d: &Dom<E>, it: &mut E::Vm, url: &str, mime: Option<String>, body: Vec<u8>) -> R<E, E::Raw> {
     let lim = d.fl();
     let mut list = HeaderList::new(Guard::Response);
     if let Some(mime) = mime {
@@ -2762,13 +2762,13 @@ fn plain_response(d: &Dom, it: &mut Interp<'_>, url: &str, mime: Option<String>,
     let body = Some(Rc::new(body));
     d.reserve(it, 2, body.as_ref().map_or(0, |b| b.len()))?;
     let h = d.headers_obj(it, list)?;
-    let r = RespData { c: Common { headers: edge(it, h), body: Body::new(body) }, status: 200, status_text: String::new(), url: url.to_string(), redirected: false, ty: "basic", stream: None };
-    Ok(Value::Object(d.add_obj(it, Pr::Response, F::Response(r))?))
+    let r = RespData { c: Common { headers: edge::<E>(it, h), body: Body::new(body) }, status: 200, status_text: String::new(), url: url.to_string(), redirected: false, ty: "basic", stream: None };
+    Ok(E::obj_raw(d.add_obj(it, Pr::Response, F::Response(r))?))
 }
 
 // Each argument is a field of the response; a bundle struct would only move the copies.
 #[allow(clippy::too_many_arguments)]
-fn build_response(d: &Dom, it: &mut Interp<'_>, status: u16, url: Url, redirected: bool, headers: Vec<(String, String)>, body: Vec<u8>, taint: Taint) -> R<Value> {
+fn build_response<E: Eng>(d: &Dom<E>, it: &mut E::Vm, status: u16, url: Url, redirected: bool, headers: Vec<(String, String)>, body: Vec<u8>, taint: Taint) -> R<E, E::Raw> {
     let lim = d.fl();
     let mut list = HeaderList::new(Guard::Response);
     for (n, v) in headers {
@@ -2779,11 +2779,11 @@ fn build_response(d: &Dom, it: &mut Interp<'_>, status: u16, url: Url, redirecte
     let body = (!status_null_body(status) && !matches!(taint, Taint::Opaque | Taint::OpaqueRedirect)).then(|| Rc::new(body));
     d.reserve(it, 2, body.as_ref().map_or(0, |b| b.len()))?;
     let h = d.headers_obj(it, list)?;
-    let r = RespData { c: Common { headers: edge(it, h), body: Body::new(body) }, status, status_text: String::new(), url: if taint == Taint::Opaque { String::new() } else { url.to_string() }, redirected, ty: ["basic", "cors", "opaque", "opaqueredirect"][taint as usize], stream: None };
-    Ok(Value::Object(d.add_obj(it, Pr::Response, F::Response(r))?))
+    let r = RespData { c: Common { headers: edge::<E>(it, h), body: Body::new(body) }, status, status_text: String::new(), url: if taint == Taint::Opaque { String::new() } else { url.to_string() }, redirected, ty: ["basic", "cors", "opaque", "opaqueredirect"][taint as usize], stream: None };
+    Ok(E::obj_raw(d.add_obj(it, Pr::Response, F::Response(r))?))
 }
 
-impl Browser {
+impl<E: Eng> Browser<E> {
     /// Set the document origin and the HTTP client. Call it before scripts run. Without it, `fetch` is `Unsupported`.
     pub fn configure_fetch(&mut self, cfg: FetchConfig) -> Result<(), String> {
         let base = cfg.base_url.as_deref().map(Url::parse).transpose()?;
@@ -2868,13 +2868,13 @@ impl Browser {
 
     /// Give the page what the event streams received (`Browser::xhr_stream_deliver`). A stream that ended is dropped. Gives how many
     /// messages were delivered.
-    pub fn run_streams(&mut self) -> R<usize> {
+    pub fn run_streams(&mut self) -> R<E, usize> {
         if self.streams_ready() != Some(true) {
             return Ok(0);
         }
         let dom = self.dom.clone();
         let lim = dom.fl();
-        let msgs: Vec<((ObjId, u64), StreamMsg)> = {
+        let msgs: Vec<((E::Obj, u64), StreamMsg)> = {
             let mut st = dom.fetch.st.borrow_mut();
             let st = &mut *st;
             let (mut msgs, mut diag) = (Vec::new(), Vec::new());
@@ -2915,7 +2915,7 @@ impl Browser {
     /// Run up to `max` queued requests, oldest first (on a live page, the oldest whose reply is in). Each one does its blocking I/O, settles its promise and runs a microtask
     /// checkpoint, so a callback may queue the next request: it runs in this call if `max` allows. Returns how many ran.
     /// A `Limit` ends the call (the VM is then unusable, as for any other limit).
-    pub fn run_network_tasks(&mut self, max: usize) -> R<usize> {
+    pub fn run_network_tasks(&mut self, max: usize) -> R<E, usize> {
         let dom = self.dom.clone();
         if let Some(e) = dom.fetch.st.borrow().halted { return Err(e); }
         let result = self.run_network_tasks_inner(max);
@@ -2923,9 +2923,9 @@ impl Browser {
         result
     }
 
-    fn run_network_tasks_inner(&mut self, max: usize) -> R<usize> {
+    fn run_network_tasks_inner(&mut self, max: usize) -> R<E, usize> {
         let dom = self.dom.clone();
-        self.it.host_scope(|it| it.host_checkpoint().map(|_| ()))?;
+        self.it.host_scope_o(|it| it.host_checkpoint().map(|_| ()))?;
         let mut n = 0;
         while n < max {
             let lim = dom.fl();
@@ -2981,7 +2981,7 @@ impl Browser {
                 self.xhr_deliver(x, seq, outcome, arrived)?;
                 continue;
             }
-            self.it.host_scope(|it| {
+            self.it.host_scope_o(|it| {
                 let promise = it.persistent_value(&task.root);
                 finish(&dom, it, promise, outcome)?;
                 it.host_checkpoint().map(|_| ())
@@ -2992,24 +2992,24 @@ impl Browser {
 
     /// Reject every queued request with an `AbortError`. A request that already started its I/O cannot be interrupted (it runs
     /// to its end inside `run_network_tasks`), so this only affects requests that have not begun. Returns how many were aborted.
-    pub fn abort_fetches(&mut self) -> R<usize> {
+    pub fn abort_fetches(&mut self) -> R<E, usize> {
         self.run_network_tasks(0)?;
         let result = self.abort_fetches_inner();
         if let Err(e) = result { self.dom.fetch.st.borrow_mut().halted = Some(e); }
         result
     }
 
-    fn abort_fetches_inner(&mut self) -> R<usize> {
+    fn abort_fetches_inner(&mut self) -> R<E, usize> {
         let dom = self.dom.clone();
-        let tasks: Vec<Pending> = {
+        let tasks: Vec<Pending<E>> = {
             let mut st = dom.fetch.st.borrow_mut();
-            let mut t: Vec<Pending> = st.queue.drain(..).collect();
+            let mut t: Vec<Pending<E>> = st.queue.drain(..).collect();
             t.append(&mut st.detached);
             st.queued_bytes = 0;
             t
         };
         let n = tasks.len();
-        self.it.host_scope(|it| {
+        self.it.host_scope_o(|it| {
             for t in tasks {
                 if let Some((x, seq)) = t.xhr {
                     dom.xhr_abort_queued(it, x, seq)?;
@@ -3039,11 +3039,11 @@ impl Browser {
 
 use Pr::*;
 
-const fn ms(on: Pr, name: &'static str, len: u32, h: HS) -> Row {
+const fn ms<E: Eng>(on: Pr, name: &'static str, len: u32, h: HS<E>) -> Row<E> {
     Row::method(1 << on as u32, name, len, h)
 }
 
-const fn gs(on: Pr, name: &'static str, h: HS) -> Row {
+const fn gs<E: Eng>(on: Pr, name: &'static str, h: HS<E>) -> Row<E> {
     Row::get(1 << on as u32, name, h, None)
 }
 
@@ -3102,22 +3102,22 @@ table!(defs = [
 ]);
 
 /// Define the globals `fetch`, `Headers`, `Request`, `Response`, `ReadableStream`, `ReadableStreamDefaultReader`.
-pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
     let g = s.global();
     // The iterator prototype inherits from %IteratorPrototype%, so `iterator[Symbol.iterator]() === iterator`.
     let ip = s.intrinsic(Intrinsic::IteratorPrototype);
-    let ip = obj_id(s, ip).expect("an object");
-    let protos: [ObjId; 6] = [d.plain_s(s)?, d.plain_s(s)?, d.plain_s(s)?, d.plain_s(s)?, d.plain_s(s)?, d.obj_s(s, ip)?];
+    let ip = obj_id::<E>(s, ip).expect("an object");
+    let protos: [E::Obj; 6] = [d.plain_s(s)?, d.plain_s(s)?, d.plain_s(s)?, d.plain_s(s)?, d.plain_s(s)?, d.obj_s(s, ip)?];
     let _ = d.fetch.protos.set(protos);
     let mut fixed = protos.to_vec();
     let targets = protos.map(|o| d.obj_local(s, o));
-    d.install_rows(s, &targets, &defs::T)?;
+    d.install_rows(s, &targets, &defs::T::<E>::V)?;
     // `Headers.prototype[Symbol.iterator]` is the same function object as `entries`.
     let entries = s.get_str(targets[Headers as usize], "entries")?;
     let sym = s.intrinsic(Intrinsic::SymbolIterator);
     s.define(targets[Headers as usize], sym, entries, Attrs::METHOD)?;
     // `Headers`, `Request` and `Response` read `new.target`, so a class may extend them.
-    let ifaces: [(&str, Pr, HS, HostFn); 5] = [
+    let ifaces: [(&str, Pr, HS<E>, HostFn); 5] = [
         ("Headers", Headers, headers_ctor, HostFn::CtorNewTarget),
         ("Request", Request, request_ctor, HostFn::CtorNewTarget),
         ("Response", Response, response_ctor, HostFn::CtorNewTarget),
@@ -3130,12 +3130,12 @@ pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
         fixed.push(d.link_s(s, f, protos[p as usize], name)?);
         if name == "Response" {
             let jf = d.def_method_l(s, f, "json", 1, response_json, false)?;
-            fixed.push(obj_id(s, jf).expect("a function"));
+            fixed.push(obj_id::<E>(s, jf).expect("a function"));
         }
     }
     let f = d.add_fn_s(s, fetch, "fetch", 1, HostFn::Method)?;
     s.define_str(g, "fetch", f, Attrs::METHOD)?;
-    fixed.push(obj_id(s, f).expect("a function"));
+    fixed.push(obj_id::<E>(s, f).expect("a function"));
     streams::install(d, s, protos[Stream as usize], protos[Reader as usize], &mut fixed)?;
     let mut held = Vec::with_capacity(fixed.len());
     for o in fixed {
@@ -3145,7 +3145,7 @@ pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
     *d.fetch.fixed.borrow_mut() = held;
     // The intrinsic JSON.parse and JSON.stringify, so a script that replaces them does not change what `json()` and `Response.json()` run.
     let json = s.get_str(g, "JSON")?;
-    if is_object(s, json) {
+    if is_object::<E>(s, json) {
         let parse = s.get_str(json, "parse")?;
         if s.is_callable(parse) {
             let _ = d.fetch.json_parse.set(s.persist(parse));

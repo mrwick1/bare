@@ -234,7 +234,9 @@ fn units(s: &str) -> Vec<u16> {
 }
 
 impl Host<Realm> for Filled {
-    fn call<'s>(&self, s: &mut Scope<'s, Realm>, _id: u32, _this: Local<'s>, _args: Args<'s>, _new: bool) -> Result<Local<'s>, Error<'s>> {
+    fn call<'s>(&self, s: &mut Scope<'s, Realm>, id: u32, this: Local<'s>, args: Args<'s>, _new: bool) -> Result<Local<'s>, Error<'s>> {
+        assert_eq!(id, 0);
+        s.set_str(this, "written", args.get(0).unwrap())?;
         Ok(s.undefined())
     }
 
@@ -279,6 +281,10 @@ impl Host<Realm> for Filled {
     fn lazy_member<'s>(&self, s: &mut Scope<'s, Realm>, object: Local<'s>, what: Lazy<'_>) -> Result<(), Error<'s>> {
         self.asked.borrow_mut().push(format!("{what:?}"));
         match what {
+            Lazy::Name("lazySetter") => {
+                let set = s.host_function("set lazySetter", 0, 1, HostFn::Method)?;
+                s.define_accessor_str(object, "lazySetter", None, Some(set), Attrs::METHOD)?;
+            }
             Lazy::Name("lazyProp") => {
                 let v = s.number(7.0);
                 s.define_str(object, "lazyProp", v, Attrs::ALL)?;
@@ -438,4 +444,31 @@ fn host_objects_survive_forced_collections_between_reads() {
         assert_eq!(js(&mut r, "nl[1] + ds.a + op.a"), "i1alphaalpha");
         r.collect(&mut [], |_| {});
     }
+}
+
+#[test]
+fn a_date_is_not_a_host_object_and_a_host_object_is_not_a_date() {
+    let (mut r, _h) = filled();
+    assert_eq!(js(&mut r, "(function () { var d = new Date(5); d.x = 3; return d.x + ',' + d.getTime() + ',' + Object.keys(d).join() + ',' + d.hasOwnProperty('x'); })()"), "3,5,x,true");
+    assert_eq!(js(&mut r, "[nl, ds, new Date(0)].map(function (o) { return Object.prototype.toString.call(o); }).join()"), "[object Object],[object Object],[object Date]");
+    assert_eq!(js(&mut r, "(function () { try { Date.prototype.getTime.call(nl); return 'no'; } catch (e) { return e instanceof TypeError; } })()"), "true");
+    assert_eq!(js(&mut r, "(function () { try { Date.prototype.getTime.call(ds); return 'no'; } catch (e) { return e instanceof TypeError; } })()"), "true");
+}
+
+#[test]
+fn a_host_object_is_not_a_date_for_object_prototype_to_string() {
+    let (mut r, _h) = filled();
+    assert_eq!(js(&mut r, "[ds, nl, new Date(0)].map(x => Object.prototype.toString.call(x)).join()"), "[object Object],[object Object],[object Date]");
+    assert_eq!(js(&mut r, "[String(ds), String(op)].join()"), "[object Object],[object Object]");
+}
+
+#[test]
+fn assignment_materializes_an_inherited_host_setter() {
+    for assignment in ["lzc.lazySetter = 42", "(function (key) { lzc[key] = 42; })('lazySetter')"] {
+        let (mut r, _) = filled();
+        let src = format!("({assignment}, [lzc.written, Object.hasOwn(lzc, 'lazySetter'), Object.hasOwn(lz, 'written')].join())");
+        assert_eq!(js(&mut r, &src), "42,false,false", "{assignment}");
+    }
+    let (mut r, _) = filled();
+    assert_eq!(js(&mut r, "(lz.lazySetter = 42, lz.written)"), "42");
 }

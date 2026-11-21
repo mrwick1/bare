@@ -32,19 +32,19 @@
 //! Gates: the lookup is on `Document` only (no `Element.getElementsByName` exists). `getElementsByTagName` and
 //! `getElementsByClassName` are still snapshot arrays. `NodeList` is not returned by `childNodes` or `querySelectorAll`.
 
+use crate::eng::{Eng, Val};
 use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_js_api::{Args, Local};
 use crate::browser_dom::{next_in};
 use bare_html::dom::{NodeData, NodeId, Ns};
-use bare_js::eval::Interp;
-use bare_js::heap::{HeapError, Slot};
-use bare_js::value::{ObjId, Value};
+use crate::eng::Slot;
+use bare_js_api::Pending;
 use std::cell::{OnceCell, RefCell};
 use std::rc::Rc;
 
-type V = R<Value>;
+type V<E: Eng> = R<E, E::Raw>;
 
 /// Bytes of list names that are alive at one time.
 const MAX_NAME_BYTES: usize = 1 << 20;
@@ -71,30 +71,30 @@ pub(crate) struct List {
 }
 
 #[derive(Default)]
-pub(crate) struct Tables {
-    pub(crate) lists: IdMap<ObjId, List>,
+pub(crate) struct Tables<E: Eng> {
+    pub(crate) lists: IdMap<<E as Eng>::Obj, List>,
     /// The one list of each `Src::Of`, so `table.rows === table.rows`.
-    of: std::collections::HashMap<(NodeId, u8), ObjId>,
+    of: std::collections::HashMap<(NodeId, u8), <E as Eng>::Obj>,
     name_bytes: usize,
     cached_ids: usize,
 }
 
 #[derive(Default)]
-pub(crate) struct NodeListHost {
-    pub(crate) s: RefCell<Tables>,
-    proto: OnceCell<ObjId>,
-    fixed: RefCell<Vec<ObjId>>,
+pub(crate) struct NodeListHost<E: Eng> {
+    pub(crate) s: RefCell<Tables<E>>,
+    proto: OnceCell<<E as Eng>::Obj>,
+    fixed: RefCell<Vec<<E as Eng>::Obj>>,
 }
 
 // ------------------------------------------------------------------------------------ GC and heap hooks
 
-pub(crate) fn roots(d: &Dom, out: &mut Roots<'_, '_>) {
-    out.extend(d.nl.fixed.borrow().iter().map(|&o| Value::Object(o)));
+pub(crate) fn roots<E: Eng>(d: &Dom<E>, out: &mut Roots<'_, '_, E>) {
+    out.extend(d.nl.fixed.borrow().iter().map(|&o| E::obj_raw(o)));
 }
 
 /// Drop the entries of the list `o`, which the collector freed. A list holds no reference: the one it had, the wrapper of the
 /// document, is a root.
-pub(crate) fn prune_list(d: &Dom, o: ObjId) {
+pub(crate) fn prune_list<E: Eng>(d: &Dom<E>, o: E::Obj) {
     let mut t = d.nl.s.borrow_mut();
     let Some(l) = t.lists.remove(&o) else { return };
     if let Src::Name(n) = &l.src {
@@ -112,32 +112,32 @@ pub(crate) fn prune_list(d: &Dom, o: ObjId) {
 }
 
 /// `IndexedSource::indexed_len` for a list. `None`: `owner` is not a list.
-pub(crate) fn len(d: &Dom, owner: ObjId) -> Option<Result<usize, HeapError>> {
+pub(crate) fn len<E: Eng>(d: &Dom<E>, owner: E::Obj) -> Option<Result<usize, Pending>> {
     let t = match d.nl.s.try_borrow() {
         Ok(t) => t,
-        Err(_) => return Some(Err(HeapError::HostUnavailable)),
+        Err(_) => return Some(Err(Pending::Busy)),
     };
     let l = t.lists.get(&owner)?;
     Some(match fresh(d, l) {
         Ok(true) => Ok(l.ids.len()),
-        Ok(false) => Err(HeapError::NeedsHost { owner, index: 0 }),
+        Ok(false) => Err(Pending::Fill(0)),
         Err(e) => Err(e),
     })
 }
 
 /// `IndexedSource::indexed_item` for a list. `None`: `owner` is not a list.
-pub(crate) fn item(d: &Dom, owner: ObjId, index: usize) -> Option<Result<Slot, HeapError>> {
+pub(crate) fn item<E: Eng>(d: &Dom<E>, owner: E::Obj, index: usize) -> Option<Result<Slot<E>, Pending>> {
     let t = match d.nl.s.try_borrow() {
         Ok(t) => t,
-        Err(_) => return Some(Err(HeapError::HostUnavailable)),
+        Err(_) => return Some(Err(Pending::Busy)),
     };
     let l = t.lists.get(&owner)?;
     Some((|| {
         if !fresh(d, l)? {
-            return Err(HeapError::NeedsHost { owner, index: index.min(u32::MAX as usize) as u32 });
+            return Err(Pending::Fill(index.min(u32::MAX as usize) as u32));
         }
         let Some(&id) = l.ids.get(index) else { return Ok(Slot::Absent) };
-        let st = d.st.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
+        let st = d.st.try_borrow().map_err(|_| Pending::Busy)?;
         Ok(match st.wrapper(id) {
             Some(o) => Slot::Ready(o),
             None => Slot::Missing,
@@ -147,24 +147,24 @@ pub(crate) fn item(d: &Dom, owner: ObjId, index: usize) -> Option<Result<Slot, H
 
 /// Does `prepare` have nothing to do for `l`? (No scan of the document: the cache is of the current revision. A list by name always goes through `prepare`.)
 #[inline]
-fn is_fresh(d: &Dom, l: &List) -> bool {
+fn is_fresh<E: Eng>(d: &Dom<E>, l: &List) -> bool {
     !matches!(l.src, Src::Name(_)) && l.rev == Some(d.doc.borrow().revision())
 }
 
-fn fresh(d: &Dom, l: &List) -> Result<bool, HeapError> {
-    let doc = d.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
+fn fresh<E: Eng>(d: &Dom<E>, l: &List) -> Result<bool, Pending> {
+    let doc = d.doc.try_borrow().map_err(|_| Pending::Busy)?;
     Ok(l.rev == Some(doc.revision()))
 }
 
 /// `Host::fill_indexed`: make the cache fresh and the wrapper of member `index`. `Ok(false)`: `owner` is not a list.
-pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<bool> {
+pub(crate) fn fill<E: Eng>(d: &Dom<E>, it: &mut E::Vm, owner: E::Obj, index: u32) -> R<E, bool> {
     // A list that is fresh needs no scope: `prepare` would return at once.
     let fresh = match d.nl.s.borrow().lists.get(&owner) {
         None => return Ok(false),
         Some(l) => is_fresh(d, l),
     };
     if !fresh {
-        run(it, |s| prepare(d, s, owner))?;
+        run::<E, _>(it, |s| prepare(d, s, owner))?;
     }
     let id = d.nl.s.borrow().lists.get(&owner).and_then(|l| l.ids.get(index as usize).copied());
     if let Some(id) = id {
@@ -176,7 +176,7 @@ pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<
 // ------------------------------------------------------------------------------------ the rebuild
 
 /// Make the cache of the list `owner` fresh. It is the only place that scans the document for a list.
-fn prepare<'s>(d: &Dom, s: &mut Sc<'s, '_>, owner: ObjId) -> Res<'s, ()> {
+fn prepare<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, owner: E::Obj) -> Res<'s, ()> {
     let (src, cached, base) = {
         let t = d.nl.s.borrow();
         let Some(l) = t.lists.get(&owner) else { return Ok(()) };
@@ -195,8 +195,8 @@ fn prepare<'s>(d: &Dom, s: &mut Sc<'s, '_>, owner: ObjId) -> Res<'s, ()> {
                 return Ok(());
             }
             let ids = match mode {
-                0 | 1 => old(s, |it| crate::browser_select::list_ids(d, it, owner_node, mode == 1))?,
-                2 => old(s, |it| crate::browser_controls::label_ids(d, it, owner_node))?,
+                0 | 1 => old::<E, _>(s, |it| crate::browser_select::list_ids(d, it, owner_node, mode == 1))?,
+                2 => old::<E, _>(s, |it| crate::browser_controls::label_ids(d, it, owner_node))?,
                 m => crate::browser_table::ids(d, s, owner_node, m - 3)?,
             };
             if ids.len() > d.lim.max_results {
@@ -261,16 +261,16 @@ fn prepare<'s>(d: &Dom, s: &mut Sc<'s, '_>, owner: ObjId) -> Res<'s, ()> {
 
 // ------------------------------------------------------------------------------------ methods
 
-fn list_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, ObjId> {
-    if let Some(o) = obj_id(s, this).filter(|o| d.nl.s.borrow().lists.contains_key(o)) {
+fn list_of<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, E::Obj> {
+    if let Some(o) = obj_id::<E>(s, this).filter(|o| d.nl.s.borrow().lists.contains_key(o)) {
         return Ok(o);
     }
     Err(s.type_error("Illegal invocation"))
 }
 
-pub(crate) fn length<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn length<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     // One lookup of the list when its cache is fresh (the common read, `i < list.length`); a stale list costs the lookups that it cost before.
-    let Some(o) = obj_id(s, this) else { return Err(s.type_error("Illegal invocation")) };
+    let Some(o) = obj_id::<E>(s, this) else { return Err(s.type_error("Illegal invocation")) };
     let fresh = match d.nl.s.borrow().lists.get(&o) {
         None => return Err(s.type_error("Illegal invocation")),
         Some(l) => is_fresh(d, l).then(|| l.ids.len()),
@@ -282,13 +282,13 @@ pub(crate) fn length<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'
     Ok(s.number(d.nl.s.borrow().lists[&o].ids.len() as f64))
 }
 
-pub(crate) fn item_method<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn item_method<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let o = list_of(d, s, this)?;
     if a.is_empty() {
         return Err(s.type_error("Failed to execute 'item' on 'NodeList': 1 argument required, but only 0 present."));
     }
     // WebIDL `unsigned long`: ToNumber, then modulo 2^32. Converting can run script, so no state is read before it.
-    let arg0 = arg_s(s, a, 0);
+    let arg0 = arg_s::<E>(s, a, 0);
     let n = s.to_number(arg0)?;
     let i = if n.is_finite() { n.trunc().rem_euclid(4294967296.0) as usize } else { 0 };
     prepare(d, s, o)?;
@@ -299,7 +299,7 @@ pub(crate) fn item_method<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: A
     }
 }
 
-pub(crate) fn get_elements_by_name<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn get_elements_by_name<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.nd_s(s, this)?;
     if !matches!(d.data(n), NodeData::Document) {
         return Err(s.type_error("Illegal invocation"));
@@ -309,11 +309,11 @@ pub(crate) fn get_elements_by_name<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<
     }
     let name = d.arg_str_s(s, a, 0)?;
     let proto = *d.nl.proto.get().expect("installed");
-    old_v(s, |it| make_list(d, it, proto, Src::Name(name.into())))
+    old_v::<E>(s, |it| make_list(d, it, proto, Src::Name(name.into())))
 }
 
 /// A new live list over `src`, with the prototype `proto`. It counts with the wrappers.
-pub(crate) fn make_list(d: &Dom, it: &mut Interp<'_>, proto: ObjId, src: Src) -> V {
+pub(crate) fn make_list<E: Eng>(d: &Dom<E>, it: &mut E::Vm, proto: E::Obj, src: Src) -> V<E> {
     let n = if let Src::Name(n) = &src { n.len() } else { 0 };
     {
         let (t, at) = (d.nl.s.borrow(), d.attr.s.borrow());
@@ -328,24 +328,24 @@ pub(crate) fn make_list(d: &Dom, it: &mut Interp<'_>, proto: ObjId, src: Src) ->
     let mut t = d.nl.s.borrow_mut();
     t.name_bytes += n;
     t.lists.insert(o, List { src, rev: None, ids: Vec::new() });
-    Ok(Value::Object(o))
+    Ok(E::obj_raw(o))
 }
 
 /// The one live `HTMLCollection` of `n` and `kind` (`Src::Of`), made on the first call.
-pub(crate) fn of(d: &Dom, it: &mut Interp<'_>, n: NodeId, kind: u8) -> V {
+pub(crate) fn of<E: Eng>(d: &Dom<E>, it: &mut E::Vm, n: NodeId, kind: u8) -> V<E> {
     if let Some(&o) = d.nl.s.borrow().of.get(&(n, kind)) {
-        return Ok(Value::Object(o));
+        return Ok(E::obj_raw(o));
     }
     let proto = crate::browser_select::collection_proto(d, it)?;
     let v = make_list(d, it, proto, Src::Of(n, kind))?;
-    if let Value::Object(o) = v {
+    if let Val::Object(o) = E::kind(v) {
         d.nl.s.borrow_mut().of.insert((n, kind), o);
     }
     Ok(v)
 }
 
 /// The members of the list `o`, fresh. `None`: `o` is not a list.
-pub(crate) fn members<'s>(d: &Dom, s: &mut Sc<'s, '_>, o: ObjId) -> Res<'s, Option<Vec<NodeId>>> {
+pub(crate) fn members<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, o: E::Obj) -> Res<'s, Option<Vec<NodeId>>> {
     if !d.nl.s.borrow().lists.contains_key(&o) {
         return Ok(None);
     }
@@ -354,7 +354,7 @@ pub(crate) fn members<'s>(d: &Dom, s: &mut Sc<'s, '_>, o: ObjId) -> Res<'s, Opti
 }
 
 /// The select of a list made by `make_list` over the options of a select.
-pub(crate) fn select_of(d: &Dom, o: ObjId) -> Option<NodeId> {
+pub(crate) fn select_of<E: Eng>(d: &Dom<E>, o: E::Obj) -> Option<NodeId> {
     match d.nl.s.borrow().lists.get(&o)?.src {
         Src::Options(s) | Src::Selected(s) => Some(s),
         Src::Name(_) | Src::Labels(_) | Src::Of(..) => None,
@@ -362,13 +362,13 @@ pub(crate) fn select_of(d: &Dom, o: ObjId) -> Option<NodeId> {
 }
 
 /// The prototype of a plain `NodeList`.
-pub(crate) fn list_proto(d: &Dom) -> ObjId {
+pub(crate) fn list_proto<E: Eng>(d: &Dom<E>) -> E::Obj {
     *d.nl.proto.get().expect("installed")
 }
 
 // ------------------------------------------------------------------------------------ install
 
-pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
     let proto = d.plain_s(s)?;
     let _ = d.nl.proto.set(proto);
     let mut fixed = vec![proto];
@@ -377,7 +377,7 @@ pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
         Row::method(1, "item", 1, item_method),
     ]);
     let targets = [d.obj_local(s, proto)];
-    d.install_rows(s, &targets, &rows1::T)?;
+    d.install_rows(s, &targets, &rows1::T::<E>::V)?;
     // The value iterator of an interface with an indexed getter: the `Array.prototype` functions (WebIDL "iterable").
     let ap = s.intrinsic(Intrinsic::ArrayPrototype);
     let po = d.obj_local(s, proto);
@@ -395,14 +395,14 @@ pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
     Ok(())
 }
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// How many `NodeList` objects are alive in the table (they count with `max_wrappers`).
     pub(crate) fn nl_count(&self) -> usize {
         self.nl.s.borrow().lists.len()
     }
 
     /// Is `o` a `NodeList` of this module (so not plain data for structured clone)?
-    pub(crate) fn is_nodelist_object(&self, o: ObjId) -> bool {
+    pub(crate) fn is_nodelist_object(&self, o: E::Obj) -> bool {
         self.nl.s.borrow().lists.contains_key(&o)
     }
 }
@@ -415,7 +415,7 @@ pub struct NodeListStats {
     pub name_bytes: usize,
 }
 
-impl Browser {
+impl<E: Eng> Browser<E> {
     pub fn nodelist_stats(&self) -> NodeListStats {
         let t = self.dom.nl.s.borrow();
         NodeListStats { lists: t.lists.len(), cached_ids: t.cached_ids, name_bytes: t.name_bytes }
@@ -425,7 +425,7 @@ impl Browser {
 // ------------------------------------------------------------------------------------------ arena reclaim (`browser_reclaim.rs`)
 
 /// The nodes that live lists name. A list builds `ids` again when `Document::revision` moved, and the reclaim moves it.
-pub(crate) fn held(d: &Dom, out: &mut Vec<NodeId>) {
+pub(crate) fn held<E: Eng>(d: &Dom<E>, out: &mut Vec<NodeId>) {
     let t = d.nl.s.borrow();
     for l in t.lists.values() {
         if let Src::Options(n) | Src::Selected(n) | Src::Labels(n) | Src::Of(n, _) = l.src {

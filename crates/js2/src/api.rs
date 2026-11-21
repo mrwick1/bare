@@ -30,7 +30,7 @@
 //! Not here yet: iteration, modules, buffers, owners with `trace` and `prune`, host-filled objects,
 //! structured clone, `Symbol`, and `run_script` (`Realm::run_text` runs a script but computes no completion value; the compiler has
 //! none yet). Each of these answers `Abort::Unsupported(name)`.
-use crate::bi_object::Desc;
+use crate::bi_object::{Desc, Own};
 use crate::builtins::Native;
 use crate::interp::STOP;
 use crate::interp_rt::{ErrKind, Key, R, Realm};
@@ -40,9 +40,16 @@ use crate::promise::DrainStop;
 use crate::shapes::{A_C, A_E, A_W};
 use crate::string::{Chars, Str};
 use crate::value::{Kind, Value};
-use bare_js_api::{Abort, Args, Attrs, Def, DefKind, Engine, Error, Host, HostFn, Intrinsic, Iter, Local, Slots, Type};
+use bare_js_api::{Abort, Args, Attrs, Def, DefKind, Engine, Error, Host, HostFn, Intrinsic, Iter, Local, Own as ApiOwn, Slots, Type};
 use std::ptr::NonNull;
 use std::rc::Rc;
+
+/// An own property of an object, as `Realm::raw_own` reads it.
+#[derive(Clone, Copy, Debug)]
+pub enum RawOwn {
+    Data { value: Value, writable: bool, enumerable: bool, configurable: bool },
+    Accessor { get: Option<Value>, set: Option<Value>, enumerable: bool, configurable: bool },
+}
 
 // A child module, so that it reads the private state and helpers of this one.
 #[path = "api_script.rs"]
@@ -180,6 +187,24 @@ pub enum RunError {
 }
 
 impl Realm {
+    /// The value of a persistent handle (`Engine::persistent` for `&self`).
+    pub fn raw_persistent(&self, id: u32) -> Value {
+        self.api.persistent[id as usize]
+    }
+
+    /// An own property with its attributes, for a host that keeps `Value`s: no getter runs and no proxy trap. `None`: there is none.
+    pub fn raw_own(&mut self, obj: Value, key: Value) -> Result<Option<RawOwn>, Error<'static>> {
+        let (ol, kl) = (self.a_push(obj), self.a_push(key));
+        let (o, k) = (self.a_obj(ol)?, self.a_key(kl)?);
+        Ok(self.get_own_h(o, k).map_err(|e| self.a_err(e))?.map(|p| {
+            let (enumerable, configurable) = (p.attrs() & A_E != 0, p.attrs() & A_C != 0);
+            match p {
+                Own::Data(value, a) => RawOwn::Data { value, writable: a & A_W != 0, enumerable, configurable },
+                Own::Acc(g, s, _) => RawOwn::Accessor { get: Some(g).filter(|v| !v.is_undefined()), set: Some(s).filter(|v| !v.is_undefined()), enumerable, configurable },
+            }
+        }))
+    }
+
     /// The step budget of a task: a top-level call outside [`Engine::task`] starts with this many back edges (default: no limit).
     pub fn set_budget(&mut self, steps: u64) {
         self.api.budget = steps;
@@ -284,7 +309,7 @@ impl Realm {
         self.call_held(f, this, args)
     }
 
-    /// `Construct(f, args, nt)` for a native constructor or a plain function. A class is not supported yet.
+    /// `Construct(f, args, nt)` for a native constructor, a plain function or a class (a class runs as a nested call that holds the collector).
     fn a_construct(&mut self, f: Value, args: &[Value], nt: Value) -> R<Value> {
         if self.native_id(f).is_some() {
             let saved = (self.callee, self.nt, self.tail.take(), std::mem::take(&mut self.tail_args));
@@ -294,8 +319,8 @@ impl Realm {
         }
         let Some((ci, _)) = self.function_new(f) else { return self.type_error("not a constructor") };
         if Realm::obj(f).is_some_and(|o| o.has_flag(F_CLASS)) {
-            self.api.abort = Some(Abort::Unsupported("construct of a class"));
-            return Err(STOP);
+            // As `Reflect.construct` does: a nested call that holds the collector until it returns.
+            return self.construct_script(f, args, nt);
         }
         if self.prog[ci].noctor {
             return self.type_error("not a constructor");
@@ -976,6 +1001,27 @@ impl Engine for Realm {
 
     fn wall_now_ms(&self) -> f64 {
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_millis() as f64)
+    }
+
+    fn own_kind<'s>(&mut self, obj: Local<'_>, key: Local<'_>) -> Result<Option<ApiOwn<'s>>, Error<'s>> {
+        let (o, k) = (self.a_obj(obj)?, self.a_key(key)?);
+        Ok(match self.get_own_h(o, k).map_err(|e| self.a_err(e))? {
+            None => None,
+            Some(Own::Data(v, _)) => Some(ApiOwn::Data(self.a_push(v))),
+            Some(Own::Acc(g, s, _)) => {
+                let get = Some(g).filter(|v| !v.is_undefined()).map(|v| self.a_push(v));
+                let set = Some(s).filter(|v| !v.is_undefined()).map(|v| self.a_push(v));
+                Some(ApiOwn::Accessor { get, set })
+            }
+        })
+    }
+
+    fn set_integrity<'s>(&mut self, obj: Local<'_>, frozen: bool) -> Result<bool, Error<'s>> {
+        let o = self.a_obj(obj)?;
+        if o.has_flag(crate::object::F_HOST) {
+            return Ok(false);
+        }
+        self.lock(o, frozen).map(|()| true).map_err(|e| self.a_err(e))
     }
 
     fn has_own<'s>(&mut self, obj: Local<'_>, key: Local<'_>) -> Result<bool, Error<'s>> {

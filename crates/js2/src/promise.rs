@@ -47,7 +47,7 @@ use crate::gc::Marker;
 use crate::heap::Heap;
 use crate::interp::{STOP, Vm};
 use crate::interp_rt::{Key, R, Realm, Slot};
-use crate::object::{Ctx, F_PROMISE, Obj, Spot};
+use crate::object::{Ctx, K_PROMISE, Obj, Spot};
 use crate::shapes::{ShapeId, Shapes};
 use crate::string::Str;
 use crate::value::Value;
@@ -219,7 +219,7 @@ impl Promises {
 /// The promise of a value.
 #[inline]
 fn promise_of(v: Value) -> Option<Obj> {
-    Realm::obj(v).filter(|o| o.has_flag(F_PROMISE))
+    Realm::obj(v).filter(|o| o.is_kind(K_PROMISE))
 }
 
 fn is_callable(v: Value) -> bool {
@@ -771,7 +771,7 @@ impl Realm {
             K_FULFIL | K_REJECT => {
                 let (h, v, d) = (r.get(A), r.get(B), r.get(D));
                 // The handler of an `await` is the activation of the async function (it has no derived promise): resume it (`reenter.rs`).
-                if d.is_undefined() && Realm::is_generator(h) {
+                if d.is_undefined() && Realm::activation(h).is_some() {
                     return self.async_resume(h, v, kind == K_REJECT);
                 }
                 let res = if h.is_undefined() { if kind == K_FULFIL { Ok(v) } else { Err(v) } } else { self.job_call(h, Value::UNDEFINED, &[v]) };

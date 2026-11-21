@@ -72,9 +72,19 @@ type ImportItem = (Box<str>, Span, bool, Box<str>, Span);
 /// Hard recursion ceiling, even when the caller raises `Limits::max_depth`.
 pub const HARD_MAX_DEPTH: u32 = 2048;
 
+/// Depth at which the parser first asks how much stack is left. A program that nests less never asks.
+const SOFT_DEPTH: u32 = 64;
+
+/// Levels of nesting that fit in the stack that is left. `None` when the stack size is unknown.
+fn stack_levels() -> Option<u32> {
+    // Nested classes use the largest frames. Leave room for work between depth checks and at the limit.
+    const LEVEL_BYTES: usize = if cfg!(debug_assertions) { 20 << 10 } else { 1920 };
+    const RESERVE_BYTES: usize = 64 << 10;
+    let left = stacker::remaining_stack()?;
+    Some((left.saturating_sub(RESERVE_BYTES) / LEVEL_BYTES).min(HARD_MAX_DEPTH as usize) as u32)
+}
+
 /// Parser limits. A program that exceeds one returns [`ErrorKind::Limit`].
-/// The recursive parser requires a caller stack of at least 32 MiB in debug builds or 4 MiB
-/// in release builds at the hard depth cap. Smaller embedding stacks are unsupported.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     /// Most source bytes.
@@ -83,9 +93,8 @@ pub struct Limits {
     pub max_nodes: u32,
     /// Most entries in one list (arguments, elements, statements in one block, ...).
     pub max_list: u32,
-    /// Deepest nesting of expressions, statements and patterns. Clamped to `HARD_MAX_DEPTH`. The Rust stack use is about
-    /// `max_depth` times 1.2 KiB at worst in a release build (nested classes), so 2048 needs about 2.3 MiB.
-    /// A debug build needs about 31 MiB for nested classes. A test parses deep input on a 4 MiB (release) or 48 MiB (debug) thread.
+    /// Deepest nesting of expressions, statements and patterns. Clamped to `HARD_MAX_DEPTH` and, where known,
+    /// to the depth that fits the remaining caller stack.
     pub max_depth: u32,
 }
 
@@ -228,25 +237,6 @@ fn parse_lazy<'a>(source: &'a str, limits: Limits, facts: &mut Facts, module: bo
     };
     let r = if module { p.parse_module_body() } else { p.parse_program() };
     p.facts.finish();
-    *facts = std::mem::take(&mut p.facts);
-    r?;
-    Ok(p.p)
-}
-
-/// The tree of the top level of `source` (a script) from the facts of an earlier [`parse_script_lazy`] of the same text, which `facts`
-/// holds. The lexer jumps over each function at the top level by its facts, so the cost is the size of the top level and not of the
-/// text. It finds no early error: the first parse did, so the caller must pass facts that were made from this exact text (a generated
-/// file and a test that compares it, see `prelude_facts.rs`). The facts are not changed.
-pub fn parse_script_known<'a>(source: &'a str, limits: Limits, facts: &mut Facts) -> Result<Program<'a>, Error> {
-    let mut p = match Parser::new(source, limits, facts.module, Mode::Function, std::mem::take(facts), 0, false, 0, false) {
-        Ok(p) => p,
-        Err((f, e)) => {
-            *facts = f;
-            return Err(e);
-        }
-    };
-    p.full_at = u32::MAX; // no function is parsed in full: each one is skipped
-    let r = p.parse_program();
     *facts = std::mem::take(&mut p.facts);
     r?;
     Ok(p.p)
@@ -419,6 +409,8 @@ struct Parser<'a> {
     used: u32,
     scratch: Vec<u32>,
     depth: u32,
+    /// `enter` asks for more stack at this depth; at most `limits.max_depth`.
+    depth_soft: u32,
     strict: bool,
     ctx: Ctx,
     labels: Vec<Label<'a>>,
@@ -656,6 +648,7 @@ impl<'a> Parser<'a> {
             used: 0,
             scratch: Vec::new(),
             depth: 0,
+            depth_soft: SOFT_DEPTH.min(limits.max_depth),
             strict,
             ctx: Ctx {
                 in_func: ctx & facts::C_IN_FUNC != 0,
@@ -791,11 +784,21 @@ impl<'a> Parser<'a> {
         Ok(())
     }
     fn enter(&mut self) -> R<()> {
-        if self.depth >= self.limits.max_depth {
+        if self.depth >= self.depth_soft && !self.deepen() {
             return Err(self.limit(LimitKind::Depth, "nesting too deep"));
         }
         self.depth += 1;
         Ok(())
+    }
+    /// At the soft depth: raise it to what the remaining stack holds, but not past `max_depth`. False if there is no room.
+    #[cold]
+    fn deepen(&mut self) -> bool {
+        let max = self.limits.max_depth;
+        if self.depth_soft >= max {
+            return false;
+        }
+        self.depth_soft = stack_levels().map_or(max, |n| self.depth.saturating_add(n).min(max));
+        self.depth < self.depth_soft
     }
 
     fn lbegin(&self) -> usize {
@@ -3704,9 +3707,11 @@ impl<'a> Parser<'a> {
 
     fn parse_class(&mut self, start: u32, is_decl: bool) -> R<ClassId> {
         self.advance()?; // `class`
+        self.enter()?;
         let saved_strict = self.strict;
         self.strict = true; // all parts of a class are strict code
         let r = self.class_inner(start, is_decl);
+        self.depth -= 1;
         self.strict = saved_strict;
         r
     }

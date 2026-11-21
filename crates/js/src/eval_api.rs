@@ -132,7 +132,7 @@ impl<'p> Interp<'p> {
 
     /// Let `host` answer for the indexed and named objects of this realm (`Heap::new_indexed`, `Heap::new_named`) by their host
     /// keys: the interface host's `indexed_*` and `named_*` methods.
-    pub fn set_api_sources<H: for<'q> bare_js_api::Host<Interp<'q>> + 'static>(&mut self, host: Rc<H>) {
+    pub fn set_api_sources<H: bare_js_api::Host<Interp<'static>> + 'static>(&mut self, host: Rc<H>) {
         self.heap.set_indexed_source(Rc::new(ApiSource(host.clone())));
         self.heap.set_named_source(Rc::new(ApiSource(host)));
     }
@@ -1367,7 +1367,7 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
 /// the host gets only the key.
 struct ApiSource<H>(Rc<H>);
 
-impl<H: for<'q> bare_js_api::Host<Interp<'q>>> ApiSource<H> {
+impl<H: bare_js_api::Host<Interp<'static>>> ApiSource<H> {
     /// The host as its own type: the calls are static, so the compiler can inline the host's answer here.
     fn host(&self) -> &impl bare_js_api::Host<Interp<'static>> {
         &*self.0
@@ -1383,7 +1383,7 @@ fn pending(owner: ObjId, p: bare_js_api::Pending) -> HeapError {
     }
 }
 
-impl<H: for<'q> bare_js_api::Host<Interp<'q>>> crate::heap::IndexedSource for ApiSource<H> {
+impl<H: bare_js_api::Host<Interp<'static>>> crate::heap::IndexedSource for ApiSource<H> {
     fn indexed_len(&self, owner: ObjId, key: u32) -> Result<usize, HeapError> {
         self.host().indexed_len(&Value::Object(owner), key).map_err(|p| pending(owner, p))
     }
@@ -1406,7 +1406,7 @@ impl<H: for<'q> bare_js_api::Host<Interp<'q>>> crate::heap::IndexedSource for Ap
     }
 }
 
-impl<H: for<'q> bare_js_api::Host<Interp<'q>>> crate::heap::NamedSource for ApiSource<H> {
+impl<H: bare_js_api::Host<Interp<'static>>> crate::heap::NamedSource for ApiSource<H> {
     fn named_has(&self, owner: ObjId, hk: u32, key: &[u16]) -> Result<bool, HeapError> {
         self.host().named_has(&Value::Object(owner), hk, key).map_err(|p| pending(owner, p))
     }

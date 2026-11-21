@@ -21,7 +21,7 @@ use crate::compile::{Child, Compiled, Input, ModInfo, ScriptMode, compile_functi
 use crate::facts::{ARGS, EVAL, Facts, FnFacts, FnId, INNER_EVAL, SUPER};
 use crate::interp::{Exit, LazyCompile, Program, Vm, code_flags};
 use crate::interp_rt::Realm;
-use crate::parse::{Limits, parse_function, parse_module_lazy, parse_script_known, parse_script_lazy};
+use crate::parse::{Limits, parse_function, parse_module_lazy, parse_script_lazy};
 use crate::shapes::A_E;
 use crate::value::Value;
 use std::borrow::Cow;
@@ -46,11 +46,14 @@ fn stub(atoms: &SharedAtoms, f: &FnFacts, name: Option<&str>) -> Result<Code, St
     c.words = vec![w[!kept as usize]];
     c.flags = if kept { 0 } else { CF_ARGS };
     c.fn_len = f.length.min(u16::MAX as u32) as u16;
+    c.noctor = matches!(f.kind, crate::ast::FuncKind::Arrow | crate::ast::FuncKind::Method | crate::ast::FuncKind::Getter | crate::ast::FuncKind::Setter);
     // `prototype` of a generator function inherits the generator prototype, and `new` on it throws: both are read before the first call.
     if f.mode == crate::ast::FuncMode::Generator {
         (c.gen_kind, c.noctor) = (crate::bytecode::GK_GEN, true);
     } else if f.mode == crate::ast::FuncMode::Async {
         (c.gen_kind, c.noctor) = (crate::bytecode::GK_ASYNC, true);
+    } else if f.mode == crate::ast::FuncMode::AsyncGen {
+        (c.gen_kind, c.noctor) = (crate::bytecode::GK_ASYNCGEN, true);
     }
     if let Some(n) = name {
         let units: Vec<u16> = n.encode_utf16().collect();
@@ -72,6 +75,8 @@ struct Unit {
     facts: Facts,
     /// The text is event handler code (`ScriptMode::scoped`): its functions get `Input::scoped`.
     scoped: bool,
+    /// The text is the prelude: its functions get `Input::pre`.
+    pre: bool,
 }
 
 /// The functions that wait for their first call: their stubs in `codes`, and what compiles them. The loader makes a stub for a function
@@ -84,6 +89,8 @@ pub struct Lazy {
     /// The functions that wait, sorted by the code index of the stub (a new stub is always after the others). A function that was compiled
     /// stays in the list with no `Child`: a search costs `log n`, and no entry moves.
     pending: Vec<Wait>,
+    /// The unit of `prelude.js`, made at the first function that a realm asks for (`prelude_fn`).
+    pre: Option<usize>,
 }
 
 /// A function that waits at the code index `ci`, and the unit that holds its text.
@@ -95,13 +102,13 @@ struct Wait {
 
 impl Lazy {
     fn new(atoms: Arc<SharedAtoms>, limits: Limits) -> Lazy {
-        Lazy { units: Vec::new(), atoms, limits, pending: Vec::new() }
+        Lazy { units: Vec::new(), atoms, limits, pending: Vec::new(), pre: None }
     }
 
     /// Add a text and the stubs that its loader made.
     fn add(&mut self, source: Cow<'static, str>, facts: Facts, pending: Vec<(usize, Child)>) {
         let u = self.units.len();
-        self.units.push(Unit { source, facts, scoped: false });
+        self.units.push(Unit { source, facts, scoped: false, pre: false });
         self.wait(u, pending);
     }
 
@@ -119,12 +126,12 @@ impl LazyCompile for Lazy {
         let base = codes.len();
         let unit = &mut self.units[u];
         let (p, fid) = parse_function(&unit.source, &mut unit.facts, ch.id, self.limits).map_err(|e| format!("parse fn {}: {}", ch.id, e.msg))?;
-        let sub = compile_function(&p, fid, ch.id, &unit.facts, &self.atoms, &Input { chain: ch.chain.clone(), self_name: ch.self_name, name: ch.name.clone(), scoped: unit.scoped })
+        let sub = compile_function(&p, fid, ch.id, &unit.facts, &self.atoms, &Input { chain: ch.chain.clone(), self_name: ch.self_name, name: ch.name.clone(), scoped: unit.scoped, pre: unit.pre })
             .map_err(|e| format!("compile fn {}: {e:?}", ch.id))?;
         // The new codes wait in `new` (their indexes start at `base`) and go into the program only when all are made: a failure leaves it as it was.
         // The room is one code for each child and one more, for the code of `ci` (`Codes::set` takes room from the last chunk).
         let (mut new, mut pending) = (Vec::with_capacity(sub.children.len() + 1), Vec::new());
-        let mut l = Loader { source: &unit.source, facts: &mut unit.facts, atoms: &self.atoms, limits: self.limits, base, codes: &mut new, lazy: Some(&mut pending), scoped: unit.scoped };
+        let mut l = Loader { source: &unit.source, facts: &mut unit.facts, atoms: &self.atoms, limits: self.limits, base, codes: &mut new, lazy: Some(&mut pending), scoped: unit.scoped, pre: unit.pre };
         let mut sub = sub;
         l.children(&mut sub)?;
         let mut code = sub.code;
@@ -142,6 +149,25 @@ impl LazyCompile for Lazy {
         Ok(())
     }
 
+    /// A stub for the top-level function `top` of `prelude.js`, added at the end of `codes`. The unit of the prelude is made here, at the first
+    /// call: a realm that uses no prelude function never reads the facts.
+    fn prelude_fn(&mut self, codes: &Codes, top: &str, name: &str) -> Result<usize, String> {
+        let u = match self.pre {
+            Some(u) => u,
+            None => {
+                self.units.push(Unit { source: Cow::Borrowed(PRELUDE), facts: crate::prelude_facts::facts(), scoped: false, pre: true });
+                self.pre = Some(self.units.len() - 1);
+                self.units.len() - 1
+            }
+        };
+        let id = crate::prelude_facts::TOP.iter().find(|(n, _)| *n == top).map(|&(_, id)| id).ok_or_else(|| format!("the prelude has no function {top} (is prelude_facts.rs out of date? run `BLESS_PRELUDE_FACTS=1 cargo test -p bare-js2 --lib prelude_facts`)"))?;
+        let mut code = stub(&self.atoms, self.units[u].facts.get(id), Some(name))?;
+        code.flags = code_flags(&code);
+        let ci = codes.push_all(vec![code]);
+        self.pending.push(Wait { ci, unit: u, child: Some(Child { id, chain: None, self_name: false, name: Some(name.into()), ready: None }) });
+        Ok(ci)
+    }
+
     /// The top level of a script that joins a program that runs: its code is the last one that this adds, and the functions inside are
     /// stubs. The flags are as `compile` makes them. A failure adds nothing.
     fn script(&mut self, codes: &Codes, src: &str, mode: ScriptMode) -> Result<usize, String> {
@@ -157,7 +183,7 @@ impl LazyCompile for Lazy {
         }
         let top = compile_script_mode(&prog, &facts, &self.atoms, mode).map_err(|e| format!("compile: {e:?}"))?;
         let (base, mut new, mut pending) = (codes.len(), Vec::new(), Vec::new());
-        let at = Loader { source: src, facts: &mut facts, atoms: &self.atoms, limits: self.limits, base, codes: &mut new, lazy: Some(&mut pending), scoped: mode.scoped }.add(top)?;
+        let at = Loader { source: src, facts: &mut facts, atoms: &self.atoms, limits: self.limits, base, codes: &mut new, lazy: Some(&mut pending), scoped: mode.scoped, pre: false }.add(top)?;
         let link = |new: &[Code], c: &Code| c.funcs.iter().any(|&k| k as usize >= base && new[k as usize - base].flags & CF_LINK != 0);
         for i in (0..new.len()).rev() {
             new[i].flags = code_flags(&new[i]) | if link(&new, &new[i]) { CF_LINK } else { 0 };
@@ -165,7 +191,7 @@ impl LazyCompile for Lazy {
         debug_assert_eq!(at, base);
         codes.push_all(new);
         let u = self.units.len();
-        self.units.push(Unit { source: Cow::Owned(src.to_owned()), facts, scoped: mode.scoped });
+        self.units.push(Unit { source: Cow::Owned(src.to_owned()), facts, scoped: mode.scoped, pre: false });
         self.wait(u, pending);
         Ok(at)
     }
@@ -177,7 +203,7 @@ impl LazyCompile for Lazy {
         let prog = parse_module_lazy(src, self.limits, &mut facts).map_err(|e| format!("SyntaxError: {}", e.msg))?;
         let (top, info) = compile_module(&prog, &facts, &self.atoms).map_err(|e| format!("compile: {e:?}"))?;
         let (base, mut new, mut pending) = (codes.len(), Vec::new(), Vec::new());
-        let at = Loader { source: src, facts: &mut facts, atoms: &self.atoms, limits: self.limits, base, codes: &mut new, lazy: Some(&mut pending), scoped: false }.add(top)?;
+        let at = Loader { source: src, facts: &mut facts, atoms: &self.atoms, limits: self.limits, base, codes: &mut new, lazy: Some(&mut pending), scoped: false, pre: false }.add(top)?;
         let link = |new: &[Code], c: &Code| c.funcs.iter().any(|&k| k as usize >= base && new[k as usize - base].flags & CF_LINK != 0);
         for i in (0..new.len()).rev() {
             new[i].flags = code_flags(&new[i]) | if link(&new, &new[i]) { CF_LINK } else { 0 };
@@ -185,7 +211,7 @@ impl LazyCompile for Lazy {
         debug_assert_eq!(at, base);
         codes.push_all(new);
         let u = self.units.len();
-        self.units.push(Unit { source: Cow::Owned(src.to_owned()), facts, scoped: false });
+        self.units.push(Unit { source: Cow::Owned(src.to_owned()), facts, scoped: false, pre: false });
         self.wait(u, pending);
         Ok((at, info))
     }
@@ -203,6 +229,8 @@ struct Loader<'a> {
     lazy: Option<&'a mut Vec<(usize, Child)>>,
     /// The text is event handler code (`Input::scoped`).
     scoped: bool,
+    /// The text is the prelude (`Input::pre`).
+    pre: bool,
 }
 
 impl Loader<'_> {
@@ -242,7 +270,7 @@ impl Loader<'_> {
                 }
                 None => {
                     let (p, fid) = parse_function(self.source, self.facts, ch.id, self.limits).map_err(|e| format!("parse fn {}: {}", ch.id, e.msg))?;
-                    compile_function(&p, fid, ch.id, self.facts, self.atoms, &Input { chain: ch.chain.clone(), self_name: ch.self_name, name: ch.name.clone(), scoped: self.scoped }).map_err(|e| format!("compile fn {}: {e:?}", ch.id))?
+                    compile_function(&p, fid, ch.id, self.facts, self.atoms, &Input { chain: ch.chain.clone(), self_name: ch.self_name, name: ch.name.clone(), scoped: self.scoped, pre: self.pre }).map_err(|e| format!("compile fn {}: {e:?}", ch.id))?
                 }
             };
             c.code.funcs[i] = self.add(sub)? as u32;
@@ -252,28 +280,18 @@ impl Loader<'_> {
 }
 
 /// Compile `source` as a script after the codes that `codes` has. The top level is the code at index `codes.len()` before the call.
-/// With `lazy` the functions inside the top level are stubs, and `lazy` gets what makes them. With `known` (the prelude) the facts of
-/// the text are not made by a pre-parse: they are the generated ones (`prelude_facts.rs`, a test keeps them equal to a pre-parse).
-fn compile_after(mut codes: Vec<Code>, source: &str, atoms: &SharedAtoms, limits: Limits, lazy: Option<&mut Vec<(usize, Child)>>, known: Option<Facts>) -> Result<(Vec<Code>, Facts), String> {
-    let (mut facts, prog) = match known {
-        Some(mut f) => {
-            let p = parse_script_known(source, limits, &mut f).map_err(|e| format!("SyntaxError: {}", e.msg))?;
-            (f, p)
-        }
-        None => {
-            let mut f = Facts::new();
-            let p = parse_script_lazy(source, limits, &mut f).map_err(|e| format!("SyntaxError: {}", e.msg))?;
-            (f, p)
-        }
-    };
+/// With `lazy` the functions inside the top level are stubs, and `lazy` gets what makes them.
+fn compile_after(mut codes: Vec<Code>, source: &str, atoms: &SharedAtoms, limits: Limits, lazy: Option<&mut Vec<(usize, Child)>>) -> Result<(Vec<Code>, Facts), String> {
+    let mut facts = Facts::new();
+    let prog = parse_script_lazy(source, limits, &mut facts).map_err(|e| format!("SyntaxError: {}", e.msg))?;
     let script = compile_script(&prog, &facts, atoms).map_err(|e| format!("compile: {e:?}"))?;
-    Loader { source, facts: &mut facts, atoms, limits, base: 0, codes: &mut codes, lazy, scoped: false }.add(script)?;
+    Loader { source, facts: &mut facts, atoms, limits, base: 0, codes: &mut codes, lazy, scoped: false, pre: false }.add(script)?;
     Ok((codes, facts))
 }
 
 /// Compile `source` as a script. The top level is `Program::codes[0]`.
 pub fn compile(source: &str, atoms: &SharedAtoms, limits: Limits) -> Result<Program, String> {
-    Ok(Program { codes: compile_after(Vec::new(), source, atoms, limits, None, None)?.0 })
+    Ok(Program { codes: compile_after(Vec::new(), source, atoms, limits, None)?.0 })
 }
 
 /// An `eval_load` program (statements and then one expression) as a script: the value of the last expression goes to the global
@@ -303,41 +321,27 @@ pub fn eval_program(src: &str) -> String {
 /// The built-ins that call script functions (`builtins.rs`), written in JavaScript.
 pub const PRELUDE: &str = include_str!("prelude.js");
 
-/// Compile `source` and make a [`Vm`] that can run it (`Vm::run_main(0)`). The prelude is compiled after the script, and it has run
-/// when this returns, so `Array.prototype.forEach` and the others are there.
+/// Compile `source` and make a [`Vm`] that can run it (`Vm::run_main(0)`). The prelude is not compiled or run: `Array.prototype.forEach` and
+/// the others are lazy table entries that make a stub at their first lookup (`prelude_pre.rs`).
 pub fn load(source: &str) -> Result<Vm, String> {
     load_with("", source)
 }
 
-/// [`load`] with a host script that has run when this returns, after the prelude and before `source` (a test harness: it sets globals,
-/// and `source` keeps its own directive prologue).
+/// [`load`] with a host script that has run when this returns, before `source` (a test harness: it sets globals, and `source` keeps its
+/// own directive prologue).
 pub fn load_with(host: &str, source: &str) -> Result<Vm, String> {
     let shared = Arc::new(SharedAtoms::default());
     let mut lazy = Lazy::new(shared.clone(), Limits::default());
     let mut pending = Vec::new();
-    let (codes, facts) = compile_after(Vec::new(), source, &shared, Limits::default(), Some(&mut pending), None)?;
+    let (codes, facts) = compile_after(Vec::new(), source, &shared, Limits::default(), Some(&mut pending))?;
     lazy.add(Cow::Owned(source.to_owned()), facts, pending);
-    let pre = codes.len();
-    let mut pending = Vec::new();
-    let (codes, facts) = compile_after(codes, PRELUDE, &shared, Limits::default(), Some(&mut pending), Some(crate::prelude_facts::facts())).map_err(|e| format!("prelude: {e} (is prelude_facts.rs out of date? run `BLESS_PRELUDE_FACTS=1 cargo test -p bare-js2 --lib prelude_facts`)"))?;
-    lazy.add(Cow::Borrowed(PRELUDE), facts, pending);
     let at = codes.len();
     let mut prog = Program { codes };
     if !host.is_empty() {
-        prog.codes = compile_after(prog.codes, host, &shared, Limits::default(), None, None).map_err(|e| format!("host script: {e}"))?.0;
+        prog.codes = compile_after(prog.codes, host, &shared, Limits::default(), None).map_err(|e| format!("host script: {e}"))?.0;
     }
     let mut vm = Vm::new(prog, shared);
     vm.realm.lazy = Some(Box::new(lazy));
-    if let Err(e) = vm.run_main(pre) {
-        panic!("the prelude failed: {e:?}");
-    }
-    // Hide the names of the prelude, do not delete them: a delete of a property that is not the last one puts the global object in dictionary
-    // mode, and then no global access can be cached. A property is not enumerable; its value is `undefined`, so a script cannot reach the function.
-    let g = vm.realm.global;
-    for name in ["__def", "__helper", "__set"] {
-        let k = vm.realm.intern(name);
-        vm.realm.define(g, crate::interp_rt::Key::Name(k), Value::UNDEFINED).expect("define");
-    }
     if !host.is_empty()
         && let Err(e) = vm.run_main(at)
     {
@@ -445,3 +449,9 @@ mod proto_ic_tests;
 #[cfg(test)]
 #[path = "regexp_rt_tests.rs"]
 mod regexp_rt_tests;
+#[cfg(test)]
+#[path = "bi_string_regexp_tests.rs"]
+mod bi_string_regexp_tests;
+#[cfg(test)]
+#[path = "bi_uri_tests.rs"]
+mod bi_uri_tests;

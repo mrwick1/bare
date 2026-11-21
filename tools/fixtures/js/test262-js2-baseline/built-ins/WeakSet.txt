@@ -1,0 +1,8 @@
+# test262 counts of tools/js/test262_js2.sh for each directory: directory, old pass, old fail, old skip, new pass, new fail, new skip.
+# old = bare-js, new = bare-js2. Commit: e4fbf57745c6aae3d1f12f181ecef78b1665d812. Written by tools/js/test262_js2.sh -u. Do not edit by hand.
+built-ins/WeakSet 17 0 2 17 0 2
+built-ins/WeakSet/prototype 2 0 0 2 0 0
+built-ins/WeakSet/prototype/add 19 0 3 19 0 3
+built-ins/WeakSet/prototype/constructor 2 0 0 2 0 0
+built-ins/WeakSet/prototype/delete 19 0 1 19 0 1
+built-ins/WeakSet/prototype/has 18 0 2 18 0 2

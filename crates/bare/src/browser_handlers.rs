@@ -39,18 +39,17 @@
 //! - Caps: a new slot counts against `max_listeners` and `max_listeners_per_target` before anything changes.
 //! - Not done: the special return value of `beforeunload` (no page leaves here), line and column of an `ErrorEvent` (0).
 
+use crate::eng::{Eng, Fault, Ops, Val};
 use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_js_api::{Args, HostFn, Local, Type};
 use bare_html::dom::{Atom, Document, NodeData, NodeId, Ns};
-use bare_js::eval::{Error, Interp};
-use bare_js::value::{ObjId, Value};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-type V = R<Value>;
+type V<E: Eng> = R<E, E::Raw>;
 
 const WINDOW: u8 = 0;
 const DOCUMENT: u8 = 1;
@@ -138,11 +137,11 @@ fn known(n: &str) -> bool {
 
 /// The handler state of the host (`State::hd`).
 #[derive(Default)]
-pub(crate) struct Hd {
+pub(crate) struct Hd<E: Eng> {
     /// Listener id of a handler slot that has an attribute value and no function yet -> the source text.
     pub raw: IdMap<u64, Rc<str>>,
     /// `(target, type)` -> the attribute value that the slot was last made from.
-    pub seen: HashMap<(Target, Rc<str>), Rc<str>>,
+    pub seen: HashMap<(Target<E>, Rc<str>), Rc<str>>,
     /// The attribute names `on<known name>` that the document has had, with their event types.
     pub atoms: Vec<(Atom, Rc<str>)>,
     /// How many names of the document table `atoms` has looked at.
@@ -152,7 +151,7 @@ pub(crate) struct Hd {
     /// The names `n` of `on<n>` that the host defined on every interface (the `EventTarget.prototype` ask), for a `body` prototype made later.
     pub asked: Vec<&'static str>,
     /// `window.event`: the event of the dispatch that runs (`Dom::dispatch`).
-    pub event: Option<ObjId>,
+    pub event: Option<<E as Eng>::Obj>,
     /// A window `error` event is running: an exception in it is not reported again.
     pub in_error: bool,
 }
@@ -160,27 +159,27 @@ pub(crate) struct Hd {
 /// `HTMLBodyElement` and `HTMLFrameSetElement` (prototype, constructor), `ErrorEvent` (`browser_error_event.rs`) and
 /// `PromiseRejectionEvent` (`browser_rejection.rs`), once made. All are roots.
 #[derive(Default)]
-pub(crate) struct Hh {
-    pub body: [Cell<Option<[ObjId; 2]>>; 2],
-    pub err: Cell<Option<[ObjId; 2]>>,
-    pub rej: Cell<Option<[ObjId; 2]>>,
+pub(crate) struct Hh<E: Eng> {
+    pub body: [Cell<Option<[<E as Eng>::Obj; 2]>>; 2],
+    pub err: Cell<Option<[<E as Eng>::Obj; 2]>>,
+    pub rej: Cell<Option<[<E as Eng>::Obj; 2]>>,
 }
 
-pub(crate) fn roots(d: &Dom, out: &mut Roots<'_, '_>) {
+pub(crate) fn roots<E: Eng>(d: &Dom<E>, out: &mut Roots<'_, '_, E>) {
     for c in d.hh.body.iter().chain([&d.hh.err, &d.hh.rej]) {
         if let Some(o) = c.get() {
-            out.extend(o.map(Value::Object));
+            out.extend(o.map(E::obj_raw));
         }
     }
 }
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// The owner of a handler of interface `k`, or `Illegal invocation`. Window also takes `undefined` and `null`. A body or frameset
     /// element gives the window.
-    fn handler_owner<'s>(&self, s: &mut Sc<'s, '_>, this: Local<'s>, k: u8) -> Res<'s, Target> {
+    fn handler_owner<'s>(&self, s: &mut Sc<'s, E>, this: Local<'s>, k: u8) -> Res<'s, Target<E>> {
         let t = match s.type_of(this) {
             Type::Undefined | Type::Null if k == WINDOW => Some(Target::Window),
-            Type::Object | Type::Function => obj_id(s, this).and_then(|o| self.st.borrow().by_obj.get(&o).copied()),
+            Type::Object | Type::Function => obj_id::<E>(s, this).and_then(|o| self.st.borrow().by_obj.get(&o).copied()),
             _ => None,
         };
         let ok = match t {
@@ -222,41 +221,41 @@ fn body_element(doc: &Document) -> Option<NodeId> {
     doc.children(html).find(|&c| body_like(doc, c))
 }
 
-fn hget<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn hget<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let (k, ty) = d.handler_fn();
     let t = d.handler_owner(s, this, k)?;
     handler_value(d, s, t, ty)
 }
 
-fn hset<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn hset<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let (k, ty) = d.handler_fn();
     let t = d.handler_owner(s, this, k)?;
     sync(d, t, ty);
-    let v = raw_arg(s, a, 0);
-    old(s, |it| handler_set(d, it, t, ty, v))?;
+    let v = raw_arg::<E>(s, a, 0);
+    old::<E, _>(s, |it| handler_set(d, it, t, ty, v))?;
     Ok(s.undefined())
 }
 
-fn sig_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn sig_get<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let t = d.handler_owner(s, this, SIGNAL)?;
-    old_v(s, |it| Ok(handler_get(d, it, t, "abort")))
+    old_v::<E>(s, |it| Ok(handler_get(d, it, t, "abort")))
 }
 
-fn sig_set<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn sig_set<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let t = d.handler_owner(s, this, SIGNAL)?;
-    let v = raw_arg(s, a, 0);
-    old(s, |it| handler_set(d, it, t, "abort", v))?;
+    let v = raw_arg::<E>(s, a, 0);
+    old::<E, _>(s, |it| handler_set(d, it, t, "abort", v))?;
     Ok(s.undefined())
 }
 
 /// The value of the handler `on<ty>` of `t`, or `null`, with no attribute and no compile (for the host-made targets).
-pub(crate) fn handler_get(d: &Dom, it: &mut Interp<'_>, t: Target, ty: &str) -> Value {
+pub(crate) fn handler_get<E: Eng>(d: &Dom<E>, it: &mut E::Vm, t: Target<E>, ty: &str) -> E::Raw {
     let st = d.st.borrow();
-    st.listeners.get(&t).and_then(|v| v.iter().find(|l| l.handler && *l.ty == *ty)).map_or(Value::Null, |l| it.traced_value(&l.cb))
+    st.listeners.get(&t).and_then(|v| v.iter().find(|l| l.handler && *l.ty == *ty)).map_or(E::null(), |l| it.traced_value(&l.cb))
 }
 
 /// The value of the handler `on<ty>` of `t` (the getter): the attribute is read and compiled if it is new.
-fn handler_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, t: Target, ty: &str) -> Res<'s, Local<'s>> {
+fn handler_value<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, t: Target<E>, ty: &str) -> Res<'s, Local<'s>> {
     sync(d, t, ty);
     let found = {
         let st = d.st.borrow();
@@ -264,15 +263,15 @@ fn handler_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, t: Target, ty: &str) -> Res<'s
     };
     match found {
         None => Ok(s.null()),
-        Some((id, true)) => old_v(s, |it| compile_slot(d, it, t, ty, id)),
-        Some((_, false)) => old_v(s, |it| Ok(handler_get(d, it, t, ty))),
+        Some((id, true)) => old_v::<E>(s, |it| compile_slot(d, it, t, ty, id)),
+        Some((_, false)) => old_v::<E>(s, |it| Ok::<_, Fault<E>>(handler_get(d, it, t, ty))),
     }
 }
 
 /// Set the handler `on<ty>` of `t` (see the header for the rules).
-pub(crate) fn handler_set(d: &Dom, it: &mut Interp<'_>, t: Target, ty: &str, value: Option<Value>) -> R<()> {
-    let cb: Option<ObjId> = match value {
-        Some(Value::Object(o)) => Some(o),
+pub(crate) fn handler_set<E: Eng>(d: &Dom<E>, it: &mut E::Vm, t: Target<E>, ty: &str, value: Option<E::Raw>) -> R<E, ()> {
+    let cb: Option<E::Obj> = match value.map(E::kind) {
+        Some(Val::Object(o)) => Some(o),
         _ => None,
     };
     let mut st = d.st.borrow_mut();
@@ -281,7 +280,7 @@ pub(crate) fn handler_set(d: &Dom, it: &mut Interp<'_>, t: Target, ty: &str, val
     match (at, cb) {
         (Some(i), Some(cb)) => {
             let l = &mut st.listeners.get_mut(&t).expect("found")[i];
-            it.store_value(&mut l.cb, Value::Object(cb));
+            it.store_value(&mut l.cb, E::obj_raw(cb));
             if !st.hd.raw.is_empty() {
                 st.hd.raw.remove(&l.id);
             }
@@ -307,7 +306,7 @@ pub(crate) fn handler_set(d: &Dom, it: &mut Interp<'_>, t: Target, ty: &str, val
             }
             st.next_id += 1;
             let id = st.next_id;
-            let cb = it.trace_value(Value::Object(cb));
+            let cb = it.trace_value(E::obj_raw(cb));
             st.listeners.entry(t).or_default().push(Listener { id, ty: Rc::from(ty), cb, capture: false, once: false, passive: false, handler: true });
             st.n_listeners += 1;
             d.own_listeners(st, it, t);
@@ -320,7 +319,7 @@ pub(crate) fn handler_set(d: &Dom, it: &mut Interp<'_>, t: Target, ty: &str, val
 // ------------------------------------------------------------------------------------------ content attributes
 
 /// Look at the names added to the document since the last scan.
-fn scan(doc: &Document, hd: &mut Hd) {
+fn scan<E: Eng>(doc: &Document, hd: &mut Hd<E>) {
     for i in hd.scanned..doc.name_count() {
         let atom = doc.atom_at(i);
         if let Some(n) = doc.atom_str(atom).strip_prefix("on")
@@ -334,19 +333,19 @@ fn scan(doc: &Document, hd: &mut Hd) {
 
 /// Does the document have no name that starts with `on`? One flag when it has none.
 #[inline]
-fn idle(d: &Dom) -> bool {
+fn idle<E: Eng>(d: &Dom<E>) -> bool {
     !d.doc.borrow().has_on_name()
 }
 
 /// Bring the handler `on<ty>` of `t` up to date with its content attribute (see the header). Cheap when the document has no `on*` name.
 #[inline]
-pub(crate) fn sync(d: &Dom, t: Target, ty: &str) {
+pub(crate) fn sync<E: Eng>(d: &Dom<E>, t: Target<E>, ty: &str) {
     if !matches!(t, Target::Obj(_)) && !idle(d) {
         sync_slow(d, t, ty);
     }
 }
 
-fn sync_slow(d: &Dom, t: Target, ty: &str) {
+fn sync_slow<E: Eng>(d: &Dom<E>, t: Target<E>, ty: &str) {
     let doc = d.doc.borrow();
     let mut st = d.st.borrow_mut();
     if doc.name_count() != st.hd.scanned {
@@ -359,7 +358,7 @@ fn sync_slow(d: &Dom, t: Target, ty: &str) {
 }
 
 /// `sync` for every target of the path of a dispatch. One test when the document has no `on*` attribute name.
-pub(crate) fn sync_path_of(d: &Dom, path: &[Target], ty: &str) {
+pub(crate) fn sync_path_of<E: Eng>(d: &Dom<E>, path: &[Target<E>], ty: &str) {
     if idle(d) {
         return;
     }
@@ -369,7 +368,7 @@ pub(crate) fn sync_path_of(d: &Dom, path: &[Target], ty: &str) {
 }
 
 /// `sync` of the handler `on<ty>` for `n`, its ancestors and the window: before the host looks whether anything listens on the path.
-pub(crate) fn sync_path(d: &Dom, n: NodeId, ty: &str) {
+pub(crate) fn sync_path<E: Eng>(d: &Dom<E>, n: NodeId, ty: &str) {
     {
         let doc = d.doc.borrow();
         let st = d.st.borrow();
@@ -387,13 +386,13 @@ pub(crate) fn sync_path(d: &Dom, n: NodeId, ty: &str) {
 
 /// `sync` for every handler name of the document: before a listener is added to `t`.
 #[inline]
-pub(crate) fn sync_all(d: &Dom, t: Target) {
+pub(crate) fn sync_all<E: Eng>(d: &Dom<E>, t: Target<E>) {
     if !matches!(t, Target::Obj(_)) && !idle(d) {
         sync_all_slow(d, t);
     }
 }
 
-fn sync_all_slow(d: &Dom, t: Target) {
+fn sync_all_slow<E: Eng>(d: &Dom<E>, t: Target<E>) {
     let doc = d.doc.borrow();
     let mut st = d.st.borrow_mut();
     if doc.name_count() != st.hd.scanned {
@@ -405,7 +404,7 @@ fn sync_all_slow(d: &Dom, t: Target) {
     }
 }
 
-fn sync_one(d: &Dom, doc: &Document, st: &mut State, t: Target, ty: &Rc<str>, atom: Atom) {
+fn sync_one<E: Eng>(d: &Dom<E>, doc: &Document, st: &mut State<E>, t: Target<E>, ty: &Rc<str>, atom: Atom) {
     let lower = ty.to_ascii_lowercase();
     let el = match t {
         Target::Window if listed(BODY_NAMES, &lower) => body_element(doc),
@@ -430,11 +429,11 @@ fn sync_one(d: &Dom, doc: &Document, st: &mut State, t: Target, ty: &Rc<str>, at
 }
 
 /// The handler of `t` for `ty` becomes the raw text `src` (in place when it exists, else a new slot).
-fn activate(d: &Dom, st: &mut State, t: Target, ty: &Rc<str>, src: Rc<str>) {
+fn activate<E: Eng>(d: &Dom<E>, st: &mut State<E>, t: Target<E>, ty: &Rc<str>, src: Rc<str>) {
     let g = *d.global.get().expect("installed");
     if let Some(l) = st.listeners.get_mut(&t).and_then(|v| v.iter_mut().find(|l| l.handler && *l.ty == **ty)) {
         // The global is a placeholder until the compile. It is always live, so it needs no write barrier and no owner.
-        l.cb.set_raw(Value::Object(g));
+        l.cb.set_raw(E::obj_raw(g));
         st.hd.raw.insert(l.id, src);
         return;
     }
@@ -444,12 +443,12 @@ fn activate(d: &Dom, st: &mut State, t: Target, ty: &Rc<str>, src: Rc<str>) {
     }
     st.next_id += 1;
     let id = st.next_id;
-    st.listeners.entry(t).or_default().push(Listener { id, ty: ty.clone(), cb: bare_js_api::Traced::from_raw(Value::Object(g)), capture: false, once: false, passive: false, handler: true });
+    st.listeners.entry(t).or_default().push(Listener { id, ty: ty.clone(), cb: bare_js_api::Traced::from_raw(E::obj_raw(g)), capture: false, once: false, passive: false, handler: true });
     st.n_listeners += 1;
     st.hd.raw.insert(id, src);
 }
 
-fn deactivate(st: &mut State, t: Target, ty: &Rc<str>) {
+fn deactivate<E: Eng>(st: &mut State<E>, t: Target<E>, ty: &Rc<str>) {
     let Some(v) = st.listeners.get_mut(&t) else { return };
     let Some(i) = v.iter().position(|l| l.handler && *l.ty == **ty) else { return };
     st.hd.raw.remove(&v.remove(i).id);
@@ -460,8 +459,8 @@ fn deactivate(st: &mut State, t: Target, ty: &Rc<str>) {
 }
 
 /// Compile the raw handler `id` of `t`. A syntax error is reported and removes the slot (the handler is null).
-pub(crate) fn compile_slot(d: &Dom, it: &mut Interp<'_>, t: Target, ty: &str, id: u64) -> V {
-    let Some(src) = d.st.borrow_mut().hd.raw.remove(&id) else { return Ok(Value::Null) };
+pub(crate) fn compile_slot<E: Eng>(d: &Dom<E>, it: &mut E::Vm, t: Target<E>, ty: &str, id: u64) -> V<E> {
+    let Some(src) = d.st.borrow_mut().hd.raw.remove(&id) else { return Ok(E::null()) };
     let svg = matches!(t, Target::Node(n) if d.doc.borrow().element_ns(n) == Ns::Svg);
     let params = if matches!(t, Target::Window) && ty == "error" {
         "event, source, lineno, colno, error"
@@ -470,20 +469,20 @@ pub(crate) fn compile_slot(d: &Dom, it: &mut Interp<'_>, t: Target, ty: &str, id
     } else {
         "event"
     };
-    match it.compile_function(&format!("on{}", ty.to_ascii_lowercase()), params, &src) {
+    match it.compile_function_o(&format!("on{}", ty.to_ascii_lowercase()), params, &src) {
         Ok(f) => {
             let mut st = d.st.borrow_mut();
             let st = &mut *st;
             if let Some(l) = st.listeners.get_mut(&t).and_then(|v| v.iter_mut().find(|l| l.id == id)) {
-                it.store_value(&mut l.cb, Value::Object(f));
+                it.store_value(&mut l.cb, E::obj_raw(f));
                 d.own_listeners(st, it, t);
             }
-            Ok(Value::Object(f))
+            Ok(E::obj_raw(f))
         }
-        Err(Error::Throw(v)) => {
+        Err(Fault::Throw(v)) => {
             d.remove_listener(t, id);
             d.report(it, v, "error", t);
-            Ok(Value::Null)
+            Ok(E::null())
         }
         Err(e) => Err(e),
     }
@@ -492,11 +491,11 @@ pub(crate) fn compile_slot(d: &Dom, it: &mut Interp<'_>, t: Target, ty: &str, id
 /// The objects that the names of the handler attribute of `t` are looked up in before the globals: the element, its form owner (and the
 /// form's named controls), and the document. A window handler has none. The named controls are a plain object made now: the first
 /// listed control of the form for each `name` or `id` (deviation: a radio group is its first button, not a `RadioNodeList`).
-pub(crate) fn scope_of(d: &Dom, it: &mut Interp<'_>, t: Target) -> R<Vec<ObjId>> {
+pub(crate) fn scope_of<E: Eng>(d: &Dom<E>, it: &mut E::Vm, t: Target<E>) -> R<E, Vec<E::Obj>> {
     let Target::Node(n) = t else { return Ok(Vec::new()) };
     let mut out = Vec::with_capacity(4);
-    let mut push = |v: Value| {
-        if let Value::Object(o) = v {
+    let mut push = |v: E::Raw| {
+        if let Val::Object(o) = E::kind(v) {
             out.push(o);
         }
     };
@@ -507,7 +506,7 @@ pub(crate) fn scope_of(d: &Dom, it: &mut Interp<'_>, t: Target) -> R<Vec<ObjId>>
             push(d.wrap(it, f)?);
         }
         let names = form_names(d, it, f)?;
-        push(Value::Object(names));
+        push(E::obj_raw(names));
     }
     let root = d.doc.borrow().root();
     push(d.wrap(it, root)?);
@@ -515,14 +514,14 @@ pub(crate) fn scope_of(d: &Dom, it: &mut Interp<'_>, t: Target) -> R<Vec<ObjId>>
 }
 
 /// A null-prototype object with the listed controls of `form` by `name` and `id` (tree order, the first wins).
-fn form_names(d: &Dom, it: &mut Interp<'_>, form: NodeId) -> R<ObjId> {
-    let o = it.heap.new_object(None).map_err(|e| it.heap_error(e))?;
+fn form_names<E: Eng>(d: &Dom<E>, it: &mut E::Vm, form: NodeId) -> R<E, E::Obj> {
+    let o = it.h_new_object(None)?;
     let mut found: Vec<(NodeId, Vec<String>)> = Vec::new();
     {
         let doc = d.doc.borrow();
         let mut stack = vec![form];
         while let Some(c) = stack.pop() {
-            it.charge(1)?;
+            it.charge_o(1)?;
             let kids: Vec<NodeId> = doc.children(c).collect();
             stack.extend(kids.into_iter().rev());
             if let NodeData::Element { name, .. } = doc.data(c)
@@ -542,7 +541,7 @@ fn form_names(d: &Dom, it: &mut Interp<'_>, form: NodeId) -> R<ObjId> {
         let w = d.wrap(it, c)?;
         for k in keys {
             let key = d.key(it, &k)?;
-            if !it.heap.has_own_property(o, key).map_err(|e| it.heap_error(e))? {
+            if !it.h_has_own(o, key)? {
                 it.define_data(o, key, w, true, true, true)?;
             }
         }
@@ -553,7 +552,7 @@ fn form_names(d: &Dom, it: &mut Interp<'_>, form: NodeId) -> R<ObjId> {
 // ------------------------------------------------------------------------------------------ lazy accessors
 
 /// The kind of interface whose accessors the object `owner` holds.
-fn kind_of(d: &Dom, owner: ObjId) -> Option<u8> {
+fn kind_of<E: Eng>(d: &Dom<E>, owner: E::Obj) -> Option<u8> {
     let p = d.p();
     let g = *d.global.get()?;
     if owner == g {
@@ -572,10 +571,10 @@ fn kind_of(d: &Dom, owner: ObjId) -> Option<u8> {
 }
 
 /// `Host::lazy_member` for `Lazy::All`: every lazy name of `owner`.
-pub(crate) fn lazy_all(d: &Dom, it: &mut Interp<'_>, owner: ObjId) -> R<()> {
+pub(crate) fn lazy_all<E: Eng>(d: &Dom<E>, it: &mut E::Vm, owner: E::Obj) -> R<E, ()> {
     let Some(k) = kind_of(d, owner) else { return Ok(()) };
     crate::browser_basics::define_all(d, it, owner)?;
-    it.heap.clear_lazy_on(owner);
+    it.h_clear_lazy_on(owner);
     for n in names(k) {
         define(d, it, owner, k, n)?;
     }
@@ -583,7 +582,7 @@ pub(crate) fn lazy_all(d: &Dom, it: &mut Interp<'_>, owner: ObjId) -> R<()> {
 }
 
 /// `Host::lazy_member` for `Lazy::Name`: the name `key` that a chain through `owner` missed.
-pub(crate) fn lazy_key(d: &Dom, it: &mut Interp<'_>, owner: ObjId, key: &str) -> R<()> {
+pub(crate) fn lazy_key<E: Eng>(d: &Dom<E>, it: &mut E::Vm, owner: E::Obj, key: &str) -> R<E, ()> {
     crate::browser_basics::define(d, it, key)?;
     if crate::browser::define_window(d,it,key)? || crate::browser_cssom::define(d,it,key)? { return Ok(()); }
     if crate::browser_svg::define(d,it,key)? || crate::browser_shims::define(d,it,key)? { return Ok(()); }
@@ -624,10 +623,10 @@ pub(crate) fn lazy_key(d: &Dom, it: &mut Interp<'_>, owner: ObjId, key: &str) ->
 }
 
 /// Define the accessor `on<n>` of kind `k` on `owner`, unless it is there.
-fn define(d: &Dom, it: &mut Interp<'_>, owner: ObjId, k: u8, n: &'static str) -> R<()> {
+fn define<E: Eng>(d: &Dom<E>, it: &mut E::Vm, owner: E::Obj, k: u8, n: &'static str) -> R<E, ()> {
     let name = format!("on{n}");
     let key = d.key(it, &name)?;
-    if it.heap.has_own_property(owner, key).map_err(|e| it.heap_error(e))? {
+    if it.h_has_own(owner, key)? {
         return Ok(());
     }
     let id = d.scoped.borrow().len() as u32;
@@ -642,18 +641,18 @@ fn define(d: &Dom, it: &mut Interp<'_>, owner: ObjId, k: u8, n: &'static str) ->
 }
 
 /// `onabort` of `AbortSignal.prototype`, made with the lazy `AbortSignal` (`browser_abort.rs`).
-pub(crate) fn install_onabort(d: &Dom, it: &mut Interp<'_>, proto: ObjId) -> R<()> {
+pub(crate) fn install_onabort<E: Eng>(d: &Dom<E>, it: &mut E::Vm, proto: E::Obj) -> R<E, ()> {
     table!(members = [Row::get(1, "onabort", sig_get, Some(sig_set))]);
-    run(it, |s| {
+    run::<E, _>(it, |s| {
         let p = d.obj_local(s, proto);
-        d.install_rows(s, &[p], &members::T)
+        d.install_rows(s, &[p], &members::T::<E>::V)
     })
 }
 
-pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
     let p = d.p();
     let g = s.global();
-    for o in [g, d.obj_local(s, p.document), d.obj_local(s, p.html), d.obj_local(s, p.svg)] {
+    for o in [g, d.obj_local(s, p.document), d.obj_local(s, p.shadow), d.obj_local(s, p.html), d.obj_local(s, p.svg)] {
         s.set_lazy(o, false)?;
     }
     let et = d.obj_local(s, p.et);
@@ -663,7 +662,7 @@ pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
         Row::both(1, "HTMLFrameSetElement", lazy_frameset),
     ]);
     let g = s.global();
-    d.install_rows(s, &[g], &lazy::T)
+    d.install_rows(s, &[g], &lazy::T::<E>::V)
 }
 
 // ------------------------------------------------------------------------------------------ body and frameset
@@ -671,7 +670,7 @@ pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
 const BODY_TAGS: [&str; 2] = ["HTMLBodyElement", "HTMLFrameSetElement"];
 
 /// `[prototype, constructor]` of `HTMLBodyElement` (`i` = 0) or `HTMLFrameSetElement` (1), made on first use.
-pub(crate) fn body_proto(d: &Dom, it: &mut Interp<'_>, i: usize) -> R<[ObjId; 2]> {
+pub(crate) fn body_proto<E: Eng>(d: &Dom<E>, it: &mut E::Vm, i: usize) -> R<E, [E::Obj; 2]> {
     if let Some(o) = d.hh.body[i].get() {
         return Ok(o);
     }
@@ -679,10 +678,10 @@ pub(crate) fn body_proto(d: &Dom, it: &mut Interp<'_>, i: usize) -> R<[ObjId; 2]
     let proto = d.obj(it, d.p().html)?;
     let f = d.add_fn_s_obj(it, illegal_constructor, name, 0, bare_js_api::HostFn::Method)?;
     let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
-    it.define_data(f, kp, Value::Object(proto), false, false, false)?;
-    it.define_data(proto, kc, Value::Object(f), true, false, true)?;
+    it.define_data(f, kp, E::obj_raw(proto), false, false, false)?;
+    it.define_data(proto, kc, E::obj_raw(f), true, false, true)?;
     crate::browser_lazy::tag(d, it, proto, name)?;
-    it.heap.set_lazy_on(proto).map_err(|e| it.heap_error(e))?;
+    it.h_set_lazy_on(proto)?;
     d.hh.body[i].set(Some([proto, f]));
     let asked = d.st.borrow().hd.asked.clone();
     for &n in asked.iter().filter(|n| has(BODY, n)) {
@@ -691,11 +690,11 @@ pub(crate) fn body_proto(d: &Dom, it: &mut Interp<'_>, i: usize) -> R<[ObjId; 2]
     Ok([proto, f])
 }
 
-fn ensure_body(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+fn ensure_body<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
     body_proto(d, it, 0).map(|_| ())
 }
 
-fn ensure_frameset(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+fn ensure_frameset<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
     body_proto(d, it, 1).map(|_| ())
 }
 
@@ -705,12 +704,12 @@ crate::browser_lazy::lazy_global!(lazy_frameset, "HTMLFrameSetElement", ensure_f
 
 #[cold]
 #[inline(never)]
-pub(crate) fn tags(d:&Dom,it:&mut Interp<'_>)->R<()> {
+pub(crate) fn tags<E: Eng>(d:&Dom<E>,it:&mut E::Vm)->R<E, ()> {
     let p=d.p();
     let key=it.symbol_to_string_tag();
     for (proto,name) in [(p.et,"EventTarget"),(p.node,"Node"),(p.element,"Element"),(p.html,"HTMLElement"),(p.svg,"SVGElement"),(p.document,"Document"),(p.text,"Text"),(p.comment,"Comment"),(it.global_object(),"Window")] {
-        if it.heap.peek_own_property(proto,key).map_err(|e|it.heap_error(e))?.is_none() {
-            let value=Value::String(it.heap.intern_str(name).map_err(|e|it.heap_error(e))?);
+        if it.h_peek_own(proto,key)?.is_none() {
+            let value=E::str_raw(it.h_intern(name)?);
             it.define_data(proto,key,value,false,false,true)?;
         }
     }

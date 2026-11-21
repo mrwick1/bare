@@ -1,0 +1,17 @@
+# test262 counts of tools/js/test262_js2.sh for each directory: directory, old pass, old fail, old skip, new pass, new fail, new skip.
+# old = bare-js, new = bare-js2. Commit: e4fbf57745c6aae3d1f12f181ecef78b1665d812. Written by tools/js/test262_js2.sh -u. Do not edit by hand.
+built-ins/Reflect 3 0 0 3 0 0
+built-ins/Reflect/apply 9 0 0 9 0 0
+built-ins/Reflect/construct 10 0 0 10 0 0
+built-ins/Reflect/defineProperty 11 0 1 11 0 1
+built-ins/Reflect/deleteProperty 10 0 1 10 0 1
+built-ins/Reflect/enumerate 1 0 0 1 0 0
+built-ins/Reflect/get 11 0 0 11 0 0
+built-ins/Reflect/getOwnPropertyDescriptor 12 0 1 12 0 1
+built-ins/Reflect/getPrototypeOf 9 0 1 9 0 1
+built-ins/Reflect/has 9 0 1 9 0 1
+built-ins/Reflect/isExtensible 7 0 1 7 0 1
+built-ins/Reflect/ownKeys 12 0 1 12 0 1
+built-ins/Reflect/preventExtensions 8 0 2 8 0 2
+built-ins/Reflect/set 18 0 0 18 0 0
+built-ins/Reflect/setPrototypeOf 13 0 1 13 0 1

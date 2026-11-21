@@ -277,7 +277,7 @@ fn private_names_and_accessors() {
 
 #[test]
 fn unbuilt_constructs_stop_the_load_and_the_rest_is_clear() {
-    for src in ["async function* g() {}", "with ({}) {}"] {
+    for src in ["with ({}) {}"] {
         let e = run(src).err().unwrap_or_else(|| panic!("{src} ran"));
         assert!(e.starts_with("not supported yet"), "{src}: {e}");
     }
@@ -357,7 +357,7 @@ fn function_prototype_and_plain_function_prototypes() {
         ("function F() {} F.prototype = {m: function () { return 'm'; }}; var r = new F().m();", "r", "m"),
         ("function A(v) { this.v = v; } function B(v) { A.call(this, v); } B.prototype = Object.create(A.prototype); var r = new B(4).v + ',' + (new B(1) instanceof A);", "r", "4,true"),
         ("function F() { this.a = 1; } F.prototype.hi = function () { return 'hi'; }; class G extends F { } var g = new G(); var r = g.a + g.hi();", "r", "1hi"),
-        ("var m = {a() { return 1; }}; var r = typeof m.a.prototype + typeof (function () {}).prototype;", "r", "objectobject"),
+        ("var m = {a() { return 1; }}; var r = typeof m.a.prototype + typeof (function () {}).prototype;", "r", "undefinedobject"),
         ("var f = function () {}; f.x = 1; var r = f() === undefined && f.x === 1 && typeof f.prototype === 'object';", "r", "true"),
         ("var bound = function (a) { return this.v + a; }.bind({v: 1}); var o = {m: bound}; var r = o.m(2) + ',' + [5, 6].map(bound).join();", "r", "3,6,7"),
         ("var r = typeof Function + (function () {} instanceof Function) + (Function.prototype === Object.getPrototypeOf(function () {}));", "r", "functiontruetrue"),
@@ -541,12 +541,9 @@ fn a_top_level_let_const_and_class_are_visible_to_the_next_script() {
 fn two_scripts(a: &str, b: &str, name: &str, gc: bool) -> Result<String, String> {
     let shared = Arc::new(SharedAtoms::default());
     let mut prog = compile(b, &shared, Limits::default())?;
-    let pre = prog.codes.len();
-    prog.codes = compile_after(prog.codes, PRELUDE, &shared, Limits::default(), None, None)?.0;
     let at = prog.codes.len();
-    prog.codes = compile_after(prog.codes, a, &shared, Limits::default(), None, None)?.0;
+    prog.codes = compile_after(prog.codes, a, &shared, Limits::default(), None)?.0;
     let mut vm = Vm::new(prog, shared);
-    vm.run_main(pre).expect("the prelude");
     if gc {
         vm.realm.heap.set_trigger(Trigger { min: 1 << 10, slack: 1 << 10 });
     }
@@ -812,22 +809,22 @@ fn waiting(vm: &Vm) -> usize {
 }
 
 #[test]
-fn prelude_functions_are_compiled_at_their_first_call() {
+fn prelude_functions_are_made_at_their_first_lookup_and_compiled_at_their_first_call() {
     let src = "var r = [3, 1, 2].sort().join(); var m = [1, 2].map(function (x) { return x * 2; }).join(); var s = [1, 2, 3].reduce(function (a, b) { return a + b; });";
     let mut vm = load(src).unwrap();
-    let before = waiting(&vm);
-    assert!(before > 40, "the methods of the prelude wait: {before}");
+    let before = vm.realm.prog.len();
+    assert!(before < 10, "the prelude adds no code at the start: {before}");
     vm.run_main(0).unwrap();
-    let after = waiting(&vm);
-    assert!(after < before && after > before - 25, "sort, map, reduce and the helpers they call were compiled: {before} -> {after}");
+    let after = vm.realm.prog.len();
+    assert!(after > before + 5 && after < before + 40, "sort, map, reduce and the helpers they call have code: {before} -> {after}");
     assert_eq!((vm.global_text("r"), vm.global_text("m"), vm.global_text("s")), ("1,2,3".into(), "2,4".into(), "6".into()));
-    // A second call compiles nothing.
+    // A second call makes and compiles nothing.
     let mut vm2 = load("var a = [2, 1]; a.sort(); a.sort(); a.sort();").unwrap();
     vm2.run_main(0).unwrap();
-    let once = waiting(&vm2);
+    let once = vm2.realm.prog.len();
     let mut vm3 = load("var a = [2, 1]; a.sort();").unwrap();
     vm3.run_main(0).unwrap();
-    assert_eq!(waiting(&vm3), once);
+    assert_eq!(vm3.realm.prog.len(), once);
 }
 
 #[test]
@@ -860,9 +857,14 @@ fn a_lazy_compile_that_fails_throws_a_plain_error() {
             Err("no compiler".into())
         }
     }
-    let mut vm = load("var e; try { [1].forEach(function () {}); } catch (x) { e = x.name + ': ' + x.message; }").unwrap();
-    vm.realm.lazy = Some(Box::new(Fails));
+    // `forEach` is looked up before the compiler changes (its stub is made then); its compile fails at the call. So is `values`, which the
+    // arguments object of the stub holds.
+    let mut vm = load("var f = [].forEach, v = [].values, e; function t(go) { if (go) try { f.call([1], function () {}); } catch (x) { e = x.name + ': ' + x.message; } }").unwrap();
     vm.run_main(0).unwrap();
+    let t = vm.global("t");
+    vm.call(t, Value::UNDEFINED, &[Value::bool(false)]).unwrap();
+    vm.realm.lazy = Some(Box::new(Fails));
+    vm.call(t, Value::UNDEFINED, &[Value::bool(true)]).unwrap();
     assert_eq!(vm.global_text("e"), "Error: no compiler");
 }
 
@@ -1107,8 +1109,6 @@ fn an_unbuilt_construct_in_a_function_fails_at_its_first_call_not_at_load() {
     assert_eq!(ev(src, "e"), "Error: not supported yet|Error");
     // The top level has the construct: the load fails, as before.
     assert!(load("with ({}) {}").err().unwrap().starts_with("not supported yet"));
-    // An async function at the top level of the script is found when its parent is compiled, so the load fails (not a lazy case).
-    assert!(load("async function* f() {}").err().unwrap().starts_with("not supported yet"));
 }
 
 #[test]
@@ -1198,11 +1198,11 @@ fn the_stubs_of_user_functions_keep_a_program_that_is_not_called_small() {
     }
     src.push_str("var r = f7(4);");
     let mut vm = load(&src).unwrap();
-    assert!(waiting(&vm) >= 200 + 40, "the 200 functions and the prelude wait: {}", waiting(&vm));
+    assert!(waiting(&vm) >= 200, "the 200 functions wait: {}", waiting(&vm));
     vm.run_main(0).unwrap();
     assert_eq!(vm.global_text("r"), "42");
     let words: usize = vm.realm.prog.iter().map(|c| c.words.len()).sum();
-    assert!(words < 4000, "only the script, the wrapper of the prelude and f7 hold code: {words} words");
+    assert!(words < 4000, "only the script and f7 hold code: {words} words");
 }
 
 #[test]
@@ -1223,5 +1223,85 @@ fn a_stub_that_keeps_the_arguments_in_registers_and_a_stub_with_an_array_agree()
         ("function f(a) { 'use strict'; var arguments2 = a; return arguments2; } var r = f(4);", "r", "4"),
         ("function f(a) { return function (b) { return a + b; }; } var r = f(1)(2) + f(10)(20);", "r", "33"),
         ("var o = { m(a, b) { return this.k + a + b; }, k: 1 }; var r = o.m(2, 3) + '|' + o.m(2);", "r", "6|NaN"),
+    ]);
+}
+
+#[test]
+fn new_on_an_arrow_function_a_method_or_an_accessor_is_a_type_error_before_the_first_call() {
+    // The stub of a function that was never called must already say that it is no constructor.
+    check(&[
+        ("var r; try { new (() => 1)(); r = 'no'; } catch (e) { r = e instanceof TypeError; }", "r", "true"),
+        ("var r; try { new ({ m() {} }).m(); r = 'no'; } catch (e) { r = e instanceof TypeError; }", "r", "true"),
+        ("var r; try { new (Object.getOwnPropertyDescriptor({ get a() { return 1; } }, 'a').get)(); r = 'no'; } catch (e) { r = e instanceof TypeError; }", "r", "true"),
+        ("var r; try { new (Object.getOwnPropertyDescriptor({ set a(v) {} }, 'a').set)(); r = 'no'; } catch (e) { r = e instanceof TypeError; }", "r", "true"),
+        ("var r; try { new (class { static m() {} }).m(); r = 'no'; } catch (e) { r = e instanceof TypeError; }", "r", "true"),
+        ("var r; try { Reflect.construct(function () {}, [], () => 1); r = 'no'; } catch (e) { r = e instanceof TypeError; }", "r", "true"),
+        ("var f = function () { this.a = 1; }; var r = new f().a;", "r", "1"),
+    ]);
+}
+
+#[test]
+fn the_generator_and_async_function_constructors_build_functions_of_their_kind() {
+    check(&[
+        // The constructors are reachable from a function of the kind, and have the spec properties.
+        (
+            "var G = Object.getPrototypeOf(function* () {}).constructor, A = Object.getPrototypeOf(async function () {}).constructor, \
+             AG = Object.getPrototypeOf(async function* () {}).constructor; \
+             var r = [G.name, A.name, AG.name, G.length, Object.getPrototypeOf(G) === Function, G.prototype === Object.getPrototypeOf(function* () {}), \
+             Object.getOwnPropertyDescriptor(G.prototype, 'constructor').writable, Object.getOwnPropertyDescriptor(G, 'prototype').writable].join();",
+            "r",
+            "GeneratorFunction,AsyncFunction,AsyncGeneratorFunction,1,true,true,false,false",
+        ),
+        (
+            "var G = Object.getPrototypeOf(function* () {}).constructor; var g = new G('a', 'b', 'yield a; yield b; return 3;'); \
+             var it = g(1, 2); var r = [g.name, g.length, Object.getPrototypeOf(g) === G.prototype, it.next().value, it.next().value, it.next().value].join();",
+            "r",
+            "anonymous,2,true,1,2,3",
+        ),
+        // A call without `new` is the same, and a bad text is a SyntaxError that does not reach the global scope.
+        (
+            "var G = Object.getPrototypeOf(function* () {}).constructor; var r = []; \
+             try { G('yield', ''); } catch (e) { r.push(e instanceof SyntaxError); } \
+             try { G('}) ; ({'); } catch (e) { r.push(e instanceof SyntaxError); } \
+             var A = Object.getPrototypeOf(async function () {}).constructor; \
+             try { A('await', ''); } catch (e) { r.push(e instanceof SyntaxError); } \
+             try { A('', 'super()'); } catch (e) { r.push(e instanceof SyntaxError); } \
+             r = r.join();",
+            "r",
+            "true,true,true,true",
+        ),
+        // The function has the global scope, not the scope of the caller.
+        (
+            "var x = 'global'; var r; (function () { var x = 'local'; var G = Object.getPrototypeOf(function* () {}).constructor; r = G('yield x')().next().value; })();",
+            "r",
+            "global",
+        ),
+    ]);
+}
+
+#[test]
+fn an_arrow_function_a_method_and_an_accessor_have_no_own_prototype() {
+    check(&[
+        ("var r = [typeof (() => 1).prototype, Object.hasOwn(() => 1, 'prototype')].join();", "r", "undefined,false"),
+        ("var o = { m() {}, get a() { return 1; }, set a(v) {} }; var d = Object.getOwnPropertyDescriptor(o, 'a'); var r = [o.m.prototype, d.get.prototype, d.set.prototype, Object.hasOwn(o.m, 'prototype')].join();", "r", ",,,false"),
+        ("var r = [Object.hasOwn(async function () {}, 'prototype'), Object.hasOwn(async () => 1, 'prototype'), Object.hasOwn(({ async m() {} }).m, 'prototype')].join();", "r", "false,false,false"),
+        ("var r = [Object.hasOwn(class { static m() {} }.m, 'prototype'), Object.getOwnPropertyNames(() => 1).join()].join('|');", "r", "false|length,name"),
+        // Functions that are constructors, and the generator kinds, keep it.
+        ("var r = [typeof function () {}.prototype, typeof function* () {}.prototype, typeof ({ *g() {} }).g.prototype, typeof ({ async *g() {} }).g.prototype, typeof class {}.prototype].join();", "r", "object,object,object,object,object"),
+        // After the first call too.
+        ("var a = () => 1; a(); var o = { m() {} }; o.m(); var r = [Object.hasOwn(a, 'prototype'), Object.hasOwn(o.m, 'prototype')].join();", "r", "false,false"),
+        ("var a = () => 1; a.prototype = 3; var r = a.prototype;", "r", "3"),
+    ]);
+}
+
+#[test]
+fn the_arguments_object_has_the_array_values_iterator() {
+    check(&[
+        ("function f() { return arguments; } var a = f(1, 2); var d = Object.getOwnPropertyDescriptor(a, Symbol.iterator); var r = [a[Symbol.iterator] === Array.prototype.values, d.writable, d.enumerable, d.configurable].join();", "r", "true,true,false,true"),
+        ("function f(x) { 'use strict'; return arguments; } var r = (f(1)[Symbol.iterator] === Array.prototype.values) + ',' + Object.hasOwn(f(1), Symbol.iterator);", "r", "true,true"),
+        ("function f(x, y) { return [...arguments].join(); } var r = f(3, 4, 5);", "r", "3,4,5"),
+        ("function f() { var r = []; for (var v of arguments) r.push(v); return r.join(); } var r = f(7, 8);", "r", "7,8"),
+        ("function f() { return Reflect.ownKeys(arguments).map(String).join(); } var r = f(1);", "r", "0,length,Symbol(Symbol.iterator)"),
+        ("function f() { delete arguments[Symbol.iterator]; return typeof arguments[Symbol.iterator]; } var r = f();", "r", "undefined"),
     ]);
 }

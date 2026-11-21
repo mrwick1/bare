@@ -56,7 +56,7 @@ impl Own {
     }
 }
 
-/// The helpers of `prelude.js` that a native tail-calls (index in `Realm::helpers`).
+/// The helpers of `prelude.js` that a native tail-calls (the first slots of `Realm::pre`).
 pub(crate) const H_DEFINE: usize = 0;
 pub(crate) const H_DEFINE_ALL: usize = 1;
 pub(crate) const H_ASSIGN: usize = 2;
@@ -64,7 +64,6 @@ pub(crate) const H_SEARCH: usize = 3;
 pub(crate) const H_SPREAD: usize = 4;
 pub(crate) const H_REST: usize = 5;
 pub(crate) const H_PAIRS: usize = 6;
-pub(crate) const HELPERS: usize = 7;
 
 /// The array index that the text of the atom `k` is, if it is one (a canonical decimal below 2^32 - 1).
 pub(crate) fn atom_index(k: Str) -> Option<u32> {
@@ -85,7 +84,10 @@ impl Realm {
 
     /// Ask the interpreter to call the helper `h` of the prelude with `args` (the tail channel): the result of the native is its result.
     pub(crate) fn helper(&mut self, h: usize, args: &[Value]) -> R<Value> {
-        let f = self.helpers[h];
+        let f = match self.pre[h] {
+            v if v.is_undefined() => self.pre_make(h)?,
+            v => v,
+        };
         self.tail_args.clear();
         self.tail_args.extend_from_slice(args);
         self.tail = Some((f, Value::UNDEFINED));
@@ -646,6 +648,7 @@ impl Realm {
         ];
         self.lazy_table(c, OBJECT_STATICS);
         static OBJECT_PROTO: &[Ent] = &[
+            crate::lazy::acc("__proto__", proto_get, proto_set),
             m("__defineGetter__", 2, define_getter),
             m("__defineSetter__", 2, define_setter),
             m("hasOwnProperty", 1, has_own),
@@ -658,9 +661,6 @@ impl Realm {
             m("toLocaleString", 0, to_locale_string),
         ];
         self.lazy_table(proto, OBJECT_PROTO);
-        let g = self.global;
-        self.method(g, "__helper", 2, register_helper);
-        self.method(g, "__set", 3, set_strict);
     }
 }
 
@@ -697,7 +697,7 @@ fn object_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     Ok(Obj::new(&mut rt.heap, &rt.shapes, shape).expect("memory").value())
 }
 
-fn object_keys(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+pub(crate) fn object_keys(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let v = to_obj(rt, arg(args, 0))?;
     rt.own_keys(v)
 }
@@ -817,7 +817,7 @@ fn define_all(rt: &mut Realm, o: Obj, props: Value) -> R<Value> {
     Ok(o.value())
 }
 
-fn object_define_property(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+pub(crate) fn object_define_property(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let Some(o) = Realm::obj(arg(args, 0)) else { return rt.type_error("Object.defineProperty called on a non-object") };
     let key = rt.key_of(arg(args, 1))?;
     let Some(d) = rt.read_desc(arg(args, 2))? else { return rt.helper(H_DEFINE, args) };
@@ -838,7 +838,7 @@ fn object_own_symbols(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> 
     Ok(rt.new_array(&list))
 }
 
-fn object_get_prototype_of(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+pub(crate) fn object_get_prototype_of(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let v = arg(args, 0);
     if let Some(o) = Realm::obj(v) {
         return Ok(rt.proto_of(o).map_or(Value::NULL, |p| p.value()));
@@ -857,7 +857,7 @@ fn object_get_prototype_of(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Va
     })
 }
 
-fn object_set_prototype_of(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+pub(crate) fn object_set_prototype_of(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let (v, p) = (arg(args, 0), arg(args, 1));
     if v.is_undefined() || v.is_null() {
         return rt.type_error("Object.setPrototypeOf called on null or undefined");
@@ -895,7 +895,7 @@ impl Realm {
     }
 }
 
-fn object_own_names(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+pub(crate) fn object_own_names(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let v = to_obj(rt, arg(args, 0))?;
     if let Some(s) = Realm::str_of(v) {
         let mut out: Vec<Value> = (0..s.len()).map(|i| rt.string(&i.to_string())).collect();
@@ -907,7 +907,7 @@ fn object_own_names(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     Ok(rt.new_array(&out))
 }
 
-fn object_own_descriptor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+pub(crate) fn object_own_descriptor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let v = to_obj(rt, arg(args, 0))?;
     let key = rt.key_of(arg(args, 1))?;
     Ok(match rt.get_own_of(v, key)? {
@@ -1085,9 +1085,9 @@ pub(crate) fn object_to_string(rt: &mut Realm, this: Value, _args: &[Value]) -> 
             "Array"
         } else if rt.is_error(this) {
             "Error"
-        } else if o.has_flag(crate::object::F_REGEXP) {
+        } else if o.is_kind(crate::object::K_REGEXP) {
             "RegExp"
-        } else if o.has_flag(crate::bi_date::F_DATE) {
+        } else if o.is_kind(crate::object::K_DATE) {
             "Date"
         } else if o.is_indexed() {
             "Arguments"
@@ -1130,19 +1130,28 @@ fn is_prototype_of(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     Ok(Value::FALSE)
 }
 
-/// `__helper(index, function)`: the prelude registers the JavaScript helpers that the natives call (`Realm::helper`).
-fn register_helper(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    let i = arg(args, 0).as_int().unwrap_or(0) as usize;
-    if i >= HELPERS {
-        return rt.type_error("no such helper");
+/// The getter of `Object.prototype.__proto__`.
+fn proto_get(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
+    if this.is_undefined() || this.is_null() {
+        return rt.type_error("cannot convert undefined or null to an object");
     }
-    rt.helpers[i] = arg(args, 1);
-    rt.keep(arg(args, 1));
+    object_get_prototype_of(rt, Value::UNDEFINED, &[this])
+}
+
+/// The setter of `Object.prototype.__proto__`: a value that is not an object or `null`, or a receiver that is not an object, changes nothing.
+fn proto_set(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+    if this.is_undefined() || this.is_null() {
+        return rt.type_error("cannot convert undefined or null to an object");
+    }
+    let p = arg(args, 0);
+    if Realm::obj(this).is_some() && (p.is_null() || Realm::obj(p).is_some()) {
+        object_set_prototype_of(rt, Value::UNDEFINED, &[this, p])?;
+    }
     Ok(Value::UNDEFINED)
 }
 
-/// `__set(target, key, value)` for the helpers: `Set(target, key, value, true)`.
-fn set_strict(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+/// `set(target, key, value)` for the helpers: `Set(target, key, value, true)`.
+pub(crate) fn set_strict(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let key = rt.key_of(arg(args, 1))?;
     rt.set_checked(arg(args, 0), key, arg(args, 2), true)?;
     Ok(Value::UNDEFINED)
