@@ -17940,3 +17940,45 @@ Measurements. Machine archMachine (loaded: only instruction counts are used). Ba
 Tests. Linux, debug: `cargo test --locked -p bare --lib -p bare-js -p bare-js-api`: 1718 pass (6 ignored), 1106 pass (1 ignored), 32 pass. `BARE_GC_STRESS=1` on the tests with `browser_fetch`, `browser_basics`, `browser_streams`, `browser_clone`, `browser_xhr` and `browser_select` in the name, and on the tests with `fetch`, `headers`, `response`, `request`, `navigator`, `beacon`, `textarea`, `message`, `window`, `plugins`, `stream` in the name: all pass. `cargo xwin check -p bare --target x86_64-pc-windows-msvc`: passes. `cargo check --locked -p bare --all-targets`: no warning.
 
 Not tested: the Windows tests (only `cargo xwin check`, no VM run); `BARE_GC_STRESS=1` over the whole `bare` crate; the removed `BARE_ALL_API` mode (it has no handler left to run); `codegen-units=1` (no row was over +0.5%); RSS and wall time; the journeys and `tools/suite/run.py`; macOS; a direct test of the textarea `readOnly`, `dirName`, `wrap` and `autocomplete` properties (the Chrome fixture `textarea` covers some of them).
+
+## 2026-11-21: pause (owner), state of the engine rewrite
+
+The owner paused the work on 2026-11-21. No agent runs. This section is the state at the pause.
+
+### Merged since 2026-11-20
+
+- S0 host interface: handler groups B (#779), A2 (#781), E (#780), F (#784), G (#782), Z (#802). S0.4 finish PR 1 (#806) and PR 2 (#811). S0.4 PR 3 (#816) has auto-merge on.
+- js2 speed: register pointer (#773), global cells (#774), call path (#775), conversions and cold hints (#785), DECOMPOSE offsets (#795).
+- js2 features: built-ins and JSON (#791), early errors (#789, #790), lazy user scripts (#777), host adapter and shared suite (#799), generators G0/G1 (#801), Symbol (#804).
+- Other: embedded time zone data (#798), Windows test fixes (#788), CI cancels stale runs and runs Miri only on the unsafe modules (#812).
+- Design documents with owner decisions: host API (#786), time zones (#793), lazy built-ins (#794), async (#796), RegExp hybrid (#797), dispatch (#803).
+
+### Open at the pause
+
+| PR                                | State                                         | Next step                                                                                                                                                                                                |
+| --------------------------------- | --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| #800 promises P0/P1               | auto-merge on, merged with main (beb29b3b)    | none; test262 17,941 pass (main 17,775), no directory drops                                                                                                                                              |
+| #810 RegExp R0/R1                 | auto-merge on, conflicts with main after #800 | merge main, regenerate the test262 baseline                                                                                                                                                              |
+| #816 S0.4 PR 3 (structured clone) | auto-merge on                                 | none                                                                                                                                                                                                     |
+| #809 dispatch step 1              | held                                          | after the merge of #801, `objects` is +0.84% (default) and +0.74% (`codegen-units=1`). It fails the cost rule. A local merge is in `/data/bare-tmp/wt-809` (commit 7eaad7a1). Find the cause, then push. |
+| #808 prototype-chain inline cache | held                                          | waits for #809. Then merge main and measure again.                                                                                                                                                       |
+
+### test262 on js2
+
+The subset grows when a step adds directories, so compare passes only on the same subset.
+
+| Point              | js2 pass                                       |
+| ------------------ | ---------------------------------------------- |
+| 2026-11-20 morning | 12.8 k                                         |
+| main at the pause  | 17,775 (old engine on the same subset: 19,146) |
+| with #800          | 17,941 (measured on the merge with main)       |
+| with #800 and #810 | about 18.9 k (hypothesis: adds the #810 gain)  |
+
+### Next steps after the pause
+
+1. Merge #810 with main. Fix #809 (the `objects` row), then #808.
+2. S0.4 PR 4 to PR 6: install functions to `Scope`, owners and `trace`/`prune`, `Browser::it`, then `Dom<E: Engine>` and the browser switch (S2.8 step 4).
+3. Async: P2 (`bare-js-api` promise methods), P3 (combinators in Rust), G2 (compiler for `function*`), G3 (iterator protocol), A1 (async functions).
+4. RegExp: R2 (own linear engine, +40 KB limit), R3 (String methods, Symbol protocol, `\p{}`).
+5. Lazy built-ins step 1 and step 2 (startup must not scale with the built-in count).
+6. Dispatch step 2 (tail-call handlers): spike, then a wall-time check on an idle machine.
