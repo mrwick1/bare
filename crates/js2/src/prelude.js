@@ -172,7 +172,10 @@
           return { value: undefined, done: true };
         }
       }, { next: 0 });
-      rawDefine(arrayIteratorProto, Symbol.iterator, { value: function() { return this; }, writable: true, configurable: true });
+      rawDefine(arrayIteratorProto, Symbol.toStringTag, { value: 'Array Iterator', configurable: true });
+      // `%IteratorPrototype%` is the prototype of `%StringIteratorPrototype%`, which is the prototype of a string iterator. It is the last
+      // step, after the object is complete: a script that replaced `String.prototype[Symbol.iterator]` may make an array iterator here.
+      setProto(arrayIteratorProto, getProto(getProto(''[Symbol.iterator]())));
     }
     var it = Object.create(arrayIteratorProto);
     it['\0o'] = a;
@@ -409,7 +412,30 @@
       var fn = arguments[1], t = arguments[2];
       if (src === undefined || src === null) throw new TypeError('the value is not iterable');
       if (fn !== undefined) need(fn);
-      var a = obj(src), n = len(a), r = [], f = fn === undefined ? undefined : bound(fn, t);
+      var m = src[Symbol.iterator], r = [], f = fn === undefined ? undefined : bound(fn, t);
+      if (m !== undefined && m !== null && m !== Array.prototype.values) {
+        if (typeof m !== 'function') throw new TypeError('the value is not iterable');
+        // The steps of `for-of` by hand: the iterator is made once, and it is closed when `f` throws.
+        var it = m.call(src), next = it.next, res, k = 0;
+        if (Object(it) !== it) throw new TypeError('the result of Symbol.iterator is not an object');
+        for (;;) {
+          res = next.call(it);
+          if (Object(res) !== res) throw new TypeError('the result of an iterator is not an object');
+          if (res.done) break;
+          try {
+            r[k] = f === undefined ? res.value : f(res.value, k);
+          } catch (e) {
+            try {
+              var ret = it.return;
+              if (ret !== undefined && ret !== null) ret.call(it);
+            } catch (e2) {}
+            throw e;
+          }
+          k++;
+        }
+        return r;
+      }
+      var a = obj(src), n = len(a);
       check(n);
       for (var i = 0; i < n; i++) r[i] = f === undefined ? a[i] : f(a[i], i);
       r.length = n;

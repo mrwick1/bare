@@ -70,6 +70,7 @@ impl Realm {
             m("localeCompare", 1, locale_compare),
             m("toString", 0, to_string),
             m("valueOf", 0, to_string),
+            crate::lazy::sym("[Symbol.iterator]", crate::bi_symbol::ITERATOR, crate::bi_string_iter::string_iterator),
         ];
         self.lazy_table(proto, STRING_PROTO);
         self.install_string_more();
