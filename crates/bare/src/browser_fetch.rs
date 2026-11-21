@@ -3102,33 +3102,33 @@ static DEFS: &[Def] = &[
 ];
 
 /// Define the globals `fetch`, `Headers`, `Request`, `Response`, `ReadableStream`, `ReadableStreamDefaultReader`.
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    let g = it.global_object();
-    let op = it.object_prototype();
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+    let g = s.global();
     // The iterator prototype inherits from %IteratorPrototype%, so `iterator[Symbol.iterator]() === iterator`.
-    let protos: [ObjId; 6] = [d.obj(it, op)?, d.obj(it, op)?, d.obj(it, op)?, d.obj(it, op)?, d.obj(it, op)?, d.obj(it, it.iterator_prototype())?];
+    let ip = s.intrinsic(Intrinsic::IteratorPrototype);
+    let ip = obj_id(s, ip).expect("an object");
+    let protos: [ObjId; 6] = [d.plain_s(s)?, d.plain_s(s)?, d.plain_s(s)?, d.plain_s(s)?, d.plain_s(s)?, d.obj_s(s, ip)?];
     let _ = d.fetch.protos.set(protos);
     let mut fixed = protos.to_vec();
     for def in DEFS {
-        let target = protos[def.on as usize];
-        let key = d.key(it, def.name)?;
+        let target = d.obj_local(s, protos[def.on as usize]);
         match def.kind {
             Kind::MethodS(h) => {
-                let f = d.add_fn_s_obj(it, h, def.name, def.len, HostFn::Method)?;
-                it.define_data(target, key, Value::Object(f), true, false, true)?;
+                let f = d.add_fn_s(s, h, def.name, def.len, HostFn::Method)?;
+                s.define_str(target, def.name, f, Attrs::METHOD)?;
                 // `Headers.prototype[Symbol.iterator]` is the same function object as `entries`.
                 if def.name == "entries" {
-                    it.define_data(target, it.symbol_iterator(), Value::Object(f), true, false, true)?;
+                    let sym = s.intrinsic(Intrinsic::SymbolIterator);
+                    s.define(target, sym, f, Attrs::METHOD)?;
                 }
             }
             Kind::GetS(h) => {
-                let f = d.add_fn_s_obj(it, h, &format!("get {}", def.name), 0, HostFn::Method)?;
-                d.define_accessor(it, target, key, f, None)?;
+                let f = d.add_fn_s(s, h, &format!("get {}", def.name), 0, HostFn::Method)?;
+                s.define_accessor_str(target, def.name, Some(f), None, Attrs { writable: false, enumerable: true, configurable: true })?;
             }
-            Kind::AccessorS(..) => return Err(Error::Unsupported(unsupported("an accessor of the new form in the fetch table"))),
+            Kind::AccessorS(..) => return Err(unsupp("an accessor of the new form in the fetch table")),
         }
     }
-    let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
     // `Headers`, `Request` and `Response` read `new.target`, so a class may extend them.
     let ifaces: [(&str, Pr, HS, HostFn); 5] = [
         ("Headers", Headers, headers_ctor, HostFn::CtorNewTarget),
@@ -3139,36 +3139,33 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     ];
     for (name, p, h, kind) in ifaces {
         let len = if matches!(name, "Headers" | "Response" | "ReadableStream") { 0 } else { 1 };
-        let f = d.add_fn_s_obj(it, h, name, len, kind)?;
-        let proto = protos[p as usize];
-        it.define_data(f, kp, Value::Object(proto), false, false, false)?;
-        it.define_data(proto, kc, Value::Object(f), true, false, true)?;
-        let k = d.key(it, name)?;
-        it.define_data(g, k, Value::Object(f), true, false, true)?;
-        fixed.push(f);
+        let f = d.add_fn_s(s, h, name, len, kind)?;
+        fixed.push(d.link_s(s, f, protos[p as usize], name)?);
         if name == "Response" {
-            let jf = d.add_fn_s_obj(it, response_json, "json", 1, HostFn::Method)?;
-            let kj = d.key(it, "json")?;
-            it.define_data(f, kj, Value::Object(jf), true, false, true)?;
-            fixed.push(jf);
+            let jf = d.def_method_l(s, f, "json", 1, response_json, false)?;
+            fixed.push(obj_id(s, jf).expect("a function"));
         }
     }
-    let f = d.add_fn_s_obj(it, fetch, "fetch", 1, HostFn::Method)?;
-    let k = d.key(it, "fetch")?;
-    it.define_data(g, k, Value::Object(f), true, false, true)?;
-    fixed.push(f);
-    streams::install(d, it, protos[Stream as usize], protos[Reader as usize], &mut fixed)?;
-    *d.fetch.fixed.borrow_mut() = fixed.into_iter().map(|o| it.persist_value(Value::Object(o))).collect();
+    let f = d.add_fn_s(s, fetch, "fetch", 1, HostFn::Method)?;
+    s.define_str(g, "fetch", f, Attrs::METHOD)?;
+    fixed.push(obj_id(s, f).expect("a function"));
+    streams::install(d, s, protos[Stream as usize], protos[Reader as usize], &mut fixed)?;
+    let mut held = Vec::with_capacity(fixed.len());
+    for o in fixed {
+        let l = d.obj_local(s, o);
+        held.push(s.persist(l));
+    }
+    *d.fetch.fixed.borrow_mut() = held;
     // The intrinsic JSON.parse and JSON.stringify, so a script that replaces them does not change what `json()` and `Response.json()` run.
-    let json = d.prop(it, Value::Object(g), "JSON")?;
-    if let Value::Object(_) = json {
-        let parse = d.prop(it, json, "parse")?;
-        if it.is_callable_value(parse) {
-            let _ = d.fetch.json_parse.set(it.persist_value(parse));
+    let json = s.get_str(g, "JSON")?;
+    if is_object(s, json) {
+        let parse = s.get_str(json, "parse")?;
+        if s.is_callable(parse) {
+            let _ = d.fetch.json_parse.set(s.persist(parse));
         }
-        let stringify = d.prop(it, json, "stringify")?;
-        if it.is_callable_value(stringify) {
-            let _ = d.fetch.json_stringify.set(it.persist_value(stringify));
+        let stringify = s.get_str(json, "stringify")?;
+        if s.is_callable(stringify) {
+            let _ = d.fetch.json_stringify.set(s.persist(stringify));
         }
     }
     Ok(())

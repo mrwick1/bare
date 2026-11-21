@@ -367,6 +367,11 @@ impl Dom {
     /// An interface object: a function `name` with the prototype `proto`, linked both ways, and a property of `window`. Gives the function.
     pub(crate) fn interface_s<'s>(&self, s: &mut Sc<'s, '_>, proto: ObjId, name: &str, h: HS, len: u32, kind: HostFn) -> Res<'s, ObjId> {
         let f = self.add_fn_s(s, h, name, len, kind)?;
+        self.link_s(s, f, proto, name)
+    }
+
+    /// `interface_s` for a function that is made already.
+    pub(crate) fn link_s<'s>(&self, s: &mut Sc<'s, '_>, f: Local<'s>, proto: ObjId, name: &str) -> Res<'s, ObjId> {
         let p = self.obj_local(s, proto);
         s.define_str(f, "prototype", p, Attrs { writable: false, enumerable: false, configurable: false })?;
         s.define_str(p, "constructor", f, Attrs::METHOD)?;

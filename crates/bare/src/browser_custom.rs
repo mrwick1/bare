@@ -890,6 +890,14 @@ pub(crate) fn interface_ctor(d: &Dom, it: &mut Interp<'_>, name: &str, new_ok: b
     }
 }
 
+/// `interface_ctor` for a scope.
+pub(crate) fn interface_ctor_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, name: &str, new_ok: bool) -> Res<'s, Local<'s>> {
+    match IFACES.iter().position(|&n| n == name) {
+        Some(k) => d.add_fn_s(s, HANDLERS[k], name, 0, HostFn::CtorNewTarget),
+        None => d.add_fn_s(s, illegal_constructor, name, 0, if new_ok { HostFn::Ctor } else { HostFn::Method }),
+    }
+}
+
 /// The error of `HTMLElement()` without `new`.
 pub(crate) fn needs_new(it: &mut Interp<'_>) -> Error {
     it.type_error("Failed to construct: please use the 'new' operator")

@@ -94,7 +94,7 @@ use bare_js::eval::{Error, EvalLimits, Host, Interp, LimitKind};
 use bare_js::heap::{Heap, HeapLimits, PropertyDescriptor};
 use bare_js::value::{ObjId, PropertyKey, Value};
 use bare_js_api::HostFn;
-use crate::browser_scoped::{old, run, Res, Sc, HS};
+use crate::browser_scoped::{obj_id, run, Attrs, Intrinsic, Res, Sc, HS};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::hash::{BuildHasherDefault, Hasher};
@@ -1491,45 +1491,44 @@ impl Dom {
         }
     }
 
-    pub(crate) fn install(&self, it: &mut Interp<'_>) -> R<()> {
-        let g = it.global_object();
-        let _ = self.global.set(g);
-        let op = it.object_prototype();
-        let ep = it.error_prototype();
-        let mk = |it: &mut Interp<'_>, parent: ObjId| self.obj(it, parent);
-        let et = mk(it, op)?;
-        let node = mk(it, et)?;
-        let element = mk(it, node)?;
-        let html = mk(it, element)?;
-        let svg = mk(it, element)?;
-        let input = mk(it, html)?;
-        let iframe = mk(it, html)?;
-        let link = mk(it, html)?;
-        let form = mk(it, html)?;
-        let button = mk(it, html)?;
-        let chardata = mk(it, node)?;
-        let text = mk(it, chardata)?;
-        let comment = mk(it, chardata)?;
-        let document = mk(it, node)?;
-        let fragment = mk(it, node)?;
-        let shadow = mk(it, fragment)?;
-        let event = mk(it, op)?;
-        let custom = mk(it, event)?;
-        let focus = mk(it, event)?;
-        let submit = mk(it, event)?;
-        let toggle = mk(it, event)?;
-        let mouse = mk(it, event)?;
-        let pointer = mk(it, mouse)?;
-        let keyboard = mk(it, event)?;
-        let inputev = mk(it, event)?;
-        let domexc = mk(it, ep)?;
+    pub(crate) fn install<'s>(&self, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+        let g = s.global();
+        let go = obj_id(s, g).expect("the global is an object");
+        let _ = self.global.set(go);
+        let ep = s.intrinsic(Intrinsic::ErrorPrototype);
+        let ep = obj_id(s, ep).expect("an object");
+        let et = self.plain_s(s)?;
+        let node = self.obj_s(s, et)?;
+        let element = self.obj_s(s, node)?;
+        let html = self.obj_s(s, element)?;
+        let svg = self.obj_s(s, element)?;
+        let input = self.obj_s(s, html)?;
+        let iframe = self.obj_s(s, html)?;
+        let link = self.obj_s(s, html)?;
+        let form = self.obj_s(s, html)?;
+        let button = self.obj_s(s, html)?;
+        let chardata = self.obj_s(s, node)?;
+        let text = self.obj_s(s, chardata)?;
+        let comment = self.obj_s(s, chardata)?;
+        let document = self.obj_s(s, node)?;
+        let fragment = self.obj_s(s, node)?;
+        let shadow = self.obj_s(s, fragment)?;
+        let event = self.plain_s(s)?;
+        let custom = self.obj_s(s, event)?;
+        let focus = self.obj_s(s, event)?;
+        let submit = self.obj_s(s, event)?;
+        let toggle = self.obj_s(s, event)?;
+        let mouse = self.obj_s(s, event)?;
+        let pointer = self.obj_s(s, mouse)?;
+        let keyboard = self.obj_s(s, event)?;
+        let inputev = self.obj_s(s, event)?;
+        let domexc = self.obj_s(s, ep)?;
         let _ = self.p.set(Protos { et, node, element, html, svg, input, iframe, link, form, button, submit, toggle, chardata, text, comment, document, fragment, shadow, event, custom, focus, mouse, pointer, keyboard, inputev, domexc });
         // The global object is `window`: its prototype is `Window.prototype`, an EventTarget.
-        let win = mk(it, et)?;
-        if let Err(e) = it.heap.set_prototype_of(g, Some(win)) {
-            return Err(it.heap_error(e));
-        }
-        self.st.borrow_mut().by_obj.insert(g, Target::Window);
+        let win = self.obj_s(s, et)?;
+        let wl = self.obj_local(s, win);
+        s.set_prototype_of(g, Some(wl))?;
+        self.st.borrow_mut().by_obj.insert(go, Target::Window);
         let mut fixed = vec![win, et, node, element, html, svg, input, iframe, link, form, button, submit, toggle, chardata, text, comment, document, fragment, shadow, event, custom, focus, mouse, pointer, keyboard, inputev, domexc];
 
         // methods and accessors
@@ -1543,25 +1542,24 @@ impl Dom {
         // One function object serves every target of a row (`Element.prototype.append === DocumentFragment.prototype.append`, unlike Chrome): a realm
         // pays for each function it makes, and most rows of the table have 2 or 3 targets.
         for d in DEFS {
-            let key = self.key(it, d.name)?;
-            let (f, s) = match d.kind {
-                Kind::MethodS(h) => (self.add_fn_s_obj(it, h, d.name, d.len, HostFn::Method)?, None),
+            let (f, st) = match d.kind {
+                Kind::MethodS(h) => (self.add_fn_s(s, h, d.name, d.len, HostFn::Method)?, None),
                 Kind::GetS(h) => {
                     named(&mut nm, "get ", d.name);
-                    (self.add_fn_s_obj(it, h, &nm, 0, HostFn::Method)?, None)
+                    (self.add_fn_s(s, h, &nm, 0, HostFn::Method)?, None)
                 }
                 Kind::AccessorS(gh, sh) => {
                     named(&mut nm, "get ", d.name);
-                    let f = self.add_fn_s_obj(it, gh, &nm, 0, HostFn::Method)?;
+                    let f = self.add_fn_s(s, gh, &nm, 0, HostFn::Method)?;
                     named(&mut nm, "set ", d.name);
-                    (f, Some(self.add_fn_s_obj(it, sh, &nm, 1, HostFn::Method)?))
+                    (f, Some(self.add_fn_s(s, sh, &nm, 1, HostFn::Method)?))
                 }
             };
             for &on in d.on {
-                let target = self.pick(on);
+                let target = self.obj_local(s, self.pick(on));
                 match d.kind {
-                    Kind::MethodS(_) => it.define_data(target, key, Value::Object(f), true, false, true)?,
-                    _ => self.define_accessor(it, target, key, f, s)?,
+                    Kind::MethodS(_) => s.define_str(target, d.name, f, Attrs::METHOD)?,
+                    _ => s.define_accessor_str(target, d.name, Some(f), st, Attrs { writable: false, enumerable: true, configurable: true })?,
                 }
             }
         }
@@ -1595,23 +1593,19 @@ impl Dom {
             ("KeyboardEvent", keyboard, None),
             ("InputEvent", inputev, None),
         ];
-        let (kp, kc) = (self.key(it, "prototype")?, self.key(it, "constructor")?);
         let mut ctors = Vec::new();
         for (name, proto, ctor) in ifaces {
             let f = match (name, ctor) {
-                ("DocumentFragment", _) => self.add_fn_s_obj(it, nd::fragment_ctor_s, name, 0, HostFn::CtorNewTarget)?,
-                ("SubmitEvent", _) => self.add_fn_s_obj(it, fm::submit_event_ctor_s, name, 1, HostFn::CtorNewTarget)?,
-                (_, Some(h)) => self.add_fn_s_obj(it, h, name, u32::from(name != "EventTarget" && !name.starts_with("HTML")), HostFn::CtorNewTarget)?,
-                (_, None) if name.starts_with("HTML") => ce::interface_ctor(self, it, name, false)?,
+                ("DocumentFragment", _) => self.add_fn_s(s, nd::fragment_ctor_s, name, 0, HostFn::CtorNewTarget)?,
+                ("SubmitEvent", _) => self.add_fn_s(s, fm::submit_event_ctor_s, name, 1, HostFn::CtorNewTarget)?,
+                (_, Some(h)) => self.add_fn_s(s, h, name, u32::from(name != "EventTarget" && !name.starts_with("HTML")), HostFn::CtorNewTarget)?,
+                (_, None) if name.starts_with("HTML") => ce::interface_ctor_s(self, s, name, false)?,
                 (_, None) => match ctor_s(name) {
-                    Some(h) => self.add_fn_s_obj(it, h, name, u32::from(name != "EventTarget"), HostFn::CtorNewTarget)?,
-                    None => self.add_fn_s_obj(it, illegal_constructor, name, 0, HostFn::Method)?,
+                    Some(h) => self.add_fn_s(s, h, name, u32::from(name != "EventTarget"), HostFn::CtorNewTarget)?,
+                    None => self.add_fn_s(s, illegal_constructor, name, 0, HostFn::Method)?,
                 },
             };
-            it.define_data(f, kp, Value::Object(proto), false, false, false)?;
-            it.define_data(proto, kc, Value::Object(f), true, false, true)?;
-            let k = self.key(it, name)?;
-            it.define_data(g, k, Value::Object(f), true, false, true)?;
+            let f = self.link_s(s, f, proto, name)?;
             fixed.push(f);
             ctors.push((name, f));
         }
@@ -1622,31 +1616,26 @@ impl Dom {
         ] {
             let f = ctors.iter().find(|c| c.0 == iface).expect("interface").1;
             let proto = if iface == "Node" { node } else { event };
+            let (f, proto) = (self.obj_local(s, f), self.obj_local(s, proto));
             for &(n, v) in consts {
-                let k = self.key(it, n)?;
-                it.define_data(f, k, Value::Number(v), false, true, false)?;
-                it.define_data(proto, k, Value::Number(v), false, true, false)?;
+                let v = s.number(v);
+                let attrs = Attrs { writable: false, enumerable: true, configurable: false };
+                s.define_str(f, n, v, attrs)?;
+                s.define_str(proto, n, v, attrs)?;
             }
         }
         *self.fixed.borrow_mut() = fixed;
 
         // globals: window, self, document
-        let docw = self.wrap(it, self.doc.borrow().root())?;
-        let Value::Object(docw) = docw else { unreachable!() };
-        let _ = self.doc_wrapper.set(docw);
-        for (name, v) in [("window", Value::Object(g)), ("self", Value::Object(g)), ("document", Value::Object(docw))] {
-            let k = self.key(it, name)?;
-            it.define_data(g, k, v, true, true, true)?;
+        let docw = self.wrap_s(s, self.doc.borrow().root())?;
+        let _ = self.doc_wrapper.set(obj_id(s, docw).expect("an object"));
+        for (name, v) in [("window", g), ("self", g), ("document", docw)] {
+            s.define_str(g, name, v, Attrs::ALL)?;
         }
-        run(it, |s| self.install_rest(s))
-    }
-
-    /// The part of `install` that runs in a scope. Keep the order: a new host function moves the id of every one after it.
-    fn install_rest<'s>(&self, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
-        old(s, |it| crate::browser_navigation::install(self, it))?;
-        old(s, |it| crate::browser_fetch::install(self, it))?;
-        old(s, |it| crate::browser_loader::install(self, it))?;
-        old(s, |it| self.install_platform(it))?;
+        crate::browser_navigation::install(self, s)?;
+        crate::browser_fetch::install(self, s)?;
+        crate::browser_loader::install(self, s)?;
+        self.install_platform(s)?;
         at::install(self, s)?;
         crate::browser_nodelist::install(self, s)?;
         crate::browser_dataset::install(self, s)?;
@@ -2047,8 +2036,10 @@ impl Browser {
         bare_js_api::Engine::set_host(&mut it, dom.clone());
         it.set_api_sources(dom.clone());
         it.host_scope(|it| {
-            dom.install(it)?;
-            dom.install_scheduler(it)?;
+            run(it, |s| {
+                dom.install(s)?;
+                dom.install_scheduler(s)
+            })?;
             crate::browser_frames::activate(&dom, it)
         })?;
         #[cfg(test)]
