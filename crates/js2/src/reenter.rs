@@ -93,6 +93,11 @@ impl Realm {
         if self.function(f).is_none() {
             return if self.function_new(f).is_some() { self.type_error("class constructor cannot be invoked without 'new'") } else { self.type_error("not a function") };
         }
+        self.start_pooled(f, this, args)
+    }
+
+    /// Run the script function `f` as a new entry on a pooled machine. `Vm::start` reads the function itself and throws when `f` is none.
+    pub(crate) fn start_pooled(&mut self, f: Value, this: Value, args: &[Value]) -> R<Value> {
         let mut m = self.pool.pop().unwrap_or_else(|| Machine { stack: Vec::new(), fbs: Vec::new() });
         let r = Vm::start(self, &mut m.stack, &mut m.fbs, f, this, args);
         self.pool.push(m);
