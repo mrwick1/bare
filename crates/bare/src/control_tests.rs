@@ -28,7 +28,7 @@ fn page(html: &str, h: u32) -> Page {
     if let Some((_, rest)) = html.split_once("<script>") {
         b.run_script(rest.split_once("</script>").unwrap().0).unwrap();
     }
-    let mut p = Page::new(Source::Browser(Box::new(b)), (400, h));
+    let mut p = Page::new(Source::Browser(Box::new(b.into())), (400, h));
     p.quiet = true;
     p
 }

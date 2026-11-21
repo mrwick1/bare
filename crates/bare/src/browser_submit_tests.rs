@@ -196,7 +196,7 @@ fn page_in_window(html: &str) -> Page {
     if !script.is_empty() {
         b.run_script(script).expect("script");
     }
-    Page::new(Source::Browser(Box::new(b)), (400, 300))
+    Page::new(Source::Browser(Box::new(b.into())), (400, 300))
 }
 
 #[test]

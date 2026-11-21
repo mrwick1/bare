@@ -88,7 +88,7 @@ fn stack<E: Eng>(it: &mut E::Vm, o: E::Obj) -> Option<String> {
     let k = it.h_key("stack").ok()?;
     let Ok(Got::Value(v)) = it.h_get(o, k) else { return None };
     let Val::String(s) = E::kind(v) else { return None };
-    Some(String::from_utf16_lossy(it.h_str_units(s).ok()?))
+    Some(String::from_utf16_lossy(&it.h_str_units(s).ok()?))
 }
 
 /// The text after `Uncaught (in promise) `: `name: message` and the first frame for an object with a `stack`, else the value.

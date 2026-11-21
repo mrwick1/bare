@@ -1,6 +1,7 @@
 # Files of crates/bare that name the old engine (`engine`) or use the field `Browser::it` (`it`). See src/old_engine_gate_tests.rs.
 # This list only gets shorter. S0.4 PR 6c-1 made the DOM code generic (`Dom<E>`, `Eng`): the files left name the old engine for a limit, a clock, a number conversion or the regexp. `eng_old.rs` is the one old-engine adapter.
 src/browser.rs engine,it
+src/browser_any.rs it
 src/browser_attr.rs engine
 src/browser_chardata.rs engine
 src/browser_child.rs engine,it
@@ -38,5 +39,5 @@ src/browser_walker.rs engine
 src/browser_xhr.rs it
 src/control.rs it
 src/eng.rs engine
+src/eng_new.rs engine
 src/eng_old.rs engine
-src/page.rs it

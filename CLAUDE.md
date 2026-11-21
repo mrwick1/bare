@@ -36,3 +36,10 @@ A limit or a budget that protects against a slow algorithm is a sign of a design
 
 - A PR runs only the rows of the code it changes: the js2 micro rows (`interp_load`) for a js2 change, and the `cost_rows.txt` rows of the touched subsystem (`cost_matrix.sh -g`). The rule per row stays: +0.5% under both allocators, or within +0.5% at `codegen-units=1`.
 - The full matrix runs on main after about every 6 merged PRs. A row that grew there is bisected to its PR, and a fix PR follows at once.
+- Rapid mode (owner, 2026-11-21): a row over the rule does not block the merge. The PR records the row in its progress file and in `docs/progress/cost-debt.md`. A fix PR follows the same day.
+
+## Merge flow (owner, 2026-11-21, rapid mode)
+
+- Every PR enables `gh pr merge --auto --merge`, also for unsafe, GC and trait changes. CI (check, windows, miri on the unsafe modules) is the gate. The owner's session reviews after merge and opens a fix PR when needed.
+- Stacked PRs are allowed. Retarget a stacked PR to main when its base merges.
+- Each PR merges origin/main right before its final push and solves its own conflicts.

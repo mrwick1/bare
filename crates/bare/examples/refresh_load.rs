@@ -91,7 +91,7 @@ fn run(lines: usize, rounds: usize) {
     b.set_document_url("http://localhost/long.html").expect("url");
     b.run_script("var n = 0; document.getElementById('go').addEventListener('click', () => { document.getElementById('st').textContent = 'clicked ' + (++n); }); document.body.addEventListener('click', () => {}); 0").expect("script");
     drop(html);
-    let mut p = Page::new(Source::Browser(Box::new(b)), (800, 600));
+    let mut p = Page::new(Source::Browser(Box::new(b.into())), (800, 600));
     let t = Instant::now();
     p.paint();
     println!("lines {lines}: first paint {:.1} ms, RSS {} KiB", t.elapsed().as_secs_f64() * 1e3, status_kib("VmRSS:"));
