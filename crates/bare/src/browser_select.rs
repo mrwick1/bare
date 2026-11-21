@@ -474,11 +474,6 @@ impl Dom {
         c.sel.first().map(|&i| c.opts[i as usize])
     }
 
-    pub(crate) fn html_el(&self, it: &mut Interp<'_>, this: Value, tag: &str) -> R<NodeId> {
-        let n = self.el(it, this)?;
-        if self.doc.borrow().is_html(n, tag) { Ok(n) } else { Err(it.type_error("Illegal invocation")) }
-    }
-
     /// `html_el` on a local.
     pub(crate) fn html_el_s<'s>(&self, s: &mut Sc<'s, '_>, this: Local<'s>, tag: &str) -> Res<'s, NodeId> {
         let n = self.el_s(s, this)?;
@@ -590,39 +585,6 @@ fn missing<'s>(s: &mut Sc<'s, '_>, on: &str, what: &str) -> bare_js_api::Error<'
 }
 
 // ------------------------------------------------------------------------------------------ reflection
-
-macro_rules! reflect {
-    ($tag:literal, $attr:literal, $get:ident, $set:ident, str) => {
-        fn $get(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-            let n = d.html_el(it, this, $tag)?;
-            let s = get(&d.doc.borrow(), n, $attr).unwrap_or("").to_string();
-            d.js_str(it, &s)
-        }
-        fn $set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-            let n = d.html_el(it, this, $tag)?;
-            let s = d.string_arg(it, a.first().copied().unwrap_or(Value::Undefined))?;
-            crate::browser_dom::attr_set(d, it, n, $attr, &s)?;
-            Ok(Value::Undefined)
-        }
-    };
-    ($tag:literal, $attr:literal, $get:ident, $set:ident, bool) => {
-        fn $get(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-            let n = d.html_el(it, this, $tag)?;
-            Ok(Value::Bool($crate::browser_select::has_in(d, &d.doc.borrow(), n, $attr)))
-        }
-        fn $set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-            let n = d.html_el(it, this, $tag)?;
-            if it.to_js_bool(a.first().copied().unwrap_or(Value::Undefined))? {
-                crate::browser_dom::attr_set(d, it, n, $attr, "")?;
-            } else {
-                d.doc.borrow_mut().remove_attr(n, $attr);
-            }
-            Ok(Value::Undefined)
-        }
-    };
-}
-
-pub(crate) use reflect;
 
 /// `reflect` for handlers of the new form.
 macro_rules! reflect_s {

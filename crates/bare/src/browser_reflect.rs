@@ -37,7 +37,7 @@ pub(crate) enum Kind {
 }
 
 /// Define reflected properties on the prototype `$o`: `"prop" => "attr": Kind`. `$tags` is a constant list of the tags that may be `this`.
-/// A closure that captures nothing is a plain function pointer in Rust (like a JS function that uses no outer variable), so it fits the `H`
+/// A closure that captures nothing is a plain function pointer in Rust (like a JS function that uses no outer variable), so it fits the `HS`
 /// type of the handlers; the constants in it are part of its code.
 macro_rules! reflect {
     ($d:expr, $it:expr, $o:expr, $tags:expr, { $($prop:literal => $attr:literal : $($kind:tt)::+ $(($($k:expr),*))?),* $(,)? }) => {{

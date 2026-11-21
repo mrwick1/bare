@@ -20,11 +20,6 @@ pub(crate) fn attr_set(d: &Dom, it: &mut Interp<'_>, n: NodeId, name: &str, valu
 }
 
 impl Dom {
-    pub(crate) fn el(&self, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
-        let n = self.nd(it, this)?;
-        if self.is_element(n) { Ok(n) } else { Err(it.type_error("Illegal invocation")) }
-    }
-
     /// Set the dirty value. A value that differs puts the caret at the end (HTML: setting `value`), and when that
     /// moves the selection of a text control, schedules its `selectionchange`. `it` is the JS caller that pays for
     /// the scans; the test driver has none (see `Dom::selection_after_value`).
