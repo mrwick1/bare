@@ -5,6 +5,7 @@
 
 use crate::eng::{Collected, Desc, Eng, Fault, Got, HeapStats, KeyKind, Ops, PState, Prop, Val, WallClock};
 use bare_js::eval::LimitKind;
+use bare_js2::api::Clock;
 use bare_js2::interp_rt::Realm;
 use bare_js2::value::{Kind, Value};
 use bare_js_api::{Abort, Args, Attrs, Engine, Error, Intrinsic, Iter, Local, Persistent, Traced};
@@ -56,7 +57,10 @@ impl Eng for New {
     type Key = NV;
 
     fn realm(_eval: bare_js::eval::EvalLimits, _heap: bare_js::heap::HeapLimits) -> Result<Realm, Fault<New>> {
-        bare_js2::script::load("").map(|vm| vm.realm).map_err(|_| Fault::Heap("the realm could not be made"))
+        bare_js2::script::load("").map(|mut vm| {
+            vm.realm.init_host_intrinsics();
+            vm.realm
+        }).map_err(|_| Fault::Heap("the realm could not be made"))
     }
 
     fn kind(v: Value) -> Val<New> {
@@ -160,10 +164,6 @@ fn run_v(r: &mut Realm, f: impl FnOnce(&mut Realm) -> Result<Local<'static>, Err
         let l = f(r)?;
         Ok(r.raw(l))
     })
-}
-
-fn unsup<T>(what: &'static str) -> Result<T, Fault<New>> {
-    Err(Fault::Unsupported(what))
 }
 
 fn key_local(r: &mut Realm, k: NV) -> Local<'static> {
@@ -405,12 +405,16 @@ impl Ops<New> for Realm {
         false
     }
     fn external_live(&self) -> usize {
-        0
+        self.raw_external_live()
     }
-    fn set_external_live(&mut self, _n: usize) {}
-    fn add_external(&mut self, _n: usize) {}
+    fn set_external_live(&mut self, n: usize) {
+        self.raw_set_external_live(n);
+    }
+    fn add_external(&mut self, n: usize) {
+        self.raw_add_external(n);
+    }
     fn gc_due(&self) -> bool {
-        self.due()
+        self.raw_gc_due()
     }
     fn api_err<'s>(&mut self, e: Fault<New>) -> bare_js_api::Error<'s> {
         error(self, e)
@@ -459,8 +463,8 @@ impl Ops<New> for Realm {
     fn h_to_string_lossy(&self, s: NV) -> Result<String, Fault<New>> {
         self.raw_units(s.0).map(|u| String::from_utf16_lossy(&u)).ok_or(Fault::Heap("Stale"))
     }
-    fn h_symbol_description(&self, _s: NV) -> Result<Option<NV>, Fault<New>> {
-        unsup("js2: symbol description of a `&self` read")
+    fn h_symbol_description(&self, s: NV) -> Result<Option<NV>, Fault<New>> {
+        self.raw_symbol_description(s.0).map(|d| d.map(NV)).ok_or(Fault::Heap("not a symbol"))
     }
     fn h_new_object(&mut self, proto: Option<NV>) -> Result<NV, Fault<New>> {
         run_v(self, |r| match proto {
@@ -587,16 +591,31 @@ impl Ops<New> for Realm {
         fault(self, e)
     }
     fn bytes_of(&self, _v: Value) -> Option<&[u8]> {
+        // js2 has no ArrayBuffer, TypedArray or DataView cells yet.
         None
     }
     fn set_wall_clock(&mut self, c: WallClock) -> Result<(), Fault<New>> {
-        match c {
-            WallClock::System => Ok(()),
-            _ => unsup("js2: a virtual wall clock"),
+        let clock = match c {
+            WallClock::System => Clock::System,
+            WallClock::Virtual(t) => Clock::Virtual(t),
+            WallClock::Host if bare_net::vclock::on() => Clock::Host(Some(Box::new(|| {
+                bare_net::vclock::advance_by(bare_net::vclock::READ_MS);
+                bare_net::vclock::epoch_ms()
+            }))),
+            WallClock::Host => Clock::Host(None),
+        };
+        if self.raw_set_clock(clock) {
+            Ok(())
+        } else {
+            Err(Fault::Unsupported("virtual wall clock must be a whole number of milliseconds within +-8.64e15"))
         }
     }
     fn wall_clock(&self) -> WallClock {
-        WallClock::System
+        match self.raw_clock() {
+            Clock::System => WallClock::System,
+            Clock::Virtual(t) => WallClock::Virtual(*t),
+            Clock::Host(_) => WallClock::Host,
+        }
     }
     fn wall_now_ms(&self) -> f64 {
         Engine::wall_now_ms(self)
@@ -611,21 +630,26 @@ impl Ops<New> for Realm {
     fn clear_failed_job(&mut self) {
         Engine::clear_failed_job(self)
     }
-    fn api_args_slice(&self, _a: Args<'_>, _from: usize, _to: usize) -> Option<&[Value]> {
-        None
+    fn api_args_slice(&self, a: Args<'_>, from: usize, to: usize) -> Option<&[Value]> {
+        self.raw_args_slice(a, from, to)
     }
     fn api_args(&self, a: Args<'_>, from: usize, to: usize) -> Vec<Value> {
-        (from..to.min(a.len())).filter_map(|i| a.get(i)).map(|l| self.raw(l)).collect()
+        if let Some(args) = self.raw_args_slice(a, from, to) {
+            return args.to_vec();
+        }
+        a.iter().skip(from).take(to.saturating_sub(from)).map(|l| self.raw(l)).collect()
     }
     fn host_new_target(&self) -> Option<NV> {
         self.raw_new_target().map(NV)
     }
     fn collect(&mut self, extra: &[Value]) -> Result<Collected, Fault<New>> {
-        // js2 does not count what it frees for the host: the counts are zero.
-        self.raw_collect(extra);
-        Ok(Collected { objects: 0, strings: 0, symbols: 0 })
+        let count = self.raw_collect(extra);
+        Ok(Collected { objects: count.objects, strings: count.strings, symbols: count.symbols })
     }
-    fn set_sources(&mut self, _dom: std::rc::Rc<crate::browser::Dom<New>>) {}
+    fn set_sources(&mut self, dom: std::rc::Rc<crate::browser::Dom<New>>) {
+        // js2 uses the same host for source reads, calls and owner tracing.
+        Engine::set_host(self, dom);
+    }
     fn module_parse_o(&mut self, source: &str, url: &str) -> Result<u32, Fault<New>> {
         run(self, |r| r.module_parse(source, url))
     }
@@ -670,16 +694,244 @@ impl Ops<New> for Realm {
         .map(NV)
     }
     fn is_constructor_value(&mut self, v: Value) -> Result<bool, Fault<New>> {
-        // A callable that is not an arrow or a method is taken as a constructor (phase 2 queue).
-        Ok(self.raw_callable(v))
+        Ok(self.raw_constructor(v))
     }
-    fn inspect_o(&mut self, v: Value, _cap: usize, _node: &dyn Fn(NV) -> Option<String>) -> String {
-        self.display_o(v)
+    fn inspect_o(&mut self, v: Value, cap: usize, node: &dyn Fn(NV) -> Option<String>) -> String {
+        self.raw_inspect(v, cap, &|o| node(NV(o)))
+    }
+}
+
+impl crate::browser::Browser<New> {
+    /// Anchor the wall clock to the scheduler of a virtual session without replay.
+    pub(crate) fn with_session_wall_clock(mut self, enabled: bool) -> Self {
+        if enabled && !bare_net::vclock::on() {
+            let dom = std::rc::Rc::clone(&self.dom);
+            let origin = Engine::wall_now_ms(&self.it) - dom.now_ms();
+            self.it.raw_set_clock(Clock::Host(Some(Box::new(move || (origin + dom.now_ms()).floor()))));
+        }
+        self
     }
 }
 
 impl From<Value> for Val<New> {
     fn from(v: Value) -> Self {
         <New as Eng>::kind(v)
+    }
+}
+
+#[cfg(test)]
+mod browser_new_adapter_tests {
+    use super::*;
+    use crate::browser::{Browser, BrowserLimits};
+
+    fn big(f: impl FnOnce() + Send + 'static) {
+        std::thread::Builder::new().stack_size(64 << 20).spawn(f).unwrap().join().unwrap();
+    }
+
+    fn with_browser(f: impl FnOnce(&mut Browser<New>) + Send + 'static) {
+        big(move || {
+            let mut b = Browser::<New>::make(
+                bare_html::tree::parse("<!doctype html><div id=a data-item=one><span></span></div>"),
+                BrowserLimits::default(),
+                Default::default(),
+                Default::default(),
+            ).unwrap();
+            f(&mut b);
+        });
+    }
+
+    fn js(b: &mut Browser<New>, source: &str) -> Value {
+        b.run_script(source).unwrap_or_else(|e| panic!("{source}: {e:?}"))
+    }
+
+    #[test]
+    fn reads_symbol_descriptions() {
+        with_browser(|b| {
+            let Val::Symbol(s) = New::kind(js(b, "Symbol('test')")) else { panic!("symbol") };
+            let d = b.it.h_symbol_description(s).unwrap().unwrap();
+            assert_eq!(b.it.h_to_string_lossy(d).unwrap(), "test");
+            let Val::Symbol(s) = New::kind(js(b, "Symbol()")) else { panic!("symbol") };
+            assert_eq!(b.it.h_symbol_description(s).unwrap(), None);
+            let Val::Symbol(s) = New::kind(js(b, "Symbol('')")) else { panic!("symbol") };
+            let d = b.it.h_symbol_description(s).unwrap().unwrap();
+            assert_eq!(b.it.h_to_string_lossy(d).unwrap(), "");
+        });
+    }
+
+    #[test]
+    fn reads_the_shared_iterator_prototype() {
+        with_browser(|b| {
+            let proto = b.it.iterator_prototype();
+            let v = js(b, "Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()))");
+            assert_eq!(proto, NV(v));
+            let v = js(b, "Object.getPrototypeOf(Object.getPrototypeOf(new FormData().entries()))");
+            assert_eq!(proto, NV(v));
+        });
+    }
+
+    #[test]
+    fn identifies_constructors() {
+        with_browser(|b| {
+            for (source, expected) in [
+                ("(() => 1)", false),
+                ("({method() {}}).method", false),
+                ("(function* () {})", false),
+                ("(function () {})", true),
+                ("(class {})", true),
+                ("HTMLElement", true),
+                ("Math.max", false),
+            ] {
+                let v = js(b, source);
+                assert_eq!(b.it.is_constructor_value(v).unwrap(), expected, "{source}");
+            }
+        });
+    }
+
+    #[test]
+    fn inspects_objects_as_compact_json() {
+        with_browser(|b| {
+            let v = js(b, "let tree = {name:'test', list:[1,,NaN], ignored:undefined, get bad(){throw 0}}; tree.self=tree; tree");
+            assert_eq!(b.it.inspect_o(v, 1000, &|_| None), r#"{"name":"test","list":[1,null,null],"bad":"[threw]","self":"[Circular]"}"#);
+            assert_eq!(b.it.inspect_o(v, 3, &|_| None), "{\"n… (cut: 3 of 72 chars)");
+        });
+    }
+
+    #[test]
+    fn inspects_collections_dates_and_nodes() {
+        with_browser(|b| {
+            let v = js(b, r#"
+                const map = new Map([['a', 1], ['remove', 2], ['b', { n: 3 }]]);
+                map.delete('remove');
+                Map.prototype.entries = () => { throw 0 };
+                const set = new Set([2, 1, 3]);
+                set.delete(1);
+                Set.prototype.values = () => { throw 0 };
+                const date = new Date(0);
+                date.toJSON = () => { throw 0 };
+                [map, set, date, document.getElementById('a')]
+            "#);
+            assert_eq!(b.inspect(v, 1000), r#"[[["a",1],["b",{"n":3}]],[2,3],"1970-01-01T00:00:00.000Z","<div#a>"]"#);
+        });
+    }
+
+    #[test]
+    fn supplies_host_filled_properties() {
+        with_browser(|b| {
+            let v = js(b, "let el = document.getElementById('a'); el.dataset.item + ':' + el.querySelectorAll('span')[0].tagName");
+            assert_eq!(b.it.display_o(v), "one:SPAN");
+        });
+    }
+
+    #[test]
+    fn uses_the_same_element_tags_as_the_old_engine() {
+        with_browser(|b| {
+            use crate::eng_old::Old;
+            let mut old = Browser::<Old>::make(
+                bare_html::tree::parse("<!doctype html>"),
+                BrowserLimits::default(),
+                Default::default(),
+                Default::default(),
+            ).unwrap();
+            for (source, expected) in [
+                ("String(document.createElement('div'))", "[object HTMLElement]"),
+                ("HTMLDivElement; String(document.createElement('div'))", "[object HTMLDivElement]"),
+            ] {
+                let old_value = old.run_script(source).unwrap();
+                assert_eq!(old.it.display_o(old_value), expected);
+                let new_value = js(b, source);
+                assert_eq!(b.it.display_o(new_value), expected);
+            }
+        });
+    }
+
+    #[test]
+    fn counts_reclaimed_cells_and_honors_extra_roots() {
+        with_browser(|b| {
+            b.collect(&[]).unwrap();
+            let object = b.it.h_new_object(None).unwrap();
+            let text = b.it.h_shared_text(&"x".repeat(16_384)).unwrap();
+            let symbol = js(b, "Symbol()");
+
+            let freed = b.collect(&[object.0, text.0, symbol]).unwrap();
+            assert_eq!(freed.symbols, 0);
+            let freed = b.collect(&[]).unwrap();
+            assert!(freed.objects >= 1);
+            assert!(freed.strings >= 1);
+            assert_eq!(freed.symbols, 1);
+            assert_eq!(b.collect(&[]).unwrap(), Collected::default());
+        });
+    }
+
+    #[test]
+    fn reads_console_call_arguments() {
+        with_browser(|b| {
+            js(b, "console.log('message', 3)");
+            let records = b.take_console_records();
+            assert_eq!(records.len(), 1);
+            let args: Vec<_> = records[0].args.iter().map(|&v| b.it.display_o(v)).collect();
+            assert_eq!(args, ["message", "3"]);
+        });
+    }
+
+    #[test]
+    fn tracks_external_bytes() {
+        with_browser(|b| {
+            b.collect(&[]).unwrap();
+            let live = b.it.external_live();
+            assert!(live > 0);
+            assert!(!b.it.gc_due());
+            b.it.add_external((4 << 20).max(live / 4) + 1);
+            assert!(b.collect_due());
+            b.collect(&[]).unwrap();
+            assert!(!b.it.gc_due());
+        });
+    }
+
+    #[test]
+    fn a_virtual_session_uses_its_clock_for_date_without_replay() {
+        use crate::browser_any::AnyBrowser;
+        use crate::browser_loader::Stop;
+        use crate::browser_session::{Session, SessionConfig, SessionStop};
+        use crate::resources::test_server::{Reply, serve};
+
+        big(|| {
+            assert!(!bare_net::vclock::on());
+            let server = serve(|_| Reply::new(200, Some("text/html"), r#"
+                <script>
+                    var wall = Date.now(), mono = performance.now(), elapsed;
+                    setTimeout(() => {
+                        elapsed = [Date.now() - wall, Math.abs(performance.now() - mono - 25) < 1e-6, Date.now() === +new Date()].join(',');
+                    }, 25);
+                </script>
+            "#));
+            let mut cfg = SessionConfig::new(&server.url("/"));
+            cfg.js2 = true;
+            cfg.virtual_clock = true;
+            cfg.page.quiet = std::time::Duration::from_millis(100);
+            let mut session = Session::new(cfg);
+            let result = session.run();
+            assert_eq!(result.stop, SessionStop::Page(Stop::Settled), "{result:?}");
+            let Some(AnyBrowser::New(b)) = session.browser() else { panic!("js2 session") };
+            let v = js(b, "elapsed");
+            assert_eq!(b.it.display_o(v), "25,true,true");
+        });
+    }
+
+    #[test]
+    fn uses_a_virtual_wall_clock_with_scheduled_tasks() {
+        with_browser(|b| {
+            b.use_virtual_clock_at(1000.0).unwrap();
+            b.use_virtual_wall_clock_at(5_000.0).unwrap();
+            assert!(b.use_virtual_wall_clock_at(5_000.5).is_err());
+            let v = js(b, "let result; setTimeout(() => result = [Date.now(), +new Date(), performance.now()].join(','), 12); Date.now()");
+            assert_eq!(b.it.display_o(v), "5000");
+            b.advance_time(11.0, 10).unwrap();
+            let v = js(b, "result");
+            assert_eq!(b.it.display_o(v), "undefined");
+            b.use_virtual_wall_clock_at(5_012.0).unwrap();
+            b.advance_time(1.0, 10).unwrap();
+            let v = js(b, "result");
+            assert_eq!(b.it.display_o(v), "5012,5012,1012");
+        });
     }
 }

@@ -176,13 +176,6 @@ fn from_local(l: f64) -> f64 {
     l + (local().zone.to_utc(secs) - secs) as f64 * 1000.0
 }
 
-fn now_ms() -> f64 {
-    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-        Ok(d) => d.as_millis() as f64,
-        Err(e) => -(e.duration().as_millis() as f64),
-    }
-}
-
 // ---- the object ----
 
 /// A new `Date` with prototype `proto` and the clipped time value `t`.
@@ -196,7 +189,7 @@ fn new_date(rt: &mut Realm, proto: Obj, t: f64) -> Value {
 }
 
 /// The object and the slot of the time value of a `Date`, or `None` for any other value.
-fn date_slot(rt: &Realm, v: Value) -> Option<(Obj, u32)> {
+pub(crate) fn date_slot(rt: &Realm, v: Value) -> Option<(Obj, u32)> {
     let o = Realm::obj(v).filter(|o| o.has_flag(F_DATE))?;
     Some((o, rt.shapes.find(o.shape(&rt.shapes), rt.k_prim)?.slot()))
 }
@@ -270,10 +263,10 @@ fn date_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     // A conversion below may call a script, so read these first.
     let (callee, nt) = (rt.callee, rt.nt);
     if nt.is_undefined() {
-        return Ok(local_text(rt, calc::time_clip(now_ms()), LocalText::Full));
+        return Ok(local_text(rt, calc::time_clip(rt.clock_now_ms()), LocalText::Full));
     }
     let t = match args.len() {
-        0 => calc::time_clip(now_ms()),
+        0 => calc::time_clip(rt.clock_now_ms()),
         1 => match date_slot(rt, args[0]) {
             Some((o, s)) => o.slot(&rt.shapes, s).as_f64().unwrap_or(f64::NAN),
             None => {
@@ -299,8 +292,8 @@ fn date_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     Ok(new_date(rt, p, t))
 }
 
-fn date_now(_rt: &mut Realm, _this: Value, _args: &[Value]) -> R<Value> {
-    Ok(Realm::num(calc::time_clip(now_ms())))
+fn date_now(rt: &mut Realm, _this: Value, _args: &[Value]) -> R<Value> {
+    Ok(Realm::num(calc::time_clip(rt.clock_now_ms())))
 }
 
 fn date_parse(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
