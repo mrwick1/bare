@@ -218,5 +218,6 @@ fn bind_constructs_with_the_bound_arguments_and_reads_metadata_at_bind_time() {
         ("var f = () => {}; try { new (f.bind(null))(); } catch (e) { return e.name; }", "TypeError"),
         ("function f(x) {} Object.defineProperty(f, 'name', {get() { throw 'name'; }}); try { f.bind(); } catch (e) { return e; }", "name"),
         ("function f(x) {} var b = f.bind(); Object.defineProperty(f, 'name', {value: 'later'}); Object.defineProperty(f, 'length', {value: 8}); return b.name + ':' + b.length;", "bound f:1"),
+        ("function f(v) { return this.offset + v; } Object.defineProperty(f, 'length', {get() { throw 'length'; }}); Object.defineProperty(f, 'name', {get() { throw 'name'; }}); return [3].map(f, {offset: 4})[0];", "7"),
     ]);
 }

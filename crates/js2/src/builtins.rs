@@ -542,15 +542,25 @@ fn fn_bind(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
         bound_name = Str::concat(&mut rt.heap, prefix, s).expect("memory").value();
     }
     let rest = if args.len() > 1 { rt.new_array(&args[1..]) } else { Value::UNDEFINED };
-    let b = rt.native_cell(rt.bound_id as usize);
+    let b = make_bound(rt, this, arg(args, 0), rest);
     b.set_proto(&mut rt.shapes, proto.map(|p| p.cell()));
-    b.set_slot(&rt.shapes, 1, this);
-    b.set_slot(&rt.shapes, 2, arg(args, 0));
-    b.set_slot(&rt.shapes, 3, rest);
     b.set_flag(F_FNPROPS);
     rt.define_attrs(b, length, A_C, Realm::num(len))?;
     rt.define_attrs(b, name, A_C, bound_name)?;
     Ok(b.value())
+}
+
+fn make_bound(rt: &mut Realm, target: Value, this: Value, args: Value) -> Obj {
+    let b = rt.native_cell(rt.bound_id as usize);
+    b.set_slot(&rt.shapes, 1, target);
+    b.set_slot(&rt.shapes, 2, this);
+    b.set_slot(&rt.shapes, 3, args);
+    b
+}
+
+/// Bind a callback for a prelude operation. The callback's metadata has no part in the call.
+pub(crate) fn bind_callback(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+    Ok(make_bound(rt, arg(args, 0), arg(args, 1), Value::UNDEFINED).value())
 }
 
 /// The call of a bound function: the target, with the bound `this` and the bound arguments before the arguments of the call.

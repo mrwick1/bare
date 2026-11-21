@@ -63,6 +63,7 @@ pub(crate) const PRE: &[(&str, Pd)] = &[
     ("getOwn", Native(crate::bi_object::object_own_descriptor, 2, "getOwnPropertyDescriptor")),
     ("ownNames", Native(crate::bi_object::object_own_names, 1, "getOwnPropertyNames")),
     ("set", Native(crate::bi_object::set_strict, 3, "set")),
+    ("bind", Native(crate::builtins::bind_callback, 2, "bind")),
 ];
 
 /// The number of slots.
