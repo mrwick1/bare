@@ -44,7 +44,11 @@ fn lazy_image_data<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -
 }
 
 pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
-    crate::browser_lazy::install(d, s, &[("ImageData", lazy_image_data as HS)])
+    table!(lazy = [
+        Row::both(1, "ImageData", lazy_image_data),
+    ]);
+    let g = s.global();
+    d.install_rows(s, &[g], &lazy::T)
 }
 
 /// An `unsigned long` of the constructor (`[EnforceRange]`): a `TypeError` when it is not finite or out of range.

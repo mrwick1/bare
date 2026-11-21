@@ -1456,13 +1456,23 @@ crate::browser_lazy::lazy_global!(lazy_registry, "CustomElementRegistry", ensure
 
 /// Install last: a new host function earlier in the list of `Dom::install` moves the id of each one after it.
 pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
-    crate::browser_lazy::install(d, s, &[&[("CustomElementRegistry", lazy_registry as HS), ("HTMLUnknownElement", lazy_unknown)], &crate::browser_face::LAZY[..]].concat())?;
-    // As in Chrome, `customElements` stays an accessor of `window` with no setter.
+    table!(lazy = [
+        Row::both(1, "CustomElementRegistry", lazy_registry),
+        Row::both(1, "HTMLUnknownElement", lazy_unknown),
+        crate::browser_face::LAZY[0],
+        crate::browser_face::LAZY[1],
+    ]);
     let g = s.global();
+    d.install_rows(s, &[g], &lazy::T)?;
+    // As in Chrome, `customElements` stays an accessor of `window` with no setter.
     let f = d.add_fn_s(s, customelements, "get customElements", 0, HostFn::Method)?;
     s.define_accessor_str(g, "customElements", Some(f), None, Attrs { writable: false, enumerable: true, configurable: true })?;
-    d.def_method_at(s, d.p().element, "toggleAttribute", 1, crate::browser_dom::toggle_attribute_s)?;
-    d.def_method_at(s, d.p().document, "importNode", 1, import_node)?;
-    d.def_method_at(s, d.p().document, "adoptNode", 1, adopt_node)?;
+    table!(rows1 = [
+        Row::method(1, "toggleAttribute", 1, crate::browser_dom::toggle_attribute_s),
+        Row::method(2, "importNode", 1, import_node),
+        Row::method(2, "adoptNode", 1, adopt_node),
+    ]);
+    let targets = [d.obj_local(s, d.p().element), d.obj_local(s, d.p().document)];
+    d.install_rows(s, &targets, &rows1::T)?;
     Ok(())
 }

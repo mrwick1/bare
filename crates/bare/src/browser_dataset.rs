@@ -344,8 +344,12 @@ pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
     let f = d.interface_s(s, proto, "DOMStringMap", illegal_constructor, 0, HostFn::Ctor)?;
     // `DOMStringMap.prototype[Symbol.toStringTag]` is "DOMStringMap".
     d.tag_s(s, proto, "DOMStringMap")?;
-    d.def_get_at(s, p.html, "dataset", html_dataset, None)?;
-    d.def_get_at(s, p.svg, "dataset", svg_dataset, None)?;
+    table!(rows1 = [
+        Row::get(1, "dataset", html_dataset, None),
+        Row::get(2, "dataset", svg_dataset, None),
+    ]);
+    let targets = [d.obj_local(s, p.html), d.obj_local(s, p.svg)];
+    d.install_rows(s, &targets, &rows1::T)?;
     *d.dataset.fixed.borrow_mut() = vec![proto, f];
     Ok(())
 }

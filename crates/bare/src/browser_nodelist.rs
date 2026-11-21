@@ -371,8 +371,12 @@ pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
     let proto = d.plain_s(s)?;
     let _ = d.nl.proto.set(proto);
     let mut fixed = vec![proto];
-    d.def_get_at(s, proto, "length", length, None)?;
-    d.def_method_at(s, proto, "item", 1, item_method)?;
+    table!(rows1 = [
+        Row::get(1, "length", length, None),
+        Row::method(1, "item", 1, item_method),
+    ]);
+    let targets = [d.obj_local(s, proto)];
+    d.install_rows(s, &targets, &rows1::T)?;
     // The value iterator of an interface with an indexed getter: the `Array.prototype` functions (WebIDL "iterable").
     let ap = s.intrinsic(Intrinsic::ArrayPrototype);
     let po = d.obj_local(s, proto);

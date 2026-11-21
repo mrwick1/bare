@@ -250,17 +250,25 @@ impl Dom {
         let mut fixed = vec![mql, list, iter];
 
         // MediaQueryList
-        self.def_get_at(s, mql, "media", media_get, None)?;
-        self.def_get_at(s, mql, "matches", matches_get, None)?;
-        self.def_get_at(s, mql, "onchange", onchange_get, Some(onchange_set))?;
-        self.def_method_at(s, mql, "addListener", 1, add_listener)?;
-        self.def_method_at(s, mql, "removeListener", 1, remove_listener)?;
+        table!(rows1 = [
+            Row::get(1, "media", media_get, None),
+            Row::get(1, "matches", matches_get, None),
+            Row::get(1, "onchange", onchange_get, Some(onchange_set)),
+            Row::method(1, "addListener", 1, add_listener),
+            Row::method(1, "removeListener", 1, remove_listener),
+        ]);
+        let targets = [self.obj_local(s, mql)];
+        self.install_rows(s, &targets, &rows1::T)?;
 
         // DOMTokenList and its iterator, then Element.classList
         crate::browser_platform_class::install(self, s, list, iter, sym)?;
-        self.def_get_at(s, p.element, "classList", crate::browser_platform_class::class_list, Some(crate::browser_platform_class::set_class_list))?;
-        self.def_get_at(s, p.link, "relList", crate::browser_platform_class::rel_list::<0>, Some(crate::browser_platform_class::set_rel_list::<0>))?;
-        self.def_get_at(s, p.iframe, "sandbox", crate::browser_platform_class::sandbox_list, Some(crate::browser_platform_class::set_sandbox_list))?;
+        table!(rows2 = [
+            Row::get(1, "classList", crate::browser_platform_class::class_list, Some(crate::browser_platform_class::set_class_list)),
+            Row::get(2, "relList", crate::browser_platform_class::rel_list::<0>, Some(crate::browser_platform_class::set_rel_list::<0>)),
+            Row::get(4, "sandbox", crate::browser_platform_class::sandbox_list, Some(crate::browser_platform_class::set_sandbox_list)),
+        ]);
+        let targets = [self.obj_local(s, p.element), self.obj_local(s, p.link), self.obj_local(s, p.iframe)];
+        self.install_rows(s, &targets, &rows2::T)?;
         crate::browser_platform_query::install(self, s)?;
 
         // interface objects and `matchMedia`

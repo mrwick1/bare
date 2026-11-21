@@ -1183,13 +1183,17 @@ fn content_editable<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s
 
 pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
     let doc = d.p().document;
-    d.def_method_at(s, doc, "execCommand", 1, exec_command)?;
-    d.def_method_at(s, doc, "queryCommandSupported", 1, query_supported)?;
-    d.def_method_at(s, doc, "queryCommandEnabled", 1, query_enabled)?;
-    d.def_method_at(s, doc, "queryCommandState", 1, query_state)?;
-    d.def_method_at(s, doc, "queryCommandIndeterm", 1, query_indeterm)?;
-    d.def_method_at(s, doc, "queryCommandValue", 1, query_value)?;
-    d.def_get_at(s, d.p().html, "isContentEditable", is_content_editable, None)?;
-    d.def_get_at(s, d.p().html, "contentEditable", content_editable, Some(content_editable))?;
+    table!(rows1 = [
+        Row::method(1, "execCommand", 1, exec_command),
+        Row::method(1, "queryCommandSupported", 1, query_supported),
+        Row::method(1, "queryCommandEnabled", 1, query_enabled),
+        Row::method(1, "queryCommandState", 1, query_state),
+        Row::method(1, "queryCommandIndeterm", 1, query_indeterm),
+        Row::method(1, "queryCommandValue", 1, query_value),
+        Row::get(2, "isContentEditable", is_content_editable, None),
+        Row::get(2, "contentEditable", content_editable, Some(content_editable)),
+    ]);
+    let targets = [d.obj_local(s, doc), d.obj_local(s, d.p().html)];
+    d.install_rows(s, &targets, &rows1::T)?;
     Ok(())
 }

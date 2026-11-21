@@ -447,6 +447,8 @@ pub enum DefKind {
     Method { id: u32, len: u32 },
     /// An accessor. The getter is named `get NAME` and has length 0; the setter is named `set NAME` and has length 1.
     Accessor { get: u32, set: Option<u32> },
+    /// An accessor with one function (length 0, named like the row, not `get NAME`) as getter and as setter: a lazy global.
+    Both { id: u32 },
     /// A data property with a number as its value.
     Number(f64),
 }
@@ -472,6 +474,11 @@ impl Def {
     /// An accessor of a WebIDL attribute: enumerable and configurable.
     pub const fn accessor(name: &'static str, on: u32, get: u32, set: Option<u32>) -> Def {
         Def { name, on, attrs: Attrs { writable: false, enumerable: true, configurable: true }, kind: DefKind::Accessor { get, set } }
+    }
+
+    /// A lazy global: one function is the getter and the setter. Configurable, not enumerable.
+    pub const fn both(name: &'static str, on: u32, id: u32) -> Def {
+        Def { name, on, attrs: Attrs { writable: false, enumerable: false, configurable: true }, kind: DefKind::Both { id } }
     }
 
     /// A constant: read-only, enumerable, not configurable.

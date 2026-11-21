@@ -29,7 +29,11 @@ use crate::browser_scoped::*;
 use bare_js_api::{Args, Attrs, HostFn, Intrinsic, Local, Type};
 
 pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
-    crate::browser_lazy::install(d, s, &[("CSS", lazy)])
+    table!(lazy = [
+        Row::both(1, "CSS", lazy),
+    ]);
+    let g = s.global();
+    d.install_rows(s, &[g], &lazy::T)
 }
 
 /// The getter (no argument) and the setter (the new value) of the global.

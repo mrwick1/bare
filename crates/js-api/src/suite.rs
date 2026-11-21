@@ -378,13 +378,14 @@ struct TableHost;
 
 const TABLE_BASE: u32 = 100;
 
-static TABLE: [Def; 6] = [
+static TABLE: [Def; 7] = [
     Def::method("twice", 0b01, 0, 1),
     Def::method("both", 0b11, 1, 2),
     Def::accessor("size", 0b01, 2, Some(3)),
     Def::accessor("ro", 0b10, 4, None),
     Def::number("LIMIT", 0b01, 7.0),
     Def::method("shown", 0b10, 5, 0).with(Attrs::ALL),
+    Def::both("lazy", 0b01, 6),
 ];
 
 impl<E: Engine> Host<E> for TableHost {
@@ -402,7 +403,11 @@ impl<E: Engine> Host<E> for TableHost {
                 Ok(s.undefined())
             }
             4 => s.string("ro"),
-            _ => s.string("shown"),
+            5 => s.string("shown"),
+            _ => {
+                let n = args.len();
+                Ok(s.number(n as f64))
+            }
         }
     }
 }
@@ -437,6 +442,9 @@ pub fn a_table_installs_methods_accessors_and_constants<H: Harness>(stress: bool
     assert_eq!(h.eval("var d = Object.getOwnPropertyDescriptor(A, 'LIMIT'); [A.LIMIT, d.writable, d.enumerable, d.configurable].join()"), "7,false,true,false");
     assert_eq!(h.eval("var d = Object.getOwnPropertyDescriptor(B, 'shown'); [B.shown(), d.writable, d.enumerable, d.configurable].join()"), "shown,true,true,true");
     assert_eq!(h.eval("Object.keys(A).join()"), "size,LIMIT");
+    // A lazy global: one function is the getter and the setter, named like the row.
+    assert_eq!(h.eval("var d = Object.getOwnPropertyDescriptor(A, 'lazy'); [d.get === d.set, d.get.name, d.get.length, d.enumerable, d.configurable, A.lazy].join()"), "true,lazy,0,false,true,0");
+    assert_eq!(h.eval("A.lazy = 1; 'set'"), "set");
     assert_eq!(depth(&mut h), 0);
 }
 

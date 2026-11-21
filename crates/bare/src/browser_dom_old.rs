@@ -91,9 +91,13 @@ pub(crate) fn install_late<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
         let o = d.obj_local(s, o);
         s.define_str(o, "replaceChildren", f, Attrs::METHOD)?;
     }
-    d.def_method_at(s, d.p().element, "insertAdjacentElement", 2, insert_adjacent_element)?;
-    d.def_method_at(s, d.p().element, "insertAdjacentText", 2, insert_adjacent_text)?;
-    d.def_method_at(s, d.p().element, "insertAdjacentHTML", 2, crate::browser_fragment::insert_adjacent_html)?;
+    table!(rows1 = [
+        Row::method(1, "insertAdjacentElement", 2, insert_adjacent_element),
+        Row::method(1, "insertAdjacentText", 2, insert_adjacent_text),
+        Row::method(1, "insertAdjacentHTML", 2, crate::browser_fragment::insert_adjacent_html),
+    ]);
+    let targets = [d.obj_local(s, d.p().element)];
+    d.install_rows(s, &targets, &rows1::T)?;
     crate::browser_implementation::install(d, s)
 }
 

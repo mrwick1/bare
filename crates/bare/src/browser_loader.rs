@@ -698,8 +698,12 @@ pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
         d.def_get_at(s, proto, name, g, Some(st))?;
     }
     let document = d.p().document;
-    d.def_get_at(s, document, "readyState", doc_ready_state, None)?;
-    d.def_get_at(s, document, "currentScript", doc_current_script, None)?;
+    table!(rows1 = [
+        Row::get(1, "readyState", doc_ready_state, None),
+        Row::get(1, "currentScript", doc_current_script, None),
+    ]);
+    let targets = [d.obj_local(s, document)];
+    d.install_rows(s, &targets, &rows1::T)?;
     let f = crate::browser_custom::interface_ctor_s(d, s, "HTMLScriptElement", false)?;
     let f = d.link_s(s, f, proto, "HTMLScriptElement")?;
     *d.scripts.fixed.borrow_mut() = vec![proto, f];

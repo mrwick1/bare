@@ -64,7 +64,15 @@ fn ensure_unit(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 }
 
 pub(crate) fn install_interfaces<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
-    crate::browser_lazy::install(d, s, &[("PerformanceEntry", lazy_entry as HS), ("PerformanceResourceTiming", lazy_resource), ("PerformanceNavigationTiming", lazy_navigation), ("PerformanceMark", lazy_mark), ("PerformanceMeasure", lazy_measure)])
+    table!(lazy = [
+        Row::both(1, "PerformanceEntry", lazy_entry),
+        Row::both(1, "PerformanceResourceTiming", lazy_resource),
+        Row::both(1, "PerformanceNavigationTiming", lazy_navigation),
+        Row::both(1, "PerformanceMark", lazy_mark),
+        Row::both(1, "PerformanceMeasure", lazy_measure),
+    ]);
+    let g = s.global();
+    d.install_rows(s, &[g], &lazy::T)
 }
 
 /// `PerformanceEntry.prototype.toJSON`: the four members of an entry.

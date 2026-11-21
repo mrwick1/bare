@@ -889,10 +889,14 @@ impl Dom {
             self.interface_s(s, proto, name, ctor.unwrap_or(illegal), 0, if ctor.is_some() { HostFn::Ctor } else { HostFn::Method })?;
         }
         let po = self.obj_local(s, port);
-        self.def_method_l(s, po, "postMessage", 1, port_post_message, true)?;
-        self.def_method_l(s, po, "start", 0, port_start, true)?;
-        self.def_method_l(s, po, "close", 0, port_close, true)?;
-        self.def_get_at(s, port, "onmessage", port_onmessage, Some(set_port_onmessage))?;
+        table!(rows1 = [
+            Row::method(1, "postMessage", 1, port_post_message).enumerable(),
+            Row::method(1, "start", 0, port_start).enumerable(),
+            Row::method(1, "close", 0, port_close).enumerable(),
+            Row::get(2, "onmessage", port_onmessage, Some(set_port_onmessage)),
+        ]);
+        let targets = [po, self.obj_local(s, port)];
+        self.install_rows(s, &targets, &rows1::T)?;
         for (name, h) in [("data", msg_data as HS), ("origin", msg_origin), ("lastEventId", msg_empty), ("source", msg_source), ("ports", msg_ports)] {
             self.def_get_at(s, event, name, h, None)?;
         }

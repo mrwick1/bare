@@ -690,9 +690,19 @@ fn ensure_iter(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 lazy_global!(lazy_iterator, "NodeIterator", ensure_iter, |d| state(d).borrow().made_iter.expect("made").1);
 
 pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
-    d.def_method_at(s, d.p().document, "createTreeWalker", 1, create_tree_walker)?;
-    d.def_method_at(s, d.p().document, "createNodeIterator", 1, create_node_iterator)?;
-    crate::browser_lazy::install(d, s, &[("TreeWalker", lazy_walker as HS), ("NodeFilter", lazy_filter), ("NodeIterator", lazy_iterator)])
+    table!(rows1 = [
+        Row::method(1, "createTreeWalker", 1, create_tree_walker),
+        Row::method(1, "createNodeIterator", 1, create_node_iterator),
+    ]);
+    let targets = [d.obj_local(s, d.p().document)];
+    d.install_rows(s, &targets, &rows1::T)?;
+    table!(lazy = [
+        Row::both(1, "TreeWalker", lazy_walker),
+        Row::both(1, "NodeFilter", lazy_filter),
+        Row::both(1, "NodeIterator", lazy_iterator),
+    ]);
+    let g = s.global();
+    d.install_rows(s, &[g], &lazy::T)
 }
 
 impl Dom {

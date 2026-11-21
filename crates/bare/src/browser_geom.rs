@@ -637,18 +637,16 @@ fn quad_to_json<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -
 
 #[inline(never)]
 pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
-    browser_lazy::install(
-        d,
-        s,
-        &[
-            ("DOMQuad", lazy_quad as HS),
-            ("DOMPoint", lazy_point_rw),
-            ("DOMPointReadOnly", lazy_point_ro),
-            ("DOMRectList", lazy_rect_list),
-            ("DOMRect", lazy_rect_rw),
-            ("DOMRectReadOnly", lazy_rect_ro),
-        ],
-    )?;
+    table!(lazy = [
+        Row::both(1, "DOMQuad", lazy_quad),
+        Row::both(1, "DOMPoint", lazy_point_rw),
+        Row::both(1, "DOMPointReadOnly", lazy_point_ro),
+        Row::both(1, "DOMRectList", lazy_rect_list),
+        Row::both(1, "DOMRect", lazy_rect_rw),
+        Row::both(1, "DOMRectReadOnly", lazy_rect_ro),
+    ]);
+    let g = s.global();
+    d.install_rows(s, &[g], &lazy::T)?;
     crate::browser_matrix::install(d, s)
 }
 

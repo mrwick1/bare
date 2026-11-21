@@ -25,8 +25,12 @@ use std::collections::HashSet;
 pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
     let p = d.p();
     for target in [p.element, p.document] {
-        d.def_method_at(s, target, "getElementsByTagName", 1, by_tag)?;
-        d.def_method_at(s, target, "getElementsByClassName", 1, by_class)?;
+        table!(rows1 = [
+            Row::method(1, "getElementsByTagName", 1, by_tag),
+            Row::method(1, "getElementsByClassName", 1, by_class),
+        ]);
+        let targets = [d.obj_local(s, target)];
+        d.install_rows(s, &targets, &rows1::T)?;
     }
     Ok(())
 }

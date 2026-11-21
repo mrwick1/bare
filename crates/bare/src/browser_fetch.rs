@@ -81,7 +81,7 @@
 //!
 //! Not browser-verified except against Node for the pure parts (`tools/js/fetch_oracle.mjs`).
 
-use crate::browser::{Browser, Dom, IdMap, Kind, Owner, R, unsupported};
+use crate::browser::{Browser, Dom, IdMap, Owner, R, unsupported};
 use crate::browser_scoped::*;
 use crate::browser_navigation_url::form_serialize;
 use crate::browser_streams as streams;
@@ -3037,69 +3037,69 @@ impl Browser {
 
 // ---------------------------------------------------------------------------------------------- install
 
-use Kind::{GetS as GS, MethodS as MS};
 use Pr::*;
 
-struct Def {
-    on: Pr,
-    name: &'static str,
-    len: u32,
-    kind: Kind,
+const fn ms(on: Pr, name: &'static str, len: u32, h: HS) -> Row {
+    Row::method(1 << on as u32, name, len, h)
 }
 
-static DEFS: &[Def] = &[
-    Def { on: Headers, name: "append", len: 2, kind: MS(headers_append) },
-    Def { on: Headers, name: "delete", len: 1, kind: MS(headers_delete) },
-    Def { on: Headers, name: "get", len: 1, kind: MS(headers_get) },
-    Def { on: Headers, name: "getSetCookie", len: 0, kind: MS(headers_get_set_cookie) },
-    Def { on: Headers, name: "has", len: 1, kind: MS(headers_has) },
-    Def { on: Headers, name: "set", len: 2, kind: MS(headers_set) },
-    Def { on: Headers, name: "forEach", len: 1, kind: MS(headers_for_each) },
-    Def { on: Headers, name: "entries", len: 0, kind: MS(headers_entries) },
-    Def { on: Headers, name: "keys", len: 0, kind: MS(headers_keys) },
-    Def { on: Headers, name: "values", len: 0, kind: MS(headers_values) },
-    Def { on: HeadersIter, name: "next", len: 0, kind: MS(headers_iter_next) },
-    Def { on: Request, name: "method", len: 0, kind: GS(req_method) },
-    Def { on: Request, name: "url", len: 0, kind: GS(req_url) },
-    Def { on: Request, name: "headers", len: 0, kind: GS(req_headers) },
-    Def { on: Request, name: "redirect", len: 0, kind: GS(req_redirect) },
-    Def { on: Request, name: "credentials", len: 0, kind: GS(req_credentials) },
-    Def { on: Request, name: "mode", len: 0, kind: GS(req_mode) },
-    Def { on: Request, name: "bodyUsed", len: 0, kind: GS(req_body_used) },
-    Def { on: Request, name: "body", len: 0, kind: GS(gate_request_body) },
-    Def { on: Request, name: "signal", len: 0, kind: GS(req_signal) },
-    Def { on: Request, name: "clone", len: 0, kind: MS(req_clone) },
-    Def { on: Request, name: "text", len: 0, kind: MS(body_text) },
-    Def { on: Request, name: "json", len: 0, kind: MS(body_json) },
-    Def { on: Request, name: "arrayBuffer", len: 0, kind: MS(body_array_buffer) },
-    Def { on: Request, name: "blob", len: 0, kind: MS(body_blob) },
-    Def { on: Request, name: "formData", len: 0, kind: MS(body_form_data) },
-    Def { on: Response, name: "status", len: 0, kind: GS(resp_status) },
-    Def { on: Response, name: "ok", len: 0, kind: GS(resp_ok) },
-    Def { on: Response, name: "statusText", len: 0, kind: GS(resp_status_text) },
-    Def { on: Response, name: "url", len: 0, kind: GS(resp_url) },
-    Def { on: Response, name: "redirected", len: 0, kind: GS(resp_redirected) },
-    Def { on: Response, name: "type", len: 0, kind: GS(resp_type) },
-    Def { on: Response, name: "headers", len: 0, kind: GS(resp_headers) },
-    Def { on: Response, name: "bodyUsed", len: 0, kind: GS(resp_body_used) },
-    Def { on: Response, name: "body", len: 0, kind: GS(resp_body) },
-    Def { on: Response, name: "clone", len: 0, kind: MS(resp_clone) },
-    Def { on: Response, name: "text", len: 0, kind: MS(body_text) },
-    Def { on: Response, name: "json", len: 0, kind: MS(body_json) },
-    Def { on: Response, name: "arrayBuffer", len: 0, kind: MS(body_array_buffer) },
-    Def { on: Response, name: "blob", len: 0, kind: MS(body_blob) },
-    Def { on: Response, name: "formData", len: 0, kind: MS(body_form_data) },
-    Def { on: Stream, name: "locked", len: 0, kind: GS(streams::locked) },
-    Def { on: Stream, name: "getReader", len: 0, kind: MS(streams::get_reader) },
-    Def { on: Stream, name: "cancel", len: 1, kind: MS(streams::cancel) },
-    Def { on: Stream, name: "tee", len: 0, kind: MS(streams::gate) },
-    Def { on: Stream, name: "pipeTo", len: 1, kind: MS(streams::pipe_to) },
-    Def { on: Stream, name: "pipeThrough", len: 1, kind: MS(streams::pipe_through) },
-    Def { on: Reader, name: "read", len: 0, kind: MS(streams::read) },
-    Def { on: Reader, name: "cancel", len: 1, kind: MS(streams::reader_cancel) },
-    Def { on: Reader, name: "releaseLock", len: 0, kind: MS(streams::release) },
-    Def { on: Reader, name: "closed", len: 0, kind: GS(streams::reader_closed) },
-];
+const fn gs(on: Pr, name: &'static str, h: HS) -> Row {
+    Row::get(1 << on as u32, name, h, None)
+}
+
+table!(defs = [
+    ms(Headers, "append", 2, headers_append),
+    ms(Headers, "delete", 1, headers_delete),
+    ms(Headers, "get", 1, headers_get),
+    ms(Headers, "getSetCookie", 0, headers_get_set_cookie),
+    ms(Headers, "has", 1, headers_has),
+    ms(Headers, "set", 2, headers_set),
+    ms(Headers, "forEach", 1, headers_for_each),
+    ms(Headers, "entries", 0, headers_entries),
+    ms(Headers, "keys", 0, headers_keys),
+    ms(Headers, "values", 0, headers_values),
+    ms(HeadersIter, "next", 0, headers_iter_next),
+    gs(Request, "method", req_method),
+    gs(Request, "url", req_url),
+    gs(Request, "headers", req_headers),
+    gs(Request, "redirect", req_redirect),
+    gs(Request, "credentials", req_credentials),
+    gs(Request, "mode", req_mode),
+    gs(Request, "bodyUsed", req_body_used),
+    gs(Request, "body", gate_request_body),
+    gs(Request, "signal", req_signal),
+    ms(Request, "clone", 0, req_clone),
+    ms(Request, "text", 0, body_text),
+    ms(Request, "json", 0, body_json),
+    ms(Request, "arrayBuffer", 0, body_array_buffer),
+    ms(Request, "blob", 0, body_blob),
+    ms(Request, "formData", 0, body_form_data),
+    gs(Response, "status", resp_status),
+    gs(Response, "ok", resp_ok),
+    gs(Response, "statusText", resp_status_text),
+    gs(Response, "url", resp_url),
+    gs(Response, "redirected", resp_redirected),
+    gs(Response, "type", resp_type),
+    gs(Response, "headers", resp_headers),
+    gs(Response, "bodyUsed", resp_body_used),
+    gs(Response, "body", resp_body),
+    ms(Response, "clone", 0, resp_clone),
+    ms(Response, "text", 0, body_text),
+    ms(Response, "json", 0, body_json),
+    ms(Response, "arrayBuffer", 0, body_array_buffer),
+    ms(Response, "blob", 0, body_blob),
+    ms(Response, "formData", 0, body_form_data),
+    gs(Stream, "locked", streams::locked),
+    ms(Stream, "getReader", 0, streams::get_reader),
+    ms(Stream, "cancel", 1, streams::cancel),
+    ms(Stream, "tee", 0, streams::gate),
+    ms(Stream, "pipeTo", 1, streams::pipe_to),
+    ms(Stream, "pipeThrough", 1, streams::pipe_through),
+    ms(Reader, "read", 0, streams::read),
+    ms(Reader, "cancel", 1, streams::reader_cancel),
+    ms(Reader, "releaseLock", 0, streams::release),
+    gs(Reader, "closed", streams::reader_closed),
+]);
 
 /// Define the globals `fetch`, `Headers`, `Request`, `Response`, `ReadableStream`, `ReadableStreamDefaultReader`.
 pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
@@ -3110,25 +3110,12 @@ pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
     let protos: [ObjId; 6] = [d.plain_s(s)?, d.plain_s(s)?, d.plain_s(s)?, d.plain_s(s)?, d.plain_s(s)?, d.obj_s(s, ip)?];
     let _ = d.fetch.protos.set(protos);
     let mut fixed = protos.to_vec();
-    for def in DEFS {
-        let target = d.obj_local(s, protos[def.on as usize]);
-        match def.kind {
-            Kind::MethodS(h) => {
-                let f = d.add_fn_s(s, h, def.name, def.len, HostFn::Method)?;
-                s.define_str(target, def.name, f, Attrs::METHOD)?;
-                // `Headers.prototype[Symbol.iterator]` is the same function object as `entries`.
-                if def.name == "entries" {
-                    let sym = s.intrinsic(Intrinsic::SymbolIterator);
-                    s.define(target, sym, f, Attrs::METHOD)?;
-                }
-            }
-            Kind::GetS(h) => {
-                let f = d.add_fn_s(s, h, &format!("get {}", def.name), 0, HostFn::Method)?;
-                s.define_accessor_str(target, def.name, Some(f), None, Attrs { writable: false, enumerable: true, configurable: true })?;
-            }
-            Kind::AccessorS(..) => return Err(unsupp("an accessor of the new form in the fetch table")),
-        }
-    }
+    let targets = protos.map(|o| d.obj_local(s, o));
+    d.install_rows(s, &targets, &defs::T)?;
+    // `Headers.prototype[Symbol.iterator]` is the same function object as `entries`.
+    let entries = s.get_str(targets[Headers as usize], "entries")?;
+    let sym = s.intrinsic(Intrinsic::SymbolIterator);
+    s.define(targets[Headers as usize], sym, entries, Attrs::METHOD)?;
     // `Headers`, `Request` and `Response` read `new.target`, so a class may extend them.
     let ifaces: [(&str, Pr, HS, HostFn); 5] = [
         ("Headers", Headers, headers_ctor, HostFn::CtorNewTarget),

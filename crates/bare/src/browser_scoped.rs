@@ -27,6 +27,128 @@ pub(crate) struct Scoped {
     cur: u32,
 }
 
+/// What a row of a table makes (see [`Row`]).
+#[derive(Clone, Copy)]
+pub(crate) enum Mem {
+    /// A method with this `length`.
+    Method(HS, u32),
+    /// A getter, and a setter when there is one.
+    Get(HS, Option<HS>),
+    /// One function that is the getter and the setter: a lazy global.
+    Both(HS),
+}
+
+/// A member of a static table of host members. `on` is a mask of the targets that the install call names (bit `i` is `targets[i]`).
+#[derive(Clone, Copy)]
+pub(crate) struct Row {
+    on: u32,
+    name: &'static str,
+    mem: Mem,
+    attrs: Attrs,
+}
+
+impl Row {
+    /// A method (not enumerable).
+    pub(crate) const fn method(on: u32, name: &'static str, len: u32, h: HS) -> Row {
+        Row { on, name, mem: Mem::Method(h, len), attrs: Attrs::METHOD }
+    }
+
+    /// An accessor of a WebIDL attribute (enumerable), or a getter when `set` is `None`.
+    pub(crate) const fn get(on: u32, name: &'static str, get: HS, set: Option<HS>) -> Row {
+        Row { on, name, mem: Mem::Get(get, set), attrs: Attrs { writable: false, enumerable: true, configurable: true } }
+    }
+
+    /// A lazy global: one function is the getter and the setter (not enumerable).
+    pub(crate) const fn both(on: u32, name: &'static str, h: HS) -> Row {
+        Row { on, name, mem: Mem::Both(h), attrs: Attrs { writable: false, enumerable: false, configurable: true } }
+    }
+
+    /// The same row with `enumerable` set.
+    pub(crate) const fn enumerable(mut self) -> Row {
+        self.attrs.enumerable = true;
+        self
+    }
+}
+
+fn no_handler<'s>(_: &Dom, _: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    unreachable!("a placeholder of a table")
+}
+
+/// How many handlers the rows hold (a getter with a setter holds two).
+pub(crate) const fn handlers(rows: &[Row]) -> usize {
+    let (mut i, mut n) = (0, 0);
+    while i < rows.len() {
+        n += match rows[i].mem {
+            Mem::Get(_, Some(_)) => 2,
+            _ => 1,
+        };
+        i += 1;
+    }
+    n
+}
+
+/// The rows of a table as the table of `Engine::install_table` and the handlers that its ids name. Both are made at compile time, so a
+/// window pays for neither. Row `i` of `defs` has the ids of its handlers in `hs`.
+pub(crate) struct Table<const N: usize, const H: usize> {
+    defs: [bare_js_api::Def; N],
+    hs: [HS; H],
+}
+
+impl<const N: usize, const H: usize> Table<N, H> {
+    pub(crate) const fn new(rows: &[Row]) -> Self {
+        assert!(rows.len() == N && handlers(rows) == H);
+        let mut defs = [bare_js_api::Def::number("", 0, 0.0); N];
+        let mut hs: [HS; H] = [no_handler; H];
+        let (mut i, mut h) = (0, 0);
+        while i < N {
+            let r = rows[i];
+            defs[i] = match r.mem {
+                Mem::Method(f, len) => {
+                    hs[h] = f;
+                    h += 1;
+                    bare_js_api::Def::method(r.name, r.on, h as u32 - 1, len)
+                }
+                Mem::Get(g, set) => {
+                    hs[h] = g;
+                    h += 1;
+                    let st = match set {
+                        Some(f) => {
+                            hs[h] = f;
+                            h += 1;
+                            Some(h as u32 - 1)
+                        }
+                        None => None,
+                    };
+                    bare_js_api::Def::accessor(r.name, r.on, if st.is_some() { h as u32 - 2 } else { h as u32 - 1 }, st)
+                }
+                Mem::Both(f) => {
+                    hs[h] = f;
+                    h += 1;
+                    bare_js_api::Def::both(r.name, r.on, h as u32 - 1)
+                }
+            }
+            .with(r.attrs);
+            i += 1;
+        }
+        Table { defs, hs }
+    }
+}
+
+/// A static table of host members: `table!(name = [Row::method(1, "item", 1, item), ...])` makes the module `name` with the table
+/// `name::T`. The handlers are in scope of the module as in the file.
+macro_rules! table {
+    ($name:ident = [$($row:expr),* $(,)?]) => {
+        mod $name {
+            #[allow(unused_imports)]
+            use super::*;
+            use $crate::browser_scoped::{handlers, Row, Table};
+            pub(super) const ROWS: &[Row] = &[$($row),*];
+            pub(super) static T: Table<{ ROWS.len() }, { handlers(ROWS) }> = Table::new(ROWS);
+        }
+    };
+}
+pub(crate) use table;
+
 /// What a scope gives to the hooks around a handler: the engine, and the way to give it an error of the old engine.
 pub(crate) trait Entry<'p> {
     type Err;
@@ -107,6 +229,17 @@ impl Dom {
     #[inline(never)]
     fn call_scoped_ce<'s, 'p>(&self, s: &mut Sc<'s, 'p>, f: HS, this: Local<'s>, args: Args<'s>) -> Res<'s, Local<'s>> {
         self.dispatch_ce(s, |s| f(self, s, this, args))
+    }
+
+    /// Install a static table (`Engine::install_table`): the handlers of the table get the next ids of `Dom::scoped`.
+    pub(crate) fn install_rows<'s, const N: usize, const H: usize>(&self, s: &mut Sc<'s, '_>, targets: &[Local<'s>], t: &'static Table<N, H>) -> Res<'s, ()> {
+        let base = {
+            let mut v = self.scoped.borrow_mut();
+            let base = v.len() as u32;
+            v.extend(t.hs.iter().enumerate().map(|(i, &f)| Scoped { f, needs_new: false, cur: (base + i as u32) | CUR_NEW }));
+            base
+        };
+        s.install_table(targets, base, &t.defs)
     }
 
     /// Make a function of the new form. Its id is its index in `Dom::scoped`.

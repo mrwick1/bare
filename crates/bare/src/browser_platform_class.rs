@@ -44,23 +44,31 @@ pub(crate) struct Toks {
 }
 
 pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>, list: ObjId, iter: ObjId, sym: Local<'s>) -> Res<'s, ()> {
-    d.def_method_at(s, list, "item", 1, item)?;
-    d.def_method_at(s, list, "contains", 1, contains)?;
-    d.def_method_at(s, list, "add", 0, add)?;
-    d.def_method_at(s, list, "remove", 0, remove)?;
-    d.def_method_at(s, list, "toggle", 1, toggle)?;
-    d.def_method_at(s, list, "replace", 2, replace)?;
-    d.def_method_at(s, list, "supports", 1, supports)?;
-    d.def_method_at(s, list, "toString", 0, value_get)?;
-    d.def_method_at(s, list, "forEach", 1, for_each)?;
-    d.def_method_at(s, list, "keys", 0, keys)?;
-    d.def_method_at(s, list, "entries", 0, entries)?;
+    table!(rows1 = [
+        Row::method(1, "item", 1, item),
+        Row::method(1, "contains", 1, contains),
+        Row::method(1, "add", 0, add),
+        Row::method(1, "remove", 0, remove),
+        Row::method(1, "toggle", 1, toggle),
+        Row::method(1, "replace", 2, replace),
+        Row::method(1, "supports", 1, supports),
+        Row::method(1, "toString", 0, value_get),
+        Row::method(1, "forEach", 1, for_each),
+        Row::method(1, "keys", 0, keys),
+        Row::method(1, "entries", 0, entries),
+    ]);
+    let targets = [d.obj_local(s, list)];
+    d.install_rows(s, &targets, &rows1::T)?;
     let values = d.def_method_at(s, list, "values", 0, values)?;
     let lo = d.obj_local(s, list);
     s.define(lo, sym, values, Attrs::METHOD)?;
-    d.def_get_at(s, list, "length", length, None)?;
-    d.def_get_at(s, list, "value", value_get, Some(value_set))?;
-    d.def_method_at(s, iter, "next", 0, iter_next)?;
+    table!(rows2 = [
+        Row::get(1, "length", length, None),
+        Row::get(1, "value", value_get, Some(value_set)),
+        Row::method(2, "next", 0, iter_next),
+    ]);
+    let targets = [d.obj_local(s, list), d.obj_local(s, iter)];
+    d.install_rows(s, &targets, &rows2::T)?;
     Ok(())
 }
 

@@ -653,7 +653,12 @@ pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
     }
     let et = d.obj_local(s, p.et);
     s.set_lazy(et, true)?;
-    crate::browser_lazy::install(d, s, &[("HTMLBodyElement", lazy_body as HS), ("HTMLFrameSetElement", lazy_frameset)])
+    table!(lazy = [
+        Row::both(1, "HTMLBodyElement", lazy_body),
+        Row::both(1, "HTMLFrameSetElement", lazy_frameset),
+    ]);
+    let g = s.global();
+    d.install_rows(s, &[g], &lazy::T)
 }
 
 // ------------------------------------------------------------------------------------------ body and frameset

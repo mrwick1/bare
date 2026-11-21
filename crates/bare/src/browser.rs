@@ -94,7 +94,7 @@ use bare_js::eval::{Error, EvalLimits, Host, Interp, LimitKind};
 use bare_js::heap::{Heap, HeapLimits, PropertyDescriptor};
 use bare_js::value::{ObjId, PropertyKey, Value};
 use bare_js_api::HostFn;
-use crate::browser_scoped::{obj_id, run, Attrs, Intrinsic, Res, Sc, HS};
+use crate::browser_scoped::{obj_id, run, table, Attrs, Intrinsic, Res, Row, Sc, HS};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::hash::{BuildHasherDefault, Hasher};
@@ -702,22 +702,6 @@ pub(crate) enum P {
     Pointer,
     Keyboard,
     InputEv,
-}
-
-pub(crate) enum Kind {
-    /// A method, on the interface registry (`browser_scoped.rs`).
-    MethodS(crate::browser_scoped::HS),
-    /// A getter.
-    GetS(crate::browser_scoped::HS),
-    /// A getter and a setter.
-    AccessorS(crate::browser_scoped::HS, crate::browser_scoped::HS),
-}
-
-pub(crate) struct Def {
-    pub on: &'static [P],
-    pub name: &'static str,
-    pub len: u32,
-    pub kind: Kind,
 }
 
 /// The DOM host of one realm.
@@ -1531,39 +1515,10 @@ impl Dom {
         self.st.borrow_mut().by_obj.insert(go, Target::Window);
         let mut fixed = vec![win, et, node, element, html, svg, input, iframe, link, form, button, submit, toggle, chardata, text, comment, document, fragment, shadow, event, custom, focus, mouse, pointer, keyboard, inputev, domexc];
 
-        // methods and accessors
-        // One buffer for the names "get x" and "set x" (a `format!` for each of the 130 accessors cost 1.5% of the start).
-        let mut nm = String::new();
-        let named = |nm: &mut String, p: &str, n: &str| {
-            nm.clear();
-            nm.push_str(p);
-            nm.push_str(n);
-        };
-        // One function object serves every target of a row (`Element.prototype.append === DocumentFragment.prototype.append`, unlike Chrome): a realm
-        // pays for each function it makes, and most rows of the table have 2 or 3 targets.
-        for d in DEFS {
-            let (f, st) = match d.kind {
-                Kind::MethodS(h) => (self.add_fn_s(s, h, d.name, d.len, HostFn::Method)?, None),
-                Kind::GetS(h) => {
-                    named(&mut nm, "get ", d.name);
-                    (self.add_fn_s(s, h, &nm, 0, HostFn::Method)?, None)
-                }
-                Kind::AccessorS(gh, sh) => {
-                    named(&mut nm, "get ", d.name);
-                    let f = self.add_fn_s(s, gh, &nm, 0, HostFn::Method)?;
-                    named(&mut nm, "set ", d.name);
-                    (f, Some(self.add_fn_s(s, sh, &nm, 1, HostFn::Method)?))
-                }
-            };
-            let key = s.string(d.name)?;
-            for &on in d.on {
-                let target = self.obj_local(s, self.pick(on));
-                match d.kind {
-                    Kind::MethodS(_) => s.define(target, key, f, Attrs::METHOD)?,
-                    _ => s.define_accessor(target, key, Some(f), st, Attrs { writable: false, enumerable: true, configurable: true })?,
-                }
-            }
-        }
+        // methods and accessors. One function object serves every target of a row (`Element.prototype.append === DocumentFragment.prototype.append`,
+        // unlike Chrome): a realm pays for each function it makes, and most rows of the table have 2 or 3 targets.
+        let targets = ALL_P.map(|p| self.obj_local(s, self.pick(p)));
+        self.install_rows(s, &targets, &defs::T)?;
 
         // interface objects
         let ifaces: [(&str, ObjId, Option<HS>); 26] = [
@@ -1667,7 +1622,11 @@ impl Dom {
         crate::browser_rejection::install(self, s)?;
         crate::browser_perf_observer::install(self, s)?;
         crate::browser_perf::install_interfaces(self, s)?;
-        crate::browser_lazy::install(self, s, &[("Screen", lazy_screen as HS)])?;
+        table!(lazy = [
+            Row::both(1, "Screen", lazy_screen),
+        ]);
+        let g = s.global();
+        self.install_rows(s, &[g], &lazy::T)?;
         crate::browser_select::install(self, s)?;
         // Last: a new host function earlier in this list moves the id of every one after it.
         crate::browser_elements::install(self, s)?;
@@ -1712,214 +1671,238 @@ pub(crate) fn illegal_constructor<'s>(_: &Dom, s: &mut crate::browser_scoped::Sc
     Err(s.type_error("Illegal constructor"))
 }
 
-use Kind::{AccessorS as AS, GetS as GS, MethodS as MS};
 use P::*;
 
 const PARENT: &[P] = &[Element, Document, Fragment];
 const CHILD: &[P] = &[Element, CharData];
 
-/// Every host method. The order is the order of function ids, but nothing depends on it.
-pub(crate) static DEFS: &[Def] = &[
-    Def { on: &[Et], name: "addEventListener", len: 2, kind: MS(ev::add_event_listener) },
-    Def { on: &[Et], name: "removeEventListener", len: 2, kind: MS(ev::remove_event_listener) },
-    Def { on: &[Et], name: "dispatchEvent", len: 1, kind: MS(ev::dispatch_event) },
-    Def { on: &[Node], name: "nodeType", len: 0, kind: GS(nd::node_type) },
-    Def { on: &[Node], name: "nodeName", len: 0, kind: GS(nd::node_name) },
-    Def { on: &[Node], name: "nodeValue", len: 0, kind: AS(nd::node_value, nd::set_node_value) },
-    Def { on: &[Node], name: "parentNode", len: 0, kind: GS(nd::parent_node) },
-    Def { on: &[Node], name: "parentElement", len: 0, kind: GS(nd::parent_element) },
-    Def { on: &[Node], name: "childNodes", len: 0, kind: GS(nd::child_nodes) },
-    Def { on: &[Node], name: "firstChild", len: 0, kind: GS(nd::first_child) },
-    Def { on: &[Node], name: "lastChild", len: 0, kind: GS(nd::last_child) },
-    Def { on: &[Node], name: "previousSibling", len: 0, kind: GS(nd::previous_sibling) },
-    Def { on: &[Node], name: "nextSibling", len: 0, kind: GS(nd::next_sibling) },
-    Def { on: &[Node], name: "ownerDocument", len: 0, kind: GS(nd::owner_document) },
-    Def { on: &[Node], name: "isConnected", len: 0, kind: GS(nd::is_connected) },
-    Def { on: &[Node], name: "textContent", len: 0, kind: AS(nd::text_content_s, nd::set_text_content_s) },
-    Def { on: &[Node], name: "appendChild", len: 1, kind: MS(nd::append_child_s) },
-    Def { on: &[Node], name: "insertBefore", len: 2, kind: MS(nd::insert_before) },
-    Def { on: &[Node], name: "removeChild", len: 1, kind: MS(nd::remove_child) },
-    Def { on: &[Node], name: "replaceChild", len: 2, kind: MS(nd::replace_child) },
-    Def { on: &[Node], name: "cloneNode", len: 0, kind: MS(nd::clone_node) },
-    Def { on: &[Node], name: "contains", len: 1, kind: MS(crate::browser_nodecmp::contains) },
-    Def { on: &[Node], name: "compareDocumentPosition", len: 1, kind: MS(crate::browser_nodecmp::compare_document_position) },
-    Def { on: &[Node], name: "isSameNode", len: 1, kind: MS(crate::browser_nodecmp::is_same_node) },
-    Def { on: &[Node], name: "isEqualNode", len: 1, kind: MS(crate::browser_nodecmp::is_equal_node) },
-    Def { on: &[Node], name: "lookupNamespaceURI", len: 1, kind: MS(crate::browser_nodecmp::lookup_namespace_uri) },
-    Def { on: &[Node], name: "lookupPrefix", len: 1, kind: MS(crate::browser_nodecmp::lookup_prefix) },
-    Def { on: &[Node], name: "isDefaultNamespace", len: 1, kind: MS(crate::browser_nodecmp::is_default_namespace) },
-    Def { on: &[Node], name: "getRootNode", len: 0, kind: MS(nd::get_root_node) },
-    Def { on: &[Node], name: "hasChildNodes", len: 0, kind: MS(nd::has_child_nodes) },
-    Def { on: PARENT, name: "children", len: 0, kind: GS(nd::children) },
-    Def { on: PARENT, name: "firstElementChild", len: 0, kind: GS(nd::first_element_child) },
-    Def { on: PARENT, name: "lastElementChild", len: 0, kind: GS(nd::last_element_child) },
-    Def { on: PARENT, name: "childElementCount", len: 0, kind: GS(nd::child_element_count) },
-    Def { on: PARENT, name: "querySelector", len: 1, kind: MS(nd::query_selector) },
-    Def { on: PARENT, name: "querySelectorAll", len: 1, kind: MS(nd::query_selector_all) },
-    Def { on: PARENT, name: "append", len: 0, kind: MS(nd::append) },
-    Def { on: PARENT, name: "prepend", len: 0, kind: MS(nd::prepend) },
-    Def { on: &[Element], name: "tagName", len: 0, kind: GS(nd::tag_name) },
-    Def { on: &[Element], name: "localName", len: 0, kind: GS(nd::local_name) },
-    Def { on: &[Element], name: "namespaceURI", len: 0, kind: GS(ns::namespace_uri) },
-    Def { on: &[Element], name: "prefix", len: 0, kind: GS(ns::prefix) },
-    Def { on: &[Element], name: "previousElementSibling", len: 0, kind: GS(nd::previous_element_sibling) },
-    Def { on: &[Element, Text], name: "assignedSlot", len: 0, kind: GS(crate::browser_slot::assigned_slot) },
-    Def { on: &[Element], name: "nextElementSibling", len: 0, kind: GS(nd::next_element_sibling) },
-    Def { on: &[Element, Shadow], name: "innerHTML", len: 0, kind: AS(frag::inner_html, frag::set_inner_html) },
-    Def { on: &[Element], name: "outerHTML", len: 0, kind: AS(frag::outer_html, frag::set_outer_html) },
-    Def { on: &[Element], name: "id", len: 0, kind: AS(nd::id, nd::set_id) },
-    Def { on: &[Element], name: "className", len: 0, kind: AS(nd::class_name, nd::set_class_name) },
-    Def { on: &[Element], name: "lang", len: 0, kind: AS(nd::lang, nd::set_lang) },
-    Def { on: &[Element], name: "getAttribute", len: 1, kind: MS(nd::get_attribute_s) },
-    Def { on: &[Element], name: "setAttribute", len: 2, kind: MS(nd::set_attribute) },
-    Def { on: &[Element], name: "removeAttribute", len: 1, kind: MS(nd::remove_attribute_s) },
-    Def { on: &[Element], name: "hasAttribute", len: 1, kind: MS(nd::has_attribute_s) },
-    Def { on: &[Element], name: "getAttributeNames", len: 0, kind: MS(nd::get_attribute_names) },
-    Def { on: &[Element], name: "attributes", len: 0, kind: GS(at::attributes) },
-    Def { on: &[Element], name: "hasAttributes", len: 0, kind: MS(at::has_attributes) },
-    Def { on: &[Element], name: "getAttributeNode", len: 1, kind: MS(at::get_attribute_node) },
-    Def { on: &[Element], name: "getAttributeNodeNS", len: 2, kind: MS(at::get_attribute_node_ns) },
-    Def { on: &[Element], name: "setAttributeNode", len: 1, kind: MS(at::set_attribute_node) },
-    Def { on: &[Element], name: "setAttributeNodeNS", len: 1, kind: MS(at::set_attribute_node) },
-    Def { on: &[Element], name: "removeAttributeNode", len: 1, kind: MS(at::remove_attribute_node) },
-    Def { on: &[Element], name: "getAttributeNS", len: 2, kind: MS(ns::get_attribute_ns) },
-    Def { on: &[Element], name: "setAttributeNS", len: 3, kind: MS(ns::set_attribute_ns) },
-    Def { on: &[Element], name: "hasAttributeNS", len: 2, kind: MS(ns::has_attribute_ns) },
-    Def { on: &[Element], name: "removeAttributeNS", len: 2, kind: MS(ns::remove_attribute_ns) },
-    Def { on: &[Element], name: "attachShadow", len: 1, kind: MS(sh::attach_shadow) },
-    Def { on: &[Element], name: "shadowRoot", len: 0, kind: GS(sh::shadow_root) },
-    Def { on: &[Shadow], name: "mode", len: 0, kind: GS(sh::mode) },
-    Def { on: &[Shadow], name: "delegatesFocus", len: 0, kind: GS(sh::flag_bit::<1>) },
-    Def { on: &[Shadow], name: "slotAssignment", len: 0, kind: GS(sh::slot_assignment) },
-    Def { on: &[Shadow], name: "clonable", len: 0, kind: GS(sh::flag_bit::<2>) },
-    Def { on: &[Shadow], name: "serializable", len: 0, kind: GS(sh::flag_bit::<4>) },
-    Def { on: &[Shadow], name: "host", len: 0, kind: GS(sh::host) },
-    Def { on: &[Element], name: "matches", len: 1, kind: MS(nd::matches_selector_s) },
-    Def { on: &[Element], name: "closest", len: 1, kind: MS(nd::closest) },
-    Def { on: CHILD, name: "remove", len: 0, kind: MS(nd::remove) },
-    Def { on: &[CharData], name: "data", len: 0, kind: AS(nd::node_value_text, nd::set_node_value_text) },
-    Def { on: &[CharData], name: "length", len: 0, kind: GS(nd::data_length) },
-    Def { on: &[CharData], name: "substringData", len: 2, kind: MS(crate::browser_chardata::substring_data) },
-    Def { on: &[CharData], name: "appendData", len: 1, kind: MS(crate::browser_chardata::append_data) },
-    Def { on: &[CharData], name: "insertData", len: 2, kind: MS(crate::browser_chardata::insert_data) },
-    Def { on: &[CharData], name: "deleteData", len: 2, kind: MS(crate::browser_chardata::delete_data) },
-    Def { on: &[CharData], name: "replaceData", len: 3, kind: MS(crate::browser_chardata::replace_data) },
-    Def { on: &[Text], name: "splitText", len: 1, kind: MS(crate::browser_chardata::split_text) },
-    Def { on: &[Node], name: "normalize", len: 0, kind: MS(crate::browser_chardata::normalize) },
-    Def { on: &[Document], name: "createElement", len: 1, kind: MS(nd::create_element_s) },
-    Def { on: &[Document], name: "createEvent", len: 1, kind: MS(ev::create_event) },
-    Def { on: &[Document], name: "createElementNS", len: 2, kind: MS(ns::create_element_ns) },
-    Def { on: &[Document], name: "getElementsByName", len: 1, kind: MS(crate::browser_nodelist::get_elements_by_name) },
-    Def { on: &[Document], name: "createAttribute", len: 1, kind: MS(at::create_attribute) },
-    Def { on: &[Document], name: "createAttributeNS", len: 2, kind: MS(at::create_attribute_ns) },
-    Def { on: &[Document], name: "createTextNode", len: 1, kind: MS(nd::create_text_node) },
-    Def { on: &[Document], name: "createComment", len: 1, kind: MS(nd::create_comment) },
-    Def { on: &[Document, Fragment], name: "getElementById", len: 1, kind: MS(nd::get_element_by_id) },
-    Def { on: &[Document, Shadow], name: "elementFromPoint", len: 2, kind: MS(crate::browser_point::element_from_point) },
-    Def { on: &[Document], name: "caretRangeFromPoint", len: 2, kind: MS(crate::browser_point::caret_range_from_point) },
-    Def { on: &[Document, Shadow], name: "elementsFromPoint", len: 2, kind: MS(crate::browser_point::elements_from_point) },
-    Def { on: &[Document], name: "documentElement", len: 0, kind: GS(nd::document_element_s) },
-    Def { on: &[Document], name: "head", len: 0, kind: GS(nd::head) },
-    Def { on: &[Document], name: "body", len: 0, kind: GS(nd::body_s) },
-    Def { on: &[Document], name: "title", len: 0, kind: AS(nd::document_title, nd::set_document_title) },
-    Def { on: &[Document], name: "doctype", len: 0, kind: GS(nd::doctype) },
-    Def { on: &[Document], name: "defaultView", len: 0, kind: GS(nd::default_view) },
-    Def { on: &[Input], name: "value", len: 0, kind: AS(nd::input_value, nd::set_input_value) },
-    Def { on: &[Input], name: "files", len: 0, kind: GS(nd::input_files) },
-    Def { on: &[Input], name: "checked", len: 0, kind: AS(nd::input_checked, nd::set_input_checked) },
-    Def { on: &[Input], name: "indeterminate", len: 0, kind: AS(nd::input_indeterminate, nd::set_input_indeterminate) },
-    Def { on: &[Input], name: "selectionStart", len: 0, kind: AS(sel::selection_start, sel::set_selection_start) },
-    Def { on: &[Input], name: "selectionEnd", len: 0, kind: AS(sel::selection_end, sel::set_selection_end) },
-    Def { on: &[Input], name: "selectionDirection", len: 0, kind: AS(sel::selection_direction, sel::set_selection_direction) },
-    Def { on: &[Input], name: "setSelectionRange", len: 2, kind: MS(sel::set_selection_range_method) },
-    Def { on: &[Input], name: "select", len: 0, kind: MS(sel::select_method) },
-    Def { on: &[Input], name: "setRangeText", len: 1, kind: MS(sel::set_range_text_input) },
-    Def { on: &[Input], name: "type", len: 0, kind: AS(nd::input_type, nd::set_input_type) },
-    Def { on: &[Input], name: "defaultValue", len: 0, kind: AS(nd::default_value, nd::set_default_value) },
-    Def { on: &[Input], name: "defaultChecked", len: 0, kind: AS(nd::default_checked, nd::set_default_checked) },
-    Def { on: &[Link], name: "rel", len: 0, kind: AS(nd::link_rel, nd::set_link_rel) },
-    Def { on: &[Link], name: "href", len: 0, kind: AS(crate::browser_loader::link_href, crate::browser_loader::set_link_href) },
-    Def { on: &[Link], name: "as", len: 0, kind: AS(nd::link_as, nd::set_link_as) },
-    Def { on: &[Link], name: "crossOrigin", len: 0, kind: AS(nd::link_cross_origin, nd::set_link_cross_origin) },
-    Def { on: &[Document], name: "scripts", len: 0, kind: GS(crate::browser_platform_query::scripts) },
-    Def { on: &[Document], name: "forms", len: 0, kind: GS(crate::browser_platform_query::forms) },
-    Def { on: &[Document], name: "images", len: 0, kind: GS(crate::browser_platform_query::images) },
-    Def { on: &[Document], name: "embeds", len: 0, kind: GS(crate::browser_platform_query::embeds) },
-    Def { on: &[Document], name: "links", len: 0, kind: GS(crate::browser_platform_query::links) },
-    Def { on: &[Document], name: "anchors", len: 0, kind: GS(crate::browser_platform_query::anchors) },
-    Def { on: &[Input], name: "name", len: 0, kind: AS(fm::input_name, fm::set_input_name) },
-    Def { on: &[Input], name: "disabled", len: 0, kind: AS(fm::input_disabled, fm::set_input_disabled) },
-    Def { on: &[Input], name: "readOnly", len: 0, kind: AS(fm::input_read_only, fm::set_input_read_only) },
-    Def { on: &[Input], name: "form", len: 0, kind: GS(fm::input_form) },
-    Def { on: &[Input], name: "formNoValidate", len: 0, kind: AS(fm::input_form_no_validate, fm::set_input_form_no_validate) },
-    Def { on: &[Button], name: "name", len: 0, kind: AS(fm::button_name, fm::set_button_name) },
-    Def { on: &[Button], name: "type", len: 0, kind: AS(fm::button_type, fm::set_button_type) },
-    Def { on: &[Button], name: "disabled", len: 0, kind: AS(fm::button_disabled, fm::set_button_disabled) },
-    Def { on: &[Button], name: "form", len: 0, kind: GS(fm::button_form) },
-    Def { on: &[Button], name: "formNoValidate", len: 0, kind: AS(fm::button_form_no_validate, fm::set_button_form_no_validate) },
-    Def { on: &[Form], name: "noValidate", len: 0, kind: AS(fm::form_no_validate, fm::set_form_no_validate) },
-    Def { on: &[Form], name: "requestSubmit", len: 0, kind: MS(crate::browser_submit::request_submit) },
-    Def { on: &[Form], name: "submit", len: 0, kind: MS(crate::browser_submit::submit_method) },
-    Def { on: &[Form], name: "checkValidity", len: 0, kind: MS(crate::browser_submit::form_check_validity) },
-    Def { on: &[Form], name: "reportValidity", len: 0, kind: MS(crate::browser_submit::form_report_validity) },
-    Def { on: &[Input, Button], name: "checkValidity", len: 0, kind: MS(crate::browser_submit::control_check_validity) },
-    Def { on: &[Input, Button], name: "reportValidity", len: 0, kind: MS(crate::browser_submit::control_report_validity) },
-    Def { on: &[Submit], name: "submitter", len: 0, kind: GS(fm::submit_event_submitter) },
-    Def { on: &[Toggle], name: "oldState", len: 0, kind: GS(crate::browser_details::old_state) },
-    Def { on: &[Toggle], name: "newState", len: 0, kind: GS(crate::browser_details::new_state) },
-    Def { on: &[Event], name: "type", len: 0, kind: GS(ev::event_type) },
-    Def { on: &[Event], name: "target", len: 0, kind: GS(ev::event_target) },
-    Def { on: &[Event], name: "currentTarget", len: 0, kind: GS(ev::event_current_target) },
-    Def { on: &[Event], name: "eventPhase", len: 0, kind: GS(ev::event_phase) },
-    Def { on: &[Event], name: "bubbles", len: 0, kind: GS(ev::event_bubbles) },
-    Def { on: &[Event], name: "cancelable", len: 0, kind: GS(ev::event_cancelable) },
-    Def { on: &[Event], name: "composed", len: 0, kind: GS(ev::event_composed) },
-    Def { on: &[Event], name: "defaultPrevented", len: 0, kind: GS(ev::event_default_prevented) },
-    Def { on: &[Event], name: "isTrusted", len: 0, kind: GS(ev::event_is_trusted) },
-    Def { on: &[Event], name: "timeStamp", len: 0, kind: GS(ev::event_time_stamp) },
-    Def { on: &[Event], name: "srcElement", len: 0, kind: GS(ev::event_src_element) },
-    Def { on: &[Event], name: "returnValue", len: 0, kind: AS(ev::event_return_value, ev::set_event_return_value) },
-    Def { on: &[Event], name: "cancelBubble", len: 0, kind: AS(ev::event_cancel_bubble, ev::set_event_cancel_bubble) },
-    Def { on: &[Event], name: "preventDefault", len: 0, kind: MS(ev::prevent_default) },
-    Def { on: &[Event], name: "stopPropagation", len: 0, kind: MS(ev::stop_propagation) },
-    Def { on: &[Event], name: "stopImmediatePropagation", len: 0, kind: MS(ev::stop_immediate_propagation) },
-    Def { on: &[Event], name: "composedPath", len: 0, kind: MS(ev::composed_path) },
-    Def { on: &[Event], name: "initEvent", len: 1, kind: MS(ev::init_event) },
-    Def { on: &[Custom], name: "initCustomEvent", len: 1, kind: MS(ev::init_custom_event) },
-    Def { on: &[Custom], name: "detail", len: 0, kind: GS(ev::custom_detail) },
-    Def { on: &[Html], name: "focus", len: 0, kind: MS(crate::browser_focus::focus) },
-    Def { on: &[Html], name: "blur", len: 0, kind: MS(crate::browser_focus::blur) },
-    Def { on: &[Document], name: "activeElement", len: 0, kind: GS(crate::browser_focus::active_element) },
-    Def { on: &[Focus], name: "relatedTarget", len: 0, kind: GS(crate::browser_focus::related_target) },
-    Def { on: &[Mouse], name: "clientX", len: 0, kind: GS(ui::client_x) },
-    Def { on: &[Mouse], name: "clientY", len: 0, kind: GS(ui::client_y) },
-    Def { on: &[Mouse], name: "screenX", len: 0, kind: GS(ui::screen_x) },
-    Def { on: &[Mouse], name: "screenY", len: 0, kind: GS(ui::screen_y) },
-    Def { on: &[Mouse], name: "pageX", len: 0, kind: GS(ui::page_x) },
-    Def { on: &[Mouse], name: "pageY", len: 0, kind: GS(ui::page_y) },
-    Def { on: &[Mouse], name: "x", len: 0, kind: GS(ui::client_x) },
-    Def { on: &[Mouse], name: "y", len: 0, kind: GS(ui::client_y) },
-    Def { on: &[Mouse], name: "button", len: 0, kind: GS(ui::button) },
-    Def { on: &[Mouse], name: "buttons", len: 0, kind: GS(ui::buttons) },
-    Def { on: &[Mouse, Keyboard, InputEv], name: "detail", len: 0, kind: GS(ui::detail) },
-    Def { on: &[Mouse, Keyboard], name: "shiftKey", len: 0, kind: GS(ui::shift) },
-    Def { on: &[Mouse, Keyboard], name: "ctrlKey", len: 0, kind: GS(ui::ctrl) },
-    Def { on: &[Mouse, Keyboard], name: "altKey", len: 0, kind: GS(ui::alt) },
-    Def { on: &[Mouse, Keyboard], name: "metaKey", len: 0, kind: GS(ui::meta) },
-    Def { on: &[Mouse], name: "relatedTarget", len: 0, kind: GS(ui::related) },
-    Def { on: &[Pointer], name: "pointerType", len: 0, kind: GS(ui::pointer_type) },
-    Def { on: &[Pointer], name: "isPrimary", len: 0, kind: GS(ui::is_primary) },
-    Def { on: &[Pointer], name: "pointerId", len: 0, kind: GS(ui::pointer_id) },
-    Def { on: &[Keyboard], name: "key", len: 0, kind: GS(ui::key) },
-    Def { on: &[Keyboard], name: "code", len: 0, kind: GS(ui::code) },
-    Def { on: &[Keyboard], name: "repeat", len: 0, kind: GS(ui::repeat) },
-    Def { on: &[Keyboard], name: "keyCode", len: 0, kind: GS(ui::key_code) },
-    Def { on: &[Keyboard], name: "which", len: 0, kind: GS(ui::key_code) },
-    Def { on: &[Keyboard], name: "location", len: 0, kind: GS(ui::location) },
-    Def { on: &[Keyboard, InputEv], name: "isComposing", len: 0, kind: GS(ui::is_composing) },
-    Def { on: &[InputEv], name: "data", len: 0, kind: GS(ui::data) },
-    Def { on: &[InputEv], name: "inputType", len: 0, kind: GS(ui::input_type) },
-];
+/// The mask of the targets of a row: bit `p` is the prototype `P::p` in the order of `ALL_P`.
+const fn mask(on: &[P]) -> u32 {
+    let (mut i, mut m) = (0, 0);
+    while i < on.len() {
+        m |= 1 << on[i] as u32;
+        i += 1;
+    }
+    m
+}
+
+const fn ms(on: &[P], name: &'static str, len: u32, h: HS) -> Row {
+    Row::method(mask(on), name, len, h)
+}
+
+const fn gs(on: &[P], name: &'static str, h: HS) -> Row {
+    Row::get(mask(on), name, h, None)
+}
+
+const fn asr(on: &[P], name: &'static str, get: HS, set: HS) -> Row {
+    Row::get(mask(on), name, get, Some(set))
+}
+
+/// The prototypes in the order of `P`: the targets of the table `defs::T`.
+const ALL_P: [P; 22] = [Et, Node, Element, Html, Input, Link, Form, Button, Submit, Toggle, CharData, Text, Document, Fragment, Shadow, Event, Custom, Focus, Mouse, Pointer, Keyboard, InputEv];
+
+// Every host method. The order is the order of function ids, but nothing depends on it.
+table!(defs = [
+    ms(&[Et], "addEventListener", 2, ev::add_event_listener),
+    ms(&[Et], "removeEventListener", 2, ev::remove_event_listener),
+    ms(&[Et], "dispatchEvent", 1, ev::dispatch_event),
+    gs(&[Node], "nodeType", nd::node_type),
+    gs(&[Node], "nodeName", nd::node_name),
+    asr(&[Node], "nodeValue", nd::node_value, nd::set_node_value),
+    gs(&[Node], "parentNode", nd::parent_node),
+    gs(&[Node], "parentElement", nd::parent_element),
+    gs(&[Node], "childNodes", nd::child_nodes),
+    gs(&[Node], "firstChild", nd::first_child),
+    gs(&[Node], "lastChild", nd::last_child),
+    gs(&[Node], "previousSibling", nd::previous_sibling),
+    gs(&[Node], "nextSibling", nd::next_sibling),
+    gs(&[Node], "ownerDocument", nd::owner_document),
+    gs(&[Node], "isConnected", nd::is_connected),
+    asr(&[Node], "textContent", nd::text_content_s, nd::set_text_content_s),
+    ms(&[Node], "appendChild", 1, nd::append_child_s),
+    ms(&[Node], "insertBefore", 2, nd::insert_before),
+    ms(&[Node], "removeChild", 1, nd::remove_child),
+    ms(&[Node], "replaceChild", 2, nd::replace_child),
+    ms(&[Node], "cloneNode", 0, nd::clone_node),
+    ms(&[Node], "contains", 1, crate::browser_nodecmp::contains),
+    ms(&[Node], "compareDocumentPosition", 1, crate::browser_nodecmp::compare_document_position),
+    ms(&[Node], "isSameNode", 1, crate::browser_nodecmp::is_same_node),
+    ms(&[Node], "isEqualNode", 1, crate::browser_nodecmp::is_equal_node),
+    ms(&[Node], "lookupNamespaceURI", 1, crate::browser_nodecmp::lookup_namespace_uri),
+    ms(&[Node], "lookupPrefix", 1, crate::browser_nodecmp::lookup_prefix),
+    ms(&[Node], "isDefaultNamespace", 1, crate::browser_nodecmp::is_default_namespace),
+    ms(&[Node], "getRootNode", 0, nd::get_root_node),
+    ms(&[Node], "hasChildNodes", 0, nd::has_child_nodes),
+    gs(PARENT, "children", nd::children),
+    gs(PARENT, "firstElementChild", nd::first_element_child),
+    gs(PARENT, "lastElementChild", nd::last_element_child),
+    gs(PARENT, "childElementCount", nd::child_element_count),
+    ms(PARENT, "querySelector", 1, nd::query_selector),
+    ms(PARENT, "querySelectorAll", 1, nd::query_selector_all),
+    ms(PARENT, "append", 0, nd::append),
+    ms(PARENT, "prepend", 0, nd::prepend),
+    gs(&[Element], "tagName", nd::tag_name),
+    gs(&[Element], "localName", nd::local_name),
+    gs(&[Element], "namespaceURI", ns::namespace_uri),
+    gs(&[Element], "prefix", ns::prefix),
+    gs(&[Element], "previousElementSibling", nd::previous_element_sibling),
+    gs(&[Element, Text], "assignedSlot", crate::browser_slot::assigned_slot),
+    gs(&[Element], "nextElementSibling", nd::next_element_sibling),
+    asr(&[Element, Shadow], "innerHTML", frag::inner_html, frag::set_inner_html),
+    asr(&[Element], "outerHTML", frag::outer_html, frag::set_outer_html),
+    asr(&[Element], "id", nd::id, nd::set_id),
+    asr(&[Element], "className", nd::class_name, nd::set_class_name),
+    asr(&[Element], "lang", nd::lang, nd::set_lang),
+    ms(&[Element], "getAttribute", 1, nd::get_attribute_s),
+    ms(&[Element], "setAttribute", 2, nd::set_attribute),
+    ms(&[Element], "removeAttribute", 1, nd::remove_attribute_s),
+    ms(&[Element], "hasAttribute", 1, nd::has_attribute_s),
+    ms(&[Element], "getAttributeNames", 0, nd::get_attribute_names),
+    gs(&[Element], "attributes", at::attributes),
+    ms(&[Element], "hasAttributes", 0, at::has_attributes),
+    ms(&[Element], "getAttributeNode", 1, at::get_attribute_node),
+    ms(&[Element], "getAttributeNodeNS", 2, at::get_attribute_node_ns),
+    ms(&[Element], "setAttributeNode", 1, at::set_attribute_node),
+    ms(&[Element], "setAttributeNodeNS", 1, at::set_attribute_node),
+    ms(&[Element], "removeAttributeNode", 1, at::remove_attribute_node),
+    ms(&[Element], "getAttributeNS", 2, ns::get_attribute_ns),
+    ms(&[Element], "setAttributeNS", 3, ns::set_attribute_ns),
+    ms(&[Element], "hasAttributeNS", 2, ns::has_attribute_ns),
+    ms(&[Element], "removeAttributeNS", 2, ns::remove_attribute_ns),
+    ms(&[Element], "attachShadow", 1, sh::attach_shadow),
+    gs(&[Element], "shadowRoot", sh::shadow_root),
+    gs(&[Shadow], "mode", sh::mode),
+    gs(&[Shadow], "delegatesFocus", sh::flag_bit::<1>),
+    gs(&[Shadow], "slotAssignment", sh::slot_assignment),
+    gs(&[Shadow], "clonable", sh::flag_bit::<2>),
+    gs(&[Shadow], "serializable", sh::flag_bit::<4>),
+    gs(&[Shadow], "host", sh::host),
+    ms(&[Element], "matches", 1, nd::matches_selector_s),
+    ms(&[Element], "closest", 1, nd::closest),
+    ms(CHILD, "remove", 0, nd::remove),
+    asr(&[CharData], "data", nd::node_value_text, nd::set_node_value_text),
+    gs(&[CharData], "length", nd::data_length),
+    ms(&[CharData], "substringData", 2, crate::browser_chardata::substring_data),
+    ms(&[CharData], "appendData", 1, crate::browser_chardata::append_data),
+    ms(&[CharData], "insertData", 2, crate::browser_chardata::insert_data),
+    ms(&[CharData], "deleteData", 2, crate::browser_chardata::delete_data),
+    ms(&[CharData], "replaceData", 3, crate::browser_chardata::replace_data),
+    ms(&[Text], "splitText", 1, crate::browser_chardata::split_text),
+    ms(&[Node], "normalize", 0, crate::browser_chardata::normalize),
+    ms(&[Document], "createElement", 1, nd::create_element_s),
+    ms(&[Document], "createEvent", 1, ev::create_event),
+    ms(&[Document], "createElementNS", 2, ns::create_element_ns),
+    ms(&[Document], "getElementsByName", 1, crate::browser_nodelist::get_elements_by_name),
+    ms(&[Document], "createAttribute", 1, at::create_attribute),
+    ms(&[Document], "createAttributeNS", 2, at::create_attribute_ns),
+    ms(&[Document], "createTextNode", 1, nd::create_text_node),
+    ms(&[Document], "createComment", 1, nd::create_comment),
+    ms(&[Document, Fragment], "getElementById", 1, nd::get_element_by_id),
+    ms(&[Document, Shadow], "elementFromPoint", 2, crate::browser_point::element_from_point),
+    ms(&[Document], "caretRangeFromPoint", 2, crate::browser_point::caret_range_from_point),
+    ms(&[Document, Shadow], "elementsFromPoint", 2, crate::browser_point::elements_from_point),
+    gs(&[Document], "documentElement", nd::document_element_s),
+    gs(&[Document], "head", nd::head),
+    gs(&[Document], "body", nd::body_s),
+    asr(&[Document], "title", nd::document_title, nd::set_document_title),
+    gs(&[Document], "doctype", nd::doctype),
+    gs(&[Document], "defaultView", nd::default_view),
+    asr(&[Input], "value", nd::input_value, nd::set_input_value),
+    gs(&[Input], "files", nd::input_files),
+    asr(&[Input], "checked", nd::input_checked, nd::set_input_checked),
+    asr(&[Input], "indeterminate", nd::input_indeterminate, nd::set_input_indeterminate),
+    asr(&[Input], "selectionStart", sel::selection_start, sel::set_selection_start),
+    asr(&[Input], "selectionEnd", sel::selection_end, sel::set_selection_end),
+    asr(&[Input], "selectionDirection", sel::selection_direction, sel::set_selection_direction),
+    ms(&[Input], "setSelectionRange", 2, sel::set_selection_range_method),
+    ms(&[Input], "select", 0, sel::select_method),
+    ms(&[Input], "setRangeText", 1, sel::set_range_text_input),
+    asr(&[Input], "type", nd::input_type, nd::set_input_type),
+    asr(&[Input], "defaultValue", nd::default_value, nd::set_default_value),
+    asr(&[Input], "defaultChecked", nd::default_checked, nd::set_default_checked),
+    asr(&[Link], "rel", nd::link_rel, nd::set_link_rel),
+    asr(&[Link], "href", crate::browser_loader::link_href, crate::browser_loader::set_link_href),
+    asr(&[Link], "as", nd::link_as, nd::set_link_as),
+    asr(&[Link], "crossOrigin", nd::link_cross_origin, nd::set_link_cross_origin),
+    gs(&[Document], "scripts", crate::browser_platform_query::scripts),
+    gs(&[Document], "forms", crate::browser_platform_query::forms),
+    gs(&[Document], "images", crate::browser_platform_query::images),
+    gs(&[Document], "embeds", crate::browser_platform_query::embeds),
+    gs(&[Document], "links", crate::browser_platform_query::links),
+    gs(&[Document], "anchors", crate::browser_platform_query::anchors),
+    asr(&[Input], "name", fm::input_name, fm::set_input_name),
+    asr(&[Input], "disabled", fm::input_disabled, fm::set_input_disabled),
+    asr(&[Input], "readOnly", fm::input_read_only, fm::set_input_read_only),
+    gs(&[Input], "form", fm::input_form),
+    asr(&[Input], "formNoValidate", fm::input_form_no_validate, fm::set_input_form_no_validate),
+    asr(&[Button], "name", fm::button_name, fm::set_button_name),
+    asr(&[Button], "type", fm::button_type, fm::set_button_type),
+    asr(&[Button], "disabled", fm::button_disabled, fm::set_button_disabled),
+    gs(&[Button], "form", fm::button_form),
+    asr(&[Button], "formNoValidate", fm::button_form_no_validate, fm::set_button_form_no_validate),
+    asr(&[Form], "noValidate", fm::form_no_validate, fm::set_form_no_validate),
+    ms(&[Form], "requestSubmit", 0, crate::browser_submit::request_submit),
+    ms(&[Form], "submit", 0, crate::browser_submit::submit_method),
+    ms(&[Form], "checkValidity", 0, crate::browser_submit::form_check_validity),
+    ms(&[Form], "reportValidity", 0, crate::browser_submit::form_report_validity),
+    ms(&[Input, Button], "checkValidity", 0, crate::browser_submit::control_check_validity),
+    ms(&[Input, Button], "reportValidity", 0, crate::browser_submit::control_report_validity),
+    gs(&[Submit], "submitter", fm::submit_event_submitter),
+    gs(&[Toggle], "oldState", crate::browser_details::old_state),
+    gs(&[Toggle], "newState", crate::browser_details::new_state),
+    gs(&[Event], "type", ev::event_type),
+    gs(&[Event], "target", ev::event_target),
+    gs(&[Event], "currentTarget", ev::event_current_target),
+    gs(&[Event], "eventPhase", ev::event_phase),
+    gs(&[Event], "bubbles", ev::event_bubbles),
+    gs(&[Event], "cancelable", ev::event_cancelable),
+    gs(&[Event], "composed", ev::event_composed),
+    gs(&[Event], "defaultPrevented", ev::event_default_prevented),
+    gs(&[Event], "isTrusted", ev::event_is_trusted),
+    gs(&[Event], "timeStamp", ev::event_time_stamp),
+    gs(&[Event], "srcElement", ev::event_src_element),
+    asr(&[Event], "returnValue", ev::event_return_value, ev::set_event_return_value),
+    asr(&[Event], "cancelBubble", ev::event_cancel_bubble, ev::set_event_cancel_bubble),
+    ms(&[Event], "preventDefault", 0, ev::prevent_default),
+    ms(&[Event], "stopPropagation", 0, ev::stop_propagation),
+    ms(&[Event], "stopImmediatePropagation", 0, ev::stop_immediate_propagation),
+    ms(&[Event], "composedPath", 0, ev::composed_path),
+    ms(&[Event], "initEvent", 1, ev::init_event),
+    ms(&[Custom], "initCustomEvent", 1, ev::init_custom_event),
+    gs(&[Custom], "detail", ev::custom_detail),
+    ms(&[Html], "focus", 0, crate::browser_focus::focus),
+    ms(&[Html], "blur", 0, crate::browser_focus::blur),
+    gs(&[Document], "activeElement", crate::browser_focus::active_element),
+    gs(&[Focus], "relatedTarget", crate::browser_focus::related_target),
+    gs(&[Mouse], "clientX", ui::client_x),
+    gs(&[Mouse], "clientY", ui::client_y),
+    gs(&[Mouse], "screenX", ui::screen_x),
+    gs(&[Mouse], "screenY", ui::screen_y),
+    gs(&[Mouse], "pageX", ui::page_x),
+    gs(&[Mouse], "pageY", ui::page_y),
+    gs(&[Mouse], "x", ui::client_x),
+    gs(&[Mouse], "y", ui::client_y),
+    gs(&[Mouse], "button", ui::button),
+    gs(&[Mouse], "buttons", ui::buttons),
+    gs(&[Mouse, Keyboard, InputEv], "detail", ui::detail),
+    gs(&[Mouse, Keyboard], "shiftKey", ui::shift),
+    gs(&[Mouse, Keyboard], "ctrlKey", ui::ctrl),
+    gs(&[Mouse, Keyboard], "altKey", ui::alt),
+    gs(&[Mouse, Keyboard], "metaKey", ui::meta),
+    gs(&[Mouse], "relatedTarget", ui::related),
+    gs(&[Pointer], "pointerType", ui::pointer_type),
+    gs(&[Pointer], "isPrimary", ui::is_primary),
+    gs(&[Pointer], "pointerId", ui::pointer_id),
+    gs(&[Keyboard], "key", ui::key),
+    gs(&[Keyboard], "code", ui::code),
+    gs(&[Keyboard], "repeat", ui::repeat),
+    gs(&[Keyboard], "keyCode", ui::key_code),
+    gs(&[Keyboard], "which", ui::key_code),
+    gs(&[Keyboard], "location", ui::location),
+    gs(&[Keyboard, InputEv], "isComposing", ui::is_composing),
+    gs(&[InputEv], "data", ui::data),
+    gs(&[InputEv], "inputType", ui::input_type),
+]);
 
 // ---------------------------------------------------------------------------------------------- Browser
 

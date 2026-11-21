@@ -128,9 +128,13 @@ pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
     ] {
         d.interface_s(s, proto, name, ctor.unwrap_or(illegal_ctor), len, HostFn::Ctor)?;
     }
-    d.def_method_at(s, observer, "observe", 1, observe)?;
-    d.def_method_at(s, observer, "unobserve", 1, unobserve)?;
-    d.def_method_at(s, observer, "disconnect", 0, disconnect)?;
+    table!(rows1 = [
+        Row::method(1, "observe", 1, observe),
+        Row::method(1, "unobserve", 1, unobserve),
+        Row::method(1, "disconnect", 0, disconnect),
+    ]);
+    let targets = [d.obj_local(s, observer)];
+    d.install_rows(s, &targets, &rows1::T)?;
     d.def_get_at(s, entry, "devicePixelContentBoxSize", device_sizes, None)
 }
 

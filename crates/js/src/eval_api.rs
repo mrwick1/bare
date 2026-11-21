@@ -267,6 +267,7 @@ impl<'p> Interp<'p> {
                         st = Some(host_fn(self, id_base + id, 1, n)?);
                     }
                 }
+                DefKind::Both { id } => f = Some(host_fn(self, id_base + id, 0, name)?),
                 DefKind::Number(_) => {}
             }
             for (i, o) in objs.iter().enumerate() {
@@ -274,7 +275,8 @@ impl<'p> Interp<'p> {
                 match d.kind {
                     DefKind::Method { .. } => self.define_data(o, key, Value::Object(f.expect("a method")), a.writable, a.enumerable, a.configurable)?,
                     DefKind::Number(n) => self.define_data(o, key, Value::Number(n), a.writable, a.enumerable, a.configurable)?,
-                    DefKind::Accessor { .. } => {
+                    DefKind::Accessor { .. } | DefKind::Both { .. } => {
+                        let st = if matches!(d.kind, DefKind::Both { .. }) { f } else { st };
                         let desc = PropertyDescriptor { get: Some(f), set: Some(st), enumerable: Some(a.enumerable), configurable: Some(a.configurable), ..Default::default() };
                         h!(self, self.heap.define_own_property(o, key, &desc));
                     }

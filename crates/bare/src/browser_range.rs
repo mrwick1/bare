@@ -1514,10 +1514,20 @@ lazy_global!(lazy_selection, "Selection", ensure, |d| state(d).borrow().made.exp
 
 pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
     let g = s.global();
-    d.def_method_l(s, g, "getSelection", 0, get_selection, false)?;
-    d.def_method_at(s, d.p().document, "getSelection", 0, get_selection)?;
-    d.def_method_at(s, d.p().document, "createRange", 0, create_range)?;
-    crate::browser_lazy::install(d, s, &[("Range", lazy_range as HS), ("Selection", lazy_selection), ("AbstractRange", lazy_abstract)])
+    table!(rows1 = [
+        Row::method(1, "getSelection", 0, get_selection),
+        Row::method(2, "getSelection", 0, get_selection),
+        Row::method(2, "createRange", 0, create_range),
+    ]);
+    let targets = [g, d.obj_local(s, d.p().document)];
+    d.install_rows(s, &targets, &rows1::T)?;
+    table!(lazy = [
+        Row::both(1, "Range", lazy_range),
+        Row::both(1, "Selection", lazy_selection),
+        Row::both(1, "AbstractRange", lazy_abstract),
+    ]);
+    let g = s.global();
+    d.install_rows(s, &[g], &lazy::T)
 }
 
 /// The boundary points of a range: start container and offset, end container and offset.

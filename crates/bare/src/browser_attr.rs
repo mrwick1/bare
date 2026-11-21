@@ -743,34 +743,46 @@ pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
     let mut fixed = vec![attr, map];
 
     // Attr
-    d.def_get_at(s, attr, "name", attr_name, None)?;
-    d.def_get_at(s, attr, "localName", attr_local_name, None)?;
-    d.def_get_at(s, attr, "prefix", attr_prefix, None)?;
-    d.def_get_at(s, attr, "namespaceURI", attr_namespace_uri, None)?;
-    d.def_get_at(s, attr, "value", attr_value_get, Some(attr_value_set))?;
-    d.def_get_at(s, attr, "nodeValue", attr_value_get, Some(attr_node_value_set))?;
-    d.def_get_at(s, attr, "textContent", attr_value_get, Some(attr_node_value_set))?;
-    d.def_get_at(s, attr, "nodeName", attr_name, None)?;
-    d.def_get_at(s, attr, "nodeType", attr_node_type, None)?;
-    d.def_get_at(s, attr, "ownerElement", attr_owner_element, None)?;
-    d.def_get_at(s, attr, "ownerDocument", attr_owner_document, None)?;
-    d.def_get_at(s, attr, "specified", attr_true, None)?;
-    d.def_get_at(s, attr, "isConnected", attr_false, None)?;
+    table!(rows1 = [
+        Row::get(1, "name", attr_name, None),
+        Row::get(1, "localName", attr_local_name, None),
+        Row::get(1, "prefix", attr_prefix, None),
+        Row::get(1, "namespaceURI", attr_namespace_uri, None),
+        Row::get(1, "value", attr_value_get, Some(attr_value_set)),
+        Row::get(1, "nodeValue", attr_value_get, Some(attr_node_value_set)),
+        Row::get(1, "textContent", attr_value_get, Some(attr_node_value_set)),
+        Row::get(1, "nodeName", attr_name, None),
+        Row::get(1, "nodeType", attr_node_type, None),
+        Row::get(1, "ownerElement", attr_owner_element, None),
+        Row::get(1, "ownerDocument", attr_owner_document, None),
+        Row::get(1, "specified", attr_true, None),
+        Row::get(1, "isConnected", attr_false, None),
+    ]);
+    let targets = [d.obj_local(s, attr)];
+    d.install_rows(s, &targets, &rows1::T)?;
     for name in ["parentNode", "parentElement", "firstChild", "lastChild", "previousSibling", "nextSibling"] {
         d.def_get_at(s, attr, name, attr_null, None)?;
     }
-    d.def_get_at(s, attr, "childNodes", attr_no_children, None)?;
-    d.def_method_at(s, attr, "hasChildNodes", 0, attr_false)?;
+    table!(rows2 = [
+        Row::get(1, "childNodes", attr_no_children, None),
+        Row::method(1, "hasChildNodes", 0, attr_false),
+    ]);
+    let targets = [d.obj_local(s, attr)];
+    d.install_rows(s, &targets, &rows2::T)?;
 
     // NamedNodeMap
-    d.def_get_at(s, map, "length", map_length, None)?;
-    d.def_method_at(s, map, "item", 1, map_item)?;
-    d.def_method_at(s, map, "getNamedItem", 1, get_named_item)?;
-    d.def_method_at(s, map, "getNamedItemNS", 2, get_named_item_ns)?;
-    d.def_method_at(s, map, "setNamedItem", 1, set_named_item)?;
-    d.def_method_at(s, map, "setNamedItemNS", 1, set_named_item)?;
-    d.def_method_at(s, map, "removeNamedItem", 1, remove_named_item)?;
-    d.def_method_at(s, map, "removeNamedItemNS", 2, remove_named_item_ns)?;
+    table!(rows3 = [
+        Row::get(1, "length", map_length, None),
+        Row::method(1, "item", 1, map_item),
+        Row::method(1, "getNamedItem", 1, get_named_item),
+        Row::method(1, "getNamedItemNS", 2, get_named_item_ns),
+        Row::method(1, "setNamedItem", 1, set_named_item),
+        Row::method(1, "setNamedItemNS", 1, set_named_item),
+        Row::method(1, "removeNamedItem", 1, remove_named_item),
+        Row::method(1, "removeNamedItemNS", 2, remove_named_item_ns),
+    ]);
+    let targets = [d.obj_local(s, map)];
+    d.install_rows(s, &targets, &rows3::T)?;
     // `[Symbol.iterator]` is `Array.prototype[Symbol.iterator]`: the map has indices and a `length`.
     let ap = s.intrinsic(Intrinsic::ArrayPrototype);
     let sym = s.intrinsic(Intrinsic::SymbolIterator);

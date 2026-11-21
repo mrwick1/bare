@@ -517,12 +517,17 @@ impl Engine for Realm {
                     });
                     [Some(g), st]
                 }
+                DefKind::Both { id } => {
+                    let Key::Name(name) = k else { unreachable!() };
+                    let f = self.host_cell(name.value(), id_base + id, 0, HostFn::Method).value();
+                    [Some(f), Some(f)]
+                }
                 DefKind::Number(n) => [Some(Value::number(n)), None],
             };
             for (i, o) in objs.iter().enumerate() {
                 let (true, Some(o)) = (d.on >> i & 1 != 0, *o) else { continue };
                 let r = match d.kind {
-                    DefKind::Accessor { .. } => {
+                    DefKind::Accessor { .. } | DefKind::Both { .. } => {
                         let g = fns[0].map_or(Ok(()), |g| self.define_accessor(o, k, g, false, d.attrs.enumerable));
                         g.and_then(|()| fns[1].map_or(Ok(()), |st| self.define_accessor(o, k, st, true, d.attrs.enumerable)))
                     }
