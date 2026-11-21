@@ -47,6 +47,23 @@ fn typed_methods_and_integer_indexed_properties() {
 }
 
 #[test]
+fn typed_array_in_the_prototype_chain_resolves_integer_indices() {
+    check(
+        r#"
+        var a = new Int8Array([7]);
+        Object.setPrototypeOf(a, {9: 91, '-1': 92});
+        var o = Object.create(a);
+        var before = [o[0], o[9], o[-1]].join(',');
+        o[9] = 8;
+        o[-1] = 3;
+        o[0] = 23;
+        var r = before + '|' + [o[0], o[9], o[-1], a[0], Object.keys(o)].join(',');
+        "#,
+        "7,,|23,,,7,0",
+    );
+}
+
+#[test]
 fn views_keep_storage_live_across_collection() {
     let mut vm = run(r#"
         var a = new Uint8ClampedArray(new ArrayBuffer(4));

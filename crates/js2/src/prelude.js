@@ -111,7 +111,7 @@ function check(n) {
 }
 // A callback with `thisArg` bound; with no `thisArg` the callback itself, so the common call is a direct call.
 function bound(cb, t) {
-  return t === undefined ? cb : cb.bind(t);
+  return t === undefined ? cb : bind(cb,t);
 }
 function defaultCompare(x, y) {
   x = '' + x;
@@ -126,11 +126,11 @@ function mergeSort(a, n, cmp) {
       var mid = lo + w < n ? lo + w : n, hi = lo + 2 * w < n ? lo + 2 * w : n;
       var i = lo, j = mid, k = lo;
       while (i < mid && j < hi) {
-        if (cmp(src[j], src[i]) < 0) dst[k++] = src[j++];
-        else dst[k++] = src[i++];
+        if (cmp(src[j], src[i]) < 0) arrayPut(dst, k++, src[j++]);
+        else arrayPut(dst, k++, src[i++]);
       }
-      while (i < mid) dst[k++] = src[i++];
-      while (j < hi) dst[k++] = src[j++];
+      while (i < mid) arrayPut(dst, k++, src[i++]);
+      while (j < hi) arrayPut(dst, k++, src[j++]);
     }
     var t = src; src = dst; dst = t;
   }
@@ -142,22 +142,22 @@ function sortList(a, n, cmp) {
     if (!(i in a)) continue;
     var v = a[i];
     if (v === undefined) undefs++;
-    else vals[k++] = v;
+    else arrayPut(vals, k++, v);
   }
   var sorted = mergeSort(vals, k, cmp);
   sorted.length = k;
-  for (i = 0; i < undefs; i++) sorted[k + i] = undefined;
+  for (i = 0; i < undefs; i++) arrayPut(sorted, k + i, undefined);
   return sorted;
 }
-function flatten(target, source, n, depth, fn, t) {
-  var k = target.length;
+function flatten(target, source, n, depth, k, fn) {
   for (var i = 0; i < n; i++) {
     if (!(i in source)) continue;
     var e = source[i];
-    if (fn !== undefined) e = fn.call(t, e, i, source);
-    if (depth > 0 && Array.isArray(e)) k = flatten(target, e, len(e), depth - 1);
+    if (fn !== undefined) e = fn(e, i, source);
+    if (depth > 0 && Array.isArray(e)) k = flatten(target, e, len(e), depth - 1, k);
     else {
-      target[k++] = e;
+      if (k >= 9007199254740991) throw new TypeError('the result has too many elements');
+      arrayPut(target, k++, e);
     }
   }
   return k;
@@ -177,26 +177,20 @@ function array_forEach(cb) {
 function array_map(cb) {
   var a = obj(this), n = len(a);
   need(cb);
-  var c;
-  if (Array.isArray(a) && ((c = a.constructor) === null || c !== undefined && typeof c !== 'object' && typeof c !== 'function')) throw new TypeError('the constructor of the array is not an object');
-  var f = bound(cb, arguments[1]), r = [];
-  check(n);
+  var r = arraySpecies(a, n), f = bound(cb, arguments[1]);
   for (var i = 0; i < n; i++) {
     var v = a[i];
-    if (v !== undefined || i in a) r[i] = f(v, i, a);
+    if (v !== undefined || i in a) arrayPut(r, i, f(v, i, a));
   }
-  r.length = n;
   return r;
 }
 function array_filter(cb) {
   var a = obj(this), n = len(a);
   need(cb);
-  var c;
-  if (Array.isArray(a) && ((c = a.constructor) === null || c !== undefined && typeof c !== 'object' && typeof c !== 'function')) throw new TypeError('the constructor of the array is not an object');
-  var f = bound(cb, arguments[1]), r = [], k = 0;
+  var r = arraySpecies(a, 0), f = bound(cb, arguments[1]), k = 0;
   for (var i = 0; i < n; i++) {
     var v = a[i];
-    if ((v !== undefined || i in a) && f(v, i, a)) r[k++] = v;
+    if ((v !== undefined || i in a) && f(v, i, a)) arrayPut(r, k++, v);
   }
   return r;
 }
@@ -289,16 +283,15 @@ function array_findLastIndex(cb) {
   return -1;
 }
 function array_flat() {
-  var a = obj(this), n = len(a), d = arguments[0] === undefined ? 1 : int(arguments[0]), r = [], c;
-  if (Array.isArray(a) && ((c = a.constructor) === null || c !== undefined && typeof c !== 'object' && typeof c !== 'function')) throw new TypeError('the constructor of the array is not an object');
-  flatten(r, a, n, d);
+  var a = obj(this), n = len(a), d = arguments[0] === undefined ? 1 : int(arguments[0]), r = arraySpecies(a, 0);
+  flatten(r, a, n, d, 0);
   return r;
 }
 function array_flatMap(cb) {
-  var a = obj(this), n = len(a), r = [], c;
+  var a = obj(this), n = len(a);
   need(cb);
-  if (Array.isArray(a) && ((c = a.constructor) === null || c !== undefined && typeof c !== 'object' && typeof c !== 'function')) throw new TypeError('the constructor of the array is not an object');
-  flatten(r, a, n, 1, cb, arguments[1]);
+  var r = arraySpecies(a, 0), f = bound(cb, arguments[1]);
+  flatten(r, a, n, 1, 0, f);
   return r;
 }
 function array_sort(cmp) {
@@ -315,15 +308,15 @@ function array_toSorted(cmp) {
   var a = obj(this), n = len(a), vals = [];
   check(n);
   if (cmp === undefined) cmp = defaultCompare;
-  for (var i = 0; i < n; i++) vals[i] = a[i];
+  for (var i = 0; i < n; i++) arrayPut(vals, i, a[i]);
   var k = 0, undefs = 0, vs = [];
   for (i = 0; i < n; i++) {
     if (vals[i] === undefined) undefs++;
-    else vs[k++] = vals[i];
+    else arrayPut(vs, k++, vals[i]);
   }
   var sorted = mergeSort(vs, k, cmp), r = [];
-  for (i = 0; i < k; i++) r[i] = sorted[i];
-  for (; i < n; i++) r[i] = undefined;
+  for (i = 0; i < k; i++) arrayPut(r, i, sorted[i]);
+  for (; i < n; i++) arrayPut(r, i, undefined);
   return r;
 }
 function array_toLocaleString() {
@@ -333,44 +326,5 @@ function array_toLocaleString() {
     var v = a[i];
     if (v !== undefined && v !== null) r += v.toLocaleString();
   }
-  return r;
-}
-function array_of() {
-  var n = arguments.length, C = this, r = typeof C === 'function' && C !== Array ? new C(n) : [];
-  for (var i = 0; i < n; i++) rawDefine(r, i, { value: arguments[i], writable: true, enumerable: true, configurable: true });
-  r.length = n;
-  return r;
-}
-function array_from(src) {
-  var fn = arguments[1], t = arguments[2];
-  if (src === undefined || src === null) throw new TypeError('the value is not iterable');
-  if (fn !== undefined) need(fn);
-  var m = src[Symbol.iterator], r = [], f = fn === undefined ? undefined : bound(fn, t);
-  if (m !== undefined && m !== null && m !== Array.prototype.values) {
-    if (typeof m !== 'function') throw new TypeError('the value is not iterable');
-    // The steps of `for-of` by hand: the iterator is made once, and it is closed when `f` throws.
-    var it = m.call(src), next = it.next, res, k = 0;
-    if (Object(it) !== it) throw new TypeError('the result of Symbol.iterator is not an object');
-    for (;;) {
-      res = next.call(it);
-      if (Object(res) !== res) throw new TypeError('the result of an iterator is not an object');
-      if (res.done) break;
-      try {
-        r[k] = f === undefined ? res.value : f(res.value, k);
-      } catch (e) {
-        try {
-          var ret = it.return;
-          if (ret !== undefined && ret !== null) ret.call(it);
-        } catch (e2) {}
-        throw e;
-      }
-      k++;
-    }
-    return r;
-  }
-  var a = obj(src), n = len(a);
-  check(n);
-  for (var i = 0; i < n; i++) r[i] = f === undefined ? a[i] : f(a[i], i);
-  r.length = n;
   return r;
 }

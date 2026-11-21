@@ -52,7 +52,7 @@ fn to_desc(rt: &mut Realm, v: Value) -> R<Desc> {
 }
 
 /// `CreateListFromArrayLike`.
-fn list_from(rt: &mut Realm, v: Value) -> R<Vec<Value>> {
+pub(crate) fn list_from(rt: &mut Realm, v: Value) -> R<Vec<Value>> {
     if Realm::obj(v).is_none() {
         return rt.type_error("argument list must be an array-like object");
     }

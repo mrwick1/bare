@@ -112,12 +112,9 @@ impl Realm {
 
     // ---- reading own properties ----
 
-    /// Is `o` an array (`length` is writable and not configurable) rather than an arguments object?
+    /// The attributes of the virtual length property of an array.
     fn array_like_length(&self, o: Obj) -> Option<u8> {
-        if !o.is_indexed() {
-            return None;
-        }
-        Some(if self.is_array(o) { if o.has_flag(F_LEN_RO) { 0 } else { A_W } } else { A_W | A_C })
+        self.is_array(o).then(|| if o.has_flag(F_LEN_RO) { 0 } else { A_W })
     }
 
     /// The own property `key` of `o`.
@@ -238,7 +235,7 @@ impl Realm {
             let units: Vec<Value> = (0..s.len()).map(|i| self.string(&i.to_string())).collect();
             out.splice(0..0, units);
         }
-        if !enumerable && (o.is_indexed() || wrapped.is_some()) {
+        if !enumerable && (self.is_array(o) || wrapped.is_some()) {
             out.push(self.k_length.value());
         }
         out.extend(names);
@@ -255,6 +252,40 @@ impl Realm {
     /// Is `k` the name of an internal slot (`\0code`, a private name)?
     fn is_hidden_key(&self, k: Str) -> bool {
         matches!(k.resolve().chars(), Some(Chars::One(b)) if b.first() == Some(&0)) || matches!(k.resolve().chars(), Some(Chars::Two(u)) if u.first() == Some(&0))
+    }
+
+    /// Snapshot the enumerable string keys, starting with the receiver and then its prototypes. A non-enumerable own key still
+    /// shadows a prototype property of the same name.
+    pub(crate) fn for_in_keys(&mut self, recv: Value) -> R<(Value, Value)> {
+        if recv.is_undefined() || recv.is_null() {
+            return Ok((Value::UNDEFINED, self.new_array(&[])));
+        }
+        let obj = self.to_object(recv)?;
+        let mut keys = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut cur = Some(obj);
+        while let Some(o) = cur {
+            for name in self.own_key_list_h(o, false)? {
+                let key = self.key_of(name)?;
+                if seen.insert(key.as_value().bits()) && self.get_own_h(o, key)?.is_some_and(|p| p.attrs() & A_E != 0) {
+                    keys.push(name);
+                }
+            }
+            cur = self.proto_of(o);
+        }
+        Ok((obj.value(), self.new_array(&keys)))
+    }
+
+    /// A key deleted before its turn is skipped.
+    pub(crate) fn for_in_has(&mut self, mut cur: Option<Obj>, name: Value) -> R<bool> {
+        let key = self.key_of(name)?;
+        while let Some(o) = cur {
+            if let Some(own) = self.get_own_h(o, key)? {
+                return Ok(own.attrs() & A_E != 0);
+            }
+            cur = self.proto_of(o);
+        }
+        Ok(false)
     }
 
     // ---- extensibility, seal, freeze ----
@@ -415,6 +446,10 @@ impl Realm {
                 }
             }
         }
+        // A compatible definition leaves a virtual, immutable string property as it is.
+        if self.has_string_own(o, key) {
+            return Ok(true);
+        }
         // The new attributes and values.
         let e_bit = d.e.map_or(cat & A_E, |b| if b { A_E } else { 0 });
         let c_bit = d.c.map_or(cat & A_C, |b| if b { A_C } else { 0 });
@@ -482,12 +517,24 @@ impl Realm {
     }
 
     /// `ArraySetLength` for a descriptor of `length`.
-    fn define_length(&mut self, o: Obj, d: &Desc) -> R<bool> {
+    pub(crate) fn define_length(&mut self, o: Obj, d: &Desc) -> R<bool> {
+        let n = if let Some(v) = d.value {
+            let first = self.to_number(v)?;
+            let n = Self::to_int32(first) as u32;
+            // Two abstract conversions can call the object's conversion methods twice.
+            let second = if Realm::obj(v).is_some() { self.to_number(v)? } else { first };
+            if second != n as f64 {
+                return Err(self.error(ErrKind::Range, "invalid array length"));
+            }
+            Some(n)
+        } else {
+            None
+        };
         if d.c == Some(true) || d.e == Some(true) || d.is_accessor() {
             return Ok(false);
         }
         let ro = o.has_flag(F_LEN_RO);
-        let Some(v) = d.value else {
+        let Some(n) = n else {
             if d.w == Some(true) && ro {
                 return Ok(false);
             }
@@ -496,14 +543,9 @@ impl Realm {
             }
             return Ok(true);
         };
-        let n = self.to_number(v)?;
-        if n < 0.0 || n.fract() != 0.0 || n >= 4294967296.0 || n.is_nan() {
-            return Err(self.error(ErrKind::Range, "invalid array length"));
-        }
-        let n = n as u32;
         let ok = if n == o.len() {
             !(ro && d.w == Some(true))
-        } else if ro || (d.w == Some(true) && ro) {
+        } else if ro {
             false
         } else {
             self.truncate(o, n)
@@ -601,55 +643,18 @@ impl Realm {
         d.value()
     }
 
-    /// `Set(o, key, v, true)`: a write that fails (not writable, not extensible, no setter) is a `TypeError`. A setter is called through
-    /// the tail channel when `last` is true (use it as the last step of a native); else a setter is a `TypeError`.
+    /// `Set(o, key, v, true)`. When `last` is true, the built-in can tail-call a setter.
     pub(crate) fn set_checked(&mut self, recv: Value, key: Key, v: Value, last: bool) -> R<()> {
-        let Some(o) = Realm::obj(recv) else {
-            if recv.is_undefined() || recv.is_null() {
-                return self.type_error("cannot set properties of undefined or null");
+        match self.set_prop_g(recv, key, v)? {
+            crate::interp_rt::Put::Done => Ok(()),
+            crate::interp_rt::Put::Fail => self.type_error("cannot assign to the property"),
+            crate::interp_rt::Put::Set(s) if last => {
+                self.tail_args.clear();
+                self.tail_args.push(v);
+                self.tail = Some((s, recv));
+                Ok(())
             }
-            return Ok(());
-        };
-        let mut p = Some(o);
-        let mut own = true;
-        while let Some(c) = p {
-            match self.get_own(c, key) {
-                Some(Own::Acc(_, s, _)) => {
-                    if s.is_undefined() {
-                        return self.type_error("cannot set a property that has only a getter");
-                    }
-                    if !last {
-                        return self.type_error("a setter cannot be called from here");
-                    }
-                    self.tail_args.clear();
-                    self.tail_args.push(v);
-                    self.tail = Some((s, recv));
-                    return Ok(());
-                }
-                Some(Own::Data(_, at)) => {
-                    if at & A_W == 0 {
-                        return self.type_error("cannot assign to a read-only property");
-                    }
-                    break;
-                }
-                None => {}
-            }
-            p = self.proto_of(c);
-            own = false;
-        }
-        let _ = own;
-        match self.get_own(o, key) {
-            Some(Own::Data(_, at)) if at & A_W != 0 => self.set_prop(recv, key, v),
-            Some(_) => Ok(()),
-            None if !o.extensible() => self.type_error("cannot add a property to a non-extensible object"),
-            // A script function has no own `length` or `name` yet; both are read only.
-            None if o.is_callable() && matches!(key, Key::Name(k) if k == self.k_length || k == self.k_name) => {
-                self.type_error("cannot assign to a read-only property")
-            }
-            None if o.is_indexed() && matches!(key, Key::Idx(i) if i >= o.len()) && o.has_flag(F_LEN_RO) => {
-                self.type_error("cannot add an element past the read-only length of an array")
-            }
-            None => self.set_prop(recv, key, v),
+            crate::interp_rt::Put::Set(s) => self.call_function(s, recv, &[v]).map(|_| ()),
         }
     }
 
@@ -1018,18 +1023,28 @@ fn object_has_own(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
 }
 
 fn object_from_entries(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    let it = arg(args, 0);
-    if it.is_undefined() || it.is_null() {
-        return rt.type_error("the value is not iterable");
-    }
     let out = Obj::new(&mut rt.heap, &rt.shapes, rt.s_object).expect("memory");
-    for e in rt.iter_values(it)? {
-        let Some(eo) = Realm::obj(e) else { return rt.type_error("an entry is not an object") };
-        let (k, v) = (rt.get_prop(eo.value(), Key::Idx(0))?, rt.get_prop(eo.value(), Key::Idx(1))?);
-        let key = rt.key_of(k)?;
-        rt.define(out, key, v)?;
+    let (it, next) = rt.iter_open_generic(arg(args, 0))?;
+    while let Some(entry) = rt.iter_step(it, next)? {
+        rt.fuel = rt.fuel.checked_sub(1).ok_or(crate::interp::STOP)?;
+        if let Err(e) = from_entry(rt, out, entry) {
+            if e != crate::interp::STOP {
+                rt.iter_close(it, next, true)?;
+            }
+            return Err(e);
+        }
     }
     Ok(out.value())
+}
+
+fn from_entry(rt: &mut Realm, out: Obj, entry: Value) -> R<()> {
+    if Realm::obj(entry).is_none() {
+        return rt.type_error("an entry is not an object");
+    }
+    let key = rt.get_prop(entry, Key::Idx(0))?;
+    let value = rt.get_prop(entry, Key::Idx(1))?;
+    let key = rt.key_of(key)?;
+    rt.define(out, key, value)
 }
 
 fn this_object(rt: &mut Realm, this: Value) -> R<Value> {

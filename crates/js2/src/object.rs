@@ -66,7 +66,8 @@ const WORD: usize = 8;
 //   17   1<<17     F_LAZYM         lazy host members (api_host.rs)
 //   18   1<<18     F_LAZYTAB       lazy built-in tables (lazy.rs)
 //   19   1<<19     F_HOST          host-filled objects (api_host.rs)
-//   20-22                          free (3 bits)
+//   20   1<<20     F_ARGS         arguments objects
+//   21-22                          free (2 bits)
 //   23   1<<23     F_PROTO         prototypes that an inline cache depends on (interp_rt.rs)
 // `F_SPARSE` is a flag of the `Elements` record, not of an object header.
 
@@ -106,7 +107,9 @@ pub const F_HOST: u32 = 1 << 19;
 pub const F_LAZYM: u32 = 1 << 17;
 /// Object header flag: the object has a lazy built-in table with entries left (`lazy.rs`).
 pub const F_LAZYTAB: u32 = 1 << 18;
-/// Object header bits 12 to 15: the kind of the object, one of the `K_*` numbers below. The kinds exclude each other, and an object of no
+/// Indexed storage with ordinary property semantics for `length`.
+pub const F_ARGS: u32 = 1 << 20;
+/// Object header bits 12 to 16: the kind of the object, one of the `K_*` numbers below. The kinds exclude each other, and an object of no
 /// kind has 0. Set once, by the constructor of the object; a shape change keeps it. Read it with [`Obj::kind`] or [`Obj::is_kind`].
 pub const F_KIND: u32 = 31 << KIND_SHIFT;
 /// The shift of the kind in [`F_KIND`].
@@ -140,7 +143,6 @@ pub const K_AGEN: u32 = 11;
 pub const K_REGEXP: u32 = 12;
 /// A `Date` object (`bi_date.rs`): the hidden property `Realm::k_prim` holds the time value.
 pub const K_DATE: u32 = 13;
-/// The largest kind: 14 and 15 are free.
 /// An ArrayBuffer.
 pub const K_BUFFER: u32 = 14;
 /// A numeric typed array.
@@ -151,9 +153,9 @@ pub const K_DATA_VIEW: u32 = 16;
 pub const K_ARRAY_ITER: u32 = 17;
 
 const K_LAST: u32 = K_ARRAY_ITER;
-const ALL_FLAGS: [u32; 17] = [
+const ALL_FLAGS: [u32; 18] = [
     F_OVER, F_CALLABLE, F_CLASS, F_DERIVED, F_NATIVE, F_NOEXT, F_FNPROPS, F_ELEMS_RO, F_ELEMS_FIXED, F_LEN_RO, F_SLOWIDX, F_LAZY, F_KIND, F_HOST,
-    F_LAZYM, F_LAZYTAB, F_PROTO,
+    F_LAZYM, F_LAZYTAB, F_ARGS, F_PROTO,
 ];
 /// Compile-time check: every flag is a bit or the kind field, all fit the 24 flag bits of a cell header, no two share a bit, and the
 /// largest kind fits the kind field.

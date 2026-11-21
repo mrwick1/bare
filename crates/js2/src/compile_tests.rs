@@ -185,13 +185,13 @@ code nregs=10 nparams=1 words=24 sites=0
 0000  LoadUndef   r2
 0001  LoadI       r1, 0
 0002  ForInOpen   3, r0
-0003  IterNext    r6, -> 0011, 3
+0003  ForInNext   r6, -> 0011, 3
 0005  Mov         r2, r6
 0006  GetElem     r7, r0, r2
 0007  Add         r1, r1, r7
 0008  JGtI        r1, -> 0011, 9
 0010  JmpBack     -> 0003
-0011  IterOpen    3, r0
+0011  IterOpen    3, r0, 0
 0012  IterNext    r7, -> 0023, 3
 0014  Mov         r8, r7
 0015  Add         r1, r1, r8
@@ -405,7 +405,7 @@ code nregs=13 nparams=1 words=48 sites=3
 0007  GetField    r7, r6, s1
 0008  GetField    r2, r7, s2
 0009  Mov         r6, r0
-0010  IterOpen    7, r6
+0010  IterOpen    7, r6, 0
 0011  LoadFalse   r10
 0012  JmpIf       r10, -> 0017
 0013  IterNext    r11, -> 0016, 7
@@ -639,7 +639,7 @@ fn update_expressions() {
         r#"function f(o, k) { var a = o.x++; --o.y; o[k] += 2; o[k]--; k++; return a + k++; }"#,
         0,
         r#"
-code nregs=5 nparams=2 words=19 sites=4
+code nregs=5 nparams=2 words=21 sites=4
 0000  GetField    r3, r0, s0
 0001  ToNumeric   r3, r3
 0002  Inc         r4, r3
@@ -648,17 +648,19 @@ code nregs=5 nparams=2 words=19 sites=4
 0005  GetField    r3, r0, s2
 0006  Dec         r3, r3
 0007  SetField    r0, r3, s3
-0008  GetElem     r3, r0, r1
-0009  AddI        r3, r3, 2
-0010  SetElem     r0, r1, r3
-0011  GetElem     r3, r0, r1
-0012  Dec         r3, r3
-0013  SetElem     r0, r1, r3
-0014  Inc         r1, r1
-0015  ToNumeric   r4, r1
-0016  Inc         r1, r4
-0017  Add         r3, r2, r4
-0018  Ret         r3
+0008  Mov         r3, r1
+0009  GetElemRef  r4, r0, r3
+0010  AddI        r4, r4, 2
+0011  SetElem     r0, r3, r4
+0012  Mov         r3, r1
+0013  GetElemRef  r4, r0, r3
+0014  Dec         r4, r4
+0015  SetElem     r0, r3, r4
+0016  Inc         r1, r1
+0017  ToNumeric   r4, r1
+0018  Inc         r1, r4
+0019  Add         r3, r2, r4
+0020  Ret         r3
 "#,
     );
 }
@@ -1558,4 +1560,83 @@ fn a_scope_with_many_locals_compiles_in_linear_time() {
     let r = compile_all(&src(70_000), &atoms, Limits::default());
     assert!(matches!(r, Err(ref e) if e.contains("Limit")), "{:?}", r.map(|_| ()));
     assert!(t.elapsed().as_secs() < 20, "{:?}", t.elapsed());
+}
+
+#[test]
+fn a_large_object_literal_compiles_in_linear_time() {
+    if cfg!(miri) {
+        return;
+    }
+    use std::fmt::Write;
+    let time = |n| {
+        let mut src = String::from("var x = 0; var o = {dynamic: x,");
+        for i in 0..n {
+            write!(src, "'key{i:05}':{i},").unwrap();
+        }
+        src.push_str("};");
+        (0..3).map(|_| {
+            let atoms = SharedAtoms::default();
+            let start = std::time::Instant::now();
+            let (script, _) = compile_all(&src, &atoms, Limits::default()).expect("compile");
+            let elapsed = start.elapsed();
+            assert!(script.unsupported.is_empty());
+            elapsed
+        }).min().unwrap()
+    };
+    let small = time(2_500);
+    let large = time(20_000);
+    assert!(large < small * 16, "2,500 keys: {small:?}, 20,000 keys: {large:?}");
+}
+
+#[test]
+fn object_literal_duplicates_keep_source_order() {
+    for padding in [String::new(), (0..64).map(|i| format!("key{i}: 0,")).collect()] {
+        let src = format!(
+            r#"var o = {{{padding} a: 1, b: 2, a: 3, __proto__: {{p: 4}},
+                get c() {{ return this.p; }}, get d() {{ return 5; }}, d: 6 }};
+                var r = [o.a, o.c, o.d, Object.getPrototypeOf(o).p,
+                    Object.keys(o).slice(-4).join(',')].join(':');"#
+        );
+        let mut vm = crate::script::run(&src).expect("run");
+        assert_eq!(vm.global_text("r"), "3:4:6:4:a,b,c,d");
+    }
+}
+
+#[test]
+fn large_data_literals_use_one_builder_and_make_fresh_containers() {
+    let padding = "0,".repeat(550);
+    let src = format!(
+        r#"function make() {{
+            return {{"2": true, "1": null, "name":"first",
+                "items": [{{"s":"\ud800","n":-0,"flag":false}}], "padding": [{padding}], "name":"last"}};
+        }}
+        var a = make(), b = make();
+        a.items[0].flag = true;
+        a.padding[0] = 7;
+        var d = Object.getOwnPropertyDescriptor(b, "name");
+        var r = a !== b && a.items !== b.items && a.items[0] !== b.items[0] &&
+            b.items[0].flag === false && b.items[0].s.charCodeAt(0) === 55296 &&
+            1 / b.items[0].n === -Infinity && b.padding[0] === 0 && b.padding.length === 550 &&
+            d.value === "last" && d.writable && d.enumerable && d.configurable &&
+            Object.keys(b).join(",") === "1,2,name,items,padding" &&
+            Object.getPrototypeOf(b) === Object.prototype &&
+            Object.getPrototypeOf(b.items) === Array.prototype;"#
+    );
+    let code = outer(&src).code;
+    assert!(code.words.len() <= 4, "the literal should use one builder");
+    let mut vm = crate::script::load(&src).expect("load");
+    vm.realm.heap.set_trigger(crate::heap::Trigger { min: 1024, slack: 1024 });
+    vm.run_main(0).expect("run");
+    assert_eq!(vm.global_text("r"), "true");
+}
+
+#[test]
+fn data_literal_falls_back_for_a_nested_prototype_setter_and_holes() {
+    let padding = "0,".repeat(550);
+    let src = format!(
+        r#"var a = [{{"\u005f_proto__":{{"p":7}}}}, , {padding}];
+        var r = a[0].p === 7 && !Object.hasOwn(a[0], "__proto__") && !(1 in a);"#
+    );
+    let mut vm = crate::script::run(&src).expect("run");
+    assert_eq!(vm.global_text("r"), "true");
 }
