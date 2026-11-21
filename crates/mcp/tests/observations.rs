@@ -320,3 +320,17 @@ fn a_long_run_of_new_siblings_is_summarized() {
     assert!(!error, "{r}");
     assert!(!r.contains("Country number 400"), "{r}");
 }
+
+/// A page whose timer always runs is ready soon after its load: a navigation does not wait for two looks with no task.
+#[test]
+fn a_navigation_to_a_busy_page_ends_soon_after_load() {
+    let base = pages(&[("/", "<!doctype html><body><p>Start</p></body>"), ("/busy", "<!doctype html><body><h1>Busy</h1><script>setInterval(() => document.title = Date.now(), 5)</script></body>")]);
+    let mut s = Server::start();
+    let (r, error) = s.tool("open", json!({"session": "m", "url": format!("{base}/"), "snapshot": false, "timeout_ms": 4000}));
+    assert!(!error, "{r}");
+    let t = std::time::Instant::now();
+    let (r, error) = s.tool("step", json!({"session": "m", "steps": format!("goto {base}/busy")}));
+    let ms = t.elapsed().as_millis();
+    assert!(!error && !r.contains("not ready"), "{r}");
+    assert!(ms < 1500, "goto took {ms} ms: {r}");
+}
