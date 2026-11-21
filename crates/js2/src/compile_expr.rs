@@ -1402,7 +1402,12 @@ impl<'a> Fc<'a> {
         };
         let k = match (private, index) {
             (Some(n), _) => Some(self.private_key(n)?),
-            (_, Some(ix)) => Some(self.any_before(ix, value)?),
+            (_, Some(ix)) if op == AssignOp::Assign => Some(self.any_before(ix, value)?),
+            (_, Some(ix)) => {
+                let k = self.alloc();
+                self.to(ix, k)?;
+                Some(k)
+            }
             _ => None,
         };
         self.line(span.start);
@@ -1489,12 +1494,12 @@ impl<'a> Fc<'a> {
                 let s = self.site_of(n)?;
                 self.op(Op::GetField, dst, o, s);
             }
-            (Mode::Plain, None, Some(k)) => self.op(Op::GetElem, dst, o, k),
+            (Mode::Plain, None, Some(k)) => self.op(Op::GetElemRef, dst, o, k),
             (Mode::Super, Some(n), _) => {
                 let s = self.site_of(n)?;
                 self.op(Op::GetSuper, dst, o, s);
             }
-            (Mode::Super, None, Some(k)) => self.op(Op::GetSuperElem, dst, o, k),
+            (Mode::Super, None, Some(k)) => self.op(Op::GetSuperElemRef, dst, o, k),
             (Mode::Private, _, Some(k)) => self.op(Op::GetPrivate, dst, o, k),
             _ => {}
         }
@@ -1568,7 +1573,8 @@ impl<'a> Fc<'a> {
             }
             ExprKind::Index { obj, index, .. } => {
                 let (o, mode) = self.member_base(obj, Some(index))?;
-                let k = self.any(index)?;
+                let k = self.alloc();
+                self.to(index, k)?;
                 self.member_update(mode, iop, prefix, o, (None, Some(k)), dst)?;
             }
             ExprKind::PrivateMember { obj, name, .. } => {

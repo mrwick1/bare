@@ -340,6 +340,8 @@ ops! {
     AIterCheck Abc "r u" "A TypeError when `a` is no object: the awaited result of `return()` (`b` 0), or the iterator that has no `throw` (`b` 1, `a` is `null`).",
     AYsCall AsBxX "w j R" "`yield*` in an async generator: the record at `x` is the iterator record, the sent value and the mode (`YS_REGS`). `a` = the result of `next`, `throw` or `return` of the iterator for the mode (not awaited). When the iterator has no `throw`: the mode register is 3 and jump. When it has no `return`: `a` = the sent value, the mode register is 2 and jump.",
     Lazy Abc "u" "The only instruction of the stub of a function that is compiled at its first call (`script::Lazy`): compile the function into this code, then run it from the start with the same arguments. With `a` = 1 the stub has `CF_ARGS`, so the frame record holds all arguments in an array. With `a` = 0 the stub has the parameter registers of the real code, and the arguments are in them (a function with plain parameters that does not read `arguments`): no array is made. The compiler never emits it.",
+    GetElemRef Abc "w r r" "As `GetElem`, but replace the key in temporary register `c` with its converted property key before the read.",
+    GetSuperElemRef Abc "w r r" "As `GetSuperElem`, but replace the key in temporary register `c` with its converted property key before the read.",
 }
 
 /// Words of a slot of a string switch table: the hash, the atom and the target.

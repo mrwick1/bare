@@ -639,7 +639,7 @@ fn update_expressions() {
         r#"function f(o, k) { var a = o.x++; --o.y; o[k] += 2; o[k]--; k++; return a + k++; }"#,
         0,
         r#"
-code nregs=5 nparams=2 words=19 sites=4
+code nregs=5 nparams=2 words=21 sites=4
 0000  GetField    r3, r0, s0
 0001  ToNumeric   r3, r3
 0002  Inc         r4, r3
@@ -648,17 +648,19 @@ code nregs=5 nparams=2 words=19 sites=4
 0005  GetField    r3, r0, s2
 0006  Dec         r3, r3
 0007  SetField    r0, r3, s3
-0008  GetElem     r3, r0, r1
-0009  AddI        r3, r3, 2
-0010  SetElem     r0, r1, r3
-0011  GetElem     r3, r0, r1
-0012  Dec         r3, r3
-0013  SetElem     r0, r1, r3
-0014  Inc         r1, r1
-0015  ToNumeric   r4, r1
-0016  Inc         r1, r4
-0017  Add         r3, r2, r4
-0018  Ret         r3
+0008  Mov         r3, r1
+0009  GetElemRef  r4, r0, r3
+0010  AddI        r4, r4, 2
+0011  SetElem     r0, r3, r4
+0012  Mov         r3, r1
+0013  GetElemRef  r4, r0, r3
+0014  Dec         r4, r4
+0015  SetElem     r0, r3, r4
+0016  Inc         r1, r1
+0017  ToNumeric   r4, r1
+0018  Inc         r1, r4
+0019  Add         r3, r2, r4
+0020  Ret         r3
 "#,
     );
 }

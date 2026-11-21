@@ -174,7 +174,7 @@ macro_rules! cold_ops {
         Op::ArraySpread | Op::ArrayHole | Op::CallSpread | Op::NewSpread | Op::CopyProps | Op::ObjRest | Op::SetProto |
         Op::DefAccessor | Op::DefAccessorElem | Op::DefMethod | Op::DefMethodElem | Op::SetHome | Op::MakeClass | Op::MakeDerived |
         Op::SetFnName | Op::DefaultCtor | Op::SetFields | Op::NewPrivateName | Op::GetPrivate | Op::SetPrivate | Op::HasPrivate |
-        Op::DefPrivate | Op::DefPrivateMethod | Op::DefPrivateAccessor | Op::GetSuper | Op::GetSuperElem | Op::SetSuper |
+        Op::DefPrivate | Op::DefPrivateMethod | Op::DefPrivateAccessor | Op::GetSuper | Op::GetSuperElem | Op::GetSuperElemRef | Op::SetSuper |
         Op::SetSuperElem | Op::CallSuper | Op::CallSuperSpread | Op::RetDerived | Op::GenInit | Op::Yield | Op::RetGen | Op::IterClose | Op::YieldStarStep | Op::AsyncInit | Op::Await | Op::RetAsync |
         Op::AIterOpen | Op::AIterNext | Op::AIterUnpack | Op::AYsUnpack | Op::AIterClose | Op::AIterCloseT | Op::AIterCheck | Op::AYsCall
     };
@@ -1674,10 +1674,13 @@ impl Vm {
                                 Got::Get(g) => call_get!(g, r!(b!()), a!(), next),
                             }
                         }
-                        Op::GetSuperElem => {
+                        Op::GetSuperElem | Op::GetSuperElemRef => {
                             std::hint::cold_path();
                             gate!();
                             let k = tri!(realm.key_of(r!(c!())));
+                            if opv == Op::GetSuperElemRef {
+                                r!(c!()) = k.as_value();
+                            }
                             match tri!(realm.super_get(home!(), k)) {
                                 Got::Val(v) => {
                                     r!(a!()) = v;
@@ -1953,7 +1956,7 @@ impl Vm {
                         tri!(realm.define(o, Key::Name(n), r!(b!())));
                         pc = next;
                     }
-                    Op::GetElem | Op::GetElemI => {
+                    Op::GetElem | Op::GetElemI | Op::GetElemRef => {
                         let key = if opv == Op::GetElemI { Value::int(c!() as i32) } else { r!(c!()) };
                         let recv = r!(b!());
                         // SAFETY: the registers hold live values.
@@ -1972,6 +1975,9 @@ impl Vm {
                             err!(ErrKind::Type, "cannot read properties of undefined or null")
                         }
                         let k = tri!(realm.key_of(key));
+                        if opv == Op::GetElemRef {
+                            r!(c!()) = k.as_value();
+                        }
                         match tri!(realm.get_prop_g(recv, k)) {
                             Got::Val(v) => {
                                 r!(a!()) = v;
@@ -2011,10 +2017,7 @@ impl Vm {
                         if recv.is_undefined() || recv.is_null() {
                             err!(ErrKind::Type, "cannot read properties of undefined or null")
                         }
-                        r!(a!()) = match tri!(realm.key_of(r!(c!()))) {
-                            Key::Idx(i) => Realm::num(i as f64),
-                            Key::Name(s) => s.key_value(),
-                        };
+                        r!(a!()) = tri!(realm.key_of(r!(c!()))).as_value();
                         pc = next;
                     }
                     Op::DefElem => {
@@ -2477,7 +2480,7 @@ pub fn code_flags(c: &Code) -> u8 {
         match ins.op {
             Op::CreateArgs | Op::CreateRest => f |= CF_ARGS,
             Op::Lazy if ins.a != 0 => f |= CF_ARGS,
-            Op::CallSuper | Op::CallSuperSpread | Op::GetSuper | Op::GetSuperElem | Op::SetSuper | Op::SetSuperElem => f |= CF_LINK,
+            Op::CallSuper | Op::CallSuperSpread | Op::GetSuper | Op::GetSuperElem | Op::GetSuperElemRef | Op::SetSuper | Op::SetSuperElem => f |= CF_LINK,
             _ => {}
         }
         pc += n;
