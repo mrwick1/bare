@@ -163,18 +163,33 @@ impl<E: Eng> Dom<E> {
     fn fire(&self, it: &mut E::Vm, ev: E::Obj, ty: &str, t: Target<E>, phase: u8, capture: bool) -> R<E, ()> {
         // Most calls find no listener: they leave before the event is looked up. The callback is read at each turn, so the snapshot
         // keeps only the flags.
-        let snapshot: Vec<Turn> = {
+        let (first, rest) = {
             let st = self.st.borrow();
+            let Some(listeners) = st.listeners.get(&t) else { return Ok(()) };
             // A plain loop: the iterator chain keeps `Cloned::next` out of line, and its cost moves with unrelated code.
-            let mut list = Vec::new();
-            for l in st.listeners.get(&t).into_iter().flatten() {
+            let mut first = None;
+            let mut rest = Vec::new();
+            for l in listeners {
                 if l.capture == capture && *l.ty == *ty {
-                    list.push(Turn { id: l.id, once: l.once, passive: l.passive, handler: l.handler });
+                    let turn = Turn { id: l.id, once: l.once, passive: l.passive, handler: l.handler };
+                    if first.is_none() {
+                        first = Some(turn);
+                    } else {
+                        rest.push(turn);
+                    }
                 }
             }
-            list
+            (first, rest)
         };
-        if snapshot.is_empty() || self.st.borrow().events[&ev].stop {
+        let Some(first) = first else {
+            return Ok(());
+        };
+        self.fire_snapshot(it, ev, ty, t, phase, first, rest)
+    }
+
+    #[inline(never)]
+    fn fire_snapshot(&self, it: &mut E::Vm, ev: E::Obj, ty: &str, t: Target<E>, phase: u8, first: Turn, rest: Vec<Turn>) -> R<E, ()> {
+        if self.st.borrow().events[&ev].stop {
             return Ok(());
         }
         let cur = self.target_value(it, t)?;
@@ -184,7 +199,7 @@ impl<E: Eng> Dom<E> {
             e.phase = phase;
             it.store_value(&mut e.current, cur);
         }
-        for l in snapshot {
+        for l in std::iter::once(first).chain(rest) {
             let (mut cb, raw) = {
                 let st = self.st.borrow();
                 if st.events[&ev].stop_imm {
