@@ -240,7 +240,7 @@ impl Str {
             Layout::TwoByte => true,
             Layout::Rope => self.head().flags() & FLAG_WIDE != 0,
             Layout::Indirect => self.resolve().is_two_byte(),
-            Layout::Object | Layout::WeakTable | Layout::Indexed | Layout::Slots | Layout::Elements => unreachable!("a string cell has a string layout"),
+            Layout::Object | Layout::WeakTable | Layout::Indexed | Layout::Slots | Layout::Elements | Layout::Blob => unreachable!("a string cell has a string layout"),
         }
     }
 

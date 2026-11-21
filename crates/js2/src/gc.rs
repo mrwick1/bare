@@ -26,7 +26,7 @@
 //! The typed trace: [`Marker::trace`] reads the layout from the header (`cell.rs`) and calls the code of that layout. S1.9 adds its
 //! layouts as arms of that one `match`.
 //!
-//! - `OneByte`, `TwoByte`: no edge.
+//! - `OneByte`, `TwoByte`, `Blob`: no edge.
 //! - `Rope`, `Indirect`: the children that [`Str::children`] names.
 //! - `Object`, `Indexed`: the header, then value words (`object.rs`): the inline slots, and for an `Indexed` object the elements
 //!   word first. The pointer to the overflow record and the elements word are values like the others, so the records are marked and
@@ -263,7 +263,7 @@ impl Marker<'_> {
     fn cell(&mut self, p: NonNull<u8>) {
         // SAFETY: `p` is a cell: its first 8 bytes are its header.
         let h = unsafe { p.cast::<CellHeader>().read() };
-        let leaf = matches!(h.layout(), Layout::OneByte | Layout::TwoByte);
+        let leaf = matches!(h.layout(), Layout::OneByte | Layout::TwoByte | Layout::Blob);
         if leaf && h.flags() & FLAG_SHARED == FLAG_SHARED {
             return;
         }
@@ -299,7 +299,7 @@ impl Marker<'_> {
         let h = unsafe { p.cast::<CellHeader>().read() };
         match h.layout() {
             // A leaf is marked and never pushed.
-            Layout::OneByte | Layout::TwoByte => {}
+            Layout::OneByte | Layout::TwoByte | Layout::Blob => {}
             Layout::Rope | Layout::Indirect => {
                 for c in Str::from_cell(p).children().into_iter().flatten() {
                     self.cell(c.cell());

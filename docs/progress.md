@@ -1,6 +1,6 @@
 # Progress
 
-This file records what is built, what comes next and what is missing. Update it after each merged PR.
+This file records what is built, what comes next and what is missing. Since 2026-11-21, each PR writes its entry to its own file in [progress/](progress/README.md). Do not append new entries to this file.
 
 The reasons for the design are in [decisions.md](decisions.md). Time and memory numbers for each module are in [resources.md](resources.md).
 
@@ -17785,6 +17785,55 @@ Results.
 | Start-up, `script_run` on `var x = 1;` (min of 3, three samples each) | default build: base 1,941,215 / 1,941,369 / 1,939,068; new 1,947,111 / 1,947,746 / 1,947,912 (+5.9K to +8.8K, +0.30% to +0.45%). `codegen-units=1`: base 1,932,659 / 1,932,999 / 1,933,199; new 1,941,212 / 1,942,605 / 1,940,830 (+7.6K to +9.6K, +0.39% to +0.50%). The Rust-side install alone is about +1K. The rest is the `assign`, `copyData` and `rest` helpers of `prelude.js` (symbols are copied). A new top-level `var` in the prelude cost +45K, so none was added. |
 
 Not tested: Windows; the browser and the old engine with symbols (the old engine has none); Miri locally (the tests use small loops for the CI Miri job); `Symbol.species`, `iterator` and `asyncIterator` reads (no built-in reads them yet); the whole-browser cost; wall time on an idle machine; the `cost_matrix.sh` rows other than the five micro rows and start-up.
+## js2 RegExp, steps R0 and R1: the backtracker behind a `Blob` (2026-11-21)
+
+Design: `design-js2-regexp.md` (PR #797), "Decisions (owner, 2026-11-21)". Base: `fd9c749b` (js2 main). Machine: archMachine (AMD Ryzen 9 5900HX), not idle (other sessions ran). Cost rows are instruction counts (`tools/js/instr.sh`, minimum of 3 runs).
+
+What changed.
+
+1. `crates/js2/src/regexp.rs`: the parser, emitter and matcher of the old engine (`crates/js/src/regexp.rs`), over a flat program image (`Vec<u64>`) that a `Blob` cell holds. The matcher is generic over `u8` and `u16` input. It writes the spans to a caller slice. It has no `AtomicU64`. One decode step per instruction: the loop matches on the opcode byte, not on a decoded enum.
+2. `Layout::Blob = 21` (`cell.rs`, `gc.rs`): a leaf cell. The collector marks it and does not trace it. `crates/js2/src/blob.rs` holds the only `unsafe` (the cell read and write). It is in the Miri list of `Cargo.toml`. js2 now depends on `bare-unicode`.
+3. Steps: each matcher step is counted down in a block of 256 steps. A block costs `FUEL_PER_BLOCK` (16) units of `Realm::fuel`. One run also has the cap `MAX_STEPS` (50 M). Fuel out, the cap, the stack limit or an input over 16 M units make the native return `Err(STOP)`: the script ends with `Exit::Fuel`, as the old engine's `Error::Limit` did. `FUEL_PER_BLOCK` is a placeholder. It is not calibrated against `loopfn` yet.
+4. `crates/js2/src/regexp_rt.rs`: `RegExp` objects (flag `F_REGEXP`, slots `\0src`, `\0fl`, `\0prog`, `lastIndex`), the constructor, `exec`, `test`, `toString`, and the getters `source`, `flags` and the 8 flag getters. `Op::NewRegExp` builds the object. The constructor checks the syntax. The program compiles at the first `exec` or `test`. A cache of 32 programs, keyed by (source cell, flags), is a root of the collector. A native getter now runs through `call_function` in `call_get!` (cold arm).
+5. Lazy install: `Realm::rx` is `None` at start. The first literal, or the first read of the global name `RegExp` that misses (`get_global_slow`, `TypeofGlobal`), builds the constructor and the prototype. Known gap: `globalThis.RegExp`, `hasOwnProperty("RegExp")` and a list of the globals do not see `RegExp` before that first use (test262 `built-ins/RegExp/prop-desc.js` fails because of it).
+6. `regexp_check.rs` checks `\p{...}` names against `bare_unicode::property::property_ranges`. A property of strings (`\p{RGI_Emoji}`) is a `SyntaxError`, as in the matcher.
+7. `test262-js2-subset.txt` has `built-ins/RegExp`, `annexB/built-ins/RegExp` and the six String regex-method directories. `test262-js2-skip.txt` allows `regexp-dotall`, `regexp-lookbehind` and `regexp-unicode-property-escapes`. The baseline is regenerated.
+8. `crates/js-diff/examples/regexp_row.rs` (data in `examples/data/regexp/`): the regex rows, both engines, same patterns and inputs. `diff-known.txt` loses `script_tests:180` (a regexp literal no longer throws).
+
+Results.
+
+| Check | Result |
+| --- | --- |
+| Regex row, 47 staging patterns, 20 inputs, `exec` with all spans (940 runs for each rep) | old 1,627 instructions per run; new 1,657 (+1.8%) |
+| Regex row, 19 Porter rules, 2,000 words (38,000 runs for each rep) | old 3,801; new 3,644 (-4.1%) |
+| Checksum of all spans on both rows | equal on both engines (after the fix of the row, see the merge note below) |
+| Compile, 66 patterns, per pattern | old 25,474; new about 25,764 (+1.1%) |
+| Compiled bytes for each pattern (66 patterns) | new 308 B (blob cell, rounded to 16); the design gives 916 B for the old engine |
+| `(a+)+b`, n = 28 | both end with a budget error; new stops at the cap of 50 M steps (about 120 ms); old about 140 to 250 ms |
+| test262 (`tools/js/test262_js2.sh -u`, checkout `e4fbf577`) | js2 passes 18,604 (baseline of `origin/main` at `29aee409`: 17,324); no test that passes on `origin/main` fails (per-test comparison of a fresh run of each tree); 1,280 tests pass that did not |
+| test262, `built-ins/RegExp` against the old engine | old passes 603, js2 723; 22 tests pass on the old engine and fail on js2 (below) |
+| test262, String regex methods | the String directories still have 127 tests that pass on the old engine and fail on js2 (the String methods with a RegExp argument, R3) |
+| `cargo test --locked -p bare-js2 --lib` | 523 pass (after the merge of `origin/main` at `29aee409`) |
+| `cargo test --locked -p bare-js-diff` | all pass (363 programs, no new difference) |
+| Startup, `script_run` with `var x = 1;` | base 1,941,522; new 1,956,532 (+0.77%); at `codegen-units=1`: 1,936,844 and 1,943,616 (+0.35%), so the rule passes |
+| Micro rows, default build (`interp_load`, base then new) | loopfn +0.005%, calls +0.002%, fib +0.001%, closures +0.004%, objects +0.009% |
+| Micro rows, `codegen-units=1` (information) | loopfn -0.35%, calls -1.21%, fib +0.26%, closures -0.79%, objects -0.96% |
+| Binary, `script_run`, release | 2,210,848 B (base) to 2,620,904 B (new): +410,056 B (+18.5%) |
+
+Merge with `origin/main` at `29aee409` (host adapter, generators, handler groups). Conflicts: `Cargo.toml` and `lib.rs` (the lists of the modules with `unsafe`: both `blob` and `api`), `interp_rt.rs` (`collect` marks `api` and `rx`), `object.rs` (`F_GEN` keeps 16384; `F_REGEXP` moved to 32768, because 8192 is for `F_PROMISE` of #800). The cost numbers above were measured again on the merged tree against `29aee409`: `interp_load` at loopfn 1,000,000, calls 1,000,000, fib 30, closures 200,000, objects 200,000; `tools/js/instr.sh`, 3 rounds, the load average was 10 to 19 (instruction counts only). The spread of the 3 rounds is under 0.001% for the micro rows and 0.13% for `script_run`. `regexp_row.rs` summed the whole output buffer of the new engine, with stale entries of earlier patterns. It now sums the spans of the pattern only, and the checksum is equal on both engines (the old row had been different, which the first version of this note did not say).
+
+The 22 tests of `built-ins/RegExp` that the old engine passes and js2 does not: 16 `lookBehind` tests and `lookahead-quantifier-match-groups` (they call `String.prototype.match`; R3), 4 tests that call a String method with a RegExp (R3), `prop-desc.js` (the lazy global, above) and `exec/u-captured-value.js`. The last one fails because of a bug that is not in this change: on the base, `'𝌆'[0]` is U+FFFD, not the lone surrogate.
+
+How the regex row moved. The first port was +26.6% (staging) and +14.7% (Porter). Three changes closed it: a countdown step counter instead of a counter with a block test on each step (the first-set skip charges once for the skipped run), a match on the opcode byte instead of decode then match, and no reset of the span buffer for each run.
+
+Not done in this change: String methods, the Symbol protocol, named groups in the result, `d`, and `\p{}` matching in the String methods (R3); the linear side (R2); the calibration of `FUEL_PER_BLOCK`.
+
+Miri (`cargo +nightly miri test`): the 3 `blob` tests, `regexp::tests::basics`, `a_one_byte_input_gives_the_same_spans_as_a_two_byte_input` and `regexp_rt_tests::last_index` pass. The full suite under Miri did not finish in 50 minutes here (`regexp::tests::compile_bounds` is slow); CI runs it.
+
+Not tested: Windows; the browser; peak RSS on `rust-book-search` and `substack-home` (no journey run); a V8 comparison of the new glue; the cost matrix of the whole repo; Miri on the whole js2 suite (the Blob and RegExp tests only; see the PR).
+
+Merge with `origin/main` at `8875c60a` (#800 promises, #804 Symbol, generators, host adapter). Conflicts: `interp.rs` (`call_get!`: one cold arm for a native getter, as for `Symbol.prototype.description` and the flag getters), `interp_rt.rs` (`collect` marks `rx` in the roots of the promise walk; `blob_of` and `sym_of` both stay), `test262-js2-subset.txt` (`built-ins/RegExp` and `built-ins/Promise`, `Symbol` both listed) and the baseline (regenerated). All `F_*` bits are distinct (`F_PROMISE` 8192, `F_GEN` 16384, `F_REGEXP` 32768; Symbol has no flag). Measured on the merged tree against `8875c60a`, archMachine, load average 11 to 16, instruction counts only (`tools/js/instr.sh`, minimum of 3). test262 (`tools/js/test262_js2.sh -u`, checkout `e4fbf577`, a fresh run of each tree): `origin/main` passes 17,941 and the merge passes 19,229; 0 tests that pass on main fail on the merge; 1,288 new passes. `cargo test --locked -p bare-js2 --lib`: 545 pass; `-p bare-js-diff --lib`: 2 pass. Micro rows, default build, base then new (`interp_load`, N minus N=0, loopfn 1,000,000, calls 1,000,000, fib 30, closures 200,000, objects 200,000): loopfn 266,500,200 to 266,500,274 (0.00%); calls 571,500,735 to 571,500,787 (0.00%); fib 1,090,130,726 to 1,090,134,014 (0.00%); closures 365,701,254 to 365,699,724 (0.00%); objects 143,393,037 to 143,392,696 (0.00%). Start-up (`script_run` on `var x = 1;`, 3 samples): base 1,967,848 / 1,969,396 / 1,969,520; new 1,979,990 / 1,980,137 / 1,978,521 (+0.54% on the minimum), so the row is over +0.5% at the default build. At `codegen-units=1` on both trees: base 1,962,603 / 1,962,867 / 1,962,473; new 1,972,167 / 1,972,951 / 1,972,767 (+0.49% on the minimum), so the rule passes, narrowly. Micro rows at `codegen-units=1` (information): loopfn -3.2%, calls -1.9%, fib +0.9%, closures -0.7%, objects -1.5%; `fib` is 0.00% at the default build, which is the build that the rule uses for the micro rows. Regex rows, new engine (the base has no RegExp): staging 1,658 per run (old engine 1,627, +1.9%), Porter 3,644 (old 3,801, -4.1%); the span checksums are equal on both engines.
+
 ## 2026-11-21: design of the js2 dispatch (`docs/design-js2-dispatch.md`)
 
 Design document for owner review. No engine code changed. Base `fd9c749b` (its `crates/js2` equals the head of #775). Machine: archMachine, load average 17, so instruction counts only.
@@ -18074,6 +18123,49 @@ Tests. Linux, debug: `cargo test --locked -p bare --lib -p bare-js -p bare-js-ap
 
 Not tested: the Windows tests (only `cargo xwin check`, no VM run); `BARE_GC_STRESS=1` over the whole `bare` crate; the removed `BARE_ALL_API` mode (it has no handler left to run); `codegen-units=1` (no row was over +0.5%); RSS and wall time; the journeys and `tools/suite/run.py`; macOS; a direct test of the textarea `readOnly`, `dirName`, `wrap` and `autocomplete` properties (the Chrome fixture `textarea` covers some of them).
 
+## 2026-11-21: pause (owner), state of the engine rewrite
+
+The owner paused the work on 2026-11-21. No agent runs. This section is the state at the pause.
+
+### Merged since 2026-11-20
+
+- S0 host interface: handler groups B (#779), A2 (#781), E (#780), F (#784), G (#782), Z (#802). S0.4 finish PR 1 (#806) and PR 2 (#811). S0.4 PR 3 (#816) has auto-merge on.
+- js2 speed: register pointer (#773), global cells (#774), call path (#775), conversions and cold hints (#785), DECOMPOSE offsets (#795).
+- js2 features: built-ins and JSON (#791), early errors (#789, #790), lazy user scripts (#777), host adapter and shared suite (#799), generators G0/G1 (#801), Symbol (#804).
+- Other: embedded time zone data (#798), Windows test fixes (#788), CI cancels stale runs and runs Miri only on the unsafe modules (#812).
+- Design documents with owner decisions: host API (#786), time zones (#793), lazy built-ins (#794), async (#796), RegExp hybrid (#797), dispatch (#803).
+
+### Open at the pause
+
+| PR                                | State                                         | Next step                                                                                                                                                                                                |
+| --------------------------------- | --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| #800 promises P0/P1               | merged (8875c60a)                             | none; test262 17,941 pass (main before: 17,775), no directory drops                                                                                                                                      |
+| #810 RegExp R0/R1                 | auto-merge on, conflicts with main after #800 | merge main, regenerate the test262 baseline                                                                                                                                                              |
+| #816 S0.4 PR 3 (structured clone) | merged (4465b004)                             | none                                                                                                                                                                                                     |
+| #809 dispatch step 1              | held                                          | after the merge of #801, `objects` is +0.84% (default) and +0.74% (`codegen-units=1`). It fails the cost rule. A local merge is in `/data/bare-tmp/wt-809` (commit 7eaad7a1). Find the cause, then push. |
+| #808 prototype-chain inline cache | held                                          | waits for #809. Then merge main and measure again.                                                                                                                                                       |
+
+### test262 on js2
+
+The subset grows when a step adds directories, so compare passes only on the same subset.
+
+| Point              | js2 pass                                       |
+| ------------------ | ---------------------------------------------- |
+| 2026-11-20 morning | 12.8 k                                         |
+| main at the pause  | 17,775 (old engine on the same subset: 19,146) |
+| with #800          | 17,941 (measured on the merge with main)       |
+| with #800 and #810 | about 18.9 k (hypothesis: adds the #810 gain)  |
+
+### Next steps after the pause
+
+1. Merge #810 with main. Fix #809 (the `objects` row), then #808.
+2. S0.4 PR 4 to PR 6: install functions to `Scope`, owners and `trace`/`prune`, `Browser::it`, then `Dom<E: Engine>` and the browser switch (S2.8 step 4).
+3. Async: P2 (`bare-js-api` promise methods), P3 (combinators in Rust), G2 (compiler for `function*`), G3 (iterator protocol), A1 (async functions).
+4. RegExp: R2 (own linear engine, +40 KB limit), R3 (String methods, Symbol protocol, `\p{}`).
+5. Lazy built-ins step 1 and step 2 (startup must not scale with the built-in count).
+6. Dispatch step 2 (tail-call handlers): spike, then a wall-time check on an idle machine.
+
+The owner resumed the work on 2026-11-21, after #800 and #816 merged.
 ## 2026-11-21: structured clone and transfer on the interface (plan step S0.4, PR 3)
 
 Status: PR 3 of the plan in "what blocks `Dom<E: Engine>`". Base: `origin/main` `29aee409` (the head of #811). The PR is open without auto-merge.
@@ -18103,3 +18195,15 @@ The clone rows do not run a handler that reads options by name. `post_args` and 
 Tests. Linux, debug: `cargo test --locked -p bare --lib`: 1719 pass (6 ignored). `-p bare-js`: 1107 pass with the new test (1 ignored). `-p bare-js-api`: 32 pass, and `--features suite`: pass. `BARE_GC_STRESS=1` on the 295 tests of `bare` with `clone`, `message`, `transfer`, `port`, `channel`, `history`, `navigation_tests`, `state`, `browser_child`, `worker`, `array_buffer` or `basics` in the name: all pass. `cargo xwin check -p bare --target x86_64-pc-windows-msvc`: passes. `cargo check --locked -p bare --all-targets`: no warning.
 
 Not tested: the Windows tests (only `cargo xwin check`, no VM run); `BARE_GC_STRESS=1` over the whole `bare` crate; `codegen-units=1` (no row was over +0.5%); an options object on the `postMessage` and `structuredClone` hot path; RSS and wall time; the journeys and `tools/suite/run.py`; macOS.
+
+## Engine rewrite: status (index, from 2026-11-21)
+
+Order (owner, 2026-11-21): first the browser runs pages on js2 (`BARE_JS_EXEC=new`), then the daily journeys on js2 decide the work, then js2 becomes the default.
+
+| Phase | Goal | State |
+| ----- | ---- | ----- |
+| 1 | The typing page runs on `BARE_JS_EXEC=new`: S0.4 PR 4 to PR 6, `Dom<E: Engine>`, the js2 adapter gaps, the browser switch | in progress |
+| 2 | Every daily journey on js2. A script lists the failures; agents work only from that list | not started |
+| 3 | Measure, profile, make js2 the default (S5.3 to S5.5) | not started |
+
+New entries: [progress/](progress/README.md).

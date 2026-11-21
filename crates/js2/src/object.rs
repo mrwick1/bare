@@ -78,6 +78,8 @@ pub const F_WRAP: u32 = 4096;
 pub const F_PROMISE: u32 = 8192;
 /// Object header flag: a generator object (`gen.rs`): its hidden slots hold the state and the saved frame.
 pub const F_GEN: u32 = 16384;
+/// Object header flag: a `RegExp` object (`regexp_rt.rs`). Its slots 0 to 3 are the pattern, the flag bits, the program and `lastIndex`. Bit 8192 is for `F_PROMISE`.
+pub const F_REGEXP: u32 = 32768;
 /// `Elements` header flag: the record is sparse.
 const F_SPARSE: u32 = 1;
 /// A write at an index this far above the capacity of a dense record makes it sparse.

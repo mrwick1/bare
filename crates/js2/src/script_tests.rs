@@ -27,7 +27,7 @@ fn ev_gc(src: &str, name: &str) -> String {
 /// Each case is `(source, global, expected text)`. Each runs normally and under constant collection. Under Miri it runs only
 /// normally (Miri is 100 times slower; `a_few_programs_under_constant_collection` and the stress test keep the collector covered), and
 /// a case with `**` is skipped (Miri adds a random error to the result of `pow`).
-fn check(cases: &[(&str, &str, &str)]) {
+pub(crate) fn check(cases: &[(&str, &str, &str)]) {
     for (src, name, want) in cases {
         if MIRI && src.contains("**") {
             continue;
@@ -177,7 +177,7 @@ fn tagged_templates_regexp_and_bigint() {
         ("function tag(s, v) { return s[0] + v + s.raw[1]; } var r = tag`a${1}b`;", "r", "a1b"),
         ("function id(s) { return s; } function t() { return id`x`; } var r = t() === t();", "r", "true"),
         ("function id(s) { return s; } var r = id`a\\n${0}` === id`a\\n${0}`;", "r", "false"),
-        ("try { /a+/g; } catch (e) { var r = e.name; }", "r", "TypeError"),
+        ("var r = /a+/g.test('caab');", "r", "true"),
         ("try { var x = 10n; } catch (e) { var r = e.name; }", "r", "TypeError"),
     ]);
 }
