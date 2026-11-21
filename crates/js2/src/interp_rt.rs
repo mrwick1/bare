@@ -409,6 +409,7 @@ impl Realm {
         let hidden = ["\0native", "\0n1", "\0n2", "\0n3"].map(&mut atom);
         let (k_value, k_done) = (atom("value"), atom("done"));
         let gkeys = ["\0gstate", "\0gframe", "\0gsent", "\0gmode", "\0gpromise", "\0gentry"].map(&mut atom);
+        let empty = atom("");
         let root = shapes.root(Layout::Object, None, 4);
         let object_proto = Obj::new(&mut heap, &shapes, root).expect("memory");
         let proto = Some(object_proto.cell());
@@ -425,8 +426,10 @@ impl Realm {
         let f = shapes.add(f, k_home, 0).expect("shape");
         let f = shapes.add(f, k_fields, 0).expect("shape");
         let s_func = shapes.add(f, k_link, 0).expect("shape");
-        let mk = |heap: &mut Heap| Obj::new(heap, &shapes, s_object).expect("memory");
-        let (string_proto, number_proto, boolean_proto, symbol_proto) = (mk(&mut heap), mk(&mut heap), mk(&mut heap), mk(&mut heap));
+        let wrapper = shapes.add(s_object, k_prim, 0).expect("shape");
+        let [string_proto, number_proto, boolean_proto] =
+            [empty.value(), Value::int(0), Value::bool(false)].map(|v| Obj::new_wrapper(&mut heap, &shapes, wrapper, v));
+        let symbol_proto = Obj::new(&mut heap, &shapes, s_object).expect("memory");
         let wk = crate::bi_symbol::well_known(&mut heap);
         // An arguments object has the own property `Symbol.iterator` (slot 0): `%Array.prototype.values%`, set when the object is made.
         let s_args = shapes.root(Layout::Indexed, Some(object_proto.cell()), 1);

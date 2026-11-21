@@ -200,3 +200,12 @@ fn the_function_constructor_builds_a_global_function() {
         ("var f = new Function('a', 'this.v = a'); var o = new f(9); return o.v + ',' + (o instanceof f);", "9,true"),
     ]);
 }
+
+#[test]
+fn primitive_prototypes_have_their_own_wrapped_values() {
+    check(&[
+        ("return Number.prototype.valueOf() + ':' + Number.prototype.toString(2) + ':' + Object.prototype.toString.call(Number.prototype);", "0:0:[object Number]"),
+        ("return Boolean.prototype.valueOf() + ':' + String.prototype.valueOf() + ':' + String.prototype.length;", "false::0"),
+        ("try { return Object.create(Number.prototype).valueOf(); } catch (e) { return e.name; }", "TypeError"),
+    ]);
+}
