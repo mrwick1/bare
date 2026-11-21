@@ -2,7 +2,7 @@
 //!
 //! How it fits together
 //! - The DOM is the native `bare_html::dom::Document` behind `Rc<RefCell<Document>>`. JS never sees a copy.
-//! - `Dom` implements `bare_js::eval::Host`. JS calls reach it as numbered methods (`Dom::scoped`). Getters and setters
+//! - `Dom` implements `bare_js_api::Host`. JS calls reach it as numbered methods (`Dom::scoped`). Getters and setters
 //!   are ordinary accessor properties on the prototypes, so `el.id` runs through the same call path and obeys the
 //!   same step and 100-call guards.
 //! - A JS node is a wrapper object. There is one wrapper for each native node while it is alive, so `a === a`.
@@ -91,7 +91,7 @@ use crate::browser_custom as ce;
 pub use crate::browser_scheduler::{Pump, SchedLimits, SchedStats};
 use bare_css::selector::Selector;
 use bare_html::dom::{Document, NodeData, NodeId, Ns};
-use bare_js::eval::{Error, EvalLimits, Host, Interp, LimitKind};
+use bare_js::eval::{Error, EvalLimits, Interp, LimitKind};
 use bare_js::heap::{Heap, HeapLimits, PropertyDescriptor};
 use bare_js::value::{ObjId, PropertyKey, Value};
 use bare_js_api::HostFn;
@@ -1077,12 +1077,17 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
         crate::browser_dataset::compact(self, datasets);
     }
 
-    /// The fill step and the named writes go to the old methods of the browser (`Host::fill_indexed`, `Host::named_write`) until the tables move.
+    /// The fill step of a host-indexed object. The tables that hold the entries still take the raw object (`Interp`, `ObjId`).
     fn fill<'s>(&self, s: &mut bare_js_api::Scope<'s, Interp<'p>>, object: bare_js_api::Local<'s>, _key: u32, index: u32) -> Result<(), bare_js_api::Error<'s>> {
         use bare_js_api::Engine as _;
-        let Value::Object(o) = s.engine().raw(object) else { return Ok(()) };
+        let Value::Object(owner) = s.engine().raw(object) else { return Ok(()) };
         let it = s.engine();
-        Host::fill_indexed(self, it, o, index).map_err(|e| it.api_err(e))
+        let r = if index == crate::browser_frames::FILL {
+            crate::browser_frames::fill(self, it, owner, index).map(|_| ())
+        } else {
+            crate::browser_sources::fill(self, it, owner, index).and_then(|done| if done { Ok(()) } else { at::fill(self, it, owner, index) })
+        };
+        r.map_err(|e| it.api_err(e))
     }
 
     fn named_write<'s>(&self, s: &mut bare_js_api::Scope<'s, Interp<'p>>, object: bare_js_api::Local<'s>, _key: u32, name: &[u16], op: bare_js_api::Write<'s>) -> Result<bool, bare_js_api::Error<'s>> {
@@ -1112,7 +1117,9 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
                 configurable: d.configurable,
             }),
         };
-        Host::named_write(self, it, NamedRequest { owner, key, op }).map_err(|e| it.api_err(e))
+        let req = NamedRequest { owner, key, op };
+        let r = if self.storage_area(owner).is_some() { crate::browser_navigation_storage::write(self, it, req) } else { crate::browser_dataset::write(self, it, req) };
+        r.map_err(|e| it.api_err(e))
     }
 
     #[inline]
@@ -1175,29 +1182,6 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
         let raw = |it: &mut Interp<'p>, l: &[bare_js_api::Local<'s>]| l.iter().map(|&l| bare_js_api::Engine::raw(it, l)).collect::<Vec<_>>();
         let (unhandled, handled) = (raw(it, unhandled), raw(it, handled));
         crate::browser_rejection::notify(self, it, &unhandled, &handled, dropped).map_err(|e| it.api_err(e))
-    }
-}
-
-/// The old `Host`: `fill_indexed` and `named_write` have no method in `bare-js-api`. It has no `roots`, `trace` or `prune`.
-impl Host for Dom {
-    /// Every host function is on the interface (`Dom::call_scoped`), so the engine never calls this.
-    fn call(&self, _: &mut Interp<'_>, _: u32, _: Value, _: &[Value], _: bool) -> R<Value> {
-        Err(Error::Unsupported(unsupported("a host function of the old registry")))
-    }
-
-    fn fill_indexed(&self, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<()> {
-        if index == crate::browser_frames::FILL { crate::browser_frames::fill(self, it, owner, index)?; return Ok(()); }
-        if crate::browser_sources::fill(self, it, owner, index)? {
-            return Ok(());
-        }
-        at::fill(self, it, owner, index)
-    }
-
-    fn named_write(&self, it: &mut Interp<'_>, req: bare_js::heap::NamedRequest) -> R<bool> {
-        if self.storage_area(req.owner).is_some() {
-            return crate::browser_navigation_storage::write(self, it, req);
-        }
-        crate::browser_dataset::write(self, it, req)
     }
 }
 
@@ -2135,7 +2119,6 @@ impl Browser {
             worker: Default::default(),
             reclaim: Default::default(),
         });
-        it.set_host(dom.clone())?;
         bare_js_api::Engine::set_host(&mut it, dom.clone());
         it.set_api_sources(dom.clone());
         it.host_scope(|it| {

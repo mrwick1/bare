@@ -321,7 +321,7 @@ pub(crate) fn named_keys(d: &Dom, object: &Value, key: u32) -> Result<Vec<Vec<u1
     r.map_err(pending)
 }
 
-/// `Host::fill_indexed` for a host-filled object: the fill step of its subsystem. `Ok(false)`: `owner` is not one.
+/// `Host::fill` for a host-filled object: the fill step of its subsystem. `Ok(false)`: `owner` is not one.
 pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<bool> {
     match it.heap.host_key(owner).and_then(Source::of) {
         Some(Source::NodeList) => crate::browser_nodelist::fill(d, it, owner, index),

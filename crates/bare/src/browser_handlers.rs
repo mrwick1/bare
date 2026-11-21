@@ -643,7 +643,11 @@ fn define(d: &Dom, it: &mut Interp<'_>, owner: ObjId, k: u8, n: &'static str) ->
 
 /// `onabort` of `AbortSignal.prototype`, made with the lazy `AbortSignal` (`browser_abort.rs`).
 pub(crate) fn install_onabort(d: &Dom, it: &mut Interp<'_>, proto: ObjId) -> R<()> {
-    d.def_get_s(it, proto, "onabort", sig_get, Some(sig_set))
+    table!(members = [Row::get(1, "onabort", sig_get, Some(sig_set))]);
+    run(it, |s| {
+        let p = d.obj_local(s, proto);
+        d.install_rows(s, &[p], &members::T)
+    })
 }
 
 pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {

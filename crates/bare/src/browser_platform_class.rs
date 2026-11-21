@@ -18,7 +18,7 @@
 //! - Indexes: the list is a host-indexed object (`Heap::new_indexed`, like `NodeList` and `NamedNodeMap`). `list[i]` is `item(i)`,
 //!   and `i` past the end is absent, so `in`, `Object.keys`, `slice` and `for..in` see the tokens, as Chrome does (the WebIDL
 //!   indexed getter of `DOMTokenList`). The count and the strings are a cache of the attribute text (`Toks`). A stale cache
-//!   asks the host first (`indexed_fill`, the `Host::fill_indexed` of this module), so no read is ever stale. The list traces
+//!   asks the host first (`indexed_fill`, the `Host::fill` of this module), so no read is ever stale. The list traces
 //!   the strings.
 //!   Port: `item` follows Ladybird `DOMTokenList::item` (`Libraries/LibWeb/DOM/DOMTokenList.cpp`, BSD-2): an index at or past the
 //!   size is null. The index rule is the WebIDL one: `list[i]` exists when `i` is less than `length`.
@@ -254,7 +254,7 @@ pub(crate) fn indexed_item(d: &Dom, owner: ObjId, index: usize) -> Option<Result
     fresh(d, owner, |t| t.vals.get(index).map_or(Slot::Absent, |&v| Slot::Str(v)))
 }
 
-/// `Host::fill_indexed` for a token list: make the cache of `owner` fresh. `Ok(false)`: `owner` is not a token list.
+/// `Host::fill` for a token list: make the cache of `owner` fresh. `Ok(false)`: `owner` is not a token list.
 pub(crate) fn indexed_fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId) -> R<bool> {
     let el = d.plat.s.borrow().lists.get(&owner).copied();
     let Some(el) = el else { return Ok(false) };
