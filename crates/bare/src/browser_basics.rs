@@ -34,7 +34,7 @@
 
 use crate::browser::*;
 use crate::browser_scoped::*;
-use bare_js_api::{Args, Engine, Local};
+use bare_js_api::{Args, Engine, Local, Type};
 use crate::browser_platform::arg;
 use bare_html::dom::{Document, NodeData};
 use bare_js::eval::Interp;
@@ -271,37 +271,38 @@ impl Dom {
 
 /// The arguments of `window.postMessage`, own or remote: the target origin as given ("/" when absent) and the transfer list.
 /// `postMessage(message, targetOrigin, transfer)` or `postMessage(message, { targetOrigin, transfer })`.
-pub(crate) fn post_args(d: &Dom, it: &mut Interp<'_>, a: &[Value]) -> R<(String, Vec<ObjId>)> {
+pub(crate) fn post_args<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>) -> Res<'s, (String, Vec<ObjId>)> {
     if a.is_empty() {
-        return Err(it.type_error("Failed to execute 'postMessage' on 'Window': 1 argument required, but only 0 present."));
+        return Err(s.type_error("Failed to execute 'postMessage' on 'Window': 1 argument required, but only 0 present."));
     }
-    let (target, transfer) = match arg(a, 1) {
-        Value::Undefined | Value::Null => (Value::Undefined, Value::Undefined),
-        o @ Value::Object(_) => {
-            let (kt, kr) = (d.key(it, "targetOrigin")?, d.key(it, "transfer")?);
-            (it.get_value(o, kt)?, it.get_value(o, kr)?)
+    let options = arg_s(s, a, 1);
+    let (target, transfer) = match s.type_of(options) {
+        Type::Undefined | Type::Null => (s.undefined(), s.undefined()),
+        Type::Object | Type::Function => {
+            let target = s.get_str(options, "targetOrigin")?;
+            (target, s.get_str(options, "transfer")?)
         }
-        v => (v, arg(a, 2)),
+        _ => (options, arg_s(s, a, 2)),
     };
-    let target = match target {
-        Value::Undefined => "/".to_string(),
-        v => {
-            let s = it.to_js_string(v)?;
-            it.heap.to_string_lossy(s).map_err(|e| it.heap_error(e))?
+    let target = match s.type_of(target) {
+        Type::Undefined => "/".to_string(),
+        _ => {
+            let t = s.to_string(target)?;
+            s.as_str(t).map_or_else(String::new, |t| t.to_string_lossy())
         }
     };
-    let list = d.transfer_list(it, transfer, None, "Failed to execute 'postMessage' on 'Window'")?;
+    let list = d.transfer_list(s, transfer, None, "Failed to execute 'postMessage' on 'Window'")?;
     Ok((target, list))
 }
 
 /// The origin that a target origin names: `None` for "*" and "/", else the origin of the URL (`SyntaxError` when it does not parse).
-pub(crate) fn target_origin(it: &mut Interp<'_>, d: &Dom, target: &str) -> R<Option<String>> {
+pub(crate) fn target_origin<'s>(s: &mut Sc<'s, '_>, d: &Dom, target: &str) -> Res<'s, Option<String>> {
     if target == "*" || target == "/" {
         return Ok(None);
     }
     match crate::browser_navigation_url::parse(target, None) {
         Ok(r) => Ok(Some(r.origin())),
-        Err(_) => Err(d.dom_err(it, "SyntaxError", &format!("Failed to execute 'postMessage' on 'Window': Invalid target origin '{target}' in a call to 'postMessage'."))),
+        Err(_) => Err(d.dom_err_s(s, "SyntaxError", &format!("Failed to execute 'postMessage' on 'Window': Invalid target origin '{target}' in a call to 'postMessage'."))),
     }
 }
 
@@ -314,17 +315,16 @@ fn post_message<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -
     if !matches!(this, Value::Undefined | Value::Null) && !matches!(this, Value::Object(o) if Some(&o) == d.global.get()) {
         return Err(s.type_error("Illegal invocation"));
     }
-    let a: Vec<Value> = a.iter().map(|v| s.engine().raw(v)).collect();
-    old(s, |it| {
-        let (target, list) = post_args(d, it, &a)?;
-        if let Some(origin) = target_origin(it, d, &target)?
-            && origin != doc_origin(d)
-        {
-            return Ok(());
-        }
-        let (data, ports, _) = crate::browser_navigation_state::clone_with(d, it, a[0], &list)?;
-        d.post_window(data, ports.into_boxed_slice())
-    })?;
+    let (target, list) = post_args(d, s, a)?;
+    if let Some(origin) = target_origin(s, d, &target)?
+        && origin != doc_origin(d)
+    {
+        return Ok(s.undefined());
+    }
+    let msg = arg_s(s, a, 0);
+    let (data, ports, _) = crate::browser_navigation_state::clone_with(d, s, msg, &list)?;
+    let data = s.engine().raw(data);
+    lift(s, d.post_window(data, ports.into_boxed_slice()))?;
     Ok(s.undefined())
 }
 
