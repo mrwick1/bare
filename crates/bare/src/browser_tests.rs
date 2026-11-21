@@ -189,6 +189,7 @@ fn selectors_lookups_and_errors() {
         let mut b = browser();
         assert_eq!(js(&mut b, "[document.querySelectorAll('div *').length, document.querySelector('p + span') === null, document.querySelector('p ~ span').id, document.getElementById('s').closest('div').id, document.getElementById('s').closest('section'), document.querySelector('#nope'), document.getElementById('')].join()"), "2,false,s,a,,,");
         assert_eq!(js(&mut b, "document.getElementById('a').querySelector('#a')"), "null"); // only descendants
+        assert_eq!(js(&mut b, "var a = document.getElementById('a'); var i = document.createElement('i'); i.id = 's'; a.appendChild(i); var ids = document.querySelector('#s').tagName + '|' + Array.from(a.querySelectorAll('#s'), e => e.tagName).join(); i.remove(); ids"), "SPAN|SPAN,I");
         assert_eq!(js(&mut b, "document.querySelector('p[')"), "throw:SyntaxError:'p[' is not a valid selector");
         assert_eq!(js(&mut b, "document.querySelector('a b c d e f g')"), lim("dom-selector-complexity"));
         // Complex selectors in `:not()` and `:is()` (Selectors 4). Their searches count for the limit too.

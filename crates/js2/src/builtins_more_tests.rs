@@ -81,10 +81,8 @@ fn json_stringify_calls_to_json_with_the_key() {
 }
 
 #[test]
-fn json_calls_that_need_the_script_call_are_type_errors_for_now() {
+fn json_ignores_a_non_callable_to_json() {
     check(&[
-        ("try { JSON.parse('1', function () {}); } catch (e) { return e.name; }", "TypeError"),
-        ("try { JSON.stringify({}, function () {}); } catch (e) { return e.name; }", "TypeError"),
         ("return JSON.stringify({toJSON: 5, a: 1});", "{\"toJSON\":5,\"a\":1}"),
     ]);
 }
@@ -198,5 +196,82 @@ fn the_function_constructor_builds_a_global_function() {
         ("try { Function('a', 'a', '\"use strict\";'); } catch (e) { return e.name; }", "SyntaxError"),
         ("var f = Function('return this'); return (f() === globalThis) + ',' + (new Function('this.z = 1; return this') instanceof Function);", "true,true"),
         ("var f = new Function('a', 'this.v = a'); var o = new f(9); return o.v + ',' + (o instanceof f);", "9,true"),
+    ]);
+}
+
+#[test]
+fn primitive_prototypes_have_their_own_wrapped_values() {
+    check(&[
+        ("return Number.prototype.valueOf() + ':' + Number.prototype.toString(2) + ':' + Object.prototype.toString.call(Number.prototype);", "0:0:[object Number]"),
+        ("return Boolean.prototype.valueOf() + ':' + String.prototype.valueOf() + ':' + String.prototype.length;", "false::0"),
+        ("try { return Object.create(Number.prototype).valueOf(); } catch (e) { return e.name; }", "TypeError"),
+    ]);
+}
+
+#[test]
+fn bind_constructs_with_the_bound_arguments_and_reads_metadata_at_bind_time() {
+    check(&[
+        ("function A(x, y, z) { this.v = [x, y, z, new.target === A]; } var B = A.bind(null, 1); var C = B.bind(null, 2); return [new C(3).v.join(), new C() instanceof B, C.length, C.name].join('|');", "1,2,3,true|true|1|bound bound A"),
+        ("function A() { this.target = new.target; } function B() {} var C = A.bind(null); return Reflect.construct(C, [], B).target === B;", "true"),
+        ("var f = () => {}; try { new (f.bind(null))(); } catch (e) { return e.name; }", "TypeError"),
+        ("function f(x) {} Object.defineProperty(f, 'name', {get() { throw 'name'; }}); try { f.bind(); } catch (e) { return e; }", "name"),
+        ("function f(x) {} var b = f.bind(); Object.defineProperty(f, 'name', {value: 'later'}); Object.defineProperty(f, 'length', {value: 8}); return b.name + ':' + b.length;", "bound f:1"),
+        ("function f(v) { return this.offset + v; } Object.defineProperty(f, 'length', {get() { throw 'length'; }}); Object.defineProperty(f, 'name', {get() { throw 'name'; }}); return [3].map(f, {offset: 4})[0];", "7"),
+    ]);
+}
+
+#[test]
+fn json_callbacks_see_the_holder_and_visit_properties_in_order() {
+    check(&[
+        (r#"var seen = []; var o = JSON.parse('{"a":[1,2],"b":3}', function (k,v) { seen.push(k); if (k === '0') { this[1] = 7; return undefined; } return v; }); return seen.join('|') + ':' + JSON.stringify(o);"#, "0|1|a|b|:{\"a\":[null,7],\"b\":3}"),
+        (r#"var seen = []; var o = { a: {toJSON() { return 5; }}, b: 2 }; var s = JSON.stringify(o, function(k,v) { seen.push(this[k] === o.a ? k + '=' + v : k); if (k === 'a') delete this.b; return v; }); return seen.join('|') + ':' + s;"#, "|a=5|b:{\"a\":5}"),
+        (r#"return JSON.stringify([new Number(2), new Boolean(false), new String('x')]);"#, "[2,false,\"x\"]"),
+        (r#"try { JSON.parse('[', function() { throw 'wrong'; }); } catch (e) { return e.name; }"#, "SyntaxError"),
+    ]);
+}
+
+#[test]
+fn prelude_builtins_have_no_construct_slot_before_or_after_call() {
+    check(&[
+        ("var f = Array.prototype.map; function tryNew() { try { Reflect.construct(Object, [], f); return 'yes'; } catch (e) { return e.name; } } var before = tryNew(); [].map(function () {}); return before + ':' + tryNew() + ':' + Object.hasOwn(f, 'prototype');", "TypeError:TypeError:false"),
+        ("var f = Array.from; try { new f(); } catch (e) { return e.name; }", "TypeError"),
+    ]);
+}
+
+#[test]
+fn array_species_constructs_results_and_defines_own_elements() {
+    check(&[
+        ("var a = [1, 2]; function S(n) { this.requested = n; } a.constructor = {[Symbol.species]: S}; var r = a.map(function(x) { return x * 2; }); return [r instanceof S, r.requested, r[0], r[1], r.length].join();", "true,2,2,4,"),
+        ("var a = [1]; function S(n) { this.requested = n; } a.constructor = {[Symbol.species]: S}; var r = a.slice(); return [r instanceof S, r.requested, r[0], r.length].join();", "true,1,1,1"),
+        ("var a = [1]; a.constructor = {[Symbol.species]: function() { return Object.preventExtensions({}); }}; try { a.concat([2]); } catch (e) { return e.name; }", "TypeError"),
+        ("var a = [1]; a.constructor = {get [Symbol.species]() { throw 'species'; }}; try { a.flatMap(function(x) { return x; }); } catch (e) { return e; }", "species"),
+        ("return Object.getOwnPropertyDescriptor(Array, Symbol.species).get.call(7);", "7"),
+        ("var a = [2]; function S() { Object.defineProperty(this, '0', {value: 1, configurable: true}); } a.constructor = {[Symbol.species]: S}; var d = Object.getOwnPropertyDescriptor(a.flat(), '0'); return [d.value, d.enumerable, d.writable, d.configurable].join();", "2,true,true,true"),
+    ]);
+}
+
+#[test]
+fn from_entries_processes_one_entry_before_reading_the_next() {
+    check(&[
+        ("var log = ''; function* entries() { log += 'a'; yield {get 0() { log += 'k'; return 'x'; }, get 1() { log += 'v'; return 3; }}; log += 'b'; yield ['y', 4]; } var o = Object.fromEntries(entries()); return [log, o.x, o.y].join();", "akvb,3,4"),
+        ("var log = ''; function* entries() { try { yield {get 0() { throw 'key'; }}; log += 'next'; } finally { log += 'close'; throw 'close'; } } try { Object.fromEntries(entries()); } catch (e) { return log + ':' + e; }", "close:key"),
+    ]);
+}
+
+#[test]
+fn number_parses_prefixed_integers_and_flattened_strings() {
+    check(&[
+        ("return [Number('0b101'), Number('0O17'), Number('0x10000000000000000'), Number('0x+1'), Number('0b'), Number('-0o1')].join();", "5,15,18446744073709552000,NaN,NaN,NaN"),
+        ("var left = '\\u2028 \\u1680'.repeat(30) + '12345'; var right = '67890' + '\\u2001 \\uFEFF'.repeat(30); return Number(left + right);", "1234567890"),
+        ("return [Number('\\u00851'), 1 / Number('\\uFEFF-0'), Number('0x1000000000000081') === 1152921504606847200].join();", "NaN,-Infinity,true"),
+    ]);
+}
+
+#[test]
+fn array_length_set_and_define_preserve_attributes_and_conversion_order() {
+    check(&[
+        ("var a = []; Object.defineProperty(a, 'length', {writable: false}); var n = 0; a.length = {valueOf() { n++; throw 'coerced'; }}; return n + ':' + a.length;", "0:0"),
+        ("var a = [0, 1]; Object.defineProperty(a, '1', {configurable: false}); function f() { 'use strict'; a.length = 1; } try { f(); } catch (e) { return e.name + ':' + a.length; }", "TypeError:2"),
+        ("var a = [], seen = 0; Object.defineProperty(a, 'length', {value: {valueOf() { seen++; return 4294967295; }}}); return seen + ':' + a.length;", "2:4294967295"),
     ]);
 }

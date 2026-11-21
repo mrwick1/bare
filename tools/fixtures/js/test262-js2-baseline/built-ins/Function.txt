@@ -8,9 +8,9 @@ built-ins/Function/prototype 12 5 0 7 10 0
 built-ins/Function/prototype/Symbol.hasInstance 9 1 1 10 0 1
 built-ins/Function/prototype/apply 43 2 3 40 5 3
 built-ins/Function/prototype/arguments 0 1 0 0 1 0
-built-ins/Function/prototype/bind 88 9 3 68 29 3
+built-ins/Function/prototype/bind 88 9 3 90 7 3
 built-ins/Function/prototype/call 47 2 0 44 5 0
 built-ins/Function/prototype/caller 0 1 0 0 1 0
 built-ins/Function/prototype/caller-arguments 0 1 0 0 1 0
 built-ins/Function/prototype/constructor 1 0 0 1 0 0
-built-ins/Function/prototype/toString 33 28 19 58 3 19
+built-ins/Function/prototype/toString 33 28 19 59 2 19

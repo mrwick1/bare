@@ -41,6 +41,10 @@ pub trait Eng: Copy + Default + Debug + PartialEq + Eq + Hash + 'static {
     type Key: Copy + Debug + Eq + Hash + 'static;
     /// A new engine with its realm, for a page or a child frame.
     fn realm(eval: bare_js::eval::EvalLimits, heap: bare_js::heap::HeapLimits) -> Result<Self::Vm, Fault<Self>>;
+    /// Attach the DOM and install its interfaces in the realm.
+    fn install_dom(vm: &mut Self::Vm, dom: &std::rc::Rc<crate::browser::Dom<Self>>) -> Result<(), Fault<Self>> {
+        dom.install_on(vm)
+    }
     fn kind(v: Self::Raw) -> Val<Self>;
     fn undef() -> Self::Raw;
     fn null() -> Self::Raw;

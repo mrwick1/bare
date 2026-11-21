@@ -111,7 +111,7 @@ function check(n) {
 }
 // A callback with `thisArg` bound; with no `thisArg` the callback itself, so the common call is a direct call.
 function bound(cb, t) {
-  return t === undefined ? cb : cb.bind(t);
+  return t === undefined ? cb : bind(cb,t);
 }
 function defaultCompare(x, y) {
   x = '' + x;
@@ -170,15 +170,15 @@ function sortList(a, n, cmp) {
   for (i = 0; i < undefs; i++) sorted[k + i] = undefined;
   return sorted;
 }
-function flatten(target, source, n, depth, fn, t) {
-  var k = target.length;
+function flatten(target, source, n, depth, k, fn) {
   for (var i = 0; i < n; i++) {
     if (!(i in source)) continue;
     var e = source[i];
-    if (fn !== undefined) e = fn.call(t, e, i, source);
-    if (depth > 0 && Array.isArray(e)) k = flatten(target, e, len(e), depth - 1);
+    if (fn !== undefined) e = fn(e, i, source);
+    if (depth > 0 && Array.isArray(e)) k = flatten(target, e, len(e), depth - 1, k);
     else {
-      target[k++] = e;
+      if (k >= 9007199254740991) throw new TypeError('the result has too many elements');
+      arrayPut(target, k++, e);
     }
   }
   return k;
@@ -198,26 +198,20 @@ function array_forEach(cb) {
 function array_map(cb) {
   var a = obj(this), n = len(a);
   need(cb);
-  var c;
-  if (Array.isArray(a) && ((c = a.constructor) === null || c !== undefined && typeof c !== 'object' && typeof c !== 'function')) throw new TypeError('the constructor of the array is not an object');
-  var f = bound(cb, arguments[1]), r = [];
-  check(n);
+  var r = arraySpecies(a, n), f = bound(cb, arguments[1]);
   for (var i = 0; i < n; i++) {
     var v = a[i];
-    if (v !== undefined || i in a) r[i] = f(v, i, a);
+    if (v !== undefined || i in a) arrayPut(r, i, f(v, i, a));
   }
-  r.length = n;
   return r;
 }
 function array_filter(cb) {
   var a = obj(this), n = len(a);
   need(cb);
-  var c;
-  if (Array.isArray(a) && ((c = a.constructor) === null || c !== undefined && typeof c !== 'object' && typeof c !== 'function')) throw new TypeError('the constructor of the array is not an object');
-  var f = bound(cb, arguments[1]), r = [], k = 0;
+  var r = arraySpecies(a, 0), f = bound(cb, arguments[1]), k = 0;
   for (var i = 0; i < n; i++) {
     var v = a[i];
-    if ((v !== undefined || i in a) && f(v, i, a)) r[k++] = v;
+    if ((v !== undefined || i in a) && f(v, i, a)) arrayPut(r, k++, v);
   }
   return r;
 }
@@ -310,16 +304,15 @@ function array_findLastIndex(cb) {
   return -1;
 }
 function array_flat() {
-  var a = obj(this), n = len(a), d = arguments[0] === undefined ? 1 : int(arguments[0]), r = [], c;
-  if (Array.isArray(a) && ((c = a.constructor) === null || c !== undefined && typeof c !== 'object' && typeof c !== 'function')) throw new TypeError('the constructor of the array is not an object');
-  flatten(r, a, n, d);
+  var a = obj(this), n = len(a), d = arguments[0] === undefined ? 1 : int(arguments[0]), r = arraySpecies(a, 0);
+  flatten(r, a, n, d, 0);
   return r;
 }
 function array_flatMap(cb) {
-  var a = obj(this), n = len(a), r = [], c;
+  var a = obj(this), n = len(a);
   need(cb);
-  if (Array.isArray(a) && ((c = a.constructor) === null || c !== undefined && typeof c !== 'object' && typeof c !== 'function')) throw new TypeError('the constructor of the array is not an object');
-  flatten(r, a, n, 1, cb, arguments[1]);
+  var r = arraySpecies(a, 0), f = bound(cb, arguments[1]);
+  flatten(r, a, n, 1, 0, f);
   return r;
 }
 function array_sort(cmp) {

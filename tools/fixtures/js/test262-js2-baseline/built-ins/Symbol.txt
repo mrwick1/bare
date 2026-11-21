@@ -18,7 +18,7 @@ built-ins/Symbol/prototype/toString 8 0 0 8 0 0
 built-ins/Symbol/prototype/valueOf 8 0 0 8 0 0
 built-ins/Symbol/replace 0 0 2 0 0 2
 built-ins/Symbol/search 0 0 2 0 0 2
-built-ins/Symbol/species 3 0 1 1 2 1
+built-ins/Symbol/species 3 0 1 3 0 1
 built-ins/Symbol/split 0 0 2 0 0 2
 built-ins/Symbol/toPrimitive 1 0 1 1 0 1
 built-ins/Symbol/toStringTag 1 0 1 1 0 1
