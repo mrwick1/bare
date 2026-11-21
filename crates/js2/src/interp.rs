@@ -170,7 +170,7 @@ impl Mode for Cold {
 macro_rules! cold_ops {
     () => {
         Op::TypeofGlobal | Op::TypeofName | Op::GetName | Op::SetName | Op::DeleteGlobal | Op::Delete | Op::Exp | Op::ThrowConst | Op::DeclGlobal |
-        Op::CheckLex | Op::DeclLex | Op::DeclLexC | Op::CreateRest | Op::Lazy | Op::NewRegExp | Op::LoadBigInt | Op::GetTemplate |
+        Op::CheckLex | Op::DeclLex | Op::DeclLexC | Op::CreateRest | Op::Lazy | Op::NewDataLit | Op::NewRegExp | Op::LoadBigInt | Op::GetTemplate |
         Op::ArraySpread | Op::ArrayHole | Op::CallSpread | Op::NewSpread | Op::CopyProps | Op::ObjRest | Op::SetProto |
         Op::DefAccessor | Op::DefAccessorElem | Op::DefMethod | Op::DefMethodElem | Op::SetHome | Op::MakeClass | Op::MakeDerived |
         Op::SetFnName | Op::DefaultCtor | Op::SetFields | Op::NewPrivateName | Op::GetPrivate | Op::SetPrivate | Op::HasPrivate |
@@ -1180,6 +1180,12 @@ impl Vm {
                 // names them: see `Vm::exec` for the rule of the split. Put a new rare op there.
                 if M::COLD {
                     match opv {
+                        Op::NewDataLit => {
+                            std::hint::cold_path();
+                            gate!();
+                            r!(a!()) = tri!(code.data[bx!()].build(realm));
+                            pc = next;
+                        }
                         Op::GetName => {
                             std::hint::cold_path();
                             gate!();
