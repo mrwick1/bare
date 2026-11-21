@@ -6,10 +6,10 @@
 //! object (it throws). The helpers [`get_at`], [`has_at`], [`set_at`] and [`del_at`] take the direct path for an array with plain
 //! elements, so a real array pays one flag test. An accessor property of an array-like is not read here (it needs a call): known gap.
 //! `shift` and `unshift` move all the elements: O(n) each.
-use crate::lazy::{Ent, m, script, sym_same};
+use crate::lazy::{Ent, data, m, script, sym_same};
 use crate::bi_object::{Desc, H_SEARCH};
 use crate::bi_symbol::{ITERATOR, SPECIES};
-use crate::builtins::{NativeFn, arg};
+use crate::builtins::{HIDDEN, NativeFn, arg};
 use crate::interp_rt::{ErrKind, Key, R, Realm};
 use crate::object::{F_ELEMS_FIXED, F_ELEMS_RO, F_LEN_RO, F_NOEXT, F_SLOWIDX, Obj};
 use crate::string::Str;
@@ -197,16 +197,27 @@ fn array_species_get(_rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> 
 }
 
 impl Realm {
-    pub(crate) fn install_array(&mut self) {
-        let proto = self.array_proto;
-        let c = self.ctor("Array", 1, array_ctor, proto);
+    /// The global and the prototype's constructor property share this intrinsic.
+    fn array_constructor(&mut self) -> Value {
+        if !self.array_ctor.is_undefined() {
+            return self.array_ctor;
+        }
+        let c = self.new_native(array_ctor, true, 1, "Array");
+        self.define_attrs(c, Key::Name(self.k_prototype), 0, self.array_proto.value()).expect("define");
         self.array_ctor = c.value();
         self.keep(c.value());
         let get = self.new_native(array_species_get, false, 0, "get [Symbol.species]");
         self.define_accessor(c, Key::Name(self.wk[SPECIES]), get.value(), false, false).expect("define");
         static ARRAY_STATICS: &[Ent] = &[m("of", 0, array_of), m("from", 1, array_from), m("isArray", 1, is_array)];
         self.lazy_table(c, ARRAY_STATICS);
+        c.value()
+    }
+
+    pub(crate) fn install_array(&mut self) {
+        static ARRAY_GLOBAL: &[Ent] = &[data("Array", Realm::array_constructor, HIDDEN)];
+        self.lazy_table(self.global, ARRAY_GLOBAL);
         static ARRAY_PROTO: &[Ent] = &[
+            data("constructor", Realm::array_constructor, HIDDEN),
             script("keys", "array_keys"),
             script("values", "array_values"),
             script("entries", "array_entries"),
@@ -247,7 +258,7 @@ impl Realm {
             m("unshift", 1, unshift),
             m("with", 2, with),
         ];
-        self.lazy_table(proto, ARRAY_PROTO);
+        self.lazy_table(self.array_proto, ARRAY_PROTO);
     }
 }
 

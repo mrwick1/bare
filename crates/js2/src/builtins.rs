@@ -21,7 +21,7 @@
 //! the caller, which the root map of the call names. A nested call holds the collector too (`reenter.rs`). So a native may keep any
 //! cell in a Rust local, and may allocate and call. A native that allocates more than the slack of the heap limit (8 MiB) only makes
 //! the next gate collect.
-use crate::lazy::{Ent, m};
+use crate::lazy::{Ent, data, m};
 use crate::cell::Layout;
 use crate::ast::StmtKind;
 use crate::facts::Facts;
@@ -388,10 +388,17 @@ impl Realm {
         let id = self.natives.len();
         self.natives.push(Native { f: empty_function, ctor: false, len: 0, name: "" });
         proto.set_slot(&self.shapes, 0, Value::int(id as i32));
-        proto.set_flag(F_CALLABLE | F_NATIVE);
-        self.materialize(proto);
+        // Its metadata is in the table so inherited lookups can also materialize it.
+        proto.set_flag(F_CALLABLE | F_NATIVE | F_FNPROPS);
         self.ctor("Function", 1, function_ctor, proto);
-        static FUNCTION_PROTO: &[Ent] = &[m("apply", 2, fn_apply), m("bind", 1, fn_bind), m("call", 1, fn_call), m("toString", 0, fn_to_string)];
+        static FUNCTION_PROTO: &[Ent] = &[
+            data("length", |_| Value::int(0), A_C),
+            data("name", |rt| rt.string(""), A_C),
+            m("apply", 2, fn_apply),
+            m("bind", 1, fn_bind),
+            m("call", 1, fn_call),
+            m("toString", 0, fn_to_string),
+        ];
         self.lazy_table(proto, FUNCTION_PROTO);
         self.install_has_instance();
     }
