@@ -220,9 +220,10 @@ impl Realm {
     // ---- prototype of a plain function ----
 
     /// Does a read of `prototype` on `o` have to make it? A script function gets its `prototype` object at the first read, not when it
-    /// is made: a closure that nobody uses as a constructor costs nothing.
+    /// is made: a closure that nobody uses as a constructor costs nothing. An arrow function, a method, an accessor and an async function
+    /// have none (`noctor` with no generator kind); a generator method has one.
     pub(crate) fn needs_prototype(&self, o: Obj) -> bool {
-        o.is_callable() && !o.has_flag(F_NATIVE | F_CLASS) && !self.function(o.value()).is_some_and(|(ci, _)| self.prog[ci].gen_kind == crate::bytecode::GK_ASYNC)
+        o.is_callable() && !o.has_flag(F_NATIVE | F_CLASS) && !self.function(o.value()).is_some_and(|(ci, _)| self.prog[ci].gen_kind == crate::bytecode::GK_ASYNC || (self.prog[ci].noctor && self.prog[ci].gen_kind == crate::bytecode::GK_NONE))
     }
 
     pub(crate) fn make_prototype(&mut self, f: Obj) -> R<Value> {

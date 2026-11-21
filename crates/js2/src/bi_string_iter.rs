@@ -1,17 +1,14 @@
 //! `String.prototype[Symbol.iterator]` and `%StringIteratorPrototype%` (ECMA-262 22.1.5). The method is a lazy table entry that is keyed
 //! by a well-known symbol (`lazy.rs`, `Kind::Sym`), so a realm that never asks for it pays nothing. The prototype and the shape of its
-//! iterators are made at the first call. A string iterator is an object of kind [`K_SITER_STR`] (the `F_COLL` bits that `bi_collections.rs`
+//! iterators are made at the first call. A string iterator is an object of kind [`K_SITER_STR`] (the kind field that `bi_collections.rs`
 //! uses for `Map` and `Set`) with two hidden slots: the string (`undefined` once the iterator is done) and the position in units.
 //! The loop of `for-of`, a spread and `Array.from` read a string primitive directly (`iter.rs`) and do not make an iterator.
 use crate::bi_symbol::TO_STRING_TAG;
 use crate::interp_rt::{Key, R, Realm};
 use crate::cell::Layout;
-use crate::object::{COLL_SHIFT, F_COLL, Obj};
+use crate::object::{K_SITER_STR, Obj};
 use crate::shapes::{A_C, ShapeId};
 use crate::value::Value;
-
-/// The kind of a string iterator in the `F_COLL` bits (1 to 6 are the kinds of `bi_collections.rs`).
-const K_SITER_STR: u32 = 7;
 
 /// The prototype of the string iterators and their shape, made at the first call of the method.
 pub(crate) struct StrIter {
@@ -52,7 +49,7 @@ pub(crate) fn string_iterator(rt: &mut Realm, this: Value, _args: &[Value]) -> R
     let s = rt.to_str(this)?;
     let (_, shape) = rt.str_iter();
     let o = Obj::new(&mut rt.heap, &rt.shapes, shape).expect("memory");
-    o.set_flag(K_SITER_STR << COLL_SHIFT);
+    o.set_kind(K_SITER_STR);
     o.set_slot(&rt.shapes, 0, s.value());
     o.set_slot(&rt.shapes, 1, Value::int(0));
     Ok(o.value())
@@ -60,7 +57,7 @@ pub(crate) fn string_iterator(rt: &mut Realm, this: Value, _args: &[Value]) -> R
 
 /// `%StringIteratorPrototype%.next`: the next code point (a lone surrogate is one), or `{ value: undefined, done: true }` for good.
 fn string_iterator_next(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
-    let Some(o) = Realm::obj(this).filter(|o| o.flags() & F_COLL == K_SITER_STR << COLL_SHIFT) else {
+    let Some(o) = Realm::obj(this).filter(|o| o.is_kind(K_SITER_STR)) else {
         return rt.type_error("String Iterator.prototype.next called on incompatible receiver");
     };
     let Some(s) = Realm::str_of(o.slot(&rt.shapes, 0)) else {

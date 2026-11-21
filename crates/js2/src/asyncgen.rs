@@ -1,7 +1,7 @@
 //! Async generators, `for await` and the async-from-sync iterator (`docs/design-js2-async.md` 6.4; plan step A2). Safe code over
 //! [`Realm`], as `generator.rs` is. The compiler side is `compile_asyncgen.rs`.
 //!
-//! **The object** is an *activation* like that of a generator, with the flag [`F_AGEN`] (and not `F_GEN`: no `for-of` steps it, and
+//! **The object** is an *activation* like that of a generator, of the kind `K_AGEN` (and not `K_GEN`: no `for-of` steps it, and
 //! `gen_request` does not accept it) and six hidden slots. Slots 0 to 3 are those of a generator (`generator.rs`). Slot 4 is the queue
 //! of requests, an array of triples `(mode, value, promise)`: `next`, `throw` and `return` add one and give its promise. Slot 5 is the
 //! promise of the call that entered the frame, which the frame gives to that caller at its next suspension.
@@ -20,7 +20,7 @@ use crate::bytecode::Code;
 use crate::generator::{G_AWAIT_RET, G_DONE, G_RUNNING, G_START, G_SUSPENDED, MODE_NEXT, MODE_RETURN, MODE_THROW};
 use crate::interp::{REC, STOP};
 use crate::interp_rt::{ErrKind, Key, R, Realm};
-use crate::object::{F_AGEN, Obj};
+use crate::object::{K_AGEN, Obj};
 use crate::shapes::{A_C, ShapeId};
 use crate::value::Value;
 
@@ -51,7 +51,7 @@ pub(crate) struct AgRealm {
 
 impl Realm {
     fn agen(v: Value) -> Option<Obj> {
-        Realm::obj(v).filter(|o| o.has_flag(F_AGEN))
+        Realm::obj(v).filter(|o| o.is_kind(K_AGEN))
     }
 
     fn agen_state(a: Obj) -> i32 {

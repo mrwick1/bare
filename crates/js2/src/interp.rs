@@ -498,7 +498,7 @@ impl Vm {
             stack.resize(need.max(256), Value::UNDEFINED);
         }
         let args_obj = if code.flags & CF_ARGS != 0 {
-            Obj::array(&mut realm.heap, &realm.shapes, realm.s_args, args).expect("memory").value()
+            realm.new_args(args)
         } else {
             Value::UNDEFINED
         };
@@ -943,7 +943,7 @@ impl Vm {
                 ensure!(new_fp + ncode.nregs as usize + 8);
                 let (np, argc, ab) = (ncode.nparams as usize, $argc as usize, $ab as usize);
                 let argsw = if ncode.flags & CF_ARGS != 0 {
-                    Obj::array(&mut realm.heap, &realm.shapes, realm.s_args, &stack[ab..ab + argc]).expect("memory").value()
+                    realm.new_args(&stack[ab..ab + argc])
                 } else {
                     undef
                 };
