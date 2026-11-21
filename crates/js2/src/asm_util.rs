@@ -187,7 +187,7 @@ pub fn roots(code: &Code, pin: &[usize]) -> RootMaps {
                 _ => {}
             }
         }
-        if matches!(i.op, Op::GenInit | Op::Yield | Op::Await) {
+        if matches!(i.op, Op::GenInit | Op::Yield | Op::YieldResult | Op::Await) {
             // A suspension reads the registers of its save list, and the resume writes the sent value and the mode.
             let l = code.save_list(i.b).expect("a save list");
             uses[x].extend(l.regs.iter().map(|r| *r as usize));

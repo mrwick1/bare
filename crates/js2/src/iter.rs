@@ -158,16 +158,8 @@ impl Realm {
         Ok(())
     }
 
-    /// `yield*` (the loop of 14.4.14, steps a to c) for a generator or a generic iterator (the loop does an array): send `v` in `mode` to the iterator of the record and give the answer: the value, and
-    /// [`YS_YIELD`] (the iterator gave a value: yield it), [`YS_DONE`] (it finished: the value of the expression) or [`YS_RETURN`] (it
-    /// finished after a `return(v)`: return the value). The value of an inner result is read here, not by the one who gets the result
-    /// (a difference that only a getter of `value` sees).
+    /// Step a delegated iterator. On suspension the original iterator result is the value returned to the caller.
     pub(crate) fn yield_star_step(&mut self, it: Value, kind: Value, mode: i32, v: Value) -> R<(Value, i32)> {
-        let fin = |m: i32| if m == MODE_RETURN { YS_RETURN } else { YS_DONE };
-        if kind.is_undefined() {
-            let (r, done) = self.gen_nested(it, mode, v)?;
-            return Ok(if done { (r, fin(mode)) } else { (r, YS_YIELD) });
-        }
         let r = match mode {
             MODE_NEXT => self.call_function(kind, it, &[v])?,
             MODE_THROW => {
@@ -190,7 +182,10 @@ impl Realm {
             return self.type_error("the result of an iterator is not an object");
         }
         let d = self.get_named(r, "done")?;
-        let value = self.get_named(r, "value")?;
-        Ok(if Realm::truthy(d) { (value, fin(mode)) } else { (value, YS_YIELD) })
+        if Realm::truthy(d) {
+            let end = if mode == MODE_RETURN { YS_RETURN } else { YS_DONE };
+            return Ok((self.get_named(r, "value")?, end));
+        }
+        Ok((r, YS_YIELD))
     }
 }

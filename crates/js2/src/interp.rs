@@ -174,7 +174,7 @@ macro_rules! cold_ops {
         Op::DefAccessor | Op::DefAccessorElem | Op::DefMethod | Op::DefMethodElem | Op::SetHome | Op::MakeClass | Op::MakeDerived |
         Op::SetFnName | Op::DefaultCtor | Op::SetFields | Op::NewPrivateName | Op::GetPrivate | Op::SetPrivate | Op::HasPrivate |
         Op::DefPrivate | Op::DefPrivateMethod | Op::DefPrivateAccessor | Op::GetSuper | Op::GetSuperElem | Op::GetSuperElemRef | Op::SetSuper |
-        Op::SetSuperElem | Op::InitSuperFields | Op::ThrowSuperDelete | Op::CallSuper | Op::CallSuperSpread | Op::RetDerived | Op::GenInit | Op::Yield | Op::RetGen | Op::IterClose | Op::ForInNext | Op::YieldStarStep | Op::AsyncInit | Op::Await | Op::RetAsync |
+        Op::SetSuperElem | Op::InitSuperFields | Op::ThrowSuperDelete | Op::CallSuper | Op::CallSuperSpread | Op::RetDerived | Op::GenInit | Op::Yield | Op::YieldResult | Op::RetGen | Op::IterClose | Op::ForInNext | Op::YieldStarStep | Op::AsyncInit | Op::Await | Op::RetAsync |
         Op::AIterOpen | Op::AIterNext | Op::AIterUnpack | Op::AYsUnpack | Op::AIterClose | Op::AIterCloseT | Op::AIterCheck | Op::AYsCall
     };
 }
@@ -412,7 +412,7 @@ fn gen_op(realm: &mut Realm, stack: &mut [Value], fbs: &mut [Feedback], prog: &C
             Some(v) => v,
             None => return Ok(GenExit::Back(ci, fp, next)),
         },
-        Op::Yield => realm.gen_yield(stack, fp, ci, code, bx, next, stack[fp + a], iter),
+        Op::Yield | Op::YieldResult => realm.gen_yield(stack, fp, ci, code, bx, next, stack[fp + a], iter, op == Op::YieldResult),
         _ if code.gen_kind == crate::bytecode::GK_ASYNCGEN => realm.agen_return(stack, fp, stack[fp + a], c != 0)?,
         _ => realm.gen_return(stack, fp, stack[fp + a], iter),
     };
@@ -1309,7 +1309,7 @@ impl Vm {
                             pc = 0;
                             continue;
                         }
-                        Op::GenInit | Op::Yield | Op::RetGen => {
+                        Op::GenInit | Op::Yield | Op::YieldResult | Op::RetGen => {
                             std::hint::cold_path();
                             match gen_op(realm, stack, fbs, prog, ci, fp, pc, opv, a!(), bx!() as u32, c!() as u32, next) {
                                 Ok(GenExit::Back(nci, nfp, npc)) => {
@@ -1434,22 +1434,7 @@ impl Vm {
                             let base = $x as usize;
                             let mode = r!(base + 4).as_int().expect("a mode");
                             let sent = r!(base + 3);
-                            let (v, state) = if let Some(i) = r!(base + 1).as_int() {
-                                // An array has no `throw` and no `return`.
-                                let arr = Realm::obj(r!(base)).expect("an array");
-                                if mode == crate::generator::MODE_THROW {
-                                    err!(ErrKind::Type, "the iterator does not have a throw method")
-                                } else if mode == crate::generator::MODE_RETURN {
-                                    (sent, crate::iter::YS_RETURN)
-                                } else if (i as u32) < arr.len() {
-                                    r!(base + 1) = Value::int(i + 1);
-                                    (arr.get_element(i as u32).unwrap_or(undef), crate::iter::YS_YIELD)
-                                } else {
-                                    (undef, crate::iter::YS_DONE)
-                                }
-                            } else {
-                                tri!(realm.yield_star_step(r!(base), r!(base + 1), mode, sent))
-                            };
+                            let (v, state) = tri!(realm.yield_star_step(r!(base), r!(base + 1), mode, sent));
                             r!(a!()) = v;
                             if state == crate::iter::YS_YIELD {
                                 pc = nextx!();
@@ -2341,7 +2326,7 @@ impl Vm {
                     Op::RetUndef => ret!(undef),
                     Op::IterOpen => {
                         let mut it = r!(b!());
-                        let string = Realm::str_of(it).is_some();
+                        let string = c!() == 0 && Realm::str_of(it).is_some();
                         if string {
                             // A string is iterated by code points: walk an array of them.
                             gate!();
@@ -2352,7 +2337,7 @@ impl Vm {
                         // A generator is stepped by `IterNext` itself (`undefined` where an array has its index): see `generator.rs`.
                         let index = if string || fast_array {
                             Value::int(0)
-                        } else if Realm::is_generator(it) {
+                        } else if c!() == 0 && Realm::is_generator(it) {
                             undef
                         } else {
                             std::hint::cold_path();

@@ -347,6 +347,7 @@ ops! {
     GetSuperElemRef Abc "w r r" "As `GetSuperElem`, but replace the key in temporary register `c` with its converted property key before the read.",
     InitSuperFields Abc "r" "Initialize the fields of the derived class on the newly bound receiver in `a`.",
     ThrowSuperDelete Abc "" "Throw a ReferenceError on deletion of a super property.",
+    YieldResult Abx "r T" "Suspend and pass the iterator result in `a` to the caller.",
     ForInNext AsBxX "w j R" "`a` = the next enumerable key of the for-in record in the 3 registers from `x`, or jump at the end.",
 }
 

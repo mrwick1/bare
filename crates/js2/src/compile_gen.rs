@@ -138,7 +138,7 @@ impl<'a> Fc<'a> {
             return Ok(());
         }
         let t = self.save_list(sent, mode, sent);
-        self.op(Op::Yield, out, t, 0);
+        self.op(Op::YieldResult, out, t, 0);
         // A resume does not bring `out` back: it holds no value at the back edge.
         Self::bit(&mut self.live, out, false);
         self.jmp_back(head);
