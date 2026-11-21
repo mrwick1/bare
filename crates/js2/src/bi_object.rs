@@ -379,6 +379,10 @@ impl Realm {
                 }
             }
         }
+        // A compatible definition leaves a virtual, immutable string property as it is.
+        if self.has_string_own(o, key) {
+            return Ok(true);
+        }
         // The new attributes and values.
         let e_bit = d.e.map_or(cat & A_E, |b| if b { A_E } else { 0 });
         let c_bit = d.c.map_or(cat & A_C, |b| if b { A_C } else { 0 });
@@ -572,55 +576,18 @@ impl Realm {
         d.value()
     }
 
-    /// `Set(o, key, v, true)`: a write that fails (not writable, not extensible, no setter) is a `TypeError`. A setter is called through
-    /// the tail channel when `last` is true (use it as the last step of a native); else a setter is a `TypeError`.
+    /// `Set(o, key, v, true)`. When `last` is true, the built-in can tail-call a setter.
     pub(crate) fn set_checked(&mut self, recv: Value, key: Key, v: Value, last: bool) -> R<()> {
-        let Some(o) = Realm::obj(recv) else {
-            if recv.is_undefined() || recv.is_null() {
-                return self.type_error("cannot set properties of undefined or null");
+        match self.set_prop_g(recv, key, v)? {
+            crate::interp_rt::Put::Done => Ok(()),
+            crate::interp_rt::Put::Fail => self.type_error("cannot assign to the property"),
+            crate::interp_rt::Put::Set(s) if last => {
+                self.tail_args.clear();
+                self.tail_args.push(v);
+                self.tail = Some((s, recv));
+                Ok(())
             }
-            return Ok(());
-        };
-        let mut p = Some(o);
-        let mut own = true;
-        while let Some(c) = p {
-            match self.get_own(c, key) {
-                Some(Own::Acc(_, s, _)) => {
-                    if s.is_undefined() {
-                        return self.type_error("cannot set a property that has only a getter");
-                    }
-                    if !last {
-                        return self.type_error("a setter cannot be called from here");
-                    }
-                    self.tail_args.clear();
-                    self.tail_args.push(v);
-                    self.tail = Some((s, recv));
-                    return Ok(());
-                }
-                Some(Own::Data(_, at)) => {
-                    if at & A_W == 0 {
-                        return self.type_error("cannot assign to a read-only property");
-                    }
-                    break;
-                }
-                None => {}
-            }
-            p = self.proto_of(c);
-            own = false;
-        }
-        let _ = own;
-        match self.get_own(o, key) {
-            Some(Own::Data(_, at)) if at & A_W != 0 => self.set_prop(recv, key, v),
-            Some(_) => Ok(()),
-            None if !o.extensible() => self.type_error("cannot add a property to a non-extensible object"),
-            // A script function has no own `length` or `name` yet; both are read only.
-            None if o.is_callable() && matches!(key, Key::Name(k) if k == self.k_length || k == self.k_name) => {
-                self.type_error("cannot assign to a read-only property")
-            }
-            None if o.is_indexed() && matches!(key, Key::Idx(i) if i >= o.len()) && o.has_flag(F_LEN_RO) => {
-                self.type_error("cannot add an element past the read-only length of an array")
-            }
-            None => self.set_prop(recv, key, v),
+            crate::interp_rt::Put::Set(s) => self.call_function(s, recv, &[v]).map(|_| ()),
         }
     }
 

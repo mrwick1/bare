@@ -46,10 +46,7 @@ fn rel(rt: &mut Realm, v: Value, default: f64, len: f64) -> R<f64> {
 }
 
 fn this_val(rt: &mut Realm, this: Value) -> R<Value> {
-    if this.is_undefined() || this.is_null() {
-        return rt.type_error("an Array method was called on undefined or null");
-    }
-    Ok(this)
+    rt.to_object(this).map(Obj::value)
 }
 
 /// The key of the position `i` (a number that is a non-negative integer).
@@ -93,9 +90,6 @@ pub(crate) fn get_at(rt: &mut Realm, v: Value, i: f64) -> R<Value> {
 
 /// `HasProperty(v, i)`.
 pub(crate) fn has_at(rt: &mut Realm, v: Value, i: f64) -> R<bool> {
-    if let Some(s) = Realm::str_of(v) {
-        return Ok(i < s.len() as f64);
-    }
     if let Some(o) = Realm::obj(v)
         && o.is_indexed()
         && i < u32::MAX as f64
@@ -103,22 +97,16 @@ pub(crate) fn has_at(rt: &mut Realm, v: Value, i: f64) -> R<bool> {
     {
         return Ok(true);
     }
-    if Realm::obj(v).is_none() {
-        return Ok(false);
-    }
     let k = key_at(rt, i);
     rt.has_prop(v, k)
 }
 
 /// `Set(v, i, x, true)`.
 pub(crate) fn set_at(rt: &mut Realm, v: Value, i: f64, x: Value) -> R<()> {
-    if let Some(s) = Realm::str_of(v) {
-        // The `String` object that `ToObject` makes: its index properties are read only.
-        return if i < s.len() as f64 { rt.type_error("cannot assign to a read only property of a string") } else { Ok(()) };
-    }
     if let Some(o) = Realm::obj(v)
         && plain(o)
-        && i < u32::MAX as f64 - 1.0
+        && i < u32::MAX as f64
+        && o.get_element(i as u32).is_some()
     {
         if o.set_element(&mut rt.heap, i as u32, x).is_none() {
             return Err(rt.error(ErrKind::Range, "invalid array length"));
@@ -131,13 +119,10 @@ pub(crate) fn set_at(rt: &mut Realm, v: Value, i: f64, x: Value) -> R<()> {
 
 /// `Set(v, "length", n, true)`.
 fn set_len(rt: &mut Realm, v: Value, n: f64) -> R<()> {
-    if Realm::str_of(v).is_some() {
-        return rt.type_error("cannot assign to a read only property of a string");
-    }
     if let Some(o) = Realm::obj(v)
         && rt.is_array(o)
         && plain(o)
-        && n < u32::MAX as f64
+        && n <= u32::MAX as f64
     {
         o.set_len(&mut rt.heap, n as u32).expect("memory");
         return Ok(());
@@ -290,20 +275,6 @@ fn at(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
 
 fn push(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let o = this_val(rt, this)?;
-    // The hot case: an array with plain elements.
-    if let Some(a) = Realm::obj(o)
-        && rt.is_array(a)
-        && plain(a)
-    {
-        let mut n = a.len();
-        for &v in args {
-            if n >= u32::MAX - 1 || a.set_element(&mut rt.heap, n, v).is_none() {
-                return Err(rt.error(ErrKind::Range, "invalid array length"));
-            }
-            n += 1;
-        }
-        return Ok(Realm::num(n as f64));
-    }
     let len = len_of(rt, o)?;
     if len + args.len() as f64 > MAX_LEN {
         return rt.type_error("the length of the array-like would be above 2^53 - 1");
@@ -618,8 +589,9 @@ fn reverse(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
     let mut lo = 0.0;
     while lo != mid {
         let hi = len - lo - 1.0;
-        let (le, he) = (has_at(rt, o, lo)?, has_at(rt, o, hi)?);
+        let le = has_at(rt, o, lo)?;
         let lv = if le { get_at(rt, o, lo)? } else { Value::UNDEFINED };
+        let he = has_at(rt, o, hi)?;
         let hv = if he { get_at(rt, o, hi)? } else { Value::UNDEFINED };
         match (le, he) {
             (true, true) => {
@@ -679,11 +651,16 @@ fn copy_within(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     Ok(o)
 }
 
+fn check_array_len(rt: &mut Realm, len: f64) -> R<()> {
+    if len > crate::object::MAX_DENSE as f64 {
+        return Err(rt.error(ErrKind::Range, "array length exceeds the dense array limit"));
+    }
+    Ok(())
+}
+
 /// The elements of an array-like as values, a hole as `undefined` (the `toX` copies).
 fn read_all(rt: &mut Realm, o: Value, len: f64) -> R<Vec<Value>> {
-    if len > u32::MAX as f64 - 1.0 {
-        return Err(rt.error(ErrKind::Range, "invalid array length"));
-    }
+    check_array_len(rt, len)?;
     let mut v = Vec::with_capacity(len as usize);
     let mut k = 0.0;
     while k < len {
@@ -696,8 +673,11 @@ fn read_all(rt: &mut Realm, o: Value, len: f64) -> R<Vec<Value>> {
 fn to_reversed(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
     let o = this_val(rt, this)?;
     let len = len_of(rt, o)?;
-    let mut v = read_all(rt, o, len)?;
-    v.reverse();
+    check_array_len(rt, len)?;
+    let mut v = Vec::with_capacity(len as usize);
+    for i in (0..len as u32).rev() {
+        v.push(get_at(rt, o, i as f64)?);
+    }
     Ok(rt.new_array(&v))
 }
 
@@ -715,9 +695,7 @@ fn to_spliced(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     if new_len > MAX_LEN {
         return rt.type_error("the length of the result would be above 2^53 - 1");
     }
-    if new_len > u32::MAX as f64 - 1.0 {
-        return Err(rt.error(ErrKind::Range, "invalid array length"));
-    }
+    check_array_len(rt, new_len)?;
     let mut v = read_all(rt, o, start)?;
     v.extend_from_slice(items);
     let mut k = start + skip;
@@ -736,7 +714,10 @@ fn with(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     if at >= len || at < 0.0 {
         return Err(rt.error(ErrKind::Range, "invalid index"));
     }
-    let mut v = read_all(rt, o, len)?;
-    v[at as usize] = arg(args, 1);
+    check_array_len(rt, len)?;
+    let mut v = Vec::with_capacity(len as usize);
+    for i in 0..len as u32 {
+        v.push(if i as f64 == at { arg(args, 1) } else { get_at(rt, o, i as f64)? });
+    }
     Ok(rt.new_array(&v))
 }

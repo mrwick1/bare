@@ -1138,13 +1138,21 @@ impl Realm {
         if self.api.hs.active && o.has_flag(F_HOST) && let Some(ok) = self.hs_write(o, key, crate::api_host::HsWrite::Set(v))? {
             return Ok(if ok { Put::Done } else { Put::Fail });
         }
+        if self.has_string_own(o, key) {
+            return Ok(Put::Fail);
+        }
         self.fn_props(o);
         match key {
             Key::Idx(i) if self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed && !o.has_flag(F_SLOWIDX) => {
-                if o.has_flag(F_NOEXT | F_ELEMS_RO | F_LEN_RO) {
-                    let exists = o.get_element(i).is_some();
-                    let refuse = if exists { o.has_flag(F_ELEMS_RO) } else { o.has_flag(F_NOEXT) || (i >= o.len() && o.has_flag(F_LEN_RO)) };
-                    if refuse {
+                if o.get_element(i).is_some() {
+                    if o.has_flag(F_ELEMS_RO) {
+                        return Ok(Put::Fail);
+                    }
+                } else {
+                    if let Some(put) = self.index_proto_setter(o, i) {
+                        return Ok(put);
+                    }
+                    if o.has_flag(F_NOEXT) || (o.has_flag(F_LEN_RO) && i >= o.len()) {
                         return Ok(Put::Fail);
                     }
                 }
@@ -1155,14 +1163,20 @@ impl Realm {
             }
             Key::Idx(i) => {
                 let k = self.idx_atom(i);
-                if self.shapes.find(o.shape(&self.shapes), k).is_none() && o.is_indexed() && o.has_flag(F_LEN_RO) && i >= o.len() {
+                if self.store_entry(o, k)?.is_some() {
+                    return self.set_named(o, k, v);
+                }
+                if let Some(put) = self.index_proto_setter(o, i) {
+                    return Ok(put);
+                }
+                if !o.extensible() || (o.is_indexed() && o.has_flag(F_LEN_RO) && i >= o.len()) {
                     return Ok(Put::Fail);
                 }
-                let r = self.set_named(o, k, v)?;
-                if o.is_indexed() && i >= o.len() && self.shapes.find(o.shape(&self.shapes), k).is_some() {
-                    o.set_len(&mut self.heap, i + 1);
+                self.add_named(o, k, v)?;
+                if o.is_indexed() && i >= o.len() {
+                    o.set_len(&mut self.heap, i + 1).expect("memory");
                 }
-                Ok(r)
+                Ok(Put::Done)
             }
             Key::Name(k) => {
                 if k == self.k_length && self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed {
@@ -1185,6 +1199,20 @@ impl Realm {
         }
     }
 
+    /// An inherited index can supply a setter or prevent creation of an own element.
+    #[cold]
+    fn index_proto_setter(&mut self, o: Obj, i: u32) -> Option<Put> {
+        let mut proto = self.proto_of(o);
+        while let Some(p) = proto {
+            match self.get_own(p, Key::Idx(i)) {
+                Some(crate::bi_object::Own::Acc(_, set, _)) => return Some(Self::setter(set)),
+                Some(crate::bi_object::Own::Data(_, attrs)) => return (attrs & A_W == 0).then_some(Put::Fail),
+                None => proto = self.proto_of(p),
+            }
+        }
+        None
+    }
+
     /// Find the descriptor for a store. Ask the host for a lazy member before treating the key as absent.
     fn store_entry(&mut self, o: Obj, k: Str) -> R<Option<Entry>> {
         let mut entry = self.shapes.find(o.shape(&self.shapes), k);
@@ -1198,6 +1226,14 @@ impl Realm {
     fn proto_setter(&mut self, o: Obj, k: Str) -> R<Option<Put>> {
         let mut proto = self.proto_of(o);
         while let Some(p) = proto {
+            if k == self.k_length {
+                if p.is_indexed() {
+                    return Ok(p.has_flag(F_LEN_RO).then_some(Put::Fail));
+                }
+                if self.has_string_own(p, Key::Name(k)) {
+                    return Ok(Some(Put::Fail));
+                }
+            }
             self.lazy_prep(p, k);
             if let Some(e) = self.store_entry(p, k)? {
                 // An accessor: its setter. A data property that is not writable: nothing is written (`Put::Fail`).
@@ -1464,7 +1500,7 @@ impl Realm {
     /// `recv.name = v` at a site.
     pub fn set_field_slow(&mut self, fb: &mut Feedback, site: usize, name: Str, recv: Value, v: Value) -> R<Put> {
         let Some(o) = Realm::obj(recv) else { return self.set_prop_g(recv, Key::Name(name), v) };
-        if o.has_flag(F_HOST) {
+        if o.has_flag(F_HOST) || (name == self.k_length && o.is_kind(K_WRAP)) {
             return self.set_prop_g(recv, Key::Name(name), v);
         }
         self.fn_prep(o, name);
@@ -1583,10 +1619,7 @@ impl Realm {
                     self.shapes.find(o.shape(&self.shapes), k).is_some() || (k == self.k_length && self.shapes.get(o.shape(&self.shapes)).layout == Layout::Indexed)
                 }
             };
-            if found || self.string_wrapper(o).is_some_and(|s| match key {
-                Key::Idx(i) => (i as usize) < s.len(),
-                Key::Name(k) => k == self.k_length,
-            }) {
+            if found || self.has_string_own(o, key) {
                 return Ok(true);
             }
             match self.proto_of(o) {
@@ -1600,6 +1633,9 @@ impl Realm {
         let Some(o) = Realm::obj(recv) else { return Ok(true) };
         if self.api.hs.active && o.has_flag(F_HOST) && let Some(ok) = self.hs_write(o, key, crate::api_host::HsWrite::Delete)? {
             return Ok(ok);
+        }
+        if self.has_string_own(o, key) {
+            return Ok(false);
         }
         self.fn_props(o);
         match key {

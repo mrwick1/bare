@@ -126,11 +126,11 @@ function mergeSort(a, n, cmp) {
       var mid = lo + w < n ? lo + w : n, hi = lo + 2 * w < n ? lo + 2 * w : n;
       var i = lo, j = mid, k = lo;
       while (i < mid && j < hi) {
-        if (cmp(src[j], src[i]) < 0) dst[k++] = src[j++];
-        else dst[k++] = src[i++];
+        if (cmp(src[j], src[i]) < 0) arrayPut(dst, k++, src[j++]);
+        else arrayPut(dst, k++, src[i++]);
       }
-      while (i < mid) dst[k++] = src[i++];
-      while (j < hi) dst[k++] = src[j++];
+      while (i < mid) arrayPut(dst, k++, src[i++]);
+      while (j < hi) arrayPut(dst, k++, src[j++]);
     }
     var t = src; src = dst; dst = t;
   }
@@ -163,11 +163,11 @@ function sortList(a, n, cmp) {
     if (!(i in a)) continue;
     var v = a[i];
     if (v === undefined) undefs++;
-    else vals[k++] = v;
+    else arrayPut(vals, k++, v);
   }
   var sorted = mergeSort(vals, k, cmp);
   sorted.length = k;
-  for (i = 0; i < undefs; i++) sorted[k + i] = undefined;
+  for (i = 0; i < undefs; i++) arrayPut(sorted, k + i, undefined);
   return sorted;
 }
 function flatten(target, source, n, depth, k, fn) {
@@ -329,15 +329,15 @@ function array_toSorted(cmp) {
   var a = obj(this), n = len(a), vals = [];
   check(n);
   if (cmp === undefined) cmp = defaultCompare;
-  for (var i = 0; i < n; i++) vals[i] = a[i];
+  for (var i = 0; i < n; i++) arrayPut(vals, i, a[i]);
   var k = 0, undefs = 0, vs = [];
   for (i = 0; i < n; i++) {
     if (vals[i] === undefined) undefs++;
-    else vs[k++] = vals[i];
+    else arrayPut(vs, k++, vals[i]);
   }
   var sorted = mergeSort(vs, k, cmp), r = [];
-  for (i = 0; i < k; i++) r[i] = sorted[i];
-  for (; i < n; i++) r[i] = undefined;
+  for (i = 0; i < k; i++) arrayPut(r, i, sorted[i]);
+  for (; i < n; i++) arrayPut(r, i, undefined);
   return r;
 }
 function array_toLocaleString() {
