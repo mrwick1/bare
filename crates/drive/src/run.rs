@@ -550,6 +550,8 @@ impl Session {
     // With `ready_wait`, an `open`, `goto` or `reload` waits until the page is ready (`ready`); `calm` counts the looks that found it so.
     // So does an action that started a navigation: a link click, `back`, `forward`, or a script that changed the address.
     let (mut navigating, mut calm) = (false, 0u8);
+    // When a look first found the page ready. A page whose timers always run is ready `IDLE_GRACE` after that look.
+    let mut idle_since: Option<Instant> = None;
     // For an action that navigated: the document before it. A page that stays the same document keeps its old HTTP status, so the
     // status is checked only for a new document.
     let mut doc0: Option<usize> = None;
@@ -603,12 +605,13 @@ impl Session {
                             Ok(_) if r.stopped.is_some() => Some(Ok(Some(format!("not ready: the page stopped after {ms} ms ({}), body {}", r.stopped.as_deref().unwrap_or(""), if r.text.is_empty() { "empty" } else { "has content" })))),
                             Ok(Ok(())) if !r.text.is_empty() => {
                                 calm = if r.ran { 0 } else { calm + 1 };
-                                (calm >= 2).then_some(Ok(None))
+                                let since = *idle_since.get_or_insert(now);
+                                (calm >= 2 || now >= since + IDLE_GRACE).then_some(Ok(None))
                             }
                             // Empty and nothing can change it: no task, no request, no timer.
                             Ok(Ok(())) if !r.ran && r.next.is_none() => Some(Ok(Some(format!("not ready: body empty after {ms} ms, {}", pending(0))))),
                             Ok(_) => {
-                                calm = 0;
+                                (calm, idle_since) = (0, None);
                                 at_end.then(|| Ok(Some(format!("not ready: {} after {ms} ms, {}", if r.text.is_empty() { "body empty" } else { "still loading" }, r.waits))))
                             }
                         };
@@ -869,6 +872,10 @@ fn thread_cpu_ns() -> u64 {
 /// How long an action waits for a cover to go (a spinner, a backdrop that fades) before it fails as `covered`. A cover that stays (a cookie
 /// banner) is for the caller to close, so it must not cost the whole time limit.
 const COVER_WAIT: Duration = Duration::from_secs(1);
+
+/// How long a navigation waits for two looks with no task once the page is ready (document in, `load` run, no request). A page with a
+/// timer that always runs never gives two such looks; it was held to the time limit of the step.
+const IDLE_GRACE: Duration = Duration::from_millis(150);
 
 /// How long the end of a journey waits for the last document to reach `load` (`Session::finish`). Page time: on the benchmark clock it is virtual.
 const END_LOAD_WAIT: Duration = Duration::from_secs(5);
