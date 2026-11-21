@@ -1,18 +1,21 @@
 name: ci
 on:
   pull_request:
+    # `closed` starts a run that only cancels the run of the PR (concurrency below); its jobs are skipped.
+    types: [opened, synchronize, reopened, closed]
   push:
     branches: [main]
 permissions:
   contents: read
-# A new push to a PR cancels the run of its older commit. Runs on main all finish.
+# A new push to a PR, or its merge or close, cancels the run of its older commit. A new push to main cancels the older run on main.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.sha }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ci-${{ github.event.pull_request.number || 'main' }}
+  cancel-in-progress: true
 jobs:
   # Branch protection on main requires these jobs. Automatic fix runs merge
   # their own PRs, so these checks are the gate for every merge.
   check:
+    if: github.event.action != 'closed'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -37,6 +40,7 @@ jobs:
       # The tests that both engines must pass (`crates/js-api/src/suite.rs`); the feature keeps them out of the workspace run.
       - run: cargo test --locked -p bare-js-api --features suite
   windows:
+    if: github.event.action != 'closed'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -44,18 +48,20 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --locked -p bare-mcp -p bare-drive
   # The new engine (crates/js2): only its `cell`, `heap`, `string`, `atoms`, `shapes`, `object`, `gc`,
-  # `interp_rt`, `interp` and `api` modules may hold `unsafe` code, so its tests run under Miri.
+  # `interp_rt`, `interp`, `api`, `codes` and `blob` modules may hold `unsafe` code, so the tests of these modules run under Miri.
+  # A filter is a substring of the test path, so a few tests of other modules (for example `bi_object::`) also run.
   miri:
+    if: github.event.action != 'closed'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
         with: { components: miri }
-      - run: cargo miri test --locked -p bare-js2
+      - run: 'cargo miri test --locked -p bare-js2 --lib -- cell:: heap:: string:: atoms:: shapes:: blob:: gc:: object:: codes:: interp_rt:: interp:: api::'
   # Automatic fix runs push autofix/* branches. They must not change the
   # workflows, because the workflows are the merge gate.
   guard:
-    if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'autofix/')
+    if: github.event_name == 'pull_request' && github.event.action != 'closed' && startsWith(github.head_ref, 'autofix/')
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
