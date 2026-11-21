@@ -322,7 +322,7 @@ impl Realm {
     /// The regexp that `String.prototype.match`, `matchAll` and `search` use for the argument `v`: `v` itself when it is a regexp, else
     /// `new RegExp(v, flags)`.
     pub(crate) fn regexp_for(&mut self, v: Value, flags: &str) -> R<Obj> {
-        if let Some(o) = Realm::obj(v).filter(|o| o.has_flag(F_REGEXP)) {
+        if let Some(o) = Realm::obj(v).filter(|o| o.is_kind(K_REGEXP)) {
             return Ok(o);
         }
         let src = if v.is_undefined() { self.intern("") } else { self.to_str(v)? };
