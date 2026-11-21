@@ -72,11 +72,19 @@ fn json_stringify_values_gaps_and_keys() {
 }
 
 #[test]
+fn json_stringify_calls_to_json_with_the_key() {
+    check(&[
+        ("return JSON.stringify({toJSON: function (k) { return [1, k]; }, a: {toJSON: function (k) { return 'k' + k; }}});", "[1,\"\"]"),
+        ("return JSON.stringify([{toJSON: function (k) { return 'k' + k; }}, {b: {toJSON: function (k) { return 'k' + k; }}}]);", "[\"k0\",{\"b\":\"kb\"}]"),
+        ("return JSON.stringify({toJSON: 5, a: 1});", "{\"toJSON\":5,\"a\":1}"),
+    ]);
+}
+
+#[test]
 fn json_calls_that_need_the_script_call_are_type_errors_for_now() {
     check(&[
         ("try { JSON.parse('1', function () {}); } catch (e) { return e.name; }", "TypeError"),
         ("try { JSON.stringify({}, function () {}); } catch (e) { return e.name; }", "TypeError"),
-        ("try { JSON.stringify({toJSON: function () { return 1; }}); } catch (e) { return e.name; }", "TypeError"),
         ("return JSON.stringify({toJSON: 5, a: 1});", "{\"toJSON\":5,\"a\":1}"),
     ]);
 }
