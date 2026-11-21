@@ -23,4 +23,4 @@ At one codegen unit, `loopfn` is +1.483% on glibc and +1.476% on jemalloc. The `
 
 ## Tests
 
-The iterator override regression failed before the fix. It passes with and without forced collection. The generator compiler tests, the iterator-close test and the js2 typecheck pass. Windows, Miri and browser journeys were not run locally.
+The iterator override regression failed before the fix. It passes with and without forced collection. The generator compiler tests, iterator bytecode tests, the iterator-close test and the js2 typecheck pass. Windows, Miri and browser journeys were not run locally.
