@@ -191,7 +191,7 @@ code nregs=10 nparams=1 words=24 sites=0
 0007  Add         r1, r1, r7
 0008  JGtI        r1, -> 0011, 9
 0010  JmpBack     -> 0003
-0011  IterOpen    3, r0
+0011  IterOpen    3, r0, 0
 0012  IterNext    r7, -> 0023, 3
 0014  Mov         r8, r7
 0015  Add         r1, r1, r8
@@ -405,7 +405,7 @@ code nregs=13 nparams=1 words=48 sites=3
 0007  GetField    r7, r6, s1
 0008  GetField    r2, r7, s2
 0009  Mov         r6, r0
-0010  IterOpen    7, r6
+0010  IterOpen    7, r6, 0
 0011  LoadFalse   r10
 0012  JmpIf       r10, -> 0017
 0013  IterNext    r11, -> 0016, 7
