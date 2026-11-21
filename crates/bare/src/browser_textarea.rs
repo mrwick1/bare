@@ -21,15 +21,13 @@
 use crate::browser::*;
 use crate::browser_reflect::this_of;
 use crate::browser_scoped::*;
-use crate::browser_select::{get, reflect};
+use crate::browser_select::{get, reflect_s};
 use crate::browser_selection as sel;
 use bare_html::dom::{Document, NodeData, NodeId};
 use bare_js::eval::Interp;
-use bare_js::value::{ObjId, Value};
+use bare_js::value::ObjId;
 use bare_js_api::{Args, Local, Type};
 use std::borrow::Cow;
-
-type V = R<Value>;
 
 /// The raw value: the text of the text children.
 pub(crate) fn default_text(doc: &Document, n: NodeId) -> String {
@@ -93,14 +91,14 @@ fn form<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s
     d.wrap_opt_s(s, f)
 }
 
-reflect!("textarea", "placeholder", placeholder, set_placeholder, str);
-reflect!("textarea", "name", name, set_name, str);
-reflect!("textarea", "wrap", wrap, set_wrap, str);
-reflect!("textarea", "dirname", dir_name, set_dir_name, str);
-reflect!("textarea", "autocomplete", autocomplete, set_autocomplete, str);
-reflect!("textarea", "required", required, set_required, bool);
-reflect!("textarea", "readonly", read_only, set_read_only, bool);
-reflect!("textarea", "disabled", disabled, set_disabled, bool);
+reflect_s!("textarea", "placeholder", placeholder, set_placeholder, str);
+reflect_s!("textarea", "name", name, set_name, str);
+reflect_s!("textarea", "wrap", wrap, set_wrap, str);
+reflect_s!("textarea", "dirname", dir_name, set_dir_name, str);
+reflect_s!("textarea", "autocomplete", autocomplete, set_autocomplete, str);
+reflect_s!("textarea", "required", required, set_required, bool);
+reflect_s!("textarea", "readonly", read_only, set_read_only, bool);
+reflect_s!("textarea", "disabled", disabled, set_disabled, bool);
 
 /// "Limited to only non-negative numbers greater than zero with fallback": `rows` and `cols`.
 fn limited<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, name: &str, fallback: u32) -> Res<'s, Local<'s>> {
@@ -185,41 +183,31 @@ fn set_min_length<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>)
     set_length(d, s, this, a, false)
 }
 
-/// A property of the prototype: a getter and a setter of the new form or of the old form (the `reflect!` ones and `browser_selection.rs`).
-enum Acc {
-    New(HS, Option<HS>),
-    Old(H, Option<H>),
-}
-
 /// Make the properties of the `HTMLTextAreaElement` prototype `proto`.
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>, proto: ObjId) -> R<()> {
-    use Acc::{New, Old};
-    for (name, acc) in [
-        ("value", New(value, Some(set_value))),
-        ("defaultValue", New(default_value, Some(set_default_value))),
-        ("textLength", New(text_length, None)),
-        ("rows", New(rows, Some(set_rows))),
-        ("cols", New(cols, Some(set_cols))),
-        ("maxLength", New(max_length, Some(set_max_length))),
-        ("minLength", New(min_length, Some(set_min_length))),
-        ("placeholder", Old(placeholder, Some(set_placeholder))),
-        ("required", Old(required, Some(set_required))),
-        ("readOnly", Old(read_only, Some(set_read_only))),
-        ("disabled", Old(disabled, Some(set_disabled))),
-        ("name", Old(name, Some(set_name))),
-        ("wrap", Old(wrap, Some(set_wrap))),
-        ("dirName", Old(dir_name, Some(set_dir_name))),
-        ("autocomplete", Old(autocomplete, Some(set_autocomplete))),
-        ("type", New(kind, None)),
-        ("form", New(form, None)),
-        ("selectionStart", New(sel::selection_start, Some(sel::set_selection_start))),
-        ("selectionEnd", New(sel::selection_end, Some(sel::set_selection_end))),
-        ("selectionDirection", New(sel::selection_direction, Some(sel::set_selection_direction))),
+    for (name, g, st) in [
+        ("value", value as HS, Some(set_value as HS)),
+        ("defaultValue", default_value, Some(set_default_value)),
+        ("textLength", text_length, None),
+        ("rows", rows, Some(set_rows)),
+        ("cols", cols, Some(set_cols)),
+        ("maxLength", max_length, Some(set_max_length)),
+        ("minLength", min_length, Some(set_min_length)),
+        ("placeholder", placeholder, Some(set_placeholder)),
+        ("required", required, Some(set_required)),
+        ("readOnly", read_only, Some(set_read_only)),
+        ("disabled", disabled, Some(set_disabled)),
+        ("name", self::name, Some(set_name)),
+        ("wrap", wrap, Some(set_wrap)),
+        ("dirName", dir_name, Some(set_dir_name)),
+        ("autocomplete", autocomplete, Some(set_autocomplete)),
+        ("type", kind, None),
+        ("form", form, None),
+        ("selectionStart", sel::selection_start, Some(sel::set_selection_start)),
+        ("selectionEnd", sel::selection_end, Some(sel::set_selection_end)),
+        ("selectionDirection", sel::selection_direction, Some(sel::set_selection_direction)),
     ] {
-        match acc {
-            New(g, s) => d.def_get_s(it, proto, name, g, s)?,
-            Old(g, s) => d.def_get(it, proto, name, g, s)?,
-        }
+        d.def_get_s(it, proto, name, g, st)?;
     }
     d.def_method_s(it, proto, "setSelectionRange", 2, sel::set_selection_range_method)?;
     d.def_method_s(it, proto, "select", 0, sel::select_method)?;

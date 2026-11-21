@@ -17913,3 +17913,32 @@ Startup is +0.33%. This is real work and not noise: the 3 rounds are within 0.02
 Tests. Linux, debug: `cargo test --locked -p bare --lib`: 1718 pass (6 ignored). `-p bare-js`: 1106 pass (1 ignored). `-p bare-js-api`: 32 pass. `BARE_GC_STRESS=1` on 107 tests of the touched files (`browser_cssom`, `browser_implementation`, `browser_perf`, `browser_lazy`, `browser_details`, `browser_web`, and tests with `url`, `blob` or `screen` in the name): all pass. `cargo xwin check -p bare --target x86_64-pc-windows-msvc`: passes. `bare-js-api` has no `suite` feature, so there is no suite run.
 
 Not tested: the Windows tests (only `cargo xwin check`, no VM run); `BARE_ALL_API=1` runs; `BARE_GC_STRESS=1` over the whole `bare` crate; startup at `codegen-units=1`; RSS and wall time; the journeys and `tools/suite/run.py`; macOS.
+
+## 2026-11-21: fetch and basics handlers on the interface, old registry removed (plan step S0.4, PR 2)
+
+Status: PR 2 of the plan in "what blocks `Dom<E: Engine>`". Base: the head of #806 (`e7125dde`), because #806 was not merged. The PR is open without auto-merge.
+
+Changed:
+
+- The fetch handlers have the interface form: `headers_ctor`, `request_ctor`, `response_ctor`, `response_json`, `req_clone`, `req_signal`, `resp_clone`, `fetch`, and the `illegal` constructor of `ReadableStreamDefaultReader` (now `illegal_constructor`). That is 9. The count of 10 in the plan also matched `prepare`, a helper of `fetch` that keeps the old form and moves in PR 4. `Headers`, `Request` and `Response` keep `HostFn::CtorNewTarget` (`new_target_proto` reads `new.target`).
+- The 2 basics handlers (`post_message`, `send_beacon`) have the interface form. The `navigator.plugins`, `mimeTypes` and `javaEnabled` closures too.
+- The handlers call the helpers of the old form through `old` and `old_v` (`make_core`, `init_response`, `post_args`, `clone_with`, `with_req`). The helpers move in PR 3 and PR 4. `fetch_args` is the old-form core of `fetch`; `send_beacon` calls it.
+- The textarea reflected properties (`placeholder`, `name`, `wrap`, `dirName`, `autocomplete`, `required`, `readOnly`, `disabled`) use `reflect_s!`. They were the last users of `Acc::Old` and of `def_get`. This was outside the list of 12, and `H` could not go without it.
+
+Removed: `H`, `Kind::Method`, `Kind::Get` (no row used them), `Dom::handlers`, `add_fn`, `add_ctor_nt`, `add_old`, `add_old_on_api`, `methods_on_api`, `all_on_api` and `BARE_ALL_API`, `Fun` (`Scoped::f` is an `HS`), `call_old`, `run_fun`, `dispatch_host`, `impl Entry for Interp`, `def_method`, `def_get`, the old `reflect!` macro of `browser_select.rs`, `Dom::el`, `Dom::html_el`, `Acc` and `V` of `browser_textarea.rs`. `Host::call` of `Dom` stays because the trait needs it. It returns `Unsupported`: no function with an old id exists now. 10 files, 182 lines added, 350 removed.
+
+Handlers of the old form that are registered: 0 (it was 12 by the strict count; `prepare` still matches the pattern but is a helper). The plan keeps for later PRs: structured clone and transfer (PR 3), the install functions and the wrappers `old`, `old_v`, `run`, `run_v` (PR 4), owners, `trace` and `prune` and the old `eval::Host` impl (PR 5), `Browser::it` (PR 6). `Interp::host_function`, `host_function_interned` and `host_ctor_with_new_target` in `bare-js` have no caller in `crates/bare` now. I did not remove them: they are part of the old engine, and its tests use them.
+
+Measurements. Machine archMachine (loaded: only instruction counts are used). Base is `e7125dde`, the new tree is `156dd68c`. Both are release builds in separate target directories.
+
+| Check | Base | New | Change |
+| --- | --- | --- | --- |
+| `tools/js/cost_matrix.sh -j4`, 817 rows (minimum of 3 runs; `parse_load deep 1` and `deep 10` fail on both trees, known) | | | mean glibc +0.002%; 0 rows over +0.5% (so no jemalloc run and no `codegen-units=1` run); largest `fetch_load objects 10` +0.439% and `objects 1` +0.410%; smallest `fragment_load deep 10` -0.346% |
+| `bare --run http://127.0.0.1:PORT/` of a small page (one script), instructions, 3 rounds of `instr.sh` (each the minimum of 3 runs) | 5,189,559 / 5,189,716 / 5,189,889 | 5,189,316 / 5,188,524 / 5,188,879 | -243 / -1,192 / -1,010 (-0.01%) |
+| Release `bare` binary | 17,204,640 B | 17,203,616 B | -1,024 B |
+
+`fetch_load objects` is the row nearest the limit. Hypothesis: the `Request` and `Response` constructors now read `new.target` and the arguments as locals, and then call the old helpers through `old_v`. I did not profile it. It is under 0.5%, so I did not change it.
+
+Tests. Linux, debug: `cargo test --locked -p bare --lib -p bare-js -p bare-js-api`: 1718 pass (6 ignored), 1106 pass (1 ignored), 32 pass. `BARE_GC_STRESS=1` on the tests with `browser_fetch`, `browser_basics`, `browser_streams`, `browser_clone`, `browser_xhr` and `browser_select` in the name, and on the tests with `fetch`, `headers`, `response`, `request`, `navigator`, `beacon`, `textarea`, `message`, `window`, `plugins`, `stream` in the name: all pass. `cargo xwin check -p bare --target x86_64-pc-windows-msvc`: passes. `cargo check --locked -p bare --all-targets`: no warning.
+
+Not tested: the Windows tests (only `cargo xwin check`, no VM run); `BARE_GC_STRESS=1` over the whole `bare` crate; the removed `BARE_ALL_API` mode (it has no handler left to run); `codegen-units=1` (no row was over +0.5%); RSS and wall time; the journeys and `tools/suite/run.py`; macOS; a direct test of the textarea `readOnly`, `dirName`, `wrap` and `autocomplete` properties (the Chrome fixture `textarea` covers some of them).

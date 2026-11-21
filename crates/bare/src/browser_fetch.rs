@@ -1385,15 +1385,25 @@ fn thrown_value(e: Error) -> R<Value> {
 
 // ---------------------------------------------------------------------------------------------- Headers methods
 
-fn headers_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    let proto = it.host_proto_from_new_target(d.fproto(Pr::Headers))?;
-    let mut list = HeaderList::new(Guard::None);
-    let init = a.first().copied().unwrap_or(Value::Undefined);
-    if matches!(init, Value::Null) {
-        return Err(it.type_error("Failed to construct 'Headers': The provided value is not of type 'HeadersInit'"));
+/// The prototype for a constructor that reads `new.target`: the one of `new.target`, or the default of `p`.
+fn new_target_proto<'s>(d: &Dom, s: &mut Sc<'s, '_>, p: Pr) -> Res<'s, ObjId> {
+    let default = d.obj_local(s, d.fproto(p));
+    let proto = s.proto_from_new_target(default)?;
+    Ok(obj_id(s, proto).expect("a prototype"))
+}
+
+fn headers_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let proto = new_target_proto(d, s, Pr::Headers)?;
+    let init = arg_s(s, a, 0);
+    if s.type_of(init) == Type::Null {
+        return Err(s.type_error("Failed to construct 'Headers': The provided value is not of type 'HeadersInit'"));
     }
-    d.fill(it, &mut list, init)?;
-    Ok(Value::Object(d.headers_obj_in(it, proto, list)?))
+    let init = s.engine().raw(init);
+    old_v(s, |it| {
+        let mut list = HeaderList::new(Guard::None);
+        d.fill(it, &mut list, init)?;
+        Ok(Value::Object(d.headers_obj_in(it, proto, list)?))
+    })
 }
 
 fn arg(a: &[Value], i: usize) -> Value {
@@ -1527,33 +1537,43 @@ fn new_request_obj(d: &Dom, it: &mut Interp<'_>, core: Core, proto: ObjId) -> R<
     d.add_obj_in(it, proto, F::Request(ReqData { c: Common { headers: edge(it, h), body: Body::new(core.body) }, method: core.method, url: core.url, redirect: core.redirect, credentials: core.credentials, mode: core.mode, signal: signal.map(|s| edge(it, s)) }))
 }
 
-fn request_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    let proto = it.host_proto_from_new_target(d.fproto(Pr::Request))?;
+fn request_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let proto = new_target_proto(d, s, Pr::Request)?;
     if a.is_empty() {
-        return Err(it.type_error("Failed to construct 'Request': 1 argument required, but only 0 present."));
+        return Err(s.type_error("Failed to construct 'Request': 1 argument required, but only 0 present."));
     }
-    let core = make_core(d, it, arg(a, 0), arg(a, 1))?;
-    Ok(Value::Object(new_request_obj(d, it, core, proto)?))
+    let (input, init) = (arg_s(s, a, 0), arg_s(s, a, 1));
+    let (input, init) = (s.engine().raw(input), s.engine().raw(init));
+    old_v(s, |it| {
+        let core = make_core(d, it, input, init)?;
+        Ok(Value::Object(new_request_obj(d, it, core, proto)?))
+    })
 }
 
 fn status_null_body(s: u16) -> bool {
     matches!(s, 101 | 103 | 204 | 205 | 304)
 }
 
-fn response_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    let proto = it.host_proto_from_new_target(d.fproto(Pr::Response))?;
-    init_response(d, it, proto, arg(a, 0), arg(a, 1), "construct 'Response'", false)
+fn response_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let proto = new_target_proto(d, s, Pr::Response)?;
+    let (body, init) = (arg_s(s, a, 0), arg_s(s, a, 1));
+    let (body, init) = (s.engine().raw(body), s.engine().raw(init));
+    old_v(s, |it| init_response(d, it, proto, body, init, "construct 'Response'", false))
 }
 
 /// `Response.json(data, init)`: the body is `data` as JSON text, typed `application/json` unless `init` sets a Content-Type.
 /// It uses the intrinsic `JSON.stringify`, as `json()` uses the intrinsic `JSON.parse`.
-fn response_json(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    let Some(stringify) = d.fetch.json_stringify.get().map(|p| it.persistent_value(p)) else { return Err(Error::Unsupported(unsupported("Response.json without JSON.stringify"))) };
-    let text = it.call(stringify, Value::Undefined, &[arg(a, 0)])?;
-    if !matches!(text, Value::String(_)) {
-        return Err(it.type_error("Failed to execute 'json' on 'Response': Value is not JSON serializable"));
-    }
-    init_response(d, it, d.fproto(Pr::Response), text, arg(a, 1), "execute 'json' on 'Response'", true)
+fn response_json<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (data, init) = (arg_s(s, a, 0), arg_s(s, a, 1));
+    let (data, init) = (s.engine().raw(data), s.engine().raw(init));
+    old_v(s, |it| {
+        let Some(stringify) = d.fetch.json_stringify.get().map(|p| it.persistent_value(p)) else { return Err(Error::Unsupported(unsupported("Response.json without JSON.stringify"))) };
+        let text = it.call(stringify, Value::Undefined, &[data])?;
+        if !matches!(text, Value::String(_)) {
+            return Err(it.type_error("Failed to execute 'json' on 'Response': Value is not JSON serializable"));
+        }
+        init_response(d, it, d.fproto(Pr::Response), text, init, "execute 'json' on 'Response'", true)
+    })
 }
 
 /// A Response with the body `body` (a body init, or the JSON text) and the status, statusText and headers of `init`.
@@ -1736,7 +1756,11 @@ fn req_body_used<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) 
     let v = with_req_s(d, s, this, |r| r.c.body.used)?;
     Ok(s.boolean(v))
 }
-fn req_clone(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
+fn req_clone<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let this = s.engine().raw(this);
+    old_v(s, |it| req_clone_old(d, it, this))
+}
+fn req_clone_old(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<Value> {
     let (method, url, redirect, credentials, mode, hdr, body, used, signal) = with_req(d, it, this, |r| (r.method.clone(), dup(&r.url), r.redirect, r.credentials, r.mode, oid(&r.c.headers), r.c.body.bytes.clone(), r.c.body.used || r.c.body.locked, r.signal.as_ref().map(oid)))?;
     if used {
         return Err(it.type_error("Failed to execute 'clone' on 'Request': Request body is already used"));
@@ -1745,7 +1769,11 @@ fn req_clone(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value>
     headers.guard = Guard::Request;
     Ok(Value::Object(new_request_obj(d, it, Core { method, url, headers, body, redirect, credentials, mode, signal }, d.fproto(Pr::Request))?))
 }
-fn req_signal(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
+fn req_signal<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let this = s.engine().raw(this);
+    old_v(s, |it| req_signal_old(d, it, this))
+}
+fn req_signal_old(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<Value> {
     let o = d.brand(it, this)?;
     if let Some(F::Request(ReqData { signal: Some(s), .. })) = d.fetch.st.borrow().f_get(&o) {
         return Ok(Value::Object(oid(s)));
@@ -1794,7 +1822,11 @@ fn resp_body_used<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>)
     let v = used || src.and_then(|x| lock_state(d, x)).is_some_and(|ld| ld.1);
     Ok(s.boolean(v))
 }
-fn resp_clone(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
+fn resp_clone<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let this = s.engine().raw(this);
+    old_v(s, |it| resp_clone_old(d, it, this))
+}
+fn resp_clone_old(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<Value> {
     let (c_hdr, body, used, status, text, url, redirected, ty) =
         with_resp(d, it, this, |r| (oid(&r.c.headers), r.c.body.bytes.clone(), r.c.body.used || r.c.body.locked, r.status, r.status_text.clone(), r.url.clone(), r.redirected, r.ty))?;
     if d.brand(it, this).ok().and_then(|o| stream_src(d, o)).is_some() {
@@ -1931,10 +1963,6 @@ fn resp_body<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> R
         r.stream = Some(edge_of(x));
     }
     Ok(d.obj_local(s, x))
-}
-
-fn illegal(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
-    Err(it.type_error("Illegal constructor"))
 }
 
 fn stream_owner<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, (ObjId, ObjId)> {
@@ -2114,7 +2142,14 @@ pub(crate) fn gate_reader_closed<'s>(_: &Dom, _: &mut Sc<'s, '_>, _: Local<'s>, 
 
 // ---------------------------------------------------------------------------------------------- fetch
 
-pub(crate) fn fetch(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
+pub(crate) fn fetch<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (input, init) = (arg_s(s, a, 0), arg_s(s, a, 1));
+    let args = [s.engine().raw(input), s.engine().raw(init)];
+    old_v(s, |it| fetch_args(d, it, &args))
+}
+
+/// `fetch(a[0], a[1])` for code of the old form.
+pub(crate) fn fetch_args(d: &Dom, it: &mut Interp<'_>, a: &[Value]) -> R<Value> {
     let p = it.host_new_promise()?;
     match prepare(d, it, p, a) {
         Ok(()) => Ok(p),
@@ -3002,7 +3037,7 @@ impl Browser {
 
 // ---------------------------------------------------------------------------------------------- install
 
-use Kind::{Get as G, GetS as GS, Method as M, MethodS as MS};
+use Kind::{GetS as GS, MethodS as MS};
 use Pr::*;
 
 struct Def {
@@ -3032,8 +3067,8 @@ static DEFS: &[Def] = &[
     Def { on: Request, name: "mode", len: 0, kind: GS(req_mode) },
     Def { on: Request, name: "bodyUsed", len: 0, kind: GS(req_body_used) },
     Def { on: Request, name: "body", len: 0, kind: GS(gate_request_body) },
-    Def { on: Request, name: "signal", len: 0, kind: G(req_signal) },
-    Def { on: Request, name: "clone", len: 0, kind: M(req_clone) },
+    Def { on: Request, name: "signal", len: 0, kind: GS(req_signal) },
+    Def { on: Request, name: "clone", len: 0, kind: MS(req_clone) },
     Def { on: Request, name: "text", len: 0, kind: MS(body_text) },
     Def { on: Request, name: "json", len: 0, kind: MS(body_json) },
     Def { on: Request, name: "arrayBuffer", len: 0, kind: MS(body_array_buffer) },
@@ -3048,7 +3083,7 @@ static DEFS: &[Def] = &[
     Def { on: Response, name: "headers", len: 0, kind: GS(resp_headers) },
     Def { on: Response, name: "bodyUsed", len: 0, kind: GS(resp_body_used) },
     Def { on: Response, name: "body", len: 0, kind: GS(resp_body) },
-    Def { on: Response, name: "clone", len: 0, kind: M(resp_clone) },
+    Def { on: Response, name: "clone", len: 0, kind: MS(resp_clone) },
     Def { on: Response, name: "text", len: 0, kind: MS(body_text) },
     Def { on: Response, name: "json", len: 0, kind: MS(body_json) },
     Def { on: Response, name: "arrayBuffer", len: 0, kind: MS(body_array_buffer) },
@@ -3091,37 +3126,20 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
                 d.define_accessor(it, target, key, f, None)?;
             }
             Kind::AccessorS(..) => return Err(Error::Unsupported(unsupported("an accessor of the new form in the fetch table"))),
-            Kind::Method(h) => {
-                let f = d.add_fn(it, h, def.name, def.len, false)?;
-                it.define_data(target, key, Value::Object(f), true, false, true)?;
-                // `Headers.prototype[Symbol.iterator]` is the same function object as `entries`.
-                if def.name == "entries" {
-                    it.define_data(target, it.symbol_iterator(), Value::Object(f), true, false, true)?;
-                }
-            }
-            Kind::Get(h) => {
-                let f = d.add_fn(it, h, &format!("get {}", def.name), 0, false)?;
-                d.define_accessor(it, target, key, f, None)?;
-            }
         }
     }
     let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
-    // `ReadableStream` has no old handler: its constructor is of the new form.
-    let ifaces: [(&str, Pr, Option<crate::browser::H>, bool); 5] = [
-        ("Headers", Headers, Some(headers_ctor), true),
-        ("Request", Request, Some(request_ctor), true),
-        ("Response", Response, Some(response_ctor), true),
-        ("ReadableStream", Stream, None, true),
-        ("ReadableStreamDefaultReader", Reader, Some(illegal), false),
+    // `Headers`, `Request` and `Response` read `new.target`, so a class may extend them.
+    let ifaces: [(&str, Pr, HS, HostFn); 5] = [
+        ("Headers", Headers, headers_ctor, HostFn::CtorNewTarget),
+        ("Request", Request, request_ctor, HostFn::CtorNewTarget),
+        ("Response", Response, response_ctor, HostFn::CtorNewTarget),
+        ("ReadableStream", Stream, streams::ctor, HostFn::Ctor),
+        ("ReadableStreamDefaultReader", Reader, crate::browser::illegal_constructor, HostFn::Method),
     ];
-    for (name, p, h, ctor) in ifaces {
+    for (name, p, h, kind) in ifaces {
         let len = if matches!(name, "Headers" | "Response" | "ReadableStream") { 0 } else { 1 };
-        // These three read `new.target`, so a class may extend them.
-        let f = match h {
-            None => d.add_fn_s_obj(it, streams::ctor, name, len, HostFn::Ctor)?,
-            Some(h) if matches!(p, Headers | Request | Response) => d.add_ctor_nt(it, h, name, len)?,
-            Some(h) => d.add_fn(it, h, name, len, ctor)?,
-        };
+        let f = d.add_fn_s_obj(it, h, name, len, kind)?;
         let proto = protos[p as usize];
         it.define_data(f, kp, Value::Object(proto), false, false, false)?;
         it.define_data(proto, kc, Value::Object(f), true, false, true)?;
@@ -3129,13 +3147,13 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         it.define_data(g, k, Value::Object(f), true, false, true)?;
         fixed.push(f);
         if name == "Response" {
-            let jf = d.add_fn(it, response_json, "json", 1, false)?;
+            let jf = d.add_fn_s_obj(it, response_json, "json", 1, HostFn::Method)?;
             let kj = d.key(it, "json")?;
             it.define_data(f, kj, Value::Object(jf), true, false, true)?;
             fixed.push(jf);
         }
     }
-    let f = d.add_fn(it, fetch, "fetch", 1, false)?;
+    let f = d.add_fn_s_obj(it, fetch, "fetch", 1, HostFn::Method)?;
     let k = d.key(it, "fetch")?;
     it.define_data(g, k, Value::Object(f), true, false, true)?;
     fixed.push(f);

@@ -193,7 +193,7 @@ fn make(d: &Dom, it: &mut Interp<'_>, i: usize) -> R<(ObjId, ObjId)> {
 }
 
 /// Getter and setter of the string attribute `$attr` of `meta`, as the property `$name`. A closure that captures nothing is a plain function
-/// pointer in Rust (like a JS function that uses no outer variable), so it fits the `H` type of the handlers.
+/// pointer in Rust (like a JS function that uses no outer variable), so it fits the `HS` type of the handlers.
 macro_rules! meta_attr {
     ($d:expr, $it:expr, $o:expr, $name:literal, $attr:literal) => {
         $d.def_get_s($it, $o, $name, |d, s, t, _| meta_get(d, s, t, $attr), Some(|d, s, t, a| meta_set(d, s, t, a, $attr)))?;
