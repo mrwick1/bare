@@ -1477,7 +1477,7 @@ impl Vm {
                                         cooked.push(if p[0] == u32::MAX { undef } else { atom!(p[0]).value() });
                                         raw.push(atom!(p[1]).value());
                                     }
-                                    let t = realm.make_template(&cooked, &raw);
+                                    let t = tri!(realm.make_template(&cooked, &raw));
                                     fb.tmpl.push((c!() as u32, t));
                                     t
                                 }

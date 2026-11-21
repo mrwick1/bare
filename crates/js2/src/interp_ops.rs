@@ -395,10 +395,12 @@ impl Realm {
     }
 
     /// The template object of a tagged template: the array of the cooked strings with the array of the raw strings as `raw`.
-    pub fn make_template(&mut self, cooked: &[Value], raw: &[Value]) -> Value {
+    pub fn make_template(&mut self, cooked: &[Value], raw: &[Value]) -> R<Value> {
         let r = Obj::array(&mut self.heap, &self.shapes, self.s_array, raw).expect("memory");
         let a = Obj::array(&mut self.heap, &self.shapes, self.s_array, cooked).expect("memory");
-        a.add(&mut self.heap, &mut self.shapes, self.k_raw, 0, &[r.value()]).expect("memory");
-        a.value()
+        self.lock(r, true)?;
+        self.define_attrs(a, Key::Name(self.k_raw), 0, r.value())?;
+        self.lock(a, true)?;
+        Ok(a.value())
     }
 }
