@@ -3,7 +3,7 @@
 //! is not built yet).
 //!
 //! **The object.** A plain `Object` cell with one hidden slot, `\0cs` (not writable, not configurable, so a script cannot move it), and
-//! the kind in the header flags ([`F_COLL`]: 1 `Map`, 2 `Set`, 3 `WeakMap`, 4 `WeakSet`, 5 and 6 the iterators). An empty `Set` is a
+//! the kind in the header flags ([`F_KIND`](crate::object::F_KIND): 1 `Map`, 2 `Set`, 3 `WeakMap`, 4 `WeakSet`, 5 and 6 the iterators). An empty `Set` is a
 //! 16-byte cell. A class that extends one of them gets the same slot over its own prototype.
 //!
 //! **`Map` and `Set`: one flat record.** The slot holds a [`Ctx`] (a `Slots` record, scanned by the collector like any record) with this
@@ -37,18 +37,11 @@ use crate::bi_symbol::{ITERATOR, SPECIES, TO_STRING_TAG};
 use crate::cell::Layout;
 use crate::heap::Heap;
 use crate::interp_rt::{Key, R, Realm};
-use crate::object::{COLL_SHIFT, Ctx, F_COLL, Obj};
+use crate::object::{Ctx, K_MAP, K_MITER, K_SET, K_SITER, K_WMAP, K_WSET, Obj};
 use crate::shapes::{A_C, ShapeId};
 use crate::string::Str;
 use crate::value::Value;
 use crate::weaktab::{WeakTab, mix, weaktab_of};
-
-pub(crate) const K_MAP: u32 = 1;
-pub(crate) const K_SET: u32 = 2;
-pub(crate) const K_WMAP: u32 = 3;
-pub(crate) const K_WSET: u32 = 4;
-const K_MITER: u32 = 5;
-const K_SITER: u32 = 6;
 
 const FWD: usize = 0;
 const STATE: usize = 1;
@@ -68,10 +61,6 @@ pub(crate) struct Colls {
     adders: [Value; 4],
     /// `Map.prototype.entries` and `Set.prototype.values`: what `[Symbol.iterator]` is, unless a script changed it.
     iters: [Value; 2],
-}
-
-fn kind_of(o: Obj) -> u32 {
-    (o.flags() & F_COLL) >> COLL_SHIFT
 }
 
 /// The key `v` as a `SameValueZero` key: equal keys have equal bits (a string and a symbol are compared apart from this).
@@ -320,7 +309,7 @@ impl Realm {
             self.coll_shape(proto, kind, keys)
         };
         let o = Obj::new(&mut self.heap, &self.shapes, shape).expect("memory");
-        o.set_flag(kind << COLL_SHIFT);
+        o.set_kind(kind);
         o.set_slot(&self.shapes, 0, table);
         Ok(o)
     }
@@ -336,7 +325,7 @@ impl Realm {
 
     /// The table of the `Map` or `Set` `this`, and its object.
     fn this_tab(&mut self, this: Value, kind: u32, what: &str) -> R<(Obj, Tab)> {
-        if let Some(o) = Realm::obj(this).filter(|o| kind_of(*o) == kind)
+        if let Some(o) = Realm::obj(this).filter(|o| o.is_kind(kind))
             && let Some(c) = Realm::ctx(o.slot(&self.shapes, 0))
         {
             return Ok((o, Tab { c, w: if kind == K_MAP { 3 } else { 2 } }));
@@ -345,7 +334,7 @@ impl Realm {
     }
 
     fn this_weak(&mut self, this: Value, kind: u32, what: &str) -> R<(Obj, WeakTab)> {
-        if let Some(o) = Realm::obj(this).filter(|o| kind_of(*o) == kind)
+        if let Some(o) = Realm::obj(this).filter(|o| o.is_kind(kind))
             && let Some(t) = weaktab_of(o.slot(&self.shapes, 0))
         {
             return Ok((o, t));
@@ -358,7 +347,7 @@ impl Realm {
         let c = self.colls();
         let shape = c.shapes[kind as usize - 1];
         let o = Obj::new(&mut self.heap, &self.shapes, shape).expect("memory");
-        o.set_flag(kind << COLL_SHIFT);
+        o.set_kind(kind);
         o.set_slot(&self.shapes, 0, t.c.value());
         o.set_slot(&self.shapes, 1, Value::int(mode as i32));
         o.value()
@@ -411,7 +400,7 @@ impl Realm {
     /// these with no iterator object and no pair array.
     fn plain_entries(&mut self, src: Value) -> Option<(u32, Vec<(Value, Value)>)> {
         let o = Realm::obj(src)?;
-        let kind = kind_of(o);
+        let kind = o.kind();
         if kind != K_MAP && kind != K_SET {
             return None;
         }
@@ -646,7 +635,7 @@ fn set_entries(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
 
 /// `next` of a `Map` or `Set` iterator: the cursor is the table and the packed index (`index << 2 | mode`) in the two slots.
 fn iter_next(rt: &mut Realm, this: Value, kind: u32, what: &str) -> R<Value> {
-    let Some(o) = Realm::obj(this).filter(|o| kind_of(*o) == kind) else {
+    let Some(o) = Realm::obj(this).filter(|o| o.is_kind(kind)) else {
         return rt.type_error(&format!("{what} called on incompatible receiver"));
     };
     let Some(c) = Realm::ctx(o.slot(&rt.shapes, 0)) else {

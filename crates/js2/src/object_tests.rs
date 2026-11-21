@@ -605,3 +605,31 @@ fn from_value_takes_objects_and_not_records() {
         assert_eq!(Obj::from_value(rec), None);
     }
 }
+
+#[test]
+fn the_kind_is_one_exclusive_field_and_no_flag_shares_a_bit_with_it() {
+    let mut r = Realm::new();
+    let o = r.object(1);
+    assert_eq!(o.kind(), K_NONE);
+    let all = [K_MAP, K_SET, K_WMAP, K_WSET, K_MITER, K_SITER, K_SITER_STR, K_WRAP, K_PROMISE, K_GEN, K_AGEN, K_REGEXP, K_DATE];
+    for (i, k) in all.into_iter().enumerate() {
+        assert_eq!(k as usize, i + 1, "the kinds are the numbers 1 to 13");
+        o.set_flag(F_HOST | F_LAZYM | F_LAZYTAB | F_PROTO | F_OVER | F_NOEXT);
+        o.set_kind(k);
+        assert_eq!(o.kind(), k);
+        for other in all {
+            assert_eq!(o.is_kind(other), other == k);
+        }
+        assert!(o.has_flag(F_HOST | F_LAZYM | F_LAZYTAB | F_PROTO | F_OVER | F_NOEXT), "a kind does not clear a flag");
+        o.clear_flag(F_HOST | F_LAZYM | F_LAZYTAB);
+        assert_eq!(o.kind(), k, "clearing a flag keeps the kind");
+        o.clear_flag(F_PROTO | F_OVER | F_NOEXT);
+    }
+    // A flag set and cleared on its own never touches the kind: each single flag is outside the kind field.
+    o.set_kind(K_AGEN);
+    for f in [F_HOST, F_LAZYM, F_LAZYTAB, F_PROTO, F_OVER, F_NOEXT, F_CALLABLE, F_CLASS, F_DERIVED, F_NATIVE, F_LAZY, F_FNPROPS, F_SLOWIDX] {
+        o.set_flag(f);
+        o.clear_flag(f);
+        assert!(o.is_kind(K_AGEN));
+    }
+}

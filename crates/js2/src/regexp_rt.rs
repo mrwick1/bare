@@ -6,7 +6,7 @@
 //! prototype ([`Realm::install_regexp`]). Known gap: `globalThis.RegExp`, `hasOwnProperty("RegExp")` and a list of the global
 //! properties do not see it before that first use.
 //!
-//! **The object.** A plain `Object` cell with the flag `F_REGEXP` and four slots, in this order: the hidden `\0src` (the pattern
+//! **The object.** A plain `Object` cell with kind `K_REGEXP` and four slots, in this order: the hidden `\0src` (the pattern
 //! string), the hidden `\0fl` (the flag bits of `Flags::bits`), the hidden `\0prog` (the [`Blob`] of the program, or `undefined`
 //! until the first match) and the own `lastIndex` (writable only). All objects start with one shape, `Rx::shape`. An object that a
 //! script gave another property has another shape, and the slots are found by name then.
@@ -21,7 +21,7 @@ use crate::builtins::{NativeFn, arg};
 use crate::gc::Marker;
 use crate::interp::STOP;
 use crate::interp_rt::{ErrKind, Key, R, Realm};
-use crate::object::{F_REGEXP, Obj};
+use crate::object::{K_REGEXP, Obj};
 use crate::regexp::{self, CompileError, ExecError, FLAG_LETTERS, Flags, Scratch};
 use crate::shapes::{A_W, ShapeId};
 use crate::string::{Chars, Str};
@@ -135,7 +135,7 @@ impl Realm {
             }
         };
         let o = Obj::new(&mut self.heap, &self.shapes, shape).expect("memory");
-        o.set_flag(F_REGEXP);
+        o.set_kind(K_REGEXP);
         o.set_slot(&self.shapes, SRC as u32, src.value());
         o.set_slot(&self.shapes, FL as u32, Value::int(bits as i32));
         o.set_slot(&self.shapes, PROG as u32, Value::UNDEFINED);
@@ -172,7 +172,7 @@ impl Realm {
 
     /// The regexp object of `this`, or a `TypeError`.
     fn this_regexp(&mut self, this: Value, what: &str) -> R<Obj> {
-        match Realm::obj(this).filter(|o| o.has_flag(F_REGEXP)) {
+        match Realm::obj(this).filter(|o| o.is_kind(K_REGEXP)) {
             Some(o) if self.rx_slot(o, SRC).is_some() => Ok(o),
             _ => self.type_error(&format!("RegExp.prototype.{what} requires that 'this' be a RegExp object")),
         }
@@ -322,7 +322,7 @@ impl Realm {
     /// The regexp that `String.prototype.match`, `matchAll` and `search` use for the argument `v`: `v` itself when it is a regexp, else
     /// `new RegExp(v, flags)`.
     pub(crate) fn regexp_for(&mut self, v: Value, flags: &str) -> R<Obj> {
-        if let Some(o) = Realm::obj(v).filter(|o| o.has_flag(F_REGEXP)) {
+        if let Some(o) = Realm::obj(v).filter(|o| o.is_kind(K_REGEXP)) {
             return Ok(o);
         }
         let src = if v.is_undefined() { self.intern("") } else { self.to_str(v)? };
@@ -394,7 +394,7 @@ impl Realm {
 
 fn regexp_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let (p, f) = (arg(args, 0), arg(args, 1));
-    let from = Realm::obj(p).filter(|o| o.has_flag(F_REGEXP));
+    let from = Realm::obj(p).filter(|o| o.is_kind(K_REGEXP));
     // `RegExp(r)` with no `new` and no flags gives `r` itself when its constructor is `RegExp`.
     if let (Some(o), true, true) = (from, rt.nt.is_undefined(), f.is_undefined()) {
         let c = rt.get_named(o.value(), "constructor")?;
@@ -436,7 +436,7 @@ fn regexp_test(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
 
 /// The pattern and the flag bits of a regexp object, or `None` for `RegExp.prototype` itself.
 fn parts(rt: &mut Realm, this: Value, what: &str) -> R<Option<(Str, u8)>> {
-    if Realm::obj(this).is_some_and(|o| o.has_flag(F_REGEXP)) {
+    if Realm::obj(this).is_some_and(|o| o.is_kind(K_REGEXP)) {
         let o = rt.this_regexp(this, what)?;
         let (ss, fs) = (rt.rx_slot(o, SRC).expect("slot"), rt.rx_slot(o, FL).expect("slot"));
         let src = Realm::str_of(o.slot(&rt.shapes, ss)).expect("a string");
