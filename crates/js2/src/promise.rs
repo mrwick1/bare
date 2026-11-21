@@ -40,6 +40,7 @@
 //!
 //! **Not here:** the statics and `finally` are in `promise_statics.rs`. `SpeciesConstructor` is there too (`then` calls it). A constructor
 //! that is a script function or class is constructed by `Realm::construct_script`.
+use crate::lazy::{Ent, m};
 use crate::builtins::{Native, NativeFn, arg};
 use crate::cell::Layout;
 use crate::gc::Marker;
@@ -475,7 +476,7 @@ impl Realm {
     }
 
     /// `PerformPromiseThen`: `derived` is a promise, a capability record or `undefined`.
-    fn perform_then(&mut self, p: Obj, on_ok: Value, on_err: Value, derived: Value) -> R<()> {
+    pub(crate) fn perform_then(&mut self, p: Obj, on_ok: Value, on_err: Value, derived: Value) -> R<()> {
         let word = self.state_word(p);
         match word & 3 {
             PENDING => {
@@ -575,11 +576,13 @@ impl Realm {
         let then = self.new_native(promise_then, false, 2, "then");
         self.define_attrs(proto, Key::Name(self.pr.k_then), crate::builtins::HIDDEN, then.value()).expect("define");
         self.pr.then_fn = then.value();
-        self.method(proto, "catch", 1, promise_catch);
-        self.method(c, "resolve", 1, promise_resolve);
-        self.method(c, "reject", 1, promise_reject);
+        static PROMISE_PROTO: &[Ent] = &[m("catch", 1, promise_catch)];
+        self.lazy_table(proto, PROMISE_PROTO);
+        static PROMISE_STATICS: &[Ent] = &[m("resolve", 1, promise_resolve), m("reject", 1, promise_reject)];
+        self.lazy_table(c, PROMISE_STATICS);
         let g = self.global;
-        self.method(g, "queueMicrotask", 1, queue_microtask);
+        static GLOBAL_PROMISE: &[Ent] = &[m("queueMicrotask", 1, queue_microtask)];
+        self.lazy_table(g, GLOBAL_PROMISE);
         self.install_promise_statics();
     }
 }
@@ -767,6 +770,10 @@ impl Realm {
         match kind {
             K_FULFIL | K_REJECT => {
                 let (h, v, d) = (r.get(A), r.get(B), r.get(D));
+                // The handler of an `await` is the activation of the async function (it has no derived promise): resume it (`reenter.rs`).
+                if d.is_undefined() && Realm::activation(h).is_some() {
+                    return self.async_resume(h, v, kind == K_REJECT);
+                }
                 let res = if h.is_undefined() { if kind == K_FULFIL { Ok(v) } else { Err(v) } } else { self.job_call(h, Value::UNDEFINED, &[v]) };
                 match res {
                     Ok(v) => self.settle_derived(d, v, false, on_error),

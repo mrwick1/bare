@@ -26,13 +26,13 @@
 //! - Not here: `ServiceWorker`, `importScripts`, a real worker (it needs a second realm and a structured clone between
 //!   heaps), `Worker.prototype.postMessage` of an object that has a function inside, `ErrorEvent` for the `error` event.
 
+use crate::eng::Eng;
+use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_console::ConsoleLevel;
 use crate::browser_handlers::{handler_get, handler_set};
 use crate::browser_navigation_url as nu;
 use crate::browser_scoped::*;
-use bare_js::eval::Interp;
-use bare_js::value::{ObjId, Value};
 use bare_js_api::{Args, Attrs, HostFn, Intrinsic, Local, Type};
 use std::cell::{Cell, RefCell};
 
@@ -44,41 +44,42 @@ const SHOWN_URL: usize = 200;
 const TYPES: [&str; 3] = ["message", "messageerror", "error"];
 
 #[derive(Default)]
-pub(crate) struct WorkerHost {
+pub(crate) struct WorkerHost<E: Eng> {
     /// The live workers, each with its pending `error`: true until the task ran or `terminate()` was called.
-    objs: RefCell<IdMap<ObjId, bool>>,
+    objs: RefCell<IdMap<<E as Eng>::Obj, bool>>,
     warned: Cell<bool>,
     warned_shared: Cell<bool>,
     /// The prototype and the constructor, once made. Roots.
-    made: Cell<Option<[ObjId; 2]>>,
+    made: Cell<Option<[<E as Eng>::Obj; 2]>>,
     /// The same for `SharedWorker`.
-    made_shared: Cell<Option<[ObjId; 2]>>,
+    made_shared: Cell<Option<[<E as Eng>::Obj; 2]>>,
     /// The live shared workers (they are also in `objs`) with their `port`. The ports are roots; `prune` drops a port with its worker.
-    ports: RefCell<IdMap<ObjId, ObjId>>,
+    ports: RefCell<IdMap<<E as Eng>::Obj, <E as Eng>::Obj>>,
 }
 
-pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
+pub(crate) fn roots<E: Eng>(d: &Dom<E>, out: &mut Roots<'_, '_, E>) {
     for m in [d.worker.made.get(), d.worker.made_shared.get()].into_iter().flatten() {
-        out.extend(m.map(Value::Object));
+        out.extend(m.map(E::obj_raw));
     }
-    out.extend(d.worker.ports.borrow().values().map(|&p| Value::Object(p)));
+    out.extend(d.worker.ports.borrow().values().map(|&p| E::obj_raw(p)));
 }
 
-pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
-    d.worker.objs.borrow_mut().retain(|&o, _| live(o));
-    d.worker.ports.borrow_mut().retain(|&o, _| live(o));
+/// The worker `o` is dead: drop its entries and its port.
+pub(crate) fn forget<E: Eng>(d: &Dom<E>, o: E::Obj) {
+    d.worker.objs.borrow_mut().remove(&o);
+    d.worker.ports.borrow_mut().remove(&o);
 }
 
-fn lazy_dedicated<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn lazy_dedicated<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     lazy(d, s, a, false)
 }
 
-fn lazy_shared<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn lazy_shared<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     lazy(d, s, a, true)
 }
 
 /// `Worker` and `SharedWorker` are accessors of the global until the first read. A call with an argument is the setter.
-fn lazy<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>, shared: bool) -> Res<'s, Local<'s>> {
+fn lazy<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, a: Args<'s>, shared: bool) -> Res<'s, Local<'s>> {
     let g = s.global();
     let name = if shared { "SharedWorker" } else { "Worker" };
     let attrs = Attrs { writable: true, enumerable: false, configurable: true };
@@ -89,7 +90,7 @@ fn lazy<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>, shared: bool) -> Res<'s, L
     let made = if shared { d.worker.made_shared.get() } else { d.worker.made.get() };
     let ctor = match made {
         Some(m) => m[1],
-        None => old(s, |it| make(d, it, shared))?,
+        None => old::<E, _>(s, |it| make(d, it, shared))?,
     };
     let ctor = d.obj_local(s, ctor);
     s.define_str(g, name, ctor, attrs)?;
@@ -98,10 +99,10 @@ fn lazy<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>, shared: bool) -> Res<'s, L
 
 #[cold]
 #[inline(never)]
-fn make(d: &Dom, it: &mut Interp<'_>, shared: bool) -> R<ObjId> {
+fn make<E: Eng>(d: &Dom<E>, it: &mut E::Vm, shared: bool) -> R<E, E::Obj> {
     let name = if shared { "SharedWorker" } else { "Worker" };
     let proto = d.obj(it, d.p().et)?;
-    let f = run(it, |s| {
+    let f = run::<E, _>(it, |s| {
         let f = d.add_fn_s(s, if shared { shared_worker_ctor } else { worker_ctor }, name, 1, HostFn::CtorNewTarget)?;
         let p = d.obj_local(s, proto);
         s.define_str(f, "prototype", p, Attrs { writable: false, enumerable: false, configurable: false })?;
@@ -109,18 +110,18 @@ fn make(d: &Dom, it: &mut Interp<'_>, shared: bool) -> R<ObjId> {
         let tag = s.intrinsic(Intrinsic::SymbolToStringTag);
         let t = s.string(name)?;
         s.define(p, tag, t, Attrs { writable: false, enumerable: false, configurable: true })?;
-        Ok(obj_id(s, f).expect("a function"))
+        Ok(obj_id::<E>(s, f).expect("a function"))
     })?;
     if shared {
         d.def_get_s(it, proto, "port", shared_port, None)?;
-        d.def_get_s(it, proto, "onerror", hget::<2>, Some(hset::<2>))?;
+        d.def_get_s(it, proto, "onerror", hget::<2, _>, Some(hset::<2, _>))?;
         d.worker.made_shared.set(Some([proto, f]));
         return Ok(f);
     }
     d.def_method_s(it, proto, "postMessage", 1, post_message)?;
     d.def_method_s(it, proto, "terminate", 0, terminate)?;
-    let gets: [HS; 3] = [hget::<0>, hget::<1>, hget::<2>];
-    let sets: [HS; 3] = [hset::<0>, hset::<1>, hset::<2>];
+    let gets: [HS<E>; 3] = [hget::<0, _>, hget::<1, _>, hget::<2, _>];
+    let sets: [HS<E>; 3] = [hset::<0, _>, hset::<1, _>, hset::<2, _>];
     for n in 0..3 {
         d.def_get_s(it, proto, &format!("on{}", TYPES[n]), gets[n], Some(sets[n]))?;
     }
@@ -128,25 +129,25 @@ fn make(d: &Dom, it: &mut Interp<'_>, shared: bool) -> R<ObjId> {
     Ok(f)
 }
 
-pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
     let g = s.global();
-    for (name, lazy) in [("Worker", lazy_dedicated as HS), ("SharedWorker", lazy_shared)] {
+    for (name, lazy) in [("Worker", lazy_dedicated as HS<E>), ("SharedWorker", lazy_shared)] {
         let f = d.add_fn_s(s, lazy, name, 0, HostFn::Method)?;
         s.define_accessor_str(g, name, Some(f), Some(f), Attrs { writable: false, enumerable: false, configurable: true })?;
     }
     Ok(())
 }
 
-impl Dom {
-    fn worker_of<'s>(&self, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, ObjId> {
-        match obj_id(s, this) {
+impl<E: Eng> Dom<E> {
+    fn worker_of<'s>(&self, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, E::Obj> {
+        match obj_id::<E>(s, this) {
             Some(o) if self.worker.objs.borrow().contains_key(&o) => Ok(o),
             _ => Err(s.type_error("Illegal invocation")),
         }
     }
 
     /// A `Worker` and not a `SharedWorker`: only a worker has `postMessage` and `terminate`.
-    fn dedicated_of<'s>(&self, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, ObjId> {
+    fn dedicated_of<'s>(&self, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, E::Obj> {
         let o = self.worker_of(s, this)?;
         if self.worker.ports.borrow().contains_key(&o) {
             return Err(s.type_error("Illegal invocation"));
@@ -155,7 +156,7 @@ impl Dom {
     }
 
     /// The task after `new Worker`: fire `error` unless the worker was terminated.
-    pub(crate) fn worker_failed(&self, it: &mut Interp<'_>, o: ObjId) -> R<()> {
+    pub(crate) fn worker_failed(&self, it: &mut E::Vm, o: E::Obj) -> R<E, ()> {
         match self.worker.objs.borrow_mut().get_mut(&o) {
             Some(p) if *p => *p = false,
             _ => return Ok(()),
@@ -171,7 +172,7 @@ impl Dom {
 }
 
 /// The checks of both constructors after the arguments: the URL against the document, the origin, the caps. Gives the absolute URL.
-fn check_url<'s>(d: &Dom, s: &mut Sc<'s, '_>, who: &str, url: &str) -> Res<'s, String> {
+fn check_url<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, who: &str, url: &str) -> Res<'s, String> {
     let cur = d.cur_rec().ok();
     let rec = match nu::parse_any(url, cur.as_ref()) {
         Ok(r) => r,
@@ -196,10 +197,10 @@ fn check_url<'s>(d: &Dom, s: &mut Sc<'s, '_>, who: &str, url: &str) -> Res<'s, S
 }
 
 /// Make the object, queue its `error` and log the first warning of its kind.
-fn start(d: &Dom, it: &mut Interp<'_>, proto: ObjId, href: &str, shared: bool) -> R<Value> {
+fn start<E: Eng>(d: &Dom<E>, it: &mut E::Vm, proto: E::Obj, href: &str, shared: bool) -> R<E, E::Raw> {
     let port = if shared { Some(d.new_port(it)?) } else { None };
     let o = d.obj(it, proto)?;
-    d.st.borrow_mut().by_obj.insert(o, Target::Obj(o));
+    d.st.borrow_mut().add_target(it, o, crate::browser::Owner::Worker(o));
     d.schedule(d.now_ms(), crate::browser_scheduler::Task::Worker(o))?;
     d.worker.objs.borrow_mut().insert(o, true);
     if let Some(p) = port {
@@ -211,11 +212,11 @@ fn start(d: &Dom, it: &mut Interp<'_>, proto: ObjId, href: &str, shared: bool) -
         let who = if shared { "SharedWorker" } else { "Worker" };
         crate::browser_console::push_text(d, it, ConsoleLevel::Warn, &format!("{who} scripts do not run in bare ({shown})"));
     }
-    Ok(Value::Object(o))
+    Ok(E::obj_raw(o))
 }
 
 /// `WorkerOptions.type` is `classic` or `module`; `name` and `credentials` are ignored.
-fn check_type<'s>(d: &Dom, s: &mut Sc<'s, '_>, who: &str, opts: Local<'s>) -> Res<'s, ()> {
+fn check_type<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, who: &str, opts: Local<'s>) -> Res<'s, ()> {
     let t = s.get_str(opts, "type")?;
     if s.type_of(t) != Type::Undefined {
         let t = d.string_arg_s(s, t)?;
@@ -226,36 +227,36 @@ fn check_type<'s>(d: &Dom, s: &mut Sc<'s, '_>, who: &str, opts: Local<'s>) -> Re
     Ok(())
 }
 
-fn worker_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn worker_ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let default = d.worker.made.get().expect("made")[0];
     let default = d.obj_local(s, default);
     let proto = s.proto_from_new_target(default)?;
-    let proto = obj_id(s, proto).expect("a prototype is an object");
+    let proto = obj_id::<E>(s, proto).expect("a prototype is an object");
     let Some(a0) = a.get(0) else {
         return Err(s.type_error("Failed to construct 'Worker': 1 argument required, but only 0 present."));
     };
     let url = d.string_arg_s(s, a0)?;
-    let a1 = arg_s(s, a, 1);
+    let a1 = arg_s::<E>(s, a, 1);
     match s.type_of(a1) {
         Type::Undefined | Type::Null => {}
         Type::Object | Type::Function => check_type(d, s, "Worker", a1)?,
         _ => return Err(s.type_error("Failed to construct 'Worker': parameter 2 is not of type 'WorkerOptions'.")),
     }
     let href = check_url(d, s, "Worker", &url)?;
-    old_v(s, |it| start(d, it, proto, &href, false))
+    old_v::<E>(s, |it| start(d, it, proto, &href, false))
 }
 
 /// `SharedWorker(url, name or options)`: the second argument is an options object, or else a string (the name).
-fn shared_worker_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn shared_worker_ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let default = d.worker.made_shared.get().expect("made")[0];
     let default = d.obj_local(s, default);
     let proto = s.proto_from_new_target(default)?;
-    let proto = obj_id(s, proto).expect("a prototype is an object");
+    let proto = obj_id::<E>(s, proto).expect("a prototype is an object");
     let Some(a0) = a.get(0) else {
         return Err(s.type_error("Failed to construct 'SharedWorker': 1 argument required, but only 0 present."));
     };
     let url = d.string_arg_s(s, a0)?;
-    let a1 = arg_s(s, a, 1);
+    let a1 = arg_s::<E>(s, a, 1);
     match s.type_of(a1) {
         Type::Undefined | Type::Null => {}
         Type::Object | Type::Function => check_type(d, s, "SharedWorker", a1)?,
@@ -264,10 +265,10 @@ fn shared_worker_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>
         }
     }
     let href = check_url(d, s, "SharedWorker", &url)?;
-    old_v(s, |it| start(d, it, proto, &href, true))
+    old_v::<E>(s, |it| start(d, it, proto, &href, true))
 }
 
-fn post_message<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn post_message<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     d.dedicated_of(s, this)?;
     let Some(m) = a.get(0) else {
         return Err(s.type_error("Failed to execute 'postMessage' on 'Worker': 1 argument required, but only 0 present."));
@@ -279,25 +280,25 @@ fn post_message<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -
     }
 }
 
-fn terminate<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn terminate<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let o = d.dedicated_of(s, this)?;
     d.worker.objs.borrow_mut().insert(o, false);
     Ok(s.undefined())
 }
 
-fn hget<'s, const N: usize>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn hget<'s, const N: usize, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let o = d.worker_of(s, this)?;
-    old_v(s, |it| Ok(handler_get(d, it, Target::Obj(o), TYPES[N])))
+    old_v::<E>(s, |it| Ok(handler_get(d, it, Target::Obj(o), TYPES[N])))
 }
 
-fn hset<'s, const N: usize>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn hset<'s, const N: usize, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let o = d.worker_of(s, this)?;
-    let v = raw_arg(s, a, 0);
-    old(s, |it| handler_set(d, it, Target::Obj(o), TYPES[N], v))?;
+    let v = raw_arg::<E>(s, a, 0);
+    old::<E, _>(s, |it| handler_set(d, it, Target::Obj(o), TYPES[N], v))?;
     Ok(s.undefined())
 }
 
-fn shared_port<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn shared_port<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let o = d.worker_of(s, this)?;
     let p = d.worker.ports.borrow().get(&o).copied();
     match p {

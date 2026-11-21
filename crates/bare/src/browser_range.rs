@@ -39,6 +39,8 @@
 //!
 //! Bound (`Limit(Host(name))`): `ranges` (live ranges, set free by the collector).
 
+use crate::eng::{Eng, Ops, Val};
+use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_scheduler::Task;
 use crate::browser_chardata::{replace, split_at};
@@ -46,15 +48,14 @@ use crate::browser_dom::{clone_tree_s, name_of, new_fragment_s, Op};
 use crate::browser_lazy::lazy_global;
 use bare_html::dom::{Change, Document, NodeData, NodeId};
 use crate::browser_scoped::*;
-use bare_js::eval::Interp;
-use bare_js::value::{to_uint32, ObjId, Value};
+use bare_js::value::to_uint32;
 use bare_js_api::{Args, HostFn, Local};
 use std::cell::{OnceCell, RefCell};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-type V = R<Value>;
+type V<E: Eng> = R<E, E::Raw>;
 
 const MAX_RANGES: usize = 1 << 16;
 
@@ -67,12 +68,12 @@ struct Rng {
 }
 
 #[derive(Default)]
-pub(crate) struct State {
+pub(crate) struct State<E: Eng> {
     /// Range, Selection and AbstractRange: prototype and constructor of each, once made.
-    made: Option<[ObjId; 6]>,
-    ranges: HashMap<ObjId, Rng>,
+    made: Option<[<E as Eng>::Obj; 6]>,
+    ranges: HashMap<<E as Eng>::Obj, Rng>,
     /// The selection object and its range.
-    sel: Option<(ObjId, Option<ObjId>)>,
+    sel: Option<(<E as Eng>::Obj, Option<<E as Eng>::Obj>)>,
     /// The focus of the selection is before its anchor (Selection API "direction" is backwards).
     back: bool,
     /// A `Task::DocSelectionChange` is queued (Selection API "has scheduled selectionchange event").
@@ -80,13 +81,13 @@ pub(crate) struct State {
 }
 
 #[derive(Default)]
-pub(crate) struct Ranges {
-    st: OnceCell<Rc<RefCell<State>>>,
+pub(crate) struct Ranges<E: Eng> {
+    st: OnceCell<Rc<RefCell<State<E>>>>,
 }
 
-impl Ranges {
+impl<E: Eng> Ranges<E> {
     /// The state, when a range is alive (for the watcher).
-    pub(crate) fn live(&self) -> Option<Rc<RefCell<State>>> {
+    pub(crate) fn live(&self) -> Option<Rc<RefCell<State<E>>>> {
         self.st.get().filter(|s| !s.borrow().ranges.is_empty()).cloned()
     }
 
@@ -96,13 +97,13 @@ impl Ranges {
 }
 
 #[cfg(test)]
-impl Ranges {
+impl<E: Eng> Ranges<E> {
     pub(crate) fn is_made(&self) -> bool {
         self.st.get().is_some()
     }
 }
 
-fn state(d: &Dom) -> &Rc<RefCell<State>> {
+fn state<E: Eng>(d: &Dom<E>) -> &Rc<RefCell<State<E>>> {
     d.range.st.get_or_init(Default::default)
 }
 
@@ -119,7 +120,7 @@ fn inside(doc: &Document, mut n: NodeId, anc: NodeId) -> bool {
     }
 }
 
-impl State {
+impl<E: Eng> State<E> {
     /// The range of the selection, as it is now.
     fn sel_rng(&self) -> Option<Rng> {
         self.sel.and_then(|(_, r)| r).and_then(|o| self.ranges.get(&o).copied())
@@ -265,14 +266,14 @@ impl Rng {
 
 // ------------------------------------------------------------ errors and arguments
 
-fn few<'s>(s: &mut Sc<'s, '_>, what: &str, need: usize, got: usize) -> bare_js_api::Error<'s> {
+fn few<'s, E: Eng>(s: &mut Sc<'s, E>, what: &str, need: usize, got: usize) -> bare_js_api::Error<'s> {
     const SEL: [&str; 9] = ["addRange", "removeRange", "getRangeAt", "collapse", "setPosition", "selectAllChildren", "extend", "setBaseAndExtent", "containsNode"];
     let iface = if SEL.contains(&what) { "Selection" } else { "Range" };
     s.type_error(&format!("Failed to execute '{what}' on '{iface}': {need} argument{} required, but only {got} present.", if need == 1 { "" } else { "s" }))
 }
 
-fn range_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, (ObjId, Rng)> {
-    if let Some(o) = obj_id(s, this)
+fn range_of<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, (E::Obj, Rng)> {
+    if let Some(o) = obj_id::<E>(s, this)
         && let Some(&r) = state(d).borrow().ranges.get(&o)
     {
         return Ok((o, r));
@@ -280,11 +281,11 @@ fn range_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, (ObjId,
     Err(s.type_error("Illegal invocation"))
 }
 
-fn offset_arg<'s>(s: &mut Sc<'s, '_>, v: Local<'s>) -> Res<'s, u32> {
+fn offset_arg<'s, E: Eng>(s: &mut Sc<'s, E>, v: Local<'s>) -> Res<'s, u32> {
     Ok(to_uint32(s.to_number(v)?))
 }
 
-fn set(d: &Dom, o: ObjId, r: Rng) {
+fn set<E: Eng>(d: &Dom<E>, o: E::Obj, r: Rng) {
     let moved = {
         let mut st = state(d).borrow_mut();
         st.ranges.insert(o, r).is_some_and(|old| old != r) && st.sel.is_some_and(|s| s.1 == Some(o))
@@ -294,12 +295,12 @@ fn set(d: &Dom, o: ObjId, r: Rng) {
     }
 }
 
-fn is_doctype(d: &Dom, n: NodeId) -> bool {
+fn is_doctype<E: Eng>(d: &Dom<E>, n: NodeId) -> bool {
     matches!(d.data(n), NodeData::Doctype(_))
 }
 
 /// The name of a doctype, for the messages (Chrome writes it where it writes a node type).
-fn doctype_name(d: &Dom, n: NodeId) -> String {
+fn doctype_name<E: Eng>(d: &Dom<E>, n: NodeId) -> String {
     match d.data(n) {
         NodeData::Doctype(s) => d.doc.borrow().text(s).to_string(),
         _ => String::new(),
@@ -307,7 +308,7 @@ fn doctype_name(d: &Dom, n: NodeId) -> String {
 }
 
 /// Check a node and an offset as `setStart` does. `who` is the interface and method for the message.
-fn check<'s>(d: &Dom, s: &mut Sc<'s, '_>, who: &str, n: NodeId, off: u32) -> Res<'s, ()> {
+fn check<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, who: &str, n: NodeId, off: u32) -> Res<'s, ()> {
     if is_doctype(d, n) {
         return Err(d.dom_err_s(s, "InvalidNodeTypeError", &format!("Failed to execute '{who}': The node provided is of type '{}'.", doctype_name(d, n))));
     }
@@ -327,15 +328,15 @@ fn check<'s>(d: &Dom, s: &mut Sc<'s, '_>, who: &str, n: NodeId, off: u32) -> Res
 
 /// `ensure` when it has not run yet.
 #[inline]
-fn made_s<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+fn made_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
     if state(d).borrow().made.is_none() {
-        old(s, |it| ensure(d, it))?;
+        old::<E, _>(s, |it| ensure(d, it))?;
     }
     Ok(())
 }
 
 /// A new range object with the points `r`.
-fn new_range_o<'s>(d: &Dom, s: &mut Sc<'s, '_>, r: Rng) -> Res<'s, ObjId> {
+fn new_range_o<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, r: Rng) -> Res<'s, E::Obj> {
     made_s(d, s)?;
     if state(d).borrow().ranges.len() >= MAX_RANGES {
         return Err(d.lim_s(s, "ranges"));
@@ -343,29 +344,30 @@ fn new_range_o<'s>(d: &Dom, s: &mut Sc<'s, '_>, r: Rng) -> Res<'s, ObjId> {
     let proto = state(d).borrow().made.expect("made")[0];
     let o = d.obj_s(s, proto)?;
     set(d, o, r);
+    d.own_obj(s.engine(), o, crate::browser::Owner::Range(o));
     if state(d).borrow().ranges.len() == 1 {
         d.sync_watcher();
     }
     Ok(o)
 }
 
-fn new_range<'s>(d: &Dom, s: &mut Sc<'s, '_>, r: Rng) -> Res<'s, Local<'s>> {
+fn new_range<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, r: Rng) -> Res<'s, Local<'s>> {
     let o = new_range_o(d, s, r)?;
     Ok(d.obj_local(s, o))
 }
 
-fn construct<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn construct<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let root = d.doc.borrow().root();
     new_range(d, s, Rng { sc: root, so: 0, ec: root, eo: 0 })
 }
 
-fn create_range<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn create_range<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.nd_s(s, this)?;
     new_range(d, s, Rng { sc: n, so: 0, ec: n, eo: 0 })
 }
 
 /// Set one boundary point as the standard says: the other point follows when the order or the tree would be wrong.
-fn bound(d: &Dom, o: ObjId, mut r: Rng, start: bool, n: NodeId, off: u32) {
+fn bound<E: Eng>(d: &Dom<E>, o: E::Obj, mut r: Rng, start: bool, n: NodeId, off: u32) {
     let doc = d.doc.borrow();
     if start {
         let other = if root_of(&doc, r.ec) != root_of(&doc, n) { None } else { Some(r.end()) };
@@ -388,23 +390,23 @@ fn bound(d: &Dom, o: ObjId, mut r: Rng, start: bool, n: NodeId, off: u32) {
     set(d, o, r);
 }
 
-fn node_arg<'s>(d: &Dom, s: &mut Sc<'s, '_>, who: &str, a: Args<'s>, i: usize) -> Res<'s, NodeId> {
-    let v = arg_s(s, a, i);
+fn node_arg<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, who: &str, a: Args<'s>, i: usize) -> Res<'s, NodeId> {
+    let v = arg_s::<E>(s, a, i);
     match d.node_of_s(s, v) {
         Some(n) => Ok(n),
         None => Err(s.type_error(&format!("Failed to execute '{who}' on 'Range': parameter {} is not of type 'Node'.", i + 1))),
     }
 }
 
-fn set_start_end<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, start: bool) -> Res<'s, Local<'s>> {
+fn set_start_end<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>, start: bool) -> Res<'s, Local<'s>> {
     let who = if start { "setStart" } else { "setEnd" };
     if a.len() < 2 {
-        return Err(few(s, who, 2, a.len()));
+        return Err(few::<E>(s, who, 2, a.len()));
     }
     let (o, _) = range_of(d, s, this)?;
     let n = node_arg(d, s, who, a, 0)?;
-    let v = arg_s(s, a, 1);
-    let off = offset_arg(s, v)?;
+    let v = arg_s::<E>(s, a, 1);
+    let off = offset_arg::<E>(s, v)?;
     check(d, s, &format!("{who}' on 'Range"), n, off)?;
     // The offset may have run script that changed the tree: read the points now.
     let r = range_of(d, s, this)?.1;
@@ -412,18 +414,18 @@ fn set_start_end<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, 
     Ok(s.undefined())
 }
 
-fn set_start<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_start<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     set_start_end(d, s, this, a, true)
 }
 
-fn set_end<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_end<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     set_start_end(d, s, this, a, false)
 }
 
 /// `setStartBefore` and the three like it: the parent and the index of the node, plus 1 for "after".
-fn set_rel<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, who: &str, start: bool, after: bool) -> Res<'s, Local<'s>> {
+fn set_rel<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>, who: &str, start: bool, after: bool) -> Res<'s, Local<'s>> {
     if a.is_empty() {
-        return Err(few(s, who, 1, 0));
+        return Err(few::<E>(s, who, 1, 0));
     }
     let (o, r) = range_of(d, s, this)?;
     let n = node_arg(d, s, who, a, 0)?;
@@ -438,22 +440,22 @@ fn set_rel<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, who: &
     Ok(s.undefined())
 }
 
-fn set_start_before<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_start_before<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     set_rel(d, s, this, a, "setStartBefore", true, false)
 }
-fn set_start_after<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_start_after<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     set_rel(d, s, this, a, "setStartAfter", true, true)
 }
-fn set_end_before<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_end_before<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     set_rel(d, s, this, a, "setEndBefore", false, false)
 }
-fn set_end_after<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_end_after<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     set_rel(d, s, this, a, "setEndAfter", false, true)
 }
 
-fn select_node<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn select_node<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     if a.is_empty() {
-        return Err(few(s, "selectNode", 1, 0));
+        return Err(few::<E>(s, "selectNode", 1, 0));
     }
     let (o, _) = range_of(d, s, this)?;
     let n = node_arg(d, s, "selectNode", a, 0)?;
@@ -468,9 +470,9 @@ fn select_node<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) ->
     Ok(s.undefined())
 }
 
-fn select_node_contents<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn select_node_contents<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     if a.is_empty() {
-        return Err(few(s, "selectNodeContents", 1, 0));
+        return Err(few::<E>(s, "selectNodeContents", 1, 0));
     }
     let (o, _) = range_of(d, s, this)?;
     let n = node_arg(d, s, "selectNodeContents", a, 0)?;
@@ -482,7 +484,7 @@ fn select_node_contents<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Arg
     Ok(s.undefined())
 }
 
-fn collapse<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn collapse<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let (o, mut r) = range_of(d, s, this)?;
     let to_start = match a.get(0) {
         Some(v) => s.to_boolean(v),
@@ -497,38 +499,38 @@ fn collapse<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Re
     Ok(s.undefined())
 }
 
-fn clone_range<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn clone_range<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let (_, r) = range_of(d, s, this)?;
     new_range(d, s, r)
 }
 
-fn detach<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn detach<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     range_of(d, s, this)?;
     Ok(s.undefined())
 }
 
-fn start_container<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn start_container<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let (_, r) = range_of(d, s, this)?;
     d.wrap_s(s, r.sc)
 }
-fn end_container<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn end_container<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let (_, r) = range_of(d, s, this)?;
     d.wrap_s(s, r.ec)
 }
-fn start_offset<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn start_offset<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let r = range_of(d, s, this)?.1;
     Ok(s.number(r.so as f64))
 }
-fn end_offset<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn end_offset<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let r = range_of(d, s, this)?.1;
     Ok(s.number(r.eo as f64))
 }
-fn collapsed<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn collapsed<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let r = range_of(d, s, this)?.1;
     Ok(s.boolean(r.start() == r.end()))
 }
 
-fn common_ancestor<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn common_ancestor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let (_, r) = range_of(d, s, this)?;
     let doc = d.doc.borrow();
     let (a, b) = (path(&doc, r.sc), path(&doc, r.ec));
@@ -540,7 +542,7 @@ fn common_ancestor<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>
 }
 
 /// The text of a range: the Text nodes it holds, cut at the two ends.
-fn range_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, r: Rng) -> Res<'s, String> {
+fn range_text<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, r: Rng) -> Res<'s, String> {
     let doc = d.doc.borrow();
     let mut out = String::new();
     if let NodeData::Text(t) = *doc.data(r.sc)
@@ -578,7 +580,7 @@ fn range_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, r: Rng) -> Res<'s, String> {
     Ok(out)
 }
 
-fn range_to_string<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn range_to_string<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let (_, r) = range_of(d, s, this)?;
     let t = range_text(d, s, r)?;
     d.js_str_s(s, &t)
@@ -587,19 +589,19 @@ fn range_to_string<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>
 // ------------------------------------------------------------ compare, point and intersect
 
 /// -1, 0 or 1 for an order.
-fn sign<'s>(s: &mut Sc<'s, '_>, o: Ordering) -> Local<'s> {
+fn sign<'s, E: Eng>(s: &mut Sc<'s, E>, o: Ordering) -> Local<'s> {
     s.number(o as i8 as f64)
 }
 
-fn compare_boundary<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn compare_boundary<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let (_, r) = range_of(d, s, this)?;
     if a.len() < 2 {
-        return Err(few(s, "compareBoundaryPoints", 2, a.len()));
+        return Err(few::<E>(s, "compareBoundaryPoints", 2, a.len()));
     }
     // `unsigned short`: the number modulo 65536.
-    let (v0, v1) = (arg_s(s, a, 0), arg_s(s, a, 1));
+    let (v0, v1) = (arg_s::<E>(s, a, 0), arg_s::<E>(s, a, 1));
     let how = to_uint32(s.to_number(v0)?) as u16;
-    let src = match obj_id(s, v1) {
+    let src = match obj_id::<E>(s, v1) {
         Some(o) => state(d).borrow().ranges.get(&o).copied(),
         None => None,
     };
@@ -622,27 +624,27 @@ fn compare_boundary<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s
     };
     let o = position(&doc, mine, other);
     drop(doc);
-    Ok(sign(s, o))
+    Ok(sign::<E>(s, o))
 }
 
 /// The arguments of `comparePoint` and `isPointInRange`: the node and the offset. `Ok(None)`: the node is in another tree.
-fn point_args<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, who: &str) -> Res<'s, (Rng, NodeId, u32)> {
+fn point_args<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>, who: &str) -> Res<'s, (Rng, NodeId, u32)> {
     let (_, r) = range_of(d, s, this)?;
     if a.len() < 2 {
-        return Err(few(s, who, 2, a.len()));
+        return Err(few::<E>(s, who, 2, a.len()));
     }
     let n = node_arg(d, s, who, a, 0)?;
-    let v = arg_s(s, a, 1);
-    Ok((r, n, offset_arg(s, v)?))
+    let v = arg_s::<E>(s, a, 1);
+    Ok((r, n, offset_arg::<E>(s, v)?))
 }
 
-fn same_tree(d: &Dom, r: Rng, n: NodeId) -> bool {
+fn same_tree<E: Eng>(d: &Dom<E>, r: Rng, n: NodeId) -> bool {
     let doc = d.doc.borrow();
     root_of(&doc, r.sc) == root_of(&doc, n)
 }
 
 /// -1 when the point is before the range, 1 when it is after, else 0.
-fn against(d: &Dom, r: Rng, p: (NodeId, u32)) -> i32 {
+fn against<E: Eng>(d: &Dom<E>, r: Rng, p: (NodeId, u32)) -> i32 {
     let doc = d.doc.borrow();
     if position(&doc, p, r.start()) == Ordering::Less {
         -1
@@ -653,7 +655,7 @@ fn against(d: &Dom, r: Rng, p: (NodeId, u32)) -> i32 {
     }
 }
 
-fn compare_point<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn compare_point<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let (r, n, off) = point_args(d, s, this, a, "comparePoint")?;
     if !same_tree(d, r, n) {
         return Err(d.dom_err_s(s, "WrongDocumentError", "Failed to execute 'comparePoint' on 'Range': The node provided and the Range are not in the same tree."));
@@ -662,7 +664,7 @@ fn compare_point<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) 
     Ok(s.number(against(d, r, (n, off)) as f64))
 }
 
-fn in_range<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn in_range<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let (r, n, off) = point_args(d, s, this, a, "isPointInRange")?;
     if !same_tree(d, r, n) {
         return Ok(s.boolean(false));
@@ -671,10 +673,10 @@ fn in_range<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Re
     Ok(s.boolean(against(d, r, (n, off)) == 0))
 }
 
-fn intersects<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn intersects<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let (_, r) = range_of(d, s, this)?;
     if a.is_empty() {
-        return Err(few(s, "intersectsNode", 1, 0));
+        return Err(few::<E>(s, "intersectsNode", 1, 0));
     }
     let n = node_arg(d, s, "intersectsNode", a, 0)?;
     let hit = {
@@ -713,7 +715,7 @@ fn text_of(doc: &Document, n: NodeId) -> Option<String> {
 /// The "extract" steps of the standard for the Text or Comment `n` (its text is `text`), units `from` to `to`: a clone of that part goes to `frag`
 /// (`Extract`, `Clone`), and the part goes from `n` (`Extract`, `Delete`).
 #[allow(clippy::too_many_arguments)]
-fn cut_data<'s>(d: &Dom, s: &mut Sc<'s, '_>, m: Mode, frag: NodeId, n: NodeId, text: &str, from: u32, to: u32) -> Res<'s, ()> {
+fn cut_data<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, m: Mode, frag: NodeId, n: NodeId, text: &str, from: u32, to: u32) -> Res<'s, ()> {
     if m != Mode::Delete {
         let c = clone_tree_s(d, s, n, false, false)?;
         let mut doc = d.doc.borrow_mut();
@@ -721,14 +723,14 @@ fn cut_data<'s>(d: &Dom, s: &mut Sc<'s, '_>, m: Mode, frag: NodeId, n: NodeId, t
         doc.move_to(c, frag, None);
     }
     if m != Mode::Clone {
-        old(s, |it| replace(d, it, "replaceData", (n, text), from, to.saturating_sub(from), "").map(drop))?;
+        old::<E, _>(s, |it| replace(d, it, "replaceData", (n, text), from, to.saturating_sub(from), "").map(drop))?;
     }
     Ok(())
 }
 
 /// A partly selected node of `cut`: its shallow clone goes to `frag`, and what the range holds of it goes into the clone.
 #[allow(clippy::too_many_arguments)]
-fn cut_partial<'s>(d: &Dom, s: &mut Sc<'s, '_>, m: Mode, who: &str, frag: NodeId, depth: u32, n: NodeId, sub: Rng) -> Res<'s, ()> {
+fn cut_partial<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, m: Mode, who: &str, frag: NodeId, depth: u32, n: NodeId, sub: Rng) -> Res<'s, ()> {
     let into = if m == Mode::Delete {
         frag
     } else {
@@ -741,7 +743,7 @@ fn cut_partial<'s>(d: &Dom, s: &mut Sc<'s, '_>, m: Mode, who: &str, frag: NodeId
 
 /// The steps "extract a live range" and "clone the contents" of the standard, for the points `r`, into `frag`. `Delete` makes no clones. Gives the
 /// point that the range gets when it is done. The order of the changes is the standard's, and so the order of the records.
-fn cut<'s>(d: &Dom, s: &mut Sc<'s, '_>, m: Mode, who: &str, r: Rng, frag: NodeId, depth: u32) -> Res<'s, (NodeId, u32)> {
+fn cut<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, m: Mode, who: &str, r: Rng, frag: NodeId, depth: u32) -> Res<'s, (NodeId, u32)> {
     s.charge(1)?;
     if depth > MAX_CUT_DEPTH {
         return Err(d.lim_s(s, "dom-depth"));
@@ -811,7 +813,7 @@ fn cut<'s>(d: &Dom, s: &mut Sc<'s, '_>, m: Mode, who: &str, r: Rng, frag: NodeId
 }
 
 /// `deleteContents`, `extractContents` and `cloneContents`. The fragment (not for `Delete`) or `undefined`.
-fn cut_range<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, m: Mode, who: &str) -> Res<'s, Local<'s>> {
+fn cut_range<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, m: Mode, who: &str) -> Res<'s, Local<'s>> {
     let (o, r) = range_of(d, s, this)?;
     let frag = if m == Mode::Delete { s.undefined() } else { new_fragment_s(d, s, None)? };
     let f = d.node_of_s(s, frag).unwrap_or(r.sc);
@@ -822,21 +824,21 @@ fn cut_range<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, m: Mode, who: &st
     Ok(frag)
 }
 
-fn delete_contents<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn delete_contents<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     cut_range(d, s, this, Mode::Delete, "deleteContents")
 }
 
-fn extract_contents<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn extract_contents<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     cut_range(d, s, this, Mode::Extract, "extractContents")
 }
 
-fn clone_contents<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn clone_contents<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     cut_range(d, s, this, Mode::Clone, "cloneContents")
 }
 
 /// The steps of `insertNode` for the range `o` (`op`: the method for the messages, `insertNode` or `surroundContents`).
-fn insert_into<'s>(d: &Dom, s: &mut Sc<'s, '_>, o: ObjId, node: NodeId, op: Op) -> Res<'s, ()> {
-    let cur = |d: &Dom| state(d).borrow().ranges[&o];
+fn insert_into<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, o: E::Obj, node: NodeId, op: Op) -> Res<'s, ()> {
+    let cur = |d: &Dom<E>| state(d).borrow().ranges[&o];
     let r = cur(d);
     let (sc, so) = (r.sc, r.so);
     let (kind, up) = {
@@ -865,7 +867,7 @@ fn insert_into<'s>(d: &Dom, s: &mut Sc<'s, '_>, o: ObjId, node: NodeId, op: Op) 
     let frag = d.check_insert_s(s, parent, node, reference, None, op)?;
     if text {
         let t = text_of(&d.doc.borrow(), sc).unwrap_or_default();
-        reference = Some(lift(s, split_at(d, sc, &t, so.min(utf16_len(&t))))?);
+        reference = Some(lift::<E, _>(s, split_at(d, sc, &t, so.min(utf16_len(&t))))?);
     }
     if reference == Some(node) {
         reference = d.doc.borrow().next_sibling(node);
@@ -881,20 +883,20 @@ fn insert_into<'s>(d: &Dom, s: &mut Sc<'s, '_>, o: ObjId, node: NodeId, op: Op) 
     Ok(())
 }
 
-fn insert_node<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn insert_node<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let (o, _) = range_of(d, s, this)?;
     if a.is_empty() {
-        return Err(few(s, "insertNode", 1, 0));
+        return Err(few::<E>(s, "insertNode", 1, 0));
     }
     let node = node_arg(d, s, "insertNode", a, 0)?;
     insert_into(d, s, o, node, Op("insertNode", "Range"))?;
     Ok(s.undefined())
 }
 
-fn surround_contents<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn surround_contents<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let (o, r) = range_of(d, s, this)?;
     if a.is_empty() {
-        return Err(few(s, "surroundContents", 1, 0));
+        return Err(few::<E>(s, "surroundContents", 1, 0));
     }
     let np = node_arg(d, s, "surroundContents", a, 0)?;
     let op = Op("surroundContents", "Range");
@@ -937,29 +939,29 @@ fn surround_contents<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'
     Ok(s.undefined())
 }
 
-fn contextual_fragment<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn contextual_fragment<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     range_of(d, s, this)?;
     if a.is_empty() {
-        return Err(few(s, "createContextualFragment", 1, 0));
+        return Err(few::<E>(s, "createContextualFragment", 1, 0));
     }
     // ToString may run page code that moves the range: the start is read after it.
     let html = d.arg_str_s(s, a, 0)?;
     let (_, r) = range_of(d, s, this)?;
-    old_v(s, |it| crate::browser_fragment::contextual_fragment(d, it, r.sc, &html))
+    old_v::<E>(s, |it| crate::browser_fragment::contextual_fragment(d, it, r.sc, &html))
 }
 
-fn illegal_selection<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn illegal_selection<'s, E: Eng>(_: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     Err(s.type_error("Failed to construct 'Selection': Illegal constructor"))
 }
 
-fn illegal_abstract<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn illegal_abstract<'s, E: Eng>(_: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     Err(s.type_error("Illegal constructor"))
 }
 
 // ------------------------------------------------------------ Selection
 
-fn sel_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, Option<ObjId>> {
-    let me = obj_id(s, this);
+fn sel_of<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, Option<E::Obj>> {
+    let me = obj_id::<E>(s, this);
     match (me, state(d).borrow().sel) {
         (Some(o), Some((x, r))) if o == x => Ok(r),
         _ => Err(s.type_error("Illegal invocation")),
@@ -967,7 +969,7 @@ fn sel_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, Option<Ob
 }
 
 /// Change the range of the selection. Chrome sends `selectionchange` when the selected range differs, not for an equal new range object.
-fn set_sel(d: &Dom, r: Option<ObjId>) {
+fn set_sel<E: Eng>(d: &Dom<E>, r: Option<E::Obj>) {
     let old = match state(d).borrow_mut().sel.as_mut() {
         Some(s) => std::mem::replace(&mut s.1, r),
         None => return,
@@ -978,12 +980,12 @@ fn set_sel(d: &Dom, r: Option<ObjId>) {
     }
 }
 
-fn sel_range(d: &Dom, r: Option<ObjId>) -> Option<Rng> {
+fn sel_range<E: Eng>(d: &Dom<E>, r: Option<E::Obj>) -> Option<Rng> {
     r.and_then(|o| state(d).borrow().ranges.get(&o).copied())
 }
 
 /// The selection object of the realm, made at the first call.
-fn selection_obj<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ObjId> {
+fn selection_obj<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, E::Obj> {
     made_s(d, s)?;
     if let Some((o, _)) = state(d).borrow().sel {
         return Ok(o);
@@ -991,23 +993,24 @@ fn selection_obj<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ObjId> {
     let proto = state(d).borrow().made.expect("made")[2];
     let o = d.obj_s(s, proto)?;
     state(d).borrow_mut().sel = Some((o, None));
+    d.own_obj(s.engine(), o, crate::browser::Owner::Sel(o));
     Ok(o)
 }
 
-fn get_selection<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn get_selection<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let o = selection_obj(d, s)?;
     Ok(d.obj_local(s, o))
 }
 
-fn range_count<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn range_count<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = sel_of(d, s, this)?.is_some() as u8 as f64;
     Ok(s.number(n))
 }
 
-fn add_range<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn add_range<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let cur = sel_of(d, s, this)?;
-    let Some(v) = a.get(0) else { return Err(few(s, "addRange", 1, 0)) };
-    let Some(o) = obj_id(s, v) else { return Err(s.type_error("Failed to execute 'addRange' on 'Selection': parameter 1 is not of type 'Range'.")) };
+    let Some(v) = a.get(0) else { return Err(few::<E>(s, "addRange", 1, 0)) };
+    let Some(o) = obj_id::<E>(s, v) else { return Err(s.type_error("Failed to execute 'addRange' on 'Selection': parameter 1 is not of type 'Range'.")) };
     let Some(r) = state(d).borrow().ranges.get(&o).copied() else {
         return Err(s.type_error("Failed to execute 'addRange' on 'Selection': parameter 1 is not of type 'Range'."));
     };
@@ -1019,16 +1022,16 @@ fn add_range<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> R
     Ok(s.undefined())
 }
 
-fn remove_all<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn remove_all<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     sel_of(d, s, this)?;
     set_sel(d, None);
     Ok(s.undefined())
 }
 
-fn remove_range<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn remove_range<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let cur = sel_of(d, s, this)?;
-    let Some(v) = a.get(0) else { return Err(few(s, "removeRange", 1, 0)) };
-    let o = match obj_id(s, v) {
+    let Some(v) = a.get(0) else { return Err(few::<E>(s, "removeRange", 1, 0)) };
+    let o = match obj_id::<E>(s, v) {
         Some(o) if state(d).borrow().ranges.contains_key(&o) => o,
         _ => return Err(s.type_error("Failed to execute 'removeRange' on 'Selection': parameter 1 is not of type 'Range'.")),
     };
@@ -1039,10 +1042,10 @@ fn remove_range<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -
     Ok(s.undefined())
 }
 
-fn get_range_at<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn get_range_at<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let cur = sel_of(d, s, this)?;
-    let Some(v) = a.get(0) else { return Err(few(s, "getRangeAt", 1, 0)) };
-    let i = offset_arg(s, v)?;
+    let Some(v) = a.get(0) else { return Err(few::<E>(s, "getRangeAt", 1, 0)) };
+    let i = offset_arg::<E>(s, v)?;
     match cur {
         Some(r) if i == 0 => Ok(d.obj_local(s, r)),
         _ => Err(d.dom_err_s(s, "IndexSizeError", &format!("Failed to execute 'getRangeAt' on 'Selection': {i} is not a valid index."))),
@@ -1050,10 +1053,10 @@ fn get_range_at<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -
 }
 
 /// `collapse(node, offset)` and `setPosition`.
-fn sel_collapse<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, who: &str) -> Res<'s, Local<'s>> {
+fn sel_collapse<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>, who: &str) -> Res<'s, Local<'s>> {
     sel_of(d, s, this)?;
-    let Some(v) = a.get(0) else { return Err(few(s, who, 1, 0)) };
-    if is_nullish(s, v) {
+    let Some(v) = a.get(0) else { return Err(few::<E>(s, who, 1, 0)) };
+    if is_nullish::<E>(s, v) {
         set_sel(d, None);
         return Ok(s.undefined());
     }
@@ -1061,7 +1064,7 @@ fn sel_collapse<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, w
         return Err(s.type_error(&format!("Failed to execute '{who}' on 'Selection': parameter 1 is not of type 'Node'.")));
     };
     let off = match a.get(1) {
-        Some(v) => offset_arg(s, v)?,
+        Some(v) => offset_arg::<E>(s, v)?,
         None => 0,
     };
     check(d, s, &format!("{who}' on 'Selection"), node, off)?;
@@ -1076,15 +1079,15 @@ fn sel_collapse<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, w
     Ok(s.undefined())
 }
 
-fn collapse_sel<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn collapse_sel<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     sel_collapse(d, s, this, a, "collapse")
 }
 
-fn set_position<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_position<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     sel_collapse(d, s, this, a, "setPosition")
 }
 
-fn collapse_to<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, who: &str, start: bool) -> Res<'s, Local<'s>> {
+fn collapse_to<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, who: &str, start: bool) -> Res<'s, Local<'s>> {
     let cur = sel_of(d, s, this)?;
     let Some(r) = sel_range(d, cur) else {
         return Err(d.dom_err_s(s, "InvalidStateError", &format!("Failed to execute '{who}' on 'Selection': there is no selection.")));
@@ -1095,18 +1098,18 @@ fn collapse_to<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, who: &str, star
     Ok(s.undefined())
 }
 
-fn collapse_to_start<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn collapse_to_start<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     collapse_to(d, s, this, "collapseToStart", true)
 }
 
-fn collapse_to_end<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn collapse_to_end<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     collapse_to(d, s, this, "collapseToEnd", false)
 }
 
-fn select_all_children<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn select_all_children<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     sel_of(d, s, this)?;
     let Some(v) = a.get(0) else {
-        return Err(few(s, "selectAllChildren", 1, 0));
+        return Err(few::<E>(s, "selectAllChildren", 1, 0));
     };
     let Some(n) = d.node_of_s(s, v) else {
         return Err(s.type_error("Failed to execute 'selectAllChildren' on 'Selection': parameter 1 is not of type 'Node'."));
@@ -1125,12 +1128,12 @@ fn select_all_children<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args
     Ok(s.undefined())
 }
 
-fn is_collapsed<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn is_collapsed<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let cur = sel_of(d, s, this)?;
     Ok(s.boolean(sel_range(d, cur).is_none_or(|r| r.start() == r.end())))
 }
 
-fn sel_point<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, f: impl Fn(Rng) -> (NodeId, u32), node: bool) -> Res<'s, Local<'s>> {
+fn sel_point<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, f: impl Fn(Rng) -> (NodeId, u32), node: bool) -> Res<'s, Local<'s>> {
     let cur = sel_of(d, s, this)?;
     let back = state(d).borrow().back;
     let f = |r: Rng| if back { f(Rng { sc: r.ec, so: r.eo, ec: r.sc, eo: r.so }) } else { f(r) };
@@ -1142,20 +1145,20 @@ fn sel_point<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, f: impl Fn(Rng) -
     }
 }
 
-fn anchor_node<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn anchor_node<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     sel_point(d, s, this, |r| r.start(), true)
 }
-fn anchor_offset<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn anchor_offset<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     sel_point(d, s, this, |r| r.start(), false)
 }
-fn focus_node<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn focus_node<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     sel_point(d, s, this, |r| r.end(), true)
 }
-fn focus_offset<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn focus_offset<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     sel_point(d, s, this, |r| r.end(), false)
 }
 
-fn sel_type<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn sel_type<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let cur = sel_of(d, s, this)?;
     d.js_str_s(s, match sel_range(d, cur) {
         None => "None",
@@ -1164,7 +1167,7 @@ fn sel_type<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Re
     })
 }
 
-fn sel_direction<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn sel_direction<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let cur = sel_of(d, s, this)?;
     d.js_str_s(s, match sel_range(d, cur) {
         Some(r) if r.start() != r.end() => if state(d).borrow().back { "backward" } else { "forward" },
@@ -1172,7 +1175,7 @@ fn sel_direction<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) 
     })
 }
 
-fn sel_to_string<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn sel_to_string<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let cur = sel_of(d, s, this)?;
     let t = match sel_range(d, cur) {
         Some(r) => range_text(d, s, r)?,
@@ -1182,26 +1185,26 @@ fn sel_to_string<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) 
 }
 
 /// Make a new range for the selection, with the direction (Selection API "set the selection range"). The anchor is the start unless `back`.
-fn set_new<'s>(d: &Dom, s: &mut Sc<'s, '_>, r: Rng, back: bool) -> Res<'s, ()> {
+fn set_new<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, r: Rng, back: bool) -> Res<'s, ()> {
     let o = new_range_o(d, s, r)?;
     set_sel(d, Some(o));
     state(d).borrow_mut().back = back && r.start() != r.end();
     Ok(())
 }
 
-fn in_doc(d: &Dom, n: NodeId) -> bool {
+fn in_doc<E: Eng>(d: &Dom<E>, n: NodeId) -> bool {
     let doc = d.doc.borrow();
     root_of(&doc, n) == doc.root()
 }
 
 /// The node and offset arguments `i` and `i + 1` of a selection method, checked as `setStart` does.
-fn sel_point_arg<'s>(d: &Dom, s: &mut Sc<'s, '_>, who: &str, a: Args<'s>, i: usize) -> Res<'s, (NodeId, u32)> {
+fn sel_point_arg<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, who: &str, a: Args<'s>, i: usize) -> Res<'s, (NodeId, u32)> {
     let n = match a.get(i).and_then(|v| d.node_of_s(s, v)) {
         Some(n) => n,
         None => return Err(s.type_error(&format!("Failed to execute '{who}' on 'Selection': parameter {} is not of type 'Node'.", i + 1))),
     };
     let off = match a.get(i + 1) {
-        Some(v) => offset_arg(s, v)?,
+        Some(v) => offset_arg::<E>(s, v)?,
         None => 0,
     };
     check(d, s, &format!("{who}' on 'Selection"), n, off)?;
@@ -1209,10 +1212,10 @@ fn sel_point_arg<'s>(d: &Dom, s: &mut Sc<'s, '_>, who: &str, a: Args<'s>, i: usi
 }
 
 /// `setBaseAndExtent`. Port of Ladybird `Selection::set_base_and_extent` (BSD-2-Clause, `LICENSE-LADYBIRD`).
-fn base_extent<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn base_extent<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     sel_of(d, s, this)?;
     if a.len() < 4 {
-        return Err(few(s, "setBaseAndExtent", 4, a.len()));
+        return Err(few::<E>(s, "setBaseAndExtent", 4, a.len()));
     }
     let anchor = sel_point_arg(d, s, "setBaseAndExtent", a, 0)?;
     let focus = sel_point_arg(d, s, "setBaseAndExtent", a, 2)?;
@@ -1226,10 +1229,10 @@ fn base_extent<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) ->
 }
 
 /// `extend`. Port of Ladybird `Selection::extend` (BSD-2-Clause, `LICENSE-LADYBIRD`).
-fn extend<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn extend<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let cur = sel_of(d, s, this)?;
     if a.is_empty() {
-        return Err(few(s, "extend", 1, 0));
+        return Err(few::<E>(s, "extend", 1, 0));
     }
     let (n, off) = sel_point_arg(d, s, "extend", a, 0)?;
     if !in_doc(d, n) {
@@ -1248,10 +1251,10 @@ fn extend<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<
 }
 
 /// `containsNode`. Port of Ladybird `Selection::contains_node` (BSD-2-Clause, `LICENSE-LADYBIRD`).
-fn contains_node<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn contains_node<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let cur = sel_of(d, s, this)?;
     let Some(v) = a.get(0) else {
-        return Err(few(s, "containsNode", 1, 0));
+        return Err(few::<E>(s, "containsNode", 1, 0));
     };
     let Some(n) = d.node_of_s(s, v) else {
         return Err(s.type_error("Failed to execute 'containsNode' on 'Selection': parameter 1 is not of type 'Node'."));
@@ -1277,7 +1280,7 @@ fn contains_node<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) 
 }
 
 /// `modify`: JS arguments, then `modify_selection`.
-fn modify<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn modify<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     sel_of(d, s, this)?;
     let mut t = [String::new(), String::new(), String::new()];
     for (i, v) in a.iter().take(3).enumerate() {
@@ -1287,21 +1290,21 @@ fn modify<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<
     Ok(s.undefined())
 }
 
-fn delete_from_document<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn delete_from_document<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     sel_of(d, s, this)?;
     Err(unsupp("Selection.deleteFromDocument"))
 }
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// `Selection.modify(alter, direction, granularity)` for `alter` `move` or `extend` (lowercase). The granularities are `character`, `word`,
     /// `lineboundary`, `paragraphboundary` and `documentboundary`; another one, another direction or no range changes nothing (Chrome).
     /// The text is that of the Text nodes inside the editing host of the focus (the document when it is in none), cut into lines at
     /// blocks and `<br>`; one move reads it once.
-    pub(crate) fn modify_selection(&self, it: &mut Interp<'_>, alter: &str, dir: &str, gran: &str) -> R<()> {
-        run(it, |s| self.modify_selection_s(s, alter, dir, gran))
+    pub(crate) fn modify_selection(&self, it: &mut E::Vm, alter: &str, dir: &str, gran: &str) -> R<E, ()> {
+        run::<E, _>(it, |s| self.modify_selection_s(s, alter, dir, gran))
     }
 
-    pub(crate) fn modify_selection_s<'s>(&self, s: &mut Sc<'s, '_>, alter: &str, dir: &str, gran: &str) -> Res<'s, ()> {
+    pub(crate) fn modify_selection_s<'s>(&self, s: &mut Sc<'s, E>, alter: &str, dir: &str, gran: &str) -> Res<'s, ()> {
         let d = self;
         let fwd = match dir {
             "forward" | "right" => true,
@@ -1374,19 +1377,19 @@ impl Dom {
     }
 }
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// A collapsed range at a text position, for `caretRangeFromPoint`.
-    pub(crate) fn caret_range(&self, it: &mut Interp<'_>, n: NodeId, o: u32) -> V {
+    pub(crate) fn caret_range(&self, it: &mut E::Vm, n: NodeId, o: u32) -> V<E> {
         run_v(it, |s| new_range(self, s, Rng { sc: n, so: o, ec: n, eo: o }))
     }
 
     /// The selection of a double click at offset `off` of Text node `n`: the word there (inside the node); of a triple click: the text of the
     /// nearest block around it (a list item, a paragraph, ..., or the editing host), from its first to its last Text node.
-    pub(crate) fn select_at_text(&self, it: &mut Interp<'_>, n: NodeId, off: u32, paragraph: bool) -> R<()> {
-        run(it, |s| self.select_at_text_s(s, n, off, paragraph))
+    pub(crate) fn select_at_text(&self, it: &mut E::Vm, n: NodeId, off: u32, paragraph: bool) -> R<E, ()> {
+        run::<E, _>(it, |s| self.select_at_text_s(s, n, off, paragraph))
     }
 
-    fn select_at_text_s<'s>(&self, s: &mut Sc<'s, '_>, n: NodeId, off: u32, paragraph: bool) -> Res<'s, ()> {
+    fn select_at_text_s<'s>(&self, s: &mut Sc<'s, E>, n: NodeId, off: u32, paragraph: bool) -> Res<'s, ()> {
         // `set_sel` has no selection object to change until one was asked for.
         selection_obj(self, s)?;
         let doc = self.doc.borrow();
@@ -1422,7 +1425,7 @@ impl Dom {
 
 // ------------------------------------------------------------ install
 
-fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+fn ensure<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
     if state(d).borrow().made.is_some() {
         return Ok(());
     }
@@ -1433,24 +1436,24 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     let rc = d.add_fn_s_obj(it, construct, "Range", 0, HostFn::Ctor)?;
     let sc = d.add_fn_s_obj(it, illegal_selection, "Selection", 0, HostFn::Ctor)?;
     let ac = d.add_fn_s_obj(it, illegal_abstract, "AbstractRange", 0, HostFn::Ctor)?;
-    it.heap.set_prototype_of(rc, Some(ac)).map_err(|e| it.heap_error(e))?;
+    it.h_set_proto(rc, Some(ac))?;
     for (f, proto, tag) in [(rc, rp, "Range"), (sc, sp, "Selection"), (ac, ap, "AbstractRange")] {
-        it.define_data(f, kp, Value::Object(proto), false, false, false)?;
-        it.define_data(proto, kc, Value::Object(f), true, false, true)?;
+        it.define_data(f, kp, E::obj_raw(proto), false, false, false)?;
+        it.define_data(proto, kc, E::obj_raw(f), true, false, true)?;
         crate::browser_lazy::tag(d, it, proto, tag)?;
     }
     for (n, v) in [("START_TO_START", 0.0), ("START_TO_END", 1.0), ("END_TO_END", 2.0), ("END_TO_START", 3.0)] {
         let k = d.key(it, n)?;
         for t in [rc, rp] {
-            it.define_data(t, k, Value::Number(v), false, true, false)?;
+            it.define_data(t, k, E::num(v), false, true, false)?;
         }
     }
-    let gets: [(&str, HS); 5] = [("startContainer", start_container), ("startOffset", start_offset), ("endContainer", end_container), ("endOffset", end_offset), ("collapsed", collapsed)];
+    let gets: [(&str, HS<E>); 5] = [("startContainer", start_container), ("startOffset", start_offset), ("endContainer", end_container), ("endOffset", end_offset), ("collapsed", collapsed)];
     for (n, h) in gets {
         d.def_get_s(it, ap, n, h, None)?;
     }
     d.def_get_s(it, rp, "commonAncestorContainer", common_ancestor, None)?;
-    let methods: [(&str, u32, HS); 24] = [
+    let methods: [(&str, u32, HS<E>); 24] = [
         ("setStart", 2, set_start),
         ("setEnd", 2, set_end),
         ("setStartBefore", 1, set_start_before),
@@ -1479,11 +1482,11 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     for (n, l, h) in methods {
         d.def_method_s(it, rp, n, l, h)?;
     }
-    let gets: [(&str, HS); 8] = [("rangeCount", range_count), ("isCollapsed", is_collapsed), ("anchorNode", anchor_node), ("anchorOffset", anchor_offset), ("focusNode", focus_node), ("focusOffset", focus_offset), ("type", sel_type), ("direction", sel_direction)];
+    let gets: [(&str, HS<E>); 8] = [("rangeCount", range_count), ("isCollapsed", is_collapsed), ("anchorNode", anchor_node), ("anchorOffset", anchor_offset), ("focusNode", focus_node), ("focusOffset", focus_offset), ("type", sel_type), ("direction", sel_direction)];
     for (n, h) in gets {
         d.def_get_s(it, sp, n, h, None)?;
     }
-    let methods: [(&str, u32, HS); 16] = [
+    let methods: [(&str, u32, HS<E>); 16] = [
         ("addRange", 1, add_range),
         ("removeAllRanges", 0, remove_all),
         ("empty", 0, remove_all),
@@ -1512,7 +1515,7 @@ lazy_global!(lazy_range, "Range", ensure, |d| state(d).borrow().made.expect("mad
 lazy_global!(lazy_abstract, "AbstractRange", ensure, |d| state(d).borrow().made.expect("made")[5]);
 lazy_global!(lazy_selection, "Selection", ensure, |d| state(d).borrow().made.expect("made")[3]);
 
-pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
     let g = s.global();
     table!(rows1 = [
         Row::method(1, "getSelection", 0, get_selection),
@@ -1520,49 +1523,59 @@ pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
         Row::method(2, "createRange", 0, create_range),
     ]);
     let targets = [g, d.obj_local(s, d.p().document)];
-    d.install_rows(s, &targets, &rows1::T)?;
+    d.install_rows(s, &targets, &rows1::T::<E>::V)?;
     table!(lazy = [
         Row::both(1, "Range", lazy_range),
         Row::both(1, "Selection", lazy_selection),
         Row::both(1, "AbstractRange", lazy_abstract),
     ]);
     let g = s.global();
-    d.install_rows(s, &[g], &lazy::T)
+    d.install_rows(s, &[g], &lazy::T::<E>::V)
 }
 
 /// The boundary points of a range: start container and offset, end container and offset.
-pub(crate) fn bounds(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<(NodeId, u32, NodeId, u32)> {
-    if let Value::Object(o) = this
+pub(crate) fn bounds<E: Eng>(d: &Dom<E>, it: &mut E::Vm, this: E::Raw) -> R<E, (NodeId, u32, NodeId, u32)> {
+    if let Val::Object(o) = E::kind(this)
         && let Some(&r) = state(d).borrow().ranges.get(&o)
     {
         return Ok((r.sc, r.so, r.ec, r.eo));
     }
-    Err(it.type_error("Illegal invocation"))
+    Err(it.type_error_o("Illegal invocation"))
 }
 
-impl Dom {
-    pub(crate) fn range_roots(&self, out: &mut Vec<Value>) {
+impl<E: Eng> Dom<E> {
+    pub(crate) fn range_roots(&self, out: &mut Roots<'_, '_, E>) {
         if let Some(st) = self.range.st.get() {
             let s = st.borrow();
-            out.extend(s.made.iter().flatten().copied().map(Value::Object));
-            out.extend(s.sel.map(|(o, _)| Value::Object(o)));
+            out.extend(s.made.iter().flatten().copied().map(E::obj_raw));
+            out.extend(s.sel.map(|(o, _)| E::obj_raw(o)));
         }
     }
 
-    pub(crate) fn range_trace(&self, owner: ObjId, out: &mut Vec<Value>) {
+    /// The reference of the selection object: its range.
+    pub(crate) fn range_trace(&self, owner: E::Obj, t: &mut bare_js_api::Tracer<'_, E::Raw>) {
         if let Some(st) = self.range.st.get()
             && let Some((o, Some(r))) = st.borrow().sel
             && o == owner
         {
-            out.push(Value::Object(r));
+            crate::browser_sources::visit::<E>(t, E::obj_raw(r));
         }
     }
 
-    pub(crate) fn range_prune(&self, live: &dyn Fn(ObjId) -> bool) {
+    /// The entries of the range table (tests).
+    #[cfg(test)]
+    pub(crate) fn range_entries(&self) -> usize {
+        self.range.st.get().map_or(0, |s| s.borrow().ranges.len())
+    }
+
+    /// The ranges `dead` were collected: drop their entries.
+    pub(crate) fn range_forget(&self, dead: &[E::Obj]) {
         if let Some(st) = self.range.st.get() {
             let mut s = st.borrow_mut();
             let had = !s.ranges.is_empty();
-            s.ranges.retain(|&o, _| live(o));
+            for o in dead {
+                s.ranges.remove(o);
+            }
             let gone = had && s.ranges.is_empty();
             drop(s);
             if gone {
@@ -1631,7 +1644,7 @@ impl Dom {
     }
 
     /// A text change moved the boundary of the selected range: Chrome sends `selectionchange` (a node insert or remove does not).
-    fn moved_selection(&self, st: &RefCell<State>, before: Option<Rng>) {
+    fn moved_selection(&self, st: &RefCell<State<E>>, before: Option<Rng>) {
         if before != st.borrow().sel_rng() {
             self.schedule_doc_selectionchange();
         }
@@ -1654,7 +1667,7 @@ impl Dom {
 // ------------------------------------------------------------------------------------------ arena reclaim (`browser_reclaim.rs`)
 
 /// The nodes that the ends of live ranges name.
-pub(crate) fn held(d: &Dom, out: &mut Vec<NodeId>) {
+pub(crate) fn held<E: Eng>(d: &Dom<E>, out: &mut Vec<NodeId>) {
     let Some(st) = d.range.st.get() else { return };
     out.extend(st.borrow().ranges.values().flat_map(|r| [r.sc, r.ec]));
 }

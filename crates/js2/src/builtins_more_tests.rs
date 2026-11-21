@@ -72,11 +72,19 @@ fn json_stringify_values_gaps_and_keys() {
 }
 
 #[test]
+fn json_stringify_calls_to_json_with_the_key() {
+    check(&[
+        ("return JSON.stringify({toJSON: function (k) { return [1, k]; }, a: {toJSON: function (k) { return 'k' + k; }}});", "[1,\"\"]"),
+        ("return JSON.stringify([{toJSON: function (k) { return 'k' + k; }}, {b: {toJSON: function (k) { return 'k' + k; }}}]);", "[\"k0\",{\"b\":\"kb\"}]"),
+        ("return JSON.stringify({toJSON: 5, a: 1});", "{\"toJSON\":5,\"a\":1}"),
+    ]);
+}
+
+#[test]
 fn json_calls_that_need_the_script_call_are_type_errors_for_now() {
     check(&[
         ("try { JSON.parse('1', function () {}); } catch (e) { return e.name; }", "TypeError"),
         ("try { JSON.stringify({}, function () {}); } catch (e) { return e.name; }", "TypeError"),
-        ("try { JSON.stringify({toJSON: function () { return 1; }}); } catch (e) { return e.name; }", "TypeError"),
         ("return JSON.stringify({toJSON: 5, a: 1});", "{\"toJSON\":5,\"a\":1}"),
     ]);
 }
@@ -169,5 +177,26 @@ fn array_species_constructor_must_be_undefined_or_an_object() {
         ("var a = [1, 2]; a.constructor = undefined; var b = [3]; b.constructor = {}; return a.map(function (x) { return x * 2; }).join() + '|' + b.filter(function () { return true; }).join() + '|' + b.slice().join() + '|' + [1].concat([2]).join() + '|' + [[1]].flat().join();", "2,4|3|3|1,2|1"),
         // A non-array `this` skips the check.
         ("var o = {length: 1, 0: 5, constructor: null}; return Array.prototype.map.call(o, function (x) { return x + 1; }).join();", "6"),
+    ]);
+}
+
+#[test]
+fn the_function_constructor_builds_a_global_function() {
+    check(&[
+        ("return new Function('a', 'b', 'return a + b')(2, 3) + ',' + Function('return 7')();", "5,7"),
+        ("return Function('a, b', 'c', 'return a + b + c')(1, 2, 3) + ',' + Function('a', 'b = a', 'return b')(4);", "6,4"),
+        ("var f = Function('a', 'return a'); return f.name + ',' + f.length + ',' + (typeof f) + ',' + (Object.getPrototypeOf(f) === Function.prototype);", "anonymous,1,function,true"),
+        ("return Function().name + ',' + Function('').length + ',' + Function()();", "anonymous,0,undefined"),
+        // The scope is the global one, and the function has no binding for its own name.
+        ("var x = 'local'; globalThis.gx = 'global'; return Function('return typeof x + gx')() + ',' + Function('return typeof anonymous')();", "undefinedglobal,undefined"),
+        // The arguments are converted to text in order, the body last.
+        ("var log = []; var o = function (n, v) { return {toString: function () { log.push(n); return v; }}; }; Function(o('p', 'a'), o('q', 'b'), o('body', 'return a'))(1); return log.join();", "p,q,body"),
+        ("var o = {toString: function () { throw new RangeError('r'); }}; try { Function(o, 'return 1'); } catch (e) { return e.name; }", "RangeError"),
+        // A comment or a brace in a part cannot reach across.
+        ("var out = []; var bad = [['/*', '*/){'], ['a){ return 1; }; (function (b', 'return 2'], ['', '}); (function () {'], ['a //', 'return a'], ['', '}\\nvar x = function () {']]; for (var i = 0; i < bad.length; i++) { try { var f = Function(bad[i][0], bad[i][1]); out.push(i === 3 ? 'ok' : 'no'); } catch (e) { out.push(e.name); } } return out.join();", "SyntaxError,SyntaxError,SyntaxError,ok,SyntaxError"),
+        ("try { Function('return ]'); } catch (e) { return e.name; }", "SyntaxError"),
+        ("try { Function('a', 'a', '\"use strict\";'); } catch (e) { return e.name; }", "SyntaxError"),
+        ("var f = Function('return this'); return (f() === globalThis) + ',' + (new Function('this.z = 1; return this') instanceof Function);", "true,true"),
+        ("var f = new Function('a', 'this.v = a'); var o = new f(9); return o.v + ',' + (o instanceof f);", "9,true"),
     ]);
 }

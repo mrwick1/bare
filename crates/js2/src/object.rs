@@ -74,12 +74,22 @@ pub const F_SLOWIDX: u32 = 1024;
 /// Object header flag: a wrapper object (`new String`, `new Number`, `new Boolean`, `Object(1)`). The value is in the hidden property
 /// `Realm::k_prim` (`bi_wrap.rs`). The flag, not the shape, tells a wrapper: a property that a script adds changes the shape.
 pub const F_WRAP: u32 = 4096;
+/// Object header flag: a feedback record of `interp_rt.rs` cached a read through this object (it is the holder, or a link between the
+/// receiver and the holder). Each change of its shape, of its keys or of its prototype bumps `Shapes::proto_epoch`, which drops those
+/// entries. A cache entry that adds a property must not run on it (`SetField`), because that change is a shape change with no bump. Sticky.
+pub const F_PROTO: u32 = 1 << 23;
 /// Object header flag: a promise (`promise.rs`). Its slots 0 and 1 are the state and the value or the reactions; a shape change keeps the flag.
 pub const F_PROMISE: u32 = 8192;
 /// Object header flag: a generator object (`gen.rs`): its hidden slots hold the state and the saved frame.
 pub const F_GEN: u32 = 16384;
+/// Object header flag (bit 21): an async generator object (`asyncgen.rs`): the hidden slots of a generator, the queue of requests and the promise of the call that entered the frame.
+pub const F_AGEN: u32 = 1 << 21;
 /// Object header flag: a `RegExp` object (`regexp_rt.rs`). Its slots 0 to 3 are the pattern, the flag bits, the program and `lastIndex`. Bit 8192 is for `F_PROMISE`.
 pub const F_REGEXP: u32 = 32768;
+/// Object header flag (bit 19): a host-filled object (`api_host.rs`): its hidden property `\0host` holds the kind and the host key.
+pub const F_HOST: u32 = 1 << 19;
+/// Object header flag (bit 20): the host defines members of the object on demand (`Engine::set_lazy`).
+pub const F_LAZYM: u32 = 1 << 20;
 /// Object header flag bits 16 to 18: the kind of a collection object (`bi_collections.rs`), 1 `Map`, 2 `Set`, 3 `WeakMap`, 4 `WeakSet`,
 /// 5 a `Map` iterator, 6 a `Set` iterator; 0 for any other object. Set once, by the constructor. A shape change keeps it.
 pub const F_COLL: u32 = 7 << 16;
@@ -365,6 +375,22 @@ impl Obj {
         }
     }
 
+    /// The place of slot `slot` now, for a holder of a prototype entry: as [`Obj::loc`], but it reads the header flag, so it also serves a
+    /// dictionary shape (which may have an overflow record early). The place stays right until the next bump of `Shapes::proto_epoch`:
+    /// the flag `F_PROTO` makes each shape change and each growth of the record (both come from `add` or `reconfigure`) bump it.
+    pub fn loc_now(self, shapes: &Shapes, slot: u32) -> u32 {
+        let h = self.head();
+        let s = shapes.of(h);
+        debug_assert!(slot < s.slots);
+        let (base, cap) = geometry(h.layout(), s.inline());
+        let i = slot as usize;
+        if i < cap - 1 || h.flags() & F_OVER == 0 {
+            (base + WORD * i) as u32
+        } else {
+            (base + WORD * (cap - 1)) as u32 | ((i - (cap - 1) + 1) as u32) << 9
+        }
+    }
+
     /// The value at a place made by [`Obj::loc`].
     ///
     /// # Safety
@@ -409,14 +435,21 @@ impl Obj {
     }
 
     /// Give the object the shape with id `id` that a cache recorded for an add: the new shape has the same layout, the object has room
-    /// in its inline slots for its slots (the cache checked that when it filled), and the caller has written the new slot.
+    /// in its inline slots for its slots (the cache checked that when it filled), and the caller has written the new slot. False, with
+    /// no change, when the object is a prototype that an entry depends on (`F_PROTO`): the add must go the long way, which bumps the epoch.
     ///
     /// # Safety
     /// `id` is a live tree shape with the layout of the object and no more slots than the inline words, as the cache entry recorded.
     #[inline]
-    pub unsafe fn set_shape_id(self, id: u32) {
+    pub unsafe fn set_shape_id(self, id: u32) -> bool {
         let h = self.head();
-        self.set_head(CellHeader::object(id, h.layout(), h.flags()));
+        if h.flags() & F_PROTO != 0 {
+            std::hint::cold_path();
+            return false;
+        }
+        // SAFETY: `self` is a live object cell, which starts with its header.
+        unsafe { CellHeader::write_shape(self.0.as_ptr().cast(), id) };
+        true
     }
 
     #[inline]
@@ -431,9 +464,13 @@ impl Obj {
         unsafe { self.0.cast::<CellHeader>().write(h) }
     }
 
-    fn set_shape(self, shapes: &Shapes, id: ShapeId) {
+    fn set_shape(self, shapes: &mut Shapes, id: ShapeId) {
         shapes.changed(self.0.as_ptr() as usize);
-        self.set_head(shapes.header(id).with_flags(self.head().flags()));
+        let f = self.head().flags();
+        if f & F_PROTO != 0 {
+            shapes.bump_proto_epoch();
+        }
+        self.set_head(shapes.header(id).with_flags(f));
     }
 
     /// The first inline slot, and the inline words of the cell.

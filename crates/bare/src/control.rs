@@ -28,6 +28,8 @@
 //! Gaps: no drag, no right button, no modifier keys on a click; `type_text` sends one key for each character (no IME, no
 //! paste); the viewport of a new document is the one of `open_with` (a resize of a real window is not given to the next document).
 
+use crate::eng::Ops;
+use crate::eng_old::Old;
 use crate::browser::Browser;
 use crate::browser_navigation::WebStorage;
 use crate::browser_scroll::Align;
@@ -156,11 +158,11 @@ pub fn key_events(spec: &str) -> Option<Vec<Event>> {
     Some(down)
 }
 
-impl Browser {
+impl Browser<Old> {
     /// Every element in tree order that matches `selector` (the native matcher of `querySelectorAll`; JS does not run).
-    pub fn query_all(&mut self, selector: &str) -> crate::browser::R<Vec<NodeId>> {
+    pub fn query_all(&mut self, selector: &str) -> crate::browser::R<Old, Vec<NodeId>> {
         let dom = self.dom.clone();
-        self.it.host_scope(|it| {
+        self.it.host_scope_o(|it| {
             let root = dom.doc.borrow().root();
             dom.query(it, root, selector, true)
         })
@@ -239,7 +241,7 @@ impl Page {
         let b = self.browser().expect("checked");
         match b.query_all(selector) {
             Ok(list) => Ok(list.into_iter().map(|node| Handle { doc, node }).collect()),
-            Err(bare_js::eval::Error::Throw(_)) => Err(format!("the selector is not valid: {selector}")),
+            Err(crate::eng::Fault::Throw(_)) => Err(format!("the selector is not valid: {selector}")),
             Err(e) => Err(format!("the query failed: {e:?}")),
         }
     }
@@ -282,7 +284,7 @@ impl Page {
     pub fn disabled(&mut self, h: Handle) -> bool {
         let Some(b) = self.browser() else { return false };
         let dom = b.dom.clone();
-        if b.it.host_scope(|it| dom.is_disabled_control(it, h.node)).unwrap_or(false) {
+        if b.it.host_scope_o(|it| dom.is_disabled_control(it, h.node)).unwrap_or(false) {
             return true;
         }
         let doc = b.document();

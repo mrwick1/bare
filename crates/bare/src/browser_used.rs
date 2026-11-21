@@ -32,9 +32,9 @@
 //! - `safe` and `unsafe` in `justify-*` and `align-*` are dropped by the parser.
 //! - Chrome keeps layout in 1/64 px at each step. We round the result once, so a long chain of fractions can differ by 1/64 px.
 
+use crate::eng::Eng;
 use crate::browser::*;
 use crate::browser_computed::{Snap, num};
-use bare_js::eval::Interp;
 use bare_css::cascade::Styles;
 use bare_css::grid::{Areas as CellAreas, Bound, Count, Grid, Line, Part, Track};
 use bare_css::values::{Keyword, Length, Property, Value as Cv};
@@ -72,7 +72,7 @@ fn may_need_layout(p: &Property) -> bool {
     matches!(p, Width | Height | MarginTop | MarginRight | MarginBottom | MarginLeft | PaddingTop | PaddingRight | PaddingBottom | PaddingLeft | Top | Right | Bottom | Left | GridTemplateColumns | GridTemplateRows)
 }
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// Does a read of `props` of `el` need the layout (`used_for`)? `Some(tracks)` when it does: `tracks` says that a grid container's used tracks are wanted.
     /// It reads the styles of `el` and its parent only, so the chain of `el` is enough for it.
     pub(crate) fn layout_wanted(&self, s: &Snap, el: NodeId, props: &[Property]) -> Option<bool> {
@@ -85,7 +85,7 @@ impl Dom {
     }
 
     /// Run the bounded layout for a read of `props` of `el`, if one of them needs it (see the header). Not for an element that is not rendered.
-    pub(crate) fn used_for(&self, it: &mut Interp<'_>, s: &Snap, el: NodeId, props: &[Property]) -> R<Option<Used>> {
+    pub(crate) fn used_for(&self, it: &mut E::Vm, s: &Snap, el: NodeId, props: &[Property]) -> R<E, Option<Used>> {
         let _caller = crate::force::tag("getComputedStyle used");
         let Some(tracks) = self.layout_wanted(s, el, props) else { return Ok(None) };
         assert!(!s.partial, "layout needs the styles of the whole page");

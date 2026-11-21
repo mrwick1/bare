@@ -20,13 +20,13 @@ enum Plan {
 
 /// The names that a function (or a script) declares in its own scope, found before the code is compiled.
 #[derive(Default)]
-struct Hoist<'a> {
+pub(super) struct Hoist<'a> {
     /// `var` names, also those in nested blocks, and the names of sloppy-mode functions in blocks (Annex B).
-    vars: Vec<Cow<'a, str>>,
+    pub(super) vars: Vec<Cow<'a, str>>,
     /// The function declarations of the top level, in order.
-    funcs: Vec<(FuncId, Cow<'a, str>)>,
+    pub(super) funcs: Vec<(FuncId, Cow<'a, str>)>,
     /// The `let`, `const` and `class` declarations of the top level, with the end of the declaration.
-    lex: Vec<(Cow<'a, str>, VK, u32)>,
+    pub(super) lex: Vec<(Cow<'a, str>, VK, u32)>,
 }
 
 /// A function declaration of a block: its name and whether the name is a binding of the block (strict code) or a variable of the function.
@@ -35,7 +35,7 @@ type BlockFn<'a> = (FuncId, Cow<'a, str>, bool);
 impl<'a> Fc<'a> {
     // ------------------------------------------------------------ hoisting
 
-    fn hoist_list(&self, list: List<Stmt>, top: bool, h: &mut Hoist<'a>) {
+    pub(super) fn hoist_list(&self, list: List<Stmt>, top: bool, h: &mut Hoist<'a>) {
         for s in self.prog.list(list) {
             self.hoist_stmt(s, top, h);
         }
@@ -65,7 +65,8 @@ impl<'a> Fc<'a> {
                 if let Some(n) = prog.func(f).name {
                     if top {
                         h.funcs.push((f, prog.name(n)));
-                    } else if !self.strict {
+                    } else if !self.strict && matches!(prog.func(f).mode, FuncMode::Plain | FuncMode::Env) {
+                        // Annex B.3.3: a plain function of a block is also a variable of the function; an async function or a generator is not.
                         h.vars.push(prog.name(n));
                     }
                 }
@@ -126,6 +127,8 @@ impl<'a> Fc<'a> {
             let r = self.alloc();
             self.set_live(r);
         }
+        // An async function makes its promise before anything else runs (`compile_async.rs`).
+        self.async_init();
         let mut h = Hoist::default();
         let stmts = match f.body {
             Body::Block(l) => Some(l),
@@ -245,12 +248,12 @@ impl<'a> Fc<'a> {
         if uses_nt && let Some(home) = self.find_var("new.target").map(|v| v.home) {
             match home {
                 Home::Reg(r) => {
-                    self.op(Op::LoadNewTarget, r, 0, 0);
+                    self.load_new_target(r);
                     self.set_live(r);
                 }
                 Home::Ctx { level, slot } => {
                     let t = self.alloc();
-                    self.op(Op::LoadNewTarget, t, 0, 0);
+                    self.load_new_target(t);
                     self.op(Op::InitCtx, t, self.depth - level, slot);
                     self.free(t);
                 }
@@ -325,6 +328,10 @@ impl<'a> Fc<'a> {
         for (f, name) in &h.funcs {
             self.declare_function(*f, name)?;
         }
+        // A generator binds its parameters at the call and runs its body at the first `next()`.
+        if self.gen_kind == crate::bytecode::GK_GEN || self.gen_kind == crate::bytecode::GK_ASYNCGEN {
+            self.gen_init();
+        }
         match f.body {
             Body::Block(l) => {
                 for s in prog.list(l) {
@@ -334,7 +341,7 @@ impl<'a> Fc<'a> {
             Body::Expr(e) => {
                 let m = self.mark();
                 let r = self.any(e)?;
-                self.op(Op::Ret, r, 0, 0);
+                self.ret_op(r);
                 self.free(m);
             }
             Body::Skipped(_) => {}
@@ -405,7 +412,7 @@ impl<'a> Fc<'a> {
     }
 
     /// Make the closure of a function declaration and store it in its variable.
-    fn declare_function(&mut self, f: FuncId, name: &str) -> CR {
+    pub(super) fn declare_function(&mut self, f: FuncId, name: &str) -> CR {
         let m = self.mark();
         let t = match self.find_var(name).map(|v| v.home) {
             Some(Home::Reg(r)) => r,
@@ -559,10 +566,11 @@ impl<'a> Fc<'a> {
                 StmtKind::Function(f) => {
                     if let Some(n) = prog.func(f).name {
                         let name = prog.name(n);
-                        if self.strict {
+                        let block_name = self.strict || !matches!(prog.func(f).mode, FuncMode::Plain | FuncMode::Env);
+                        if block_name {
                             decls.push(Decl { name: name.clone(), kind: VK::Func, end: 0, reg: None });
                         }
-                        funcs.push((f, name, self.strict));
+                        funcs.push((f, name, block_name));
                     }
                 }
                 _ => {}
@@ -675,13 +683,8 @@ impl<'a> Fc<'a> {
                 self.bind(brk);
             }
             StmtKind::For { init, test, update, body } => self.for_stmt(st.span, init, test, update, body)?,
-            StmtKind::ForIn { left, right, body } => self.for_in_of(left, right, body, false)?,
-            StmtKind::ForOf { left, right, body, is_await } => {
-                if is_await {
-                    self.unsup("for await");
-                }
-                self.for_in_of(left, right, body, true)?
-            }
+            StmtKind::ForIn { left, right, body } => self.for_in_of(left, right, body, false, false)?,
+            StmtKind::ForOf { left, right, body, is_await } => self.for_in_of(left, right, body, true, is_await)?,
             StmtKind::Break(label) => self.jump_out(label, true)?,
             StmtKind::Continue(label) => self.jump_out(label, false)?,
             StmtKind::Throw(e) => {
@@ -711,7 +714,7 @@ impl<'a> Fc<'a> {
             }
             StmtKind::Block(list) => self.block(list, st.span)?,
             StmtKind::With { .. } => self.unsup("with"),
-            StmtKind::ExportDefault(..) => self.unsup("a module"),
+            StmtKind::ExportDefault(e, hoisted) => self.export_default(e, hoisted, false)?,
         }
         self.free(m);
         Ok(())
@@ -809,7 +812,7 @@ impl<'a> Fc<'a> {
 
     /// Run what a jump out of the frames above `to` must run: close iterators and repeat the finalizers (innermost first). The contexts
     /// are popped down to the context of each finalizer. Gives the depth that the code is at when it returns.
-    fn unwind(&mut self, to: usize) -> CR<u32> {
+    pub(crate) fn unwind(&mut self, to: usize) -> CR<u32> {
         let (d0, c0) = (self.depth, self.cur_ctx.clone());
         let mut rt = self.depth;
         let mut paused: Vec<usize> = Vec::new();
@@ -823,7 +826,7 @@ impl<'a> Fc<'a> {
                         self.pause(k);
                         paused.push(k);
                     }
-                    self.op(Op::IterClose, rec, 0, 0);
+                    self.iter_close_op(rec, false)?;
                 }
                 FrameKind::Try { fin: Some(fin), .. } => {
                     let fin = *fin;
@@ -904,7 +907,7 @@ impl<'a> Fc<'a> {
                         // A `return()` that throws is not for the handler of this loop: it would close the iterator twice.
                         let was_open = self.frames[k].open.is_some();
                         self.pause(k);
-                        self.op(Op::IterClose, rec, 0, 0);
+                        self.iter_close_op(rec, false)?;
                         if was_open {
                             self.resume(&[k]);
                         }
@@ -937,18 +940,26 @@ impl<'a> Fc<'a> {
             }
             None => {
                 self.unwind(0)?;
-                self.op(Op::RetUndef, 0, 0, 0);
+                self.ret_undef();
+            }
+            Some(e) if self.gen_kind == crate::bytecode::GK_ASYNCGEN => {
+                // `return x` in an async generator waits for `x` first.
+                let t = self.await_operand(e)?;
+                if cleanup {
+                    self.unwind(0)?;
+                }
+                self.ret_op(t);
             }
             Some(e) if !cleanup => {
                 let r = self.any(e)?;
-                self.op(Op::Ret, r, 0, 0);
+                self.ret_op(r);
             }
             Some(e) => {
                 // The value is kept in a temporary: a finalizer can change a variable.
                 let t = self.alloc();
                 self.to(e, t)?;
                 self.unwind(0)?;
-                self.op(Op::Ret, t, 0, 0);
+                self.ret_op(t);
             }
         }
         Ok(())
@@ -1004,22 +1015,29 @@ impl<'a> Fc<'a> {
         Ok(())
     }
 
-    fn for_in_of(&mut self, left: ForLeft, right: ExprId, body: StmtId, of: bool) -> CR {
+    fn for_in_of(&mut self, left: ForLeft, right: ExprId, body: StmtId, of: bool, is_await: bool) -> CR {
         let prog = self.prog;
         let labels = std::mem::take(&mut self.pending);
         let m = self.mark();
         let v = self.any(right)?;
         let rec = self.window(3);
         self.line(prog.expr(right).span.start);
-        self.op(if of { Op::IterOpen } else { Op::ForInOpen }, rec, v, 0);
+        self.op(if is_await { Op::AIterOpen } else if of { Op::IterOpen } else { Op::ForInOpen }, rec, v, 0);
         (0..3).for_each(|i| self.set_live(rec + i));
+        if is_await {
+            self.await_recs.push(rec);
+        }
         let (head, cont, brk) = (self.label(), self.label(), self.label());
         // An exception in the body of a `for-of` closes the iterator: a handler for the body that does it and throws again.
         let ex = of.then(|| self.alloc());
         self.bind(head);
         self.mark_used(head);
         let t = self.alloc();
-        self.jmp_rx(Op::IterNext, t, rec, brk);
+        if is_await {
+            self.aiter_step(rec, t, brk)?;
+        } else {
+            self.jmp_rx(Op::IterNext, t, rec, brk);
+        }
         self.set_live(t);
         let guard = ex.map(|ex| (ex, self.live.clone(), self.asm.len(), self.depth));
         // The binding of `let` and `const` is new in each iteration.
@@ -1040,7 +1058,10 @@ impl<'a> Fc<'a> {
             let ds: Vec<Decl> = names.into_iter().map(|(name, _)| Decl { name, kind: if k == VarKind::Let { VK::Let } else { VK::Const }, end: 0, reg: None }).collect();
             scope = Some(self.enter(prog.stmt(body).span, &ds, false)?);
         }
-        self.bind_pattern(target, t, if kind.is_some() { Bind::Init } else { Bind::Assign })?;
+        self.of_head = of;
+        let bound = self.bind_pattern(target, t, if kind.is_some() { Bind::Init } else { Bind::Assign });
+        self.of_head = false;
+        bound?;
         self.pending = labels;
         self.push_loop(brk, cont, of.then_some(rec));
         {
@@ -1067,13 +1088,16 @@ impl<'a> Fc<'a> {
             self.bind(lb);
             self.live = live;
             self.set_live(ex);
-            self.op(Op::IterClose, rec, 0, 0);
+            self.iter_close_op(rec, true)?;
             self.op(Op::Throw, ex, 0, 0);
             for (start, end) in pieces {
                 self.handlers.push(HandlerRec { start, end, target: lb, reg: ex, depth });
             }
         }
         self.bind(brk);
+        if is_await {
+            self.await_recs.pop();
+        }
         self.free(m);
         Ok(())
     }

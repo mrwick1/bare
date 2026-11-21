@@ -59,6 +59,8 @@ allow:super
 allow:hashbang
 allow:json-superset
 allow:for-of
+allow:generators
+allow:async-functions
 allow:for-in-order
 allow:globalThis
 allow:__proto__

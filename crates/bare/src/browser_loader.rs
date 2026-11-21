@@ -72,6 +72,8 @@
 //! Not here: `window.onload`, `DOMContentLoaded` for scripts that were added late, `defer` on dynamic scripts,
 //! `integrity`, `crossorigin`, `nonce`, CSP, `<noscript>`, a service worker.
 
+use crate::eng::{Eng, Fault, Ops, Val};
+use crate::browser_sources::Roots;
 use crate::browser::{Browser, Dom, IdHash, Listener, R, Survive, Target as EvTarget};
 use crate::browser_scoped::*;
 use crate::browser_dom as nd;
@@ -79,8 +81,6 @@ use crate::browser_fetch::{FetchConfig, FetchLimits};
 use crate::browser_navigation::NavigationRequest;
 use crate::resources::{self, Expect, JS_TYPES, Kind, Limits, LoadError, Source, Timing, WS};
 use bare_html::dom::{NodeData, NodeId};
-use bare_js::eval::{Error, Interp};
-use bare_js::value::{ObjId, Value};
 use bare_js_api::{Args, Local};
 use bare_net::http::Client;
 use bare_net::parallel::Task;
@@ -294,10 +294,10 @@ enum Ext {
 
 /// The state that the DOM host needs: script elements, the lifecycle, the queues of dynamic scripts.
 #[derive(Default)]
-pub(crate) struct Scripts {
+pub(crate) struct Scripts<E: Eng> {
     enabled: Cell<bool>,
-    pub(crate) proto: OnceCell<ObjId>,
-    fixed: RefCell<Vec<ObjId>>,
+    pub(crate) proto: OnceCell<<E as Eng>::Obj>,
+    fixed: RefCell<Vec<<E as Eng>::Obj>>,
     /// 0 `loading`, 1 `interactive`, 2 `complete`.
     ready: Cell<u8>,
     current: Cell<Option<NodeId>>,
@@ -332,17 +332,17 @@ pub(crate) struct Scripts {
     parse: RefCell<Option<Box<Parse>>>,
 }
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// Scripts that wait to run (inline and external dynamic scripts).
     pub(crate) fn scripts_queued(&self) -> usize {
         self.scripts.inline.borrow().len() + self.scripts.external.borrow().len()
     }
 
-    pub(crate) fn scripts_roots(&self, out: &mut Vec<Value>) {
+    pub(crate) fn scripts_roots(&self, out: &mut Roots<'_, '_, E>) {
         let s = &self.scripts;
-        out.extend(s.fixed.borrow().iter().map(|&o| Value::Object(o)));
+        out.extend(s.fixed.borrow().iter().map(|&o| E::obj_raw(o)));
         let st = self.st.borrow();
-        let mut keep = |n: &NodeId| out.extend(st.wrapper(*n).map(Value::Object));
+        let mut keep = |n: &NodeId| out.extend(st.wrapper(*n).map(E::obj_raw));
         s.inline.borrow().iter().for_each(|(n, _)| keep(n));
         s.external.borrow().iter().for_each(|e| match e {
             Ext::Fetch(n, _) | Ext::Fail(n) | Ext::Text(n, _) => keep(n),
@@ -361,7 +361,7 @@ impl Dom {
     }
 
     /// A node went into the tree. Every classic `<script>` of it (it may be a subtree) is prepared.
-    pub(crate) fn script_inserted(&self, it: &mut Interp<'_>, node: NodeId) -> R<()> {
+    pub(crate) fn script_inserted(&self, it: &mut E::Vm, node: NodeId) -> R<E, ()> {
         if !self.scripts.enabled.get() || !self.is_element(node) {
             return Ok(());
         }
@@ -369,7 +369,7 @@ impl Dom {
             let doc = self.doc.borrow();
             let mut up = node;
             while let Some(p) = doc.parent(up) {
-                it.charge(1)?;
+                it.charge_o(1)?;
                 up = p;
             }
             if up != doc.root() {
@@ -379,7 +379,7 @@ impl Dom {
             let mut found = Vec::new();
             let mut stack = vec![node];
             while let Some(n) = stack.pop() {
-                it.charge(1)?;
+                it.charge_o(1)?;
                 if let NodeData::Element { name, .. } = *doc.data(n) {
                     if (Some(name) == script || Some(name) == iframe) && !doc.is_foreign(n) {
                         found.push(n);
@@ -407,7 +407,7 @@ impl Dom {
     }
 
     /// `src` was set on `node`.
-    pub(crate) fn script_src_changed(&self, it: &mut Interp<'_>, node: NodeId) -> R<()> {
+    pub(crate) fn script_src_changed(&self, it: &mut E::Vm, node: NodeId) -> R<E, ()> {
         let is_script = {
             let doc = self.doc.borrow();
             doc.is_html(node, "script")
@@ -435,7 +435,7 @@ impl Dom {
     /// "execute the script element" step of an inserted inline script, at the first point where the engine can nest a script; Ladybird
     /// `HTMLScriptElement::prepare_script` runs it inside the insertion). A throw is reported and ends only that script. A module
     /// script, or a pending navigation, stops the run: the driver handles them. The driver counts none of these runs.
-    pub(crate) fn run_inline_scripts(&self, it: &mut Interp<'_>) -> R<()> {
+    pub(crate) fn run_inline_scripts(&self, it: &mut E::Vm) -> R<E, ()> {
         let s = &self.scripts;
         while self.nav.s.borrow().requests.is_empty() {
             let next = {
@@ -447,13 +447,13 @@ impl Dom {
             };
             let Some((node, text)) = next else { break };
             s.pending_bytes.set(s.pending_bytes.get().saturating_sub(text.len()));
-            it.host_scope(|it| crate::browser_frames::activate(self, it))?;
+            it.host_scope_o(|it| crate::browser_frames::activate(self, it))?;
             let was = s.current.replace(Some(node));
-            let r = it.run_script(&text);
+            let r = it.run_script_o(&text);
             s.current.set(was);
             match r {
                 Ok(_) => {}
-                Err(Error::Throw(v)) => self.report(it, v, "error", EvTarget::Window),
+                Err(Fault::Throw(v)) => self.report(it, v, "error", EvTarget::Window),
                 Err(e) => return Err(e),
             }
         }
@@ -461,7 +461,7 @@ impl Dom {
     }
 
     /// The "prepare the script element" steps for a classic script that is in the document.
-    fn prepare_script(&self, _it: &mut Interp<'_>, el: NodeId) -> R<()> {
+    fn prepare_script(&self, _it: &mut E::Vm, el: NodeId) -> R<E, ()> {
         let s = &self.scripts;
         if s.started.borrow().contains(&el) {
             return Ok(());
@@ -522,7 +522,7 @@ impl Dom {
 // ---------------------------------------------------------------------------------------------- JS surface
 
 /// The IDL value of a URL attribute: the resolved URL when it resolves against the document base, else the text.
-fn url_attr_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId, name: &str) -> Res<'s, Local<'s>> {
+fn url_attr_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, n: NodeId, name: &str) -> Res<'s, Local<'s>> {
     let raw = {
         let doc = d.doc.borrow();
         doc.find_atom(name).and_then(|a| doc.attr(n, a)).unwrap_or("").to_string()
@@ -531,24 +531,24 @@ fn url_attr_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId, name: &str) -> Res<'s,
     d.js_str_s(s, &resolved.map_or(raw, |u| u.to_string()))
 }
 
-fn script_src<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn script_src<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.el_s(s, this)?;
     url_attr_s(d, s, n, "src")
 }
 
-pub(crate) fn link_href<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn link_href<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = nd::link_el_s(d, s, this)?;
     url_attr_s(d, s, n, "href")
 }
 
-pub(crate) fn set_link_href<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn set_link_href<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = nd::link_el_s(d, s, this)?;
     let text = d.arg_str_s(s, a, 0)?;
     nd::attr_set_s(d, s, n, "href", &text)?;
     Ok(s.undefined())
 }
 
-fn set_script_src<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_script_src<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.el_s(s, this)?;
     let text = d.arg_str_s(s, a, 0)?;
     nd::attr_set_s(d, s, n, "src", &text)?;
@@ -556,7 +556,7 @@ fn set_script_src<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>)
     Ok(s.undefined())
 }
 
-fn script_type<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn script_type<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.el_s(s, this)?;
     let text = {
         let doc = d.doc.borrow();
@@ -565,14 +565,14 @@ fn script_type<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) ->
     d.js_str_s(s, &text)
 }
 
-fn set_script_type<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_script_type<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.el_s(s, this)?;
     let text = d.arg_str_s(s, a, 0)?;
     nd::attr_set_s(d, s, n, "type", &text)?;
     Ok(s.undefined())
 }
 
-pub(crate) fn flag<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, name: &str) -> Res<'s, Local<'s>> {
+pub(crate) fn flag<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, name: &str) -> Res<'s, Local<'s>> {
     let n = d.el_s(s, this)?;
     let on = {
         let doc = d.doc.borrow();
@@ -581,9 +581,9 @@ pub(crate) fn flag<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, name: &str)
     Ok(s.boolean(on))
 }
 
-pub(crate) fn set_flag<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, name: &str) -> Res<'s, Local<'s>> {
+pub(crate) fn set_flag<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>, name: &str) -> Res<'s, Local<'s>> {
     let n = d.el_s(s, this)?;
-    let v = arg_s(s, a, 0);
+    let v = arg_s::<E>(s, a, 0);
     if s.to_boolean(v) {
         nd::attr_set_s(d, s, n, name, "")?;
     } else {
@@ -592,24 +592,24 @@ pub(crate) fn set_flag<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args
     Ok(s.undefined())
 }
 
-fn script_async<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn script_async<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     flag(d, s, this, "async")
 }
 
-fn set_script_async<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_script_async<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     set_flag(d, s, this, a, "async")
 }
 
-fn script_defer<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn script_defer<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     flag(d, s, this, "defer")
 }
 
-fn set_script_defer<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_script_defer<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     set_flag(d, s, this, a, "defer")
 }
 
 /// The listener of an `on...` handler: one per element and event, kept in the normal listener list.
-fn handler_get<'s, const ERR: bool>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn handler_get<'s, const ERR: bool, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.el_s(s, this)?;
     let Some(id) = d.scripts.handlers.borrow().get(&(n, ERR)).copied() else { return Ok(s.null()) };
     let st = d.st.borrow();
@@ -619,9 +619,9 @@ fn handler_get<'s, const ERR: bool>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>
     }
 }
 
-fn handler_set<'s, const ERR: bool>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn handler_set<'s, const ERR: bool, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.el_s(s, this)?;
-    let v = arg_s(s, a, 0);
+    let v = arg_s::<E>(s, a, 0);
     let cb = s.is_callable(v).then_some(v);
     let (t, ty) = (EvTarget::Node(n), if ERR { "error" } else { "load" });
     let old = d.scripts.handlers.borrow().get(&(n, ERR)).copied();
@@ -662,38 +662,38 @@ fn handler_set<'s, const ERR: bool>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>
     Ok(s.undefined())
 }
 
-fn script_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn script_text<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     d.el_s(s, this)?;
     nd::text_content_s(d, s, this, a)
 }
 
-fn set_script_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_script_text<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     d.el_s(s, this)?;
     nd::set_text_content_s(d, s, this, a)
 }
 
-fn doc_ready_state<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn doc_ready_state<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     d.nd_s(s, this)?;
     d.js_str_s(s, ["loading", "interactive", "complete"][d.scripts.ready.get() as usize])
 }
 
-fn doc_current_script<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn doc_current_script<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     d.nd_s(s, this)?;
     d.wrap_opt_s(s, d.scripts.current.get())
 }
 
-pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
     let proto = d.obj_s(s, d.p().html)?;
     let _ = d.scripts.proto.set(proto);
     for (name, g, st) in [
-        ("src", script_src as HS, set_script_src as HS),
+        ("src", script_src as HS<E>, set_script_src as HS<E>),
         ("type", script_type, set_script_type),
         ("async", script_async, set_script_async),
         ("defer", script_defer, set_script_defer),
         ("noModule", crate::browser_gaps::script_no_module, crate::browser_gaps::set_script_no_module),
         ("text", script_text, set_script_text),
-        ("onload", handler_get::<false>, handler_set::<false>),
-        ("onerror", handler_get::<true>, handler_set::<true>),
+        ("onload", handler_get::<false, _>, handler_set::<false, _>),
+        ("onerror", handler_get::<true, _>, handler_set::<true, _>),
     ] {
         d.def_get_at(s, proto, name, g, Some(st))?;
     }
@@ -703,7 +703,7 @@ pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
         Row::get(1, "currentScript", doc_current_script, None),
     ]);
     let targets = [d.obj_local(s, document)];
-    d.install_rows(s, &targets, &rows1::T)?;
+    d.install_rows(s, &targets, &rows1::T::<E>::V)?;
     let f = crate::browser_custom::interface_ctor_s(d, s, "HTMLScriptElement", false)?;
     let f = d.link_s(s, f, proto, "HTMLScriptElement")?;
     *d.scripts.fixed.borrow_mut() = vec![proto, f];
@@ -712,7 +712,7 @@ pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
 
 // ---------------------------------------------------------------------------------------------- the driver
 
-impl Browser {
+impl<E: Eng> Browser<E> {
     /// The iframes of the parsed document ask for their child pages, in document order.
     fn scan_frames(&mut self) {
         let dom = self.dom.clone();
@@ -740,10 +740,10 @@ impl Browser {
     }
 
     /// Dispatch a new non-cancelable event at `t`. A checkpoint follows each listener (the driver flag).
-    fn fire(&mut self, t: EvTarget, ty: &str, bubbles: bool) -> R<()> {
+    fn fire(&mut self, t: EvTarget<E>, ty: &str, bubbles: bool) -> R<E, ()> {
         let dom = self.dom.clone();
         let was = std::mem::replace(&mut dom.st.borrow_mut().driver, true);
-        let r = self.it.host_scope(|it| {
+        let r = self.it.host_scope_o(|it| {
             let e = dom.new_event(it, ty, bubbles, false, false, None)?;
             dom.dispatch(it, t, e).map(|_| ())
         });
@@ -878,7 +878,7 @@ impl Browser {
     }
 }
 
-impl Browser {
+impl<E: Eng> Browser<E> {
     /// Take the inputs of `steps` in order, then run the rounds again on a page that `run_page` settled: the same realm,
     /// DOM, queues and pumps, no reload. A sticky fatal stops it before any JS or I/O. `limits` is what is left of the
     /// session; the fetch budget of the page carries over. A page that did not run, or has no URL, is a `Setup` fatal.
@@ -962,7 +962,7 @@ impl Browser {
 /// The most work that one live turn does before it gives the thread back (to the input events and the frame), once the page has loaded.
 pub(crate) const SLICE: Duration = Duration::from_millis(8);
 
-impl Browser {
+impl<E: Eng> Browser<E> {
     /// Is the page live (`Session` with `live`)? Then a turn waits for no reply.
     pub(crate) fn live(&self) -> bool {
         self.dom.fetch.live.get()
@@ -1192,9 +1192,9 @@ impl Drop for Net {
     }
 }
 
-struct Run<'a> {
-    b: &'a mut Browser,
-    dom: Rc<Dom>,
+struct Run<'a, E: Eng> {
+    b: &'a mut Browser<E>,
+    dom: Rc<Dom<E>>,
     net: Net,
     /// Live: when the turn gives the thread back. It counts after `load`, and before it in a split document (`split`).
     slice: Option<Instant>,
@@ -1244,32 +1244,12 @@ pub(crate) fn deadline_after(d: Duration) -> Instant {
     now.checked_add(d).unwrap_or_else(|| now + Duration::from_secs(100 * 365 * 86_400))
 }
 
-fn fatal_of(e: Error) -> Stop {
+fn fatal_of<E: Eng>(e: Fault<E>) -> Stop {
     Stop::Fatal(match e {
-        Error::Unsupported(u) => Fatal::Unsupported(u.what),
-        Error::Limit(l) => Fatal::Limit(format!("{l:?}")),
-        Error::Heap(e) => {
-            use bare_js::heap::HeapError::*;
-            Fatal::Heap(match e {
-                Stale => "Stale",
-                Limit(_) => "Limit",
-                InvalidKey => "InvalidKey",
-                InvalidDescriptor => "InvalidDescriptor",
-                InvalidArrayLength => "InvalidArrayLength",
-                SymbolConversion => "SymbolConversion",
-                SymbolToNumber => "SymbolToNumber",
-                BigIntToNumber => "BigIntToNumber",
-                NeedsExecution(_) => "NeedsExecution",
-                NeedsBigInt => "NeedsBigInt",
-                BigUnsigned(_) => "BigUnsigned",
-                BigElement => "BigElement",
-                NeedsHost { .. } => "NeedsHost",
-                HostUnavailable => "HostUnavailable",
-                NeedsNamed => "NeedsNamed",
-                Proxy(_) => "Proxy",
-            })
-        },
-        Error::Throw(_) => Fatal::Poisoned,
+        Fault::Unsupported(w) => Fatal::Unsupported(w),
+        Fault::Limit(l) => Fatal::Limit(format!("{l:?}")),
+        Fault::Heap(h) => Fatal::Heap(h),
+        Fault::Throw(_) => Fatal::Poisoned,
     })
 }
 
@@ -1303,7 +1283,7 @@ fn download(net: &mut Net, https_only: bool, lim: &PageLimits, deadline: Instant
     }
 }
 
-impl Run<'_> {
+impl<E: Eng> Run<'_, E> {
     fn diag(&mut self, line: String) {
         if self.res.diagnostics.len() < self.lim.max_diagnostics {
             self.res.diagnostics.push(line.chars().take(200).collect());
@@ -1333,7 +1313,7 @@ impl Run<'_> {
 
     /// A task of `what` ended with `e`. A script budget aborts only that task (it is logged to the console and the run goes on) up to
     /// the page budget; any other error is fatal.
-    fn abort(&mut self, e: Error, what: &str) -> Flow {
+    fn abort(&mut self, e: Fault<E>, what: &str) -> Flow {
         match self.b.survive(e, what) {
             Survive::Aborted => {
                 self.res.aborted += 1;
@@ -1349,15 +1329,15 @@ impl Run<'_> {
     }
 
     /// `n` tasks ran, or `r` failed and a script budget aborted one: it counts as a task that ran.
-    fn tasks_or_abort(&mut self, r: R<usize>, what: &str) -> Result<usize, Stop> {
+    fn tasks_or_abort(&mut self, r: R<E, usize>, what: &str) -> Result<usize, Stop> {
         match r {
             Ok(n) => Ok(n),
             Err(e) => self.abort(e, what).map(|_| 1),
         }
     }
 
-    fn fatal(&mut self, e: Error, what: &str) -> Stop {
-        let stop = fatal_of(e);
+    fn fatal(&mut self, e: Fault<E>, what: &str) -> Stop {
+        let stop = fatal_of::<E>(e);
         self.diag(format!("fatal in {what}: {stop:?}"));
         stop
     }
@@ -1378,7 +1358,7 @@ impl Run<'_> {
     fn exec_one(&mut self, node: NodeId, source: &str, what: &str) -> Flow {
         self.budget()?;
         let dom = self.dom.clone();
-        if let Err(e) = self.b.it.host_scope(|it| crate::browser_frames::activate(&dom, it)) { return self.abort(e, what); }
+        if let Err(e) = self.b.it.host_scope_o(|it| crate::browser_frames::activate(&dom, it)) { return self.abort(e, what); }
         self.dom.scripts.current.set(Some(node));
         let t = bare_net::trace::on().then(Instant::now);
         let r = self.b.run_script(source);
@@ -1389,7 +1369,7 @@ impl Run<'_> {
         self.res.tasks += 1;
         match r {
             Ok(_) => Ok(()),
-            Err(Error::Throw(v)) => {
+            Err(Fault::Throw(v)) => {
                 self.script_threw(v, what);
                 Ok(())
             }
@@ -1398,10 +1378,10 @@ impl Run<'_> {
     }
 
     /// A script or module threw `v`: report it to `window` and count it.
-    fn script_threw(&mut self, v: Value, what: &str) {
+    fn script_threw(&mut self, v: E::Raw, what: &str) {
         self.dom.report(&mut self.b.it, v, "error", EvTarget::Window);
         self.res.script_throws += 1;
-        let name = if matches!(v, Value::Object(_)) {
+        let name = if matches!(E::kind(v), Val::Object(_)) {
             let reports = self.dom.st.borrow();
             match reports.reports.back().and_then(|r| r.message.split(':').next()) {
                 Some(n @ ("Error" | "TypeError" | "ReferenceError" | "SyntaxError" | "RangeError" | "URIError" | "EvalError" | "AggregateError" | "SecurityError" | "QuotaExceededError" | "InvalidStateError")) => n.to_string(),
@@ -1454,7 +1434,7 @@ impl Run<'_> {
         Ok(())
     }
 
-    fn fire(&mut self, t: EvTarget, ty: &str, bubbles: bool) -> Flow {
+    fn fire(&mut self, t: EvTarget<E>, ty: &str, bubbles: bool) -> Flow {
         self.nav_stop()?;
         match self.b.fire(t, ty, bubbles) {
             Ok(()) => Ok(()),
@@ -1475,7 +1455,7 @@ impl Run<'_> {
             Ok(text) => {
                 self.run_one(node, &text, what)?;
                 self.after_js()?;
-                self.fire(EvTarget::Node(node), "load", false)?;
+                self.fire(EvTarget::Node::<E>(node), "load", false)?;
             }
             Err(why) => {
                 self.res.tasks += 1;
@@ -1697,7 +1677,7 @@ impl Run<'_> {
             } else {
                 match self.b.query(sel) {
                     Ok(Some(n)) => Some(n),
-                    Ok(None) | Err(Error::Throw(_)) => return Err(Stop::NoTarget(i)),
+                    Ok(None) | Err(Fault::Throw(_)) => return Err(Stop::NoTarget(i)),
                     Err(e) => return Err(self.fatal(e, "input selector")),
                 }
             };
@@ -1864,7 +1844,7 @@ impl Run<'_> {
         }
         let Some(js) = bare_net::trace::probe() else { return };
         if let Ok(v) = self.b.run_script(&js)
-            && matches!(v, bare_js::value::Value::Bool(true)) {
+            && matches!(E::kind(v), Val::Bool(true)) {
             self.probed = true;
             bare_observe::process::emit("loader", "probe", || []);
             bare_net::trace::mark(|| "probe".into(), 0);
@@ -2041,7 +2021,7 @@ impl Run<'_> {
 
 
 /// `this` is a document node, else `Illegal invocation`. The result says whether it is the main document.
-fn write_target<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, (NodeId, bool)> {
+fn write_target<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, (NodeId, bool)> {
     let root = d.nd_s(s, this)?;
     if !matches!(d.doc.borrow().data(root), NodeData::Document) {
         return Err(s.type_error("Illegal invocation"));
@@ -2052,7 +2032,7 @@ fn write_target<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, (No
 
 #[cold]
 #[inline(never)]
-pub(crate) fn document_open<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn document_open<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let (root, main) = write_target(d, s, this)?;
     let html = {
         let doc = d.doc.borrow();
@@ -2079,7 +2059,7 @@ pub(crate) fn document_open<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _:
 
 #[cold]
 #[inline(never)]
-pub(crate) fn document_close<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn document_close<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let (_, main) = write_target(d, s, this)?;
     if main {
         d.scripts.write_open.set(false);
@@ -2089,17 +2069,17 @@ pub(crate) fn document_close<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _
 
 #[cold]
 #[inline(never)]
-pub(crate) fn document_write<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    write::<false>(d, s, this, a)
+pub(crate) fn document_write<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    write::<false, _>(d, s, this, a)
 }
 
 #[cold]
 #[inline(never)]
-pub(crate) fn document_writeln<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    write::<true>(d, s, this, a)
+pub(crate) fn document_writeln<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    write::<true, _>(d, s, this, a)
 }
 
-fn write<'s, const NEWLINE: bool>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn write<'s, const NEWLINE: bool, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let (_, main) = write_target(d, s, this)?;
     let mut text = String::new();
     for v in a.iter() {
@@ -2112,7 +2092,7 @@ fn write<'s, const NEWLINE: bool>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, 
         text.push('\n');
     }
     if let Some(script) = d.scripts.current.get().filter(|_| main && d.scripts.ready.get() == 0)
-        && old(s, |it| d.in_document(it, script))?
+        && old::<E, _>(s, |it| d.in_document(it, script))?
     {
         let before = match d.scripts.write_anchor.get() {
             Some((sc, before)) if sc == script => before,
@@ -2124,7 +2104,7 @@ fn write<'s, const NEWLINE: bool>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, 
         };
         let parent = d.doc.borrow().parent(script);
         if let Some(parent) = parent {
-            return old_v(s, |it| crate::browser_fragment::write_at(d, it, &text, parent, before));
+            return old_v::<E>(s, |it| crate::browser_fragment::write_at(d, it, &text, parent, before));
         }
         return Ok(s.undefined());
     }
@@ -2133,13 +2113,13 @@ fn write<'s, const NEWLINE: bool>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, 
     }
     let body = nd::body_s(d, s, this, Args::from_slots(0, 0))?;
     let n = d.el_s(s, body)?;
-    old_v(s, |it| crate::browser_fragment::write_at(d, it, &text, n, None))
+    old_v::<E>(s, |it| crate::browser_fragment::write_at(d, it, &text, n, None))
 }
 
 // ---------------------------------------------------------------------------------------------- arena reclaim (`browser_reclaim.rs`)
 
 /// The nodes that the script queues and the running script name.
-pub(crate) fn held(d: &Dom, out: &mut Vec<NodeId>) {
+pub(crate) fn held<E: Eng>(d: &Dom<E>, out: &mut Vec<NodeId>) {
     let s = &d.scripts;
     out.extend(s.current.get());
     out.extend(s.write_anchor.get().into_iter().flat_map(|(a, b)| [Some(a), b]).flatten());
@@ -2150,7 +2130,7 @@ pub(crate) fn held(d: &Dom, out: &mut Vec<NodeId>) {
 }
 
 /// Drop the state of the nodes that the reclaim freed: the started flag of a script, its load handlers and the link states.
-pub(crate) fn forget(d: &Dom, gone: &dyn Fn(NodeId) -> bool) {
+pub(crate) fn forget<E: Eng>(d: &Dom<E>, gone: &dyn Fn(NodeId) -> bool) {
     let s = &d.scripts;
     s.started.borrow_mut().retain(|&n| !gone(n));
     s.handlers.borrow_mut().retain(|&(n, _), _| !gone(n));
@@ -2161,6 +2141,6 @@ pub(crate) fn forget(d: &Dom, gone: &dyn Fn(NodeId) -> bool) {
 
 /// How many script elements have the started flag (tests of the reclaim).
 #[cfg(test)]
-pub(crate) fn started_len(d: &Dom) -> usize {
+pub(crate) fn started_len<E: Eng>(d: &Dom<E>) -> usize {
     d.scripts.started.borrow().len()
 }

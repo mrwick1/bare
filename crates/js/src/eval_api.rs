@@ -132,7 +132,7 @@ impl<'p> Interp<'p> {
 
     /// Let `host` answer for the indexed and named objects of this realm (`Heap::new_indexed`, `Heap::new_named`) by their host
     /// keys: the interface host's `indexed_*` and `named_*` methods.
-    pub fn set_api_sources<H: for<'q> bare_js_api::Host<Interp<'q>> + 'static>(&mut self, host: Rc<H>) {
+    pub fn set_api_sources<H: bare_js_api::Host<Interp<'static>> + 'static>(&mut self, host: Rc<H>) {
         self.heap.set_indexed_source(Rc::new(ApiSource(host.clone())));
         self.heap.set_named_source(Rc::new(ApiSource(host)));
     }
@@ -326,6 +326,92 @@ impl<'p> Interp<'p> {
         self.api.stack.push(Value::Object(owner));
         let r = bare_js_api::enter(self, |s| match h.lazy_member(s, bare_js_api::Local::from_slot((base - SEEDS) as u32), what) {
             Ok(()) => Ok(()),
+            Err(bare_js_api::Error::Throw(v)) => Err(Error::Throw(s.engine().api_at(v))),
+            Err(bare_js_api::Error::Abort(a)) => Err(s.engine().api.abort.take().unwrap_or(match a {
+                bare_js_api::Abort::Limit(w) | bare_js_api::Abort::Unsupported(w) => unsupported(w, Span::default()),
+            })),
+        });
+        self.api.stack.truncate(base);
+        r
+    }
+
+    /// The heap asked for the fill step (`NeedsHost`) and the realm has no old host: ask the interface host `h` (`Host::fill`).
+    #[cold]
+    fn api_fill(&mut self, h: &dyn bare_js_api::Host<Interp<'p>>, owner: ObjId, index: u32) -> Result<(), Error> {
+        let Some(key) = self.heap.host_key(owner) else { return Err(unsupported("fill of an object with no host key", Span::default())) };
+        self.api_host_scope(&[Value::Object(owner)], |s, base| h.fill(s, bare_js_api::Local::from_slot(base), key, index))
+    }
+
+    /// The heap asked for a write (`NeedsNamed`) and the realm has no old host: ask the interface host `h` (`Host::named_write`).
+    #[cold]
+    fn api_named_write(&mut self, h: &dyn bare_js_api::Host<Interp<'p>>, req: crate::heap::NamedRequest) -> Result<bool, Error> {
+        use crate::heap::NamedOp;
+        let Some(hk) = self.heap.host_key(req.owner) else { return Err(unsupported("named write of an object with no host key", Span::default())) };
+        // A name of up to 48 units goes through a stack buffer: this runs for each write to a host object.
+        let mut buf = [0u16; 48];
+        let long: Vec<u16>;
+        let name: &[u16] = match req.key {
+            PropertyKey::Index(i) => {
+                long = i.to_string().encode_utf16().collect();
+                &long
+            }
+            PropertyKey::String(s) => {
+                let u = h!(self, self.heap.str_units(s));
+                if u.len() <= buf.len() {
+                    buf[..u.len()].copy_from_slice(u);
+                    &buf[..u.len()]
+                } else {
+                    long = u.to_vec();
+                    &long
+                }
+            }
+            PropertyKey::Symbol(_) => return Ok(false),
+        };
+        let obj = |o: Option<Option<ObjId>>| o.map(|o| o.map_or(Value::Undefined, Value::Object));
+        let (vals, d) = match req.op {
+            NamedOp::Set(v) => ([Some(v), None, None], None),
+            NamedOp::Define(d) => ([d.value, obj(d.get), obj(d.set)], Some(d)),
+            NamedOp::Delete => ([None; 3], None),
+        };
+        let mut seeds = [Value::Object(req.owner); 4];
+        let mut n = 1;
+        for v in vals.into_iter().flatten() {
+            seeds[n] = v;
+            n += 1;
+        }
+        let vals = &seeds[..n];
+        let is_set = matches!(req.op, NamedOp::Set(_));
+        self.api_host_scope(vals, |s, base| {
+            use bare_js_api::{Descriptor, Local, Write};
+            let mut next = base;
+            let mut take = |on: bool| {
+                on.then(|| {
+                    next += 1;
+                    Local::from_slot(next)
+                })
+            };
+            let op = match d {
+                Some(d) => Write::Define(Descriptor {
+                    value: take(d.value.is_some()),
+                    get: take(d.get.is_some()),
+                    set: take(d.set.is_some()),
+                    writable: d.writable,
+                    enumerable: d.enumerable,
+                    configurable: d.configurable,
+                }),
+                None if is_set => Write::Set(Local::from_slot(base + 1)),
+                None => Write::Delete,
+            };
+            h.named_write(s, Local::from_slot(base), hk, name, op)
+        })
+    }
+
+    /// Run a hook of the interface host that may run script, with `vals` on the handle stack from slot `base`.
+    fn api_host_scope<T>(&mut self, vals: &[Value], f: impl for<'s> FnOnce(&mut bare_js_api::Scope<'s, Interp<'p>>, u32) -> Result<T, bare_js_api::Error<'s>>) -> Result<T, Error> {
+        let base = self.api.stack.len();
+        self.api.stack.extend_from_slice(vals);
+        let r = bare_js_api::enter(self, |s| match f(s, (base - SEEDS) as u32) {
+            Ok(x) => Ok(x),
             Err(bare_js_api::Error::Throw(v)) => Err(Error::Throw(s.engine().api_at(v))),
             Err(bare_js_api::Error::Abort(a)) => Err(s.engine().api.abort.take().unwrap_or(match a {
                 bare_js_api::Abort::Limit(w) | bare_js_api::Abort::Unsupported(w) => unsupported(w, Span::default()),
@@ -1281,7 +1367,7 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
 /// the host gets only the key.
 struct ApiSource<H>(Rc<H>);
 
-impl<H: for<'q> bare_js_api::Host<Interp<'q>>> ApiSource<H> {
+impl<H: bare_js_api::Host<Interp<'static>>> ApiSource<H> {
     /// The host as its own type: the calls are static, so the compiler can inline the host's answer here.
     fn host(&self) -> &impl bare_js_api::Host<Interp<'static>> {
         &*self.0
@@ -1297,7 +1383,7 @@ fn pending(owner: ObjId, p: bare_js_api::Pending) -> HeapError {
     }
 }
 
-impl<H: for<'q> bare_js_api::Host<Interp<'q>>> crate::heap::IndexedSource for ApiSource<H> {
+impl<H: bare_js_api::Host<Interp<'static>>> crate::heap::IndexedSource for ApiSource<H> {
     fn indexed_len(&self, owner: ObjId, key: u32) -> Result<usize, HeapError> {
         self.host().indexed_len(&Value::Object(owner), key).map_err(|p| pending(owner, p))
     }
@@ -1320,7 +1406,7 @@ impl<H: for<'q> bare_js_api::Host<Interp<'q>>> crate::heap::IndexedSource for Ap
     }
 }
 
-impl<H: for<'q> bare_js_api::Host<Interp<'q>>> crate::heap::NamedSource for ApiSource<H> {
+impl<H: bare_js_api::Host<Interp<'static>>> crate::heap::NamedSource for ApiSource<H> {
     fn named_has(&self, owner: ObjId, hk: u32, key: &[u16]) -> Result<bool, HeapError> {
         self.host().named_has(&Value::Object(owner), hk, key).map_err(|p| pending(owner, p))
     }

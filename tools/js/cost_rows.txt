@@ -6,6 +6,11 @@
 # Left out: 5 rows whose count moves by more than 0.25% between two runs of one binary (loopback server threads):
 # `scheduler_load timers 1`, `preload_load font 10`, `preload_load dups 10`, `resources_load largechunk 1` and `10`.
 # Not here: `type_load` (tools/js/typing/keycost.sh), `https_load` and the other network examples.
+# The js2 rows use distinct binary names so both engines can share a target directory.
+examples/js2_gen_load next 100000
+examples/js2_lex_load small 1 1
+examples/js2_parse_load full stmts 1
+examples/js2_promise_load then 100000
 examples/adapter_load u8iter 1
 examples/adapter_load u8iter 10
 examples/adapter_load u8steps 1

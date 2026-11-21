@@ -59,6 +59,7 @@
 //! is a chain of one-shots and blocks while it is within the window. A timer beyond the window never blocks, as before.
 //! Results and diagnostics name `scheme://host:port/path` only: no query, fragment, header, body or source.
 
+use crate::eng_old::Old;
 use crate::browser::{Browser, BrowserLimits};
 use crate::browser_fetch::{FetchLimits, metadata_site, potentially_trustworthy};
 use crate::browser_loader::{Input, PageConfig, PageLimits, PageResult, SLICE, Scan, Stop, deadline_after, label};
@@ -226,7 +227,7 @@ pub struct Session {
     cfg: SessionConfig,
     store: WebStorage,
     /// The last document. Dropped before the next one is requested.
-    browser: Option<Browser>,
+    browser: Option<Browser<Old>>,
     /// What the session has used so far, shared by `run` and every `resume`.
     used: Used,
     /// The first client that `cfg.client` made. Each document and each `resume` gets a fork: they share the connections, as the
@@ -679,7 +680,7 @@ impl Session {
     }
 
     /// The last document, while its `Browser` is alive (after `run`).
-    pub fn browser(&mut self) -> Option<&mut Browser> {
+    pub fn browser(&mut self) -> Option<&mut Browser<Old>> {
         self.browser.as_mut()
     }
 

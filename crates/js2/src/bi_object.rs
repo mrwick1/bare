@@ -11,7 +11,8 @@
 //! **A native does not call a script function** (`builtins.rs`). A built-in that meets an accessor (a getter of a descriptor, a setter
 //! of the target of `Object.assign`) hands the work to a JavaScript helper of `prelude.js` through the tail channel (`Realm::helper`).
 //! The common case, data properties, stays in Rust.
-use crate::builtins::{NativeFn, arg};
+use crate::lazy::{Ent, m};
+use crate::builtins::arg;
 use crate::cell::Layout;
 use crate::interp_rt::{ErrKind, Key, R, Realm, Slot};
 use crate::object::{F_ELEMS_FIXED, F_ELEMS_RO, F_LEN_RO, F_SLOWIDX, Obj};
@@ -55,7 +56,7 @@ impl Own {
     }
 }
 
-/// The helpers of `prelude.js` that a native tail-calls (index in `Realm::helpers`).
+/// The helpers of `prelude.js` that a native tail-calls (the first slots of `Realm::pre`).
 pub(crate) const H_DEFINE: usize = 0;
 pub(crate) const H_DEFINE_ALL: usize = 1;
 pub(crate) const H_ASSIGN: usize = 2;
@@ -63,7 +64,6 @@ pub(crate) const H_SEARCH: usize = 3;
 pub(crate) const H_SPREAD: usize = 4;
 pub(crate) const H_REST: usize = 5;
 pub(crate) const H_PAIRS: usize = 6;
-pub(crate) const HELPERS: usize = 7;
 
 /// The array index that the text of the atom `k` is, if it is one (a canonical decimal below 2^32 - 1).
 pub(crate) fn atom_index(k: Str) -> Option<u32> {
@@ -84,7 +84,10 @@ impl Realm {
 
     /// Ask the interpreter to call the helper `h` of the prelude with `args` (the tail channel): the result of the native is its result.
     pub(crate) fn helper(&mut self, h: usize, args: &[Value]) -> R<Value> {
-        let f = self.helpers[h];
+        let f = match self.pre[h] {
+            v if v.is_undefined() => self.pre_make(h)?,
+            v => v,
+        };
         self.tail_args.clear();
         self.tail_args.extend_from_slice(args);
         self.tail = Some((f, Value::UNDEFINED));
@@ -161,7 +164,7 @@ impl Realm {
     /// The own property `key` of any value (`ToObject` for a string: its characters and `length`).
     fn get_own_of(&mut self, v: Value, key: Key) -> R<Option<Own>> {
         if let Some(o) = Realm::obj(v) {
-            return Ok(self.get_own(o, key));
+            return self.get_own_h(o, key);
         }
         if let Some(s) = Realm::str_of(v) {
             let s = self.flat(s);
@@ -246,6 +249,7 @@ impl Realm {
     // ---- extensibility, seal, freeze ----
 
     pub(crate) fn prevent_extensions(&mut self, o: Obj) {
+        self.lazy_all(o);
         if o.extensible() {
             o.prevent_extensions(&mut self.shapes);
         }
@@ -331,6 +335,9 @@ impl Realm {
             && self.is_array(o)
         {
             return self.define_length(o, d);
+        }
+        if self.api.hs.active && o.has_flag(crate::object::F_HOST) && let Some(ok) = self.hs_write(o, key, crate::api_host::HsWrite::Define(d))? {
+            return Ok(ok);
         }
         let cur = self.get_own(o, key);
         let Some(cur) = cur else {
@@ -615,49 +622,45 @@ impl Realm {
     pub(crate) fn install_object(&mut self) {
         let proto = self.object_proto;
         let c = self.ctor("Object", 1, object_ctor, proto);
-        for (n, len, f) in [
-            ("assign", 2, object_assign as NativeFn),
-            ("getOwnPropertyDescriptor", 2, object_own_descriptor),
-            ("getOwnPropertyDescriptors", 1, object_own_descriptors),
-            ("getOwnPropertyNames", 1, object_own_names),
-            ("getOwnPropertySymbols", 1, object_own_symbols),
-            ("is", 2, object_is),
-            ("preventExtensions", 1, object_prevent_extensions),
-            ("seal", 1, object_seal),
-            ("create", 2, object_create),
-            ("defineProperties", 2, object_define_properties),
-            ("defineProperty", 3, object_define_property),
-            ("freeze", 1, object_freeze),
-            ("getPrototypeOf", 1, object_get_prototype_of),
-            ("setPrototypeOf", 2, object_set_prototype_of),
-            ("isExtensible", 1, object_is_extensible),
-            ("isFrozen", 1, object_is_frozen),
-            ("isSealed", 1, object_is_sealed),
-            ("keys", 1, object_keys),
-            ("entries", 1, object_entries),
-            ("fromEntries", 1, object_from_entries),
-            ("values", 1, object_values),
-            ("hasOwn", 2, object_has_own),
-        ] {
-            self.method(c, n, len, f);
-        }
-        for (n, len, f) in [
-            ("__defineGetter__", 2, define_getter as NativeFn),
-            ("__defineSetter__", 2, define_setter),
-            ("hasOwnProperty", 1, has_own),
-            ("__lookupGetter__", 1, lookup_getter),
-            ("__lookupSetter__", 1, lookup_setter),
-            ("isPrototypeOf", 1, is_prototype_of),
-            ("propertyIsEnumerable", 1, property_is_enumerable),
-            ("toString", 0, object_to_string),
-            ("valueOf", 0, object_value_of),
-            ("toLocaleString", 0, to_locale_string),
-        ] {
-            self.method(proto, n, len, f);
-        }
-        let g = self.global;
-        self.method(g, "__helper", 2, register_helper);
-        self.method(g, "__set", 3, set_strict);
+        static OBJECT_STATICS: &[Ent] = &[
+            m("assign", 2, object_assign),
+            m("getOwnPropertyDescriptor", 2, object_own_descriptor),
+            m("getOwnPropertyDescriptors", 1, object_own_descriptors),
+            m("getOwnPropertyNames", 1, object_own_names),
+            m("getOwnPropertySymbols", 1, object_own_symbols),
+            m("is", 2, object_is),
+            m("preventExtensions", 1, object_prevent_extensions),
+            m("seal", 1, object_seal),
+            m("create", 2, object_create),
+            m("defineProperties", 2, object_define_properties),
+            m("defineProperty", 3, object_define_property),
+            m("freeze", 1, object_freeze),
+            m("getPrototypeOf", 1, object_get_prototype_of),
+            m("setPrototypeOf", 2, object_set_prototype_of),
+            m("isExtensible", 1, object_is_extensible),
+            m("isFrozen", 1, object_is_frozen),
+            m("isSealed", 1, object_is_sealed),
+            m("keys", 1, object_keys),
+            m("entries", 1, object_entries),
+            m("fromEntries", 1, object_from_entries),
+            m("values", 1, object_values),
+            m("hasOwn", 2, object_has_own),
+        ];
+        self.lazy_table(c, OBJECT_STATICS);
+        static OBJECT_PROTO: &[Ent] = &[
+            crate::lazy::acc("__proto__", proto_get, proto_set),
+            m("__defineGetter__", 2, define_getter),
+            m("__defineSetter__", 2, define_setter),
+            m("hasOwnProperty", 1, has_own),
+            m("__lookupGetter__", 1, lookup_getter),
+            m("__lookupSetter__", 1, lookup_setter),
+            m("isPrototypeOf", 1, is_prototype_of),
+            m("propertyIsEnumerable", 1, property_is_enumerable),
+            m("toString", 0, object_to_string),
+            m("valueOf", 0, object_value_of),
+            m("toLocaleString", 0, to_locale_string),
+        ];
+        self.lazy_table(proto, OBJECT_PROTO);
     }
 }
 
@@ -694,7 +697,7 @@ fn object_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     Ok(Obj::new(&mut rt.heap, &rt.shapes, shape).expect("memory").value())
 }
 
-fn object_keys(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+pub(crate) fn object_keys(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let v = to_obj(rt, arg(args, 0))?;
     rt.own_keys(v)
 }
@@ -814,7 +817,7 @@ fn define_all(rt: &mut Realm, o: Obj, props: Value) -> R<Value> {
     Ok(o.value())
 }
 
-fn object_define_property(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+pub(crate) fn object_define_property(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let Some(o) = Realm::obj(arg(args, 0)) else { return rt.type_error("Object.defineProperty called on a non-object") };
     let key = rt.key_of(arg(args, 1))?;
     let Some(d) = rt.read_desc(arg(args, 2))? else { return rt.helper(H_DEFINE, args) };
@@ -835,7 +838,7 @@ fn object_own_symbols(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> 
     Ok(rt.new_array(&list))
 }
 
-fn object_get_prototype_of(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+pub(crate) fn object_get_prototype_of(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let v = arg(args, 0);
     if let Some(o) = Realm::obj(v) {
         return Ok(rt.proto_of(o).map_or(Value::NULL, |p| p.value()));
@@ -854,7 +857,7 @@ fn object_get_prototype_of(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Va
     })
 }
 
-fn object_set_prototype_of(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+pub(crate) fn object_set_prototype_of(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let (v, p) = (arg(args, 0), arg(args, 1));
     if v.is_undefined() || v.is_null() {
         return rt.type_error("Object.setPrototypeOf called on null or undefined");
@@ -892,7 +895,7 @@ impl Realm {
     }
 }
 
-fn object_own_names(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+pub(crate) fn object_own_names(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let v = to_obj(rt, arg(args, 0))?;
     if let Some(s) = Realm::str_of(v) {
         let mut out: Vec<Value> = (0..s.len()).map(|i| rt.string(&i.to_string())).collect();
@@ -900,11 +903,11 @@ fn object_own_names(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
         return Ok(rt.new_array(&out));
     }
     let Some(o) = Realm::obj(v) else { return Ok(rt.new_array(&[])) };
-    let out = rt.own_key_list(o, false);
+    let out = rt.own_key_list_h(o, false)?;
     Ok(rt.new_array(&out))
 }
 
-fn object_own_descriptor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+pub(crate) fn object_own_descriptor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let v = to_obj(rt, arg(args, 0))?;
     let key = rt.key_of(arg(args, 1))?;
     Ok(match rt.get_own_of(v, key)? {
@@ -917,11 +920,11 @@ fn object_own_descriptors(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Val
     let v = to_obj(rt, arg(args, 0))?;
     let out = Obj::new(&mut rt.heap, &rt.shapes, rt.s_object).expect("memory");
     if let Some(o) = Realm::obj(v) {
-        let mut keys = rt.own_key_list(o, false);
+        let mut keys = rt.own_key_list_h(o, false)?;
         keys.extend(rt.own_symbol_list(o, false));
         for k in keys {
             let key = rt.key_of(k)?;
-            if let Some(p) = rt.get_own(o, key) {
+            if let Some(p) = rt.get_own_h(o, key)? {
                 let d = rt.from_own(p);
                 rt.define(out, key, d)?;
             }
@@ -1084,6 +1087,8 @@ pub(crate) fn object_to_string(rt: &mut Realm, this: Value, _args: &[Value]) -> 
             "Error"
         } else if o.has_flag(crate::object::F_REGEXP) {
             "RegExp"
+        } else if o.has_flag(crate::bi_date::F_DATE) {
+            "Date"
         } else if o.is_indexed() {
             "Arguments"
         } else {
@@ -1125,19 +1130,28 @@ fn is_prototype_of(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     Ok(Value::FALSE)
 }
 
-/// `__helper(index, function)`: the prelude registers the JavaScript helpers that the natives call (`Realm::helper`).
-fn register_helper(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    let i = arg(args, 0).as_int().unwrap_or(0) as usize;
-    if i >= HELPERS {
-        return rt.type_error("no such helper");
+/// The getter of `Object.prototype.__proto__`.
+fn proto_get(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
+    if this.is_undefined() || this.is_null() {
+        return rt.type_error("cannot convert undefined or null to an object");
     }
-    rt.helpers[i] = arg(args, 1);
-    rt.keep(arg(args, 1));
+    object_get_prototype_of(rt, Value::UNDEFINED, &[this])
+}
+
+/// The setter of `Object.prototype.__proto__`: a value that is not an object or `null`, or a receiver that is not an object, changes nothing.
+fn proto_set(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+    if this.is_undefined() || this.is_null() {
+        return rt.type_error("cannot convert undefined or null to an object");
+    }
+    let p = arg(args, 0);
+    if Realm::obj(this).is_some() && (p.is_null() || Realm::obj(p).is_some()) {
+        object_set_prototype_of(rt, Value::UNDEFINED, &[this, p])?;
+    }
     Ok(Value::UNDEFINED)
 }
 
-/// `__set(target, key, value)` for the helpers: `Set(target, key, value, true)`.
-fn set_strict(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+/// `set(target, key, value)` for the helpers: `Set(target, key, value, true)`.
+pub(crate) fn set_strict(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let key = rt.key_of(arg(args, 1))?;
     rt.set_checked(arg(args, 0), key, arg(args, 2), true)?;
     Ok(Value::UNDEFINED)

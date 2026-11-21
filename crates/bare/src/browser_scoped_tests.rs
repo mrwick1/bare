@@ -91,7 +91,7 @@ fn the_hooks_around_a_host_call_run_for_a_handler_on_the_interface() {
 }
 
 /// A handler of the new form that runs the heap collection with the engine's roots while it runs, then reads `this` and its arguments.
-fn collecting_probe<'s>(d: &Dom, s: &mut crate::browser_scoped::Sc<'s, '_>, this: bare_js_api::Local<'s>, a: bare_js_api::Args<'s>) -> crate::browser_scoped::Res<'s, bare_js_api::Local<'s>> {
+fn collecting_probe<'s>(d: &Dom, s: &mut crate::browser_scoped::Sc<'s, crate::eng_old::Old>, this: bare_js_api::Local<'s>, a: bare_js_api::Args<'s>) -> crate::browser_scoped::Res<'s, bare_js_api::Local<'s>> {
     // `Interp::collect` refuses inside a call, so this goes to the heap with `Interp::roots` (it includes the arguments of the running call).
     let it = s.engine();
     let roots = it.roots();

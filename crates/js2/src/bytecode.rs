@@ -169,6 +169,7 @@ ops! {
     GetName Abx "w S" "`a` = the name of the site `bx` by the full search (a function with `with` or direct `eval`).",
     SetName Abx "r S" "The name of the site `bx` = `a`, by the full search.",
     TypeofName Abx "w S" "`a` = `typeof` the name of the site `bx`, by the full search.",
+    GetPre Abx "w u" "`a` = the slot `bx` of the realm's prelude slots (`prelude_pre.rs`): a function of the prelude, a native or a state object. Only the compiler of the prelude emits it.",
     GetField Abc "w r S" "`a = b.name` for the site `c`.",
     SetField Abc "r r S" "`a.name = b` for the site `c`.",
     SetFieldK Abc "r z S" "`a.name` = the special constant `b` (0 `undefined`, 1 `null`, 2 `false`, 3 `true`).",
@@ -284,7 +285,7 @@ ops! {
     IterOpen Abc "W r" "Open the iterator of `b`. The iterator record (iterator, `next`, state) is in the 3 registers from `a`.",
     ForInOpen Abc "W r" "Open the keys of `b` (`for-in`). The record is in the 3 registers from `a`, as for `IterOpen`.",
     IterNext AsBxX "w j R" "`a` = the next value of the record in the 3 registers from `x`. When it is done, jump.",
-    IterClose Abc "R" "Close the iterator whose record is in the 3 registers from `a` (a `break` or an exception out of the loop).",
+    IterClose Abc "R - u" "Close the iterator whose record is in the 3 registers from `a` (a `break` or an exception out of the loop). `c` is 1 for an exception: the error of `return()` is then dropped.",
     CreateArgs Abc "w" "`a` = a new arguments object that holds every argument of this call (the frame keeps them, also those past `nparams`). Always unmapped: `arguments[i]` does not alias the parameter `i`. The first instruction of the function, before any parameter is written.",
     CreateRest Abc "w u" "`a` = a new array of the arguments of this call from the index `b` on (a rest parameter; `b` is its position).",
     LoadCallee Abc "w" "`a` = the function that runs (the name of a named function expression inside its own body).",
@@ -325,7 +326,19 @@ ops! {
     RetDerived Abc "r r" "Return from a derived constructor with the value `a` and the variable `this` in `b`: an object is returned as it is; `undefined` gives `this` (a ReferenceError when `this` is the hole); anything else is a TypeError.",
     GenInit Abx "- T" "The first suspension of a generator: the parameters are bound and the defaults are evaluated, and the body has not run. Make the generator object and the record that keeps the frame, save the registers of the list at `tables[bx..]` (see \"Suspension\" above), and return the generator object to the caller. The first `next()` goes on at the instruction after this one.",
     Yield Abx "r T" "Suspend the generator: save the registers of the list at `tables[bx..]`, and give the value `a` to the caller of `next()`. A resume goes on at the instruction after this one with the sent value and the mode in the registers that the list names.",
-    RetGen Abc "r" "Return `a` from a generator: the generator is done. The only return of the code of a generator (`Ret` is not allowed there).",
+    YieldStarStep AsBxX "w j R" "`yield*`: the record at `x` is the iterator record (3 registers), then the sent value and the mode (`YS_REGS`). Send them to the iterator. If it gave a value, `a` = the value and the next instruction runs (it yields `a`). If it finished, `a` = its value, the mode register is 0 (the value of the expression) or 2 (`return` it), and jump.",
+    RetGen Abc "r - u" "Return `a` from a generator: the generator is done. The only return of the code of a generator (`Ret` is not allowed there). In an async generator, `c` = 1 is a throw out of the body: the request that waits is rejected with `a`.",
+    AsyncInit Abc "" "The first instruction of an async function: make its activation and its result promise, and keep the activation in the frame record where `new.target` is. The frame is an async frame from here on: it keeps no record yet, and the first `Await` makes it.",
+    Await Abx "r T" "`await a`: wait for the value `a` (`PromiseResolve`, then a reaction that resumes this frame). Save the registers of the list at `tables[bx..]` as `Yield` does, and return the result promise of the function to the caller. A resume goes on at the instruction after this one with the settled value in the `sent` register and the mode (0 fulfilled, 1 rejected) in the `mode` register of the list.",
+    RetAsync Abc "r - u" "Return from an async function: with `c` = 0 resolve the result promise with `a`, with `c` = 1 reject it with `a`. The function is done, and the caller gets the result promise (a resume from the job queue drops it). The only return of an async function.",
+    AIterOpen Abc "W r" "`for await`: open the async iterator of `b` (`GetIterator(b, async)`: `Symbol.asyncIterator`, else the sync iterator wrapped in an async-from-sync iterator). The record is in the 3 registers from `a`: the iterator, its `next` and 0.",
+    AIterNext Abc "w R" "`a` = the result of calling `next` of the async record in the 3 registers from `b`. The result is not awaited: the compiler awaits it.",
+    AIterUnpack AsBxX "w j r" "`a` = the `value` of the awaited result object in `x`. When its `done` is true, jump. A TypeError when `x` is no object.",
+    AYsUnpack AsBxX "w j r" "As `AIterUnpack` for `yield*`: `a` = the `value` of the awaited result in `x` also when `done` is true (the value of the expression).",
+    AIterClose AsBxX "w j R" "`for await` leaves early: `a` = the result of `return()` of the async record at `x`, to be awaited. Jump when the iterator has no `return`. The error of a getter or of the call is thrown.",
+    AIterCloseT AsBxX "w j R" "As `AIterClose`, for an exception that leaves the loop: an error of the getter or of the call is dropped (the jump is taken).",
+    AIterCheck Abc "r u" "A TypeError when `a` is no object: the awaited result of `return()` (`b` 0), or the iterator that has no `throw` (`b` 1, `a` is `null`).",
+    AYsCall AsBxX "w j R" "`yield*` in an async generator: the record at `x` is the iterator record, the sent value and the mode (`YS_REGS`). `a` = the result of `next`, `throw` or `return` of the iterator for the mode (not awaited). When the iterator has no `throw`: the mode register is 3 and jump. When it has no `return`: `a` = the sent value, the mode register is 2 and jump.",
     Lazy Abc "u" "The only instruction of the stub of a function that is compiled at its first call (`script::Lazy`): compile the function into this code, then run it from the start with the same arguments. With `a` = 1 the stub has `CF_ARGS`, so the frame record holds all arguments in an array. With `a` = 0 the stub has the parameter registers of the real code, and the arguments are in them (a function with plain parameters that does not read `arguments`): no array is made. The compiler never emits it.",
 }
 
@@ -336,6 +349,9 @@ pub const STR_EMPTY: u32 = u32::MAX;
 
 /// The registers of an iterator record (`IterOpen`, `ForInOpen`, `IterNext`, `IterClose`).
 pub const ITER_REGS: u32 = 3;
+
+/// The registers of the window of `YieldStarStep`: the iterator record, the sent value, the mode.
+pub const YS_REGS: u32 = 5;
 
 impl Op {
     /// The opcode of a byte, or `None` for a byte that is no opcode.
@@ -355,7 +371,7 @@ impl Op {
 
     /// Does control go on to the next instruction? (`Jmp`, `JmpBack`, the returns and the throws do not.)
     pub fn falls_through(self) -> bool {
-        !matches!(self, Op::Jmp | Op::JmpBack | Op::Ret | Op::RetUndef | Op::RetGen | Op::Throw | Op::ThrowConst | Op::RetDerived | Op::SwitchI | Op::SwitchA)
+        !matches!(self, Op::Jmp | Op::JmpBack | Op::Ret | Op::RetUndef | Op::RetGen | Op::RetAsync | Op::Throw | Op::ThrowConst | Op::RetDerived | Op::SwitchI | Op::SwitchA)
     }
 
     /// Can the instruction run JS, allocate or throw, so that a collection can happen in it? The compiler gives a root map to each one.
@@ -582,6 +598,8 @@ pub const CF_ARGS: u8 = 1;
 /// `Code::flags`: the function (or a function inside it) uses `super`, so `Closure` gives the new function the home object and the
 /// constructor link of the function that makes it.
 pub const CF_LINK: u8 = 2;
+/// `Code::flags`: the function is a generator, so `Closure` gives the new function the prototype `%GeneratorFunction.prototype%`.
+pub const CF_GEN: u8 = 4;
 
 /// The code of one function. It holds no pointer to a realm's heap: its atoms are shared atoms, so all realms of a session can use it.
 #[derive(Debug)]
@@ -617,7 +635,7 @@ pub struct Code {
     pub strict: bool,
     /// The function is an arrow, a method, a getter or a setter: `new` on it throws a `TypeError`.
     pub noctor: bool,
-    /// [`GK_NONE`], or the kind of function whose frame can be suspended (`GenInit`, `Yield`, `RetGen`).
+    /// [`GK_NONE`], or the kind of function whose frame can be suspended (`GenInit`, `Yield`, `RetGen`; [`GK_ASYNCGEN`] also `Await`).
     pub gen_kind: u8,
     /// The length of the longest save list of the code: the number of registers that its record has room for.
     pub gen_regs: u16,
@@ -627,6 +645,10 @@ pub struct Code {
 pub const GK_NONE: u8 = 0;
 /// `Code::gen_kind` of a generator function.
 pub const GK_GEN: u8 = 1;
+/// `Code::gen_kind` of an async function.
+pub const GK_ASYNC: u8 = 2;
+/// An async generator (`GenInit`, `Yield`, `Await`, `RetGen`; `compile_asyncgen.rs`).
+pub const GK_ASYNCGEN: u8 = 3;
 /// The register field of a save list that names no register.
 pub const NO_REG: u32 = u32::MAX;
 

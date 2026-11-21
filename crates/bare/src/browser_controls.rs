@@ -39,6 +39,7 @@
 //! - A radio group is read when asked (no group state), so two `checked` radios of one group in the markup both read as checked until a
 //!   script or a reset checks one. A `checked` write unchecks the other radios of the group.
 
+use crate::eng::{Eng, Ops};
 use crate::browser::*;
 use crate::browser_dom::input_kind;
 use crate::browser_lazy::lazy_global;
@@ -46,8 +47,6 @@ use crate::browser_nodelist::Src;
 use crate::browser_scoped::*;
 use crate::browser_select::{get, has, reflect_s};
 use bare_html::dom::{Atom, Document, NodeId};
-use bare_js::eval::Interp;
-use bare_js::value::{ObjId, Value};
 use bare_js_api::{Args, HostFn, Local};
 use std::borrow::Cow;
 use std::cell::{Cell, OnceCell, RefCell};
@@ -323,42 +322,42 @@ fn step_message(value: &str, min: Option<&str>, max: Option<&str>, step: Option<
 // ------------------------------------------------------------------------------------------ host state
 
 #[derive(Default)]
-struct St {
+struct St<E: Eng> {
     /// The `setCustomValidity` messages (not empty).
     custom: HashMap<NodeId, String>,
     /// The `ValidityState` of each element, and the element of each `ValidityState`.
-    state: IdMap<NodeId, ObjId>,
-    owner: IdMap<ObjId, NodeId>,
+    state: IdMap<NodeId, <E as Eng>::Obj>,
+    owner: IdMap<<E as Eng>::Obj, NodeId>,
     /// The `labels` list of each control.
-    labels: IdMap<NodeId, ObjId>,
+    labels: IdMap<NodeId, <E as Eng>::Obj>,
     /// The forms in `reset()` now.
     locked: HashSet<NodeId>,
 }
 
 #[derive(Default)]
-pub(crate) struct CtlHost {
-    st: RefCell<St>,
+pub(crate) struct CtlHost<E: Eng> {
+    st: RefCell<St<E>>,
     /// The shared objects below, in persistent handles: the engine roots them. The `ObjId`s in the cells are for lookups.
     keep: RefCell<Vec<bare_js_api::Persistent>>,
     /// `willValidate`, `validationMessage`, `validity`, `setCustomValidity`, `labels`, `checkValidity`, `reportValidity`.
-    shared: OnceCell<[ObjId; 7]>,
+    shared: OnceCell<[<E as Eng>::Obj; 7]>,
     /// `input.required`: getter and setter.
-    required: OnceCell<[ObjId; 2]>,
+    required: OnceCell<[<E as Eng>::Obj; 2]>,
     /// `ValidityState`: prototype and constructor.
-    validity: OnceCell<[ObjId; 2]>,
+    validity: OnceCell<[<E as Eng>::Obj; 2]>,
     /// `HTMLLabelElement`: prototype and constructor.
-    label: OnceCell<[ObjId; 2]>,
+    label: OnceCell<[<E as Eng>::Obj; 2]>,
     /// Which of `input` (1), `button` (2) and `form` (4) got their members.
     done: Cell<u8>,
 }
 
 /// Keep the shared objects `objs` alive for the life of the page, in persistent handles of `keep`.
-pub(crate) fn hold(it: &mut Interp<'_>, keep: &RefCell<Vec<bare_js_api::Persistent>>, objs: &[ObjId]) {
-    keep.borrow_mut().extend(objs.iter().map(|&o| it.persist_value(Value::Object(o))));
+pub(crate) fn hold<E: Eng>(it: &mut E::Vm, keep: &RefCell<Vec<bare_js_api::Persistent>>, objs: &[E::Obj]) {
+    keep.borrow_mut().extend(objs.iter().map(|&o| it.persist_value(E::obj_raw(o))));
 }
 
 /// Forget the `ValidityState` `o`, which the collector freed. The entry of its element may name a newer one.
-pub(crate) fn prune_validity(d: &Dom, o: ObjId) {
+pub(crate) fn prune_validity<E: Eng>(d: &Dom<E>, o: E::Obj) {
     let mut st = d.ctl.st.borrow_mut();
     if let Some(n) = st.owner.remove(&o)
         && st.state.get(&n) == Some(&o)
@@ -368,7 +367,7 @@ pub(crate) fn prune_validity(d: &Dom, o: ObjId) {
 }
 
 /// Forget the `labels` list `o` of the control `n`, which the collector freed.
-pub(crate) fn forget_labels(d: &Dom, n: NodeId, o: ObjId) {
+pub(crate) fn forget_labels<E: Eng>(d: &Dom<E>, n: NodeId, o: E::Obj) {
     let mut st = d.ctl.st.borrow_mut();
     if st.labels.get(&n) == Some(&o) {
         st.labels.remove(&n);
@@ -408,21 +407,21 @@ fn tag_of(doc: &Document, n: NodeId) -> Option<&'static str> {
 }
 
 /// The pattern `p` matches all of `value`. A pattern that does not compile matches.
-fn pattern_ok(it: &mut Interp<'_>, p: &str, value: &str) -> R<bool> {
+fn pattern_ok<E: Eng>(it: &mut E::Vm, p: &str, value: &str) -> R<E, bool> {
     use bare_js::regexp::{Limits, Regex, Scratch};
     let Ok(re) = Regex::from_str(&format!("^(?:{p})$"), "u") else { return Ok(true) };
     let units: Vec<u16> = value.encode_utf16().collect();
     let mut sc = Scratch::new();
     let r = re.exec(&units, 0, &Limits::default(), None, &mut sc);
-    it.charge(sc.steps / 16 + 1)?;
+    it.charge_o(sc.steps / 16 + 1)?;
     Ok(!matches!(r, Ok(None)))
 }
 
 const TEXTY: [&str; 11] = ["text", "search", "tel", "url", "email", "password", "number", "date", "month", "week", "time"];
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// Is `n` a candidate for constraint validation?
-    pub(crate) fn will_validate(&self, it: &mut Interp<'_>, n: NodeId) -> R<bool> {
+    pub(crate) fn will_validate(&self, it: &mut E::Vm, n: NodeId) -> R<E, bool> {
         {
             let doc = self.doc.borrow();
             let barred = match tag_of(&doc, n) {
@@ -440,7 +439,7 @@ impl Dom {
             if doc.find_atom("datalist").is_some() {
                 let mut cur = doc.parent(n);
                 while let Some(p) = cur {
-                    it.charge(1)?;
+                    it.charge_o(1)?;
                     if doc.is_html(p, "datalist") {
                         return Ok(false);
                     }
@@ -451,7 +450,7 @@ impl Dom {
         Ok(!self.is_disabled_control(it, n)?)
     }
 
-    fn verdict(&self, it: &mut Interp<'_>, n: NodeId) -> R<Verdict> {
+    fn verdict(&self, it: &mut E::Vm, n: NodeId) -> R<E, Verdict> {
         if let Some((flags, msg)) = self.face_verdict(n) {
             return Ok(Verdict { flags, msg });
         }
@@ -500,7 +499,7 @@ impl Dom {
                 drop(doc);
                 if let Some(p) = pattern.as_deref().filter(|p| !p.is_empty()) {
                     for piece in &pieces {
-                        if !pattern_ok(it, p, piece)? {
+                        if !pattern_ok::<E>(it, p, piece)? {
                             v.add(PATTERN, || "Please match the requested format.".into());
                             break;
                         }
@@ -551,7 +550,7 @@ impl Dom {
     }
 
     /// Does `n` fail its constraints, and is it a candidate? (The check of `checkValidity`, of the form and of submission.)
-    pub(crate) fn is_invalid(&self, it: &mut Interp<'_>, n: NodeId) -> R<bool> {
+    pub(crate) fn is_invalid(&self, it: &mut E::Vm, n: NodeId) -> R<E, bool> {
         Ok(self.will_validate(it, n)? && self.verdict(it, n)?.flags != 0)
     }
 }
@@ -559,30 +558,30 @@ impl Dom {
 // ------------------------------------------------------------------------------------------ the members
 
 /// `this` is an `input`, `select`, `textarea` or `button`.
-pub(crate) fn control<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
+pub(crate) fn control<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, NodeId> {
     let n = d.el_s(s, this)?;
     let ok = tag_of(&d.doc.borrow(), n).is_some();
     if ok { Ok(n) } else { Err(s.type_error("Illegal invocation")) }
 }
 
-fn will_validate<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn will_validate<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = control(d, s, this)?;
-    let w = old(s, |it| d.will_validate(it, n))?;
+    let w = old::<E, _>(s, |it| d.will_validate(it, n))?;
     Ok(s.boolean(w))
 }
 
-fn validation_message<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn validation_message<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = control(d, s, this)?;
-    let m = old(s, |it| message_of(d, it, n))?;
+    let m = old::<E, _>(s, |it| message_of(d, it, n))?;
     d.js_str_s(s, &m)
 }
 
 /// The `validationMessage` of `n`.
-pub(crate) fn message_of(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> R<String> {
+pub(crate) fn message_of<E: Eng>(d: &Dom<E>, it: &mut E::Vm, n: NodeId) -> R<E, String> {
     Ok(if d.will_validate(it, n)? { d.verdict(it, n)?.msg } else { String::new() })
 }
 
-fn set_custom_validity<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_custom_validity<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = control(d, s, this)?;
     let Some(v) = a.get(0) else {
         let name = match tag_of(&d.doc.borrow(), n) {
@@ -603,18 +602,18 @@ fn set_custom_validity<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args
     Ok(s.undefined())
 }
 
-fn validity<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn validity<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = control(d, s, this)?;
     validity_of(d, s, n)
 }
 
 /// The `ValidityState` of `n`.
-pub(crate) fn validity_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId) -> Res<'s, Local<'s>> {
+pub(crate) fn validity_of<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, n: NodeId) -> Res<'s, Local<'s>> {
     let cached = d.ctl.st.borrow().state.get(&n).copied();
     if let Some(o) = cached {
         return Ok(d.obj_local(s, o));
     }
-    let [proto, _] = old(s, |it| made_validity(d, it))?;
+    let [proto, _] = old::<E, _>(s, |it| made_validity(d, it))?;
     let o = d.obj_s(s, proto)?;
     let l = d.obj_local(s, o);
     // An owner: the collector prunes the two entries when `o` dies.
@@ -626,71 +625,71 @@ pub(crate) fn validity_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId) -> Res<'s,
     Ok(l)
 }
 
-fn flag<'s, const I: u32>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
-    let owner = match obj_id(s, this) {
+fn flag<'s, const I: u32, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let owner = match obj_id::<E>(s, this) {
         Some(o) => d.ctl.st.borrow().owner.get(&o).copied(),
         None => None,
     };
     let Some(n) = owner else { return Err(s.type_error("Illegal invocation")) };
-    let f = old(s, |it| d.verdict(it, n))?.flags;
+    let f = old::<E, _>(s, |it| d.verdict(it, n))?.flags;
     Ok(s.boolean(if I == 10 { f == 0 } else { f & (1 << I) != 0 }))
 }
 
-fn made_validity(d: &Dom, it: &mut Interp<'_>) -> R<[ObjId; 2]> {
+fn made_validity<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, [E::Obj; 2]> {
     if let Some(&m) = d.ctl.validity.get() {
         return Ok(m);
     }
     let op = it.object_prototype();
     let proto = d.obj(it, op)?;
-    let getters: [(&str, HS); 11] = [
-        ("valueMissing", flag::<0>),
-        ("typeMismatch", flag::<1>),
-        ("patternMismatch", flag::<2>),
-        ("tooLong", flag::<3>),
-        ("tooShort", flag::<4>),
-        ("rangeUnderflow", flag::<5>),
-        ("rangeOverflow", flag::<6>),
-        ("stepMismatch", flag::<7>),
-        ("badInput", flag::<8>),
-        ("customError", flag::<9>),
-        ("valid", flag::<10>),
+    let getters: [(&str, HS<E>); 11] = [
+        ("valueMissing", flag::<0, _>),
+        ("typeMismatch", flag::<1, _>),
+        ("patternMismatch", flag::<2, _>),
+        ("tooLong", flag::<3, _>),
+        ("tooShort", flag::<4, _>),
+        ("rangeUnderflow", flag::<5, _>),
+        ("rangeOverflow", flag::<6, _>),
+        ("stepMismatch", flag::<7, _>),
+        ("badInput", flag::<8, _>),
+        ("customError", flag::<9, _>),
+        ("valid", flag::<10, _>),
     ];
     for (name, g) in getters {
         d.def_get_s(it, proto, name, g, None)?;
     }
     let ctor = interface(d, it, proto, "ValidityState")?;
-    hold(it, &d.ctl.keep, &[proto, ctor]);
+    hold::<E>(it, &d.ctl.keep, &[proto, ctor]);
     let _ = d.ctl.validity.set([proto, ctor]);
     Ok([proto, ctor])
 }
 
 /// The constructor `name` (illegal to call) of `proto`, with the `toStringTag`.
-fn interface(d: &Dom, it: &mut Interp<'_>, proto: ObjId, name: &str) -> R<ObjId> {
+fn interface<E: Eng>(d: &Dom<E>, it: &mut E::Vm, proto: E::Obj, name: &str) -> R<E, E::Obj> {
     let f = crate::browser_custom::interface_ctor(d, it, name, true)?;
     link(d, it, proto, name, f)
 }
 
 /// The same with the constructor function `h`.
-pub(crate) fn interface_with(d: &Dom, it: &mut Interp<'_>, proto: ObjId, name: &str, h: HS) -> R<ObjId> {
+pub(crate) fn interface_with<E: Eng>(d: &Dom<E>, it: &mut E::Vm, proto: E::Obj, name: &str, h: HS<E>) -> R<E, E::Obj> {
     let f = d.add_fn_s_obj(it, h, name, 0, HostFn::Ctor)?;
     link(d, it, proto, name, f)
 }
 
-fn link(d: &Dom, it: &mut Interp<'_>, proto: ObjId, name: &str, f: ObjId) -> R<ObjId> {
+fn link<E: Eng>(d: &Dom<E>, it: &mut E::Vm, proto: E::Obj, name: &str, f: E::Obj) -> R<E, E::Obj> {
     let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
-    it.define_data(f, kp, Value::Object(proto), false, false, false)?;
-    it.define_data(proto, kc, Value::Object(f), true, false, true)?;
+    it.define_data(f, kp, E::obj_raw(proto), false, false, false)?;
+    it.define_data(proto, kc, E::obj_raw(f), true, false, true)?;
     crate::browser_lazy::tag(d, it, proto, name)?;
     Ok(f)
 }
 
-fn labels<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn labels<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = control(d, s, this)?;
     labels_of(d, s, n)
 }
 
 /// The `labels` of `n`: `null` when it is not labelable.
-pub(crate) fn labels_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId) -> Res<'s, Local<'s>> {
+pub(crate) fn labels_of<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, n: NodeId) -> Res<'s, Local<'s>> {
     if !labelable(d, &d.doc.borrow(), n) {
         return Ok(s.null());
     }
@@ -698,17 +697,17 @@ pub(crate) fn labels_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId) -> Res<'s, L
     if let Some(o) = cached {
         return Ok(d.obj_local(s, o));
     }
-    let v = old_v(s, |it| crate::browser_nodelist::make_list(d, it, crate::browser_nodelist::list_proto(d), Src::Labels(n)))?;
-    let Some(o) = obj_id(s, v) else { unreachable!() };
+    let v = old_v::<E>(s, |it| crate::browser_nodelist::make_list(d, it, crate::browser_nodelist::list_proto(d), Src::Labels(n)))?;
+    let Some(o) = obj_id::<E>(s, v) else { unreachable!() };
     d.ctl.st.borrow_mut().labels.insert(n, o);
     Ok(v)
 }
 
-fn shared(d: &Dom, it: &mut Interp<'_>) -> R<[ObjId; 7]> {
+fn shared<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, [E::Obj; 7]> {
     if let Some(&s) = d.ctl.shared.get() {
         return Ok(s);
     }
-    let hs: [(HS, &str, u32); 7] = [
+    let hs: [(HS<E>, &str, u32); 7] = [
         (will_validate, "get willValidate", 0),
         (validation_message, "get validationMessage", 0),
         (validity, "get validity", 0),
@@ -721,26 +720,26 @@ fn shared(d: &Dom, it: &mut Interp<'_>) -> R<[ObjId; 7]> {
     for (h, name, len) in hs {
         v.push(d.add_fn_s_obj(it, h, name, len, HostFn::Method)?);
     }
-    let out: [ObjId; 7] = v.try_into().expect("seven");
-    hold(it, &d.ctl.keep, &out);
+    let out: [E::Obj; 7] = v.try_into().expect("seven");
+    hold::<E>(it, &d.ctl.keep, &out);
     let _ = d.ctl.shared.set(out);
     Ok(out)
 }
 
 /// Define the validation members and `labels` on the prototype `proto` (`check`: also `checkValidity` and `reportValidity`, which the
 /// `input` and `button` prototypes have from the start).
-pub(crate) fn decorate(d: &Dom, it: &mut Interp<'_>, proto: ObjId, check: bool) -> R<()> {
+pub(crate) fn decorate<E: Eng>(d: &Dom<E>, it: &mut E::Vm, proto: E::Obj, check: bool) -> R<E, ()> {
     let f = shared(d, it)?;
     for (name, g) in [("willValidate", f[0]), ("validationMessage", f[1]), ("validity", f[2]), ("labels", f[4])] {
         let k = d.key(it, name)?;
         d.define_accessor(it, proto, k, g, None)?;
     }
     let k = d.key(it, "setCustomValidity")?;
-    it.define_data(proto, k, Value::Object(f[3]), true, false, true)?;
+    it.define_data(proto, k, E::obj_raw(f[3]), true, false, true)?;
     if check {
         for (name, i) in [("checkValidity", 5), ("reportValidity", 6)] {
             let k = d.key(it, name)?;
-            it.define_data(proto, k, Value::Object(f[i]), true, false, true)?;
+            it.define_data(proto, k, E::obj_raw(f[i]), true, false, true)?;
         }
     }
     Ok(())
@@ -749,14 +748,14 @@ pub(crate) fn decorate(d: &Dom, it: &mut Interp<'_>, proto: ObjId, check: bool) 
 reflect_s!("input", "required", input_required, set_input_required, bool);
 
 /// `form.elements`: one live `HTMLCollection` of the form (`browser_table::FORM`).
-fn form_elements<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn form_elements<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let f = d.html_el_s(s, this, "form")?;
-    old_v(s, |it| crate::browser_nodelist::of(d, it, f, crate::browser_table::FORM))
+    old_v::<E>(s, |it| crate::browser_nodelist::of(d, it, f, crate::browser_table::FORM))
 }
 
 /// The prototype of a new wrapper of an HTML `input`, `button`, `form` or `label`. The first `input`, the first `button` and the first `form`
 /// give their prototype the members of this file.
-pub(crate) fn proto_for(d: &Dom, it: &mut Interp<'_>, tag: &str) -> R<ObjId> {
+pub(crate) fn proto_for<E: Eng>(d: &Dom<E>, it: &mut E::Vm, tag: &str) -> R<E, E::Obj> {
     if tag == "label" {
         return Ok(made_label(d, it)?[0]);
     }
@@ -777,7 +776,7 @@ pub(crate) fn proto_for(d: &Dom, it: &mut Interp<'_>, tag: &str) -> R<ObjId> {
             d.def_get_s(it, p.form, "elements", form_elements, None)?;
             d.def_get_s(it, p.form, "length", |d, s, t, _| {
                 let f = d.html_el_s(s, t, "form")?;
-                let n = old(s, |it| d.form_elements(it, f))?.len();
+                let n = old::<E, _>(s, |it| d.form_elements(it, f))?.len();
                 Ok(s.number(n as f64))
             }, None)?;
             d.ctl.done.set(done | 4);
@@ -798,7 +797,7 @@ pub(crate) fn proto_for(d: &Dom, it: &mut Interp<'_>, tag: &str) -> R<ObjId> {
                 let k = d.key(it, "required")?;
                 let g = d.add_fn_s_obj(it, input_required, "get required", 0, HostFn::Method)?;
                 let s = d.add_fn_s_obj(it, set_input_required, "set required", 1, HostFn::Method)?;
-                hold(it, &d.ctl.keep, &[g, s]);
+                hold::<E>(it, &d.ctl.keep, &[g, s]);
                 let _ = d.ctl.required.set([g, s]);
                 d.define_accessor(it, proto, k, g, Some(s))?;
             }
@@ -815,29 +814,29 @@ pub(crate) fn proto_for(d: &Dom, it: &mut Interp<'_>, tag: &str) -> R<ObjId> {
 // ------------------------------------------------------------------------------------------ label
 
 /// Is `n` a labelable element?
-fn labelable(d: &Dom, doc: &Document, n: NodeId) -> bool {
+fn labelable<E: Eng>(d: &Dom<E>, doc: &Document, n: NodeId) -> bool {
     ["button", "select", "textarea", "meter", "output", "progress"].iter().any(|t| doc.is_html(n, t)) || (doc.is_html(n, "input") && input_kind(doc, n) != "hidden") || d.is_face(n)
 }
 
-fn root_of(doc: &Document, it: &mut Interp<'_>, n: NodeId) -> R<NodeId> {
+fn root_of<E: Eng>(doc: &Document, it: &mut E::Vm, n: NodeId) -> R<E, NodeId> {
     let mut top = n;
     while let Some(p) = doc.parent(top) {
-        it.charge(1)?;
+        it.charge_o(1)?;
         top = p;
     }
     Ok(top)
 }
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// The control of a label: the element that its `for` names (the first with that ID in the tree of the label), else its first labelable
     /// descendant. `None` when it is not labelable.
-    pub(crate) fn label_control(&self, it: &mut Interp<'_>, label: NodeId) -> R<Option<NodeId>> {
+    pub(crate) fn label_control(&self, it: &mut E::Vm, label: NodeId) -> R<E, Option<NodeId>> {
         let doc = self.doc.borrow();
         if let Some(id) = get(&doc, label, "for") {
-            let root = root_of(&doc, it, label)?;
+            let root = root_of::<E>(&doc, it, label)?;
             let (mut cur, mut depth) = (root, 0);
             while !id.is_empty() && let Some((c, d)) = crate::browser_dom::next_in(&doc, root, cur, depth) {
-                it.charge(1)?;
+                it.charge_o(1)?;
                 (cur, depth) = (c, d);
                 if doc.attr(c, Atom::ID) == Some(id) {
                     return Ok(labelable(self, &doc, c).then_some(c));
@@ -847,7 +846,7 @@ impl Dom {
         }
         let (mut cur, mut depth) = (label, 0);
         while let Some((c, d)) = crate::browser_dom::next_in(&doc, label, cur, depth) {
-            it.charge(1)?;
+            it.charge_o(1)?;
             (cur, depth) = (c, d);
             if labelable(self, &doc, c) {
                 return Ok(Some(c));
@@ -858,13 +857,13 @@ impl Dom {
 }
 
 /// The labels of `control` in tree order, for `Src::Labels`.
-pub(crate) fn label_ids(d: &Dom, it: &mut Interp<'_>, control: NodeId) -> R<Vec<NodeId>> {
+pub(crate) fn label_ids<E: Eng>(d: &Dom<E>, it: &mut E::Vm, control: NodeId) -> R<E, Vec<NodeId>> {
     let (root, all) = {
         let doc = d.doc.borrow();
-        let root = root_of(&doc, it, control)?;
+        let root = root_of::<E>(&doc, it, control)?;
         let (mut cur, mut depth, mut all) = (root, 0, Vec::new());
         while let Some((c, dp)) = crate::browser_dom::next_in(&doc, root, cur, depth) {
-            it.charge(1)?;
+            it.charge_o(1)?;
             (cur, depth) = (c, dp);
             if doc.is_html(c, "label") {
                 all.push(c);
@@ -885,19 +884,19 @@ pub(crate) fn label_ids(d: &Dom, it: &mut Interp<'_>, control: NodeId) -> R<Vec<
     Ok(out)
 }
 
-fn label_el<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
+fn label_el<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, NodeId> {
     d.html_el_s(s, this, "label")
 }
 
-fn label_control<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn label_control<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let l = label_el(d, s, this)?;
-    let c = old(s, |it| d.label_control(it, l))?;
+    let c = old::<E, _>(s, |it| d.label_control(it, l))?;
     d.wrap_opt_s(s, c)
 }
 
-fn label_form<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn label_form<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let l = label_el(d, s, this)?;
-    let f = old(s, |it| match d.label_control(it, l)? {
+    let f = old::<E, _>(s, |it| match d.label_control(it, l)? {
         Some(c) => d.form_owner(it, c),
         None => Ok(None),
     })?;
@@ -906,7 +905,7 @@ fn label_form<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> 
 
 reflect_s!("label", "for", html_for, set_html_for, str);
 
-fn made_label(d: &Dom, it: &mut Interp<'_>) -> R<[ObjId; 2]> {
+fn made_label<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, [E::Obj; 2]> {
     if let Some(&m) = d.ctl.label.get() {
         return Ok(m);
     }
@@ -915,16 +914,16 @@ fn made_label(d: &Dom, it: &mut Interp<'_>) -> R<[ObjId; 2]> {
     d.def_get_s(it, proto, "htmlFor", html_for, Some(set_html_for))?;
     d.def_get_s(it, proto, "form", label_form, None)?;
     let ctor = interface(d, it, proto, "HTMLLabelElement")?;
-    hold(it, &d.ctl.keep, &[proto, ctor]);
+    hold::<E>(it, &d.ctl.keep, &[proto, ctor]);
     let _ = d.ctl.label.set([proto, ctor]);
     Ok([proto, ctor])
 }
 
 // ------------------------------------------------------------------------------------------ reset
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// The reset algorithm of a control (HTML "reset algorithm" of input, select and textarea).
-    fn reset_control(&self, it: &mut Interp<'_>, n: NodeId) -> R<()> {
+    fn reset_control(&self, it: &mut E::Vm, n: NodeId) -> R<E, ()> {
         let (tag, kind) = {
             let doc = self.doc.borrow();
             (tag_of(&doc, n), if doc.is_html(n, "input") { input_kind(&doc, n) } else { "" })
@@ -957,7 +956,7 @@ impl Dom {
     }
 
     /// `form.reset()` and a reset button: the `reset` event, then the reset of each control. Nothing when the form is already resetting.
-    pub(crate) fn reset_form(&self, it: &mut Interp<'_>, form: NodeId) -> R<()> {
+    pub(crate) fn reset_form(&self, it: &mut E::Vm, form: NodeId) -> R<E, ()> {
         if !self.ctl.st.borrow_mut().locked.insert(form) {
             return Ok(());
         }
@@ -980,32 +979,32 @@ impl Dom {
     }
 }
 
-pub(crate) fn form_reset<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn form_reset<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let f = d.html_el_s(s, this, "form")?;
-    old(s, |it| d.reset_form(it, f))?;
+    old::<E, _>(s, |it| d.reset_form(it, f))?;
     Ok(s.undefined())
 }
 
 // ------------------------------------------------------------------------------------------ install
 
-fn ens_validity(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+fn ens_validity<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
     made_validity(d, it).map(|_| ())
 }
 
-fn ens_label(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+fn ens_label<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
     made_label(d, it).map(|_| ())
 }
 
 lazy_global!(lazy_validity, "ValidityState", ens_validity, |d| d.ctl.validity.get().expect("made")[1]);
 lazy_global!(lazy_label, "HTMLLabelElement", ens_label, |d| d.ctl.label.get().expect("made")[1]);
 
-pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
     table!(lazy = [
         Row::both(1, "ValidityState", lazy_validity),
         Row::both(1, "HTMLLabelElement", lazy_label),
     ]);
     let g = s.global();
-    d.install_rows(s, &[g], &lazy::T)
+    d.install_rows(s, &[g], &lazy::T::<E>::V)
 }
 
 #[cfg(test)]
@@ -1083,7 +1082,7 @@ mod tests {
 }
 
 #[cfg(test)]
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// The entries of the `ValidityState` maps (element to object, object to element) and of `labels`. (Tests.)
     pub(crate) fn ctl_entries(&self) -> (usize, usize, usize) {
         let st = self.ctl.st.borrow();
@@ -1094,7 +1093,7 @@ impl Dom {
 // ------------------------------------------------------------------------------------------ arena reclaim (`browser_reclaim.rs`)
 
 /// The nodes that live `ValidityState` and `labels` objects name.
-pub(crate) fn held(d: &Dom, out: &mut Vec<NodeId>) {
+pub(crate) fn held<E: Eng>(d: &Dom<E>, out: &mut Vec<NodeId>) {
     let st = d.ctl.st.borrow();
     out.extend(st.state.keys().copied());
     out.extend(st.owner.values().copied());
@@ -1103,6 +1102,6 @@ pub(crate) fn held(d: &Dom, out: &mut Vec<NodeId>) {
 }
 
 /// Drop the state of the nodes that the reclaim freed.
-pub(crate) fn forget(d: &Dom, gone: &dyn Fn(NodeId) -> bool) {
+pub(crate) fn forget<E: Eng>(d: &Dom<E>, gone: &dyn Fn(NodeId) -> bool) {
     d.ctl.st.borrow_mut().custom.retain(|&n, _| !gone(n));
 }

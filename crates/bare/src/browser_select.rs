@@ -40,13 +40,13 @@
 //!
 //! Bounds: the options of one select count with `dom-results`; a list counts with the wrappers.
 
+use crate::eng::{Eng, Ops};
 use crate::browser::*;
 use crate::browser_lazy::lazy_global;
 use crate::browser_nodelist::{self as nl, Src};
 use crate::browser_scoped::*;
 use bare_html::dom::{Atom, Document, NodeData, NodeId};
-use bare_js::eval::Interp;
-use bare_js::value::{ObjId, Value, to_int32, to_uint32};
+use bare_js::value::{to_int32, to_uint32};
 use bare_js_api::{Args, HostFn, Local, Type};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashSet;
@@ -64,7 +64,7 @@ struct Opt {
     idx: u32,
 }
 
-struct Cache {
+struct Cache<E: Eng> {
     rev: u64,
     opts: Vec<NodeId>,
     attrs: Vec<bool>,
@@ -72,31 +72,31 @@ struct Cache {
     sel: Vec<u32>,
     multiple: bool,
     size1: bool,
-    options: Option<ObjId>,
-    chosen: Option<ObjId>,
+    options: Option<E::Obj>,
+    chosen: Option<E::Obj>,
 }
 
 #[derive(Default)]
-struct State {
+struct State<E: Eng> {
     opt: IdTab<NodeId, Opt>,
-    cache: IdMap<NodeId, Cache>,
+    cache: IdMap<NodeId, Cache<E>>,
 }
 
 #[derive(Clone, Copy)]
-struct Made {
-    select: ObjId,
-    option: ObjId,
-    optgroup: ObjId,
-    collection: ObjId,
-    options: ObjId,
-    textarea: ObjId,
-    ctors: [ObjId; 7],
+struct Made<E: Eng> {
+    select: E::Obj,
+    option: E::Obj,
+    optgroup: E::Obj,
+    collection: E::Obj,
+    options: E::Obj,
+    textarea: E::Obj,
+    ctors: [E::Obj; 7],
 }
 
 #[derive(Default)]
-pub(crate) struct SelHost {
-    st: RefCell<State>,
-    made: OnceCell<Made>,
+pub(crate) struct SelHost<E: Eng> {
+    st: RefCell<State<E>>,
+    made: OnceCell<Made<E>>,
     /// The objects of `made`, in persistent handles: the engine roots them.
     keep: RefCell<Vec<bare_js_api::Persistent>>,
     /// The members of `HTMLTextAreaElement.prototype` are made at the first textarea wrapper or the first read of the global.
@@ -108,7 +108,7 @@ pub(crate) struct SelHost {
 macro_rules! ch {
     ($it:expr, $n:expr) => {
         if let Some(i) = $it.as_deref_mut() {
-            i.charge($n)?;
+            i.charge_o($n)?;
         }
     };
 }
@@ -116,7 +116,7 @@ macro_rules! ch {
 /// The atom of an attribute name. The three names that option properties read at each access come from `SelHost::atoms`, so a
 /// read does not hash the name. A name that the document lacks stays missing until the name table grows, because a name is never
 /// removed. The document of a `Dom` never changes, so a cached atom stays valid.
-fn atom(d: &Dom, doc: &Document, name: &str) -> Option<Atom> {
+fn atom<E: Eng>(d: &Dom<E>, doc: &Document, name: &str) -> Option<Atom> {
     let i = match name {
         "value" => 0,
         "selected" => 1,
@@ -133,11 +133,11 @@ fn atom(d: &Dom, doc: &Document, name: &str) -> Option<Atom> {
 }
 
 /// `has` and `get` for the reads that run at each option property access.
-pub(crate) fn has_in(d: &Dom, doc: &Document, n: NodeId, name: &str) -> bool {
+pub(crate) fn has_in<E: Eng>(d: &Dom<E>, doc: &Document, n: NodeId, name: &str) -> bool {
     atom(d, doc, name).is_some_and(|a| doc.attr(n, a).is_some())
 }
 
-fn get_in<'a>(d: &Dom, doc: &'a Document, n: NodeId, name: &str) -> Option<&'a str> {
+fn get_in<'a, E: Eng>(d: &Dom<E>, doc: &'a Document, n: NodeId, name: &str) -> Option<&'a str> {
     atom(d, doc, name).and_then(|a| doc.attr(n, a))
 }
 
@@ -167,7 +167,7 @@ fn display_size(doc: &Document, select: NodeId) -> u32 {
 }
 
 /// The options of `select` in tree order. A nested `select` is not entered and a foreign element is skipped.
-fn collect(d: &Dom, doc: &Document, it: &mut Option<&mut Interp<'_>>, select: NodeId) -> R<Vec<NodeId>> {
+fn collect<E: Eng>(d: &Dom<E>, doc: &Document, it: &mut Option<&mut E::Vm>, select: NodeId) -> R<E, Vec<NodeId>> {
     let mut out = Vec::new();
     let mut stack: Vec<NodeId> = doc.children(select).collect();
     stack.reverse();
@@ -199,7 +199,7 @@ pub(crate) fn is_disabled(doc: &Document, o: NodeId) -> bool {
     has(doc, o, "disabled") || doc.parent(o).is_some_and(|p| doc.is_html(p, "optgroup") && has(doc, p, "disabled"))
 }
 
-fn first_enabled(d: &Dom, doc: &Document, opts: &[NodeId]) -> Option<usize> {
+fn first_enabled<E: Eng>(d: &Dom<E>, doc: &Document, opts: &[NodeId]) -> Option<usize> {
     let off = |o: NodeId| !has_in(d, doc, o, "disabled") && !doc.parent(o).is_some_and(|p| doc.is_html(p, "optgroup") && has_in(d, doc, p, "disabled"));
     opts.iter().position(|&o| off(o))
 }
@@ -234,17 +234,17 @@ pub(crate) fn value_of(doc: &Document, o: NodeId) -> String {
     get(doc, o, "value").map_or_else(|| text_of(doc, o), str::to_string)
 }
 
-fn value_is(d: &Dom, doc: &Document, o: NodeId, want: &str) -> bool {
+fn value_is<E: Eng>(d: &Dom<E>, doc: &Document, o: NodeId, want: &str) -> bool {
     match get_in(d, doc, o, "value") {
         Some(v) => v == want,
         None => text_of(doc, o) == want,
     }
 }
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// The state of the select `select` is read again if the document changed since the last call; the rules of the standard run when the
     /// list or a default changed. `it` pays for the walk; the painter has none.
-    pub(crate) fn sel_sync(&self, mut it: Option<&mut Interp<'_>>, select: NodeId) -> R<()> {
+    pub(crate) fn sel_sync(&self, mut it: Option<&mut E::Vm>, select: NodeId) -> R<E, ()> {
         let rev = self.doc.borrow().revision();
         if self.sel.st.borrow().cache.get(&select).is_some_and(|c| c.rev == rev) {
             return Ok(());
@@ -311,11 +311,11 @@ impl Dom {
     }
 
     /// The nearest `select` ancestor of `n`.
-    fn owner_select(&self, it: &mut Interp<'_>, n: NodeId) -> R<Option<NodeId>> {
+    fn owner_select(&self, it: &mut E::Vm, n: NodeId) -> R<E, Option<NodeId>> {
         let doc = self.doc.borrow();
         let mut cur = doc.parent(n);
         while let Some(p) = cur {
-            it.charge(1)?;
+            it.charge_o(1)?;
             if doc.is_html(p, "select") {
                 return Ok(Some(p));
             }
@@ -325,7 +325,7 @@ impl Dom {
     }
 
     /// The state of the option `o`: its select, if it is in the list of one, and its `Opt`.
-    fn opt_state(&self, it: &mut Interp<'_>, o: NodeId) -> R<(Option<NodeId>, Opt)> {
+    fn opt_state(&self, it: &mut E::Vm, o: NodeId) -> R<E, (Option<NodeId>, Opt)> {
         let owner = self.owner_select(it, o)?;
         if let Some(s) = owner {
             self.sel_sync(Some(&mut *it), s)?;
@@ -416,7 +416,7 @@ impl Dom {
 
     /// Pick the options of `select` that match `wanted` (each by label, else by value; a disabled option never matches), as a user
     /// does. Gives whether the selection changed, or why no option was picked.
-    pub(crate) fn sel_pick(&self, it: &mut Interp<'_>, select: NodeId, wanted: &[String]) -> R<Result<bool, String>> {
+    pub(crate) fn sel_pick(&self, it: &mut E::Vm, select: NodeId, wanted: &[String]) -> R<E, Result<bool, String>> {
         self.sel_sync(Some(&mut *it), select)?;
         let (opts, multiple, before) = {
             let st = self.sel.st.borrow();
@@ -475,26 +475,26 @@ impl Dom {
     }
 
     /// `html_el` on a local.
-    pub(crate) fn html_el_s<'s>(&self, s: &mut Sc<'s, '_>, this: Local<'s>, tag: &str) -> Res<'s, NodeId> {
+    pub(crate) fn html_el_s<'s>(&self, s: &mut Sc<'s, E>, this: Local<'s>, tag: &str) -> Res<'s, NodeId> {
         let n = self.el_s(s, this)?;
         if self.doc.borrow().is_html(n, tag) { Ok(n) } else { Err(s.type_error("Illegal invocation")) }
     }
 
     /// `sel_sync` for a call of the host: `s` pays for the walk.
-    fn sel_sync_s<'s>(&self, s: &mut Sc<'s, '_>, select: NodeId) -> Res<'s, ()> {
-        old(s, |it| self.sel_sync(Some(it), select))
+    fn sel_sync_s<'s>(&self, s: &mut Sc<'s, E>, select: NodeId) -> Res<'s, ()> {
+        old::<E, _>(s, |it| self.sel_sync(Some(it), select))
     }
 
     /// The select of `this`, which is a select or one of its collections.
-    fn select_or_list_s<'s>(&self, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
-        match obj_id(s, this).and_then(|o| nl::select_of(self, o)) {
+    fn select_or_list_s<'s>(&self, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, NodeId> {
+        match obj_id::<E>(s, this).and_then(|o| nl::select_of(self, o)) {
             Some(sel) => Ok(sel),
             None => self.html_el_s(s, this, "select"),
         }
     }
 
     /// The select of `this` (a select or its collection), synced.
-    fn select_this_s<'s>(&self, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
+    fn select_this_s<'s>(&self, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, NodeId> {
         let sel = self.select_or_list_s(s, this)?;
         self.sel_sync_s(s, sel)?;
         Ok(sel)
@@ -518,7 +518,7 @@ impl Dom {
 
     /// The reset steps of `select`: each option takes its `selected` attribute and is clean, then the rules run again (the next `sel_sync`
     /// sees a changed list, and counts each selected option as new, so the last one wins).
-    pub(crate) fn sel_reset(&self, it: &mut Interp<'_>, select: NodeId) -> R<()> {
+    pub(crate) fn sel_reset(&self, it: &mut E::Vm, select: NodeId) -> R<E, ()> {
         self.sel_sync(Some(&mut *it), select)?;
         {
             let (mut guard, doc) = (self.sel.st.borrow_mut(), self.doc.borrow());
@@ -538,7 +538,7 @@ impl Dom {
 }
 
 /// Does the select suffer from being missing (`required` and nothing chosen, or only the placeholder label option)? `browser_controls.rs`.
-pub(crate) fn value_missing(d: &Dom, it: &mut Interp<'_>, select: NodeId) -> R<bool> {
+pub(crate) fn value_missing<E: Eng>(d: &Dom<E>, it: &mut E::Vm, select: NodeId) -> R<E, bool> {
     d.sel_sync(Some(&mut *it), select)?;
     let (st, doc) = (d.sel.st.borrow(), d.doc.borrow());
     let c = &st.cache[&select];
@@ -546,7 +546,7 @@ pub(crate) fn value_missing(d: &Dom, it: &mut Interp<'_>, select: NodeId) -> R<b
 }
 
 /// The nodes for a list of `select`: all the options, or the selected ones. Called by `browser_nodelist.rs`.
-pub(crate) fn list_ids(d: &Dom, it: &mut Interp<'_>, select: NodeId, chosen: bool) -> R<Vec<NodeId>> {
+pub(crate) fn list_ids<E: Eng>(d: &Dom<E>, it: &mut E::Vm, select: NodeId, chosen: bool) -> R<E, Vec<NodeId>> {
     d.sel_sync(Some(&mut *it), select)?;
     let st = d.sel.st.borrow();
     let c = &st.cache[&select];
@@ -554,12 +554,12 @@ pub(crate) fn list_ids(d: &Dom, it: &mut Interp<'_>, select: NodeId, chosen: boo
 }
 
 /// `HTMLCollection.prototype`, for the collections of other modules (`browser_nodelist::of`).
-pub(crate) fn collection_proto(d: &Dom, it: &mut Interp<'_>) -> R<ObjId> {
+pub(crate) fn collection_proto<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, E::Obj> {
     Ok(ensure(d, it)?.collection)
 }
 
 /// The prototype of a new wrapper of an HTML `select`, `option` or `optgroup`.
-pub(crate) fn proto_for(d: &Dom, it: &mut Interp<'_>, tag: &str) -> R<ObjId> {
+pub(crate) fn proto_for<E: Eng>(d: &Dom<E>, it: &mut E::Vm, tag: &str) -> R<E, E::Obj> {
     let m = ensure(d, it)?;
     Ok(match tag {
         "select" => m.select,
@@ -572,15 +572,15 @@ pub(crate) fn proto_for(d: &Dom, it: &mut Interp<'_>, tag: &str) -> R<ObjId> {
     })
 }
 
-fn int<'s>(s: &mut Sc<'s, '_>, v: Local<'s>) -> Res<'s, i32> {
+fn int<'s, E: Eng>(s: &mut Sc<'s, E>, v: Local<'s>) -> Res<'s, i32> {
     Ok(to_int32(s.to_number(v)?))
 }
 
-fn uint<'s>(s: &mut Sc<'s, '_>, v: Local<'s>) -> Res<'s, u32> {
+fn uint<'s, E: Eng>(s: &mut Sc<'s, E>, v: Local<'s>) -> Res<'s, u32> {
     Ok(to_uint32(s.to_number(v)?))
 }
 
-fn missing<'s>(s: &mut Sc<'s, '_>, on: &str, what: &str) -> bare_js_api::Error<'s> {
+fn missing<'s, E: Eng>(s: &mut Sc<'s, E>, on: &str, what: &str) -> bare_js_api::Error<'s> {
     s.type_error(&format!("Failed to execute '{what}' on '{on}': 1 argument required, but only 0 present."))
 }
 
@@ -589,12 +589,12 @@ fn missing<'s>(s: &mut Sc<'s, '_>, on: &str, what: &str) -> bare_js_api::Error<'
 /// `reflect` for handlers of the new form.
 macro_rules! reflect_s {
     ($tag:literal, $attr:literal, $get:ident, $set:ident, str) => {
-        fn $get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+        fn $get<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
             let n = d.html_el_s(s, this, $tag)?;
             let t = get(&d.doc.borrow(), n, $attr).unwrap_or("").to_string();
             d.js_str_s(s, &t)
         }
-        fn $set<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+        fn $set<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
             let n = d.html_el_s(s, this, $tag)?;
             let t = d.arg_str_s(s, a, 0)?;
             crate::browser_dom::attr_set_s(d, s, n, $attr, &t)?;
@@ -602,13 +602,13 @@ macro_rules! reflect_s {
         }
     };
     ($tag:literal, $attr:literal, $get:ident, $set:ident, bool) => {
-        fn $get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+        fn $get<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
             let n = d.html_el_s(s, this, $tag)?;
             Ok(s.boolean($crate::browser_select::has_in(d, &d.doc.borrow(), n, $attr)))
         }
-        fn $set<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+        fn $set<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
             let n = d.html_el_s(s, this, $tag)?;
-            let v = arg_s(s, a, 0);
+            let v = arg_s::<E>(s, a, 0);
             if s.to_boolean(v) {
                 crate::browser_dom::attr_set_s(d, s, n, $attr, "")?;
             } else {
@@ -630,56 +630,56 @@ reflect_s!("optgroup", "disabled", group_disabled, set_group_disabled, bool);
 reflect_s!("optgroup", "label", group_label, set_group_label, str);
 
 /// `multiple` changes the rules: the state is read before the write, so the rules see the change.
-fn set_select_multiple<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_select_multiple<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let sel = d.html_el_s(s, this, "select")?;
     d.sel_sync_s(s, sel)?;
     set_select_multiple_attr(d, s, this, a)
 }
 
-fn select_size<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn select_size<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.html_el_s(s, this, "select")?;
     let v = get(&d.doc.borrow(), n, "size").and_then(parse_u).unwrap_or(0);
     Ok(s.number(v as f64))
 }
 
-fn set_select_size<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_select_size<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.html_el_s(s, this, "select")?;
-    let arg0 = arg_s(s, a, 0);
-    let v = uint(s, arg0)?;
+    let arg0 = arg_s::<E>(s, a, 0);
+    let v = uint::<E>(s, arg0)?;
     d.sel_sync_s(s, n)?;
     crate::browser_dom::attr_set_s(d, s, n, "size", &v.to_string())?;
     Ok(s.undefined())
 }
 
-fn select_type<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn select_type<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.html_el_s(s, this, "select")?;
     let m = has(&d.doc.borrow(), n, "multiple");
     d.js_str_s(s, if m { "select-multiple" } else { "select-one" })
 }
 
-fn select_form<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn select_form<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.html_el_s(s, this, "select")?;
-    let f = old(s, |it| d.form_owner(it, n))?;
+    let f = old::<E, _>(s, |it| d.form_owner(it, n))?;
     d.wrap_opt_s(s, f)
 }
 
 // ------------------------------------------------------------------------------------------ select
 
-fn select_selected_index<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn select_selected_index<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let sel = d.select_this_s(s, this)?;
     Ok(s.number(d.sel_first(sel).map_or(-1.0, |i| i as f64)))
 }
 
-fn set_select_selected_index<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_select_selected_index<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let sel = d.select_this_s(s, this)?;
-    let arg0 = arg_s(s, a, 0);
-    let i = int(s, arg0)?;
+    let arg0 = arg_s::<E>(s, a, 0);
+    let i = int::<E>(s, arg0)?;
     let len = d.sel_len(sel);
     d.sel_only(sel, usize::try_from(i).ok().filter(|&i| i < len));
     Ok(s.undefined())
 }
 
-fn select_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn select_value<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let sel = d.html_el_s(s, this, "select")?;
     d.sel_sync_s(s, sel)?;
     let o = d.sel_first(sel).and_then(|i| d.sel_at(sel, i));
@@ -687,7 +687,7 @@ fn select_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -
     d.js_str_s(s, &v)
 }
 
-fn set_select_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_select_value<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let sel = d.html_el_s(s, this, "select")?;
     let want = d.arg_str_s(s, a, 0)?;
     d.sel_sync_s(s, sel)?;
@@ -707,16 +707,16 @@ fn set_select_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s
     Ok(s.undefined())
 }
 
-fn select_length<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn select_length<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let sel = d.select_this_s(s, this)?;
     Ok(s.number(d.sel_len(sel) as f64))
 }
 
 /// Grow the list with new empty options at the end of the select, or remove options from its end.
-fn set_length<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_length<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let sel = d.select_or_list_s(s, this)?;
-    let arg0 = arg_s(s, a, 0);
-    let n = uint(s, arg0)?;
+    let arg0 = arg_s::<E>(s, a, 0);
+    let n = uint::<E>(s, arg0)?;
     d.sel_sync_s(s, sel)?;
     if n > MAX_LENGTH {
         return Ok(s.undefined());
@@ -744,22 +744,22 @@ fn set_length<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> 
     Ok(s.undefined())
 }
 
-fn select_item<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn select_item<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let sel = d.html_el_s(s, this, "select")?;
     if a.is_empty() {
-        return Err(missing(s, "HTMLSelectElement", "item"));
+        return Err(missing::<E>(s, "HTMLSelectElement", "item"));
     }
-    let arg0 = arg_s(s, a, 0);
-    let i = uint(s, arg0)? as usize;
+    let arg0 = arg_s::<E>(s, a, 0);
+    let i = uint::<E>(s, arg0)? as usize;
     d.sel_sync_s(s, sel)?;
     let o = d.sel_at(sel, i);
     d.wrap_opt_s(s, o)
 }
 
 /// `namedItem`: the first element with that `id` or `name`.
-fn named<'s>(d: &Dom, s: &mut Sc<'s, '_>, ids: &[NodeId], a: Args<'s>, on: &str) -> Res<'s, Local<'s>> {
+fn named<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, ids: &[NodeId], a: Args<'s>, on: &str) -> Res<'s, Local<'s>> {
     if a.is_empty() {
-        return Err(missing(s, on, "namedItem"));
+        return Err(missing::<E>(s, on, "namedItem"));
     }
     let name = d.arg_str_s(s, a, 0)?;
     let found = if name.is_empty() {
@@ -771,23 +771,23 @@ fn named<'s>(d: &Dom, s: &mut Sc<'s, '_>, ids: &[NodeId], a: Args<'s>, on: &str)
     d.wrap_opt_s(s, found)
 }
 
-fn select_named_item<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn select_named_item<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let sel = d.html_el_s(s, this, "select")?;
     d.sel_sync_s(s, sel)?;
     let ids = d.sel_opts(sel);
     named(d, s, &ids, a, "HTMLSelectElement")
 }
 
-fn collection_named_item<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    let Some(ids) = obj_id(s, this).map(|o| nl::members(d, s, o)).transpose()?.flatten() else { return Err(s.type_error("Illegal invocation")) };
+fn collection_named_item<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let Some(ids) = obj_id::<E>(s, this).map(|o| nl::members(d, s, o)).transpose()?.flatten() else { return Err(s.type_error("Illegal invocation")) };
     named(d, s, &ids, a, "HTMLCollection")
 }
 
-fn add_to<'s>(d: &Dom, s: &mut Sc<'s, '_>, sel: NodeId, a: Args<'s>, on: &str) -> Res<'s, Local<'s>> {
+fn add_to<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, sel: NodeId, a: Args<'s>, on: &str) -> Res<'s, Local<'s>> {
     if a.is_empty() {
-        return Err(missing(s, on, "add"));
+        return Err(missing::<E>(s, on, "add"));
     }
-    let a0 = arg_s(s, a, 0);
+    let a0 = arg_s::<E>(s, a, 0);
     let el = d.node_of_s(s, a0).filter(|&n| {
         let doc = d.doc.borrow();
         doc.is_html(n, "option") || doc.is_html(n, "optgroup")
@@ -795,15 +795,15 @@ fn add_to<'s>(d: &Dom, s: &mut Sc<'s, '_>, sel: NodeId, a: Args<'s>, on: &str) -
     let Some(el) = el else {
         return Err(s.type_error(&format!("Failed to execute 'add' on '{on}': The provided value is not of type '(HTMLOptGroupElement or HTMLOptionElement)'.")));
     };
-    let a1 = arg_s(s, a, 1);
-    let before = if is_nullish(s, a1) {
+    let a1 = arg_s::<E>(s, a, 1);
+    let before = if is_nullish::<E>(s, a1) {
         None
     } else {
         match d.node_of_s(s, a1) {
             Some(n) if d.is_element(n) => Some(n),
             Some(_) => return Err(s.type_error(&format!("Failed to execute 'add' on '{on}': The provided value is not of type '(HTMLElement or long)'."))),
             None => {
-                let i = int(s, a1)?;
+                let i = int::<E>(s, a1)?;
                 d.sel_sync_s(s, sel)?;
                 usize::try_from(i).ok().and_then(|i| d.sel_at(sel, i))
             }
@@ -816,18 +816,18 @@ fn add_to<'s>(d: &Dom, s: &mut Sc<'s, '_>, sel: NodeId, a: Args<'s>, on: &str) -
     Ok(s.undefined())
 }
 
-fn select_add<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn select_add<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let sel = d.html_el_s(s, this, "select")?;
     add_to(d, s, sel, a, "HTMLSelectElement")
 }
 
-fn collection_add<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn collection_add<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let sel = d.select_or_list_s(s, this)?;
     add_to(d, s, sel, a, "HTMLOptionsCollection")
 }
 
-fn remove_at<'s>(d: &Dom, s: &mut Sc<'s, '_>, sel: NodeId, v: Local<'s>) -> Res<'s, Local<'s>> {
-    let i = int(s, v)?;
+fn remove_at<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, sel: NodeId, v: Local<'s>) -> Res<'s, Local<'s>> {
+    let i = int::<E>(s, v)?;
     d.sel_sync_s(s, sel)?;
     if let Some(o) = usize::try_from(i).ok().and_then(|i| d.sel_at(sel, i)) {
         d.doc.borrow_mut().detach(o);
@@ -836,7 +836,7 @@ fn remove_at<'s>(d: &Dom, s: &mut Sc<'s, '_>, sel: NodeId, v: Local<'s>) -> Res<
 }
 
 /// `remove()` removes the select itself (`ChildNode.remove`); `remove(index)` removes an option.
-fn select_remove<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn select_remove<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let sel = d.html_el_s(s, this, "select")?;
     let Some(v) = a.get(0) else {
         d.doc.borrow_mut().detach(sel);
@@ -845,14 +845,14 @@ fn select_remove<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) 
     remove_at(d, s, sel, v)
 }
 
-fn collection_remove<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn collection_remove<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let sel = d.select_or_list_s(s, this)?;
-    let Some(v) = a.get(0) else { return Err(missing(s, "HTMLOptionsCollection", "remove")) };
+    let Some(v) = a.get(0) else { return Err(missing::<E>(s, "HTMLOptionsCollection", "remove")) };
     remove_at(d, s, sel, v)
 }
 
 /// The cached collection of `select`: `chosen` for `selectedOptions`, else `options`.
-fn collection<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, chosen: bool) -> Res<'s, Local<'s>> {
+fn collection<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, chosen: bool) -> Res<'s, Local<'s>> {
     let sel = d.html_el_s(s, this, "select")?;
     d.sel_sync_s(s, sel)?;
     let cached = {
@@ -863,30 +863,30 @@ fn collection<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, chosen: bool) ->
     if let Some(o) = cached {
         return Ok(d.obj_local(s, o));
     }
-    let m = old(s, |it| ensure(d, it))?;
-    let v = old_v(s, |it| nl::make_list(d, it, if chosen { m.collection } else { m.options }, if chosen { Src::Selected(sel) } else { Src::Options(sel) }))?;
-    let Some(o) = obj_id(s, v) else { unreachable!() };
+    let m = old::<E, _>(s, |it| ensure(d, it))?;
+    let v = old_v::<E>(s, |it| nl::make_list(d, it, if chosen { m.collection } else { m.options }, if chosen { Src::Selected(sel) } else { Src::Options(sel) }))?;
+    let Some(o) = obj_id::<E>(s, v) else { unreachable!() };
     if let Some(c) = d.sel.st.borrow_mut().cache.get_mut(&sel) {
         *(if chosen { &mut c.chosen } else { &mut c.options }) = Some(o);
     }
     Ok(v)
 }
 
-fn select_options<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn select_options<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     collection(d, s, this, false)
 }
 
-fn select_selected_options<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn select_selected_options<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     collection(d, s, this, true)
 }
 
 // ------------------------------------------------------------------------------------------ option
 
-fn option_this<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
+fn option_this<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, NodeId> {
     d.html_el_s(s, this, "option")
 }
 
-fn option_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn option_value<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let o = option_this(d, s, this)?;
     let doc = d.doc.borrow();
     match get_in(d, &doc, o, "value") {
@@ -895,27 +895,27 @@ fn option_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -
     }
 }
 
-fn set_option_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_option_value<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let o = option_this(d, s, this)?;
     let t = d.arg_str_s(s, a, 0)?;
     crate::browser_dom::attr_set_s(d, s, o, "value", &t)?;
     Ok(s.undefined())
 }
 
-fn option_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn option_text<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let o = option_this(d, s, this)?;
     let t = text_of(&d.doc.borrow(), o);
     d.js_str_s(s, &t)
 }
 
-fn set_option_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_option_text<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     option_this(d, s, this)?;
     let t = d.arg_str_s(s, a, 0)?;
     let v = d.js_str_s(s, &t)?;
     crate::browser_dom::set_text_content_s(d, s, this, Args::from_slots(v.slot(), 1))
 }
 
-fn option_label<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn option_label<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let o = option_this(d, s, this)?;
     let t = {
         let doc = d.doc.borrow();
@@ -924,24 +924,24 @@ fn option_label<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -
     d.js_str_s(s, &t)
 }
 
-fn set_option_label<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_option_label<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let o = option_this(d, s, this)?;
     let t = d.arg_str_s(s, a, 0)?;
     crate::browser_dom::attr_set_s(d, s, o, "label", &t)?;
     Ok(s.undefined())
 }
 
-fn option_selected<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn option_selected<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let o = option_this(d, s, this)?;
-    let on = old(s, |it| d.opt_state(it, o))?.1.selected;
+    let on = old::<E, _>(s, |it| d.opt_state(it, o))?.1.selected;
     Ok(s.boolean(on))
 }
 
-fn set_option_selected<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_option_selected<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let o = option_this(d, s, this)?;
-    let arg0 = arg_s(s, a, 0);
+    let arg0 = arg_s::<E>(s, a, 0);
     let on = s.to_boolean(arg0);
-    match old(s, |it| d.opt_state(it, o))? {
+    match old::<E, _>(s, |it| d.opt_state(it, o))? {
         (Some(sel), e) => d.sel_set(sel, e.idx as usize, on),
         (None, _) => {
             let mut st = d.sel.st.borrow_mut();
@@ -952,14 +952,14 @@ fn set_option_selected<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args
     Ok(s.undefined())
 }
 
-fn option_default_selected<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn option_default_selected<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let o = option_this(d, s, this)?;
     Ok(s.boolean(has_in(d, &d.doc.borrow(), o, "selected")))
 }
 
-fn set_option_default_selected<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn set_option_default_selected<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let o = option_this(d, s, this)?;
-    let arg0 = arg_s(s, a, 0);
+    let arg0 = arg_s::<E>(s, a, 0);
     if s.to_boolean(arg0) {
         crate::browser_dom::attr_set_s(d, s, o, "selected", "")?;
     } else {
@@ -968,15 +968,15 @@ fn set_option_default_selected<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>,
     Ok(s.undefined())
 }
 
-fn option_index<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn option_index<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let o = option_this(d, s, this)?;
-    let (sel, e) = old(s, |it| d.opt_state(it, o))?;
+    let (sel, e) = old::<E, _>(s, |it| d.opt_state(it, o))?;
     Ok(s.number(if sel.is_some() { e.idx as f64 } else { 0.0 }))
 }
 
-fn option_form<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn option_form<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let o = option_this(d, s, this)?;
-    let f = old(s, |it| match d.owner_select(it, o)? {
+    let f = old::<E, _>(s, |it| match d.owner_select(it, o)? {
         Some(sel) => d.form_owner(it, sel),
         None => Ok(None),
     })?;
@@ -984,20 +984,20 @@ fn option_form<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) ->
 }
 
 /// `new Option(text = "", value, defaultSelected = false, selected = false)`.
-fn option_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    let a0 = arg_s(s, a, 0);
+fn option_ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let a0 = arg_s::<E>(s, a, 0);
     let text = match s.type_of(a0) {
         Type::Undefined => String::new(),
         _ => d.string_arg_s(s, a0)?,
     };
-    let a1 = arg_s(s, a, 1);
+    let a1 = arg_s::<E>(s, a, 1);
     let value = match s.type_of(a1) {
         Type::Undefined => None,
         _ => Some(d.string_arg_s(s, a1)?),
     };
-    let a2 = arg_s(s, a, 2);
+    let a2 = arg_s::<E>(s, a, 2);
     let default_selected = s.to_boolean(a2);
-    let a3 = arg_s(s, a, 3);
+    let a3 = arg_s::<E>(s, a, 3);
     let selected = s.to_boolean(a3);
     let o = {
         let mut doc = d.doc.borrow_mut();
@@ -1027,7 +1027,7 @@ fn option_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Re
 
 // ------------------------------------------------------------------------------------------ install
 
-fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<Made> {
+fn ensure<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, Made<E>> {
     if let Some(&m) = d.sel.made.get() {
         return Ok(m);
     }
@@ -1040,14 +1040,14 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<Made> {
     let mut ctors = [collection; 7];
     for (i, (name, proto)) in [("HTMLSelectElement", select), ("HTMLOptionElement", option), ("HTMLOptGroupElement", optgroup), ("HTMLOptionsCollection", options), ("HTMLCollection", collection), ("HTMLTextAreaElement", textarea)].into_iter().enumerate() {
         let f = crate::browser_custom::interface_ctor(d, it, name, true)?;
-        it.define_data(f, kp, Value::Object(proto), false, false, false)?;
-        it.define_data(proto, kc, Value::Object(f), true, false, true)?;
+        it.define_data(f, kp, E::obj_raw(proto), false, false, false)?;
+        it.define_data(proto, kc, E::obj_raw(f), true, false, true)?;
         crate::browser_lazy::tag(d, it, proto, name)?;
         ctors[i] = f;
     }
     // `Option` has the prototype of `HTMLOptionElement`.
     let f = d.add_fn_s_obj(it, option_ctor, "Option", 0, HostFn::Ctor)?;
-    it.define_data(f, kp, Value::Object(option), false, false, false)?;
+    it.define_data(f, kp, E::obj_raw(option), false, false, false)?;
     ctors[6] = f;
 
     d.def_get_s(it, collection, "length", nl::length, None)?;
@@ -1055,7 +1055,7 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<Made> {
     d.def_method_s(it, collection, "namedItem", 1, collection_named_item)?;
     let sym = d.plat.sym_iter.get().copied().expect("platform installed first");
     let kv = d.key(it, "values")?;
-    let values = it.get_value(Value::Object(it.array_prototype()), kv)?;
+    let values = it.get_value(E::obj_raw(it.array_prototype()), kv)?;
     it.define_data(collection, sym, values, true, false, true)?;
 
     d.def_get_s(it, options, "length", nl::length, Some(set_length))?;
@@ -1064,7 +1064,7 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<Made> {
     d.def_get_s(it, options, "selectedIndex", select_selected_index, Some(set_select_selected_index))?;
 
     for (name, g, s) in [
-        ("selectedIndex", select_selected_index as HS, Some(set_select_selected_index as HS)),
+        ("selectedIndex", select_selected_index as HS<E>, Some(set_select_selected_index as HS<E>)),
         ("value", select_value, Some(set_select_value)),
         ("multiple", select_multiple, Some(set_select_multiple)),
         ("size", select_size, Some(set_select_size)),
@@ -1085,7 +1085,7 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<Made> {
     d.def_method_s(it, select, "remove", 0, select_remove)?;
 
     for (name, g, s) in [
-        ("value", option_value as HS, Some(set_option_value as HS)),
+        ("value", option_value as HS<E>, Some(set_option_value as HS<E>)),
         ("text", option_text, Some(set_option_text)),
         ("label", option_label, Some(set_option_label)),
         ("selected", option_selected, Some(set_option_selected)),
@@ -1101,22 +1101,22 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<Made> {
     d.def_get_s(it, optgroup, "label", group_label, Some(set_group_label))?;
 
     let m = Made { select, option, optgroup, collection, options, textarea, ctors };
-    crate::browser_controls::hold(it, &d.sel.keep, &[select, option, optgroup, collection, options, textarea]);
-    crate::browser_controls::hold(it, &d.sel.keep, &ctors);
+    crate::browser_controls::hold::<E>(it, &d.sel.keep, &[select, option, optgroup, collection, options, textarea]);
+    crate::browser_controls::hold::<E>(it, &d.sel.keep, &ctors);
     let _ = d.sel.made.set(m);
     Ok(m)
 }
 
-fn pick(d: &Dom, i: usize) -> ObjId {
+fn pick<E: Eng>(d: &Dom<E>, i: usize) -> E::Obj {
     d.sel.made.get().expect("made").ctors[i]
 }
 
-fn ens(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+fn ens<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
     ensure(d, it).map(|_| ())
 }
 
 /// Make the members of the textarea prototype (once). They are 40 functions, so a page with a select but no textarea does not pay.
-fn fill_area(d: &Dom, it: &mut Interp<'_>, m: &Made) -> R<()> {
+fn fill_area<E: Eng>(d: &Dom<E>, it: &mut E::Vm, m: &Made<E>) -> R<E, ()> {
     if !d.sel.area.get() {
         crate::browser_textarea::install(d, it, m.textarea)?;
         d.sel.area.set(true);
@@ -1124,7 +1124,7 @@ fn fill_area(d: &Dom, it: &mut Interp<'_>, m: &Made) -> R<()> {
     Ok(())
 }
 
-fn ens_area(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+fn ens_area<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
     let m = ensure(d, it)?;
     fill_area(d, it, &m)
 }
@@ -1137,7 +1137,7 @@ lazy_global!(lazy_collection, "HTMLCollection", ens, |d| pick(d, 4));
 lazy_global!(lazy_textarea, "HTMLTextAreaElement", ens_area, |d| pick(d, 5));
 lazy_global!(lazy_option, "Option", ens, |d| pick(d, 6));
 
-pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
     table!(lazy = [
         Row::both(1, "HTMLSelectElement", lazy_select),
         Row::both(1, "HTMLOptionElement", lazy_option_el),
@@ -1148,18 +1148,18 @@ pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
         Row::both(1, "Option", lazy_option),
     ]);
     let g = s.global();
-    d.install_rows(s, &[g], &lazy::T)
+    d.install_rows(s, &[g], &lazy::T::<E>::V)
 }
 
 /// Forget the `options` or `selectedOptions` collection `o` of the select `s`, which the collector freed.
-pub(crate) fn forget_collection(d: &Dom, s: NodeId, o: ObjId) {
+pub(crate) fn forget_collection<E: Eng>(d: &Dom<E>, s: NodeId, o: E::Obj) {
     if let Some(c) = d.sel.st.borrow_mut().cache.get_mut(&s) {
         c.options = c.options.filter(|&x| x != o);
         c.chosen = c.chosen.filter(|&x| x != o);
     }
 }
 
-impl Browser {
+impl<E: Eng> Browser<E> {
     /// The labels of the selected options of a `<select>`.
     pub fn selected_labels(&self, select: NodeId) -> Option<Vec<String>> {
         self.dom.sel_labels(select)
@@ -1172,7 +1172,7 @@ impl Browser {
 }
 
 #[cfg(test)]
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// Has any select, option or list interface been made? (Tests: a page without selects pays nothing.)
     pub(crate) fn sel_made(&self) -> bool {
         self.sel.made.get().is_some()
@@ -1187,7 +1187,7 @@ impl Dom {
 // ------------------------------------------------------------------------------------------ arena reclaim (`browser_reclaim.rs`)
 
 /// Drop the state of the nodes that the reclaim freed. The option lists are caches: the next read builds them again.
-pub(crate) fn forget(d: &Dom, gone: &dyn Fn(NodeId) -> bool) {
+pub(crate) fn forget<E: Eng>(d: &Dom<E>, gone: &dyn Fn(NodeId) -> bool) {
     let mut st = d.sel.st.borrow_mut();
     st.opt.retain(|&n, _| !gone(n));
     st.cache.clear();

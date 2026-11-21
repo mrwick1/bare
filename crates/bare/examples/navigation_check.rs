@@ -7,6 +7,7 @@
 use bare::browser::*;
 use bare_html::tree;
 use bare_js::eval::*;
+use bare::eng_old::OldFault as Error;
 use bare_js::heap::HeapLimits;
 use bare_js::value::Value;
 
@@ -24,7 +25,7 @@ fn run(src: &str) -> String {
         Ok(v) => v,
         Err(e) => return fail(&mut b, e),
     };
-    match b.it.call(reader, Value::Undefined, &[]) {
+    match bare::eng::Ops::call_o(&mut b.it, reader, Value::Undefined, &[]) {
         Ok(v) => esc(&b.it.display(v)),
         Err(e) => fail(&mut b, e),
     }
@@ -34,7 +35,7 @@ fn fail(b: &mut Browser, e: Error) -> String {
     match e {
         Error::Throw(v) if matches!(v, Value::Object(_)) => format!("throw:{}", esc(&b.it.get_str(v, "name"))),
         Error::Throw(v) => format!("throw-value:{}", esc(&b.it.display(v))),
-        Error::Unsupported(u) => format!("unsupported:{}", u.what),
+        Error::Unsupported(u) => format!("unsupported:{}", u),
         Error::Limit(_) => "limit".into(),
         e => format!("internal-error:{e:?}"),
     }

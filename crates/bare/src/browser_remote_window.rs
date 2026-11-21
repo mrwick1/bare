@@ -22,11 +22,10 @@
 //! - `top` and `parent` of a window of a child, read in the parent: the global of the parent, and its own `top`. In a child page the
 //!   parent window and the top window are one object when the child is a frame of the top page. In a deeper child, the `parent` of
 //!   the parent window is taken as the top window (the exact grandparent needs 3b).
+use crate::eng::{Eng, Ops, Val};
 use crate::browser::*;
 use crate::browser_scoped::*;
 use crate::browser_child::{FrameId, Out};
-use bare_js::eval::Interp;
-use bare_js::value::{ObjId, Value};
 use bare_js_api::{Args, HostFn, Local};
 
 /// Which page a window stands for, seen from the page that holds it.
@@ -42,46 +41,46 @@ pub(crate) enum Side {
 
 /// What a trap knows about its target.
 #[derive(Clone, Copy)]
-pub(crate) struct Win {
+pub(crate) struct Win<E: Eng> {
     pub side: Side,
-    pub proxy: ObjId,
+    pub proxy: E::Obj,
     /// The target is the `location` object of the window, not the window.
     pub location: bool,
 }
 
 /// The host functions that all windows of one realm share.
 #[derive(Clone, Copy)]
-pub(crate) struct Common {
-    pub handler: ObjId,
+pub(crate) struct Common<E: Eng> {
+    pub handler: E::Obj,
     /// `Proxy.revocable`: only the engine's own proxy creation prepares it to find the traps (`Heap::new_proxy` alone does not).
     /// A host call cannot `new Proxy`, because the host check of a constructor refuses it.
-    pub ctor: ObjId,
-    pub no_op: [ObjId; 4],
-    pub closed: ObjId,
-    pub replace: ObjId,
-    pub href_get: ObjId,
-    pub href_set: ObjId,
+    pub ctor: E::Obj,
+    pub no_op: [E::Obj; 4],
+    pub closed: E::Obj,
+    pub replace: E::Obj,
+    pub href_get: E::Obj,
+    pub href_set: E::Obj,
 }
 
 const API: [&str; 13] = ["window", "self", "frames", "length", "top", "parent", "opener", "closed", "postMessage", "blur", "focus", "close", "location"];
 
-fn text(s: &Sc<'_, '_>, v: Local<'_>) -> Option<String> {
+fn text<E: Eng>(s: &Sc<'_, E>, v: Local<'_>) -> Option<String> {
     s.as_str(v).map(|t| t.to_string_lossy())
 }
 
-fn blocked<'s>(d: &Dom, s: &mut Sc<'s, '_>, verb: &str, key: &str) -> bare_js_api::Error<'s> {
+fn blocked<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, verb: &str, key: &str) -> bare_js_api::Error<'s> {
     let origin = d.cur_rec().map_or_else(|_| "null".to_string(), |r| r.origin());
     d.dom_err_s(s, "SecurityError", &format!("Failed to {verb} a named property '{key}' {} 'Window': Blocked a frame with origin \"{origin}\" from accessing a cross-origin frame.", if verb == "read" { "from" } else { "on" }))
 }
 
-fn key_text(s: &Sc<'_, '_>, v: Local<'_>) -> String {
-    text(s, v).unwrap_or_default()
+fn key_text<E: Eng>(s: &Sc<'_, E>, v: Local<'_>) -> String {
+    text::<E>(s, v).unwrap_or_default()
 }
 
-fn trap_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    let (target, k) = (arg_s(s, a, 0), arg_s(s, a, 1));
+fn trap_get<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (target, k) = (arg_s::<E>(s, a, 0), arg_s::<E>(s, a, 1));
     // A symbol key (`Symbol.toPrimitive`, `Symbol.toStringTag`) and `then` read as `undefined`, as in a browser.
-    let Some(name) = text(s, k) else { return Ok(s.undefined()) };
+    let Some(name) = text::<E>(s, k) else { return Ok(s.undefined()) };
     if name == "then" {
         return Ok(s.undefined());
     }
@@ -91,10 +90,10 @@ fn trap_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'
     s.get(target, k)
 }
 
-fn trap_set<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    let (target, k, v) = (arg_s(s, a, 0), arg_s(s, a, 1), arg_s(s, a, 2));
-    let name = key_text(s, k);
-    let win = obj_id(s, target).and_then(|t| d.kids.win_of(t));
+fn trap_set<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let (target, k, v) = (arg_s::<E>(s, a, 0), arg_s::<E>(s, a, 1), arg_s::<E>(s, a, 2));
+    let name = key_text::<E>(s, k);
+    let win = obj_id::<E>(s, target).and_then(|t| d.kids.win_of(t));
     match (name.as_str(), win) {
         ("location", Some(w)) if !w.location => {
             let url = d.string_arg_s(s, v)?;
@@ -107,29 +106,29 @@ fn trap_set<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'
     }
 }
 
-fn trap_has<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    let k = arg_s(s, a, 1);
-    match text(s, k) {
+fn trap_has<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let k = arg_s::<E>(s, a, 1);
+    match text::<E>(s, k) {
         Some(name) if !API.contains(&name.as_str()) => Err(blocked(d, s, "read", &name)),
         Some(_) => Ok(s.boolean(true)),
         None => Ok(s.boolean(false)),
     }
 }
 
-fn trap_define<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    let k = arg_s(s, a, 1);
-    let name = key_text(s, k);
+fn trap_define<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let k = arg_s::<E>(s, a, 1);
+    let name = key_text::<E>(s, k);
     Err(blocked(d, s, "define", &name))
 }
 
-fn trap_delete<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    let k = arg_s(s, a, 1);
-    let name = key_text(s, k);
+fn trap_delete<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let k = arg_s::<E>(s, a, 1);
+    let name = key_text::<E>(s, k);
     Err(blocked(d, s, "delete", &name))
 }
 
-fn win_closed<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
-    let Some(t) = obj_id(s, this) else { return Ok(s.boolean(true)) };
+fn win_closed<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let Some(t) = obj_id::<E>(s, this) else { return Ok(s.boolean(true)) };
     let closed = match d.kids.win_of(t).map(|w| w.side) {
         Some(Side::Child(id)) => !d.kids.alive(id),
         _ => false,
@@ -138,14 +137,14 @@ fn win_closed<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> 
 }
 
 /// `postMessage` of a remote window: the message goes to the outbox of this page. The driver routes it (`Browser::kids_turn`).
-fn win_post<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    let win = obj_id(s, this).and_then(|p| d.kids.target_of(p)).and_then(|t| d.kids.win_of(t));
+fn win_post<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let win = obj_id::<E>(s, this).and_then(|p| d.kids.target_of(p)).and_then(|t| d.kids.win_of(t));
     let Some(Win { side: to, .. }) = win else { return Err(s.type_error("Illegal invocation")) };
     post(d, s, to, a)?;
     Ok(s.undefined())
 }
 
-fn post<'s>(d: &Dom, s: &mut Sc<'s, '_>, to: Side, a: Args<'s>) -> Res<'s, ()> {
+fn post<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, to: Side, a: Args<'s>) -> Res<'s, ()> {
     let (target, list) = crate::browser_basics::post_args(d, s, a)?;
     let origin = d.window_origin();
     let target_origin = match crate::browser_basics::target_origin(s, d, &target)? {
@@ -159,21 +158,21 @@ fn post<'s>(d: &Dom, s: &mut Sc<'s, '_>, to: Side, a: Args<'s>) -> Res<'s, ()> {
     if d.kids.outbox_len() >= d.max_messages() {
         return Err(d.lim_s(s, "messages"));
     }
-    let msg = arg_s(s, a, 0);
+    let msg = arg_s::<E>(s, a, 0);
     let mut cloned = crate::browser_navigation_state::clone_state_with(d, s, msg, &list)?;
     d.export_ports(s, &mut cloned)?;
     d.kids.send(Out { to, target_origin, origin, cloned });
     Ok(())
 }
 
-fn loc_target<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, Win> {
-    match obj_id(s, this).and_then(|t| d.kids.win_of(t)).filter(|w| w.location) {
+fn loc_target<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, Win<E>> {
+    match obj_id::<E>(s, this).and_then(|t| d.kids.win_of(t)).filter(|w| w.location) {
         Some(w) => Ok(w),
         None => Err(s.type_error("Illegal invocation")),
     }
 }
 
-fn loc_replace<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn loc_replace<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let w = loc_target(d, s, this)?;
     let url = d.arg_str_s(s, a, 0)?;
     if let Side::Child(id) = w.side {
@@ -182,24 +181,24 @@ fn loc_replace<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) ->
     Ok(s.undefined())
 }
 
-fn loc_href_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn loc_href_get<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     Err(blocked(d, s, "read", "href"))
 }
 
-fn loc_href_set<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn loc_href_set<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     loc_replace(d, s, this, a)
 }
 
-fn common(d: &Dom, it: &mut Interp<'_>) -> R<Common> {
+fn common<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, Common<E>> {
     if let Some(c) = d.kids.common.get() {
         return Ok(c);
     }
-    let handler = it.heap.new_object(None).map_err(|e| it.heap_error(e))?;
-    let traps: [(&str, HS); 5] = [("get", trap_get), ("set", trap_set), ("has", trap_has), ("defineProperty", trap_define), ("deleteProperty", trap_delete)];
+    let handler = it.h_new_object(None)?;
+    let traps: [(&str, HS<E>); 5] = [("get", trap_get), ("set", trap_set), ("has", trap_has), ("defineProperty", trap_define), ("deleteProperty", trap_delete)];
     for (name, h) in traps {
         let f = d.add_fn_s_obj(it, h, name, 3, HostFn::Method)?;
         let k = d.key(it, name)?;
-        it.define_data(handler, k, Value::Object(f), true, false, true)?;
+        it.define_data(handler, k, E::obj_raw(f), true, false, true)?;
     }
     let mut no_op = [handler; 4];
     for (slot, name) in no_op.iter_mut().zip(["postMessage", "blur", "focus", "close"]) {
@@ -209,11 +208,11 @@ fn common(d: &Dom, it: &mut Interp<'_>) -> R<Common> {
     let replace = d.add_fn_s_obj(it, loc_replace, "replace", 1, HostFn::Method)?;
     let href_get = d.add_fn_s_obj(it, loc_href_get, "get href", 0, HostFn::Method)?;
     let href_set = d.add_fn_s_obj(it, loc_href_set, "set href", 1, HostFn::Method)?;
-    let g = Value::Object(it.global_object());
+    let g = E::obj_raw(it.global_object());
     let kp = d.key(it, "Proxy")?;
     let px = it.get_value(g, kp)?;
     let kr = d.key(it, "revocable")?;
-    let Value::Object(ctor) = it.get_value(px, kr)? else { return Err(it.type_error("Proxy is not available")) };
+    let Val::Object(ctor) = E::kind(it.get_value(px, kr)?) else { return Err(it.type_error_o("Proxy is not available")) };
     let c = Common { handler, ctor, no_op, closed, replace, href_get, href_set };
     d.kids.set_common(it, c);
     Ok(c)
@@ -221,31 +220,31 @@ fn common(d: &Dom, it: &mut Interp<'_>) -> R<Common> {
 
 /// The window object for `side` in this realm: a new proxy over a fresh target. `top` and `parent` are the values for the properties of the
 /// same names (`None`: the window itself).
-pub(crate) fn make(d: &Dom, it: &mut Interp<'_>, side: Side, top: Option<Value>, parent: Option<Value>) -> R<ObjId> {
+pub(crate) fn make<E: Eng>(d: &Dom<E>, it: &mut E::Vm, side: Side, top: Option<E::Raw>, parent: Option<E::Raw>) -> R<E, E::Obj> {
     let c = common(d, it)?;
-    let target = it.heap.new_object(None).map_err(|e| it.heap_error(e))?;
-    let made = it.call(Value::Object(c.ctor), Value::Undefined, &[Value::Object(target), Value::Object(c.handler)])?;
+    let target = it.h_new_object(None)?;
+    let made = it.call_o(E::obj_raw(c.ctor), E::undef(), &[E::obj_raw(target), E::obj_raw(c.handler)])?;
     let kp = d.key(it, "proxy")?;
-    let Value::Object(proxy) = it.get_value(made, kp)? else { return Err(it.type_error("Proxy failed")) };
-    let me = Value::Object(proxy);
-    for (name, v) in [("window", me), ("self", me), ("frames", me), ("length", Value::Number(0.0)), ("top", top.unwrap_or(me)), ("parent", parent.unwrap_or(me)), ("opener", Value::Null)] {
+    let Val::Object(proxy) = E::kind(it.get_value(made, kp)?) else { return Err(it.type_error_o("Proxy failed")) };
+    let me = E::obj_raw(proxy);
+    for (name, v) in [("window", me), ("self", me), ("frames", me), ("length", E::num(0.0)), ("top", top.unwrap_or(me)), ("parent", parent.unwrap_or(me)), ("opener", E::null())] {
         let k = d.key(it, name)?;
         it.define_data(target, k, v, false, true, true)?;
     }
     for (name, f) in ["postMessage", "blur", "focus", "close"].into_iter().zip(c.no_op) {
         let k = d.key(it, name)?;
-        it.define_data(target, k, Value::Object(f), true, true, true)?;
+        it.define_data(target, k, E::obj_raw(f), true, true, true)?;
     }
     let k = d.key(it, "closed")?;
     d.define_accessor(it, target, k, c.closed, None)?;
     // The `location` object, with its own target so that its functions find the window.
-    let loc = it.heap.new_object(None).map_err(|e| it.heap_error(e))?;
+    let loc = it.h_new_object(None)?;
     let k = d.key(it, "replace")?;
-    it.define_data(loc, k, Value::Object(c.replace), true, true, true)?;
+    it.define_data(loc, k, E::obj_raw(c.replace), true, true, true)?;
     let k = d.key(it, "href")?;
     d.define_accessor(it, loc, k, c.href_get, Some(c.href_set))?;
     let k = d.key(it, "location")?;
-    it.define_data(target, k, Value::Object(loc), true, true, true)?;
+    it.define_data(target, k, E::obj_raw(loc), true, true, true)?;
     d.kids.add_win(it, target, Win { side, proxy, location: false });
     d.kids.add_win(it, loc, Win { side, proxy, location: true });
     Ok(proxy)
@@ -253,34 +252,34 @@ pub(crate) fn make(d: &Dom, it: &mut Interp<'_>, side: Side, top: Option<Value>,
 
 /// In a child page: `window.parent` and `window.top` are windows of the page that embeds it, and of the top page. They are one object for
 /// a frame of the top page.
-pub(crate) fn install_up(d: &Dom, it: &mut Interp<'_>, depth: u8) -> R<()> {
+pub(crate) fn install_up<E: Eng>(d: &Dom<E>, it: &mut E::Vm, depth: u8) -> R<E, ()> {
     let parent = make(d, it, Side::Parent, None, None)?;
     let top = if depth <= 1 { parent } else { make(d, it, Side::Top, None, None)? };
     if depth > 1 {
         // The parent window of a deeper child reports the top window as its `parent`.
         let k = d.key(it, "parent")?;
         if let Some(t) = d.kids.target_of(parent) {
-            it.define_data(t, k, Value::Object(top), false, true, true)?;
+            it.define_data(t, k, E::obj_raw(top), false, true, true)?;
         }
     }
     let g = it.global_object();
     let (kp, kt) = (d.key(it, "parent")?, d.key(it, "top")?);
-    it.define_data(g, kp, Value::Object(parent), true, true, true)?;
-    it.define_data(g, kt, Value::Object(top), false, true, false)?;
+    it.define_data(g, kp, E::obj_raw(parent), true, true, true)?;
+    it.define_data(g, kt, E::obj_raw(top), false, true, false)?;
     Ok(())
 }
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// The window of the child page `id` of this page, in this heap. The same object each time while the frame lives.
-    pub(crate) fn child_window(&self, it: &mut Interp<'_>, id: FrameId) -> R<Value> {
+    pub(crate) fn child_window(&self, it: &mut E::Vm, id: FrameId) -> R<E, E::Raw> {
         if let Some(w) = self.kids.window_of(id) {
-            return Ok(Value::Object(w));
+            return Ok(E::obj_raw(w));
         }
-        let g = Value::Object(it.global_object());
+        let g = E::obj_raw(it.global_object());
         let kt = self.key(it, "top")?;
         let top = it.get_value(g, kt)?;
         let w = make(self, it, Side::Child(id), Some(top), Some(g))?;
         self.kids.set_window(id, w);
-        Ok(Value::Object(w))
+        Ok(E::obj_raw(w))
     }
 }

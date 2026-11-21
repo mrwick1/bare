@@ -28,13 +28,12 @@
 //!   document is replaced). `form.elements`, `form.action` and `form.method` are absent. `new FormData(form)` (`browser_web.rs`) uses the same entry list, and keeps a file input as an empty File.
 //! - A form with a `javascript:` or other non-http(s) action does nothing.
 
+use crate::eng::{Eng, Fault, Ops, Val};
 use crate::browser::*;
 use crate::browser_dom as nd;
 use crate::browser_scoped::*;
 use bare_html::dom::{Document, NodeData, NodeId};
-use bare_js::eval::{Error, Interp};
 use crate::browser_web::Ent;
-use bare_js::value::Value;
 use bare_js_api::{Args, Local};
 
 fn attr<'a>(doc: &'a Document, n: NodeId, name: &str) -> Option<&'a str> {
@@ -111,7 +110,7 @@ pub(crate) fn fit_units(s: &str, room: u32) -> String {
     out
 }
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// The `maxlength` of a text field, if it has a valid one.
     pub(crate) fn max_length(&self, n: NodeId) -> Option<u32> {
         let doc = self.doc.borrow();
@@ -122,18 +121,18 @@ impl Dom {
     }
 
     /// The listed controls that `form` owns, in tree order. The walk starts at the top of the tree of `form`: it is the document, or the top of a detached tree.
-    pub(crate) fn owned_controls(&self, it: &mut Interp<'_>, form: NodeId) -> R<Vec<NodeId>> {
+    pub(crate) fn owned_controls(&self, it: &mut E::Vm, form: NodeId) -> R<E, Vec<NodeId>> {
         let mut all = Vec::new();
         {
             let doc = self.doc.borrow();
             let mut root = form;
             while let Some(p) = doc.parent(root) {
-                it.charge(1)?;
+                it.charge_o(1)?;
                 root = p;
             }
             let (mut cur, mut depth) = (root, 0);
             while let Some((c, d)) = nd::next_in(&doc, root, cur, depth) {
-                it.charge(1)?;
+                it.charge_o(1)?;
                 (cur, depth) = (c, d);
                 if tag_is(&doc, c, &["button", "input", "select", "textarea"]) || self.is_face(c) {
                     all.push(c);
@@ -150,7 +149,7 @@ impl Dom {
     }
 
     /// The entry list of `form` for `submitter` (HTML "constructing the entry list"). A file input has one entry with no value: an empty file.
-    pub(crate) fn entry_list(&self, it: &mut Interp<'_>, form: NodeId, submitter: Option<NodeId>) -> R<Vec<(String, Option<Ent>)>> {
+    pub(crate) fn entry_list(&self, it: &mut E::Vm, form: NodeId, submitter: Option<NodeId>) -> R<E, Vec<(String, Option<Ent<E>>)>> {
         let mut out = Vec::new();
         for n in self.owned_controls(it, form)? {
             if self.is_disabled_control(it, n)? {
@@ -196,7 +195,7 @@ impl Dom {
                         out.push((name.clone(), None));
                     }
                     for f in &files {
-                        let Value::Object(o) = crate::browser_web::file_from_ref(self, it, f)? else { unreachable!() };
+                        let Val::Object(o) = E::kind(crate::browser_web::file_from_ref(self, it, f)?) else { unreachable!() };
                         out.push((name.clone(), Some(Ent::B(o))));
                     }
                 }
@@ -223,7 +222,7 @@ impl Dom {
     }
 
     /// The invalid controls of `form`, in tree order.
-    fn invalid_controls(&self, it: &mut Interp<'_>, form: NodeId) -> R<Vec<NodeId>> {
+    fn invalid_controls(&self, it: &mut E::Vm, form: NodeId) -> R<E, Vec<NodeId>> {
         let mut out = Vec::new();
         for n in self.owned_controls(it, form)? {
             if self.is_invalid(it, n)? {
@@ -234,7 +233,7 @@ impl Dom {
     }
 
     /// Fire `invalid` at each of `bad`; when none was canceled, focus the first. Gives whether the list is empty.
-    fn report_invalid(&self, it: &mut Interp<'_>, bad: &[NodeId], focus: bool) -> R<bool> {
+    fn report_invalid(&self, it: &mut E::Vm, bad: &[NodeId], focus: bool) -> R<E, bool> {
         let mut canceled = false;
         for &n in bad {
             let e = self.new_event(it, "invalid", false, true, false, None)?;
@@ -248,7 +247,7 @@ impl Dom {
     }
 
     /// HTML "submit" a form: validate (unless `skip`), fire `submit` (unless `event` is false), then navigate.
-    pub(crate) fn submit_with(&self, it: &mut Interp<'_>, form: NodeId, submitter: Option<NodeId>, validate: bool, event: bool) -> R<()> {
+    pub(crate) fn submit_with(&self, it: &mut E::Vm, form: NodeId, submitter: Option<NodeId>, validate: bool, event: bool) -> R<E, ()> {
         if !self.is_connected_node(it, form)? {
             return Ok(()); // cannot navigate
         }
@@ -267,7 +266,7 @@ impl Dom {
         if event {
             let who = match submitter {
                 Some(s) => self.wrap(it, s)?,
-                None => Value::Null,
+                None => E::null(),
             };
             let e = self.new_event_proto(it, "submit", true, true, false, self.p().submit)?;
             {
@@ -285,7 +284,7 @@ impl Dom {
         self.navigate_form(it, form, submitter)
     }
 
-    fn navigate_form(&self, it: &mut Interp<'_>, form: NodeId, submitter: Option<NodeId>) -> R<()> {
+    fn navigate_form(&self, it: &mut E::Vm, form: NodeId, submitter: Option<NodeId>) -> R<E, ()> {
         let (action, method, enc) = {
             let doc = self.doc.borrow();
             let pick = |sub: &str, own: &str| submitter.and_then(|s| attr(&doc, s, sub)).or_else(|| attr(&doc, form, own)).map(str::to_string);
@@ -301,7 +300,7 @@ impl Dom {
         let post = method == "post";
         let multipart = post && enc == "multipart/form-data";
         if post && !(multipart || enc.is_empty() || enc == "application/x-www-form-urlencoded") {
-            return Err(Error::Unsupported(unsupported("form POST with an enctype other than application/x-www-form-urlencoded and multipart/form-data")));
+            return Err(Fault::Unsupported("form POST with an enctype other than application/x-www-form-urlencoded and multipart/form-data"));
         }
         if multipart {
             let list = self.entry_list(it, form, submitter)?;
@@ -316,10 +315,10 @@ impl Dom {
             .filter_map(|(n, v)| match v? {
                 Ent::S(v) => Some((n, v)),
                 // A file value sends its name.
-                Ent::B(f) => Some((n, crate::browser_web::file_name(self, Value::Object(f))?)),
+                Ent::B(f) => Some((n, crate::browser_web::file_name(self, E::obj_raw(f))?)),
             })
             .collect();
-        it.charge(entries.len() as u64 + 1)?;
+        it.charge_o(entries.len() as u64 + 1)?;
         self.submit_navigation(it, action.trim(), post, &encode_entries(&entries), None)
     }
 
@@ -332,14 +331,14 @@ impl Dom {
 
 // ---------------------------------------------------------------------------------------------- JS API
 
-fn form_this<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, NodeId> {
+fn form_this<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, NodeId> {
     let n = d.el_s(s, this)?;
     if tag_is(&d.doc.borrow(), n, &["form"]) { Ok(n) } else { Err(s.type_error("Illegal invocation")) }
 }
 
-pub(crate) fn request_submit<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn request_submit<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let form = form_this(d, s, this)?;
-    let submitter = match a.get(0).filter(|&v| !is_nullish(s, v)) {
+    let submitter = match a.get(0).filter(|&v| !is_nullish::<E>(s, v)) {
         None => None,
         Some(v) => {
             let Some(sub) = d.node_of_s(s, v).filter(|&x| d.is_element(x)) else {
@@ -348,54 +347,54 @@ pub(crate) fn request_submit<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a
             if !d.is_submit_button(sub) {
                 return Err(s.type_error("Failed to execute 'requestSubmit' on 'HTMLFormElement': The specified element is not a submit button."));
             }
-            if old(s, |it| d.form_owner(it, sub))? != Some(form) {
+            if old::<E, _>(s, |it| d.form_owner(it, sub))? != Some(form) {
                 return Err(d.dom_err_s(s, "NotFoundError", "Failed to execute 'requestSubmit' on 'HTMLFormElement': The specified element is not owned by this form element."));
             }
             Some(sub)
         }
     };
-    old(s, |it| d.submit_with(it, form, submitter, true, true))?;
+    old::<E, _>(s, |it| d.submit_with(it, form, submitter, true, true))?;
     Ok(s.undefined())
 }
 
-pub(crate) fn submit_method<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn submit_method<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let form = form_this(d, s, this)?;
-    old(s, |it| d.submit_with(it, form, None, false, false))?;
+    old::<E, _>(s, |it| d.submit_with(it, form, None, false, false))?;
     Ok(s.undefined())
 }
 
-fn form_validity<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, focus: bool) -> Res<'s, Local<'s>> {
+fn form_validity<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, focus: bool) -> Res<'s, Local<'s>> {
     let form = form_this(d, s, this)?;
-    let ok = old(s, |it| {
+    let ok = old::<E, _>(s, |it| {
         let bad = d.invalid_controls(it, form)?;
         d.report_invalid(it, &bad, focus)
     })?;
     Ok(s.boolean(ok))
 }
 
-pub(crate) fn form_check_validity<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn form_check_validity<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     form_validity(d, s, this, false)
 }
 
-pub(crate) fn form_report_validity<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn form_report_validity<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     form_validity(d, s, this, true)
 }
 
 /// `checkValidity()` and `reportValidity()` of the one element `n`.
-pub(crate) fn report_one<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId, focus: bool) -> Res<'s, Local<'s>> {
-    let ok = old(s, |it| {
+pub(crate) fn report_one<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, n: NodeId, focus: bool) -> Res<'s, Local<'s>> {
+    let ok = old::<E, _>(s, |it| {
         let bad = if d.is_invalid(it, n)? { vec![n] } else { vec![] };
         d.report_invalid(it, &bad, focus)
     })?;
     Ok(s.boolean(ok))
 }
 
-pub(crate) fn control_check_validity<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn control_check_validity<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = crate::browser_controls::control(d, s, this)?;
     report_one(d, s, n, false)
 }
 
-pub(crate) fn control_report_validity<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn control_report_validity<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = crate::browser_controls::control(d, s, this)?;
     report_one(d, s, n, true)
 }

@@ -29,14 +29,14 @@
 //!
 //! Bounds (`Limit(Host(name))`): `resize-observers` (live observers), `resize-observations` (all observations together).
 
+use crate::eng::{Eng, Fault, Ops};
+use crate::browser_sources::Roots;
 use crate::browser::*;
 use bare_css::cascade::Styles;
 use bare_css::values::{Length, Property, Value as Cv};
 use bare_layout::boxes::{Kind, Tree};
 use bare_layout::fragment::{Kind as FragKind, Rect};
 use bare_html::dom::{Document, NodeId};
-use bare_js::eval::{Error, Interp};
-use bare_js::value::{ObjId, Value};
 use bare_js_api::{Args, Engine, HostFn, Local, Type};
 use crate::browser_scoped::*;
 use std::cell::{Cell, RefCell};
@@ -61,17 +61,17 @@ enum Boxes {
     Border,
 }
 
-struct Observation {
+struct Observation<E: Eng> {
     target: NodeId,
     /// The target's wrapper: the entry gives it back, and the observer keeps it alive.
-    wrapper: ObjId,
+    wrapper: E::Obj,
     observed: Boxes,
     last: (f32, f32),
 }
 
-struct Observer {
-    cb: Value,
-    obs: Vec<Observation>,
+struct Observer<E: Eng> {
+    cb: E::Raw,
+    obs: Vec<Observation<E>>,
     /// The targets of `obs`: `observe` of a new target skips the scan of `obs`.
     targets: HashSet<NodeId>,
     /// Indexes in `obs` of the observations to deliver now.
@@ -80,30 +80,30 @@ struct Observer {
 }
 
 #[derive(Clone, Copy)]
-struct Protos {
-    observer: ObjId,
-    entry: ObjId,
-    size: ObjId,
+struct Protos<E: Eng> {
+    observer: E::Obj,
+    entry: E::Obj,
+    size: E::Obj,
 }
 
 /// What a frame looks at: document tree and attributes, text, viewport, supplied sheets.
 type Key = (u64, u64, (u32, u32), u64);
 
 #[derive(Default)]
-struct State {
-    protos: Option<Protos>,
+struct State<E: Eng> {
+    protos: Option<Protos<E>>,
     /// Live observers in creation order (the order of delivery).
-    order: Vec<ObjId>,
-    observers: IdMap<ObjId, Observer>,
+    order: Vec<<E as Eng>::Obj>,
+    observers: IdMap<<E as Eng>::Obj, Observer<E>>,
     observations: usize,
     pending: bool,
     last_key: Option<Key>,
 }
 
 #[derive(Default)]
-pub(crate) struct Resize {
+pub(crate) struct Resize<E: Eng> {
     lim: Cell<ResizeLimits>,
-    s: RefCell<State>,
+    s: RefCell<State<E>>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -118,11 +118,11 @@ const DEVICE: &str = "ResizeObserver device-pixel-content-box (the device pixel 
 const PADDING: &str = "ResizeObserver content box with a padding that is not an absolute length (it needs the containing block)";
 const LOOP: &str = "ResizeObserver loop completed with undelivered notifications.";
 
-pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
     let (observer, entry, size) = (d.plain_s(s)?, d.plain_s(s)?, d.plain_s(s)?);
     d.resize.s.borrow_mut().protos = Some(Protos { observer, entry, size });
     for (name, proto, ctor, len) in [
-        ("ResizeObserver", observer, Some(construct as HS), 1),
+        ("ResizeObserver", observer, Some(construct as HS<E>), 1),
         ("ResizeObserverEntry", entry, None, 0),
         ("ResizeObserverSize", size, None, 0),
     ] {
@@ -134,16 +134,16 @@ pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
         Row::method(1, "disconnect", 0, disconnect),
     ]);
     let targets = [d.obj_local(s, observer)];
-    d.install_rows(s, &targets, &rows1::T)?;
+    d.install_rows(s, &targets, &rows1::T::<E>::V)?;
     d.def_get_at(s, entry, "devicePixelContentBoxSize", device_sizes, None)
 }
 
-fn illegal_ctor<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn illegal_ctor<'s, E: Eng>(_: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     Err(s.type_error("Illegal constructor"))
 }
 
-fn construct<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    let cb = arg_s(s, a, 0);
+fn construct<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let cb = arg_s::<E>(s, a, 0);
     if !s.is_callable(cb) {
         return Err(s.type_error("Failed to construct 'ResizeObserver': parameter 1 is not of type 'Function'."));
     }
@@ -157,25 +157,26 @@ fn construct<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<
     m.observers.insert(o, Observer { cb, obs: Vec::new(), targets: HashSet::new(), active: Vec::new(), skipped: false });
     m.order.push(o);
     drop(m);
+    d.own_obj(s.engine(), o, crate::browser::Owner::Resize(o));
     Ok(d.obj_local(s, o))
 }
 
-fn observer_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, ObjId> {
-    match obj_id(s, this) {
+fn observer_of<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, E::Obj> {
+    match obj_id::<E>(s, this) {
         Some(o) if d.resize.s.borrow().observers.contains_key(&o) => Ok(o),
         _ => Err(s.type_error("Illegal invocation")),
     }
 }
 
-fn target_arg<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>, method: &str) -> Res<'s, (NodeId, ObjId)> {
-    let v = arg_s(s, a, 0);
-    match (d.node_of_s(s, v), obj_id(s, v)) {
+fn target_arg<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, a: Args<'s>, method: &str) -> Res<'s, (NodeId, E::Obj)> {
+    let v = arg_s::<E>(s, a, 0);
+    match (d.node_of_s(s, v), obj_id::<E>(s, v)) {
         (Some(n), Some(o)) if d.is_element(n) => Ok((n, o)),
         _ => Err(s.type_error(&format!("Failed to execute '{method}' on 'ResizeObserver': parameter 1 is not of type 'Element'."))),
     }
 }
 
-fn remove(d: &Dom, o: ObjId, target: NodeId) {
+fn remove<E: Eng>(d: &Dom<E>, o: E::Obj, target: NodeId) {
     let mut s = d.resize.s.borrow_mut();
     let s = &mut *s;
     let ob = s.observers.get_mut(&o).expect("checked");
@@ -188,14 +189,14 @@ fn remove(d: &Dom, o: ObjId, target: NodeId) {
     s.observations -= before - ob.obs.len();
 }
 
-fn observe<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn observe<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let o = observer_of(d, s, this)?;
     let (target, wrapper) = target_arg(d, s, a, "observe")?;
     // The options dictionary: `box` is read once, after the target check (WebIDL order).
-    let opts = arg_s(s, a, 1);
-    let observed = if is_nullish(s, opts) {
+    let opts = arg_s::<E>(s, a, 1);
+    let observed = if is_nullish::<E>(s, opts) {
         Boxes::Content
-    } else if is_object(s, opts) {
+    } else if is_object::<E>(s, opts) {
         let b = s.get_str(opts, "box")?;
         if s.type_of(b) == Type::Undefined {
             Boxes::Content
@@ -203,7 +204,7 @@ fn observe<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res
             match d.string_arg_s(s, b)?.as_str() {
                 "content-box" => Boxes::Content,
                 "border-box" => Boxes::Border,
-                "device-pixel-content-box" => return Err(lift_err(s, Dom::gate(DEVICE))),
+                "device-pixel-content-box" => return Err(lift_err::<E>(s, Dom::<E>::gate(DEVICE))),
                 other => {
                     let m = format!("Failed to execute 'observe' on 'ResizeObserver': The provided value '{other}' is not a valid enum value of type ResizeObserverBoxOptions.");
                     return Err(s.type_error(&m));
@@ -229,14 +230,14 @@ fn observe<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res
     Ok(s.undefined())
 }
 
-fn unobserve<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn unobserve<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let o = observer_of(d, s, this)?;
     let (target, _) = target_arg(d, s, a, "unobserve")?;
     remove(d, o, target);
     Ok(s.undefined())
 }
 
-fn disconnect<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn disconnect<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let o = observer_of(d, s, this)?;
     let mut m = d.resize.s.borrow_mut();
     let m = &mut *m;
@@ -248,26 +249,26 @@ fn disconnect<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> 
     Ok(s.undefined())
 }
 
-fn device_sizes<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
-    Err(lift_err(s, Dom::gate(DEVICE)))
+fn device_sizes<'s, E: Eng>(_: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    Err(lift_err::<E>(s, Dom::<E>::gate(DEVICE)))
 }
 
 /// A padding side in px. Only an absolute length is known without the containing block.
-fn padding(style: &bare_css::cascade::ComputedStyle, p: Property) -> R<f32> {
+fn padding<E: Eng>(style: &bare_css::cascade::ComputedStyle, p: Property) -> R<E, f32> {
     match style.get(p) {
         Cv::Length(Length::Px(x)) => Ok(x.max(0.0)),
-        _ => Err(Dom::gate(PADDING)),
+        _ => Err(Dom::<E>::gate(PADDING)),
     }
 }
 
-fn sizes_of(tree: &Tree, styles: &Styles, border: Option<Rect>, el: NodeId) -> R<Sizes> {
+fn sizes_of<E: Eng>(tree: &Tree, styles: &Styles, border: Option<Rect>, el: NodeId) -> R<E, Sizes> {
     let Some(style) = styles.style(el) else { return Ok(Sizes::default()) };
     // No box (`display: none`) or a non-replaced inline box: 0 x 0 (an ancestor with no box leaves no fragment, below).
     if matches!(tree.kind(el), Kind::Inline | Kind::Break | Kind::None) {
         return Ok(Sizes::default());
     }
     let Some(r) = border else { return Ok(Sizes::default()) };
-    let (pl, pr, pt, pb) = (padding(style, Property::PaddingLeft)?, padding(style, Property::PaddingRight)?, padding(style, Property::PaddingTop)?, padding(style, Property::PaddingBottom)?);
+    let (pl, pr, pt, pb) = (padding::<E>(style, Property::PaddingLeft)?, padding::<E>(style, Property::PaddingRight)?, padding::<E>(style, Property::PaddingTop)?, padding::<E>(style, Property::PaddingBottom)?);
     let b = |p| style.px(p).max(0.0);
     let w = (r.w - b(Property::BorderLeftWidth) - b(Property::BorderRightWidth) - pl - pr).max(0.0);
     let h = (r.h - b(Property::BorderTopWidth) - b(Property::BorderBottomWidth) - pt - pb).max(0.0);
@@ -284,7 +285,7 @@ fn depth(doc: &Document, n: NodeId) -> usize {
     d
 }
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     fn resize_key(&self) -> Key {
         let doc = self.doc.borrow();
         let vp = self.plat.s.borrow().viewport;
@@ -307,7 +308,7 @@ impl Dom {
     }
 
     /// Measure every observed target once: one cascade and one bounded layout.
-    fn measure(&self, it: &mut Interp<'_>) -> R<HashMap<NodeId, Sizes>> {
+    fn measure(&self, it: &mut E::Vm) -> R<E, HashMap<NodeId, Sizes>> {
         let _caller = crate::force::tag("ResizeObserver");
         let targets: Vec<NodeId> = {
             let s = self.resize.s.borrow();
@@ -317,7 +318,7 @@ impl Dom {
         let layout = &self.layout_now(it, &styles)?.layout;
         // The border box of each target: the union of its box fragments, in one pass over the fragments (CSSOM View).
         let mut boxes: HashMap<NodeId, Option<Rect>> = targets.iter().map(|&t| (t, None)).collect();
-        it.charge(layout.fragments.len() as u64)?;
+        it.charge_o(layout.fragments.len() as u64)?;
         for f in layout.fragments.iter().filter(|f| f.kind == FragKind::Box) {
             if let Some(b) = boxes.get_mut(&f.node) {
                 let r = f.rect;
@@ -334,8 +335,8 @@ impl Dom {
         let tree = Tree::new(&doc, &styles);
         let mut out = HashMap::with_capacity(boxes.len());
         for (t, border) in boxes {
-            it.charge(1)?;
-            out.insert(t, sizes_of(&tree, &styles, border, t)?);
+            it.charge_o(1)?;
+            out.insert(t, sizes_of::<E>(&tree, &styles, border, t)?);
         }
         Ok(out)
     }
@@ -365,32 +366,32 @@ impl Dom {
         (active, skipped)
     }
 
-    fn size_obj(&self, it: &mut Interp<'_>, proto: ObjId, (w, h): (f32, f32)) -> R<Value> {
+    fn size_obj(&self, it: &mut E::Vm, proto: E::Obj, (w, h): (f32, f32)) -> R<E, E::Raw> {
         let o = self.obj(it, proto)?;
         for (name, v) in [("inlineSize", w), ("blockSize", h)] {
             let k = self.key(it, name)?;
-            it.define_data(o, k, Value::Number(v as f64), false, true, true)?;
+            it.define_data(o, k, E::num(v as f64), false, true, true)?;
         }
-        Ok(Value::Object(o))
+        Ok(E::obj_raw(o))
     }
 
-    fn entry(&self, it: &mut Interp<'_>, p: Protos, wrapper: ObjId, z: Sizes) -> R<Value> {
-        it.charge(1)?;
+    fn entry(&self, it: &mut E::Vm, p: Protos<E>, wrapper: E::Obj, z: Sizes) -> R<E, E::Raw> {
+        it.charge_o(1)?;
         let e = self.obj(it, p.entry)?;
         let rect = crate::browser_geom::rect_object(self, it, [z.at.0 as f64, z.at.1 as f64, z.content.0 as f64, z.content.1 as f64], false)?;
         let border = self.size_obj(it, p.size, z.border)?;
         let border = it.array_from(&[border])?;
         let content = self.size_obj(it, p.size, z.content)?;
         let content = it.array_from(&[content])?;
-        for (name, v) in [("target", Value::Object(wrapper)), ("contentRect", rect), ("borderBoxSize", border), ("contentBoxSize", content)] {
+        for (name, v) in [("target", E::obj_raw(wrapper)), ("contentRect", rect), ("borderBoxSize", border), ("contentBoxSize", content)] {
             let k = self.key(it, name)?;
             it.define_data(e, k, v, false, true, true)?;
         }
-        Ok(Value::Object(e))
+        Ok(E::obj_raw(e))
     }
 
     /// Broadcast: each observer with active observations, in creation order, gets its entries. Gives the shallowest delivered depth.
-    fn broadcast(&self, it: &mut Interp<'_>, sizes: &HashMap<NodeId, Sizes>) -> R<usize> {
+    fn broadcast(&self, it: &mut E::Vm, sizes: &HashMap<NodeId, Sizes>) -> R<E, usize> {
         let order = self.resize.s.borrow().order.clone();
         let mut shallowest = usize::MAX;
         for o in order {
@@ -418,9 +419,9 @@ impl Dom {
                 entries.push(self.entry(it, p, w, z)?);
             }
             let list = it.array_from(&entries)?;
-            match it.call(cb, Value::Object(o), &[list, Value::Object(o)]) {
+            match it.call_o(cb, E::obj_raw(o), &[list, E::obj_raw(o)]) {
                 Ok(_) => {}
-                Err(Error::Throw(v)) => self.report(it, v, "resizeobserver", Target::Window),
+                Err(Fault::Throw(v)) => self.report(it, v, "resizeobserver", Target::Window),
                 Err(e) => return Err(e),
             }
             it.host_checkpoint()?;
@@ -429,7 +430,7 @@ impl Dom {
     }
 
     /// The rendering step: gather and broadcast until no observation is active (see the header).
-    pub(crate) fn resize_frame(&self, it: &mut Interp<'_>) -> R<()> {
+    pub(crate) fn resize_frame(&self, it: &mut E::Vm) -> R<E, ()> {
         self.resize.s.borrow_mut().pending = false;
         if self.resize.s.borrow().observations == 0 {
             return Ok(());
@@ -449,37 +450,47 @@ impl Dom {
         s.last_key = if skipped { None } else { Some(key) };
         drop(s);
         if skipped {
-            let e = it.new_error(it.error_prototype(), LOOP)?;
-            self.report(it, Value::Object(e), "error", Target::Window);
+            let e = it.new_error_o(it.error_prototype(), LOOP)?;
+            self.report(it, E::obj_raw(e), "error", Target::Window);
         }
         Ok(())
     }
 
-    pub(crate) fn resize_roots(&self, out: &mut Vec<Value>) {
+    pub(crate) fn resize_roots(&self, out: &mut Roots<'_, '_, E>) {
         let s = self.resize.s.borrow();
         if let Some(p) = s.protos {
-            out.extend([p.observer, p.entry, p.size].map(Value::Object));
+            out.extend([p.observer, p.entry, p.size].map(E::obj_raw));
         }
-        out.extend(s.observers.iter().filter(|(_, ob)| !ob.obs.is_empty()).map(|(&o, _)| Value::Object(o)));
+        out.extend(s.observers.iter().filter(|(_, ob)| !ob.obs.is_empty()).map(|(&o, _)| E::obj_raw(o)));
     }
 
-    pub(crate) fn resize_trace(&self, owner: ObjId, out: &mut Vec<Value>) {
+    pub(crate) fn resize_trace(&self, owner: E::Obj, t: &mut bare_js_api::Tracer<'_, E::Raw>) {
+        let out = &mut Roots::<E>(t);
         if let Some(ob) = self.resize.s.borrow().observers.get(&owner) {
             out.push(ob.cb);
-            out.extend(ob.obs.iter().map(|x| Value::Object(x.wrapper)));
+            out.extend(ob.obs.iter().map(|x| E::obj_raw(x.wrapper)));
         }
     }
 
-    pub(crate) fn resize_prune(&self, live: &dyn Fn(ObjId) -> bool) {
+    /// The entries of the observer table (tests).
+    #[cfg(test)]
+    pub(crate) fn resize_entries(&self) -> usize {
+        self.resize.s.borrow().observers.len()
+    }
+
+    /// The observers `dead` were collected: drop their entries.
+    pub(crate) fn resize_forget(&self, dead: &[E::Obj]) {
         let mut s = self.resize.s.borrow_mut();
-        s.observers.retain(|&o, _| live(o));
         let s = &mut *s;
+        for o in dead {
+            s.observers.remove(o);
+        }
         let observers = &s.observers;
         s.order.retain(|o| observers.contains_key(o));
     }
 }
 
-impl Browser {
+impl<E: Eng> Browser<E> {
     /// Replace the bounds of this module. Call it before scripts run.
     pub fn set_resize_limits(&mut self, l: ResizeLimits) {
         self.dom.resize.lim.set(l);

@@ -17,37 +17,36 @@
 //! - After `MAX_ENTRIES` entries, a new one is returned but not kept.
 //! - The methods and legacy navigation accessors are installed with the scheduler. The entry list is empty until the first `mark`.
 
+use crate::eng::{Eng, Ops};
 use crate::browser::*;
 use crate::browser_geom::Iface;
 use crate::browser_scoped::*;
-use bare_js::eval::Interp;
-use bare_js::value::ObjId;
 use bare_js_api::{Args, Attrs, HostFn, Local, Type};
 
 const MAX_ENTRIES: usize = 50_000;
 
 /// The interfaces of the timeline. Made once by `ensure`. Their prototypes and constructors are in `Dom::fixed` (`browser_geom::make`).
 #[derive(Clone, Copy)]
-pub(crate) struct Ifaces {
-    entry: Iface,
-    resource: Iface,
-    navigation: Iface,
-    mark: Iface,
-    measure: Iface,
+pub(crate) struct Ifaces<E: Eng> {
+    entry: Iface<E>,
+    resource: Iface<E>,
+    navigation: Iface<E>,
+    mark: Iface<E>,
+    measure: Iface<E>,
 }
 
-fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<Ifaces> {
+fn ensure<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, Ifaces<E>> {
     if let Some(i) = d.perf_ifaces.get() {
         return Ok(i);
     }
     let entry = crate::browser_geom::make_s(d, it, it.object_prototype(), "PerformanceEntry", crate::browser::illegal_constructor, HostFn::Ctor)?;
-    let sub = |it: &mut Interp<'_>, name: &str| crate::browser_geom::make_s(d, it, entry.proto, name, crate::browser::illegal_constructor, HostFn::Ctor);
+    let sub = |it: &mut E::Vm, name: &str| crate::browser_geom::make_s(d, it, entry.proto, name, crate::browser::illegal_constructor, HostFn::Ctor);
     let (resource, navigation, mark, measure) = (sub(it, "PerformanceResourceTiming")?, sub(it, "PerformanceNavigationTiming")?, sub(it, "PerformanceMark")?, sub(it, "PerformanceMeasure")?);
-    crate::browser_geom::finish_s(d, it, entry, "PerformanceEntry", &[("toJSON", 0, entry_json as HS)])?;
+    crate::browser_geom::finish_s(d, it, entry, "PerformanceEntry", &[("toJSON", 0, entry_json as HS<E>)])?;
     crate::browser_geom::finish_s(d, it, resource, "PerformanceResourceTiming", &[])?;
     crate::browser_geom::finish_s(d, it, navigation, "PerformanceNavigationTiming", &[])?;
-    crate::browser_geom::finish_s(d, it, mark, "PerformanceMark", &[("toJSON", 0, detail_json as HS)])?;
-    crate::browser_geom::finish_s(d, it, measure, "PerformanceMeasure", &[("toJSON", 0, detail_json as HS)])?;
+    crate::browser_geom::finish_s(d, it, mark, "PerformanceMark", &[("toJSON", 0, detail_json as HS<E>)])?;
+    crate::browser_geom::finish_s(d, it, measure, "PerformanceMeasure", &[("toJSON", 0, detail_json as HS<E>)])?;
     let i = Ifaces { entry, resource, navigation, mark, measure };
     d.perf_ifaces.set(Some(i));
     Ok(i)
@@ -59,11 +58,11 @@ crate::browser_lazy::lazy_global!(lazy_navigation, "PerformanceNavigationTiming"
 crate::browser_lazy::lazy_global!(lazy_mark, "PerformanceMark", ensure_unit, |d| d.perf_ifaces.get().expect("made").mark.ctor);
 crate::browser_lazy::lazy_global!(lazy_measure, "PerformanceMeasure", ensure_unit, |d| d.perf_ifaces.get().expect("made").measure.ctor);
 
-fn ensure_unit(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+fn ensure_unit<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
     ensure(d, it).map(|_| ())
 }
 
-pub(crate) fn install_interfaces<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+pub(crate) fn install_interfaces<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
     table!(lazy = [
         Row::both(1, "PerformanceEntry", lazy_entry),
         Row::both(1, "PerformanceResourceTiming", lazy_resource),
@@ -72,22 +71,22 @@ pub(crate) fn install_interfaces<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()>
         Row::both(1, "PerformanceMeasure", lazy_measure),
     ]);
     let g = s.global();
-    d.install_rows(s, &[g], &lazy::T)
+    d.install_rows(s, &[g], &lazy::T::<E>::V)
 }
 
 /// `PerformanceEntry.prototype.toJSON`: the four members of an entry.
-fn entry_json<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn entry_json<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     json(d, s, this, false)
 }
 
 /// `toJSON` of a mark and a measure: the four members and `detail`.
-fn detail_json<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn detail_json<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     json(d, s, this, true)
 }
 
-fn json<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, detail: bool) -> Res<'s, Local<'s>> {
-    if !is_object(s, this) {
-        return Err(crate::browser_geom::illegal_s(s));
+fn json<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, detail: bool) -> Res<'s, Local<'s>> {
+    if !is_object::<E>(s, this) {
+        return Err(crate::browser_geom::illegal_s::<E>(s));
     }
     let proto = s.engine().object_prototype();
     let o = d.obj_with_s(s, proto)?;
@@ -118,7 +117,7 @@ pub(crate) struct LoadTimes {
 }
 
 /// A new plain object with the prototype `proto` and the data properties `props`, in this order.
-fn object<'s>(d: &Dom, s: &mut Sc<'s, '_>, proto: ObjId, props: &[(&str, Local<'s>)]) -> Res<'s, Local<'s>> {
+fn object<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, proto: E::Obj, props: &[(&str, Local<'s>)]) -> Res<'s, Local<'s>> {
     let o = d.obj_s(s, proto)?;
     let l = d.obj_local(s, o);
     for &(k, v) in props {
@@ -128,11 +127,11 @@ fn object<'s>(d: &Dom, s: &mut Sc<'s, '_>, proto: ObjId, props: &[(&str, Local<'
 }
 
 /// The navigation entry of the document `url`. Each read makes a new object. Its times are those of `LoadTimes`.
-fn nav_entry<'s>(d: &Dom, s: &mut Sc<'s, '_>, url: &str) -> Res<'s, Local<'s>> {
-    let i = old(s, |it| ensure(d, it))?;
+fn nav_entry<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, url: &str) -> Res<'s, Local<'s>> {
+    let i = old::<E, _>(s, |it| ensure(d, it))?;
     let t = *d.load_times.borrow();
     let (name, ty, nav) = (d.js_str_s(s, url)?, d.js_str_s(s, "navigation")?, d.js_str_s(s, "navigate")?);
-    let n = |s: &mut Sc<'s, '_>, v: f64| s.number(v);
+    let n = |s: &mut Sc<'s, E>, v: f64| s.number(v);
     let props = [
         ("name", name),
         ("entryType", ty),
@@ -149,47 +148,47 @@ fn nav_entry<'s>(d: &Dom, s: &mut Sc<'s, '_>, url: &str) -> Res<'s, Local<'s>> {
     object(d, s, i.navigation.proto, &props)
 }
 
-fn need<'s>(s: &mut Sc<'s, '_>, a: Args<'s>, what: &str) -> Res<'s, ()> {
+fn need<'s, E: Eng>(s: &mut Sc<'s, E>, a: Args<'s>, what: &str) -> Res<'s, ()> {
     if a.len() == 0 {
         return Err(s.type_error(&format!("Failed to execute '{what}' on 'Performance': 1 argument required, but only 0 present.")));
     }
     Ok(())
 }
 
-fn present(s: &Sc<'_, '_>, v: Local<'_>) -> bool {
+fn present<E: Eng>(s: &Sc<'_, E>, v: Local<'_>) -> bool {
     s.type_of(v) != Type::Undefined
 }
 
 /// The object of an entry: an instance of `PerformanceMark` or `PerformanceMeasure`.
-fn make<'s>(d: &Dom, s: &mut Sc<'s, '_>, e: &Entry, detail: Local<'s>) -> Res<'s, Local<'s>> {
-    let i = old(s, |it| ensure(d, it))?;
+fn make<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, e: &Entry, detail: Local<'s>) -> Res<'s, Local<'s>> {
+    let i = old::<E, _>(s, |it| ensure(d, it))?;
     let (name, ty) = (d.js_str_s(s, &e.name)?, d.js_str_s(s, if e.measure { "measure" } else { "mark" })?);
     let (start, dur) = (s.number(e.start), s.number(e.dur));
     object(d, s, if e.measure { i.measure.proto } else { i.mark.proto }, &[("name", name), ("entryType", ty), ("startTime", start), ("duration", dur), ("detail", detail)])
 }
 
-fn keep(d: &Dom, e: Entry) {
+fn keep<E: Eng>(d: &Dom<E>, e: Entry) {
     let mut l = d.perf_entries.borrow_mut();
     if l.len() < MAX_ENTRIES {
         l.push(e);
     }
 }
 
-fn mark<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    need(s, a, "mark")?;
+fn mark<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    need::<E>(s, a, "mark")?;
     let name = d.arg_str_s(s, a, 0)?;
     let (mut start, mut detail) = (d.now_ms(), s.null());
-    let o = arg_s(s, a, 1);
-    if is_object(s, o) {
+    let o = arg_s::<E>(s, a, 1);
+    if is_object::<E>(s, o) {
         let v = s.get_str(o, "startTime")?;
-        if present(s, v) {
+        if present::<E>(s, v) {
             start = s.to_number(v)?;
             if !start.is_finite() || start < 0.0 {
                 return Err(s.type_error("Failed to execute 'mark' on 'Performance': 'startTime' must be a non-negative finite number."));
             }
         }
         let v = s.get_str(o, "detail")?;
-        if present(s, v) {
+        if present::<E>(s, v) {
             detail = v;
         }
     }
@@ -200,8 +199,8 @@ fn mark<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, L
 }
 
 /// A time of `measure`: a number, or the name of a mark. `None` for `undefined`.
-fn time<'s>(d: &Dom, s: &mut Sc<'s, '_>, v: Local<'s>) -> Res<'s, Option<f64>> {
-    if !present(s, v) {
+fn time<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>) -> Res<'s, Option<f64>> {
+    if !present::<E>(s, v) {
         return Ok(None);
     }
     if let Some(n) = s.as_number(v) {
@@ -218,29 +217,29 @@ fn time<'s>(d: &Dom, s: &mut Sc<'s, '_>, v: Local<'s>) -> Res<'s, Option<f64>> {
     }
 }
 
-fn measure<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    need(s, a, "measure")?;
+fn measure<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    need::<E>(s, a, "measure")?;
     let name = d.arg_str_s(s, a, 0)?;
     let (start, end);
     let (mut dur, mut detail) = (None, s.null());
-    let (a1, a2) = (arg_s(s, a, 1), arg_s(s, a, 2));
-    if is_object(s, a1) {
+    let (a1, a2) = (arg_s::<E>(s, a, 1), arg_s::<E>(s, a, 2));
+    if is_object::<E>(s, a1) {
         let (st, e, du, de) = (s.get_str(a1, "start")?, s.get_str(a1, "end")?, s.get_str(a1, "duration")?, s.get_str(a1, "detail")?);
-        if [st, e, du, de].into_iter().any(|v| present(s, v)) {
-            if present(s, a2) {
+        if [st, e, du, de].into_iter().any(|v| present::<E>(s, v)) {
+            if present::<E>(s, a2) {
                 return Err(s.type_error("Failed to execute 'measure' on 'Performance': The measureOptions and endMark cannot both be passed."));
             }
-            let (ps, pe, pd) = (present(s, st), present(s, e), present(s, du));
+            let (ps, pe, pd) = (present::<E>(s, st), present::<E>(s, e), present::<E>(s, du));
             if (!ps && !pe) || (ps && pe && pd) {
                 return Err(s.type_error("Failed to execute 'measure' on 'Performance': Invalid measure options."));
             }
         }
-        let end_arg = if present(s, a2) { a2 } else { e };
+        let end_arg = if present::<E>(s, a2) { a2 } else { e };
         (start, end) = (time(d, s, st)?, time(d, s, end_arg)?);
-        if present(s, du) {
+        if present::<E>(s, du) {
             dur = Some(s.to_number(du)?);
         }
-        if present(s, de) {
+        if present::<E>(s, de) {
             detail = de;
         }
     } else {
@@ -258,7 +257,7 @@ fn measure<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s
     Ok(v)
 }
 
-fn list<'s>(d: &Dom, s: &mut Sc<'s, '_>, ty: Option<&str>, name: Option<&str>) -> Res<'s, Local<'s>> {
+fn list<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, ty: Option<&str>, name: Option<&str>) -> Res<'s, Local<'s>> {
     let mut out = Vec::new();
     if let Ok(rec) = d.cur_rec() {
         let url = rec.href();
@@ -286,12 +285,12 @@ fn list<'s>(d: &Dom, s: &mut Sc<'s, '_>, ty: Option<&str>, name: Option<&str>) -
     s.new_array(&out)
 }
 
-fn get_entries<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn get_entries<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     list(d, s, None, None)
 }
 
-fn by_type<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    need(s, a, "getEntriesByType")?;
+fn by_type<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    need::<E>(s, a, "getEntriesByType")?;
     let t = d.arg_str_s(s, a, 0)?;
     if !matches!(t.as_str(), "mark" | "measure" | "navigation") {
         return s.new_array(&[]);
@@ -299,36 +298,36 @@ fn by_type<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s
     list(d, s, Some(&t), None)
 }
 
-fn by_name<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    need(s, a, "getEntriesByName")?;
+fn by_name<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    need::<E>(s, a, "getEntriesByName")?;
     let n = d.arg_str_s(s, a, 0)?;
-    let a1 = arg_s(s, a, 1);
-    let t = if present(s, a1) { Some(d.string_arg_s(s, a1)?) } else { None };
+    let a1 = arg_s::<E>(s, a, 1);
+    let t = if present::<E>(s, a1) { Some(d.string_arg_s(s, a1)?) } else { None };
     if t.as_deref().is_some_and(|t| !matches!(t, "mark" | "measure" | "navigation")) {
         return s.new_array(&[]);
     }
     list(d, s, t.as_deref(), Some(&n))
 }
 
-fn clear<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>, measure: bool) -> Res<'s, Local<'s>> {
-    let a0 = arg_s(s, a, 0);
-    let name = if present(s, a0) { Some(d.string_arg_s(s, a0)?) } else { None };
+fn clear<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, a: Args<'s>, measure: bool) -> Res<'s, Local<'s>> {
+    let a0 = arg_s::<E>(s, a, 0);
+    let name = if present::<E>(s, a0) { Some(d.string_arg_s(s, a0)?) } else { None };
     d.perf_entries.borrow_mut().retain(|e| e.measure != measure || name.as_ref().is_some_and(|n| *n != e.name));
     Ok(s.undefined())
 }
 
-fn clear_marks<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn clear_marks<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     clear(d, s, a, false)
 }
 
-fn clear_measures<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn clear_measures<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     clear(d, s, a, true)
 }
 
 /// Define the methods on `perf`, the prototype of the `performance` object.
-pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>, perf: ObjId) -> Res<'s, ()> {
+pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, perf: E::Obj) -> Res<'s, ()> {
     for (name, len, h) in [
-        ("mark", 1, mark as HS),
+        ("mark", 1, mark as HS<E>),
         ("measure", 1, measure),
         ("getEntries", 0, get_entries),
         ("getEntriesByType", 1, by_type),
@@ -339,7 +338,7 @@ pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>, perf: ObjId) -> Res<'s, (
         d.def_method_at(s, perf, name, len, h)?;
     }
     let po = d.obj_local(s, perf);
-    for (name, h) in [("timing", timing as HS), ("navigation", navigation as HS), ("timeOrigin", time_origin as HS)] {
+    for (name, h) in [("timing", timing as HS<E>), ("navigation", navigation as HS<E>), ("timeOrigin", time_origin as HS<E>)] {
         let f = d.add_fn_s(s, h, name, 0, HostFn::Method)?;
         s.define_accessor_str(po, name, Some(f), None, Attrs { writable: false, enumerable: true, configurable: true })?;
     }
@@ -348,10 +347,10 @@ pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>, perf: ObjId) -> Res<'s, (
 
 /// Legacy navigation data is synthesized on first access. It does not add realm state.
 #[cold]
-fn legacy<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, timing: bool) -> Res<'s, Local<'s>> {
-    let proto = old(s, |it| Ok(it.object_prototype()))?;
+fn legacy<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, timing: bool) -> Res<'s, Local<'s>> {
+    let proto = old::<E, _>(s, |it| Ok(it.object_prototype()))?;
     let o = d.obj_s(s, proto)?;
-    old(s, |it| crate::browser_lazy::tag(d, it, o, if timing { "PerformanceTiming" } else { "PerformanceNavigation" }))?;
+    old::<E, _>(s, |it| crate::browser_lazy::tag(d, it, o, if timing { "PerformanceTiming" } else { "PerformanceNavigation" }))?;
     let l = d.obj_local(s, o);
     let fixed = Attrs { writable: false, enumerable: true, configurable: true };
     if timing {
@@ -367,22 +366,22 @@ fn legacy<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, timing: bool) -> Res
             s.define_str(l, name, v, fixed)?;
         }
     }
-    if is_object(s, this) {
+    if is_object::<E>(s, this) {
         s.define_str(this, if timing { "timing" } else { "navigation" }, l, fixed)?;
     }
     Ok(l)
 }
-fn timing<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn timing<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     legacy(d, s, this, true)
 }
-fn navigation<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn navigation<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     legacy(d, s, this, false)
 }
 /// The wall clock at time 0 of the scheduler clock, in ms. The first read fixes it on the owner, as `legacy` does.
-fn time_origin<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn time_origin<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let t = s.wall_now_ms() - d.now_ms();
     let v = s.number(t);
-    if is_object(s, this) {
+    if is_object::<E>(s, this) {
         let fixed = Attrs { writable: false, enumerable: true, configurable: true };
         s.define_str(this, "timeOrigin", v, fixed)?;
     }

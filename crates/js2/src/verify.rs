@@ -18,12 +18,12 @@
 //!   never below 0, and at least the depth of a handler in each instruction that can throw in its range; no instruction reads a register
 //!   that some path has not written, and a root map names only registers that every path has written. Registers `0..nparams` are
 //!   written at the entry, and a handler writes its register. Unreachable instructions are not checked by the data flow.
-//! - suspension (`GenInit`, `Yield`, `RetGen`): only code with `gen_kind` that is a constructor-less function has them, and it has no `Ret`
+//! - suspension (`GenInit`, `Yield`, `RetGen` in a generator; `AsyncInit`, `Await`, `RetAsync` in an async function): only code with `gen_kind` that is a constructor-less function has them, and it has no `Ret`
 //!   or `LoadNewTarget`. A save list is inside the pool, names registers that are written on every path to the suspension and that its
 //!   root map names (a collection before the copy must not free them), and is no longer than `gen_regs`. After the suspension only the registers of
 //!   the list, the sent value and the mode are written: the resume restores no other. A handler whose range holds a suspension is
 //!   entered with that smaller set too.
-use crate::bytecode::{Code, GK_NONE, ITER_REGS, Ins, NO_REG, Op, Recipes, STR_EMPTY, STR_SLOT, decode};
+use crate::bytecode::{Code, GK_ASYNC, GK_ASYNCGEN, GK_GEN, GK_NONE, ITER_REGS, Ins, NO_REG, Op, Recipes, STR_EMPTY, STR_SLOT, YS_REGS, decode};
 
 type Bits = Vec<u64>;
 
@@ -45,7 +45,8 @@ fn window(ins: &Ins, recipes: &Recipes) -> Option<u32> {
         Op::NewSpread => 2,
         Op::ObjRest => ins.x,
         Op::NewObjLit => recipes.get(ins.c as usize).map_or(0, |k| k.len() as u32),
-        Op::IterOpen | Op::ForInOpen | Op::IterNext | Op::IterClose => ITER_REGS,
+        Op::IterOpen | Op::ForInOpen | Op::IterNext | Op::IterClose | Op::AIterOpen | Op::AIterNext | Op::AIterClose | Op::AIterCloseT => ITER_REGS,
+        Op::YieldStarStep | Op::AYsCall => YS_REGS,
         _ => return None,
     })
 }
@@ -98,12 +99,15 @@ pub fn verify(code: &Code) -> Result<(), String> {
     }
     for &(pc, i, len) in &ins {
         let err = |what: &str| Err(format!("{pc:04} {}: {what}", i.op.name()));
-        let suspends = matches!(i.op, Op::GenInit | Op::Yield | Op::RetGen);
-        if suspends && code.gen_kind == GK_NONE {
-            return err("an op of generator code in a function that is not one");
+        let (gen_op, async_op) = (matches!(i.op, Op::GenInit | Op::Yield | Op::RetGen), matches!(i.op, Op::AsyncInit | Op::Await | Op::RetAsync));
+        // An async generator has the ops of both: `Await` for `await`, and the generator ops.
+        let gk = code.gen_kind;
+        let ok = if i.op == Op::Await { gk == GK_ASYNC || gk == GK_ASYNCGEN } else if gen_op { gk == GK_GEN || gk == GK_ASYNCGEN } else { gk == GK_ASYNC };
+        if (gen_op || async_op) && !ok {
+            return err("an op of generator or async code in a function that is not one");
         }
         if code.gen_kind != GK_NONE && matches!(i.op, Op::Ret | Op::RetUndef | Op::RetDerived | Op::LoadNewTarget) {
-            return err("not allowed in generator code (a generator returns with RetGen, and its frame keeps the generator where new.target is)");
+            return err("not allowed in generator code (a generator returns with RetGen or RetAsync, and its frame keeps the generator where new.target is)");
         }
         for k in 0..i.op.form().fields() {
             let v = i.field(k);
@@ -217,7 +221,7 @@ fn check_table(code: &Code, i: &Ins, pc: usize, start: &dyn Fn(i64) -> bool) -> 
                 }
             }
         }
-        Op::GenInit | Op::Yield => {
+        Op::GenInit | Op::Yield | Op::Await => {
             let nregs = code.nregs as u32;
             let l = code.save_list(i.b).ok_or("the save list is not inside the pool")?;
             if l.regs.len() > code.gen_regs as usize {
@@ -348,7 +352,7 @@ fn flow(code: &Code, ins: &[(usize, Ins, usize)], at: &[usize]) -> Result<(), St
             _ => depth,
         };
         // A suspension: a resume restores the registers of the list and writes the sent value and the mode, and nothing else.
-        if matches!(i.op, Op::GenInit | Op::Yield) {
+        if matches!(i.op, Op::GenInit | Op::Yield | Op::Await) {
             let l = code.save_list(i.b).expect("a save list that the checks accepted");
             if let Some(r) = l.regs.iter().find(|r| !has(&set, **r)) {
                 return err(format!("the save list names r{r}, which a path has not written"));

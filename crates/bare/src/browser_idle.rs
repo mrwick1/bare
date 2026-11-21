@@ -24,12 +24,13 @@
 //! Deviations: Chrome waits for the end of the load before the first idle period, so a short `timeout` there fires before the callback of
 //! an earlier request with a longer one. Here the first period comes at once. Bound: `idle-callbacks` (live callbacks).
 
+use crate::eng::{Eng, Fault, Ops, Val};
+use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_frame::window_this;
 use crate::browser_scheduler::{Key, Task};
 use crate::browser_scoped::*;
-use bare_js::eval::{Error, Interp};
-use bare_js::value::{ObjId, Value, to_uint32};
+use bare_js::value::to_uint32;
 use bare_js_api::{Args, Attrs, Engine, HostFn, Local, Type};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
@@ -39,21 +40,21 @@ const MAX_CALLBACKS: usize = 1 << 16;
 const PERIOD_MS: f64 = 50.0;
 
 #[derive(Default)]
-pub(crate) struct Idle {
+pub(crate) struct Idle<E: Eng> {
     /// Live callbacks by handle, with the key of their timeout task.
-    cbs: RefCell<BTreeMap<u32, (Value, Option<Key>)>>,
+    cbs: RefCell<BTreeMap<u32, (<E as Eng>::Raw, Option<Key>)>>,
     next: Cell<u32>,
     /// A `Task::Idle` is queued.
     queued: Cell<bool>,
     /// The queued period was moved behind the frame once.
     deferred: Cell<bool>,
     /// `(prototype, constructor)` of `IdleDeadline`, once made.
-    made: Cell<Option<(ObjId, ObjId)>>,
+    made: Cell<Option<(<E as Eng>::Obj, <E as Eng>::Obj)>>,
     /// `IdleDeadline` instances: `(deadline, didTimeout)`.
-    deadlines: RefCell<HashMap<ObjId, (f64, bool)>>,
+    deadlines: RefCell<HashMap<<E as Eng>::Obj, (f64, bool)>>,
 }
 
-fn request<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn request<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     const F: &str = "Failed to execute 'requestIdleCallback' on 'Window'";
     window_this(d, s, this)?;
     let Some(cb) = a.get(0) else {
@@ -62,11 +63,11 @@ fn request<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res
     if !s.is_callable(cb) {
         return Err(s.type_error(&format!("{F}: The callback provided as parameter 1 is not a function.")));
     }
-    let o = arg_s(s, a, 1);
-    let timeout = if is_object(s, o) {
+    let o = arg_s::<E>(s, a, 1);
+    let timeout = if is_object::<E>(s, o) {
         let v = s.get_str(o, "timeout")?;
         if s.type_of(v) == Type::Undefined { 0 } else { to_uint32(s.to_number(v)?) }
-    } else if is_nullish(s, o) {
+    } else if is_nullish::<E>(s, o) {
         0
     } else {
         return Err(s.type_error(&format!("{F}: parameter 2 ('options') is not an object.")));
@@ -78,12 +79,12 @@ fn request<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res
     }
     let Some(id) = i.next.get().checked_add(1) else { return Err(d.lim_s(s, "idle-handles")) };
     let now = d.now_ms();
-    let key = if timeout > 0 { Some(lift(s, d.schedule(now + timeout as f64, Task::IdleTimeout(id)))?) } else { None };
+    let key = if timeout > 0 { Some(lift::<E, _>(s, d.schedule(now + timeout as f64, Task::IdleTimeout(id)))?) } else { None };
     if let Err(e) = d.idle_queue(now) {
         if let Some(k) = key {
             d.unschedule(k);
         }
-        return Err(lift_err(s, e));
+        return Err(lift_err::<E>(s, e));
     }
     d.idle_asked();
     i.next.set(id);
@@ -91,7 +92,7 @@ fn request<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res
     Ok(s.number(id as f64))
 }
 
-fn cancel<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn cancel<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     window_this(d, s, this)?;
     let Some(v) = a.get(0) else {
         return Err(s.type_error("Failed to execute 'cancelIdleCallback' on 'Window': 1 argument required, but only 0 present."));
@@ -104,30 +105,30 @@ fn cancel<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<
     Ok(s.undefined())
 }
 
-fn deadline_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, (f64, bool)> {
-    match obj_id(s, this).and_then(|o| d.idle.deadlines.borrow().get(&o).copied()) {
+fn deadline_of<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, (f64, bool)> {
+    match obj_id::<E>(s, this).and_then(|o| d.idle.deadlines.borrow().get(&o).copied()) {
         Some(v) => Ok(v),
         None => Err(s.type_error("Illegal invocation")),
     }
 }
 
-fn time_remaining<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn time_remaining<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let (end, _) = deadline_of(d, s, this)?;
     Ok(s.number((end - d.now_ms()).max(0.0)))
 }
 
-fn did_timeout<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn did_timeout<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let timed_out = deadline_of(d, s, this)?.1;
     Ok(s.boolean(timed_out))
 }
 
-fn illegal<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn illegal<'s, E: Eng>(_: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     Err(s.type_error("Illegal constructor"))
 }
 
 #[cold]
 #[inline(never)]
-fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+fn ensure<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
     if d.idle.made.get().is_some() {
         return Ok(());
     }
@@ -135,39 +136,40 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     let proto = d.obj(it, op)?;
     let (kc, kp) = (d.key(it, "constructor")?, d.key(it, "prototype")?);
     let ctor = d.add_fn_s_obj(it, illegal, "IdleDeadline", 0, HostFn::Ctor)?;
-    it.define_data(ctor, kp, Value::Object(proto), false, false, false)?;
-    it.define_data(proto, kc, Value::Object(ctor), true, false, true)?;
+    it.define_data(ctor, kp, E::obj_raw(proto), false, false, false)?;
+    it.define_data(proto, kc, E::obj_raw(ctor), true, false, true)?;
     crate::browser_lazy::tag(d, it, proto, "IdleDeadline")?;
     d.def_method_s(it, proto, "timeRemaining", 0, time_remaining)?;
     d.def_get_s(it, proto, "didTimeout", did_timeout, None)?;
     d.idle.made.set(Some((proto, ctor)));
     // The global is made here and not as a lazy accessor: one more property of `window` costs a frame loop 0.6% (see resources.md).
     let (g, k) = (it.global_object(), d.key(it, "IdleDeadline")?);
-    if matches!(it.get_value(Value::Object(g), k)?, Value::Undefined) {
-        it.define_data(g, k, Value::Object(ctor), true, false, true)?;
+    if matches!(E::kind(it.get_value(E::obj_raw(g), k)?), Val::Undefined) {
+        it.define_data(g, k, E::obj_raw(ctor), true, false, true)?;
     }
     Ok(())
 }
 
-pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
     let g = s.global();
-    for (name, h) in [("requestIdleCallback", request as HS), ("cancelIdleCallback", cancel)] {
+    for (name, h) in [("requestIdleCallback", request as HS<E>), ("cancelIdleCallback", cancel)] {
         let f = d.add_fn_s(s, h, name, 1, HostFn::Method)?;
         s.define_str(g, name, f, Attrs::ALL)?;
     }
     Ok(())
 }
 
-impl Dom {
-    pub(crate) fn idle_roots(&self, out: &mut Vec<Value>) {
+impl<E: Eng> Dom<E> {
+    pub(crate) fn idle_roots(&self, out: &mut Roots<'_, '_, E>) {
         out.extend(self.idle.cbs.borrow().values().map(|c| c.0));
         if let Some((p, c)) = self.idle.made.get() {
-            out.extend([Value::Object(p), Value::Object(c)]);
+            out.extend([E::obj_raw(p), E::obj_raw(c)]);
         }
     }
 
-    pub(crate) fn idle_prune(&self, live: &dyn Fn(ObjId) -> bool) {
-        self.idle.deadlines.borrow_mut().retain(|&o, _| live(o));
+    /// The `IdleDeadline` `o` is dead: drop its entry.
+    pub(crate) fn idle_forget(&self, o: E::Obj) {
+        self.idle.deadlines.borrow_mut().remove(&o);
     }
 
     /// Queue the next idle period at `due` unless one is queued.
@@ -175,7 +177,7 @@ impl Dom {
         self.idle.cbs.borrow().len()
     }
 
-    fn idle_queue(&self, due: f64) -> R<()> {
+    fn idle_queue(&self, due: f64) -> R<E, ()> {
         if !self.idle.queued.get() {
             self.schedule(due, Task::Idle)?;
             self.idle.queued.set(true);
@@ -184,7 +186,7 @@ impl Dom {
     }
 
     /// Call one callback with a new `IdleDeadline`, then a microtask checkpoint. A throw is reported.
-    fn idle_call(&self, it: &mut Interp<'_>, cb: Value, end: f64, timed_out: bool) -> R<()> {
+    fn idle_call(&self, it: &mut E::Vm, cb: E::Raw, end: f64, timed_out: bool) -> R<E, ()> {
         ensure(self, it)?;
         let proto = self.idle.made.get().expect("made").0;
         if self.idle.deadlines.borrow().len() >= MAX_CALLBACKS {
@@ -192,10 +194,11 @@ impl Dom {
         }
         let o = self.obj(it, proto)?;
         self.idle.deadlines.borrow_mut().insert(o, (end, timed_out));
-        it.charge(1)?;
-        match it.call(cb, Value::Undefined, &[Value::Object(o)]) {
+        self.own_obj(it, o, crate::browser::Owner::Idle(o));
+        it.charge_o(1)?;
+        match it.call_o(cb, E::undef(), &[E::obj_raw(o)]) {
             Ok(_) => {}
-            Err(Error::Throw(v)) => self.report(it, v, "idlecallback", Target::Window),
+            Err(Fault::Throw(v)) => self.report(it, v, "idlecallback", Target::Window),
             Err(e) => return Err(e),
         }
         it.host_checkpoint().map(|_| ())
@@ -203,7 +206,7 @@ impl Dom {
 
     /// `Task::Idle`: see the header.
     /// True when a period ran callbacks.
-    pub(crate) fn idle_run(&self, it: &mut Interp<'_>) -> R<bool> {
+    pub(crate) fn idle_run(&self, it: &mut E::Vm) -> R<E, bool> {
         let i = &self.idle;
         i.queued.set(false);
         if i.cbs.borrow().is_empty() {
@@ -246,7 +249,7 @@ impl Dom {
     }
 
     /// `Task::IdleTimeout`: the callback runs now if it still waits.
-    pub(crate) fn idle_timeout(&self, it: &mut Interp<'_>, id: u32) -> R<bool> {
+    pub(crate) fn idle_timeout(&self, it: &mut E::Vm, id: u32) -> R<E, bool> {
         let gone = self.idle.cbs.borrow_mut().remove(&id);
         match gone {
             Some((cb, _)) => self.idle_call(it, cb, self.now_ms(), true).map(|_| true),

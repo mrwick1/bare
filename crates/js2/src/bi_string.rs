@@ -2,8 +2,9 @@
 //! not copy (a rope is flattened first, once). The methods that make a new string build a `Vec<u16>` and give it to [`Realm::make_units`],
 //! which picks the narrow form when it can. There is no regular expression: `split`, `replace` and the others take a string pattern.
 //! A call with a `RegExp` is a `TypeError` (the literal is one already). `replace` with a function replacer is in `prelude.js`.
+use crate::lazy::{Ent, m};
 use crate::bi_array::rel_index;
-use crate::builtins::{NativeFn, arg};
+use crate::builtins::arg;
 use crate::interp_rt::{ErrKind, R, Realm};
 use crate::string::{Chars, Str};
 use crate::value::Value;
@@ -39,38 +40,39 @@ impl Realm {
     pub(crate) fn install_string(&mut self) {
         let proto = self.string_proto;
         let c = self.ctor("String", 1, string_ctor, proto);
-        self.method(c, "fromCharCode", 1, from_char_code);
-        for (n, len, f) in [
-            ("charAt", 1, char_at as NativeFn),
-            ("charCodeAt", 1, char_code_at),
-            ("codePointAt", 1, code_point_at),
-            ("at", 1, at),
-            ("indexOf", 1, index_of),
-            ("lastIndexOf", 1, last_index_of),
-            ("includes", 1, includes),
-            ("startsWith", 1, starts_with),
-            ("endsWith", 1, ends_with),
-            ("slice", 2, slice),
-            ("substring", 2, substring),
-            ("substr", 2, substr),
-            ("split", 2, split),
-            ("toUpperCase", 0, to_upper),
-            ("toLowerCase", 0, to_lower),
-            ("trim", 0, trim),
-            ("trimStart", 0, trim_start),
-            ("trimEnd", 0, trim_end),
-            ("concat", 1, concat),
-            ("repeat", 1, repeat),
-            ("padStart", 1, pad_start),
-            ("padEnd", 1, pad_end),
-            ("replace", 2, replace),
-            ("replaceAll", 2, replace_all),
-            ("localeCompare", 1, locale_compare),
-            ("toString", 0, to_string),
-            ("valueOf", 0, to_string),
-        ] {
-            self.method(proto, n, len, f);
-        }
+        static STRING_STATICS: &[Ent] = &[m("fromCharCode", 1, from_char_code)];
+        self.lazy_table(c, STRING_STATICS);
+        static STRING_PROTO: &[Ent] = &[
+            crate::lazy::script("replace", "string_replace"),
+            crate::lazy::script("replaceAll", "string_replaceAll"),
+            m("charAt", 1, char_at),
+            m("charCodeAt", 1, char_code_at),
+            m("codePointAt", 1, code_point_at),
+            m("at", 1, at),
+            m("indexOf", 1, index_of),
+            m("lastIndexOf", 1, last_index_of),
+            m("includes", 1, includes),
+            m("startsWith", 1, starts_with),
+            m("endsWith", 1, ends_with),
+            m("slice", 2, slice),
+            m("substring", 2, substring),
+            m("substr", 2, substr),
+            m("split", 2, split),
+            m("toUpperCase", 0, to_upper),
+            m("toLowerCase", 0, to_lower),
+            m("trim", 0, trim),
+            m("trimStart", 0, trim_start),
+            m("trimEnd", 0, trim_end),
+            m("concat", 1, concat),
+            m("repeat", 1, repeat),
+            m("padStart", 1, pad_start),
+            m("padEnd", 1, pad_end),
+            m("localeCompare", 1, locale_compare),
+            m("toString", 0, to_string),
+            m("valueOf", 0, to_string),
+            crate::lazy::sym("[Symbol.iterator]", crate::bi_symbol::ITERATOR, crate::bi_string_iter::string_iterator),
+        ];
+        self.lazy_table(proto, STRING_PROTO);
         self.install_string_more();
     }
 }
@@ -418,11 +420,11 @@ fn replace_with(rt: &mut Realm, this: Value, args: &[Value], all: bool) -> R<Val
     Ok(rt.make_units(&out))
 }
 
-fn replace(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+pub(crate) fn replace(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     replace_with(rt, this, args, false)
 }
 
-fn replace_all(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+pub(crate) fn replace_all(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     replace_with(rt, this, args, true)
 }
 

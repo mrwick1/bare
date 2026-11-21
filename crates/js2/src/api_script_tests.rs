@@ -214,3 +214,21 @@ fn symbols_and_the_iterator_intrinsics() {
     })
     .unwrap();
 }
+
+/// Indirect eval from a script, under constant collection (a tiny trigger: nearly every op that allocates collects first).
+#[test]
+fn an_indirect_eval_called_by_a_script_survives_constant_collection() {
+    let mut r = realm();
+    task(&mut r, |s| {
+        let ev = s.eval_function().unwrap();
+        let g = s.global();
+        s.set_str(g, "ev", ev).unwrap();
+    })
+    .unwrap();
+    r.heap.set_trigger(crate::heap::Trigger { min: 1 << 10, slack: 1 << 10 });
+    let src = "var t = []; for (var i = 0; i < 20; i++) t.push({ i: i, s: 'k' + i });
+               var a = ev('var q = []; for (var j = 0; j < 50; j++) q.push({ j: j, s: \"v\" + j }); q.length');
+               var b = ev('q.map(function (n) { return n.s + t.length; }).join(\"\")');
+               [a, t.length, ev('1 + 1'), b.length].join()";
+    assert_eq!(run(&mut r, src), "50,20,2,240");
+}

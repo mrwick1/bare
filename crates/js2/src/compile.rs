@@ -24,11 +24,11 @@
 //! the `static` blocks are functions that the parent compiles itself (their text is in its tree): see `compile_class.rs` and [`Child::ready`].
 //!
 //! **Not built** (each one is recorded in [`Compiled::unsupported`] and the code is not to be run; the driver throws the TypeError of
-//! design 6.12 that names it): generators, async functions, `await`, `yield`, `for await`, `with`, direct `eval`, `import()`,
-//! `import.meta`, `delete` of a global name. See [`Fc::unsup`] and the progress entry.
+//! design 6.12 that names it): generators, async functions, `await`, `yield`, `for await`, `with`, direct `eval`,
+//! `delete` of a global name. See [`Fc::unsup`] and the progress entry.
 use crate::ast::*;
 use crate::atoms::SharedAtoms;
-use crate::bytecode::{Asm, BcError, Code, Handler, Ins, Label, NO_NAME, Op, Recipes};
+use crate::bytecode::{Asm, BcError, Code, GK_ASYNC, GK_ASYNCGEN, GK_GEN, Handler, Ins, Label, NO_NAME, Op, Recipes};
 use crate::facts::{self, Facts, FnId};
 use crate::roots::RootMaps;
 use crate::string::{Chars, Str};
@@ -71,6 +71,9 @@ pub struct LevelVar {
     pub konst: bool,
     /// The name of a named function expression, inside the function: an assignment throws in strict code and does nothing in sloppy code.
     pub callee: bool,
+    /// A module binding that lives in a property of an environment object (`docs/design-js2-host-api.md` section 12): the slot holds the
+    /// object and this is the name of the property. Only the `Level` of a module has such a variable.
+    pub env: Option<Box<str>>,
 }
 
 impl Level {
@@ -100,6 +103,8 @@ pub struct Input {
     /// The function is in the code of an event handler (`compile_function`): a name that no scope declares is read by the full search
     /// (`GetName`), which looks in the objects of `call_scoped` first.
     pub scoped: bool,
+    /// The function is in the text of the prelude (`prelude.js`): a free name that is a slot of `prelude_pre.rs` is read by `GetPre`.
+    pub pre: bool,
 }
 
 /// A function inside the compiled one: the entry of the facts, and the chain that its closure sees. Parallel to `Code::funcs`.
@@ -199,7 +204,8 @@ pub(crate) struct Decl<'a> {
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Res {
     Reg { reg: u32, tdz: bool, konst: bool },
-    Ctx { hops: u32, slot: u32, tdz: bool, konst: bool },
+    /// `env`: the slot holds an environment object and the value is its property ([`Fc::env_key`]).
+    Ctx { hops: u32, slot: u32, tdz: bool, konst: bool, env: bool },
     Global,
 }
 
@@ -312,6 +318,8 @@ pub(crate) struct Fc<'a> {
     pub eval: bool,
     /// Event handler code: free names go through `GetName`, `SetName` and `TypeofName` (`Input::scoped`).
     pub scoped: bool,
+    /// The function is in the prelude (`Input::pre`).
+    pub pre: bool,
     pub is_arrow: bool,
     /// The function cannot be a constructor (an arrow, a method, a getter or a setter).
     pub noctor: bool,
@@ -330,6 +338,16 @@ pub(crate) struct Fc<'a> {
     /// Labels of the statement that is about to be compiled (`a: b: for (...)`).
     pub pending: Vec<String>,
     pub unsupported: Vec<&'static str>,
+    /// [`GK_GEN`] while a generator is compiled, else 0 (`compile_gen.rs`), and the longest save list that it made.
+    pub gen_kind: u8,
+    pub gen_regs: u16,
+    /// The catch-all handler of an async function: where its range starts (an instruction index), the register that gets the exception
+    /// and the context depth (`compile_async.rs`).
+    pub async_h: Option<(usize, u32, u32)>,
+    /// The head of a `for-of` is being bound: its loop frame is not pushed yet, but a throw of a pattern there closes the iterator.
+    pub of_head: bool,
+    /// The iterator records (`rec` registers) of the `for await` loops that are open now: their exits wait for `return()` (`compile_asyncgen.rs`).
+    pub await_recs: Vec<u32>,
     /// While the default of parameter `i` is compiled and it names a parameter that is not set yet: `(i, number of parameters, register
     /// of the hole)`. A read of such a parameter reads the hole, so it throws.
     pub param_dz: Option<(u32, u32, u32)>,
@@ -381,6 +399,7 @@ impl<'a> Fc<'a> {
             value: None,
             eval: false,
             scoped: input.scoped,
+            pre: input.pre,
             is_arrow: false,
             noctor: false,
             fn_flags: 0,
@@ -394,6 +413,11 @@ impl<'a> Fc<'a> {
             chain_short: None,
             pending: Vec::new(),
             unsupported: Vec::new(),
+            gen_kind: 0,
+            async_h: None,
+            gen_regs: 0,
+            of_head: false,
+            await_recs: Vec::new(),
             param_dz: None,
         }
     }
@@ -701,7 +725,7 @@ impl<'a> Fc<'a> {
             let tdz = matches!(kind, VK::Let | VK::Const | VK::Class);
             let home = if self.captured(name, span) {
                 let slot = slots.len() as u32;
-                slots.push(LevelVar { name: name.as_ref().into(), slot, tdz, konst: kind == VK::Const || kind == VK::Callee, callee: kind == VK::Callee });
+                slots.push(LevelVar { name: name.as_ref().into(), slot, tdz, konst: kind == VK::Const || kind == VK::Callee, callee: kind == VK::Callee, env: None });
                 Home::Ctx { level, slot }
             } else {
                 let r = d.reg.unwrap_or_else(|| self.alloc());
@@ -752,19 +776,31 @@ impl<'a> Fc<'a> {
             let konst = matches!(v.kind, VK::Const | VK::Callee);
             return match v.home {
                 Home::Reg(reg) => Res::Reg { reg, tdz, konst },
-                Home::Ctx { level, slot } => Res::Ctx { hops: self.depth - level, slot, tdz, konst },
+                Home::Ctx { level, slot } => Res::Ctx { hops: self.depth - level, slot, tdz, konst, env: false },
             };
         }
         let mut l = self.outer.as_ref();
         let mut hops = self.depth;
         while let Some(level) = l {
             if let Some(v) = level.find(name) {
-                return Res::Ctx { hops, slot: v.slot, tdz: v.tdz, konst: v.konst };
+                return Res::Ctx { hops, slot: v.slot, tdz: v.tdz, konst: v.konst, env: v.env.is_some() };
             }
             hops += 1;
             l = level.parent.as_ref();
         }
         Res::Global
+    }
+
+    /// The property name of the module binding `name` that [`Res::Ctx`] marked with `env`.
+    pub(crate) fn env_key(&self, name: &str) -> Option<Box<str>> {
+        let mut l = self.outer.as_ref();
+        while let Some(level) = l {
+            if let Some(v) = level.find(name) {
+                return v.env.clone();
+            }
+            l = level.parent.as_ref();
+        }
+        None
     }
 
     /// Is `name` the name of a named function expression that is a variable of this function or of one around it?
@@ -841,7 +877,7 @@ impl<'a> Fc<'a> {
 
     pub(crate) fn finish(mut self, nparams: u32) -> CR<Compiled> {
         if !self.dead {
-            self.op(Op::RetUndef, 0, 0, 0);
+            self.ret_undef();
         }
         for c in std::mem::take(&mut self.cold) {
             self.bind(c.label);
@@ -849,10 +885,12 @@ impl<'a> Fc<'a> {
             self.set_live(c.ex);
             let skip = self.label();
             self.jmp_r(Op::JmpIf, c.done, skip);
-            self.op(Op::IterClose, c.rec, 0, 0);
+            self.op(Op::IterClose, c.rec, 0, 1);
             self.bind(skip);
             self.op(Op::Throw, c.ex, 0, 0);
         }
+        let async_end = self.asm.len();
+        self.async_catch_all(async_end);
         if let Some(why) = self.overflow {
             return Err(CompileError::Limit(why));
         }
@@ -869,6 +907,8 @@ impl<'a> Fc<'a> {
         code.fn_len = self.fn_len;
         code.strict = self.strict;
         code.noctor = self.noctor;
+        code.gen_kind = self.gen_kind;
+        code.gen_regs = self.gen_regs;
         let mut roots = RootMaps::new(nregs as usize);
         for (k, &(idx, start)) in self.root_at.iter().enumerate() {
             let end = self.root_at.get(k + 1).map_or(self.root_regs.len(), |n| n.1);
@@ -947,6 +987,8 @@ pub fn compile_script_mode(prog: &Program, facts: &Facts, atoms: &SharedAtoms, m
     c.finish(0)
 }
 
+pub use module::{Exp, ExpSrc, Imp, ModInfo, compile_module};
+
 /// Compile function `id` of `facts`. `prog` and `fid` come from `parse_function(source, facts, id, ..)`. `input` is the chain that the
 /// parent recorded for this child ([`Child::chain`]).
 pub fn compile_function(prog: &Program, fid: FuncId, id: FnId, facts: &Facts, atoms: &SharedAtoms, input: &Input) -> CR<Compiled> {
@@ -958,6 +1000,14 @@ pub fn compile_function(prog: &Program, fid: FuncId, id: FnId, facts: &Facts, at
     c.fn_flags = f.flags;
     c.fn_id = Some(id);
     c.derived = f.kind == FuncKind::DerivedConstructor;
+    if f.mode == FuncMode::Generator {
+        // A generator is no constructor, and `new.target` is `undefined` in it (`compile_gen.rs`).
+        (c.gen_kind, c.noctor) = (GK_GEN, true);
+    } else if f.mode == FuncMode::Async {
+        (c.gen_kind, c.noctor) = (GK_ASYNC, true);
+    } else if f.mode == FuncMode::AsyncGen {
+        (c.gen_kind, c.noctor) = (GK_ASYNCGEN, true);
+    }
     c.fn_len = prog.list(prog.func(fid).params).take_while(|&p| !matches!(prog.pat(p).kind, PatKind::Assign { .. } | PatKind::Rest(_))).count().min(u16::MAX as usize) as u16;
     c.force_ctx = f.flags & facts::INNER_EVAL != 0;
     if f.flags & (facts::EVAL | facts::WITH | facts::IN_WITH) != 0 {
@@ -1024,8 +1074,16 @@ pub fn compile_all(source: &str, atoms: &SharedAtoms, limits: crate::parse::Limi
 
 #[path = "compile_class.rs"]
 mod class;
+#[path = "compile_async.rs"]
+mod async_code;
+#[path = "compile_gen.rs"]
+mod gen_code;
+#[path = "compile_asyncgen.rs"]
+mod asyncgen_code;
 #[path = "compile_expr.rs"]
 mod expr;
+#[path = "compile_module.rs"]
+mod module;
 #[path = "compile_pat.rs"]
 mod pat;
 #[path = "compile_stmt.rs"]

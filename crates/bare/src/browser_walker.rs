@@ -29,12 +29,12 @@
 //!
 //! Bound (`Limit(Host(name))`): `tree-walkers` (live walkers, set free by the collector).
 
+use crate::eng::{Eng, Ops, Val};
+use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_lazy::lazy_global;
 use crate::browser_scoped::*;
 use bare_html::dom::{Change, Document, NodeData, NodeId};
-use bare_js::eval::Interp;
-use bare_js::value::{ObjId, Value};
 use bare_js_api::{Args, Engine, HostFn, Local, Type};
 use std::cell::{OnceCell, RefCell};
 use std::rc::Rc;
@@ -44,11 +44,11 @@ const ACCEPT: u16 = 1;
 const REJECT: u16 = 2;
 const SKIP: u16 = 3;
 
-struct Walker {
+struct Walker<E: Eng> {
     root: NodeId,
     what: u32,
     /// `Value::Null` or an object.
-    filter: Value,
+    filter: E::Raw,
     cur: NodeId,
     /// A filter of this walker is running.
     active: bool,
@@ -61,12 +61,12 @@ struct Walker {
 }
 
 #[derive(Default)]
-pub(crate) struct State {
+pub(crate) struct State<E: Eng> {
     /// The prototype and the two constructors, once made.
-    made: Option<(ObjId, ObjId, ObjId)>,
+    made: Option<(<E as Eng>::Obj, <E as Eng>::Obj, <E as Eng>::Obj)>,
     /// The prototype and the constructor of `NodeIterator`, once made.
-    made_iter: Option<(ObjId, ObjId)>,
-    walkers: IdMap<ObjId, Walker>,
+    made_iter: Option<(<E as Eng>::Obj, <E as Eng>::Obj)>,
+    walkers: IdMap<<E as Eng>::Obj, Walker<E>>,
     /// How many of `walkers` are iterators.
     iters: usize,
     /// "Replace all" is running: its iterators were told already.
@@ -74,18 +74,18 @@ pub(crate) struct State {
 }
 
 #[derive(Default)]
-pub(crate) struct Walk {
-    st: OnceCell<Rc<RefCell<State>>>,
+pub(crate) struct Walk<E: Eng> {
+    st: OnceCell<Rc<RefCell<State<E>>>>,
 }
 
-impl Walk {
+impl<E: Eng> Walk<E> {
     /// The state, when a `NodeIterator` is alive (for the watcher).
-    pub(crate) fn live(&self) -> Option<Rc<RefCell<State>>> {
+    pub(crate) fn live(&self) -> Option<Rc<RefCell<State<E>>>> {
         self.st.get().filter(|s| s.borrow().iters > 0).cloned()
     }
 }
 
-fn state(d: &Dom) -> &Rc<RefCell<State>> {
+fn state<E: Eng>(d: &Dom<E>) -> &Rc<RefCell<State<E>>> {
     d.walk.st.get_or_init(Default::default)
 }
 
@@ -106,7 +106,7 @@ const SHOW: [(&str, u32); 13] = [
 ];
 
 /// The `SHOW_*` bit of a node: bit `nodeType - 1`.
-fn bit(d: &Dom, n: NodeId) -> u32 {
+fn bit<E: Eng>(d: &Dom<E>, n: NodeId) -> u32 {
     match d.data(n) {
         NodeData::Element { .. } => 0x1,
         NodeData::Text(_) => 0x4,
@@ -117,22 +117,22 @@ fn bit(d: &Dom, n: NodeId) -> u32 {
     }
 }
 
-fn walker_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, ObjId> {
-    match obj_id(s, this) {
+fn walker_of<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, E::Obj> {
+    match obj_id::<E>(s, this) {
         Some(o) if state(d).borrow().walkers.get(&o).is_some_and(|w| !w.iter) => Ok(o),
         _ => Err(s.type_error("Illegal invocation")),
     }
 }
 
-fn iter_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, ObjId> {
-    match obj_id(s, this) {
+fn iter_of<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, E::Obj> {
+    match obj_id::<E>(s, this) {
         Some(o) if state(d).borrow().walkers.get(&o).is_some_and(|w| w.iter) => Ok(o),
         _ => Err(s.type_error("Illegal invocation")),
     }
 }
 
 /// The filter steps: `SKIP` for a type that is not shown, `ACCEPT` with no filter, else the call. `method` names the caller in errors.
-fn filter<'s>(d: &Dom, s: &mut Sc<'s, '_>, w: ObjId, method: &str, n: NodeId) -> Res<'s, u16> {
+fn filter<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, w: E::Obj, method: &str, n: NodeId) -> Res<'s, u16> {
     s.charge(1)?;
     let (active, what, f) = {
         let s = state(d).borrow();
@@ -146,7 +146,7 @@ fn filter<'s>(d: &Dom, s: &mut Sc<'s, '_>, w: ObjId, method: &str, n: NodeId) ->
     if what & bit(d, n) == 0 {
         return Ok(SKIP);
     }
-    if matches!(f, Value::Null) {
+    if matches!(E::kind(f), Val::Null) {
         return Ok(ACCEPT);
     }
     state(d).borrow_mut().walkers.get_mut(&w).expect("live").active = true;
@@ -175,17 +175,17 @@ fn filter<'s>(d: &Dom, s: &mut Sc<'s, '_>, w: ObjId, method: &str, n: NodeId) ->
     r
 }
 
-fn set_current<'s>(d: &Dom, s: &mut Sc<'s, '_>, w: ObjId, n: NodeId) -> Res<'s, Local<'s>> {
+fn set_current<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, w: E::Obj, n: NodeId) -> Res<'s, Local<'s>> {
     state(d).borrow_mut().walkers.get_mut(&w).expect("live").cur = n;
     d.wrap_s(s, n)
 }
 
-fn walker_fields(d: &Dom, w: ObjId) -> (NodeId, NodeId) {
+fn walker_fields<E: Eng>(d: &Dom<E>, w: E::Obj) -> (NodeId, NodeId) {
     let s = state(d).borrow();
     (s.walkers[&w].root, s.walkers[&w].cur)
 }
 
-fn parent_node<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn parent_node<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let w = walker_of(d, s, this)?;
     let (root, mut node) = walker_fields(d, w);
     while node != root {
@@ -199,7 +199,7 @@ fn parent_node<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) ->
 }
 
 /// "Traverse children": `first` takes the first child and goes right, else the last child and goes left.
-fn children<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, first: bool) -> Res<'s, Local<'s>> {
+fn children<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, first: bool) -> Res<'s, Local<'s>> {
     let method = if first { "firstChild" } else { "lastChild" };
     let w = walker_of(d, s, this)?;
     let (root, cur) = walker_fields(d, w);
@@ -239,7 +239,7 @@ fn children<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, first: bool) -> Re
 }
 
 /// "Traverse siblings": `next` goes right, else left.
-fn siblings<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, next: bool) -> Res<'s, Local<'s>> {
+fn siblings<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, next: bool) -> Res<'s, Local<'s>> {
     let method = if next { "nextSibling" } else { "previousSibling" };
     let w = walker_of(d, s, this)?;
     let (root, mut node) = walker_fields(d, w);
@@ -274,7 +274,7 @@ fn siblings<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, next: bool) -> Res
     }
 }
 
-fn previous_node<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn previous_node<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let w = walker_of(d, s, this)?;
     let (root, mut node) = walker_fields(d, w);
     while node != root {
@@ -301,7 +301,7 @@ fn previous_node<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) 
     Ok(s.null())
 }
 
-fn next_node<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn next_node<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let w = walker_of(d, s, this)?;
     let (root, mut node) = walker_fields(d, w);
     let mut r = ACCEPT;
@@ -339,42 +339,42 @@ fn next_node<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> R
     }
 }
 
-fn first_child<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn first_child<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     children(d, s, this, true)
 }
-fn last_child<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn last_child<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     children(d, s, this, false)
 }
-fn next_sibling<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn next_sibling<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     siblings(d, s, this, true)
 }
-fn previous_sibling<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn previous_sibling<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     siblings(d, s, this, false)
 }
 
-fn root_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn root_get<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let w = walker_of(d, s, this)?;
     d.wrap_s(s, walker_fields(d, w).0)
 }
 
-fn what_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn what_get<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let w = walker_of(d, s, this)?;
     let what = state(d).borrow().walkers[&w].what;
     Ok(s.number(what as f64))
 }
 
-fn filter_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn filter_get<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let w = walker_of(d, s, this)?;
     let f = state(d).borrow().walkers[&w].filter;
     Ok(s.engine().raw_local(&f))
 }
 
-fn current_get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn current_get<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let w = walker_of(d, s, this)?;
     d.wrap_s(s, walker_fields(d, w).1)
 }
 
-fn current_set<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn current_set<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let w = walker_of(d, s, this)?;
     let Some(n) = a.get(0).and_then(|v| d.node_of_s(s, v)) else {
         return Err(s.type_error("Failed to set the 'currentNode' property on 'TreeWalker': Failed to convert value to 'Node'."));
@@ -383,15 +383,15 @@ fn current_set<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) ->
     Ok(s.undefined())
 }
 
-fn illegal_walker<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn illegal_walker<'s, E: Eng>(_: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     Err(s.type_error("Failed to construct 'TreeWalker': Illegal constructor"))
 }
 
-fn illegal_filter<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn illegal_filter<'s, E: Eng>(_: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     Err(s.type_error("Failed to construct 'NodeFilter': Illegal constructor"))
 }
 
-fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+fn ensure<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
     if state(d).borrow().made.is_some() {
         return Ok(());
     }
@@ -399,21 +399,21 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     let proto = d.obj(it, op)?;
     let (kc, kp) = (d.key(it, "constructor")?, d.key(it, "prototype")?);
     let ctor = d.add_fn_s_obj(it, illegal_walker, "TreeWalker", 0, HostFn::Ctor)?;
-    it.define_data(ctor, kp, Value::Object(proto), false, false, false)?;
-    it.define_data(proto, kc, Value::Object(ctor), true, false, true)?;
+    it.define_data(ctor, kp, E::obj_raw(proto), false, false, false)?;
+    it.define_data(proto, kc, E::obj_raw(ctor), true, false, true)?;
     crate::browser_lazy::tag(d, it, proto, "TreeWalker")?;
     d.def_get_s(it, proto, "root", root_get, None)?;
     d.def_get_s(it, proto, "whatToShow", what_get, None)?;
     d.def_get_s(it, proto, "filter", filter_get, None)?;
     d.def_get_s(it, proto, "currentNode", current_get, Some(current_set))?;
-    for (name, h) in [("parentNode", parent_node as HS), ("firstChild", first_child), ("lastChild", last_child), ("previousSibling", previous_sibling), ("nextSibling", next_sibling), ("previousNode", previous_node), ("nextNode", next_node)] {
+    for (name, h) in [("parentNode", parent_node as HS<E>), ("firstChild", first_child), ("lastChild", last_child), ("previousSibling", previous_sibling), ("nextSibling", next_sibling), ("previousNode", previous_node), ("nextNode", next_node)] {
         d.def_method_s(it, proto, name, 0, h)?;
     }
     // `NodeFilter` is a callback interface: an interface object with constants, and no prototype.
     let nf = d.add_fn_s_obj(it, illegal_filter, "NodeFilter", 0, HostFn::Ctor)?;
     for (name, v) in [("FILTER_ACCEPT", ACCEPT as u32), ("FILTER_REJECT", REJECT as u32), ("FILTER_SKIP", SKIP as u32)].into_iter().chain(SHOW) {
         let k = d.key(it, name)?;
-        it.define_data(nf, k, Value::Number(v as f64), false, true, false)?;
+        it.define_data(nf, k, E::num(v as f64), false, true, false)?;
     }
     state(d).borrow_mut().made = Some((proto, ctor, nf));
     Ok(())
@@ -423,7 +423,7 @@ lazy_global!(lazy_walker, "TreeWalker", ensure, |d| state(d).borrow().made.expec
 lazy_global!(lazy_filter, "NodeFilter", ensure, |d| state(d).borrow().made.expect("made").2);
 
 /// `createTreeWalker` and `createNodeIterator`: the same three arguments.
-fn create<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, iter: bool) -> Res<'s, Local<'s>> {
+fn create<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>, iter: bool) -> Res<'s, Local<'s>> {
     let who = if iter { "createNodeIterator" } else { "createTreeWalker" };
     d.nd_s(s, this)?;
     let Some(r) = a.get(0) else {
@@ -437,16 +437,16 @@ fn create<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, iter: b
         _ => 0xFFFF_FFFF,
     };
     let filter = match a.get(2) {
-        Some(v) if is_object(s, v) => s.engine().raw(v),
-        Some(v) if !is_nullish(s, v) => return Err(s.type_error(&format!("Failed to execute '{who}' on 'Document': parameter 3 is not of type 'Object'."))),
-        _ => Value::Null,
+        Some(v) if is_object::<E>(s, v) => s.engine().raw(v),
+        Some(v) if !is_nullish::<E>(s, v) => return Err(s.type_error(&format!("Failed to execute '{who}' on 'Document': parameter 3 is not of type 'Object'."))),
+        _ => E::null(),
     };
     if iter {
         if state(d).borrow().made_iter.is_none() {
-            old(s, |it| ensure_iter(d, it))?;
+            old::<E, _>(s, |it| ensure_iter(d, it))?;
         }
     } else if state(d).borrow().made.is_none() {
-        old(s, |it| ensure(d, it))?;
+        old::<E, _>(s, |it| ensure(d, it))?;
     }
     if state(d).borrow().walkers.len() >= MAX_WALKERS {
         return Err(d.lim_s(s, "tree-walkers"));
@@ -462,17 +462,18 @@ fn create<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, iter: b
         st.iters += iter as usize;
         iter && st.iters == 1
     };
+    d.own_obj(s.engine(), w, crate::browser::Owner::Walk(w));
     if first {
         d.sync_watcher();
     }
     Ok(d.obj_local(s, w))
 }
 
-fn create_tree_walker<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn create_tree_walker<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     create(d, s, this, a, false)
 }
 
-fn create_node_iterator<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn create_node_iterator<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     create(d, s, this, a, true)
 }
 
@@ -511,7 +512,7 @@ fn preceding(doc: &Document, root: NodeId, n: NodeId) -> Option<NodeId> {
     doc.prev_sibling(n).map_or_else(|| doc.parent(n), |p| Some(last_inclusive(doc, p)))
 }
 
-impl Walker {
+impl<E: Eng> Walker<E> {
     /// The "pre-removing steps" of the standard, for the node `gone`, which is about to leave `parent`.
     /// As in Chrome, a pointer before the reference node stays when no node follows `gone` in the root.
     fn removing(&mut self, doc: &Document, gone: NodeId, parent: NodeId) {
@@ -541,7 +542,7 @@ impl Walker {
     }
 }
 
-impl State {
+impl<E: Eng> State<E> {
     /// Tell the iterators of a node that is about to leave the tree.
     pub(crate) fn on_change(&mut self, doc: &Document, ch: Change) {
         if let (Change::Unlink { parent, node, .. }, false) = (ch, self.told) {
@@ -552,7 +553,7 @@ impl State {
     }
 }
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// As in Chrome, "replace all" tells the iterators about every child of `parent`, with the tree whole, before it removes the first
     /// (the standard removes one by one). The per-node removals are muted until `iter_told_end`.
     pub(crate) fn iter_told_all(&self, doc: &Document, parent: NodeId) {
@@ -574,7 +575,7 @@ impl Dom {
 }
 
 /// "Traverse": `next` goes on in tree order, else back.
-fn traverse<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, next: bool) -> Res<'s, Local<'s>> {
+fn traverse<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, next: bool) -> Res<'s, Local<'s>> {
     let method = if next { "nextNode" } else { "previousNode" };
     let w = iter_of(d, s, this)?;
     let (root, mut node, mut before) = {
@@ -618,54 +619,54 @@ fn traverse<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, next: bool) -> Res
     res
 }
 
-fn next_iter<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn next_iter<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     traverse(d, s, this, true)
 }
 
-fn previous_iter<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn previous_iter<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     traverse(d, s, this, false)
 }
 
-fn detach_iter<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn detach_iter<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     iter_of(d, s, this)?;
     Ok(s.undefined())
 }
 
-fn iter_root<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn iter_root<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let w = iter_of(d, s, this)?;
     let n = state(d).borrow().walkers[&w].root;
     d.wrap_s(s, n)
 }
 
-fn iter_reference<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn iter_reference<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let w = iter_of(d, s, this)?;
     let n = state(d).borrow().walkers[&w].cur;
     d.wrap_s(s, n)
 }
 
-fn iter_pointer<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn iter_pointer<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let w = iter_of(d, s, this)?;
     let b = state(d).borrow().walkers[&w].before;
     Ok(s.boolean(b))
 }
 
-fn iter_what<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn iter_what<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let w = iter_of(d, s, this)?;
     let what = state(d).borrow().walkers[&w].what;
     Ok(s.number(what as f64))
 }
 
-fn iter_filter<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn iter_filter<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let w = iter_of(d, s, this)?;
     let f = state(d).borrow().walkers[&w].filter;
     Ok(s.engine().raw_local(&f))
 }
 
-fn illegal_iterator<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn illegal_iterator<'s, E: Eng>(_: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     Err(s.type_error("Failed to construct 'NodeIterator': Illegal constructor"))
 }
 
-fn ensure_iter(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+fn ensure_iter<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
     if state(d).borrow().made_iter.is_some() {
         return Ok(());
     }
@@ -673,14 +674,14 @@ fn ensure_iter(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     let proto = d.obj(it, op)?;
     let (kc, kp) = (d.key(it, "constructor")?, d.key(it, "prototype")?);
     let ctor = d.add_fn_s_obj(it, illegal_iterator, "NodeIterator", 0, HostFn::Ctor)?;
-    it.define_data(ctor, kp, Value::Object(proto), false, false, false)?;
-    it.define_data(proto, kc, Value::Object(ctor), true, false, true)?;
+    it.define_data(ctor, kp, E::obj_raw(proto), false, false, false)?;
+    it.define_data(proto, kc, E::obj_raw(ctor), true, false, true)?;
     crate::browser_lazy::tag(d, it, proto, "NodeIterator")?;
-    let gets: [(&str, HS); 5] = [("root", iter_root), ("referenceNode", iter_reference), ("pointerBeforeReferenceNode", iter_pointer), ("whatToShow", iter_what), ("filter", iter_filter)];
+    let gets: [(&str, HS<E>); 5] = [("root", iter_root), ("referenceNode", iter_reference), ("pointerBeforeReferenceNode", iter_pointer), ("whatToShow", iter_what), ("filter", iter_filter)];
     for (name, h) in gets {
         d.def_get_s(it, proto, name, h, None)?;
     }
-    for (name, h) in [("nextNode", next_iter as HS), ("previousNode", previous_iter), ("detach", detach_iter)] {
+    for (name, h) in [("nextNode", next_iter as HS<E>), ("previousNode", previous_iter), ("detach", detach_iter)] {
         d.def_method_s(it, proto, name, 0, h)?;
     }
     state(d).borrow_mut().made_iter = Some((proto, ctor));
@@ -689,44 +690,53 @@ fn ensure_iter(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 
 lazy_global!(lazy_iterator, "NodeIterator", ensure_iter, |d| state(d).borrow().made_iter.expect("made").1);
 
-pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
     table!(rows1 = [
         Row::method(1, "createTreeWalker", 1, create_tree_walker),
         Row::method(1, "createNodeIterator", 1, create_node_iterator),
     ]);
     let targets = [d.obj_local(s, d.p().document)];
-    d.install_rows(s, &targets, &rows1::T)?;
+    d.install_rows(s, &targets, &rows1::T::<E>::V)?;
     table!(lazy = [
         Row::both(1, "TreeWalker", lazy_walker),
         Row::both(1, "NodeFilter", lazy_filter),
         Row::both(1, "NodeIterator", lazy_iterator),
     ]);
     let g = s.global();
-    d.install_rows(s, &[g], &lazy::T)
+    d.install_rows(s, &[g], &lazy::T::<E>::V)
 }
 
-impl Dom {
-    pub(crate) fn walk_roots(&self, out: &mut Vec<Value>) {
+impl<E: Eng> Dom<E> {
+    pub(crate) fn walk_roots(&self, out: &mut Roots<'_, '_, E>) {
         if let Some(st) = self.walk.st.get() {
             let s = st.borrow();
             let (a, b) = s.made_iter.unzip();
-            out.extend(s.made.into_iter().flat_map(|(p, c, n)| [p, c, n]).chain(a).chain(b).map(Value::Object));
+            out.extend(s.made.into_iter().flat_map(|(p, c, n)| [p, c, n]).chain(a).chain(b).map(E::obj_raw));
         }
     }
 
-    pub(crate) fn walk_trace(&self, owner: ObjId, out: &mut Vec<Value>) {
+    pub(crate) fn walk_trace(&self, owner: E::Obj, t: &mut bare_js_api::Tracer<'_, E::Raw>) {
         if let Some(st) = self.walk.st.get()
             && let Some(w) = st.borrow().walkers.get(&owner)
         {
-            out.push(w.filter);
+            crate::browser_sources::visit::<E>(t, w.filter);
         }
     }
 
-    pub(crate) fn walk_prune(&self, live: &dyn Fn(ObjId) -> bool) {
+    /// The entries of the walker table (tests).
+    #[cfg(test)]
+    pub(crate) fn walk_entries(&self) -> usize {
+        self.walk.st.get().map_or(0, |s| s.borrow().walkers.len())
+    }
+
+    /// The walkers and iterators `dead` were collected: drop their entries.
+    pub(crate) fn walk_forget(&self, dead: &[E::Obj]) {
         if let Some(st) = self.walk.st.get() {
             let mut s = st.borrow_mut();
             let had = s.iters;
-            s.walkers.retain(|&o, _| live(o));
+            for o in dead {
+                s.walkers.remove(o);
+            }
             s.iters = s.walkers.values().filter(|w| w.iter).count();
             let gone = had > 0 && s.iters == 0;
             drop(s);
@@ -740,7 +750,7 @@ impl Dom {
 // ------------------------------------------------------------------------------------------ arena reclaim (`browser_reclaim.rs`)
 
 /// The nodes that live walkers and iterators name.
-pub(crate) fn held(d: &Dom, out: &mut Vec<NodeId>) {
+pub(crate) fn held<E: Eng>(d: &Dom<E>, out: &mut Vec<NodeId>) {
     let Some(st) = d.walk.st.get() else { return };
     for w in st.borrow().walkers.values() {
         out.extend([w.root, w.cur]);

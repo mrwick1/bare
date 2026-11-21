@@ -28,12 +28,12 @@
 //! the name table. Both stay in the document arena like every native node and name (it never frees). The caps are `max_names`
 //! (the local name and the prefix are two names), `max_nodes`, `max_attr_slots` and `max_text_bytes`, checked before any write.
 
+use crate::eng::{Eng, Ops};
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_js_api::{Args, Local, Type};
 use crate::browser_dom::{valid_name};
 use bare_html::dom::{Atom, NodeId, Ns};
-use bare_js::eval::{Interp};
 
 /// The qualified name of an element: `prefix:local`, or the local name.
 pub(crate) fn qualified(doc: &bare_html::dom::Document, el: NodeId) -> String {
@@ -69,7 +69,7 @@ fn qname_parts(q: &str) -> Option<(Option<&str>, &str)> {
 
 /// "Validate and extract" of the DOM Standard. Gives the prefix and the local name. `ns` is the namespace string as the page gave it
 /// (`None` for null; an empty string is null too).
-pub(crate) fn extract<'s, 'a>(d: &Dom, s: &mut Sc<'s, '_>, ns: Option<&str>, qname: &'a str) -> Res<'s, (Option<&'a str>, &'a str)> {
+pub(crate) fn extract<'s, 'a, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, ns: Option<&str>, qname: &'a str) -> Res<'s, (Option<&'a str>, &'a str)> {
     let Some((prefix, local)) = qname_parts(qname) else {
         return Err(d.dom_err_s(s, "InvalidCharacterError", &format!("The qualified name provided ('{qname}') is not a valid name.")));
     };
@@ -84,7 +84,7 @@ pub(crate) fn extract<'s, 'a>(d: &Dom, s: &mut Sc<'s, '_>, ns: Option<&str>, qna
 }
 
 /// A namespace argument: `null`, `undefined` and the empty string are no namespace.
-pub(crate) fn ns_arg<'s>(d: &Dom, s: &mut Sc<'s, '_>, v: Local<'s>) -> Res<'s, Option<String>> {
+pub(crate) fn ns_arg<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>) -> Res<'s, Option<String>> {
     Ok(match s.type_of(v) {
         Type::Null | Type::Undefined => None,
         _ => Some(d.string_arg_s(s, v)?).filter(|st| !st.is_empty()),
@@ -104,13 +104,13 @@ pub(crate) fn attr_ns_of(ns: Option<&str>) -> Result<Option<Ns>, ()> {
     }
 }
 
-pub(crate) fn namespace_uri<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn namespace_uri<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.el_s(s, this)?;
     let uri = d.doc.borrow().element_ns(n).uri();
     d.js_str_s(s, uri)
 }
 
-pub(crate) fn prefix<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn prefix<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.el_s(s, this)?;
     let p = d.doc.borrow().element_prefix(n).map(str::to_string);
     match p {
@@ -119,9 +119,9 @@ pub(crate) fn prefix<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'
     }
 }
 
-pub(crate) fn create_element_ns<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn create_element_ns<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     d.nd_s(s, this)?;
-    let arg0 = arg_s(s, a, 0);
+    let arg0 = arg_s::<E>(s, a, 0);
     let ns = ns_arg(d, s, arg0)?;
     let qname = d.arg_str_s(s, a, 1)?;
     let (prefix, local) = extract(d, s, ns.as_deref(), &qname)?;
@@ -131,7 +131,7 @@ pub(crate) fn create_element_ns<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>
             if prefix.is_some() || qname.bytes().any(|b| b.is_ascii_uppercase()) {
                 return Err(unsupp("createElementNS in the HTML namespace with a prefix or capital letters (names are lowercase in the native document)"));
             }
-            if d.ce.on.get() || a.len() > 2 { { let o = arg_s(s, a, 2); crate::browser_custom::create_s(d, s, &qname, o) } } else { crate::browser_dom::make_element_s(d, s, &qname) }
+            if d.ce.on.get() || a.len() > 2 { { let o = arg_s::<E>(s, a, 2); crate::browser_custom::create_s(d, s, &qname, o) } } else { crate::browser_dom::make_element_s(d, s, &qname) }
         }
         Some(Some(ns @ (Ns::Svg | Ns::MathMl))) => {
             let node = {
@@ -153,7 +153,7 @@ pub(crate) fn create_element_ns<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>
 }
 
 /// Write an attribute: by its atom if it exists, else by a new name in `ns`. Every cap is checked before the write.
-pub(crate) fn put(d: &Dom, it: &mut Interp<'_>, n: NodeId, existing: Option<Atom>, ns: Option<Ns>, qname: &str, value: &str) -> R<()> {
+pub(crate) fn put<E: Eng>(d: &Dom<E>, it: &mut E::Vm, n: NodeId, existing: Option<Atom>, ns: Option<Ns>, qname: &str, value: &str) -> R<E, ()> {
     let mut doc = d.doc.borrow_mut();
     d.room(&doc, 0, value.len())?;
     if doc.live_attr_slots() + doc.attr_count(n) + 1 > d.lim.max_attr_slots {
@@ -168,21 +168,21 @@ pub(crate) fn put(d: &Dom, it: &mut Interp<'_>, n: NodeId, existing: Option<Atom
             doc.intern_ns(ns, qname)
         }
     };
-    it.charge(doc.attr_count(n) as u64 + 1)?;
+    it.charge_o(doc.attr_count(n) as u64 + 1)?;
     doc.set_attr_atom(n, atom, value);
     Ok(())
 }
 
-pub(crate) fn set_attribute_ns<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn set_attribute_ns<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.el_s(s, this)?;
-    let arg0 = arg_s(s, a, 0);
+    let arg0 = arg_s::<E>(s, a, 0);
     let ns = ns_arg(d, s, arg0)?;
     let qname = d.arg_str_s(s, a, 1)?;
     let value = d.arg_str_s(s, a, 2)?;
     let (_, local) = extract(d, s, ns.as_deref(), &qname)?;
     let Ok(kind) = attr_ns_of(ns.as_deref()) else { return Err(unsupp(ATTR_NS)) };
     let existing = d.doc.borrow().find_attr_ns(n, kind, local);
-    old(s, |it| put(d, it, n, existing, kind, &qname, &value))?;
+    old::<E, _>(s, |it| put(d, it, n, existing, kind, &qname, &value))?;
     if kind.is_none() && local == "src" {
         script_src_changed_s(d, s, n)?;
     }
@@ -190,9 +190,9 @@ pub(crate) fn set_attribute_ns<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>,
 }
 
 /// The atom of the attribute for the `*AttributeNS` readers. `None` also for a namespace that no attribute can have.
-fn find<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, (NodeId, Option<Atom>)> {
+fn find<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, (NodeId, Option<Atom>)> {
     let n = d.el_s(s, this)?;
-    let arg0 = arg_s(s, a, 0);
+    let arg0 = arg_s::<E>(s, a, 0);
     let ns = ns_arg(d, s, arg0)?;
     let local = d.arg_str_s(s, a, 1)?;
     let doc = d.doc.borrow();
@@ -203,7 +203,7 @@ fn find<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s
     })
 }
 
-pub(crate) fn get_attribute_ns<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn get_attribute_ns<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let (n, atom) = find(d, s, this, a)?;
     let st = atom.and_then(|at| d.doc.borrow().attr(n, at).map(str::to_string));
     match st {
@@ -212,12 +212,12 @@ pub(crate) fn get_attribute_ns<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>,
     }
 }
 
-pub(crate) fn has_attribute_ns<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn has_attribute_ns<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let found = find(d, s, this, a)?.1.is_some();
     Ok(s.boolean(found))
 }
 
-pub(crate) fn remove_attribute_ns<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn remove_attribute_ns<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let (n, atom) = find(d, s, this, a)?;
     if let Some(at) = atom {
         d.doc.borrow_mut().remove_attr_atom(n, at);

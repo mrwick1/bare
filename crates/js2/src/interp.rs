@@ -61,7 +61,7 @@
 //! safe form of each, in `docs/progress.md` (S2.6): (1) and (2) together save 8 to 18% of the instructions of a micro loop, (3) another 6 to 9%.
 use crate::atoms::SharedAtoms;
 use crate::builtins::Outcome;
-use crate::bytecode::{Asm, CF_ARGS, CF_LINK, Code, ITER_REGS, Ins, Op, STR_EMPTY, STR_SLOT, decode};
+use crate::bytecode::{Asm, CF_ARGS, CF_GEN, CF_LINK, Code, ITER_REGS, Ins, Op, STR_EMPTY, STR_SLOT, decode};
 use crate::codes::Codes;
 use crate::gc::Marker;
 use crate::interp_rt::{ErrKind, Feedback, Got, Key, Put, R, Realm};
@@ -104,6 +104,15 @@ pub trait LazyCompile {
     /// parameters (`api.rs`, `Realm::run_text`).
     fn script(&mut self, _codes: &Codes, _src: &str, _mode: crate::compile::ScriptMode) -> Result<usize, String> {
         Err("this compiler cannot add a script".into())
+    }
+    /// Add a stub for the top-level function `top` of the prelude, with the `name` that its `name` property gets, at the end of `codes`.
+    /// Gives its index. Nothing is parsed or compiled: the first call does that (`compile`).
+    fn prelude_fn(&mut self, _codes: &Codes, _top: &str, _name: &str) -> Result<usize, String> {
+        Err("this compiler has no prelude".into())
+    }
+    /// Compile `src` as a module (`compile_module`) and add it at the end of `codes`. Gives the index of its code and its facts.
+    fn module(&mut self, _codes: &Codes, _src: &str) -> Result<(usize, crate::compile::ModInfo), String> {
+        Err("this compiler cannot add a module".into())
     }
 }
 
@@ -166,7 +175,8 @@ macro_rules! cold_ops {
         Op::DefAccessor | Op::DefAccessorElem | Op::DefMethod | Op::DefMethodElem | Op::SetHome | Op::MakeClass | Op::MakeDerived |
         Op::SetFnName | Op::DefaultCtor | Op::SetFields | Op::NewPrivateName | Op::GetPrivate | Op::SetPrivate | Op::HasPrivate |
         Op::DefPrivate | Op::DefPrivateMethod | Op::DefPrivateAccessor | Op::GetSuper | Op::GetSuperElem | Op::SetSuper |
-        Op::SetSuperElem | Op::CallSuper | Op::CallSuperSpread | Op::RetDerived | Op::GenInit | Op::Yield | Op::RetGen
+        Op::SetSuperElem | Op::CallSuper | Op::CallSuperSpread | Op::RetDerived | Op::GenInit | Op::Yield | Op::RetGen | Op::IterClose | Op::YieldStarStep | Op::AsyncInit | Op::Await | Op::RetAsync |
+        Op::AIterOpen | Op::AIterNext | Op::AIterUnpack | Op::AYsUnpack | Op::AIterClose | Op::AIterCloseT | Op::AIterCheck | Op::AYsCall
     };
 }
 
@@ -355,12 +365,40 @@ enum GenExit {
     Done(Value),
 }
 
+/// `AsyncInit`, `Await` and `RetAsync` (`generator.rs`): as `gen_op`, in a function of their own so that `gen_op` keeps its shape.
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn async_op(realm: &mut Realm, stack: &mut [Value], fbs: &mut [Feedback], prog: &Codes, ci: usize, fp: usize, pc: usize, op: Op, a: usize, bx: u32, c: u32, next: usize) -> Result<GenExit, Value> {
+    if realm.due() {
+        realm.cur = (ci, fp, pc as u32);
+        let (cur, st) = (realm.cur, &stack[..]);
+        realm.collect(fbs, |m| walk_frames(m, prog, st, cur.0, cur.1, cur.2));
+    }
+    let v = match op {
+        Op::AsyncInit => {
+            realm.async_init(stack, fp);
+            // The same frame goes on at the next instruction.
+            return Ok(GenExit::Back(ci, fp, next));
+        }
+        Op::Await => realm.async_await(stack, fp, ci, &prog[ci], bx, next, stack[fp + a])?,
+        _ => realm.async_return(stack, fp, stack[fp + a], c != 0)?,
+    };
+    let (caller, dst) = (int_at(stack, fp, 5), int_at(stack, fp, 7));
+    if caller == ENTRY {
+        return Ok(GenExit::Done(v));
+    }
+    let nfp = fp - REC - prog[caller as usize].nregs as usize;
+    stack[nfp + (dst & 0xffff) as usize] = v;
+    Ok(GenExit::Back(caller as usize, nfp, int_at(stack, fp, 4) as usize))
+}
+
 /// `GenInit`, `Yield` and `RetGen` with the return to the caller, out of line so that the loop of `Vm::run` keeps its shape
 /// (`generator.rs`). As `ret!`, for a frame that has no `new` flags (the verifier does not let a generator be constructed).
 #[cold]
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn gen_op(realm: &mut Realm, stack: &mut [Value], fbs: &mut [Feedback], prog: &Codes, ci: usize, fp: usize, pc: usize, op: Op, a: usize, bx: u32, next: usize) -> Result<GenExit, Value> {
+fn gen_op(realm: &mut Realm, stack: &mut [Value], fbs: &mut [Feedback], prog: &Codes, ci: usize, fp: usize, pc: usize, op: Op, a: usize, bx: u32, c: u32, next: usize) -> Result<GenExit, Value> {
     if realm.due() {
         realm.cur = (ci, fp, pc as u32);
         let (cur, st) = (realm.cur, &stack[..]);
@@ -370,7 +408,13 @@ fn gen_op(realm: &mut Realm, stack: &mut [Value], fbs: &mut [Feedback], prog: &C
     let code = &prog[ci];
     let v = match op {
         Op::GenInit => realm.gen_init(stack, fp, ci, code, bx, next)?,
+        // An async generator goes on in its own frame when another request waits; else its frame is saved and the caller gets a promise.
+        Op::Yield if code.gen_kind == crate::bytecode::GK_ASYNCGEN => match realm.agen_yield(stack, fp, ci, code, bx, next, stack[fp + a])? {
+            Some(v) => v,
+            None => return Ok(GenExit::Back(ci, fp, next)),
+        },
         Op::Yield => realm.gen_yield(stack, fp, ci, code, bx, next, stack[fp + a], iter),
+        _ if code.gen_kind == crate::bytecode::GK_ASYNCGEN => realm.agen_return(stack, fp, stack[fp + a], c != 0)?,
         _ => realm.gen_return(stack, fp, stack[fp + a], iter),
     };
     let (caller, dst) = (int_at(stack, fp, 5), int_at(stack, fp, 7));
@@ -693,6 +737,16 @@ impl Vm {
                         pc = $next;
                         continue;
                     }
+                    // A prototype entry (`interp_rt.rs`): the record has shape 0 and the receiver shape in `to`.
+                    if c.to == shape
+                        && let Some(h) = fb.protos.get(c.loc as usize)
+                        && h.epoch == realm.shapes.proto_epoch()
+                    {
+                        // SAFETY: the epoch is current, so `holder` is alive and `loc` is its slot (`Obj::loc_now`).
+                        r!($dst) = unsafe { h.holder.read_loc(h.loc) };
+                        pc = $next;
+                        continue;
+                    }
                 }
                 gate!();
                 let n = name!($site);
@@ -715,15 +769,16 @@ impl Vm {
                 if let Some((o, shape)) = unsafe { Obj::from_value_shape(recv) } {
                     let c = &fb.caches[$site];
                     if c.shape == shape {
-                        // SAFETY: the entry was made by `Obj::loc` for an object of this shape id; an add entry has an inline slot.
+                        // SAFETY: the entry was made by `Obj::loc` for an object of this shape id; an add entry has an inline slot. A write
+                        // of a slot that the shape does not have yet is harmless: the add that follows a refusal writes it again.
+                        // `set_shape_id` refuses an object that a prototype entry depends on (`F_PROTO`).
                         unsafe {
                             o.write_loc(c.loc, val);
-                            if c.to != 0 {
-                                o.set_shape_id(c.to);
+                            if c.to == 0 || o.set_shape_id(c.to) {
+                                pc = $next;
+                                continue;
                             }
                         }
-                        pc = $next;
-                        continue;
                     }
                 }
                 gate!();
@@ -969,7 +1024,8 @@ impl Vm {
         // Call the helper `$h` of the prelude with the arguments in `realm.tail_args`; the result goes to register `$dst`.
         macro_rules! enter_helper {
             ($h:expr, $dst:expr, $next:expr) => {{
-                let f = realm.helpers[$h];
+                let f = realm.pre[$h];
+                let f = if f.is_undefined() { tri!(realm.pre_make($h)) } else { f };
                 let Some((ni, cctx)) = realm.function(f) else { call_err!(f) };
                 let len = realm.tail_args.len();
                 let nf = fp + code.nregs as usize + REC;
@@ -1243,7 +1299,7 @@ impl Vm {
                         }
                         Op::GenInit | Op::Yield | Op::RetGen => {
                             std::hint::cold_path();
-                            match gen_op(realm, stack, fbs, prog, ci, fp, pc, opv, a!(), bx!() as u32, next) {
+                            match gen_op(realm, stack, fbs, prog, ci, fp, pc, opv, a!(), bx!() as u32, c!() as u32, next) {
                                 Ok(GenExit::Back(nci, nfp, npc)) => {
                                     (ci, fp, pc) = (nci, nfp, npc);
                                     reload!();
@@ -1251,6 +1307,121 @@ impl Vm {
                                 }
                                 Ok(GenExit::Done(v)) => return M::done(Ok(v)),
                                 Err(e) => throw!(e),
+                            }
+                        }
+                        Op::AsyncInit | Op::Await | Op::RetAsync => {
+                            std::hint::cold_path();
+                            match async_op(realm, stack, fbs, prog, ci, fp, pc, opv, a!(), bx!() as u32, c!() as u32, next) {
+                                Ok(GenExit::Back(nci, nfp, npc)) => {
+                                    (ci, fp, pc) = (nci, nfp, npc);
+                                    reload!();
+                                    continue;
+                                }
+                                Ok(GenExit::Done(v)) => return M::done(Ok(v)),
+                                Err(e) => throw!(e),
+                            }
+                        }
+                        Op::IterClose => {
+                            std::hint::cold_path();
+                            // The loop leaves early (`c` = 1: with a throw): `return()` of the iterator, so a generator runs its `finally` blocks.
+                            if r!(a!() + 1).as_int().is_none() {
+                                tri!(realm.iter_close(r!(a!()), r!(a!() + 1), c!() != 0));
+                            }
+                            pc = next;
+                        }
+                        Op::AIterOpen => {
+                            std::hint::cold_path();
+                            gate!();
+                            let (it, nx) = tri!(realm.aiter_open(r!(b!())));
+                            r!(a!()) = it;
+                            r!(a!() + 1) = nx;
+                            r!(a!() + 2) = Value::int(0);
+                            pc = next;
+                        }
+                        Op::AIterNext => {
+                            std::hint::cold_path();
+                            gate!();
+                            let base = b!();
+                            r!(a!()) = tri!(realm.aiter_call(r!(base), r!(base + 1), &[]));
+                            pc = next;
+                        }
+                        Op::AIterUnpack | Op::AYsUnpack => {
+                            std::hint::cold_path();
+                            gate!();
+                            let (v, done) = tri!(realm.aiter_unpack(r!($x as usize), opv == Op::AYsUnpack));
+                            r!(a!()) = v;
+                            jump!(done, nextx!(), sbx!())
+                        }
+                        Op::AIterClose | Op::AIterCloseT => {
+                            std::hint::cold_path();
+                            gate!();
+                            let base = $x as usize;
+                            match tri!(realm.aiter_close_call(r!(base), opv == Op::AIterCloseT)) {
+                                Some(v) => {
+                                    r!(a!()) = v;
+                                    pc = nextx!();
+                                }
+                                None => jump!(true, nextx!(), sbx!()),
+                            }
+                        }
+                        Op::AIterCheck => {
+                            std::hint::cold_path();
+                            if Realm::obj(r!(a!())).is_none() {
+                                if b!() == 1 {
+                                    err!(ErrKind::Type, "the iterator does not have a throw method")
+                                }
+                                err!(ErrKind::Type, "the result of return() is not an object")
+                            }
+                            pc = next;
+                        }
+                        Op::AYsCall => {
+                            std::hint::cold_path();
+                            gate!();
+                            let base = $x as usize;
+                            let mode = r!(base + 4).as_int().expect("a mode");
+                            match tri!(realm.ays_call(r!(base), r!(base + 1), mode, r!(base + 3))) {
+                                crate::asyncgen::YsCall::Call(v) => {
+                                    r!(a!()) = v;
+                                    pc = nextx!();
+                                }
+                                crate::asyncgen::YsCall::NoThrow => {
+                                    r!(base + 4) = Value::int(3);
+                                    jump!(true, nextx!(), sbx!())
+                                }
+                                crate::asyncgen::YsCall::NoReturn => {
+                                    r!(a!()) = r!(base + 3);
+                                    jump!(true, nextx!(), sbx!())
+                                }
+                            }
+                        }
+                        Op::YieldStarStep => {
+                            std::hint::cold_path();
+                            gate!();
+                            let base = $x as usize;
+                            let mode = r!(base + 4).as_int().expect("a mode");
+                            let sent = r!(base + 3);
+                            let (v, state) = if let Some(i) = r!(base + 1).as_int() {
+                                // An array has no `throw` and no `return`.
+                                let arr = Realm::obj(r!(base)).expect("an array");
+                                if mode == crate::generator::MODE_THROW {
+                                    err!(ErrKind::Type, "the iterator does not have a throw method")
+                                } else if mode == crate::generator::MODE_RETURN {
+                                    (sent, crate::iter::YS_RETURN)
+                                } else if (i as u32) < arr.len() {
+                                    r!(base + 1) = Value::int(i + 1);
+                                    (arr.get_element(i as u32).unwrap_or(undef), crate::iter::YS_YIELD)
+                                } else {
+                                    (undef, crate::iter::YS_DONE)
+                                }
+                            } else {
+                                tri!(realm.yield_star_step(r!(base), r!(base + 1), mode, sent))
+                            };
+                            r!(a!()) = v;
+                            if state == crate::iter::YS_YIELD {
+                                pc = nextx!();
+                            } else {
+                                r!(base + 4) = Value::int(if state == crate::iter::YS_RETURN { crate::generator::MODE_RETURN } else { crate::generator::MODE_NEXT });
+                                jump!(true, nextx!(), sbx!())
                             }
                         }
                         Op::NewRegExp => {
@@ -1662,6 +1833,18 @@ impl Vm {
                         tdz!(r!(a!()), bx!());
                         pc = next;
                     }
+                    Op::GetPre => {
+                        // A slot of the prelude (`prelude_pre.rs`): the value, or the first read of the slot makes it.
+                        let v = realm.pre[bx!()];
+                        if v.is_undefined() {
+                            std::hint::cold_path();
+                            gate!();
+                            r!(a!()) = tri!(realm.pre_make(bx!()));
+                        } else {
+                            r!(a!()) = v;
+                        }
+                        pc = next;
+                    }
                     Op::GetCtx => {
                         let v = ctx_hops!(b!()).get(1 + c!());
                         r!(a!()) = v;
@@ -1887,7 +2070,12 @@ impl Vm {
                         let ctx = stack[fp - REC + 2];
                         let child = code.funcs[bx!()] as usize;
                         let f = realm.new_function(child, ctx);
-                        if prog[child].flags & CF_LINK != 0 {
+                        let child_flags = prog[child].flags;
+                        if child_flags & CF_GEN != 0 {
+                            std::hint::cold_path();
+                            realm.make_generator_function(f);
+                        }
+                        if child_flags & CF_LINK != 0 {
                             // The function uses `super` (or holds one that does): it gets the home object and the constructor link.
                             let (cur, nt) = (record(stack, fp, 0), record(stack, fp, 8));
                             let (co, fo) = (Realm::obj(cur).expect("a function"), Realm::obj(f).expect("a function"));
@@ -2118,18 +2306,36 @@ impl Vm {
                             it = Obj::array(&mut realm.heap, &realm.shapes, realm.s_array, &vals).expect("memory").value();
                         }
                         let is_array = Realm::obj(it).is_some_and(|o| realm.shapes.get(o.shape(&realm.shapes)).layout == crate::cell::Layout::Indexed);
-                        if !is_array {
-                            err!(ErrKind::Type, "the value is not iterable (the iterator protocol is S2.7)")
-                        }
+                        // A generator is stepped by `IterNext` itself (`undefined` where an array has its index): see `generator.rs`.
+                        let index = if is_array {
+                            Value::int(0)
+                        } else if Realm::is_generator(it) {
+                            undef
+                        } else {
+                            std::hint::cold_path();
+                            let (i, k) = tri!(realm.iter_open_generic(it));
+                            it = i;
+                            k
+                        };
                         r!(a!()) = it;
-                        r!(a!() + 1) = Value::int(0);
+                        r!(a!() + 1) = index;
                         r!(a!() + 2) = Value::int(0);
                         pc = next;
                     }
                     Op::IterNext => {
                         let base = $x as usize;
+                        let Some(i) = r!(base + 1).as_int() else {
+                            std::hint::cold_path();
+                            match tri!(realm.iter_step_any(r!(base), r!(base + 1))) {
+                                None => jump!(true, nextx!(), sbx!()),
+                                Some(v) => {
+                                    r!(a!()) = v;
+                                    pc = nextx!();
+                                }
+                            }
+                            continue;
+                        };
                         let arr = Realm::obj(r!(base)).expect("an array");
-                        let i = r!(base + 1).as_int().expect("an index");
                         if (i as u32) < arr.len() {
                             r!(a!()) = arr.get_element(i as u32).unwrap_or(undef);
                             r!(base + 1) = Value::int(i + 1);
@@ -2138,7 +2344,6 @@ impl Vm {
                             jump!(true, nextx!(), sbx!())
                         }
                     }
-                    Op::IterClose => pc = next,
                     Op::LoadCallee => {
                         r!(a!()) = record(stack, fp, 0);
                         pc = next;
@@ -2276,6 +2481,10 @@ pub fn code_flags(c: &Code) -> u8 {
             _ => {}
         }
         pc += n;
+    }
+    // A stub has the kind of its function too (`script.rs`: `stub`).
+    if c.gen_kind != 0 {
+        f |= CF_GEN;
     }
     f
 }

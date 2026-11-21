@@ -34,32 +34,33 @@
 //! names are refused (`TypeError`); the Standard says `[[PreventExtensions]]` of a legacy platform object is `false`, which is not
 //! forced for an empty map. `new DOMStringMap()` is an illegal constructor. A map is not plain data for structured clone.
 
+use crate::eng::{Eng, Ops};
+use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_js_api::{Args, Local};
 use crate::browser_dom::attr_set;
 use bare_html::dom::{NodeData, NodeId, Ns};
-use bare_js::eval::Interp;
-use bare_js::heap::{HeapError, NamedOp, NamedRequest};
-use bare_js::value::{ObjId, PropertyKey, Value};
+use crate::eng::NamedOp;
+use bare_js_api::Pending;
 use std::cell::{Cell, OnceCell, RefCell};
 
 /// An element with at most this many attributes is scanned by a read at no charge: the scan costs less than a step.
 const SCAN_FREE: usize = 32;
 
 #[derive(Default)]
-struct DState {
+struct DState<E: Eng> {
     /// `DOMStringMap` object -> its element.
-    objs: IdTab<ObjId, NodeId>,
+    objs: IdTab<<E as Eng>::Obj, NodeId>,
     /// element -> its map (`SameObject`).
-    by_el: IdTab<NodeId, ObjId>,
+    by_el: IdTab<NodeId, <E as Eng>::Obj>,
 }
 
 #[derive(Default)]
-pub(crate) struct DatasetHost {
-    s: RefCell<DState>,
-    proto: OnceCell<ObjId>,
-    fixed: RefCell<Vec<ObjId>>,
+pub(crate) struct DatasetHost<E: Eng> {
+    s: RefCell<DState<E>>,
+    proto: OnceCell<<E as Eng>::Obj>,
+    fixed: RefCell<Vec<<E as Eng>::Obj>>,
     /// `fill` charged a long scan: the next read of a long list may go on (one use).
     paid: Cell<bool>,
 }
@@ -170,18 +171,18 @@ fn name_char(c: char) -> bool {
 
 // ------------------------------------------------------------------------------------ heap hooks
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// The element of the map `owner`. `Ok(None)`: not a map of this host.
-    fn dataset_el(&self, owner: ObjId) -> Result<Option<NodeId>, HeapError> {
-        Ok(self.dataset.s.try_borrow().map_err(|_| HeapError::HostUnavailable)?.objs.get(&owner).copied())
+    fn dataset_el(&self, owner: E::Obj) -> Result<Option<NodeId>, Pending> {
+        Ok(self.dataset.s.try_borrow().map_err(|_| Pending::Busy)?.objs.get(&owner).copied())
     }
 
     /// Ask for the charge of a long scan before it runs (see the header). `Ok` when the scan may run now.
-    fn dataset_gate(&self, owner: ObjId, n: usize) -> Result<(), HeapError> {
+    fn dataset_gate(&self, _owner: E::Obj, n: usize) -> Result<(), Pending> {
         if n <= SCAN_FREE || self.dataset.paid.replace(false) {
             return Ok(());
         }
-        Err(HeapError::NeedsHost { owner, index: u32::MAX })
+        Err(Pending::Fill(u32::MAX))
     }
 }
 
@@ -199,9 +200,9 @@ fn units(cs: impl Iterator<Item = char>, cap: usize) -> Vec<u16> {
 
 /// Is `key` a name of the map `owner` now? `browser_sources.rs` calls these for the kind `Dataset`.
 #[inline]
-pub(crate) fn has(d: &Dom, owner: ObjId, key: &[u16]) -> Result<bool, HeapError> {
+pub(crate) fn has<E: Eng>(d: &Dom<E>, owner: E::Obj, key: &[u16]) -> Result<bool, Pending> {
     let Some(el) = d.dataset_el(owner)? else { return Ok(false) };
-    let doc = d.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
+    let doc = d.doc.try_borrow().map_err(|_| Pending::Busy)?;
     d.dataset_gate(owner, doc.attr_count(el))?;
     let NodeData::Element { attrs, .. } = *doc.data(el) else { return Ok(false) };
     Ok(doc.attrs(attrs).iter().any(|a| matches(doc.atom_str(a.name), key)))
@@ -209,9 +210,9 @@ pub(crate) fn has(d: &Dom, owner: ObjId, key: &[u16]) -> Result<bool, HeapError>
 
 /// The value of name `key` of the map `owner`. No gate: the heap calls this right after `has`, and that call paid for the scan.
 #[inline]
-pub(crate) fn get(d: &Dom, owner: ObjId, key: &[u16]) -> Result<Option<bare_js_api::Named<Value>>, HeapError> {
+pub(crate) fn get<E: Eng>(d: &Dom<E>, owner: E::Obj, key: &[u16]) -> Result<Option<bare_js_api::Named<E::Raw>>, Pending> {
     let Some(el) = d.dataset_el(owner)? else { return Ok(None) };
-    let doc = d.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
+    let doc = d.doc.try_borrow().map_err(|_| Pending::Busy)?;
     let NodeData::Element { attrs, .. } = *doc.data(el) else { return Ok(None) };
     Ok(doc.attrs(attrs).iter().find(|a| matches(doc.atom_str(a.name), key)).map(|a| {
         let t = doc.text(a.value);
@@ -221,9 +222,9 @@ pub(crate) fn get(d: &Dom, owner: ObjId, key: &[u16]) -> Result<Option<bare_js_a
 
 /// The number of names of the map `owner`.
 #[inline]
-pub(crate) fn len(d: &Dom, owner: ObjId) -> Result<usize, HeapError> {
+pub(crate) fn len<E: Eng>(d: &Dom<E>, owner: E::Obj) -> Result<usize, Pending> {
     let Some(el) = d.dataset_el(owner)? else { return Ok(0) };
-    let doc = d.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
+    let doc = d.doc.try_borrow().map_err(|_| Pending::Busy)?;
     d.dataset_gate(owner, doc.attr_count(el))?;
     let NodeData::Element { attrs, .. } = *doc.data(el) else { return Ok(0) };
     Ok(doc.attrs(attrs).iter().filter(|a| is_data(doc.atom_str(a.name))).count())
@@ -231,9 +232,9 @@ pub(crate) fn len(d: &Dom, owner: ObjId) -> Result<usize, HeapError> {
 
 /// The names of the map `owner`. No gate here: the heap calls `len` first, and that call paid for the scan.
 #[inline]
-pub(crate) fn keys(d: &Dom, owner: ObjId) -> Result<Vec<Vec<u16>>, HeapError> {
+pub(crate) fn keys<E: Eng>(d: &Dom<E>, owner: E::Obj) -> Result<Vec<Vec<u16>>, Pending> {
     let Some(el) = d.dataset_el(owner)? else { return Ok(Vec::new()) };
-    let doc = d.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
+    let doc = d.doc.try_borrow().map_err(|_| Pending::Busy)?;
     let NodeData::Element { attrs, .. } = *doc.data(el) else { return Ok(Vec::new()) };
     Ok(doc.attrs(attrs).iter().filter_map(|a| {
         let n = doc.atom_str(a.name);
@@ -242,10 +243,10 @@ pub(crate) fn keys(d: &Dom, owner: ObjId) -> Result<Vec<Vec<u16>>, HeapError> {
 }
 
 /// `Host::fill_indexed` for a map: charge the long scan that the heap announced. `Ok(false)`: `owner` is not a map.
-pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId) -> R<bool> {
+pub(crate) fn fill<E: Eng>(d: &Dom<E>, it: &mut E::Vm, owner: E::Obj) -> R<E, bool> {
     let Some(&el) = d.dataset.s.borrow().objs.get(&owner) else { return Ok(false) };
     let n = d.doc.borrow().attr_count(el);
-    it.charge(1 + n as u64 / 8)?;
+    it.charge_o(1 + n as u64 / 8)?;
     d.dataset.paid.set(true);
     Ok(true)
 }
@@ -253,27 +254,23 @@ pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId) -> R<bool> {
 // ------------------------------------------------------------------------------------ writes
 
 /// The text of a property key (a string key, or an array index as its digits).
-fn key_text(d: &Dom, it: &mut Interp<'_>, key: PropertyKey) -> R<String> {
-    let v = it.heap.key_to_value(key).map_err(|e| it.heap_error(e))?;
-    d.string_arg(it, v)
-}
 
 /// `Host::named_write` for a map: the setter, the deleter and `[[DefineOwnProperty]]` of the Standard.
-pub(crate) fn write(d: &Dom, it: &mut Interp<'_>, req: NamedRequest) -> R<bool> {
-    let Some(&el) = d.dataset.s.borrow().objs.get(&req.owner) else { return Ok(false) };
-    match req.op {
-        NamedOp::Set(v) => set(d, it, el, req.key, v).map(|_| true),
+pub(crate) fn write<E: Eng>(d: &Dom<E>, it: &mut E::Vm, owner: E::Obj, name: &[u16], op: NamedOp<E>) -> R<E, bool> {
+    let Some(&el) = d.dataset.s.borrow().objs.get(&owner) else { return Ok(false) };
+    match op {
+        NamedOp::Set(v) => set(d, it, el, name, v).map(|_| true),
         NamedOp::Define(desc) => {
             // WebIDL: only a data descriptor (a `value` or a `writable` field) runs the setter. Its flags are ignored.
             if desc.value.is_none() && desc.writable.is_none() {
                 return Ok(false);
             }
-            set(d, it, el, req.key, desc.value.unwrap_or(Value::Undefined)).map(|_| true)
+            set(d, it, el, name, desc.value.unwrap_or(E::undef())).map(|_| true)
         }
         NamedOp::Delete => {
-            let name = key_text(d, it, req.key)?;
+            let name = String::from_utf16_lossy(name);
             let mut doc = d.doc.borrow_mut();
-            it.charge(1 + doc.attr_count(el) as u64 / 8)?;
+            it.charge_o(1 + doc.attr_count(el) as u64 / 8)?;
             let attr = attr_of(&name);
             // Only a supported name: `data-keep-me` is the property `keepMe`, so `delete ds["keep-me"]` removes nothing.
             if let Some(at) = doc.find_attr_qname(el, &attr)
@@ -287,9 +284,9 @@ pub(crate) fn write(d: &Dom, it: &mut Interp<'_>, req: NamedRequest) -> R<bool> 
 }
 
 /// The named setter: the value first (`ToString` can run script), then the name, then the attribute.
-fn set(d: &Dom, it: &mut Interp<'_>, el: NodeId, key: PropertyKey, v: Value) -> R<()> {
+fn set<E: Eng>(d: &Dom<E>, it: &mut E::Vm, el: NodeId, name: &[u16], v: E::Raw) -> R<E, ()> {
     let value = d.string_arg(it, v)?;
-    let name = key_text(d, it, key)?;
+    let name = String::from_utf16_lossy(name);
     let b = name.as_bytes();
     if b.windows(2).any(|w| w[0] == b'-' && w[1].is_ascii_lowercase()) {
         return Err(d.dom_err(it, "SyntaxError", &format!("'{name}' is not a valid property name.")));
@@ -304,7 +301,7 @@ fn set(d: &Dom, it: &mut Interp<'_>, el: NodeId, key: PropertyKey, v: Value) -> 
 // ------------------------------------------------------------------------------------ the attribute
 
 /// `el.dataset` for an element of the right kind: `svg` for an SVG element, else an HTML one.
-fn dataset_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, svg: bool) -> Res<'s, Local<'s>> {
+fn dataset_of<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, svg: bool) -> Res<'s, Local<'s>> {
     let el = d.el_s(s, this)?;
     let right = {
         let doc = d.doc.borrow();
@@ -327,17 +324,17 @@ fn dataset_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, svg: bool) -> Re
     Ok(d.obj_local(s, o))
 }
 
-fn html_dataset<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn html_dataset<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     dataset_of(d, s, this, false)
 }
 
-fn svg_dataset<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn svg_dataset<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     dataset_of(d, s, this, true)
 }
 
 // ------------------------------------------------------------------------------------ install and GC hooks
 
-pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
     let p = d.p();
     let proto = d.plain_s(s)?;
     let _ = d.dataset.proto.set(proto);
@@ -349,17 +346,17 @@ pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
         Row::get(2, "dataset", svg_dataset, None),
     ]);
     let targets = [d.obj_local(s, p.html), d.obj_local(s, p.svg)];
-    d.install_rows(s, &targets, &rows1::T)?;
+    d.install_rows(s, &targets, &rows1::T::<E>::V)?;
     *d.dataset.fixed.borrow_mut() = vec![proto, f];
     Ok(())
 }
 
-pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
-    out.extend(d.dataset.fixed.borrow().iter().map(|&o| Value::Object(o)));
+pub(crate) fn roots<E: Eng>(d: &Dom<E>, out: &mut Roots<'_, '_, E>) {
+    out.extend(d.dataset.fixed.borrow().iter().map(|&o| E::obj_raw(o)));
 }
 
 /// The references of the dataset object `o` (its owner entry, `browser_sources.rs`): the wrapper of its element.
-pub(crate) fn trace_obj(d: &Dom, o: ObjId, t: &mut bare_js_api::Tracer<'_, Value>) {
+pub(crate) fn trace_obj<E: Eng>(d: &Dom<E>, o: E::Obj, t: &mut bare_js_api::Tracer<'_, E::Raw>) {
     if let Some(&el) = d.dataset.s.borrow().objs.get(&o)
         && let Some(w) = d.st.borrow().by_node.get(&el)
     {
@@ -368,22 +365,22 @@ pub(crate) fn trace_obj(d: &Dom, o: ObjId, t: &mut bare_js_api::Tracer<'_, Value
 }
 
 /// The references of the wrapper of the element `n`: its dataset object.
-pub(crate) fn trace_node(d: &Dom, n: NodeId, t: &mut bare_js_api::Tracer<'_, Value>) {
+pub(crate) fn trace_node<E: Eng>(d: &Dom<E>, n: NodeId, t: &mut bare_js_api::Tracer<'_, E::Raw>) {
     let s = d.dataset.s.borrow();
     if !s.by_el.is_empty()
         && let Some(&o) = s.by_el.get(&n)
     {
-        crate::browser_sources::visit(t, Value::Object(o));
+        crate::browser_sources::visit::<E>(t, E::obj_raw(o));
     }
 }
 
 /// How many dataset objects there are.
-pub(crate) fn count(d: &Dom) -> usize {
+pub(crate) fn count<E: Eng>(d: &Dom<E>) -> usize {
     d.dataset.s.borrow().objs.len()
 }
 
 /// After a batch of `prune_obj` that dropped entries: free the empty pages of the tables (`IdTab::remove`).
-pub(crate) fn compact(d: &Dom, before: usize) {
+pub(crate) fn compact<E: Eng>(d: &Dom<E>, before: usize) {
     let mut s = d.dataset.s.borrow_mut();
     if s.objs.len() != before {
         s.objs.retain(|_, _| true);
@@ -392,7 +389,7 @@ pub(crate) fn compact(d: &Dom, before: usize) {
 }
 
 /// Drop the entries of the dataset object `o`, which the collector freed.
-pub(crate) fn prune_obj(d: &Dom, o: ObjId) {
+pub(crate) fn prune_obj<E: Eng>(d: &Dom<E>, o: E::Obj) {
     let mut s = d.dataset.s.borrow_mut();
     if let Some(el) = s.objs.remove(&o)
         && s.by_el.get(&el) == Some(&o)
@@ -401,14 +398,14 @@ pub(crate) fn prune_obj(d: &Dom, o: ObjId) {
     }
 }
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// Is `o` a `DOMStringMap` of this module (so not plain data for structured clone)?
-    pub(crate) fn is_dataset_object(&self, o: ObjId) -> bool {
+    pub(crate) fn is_dataset_object(&self, o: E::Obj) -> bool {
         self.dataset.s.borrow().objs.contains_key(&o)
     }
 }
 
-impl Browser {
+impl<E: Eng> Browser<E> {
     pub fn dataset_stats(&self) -> DatasetStats {
         DatasetStats { objects: self.dom.dataset.s.borrow().objs.len() }
     }

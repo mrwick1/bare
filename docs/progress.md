@@ -15007,13 +15007,13 @@ Not tested: a real interpreter, compiler root maps or deep stacks (S2); a collec
 
 `bare-js2` has the lexer (`crates/js2/src/lex.rs`, tests in `lex_tests.rs`; design 6.9 item 9). It is the streaming lexer of `crates/js/src/lex.rs` with the same token type, goals, errors and decode helpers. A token is 12 bytes: a kind, a byte span into the source and two flags. The lexer borrows the source and never allocates while it scans. Base: origin/main `e36a8dd4`. `crates/js` is not changed.
 
-Decision: the lexer gives spans, and the S2.5 compiler makes atoms. Reasons: (1) The lexer has no heap and no `Atoms`. With `Atoms` it would need `&mut Heap` and a realm, and an allocation failure path (`R<Str>`), in a loop that is allocation-free today (`lex_load` checks 0 allocations). (2) The grammar will also run in check-only mode (design 6.9 item 9) and skip nested functions. Most identifiers in such a text are never used as names, so interning them in the lexer is work that nothing needs. The compiler knows which names it needs (and a token with no escape is already a `&str` slice, `ident_name`). (3) `SharedAtoms::intern` takes a mutex. The compiler can intern once for each distinct name of a function, not once for each token. (4) A string literal can hold lone surrogates, so its value is `Vec<u16>` (`decode_string`), not text. The compiler decides which of them are keys (atoms) and which are only values. Cost of the choice: the compiler hashes a name that the lexer has already scanned. `Chars::One` takes a `&[u8]`, so a name with no escape can be passed as a slice of the source (to verify in S2.5).
+Decision: the lexer gives spans, and the S2.5 compiler makes atoms. Reasons: (1) The lexer has no heap and no `Atoms`. With `Atoms` it would need `&mut Heap` and a realm, and an allocation failure path (`R<Str>`), in a loop that is allocation-free today (`js2_lex_load` checks 0 allocations). (2) The grammar will also run in check-only mode (design 6.9 item 9) and skip nested functions. Most identifiers in such a text are never used as names, so interning them in the lexer is work that nothing needs. The compiler knows which names it needs (and a token with no escape is already a `&str` slice, `ident_name`). (3) `SharedAtoms::intern` takes a mutex. The compiler can intern once for each distinct name of a function, not once for each token. (4) A string literal can hold lone surrogates, so its value is `Vec<u16>` (`decode_string`), not text. The compiler decides which of them are keys (atoms) and which are only values. Cost of the choice: the compiler hashes a name that the lexer has already scanned. `Chars::One` takes a `&[u8]`, so a name with no escape can be passed as a slice of the source (to verify in S2.5).
 
 What changed in the copy, and why:
 - `use crate::number` is gone: `crates/js2` must not depend on `crates/js`. The three functions the lexer uses (`decimal_value`, `separated_decimal_value`, `reduce` with its helpers, about 110 lines of `number.rs`) are copied into `lex.rs` as private items. `decimal_units_value` (used only by the JSON parser) is not copied. When S2 gets a `Number(string)` conversion, it can take these from `lex.rs`.
 - `icu_properties` (version, features and `compiled_data` as in `bare-js`) is a dependency of `bare-js2` for ID_Start and ID_Continue. Because of it the `license` field of `bare-js2` is now `(MIT OR Apache-2.0) AND Unicode-3.0` (the `bare-js` string without its `BSD-3-Clause` part; I did not check where that part comes from). `Cargo.lock` gets one line. `--locked` needs this line.
 - The 31 tests moved to `lex_tests.rs` (`#[path]` module, as `atoms_tests.rs`), with one level less indent. No test changed.
-- `crates/js2/examples/lex_load.rs` and `lex_check.rs` are copies with `bare_js2::lex`. `tools/js_lex_load.sh` and `tools/js_lex_check.sh` take `LEX_PKG=bare-js2` and honour `CARGO_TARGET_DIR`. Default is unchanged.
+- `crates/js2/examples/js2_lex_load.rs` and `lex_check.rs` are copies with `bare_js2::lex`. `tools/js_lex_load.sh` and `tools/js_lex_check.sh` take `LEX_PKG=bare-js2` and honour `CARGO_TARGET_DIR`. Default is unchanged.
 - No `unsafe` in `lex.rs`: `#![deny(unsafe_code)]` of the crate holds, and the module has no `allow`. The old lexer has none either, so no measured gain was needed.
 
 Checks:
@@ -15159,7 +15159,7 @@ Not tested: the S2.2 parser as the job (the module takes any `Job`); wiring into
 What it does:
 - `parse_script` and `parse_module` give one tree of the whole text, as `crates/js` does. The tests use them.
 - `parse_script_lazy` and `parse_module_lazy` give a tree of the top level only. Each function inside it is checked, not kept. The check finds every early error. It writes one `FnFacts` entry (`facts.rs`): the skip range, the captures (the outer names that it uses, one entry for each distinct name), `this`, `arguments`, `super`, `new.target`, direct `eval` and `with` flags, strictness, `length`, and the context at the start. The tree has `Body::Skipped(id)` for it.
-- `parse_function(source, &mut facts, id)` gives the tree of one function from its facts. It finds each function inside it by its start offset (`Facts::find`, a binary search in the entries sorted by start) and the lexer jumps over its body. It adds no facts entry, and it does not pre-parse again. `Facts::preparsed` counts the bodies that were read in check mode; the tests and `parse_load fns` check that it does not change.
+- `parse_function(source, &mut facts, id)` gives the tree of one function from its facts. It finds each function inside it by its start offset (`Facts::find`, a binary search in the entries sorted by start) and the lexer jumps over its body. It adds no facts entry, and it does not pre-parse again. `Facts::preparsed` counts the bodies that were read in check mode; the tests and `js2_parse_load fns` check that it does not change.
 
 How the captures work. A name that an identifier expression uses goes on one stack (`refs`, 8 bytes each, only inside a function). A scope that closes removes the names that it declared (so a use before the `var`, `let` or function declaration is bound too). What a function leaves is its capture list, and it stays on the stack for the function around it. Entries are written when a function ends, so a function comes after the functions in it (`fns[sub..own]` are its descendants). The head of an arrow is read as an expression before `=>` shows that it is an arrow, so an arrow takes the stack and the entries from the start of its head (`(a, b = () => a) => ...`: the inner arrow belongs to the outer one and `a` is bound by its parameter). Rules: `arguments` is bound by a function that is not an arrow (it sets `ARGS` and is no capture); an arrow lists it. A function expression binds its own name; a class expression binds its name for its members. A class field initializer and a `static {}` block are functions for the names (their `this` is their own) and stay in the tree of the function around the class (`INLINE`, with their own entry). A direct `eval` (the name `eval`, not in parentheses, not `?.`) sets `EVAL` on the function and `INNER_EVAL` on every function around it. `with` sets `WITH`; a function in its body gets `IN_WITH`.
 
@@ -15176,7 +15176,7 @@ Tests (`cargo test --locked -p bare-js2 --lib parse`: 67):
 - Sweep (`/data/bare-tmp/s2/sweep.sh`, not in the repo): the first 600 `.js` files of 4 KiB or more under `/usr/share/cursor/resources/app/node_modules`, `~/.cursor/extensions` and `/opt/postman/app/resources/app` (files over 16 MB skipped). `full` and `fns` exit with the same status on all 600 (239 fail in both: module syntax in script mode). On the 361 that parse, `parse_function` of all 20,593 functions succeeds and `preparsed` does not change.
 - `cargo test --locked -p bare-js2 --lib`: 180 pass on Linux. Windows 11 VM (`cargo xwin test --no-run`, the exe copied to the VM): 65 of the 67 parse tests pass; the 2 corpus tests need `tools/fixtures` at the build path and were skipped. `cargo clippy -p bare-js2 --all-targets` shows no finding in the new files.
 
-Parse-only rows (`crates/js2/examples/parse_load.rs`; `crates/js/examples/parse_load.rs` through a copy of the same harness in `/data/bare-tmp/oldparse`; `perf stat -e instructions:u`, `glibc.malloc.tcache_count=65535`, 3 runs each, release, archMachine, AMD Ryzen 9 5900HX; the spread is below 0.05% in every row). `full` = one tree of the whole text; `lazy` = the pre-parse; `fns` = `lazy`, then `parse_function` of every function once (what compiling each function costs). Peak = peak live heap bytes during the parse, source not counted (counting allocator, 1 run). The old parser's `stmts`, `chain` and `bodies` sources are used at the same scale.
+Parse-only rows (`crates/js2/examples/js2_parse_load.rs`; `crates/js/examples/parse_load.rs` through a copy of the same harness in `/data/bare-tmp/oldparse`; `perf stat -e instructions:u`, `glibc.malloc.tcache_count=65535`, 3 runs each, release, archMachine, AMD Ryzen 9 5900HX; the spread is below 0.05% in every row). `full` = one tree of the whole text; `lazy` = the pre-parse; `fns` = `lazy`, then `parse_function` of every function once (what compiling each function costs). Peak = peak live heap bytes during the parse, source not counted (counting allocator, 1 run). The old parser's `stmts`, `chain` and `bodies` sources are used at the same scale.
 
 | Row | old `full` instr | new `full` | new `lazy` | new `fns` | old full peak | new full | new lazy |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -17509,7 +17509,7 @@ Causes fixed (all in `parse.rs`).
 3. `(function await(await) {})` in a static block was rejected: the name of a function expression was checked with `static_block` still set. The function has its own context. 2 tests of the runner.
 4. `async(x = await) => {}`, `async(a = await => {}) => {}`, `async(await) => {}`, `async(a = (await) => {}) => {}` and `async(a = (...await) => {}) => {}` were accepted. `await` as a name is now recorded (`await_ident`, like `await_pos`) and an async arrow with one in its parameters is an error. A nested function has its own record, so `async(x = function () { var await }) => {}` is still valid. 1 test of the runner (the other forms are in `an_async_arrow_parameter_cannot_use_await_as_a_name`: their tests are skipped by feature).
 
-Parse cost (instructions, `parse_load MODE file 1 PATH`, minimum of 3 runs for each of 3 runs, machine archMachine, `--release`, base and branch built from source). The cost is the compare of each name with `await`.
+Parse cost (instructions, `js2_parse_load MODE file 1 PATH`, minimum of 3 runs for each of 3 runs, machine archMachine, `--release`, base and branch built from source). The cost is the compare of each name with `await`.
 
 | File (modes full / lazy / fns)       | Base full | After | Change | lazy | fns |
 | ------------------------------------ | --------: | ----: | -----: | ---: | --: |
@@ -17569,7 +17569,7 @@ Evidence of correctness. Differential against V8 (Deno 2.9.8, V8 15.0): 660,000 
 
 Result on the runner: js2 passes 14,772 (#789) and 14,802 here: 30 tests of `language/literals/regexp` go from fail to pass, 0 from pass to fail (against the run of #789). All tests of `language/` and `annexB/language` that must fail at parse time now do, except the ones that need the Unicode property tables: the scan of every `negative: phase: parse|early` test in `language`, `annexB/language`, `built-ins`, `annexB/built-ins` and `staging` goes from 722 accepted (334 after group 1, 388 in the other directories) to 300 accepted. The 300 are 242 in `built-ins/RegExp/property-escapes` (non-existent property names and values; needs the tables), 54 in `built-ins/RegExp/prototype/unicodeSets` (class syntax of `v`) and 4 in `staging` (`staging/sm/module/await-restricted-nested.js` and `staging/sm/fields/await-identifier-module-2.js`; not looked at, probably module goal tests). The tests that remain in the runner for this directory fail on `RegExp is not defined`, `eval` or regular expression literals not supported (the engine is S3).
 
-Parse cost (instructions, `parse_load full|lazy file 1 PATH`, minimum of 3 runs, 3 runs each, machine archMachine). The default build moves every row by +0.7% to +1.3%, also on `prelude.js`, which has no regular expression: the codegen-unit split changed (a new module and a new function in `parse.rs`). By the standing rule the rows are measured again with `codegen-units=1` on all three trees (base `43b62b05`, #789 `ad895eae`, this change):
+Parse cost (instructions, `js2_parse_load full|lazy file 1 PATH`, minimum of 3 runs, 3 runs each, machine archMachine). The default build moves every row by +0.7% to +1.3%, also on `prelude.js`, which has no regular expression: the codegen-unit split changed (a new module and a new function in `parse.rs`). By the standing rule the rows are measured again with `codegen-units=1` on all three trees (base `43b62b05`, #789 `ad895eae`, this change):
 
 | Row, full parse | Base | #789 | This change | vs base | vs #789 |
 | --------------- | ---: | ---: | ----------: | ------: | ------: |
@@ -17587,7 +17587,7 @@ Not tested: patterns with the `v` flag (accepted without a check), property name
 
 ### Cost round of the regular expression check
 
-Task: `lodash.js` was +0.52% over the base at `codegen-units=1` (limit +0.5%). Make the check cheaper with a design that removes work. Trees: base `43b62b05`, #789 `ad895eae`, #790 `86ea9be3`, this change. Machine archMachine, rustc 1.96.0, instructions of `parse_load full|lazy file 1 PATH` by `tools/js/instr.sh` (minimum of 3 runs), each tree in its own `CARGO_TARGET_DIR`.
+Task: `lodash.js` was +0.52% over the base at `codegen-units=1` (limit +0.5%). Make the check cheaper with a design that removes work. Trees: base `43b62b05`, #789 `ad895eae`, #790 `86ea9be3`, this change. Machine archMachine, rustc 1.96.0, instructions of `js2_parse_load full|lazy file 1 PATH` by `tools/js/instr.sh` (minimum of 3 runs), each tree in its own `CARGO_TARGET_DIR`.
 
 Where the cost went (callgrind, `lodash.js`, `codegen-units=1`, symbols): the 39 literals hold 846 bytes of pattern. `check` cost 35,204 instructions (0.19% of the parse), 41 for each byte, and 900 for each pattern. There is no hot spot. The cost is the work for each term: a bounds-checked byte read, a `match` on the byte, an `Option`, a call or a return for each atom, group and class atom, and a `Path` for each alternative. `lex::regexp_parts` (one `memrchr` call to find the flags) added 4,400 (110 for each literal).
 
@@ -17637,7 +17637,7 @@ Not tested: Windows; the browser; the `v` flag; the `u` fast paths of the full c
 
 ### P0 gate
 
-The P0 spike ran inside `crates/js2` (it is the first version of `promise.rs`, not a separate scratch crate). The cost rows are in `crates/js2/examples/promise_load.rs`. Machine: archMachine, release build, `perf stat -e instructions:u`, 3 runs of each scale (20,000 and 40,000 steps), step = (I(40,000) - I(20,000)) / 20,000. The 3 runs gave the same number in every row (spread under 1 instruction).
+The P0 spike ran inside `crates/js2` (it is the first version of `promise.rs`, not a separate scratch crate). The cost rows are in `crates/js2/examples/js2_promise_load.rs`. Machine: archMachine, release build, `perf stat -e instructions:u`, 3 runs of each scale (20,000 and 40,000 steps), step = (I(40,000) - I(20,000)) / 20,000. The 3 runs gave the same number in every row (spread under 1 instruction).
 
 | Row | Instructions per step |
 | --- | ---: |
@@ -17855,7 +17855,7 @@ Task: steps G0 and G1 of `docs/design-js2-async.md` (PR #796). A suspended frame
 
 **What is built.** Ops `GenInit`, `Yield`, `RetGen`. `Code` fields `gen_kind` and `gen_regs`; a save list `[sent, mode, len, regs...]` in `Code::tables`. The generator object has the flag `F_GEN` and four hidden slots (state, saved frame, sent value, mode). The saved frame is a `Slots` record: 8 header words, then the listed registers. The frame on the stack keeps the generator in the record word of `new.target`, so the marker and `unwind` find it. `next`, `return` and `throw` are natives. They ask for `Outcome::Resume` through the tail channel; the loop pushes the frame with the same `ensure!` and `reload!` as a call (#773). `Vm::resume` is the host entry; `Realm::call_function` resumes on a pooled machine (#785). A generator that is dropped by an exception is marked done in `unwind`. The verifier rejects: a register that is read after a suspension and is not in the list (or is not written before it); a list that is not inside the root map of the suspension; a list that is out of range, has a duplicate or is longer than `gen_regs`; the ops in code that is not a generator; `Ret`, `RetUndef`, `RetDerived` and `LoadNewTarget` in a generator; a generator that a script can construct. A handler that covers a suspension gets only the registers of the list.
 
-**G0 gate: per yield at or below 600 instructions.** `crates/js2/examples/gen_load.rs`: 5 live registers, 100,000 turns, final tree (merged with main `fd9c749b`).
+**G0 gate: per yield at or below 600 instructions.** `crates/js2/examples/js2_gen_load.rs`: 5 live registers, 100,000 turns, final tree (merged with main `fd9c749b`).
 
 | Case | What it runs | Net per turn |
 | --- | --- | ---: |
@@ -17912,7 +17912,7 @@ Fix: `Outcome::Resume` is gone. A native that wants a resume asks for `Outcome::
 | `closures` | 143.09 | 142.54 | -0.38% | 142.73 | 142.83 | +0.07% |
 | `objects` | 734.45 | 732.05 | -0.33% | 735.61 | 735.64 | +0.00% |
 
-Result: by the standing rule every row passes. `objects` of `interp_load` is over +0.5% at the default build (+0.85%) and within +0.5% at `codegen-units=1` (-0.13%); the other nine rows are within +0.5% at both builds. The `objects` row at the default build is still above main. I did not find a cause in the work: the arms that it runs are the same; the layout of the loop moves with the build. test262 (`TEST262=/data/claude-tmp/test262`, `tools/js/test262_js2.sh -j 4`): 17,324 tests pass on main and on this tree; no test that passes on main fails here (per-test `new.txt` compared). `cargo test --locked -p bare-js2 --lib`: 480 pass. `cargo test --locked -p bare-js-diff`: pass. Not tested: Windows; the cost of `next` after the change (`gen_load`; the cold path has the same code as before, one `is_hole` test more).
+Result: by the standing rule every row passes. `objects` of `interp_load` is over +0.5% at the default build (+0.85%) and within +0.5% at `codegen-units=1` (-0.13%); the other nine rows are within +0.5% at both builds. The `objects` row at the default build is still above main. I did not find a cause in the work: the arms that it runs are the same; the layout of the loop moves with the build. test262 (`TEST262=/data/claude-tmp/test262`, `tools/js/test262_js2.sh -j 4`): 17,324 tests pass on main and on this tree; no test that passes on main fails here (per-test `new.txt` compared). `cargo test --locked -p bare-js2 --lib`: 480 pass. `cargo test --locked -p bare-js-diff`: pass. Not tested: Windows; the cost of `next` after the change (`js2_gen_load`; the cold path has the same code as before, one `is_hole` test more).
 ## 2026-11-21: host handlers on the interface, Z: dead bridges (plan step S0.4 / Z)
 
 Status: S0.4 complete for the handlers. This PR removes the code that the groups H0 to E left unused. The PR is open without auto-merge. The rest of group Z cannot be done now (see "Kept").
@@ -17949,6 +17949,81 @@ The `codegen-units=1` rule was not needed: no row is over +0.5% at the default b
 Tests. Linux, debug: `cargo test --locked -p bare --lib -p bare-js -p bare-js-api`: 1718 (6 ignored), 1106 (1 ignored) and 32 pass (run before the merge of `origin/main`, which changes only tests and docs in the Windows fixes).
 
 Not tested: the Windows tests (only `cargo xwin check`, no VM run); `BARE_GC_STRESS=1` and `BARE_ALL_API=1` runs; `codegen-units=1`; RSS and wall time; the journeys and `tools/suite/run.py`; macOS; the `cfg` paths of other targets.
+
+## 2026-11-21: js2 prototype-chain inline cache
+
+Status: built and measured. The PR is open without auto-merge. The cost rule (see "Cost rule") is not met cleanly: it needs an owner decision. Design: [design-js2-proto-ic.md](design-js2-proto-ic.md).
+
+Problem: a read that finds a data property on the prototype chain (`p.then`, `o.m()` with `m` on the class prototype, `arr.push`, `str.slice`) had no site cache. Each read walked the chain. The promise agent measured `p.then` at 473 of the 1,849 instructions of a `then` step (PR #800).
+
+Design chosen: design (b), one global epoch (`Shapes::proto_epoch`) and a sticky flag `F_PROTO` on each object that an entry depends on (the holder and the links). An entry is `{holder, slot place, epoch}` in `Feedback::protos`; the hit is the compare of the receiver shape, the compare of the epoch and one load. It costs the same at any depth. Design (a), a shape compare for each link, costs more with each link and cannot see a change of a dictionary-mode prototype. Every shape change of a flagged object bumps the epoch; a collection bumps it too, so an entry holds no root. A cached add (`SetField` hit) refuses a flagged object. Accessors, absent keys and dictionary receivers are not cached. A string, a number or a boolean receiver uses the slow path only (it still gets an entry).
+
+Method. Machine archMachine, loaded, so only instruction counts (`tools/js/instr.sh`, minimum of 3 runs). Base is `origin/main` `a04014eb`, the new tree is `86ba4a4f` (the same plus this change). Separate target directories, release builds. A case is a loop in `script_run`; the number is `(I(N=100000) - I(N=0)) / 100000`. 3 rounds. The 3 rounds differ by 0 to 2 instructions in most rows (up to 15 in `slice` and `push`). The values below are the minimum.
+
+Measured cases, instructions for each loop turn:
+
+| Case (body of the loop) | Base | New | Change |
+| --- | --- | --- | --- |
+| `s += 1` (`empty`) | 139 | 147 | +5.8% |
+| `s += o.x`, own property (`own`) | 199 | 209 | +5.0% |
+| `r = o.m`, `m` on the class prototype (`fld1`) | 620 | 226 | -63.5% |
+| `s += o.m()`, depth 1 (`m1`) | 888 | 486 | -45.3% |
+| `s += o.m()`, depth 2 (`m2`) | 967 | 486 | -49.7% |
+| `s += o.m()`, depth 3 (`m3`) | 1,046 | 486 | -53.5% |
+| `s += o.f()`, `f` own (`fn`) | 468 | 471 | +0.6% |
+| `a.push(i)` (`push`) | 1,371 | 935 | -31.8% |
+| `a[i % 100] = i` (`pushref`, no read of a prototype) | 636 | 645 | +1.4% |
+| `t.slice(1, 3).length`, string receiver (`slice`) | 2,024 | 1,850 | -8.6% |
+| `s += t.length`, string receiver (`lenstr`) | 345 | 362 | +4.9% |
+
+At `codegen-units=1` (both trees): `empty` 141 / 144, `own` 202 / 209, `fld1` 627 / 223, `m1` 874 / 472, `m2` 950 / 472, `m3` 1,026 / 472, `fn` 450 / 459, `push` 1,379 / 941, `pushref` 639 / 644, `slice` 1,985 / 1,761, `lenstr` 347 / 324.
+
+Where the time went before: a prototype read of the class method (`m1` minus `fn`) cost about 420 instructions more than an own read, and each extra link cost about 80. After the change the read costs about 15 more than an own read, at any depth (`m1`, `m2` and `m3` are equal).
+
+`then` step. PR #800 is still open at `5083fd32`. I built `examples/js2_promise_load.rs` on that head with and without this change (the change cherry-picked on it; one conflict, in the flag constants of `object.rs`, kept both). 20,000 steps minus 0, 3 rounds, all the same:
+
+| `js2_promise_load` case | #800 head | With this change | Change |
+| --- | --- | --- | --- |
+| `then` (one step of `p = p.then(f)` and its job) | 1,839 | 1,421 | -22.7% (-418) |
+| `get` (`g = p.then` in a loop) | 591 | 172 | -70.9% |
+
+Micro rows of `interp_load` (instructions for each turn; `fib` is the total of `fib 27`), default build and `codegen-units=1`:
+
+| Row | Default base | Default new | Change | cgu1 base | cgu1 new | Change |
+| --- | --- | --- | --- | --- | --- | --- |
+| `loopfn` | 272 | 277 | +1.8% | 282 | 288 | +2.1% |
+| `calls` | 586 | 578 | -1.4% | 579 | 579 | 0.0% |
+| `fib` | 261,438,766 | 261,438,578 | -0.0001% | 252,205,716 | 257,610,068 | +2.1% |
+| `closures` | 1,765 | 1,780 | +0.8% | 1,761 | 1,758 | -0.2% |
+| `objects` | 707 | 719 | +1.7% | 717 | 722 | +0.7% |
+
+Startup, `script_run` with `run(0)` (`empty.0.js`): default 2,025,350 base, 2,029,957 new (+0.23%); `codegen-units=1` 2,018,367 and 2,020,947 (+0.13%).
+
+Cost rule (a row over +0.5% at the default build passes only if it is within +0.5% at `codegen-units=1` on both trees). Three micro rows are over +0.5% at the default build: `loopfn` (+1.8%), `closures` (+0.8%) and `objects` (+1.7%). `closures` passes (-0.2% at `codegen-units=1`). `loopfn` (+2.1%) and `objects` (+0.7%) are over at `codegen-units=1` too, so the rule fails for them. `fib` is 0.0% at the default build and +2.1% at `codegen-units=1`. Cause: the code of `Vm::run` changes shape, and the compiler lays the loop out another way. Evidence that it is layout and not the added work: the loop `s += 1` (`empty`, no property op at all, and the arms that I changed do not run) costs +8 instructions for each turn at the default build and +3 at `codegen-units=1`; `fib` has the same instruction count at the default build and +2.1% at `codegen-units=1`; `pushref`, `fn` and `own` move by 3 to 10 instructions with no change in the code that they run. The added code in `get_field!` runs only after the own-hit check fails, and `set_field!` adds one compare of the result of `set_shape_id` (`c.to == 0 || ...`). Before the rebase I tried several variants of the same logic (a `Cell` field in `Shapes` was one: it was worse); each moved the rows by a similar amount in another direction, and none was clean on both builds. I report it and do not hide it: the rows that gain are large (a prototype read -45% to -64%, the `then` step -23%) and the rows that lose are 1% to 2% in noise of layout, but the rule as written is not met.
+
+Tests. Linux, debug: `cargo test --locked -p bare-js2 --lib`: 471 of 472 pass in a run that shared the machine with 3 builds; the failing one is `compile::tests::a_scope_with_many_locals_compiles_in_linear_time` (a timing test, unrelated), which passes alone. `cargo test --locked --release -p bare-js-diff`: pass. test262 (`tools/js/test262_js2.sh -j 4`): the base `a04014eb` and the new tree give the same result for all 31,819 test lines (`diff` of `new.txt` is empty), so the baseline file is not changed. `proto_ic_tests.rs`: 15 tests (each normally and under constant collection); Before the rebase I broke the invalidation rules in the code on purpose, one at a time, and a test failed each time (not repeated after the rebase).
+
+Not tested: Windows, macOS, Miri and clippy; the browser (js2 is not wired in); a getter or an absent key on the chain (not cached, by design); a program that changes a prototype in a hot loop (the 16-refill budget is covered by a test, no timing); wall time and memory (RSS) of a whole run; a `then` step on a tree with the generator and Symbol changes (not merged yet).
+### Prototype-chain inline cache on top of the cold arms (#809), 2026-11-21
+
+The layout failure above was measured against a `Vm::run` of one function. #809 splits the loop into `Vm::exec::<Hot>` and `Vm::exec::<Cold>`. This branch is merged with the #809 head `ba35454d` (conflict only in `object.rs`: `F_PROTO` next to `F_PROMISE` and `F_GEN`, no overlap of values).
+
+`interp_load`, `tools/js/instr.sh` (3 runs, spread 0.002 M), net of N = 0, M instructions, archMachine (not idle). Base: `ba35454d`. New: this tree. Both built in the same session with symbols kept; the cgu1 columns use `CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1`.
+
+| Row | #809 default | This tree default | | #809 cgu1 | This tree cgu1 | |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `loopfn` | 280.50 | 281.50 | +0.4% | 280.50 | 275.50 | -1.8% |
+| `calls` | 586.50 | 579.50 | -1.2% | 562.50 | 556.50 | -1.1% |
+| `fib` | 1,100.90 | 1,091.48 | -0.9% | 1,048.40 | 1,038.98 | -0.9% |
+| `closures` | 370.10 | 368.70 | -0.4% | 360.56 | 357.56 | -0.8% |
+| `objects` | 143.73 | 142.19 | -1.1% | 142.59 | 141.19 | -1.0% |
+
+No row is over +0.5% at the default build or at `codegen-units=1`: the layout change that the single function showed is gone. Hypothesis: the hot copy has fewer live values, so the added arm code does not move the registers of the loop as before.
+
+Tests. `cargo test --locked -p bare-js2 --lib`: 527 pass.
+
+Not tested: the rest of the cost matrix, start-up (`script_run`), test262, Windows.
+
 ## Cold arms of `Vm::run` (step 1 of the dispatch design, 2026-11-21)
 
 Design: [design-js2-dispatch.md](design-js2-dispatch.md), step 1 and "Decisions (owner, 2026-11-21)". Base: `a04014eb` (`origin/main`). Its `crates/js2` is the same as at `351f9b72`, where I built and measured main (`git diff 351f9b72 a04014eb -- crates/js2` is empty). Machine: archMachine, not idle (other sessions ran), so instruction counts only.

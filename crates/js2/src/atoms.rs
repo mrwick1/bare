@@ -50,6 +50,8 @@ impl Table {
         }
         let mask = self.slots.len() - 1;
         let tag = (hash >> 16) as u64;
+        // Use the high bits for an odd stride. It visits every slot of the power-of-two table and breaks up clusters.
+        let step = tag as usize | 1;
         let mut i = hash as usize & mask;
         loop {
             let e = self.slots[i];
@@ -62,7 +64,7 @@ impl Table {
                     return Some(s);
                 }
             }
-            i = (i + 1) & mask;
+            i = (i + step) & mask;
         }
     }
 
@@ -71,15 +73,16 @@ impl Table {
         if (self.len + 1) * 4 > self.slots.len() * 3 {
             self.rebuild((self.len + 1).next_power_of_two().max(8) * 2, |_| true);
         }
-        self.put(Table::entry(s, hash));
+        self.put(Table::entry(s, hash), hash);
         self.len += 1;
     }
 
-    fn put(&mut self, e: u64) {
+    fn put(&mut self, e: u64, hash: u32) {
         let mask = self.slots.len() - 1;
-        let mut i = Table::str_of(e).cached_hash() as usize & mask;
+        let step = (hash >> 16) as usize | 1;
+        let mut i = hash as usize & mask;
         while self.slots[i] != 0 {
-            i = (i + 1) & mask;
+            i = (i + step) & mask;
         }
         self.slots[i] = e;
     }
@@ -90,8 +93,9 @@ impl Table {
         let before = self.len;
         self.len = 0;
         for e in old.into_iter().filter(|&e| e != 0) {
-            if keep(Table::str_of(e)) {
-                self.put(e);
+            let s = Table::str_of(e);
+            if keep(s) {
+                self.put(e, s.cached_hash());
                 self.len += 1;
             }
         }

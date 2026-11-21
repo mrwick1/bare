@@ -8,6 +8,7 @@
 //! the page code adds later with the same URL (`Net::fetch` finds it by kind and URL). A hint that no element takes holds no page work
 //! (`Net::hints`). A `<base href>` counts from where it is: a script before it resolves against the page, so its early download is not used.
 
+use crate::eng::Eng;
 use super::{Net, sheets};
 use crate::browser::Browser;
 use crate::resources::{Expect, JS_TYPES, Limits, WS};
@@ -119,7 +120,7 @@ impl Scan {
     }
 }
 
-impl Browser {
+impl<E: Eng> Browser<E> {
     /// Live: `run_page` goes on with the downloads that the scan of the document started.
     pub(crate) fn adopt_scan(&self, scan: Scan) {
         *self.dom.scripts.net.borrow_mut() = Some(Box::new(scan.net));

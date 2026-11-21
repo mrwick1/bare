@@ -159,6 +159,7 @@ impl<'a> Fc<'a> {
                     self.op(Op::Mov, dst, reg, 0);
                 }
             }
+            Res::Ctx { hops, slot, tdz, env: true, .. } => self.read_env(name, hops, slot, tdz, dst)?,
             Res::Ctx { hops, slot, tdz, .. } => {
                 if tdz {
                     let a = self.atom(name)?;
@@ -176,6 +177,12 @@ impl<'a> Fc<'a> {
                     self.op(Op::LoadUndef, dst, 0, 0);
                 }
                 _ => {
+                    if self.pre
+                        && let Some(slot) = crate::prelude_pre::slot(name)
+                    {
+                        self.op(Op::GetPre, dst, slot, 0);
+                        return Ok(());
+                    }
                     let s = self.site_of(name)?;
                     self.op(if self.scoped { Op::GetName } else { Op::GetGlobal }, dst, s, 0);
                 }
@@ -214,7 +221,8 @@ impl<'a> Fc<'a> {
                 }
                 self.set_live(reg);
             }
-            Res::Ctx { hops, slot, tdz, konst } => {
+            Res::Ctx { hops, slot, tdz, konst, env: true } => self.store_env(name, hops, slot, tdz, konst, src, init)?,
+            Res::Ctx { hops, slot, tdz, konst, .. } => {
                 if konst && !init {
                     let a = self.atom(name)?;
                     if tdz {
@@ -231,6 +239,9 @@ impl<'a> Fc<'a> {
                 }
             }
             Res::Global => {
+                if self.pre && crate::prelude_pre::slot(name).is_some() {
+                    self.unsup("an assignment to a slot of the prelude");
+                }
                 let s = self.site_of(name)?;
                 self.op(if self.scoped { Op::SetName } else if self.strict && !init { Op::SetGlobalS } else { Op::SetGlobal }, src, s, 0);
             }
@@ -465,15 +476,15 @@ impl<'a> Fc<'a> {
                 if self.is_arrow && !matches!(self.resolve("new.target", 0), Res::Global) {
                     self.read_var("new.target", 0, dst)?;
                 } else {
-                    self.op(Op::LoadNewTarget, dst, 0, 0);
+                    self.load_new_target(dst);
                 }
             }
-            ExprKind::Await(_) => self.not_built(dst, "await"),
-            ExprKind::Yield { .. } => self.not_built(dst, "yield"),
+            ExprKind::Await(a) => self.await_expr(a, dst)?,
+            ExprKind::Yield { arg, delegate } => self.yield_expr(arg, delegate, dst)?,
             ExprKind::Spread(_) => self.not_built(dst, "spread"),
             ExprKind::Hole => self.op(Op::LoadUndef, dst, 0, 0),
-            ExprKind::ImportCall { .. } => self.not_built(dst, "import()"),
-            ExprKind::ImportMeta => self.not_built(dst, "import.meta"),
+            ExprKind::ImportCall { arg, opts } => self.import_call(arg, opts, dst)?,
+            ExprKind::ImportMeta => self.read_var("%meta", 0, dst)?,
         }
         Ok(())
     }
@@ -855,12 +866,6 @@ impl<'a> Fc<'a> {
             Some(n) => Some(Box::from(&*self.prog.name(n))),
             None => self.hint_for_func(f),
         };
-        if func.is_async() {
-            self.unsup("an async function");
-        }
-        if func.is_generator() {
-            self.unsup("a generator");
-        }
         let self_name = expr && func.name.is_some() && func.kind == FuncKind::Normal;
         let i = self.child(f, self_name, name)?;
         self.op(Op::Closure, dst, i, 0);
