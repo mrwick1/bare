@@ -20,6 +20,7 @@ use crate::cell::Layout;
 use crate::gc::{AddrHasher, Live, Marker};
 use crate::interp::STOP;
 use crate::interp_rt::{Got, Key, R, Realm, Slot};
+use crate::object::K_PROXY;
 use crate::object::{F_HOST, F_LAZYM, Obj};
 use crate::shapes::{A_ACC, A_C, A_E, A_W};
 use crate::string::{Chars, Str};
@@ -383,6 +384,13 @@ impl Realm {
         let mut open: Vec<(Obj, u32)> = Vec::new();
         let mut c = Some(o);
         while let Some(x) = c {
+            if x.is_kind(K_PROXY) {
+                return if want {
+                    self.proxy_get(x, key, o.value()).map(|v| Walk::Hit(Got::Val(v)))
+                } else {
+                    self.proxy_has(x, key).map(|has| if has { Walk::Hit(Got::Val(Value::UNDEFINED)) } else { Walk::Miss })
+                };
+            }
             self.fn_props(x);
             if let Some((kind, hk)) = self.hs_info(x) {
                 match (kind, key) {
@@ -405,7 +413,7 @@ impl Realm {
                 p = self.hs_plain(x, key);
             }
             if p.is_some() {
-                return Ok(Walk::Hit(Realm::got(p)));
+                return self.got(p, key, o.value()).map(Walk::Hit);
             }
             // A plain function makes its `prototype` at the first read of it (as `lookup` and `get_prop_g` do).
             if matches!(key, Key::Name(k) if k == self.k_prototype) && self.needs_prototype(x) {
@@ -436,6 +444,10 @@ impl Realm {
     /// `get_own` that asks the host first. Index properties of an indexed object are not writable; a name of a named object is a
     /// writable data property (`heap_named.rs`); an alias is not enumerable.
     pub(crate) fn get_own_h(&mut self, o: Obj, key: Key) -> R<Option<Own>> {
+        if o.is_kind(K_PROXY) {
+            return self.proxy_descriptor(o, key);
+        }
+        self.prepare_own_prototype(o, key)?;
         if !self.api.hs.active || !o.has_flag(F_HOST | F_LAZYM) {
             return Ok(self.get_own(o, key));
         }
@@ -475,6 +487,20 @@ impl Realm {
     /// `own_key_list` with the keys of the host in front: the indices of an indexed object (and its aliases, when not only the
     /// enumerable keys are asked), the names of a named object. A lazy object lets the host define all its members first.
     pub(crate) fn own_key_list_h(&mut self, o: Obj, enumerable: bool) -> R<Vec<Value>> {
+        if o.is_kind(K_PROXY) {
+            let keys = self.proxy_keys(o)?;
+            let mut strings = Vec::new();
+            for v in keys.into_iter().filter(|v| Self::str_of(*v).is_some()) {
+                if enumerable {
+                    let k = self.key_of(v)?;
+                    if !self.get_own_h(o, k)?.is_some_and(|d| d.attrs() & A_E != 0) {
+                        continue;
+                    }
+                }
+                strings.push(v);
+            }
+            return Ok(strings);
+        }
         if !self.api.hs.active || !o.has_flag(F_HOST | F_LAZYM) {
             return Ok(self.own_key_list(o, enumerable));
         }

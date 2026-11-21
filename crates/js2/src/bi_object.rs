@@ -15,6 +15,7 @@ use crate::lazy::{Ent, m};
 use crate::builtins::arg;
 use crate::cell::Layout;
 use crate::interp_rt::{ErrKind, Key, R, Realm, Slot};
+use crate::object::K_PROXY;
 use crate::object::{F_ELEMS_FIXED, F_ELEMS_RO, F_LEN_RO, F_SLOWIDX, Obj};
 use crate::shapes::{A_ACC, A_C, A_E, A_W};
 use crate::string::{Chars, Str};
@@ -32,7 +33,7 @@ pub(crate) struct Desc {
 }
 
 impl Desc {
-    fn is_accessor(&self) -> bool {
+    pub(crate) fn is_accessor(&self) -> bool {
         self.get.is_some() || self.set.is_some()
     }
 
@@ -257,6 +258,24 @@ impl Realm {
 
     /// `seal` (`freeze` false) or `freeze`: no new property, no property configurable, and for `freeze` no data property writable.
     pub(crate) fn lock(&mut self, o: Obj, freeze: bool) -> R<()> {
+        if o.is_kind(K_PROXY) {
+            if !self.prevent_extensions_internal(o)? {
+                return self.type_error("cannot prevent extensions");
+            }
+            for v in self.proxy_keys(o)? {
+                let key = self.key_of(v)?;
+                let w = if freeze {
+                    let Some(d) = self.get_own_h(o, key)? else { continue };
+                    matches!(d, Own::Data(..)).then_some(false)
+                } else {
+                    None
+                };
+                if !self.define_own(o, key, &Desc { c: Some(false), w, ..Desc::default() })? {
+                    return self.type_error("cannot lock property");
+                }
+            }
+            return Ok(());
+        }
         self.fn_prep_all(o);
         self.prevent_extensions(o);
         if o.is_indexed() {
@@ -275,6 +294,24 @@ impl Realm {
     }
 
     /// Is `o` sealed (`frozen` false) or frozen?
+    fn is_locked_internal(&mut self, o: Obj, frozen: bool) -> R<bool> {
+        if !o.is_kind(K_PROXY) {
+            return Ok(self.is_locked(o, frozen));
+        }
+        if self.is_extensible_internal(o)? {
+            return Ok(false);
+        }
+        for v in self.proxy_keys(o)? {
+            let k = self.key_of(v)?;
+            if let Some(d) = self.get_own_h(o, k)?
+                && (d.attrs() & A_C != 0 || frozen && matches!(d, Own::Data(_, at) if at & A_W != 0))
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     pub(crate) fn is_locked(&mut self, o: Obj, frozen: bool) -> bool {
         if o.extensible() {
             return false;
@@ -329,6 +366,10 @@ impl Realm {
 
     /// `[[DefineOwnProperty]]` (`ValidateAndApplyPropertyDescriptor`): false when the specification says to refuse.
     pub(crate) fn define_own(&mut self, o: Obj, key: Key, d: &Desc) -> R<bool> {
+        if o.is_kind(K_PROXY) {
+            return self.proxy_define(o, key, d);
+        }
+        self.prepare_own_prototype(o, key)?;
         if let Key::Name(k) = key
             && k == self.k_length
             && self.array_like_length(o).is_some()
@@ -354,31 +395,10 @@ impl Realm {
             let (attrs, vals) = new_property(d);
             return self.create_own(o, key, attrs, &vals).map(|_| true);
         };
-        // The checks of a property that exists.
-        let cat = cur.attrs();
-        if cat & A_C == 0 {
-            if d.c == Some(true) || d.e.is_some_and(|e| e != (cat & A_E != 0)) {
-                return Ok(false);
-            }
-            if d.is_accessor() || d.is_data() {
-                let cur_acc = matches!(cur, Own::Acc(..));
-                if d.is_accessor() != cur_acc && (d.is_accessor() || d.is_data()) {
-                    return Ok(false);
-                }
-                match cur {
-                    Own::Acc(g, s, _) => {
-                        if d.get.is_some_and(|x| !self.same_value(x, g)) || d.set.is_some_and(|x| !self.same_value(x, s)) {
-                            return Ok(false);
-                        }
-                    }
-                    Own::Data(v, _) => {
-                        if cat & A_W == 0 && (d.w == Some(true) || d.value.is_some_and(|x| !self.same_value(x, v))) {
-                            return Ok(false);
-                        }
-                    }
-                }
-            }
+        if !self.compatible_property(cur, d) {
+            return Ok(false);
         }
+        let cat = cur.attrs();
         // The new attributes and values.
         let e_bit = d.e.map_or(cat & A_E, |b| if b { A_E } else { 0 });
         let c_bit = d.c.map_or(cat & A_C, |b| if b { A_C } else { 0 });
@@ -389,6 +409,34 @@ impl Realm {
             Own::Acc(g, s, _) => (A_ACC | e_bit | c_bit, vec![d.get.unwrap_or(g), d.set.unwrap_or(s)]),
         };
         self.write_own(o, key, attrs, &vals).map(|_| true)
+    }
+
+    pub(crate) fn compatible_property(&mut self, cur: Own, d: &Desc) -> bool {
+        let cat = cur.attrs();
+        if cat & A_C == 0 {
+            if d.c == Some(true) || d.e.is_some_and(|e| e != (cat & A_E != 0)) {
+                return false;
+            }
+            if d.is_accessor() || d.is_data() {
+                let cur_acc = matches!(cur, Own::Acc(..));
+                if d.is_accessor() != cur_acc && (d.is_accessor() || d.is_data()) {
+                    return false;
+                }
+                match cur {
+                    Own::Acc(g, s, _) => {
+                        if d.get.is_some_and(|x| !self.same_value(x, g)) || d.set.is_some_and(|x| !self.same_value(x, s)) {
+                            return false;
+                        }
+                    }
+                    Own::Data(v, _) => {
+                        if cat & A_W == 0 && (d.w == Some(true) || d.value.is_some_and(|x| !self.same_value(x, v))) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        true
     }
 
     /// Make a property that the object does not have.
@@ -532,6 +580,7 @@ impl Realm {
                 None => continue,
                 Some(Slot::Data(v)) => v,
                 Some(Slot::Acc(..)) => return Ok(None),
+                Some(Slot::Proxy(_)) => return crate::bi_reflect::to_desc(self, d).map(Some),
             };
             match slot {
                 0 => out.e = Some(Realm::truthy(v)),
@@ -584,6 +633,9 @@ impl Realm {
         let mut p = Some(o);
         let mut own = true;
         while let Some(c) = p {
+            if c.is_kind(K_PROXY) {
+                return if self.proxy_set(c, key, v, recv)? { Ok(()) } else { self.type_error("cannot assign to Proxy property") };
+            }
             match self.get_own(c, key) {
                 Some(Own::Acc(_, s, _)) => {
                     if s.is_undefined() {
@@ -672,7 +724,7 @@ impl Realm {
 }
 
 /// The attributes and values that a descriptor gives to a new property (a missing field is false or `undefined`).
-fn new_property(d: &Desc) -> (u8, Vec<Value>) {
+pub(crate) fn new_property(d: &Desc) -> (u8, Vec<Value>) {
     let ec = d.e.map_or(0, |b| if b { A_E } else { 0 }) | d.c.map_or(0, |b| if b { A_C } else { 0 });
     if d.is_accessor() {
         (A_ACC | ec, vec![d.get.unwrap_or(Value::UNDEFINED), d.set.unwrap_or(Value::UNDEFINED)])
@@ -712,6 +764,9 @@ pub(crate) fn object_keys(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Val
 /// The own enumerable keys of `v` and the value of each. A getter is a call: `Err` through `Ok(None)` when one is met.
 fn own_pairs(rt: &mut Realm, v: Value) -> R<Option<Vec<(Value, Value)>>> {
     let o = to_obj(rt, v)?;
+    if let Some(p) = Realm::obj(o).filter(|o| o.is_kind(K_PROXY)) {
+        return rt.proxy_pairs(p, false).map(Some);
+    }
     let keys = rt.own_keys(o)?;
     let ko = Realm::obj(keys).expect("an array");
     let mut out = Vec::with_capacity(ko.len() as usize);
@@ -747,6 +802,9 @@ fn has_accessor(rt: &mut Realm, v: Value) -> bool {
 
 fn object_assign(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let target = rt.to_object(arg(args, 0))?.value();
+    if let Some(o) = Realm::obj(target).filter(|o| o.is_kind(K_PROXY)) {
+        return assign_to_proxy(rt, o, &args[1..]);
+    }
     let slow = args.iter().skip(1).any(|&s| has_accessor(rt, s)) || {
         // A setter on the target or its prototypes, or a getter on the keys, needs the helper.
         let mut chain = Realm::obj(target);
@@ -767,6 +825,10 @@ fn object_assign(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
         if src.is_undefined() || src.is_null() {
             continue;
         }
+        if let Some(p) = Realm::obj(src).filter(|o| o.is_kind(K_PROXY)) {
+            rt.assign_proxy_source(target, p)?;
+            continue;
+        }
         let Some(pairs) = own_pairs(rt, src)? else { return rt.helper(H_ASSIGN, args) };
         for (k, v) in pairs {
             let key = rt.key_of(k)?;
@@ -781,6 +843,18 @@ fn object_assign(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
         }
     }
     Ok(target)
+}
+
+fn assign_to_proxy(rt: &mut Realm, target: Obj, sources: &[Value]) -> R<Value> {
+    let recv = target.value();
+    for &src in sources {
+        if src.is_undefined() || src.is_null() {
+            continue;
+        }
+        let o = rt.to_object(src)?;
+        rt.assign_proxy_source(recv, o)?;
+    }
+    Ok(recv)
 }
 
 fn has_any_accessor(rt: &Realm, o: Obj) -> bool {
@@ -841,14 +915,18 @@ fn object_define_properties(rt: &mut Realm, _this: Value, args: &[Value]) -> R<V
 
 fn object_own_symbols(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let v = to_obj(rt, arg(args, 0))?;
-    let list = Realm::obj(v).map(|o| rt.own_symbol_list(o, false)).unwrap_or_default();
+    let list = match Realm::obj(v) {
+        Some(o) if o.is_kind(K_PROXY) => rt.proxy_keys(o)?.into_iter().filter(|v| Realm::sym_of(*v).is_some()).collect(),
+        Some(o) => rt.own_symbol_list(o, false),
+        None => Vec::new(),
+    };
     Ok(rt.new_array(&list))
 }
 
 pub(crate) fn object_get_prototype_of(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let v = arg(args, 0);
     if let Some(o) = Realm::obj(v) {
-        return Ok(rt.proto_of(o).map_or(Value::NULL, |p| p.value()));
+        return Ok(rt.get_proto_internal(o)?.map_or(Value::NULL, |p| p.value()));
     }
     Ok(if Realm::str_of(v).is_some() {
         rt.string_proto.value()
@@ -883,6 +961,9 @@ pub(crate) fn object_set_prototype_of(rt: &mut Realm, _this: Value, args: &[Valu
 impl Realm {
     /// `[[SetPrototypeOf]]`: false when the object is not extensible (and the prototype differs) or the change would make a cycle.
     pub(crate) fn set_proto_checked(&mut self, o: Obj, p: Option<Obj>) -> R<bool> {
+        if o.is_kind(K_PROXY) {
+            return self.proxy_set_proto(o, p);
+        }
         if self.proto_of(o) == p {
             return Ok(true);
         }
@@ -894,6 +975,9 @@ impl Realm {
         while let Some(x) = c {
             if x == o {
                 return Ok(false);
+            }
+            if x.is_kind(K_PROXY) {
+                break;
             }
             c = self.proto_of(x);
         }
@@ -927,8 +1011,7 @@ fn object_own_descriptors(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Val
     let v = to_obj(rt, arg(args, 0))?;
     let out = Obj::new(&mut rt.heap, &rt.shapes, rt.s_object).expect("memory");
     if let Some(o) = Realm::obj(v) {
-        let mut keys = rt.own_key_list_h(o, false)?;
-        keys.extend(rt.own_symbol_list(o, false));
+        let keys = rt.all_own_keys(o)?;
         for k in keys {
             let key = rt.key_of(k)?;
             if let Some(p) = rt.get_own_h(o, key)? {
@@ -946,14 +1029,17 @@ fn object_is(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
 
 fn object_prevent_extensions(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let v = arg(args, 0);
-    if let Some(o) = Realm::obj(v) {
-        rt.prevent_extensions(o);
+    if let Some(o) = Realm::obj(v) && !rt.prevent_extensions_internal(o)? {
+        return rt.type_error("cannot prevent extensions");
     }
     Ok(v)
 }
 
-fn object_is_extensible(_rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    Ok(Value::bool(Realm::obj(arg(args, 0)).is_some_and(|o| o.extensible())))
+fn object_is_extensible(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+    Ok(Value::bool(match Realm::obj(arg(args, 0)) {
+        Some(o) => rt.is_extensible_internal(o)?,
+        None => false,
+    }))
 }
 
 fn object_freeze(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
@@ -973,11 +1059,17 @@ fn object_seal(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
 }
 
 fn object_is_frozen(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    Ok(Value::bool(Realm::obj(arg(args, 0)).is_none_or(|o| rt.is_locked(o, true))))
+    Ok(Value::bool(match Realm::obj(arg(args, 0)) {
+        Some(o) => rt.is_locked_internal(o, true)?,
+        None => true,
+    }))
 }
 
 fn object_is_sealed(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    Ok(Value::bool(Realm::obj(arg(args, 0)).is_none_or(|o| rt.is_locked(o, false))))
+    Ok(Value::bool(match Realm::obj(arg(args, 0)) {
+        Some(o) => rt.is_locked_internal(o, false)?,
+        None => true,
+    }))
 }
 
 fn object_has_own(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
@@ -1138,7 +1230,7 @@ fn to_locale_string(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
 fn is_prototype_of(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let Some(mut o) = Realm::obj(arg(args, 0)) else { return Ok(Value::FALSE) };
     let Some(p) = Realm::obj(this_object(rt, this)?) else { return Ok(Value::FALSE) };
-    while let Some(n) = rt.proto_of(o) {
+    while let Some(n) = rt.get_proto_internal(o)? {
         if n == p {
             return Ok(Value::TRUE);
         }

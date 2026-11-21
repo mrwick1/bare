@@ -1,14 +1,14 @@
 //! `Reflect` (the census names `RGet`, `RApply`, `RSet`, `RDefineProperty`, `RGetPrototypeOf`, `RGetOwnPropertyDescriptor`, `OwnKeys`):
-//! thin wrappers over the object operations of [`Realm`] (`bi_object.rs`). js2 has no proxy, so every operation is the ordinary one.
+//! thin wrappers over the object operations of [`Realm`] (`bi_object.rs`).
 //! The difference from `Object.*` is the result: a failed operation is `false`, not a `TypeError`. The receiver of `get` and `set` is a
 //! parameter, so they walk the prototype chain by hand and call the accessor with the receiver.
 //! `apply` leaves the call to the caller through the tail channel, so it adds no native frame.
 use crate::lazy::{Ent, m};
-use crate::bi_object::{Desc, Own};
+use crate::bi_object::Desc;
 use crate::builtins::arg;
 use crate::interp_rt::{Key, R, Realm};
 use crate::object::Obj;
-use crate::shapes::{A_C, A_W};
+use crate::shapes::A_C;
 use crate::value::Value;
 
 /// The object that `v` is, or a `TypeError` that names the method.
@@ -20,7 +20,7 @@ fn target(rt: &mut Realm, v: Value, what: &str) -> R<Obj> {
 }
 
 /// `ToPropertyDescriptor`: reads the six fields with `[[Get]]`, so an accessor on the descriptor object runs.
-fn to_desc(rt: &mut Realm, v: Value) -> R<Desc> {
+pub(crate) fn to_desc(rt: &mut Realm, v: Value) -> R<Desc> {
     if Realm::obj(v).is_none() {
         return rt.type_error("property description must be an object");
     }
@@ -52,7 +52,7 @@ fn to_desc(rt: &mut Realm, v: Value) -> R<Desc> {
 }
 
 /// `CreateListFromArrayLike`.
-fn list_from(rt: &mut Realm, v: Value) -> R<Vec<Value>> {
+pub(crate) fn list_from(rt: &mut Realm, v: Value) -> R<Vec<Value>> {
     if Realm::obj(v).is_none() {
         return rt.type_error("argument list must be an array-like object");
     }
@@ -110,28 +110,13 @@ fn get(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let o = target(rt, arg(args, 0), "get")?;
     let key = rt.key_of(arg(args, 1))?;
     let recv = if args.len() > 2 { args[2] } else { o.value() };
-    let mut p = Some(o);
-    while let Some(c) = p {
-        match rt.get_own(c, key) {
-            Some(Own::Data(v, _)) => return Ok(v),
-            Some(Own::Acc(g, ..)) => {
-                if g.is_undefined() {
-                    return Ok(Value::UNDEFINED);
-                }
-                rt.tail_args.clear();
-                rt.tail = Some((g, recv));
-                return Ok(Value::UNDEFINED);
-            }
-            None => p = rt.proto_of(c),
-        }
-    }
-    Ok(Value::UNDEFINED)
+    rt.get_from(o, key, recv)
 }
 
 fn get_own_property_descriptor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let o = target(rt, arg(args, 0), "getOwnPropertyDescriptor")?;
     let key = rt.key_of(arg(args, 1))?;
-    Ok(match rt.get_own(o, key) {
+    Ok(match rt.get_own_h(o, key)? {
         Some(p) => rt.from_own(p),
         None => Value::UNDEFINED,
     })
@@ -139,7 +124,7 @@ fn get_own_property_descriptor(rt: &mut Realm, _this: Value, args: &[Value]) -> 
 
 fn get_prototype_of(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let o = target(rt, arg(args, 0), "getPrototypeOf")?;
-    Ok(rt.proto_of(o).map_or(Value::NULL, |p| p.value()))
+    Ok(rt.get_proto_internal(o)?.map_or(Value::NULL, |p| p.value()))
 }
 
 fn has(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
@@ -149,20 +134,19 @@ fn has(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
 }
 
 fn is_extensible(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    Ok(Value::bool(target(rt, arg(args, 0), "isExtensible")?.extensible()))
+    let o = target(rt, arg(args, 0), "isExtensible")?;
+    Ok(Value::bool(rt.is_extensible_internal(o)?))
 }
 
 fn own_keys(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let o = target(rt, arg(args, 0), "ownKeys")?;
-    let mut keys = rt.own_key_list(o, false);
-    keys.extend(rt.own_symbol_list(o, false));
+    let keys = rt.all_own_keys(o)?;
     Ok(rt.new_array(&keys))
 }
 
 fn prevent_extensions(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let o = target(rt, arg(args, 0), "preventExtensions")?;
-    rt.prevent_extensions(o);
-    Ok(Value::TRUE)
+    Ok(Value::bool(rt.prevent_extensions_internal(o)?))
 }
 
 /// `Reflect.set(target, key, v, receiver)`: `OrdinarySet`. The result is false where `Object.assign` and strict code would throw.
@@ -170,33 +154,7 @@ fn set(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let o = target(rt, arg(args, 0), "set")?;
     let key = rt.key_of(arg(args, 1))?;
     let (v, recv) = (arg(args, 2), if args.len() > 3 { args[3] } else { o.value() });
-    let mut p = Some(o);
-    while let Some(c) = p {
-        match rt.get_own(c, key) {
-            Some(Own::Acc(_, s, _)) => {
-                if s.is_undefined() {
-                    return Ok(Value::FALSE);
-                }
-                rt.call_function(s, recv, &[v])?;
-                return Ok(Value::TRUE);
-            }
-            Some(Own::Data(_, at)) => {
-                if at & A_W == 0 {
-                    return Ok(Value::FALSE);
-                }
-                break;
-            }
-            None => p = rt.proto_of(c),
-        }
-    }
-    let Some(r) = Realm::obj(recv) else { return Ok(Value::FALSE) };
-    let d = match rt.get_own(r, key) {
-        Some(Own::Acc(..)) => return Ok(Value::FALSE),
-        Some(Own::Data(_, at)) if at & A_W == 0 => return Ok(Value::FALSE),
-        Some(Own::Data(..)) => Desc { value: Some(v), ..Desc::default() },
-        None => Desc { value: Some(v), w: Some(true), e: Some(true), c: Some(true), ..Desc::default() },
-    };
-    Ok(Value::bool(rt.define_own(r, key, &d)?))
+    Ok(Value::bool(rt.set_from(o, key, v, recv)?))
 }
 
 fn set_prototype_of(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {

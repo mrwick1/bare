@@ -62,3 +62,38 @@ No row grows by more than 0.5% on both allocators.
 | parse-fns | -0.007% | +0.018% |
 
 Windows, Miri and the full Rust suite were not run locally.
+
+## Proxy results
+
+Proxy objects use kind 14 and an uncacheable dictionary shape.
+The target and handler live in traced slots.
+The property-get inline cache keeps its existing hit path.
+Prototype cache lookup stops at a proxy.
+
+The pinned subset gains 23 js2 passes with no lost passes.
+All 19 assigned cases pass.
+The old-only count falls from 143 to 121.
+The Proxy test262 directory has 268 passes and 43 skips.
+Five narrow Rust tests pass on Linux, including forced collection.
+The two touched crates pass cargo check.
+
+These rows compare against the dynamic-scope build and use the same workloads and run count.
+No row grows by more than 0.5% on both allocators.
+
+| Row | glibc | jemalloc |
+| --- | ---: | ---: |
+| loopfn | +0.001% | +0.005% |
+| calls | +0.001% | +0.007% |
+| fib | +0.002% | +0.001% |
+| closures | +0.000% | +0.002% |
+| objects | +0.001% | +0.001% |
+| startup | +0.840% | +0.146% |
+| parse-full | +0.004% | +0.001% |
+| parse-lazy | +0.001% | -0.008% |
+| parse-fns | -0.004% | +0.001% |
+
+Windows, Miri and the full Rust suite were not run locally.
+
+The combined build grows startup by +1.247% with glibc and +0.984% with jemalloc against `aded3c3a`.
+With `RUSTFLAGS="-C codegen-units=1"`, startup grows by +1.618% and +1.029%.
+Hypothesis: eager registration of eval and Proxy and the additional well-known symbol add startup work.
