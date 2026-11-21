@@ -84,6 +84,11 @@ pub const F_PROMISE: u32 = 8192;
 pub const F_GEN: u32 = 16384;
 /// Object header flag: a `RegExp` object (`regexp_rt.rs`). Its slots 0 to 3 are the pattern, the flag bits, the program and `lastIndex`. Bit 8192 is for `F_PROMISE`.
 pub const F_REGEXP: u32 = 32768;
+/// Object header flag bits 16 to 18: the kind of a collection object (`bi_collections.rs`), 1 `Map`, 2 `Set`, 3 `WeakMap`, 4 `WeakSet`,
+/// 5 a `Map` iterator, 6 a `Set` iterator; 0 for any other object. Set once, by the constructor. A shape change keeps it.
+pub const F_COLL: u32 = 7 << 16;
+/// The shift of the kind in [`F_COLL`].
+pub const COLL_SHIFT: u32 = 16;
 /// `Elements` header flag: the record is sparse.
 const F_SPARSE: u32 = 1;
 /// A write at an index this far above the capacity of a dense record makes it sparse.
@@ -294,6 +299,12 @@ impl Obj {
 
     pub fn set_callable(self) {
         self.set_flag(F_CALLABLE);
+    }
+
+    /// The flag bits of the header.
+    #[inline]
+    pub fn flags(self) -> u32 {
+        self.head().flags()
     }
 
     /// Does the header have the flag bit `f` (`F_CLASS`, `F_DERIVED`)?

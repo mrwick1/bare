@@ -12,11 +12,12 @@
 //! A child with [`Child::ready`] (the initializers of the fields of a class, `static` blocks) takes its code from `Compiled::inline`
 //! of its parent. `Code::funcs` of the compiler holds the id of the child in the facts; the driver replaces it by the index in the
 //! program (the facts id of a synthetic function is not always unique).
+use crate::ast::{ExprKind, StmtKind};
 use crate::atoms::SharedAtoms;
 use crate::string::Chars;
 use crate::bytecode::{CF_ARGS, CF_LINK, Code, Ins, Op};
 use crate::codes::Codes;
-use crate::compile::{Child, Compiled, Input, compile_function, compile_script};
+use crate::compile::{Child, Compiled, Input, ScriptMode, compile_function, compile_script, compile_script_mode};
 use crate::facts::{ARGS, EVAL, Facts, FnFacts, FnId, INNER_EVAL, SUPER};
 use crate::interp::{Exit, LazyCompile, Program, Vm, code_flags};
 use crate::interp_rt::Realm;
@@ -63,6 +64,8 @@ fn stub(atoms: &SharedAtoms, f: &FnFacts, name: Option<&str>) -> Result<Code, St
 struct Unit {
     source: Cow<'static, str>,
     facts: Facts,
+    /// The text is event handler code (`ScriptMode::scoped`): its functions get `Input::scoped`.
+    scoped: bool,
 }
 
 /// The functions that wait for their first call: their stubs in `codes`, and what compiles them. The loader makes a stub for a function
@@ -92,7 +95,7 @@ impl Lazy {
     /// Add a text and the stubs that its loader made.
     fn add(&mut self, source: Cow<'static, str>, facts: Facts, pending: Vec<(usize, Child)>) {
         let u = self.units.len();
-        self.units.push(Unit { source, facts });
+        self.units.push(Unit { source, facts, scoped: false });
         self.wait(u, pending);
     }
 
@@ -110,12 +113,12 @@ impl LazyCompile for Lazy {
         let base = codes.len();
         let unit = &mut self.units[u];
         let (p, fid) = parse_function(&unit.source, &mut unit.facts, ch.id, self.limits).map_err(|e| format!("parse fn {}: {}", ch.id, e.msg))?;
-        let sub = compile_function(&p, fid, ch.id, &unit.facts, &self.atoms, &Input { chain: ch.chain.clone(), self_name: ch.self_name, name: ch.name.clone() })
+        let sub = compile_function(&p, fid, ch.id, &unit.facts, &self.atoms, &Input { chain: ch.chain.clone(), self_name: ch.self_name, name: ch.name.clone(), scoped: unit.scoped })
             .map_err(|e| format!("compile fn {}: {e:?}", ch.id))?;
         // The new codes wait in `new` (their indexes start at `base`) and go into the program only when all are made: a failure leaves it as it was.
         // The room is one code for each child and one more, for the code of `ci` (`Codes::set` takes room from the last chunk).
         let (mut new, mut pending) = (Vec::with_capacity(sub.children.len() + 1), Vec::new());
-        let mut l = Loader { source: &unit.source, facts: &mut unit.facts, atoms: &self.atoms, limits: self.limits, base, codes: &mut new, lazy: Some(&mut pending) };
+        let mut l = Loader { source: &unit.source, facts: &mut unit.facts, atoms: &self.atoms, limits: self.limits, base, codes: &mut new, lazy: Some(&mut pending), scoped: unit.scoped };
         let mut sub = sub;
         l.children(&mut sub)?;
         let mut code = sub.code;
@@ -135,12 +138,20 @@ impl LazyCompile for Lazy {
 
     /// The top level of a script that joins a program that runs: its code is the last one that this adds, and the functions inside are
     /// stubs. The flags are as `compile` makes them. A failure adds nothing.
-    fn script(&mut self, codes: &Codes, src: &str) -> Result<usize, String> {
+    fn script(&mut self, codes: &Codes, src: &str, mode: ScriptMode) -> Result<usize, String> {
         let mut facts = Facts::new();
         let prog = parse_script_lazy(src, self.limits, &mut facts).map_err(|e| format!("SyntaxError: {}", e.msg))?;
-        let top = compile_script(&prog, &facts, &self.atoms).map_err(|e| format!("compile: {e:?}"))?;
+        // The text of an event handler is one function expression, so a body cannot close the function and go on (`compile_function`).
+        if mode.scoped {
+            let mut body = prog.list(prog.body);
+            let one = matches!((body.next(), body.next()), (Some(s), None) if matches!(prog.stmt(s).kind, StmtKind::Expr(e) if matches!(prog.expr(e).kind, ExprKind::Function(_))));
+            if !one {
+                return Err("SyntaxError: Unexpected token '}'".into());
+            }
+        }
+        let top = compile_script_mode(&prog, &facts, &self.atoms, mode).map_err(|e| format!("compile: {e:?}"))?;
         let (base, mut new, mut pending) = (codes.len(), Vec::new(), Vec::new());
-        let at = Loader { source: src, facts: &mut facts, atoms: &self.atoms, limits: self.limits, base, codes: &mut new, lazy: Some(&mut pending) }.add(top)?;
+        let at = Loader { source: src, facts: &mut facts, atoms: &self.atoms, limits: self.limits, base, codes: &mut new, lazy: Some(&mut pending), scoped: mode.scoped }.add(top)?;
         let link = |new: &[Code], c: &Code| c.funcs.iter().any(|&k| k as usize >= base && new[k as usize - base].flags & CF_LINK != 0);
         for i in (0..new.len()).rev() {
             new[i].flags = code_flags(&new[i]) | if link(&new, &new[i]) { CF_LINK } else { 0 };
@@ -148,7 +159,7 @@ impl LazyCompile for Lazy {
         debug_assert_eq!(at, base);
         codes.push_all(new);
         let u = self.units.len();
-        self.units.push(Unit { source: Cow::Owned(src.to_owned()), facts });
+        self.units.push(Unit { source: Cow::Owned(src.to_owned()), facts, scoped: mode.scoped });
         self.wait(u, pending);
         Ok(at)
     }
@@ -164,6 +175,8 @@ struct Loader<'a> {
     codes: &'a mut Vec<Code>,
     /// Make a stub for each function that may wait (the `Child` goes here); `None`: compile every function now.
     lazy: Option<&'a mut Vec<(usize, Child)>>,
+    /// The text is event handler code (`Input::scoped`).
+    scoped: bool,
 }
 
 impl Loader<'_> {
@@ -203,7 +216,7 @@ impl Loader<'_> {
                 }
                 None => {
                     let (p, fid) = parse_function(self.source, self.facts, ch.id, self.limits).map_err(|e| format!("parse fn {}: {}", ch.id, e.msg))?;
-                    compile_function(&p, fid, ch.id, self.facts, self.atoms, &Input { chain: ch.chain.clone(), self_name: ch.self_name, name: ch.name.clone() }).map_err(|e| format!("compile fn {}: {e:?}", ch.id))?
+                    compile_function(&p, fid, ch.id, self.facts, self.atoms, &Input { chain: ch.chain.clone(), self_name: ch.self_name, name: ch.name.clone(), scoped: self.scoped }).map_err(|e| format!("compile fn {}: {e:?}", ch.id))?
                 }
             };
             c.code.funcs[i] = self.add(sub)? as u32;
@@ -228,7 +241,7 @@ fn compile_after(mut codes: Vec<Code>, source: &str, atoms: &SharedAtoms, limits
         }
     };
     let script = compile_script(&prog, &facts, atoms).map_err(|e| format!("compile: {e:?}"))?;
-    Loader { source, facts: &mut facts, atoms, limits, base: 0, codes: &mut codes, lazy }.add(script)?;
+    Loader { source, facts: &mut facts, atoms, limits, base: 0, codes: &mut codes, lazy, scoped: false }.add(script)?;
     Ok((codes, facts))
 }
 

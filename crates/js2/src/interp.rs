@@ -102,7 +102,7 @@ pub trait LazyCompile {
     fn compile(&mut self, codes: &Codes, ci: usize) -> Result<(), String>;
     /// Compile `src` as a script and add it at the end of `codes`. Gives the index of its top level code: a function with no
     /// parameters (`api.rs`, `Realm::run_text`).
-    fn script(&mut self, _codes: &Codes, _src: &str) -> Result<usize, String> {
+    fn script(&mut self, _codes: &Codes, _src: &str, _mode: crate::compile::ScriptMode) -> Result<usize, String> {
         Err("this compiler cannot add a script".into())
     }
 }
@@ -160,7 +160,7 @@ impl Mode for Cold {
 /// The ops that the cold function runs: the arms of the cold `match` of `Vm::exec`. The hot `match` has no arm for them but this one.
 macro_rules! cold_ops {
     () => {
-        Op::TypeofGlobal | Op::TypeofName | Op::DeleteGlobal | Op::Delete | Op::Exp | Op::ThrowConst | Op::DeclGlobal |
+        Op::TypeofGlobal | Op::TypeofName | Op::GetName | Op::SetName | Op::DeleteGlobal | Op::Delete | Op::Exp | Op::ThrowConst | Op::DeclGlobal |
         Op::CheckLex | Op::DeclLex | Op::DeclLexC | Op::CreateRest | Op::Lazy | Op::NewRegExp | Op::LoadBigInt | Op::GetTemplate |
         Op::ArraySpread | Op::ArrayHole | Op::CallSpread | Op::NewSpread | Op::CopyProps | Op::ObjRest | Op::SetProto |
         Op::DefAccessor | Op::DefAccessorElem | Op::DefMethod | Op::DefMethodElem | Op::SetHome | Op::MakeClass | Op::MakeDerived |
@@ -431,6 +431,21 @@ impl Vm {
             let e = realm.error(ErrKind::Type, "not a function");
             return Err(Exit::Throw(e));
         };
+        Vm::start_at(realm, stack, fbs, (f, ci, ctx), this, (Value::UNDEFINED, 0), args)
+    }
+
+    /// As [`Vm::start`] for a construct call of the class or function `f` (`Realm::construct_script`): `nt` is `new.target`, and a
+    /// result that is not an object is the `this` of the frame.
+    pub(crate) fn start_new(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, f: Value, this: Value, nt: Value, args: &[Value]) -> Result<Value, Exit> {
+        let Some((ci, ctx)) = realm.function_new(f) else {
+            let e = realm.error(ErrKind::Type, "not a constructor");
+            return Err(Exit::Throw(e));
+        };
+        Vm::start_at(realm, stack, fbs, (f, ci, ctx), this, (nt, CONSTRUCT), args)
+    }
+
+    #[inline(always)]
+    fn start_at(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, (f, ci, ctx): (Value, usize, Value), this: Value, (nt, dstw): (Value, i32), args: &[Value]) -> Result<Value, Exit> {
         let prog = realm.prog.clone();
         let code = &prog[ci];
         let fp = REC;
@@ -443,7 +458,7 @@ impl Vm {
         } else {
             Value::UNDEFINED
         };
-        let rec = [f, this, ctx, Value::int(0), Value::int(0), Value::int(ENTRY), Value::int(0), Value::int(0), Value::UNDEFINED, args_obj];
+        let rec = [f, this, ctx, Value::int(0), Value::int(0), Value::int(ENTRY), Value::int(0), Value::int(dstw), nt, args_obj];
         stack[..REC].copy_from_slice(&rec);
         for i in 0..code.nparams as usize {
             stack[fp + i] = args.get(i).copied().unwrap_or(Value::UNDEFINED);
@@ -1115,7 +1130,29 @@ impl Vm {
                 // names them: see `Vm::exec` for the rule of the split. Put a new rare op there.
                 if M::COLD {
                     match opv {
-                        Op::TypeofGlobal | Op::TypeofName => {
+                        Op::GetName => {
+                            std::hint::cold_path();
+                            gate!();
+                            let n = name!(bx!());
+                            r!(a!()) = tri!(realm.get_name(n, false));
+                            pc = next;
+                        }
+                        Op::SetName => {
+                            std::hint::cold_path();
+                            gate!();
+                            let n = name!(bx!());
+                            tri!(realm.set_name(n, r!(a!())));
+                            pc = next;
+                        }
+                        Op::TypeofName => {
+                            std::hint::cold_path();
+                            gate!();
+                            let n = name!(bx!());
+                            let v = tri!(realm.get_name(n, true));
+                            r!(a!()) = realm.typeof_name(v);
+                            pc = next;
+                        }
+                        Op::TypeofGlobal => {
                             std::hint::cold_path();
                             gate!();
                             let n = name!(bx!());
@@ -1683,7 +1720,7 @@ impl Vm {
                         stack[fp - REC + 2] = cx.value();
                         pc = next;
                     }
-                    Op::GetGlobal | Op::GetName => {
+                    Op::GetGlobal => {
                         let cc = &fb.caches[bx!()];
                         if cc.shape == realm.shapes.watch_tag() {
                             // SAFETY: the entry has the address of a slot of the global object, made while the tag was the same, and
@@ -1702,7 +1739,7 @@ impl Vm {
                             Got::Get(f) => call_get!(f, realm.global.value(), a!(), next),
                         }
                     }
-                    Op::SetGlobal | Op::SetName => {
+                    Op::SetGlobal => {
                         let cc = &fb.caches[bx!()];
                         if cc.shape == realm.shapes.watch_tag() {
                             let v = r!(a!());

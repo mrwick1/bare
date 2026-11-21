@@ -20,7 +20,14 @@
 //! and the top-level call gives it back as `Error::Abort`. The step budget is `Realm::fuel`; a top-level call outside a [`Engine::task`]
 //! starts it from [`Realm::set_budget`].
 //!
-//! Not here yet: promises and microtasks, iteration, modules, buffers, owners with `trace` and `prune`, host-filled objects,
+//! **Promises and microtasks.** The host settles a promise with `resolve_promise` and `reject_promise` (a settled one is left alone), reads
+//! it with `promise_status`, and attaches handlers with `promise_then` and `promise_react`. `drain_microtasks` and `checkpoint` run the
+//! jobs of `promise.rs` (`Realm::drain_jobs`) and call the hooks of the host: `between_jobs` before each job and once at the end,
+//! `report_exception` for a throw of a `queueMicrotask` callback, `promise_rejections` after the queue is empty (the jobs that it queues
+//! run in the same call). A `checkpoint` from a host call or a native does nothing; a `drain_microtasks` there is `Unsupported`. A stop
+//! of the drain (budget, `max_jobs_per_drain`, an error of `between_jobs`) is sticky until `clear_failed_job`.
+//!
+//! Not here yet: iteration, modules, buffers, owners with `trace` and `prune`, host-filled objects,
 //! structured clone, `Symbol`, and `run_script` (`Realm::run_text` runs a script but computes no completion value; the compiler has
 //! none yet). Each of these answers `Abort::Unsupported(name)`.
 use crate::bi_object::Desc;
@@ -29,12 +36,17 @@ use crate::interp::STOP;
 use crate::interp_rt::{ErrKind, Key, R, Realm};
 use crate::gc::Marker;
 use crate::object::{F_CLASS, Obj};
+use crate::promise::DrainStop;
 use crate::shapes::A_E;
 use crate::string::{Chars, Str};
 use crate::value::{Kind, Value};
 use bare_js_api::{Abort, Args, Attrs, Engine, Error, Host, HostFn, Intrinsic, Iter, Local, Slots, Type};
 use std::ptr::NonNull;
 use std::rc::Rc;
+
+// A child module, so that it reads the private state and helpers of this one.
+#[path = "api_script.rs"]
+mod api_script;
 
 /// The shared slots at the start of the handle stack. They have the numbers `u32::MAX - 3..=u32::MAX`, so a pushed value of logical
 /// index `n` is at the physical index `n + 4` and `stack_len` is 0 for an empty stack.
@@ -68,6 +80,12 @@ pub(crate) struct ApiState {
     host_ptr: Option<NonNull<dyn Host<Realm>>>,
     /// Why the last run stopped, when it was not a limit.
     abort: Option<Abort>,
+    /// `call_scoped`: the objects that the names of handler code are looked up in (`api_script.rs`), and the code of each handler text.
+    scope: Vec<Obj>,
+    handlers: std::collections::HashMap<String, usize>,
+    /// `%eval%` and `%IteratorPrototype%`, made at the first ask (`undefined` before).
+    eval_fn: Value,
+    iter_proto: Value,
     /// The index in `Realm::natives` of the trampoline of a plain host function and of a host constructor (`usize::MAX`: not made).
     natives: [usize; 2],
     /// The step budget of a task, and the nesting of [`Engine::task`].
@@ -85,6 +103,10 @@ impl Default for ApiState {
             host: None,
             host_ptr: None,
             abort: None,
+            scope: Vec::new(),
+            handlers: Default::default(),
+            eval_fn: Value::UNDEFINED,
+            iter_proto: Value::UNDEFINED,
             natives: [usize::MAX; 2],
             budget: u64::MAX,
             tasks: 0,
@@ -96,6 +118,11 @@ impl ApiState {
     /// Mark the roots of the interface: the handle stack, the live persistent slots and the windows of the running host calls.
     pub(crate) fn mark(&self, m: &mut Marker) {
         m.values(&self.stack[SEEDS..]);
+        m.value(self.eval_fn);
+        m.value(self.iter_proto);
+        for o in &self.scope {
+            m.value(o.value());
+        }
         let mut w = self.win;
         // SAFETY: each `Win` is in the frame of a `host_call` that is still running, and its `args` slice is held by the caller of
         // that call (`host_call` links a window before the call and unlinks it after, also when the host panics).
@@ -126,21 +153,7 @@ impl Realm {
     /// completion value. A syntax error is a thrown `SyntaxError`.
     pub fn run_text(&mut self, src: &str) -> Result<(), RunError> {
         self.api.abort = None;
-        let Some(l) = self.lazy.as_mut() else { return Err(RunError::Abort(Abort::Unsupported("a realm with no compiler"))) };
-        let ci = match l.script(&self.prog, src) {
-            Ok(ci) => ci,
-            Err(m) => {
-                let (kind, text) = match m.strip_prefix("SyntaxError: ") {
-                    Some(t) => (ErrKind::Syntax, t),
-                    None => (ErrKind::Plain, m.as_str()),
-                };
-                return Err(RunError::Throw(self.error(kind, text)));
-            }
-        };
-        self.fn_info.extend((self.fn_info.len()..self.prog.len()).map(|i| crate::interp::code_info(&self.prog[i])));
-        let f = self.new_function(ci, Value::UNDEFINED);
-        let g = self.global.value();
-        match self.a_call(f, g, &[]) {
+        match self.script_code(src, Default::default()).and_then(|ci| self.run_code(ci)) {
             Ok(_) => Ok(()),
             Err(STOP) => Err(RunError::Abort(self.api.abort.take().unwrap_or(Abort::Limit("the step budget")))),
             Err(e) => Err(RunError::Throw(e)),
@@ -264,6 +277,79 @@ impl Realm {
         }
         let len = o.slot(&self.shapes, 2).as_int()? >> 2;
         Some((len as f64, Realm::str_of(o.slot(&self.shapes, 3)).map(|s| self.text(s)).unwrap_or_default()))
+    }
+
+    /// The promise that a host settles: `Unsupported` when `p` is no promise, `None` when it is settled already (the host settles once;
+    /// a second call does nothing).
+    fn a_pending_promise<'s>(&mut self, what: &'static str, p: Local<'_>) -> Result<Option<Obj>, Error<'s>> {
+        let Some(o) = Realm::promise_obj(self.a_at(p)) else { return Err(self.a_unsup(what)) };
+        Ok(Realm::promise_status(self, o.value()).filter(|s| s.0 == 0).map(|_| o))
+    }
+
+    /// `PerformPromiseThen(p, ok, err)` with a derived promise that nobody holds (a throw of a handler is an unhandled rejection).
+    fn a_then<'s>(&mut self, p: Obj, ok: Value, err: Value) -> Result<(), Error<'s>> {
+        self.promise_then_host(p, ok, err).map_err(|e| self.a_err(e))
+    }
+
+    /// Run the jobs and the hooks of a checkpoint (the order of the old engine): the jobs, then the rejections, then the jobs that the
+    /// listeners queued. `n` is the count of jobs.
+    fn a_drain(&mut self, host: Option<&dyn Host<Realm>>, n: &mut u32) -> Result<(), DrainStop> {
+        let Some(h) = host else { return self.drain_jobs(n, None, &mut |_, _| {}) };
+        self.drain_jobs(n, Some(&mut |rt| rt.a_between(h)), &mut |rt, v| rt.a_report(h, v))?;
+        if !self.rejections_wait() {
+            return Ok(());
+        }
+        self.a_notify(h)?;
+        self.drain_jobs(n, Some(&mut |rt| rt.a_between(h)), &mut |rt, v| rt.a_report(h, v))
+    }
+
+    /// An error of a hook as the reason of a drain stop. A thrown value is rooted by `Promises::failed`, an abort by `ApiState::abort`.
+    fn a_stop(&mut self, e: Error<'_>) -> DrainStop {
+        match e {
+            Error::Throw(l) => DrainStop::Throw(self.a_at(l)),
+            Error::Abort(a) => {
+                self.api.abort.get_or_insert(a);
+                DrainStop::Fuel
+            }
+        }
+    }
+
+    /// `Host::between_jobs`. A script that it runs gets a budget of its own (a call at the top starts one): the budget of the checkpoint
+    /// comes back after.
+    fn a_between(&mut self, h: &dyn Host<Realm>) -> Result<(), DrainStop> {
+        let fuel = self.fuel;
+        let r = bare_js_api::enter(self, |s| h.between_jobs(s).map_err(|e| s.engine().a_stop(e)));
+        self.fuel = fuel;
+        r
+    }
+
+    /// `Host::report_exception` for a throw of a `queueMicrotask` callback. The hook runs as a host call of the checkpoint: one task
+    /// level, so a script that it runs shares the budget.
+    fn a_report(&mut self, h: &dyn Host<Realm>, v: Value) {
+        self.api.tasks += 1;
+        bare_js_api::enter(self, |s| {
+            let thrown = s.engine().a_push(v);
+            h.report_exception(s, thrown);
+        });
+        self.api.tasks -= 1;
+    }
+
+    /// `Host::promise_rejections` (HTML "notify about rejected promises"). An error is the result of the checkpoint, and is not sticky.
+    #[cold]
+    fn a_notify(&mut self, h: &dyn Host<Realm>) -> Result<(), DrainStop> {
+        let r = self.take_rejections();
+        if r.unhandled.is_empty() && r.handled.is_empty() && r.dropped == 0 {
+            return Ok(());
+        }
+        self.api.tasks += 1;
+        let out = bare_js_api::enter(self, |s| {
+            let e = s.engine();
+            let u: Vec<_> = r.unhandled.iter().map(|&v| e.a_push(v)).collect();
+            let hd: Vec<_> = r.handled.iter().map(|&v| e.a_push(v)).collect();
+            h.promise_rejections(s, &u, &hd, r.dropped).map_err(|e| s.engine().a_stop(e))
+        });
+        self.api.tasks -= 1;
+        out
     }
 
     fn host_native(&mut self, ctor: bool) -> usize {
@@ -501,58 +587,118 @@ impl Engine for Realm {
     }
 
     fn new_promise<'s>(&mut self) -> Result<Local<'s>, Error<'s>> {
-        Err(self.a_unsup("new_promise"))
+        let p = Realm::new_promise(self);
+        Ok(self.a_push(p.value()))
     }
 
-    fn resolve_promise<'s>(&mut self, _p: Local<'_>, _v: Local<'_>) -> Result<(), Error<'s>> {
-        Err(self.a_unsup("resolve_promise"))
+    fn resolve_promise<'s>(&mut self, p: Local<'_>, v: Local<'_>) -> Result<(), Error<'s>> {
+        let Some(p) = self.a_pending_promise("resolve_promise", p)? else { return Ok(()) };
+        let v = self.a_at(v);
+        Realm::resolve_promise(self, p, v).map_err(|e| self.a_err(e))
     }
 
-    fn reject_promise<'s>(&mut self, _p: Local<'_>, _reason: Local<'_>) -> Result<(), Error<'s>> {
-        Err(self.a_unsup("reject_promise"))
+    fn reject_promise<'s>(&mut self, p: Local<'_>, reason: Local<'_>) -> Result<(), Error<'s>> {
+        let Some(p) = self.a_pending_promise("reject_promise", p)? else { return Ok(()) };
+        let r = self.a_at(reason);
+        Realm::reject_promise(self, p, r);
+        Ok(())
     }
 
-    fn promise_then<'s>(&mut self, _p: Local<'_>, _ok: Local<'_>, _err: Local<'_>) -> Result<(), Error<'s>> {
-        Err(self.a_unsup("promise_then"))
+    fn promise_then<'s>(&mut self, p: Local<'_>, ok: Local<'_>, err: Local<'_>) -> Result<(), Error<'s>> {
+        let Some(p) = Realm::promise_obj(self.a_at(p)) else { return Err(self.a_unsup("promise_then")) };
+        let (ok, err) = (self.a_at(ok), self.a_at(err));
+        self.a_then(p, ok, err)
     }
 
-    fn promise_react<'s>(&mut self, _x: Local<'_>, _ok: Local<'_>, _err: Local<'_>) -> Result<(), Error<'s>> {
-        Err(self.a_unsup("promise_react"))
+    fn promise_react<'s>(&mut self, x: Local<'_>, ok: Local<'_>, err: Local<'_>) -> Result<(), Error<'s>> {
+        let (x, ok, err) = (self.a_at(x), self.a_at(ok), self.a_at(err));
+        let p = match self.promise_resolve_default(x) {
+            Ok(p) => p,
+            Err(e) => return Err(self.a_err(e)),
+        };
+        self.a_then(p, ok, err)
     }
 
-    /// No value is a promise.
-    fn promise_status<'s>(&mut self, _v: Local<'_>) -> Option<bare_js_api::PromiseState<'s>> {
-        None
+    fn promise_status<'s>(&mut self, v: Local<'_>) -> Option<bare_js_api::PromiseState<'s>> {
+        use bare_js_api::PromiseState;
+        Some(match Realm::promise_status(self, self.a_at(v))? {
+            (0, _) => PromiseState::Pending,
+            (1, x) => PromiseState::Fulfilled(self.a_push(x)),
+            (_, x) => PromiseState::Rejected(self.a_push(x)),
+        })
     }
 
-    fn queue_microtask<'s>(&mut self, _cb: Local<'_>) -> Result<(), Error<'s>> {
-        Err(self.a_unsup("queue_microtask"))
+    fn queue_microtask<'s>(&mut self, cb: Local<'_>) -> Result<(), Error<'s>> {
+        let cb = self.a_at(cb);
+        self.queue_callback(cb).map_err(|e| self.a_err(e))
     }
 
+    /// From a host call that a script function called, or a native: nothing runs (the HTML rule). Else it is `drain_microtasks`.
     fn checkpoint<'s>(&mut self) -> Result<usize, Error<'s>> {
-        Err(self.a_unsup("checkpoint"))
+        if self.a_nested() { Ok(0) } else { self.drain_microtasks() }
     }
 
     fn drain_microtasks<'s>(&mut self) -> Result<usize, Error<'s>> {
-        Err(self.a_unsup("drain_microtasks"))
+        if self.a_nested() {
+            return Err(self.a_unsup("drain_microtasks during a call"));
+        }
+        if self.api.tasks == 0 {
+            self.fuel = self.api.budget;
+        }
+        // One clone of the host for the whole checkpoint: a hook that calls `set_host` cannot free it under the drain.
+        let host = self.api.host.clone();
+        let mut n = 0;
+        let r = self.a_drain(host.as_deref(), &mut n);
+        match r {
+            Ok(()) => Ok(n as usize),
+            Err(DrainStop::Limit) => Err(Error::Abort(Abort::Limit("the microtask drain"))),
+            Err(DrainStop::Fuel) => Err(self.a_err(STOP)),
+            Err(DrainStop::Throw(v)) => Err(self.a_err(v)),
+        }
     }
 
     fn pending_jobs(&self) -> usize {
-        0
+        Realm::pending_jobs(self)
     }
 
-    fn clear_failed_job(&mut self) {}
-
-    fn iter_open<'s>(&mut self, _v: Local<'_>) -> Result<Option<Iter<'s>>, Error<'s>> {
-        Err(self.a_unsup("iter_open"))
+    fn clear_failed_job(&mut self) {
+        Realm::clear_failed_job(self);
     }
 
-    fn iter_next<'s>(&mut self, _it: &mut Iter<'s>) -> Result<Option<Local<'s>>, Error<'s>> {
-        Err(self.a_unsup("iter_next"))
+    fn iter_open<'s>(&mut self, v: Local<'_>) -> Result<Option<Iter<'s>>, Error<'s>> {
+        self.a_iter_open(v)
     }
 
-    fn iter_fail<'s>(&mut self, _it: &mut Iter<'s>, err: Error<'s>) -> Error<'s> {
-        err
+    fn iter_next<'s>(&mut self, it: &mut Iter<'s>) -> Result<Option<Local<'s>>, Error<'s>> {
+        self.a_iter_next(it)
+    }
+
+    fn iter_fail<'s>(&mut self, it: &mut Iter<'s>, err: Error<'s>) -> Error<'s> {
+        self.a_iter_fail(it, err)
+    }
+
+    fn run_script<'s>(&mut self, source: &str) -> Result<Local<'s>, Error<'s>> {
+        self.a_run_script(source)
+    }
+
+    fn compile_function<'s>(&mut self, name: &str, params: &str, body: &str) -> Result<Local<'s>, Error<'s>> {
+        self.a_compile_function(name, params, body)
+    }
+
+    fn call_scoped<'s>(&mut self, f: Local<'_>, this: Local<'_>, args: &[Local<'_>], scope: &[Local<'_>]) -> Result<Local<'s>, Error<'s>> {
+        self.a_call_scoped(f, this, args, scope)
+    }
+
+    fn eval_global<'s>(&mut self, src: Local<'_>) -> Result<Local<'s>, Error<'s>> {
+        self.a_eval_global(src)
+    }
+
+    fn eval_function<'s>(&mut self) -> Result<Local<'s>, Error<'s>> {
+        Ok(self.a_eval_function())
+    }
+
+    fn symbol_description<'s>(&mut self, v: Local<'_>) -> Result<Option<Local<'s>>, Error<'s>> {
+        self.a_symbol_description(v)
     }
 
     fn module_parse<'s>(&mut self, _source: &str, _url: &str) -> Result<u32, Error<'s>> {
@@ -640,14 +786,15 @@ impl Engine for Realm {
     }
 
     fn intrinsic<'s>(&mut self, which: Intrinsic) -> Local<'s> {
-        let o = match which {
-            Intrinsic::ObjectPrototype => self.object_proto,
-            Intrinsic::ArrayPrototype => self.array_proto,
-            Intrinsic::ErrorPrototype => self.error_proto,
-            // There is no `Symbol` and no iterator protocol yet: the host sees `undefined`.
-            Intrinsic::IteratorPrototype | Intrinsic::SymbolIterator | Intrinsic::SymbolToStringTag => return self.undefined(),
+        let v = match which {
+            Intrinsic::ObjectPrototype => self.object_proto.value(),
+            Intrinsic::ArrayPrototype => self.array_proto.value(),
+            Intrinsic::ErrorPrototype => self.error_proto.value(),
+            Intrinsic::IteratorPrototype => self.iterator_prototype(),
+            Intrinsic::SymbolIterator => self.wk[crate::bi_symbol::ITERATOR].key_value(),
+            Intrinsic::SymbolToStringTag => self.wk[crate::bi_symbol::TO_STRING_TAG].key_value(),
         };
-        self.a_push(o.value())
+        self.a_push(v)
     }
 
     fn get_prototype_of<'s>(&mut self, obj: Local<'_>) -> Result<Option<Local<'s>>, Error<'s>> {
