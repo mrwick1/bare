@@ -251,7 +251,7 @@ built-ins/Object/entries 20 0 1 20 0 1
 built-ins/Object/freeze 49 0 4 48 1 4
 built-ins/Object/fromEntries 25 0 0 25 0 0
 built-ins/Object/getOwnPropertyDescriptor 308 2 0 309 1 0
-built-ins/Object/getOwnPropertyDescriptors 15 0 3 13 2 3
+built-ins/Object/getOwnPropertyDescriptors 15 0 3 15 0 3
 built-ins/Object/getOwnPropertyNames 40 1 4 40 1 4
 built-ins/Object/getOwnPropertySymbols 8 0 4 8 0 4
 built-ins/Object/getPrototypeOf 39 0 0 39 0 0
@@ -269,7 +269,7 @@ built-ins/Object/prototype/__defineGetter__ 10 0 1 10 0 1
 built-ins/Object/prototype/__defineSetter__ 10 0 1 10 0 1
 built-ins/Object/prototype/__lookupGetter__ 12 0 4 12 0 4
 built-ins/Object/prototype/__lookupSetter__ 12 0 4 12 0 4
-built-ins/Object/prototype/__proto__ 13 0 2 10 3 2
+built-ins/Object/prototype/__proto__ 13 0 2 12 1 2
 built-ins/Object/prototype/constructor 2 0 0 2 0 0
 built-ins/Object/prototype/hasOwnProperty 62 1 0 63 0 0
 built-ins/Object/prototype/isPrototypeOf 9 0 1 9 0 1
