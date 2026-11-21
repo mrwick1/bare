@@ -1091,18 +1091,10 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
     }
 
     fn named_write<'s>(&self, s: &mut bare_js_api::Scope<'s, Interp<'p>>, object: bare_js_api::Local<'s>, _key: u32, name: &[u16], op: bare_js_api::Write<'s>) -> Result<bool, bare_js_api::Error<'s>> {
-        use bare_js::heap::{NamedOp, NamedRequest};
+        use bare_js::heap::NamedOp;
         use bare_js_api::Engine as _;
         let it = s.engine();
         let Value::Object(owner) = it.raw(object) else { return Ok(false) };
-        let key = it.heap.intern_units(name).and_then(|n| it.heap.key_from_string(n));
-        let key = match key {
-            Ok(k) => k,
-            Err(e) => {
-                let e = it.heap_error(e);
-                return Err(it.api_err(e));
-            }
-        };
         let val = |it: &Interp<'p>, l: Option<bare_js_api::Local<'s>>| l.map(|l| it.raw(l));
         let accessor = |it: &Interp<'p>, l: Option<bare_js_api::Local<'s>>| val(it, l).map(|v| if let Value::Object(o) = v { Some(o) } else { None });
         let op = match op {
@@ -1117,8 +1109,7 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
                 configurable: d.configurable,
             }),
         };
-        let req = NamedRequest { owner, key, op };
-        let r = if self.storage_area(owner).is_some() { crate::browser_navigation_storage::write(self, it, req) } else { crate::browser_dataset::write(self, it, req) };
+        let r = if self.storage_area(owner).is_some() { crate::browser_navigation_storage::write(self, it, owner, name, op) } else { crate::browser_dataset::write(self, it, owner, name, op) };
         r.map_err(|e| it.api_err(e))
     }
 

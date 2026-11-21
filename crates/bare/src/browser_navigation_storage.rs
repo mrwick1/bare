@@ -31,8 +31,8 @@
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_js::eval::{Error, Interp};
-use bare_js::heap::{HeapError, NamedOp, NamedRequest};
-use bare_js::value::{ObjId, PropertyKey, Value};
+use bare_js::heap::{HeapError, NamedOp};
+use bare_js::value::{ObjId, Value};
 use bare_js_api::{Args, Engine as _, Local, Str, Type};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -342,18 +342,10 @@ fn lossy(u: &[u16]) -> String {
 
 /// `Host::named_write` for `localStorage` and `sessionStorage`: the named setter, deleter and `[[DefineOwnProperty]]`.
 /// `Ok(false)` when `req.owner` is no `Storage` object (`Dom::named_write` calls this for `Storage` objects only).
-pub(crate) fn write(d: &Dom, it: &mut Interp<'_>, req: NamedRequest) -> R<bool> {
-    let Some(session) = d.storage_area(req.owner) else { return Ok(false) };
-    let key: Vec<u16> = match req.key {
-        PropertyKey::Index(i) => i.to_string().encode_utf16().collect(),
-        PropertyKey::String(s) => match it.heap.str_units(s) {
-            Ok(u) => u.to_vec(),
-            Err(e) => return Err(it.heap_error(e)),
-        },
-        PropertyKey::Symbol(_) => return Ok(false),
-    };
-    let named = format!("Failed to set a named property '{}' on 'Storage'", lossy(&key));
-    let value = match req.op {
+pub(crate) fn write(d: &Dom, it: &mut Interp<'_>, owner: ObjId, key: &[u16], op: NamedOp) -> R<bool> {
+    let Some(session) = d.storage_area(owner) else { return Ok(false) };
+    let named = format!("Failed to set a named property '{}' on 'Storage'", lossy(key));
+    let value = match op {
         NamedOp::Set(v) => v,
         NamedOp::Define(desc) => {
             if desc.get.is_some() || desc.set.is_some() {

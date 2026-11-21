@@ -347,9 +347,24 @@ impl<'p> Interp<'p> {
     fn api_named_write(&mut self, h: &dyn bare_js_api::Host<Interp<'p>>, req: crate::heap::NamedRequest) -> Result<bool, Error> {
         use crate::heap::NamedOp;
         let Some(hk) = self.heap.host_key(req.owner) else { return Err(unsupported("named write of an object with no host key", Span::default())) };
-        let name: Vec<u16> = match req.key {
-            PropertyKey::Index(i) => i.to_string().encode_utf16().collect(),
-            PropertyKey::String(s) => h!(self, self.heap.str_units(s)).to_vec(),
+        // A name of up to 48 units goes through a stack buffer: this runs for each write to a host object.
+        let mut buf = [0u16; 48];
+        let long: Vec<u16>;
+        let name: &[u16] = match req.key {
+            PropertyKey::Index(i) => {
+                long = i.to_string().encode_utf16().collect();
+                &long
+            }
+            PropertyKey::String(s) => {
+                let u = h!(self, self.heap.str_units(s));
+                if u.len() <= buf.len() {
+                    buf[..u.len()].copy_from_slice(u);
+                    &buf[..u.len()]
+                } else {
+                    long = u.to_vec();
+                    &long
+                }
+            }
             PropertyKey::Symbol(_) => return Ok(false),
         };
         let obj = |o: Option<Option<ObjId>>| o.map(|o| o.map_or(Value::Undefined, Value::Object));
@@ -358,9 +373,15 @@ impl<'p> Interp<'p> {
             NamedOp::Define(d) => ([d.value, obj(d.get), obj(d.set)], Some(d)),
             NamedOp::Delete => ([None; 3], None),
         };
-        let vals: Vec<Value> = [Some(Value::Object(req.owner))].into_iter().chain(vals).flatten().collect();
+        let mut seeds = [Value::Object(req.owner); 4];
+        let mut n = 1;
+        for v in vals.into_iter().flatten() {
+            seeds[n] = v;
+            n += 1;
+        }
+        let vals = &seeds[..n];
         let is_set = matches!(req.op, NamedOp::Set(_));
-        self.api_host_scope(&vals, |s, base| {
+        self.api_host_scope(vals, |s, base| {
             use bare_js_api::{Descriptor, Local, Write};
             let mut next = base;
             let mut take = |on: bool| {
@@ -381,7 +402,7 @@ impl<'p> Interp<'p> {
                 None if is_set => Write::Set(Local::from_slot(base + 1)),
                 None => Write::Delete,
             };
-            h.named_write(s, Local::from_slot(base), hk, &name, op)
+            h.named_write(s, Local::from_slot(base), hk, name, op)
         })
     }
 
