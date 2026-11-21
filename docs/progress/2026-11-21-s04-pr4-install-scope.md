@@ -52,8 +52,8 @@ js2 rows (`host_call_load`, `interp_load`; base `2f12c3f6` against this branch; 
 A first version of the setter change (the nested call inline in the macro) gave `interp_load loopfn` +1.73% and `calls` +0.50%. The cold function removed that. `fib 25` at +0.485% is close to the limit; it is code layout, as the other rows moved both ways.
 
 ### Tests
-- Linux, `cargo test --locked -p bare-js-api -p bare-js -p bare-js2 -p bare --lib`: 32, 1107 (1 ignored), 546 and 1719 (6 ignored) pass, 0 fail. `cargo test --locked -p bare-js-api --features suite`: 32 and 56 pass (56 = the suite on both engines, plain and stress; 8 of them are the new tests).
-- Windows 11 VM (`cargo xwin test`, exe through `winssh`): `bare-js-api` 32 pass, `engines` (suite on both engines) 56 pass, `bare --lib` 1719 pass, 0 fail.
+- Linux, after the merge of origin/main `e23fe584` (promise API): `cargo test --locked -p bare-js-api -p bare-js -p bare-js2 -p bare --lib`: 32, 1107 (1 ignored), 552 and 1719 (6 ignored) pass, 0 fail. `cargo test --locked -p bare-js-api --features suite`: 32 lib and 92 `engines` tests pass (the suite on both engines, plain and stress; 4 of them are the new table tests).
+- Windows 11 VM (`cargo xwin test`, exe through `winssh`), run before the merge of `e23fe584`: `bare-js-api` 32 pass, `engines` 56 pass, `bare --lib` 1719 pass, 0 fail.
 
 ### Install functions that are not tables yet (for PR 6)
 Left on the per-call path: 174 `host_function`, 230 `define_named` and 55 `define_accessor_named` calls for each window (459).
@@ -64,6 +64,8 @@ Left on the per-call path: 174 `host_function`, 230 `define_named` and 55 `defin
 - Rows that need a Symbol key (`entries` as `[Symbol.iterator]`) stay one `define` after the table (`browser_fetch.rs`, `browser_navigation.rs`).
 
 ### Not tested
+- Windows after the merge of `e23fe584`. The merge changed the promise API only.
+- The cost rows after that merge (measured on base `2f12c3f6`).
 - The browser on js2 (`BARE_JS_EXEC=new`): the table path runs on js2 through the shared suite only.
 - `Number` rows of `install_table` have a suite test but no browser user yet.
 - Timing (wall clock) and memory (RSS) of the window setup.
