@@ -1000,7 +1000,7 @@ lazy_global!(lazy_validity, "ValidityState", ens_validity, |d| d.ctl.validity.ge
 lazy_global!(lazy_label, "HTMLLabelElement", ens_label, |d| d.ctl.label.get().expect("made")[1]);
 
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    crate::browser_lazy::install(d, it, &[("ValidityState", lazy_validity as H), ("HTMLLabelElement", lazy_label)])
+    crate::browser_lazy::install(d, it, &[("ValidityState", lazy_validity as HS), ("HTMLLabelElement", lazy_label)])
 }
 
 #[cfg(test)]

@@ -15,41 +15,39 @@
 
 use crate::browser::*;
 use crate::browser_scoped::*;
-use bare_js_api::{Args, Local};
+use bare_js_api::{Args, Local, Type};
 use crate::browser_reflect::this_of;
 use bare_html::dom::NodeId;
 use bare_js::eval::Interp;
-use bare_js::value::{Value};
 
-type V = R<Value>;
-
-pub(crate) fn toggle_event_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
+pub(crate) fn toggle_event_ctor<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     if a.is_empty() {
-        return Err(it.type_error("Failed to construct 'ToggleEvent': 1 argument required, but only 0 present."));
+        return Err(s.type_error("Failed to construct 'ToggleEvent': 1 argument required, but only 0 present."));
     }
-    let ty = d.string_arg(it, a[0])?;
+    let ty = d.arg_str_s(s, a, 0)?;
     let (mut bubbles, mut cancelable, mut composed) = (false, false, false);
-    let (mut old, mut new) = (String::new(), String::new());
-    match a.get(1).copied().unwrap_or(Value::Undefined) {
-        Value::Undefined | Value::Null => {}
-        init @ Value::Object(_) => {
-            bubbles = crate::browser_events::init_flag(d, it, init, "bubbles")?;
-            cancelable = crate::browser_events::init_flag(d, it, init, "cancelable")?;
-            composed = crate::browser_events::init_flag(d, it, init, "composed")?;
-            for (name, out) in [("oldState", &mut old), ("newState", &mut new)] {
-                let k = d.key(it, name)?;
-                match it.get_value(init, k)? {
-                    Value::Undefined => {}
-                    v => *out = d.string_arg(it, v)?,
-                }
+    let (mut was, mut now) = (String::new(), String::new());
+    let init = arg_s(s, a, 1);
+    if !is_nullish(s, init) {
+        if !is_object(s, init) {
+            return Err(s.type_error("The event initializer is not an object."));
+        }
+        bubbles = crate::browser_events::init_flag_s(s, init, "bubbles")?;
+        cancelable = crate::browser_events::init_flag_s(s, init, "cancelable")?;
+        composed = crate::browser_events::init_flag_s(s, init, "composed")?;
+        for (name, out) in [("oldState", &mut was), ("newState", &mut now)] {
+            let v = s.get_str(init, name)?;
+            if s.type_of(v) != Type::Undefined {
+                *out = d.string_arg_s(s, v)?;
             }
         }
-        _ => return Err(it.type_error("The event initializer is not an object.")),
     }
-    let proto = it.host_proto_from_new_target(d.p().toggle)?;
-    let e = d.new_event_proto(it, &ty, bubbles, cancelable, composed, proto)?;
-    d.st.borrow_mut().events.get_mut(&e).expect("just made").toggle = Some((old, new));
-    Ok(Value::Object(e))
+    let default = d.obj_local(s, d.p().toggle);
+    let proto = s.proto_from_new_target(default)?;
+    let proto = obj_id(s, proto).expect("a prototype is an object");
+    let e = old(s, |it| d.new_event_proto(it, &ty, bubbles, cancelable, composed, proto))?;
+    d.st.borrow_mut().events.get_mut(&e).expect("just made").toggle = Some((was, now));
+    Ok(d.obj_local(s, e))
 }
 
 fn state<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, new: bool) -> Res<'s, Local<'s>> {

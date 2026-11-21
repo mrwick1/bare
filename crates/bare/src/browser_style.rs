@@ -661,7 +661,7 @@ crate::browser_lazy::lazy_global!(lazy_ctor, "CSSStyleDeclaration", ensure, |d| 
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     // The prototype, its 250 accessors and the computed prototype wait for the first style object, the first `getComputedStyle` or the
     // first read of the global (`ensure`). A page that uses none of them never pays for them.
-    crate::browser_lazy::install(d, it, &[("CSSStyleDeclaration", lazy_ctor as H)])?;
+    crate::browser_lazy::install(d, it, &[("CSSStyleDeclaration", lazy_ctor as HS)])?;
     d.def_get_s(it, d.p().html, "style", style_attr, Some(set_style_attr))?;
     d.def_get_s(it, d.p().svg, "style", style_attr_svg, Some(set_style_attr_svg))?;
     Ok(())
@@ -716,7 +716,7 @@ pub(crate) fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 
     // `constructor` comes after the accessors, as in `getOwnPropertyNames`.
     let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
-    let f = d.add_fn(it, illegal_constructor, "CSSStyleDeclaration", 0, false)?;
+    let f = d.add_fn_s_obj(it, illegal_constructor, "CSSStyleDeclaration", 0, bare_js_api::HostFn::Method)?;
     it.define_data(f, kp, Value::Object(proto), false, false, false)?;
     it.define_data(proto, kc, Value::Object(f), true, false, true)?;
     crate::browser_computed::fill(d, it, proto, &props)?;

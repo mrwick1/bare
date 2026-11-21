@@ -62,7 +62,7 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 lazy_global!(lazy_image, "Image", ensure, |d| d.img.made.get().expect("made"));
 
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    crate::browser_lazy::install(d, it, &[("Image", lazy_image as H)])
+    crate::browser_lazy::install(d, it, &[("Image", lazy_image as HS)])
 }
 
 /// The members of `HTMLImageElement.prototype` that load pictures (`browser_elements.rs` calls this when it makes the prototype).

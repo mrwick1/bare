@@ -528,7 +528,7 @@ impl Server {
             "run_steps" => self.run_steps(&args).map_err(Failure::from),
             "run_suite" => self.run_suite(&args).map_err(Failure::from),
             "open" => self.open(&args).map_err(Failure::from),
-            "step" => self.step(&args).map(|(t, f)| { step_failure = f; t }).map_err(Failure::from),
+            "step" => self.step(&args).map(|(t, f)| { step_failure = f; t }),
             "save_state" => self.save_state(&args).map_err(Failure::from),
             "ensure_session" => self.ensure_session(&args).map_err(Failure::from),
             "close" => self.close(&args).map_err(Failure::from),
@@ -741,8 +741,8 @@ impl Server {
         Ok(with_session(rep, if had { "recreated" } else { "created" }))
     }
 
-    fn step(&mut self, args: &Value) -> Result<(String, Option<Failure>), String> {
-        let src = args.get("steps").and_then(Value::as_str).ok_or("steps (one or more step lines) is required")?;
+    fn step(&mut self, args: &Value) -> Result<(String, Option<Failure>), Failure> {
+        let src = args.get("steps").and_then(Value::as_str).ok_or_else(|| Failure::args("steps (one or more step lines) is required"))?;
         let (text, _, failure) = self.run_live_typed(args, src)?;
         Ok((text, failure))
     }
@@ -755,16 +755,16 @@ impl Server {
 
     /// Run step lines on the live session until one fails, and give the report of these lines.
     fn run_live(&mut self, args: &Value, src: &str) -> Result<(String, bool), String> {
-        self.run_live_typed(args, src).map(|(t, ok, _)| (t, ok))
+        self.run_live_typed(args, src).map(|(t, ok, _)| (t, ok)).map_err(String::from)
     }
 
     /// `run_live` with the failure of this run: the driver `kind` and message, taken from the report of these steps.
-    fn run_live_typed(&mut self, args: &Value, src: &str) -> Result<(String, bool, Option<Failure>), String> {
+    fn run_live_typed(&mut self, args: &Value, src: &str) -> Result<(String, bool, Option<Failure>), Failure> {
         let live = self.live_mut(args)?;
         // A `timeout` line lasts only for this call: the next call starts from the default of the session, or from `timeout_ms`.
         let limit = args.get("timeout_ms").and_then(Value::as_u64).map_or(live.opt.timeout, Duration::from_millis);
         live.session.set_timeout(limit);
-        let mut list = steps::parse(src, &live.vars).map_err(|e| live.red.clean(&e))?;
+        let mut list = steps::parse(src, &live.vars).map_err(|e| Failure::args(live.red.clean(&e)))?;
         for s in &mut list {
             s.line += live.lines;
         }
@@ -1092,7 +1092,12 @@ impl Server {
         let before = live.session.url();
         // A driver failure can happen after input was dispatched. Do not claim it is safe to retry.
         outcome.action_status = "unknown";
-        let (receipt, ok, mut failure) = self.run_live_typed(&a, &line)?;
+        let (receipt, ok, mut failure) = self.run_live_typed(&a, &line).inspect_err(|f| {
+            // A step line that does not parse was rejected before any input.
+            if f.input == "no" {
+                outcome.action_status = "not_started";
+            }
+        })?;
         if ok {
             outcome.action_status = "completed";
         }
@@ -1504,7 +1509,7 @@ fn compact(rep: &Report, red: &Redactor) -> String {
                 "hidden" => "open the menu, tab or section that holds it, or scroll",
                 "covered" => "close the dialog or overlay first (press Escape), or act on the covering element",
                 "disabled" => "fill the required fields first, or wait",
-                "duplicate" => "use a ref from snapshot or find",
+                "duplicate" => "add nth=0 (the first match) to the locator, or use a ref from snapshot or find",
                 _ => "",
             };
             let script = rep.logs.iter().find(|(_, l)| bare_drive::diag::uncaught(l)).filter(|_| matches!(f.kind, "not_found" | "hidden" | "page"));
@@ -1603,7 +1608,7 @@ fn tools() -> Value {
         expect LOC visible|hidden|enabled|disabled|checked|unchecked|focused|count N|text=\"x\"|value~\"x\", \
         expect url=\"x\"|url~\"x\", expect title=\"x\"|title~\"x\", expect js \"expression\", expect cookie NAME [absent|value=\"x\"], \
         cookie set NAME VALUE, shot NAME (a PNG in the out folder), timeout MS. \
-        LOC: ref=e7 (from snapshot), css=\"...\", role=NAME [name=\"...\"|name~\"...\"], label=\"...\", text=\"...\", placeholder=\"...\"; it must match one element. \
+        LOC: ref=e7 (from snapshot), css=\"...\", role=NAME [name=\"...\"|name~\"...\"], label=\"...\", text=\"...\", placeholder=\"...\"; it must match one element: add nth=N to pick rendered match N (from 0). \
         A step waits for its condition until its time limit; there are no fixed sleeps.";
     json!([
         {
@@ -1667,7 +1672,7 @@ fn tools() -> Value {
                 "failure": {"type": "object", "properties": {"code": {"type": "string"}, "message": {"type": "string"}, "next_action": {"type": "string"}, "input_dispatched": {"type": "string", "enum": ["no", "unknown"]}}, "required": ["code", "message", "next_action", "input_dispatched"]}
             }, "required": ["action_status", "page_status", "verification"]},
             "description": "Act on the live page like a user and get a short receipt (ok, or the failure with a hint, up to 3 script error lines for uncaught errors, new console errors and failed requests, navigation, dialogs and the answer given, tabs the page opened: \"opened tab: main~2 URL\" is a new session that you read with session=main~2 and end with close), then what changed on the page (only the lines marked *, with the lines that hold them; the whole outline after a navigation or with diff false). Ops: click, fill (clears the field, then inserts text as one edit with no key events, like Playwright fill: one render on a heavy React form; use it for plain fields; last_key true types the last character as a key, for autocomplete), type (clears the field, then types text one key at a time; \\n is Enter; for fields that need keys: autocomplete, masks; each key runs the page handlers, so on a heavy form a long text costs one render per character: use fill for long text), press (key: Enter, Escape, Tab, Control+a; with ref it acts on that element, and Enter in a form field submits the form), scroll (dy pixels, over ref or the page), goto (url), reload, back, forward (the history), wait (ref until text state: visible, hidden, enabled, checked, text~\"x\"), select (text = the option label or value; options = several for a multiple select; fires input and change), check and uncheck (a checkbox, a radio, or an ARIA role=switch, checkbox or radio with aria-checked; clicks only when the state differs), hover (pointer over the element: :hover and mouseenter), dblclick, upload (files = local paths for an <input type=file>, at most 100 MiB each; a hidden input needs loc css=\"input[type=file]\"). The action waits for the element up to the timeout_ms that open set (act takes no timeout_ms).",
-            "inputSchema": {"type": "object", "properties": {"session": S, "expect": {"type": "string", "description": "Optional postconditions: one or more expect step lines (no JavaScript). Validated before the action. A failed check keeps action_status completed: inspect before retrying."}, "op": {"type": "string", "enum": ["click", "fill", "type", "select", "check", "uncheck", "hover", "dblclick", "upload", "press", "scroll", "goto", "reload", "back", "forward", "wait"]}, "options": {"type": "array", "items": {"type": "string"}, "description": "For select: several options of a multiple select."}, "files": {"type": "array", "items": {"type": "string"}, "description": "For upload: local file paths."}, "dialog": {"type": "string", "enum": ["accept", "dismiss"], "description": "How to answer alert, confirm and prompt dialogs that the action opens. Default accept. The receipt lists each one."}, "prompt_text": {"type": "string", "description": "The answer of an accepted prompt. Default: the default value of the prompt."}, "ref": {"type": "string", "description": "e7 from snapshot or find."}, "loc": {"type": "string", "description": "A step locator instead of ref: role=button name=\"Save\", label=\"Email\", text=\"x\", css=\"...\"."}, "text": {"type": "string", "description": "For type and fill. A date or time field takes its value format: 2026-11-18, 2026-11, 2026-W47, 10:30 or 2026-11-18T10:30."}, "last_key": {"type": "boolean", "description": "For fill: type the last character as a key (autocomplete sees a key). Default false."}, "key": {"type": "string"}, "dy": {"type": "number"}, "url": {"type": "string"}, "snapshot": {"type": "boolean", "description": "Default true: add the changes of the page after the action."}, "diff": {"type": "boolean", "description": "Default true. False: add the whole outline instead of the changes."}, "mode": {"type": "string", "enum": ["interactive", "all"]}, "max_chars": {"type": "integer"}}, "required": ["op"]},
+            "inputSchema": {"type": "object", "properties": {"session": S, "expect": {"type": "string", "description": "Optional postconditions: one or more expect step lines (no JavaScript). Validated before the action. A failed check keeps action_status completed: inspect before retrying."}, "op": {"type": "string", "enum": ["click", "fill", "type", "select", "check", "uncheck", "hover", "dblclick", "upload", "press", "scroll", "goto", "reload", "back", "forward", "wait"]}, "options": {"type": "array", "items": {"type": "string"}, "description": "For select: several options of a multiple select."}, "files": {"type": "array", "items": {"type": "string"}, "description": "For upload: local file paths."}, "dialog": {"type": "string", "enum": ["accept", "dismiss"], "description": "How to answer alert, confirm and prompt dialogs that the action opens. Default accept. The receipt lists each one."}, "prompt_text": {"type": "string", "description": "The answer of an accepted prompt. Default: the default value of the prompt."}, "ref": {"type": "string", "description": "e7 from snapshot or find."}, "loc": {"type": "string", "description": "A step locator instead of ref: role=button name=\"Save\", label=\"Email\", text=\"x\", css=\"...\". Add nth=N to pick rendered match N (from 0) when several match."}, "text": {"type": "string", "description": "For type and fill. A date or time field takes its value format: 2026-11-18, 2026-11, 2026-W47, 10:30 or 2026-11-18T10:30."}, "last_key": {"type": "boolean", "description": "For fill: type the last character as a key (autocomplete sees a key). Default false."}, "key": {"type": "string"}, "dy": {"type": "number"}, "url": {"type": "string"}, "snapshot": {"type": "boolean", "description": "Default true: add the changes of the page after the action."}, "diff": {"type": "boolean", "description": "Default true. False: add the whole outline instead of the changes."}, "mode": {"type": "string", "enum": ["interactive", "all"]}, "max_chars": {"type": "integer"}}, "required": ["op"]},
         },
         {
             "name": "find",

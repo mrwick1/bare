@@ -132,6 +132,26 @@ impl LazyCompile for Lazy {
         self.wait(u, pending);
         Ok(())
     }
+
+    /// The top level of a script that joins a program that runs: its code is the last one that this adds, and the functions inside are
+    /// stubs. The flags are as `compile` makes them. A failure adds nothing.
+    fn script(&mut self, codes: &Codes, src: &str) -> Result<usize, String> {
+        let mut facts = Facts::new();
+        let prog = parse_script_lazy(src, self.limits, &mut facts).map_err(|e| format!("SyntaxError: {}", e.msg))?;
+        let top = compile_script(&prog, &facts, &self.atoms).map_err(|e| format!("compile: {e:?}"))?;
+        let (base, mut new, mut pending) = (codes.len(), Vec::new(), Vec::new());
+        let at = Loader { source: src, facts: &mut facts, atoms: &self.atoms, limits: self.limits, base, codes: &mut new, lazy: Some(&mut pending) }.add(top)?;
+        let link = |new: &[Code], c: &Code| c.funcs.iter().any(|&k| k as usize >= base && new[k as usize - base].flags & CF_LINK != 0);
+        for i in (0..new.len()).rev() {
+            new[i].flags = code_flags(&new[i]) | if link(&new, &new[i]) { CF_LINK } else { 0 };
+        }
+        debug_assert_eq!(at, base);
+        codes.push_all(new);
+        let u = self.units.len();
+        self.units.push(Unit { source: Cow::Owned(src.to_owned()), facts });
+        self.wait(u, pending);
+        Ok(at)
+    }
 }
 
 struct Loader<'a> {
@@ -352,7 +372,7 @@ impl Vm {
         }
         let mut parts: Vec<String> = Vec::new();
         let indexed = r.shapes.get(id).layout == crate::cell::Layout::Indexed;
-        let entries: Vec<_> = r.shapes.entries(id).filter(|e| e.attrs() & A_E != 0).map(|e| (r.text(e.key()), o.slot(&r.shapes, e.slot()))).collect();
+        let entries: Vec<_> = r.shapes.entries(id).filter(|e| e.attrs() & A_E != 0 && !e.key().is_symbol()).map(|e| (r.text(e.key()), o.slot(&r.shapes, e.slot()))).collect();
         let elems: Vec<Value> = if indexed { (0..o.len()).map(|i| o.get_element(i).unwrap_or(Value::HOLE)).collect() } else { vec![] };
         for e in elems {
             parts.push(if e.is_hole() { String::new() } else { self.display_at(e, true, depth + 1) });

@@ -41,6 +41,13 @@ const FLAG_WIDE: u32 = 1;
 pub const FLAG_ATOM: u32 = 2;
 /// The atom lives in the table that all realms share, outside the heap of any realm.
 pub const FLAG_SHARED: u32 = 4 | FLAG_ATOM;
+/// The cell is a symbol (`Kind::Symbol`, `bi_symbol.rs`): a flat string cell whose units are the description. It has no edge, so the
+/// collector treats it as a leaf. A property key is the address of a cell, so a symbol is a key that no string atom equals.
+pub const FLAG_SYMBOL: u32 = 8;
+/// A symbol made by `Symbol()`: its description is `undefined`, not the empty string.
+pub const FLAG_NO_DESC: u32 = 16;
+/// A symbol of the global registry (`Symbol.for`): `Symbol.keyFor` gives its description.
+pub const FLAG_REGISTERED: u32 = 32;
 
 #[repr(C)]
 struct Prefix {
@@ -143,6 +150,18 @@ impl Str {
         }
     }
 
+    /// The symbol of a value of kind `Symbol`: the cell has the layout of a flat string (the description) and `FLAG_SYMBOL`.
+    ///
+    /// # Safety
+    /// If `v` is a pointer value of kind `Symbol`, its cell is a live symbol cell made by [`Str::new_symbol`].
+    #[inline]
+    pub unsafe fn from_symbol(v: Value) -> Option<Str> {
+        match v.as_pointer() {
+            Some((Kind::Symbol, p)) => Some(Str(p)),
+            _ => None,
+        }
+    }
+
     /// The string at a cell address that holds a live string cell of this module.
     pub(crate) fn from_cell(p: NonNull<u8>) -> Str {
         Str(p)
@@ -151,6 +170,12 @@ impl Str {
     #[inline]
     pub fn value(self) -> Value {
         Value::pointer(Kind::String, self.0)
+    }
+
+    /// The value of a property key: a symbol gives a value of kind `Symbol`, any other key a string.
+    #[inline]
+    pub fn key_value(self) -> Value {
+        if self.is_symbol() { Value::pointer(Kind::Symbol, self.0) } else { self.value() }
     }
 
     /// The address of the cell, for the collector (`Heap::mark`).
@@ -222,6 +247,23 @@ impl Str {
     #[inline]
     pub fn is_atom(self) -> bool {
         self.head().flags() & FLAG_ATOM != 0
+    }
+
+    /// True for a symbol cell (a property key that is not a string).
+    #[inline]
+    pub fn is_symbol(self) -> bool {
+        self.head().flags() & FLAG_SYMBOL != 0
+    }
+
+    /// True for a symbol that `Symbol()` made with no description.
+    #[inline]
+    pub fn symbol_has_no_desc(self) -> bool {
+        self.head().flags() & FLAG_NO_DESC != 0
+    }
+
+    #[inline]
+    pub fn is_registered(self) -> bool {
+        self.head().flags() & FLAG_REGISTERED != 0
     }
 
     /// True for an atom of the shared table. The collector must not mark or free such a cell: it is outside every heap it walks.
@@ -325,6 +367,13 @@ impl Str {
                 Ok(s)
             }
         }
+    }
+
+    /// A new symbol with the description `desc` (`None`: no description). Two symbols are never equal, and no atom is a symbol.
+    pub fn new_symbol(heap: &mut Heap, desc: Option<Chars>) -> R<Str> {
+        let s = Str::new(heap, desc.unwrap_or(Chars::One(b"")))?;
+        s.add_flags(FLAG_SYMBOL | if desc.is_none() { FLAG_NO_DESC } else { 0 });
+        Ok(s)
     }
 
     /// A new flat string from UTF-8 text.
