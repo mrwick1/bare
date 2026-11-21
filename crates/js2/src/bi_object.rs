@@ -436,6 +436,7 @@ impl Realm {
         if self.has_string_own(o, key) {
             return Ok(true);
         }
+        let cat = cur.attrs();
         // The new attributes and values.
         let e_bit = d.e.map_or(cat & A_E, |b| if b { A_E } else { 0 });
         let c_bit = d.c.map_or(cat & A_C, |b| if b { A_C } else { 0 });
