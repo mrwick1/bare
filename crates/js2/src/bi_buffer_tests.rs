@@ -48,20 +48,20 @@ fn typed_methods_and_integer_indexed_properties() {
 
 #[test]
 fn views_keep_storage_live_across_collection() {
-    let mut vm = load(
-        r#"
+    let mut vm = run(r#"
         var a = new Uint8ClampedArray(new ArrayBuffer(4));
         a.set([1.5, 2.5, 256, -1]);
         var view = a.subarray(1, 3);
         a = null;
-        for (var i = 0; i < 350; i++) ({ i });
-        var r = [view.join(), new DataView(view.buffer).getUint8(2)].join('|');
-    "#,
-    )
+    "#)
     .unwrap();
-    vm.realm.heap.set_trigger(crate::heap::Trigger { min: 4096, slack: 4096 });
-    vm.run_main(0).unwrap();
-    assert_eq!(vm.global_text("r"), "2,255|255");
+    vm.realm.collect(&mut [], |_| {});
+    bare_js_api::enter(&mut vm.realm, |s| {
+        let v = s
+            .run_script("[view.join(), new DataView(view.buffer).getUint8(2)].join('|')")
+            .unwrap();
+        assert_eq!(s.as_str(v).unwrap().to_string_lossy(), "2,255|255");
+    });
 }
 
 #[test]
