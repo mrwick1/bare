@@ -549,7 +549,7 @@ language/expressions/class/method/forbidden-ext/b2 3 0 0 3 0 0
 language/expressions/class/subclass-builtins 21 0 15 20 1 15
 language/expressions/coalesce 22 0 2 22 0 2
 language/expressions/comma 4 1 1 4 1 1
-language/expressions/compound-assignment 411 44 0 379 76 0
+language/expressions/compound-assignment 411 44 0 391 64 0
 language/expressions/concatenation 4 1 0 4 1 0
 language/expressions/conditional 19 1 2 19 1 2
 language/expressions/delete 67 2 0 61 8 0
@@ -589,7 +589,7 @@ language/expressions/left-shift 38 1 6 38 1 6
 language/expressions/less-than 36 1 8 36 1 8
 language/expressions/less-than-or-equal 40 1 6 40 1 6
 language/expressions/logical-and 16 1 1 16 1 1
-language/expressions/logical-assignment 78 0 3 75 3 3
+language/expressions/logical-assignment 78 0 3 78 0 3
 language/expressions/logical-not 16 2 1 16 2 1
 language/expressions/logical-or 16 1 1 16 1 1
 language/expressions/member-expression 1 0 0 1 0 0
@@ -603,10 +603,10 @@ language/expressions/object/method-definition 153 24 106 174 3 106
 language/expressions/object/method-definition/forbidden-ext/b1 6 0 2 6 0 2
 language/expressions/object/method-definition/forbidden-ext/b2 9 0 3 9 0 3
 language/expressions/optional-chaining 37 1 0 37 1 0
-language/expressions/postfix-decrement 32 4 1 30 6 1
-language/expressions/postfix-increment 33 4 1 31 6 1
-language/expressions/prefix-decrement 29 4 1 27 6 1
-language/expressions/prefix-increment 28 4 1 26 6 1
+language/expressions/postfix-decrement 32 4 1 31 5 1
+language/expressions/postfix-increment 33 4 1 32 5 1
+language/expressions/prefix-decrement 29 4 1 28 5 1
+language/expressions/prefix-increment 28 4 1 27 5 1
 language/expressions/property-accessors 18 3 0 18 3 0
 language/expressions/relational 1 0 0 1 0 0
 language/expressions/right-shift 30 1 6 30 1 6
