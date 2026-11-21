@@ -1,7 +1,7 @@
 //! Cost rows of `Promise` (plan step P0/P1, `docs/design-js2-async.md` 8 and 9). One case for each process, so
 //! `perf stat -e instructions:u` (or `tools/js/instr.sh`) counts it: the cost of one step is the difference of two scales divided by the
 //! difference of the scales. The script runs, then the host drains the jobs.
-//!   promise_load CASE N          CASE: then | then_hit | thenable | new | microtask | empty | mem | await_prim | await_prom | async_noawait
+//!   js2_promise_load CASE N          CASE: then | then_hit | thenable | new | microtask | empty | mem | await_prim | await_prom | async_noawait
 //!
 //! - `then`: N times `p = p.then(f)` on a pending promise, then the root is resolved and the drain runs the N jobs. The step is the
 //!   `then` call (derived promise and reaction), the settle, the job and the resolve of the derived promise.
@@ -19,7 +19,7 @@ use bare_js2::script::load;
 
 fn main() {
     let mut a = std::env::args().skip(1);
-    let (case, n) = (a.next().expect("usage: promise_load CASE N"), a.next().and_then(|s| s.parse::<u32>().ok()).expect("N"));
+    let (case, n) = (a.next().expect("usage: js2_promise_load CASE N"), a.next().and_then(|s| s.parse::<u32>().ok()).expect("N"));
     // Inside a function, so the variables are registers and the loop costs what a loop of a program costs.
     let body = match case.as_str() {
         "then" => "var rs; (function () { var p = new Promise(function (r) { rs = r; }); var f = function (x) { return x + 1; }; for (var i = 0; i < N; i++) p = p.then(f); })(); rs(0);",

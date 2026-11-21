@@ -5,7 +5,8 @@
 
 use crate::browser::*;
 use bare_html::tree;
-use bare_js::eval::{Error, EvalLimits};
+use crate::eng_old::OldFault as Error;
+use bare_js::eval::{EvalLimits};
 use bare_js::heap::HeapLimits;
 use bare_js::value::Value;
 
@@ -68,7 +69,7 @@ pub(crate) fn run(k: &Case) -> String {
     esc(&match out {
         Ok(s) => s,
         Err(Error::Throw(v)) if matches!(v, Value::Object(_)) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
-        Err(Error::Unsupported(u)) => format!("unsupported:{}", u.what),
+        Err(Error::Unsupported(u)) => format!("unsupported:{}", u),
         Err(e) => format!("other:{e:?}"),
     })
 }

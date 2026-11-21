@@ -1,7 +1,7 @@
 use super::*;
 fn check(remove_one: bool, important: bool) {
     let lim = Lim { bytes: 10000, decls: 100 };
-    let mut charge = |_| Ok(());
+    let mut charge = |_| Ok::<(), crate::eng::Fault<crate::eng_old::Old>>(());
     let text = if important { "--m: 3px 4px; margin: var(--m) !important" } else { "--m: 3px 4px; margin: var(--m)" };
     let mut list = parse(text, lim, &mut charge).ok().unwrap();
     let mut out = String::new();

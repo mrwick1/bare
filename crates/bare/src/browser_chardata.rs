@@ -6,18 +6,18 @@
 //! same known deviation as `Range.toString`). Each method that changes text tells the live ranges first (`Dom::range_data`, `range_split`,
 //! `range_merge`, see `browser_range.rs`); when no range exists it does no more work for that.
 
+use crate::eng::Eng;
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_js_api::{Args, Local};
 use crate::browser_range::utf16_len;
 use bare_html::dom::NodeData;
-use bare_js::eval::{Interp};
-use bare_js::value::{to_uint32, Value};
+use bare_js::value::to_uint32;
 
-type V = R<Value>;
+type V<E: Eng> = R<E, E::Raw>;
 
 /// The node and its text, for a Text or a Comment.
-fn data_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, (bare_html::dom::NodeId, String)> {
+fn data_of<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, (bare_html::dom::NodeId, String)> {
     let n = d.nd_s(s, this)?;
     let doc = d.doc.borrow();
     match *doc.data(n) {
@@ -26,19 +26,19 @@ fn data_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, (bare_ht
     }
 }
 
-fn args<'s>(s: &mut Sc<'s, '_>, who: &str, iface: &str, a: Args<'s>, need: usize) -> Res<'s, ()> {
+fn args<'s, E: Eng>(s: &mut Sc<'s, E>, who: &str, iface: &str, a: Args<'s>, need: usize) -> Res<'s, ()> {
     if a.len() < need {
         return Err(s.type_error(&format!("Failed to execute '{who}' on '{iface}': {need} argument{} required, but only {} present.", if need == 1 { "" } else { "s" }, a.len())));
     }
     Ok(())
 }
 
-fn offset<'s>(s: &mut Sc<'s, '_>, a: Args<'s>, i: usize) -> Res<'s, u32> {
-    let argi = arg_s(s, a, i);
+fn offset<'s, E: Eng>(s: &mut Sc<'s, E>, a: Args<'s>, i: usize) -> Res<'s, u32> {
+    let argi = arg_s::<E>(s, a, i);
     Ok(to_uint32(s.to_number(argi)?))
 }
 
-fn out_of_range<'s>(d: &Dom, s: &mut Sc<'s, '_>, who: &str, iface: &str, off: u32, len: u32) -> bare_js_api::Error<'s> {
+fn out_of_range<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, who: &str, iface: &str, off: u32, len: u32) -> bare_js_api::Error<'s> {
     d.dom_err_s(s, "IndexSizeError", &out_of_range_msg(who, iface, off, len))
 }
 
@@ -51,7 +51,7 @@ fn out_of_range_msg(who: &str, iface: &str, off: u32, len: u32) -> String {
 }
 
 /// `replaceData(offset, count, data)` on the text of `n`: the live ranges first, then the text.
-pub(crate) fn replace(d: &Dom, it: &mut Interp<'_>, who: &str, (n, text): (bare_html::dom::NodeId, &str), off: u32, count: u32, data: &str) -> V {
+pub(crate) fn replace<E: Eng>(d: &Dom<E>, it: &mut E::Vm, who: &str, (n, text): (bare_html::dom::NodeId, &str), off: u32, count: u32, data: &str) -> V<E> {
     let u: Vec<u16> = text.encode_utf16().collect();
     let len = u.len() as u32;
     if off > len {
@@ -66,13 +66,13 @@ pub(crate) fn replace(d: &Dom, it: &mut Interp<'_>, who: &str, (n, text): (bare_
         d.range_data(n, off, count, data16.len() as u32);
         doc.set_text(n, &new);
     }
-    Ok(Value::Undefined)
+    Ok(E::undef())
 }
 
-pub(crate) fn substring_data<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn substring_data<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let (_, text) = data_of(d, s, this)?;
-    args(s, "substringData", "CharacterData", a, 2)?;
-    let (off, count) = (offset(s, a, 0)?, offset(s, a, 1)?);
+    args::<E>(s, "substringData", "CharacterData", a, 2)?;
+    let (off, count) = (offset::<E>(s, a, 0)?, offset::<E>(s, a, 1)?);
     let u: Vec<u16> = text.encode_utf16().collect();
     if off as usize > u.len() {
         return Err(out_of_range(d, s, "substringData", "CharacterData", off, u.len() as u32));
@@ -81,50 +81,50 @@ pub(crate) fn substring_data<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a
     d.js_str_s(s, &String::from_utf16_lossy(&u[off as usize..end]))
 }
 
-pub(crate) fn append_data<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn append_data<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let (n, text) = data_of(d, s, this)?;
-    args(s, "appendData", "CharacterData", a, 1)?;
+    args::<E>(s, "appendData", "CharacterData", a, 1)?;
     let data = d.arg_str_s(s, a, 0)?;
-    old_v(s, |it| replace(d, it, "appendData", (n, &text), utf16_len(&text), 0, &data))
+    old_v::<E>(s, |it| replace(d, it, "appendData", (n, &text), utf16_len(&text), 0, &data))
 }
 
-pub(crate) fn insert_data<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn insert_data<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let (n, text) = data_of(d, s, this)?;
-    args(s, "insertData", "CharacterData", a, 2)?;
-    let off = offset(s, a, 0)?;
+    args::<E>(s, "insertData", "CharacterData", a, 2)?;
+    let off = offset::<E>(s, a, 0)?;
     let data = d.arg_str_s(s, a, 1)?;
-    old_v(s, |it| replace(d, it, "insertData", (n, &text), off, 0, &data))
+    old_v::<E>(s, |it| replace(d, it, "insertData", (n, &text), off, 0, &data))
 }
 
-pub(crate) fn delete_data<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn delete_data<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let (n, text) = data_of(d, s, this)?;
-    args(s, "deleteData", "CharacterData", a, 2)?;
-    let (off, count) = (offset(s, a, 0)?, offset(s, a, 1)?);
-    old_v(s, |it| replace(d, it, "deleteData", (n, &text), off, count, ""))
+    args::<E>(s, "deleteData", "CharacterData", a, 2)?;
+    let (off, count) = (offset::<E>(s, a, 0)?, offset::<E>(s, a, 1)?);
+    old_v::<E>(s, |it| replace(d, it, "deleteData", (n, &text), off, count, ""))
 }
 
-pub(crate) fn replace_data<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn replace_data<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let (n, text) = data_of(d, s, this)?;
-    args(s, "replaceData", "CharacterData", a, 3)?;
-    let (off, count) = (offset(s, a, 0)?, offset(s, a, 1)?);
+    args::<E>(s, "replaceData", "CharacterData", a, 3)?;
+    let (off, count) = (offset::<E>(s, a, 0)?, offset::<E>(s, a, 1)?);
     let data = d.arg_str_s(s, a, 2)?;
-    old_v(s, |it| replace(d, it, "replaceData", (n, &text), off, count, &data))
+    old_v::<E>(s, |it| replace(d, it, "replaceData", (n, &text), off, count, &data))
 }
 
-pub(crate) fn split_text<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn split_text<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let (n, text) = data_of(d, s, this)?;
-    args(s, "splitText", "Text", a, 1)?;
-    let off = offset(s, a, 0)?;
+    args::<E>(s, "splitText", "Text", a, 1)?;
+    let off = offset::<E>(s, a, 0)?;
     if off > utf16_len(&text) {
         return Err(out_of_range(d, s, "splitText", "Text", off, utf16_len(&text)));
     }
-    let new = lift(s, split_at(d, n, &text, off))?;
+    let new = lift::<E, _>(s, split_at(d, n, &text, off))?;
     d.wrap_s(s, new)
 }
 
 /// Split the text node `n` (its text is `text`) at `off` UTF-16 units, which are in range. The order is Chrome's: the data of `n` first (one record),
 /// then the new node in (another one). The live ranges follow as the standard says.
-pub(crate) fn split_at(d: &Dom, n: bare_html::dom::NodeId, text: &str, off: u32) -> R<bare_html::dom::NodeId> {
+pub(crate) fn split_at<E: Eng>(d: &Dom<E>, n: bare_html::dom::NodeId, text: &str, off: u32) -> R<E, bare_html::dom::NodeId> {
     let u: Vec<u16> = text.encode_utf16().collect();
     let (head, tail) = (String::from_utf16_lossy(&u[..off as usize]), String::from_utf16_lossy(&u[off as usize..]));
     let mut doc = d.doc.borrow_mut();
@@ -143,7 +143,7 @@ pub(crate) fn split_at(d: &Dom, n: bare_html::dom::NodeId, text: &str, off: u32)
 }
 
 /// `Node.normalize()`: the runs of Text nodes below `this` become one node each, and the empty ones go.
-pub(crate) fn normalize<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+pub(crate) fn normalize<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let root = d.nd_s(s, this)?;
     let mut doc = d.doc.borrow_mut();
     let mut texts = Vec::new();

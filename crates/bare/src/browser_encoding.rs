@@ -9,20 +9,21 @@
 //!   not be 1 mod 4 after up to two trailing `=` are removed (when the length is a multiple of 4), any other character that is
 //!   not in the standard alphabet is `InvalidCharacterError`. The unused bits of the last character are dropped.
 
+use crate::eng::Eng;
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_js_api::{Args, Attrs, HostFn, Local, Str, Type};
 
-fn need<'s>(s: &mut Sc<'s, '_>, a: Args<'s>, f: &str) -> Res<'s, ()> {
+fn need<'s, E: Eng>(s: &mut Sc<'s, E>, a: Args<'s>, f: &str) -> Res<'s, ()> {
     match a.is_empty() {
         true => Err(s.type_error(&format!("Failed to execute '{f}' on 'Window': 1 argument required, but only 0 present."))),
         false => Ok(()),
     }
 }
 
-fn structured_clone<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    need(s, a, "structuredClone")?;
-    let (value, options) = (arg_s(s, a, 0), arg_s(s, a, 1));
+fn structured_clone<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    need::<E>(s, a, "structuredClone")?;
+    let (value, options) = (arg_s::<E>(s, a, 0), arg_s::<E>(s, a, 1));
     let list = match s.type_of(options) {
         Type::Undefined | Type::Null => Vec::new(),
         Type::Object | Type::Function => {
@@ -37,7 +38,7 @@ fn structured_clone<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) 
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /// The UTF-16 units of `ToString(v)`, within the DOM string cap.
-fn units_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, v: Local<'s>) -> Res<'s, Vec<u16>> {
+fn units_of<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>) -> Res<'s, Vec<u16>> {
     let v = if s.type_of(v) == Type::String { v } else { s.to_string(v)? };
     let len = s.as_str(v).map_or(0, |t| t.len());
     if len > d.lim.max_string_bytes {
@@ -51,9 +52,9 @@ fn units_of<'s>(d: &Dom, s: &mut Sc<'s, '_>, v: Local<'s>) -> Res<'s, Vec<u16>> 
     })
 }
 
-fn btoa<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    need(s, a, "btoa")?;
-    let a0 = arg_s(s, a, 0);
+fn btoa<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    need::<E>(s, a, "btoa")?;
+    let a0 = arg_s::<E>(s, a, 0);
     let u = units_of(d, s, a0)?;
     if u.iter().any(|&c| c > 0xFF) {
         return Err(d.dom_err_s(s, "InvalidCharacterError", "Failed to execute 'btoa' on 'Window': The string to be encoded contains characters outside of the Latin1 range."));
@@ -68,9 +69,9 @@ fn btoa<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, L
     s.string_utf16(&out)
 }
 
-fn atob<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    need(s, a, "atob")?;
-    let a0 = arg_s(s, a, 0);
+fn atob<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    need::<E>(s, a, "atob")?;
+    let a0 = arg_s::<E>(s, a, 0);
     let mut u = units_of(d, s, a0)?;
     u.retain(|&c| !matches!(c, 9 | 10 | 12 | 13 | 32));
     if u.len() % 4 == 0 {
@@ -98,9 +99,9 @@ fn atob<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, L
     s.string_utf16(&out)
 }
 
-pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
     let g = s.global();
-    for (name, h, len) in [("structuredClone", structured_clone as HS, 1), ("btoa", btoa as HS, 1), ("atob", atob as HS, 1)] {
+    for (name, h, len) in [("structuredClone", structured_clone as HS<E>, 1), ("btoa", btoa as HS<E>, 1), ("atob", atob as HS<E>, 1)] {
         let f = d.add_fn_s(s, h, name, len, HostFn::Method)?;
         s.define_str(g, name, f, Attrs::ALL)?;
     }

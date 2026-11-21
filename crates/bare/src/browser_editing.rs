@@ -50,18 +50,17 @@
 //!   the list. The other kind still renames the whole list.
 //! - No undo history, no `beforeinput`, no `styleWithCSS`, no `defaultParagraphSeparator`.
 
+use crate::eng::{Eng, Ops, Val};
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_js_api::{Args, Local, Type};
 use crate::browser_ui::Ui;
 use bare_html::dom::{Document, NodeData, NodeId};
-use bare_js::eval::Interp;
-use bare_js::value::Value;
 
-type V = R<Value>;
+type V<E: Eng> = R<E, E::Raw>;
 
-fn num(n: u32) -> Value {
-    Value::Number(n as f64)
+fn num<E: Eng>(n: u32) -> E::Raw {
+    E::num(n as f64)
 }
 
 // ------------------------------------------------------------------------------------ reading the tree
@@ -250,52 +249,52 @@ fn top_index(doc: &Document, host: NodeId, c: NodeId, o: u32, is_end: bool) -> u
 
 // ------------------------------------------------------------------------------------ calling the DOM
 
-fn call(d: &Dom, it: &mut Interp<'_>, recv: Value, name: &str, args: &[Value]) -> V {
+fn call<E: Eng>(d: &Dom<E>, it: &mut E::Vm, recv: E::Raw, name: &str, args: &[E::Raw]) -> V<E> {
     let k = d.key(it, name)?;
     let f = it.get_value(recv, k)?;
-    it.call(f, recv, args)
+    it.call_o(f, recv, args)
 }
 
 /// The caret as a position of the selection.
-fn caret(d: &Dom, it: &mut Interp<'_>, sel: Value, n: NodeId, off: u32) -> R<()> {
+fn caret<E: Eng>(d: &Dom<E>, it: &mut E::Vm, sel: E::Raw, n: NodeId, off: u32) -> R<E, ()> {
     let w = d.wrap(it, n)?;
-    call(d, it, sel, "collapse", &[w, num(off)]).map(drop)
+    call(d, it, sel, "collapse", &[w, num::<E>(off)]).map(drop)
 }
 
 /// The first range of the selection and where it is.
-struct Act {
-    sel: Value,
-    range: Value,
+struct Act<E: Eng> {
+    sel: E::Raw,
+    range: E::Raw,
     host: Option<NodeId>,
     start: (NodeId, u32),
     end: (NodeId, u32),
 }
 
-fn active(d: &Dom, it: &mut Interp<'_>, docv: Value) -> R<Option<Act>> {
+fn active<E: Eng>(d: &Dom<E>, it: &mut E::Vm, docv: E::Raw) -> R<E, Option<Act<E>>> {
     let sel = call(d, it, docv, "getSelection", &[])?;
     let k = d.key(it, "rangeCount")?;
-    if !matches!(it.get_value(sel, k)?, Value::Number(n) if n >= 1.0) {
+    if !matches!(E::kind(it.get_value(sel, k)?), Val::Number(n) if n >= 1.0) {
         return Ok(None);
     }
-    let range = call(d, it, sel, "getRangeAt", &[num(0)])?;
+    let range = call(d, it, sel, "getRangeAt", &[num::<E>(0)])?;
     let (sc, so, ec, eo) = crate::browser_range::bounds(d, it, range)?;
     let doc = d.doc.borrow();
     let host = host_of(&doc, sc).filter(|&h| host_of(&doc, ec) == Some(h));
     Ok(Some(Act { sel, range, host, start: (sc, so), end: (ec, eo) }))
 }
 
-fn doc_value(d: &Dom) -> Value {
-    Value::Object(*d.doc_wrapper.get().expect("installed"))
+fn doc_value<E: Eng>(d: &Dom<E>) -> E::Raw {
+    E::obj_raw(*d.doc_wrapper.get().expect("installed"))
 }
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// The editing host that `n` is in, if any.
     pub(crate) fn editing_host(&self, n: NodeId) -> Option<NodeId> {
         host_of(&self.doc.borrow(), n)
     }
 
     /// Put a collapsed caret at the end of the host of `n`, unless the selection is already in that host.
-    pub(crate) fn caret_into_host(&self, it: &mut Interp<'_>, n: NodeId) -> R<()> {
+    pub(crate) fn caret_into_host(&self, it: &mut E::Vm, n: NodeId) -> R<E, ()> {
         let Some(host) = self.editing_host(n) else { return Ok(()) };
         if self.editing(it)?.is_some_and(|(_, h)| h == host) {
             return Ok(());
@@ -306,12 +305,12 @@ impl Dom {
     }
 
     /// The active range, when it is in an editing host.
-    fn editing(&self, it: &mut Interp<'_>) -> R<Option<(Act, NodeId)>> {
+    fn editing(&self, it: &mut E::Vm) -> R<E, Option<(Act<E>, NodeId)>> {
         Ok(active(self, it, doc_value(self))?.and_then(|a| a.host.map(|h| (a, h))))
     }
 
     /// Delete a non-collapsed selection. Gives the caret.
-    fn cut_selection(&self, it: &mut Interp<'_>, a: &Act) -> R<(NodeId, u32)> {
+    fn cut_selection(&self, it: &mut E::Vm, a: &Act<E>) -> R<E, (NodeId, u32)> {
         if a.start != a.end {
             call(self, it, a.range, "deleteContents", &[])?;
         }
@@ -319,13 +318,13 @@ impl Dom {
         Ok((sc, so))
     }
 
-    fn input_event(&self, it: &mut Interp<'_>, host: NodeId, kind: &str, data: Option<&str>) -> R<()> {
+    fn input_event(&self, it: &mut E::Vm, host: NodeId, kind: &str, data: Option<&str>) -> R<E, ()> {
         let ui = Ui { data: data.map(str::to_string), input_type: kind.to_string(), ..Ui::default() };
         self.fire_ui(it, host, "input", self.p().inputev, true, false, ui, None).map(drop)
     }
 
     /// `insertText`: replace the selection with `text`, the caret after it. False when the selection is not in an editing host.
-    pub(crate) fn insert_text(&self, it: &mut Interp<'_>, text: &str) -> R<bool> {
+    pub(crate) fn insert_text(&self, it: &mut E::Vm, text: &str) -> R<E, bool> {
         let Some((a, host)) = self.editing(it)? else { return Ok(false) };
         if text.is_empty() {
             return Ok(false);
@@ -363,7 +362,7 @@ impl Dom {
         let (node, at) = match target {
             Some(t) => {
                 let w = self.wrap(it, t)?;
-                call(self, it, w, "insertData", &[num(at), add])?;
+                call(self, it, w, "insertData", &[num::<E>(at), add])?;
                 (t, at)
             }
             None => {
@@ -389,7 +388,7 @@ impl Dom {
 
     /// Give the text `at..at + len` of `node` the state override `ov` (`b`, `i`, `u`): wrap it in the element that it lacks, or
     /// move it out of the one that it has, splitting that element. Gives the caret after the text.
-    fn apply_override(&self, it: &mut Interp<'_>, host: NodeId, node: NodeId, at: u32, len: u32, ov: [Option<bool>; 3]) -> R<(NodeId, u32)> {
+    fn apply_override(&self, it: &mut E::Vm, host: NodeId, node: NodeId, at: u32, len: u32, ov: [Option<bool>; 3]) -> R<E, (NodeId, u32)> {
         const TAGS: [&[&str]; 3] = [&["b", "strong"], &["i", "em"], &["u"]];
         const NAMES: [&str; 3] = ["b", "i", "u"];
         let (todo, total) = {
@@ -405,11 +404,11 @@ impl Dom {
         let mut t = node;
         if at + len < total {
             let w = self.wrap(it, t)?;
-            call(self, it, w, "splitText", &[num(at + len)])?;
+            call(self, it, w, "splitText", &[num::<E>(at + len)])?;
         }
         if at > 0 {
             let w = self.wrap(it, t)?;
-            let r = call(self, it, w, "splitText", &[num(at)])?;
+            let r = call(self, it, w, "splitText", &[num::<E>(at)])?;
             t = self.nd(it, r)?;
         }
         for (i, on) in todo {
@@ -432,7 +431,7 @@ impl Dom {
                 };
                 let (pw, ppw) = (self.wrap(it, p)?, self.wrap(it, pp)?);
                 if !after.is_empty() {
-                    let copy = call(self, it, pw, "cloneNode", &[Value::Bool(false)])?;
+                    let copy = call(self, it, pw, "cloneNode", &[E::bool_raw(false)])?;
                     for f in after {
                         let fw = self.wrap(it, f)?;
                         call(self, it, copy, "appendChild", &[fw])?;
@@ -454,7 +453,7 @@ impl Dom {
         Ok((t, len))
     }
 
-    fn delete_step(&self, it: &mut Interp<'_>, back: bool) -> R<bool> {
+    fn delete_step(&self, it: &mut E::Vm, back: bool) -> R<E, bool> {
         let Some((a, host)) = self.editing(it)? else { return Ok(false) };
         let kind = if back { "deleteContentBackward" } else { "deleteContentForward" };
         if a.start != a.end {
@@ -467,7 +466,7 @@ impl Dom {
         match found {
             Del::Chars(n, from, to) => {
                 let w = self.wrap(it, n)?;
-                call(self, it, w, "deleteData", &[num(from), num(to - from)])?;
+                call(self, it, w, "deleteData", &[num::<E>(from), num::<E>(to - from)])?;
                 let (empty, up) = {
                     let doc = self.doc.borrow();
                     (units(&doc, n).is_some_and(|u| u.is_empty()), doc.parent(n).map(|p| (p, index(&doc, n))))
@@ -502,7 +501,7 @@ impl Dom {
     /// - Delete moves the children of the next block (the first item of a next list) to the end of this block.
     ///
     /// The first block of the host (Backspace) and the last one (Delete) have nothing to merge: false.
-    fn delete_at_block_edge(&self, it: &mut Interp<'_>, a: &Act, host: NodeId, back: bool) -> R<bool> {
+    fn delete_at_block_edge(&self, it: &mut E::Vm, a: &Act<E>, host: NodeId, back: bool) -> R<E, bool> {
         enum Plan {
             Outdent(NodeId, u32),
             Merge { from: NodeId, to: NodeId, drop_list: Option<NodeId>, clear_to: bool },
@@ -575,20 +574,20 @@ impl Dom {
     }
 
     /// The caret at the end of the content of `n`: after its last Text, going down through the last children.
-    fn caret_end_of(&self, it: &mut Interp<'_>, a: &Act, n: NodeId) -> R<()> {
+    fn caret_end_of(&self, it: &mut E::Vm, a: &Act<E>, n: NodeId) -> R<E, ()> {
         let pos = end_pos(&self.doc.borrow(), n);
         caret(self, it, a.sel, pos.0, pos.1)
     }
 
     /// Turn the items `first..=last` of the list `l` into `div` blocks after it. The items before stay in `l`; the items after go to
     /// a new list of the same kind. An empty `l` is removed. Gives the new blocks.
-    fn outdent(&self, it: &mut Interp<'_>, l: NodeId, first: u32, last: u32) -> R<Vec<NodeId>> {
+    fn outdent(&self, it: &mut E::Vm, l: NodeId, first: u32, last: u32) -> R<E, Vec<NodeId>> {
         let items: Vec<NodeId> = self.doc.borrow().children(l).collect();
         let (lw, pw) = (self.wrap(it, l)?, self.wrap(it, self.doc.borrow().parent(l).expect("in the host"))?);
         let next = self.doc.borrow().next_sibling(l);
         let mut at = self.wrap_opt(it, next)?;
         if (last as usize) + 1 < items.len() {
-            let tail = call(self, it, lw, "cloneNode", &[Value::Bool(false)])?;
+            let tail = call(self, it, lw, "cloneNode", &[E::bool_raw(false)])?;
             for &li in &items[last as usize + 1..] {
                 let w = self.wrap(it, li)?;
                 call(self, it, tail, "appendChild", &[w])?;
@@ -613,17 +612,17 @@ impl Dom {
     }
 
     /// `delete` (Backspace).
-    pub(crate) fn delete_back(&self, it: &mut Interp<'_>) -> R<bool> {
+    pub(crate) fn delete_back(&self, it: &mut E::Vm) -> R<E, bool> {
         self.delete_step(it, true)
     }
 
     /// `forwardDelete` (Delete).
-    pub(crate) fn delete_forward(&self, it: &mut Interp<'_>) -> R<bool> {
+    pub(crate) fn delete_forward(&self, it: &mut E::Vm) -> R<E, bool> {
         self.delete_step(it, false)
     }
 
     /// A `br` when the block has nothing to show, so that the empty line has a height.
-    fn fill_empty(&self, it: &mut Interp<'_>, block: NodeId) -> R<()> {
+    fn fill_empty(&self, it: &mut E::Vm, block: NodeId) -> R<E, ()> {
         let empty = {
             let doc = self.doc.borrow();
             doc.children(block).all(|k| units(&doc, k).is_some_and(|u| u.is_empty()))
@@ -638,7 +637,7 @@ impl Dom {
     }
 
     /// `insertParagraph`: split the block of the caret in two. Text straight in the host goes into a new `div` first.
-    pub(crate) fn insert_paragraph(&self, it: &mut Interp<'_>) -> R<bool> {
+    pub(crate) fn insert_paragraph(&self, it: &mut E::Vm) -> R<E, bool> {
         let Some((a, host)) = self.editing(it)? else { return Ok(false) };
         let (mut c, o) = self.cut_selection(it, &a)?;
         let empty_item = {
@@ -683,10 +682,10 @@ impl Dom {
         let (cw, bw) = (self.wrap(it, c)?, self.wrap(it, block)?);
         let r = call(self, it, doc_value(self), "createRange", &[])?;
         let n = self.doc.borrow().children(block).count() as u32;
-        call(self, it, r, "setStart", &[cw, num(o)])?;
-        call(self, it, r, "setEnd", &[bw, num(n)])?;
+        call(self, it, r, "setStart", &[cw, num::<E>(o)])?;
+        call(self, it, r, "setEnd", &[bw, num::<E>(n)])?;
         let tail = call(self, it, r, "extractContents", &[])?;
-        let fresh = call(self, it, bw, "cloneNode", &[Value::Bool(false)])?;
+        let fresh = call(self, it, bw, "cloneNode", &[E::bool_raw(false)])?;
         call(self, it, fresh, "appendChild", &[tail])?;
         let after = self.doc.borrow().next_sibling(block);
         let after = self.wrap_opt(it, after)?;
@@ -702,7 +701,7 @@ impl Dom {
     }
 
     /// `insertLineBreak`: a `br` at the caret. A `br` at the end of a block gets a second one, so that the new line shows.
-    pub(crate) fn insert_line_break(&self, it: &mut Interp<'_>) -> R<bool> {
+    pub(crate) fn insert_line_break(&self, it: &mut E::Vm) -> R<E, bool> {
         let Some((a, host)) = self.editing(it)? else { return Ok(false) };
         let (c, o) = self.cut_selection(it, &a)?;
         let tag = self.js_str(it, "br")?;
@@ -716,7 +715,7 @@ impl Dom {
                 self.doc.borrow().next_sibling(c)
             } else {
                 let w = self.wrap(it, c)?;
-                let tail = call(self, it, w, "splitText", &[num(o)])?;
+                let tail = call(self, it, w, "splitText", &[num::<E>(o)])?;
                 self.node_of(tail)
             }
         } else {
@@ -730,7 +729,7 @@ impl Dom {
             (doc.next_sibling(b).is_none(), index(&doc, b) + 1)
         };
         if at.0 {
-            let again = call(self, it, br, "cloneNode", &[Value::Bool(false)])?;
+            let again = call(self, it, br, "cloneNode", &[E::bool_raw(false)])?;
             call(self, it, pw, "appendChild", &[again])?;
         }
         caret(self, it, a.sel, parent, at.1)?;
@@ -738,13 +737,13 @@ impl Dom {
         Ok(true)
     }
 
-    fn make(&self, it: &mut Interp<'_>, name: &str) -> V {
+    fn make(&self, it: &mut E::Vm, name: &str) -> V<E> {
         let t = self.js_str(it, name)?;
         call(self, it, doc_value(self), "createElement", &[t])
     }
 
     /// Move all children of `from` to the end of `to`.
-    fn move_children(&self, it: &mut Interp<'_>, from: NodeId, to: Value) -> R<()> {
+    fn move_children(&self, it: &mut E::Vm, from: NodeId, to: E::Raw) -> R<E, ()> {
         loop {
             let first = self.doc.borrow().children(from).next();
             let Some(f) = first else { return Ok(()) };
@@ -753,14 +752,14 @@ impl Dom {
         }
     }
 
-    fn remove(&self, it: &mut Interp<'_>, n: NodeId) -> R<()> {
+    fn remove(&self, it: &mut E::Vm, n: NodeId) -> R<E, ()> {
         let p = self.doc.borrow().parent(n).expect("in the tree");
         let (pw, w) = (self.wrap(it, p)?, self.wrap(it, n)?);
         call(self, it, pw, "removeChild", &[w]).map(drop)
     }
 
     /// Remove the empty Text that `insertNode` leaves next to `n` after it split a Text.
-    fn drop_empty_text(&self, it: &mut Interp<'_>, n: NodeId) -> R<()> {
+    fn drop_empty_text(&self, it: &mut E::Vm, n: NodeId) -> R<E, ()> {
         let sides = {
             let doc = self.doc.borrow();
             [doc.prev_sibling(n), doc.next_sibling(n)].map(|s| s.filter(|&s| units(&doc, s).is_some_and(|u| u.is_empty())))
@@ -772,19 +771,19 @@ impl Dom {
     }
 
     /// Put the ends of the active range back at `pos`, where the second value of a pair says it is to be set.
-    fn set_ends(&self, it: &mut Interp<'_>, a: &Act, pos: [((NodeId, u32), bool); 2]) -> R<()> {
+    fn set_ends(&self, it: &mut E::Vm, a: &Act<E>, pos: [((NodeId, u32), bool); 2]) -> R<E, ()> {
         for (i, name) in ["setStart", "setEnd"].into_iter().enumerate() {
             let ((n, o), keep) = pos[i];
             if keep {
                 let w = self.wrap(it, n)?;
-                call(self, it, a.range, name, &[w, num(o)])?;
+                call(self, it, a.range, name, &[w, num::<E>(o)])?;
             }
         }
         Ok(())
     }
 
     /// The ends that are in a Text stay valid when the tree around them changes; the DOM moves the live range, so put them back.
-    fn keep_text_ends(&self, it: &mut Interp<'_>, a: &Act) -> R<()> {
+    fn keep_text_ends(&self, it: &mut E::Vm, a: &Act<E>) -> R<E, ()> {
         let pos = {
             let doc = self.doc.borrow();
             [(a.start, units(&doc, a.start.0).is_some()), (a.end, units(&doc, a.end.0).is_some())]
@@ -793,7 +792,7 @@ impl Dom {
     }
 
     /// Replace `el` by its children. Gives the changed positions of the ends of the selection in `pos`.
-    fn unwrap(&self, it: &mut Interp<'_>, el: NodeId, pos: &mut [((NodeId, u32), bool); 2]) -> R<()> {
+    fn unwrap(&self, it: &mut E::Vm, el: NodeId, pos: &mut [((NodeId, u32), bool); 2]) -> R<E, ()> {
         let (p, i) = {
             let doc = self.doc.borrow();
             (doc.parent(el).expect("in the host"), index(&doc, el))
@@ -812,13 +811,13 @@ impl Dom {
     }
 
     /// Unwrap every element with a tag in `tags` that touches the selection. Whether it changed anything.
-    fn unwrap_in(&self, it: &mut Interp<'_>, a: &Act, host: NodeId, tags: &[&str]) -> R<bool> {
+    fn unwrap_in(&self, it: &mut E::Vm, a: &Act<E>, host: NodeId, tags: &[&str]) -> R<E, bool> {
         let mut found = Vec::new();
         collect(&self.doc.borrow(), host, tags, &mut found);
         let mut hit = Vec::new();
         for el in found {
             let w = self.wrap(it, el)?;
-            if matches!(call(self, it, a.range, "intersectsNode", &[w])?, Value::Bool(true)) {
+            if matches!(E::kind(call(self, it, a.range, "intersectsNode", &[w])?), Val::Bool(true)) {
                 hit.push(el);
             }
         }
@@ -834,7 +833,7 @@ impl Dom {
     }
 
     /// Wrap the selected contents in a new element, and select the contents of it.
-    fn wrap_selection(&self, it: &mut Interp<'_>, a: &Act, name: &str, href: Option<&str>) -> R<()> {
+    fn wrap_selection(&self, it: &mut E::Vm, a: &Act<E>, name: &str, href: Option<&str>) -> R<E, ()> {
         let part = call(self, it, a.range, "extractContents", &[])?;
         let el = self.make(it, name)?;
         if let Some(h) = href {
@@ -849,7 +848,7 @@ impl Dom {
     }
 
     /// `bold`, `italic` and `underline`.
-    pub(crate) fn format_inline(&self, it: &mut Interp<'_>, tags: &[&str], name: &str, kind: &str) -> R<bool> {
+    pub(crate) fn format_inline(&self, it: &mut E::Vm, tags: &[&str], name: &str, kind: &str) -> R<E, bool> {
         let Some((a, host)) = self.editing(it)? else { return Ok(false) };
         let on = ancestor_with(&self.doc.borrow(), host, a.start.0, tags).is_some();
         if a.start == a.end {
@@ -872,7 +871,7 @@ impl Dom {
     }
 
     /// `queryCommandState`.
-    fn format_state(&self, it: &mut Interp<'_>, name: &str) -> R<bool> {
+    fn format_state(&self, it: &mut E::Vm, name: &str) -> R<E, bool> {
         let Some((a, host)) = self.editing(it)? else { return Ok(false) };
         let doc = self.doc.borrow();
         let inside = |tags: &[&str]| ancestor_with(&doc, host, a.start.0, tags);
@@ -888,7 +887,7 @@ impl Dom {
     }
 
     /// `insertUnorderedList` and `insertOrderedList` (`kind` is `ul` or `ol`).
-    fn list(&self, it: &mut Interp<'_>, kind: &str) -> R<bool> {
+    fn list(&self, it: &mut E::Vm, kind: &str) -> R<E, bool> {
         let Some((a, host)) = self.editing(it)? else { return Ok(false) };
         let event = if kind == "ul" { "insertUnorderedList" } else { "insertOrderedList" };
         let inside = ancestor_with(&self.doc.borrow(), host, a.start.0, &["ul", "ol"]);
@@ -951,7 +950,7 @@ impl Dom {
             } else {
                 let at = self.wrap(it, kids[first as usize])?;
                 call(self, it, hw, "insertBefore", &[list, at])?;
-                let mut pending: Option<Value> = None;
+                let mut pending: Option<E::Raw> = None;
                 for &k in &kids[first as usize..=last as usize] {
                     let kw = self.wrap(it, k)?;
                     let (block, is_list) = {
@@ -991,7 +990,7 @@ impl Dom {
     }
 
     /// `createLink`: wrap the selection in `a`, or put an `a` with the URL as its text at the caret.
-    fn create_link(&self, it: &mut Interp<'_>, url: &str) -> R<bool> {
+    fn create_link(&self, it: &mut E::Vm, url: &str) -> R<E, bool> {
         if url.is_empty() {
             return Ok(false);
         }
@@ -1018,7 +1017,7 @@ impl Dom {
     }
 
     /// `unlink` and `removeFormat`: unwrap the elements with a tag in `tags` that touch the selection.
-    fn unwrap_command(&self, it: &mut Interp<'_>, tags: &[&str]) -> R<bool> {
+    fn unwrap_command(&self, it: &mut E::Vm, tags: &[&str]) -> R<E, bool> {
         let Some((a, host)) = self.editing(it)? else { return Ok(false) };
         if self.unwrap_in(it, &a, host, tags)? {
             self.input_event(it, host, "formatRemove", None)?;
@@ -1027,7 +1026,7 @@ impl Dom {
     }
 
     /// `insertHTML`: replace the selection with the parsed fragment, the caret after it.
-    fn insert_html(&self, it: &mut Interp<'_>, html: &str) -> R<bool> {
+    fn insert_html(&self, it: &mut E::Vm, html: &str) -> R<E, bool> {
         let Some((a, host)) = self.editing(it)? else { return Ok(false) };
         self.cut_selection(it, &a)?;
         let src = self.js_str(it, html)?;
@@ -1047,14 +1046,14 @@ impl Dom {
     }
 
     /// `selectAll`: the contents of the editing host, or of the body when the selection is not in one.
-    pub(crate) fn select_all(&self, it: &mut Interp<'_>) -> R<bool> {
+    pub(crate) fn select_all(&self, it: &mut E::Vm) -> R<E, bool> {
         let docv = doc_value(self);
         let root = match self.editing(it)? {
             Some((_, h)) => self.wrap(it, h)?,
             None => {
                 let k = self.key(it, "body")?;
-                match it.get_value(docv, k)? {
-                    Value::Object(b) => Value::Object(b),
+                match E::kind(it.get_value(docv, k)?) {
+                    Val::Object(b) => E::obj_raw(b),
                     _ => {
                         let k = self.key(it, "documentElement")?;
                         it.get_value(docv, k)?
@@ -1075,86 +1074,86 @@ const COMMANDS: [&str; 15] = [
     "insertunorderedlist", "insertorderedlist", "createlink", "unlink", "inserthtml", "removeformat",
 ];
 
-fn name_arg<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>) -> Res<'s, String> {
+fn name_arg<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, a: Args<'s>) -> Res<'s, String> {
     Ok(d.arg_str_s(s, a, 0)?.to_ascii_lowercase())
 }
 
 /// The string of the optional argument `i`: empty for `undefined`.
-fn opt_arg<'s>(d: &Dom, s: &mut Sc<'s, '_>, a: Args<'s>, i: usize) -> Res<'s, String> {
-    let v = arg_s(s, a, i);
+fn opt_arg<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, a: Args<'s>, i: usize) -> Res<'s, String> {
+    let v = arg_s::<E>(s, a, i);
     if s.type_of(v) == Type::Undefined { Ok(String::new()) } else { d.string_arg_s(s, v) }
 }
 
-fn exec_command<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn exec_command<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let name = name_arg(d, s, a)?;
     let ok = match name.as_str() {
         "inserttext" => {
             let text = opt_arg(d, s, a, 2)?;
-            old(s, |it| d.insert_text(it, &text))?
+            old::<E, _>(s, |it| d.insert_text(it, &text))?
         }
-        "delete" => old(s, |it| d.delete_back(it))?,
-        "forwarddelete" => old(s, |it| d.delete_forward(it))?,
-        "insertparagraph" => old(s, |it| d.insert_paragraph(it))?,
-        "insertlinebreak" => old(s, |it| d.insert_line_break(it))?,
-        "selectall" => old(s, |it| d.select_all(it))?,
-        "bold" => old(s, |it| d.format_inline(it, &["b", "strong"], "b", "formatBold"))?,
-        "italic" => old(s, |it| d.format_inline(it, &["i", "em"], "i", "formatItalic"))?,
-        "underline" => old(s, |it| d.format_inline(it, &["u"], "u", "formatUnderline"))?,
-        "insertunorderedlist" => old(s, |it| d.list(it, "ul"))?,
-        "insertorderedlist" => old(s, |it| d.list(it, "ol"))?,
+        "delete" => old::<E, _>(s, |it| d.delete_back(it))?,
+        "forwarddelete" => old::<E, _>(s, |it| d.delete_forward(it))?,
+        "insertparagraph" => old::<E, _>(s, |it| d.insert_paragraph(it))?,
+        "insertlinebreak" => old::<E, _>(s, |it| d.insert_line_break(it))?,
+        "selectall" => old::<E, _>(s, |it| d.select_all(it))?,
+        "bold" => old::<E, _>(s, |it| d.format_inline(it, &["b", "strong"], "b", "formatBold"))?,
+        "italic" => old::<E, _>(s, |it| d.format_inline(it, &["i", "em"], "i", "formatItalic"))?,
+        "underline" => old::<E, _>(s, |it| d.format_inline(it, &["u"], "u", "formatUnderline"))?,
+        "insertunorderedlist" => old::<E, _>(s, |it| d.list(it, "ul"))?,
+        "insertorderedlist" => old::<E, _>(s, |it| d.list(it, "ol"))?,
         "createlink" => {
             let url = opt_arg(d, s, a, 2)?;
-            old(s, |it| d.create_link(it, &url))?
+            old::<E, _>(s, |it| d.create_link(it, &url))?
         }
-        "unlink" => old(s, |it| d.unwrap_command(it, &["a"]))?,
-        "removeformat" => old(s, |it| d.unwrap_command(it, &["b", "strong", "i", "em", "u", "s", "strike", "sub", "sup", "font", "span"]))?,
+        "unlink" => old::<E, _>(s, |it| d.unwrap_command(it, &["a"]))?,
+        "removeformat" => old::<E, _>(s, |it| d.unwrap_command(it, &["b", "strong", "i", "em", "u", "s", "strike", "sub", "sup", "font", "span"]))?,
         "inserthtml" => {
             let html = opt_arg(d, s, a, 2)?;
-            old(s, |it| d.insert_html(it, &html))?
+            old::<E, _>(s, |it| d.insert_html(it, &html))?
         }
         _ => false,
     };
     Ok(s.boolean(ok))
 }
 
-fn query_supported<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn query_supported<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let name = name_arg(d, s, a)?;
     Ok(s.boolean(COMMANDS.contains(&name.as_str())))
 }
 
-fn query_enabled<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn query_enabled<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let name = name_arg(d, s, a)?;
     let on = match name.as_str() {
         "selectall" => true,
-        n if COMMANDS.contains(&n) => old(s, |it| d.editing(it))?.is_some(),
+        n if COMMANDS.contains(&n) => old::<E, _>(s, |it| d.editing(it))?.is_some(),
         _ => false,
     };
     Ok(s.boolean(on))
 }
 
-fn query_state<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn query_state<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let name = name_arg(d, s, a)?;
-    let on = old(s, |it| d.format_state(it, &name))?;
+    let on = old::<E, _>(s, |it| d.format_state(it, &name))?;
     Ok(s.boolean(on))
 }
 
-fn query_indeterm<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn query_indeterm<'s, E: Eng>(_: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     Ok(s.boolean(false))
 }
 
-fn query_value<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn query_value<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     d.js_str_s(s, "")
 }
 
 // ------------------------------------------------------------------------------------ HTMLElement
 
-fn is_content_editable<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn is_content_editable<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.nd_s(s, this)?;
     let on = editable(&d.doc.borrow(), n);
     Ok(s.boolean(on))
 }
 
-fn content_editable<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn content_editable<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.nd_s(s, this)?;
     if a.len() == 0 {
         let v = attr(&d.doc.borrow(), n, "contenteditable").map(str::to_ascii_lowercase);
@@ -1168,11 +1167,11 @@ fn content_editable<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s
     let v = d.arg_str_s(s, a, 0)?.to_ascii_lowercase();
     let recv = bare_js_api::Engine::raw(s.engine(), this);
     match v.as_str() {
-        "inherit" => old(s, |it| {
+        "inherit" => old::<E, _>(s, |it| {
             let k = d.js_str(it, "contenteditable")?;
             call(d, it, recv, "removeAttribute", &[k])
         })?,
-        "true" | "false" | "plaintext-only" => old(s, |it| {
+        "true" | "false" | "plaintext-only" => old::<E, _>(s, |it| {
             let (k, x) = (d.js_str(it, "contenteditable")?, d.js_str(it, &v)?);
             call(d, it, recv, "setAttribute", &[k, x])
         })?,
@@ -1181,7 +1180,7 @@ fn content_editable<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s
     Ok(s.undefined())
 }
 
-pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
     let doc = d.p().document;
     table!(rows1 = [
         Row::method(1, "execCommand", 1, exec_command),
@@ -1194,6 +1193,6 @@ pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
         Row::get(2, "contentEditable", content_editable, Some(content_editable)),
     ]);
     let targets = [d.obj_local(s, doc), d.obj_local(s, d.p().html)];
-    d.install_rows(s, &targets, &rows1::T)?;
+    d.install_rows(s, &targets, &rows1::T::<E>::V)?;
     Ok(())
 }

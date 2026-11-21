@@ -31,11 +31,10 @@
 //! `import()`: the engine queues the call; `after_js` (every microtask checkpoint) answers it: load the graph, link, evaluate, and settle
 //! the promise with the namespace. A fetch or resolution failure rejects with a `TypeError`, a syntax error with a `SyntaxError`.
 
+use crate::eng::{Eng, Fault, Ops, PState, Val};
 use super::{EvTarget, Flow, Run, Stop, WS, download, label};
 use crate::resources::{self, Expect, JS_TYPES, Target};
 use bare_html::dom::NodeId;
-use bare_js::eval::{Error, PromiseStatus};
-use bare_js::value::{ObjId, Value};
 use bare_js_api::Persistent;
 use bare_url::Url;
 use std::collections::{HashMap, HashSet};
@@ -70,12 +69,12 @@ fn is_data(spec: &str) -> bool {
 }
 
 /// Why a graph did not load.
-pub(super) enum Load {
+pub(super) enum Load<E: Eng> {
     /// A download failed: the element gets `error`.
     Net(String),
     /// A syntax error or a bad specifier: reported as an exception. The value is held until it is reported or rejects an `import()`.
     Throw(Persistent),
-    Fatal(Error),
+    Fatal(Fault<E>),
 }
 
 // ------------------------------------------------------------------------------------------- import maps
@@ -324,7 +323,7 @@ fn copy(u: &Url) -> Url {
     Url { scheme: u.scheme, host: u.host.clone(), port: u.port, path: u.path.clone() }
 }
 
-impl Run<'_> {
+impl<E: Eng> Run<'_, E> {
     /// The base URL of the document: where an inline module and `import()` in a classic script resolve from.
     pub(super) fn doc_base(&self) -> Option<Url> {
         self.dom.scripts.base.borrow().as_deref().and_then(|b| Url::parse(b).ok())
@@ -368,14 +367,14 @@ impl Run<'_> {
 
     /// A `TypeError` object (the value to throw).
     fn type_error_value(&mut self, msg: &str) -> Persistent {
-        let v = match self.b.it.type_error(msg) {
-            Error::Throw(v) => v,
-            _ => Value::Undefined,
+        let v = match self.b.it.type_error_o(msg) {
+            Fault::Throw(v) => v,
+            _ => E::undef(),
         };
         self.b.it.persist_value(v)
     }
 
-    fn resolve_spec(&mut self, spec: &str, referrer: &Url) -> Result<Url, Load> {
+    fn resolve_spec(&mut self, spec: &str, referrer: &Url) -> Result<Url, Load<E>> {
         self.ensure_map(referrer);
         let r = self.dom.scripts.modules.borrow().resolve(spec, referrer);
         r.map_err(|m| Load::Throw(self.type_error_value(&m)))
@@ -407,7 +406,7 @@ impl Run<'_> {
 
     /// Load the module at `url` and everything it imports. `text` is the source when the caller has downloaded it. On an error the
     /// modules that this call made are forgotten, so that no module with a missing import stays in the cache.
-    pub(super) fn load_graph(&mut self, url: &Url, text: Option<String>) -> Result<u32, Load> {
+    pub(super) fn load_graph(&mut self, url: &Url, text: Option<String>) -> Result<u32, Load<E>> {
         let mut made = Vec::new();
         let r = self.load_rec(url, text, 0, &mut made);
         if r.is_err() {
@@ -420,11 +419,11 @@ impl Run<'_> {
     }
 
     /// An inline module: parsed with the document URL, not cached by URL.
-    fn load_inline(&mut self, base: &Url, text: &str) -> Result<u32, Load> {
+    fn load_inline(&mut self, base: &Url, text: &str) -> Result<u32, Load<E>> {
         let mut made = Vec::new();
-        let id = match self.b.it.module_parse(text, &base.to_string()) {
+        let id = match self.b.it.module_parse_o(text, &base.to_string()) {
             Ok(id) => id,
-            Err(Error::Throw(v)) => return Err(Load::Throw(self.b.it.persist_value(v))),
+            Err(Fault::Throw(v)) => return Err(Load::Throw(self.b.it.persist_value(v))),
             Err(e) => return Err(Load::Fatal(e)),
         };
         let r = self.load_deps(id, base, 0, &mut made).map(|()| id);
@@ -437,7 +436,7 @@ impl Run<'_> {
         r
     }
 
-    fn load_rec(&mut self, url: &Url, text: Option<String>, depth: u32, made: &mut Vec<String>) -> Result<u32, Load> {
+    fn load_rec(&mut self, url: &Url, text: Option<String>, depth: u32, made: &mut Vec<String>) -> Result<u32, Load<E>> {
         let key = url.to_string();
         if let Some(&id) = self.dom.scripts.modules.borrow().ids.get(&key) {
             return Ok(id);
@@ -449,9 +448,9 @@ impl Run<'_> {
             Some(t) => t,
             None => self.module_text(url).map_err(Load::Net)?,
         };
-        let id = match self.b.it.module_parse(&text, &key) {
+        let id = match self.b.it.module_parse_o(&text, &key) {
             Ok(id) => id,
-            Err(Error::Throw(v)) => return Err(Load::Throw(self.b.it.persist_value(v))),
+            Err(Fault::Throw(v)) => return Err(Load::Throw(self.b.it.persist_value(v))),
             Err(e) => return Err(Load::Fatal(e)),
         };
         self.dom.scripts.modules.borrow_mut().ids.insert(key.clone(), id);
@@ -465,7 +464,7 @@ impl Run<'_> {
     /// reads the document directory).
     #[cold]
     #[inline(never)]
-    fn load_data(&mut self, spec: &str, depth: u32, made: &mut Vec<String>) -> Result<u32, Load> {
+    fn load_data(&mut self, spec: &str, depth: u32, made: &mut Vec<String>) -> Result<u32, Load<E>> {
         if let Some(&id) = self.dom.scripts.modules.borrow().ids.get(spec) {
             return Ok(id);
         }
@@ -480,9 +479,9 @@ impl Run<'_> {
         let Some(bytes) = crate::images::data_url(spec) else { return Err(Load::Net("bad data: URL".into())) };
         let Some(base) = self.doc_base() else { return Err(Load::Net("no base URL".into())) };
         let text = String::from_utf8_lossy(&bytes).into_owned();
-        let id = match self.b.it.module_parse(&text, spec) {
+        let id = match self.b.it.module_parse_o(&text, spec) {
             Ok(id) => id,
-            Err(Error::Throw(v)) => return Err(Load::Throw(self.b.it.persist_value(v))),
+            Err(Fault::Throw(v)) => return Err(Load::Throw(self.b.it.persist_value(v))),
             Err(e) => return Err(Load::Fatal(e)),
         };
         self.dom.scripts.modules.borrow_mut().ids.insert(spec.to_string(), id);
@@ -492,8 +491,8 @@ impl Run<'_> {
     }
 
     /// Resolve the imports of module `id` (at `url`), fetch them (in parallel from two), and give them to the engine.
-    fn load_deps(&mut self, id: u32, url: &Url, depth: u32, made: &mut Vec<String>) -> Result<(), Load> {
-        let specs = self.b.it.module_requests(id);
+    fn load_deps(&mut self, id: u32, url: &Url, depth: u32, made: &mut Vec<String>) -> Result<(), Load<E>> {
+        let specs = self.b.it.module_requests_o(id);
         let mut urls = Vec::with_capacity(specs.len());
         for s in &specs {
             urls.push(if is_data(s) { Dep::Data(s.clone()) } else { Dep::Url(self.resolve_spec(s, url)?) });
@@ -524,7 +523,7 @@ impl Run<'_> {
                 Dep::Data(s) => self.load_data(s, depth + 1, made)?,
             });
         }
-        self.b.it.module_set_requested(id, &deps);
+        self.b.it.module_set_requested_o(id, &deps);
         Ok(())
     }
 
@@ -556,20 +555,20 @@ impl Run<'_> {
 
     /// Link and evaluate. A link error is reported. The promise of the evaluation is watched (`settle_evals`).
     fn run_graph(&mut self, id: u32, what: &str) -> Flow {
-        match self.b.it.module_link(id) {
+        match self.b.it.module_link_o(id) {
             Ok(()) => {}
-            Err(Error::Throw(v)) => {
+            Err(Fault::Throw(v)) => {
                 self.script_threw(v, what);
                 return Ok(());
             }
             Err(e) => return Err(self.fatal(e, what)),
         }
-        match self.b.it.module_evaluate(id) {
+        match self.b.it.module_evaluate_o(id) {
             Ok(p) => {
-                let p = self.b.it.persist_value(Value::Object(p));
+                let p = self.b.it.persist_value(E::obj_raw(p));
                 self.dom.scripts.modules.borrow_mut().evals.push((p, what.to_string()));
             }
-            Err(Error::Throw(v)) => self.script_threw(v, what),
+            Err(Fault::Throw(v)) => self.script_threw(v, what),
             Err(e) => return Err(self.fatal(e, what)),
         }
         Ok(())
@@ -579,7 +578,7 @@ impl Run<'_> {
         self.res.tasks += 1;
         self.res.load_errors += 1;
         self.diag(format!("script failed: {what}: {why}"));
-        self.fire(EvTarget::Node(node), "error", false)
+        self.fire(EvTarget::Node::<E>(node), "error", false)
     }
 
     /// Report the evaluations that were seen rejected since the last checkpoint.
@@ -591,8 +590,8 @@ impl Run<'_> {
         let mut keep = Vec::new();
         for (p, what) in list {
             match self.b.it.promise_status(self.b.it.persistent_value(&p)) {
-                Some(PromiseStatus::Pending) => keep.push((p, what)),
-                Some(PromiseStatus::Rejected(v)) => self.script_threw(v, &what),
+                Some(PState::Pending) => keep.push((p, what)),
+                Some(PState::Rejected(v)) => self.script_threw(v, &what),
                 _ => {}
             }
         }
@@ -603,14 +602,14 @@ impl Run<'_> {
     /// the document stands in (see `load_data`).
     fn import_base(&mut self, referrer: Option<u32>) -> Option<Url> {
         match referrer {
-            Some(m) => Url::parse(self.b.it.module_url(m)).ok().or_else(|| self.doc_base()),
+            Some(m) => Url::parse(self.b.it.module_url_o(m)).ok().or_else(|| self.doc_base()),
             None => self.doc_base(),
         }
     }
 
     /// The promise object of an `import()` request. The handle is the only reference the host keeps: read it where it is used.
-    fn import_promise(&self, p: &Persistent) -> ObjId {
-        let Value::Object(o) = self.b.it.persistent_value(p) else { unreachable!("an import promise is an object") };
+    fn import_promise(&self, p: &Persistent) -> E::Obj {
+        let Val::Object(o) = E::kind(self.b.it.persistent_value(p)) else { unreachable!("an import promise is an object") };
         o
     }
 
@@ -669,12 +668,12 @@ impl Run<'_> {
             };
             let promise = self.import_promise(&r.promise);
             let done = match loaded {
-                Ok(id) => self.b.it.finish_dynamic_import(promise, id),
+                Ok(id) => self.b.it.finish_dynamic_import_o(promise, id),
                 Err(Load::Net(msg)) => {
                     self.diag(msg.clone());
-                    self.b.it.fail_dynamic_import(promise, &msg)
+                    self.b.it.fail_dynamic_import_o(promise, &msg)
                 }
-                Err(Load::Throw(v)) => self.b.it.reject_dynamic_import(promise, Error::Throw(self.b.it.persistent_value(&v))),
+                Err(Load::Throw(v)) => self.b.it.reject_dynamic_import_o(promise, Fault::Throw(self.b.it.persistent_value(&v))),
                 Err(Load::Fatal(e)) => return Err(self.fatal(e, "import()")),
             };
             if let Err(e) = done {

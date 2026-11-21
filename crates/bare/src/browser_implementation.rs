@@ -11,27 +11,26 @@
 //!   iframe is the exception: `browser_frames` records its window and its created nodes. Scripts in the new document never run.
 //!   `createDocument` and `createDocumentType` are absent.
 
+use crate::eng::{Eng, Ops};
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_html::dom::NodeData;
-use bare_js::eval::Interp;
-use bare_js::value::{ObjId, Value};
 use bare_js_api::{Args, Attrs, HostFn, Local, Type};
 
 /// `implementation.createHTMLDocument(title)`.
-fn create_html_document<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn create_html_document<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     receiver(d, s, this)?;
-    let v = arg_s(s, a, 0);
+    let v = arg_s::<E>(s, a, 0);
     let title = if s.type_of(v) == Type::Undefined { None } else { Some(d.string_arg_s(s, v)?) };
     d.html_document(s, title)
 }
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// A document with `html`, `head` and `body` outside the tree. An iframe with an initial `about:blank` document gets one too.
-    pub(crate) fn new_blank_document(&self, it: &mut Interp<'_>) -> R<Value> {
-        run_v(it, |s| self.html_document(s, None))
+    pub(crate) fn new_blank_document(&self, it: &mut E::Vm) -> R<E, E::Raw> {
+        run_v::<E>(it, |s| self.html_document(s, None))
     }
-    fn html_document<'s>(&self, s: &mut Sc<'s, '_>, title: Option<String>) -> Res<'s, Local<'s>> {
+    fn html_document<'s>(&self, s: &mut Sc<'s, E>, title: Option<String>) -> Res<'s, Local<'s>> {
     let d = self;
     let n = {
         let mut doc = d.doc.borrow_mut();
@@ -51,38 +50,38 @@ impl Dom {
     }
 }
 
-fn receiver<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, ()> {
-    if obj_id(s, this).is_some_and(|o| d.implementation.get() == Some(o)) { return Ok(()); }
+fn receiver<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, ()> {
+    if obj_id::<E>(s, this).is_some_and(|o| d.implementation.get() == Some(o)) { return Ok(()); }
     Err(s.type_error("Illegal invocation"))
 }
 
-fn has_feature<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn has_feature<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     receiver(d, s, this)?;
     Ok(s.boolean(true))
 }
 
 /// The getter of `document.implementation`.
-fn implementation<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn implementation<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let o = match d.implementation.get() {
         Some(o) => o,
-        None => old(s, |it| make_implementation(d, it))?,
+        None => old::<E, _>(s, |it| make_implementation(d, it))?,
     };
     Ok(d.obj_local(s, o))
 }
 
-fn make_implementation(d: &Dom, it: &mut Interp<'_>) -> R<ObjId> {
+fn make_implementation<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, E::Obj> {
     let proto = d.obj(it, it.object_prototype())?;
     d.def_method_s(it, proto, "createHTMLDocument", 0, create_html_document)?;
     d.def_method_s(it, proto, "hasFeature", 0, has_feature)?;
     crate::browser_lazy::tag(d, it, proto, "DOMImplementation")?;
     let ctor = d.add_fn_s_obj(it, illegal_constructor, "DOMImplementation", 0, HostFn::Ctor)?;
     let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
-    it.define_data(ctor, kp, Value::Object(proto), false, false, false)?;
-    it.define_data(proto, kc, Value::Object(ctor), true, false, true)?;
+    it.define_data(ctor, kp, E::obj_raw(proto), false, false, false)?;
+    it.define_data(proto, kc, E::obj_raw(ctor), true, false, true)?;
     let kg = d.key(it, "DOMImplementation")?;
     let g = it.global_object();
-    if it.heap.peek_own_property(g, kg).map_err(|e| it.heap_error(e))?.is_some_and(|p| matches!(p, bare_js::heap::Property::Accessor { .. })) {
-        it.define_data(g, kg, Value::Object(ctor), true, false, true)?;
+    if it.h_peek_own(g, kg)?.is_some_and(|p| matches!(p, crate::eng::Prop::Accessor { .. })) {
+        it.define_data(g, kg, E::obj_raw(ctor), true, false, true)?;
     }
     let o = d.obj(it, proto)?;
     d.implementation.set(Some(o));
@@ -90,7 +89,7 @@ fn make_implementation(d: &Dom, it: &mut Interp<'_>) -> R<ObjId> {
     Ok(o)
 }
 
-fn implementation_global<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn implementation_global<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let v = match a.get(0) {
         Some(v) => v,
         None => {
@@ -105,7 +104,7 @@ fn implementation_global<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Ar
 }
 
 /// Installed with the late members of `Document` (`browser_dom::install_late`).
-pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
     d.def_get_at(s, d.p().document, "implementation", implementation, None)?;
     table!(lazy = [
         Row::both(1, "DOMImplementation", implementation_global),
@@ -113,12 +112,12 @@ pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
         Row::both(1, "XMLSerializer", serializer_global),
     ]);
     let g = s.global();
-    d.install_rows(s, &[g], &lazy::T)
+    d.install_rows(s, &[g], &lazy::T::<E>::V)
 }
 
 // XML MIME types use the HTML parser. Case, namespaces, errors and serialization
 // follow HTML rules. This host does not implement an XML parser.
-fn parse_from_string<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn parse_from_string<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let text = d.arg_str_s(s, a, 0)?;
     let mime = d.arg_str_s(s, a, 1)?;
     if !["text/html", "text/xml", "application/xml", "image/svg+xml"].contains(&mime.as_str()) {
@@ -165,8 +164,8 @@ fn parse_from_string<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>)
     d.wrap_s(s, root)
 }
 
-fn serialize_to_string<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    let v = arg_s(s, a, 0);
+fn serialize_to_string<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let v = arg_s::<E>(s, a, 0);
     let n = d.nd_s(s, v)?;
     let doc = d.doc.borrow();
     let whole = !matches!(doc.data(n), bare_html::dom::NodeData::Document);
@@ -175,26 +174,26 @@ fn serialize_to_string<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s
 }
 
 /// A new object of the interface whose prototype is `protos[i]` (the `new.target` prototype when a subclass makes it).
-fn construct<'s>(d: &Dom, s: &mut Sc<'s, '_>, i: usize) -> Res<'s, Local<'s>> {
+fn construct<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, i: usize) -> Res<'s, Local<'s>> {
     let default = d.obj_local(s, d.parsing_protos.get()[i].expect("interface prototype"));
     let proto = s.proto_from_new_target(default)?;
-    let proto = obj_id(s, proto).expect("a prototype is an object");
+    let proto = obj_id::<E>(s, proto).expect("a prototype is an object");
     d.obj_with_s(s, proto)
 }
 
-fn parser_construct<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn parser_construct<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     construct(d, s, 0)
 }
 
-fn serializer_construct<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn serializer_construct<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     construct(d, s, 1)
 }
 
-fn interface<'s>(d: &Dom, s: &mut Sc<'s, '_>, name: &str, h: HS, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn interface<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, name: &str, h: HS<E>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let value = match a.get(0) {
         Some(v) => v,
         None => {
-            let ctor = old(s, |it| make_interface(d, it, name, h))?;
+            let ctor = old::<E, _>(s, |it| make_interface(d, it, name, h))?;
             d.obj_local(s, ctor)
         }
     };
@@ -203,13 +202,13 @@ fn interface<'s>(d: &Dom, s: &mut Sc<'s, '_>, name: &str, h: HS, a: Args<'s>) ->
     Ok(value)
 }
 
-fn make_interface(d: &Dom, it: &mut Interp<'_>, name: &str, h: HS) -> R<ObjId> {
+fn make_interface<E: Eng>(d: &Dom<E>, it: &mut E::Vm, name: &str, h: HS<E>) -> R<E, E::Obj> {
     let i = usize::from(name == "XMLSerializer");
     let p = d.obj(it, it.object_prototype())?;
     let ctor = d.add_fn_s_obj(it, h, name, 0, HostFn::CtorNewTarget)?;
     let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
-    it.define_data(ctor, kp, Value::Object(p), false, false, false)?;
-    it.define_data(p, kc, Value::Object(ctor), true, false, true)?;
+    it.define_data(ctor, kp, E::obj_raw(p), false, false, false)?;
+    it.define_data(p, kc, E::obj_raw(ctor), true, false, true)?;
     crate::browser_lazy::tag(d, it, p, name)?;
     if i == 0 { d.def_method_s(it, p, "parseFromString", 2, parse_from_string)?; }
     else { d.def_method_s(it, p, "serializeToString", 1, serialize_to_string)?; }
@@ -220,22 +219,22 @@ fn make_interface(d: &Dom, it: &mut Interp<'_>, name: &str, h: HS) -> R<ObjId> {
     Ok(ctor)
 }
 
-fn parser_global<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn parser_global<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     interface(d, s, "DOMParser", parser_construct, a)
 }
 
-fn serializer_global<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn serializer_global<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     interface(d, s, "XMLSerializer", serializer_construct, a)
 }
 
 #[cold]
-pub(crate) fn doctype_proto(d: &Dom, it: &mut Interp<'_>) -> R<ObjId> {
+pub(crate) fn doctype_proto<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, E::Obj> {
     if let Some(p) = d.parsing_protos.get()[2] { return Ok(p); }
     let p = d.obj(it, d.p().node)?;
     let ctor = d.add_fn_s_obj(it, illegal_constructor, "DocumentType", 0, HostFn::Ctor)?;
     let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
-    it.define_data(ctor, kp, Value::Object(p), false, false, false)?;
-    it.define_data(p, kc, Value::Object(ctor), true, false, true)?;
+    it.define_data(ctor, kp, E::obj_raw(p), false, false, false)?;
+    it.define_data(p, kc, E::obj_raw(ctor), true, false, true)?;
     crate::browser_lazy::tag(d, it, p, "DocumentType")?;
     d.def_get_s(it, p, "name", doctype_name, None)?;
     d.def_get_s(it, p, "publicId", doctype_empty, None)?;
@@ -247,11 +246,11 @@ pub(crate) fn doctype_proto(d: &Dom, it: &mut Interp<'_>) -> R<ObjId> {
     Ok(p)
 }
 /// The global `DocumentType`: `v` when a script assigns it, else the constructor of the interface.
-pub(crate) fn doctype_define<'s>(d: &Dom, s: &mut Sc<'s, '_>, v: Option<Local<'s>>) -> Res<'s, Local<'s>> {
+pub(crate) fn doctype_define<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Option<Local<'s>>) -> Res<'s, Local<'s>> {
     let v = match v {
         Some(v) => v,
         None => {
-            let p = old(s, |it| doctype_proto(d, it))?;
+            let p = old::<E, _>(s, |it| doctype_proto(d, it))?;
             let p = d.obj_local(s, p);
             s.get_str(p, "constructor")?
         }
@@ -260,7 +259,7 @@ pub(crate) fn doctype_define<'s>(d: &Dom, s: &mut Sc<'s, '_>, v: Option<Local<'s
     s.define_str(g, "DocumentType", v, Attrs { writable: true, enumerable: false, configurable: true })?;
     Ok(v)
 }
-fn doctype_name<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn doctype_name<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.nd_s(s, this)?;
     let name = match *d.doc.borrow().data(n) {
         NodeData::Doctype(t) => d.doc.borrow().text(t).to_string(),
@@ -268,7 +267,7 @@ fn doctype_name<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, _: Args<'s>) -
     };
     d.js_str_s(s, &name)
 }
-fn doctype_empty<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn doctype_empty<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     doctype_name(d, s, this, a)?;
     d.js_str_s(s, "")
 }

@@ -16,7 +16,7 @@
 //! `outerHTML` and `insertAdjacentHTML` (`fragment_upgrades`), `wrap` (the prototype of a custom element after its wrapper was collected)
 //! and `Host::call`.
 //!
-//! The constructor. Each HTML interface that bare has is a constructor that reads `new.target` (`html_ctor::<K>`). The standard algorithm:
+//! The constructor. Each HTML interface that bare has is a constructor that reads `new.target` (`html_ctor::<K, _>`). The standard algorithm:
 //! no definition for `new.target` is an illegal constructor; a definition with an empty construction stack makes a new element; with one
 //! entry it takes that element (an upgrade) and marks the entry as constructed.
 //!
@@ -38,13 +38,12 @@
 //! - No `new CustomElementRegistry()`, `initialize` or scoped registries.
 //! - The `outerHTML` of an element made with `is` does not show the `is` value.
 
+use crate::eng::{Eng, Fault, Ops, Val};
 use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_dom::{make_element_s, next_composed};
 use crate::browser_scoped::*;
 use bare_html::dom::{Change, Document, FAILED, NodeData, NodeId, Ns, PRECUSTOMIZED, valid_custom_name};
-use bare_js::eval::{Error, Interp};
-use bare_js::value::{ObjId, Value};
 use bare_js_api::{Args, Attrs, Engine, HostFn, Local, Type};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{HashMap, VecDeque};
@@ -63,16 +62,18 @@ const FORM_ASSOCIATED: usize = 4;
 const FORM_RESET: usize = 5;
 const FORM_DISABLED: usize = 6;
 
-/// The interfaces that have a constructor for custom elements, in the order of `html_ctor::<K>`.
+/// The interfaces that have a constructor for custom elements, in the order of `html_ctor::<K, _>`.
 const IFACES: [&str; 15] = [
     "HTMLElement", "HTMLAnchorElement", "HTMLAreaElement", "HTMLButtonElement", "HTMLFormElement", "HTMLIFrameElement", "HTMLInputElement", "HTMLLinkElement",
     "HTMLOptionElement", "HTMLOptGroupElement", "HTMLScriptElement", "HTMLSelectElement", "HTMLTemplateElement", "HTMLTextAreaElement", "HTMLLabelElement",
 ];
 
-pub(crate) const HANDLERS: [HS; 15] = [
-    html_ctor::<0>, html_ctor::<1>, html_ctor::<2>, html_ctor::<3>, html_ctor::<4>, html_ctor::<5>, html_ctor::<6>, html_ctor::<7>,
-    html_ctor::<8>, html_ctor::<9>, html_ctor::<10>, html_ctor::<11>, html_ctor::<12>, html_ctor::<13>, html_ctor::<14>,
-];
+pub(crate) fn handlers<E: Eng>() -> [HS<E>; 15] {
+    [
+    html_ctor::<0, _>, html_ctor::<1, _>, html_ctor::<2, _>, html_ctor::<3, _>, html_ctor::<4, _>, html_ctor::<5, _>, html_ctor::<6, _>, html_ctor::<7, _>,
+    html_ctor::<8, _>, html_ctor::<9, _>, html_ctor::<10, _>, html_ctor::<11, _>, html_ctor::<12, _>, html_ctor::<13, _>, html_ctor::<14, _>,
+    ]
+}
 
 /// The HTML elements whose interface is `HTMLElement` itself (Chrome 155).
 const PLAIN: &str = "abbr acronym address article aside b basefont bdi bdo big center cite code dd dfn dt em figcaption figure footer header hgroup i kbd main mark nav nobr noembed noframes noscript plaintext rb rp rt rtc ruby s samp search section small strike strong sub summary sup tt u var wbr";
@@ -130,15 +131,15 @@ fn iface_of(local: &str) -> usize {
 }
 
 /// One definition (`customElements.define`).
-struct Def {
+struct Def<E: Eng> {
     name: Box<str>,
     /// The local name of a customized built-in element (`extends`).
     ext: Option<Box<str>>,
-    ctor: ObjId,
-    proto: ObjId,
+    ctor: E::Obj,
+    proto: E::Obj,
     /// `connectedCallback`, `disconnectedCallback`, `adoptedCallback`, `attributeChangedCallback`, then (for a form-associated definition)
     /// `formAssociatedCallback`, `formResetCallback`, `formDisabledCallback` and `formStateRestoreCallback`; `Undefined` when absent.
-    cb: [Value; 8],
+    cb: [E::Raw; 8],
     obs: Box<[Box<str>]>,
     /// `static formAssociated`, and whether `static disabledFeatures` has `internals`.
     form: bool,
@@ -169,10 +170,10 @@ struct AttrArgs {
 }
 
 #[derive(Default)]
-pub(crate) struct CeSt {
-    defs: Vec<Def>,
+pub(crate) struct CeSt<E: Eng> {
+    defs: Vec<Def<E>>,
     by_name: HashMap<Box<str>, u32>,
-    by_ctor: HashMap<ObjId, u32>,
+    by_ctor: HashMap<<E as Eng>::Obj, u32>,
     /// Some definition has `extends`: an element can need its `is` value.
     has_ext: bool,
     /// The "element definition is running" flag of the registry.
@@ -196,40 +197,40 @@ pub(crate) struct CeSt {
     /// The custom elements that a script moved into the contents of a template: their owner document is the inert one, also while they are out.
     inert: std::collections::HashSet<u32>,
     /// The state of the form-associated elements by `NodeId::index`, and the element of each `ElementInternals` and `CustomStateSet` (`browser_face.rs`).
-    pub(crate) face: HashMap<u32, crate::browser_face::Face>,
-    pub(crate) ints: HashMap<ObjId, (NodeId, bool)>,
+    pub(crate) face: HashMap<u32, crate::browser_face::Face<E>>,
+    pub(crate) ints: HashMap<<E as Eng>::Obj, (NodeId, bool)>,
     /// Some definition is form-associated: a tree change can move a form owner.
     has_face: bool,
     /// The promise of `whenDefined` for each name that is not defined yet.
     when: HashMap<Box<str>, bare_js_api::Persistent>,
-    flush: Option<ObjId>,
+    flush: Option<<E as Eng>::Obj>,
     /// The prototype, the constructor and the one registry object, once made.
-    reg: Option<[ObjId; 3]>,
+    reg: Option<[<E as Eng>::Obj; 3]>,
 }
 
 /// The state of custom elements of one realm. `on` is true after the first `define`.
 #[derive(Default)]
-pub(crate) struct Ce {
+pub(crate) struct Ce<E: Eng> {
     pub(crate) on: Cell<bool>,
     /// The parser-blocking script that runs now while the page loads (see `release`).
     pub(crate) parsing: Cell<Option<NodeId>>,
     /// The prototype and the constructor of `HTMLUnknownElement`, once made.
-    unk: OnceCell<[ObjId; 2]>,
+    unk: OnceCell<[<E as Eng>::Obj; 2]>,
     /// The prototypes and constructors of `ElementInternals` and `CustomStateSet`, once made.
-    pub(crate) int: OnceCell<[ObjId; 4]>,
+    pub(crate) int: OnceCell<[<E as Eng>::Obj; 4]>,
     /// The inert document that owns the contents of the templates (a `Document` node outside the tree), once needed.
     tpl: Cell<Option<NodeId>>,
-    st: OnceCell<Rc<RefCell<CeSt>>>,
+    st: OnceCell<Rc<RefCell<CeSt<E>>>>,
 }
 
-impl Ce {
+impl<E: Eng> Ce<E> {
     /// The state for the watcher of the document, once a definition was made.
-    pub(crate) fn watching(&self) -> Option<Rc<RefCell<CeSt>>> {
+    pub(crate) fn watching(&self) -> Option<Rc<RefCell<CeSt<E>>>> {
         self.on.get().then(|| self.st.get().cloned()).flatten()
     }
 }
 
-pub(crate) fn st(d: &Dom) -> &Rc<RefCell<CeSt>> {
+pub(crate) fn st<E: Eng>(d: &Dom<E>) -> &Rc<RefCell<CeSt<E>>> {
     d.ce.st.get_or_init(Default::default)
 }
 
@@ -257,7 +258,7 @@ fn each_element(doc: &Document, root: NodeId, mut f: impl FnMut(NodeId)) {
     }
 }
 
-impl CeSt {
+impl<E: Eng> CeSt<E> {
     fn enqueue(&mut self, el: NodeId, r: Reaction) {
         if self.pending >= MAX_PENDING {
             self.overflow = true;
@@ -324,11 +325,11 @@ impl CeSt {
                             // "Adopt": the owner document changes when the element enters or leaves the contents of a template.
                             if inert != self.inert.contains(&(e.index() as u32)) {
                                 if inert { self.inert.insert(e.index() as u32) } else { self.inert.remove(&(e.index() as u32)) };
-                                if !matches!(self.defs[s as usize].cb[ADOPTED], Value::Undefined) {
+                                if !matches!(E::kind(self.defs[s as usize].cb[ADOPTED]), Val::Undefined) {
                                     self.enqueue(e, Reaction::Adopted(inert));
                                 }
                             }
-                            if conn && !matches!(self.defs[s as usize].cb[CONNECTED], Value::Undefined) {
+                            if conn && !matches!(E::kind(self.defs[s as usize].cb[CONNECTED]), Val::Undefined) {
                                 self.enqueue(e, Reaction::Connected);
                             }
                         }
@@ -355,7 +356,7 @@ impl CeSt {
                 let forms = self.has_face && els.iter().any(|&e| doc.is_html(e, "form"));
                 for e in els {
                     let Some(s) = doc.custom_state(e).filter(|&s| s < PRECUSTOMIZED) else { continue };
-                    if conn && !matches!(self.defs[s as usize].cb[DISCONNECTED], Value::Undefined) {
+                    if conn && !matches!(E::kind(self.defs[s as usize].cb[DISCONNECTED]), Val::Undefined) {
                         self.enqueue(e, Reaction::Disconnected);
                     }
                     if self.defs[s as usize].form {
@@ -383,7 +384,7 @@ impl CeSt {
                 }
                 let def = &self.defs[s as usize];
                 let local = doc.attr_local(name);
-                if matches!(def.cb[ATTRIBUTE], Value::Undefined) || !def.obs.iter().any(|o| &**o == local) {
+                if matches!(E::kind(def.cb[ATTRIBUTE]), Val::Undefined) || !def.obs.iter().any(|o| &**o == local) {
                     return;
                 }
                 let args = AttrArgs { name: local.into(), old: old.map(|s| doc.text(s).into()), new: new.map(|s| doc.text(s).into()), ns: doc.attr_ns(name).map(Ns::uri) };
@@ -449,14 +450,14 @@ impl CeSt {
     }
 }
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// Open the scope of "custom element reactions" of a host call (`Dom::dispatch_host`). `ce_pop` closes it.
     pub(crate) fn ce_enter(&self) {
         st(self).borrow_mut().stack.push(Vec::new());
     }
 
     /// End a scope: run the reactions of its element queue, then queue the microtask of the backup queue when it is needed.
-    pub(crate) fn ce_pop(&self, it: &mut Interp<'_>) -> R<()> {
+    pub(crate) fn ce_pop(&self, it: &mut E::Vm) -> R<E, ()> {
         let els = st(self).borrow_mut().stack.pop().unwrap_or_default();
         if !els.is_empty() {
             self.invoke(it, els)?;
@@ -480,11 +481,11 @@ impl Dom {
                 f
             }
         };
-        it.queue_microtask(Value::Object(f))
+        it.queue_microtask_o(E::obj_raw(f))
     }
 
     /// "Invoke custom element reactions": for each element, in order, run its reactions until its queue is empty.
-    fn invoke(&self, it: &mut Interp<'_>, els: Vec<NodeId>) -> R<()> {
+    fn invoke(&self, it: &mut E::Vm, els: Vec<NodeId>) -> R<E, ()> {
         for e in els {
             loop {
                 let r = {
@@ -499,14 +500,14 @@ impl Dom {
                     s.pending -= 1;
                     r
                 };
-                it.charge(1)?;
+                it.charge_o(1)?;
                 self.react(it, e, r)?;
             }
         }
         Ok(())
     }
 
-    fn react(&self, it: &mut Interp<'_>, el: NodeId, r: Reaction) -> R<()> {
+    fn react(&self, it: &mut E::Vm, el: NodeId, r: Reaction) -> R<E, ()> {
         let (slot, args) = match r {
             Reaction::Upgrade(i) => return self.upgrade(it, el, i),
             Reaction::Connected => (CONNECTED, None),
@@ -521,20 +522,20 @@ impl Dom {
         let f = st(self).borrow().defs[s as usize].cb[slot];
         let mut argv = Vec::new();
         if let Some(a) = args {
-            let opt = |it: &mut Interp<'_>, v: &Option<Box<str>>| match v {
+            let opt = |it: &mut E::Vm, v: &Option<Box<str>>| match v {
                 Some(s) => self.js_str(it, s),
-                None => Ok(Value::Null),
+                None => Ok(E::null()),
             };
             argv.push(self.js_str(it, &a.name)?);
             argv.push(opt(it, &a.old)?);
             argv.push(opt(it, &a.new)?);
             argv.push(match a.ns {
                 Some(u) => self.js_str(it, u)?,
-                None => Value::Null,
+                None => E::null(),
             });
         }
         let this = self.wrap(it, el)?;
-        self.guarded(it, el, |it| it.call(f, this, &argv).map(|_| ()))
+        self.guarded(it, el, |it| it.call_o(f, this, &argv).map(|_| ()))
     }
 
     /// Is `n` a form-associated custom element (also while its constructor runs)?
@@ -567,23 +568,23 @@ impl Dom {
     }
 
     /// Call the callback `slot` of the custom element `el` when its definition has one.
-    fn form_cb(&self, it: &mut Interp<'_>, el: NodeId, slot: usize, args: &[Value]) -> R<()> {
+    fn form_cb(&self, it: &mut E::Vm, el: NodeId, slot: usize, args: &[E::Raw]) -> R<E, ()> {
         let Some(s) = self.doc.borrow().custom_state(el).filter(|&s| s < PRECUSTOMIZED) else { return Ok(()) };
         let f = st(self).borrow().defs[s as usize].cb[slot];
-        if matches!(f, Value::Undefined) {
+        if matches!(E::kind(f), Val::Undefined) {
             return Ok(());
         }
         let this = self.wrap(it, el)?;
-        self.guarded(it, el, |it| it.call(f, this, args).map(|_| ()))
+        self.guarded(it, el, |it| it.call_o(f, this, args).map(|_| ()))
     }
 
-    fn form_assoc(&self, it: &mut Interp<'_>, el: NodeId, owner: Option<NodeId>) -> R<()> {
+    fn form_assoc(&self, it: &mut E::Vm, el: NodeId, owner: Option<NodeId>) -> R<E, ()> {
         let form = self.wrap_opt(it, owner)?;
         self.form_cb(it, el, FORM_ASSOCIATED, &[form])
     }
 
     /// `formAssociatedCallback` and `formDisabledCallback` for what changed since the last check of `el`.
-    fn form_check(&self, it: &mut Interp<'_>, el: NodeId) -> R<()> {
+    fn form_check(&self, it: &mut E::Vm, el: NodeId) -> R<E, ()> {
         if !self.is_face(el) {
             return Ok(());
         }
@@ -597,7 +598,7 @@ impl Dom {
             self.form_assoc(it, el, owner)?;
         }
         if dis {
-            self.form_cb(it, el, FORM_DISABLED, &[Value::Bool(disabled)])?;
+            self.form_cb(it, el, FORM_DISABLED, &[E::bool_raw(disabled)])?;
         }
         Ok(())
     }
@@ -606,14 +607,14 @@ impl Dom {
     pub(crate) fn ce_form_reset(&self, el: NodeId) {
         let mut s = st(self).borrow_mut();
         if let Some(i) = self.doc.borrow().custom_state(el).filter(|&i| i < PRECUSTOMIZED)
-            && !matches!(s.defs[i as usize].cb[FORM_RESET], Value::Undefined)
+            && !matches!(E::kind(s.defs[i as usize].cb[FORM_RESET]), Val::Undefined)
         {
             s.enqueue(el, Reaction::FormReset);
         }
     }
 
     /// `adoptedCallback(oldDocument, newDocument)`.
-    fn react_adopted(&self, it: &mut Interp<'_>, el: NodeId, to_inert: bool) -> R<()> {
+    fn react_adopted(&self, it: &mut E::Vm, el: NodeId, to_inert: bool) -> R<E, ()> {
         let Some(s) = self.doc.borrow().custom_state(el).filter(|&s| s < PRECUSTOMIZED) else { return Ok(()) };
         let f = st(self).borrow().defs[s as usize].cb[ADOPTED];
         let tpl = template_document(self);
@@ -621,13 +622,13 @@ impl Dom {
         let (old, new) = if to_inert { (main, tpl) } else { (tpl, main) };
         let argv = [self.wrap(it, old)?, self.wrap(it, new)?];
         let this = self.wrap(it, el)?;
-        self.guarded(it, el, |it| it.call(f, this, &argv).map(|_| ()))
+        self.guarded(it, el, |it| it.call_o(f, this, &argv).map(|_| ()))
     }
 
     /// Run `f`. An exception is reported (the page goes on, as a listener that throws); any other error ends the run.
-    pub(crate) fn guarded(&self, it: &mut Interp<'_>, el: NodeId, f: impl FnOnce(&mut Interp<'_>) -> R<()>) -> R<()> {
+    pub(crate) fn guarded(&self, it: &mut E::Vm, el: NodeId, f: impl FnOnce(&mut E::Vm) -> R<E, ()>) -> R<E, ()> {
         match f(it) {
-            Err(Error::Throw(v)) => {
+            Err(Fault::Throw(v)) => {
                 self.report(it, v, "custom-element", Target::Node(el));
                 Ok(())
             }
@@ -636,7 +637,7 @@ impl Dom {
     }
 
     /// "Upgrade an element".
-    fn upgrade(&self, it: &mut Interp<'_>, el: NodeId, idx: u32) -> R<()> {
+    fn upgrade(&self, it: &mut E::Vm, el: NodeId, idx: u32) -> R<E, ()> {
         if self.doc.borrow().custom_state(el).is_some() {
             return Ok(());
         }
@@ -676,16 +677,16 @@ impl Dom {
     }
 
     /// `Construct(ctor)` and the check that the result is `wrapper`.
-    fn construct_checked(&self, it: &mut Interp<'_>, ctor: ObjId, wrapper: Value) -> R<()> {
-        match (it.host_construct(Value::Object(ctor), &[], None)?, wrapper) {
-            (Value::Object(a), Value::Object(b)) if a == b => Ok(()),
-            _ => Err(it.type_error("Custom element constructor did not return the element that is being upgraded")),
+    fn construct_checked(&self, it: &mut E::Vm, ctor: E::Obj, wrapper: E::Raw) -> R<E, ()> {
+        match (E::kind(it.host_construct(E::obj_raw(ctor), &[], None)?), E::kind(wrapper)) {
+            (Val::Object(a), Val::Object(b)) if a == b => Ok(()),
+            _ => Err(it.type_error_o("Custom element constructor did not return the element that is being upgraded")),
         }
     }
 
     /// The parser reaches the script `upto` (`None`: the end of the page): make the held elements before it, in tree order, as the parser would have
     /// made them (`parse_construct`). The loader calls it before each parser-blocking script.
-    pub(crate) fn ce_release(&self, it: &mut Interp<'_>, upto: Option<NodeId>) -> R<()> {
+    pub(crate) fn ce_release(&self, it: &mut E::Vm, upto: Option<NodeId>) -> R<E, ()> {
         if self.ce.st.get().is_none_or(|s| s.borrow().held.is_empty()) {
             return Ok(());
         }
@@ -714,7 +715,7 @@ impl Dom {
     /// already built, so `el` is taken out of it (`Document::parse_cut`): the constructor sees what the parser has when it calls it, an element with
     /// no attributes, no children and no parent, in a document that stops before it. Then the parser adds the attributes and inserts the element,
     /// and the reactions run (`attributeChangedCallback`, `connectedCallback`) while the element has no children yet. Its children come back last.
-    fn parse_construct(&self, it: &mut Interp<'_>, el: NodeId) -> R<()> {
+    fn parse_construct(&self, it: &mut E::Vm, el: NodeId) -> R<E, ()> {
         let found = {
             let (doc, s) = (self.doc.borrow(), st(self).borrow());
             if doc.custom_state(el).is_some() || !connected(&doc, el) { None } else { s.def_of(&doc, el).map(|i| (i, s.defs[i as usize].ctor, doc.element_name(el).to_string())) }
@@ -729,14 +730,14 @@ impl Dom {
             self.doc.borrow_mut().set_custom_state(el, Some(PRECUSTOMIZED));
         }
         let r = self.construct_checked(it, ctor, wrapper).and_then(|()| {
-            run(it, |s| {
+            run::<E, _>(it, |s| {
                 let w = s.engine().raw_local(&wrapper);
                 check_result(self, s, w, &name).map(drop)
             })
         });
         st(self).borrow_mut().defs[idx as usize].stack.pop();
         let r = match r {
-            Err(Error::Throw(e)) => Err(e),
+            Err(Fault::Throw(e)) => Err(e),
             Err(e) => {
                 st(self).borrow_mut().stack.pop();
                 self.doc.borrow_mut().parse_close(cut);
@@ -755,7 +756,7 @@ impl Dom {
                 }
             }
             Err(e) => {
-                run(it, |s| {
+                run::<E, _>(it, |s| {
                     let w = s.engine().raw_local(&wrapper);
                     self.make_unknown(s, el, w)
                 })?;
@@ -767,7 +768,7 @@ impl Dom {
             }
         }
         // The constructor was the only script on the stack: its microtask checkpoint comes before the reactions.
-        let r = it.drain_microtasks().map(drop).and_then(|()| self.ce_pop(it));
+        let r = it.drain_microtasks_o().map(drop).and_then(|()| self.ce_pop(it));
         self.doc.borrow_mut().parse_close(cut);
         r
     }
@@ -806,7 +807,7 @@ impl Dom {
     }
 
     /// The prototype that a new wrapper of the element `n` must have: that of its definition when it is a custom element.
-    pub(crate) fn ce_proto(&self, doc: &Document, n: NodeId, natural: ObjId) -> ObjId {
+    pub(crate) fn ce_proto(&self, doc: &Document, n: NodeId, natural: E::Obj) -> E::Obj {
         match (doc.custom_state(n), self.ce.st.get()) {
             (Some(s), Some(st)) if s < PRECUSTOMIZED => st.borrow().defs[s as usize].proto,
             (Some(FAILED), Some(st)) if st.borrow().unk.contains(&(n.index() as u32)) => self.ce.unk.get().map_or(natural, |u| u[0]),
@@ -814,19 +815,19 @@ impl Dom {
         }
     }
 
-    pub(crate) fn ce_roots(&self, out: &mut Roots<'_, '_>) {
+    pub(crate) fn ce_roots(&self, out: &mut Roots<'_, '_, E>) {
         // A page that never uses the registry still makes these (an unknown element, a lazy global): they are roots without it.
-        out.extend(self.ce.unk.get().into_iter().flatten().copied().map(Value::Object));
-        out.extend(self.ce.int.get().into_iter().flatten().copied().map(Value::Object));
+        out.extend(self.ce.unk.get().into_iter().flatten().copied().map(E::obj_raw));
+        out.extend(self.ce.int.get().into_iter().flatten().copied().map(E::obj_raw));
         let Some(st) = self.ce.st.get() else { return };
         let s = st.borrow();
         for d in &s.defs {
-            out.extend([Value::Object(d.ctor), Value::Object(d.proto)]);
-            out.extend(d.cb.iter().copied().filter(|v| !matches!(v, Value::Undefined)));
+            out.extend([E::obj_raw(d.ctor), E::obj_raw(d.proto)]);
+            out.extend(d.cb.iter().copied().filter(|v| !matches!(E::kind(*v), Val::Undefined)));
         }
-        out.extend(s.flush.map(Value::Object));
-        out.extend(s.reg.iter().flatten().copied().map(Value::Object));
-        out.extend(s.ints.keys().copied().map(Value::Object));
+        out.extend(s.flush.map(E::obj_raw));
+        out.extend(s.reg.iter().flatten().copied().map(E::obj_raw));
+        out.extend(s.ints.keys().copied().map(E::obj_raw));
         for f in s.face.values() {
             f.roots(out);
         }
@@ -834,22 +835,22 @@ impl Dom {
 }
 
 /// The microtask of the backup element queue.
-fn flush<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn flush<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let els = {
         let mut ce = st(d).borrow_mut();
         ce.queued = false;
         std::mem::take(&mut ce.backup)
     };
-    old(s, |it| d.invoke(it, els))?;
+    old::<E, _>(s, |it| d.invoke(it, els))?;
     Ok(s.undefined())
 }
 
 // ------------------------------------------------------------------------------------------ the constructors
 
 /// The constructor of the interface `IFACES[K]`: "the HTMLElement constructor" of the standard.
-fn html_ctor<'s, const K: usize>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn html_ctor<'s, const K: usize, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let iface = IFACES[K];
-    let bad = |s: &mut Sc<'s, '_>, why: &str| s.type_error(&format!("Failed to construct '{iface}': Illegal constructor{why}"));
+    let bad = |s: &mut Sc<'s, E>, why: &str| s.type_error(&format!("Failed to construct '{iface}': Illegal constructor{why}"));
     let Some(nt) = s.engine().host_new_target() else { return Err(bad(s, "")) };
     let Some(sr) = d.ce.st.get() else { return Err(bad(s, "")) };
     let found = {
@@ -884,41 +885,41 @@ fn html_ctor<'s, const K: usize>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: A
 
 /// The constructor object of the interface `name`: for an HTML element interface it takes `new.target` (`class extends`, `Reflect.construct`), for any
 /// other it is an illegal constructor (`new_ok`: whether `new` reaches it).
-pub(crate) fn interface_ctor(d: &Dom, it: &mut Interp<'_>, name: &str, new_ok: bool) -> R<ObjId> {
+pub(crate) fn interface_ctor<E: Eng>(d: &Dom<E>, it: &mut E::Vm, name: &str, new_ok: bool) -> R<E, E::Obj> {
     match IFACES.iter().position(|&n| n == name) {
-        Some(k) => d.add_fn_s_obj(it, HANDLERS[k], name, 0, HostFn::CtorNewTarget),
+        Some(k) => d.add_fn_s_obj(it, handlers::<E>()[k], name, 0, HostFn::CtorNewTarget),
         None => d.add_fn_s_obj(it, illegal_constructor, name, 0, if new_ok { bare_js_api::HostFn::Ctor } else { bare_js_api::HostFn::Method }),
     }
 }
 
 /// `interface_ctor` for a scope.
-pub(crate) fn interface_ctor_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, name: &str, new_ok: bool) -> Res<'s, Local<'s>> {
+pub(crate) fn interface_ctor_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, name: &str, new_ok: bool) -> Res<'s, Local<'s>> {
     match IFACES.iter().position(|&n| n == name) {
-        Some(k) => d.add_fn_s(s, HANDLERS[k], name, 0, HostFn::CtorNewTarget),
+        Some(k) => d.add_fn_s(s, handlers::<E>()[k], name, 0, HostFn::CtorNewTarget),
         None => d.add_fn_s(s, illegal_constructor, name, 0, if new_ok { HostFn::Ctor } else { HostFn::Method }),
     }
 }
 
 /// The error of `HTMLElement()` without `new`.
-pub(crate) fn needs_new(it: &mut Interp<'_>) -> Error {
-    it.type_error("Failed to construct: please use the 'new' operator")
+pub(crate) fn needs_new<E: Eng>(it: &mut E::Vm) -> Fault<E> {
+    it.type_error_o("Failed to construct: please use the 'new' operator")
 }
 
 /// The error of a call without `new` of the constructor `h`, when `h` is one of this module's.
-pub(crate) fn needs_new_s(it: &mut Interp<'_>, h: HS) -> Option<Error> {
-    if h as usize == unknown_ctor as HS as usize {
-        return Some(it.type_error("Illegal constructor"));
+pub(crate) fn needs_new_s<E: Eng>(it: &mut E::Vm, h: HS<E>) -> Option<Fault<E>> {
+    if h as usize == unknown_ctor as HS<E> as usize {
+        return Some(it.type_error_o("Illegal constructor"));
     }
-    let k = HANDLERS.iter().position(|&x| x as usize == h as usize)?;
-    Some(it.type_error(&format!("Failed to construct '{}': Please use the 'new' operator, this DOM object constructor cannot be called as a function.", IFACES[k])))
+    let k = handlers::<E>().iter().position(|&x| x as usize == h as usize)?;
+    Some(it.type_error_o(&format!("Failed to construct '{}': Please use the 'new' operator, this DOM object constructor cannot be called as a function.", IFACES[k])))
 }
 
 // ------------------------------------------------------------------------------------------ createElement
 
 /// `createElement(name, options)` and `createElementNS` of the HTML namespace: "create an element" with the synchronous custom elements flag.
 /// `name` is lowercase. `options` is the second argument (`undefined` for none).
-pub(crate) fn create_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, name: &str, options: Local<'s>) -> Res<'s, Local<'s>> {
-    let is = if is_object(s, options) {
+pub(crate) fn create_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, name: &str, options: Local<'s>) -> Res<'s, Local<'s>> {
+    let is = if is_object::<E>(s, options) {
         let v = s.get_str(options, "is")?;
         if s.type_of(v) == Type::Undefined { None } else { Some(d.string_arg_s(s, v)?) }
     } else {
@@ -953,7 +954,7 @@ pub(crate) fn create_s<'s>(d: &Dom, s: &mut Sc<'s, '_>, name: &str, options: Loc
 }
 
 /// The inert document that owns the contents of the templates, made by the first need.
-pub(crate) fn template_document(d: &Dom) -> NodeId {
+pub(crate) fn template_document<E: Eng>(d: &Dom<E>) -> NodeId {
     d.ce.tpl.get().unwrap_or_else(|| {
         let n = d.doc.borrow_mut().create_document();
         d.ce.tpl.set(Some(n));
@@ -961,17 +962,17 @@ pub(crate) fn template_document(d: &Dom) -> NodeId {
     })
 }
 
-impl Dom {
+impl<E: Eng> Dom<E> {
     /// Does the inert document own `n`: is it in the contents of a template, or was it moved out of them by a script (a custom element)?
     pub(crate) fn in_inert(&self, n: NodeId) -> bool {
         self.doc.borrow().in_template_content(n) || (self.ce.on.get() && st(self).borrow().inert.contains(&(n.index() as u32)))
     }
 
     /// The element `n` (wrapper `v`) failed to construct: the state "failed", and its interface is `HTMLUnknownElement`.
-    fn make_unknown<'s>(&self, s: &mut Sc<'s, '_>, n: NodeId, v: Local<'s>) -> Res<'s, ()> {
+    fn make_unknown<'s>(&self, s: &mut Sc<'s, E>, n: NodeId, v: Local<'s>) -> Res<'s, ()> {
         self.doc.borrow_mut().set_custom_state(n, Some(FAILED));
         st(self).borrow_mut().unk.insert(n.index() as u32);
-        let proto = old(s, |it| unknown_proto(self, it))?;
+        let proto = old::<E, _>(s, |it| unknown_proto(self, it))?;
         let proto = self.obj_local(s, proto);
         s.set_prototype_of(v, Some(proto))?;
         Ok(())
@@ -979,32 +980,32 @@ impl Dom {
 }
 
 /// The prototype of `HTMLUnknownElement`, made by the first element that needs it.
-pub(crate) fn unknown_proto(d: &Dom, it: &mut Interp<'_>) -> R<ObjId> {
+pub(crate) fn unknown_proto<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, E::Obj> {
     if let Some(u) = d.ce.unk.get() {
         return Ok(u[0]);
     }
     let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
     let proto = d.obj(it, d.p().html)?;
     let f = d.add_fn_s_obj(it, unknown_ctor, "HTMLUnknownElement", 0, HostFn::Ctor)?;
-    it.define_data(f, kp, Value::Object(proto), false, false, false)?;
-    it.define_data(proto, kc, Value::Object(f), true, false, true)?;
+    it.define_data(f, kp, E::obj_raw(proto), false, false, false)?;
+    it.define_data(proto, kc, E::obj_raw(f), true, false, true)?;
     crate::browser_lazy::tag(d, it, proto, "HTMLUnknownElement")?;
     // Like every HTML interface, its constructor inherits from `HTMLElement`.
     let g = it.global_object();
     let k = d.key(it, "HTMLElement")?;
-    if let Value::Object(h) = it.get_value(Value::Object(g), k)? {
-        it.heap.set_prototype_of(f, Some(h)).map_err(|e| it.heap_error(e))?;
+    if let Val::Object(h) = E::kind(it.get_value(E::obj_raw(g), k)?) {
+        it.h_set_proto(f, Some(h))?;
     }
     let _ = d.ce.unk.set([proto, f]);
     Ok(proto)
 }
 
 /// `new HTMLUnknownElement()` is an error (a call without `new` is one too: see `needs_new`).
-fn unknown_ctor<'s>(_: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+fn unknown_ctor<'s, E: Eng>(_: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     Err(s.type_error("Failed to construct 'HTMLUnknownElement': Illegal constructor"))
 }
 
-fn ensure_unknown(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+fn ensure_unknown<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
     unknown_proto(d, it).map(|_| ())
 }
 
@@ -1012,9 +1013,9 @@ crate::browser_lazy::lazy_global!(lazy_unknown, "HTMLUnknownElement", ensure_unk
 
 /// The reactions of a new custom element, in the order of the standard: `attributeChangedCallback` for each observed attribute that it has, then
 /// `connectedCallback` when it is connected.
-fn initial_reactions(doc: &Document, def: &Def, el: NodeId, conn: bool) -> Vec<Reaction> {
+fn initial_reactions<E: Eng>(doc: &Document, def: &Def<E>, el: NodeId, conn: bool) -> Vec<Reaction> {
     let mut reactions = Vec::new();
-    if !matches!(def.cb[ATTRIBUTE], Value::Undefined) && !def.obs.is_empty() {
+    if !matches!(E::kind(def.cb[ATTRIBUTE]), Val::Undefined) && !def.obs.is_empty() {
         let NodeData::Element { attrs, .. } = *doc.data(el) else { unreachable!("only elements are upgraded") };
         for a in doc.attrs(attrs) {
             let local = doc.attr_local(a.name);
@@ -1023,7 +1024,7 @@ fn initial_reactions(doc: &Document, def: &Def, el: NodeId, conn: bool) -> Vec<R
             }
         }
     }
-    if conn && !matches!(def.cb[CONNECTED], Value::Undefined) {
+    if conn && !matches!(E::kind(def.cb[CONNECTED]), Val::Undefined) {
         reactions.push(Reaction::Connected);
     }
     if def.form {
@@ -1033,7 +1034,7 @@ fn initial_reactions(doc: &Document, def: &Def, el: NodeId, conn: bool) -> Vec<R
 }
 
 /// The checks of the standard on what the constructor gave.
-fn check_result<'s>(d: &Dom, s: &mut Sc<'s, '_>, v: Local<'s>, name: &str) -> Res<'s, Local<'s>> {
+fn check_result<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>, name: &str) -> Res<'s, Local<'s>> {
     let msg = {
         let doc = d.doc.borrow();
         match d.node_of_s(s, v) {
@@ -1061,58 +1062,58 @@ fn check_result<'s>(d: &Dom, s: &mut Sc<'s, '_>, v: Local<'s>, name: &str) -> Re
 
 // ------------------------------------------------------------------------------------------ the registry
 
-fn registry<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>) -> Res<'s, ()> {
+fn registry<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, ()> {
     match d.ce.st.get().and_then(|c| c.borrow().reg) {
         Some([_, _, r]) if d.is_obj_s(s, this, r) => Ok(()),
         _ => Err(s.type_error("Illegal invocation")),
     }
 }
 
-fn reg_err<'s>(s: &mut Sc<'s, '_>, m: &str, msg: &str) -> bare_js_api::Error<'s> {
+fn reg_err<'s, E: Eng>(s: &mut Sc<'s, E>, m: &str, msg: &str) -> bare_js_api::Error<'s> {
     s.type_error(&format!("Failed to execute '{m}' on 'CustomElementRegistry': {msg}"))
 }
 
-fn reg_dom_err<'s>(d: &Dom, s: &mut Sc<'s, '_>, kind: &str, m: &str, msg: &str) -> bare_js_api::Error<'s> {
+fn reg_dom_err<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, kind: &str, m: &str, msg: &str) -> bare_js_api::Error<'s> {
     d.dom_err_s(s, kind, &format!("Failed to execute '{m}' on 'CustomElementRegistry': {msg}"))
 }
 
 /// `customElements.define(name, constructor, options)`. The first call has no scope of reactions yet (`Host::call` opens it once `on` is set).
-fn define<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn define<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     if d.ce.on.get() {
         return define_in(d, s, this, a);
     }
     d.ce.on.set(true);
     st(d).borrow_mut().stack.push(Vec::new());
     d.sync_watcher();
-    old(s, |it| d.def_method_s(it, d.p().html, "attachInternals", 0, crate::browser_face::attach_internals))?;
+    old::<E, _>(s, |it| d.def_method_s(it, d.p().html, "attachInternals", 0, crate::browser_face::attach_internals))?;
     let r = define_in(d, s, this, a);
-    let q = old(s, |it| d.ce_pop(it));
+    let q = old::<E, _>(s, |it| d.ce_pop(it));
     r.and_then(|v| q.map(|()| v))
 }
 
-fn define_in<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn define_in<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     registry(d, s, this)?;
     if a.len() < 2 {
-        return Err(reg_err(s, "define", &format!("2 arguments required, but only {} present.", a.len())));
+        return Err(reg_err::<E>(s, "define", &format!("2 arguments required, but only {} present.", a.len())));
     }
     let name = d.arg_str_s(s, a, 0)?;
-    let ctor = arg_s(s, a, 1);
-    let Some(ctor_obj) = obj_id(s, ctor) else { return Err(reg_err(s, "define", "parameter 2 is not of type 'Function'.")) };
+    let ctor = arg_s::<E>(s, a, 1);
+    let Some(ctor_obj) = obj_id::<E>(s, ctor) else { return Err(reg_err::<E>(s, "define", "parameter 2 is not of type 'Function'.")) };
     if !s.is_callable(ctor) {
-        return Err(reg_err(s, "define", "parameter 2 is not of type 'Function'."));
+        return Err(reg_err::<E>(s, "define", "parameter 2 is not of type 'Function'."));
     }
-    let options = arg_s(s, a, 2);
-    let ext = if is_nullish(s, options) {
+    let options = arg_s::<E>(s, a, 2);
+    let ext = if is_nullish::<E>(s, options) {
         None
-    } else if is_object(s, options) {
+    } else if is_object::<E>(s, options) {
         let v = s.get_str(options, "extends")?;
         if s.type_of(v) == Type::Undefined { None } else { Some(d.string_arg_s(s, v)?) }
     } else {
-        return Err(reg_err(s, "define", "The provided value is not of type 'ElementDefinitionOptions'."));
+        return Err(reg_err::<E>(s, "define", "The provided value is not of type 'ElementDefinitionOptions'."));
     };
     let raw = s.engine().raw(ctor);
-    if !old(s, |it| it.is_constructor_value(raw))? {
-        return Err(reg_err(s, "define", "constructor argument is not a constructor"));
+    if !old::<E, _>(s, |it| it.is_constructor_value(raw))? {
+        return Err(reg_err::<E>(s, "define", "constructor argument is not a constructor"));
     }
     if !valid_custom_name(&name) {
         return Err(reg_dom_err(d, s, "SyntaxError", "define", &format!("\"{name}\" is not a valid custom element name")));
@@ -1189,28 +1190,28 @@ fn define_in<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> R
 }
 
 /// The prototype, the callbacks, the observed attributes, `formAssociated` and "`disabledFeatures` has `internals`".
-type Read = (ObjId, [Value; 8], Box<[Box<str>]>, bool, bool);
+type Read<E: Eng> = (E::Obj, [E::Raw; 8], Box<[Box<str>]>, bool, bool);
 
 /// The callback `n` of `proto`: `None` when absent, an error when it is not a function.
-fn callback<'s>(s: &mut Sc<'s, '_>, proto: Local<'s>, n: &str) -> Res<'s, Option<Local<'s>>> {
+fn callback<'s, E: Eng>(s: &mut Sc<'s, E>, proto: Local<'s>, n: &str) -> Res<'s, Option<Local<'s>>> {
     let v = s.get_str(proto, n)?;
     if s.type_of(v) == Type::Undefined {
         return Ok(None);
     }
     if !s.is_callable(v) {
-        return Err(reg_err(s, "define", &format!("\"{n}\" is not a function")));
+        return Err(reg_err::<E>(s, "define", &format!("\"{n}\" is not a function")));
     }
     Ok(Some(v))
 }
 
 /// A `sequence<DOMString>` that `v` holds: `observedAttributes` and `disabledFeatures`.
-fn strings<'s>(d: &Dom, s: &mut Sc<'s, '_>, v: Local<'s>) -> Res<'s, Vec<Box<str>>> {
+fn strings<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>) -> Res<'s, Vec<Box<str>>> {
     let mut out: Vec<Box<str>> = Vec::new();
     if s.type_of(v) == Type::Undefined {
         return Ok(out);
     }
-    let iter = if is_object(s, v) { s.iter_open(v)? } else { None };
-    let Some(mut iter) = iter else { return Err(reg_err(s, "define", "The provided value cannot be converted to a sequence.")) };
+    let iter = if is_object::<E>(s, v) { s.iter_open(v)? } else { None };
+    let Some(mut iter) = iter else { return Err(reg_err::<E>(s, "define", "The provided value cannot be converted to a sequence.")) };
     loop {
         s.charge(1)?;
         match s.iter_next(&mut iter)? {
@@ -1228,13 +1229,13 @@ fn strings<'s>(d: &Dom, s: &mut Sc<'s, '_>, v: Local<'s>) -> Res<'s, Vec<Box<str
 }
 
 /// What `define` reads from a constructor, in the order of the standard (and Chrome 155).
-fn read_definition<'s>(d: &Dom, s: &mut Sc<'s, '_>, ctor: Local<'s>) -> Res<'s, Read> {
+fn read_definition<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, ctor: Local<'s>) -> Res<'s, Read<E>> {
     let proto = s.get_str(ctor, "prototype")?;
-    let Some(proto_obj) = obj_id(s, proto) else { return Err(reg_err(s, "define", "constructor prototype is not an object")) };
+    let Some(proto_obj) = obj_id::<E>(s, proto) else { return Err(reg_err::<E>(s, "define", "constructor prototype is not an object")) };
     let mut cb: [Option<Local<'s>>; 8] = [None; 8];
     // `connectedMoveCallback` is read and checked as Chrome does; it is never called (no `moveBefore`).
     for (slot, n) in [Some(CONNECTED), Some(DISCONNECTED), None, Some(2), Some(ATTRIBUTE)].into_iter().zip(["connectedCallback", "disconnectedCallback", "connectedMoveCallback", "adoptedCallback", "attributeChangedCallback"]) {
-        let v = callback(s, proto, n)?;
+        let v = callback::<E>(s, proto, n)?;
         if let Some(i) = slot {
             cb[i] = v;
         }
@@ -1250,20 +1251,20 @@ fn read_definition<'s>(d: &Dom, s: &mut Sc<'s, '_>, ctor: Local<'s>) -> Res<'s, 
     let form = s.to_boolean(v);
     if form {
         for (slot, n) in [FORM_ASSOCIATED, FORM_RESET, FORM_DISABLED, 7].into_iter().zip(["formAssociatedCallback", "formResetCallback", "formDisabledCallback", "formStateRestoreCallback"]) {
-            cb[slot] = callback(s, proto, n)?;
+            cb[slot] = callback::<E>(s, proto, n)?;
         }
         // Chrome reads `toolFillCallback` too. It is never called.
-        callback(s, proto, "toolFillCallback")?;
+        callback::<E>(s, proto, "toolFillCallback")?;
     }
     let it = s.engine();
-    let raw = cb.map(|c| c.map_or(Value::Undefined, |l| it.raw(l)));
+    let raw = cb.map(|c| c.map_or(E::undef(), |l| it.raw(l)));
     Ok((proto_obj, raw, obs.into(), form, no_internals))
 }
 
-fn get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn get<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     registry(d, s, this)?;
     if a.is_empty() {
-        return Err(reg_err(s, "get", "1 argument required, but only 0 present."));
+        return Err(reg_err::<E>(s, "get", "1 argument required, but only 0 present."));
     }
     let name = d.arg_str_s(s, a, 0)?;
     let ctor = {
@@ -1276,18 +1277,18 @@ fn get<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s,
     }
 }
 
-fn get_name<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn get_name<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     registry(d, s, this)?;
     if a.is_empty() {
-        return Err(reg_err(s, "getName", "1 argument required, but only 0 present."));
+        return Err(reg_err::<E>(s, "getName", "1 argument required, but only 0 present."));
     }
-    let v = arg_s(s, a, 0);
-    let name = match obj_id(s, v) {
+    let v = arg_s::<E>(s, a, 0);
+    let name = match obj_id::<E>(s, v) {
         Some(o) if s.is_callable(v) => {
             let ce = st(d).borrow();
             ce.by_ctor.get(&o).map(|&i| ce.defs[i as usize].name.clone())
         }
-        _ => return Err(reg_err(s, "getName", "parameter 1 is not of type 'Function'.")),
+        _ => return Err(reg_err::<E>(s, "getName", "parameter 1 is not of type 'Function'.")),
     };
     match name {
         Some(n) => d.js_str_s(s, &n),
@@ -1295,10 +1296,10 @@ fn get_name<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Re
     }
 }
 
-fn when_defined<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn when_defined<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     registry(d, s, this)?;
     if a.is_empty() {
-        return Err(reg_err(s, "whenDefined", "1 argument required, but only 0 present."));
+        return Err(reg_err::<E>(s, "whenDefined", "1 argument required, but only 0 present."));
     }
     let name = d.arg_str_s(s, a, 0)?;
     let invalid = !valid_custom_name(&name);
@@ -1327,13 +1328,13 @@ fn when_defined<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -
     Ok(p)
 }
 
-fn upgrade<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn upgrade<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     registry(d, s, this)?;
     if a.is_empty() {
-        return Err(reg_err(s, "upgrade", "1 argument required, but only 0 present."));
+        return Err(reg_err::<E>(s, "upgrade", "1 argument required, but only 0 present."));
     }
-    let v = arg_s(s, a, 0);
-    let Some(root) = d.node_of_s(s, v) else { return Err(reg_err(s, "upgrade", "parameter 1 is not of type 'Node'.")) };
+    let v = arg_s::<E>(s, a, 0);
+    let Some(root) = d.node_of_s(s, v) else { return Err(reg_err::<E>(s, "upgrade", "parameter 1 is not of type 'Node'.")) };
     let mut els = Vec::new();
     let budget = {
         let doc = d.doc.borrow();
@@ -1360,12 +1361,12 @@ fn upgrade<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res
 // ------------------------------------------------------------------------------------------ importNode, adoptNode
 
 /// The node argument of `importNode` and `adoptNode` (`m`): the count and type checks of WebIDL, then the refusal of a document and a shadow root.
-fn move_arg<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, m: &str, what: &str) -> Res<'s, NodeId> {
+fn move_arg<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>, m: &str, what: &str) -> Res<'s, NodeId> {
     d.nd_s(s, this)?;
     if a.is_empty() {
         return Err(s.type_error(&format!("Failed to execute '{m}' on 'Document': 1 argument required, but only 0 present.")));
     }
-    let v = arg_s(s, a, 0);
+    let v = arg_s::<E>(s, a, 0);
     let Some(n) = d.node_of_s(s, v) else { return Err(s.type_error(&format!("Failed to execute '{m}' on 'Document': parameter 1 is not of type 'Node'."))) };
     match d.data(n) {
         NodeData::Document if m == "adoptNode" => Err(d.dom_err_s(s, "NotSupportedError", "Failed to execute 'adoptNode' on 'Document': The node provided is of type '#document', which may not be adopted.")),
@@ -1379,9 +1380,9 @@ fn move_arg<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>, m: &s
 }
 
 /// `document.importNode(node, deep)`: a clone that belongs to the document (its custom elements are upgraded, also when `node` is in a template).
-fn import_node<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn import_node<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = move_arg(d, s, this, a, "importNode", "imported")?;
-    let deep = arg_s(s, a, 1);
+    let deep = arg_s::<E>(s, a, 1);
     let deep = s.to_boolean(deep);
     let c = crate::browser_dom::clone_tree_s(d, s, n, deep, true)?;
     d.wrap_s(s, c)
@@ -1389,7 +1390,7 @@ fn import_node<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) ->
 
 /// `document.adoptNode(node)`: `node` leaves its parent and belongs to the document. A custom element that came from the contents of a template gets
 /// `adoptedCallback`.
-fn adopt_node<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+fn adopt_node<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = move_arg(d, s, this, a, "adoptNode", "adopted")?;
     d.doc.borrow_mut().detach(n);
     if d.ce.on.get() {
@@ -1399,18 +1400,18 @@ fn adopt_node<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>) -> 
         let mut ce = st(d).borrow_mut();
         let doc = d.doc.borrow();
         for e in els {
-            if let Some(c) = doc.custom_state(e).filter(|&c| c < PRECUSTOMIZED) && ce.inert.remove(&(e.index() as u32)) && !matches!(ce.defs[c as usize].cb[ADOPTED], Value::Undefined) {
+            if let Some(c) = doc.custom_state(e).filter(|&c| c < PRECUSTOMIZED) && ce.inert.remove(&(e.index() as u32)) && !matches!(E::kind(ce.defs[c as usize].cb[ADOPTED]), Val::Undefined) {
                 ce.enqueue(e, Reaction::Adopted(false));
             }
         }
     }
-    Ok(arg_s(s, a, 0))
+    Ok(arg_s::<E>(s, a, 0))
 }
 
 // ------------------------------------------------------------------------------------------ install
 
 /// Make the prototype, the constructor and the registry (the first read of `customElements` or `CustomElementRegistry`).
-fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+fn ensure<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
     if st(d).borrow().reg.is_none() {
         make(d, it)?;
     }
@@ -1419,19 +1420,19 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 
 #[cold]
 #[inline(never)]
-fn make(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+fn make<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
     let op = it.object_prototype();
     let proto = d.obj(it, op)?;
     let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
     let f = d.add_fn_s_obj(it, illegal_constructor, "CustomElementRegistry", 0, bare_js_api::HostFn::Ctor)?;
-    it.define_data(f, kp, Value::Object(proto), false, false, false)?;
-    it.define_data(proto, kc, Value::Object(f), true, false, true)?;
+    it.define_data(f, kp, E::obj_raw(proto), false, false, false)?;
+    it.define_data(proto, kc, E::obj_raw(f), true, false, true)?;
     crate::browser_lazy::tag(d, it, proto, "CustomElementRegistry")?;
-    for (name, len, h) in [("define", 2, define as HS), ("get", 1, get), ("getName", 1, get_name), ("whenDefined", 1, when_defined), ("upgrade", 1, upgrade)] {
+    for (name, len, h) in [("define", 2, define as HS<E>), ("get", 1, get), ("getName", 1, get_name), ("whenDefined", 1, when_defined), ("upgrade", 1, upgrade)] {
         let k = d.key(it, name)?;
         let m = d.add_fn_s_obj(it, h, name, len, HostFn::Method)?;
         // WebIDL operations are enumerable.
-        it.define_data(proto, k, Value::Object(m), true, true, true)?;
+        it.define_data(proto, k, E::obj_raw(m), true, true, true)?;
     }
     // `Object.prototype.toString` of an element made by a custom element constructor says `[object HTMLElement]`. The prototypes of the eager
     // interfaces get their tag now, so a page that never reads `customElements` does not pay for them.
@@ -1447,8 +1448,8 @@ fn make(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     Ok(())
 }
 
-fn customelements<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
-    old(s, |it| ensure(d, it))?;
+fn customelements<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    old::<E, _>(s, |it| ensure(d, it))?;
     let [_, _, r] = st(d).borrow().reg.expect("made");
     Ok(d.obj_local(s, r))
 }
@@ -1456,15 +1457,15 @@ fn customelements<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, _: Args<'s>) ->
 crate::browser_lazy::lazy_global!(lazy_registry, "CustomElementRegistry", ensure, |d| st(d).borrow().reg.expect("made")[1]);
 
 /// Install last: a new host function earlier in the list of `Dom::install` moves the id of each one after it.
-pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
     table!(lazy = [
         Row::both(1, "CustomElementRegistry", lazy_registry),
         Row::both(1, "HTMLUnknownElement", lazy_unknown),
-        crate::browser_face::LAZY[0],
-        crate::browser_face::LAZY[1],
+        crate::browser_face::lazy::<E>()[0],
+        crate::browser_face::lazy::<E>()[1],
     ]);
     let g = s.global();
-    d.install_rows(s, &[g], &lazy::T)?;
+    d.install_rows(s, &[g], &lazy::T::<E>::V)?;
     // As in Chrome, `customElements` stays an accessor of `window` with no setter.
     let f = d.add_fn_s(s, customelements, "get customElements", 0, HostFn::Method)?;
     s.define_accessor_str(g, "customElements", Some(f), None, Attrs { writable: false, enumerable: true, configurable: true })?;
@@ -1474,6 +1475,6 @@ pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
         Row::method(2, "adoptNode", 1, adopt_node),
     ]);
     let targets = [d.obj_local(s, d.p().element), d.obj_local(s, d.p().document)];
-    d.install_rows(s, &targets, &rows1::T)?;
+    d.install_rows(s, &targets, &rows1::T::<E>::V)?;
     Ok(())
 }
