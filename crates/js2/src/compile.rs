@@ -103,6 +103,8 @@ pub struct Input {
     /// The function is in the code of an event handler (`compile_function`): a name that no scope declares is read by the full search
     /// (`GetName`), which looks in the objects of `call_scoped` first.
     pub scoped: bool,
+    /// The function is in the text of the prelude (`prelude.js`): a free name that is a slot of `prelude_pre.rs` is read by `GetPre`.
+    pub pre: bool,
 }
 
 /// A function inside the compiled one: the entry of the facts, and the chain that its closure sees. Parallel to `Code::funcs`.
@@ -316,6 +318,8 @@ pub(crate) struct Fc<'a> {
     pub eval: bool,
     /// Event handler code: free names go through `GetName`, `SetName` and `TypeofName` (`Input::scoped`).
     pub scoped: bool,
+    /// The function is in the prelude (`Input::pre`).
+    pub pre: bool,
     pub is_arrow: bool,
     /// The function cannot be a constructor (an arrow, a method, a getter or a setter).
     pub noctor: bool,
@@ -395,6 +399,7 @@ impl<'a> Fc<'a> {
             value: None,
             eval: false,
             scoped: input.scoped,
+            pre: input.pre,
             is_arrow: false,
             noctor: false,
             fn_flags: 0,

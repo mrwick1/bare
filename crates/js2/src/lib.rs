@@ -78,6 +78,7 @@ mod bi_string_iter;
 mod lazy;
 #[rustfmt::skip]
 mod prelude_facts;
+mod prelude_pre;
 pub mod script;
 #[cfg(test)]
 #[path = "prelude_facts_tests.rs"]
