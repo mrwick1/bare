@@ -32,7 +32,7 @@ use crate::codes::Codes;
 use crate::interp::{GEN, MAX_STACK, REC};
 use crate::interp_rt::{ErrKind, Key, R, Realm};
 use crate::shapes::A_C;
-use crate::object::{F_GEN, Obj};
+use crate::object::{F_AGEN, F_GEN, Obj};
 use crate::shapes::ShapeId;
 use crate::value::Value;
 
@@ -40,6 +40,9 @@ pub const G_START: i32 = 0;
 pub const G_SUSPENDED: i32 = 1;
 pub const G_RUNNING: i32 = 2;
 pub const G_DONE: i32 = 3;
+/// Async generators only: the frame waits for an `await` (the generator is *executing*), and the generator waits for the promise of a `return(v)` (`asyncgen.rs`).
+pub const G_AWAIT: i32 = 4;
+pub const G_AWAIT_RET: i32 = 5;
 
 pub const MODE_NEXT: i32 = 0;
 pub const MODE_THROW: i32 = 1;
@@ -71,23 +74,27 @@ pub(crate) struct GenRealm {
     /// The shape of `{ value, done }`.
     pub s_iter: ShapeId,
     /// The names of the hidden slots: the first four are those of a generator, the fifth holds the result promise of an async function.
-    pub keys: [crate::string::Str; 5],
+    pub keys: [crate::string::Str; 6],
     /// `%GeneratorFunction.prototype%`, made when the first generator function is (a rooted constant: `Realm::consts`).
     pub func_proto: Option<Obj>,
     /// `%AsyncFunction.prototype%`, made when the first async function is (a rooted constant).
     pub async_proto: Option<Obj>,
     /// The shape of the activation of an async function (no prototype, five hidden slots).
     pub async_shape: Option<ShapeId>,
+    /// The objects of async generators and `for await` (`asyncgen.rs`), made when the first one is needed (rooted constants).
+    pub ag: crate::asyncgen::AgRealm,
 }
 
 impl Realm {
-    fn activation(v: Value) -> Option<Obj> {
-        Realm::obj(v).filter(|o| o.has_flag(F_GEN))
+    /// The activation of a generator, an async function or an async generator (the frame side).
+    pub(crate) fn activation(v: Value) -> Option<Obj> {
+        Realm::obj(v).filter(|o| o.has_flag(F_GEN | F_AGEN))
     }
 
-    /// Is `v` a generator object? (`for-of` steps one itself: the intrinsic path of the iterator protocol, until G3.)
+    /// Is `v` a generator object or the activation of an async function? (`for-of` steps a generator itself: the intrinsic path of the
+    /// iterator protocol.) An async generator is not one: it has no `next` that gives a result.
     pub(crate) fn is_generator(v: Value) -> bool {
-        Realm::activation(v).is_some()
+        Realm::obj(v).is_some_and(|o| o.has_flag(F_GEN))
     }
 
     fn gen_state(a: Obj) -> i32 {
@@ -111,16 +118,20 @@ impl Realm {
     /// activation. The first resume goes on at `resume`. No collection runs here (the loop collected before).
     pub(crate) fn gen_init(&mut self, stack: &[Value], fp: usize, ci: usize, code: &Code, tbl: u32, resume: usize) -> R<Value> {
         let callee = stack[fp - REC];
+        let ag = code.gen_kind == crate::bytecode::GK_ASYNCGEN;
         let proto = match Realm::obj(callee).map(|f| self.lookup(f, self.k_prototype)).transpose()?.flatten().and_then(Realm::obj) {
             Some(p) => p,
+            None if ag => self.ag_proto(),
             None => self.genr.proto,
         };
-        let mut shape = self.shapes.root(crate::cell::Layout::Object, Some(proto.cell()), 4);
-        for k in self.genr.keys[..4].iter().copied() {
+        // An async generator has two more hidden slots: the queue of requests and the promise of the call that entered the frame.
+        let n = if ag { 6 } else { 4 };
+        let mut shape = self.shapes.root(crate::cell::Layout::Object, Some(proto.cell()), n as u16);
+        for k in self.genr.keys[..n].iter().copied() {
             shape = self.shapes.add(shape, k, 0).expect("shape");
         }
         let act = Obj::new(&mut self.heap, &self.shapes, shape).expect("memory");
-        act.set_flag(F_GEN);
+        act.set_flag(if ag { F_AGEN } else { F_GEN });
         let fr = crate::object::Ctx::new(&mut self.heap, FR_HDR + code.gen_regs as usize, Value::UNDEFINED).expect("memory");
         act.set_inline_slot(0, Value::int(G_START));
         act.set_inline_slot(1, fr.value());
@@ -155,7 +166,7 @@ impl Realm {
             Some(s) => s,
             None => {
                 let mut s = self.shapes.root(crate::cell::Layout::Object, None, 5);
-                for k in self.genr.keys {
+                for k in self.genr.keys[..5].iter().copied() {
                     s = self.shapes.add(s, k, 0).expect("shape");
                 }
                 // The collector frees a shape that nothing holds: pin it.
@@ -191,6 +202,11 @@ impl Realm {
             }
         };
         save(stack, fp, ci, code, tbl, resume, fr);
+        // An async generator is still executing for its callers while it waits; its frame goes to the caller of `next()` with that promise.
+        if act.has_flag(F_AGEN) {
+            act.set_inline_slot(0, Value::int(G_AWAIT));
+            return Ok(act.inline_slot(5));
+        }
         act.set_inline_slot(0, Value::int(G_SUSPENDED));
         Ok(act.inline_slot(4))
     }
@@ -198,6 +214,9 @@ impl Realm {
     /// An async function that cannot go on (a throw out of its frame): reject its promise with `e`.
     pub(crate) fn async_abort(&mut self, act: Value, e: Value) {
         let Some(a) = Realm::activation(act) else { return };
+        if a.has_flag(F_AGEN) {
+            return self.agen_abort(a, e);
+        }
         let p = a.inline_slot(4);
         finish(a);
         if let Some(po) = Realm::promise_obj(p) {
@@ -221,7 +240,7 @@ impl Realm {
 
     /// A request to the generator `g` (`next`, `throw`, `return`; `v` is the argument). See [`Step`].
     pub(crate) fn gen_request(&mut self, g: Value, mode: i32, v: Value) -> R<Step> {
-        let Some(act) = Realm::activation(g) else { return self.type_error("not a generator") };
+        let Some(act) = Realm::obj(g).filter(|o| o.has_flag(F_GEN)) else { return self.type_error("not a generator") };
         match Realm::gen_state(act) {
             G_RUNNING => return self.type_error("the generator is already running"),
             G_DONE => {
@@ -284,12 +303,14 @@ impl Realm {
     }
 
     /// `Closure` made the generator function `f`: it inherits `%GeneratorFunction.prototype%`, which is made now if it is not yet. That object
-    /// holds `prototype` (`%GeneratorPrototype%`) and the tag; `%GeneratorPrototype%` holds `constructor` and its tag. The `GeneratorFunction`
-    /// constructor is not built (js2 has no `Function` constructor).
+    /// holds `prototype` (`%GeneratorPrototype%`) and the tag; `%GeneratorPrototype%` holds `constructor` and its tag. `GeneratorFunction` is
+    /// `%GeneratorFunction.prototype%.constructor` (`dynamic_ctor`).
     #[cold]
     pub(crate) fn make_generator_function(&mut self, f: Value) {
-        if self.function(f).is_some_and(|(ci, _)| self.prog[ci].gen_kind == crate::bytecode::GK_ASYNC) {
-            return self.make_async_function(f);
+        match self.function(f).map(|(ci, _)| self.prog[ci].gen_kind) {
+            Some(crate::bytecode::GK_ASYNC) => return self.make_async_function(f),
+            Some(crate::bytecode::GK_ASYNCGEN) => return self.make_async_generator_function(f),
+            _ => {}
         }
         let fp = match self.genr.func_proto {
             Some(p) => p,
@@ -309,6 +330,7 @@ impl Realm {
                 // `%IteratorPrototype%` (made for the host API too) is the prototype of `%GeneratorPrototype%`.
                 let ip = Realm::obj(self.iterator_prototype()).expect("an object");
                 gp.set_proto(&mut self.shapes, Some(ip.cell()));
+                self.dynamic_ctor(p, "GeneratorFunction", crate::builtins::generator_function_ctor);
                 p
             }
         };
@@ -316,8 +338,7 @@ impl Realm {
         o.set_proto(&mut self.shapes, Some(fp.cell()));
     }
 
-    /// `Closure` made the async function `f`: it inherits `%AsyncFunction.prototype%`, which holds the tag `AsyncFunction`. The `AsyncFunction`
-    /// constructor is not built (js2 has no `Function` constructor).
+    /// `Closure` made the async function `f`: it inherits `%AsyncFunction.prototype%`, which holds the tag `AsyncFunction`. `AsyncFunction` is its `constructor`.
     #[cold]
     fn make_async_function(&mut self, f: Value) {
         let ap = match self.genr.async_proto {
@@ -330,6 +351,7 @@ impl Realm {
                 let tag = Key::Name(self.wk[crate::bi_symbol::TO_STRING_TAG]);
                 let t = self.string("AsyncFunction");
                 self.define_attrs(p, tag, A_C, t).expect("define");
+                self.dynamic_ctor(p, "AsyncFunction", crate::builtins::async_function_ctor);
                 p
             }
         };
@@ -347,7 +369,7 @@ impl Realm {
 }
 
 /// Copy the record words and the registers of the list into `fr` (see the module comment).
-fn save(stack: &[Value], fp: usize, ci: usize, code: &Code, tbl: u32, resume: usize, fr: crate::object::Ctx) {
+pub(crate) fn save(stack: &[Value], fp: usize, ci: usize, code: &Code, tbl: u32, resume: usize, fr: crate::object::Ctx) {
     let rec = &stack[fp - REC..fp];
     let list = code.save_list(tbl).expect("the save list of a suspension");
     let regs = &stack[fp..fp + code.nregs as usize];

@@ -56,6 +56,7 @@ pub mod opcount;
 pub mod builtins;
 pub mod reenter;
 pub mod generator;
+mod asyncgen;
 mod iter;
 mod bi_array;
 mod bi_json;
@@ -73,6 +74,7 @@ mod bi_symbol;
 mod bi_collections;
 mod bi_reflect;
 mod bi_string_more;
+mod bi_string_iter;
 mod lazy;
 #[rustfmt::skip]
 mod prelude_facts;

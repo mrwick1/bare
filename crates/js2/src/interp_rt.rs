@@ -405,7 +405,7 @@ impl Realm {
         let (k_then, k_pstate, k_presult) = (atom("then"), atom("\0pstate"), atom("\0presult"));
         let hidden = ["\0native", "\0n1", "\0n2", "\0n3"].map(&mut atom);
         let (k_value, k_done) = (atom("value"), atom("done"));
-        let gkeys = ["\0gstate", "\0gframe", "\0gsent", "\0gmode", "\0gpromise"].map(&mut atom);
+        let gkeys = ["\0gstate", "\0gframe", "\0gsent", "\0gmode", "\0gpromise", "\0gentry"].map(&mut atom);
         let root = shapes.root(Layout::Object, None, 4);
         let object_proto = Obj::new(&mut heap, &shapes, root).expect("memory");
         let proto = Some(object_proto.cell());
@@ -492,7 +492,7 @@ impl Realm {
             registry: None,
             error_protos,
             s_native,
-            genr: crate::generator::GenRealm { proto: gen_proto, s_iter, keys: gkeys, func_proto: None, async_proto: None, async_shape: None },
+            genr: crate::generator::GenRealm { proto: gen_proto, s_iter, keys: gkeys, func_proto: None, async_proto: None, async_shape: None, ag: Default::default() },
             natives: Vec::new(),
             fn_info: Vec::new(),
             bound_id: 0,
@@ -1681,7 +1681,7 @@ impl Realm {
         self.define_attrs(o, Key::Name(self.k_length), A_C, Value::int(len as i32)).expect("memory");
         self.define_attrs(o, Key::Name(self.k_name), A_C, name.value()).expect("memory");
         // A generator function has its own `prototype` (a plain function makes it at the first read of it).
-        if o.slot(&self.shapes, 0).as_int().is_some_and(|c| self.prog[c as usize].gen_kind == crate::bytecode::GK_GEN) {
+        if o.slot(&self.shapes, 0).as_int().is_some_and(|c| matches!(self.prog[c as usize].gen_kind, crate::bytecode::GK_GEN | crate::bytecode::GK_ASYNCGEN)) {
             self.make_prototype(o).expect("memory");
         }
     }
