@@ -1123,8 +1123,15 @@ impl Server {
             // The action ran: a page with no layout yet (a style sheet still on its way) does not make it a failure, or the agent acts twice.
             Some(self.snapshot_diff(args, args.get("diff").and_then(Value::as_bool) != Some(false)).unwrap_or_else(|e| format!("no snapshot: {e}: take one later")))
         } else {
-            // No snapshot waits for the page, so let a started navigation finish before the URL check (#382).
-            self.live_mut(args)?.session.with_refs(|p, _| snap::settle(p))?;
+            // No snapshot waits for the page, so let a started navigation finish before the URL check (#382). One tick starts a
+            // navigation that the action queued (a link), or a request (a form that a script sends). Without either, a busy page (a
+            // timer that always runs) would hold each action up to the 300 ms bound of `settle`.
+            self.live_mut(args)?.session.with_refs(|p, _| {
+                p.tick();
+                if p.loading() || p.browser().is_some_and(|b| b.pending_fetches() > 0) {
+                    snap::settle(p);
+                }
+            })?;
             None
         };
         // A download that started in the action ends first. The page needs ticks for that: a link starts its worker in a tick.
