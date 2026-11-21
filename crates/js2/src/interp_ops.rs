@@ -73,14 +73,17 @@ impl Realm {
             None => (Some(self.object_proto.cell()), None),
             Some(p) if p.is_null() => (None, None),
             Some(p) => {
-                let Some(po) = Realm::obj(p).filter(|o| o.is_callable()) else { return self.type_error("class extends value is not a constructor or null") };
-                let pp = match self.lookup(po, self.k_prototype)? {
-                    Some(v) if v.is_null() => None,
-                    Some(v) => match Realm::obj(v) {
-                        Some(x) => Some(x.cell()),
-                        None => return self.type_error("class extends value does not have a valid prototype property"),
-                    },
-                    None => return self.type_error("class extends value does not have a valid prototype property"),
+                if !self.is_constructor(p) {
+                    return self.type_error("class extends value is not a constructor or null");
+                }
+                let po = Realm::obj(p).expect("a constructor");
+                let proto = self.get_prop(p, Key::Name(self.k_prototype))?;
+                let pp = if proto.is_null() {
+                    None
+                } else if let Some(o) = Realm::obj(proto) {
+                    Some(o.cell())
+                } else {
+                    return self.type_error("class extends value does not have a valid prototype property");
                 };
                 (pp, Some(po))
             }
@@ -392,10 +395,12 @@ impl Realm {
     }
 
     /// The template object of a tagged template: the array of the cooked strings with the array of the raw strings as `raw`.
-    pub fn make_template(&mut self, cooked: &[Value], raw: &[Value]) -> Value {
+    pub fn make_template(&mut self, cooked: &[Value], raw: &[Value]) -> R<Value> {
         let r = Obj::array(&mut self.heap, &self.shapes, self.s_array, raw).expect("memory");
         let a = Obj::array(&mut self.heap, &self.shapes, self.s_array, cooked).expect("memory");
-        a.add(&mut self.heap, &mut self.shapes, self.k_raw, 0, &[r.value()]).expect("memory");
-        a.value()
+        self.lock(r, true)?;
+        self.define_attrs(a, Key::Name(self.k_raw), 0, r.value())?;
+        self.lock(a, true)?;
+        Ok(a.value())
     }
 }

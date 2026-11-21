@@ -302,6 +302,10 @@ impl Realm {
             Kind::Script(top) => self.pre_fn(top, e.name).expect("a function of the prelude"),
             Kind::Acc(get, set) => {
                 let (g, s) = (self.new_native(get, false, 0, "get").value(), self.new_native(set, false, 1, "set").value());
+                for (f, prefix) in [(g, 1), (s, 2)] {
+                    self.fn_prep(Realm::obj(f).expect("a native function"), self.k_length);
+                    self.name_function(f, k, prefix).expect("define the accessor name");
+                }
                 let d = Desc { get: Some(g), set: Some(s), e: Some(false), c: Some(true), ..Desc::default() };
                 self.define_own(o, k, &d).expect("define");
                 return;

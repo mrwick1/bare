@@ -78,7 +78,6 @@ pub const REC: usize = 10;
 const ENTRY: i32 = -1;
 const CONSTRUCT: i32 = 1 << 24;
 /// A construct call made by `super()`: the return runs the fields of the class that made the call.
-const AFTER_SUPER: i32 = 1 << 25;
 /// The pc of a frame that has no root map: the constructor of a base class, below its fields function.
 const NOPC: u32 = u32::MAX;
 /// A frame that runs a generator: an exception that drops it ends the generator (`generator.rs`).
@@ -175,7 +174,7 @@ macro_rules! cold_ops {
         Op::DefAccessor | Op::DefAccessorElem | Op::DefMethod | Op::DefMethodElem | Op::SetHome | Op::MakeClass | Op::MakeDerived |
         Op::SetFnName | Op::DefaultCtor | Op::SetFields | Op::NewPrivateName | Op::GetPrivate | Op::SetPrivate | Op::HasPrivate |
         Op::DefPrivate | Op::DefPrivateMethod | Op::DefPrivateAccessor | Op::GetSuper | Op::GetSuperElem | Op::GetSuperElemRef | Op::SetSuper |
-        Op::SetSuperElem | Op::CallSuper | Op::CallSuperSpread | Op::RetDerived | Op::GenInit | Op::Yield | Op::RetGen | Op::IterClose | Op::ForInNext | Op::YieldStarStep | Op::AsyncInit | Op::Await | Op::RetAsync |
+        Op::SetSuperElem | Op::InitSuperFields | Op::ThrowSuperDelete | Op::CallSuper | Op::CallSuperSpread | Op::RetDerived | Op::GenInit | Op::Yield | Op::RetGen | Op::IterClose | Op::ForInNext | Op::YieldStarStep | Op::AsyncInit | Op::Await | Op::RetAsync |
         Op::AIterOpen | Op::AIterNext | Op::AIterUnpack | Op::AYsUnpack | Op::AIterClose | Op::AIterCloseT | Op::AIterCheck | Op::AYsCall
     };
 }
@@ -1133,21 +1132,12 @@ impl Vm {
                     return M::done(Ok(v));
                 }
                 pc = rec_int!(4) as usize;
-                let callpc = rec_int!(3);
                 ci = caller as usize;
                 // SAFETY: as in `reload!`: `ci` is a frame that the stack holds. `fp` moves before the reload, which sets `regs` from it.
                 let ccode = unsafe { prog.at(ci) };
                 fp -= REC + ccode.nregs as usize;
                 reload!(ccode);
                 r!(dst & 0xffff) = v;
-                if dst & AFTER_SUPER != 0
-                    && let Some((class, _)) = super_info(realm, stack, fp)
-                    && let Some((fi, fctx, ff)) = realm.fields_of(class)
-                {
-                    // The fields of the class that called `super()`: a frame on top of the caller, then the caller goes on.
-                    enter!(ff, fi, fctx, v, undef, code.nregs as i32, callpc as u32 as usize, pc, 0usize, 0usize);
-                    pc = 0;
-                }
                 continue;
             }};
         }
@@ -1487,7 +1477,7 @@ impl Vm {
                                         cooked.push(if p[0] == u32::MAX { undef } else { atom!(p[0]).value() });
                                         raw.push(atom!(p[1]).value());
                                     }
-                                    let t = realm.make_template(&cooked, &raw);
+                                    let t = tri!(realm.make_template(&cooked, &raw));
                                     fb.tmpl.push((c!() as u32, t));
                                     t
                                 }
@@ -1772,22 +1762,32 @@ impl Vm {
                             };
                             let Some((ni, cctx)) = realm.function_new(pv) else {
                                 if realm.native_id(pv).is_some() {
-                                    // A class that extends a built-in: the built-in makes `this`, then the fields of the class run.
+                                    // A built-in superclass creates the receiver.
                                     let (ab, argc) = if opv == Op::CallSuper { (fp + b!(), c!()) } else { stage_array!(r!(b!())) };
                                     let v = tri!(realm.construct_native(pv, &stack[ab..ab + argc], nt));
                                     r!(a!()) = v;
-                                    if let Some((fi, fctx, ff)) = realm.fields_of(class) {
-                                        enter!(ff, fi, fctx, v, undef, code.nregs as i32, pc, next, 0usize, 0usize);
-                                        pc = 0;
-                                    } else {
-                                        pc = next;
-                                    }
+                                    pc = next;
                                     continue;
                                 }
                                 err!(ErrKind::Type, "super constructor is not a constructor")
                             };
                             let (ab, argc) = if opv == Op::CallSuper { (fp + b!(), c!()) } else { stage_array!(r!(b!())) };
-                            construct!(pv, ni, cctx, nt, a!(), next, ab, argc, AFTER_SUPER)
+                            construct!(pv, ni, cctx, nt, a!(), next, ab, argc, 0)
+                        }
+                        Op::InitSuperFields => {
+                            gate!();
+                            if let Some((class, _)) = super_info(realm, stack, fp)
+                                && let Some((fi, fctx, ff)) = realm.fields_of(class)
+                            {
+                                enter!(ff, fi, fctx, r!(a!()), undef, code.nregs as i32, pc, next, 0usize, 0usize);
+                                pc = 0;
+                                continue;
+                            }
+                            pc = next;
+                        }
+                        Op::ThrowSuperDelete => {
+                            gate!();
+                            err!(ErrKind::Reference, "cannot delete a super property")
                         }
                         Op::RetDerived => {
                             std::hint::cold_path();
@@ -2507,7 +2507,7 @@ fn default_ctors() -> [Code; 2] {
     let mut base = Code::new(0, 0);
     base.words = vec![Op::RetUndef as u32];
     let mut a = Asm::default();
-    for ins in [Ins::new(Op::CreateRest, 0, 0, 0), Ins::new(Op::CallSuperSpread, 1, 0, 0), Ins::new(Op::LoadUndef, 2, 0, 0), Ins::new(Op::RetDerived, 2, 1, 0)] {
+    for ins in [Ins::new(Op::CreateRest, 0, 0, 0), Ins::new(Op::CallSuperSpread, 1, 0, 0), Ins::new(Op::InitSuperFields, 1, 0, 0), Ins::new(Op::LoadUndef, 2, 0, 0), Ins::new(Op::RetDerived, 2, 1, 0)] {
         a.emit(ins);
     }
     let asm = a.finish().expect("the default constructor assembles");
@@ -2516,7 +2516,8 @@ fn default_ctors() -> [Code; 2] {
     derived.roots = RootMaps::new(3);
     derived.roots.add(asm.pcs[0], [0]);
     derived.roots.add(asm.pcs[1], [0]);
-    derived.roots.add(asm.pcs[3], [1, 2]);
+    derived.roots.add(asm.pcs[2], [1]);
+    derived.roots.add(asm.pcs[4], [1, 2]);
     [base, derived]
 }
 
