@@ -148,7 +148,7 @@ fn string_normalize_locale_case_and_the_methods_that_need_a_regexp() {
         ("var n = 0; var bad = ['nfc', 'NFX', '', null, 1]; for (var i = 0; i < bad.length; i++) { try { 'a'.normalize(bad[i]); } catch (e) { if (e instanceof RangeError) n++; } } return n;", "5"),
         ("return 'a\\ud800\\u0301'.normalize('NFC').length + ',' + 'a\\u0301\\ud800'.normalize('NFC').length;", "3,2"),
         ("return 'AbC'.toLocaleLowerCase() + 'AbC'.toLocaleUpperCase() + 'ß'.toLocaleUpperCase() + 'a\\ud800'.toLocaleUpperCase().charCodeAt(1).toString(16) + 'ΑΣ'.toLocaleLowerCase();", "abcABCSSd800ας"),
-        ("var n = 0; var f = ['match', 'matchAll', 'search']; for (var i = 0; i < f.length; i++) { try { String.prototype[f[i]].call(undefined, 'a'); } catch (e) { if (e instanceof TypeError) n++; } try { 'a'[f[i]]('a'); } catch (e) { if (e instanceof TypeError) n++; } } return n + ',' + String.prototype.match.length + String.prototype.search.length + String.prototype.matchAll.length;", "6,111"),
+        ("var n = 0; var f = ['match', 'matchAll', 'search']; for (var i = 0; i < f.length; i++) { try { String.prototype[f[i]].call(undefined, 'a'); } catch (e) { if (e instanceof TypeError) n++; } try { 'a'[f[i]]('a'); } catch (e) { if (e instanceof TypeError) n++; } } return n + ',' + String.prototype.match.length + String.prototype.search.length + String.prototype.matchAll.length;", "3,111"),
         ("return ['o\\u0308'.localeCompare('\\u00f6'), 'a'.localeCompare('b'), 'b'.localeCompare('a'), 'a'.localeCompare('a')].join();", "0,-1,1,0"),
         ("return ['abc'.charAt(), 'abc'.charAt(NaN), 'abc'.charAt(undefined), 'abc'.charAt(-0.99999), 'abc'.charAt(1.9), 'abc'.charAt(-1) === '', 'abc'.charAt(3) === ''].join();", "a,a,a,a,b,true,true"),
     ]);

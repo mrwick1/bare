@@ -22,7 +22,7 @@
 //! click is mapped with the same scroll, so a click right after a scroll can be off by a few pixels at the field edge.
 
 use crate::eng::Eng;
-use crate::eng_old::Old;
+use crate::browser_any::{AnyBrowser, AnyFault};
 use crate::browser::{Browser, Report, Survive};
 use crate::browser_dom::input_kind;
 use crate::browser_session::{Session, SessionConfig, SessionStop};
@@ -48,11 +48,11 @@ type Fresh = (Vec<Fragment>, (bool, bool));
 /// Where the page comes from. A session reloads on a link click; a bare browser (tests) does not.
 pub enum Source {
     Session(Box<Session>),
-    Browser(Box<Browser<Old>>),
+    Browser(Box<AnyBrowser>),
 }
 
 impl Source {
-    pub(crate) fn browser(&mut self) -> Option<&mut Browser<Old>> {
+    pub(crate) fn browser(&mut self) -> Option<&mut AnyBrowser> {
         match self {
             Source::Session(s) => s.browser(),
             Source::Browser(b) => Some(b),
@@ -535,7 +535,7 @@ impl Page {
         }
     }
 
-    pub fn browser(&mut self) -> Option<&mut Browser<Old>> {
+    pub fn browser(&mut self) -> Option<&mut AnyBrowser> {
         self.source.browser()
     }
 
@@ -670,7 +670,7 @@ impl Page {
         if self.browser().is_none_or(|b| b.hide().is_err()) {
             return;
         }
-        while bare_net::vclock::since(v) < limit && self.browser().is_some_and(|b| b.it.pending_jobs() > 0 || b.fetches_since(t) > 0) {
+        while bare_net::vclock::since(v) < limit && self.browser().is_some_and(|b| b.pending_jobs() > 0 || b.fetches_since(t) > 0) {
             let (ran, next) = self.tick();
             if !ran {
                 let Some(next) = next else { return };
@@ -733,7 +733,7 @@ impl Page {
         let images = self.images.pending();
         let Some(b) = self.browser().filter(|_| !stopped) else { return (false, images.then(look)) };
         // A script that ran outside a task (an agent `eval`) can leave promise jobs queued: they are work for now.
-        if b.has_download_request() || b.it.pending_jobs() > 0 {
+        if b.has_download_request() || b.pending_jobs() > 0 {
             return (true, Some(bare_net::vclock::instant()));
         }
         // A split document that waits for a download runs no task before it is in: a due task would turn the page for nothing.
@@ -790,8 +790,8 @@ impl Page {
 
     /// A render stopped. A style sheet that is not supplied yet is not a failure while the session runs: the page waits for it, quietly,
     /// and the key says when to try again. It is a line of the console only if the session has ended (the sheet will never come).
-    fn render_failed(&mut self, e: &crate::eng::Fault<Old>, key: Option<(usize, [u64; 8])>) {
-        if crate::browser_computed::is_missing_sheet::<Old>(e) {
+    fn render_failed(&mut self, e: &AnyFault, key: Option<(usize, [u64; 8])>) {
+        if e.is_missing_sheet() {
             self.waiting_sheet = key;
             if matches!(&self.source, Source::Session(s) if s.ended().is_none()) {
                 return;
@@ -853,7 +853,7 @@ impl Page {
     fn caret_at(&mut self, n: NodeId, x: f64, y: f64) -> Option<u32> {
         self.frame_now()?;
         let Page { source, frame, .. } = self;
-        caret_in(source.browser()?, frame.as_ref()?, n, x, y)
+        crate::any!(source.browser()?, b => caret_in(b, frame.as_ref()?, n, x, y))
     }
 
     /// Which document is the page now? A node of an old one means nothing after a navigation.
@@ -905,7 +905,7 @@ impl Page {
                 SessionStop::LoadFailed(why) => Some(why),
                 _ => None,
             },
-            Source::Browser(b) => match b.drain().and_then(|_| b.run_navigation_tasks()).and_then(|_| b.run_scheduled_tasks(1000)) {
+            Source::Browser(b) => match b.run_tasks() {
                 Ok(_) => None,
                 Err(e) => match b.survive(e, "task") {
                     Survive::Aborted => None,
@@ -920,7 +920,7 @@ impl Page {
         self.stale = true;
     }
 
-    pub(crate) fn after(&mut self, r: Result<UiOutcome, crate::eng::Fault<Old>>) -> bool {
+    pub(crate) fn after(&mut self, r: Result<UiOutcome, AnyFault>) -> bool {
         let out = match r {
             Ok(o) => o,
             Err(e) => {

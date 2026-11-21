@@ -16,7 +16,6 @@
 //! Limits (`bare_image`): 32 MiB of file, 16 M pixels. `BUDGET` bounds the decoded pixels of the pictures of one page: a worker reserves
 //! `4 * width * height` bytes from the header size before it allocates, and a picture over the budget fails.
 
-use crate::eng_old::Old;
 use crate::page::{Page, Source};
 use bare_html::dom::{Bitmap, Document, NodeData, NodeId, Pixels};
 use bare_net::http::{Client, Request};
@@ -211,7 +210,7 @@ fn load(client: &mut Client, url: &str, used: &AtomicUsize) -> Option<Bitmap> {
 const CAPTURE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Queue the picture of the `<img>` `n` (`by_url` joins elements with one URL). Gives false if it cannot be queued.
-fn want(images: &mut Images, b: &crate::browser::Browser<Old>, doc: &Document, n: NodeId, by_url: &mut HashMap<String, usize>) -> bool {
+fn want(images: &mut Images, b: &crate::browser_any::AnyBrowser, doc: &Document, n: NodeId, by_url: &mut HashMap<String, usize>) -> bool {
     let Some(src) = source_of(doc, n) else { return false };
     let url = if src.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("data:")) { Ok(src) } else { b.resolve_url(&src) };
     let Ok(url) = url else { return false };

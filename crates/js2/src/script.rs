@@ -449,3 +449,9 @@ mod proto_ic_tests;
 #[cfg(test)]
 #[path = "regexp_rt_tests.rs"]
 mod regexp_rt_tests;
+#[cfg(test)]
+#[path = "bi_string_regexp_tests.rs"]
+mod bi_string_regexp_tests;
+#[cfg(test)]
+#[path = "bi_uri_tests.rs"]
+mod bi_uri_tests;
