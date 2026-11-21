@@ -4,7 +4,7 @@
 //! records the table; a property is made at the first lookup that needs it, with the same attributes, the same native and the same lazy
 //! `length` and `name` as an eager install. So a realm pays for the properties that a script uses, and no more.
 //!
-//! **The flag.** An object that has a table with entries left has [`F_LAZYTAB`]. The flag is the only cost on the paths that do not
+//! **The flag.** An object that has a table with entries left has [`F_LAZYTAB`] (`object.rs`). The flag is the only cost on the paths that do not
 //! look at a name of such an object. Each place that reads, tests, defines, deletes or lists an own property of an object calls
 //! [`Realm::lazy_prep`] (one name) or [`Realm::lazy_all`] (all names) first. Both are called from `fn_prep` and `fn_prep_all`
 //! (`builtins.rs`), from the walks along a prototype chain (`lookup_g`, `proto_setter`, `proto_target`), and from `define_attrs`.
@@ -24,14 +24,10 @@
 //! the rest in table order after a listing. ECMA-262 does not fix this order (owner decision 2, 2026-11-20).
 use crate::builtins::{HIDDEN, NativeFn};
 use crate::interp_rt::{Key, Realm};
-use crate::object::Obj;
+use crate::object::{F_LAZYTAB, Obj};
 use crate::bi_object::Desc;
 use crate::string::{Chars, Str};
 use crate::value::Value;
-
-/// Object header flag: the object has a lazy table with entries left. Bits 16 to 18 are `F_COLL`, bit 19 is `F_DATE` or `F_HOST`, bit 20 is
-/// `F_LAZYM`, bit 23 is `F_PROTO`.
-pub const F_LAZYTAB: u32 = 1 << 21;
 
 /// What a table entry makes.
 #[derive(Clone, Copy)]

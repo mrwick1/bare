@@ -439,3 +439,12 @@ fn host_objects_survive_forced_collections_between_reads() {
         r.collect(&mut [], |_| {});
     }
 }
+
+#[test]
+fn a_date_is_not_a_host_object_and_a_host_object_is_not_a_date() {
+    let (mut r, _h) = filled();
+    assert_eq!(js(&mut r, "(function () { var d = new Date(5); d.x = 3; return d.x + ',' + d.getTime() + ',' + Object.keys(d).join() + ',' + d.hasOwnProperty('x'); })()"), "3,5,x,true");
+    assert_eq!(js(&mut r, "[nl, ds, new Date(0)].map(function (o) { return Object.prototype.toString.call(o); }).join()"), "[object Object],[object Object],[object Date]");
+    assert_eq!(js(&mut r, "(function () { try { Date.prototype.getTime.call(nl); return 'no'; } catch (e) { return e instanceof TypeError; } })()"), "true");
+    assert_eq!(js(&mut r, "(function () { try { Date.prototype.getTime.call(ds); return 'no'; } catch (e) { return e instanceof TypeError; } })()"), "true");
+}

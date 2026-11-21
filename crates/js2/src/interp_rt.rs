@@ -51,7 +51,7 @@ use crate::codes::Codes;
 use crate::interp::LazyCompile;
 use crate::reenter::Machine;
 use crate::builtins::{Hint, Native};
-use crate::object::{Ctx, F_CLASS, F_ELEMS_FIXED, F_ELEMS_RO, F_HOST, F_LAZY, F_LEN_RO, F_NATIVE, F_NOEXT, F_PROTO, F_SLOWIDX, F_WRAP, Obj};
+use crate::object::{Ctx, F_CLASS, F_ELEMS_FIXED, F_ELEMS_RO, F_HOST, F_LAZY, F_LEN_RO, F_NATIVE, F_NOEXT, F_PROTO, F_SLOWIDX, K_WRAP, Obj};
 use crate::shapes::{A_ACC, A_C, A_E, A_W, ShapeId, Shapes};
 use crate::string::{Chars, Str};
 use crate::value::{Kind, Value};
@@ -1325,7 +1325,7 @@ impl Realm {
     /// prototype chain of the receiver.
     fn fill_proto(&mut self, fb: &mut Feedback, site: usize, o: Obj, name: Str) {
         // `prototype` of a function, `length` of an array and of a wrapper, and the indexes of a wrapper are not in the shape or the chain only.
-        if name == self.k_prototype || o.has_flag(F_WRAP) {
+        if name == self.k_prototype || o.is_kind(K_WRAP) {
             return;
         }
         // The shape after the read: the read may have given a function its own properties.
