@@ -224,7 +224,7 @@ built-ins/NativeErrors/TypeError 9 0 1 9 0 1
 built-ins/NativeErrors/TypeError/prototype 5 0 0 5 0 0
 built-ins/NativeErrors/URIError 9 0 1 9 0 1
 built-ins/NativeErrors/URIError/prototype 5 0 0 5 0 0
-built-ins/Number 118 0 2 115 3 2
+built-ins/Number 118 0 2 118 0 2
 built-ins/Number/MAX_VALUE 4 0 0 4 0 0
 built-ins/Number/MIN_VALUE 4 0 0 4 0 0
 built-ins/Number/NEGATIVE_INFINITY 4 0 0 4 0 0
