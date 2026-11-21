@@ -119,6 +119,9 @@ impl Engine for Toy {
     fn host_function<'s>(&mut self, _name: &str, _id: u32, _length: u32, _kind: HostFn) -> Result<Local<'s>, Error<'s>> {
         Err(Error::Abort(Abort::Unsupported("host functions")))
     }
+    fn install_table<'s>(&mut self, _targets: &[Local<'_>], _id_base: u32, _defs: &'static [crate::Def]) -> Result<(), Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("host functions")))
+    }
     fn set_host(&mut self, _host: Rc<dyn Host<Self>>) {}
     fn raw(&self, v: Local<'_>) -> V {
         self.at(v).clone()

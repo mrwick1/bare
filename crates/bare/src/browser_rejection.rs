@@ -36,8 +36,12 @@ fn ensure_unit(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 
 crate::browser_lazy::lazy_global!(lazy_rejection_event, "PromiseRejectionEvent", ensure_unit, |d| d.hh.rej.get().expect("made")[1]);
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    crate::browser_lazy::install(d, it, &[("PromiseRejectionEvent", lazy_rejection_event as HS)])
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+    table!(lazy = [
+        Row::both(1, "PromiseRejectionEvent", lazy_rejection_event),
+    ]);
+    let g = s.global();
+    d.install_rows(s, &[g], &lazy::T)
 }
 
 fn build(d: &Dom, it: &mut Interp<'_>, ty: &str, flags: [bool; 3], promise: Value, reason: Value) -> R<ObjId> {

@@ -482,13 +482,11 @@ fn make(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     Ok(())
 }
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    run(it, |s| {
-        let g = s.global();
-        for (name, f) in [("AbortController", lazy::<false> as HS), ("AbortSignal", lazy::<true> as HS)] {
-            let f = d.add_fn_s(s, f, name, 0, HostFn::Method)?;
-            s.define_accessor_str(g, name, Some(f), Some(f), Attrs { writable: false, enumerable: false, configurable: true })?;
-        }
-        Ok(())
-    })
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+    let g = s.global();
+    for (name, f) in [("AbortController", lazy::<false> as HS), ("AbortSignal", lazy::<true> as HS)] {
+        let f = d.add_fn_s(s, f, name, 0, HostFn::Method)?;
+        s.define_accessor_str(g, name, Some(f), Some(f), Attrs { writable: false, enumerable: false, configurable: true })?;
+    }
+    Ok(())
 }

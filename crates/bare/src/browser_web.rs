@@ -285,15 +285,13 @@ macro_rules! lazy {
 }
 lazy!(lazy0 0, lazy1 1, lazy2 2, lazy3 3, lazy4 4, lazy5 5);
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    run(it, |s| {
-        let g = s.global();
-        for (i, h) in [lazy0 as HS, lazy1, lazy2, lazy3, lazy4, lazy5].into_iter().enumerate() {
-            let f = d.add_fn_s(s, h, NAMES[i], 0, HostFn::Method)?;
-            s.define_accessor_str(g, NAMES[i], Some(f), Some(f), Attrs { writable: false, enumerable: i < 2, configurable: true })?;
-        }
-        Ok(())
-    })
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+    let g = s.global();
+    for (i, h) in [lazy0 as HS, lazy1, lazy2, lazy3, lazy4, lazy5].into_iter().enumerate() {
+        let f = d.add_fn_s(s, h, NAMES[i], 0, HostFn::Method)?;
+        s.define_accessor_str(g, NAMES[i], Some(f), Some(f), Attrs { writable: false, enumerable: i < 2, configurable: true })?;
+    }
+    Ok(())
 }
 
 /// The getter (no argument) and the setter (the new value) of global `NAMES[i]`.

@@ -457,4 +457,4 @@ crate::browser_lazy::lazy_global!(lazy_internals, "ElementInternals", ensure_int
 crate::browser_lazy::lazy_global!(lazy_states, "CustomStateSet", ensure_internals, |d| d.ce.int.get().expect("made")[3]);
 
 /// The lazy globals `ElementInternals` and `CustomStateSet`, for `browser_custom::install`.
-pub(crate) const LAZY: [(&str, HS); 2] = [("ElementInternals", lazy_internals), ("CustomStateSet", lazy_states)];
+pub(crate) const LAZY: [Row; 2] = [Row::both(1, "ElementInternals", lazy_internals), Row::both(1, "CustomStateSet", lazy_states)];

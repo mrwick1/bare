@@ -37,12 +37,16 @@ use crate::interp_rt::{ErrKind, Key, R, Realm};
 use crate::gc::Marker;
 use crate::object::{F_CLASS, Obj};
 use crate::promise::DrainStop;
-use crate::shapes::A_E;
+use crate::shapes::{A_C, A_E, A_W};
 use crate::string::{Chars, Str};
 use crate::value::{Kind, Value};
-use bare_js_api::{Abort, Args, Attrs, Engine, Error, Host, HostFn, Intrinsic, Iter, Local, Slots, Type};
+use bare_js_api::{Abort, Args, Attrs, Def, DefKind, Engine, Error, Host, HostFn, Intrinsic, Iter, Local, Slots, Type};
 use std::ptr::NonNull;
 use std::rc::Rc;
+
+// A child module, so that it reads the private state and helpers of this one.
+#[path = "api_script.rs"]
+mod api_script;
 
 /// The shared slots at the start of the handle stack. They have the numbers `u32::MAX - 3..=u32::MAX`, so a pushed value of logical
 /// index `n` is at the physical index `n + 4` and `stack_len` is 0 for an empty stack.
@@ -76,6 +80,12 @@ pub(crate) struct ApiState {
     host_ptr: Option<NonNull<dyn Host<Realm>>>,
     /// Why the last run stopped, when it was not a limit.
     abort: Option<Abort>,
+    /// `call_scoped`: the objects that the names of handler code are looked up in (`api_script.rs`), and the code of each handler text.
+    scope: Vec<Obj>,
+    handlers: std::collections::HashMap<String, usize>,
+    /// `%eval%` and `%IteratorPrototype%`, made at the first ask (`undefined` before).
+    eval_fn: Value,
+    iter_proto: Value,
     /// The index in `Realm::natives` of the trampoline of a plain host function and of a host constructor (`usize::MAX`: not made).
     natives: [usize; 2],
     /// The step budget of a task, and the nesting of [`Engine::task`].
@@ -93,6 +103,10 @@ impl Default for ApiState {
             host: None,
             host_ptr: None,
             abort: None,
+            scope: Vec::new(),
+            handlers: Default::default(),
+            eval_fn: Value::UNDEFINED,
+            iter_proto: Value::UNDEFINED,
             natives: [usize::MAX; 2],
             budget: u64::MAX,
             tasks: 0,
@@ -104,6 +118,11 @@ impl ApiState {
     /// Mark the roots of the interface: the handle stack, the live persistent slots and the windows of the running host calls.
     pub(crate) fn mark(&self, m: &mut Marker) {
         m.values(&self.stack[SEEDS..]);
+        m.value(self.eval_fn);
+        m.value(self.iter_proto);
+        for o in &self.scope {
+            m.value(o.value());
+        }
         let mut w = self.win;
         // SAFETY: each `Win` is in the frame of a `host_call` that is still running, and its `args` slice is held by the caller of
         // that call (`host_call` links a window before the call and unlinks it after, also when the host panics).
@@ -134,21 +153,7 @@ impl Realm {
     /// completion value. A syntax error is a thrown `SyntaxError`.
     pub fn run_text(&mut self, src: &str) -> Result<(), RunError> {
         self.api.abort = None;
-        let Some(l) = self.lazy.as_mut() else { return Err(RunError::Abort(Abort::Unsupported("a realm with no compiler"))) };
-        let ci = match l.script(&self.prog, src) {
-            Ok(ci) => ci,
-            Err(m) => {
-                let (kind, text) = match m.strip_prefix("SyntaxError: ") {
-                    Some(t) => (ErrKind::Syntax, t),
-                    None => (ErrKind::Plain, m.as_str()),
-                };
-                return Err(RunError::Throw(self.error(kind, text)));
-            }
-        };
-        self.fn_info.extend((self.fn_info.len()..self.prog.len()).map(|i| crate::interp::code_info(&self.prog[i])));
-        let f = self.new_function(ci, Value::UNDEFINED);
-        let g = self.global.value();
-        match self.a_call(f, g, &[]) {
+        match self.script_code(src, Default::default()).and_then(|ci| self.run_code(ci)) {
             Ok(_) => Ok(()),
             Err(STOP) => Err(RunError::Abort(self.api.abort.take().unwrap_or(Abort::Limit("the step budget")))),
             Err(e) => Err(RunError::Throw(e)),
@@ -355,6 +360,26 @@ impl Realm {
         }
         self.api.natives[i]
     }
+
+    /// A setter that the interpreter cannot enter (a host function): run it in a nested call. Not a function: a `TypeError`.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn call_setter_slow(&mut self, f: Value, this: Value, v: Value) -> R<()> {
+        if !Realm::obj(f).is_some_and(|o| o.is_callable()) {
+            return self.type_error("a setter is not a function");
+        }
+        self.call_function(f, this, &[v]).map(|_| ())
+    }
+
+    /// The function object of host id `id`, named `name` (a string value).
+    fn host_cell(&mut self, name: Value, id: u32, length: u32, kind: HostFn) -> Obj {
+        let nid = self.host_native(kind != HostFn::Method);
+        let cell = self.native_cell(nid);
+        cell.set_slot(&self.shapes, 1, Value::int(id as i32));
+        cell.set_slot(&self.shapes, 2, Value::int(kind as i32 | (length.min(1 << 20) as i32) << 2));
+        cell.set_slot(&self.shapes, 3, name);
+        cell
+    }
 }
 
 /// Undoes the window link when the host call ends, by return or by panic: a caller that catches the panic keeps the realm, and a
@@ -554,13 +579,60 @@ impl Engine for Realm {
 
     fn host_function<'s>(&mut self, name: &str, id: u32, length: u32, kind: HostFn) -> Result<Local<'s>, Error<'s>> {
         assert!(id < 1 << 31, "a host id is below 2^31");
-        let nid = self.host_native(kind != HostFn::Method);
-        let cell = self.native_cell(nid);
         let name = self.string(name);
-        cell.set_slot(&self.shapes, 1, Value::int(id as i32));
-        cell.set_slot(&self.shapes, 2, Value::int(kind as i32 | (length.min(1 << 20) as i32) << 2));
-        cell.set_slot(&self.shapes, 3, name);
+        let cell = self.host_cell(name, id, length, kind);
         Ok(self.a_push(cell.value()))
+    }
+
+    fn install_table<'s>(&mut self, targets: &[Local<'_>], id_base: u32, defs: &'static [Def]) -> Result<(), Error<'s>> {
+        assert!(id_base < 1 << 31 && targets.len() <= 32, "a host id is below 2^31, and a table has at most 32 targets");
+        let mut objs = [None; 32];
+        for (o, &t) in objs.iter_mut().zip(targets) {
+            *o = Some(self.a_obj(t)?);
+        }
+        let mut text = String::new();
+        for d in defs {
+            let k = Key::Name(self.intern(d.name));
+            let bit = |on: bool, b: u8| if on { b } else { 0 };
+            let attrs = bit(d.attrs.writable, A_W) | bit(d.attrs.enumerable, A_E) | bit(d.attrs.configurable, A_C);
+            let fns = match d.kind {
+                DefKind::Method { id, len } => {
+                    let Key::Name(name) = k else { unreachable!() };
+                    [Some(self.host_cell(name.value(), id_base + id, len, HostFn::Method).value()), None]
+                }
+                DefKind::Accessor { get, set } => {
+                    text.clear();
+                    text.push_str("get ");
+                    text.push_str(d.name);
+                    let name = self.string(&text);
+                    let g = self.host_cell(name, id_base + get, 0, HostFn::Method).value();
+                    text.replace_range(..3, "set");
+                    let st = set.map(|id| {
+                        let name = self.string(&text);
+                        self.host_cell(name, id_base + id, 1, HostFn::Method).value()
+                    });
+                    [Some(g), st]
+                }
+                DefKind::Both { id } => {
+                    let Key::Name(name) = k else { unreachable!() };
+                    let f = self.host_cell(name.value(), id_base + id, 0, HostFn::Method).value();
+                    [Some(f), Some(f)]
+                }
+                DefKind::Number(n) => [Some(Value::number(n)), None],
+            };
+            for (i, o) in objs.iter().enumerate() {
+                let (true, Some(o)) = (d.on >> i & 1 != 0, *o) else { continue };
+                let r = match d.kind {
+                    DefKind::Accessor { .. } | DefKind::Both { .. } => {
+                        let g = fns[0].map_or(Ok(()), |g| self.define_accessor(o, k, g, false, d.attrs.enumerable));
+                        g.and_then(|()| fns[1].map_or(Ok(()), |st| self.define_accessor(o, k, st, true, d.attrs.enumerable)))
+                    }
+                    _ => self.define_attrs(o, k, attrs, fns[0].expect("a value")),
+                };
+                r.map_err(|e| self.a_err(e))?;
+            }
+        }
+        Ok(())
     }
 
     fn set_host(&mut self, host: Rc<dyn Host<Realm>>) {
@@ -660,16 +732,40 @@ impl Engine for Realm {
         Realm::clear_failed_job(self);
     }
 
-    fn iter_open<'s>(&mut self, _v: Local<'_>) -> Result<Option<Iter<'s>>, Error<'s>> {
-        Err(self.a_unsup("iter_open"))
+    fn iter_open<'s>(&mut self, v: Local<'_>) -> Result<Option<Iter<'s>>, Error<'s>> {
+        self.a_iter_open(v)
     }
 
-    fn iter_next<'s>(&mut self, _it: &mut Iter<'s>) -> Result<Option<Local<'s>>, Error<'s>> {
-        Err(self.a_unsup("iter_next"))
+    fn iter_next<'s>(&mut self, it: &mut Iter<'s>) -> Result<Option<Local<'s>>, Error<'s>> {
+        self.a_iter_next(it)
     }
 
-    fn iter_fail<'s>(&mut self, _it: &mut Iter<'s>, err: Error<'s>) -> Error<'s> {
-        err
+    fn iter_fail<'s>(&mut self, it: &mut Iter<'s>, err: Error<'s>) -> Error<'s> {
+        self.a_iter_fail(it, err)
+    }
+
+    fn run_script<'s>(&mut self, source: &str) -> Result<Local<'s>, Error<'s>> {
+        self.a_run_script(source)
+    }
+
+    fn compile_function<'s>(&mut self, name: &str, params: &str, body: &str) -> Result<Local<'s>, Error<'s>> {
+        self.a_compile_function(name, params, body)
+    }
+
+    fn call_scoped<'s>(&mut self, f: Local<'_>, this: Local<'_>, args: &[Local<'_>], scope: &[Local<'_>]) -> Result<Local<'s>, Error<'s>> {
+        self.a_call_scoped(f, this, args, scope)
+    }
+
+    fn eval_global<'s>(&mut self, src: Local<'_>) -> Result<Local<'s>, Error<'s>> {
+        self.a_eval_global(src)
+    }
+
+    fn eval_function<'s>(&mut self) -> Result<Local<'s>, Error<'s>> {
+        Ok(self.a_eval_function())
+    }
+
+    fn symbol_description<'s>(&mut self, v: Local<'_>) -> Result<Option<Local<'s>>, Error<'s>> {
+        self.a_symbol_description(v)
     }
 
     fn module_parse<'s>(&mut self, _source: &str, _url: &str) -> Result<u32, Error<'s>> {
@@ -757,14 +853,15 @@ impl Engine for Realm {
     }
 
     fn intrinsic<'s>(&mut self, which: Intrinsic) -> Local<'s> {
-        let o = match which {
-            Intrinsic::ObjectPrototype => self.object_proto,
-            Intrinsic::ArrayPrototype => self.array_proto,
-            Intrinsic::ErrorPrototype => self.error_proto,
-            // There is no `Symbol` and no iterator protocol yet: the host sees `undefined`.
-            Intrinsic::IteratorPrototype | Intrinsic::SymbolIterator | Intrinsic::SymbolToStringTag => return self.undefined(),
+        let v = match which {
+            Intrinsic::ObjectPrototype => self.object_proto.value(),
+            Intrinsic::ArrayPrototype => self.array_proto.value(),
+            Intrinsic::ErrorPrototype => self.error_proto.value(),
+            Intrinsic::IteratorPrototype => self.iterator_prototype(),
+            Intrinsic::SymbolIterator => self.wk[crate::bi_symbol::ITERATOR].key_value(),
+            Intrinsic::SymbolToStringTag => self.wk[crate::bi_symbol::TO_STRING_TAG].key_value(),
         };
-        self.a_push(o.value())
+        self.a_push(v)
     }
 
     fn get_prototype_of<'s>(&mut self, obj: Local<'_>) -> Result<Option<Local<'s>>, Error<'s>> {

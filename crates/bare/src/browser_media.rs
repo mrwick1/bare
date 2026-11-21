@@ -191,8 +191,17 @@ lazy_global!(lazy_ranges, "TimeRanges", ens, |d| pick(d, 3));
 lazy_global!(lazy_error, "MediaError", ens, |d| pick(d, 4));
 lazy_global!(lazy_audio, "Audio", ens, |d| pick(d, 5));
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    crate::browser_lazy::install(d, it, &[("HTMLMediaElement", lazy_media as HS), ("HTMLAudioElement", lazy_audio_el), ("HTMLVideoElement", lazy_video_el), ("TimeRanges", lazy_ranges), ("MediaError", lazy_error), ("Audio", lazy_audio)])
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+    table!(lazy = [
+        Row::both(1, "HTMLMediaElement", lazy_media),
+        Row::both(1, "HTMLAudioElement", lazy_audio_el),
+        Row::both(1, "HTMLVideoElement", lazy_video_el),
+        Row::both(1, "TimeRanges", lazy_ranges),
+        Row::both(1, "MediaError", lazy_error),
+        Row::both(1, "Audio", lazy_audio),
+    ]);
+    let g = s.global();
+    d.install_rows(s, &[g], &lazy::T)
 }
 
 /// `new HTMLMediaElement()` and the like: `Failed to construct 'X': Illegal constructor`.
@@ -1069,9 +1078,13 @@ fn caption_object<'s>(d: &Dom, s: &mut Sc<'s, '_>, n: NodeId) -> Res<'s, Local<'
     let o = s.new_object()?;
     let id = obj_id(s, o).expect("an object");
     old(s, |it| crate::browser_lazy::tag(d, it, id, "TextTrack"))?;
-    d.def_get_l(s, o, "mode", caption_mode, Some(caption_set_mode))?;
-    d.def_get_l(s, o, "cues", caption_cues, None)?;
-    d.def_get_l(s, o, "activeCues", caption_active, None)?;
+    table!(rows1 = [
+        Row::get(1, "mode", caption_mode, Some(caption_set_mode)),
+        Row::get(1, "cues", caption_cues, None),
+        Row::get(1, "activeCues", caption_active, None),
+    ]);
+    let targets = [o];
+    d.install_rows(s, &targets, &rows1::T)?;
     d.media.tracks.borrow_mut().insert(n, CaptionTrack { object: id, mode: "disabled".into(), epoch: 0, ready: 0, cues: None, active: None, entries: Vec::new() });
     lift(s, caption_start(d, n))?;
     Ok(o)

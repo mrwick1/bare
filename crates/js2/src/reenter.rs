@@ -29,6 +29,7 @@
 use crate::builtins::Outcome;
 use crate::interp::{Exit, STOP, Vm};
 use crate::interp_rt::{ErrKind, Feedback, R, Realm};
+use crate::object::F_DERIVED;
 use crate::value::Value;
 
 /// A JS stack and a feedback vector for one nested call.
@@ -100,6 +101,42 @@ impl Realm {
     pub(crate) fn start_pooled(&mut self, f: Value, this: Value, args: &[Value]) -> R<Value> {
         let mut m = self.pool.pop().unwrap_or_else(|| Machine { stack: Vec::new(), fbs: Vec::new() });
         let r = Vm::start(self, &mut m.stack, &mut m.fbs, f, this, args);
+        self.pool.push(m);
+        match r {
+            Ok(v) => Ok(v),
+            Err(Exit::Throw(e)) => Err(e),
+            Err(Exit::Fuel) => Err(STOP),
+        }
+    }
+
+    /// `Construct(f, args, nt)` for a script function or class, as a nested call (`call_function` for `new`): the object that a base
+    /// class or a plain function makes, or what a derived class gives. A base class runs its field initializers first.
+    pub(crate) fn construct_script(&mut self, f: Value, args: &[Value], nt: Value) -> R<Value> {
+        let Some((ci, _)) = self.function_new(f) else { return self.type_error("not a constructor") };
+        if self.prog[ci].noctor {
+            return self.type_error("not a constructor");
+        }
+        if self.nest >= MAX_NEST {
+            return Err(self.error(ErrKind::Range, "maximum call stack size exceeded"));
+        }
+        let saved = (self.callee, self.nt, self.tail.take(), std::mem::take(&mut self.tail_args));
+        self.nest += 1;
+        let held = self.heap.hold_task();
+        let r = self.construct_held(f, args, nt);
+        self.heap.release_task(held);
+        self.nest -= 1;
+        (self.callee, self.nt, self.tail, self.tail_args) = saved;
+        r
+    }
+
+    fn construct_held(&mut self, f: Value, args: &[Value], nt: Value) -> R<Value> {
+        let derived = Realm::obj(f).is_some_and(|o| o.has_flag(F_DERIVED));
+        let this = if derived { Value::UNDEFINED } else { self.new_this(nt)? };
+        if !derived && let Some((_, _, ff)) = self.fields_of(f) {
+            self.start_pooled(ff, this, &[])?;
+        }
+        let mut m = self.pool.pop().unwrap_or_else(|| Machine { stack: Vec::new(), fbs: Vec::new() });
+        let r = Vm::start_new(self, &mut m.stack, &mut m.fbs, f, this, nt, args);
         self.pool.push(m);
         match r {
             Ok(v) => Ok(v),

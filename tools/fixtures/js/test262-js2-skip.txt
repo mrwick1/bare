@@ -84,6 +84,12 @@ allow:regexp-lookbehind
 allow:regexp-unicode-property-escapes
 allow:error-stack-accessor
 allow:Promise
+allow:Promise.allSettled
+allow:Promise.any
+allow:Promise.prototype.finally
+allow:promise-with-resolvers
+allow:promise-try
+allow:AggregateError
 allow:Symbol
 allow:Symbol.prototype.description
 allow:Symbol.toPrimitive
@@ -92,3 +98,12 @@ allow:Symbol.hasInstance
 allow:Symbol.iterator
 allow:Symbol.asyncIterator
 allow:Symbol.species
+# Map, Set, WeakMap and WeakSet (bi_collections.rs) and Reflect (bi_reflect.rs). The set methods, symbols as weak keys and WeakRef are not built.
+allow:Map
+allow:Set
+allow:WeakMap
+allow:WeakSet
+allow:Reflect
+allow:Reflect.construct
+allow:Reflect.set
+allow:Reflect.setPrototypeOf

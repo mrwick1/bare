@@ -162,6 +162,7 @@ name = "bare-js-diff"
 version = "0.1.0"
 dependencies = [
  "bare-js",
+ "bare-js-api",
  "bare-js2",
 ]
 
@@ -171,6 +172,7 @@ version = "0.1.0"
 dependencies = [
  "bare-js-api",
  "bare-os",
+ "bare-tzdata",
  "bare-unicode",
  "icu_properties",
 ]

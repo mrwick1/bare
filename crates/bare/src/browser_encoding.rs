@@ -11,7 +11,6 @@
 
 use crate::browser::*;
 use crate::browser_scoped::*;
-use bare_js::eval::Interp;
 use bare_js_api::{Args, Attrs, HostFn, Local, Str, Type};
 
 fn need<'s>(s: &mut Sc<'s, '_>, a: Args<'s>, f: &str) -> Res<'s, ()> {
@@ -99,13 +98,11 @@ fn atob<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Res<'s, L
     s.string_utf16(&out)
 }
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    run(it, |s| {
-        let g = s.global();
-        for (name, h, len) in [("structuredClone", structured_clone as HS, 1), ("btoa", btoa as HS, 1), ("atob", atob as HS, 1)] {
-            let f = d.add_fn_s(s, h, name, len, HostFn::Method)?;
-            s.define_str(g, name, f, Attrs::ALL)?;
-        }
-        Ok(())
-    })
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+    let g = s.global();
+    for (name, h, len) in [("structuredClone", structured_clone as HS, 1), ("btoa", btoa as HS, 1), ("atob", atob as HS, 1)] {
+        let f = d.add_fn_s(s, h, name, len, HostFn::Method)?;
+        s.define_str(g, name, f, Attrs::ALL)?;
+    }
+    Ok(())
 }

@@ -779,97 +779,141 @@ fn hist_set_scroll<'s>(d: &Dom, s: &mut Sc<'s, '_>, this: Local<'s>, a: Args<'s>
 
 // ------------------------------------------------------------------------------------------ install
 
-macro_rules! parts {
-    ($d:expr, $it:expr, $o:expr, $get:ident, $set:ident, [$(($name:expr, $part:expr)),*]) => {
-        $( $d.def_get_s($it, $o, $name, |d, s, t, _| $get(d, s, t, $part), Some(|d, s, t, a| $set(d, s, t, a, $part)))?; )*
+/// A row for a part of a URL: the getter and the setter of `$part`.
+macro_rules! part {
+    ($get:ident, $set:ident, $name:expr, $part:expr) => {
+        Row::get(1, $name, |d, s, t, _| $get(d, s, t, $part), Some(|d, s, t, a| $set(d, s, t, a, $part)))
     };
 }
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    let g = *d.global.get().expect("installed");
-    let op = it.object_prototype();
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+    let g = s.global();
     let mut protos = Vec::new();
     for _ in 0..6 {
-        protos.push(d.obj(it, op)?);
+        protos.push(d.plain_s(s)?);
     }
     let (url, params, iter, loc_proto, hist_proto, storage_proto) = (protos[0], protos[1], protos[2], protos[3], protos[4], protos[5]);
-    let (location, history) = (d.obj(it, loc_proto)?, d.obj(it, hist_proto)?);
-    let held = [url, params, iter, location, history, storage_proto].map(|o| it.persist_value(Value::Object(o)));
+    let (location, history) = (d.obj_s(s, loc_proto)?, d.obj_s(s, hist_proto)?);
+    let held = [url, params, iter, location, history, storage_proto].map(|o| {
+        let l = d.obj_local(s, o);
+        s.persist(l)
+    });
     let _ = d.nav.p.set(NavObjs { url, params, iter, location, history, storage_proto, _held: held });
 
     // URL
-    parts!(d, it, url, url_get_h, url_set_h, [
-        ("href", Part::Href), ("protocol", Part::Protocol), ("host", Part::Host), ("hostname", Part::Hostname),
-        ("port", Part::Port), ("pathname", Part::Pathname), ("search", Part::Search), ("hash", Part::Hash), ("username", Part::Username), ("password", Part::Password)
+    table!(rows1 = [
+        part!(url_get_h, url_set_h, "href", Part::Href),
+        part!(url_get_h, url_set_h, "protocol", Part::Protocol),
+        part!(url_get_h, url_set_h, "host", Part::Host),
+        part!(url_get_h, url_set_h, "hostname", Part::Hostname),
+        part!(url_get_h, url_set_h, "port", Part::Port),
+        part!(url_get_h, url_set_h, "pathname", Part::Pathname),
+        part!(url_get_h, url_set_h, "search", Part::Search),
+        part!(url_get_h, url_set_h, "hash", Part::Hash),
+        part!(url_get_h, url_set_h, "username", Part::Username),
+        part!(url_get_h, url_set_h, "password", Part::Password),
+        Row::get(1, "origin", pr::url_origin, None),
+        Row::get(1, "searchParams", pr::url_search_params, None),
+        Row::method(1, "toString", 0, pr::url_to_string),
+        Row::method(1, "toJSON", 0, pr::url_to_string),
     ]);
-    d.def_get_s(it, url, "origin", pr::url_origin, None)?;
-    d.def_get_s(it, url, "searchParams", pr::url_search_params, None)?;
-    d.def_method_s(it, url, "toString", 0, pr::url_to_string)?;
-    d.def_method_s(it, url, "toJSON", 0, pr::url_to_string)?;
+    let targets = [d.obj_local(s, url)];
+    d.install_rows(s, &targets, &rows1::T)?;
 
     // URLSearchParams
-    for (name, len, h) in [
-        ("append", 2, pr::p_append as HS), ("delete", 1, pr::p_delete), ("get", 1, pr::p_get), ("getAll", 1, pr::p_get_all),
-        ("has", 1, pr::p_has), ("set", 2, pr::p_set), ("sort", 0, pr::p_sort), ("toString", 0, pr::p_to_string),
-        ("forEach", 1, pr::p_for_each), ("keys", 0, pr::p_keys), ("values", 0, pr::p_values), ("entries", 0, pr::p_entries),
-    ] {
-        let f = d.def_method_s(it, params, name, len, h)?;
-        // `[Symbol.iterator]` is the same function object as `entries`. The key is the realm's own symbol.
-        if name == "entries" {
-            it.define_data(params, it.symbol_iterator(), Value::Object(f), true, false, true)?;
-        }
-    }
+    table!(rows_params = [
+        Row::method(1, "append", 2, pr::p_append),
+        Row::method(1, "delete", 1, pr::p_delete),
+        Row::method(1, "get", 1, pr::p_get),
+        Row::method(1, "getAll", 1, pr::p_get_all),
+        Row::method(1, "has", 1, pr::p_has),
+        Row::method(1, "set", 2, pr::p_set),
+        Row::method(1, "sort", 0, pr::p_sort),
+        Row::method(1, "toString", 0, pr::p_to_string),
+        Row::method(1, "forEach", 1, pr::p_for_each),
+        Row::method(1, "keys", 0, pr::p_keys),
+        Row::method(1, "values", 0, pr::p_values),
+        Row::method(1, "entries", 0, pr::p_entries),
+    ]);
+    let po = d.obj_local(s, params);
+    d.install_rows(s, &[po], &rows_params::T)?;
+    // `[Symbol.iterator]` is the same function object as `entries`. The key is the realm's own symbol.
+    let entries = s.get_str(po, "entries")?;
+    let sym = s.intrinsic(Intrinsic::SymbolIterator);
+    s.define(po, sym, entries, Attrs::METHOD)?;
     // The iterator objects inherit from %IteratorPrototype%, so `iterator[Symbol.iterator]() === iterator`.
-    if let Err(e) = it.heap.set_prototype_of(iter, Some(it.iterator_prototype())) {
-        return Err(it.heap_error(e));
-    }
-    d.def_get_s(it, params, "size", pr::p_size, None)?;
-    d.def_method_s(it, iter, "next", 0, pr::iter_next)?;
+    let (io, ip) = (d.obj_local(s, iter), s.intrinsic(Intrinsic::IteratorPrototype));
+    s.set_prototype_of(io, Some(ip))?;
+    table!(rows2 = [
+        Row::get(1, "size", pr::p_size, None),
+        Row::method(2, "next", 0, pr::iter_next),
+    ]);
+    let targets = [d.obj_local(s, params), d.obj_local(s, iter)];
+    d.install_rows(s, &targets, &rows2::T)?;
 
     // Location
-    parts!(d, it, loc_proto, loc_get, loc_set, [
-        ("href", Part::Href), ("protocol", Part::Protocol), ("host", Part::Host), ("hostname", Part::Hostname),
-        ("port", Part::Port), ("pathname", Part::Pathname), ("search", Part::Search), ("hash", Part::Hash)
+    table!(rows3 = [
+        part!(loc_get, loc_set, "href", Part::Href),
+        part!(loc_get, loc_set, "protocol", Part::Protocol),
+        part!(loc_get, loc_set, "host", Part::Host),
+        part!(loc_get, loc_set, "hostname", Part::Hostname),
+        part!(loc_get, loc_set, "port", Part::Port),
+        part!(loc_get, loc_set, "pathname", Part::Pathname),
+        part!(loc_get, loc_set, "search", Part::Search),
+        part!(loc_get, loc_set, "hash", Part::Hash),
+        Row::get(1, "origin", |d, s, t, a| if loc_check(d, s, t)? { d.js_str_s(s, "null") } else { win_origin(d, s, t, a) }, None),
+        Row::method(1, "assign", 1, |d, s, t, a| loc_go(d, s, t, a, false)),
+        Row::method(1, "replace", 1, |d, s, t, a| loc_go(d, s, t, a, true)),
+        Row::method(1, "reload", 0, loc_reload),
+        Row::method(1, "toString", 0, |d, s, t, _| loc_get(d, s, t, Part::Href)),
     ]);
-    d.def_get_s(it, loc_proto, "origin", |d, s, t, a| if loc_check(d, s, t)? { d.js_str_s(s, "null") } else { win_origin(d, s, t, a) }, None)?;
-    d.def_method_s(it, loc_proto, "assign", 1, |d, s, t, a| loc_go(d, s, t, a, false))?;
-    d.def_method_s(it, loc_proto, "replace", 1, |d, s, t, a| loc_go(d, s, t, a, true))?;
-    d.def_method_s(it, loc_proto, "reload", 0, loc_reload)?;
-    d.def_method_s(it, loc_proto, "toString", 0, |d, s, t, _| loc_get(d, s, t, Part::Href))?;
+    let targets = [d.obj_local(s, loc_proto)];
+    d.install_rows(s, &targets, &rows3::T)?;
 
     // History
-    d.def_method_s(it, hist_proto, "pushState", 2, |d, s, t, a| push_replace(d, s, t, a, false))?;
-    d.def_method_s(it, hist_proto, "replaceState", 2, |d, s, t, a| push_replace(d, s, t, a, true))?;
-    d.def_method_s(it, hist_proto, "go", 0, hist_go)?;
-    d.def_method_s(it, hist_proto, "back", 0, hist_back)?;
-    d.def_method_s(it, hist_proto, "forward", 0, hist_forward)?;
-    d.def_get_s(it, hist_proto, "length", hist_length, None)?;
-    d.def_get_s(it, hist_proto, "state", hist_state, None)?;
-    d.def_get_s(it, hist_proto, "scrollRestoration", hist_scroll, Some(hist_set_scroll))?;
+    table!(rows4 = [
+        Row::method(1, "pushState", 2, |d, s, t, a| push_replace(d, s, t, a, false)),
+        Row::method(1, "replaceState", 2, |d, s, t, a| push_replace(d, s, t, a, true)),
+        Row::method(1, "go", 0, hist_go),
+        Row::method(1, "back", 0, hist_back),
+        Row::method(1, "forward", 0, hist_forward),
+        Row::get(1, "length", hist_length, None),
+        Row::get(1, "state", hist_state, None),
+        Row::get(1, "scrollRestoration", hist_scroll, Some(hist_set_scroll)),
+    ]);
+    let targets = [d.obj_local(s, hist_proto)];
+    d.install_rows(s, &targets, &rows4::T)?;
 
     // Storage
     // The order of Chrome (a `for in` over a `Storage` lists them so).
-    d.def_get_s(it, storage_proto, "length", sto::length, None)?;
-    for (name, len, h) in [("clear", 0, sto::clear as HS), ("getItem", 1, sto::get_item), ("key", 1, sto::key), ("removeItem", 1, sto::remove_item), ("setItem", 2, sto::set_item)] {
-        // WebIDL operations are enumerable (a `for in` over a `Storage` lists them).
-        let f = d.def_method_s(it, storage_proto, name, len, h)?;
-        let k = d.key(it, name)?;
-        it.define_data(storage_proto, k, Value::Object(f), true, true, true)?;
-    }
+    // WebIDL operations are enumerable (a `for in` over a `Storage` lists them).
+    table!(rows_storage = [
+        Row::get(1, "length", sto::length, None),
+        Row::method(1, "clear", 0, sto::clear).enumerable(),
+        Row::method(1, "getItem", 1, sto::get_item).enumerable(),
+        Row::method(1, "key", 1, sto::key).enumerable(),
+        Row::method(1, "removeItem", 1, sto::remove_item).enumerable(),
+        Row::method(1, "setItem", 2, sto::set_item).enumerable(),
+    ]);
+    let sp = d.obj_local(s, storage_proto);
+    d.install_rows(s, &[sp], &rows_storage::T)?;
 
     // document and window
     let p = d.p();
-    d.def_get_s(it, p.document, "URL", doc_url, None)?;
-    d.def_get_s(it, p.document, "documentURI", doc_url, None)?;
-    d.def_get_s(it, p.document, "cookie", crate::browser_cookie::doc_cookie_get, Some(crate::browser_cookie::doc_cookie_set))?;
-    d.def_get_s(it, p.document, "domain", doc_domain, Some(doc_set_domain))?;
-    d.def_get_s(it, p.node, "baseURI", doc_url, None)?;
-    d.def_get_s(it, p.document, "location", loc_obj, Some(win_set_location))?;
-    d.def_get_s(it, g, "location", loc_obj, Some(win_set_location))?;
-    d.def_get_s(it, g, "origin", win_origin, None)?;
+    table!(rows5 = [
+        Row::get(1, "URL", doc_url, None),
+        Row::get(1, "documentURI", doc_url, None),
+        Row::get(1, "cookie", crate::browser_cookie::doc_cookie_get, Some(crate::browser_cookie::doc_cookie_set)),
+        Row::get(1, "domain", doc_domain, Some(doc_set_domain)),
+        Row::get(2, "baseURI", doc_url, None),
+        Row::get(1, "location", loc_obj, Some(win_set_location)),
+        Row::get(4, "location", loc_obj, Some(win_set_location)),
+        Row::get(4, "origin", win_origin, None),
+    ]);
+    let targets = [d.obj_local(s, p.document), d.obj_local(s, p.node), g];
+    d.install_rows(s, &targets, &rows5::T)?;
 
     // constructors and globals
-    let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
     let mut fixed = vec![loc_proto, hist_proto];
     let ifaces: [(&str, ObjId, HS, HostFn); 5] = [
         ("URL", url, pr::url_ctor, HostFn::CtorNewTarget),
@@ -883,31 +927,30 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
             "URL" | "Location" | "History" => 1,
             _ => 0,
         };
-        let f = d.add_fn_s_obj(it, h, name, len, kind)?;
-        it.define_data(f, kp, Value::Object(proto), false, false, false)?;
-        it.define_data(proto, kc, Value::Object(f), true, false, true)?;
-        let k = d.key(it, name)?;
-        it.define_data(g, k, Value::Object(f), true, false, true)?;
+        let f = d.add_fn_s(s, h, name, len, kind)?;
+        fixed.push(d.link_s(s, f, proto, name)?);
         if name == "URL" {
-            d.def_method_s(it, f, "canParse", 1, pr::url_can_parse)?;
-            d.def_method_s(it, f, "createObjectURL", 1, crate::browser_web::create_object_url)?;
-            d.def_method_s(it, f, "revokeObjectURL", 1, crate::browser_web::revoke_object_url)?;
+            table!(rows6 = [
+                Row::method(1, "canParse", 1, pr::url_can_parse),
+                Row::method(1, "createObjectURL", 1, crate::browser_web::create_object_url),
+                Row::method(1, "revokeObjectURL", 1, crate::browser_web::revoke_object_url),
+            ]);
+            let targets = [f];
+            d.install_rows(s, &targets, &rows6::T)?;
         }
-        fixed.push(f);
     }
     // `Storage.prototype[Symbol.toStringTag]` is "Storage".
-    let (ks, kt) = (d.key(it, "Symbol")?, d.key(it, "toStringTag")?);
-    let sy = it.get_value(Value::Object(g), ks)?;
-    if let Value::Symbol(sym) = it.get_value(sy, kt)? {
-        let tag = Value::String(it.heap.intern_str("Storage").map_err(|e| it.heap_error(e))?);
-        it.define_data(storage_proto, bare_js::value::PropertyKey::Symbol(sym), tag, false, false, true)?;
-    }
-    let k = d.key(it, "history")?;
-    it.define_data(g, k, Value::Object(history), true, true, true)?;
+    d.tag_s(s, storage_proto, "Storage")?;
+    let ho = d.obj_local(s, history);
+    s.define_str(g, "history", ho, Attrs::ALL)?;
     // The two areas are host named objects (`localStorage.x` is `getItem('x')`). Each is made on its first read: a page that reads
     // neither keeps `Heap::has_exotics` false, and every property write skips the exotic checks.
-    d.def_get_s(it, g, "localStorage", |d, s, _, _| sto::area_get(d, s, false), None)?;
-    d.def_get_s(it, g, "sessionStorage", |d, s, _, _| sto::area_get(d, s, true), None)?;
+    table!(rows7 = [
+        Row::get(1, "localStorage", |d, s, _, _| sto::area_get(d, s, false), None),
+        Row::get(1, "sessionStorage", |d, s, _, _| sto::area_get(d, s, true), None),
+    ]);
+    let targets = [g];
+    d.install_rows(s, &targets, &rows7::T)?;
     d.fixed.borrow_mut().extend(fixed);
     Ok(())
 }

@@ -57,9 +57,9 @@
 use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_scoped::*;
-use bare_js_api::{Args, Local};
+use bare_js_api::{Args, Attrs, Local};
 use bare_js::eval::{Error, Interp};
-use bare_js::heap::{Property, PropertyDescriptor};
+use bare_js::heap::Property;
 use bare_js::value::{ObjId, PropertyKey, StrId, Value, is_js_space, number_to_string, string_to_number};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
@@ -425,13 +425,10 @@ fn count_reset<'s>(d: &Dom, s: &mut Sc<'s, '_>, _: Local<'s>, a: Args<'s>) -> Re
 
 /// The global `console` is an accessor until the first read or write (as `CSS`, `crypto` and `Intl`): a page that never reads
 /// it does not pay for 19 functions. The first read makes the object and replaces the accessor with a data property.
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    let g = *d.global.get().expect("installed");
-    let f = d.add_fn_s_obj(it, lazy, "console", 0, bare_js_api::HostFn::Method)?;
-    let k = d.key(it, "console")?;
-    let desc = PropertyDescriptor { get: Some(Some(f)), set: Some(Some(f)), enumerable: Some(false), configurable: Some(true), ..Default::default() };
-    it.heap.define_own_property(g, k, &desc).map_err(|e| it.heap_error(e))?;
-    Ok(())
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+    let g = s.global();
+    let f = d.add_fn_s(s, lazy, "console", 0, bare_js_api::HostFn::Method)?;
+    s.define_accessor_str(g, "console", Some(f), Some(f), Attrs { writable: false, enumerable: false, configurable: true })
 }
 
 /// The getter (no argument) and the setter (the new value) of the global.

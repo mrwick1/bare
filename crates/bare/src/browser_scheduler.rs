@@ -887,14 +887,11 @@ impl Dom {
 
     // ------------------------------------------------------------ install
 
-    pub(crate) fn install_scheduler(&self, it: &mut Interp<'_>) -> R<()> {
-        let g = it.global_object();
+    pub(crate) fn install_scheduler<'s>(&self, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+        let g = s.global();
         let p = self.p();
-        let op = it.object_prototype();
-        let (port, channel, event, perf) = (self.obj(it, p.et)?, self.obj(it, op)?, self.obj(it, p.event)?, self.obj(it, op)?);
+        let (port, channel, event, perf) = (self.obj_s(s, p.et)?, self.plain_s(s)?, self.obj_s(s, p.event)?, self.plain_s(s)?);
         self.sched.borrow_mut().protos = Some(SProtos { port, channel, event, perf });
-        let kc = self.key(it, "constructor")?;
-        let kp = self.key(it, "prototype")?;
         for (name, h, len) in [
             ("setTimeout", set_timeout as HS, 1),
             ("setInterval", set_interval as HS, 1),
@@ -902,9 +899,8 @@ impl Dom {
             ("clearInterval", clear_timer as HS, 1),
             ("queueMicrotask", queue_microtask as HS, 1),
         ] {
-            let f = self.add_fn_s_obj(it, h, name, len, HostFn::Method)?;
-            let k = self.key(it, name)?;
-            it.define_data(g, k, Value::Object(f), true, true, true)?;
+            let f = self.add_fn_s(s, h, name, len, HostFn::Method)?;
+            s.define_str(g, name, f, Attrs::ALL)?;
         }
         // interface objects
         for (name, proto, ctor) in [
@@ -912,42 +908,25 @@ impl Dom {
             ("MessagePort", port, None),
             ("MessageEvent", event, None),
         ] {
-            let f = self.add_fn_s_obj(it, ctor.unwrap_or(illegal), name, 0, if ctor.is_some() { HostFn::Ctor } else { HostFn::Method })?;
-            it.define_data(f, kp, Value::Object(proto), false, false, false)?;
-            it.define_data(proto, kc, Value::Object(f), true, false, true)?;
-            let k = self.key(it, name)?;
-            it.define_data(g, k, Value::Object(f), true, false, true)?;
+            self.interface_s(s, proto, name, ctor.unwrap_or(illegal), 0, if ctor.is_some() { HostFn::Ctor } else { HostFn::Method })?;
         }
-        let acc = |it: &mut Interp<'_>, on: ObjId, name: &str, get: HS, set: Option<HS>| -> R<()> {
-            let key = self.key(it, name)?;
-            let gf = self.add_fn_s_obj(it, get, &format!("get {name}"), 0, HostFn::Method)?;
-            let sf = match set {
-                Some(s) => Some(self.add_fn_s_obj(it, s, &format!("set {name}"), 1, HostFn::Method)?),
-                None => None,
-            };
-            let d = bare_js::heap::PropertyDescriptor { get: Some(Some(gf)), set: Some(sf), enumerable: Some(true), configurable: Some(true), ..Default::default() };
-            match it.heap.define_own_property(on, key, &d) {
-                Ok(_) => Ok(()),
-                Err(e) => Err(it.heap_error(e)),
-            }
-        };
-        let method = |it: &mut Interp<'_>, on: ObjId, name: &str, h: HS, len: u32| -> R<()> {
-            let f = self.add_fn_s_obj(it, h, name, len, HostFn::Method)?;
-            let k = self.key(it, name)?;
-            it.define_data(on, k, Value::Object(f), true, true, true)
-        };
-        method(it, port, "postMessage", port_post_message, 1)?;
-        method(it, port, "start", port_start, 0)?;
-        method(it, port, "close", port_close, 0)?;
-        acc(it, port, "onmessage", port_onmessage, Some(set_port_onmessage))?;
+        let po = self.obj_local(s, port);
+        table!(rows1 = [
+            Row::method(1, "postMessage", 1, port_post_message).enumerable(),
+            Row::method(1, "start", 0, port_start).enumerable(),
+            Row::method(1, "close", 0, port_close).enumerable(),
+            Row::get(2, "onmessage", port_onmessage, Some(set_port_onmessage)),
+        ]);
+        let targets = [po, self.obj_local(s, port)];
+        self.install_rows(s, &targets, &rows1::T)?;
         for (name, h) in [("data", msg_data as HS), ("origin", msg_origin), ("lastEventId", msg_empty), ("source", msg_source), ("ports", msg_ports)] {
-            acc(it, event, name, h, None)?;
+            self.def_get_at(s, event, name, h, None)?;
         }
-        method(it, perf, "now", performance_now, 0)?;
-        crate::browser_perf::install(self, it, perf)?;
-        let po = self.obj(it, perf)?;
-        let k = self.key(it, "performance")?;
-        it.define_data(g, k, Value::Object(po), true, true, true)?;
+        let pl = self.obj_local(s, perf);
+        self.def_method_l(s, pl, "now", 0, performance_now, true)?;
+        crate::browser_perf::install(self, s, perf)?;
+        let po = self.obj_with_s(s, perf)?;
+        s.define_str(g, "performance", po, Attrs::ALL)?;
         Ok(())
     }
 

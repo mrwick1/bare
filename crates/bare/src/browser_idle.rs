@@ -31,7 +31,7 @@ use crate::browser_scheduler::{Key, Task};
 use crate::browser_scoped::*;
 use bare_js::eval::{Error, Interp};
 use bare_js::value::{ObjId, Value, to_uint32};
-use bare_js_api::{Args, Engine, HostFn, Local, Type};
+use bare_js_api::{Args, Attrs, Engine, HostFn, Local, Type};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 
@@ -150,12 +150,11 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     Ok(())
 }
 
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    let g = it.global_object();
+pub(crate) fn install<'s>(d: &Dom, s: &mut Sc<'s, '_>) -> Res<'s, ()> {
+    let g = s.global();
     for (name, h) in [("requestIdleCallback", request as HS), ("cancelIdleCallback", cancel)] {
-        let f = d.add_fn_s_obj(it, h, name, 1, HostFn::Method)?;
-        let k = d.key(it, name)?;
-        it.define_data(g, k, Value::Object(f), true, true, true)?;
+        let f = d.add_fn_s(s, h, name, 1, HostFn::Method)?;
+        s.define_str(g, name, f, Attrs::ALL)?;
     }
     Ok(())
 }

@@ -540,7 +540,7 @@ impl Realm {
     }
 
     /// The descriptor object of an own property.
-    fn from_own(&mut self, p: Own) -> Value {
+    pub(crate) fn from_own(&mut self, p: Own) -> Value {
         let d = Obj::new(&mut self.heap, &self.shapes, self.s_object).expect("memory");
         let at = p.attrs();
         match p {
@@ -876,7 +876,8 @@ impl Realm {
         if self.proto_of(o) == p {
             return Ok(true);
         }
-        if !o.extensible() {
+        // `Object.prototype` is an immutable prototype exotic object.
+        if !o.extensible() || o == self.object_proto {
             return Ok(false);
         }
         let mut c = p;
@@ -1083,6 +1084,8 @@ pub(crate) fn object_to_string(rt: &mut Realm, this: Value, _args: &[Value]) -> 
             "Error"
         } else if o.has_flag(crate::object::F_REGEXP) {
             "RegExp"
+        } else if o.has_flag(crate::bi_date::F_DATE) {
+            "Date"
         } else if o.is_indexed() {
             "Arguments"
         } else {
