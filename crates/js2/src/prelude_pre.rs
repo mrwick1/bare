@@ -66,6 +66,7 @@ pub(crate) const PRE: &[(&str, Pd)] = &[
     ("bind", Native(crate::builtins::bind_callback, 2, "bind")),
     ("arraySpecies", Native(crate::bi_array::prelude_species, 2, "arraySpecies")),
     ("arrayPut", Native(crate::bi_array::prelude_array_put, 3, "arrayPut")),
+    ("arrayString", Native(crate::bi_array::prelude_array_string, 1, "arrayString")),
 ];
 
 /// The number of slots.
