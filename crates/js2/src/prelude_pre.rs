@@ -110,6 +110,9 @@ impl Realm {
         let next = self.pre_fn("arrayIteratorNext", "next")?;
         let k = self.intern("next");
         self.define_attrs(proto, Key::Name(k), HIDDEN, next)?;
+        self.keep(next);
+        self.keep(k.value());
+        self.ltab.array_iter_next = Some((proto, k, next));
         let tag = self.string("Array Iterator");
         self.define_attrs(proto, Key::Name(self.wk[TO_STRING_TAG]), A_C, tag)?;
         Ok(proto.value())

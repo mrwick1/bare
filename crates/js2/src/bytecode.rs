@@ -282,7 +282,7 @@ ops! {
     RetUndef Abc "" "Return `undefined`.",
     Throw Abc "r" "Throw `a`.",
     ThrowConst Abx "- A" "Throw the TypeError of an assignment to the constant named by `atoms[bx]`.",
-    IterOpen Abc "W r" "Open the iterator of `b`. The iterator record (iterator, `next`, state) is in the 3 registers from `a`.",
+    IterOpen Abc "W r u" "Open the iterator of `b`. The iterator record (iterator, `next`, state) is in the 3 registers from `a`. With `c` = 1, use a full array iterator for `yield*`.",
     ForInOpen Abc "W r" "Open the keys of `b` (`for-in`). The record is in the 3 registers from `a`, as for `IterOpen`.",
     IterNext AsBxX "w j R" "`a` = the next value of the record in the 3 registers from `x`. When it is done, jump.",
     IterClose Abc "R - u" "Close the iterator whose record is in the 3 registers from `a` (a `break` or an exception out of the loop). `c` is 1 for an exception: the error of `return()` is then dropped.",

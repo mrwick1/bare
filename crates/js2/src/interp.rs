@@ -1324,7 +1324,11 @@ impl Vm {
                         Op::IterClose => {
                             std::hint::cold_path();
                             // The loop leaves early (`c` = 1: with a throw): `return()` of the iterator, so a generator runs its `finally` blocks.
-                            if r!(a!() + 1).as_int().is_none() {
+                            if let Some(i) = r!(a!() + 1).as_int() {
+                                if r!(a!() + 2) == Value::bool(true) {
+                                    tri!(realm.close_array_iterator(r!(a!()), i, c!() != 0));
+                                }
+                            } else {
                                 tri!(realm.iter_close(r!(a!()), r!(a!() + 1), c!() != 0));
                             }
                             pc = next;
@@ -2302,27 +2306,29 @@ impl Vm {
                     Op::RetUndef => ret!(undef),
                     Op::IterOpen => {
                         let mut it = r!(b!());
-                        if Realm::str_of(it).is_some() {
+                        let string = Realm::str_of(it).is_some();
+                        if string {
                             // A string is iterated by code points: walk an array of them.
                             gate!();
                             let vals = tri!(realm.iter_values(it));
                             it = Obj::array(&mut realm.heap, &realm.shapes, realm.s_array, &vals).expect("memory").value();
                         }
-                        let is_array = Realm::obj(it).is_some_and(|o| realm.shapes.get(o.shape(&realm.shapes)).layout == crate::cell::Layout::Indexed);
+                        let fast_array = !string && c!() == 0 && Realm::obj(it).is_some_and(|o| realm.plain_array_iterator(o));
                         // A generator is stepped by `IterNext` itself (`undefined` where an array has its index): see `generator.rs`.
-                        let index = if is_array {
+                        let index = if string || fast_array {
                             Value::int(0)
                         } else if Realm::is_generator(it) {
                             undef
                         } else {
                             std::hint::cold_path();
+                            gate!();
                             let (i, k) = tri!(realm.iter_open_generic(it));
                             it = i;
                             k
                         };
                         r!(a!()) = it;
                         r!(a!() + 1) = index;
-                        r!(a!() + 2) = Value::int(0);
+                        r!(a!() + 2) = Value::bool(fast_array);
                         pc = next;
                     }
                     Op::IterNext => {
@@ -2340,8 +2346,14 @@ impl Vm {
                         };
                         let arr = Realm::obj(r!(base)).expect("an array");
                         if (i as u32) < arr.len() {
-                            r!(a!()) = arr.get_element(i as u32).unwrap_or(undef);
                             r!(base + 1) = Value::int(i + 1);
+                            r!(a!()) = if let Some(v) = arr.get_element(i as u32) {
+                                v
+                            } else {
+                                std::hint::cold_path();
+                                gate!();
+                                tri!(realm.get_prop(arr.value(), Key::Idx(i as u32)))
+                            };
                             pc = nextx!();
                         } else {
                             jump!(true, nextx!(), sbx!())

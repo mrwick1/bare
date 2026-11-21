@@ -118,7 +118,7 @@ impl<'a> Fc<'a> {
         let m0 = self.mark();
         let w = self.window(YS_REGS);
         let v = self.any(arg)?;
-        self.op(Op::IterOpen, w, v, 0);
+        self.op(Op::IterOpen, w, v, 1);
         // `v` is dead now, and a resume does not bring it back.
         self.free(w + YS_REGS);
         (0..ITER_REGS).for_each(|i| self.set_live(w + i));
