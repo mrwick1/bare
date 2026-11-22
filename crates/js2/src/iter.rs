@@ -73,8 +73,9 @@ impl Realm {
         let result = (|| {
             if self.has_prop(proto, Key::Name(ret))? {
                 let it = self.call_function(self.args_iter, array, &[])?;
-                let pos = self.intern("\0i");
-                self.set_prop(it, Key::Name(pos), Realm::num(index as f64))?;
+                let it_obj = Realm::obj(it).expect("array iterator");
+                debug_assert!(it_obj.is_kind(crate::object::K_ARRAY_ITER));
+                it_obj.set_slot(&self.shapes, 1, Realm::num(index as f64));
                 self.iter_close_inner(it, Value::NULL)?;
             }
             Ok(())

@@ -1052,6 +1052,11 @@ impl Realm {
             if let Some(s) = self.slot_at(o, key) {
                 return Some(s);
             }
+            if o.is_kind(crate::object::K_TYPED)
+                && let Some(i) = crate::bi_typed::numeric_key(Key::Name(key))
+            {
+                return i.and_then(|i| self.typed_get(o, i)).map(Slot::Data);
+            }
             o = self.proto_of(o)?;
         }
     }
@@ -1061,6 +1066,9 @@ impl Realm {
     fn lookup_index_g(&mut self, mut o: Obj, index: u32) -> Option<Slot> {
         let key = self.idx_atom(index);
         loop {
+            if o.is_kind(crate::object::K_TYPED) {
+                return self.typed_get(o, index as usize).map(Slot::Data);
+            }
             if let Some(s) = self.slot_at(o, key) {
                 return Some(s);
             }
@@ -1149,6 +1157,9 @@ impl Realm {
                         && let Some(v) = o.get_element(i)
                     {
                         return Ok(Got::Val(v));
+                    }
+                    if o.is_kind(crate::object::K_TYPED) {
+                        return Ok(Got::Val(self.typed_get(o, i as usize).unwrap_or(Value::UNDEFINED)));
                     }
                     Ok(Self::got(self.lookup_index_g(o, i)))
                 }
@@ -1261,6 +1272,10 @@ impl Realm {
                 Ok(Put::Done)
             }
             Key::Idx(i) => {
+                if o.is_kind(crate::object::K_TYPED) {
+                    self.typed_set(o, Some(i as usize), v)?;
+                    return Ok(Put::Done);
+                }
                 let k = self.idx_atom(i);
                 if self.store_entry(o, k)?.is_some() {
                     return self.set_named(o, k, v);
@@ -1278,6 +1293,12 @@ impl Realm {
                 Ok(Put::Done)
             }
             Key::Name(k) => {
+                if o.is_kind(crate::object::K_TYPED)
+                    && let Some(i) = crate::bi_typed::numeric_key(key)
+                {
+                    self.typed_set(o, i, v)?;
+                    return Ok(Put::Done);
+                }
                 if k == self.k_length && self.is_array(o) {
                     if o.has_flag(F_LEN_RO) {
                         return Ok(Put::Fail);
@@ -1303,6 +1324,9 @@ impl Realm {
     fn index_proto_setter(&mut self, o: Obj, i: u32) -> Option<Put> {
         let mut proto = self.proto_of(o);
         while let Some(p) = proto {
+            if p.is_kind(crate::object::K_TYPED) {
+                return (i as usize >= self.typed_len(p)).then_some(Put::Done);
+            }
             match self.get_own(p, Key::Idx(i)) {
                 Some(crate::bi_object::Own::Acc(_, set, _)) => return Some(Self::setter(set)),
                 Some(crate::bi_object::Own::Data(_, attrs)) => return (attrs & A_W == 0).then_some(Put::Fail),
@@ -1343,6 +1367,11 @@ impl Realm {
                 } else {
                     None
                 });
+            }
+            if p.is_kind(crate::object::K_TYPED)
+                && let Some(i) = crate::bi_typed::numeric_key(Key::Name(k))
+            {
+                return Ok((!i.is_some_and(|i| i < self.typed_len(p))).then_some(Put::Done));
             }
             proto = self.proto_of(p);
         }
@@ -1512,7 +1541,9 @@ impl Realm {
     /// prototype chain of the receiver.
     fn fill_proto(&mut self, fb: &mut Feedback, site: usize, o: Obj, name: Str) {
         // `prototype` of a function, `length` of an array and of a wrapper, and the indexes of a wrapper are not in the shape or the chain only.
-        if name == self.k_prototype || o.is_kind(K_WRAP) {
+        if name == self.k_prototype || o.is_kind(K_WRAP)
+            || (o.is_kind(crate::object::K_TYPED) && crate::bi_typed::numeric_key(Key::Name(name)).is_some())
+        {
             return;
         }
         // The shape after the read: the read may have given a function its own properties.
@@ -1595,7 +1626,9 @@ impl Realm {
     /// `recv.name = v` at a site.
     pub fn set_field_slow(&mut self, fb: &mut Feedback, site: usize, name: Str, recv: Value, v: Value) -> R<Put> {
         let Some(o) = Realm::obj(recv) else { return self.set_prop_g(recv, Key::Name(name), v) };
-        if o.has_flag(F_HOST) || (name == self.k_length && o.is_kind(K_WRAP)) {
+        if o.has_flag(F_HOST) || (name == self.k_length && o.is_kind(K_WRAP))
+            || (o.is_kind(crate::object::K_TYPED) && crate::bi_typed::numeric_key(Key::Name(name)).is_some())
+        {
             return self.set_prop_g(recv, Key::Name(name), v);
         }
         self.fn_prep(o, name);
@@ -1703,6 +1736,11 @@ impl Realm {
             }
         }
         loop {
+            if o.is_kind(crate::object::K_TYPED)
+                && let Some(i) = crate::bi_typed::numeric_key(key)
+            {
+                return Ok(i.is_some_and(|i| i < self.typed_len(o)));
+            }
             self.fn_props(o);
             let found = match key {
                 Key::Idx(i) => (o.is_indexed() && o.get_element(i).is_some()) || {
@@ -1728,6 +1766,11 @@ impl Realm {
         let Some(o) = Realm::obj(recv) else { return Ok(true) };
         if self.api.hs.active && o.has_flag(F_HOST) && let Some(ok) = self.hs_write(o, key, crate::api_host::HsWrite::Delete)? {
             return Ok(ok);
+        }
+        if o.is_kind(crate::object::K_TYPED)
+            && let Some(i) = crate::bi_typed::numeric_key(key)
+        {
+            return Ok(!i.is_some_and(|i| i < self.typed_len(o)));
         }
         if self.has_string_own(o, key) {
             return Ok(false);

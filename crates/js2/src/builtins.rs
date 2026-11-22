@@ -362,6 +362,7 @@ impl Realm {
         self.install_error();
         // One line for each built-in module. Add one line, keep sorted.
         self.install_array();
+        self.lazy_table(g, crate::bi_buffer::GLOBALS);
         self.install_collections();
         self.install_date();
         self.install_generator();

@@ -136,27 +136,6 @@ function mergeSort(a, n, cmp) {
   }
   return src;
 }
-// The iterator of `keys`, `values` and `entries`. Its state is in three own properties whose names start with U+0000: no list of keys
-// shows them. `arrayIteratorProto` is a slot that the realm makes at the first read (`prelude_pre.rs`).
-function arrayIterator(a, kind) {
-  var it = Object.create(arrayIteratorProto);
-  it['\0o'] = a;
-  it['\0i'] = 0;
-  it['\0k'] = kind;
-  return it;
-}
-// `%ArrayIteratorPrototype%.next`.
-function arrayIteratorNext() {
-  if (typeof this !== 'object' || this === null || !('\0k' in this)) throw new TypeError('next called on a value that is not an array iterator');
-  var a = this['\0o'], i = this['\0i'];
-  if (a !== undefined && i < len(a)) {
-    this['\0i'] = i + 1;
-    var k = this['\0k'];
-    return { value: k === 0 ? i : k === 1 ? a[i] : [i, a[i]], done: false };
-  }
-  this['\0o'] = undefined;
-  return { value: undefined, done: true };
-}
 function sortList(a, n, cmp) {
   var vals = [], k = 0, undefs = 0;
   for (var i = 0; i < n; i++) {
