@@ -508,3 +508,7 @@ mod key_add_tests;
 #[cfg(test)]
 #[path = "script_foreach_step_tests.rs"]
 mod foreach_step_tests;
+
+#[cfg(test)]
+#[path = "forin_shape_tests.rs"]
+mod forin_shape_tests;

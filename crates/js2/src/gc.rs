@@ -260,6 +260,15 @@ impl Marker<'_> {
         }
     }
 
+    /// A register can hold a for-in shape root in place of a script value.
+    pub(crate) fn register(&mut self, v: Value) {
+        if let Some(id) = v.as_for_in_shape() {
+            self.shape(id);
+        } else {
+            self.value(v);
+        }
+    }
+
     /// Keep a shape that no marked object may use yet: a shape that code or a native function holds before it makes the first object.
     /// Its prototype is marked, as for the first object of the shape. Another shape is freed by `Shapes::finish_marks`.
     pub fn shape(&mut self, id: ShapeId) {
@@ -347,8 +356,27 @@ impl Marker<'_> {
 
     /// A record of values (`Slots` or `Elements`): scan its capacity. A long record is scanned in slices of [`SLICE`] values (below).
     fn record(&mut self, p: NonNull<u8>, h: CellHeader) {
-        let at = if h.layout() == Layout::Elements { object::ELEMS_AT } else { object::SLOTS_AT };
-        self.scan(p.as_ptr().wrapping_add(at).cast(), 0, h.cap() as usize);
+        let cap = h.cap() as usize;
+        if h.layout() == Layout::Elements {
+            self.scan(p.as_ptr().wrapping_add(object::ELEMS_AT).cast(), 0, cap);
+        } else {
+            let base = p.as_ptr().wrapping_add(object::SLOTS_AT).cast();
+            if h.flags() & object::F_SAVED_REGS != 0 {
+                self.saved_shapes(base, cap);
+            }
+            self.scan(base, 0, cap);
+        }
+    }
+
+    #[cold]
+    fn saved_shapes(&mut self, base: *mut Value, cap: usize) {
+        for i in 0..cap {
+            // SAFETY: the saved frame has `cap` initialized values.
+            let v = unsafe { base.add(i).read() };
+            if let Some(id) = v.as_for_in_shape() {
+                self.shape(id);
+            }
+        }
     }
 
     /// Mark the values `from..end` after `base`, at most [`SLICE`] of them, and keep the rest of the range for later. Each value that

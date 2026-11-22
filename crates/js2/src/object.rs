@@ -173,6 +173,8 @@ const _: () = {
 };
 /// `Elements` header flag: the record is sparse.
 const F_SPARSE: u32 = 1;
+/// `Slots` header flag: the record holds a suspended frame and may contain for-in shape roots.
+pub(crate) const F_SAVED_REGS: u32 = 1;
 /// A write at an index this far above the capacity of a dense record makes it sparse.
 pub const DENSE_GAP: usize = 1024;
 /// A dense record never has more values than this.
@@ -1055,7 +1057,7 @@ impl Obj {
 /// parent context (or `undefined`), the variables follow. The collector scans it like any record. A script never sees one: a value
 /// that points to it is not an object for [`Obj::from_value`].
 ///
-/// Type invariant: it points to a live `Slots` cell made by [`Ctx::new`]. The owner keeps it reachable. No collection may run inside
+/// Type invariant: it points to a live `Slots` cell. The owner keeps it reachable. No collection may run inside
 /// a call of this module.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Ctx(NonNull<u8>);
@@ -1068,10 +1070,17 @@ impl Ctx {
         Some(Ctx(r.0))
     }
 
+    /// A suspended frame can keep shape roots in its saved registers.
+    pub(crate) fn saved_regs(heap: &mut Heap, n: usize) -> Option<Ctx> {
+        // SAFETY: no values are copied.
+        let r = unsafe { make_record(heap, Layout::Slots, F_SAVED_REGS, n, Value::UNDEFINED, ptr::null(), 0)? };
+        Some(Ctx(r.0))
+    }
+
     /// The context of a value.
     ///
     /// # Safety
-    /// If `v` is a pointer value of kind `Object` that is not an object, it is a live `Slots` cell made by [`Ctx::new`].
+    /// If `v` is a pointer value of kind `Object` that is not an object, it is a live `Slots` cell.
     #[inline]
     pub unsafe fn from_value(v: Value) -> Option<Ctx> {
         let (Kind::Object, p) = v.as_pointer()? else { return None };

@@ -137,7 +137,7 @@ impl Realm {
         }
         let act = Obj::new(&mut self.heap, &self.shapes, shape).expect("memory");
         act.set_kind(if ag { K_AGEN } else { K_GEN });
-        let fr = crate::object::Ctx::new(&mut self.heap, FR_HDR + code.gen_regs as usize, Value::UNDEFINED).expect("memory");
+        let fr = crate::object::Ctx::saved_regs(&mut self.heap, FR_HDR + code.gen_regs as usize).expect("memory");
         act.set_inline_slot(0, Value::int(G_START));
         act.set_inline_slot(1, fr.value());
         act.set_inline_slot(3, Value::int(MODE_NEXT));
@@ -208,7 +208,7 @@ impl Realm {
         let fr = match Realm::ctx(act.inline_slot(1)) {
             Some(fr) => fr,
             None => {
-                let fr = crate::object::Ctx::new(&mut self.heap, FR_HDR + code.gen_regs as usize, Value::UNDEFINED).expect("memory");
+                let fr = crate::object::Ctx::saved_regs(&mut self.heap, FR_HDR + code.gen_regs as usize).expect("memory");
                 act.set_inline_slot(1, fr.value());
                 fr
             }
