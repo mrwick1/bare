@@ -31,6 +31,9 @@ pub(crate) enum Pd {
 
 use Pd::{ArrayIter, Func, Native};
 
+/// An effect-only prelude call that the compiler lowers to a step and a callback.
+pub(crate) const FOR_EACH_STEP: &str = "forEachStep";
+
 /// The names that a prelude function can read by `GetPre`, and what each is. The index is the slot. A name here that a script function of the
 /// prelude declares itself (a parameter, a `var`) is that variable: the slots are only for names that no scope declares.
 pub(crate) const PRE: &[(&str, Pd)] = &[

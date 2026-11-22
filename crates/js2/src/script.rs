@@ -483,3 +483,7 @@ mod array_push_tests;
 #[cfg(test)]
 #[path = "script_key_add_tests.rs"]
 mod key_add_tests;
+
+#[cfg(test)]
+#[path = "script_foreach_step_tests.rs"]
+mod foreach_step_tests;
