@@ -106,8 +106,10 @@ impl<'a> Fc<'a> {
         let (head, special, done, ret, end, back) = (self.label(), self.label(), self.label(), self.label(), self.label(), self.label());
         self.bind(head);
         self.mark_used(head);
-        self.jmp_rx(Op::AYsCall, out, w, special);
+        // The no-throw branch of AYsCall leaves out untouched.
+        self.op(Op::LoadUndef, out, 0, 0);
         self.set_live(out);
+        self.jmp_rx(Op::AYsCall, out, w, special);
         let m1 = self.mark();
         self.await_reg(out, out, m1, true);
         self.free(m1);
