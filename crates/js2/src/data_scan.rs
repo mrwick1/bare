@@ -12,7 +12,7 @@ pub(crate) const MAX_DEPTH: usize = 64;
 /// A checked span can stand for a literal with no JS expressions or prototype setters.
 pub(crate) fn scan_span(source: &str, depth: usize, list: u32) -> Option<(u32, u32)> {
     let mut scan = Scan::new(source, list);
-    scan.value(depth.min(MAX_DEPTH), &mut |_| Some(()))?;
+    scan.value::<false>(depth.min(MAX_DEPTH), &mut |_| Some(()))?;
     // Empty containers, even nested ones, can be valid assignment patterns.
     (scan.scalar && scan.at >= MIN_BYTES as usize).then_some((u32::try_from(scan.at).ok()?, u32::try_from(scan.nodes).ok()?))
 }
@@ -24,6 +24,7 @@ pub(crate) enum Part {
     Number(Span),
     Bool(bool),
     Null,
+    Integer(i32),
 }
 
 pub(crate) struct Scan<'a> {
@@ -104,40 +105,57 @@ impl<'a> Scan<'a> {
         Some(span)
     }
 
-    fn digits(&mut self) -> Option<()> {
+    fn digits<const DECODE: bool>(&mut self) -> Option<i32> {
         let start = self.at;
-        while matches!(self.peek(), Some(b'0'..=b'9')) {
+        let mut n = 0i32;
+        while let Some(c @ b'0'..=b'9') = self.peek() {
+            if DECODE {
+                // Only a token of at most nine digits can use the accumulated value.
+                n = n.wrapping_mul(10).wrapping_add(i32::from(c - b'0'));
+            }
             self.at += 1;
         }
-        (self.at != start).then_some(())
+        (self.at != start).then_some(n)
     }
 
-    fn number(&mut self) -> Option<Span> {
+    fn number<const DECODE: bool>(&mut self) -> Option<Part> {
         let start = self.at;
-        if self.peek() == Some(b'-') {
+        let negative = self.peek() == Some(b'-');
+        if negative {
             self.at += 1;
             self.nodes += 1;
         }
-        match self.peek()? {
-            b'0' => self.at += 1,
-            b'1'..=b'9' => self.digits()?,
+        let digits = self.at;
+        let n = match self.peek()? {
+            b'0' => {
+                self.at += 1;
+                0
+            }
+            b'1'..=b'9' => self.digits::<DECODE>()?,
             _ => return None,
-        }
-        if self.peek() == Some(b'.') {
+        };
+        let integer = self.at - digits <= 9 && (!negative || n != 0);
+        let fraction = self.peek() == Some(b'.');
+        if fraction {
             self.at += 1;
-            self.digits()?;
+            self.digits::<false>()?;
         }
-        if matches!(self.peek(), Some(b'e' | b'E')) {
+        let exponent = matches!(self.peek(), Some(b'e' | b'E'));
+        if exponent {
             self.at += 1;
             if matches!(self.peek(), Some(b'+' | b'-')) {
                 self.at += 1;
             }
-            self.digits()?;
+            self.digits::<false>()?;
         }
-        Some(self.span(start))
+        Some(if DECODE && integer && !fraction && !exponent {
+            Part::Integer(if negative { -n } else { n })
+        } else {
+            Part::Number(self.span(start))
+        })
     }
 
-    pub(crate) fn value(&mut self, depth: usize, part: &mut impl FnMut(Part) -> Option<()>) -> Option<()> {
+    pub(crate) fn value<const DECODE: bool>(&mut self, depth: usize, part: &mut impl FnMut(Part) -> Option<()>) -> Option<()> {
         self.ws();
         self.nodes += 1;
         let value = match self.peek()? {
@@ -158,7 +176,7 @@ impl<'a> Scan<'a> {
                         if object {
                             part(Part::String(self.key()?))?;
                         }
-                        self.value(depth - 1, part)?;
+                        self.value::<DECODE>(depth - 1, part)?;
                         self.ws();
                         match self.peek()? {
                             b',' => self.at += 1,
@@ -172,7 +190,7 @@ impl<'a> Scan<'a> {
                 return part(Part::Close(len));
             }
             b'"' => Part::String(self.string()?.0),
-            b'-' | b'0'..=b'9' => Part::Number(self.number()?),
+            b'-' | b'0'..=b'9' => self.number::<DECODE>()?,
             b't' | b'f' | b'n' => {
                 let (word, value) = match self.peek()? {
                     b't' => ("true", Part::Bool(true)),
