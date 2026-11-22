@@ -45,6 +45,11 @@
 use bare_unicode::fold;
 use bare_unicode::tables::{CASE_FOLD, CASE_FOLD_INV};
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// The longest pattern, in UTF-16 code units.
 pub const MAX_PATTERN_UNITS: usize = 1 << 16;
 /// The deepest group nesting. It bounds recursion in the parser and the compiler.
@@ -369,7 +374,10 @@ pub fn compile(pattern: &[u16], flags: &str) -> Result<Vec<u64>, CompileError> {
 /// [`compile`] reports before it emits code is reported here, with the same error. The program limits (code size, nesting of the
 /// emit pass) are not checked: they show at [`compile`].
 pub fn check(pattern: &[u16], flags: &str) -> Result<(), CompileError> {
-    let flags = Flags::parse(flags)?;
+    check_pattern(pattern, Flags::parse(flags)?)
+}
+
+pub(crate) fn check_pattern(pattern: &[u16], flags: Flags) -> Result<(), CompileError> {
     if pattern.len() > MAX_PATTERN_UNITS {
         return Err(CompileError::Limit("pattern too long"));
     }
@@ -1313,6 +1321,8 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_pattern(&mut self) -> Result<Node, CompileError> {
+        #[cfg(test)]
+        PARSES.with(|n| n.set(n.get() + 1));
         let n = self.parse_alt()?;
         if self.i < self.p.len() {
             return syn("Unmatched ')'", self.i);

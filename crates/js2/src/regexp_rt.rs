@@ -11,8 +11,8 @@
 //! until the first match) and the own `lastIndex` (writable only). All objects start with one shape, `Rx::shape`. An object that a
 //! script gave another property has another shape, and the slots are found by name then.
 //!
-//! **Compile.** The constructor checks the syntax (`regexp::check`), so a bad pattern throws at once. The program is compiled at the
-//! first `exec` or `test`. A small cache keeps the last programs by (source cell, flags), so a literal in a loop compiles once.
+//! **Compile.** The constructor checks the syntax, so a bad pattern throws at once. The program is compiled at the first `exec`
+//! or `test`. A small cache keeps verified patterns and their optional programs by source content and flags.
 //!
 //! **Steps.** The matcher charges its steps to `Realm::fuel`. When the fuel is out, or the run passes the cap of one run, the native
 //! returns `Err(STOP)`: no handler runs, and the script ends with `Exit::Fuel` (the old engine's `Error::Limit` was as final).
@@ -32,8 +32,19 @@ use crate::value::Value;
 #[path = "regexp_protocol.rs"]
 pub(crate) mod protocol;
 
-/// How many compiled programs the cache keeps.
+/// How many verified patterns the cache keeps.
 const CACHE: usize = 32;
+
+struct CachedPattern {
+    src: Str,
+    bits: u8,
+    program: Value,
+}
+
+#[cfg(test)]
+thread_local! {
+    static CACHE_HITS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
 
 /// The state of `RegExp` in a realm. The collector marks it ([`Rx::mark`]).
 pub struct Rx {
@@ -54,8 +65,8 @@ pub struct Rx {
     out: Vec<u32>,
     /// The words of `out` that the last match filled: two for each group, from group 0.
     nspans: usize,
-    /// (source cell, flag bits, program), the newest last.
-    cache: Vec<(Value, u8, Value)>,
+    /// Ordered by last use, newest last.
+    cache: Vec<CachedPattern>,
 }
 
 /// The flag getters, in the order of the bits of `Flags::bits`.
@@ -77,9 +88,35 @@ impl Rx {
         m.shape(self.shape);
         self.keys.iter().for_each(|k| m.value(k.value()));
         self.cache.iter().for_each(|c| {
-            m.value(c.0);
-            m.value(c.2);
+            m.value(c.src.value());
+            m.value(c.program);
         });
+    }
+
+    fn cached(&self, src: Str, bits: u8) -> Option<usize> {
+        let chars = src.chars().expect("flat pattern");
+        let i = self.cache.iter().rposition(|c| {
+            c.bits == bits && (c.src == src || c.src.len() == chars.len() && chars.same(&c.src.chars().expect("flat pattern")))
+        })?;
+        #[cfg(test)]
+        CACHE_HITS.with(|hits| {
+            let (pointer, content) = hits.get();
+            if self.cache[i].src == src {
+                hits.set((pointer + 1, content));
+            } else {
+                hits.set((pointer, content + 1));
+            }
+        });
+        Some(i)
+    }
+
+    fn remember(&mut self, hit: Option<usize>, src: Str, bits: u8, program: Value) {
+        if let Some(i) = hit {
+            self.cache.remove(i);
+        } else if self.cache.len() == CACHE {
+            self.cache.remove(0);
+        }
+        self.cache.push(CachedPattern { src, bits, program });
     }
 }
 
@@ -198,12 +235,18 @@ impl Realm {
     /// A new `RegExp` object. The syntax of `src` and `flags` is checked.
     pub(crate) fn new_regexp(&mut self, proto: Option<Obj>, src: Str, flags: &str) -> R<Value> {
         let src = self.flat(src);
-        let units = self.units(src);
-        if let Err(e) = regexp::check(&units, flags) {
-            return Err(self.regexp_error(&e, src));
+        let flags = Flags::parse(flags).map_err(|e| self.regexp_error(&e, src))?;
+        let bits = flags.bits();
+        let hit = self.rx.as_ref().and_then(|rx| rx.cached(src, bits));
+        if hit.is_none() {
+            let units = self.units(src);
+            if let Err(e) = regexp::check_pattern(&units, flags) {
+                return Err(self.regexp_error(&e, src));
+            }
         }
-        let bits = Flags::parse(flags).map_or(0, Flags::bits);
         let rx = self.rx();
+        let program = hit.map_or(Value::UNDEFINED, |i| rx.cache[i].program);
+        rx.remember(hit, src, bits, program);
         let shape = match proto {
             None => rx.shape,
             Some(p) if p == rx.proto => rx.shape,
@@ -279,29 +322,20 @@ impl Realm {
         };
         let bits = bits as u8;
         let rx = self.rx();
-        let hit = rx.cache.iter().position(|c| c.0 == src.value() && c.1 == bits);
-        let blob = match hit {
-            Some(i) => {
-                let c = rx.cache.remove(i);
-                rx.cache.push(c);
-                Realm::blob_of(c.2).expect("a blob")
-            }
+        let hit = rx.cached(src, bits);
+        let blob = match hit.and_then(|i| Realm::blob_of(rx.cache[i].program)) {
+            Some(b) => b,
             None => {
                 let units = self.units(src);
-                let letters: String = (0..8).filter(|i| bits >> i & 1 != 0).map(|i| FLAG_LETTERS[i] as char).collect();
-                let img = match regexp::compile(&units, &letters) {
+                let img = match regexp::compile(&units, &letters(bits)) {
                     Ok(img) => img,
                     Err(e) => return Err(self.regexp_error(&e, src)),
                 };
                 let Some(b) = Blob::new(&mut self.heap, &img) else { return Err(self.error(ErrKind::Range, "out of memory")) };
-                let rx = self.rx();
-                if rx.cache.len() == CACHE {
-                    rx.cache.remove(0);
-                }
-                rx.cache.push((src.value(), bits, b.value()));
                 b
             }
         };
+        self.rx().remember(hit, src, bits, blob.value());
         o.set_slot(&self.shapes, ps, blob.value());
         Ok(blob)
     }
@@ -672,3 +706,7 @@ fn regexp_to_string(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
     rt.push_units(&mut out, f);
     Ok(rt.make_units(&out))
 }
+
+#[cfg(test)]
+#[path = "regexp_setup_reuse_tests.rs"]
+mod setup_reuse_tests;
