@@ -593,7 +593,7 @@ impl Vm {
     }
 
     /// The interpreter loop, in two copies. `exec::<Hot>` is the hot loop: it runs from `pc` of the frame `(ci, fp)` (0, or the resume point of a generator) until the entry
-    /// frame returns. `exec::<Cold>` is the cold function: it runs the one instruction at `pc` of a cold op (`cold_ops!`) and returns
+    /// frame returns. `exec::<Cold>` is the cold function: it runs the one instruction at `pc` of a cold op (`cold_ops!`) or a global cache miss and returns
     /// `Flow::Go` with the new `(ci, fp, pc)`. The macros below serve both, so an arm has one text. `M::COLD` is a constant: each copy has
     /// only its own `match`.
     ///
@@ -623,7 +623,7 @@ impl Vm {
             grow_fbs(fbs, prog.len());
             &mut fbs[ci]
         };
-        if !fb.ready {
+        if !fb.ready || fb.caches.len() != code.sites.len() {
             fb.init(code);
         }
         let mut pc: usize = pc0;
@@ -651,9 +651,22 @@ impl Vm {
                     grow_fbs(fbs, prog.len());
                     &mut fbs[ci]
                 };
-                if !fb.ready {
+                if !fb.ready || fb.caches.len() != code.sites.len() {
                     fb.init(code);
                 }
+            }};
+        }
+        macro_rules! run_cold {
+            () => {{
+                let flow = Vm::run_cold(realm, stack, fbs, prog, ci, fp, pc);
+                let (nci, nfp, npc) = match flow {
+                    Flow::Go(c, f, p) => (c, f, p),
+                    Flow::Done(r) => return M::done(r),
+                };
+                (ci, fp, pc) = (nci, nfp, npc);
+                // The cold function may have grown the stack, compiled a function or entered a frame: every cached local is stale.
+                reload!();
+                continue;
             }};
         }
         // The integer word `$k` of the frame record of the current frame (see `int_at`).
@@ -673,6 +686,13 @@ impl Vm {
         macro_rules! word {
             ($i:expr) => {
                 unsafe { *words.get_unchecked($i) }
+            };
+        }
+        macro_rules! global_cache {
+            ($site:expr) => {
+                // SAFETY: the verifier bounds the site by code.sites. Entry and reload pair it with
+                // feedback of that length. Lazy replacement resets the feedback before reload.
+                unsafe { fb.caches.get_unchecked($site) }
             };
         }
         // Throw `e` at the current instruction.
@@ -1188,6 +1208,20 @@ impl Vm {
                 if M::COLD {
                     match opv {
                         Op::AddKey => op_add!(a!(), r!(b!()), r!(c!()), next, Realm::add_key_slow),
+                        Op::GetGlobal => {
+                            gate!();
+                            let n = name!(bx!());
+                            match tri!(realm.get_global_slow(fb, bx!(), n)) {
+                                Got::Val(v) => {
+                                    r!(a!()) = v;
+                                    pc = next;
+                                }
+                                Got::Get(f) => call_get!(f, realm.global.value(), a!(), next),
+                            }
+                        }
+                        Op::SetGlobal | Op::SetGlobalS => {
+                            set_global!(opv == Op::SetGlobalS, r!(a!()), bx!(), next);
+                        }
                         Op::NewDataLit => {
                             std::hint::cold_path();
                             gate!();
@@ -1957,7 +1991,7 @@ impl Vm {
                         pc = next;
                     }
                     Op::GetGlobal => {
-                        let cc = &fb.caches[bx!()];
+                        let cc = global_cache!(bx!());
                         if cc.shape == realm.shapes.watch_tag() {
                             // SAFETY: the entry has the address of a slot of the global object, made while the tag was the same, and
                             // the tag changes each time the object gets another shape (`Shapes::watch_tag`).
@@ -1965,18 +1999,10 @@ impl Vm {
                             pc = next;
                             continue;
                         }
-                        gate!();
-                        let n = name!(bx!());
-                        match tri!(realm.get_global_slow(fb, bx!(), n)) {
-                            Got::Val(v) => {
-                                r!(a!()) = v;
-                                pc = next;
-                            }
-                            Got::Get(f) => call_get!(f, realm.global.value(), a!(), next),
-                        }
+                        run_cold!();
                     }
-                    Op::SetGlobal => {
-                        let cc = &fb.caches[bx!()];
+                    Op::SetGlobal | Op::SetGlobalS => {
+                        let cc = global_cache!(bx!());
                         if cc.shape == realm.shapes.watch_tag() {
                             let v = r!(a!());
                             // SAFETY: as for `GetGlobal`; the entry was made for a writable data property.
@@ -1984,18 +2010,7 @@ impl Vm {
                             pc = next;
                             continue;
                         }
-                        set_global!(false, r!(a!()), bx!(), next);
-                    }
-                    Op::SetGlobalS => {
-                        let cc = &fb.caches[bx!()];
-                        if cc.shape == realm.shapes.watch_tag() {
-                            let v = r!(a!());
-                            // SAFETY: as for `SetGlobal`.
-                            unsafe { cc.global_slot().write(v) };
-                            pc = next;
-                            continue;
-                        }
-                        set_global!(true, r!(a!()), bx!(), next);
+                        run_cold!();
                     }
                     Op::GetField => get_field!(a!(), r!(b!()), c!(), next),
                     Op::SetField => set_field!(r!(a!()), r!(b!()), c!(), next),
@@ -2502,17 +2517,7 @@ impl Vm {
                         r!(a!()) = record(stack, fp, 9);
                         pc = next;
                     }
-                    cold_ops!() => {
-                        let flow = Vm::run_cold(realm, stack, fbs, prog, ci, fp, pc);
-                        let (nci, nfp, npc) = match flow {
-                            Flow::Go(c, f, p) => (c, f, p),
-                            Flow::Done(r) => return M::done(r),
-                        };
-                        (ci, fp, pc) = (nci, nfp, npc);
-                        // The cold function may have grown the stack, compiled a function or entered a frame: every cached local is stale.
-                        reload!();
-                        continue;
-                    }
+                    cold_ops!() => run_cold!(),
                 }
             }};
         }
@@ -2659,3 +2664,7 @@ pub(crate) fn pow(x: f64, y: f64) -> f64 {
 #[cfg(test)]
 #[path = "interp_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "interp_global_site_tests.rs"]
+mod global_site_tests;

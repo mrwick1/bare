@@ -593,5 +593,9 @@ fn check_live_roots(code: &Code, ins: &[(usize, Ins, usize)], at: &[usize], acce
 mod tests;
 
 #[cfg(test)]
+#[path = "verify_global_site_tests.rs"]
+mod global_site_tests;
+
+#[cfg(test)]
 #[path = "verify_roots_tests.rs"]
 mod roots_tests;
