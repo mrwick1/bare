@@ -741,10 +741,15 @@ impl<'a> Fc<'a> {
         self.prog.number(s, base).unwrap_or(0.0)
     }
 
-    fn static_key(&self, key: Key) -> Option<Cow<'a, str>> {
+    pub(crate) fn static_key(&self, key: Key) -> Option<Cow<'a, str>> {
         let prog = self.prog;
         match key {
             Key::Name(s) => Some(prog.name(s)),
+            Key::BigInt(s) => {
+                let text = self.src.get(s.start as usize..s.end as usize)?;
+                let n = crate::bigint::parse_literal(text)?;
+                Some(Cow::Owned(crate::bigint::to_string_radix(n.sv(), 10)))
+            }
             Key::Str(s) => {
                 let mut b = Vec::new();
                 prog.string(s, &mut b).ok()?;
@@ -793,7 +798,7 @@ impl<'a> Fc<'a> {
                 self.load_number(kt, v);
             }
             _ => {
-                self.unsup("a BigInt or private key in an object literal");
+                self.unsup("a private key in an object literal");
                 self.op(Op::LoadUndef, kt, 0, 0);
             }
         }

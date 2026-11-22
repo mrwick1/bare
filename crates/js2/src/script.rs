@@ -160,7 +160,7 @@ impl LazyCompile for Lazy {
                 self.units.len() - 1
             }
         };
-        let id = crate::prelude_facts::TOP.iter().find(|(n, _)| *n == top).map(|&(_, id)| id).ok_or_else(|| format!("the prelude has no function {top} (is prelude_facts.rs out of date? run `BLESS_PRELUDE_FACTS=1 cargo test -p bare-js2 --lib prelude_facts`)"))?;
+        let id = crate::prelude_facts::TOP.iter().find(|(n, _)| *n == top).map(|&(_, id)| id).ok_or_else(|| format!("the prelude has no function {top}"))?;
         let mut code = stub(&self.atoms, self.units[u].facts.get(id), Some(name))?;
         // A built-in has no construct slot, even when its body is a function declaration in the prelude.
         code.noctor = true;
@@ -414,6 +414,9 @@ impl Vm {
         }
         if let Some(b) = v.as_bool() {
             return b.to_string();
+        }
+        if let Some(b) = Realm::big_of(v) {
+            return crate::bigint::to_string_radix(b.bigint(), 10);
         }
         let Some(o) = Realm::obj(v) else { return format!("{v:?}") };
         if o.is_callable() {

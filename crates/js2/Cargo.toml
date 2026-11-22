@@ -17,6 +17,12 @@ bare-unicode = { path = "../unicode" }
 icu_properties = { version = "2.4.0", default-features = false, features = ["compiled_data"] }
 stacker = "0.1.25"
 
+[build-dependencies]
+# The generator compiles the same lexer, parser and RegExp syntax checker for the build host.
+bare-unicode = { path = "../unicode" }
+icu_properties = { version = "2.4.0", default-features = false, features = ["compiled_data"] }
+stacker = "0.1.25"
+
 [features]
 # Count the executed ops, pairs and triples (`src/opcount.rs`, example `op_count`). Off by default: the normal build has no call into it.
 op-count = []
