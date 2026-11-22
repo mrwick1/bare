@@ -920,6 +920,14 @@ impl Realm {
         self.atoms.find(&Chars::One(&bytes[..len]))
     }
 
+    /// The existing decimal atom for an index, if this shape can have an index name.
+    pub(crate) fn find_index_name(&self, o: Obj, index: u32) -> Option<Str> {
+        if index != u32::MAX && !self.shapes.may_have_indexed_name(o.shape(&self.shapes)) {
+            return None;
+        }
+        self.find_idx_atom(index)
+    }
+
     // ---- operators ----
 
     /// Addition for a computed member key. Intern short Latin-1 results before making a value string.

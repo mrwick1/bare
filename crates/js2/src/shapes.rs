@@ -563,6 +563,12 @@ impl Shapes {
         }
     }
 
+    /// A dictionary can change in place. Only an immutable shape can rule out named indices.
+    #[inline]
+    pub(crate) fn may_have_indexed_name(&self, id: ShapeId) -> bool {
+        self.node(id).flags & (F_DICT | F_INDEX) != 0
+    }
+
     /// A conservative test. Enumerable symbols and internal names also set this flag.
     pub(crate) fn may_have_enumerable(&self, id: ShapeId) -> bool {
         let s = self.node(id);
