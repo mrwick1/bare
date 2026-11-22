@@ -168,8 +168,13 @@ pub fn verify(code: &Code) -> Result<(), String> {
         return Err("the root maps have another register count".into());
     }
     for &(pc, i, _) in &ins {
-        if i.op.is_safepoint() && code.roots.find(pc as u32).is_none() {
-            return Err(format!("{pc:04} {}: a safepoint with no root map", i.op.name()));
+        if i.op.is_safepoint() {
+            let Some(map) = code.roots.find(pc as u32) else {
+                return Err(format!("{pc:04} {}: a safepoint with no root map", i.op.name()));
+            };
+            if i.op == Op::AddKey && [i.b, i.c].iter().any(|&r| !map.slots().any(|s| s == r as usize)) {
+                return Err(format!("{pc:04} AddKey: an operand is missing from the root map"));
+            }
         }
     }
     for &p in code.roots.pcs() {
