@@ -51,6 +51,7 @@ fn counting_loop() -> (SharedAtoms, Code) {
         a.emit(ins(Op::Ret, 1, 0, 0));
     });
     c.sites = vec![0];
+    maps(&mut c, |_| vec![0, 1]);
     (s, c)
 }
 
@@ -64,10 +65,10 @@ fn a_valid_function_passes() {
     let (_s, c) = counting_loop();
     verify(&c).unwrap();
     assert_eq!(c.loops, [LoopHeader { head: 1, end: 5 }]);
-    // r1 is written before the safepoints, so a root map may name it; r2 is not written before the field read.
+    // r1 is read at the loop header, so even the map before the first field read must name it.
     let mut c = c;
     maps(&mut c, |pc| if pc >= 3 { vec![0, 1] } else { vec![0] });
-    verify(&c).unwrap();
+    bad(&c, "root map misses live r1");
 }
 
 #[test]
@@ -192,12 +193,14 @@ fn the_loop_table() {
 #[test]
 fn handlers() {
     let mk = || {
-        build(3, 1, |a| {
+        let (s, mut c) = build(3, 1, |a| {
             a.emit(ins(Op::LoadI, 1, 1, 0));
             a.emit(ins(Op::Add, 1, 1, 0));
             a.emit(ins(Op::Ret, 1, 0, 0));
             a.emit(ins(Op::Ret, 2, 0, 0));
-        })
+        });
+        maps(&mut c, |_| vec![0, 1]);
+        (s, c)
     };
     let h = Handler { start: 1, end: 2, target: 3, reg: 2, depth: 0 };
     let (_s, mut c) = mk();
@@ -292,7 +295,7 @@ fn reads_come_after_writes() {
     let (_s, c) = build(3, 1, |a| _ = (a.emit(ins(Op::Mov, 1, 1, 0)), a.emit(ins(Op::RetUndef, 0, 0, 0))));
     bad(&c, "reads r1");
     // A window: a call reads its callee, `this` and arguments, and an iterator record is written by `IterOpen` and read by `IterNext`.
-    let (_s, c) = build(6, 1, |a| {
+    let (_s, mut c) = build(6, 1, |a| {
         let (done, again) = (a.label(), a.label());
         a.emit(ins(Op::IterOpen, 1, 0, 0));
         a.bind(again);
@@ -303,6 +306,7 @@ fn reads_come_after_writes() {
         a.emit(ins(Op::IterClose, 1, 0, 0));
         a.emit(ins(Op::RetUndef, 0, 0, 0));
     });
+    maps(&mut c, |pc| if pc == 0 { vec![0] } else { vec![0, 1, 2, 3] });
     verify(&c).unwrap();
     // Reading one register of the window that was not written: `IterNext` with the record at r2 (r1 holds the written part).
     let (_s, c) = build(6, 1, |a| {
