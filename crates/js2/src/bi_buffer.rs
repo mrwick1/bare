@@ -276,6 +276,17 @@ impl Realm {
         Some((v.buffer, v.len().map_or(0..0, |n| v.offset..v.offset + n * v.width())))
     }
 
+    pub(crate) fn clone_detach_buffer(&mut self, o: Obj) -> Vec<u8> {
+        let bytes = Buffer::of(o).bytes(self).to_vec();
+        self.detach_buffer(o);
+        bytes
+    }
+
+    fn detach_buffer(&mut self, o: Obj) {
+        o.set_slot(&self.shapes, 0, Value::UNDEFINED);
+        o.set_slot(&self.shapes, 1, Value::int(0));
+    }
+
     pub(crate) fn buffer_detached(&self, o: Obj) -> bool {
         let buffer = View::of(o).map_or(o, |v| v.buffer);
         buffer.is_kind(K_BUFFER) && Buffer::of(buffer).blob.is_none()
@@ -590,8 +601,7 @@ fn transfer(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
         rt.copy_buffer_bytes(o, 0, result, 0, len.min(b.len));
         result
     };
-    o.set_slot(&rt.shapes, 0, Value::UNDEFINED);
-    o.set_slot(&rt.shapes, 1, Value::int(0));
+    rt.detach_buffer(o);
     Ok(result.value())
 }
 
