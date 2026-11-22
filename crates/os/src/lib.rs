@@ -10,3 +10,23 @@ pub mod pages;
 pub mod random;
 pub mod trust;
 pub mod tz;
+
+/// The browser cache root. An empty BARE_CACHE_DIR disables disk caching.
+pub fn cache_dir() -> Option<std::path::PathBuf> {
+    use std::{env, path::PathBuf};
+
+    if let Some(dir) = env::var_os("BARE_CACHE_DIR") {
+        return (!dir.is_empty()).then(|| PathBuf::from(dir));
+    }
+    let path = |name| env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+    if cfg!(target_os = "windows") {
+        path("LOCALAPPDATA").map(|dir| dir.join("bare").join("cache"))
+    } else if cfg!(target_os = "macos") {
+        path("HOME").map(|dir| dir.join("Library").join("Caches").join("bare"))
+    } else if cfg!(target_os = "linux") {
+        path("XDG_CACHE_HOME")
+            .or_else(|| path("HOME").map(|dir| dir.join(".cache"))).map(|dir| dir.join("bare"))
+    } else {
+        None
+    }
+}
