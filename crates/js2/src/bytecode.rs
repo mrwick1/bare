@@ -99,6 +99,26 @@ impl Form {
     }
 }
 
+const fn operand_letters(spec: &str) -> [u8; 5] {
+    // The last entry holds the jump field, or 4 when there is no jump.
+    let mut letters = [b'-', b'-', b'-', b'-', 4];
+    let bytes = spec.as_bytes();
+    let (mut i, mut field) = (0, 0);
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b != b' ' {
+            assert!(field < 4 && b.is_ascii());
+            letters[field] = b;
+            if b == b'j' {
+                letters[4] = field as u8;
+            }
+            field += 1;
+        }
+        i += 1;
+    }
+    letters
+}
+
 /// `ops!` makes the opcode enum and its tables from one list, so the name, the form and the operand letters cannot drift apart. The
 /// letters say what each field is, in the order of the fields (`a`, `b`, `c`, `x`; for `Abx` and `AsBx`: `a`, `bx`; for `AsBxX`: `a`,
 /// `bx`, `x`; for `Sj`: the one operand). A letter list shorter than the form means that the fields that are left are 0.
@@ -118,6 +138,7 @@ macro_rules! ops {
             $(#[doc = $doc] $name,)*
         }
         impl Op {
+            const OPERANDS: &'static [[u8; 5]] = &[$(operand_letters($spec),)*];
             /// Every opcode, in the order of its number.
             pub const ALL: &'static [Op] = &[$(Op::$name,)*];
             pub fn form(self) -> Form {
@@ -367,12 +388,13 @@ impl Op {
 
     /// The letter of field `i` (`a`, `b`, `c`, `x`), `-` when the spec has none.
     pub fn letter(self, i: usize) -> char {
-        self.spec().chars().filter(|l| *l != ' ').nth(i).unwrap_or('-')
+        if i < 4 { Self::OPERANDS[self as usize][i] as char } else { '-' }
     }
 
     /// The index of the field that holds the jump offset (`a` 0, `b` 1, `c` 2, `x` 3), if the op jumps.
     pub fn jump_field(self) -> Option<usize> {
-        (0..self.form().fields()).find(|&i| self.letter(i) == 'j')
+        let i = Self::OPERANDS[self as usize][4] as usize;
+        (i < 4).then_some(i)
     }
 
     /// Does control go on to the next instruction? (`Jmp`, `JmpBack`, the returns and the throws do not.)
@@ -475,6 +497,8 @@ pub fn encode(words: &mut Vec<u32>, ins: &Ins) -> Result<usize, BcError> {
 
 /// As [`encode`]; `wide` asks for the wide form even when the narrow form fits (the assembler needs this for a jump).
 pub fn encode_in(words: &mut Vec<u32>, ins: &Ins, wide: bool) -> Result<usize, BcError> {
+    #[cfg(test)]
+    single_encode_tests::ENCODE_COUNT.with(|n| n.set(n.get() + 1));
     let op = ins.op;
     let form = op.form();
     let start = words.len();
@@ -912,7 +936,22 @@ impl Asm {
         self.at[l.0 as usize] = Some(self.ins.len() as u32);
     }
 
-    pub fn finish(mut self) -> Result<Assembled, BcError> {
+    pub fn finish(self) -> Result<Assembled, BcError> {
+        if self.ins.iter().any(|(_, target)| target.is_some()) {
+            return self.finish_relaxed();
+        }
+        let mut words = Vec::with_capacity(self.ins.len());
+        let mut pcs = Vec::with_capacity(self.ins.len() + 1);
+        for (ins, _) in &self.ins {
+            pcs.push(words.len() as u32);
+            encode(&mut words, ins)?;
+        }
+        pcs.push(words.len() as u32);
+        let label_pcs = self.at.iter().map(|a| a.map_or(u32::MAX, |i| pcs[i as usize])).collect();
+        Ok(Assembled { words, pcs, label_pcs, loops: Vec::new() })
+    }
+
+    fn finish_relaxed(mut self) -> Result<Assembled, BcError> {
         let n = self.ins.len();
         // A `Jmp` to a `Ret` is that `Ret`. Neither op is a safepoint and neither can throw, so the root maps and the handler ranges stay.
         for i in 0..n {
@@ -973,3 +1012,7 @@ impl Asm {
 #[cfg(test)]
 #[path = "bytecode_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "bytecode_single_encode_tests.rs"]
+mod single_encode_tests;
