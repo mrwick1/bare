@@ -631,7 +631,7 @@ impl<'a> Fc<'a> {
         self.emit(Ins::new(op, a, b, c).with_x(x));
     }
 
-    fn jump_ins(&mut self, ins: Ins, to: Lb) {
+    pub(crate) fn jump_ins(&mut self, ins: Ins, to: Lb) {
         if self.dead {
             return;
         }

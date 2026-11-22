@@ -190,10 +190,7 @@ function array_forEach(cb) {
   var a = obj(this), n = len(a);
   need(cb);
   var f = bound(cb, arguments[1]);
-  for (var i = 0; i < n; i++) {
-    var v = a[i];
-    if (v !== undefined || i in a) f(v, i, a);
-  }
+  for (var i = 0; i < n; i++) forEachStep(f, a, i);
 }
 function array_map(cb) {
   var a = obj(this), n = len(a);

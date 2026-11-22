@@ -1653,11 +1653,39 @@ impl<'a> Fc<'a> {
 
     // ------------------------------------------------------------ effect context
 
+    fn foreach_step(&mut self, args: List<Expr>, at: u32) -> CR {
+        let mut args = self.prog.list(args);
+        let (Some(callback), Some(recv), Some(index), None) = (args.next(), args.next(), args.next(), args.next()) else {
+            unreachable!("forEachStep takes a callback, a receiver, and an index")
+        };
+        let base = self.window(4);
+        self.to(callback, base)?;
+        let recv = self.any_before(recv, index)?;
+        let index = self.any(index)?;
+        let skip = self.label();
+        self.line(at);
+        self.jump_ins(Ins::new(Op::ForEachStep, base + 1, recv, index), skip);
+        for r in base + 1..base + 4 {
+            self.set_live(r);
+        }
+        self.op(Op::CallU, base, base, 3);
+        self.bind(skip);
+        Ok(())
+    }
+
     /// Evaluate `e` for its effects only.
     pub(crate) fn effect(&mut self, e: ExprId) -> CR {
         let x = *self.prog.expr(e);
         let m = self.mark();
         match x.kind {
+            ExprKind::Call { callee, args, optional: false }
+                if self.pre
+                    && matches!(self.expr_kind(callee), ExprKind::Ident)
+                    && self.name_of(self.prog.expr(callee).span) == crate::prelude_pre::FOR_EACH_STEP
+                    && matches!(self.resolve(crate::prelude_pre::FOR_EACH_STEP, x.span.start), Res::Global) =>
+            {
+                self.foreach_step(args, x.span.start)?;
+            }
             ExprKind::Assign { op, target, value } => self.assign(op, target, value, None, x.span)?,
             ExprKind::Update { op, prefix, arg } => self.update(op, prefix, arg, None)?,
             ExprKind::Seq(list) => {
