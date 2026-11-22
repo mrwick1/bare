@@ -159,7 +159,7 @@ pub fn initialize<A: Options>(
     f.accounting = options.choice(who, "currencySign", &["standard", "accounting"])?.unwrap_or(0) == 1;
     let unit = options.string_option("unit")?;
     match &unit {
-        Some(u) if !u.split("-per-").all(|p| icu::UNIT_NAMES.contains(&p)) || u.matches("-per-").count() > 1 => {
+        Some(u) if !u.split("-per-").all(|p| icu::unit_index(p).is_some()) || u.matches("-per-").count() > 1 => {
             return Err(options.range_error(&format!("Invalid unit argument for Intl.NumberFormat() '{u}'")));
         }
         None if style == 3 => return Err(options.type_error("Invalid unit argument for Intl.NumberFormat() ''")),
@@ -170,8 +170,8 @@ pub fn initialize<A: Options>(
     if style == 3 {
         let mut parts = unit.as_deref().expect("required unit").split("-per-");
         let numerator = parts.next();
-        f.unit = icu::UNIT_NAMES.iter().position(|u| Some(*u) == numerator).expect("validated unit") as u8;
-        f.per_unit = parts.next().and_then(|p| icu::UNIT_NAMES.iter().position(|u| *u == p)).map_or(255, |i| i as u8);
+        f.unit = numerator.and_then(icu::unit_index).expect("validated unit");
+        f.per_unit = parts.next().and_then(icu::unit_index).unwrap_or(255);
     }
     if style == 2 {
         f.display = display as u8;
