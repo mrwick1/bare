@@ -41,6 +41,7 @@ pub trait Options {
     }
 
     /// SetNumberFormatDigitOptions. Returns a gate when the options ask for something bare cannot do.
+    #[inline]
     fn digits(&mut self, who: &str, f: &mut icu::NumFmt, defaults: (u8, u8)) -> Result<Option<&'static str>, Self::Error> {
         let mnid = self.get("minimumIntegerDigits")?;
         f.min_int = self.number_option(mnid, "minimumIntegerDigits", 1.0, 21.0)?.unwrap_or(1) as u8;
@@ -98,6 +99,7 @@ pub trait Options {
     }
 
     /// GetBooleanOrStringNumberFormatOption for `useGrouping`.
+    #[inline]
     fn grouping(&mut self, who: &str, compact: bool) -> Result<icu::Grouping, Self::Error> {
         let default = if compact { icu::Grouping::Min2 } else { icu::Grouping::Auto };
         let v = self.get("useGrouping")?;
@@ -123,6 +125,7 @@ pub trait Options {
 }
 
 /// Resolve number options after the engine has selected the locale.
+#[inline]
 pub fn initialize<A: Options>(
     options: &mut A,
     who: &str,

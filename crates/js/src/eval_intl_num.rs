@@ -28,6 +28,7 @@
 // formatters by `max_formatters` and pruned by `collect`. The ICU4X formatters and the collators are made once and shared
 // (`intl.icu`).
 
+use bare_intl::number_options::{self, CURRENCY_DISPLAYS, NOTATIONS, SIGN_DISPLAYS};
 use fixed_decimal::SignDisplay;
 
 /// A number formatter: its resolved options and the bound `format` function.
@@ -57,7 +58,6 @@ struct IntlPr {
 
 const SENSITIVITY: [&str; 4] = ["base", "accent", "case", "variant"];
 const CASE_FIRST: [&str; 3] = ["upper", "lower", "false"];
-use bare_intl::number_options::{self, CURRENCY_DISPLAYS, NOTATIONS, SIGN_DISPLAYS};
 
 impl<'p> Interp<'p> {
     /// Number and collator objects the evaluator tracks (until `collect` drops the dead ones).
@@ -625,6 +625,14 @@ impl number_options::Options for OldNumberOptions<'_, '_> {
 
     fn get(&mut self, name: &str) -> Res<Value> {
         self.interp.intl_get(self.opts, name)
+    }
+
+    fn string_option(&mut self, name: &str) -> Res<Option<String>> {
+        self.interp.intl_opt_str(self.opts, name)
+    }
+
+    fn choice(&mut self, who: &str, name: &str, choices: &[&str]) -> Res<Option<usize>> {
+        self.interp.intl_opt_for(who, self.opts, name, choices)
     }
 
     fn is_undefined(v: Value) -> bool {
