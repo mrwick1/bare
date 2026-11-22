@@ -18277,8 +18277,8 @@ Order (owner, 2026-11-21): first the browser runs pages on js2 (`BARE_JS_EXEC=ne
 
 | Phase | Goal | State |
 | ----- | ---- | ----- |
-| 1 | The typing page runs on `BARE_JS_EXEC=new`: S0.4 PR 4 to PR 6, `Dom<E: Engine>`, the js2 adapter gaps, the browser switch | in progress |
-| 2 | Every daily journey on js2. A script lists the failures; agents work only from that list | not started |
-| 3 | Measure, profile, make js2 the default (S5.3 to S5.5) | not started |
+| 1 | The typing page runs on `BARE_JS_EXEC=new`: S0.4 PR 4 to PR 6, `Dom<E: Engine>`, the js2 adapter gaps, the browser switch | done. Typing on js2 is 0.85x OLD instructions (#957). |
+| 2 | Every daily journey on js2. A script lists the failures; agents work only from that list | in progress. 31 of 44 public journeys and 26 of 27 ramps are clean on both engines (#957). |
+| 3 | Measure, profile, make js2 the default (S5.3 to S5.5) | measure done (#957). Profile and default switch open. See [next work](next-work.md). Paused 2026-11-23. |
 
 New entries: [progress/](progress/README.md).
