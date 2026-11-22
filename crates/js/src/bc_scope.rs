@@ -47,7 +47,7 @@ pub(super) enum Site {
 /// What made a binding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum BindKind {
-    /// `%this`, `%fn` or `%nt` of a class member (`cls_frame`).
+    /// A class member's hidden binding or a module's default export slot.
     Hidden,
     /// The own name of a named function expression (flag `SELF`).
     SelfName,
@@ -56,6 +56,7 @@ pub(super) enum BindKind {
     Var,
     Let,
     Const,
+    Import,
     /// A function declaration: its closure is made when the scope starts.
     Func(FuncId),
     Class,
@@ -292,6 +293,16 @@ impl<'p> Interp<'p> {
                 }
                 for &name in &self.cc.scopes[fid.index()].vars {
                     decl(out, Bind { name, flags: INIT | MUT, kind: BindKind::Var }, true);
+                }
+                // The module linker inserts these bindings before the lexical declarations.
+                if let Some(m) = prog.module.as_ref().filter(|m| m.func == fid) {
+                    for import in &m.imports {
+                        let name = self.name_at(import.local);
+                        decl(out, Bind { name, flags: IMPORT, kind: BindKind::Import }, false);
+                    }
+                    if m.exports.iter().any(|e| e.source == ExportSource::Default) {
+                        decl(out, Bind { name: self.default_name(), flags: MUT, kind: BindKind::Hidden }, false);
+                    }
                 }
                 if let Body::Block(l) = f.body {
                     self.bc_lex(l, true, out, start);

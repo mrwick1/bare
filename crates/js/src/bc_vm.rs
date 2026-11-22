@@ -1204,7 +1204,8 @@ impl<'p> Interp<'p> {
                         let (e, i) = self.bc_slot($h as u32, $i as u32);
                         regs[$a] = match self.envs[e as usize].bindings.get(i) {
                             Some(bd) if bd.flags & INIT != 0 => bd.value,
-                            _ => tri!(at, Err::<Value, _>(self.bc_env_err(e, i))),
+                            Some(bd) => tri!(at, self.get_name_uninit(bd.name, bd.flags, bd.value)),
+                            None => tri!(at, Err::<Value, _>(self.bc_env_err(e, i))),
                         };
                     }};
                 }
