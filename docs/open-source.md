@@ -17,7 +17,7 @@ Survey date: 2026-11-05. Stars, licenses and last-push dates come from the GitHu
 `bare` is MIT or Apache-2.0.
 
 - MIT, Apache-2.0, BSD and ISC code: we can use or copy it. Keep the copyright notice and the license text. `crates/js/LICENSE-V8` shows the pattern.
-- Unicode-3.0 (ICU4X): permissive. Keep the notice. `crates/js/LICENSE-UNICODE` has the text, and the `license` field of `crates/js/Cargo.toml` names it. It covers the ICU4X crates and the data in `crates/js/src/icu_data`, which comes from CLDR and ICU. `crates/js/src/intl_num_data.rs` holds currency symbols that come from the same CLDR data.
+- Unicode-3.0 (ICU4X): permissive. Keep the notice. `crates/js/LICENSE-UNICODE` has the text, and the `license` field of `crates/js/Cargo.toml` names it. It covers the ICU4X crates and the data in `crates/intl/src/icu_data`, which comes from CLDR and ICU. `crates/js/src/intl_num_data.rs` holds currency symbols that come from the same CLDR data.
 - MPL-2.0 (Servo, Stylo, cssparser, lightningcss, Nova): file-level copyleft. We can use it as a crate. A file that we copy and change stays MPL-2.0, and its source must stay available. Keep copied MPL files in their own module with the license header.
 
 ## Whole engines

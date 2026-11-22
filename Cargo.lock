@@ -126,14 +126,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "bare-js"
+name = "bare-intl"
 version = "0.1.0"
 dependencies = [
- "bare-js-api",
- "bare-observe",
- "bare-os",
- "bare-tzdata",
- "bare-unicode",
  "fixed_decimal",
  "icu_collator",
  "icu_collections",
@@ -142,12 +137,25 @@ dependencies = [
  "icu_locale_fallback",
  "icu_normalizer",
  "icu_plurals",
- "icu_properties",
  "icu_provider",
  "icu_segmenter",
- "stacker",
  "writeable",
  "zerovec",
+]
+
+[[package]]
+name = "bare-js"
+version = "0.1.0"
+dependencies = [
+ "bare-intl",
+ "bare-js-api",
+ "bare-observe",
+ "bare-os",
+ "bare-tzdata",
+ "bare-unicode",
+ "fixed_decimal",
+ "icu_properties",
+ "stacker",
 ]
 
 [[package]]

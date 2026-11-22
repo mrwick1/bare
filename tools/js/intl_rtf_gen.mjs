@@ -1,6 +1,6 @@
-// Generate crates/js/src/intl_rtf_data.rs (included by intl.rs): English relative time patterns from Node's ICU (CLDR data, Unicode license).
+// Generate crates/intl/src/intl_rtf_data.rs (included by intl.rs): English relative time patterns from Node's ICU (CLDR data, Unicode license).
 // Only Intl.RelativeTimeFormat of this Node runs here; no page code.
-//   node tools/js/intl_rtf_gen.mjs > crates/js/src/intl_rtf_data.rs
+//   node tools/js/intl_rtf_gen.mjs > crates/intl/src/intl_rtf_data.rs
 //
 // A pattern is "in {n}{label}" (future) or "{n}{label} ago" (past). `label` has its own space ("" or " days"), and one form for
 // "1" and one for the rest. `auto` has the words for -1, 0 and 1 with numeric "auto" ("" for none). The script checks every

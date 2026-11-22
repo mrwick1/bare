@@ -19,13 +19,7 @@
 //
 // Storage: one `IntlRtf` in `intl.loc.rtfs`, capped with the other formatters by `max_formatters` and pruned by `collect`.
 
-#[derive(Clone, Copy)]
-struct IntlRtf {
-    loc: u8,
-    /// 0 long, 1 short, 2 narrow.
-    style: u8,
-    auto: bool,
-}
+use bare_intl::relative_time::{IntlRtf, rtf_parts};
 
 const RTF_UNITS: [&str; 8] = ["second", "minute", "hour", "day", "week", "month", "quarter", "year"];
 const RTF_STYLES: [&str; 3] = ["long", "short", "narrow"];
@@ -73,53 +67,6 @@ impl<'p> Interp<'p> {
     }
 
     /// The number formatter of the patterns: decimal, up to 3 fraction digits, grouping.
-    fn rtf_numfmt(loc: u8) -> icu::NumFmt {
-        icu::NumFmt {
-            loc,
-            style: icu::Style::Decimal,
-            currency: *b"USD",
-            display: icu::SYMBOL,
-            accounting: false,
-            min_int: 1,
-            rounding: icu::Rounding::Fraction,
-            fd: (0, 3),
-            sd: (1, 21),
-            grouping: icu::Grouping::Auto,
-            sign: SignDisplay::Auto,
-            mode: icu::HALF_EXPAND,
-            unit: 255, per_unit: 255, unit_display: 0, notation: 0, compact_long: false, strip_zero: false,
-        }
-    }
-
-    /// The text of `format(x, unit)` as parts: (type, text, is a part of the number), the number parts have the unit.
-    fn rtf_parts(&mut self, r: IntlRtf, x: f64, unit: usize) -> Vec<(&'static str, String)> {
-        let d = &intl::RTF_DATA[intl::RTF_VARIANT[r.loc as usize] as usize][r.style as usize][unit];
-        if r.auto {
-            // ICU compares the value rounded at two fraction digits
-            let k = (x.abs() * 100.0).round();
-            let word = if k == 0.0 { 1 } else if k == 100.0 { if x < 0.0 { 0 } else { 2 } } else { 3 };
-            if word < 3 && !d.auto[word].is_empty() {
-                return vec![("literal", d.auto[word].to_string())];
-            }
-        }
-        let past = x < 0.0 || (x == 0.0 && x.is_sign_negative());
-        let f = Self::rtf_numfmt(r.loc);
-        let mut nparts = Vec::new();
-        let s = self.intl_num_format(&f, icu::num_from_f64(x.abs()), Some(&mut nparts));
-        let label = if self.intl.icu.plural(&f, false, icu::num_from_f64(x.abs())) == "one" { d.one } else { d.other };
-        let mut out = Vec::with_capacity(nparts.len() + 2);
-        if !past {
-            out.push(("literal", "in ".to_string()));
-        }
-        let mut start = 0;
-        for (ty, end) in nparts {
-            out.push((ty, s[start..end].to_string()));
-            start = end;
-        }
-        out.push(("literal", if past { format!("{label} ago") } else { label.to_string() }));
-        out
-    }
-
     fn call_intl_rtf(&mut self, f: IntlFn, this: Value, args: &[Value], is_new: bool) -> Res<Value> {
         let (a0, a1) = (arg(args, 0), arg(args, 1));
         match f {
@@ -151,7 +98,7 @@ impl<'p> Interp<'p> {
                 let Some(unit) = RTF_UNITS.iter().position(|n| u == *n || u.strip_suffix('s') == Some(*n)) else {
                     return Err(self.range_error(&format!("Invalid unit argument for Intl.RelativeTimeFormat.prototype.{method}() '{u}'")));
                 };
-                let parts = self.rtf_parts(r, x, unit);
+                let parts = rtf_parts(&mut self.intl.icu, r, x, unit);
                 if !to_parts {
                     let s: String = parts.iter().map(|p| p.1.as_str()).collect();
                     return self.str_value(&s);

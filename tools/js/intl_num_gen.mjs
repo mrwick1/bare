@@ -1,6 +1,6 @@
-// Generate crates/js/src/intl_num_data.rs: currency symbols and digits for Intl.NumberFormat, from Node's ICU (CLDR data, Unicode
+// Generate crates/intl/src/intl_num_data.rs: currency symbols and digits for Intl.NumberFormat, from Node's ICU (CLDR data, Unicode
 // license). Only Intl.NumberFormat of this Node runs here; no page code.
-//   node tools/js/intl_num_gen.mjs > crates/js/src/intl_num_data.rs
+//   node tools/js/intl_num_gen.mjs > crates/intl/src/intl_num_data.rs
 //
 // A currency that has no entry shows its code and has 2 digits. `space` is true when the locale puts a no-break space
 // between the symbol and the digits (the symbol does not end in a Unicode symbol character).

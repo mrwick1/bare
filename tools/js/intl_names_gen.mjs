@@ -1,6 +1,6 @@
-// Generate crates/js/src/intl_names_data.rs (included by intl.rs): English display names for Intl.DisplayNames from Node's ICU
+// Generate crates/intl/src/intl_names_data.rs (included by intl.rs): English display names for Intl.DisplayNames from Node's ICU
 // (CLDR data, Unicode license). Only Intl.DisplayNames of this Node runs here; no page code.
-//   node tools/js/intl_names_gen.mjs > crates/js/src/intl_names_data.rs
+//   node tools/js/intl_names_gen.mjs > crates/intl/src/intl_names_data.rs
 //
 // A short list of common codes, not all of CLDR: an unknown code gives the code itself (fallback "code"). A row is
 // (code, long, short, narrow); short and narrow are "" when they equal the long name. The names are those of en-US for every

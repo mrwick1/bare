@@ -1,5 +1,5 @@
 #!/bin/sh
-# Make crates/js/src/icu_data: the ICU4X data of bare-js, for the root locale and 5 English locales (en, en-US, en-GB, en-CA, en-IN).
+# Make crates/intl/src/icu_data: the ICU4X data of bare-js, for the root locale and 5 English locales (en, en-US, en-GB, en-CA, en-IN).
 #   cargo install icu4x-datagen --version 2.4.0
 #   tools/js/icu_data_gen.sh
 # It downloads CLDR 49 (about 80 MB, kept in $WORK) and needs the disk, not /tmp: /tmp can be a small tmpfs.
@@ -10,7 +10,7 @@
 # their data (a collator reads the metadata of the locale `und`).
 set -eu
 here=$(dirname "$0")
-out=$here/../../crates/js/src/icu_data
+out=$here/../../crates/intl/src/icu_data
 work=${WORK:-$HOME/.cache/bare-icu-data}
 mkdir -p "$work"
 markers="CollationRootV1 CollationJamoV1 CollationSpecialPrimariesV1 CollationDiacriticsV1 CollationReorderingV1 CollationMetadataV1 NormalizerNfdDataV1 NormalizerNfdTablesV1 NormalizerNfkdDataV1 NormalizerNfkdTablesV1 NormalizerNfcV1 DecimalSymbolsV1 DecimalDigitsV1 PluralsCardinalV1 PluralsOrdinalV1"

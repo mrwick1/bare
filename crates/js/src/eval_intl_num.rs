@@ -28,6 +28,7 @@
 // formatters by `max_formatters` and pruned by `collect`. The ICU4X formatters and the collators are made once and shared
 // (`intl.icu`).
 
+use bare_intl::number_options::{self, CURRENCY_DISPLAYS, NOTATIONS, SIGN_DISPLAYS};
 use fixed_decimal::SignDisplay;
 
 /// A number formatter: its resolved options and the bound `format` function.
@@ -57,18 +58,6 @@ struct IntlPr {
 
 const SENSITIVITY: [&str; 4] = ["base", "accent", "case", "variant"];
 const CASE_FIRST: [&str; 3] = ["upper", "lower", "false"];
-const NOTATIONS: [&str; 4] = ["standard", "scientific", "engineering", "compact"];
-const CURRENCY_DISPLAYS: [&str; 4] = ["symbol", "narrowSymbol", "code", "name"];
-const SIGN_DISPLAYS: [&str; 5] = ["auto", "never", "always", "exceptZero", "negative"];
-const ROUNDING_PRIORITIES: [&str; 3] = ["auto", "morePrecision", "lessPrecision"];
-const GROUPINGS: [&str; 5] = ["min2", "auto", "always", "true", "false"];
-const ROUNDING_INCREMENTS: [u16; 15] = [1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 2500, 5000];
-const SANCTIONED_UNITS: [&str; 45] = [
-    "acre", "bit", "byte", "celsius", "centimeter", "day", "degree", "fahrenheit", "fluid-ounce", "foot", "gallon", "gigabit", "gigabyte",
-    "gram", "hectare", "hour", "inch", "kilobit", "kilobyte", "kilogram", "kilometer", "liter", "megabit", "megabyte", "meter",
-    "microsecond", "mile", "mile-scandinavian", "milliliter", "millimeter", "millisecond", "minute", "month", "nanosecond", "ounce",
-    "percent", "petabyte", "pound", "second", "stone", "terabit", "terabyte", "week", "yard", "year",
-];
 
 impl<'p> Interp<'p> {
     /// Number and collator objects the evaluator tracks (until `collect` drops the dead ones).
@@ -132,63 +121,6 @@ impl<'p> Interp<'p> {
 
     // ------------------------------------------------------------ NumberFormat
 
-    /// SetNumberFormatDigitOptions. Returns a gate when the options ask for something bare cannot do.
-    fn intl_digits(&mut self, who: &str, opts: Option<Value>, f: &mut icu::NumFmt, defaults: (u8, u8)) -> Res<Option<&'static str>> {
-        let mnid = self.intl_get(opts, "minimumIntegerDigits")?;
-        f.min_int = self.intl_number(mnid, "minimumIntegerDigits", 1.0, 21.0)?.unwrap_or(1) as u8;
-        let mnfd = self.intl_get(opts, "minimumFractionDigits")?;
-        let mxfd = self.intl_get(opts, "maximumFractionDigits")?;
-        let mnsd = self.intl_get(opts, "minimumSignificantDigits")?;
-        let mxsd = self.intl_get(opts, "maximumSignificantDigits")?;
-        let inc = self.intl_get(opts, "roundingIncrement")?;
-        let inc = self.intl_number(inc, "roundingIncrement", 1.0, 5000.0)?.unwrap_or(1);
-        if !ROUNDING_INCREMENTS.contains(&(inc as u16)) {
-            return Err(self.range_error("roundingIncrement value is out of range."));
-        }
-        f.mode = self.intl_opt_for(who, opts, "roundingMode", &icu::ROUNDING_MODES)?.map_or(icu::HALF_EXPAND, |i| i as u8);
-        let priority = self.intl_opt_for(who, opts, "roundingPriority", &ROUNDING_PRIORITIES)?.unwrap_or(0);
-        f.strip_zero = self.intl_opt_for(who, opts, "trailingZeroDisplay", &["auto", "stripIfInteger"])?.unwrap_or(0) == 1;
-        let has_sd = !matches!(mnsd, Value::Undefined) || !matches!(mxsd, Value::Undefined);
-        let has_fd = !matches!(mnfd, Value::Undefined) || !matches!(mxfd, Value::Undefined);
-        let (mut need_sd, mut need_fd) = (true, true);
-        if priority == 0 {
-            need_sd = has_sd;
-            if need_sd {
-                need_fd = false;
-            }
-        }
-        f.sd = (1, 21);
-        f.fd = defaults;
-        if need_sd && has_sd {
-            let lo = self.intl_number(mnsd, "minimumSignificantDigits", 1.0, 21.0)?.unwrap_or(1);
-            let hi = self.intl_number(mxsd, "maximumSignificantDigits", lo as f64, 21.0)?.unwrap_or(21);
-            f.sd = (lo as u8, hi as u8);
-        }
-        if need_fd && has_fd {
-            let lo = self.intl_number(mnfd, "minimumFractionDigits", 0.0, 100.0)?;
-            let hi = self.intl_number(mxfd, "maximumFractionDigits", 0.0, 100.0)?;
-            f.fd = match (lo, hi) {
-                (None, Some(h)) => (defaults.0.min(h as u8), h as u8),
-                (Some(l), None) => (l as u8, defaults.1.max(l as u8)),
-                (Some(l), Some(h)) if l > h => return Err(self.range_error("maximumFractionDigits value is out of range.")),
-                (Some(l), Some(h)) => (l as u8, h as u8),
-                (None, None) => defaults,
-            };
-        }
-        f.rounding = match priority {
-            1 => icu::Rounding::MorePrecision,
-            2 => icu::Rounding::LessPrecision,
-            _ if has_sd => icu::Rounding::Significant,
-            _ => icu::Rounding::Fraction,
-        };
-        if f.notation == 3 && priority == 0 && !has_fd && !has_sd {
-            f.rounding = icu::Rounding::MorePrecision;
-            f.fd = (0, 0);
-            f.sd = (1, 2);
-        }
-        Ok((inc != 1).then_some("Intl.NumberFormat option roundingIncrement"))
-    }
-
     /// InitializeNumberFormat (`who` is the caller named by the TypeError for a null `options`).
     /// The `-u-` keyword `nu` of the requested locales. `latn` goes in `resolvedOptions().locale` (`pending_ext`); another
     /// numbering system that ICU has sets the gate, as the option does.
@@ -220,97 +152,7 @@ impl<'p> Interp<'p> {
         if requested.iter().any(|t| intl::has_unicode_ext(t)) {
             self.intl_nf_keywords(&requested, nu.as_deref(), &mut gate);
         }
-        let mut f = icu::NumFmt {
-            loc,
-            style: icu::Style::Decimal,
-            currency: *b"USD",
-            display: icu::SYMBOL,
-            accounting: false,
-            min_int: 1,
-            rounding: icu::Rounding::Fraction,
-            fd: (0, 3),
-            sd: (1, 21),
-            grouping: icu::Grouping::Auto,
-            sign: SignDisplay::Auto,
-            mode: icu::HALF_EXPAND,
-            unit: 255, per_unit: 255, unit_display: 0, notation: 0, compact_long: false, strip_zero: false,
-        };
-        // SetNumberFormatUnitOptions
-        let style = self.intl_opt_for(who, opts, "style", &["decimal", "percent", "currency", "unit"])?.unwrap_or(0);
-        match self.intl_opt_str(opts, "currency")? {
-            Some(c) if c.len() == 3 && c.bytes().all(|b| b.is_ascii_alphabetic()) => f.currency.copy_from_slice(c.to_ascii_uppercase().as_bytes()),
-            Some(c) => return Err(self.range_error(&format!("Invalid currency code : {c}"))),
-            None if style == 2 => return Err(self.type_err("Currency code is required with currency style.")),
-            None => {}
-        }
-        let display = self.intl_opt_for(who, opts, "currencyDisplay", &CURRENCY_DISPLAYS)?.unwrap_or(0);
-        f.accounting = self.intl_opt_for(who, opts, "currencySign", &["standard", "accounting"])?.unwrap_or(0) == 1;
-        let unit = self.intl_opt_str(opts, "unit")?;
-        match &unit {
-            Some(u) if !u.split("-per-").all(|p| SANCTIONED_UNITS.contains(&p)) || u.matches("-per-").count() > 1 => {
-                return Err(self.range_error(&format!("Invalid unit argument for Intl.NumberFormat() '{u}'")));
-            }
-            None if style == 3 => return Err(self.type_err("Invalid unit argument for Intl.NumberFormat() ''")),
-            _ => {}
-        }
-        f.unit_display = self.intl_opt_for(who, opts, "unitDisplay", &["short", "narrow", "long"])?.unwrap_or(0) as u8;
-        f.style = [icu::Style::Decimal, icu::Style::Percent, icu::Style::Currency, icu::Style::Decimal][style];
-        if style == 3 {
-            let mut parts = unit.as_deref().unwrap_or("meter").split("-per-");
-            let numerator = parts.next();
-            f.unit = SANCTIONED_UNITS.iter().position(|u| Some(*u) == numerator).unwrap_or(24) as u8;
-            f.per_unit = parts.next().and_then(|p| SANCTIONED_UNITS.iter().position(|u| *u == p)).map_or(255, |i| i as u8);
-        }
-        if style == 2 {
-            f.display = display as u8;
-        }
-        let cd = icu::currency_digits(core::str::from_utf8(&f.currency).unwrap_or(""));
-        let defaults = match style {
-            2 => (cd, cd),
-            1 => (0, 0),
-            _ => (0, 3),
-        };
-        let notation = self.intl_opt_for(who, opts, "notation", &NOTATIONS)?.unwrap_or(0);
-        f.notation = notation as u8;
-        gate = gate.or(self.intl_digits(who, opts, &mut f, if notation == 3 { (0, 0) } else { defaults })?);
-        f.compact_long = self.intl_opt_for(who, opts, "compactDisplay", &["short", "long"])?.unwrap_or(0) == 1;
-        f.grouping = self.intl_grouping(who, opts, notation == 3)?;
-        f.sign = match self.intl_opt_for(who, opts, "signDisplay", &SIGN_DISPLAYS)?.unwrap_or(0) {
-            1 => SignDisplay::Never,
-            2 => SignDisplay::Always,
-            3 => SignDisplay::ExceptZero,
-            4 => SignDisplay::Negative,
-            _ => SignDisplay::Auto,
-        };
-        match gate {
-            Some(g) => Err(unsupported(g, Span::default())),
-            None => Ok(f),
-        }
-    }
-
-    /// GetBooleanOrStringNumberFormatOption for `useGrouping`.
-    fn intl_grouping(&mut self, who: &str, opts: Option<Value>, compact: bool) -> Res<icu::Grouping> {
-        let default = if compact { icu::Grouping::Min2 } else { icu::Grouping::Auto };
-        let v = self.intl_get(opts, "useGrouping")?;
-        if matches!(v, Value::Undefined) {
-            return Ok(default);
-        }
-        if matches!(v, Value::Bool(true)) {
-            return Ok(icu::Grouping::Always);
-        }
-        if !self.truthy(v)? {
-            return Ok(icu::Grouping::Never);
-        }
-        let shown = self.intl_show(v);
-        let s = self.coerce_string(v)?;
-        let s = h!(self, self.heap.to_string_lossy(s));
-        match GROUPINGS.iter().position(|g| *g == s) {
-            Some(0) => Ok(icu::Grouping::Min2),
-            Some(1) => Ok(icu::Grouping::Auto),
-            Some(2) => Ok(icu::Grouping::Always),
-            Some(_) => Ok(default),
-            None => Err(self.range_error(&format!("Value {shown} out of range for {who} options property useGrouping"))),
-        }
+        number_options::initialize(&mut OldNumberOptions { interp: self, opts }, who, loc, gate)
     }
 
     /// A value as V8 shows it in a receiver or option error: `#<Object>` for an object.
@@ -764,10 +606,69 @@ impl<'p> Interp<'p> {
             mode: icu::HALF_EXPAND,
             unit: 255, per_unit: 255, unit_display: 0, notation: 0, compact_long: false, strip_zero: false,
         };
-        if let Some(g) = self.intl_digits(PR, opts, &mut f, (0, 3))? {
+        if let Some(g) = number_options::Options::digits(&mut OldNumberOptions { interp: self, opts }, PR, &mut f, (0, 3))? {
             return Err(unsupported(g, Span::default()));
         }
         let found = self.intl_pick(&requested).is_some();
         Ok(IntlPr { f, ordinal, found })
+    }
+}
+
+struct OldNumberOptions<'a, 'p> {
+    interp: &'a mut Interp<'p>,
+    opts: Option<Value>,
+}
+
+impl number_options::Options for OldNumberOptions<'_, '_> {
+    type Value = Value;
+    type Error = Error;
+
+    fn get(&mut self, name: &str) -> Res<Value> {
+        self.interp.intl_get(self.opts, name)
+    }
+
+    fn string_option(&mut self, name: &str) -> Res<Option<String>> {
+        self.interp.intl_opt_str(self.opts, name)
+    }
+
+    fn choice(&mut self, who: &str, name: &str, choices: &[&str]) -> Res<Option<usize>> {
+        self.interp.intl_opt_for(who, self.opts, name, choices)
+    }
+
+    fn is_undefined(v: Value) -> bool {
+        matches!(v, Value::Undefined)
+    }
+
+    fn is_true(v: Value) -> bool {
+        matches!(v, Value::Bool(true))
+    }
+
+    fn truthy(&mut self, v: Value) -> Res<bool> {
+        self.interp.truthy(v)
+    }
+
+    fn string(&mut self, v: Value) -> Res<String> {
+        let s = self.interp.coerce_string(v)?;
+        Ok(h!(self.interp, self.interp.heap.to_string_lossy(s)))
+    }
+
+    fn show(&self, v: Value) -> String {
+        self.interp.intl_show(v)
+    }
+
+    fn number_option(&mut self, v: Value, name: &str, min: f64, max: f64) -> Res<Option<u32>> {
+        self.interp.intl_number(v, name, min, max)
+    }
+
+    fn range_error(&mut self, message: &str) -> Error {
+        self.interp.range_error(message)
+    }
+
+    fn type_error(&mut self, message: &str) -> Error {
+        self.interp.type_err(message)
+    }
+
+    fn unsupported(&mut self, feature: &'static str) -> Error {
+        unsupported(feature, Span::default())
     }
 }

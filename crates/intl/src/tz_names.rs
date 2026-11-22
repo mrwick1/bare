@@ -72,7 +72,7 @@ fn offset_name(off: i32, long: bool) -> String {
 /// The name of kind `kind` for zone `zone` (as given) at offset `off` seconds, in locale `loc` (an index in `intl::LOCALES`).
 pub fn name(zone: &str, off: i32, kind: u8, loc: u8) -> String {
     let long_kind = matches!(kind, LONG | LONG_OFFSET | LONG_GENERIC);
-    if crate::tz::is_utc_name(zone) {
+    if is_utc_name(zone) {
         return match kind {
             SHORT => "UTC".into(),
             LONG => "Coordinated Universal Time".into(),
@@ -94,4 +94,12 @@ pub fn name(zone: &str, off: i32, kind: u8, loc: u8) -> String {
         }
     }
     offset_name(off, long_kind)
+}
+
+pub fn is_utc_name(s: &str) -> bool {
+    const UTC: [&str; 18] = [
+        "UTC", "Etc/UTC", "Etc/GMT", "GMT", "Etc/UCT", "UCT", "Etc/Universal", "Universal", "Etc/Zulu", "Zulu", "Etc/GMT0", "GMT0", "Etc/GMT+0",
+        "Etc/GMT-0", "GMT+0", "GMT-0", "Etc/Greenwich", "Greenwich",
+    ];
+    UTC.iter().any(|u| u.eq_ignore_ascii_case(s))
 }

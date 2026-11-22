@@ -8,10 +8,10 @@ pub mod parse_ahead;
 pub mod value;
 pub mod date;
 pub mod tz;
-mod tz_names;
+use bare_intl::tz_names;
+#[path = "intl_api.rs"]
 pub mod intl;
-mod intl_data;
-mod intl_num_data;
+#[path = "icu_api.rs"]
 mod icu;
 pub mod heap;
 pub mod layout_census;
