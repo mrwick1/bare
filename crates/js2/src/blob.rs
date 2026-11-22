@@ -1,18 +1,18 @@
-//! A cell of plain words for RegExp programs and ArrayBuffer bytes.
+//! A cell of plain words for RegExp programs, ArrayBuffer bytes, and BigInt magnitudes.
 //!
 //! A [`Blob`] is the header (`Layout::Blob`, the length in words) and then that many `u64` words. It has no edge, so the collector marks it
-//! and never traces it. It has no finalizer and no Rust owner: the sweep frees it when no object points to it. A script never sees one:
-//! its value has the kind `Object` as a context has (`object.rs`), and `Obj::from_value` does not take it (the layout is not an object).
+//! and never traces it. It has no finalizer. A RegExp program has the kind `Object` as a context has. A BigInt uses its own value tag
+//! and puts the sign in a header flag.
 //!
-//! A Blob points to a live cell made by Blob::new or Blob::zeroed_bytes. The
-//! owner keeps it reachable. A byte borrow also borrows the heap, so the
-//! collector cannot run while the borrow is live.
+//! A Blob points to a live cell made by [`Blob::new`], [`Blob::new_bigint`], or [`Blob::zeroed_bytes`]. The owner keeps it reachable.
+//! A byte slice borrows the heap, which prevents collection. A slice from [`Blob::words`] must stay within a region where collection cannot run.
 use crate::cell::{CellHeader, Layout};
 use crate::heap::Heap;
 use crate::value::{Kind, Value};
 use std::ptr::{self, NonNull};
 
 const WORDS_AT: usize = CellHeader::SIZE;
+const NEGATIVE: u32 = 1;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Blob(NonNull<u8>);
@@ -20,11 +20,15 @@ pub struct Blob(NonNull<u8>);
 impl Blob {
     /// A new cell with a copy of `words`. `None` when out of memory or when the image is longer than a cell can say.
     pub fn new(heap: &mut Heap, words: &[u64]) -> Option<Blob> {
+        Self::with_flags(heap, words, 0)
+    }
+
+    fn with_flags(heap: &mut Heap, words: &[u64], flags: u32) -> Option<Blob> {
         let n = u32::try_from(words.len()).ok()?;
         let p = heap.alloc(WORDS_AT + 8 * words.len())?;
         // SAFETY: the new cell has room for the header and `words.len()` words; `words` is another memory (not this cell).
         unsafe {
-            p.cast::<CellHeader>().write(CellHeader::blob(n));
+            p.cast::<CellHeader>().write(CellHeader::blob(n).with_flags(flags));
             ptr::copy_nonoverlapping(words.as_ptr(), p.as_ptr().add(WORDS_AT).cast::<u64>(), words.len());
         }
         Some(Blob(p))
@@ -61,6 +65,25 @@ impl Blob {
     pub(crate) unsafe fn copy_bytes(self, _heap: &mut Heap, from: usize, to: Blob, at: usize, len: usize) {
         // SAFETY: the caller guarantees the cells, ranges and access.
         unsafe { ptr::copy(self.0.as_ptr().add(WORDS_AT + from), to.0.as_ptr().add(WORDS_AT + at), len) }
+    }
+
+    /// Store the sign and normalized magnitude of a BigInt.
+    pub(crate) fn new_bigint(heap: &mut Heap, a: crate::bigint::Sv<'_>) -> Option<Value> {
+        let b = Self::with_flags(heap, a.mag, if a.neg { NEGATIVE } else { 0 })?;
+        Some(Value::pointer(Kind::BigInt, b.0))
+    }
+
+    /// # Safety
+    /// A BigInt value must name a live cell made by `new_bigint`.
+    pub(crate) unsafe fn from_bigint(v: Value) -> Option<Blob> {
+        let (Kind::BigInt, p) = v.as_pointer()? else { return None };
+        Some(Blob(p))
+    }
+
+    pub(crate) fn bigint(&self) -> crate::bigint::Sv<'_> {
+        // SAFETY: the live cell starts with a header as described in the type invariant.
+        let neg = unsafe { self.0.cast::<CellHeader>().read() }.flags() & NEGATIVE != 0;
+        crate::bigint::Sv { neg, mag: self.words() }
     }
 
     /// The blob of a value that [`Blob::value`] made.

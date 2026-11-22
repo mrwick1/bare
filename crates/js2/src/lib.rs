@@ -61,6 +61,8 @@ pub mod generator;
 mod asyncgen;
 mod iter;
 mod bi_array;
+mod bi_bigint;
+mod bigint;
 #[allow(unsafe_code)]
 mod bi_buffer;
 mod bi_typed;
@@ -83,8 +85,9 @@ mod bi_string_regexp;
 mod bi_uri;
 mod bi_string_iter;
 mod lazy;
-#[rustfmt::skip]
-mod prelude_facts;
+mod prelude_facts {
+    include!(concat!(env!("OUT_DIR"), "/prelude_facts.rs"));
+}
 mod prelude_pre;
 pub mod script;
 #[cfg(test)]

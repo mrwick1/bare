@@ -890,6 +890,8 @@ pub(crate) fn object_get_prototype_of(rt: &mut Realm, _this: Value, args: &[Valu
         rt.number_proto.value()
     } else if v.as_bool().is_some() {
         rt.boolean_proto.value()
+    } else if v.is_bigint() {
+        rt.bigint_intrinsics().1.value()
     } else if Realm::sym_of(v).is_some() {
         rt.fn_props(rt.symbol_proto);
         rt.symbol_proto.value()
@@ -1127,7 +1129,7 @@ pub(crate) fn object_to_string(rt: &mut Realm, this: Value, _args: &[Value]) -> 
                 "String"
             } else if p.is_number() {
                 "Number"
-            } else if Realm::sym_of(p).is_some() {
+            } else if p.is_bigint() || Realm::sym_of(p).is_some() {
                 "Object"
             } else {
                 "Boolean"

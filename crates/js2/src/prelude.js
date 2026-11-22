@@ -2,7 +2,7 @@
 // each top-level function is compiled at its first call (`script.rs`, `Lazy::prelude_fn`). A name that a function reads and no scope in it
 // declares is a slot of the realm (`GetPre`, `prelude_pre.rs`) when it is the name of a top-level function here, of a native or of a state
 // variable in `prelude_pre.rs`. The public names (`Array.prototype.forEach`) are lazy table entries of kind `Pre` (`lazy.rs`).
-// After a change of this text run `BLESS_PRELUDE_FACTS=1 cargo test -p bare-js2 --lib prelude_facts`.
+// Cargo generates the pre-parse facts from this text.
 'use strict';
 // The descriptor object `d` as a plain object, read with ordinary property reads (a field of `d` may be an accessor).
 function toDesc(d) {

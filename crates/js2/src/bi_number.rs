@@ -13,7 +13,11 @@ impl Realm {
         let c = self.ctor("Number", 1, number_ctor, proto);
         // The table of the global functions comes first: `Number.parseInt` is one of them (`Kind::Alias`).
         let g = self.global;
-        static GLOBAL_FUNCTIONS: &[Ent] = &[m("parseInt", 2, parse_int), m("parseFloat", 1, parse_float), m("isNaN", 1, global_is_nan), m("isFinite", 1, global_is_finite)];
+        static GLOBAL_FUNCTIONS: &[Ent] = &[
+            m("parseInt", 2, parse_int), m("parseFloat", 1, parse_float),
+            m("isNaN", 1, global_is_nan), m("isFinite", 1, global_is_finite),
+            crate::lazy::factory("BigInt", crate::bi_bigint::bigint_global),
+        ];
         self.lazy_table(g, GLOBAL_FUNCTIONS);
         static NUMBER_STATICS: &[Ent] = &[
             m("isInteger", 1, is_integer),
@@ -145,7 +149,15 @@ fn radix_integer(digits: &[u8], bits: u32) -> f64 {
 }
 
 fn number_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    let n = if args.is_empty() { Value::int(0) } else { Realm::num(rt.to_number(args[0])?) };
+    let n = if args.is_empty() {
+        Value::int(0)
+    } else {
+        let p = rt.to_primitive(args[0], crate::builtins::Hint::Number)?;
+        Realm::num(match Realm::big_of(p) {
+            Some(b) => crate::bigint::to_f64(b.bigint()),
+            None => rt.to_number(p)?,
+        })
+    };
     if Realm::obj(rt.nt).is_none() {
         return Ok(n);
     }
@@ -359,15 +371,20 @@ fn to_locale_string(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
         let f = f.trim_end_matches('0').trim_end_matches('.');
         let (int, frac) = f.split_once('.').unwrap_or((f, ""));
         let mut g = String::new();
-        for (i, c) in int.chars().enumerate() {
-            if i > 0 && (int.len() - i) % 3 == 0 {
-                g.push(',');
-            }
-            g.push(c);
-        }
+        group_decimal(&mut g, int);
         format!("{}{g}{}{frac}", if x.is_sign_negative() { "-" } else { "" }, if frac.is_empty() { "" } else { "." })
     };
     Ok(rt.string(&t))
+}
+
+/// Add comma separators to an unsigned ASCII decimal integer.
+pub(crate) fn group_decimal(out: &mut String, digits: &str) {
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
 }
 
 fn is_integer(_rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
