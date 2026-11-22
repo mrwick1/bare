@@ -255,7 +255,7 @@ impl Realm {
                 {
                     return Some(Slot::Data(v));
                 }
-                self.idx_atom(i)
+                self.find_index_name(c, i)?
             }
             Key::Name(k) => {
                 if k == self.k_length && Realm::is_array(self, c) {
@@ -604,3 +604,7 @@ mod tests;
 #[cfg(test)]
 #[path = "api_host_typed_index_tests.rs"]
 mod typed_index_tests;
+
+#[cfg(test)]
+#[path = "api_host_index_probe_tests.rs"]
+mod index_probe_tests;

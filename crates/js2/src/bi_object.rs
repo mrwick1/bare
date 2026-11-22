@@ -147,7 +147,7 @@ impl Realm {
                     }
                     return Some(Own::Data(v, at));
                 }
-                self.find_idx_atom(i)?
+                self.find_index_name(o, i)?
             }
             Key::Name(k) => {
                 if k == self.k_length
