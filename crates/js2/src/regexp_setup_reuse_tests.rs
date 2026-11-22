@@ -17,8 +17,8 @@ fn literal_checks_and_compiles_once_per_resident_entry() {
         }
     ").unwrap();
     assert_eq!(vm.global_text("ok"), "true");
-    assert_eq!(PARSES.get(), 2);
-    assert_eq!(CACHE_HITS.get(), (39, 0));
+    assert_eq!(PARSES.get(), 1);
+    assert_eq!(CACHE_HITS.get(), (19, 0));
 }
 
 #[test]
@@ -34,13 +34,13 @@ fn equal_source_content_and_program_survive_collection() {
     assert_ne!(src, other);
     let second = vm.realm.new_regexp(None, other, "ig").unwrap();
     let second = vm.realm.program(Realm::obj(second).unwrap()).unwrap().value();
-    assert_eq!(PARSES.get(), 2);
+    assert_eq!(PARSES.get(), 1);
     assert_eq!(first, second);
-    assert_eq!(CACHE_HITS.get(), (2, 1));
+    assert_eq!(CACHE_HITS.get(), (0, 1));
 }
 
 #[test]
-fn uncompiled_entries_survive_collection_and_stay_bounded() {
+fn unused_entries_survive_collection_and_stay_bounded() {
     let mut vm = load("").unwrap();
     for i in 0..CACHE + 1 {
         let src = Str::from_str(&mut vm.realm.heap, &format!("pattern{i}")).unwrap();
@@ -87,5 +87,5 @@ fn different_flags_use_different_programs() {
         var ok = a.test('ABC') && !b.test('ABC') && b.test('abc');
     ").unwrap();
     assert_eq!(vm.global_text("ok"), "true");
-    assert_eq!(PARSES.get(), 4);
+    assert_eq!(PARSES.get(), 2);
 }

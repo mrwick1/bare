@@ -7,12 +7,12 @@
 //! properties do not see it before that first use.
 //!
 //! **The object.** A plain `Object` cell with the kind `K_REGEXP` and four slots, in this order: the hidden `\0src` (the pattern
-//! string), the hidden `\0fl` (the flag bits of `Flags::bits`), the hidden `\0prog` (the [`Blob`] of the program, or `undefined`
-//! until the first match) and the own `lastIndex` (writable only). All objects start with one shape, `Rx::shape`. An object that a
+//! string), the hidden `\0fl` (the flag bits of `Flags::bits`), the hidden `\0prog` (the [`Blob`] or the pending emit limit)
+//! and the own `lastIndex` (writable only). All objects start with one shape, `Rx::shape`. An object that a
 //! script gave another property has another shape, and the slots are found by name then.
 //!
-//! **Compile.** The constructor checks the syntax, so a bad pattern throws at once. The program is compiled at the first `exec`
-//! or `test`. A small cache keeps verified patterns and their optional programs by source content and flags.
+//! **Compile.** A bad pattern throws at creation. The emitter reuses the validated tree and records emit limits for first use.
+//! A small cache shares immutable setup by source content and flags. Each wrapper owns its `lastIndex`.
 //!
 //! **Steps.** The matcher charges its steps to `Realm::fuel`. When the fuel is out, or the run passes the cap of one run, the native
 //! returns `Err(STOP)`: no handler runs, and the script ends with `Exit::Fuel` (the old engine's `Error::Limit` was as final).
@@ -238,14 +238,19 @@ impl Realm {
         let flags = Flags::parse(flags).map_err(|e| self.regexp_error(&e, src))?;
         let bits = flags.bits();
         let hit = self.rx.as_ref().and_then(|rx| rx.cached(src, bits));
-        if hit.is_none() {
-            let units = self.units(src);
-            if let Err(e) = regexp::check_pattern(&units, flags) {
-                return Err(self.regexp_error(&e, src));
+        let program = match hit {
+            Some(i) => self.rx().cache[i].program,
+            None => {
+                let parsed = regexp::parse(&self.units(src), flags).map_err(|e| self.regexp_error(&e, src))?;
+                match regexp::emit(parsed) {
+                    // If the heap refuses the image, retry at first use as before.
+                    Ok(img) => Blob::new(&mut self.heap, &img).map_or(Value::UNDEFINED, Blob::value),
+                    Err(CompileError::Limit(reason)) => self.intern(reason).value(),
+                    Err(e) => return Err(self.regexp_error(&e, src)),
+                }
             }
-        }
+        };
         let rx = self.rx();
-        let program = hit.map_or(Value::UNDEFINED, |i| rx.cache[i].program);
         rx.remember(hit, src, bits, program);
         let shape = match proto {
             None => rx.shape,
@@ -264,7 +269,7 @@ impl Realm {
         o.set_kind(K_REGEXP);
         o.set_slot(&self.shapes, SRC as u32, src.value());
         o.set_slot(&self.shapes, FL as u32, Value::int(bits as i32));
-        o.set_slot(&self.shapes, PROG as u32, Value::UNDEFINED);
+        o.set_slot(&self.shapes, PROG as u32, program);
         o.set_slot(&self.shapes, LAST as u32, Value::int(0));
         Ok(o.value())
     }
@@ -304,7 +309,7 @@ impl Realm {
         }
     }
 
-    /// The program of the regexp `o`: compiled now if it is not.
+    /// The program of the regexp `o`, or the error on first use.
     #[inline(always)]
     pub(crate) fn program(&mut self, o: Obj) -> R<Blob> {
         let Some(ps) = self.rx_slot(o, PROG) else { return self.type_error("invalid RegExp object") };
@@ -320,6 +325,10 @@ impl Realm {
         let (Some(src), Some(bits)) = (Realm::str_of(o.slot(&self.shapes, ss)), o.slot(&self.shapes, fs).as_int()) else {
             return self.type_error("invalid RegExp object");
         };
+        if let Some(reason) = Realm::str_of(o.slot(&self.shapes, ps)) {
+            let (src, reason) = (self.text(src), self.text(reason));
+            return Err(self.error(ErrKind::Syntax, &format!("Invalid regular expression: /{src}/: {reason}")));
+        }
         let bits = bits as u8;
         let rx = self.rx();
         let hit = rx.cached(src, bits);
@@ -710,3 +719,7 @@ fn regexp_to_string(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
 #[cfg(test)]
 #[path = "regexp_setup_reuse_tests.rs"]
 mod setup_reuse_tests;
+
+#[cfg(test)]
+#[path = "regexp_one_pass_tests.rs"]
+mod one_pass_tests;
