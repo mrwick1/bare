@@ -76,7 +76,7 @@ impl<'a> Fc<'a> {
         let mut scan = Scan::new(source, u32::MAX);
         let mut opens = Vec::new();
         let mut error = Ok(());
-        let built = scan.value(MAX_DEPTH - depth, &mut |part| {
+        let built = scan.value::<true>(MAX_DEPTH - depth, &mut |part| {
             let item = match part {
                 Part::Open(object) => {
                     opens.push(out.len());
@@ -100,11 +100,14 @@ impl<'a> Fc<'a> {
                     }
                 }
                 Part::Number(s) => {
+                    #[cfg(test)]
+                    integer_tests::CONVERSIONS.with(|n| n.set(n.get() + 1));
                     let n = crate::lex::decimal_value(prog.text(Span { start: span.start + s.start, end: span.start + s.end }), &mut String::new());
                     Item::Scalar(Realm::num(n.unwrap_or(f64::NAN)))
                 }
                 Part::Bool(b) => Item::Scalar(Value::bool(b)),
                 Part::Null => Item::Scalar(Value::NULL),
+                Part::Integer(n) => Item::Scalar(Value::int(n)),
             };
             out.push(item);
             Some(())
@@ -219,3 +222,7 @@ impl DataLiteral {
 #[cfg(test)]
 #[path = "data_lit_span_tests.rs"]
 mod span_tests;
+
+#[cfg(test)]
+#[path = "data_lit_integer_tests.rs"]
+mod integer_tests;
