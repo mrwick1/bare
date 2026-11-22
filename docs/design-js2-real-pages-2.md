@@ -129,6 +129,34 @@ A smaller cost is separable. `hs_lazy` renders the name before it checks whether
 
 Check callbacks for names, indices, symbols and enumeration. Keep the first callback, retries after GC, and callback errors. The design does not predict that the small host change alone removes the full Python.org gap.
 
+## Remaining Python Docs work after the first three fixes
+
+The tape still uses 1,106.33 M instructions on js2 after the checked-span, indexed-probe, and host-name changes. The OLD minimum was about 1,058.5 M on the same tape. All measured native replies match. The newer Callgrind sample has one extra zero-byte 304. It still attributes 79.05 M inclusive to portable code capture.
+
+### Keep the warm search-index cache
+
+The decoded search-index script is 3,806,411 bytes. In the isolated `code_cache_load` example, its first load uses 433.95 M Callgrind instructions. A single `PortableUnit::capture` call uses 76.60 M. The entry accounts for 17,722,435 bytes. Two and three realm loads use 474.95 M and 516.98 M. The cache reports one and two hits. Each warm load uses about 41–42 M additional instructions.
+
+OLD's source-span literal has no portable recipe to copy. QuickJS's `__JS_EvalInternal` creates bytecode and evaluates it. Its portable writer is the separate `JS_WriteObject` API.
+
+| Design | Work and storage | Expected gain |
+|---|---|---|
+| Admit a large recipe on its second load. | Keep one bounded identity marker after a cold miss. Build the portable entry only after a repeat. The first load avoids O(items) cloning. The next load compiles a second time. | Saves up to 76.6 M cold. The second request would use about 393 M extra instructions from the measured compile and bind costs. Keep the current admission policy. |
+| Share immutable recipes that contain local atom indices. | Let the realm and cache share the O(items) recipe. Bind a separate O(distinct atoms) table per realm. The runtime allocation op must read strings through that table. | Hypothesis: saves up to 76.6 M on cold loads and retains the warm compile hit. This changes compiler storage and the runtime builder. Defer it. |
+
+### Emit small integers during the checked-span lowering pass
+
+The recorded search-index object contains 341,428 numbers. They are all integers with at most nine decimal digits. The isolated compile enters the general floating-point parser 341,428 times. `FromStr<f64>` and its decimal parser use about 46 M exclusive instructions in the journey profile. The decimal text had already been checked by the span scanner.
+
+OLD's `Build::number` accumulates digits directly when up to 15 digits fit exactly in an `f64`. It applies the sign separately and keeps negative zero. QuickJS checks the syntax in `json_parse_number`, then calls `js_atod` and returns a compact number through `JS_NewFloat64`. js2 can emit its tagged integer directly when the scanner has already checked the digits.
+
+| Design | Work and storage | Expected gain |
+|---|---|---|
+| Accumulate the integer on the lowering scan. | Use the digit walk already needed to find the token end. For at most nine digits and no fraction or exponent, emit a tagged integer. Make negative zero and other decimal numbers use the existing converter. O(digits) time and O(1) storage. | Hypothesis: 40–50 M on Python Docs. The first validation pass still checks syntax without building a value. |
+| Try `i32` conversion after scanning each number. | Accept the same signed integer subset. Delegate every other token to the existing decimal converter. It reads digits twice during lowering. O(digits) time and O(1) storage. | Hypothesis: 25–40 M. The extra digit pass gives simpler code but preserves work that the first design removes. |
+
+Build the first option. Cover negative zero, the fast-path endpoints, fractions, exponents, long integers and long exponent cancellation. Recheck the matching tapes, live samples, peak RSS, the relevant test262 directories, and the parser and interpreter cost rows.
+
 ## Verification and limits
 
 For each fix, use a new focused test file. Keep a failed baseline result and a passing result. Run the narrow tests, targeted test262, affected cost rows, five js2 interpreter rows, and the three-run journey and RSS gates. Recheck Rust Book search, DEV home, Python.org search and the React typing fixture. Reuse the tapes and check the live reply lists again.
