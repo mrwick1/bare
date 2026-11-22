@@ -11,7 +11,7 @@ use crate::bi_object::{Desc, H_SEARCH};
 use crate::bi_symbol::{ITERATOR, SPECIES};
 use crate::builtins::{HIDDEN, NativeFn, arg};
 use crate::interp_rt::{ErrKind, Key, R, Realm};
-use crate::object::{F_ELEMS_FIXED, F_ELEMS_RO, F_LEN_RO, F_NOEXT, F_SLOWIDX, Obj};
+use crate::object::{F_ARGS, F_ELEMS_FIXED, F_ELEMS_RO, F_HOST, F_LAZYM, F_LEN_RO, F_NOEXT, F_SLOWIDX, Obj};
 use crate::string::Str;
 use crate::value::Value;
 
@@ -378,6 +378,16 @@ fn at(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
 }
 
 fn push(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+    if let [v] = args
+        && let Some(o) = Realm::obj(this)
+        && o.is_indexed()
+        && !o.has_flag(PLAIN | F_ARGS | F_HOST | F_LAZYM)
+        && o.proto(&rt.shapes) == Some(rt.array_proto.cell())
+        && rt.clean_array_push_prototypes()
+        && let Some(n) = o.append_dense(&mut rt.heap, *v)
+    {
+        return Ok(Realm::num(n as f64));
+    }
     let o = this_val(rt, this)?;
     let len = len_of(rt, o)?;
     if len + args.len() as f64 > MAX_LEN {

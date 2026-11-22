@@ -65,7 +65,7 @@ use crate::bytecode::{Asm, CF_ARGS, CF_GEN, CF_LINK, Code, ITER_REGS, Ins, Op, S
 use crate::codes::Codes;
 use crate::gc::Marker;
 use crate::interp_rt::{ErrKind, Feedback, Got, Key, Put, Realm};
-use crate::object::{F_DERIVED, Obj};
+use crate::object::{F_ARGS, F_DERIVED, F_HOST, F_LAZYM, F_SLOWIDX, Obj};
 use crate::roots::RootMaps;
 use crate::shapes::{A_C, A_E, A_W};
 use crate::value::Value;
@@ -175,7 +175,8 @@ macro_rules! cold_ops {
         Op::SetFnName | Op::DefaultCtor | Op::SetFields | Op::NewPrivateName | Op::GetPrivate | Op::SetPrivate | Op::HasPrivate |
         Op::DefPrivate | Op::DefPrivateMethod | Op::DefPrivateAccessor | Op::GetSuper | Op::GetSuperElem | Op::GetSuperElemRef | Op::SetSuper |
         Op::SetSuperElem | Op::InitSuperFields | Op::ThrowSuperDelete | Op::CallSuper | Op::CallSuperSpread | Op::RetDerived | Op::GenInit | Op::Yield | Op::YieldResult | Op::RetGen | Op::IterClose | Op::ForInNext | Op::YieldStarStep | Op::YieldOpen | Op::AsyncInit | Op::Await | Op::RetAsync |
-        Op::AIterOpen | Op::AIterNext | Op::AIterUnpack | Op::AYsUnpack | Op::AIterClose | Op::AIterCloseT | Op::AIterCheck | Op::AYsCall
+        Op::AIterOpen | Op::AIterNext | Op::AIterUnpack | Op::AYsUnpack | Op::AIterClose | Op::AIterCloseT | Op::AIterCheck | Op::AYsCall |
+        Op::AddKey
     };
 }
 
@@ -441,10 +442,20 @@ fn gen_resume(realm: &mut Realm, stack: &mut Vec<Value>, prog: &Codes, ci: usize
 }
 
 impl Vm {
-    pub fn new(mut prog: Program, shared: Arc<SharedAtoms>) -> Vm {
+    pub fn new(prog: Program, shared: Arc<SharedAtoms>) -> Vm {
+        Self::new_with_flags(prog, shared, true)
+    }
+
+    pub(crate) fn new_compiled(prog: Program, shared: Arc<SharedAtoms>) -> Vm {
+        Self::new_with_flags(prog, shared, false)
+    }
+
+    fn new_with_flags(mut prog: Program, shared: Arc<SharedAtoms>, scan: bool) -> Vm {
         let dctor = [prog.codes.len(), prog.codes.len() + 1];
         prog.codes.extend(default_ctors());
-        scan_flags(&mut prog.codes);
+        if scan {
+            scan_flags(&mut prog.codes);
+        }
         let fbs = prog.codes.iter().map(|_| Feedback::default()).collect();
         let mut realm = Realm::new(shared);
         (realm.prog, realm.dctor) = (Rc::new(prog.codes.into()), dctor);
@@ -833,7 +844,10 @@ impl Vm {
         }
         macro_rules! op_add {
             ($a:expr, $x:expr, $y:expr, $next:expr) => {
-                arith!($a, $x, $y, $next, |i, j| i.checked_add(j).map_or_else(|| Value::number(i as f64 + j as f64), Value::int), |f, g| Value::number(f + g), Realm::add_slow)
+                op_add!($a, $x, $y, $next, Realm::add_slow)
+            };
+            ($a:expr, $x:expr, $y:expr, $next:expr, $slow:expr) => {
+                arith!($a, $x, $y, $next, |i, j| i.checked_add(j).map_or_else(|| Value::number(i as f64 + j as f64), Value::int), |f, g| Value::number(f + g), $slow)
             };
         }
         macro_rules! op_sub {
@@ -1173,6 +1187,7 @@ impl Vm {
                 // names them: see `Vm::exec` for the rule of the split. Put a new rare op there.
                 if M::COLD {
                     match opv {
+                        Op::AddKey => op_add!(a!(), r!(b!()), r!(c!()), next, Realm::add_key_slow),
                         Op::NewDataLit => {
                             std::hint::cold_path();
                             gate!();
@@ -2045,6 +2060,37 @@ impl Vm {
                     }
                         }
                     }
+                    Op::ForEachStep => {
+                        std::hint::cold_path();
+                        let (recv, index) = (r!(b!()), r!(c!()));
+                        r!(a!() + 1) = index;
+                        r!(a!() + 2) = recv;
+                        let next = nextx!();
+                        if let Some(i) = index.as_int()
+                            && i >= 0
+                            && let Some(o) = Realm::obj(recv)
+                            && o.is_indexed()
+                            && !o.has_flag(F_ARGS | F_HOST | F_LAZYM | F_SLOWIDX)
+                            && let Some(v) = o.get_element(i as u32)
+                        {
+                            r!(a!()) = v;
+                            pc = next;
+                            continue;
+                        }
+                        std::hint::cold_path();
+                        gate!();
+                        match tri!(realm.foreach_get_g(recv, index)) {
+                            Some(Got::Val(v)) => {
+                                r!(a!()) = v;
+                                pc = next;
+                            }
+                            Some(Got::Get(g)) => call_get!(g, recv, a!(), next),
+                            None => {
+                                r!(a!()) = undef;
+                                jump!(true, next, $x as i32)
+                            }
+                        }
+                    }
                     Op::RequireObj => {
                         let v = r!(a!());
                         if v.is_undefined() || v.is_null() {
@@ -2535,6 +2581,7 @@ fn default_ctors() -> [Code; 2] {
     }
     let asm = a.finish().expect("the default constructor assembles");
     let mut derived = Code::new(3, 1);
+    derived.flags = CF_ARGS | CF_LINK;
     derived.words = asm.words;
     derived.roots = RootMaps::new(3);
     derived.roots.add(asm.pcs[0], [0]);
@@ -2548,11 +2595,9 @@ fn default_ctors() -> [Code; 2] {
 pub fn code_flags(c: &Code) -> u8 {
     let (mut pc, mut f) = (0, 0);
     while let Ok((ins, n)) = decode(&c.words, pc) {
-        match ins.op {
-            Op::CreateArgs | Op::CreateRest => f |= CF_ARGS,
-            Op::Lazy if ins.a != 0 => f |= CF_ARGS,
-            Op::CallSuper | Op::CallSuperSpread | Op::GetSuper | Op::GetSuperElem | Op::GetSuperElemRef | Op::SetSuper | Op::SetSuperElem => f |= CF_LINK,
-            _ => {}
+        f |= ins.op.emitted_flags();
+        if ins.op == Op::Lazy && ins.a != 0 {
+            f |= CF_ARGS;
         }
         pc += n;
     }
