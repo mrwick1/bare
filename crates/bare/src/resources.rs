@@ -22,9 +22,8 @@
 //!   compressed bytes as source.
 //! - The text is UTF-8 unless `charset` names another encoding that `bare_html::encoding` knows.
 //!
-//! Memory: the body is read into one buffer that becomes the `String` (no second copy for UTF-8). The client cache is
-//! not used, because `get_stream` does not put replies in it. An inline script is not copied: `inline_source` reads
-//! the DOM text.
+//! Memory: the body buffer becomes the `String` for UTF-8. The client caches eligible complete replies.
+//! `inline_source` reads inline scripts directly from the DOM text.
 //!
 //! Time: `Limits::max_time` is checked before each request and between reads. A blocking call is not interrupted:
 //! one DNS lookup, connect (10 s) or read (30 s) in `bare_net` can pass the limit by that much before we notice.
@@ -579,7 +578,7 @@ pub fn fetch(client: &mut http::Client, target: &Target, limits: &Limits, deadli
     }
     buf.truncate(filled);
     // A fresh copy answers the next document of the session (an immutable script of an app) without a request.
-    client.keep(&current, &streamed.response, &buf);
+    client.keep(&streamed, &buf);
     if buf.capacity() - filled > filled / 8 {
         // Chunked bodies grow by doubling. Give back the unused room: the cap is on the memory that we keep.
         buf.shrink_to_fit();
