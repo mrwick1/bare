@@ -299,6 +299,8 @@ pub struct Realm {
     pub object_proto: Obj,
     pub function_proto: Obj,
     pub array_proto: Obj,
+    /// The prototype epoch and the proof that the stock array chain has no named indices.
+    array_push_proof: (u64, bool),
     pub(crate) array_ctor: Value,
     pub error_proto: Obj,
     pub s_object: ShapeId,
@@ -482,6 +484,7 @@ impl Realm {
             object_proto,
             function_proto,
             array_proto,
+            array_push_proof: (0, false),
             array_ctor: Value::UNDEFINED,
             error_proto,
             s_object,
@@ -991,6 +994,29 @@ impl Realm {
     /// The prototype of an object as an object.
     pub(crate) fn proto_of(&self, o: Obj) -> Option<Obj> {
         o.proto(&self.shapes).and_then(|p| Realm::obj(Value::pointer(Kind::Object, p)))
+    }
+
+    pub(crate) fn clean_array_push_prototypes(&mut self) -> bool {
+        // Dense element writes and host flags can change without a shape transition.
+        if !self.array_proto.is_empty() || self.array_proto.has_flag(F_HOST | F_LAZYM) || self.object_proto.has_flag(F_HOST | F_LAZYM) {
+            return false;
+        }
+        let (epoch, clean) = self.array_push_proof;
+        if epoch == self.shapes.proto_epoch() { clean } else { self.refresh_array_push_proof() }
+    }
+
+    #[cold]
+    fn refresh_array_push_proof(&mut self) -> bool {
+        let a = self.array_proto;
+        let o = self.object_proto;
+        a.set_flag(F_PROTO);
+        o.set_flag(F_PROTO);
+        let clean = a.proto(&self.shapes) == Some(o.cell())
+            && o.proto(&self.shapes).is_none()
+            && !self.shapes.has_indexed_name(a.shape(&self.shapes))
+            && !self.shapes.has_indexed_name(o.shape(&self.shapes));
+        self.array_push_proof = (self.shapes.proto_epoch(), clean);
+        clean
     }
 
     /// What `o` itself holds for `key`.

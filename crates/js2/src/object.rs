@@ -905,6 +905,29 @@ impl Obj {
         (!v.is_hole()).then_some(v)
     }
 
+    /// Append to a dense array whose caller has checked the property rules. On a miss the elements and length stay unchanged.
+    pub(crate) fn append_dense(self, heap: &mut Heap, v: Value) -> Option<u32> {
+        let old = self.elems();
+        let (r, i) = if let Some(r) = old {
+            let i = r.len() as usize;
+            if r.sparse() || i >= MAX_DENSE || i > r.cap() {
+                return None;
+            }
+            let r = if i == r.cap() {
+                self.regrow(heap, old, (i + 1).max(i + i / 2).max(MIN_ELEMS))?
+            } else {
+                r
+            };
+            (r, i)
+        } else {
+            (self.regrow(heap, None, MIN_ELEMS)?, 0)
+        };
+        r.put(i, v);
+        let n = i as u32 + 1;
+        r.set_len(n);
+        Some(n)
+    }
+
     /// Set element `i` (not `u32::MAX`, which is no array index); the length becomes at least `i + 1`.
     pub fn set_element(self, heap: &mut Heap, i: u32, v: Value) -> Option<()> {
         assert!(i != u32::MAX, "u32::MAX is not an array index");
