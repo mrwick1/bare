@@ -71,6 +71,7 @@ fn window(ins: &Ins, recipes: &Recipes) -> Option<u32> {
         Op::NewObjLit => recipes.get(ins.c as usize).map_or(0, |k| k.len() as u32),
         Op::IterOpen | Op::ForInOpen | Op::ForInNext | Op::IterNext | Op::IterClose | Op::AIterOpen | Op::AIterNext | Op::AIterClose | Op::AIterCloseT => ITER_REGS,
         Op::YieldStarStep | Op::AYsCall => YS_REGS,
+        Op::ForEachStep => 3,
         _ => return None,
     })
 }
@@ -168,8 +169,8 @@ pub fn verify(code: &Code) -> Result<(), String> {
         let safepoint = i.op.is_safepoint();
         if safepoint {
             let map = code.roots.find(pc as u32).ok_or_else(|| format!("{pc:04} {}: a safepoint with no root map", i.op.name()))?;
-            if i.op == Op::AddKey && [i.b, i.c].iter().any(|&r| !map.slots().any(|s| s == r as usize)) {
-                return err("AddKey: an operand is missing from the root map");
+            if matches!(i.op, Op::AddKey | Op::ForEachStep) && [i.b, i.c].iter().any(|&r| !map.slots().any(|s| s == r as usize)) {
+                return err("an operand is missing from the root map");
             }
             let bits = &mut maps[k * words..(k + 1) * words];
             map.slots().for_each(|r| put(bits, r as u32));
@@ -199,6 +200,9 @@ pub fn verify(code: &Code) -> Result<(), String> {
                     }
                     if v as u64 + size as u64 > nregs as u64 {
                         return err("window out of range");
+                    }
+                    if i.op == Op::ForEachStep && [i.b, i.c].iter().any(|r| (v..v + size).contains(r)) {
+                        return err("the argument window overlaps a source register");
                     }
                     if letter == 'R' {
                         a.read_window = v..v + size;
