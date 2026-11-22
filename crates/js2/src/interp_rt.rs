@@ -1221,6 +1221,13 @@ impl Realm {
         }
     }
 
+    /// The generic forEach step. Test presence first even when the property value is undefined.
+    #[cold]
+    pub(crate) fn foreach_get_g(&mut self, recv: Value, index: Value) -> R<Option<Got>> {
+        let key = self.key_of(index)?;
+        if self.has_prop(recv, key)? { self.get_prop_g(recv, key).map(Some) } else { Ok(None) }
+    }
+
     /// `recv[key] = v`. A write to a primitive does nothing. A setter gives [`Put::Set`]. A write that the object refuses (not writable,
     /// not extensible) gives [`Put::Fail`]: sloppy code goes on, strict code throws. [`Realm::set_checked`] throws always.
     pub fn set_prop_g(&mut self, recv: Value, key: Key, v: Value) -> R<Put> {

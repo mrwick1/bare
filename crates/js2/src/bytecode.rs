@@ -368,6 +368,7 @@ ops! {
     GetSuperElemRef Abc "w r r" "As `GetSuperElem`, but replace the key in temporary register `c` with its converted property key before the read.",
     ForInNext AsBxX "w j R" "`a` = the next enumerable key of the for-in record in the 3 registers from `x`, or jump at the end.",
     AddKey Abc "w r r" "As `Add` for a computed member key. Short string and integer concatenations can return an atom.",
+    ForEachStep AbcX "W r r j" "Read index `c` of `b`. Write (value, index, receiver) from `a`. On absence the value is undefined and control jumps.",
 }
 
 /// Words of a slot of a string switch table: the hash, the atom and the target.

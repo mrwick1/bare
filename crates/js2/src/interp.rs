@@ -65,7 +65,7 @@ use crate::bytecode::{Asm, CF_ARGS, CF_GEN, CF_LINK, Code, ITER_REGS, Ins, Op, S
 use crate::codes::Codes;
 use crate::gc::Marker;
 use crate::interp_rt::{ErrKind, Feedback, Got, Key, Put, Realm};
-use crate::object::{F_DERIVED, Obj};
+use crate::object::{F_ARGS, F_DERIVED, F_HOST, F_LAZYM, F_SLOWIDX, Obj};
 use crate::roots::RootMaps;
 use crate::shapes::{A_C, A_E, A_W};
 use crate::value::Value;
@@ -2080,6 +2080,37 @@ impl Vm {
                             }
                             pc = next;
                     }
+                        }
+                    }
+                    Op::ForEachStep => {
+                        std::hint::cold_path();
+                        let (recv, index) = (r!(b!()), r!(c!()));
+                        r!(a!() + 1) = index;
+                        r!(a!() + 2) = recv;
+                        let next = nextx!();
+                        if let Some(i) = index.as_int()
+                            && i >= 0
+                            && let Some(o) = Realm::obj(recv)
+                            && o.is_indexed()
+                            && !o.has_flag(F_ARGS | F_HOST | F_LAZYM | F_SLOWIDX)
+                            && let Some(v) = o.get_element(i as u32)
+                        {
+                            r!(a!()) = v;
+                            pc = next;
+                            continue;
+                        }
+                        std::hint::cold_path();
+                        gate!();
+                        match tri!(realm.foreach_get_g(recv, index)) {
+                            Some(Got::Val(v)) => {
+                                r!(a!()) = v;
+                                pc = next;
+                            }
+                            Some(Got::Get(g)) => call_get!(g, recv, a!(), next),
+                            None => {
+                                r!(a!()) = undef;
+                                jump!(true, next, $x as i32)
+                            }
                         }
                     }
                     Op::RequireObj => {
