@@ -2,7 +2,7 @@
 
 Use the verifier's global site bounds for hot cache lookups. Match the feedback cache length to the current code on entry and reload. Lazy compilation also resets feedback for the replaced stub. Run cache misses through the cold interpreter at the original instruction PC. The cold path retains the global name lookup, accessors, strict writes and reentry.
 
-Baseline `744954298e5d0d294aab423ec780c39cac2a8855`. Implementation `c1aa04aef193c4297ce0920d755be42f551b058d`. Machine `archMachine`, Ryzen 9 5900HX, Linux 7.2.15-zen1-1-zen, Rust 1.96.0.
+Baseline `2be8e4a9cee9ef69dd60eebed0a215f8ef322c68`. Measured tree `be2120dd2b21da92c1082e3d4106026a5446c476`. Machine `archMachine`, Ryzen 9 5900HX, Linux 7.2.15-zen1-1-zen, Rust 1.96.0.
 
 Use the pinned [script-completion inputs](2026-11-21-engine-decision-benchmark.md). The scale-10 calls and loop checksums are 35741 and 63. The release builds use locked dependencies. The workspace already builds js2 with one codegen unit. The control sets `RUSTFLAGS="-C codegen-units=1"` for all crates on both builds.
 
@@ -10,45 +10,47 @@ Report the minimum and spread of three fresh `perf stat -e instructions:u` runs 
 
 | Script | glibc base [spread] | glibc patch [spread] | jemalloc base [spread] | jemalloc patch [spread] |
 |---|---:|---:|---:|---:|
-| `calls_1` | 69,620,132 [942] | 65,420,943 [728] | 72,992,593 [486] | 68,793,607 [709] |
-| `calls_10` | 688,820,052 [286] | 646,820,614 [750] | 692,222,507 [1,472] | 650,222,909 [3,402] |
-| `loop_1` | 88,178,252 [43] | 78,577,712 [946] | 91,553,626 [733] | 81,953,181 [840] |
-| `loop_10` | 874,778,253 [35] | 778,777,680 [630] | 878,183,675 [304] | 782,183,557 [993] |
-| `empty_1` | 713,256 [512] | 711,251 [181] | 4,056,763 [569] | 4,054,010 [412] |
-| `local_call` | 530,838,985 [886] | 518,836,749 [729] | 534,236,969 [1,070] | 522,236,261 [800] |
-| `local_loop` | 474,792,097 [862] | 446,789,622 [801] | 478,161,209 [880] | 450,158,942 [489] |
-| `fib_10` | 34,039,081 [307] | 34,130,119 [2,263] | 37,441,629 [1,555] | 37,531,879 [1,427] |
-| `closures_10` | 119,769,888 [931] | 116,222,707 [853] | 123,142,878 [30,650] | 119,596,267 [435] |
-| `throws_10` | 286,446,452 [1,339] | 271,782,434 [874] | 289,856,408 [628] | 275,192,893 [315] |
-| `objects_10` | 590,007,418 [711,600] | 571,721,296 [422,695] | 593,490,352 [324,850] | 575,287,696 [360,023] |
-| `webpack_10` | 43,171,680 [6,971] | 43,081,674 [6,343] | 46,351,006 [6,667] | 46,260,380 [7,104] |
+| `calls_1` | 69,105,816 [379] | 65,709,137 [194] | 72,477,795 [894] | 69,080,746 [469] |
+| `calls_10` | 682,906,315 [933] | 648,908,405 [861] | 686,307,641 [750] | 652,310,094 [1,356] |
+| `loop_1` | 86,847,593 [338] | 79,048,818 [1,305] | 90,221,448 [538] | 82,423,362 [1,303] |
+| `loop_10` | 860,846,546 [1,111] | 782,848,874 [580] | 864,250,960 [1,105] | 786,253,930 [1,003] |
+| `empty_1` | 710,821 [723] | 710,943 [605] | 4,054,231 [1,182] | 4,054,029 [672] |
+| `local_call` | 524,836,729 [507] | 520,837,179 [225] | 528,234,938 [748] | 524,235,224 [759] |
+| `local_loop` | 468,789,805 [456] | 450,789,524 [598] | 472,158,710 [1,429] | 454,158,505 [650] |
+| `fib_10` | 34,361,561 [543] | 34,316,098 [889] | 37,762,829 [1,659] | 37,718,333 [1,570] |
+| `closures_10` | 120,642,521 [1,209] | 116,897,711 [654] | 124,013,359 [1,559] | 120,268,658 [272] |
+| `throws_10` | 282,982,756 [1,470] | 273,058,163 [1,044] | 286,389,441 [726] | 276,464,596 [562] |
+| `objects_10` | 571,239,595 [96,770] | 558,808,615 [126,233] | 574,705,099 [355,815] | 562,315,633 [143,108] |
+| `webpack_10` | 43,800,661 [10,053] | 43,719,090 [4,185] | 46,967,291 [4,932] | 46,884,772 [8,615] |
 
 | Script | Executable RSS, KiB | Anonymous RSS, KiB | wait4 RSS, KiB | Peak heap, bytes | Heap with overhead, bytes |
 |---|---:|---:|---:|---:|---:|
-| `calls_10` | 1,856 → 1,980 | 916 → 912 | 5,300 → 5,424 | 41,240 → 41,240 | 42,760 → 42,760 |
-| `loop_10` | 1,856 → 1,980 | 916 → 912 | 5,300 → 5,424 | 39,956 → 39,956 | 41,312 → 41,296 |
+| `calls_10` | 1,860 → 1,924 | 916 → 912 | 5,304 → 5,432 | 42,275 → 42,275 | 43,760 → 43,760 |
+| `loop_10` | 1,924 → 1,924 | 916 → 912 | 5,432 → 5,432 | 41,494 → 41,494 | 42,848 → 42,832 |
 
 | `interp_load` row | Default glibc / jemalloc | One codegen unit glibc / jemalloc |
 |---|---:|---:|
-| `loopfn` | -4.500% / -4.474% | -4.500% / -4.474% |
-| `calls` | -1.400% / -1.392% | -1.400% / -1.392% |
-| `fib` | +0.505% / +0.461% | +0.503% / +0.461% |
-| `closures` | -0.426% / -0.409% | -0.426% / -0.410% |
-| `objects` | -3.753% / -3.616% | -3.753% / -3.617% |
+| `loopfn` | -2.440% / -2.426% | -2.440% / -2.426% |
+| `calls` | +0.532% / +0.528% | +0.532% / +0.528% |
+| `fib` | +0.127% / +0.117% | +0.124% / +0.117% |
+| `closures` | -0.661% / -0.636% | -0.660% / -0.636% |
+| `objects` | -1.905% / -1.835% | -1.905% / -1.834% |
 
 | Matrix row | Default glibc / jemalloc | One codegen unit glibc / jemalloc |
 |---|---:|---:|
-| `js2_gen_load next 100000` | -1.000% / -0.963% | -1.000% / -0.964% |
-| `js2_lex_load small 1 1` | -0.000% / +0.003% | +0.000% / +0.003% |
-| `js2_parse_load full stmts 1` | +0.031% / +0.038% | -0.032% / +0.016% |
-| `js2_promise_load then 100000` | -0.784% / -0.752% | -0.784% / -0.752% |
+| `js2_gen_load next 100000` | -0.295% / -0.285% | -0.296% / -0.285% |
+| `js2_lex_load small 1 1` | -0.000% / +0.004% | +0.001% / +0.004% |
+| `js2_parse_load full stmts 1` | +0.002% / +0.025% | +0.037% / +0.003% |
+| `js2_promise_load then 100000` | -0.457% / -0.438% | -0.458% / -0.438% |
 
-The binary gained 124 KiB of executable RSS on both target rows. Across all executable mappings, including shared libraries, RSS went from 3,520 to 3,644 KiB. The owner accepts 128 KiB for Fix 1. This leaves 4 KiB for later steps. Peak requested heap stayed flat on both rows. All nine cost rows meet the rule. The glibc fib row exceeds 0.5% in both builds. The jemalloc fib row stays below the threshold in both builds.
+Executable RSS grew by 64 KiB on calls and stayed flat on loop. Shared executable mappings stayed flat on both rows. Peak requested heap stayed at 42,275 bytes on calls and 41,494 bytes on loop.
 
-Typecheck passed for `bare-js2` and `bare`. The narrow run passed 40 interpreter, 2 runtime, and 17 verifier tests. These counts include the feedback rebuild, cache refill, and narrow and wide site validation tests.
+Typecheck passed for `bare-js2` and `bare`. The narrow run passed 40 interpreter, 2 runtime, and 17 verifier tests. These counts include feedback rebuild, cache refill, and narrow and wide site validation tests.
 
-Targeted test262 covered seven directories for assignments, global code, identifier resolution, and variable declarations. Both trees had 650 pass, 53 fail, and 16 skip. The passing filename comparison found zero lost passes. The baseline files stay as recorded on main.
+Targeted test262 covered seven directories for assignments, global code, identifier resolution, and variable declarations. Both trees had 650 pass, 53 fail, and 16 skip. Comparing the passing filenames found zero lost passes.
 
-The final merge from `9c7ebd53` adds a progress document. The measured source stays at the comparison above.
+## Cost debt
+
+`interp_load calls` grew by 0.532% on glibc and 0.528% on jemalloc. The one-codegen-unit control had the same deltas at the shown precision. Hypothesis: the hot dispatch layout changes the instruction count of this function-local call workload. The other eight cost rows pass.
 
 Untested locally include the full workspace suite, browser journeys, Windows, and Miri.
