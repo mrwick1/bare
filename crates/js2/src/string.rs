@@ -35,6 +35,25 @@ pub const MAX_LEN: usize = (1 << 29) - 24;
 /// A concatenation of fewer units is copied; a longer one is a rope.
 pub const ROPE_MIN: usize = 32;
 
+/// Write an integer as decimal at the end of the buffer.
+pub(crate) fn int_text(i: i32, out: &mut [u8; 11]) -> &[u8] {
+    let mut n = i.unsigned_abs();
+    let mut at = out.len();
+    loop {
+        at -= 1;
+        out[at] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    if i < 0 {
+        at -= 1;
+        out[at] = b'-';
+    }
+    &out[at..]
+}
+
 /// A rope that flattens to two bytes.
 const FLAG_WIDE: u32 = 1;
 /// The string is an atom of its realm: the one cell for its content.
@@ -422,25 +441,28 @@ impl Str {
 
     /// Join an integer and a string. A short Latin-1 result needs only one cell.
     pub(crate) fn concat_int(heap: &mut Heap, s: Str, i: i32, int_first: bool) -> R<Str> {
-        use std::io::Write;
         let mut digits = [0; 11];
-        let mut tail = digits.as_mut_slice();
-        write!(tail, "{i}").expect("an i32 fits in eleven bytes");
-        let len = 11 - tail.len();
-        let digits = &digits[..len];
-        if let Some(Chars::One(bytes)) = s.chars()
-            && bytes.len() + digits.len() < ROPE_MIN
-        {
-            let (left, right) = if int_first { (digits, bytes) } else { (bytes, digits) };
-            let mut buf = [0; ROPE_MIN];
-            let total = left.len() + right.len();
-            buf[..left.len()].copy_from_slice(left);
-            buf[left.len()..total].copy_from_slice(right);
-            return Str::new(heap, Chars::One(&buf[..total]));
+        let digits = int_text(i, &mut digits);
+        let mut out = [0; ROPE_MIN];
+        if let Some(bytes) = s.short_int_concat(digits, int_first, &mut out) {
+            return Str::new(heap, Chars::One(bytes));
         }
         let n = Str::new(heap, Chars::One(digits))?;
         let (left, right) = if int_first { (n, s) } else { (s, n) };
         Str::concat(heap, left, right)
+    }
+
+    /// Join flat Latin-1 text and decimal digits in the caller's stack buffer.
+    pub(crate) fn short_int_concat<'a>(self, digits: &[u8], int_first: bool, out: &'a mut [u8; ROPE_MIN]) -> Option<&'a [u8]> {
+        let Chars::One(bytes) = self.chars()? else { return None };
+        let total = bytes.len() + digits.len();
+        if total >= ROPE_MIN {
+            return None;
+        }
+        let (left, right) = if int_first { (digits, bytes) } else { (bytes, digits) };
+        out[..left.len()].copy_from_slice(left);
+        out[left.len()..total].copy_from_slice(right);
+        Some(&out[..total])
     }
 
     /// Copy the units of the flat string `leaf` to unit `at` of this new flat string.

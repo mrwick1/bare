@@ -539,6 +539,11 @@ impl Shapes {
         self.table(s.table).entries.iter().take(n).copied().filter(|e| !e.is_tomb())
     }
 
+    /// Whether the shape has a named descriptor for a canonical array index.
+    pub(crate) fn has_indexed_name(&self, id: ShapeId) -> bool {
+        self.entries(id).any(|e| crate::bi_object::atom_index(e.key()).is_some())
+    }
+
     /// False for a dictionary shape. Its table changes in place, so the shape ID cannot guard a cache entry.
     #[inline]
     pub fn cacheable(&self, id: ShapeId) -> bool {

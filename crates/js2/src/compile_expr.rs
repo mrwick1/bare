@@ -561,9 +561,25 @@ impl<'a> Fc<'a> {
             self.op(Op::GetElemI, dst, o, i as u32);
             return Ok(());
         }
-        let k = self.any(index)?;
+        let k = match self.key_add(index)? {
+            Some(k) => k,
+            None => self.any(index)?,
+        };
         self.op(Op::GetElem, dst, o, k);
         Ok(())
+    }
+
+    /// Evaluate an addition whose result is only used as a computed member key.
+    fn key_add(&mut self, e: ExprId) -> CR<Option<u32>> {
+        let ExprKind::Binary { op: BinaryOp::Add, left, right } = self.expr_kind(e) else { return Ok(None) };
+        let dst = self.alloc();
+        let m = self.mark();
+        let l = self.any_before(left, right)?;
+        let r = self.any(right)?;
+        self.op(Op::AddKey, dst, l, r);
+        self.free(m);
+        self.set_live(dst);
+        Ok(Some(dst))
     }
 
     fn template(&mut self, t: Id<Template>, dst: u32) -> CR {
@@ -1411,12 +1427,15 @@ impl<'a> Fc<'a> {
         };
         let k = match (private, index) {
             (Some(n), _) => Some(self.private_key(n)?),
-            (_, Some(ix)) if op == AssignOp::Assign => Some(self.any_before(ix, value)?),
-            (_, Some(ix)) => {
-                let k = self.alloc();
-                self.to(ix, k)?;
-                Some(k)
-            }
+            (_, Some(ix)) => Some(match self.key_add(ix)? {
+                Some(k) => k,
+                None if op == AssignOp::Assign => self.any_before(ix, value)?,
+                None => {
+                    let k = self.alloc();
+                    self.to(ix, k)?;
+                    k
+                }
+            }),
             _ => None,
         };
         self.line(span.start);

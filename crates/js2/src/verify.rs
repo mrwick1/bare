@@ -168,6 +168,9 @@ pub fn verify(code: &Code) -> Result<(), String> {
         let safepoint = i.op.is_safepoint();
         if safepoint {
             let map = code.roots.find(pc as u32).ok_or_else(|| format!("{pc:04} {}: a safepoint with no root map", i.op.name()))?;
+            if i.op == Op::AddKey && [i.b, i.c].iter().any(|&r| !map.slots().any(|s| s == r as usize)) {
+                return err("AddKey: an operand is missing from the root map");
+            }
             let bits = &mut maps[k * words..(k + 1) * words];
             map.slots().for_each(|r| put(bits, r as u32));
         }
