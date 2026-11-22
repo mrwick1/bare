@@ -141,6 +141,9 @@ pub struct Feedback {
 
 impl Feedback {
     pub fn init(&mut self, code: &Code) {
+        if self.ready {
+            *self = Self::default();
+        }
         self.caches = vec![Cache::default(); code.sites.len()].into();
         self.names = vec![None; code.atoms.len()].into();
         self.lits = vec![None; code.recipes.len()].into();

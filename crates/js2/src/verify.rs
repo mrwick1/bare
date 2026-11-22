@@ -410,3 +410,7 @@ fn flow(code: &Code, ins: &[(usize, Ins, usize)], at: &[usize]) -> Result<(), St
 #[cfg(test)]
 #[path = "verify_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "verify_global_site_tests.rs"]
+mod global_site_tests;
