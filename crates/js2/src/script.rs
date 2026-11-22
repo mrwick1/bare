@@ -512,3 +512,7 @@ mod foreach_step_tests;
 #[cfg(test)]
 #[path = "forin_shape_tests.rs"]
 mod forin_shape_tests;
+
+#[cfg(test)]
+#[path = "regexp_test_fast_tests.rs"]
+mod regexp_test_fast_tests;

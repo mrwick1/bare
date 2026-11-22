@@ -266,10 +266,12 @@ impl Steps<'_> {
 //
 // Words of an image, all `u64`:
 //   0: instructions | classes << 32          1: groups | registers << 32       2: tmp_base | mark_base << 32
-//   3: flags bits | anchored << 8 | has first set << 9 | has names << 10 | class ranges << 32
-//   then: the first-unit set (2 words, only when word 3 says so), the instructions, the class table, the class ranges.
+//   3: flags bits | anchored << 8 | has first set << 9 | has names << 10 | has last set << 11 | class ranges << 32
+//   then: the first-unit set (2 words if present), instructions, class table, class ranges, names, last-unit set (2 words if present).
 // An instruction is `op | a << 8 | b << 36` (`Inst::enc`). A class table entry is `first range | length << 32 | negated << 63`.
 // A class range is `lo << 32 | hi`. A name follows the ranges as index | length << 32 and packed UTF-16 units.
+
+const HAS_LAST_SET: u64 = 1 << 11;
 
 /// A compiled pattern, read from its image.
 struct Prog<'a> {
@@ -357,6 +359,7 @@ pub(crate) fn emit(pattern: ParsedPattern) -> Result<Vec<u64>, CompileError> {
     let mark_base = tmp_base + groups + 1;
     let nregs = mark_base + e.max_slot as usize;
     let first = first_set(&e.prog, &e.classes, flags);
+    let last = last_set(&node, flags);
     let anchored = matches!(e.prog[0], Inst::Start);
     // The class ranges, then the table.
     let mut ranges: Vec<u64> = Vec::new();
@@ -365,11 +368,12 @@ pub(crate) fn emit(pattern: ParsedPattern) -> Result<Vec<u64>, CompileError> {
         ctab.push(ranges.len() as u64 | (c.ranges.len() as u64) << 32 | (c.neg as u64) << 63);
         ranges.extend(c.ranges.iter().map(|&(lo, hi)| (lo as u64) << 32 | hi as u64));
     }
-    let mut w: Vec<u64> = Vec::with_capacity(4 + 2 + e.prog.len() + ctab.len() + ranges.len());
+    let mut w: Vec<u64> = Vec::with_capacity(4 + 2 * (usize::from(first.is_some()) + usize::from(last.is_some())) + e.prog.len() + ctab.len() + ranges.len());
     w.push(e.prog.len() as u64 | (ctab.len() as u64) << 32);
     w.push(groups as u64 | (nregs as u64) << 32);
     w.push(tmp_base as u64 | (mark_base as u64) << 32);
-    w.push(flags.bits() as u64 | (anchored as u64) << 8 | (first.is_some() as u64) << 9 | (!names.is_empty() as u64) << 10 | (ranges.len() as u64) << 32);
+    let has_last = if last.is_some() { HAS_LAST_SET } else { 0 };
+    w.push(flags.bits() as u64 | (anchored as u64) << 8 | (first.is_some() as u64) << 9 | (!names.is_empty() as u64) << 10 | has_last | (ranges.len() as u64) << 32);
     if let Some(f) = first {
         w.extend(f);
     }
@@ -382,6 +386,9 @@ pub(crate) fn emit(pattern: ParsedPattern) -> Result<Vec<u64>, CompileError> {
         w.extend(units.chunks(4).map(|chunk| {
             chunk.iter().enumerate().fold(0, |word, (i, &u)| word | (u as u64) << (16 * i))
         }));
+    }
+    if let Some(last) = last {
+        w.extend([last as u64, (last >> 64) as u64]);
     }
     Ok(w)
 }
@@ -407,7 +414,8 @@ pub(crate) fn image_extra_groups(w: &[u64]) -> bool {
 /// The names in capture order, with their group numbers.
 pub(crate) fn image_names(w: &[u64]) -> impl Iterator<Item = (Vec<u16>, usize)> + '_ {
     let end = 4 + 2 * ((w[3] >> 9 & 1) as usize) + w[0] as u32 as usize + (w[0] >> 32) as usize + (w[3] >> 32) as usize;
-    let mut words = &w[end..];
+    let names_end = w.len() - 2 * usize::from(w[3] & HAS_LAST_SET != 0);
+    let mut words = &w[end..names_end];
     std::iter::from_fn(move || {
         let (&head, rest) = words.split_first()?;
         let len = (head >> 32) as usize;
@@ -455,6 +463,27 @@ fn first_set(prog: &[Inst], classes: &[ClassSet], flags: Flags) -> Option<[u64; 
     Some(w)
 }
 
+/// A non-multiline `$` can only match at the end of the input. Record the possible ASCII literals
+/// immediately before it, if every alternative consumes one. Keep the full matcher for any other suffix.
+fn last_set(node: &Node, flags: Flags) -> Option<u128> {
+    if flags.multiline || flags.ignore_case || flags.unicode {
+        return None;
+    }
+    let Node::Cat(nodes) = node else { return None };
+    let [.., tail, Node::End] = nodes.as_slice() else { return None };
+
+    fn literals(node: &Node) -> Option<u128> {
+        match node {
+            Node::Char(c) if *c < 128 => Some(1 << c),
+            Node::Group(_, body) => literals(body),
+            Node::Cat(nodes) => literals(nodes.last()?),
+            Node::Alt(nodes) => nodes.iter().try_fold(0, |set, node| Some(set | literals(node)?)),
+            _ => None,
+        }
+    }
+    literals(tail)
+}
+
 // ---------------------------------------------------------------------------------------------
 // The matcher
 // ---------------------------------------------------------------------------------------------
@@ -464,6 +493,17 @@ fn first_set(prog: &[Inst], classes: &[ClassSet], flags: Flags) -> Option<[u64; 
 /// least. `Ok(false)` means no match, including `from > input.len()`. `fuel` is the budget of the caller (see the header).
 #[inline]
 pub fn exec<U: Unit>(img: &[u64], input: &[U], from: usize, sc: &mut Scratch, fuel: &mut u64, out: &mut [u32]) -> Result<bool, ExecError> {
+    if img[3] & HAS_LAST_SET != 0 && from <= input.len() && input.len() <= MAX_INPUT_UNITS {
+        let viable = input.last().is_some_and(|unit| {
+            let c = unit.u() as usize;
+            c < 128 && img[img.len() - 2 + (c >> 6)] >> (c & 63) & 1 != 0
+        });
+        if !viable {
+            // One unit check costs less than a block. No candidate reached the matcher.
+            sc.steps = 1;
+            return Ok(false);
+        }
+    }
     let p = Prog::new(img);
     let mut st = Steps { left: BLOCK, done: 0, fuel };
     let r = if p.flags.unicode && p.flags.ignore_case { p.exec_in::<U, true>(input, from, sc, &mut st, out) } else { p.exec_in::<U, false>(input, from, sc, &mut st, out) };
