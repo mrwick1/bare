@@ -1282,7 +1282,7 @@ const KEEP_DIGITS: usize = 800;
 /// exponent. `text` has no separators. `scratch` holds the reduced text of a long token and keeps
 /// its capacity for the next call. Gives `None` only when `text` is not a decimal literal.
 #[inline]
-fn decimal_value(text: &str, scratch: &mut String) -> Option<f64> {
+pub(crate) fn decimal_value(text: &str, scratch: &mut String) -> Option<f64> {
     if text.len() <= DIRECT_UNITS {
         return text.parse().ok();
     }

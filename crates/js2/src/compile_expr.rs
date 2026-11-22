@@ -418,6 +418,7 @@ impl<'a> Fc<'a> {
                 self.op(Op::LoadAtom, dst, a, 0);
             }
             ExprKind::Template(t) => self.template(t, dst)?,
+            ExprKind::Data => self.emit_data_span(x.span, dst)?,
             ExprKind::Array(_) | ExprKind::Object(_)
                 if x.span.end - x.span.start >= crate::data_lit::MIN_BYTES && self.try_data_literal(e, dst)? => {}
             ExprKind::Array(list) => self.array(list, dst)?,
