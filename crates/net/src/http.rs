@@ -30,7 +30,8 @@ use std::io::{self, ErrorKind, Read, Write};
 // These give us the `read` and `write` functions on a connection.
 // Rust needs this import before you can call them.
 use std::net::{SocketAddr, TcpStream};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::path::PathBuf;
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 // JS: like a shared reference. `Arc` lets two owners hold one value, and a copy of the `Arc` costs nothing.
 // `SocketAddr` is an IP address plus a port. `TcpStream` is an open connection.
 use std::time::{Duration, Instant};
@@ -56,6 +57,9 @@ pub(crate) const MAX_REPLY: usize = 128 * 1024 * 1024;
 const MAX_TIME: Duration = Duration::from_secs(120);
 // A reply must be complete after 120 seconds. The read limit of `tcp.rs` is for each read, so a server that sends
 // one byte every 10 seconds would keep us for ever.
+
+#[path = "disk_cache.rs"]
+mod disk_cache;
 
 const MAX_CACHE: usize = 64 * 1024 * 1024;
 // The cache holds 64 MB at most. When it is full, we empty it.
@@ -123,6 +127,20 @@ type Sessions = Arc<Mutex<HashMap<Server, Arc<h2::Conn>>>>;
 /// A cached reply is found by scheme, host, port and path.
 type CacheKey = (Scheme, String, u16, String);
 
+fn cache_key(url: &Url) -> CacheKey {
+    (url.scheme, url.host.clone(), url.port, url.path.clone())
+}
+
+fn disk_key((scheme, host, port, path): &CacheKey) -> String {
+    format!("GET {scheme}://[{host}]:{port}{path}\n{}", accept_encoding(*scheme, host).unwrap_or(""))
+}
+
+enum Lookup {
+    Fresh(Arc<Response>),
+    Stale(Arc<Response>),
+    Miss,
+}
+
 /// A stored reply: when we stored it, and for how long it stays fresh.
 struct Cached {
     response: Arc<Response>,
@@ -168,8 +186,8 @@ impl Cache {
 
     /// The server answered 304 to a question about the stored reply: it is right. Its headers replace the stored ones of the same name
     /// (RFC 9111 section 4.3.4), the reply is fresh again, and the stored reply comes back with its body. `None`: it is not stored (any more).
-    fn revalidated(&mut self, key: &CacheKey, not_modified: &Response) -> Option<Arc<Response>> {
-        let cached = self.map.get_mut(key)?;
+    fn revalidated(&mut self, key: &CacheKey, candidate: &Weak<Response>, not_modified: &Response) -> Option<Arc<Response>> {
+        let cached = self.map.get_mut(key).filter(|c| std::ptr::eq(Arc::as_ptr(&c.response), candidate.as_ptr()))?;
         let news: Vec<_> = not_modified.headers.iter().filter(|(n, _)| !matches!(n.as_str(), "content-length" | "content-encoding" | "transfer-encoding" | "connection" | "keep-alive")).collect();
         // The stored `Age` is old. Only the one of the 304 counts.
         let stored = Arc::make_mut(&mut cached.response);
@@ -341,7 +359,8 @@ pub struct Client {
     // Up to `MAX_IDLE_PER_SERVER` connections per server: workers (see `parallel.rs`) open more at once, as Chrome does (6).
     cache: Arc<Mutex<Cache>>,
     // Replies we may use again. The key is the scheme, the host, the port and the path.
-    // It lives in memory only. `MAX_CACHE` is the size limit. A fork shares it.
+    // `MAX_CACHE` is the memory limit. A fork shares both cache tiers.
+    disk: Option<Arc<disk_cache::Disk>>,
     roots: Arc<OnceLock<Result<(TrustStore, bool), String>>>,
     // The trusted root certificates for https, and whether they come from the OS. `open` loads the OS bundle on the first https connection and keeps it.
     // The roots never come from a peer. A fork of the client shares them: the bundle is read once.
@@ -410,6 +429,16 @@ impl Client {
         Client { tape: replay::Tape::from_env(), ..Client::default() }
     }
 
+    /// Enable the shared disk tier in this directory. With no directory the cache stays in memory.
+    pub fn with_disk_cache(mut self, dir: Option<PathBuf>) -> Client {
+        self.disk = dir.map(|dir| Arc::new(disk_cache::Disk::new(dir)));
+        self
+    }
+
+    fn disk(&self) -> Option<&disk_cache::Disk> {
+        self.disk.as_deref().filter(|_| self.tape.is_none() && !self.roots.get().is_some_and(|r| matches!(r, Ok((_, false)))))
+    }
+
     /// Record or replay with this tape, for this client and its forks (a test; the environment does it for `new`).
     pub fn use_tape(&mut self, tape: Arc<replay::Tape>) {
         self.tape = Some(tape);
@@ -423,9 +452,9 @@ impl Client {
         client
     }
 
-    /// A second client that shares the connections, the root certificates and the worker threads of this one. The reply cache is not shared.
+    /// A second client that shares the connections, certificates, workers and reply cache.
     pub fn fork(&self) -> Client {
-        Client { idle: self.idle.clone(), sessions: self.sessions.clone(), slots: self.slots.clone(), cache: self.cache.clone(), roots: self.roots.clone(), workers: self.workers.clone(), jar: self.jar.clone(), site: self.site.clone(), identity: self.identity.clone(), tape: self.tape.clone(), big: false }
+        Client { idle: self.idle.clone(), sessions: self.sessions.clone(), slots: self.slots.clone(), cache: self.cache.clone(), disk: self.disk.clone(), roots: self.roots.clone(), workers: self.workers.clone(), jar: self.jar.clone(), site: self.site.clone(), identity: self.identity.clone(), tape: self.tape.clone(), big: false }
     }
 
     /// Let a reply declare more than `MAX_REPLY` bytes. The body still stops at `MAX_REPLY` and at `MAX_TIME` until the caller calls
@@ -442,8 +471,7 @@ impl Client {
 
     /// Whom a reply answers: every jar (0) when it says `public` or `immutable`, else the jar of this client.
     fn owner_of(&self, response: &Response) -> u64 {
-        let control = response.header("cache-control").unwrap_or("").to_ascii_lowercase();
-        if control.split(',').map(str::trim).any(|d| d == "public" || d == "immutable") { 0 } else { self.jar.lock().unwrap_or_else(|e| e.into_inner()).id() }
+        if cache_directives(response).any(shared_directive) { 0 } else { self.jar.lock().unwrap_or_else(|e| e.into_inner()).id() }
     }
 
     /// A fresh stored reply may answer this client with no request: it is shared, or it was stored for the jar of this client. Any stored
@@ -498,7 +526,7 @@ impl Client {
     pub fn send_once(&mut self, req: &Request, max_body: usize) -> Result<Arc<Response>, Error> {
         check_request(req)?;
         let plan = Plan { cookies: req.cookies, method: req.method, headers: Cow::Borrowed(req.headers), body: req.body, ident: self.identity.clone() };
-        let (mut response, mut body) = self.start(req.url, &plan, "")?;
+        let (mut response, mut body, _) = self.start(req.url, &plan, "")?;
         if body.size_hint() > max_body {
             body.note(&io::Error::new(ErrorKind::InvalidData, "the reply is too big"));
             return Err("the reply is too big".into());
@@ -527,8 +555,8 @@ impl Client {
         let _observe = bare_observe::process::span("network", "request_once");
         check_request(req)?;
         let plan = Plan { cookies: req.cookies, method: req.method, headers: Cow::Borrowed(req.headers), body: req.body, ident: self.identity.clone() };
-        let (response, body) = self.start(req.url, &plan, "")?;
-        Ok(Streamed { response: Arc::new(response), body })
+        let (response, body, _) = self.start(req.url, &plan, "")?;
+        Ok(Streamed { response: Arc::new(response), body, cache: None })
     }
 
     /// Like `send_stream_once`, but a fresh copy in the cache answers a cacheable request without a request to the server. The
@@ -536,31 +564,26 @@ impl Client {
     pub fn send_stream_cached(&mut self, req: &Request) -> Result<Streamed, Error> {
         check_request(req)?;
         let plan = Plan { cookies: req.cookies, method: req.method, headers: Cow::Borrowed(req.headers), body: req.body, ident: self.identity.clone() };
-        let (response, body) = self.hop_stream(req.url, &plan)?;
-        Ok(Streamed { response, body: body.expect("a streamed hop has a body") })
+        let (response, body, cache) = self.hop_stream(req.url, &plan)?;
+        let cache = cache.filter(|_| response.status == 200 && (response.header("cache-control").is_some() || has_validator(&response)));
+        Ok(Streamed { response, body, cache: cache.map(|anonymous| (cache_key(req.url), anonymous)) })
     }
 
     /// Store a streamed reply that `send_stream_cached` gave, with its whole body as the caller read it. Only a 200 is kept, as `get` does:
     /// no `no-store`, no `Vary` but `Accept-Encoding`, and fresh for a while or with an `ETag` or `Last-Modified` to ask about when it
     /// is stale. The body is copied only when it is kept. A reply that came from the cache is not stored again.
-    pub fn keep(&mut self, url: &Url, response: &Arc<Response>, body: &[u8]) {
-        // With no `Cache-Control` and no validator, a reply is never fresh and cannot be asked about: most replies stop here.
-        if response.status != 200 || (response.header("cache-control").is_none() && !has_validator(response)) {
-            return;
-        }
+    pub fn keep(&mut self, streamed: &Streamed, body: &[u8]) {
+        let Some((key, anonymous)) = &streamed.cache else { return };
+        let response = &streamed.response;
         let fresh_for = match freshness(response) {
             Some(f) if vary_ok(response) && (!f.is_zero() || has_validator(response)) => f,
             _ => return,
         };
-        let key = (url.scheme, url.host.clone(), url.port, url.path.clone());
-        let mut cache = self.cache.lock().unwrap();
-        if cache.map.get(&key).is_some_and(|c| Arc::ptr_eq(&c.response, response)) {
-            return;
+        if body.len() + 512 <= MAX_CACHE {
+            let mut stored = Response::clone(response);
+            stored.body = body.to_vec();
+            self.store(key.clone(), Arc::new(stored), fresh_for, *anonymous);
         }
-        let mut stored = Response::clone(response);
-        stored.body = body.to_vec();
-        let owner = self.owner_of(response);
-        cache.put(key, Arc::new(stored), fresh_for, owner);
     }
 
     /// Like `send`, with a body that reads from the connection. See `get_stream`.
@@ -570,7 +593,7 @@ impl Client {
         let _context = bare_observe::process::enter(ids);
         let _observe = bare_observe::process::span("network", "request_head");
         let (response, body) = self.follow(req, true)?;
-        Ok(Streamed { response, body: body.expect("a streamed hop has a body") })
+        Ok(Streamed { response, body: body.expect("a streamed hop has a body"), cache: None })
     }
 
     /// Send the request, and follow redirects like a browser does (Fetch standard, "HTTP-redirect fetch"):
@@ -587,7 +610,12 @@ impl Client {
         // Where a redirect sends us. We own this `Url`, so it must live outside the loop.
         for _ in 0..=MAX_REDIRECTS {
             // `0..=20` is 21 turns: the first request plus 20 redirects.
-            let (response, body) = if stream { self.hop_stream(current, &plan)? } else { (self.load(current, &plan)?, None) };
+            let (response, body) = if stream {
+                let (response, body, _) = self.hop_stream(current, &plan)?;
+                (response, Some(body))
+            } else {
+                (self.load(current, &plan)?, None)
+            };
             let Some(location) = redirect_target(&response) else {
                 return Ok((response, body));
                 // Not a redirect: this is the page.
@@ -632,55 +660,110 @@ impl Client {
     fn load(&mut self, url: &Url, plan: &Plan) -> Result<Arc<Response>, Error> {
         // A plain copy of the same host, port and path must not answer an https URL: the scheme is in the cache key.
         if !plan.cacheable() {
-            return Ok(Arc::new(self.fetch(url, plan, "")?));
+            return Ok(Arc::new(self.fetch(url, plan, "")?.0));
         }
-        let key = (url.scheme, url.host.clone(), url.port, url.path.clone());
-        let mut conditions = String::new();
-        // Extra request headers. They stay empty unless we have an old copy to check.
-
-        if let Some(cached) = self.cache.lock().unwrap().map.get(&key) {
-            if cached.stored.elapsed() < cached.fresh_for && self.visible(cached) {
-                return Ok(cached.response.clone());
-                // Still fresh: use the copy. No request at all.
+        let (key, found) = self.lookup(url, plan);
+        let key = key.unwrap_or_else(|| cache_key(url));
+        let (ask, candidate) = match found {
+            Lookup::Fresh(response) => return Ok(response),
+            Lookup::Stale(response) => (questions(&response), Arc::downgrade(&response)),
+            Lookup::Miss => (String::new(), Weak::new()),
+        };
+        let (mut response, mut anonymous) = self.fetch(url, plan, &ask)?;
+        if response.status == 304 && !ask.is_empty() {
+            if let Some(stored) = self.refresh(&key, &candidate, &response, anonymous) {
+                return Ok(stored);
             }
-            // Stale. The copy may still be right, so we ask the server: "has it changed?"
-            conditions = questions(&cached.response);
+            (response, anonymous) = self.fetch(url, plan, "")?;
         }
-
-        let response = Arc::new(self.fetch(url, plan, &conditions)?);
-
-        if response.status == 304
-            && let Some(stored) = self.cache.lock().unwrap().revalidated(&key, &response)
-        {
-            // "Not Modified": our copy is still right. The reply has no body. The 304 may give a new `max-age`.
-            return Ok(stored);
-        }
-
+        let response = Arc::new(response);
         match freshness(&response) {
-            Some(fresh_for)
-                if response.status == 200
-                    && vary_ok(&response)
-                    && (!fresh_for.is_zero() || has_validator(&response)) =>
-            {
-                // We keep a reply only if all of these are true:
-                // - It is a 200 and the server did not say `no-store`.
-                // - It has no `Vary` header, or only `Vary: Accept-Encoding`. `Vary` says the reply depends on a request
-                //   header. We do not handle that, except for the one header that this client always sends the same.
-                // - It is useful: it is fresh for a while, or we can ask the server about it later.
-                let owner = self.owner_of(&response);
-                self.cache.lock().unwrap().put(key, response.clone(), fresh_for, owner);
+            Some(fresh_for) if response.status == 200 && vary_ok(&response) && (!fresh_for.is_zero() || has_validator(&response)) => {
+                self.store(key, response.clone(), fresh_for, anonymous);
             }
-            _ => {
-                self.cache.lock().unwrap().forget(&key);
-                // Do not keep this reply. Throw away any older copy too: it is out of date.
-            }
+            _ => self.forget(&key),
         }
         Ok(response)
     }
 
+    fn lookup(&self, url: &Url, plan: &Plan) -> (Option<CacheKey>, Lookup) {
+        let disk = self.disk();
+        let cache = self.cache.lock().unwrap();
+        if disk.is_none() && cache.map.is_empty() {
+            return (None, Lookup::Miss);
+        }
+        let key = cache_key(url);
+        if let Some(cached) = cache.map.get(&key) {
+            let found = self.memory_reply(cached);
+            return (Some(key), found);
+        }
+        drop(cache);
+        let Some((response, remaining)) = disk
+            .filter(|_| self.cookie_line(url, plan).is_none())
+            .and_then(|disk| disk.get(&disk_key(&key)))
+        else { return (Some(key), Lookup::Miss) };
+        let mut cache = self.cache.lock().unwrap();
+        let found = if let Some(cached) = cache.map.get(&key) {
+            self.memory_reply(cached)
+        } else {
+            cache.put(key.clone(), response.clone(), remaining, 0);
+            if remaining.is_zero() { Lookup::Stale(response) } else { Lookup::Fresh(response) }
+        };
+        (Some(key), found)
+    }
+
+    fn memory_reply(&self, cached: &Cached) -> Lookup {
+        if cached.stored.elapsed() < cached.fresh_for && self.visible(cached) {
+            Lookup::Fresh(cached.response.clone())
+        } else {
+            Lookup::Stale(cached.response.clone())
+        }
+    }
+
+    fn store(&self, key: CacheKey, response: Arc<Response>, fresh_for: Duration, anonymous: bool) {
+        let owner = self.owner_of(&response);
+        let disk = self.disk().filter(|_| anonymous).map(|disk| (disk, disk_key(&key)));
+        let mut cache = self.cache.lock().unwrap();
+        cache.put(key, response.clone(), fresh_for, owner);
+        if let Some((disk, key)) = disk {
+            if cache_size(&response) <= MAX_CACHE && owner == 0 && disk_allowed(&response) {
+                disk.put(key, response, fresh_for);
+            } else {
+                disk.forget(&key);
+            }
+        }
+    }
+
+    fn refresh(&self, key: &CacheKey, candidate: &Weak<Response>, response: &Response, anonymous: bool) -> Option<Arc<Response>> {
+        let mut cache = self.cache.lock().unwrap();
+        let stored = cache.revalidated(key, candidate, response)?;
+        let cached = cache.map.get_mut(key).unwrap();
+        cached.owner = self.owner_of(&stored);
+        let keep = freshness(&stored).is_some() && vary_ok(&stored);
+        if let Some(disk) = self.disk() {
+            if anonymous && keep && cached.owner == 0 && disk_allowed(&stored) {
+                disk.put(disk_key(key), stored.clone(), cached.fresh_for);
+            } else {
+                disk.forget(&disk_key(key));
+            }
+        }
+        if !keep {
+            cache.forget(key);
+        }
+        Some(stored)
+    }
+
+    fn forget(&self, key: &CacheKey) {
+        let mut cache = self.cache.lock().unwrap();
+        cache.forget(key);
+        if let Some(disk) = self.disk() {
+            disk.forget(&disk_key(key));
+        }
+    }
+
     /// Send a request and read the whole reply. Reuse an idle connection when there is one.
-    fn fetch(&mut self, url: &Url, plan: &Plan, conditions: &str) -> Result<Response, Error> {
-        let (mut response, mut body) = self.start(url, plan, conditions)?;
+    fn fetch(&mut self, url: &Url, plan: &Plan, conditions: &str) -> Result<(Response, bool), Error> {
+        let (mut response, mut body, anonymous) = self.start(url, plan, conditions)?;
         let mut bytes = Vec::with_capacity(body.size_hint());
         // A reply with a `Content-Length` gets its room at once: a list that grows by doubling holds up to twice the body for a moment.
         match body.read_to_end(&mut bytes) {
@@ -696,7 +779,7 @@ impl Client {
             // Give the spare room back. For a big list, the system does this without a copy.
         }
         response.body = bytes;
-        Ok(response)
+        Ok((response, anonymous))
     }
 
     /// Send a request and read the status and the headers. The body is not read: the `Body` reads it from the
@@ -744,7 +827,7 @@ impl Client {
             r.h2 = true;
         }
         if !plan.method.safe() && (200..400).contains(&head.status) {
-            self.cache.lock().unwrap().forget(&(url.scheme, url.host.clone(), url.port, url.path.clone()));
+            self.forget(&cache_key(url));
         }
         let response = Response { status: head.status, headers: head.headers, body: Vec::new(), close: false };
         if !self.big && body.declared.is_some_and(|n| n > MAX_REPLY) {
@@ -762,11 +845,13 @@ impl Client {
         Ok((response, live))
     }
 
-    fn start(&mut self, url: &Url, plan: &Plan, conditions: &str) -> Result<(Response, Body), Error> {
+    fn start(&mut self, url: &Url, plan: &Plan, conditions: &str) -> Result<(Response, Body, bool), Error> {
         let begun = (bare_observe::process::tracing() && bare_observe::process::accepts("network")).then(Instant::now);
         let mut retried = false;
         let with_cookies;
-        let conditions = match self.cookie_line(url, plan) {
+        let cookie = self.cookie_line(url, plan);
+        let anonymous = cookie.is_none();
+        let conditions = match cookie {
             Some(line) => {
                 with_cookies = format!("{conditions}Cookie: {line}\r\n");
                 &with_cookies
@@ -805,7 +890,7 @@ impl Client {
             }
         };
         self.store_cookies(url, plan, &response);
-        Ok((response, body))
+        Ok((response, body, anonymous))
     }
 
     /// The label of a request on the tape (see `replay.rs`).
@@ -819,7 +904,7 @@ impl Client {
             return Err(error.into());
         }
         if !plan.method.safe() && (200..400).contains(&entry.status) {
-            self.cache.lock().unwrap().forget(&(url.scheme, url.host.clone(), url.port, url.path.clone()));
+            self.forget(&cache_key(url));
         }
         // The reply shows in the timing records (`BARE_NET_TRACE`, the `network` list of a driver report) with no time: nothing was waited for.
         if let Some(mut rec) = trace::begin(|| format!("{}://{}:{}{}", url.scheme, url.host, url.port, url.path)) {
@@ -964,7 +1049,7 @@ impl Client {
         }
         if !get && (200..400).contains(&head.response.status) {
             // RFC 9111 section 4.4: a successful unsafe request invalidates the cached target.
-            self.cache.lock().unwrap().forget(&(url.scheme, url.host.clone(), url.port, url.path.clone()));
+            self.forget(&cache_key(url));
         }
         if let Framing::Length(n) = head.framing
             && n > MAX_REPLY
@@ -987,39 +1072,30 @@ impl Client {
 
     /// One hop of `send_stream`: a fresh copy from the cache, or a reply from the server whose body is still on the connection. A stale
     /// copy is asked about (`If-None-Match`, `If-Modified-Since`): on a 304 the stored body answers, with the headers of the 304.
-    fn hop_stream(&mut self, url: &Url, plan: &Plan) -> Result<(Arc<Response>, Option<Body>), Error> {
-        let memory = |response: Arc<Response>| (response.clone(), Some(Body(Source::Memory(response, 0))));
-        // An empty cache needs no key: most requests of a page that sends no `max-age` pay one lock and no allocation.
-        let mut stale = None;
-        if plan.cacheable() {
-            let cache = self.cache.lock().unwrap();
-            if !cache.map.is_empty() {
-                let key = (url.scheme, url.host.clone(), url.port, url.path.clone());
-                match cache.map.get(&key) {
-                    Some(c) if c.stored.elapsed() < c.fresh_for && self.visible(c) => return Ok(memory(c.response.clone())),
-                    Some(c) => stale = Some((key, questions(&c.response))),
-                    None => {}
-                }
-            }
-        }
-        let Some((key, ask)) = stale else {
-            let (response, body) = self.start(url, plan, "")?;
-            return Ok((Arc::new(response), Some(body)));
+    fn hop_stream(&mut self, url: &Url, plan: &Plan) -> Result<(Arc<Response>, Body, Option<bool>), Error> {
+        let memory = |response: Arc<Response>| (response.clone(), Body(Source::Memory(response, 0)), None);
+        let (key, found) = if plan.cacheable() { self.lookup(url, plan) } else { (None, Lookup::Miss) };
+        let stale = match found {
+            Lookup::Fresh(response) => return Ok(memory(response)),
+            Lookup::Stale(response) => Some((questions(&response), Arc::downgrade(&response))),
+            Lookup::Miss => None,
         };
-        let (response, mut body) = self.start(url, plan, &ask)?;
-        if response.status == 304 {
-            // No body follows a 304: read the end of it, so that the connection can go back to the pool.
-            let _ = io::copy(&mut body, &mut io::sink());
-            if let Some(stored) = self.cache.lock().unwrap().revalidated(&key, &response) {
-                return Ok(memory(stored));
+        let ask = stale.as_ref().map_or("", |(q, _)| q);
+        let (mut response, mut body, mut anonymous) = self.start(url, plan, ask)?;
+        if let Some((ask, candidate)) = stale {
+            let key = key.as_ref().unwrap();
+            if response.status == 304 && !ask.is_empty() {
+                // Read the end of the 304 so the connection can go back to the pool.
+                let _ = io::copy(&mut body, &mut io::sink());
+                if let Some(stored) = self.refresh(key, &candidate, &response, anonymous) {
+                    return Ok(memory(stored));
+                }
+                // Another fork changed the copy meanwhile. Ask again without a validator.
+                (response, body, anonymous) = self.start(url, plan, "")?;
             }
-            // Another fork dropped the copy meanwhile: ask again, with no question.
-            let (response, body) = self.start(url, plan, "")?;
-            return Ok((Arc::new(response), Some(body)));
+            self.forget(key);
         }
-        // A new reply. The old copy is out of date; `keep` stores the new one if it can.
-        self.cache.lock().unwrap().forget(&key);
-        Ok((Arc::new(response), Some(body)))
+        Ok((Arc::new(response), body, plan.cacheable().then_some(anonymous)))
     }
 
     /// Fetch a URL, and give the body as a `Body` that reads from the connection while the caller reads. The caller can
@@ -1041,6 +1117,8 @@ enum Dialed {
 pub struct Streamed {
     pub response: Arc<Response>,
     pub body: Body,
+    // The key of the original GET, and whether it carried no credentials. Cache hits carry no key.
+    cache: Option<(CacheKey, bool)>,
 }
 
 /// Open a new connection to the server of this URL. The only place that makes a `Stream`.
@@ -1285,6 +1363,10 @@ fn hints<'a>(url: &Url, plan: &'a Plan) -> Vec<(&'static str, &'a str)> {
     ident.hints.iter().filter(|(name, _)| !plan.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case(name))).map(|(name, value)| (*name, value.as_str())).collect()
 }
 
+fn accept_encoding(scheme: Scheme, host: &str) -> Option<&'static str> {
+    (!loopback(host)).then_some(if scheme == Scheme::Https { "gzip, deflate, br" } else { "gzip, deflate" })
+}
+
 /// The headers of an HTTP/2 request: the four pseudo headers first, then what `request_head` writes for HTTP/1.1, with no `Host`.
 /// `authority` is `host_header(url)`, and `length` is the length of the body in digits.
 fn h2_headers<'a>(url: &'a Url, plan: &'a Plan, conditions: &'a str, authority: &'a str, length: &'a str) -> Vec<(&'a str, &'a str)> {
@@ -1295,8 +1377,10 @@ fn h2_headers<'a>(url: &'a Url, plan: &'a Plan, conditions: &'a str, authority: 
     for (name, value) in hints(url, plan) {
         headers.push((name, value));
     }
-    if !loopback(&url.host) && !plan.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("accept-encoding")) {
-        headers.push(("accept-encoding", "gzip, deflate, br"));
+    if let Some(coding) = accept_encoding(url.scheme, &url.host)
+        && !plan.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("accept-encoding"))
+    {
+        headers.push(("accept-encoding", coding));
     }
     if !loopback(&url.host) && !plan.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("accept-language")) {
         headers.push(("accept-language", ACCEPT_LANGUAGE));
@@ -1324,9 +1408,10 @@ fn request_head(url: &Url, plan: &Plan, conditions: &str, extra: usize) -> Vec<u
     for (name, value) in hints(url, plan) {
         let _ = write!(out, "{name}: {value}\r\n");
     }
-    if !loopback(&url.host) && !plan.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("accept-encoding")) {
-        // `br` only over https, as Chrome does: some plain proxies break it.
-        out.extend_from_slice(if url.scheme == Scheme::Https { b"Accept-Encoding: gzip, deflate, br\r\n" } else { b"Accept-Encoding: gzip, deflate\r\n" });
+    if let Some(coding) = accept_encoding(url.scheme, &url.host)
+        && !plan.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("accept-encoding"))
+    {
+        let _ = write!(out, "Accept-Encoding: {coding}\r\n");
     }
     if !loopback(&url.host) && !plan.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("accept-language")) {
         out.extend_from_slice(b"Accept-Language: ");
@@ -1455,6 +1540,45 @@ fn vary_ok(response: &Response) -> bool {
     response.headers.iter().filter(|(n, _)| n == "vary").all(|(_, v)| v.split(',').all(|t| t.trim().eq_ignore_ascii_case("accept-encoding")))
 }
 
+/// Commas inside quoted directive values do not start a new directive.
+fn cache_directives(response: &Response) -> impl Iterator<Item = &str> {
+    response.headers.iter().filter(|(n, _)| n == "cache-control").flat_map(|(_, value)| {
+        let (mut quoted, mut escape) = (false, false);
+        value.split(move |c| {
+            if escape {
+                escape = false;
+            } else if c == '"' {
+                quoted = !quoted;
+            } else if quoted && c == '\\' {
+                escape = true;
+            } else if !quoted && c == ',' {
+                return true;
+            }
+            false
+        }).map(str::trim)
+    })
+}
+
+fn shared_directive(directive: &str) -> bool {
+    directive.eq_ignore_ascii_case("public") || directive.eq_ignore_ascii_case("immutable")
+}
+
+/// The disk is shared across sessions. Check all field lines, including directives with a field list.
+fn disk_allowed(response: &Response) -> bool {
+    if response.status != 200 || response.header("set-cookie").is_some() || response.encoded() || !vary_ok(response) {
+        return false;
+    }
+    let mut shared = false;
+    for directive in cache_directives(response) {
+        let name = directive.split('=').next().unwrap().trim_end();
+        if name.eq_ignore_ascii_case("no-store") || name.eq_ignore_ascii_case("private") {
+            return false;
+        }
+        shared |= shared_directive(directive);
+    }
+    shared
+}
+
 /// Where a redirect sends us, or `None` when the reply is not a redirect.
 fn redirect_target(response: &Response) -> Option<&str> {
     match response.status {
@@ -1468,22 +1592,21 @@ fn redirect_target(response: &Response) -> Option<&str> {
 
 /// For how long a reply stays fresh. `None` means "never keep it" (`no-store`).
 fn freshness(response: &Response) -> Option<Duration> {
-    let control = response.header("cache-control").unwrap_or("").to_ascii_lowercase();
-    // Like "max-age=60, public". The words are not case sensitive.
     let mut fresh_for = Duration::ZERO;
     let mut no_cache = false;
-    for directive in control.split(',').map(str::trim) {
-        if directive == "no-store" {
+    for directive in cache_directives(response) {
+        let (name, value) = directive.split_once('=').unwrap_or((directive, ""));
+        let name = name.trim_end();
+        if name.eq_ignore_ascii_case("no-store") {
             return None;
-            // The page is private, like a bank page. Never keep it.
         }
-        if directive.starts_with("no-cache") {
+        if name.eq_ignore_ascii_case("no-cache") {
             no_cache = true;
-            // "no-cache" does not mean "do not keep it". It means "ask the server before every use".
         }
-        if let Some(seconds) = directive.strip_prefix("max-age=").and_then(|n| parse_number(n.trim_matches('"'), 10)) {
+        if name.eq_ignore_ascii_case("max-age")
+            && let Some(seconds) = parse_number(value.trim().trim_matches('"'), 10)
+        {
             fresh_for = Duration::from_secs(seconds as u64);
-            // "Use this for N seconds without asking."
         }
     }
     if no_cache {
@@ -2652,7 +2775,7 @@ mod tests {
         let mut s = worker.send_stream_cached(&Request::get(&u)).unwrap();
         let mut body = Vec::new();
         s.body.read_to_end(&mut body).unwrap();
-        worker.keep(&u, &s.response, &body);
+        worker.keep(&s, &body);
         let mut again = client.fork().send_stream_cached(&Request::get(&u)).unwrap();
         let mut body = Vec::new();
         again.body.read_to_end(&mut body).unwrap();
@@ -2665,7 +2788,7 @@ mod tests {
         let mut s = c.send_stream_cached(&Request::get(&u)).unwrap();
         let mut body = Vec::new();
         s.body.read_to_end(&mut body).unwrap();
-        c.keep(&u, &s.response, &body);
+        c.keep(&s, &body);
         let mut s = c.send_stream_cached(&Request::get(&u)).unwrap();
         let mut body = Vec::new();
         s.body.read_to_end(&mut body).unwrap();
@@ -2678,7 +2801,7 @@ mod tests {
         let mut s = client.send_stream_cached(&Request::get(u)).unwrap();
         let mut body = Vec::new();
         s.body.read_to_end(&mut body).unwrap();
-        client.keep(u, &s.response, &body);
+        client.keep(&s, &body);
         (body, s.response)
     }
 

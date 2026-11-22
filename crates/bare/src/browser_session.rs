@@ -458,7 +458,7 @@ fn fetch_hop(client: &mut Client, req: &Request, max: usize, g: Option<&Grab>, o
     if g.is_some() {
         big.allow_big();
     }
-    let Streamed { response, mut body } = big.send_stream_once(req).map_err(|e| cause(&*e))?;
+    let Streamed { response, mut body, .. } = big.send_stream_once(req).map_err(|e| cause(&*e))?;
     let mut r = Arc::try_unwrap(response).map_err(|_| "network error".to_string())?;
     let (ct, cd) = (r.header("content-type"), r.header("content-disposition"));
     if let Some(g) = g.filter(|g| (200..300).contains(&r.status) && (g.force || downloads::is_download(ct, cd))) {
