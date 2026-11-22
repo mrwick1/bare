@@ -357,7 +357,7 @@ fn show_interactive(url: &str, viewport: (f32, f32)) -> i32 {
     let stack = if cfg!(debug_assertions) { 64 << 20 } else { 8 << 20 };
     let worker = std::thread::Builder::new().stack_size(stack).spawn(move || {
         let size = (viewport.0 as u32, viewport.1 as u32);
-        let mut page = match bare::page::Page::open(&url, size) {
+        let mut page = match bare::page::Page::open_in(&url, size, &session_client()) {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("error: {e}");
@@ -392,6 +392,10 @@ fn cpu_us() -> u64 {
     f.iter().sum::<u64>() * 10_000
 }
 
+fn session_client() -> http::Client {
+    http::Client::new().with_disk_cache(bare_os::cache_dir().map(|d| d.join("http")))
+}
+
 /// `--run`: a session over the real URL (document load, scripts, timers, `fetch`, navigations: `browser_session.rs`).
 /// The VM needs a big stack: 8 MiB is the floor in release, a debug build uses more stack per frame.
 /// Exit code: 0 settled or a budget ended it, 1 fatal or a failed load.
@@ -401,6 +405,7 @@ fn run_page(page: String, viewport: (f32, f32)) -> i32 {
     let stack = if cfg!(debug_assertions) { 64 << 20 } else { 8 << 20 };
     let worker = std::thread::Builder::new().stack_size(stack).spawn(move || {
         let mut cfg = SessionConfig::new(&page);
+        cfg.client = Box::new(session_client);
         cfg.viewport = Some(viewport);
         let mut s = Session::new(cfg);
         let wall = std::time::Instant::now();

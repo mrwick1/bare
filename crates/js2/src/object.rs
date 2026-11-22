@@ -912,6 +912,29 @@ impl Obj {
         (!v.is_hole()).then_some(v)
     }
 
+    /// Append to a dense array whose caller has checked the property rules. On a miss the elements and length stay unchanged.
+    pub(crate) fn append_dense(self, heap: &mut Heap, v: Value) -> Option<u32> {
+        let old = self.elems();
+        let (r, i) = if let Some(r) = old {
+            let i = r.len() as usize;
+            if r.sparse() || i >= MAX_DENSE || i > r.cap() {
+                return None;
+            }
+            let r = if i == r.cap() {
+                self.regrow(heap, old, (i + 1).max(i + i / 2).max(MIN_ELEMS))?
+            } else {
+                r
+            };
+            (r, i)
+        } else {
+            (self.regrow(heap, None, MIN_ELEMS)?, 0)
+        };
+        r.put(i, v);
+        let n = i as u32 + 1;
+        r.set_len(n);
+        Some(n)
+    }
+
     /// Set element `i` (not `u32::MAX`, which is no array index); the length becomes at least `i + 1`.
     pub fn set_element(self, heap: &mut Heap, i: u32, v: Value) -> Option<()> {
         assert!(i != u32::MAX, "u32::MAX is not an array index");
@@ -948,6 +971,10 @@ impl Obj {
         let r = unsafe { make_record(heap, Layout::Elements, 0, ncap, Value::HOLE, src, n)? };
         r.set_len(old.map_or(0, Rec::len));
         self.set_elems(r);
+        if let Some(old) = old {
+            // SAFETY: The elements record is private to this array and has been replaced.
+            unsafe { heap.release_large(old.0) };
+        }
         Some(r)
     }
 
@@ -1129,3 +1156,7 @@ fn to_dense(heap: &mut Heap, r: Rec, cap: usize) -> Option<Rec> {
 #[cfg(test)]
 #[path = "object_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "object_large_elements_tests.rs"]
+mod large_elements_tests;

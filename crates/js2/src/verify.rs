@@ -47,6 +47,7 @@ fn window(ins: &Ins, recipes: &Recipes) -> Option<u32> {
         Op::NewObjLit => recipes.get(ins.c as usize).map_or(0, |k| k.len() as u32),
         Op::IterOpen | Op::ForInOpen | Op::ForInNext | Op::IterNext | Op::IterClose | Op::AIterOpen | Op::AIterNext | Op::AIterClose | Op::AIterCloseT => ITER_REGS,
         Op::YieldStarStep | Op::AYsCall => YS_REGS,
+        Op::ForEachStep => 3,
         _ => return None,
     })
 }
@@ -149,6 +150,9 @@ pub fn verify(code: &Code) -> Result<(), String> {
             if base as u64 + size as u64 > nregs as u64 {
                 return err("window out of range");
             }
+            if i.op == Op::ForEachStep && [i.b, i.c].iter().any(|r| (base..base + size).contains(r)) {
+                return err("the argument window overlaps a source register");
+            }
         }
     }
     if let Some(s) = site_uses.iter().position(|u| *u != 1) {
@@ -168,8 +172,13 @@ pub fn verify(code: &Code) -> Result<(), String> {
         return Err("the root maps have another register count".into());
     }
     for &(pc, i, _) in &ins {
-        if i.op.is_safepoint() && code.roots.find(pc as u32).is_none() {
-            return Err(format!("{pc:04} {}: a safepoint with no root map", i.op.name()));
+        if i.op.is_safepoint() {
+            let Some(map) = code.roots.find(pc as u32) else {
+                return Err(format!("{pc:04} {}: a safepoint with no root map", i.op.name()));
+            };
+            if matches!(i.op, Op::AddKey | Op::ForEachStep) && [i.b, i.c].iter().any(|&r| !map.slots().any(|s| s == r as usize)) {
+                return Err(format!("{pc:04} {}: an operand is missing from the root map", i.op.name()));
+            }
         }
     }
     for &p in code.roots.pcs() {

@@ -299,6 +299,8 @@ pub struct Realm {
     pub object_proto: Obj,
     pub function_proto: Obj,
     pub array_proto: Obj,
+    /// The prototype epoch and the proof that the stock array chain has no named indices.
+    array_push_proof: (u64, bool),
     pub(crate) array_ctor: Value,
     pub error_proto: Obj,
     pub s_object: ShapeId,
@@ -482,6 +484,7 @@ impl Realm {
             object_proto,
             function_proto,
             array_proto,
+            array_push_proof: (0, false),
             array_ctor: Value::UNDEFINED,
             error_proto,
             s_object,
@@ -874,7 +877,32 @@ impl Realm {
         self.intern(&i.to_string())
     }
 
+    /// Look up an index name without creating an atom for a missing property.
+    pub(crate) fn find_idx_atom(&self, i: u32) -> Option<Str> {
+        use std::io::Write;
+        let mut bytes = [0; 10];
+        let mut tail = bytes.as_mut_slice();
+        write!(tail, "{i}").expect("a u32 fits in ten digits");
+        let len = 10 - tail.len();
+        self.atoms.find(&Chars::One(&bytes[..len]))
+    }
+
     // ---- operators ----
+
+    /// Addition for a computed member key. Intern short Latin-1 results before making a value string.
+    pub(crate) fn add_key_slow(&mut self, x: Value, y: Value) -> R<Value> {
+        let atom = if let (Some(i), Some(s)) = (y.as_int(), Self::str_of(x)) {
+            self.atoms.intern_int_concat(&mut self.heap, s, i, false)
+        } else if let (Some(i), Some(s)) = (x.as_int(), Self::str_of(y)) {
+            self.atoms.intern_int_concat(&mut self.heap, s, i, true)
+        } else {
+            None
+        };
+        match atom {
+            Some(s) => Ok(s.expect("memory").value()),
+            None => self.add_slow(x, y),
+        }
+    }
 
     /// `a + b` when the fast path (two numbers) did not apply.
     pub fn add_slow(&mut self, mut x: Value, mut y: Value) -> R<Value> {
@@ -884,11 +912,18 @@ impl Realm {
         if Realm::obj(y).is_some() {
             y = self.to_primitive(y, Hint::Default)?;
         }
-        if let (Some(a), Some(b)) = (Realm::str_of(x), Realm::str_of(y)) {
+        let (a, b) = (Realm::str_of(x), Realm::str_of(y));
+        if let (Some(a), Some(b)) = (a, b) {
             return Ok(Str::concat(&mut self.heap, a, b).expect("memory").value());
         }
-        if Realm::str_of(x).is_some() || Realm::str_of(y).is_some() {
-            let (a, b) = (self.to_str(x)?, self.to_str(y)?);
+        if let Some(s) = a.or(b) {
+            let int_first = a.is_none();
+            let v = if int_first { x } else { y };
+            if let Some(i) = v.as_int() {
+                return Ok(Str::concat_int(&mut self.heap, s, i, int_first).expect("memory").value());
+            }
+            let t = self.to_str(v)?;
+            let (a, b) = if int_first { (t, s) } else { (s, t) };
             return Ok(Str::concat(&mut self.heap, a, b).expect("memory").value());
         }
         if x.is_bigint() || y.is_bigint() {
@@ -974,6 +1009,29 @@ impl Realm {
     /// The prototype of an object as an object.
     pub(crate) fn proto_of(&self, o: Obj) -> Option<Obj> {
         o.proto(&self.shapes).and_then(|p| Realm::obj(Value::pointer(Kind::Object, p)))
+    }
+
+    pub(crate) fn clean_array_push_prototypes(&mut self) -> bool {
+        // Dense element writes and host flags can change without a shape transition.
+        if !self.array_proto.is_empty() || self.array_proto.has_flag(F_HOST | F_LAZYM) || self.object_proto.has_flag(F_HOST | F_LAZYM) {
+            return false;
+        }
+        let (epoch, clean) = self.array_push_proof;
+        if epoch == self.shapes.proto_epoch() { clean } else { self.refresh_array_push_proof() }
+    }
+
+    #[cold]
+    fn refresh_array_push_proof(&mut self) -> bool {
+        let a = self.array_proto;
+        let o = self.object_proto;
+        a.set_flag(F_PROTO);
+        o.set_flag(F_PROTO);
+        let clean = a.proto(&self.shapes) == Some(o.cell())
+            && o.proto(&self.shapes).is_none()
+            && !self.shapes.has_indexed_name(a.shape(&self.shapes))
+            && !self.shapes.has_indexed_name(o.shape(&self.shapes));
+        self.array_push_proof = (self.shapes.proto_epoch(), clean);
+        clean
     }
 
     /// What `o` itself holds for `key`.
@@ -1169,6 +1227,13 @@ impl Realm {
             Got::Val(v) => Ok(v),
             Got::Get(g) => self.call_function(g, recv, &[]),
         }
+    }
+
+    /// The generic forEach step. Test presence first even when the property value is undefined.
+    #[cold]
+    pub(crate) fn foreach_get_g(&mut self, recv: Value, index: Value) -> R<Option<Got>> {
+        let key = self.key_of(index)?;
+        if self.has_prop(recv, key)? { self.get_prop_g(recv, key).map(Some) } else { Ok(None) }
     }
 
     /// `recv[key] = v`. A write to a primitive does nothing. A setter gives [`Put::Set`]. A write that the object refuses (not writable,
@@ -1914,3 +1979,7 @@ impl Realm {
         self.define(o, Key::Name(k), v).expect("define");
     }
 }
+
+#[cfg(test)]
+#[path = "interp_rt_index_atom_tests.rs"]
+mod index_atom_tests;

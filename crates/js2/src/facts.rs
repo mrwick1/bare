@@ -92,7 +92,7 @@ pub struct FnFacts {
 }
 
 /// The facts of one source text.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Facts {
     /// The functions, in post-order (see the module comment).
     pub fns: Vec<FnFacts>,

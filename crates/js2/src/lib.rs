@@ -28,6 +28,7 @@ pub mod gc;
 pub mod object;
 #[allow(unsafe_code)]
 pub mod codes;
+pub mod code_cache;
 #[allow(unsafe_code)]
 pub mod weaktab;
 pub mod roots;
