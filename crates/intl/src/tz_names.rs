@@ -6,6 +6,8 @@
 //! abbreviation in the locale. Known deviations: the long and the generic names of a zone that is not in the table are
 //! offsets (ICU writes `Nepal Time`); `shortGeneric` has names for `en` and `en-US` only.
 
+use crate::packed::pack_table;
+
 /// The kinds, in the order of the `timeZoneName` option values.
 pub const SHORT: u8 = 0;
 pub const LONG: u8 = 1;
@@ -80,16 +82,25 @@ pub fn name(zone: &str, off: i32, kind: u8, loc: u8) -> String {
         };
     }
     let bit = 1u8 << loc;
-    if let Some(t) = TABLE.iter().find(|t| t.names.contains(&zone)) {
-        let dst = off != t.std;
+    let zones = pack_table!(TABLE, 8, (i32, u8, bool), |i| {
+        let t = &TABLE[i];
+        assert!(!t.names.is_empty() && t.names.len() <= 2);
+        let alias = if t.names.len() == 2 { t.names[1] } else { "" };
+        let [std_name, dst_name, long_generic] = t.long;
+        let [std_abbr, dst_abbr] = t.short;
+        ([t.names[0], alias, std_name, dst_name, long_generic, std_abbr, dst_abbr, t.generic], (t.std, t.abbr, t.saving))
+    });
+    if let Some(i) = (0..zones.len()).find(|&i| zones.text(i, 0) == zone || (!zone.is_empty() && zones.text(i, 1) == zone)) {
+        let (std, abbr, saving) = zones.meta(i);
+        let dst = off != std;
         match kind {
-            SHORT if t.abbr & bit != 0 => return t.short[dst as usize].into(),
+            SHORT if abbr & bit != 0 => return zones.text(i, 5 + dst as usize).into(),
             LONG => {
-                let n = t.long[dst as usize];
-                return if dst && t.saving && loc == 2 { n.replace("Daylight Time", "Daylight Saving Time") } else { n.into() };
+                let n = zones.text(i, 2 + dst as usize);
+                return if dst && saving && loc == 2 { n.replace("Daylight Time", "Daylight Saving Time") } else { n.into() };
             }
-            SHORT_GENERIC if loc < 2 => return t.generic.into(),
-            LONG_GENERIC => return t.long[2].into(),
+            SHORT_GENERIC if loc < 2 => return zones.text(i, 7).into(),
+            LONG_GENERIC => return zones.text(i, 4).into(),
             _ => {}
         }
     }

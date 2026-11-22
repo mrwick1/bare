@@ -10,5 +10,6 @@ pub mod number_options;
 mod intl_data;
 mod intl_num_data;
 
+mod packed;
 mod number;
 pub use number::number_to_string;

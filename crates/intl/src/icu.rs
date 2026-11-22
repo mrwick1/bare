@@ -12,14 +12,15 @@
 
 use crate::intl_data::LOCALES;
 use crate::intl_num_data::{DIGITS, NARROW, SYMBOLS, SYMBOLS_LOCALE};
+use crate::packed::pack_table;
 use fixed_decimal::{Decimal, Sign, SignDisplay, SignedRoundingMode, UnsignedRoundingMode};
 use icu_collator::options::{AlternateHandling, CaseLevel, CollatorOptions, Strength};
 use icu_collator::preferences::{CollationCaseFirst, CollationNumericOrdering};
 use icu_collator::{Collator, CollatorPreferences};
 use icu_decimal::options::GroupingStrategy;
 use icu_decimal::DecimalFormatter;
-use icu_locale_core::Locale;
-use icu_plurals::{PluralCategory, PluralRuleType, PluralRules, PluralRulesOptions};
+use icu_locale_core::{Locale, locale};
+use icu_plurals::{PluralCategory, PluralRules};
 use std::rc::Rc;
 use writeable::{Part, PartsWrite, Writeable};
 
@@ -98,9 +99,17 @@ fn mode_of(i: u8) -> SignedRoundingMode {
     }
 }
 
+// The generated currency tables use three ASCII bytes per key.
+const fn currency_key(code: &str) -> [u8; 3] {
+    let [a, b, c] = code.as_bytes() else { panic!("invalid currency key") };
+    [*a, *b, *c]
+}
+
 /// The digits after the point of currency `code` (2 unless the table says otherwise).
 pub fn currency_digits(code: &str) -> u8 {
-    DIGITS.binary_search_by_key(&code, |r| r.0).map_or(2, |i| DIGITS[i].1)
+    let Ok(key) = <[u8; 3]>::try_from(code.as_bytes()) else { return 2 };
+    let table = pack_table!(DIGITS, 0, ([u8; 3], u8), |i| ([], (currency_key(DIGITS[i].0), DIGITS[i].1)));
+    table.search_by(|(a, _)| a.cmp(&key)).map_or(2, |i| table.meta(i).1)
 }
 
 /// The text of a currency and whether a no-break space separates it from the digits.
@@ -108,18 +117,32 @@ fn currency_text(loc: u8, code: &str, display: u8) -> (&str, bool) {
     if display == CODE {
         return (code, true);
     }
-    if display == NARROW_SYMBOL
-        && let Ok(i) = NARROW.binary_search_by_key(&code, |r| r.0)
-    {
-        return (NARROW[i].1, NARROW[i].2);
+    let Ok(key) = <[u8; 3]>::try_from(code.as_bytes()) else { return (code, true) };
+    let narrow = pack_table!(NARROW, 1, ([u8; 3], bool), |i| {
+        let (code, text, space) = NARROW[i];
+        ([text], (currency_key(code), space))
+    });
+    if display == NARROW_SYMBOL && let Some(i) = narrow.search_by(|(a, _)| a.cmp(&key)) {
+        return (narrow.text(i, 0), narrow.meta(i).1);
     }
     // the narrow symbol is the same in every locale here (the generator checks it)
+    let local = pack_table!(SYMBOLS_LOCALE, 1, (u8, [u8; 3], bool), |i| {
+        let (locale, code, text, space) = SYMBOLS_LOCALE[i];
+        ([text], (locale, currency_key(code), space))
+    });
     if display != NARROW_SYMBOL
-        && let Some(r) = SYMBOLS_LOCALE.iter().find(|r| r.0 == loc && r.1 == code) {
-        return (r.2, r.3);
+        && let Some(i) = (0..local.len()).find(|&i| {
+            let (locale, currency, _) = local.meta(i);
+            locale == loc && currency == key
+        }) {
+        return (local.text(i, 0), local.meta(i).2);
     }
-    if let Ok(i) = SYMBOLS.binary_search_by_key(&code, |r| r.0) {
-        return (SYMBOLS[i].1, SYMBOLS[i].2);
+    let symbols = pack_table!(SYMBOLS, 1, ([u8; 3], bool), |i| {
+        let (code, text, space) = SYMBOLS[i];
+        ([text], (currency_key(code), space))
+    });
+    if let Some(i) = symbols.search_by(|(a, _)| a.cmp(&key)) {
+        return (symbols.text(i, 0), symbols.meta(i).1);
     }
     (code, true)
 }
@@ -171,6 +194,11 @@ fn magnitude(d: &Decimal) -> i16 {
 }
 
 include!("intl_unit_data.rs");
+
+pub(crate) fn unit_index(unit: &str) -> Option<u8> {
+    let names = pack_table!(UNIT_NAMES, 1, (), |i| ([UNIT_NAMES[i]], ()));
+    names.search(unit).map(|i| i as u8)
+}
 
 impl NumFmt {
     /// Round `d` (signed) as ECMA-402 FormatNumericToString does, and pad it.
@@ -301,8 +329,12 @@ pub struct Cache {
     colls: Vec<(CollKey, Rc<Collator>)>,
 }
 
-fn icu_locale(loc: u8) -> Locale {
-    LOCALES[loc as usize].parse().unwrap_or(Locale::UNKNOWN)
+fn icu_locale(loc: u8) -> &'static Locale {
+    // This order matches intl_data::LOCALES.
+    static ICU_LOCALES: [Locale; LOCALES.len()] = [
+        locale!("en-US"), locale!("en"), locale!("en-CA"), locale!("en-IN"), locale!("en-GB"),
+    ];
+    &ICU_LOCALES[loc as usize]
 }
 
 fn strategy(g: Grouping) -> GroupingStrategy {
@@ -318,7 +350,7 @@ impl Cache {
     fn decimal(&mut self, loc: u8, g: Grouping) -> &DecimalFormatter {
         self.dec[loc as usize][g as usize].get_or_insert_with(|| {
             // the baked data has the 5 locales of `LOCALES`; a failure here is a build error
-            DecimalFormatter::try_new_unstable(&Baked, (&icu_locale(loc)).into(), strategy(g).into()).expect("baked decimal data")
+            DecimalFormatter::try_new_unstable(&Baked, icu_locale(loc).into(), strategy(g).into()).expect("baked decimal data")
         })
     }
 
@@ -407,18 +439,27 @@ impl Cache {
             out.push("percentSign", "%");
         }
         if f.style == Style::Currency && f.display == 3 {
-            let name = CURRENCY_NAMES.iter().find(|r| r.0 == code).map_or(code, |r| if singular { r.1 } else { r.2 });
+            let names = pack_table!(CURRENCY_NAMES, 3, (), |i| {
+                let (code, one, other) = CURRENCY_NAMES[i];
+                ([code, one, other], ())
+            });
+            let name = names.search(code).map_or(code, |i| names.text(i, if singular { 1 } else { 2 }));
             out.push("literal", " ");
             out.push("currency", name);
         }
         if f.unit != 255 {
-            let pair = UNIT_SUFFIXES[f.unit as usize][f.unit_display as usize];
-            let suffix = if singular { pair.0 } else { pair.1 };
+            let suffixes = pack_table!(UNIT_SUFFIXES, 6, (), |i| {
+                let [(a, b), (c, d), (e, f)] = UNIT_SUFFIXES[i];
+                ([a, b, c, d, e, f], ())
+            });
+            let display = f.unit_display as usize;
+            let suffix = suffixes.text(f.unit as usize, 2 * display + usize::from(!singular));
             let unit = if let Some(t) = suffix.strip_prefix(' ') { out.push("literal", " "); t } else { suffix };
             let mut label = unit.to_string();
             if f.per_unit != 255 {
                 label.push_str(if f.unit_display == 2 { " per " } else { "/" });
-                label.push_str(UNIT_DENOMINATORS[f.per_unit as usize][f.unit_display as usize]);
+                let denominators = pack_table!(UNIT_DENOMINATORS, 3, (), |i| (UNIT_DENOMINATORS[i], ()));
+                label.push_str(denominators.text(f.per_unit as usize, display));
             }
             out.push("unit", &label);
         }
@@ -427,21 +468,33 @@ impl Cache {
         }
     }
 
-    pub fn plural_rules(&mut self, ordinal: bool) -> &PluralRules {
-        self.plurals[ordinal as usize].get_or_insert_with(|| {
-            let mut o = PluralRulesOptions::default();
-            o.rule_type = Some(if ordinal { PluralRuleType::Ordinal } else { PluralRuleType::Cardinal });
-            PluralRules::try_new_unstable(&Baked, icu_locale(0).into(), o).expect("baked plural data")
+    fn plural_rules_for<const ORDINAL: bool>(&mut self) -> &PluralRules {
+        self.plurals[ORDINAL as usize].get_or_insert_with(|| {
+            let prefs = icu_locale(0).into();
+            if ORDINAL {
+                PluralRules::try_new_ordinal_unstable(&Baked, prefs)
+            } else {
+                PluralRules::try_new_cardinal_unstable(&Baked, prefs)
+            }.expect("baked plural data")
         })
+    }
+
+    pub fn plural_rules(&mut self, ordinal: bool) -> &PluralRules {
+        if ordinal { self.plural_rules_for::<true>() } else { self.plural_rules_for::<false>() }
     }
 
     /// The plural category of `n` (formatted by `f`: the digits decide `1` against `1.0`), as its ECMA-402 name.
     pub fn plural(&mut self, f: &NumFmt, ordinal: bool, n: Num) -> &'static str {
+        if ordinal { self.plural_for::<true>(f, n) } else { self.plural_for::<false>(f, n) }
+    }
+
+    // RelativeTimeFormat uses cardinal rules only. Keep ordinal data out of
+    // binaries that do not expose a PluralRules constructor.
+    pub(crate) fn plural_for<const ORDINAL: bool>(&mut self, f: &NumFmt, n: Num) -> &'static str {
         let Num::Fin(mut d) = n else { return "other" };
         d.set_sign(Sign::None);
         f.round(&mut d);
-        let c = self.plural_rules(ordinal).category_for(&d);
-        category_name(c)
+        category_name(self.plural_rules_for::<ORDINAL>().category_for(&d))
     }
 
     /// The categories of the rules, in the order of V8 (alphabetic, `other` last).
@@ -540,3 +593,7 @@ pub fn segment_breaks(granularity: u8, u: &[u16]) -> (Vec<u32>, Vec<bool>) {
     wl.resize(b.len() - 1, false);
     (b, wl)
 }
+
+#[cfg(test)]
+#[path = "icu_packed_locales_tests.rs"]
+mod packed_locales_tests;

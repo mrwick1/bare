@@ -8,18 +8,18 @@
 
 /// The most likely script and region of a language, in the order of CLDR (a script or region alone, as in `und-Cyrl`, takes
 /// the first row that has it).
-const LOC_LIKELY: [(&str, &str, &str); 40] = [
-    ("en", "Latn", "US"), ("es", "Latn", "ES"), ("fr", "Latn", "FR"), ("de", "Latn", "DE"), ("it", "Latn", "IT"), ("pt", "Latn", "BR"),
-    ("nl", "Latn", "NL"), ("ru", "Cyrl", "RU"), ("uk", "Cyrl", "UA"), ("sr", "Cyrl", "RS"), ("pl", "Latn", "PL"), ("tr", "Latn", "TR"),
-    ("ar", "Arab", "EG"), ("fa", "Arab", "IR"), ("ur", "Arab", "PK"), ("he", "Hebr", "IL"), ("hi", "Deva", "IN"), ("mr", "Deva", "IN"),
-    ("bn", "Beng", "BD"), ("ta", "Taml", "IN"), ("te", "Telu", "IN"), ("ja", "Jpan", "JP"), ("ko", "Kore", "KR"), ("zh", "Hans", "CN"),
-    ("th", "Thai", "TH"), ("vi", "Latn", "VN"), ("id", "Latn", "ID"), ("ms", "Latn", "MY"), ("sv", "Latn", "SE"), ("da", "Latn", "DK"),
-    ("nb", "Latn", "NO"), ("no", "Latn", "NO"), ("fi", "Latn", "FI"), ("cs", "Latn", "CZ"), ("el", "Grek", "GR"), ("hu", "Latn", "HU"),
-    ("ro", "Latn", "RO"), ("ca", "Latn", "ES"), ("sw", "Latn", "TZ"), ("bg", "Cyrl", "BG"),
+const LOC_LIKELY: [[&str; 3]; 40] = [
+    ["en", "Latn", "US"], ["es", "Latn", "ES"], ["fr", "Latn", "FR"], ["de", "Latn", "DE"], ["it", "Latn", "IT"], ["pt", "Latn", "BR"],
+    ["nl", "Latn", "NL"], ["ru", "Cyrl", "RU"], ["uk", "Cyrl", "UA"], ["sr", "Cyrl", "RS"], ["pl", "Latn", "PL"], ["tr", "Latn", "TR"],
+    ["ar", "Arab", "EG"], ["fa", "Arab", "IR"], ["ur", "Arab", "PK"], ["he", "Hebr", "IL"], ["hi", "Deva", "IN"], ["mr", "Deva", "IN"],
+    ["bn", "Beng", "BD"], ["ta", "Taml", "IN"], ["te", "Telu", "IN"], ["ja", "Jpan", "JP"], ["ko", "Kore", "KR"], ["zh", "Hans", "CN"],
+    ["th", "Thai", "TH"], ["vi", "Latn", "VN"], ["id", "Latn", "ID"], ["ms", "Latn", "MY"], ["sv", "Latn", "SE"], ["da", "Latn", "DK"],
+    ["nb", "Latn", "NO"], ["no", "Latn", "NO"], ["fi", "Latn", "FI"], ["cs", "Latn", "CZ"], ["el", "Grek", "GR"], ["hu", "Latn", "HU"],
+    ["ro", "Latn", "RO"], ["ca", "Latn", "ES"], ["sw", "Latn", "TZ"], ["bg", "Cyrl", "BG"],
 ];
 /// A script that sets the region, or a region that sets the script, where the rule "the language's own script or region" is wrong.
-const LOC_SCRIPT_REGION: [(&str, &str, &str); 2] = [("zh", "Hant", "TW"), ("sr", "Latn", "RS")];
-const LOC_REGION_SCRIPT: [(&str, &str, &str); 3] = [("zh", "TW", "Hant"), ("zh", "HK", "Hant"), ("zh", "MO", "Hant")];
+const LOC_SCRIPT_REGION: [[&str; 3]; 2] = [["zh", "Hant", "TW"], ["sr", "Latn", "RS"]];
+const LOC_REGION_SCRIPT: [[&str; 3]; 3] = [["zh", "TW", "Hant"], ["zh", "HK", "Hant"], ["zh", "MO", "Hant"]];
 
 /// The pieces of a canonical tag: language, script, region, the variants (with their `-`) and the extensions (with their `-`).
 pub struct LocSplit<'a> {
@@ -143,21 +143,34 @@ pub fn loc_apply(tag: &str, lang: &str, script: &str, region: &str, kws: &[(&str
 /// AddLikelySubtags with the table above.
 pub fn loc_maximize(tag: &str) -> String {
     let s = loc_split(tag);
+    use crate::packed::pack_table;
+    let likely = pack_table!(LOC_LIKELY, 3, (), |i| (LOC_LIKELY[i], ()));
     let row = if s.lang == "und" {
-        LOC_LIKELY.iter().find(|r| (s.script.is_empty() || r.1 == s.script) && (s.region.is_empty() || r.2 == s.region) && !(s.script.is_empty() && s.region.is_empty() && r.0 != "en"))
+        (0..likely.len()).find(|&i| {
+            (s.script.is_empty() || likely.text(i, 1) == s.script)
+                && (s.region.is_empty() || likely.text(i, 2) == s.region)
+                && !(s.script.is_empty() && s.region.is_empty() && likely.text(i, 0) != "en")
+        })
     } else {
-        LOC_LIKELY.iter().find(|r| r.0 == s.lang)
+        (0..likely.len()).find(|&i| likely.text(i, 0) == s.lang)
     };
-    let Some(&(l, rs, rr)) = row else { return tag.to_string() };
+    let Some(row) = row else { return tag.to_string() };
+    let (l, rs, rr) = (likely.text(row, 0), likely.text(row, 1), likely.text(row, 2));
     let lang = if s.lang == "und" { l } else { s.lang };
     // script from the region, or region from the script, where the table's own pair is wrong
+    let lookup = |table: crate::packed::Table<3>, key, fallback| {
+        (0..table.len()).find(|&i| table.text(i, 0) == lang && table.text(i, 1) == key)
+            .map_or(fallback, |i| table.text(i, 2))
+    };
+    let by_region = pack_table!(LOC_REGION_SCRIPT, 3, (), |i| (LOC_REGION_SCRIPT[i], ()));
+    let by_script = pack_table!(LOC_SCRIPT_REGION, 3, (), |i| (LOC_SCRIPT_REGION[i], ()));
     let script = match (s.script, s.region) {
-        ("", r) if !r.is_empty() => LOC_REGION_SCRIPT.iter().find(|x| x.0 == lang && x.1 == r).map_or(rs, |x| x.2),
+        ("", r) if !r.is_empty() => lookup(by_region, r, rs),
         ("", _) => rs,
         (sc, _) => sc,
     };
     let region = match (s.region, s.script) {
-        ("", sc) if !sc.is_empty() && sc != rs => LOC_SCRIPT_REGION.iter().find(|x| x.0 == lang && x.1 == sc).map_or("", |x| x.2),
+        ("", sc) if !sc.is_empty() && sc != rs => lookup(by_script, sc, ""),
         ("", _) => rr,
         (r, _) => r,
     };

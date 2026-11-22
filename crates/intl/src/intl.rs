@@ -457,7 +457,8 @@ pub fn shown(p: Pattern) -> (Vec<(&'static str, &'static str)>, Option<u8>) {
 /// Format local fields `t` with pattern `p` of locale `loc` into `out`. `parts` gets the type and the end of each part
 /// (adjacent literals are one part).
 pub fn format(loc: u8, p: Pattern, t: &Fields, ex: &Extras, out: &mut String, mut parts: Option<&mut Vec<(Part, usize)>>) -> Result<(), Gate> {
-    let names = &NAMES[LOCALE_NAMES[loc as usize] as usize];
+    let names = crate::packed::pack_table!(NAMES, 59, (), |i| (NAMES[i], ()));
+    let name = |col| names.text(LOCALE_NAMES[loc as usize] as usize, col);
     for x in pieces(p) {
         let kind = match x {
             Err(lit) => {
@@ -484,7 +485,7 @@ pub fn format(loc: u8, p: Pattern, t: &Fields, ex: &Extras, out: &mut String, mu
                 };
                 match c {
                     b'w' => {
-                        out.push_str(names[36 + (text(0) * 7) + t.weekday as usize]);
+                        out.push_str(name(36 + (text(0) * 7) + t.weekday as usize));
                         Part::Weekday
                     }
                     b'y' => {
@@ -495,7 +496,7 @@ pub fn format(loc: u8, p: Pattern, t: &Fields, ex: &Extras, out: &mut String, mu
                         Part::Year
                     }
                     b'M' => {
-                        if w == b'1' || w == b'2' { num(out, t.month + 1) } else { out.push_str(names[text(0) * 12 + t.month as usize]) }
+                        if w == b'1' || w == b'2' { num(out, t.month + 1) } else { out.push_str(name(text(0) * 12 + t.month as usize)) }
                         Part::Month
                     }
                     b'd' => {
@@ -525,7 +526,7 @@ pub fn format(loc: u8, p: Pattern, t: &Fields, ex: &Extras, out: &mut String, mu
                         Part::TimeZoneName
                     }
                     b'a' => {
-                        out.push_str(names[57 + (t.hour >= 12) as usize]);
+                        out.push_str(name(57 + (t.hour >= 12) as usize));
                         Part::DayPeriod
                     }
                     _ => return Err(Gate::ZoneName),

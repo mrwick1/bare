@@ -1,4 +1,5 @@
 use crate::{icu, intl};
+use crate::packed::pack_table;
 use fixed_decimal::SignDisplay;
 
 #[derive(Clone, Copy)]
@@ -30,13 +31,21 @@ fn rtf_numfmt(loc: u8) -> icu::NumFmt {
 
 /// The text of `format(x, unit)` as parts: (type, text, is a part of the number), the number parts have the unit.
 pub fn rtf_parts(cache: &mut icu::Cache, r: IntlRtf, x: f64, unit: usize) -> Vec<(&'static str, String)> {
-    let d = &intl::RTF_DATA[intl::RTF_VARIANT[r.loc as usize] as usize][r.style as usize][unit];
+    let table = pack_table!([(); intl::RTF_DATA.len() * 3 * 8], 5, (), |i| {
+        let d = &intl::RTF_DATA[i / 24][i / 8 % 3][i % 8];
+        ([d.one, d.other, d.auto[0], d.auto[1], d.auto[2]], ())
+    });
+    assert!(r.style < 3 && unit < 8);
+    let row = (intl::RTF_VARIANT[r.loc as usize] as usize * 3 + r.style as usize) * 8 + unit;
     if r.auto {
         // ICU compares the value rounded at two fraction digits
         let k = (x.abs() * 100.0).round();
         let word = if k == 0.0 { 1 } else if k == 100.0 { if x < 0.0 { 0 } else { 2 } } else { 3 };
-        if word < 3 && !d.auto[word].is_empty() {
-            return vec![("literal", d.auto[word].to_string())];
+        if word < 3 {
+            let text = table.text(row, 2 + word);
+            if !text.is_empty() {
+                return vec![("literal", text.to_string())];
+            }
         }
     }
     let past = x < 0.0 || (x == 0.0 && x.is_sign_negative());
@@ -44,7 +53,7 @@ pub fn rtf_parts(cache: &mut icu::Cache, r: IntlRtf, x: f64, unit: usize) -> Vec
     let mut nparts = Vec::new();
     let mut s = String::new();
     cache.format(&f, icu::num_from_f64(x.abs()), icu::Out { s: &mut s, parts: Some(&mut nparts) });
-    let label = if cache.plural(&f, false, icu::num_from_f64(x.abs())) == "one" { d.one } else { d.other };
+    let label = table.text(row, usize::from(cache.plural_for::<false>(&f, icu::num_from_f64(x.abs())) != "one"));
     let mut out = Vec::with_capacity(nparts.len() + 2);
     if !past {
         out.push(("literal", "in ".to_string()));
