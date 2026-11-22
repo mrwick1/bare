@@ -53,6 +53,26 @@ impl RootMaps {
         RootMaps { regs, pcs: Vec::new(), words: Vec::new() }
     }
 
+    pub(crate) fn with_capacity(regs: usize, maps: usize) -> RootMaps {
+        RootMaps { regs, pcs: Vec::with_capacity(maps), words: Vec::with_capacity(maps * regs.div_ceil(64)) }
+    }
+
+    pub(crate) fn single_word(regs: usize, pcs: Vec<u32>, words: Vec<u64>) -> RootMaps {
+        debug_assert!((1..=64).contains(&regs) && pcs.len() == words.len());
+        RootMaps { regs, pcs, words }
+    }
+
+    pub(crate) fn add_words(&mut self, pc: u32, bits: &[u64]) {
+        assert!(self.pcs.last().is_none_or(|&last| last < pc), "safepoints are added in the order of pc");
+        let width = self.per_map();
+        assert!(bits.len() <= width);
+        debug_assert!(bits.len() < width || self.regs % 64 == 0 || bits.last().unwrap() >> (self.regs % 64) == 0);
+        let end = self.words.len() + width;
+        self.pcs.push(pc);
+        self.words.extend_from_slice(bits);
+        self.words.resize(end, 0);
+    }
+
     fn per_map(&self) -> usize {
         self.regs.div_ceil(64)
     }
