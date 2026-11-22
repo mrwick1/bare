@@ -539,7 +539,30 @@ fn host_call(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     })
 }
 
+#[path = "api_clone.rs"]
+mod api_clone;
+
 impl Engine for Realm {
+    fn clone_out<'s>(&mut self, v: Local<'_>, o: &bare_js_api::CloneOpts<'_, '_>, h: &mut dyn bare_js_api::CloneHost<Self>) -> Result<bare_js_api::Cloned, Error<'s>> {
+        let v = self.a_at(v);
+        bare_js_api::enter(self, |s| {
+            let rt = s.engine();
+            api_clone::write(rt, v, o, h).map_err(|e| match e {
+                Error::Throw(l) => Ok(rt.a_at(l)),
+                Error::Abort(a) => Err(a),
+            })
+        }).map_err(|e| match e { Ok(v) => Error::Throw(self.a_push(v)), Err(a) => Error::Abort(a) })
+    }
+
+    fn clone_in<'s>(&mut self, c: &mut bare_js_api::Cloned, h: &mut dyn bare_js_api::CloneHost<Self>) -> Result<bare_js_api::CloneIn<'s>, Error<'s>> {
+        api_clone::load(self, c, h)
+    }
+
+    fn clone_copy<'s>(&mut self, v: Local<'_>, l: &bare_js_api::CloneLimits, h: &mut dyn bare_js_api::CloneHost<Self>) -> Result<(Local<'s>, usize), Error<'s>> {
+        let mut c = self.clone_out(v, &bare_js_api::CloneOpts { limits: *l, transfer: &[] }, h)?;
+        Ok((self.clone_in(&mut c, h)?.value, c.cost()))
+    }
+
     type Raw = Value;
 
     #[inline]
@@ -1219,3 +1242,7 @@ mod modules;
 #[allow(unsafe_code)]
 #[path = "api_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "api_clone_tests.rs"]
+mod clone_tests;

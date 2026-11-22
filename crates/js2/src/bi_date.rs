@@ -176,7 +176,7 @@ fn from_local(l: f64) -> f64 {
 // ---- the object ----
 
 /// A new `Date` with prototype `proto` and the clipped time value `t`.
-fn new_date(rt: &mut Realm, proto: Obj, t: f64) -> Value {
+pub(crate) fn new_date(rt: &mut Realm, proto: Obj, t: f64) -> Value {
     let root = rt.shapes.root(Layout::Object, Some(proto.cell()), 4);
     let shape = rt.shapes.add(root, rt.k_prim, 0).expect("shape");
     let o = Obj::new(&mut rt.heap, &rt.shapes, shape).expect("memory");
@@ -413,6 +413,8 @@ const fn date_table() -> [Ent; OPS.len() + 1] {
 impl Realm {
     pub(crate) fn install_date(&mut self) {
         let proto = Obj::new(&mut self.heap, &self.shapes, self.s_object).expect("memory");
+        self.date_proto = proto;
+        self.keep(proto.value());
         let c = self.ctor("Date", 7, date_ctor, proto);
         static DATE_STATICS: &[Ent] = &[m("now", 0, date_now), m("parse", 1, date_parse), m("UTC", 7, date_utc)];
         self.lazy_table(c, DATE_STATICS);

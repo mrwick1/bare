@@ -352,6 +352,7 @@ pub struct Realm {
     pub(crate) registry: Option<Obj>,
     /// `TypeError.prototype` and the others, by `ErrKind`.
     pub error_protos: [Obj; 7],
+    pub(crate) date_proto: Obj,
     /// The shape of a built-in function cell: slot 0 is the index in `natives`, slots 1 to 3 are free for the function (a bound function).
     pub s_native: ShapeId,
     pub(crate) proxy_natives: Option<usize>,
@@ -548,6 +549,7 @@ impl Realm {
             unscopables: None,
             registry: None,
             error_protos,
+            date_proto: object_proto,
             s_native,
             proxy_natives: None,
             proxy_depth: 0,
