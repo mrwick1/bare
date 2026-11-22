@@ -215,6 +215,12 @@ impl Atoms {
         &self.runtime
     }
 
+    /// The canonical atom when either table already has these units.
+    pub(crate) fn find(&self, c: &Chars) -> Option<Str> {
+        let hash = c.hash();
+        self.runtime.table.find(hash, c).or_else(|| self.shared.lock().table.find(hash, c))
+    }
+
     /// The atom of this realm with the units of `c`: the realm's own, else the shared one, else a new one in `heap`.
     pub fn intern(&mut self, heap: &mut Heap, c: Chars) -> R<Str> {
         let hash = c.hash();
