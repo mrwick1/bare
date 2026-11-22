@@ -47,4 +47,19 @@ All ten adapter cost rows pass under both allocators. These rows use the same OL
 | `closures 1000000` | 1739061211 → 1739061380 | 1742414373 → 1742414201 |
 | `objects 1000000` | 699651294 → 699650823 | 703020871 → 703020602 |
 
+## Rerun after typed-array lookup and text codecs merged
+
+The baseline binary at `71c71e0b` has the same files as main at `33e5b4b1`. It includes the typed-array host lookup in PR #944, text codecs in PR #948, and the indexed probes in PR #949. The previous tables use the earlier source.
+
+| Python.org docs link | js2 before, M | js2 after, M | js2 RSS before, MiB | js2 RSS after, MiB |
+|---|---:|---:|---:|---:|
+| Live | 1,209.63 [1,209.63–1,219.95] | 1,199.64 [1,199.64–2,017.07] | 38.39 [38.06–38.47] | 38.14 [37.99–38.62] |
+| Replay | 1,167.66 [1,167.66–1,167.96] | 1,163.15 [1,163.15–1,163.18] | 37.89 [37.47–38.49] | 38.09 [37.89–38.29] |
+
+The live minima match at 16 replies and 331,977 bytes. Replay has 20 replies and 541,271 bytes. The instruction minimum falls by 9.99 M live and 4.51 M on replay. The live range includes one high patched sample. The three replay instruction samples have a narrower range. Replay RSS uses six samples per build. The 0.20 MiB increase stays within the baseline spread.
+
+The latest Callgrind pair has the same 20 replies. It again shows 14,987 to 3,088 calls to `Realm::text` from `hs_lazy`, or 5.29 M to 1.13 M inclusive instructions. Total `Ir` falls from 1,216.19 M to 1,212.00 M.
+
+All four control instruction minima fall or stay within the baseline spread. Across six RSS samples, W3C live moves from 27.99 to 28.23 MiB within its baseline spread. Python.org search replay moves from 36.68 to 36.63 MiB. The new unit test also checks that a throwing host callback reports the first error and skips conversion on a repeated lookup. All 26 host tests and the typecheck pass. The expanded test262 selection retains 2,634 passes, with 57 failures and 28 skips on each tree. All ten adapter cost rows and five interpreter rows pass under both allocators. No cost debt.
+
 Not tested locally: Windows, windowed paint, idle latency, the full workspace suite, and the full test262 suite.
