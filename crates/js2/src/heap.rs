@@ -545,6 +545,11 @@ impl Heap {
         self.grown >= self.task_limit
     }
 
+    /// Use the idle threshold at an in-task safepoint when the task limit is adaptive and collection is permitted.
+    pub(crate) fn idle_due_in_task(&self) -> bool {
+        self.adaptive_task && self.task_limit != usize::MAX && self.due()
+    }
+
     /// Bytes of the cells that the last [`Heap::finish_mark`] found marked: the size class of a small cell and the whole mapping of a
     /// large one. A cell allocated since then is not counted. With no root, a collection brings it to 0.
     pub fn marked_bytes(&self) -> usize {

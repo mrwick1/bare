@@ -16,8 +16,8 @@ use crate::builtins::arg;
 use crate::cell::Layout;
 use crate::interp_rt::{ErrKind, Key, R, Realm, Slot};
 use crate::object::K_PROXY;
-use crate::object::{F_ELEMS_FIXED, F_ELEMS_RO, F_LEN_RO, F_SLOWIDX, Obj};
-use crate::shapes::{A_ACC, A_C, A_E, A_W};
+use crate::object::{F_CALLABLE, F_ELEMS_FIXED, F_ELEMS_RO, F_HOST, F_KIND, F_LAZYM, F_LAZYTAB, F_LEN_RO, F_SLOWIDX, Obj};
+use crate::shapes::{A_ACC, A_C, A_E, A_W, ShapeId};
 use crate::string::{Chars, Str};
 use crate::value::Value;
 
@@ -65,6 +65,8 @@ pub(crate) const H_SEARCH: usize = 3;
 pub(crate) const H_SPREAD: usize = 4;
 pub(crate) const H_REST: usize = 5;
 pub(crate) const H_PAIRS: usize = 6;
+
+const FOR_IN_EXOTIC: u32 = F_CALLABLE | F_HOST | F_KIND | F_LAZYTAB;
 
 /// The array index that the text of the atom `k` is, if it is one (a canonical decimal below 2^32 - 1).
 pub(crate) fn atom_index(k: Str) -> Option<u32> {
@@ -255,9 +257,37 @@ impl Realm {
         matches!(k.resolve().chars(), Some(Chars::One(b)) if b.first() == Some(&0)) || matches!(k.resolve().chars(), Some(Chars::Two(u)) if u.first() == Some(&0))
     }
 
-    /// Snapshot the enumerable string keys, starting with the receiver and then its prototypes. A non-enumerable own key still
-    /// shadows a prototype property of the same name.
-    pub(crate) fn for_in_keys(&mut self, recv: Value) -> R<(Value, Value)> {
+    /// Keep the immutable opening shape if every enumerable string key comes from it.
+    pub(crate) fn for_in_open(&mut self, recv: Value) -> R<(Value, Value)> {
+        if let Some(id) = self.for_in_open_shape(recv) {
+            return Ok((recv, Value::for_in_shape(id)));
+        }
+        self.for_in_snapshot(recv)
+    }
+
+    pub(crate) fn for_in_open_shape(&self, recv: Value) -> Option<ShapeId> {
+        let o = Realm::obj(recv)?;
+        let id = o.shape(&self.shapes);
+        if o.is_indexed() || o.has_flag(FOR_IN_EXOTIC | F_LAZYM) || !self.shapes.cacheable(id) || self.shapes.has_indexed_name(id) {
+            return None;
+        }
+        let mut cur = self.proto_of(o);
+        while let Some(p) = cur {
+            // A pending Lazy::All can run the host and change the enumeration. Use the snapshot path until it has run.
+            if p.is_indexed() || p.has_flag(FOR_IN_EXOTIC)
+                || (p.has_flag(F_LAZYM) && !self.hs_all_asked(p))
+                || self.shapes.may_have_enumerable(p.shape(&self.shapes))
+            {
+                return None;
+            }
+            cur = self.proto_of(p);
+        }
+        Some(id)
+    }
+
+    /// Snapshot enumerable string keys in receiver and prototype order. Non-enumerable own keys still shadow inherited keys.
+    #[cold]
+    fn for_in_snapshot(&mut self, recv: Value) -> R<(Value, Value)> {
         if recv.is_undefined() || recv.is_null() {
             return Ok((Value::UNDEFINED, self.new_array(&[])));
         }
@@ -277,9 +307,41 @@ impl Realm {
         Ok((obj.value(), self.new_array(&keys)))
     }
 
+    /// Advance to an opening key. After a shape change, a complemented cursor keeps the loop in descriptor-checking mode.
+    pub(crate) fn for_in_next(&mut self, keys: Value, source: Value, mut cursor: i32) -> R<Option<(Value, i32)>> {
+        let source = Realm::obj(source);
+        if let Some(id) = keys.as_for_in_shape() {
+            let o = source.expect("shaped for-in source");
+            // The opening keys are all own keys. Changes elsewhere in the prototype chain cannot hide an unchanged own key.
+            let guarded = cursor >= 0 && o.shape(&self.shapes) == id && !o.has_flag(F_HOST | F_LAZYM | F_LAZYTAB);
+            if cursor < 0 {
+                cursor = !cursor;
+            }
+            while let Some(e) = self.shapes.tree_entries(id).get(cursor as usize).copied() {
+                cursor += 1;
+                let k = e.key();
+                if e.attrs() & A_E == 0 || k.is_symbol() || self.is_hidden_key(k) {
+                    continue;
+                }
+                if guarded || self.for_in_has(source, Key::Name(k))? {
+                    return Ok(Some((k.value(), if guarded { cursor } else { !cursor })));
+                }
+            }
+        } else {
+            let keys = Realm::obj(keys).expect("for-in keys");
+            while let Some(name) = keys.get_element(cursor as u32) {
+                cursor += 1;
+                let key = self.key_of(name)?;
+                if self.for_in_has(source, key)? {
+                    return Ok(Some((name, cursor)));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// A key deleted before its turn is skipped.
-    pub(crate) fn for_in_has(&mut self, mut cur: Option<Obj>, name: Value) -> R<bool> {
-        let key = self.key_of(name)?;
+    fn for_in_has(&mut self, mut cur: Option<Obj>, key: Key) -> R<bool> {
         while let Some(o) = cur {
             if let Some(own) = self.get_own_h(o, key)? {
                 return Ok(own.attrs() & A_E != 0);

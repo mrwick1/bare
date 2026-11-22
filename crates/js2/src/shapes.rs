@@ -58,6 +58,8 @@ const NONE: u32 = u32::MAX;
 const WATCH_TAG0: u32 = 1 << 31;
 const F_DICT: u8 = 1;
 const F_FREE: u8 = 2;
+const F_INDEX: u8 = 4;
+const F_ENUM: u8 = 8;
 /// The tag of a prototype edge in the child map; an attribute byte never has it.
 const PROTO_EDGE: u64 = 0x80;
 
@@ -84,6 +86,11 @@ type Map<K, V> = HashMap<K, V, BuildHasherDefault<Fx>>;
 pub struct ShapeId(u32);
 
 impl ShapeId {
+    #[inline]
+    pub(crate) fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
     /// The id as stored in the header (`CellHeader::shape_id`).
     #[inline]
     pub fn raw(self) -> u32 {
@@ -476,7 +483,7 @@ impl Shapes {
         if s.count as usize >= MAX_PROPS || self.live_count() >= SHAPE_CAP {
             return None;
         }
-        let (count, slots, table, layout, proto, inline) = (s.count as usize, s.slots, s.table, s.layout, s.proto, s.inline);
+        let (count, slots, table, layout, proto, inline, flags) = (s.count as usize, s.slots, s.table, s.layout, s.proto, s.inline, s.flags);
         let entry = Entry::new(key, slots, attrs);
         let t = self.table_mut(table);
         // The tip of a table adds to it. A table that already has this entry here is shared. Any other shape copies its prefix first.
@@ -496,6 +503,13 @@ impl Shapes {
         n.table = table;
         n.count = count as u16 + 1;
         n.slots = slots + entry.width();
+        n.flags = flags;
+        if attrs & A_E != 0 {
+            n.flags |= F_ENUM;
+        }
+        if flags & F_INDEX == 0 && crate::bi_object::atom_index(entry.key()).is_some() {
+            n.flags |= F_INDEX;
+        }
         let id = self.make(n).expect("room was checked");
         let s = &mut self.nodes[from.0 as usize];
         if s.child_edge == 0 {
@@ -541,7 +555,29 @@ impl Shapes {
 
     /// Whether the shape has a named descriptor for a canonical array index.
     pub(crate) fn has_indexed_name(&self, id: ShapeId) -> bool {
-        self.entries(id).any(|e| crate::bi_object::atom_index(e.key()).is_some())
+        let s = self.node(id);
+        if s.is_dict() {
+            self.entries(id).any(|e| crate::bi_object::atom_index(e.key()).is_some())
+        } else {
+            s.flags & F_INDEX != 0
+        }
+    }
+
+    /// A conservative test. Enumerable symbols and internal names also set this flag.
+    pub(crate) fn may_have_enumerable(&self, id: ShapeId) -> bool {
+        let s = self.node(id);
+        if s.is_dict() {
+            self.entries(id).any(|e| e.attrs() & A_E != 0)
+        } else {
+            s.flags & F_ENUM != 0
+        }
+    }
+
+    /// The immutable prefix of the descriptor table for a tree shape.
+    pub(crate) fn tree_entries(&self, id: ShapeId) -> &[Entry] {
+        let s = self.node(id);
+        debug_assert!(!s.is_dict());
+        &self.table(s.table).entries[..s.count()]
     }
 
     /// False for a dictionary shape. Its table changes in place, so the shape ID cannot guard a cache entry.
@@ -619,6 +655,7 @@ impl Shapes {
         }
         let mut n = Shape::new(s.layout, p, s.inline);
         (n.table, n.count, n.slots) = (s.table, s.count, s.slots);
+        n.flags = s.flags;
         // A shape at the cap cannot be made: the object goes to its own dictionary shape.
         let Some(c) = self.make(n) else {
             let d = self.to_dict(id);

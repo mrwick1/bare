@@ -35,6 +35,7 @@ const NAMED: u64 = 2;
 const NAMED_OPEN: u64 = 3;
 /// The asks of one read: the receiver, a prototype and a lazy name (as `MAX_FILLS` of the old engine). One more is a host bug.
 const MAX_FILLS: u32 = 3;
+const ASK_ALL: (u8, u64) = (0, 0);
 
 /// What the interface keeps for owners, host-filled objects and lazy members.
 #[derive(Default)]
@@ -328,10 +329,15 @@ impl Realm {
         self.hs_ask(c, hk, || h.indexed_name(&v, hk, &u))
     }
 
+    /// A new enumeration would skip the host callback for this object in the current collection cycle.
+    pub(crate) fn hs_all_asked(&self, o: Obj) -> bool {
+        self.api.hs.asked.contains(&(o.cell().as_ptr().addr(), ASK_ALL.0, ASK_ALL.1))
+    }
+
     /// Ask `Host::lazy_member` for `what` on `c`, once for each (object, name) until the next collection. True when the host was asked.
     pub(crate) fn hs_lazy(&mut self, c: Obj, key: Option<Key>) -> R<bool> {
         let (kind, tag, name) = match key {
-            None => (0, 0, String::new()),
+            None => (ASK_ALL.0, ASK_ALL.1, String::new()),
             Some(Key::Idx(i)) => (1, i as u64, i.to_string()),
             Some(Key::Name(k)) if k.is_symbol() => (2, 0, String::new()),
             Some(Key::Name(k)) => (3, k.value().as_pointer().map_or(0, |p| p.1.as_ptr().addr() as u64), self.text(k)),

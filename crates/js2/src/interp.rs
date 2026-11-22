@@ -254,7 +254,7 @@ fn walk_frames(m: &mut Marker, prog: &Codes, stack: &[Value], mut ci: usize, mut
         if pc != NOPC {
             let map = prog[ci].roots.find(pc).expect("a root map for each safepoint");
             for r in map.slots() {
-                m.value(stack[fp + r]);
+                m.register(stack[fp + r]);
             }
         }
         let caller = int_at(stack, fp, 5);
@@ -724,8 +724,9 @@ impl Vm {
         }
         // An op that allocates collects first, when the heap is past the limit.
         macro_rules! gate {
-            () => {
-                if realm.due() {
+            () => { gate!(false) };
+            ($early:expr) => {
+                if realm.due() || $early {
                     std::hint::cold_path();
                     realm.cur = (ci, fp, pc as u32);
                     let (cur, st) = (realm.cur, &stack[..]);
@@ -1576,20 +1577,13 @@ impl Vm {
                         Op::ForInNext => {
                             gate!();
                             let base = $x as usize;
-                            let keys = Realm::obj(r!(base)).expect("for-in keys");
-                            let source = Realm::obj(r!(base + 2));
-                            let mut i = r!(base + 1).as_int().expect("for-in index");
-                            let mut found = false;
-                            while let Some(key) = keys.get_element(i as u32) {
-                                i += 1;
-                                if tri!(realm.for_in_has(source, key)) {
-                                    r!(a!()) = key;
-                                    r!(base + 1) = Value::int(i);
-                                    found = true;
-                                    break;
-                                }
+                            let i = r!(base + 1).as_int().expect("for-in index");
+                            let found = tri!(realm.for_in_next(r!(base), r!(base + 2), i));
+                            if let Some((key, i)) = found {
+                                r!(a!()) = key;
+                                r!(base + 1) = Value::int(i);
                             }
-                            jump!(!found, nextx!(), sbx!());
+                            jump!(found.is_none(), nextx!(), sbx!());
                         }
                         Op::YieldOpen => {
                             gate!();
@@ -2584,8 +2578,10 @@ impl Vm {
                     Op::Throw => { std::hint::cold_path(); throw!(r!(a!())) }
                     Op::ForInOpen => {
                         std::hint::cold_path();
-                        gate!();
-                        let (source, keys) = tri!(realm.for_in_keys(r!(b!())));
+                        let recv = r!(b!());
+                        // A shape hit saves the temporary snapshot allocations that can prompt a collection in this task.
+                        gate!(realm.heap.idle_due_in_task() && realm.for_in_open_shape(recv).is_some());
+                        let (source, keys) = tri!(realm.for_in_open(recv));
                         r!(a!()) = keys;
                         r!(a!() + 1) = Value::int(0);
                         r!(a!() + 2) = source;

@@ -8,6 +8,7 @@
 //! | `0xFFF9` | a 32-bit integer | the integer in the low 32 bits |
 //! | `0xFFFA` | `undefined`, `null`, `false`, `true`, a hole | 0, 1, 2, 3, 4 |
 //! | `0xFFFB` to `0xFFFE` | a string, symbol, BigInt or object | the address of the cell |
+//! | `0xFFFF` | internal for-in shape root | the opening shape ID in the low 32 bits |
 //!
 //! So "is a double" is one unsigned compare. A NaN whose bits reach `0xFFF9` would look like a tagged value, so [`Value::number`]
 //! replaces it with the canonical NaN. Hardware arithmetic never makes one: the x86 default NaN is `0xFFF8...`.
@@ -15,6 +16,7 @@
 //! Addresses: a cell address must fit 48 bits. The heap checks this for each block it gets from the OS (the address invariant);
 //! here it is a debug check only. Values hold addresses as integers, through the exposed-provenance API, so this module needs no
 //! `unsafe` code. Reading a cell through the address is the heap's job.
+use crate::shapes::ShapeId;
 use std::ptr::NonNull;
 
 const TAG_SHIFT: u32 = 48;
@@ -24,6 +26,7 @@ const FIRST_TAGGED: u64 = 0xFFF9 << TAG_SHIFT;
 const TAG_INT: u64 = 0xFFF9;
 const TAG_SPECIAL: u64 = 0xFFFA;
 const TAG_STRING: u64 = 0xFFFB;
+const TAG_FOR_IN_SHAPE: u64 = 0xFFFF;
 /// The NaN that stands for every NaN whose bits would reach the tag space.
 pub const CANONICAL_NAN: u64 = 0x7FF8_0000_0000_0000;
 
@@ -58,6 +61,17 @@ impl Value {
     #[inline]
     pub fn int(i: i32) -> Value {
         Value(TAG_INT << TAG_SHIFT | i as u32 as u64)
+    }
+
+    /// Only a for-in record holds this value. The collector keeps the shape even if the receiver changes shape.
+    #[inline]
+    pub(crate) fn for_in_shape(id: ShapeId) -> Value {
+        Value(TAG_FOR_IN_SHAPE << TAG_SHIFT | id.raw() as u64)
+    }
+
+    #[inline]
+    pub(crate) fn as_for_in_shape(self) -> Option<ShapeId> {
+        (self.tag() == TAG_FOR_IN_SHAPE).then_some(ShapeId::from_raw(self.0 as u32))
     }
 
     #[inline]
@@ -156,6 +170,8 @@ impl std::fmt::Debug for Value {
             write!(f, "Number({n})")
         } else if let Some((k, p)) = self.as_pointer() {
             write!(f, "{k:?}({p:p})")
+        } else if let Some(id) = self.as_for_in_shape() {
+            write!(f, "ForInShape({})", id.raw())
         } else {
             match self.0 & PAYLOAD {
                 0 => f.write_str("Undefined"),
