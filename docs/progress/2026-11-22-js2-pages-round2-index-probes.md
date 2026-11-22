@@ -49,4 +49,21 @@ Targeted test262 covers property accessors, assignment, `in`, and affected Array
 
 The 12 Array, Object and adapter rows in `cost_matrix.sh` pass under both allocators. Those rows use the same OLD example binaries on both sides because the OLD source is unchanged. The live and replay rows test the js2 paths. No cost debt.
 
+## Rerun after typed-array lookup changed on main
+
+PR #944 merged while this PR was in CI. It gives typed arrays a direct integer-indexed read in host prototype walks. The historical W3C comparison above includes work that #944 also removes. Use the new comparison below for the current effect of this PR.
+
+The baseline source is `cad56767`. In the matched live Callgrind pair it reports five replies and 64,947 bytes. On baseline js2, `hs_plain` calls `idx_atom` 205 times for 0.08 M inclusive instructions. The earlier js2 live profile had 176,341 calls and 76.70 M. The ordinary indexed setter's prototype lookup still costs 33.75 M at 31,633 calls. It can still avoid probing a name on an immutable shape that has no named indices.
+
+The patched Callgrind run reports the same five replies and 64,947 bytes. The setter's prototype lookup falls to 7.41 M at 31,679 calls. Total js2 instructions fall from 744.75 M to 707.83 M in this pair.
+
+| W3C input | OLD on branch, M | js2 before, M | js2 after, M | js2 RSS before, MiB | js2 RSS after, MiB |
+|---|---:|---:|---:|---:|---:|
+| Live | 702.57 [702.57–716.33] | 687.86 [687.86–702.49] | 665.58 [665.58–673.75] | 28.37 [28.35–28.41] | 27.77 [27.55–28.06] |
+| Replay | 690.43 [690.43–690.47] | 657.47 [657.47–657.51] | 631.18 [631.18–631.21] | 27.81 [27.63–27.93] | 27.79 [27.68–28.07] |
+
+All live W3C samples match at seven replies and 83,582 bytes. The live instruction minimum falls 22.27 M and median RSS falls 0.60 MiB. Replay still has the same POST miss. All control instruction minima fall or stay within the baseline spread. The first three DEV tape RSS trials have medians of 100.18 MiB and 103.66 MiB. Recheck the control's peak RSS on final main.
+
+The expanded host test262 selection adds typed-array internal Get and HasProperty. It gives 2,634 passes, 57 failures and 28 skips on both trees. No passing test was lost. All 24 host unit tests pass. The typecheck, the 12 cost rows and the five interpreter cost rows pass. No cost debt.
+
 Not tested locally: Windows, windowed paint, idle-machine latency, the full workspace suite, and the full test262 suite.
