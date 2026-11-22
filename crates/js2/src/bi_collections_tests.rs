@@ -136,7 +136,11 @@ fn a_weak_map_and_a_weak_set_hold_objects_only() {
 
 /// Run `src` and collect once; the counters of that collection.
 fn collect_after(src: &str) -> crate::gc::Stats {
-    let mut vm = run(src).unwrap_or_else(|e| panic!("{e}\n--- source:\n{src}"));
+    let mut vm = load(src).unwrap_or_else(|e| panic!("{e}\n--- source:\n{src}"));
+    vm.realm.heap.set_trigger(Trigger { min: usize::MAX, slack: 0 });
+    if let Err(e) = vm.run_main(0) {
+        panic!("uncaught {e:?}\n--- source:\n{src}");
+    }
     vm.collect_idle();
     vm.realm.last_gc
 }
