@@ -291,6 +291,11 @@ impl Realm {
     }
 
     /// The slot of the hidden property `which` of the regexp `o`.
+    pub(crate) fn clone_regexp_parts(&mut self, o: Obj) -> (Str, String) {
+        let (src, flags) = parts(self, o.value(), "source").expect("RegExp").expect("RegExp slots");
+        (src, letters(flags))
+    }
+
     fn rx_slot(&mut self, o: Obj, which: usize) -> Option<u32> {
         let rx = self.rx.as_ref()?;
         if o.shape(&self.shapes) == rx.shape {

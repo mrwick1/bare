@@ -303,6 +303,10 @@ impl Realm {
     /// A new collection object of `kind` with `table` in its slot and the prototype of `new.target`.
     fn new_coll(&mut self, kind: u32, table: Value) -> R<Obj> {
         let proto = self.new_proto()?;
+        Ok(self.new_coll_at(kind, table, proto))
+    }
+
+    fn new_coll_at(&mut self, kind: u32, table: Value, proto: Obj) -> Obj {
         let c = self.colls();
         let i = kind as usize - 1;
         let shape = if proto == c.protos[i] {
@@ -314,7 +318,14 @@ impl Realm {
         let o = Obj::new(&mut self.heap, &self.shapes, shape).expect("memory");
         o.set_kind(kind);
         o.set_slot(&self.shapes, 0, table);
-        Ok(o)
+        o
+    }
+
+    pub(crate) fn clone_new_collection(&mut self, is_map: bool) -> Obj {
+        let kind = if is_map { K_MAP } else { K_SET };
+        let proto = self.colls().protos[kind as usize - 1];
+        let tab = Tab::new(&mut self.heap, if is_map { 3 } else { 2 }, MIN_CAP);
+        self.new_coll_at(kind, tab.c.value(), proto)
     }
 
     fn coll_shape(&mut self, proto: Obj, kind: u32, keys: [Str; 3]) -> ShapeId {
@@ -482,7 +493,7 @@ fn ctor_values(rt: &mut Realm, o: Obj, kind: u32, src: Value) -> R<()> {
 }
 
 /// Add one entry to the new collection `o` of `kind`.
-fn add_pair(rt: &mut Realm, o: Obj, kind: u32, k: Value, v: Value) -> R<()> {
+pub(crate) fn add_pair(rt: &mut Realm, o: Obj, kind: u32, k: Value, v: Value) -> R<()> {
     match kind {
         K_MAP | K_SET => {
             let t = rt.this_tab(o.value(), kind, "set")?.1;
