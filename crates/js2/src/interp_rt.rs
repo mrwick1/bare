@@ -894,11 +894,18 @@ impl Realm {
         if Realm::obj(y).is_some() {
             y = self.to_primitive(y, Hint::Default)?;
         }
-        if let (Some(a), Some(b)) = (Realm::str_of(x), Realm::str_of(y)) {
+        let (a, b) = (Realm::str_of(x), Realm::str_of(y));
+        if let (Some(a), Some(b)) = (a, b) {
             return Ok(Str::concat(&mut self.heap, a, b).expect("memory").value());
         }
-        if Realm::str_of(x).is_some() || Realm::str_of(y).is_some() {
-            let (a, b) = (self.to_str(x)?, self.to_str(y)?);
+        if let Some(s) = a.or(b) {
+            let int_first = a.is_none();
+            let v = if int_first { x } else { y };
+            if let Some(i) = v.as_int() {
+                return Ok(Str::concat_int(&mut self.heap, s, i, int_first).expect("memory").value());
+            }
+            let t = self.to_str(v)?;
+            let (a, b) = if int_first { (t, s) } else { (s, t) };
             return Ok(Str::concat(&mut self.heap, a, b).expect("memory").value());
         }
         if x.is_bigint() || y.is_bigint() {

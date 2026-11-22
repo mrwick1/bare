@@ -420,6 +420,29 @@ impl Str {
         Ok(s)
     }
 
+    /// Join an integer and a string. A short Latin-1 result needs only one cell.
+    pub(crate) fn concat_int(heap: &mut Heap, s: Str, i: i32, int_first: bool) -> R<Str> {
+        use std::io::Write;
+        let mut digits = [0; 11];
+        let mut tail = digits.as_mut_slice();
+        write!(tail, "{i}").expect("an i32 fits in eleven bytes");
+        let len = 11 - tail.len();
+        let digits = &digits[..len];
+        if let Some(Chars::One(bytes)) = s.chars()
+            && bytes.len() + digits.len() < ROPE_MIN
+        {
+            let (left, right) = if int_first { (digits, bytes) } else { (bytes, digits) };
+            let mut buf = [0; ROPE_MIN];
+            let total = left.len() + right.len();
+            buf[..left.len()].copy_from_slice(left);
+            buf[left.len()..total].copy_from_slice(right);
+            return Str::new(heap, Chars::One(&buf[..total]));
+        }
+        let n = Str::new(heap, Chars::One(digits))?;
+        let (left, right) = if int_first { (n, s) } else { (s, n) };
+        Str::concat(heap, left, right)
+    }
+
     /// Copy the units of the flat string `leaf` to unit `at` of this new flat string.
     fn write_leaf(self, leaf: Str, at: usize) {
         let wide_dst = self.head().layout() == Layout::TwoByte;
@@ -519,3 +542,7 @@ impl Str {
 #[cfg(test)]
 #[path = "string_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "string_int_concat_tests.rs"]
+mod int_concat_tests;
