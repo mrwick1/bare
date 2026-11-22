@@ -11,7 +11,7 @@ fn the_span_builder_converts_only_non_integer_decimals() {
     let long = format!("1{}e-1100", "0".repeat(1100));
     let src = format!(
         "{pad}var a = [-999999999,0,999999999,-0,1e0,1.25,2147483648,9007199254740993,{long}{nums}];\n
-        var ok = a[0] === -999999999 && a[1] === 0 && a[2] === 999999999 && 1 / a[3] === -Infinity &&
+        var ok = a[0] === -999999999 && 1 / a[1] === Infinity && a[2] === 999999999 && 1 / a[3] === -Infinity &&
             a[4] === 1 && a[5] === 1.25 && a[6] === 2147483648 && a[7] === 9007199254740992 &&
             a[8] === 1 && a[9] === 11 && a.length === 559;"
     );
