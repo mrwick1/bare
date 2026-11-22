@@ -129,6 +129,11 @@ impl Value {
         self == Value::NULL
     }
 
+    #[inline]
+    pub fn is_bigint(self) -> bool {
+        self.tag() == TAG_STRING + Kind::BigInt as u64
+    }
+
     /// The kind and the address of a pointer value, with the provenance that [`Value::pointer`] exposed.
     #[inline]
     pub fn as_pointer(self) -> Option<(Kind, NonNull<u8>)> {

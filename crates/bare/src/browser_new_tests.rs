@@ -50,6 +50,24 @@ fn the_host_freezes_an_array_and_constructs_a_class() {
 }
 
 #[test]
+fn deleting_a_cached_global_reveals_the_window_named_property() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(js(&mut b, r#"
+            function read() { return a; }
+            var named = read().id;
+            a = 5;
+            read(); read();
+            var own = read();
+            Object.defineProperty(window, 'a', { get: function () { return 6; }, configurable: true });
+            var accessor = read();
+            delete a;
+            [named, own, accessor, read().id].join()
+        "#), "a,5,6,a");
+    })
+}
+
+#[test]
 fn assignment_adopts_a_constructed_stylesheet() {
     big(|| {
         let mut b = browser();
