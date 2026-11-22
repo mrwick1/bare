@@ -118,6 +118,21 @@ impl<'a> Fc<'a> {
 
     // ------------------------------------------------------------ entry of a function
 
+    /// Does a parameter pattern evaluate a default initializer or a computed key?
+    fn parameter_has_expression(&self, p: PatId) -> bool {
+        let prog = self.prog;
+        match prog.pat(p).kind {
+            PatKind::Assign { .. } => true,
+            PatKind::Rest(p) => self.parameter_has_expression(p),
+            PatKind::Array(l) => prog.list(l).any(|p| self.parameter_has_expression(p)),
+            PatKind::Object(l) => prog.list(l).any(|p| {
+                let prop = prog.pat_prop(p);
+                matches!(prop.key, Key::Computed(_)) || self.parameter_has_expression(prop.value)
+            }),
+            _ => false,
+        }
+    }
+
     /// Allocate the parameter registers, declare the scope of the function and compile its body.
     pub(crate) fn function_body(&mut self, fid: FuncId) -> CR {
         let prog = self.prog;
@@ -141,6 +156,8 @@ impl<'a> Fc<'a> {
         if let Some(l) = stmts {
             self.hoist_list(l, true, &mut h);
         }
+        // A body function named `arguments` shadows the parameter binding only after the parameters run.
+        let split_arguments = h.funcs.iter().any(|(_, n)| n == "arguments") && params.iter().any(|&p| self.parameter_has_expression(p));
         let mut decls: Vec<Decl<'a>> = Vec::new();
         for (i, p) in params.iter().enumerate() {
             let mut pt = *prog.pat(*p);
@@ -173,8 +190,12 @@ impl<'a> Fc<'a> {
         decls.extend(h.vars.iter().map(|n| Decl { name: n.clone(), kind: VK::Var, end: 0, reg: None }));
         decls.extend(h.funcs.iter().map(|(_, n)| Decl { name: n.clone(), kind: VK::Func, end: 0, reg: None }));
         decls.extend(h.lex.iter().map(|(n, k, e)| Decl { name: n.clone(), kind: *k, end: *e, reg: None }));
-        // `arguments`: a variable that holds the arguments object. A declaration of that name (a parameter, a `var`) comes first.
-        let uses_args = !self.is_arrow && (self.fn_flags & facts::ARGS != 0 || self.cap.contains_key("arguments") || self.force_ctx) && !decls.iter().any(|d| d.name == "arguments");
+        if split_arguments {
+            decls.retain(|d| d.name != "arguments" || d.kind == VK::Param);
+        }
+        let uses_args = !self.is_arrow
+            && (split_arguments || self.fn_flags & facts::ARGS != 0 || self.cap.contains_key("arguments") || self.force_ctx)
+            && !decls.iter().any(|d| d.name == "arguments");
         if uses_args {
             decls.push(Decl { name: Cow::Borrowed("arguments"), kind: VK::Var, end: 0, reg: None });
         }
@@ -338,6 +359,13 @@ impl<'a> Fc<'a> {
                 self.bind_pattern(target, r, Bind::Init)?;
             }
         }
+        let body_mark = if split_arguments {
+            let start = prog.pat(*params.last().expect("a parameter with an expression")).span.end;
+            let decl = Decl { name: Cow::Borrowed("arguments"), kind: VK::Func, end: 0, reg: None };
+            Some(self.enter(Span { start, end: span.end }, &[decl], false)?)
+        } else {
+            None
+        };
         // Function declarations are made before the first statement.
         for (f, name) in &h.funcs {
             self.declare_function(*f, name)?;
@@ -362,6 +390,9 @@ impl<'a> Fc<'a> {
         }
         if self.derived && !self.dead {
             self.derived_return(None)?;
+        }
+        if let Some(body_mark) = body_mark {
+            self.leave(body_mark);
         }
         self.leave(mark);
         if let Some(mark) = extension {

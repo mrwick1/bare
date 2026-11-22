@@ -99,6 +99,26 @@ impl Form {
     }
 }
 
+const fn operand_letters(spec: &str) -> [u8; 5] {
+    // The last entry holds the jump field, or 4 when there is no jump.
+    let mut letters = [b'-', b'-', b'-', b'-', 4];
+    let bytes = spec.as_bytes();
+    let (mut i, mut field) = (0, 0);
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b != b' ' {
+            assert!(field < 4 && b.is_ascii());
+            letters[field] = b;
+            if b == b'j' {
+                letters[4] = field as u8;
+            }
+            field += 1;
+        }
+        i += 1;
+    }
+    letters
+}
+
 /// `ops!` makes the opcode enum and its tables from one list, so the name, the form and the operand letters cannot drift apart. The
 /// letters say what each field is, in the order of the fields (`a`, `b`, `c`, `x`; for `Abx` and `AsBx`: `a`, `bx`; for `AsBxX`: `a`,
 /// `bx`, `x`; for `Sj`: the one operand). A letter list shorter than the form means that the fields that are left are 0.
@@ -118,6 +138,7 @@ macro_rules! ops {
             $(#[doc = $doc] $name,)*
         }
         impl Op {
+            const OPERANDS: &'static [[u8; 5]] = &[$(operand_letters($spec),)*];
             /// Every opcode, in the order of its number.
             pub const ALL: &'static [Op] = &[$(Op::$name,)*];
             pub fn form(self) -> Form {
@@ -354,6 +375,8 @@ ops! {
     GetElemRef Abc "w r r" "As `GetElem`, but replace the key in temporary register `c` with its converted property key before the read.",
     GetSuperElemRef Abc "w r r" "As `GetSuperElem`, but replace the key in temporary register `c` with its converted property key before the read.",
     ForInNext AsBxX "w j R" "`a` = the next enumerable key of the for-in record in the 3 registers from `x`, or jump at the end.",
+    AddKey Abc "w r r" "As `Add` for a computed member key. Short string and integer concatenations can return an atom.",
+    ForEachStep AbcX "W r r j" "Read index `c` of `b`. Write (value, index, receiver) from `a`. On absence the value is undefined and control jumps.",
 }
 
 /// Words of a slot of a string switch table: the hash, the atom and the target.
@@ -375,12 +398,21 @@ impl Op {
 
     /// The letter of field `i` (`a`, `b`, `c`, `x`), `-` when the spec has none.
     pub fn letter(self, i: usize) -> char {
-        self.spec().chars().filter(|l| *l != ' ').nth(i).unwrap_or('-')
+        if i < 4 { Self::OPERANDS[self as usize][i] as char } else { '-' }
     }
 
     /// The index of the field that holds the jump offset (`a` 0, `b` 1, `c` 2, `x` 3), if the op jumps.
     pub fn jump_field(self) -> Option<usize> {
-        (0..self.form().fields()).find(|&i| self.letter(i) == 'j')
+        let i = Self::OPERANDS[self as usize][4] as usize;
+        (i < 4).then_some(i)
+    }
+
+    pub(crate) fn emitted_flags(self) -> u8 {
+        match self {
+            Op::CreateArgs | Op::CreateRest => CF_ARGS,
+            Op::CallSuper | Op::CallSuperSpread | Op::GetSuper | Op::GetSuperElem | Op::GetSuperElemRef | Op::SetSuper | Op::SetSuperElem => CF_LINK,
+            _ => 0,
+        }
     }
 
     /// Does control go on to the next instruction? (`Jmp`, `JmpBack`, the returns and the throws do not.)
@@ -483,6 +515,8 @@ pub fn encode(words: &mut Vec<u32>, ins: &Ins) -> Result<usize, BcError> {
 
 /// As [`encode`]; `wide` asks for the wide form even when the narrow form fits (the assembler needs this for a jump).
 pub fn encode_in(words: &mut Vec<u32>, ins: &Ins, wide: bool) -> Result<usize, BcError> {
+    #[cfg(test)]
+    single_encode_tests::ENCODE_COUNT.with(|n| n.set(n.get() + 1));
     let op = ins.op;
     let form = op.form();
     let start = words.len();
@@ -617,7 +651,7 @@ pub const CF_GEN: u8 = 4;
 
 /// The code of one function. It holds no pointer to a realm's heap: its atoms are shared atoms, so all realms of a session can use it.
 #[derive(Debug)]
-pub struct Code {
+pub struct Code<A = Str> {
     pub words: Vec<u32>,
     pub(crate) eval_scopes: Box<[Option<std::rc::Rc<crate::compile::Level>>]>,
     /// The registers of a frame. Registers `0..nparams` hold the arguments at the entry; the others are not written.
@@ -626,12 +660,12 @@ pub struct Code {
     /// The numbers that do not fit an immediate.
     pub numbers: Vec<f64>,
     /// The names and the string literals.
-    pub atoms: Vec<Str>,
+    pub atoms: Vec<A>,
     /// The child functions, as numbers of the script.
     pub funcs: Vec<u32>,
     pub recipes: Recipes,
     /// Constant trees for `NewDataLit`.
-    pub(crate) data: Vec<DataLiteral>,
+    pub(crate) data: Vec<DataLiteral<A>>,
     /// The jump tables of `SwitchI` and `SwitchA` (see the module comment for the layout).
     pub tables: Vec<u32>,
     /// The name of each site, as an index of `atoms`. Each site has exactly one instruction.
@@ -656,6 +690,54 @@ pub struct Code {
     pub gen_kind: u8,
     /// The length of the longest save list of the code: the number of registers that its record has room for.
     pub gen_regs: u16,
+}
+
+impl<A: Copy> Code<A> {
+    /// Copy the immutable tables and translate every source atom.
+    pub(crate) fn map_atoms<B>(&self, mut map: impl FnMut(A) -> B) -> Code<B> {
+        Code {
+            words: self.words.clone(),
+            eval_scopes: self.eval_scopes.clone(),
+            nregs: self.nregs,
+            nparams: self.nparams,
+            numbers: self.numbers.clone(),
+            atoms: self.atoms.iter().copied().map(&mut map).collect(),
+            funcs: self.funcs.clone(),
+            recipes: self.recipes.clone(),
+            data: self.data.iter().map(|d| d.map_atoms(&mut map)).collect(),
+            tables: self.tables.clone(),
+            sites: self.sites.clone(),
+            loops: self.loops.clone(),
+            handlers: self.handlers.clone(),
+            roots: self.roots.clone(),
+            lines: self.lines.clone(),
+            flags: self.flags,
+            fn_name: self.fn_name,
+            fn_len: self.fn_len,
+            strict: self.strict,
+            noctor: self.noctor,
+            gen_kind: self.gen_kind,
+            gen_regs: self.gen_regs,
+        }
+    }
+
+    /// Memory charged to the cache, excluding the string table.
+    pub(crate) fn cache_bytes(&self) -> usize {
+        self.words.capacity() * size_of::<u32>()
+            + size_of_val(&*self.eval_scopes)
+            + self.numbers.capacity() * size_of::<f64>()
+            + self.atoms.capacity() * size_of::<A>()
+            + self.funcs.capacity() * size_of::<u32>()
+            + (self.recipes.ends.capacity() + self.recipes.keys.capacity()) * size_of::<u32>()
+            + self.data.capacity() * size_of::<DataLiteral<A>>()
+            + self.data.iter().map(DataLiteral::bytes).sum::<usize>()
+            + self.tables.capacity() * size_of::<u32>()
+            + self.sites.capacity() * size_of::<u32>()
+            + self.loops.capacity() * size_of::<LoopHeader>()
+            + self.handlers.capacity() * size_of::<Handler>()
+            + self.roots.bytes()
+            + self.lines.capacity() * size_of::<(u32, u32)>()
+    }
 }
 
 /// `Code::gen_kind` of a function that has no suspension.
@@ -876,7 +958,22 @@ impl Asm {
         self.at[l.0 as usize] = Some(self.ins.len() as u32);
     }
 
-    pub fn finish(mut self) -> Result<Assembled, BcError> {
+    pub fn finish(self) -> Result<Assembled, BcError> {
+        if self.ins.iter().any(|(_, target)| target.is_some()) {
+            return self.finish_relaxed();
+        }
+        let mut words = Vec::with_capacity(self.ins.len());
+        let mut pcs = Vec::with_capacity(self.ins.len() + 1);
+        for (ins, _) in &self.ins {
+            pcs.push(words.len() as u32);
+            encode(&mut words, ins)?;
+        }
+        pcs.push(words.len() as u32);
+        let label_pcs = self.at.iter().map(|a| a.map_or(u32::MAX, |i| pcs[i as usize])).collect();
+        Ok(Assembled { words, pcs, label_pcs, loops: Vec::new() })
+    }
+
+    fn finish_relaxed(mut self) -> Result<Assembled, BcError> {
         let n = self.ins.len();
         // A `Jmp` to a `Ret` is that `Ret`. Neither op is a safepoint and neither can throw, so the root maps and the handler ranges stay.
         for i in 0..n {
@@ -937,3 +1034,7 @@ impl Asm {
 #[cfg(test)]
 #[path = "bytecode_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "bytecode_single_encode_tests.rs"]
+mod single_encode_tests;

@@ -560,7 +560,7 @@ fn two_scripts(a: &str, b: &str, name: &str, gc: bool) -> Result<String, String>
     let shared = Arc::new(SharedAtoms::default());
     let mut prog = compile(b, &shared, Limits::default())?;
     let at = prog.codes.len();
-    prog.codes = compile_after(prog.codes, a, &shared, Limits::default(), None)?.0;
+    prog.codes = compile_after(prog.codes, a, &shared, Limits::default())?;
     let mut vm = Vm::new(prog, shared);
     if gc {
         vm.realm.heap.set_trigger(Trigger { min: 1 << 10, slack: 1 << 10 });

@@ -643,9 +643,25 @@ impl<'a> Fc<'a> {
             self.op(Op::GetElemI, dst, o, i as u32);
             return Ok(());
         }
-        let k = self.any(index)?;
+        let k = match self.key_add(index)? {
+            Some(k) => k,
+            None => self.any(index)?,
+        };
         self.op(Op::GetElem, dst, o, k);
         Ok(())
+    }
+
+    /// Evaluate an addition whose result is only used as a computed member key.
+    fn key_add(&mut self, e: ExprId) -> CR<Option<u32>> {
+        let ExprKind::Binary { op: BinaryOp::Add, left, right } = self.expr_kind(e) else { return Ok(None) };
+        let dst = self.alloc();
+        let m = self.mark();
+        let l = self.any_before(left, right)?;
+        let r = self.any(right)?;
+        self.op(Op::AddKey, dst, l, r);
+        self.free(m);
+        self.set_live(dst);
+        Ok(Some(dst))
     }
 
     fn template(&mut self, t: Id<Template>, dst: u32) -> CR {
@@ -1536,12 +1552,15 @@ impl<'a> Fc<'a> {
         };
         let k = match (private, index) {
             (Some(n), _) => Some(self.private_key(n)?),
-            (_, Some(ix)) if op == AssignOp::Assign => Some(self.any_before(ix, value)?),
-            (_, Some(ix)) => {
-                let k = self.alloc();
-                self.to(ix, k)?;
-                Some(k)
-            }
+            (_, Some(ix)) => Some(match self.key_add(ix)? {
+                Some(k) => k,
+                None if op == AssignOp::Assign => self.any_before(ix, value)?,
+                None => {
+                    let k = self.alloc();
+                    self.to(ix, k)?;
+                    k
+                }
+            }),
             _ => None,
         };
         self.line(span.start);
@@ -1760,11 +1779,39 @@ impl<'a> Fc<'a> {
 
     // ------------------------------------------------------------ effect context
 
+    fn foreach_step(&mut self, args: List<Expr>, at: u32) -> CR {
+        let mut args = self.prog.list(args);
+        let (Some(callback), Some(recv), Some(index), None) = (args.next(), args.next(), args.next(), args.next()) else {
+            unreachable!("forEachStep takes a callback, a receiver, and an index")
+        };
+        let base = self.window(4);
+        self.to(callback, base)?;
+        let recv = self.any_before(recv, index)?;
+        let index = self.any(index)?;
+        let skip = self.label();
+        self.line(at);
+        self.jump_ins(Ins::new(Op::ForEachStep, base + 1, recv, index), skip);
+        for r in base + 1..base + 4 {
+            self.set_live(r);
+        }
+        self.op(Op::CallU, base, base, 3);
+        self.bind(skip);
+        Ok(())
+    }
+
     /// Evaluate `e` for its effects only.
     pub(crate) fn effect(&mut self, e: ExprId) -> CR {
         let x = *self.prog.expr(e);
         let m = self.mark();
         match x.kind {
+            ExprKind::Call { callee, args, optional: false }
+                if self.pre
+                    && matches!(self.expr_kind(callee), ExprKind::Ident)
+                    && self.name_of(self.prog.expr(callee).span) == crate::prelude_pre::FOR_EACH_STEP
+                    && matches!(self.resolve(crate::prelude_pre::FOR_EACH_STEP, x.span.start), Res::Global) =>
+            {
+                self.foreach_step(args, x.span.start)?;
+            }
             ExprKind::Assign { op, target, value } => self.assign(op, target, value, None, x.span)?,
             ExprKind::Update { op, prefix, arg } => self.update(op, prefix, arg, None)?,
             ExprKind::Seq(list) => {

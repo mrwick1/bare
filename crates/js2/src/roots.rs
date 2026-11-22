@@ -3,9 +3,9 @@
 //!
 //! **Trigger.** `heap.rs` counts the bytes of cells that the allocator took since the last collection, on its slow path only. The fast
 //! path of [`Heap::alloc`] has no counter. Two limits (see [`crate::heap::Trigger`]): [`Heap::due`] is the limit of a collection between
-//! tasks, where the host collects with no JS frame (the roots are the globals and the host's roots). [`Heap::try_alloc`] refuses at that
-//! limit plus a slack, and [`alloc_in_task`] then collects with the frames as roots. The slack is 2 times the largest task that the
-//! journeys make, so a task collects inside itself only when it grows by more than the slack past the between-task limit.
+//! tasks, where the host collects with no JS frame (the roots are the globals and the host's roots). [`Heap::try_alloc`] refuses at the
+//! in-task limit, and [`alloc_in_task`] then collects with the frames as roots. The heap adjusts the default in-task limit after each
+//! collection based on retained growth.
 //!
 //! **Root map.** The compiler gives each safepoint of a function (an allocation, a call, a loop back edge) the set of registers that
 //! hold a value that the program can still read. A [`RootMaps`] is that set for one function: a bitmap of the registers for each
@@ -51,6 +51,26 @@ impl RootMaps {
     /// Maps for a function with `regs` registers.
     pub fn new(regs: usize) -> RootMaps {
         RootMaps { regs, pcs: Vec::new(), words: Vec::new() }
+    }
+
+    pub(crate) fn with_capacity(regs: usize, maps: usize) -> RootMaps {
+        RootMaps { regs, pcs: Vec::with_capacity(maps), words: Vec::with_capacity(maps * regs.div_ceil(64)) }
+    }
+
+    pub(crate) fn single_word(regs: usize, pcs: Vec<u32>, words: Vec<u64>) -> RootMaps {
+        debug_assert!((1..=64).contains(&regs) && pcs.len() == words.len());
+        RootMaps { regs, pcs, words }
+    }
+
+    pub(crate) fn add_words(&mut self, pc: u32, bits: &[u64]) {
+        assert!(self.pcs.last().is_none_or(|&last| last < pc), "safepoints are added in the order of pc");
+        let width = self.per_map();
+        assert!(bits.len() <= width);
+        debug_assert!(bits.len() < width || self.regs % 64 == 0 || bits.last().unwrap() >> (self.regs % 64) == 0);
+        let end = self.words.len() + width;
+        self.pcs.push(pc);
+        self.words.extend_from_slice(bits);
+        self.words.resize(end, 0);
     }
 
     fn per_map(&self) -> usize {
