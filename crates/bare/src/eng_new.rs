@@ -223,6 +223,9 @@ impl Ops<New> for Realm {
             Val::BigInt => "0n".into(),
         }
     }
+    fn rejection_text_o(&self, v: Value) -> String {
+        if self.is_error(v) { self.error_text(v) } else { self.display_o(v) }
+    }
     fn new_error_o(&mut self, proto: NV, msg: &str) -> Result<NV, Fault<New>> {
         run_v(self, |r| {
             let pl = lc(r, proto.0);

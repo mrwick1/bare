@@ -171,6 +171,7 @@ pub trait Ops<E: Eng>: Sized {
     fn range_error_o(&mut self, msg: &str) -> Fault<E>;
     fn call_o(&mut self, f: E::Raw, this: E::Raw, args: &[E::Raw]) -> Result<E::Raw, Fault<E>>;
     fn display_o(& self, v: E::Raw) -> String;
+    fn rejection_text_o(&self, v: E::Raw) -> String { self.display_o(v) }
     fn new_error_o(&mut self, proto: E::Obj, msg: &str) -> Result<E::Obj, Fault<E>>;
     fn drain_microtasks_o(&mut self) -> Result<usize, Fault<E>>;
     fn compile_function_o(&mut self, name: &str, params: &str, body: &str) -> Result<E::Obj, Fault<E>>;
