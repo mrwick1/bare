@@ -463,6 +463,100 @@ fn a_host_object_is_not_a_date_for_object_prototype_to_string() {
 }
 
 #[test]
+fn a_lazy_dictionary_global_caches_its_own_data() {
+    let (mut r, _) = filled();
+    enter(&mut r, |s| {
+        let g = s.global();
+        s.set_lazy(g, false).unwrap();
+    });
+    let source = "var sum = 0; for (var i = 0; i < 1000; i++) sum += i;";
+    let ci = r.script_code(source, Default::default()).unwrap();
+    r.run_text("implicit = 0; Object.defineProperty(globalThis, 'implicit', { enumerable: false });").unwrap();
+    assert!(r.shapes.get(r.global.shape(&r.shapes)).is_dict());
+    r.run_code(ci, false).unwrap();
+    let tag = r.shapes.watch_tag();
+    let caches = &r.pool.last().unwrap().fbs[ci].caches;
+    assert_eq!(caches.iter().filter(|c| c.shape == tag).count(), 6);
+    assert_eq!(js(&mut r, "sum + ',' + i"), "499500,1000");
+}
+
+#[test]
+fn cached_globals_follow_host_names_lazy_members_and_descriptors() {
+    let (mut r, h) = filled();
+    enter(&mut r, |s| {
+        let g = s.global();
+        let p = s.get_str(g, "op").unwrap();
+        s.set_prototype_of(g, Some(p)).unwrap();
+        s.set_lazy(g, false).unwrap();
+    });
+    r.run_text(r#"
+        implicit = 0;
+        Object.defineProperty(globalThis, 'implicit', { enumerable: false });
+        function read() { return a; }
+        function write(v) { 'use strict'; a = v; }
+        function lazy() { return lazyProp; }
+        var log = read() + ',';
+        a = 1;
+        write(2); write(3); write(4);
+        read(); read(); log += read() + ',';
+        Object.defineProperty(globalThis, 'a', { writable: false });
+        try { write(5); } catch (e) { log += e.name + ','; }
+        log += read() + ',';
+        Object.defineProperty(globalThis, 'a', { get: function () { return 6; }, configurable: true });
+        log += read() + ',';
+        delete a;
+        log += read() + ',' + lazy() + lazy() + lazy();
+    "#).unwrap();
+    assert_eq!(h.asked.borrow().iter().filter(|a| a.contains("lazyProp")).count(), 1);
+    assert_eq!(js(&mut r, "log"), "alpha,4,TypeError,4,6,alpha,777");
+}
+
+#[test]
+fn borrows_the_current_call_arguments() {
+    struct ReadArgs;
+
+    impl Host<Realm> for ReadArgs {
+        fn call<'s>(&self, s: &mut Scope<'s, Realm>, _id: u32, this: Local<'s>, args: Args<'s>, _new: bool) -> Result<Local<'s>, Error<'s>> {
+            let rt = s.engine();
+            assert_eq!(rt.raw_args_slice(args, 1, usize::MAX), Some([Value::int(2), Value::int(3)].as_slice()));
+            assert_eq!(rt.raw_args_slice(args, 1, 1), None);
+            assert_eq!(rt.raw_args_slice(args, 3, 4), None);
+            assert_eq!(rt.raw_args_slice(Args::from_slots(this.slot(), 1), 0, 1), None);
+            assert_eq!(rt.raw_args_slice(Args::from_slots(args.get(2).unwrap().slot(), 2), 0, 2), None);
+            Ok(s.undefined())
+        }
+    }
+
+    let mut r = realm();
+    r.set_host(Rc::new(ReadArgs));
+    enter(&mut r, |s| {
+        let f = s.host_function("readArgs", 0, 3, HostFn::Method).unwrap();
+        let g = s.global();
+        s.define_str(g, "readArgs", f, Attrs::METHOD).unwrap();
+    });
+    r.run_text("readArgs(1, 2, 3)").unwrap();
+}
+
+#[test]
+fn a_counted_collection_skips_live_cells_and_free_slots() {
+    let mut r = realm();
+    r.raw_collect(&[]);
+    let (keep, dead) = enter(&mut r, |s| {
+        let keep = s.new_object().unwrap();
+        let dead = s.new_object().unwrap();
+        (s.engine().raw(keep), s.engine().raw(dead))
+    });
+    let text = r.string("a small string");
+    let long = r.string(&"x".repeat(16_384));
+    let symbol = Str::new_symbol(&mut r.heap, None).unwrap().key_value();
+
+    assert_eq!(r.raw_collect(&[keep, dead, text, long, symbol]), Default::default());
+    let freed = r.raw_collect(&[keep]);
+    assert_eq!((freed.objects, freed.strings, freed.symbols), (1, 2, 1));
+    assert_eq!(r.raw_collect(&[keep]), Default::default());
+}
+
+#[test]
 fn assignment_materializes_an_inherited_host_setter() {
     for assignment in ["lzc.lazySetter = 42", "(function (key) { lzc[key] = 42; })('lazySetter')"] {
         let (mut r, _) = filled();

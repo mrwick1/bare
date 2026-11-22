@@ -43,3 +43,7 @@ A limit or a budget that protects against a slow algorithm is a sign of a design
 - Every PR enables `gh pr merge --auto --merge`, also for unsafe, GC and trait changes. CI (check, windows, miri on the unsafe modules) is the gate. The owner's session reviews after merge and opens a fix PR when needed.
 - Stacked PRs are allowed. Retarget a stacked PR to main when its base merges.
 - Each PR merges origin/main right before its final push and solves its own conflicts.
+- A PR does not change `tools/fixtures/js/test262-js2-baseline.txt`. It gives its test262 counts in its progress file. The owner's session writes the baseline on main together with the full cost matrix.
+- A PR puts new tests in a new test file per topic (`<module>_<topic>_tests.rs`). It does not append to a shared test file.
+- A PR does not change `docs/progress/cost-debt.md`. It gives its over-rule rows in its progress file. The owner's session copies them into the debt list.
+- On a conflict in a generated file (`crates/js2/src/prelude_facts.rs`), take main's version and generate the file again. Do not merge it by hand.

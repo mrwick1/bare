@@ -311,3 +311,20 @@ fn tasks_nest_and_the_budget_starts_at_the_outer_one() {
     assert_eq!(out, Ok(500));
     assert_eq!(seen.get(), 500);
 }
+
+#[test]
+fn bigint_locals_keep_their_type_and_limbs_across_collection() {
+    let mut r = realm();
+    enter(&mut r, |s| {
+        let v = s.run_script("1n << 130n").unwrap();
+        let zero = s.run_script("0n").unwrap();
+        let one = s.run_script("1n").unwrap();
+        s.engine().collect(&mut [], |_| {});
+        assert_eq!(s.type_of(v), bare_js_api::Type::BigInt);
+        assert_eq!(s.bigint_limbs(v), 3);
+        assert_eq!(s.bigint_limbs(one), 1);
+        assert_eq!(s.bigint_limbs(zero), 0);
+        let undef = s.undefined();
+        assert_eq!(s.bigint_limbs(undef), 0);
+    });
+}
