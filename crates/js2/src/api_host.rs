@@ -20,7 +20,7 @@ use crate::cell::Layout;
 use crate::gc::{AddrHasher, Live, Marker};
 use crate::interp::STOP;
 use crate::interp_rt::{Got, Key, R, Realm, Slot};
-use crate::object::K_PROXY;
+use crate::object::{K_PROXY, K_TYPED};
 use crate::object::{F_HOST, F_LAZYM, Obj};
 use crate::shapes::{A_ACC, A_C, A_E, A_W};
 use crate::string::{Chars, Str};
@@ -397,6 +397,12 @@ impl Realm {
                     self.proxy_has(x, key).map(|has| if has { Walk::Hit(Got::Val(Value::UNDEFINED)) } else { Walk::Miss })
                 };
             }
+            if x.is_kind(K_TYPED) && let Some(i) = crate::bi_typed::numeric_key(key) {
+                return Ok(match i.and_then(|i| self.typed_get(x, i)) {
+                    Some(v) => Walk::Hit(Got::Val(v)),
+                    None => Walk::Miss,
+                });
+            }
             self.fn_props(x);
             if let Some((kind, hk)) = self.hs_info(x) {
                 match (kind, key) {
@@ -594,3 +600,7 @@ impl Realm {
 #[allow(unsafe_code)]
 #[path = "api_host_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "api_host_typed_index_tests.rs"]
+mod typed_index_tests;

@@ -419,10 +419,9 @@ impl Realm {
 
     fn install_error(&mut self) {
         // The order is that of `ErrKind` and `Realm::error_protos`.
-        let names = ["TypeError", "ReferenceError", "RangeError", "SyntaxError", "Error", "EvalError", "URIError"];
         let mut error_ctor_cell = None;
         for i in [4, 0, 1, 2, 3, 5, 6] {
-            let n = names[i];
+            let n = ERROR_NAMES[i];
             let proto = self.error_protos[i];
             let nv = self.string(n);
             self.hidden(proto, "name", nv);
@@ -440,6 +439,8 @@ impl Realm {
         self.install_aggregate_error(error_ctor_cell.expect("Error"));
     }
 }
+
+pub(crate) const ERROR_NAMES: [&str; 7] = ["TypeError", "ReferenceError", "RangeError", "SyntaxError", "Error", "EvalError", "URIError"];
 
 impl Realm {
     /// An indexed object with array property semantics.

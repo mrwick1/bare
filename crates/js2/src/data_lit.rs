@@ -7,9 +7,8 @@ use crate::interp_rt::{Key as RuntimeKey, R, Realm};
 use crate::object::Obj;
 use crate::value::Value;
 
-/// Small literals stay on the register path. Bound the stack used to lower and build a recipe.
-pub(crate) const MIN_BYTES: u32 = 1024;
-const MAX_DEPTH: usize = 64;
+use crate::parse::data_scan::{MAX_DEPTH, Part, Scan};
+pub(crate) use crate::parse::data_scan::MIN_BYTES;
 
 /// A prefix tree. A container header is followed by its children in source order. Each object child has a string key first.
 #[derive(Debug)]
@@ -49,16 +48,76 @@ impl<'a> Fc<'a> {
         if !self.data_items(e, &mut items, 0)? {
             return Ok(false);
         }
+        self.emit_data_items(items, dst);
+        Ok(true)
+    }
+
+    fn emit_data_items(&mut self, items: Vec<Item<Str>>, dst: u32) {
         let index = self.data.len() as u32;
         self.data.push(DataLiteral(items.into_boxed_slice()));
         self.op(Op::NewDataLit, dst, index, 0);
-        Ok(true)
+    }
+
+    pub(crate) fn emit_data_span(&mut self, span: Span, dst: u32) -> CR {
+        if self.dead {
+            return Ok(());
+        }
+        let mut items = Vec::new();
+        if !self.span_items(span, &mut items, 0)? {
+            return Err(CompileError::Syntax("invalid checked data literal".into()));
+        }
+        self.emit_data_items(items, dst);
+        Ok(())
+    }
+
+    fn span_items(&mut self, span: Span, out: &mut Vec<Item<Str>>, depth: usize) -> CR<bool> {
+        let prog = self.prog;
+        let source = prog.text(span);
+        let mut scan = Scan::new(source, u32::MAX);
+        let mut opens = Vec::new();
+        let mut error = Ok(());
+        let built = scan.value(MAX_DEPTH - depth, &mut |part| {
+            let item = match part {
+                Part::Open(object) => {
+                    opens.push(out.len());
+                    if object { Item::Object(0) } else { Item::Array(0) }
+                }
+                Part::Close(len) => {
+                    let at = opens.pop().expect("an open data container");
+                    match &mut out[at] {
+                        Item::Object(n) | Item::Array(n) => *n = len,
+                        _ => unreachable!("a data container"),
+                    }
+                    return Some(());
+                }
+                Part::String(s) => {
+                    match self.data_string(Span { start: span.start + s.start, end: span.start + s.end }) {
+                        Ok(s) => Item::String(s),
+                        Err(e) => {
+                            error = Err(e);
+                            return None;
+                        }
+                    }
+                }
+                Part::Number(s) => {
+                    let n = crate::lex::decimal_value(prog.text(Span { start: span.start + s.start, end: span.start + s.end }), &mut String::new());
+                    Item::Scalar(Realm::num(n.unwrap_or(f64::NAN)))
+                }
+                Part::Bool(b) => Item::Scalar(Value::bool(b)),
+                Part::Null => Item::Scalar(Value::NULL),
+            };
+            out.push(item);
+            Some(())
+        });
+        error?;
+        Ok(built.is_some() && scan.at == source.len())
     }
 
     fn data_items(&mut self, e: ExprId, out: &mut Vec<Item<Str>>, depth: usize) -> CR<bool> {
         let prog = self.prog;
         let x = *prog.expr(e);
         let item = match x.kind {
+            ExprKind::Data if depth < MAX_DEPTH => return self.span_items(x.span, out, depth),
             ExprKind::Null => Item::Scalar(Value::NULL),
             ExprKind::Bool(b) => Item::Scalar(Value::bool(b)),
             ExprKind::Number(base) => Item::Scalar(Realm::num(prog.number(x.span, base).unwrap_or(f64::NAN))),
@@ -156,3 +215,7 @@ impl DataLiteral {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "data_lit_span_tests.rs"]
+mod span_tests;

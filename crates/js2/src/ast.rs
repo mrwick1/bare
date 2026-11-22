@@ -248,6 +248,8 @@ pub enum ExprKind {
     ImportCall { arg: ExprId, opts: Option<ExprId> },
     /// `import.meta`. Only in a module.
     ImportMeta,
+    /// A checked constant array or object literal, kept as a source span.
+    Data,
 }
 
 /// A template literal: `n` expressions and `n + 1` pieces. Read with [`Program::template_quasis`] and
