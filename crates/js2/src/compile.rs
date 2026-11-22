@@ -24,8 +24,7 @@
 //! the `static` blocks are functions that the parent compiles itself (their text is in its tree): see `compile_class.rs` and [`Child::ready`].
 //!
 //! **Not built** (each one is recorded in [`Compiled::unsupported`] and the code is not to be run; the driver throws the TypeError of
-//! design 6.12 that names it): generators, async functions, `await`, `yield`, `for await`, `with`, direct `eval`,
-//! `delete` of a global name. See [`Fc::unsup`] and the progress entry.
+//! design 6.12 that names it). See [`Fc::unsup`] and the progress entry.
 use crate::ast::*;
 use crate::atoms::SharedAtoms;
 use crate::bytecode::{Asm, BcError, CF_GEN, Code, GK_ASYNC, GK_ASYNCGEN, GK_GEN, Handler, Ins, Label, NO_NAME, Op, Recipes};
@@ -43,6 +42,7 @@ pub enum CompileError {
     Limit(&'static str),
     /// The atom table could not make an atom.
     Memory,
+    Syntax(String),
     Asm(BcError),
 }
 
@@ -59,6 +59,7 @@ pub(crate) type CR<T = ()> = Result<T, CompileError>;
 pub struct Level {
     pub parent: Option<Rc<Level>>,
     pub vars: Vec<LevelVar>,
+    dynamic: bool,
     /// Name to position in `vars`, for a level with more than `INDEX_MIN` names.
     index: HashMap<Box<str>, u32>,
 }
@@ -80,7 +81,8 @@ pub struct LevelVar {
 impl Level {
     pub fn new(parent: Option<Rc<Level>>, vars: Vec<LevelVar>) -> Level {
         let index = if vars.len() > INDEX_MIN { vars.iter().enumerate().map(|(i, v)| (v.name.clone(), i as u32)).collect() } else { HashMap::new() };
-        Level { parent, vars, index }
+        let dynamic = vars.first().is_some_and(|v| v.name.starts_with("%scope:")) || parent.as_ref().is_some_and(|l| l.dynamic);
+        Level { parent, vars, index, dynamic }
     }
 
     pub(crate) fn cache_bytes(&self) -> usize {
@@ -296,6 +298,7 @@ pub(crate) struct Fc<'a> {
     pub inline: Vec<Compiled>,
     pub recipes: Recipes,
     pub data: Vec<DataLiteral>,
+    pub eval_scopes: Vec<Option<Rc<Level>>>,
     /// The switch tables (`Code::tables`). A target is 0 until `finish`, which fills each `(index, label)` of `table_fix` with the `pc`.
     pub tables: Vec<u32>,
     pub table_fix: Vec<(usize, Lb)>,
@@ -386,6 +389,7 @@ impl<'a> Fc<'a> {
             inline: Vec::new(),
             recipes: Recipes::default(),
             data: Vec::new(),
+            eval_scopes: Vec::new(),
             tables: Vec::new(),
             table_fix: Vec::new(),
             unit_buf: Vec::new(),
@@ -766,6 +770,42 @@ impl<'a> Fc<'a> {
         self.free(m.reg);
     }
 
+    /// The object environments that can shadow the statically resolved binding.
+    pub(crate) fn dynamic_hops(&self, name: &str) -> Vec<(u32, u32)> {
+        let mut result = Vec::new();
+        if !self.cur_ctx.as_ref().is_some_and(|l| l.dynamic)
+            || name.starts_with(['%', '#'])
+            || matches!(name, "this" | "new.target")
+        {
+            return result;
+        }
+        for scope in self.scopes.iter().rev() {
+            if scope.find(name).is_some() {
+                return result;
+            }
+            for (marker, kind) in [("%scope:with", 0), ("%scope:eval", 1)] {
+                if let Some(Var { home: Home::Ctx { level, .. }, .. }) = scope.find(marker) {
+                    result.push((self.depth - level, kind));
+                }
+            }
+        }
+        let mut level = self.outer.as_deref();
+        let mut hops = self.depth;
+        while let Some(l) = level.filter(|l| l.dynamic) {
+            if l.find(name).is_some() {
+                break;
+            }
+            match l.vars.first().map(|v| v.name.as_ref()) {
+                Some("%scope:with") => result.push((hops, 0)),
+                Some("%scope:eval") => result.push((hops, 1)),
+                _ => {}
+            }
+            hops += 1;
+            level = l.parent.as_deref();
+        }
+        result
+    }
+
     pub(crate) fn find_var(&self, name: &str) -> Option<&Var<'a>> {
         self.scopes.iter().rev().find_map(|s| s.find(name))
     }
@@ -910,6 +950,7 @@ impl<'a> Fc<'a> {
             self.tables[at] = asm.label_pcs[l.0];
         }
         let mut code = Code::new(nregs, nparams as u16);
+        code.eval_scopes = self.eval_scopes.into_boxed_slice();
         code.fn_len = self.fn_len;
         code.strict = self.strict;
         code.noctor = self.noctor;
@@ -989,8 +1030,13 @@ pub fn compile_script(prog: &Program, facts: &Facts, atoms: &SharedAtoms) -> CR<
 
 /// [`compile_script`] for a `mode`.
 pub fn compile_script_mode(prog: &Program, facts: &Facts, atoms: &SharedAtoms, mode: ScriptMode) -> CR<Compiled> {
-    let mut c = Fc::new(prog, facts, atoms, &Input { scoped: mode.scoped, ..Input::default() });
+    compile_script_in(prog, facts, atoms, mode, None)
+}
+
+pub(crate) fn compile_script_in(prog: &Program, facts: &Facts, atoms: &SharedAtoms, mode: ScriptMode, chain: Option<Rc<Level>>) -> CR<Compiled> {
+    let mut c = Fc::new(prog, facts, atoms, &Input { scoped: mode.scoped, chain, ..Input::default() });
     c.eval = mode.eval;
+    c.force_ctx = prog.flags & (facts::EVAL | facts::INNER_EVAL) != 0;
     c.value = mode.value.then_some(0);
     c.is_script = true;
     c.strict = prog.strict;
@@ -1023,10 +1069,7 @@ pub fn compile_function(prog: &Program, fid: FuncId, id: FnId, facts: &Facts, at
         (c.gen_kind, c.noctor) = (GK_ASYNCGEN, true);
     }
     c.fn_len = prog.list(prog.func(fid).params).take_while(|&p| !matches!(prog.pat(p).kind, PatKind::Assign { .. } | PatKind::Rest(_))).count().min(u16::MAX as usize) as u16;
-    c.force_ctx = f.flags & facts::INNER_EVAL != 0;
-    if f.flags & (facts::EVAL | facts::WITH | facts::IN_WITH) != 0 {
-        c.unsup("direct eval or with");
-    }
+    c.force_ctx = f.flags & (facts::EVAL | facts::INNER_EVAL) != 0;
     let kids: Vec<_> = facts.children(Some(id)).collect();
     c.note_children(&kids);
     c.function_body(fid)?;

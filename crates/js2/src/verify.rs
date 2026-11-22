@@ -65,7 +65,7 @@ fn window(ins: &Ins, recipes: &Recipes) -> Option<u32> {
         Op::Call => 2 + ins.c,
         Op::CallU | Op::New => 1 + ins.c,
         Op::Concat | Op::NewArrLit | Op::CallSuper => ins.c,
-        Op::CallSpread => 3,
+        Op::CallSpread | Op::EvalCall => 3,
         Op::NewSpread => 2,
         Op::ObjRest => ins.x,
         Op::NewObjLit => recipes.get(ins.c as usize).map_or(0, |k| k.len() as u32),
@@ -165,6 +165,9 @@ pub fn verify(code: &Code) -> Result<(), String> {
         }
         if code.gen_kind != GK_NONE && matches!(i.op, Op::Ret | Op::RetUndef | Op::RetDerived | Op::LoadNewTarget) {
             return err("not allowed in generator code (a generator returns with RetGen or RetAsync, and its frame keeps the generator where new.target is)");
+        }
+        if i.op == Op::EvalCall && (i.c > 1 || i.x as usize >= code.eval_scopes.len()) {
+            return err("bad eval scope");
         }
         let safepoint = i.op.is_safepoint();
         if safepoint {

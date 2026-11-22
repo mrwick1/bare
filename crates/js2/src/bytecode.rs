@@ -186,6 +186,13 @@ ops! {
     SetGlobalS Abx "r S" "As `SetGlobal` in strict code: a ReferenceError when the global does not exist.",
     DeclGlobal Abx "- S" "Create the global of the site `bx` with the value `undefined` when it does not exist (the hoisting of the `var` names and the function names of a script).",
     DeclLex Abx "u S" "The slot `a` of the current context is the global lexical binding of the site `bx` (a top-level `let` or `class`): other scripts of the realm read it by name. A SyntaxError when the name is declared already.",
+    DeclEval Abx "u S" "Declare the name at site `bx` in the eval variable environment. Zero means global, otherwise `a - 1` is the context distance.",
+    InitEval Abc "r u S" "Store an eval function declaration without searching with environments.",
+    InitEvalScope Abc "r - -" "Give a new eval variable environment a null prototype.",
+    ScopeGet Abc "w r S" "Read the binding at site `c` from object environment `b`.",
+    ScopeSet Abc "r r S" "Store `b` into the binding at site `c` of object environment `a`.",
+    ScopeObject Abc "w r -" "Convert the with operand `b` to an object in `a`.",
+    FindScope AbcX "w u u S" "Find the name at site `x` in the context at distance `b`. `c` is 0 for with and 1 for eval.",
     CheckLex Abx "- S" "A SyntaxError when the global lexical environment has the name of the site `bx` already, or the global object has a fixed property of that name (the early check of a top-level `let` that lives in a register).",
     DeclLexC Abx "u S" "As `DeclLex` for a top-level `const`: an assignment throws a TypeError.",
     TypeofGlobal Abx "w S" "`a` = `typeof` the global of the site `bx`. A missing name gives `\"undefined\"`.",
@@ -317,6 +324,7 @@ ops! {
     LoadBigInt Abx "w A" "`a` = the BigInt whose literal text (no `n`, no `_`, with its `0x`, `0o` or `0b` prefix) is `atoms[bx]`.",
     ArraySpread Abc "r r" "Append every value that the iterator of `b` gives to the array `a` (`[...b]`, an argument `...b`).",
     ArrayHole Abc "r" "Append a hole to the array `a` (`[1, , 2]`).",
+    EvalCall AbcX "w R u u" "As CallSpread. If the callee is the eval intrinsic, use lexical chain `x`. `c` permits new.target.",
     CallSpread Abc "w R" "`a = b(...)` with the arguments in an array: the callee is in `b`, `this` in `b+1`, the array in `b+2`.",
     NewSpread Abc "w R" "`a = new b(...)` with the arguments in an array: the constructor is in `b`, the array in `b+1`.",
     CopyProps Abc "r r" "Copy the own enumerable properties of `b` to the object `a` (`{...b}`); `undefined` and `null` copy nothing.",
@@ -649,6 +657,7 @@ pub const CF_GEN: u8 = 4;
 #[derive(Debug)]
 pub struct Code<A = Str> {
     pub words: Vec<u32>,
+    pub(crate) eval_scopes: Box<[Option<std::rc::Rc<crate::compile::Level>>]>,
     /// The registers of a frame. Registers `0..nparams` hold the arguments at the entry; the others are not written.
     pub nregs: u16,
     pub nparams: u16,
@@ -692,6 +701,7 @@ impl<A: Copy> Code<A> {
     pub(crate) fn map_atoms<B>(&self, mut map: impl FnMut(A) -> B) -> Code<B> {
         Code {
             words: self.words.clone(),
+            eval_scopes: self.eval_scopes.clone(),
             nregs: self.nregs,
             nparams: self.nparams,
             numbers: self.numbers.clone(),
@@ -718,6 +728,7 @@ impl<A: Copy> Code<A> {
     /// Memory charged to the cache, excluding the string table.
     pub(crate) fn cache_bytes(&self) -> usize {
         self.words.capacity() * size_of::<u32>()
+            + size_of_val(&*self.eval_scopes)
             + self.numbers.capacity() * size_of::<f64>()
             + self.atoms.capacity() * size_of::<A>()
             + self.funcs.capacity() * size_of::<u32>()
@@ -759,6 +770,7 @@ impl Code {
     pub fn new(nregs: u16, nparams: u16) -> Code {
         Code {
             words: Vec::new(),
+            eval_scopes: Box::default(),
             nregs,
             nparams,
             numbers: Vec::new(),

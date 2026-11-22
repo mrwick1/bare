@@ -272,6 +272,16 @@ impl Realm {
         o.is_callable() && !o.has_flag(F_NATIVE | F_CLASS) && !self.function(o.value()).is_some_and(|(ci, _)| self.prog[ci].gen_kind == crate::bytecode::GK_ASYNC || (self.prog[ci].noctor && self.prog[ci].gen_kind == crate::bytecode::GK_NONE))
     }
 
+    pub(crate) fn prepare_own_prototype(&mut self, o: Obj, key: Key) -> R<()> {
+        if matches!(key, Key::Name(k) if k == self.k_prototype) && self.needs_prototype(o) {
+            self.fn_props(o);
+            if self.shapes.find(o.shape(&self.shapes), self.k_prototype).is_none() {
+                self.make_prototype(o)?;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn make_prototype(&mut self, f: Obj) -> R<Value> {
         let kind = self.function(f.value()).map_or(0, |(ci, _)| self.prog[ci].gen_kind);
         if kind == crate::bytecode::GK_GEN || kind == crate::bytecode::GK_ASYNCGEN {

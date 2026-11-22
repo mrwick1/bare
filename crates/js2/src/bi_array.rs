@@ -138,7 +138,7 @@ fn del_at(rt: &mut Realm, v: Value, i: f64) -> R<()> {
 
 /// Create the result of an array method, using the original array's species when present.
 fn species_create(rt: &mut Realm, o: Value, n: f64) -> R<Obj> {
-    if Realm::obj(o).is_some_and(|x| rt.is_array(x)) {
+    if rt.is_array_value(o)? {
         let mut c = rt.get_prop(o, Key::Name(rt.k_constructor))?;
         if Realm::obj(c).is_some() {
             c = rt.get_prop(c, Key::Name(rt.wk[SPECIES]))?;
@@ -366,7 +366,7 @@ fn array_from(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
 }
 
 fn is_array(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    Ok(Value::bool(Realm::obj(arg(args, 0)).is_some_and(|o| rt.is_array(o))))
+    Ok(Value::bool(rt.is_array_value(arg(args, 0))?))
 }
 
 fn at(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {

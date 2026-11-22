@@ -233,7 +233,7 @@ impl Realm {
     pub(crate) fn buffer_intrinsic(&mut self, name: &'static str) -> Obj {
         let key = self.intern(name);
         self.lazy_prep(self.global, key);
-        let c = Realm::obj(self.shared_fn(self.global, name)).expect("buffer constructor");
+        let c = self.shared_fn(self.global, name).and_then(Realm::obj).expect("buffer constructor");
         ctor_proto(self, c)
     }
 

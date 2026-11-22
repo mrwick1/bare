@@ -3,8 +3,7 @@
 //! for its first call ([`Lazy`]): the pre-parse of the whole text finds every early error at load, and the full parse and the compile of
 //! one function happen at its first call. [`compile`] still compiles every function (the examples and the tests of the compiler use it).
 //!
-//! What a lazy function changes: a construct that the compiler does not build yet (direct `eval`, `with`, a generator or `async` function,
-//! ...) stops the load when the top level code of the script holds it (a generator declared there counts). In the code of a function
+//! An unsupported construct stops the load when the top level of the script contains it. In the code of a function
 //! it fails at the first call of the function that holds it: the call throws an `Error` ("not supported yet: ...") that a `try` can
 //! catch, and a function that nobody calls never fails. A function with `super` in it or in a function inside it is compiled at load
 //! (the `CF_LINK` flag of its code is not known before the compile).
@@ -22,7 +21,7 @@ use crate::compile::{Child, Compiled, Input, ModInfo, ScriptMode, compile_functi
 use crate::facts::{ARGS, EVAL, Facts, FnFacts, FnId, INNER_EVAL, SUPER};
 use crate::interp::{Exit, LazyCompile, Program, Vm};
 use crate::interp_rt::Realm;
-use crate::parse::{Limits, parse_function, parse_module_lazy, parse_script_lazy};
+use crate::parse::{Limits, parse_eval_lazy, parse_function, parse_module_lazy, parse_script_lazy};
 use crate::shapes::A_E;
 use crate::value::Value;
 use std::rc::Rc;
@@ -170,8 +169,25 @@ impl LazyCompile for Lazy {
         Ok(ci)
     }
 
-    fn script(&mut self, codes: &Codes, src: &str, mode: ScriptMode) -> Result<usize, String> {
-        load_unit(self, codes, src, Mode::Script(mode)).map(|(at, _)| at)
+    fn script_in(
+        &mut self, codes: &Codes, src: &str, mode: ScriptMode,
+        chain: Option<Rc<crate::compile::Level>>, strict: bool, new_target: bool,
+    ) -> Result<usize, String> {
+        if !mode.eval {
+            return load_unit(self, codes, src, Mode::Script(mode)).map(|(at, _)| at);
+        }
+        // Eval parses and compiles against the caller's environment.
+        let mut facts = Facts::new();
+        let prog = parse_eval_lazy(src, self.limits, &mut facts, strict, new_target)
+            .map_err(|e| format!("SyntaxError: {}", e.msg))?;
+        let top = crate::compile::compile_script_in(&prog, &facts, &self.atoms, mode, chain).map_err(|e| match e {
+            crate::compile::CompileError::Syntax(msg) => format!("SyntaxError: {msg}"),
+            _ => format!("compile: {e:?}"),
+        })?;
+        let (mut new, mut pending) = (Vec::new(), Vec::new());
+        Loader { source: src, facts: &mut facts, atoms: &self.atoms, limits: self.limits, base: 0, codes: &mut new, lazy: Some(&mut pending), scoped: mode.scoped, pre: false }.add(top)?;
+        let unit = UnitCode { codes: new, facts, pending, info: None };
+        bind_unit(self, codes, Rc::from(src), unit, mode.scoped).map(|(at, _)| at)
     }
 
     fn module(&mut self, codes: &Codes, src: &str) -> Result<(usize, ModInfo), String> {
@@ -183,8 +199,13 @@ impl LazyCompile for Lazy {
 /// Bind a unit before changing the program. A failure adds nothing.
 fn load_unit(lazy: &mut Lazy, codes: &Codes, src: &str, mode: Mode) -> Result<(usize, Option<ModInfo>), String> {
     let scoped = matches!(mode, Mode::Script(s) if s.scoped);
-    let (source, UnitCode { codes: mut new, facts, pending, info }) =
+    let (source, unit) =
         code_cache::get_or_compile(src, mode, lazy.limits, &lazy.atoms, || compile_unit(src, mode, lazy.limits, &lazy.atoms))?;
+    bind_unit(lazy, codes, source, unit, scoped)
+}
+
+fn bind_unit(lazy: &mut Lazy, codes: &Codes, source: Rc<str>, unit: UnitCode, scoped: bool) -> Result<(usize, Option<ModInfo>), String> {
+    let UnitCode { codes: mut new, facts, pending, info } = unit;
     let base = codes.len();
     if base.checked_add(new.len() - 1).is_none_or(|last| last > u32::MAX as usize) {
         return Err("too many codes in the realm".into());

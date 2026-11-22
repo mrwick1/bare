@@ -110,11 +110,12 @@ impl PortableUnit {
     fn bytes(&self) -> usize {
         let UnitCode { codes, facts, pending, info } = &self.code;
         let mut levels = HashSet::new();
-        let chains = pending
-            .iter()
-            .map(|(_, child)| {
-                let mut bytes = child.name.as_ref().map_or(0, |s| s.len());
-                let mut level = child.chain.as_ref();
+        let child_names: usize = pending.iter().map(|(_, child)| child.name.as_ref().map_or(0, |s| s.len())).sum();
+        let chains = pending.iter().filter_map(|(_, child)| child.chain.as_ref())
+            .chain(codes.iter().flat_map(|code| code.eval_scopes.iter().flatten()))
+            .map(|root| {
+                let mut bytes = 0;
+                let mut level = Some(root);
                 while let Some(current) = level {
                     if !levels.insert(Rc::<Level>::as_ptr(current)) {
                         break;
@@ -143,6 +144,7 @@ impl PortableUnit {
             + facts.caps.capacity() * size_of::<crate::ast::Span>()
             + facts.by_start.capacity() * size_of::<crate::facts::FnId>()
             + pending.capacity() * size_of::<(usize, Child)>()
+            + child_names
             + chains
             + module
             + size_of::<(Key, Entry)>()

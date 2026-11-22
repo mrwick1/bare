@@ -132,7 +132,7 @@ pub(crate) fn intrinsic(rt: &mut Realm) -> (Obj, Obj) {
     // Typed arrays share Array.prototype.toString, which uses their join method.
     let name = rt.k_to_string;
     rt.lazy_prep(rt.array_proto, name);
-    let to_string = rt.shared_fn(rt.array_proto, "toString");
+    let to_string = rt.shared_fn(rt.array_proto, "toString").expect("the array toString entry");
     rt.hidden(p, "toString", to_string);
     rt.lazy_table(
         p,

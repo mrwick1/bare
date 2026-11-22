@@ -11,12 +11,13 @@ impl Realm {
     pub(crate) fn install_number(&mut self) {
         let proto = self.number_proto;
         let c = self.ctor("Number", 1, number_ctor, proto);
-        // The table of the global functions comes first: `Number.parseInt` is one of them (`Kind::Alias`).
+        // Register the globals together. `Number.parseInt` and `Number.parseFloat` alias two of these functions.
         let g = self.global;
         static GLOBAL_FUNCTIONS: &[Ent] = &[
             m("parseInt", 2, parse_int), m("parseFloat", 1, parse_float),
             m("isNaN", 1, global_is_nan), m("isFinite", 1, global_is_finite),
             crate::lazy::factory("BigInt", crate::bi_bigint::bigint_global),
+            m("eval", 1, crate::api::eval_native), crate::bi_proxy::PROXY,
         ];
         self.lazy_table(g, GLOBAL_FUNCTIONS);
         static NUMBER_STATICS: &[Ent] = &[

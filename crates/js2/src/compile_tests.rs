@@ -1372,18 +1372,6 @@ fn every_construct_of_a_class_passes_the_verifier() {
 }
 
 #[test]
-fn constructs_the_compiler_does_not_build_are_listed() {
-    let cases = [
-        ("with (a) { b; }", "with"),
-        ("eval('1');", "direct eval or with"),
-    ];
-    for (body, what) in cases {
-        let f = outer(&format!("function f(a) {{ {body} }}"));
-        assert!(f.unsupported.contains(&what), "{body}: {:?}", f.unsupported);
-    }
-}
-
-#[test]
 fn handler_ranges_leave_out_the_inlined_finalizers() {
     // The `try` block is 7..20 and the `catch` clause 24..30. The finalizer is inlined after each of them (20..23, 30..33) and once more
     // for an exception (34..37). Neither inlined copy is inside a range, so an exception in it goes to the next handler out.

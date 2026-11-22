@@ -59,6 +59,17 @@ impl Realm {
         format!("Symbol({})", self.text(s))
     }
 
+    /// The same symbol is used by `with` and the public `Symbol.unscopables` property.
+    pub(crate) fn symbol_unscopables(&mut self) -> Str {
+        if let Some(s) = self.unscopables {
+            return s;
+        }
+        let s = Str::new_symbol(&mut self.heap, Some(Chars::One(b"Symbol.unscopables"))).expect("memory");
+        self.keep(s.key_value());
+        self.unscopables = Some(s);
+        s
+    }
+
     pub(crate) fn install_symbol(&mut self) {
         let c = self.new_native(symbol_ctor, true, 0, "Symbol");
         let g = self.global;
@@ -85,6 +96,9 @@ impl Realm {
             let k = self.intern(&d["Symbol.".len()..]);
             self.define_attrs(c, Key::Name(k), 0, self.wk[i].key_value()).expect("define");
         }
+        let k = self.intern("unscopables");
+        let s = self.symbol_unscopables();
+        self.define_attrs(c, Key::Name(k), 0, s.key_value()).expect("define");
         self.method(p, "toString", 0, symbol_to_string);
         self.method(p, "valueOf", 0, symbol_value_of);
         let getter = self.new_native(symbol_description, false, 0, "get description");
