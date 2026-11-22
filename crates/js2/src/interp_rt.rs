@@ -874,6 +874,16 @@ impl Realm {
         self.intern(&i.to_string())
     }
 
+    /// Look up an index name without creating an atom for a missing property.
+    pub(crate) fn find_idx_atom(&self, i: u32) -> Option<Str> {
+        use std::io::Write;
+        let mut bytes = [0; 10];
+        let mut tail = bytes.as_mut_slice();
+        write!(tail, "{i}").expect("a u32 fits in ten digits");
+        let len = 10 - tail.len();
+        self.atoms.find(&Chars::One(&bytes[..len]))
+    }
+
     // ---- operators ----
 
     /// `a + b` when the fast path (two numbers) did not apply.
@@ -1871,3 +1881,7 @@ impl Realm {
         self.define(o, Key::Name(k), v).expect("define");
     }
 }
+
+#[cfg(test)]
+#[path = "interp_rt_index_atom_tests.rs"]
+mod index_atom_tests;
