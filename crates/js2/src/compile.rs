@@ -83,6 +83,13 @@ impl Level {
         Level { parent, vars, index }
     }
 
+    pub(crate) fn cache_bytes(&self) -> usize {
+        size_of::<Level>() + self.vars.capacity() * size_of::<LevelVar>()
+            + self.vars.iter().map(|v| v.name.len() + v.env.as_ref().map_or(0, |s| s.len())).sum::<usize>()
+            + self.index.capacity() * (size_of::<(Box<str>, u32)>() + 1)
+            + self.index.keys().map(|s| s.len()).sum::<usize>()
+    }
+
     fn find(&self, name: &str) -> Option<&LevelVar> {
         if self.index.is_empty() {
             self.vars.iter().rev().find(|v| &*v.name == name)
@@ -958,7 +965,7 @@ pub(crate) struct ScopeMark {
 // ---------------------------------------------------------------- entry points
 
 /// What a script is compiled for. The default is a script that nobody asks for a value.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct ScriptMode {
     /// The code returns the completion value of the script. The other code returns `undefined` and pays nothing for it.
     pub value: bool,
