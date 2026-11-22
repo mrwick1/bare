@@ -299,6 +299,8 @@ pub struct Realm {
     pub object_proto: Obj,
     pub function_proto: Obj,
     pub array_proto: Obj,
+    /// The prototype epoch and the proof that the stock array chain has no named indices.
+    array_push_proof: (u64, bool),
     pub(crate) array_ctor: Value,
     pub error_proto: Obj,
     pub s_object: ShapeId,
@@ -482,6 +484,7 @@ impl Realm {
             object_proto,
             function_proto,
             array_proto,
+            array_push_proof: (0, false),
             array_ctor: Value::UNDEFINED,
             error_proto,
             s_object,
@@ -886,6 +889,21 @@ impl Realm {
 
     // ---- operators ----
 
+    /// Addition for a computed member key. Intern short Latin-1 results before making a value string.
+    pub(crate) fn add_key_slow(&mut self, x: Value, y: Value) -> R<Value> {
+        let atom = if let (Some(i), Some(s)) = (y.as_int(), Self::str_of(x)) {
+            self.atoms.intern_int_concat(&mut self.heap, s, i, false)
+        } else if let (Some(i), Some(s)) = (x.as_int(), Self::str_of(y)) {
+            self.atoms.intern_int_concat(&mut self.heap, s, i, true)
+        } else {
+            None
+        };
+        match atom {
+            Some(s) => Ok(s.expect("memory").value()),
+            None => self.add_slow(x, y),
+        }
+    }
+
     /// `a + b` when the fast path (two numbers) did not apply.
     pub fn add_slow(&mut self, mut x: Value, mut y: Value) -> R<Value> {
         if Realm::obj(x).is_some() {
@@ -991,6 +1009,29 @@ impl Realm {
     /// The prototype of an object as an object.
     pub(crate) fn proto_of(&self, o: Obj) -> Option<Obj> {
         o.proto(&self.shapes).and_then(|p| Realm::obj(Value::pointer(Kind::Object, p)))
+    }
+
+    pub(crate) fn clean_array_push_prototypes(&mut self) -> bool {
+        // Dense element writes and host flags can change without a shape transition.
+        if !self.array_proto.is_empty() || self.array_proto.has_flag(F_HOST | F_LAZYM) || self.object_proto.has_flag(F_HOST | F_LAZYM) {
+            return false;
+        }
+        let (epoch, clean) = self.array_push_proof;
+        if epoch == self.shapes.proto_epoch() { clean } else { self.refresh_array_push_proof() }
+    }
+
+    #[cold]
+    fn refresh_array_push_proof(&mut self) -> bool {
+        let a = self.array_proto;
+        let o = self.object_proto;
+        a.set_flag(F_PROTO);
+        o.set_flag(F_PROTO);
+        let clean = a.proto(&self.shapes) == Some(o.cell())
+            && o.proto(&self.shapes).is_none()
+            && !self.shapes.has_indexed_name(a.shape(&self.shapes))
+            && !self.shapes.has_indexed_name(o.shape(&self.shapes));
+        self.array_push_proof = (self.shapes.proto_epoch(), clean);
+        clean
     }
 
     /// What `o` itself holds for `key`.
