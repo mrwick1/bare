@@ -94,7 +94,7 @@ fn stack<E: Eng>(it: &mut E::Vm, o: E::Obj) -> Option<String> {
 /// The text after `Uncaught (in promise) `: `name: message` and the first frame for an object with a `stack`, else the value.
 fn reason_text<E: Eng>(d: &Dom<E>, it: &mut E::Vm, reason: E::Raw) -> String {
     let Val::Object(o) = E::kind(reason) else { return d.error_text(it, reason) };
-    let Some(stack) = stack::<E>(it, o) else { return it.display_o(reason) };
+    let Some(stack) = stack::<E>(it, o) else { return it.rejection_text_o(reason) };
     let head = d.error_text(it, reason);
     match stack.lines().map(str::trim).find(|l| l.starts_with("at ")) {
         Some(at) => format!("{head} {}", at.chars().take(512).collect::<String>()),
