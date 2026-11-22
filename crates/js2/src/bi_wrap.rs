@@ -81,6 +81,8 @@ impl Realm {
             self.number_proto
         } else if v.as_bool().is_some() {
             self.boolean_proto
+        } else if v.is_bigint() {
+            self.bigint_intrinsics().1
         } else if Realm::sym_of(v).is_some() {
             self.fn_props(self.symbol_proto);
             self.symbol_proto

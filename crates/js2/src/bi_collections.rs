@@ -63,7 +63,7 @@ pub(crate) struct Colls {
     iters: [Value; 2],
 }
 
-/// The key `v` as a `SameValueZero` key: equal keys have equal bits (a string and a symbol are compared apart from this).
+/// The key `v` as a `SameValueZero` key: equal keys have equal bits (strings and BigInts compare by value).
 fn norm(v: Value) -> Value {
     match v.as_f64() {
         Some(f) if f.is_nan() => Value::number(f64::NAN),
@@ -175,18 +175,21 @@ impl Realm {
     fn coll_hash(&mut self, k: Value) -> u32 {
         match Realm::str_of(k) {
             Some(s) => mix(s.hash(&mut self.heap).expect("memory") as u64),
-            None => mix(k.bits()),
+            None => match Realm::big_of(k) {
+                Some(b) => mix(crate::bigint::hash(b.bigint()) as u64),
+                None => mix(k.bits()),
+            },
         }
     }
 
     fn coll_eq(&mut self, a: Value, b: Value) -> bool {
-        a == b || matches!((Realm::str_of(a), Realm::str_of(b)), (Some(x), Some(y)) if Str::equals(&mut self.heap, x, y).expect("memory"))
+        a == b || self.strict_eq(a, b)
     }
 
     /// The slot of the key of the entry for `k` (normalized), if the table has one.
     fn tab_find(&mut self, t: Tab, k: Value, h: u32) -> Option<usize> {
-        if Realm::str_of(k).is_none() {
-            // No string: equal keys have equal bits, so the chain is walked over the slice with no call.
+        if Realm::str_of(k).is_none() && !k.is_bigint() {
+            // Equal keys have equal bits in this branch. Walk the chain over the slice.
             let w = t.w;
             return t.c.with(|s| {
                 let nb = s[CAP].as_int().expect("a count") as usize / 2;
@@ -331,6 +334,19 @@ impl Realm {
             return Ok((o, Tab { c, w: if kind == K_MAP { 3 } else { 2 } }));
         }
         self.type_error(&format!("Method {what} called on incompatible receiver"))
+    }
+
+    /// Copy live Map or Set entries in insertion order before inspection can run getters.
+    pub(crate) fn inspect_collection(&self, o: Obj, limit: usize) -> Option<(bool, Vec<(Value, Value)>)> {
+        let kind = o.kind();
+        if !matches!(kind, K_MAP | K_SET) {
+            return None;
+        }
+        let c = Realm::ctx(o.slot(&self.shapes, 0))?;
+        let is_map = kind == K_MAP;
+        let mut cur = Cur { t: Tab { c, w: if is_map { 3 } else { 2 } }, i: 0 };
+        let entries = std::iter::from_fn(|| cur.next()).take(limit).collect();
+        Some((is_map, entries))
     }
 
     fn this_weak(&mut self, this: Value, kind: u32, what: &str) -> R<(Obj, WeakTab)> {

@@ -24,8 +24,8 @@
 //!
 //! A hit is the compare of the shape id of the receiver with `Cache::shape`, then one load or store at `Cache::loc` (`Obj::loc`).
 //! A set that adds a property is a hit too: the entry has the shape after the add, and the hit stores the value and the new shape id.
-//! That entry is made only when the new slot is inline, so no allocation is needed. A dictionary shape (`Shapes::cacheable`) never
-//! gets an entry.
+//! That entry is made only when the new slot is inline, so no allocation is needed. A cache guarded by shape ID does not take
+//! dictionary shapes (`Shapes::cacheable`). Global sites instead guard the address of an own data slot with the global mutation tag.
 //!
 //! **Prototype entries** (`docs/design-js2-proto-ic.md`). A read that finds a data property on the prototype chain makes an entry too.
 //! The record keeps `shape` 0 (the own-property hit never matches), the shape of the receiver in `to` (a shape id is never 0), and the
@@ -39,9 +39,7 @@
 //! After a collection that freed a shape (`Shapes::epoch` changed) [`Realm::collect`] clears every record, because an id may name
 //! another shape now.
 //!
-//! **Not here:** `Symbol`, `BigInt`, the full `Number` to string rules (a number prints with Rust's rules, so `1e21` differs), and the
-//! built-ins past the core (`Map`, `Set`, `JSON`, `Date`, `Promise`, `RegExp`). `ToPrimitive` calls only native `valueOf` and `toString`
-//! (`builtins.rs`).
+//! The slow operator paths use the conversions here. `ToPrimitive` calls script and native methods (`builtins.rs`).
 use crate::atoms::{Atoms, SharedAtoms};
 use crate::bytecode::Code;
 use crate::cell::Layout;
@@ -337,6 +335,7 @@ pub struct Realm {
     /// `Symbol.prototype`, and the well-known symbols in the order of `bi_symbol::WK` (`bi_symbol.rs`). The members of `Symbol` and of
     /// the prototype are made at the first use of either (`Realm::fn_props`).
     pub symbol_proto: Obj,
+    pub(crate) bigint_intrinsics: Option<(Obj, Obj)>,
     pub symbol_ctor: Option<Obj>,
     /// The lazy tables of the built-in objects (`lazy.rs`).
     pub(crate) ltab: crate::lazy::Lazy,
@@ -510,6 +509,7 @@ impl Realm {
             number_proto,
             boolean_proto,
             symbol_proto,
+            bigint_intrinsics: None,
             symbol_ctor: None,
             ltab: Default::default(),
             wk,
@@ -635,6 +635,12 @@ impl Realm {
         unsafe { crate::blob::Blob::from_value(v) }
     }
 
+    #[inline]
+    pub(crate) fn big_of(v: Value) -> Option<crate::blob::Blob> {
+        // SAFETY: by the invariant of `Realm::obj`.
+        unsafe { crate::blob::Blob::from_bigint(v) }
+    }
+
     /// The symbol of a value of kind `Symbol`.
     #[inline]
     pub fn sym_of(v: Value) -> Option<Str> {
@@ -741,6 +747,8 @@ impl Realm {
             false
         } else if let Some(s) = Realm::str_of(v) {
             !s.is_empty()
+        } else if let Some(b) = Realm::big_of(v) {
+            !b.bigint().is_zero()
         } else {
             true
         }
@@ -768,7 +776,7 @@ impl Realm {
             let p = self.to_primitive(v, Hint::Number)?;
             return self.to_number(p);
         }
-        let what = if Realm::sym_of(v).is_some() { "a Symbol value" } else { "a value" };
+        let what = if Realm::sym_of(v).is_some() { "a Symbol value" } else if v.is_bigint() { "a BigInt value" } else { "a value" };
         self.type_error(&format!("cannot convert {what} to a number"))
     }
 
@@ -822,6 +830,8 @@ impl Realm {
         } else if Realm::obj(v).is_some() {
             let p = self.to_primitive(v, Hint::String)?;
             return self.to_str(p);
+        } else if let Some(b) = Realm::big_of(v) {
+            self.bigint_text(b, 10)?
         } else {
             let what = if Realm::sym_of(v).is_some() { "a Symbol value" } else { "a value" };
             return self.type_error(&format!("cannot convert {what} to a string"));
@@ -882,6 +892,9 @@ impl Realm {
             let (a, b) = (self.to_str(x)?, self.to_str(y)?);
             return Ok(Str::concat(&mut self.heap, a, b).expect("memory").value());
         }
+        if x.is_bigint() || y.is_bigint() {
+            return self.bigint_binary(crate::bytecode::Op::Add, x, y);
+        }
         let (a, b) = (self.to_number(x)?, self.to_number(y)?);
         Ok(Value::number(a + b))
     }
@@ -899,6 +912,12 @@ impl Realm {
             let (ca, cb) = (a.chars().expect("flat"), b.chars().expect("flat"));
             return Ok(Some(ca.units().cmp(cb.units())));
         }
+        if let Some(a) = Realm::big_of(x) {
+            return self.bigint_order(a, y);
+        }
+        if let Some(b) = Realm::big_of(y) {
+            return Ok(self.bigint_order(b, x)?.map(std::cmp::Ordering::reverse));
+        }
         let (a, b) = (self.to_number(x)?, self.to_number(y)?);
         Ok(a.partial_cmp(&b))
     }
@@ -912,7 +931,10 @@ impl Realm {
         }
         match (Realm::str_of(x), Realm::str_of(y)) {
             (Some(a), Some(b)) => Str::equals(&mut self.heap, a, b).expect("memory"),
-            _ => false,
+            _ => match (Realm::big_of(x), Realm::big_of(y)) {
+                (Some(a), Some(b)) => crate::bigint::cmp(a.bigint(), b.bigint()).is_eq(),
+                _ => false,
+            },
         }
     }
 
@@ -937,6 +959,12 @@ impl Realm {
         // A symbol is equal to itself only; it never converts to a number.
         if x.as_pointer().is_some_and(|p| p.0 == Kind::Symbol) || y.as_pointer().is_some_and(|p| p.0 == Kind::Symbol) {
             return Ok(x == y);
+        }
+        if let Some(a) = Realm::big_of(x) {
+            return Ok(!nullish(y) && self.bigint_order(a, y)?.is_some_and(|ord| ord.is_eq()));
+        }
+        if let Some(b) = Realm::big_of(y) {
+            return Ok(!nullish(x) && self.bigint_order(b, x)?.is_some_and(|ord| ord.is_eq()));
         }
         let (a, b) = (self.to_number(x)?, self.to_number(y)?);
         Ok(a == b)
@@ -1109,6 +1137,11 @@ impl Realm {
                 Key::Name(k) => Self::got(self.lookup_g(self.symbol_proto, k)),
                 Key::Idx(_) => Got::Val(Value::UNDEFINED),
             });
+        }
+        if recv.is_bigint() {
+            let proto = self.bigint_intrinsics().1;
+            let k = match key { Key::Name(k) => k, Key::Idx(i) => self.idx_atom(i) };
+            return Ok(Self::got(self.lookup_g(proto, k)));
         }
         if recv.is_undefined() || recv.is_null() {
             let name = match key {
@@ -1428,8 +1461,6 @@ impl Realm {
         }
     }
 
-    /// `GetGlobal`: the property of the global object, or a `ReferenceError` when it is not there.
-
     /// Make the entry of the global site `site` for the own data property in slot `slot` of the global object. The first run only marks
     /// the site (as for a property site), the second makes the entry.
     fn fill_global(&mut self, fb: &mut Feedback, site: usize, slot: u32) {
@@ -1442,17 +1473,16 @@ impl Realm {
     }
 
     /// `GetGlobal`: the property of the global object, or a `ReferenceError` when it is not there. A global lexical binding comes first and
-    /// has no entry (`declare_lex` changes the tag, so an entry for a property that a binding now hides does not match). An own data
-    /// property of a tree shape gets a cache entry (the address of its slot, valid while the tag of the global object stays); an accessor
-    /// and the rest are looked up each time.
+    /// has no entry (`declare_lex` changes the tag). The global is an ordinary object. Its own data properties come before lazy
+    /// and inherited host properties. The cache guards the slot address with the global mutation tag, which also covers changes
+    /// to a dictionary shape in place. Accessors and inherited properties use the slow lookup.
     pub fn get_global_slow(&mut self, fb: &mut Feedback, site: usize, name: Str) -> R<Got> {
         if let Some(v) = self.lex_get(name) {
             return Ok(Got::Val(v?));
         }
         let o = self.global;
         let id = o.shape(&self.shapes);
-        if self.shapes.cacheable(id)
-            && let Some(e) = self.shapes.find(id, name)
+        if let Some(e) = self.shapes.find(id, name)
             && e.attrs() & A_ACC == 0
         {
             self.fill_global(fb, site, e.slot());
@@ -1474,7 +1504,7 @@ impl Realm {
         Ok(got)
     }
 
-    /// `SetGlobal` (`strict` false) and `SetGlobalS`: a global lexical binding first; then a writable own data property of a tree shape
+    /// `SetGlobal` (`strict` false) and `SetGlobalS`: a global lexical binding first; then a writable own data property
     /// gets a cache entry as in `get_global_slow`. In strict code a name that is not there is a `ReferenceError`. An add, a setter and
     /// the rest are `set_prop_g`.
     pub fn set_global_slow(&mut self, fb: &mut Feedback, site: usize, name: Str, v: Value, strict: bool) -> R<Put> {
@@ -1484,8 +1514,7 @@ impl Realm {
         }
         let o = self.global;
         let id = o.shape(&self.shapes);
-        if self.shapes.cacheable(id)
-            && let Some(e) = self.shapes.find(id, name)
+        if let Some(e) = self.shapes.find(id, name)
             && e.attrs() & (A_ACC | A_W) == A_W
         {
             o.set_slot(&self.shapes, e.slot(), v);

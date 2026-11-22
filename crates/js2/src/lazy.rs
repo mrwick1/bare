@@ -34,6 +34,8 @@ use crate::value::Value;
 pub(crate) enum Kind {
     /// A method: a native function, not enumerable, writable and configurable.
     Method(NativeFn),
+    /// An intrinsic initialized at the first lookup.
+    Factory(fn(&mut Realm) -> Value),
     /// A constant: a number, not writable, not enumerable and not configurable.
     Num(f64),
     /// A method whose native has `i` in slot 1 (one native for many methods: `Date.prototype`, `bi_date.rs`).
@@ -81,6 +83,11 @@ const fn hash(s: &str) -> u32 {
 /// A method `name` with the function `length` `len`.
 pub(crate) const fn m(name: &'static str, len: u8, f: NativeFn) -> Ent {
     Ent { hash: hash(name), name, len, kind: Kind::Method(f) }
+}
+
+/// An intrinsic initialized when its property `name` is read.
+pub(crate) const fn factory(name: &'static str, f: fn(&mut Realm) -> Value) -> Ent {
+    Ent { hash: hash(name), name, len: 0, kind: Kind::Factory(f) }
 }
 
 /// A constant `name`.
@@ -283,6 +290,7 @@ impl Realm {
         let keep = o == self.global || self.ltab.tabs[ti].has_same;
         let v = match e.kind {
             Kind::Method(f) | Kind::Sym(f, _) => self.new_native(f, false, e.len, e.name).value(),
+            Kind::Factory(f) => f(self),
             Kind::Indexed(f, i) => {
                 let c = self.new_native(f, false, e.len, e.name);
                 c.set_slot(&self.shapes, 1, Value::int(i));
