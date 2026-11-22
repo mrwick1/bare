@@ -13,16 +13,31 @@ const MAX_DEPTH: usize = 64;
 
 /// A prefix tree. A container header is followed by its children in source order. Each object child has a string key first.
 #[derive(Debug)]
-enum Item {
+enum Item<A> {
     Object(u32),
     Array(u32),
-    String(Str),
+    String(A),
     Scalar(Value),
 }
 
 /// Built only from the validated syntax tree. Its strings are shared atoms, with the same lifetime as `Code::atoms`.
 #[derive(Debug)]
-pub(crate) struct DataLiteral(Box<[Item]>);
+pub(crate) struct DataLiteral<A = Str>(Box<[Item<A>]>);
+
+impl<A: Copy> DataLiteral<A> {
+    pub(crate) fn map_atoms<B>(&self, mut map: impl FnMut(A) -> B) -> DataLiteral<B> {
+        DataLiteral(self.0.iter().map(|item| match *item {
+            Item::Object(n) => Item::Object(n),
+            Item::Array(n) => Item::Array(n),
+            Item::String(a) => Item::String(map(a)),
+            Item::Scalar(v) => Item::Scalar(v),
+        }).collect())
+    }
+
+    pub(crate) fn bytes(&self) -> usize {
+        size_of_val(&*self.0)
+    }
+}
 
 impl<'a> Fc<'a> {
     #[cold]
@@ -40,7 +55,7 @@ impl<'a> Fc<'a> {
         Ok(true)
     }
 
-    fn data_items(&mut self, e: ExprId, out: &mut Vec<Item>, depth: usize) -> CR<bool> {
+    fn data_items(&mut self, e: ExprId, out: &mut Vec<Item<Str>>, depth: usize) -> CR<bool> {
         let prog = self.prog;
         let x = *prog.expr(e);
         let item = match x.kind {
@@ -113,7 +128,7 @@ impl DataLiteral {
         Self::value(&mut self.0.iter(), realm, &mut Vec::new())
     }
 
-    fn value(items: &mut std::slice::Iter<'_, Item>, realm: &mut Realm, elems: &mut Vec<Value>) -> R<Value> {
+    fn value(items: &mut std::slice::Iter<'_, Item<Str>>, realm: &mut Realm, elems: &mut Vec<Value>) -> R<Value> {
         match *items.next().expect("a data value") {
             Item::Scalar(v) => Ok(v),
             Item::String(s) => Ok(s.value()),
