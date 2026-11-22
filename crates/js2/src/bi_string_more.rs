@@ -1,6 +1,6 @@
 //! The rest of `String` and `String.prototype`: `raw`, `fromCodePoint`, `normalize`, the locale case methods, `isWellFormed`,
 //! `toWellFormed`. (`match`, `matchAll` and `search` are in `bi_string_regexp.rs`.)
-//! `normalize` does NFC and NFD with `bare-unicode`; NFKC and NFKD need the compatibility data of ICU (`bare-js` bakes it) and throw a `TypeError`.
+//! `normalize` uses the Unicode data in `bare-unicode`.
 use crate::lazy::{Ent, m};
 use crate::bi_array::len_of;
 use crate::builtins::arg;
@@ -99,27 +99,33 @@ fn normalize(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
         let f = rt.to_str(args[0])?;
         rt.text(f)
     };
-    let nfc = match form.as_str() {
-        "NFC" => true,
-        "NFD" => false,
-        "NFKC" | "NFKD" => return rt.type_error("normalize: NFKC and NFKD are not supported yet in js2 (no compatibility data)"),
+    let src = rt.units(s);
+    let out = match form.as_str() {
+        "NFC" => normalize_units(&src, true),
+        "NFD" => normalize_units(&src, false),
+        "NFKC" => normalize_segments(&src, 0xA0, bare_unicode::nfkc),
+        "NFKD" => normalize_segments(&src, 0xA0, bare_unicode::nfkd),
         _ => return Err(rt.error(ErrKind::Range, "the normalization form must be one of NFC, NFD, NFKC, NFKD")),
     };
-    let src = rt.units(s);
-    let out = normalize_units(&src, nfc);
     if out == src { Ok(s.value()) } else { Ok(rt.make_units(&out)) }
 }
 
 /// NFC or NFD of the units `src`. A run of well-formed text is normalized; a lone surrogate stays as it is.
 pub(crate) fn normalize_units(src: &[u16], nfc: bool) -> Vec<u16> {
-    // Below U+00C0 (U+0300 for NFC) no unit changes in NFC or NFD.
-    if src.iter().all(|&c| c < if nfc { 0x300 } else { 0xC0 }) {
+    if nfc {
+        normalize_segments(src, 0x300, bare_unicode::nfc)
+    } else {
+        normalize_segments(src, 0xC0, bare_unicode::nfd)
+    }
+}
+
+fn normalize_segments(src: &[u16], first_change: u16, normalize: impl Fn(&str) -> String) -> Vec<u16> {
+    if src.iter().all(|&c| c < first_change) {
         return src.to_vec();
     }
     let (mut out, mut seg): (Vec<u16>, String) = (Vec::with_capacity(src.len()), String::new());
     let flush = |seg: &mut String, out: &mut Vec<u16>| {
-        let m = if nfc { bare_unicode::nfc(seg) } else { bare_unicode::nfd(seg) };
-        out.extend(m.encode_utf16());
+        out.extend(normalize(seg).encode_utf16());
         seg.clear();
     };
     for r in char::decode_utf16(src.iter().copied()) {

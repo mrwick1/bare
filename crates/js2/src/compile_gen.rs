@@ -118,7 +118,7 @@ impl<'a> Fc<'a> {
         let m0 = self.mark();
         let w = self.window(YS_REGS);
         let v = self.any(arg)?;
-        self.op(Op::IterOpen, w, v, 1);
+        self.op(Op::YieldOpen, w, v, 0);
         // `v` is dead now, and a resume does not bring it back.
         self.free(w + YS_REGS);
         (0..ITER_REGS).for_each(|i| self.set_live(w + i));
@@ -138,7 +138,7 @@ impl<'a> Fc<'a> {
             return Ok(());
         }
         let t = self.save_list(sent, mode, sent);
-        self.op(Op::Yield, out, t, 0);
+        self.op(Op::YieldResult, out, t, 0);
         // A resume does not bring `out` back: it holds no value at the back edge.
         Self::bit(&mut self.live, out, false);
         self.jmp_back(head);

@@ -40,6 +40,8 @@ pub(crate) enum Kind {
     Factory(fn(&mut Realm) -> Value),
     /// A constant: a number, not writable, not enumerable and not configurable.
     Num(f64),
+    /// A data property with explicit attributes.
+    Data(fn(&mut Realm) -> Value, u8),
     /// A method whose native has `i` in slot 1 (one native for many methods: `Date.prototype`, `bi_date.rs`).
     Indexed(NativeFn, i32),
     /// The global property of this name (`Number.parseInt` is the function `parseInt`), as a method.
@@ -105,6 +107,10 @@ pub(crate) const fn factory(name: &'static str, f: fn(&mut Realm) -> Value) -> E
 /// A constant `name`.
 pub(crate) const fn num(name: &'static str, v: f64) -> Ent {
     Ent { hash: hash(name), name, len: 0, kind: Kind::Num(v) }
+}
+
+pub(crate) const fn data(name: &'static str, get: fn(&mut Realm) -> Value, attrs: u8) -> Ent {
+    Ent { hash: hash(name), name, len: 0, kind: Kind::Data(get, attrs) }
 }
 
 /// A method `name` of the native `f` with `i` in its slot 1.
@@ -345,6 +351,10 @@ impl Realm {
                 c.value()
             }
             Kind::Num(n) => return self.define_attrs(o, k, 0, Value::number(n)).expect("define"),
+            Kind::Data(get, attrs) => {
+                let v = get(self);
+                return self.define_attrs(o, k, attrs, v).expect("define");
+            }
             Kind::Alias => {
                 let g = self.global;
                 self.lazy_prep(g, ka);
@@ -364,6 +374,10 @@ impl Realm {
             }
             Kind::Acc(get, set) => {
                 let (g, s) = (self.new_native(get, false, 0, "get").value(), self.new_native(set, false, 1, "set").value());
+                for (f, prefix) in [(g, 1), (s, 2)] {
+                    self.fn_prep(Realm::obj(f).expect("a native function"), self.k_length);
+                    self.name_function(f, k, prefix).expect("define the accessor name");
+                }
                 let d = Desc { get: Some(g), set: Some(s), e: Some(false), c: Some(true), ..Desc::default() };
                 self.define_own(o, k, &d).expect("define");
                 return;

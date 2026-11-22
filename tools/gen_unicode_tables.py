@@ -59,14 +59,16 @@ def rust_str(cps):
 
 
 # UnicodeData.txt: combining class, general category, canonical decompositions.
-ccc, marks, decomp = {}, [], {}
+ccc, marks, decomp, compat = {}, [], {}, {}
 for cp, _, f in rows("UnicodeData.txt"):
     category, combining, mapping = f[1], int(f[2]), f[4]
     if combining:
         ccc[cp] = combining
     if category.startswith("M"):
         marks.append((cp, cp, "()"))
-    if mapping and not mapping.startswith("<"):
+    if mapping.startswith("<"):
+        compat[cp] = [int(x, 16) for x in mapping.split()[1:]]
+    elif mapping:
         decomp[cp] = [int(x, 16) for x in mapping.split()]
 
 # Full canonical decomposition: apply the mappings until nothing changes.
@@ -74,6 +76,23 @@ def full(cp):
     return [y for x in decomp[cp] for y in (full(x) if x in decomp else [x])]
 
 full_decomp = {cp: full(cp) for cp in decomp}
+
+# Compatibility decomposition also expands canonical mappings and Korean syllables.
+def full_compat(cp):
+    if 0xAC00 <= cp < 0xD7A4:
+        s = cp - 0xAC00
+        parts = [0x1100 + s // 588, 0x1161 + (s // 28) % 21]
+        if s % 28:
+            parts.append(0x11A7 + s % 28)
+        return parts
+    mapping = compat.get(cp, decomp.get(cp))
+    return [cp] if mapping is None else [y for x in mapping for y in full_compat(x)]
+
+full_compat_decomp = {}
+for cp in compat.keys() | decomp.keys():
+    parts = full_compat(cp)
+    if parts != full_decomp.get(cp, [cp]):
+        full_compat_decomp[cp] = parts
 
 # Composition pairs. Full_Composition_Exclusion = the exclusion list, plus singletons,
 # plus non-starter decompositions (UAX #15).
@@ -183,6 +202,18 @@ pub enum Joining {
     out.write(f"pub static DECOMPOSE: [(u32, u16, u8); {len(entries)}] = [\n{''.join(entries)}];\n\n")
     out.write("/// The decomposed parts of all `DECOMPOSE` entries, one entry after the other.\n")
     out.write(f"pub static DECOMPOSE_DATA: [char; {len(data)}] = [\n")
+    for i in range(0, len(data), 8):
+        out.write("    " + ", ".join(f"'\\u{{{c:x}}}'" for c in data[i:i + 8]) + ",\n")
+    out.write("];\n\n")
+    # Extra mappings for NFKD. Keep the data free of pointers, as for DECOMPOSE.
+    data, entries = [], []
+    for cp, parts in sorted(full_compat_decomp.items()):
+        assert len(parts) < 256 and len(data) < 65536
+        entries.append(f"    (0x{cp:x}, {len(data)}, {len(parts)}),\n")
+        data += parts
+    out.write("/// Compatibility decomposition when it differs from the canonical one.\n")
+    out.write(f"pub static COMPAT_DECOMPOSE: [(u32, u16, u8); {len(entries)}] = [\n{''.join(entries)}];\n\n")
+    out.write(f"pub static COMPAT_DECOMPOSE_DATA: [char; {len(data)}] = [\n")
     for i in range(0, len(data), 8):
         out.write("    " + ", ".join(f"'\\u{{{c:x}}}'" for c in data[i:i + 8]) + ",\n")
     out.write("];\n\n")

@@ -48,6 +48,32 @@ fn eval_and_proxy_materialize_on_first_use() {
 }
 
 #[test]
+fn function_prototype_metadata_is_lazy() {
+    let vm = run("var x = 1;").unwrap();
+    let rt = &vm.realm;
+    let shape = rt.function_proto.shape(&rt.shapes);
+    assert!(rt.shapes.find(shape, rt.k_length).is_none());
+    assert!(rt.shapes.find(shape, rt.k_name).is_none());
+
+    check(&[
+        (&format!("{DESC} var p = Function.prototype; var o = Object.create(p); var r = [p() === undefined, o.length, o.name, d(p, 'length'), d(p, 'name')].join('|');"), "true|0||number,false,false,true|string,false,false,true"),
+        ("var p = Function.prototype; var r = delete p.name && !Object.hasOwn(p, 'name') && typeof p.name === 'undefined';", "true"),
+    ]);
+}
+
+#[test]
+fn array_constructor_is_lazy_and_shared() {
+    let vm = run("var x = 1;").unwrap();
+    assert!(vm.realm.array_ctor.is_undefined());
+
+    check(&[
+        ("var a = [].constructor; var r = [a === Array, a.isArray(a.prototype), a[Symbol.species] === a, a.of(2)[0]].join();", "true,true,true,2"),
+        ("globalThis.Array = 1; var a = [].constructor; var r = [Array, a.isArray([]), a.prototype.constructor === a].join();", "1,true,true"),
+        ("var p = Object.getPrototypeOf([]); delete p.constructor; var r = Array.prototype === p && !Object.hasOwn(p, 'constructor');", "true"),
+    ]);
+}
+
+#[test]
 fn has_own_property_and_in_see_a_name_that_is_not_made() {
     check(&[
         ("var r = Object.hasOwn(Math, 'floor') + ',' + Object.hasOwn(Math, 'nope');", "true,false"),

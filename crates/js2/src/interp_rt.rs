@@ -456,9 +456,10 @@ impl Realm {
         let object_proto = Obj::new(&mut heap, &shapes, root).expect("memory");
         let proto = Some(object_proto.cell());
         let s_object = shapes.root(Layout::Object, proto, 4);
-        let function_proto = Obj::new(&mut heap, &shapes, s_object).expect("memory");
-        let array_proto_shape = shapes.root(Layout::Indexed, proto, 0);
-        let array_proto = Obj::array(&mut heap, &shapes, array_proto_shape, &[]).expect("memory");
+        let function_proto_shape = shapes.add(s_object, hidden[0], 0).expect("shape");
+        let function_proto = Obj::new(&mut heap, &shapes, function_proto_shape).expect("memory");
+        let array_proto_shape = shapes.root(Layout::Indexed, proto, 2);
+        let array_proto = Obj::new(&mut heap, &shapes, array_proto_shape).expect("memory");
         let error_proto = Obj::new(&mut heap, &shapes, s_object).expect("memory");
         let global = Obj::new(&mut heap, &shapes, s_object).expect("memory");
         shapes.watch(global.cell().as_ptr() as usize);

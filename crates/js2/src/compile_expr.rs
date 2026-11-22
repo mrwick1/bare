@@ -1041,6 +1041,15 @@ impl<'a> Fc<'a> {
     fn delete(&mut self, arg: ExprId, dst: u32) -> CR {
         let a = *self.prog.expr(arg);
         match a.kind {
+            ExprKind::Member { obj, .. } if matches!(self.expr_kind(obj), ExprKind::Super) => {
+                self.this_reg()?;
+                self.op(Op::ThrowSuperDelete, 0, 0, 0);
+            }
+            ExprKind::Index { obj, index, .. } if matches!(self.expr_kind(obj), ExprKind::Super) => {
+                self.this_reg()?;
+                self.effect(index)?;
+                self.op(Op::ThrowSuperDelete, 0, 0, 0);
+            }
             ExprKind::Member { obj, name, .. } => {
                 let nm = self.name_of(name);
                 let o = self.any(obj)?;
@@ -1333,6 +1342,7 @@ impl<'a> Fc<'a> {
             self.op(Op::CheckUnbound, t, 0, 0);
         }
         self.store_var("this", 0, dst, true)?;
+        self.op(Op::InitSuperFields, dst, 0, 0);
         self.free(m);
         Ok(())
     }
@@ -1846,6 +1856,10 @@ impl<'a> Fc<'a> {
                 self.bind(end);
             }
             ExprKind::Unary { op: UnaryOp::Void, arg } => self.effect(arg)?,
+            ExprKind::This if self.derived || self.is_arrow => {
+                let t = self.alloc();
+                self.this(t)?;
+            }
             ExprKind::Number(_) | ExprKind::String | ExprKind::Null | ExprKind::Bool(_) | ExprKind::This | ExprKind::Function(_) => {}
             ExprKind::Ident => {
                 // A read can throw (a global that does not exist, a dead zone), so it stays; a variable that cannot throw does not.
