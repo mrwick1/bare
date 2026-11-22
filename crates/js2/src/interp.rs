@@ -176,7 +176,8 @@ macro_rules! cold_ops {
         Op::SetFnName | Op::DefaultCtor | Op::SetFields | Op::NewPrivateName | Op::GetPrivate | Op::SetPrivate | Op::HasPrivate |
         Op::DefPrivate | Op::DefPrivateMethod | Op::DefPrivateAccessor | Op::GetSuper | Op::GetSuperElem | Op::GetSuperElemRef | Op::SetSuper |
         Op::SetSuperElem | Op::CallSuper | Op::CallSuperSpread | Op::RetDerived | Op::GenInit | Op::Yield | Op::RetGen | Op::IterClose | Op::ForInNext | Op::YieldStarStep | Op::AsyncInit | Op::Await | Op::RetAsync |
-        Op::AIterOpen | Op::AIterNext | Op::AIterUnpack | Op::AYsUnpack | Op::AIterClose | Op::AIterCloseT | Op::AIterCheck | Op::AYsCall
+        Op::AIterOpen | Op::AIterNext | Op::AIterUnpack | Op::AYsUnpack | Op::AIterClose | Op::AIterCloseT | Op::AIterCheck | Op::AYsCall |
+        Op::AddKey
     };
 }
 
@@ -834,7 +835,10 @@ impl Vm {
         }
         macro_rules! op_add {
             ($a:expr, $x:expr, $y:expr, $next:expr) => {
-                arith!($a, $x, $y, $next, |i, j| i.checked_add(j).map_or_else(|| Value::number(i as f64 + j as f64), Value::int), |f, g| Value::number(f + g), Realm::add_slow)
+                op_add!($a, $x, $y, $next, Realm::add_slow)
+            };
+            ($a:expr, $x:expr, $y:expr, $next:expr, $slow:expr) => {
+                arith!($a, $x, $y, $next, |i, j| i.checked_add(j).map_or_else(|| Value::number(i as f64 + j as f64), Value::int), |f, g| Value::number(f + g), $slow)
             };
         }
         macro_rules! op_sub {
@@ -1183,6 +1187,7 @@ impl Vm {
                 // names them: see `Vm::exec` for the rule of the split. Put a new rare op there.
                 if M::COLD {
                     match opv {
+                        Op::AddKey => op_add!(a!(), r!(b!()), r!(c!()), next, Realm::add_key_slow),
                         Op::NewDataLit => {
                             std::hint::cold_path();
                             gate!();

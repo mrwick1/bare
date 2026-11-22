@@ -19,7 +19,7 @@
 //! [`RuntimeAtoms::sweep`]) with the heap. It drops the entries whose cell is not marked. The collector must not mark an atom
 //! through the table. A shared atom has no mark bit in any realm heap: skip a string when `Str::is_shared` is true.
 use crate::heap::Heap;
-use crate::string::{Chars, FLAG_ATOM, FLAG_SHARED, R, Str};
+use crate::string::{Chars, FLAG_ATOM, FLAG_SHARED, R, ROPE_MIN, Str, int_text};
 use std::ptr::NonNull;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -235,6 +235,14 @@ impl Atoms {
         s.add_flags(FLAG_ATOM);
         self.runtime.table.insert(s, hash);
         Ok(s)
+    }
+
+    /// Intern a short concatenation without allocating an uninterned string.
+    pub(crate) fn intern_int_concat(&mut self, heap: &mut Heap, s: Str, i: i32, int_first: bool) -> Option<R<Str>> {
+        let mut digits = [0; 11];
+        let mut out = [0; ROPE_MIN];
+        let bytes = s.short_int_concat(int_text(i, &mut digits), int_first, &mut out)?;
+        Some(self.intern(heap, Chars::One(bytes)))
     }
 
     /// The atom of this realm for the units of `s`. A flat string that is not an atom yet becomes the atom in place, with no copy;
