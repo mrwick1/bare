@@ -61,6 +61,7 @@ dependencies = [
  "bare-layout",
  "bare-net",
  "bare-observe",
+ "bare-os",
  "bare-paint",
  "bare-tls",
  "bare-url",
