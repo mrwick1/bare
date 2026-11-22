@@ -167,7 +167,7 @@ fn download(client: &mut Client, url: &str) -> Option<Vec<u8>> {
         if bytes.len() > bare_image::MAX_BYTES {
             return None;
         }
-        client.keep(&url, &s.response, &bytes);
+        client.keep(&s, &bytes);
         return Some(bytes);
     }
     None
