@@ -270,8 +270,11 @@ impl<'p> Interp<'p> {
                 DefKind::Both { id } => f = Some(host_fn(self, id_base + id, 0, name)?),
                 DefKind::Number(_) => {}
             }
-            for (i, o) in objs.iter().enumerate() {
-                let (true, Some(o)) = (d.on >> i & 1 != 0, *o) else { continue };
+            let mut on = d.on;
+            while on != 0 {
+                let i = on.trailing_zeros() as usize;
+                on &= on - 1;
+                let Some(o) = objs[i] else { continue };
                 match d.kind {
                     DefKind::Method { .. } => self.define_data(o, key, Value::Object(f.expect("a method")), a.writable, a.enumerable, a.configurable)?,
                     DefKind::Number(n) => self.define_data(o, key, Value::Number(n), a.writable, a.enumerable, a.configurable)?,
