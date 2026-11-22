@@ -50,7 +50,7 @@ One W3C js2 live RSS trial has six replies. The other five trials have seven. W3
 
 ## Callgrind split
 
-Use `--tool=callgrind --cache-sim=no --smc-check=all-non-file --separate-callers=1`. For these runs, raise the step-file timeout to 120 seconds. The table gives exclusive `Ir` in millions. Attribute instructions by source or symbol, then by the immediate caller. The engine boundary includes `eng*.rs`, `api*.rs`, and host-aware lookups implemented there. Other includes unresolved allocator, copy, and runtime work. The separate call-edge counts below include callees.
+Use `--tool=callgrind --cache-sim=no --smc-check=all-non-file --separate-callers=1`. For these runs, raise the step-file timeout to 120 seconds. The table gives exclusive `Ir` in millions. Attribute instructions by source or symbol, then by the immediate caller. The engine boundary includes `eng*.rs`, `api*.rs`, and host-aware lookups implemented there. OLD's bytecode verifier and compiler tree walker count as compilation. Its stored-edge visitors count as GC. Other includes unresolved allocator, copy, and runtime work. The separate call-edge counts below include callees.
 
 The Python Docs live profiles have 40 replies and 42,122 bytes. The W3C live profiles have five replies and 64,947 bytes and list two fewer script replies than the native runs. The Python.org tape profiles have 20 replies and 541,271 bytes. The live Python.org profiles differ by two replies and by style/layout work, so use its tape pair. The Python Docs tape profile pair differs by one zero-byte 304 response. Its gap is 376.28 M, compared with 368.49 M live. The W3C tape profile pair differs by one 974-byte script and has tape misses.
 
@@ -58,12 +58,12 @@ The Python Docs live profiles have 40 replies and 42,122 bytes. The W3C live pro
 |---|---:|---:|---:|
 | Network | 85.55 → 108.23 | 69.86 → 89.91 | 34.94 → 35.27 |
 | HTML parse | 2.63 → 2.80 | 7.64 → 7.65 | 8.63 → 8.65 |
-| JS parse and compile | 40.20 → 644.41 | 33.24 → 60.63 | 184.20 → 260.57 |
+| JS parse and compile | 43.74 → 644.41 | 39.09 → 60.63 | 205.89 → 260.57 |
 | Style | 41.48 → 36.12 | 33.21 → 31.77 | 296.77 → 296.37 |
 | Layout | 13.26 → 13.26 | 9.95 → 9.95 | 269.21 → 269.21 |
 | Paint | 0.17 → 0.17 | 0.14 → 0.14 | 0.22 → 0.22 |
-| JS run | 724.18 → 399.71 | 522.12 → 558.75 | 169.31 → 103.65 |
-| GC | 40.29 → 31.11 | 0.00 → 4.82 | 0.00 → 2.09 |
+| JS run | 703.84 → 399.71 | 516.27 → 558.75 | 147.61 → 103.65 |
+| GC | 57.09 → 31.11 | 0.00 → 4.82 | 0.00 → 2.09 |
 | Engine boundary | 0.57 → 21.15 | 0.99 → 57.58 | 0.69 → 18.21 |
 | DOM and browser | 12.97 → 12.51 | 11.98 → 14.96 | 67.92 → 68.93 |
 | Images | 0.17 → 0.15 | 0.35 → 0.34 | 38.79 → 38.79 |
@@ -71,13 +71,20 @@ The Python Docs live profiles have 40 replies and 42,122 bytes. The W3C live pro
 | Other | 145.65 → 206.82 | 44.91 → 84.29 | 121.70 → 115.24 |
 | **Total** | **1,108.30 → 1,476.79** | **734.61 → 921.00** | **1,192.57 → 1,217.39** |
 
-| Journey | Largest js2 built-in source groups in JS run, exclusive M | OLD corresponding work |
-|---|---|---|
-| Python Docs | Data recipe build 28.78, string 26.62, object 8.81, array 2.63 | OLD's source-based data build and related literal helpers use 169.16 M exclusive. |
-| W3C | Object 16.50, buffer views 9.58, array 9.00, BigInt helpers 6.68, string 6.36 | OLD's interpreter dispatch and shared property helpers contain much of this work. OLD's bytecode loop alone uses about 226 M on the tape. |
-| Python.org | Object 4.28, regexp and runtime 3.72, array 0.49, string 0.35 | OLD regexp execution uses 2.38 M exclusive. Parser and character-class construction are in the compile row. |
+| Built-in group | Python Docs OLD | Python Docs js2 | W3C OLD | W3C js2 | Python.org OLD | Python.org js2 |
+|---|---:|---:|---:|---:|---:|---:|
+| Data recipe or literal | 169.16 | 28.78 | 1.44 | 0.10 | 0.11 | 0.00 |
+| ArrayBuffer or typed view | 0.23 | 0.00 | 14.79 | 10.82 | 0.98 | 0.00 |
+| Array | 18.38 | 2.64 | 1.21 | 9.00 | 0.28 | 0.49 |
+| BigInt | 0.00 | 0.00 | 0.00 | 6.68 | 0.00 | 0.00 |
+| Date or Intl | 0.00 | 0.00 | 0.00 | 0.01 | 0.00 | 0.00 |
+| JSON | 0.00 | 0.00 | 0.00 | 0.45 | 0.01 | 0.01 |
+| Object and Reflect | 0.00 | 8.81 | 0.00 | 16.57 | 0.00 | 4.31 |
+| RegExp | 0.06 | 0.07 | 0.21 | 0.20 | 2.38 | 3.22 |
+| String | 36.23 | 26.62 | 2.14 | 6.37 | 3.16 | 0.39 |
+| Dispatch and shared work | 479.78 | 332.79 | 496.47 | 508.55 | 140.69 | 95.22 |
 
-The built-in source grouping includes helpers that run below an opcode. It excludes time attributed to callees in other modules. OLD handles many built-ins inside its evaluator, so this split cannot identify all corresponding functions by source name.
+The rows give exclusive instructions in millions from named built-in source groups. Shared work includes interpreter dispatch and built-ins that share evaluator code. A zero in a named row means the profile did not attribute instructions to that group. OLD's W3C live bytecode loop uses 225.98 M instructions in the shared row.
 
 ## Python Docs search
 
@@ -111,7 +118,7 @@ Test dense hits, inherited data and accessors, a numeric name added after a miss
 
 ## Python.org documentation link
 
-The compile row costs 76.37 M more on js2. It is offset by 65.66 M less JS execution. The tape has 802 calls to js2 `parse_function` under lazy compilation, for 45.22 M inclusive. The initial parse already checked those bodies for syntax. The later parse builds the tree js2 compiles. QuickJS compiles nested bodies during parsing and finishes their bytecode in `js_create_function`. It has no first-call body parse.
+The compile row costs 54.68 M more on js2. js2 spends 43.96 M fewer instructions on JS execution. The tape has 802 calls to js2 `parse_function` under lazy compilation, for 45.22 M inclusive. The initial parse already checked those bodies for syntax. The later parse builds the tree js2 compiles. QuickJS compiles nested bodies during parsing and finishes their bytecode in `js_create_function`. It has no first-call body parse.
 
 | Design | Work and storage | Expected gain |
 |---|---|---|
