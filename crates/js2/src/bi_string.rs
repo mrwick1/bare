@@ -125,16 +125,19 @@ fn code_point_at(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let s = rt.this_str(this, "codePointAt")?;
     let i = rt.to_number(arg(args, 0))?;
     let i = if i.is_nan() { 0.0 } else { i.trunc() };
-    let u = rt.units(s);
-    if i < 0.0 || i >= u.len() as f64 {
+    if i < 0.0 || i >= s.len() as f64 {
         return Ok(Value::UNDEFINED);
     }
     let i = i as usize;
-    let c = char::decode_utf16(u[i..].iter().copied()).next();
-    Ok(Value::int(match c {
-        Some(Ok(c)) => c as i32,
-        _ => u[i] as i32,
-    }))
+    let s = rt.flat(s);
+    let point = match s.chars().expect("flat string") {
+        Chars::One(c) => c[i] as i32,
+        Chars::Two(c) => match char::decode_utf16(c[i..].iter().copied()).next() {
+            Some(Ok(point)) => point as i32,
+            _ => c[i] as i32,
+        },
+    };
+    Ok(Value::int(point))
 }
 
 fn at(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
@@ -221,34 +224,44 @@ fn ends_with(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     Ok(Value::bool(h[..end].ends_with(&n)))
 }
 
+fn string_range(rt: &mut Realm, s: Str, start: usize, end: usize) -> Value {
+    if start == 0 && end == s.len() {
+        return s.value();
+    }
+    if start >= end {
+        return rt.string("");
+    }
+    let s = rt.flat(s);
+    rt.substring(s, start, end)
+}
+
+// Argument coercions can reenter JS. Realm::call_function holds the collector during reentry,
+// so the string from this_str stays live until the range is copied.
 fn slice(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let s = rt.this_str(this, "slice")?;
-    let u = rt.units(s);
-    let len = u.len() as f64;
+    let len = s.len() as f64;
     let a = rel_index(rt, arg(args, 0), 0.0, len, true)?;
     let b = rel_index(rt, arg(args, 1), len, len, true)?;
-    Ok(if a < b { rt.make_units(&u[a..b]) } else { rt.string("") })
+    Ok(string_range(rt, s, a, b))
 }
 
 fn substring(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let s = rt.this_str(this, "substring")?;
-    let u = rt.units(s);
-    let len = u.len() as f64;
+    let len = s.len() as f64;
     let a = rel_index(rt, arg(args, 0), 0.0, len, false)?;
     let b = rel_index(rt, arg(args, 1), len, len, false)?;
     let (a, b) = (a.min(b), a.max(b));
-    Ok(rt.make_units(&u[a..b]))
+    Ok(string_range(rt, s, a, b))
 }
 
 fn substr(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let s = rt.this_str(this, "substr")?;
-    let u = rt.units(s);
-    let len = u.len() as f64;
+    let len = s.len() as f64;
     let a = rel_index(rt, arg(args, 0), 0.0, len, true)?;
     let n = if arg(args, 1).is_undefined() { len } else { rt.to_number(arg(args, 1))? };
     let n = if n.is_nan() { 0.0 } else { n.trunc() };
     let b = (a as f64 + n.max(0.0)).min(len) as usize;
-    Ok(if a < b { rt.make_units(&u[a..b]) } else { rt.string("") })
+    Ok(string_range(rt, s, a, b))
 }
 
 fn split(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
@@ -397,3 +410,7 @@ fn to_string(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
         None => rt.type_error("String.prototype.toString requires that 'this' be a String"),
     }
 }
+
+#[cfg(test)]
+#[path = "bi_string_range_tests.rs"]
+mod tests;
