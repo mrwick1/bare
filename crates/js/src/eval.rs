@@ -4200,6 +4200,10 @@ mod script_tests;
 mod module_tests;
 
 #[cfg(test)]
+#[path = "eval_module_bytecode_scope_tests.rs"]
+mod module_bytecode_scope_tests;
+
+#[cfg(test)]
 #[path = "eval_scope_tests.rs"]
 mod scope_tests;
 #[cfg(test)]
