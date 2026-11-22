@@ -20,7 +20,7 @@
 //! - The text in parentheses of `toString` is the long English name for the 13 zones of `bi_date_tz::long_name` and `GMT+hh:mm` for any
 //!   other zone (V8 writes the ICU name of every zone). The old engine does the same.
 //! - `toLocaleString`, `toLocaleDateString` and `toLocaleTimeString` write the `en-US` form (`1/2/2020, 3:04:05 PM`, with a plain space
-//!   before `AM`) in the local zone, and ignore the locale and the options: js2 has no `Intl` yet. The old engine forwards to `Intl`.
+//!   before `AM`) in the local zone. These methods use their own formatter and ignore the locale and options.
 //! - `Date.now` and `new Date()` read the system clock (no virtual clock).
 use crate::lazy::{Ent, indexed, m, same};
 use crate::bi_date_calc::{self as calc, Fields, LocalText, Parsed};
@@ -109,9 +109,9 @@ const OPS: &[(&str, u8, Op)] = &[
 // ---- the local zone ----
 
 /// A zone and the name it was asked for.
-struct Local {
-    name: String,
-    zone: Zone,
+pub(crate) struct Local {
+    pub(crate) name: String,
+    pub(crate) zone: Zone,
 }
 
 thread_local! {
@@ -119,7 +119,7 @@ thread_local! {
 }
 
 /// A zone by name: the UTC names, an offset, or a zone of `bare-tzdata`. `None` when it is not a zone.
-fn zone_named(name: &str) -> Option<Local> {
+pub(crate) fn zone_named(name: &str) -> Option<Local> {
     if tz::is_utc_name(name) {
         return Some(Local { name: "UTC".into(), zone: Zone::fixed(0) });
     }
@@ -131,7 +131,7 @@ fn zone_named(name: &str) -> Option<Local> {
 }
 
 /// The local zone of this thread (see the module text).
-fn local() -> Rc<Local> {
+pub(crate) fn local() -> Rc<Local> {
     LOCAL.with(|c| {
         c.borrow_mut()
             .get_or_insert_with(|| {

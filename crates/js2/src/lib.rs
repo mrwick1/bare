@@ -70,6 +70,7 @@ mod bi_typed;
 mod bi_text;
 mod bi_json;
 mod bi_date;
+mod bi_intl;
 mod bi_date_calc;
 mod bi_date_tz;
 mod bi_object;

@@ -67,7 +67,7 @@ impl Realm {
             m("repeat", 1, repeat),
             m("padStart", 1, pad_start),
             m("padEnd", 1, pad_end),
-            m("localeCompare", 1, locale_compare),
+            m("localeCompare", 1, crate::bi_intl::locale_compare),
             m("toString", 0, to_string),
             m("valueOf", 0, to_string),
             crate::lazy::sym("[Symbol.iterator]", crate::bi_symbol::ITERATOR, crate::bi_string_iter::string_iterator),
@@ -388,20 +388,6 @@ fn pad_start(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
 
 fn pad_end(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     pad(rt, this, args, false)
-}
-
-fn locale_compare(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
-    let s = rt.this_str(this, "localeCompare")?;
-    let t = pattern(rt, arg(args, 0))?;
-    let u = rt.units(s);
-    // Canonically equivalent strings are equal (`o` and U+0308 against U+00F6): compare the NFC forms. The order of other strings is
-    // that of the units: js2 has no collation data yet.
-    let (u, t) = (crate::bi_string_more::normalize_units(&u, true), crate::bi_string_more::normalize_units(&t, true));
-    Ok(Value::int(match u.cmp(&t) {
-        std::cmp::Ordering::Less => -1,
-        std::cmp::Ordering::Equal => 0,
-        std::cmp::Ordering::Greater => 1,
-    }))
 }
 
 fn to_string(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
