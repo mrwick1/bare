@@ -16,8 +16,8 @@ Rows that merged over the cost rule (CLAUDE.md, "Cost gate"). One line per row. 
 | `observer_load mo 10` | #849 | +1.759% | +0.786% | Out-of-line DOM helpers. | [Fixed](2026-11-21-cost-debt-849.md#849-rows). |
 | `preload_load script 10` | #849 | +0.943% | +0.569% | Duplicate old DOM installation code and relocations. | [Fixed](2026-11-21-cost-debt-849.md#849-rows). |
 | `interp_load loopfn 3000000` | #876 | +2.780% | +1.483% | The iterator branches can change register allocation in the shared dispatch loop. | [Fixed](2026-11-22-full-cost-matrix.md#debt-from-earlier-prs). |
-| `interp_load calls 1000000` | #876 | +1.175% | +1.098% | The iterator branches can change register allocation in the shared dispatch loop. | open |
-| `raw_collect 10000 1000 10` | #864 | +1.361% | +1.231% glibc, +1.121% jemalloc | The count visits unmarked cells and skips free slots after marking. | open |
+| `interp_load calls 1000000` | #876 | +1.175% | +1.098% | The iterator branches can change register allocation in the shared dispatch loop. | Accepted by the owner on 2026-11-22. #931 measured +0.55% after 2 fix attempts (stack and branch layout). |
+| `raw_collect 10000 1000 10` | #864 | +1.361% | +1.231% glibc, +1.121% jemalloc | The count visits unmarked cells and skips free slots after marking. | Accepted by the owner on 2026-11-22. #931 measured +1.39%. The adaptive GC (#911) collects during setup by design. |
 | `script_run startup (var x = 1;)` | #901 | +1.085% | +1.085% | Additional prototype shapes and metadata increase realm setup. | [Fixed](2026-11-22-full-cost-matrix.md#debt-from-earlier-prs). |
 | `interp_load fib 27` | #921 | +0.895% | +0.895% | Hot dispatch layout changes the cost of existing operations. | [Fixed](2026-11-22-full-cost-matrix.md#debt-from-earlier-prs). |
 | `interp_load calls 1000000` | #922 | +0.532% | +0.532% | Hot dispatch layout adds instructions to function-local calls. | [Fixed](2026-11-22-full-cost-matrix.md#debt-from-earlier-prs). |
