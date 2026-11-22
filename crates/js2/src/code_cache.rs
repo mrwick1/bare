@@ -52,7 +52,7 @@ impl AtomUnits {
     }
 }
 
-/// All indexes in `code` are local to this unit. There are no heap pointers.
+/// All indexes in `code` are local to this unit. There are no pointers into a realm.
 pub(crate) struct PortableUnit {
     pub source: Rc<str>,
     pub atoms: Vec<AtomUnits>,
