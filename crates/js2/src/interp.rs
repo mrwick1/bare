@@ -47,7 +47,7 @@
 //! of the site and then load or store at its place, inline (`interp_rt.rs`: the states and the transitions). Everything else about a
 //! miss is in the realm, out of line.
 //!
-//! **Not here:** the generators and async functions, `with` and direct `eval`, regexp and BigInt (a literal throws a `TypeError`),
+//! **Not here:** the generators and async functions, `with` and direct `eval`, and regular expression features beyond the built-in matcher,
 //! the iterator protocol (an array and a string are iterated, anything else throws; `for-in` walks the own keys), `Symbol`, `Map`, `Set`,
 //! `JSON`, `Date` and `Promise`. The core built-ins (S2.7: `builtins.rs`) and `ToPrimitive` are here. The classes, `super`, private names, accessors, spread and rest, `arguments` and `new.target` are here
 //! (`interp_ops.rs` has the runtime side).
@@ -64,7 +64,7 @@ use crate::builtins::Outcome;
 use crate::bytecode::{Asm, CF_ARGS, CF_GEN, CF_LINK, Code, ITER_REGS, Ins, Op, STR_EMPTY, STR_SLOT, decode};
 use crate::codes::Codes;
 use crate::gc::Marker;
-use crate::interp_rt::{ErrKind, Feedback, Got, Key, Put, R, Realm};
+use crate::interp_rt::{ErrKind, Feedback, Got, Key, Put, Realm};
 use crate::object::{F_DERIVED, Obj};
 use crate::roots::RootMaps;
 use crate::shapes::{A_C, A_E, A_W};
@@ -825,6 +825,7 @@ impl Vm {
                 } else if let (Some($f), Some($g)) = (x.as_f64(), y.as_f64()) {
                     $dbl
                 } else {
+                    gate!();
                     tri!(($slow)(&mut *realm, x, y))
                 };
                 pc = $next;
@@ -837,39 +838,41 @@ impl Vm {
         }
         macro_rules! op_sub {
             ($a:expr, $x:expr, $y:expr, $next:expr) => {
-                arith!($a, $x, $y, $next, |i, j| i.checked_sub(j).map_or_else(|| Value::number(i as f64 - j as f64), Value::int), |f, g| Value::number(f - g), |rt: &mut Realm, x, y| num2(rt, x, y, |p, q| p - q))
+                arith!($a, $x, $y, $next, |i, j| i.checked_sub(j).map_or_else(|| Value::number(i as f64 - j as f64), Value::int), |f, g| Value::number(f - g), |rt: &mut Realm, x, y| rt.numeric_binary(Op::Sub, x, y))
             };
         }
         macro_rules! op_mul {
             ($a:expr, $x:expr, $y:expr, $next:expr) => {
-                arith!($a, $x, $y, $next, |i, j| imul(i, j), |f, g| Value::number(f * g), |rt: &mut Realm, x, y| num2(rt, x, y, |p, q| p * q))
+                arith!($a, $x, $y, $next, |i, j| imul(i, j), |f, g| Value::number(f * g), |rt: &mut Realm, x, y| rt.numeric_binary(Op::Mul, x, y))
             };
         }
         macro_rules! op_div {
             ($a:expr, $x:expr, $y:expr, $next:expr) => {
-                arith!($a, $x, $y, $next, |i, j| Realm::num(i as f64 / j as f64), |f, g| Value::number(f / g), |rt: &mut Realm, x, y| num2(rt, x, y, |p, q| p / q))
+                arith!($a, $x, $y, $next, |i, j| Realm::num(i as f64 / j as f64), |f, g| Value::number(f / g), |rt: &mut Realm, x, y| rt.numeric_binary(Op::Div, x, y))
             };
         }
         macro_rules! op_mod {
             ($a:expr, $x:expr, $y:expr, $next:expr) => {
-                arith!($a, $x, $y, $next, |i, j| imod(i, j), |f, g| Value::number(f % g), |rt: &mut Realm, x, y| num2(rt, x, y, |p, q| p % q))
+                arith!($a, $x, $y, $next, |i, j| imod(i, j), |f, g| Value::number(f % g), |rt: &mut Realm, x, y| rt.numeric_binary(Op::Mod, x, y))
             };
         }
         macro_rules! op_exp {
             ($a:expr, $x:expr, $y:expr, $next:expr) => {
-                arith!($a, $x, $y, $next, |i, j| Realm::num(pow(i as f64, j as f64)), |f, g| Value::number(pow(f, g)), |rt: &mut Realm, x, y| num2(rt, x, y, pow))
+                arith!($a, $x, $y, $next, |i, j| Realm::num(pow(i as f64, j as f64)), |f, g| Value::number(pow(f, g)), |rt: &mut Realm, x, y| rt.numeric_binary(Op::Exp, x, y))
             };
         }
         macro_rules! bitop {
-            ($a:expr, $x:expr, $y:expr, $next:expr, |$i:ident, $j:ident| $e:expr) => {{
+            ($a:expr, $x:expr, $y:expr, $next:expr, $op:ident, |$i:ident, $j:ident| $e:expr) => {{
                 let (x, y): (Value, Value) = ($x, $y);
-                let ($i, $j) = if let (Some(i), Some(j)) = (x.as_int(), y.as_int()) {
-                    (i, j)
+                r!($a) = if let (Some($i), Some($j)) = (x.as_int(), y.as_int()) {
+                    $e
+                } else if let (Some(p), Some(q)) = (x.as_f64(), y.as_f64()) {
+                    let ($i, $j) = (Realm::to_int32(p), Realm::to_int32(q));
+                    $e
                 } else {
-                    let (p, q) = (tri!(realm.to_number(x)), tri!(realm.to_number(y)));
-                    (Realm::to_int32(p), Realm::to_int32(q))
+                    gate!();
+                    tri!(realm.numeric_binary(Op::$op, x, y))
                 };
-                r!($a) = $e;
                 pc = $next;
             }};
         }
@@ -1457,7 +1460,13 @@ impl Vm {
                             r!(a!()) = tri!(realm.regexp_literal(atom!(b!()), atom!(c!())));
                             pc = next;
                         }
-                        Op::LoadBigInt => { std::hint::cold_path(); err!(ErrKind::Type, "BigInt literals are not supported yet (js2 has no BigInt: S2.7)") }
+                        Op::LoadBigInt => {
+                            std::hint::cold_path();
+                            gate!();
+                            let digits = code.atoms[bx!()];
+                            r!(a!()) = tri!(realm.load_bigint(digits));
+                            pc = next;
+                        }
                         Op::GetTemplate => {
                             std::hint::cold_path();
                             gate!();
@@ -2167,24 +2176,24 @@ impl Vm {
                     Op::ModX => op_mod!(a!(), r!(b!()), Value::int($x as i32), nextx!()),
                     Op::BitAnd | Op::BitAndI => {
                         let y = if opv == Op::BitAndI { Value::int(sc!()) } else { r!(c!()) };
-                        bitop!(a!(), r!(b!()), y, next, |i, j| Value::int(i & j))
+                        bitop!(a!(), r!(b!()), y, next, BitAnd, |i, j| Value::int(i & j))
                     }
                     Op::BitOr | Op::BitOrI => {
                         let y = if opv == Op::BitOrI { Value::int(sc!()) } else { r!(c!()) };
-                        bitop!(a!(), r!(b!()), y, next, |i, j| Value::int(i | j))
+                        bitop!(a!(), r!(b!()), y, next, BitOr, |i, j| Value::int(i | j))
                     }
-                    Op::BitXor => bitop!(a!(), r!(b!()), r!(c!()), next, |i, j| Value::int(i ^ j)),
+                    Op::BitXor => bitop!(a!(), r!(b!()), r!(c!()), next, BitXor, |i, j| Value::int(i ^ j)),
                     Op::Shl | Op::ShlI => {
                         let y = if opv == Op::ShlI { Value::int(sc!()) } else { r!(c!()) };
-                        bitop!(a!(), r!(b!()), y, next, |i, j| Value::int(i << (j & 31)))
+                        bitop!(a!(), r!(b!()), y, next, Shl, |i, j| Value::int(i << (j & 31)))
                     }
                     Op::Shr | Op::ShrI => {
                         let y = if opv == Op::ShrI { Value::int(sc!()) } else { r!(c!()) };
-                        bitop!(a!(), r!(b!()), y, next, |i, j| Value::int(i >> (j & 31)))
+                        bitop!(a!(), r!(b!()), y, next, Shr, |i, j| Value::int(i >> (j & 31)))
                     }
                     Op::UShr | Op::UShrI => {
                         let y = if opv == Op::UShrI { Value::int(sc!()) } else { r!(c!()) };
-                        bitop!(a!(), r!(b!()), y, next, |i, j| Realm::num(((i as u32) >> (j & 31)) as f64))
+                        bitop!(a!(), r!(b!()), y, next, UShr, |i, j| Realm::num(((i as u32) >> (j & 31)) as f64))
                     }
                     Op::Eq => {
                         let e = tri!(realm.loose_eq(r!(b!()), r!(c!())));
@@ -2224,13 +2233,24 @@ impl Vm {
                         let x = r!(b!());
                         r!(a!()) = match x.as_int() {
                             Some(i) if i != 0 && i != i32::MIN => Value::int(-i),
-                            _ => Value::number(-tri!(realm.to_number(x))),
+                            _ => if let Some(f) = x.as_f64() {
+                                Value::number(-f)
+                            } else {
+                                gate!();
+                                tri!(realm.numeric_unary(Op::Neg, x))
+                            },
                         };
                         pc = next;
                     }
                     Op::Plus | Op::ToNumeric => {
                         let x = r!(b!());
-                        r!(a!()) = if x.is_number() { x } else { Realm::num(tri!(realm.to_number(x))) };
+                        r!(a!()) = if x.is_number() {
+                            x
+                        } else if opv == Op::ToNumeric {
+                            tri!(realm.to_numeric(x))
+                        } else {
+                            Realm::num(tri!(realm.to_number(x)))
+                        };
                         pc = next;
                     }
                     Op::Not => {
@@ -2239,11 +2259,14 @@ impl Vm {
                     }
                     Op::BitNot => {
                         let x = r!(b!());
-                        let i = match x.as_int() {
-                            Some(i) => i,
-                            None => Realm::to_int32(tri!(realm.to_number(x))),
+                        r!(a!()) = if let Some(i) = x.as_int() {
+                            Value::int(!i)
+                        } else if let Some(f) = x.as_f64() {
+                            Value::int(!Realm::to_int32(f))
+                        } else {
+                            gate!();
+                            tri!(realm.numeric_unary(Op::BitNot, x))
                         };
-                        r!(a!()) = Value::int(!i);
                         pc = next;
                     }
                     Op::Typeof => {
@@ -2252,9 +2275,16 @@ impl Vm {
                     }
                     Op::Inc | Op::Dec => {
                         let x = r!(b!());
-                        let x = if x.is_number() { x } else { Realm::num(tri!(realm.to_number(x))) };
                         let d = if opv == Op::Inc { 1 } else { -1 };
-                        op_add!(a!(), x, Value::int(d), next)
+                        if let Some(i) = x.as_int() {
+                            r!(a!()) = i.checked_add(d).map_or_else(|| Value::number(i as f64 + d as f64), Value::int);
+                        } else if let Some(f) = x.as_f64() {
+                            r!(a!()) = Value::number(f + d as f64);
+                        } else {
+                            gate!();
+                            r!(a!()) = tri!(realm.numeric_unary(opv, x));
+                        }
+                        pc = next;
                     }
                     Op::ToStr => {
                         gate!();
@@ -2579,12 +2609,6 @@ fn imod(i: i32, j: i32) -> Value {
 /// `x ** y` with the rules of JavaScript where Rust's `powf` differs.
 pub(crate) fn pow(x: f64, y: f64) -> f64 {
     if y.is_nan() || (x.abs() == 1.0 && y.is_infinite()) { f64::NAN } else { x.powf(y) }
-}
-
-/// A binary numeric op on two values that are not both numbers: `ToNumber` on each.
-fn num2(rt: &mut Realm, x: Value, y: Value, f: fn(f64, f64) -> f64) -> R<Value> {
-    let (p, q) = (rt.to_number(x)?, rt.to_number(y)?);
-    Ok(Value::number(f(p, q)))
 }
 
 #[cfg(test)]
