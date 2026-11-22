@@ -32,4 +32,14 @@ The instruction minimum fell by 203.55 M (4.86%). RSS in the table comes from th
 
 The first RSS harness read stderr. The `wait4` helper writes its result to stdout and discards the child streams. The second run read stdout and expected a driver report on disk. The harness did not pass the driver's `--out` option. The two-attempt rule stopped the work before the separate RSS gate or PR.
 
-`t` passed the string range, iterator, regexp, and related built-in checks. The final added assertions for a flat wide source and a short range of a large flat source were not rerun. Typecheck, the string cost rows, the five interpreter micro rows, the other three journeys, Windows, and the full suite were not run.
+`t` passed the string range, iterator, regexp, and related built-in checks. The final added assertions for a flat wide source and a short range of a large flat source were not rerun. The owner's session ran the rest on `d1e9876f` against this branch. `cargo test -p bare-js2 --lib bi_string` passed 19 tests, including the final assertions. `cargo check -p bare-js2 -p bare` passed. js2 has no string row in `tools/js/cost_rows.txt`. The five interpreter micro rows (minimum of 3, glibc) did not change:
+
+| Row | Main | Branch | Change |
+| --- | ---: | ---: | ---: |
+| `interp_load loopfn 3000000` | 800,255,842 | 800,255,242 | -0.000% |
+| `interp_load calls 1000000` | 556,295,052 | 556,294,825 | -0.000% |
+| `interp_load fib 27` | 241,938,008 | 241,937,802 | -0.000% |
+| `interp_load closures 1000000` | 1,741,054,588 | 1,741,054,404 | -0.000% |
+| `interp_load objects 1000000` | 699,644,090 | 699,644,092 | +0.000% |
+
+The separate `wait4` RSS gate, the other three journeys, Windows and the full suite were not run.
