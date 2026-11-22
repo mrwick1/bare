@@ -475,3 +475,11 @@ mod bi_string_regexp_tests;
 #[cfg(test)]
 #[path = "bi_uri_tests.rs"]
 mod bi_uri_tests;
+
+#[cfg(test)]
+#[path = "script_array_push_tests.rs"]
+mod array_push_tests;
+
+#[cfg(test)]
+#[path = "script_key_add_tests.rs"]
+mod key_add_tests;
