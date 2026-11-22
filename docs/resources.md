@@ -1852,7 +1852,7 @@ The live login stopped at `ReferenceError: Intl is not defined` after it went to
 Design:
 
 - Locales: `en-US`, `en`, `en-CA`, `en-IN` and `en-GB`. Lookup drops subtags from the right, so `en-AU` is `en`. A locale with no match falls back to `en-US`. ECMA-402 allows this when a locale is not available, but Node formats `fr` in French.
-- Patterns come from tables, not from a CLDR pattern generator. `tools/js/intl_gen.mjs` makes `crates/js/src/intl_data.rs` from the ICU 77 data of Node 22.18. The tables are:
+- Patterns come from tables, not from a CLDR pattern generator. `tools/js/intl_gen.mjs` makes `crates/intl/src/intl_data.rs` from the ICU 77 data of Node 22.18. The tables are:
   - a date pattern for each set of date fields;
   - a time pattern for each set of time fields and hour cycle;
   - a joiner (", " or " at ");
@@ -2470,7 +2470,7 @@ The live staging dashboard calls `Number.prototype.toLocaleString` with `en-IN` 
 Crates and data (ICU4X 2.4, Unicode-3.0 license):
 
 - Crates: `icu_decimal` (digits, grouping), `icu_plurals`, `icu_collator`, `fixed_decimal` (exact decimals and rounding), `icu_locale_core`. All are used with `default-features = false`, so no compiled data is linked.
-- Data: `crates/js/src/icu_data` is made by `tools/js/icu_data_gen.sh` (icu4x-datagen 2.4.0, CLDR 49). It holds the 5 English locales of `intl.rs` and the root. The collator reads the root collation: English has no tailoring. The Chinese and other tailorings are dropped. The data is 836 KB of source. The NFKD tables and the NFC composition table (160 KB) were added for `normalize("NFKC")` and `normalize("NFKD")`. The release `bare-mcp` binary grew by 104,992 B (+0.57%, 18,313,440 B to 18,418,432 B, unstripped, measured 2026-11-12).
+- Data: `crates/intl/src/icu_data` is made by `tools/js/icu_data_gen.sh` (icu4x-datagen 2.4.0, CLDR 49). It holds the 5 English locales of `intl.rs` and the root. The collator reads the root collation: English has no tailoring. The Chinese and other tailorings are dropped. The data is 836 KB of source. The NFKD tables and the NFC composition table (160 KB) were added for `normalize("NFKC")` and `normalize("NFKD")`. The release `bare-mcp` binary grew by 104,992 B (+0.57%, 18,313,440 B to 18,418,432 B, unstripped, measured 2026-11-12).
 - Currency symbols and digits are not in ICU4X (its currency formatter is unstable). `tools/js/intl_num_gen.mjs` makes `intl_num_data.rs` from the ICU 77 data of Node 22.18. It has 22 symbols, 87 narrow symbols and the non-2-digit currencies.
 - Compact notation needs the unstable `CompactDecimalFormatter`. It is a gate.
 

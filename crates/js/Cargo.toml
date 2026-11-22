@@ -15,24 +15,12 @@ bc-poison = []
 census = []
 
 [dependencies]
+bare-intl = { path = "../intl" }
 bare-js-api = { path = "../js-api" }
 bare-observe = { path = "../observe" }
 bare-os = { path = "../os" }
 bare-tzdata = { path = "../tzdata" }
 bare-unicode = { path = "../unicode" }
 fixed_decimal = "0.7.3"
-# ICU4X without its compiled data: the data of 5 English locales is in `src/icu_data` (see `tools/js/icu_data_gen.sh`)
-icu_collator = { version = "2.4.0", default-features = false }
-icu_collections = "2.4.0"
-icu_decimal = { version = "2.4.0", default-features = false, features = ["alloc"] }
-icu_locale_core = "2.4.0"
-icu_locale_fallback = { version = "2.4.0", features = ["compiled_data"] }
-icu_normalizer = { version = "2.4.0", default-features = false }
-icu_plurals = { version = "2.4.0", default-features = false }
 icu_properties = { version = "2.4.0", default-features = false, features = ["compiled_data"] }
-icu_provider = { version = "2.4.0", features = ["baked"] }
-# Rule-based segmenters with compiled data and no dictionary or LSTM data (`Intl.Segmenter`, see `docs/resources.md`)
-icu_segmenter = { version = "2.4.0", default-features = false, features = ["compiled_data"] }
 stacker = "0.1.25"
-writeable = "0.6.4"
-zerovec = "0.11"

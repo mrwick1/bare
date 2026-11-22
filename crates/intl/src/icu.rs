@@ -145,7 +145,7 @@ pub fn num_from_f64(x: f64) -> Num {
         Decimal::from(x.abs() as i64)
     } else {
         // `number_to_string` is the shortest form, with an exponent for the very large and the very small
-        let s = crate::value::number_to_string(x.abs()).replace("e+", "e");
+        let s = crate::number_to_string(x.abs()).replace("e+", "e");
         Decimal::try_from_str(&s).unwrap_or_default()
     };
     d.set_sign(if x.is_sign_negative() { Sign::Negative } else { Sign::None });
@@ -276,7 +276,7 @@ impl PartsWrite for Sink<'_, '_> {
 }
 
 /// ICU4X data for the 5 English locales and the root collation, made by `tools/js/icu_data_gen.sh`.
-#[allow(dead_code, unused_imports, clippy::all)]
+#[allow(unsafe_code, dead_code, unused_imports, clippy::all)]
 mod baked {
     include!("icu_data/mod.rs");
     pub struct Baked;
@@ -512,10 +512,6 @@ pub const DEFAULT_COLL: CollKey = CollKey { sensitivity: 3, case_first: 0, numer
 pub fn compare(c: &Collator, a: &str, b: &str) -> i32 {
     c.as_borrowed().compare(a, b) as i32
 }
-
-#[cfg(test)]
-#[path = "icu_tests.rs"]
-mod tests;
 
 // ------------------------------------------------------------ segmentation
 

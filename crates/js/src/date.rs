@@ -62,21 +62,7 @@ pub fn days_in_month(y: i64, m: i64) -> i64 {
     }
 }
 
-/// The calendar fields of a time value.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Fields {
-    pub year: i64,
-    /// 0..=11
-    pub month: i64,
-    /// 1..=31
-    pub day: i64,
-    pub hour: i64,
-    pub minute: i64,
-    pub second: i64,
-    pub ms: i64,
-    /// 0 is Sunday.
-    pub weekday: i64,
-}
+pub use bare_intl::intl::Fields;
 
 /// The fields of time value `t`. `None` for NaN (and for anything that is not a valid time value).
 pub fn fields(t: f64) -> Option<Fields> {

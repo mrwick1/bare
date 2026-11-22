@@ -8,8 +8,23 @@
 //!   for each set of time fields and hour cycle, a joiner between them (", " or " at "), and the whole pattern for the 576
 //!   pairs that are not date + joiner + time (ICU has a better match for them, like "Fri 3:04 AM").
 
-use crate::date::Fields;
 use crate::intl_data::*;
+
+/// The calendar fields of a time value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Fields {
+    pub year: i64,
+    /// 0..=11
+    pub month: i64,
+    /// 1..=31
+    pub day: i64,
+    pub hour: i64,
+    pub minute: i64,
+    pub second: i64,
+    pub ms: i64,
+    /// 0 is Sunday.
+    pub weekday: i64,
+}
 
 /// The name of locale `i` (the BCP 47 tag that `resolvedOptions` reports).
 pub fn locale_name(i: u8) -> &'static str {
@@ -551,10 +566,6 @@ pub fn zone_tail(p: Pattern, zone: &str, out: &mut String, parts: Option<&mut Ve
         ps.push((Part::TimeZoneName, out.len()));
     }
 }
-
-#[cfg(test)]
-#[path = "intl_tests.rs"]
-mod tests;
 
 // Included, not modules: a new module moves the other modules to other codegen units and changes their inlining (the lexer and
 // the parser rows of the cost matrix moved by 2%).

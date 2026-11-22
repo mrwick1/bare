@@ -1,6 +1,6 @@
 // Generate English unit suffixes and currency names from Node's Intl data.
 import fs from 'node:fs';
-const source = fs.readFileSync('crates/js/src/eval_intl_num.rs', 'utf8');
+const source = fs.readFileSync('crates/intl/src/eval_intl_num.rs', 'utf8');
 const units = [...source.match(/const SANCTIONED_UNITS:[\s\S]*?= \[([\s\S]*?)\];/)[1].matchAll(/"([^"]+)"/g)].map(x => x[1]);
 const q = JSON.stringify;
 let out = '// English suffixes from Node Intl. Regenerate with tools/js/intl_unit_gen.mjs.\n';
@@ -26,4 +26,4 @@ for (const currency of Intl.supportedValuesOf('currency')) {
  out += '(' + [currency,...[1,2].map(n=>f.formatToParts(n).find(p=>p.type==='currency').value)].map(q).join(',') + '),\n';
 }
 out += '];\n';
-fs.writeFileSync('crates/js/src/intl_unit_data.rs', out);
+fs.writeFileSync('crates/intl/src/intl_unit_data.rs', out);

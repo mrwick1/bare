@@ -1,6 +1,6 @@
-// Generate crates/js/src/intl_data.rs: English date and time patterns from Node's ICU (CLDR data, Unicode license).
+// Generate crates/intl/src/intl_data.rs: English date and time patterns from Node's ICU (CLDR data, Unicode license).
 // Only Intl.DateTimeFormat of this Node runs here; no page code.
-//   node tools/js/intl_gen.mjs > crates/js/src/intl_data.rs
+//   node tools/js/intl_gen.mjs > crates/intl/src/intl_data.rs
 //
 // A pattern is text with fields `{Xw}`: X is w (weekday), y, M, d, the hour
 // (h 1-12, K 0-11, H 0-23, k 1-24), m, s, a (day period), z (zone name, a gate);

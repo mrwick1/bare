@@ -315,13 +315,7 @@ pub fn parse_offset_name(s: &str) -> Option<i32> {
 }
 
 /// True for the names that ECMA-402 makes the zone `UTC` (compared without case).
-pub fn is_utc_name(s: &str) -> bool {
-    const UTC: [&str; 18] = [
-        "UTC", "Etc/UTC", "Etc/GMT", "GMT", "Etc/UCT", "UCT", "Etc/Universal", "Universal", "Etc/Zulu", "Zulu", "Etc/GMT0", "GMT0", "Etc/GMT+0",
-        "Etc/GMT-0", "GMT+0", "GMT-0", "Etc/Greenwich", "Greenwich",
-    ];
-    UTC.iter().any(|u| u.eq_ignore_ascii_case(s))
-}
+pub use bare_intl::tz_names::is_utc_name;
 
 #[cfg(test)]
 #[path = "tz_tests.rs"]
