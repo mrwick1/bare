@@ -29,7 +29,6 @@
 //!   the list, the sent value and the mode are written: the resume restores no other. An exception before suspension sees
 //!   the original frame. A throw after resumption goes through the resume instructions.
 use crate::bytecode::{CF_ARGS, CF_GEN, Code, GK_ASYNC, GK_ASYNCGEN, GK_GEN, GK_NONE, Handler, ITER_REGS, Ins, NO_NAME, NO_REG, Op, Recipes, STR_EMPTY, STR_SLOT, SaveList, YS_REGS, decode};
-use crate::roots::Map;
 use std::ops::Range;
 
 const UNREACHED: u32 = u32::MAX;
@@ -40,7 +39,8 @@ struct Access<'a> {
     read_window: Range<u32>,
     writes: Range<u32>,
     target: Option<usize>,
-    map: Option<Map<'a>>,
+    safepoint: bool,
+    fallthrough: bool,
     handler: Option<&'a Handler>,
     save: Option<SaveList<'a>>,
 }
@@ -105,6 +105,9 @@ pub fn verify(code: &Code) -> Result<(), String> {
     if code.gen_kind != GK_NONE && !code.noctor {
         return Err("a generator that a script can construct".into());
     }
+    if code.roots.regs() != nregs as usize {
+        return Err("the root maps have another register count".into());
+    }
     if let Ok((i, 1)) = decode(&code.words, 0)
         && i.op == Op::Lazy
     {
@@ -145,7 +148,9 @@ pub fn verify(code: &Code) -> Result<(), String> {
     }
     let mut site_uses = vec![0u32; code.sites.len()];
     let mut access = Vec::with_capacity(ins.len());
-    for &(pc, i, len) in &ins {
+    let words = (code.nregs as usize).div_ceil(64).max(1);
+    let mut maps = vec![0u64; ins.len() * words];
+    for (k, &(pc, i, len)) in ins.iter().enumerate() {
         let err = |what: &str| Err(format!("{pc:04} {}: {what}", i.op.name()));
         if i.op == Op::Lazy {
             return err("Lazy must be the only word of its stub");
@@ -160,9 +165,14 @@ pub fn verify(code: &Code) -> Result<(), String> {
         if code.gen_kind != GK_NONE && matches!(i.op, Op::Ret | Op::RetUndef | Op::RetDerived | Op::LoadNewTarget) {
             return err("not allowed in generator code (a generator returns with RetGen or RetAsync, and its frame keeps the generator where new.target is)");
         }
+        let safepoint = i.op.is_safepoint();
+        if safepoint {
+            let map = code.roots.find(pc as u32).ok_or_else(|| format!("{pc:04} {}: a safepoint with no root map", i.op.name()))?;
+            let bits = &mut maps[k * words..(k + 1) * words];
+            map.slots().for_each(|r| put(bits, r as u32));
+        }
         let mut a = Access { reads: [0; 4], read_count: 0, read_window: 0..0, writes: 0..0, target: None,
-            map: if i.op.is_safepoint() { code.roots.find(pc as u32) } else { None },
-            handler: handler(code, i, pc), save: save_list(code, i) };
+            safepoint, fallthrough: i.op.falls_through(), handler: handler(code, i, pc, safepoint), save: save_list(code, i) };
         for k in 0..i.op.form().fields() {
             let letter = i.op.letter(k);
             let v = i.field(k);
@@ -237,21 +247,13 @@ pub fn verify(code: &Code) -> Result<(), String> {
     if code.lines.windows(2).any(|w| w[0].0 >= w[1].0) || code.lines.last().is_some_and(|l| l.0 as usize >= n) {
         return Err("source positions not sorted or past the end".into());
     }
-    if code.roots.regs() != nregs as usize {
-        return Err("the root maps have another register count".into());
-    }
-    for (&(pc, i, _), a) in ins.iter().zip(&access) {
-        if i.op.is_safepoint() && a.map.is_none() {
-            return Err(format!("{pc:04} {}: a safepoint with no root map", i.op.name()));
-        }
-    }
     for &p in code.roots.pcs() {
-        if !start(p as i64) || !ins[at[p as usize]].1.op.is_safepoint() {
+        if !start(p as i64) || !access[at[p as usize]].safepoint {
             return Err(format!("{p:04}: a root map for a word that is not a safepoint instruction"));
         }
     }
-    let state = flow(code, &ins, &at, &access)?;
-    check_live_roots(code, &ins, &at, &access, &state)
+    let state = flow(code, &ins, &at, &access, words, &maps)?;
+    check_live_roots(code, &ins, &at, &access, &state, words, &maps)
 }
 
 fn verify_lazy(code: &Code, i: Ins) -> Result<(), String> {
@@ -262,7 +264,7 @@ fn verify_lazy(code: &Code, i: Ins) -> Result<(), String> {
         || (!args && (code.nparams > 64 || code.nregs != code.nparams.max(1) || code.fn_len != code.nparams))
         || !code.funcs.is_empty() || !code.sites.is_empty() || !code.recipes.is_empty() || !code.data.is_empty()
         || !code.numbers.is_empty() || !code.tables.is_empty() || !code.loops.is_empty() || !code.handlers.is_empty()
-        || !code.lines.is_empty() || code.gen_regs != 0 || !code.roots.pcs().is_empty() || code.roots.regs() != code.nregs as usize
+        || !code.lines.is_empty() || code.gen_regs != 0 || !code.roots.pcs().is_empty()
     {
         return Err("invalid lazy stub metadata".into());
     }
@@ -373,8 +375,7 @@ fn check_loops(code: &Code, ins: &[(usize, Ins, usize)], at: &[usize], n: usize)
 }
 
 /// Propagate the context depth and the registers that every incoming path has written.
-fn flow(code: &Code, ins: &[(usize, Ins, usize)], at: &[usize], access: &[Access<'_>]) -> Result<Vec<u32>, String> {
-    let words = (code.nregs as usize).div_ceil(64).max(1);
+fn flow(code: &Code, ins: &[(usize, Ins, usize)], at: &[usize], access: &[Access<'_>], words: usize, maps: &[u64]) -> Result<Vec<u32>, String> {
     let mut depths = vec![UNREACHED; ins.len()];
     let mut written = vec![0; ins.len() * words];
     let mut work = vec![0];
@@ -394,8 +395,8 @@ fn flow(code: &Code, ins: &[(usize, Ins, usize)], at: &[usize], access: &[Access
         if let Some(r) = a.read_window.clone().find(|r| !has(&set, *r)) {
             return err(format!("reads r{r} of its window, which a path has not written"));
         }
-        if let Some(map) = a.map
-            && let Some(r) = map.slots().find(|r| !has(&set, *r as u32))
+        if a.safepoint
+            && let Some(r) = missing(&maps[k * words..(k + 1) * words], &set)
         {
             return err(format!("the root map names r{r}, which a path has not written"));
         }
@@ -448,10 +449,12 @@ fn flow(code: &Code, ins: &[(usize, Ins, usize)], at: &[usize], access: &[Access
         if let Some(t) = a.target.filter(|_| !skips_write(i.op)) {
             meet(t, depth, &set)?;
         }
-        for t in code.switch_targets(&i).into_iter().flatten() {
-            meet(at[t as usize], depth, &set)?;
+        if matches!(i.op, Op::SwitchA | Op::SwitchI) {
+            for t in code.switch_targets(&i).expect("a checked switch table") {
+                meet(at[t as usize], depth, &set)?;
+            }
         }
-        if i.op.falls_through() {
+        if a.fallthrough {
             if k + 1 == ins.len() {
                 return err("a path runs past the end".into());
             }
@@ -466,13 +469,13 @@ fn skips_write(op: Op) -> bool {
     matches!(op, Op::IterNext | Op::ForInNext | Op::AIterClose | Op::AIterCloseT | Op::AYsCall)
 }
 
-fn handler(code: &Code, i: Ins, pc: usize) -> Option<&Handler> {
+fn handler(code: &Code, i: Ins, pc: usize, safepoint: bool) -> Option<&Handler> {
     let throws = match i.op {
         Op::Throw => true,
         Op::RetDerived | Op::AsyncInit | Op::JmpBack | Op::AIterCloseT => false,
         Op::IterClose => i.c == 0,
         Op::Yield | Op::RetGen => code.gen_kind == GK_ASYNCGEN,
-        _ => i.op.is_safepoint(),
+        _ => safepoint,
     };
     if throws { code.handler_at(pc as u32) } else { None }
 }
@@ -488,11 +491,19 @@ enum Edge {
     Throw(u32),
 }
 
-fn check_live_roots(code: &Code, ins: &[(usize, Ins, usize)], at: &[usize], access: &[Access<'_>], depths: &[u32]) -> Result<(), String> {
-    let words = (code.nregs as usize).div_ceil(64).max(1);
+/// Return the first register in `needed` that `available` does not cover.
+fn missing(needed: &[u64], available: &[u64]) -> Option<usize> {
+    needed.iter().zip(available).enumerate().find_map(|(w, (&need, &have))| {
+        let absent = need & !have;
+        (absent != 0).then(|| w * 64 + absent.trailing_zeros() as usize)
+    })
+}
+
+fn check_live_roots(code: &Code, ins: &[(usize, Ins, usize)], at: &[usize], access: &[Access<'_>], depths: &[u32], words: usize, maps: &[u64]) -> Result<(), String> {
     let mut preds = vec![usize::MAX; ins.len()];
     let mut edges = Vec::new();
-    let mut live = vec![0u64; ins.len() * words];
+    // The collector itself reads each named slot. Seed those uses so an omitted pointer cannot be marked later.
+    let mut live = maps.to_vec();
     let mut kills = vec![0u64; ins.len() * words];
     let mut work = Vec::new();
     let mut queued = vec![false; ins.len()];
@@ -508,8 +519,10 @@ fn check_live_roots(code: &Code, ins: &[(usize, Ins, usize)], at: &[usize], acce
         if let Some(t) = a.target {
             edge(t, if skips_write(i.op) { Edge::Keep } else { Edge::Write });
         }
-        for t in code.switch_targets(&i).into_iter().flatten() {
-            edge(at[t as usize], Edge::Write);
+        if matches!(i.op, Op::SwitchA | Op::SwitchI) {
+            for t in code.switch_targets(&i).expect("a checked switch table") {
+                edge(at[t as usize], Edge::Write);
+            }
         }
         if let Some(h) = a.handler {
             edge(at[h.target as usize], Edge::Throw(h.reg as u32));
@@ -525,11 +538,6 @@ fn check_live_roots(code: &Code, ins: &[(usize, Ins, usize)], at: &[usize], acce
             // Only saved slots can be needed after the resume (the forward pass checks this).
             list.regs.iter().for_each(|r| put(uses, *r));
         }
-        if let Some(map) = a.map {
-            // The collector itself reads each named slot. Track these uses too, so an old
-            // value omitted at one safepoint cannot be marked at a later safepoint.
-            map.slots().for_each(|r| put(uses, r as u32));
-        }
         work.push(k);
         queued[k] = true;
     }
@@ -538,19 +546,10 @@ fn check_live_roots(code: &Code, ins: &[(usize, Ins, usize)], at: &[usize], acce
         queued[k] = false;
         let (pc, i, _) = ins[k];
         current.copy_from_slice(&live[k * words..(k + 1) * words]);
-        if let Some(map) = access[k].map {
-            let mut mapped = map.slots().peekable();
-            for (w, &word) in current.iter().enumerate() {
-                let mut word = word;
-                while word != 0 {
-                    let r = w * 64 + word.trailing_zeros() as usize;
-                    word &= word - 1;
-                    while mapped.next_if(|&m| m < r).is_some() {}
-                    if mapped.next_if_eq(&r).is_none() {
-                        return Err(format!("{pc:04} {}: root map misses live r{r}", i.op.name()));
-                    }
-                }
-            }
+        if access[k].safepoint
+            && let Some(r) = missing(&current, &maps[k * words..(k + 1) * words])
+        {
+            return Err(format!("{pc:04} {}: root map misses live r{r}", i.op.name()));
         }
         let mut propagate = |pred: usize, edge| {
             let mut changed = false;
@@ -569,7 +568,7 @@ fn check_live_roots(code: &Code, ins: &[(usize, Ins, usize)], at: &[usize], acce
                 queued[pred] = true;
             }
         };
-        if k > 0 && depths[k - 1] != UNREACHED && ins[k - 1].1.op.falls_through() {
+        if k > 0 && depths[k - 1] != UNREACHED && access[k - 1].fallthrough {
             propagate(k - 1, Edge::Write);
         }
         let mut edge = preds[k];
