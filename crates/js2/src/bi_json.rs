@@ -1,6 +1,6 @@
-//! `JSON.parse` and `JSON.stringify` (plan step S2.7). Both read and write 16-bit units, so a lone surrogate and a string with
-//! `\u0000` survive. `parse` makes plain objects and arrays with `Realm::define`, so the key `__proto__` is an own property and a
-//! repeated key keeps the last value. Nesting is limited to [`MAX_DEPTH`] (a `RangeError`).
+//! `JSON.parse` reads flat Latin-1 or UTF-16 input. `JSON.stringify` writes UTF-16. Both preserve lone surrogates and NULs.
+//! Parsing defines own data properties, including `__proto__`. A repeated key keeps the last value. Nesting is limited to
+//! [`MAX_DEPTH`] (a `RangeError`).
 //!
 //! The parser visits children before it calls the reviver. The writer calls `toJSON` before the replacer.
 //! A BigInt or BigInt wrapper left after those calls throws a `TypeError`.
@@ -11,10 +11,12 @@ use crate::builtins::arg;
 use crate::interp::STOP;
 use crate::interp_rt::{ErrKind, Key, R, Realm};
 use crate::object::Obj;
+use crate::string::{Chars, Str};
 use crate::value::Value;
 
 /// The deepest nesting of arrays and objects that `parse` and `stringify` take.
 const MAX_DEPTH: usize = 1000;
+const INDEX_CACHE_LEN: usize = 128;
 
 impl Realm {
     pub(crate) fn install_json(&mut self) {
@@ -38,28 +40,78 @@ fn callable(v: Value) -> bool {
 
 // ---- parse ----
 
-struct Parser<'a> {
-    s: &'a [u16],
-    i: usize,
+trait Unit: Copy + Into<u16> {
+    fn chars(span: &[Self]) -> Chars<'_>;
+    fn number(span: &[Self]) -> f64;
 }
 
-impl Parser<'_> {
+impl Unit for u8 {
+    fn chars(span: &[Self]) -> Chars<'_> {
+        Chars::One(span)
+    }
+
+    fn number(span: &[Self]) -> f64 {
+        std::str::from_utf8(span).expect("ASCII number").parse().unwrap_or(f64::NAN)
+    }
+}
+
+impl Unit for u16 {
+    fn chars(span: &[Self]) -> Chars<'_> {
+        Chars::Two(span)
+    }
+
+    fn number(span: &[Self]) -> f64 {
+        let text: String = span.iter().map(|&c| c as u8 as char).collect();
+        text.parse().unwrap_or(f64::NAN)
+    }
+}
+
+/// An index has canonical decimal spelling and is below 2^32 - 1.
+fn decimal_index<U: Unit>(s: &[U]) -> Option<u32> {
+    let (&first, rest) = s.split_first()?;
+    let mut n = u32::from(first.into()).wrapping_sub(0x30);
+    if n > 9 || rest.len() >= 10 || (n == 0 && !rest.is_empty()) {
+        return None;
+    }
+    for &c in rest {
+        let digit = u32::from(c.into()).wrapping_sub(0x30);
+        if digit > 9 {
+            return None;
+        }
+        n = n.checked_mul(10)?.checked_add(digit)?;
+    }
+    (n != u32::MAX).then_some(n)
+}
+
+struct Parser<'a, U> {
+    s: &'a [U],
+    i: usize,
+    scratch: Vec<u16>,
+    /// Plain objects store an index under its decimal atom. Keep recent indices with their atoms for this parse.
+    indices: [Option<(u32, Str)>; INDEX_CACHE_LEN],
+}
+
+impl<'a, U: Unit> Parser<'a, U> {
+    fn peek(&self) -> Option<u16> {
+        self.s.get(self.i).copied().map(Into::into)
+    }
+
     fn ws(&mut self) {
-        while matches!(self.s.get(self.i), Some(0x20 | 0x09 | 0x0a | 0x0d)) {
+        while matches!(self.peek(), Some(0x20 | 0x09 | 0x0a | 0x0d)) {
             self.i += 1;
         }
     }
 
     fn fail<T>(&self, rt: &mut Realm) -> R<T> {
-        Err(match self.s.get(self.i) {
+        Err(match self.peek() {
             None => rt.error(ErrKind::Syntax, "Unexpected end of JSON input"),
-            Some(&c) => rt.json_syntax(&format!("Unexpected token {}", char::from_u32(c as u32).unwrap_or('\u{fffd}')), self.i),
+            Some(c) => rt.json_syntax(&format!("Unexpected token {}", char::from_u32(c as u32).unwrap_or('\u{fffd}')), self.i),
         })
     }
 
     fn lit(&mut self, rt: &mut Realm, word: &str, v: Value) -> R<Value> {
         for b in word.bytes() {
-            if self.s.get(self.i) != Some(&(b as u16)) {
+            if self.peek() != Some(b as u16) {
                 return self.fail(rt);
             }
             self.i += 1;
@@ -69,12 +121,12 @@ impl Parser<'_> {
 
     fn value(&mut self, rt: &mut Realm, depth: usize) -> R<Value> {
         self.ws();
-        match self.s.get(self.i).copied() {
+        match self.peek() {
             Some(0x7b) => self.object(rt, depth),
             Some(0x5b) => self.array(rt, depth),
             Some(0x22) => {
-                let u = self.string(rt)?;
-                Ok(rt.make_units(&u))
+                let text = self.string(rt)?.map_or_else(|| Chars::Two(&self.scratch), U::chars);
+                Ok(Str::new(&mut rt.heap, text).expect("memory").value())
             }
             Some(0x74) => self.lit(rt, "true", Value::TRUE),
             Some(0x66) => self.lit(rt, "false", Value::FALSE),
@@ -86,89 +138,120 @@ impl Parser<'_> {
 
     fn number(&mut self, rt: &mut Realm) -> R<Value> {
         let start = self.i;
-        if self.s[self.i] == 0x2d {
+        if self.peek() == Some(0x2d) {
             self.i += 1;
         }
         let digits = |p: &mut Self| {
             let s = p.i;
-            while matches!(p.s.get(p.i), Some(0x30..=0x39)) {
+            while matches!(p.peek(), Some(0x30..=0x39)) {
                 p.i += 1;
             }
             p.i - s
         };
-        match self.s.get(self.i) {
+        match self.peek() {
             Some(0x30) => self.i += 1,
             Some(0x31..=0x39) => {
                 digits(self);
             }
             _ => return self.fail(rt),
         }
-        if self.s.get(self.i) == Some(&0x2e) {
+        if self.peek() == Some(0x2e) {
             self.i += 1;
             if digits(self) == 0 {
                 return self.fail(rt);
             }
         }
-        if matches!(self.s.get(self.i), Some(0x65 | 0x45)) {
+        if matches!(self.peek(), Some(0x65 | 0x45)) {
             self.i += 1;
-            if matches!(self.s.get(self.i), Some(0x2b | 0x2d)) {
+            if matches!(self.peek(), Some(0x2b | 0x2d)) {
                 self.i += 1;
             }
             if digits(self) == 0 {
                 return self.fail(rt);
             }
         }
-        let t: String = self.s[start..self.i].iter().map(|&c| c as u8 as char).collect();
-        Ok(Realm::num(t.parse::<f64>().unwrap_or(f64::NAN)))
+        Ok(Realm::num(U::number(&self.s[start..self.i])))
     }
 
-    /// A string literal at `"`: its units.
-    fn string(&mut self, rt: &mut Realm) -> R<Vec<u16>> {
+    /// Scan a quoted string. Return its source span, or leave decoded units in scratch if escaped.
+    fn string(&mut self, rt: &mut Realm) -> R<Option<&'a [U]>> {
         self.i += 1;
-        let mut out: Vec<u16> = Vec::new();
+        let start = self.i;
         loop {
-            let Some(&c) = self.s.get(self.i) else { return self.fail(rt) };
-            match c {
-                0x22 => {
+            match self.peek() {
+                Some(0x22) => {
+                    let span = &self.s[start..self.i];
                     self.i += 1;
-                    return Ok(out);
+                    return Ok(Some(span));
                 }
-                0x5c => {
+                Some(0x5c) => {
+                    self.scratch.clear();
+                    self.scratch.extend(self.s[start..self.i].iter().copied().map(Into::into));
+                    self.escaped(rt)?;
+                    return Ok(None);
+                }
+                Some(0..=0x1f) | None => return self.fail(rt),
+                _ => self.i += 1,
+            }
+        }
+    }
+
+    #[cold]
+    fn escaped(&mut self, rt: &mut Realm) -> R<()> {
+        loop {
+            let unit = match self.peek() {
+                Some(0x22) => {
                     self.i += 1;
-                    let Some(&e) = self.s.get(self.i) else { return self.fail(rt) };
-                    let u = match e {
-                        0x22 | 0x5c | 0x2f => e,
-                        0x62 => 8,
-                        0x66 => 12,
-                        0x6e => 10,
-                        0x72 => 13,
-                        0x74 => 9,
-                        0x75 => {
+                    return Ok(());
+                }
+                Some(0x5c) => {
+                    self.i += 1;
+                    match self.peek() {
+                        Some(e @ (0x22 | 0x5c | 0x2f)) => e,
+                        Some(0x62) => 8,
+                        Some(0x66) => 12,
+                        Some(0x6e) => 10,
+                        Some(0x72) => 13,
+                        Some(0x74) => 9,
+                        Some(0x75) => {
                             let mut n = 0u16;
-                            for k in 1..=4 {
-                                match self.s.get(self.i + k).and_then(|&h| char::from_u32(h as u32)).and_then(|h| h.to_digit(16)) {
-                                    Some(d) => n = n * 16 + d as u16,
-                                    None => {
-                                        self.i += k;
-                                        return self.fail(rt);
-                                    }
-                                }
+                            for _ in 0..4 {
+                                self.i += 1;
+                                let Some(d) = self.peek().and_then(|h| char::from_u32(h as u32)).and_then(|h| h.to_digit(16)) else {
+                                    return self.fail(rt);
+                                };
+                                n = n * 16 + d as u16;
                             }
-                            self.i += 4;
                             n
                         }
                         _ => return self.fail(rt),
-                    };
-                    out.push(u);
-                    self.i += 1;
+                    }
                 }
-                0..=0x1f => return self.fail(rt),
-                _ => {
-                    out.push(c);
-                    self.i += 1;
-                }
-            }
+                Some(0..=0x1f) | None => return self.fail(rt),
+                Some(c) => c,
+            };
+            self.scratch.push(unit);
+            self.i += 1;
         }
+    }
+
+    fn key(&mut self, rt: &mut Realm) -> R<Str> {
+        let (text, index) = match self.string(rt)? {
+            Some(span) => (U::chars(span), decimal_index(span)),
+            None => (Chars::Two(&self.scratch), decimal_index(&self.scratch)),
+        };
+        let Some(index) = index else {
+            return Ok(rt.atoms.intern(&mut rt.heap, text).expect("memory"));
+        };
+        let slot = &mut self.indices[index as usize % INDEX_CACHE_LEN];
+        if let Some((cached, atom)) = *slot
+            && cached == index
+        {
+            return Ok(atom);
+        }
+        let atom = rt.atoms.intern(&mut rt.heap, text).expect("memory");
+        *slot = Some((index, atom));
+        Ok(atom)
     }
 
     fn array(&mut self, rt: &mut Realm, depth: usize) -> R<Value> {
@@ -176,20 +259,21 @@ impl Parser<'_> {
             return Err(rt.error(ErrKind::Range, "JSON is nested too deeply"));
         }
         self.i += 1;
-        let mut vals: Vec<Value> = Vec::new();
+        let a = Obj::array(&mut rt.heap, &rt.shapes, rt.s_array, &[]).expect("memory");
         self.ws();
-        if self.s.get(self.i) == Some(&0x5d) {
+        if self.peek() == Some(0x5d) {
             self.i += 1;
-            return Ok(rt.new_array(&vals));
+            return Ok(a.value());
         }
         loop {
-            vals.push(self.value(rt, depth + 1)?);
+            let v = self.value(rt, depth + 1)?;
+            a.append_dense(&mut rt.heap, v).expect("memory");
             self.ws();
-            match self.s.get(self.i) {
+            match self.peek() {
                 Some(0x2c) => self.i += 1,
                 Some(0x5d) => {
                     self.i += 1;
-                    return Ok(rt.new_array(&vals));
+                    return Ok(a.value());
                 }
                 _ => return self.fail(rt),
             }
@@ -203,27 +287,30 @@ impl Parser<'_> {
         self.i += 1;
         let o = Obj::new_plain(rt);
         self.ws();
-        if self.s.get(self.i) == Some(&0x7d) {
+        if self.peek() == Some(0x7d) {
             self.i += 1;
             return Ok(o.value());
         }
         loop {
             self.ws();
-            if self.s.get(self.i) != Some(&0x22) {
+            if self.peek() != Some(0x22) {
                 return self.fail(rt);
             }
-            let k = self.string(rt)?;
+            let k = self.key(rt)?;
             self.ws();
-            if self.s.get(self.i) != Some(&0x3a) {
+            if self.peek() != Some(0x3a) {
                 return self.fail(rt);
             }
             self.i += 1;
             let v = self.value(rt, depth + 1)?;
-            let kv = rt.make_units(&k);
-            let key = rt.key_of(kv)?;
-            rt.define(o, key, v)?;
+            // This object stays private to the parser. Every existing property is an own data property.
+            if let Some(entry) = rt.shapes.find(o.shape(&rt.shapes), k) {
+                o.set_slot(&rt.shapes, entry.slot(), v);
+            } else {
+                rt.add_named(o, k, v)?;
+            }
             self.ws();
-            match self.s.get(self.i) {
+            match self.peek() {
                 Some(0x2c) => self.i += 1,
                 Some(0x7d) => {
                     self.i += 1;
@@ -235,15 +322,24 @@ impl Parser<'_> {
     }
 }
 
-fn parse(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    let t = rt.to_str(arg(args, 0))?;
-    let u = rt.units(t);
-    let mut p = Parser { s: &u, i: 0 };
+fn parse_units<U: Unit>(rt: &mut Realm, s: &[U]) -> R<Value> {
+    // Parsing does not call JavaScript or reach a GC safepoint. The source and cached atoms stay live here.
+    let mut p = Parser { s, i: 0, scratch: Vec::new(), indices: [None; INDEX_CACHE_LEN] };
     let v = p.value(rt, 0)?;
     p.ws();
-    if p.i < u.len() {
+    if p.i < s.len() {
         return p.fail(rt);
     }
+    Ok(v)
+}
+
+fn parse(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
+    let t = rt.to_str(arg(args, 0))?;
+    let t = rt.flat(t);
+    let v = match t.chars().expect("flat") {
+        Chars::One(s) => parse_units(rt, s),
+        Chars::Two(s) => parse_units(rt, s),
+    }?;
     let reviver = arg(args, 1);
     if callable(reviver) {
         let root = Obj::new_plain(rt);
@@ -528,3 +624,7 @@ fn stringify(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     };
     if w.value(rt, value, holder, key.value(), &[])? { Ok(rt.make_units(&w.out)) } else { Ok(Value::UNDEFINED) }
 }
+
+#[cfg(test)]
+#[path = "bi_json_keys_tests.rs"]
+mod keys_tests;

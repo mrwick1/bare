@@ -73,6 +73,7 @@
 //! `integrity`, `crossorigin`, `nonce`, CSP, `<noscript>`, a service worker.
 
 use crate::eng::{Eng, Fault, Ops, Val};
+use crate::eng_new::New;
 use crate::browser_sources::Roots;
 use crate::browser::{Browser, Dom, IdHash, Listener, R, Survive, Target as EvTarget};
 use crate::browser_scoped::*;
@@ -81,10 +82,12 @@ use crate::browser_fetch::{FetchConfig, FetchLimits};
 use crate::browser_navigation::NavigationRequest;
 use crate::resources::{self, Expect, JS_TYPES, Kind, Limits, LoadError, Source, Timing, WS};
 use bare_html::dom::{NodeData, NodeId};
+use bare_js::parse_ahead::Ahead;
 use bare_js_api::{Args, Local};
 use bare_net::http::Client;
 use bare_net::parallel::Task;
 use bare_url::Url;
+use std::any::TypeId;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
@@ -101,6 +104,9 @@ mod diagnostic_tests;
 mod preload_tests;
 #[cfg(test)]
 mod parallel_tests;
+#[cfg(test)]
+#[path = "browser_loader_parse_ahead_tests.rs"]
+mod parse_ahead_tests;
 #[cfg(test)]
 mod close_tests;
 mod scan;
@@ -835,8 +841,10 @@ impl<E: Eng> Browser<E> {
         bare_net::trace::page_start();
         let deadline = deadline_after(cfg.limits.max_time);
         let live = self.live();
-        let net = dom.scripts.net.borrow_mut().take().filter(|_| live).map_or_else(|| Net::new(cfg.client), |n| *n);
-        net.ahead.attach();
+        let net = dom.scripts.net.borrow_mut().take().filter(|_| live).map_or_else(|| Net::new(cfg.client, TypeId::of::<E>() == TypeId::of::<New>()), |n| *n);
+        if let Some(ahead) = &net.ahead {
+            ahead.attach();
+        }
         let mut run = Run {
             b: self,
             dom: dom.clone(),
@@ -917,8 +925,10 @@ impl<E: Eng> Browser<E> {
             step: 0,
             waiting: false,
         });
-        let net = net.map_or_else(|| Net::new(client), |n| *n);
-        net.ahead.attach();
+        let net = net.map_or_else(|| Net::new(client, TypeId::of::<E>() == TypeId::of::<New>()), |n| *n);
+        if let Some(ahead) = &net.ahead {
+            ahead.attach();
+        }
         let mut run = Run {
             b: self,
             dom: dom.clone(),
@@ -1097,9 +1107,9 @@ struct Net {
     /// The keys in `started` that only a `<link rel=preload>` of the document asked for (`scan.rs`). They hold the page for nothing until
     /// an element takes the file: a hint that no element uses must not delay `load` or the settle.
     hints: HashSet<String>,
-    /// The worker that parses the text of a classic script when its download ends (`bare_js::parse_ahead`). The page thread finds the tree
-    /// ready when the script runs. It ends with the page: dropping the `Net` drops the parses that wait.
-    ahead: bare_js::parse_ahead::Ahead,
+    /// The OLD engine's worker parses classic scripts when their downloads end.
+    /// Dropping the `Net` drops the parses that wait.
+    ahead: Option<Ahead>,
 }
 
 /// Downloads that are started and not taken at once. The workers run `MAX_WORKERS` of them at a time (6 for each HTTP/1.1 server, as
@@ -1108,8 +1118,8 @@ struct Net {
 const WINDOW: usize = bare_net::parallel::MAX_WORKERS;
 
 impl Net {
-    fn new(client: Client) -> Net {
-        Net { client, started: HashMap::new(), direct: HashSet::default(), done: Arc::default(), waits: Vec::new(), born: HashMap::new(), hints: HashSet::new(), ahead: bare_js::parse_ahead::Ahead::new() }
+    fn new(client: Client, js2: bool) -> Net {
+        Net { client, started: HashMap::new(), direct: HashSet::default(), done: Arc::default(), waits: Vec::new(), born: HashMap::new(), hints: HashSet::new(), ahead: (!js2).then(Ahead::new) }
     }
 
     fn tag(expect: Expect, url: &Url) -> u64 {
@@ -1133,7 +1143,7 @@ impl Net {
     }
 
     /// `start`. `classic`: the text is a classic script that the document names (a `<script src>` or a preload hint). It will run before `load`,
-    /// so the worker parses it when it arrives, if it is long enough (`parse_ahead`). A script that page code adds later may never run: its
+    /// so the OLD worker parses it when it arrives, if it is long enough. A script that page code adds later may never run: its
     /// text is not parsed ahead (an unused parse costs instructions).
     fn start_with(&mut self, expect: Expect, url: &Url, lim: &Limits, deadline: Instant, retained: usize, classic: bool) {
         let key = Net::key(expect, url);
@@ -1142,7 +1152,7 @@ impl Net {
         }
         let url = Url { scheme: url.scheme, host: url.host.clone(), port: url.port, path: url.path.clone() };
         let (target, lim, done) = (resources::Target { expect, url }, lim.clone(), self.done.clone());
-        let ahead = classic.then(|| self.ahead.sender());
+        let ahead = if classic { self.ahead.as_ref().map(Ahead::sender) } else { None };
         self.born.insert(key.clone(), Instant::now());
         self.started.insert(key, self.client.spawn(move |client| {
             if done.load(Ordering::Relaxed) >= lim.max_total_bytes {
