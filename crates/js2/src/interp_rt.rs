@@ -874,6 +874,16 @@ impl Realm {
         self.intern(&i.to_string())
     }
 
+    /// Look up an index name without creating an atom for a missing property.
+    pub(crate) fn find_idx_atom(&self, i: u32) -> Option<Str> {
+        use std::io::Write;
+        let mut bytes = [0; 10];
+        let mut tail = bytes.as_mut_slice();
+        write!(tail, "{i}").expect("a u32 fits in ten digits");
+        let len = 10 - tail.len();
+        self.atoms.find(&Chars::One(&bytes[..len]))
+    }
+
     // ---- operators ----
 
     /// `a + b` when the fast path (two numbers) did not apply.
@@ -884,11 +894,18 @@ impl Realm {
         if Realm::obj(y).is_some() {
             y = self.to_primitive(y, Hint::Default)?;
         }
-        if let (Some(a), Some(b)) = (Realm::str_of(x), Realm::str_of(y)) {
+        let (a, b) = (Realm::str_of(x), Realm::str_of(y));
+        if let (Some(a), Some(b)) = (a, b) {
             return Ok(Str::concat(&mut self.heap, a, b).expect("memory").value());
         }
-        if Realm::str_of(x).is_some() || Realm::str_of(y).is_some() {
-            let (a, b) = (self.to_str(x)?, self.to_str(y)?);
+        if let Some(s) = a.or(b) {
+            let int_first = a.is_none();
+            let v = if int_first { x } else { y };
+            if let Some(i) = v.as_int() {
+                return Ok(Str::concat_int(&mut self.heap, s, i, int_first).expect("memory").value());
+            }
+            let t = self.to_str(v)?;
+            let (a, b) = if int_first { (t, s) } else { (s, t) };
             return Ok(Str::concat(&mut self.heap, a, b).expect("memory").value());
         }
         if x.is_bigint() || y.is_bigint() {
@@ -1871,3 +1888,7 @@ impl Realm {
         self.define(o, Key::Name(k), v).expect("define");
     }
 }
+
+#[cfg(test)]
+#[path = "interp_rt_index_atom_tests.rs"]
+mod index_atom_tests;
