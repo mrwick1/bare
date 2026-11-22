@@ -157,3 +157,26 @@ fn a_template_recipe_cannot_double_as_object_keys() {
     code.recipes.push(&[u32::MAX, 0]);
     assert!(verify(&code).unwrap_err().contains("used as both kinds"));
 }
+
+#[test]
+fn a_later_map_cannot_mark_a_value_omitted_at_an_earlier_safepoint() {
+    let mut code = assemble(3, 2, |a| {
+        a.emit(Ins::new(Op::CallU, 2, 0, 0));
+        a.emit(Ins::new(Op::CallU, 2, 0, 0));
+        a.emit(Ins::new(Op::RetUndef, 0, 0, 0));
+    });
+    code.roots.add(0, [0]);
+    code.roots.add(1, [0, 1]);
+    assert_eq!(verify(&code), Err("0000 CallU: root map misses live r1".into()));
+}
+
+#[test]
+fn operand_table_uses_single_letters_and_one_space() {
+    for op in (0..=u8::MAX).map_while(Op::from_u8) {
+        let spec = op.spec();
+        assert!(spec.is_empty() || spec.split(' ').all(|letter| letter.len() == 1));
+        for i in 0..4 {
+            assert_eq!(op.letter(i), spec.chars().filter(|&c| c != ' ').nth(i).unwrap_or('-'), "{op:?}");
+        }
+    }
+}

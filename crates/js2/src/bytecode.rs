@@ -367,7 +367,9 @@ impl Op {
 
     /// The letter of field `i` (`a`, `b`, `c`, `x`), `-` when the spec has none.
     pub fn letter(self, i: usize) -> char {
-        self.spec().chars().filter(|l| *l != ' ').nth(i).unwrap_or('-')
+        // The operand table separates its single-byte letters with one space.
+        let spec = self.spec().as_bytes();
+        if i < spec.len().div_ceil(2) { char::from(spec[i * 2]) } else { '-' }
     }
 
     /// The index of the field that holds the jump offset (`a` 0, `b` 1, `c` 2, `x` 3), if the op jumps.
