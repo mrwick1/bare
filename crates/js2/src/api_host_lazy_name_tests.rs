@@ -16,10 +16,11 @@ impl Host<Realm> for Names {
         Ok(s.undefined())
     }
 
-    fn lazy_member<'s>(&self, _: &mut Scope<'s, Realm>, _: Local<'s>, what: Lazy<'_>) -> Result<(), Error<'s>> {
+    fn lazy_member<'s>(&self, s: &mut Scope<'s, Realm>, _: Local<'s>, what: Lazy<'_>) -> Result<(), Error<'s>> {
         self.seen.borrow_mut().push(match what {
             Lazy::All => "all".into(),
             Lazy::Symbols => "symbols".into(),
+            Lazy::Name("throws") => return Err(s.type_error("host error")),
             Lazy::Name(n) => n.into(),
         });
         Ok(())
@@ -46,4 +47,17 @@ fn each_lazy_name_is_converted_only_on_the_first_ask() {
         r.collect(&mut [], |_| {});
     }
     assert_eq!(*host.seen.borrow(), ["雪", "70", "symbols", "all", "雪", "70", "symbols", "all"]);
+}
+
+
+#[test]
+fn a_throwing_lazy_name_is_asked_once() {
+    let mut r = crate::script::load("").unwrap().realm;
+    r.set_host(std::rc::Rc::new(Names::default()));
+    let o = Obj::new_plain(&mut r);
+    let key = Some(Key::Name(r.intern("throws")));
+    CONVERSIONS.with(|n| n.set(0));
+    assert!(r.hs_lazy(o, key).is_err());
+    assert!(!r.hs_lazy(o, key).unwrap());
+    assert_eq!(CONVERSIONS.with(Cell::get), 1);
 }
