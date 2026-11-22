@@ -394,6 +394,7 @@ impl Realm {
         self.install_reflect();
         self.install_string();
         self.install_symbol();
+        self.lazy_table(g, crate::bi_text::GLOBALS);
     }
 
     fn install_function(&mut self) {

@@ -67,6 +67,7 @@ mod bigint;
 #[allow(unsafe_code)]
 mod bi_buffer;
 mod bi_typed;
+mod bi_text;
 mod bi_json;
 mod bi_date;
 mod bi_date_calc;
