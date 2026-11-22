@@ -21,9 +21,11 @@ The owner's session keeps this list current. Each item gives the problem, the nu
    | python-org-search                                                                                                            | 1,246 to 1,494 | 1.20x |
    | rust-lang-org-home                                                                                                           |      87 to 100 | 1.15x |
    | Next step: profile the whole browser on these journeys and split the cost by subsystem (CLAUDE.md, "How to improve a part"). |
-   Update 2026-11-22: [the profile](design-js2-real-pages.md) (#927) found the causes. #930 fixed `for...in` setup. Five fixes are in progress: no OLD speculative parse in js2 sessions, substring range copy, regexp setup reuse, JSON.parse keys, and the `RegExp.test` match loop.
+   Done 2026-11-22. [The profile](design-js2-real-pages.md) (#927) found the causes. Fixes: #930 and #940 (`for...in` setup), #933 and #938 (regexp setup), #934 (JSON.parse keys), #935 (no OLD speculative parse in js2 sessions), #936 (`RegExp.test`), #937 (substring range).
+   [Remeasure](progress/2026-11-22-real-pages-after-fixes.md) on `9a187630` (#939): rust-book-search 1.30x, python-org-search 1.02x, rust-lang-org-home 1.05x, devto-home 1.03x on the tape. #940 then cut rust-book-search to 1,866 M against OLD 2,370 M (0.79x).
+   Next step: run the full public cohort and the ramps again for the new median and the new worst journeys.
 2. **React typing.** js2 uses 7.66 G and OLD uses 6.38 G (1.20x). The decision benchmark gave OLD 14.4 G on the same frozen OLD commit.
-   Done 2026-11-22. The 14.4 G count was OLD `tree` mode (#926). #930 reads `for...in` keys from the shape: js2 5.71 G, 0.896x OLD `auto`.
+   Done 2026-11-22. The 14.4 G count was OLD `tree` mode (#926). #930 reads `for...in` keys from the shape: js2 5.71 G, 0.896x OLD `auto`. After #940: 5.68 G.
 3. **Startup memory.** An empty js2 process uses 5.6 MiB. QuickJS uses 3.0 MiB. This base is most of the per-program RSS gap.
    Done 2026-11-22. #925 defers free-list writes: 5,776 to 5,452 KiB. #929 orders the code: empty js2 5,528 to 4,300 KiB, empty bare 19,188 to 8,744 KiB.
    Note: the code order applies only to builds made with `tools/code-order/build.sh` and the Linux release workflow. A plain `cargo build --release` does not use it.
