@@ -964,6 +964,10 @@ impl Obj {
         let r = unsafe { make_record(heap, Layout::Elements, 0, ncap, Value::HOLE, src, n)? };
         r.set_len(old.map_or(0, Rec::len));
         self.set_elems(r);
+        if let Some(old) = old {
+            // SAFETY: The elements record is private to this array and has been replaced.
+            unsafe { heap.release_large(old.0) };
+        }
         Some(r)
     }
 
@@ -1145,3 +1149,7 @@ fn to_dense(heap: &mut Heap, r: Rec, cap: usize) -> Option<Rec> {
 #[cfg(test)]
 #[path = "object_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "object_large_elements_tests.rs"]
+mod large_elements_tests;

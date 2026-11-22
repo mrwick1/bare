@@ -8,7 +8,7 @@
 use bare_js2::atoms::{Atoms, SharedAtoms};
 use bare_js2::cell::{CellHeader, Layout, Shapes};
 use bare_js2::gc::Marker;
-use bare_js2::heap::Heap;
+use bare_js2::heap::{Heap, Trigger};
 use bare_js2::roots::{Frames, RootMaps, alloc_in_task};
 use bare_js2::value::{Kind, Value};
 use std::hint::black_box;
@@ -24,6 +24,9 @@ fn main() {
         "heap" | "try" => {
             let try_alloc = a[1] == "try";
             let mut h = Heap::default();
+            if try_alloc {
+                h.set_trigger(Trigger::default());
+            }
             let mut round = Vec::with_capacity(ROUND);
             for i in 0..n {
                 let p = if try_alloc { h.try_alloc(32) } else { h.alloc(32) }.expect("memory");
