@@ -186,10 +186,10 @@ function flatten(target, source, n, depth, k, fn) {
 function array_keys() { return arrayIterator(obj(this), 0); }
 function array_values() { return arrayIterator(obj(this), 1); }
 function array_entries() { return arrayIterator(obj(this), 2); }
-function array_forEach(cb) {
+function array_forEach(cb, thisArg = undefined) {
   var a = obj(this), n = len(a);
   need(cb);
-  var f = bound(cb, arguments[1]);
+  var f = bound(cb, thisArg);
   for (var i = 0; i < n; i++) forEachStep(f, a, i);
 }
 function array_map(cb) {
