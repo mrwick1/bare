@@ -2058,6 +2058,7 @@ impl Vm {
                         }
                     }
                     Op::ForEachStep => {
+                        std::hint::cold_path();
                         let (recv, index) = (r!(b!()), r!(c!()));
                         r!(a!() + 1) = index;
                         r!(a!() + 2) = recv;
