@@ -334,22 +334,35 @@ impl Realm {
         self.api.hs.asked.contains(&(o.cell().as_ptr().addr(), ASK_ALL.0, ASK_ALL.1))
     }
 
+    fn hs_lazy_name(&self, key: Key) -> String {
+        #[cfg(test)]
+        lazy_name_tests::CONVERSIONS.with(|n| n.set(n.get() + 1));
+        match key {
+            Key::Idx(i) => i.to_string(),
+            Key::Name(k) => self.text(k),
+        }
+    }
+
     /// Ask `Host::lazy_member` for `what` on `c`, once for each (object, name) until the next collection. True when the host was asked.
     pub(crate) fn hs_lazy(&mut self, c: Obj, key: Option<Key>) -> R<bool> {
-        let (kind, tag, name) = match key {
-            None => (ASK_ALL.0, ASK_ALL.1, String::new()),
-            Some(Key::Idx(i)) => (1, i as u64, i.to_string()),
-            Some(Key::Name(k)) if k.is_symbol() => (2, 0, String::new()),
-            Some(Key::Name(k)) => (3, k.value().as_pointer().map_or(0, |p| p.1.as_ptr().addr() as u64), self.text(k)),
+        let (kind, tag) = match key {
+            None => ASK_ALL,
+            Some(Key::Idx(i)) => (1, i as u64),
+            Some(Key::Name(k)) if k.is_symbol() => (2, 0),
+            Some(Key::Name(k)) => (3, k.value().as_pointer().map_or(0, |p| p.1.as_ptr().addr() as u64)),
         };
         if !self.api.hs.asked.insert((c.cell().as_ptr().addr(), kind, tag)) {
             return Ok(false);
         }
         let Some(h) = self.hs_host() else { return Ok(false) };
+        let name;
         let what = match kind {
             0 => Lazy::All,
             2 => Lazy::Symbols,
-            _ => Lazy::Name(&name),
+            _ => {
+                name = self.hs_lazy_name(key.expect("a named ask has a key"));
+                Lazy::Name(&name)
+            }
         };
         let slot = self.stack_len();
         self.a_push(c.value());
@@ -608,3 +621,7 @@ mod typed_index_tests;
 #[cfg(test)]
 #[path = "api_host_index_probe_tests.rs"]
 mod index_probe_tests;
+
+#[cfg(test)]
+#[path = "api_host_lazy_name_tests.rs"]
+mod lazy_name_tests;
