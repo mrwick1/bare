@@ -54,7 +54,7 @@ Land the index lookup change first. In a separate three-run comparison against `
 
 ## Browser and correctness
 
-The headless `bare-drive` profiling builds ran the decision benchmark's `style_100k` fixture with `BARE_JS_EXEC=new` and `BARE_SEED=1`. All six runs passed the completion marker. Peak RSS moved from 46.27 [46.09–46.39] to 45.86 [45.73–46.00] MiB. Median ready time was 204.3 [189.2–223.6] to 191.7 [190.0–230.4] ms. The machine was shared during these runs.
+The headless `bare-drive` profiling builds ran the decision benchmark's `style_100k` fixture with `BARE_JS_EXEC=new` and `BARE_SEED=1`. All six runs passed the completion marker. Peak RSS moved from 46.27 [46.09–46.39] to 45.86 [45.73–46.00] MiB. Median ready time was 204.3 [189.2–223.6] to 191.7 [190.0–230.4] ms. The machine was shared during these runs. A repeat after the docs-only merge of #907 measured 45.91 [45.74–45.97] to 46.00 [45.73–46.22] MiB. The direction changed between runs.
 
 The concat allocation test failed before the change and passed afterward. The value test covers operand order, the signed 32-bit minimum, empty strings, Latin-1 and UTF-16 strings, and long strings. The narrow js2 runtime, string and script filters and the js2 typecheck passed. The targeted test262 comparison covered addition, array push and forEach, and the two own-property queries. Both trees passed the same 627 tests with three failures and four skips. Lost passes: zero.
 
