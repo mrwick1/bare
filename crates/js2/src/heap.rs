@@ -34,24 +34,28 @@ pub const MAX_SMALL: usize = 8192;
 pub const POOL_KEEP: usize = 4;
 const CLASSES: [u32; 16] = [16, 32, 48, 64, 80, 96, 128, 160, 192, 256, 384, 512, 1024, 2048, 4096, 8192];
 const NCLASS: usize = CLASSES.len();
-/// The class of a large object.
-const LARGE: u16 = u16::MAX;
 const MARK_WORDS: usize = 64;
 /// The default of [`Trigger::min`]: the floor that the old engine uses (`GC_MIN_BYTES`).
 pub const TRIGGER_MIN: usize = 8 << 20;
 /// Default slack for a fixed [`Trigger`].
 pub const TRIGGER_SLACK: usize = 8 << 20;
-/// Leave room for the first block refills before sampling survival.
-const TASK_SAMPLE: usize = 832 << 10;
+/// Sample survival before a task builds a large live graph. A second sample gives startup garbage a chance to clear.
+const TASK_SAMPLE: usize = 512 << 10;
+const TASK_RESAMPLE: usize = 832 << 10;
 const TASK_MIN: usize = 2 << 20;
 const TASK_RETAINED_HEADROOM: usize = 16 << 20;
+/// Amortize repeated scans of a small stable live set over more allocation work.
+const TASK_SMALL_LIVE: usize = 64 << 10;
+const TASK_GROWTH_PER_LIVE_CELL: usize = 16 << 10;
 const ADDRESS_LIMIT: usize = 1 << 48;
 
 #[repr(C)]
 struct Header {
     cell: u32,
+    /// The small block's cell count, or this large mapping's index in `Heap::large`.
     cells: u32,
-    class: u16,
+    /// Marked cells counted at the end of the last collection.
+    live: u32,
     /// The length of the mapping: [`BLOCK`] for a block of cells.
     len: usize,
     marks: [u64; MARK_WORDS],
@@ -183,7 +187,7 @@ impl Heap {
                 None => {
                     let b = self.new_block(c)?;
                     // SAFETY: a new block: every cell is free.
-                    unsafe { self.link(b, c, |_| false) };
+                    unsafe { self.link(b, c) };
                     self.grown += ((BLOCK - FIRST) / CLASSES[c] as usize) * CLASSES[c] as usize;
                     self.swept[c].push(b);
                 }
@@ -196,22 +200,20 @@ impl Heap {
         Some(unsafe { NonNull::new_unchecked(p) })
     }
 
-    /// Put the cells of `b` for which `live` is false on the free list of class `c`, in address order.
+    /// Put all cells of a fresh block on the free list in address order.
     ///
     /// # Safety
     /// `b` is a block of class `c` whose free cells are on no free list.
-    unsafe fn link(&mut self, b: Block, c: usize, live: impl Fn(usize) -> bool) {
+    unsafe fn link(&mut self, b: Block, c: usize) {
         // SAFETY: `b` is a block of this heap.
         let (cell, cells) = unsafe { ((*b.as_ptr()).cell as usize, (*b.as_ptr()).cells as usize) };
         let base = b.as_ptr().cast::<u8>();
         let mut head = self.free[c];
         for i in (0..cells).rev() {
-            if !live(i) {
-                let p = base.wrapping_add(FIRST + i * cell);
-                // SAFETY: cell `i` is inside the block and free, so its first 8 bytes are ours.
-                unsafe { p.cast::<*mut u8>().write(head) };
-                head = p;
-            }
+            let p = base.wrapping_add(FIRST + i * cell);
+            // SAFETY: cell `i` is inside the block and free, so its first 8 bytes are ours.
+            unsafe { p.cast::<*mut u8>().write(head) };
+            head = p;
         }
         self.free[c] = head;
     }
@@ -219,16 +221,33 @@ impl Heap {
     /// Sweep block `b` of class `c`: unmarked cells become free, and the marks are cleared. A block with no mark leaves the class.
     fn sweep(&mut self, b: Block, c: usize) {
         // SAFETY: `b` is a block of this heap, and no other reference to its header is alive.
-        let marks = unsafe { std::mem::replace(&mut (*b.as_ptr()).marks, [0; MARK_WORDS]) };
-        if marks.iter().all(|&w| w == 0) {
+        let h = unsafe { &mut *b.as_ptr() };
+        if h.live == 0 {
             self.release(b);
             return;
         }
-        // SAFETY: the cells of an unswept block are on no free list (`finish_mark` emptied them).
-        unsafe { self.link(b, c, |i| marks[i / 64] >> (i % 64) & 1 != 0) };
-        // SAFETY: as above.
-        let (cell, cells) = unsafe { ((*b.as_ptr()).cell as usize, (*b.as_ptr()).cells as usize) };
-        self.grown += (cells - marks.iter().map(|w| w.count_ones() as usize).sum::<usize>()) * cell;
+        let (cell, cells) = (h.cell as usize, h.cells as usize);
+        let marks = &mut h.marks[..cells.div_ceil(64)];
+        if h.live == h.cells {
+            marks.fill(0);
+        } else {
+            let base = b.as_ptr().cast::<u8>();
+            let mut head = self.free[c];
+            for (word, marks) in marks.iter_mut().enumerate().rev() {
+                let first = word * 64;
+                let mut free = !std::mem::take(marks) & (u64::MAX >> (64 - (cells - first).min(64)));
+                while free != 0 {
+                    let bit = 63 - free.leading_zeros();
+                    free ^= 1u64 << bit;
+                    let p = base.wrapping_add(FIRST + (first + bit as usize) * cell);
+                    // SAFETY: Each set bit names an unmarked cell in this block. Its cells are on no free list.
+                    unsafe { p.cast::<*mut u8>().write(head) };
+                    head = p;
+                }
+            }
+            self.free[c] = head;
+            self.grown += (cells - h.live as usize) * cell;
+        }
         self.swept[c].push(b);
     }
 
@@ -249,7 +268,7 @@ impl Heap {
             None => self.map(BLOCK)?.cast(),
         };
         let cell = CLASSES[c];
-        let h = Header { cell, cells: ((BLOCK - FIRST) / cell as usize) as u32, class: c as u16, len: BLOCK, marks: [0; MARK_WORDS] };
+        let h = Header { cell, cells: ((BLOCK - FIRST) / cell as usize) as u32, live: 0, len: BLOCK, marks: [0; MARK_WORDS] };
         // SAFETY: the block is ours and starts with room for a header.
         unsafe { b.as_ptr().write(h) };
         Some(b)
@@ -271,6 +290,30 @@ impl Heap {
         self.mapped -= len;
     }
 
+    /// Unmap a large cell that its owner has detached. Small cells wait for the collector.
+    ///
+    /// # Safety
+    /// `p` is a live cell, and no root or cell points to it anymore.
+    #[cold]
+    pub(crate) unsafe fn release_large(&mut self, p: NonNull<u8>) {
+        let base = p.as_ptr().map_addr(|a| a & !(BLOCK - 1)).cast::<Header>();
+        // SAFETY: The cell's mapping starts with its header.
+        let h = unsafe { &*base };
+        if h.cell != 0 {
+            return;
+        }
+        let i = h.cells as usize;
+        let Some(&b) = self.large.get(i).filter(|b| b.as_ptr() == base) else {
+            return;
+        };
+        self.large.swap_remove(i);
+        if let Some(next) = self.large.get(i) {
+            // SAFETY: The swapped mapping belongs to this heap.
+            unsafe { (*next.as_ptr()).cells = i as u32 };
+        }
+        self.unmap(b);
+    }
+
     #[cold]
     fn alloc_large(&mut self, size: usize, task: bool) -> Option<NonNull<u8>> {
         if task && self.task_due() {
@@ -280,7 +323,7 @@ impl Heap {
         let b: Block = self.map(len)?.cast();
         self.grown += len;
         // SAFETY: a new mapping with room for the header.
-        unsafe { b.as_ptr().write(Header { cell: 0, cells: 1, class: LARGE, len, marks: [0; MARK_WORDS] }) };
+        unsafe { b.as_ptr().write(Header { cell: 0, cells: self.large.len() as u32, live: 0, len, marks: [0; MARK_WORDS] }) };
         self.large.push(b);
         Some(NonNull::new(b.as_ptr().cast::<u8>().wrapping_add(FIRST)).expect("not null"))
     }
@@ -371,43 +414,56 @@ impl Heap {
 
     /// End a collection: unmarked large objects go back to the OS, and every block of cells waits for its lazy sweep.
     pub fn finish_mark(&mut self) {
+        let mut marked = 0;
+        let mut marked_cells = 0;
         for c in 0..NCLASS {
             self.free[c] = ptr::null_mut();
-            let s = std::mem::take(&mut self.swept[c]);
-            self.unswept[c].extend(s);
-        }
-        // Every block of cells waits for its sweep now, with the marks of this collection: count them (64 words for each block).
-        let mut marked = 0;
-        for c in 0..NCLASS {
-            for b in &self.unswept[c] {
-                // SAFETY: `b` is a block of this heap.
-                let h = unsafe { &*b.as_ptr() };
-                marked += h.marks.iter().map(|w| w.count_ones() as usize).sum::<usize>() * h.cell as usize;
+            debug_assert!(self.unswept[c].is_empty());
+            std::mem::swap(&mut self.swept[c], &mut self.unswept[c]);
+            for &b in &self.unswept[c] {
+                // SAFETY: `b` is a block of this heap, with no other reference to its header.
+                let h = unsafe { &mut *b.as_ptr() };
+                let marks = &h.marks[..(h.cells as usize).div_ceil(64)];
+                h.live = if marks.iter().all(|&w| w == 0) { 0 } else { marks.iter().map(|w| w.count_ones()).sum() };
+                marked_cells += h.live as usize;
+                marked += h.live as usize * h.cell as usize;
             }
         }
-        let (live, dead): (Vec<Block>, Vec<Block>) = std::mem::take(&mut self.large).into_iter().partition(|&b| {
-            // SAFETY: `b` is a large object of this heap.
-            let m = unsafe { &mut (*b.as_ptr()).marks[0] };
-            let live = *m & 1 != 0;
-            *m = 0;
-            live
+        let mut large = std::mem::take(&mut self.large);
+        let mut live_index = 0;
+        let mut live_bytes = marked;
+        large.retain(|&b| {
+            // SAFETY: `b` is a large mapping of this heap.
+            let h = unsafe { &mut *b.as_ptr() };
+            if std::mem::take(&mut h.marks[0]) == 0 {
+                self.unmap(b);
+                return false;
+            }
+            live_bytes += h.len;
+            h.cells = live_index;
+            live_index += 1;
+            true
         });
-        // SAFETY: each block of `live` is a large object of this heap.
-        let live_bytes = marked + live.iter().map(|b| unsafe { (*b.as_ptr()).len }).sum::<usize>();
+        self.large = large;
         let retained_growth = live_bytes.saturating_sub(self.marked);
+        let stable = live_bytes == self.marked;
+        let first_sample = self.task_limit == TASK_SAMPLE;
         self.marked = live_bytes;
-        self.large = live;
-        for b in dead {
-            self.unmap(b);
-        }
         self.set_limits();
         if self.adaptive_task {
             // A growing live graph needs more headroom to avoid marking it again too soon.
             // Refills count the free cells of a block, so short intervals can overstate growth.
             self.task_limit = if self.grown != 0 && retained_growth >= self.grown.div_ceil(6) {
                 TASK_RETAINED_HEADROOM.max(live_bytes.saturating_mul(2))
+            } else if first_sample {
+                TASK_RESAMPLE
             } else {
-                TASK_MIN.saturating_sub(live_bytes).max(live_bytes / 4 * 3)
+                let budget = TASK_MIN.saturating_sub(live_bytes).max(live_bytes / 4 * 3);
+                if stable && live_bytes <= TASK_SMALL_LIVE {
+                    budget.max((marked_cells * TASK_GROWTH_PER_LIVE_CELL).min(TASK_RETAINED_HEADROOM))
+                } else {
+                    budget
+                }
             };
         }
         self.grown = 0;
@@ -486,3 +542,7 @@ mod tests;
 #[cfg(test)]
 #[path = "heap_adaptive_trigger_tests.rs"]
 mod adaptive_trigger_tests;
+
+#[cfg(test)]
+#[path = "heap_sampling_tests.rs"]
+mod sampling_tests;
