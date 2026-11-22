@@ -38,7 +38,13 @@ jobs:
       - name: Install system packages
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev pkg-config
+      - name: Build Linux AMD64 with driver code order
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          cargo build --release --locked --target ${{ matrix.target }} -p bare-mcp
+          tools/code-order/build.sh bare-drive
       - name: Build
+        if: matrix.target != 'x86_64-unknown-linux-gnu'
         run: cargo build --release --locked --target ${{ matrix.target }} -p bare-mcp -p bare-drive
       - name: Rename binaries
         shell: bash
