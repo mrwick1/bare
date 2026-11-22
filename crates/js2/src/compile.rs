@@ -1110,3 +1110,7 @@ mod tests;
 #[cfg(test)]
 #[path = "compile_emitted_metadata_tests.rs"]
 mod emitted_metadata_tests;
+
+#[cfg(test)]
+#[path = "compile_arguments_scope_tests.rs"]
+mod arguments_scope_tests;
