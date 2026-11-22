@@ -356,20 +356,22 @@ impl Realm {
             let k = self.intern(n);
             self.define_attrs(g, Key::Name(k), 0, v).expect("define");
         }
+        // These three come first: the rest uses `Object`, `Function` and the error prototypes.
         self.install_object();
         self.install_function();
         self.install_error();
+        // One line for each built-in module. Add one line, keep sorted.
         self.install_array();
-        self.install_string();
-        self.install_number();
-        self.install_promise();
-        self.install_modules();
-        self.install_symbol();
-        self.install_generator();
-        self.install_json();
         self.install_collections();
         self.install_date();
+        self.install_generator();
+        self.install_json();
+        self.install_modules();
+        self.install_number();
+        self.install_promise();
         self.install_reflect();
+        self.install_string();
+        self.install_symbol();
     }
 
     fn install_function(&mut self) {
