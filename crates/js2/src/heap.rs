@@ -35,6 +35,8 @@ pub const POOL_KEEP: usize = 4;
 const CLASSES: [u32; 16] = [16, 32, 48, 64, 80, 96, 128, 160, 192, 256, 384, 512, 1024, 2048, 4096, 8192];
 const NCLASS: usize = CLASSES.len();
 const MARK_WORDS: usize = 64;
+/// Link one 4 KiB prefix, or one cell if it does not fit.
+const FIRST_LINK_BYTES: usize = 4096;
 /// The default of [`Trigger::min`]: the floor that the old engine uses (`GC_MIN_BYTES`).
 pub const TRIGGER_MIN: usize = 8 << 20;
 /// Default slack for a fixed [`Trigger`].
@@ -56,6 +58,8 @@ struct Header {
     cells: u32,
     /// Marked cells counted at the end of the last collection.
     live: u32,
+    /// Cells in the prefix that has been linked at least once.
+    linked: u32,
     /// The length of the mapping: [`BLOCK`] for a block of cells.
     len: usize,
     marks: [u64; MARK_WORDS],
@@ -188,7 +192,15 @@ impl Heap {
     /// `task`: refuse (return `None`) when the task limit has passed.
     #[cold]
     fn alloc_slow(&mut self, c: usize, task: bool) -> Option<NonNull<u8>> {
-        if task && self.task_due() {
+        let block = self.swept[c].last().copied().filter(|b| {
+            // SAFETY: This is the last swept block of the class, and it belongs to this heap.
+            let h = unsafe { b.as_ref() };
+            h.linked < h.cells
+        });
+        if let Some(b) = block {
+            // SAFETY: The free list is empty and the tail of this block has never been linked.
+            unsafe { self.link(b, c, b.as_ref().cells) };
+        } else if task && self.task_due() {
             return None;
         }
         while self.free[c].is_null() {
@@ -196,9 +208,13 @@ impl Heap {
                 Some(b) => self.sweep(b, c),
                 None => {
                     let b = self.new_block(c)?;
-                    // SAFETY: a new block: every cell is free.
-                    unsafe { self.link(b, c) };
-                    self.grown += ((BLOCK - FIRST) / CLASSES[c] as usize) * CLASSES[c] as usize;
+                    let cell = CLASSES[c] as usize;
+                    let cells = (BLOCK - FIRST) / cell;
+                    let linked = if self.swept[c].is_empty() { ((FIRST_LINK_BYTES - FIRST) / cell).max(1) } else { cells };
+                    // SAFETY: This is a new block. No cell in it has been linked.
+                    unsafe { self.link(b, c, linked as u32) };
+                    // Charge the whole block now, so extending the list doesn't move the GC trigger.
+                    self.grown += cells * cell;
                     self.swept[c].push(b);
                 }
             }
@@ -210,21 +226,24 @@ impl Heap {
         Some(unsafe { NonNull::new_unchecked(p) })
     }
 
-    /// Put all cells of a fresh block on the free list in address order.
+    /// Add cells from the untouched part of a block in address order.
     ///
     /// # Safety
-    /// `b` is a block of class `c` whose free cells are on no free list.
-    unsafe fn link(&mut self, b: Block, c: usize) {
-        // SAFETY: `b` is a block of this heap.
-        let (cell, cells) = unsafe { ((*b.as_ptr()).cell as usize, (*b.as_ptr()).cells as usize) };
-        let base = b.as_ptr().cast::<u8>();
+    /// `b` is a block of class `c`, with no active references. The range from its linked count to `end` is free and inside the block.
+    unsafe fn link(&mut self, mut b: Block, c: usize, end: u32) {
+        // SAFETY: The block is ours and there are no other active references.
+        let h = unsafe { b.as_mut() };
+        let cell = h.cell as usize;
+        let base = b.as_ptr().cast::<u8>().wrapping_add(FIRST);
+        let mut p = base.wrapping_add(end as usize * cell);
         let mut head = self.free[c];
-        for i in (0..cells).rev() {
-            let p = base.wrapping_add(FIRST + i * cell);
-            // SAFETY: cell `i` is inside the block and free, so its first 8 bytes are ours.
+        for _ in h.linked..end {
+            p = p.wrapping_sub(cell);
+            // SAFETY: The cell is inside the block and free, so its first 8 bytes are ours.
             unsafe { p.cast::<*mut u8>().write(head) };
             head = p;
         }
+        h.linked = end;
         self.free[c] = head;
     }
 
@@ -256,6 +275,7 @@ impl Heap {
                 }
             }
             self.free[c] = head;
+            h.linked = h.cells;
             self.grown += (cells - h.live as usize) * cell;
         }
         self.swept[c].push(b);
@@ -278,7 +298,7 @@ impl Heap {
             None => self.map(BLOCK)?.cast(),
         };
         let cell = CLASSES[c];
-        let h = Header { cell, cells: ((BLOCK - FIRST) / cell as usize) as u32, live: 0, len: BLOCK, marks: [0; MARK_WORDS] };
+        let h = Header { cell, cells: ((BLOCK - FIRST) / cell as usize) as u32, live: 0, linked: 0, len: BLOCK, marks: [0; MARK_WORDS] };
         // SAFETY: the block is ours and starts with room for a header.
         unsafe { b.as_ptr().write(h) };
         Some(b)
@@ -333,7 +353,7 @@ impl Heap {
         let b: Block = self.map(len)?.cast();
         self.grown += len;
         // SAFETY: a new mapping with room for the header.
-        unsafe { b.as_ptr().write(Header { cell: 0, cells: self.large.len() as u32, live: 0, len, marks: [0; MARK_WORDS] }) };
+        unsafe { b.as_ptr().write(Header { cell: 0, cells: self.large.len() as u32, live: 0, linked: 0, len, marks: [0; MARK_WORDS] }) };
         self.large.push(b);
         Some(NonNull::new(b.as_ptr().cast::<u8>().wrapping_add(FIRST)).expect("not null"))
     }
@@ -388,12 +408,13 @@ impl Heap {
             debug_assert!(self.unswept[c].is_empty(), "start_mark swept all blocks");
             let mut free = self.free[c];
             // A block joins swept when its free cells are prepended to the list. Within the block they follow address order.
+            // Cells beyond the linked prefix have never been allocated.
             for &b in self.swept[c].iter().rev() {
                 // SAFETY: this block belongs to the heap. The free list separates cells with no object header from allocated cells.
                 unsafe {
                     let h = b.as_ref();
                     let base = b.as_ptr().cast::<u8>().add(FIRST);
-                    let cells = h.cells as usize;
+                    let cells = h.linked as usize;
                     for word in 0..cells.div_ceil(64) {
                         let first = word * 64;
                         let mut unmarked = !h.marks[word] & (u64::MAX >> (64 - (cells - first).min(64)));
@@ -556,3 +577,7 @@ mod adaptive_trigger_tests;
 #[cfg(test)]
 #[path = "heap_sampling_tests.rs"]
 mod sampling_tests;
+
+#[cfg(test)]
+#[path = "heap_startup_tests.rs"]
+mod startup_tests;
