@@ -128,6 +128,6 @@ fn the_prototype_of_a_symbol_has_its_members_however_it_is_reached() {
 fn instanceof_follows_a_bound_function_to_its_target() {
     check(&[
         ("function F() {} var B = F.bind(null); var r = (new F() instanceof B) + ',' + ({} instanceof B);", "r", "true,false"),
-        ("function F() {} Object.defineProperty(F, 'prototype', {get() { throw new RangeError('x'); }}); var r = ''; try { ({}) instanceof F; } catch (e) { r = e.name; } try { 1 instanceof F; r += ',ok'; } catch (e) { r += ',' + e.name; }", "r", "RangeError,ok"),
+        ("var F = ({ m() {} }).m; Object.defineProperty(F, 'prototype', {get() { throw new RangeError('x'); }}); var r = ''; try { ({}) instanceof F; } catch (e) { r = e.name; } try { 1 instanceof F; r += ',ok'; } catch (e) { r += ',' + e.name; }", "r", "RangeError,ok"),
     ]);
 }
