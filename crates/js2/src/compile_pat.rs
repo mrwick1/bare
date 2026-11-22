@@ -204,13 +204,15 @@ impl<'a> Fc<'a> {
                     self.set_live(kt);
                     self.bind_src(pp.value, Src::Elem(v, kt), mode)?;
                 }
-                Key::Name(s) | Key::Str(s) => {
-                    let name: Cow<str> = if matches!(pp.key, Key::Name(_)) {
-                        prog.name(s)
-                    } else {
-                        let mut b = Vec::new();
-                        let _ = prog.string(s, &mut b);
-                        Cow::Owned(String::from_utf16_lossy(&b))
+                Key::Name(s) | Key::Str(s) | Key::BigInt(s) => {
+                    let name: Cow<str> = match pp.key {
+                        Key::Name(_) => prog.name(s),
+                        Key::BigInt(_) => self.static_key(pp.key).expect("valid BigInt key"),
+                        _ => {
+                            let mut b = Vec::new();
+                            let _ = prog.string(s, &mut b);
+                            Cow::Owned(String::from_utf16_lossy(&b))
+                        }
                     };
                     if super::expr::index_like(&name) {
                         let k = slot.unwrap_or_else(|| self.alloc());
@@ -233,7 +235,7 @@ impl<'a> Fc<'a> {
                     self.set_live(k);
                     self.bind_src(pp.value, Src::Elem(v, k), mode)?;
                 }
-                Key::BigInt(_) | Key::Private(_) => self.unsup("a BigInt or private key in a pattern"),
+                Key::Private(_) => self.unsup("a private key in a pattern"),
             }
             self.free(m);
         }
