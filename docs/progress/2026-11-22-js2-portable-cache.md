@@ -24,24 +24,24 @@ The browser calls the cached script and module loaders through its existing js2 
 
 ## Measurement
 
-Machine archMachine, AMD Ryzen 9 5900HX, Linux 7.2.15-zen1-1-zen, Rust 1.96.0. Release base `65f23e2f`, change `08edd23a` before the report. Each row has three fresh processes per variant. `perf stat -e instructions:u` reported at least 99% coverage. Instruction ranges are min–max in millions. Peak RSS is median [min–max] in KiB from three separate `wait4` runs. The machine ran other work during the measurements.
+Machine archMachine, AMD Ryzen 9 5900HX, Linux 7.2.15-zen1-1-zen, Rust 1.96.0. Release base `14237fe1`, change `0f2af01b` before the report. Each row has three fresh processes per variant. `perf stat -e instructions:u` reported at least 99% coverage. Instruction ranges are min–max in millions. Peak RSS is median [min–max] in KiB from three separate `wait4` runs. The machine ran other work during the measurements.
 
 The bundle is the 314,192-byte React typing fixture `app.js` (SHA-256 `1992c72031ad2bad490a784172a2e9400b822cb0eb4d0e539f4a021af7c07400`). Run `code_cache_load FILE REALMS [cold]` from the release examples. It compiles and drops each realm in order. `cold` clears the cache before each realm and pays the cost of storing the new entry. The base has no cache. The first realm in a cached process fills it. Its entry charges 444,084 bytes.
 
 | React realms | Base instructions | Forced-cold instructions | Cached instructions | Base RSS | Forced-cold RSS | Cached RSS |
 |---|---:|---:|---:|---:|---:|---:|
-| 1 | 76.796–76.801 | 76.994–76.996 | 76.992–77.000 | 6172 [6136–6216] | 6104 [6060–6400] | 6328 [6204–6336] |
-| 2 | 152.993–152.998 | 153.382–153.392 | 77.482–77.489 | 6136 [6068–6180] | 6112 [6100–6208] | 6060 [6060–6120] |
-| 5 | 381.595–381.619 | 382.575–382.596 | 78.958–78.959 | 6084 [6040–6188] | 6224 [6012–6276] | 6240 [6216–6344] |
+| 1 | 76.792–76.797 | 76.993–76.996 | 76.995–76.996 | 6256 [6080–6272] | 6256 [6184–6332] | 6272 [6116–6312] |
+| 2 | 152.994–153.001 | 153.386–153.396 | 77.483–77.493 | 6116 [6084–6304] | 6196 [5940–6200] | 6200 [5920–6232] |
+| 5 | 381.596–381.602 | 382.584–382.595 | 78.956–78.964 | 6236 [6164–6336] | 6192 [6144–6296] | 6316 [6288–6376] |
 
 | Additional React realms | Base per realm | Forced cold per realm | Warm per realm |
 |---|---:|---:|---:|
-| 1 | 76.192–76.201 | 76.388–76.396 | 0.483–0.493 |
-| 4 | 76.200–76.206 | 76.395–76.400 | 0.489–0.491 |
+| 1 | 76.201–76.204 | 76.390–76.403 | 0.487–0.498 |
+| 4 | 76.200–76.202 | 76.397–76.400 | 0.490–0.492 |
 
 The per-realm estimate subtracts the matching one-realm process count before dividing by the number of later realms.
 
-The design probes used the same bundle and three-run method. The parse-tree probe retains the lazy parse result and compiles fresh code in each realm. The thread-arena probe holds one source atom arena and copies its code tables. Both probes omit cache map bookkeeping. The thread-arena probe covers one source. The memory cost of retaining atoms across unique documents was outside the probe.
+The design probes used the same bundle and three-run method on a scratch build from 39afc309. The parse-tree probe retains the lazy parse result and compiles fresh code in each realm. The thread-arena probe holds one source atom arena and copies its code tables. Both probes omit cache map bookkeeping. The thread-arena probe covers one source. The memory cost of retaining atoms across unique documents was outside the probe.
 
 | Probe | Five-realm instructions | Additional instructions per realm | Five-realm peak RSS |
 |---|---:|---:|---:|
@@ -56,10 +56,15 @@ The headless `bare-drive` journey on `BARE_JS_EXEC=new` opened the React typing 
 
 | Build | Passed | Instructions, M | Journey time, ms | Peak RSS, KiB |
 |---|---:|---:|---:|---:|
-| Base | 3/3 | 2702.522–2704.436 | 1061.7–1331.2 | 37424–37700 |
-| Cache | 3/3 | 2398.115–2401.806 | 1177.1–1340.2 | 37656–38616 |
+| Base | 3/3 | 2701.777–2704.845 | 1178.2–1333.2 | 37344–38368 |
+| Cache | 3/3 | 2397.025–2401.275 | 774.0–1110.2 | 37476–38012 |
 
-Journey time includes waiting, navigation, and the visibility checks. It is observational on this shared machine.
+| Build | First document ready, ms | Mean of the next four, ms |
+|---|---:|---:|
+| Base | 180.8–357.5 | 207.3–256.7 |
+| Cache | 185.0–318.2 | 146.4–197.2 |
+
+Ready time sums each navigation and the following visibility check. Journey time includes waiting, navigation, and the visibility checks. It is observational on this shared machine.
 
 ### Compiled micro sources
 
@@ -67,9 +72,9 @@ Use `interp_load --source` for the same five cases. Prefix a comment of 512 spac
 
 | Source (turns) | Base per realm, M | Forced cold per realm, M | Warm per realm, M |
 |---|---:|---:|---:|
-| loopfn (1000) | 0.307–0.307 | 0.315–0.315 | 0.261–0.262 |
-| calls (1000) | 0.325–0.326 | 0.336–0.336 | 0.264–0.265 |
-| fib (12) | 0.304–0.304 | 0.312–0.313 | 0.261–0.261 |
+| loopfn (1000) | 0.307–0.307 | 0.315–0.315 | 0.261–0.261 |
+| calls (1000) | 0.326–0.326 | 0.336–0.336 | 0.264–0.265 |
+| fib (12) | 0.303–0.304 | 0.312–0.312 | 0.261–0.261 |
 | closures (1000) | 0.345–0.346 | 0.356–0.356 | 0.263–0.264 |
 | objects (1000) | 0.316–0.316 | 0.324–0.324 | 0.261–0.261 |
 
@@ -79,15 +84,15 @@ The hand-assembled examples measure execution. Every run checked its result. Cel
 
 | Row | glibc | jemalloc | Max spread, M |
 |---|---:|---:|---:|
-| loopfn 3000000 | 866.297 → 866.299 (+0.0003%) | 869.704 → 869.706 (+0.0002%) | 0.0010 |
-| calls 1000000 | 571.348 → 571.350 (+0.0004%) | 574.723 → 574.725 (+0.0005%) | 0.0305 |
-| fib 27 | 248.668 → 248.670 (+0.0008%) | 252.106 → 252.108 (+0.0011%) | 0.0006 |
-| closures 1000000 | 1942.669 → 1942.674 (+0.0003%) | 1945.966 → 1945.970 (+0.0002%) | 0.0662 |
-| objects 1000000 | 744.193 → 744.195 (+0.0002%) | 747.629 → 747.631 (+0.0003%) | 0.0008 |
+| loopfn 3000000 | 866.299 → 866.297 (-0.0002%) | 869.706 → 869.703 (-0.0003%) | 0.0018 |
+| calls 1000000 | 571.350 → 571.348 (-0.0004%) | 574.725 → 574.722 (-0.0005%) | 0.0306 |
+| fib 27 | 248.670 → 248.667 (-0.0009%) | 252.108 → 252.105 (-0.0010%) | 0.0009 |
+| closures 1000000 | 1942.674 → 1942.671 (-0.0002%) | 1945.968 → 1945.956 (-0.0006%) | 0.0311 |
+| objects 1000000 | 744.196 → 744.193 (-0.0003%) | 747.631 → 747.629 (-0.0003%) | 0.0010 |
 
 ## Cost debt
 
-No interpreter row exceeded +0.5%. The mean change across both allocators was +0.0004%.
+No interpreter row exceeded +0.5%. The mean change across both allocators was -0.0005%.
 
 ## Tests
 
