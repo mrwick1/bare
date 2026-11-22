@@ -16,10 +16,11 @@ use crate::builtins::arg;
 use crate::cell::Layout;
 use crate::interp_rt::{ErrKind, Key, R, Realm, Slot};
 use crate::object::K_PROXY;
-use crate::object::{F_CALLABLE, F_ELEMS_FIXED, F_ELEMS_RO, F_HOST, F_KIND, F_LAZYM, F_LAZYTAB, F_LEN_RO, F_SLOWIDX, Obj};
+use crate::object::{F_ARGS, F_CALLABLE, F_ELEMS_FIXED, F_ELEMS_RO, F_HOST, F_KIND, F_LAZYM, F_LAZYTAB, F_LEN_RO, F_SLOWIDX, Obj};
 use crate::shapes::{A_ACC, A_C, A_E, A_W, ShapeId};
 use crate::string::{Chars, Str};
 use crate::value::Value;
+use std::collections::HashSet;
 
 /// A property descriptor as a script gives it: each field may be missing.
 #[derive(Clone, Copy, Default, Debug)]
@@ -292,8 +293,86 @@ impl Realm {
             return Ok((Value::UNDEFINED, self.new_array(&[])));
         }
         let obj = self.to_object(recv)?;
+        let keys = self.for_in_ordinary_snapshot(obj).map_or_else(|| self.for_in_exotic_snapshot(obj), Ok)?;
+        Ok((obj.value(), self.new_array(&keys)))
+    }
+
+    /// Prove that descriptor reads need no host calls or traps before bypassing them.
+    fn for_in_ordinary_snapshot(&self, obj: Obj) -> Option<Vec<Value>> {
+        if obj.has_flag(FOR_IN_EXOTIC | F_ARGS | F_LAZYM) {
+            return None;
+        }
+        let mut inherited = false;
+        let mut cur = self.proto_of(obj);
+        while let Some(p) = cur {
+            if p.has_flag(FOR_IN_EXOTIC | F_ARGS) || (p.has_flag(F_LAZYM) && !self.hs_all_asked(p)) {
+                return None;
+            }
+            if !inherited {
+                let id = p.shape(&self.shapes);
+                inherited = (p.is_indexed() && !p.is_empty() && !p.indices().is_empty())
+                    || (self.shapes.may_have_enumerable(id) && self.shapes.entries(id)
+                        .any(|e| e.attrs() & A_E != 0 && !e.key().is_symbol() && !self.is_hidden_key(e.key())));
+            }
+            cur = self.proto_of(p);
+        }
         let mut keys = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        if inherited {
+            let mut seen = HashSet::new();
+            let mut cur = Some(obj);
+            while let Some(o) = cur {
+                self.for_in_ordinary_keys(o, &mut keys, Some(&mut seen));
+                cur = self.proto_of(o);
+            }
+        } else {
+            self.for_in_ordinary_keys(obj, &mut keys, None);
+        }
+        Some(keys)
+    }
+
+    fn for_in_ordinary_keys(&self, o: Obj, keys: &mut Vec<Value>, mut seen: Option<&mut HashSet<u64>>) {
+        let start = keys.len();
+        let mut indices = if o.is_indexed() { o.indices() } else { Vec::new() };
+        if let Some(seen) = seen.as_deref_mut() {
+            indices.retain(|&i| seen.insert(Key::Idx(i).as_value().bits()));
+            if self.is_array(o) {
+                seen.insert(self.k_length.value().bits());
+            }
+        }
+        let ordered = indices.len();
+        for e in self.shapes.entries(o.shape(&self.shapes)) {
+            let enumerable = e.attrs() & A_E != 0;
+            if !enumerable && seen.is_none() {
+                continue;
+            }
+            let k = e.key();
+            if k.is_symbol() || self.is_hidden_key(k) {
+                continue;
+            }
+            let index = atom_index(k);
+            let key = index.map_or(Key::Name(k), Key::Idx).as_value();
+            if seen.as_deref_mut().is_some_and(|seen| !seen.insert(key.bits())) || !enumerable {
+                continue;
+            }
+            if let Some(i) = index {
+                indices.push(i);
+            } else {
+                keys.push(key);
+            }
+        }
+        if indices.len() > ordered {
+            indices.sort_unstable();
+        }
+        if keys.len() == start {
+            keys.extend(indices.into_iter().map(|i| Key::Idx(i).as_value()));
+        } else if !indices.is_empty() {
+            keys.splice(start..start, indices.into_iter().map(|i| Key::Idx(i).as_value()));
+        }
+    }
+
+    fn for_in_exotic_snapshot(&mut self, obj: Obj) -> R<Vec<Value>> {
+        let mut keys = Vec::new();
+        let mut seen = HashSet::new();
         let mut cur = Some(obj);
         while let Some(o) = cur {
             for name in self.own_key_list_h(o, false)? {
@@ -304,7 +383,7 @@ impl Realm {
             }
             cur = self.proto_of(o);
         }
-        Ok((obj.value(), self.new_array(&keys)))
+        Ok(keys)
     }
 
     /// Advance to an opening key. After a shape change, a complemented cursor keeps the loop in descriptor-checking mode.
@@ -331,8 +410,16 @@ impl Realm {
             let keys = Realm::obj(keys).expect("for-in keys");
             while let Some(name) = keys.get_element(cursor as u32) {
                 cursor += 1;
-                let key = self.key_of(name)?;
+                let index = name.as_f64().map(|i| i as u32);
+                let key = match index {
+                    Some(i) => Key::Idx(i),
+                    None => self.key_of(name)?,
+                };
                 if self.for_in_has(source, key)? {
+                    let name = match index {
+                        Some(i) => self.string(&i.to_string()),
+                        None => name,
+                    };
                     return Ok(Some((name, cursor)));
                 }
             }

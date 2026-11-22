@@ -514,5 +514,9 @@ mod foreach_step_tests;
 mod forin_shape_tests;
 
 #[cfg(test)]
+#[path = "bi_object_forin_snapshot_tests.rs"]
+mod forin_snapshot_tests;
+
+#[cfg(test)]
 #[path = "regexp_test_fast_tests.rs"]
 mod regexp_test_fast_tests;
