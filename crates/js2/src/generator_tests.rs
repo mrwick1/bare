@@ -636,6 +636,9 @@ fn the_ops_of_a_generator_are_only_for_generator_code() {
     let mut c = g.build_unchecked();
     verify(&c).unwrap();
     c.gen_kind = crate::bytecode::GK_NONE;
+    bad(&c, "invalid suspension metadata");
+    // With no save registers either, the verifier reaches the ops.
+    c.gen_regs = 0;
     bad(&c, "not one");
     // A generator that a script can construct, and the ops that a generator may not use.
     let mut c = {
