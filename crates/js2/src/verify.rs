@@ -1,9 +1,11 @@
 //! The verifier of bytecode (plan step S2.4). It checks a [`Code`] before the interpreter (S2.6) may run it, so that the interpreter can
 //! read operands with no checks. It is meant for debug builds, tests and a compiler that has a bug, not for every compile in a release
-//! build: the data flow part keeps one register set for each instruction. It checks:
+//! build: the data flow part keeps register sets for each instruction. It checks:
 //! - every word decodes, and each instruction starts where the one before it ends;
 //! - registers (and the windows of calls, literals and iterators) are below `nregs`, the special constants are 0 to 3, each index
 //!   of a table (numbers, atoms, functions, recipes, sites) is in range, and a field that the op does not use is 0;
+//! - recipes contain only valid keys, and template recipes are only used by templates;
+//! - names, generator kinds and lazy stubs are consistent. [`verify_program`] also checks child indexes in the code table;
 //! - each site has an atom, and exactly one instruction uses it;
 //! - each jump target is the first word of an instruction; `JmpBack` goes back and every other jump goes forward;
 //! - each switch table is inside the pool `Code::tables`, and all its targets are later instructions. A string table has a power of two
@@ -17,21 +19,24 @@
 //! - data flow on every path: no path runs past the last word; the context depth is the same on every path to an instruction and
 //!   never below 0, and at least the depth of a handler in each instruction that can throw in its range; no instruction reads a register
 //!   that some path has not written, and a root map names only registers that every path has written. Registers `0..nparams` are
-//!   written at the entry, and a handler writes its register. Unreachable instructions are not checked by the data flow.
+//!   written at the entry, and the first matching handler writes its register. Unreachable instructions are not checked by the data flow.
+//! - root-map coverage: the collector reads the map at the start of an allocating instruction and while its frame is paused at a call.
+//!   The map covers every register read by the instruction or before its next write along normal, handler and resume paths.
+//!   The verifier treats every live register as a possible heap value. A later map counts as a read so it cannot mark a stale pointer.
 //! - suspension (`GenInit`, `Yield`, `RetGen` in a generator; `AsyncInit`, `Await`, `RetAsync` in an async function): only code with `gen_kind` that is a constructor-less function has them, and it has no `Ret`
 //!   or `LoadNewTarget`. A save list is inside the pool, names registers that are written on every path to the suspension and that its
 //!   root map names (a collection before the copy must not free them), and is no longer than `gen_regs`. After the suspension only the registers of
-//!   the list, the sent value and the mode are written: the resume restores no other. A handler whose range holds a suspension is
-//!   entered with that smaller set too.
-use crate::bytecode::{Code, GK_ASYNC, GK_ASYNCGEN, GK_GEN, GK_NONE, ITER_REGS, Ins, NO_REG, Op, Recipes, STR_EMPTY, STR_SLOT, YS_REGS, decode};
+//!   the list, the sent value and the mode are written: the resume restores no other. An exception before suspension sees
+//!   the original frame. A throw after resumption goes through the resume instructions.
+use crate::bytecode::{CF_ARGS, CF_GEN, Code, GK_ASYNC, GK_ASYNCGEN, GK_GEN, GK_NONE, Handler, ITER_REGS, Ins, NO_NAME, NO_REG, Op, Recipes, SaveList, STR_EMPTY, STR_SLOT, YS_REGS, decode};
 
 type Bits = Vec<u64>;
 
-fn has(b: &Bits, r: u32) -> bool {
+fn has(b: &[u64], r: u32) -> bool {
     b[r as usize / 64] >> (r % 64) & 1 != 0
 }
 
-fn put(b: &mut Bits, r: u32) {
+fn put(b: &mut [u64], r: u32) {
     b[r as usize / 64] |= 1 << (r % 64);
 }
 
@@ -56,7 +61,18 @@ fn window_base(ins: &Ins) -> Option<u32> {
     (0..ins.op.form().fields()).find(|&i| matches!(ins.op.letter(i), 'R' | 'W')).map(|i| ins.field(i))
 }
 
-/// Check `code`. Gives the first error.
+/// Check the code table after the loader has resolved child references.
+pub fn verify_program(codes: &[Code]) -> Result<(), String> {
+    for (ci, code) in codes.iter().enumerate() {
+        if let Some(child) = code.funcs.iter().find(|&&child| child as usize >= codes.len()) {
+            return Err(format!("function {ci}: no child function {child} in the code table"));
+        }
+        verify(code).map_err(|err| format!("function {ci}: {err}"))?;
+    }
+    Ok(())
+}
+
+/// Check `code`. Gives the first error. The function table and the lazy compiler's source data belong to the loader.
 pub fn verify(code: &Code) -> Result<(), String> {
     let n = code.words.len();
     let nregs = code.nregs as u32;
@@ -65,6 +81,20 @@ pub fn verify(code: &Code) -> Result<(), String> {
     }
     if code.nparams > code.nregs {
         return Err("more parameters than registers".into());
+    }
+    if code.fn_name != NO_NAME && code.fn_name as usize >= code.atoms.len() {
+        return Err("the function name has no atom".into());
+    }
+    if code.gen_kind > GK_ASYNCGEN || code.gen_regs > code.nregs || (code.gen_kind == GK_NONE && code.gen_regs != 0) {
+        return Err("invalid suspension metadata".into());
+    }
+    if code.gen_kind != GK_NONE && !code.noctor {
+        return Err("a generator that a script can construct".into());
+    }
+    if let Ok((i, 1)) = decode(&code.words, 0)
+        && i.op == Op::Lazy
+    {
+        return verify_lazy(code, i);
     }
     let mut ins: Vec<(usize, Ins, usize)> = Vec::new();
     let mut at = vec![usize::MAX; n];
@@ -81,24 +111,30 @@ pub fn verify(code: &Code) -> Result<(), String> {
         return Err(format!("site {i} has no atom"));
     }
     // The recipe of a `GetTemplate` is pairs (cooked, raw); a cooked string that is `undefined` is `u32::MAX`.
-    let mut templates = vec![false; code.recipes.len()];
+    let mut recipe_kind = vec![0u8; code.recipes.len()];
     for &(_, i, _) in &ins {
-        if i.op == Op::GetTemplate && let Some(t) = templates.get_mut(i.b as usize) {
-            *t = true;
+        let (r, kind) = match i.op {
+            Op::GetTemplate => (i.b, 1),
+            Op::NewObjLit => (i.c, 2),
+            _ => continue,
+        };
+        if let Some(entry) = recipe_kind.get_mut(r as usize) {
+            *entry |= kind;
         }
     }
     let bad_recipe = |i: usize, k: &[u32]| {
-        k.iter().enumerate().any(|(j, a)| *a >= natoms && !(templates[i] && j % 2 == 0 && *a == u32::MAX)) || (templates[i] && !k.len().is_multiple_of(2))
+        let template = recipe_kind[i] == 1;
+        recipe_kind[i] == 3 || k.iter().enumerate().any(|(j, a)| *a >= natoms && !(template && j % 2 == 0 && *a == u32::MAX)) || (template && !k.len().is_multiple_of(2))
     };
     if (0..code.recipes.len()).any(|i| code.recipes.get(i).is_some_and(|k| bad_recipe(i, k))) {
-        return Err("a recipe names no atom".into());
+        return Err("a recipe names no atom, has unmatched template entries or is used as both kinds".into());
     }
     let mut site_uses = vec![0u32; code.sites.len()];
-    if code.gen_kind != GK_NONE && !code.noctor {
-        return Err("a generator that a script can construct".into());
-    }
     for &(pc, i, len) in &ins {
         let err = |what: &str| Err(format!("{pc:04} {}: {what}", i.op.name()));
+        if i.op == Op::Lazy {
+            return err("Lazy must be the only word of its stub");
+        }
         let (gen_op, async_op) = (matches!(i.op, Op::GenInit | Op::Yield | Op::RetGen), matches!(i.op, Op::AsyncInit | Op::Await | Op::RetAsync));
         // An async generator has the ops of both: `Await` for `await`, and the generator ops.
         let gk = code.gen_kind;
@@ -177,7 +213,23 @@ pub fn verify(code: &Code) -> Result<(), String> {
             return Err(format!("{p:04}: a root map for a word that is not a safepoint instruction"));
         }
     }
-    flow(code, &ins, &at)
+    let state = flow(code, &ins, &at)?;
+    check_live_roots(code, &ins, &at, &state)
+}
+
+fn verify_lazy(code: &Code, i: Ins) -> Result<(), String> {
+    let args = code.flags & CF_ARGS != 0;
+    if code.words.len() != 1 || i.a != args as u32 || i.b != 0 || i.c != 0
+        || code.flags & !(CF_ARGS | CF_GEN) != 0 || (code.flags & CF_GEN != 0 && code.gen_kind == GK_NONE)
+        || (args && (code.nparams != 0 || code.nregs != 0))
+        || (!args && (code.nparams > 64 || code.nregs != code.nparams.max(1) || code.fn_len != code.nparams))
+        || !code.funcs.is_empty() || !code.sites.is_empty() || !code.recipes.is_empty() || !code.data.is_empty()
+        || !code.numbers.is_empty() || !code.tables.is_empty() || !code.loops.is_empty() || !code.handlers.is_empty()
+        || !code.lines.is_empty() || code.gen_regs != 0 || !code.roots.pcs().is_empty() || code.roots.regs() != code.nregs as usize
+    {
+        return Err("invalid lazy stub metadata".into());
+    }
+    Ok(())
 }
 
 /// Check the switch table of `i` (at `pc`). A target must be an instruction after the switch.
@@ -234,6 +286,9 @@ fn check_table(code: &Code, i: &Ins, pc: usize, start: &dyn Fn(i64) -> bool) -> 
             if l.sent != NO_REG && l.sent == l.mode || l.regs.iter().enumerate().any(|(k, r)| l.regs[..k].contains(r)) {
                 return Err("the save list names a register twice");
             }
+            if i.op == Op::Yield && code.gen_kind == GK_ASYNCGEN && (l.sent == NO_REG || l.mode == NO_REG) {
+                return Err("async generator Yield needs both resume registers");
+            }
             if let Some(map) = code.roots.find(pc as u32)
                 && l.regs.iter().any(|r| !map.slots().any(|m| m == *r as usize))
             {
@@ -281,7 +336,9 @@ fn check_loops(code: &Code, ins: &[(usize, Ins, usize)], at: &[usize], n: usize)
 }
 
 /// The data flow: the context depth and the set of registers that every path has written.
-fn flow(code: &Code, ins: &[(usize, Ins, usize)], at: &[usize]) -> Result<(), String> {
+type State = Option<(u32, Bits)>;
+
+fn flow(code: &Code, ins: &[(usize, Ins, usize)], at: &[usize]) -> Result<Vec<State>, String> {
     let nregs = code.nregs as u32;
     let words = (nregs as usize).div_ceil(64).max(1);
     let mut state: Vec<Option<(u32, Bits)>> = vec![None; ins.len()];
@@ -337,15 +394,13 @@ fn flow(code: &Code, ins: &[(usize, Ins, usize)], at: &[usize]) -> Result<(), St
             return err(format!("the root map names r{r}, which a path has not written"));
         }
         // Depth, and the handlers that cover this instruction.
-        for h in &code.handlers {
-            if h.start as usize == pc {
-                let mut hs = set.clone();
-                put(&mut hs, h.reg as u32);
-                meet(&mut state, &mut work, at[h.target as usize], k, h.depth as u32, &hs)?;
-            }
-            if (h.start as usize..h.end as usize).contains(&pc) && i.op.is_safepoint() && depth < h.depth as u32 {
+        if let Some(h) = handler(code, i, pc) {
+            if depth < h.depth as u32 {
                 return err(format!("context depth {depth} is below the depth {} of its handler", h.depth));
             }
+            let mut hs = set.clone();
+            put(&mut hs, h.reg as u32);
+            meet(&mut state, &mut work, at[h.target as usize], k, h.depth as u32, &hs)?;
         }
         let depth = match i.op {
             Op::PushCtx => depth + 1,
@@ -353,8 +408,7 @@ fn flow(code: &Code, ins: &[(usize, Ins, usize)], at: &[usize]) -> Result<(), St
             _ => depth,
         };
         // A suspension: a resume restores the registers of the list and writes the sent value and the mode, and nothing else.
-        if matches!(i.op, Op::GenInit | Op::Yield | Op::Await) {
-            let l = code.save_list(i.b).expect("a save list that the checks accepted");
+        if let Some(l) = save_list(code, i) {
             if let Some(r) = l.regs.iter().find(|r| !has(&set, **r)) {
                 return err(format!("the save list names r{r}, which a path has not written"));
             }
@@ -366,13 +420,10 @@ fn flow(code: &Code, ins: &[(usize, Ins, usize)], at: &[usize]) -> Result<(), St
             for r in [l.sent, l.mode].into_iter().filter(|r| *r != NO_REG) {
                 put(&mut set, r);
             }
-            for h in &code.handlers {
-                if (h.start as usize..h.end as usize).contains(&pc) {
-                    let mut hs = set.clone();
-                    put(&mut hs, h.reg as u32);
-                    meet(&mut state, &mut work, at[h.target as usize], k, h.depth as u32, &hs)?;
-                }
-            }
+        }
+        let target = i.target(pc, len).map(|t| at[t as usize]);
+        if let Some(t) = target.filter(|_| skips_write(i.op)) {
+            meet(&mut state, &mut work, t, k, depth, &set)?;
         }
         // Writes.
         for f in 0..i.op.form().fields() {
@@ -386,8 +437,8 @@ fn flow(code: &Code, ins: &[(usize, Ins, usize)], at: &[usize]) -> Result<(), St
             (b..b + s).for_each(|r| put(&mut set, r));
         }
         // Successors.
-        if let Some(t) = i.target(pc, len) {
-            meet(&mut state, &mut work, at[t as usize], k, depth, &set)?;
+        if let Some(t) = target.filter(|_| !skips_write(i.op)) {
+            meet(&mut state, &mut work, t, k, depth, &set)?;
         }
         for t in code.switch_targets(&i).into_iter().flatten() {
             meet(&mut state, &mut work, at[t as usize], k, depth, &set)?;
@@ -399,9 +450,131 @@ fn flow(code: &Code, ins: &[(usize, Ins, usize)], at: &[usize]) -> Result<(), St
             meet(&mut state, &mut work, k + 1, k, depth, &set)?;
         }
     }
+    Ok(state)
+}
+
+/// A taken branch can leave the destination untouched. AYsCall writes it on only one of its two taken paths.
+fn skips_write(op: Op) -> bool {
+    matches!(op, Op::IterNext | Op::ForInNext | Op::AIterClose | Op::AIterCloseT | Op::AYsCall)
+}
+
+fn handler(code: &Code, i: Ins, pc: usize) -> Option<&Handler> {
+    let throws = match i.op {
+        Op::Throw => true,
+        Op::RetDerived | Op::AsyncInit | Op::JmpBack | Op::AIterCloseT => false,
+        Op::IterClose => i.c == 0,
+        Op::Yield | Op::RetGen => code.gen_kind == GK_ASYNCGEN,
+        _ => i.op.is_safepoint(),
+    };
+    if throws { code.handler_at(pc as u32) } else { None }
+}
+
+fn save_list(code: &Code, i: Ins) -> Option<SaveList<'_>> {
+    if matches!(i.op, Op::GenInit | Op::Yield | Op::Await) { code.save_list(i.b) } else { None }
+}
+
+#[derive(Clone, Copy)]
+enum Edge {
+    Write,
+    Keep,
+    Throw(u32),
+}
+
+fn check_live_roots(code: &Code, ins: &[(usize, Ins, usize)], at: &[usize], state: &[State]) -> Result<(), String> {
+    let words = (code.nregs as usize).div_ceil(64).max(1);
+    let mut preds: Vec<Vec<(usize, Edge)>> = vec![Vec::new(); ins.len()];
+    let mut live = vec![0u64; ins.len() * words];
+    let mut kills = vec![0u64; ins.len() * words];
+    let mut work = Vec::new();
+    let mut queued = vec![false; ins.len()];
+    for (k, &(pc, i, len)) in ins.iter().enumerate() {
+        if state[k].is_none() {
+            continue;
+        }
+        let mut edge = |to: usize, kind| preds[to].push((k, kind));
+        if let Some(t) = i.target(pc, len) {
+            edge(at[t as usize], if skips_write(i.op) { Edge::Keep } else { Edge::Write });
+        }
+        for t in code.switch_targets(&i).into_iter().flatten() {
+            edge(at[t as usize], Edge::Write);
+        }
+        if i.op.falls_through() {
+            edge(k + 1, Edge::Write);
+        }
+        if let Some(h) = handler(code, i, pc) {
+            edge(at[h.target as usize], Edge::Throw(h.reg as u32));
+        }
+        let kill = &mut kills[k * words..(k + 1) * words];
+        let uses = &mut live[k * words..(k + 1) * words];
+        for f in 0..i.op.form().fields() {
+            let r = i.field(f);
+            match i.op.letter(f) {
+                'r' => put(uses, r),
+                'w' => put(kill, r),
+                'R' => (r..r + window(&i, &code.recipes).unwrap()).for_each(|r| put(uses, r)),
+                'W' => (r..r + window(&i, &code.recipes).unwrap()).for_each(|r| put(kill, r)),
+                _ => {}
+            }
+        }
+        if let Some(list) = save_list(code, i) {
+            for r in [list.sent, list.mode].into_iter().filter(|r| *r != NO_REG) {
+                put(kill, r);
+            }
+            // Only saved slots can be needed after the resume (the forward pass checks this).
+            list.regs.iter().for_each(|r| put(uses, *r));
+        }
+        if let Some(map) = code.roots.find(pc as u32) {
+            // The collector itself reads each named slot. Track these uses too, so an old
+            // value omitted at one safepoint cannot be marked at a later safepoint.
+            map.slots().for_each(|r| put(uses, r as u32));
+        }
+        work.push(k);
+        queued[k] = true;
+    }
+    let mut current = vec![0; words];
+    while let Some(k) = work.pop() {
+        queued[k] = false;
+        let (pc, i, _) = ins[k];
+        current.copy_from_slice(&live[k * words..(k + 1) * words]);
+        if let Some(map) = code.roots.find(pc as u32) {
+            let mut mapped = map.slots().peekable();
+            for (w, &word) in current.iter().enumerate() {
+                let mut word = word;
+                while word != 0 {
+                    let r = w * 64 + word.trailing_zeros() as usize;
+                    word &= word - 1;
+                    while mapped.next_if(|&m| m < r).is_some() {}
+                    if mapped.next_if_eq(&r).is_none() {
+                        return Err(format!("{pc:04} {}: root map misses live r{r}", i.op.name()));
+                    }
+                }
+            }
+        }
+        for &(pred, edge) in &preds[k] {
+            let mut changed = false;
+            for (w, old) in live[pred * words..(pred + 1) * words].iter_mut().enumerate() {
+                let mut new = current[w];
+                match edge {
+                    Edge::Write => new &= !kills[pred * words + w],
+                    Edge::Throw(r) if r as usize / 64 == w => new &= !(1 << (r % 64)),
+                    _ => {}
+                }
+                changed |= new & !*old != 0;
+                *old |= new;
+            }
+            if changed && !queued[pred] {
+                work.push(pred);
+                queued[pred] = true;
+            }
+        }
+    }
     Ok(())
 }
 
 #[cfg(test)]
 #[path = "verify_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "verify_roots_tests.rs"]
+mod roots_tests;

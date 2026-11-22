@@ -1467,6 +1467,7 @@ impl<'a> Fc<'a> {
                     _ => cur,
                 };
                 self.binary_regs(bop, cur, value, res)?;
+                self.set_live(res);
                 self.set_member(mode, o, name.as_deref(), k, res)?;
                 if let Some(d) = dst
                     && d != res
@@ -1557,6 +1558,7 @@ impl<'a> Fc<'a> {
                             // The value is the old one, after ToNumeric.
                             let old = if self.is_var_reg(d) { self.alloc() } else { d };
                             self.op(Op::ToNumeric, old, reg, 0);
+                            self.set_live(old);
                             self.op(iop, reg, old, 0);
                             if old != d {
                                 self.op(Op::Mov, d, old, 0);
