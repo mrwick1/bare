@@ -1092,3 +1092,7 @@ mod stmt;
 #[cfg(test)]
 #[path = "compile_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "compile_arguments_scope_tests.rs"]
+mod arguments_scope_tests;
