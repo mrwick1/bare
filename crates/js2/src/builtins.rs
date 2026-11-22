@@ -21,7 +21,7 @@
 //! the caller, which the root map of the call names. A nested call holds the collector too (`reenter.rs`). So a native may keep any
 //! cell in a Rust local, and may allocate and call. A native that allocates more than the slack of the heap limit (8 MiB) only makes
 //! the next gate collect.
-use crate::lazy::{Ent, m};
+use crate::lazy::{Ent, data, m};
 use crate::cell::Layout;
 use crate::ast::StmtKind;
 use crate::facts::Facts;
@@ -113,6 +113,9 @@ impl Realm {
     pub(crate) fn fn_prep(&mut self, o: Obj, k: Str) {
         self.fn_props(o);
         self.lazy_prep(o, k);
+        if k == self.k_prototype {
+            self.ensure_function_prototype(o);
+        }
         if o.has_flag(F_NATIVE) && !o.has_flag(F_FNPROPS) && (k == self.k_length || k == self.k_name) {
             self.materialize(o);
         }
@@ -122,8 +125,16 @@ impl Realm {
     pub(crate) fn fn_prep_all(&mut self, o: Obj) {
         self.fn_props(o);
         self.lazy_all(o);
+        self.ensure_function_prototype(o);
         if o.has_flag(F_NATIVE) && !o.has_flag(F_FNPROPS) {
             self.materialize(o);
+        }
+    }
+
+    #[cold]
+    fn ensure_function_prototype(&mut self, o: Obj) {
+        if self.needs_prototype(o) && self.shapes.find(o.shape(&self.shapes), self.k_prototype).is_none() {
+            self.make_prototype(o).expect("define");
         }
     }
 
@@ -377,8 +388,20 @@ impl Realm {
 
     fn install_function(&mut self) {
         let proto = self.function_proto;
+        let id = self.natives.len();
+        self.natives.push(Native { f: empty_function, ctor: false, len: 0, name: "" });
+        proto.set_slot(&self.shapes, 0, Value::int(id as i32));
+        // Its metadata is in the table so inherited lookups can also materialize it.
+        proto.set_flag(F_CALLABLE | F_NATIVE | F_FNPROPS);
         self.ctor("Function", 1, function_ctor, proto);
-        static FUNCTION_PROTO: &[Ent] = &[m("apply", 2, fn_apply), m("bind", 1, fn_bind), m("call", 1, fn_call), m("toString", 0, fn_to_string)];
+        static FUNCTION_PROTO: &[Ent] = &[
+            data("length", |_| Value::int(0), A_C),
+            data("name", |rt| rt.string(""), A_C),
+            m("apply", 2, fn_apply),
+            m("bind", 1, fn_bind),
+            m("call", 1, fn_call),
+            m("toString", 0, fn_to_string),
+        ];
         self.lazy_table(proto, FUNCTION_PROTO);
         self.install_has_instance();
     }
@@ -415,6 +438,10 @@ impl Realm {
 }
 
 // ---- Function.prototype ----
+
+fn empty_function(_rt: &mut Realm, _this: Value, _args: &[Value]) -> R<Value> {
+    Ok(Value::UNDEFINED)
+}
 
 /// `Function(p1, ..., body)` and `new Function(...)`: CreateDynamicFunction for the normal kind. The text is one function expression
 /// compiled as a script of this realm, so the function has the global scope. The parameters and the body must parse alone, so a
@@ -482,6 +509,12 @@ fn dynamic_function(rt: &mut Realm, args: &[Value], keyword: &str) -> R<Value> {
     let ci = rt.script_code(&format!("({keyword} ({params}\n) {{\n{body}\n}})"), ScriptMode { value: true, ..ScriptMode::default() })?;
     let (top, global) = (rt.new_function(ci, Value::UNDEFINED), rt.global.value());
     let f = rt.call_function(top, global, &[])?;
+    if !rt.nt.is_undefined() {
+        let proto = rt.get_prop(rt.nt, Key::Name(rt.k_prototype))?;
+        if let Some(proto) = Realm::obj(proto) {
+            Realm::obj(f).expect("a function").set_proto(&mut rt.shapes, Some(proto.cell()));
+        }
+    }
     let anonymous = rt.intern("anonymous");
     rt.name_function(f, Key::Name(anonymous), 0)?;
     Ok(f)

@@ -69,7 +69,7 @@ fn window(ins: &Ins, recipes: &Recipes) -> Option<u32> {
         Op::NewSpread => 2,
         Op::ObjRest => ins.x,
         Op::NewObjLit => recipes.get(ins.c as usize).map_or(0, |k| k.len() as u32),
-        Op::IterOpen | Op::ForInOpen | Op::ForInNext | Op::IterNext | Op::IterClose | Op::AIterOpen | Op::AIterNext | Op::AIterClose | Op::AIterCloseT => ITER_REGS,
+        Op::IterOpen | Op::YieldOpen | Op::ForInOpen | Op::ForInNext | Op::IterNext | Op::IterClose | Op::AIterOpen | Op::AIterNext | Op::AIterClose | Op::AIterCloseT => ITER_REGS,
         Op::YieldStarStep | Op::AYsCall => YS_REGS,
         Op::ForEachStep => 3,
         _ => return None,
@@ -156,7 +156,7 @@ pub fn verify(code: &Code) -> Result<(), String> {
         if i.op == Op::Lazy {
             return err("Lazy must be the only word of its stub");
         }
-        let (gen_op, async_op) = (matches!(i.op, Op::GenInit | Op::Yield | Op::RetGen), matches!(i.op, Op::AsyncInit | Op::Await | Op::RetAsync));
+        let (gen_op, async_op) = (matches!(i.op, Op::GenInit | Op::Yield | Op::YieldResult | Op::RetGen), matches!(i.op, Op::AsyncInit | Op::Await | Op::RetAsync));
         // An async generator has the ops of both: `Await` for `await`, and the generator ops.
         let gk = code.gen_kind;
         let ok = if i.op == Op::Await { gk == GK_ASYNC || gk == GK_ASYNCGEN } else if gen_op { gk == GK_GEN || gk == GK_ASYNCGEN } else { gk == GK_ASYNC };
@@ -320,7 +320,7 @@ fn check_table(code: &Code, i: &Ins, pc: usize, start: &dyn Fn(i64) -> bool) -> 
                 }
             }
         }
-        Op::GenInit | Op::Yield | Op::Await => {
+        Op::GenInit | Op::Yield | Op::YieldResult | Op::Await => {
             let nregs = code.nregs as u32;
             let l = code.save_list(i.b).ok_or("the save list is not inside the pool")?;
             if l.regs.len() > code.gen_regs as usize {
@@ -488,7 +488,7 @@ fn handler(code: &Code, i: Ins, pc: usize, safepoint: bool) -> Option<&Handler> 
 }
 
 fn save_list(code: &Code, i: Ins) -> Option<SaveList<'_>> {
-    if matches!(i.op, Op::GenInit | Op::Yield | Op::Await) { code.save_list(i.b) } else { None }
+    if matches!(i.op, Op::GenInit | Op::Yield | Op::YieldResult | Op::Await) { code.save_list(i.b) } else { None }
 }
 
 #[derive(Clone, Copy)]

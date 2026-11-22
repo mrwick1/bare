@@ -1003,6 +1003,7 @@ impl<'a> Fc<'a> {
         let labels = std::mem::take(&mut self.pending);
         // A `let` or `const` in the head is a scope of the loop.
         let mut scope = None;
+        let mut let_head = false;
         if let ForInit::Var(v) = init
             && let StmtKind::Var { kind: kind @ (VarKind::Let | VarKind::Const), decls } = prog.stmt(v).kind
         {
@@ -1013,6 +1014,7 @@ impl<'a> Fc<'a> {
                 self.pat_names(d.target, &mut names);
                 ds.extend(names.into_iter().map(|(name, _)| Decl { name, kind: if kind == VarKind::Let { VK::Let } else { VK::Const }, end: d.span.end, reg: None }));
             }
+            let_head = kind == VarKind::Let;
             scope = Some(self.enter(span, &ds, false)?);
         }
         match init {
@@ -1020,7 +1022,10 @@ impl<'a> Fc<'a> {
             ForInit::Var(v) => self.stmt(v)?,
             ForInit::Expr(e) => self.effect(e)?,
         }
-        let per_iteration = scope.as_ref().is_some_and(|m| self.depth > m.ctx);
+        let per_iteration = let_head && scope.as_ref().is_some_and(|m| self.depth > m.ctx);
+        if per_iteration {
+            self.op(Op::CopyCtx, 0, 0, 0);
+        }
         let (head, cont, brk) = (self.label(), self.label(), self.label());
         self.bind(head);
         self.mark_used(head);

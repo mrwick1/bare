@@ -187,7 +187,11 @@ fn last_index_of(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
 
 fn includes(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let s = rt.this_str(this, "includes")?;
-    let n = pattern(rt, arg(args, 0))?;
+    let search = arg(args, 0);
+    if rt.is_regexp(search)? {
+        return rt.type_error("the search value is a regular expression");
+    }
+    let n = pattern(rt, search)?;
     let h = rt.units(s);
     let from = rel_index(rt, arg(args, 1), 0.0, h.len() as f64, false)?;
     Ok(Value::bool(find(&h, &n, from).is_some()))
@@ -195,7 +199,11 @@ fn includes(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
 
 fn starts_with(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let s = rt.this_str(this, "startsWith")?;
-    let n = pattern(rt, arg(args, 0))?;
+    let search = arg(args, 0);
+    if rt.is_regexp(search)? {
+        return rt.type_error("the search value is a regular expression");
+    }
+    let n = pattern(rt, search)?;
     let h = rt.units(s);
     let from = rel_index(rt, arg(args, 1), 0.0, h.len() as f64, false)?;
     Ok(Value::bool(h[from..].starts_with(&n)))
@@ -203,7 +211,11 @@ fn starts_with(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
 
 fn ends_with(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let s = rt.this_str(this, "endsWith")?;
-    let n = pattern(rt, arg(args, 0))?;
+    let search = arg(args, 0);
+    if rt.is_regexp(search)? {
+        return rt.type_error("the search value is a regular expression");
+    }
+    let n = pattern(rt, search)?;
     let h = rt.units(s);
     let end = if arg(args, 1).is_undefined() { h.len() } else { rel_index(rt, arg(args, 1), 0.0, h.len() as f64, false)? };
     Ok(Value::bool(h[..end].ends_with(&n)))

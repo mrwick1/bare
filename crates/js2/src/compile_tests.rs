@@ -1067,12 +1067,13 @@ code nregs=5 nparams=0 words=19 sites=5
         src,
         0,
         r#"
-code nregs=3 nparams=0 words=5 sites=0
+code nregs=3 nparams=0 words=6 sites=0
 0000  CallSuper   r0, 1, 0
 0001  GetCtx      r2, 0, 0
 0002  CheckUnbound r2
 0003  InitCtx     r0, 0, 0
-0004  Ret         r0
+0004  InitSuperFields r0
+0005  Ret         r0
 "#,
     );
     golden(

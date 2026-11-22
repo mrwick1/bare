@@ -49,7 +49,7 @@ use crate::codes::Codes;
 use crate::interp::LazyCompile;
 use crate::reenter::Machine;
 use crate::builtins::{Hint, Native};
-use crate::object::{Ctx, F_CLASS, F_ELEMS_FIXED, F_ELEMS_RO, F_HOST, F_LAZY, F_LAZYM, F_LEN_RO, F_NATIVE, F_NOEXT, F_PROTO, F_SLOWIDX, K_WRAP, Obj};
+use crate::object::{Ctx, F_ARGS, F_CLASS, F_ELEMS_FIXED, F_ELEMS_RO, F_HOST, F_LAZY, F_LAZYM, F_LEN_RO, F_NATIVE, F_NOEXT, F_PROTO, F_SLOWIDX, K_WRAP, Obj};
 use crate::shapes::{A_ACC, A_C, A_E, A_W, Entry, ShapeId, Shapes};
 use crate::string::{Chars, Str};
 use crate::value::{Kind, Value};
@@ -307,7 +307,7 @@ pub struct Realm {
     pub s_array: ShapeId,
     pub s_func: ShapeId,
     /// The shape of an arguments object: an array with the prototype of `Object`.
-    pub s_args: ShapeId,
+    s_args: Option<ShapeId>,
     /// `%Array.prototype.values%`, the value of `Symbol.iterator` of each arguments object; made at the first one (`Realm::new_args`).
     pub(crate) args_iter: Value,
     pub k_constructor: Str,
@@ -406,6 +406,31 @@ pub struct Realm {
 const TYPEOF: [&str; 8] = ["undefined", "object", "boolean", "number", "string", "function", "symbol", "bigint"];
 
 impl Realm {
+    /// Make an arguments object with own properties for its length and iterator.
+    #[inline(never)]
+    pub(crate) fn new_args(&mut self, args: &[Value]) -> Value {
+        if self.args_iter.is_undefined() {
+            self.args_iter = self.array_values();
+        }
+        let shape = match self.s_args {
+            Some(shape) => shape,
+            None => {
+                let shape = self.shapes.root(Layout::Indexed, Some(self.object_proto.cell()), 2);
+                let shape = self.shapes.add(shape, self.k_length, crate::builtins::HIDDEN).expect("shape");
+                let key = self.wk[crate::bi_symbol::ITERATOR];
+                let shape = self.shapes.add(shape, key, crate::builtins::HIDDEN).expect("shape");
+                self.pins.push(shape);
+                self.s_args = Some(shape);
+                shape
+            }
+        };
+        let o = Obj::array(&mut self.heap, &self.shapes, shape, args).expect("memory");
+        o.set_slot(&self.shapes, 0, Realm::num(args.len() as f64));
+        o.set_slot(&self.shapes, 1, self.args_iter);
+        o.set_flag(F_ARGS);
+        o.value()
+    }
+
     pub fn new(shared: Arc<SharedAtoms>) -> Realm {
         let mut heap = Heap::default();
         let mut shapes = Shapes::default();
@@ -426,9 +451,10 @@ impl Realm {
         let object_proto = Obj::new(&mut heap, &shapes, root).expect("memory");
         let proto = Some(object_proto.cell());
         let s_object = shapes.root(Layout::Object, proto, 4);
-        let function_proto = Obj::new(&mut heap, &shapes, s_object).expect("memory");
-        let array_proto_shape = shapes.root(Layout::Indexed, proto, 0);
-        let array_proto = Obj::array(&mut heap, &shapes, array_proto_shape, &[]).expect("memory");
+        let function_proto_shape = shapes.add(s_object, hidden[0], 0).expect("shape");
+        let function_proto = Obj::new(&mut heap, &shapes, function_proto_shape).expect("memory");
+        let array_proto_shape = shapes.root(Layout::Indexed, proto, 2);
+        let array_proto = Obj::new(&mut heap, &shapes, array_proto_shape).expect("memory");
         let error_proto = Obj::new(&mut heap, &shapes, s_object).expect("memory");
         let global = Obj::new(&mut heap, &shapes, s_object).expect("memory");
         shapes.watch(global.cell().as_ptr() as usize);
@@ -444,10 +470,6 @@ impl Realm {
             [empty.value(), Value::int(0), Value::bool(false)].map(|v| Obj::new_wrapper(&mut heap, &shapes, wrapper, v));
         let symbol_proto = Obj::new(&mut heap, &shapes, s_object).expect("memory");
         let wk = crate::bi_symbol::well_known(&mut heap);
-        // Arguments objects have ordinary own properties for length and the iterator.
-        let s_args = shapes.root(Layout::Indexed, Some(object_proto.cell()), 2);
-        let s_args = shapes.add(s_args, k_length, crate::builtins::HIDDEN).expect("shape");
-        let s_args = shapes.add(s_args, wk[crate::bi_symbol::ITERATOR], crate::builtins::HIDDEN).expect("shape");
         let pr = crate::promise::Promises::new(&mut heap, &mut shapes, s_object, k_then, k_pstate, k_presult);
         // The prototypes of `TypeError` and the others inherit from `Error.prototype`.
         let eshape = shapes.root(Layout::Object, Some(error_proto.cell()), 4);
@@ -471,7 +493,7 @@ impl Realm {
         consts.extend([k_prim, k_code, k_ctx, k_prototype, k_length, k_name, k_message, k_home, k_fields, k_link, k_constructor, k_raw, k_value_of, k_to_string].iter().map(|s| s.value()));
         consts.extend(tnames.iter().map(|s| s.value()));
         consts.extend(wk.iter().map(|s| s.key_value()));
-        let pins = vec![s_object, s_array, s_func, s_args, s_native, s_iter, pr.shape];
+        let pins = vec![s_object, s_array, s_func, s_native, s_iter, pr.shape];
         let epoch = shapes.epoch();
         let probe = Obj::new(&mut heap, &shapes, s_func).expect("memory");
         let (func_shape, loc_code, loc_ctx) = (s_func.raw(), probe.loc(&shapes, 0), probe.loc(&shapes, 1));
@@ -490,7 +512,7 @@ impl Realm {
             s_object,
             s_array,
             s_func,
-            s_args,
+            s_args: None,
             args_iter: Value::UNDEFINED,
             k_constructor,
             k_raw,

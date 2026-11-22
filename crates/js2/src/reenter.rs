@@ -92,7 +92,11 @@ impl Realm {
                 self.heap.release_task(held);
                 self.nest -= 1;
                 (self.callee, self.nt, self.tail, self.tail_args) = saved;
-                r.map(|v| (v, self.gen_done(g)))
+                let v = r?;
+                if mode == crate::generator::MODE_NEXT && Realm::yielded_result(g) {
+                    return self.get_named(v, "value").map(|v| (v, false));
+                }
+                Ok((v, self.gen_done(g)))
             }
         }
     }
@@ -121,6 +125,9 @@ impl Realm {
         let v = self.resume_raw(g)?;
         if let Some(p) = Realm::agen_entry_promise(g) {
             return Ok(p);
+        }
+        if Realm::yielded_result(g) {
+            return Ok(v);
         }
         let done = self.gen_done(g);
         Ok(self.iter_result(v, done))
