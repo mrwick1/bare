@@ -327,14 +327,30 @@ impl<'a> Prog<'a> {
 
 /// Compile `pattern` (UTF-16 code units) with `flags` (e.g. `"gi"`) into an image.
 pub fn compile(pattern: &[u16], flags: &str) -> Result<Vec<u64>, CompileError> {
-    let flags = Flags::parse(flags)?;
+    emit(parse(pattern, Flags::parse(flags)?)?)
+}
+
+pub(crate) struct ParsedPattern {
+    node: Node,
+    classes: Vec<ClassSet>,
+    names: Vec<(String, u32)>,
+    groups: usize,
+    flags: Flags,
+}
+
+pub(crate) fn parse(pattern: &[u16], flags: Flags) -> Result<ParsedPattern, CompileError> {
     if pattern.len() > MAX_PATTERN_UNITS {
         return Err(CompileError::Limit("pattern too long"));
     }
     let mut p = Parser::new(pattern, flags);
     let node = p.parse_pattern()?;
-    let groups = p.ncap as usize;
-    let mut e = Emitter { prog: Vec::new(), classes: p.classes, flags, work: 0, depth: 0, max_slot: 0, backwards: false };
+    Ok(ParsedPattern { node, classes: p.classes, names: p.names, groups: p.ncap as usize, flags })
+}
+
+/// Emit from the tree that already passed the syntax and parser limits.
+pub(crate) fn emit(pattern: ParsedPattern) -> Result<Vec<u64>, CompileError> {
+    let ParsedPattern { node, classes, names, groups, flags } = pattern;
+    let mut e = Emitter { prog: Vec::new(), classes, flags, work: 0, depth: 0, max_slot: 0, backwards: false };
     e.emit(&node)?;
     e.push(Inst::Match)?;
     let tmp_base = 2 * (groups + 1);
@@ -353,14 +369,14 @@ pub fn compile(pattern: &[u16], flags: &str) -> Result<Vec<u64>, CompileError> {
     w.push(e.prog.len() as u64 | (ctab.len() as u64) << 32);
     w.push(groups as u64 | (nregs as u64) << 32);
     w.push(tmp_base as u64 | (mark_base as u64) << 32);
-    w.push(flags.bits() as u64 | (anchored as u64) << 8 | (first.is_some() as u64) << 9 | (!p.names.is_empty() as u64) << 10 | (ranges.len() as u64) << 32);
+    w.push(flags.bits() as u64 | (anchored as u64) << 8 | (first.is_some() as u64) << 9 | (!names.is_empty() as u64) << 10 | (ranges.len() as u64) << 32);
     if let Some(f) = first {
         w.extend(f);
     }
     w.extend(e.prog.iter().map(|i| i.enc()));
     w.extend(ctab);
     w.extend(ranges);
-    for (name, index) in p.names {
+    for (name, index) in names {
         let units: Vec<_> = name.encode_utf16().collect();
         w.push(index as u64 | (units.len() as u64) << 32);
         w.extend(units.chunks(4).map(|chunk| {
@@ -374,14 +390,7 @@ pub fn compile(pattern: &[u16], flags: &str) -> Result<Vec<u64>, CompileError> {
 /// [`compile`] reports before it emits code is reported here, with the same error. The program limits (code size, nesting of the
 /// emit pass) are not checked: they show at [`compile`].
 pub fn check(pattern: &[u16], flags: &str) -> Result<(), CompileError> {
-    check_pattern(pattern, Flags::parse(flags)?)
-}
-
-pub(crate) fn check_pattern(pattern: &[u16], flags: Flags) -> Result<(), CompileError> {
-    if pattern.len() > MAX_PATTERN_UNITS {
-        return Err(CompileError::Limit("pattern too long"));
-    }
-    Parser::new(pattern, flags).parse_pattern().map(drop)
+    parse(pattern, Flags::parse(flags)?).map(drop)
 }
 
 /// The flags of an image.
