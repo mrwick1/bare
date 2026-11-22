@@ -54,3 +54,4 @@ built-ins/Number
 built-ins/Math
 built-ins/JSON
 built-ins/Date
+built-ins/BigInt

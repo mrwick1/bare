@@ -1,7 +1,0 @@
-# test262 counts of tools/js/test262_js2.sh for each directory: directory, old pass, old fail, old skip, new pass, new fail, new skip.
-# old = bare-js, new = bare-js2. Commit: e4fbf57745c6aae3d1f12f181ecef78b1665d812. Written by tools/js/test262_js2.sh -u. Do not edit by hand.
-built-ins/JSON 6 0 0 6 0 0
-built-ins/JSON/isRawJSON 0 0 6 0 0 6
-built-ins/JSON/parse 63 0 14 63 0 14
-built-ins/JSON/rawJSON 0 0 10 0 0 10
-built-ins/JSON/stringify 50 0 17 50 0 17

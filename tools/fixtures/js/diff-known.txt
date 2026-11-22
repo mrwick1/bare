@@ -4,10 +4,9 @@
 script_tests:144	error message text differs ("Cannot read" against "cannot read")
 script_tests:146	error message text differs (js2 has no name of the callee)
 script_tests:149	old engine stops at its call-depth limit; js2 throws RangeError
-script_tests:401	old engine stops at its traversal-depth limit; js2 throws RangeError
-script_tests:181	BigInt literal: js2 throws TypeError (not built)
-script_tests:384	Error.stack: js2 has none
-script_tests:400	Function.prototype.toString of a script function: js2 gives "[native code]"
-script_tests:467	toFixed(2) of -0.0001: js2 loses the sign of "-0.00"
-script_tests:478	self: the old engine has no global self
-script_tests:480	self: the old engine has no global self
+script_tests:421	old engine stops at its traversal-depth limit; js2 throws RangeError
+script_tests:404	Error.stack: js2 has none
+script_tests:420	Function.prototype.toString of a script function: js2 gives "[native code]"
+script_tests:487	toFixed(2) of -0.0001: js2 loses the sign of "-0.00"
+script_tests:498	self: the old engine has no global self
+script_tests:500	self: the old engine has no global self
