@@ -62,7 +62,7 @@ The patched Callgrind run reports the same five replies and 64,947 bytes. The se
 | Live | 702.57 [702.57–716.33] | 687.86 [687.86–702.49] | 665.58 [665.58–673.75] | 28.37 [28.35–28.41] | 27.77 [27.55–28.06] |
 | Replay | 690.43 [690.43–690.47] | 657.47 [657.47–657.51] | 631.18 [631.18–631.21] | 27.81 [27.63–27.93] | 27.79 [27.68–28.07] |
 
-All live W3C samples match at seven replies and 83,582 bytes. The live instruction minimum falls 22.27 M and median RSS falls 0.60 MiB. Replay still has the same POST miss. All control instruction minima fall or stay within the baseline spread. The first three DEV tape RSS trials have medians of 100.18 MiB and 103.66 MiB. Recheck the control's peak RSS on final main.
+All live W3C samples match at seven replies and 83,582 bytes. The live instruction minimum falls 22.27 M and median RSS falls 0.60 MiB. Replay still has the same POST miss. All control instruction minima fall or stay within the baseline spread. The first three DEV tape RSS trials have medians of 100.18 MiB and 103.66 MiB. Three more trials per build give medians of 100.34 MiB [99.88–106.54] and 105.68 MiB [103.49–108.17] across all six. The increase stays within the measured baseline spread.
 
 The expanded host test262 selection adds typed-array internal Get and HasProperty. It gives 2,634 passes, 57 failures and 28 skips on both trees. No passing test was lost. All 24 host unit tests pass. The typecheck, the 12 cost rows and the five interpreter cost rows pass. No cost debt.
 
