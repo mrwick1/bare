@@ -3,6 +3,7 @@
 //! repeated key keeps the last value. Nesting is limited to [`MAX_DEPTH`] (a `RangeError`).
 //!
 //! The parser visits children before it calls the reviver. The writer calls `toJSON` before the replacer.
+//! A BigInt or BigInt wrapper left after those calls throws a `TypeError`.
 use crate::lazy::{Ent, m};
 use crate::bi_array::{get_at, len_of};
 use crate::bi_object::Desc;
@@ -344,7 +345,7 @@ impl Writer {
 
     /// `SerializeJSONProperty` for the value `v` read from `holder[key]`. Returns false when nothing was written.
     fn value(&mut self, rt: &mut Realm, mut v: Value, holder: Value, key: Value, indent: &[u16]) -> R<bool> {
-        if Realm::obj(v).is_some() {
+        if v.is_bigint() || Realm::obj(v).is_some() {
             let to_json = rt.get_named(v, "toJSON")?;
             if callable(to_json) {
                 let k = rt.to_str(key)?.value();
@@ -360,9 +361,12 @@ impl Writer {
                 v = Realm::num(rt.to_number(v)?);
             } else if Realm::str_of(p).is_some() {
                 v = rt.to_str(v)?.value();
-            } else if p.as_bool().is_some() {
+            } else if p.is_bigint() || p.as_bool().is_some() {
                 v = p;
             }
+        }
+        if v.is_bigint() {
+            return rt.type_error("cannot serialize a BigInt");
         }
         if let Some(o) = Realm::obj(v) {
             if o.is_callable() {

@@ -13,7 +13,7 @@
 //!   A table of more than [`SCAN_MAX`] entries gets a hash index at its first probe.
 //! - Dictionary mode. An object that outgrows the tree gets a shape of its own (a dictionary shape) with a table that only this
 //!   object uses and that changes in place. Its slots do not move: they keep their numbers, a deleted slot is reused, and the
-//!   shape id stays. A cache must not fill for a dictionary shape ([`Shapes::cacheable`]). An object goes to dictionary mode when
+//!   shape id stays. A cache guarded by shape ID must skip dictionaries ([`Shapes::cacheable`]). An object goes to dictionary mode when
 //!   a property other than the last one added is deleted, when an attribute changes (`freeze`, `seal`, data to accessor), or when it
 //!   would have more than [`MAX_PROPS`] properties. A dictionary shape never returns to the tree.
 //! - Prototype change. [`Shapes::with_proto`] makes one node with the same table and the new prototype (the same shape every time
@@ -367,16 +367,15 @@ impl Shapes {
         self.watch = addr;
     }
 
-    /// The tag of the watched object: a number that changes each time the object gets another shape (`Obj::set_shape`: an add, a
-    /// delete, an attribute change, a new prototype). Those are the only changes that move a slot of the object or replace its
-    /// overflow record, so the address of a slot stays right while the tag is the same. A global-variable cache (`GetGlobal`,
-    /// `SetGlobal`) holds the tag and the address. The tag is never 0 and never a shape id.
+    /// The global mutation tag. An add, deletion, attribute change or prototype change calls `Obj::set_shape`, which bumps the
+    /// tag even if the dictionary keeps its shape ID. Slot-record moves and global lexical declarations also bump the tag.
+    /// A global-variable cache (`GetGlobal`, `SetGlobal`) holds the tag and the address of a slot. The tag is never 0 and never a shape id.
     #[inline]
     pub fn watch_tag(&self) -> u32 {
         self.watch_tag.get()
     }
 
-    /// Called when the object at `addr` got another shape.
+    /// Invalidate the global caches if the watched object is at `addr`.
     #[inline]
     pub(crate) fn changed(&self, addr: usize) {
         if addr == self.watch {
@@ -540,7 +539,7 @@ impl Shapes {
         self.table(s.table).entries.iter().take(n).copied().filter(|e| !e.is_tomb())
     }
 
-    /// False for a dictionary shape: its table changes in place, so a cache must not keep it.
+    /// False for a dictionary shape. Its table changes in place, so the shape ID cannot guard a cache entry.
     #[inline]
     pub fn cacheable(&self, id: ShapeId) -> bool {
         !self.node(id).is_dict()
