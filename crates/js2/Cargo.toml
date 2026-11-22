@@ -7,6 +7,7 @@ edition.workspace = true
 license = "(MIT OR Apache-2.0) AND Unicode-3.0"
 
 [dependencies]
+bare-intl = { path = "../intl" }
 bare-os = { path = "../os" }
 # The embedded time zone files for the local zone of `Date` (`bi_date_tz.rs`)
 bare-tzdata = { path = "../tzdata" }

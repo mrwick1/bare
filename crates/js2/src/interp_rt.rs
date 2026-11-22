@@ -410,6 +410,7 @@ pub struct Realm {
     pub(crate) rx: Option<Box<crate::regexp_rt::Rx>>,
     /// `Map`, `Set`, `WeakMap` and `WeakSet` (`bi_collections.rs`).
     pub(crate) coll: Option<Box<crate::bi_collections::Colls>>,
+    pub(crate) intl: Option<Box<crate::bi_intl::State>>,
 }
 
 const TYPEOF: [&str; 8] = ["undefined", "object", "boolean", "number", "string", "function", "symbol", "bigint"];
@@ -581,6 +582,7 @@ impl Realm {
             last_gc: Default::default(),
             rx: None,
             coll: None,
+            intl: None,
         };
         rt.install_builtins();
         rt
@@ -596,11 +598,12 @@ impl Realm {
     pub fn collect(&mut self, fbs: &mut [Feedback], walk_frames: impl FnOnce(&mut Marker)) {
         // A nested call holds the collector (`Realm::call_function`), so no machine is in use now: the idle ones keep their feedback.
         debug_assert!(self.nest == 0, "a collection inside a nested call");
-        let Realm { heap, shapes, atoms, consts, pins, lex, pool, pr, api, rx, .. } = self;
+        let Realm { heap, shapes, atoms, consts, pins, lex, pool, pr, api, rx, intl, .. } = self;
         let mut walk_frames = Some(walk_frames);
         let stats = {
             // The promise state is marked in the walk; its weak list is cleared after the marking.
-            struct Rr<'a, F: FnMut(&mut Marker)>(F, &'a mut crate::promise::Promises, &'a mut crate::api::ApiState);
+            struct Rr<'a, F: FnMut(&mut Marker)>(F, &'a mut crate::promise::Promises, &'a mut crate::api::ApiState,
+                &'a mut Option<Box<crate::bi_intl::State>>);
             impl<F: FnMut(&mut Marker)> crate::gc::Roots for Rr<'_, F> {
                 fn walk(&mut self, m: &mut Marker) {
                     (self.0)(m);
@@ -614,6 +617,10 @@ impl Realm {
                     // SAFETY: the list holds cells of this heap that the last collection did not free: a dead one is dropped here.
                     self.1.weak_list().retain(|v| unsafe { live.value(*v) });
                     self.2.prune_owners(live);
+                    if let Some(intl) = self.3 {
+                        // SAFETY: each key is an object in this heap and is removed before it can be freed.
+                        intl.retain_live(|v| unsafe { live.value(v) });
+                    }
                 }
             }
             let roots = |m: &mut Marker| {
@@ -633,7 +640,7 @@ impl Realm {
                 }
             };
             pr.collected();
-            collect(heap, shapes, atoms, &mut Rr(roots, pr, api))
+            collect(heap, shapes, atoms, &mut Rr(roots, pr, api, intl))
         };
         self.last_gc = stats;
         self.collections += 1;
