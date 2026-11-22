@@ -120,6 +120,11 @@ impl Realm {
 
     /// The own property `key` of `o`.
     pub(crate) fn get_own(&mut self, o: Obj, key: Key) -> Option<Own> {
+        if o.is_kind(crate::object::K_TYPED)
+            && let Some(i) = crate::bi_typed::numeric_key(key)
+        {
+            return self.typed_get(o, i?).map(|v| Own::Data(v, A_W | A_E | A_C));
+        }
         if let Some(s) = self.string_wrapper(o)
             && let Some(v) = self.string_own(s, key)
         {
@@ -204,7 +209,13 @@ impl Realm {
                 None => names.push(k.value()),
             }
         }
-        let elems = if o.is_indexed() { o.indices() } else { Vec::new() };
+        let elems = if o.is_indexed() {
+            o.indices()
+        } else if o.is_kind(crate::object::K_TYPED) {
+            (0..self.typed_len(o) as u32).collect()
+        } else {
+            Vec::new()
+        };
         let mut out = Vec::with_capacity(elems.len() + idx.len() + names.len() + 1);
         if idx.is_empty() {
             for i in elems {
@@ -280,13 +291,6 @@ impl Realm {
 
     // ---- extensibility, seal, freeze ----
 
-    pub(crate) fn prevent_extensions(&mut self, o: Obj) {
-        self.lazy_all(o);
-        if o.extensible() {
-            o.prevent_extensions(&mut self.shapes);
-        }
-    }
-
     /// `seal` (`freeze` false) or `freeze`: no new property, no property configurable, and for `freeze` no data property writable.
     pub(crate) fn lock(&mut self, o: Obj, freeze: bool) -> R<()> {
         if o.is_kind(K_PROXY) {
@@ -308,7 +312,12 @@ impl Realm {
             return Ok(());
         }
         self.fn_prep_all(o);
-        self.prevent_extensions(o);
+        if !self.prevent_extensions_internal(o)? {
+            return self.type_error("cannot prevent extensions on a resizable typed array");
+        }
+        if freeze && o.is_kind(crate::object::K_TYPED) && self.typed_len(o) != 0 {
+            return self.type_error("cannot freeze a typed array with elements");
+        }
         if o.is_indexed() {
             o.set_flag(F_ELEMS_FIXED | if freeze { F_ELEMS_RO | F_LEN_RO } else { 0 });
         }
@@ -348,6 +357,9 @@ impl Realm {
             return false;
         }
         self.fn_prep_all(o);
+        if frozen && o.is_kind(crate::object::K_TYPED) && self.typed_len(o) != 0 {
+            return false;
+        }
         if o.is_indexed() {
             let has = !o.is_empty() && !o.indices().is_empty();
             if has && (!o.has_flag(F_ELEMS_FIXED) || (frozen && !o.has_flag(F_ELEMS_RO))) {
@@ -399,6 +411,17 @@ impl Realm {
     pub(crate) fn define_own(&mut self, o: Obj, key: Key, d: &Desc) -> R<bool> {
         if o.is_kind(K_PROXY) {
             return self.proxy_define(o, key, d);
+        }
+        if o.is_kind(crate::object::K_TYPED)
+            && let Some(i) = crate::bi_typed::numeric_key(key)
+        {
+            if !i.is_some_and(|i| i < self.typed_len(o)) || d.is_accessor() || d.c == Some(false) || d.e == Some(false) || d.w == Some(false) {
+                return Ok(false);
+            }
+            if let Some(v) = d.value {
+                self.typed_set(o, i, v)?;
+            }
+            return Ok(true);
         }
         self.prepare_own_prototype(o, key)?;
         if let Key::Name(k) = key
@@ -1027,7 +1050,11 @@ fn object_is(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
 fn object_prevent_extensions(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let v = arg(args, 0);
     if let Some(o) = Realm::obj(v) && !rt.prevent_extensions_internal(o)? {
-        return rt.type_error("cannot prevent extensions");
+        return rt.type_error(if o.is_kind(crate::object::K_TYPED) {
+            "cannot prevent extensions on a resizable typed array"
+        } else {
+            "cannot prevent extensions"
+        });
     }
     Ok(v)
 }

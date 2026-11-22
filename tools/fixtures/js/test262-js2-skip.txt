@@ -26,7 +26,7 @@ json-modules
 # Core census features: a test runs only when each of its features is named by an `allow:` line (a test with no feature runs).
 # The census (docs/census/2026-11-18.tsv) has these syntax kinds; the first group is plain syntax of ES2015 to ES2022, the second the
 # built-ins of S2.7. Left out until S3 and S4 build them: generators, async functions and iteration, the well-known symbols that nothing reads yet (`match`, `replace`, `unscopables` and the others),
-# Proxy and Reflect, typed arrays, RegExp features, Map and Set, Promise, modules and dynamic import, resource management.
+# Proxy and Reflect, RegExp features, Map and Set, Promise, modules and dynamic import, resource management.
 allow:arrow-function
 allow:class
 allow:class-fields-public
@@ -110,3 +110,22 @@ allow:Reflect
 allow:Reflect.construct
 allow:Reflect.set
 allow:Reflect.setPrototypeOf
+# ArrayBuffer, numeric typed arrays and DataView.
+allow:ArrayBuffer
+allow:TypedArray
+allow:DataView
+allow:Int8Array
+allow:Uint8Array
+allow:resizable-arraybuffer
+allow:align-detached-buffer-semantics-with-web-reality
+allow:arraybuffer-transfer
+allow:stable-typedarray-sort
+allow:TypedArray.prototype.at
+allow:DataView.prototype.getFloat32
+allow:DataView.prototype.getFloat64
+allow:DataView.prototype.getInt8
+allow:DataView.prototype.getInt16
+allow:DataView.prototype.getInt32
+allow:DataView.prototype.getUint16
+allow:DataView.prototype.getUint32
+allow:DataView.prototype.setUint8

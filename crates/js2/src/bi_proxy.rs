@@ -1,9 +1,10 @@
 //! Proxy objects use a dictionary shape. Only the internal slots are stored in the cell.
 use crate::bi_object::{Desc, Own, new_property};
+use crate::bi_typed::numeric_key;
 use crate::builtins::{Native, arg};
 use crate::interp_rt::{ErrKind, Key, R, Realm};
 use crate::lazy::{Ent, ctor, m};
-use crate::object::{F_CALLABLE, F_FNPROPS, F_NATIVE, K_PROXY, Obj};
+use crate::object::{F_CALLABLE, F_FNPROPS, F_NATIVE, K_PROXY, K_TYPED, Obj};
 use crate::shapes::{A_C, A_E, A_W};
 use crate::value::Value;
 use std::collections::HashSet;
@@ -93,6 +94,9 @@ impl Realm {
             if target.is_kind(K_PROXY) {
                 return self.proxy_get(target, key, receiver);
             }
+            if target.is_kind(K_TYPED) && let Some(i) = numeric_key(key) {
+                return Ok(i.and_then(|i| self.typed_get(target, i)).unwrap_or(Value::UNDEFINED));
+            }
             match self.get_own_h(target, key)? {
                 Some(Own::Data(v, _)) => return Ok(v),
                 Some(Own::Acc(g, ..)) if !g.is_undefined() => return self.call_function(g, receiver, &[]),
@@ -109,6 +113,16 @@ impl Realm {
         loop {
             if target.is_kind(K_PROXY) {
                 return self.proxy_set(target, key, value, receiver);
+            }
+            if target.is_kind(K_TYPED) && let Some(i) = numeric_key(key) {
+                if target.value() == receiver {
+                    self.typed_set(target, i, value)?;
+                    return Ok(true);
+                }
+                if !i.is_some_and(|i| i < self.typed_len(target)) {
+                    return Ok(true);
+                }
+                break;
             }
             match self.get_own_h(target, key)? {
                 Some(Own::Acc(_, s, _)) => {
@@ -379,18 +393,24 @@ impl Realm {
     }
 
     pub(crate) fn prevent_extensions_internal(&mut self, obj: Obj) -> R<bool> {
-        if !obj.is_kind(K_PROXY) {
-            self.prevent_extensions(obj);
-            return Ok(true);
+        if obj.is_kind(K_PROXY) {
+            return self.proxy_op(obj, "preventExtensions", |rt, target, handler, trap| {
+                let Some(trap) = trap else { return rt.prevent_extensions_internal(target) };
+                let ok = Self::truthy(rt.call_function(trap, handler, &[target.value()])?);
+                if ok && rt.is_extensible_internal(target)? {
+                    return rt.type_error("Proxy preventExtensions trap left the target extensible");
+                }
+                Ok(ok)
+            });
         }
-        self.proxy_op(obj, "preventExtensions", |rt, target, handler, trap| {
-            let Some(trap) = trap else { return rt.prevent_extensions_internal(target) };
-            let ok = Self::truthy(rt.call_function(trap, handler, &[target.value()])?);
-            if ok && rt.is_extensible_internal(target)? {
-                return rt.type_error("Proxy preventExtensions trap left the target extensible");
-            }
-            Ok(ok)
-        })
+        if obj.is_kind(K_TYPED) && !crate::bi_buffer::View::of(obj).expect("typed array").is_fixed() {
+            return Ok(false);
+        }
+        self.lazy_all(obj);
+        if obj.extensible() {
+            obj.prevent_extensions(&mut self.shapes);
+        }
+        Ok(true)
     }
 }
 

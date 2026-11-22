@@ -1,11 +1,11 @@
-//! A cell of plain words for a RegExp program or a BigInt magnitude.
+//! A cell of plain words for RegExp programs, ArrayBuffer bytes, and BigInt magnitudes.
 //!
 //! A [`Blob`] is the header (`Layout::Blob`, the length in words) and then that many `u64` words. It has no edge, so the collector marks it
 //! and never traces it. It has no finalizer. A RegExp program has the kind `Object` as a context has. A BigInt uses its own value tag
 //! and puts the sign in a header flag.
 //!
-//! Type invariant of [`Blob`]: it points to a live `Blob` cell made by [`Blob::new`]. The owner keeps it reachable. No collection may
-//! run while a slice that [`Blob::words`] gave is in use: the collector runs at the `gate!` of an op only, and a native never reaches it.
+//! A Blob points to a live cell made by [`Blob::new`], [`Blob::new_bigint`], or [`Blob::zeroed_bytes`]. The owner keeps it reachable.
+//! A byte slice borrows the heap, which prevents collection. A slice from [`Blob::words`] must stay within a region where collection cannot run.
 use crate::cell::{CellHeader, Layout};
 use crate::heap::Heap;
 use crate::value::{Kind, Value};
@@ -32,6 +32,39 @@ impl Blob {
             ptr::copy_nonoverlapping(words.as_ptr(), p.as_ptr().add(WORDS_AT).cast::<u64>(), words.len());
         }
         Some(Blob(p))
+    }
+
+    /// Allocate a byte cell. The blob header counts whole words.
+    pub(crate) fn zeroed_bytes(heap: &mut Heap, len: usize) -> Option<Blob> {
+        let n = len.div_ceil(8);
+        let words = u32::try_from(n).ok()?;
+        let p = heap.alloc_zeroed(WORDS_AT.checked_add(n.checked_mul(8)?)?)?;
+        // SAFETY: the new cell has room for its header.
+        unsafe { p.cast::<CellHeader>().write(CellHeader::blob(words)) };
+        Some(Blob(p))
+    }
+
+    /// # Safety
+    /// This is a live byte cell of heap with at least len bytes.
+    /// Access to its data must be tied to this borrow of heap.
+    pub(crate) unsafe fn bytes<'h>(self, _heap: &'h Heap, len: usize) -> &'h [u8] {
+        // SAFETY: the caller guarantees the cell, bounds and borrow.
+        unsafe { std::slice::from_raw_parts(self.0.as_ptr().add(WORDS_AT), len) }
+    }
+
+    /// # Safety
+    /// Follow the requirements of bytes, with exclusive access to the cell.
+    pub(crate) unsafe fn bytes_mut<'h>(self, _heap: &'h mut Heap, len: usize) -> &'h mut [u8] {
+        // SAFETY: the caller guarantees the cell, bounds and exclusive borrow.
+        unsafe { std::slice::from_raw_parts_mut(self.0.as_ptr().add(WORDS_AT), len) }
+    }
+
+    /// # Safety
+    /// Both byte cells are live in heap and the ranges fit. There
+    /// must be no live reference to either range. The ranges can overlap.
+    pub(crate) unsafe fn copy_bytes(self, _heap: &mut Heap, from: usize, to: Blob, at: usize, len: usize) {
+        // SAFETY: the caller guarantees the cells, ranges and access.
+        unsafe { ptr::copy(self.0.as_ptr().add(WORDS_AT + from), to.0.as_ptr().add(WORDS_AT + at), len) }
     }
 
     /// Store the sign and normalized magnitude of a BigInt.
@@ -70,7 +103,8 @@ impl Blob {
         Value::pointer(Kind::Object, self.0)
     }
 
-    /// The words of the cell. The slice borrows the handle, not the heap: see the type invariant for how long it is good.
+    /// The words of an immutable blob. The owner must keep the cell live for
+    /// the borrow. Mutable byte cells use the heap-borrowing methods.
     #[inline]
     pub fn words(&self) -> &[u64] {
         // SAFETY: by the type invariant the cell is live; its header holds the length and the words follow it (`Blob::new`). The cell

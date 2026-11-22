@@ -365,7 +365,7 @@ impl Realm {
         }
         let tag = self.string("Module");
         let _ = self.define_attrs(o, Key::Name(self.wk[3]), 0, tag);
-        self.prevent_extensions(o);
+        assert!(self.prevent_extensions_internal(o).expect("ordinary module namespace"));
         o.value()
     }
 

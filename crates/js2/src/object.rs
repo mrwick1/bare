@@ -62,11 +62,10 @@ const WORD: usize = 8;
 //    9       512   F_LEN_RO        arrays
 //   10      1024   F_SLOWIDX       arrays
 //   11      2048   F_LAZY          functions (interp_rt.rs)
-//   12-15  15<<12  F_KIND          the kind field: K_MAP .. K_DATE (13 kinds, 0 is none)
-//   16   1<<16     F_HOST          host-filled objects (api_host.rs)
+//   12-16  31<<12  F_KIND          the kind field (0 is none)
 //   17   1<<17     F_LAZYM         lazy host members (api_host.rs)
 //   18   1<<18     F_LAZYTAB       lazy built-in tables (lazy.rs)
-//   19                             free
+//   19   1<<19     F_HOST          host-filled objects (api_host.rs)
 //   20   1<<20     F_ARGS         arguments objects
 //   21-22                          free (2 bits)
 //   23   1<<23     F_PROTO         prototypes that an inline cache depends on (interp_rt.rs)
@@ -103,16 +102,16 @@ pub const F_SLOWIDX: u32 = 1024;
 /// entries. A cache entry that adds a property must not run on it (`SetField`), because that change is a shape change with no bump. Sticky.
 pub const F_PROTO: u32 = 1 << 23;
 /// Object header flag: a host-filled object (`api_host.rs`): its hidden property `\0host` holds the kind and the host key.
-pub const F_HOST: u32 = 1 << 16;
+pub const F_HOST: u32 = 1 << 19;
 /// Object header flag: the host defines members of the object on demand (`Engine::set_lazy`).
 pub const F_LAZYM: u32 = 1 << 17;
 /// Object header flag: the object has a lazy built-in table with entries left (`lazy.rs`).
 pub const F_LAZYTAB: u32 = 1 << 18;
 /// Indexed storage with ordinary property semantics for `length`.
 pub const F_ARGS: u32 = 1 << 20;
-/// Object header bits 12 to 15: the kind of the object, one of the `K_*` numbers below. The kinds exclude each other, and an object of no
+/// Object header bits 12 to 16: the kind of the object, one of the `K_*` numbers below. The kinds exclude each other, and an object of no
 /// kind has 0. Set once, by the constructor of the object; a shape change keeps it. Read it with [`Obj::kind`] or [`Obj::is_kind`].
-pub const F_KIND: u32 = 15 << KIND_SHIFT;
+pub const F_KIND: u32 = 31 << KIND_SHIFT;
 /// The shift of the kind in [`F_KIND`].
 pub const KIND_SHIFT: u32 = 12;
 /// No kind: a plain object, an array, a function.
@@ -144,7 +143,15 @@ pub const K_AGEN: u32 = 11;
 pub const K_REGEXP: u32 = 12;
 /// A `Date` object (`bi_date.rs`): the hidden property `Realm::k_prim` holds the time value.
 pub const K_DATE: u32 = 13;
-pub(crate) const K_PROXY: u32 = 14;
+/// An ArrayBuffer.
+pub const K_BUFFER: u32 = 14;
+/// A numeric typed array.
+pub const K_TYPED: u32 = 15;
+/// A DataView.
+pub const K_DATA_VIEW: u32 = 16;
+/// An iterator of an array or typed array.
+pub const K_ARRAY_ITER: u32 = 17;
+pub(crate) const K_PROXY: u32 = 18;
 /// The largest kind.
 const K_LAST: u32 = K_PROXY;
 const ALL_FLAGS: [u32; 18] = [
