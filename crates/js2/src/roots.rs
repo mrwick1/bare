@@ -3,9 +3,9 @@
 //!
 //! **Trigger.** `heap.rs` counts the bytes of cells that the allocator took since the last collection, on its slow path only. The fast
 //! path of [`Heap::alloc`] has no counter. Two limits (see [`crate::heap::Trigger`]): [`Heap::due`] is the limit of a collection between
-//! tasks, where the host collects with no JS frame (the roots are the globals and the host's roots). [`Heap::try_alloc`] refuses at that
-//! limit plus a slack, and [`alloc_in_task`] then collects with the frames as roots. The slack is 2 times the largest task that the
-//! journeys make, so a task collects inside itself only when it grows by more than the slack past the between-task limit.
+//! tasks, where the host collects with no JS frame (the roots are the globals and the host's roots). [`Heap::try_alloc`] refuses at the
+//! in-task limit, and [`alloc_in_task`] then collects with the frames as roots. The heap adjusts the default in-task limit after each
+//! collection based on retained growth.
 //!
 //! **Root map.** The compiler gives each safepoint of a function (an allocation, a call, a loop back edge) the set of registers that
 //! hold a value that the program can still read. A [`RootMaps`] is that set for one function: a bitmap of the registers for each

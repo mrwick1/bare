@@ -15,8 +15,9 @@
 //! cells on the free list, so the fast path has no counter and no compare. It is an upper bound by at most one block for each class
 //! (the cells of a refilled block that no one took yet). The count has two limits, both in [`Trigger`] terms:
 //! - [`Heap::due`]: the limit of a collection between tasks. The host asks at a safepoint with an empty JS stack.
-//! - [`Heap::try_alloc`] refuses at the task limit, which is the first limit plus [`Trigger::slack`]. The caller collects with the
-//!   roots of its frames (`roots.rs`) and then calls [`Heap::alloc`], which never refuses.
+//! - [`Heap::try_alloc`] refuses at the task limit. The default starts with a small sample and adjusts after each collection.
+//!   A custom trigger uses the between-task limit plus [`Trigger::slack`]. The caller collects with the roots of its frames
+//!   (`roots.rs`) and then calls [`Heap::alloc`], which does not check the limit.
 //!
 //! Address invariant (design 6.1): a [`crate::value::Value`] holds 48 address bits, so a block that the OS maps above that is
 //! given back and the allocation fails.
@@ -38,8 +39,12 @@ const LARGE: u16 = u16::MAX;
 const MARK_WORDS: usize = 64;
 /// The default of [`Trigger::min`]: the floor that the old engine uses (`GC_MIN_BYTES`).
 pub const TRIGGER_MIN: usize = 8 << 20;
-/// The default of [`Trigger::slack`]: 2 times `task_alloc_max` of the daily journeys (4.23 MiB at most, `docs/progress.md`, P0.2).
+/// Default slack for a fixed [`Trigger`].
 pub const TRIGGER_SLACK: usize = 8 << 20;
+/// Leave room for the first block refills before sampling survival.
+const TASK_SAMPLE: usize = 832 << 10;
+const TASK_MIN: usize = 2 << 20;
+const TASK_RETAINED_HEADROOM: usize = 16 << 20;
 const ADDRESS_LIMIT: usize = 1 << 48;
 
 #[repr(C)]
@@ -78,8 +83,7 @@ pub struct Trigger {
     /// A collection is due when the heap (the live bytes of the last collection and the bytes allocated since) passes the larger of this
     /// and 1.75 times the live bytes. This is the rule of the old engine (`Interp::gc_due`), in bytes of growth.
     pub min: usize,
-    /// A task may allocate this much past that limit before the allocation itself collects. With the slack above the largest task
-    /// that the journeys make, only a task that grows by more than the slack ever collects inside the task.
+    /// A task with an explicit trigger may allocate this much past that limit before it collects.
     pub slack: usize,
 }
 
@@ -107,6 +111,7 @@ pub struct Heap {
     limit: usize,
     task_limit: usize,
     trigger: Trigger,
+    adaptive_task: bool,
 }
 
 impl Default for Heap {
@@ -122,8 +127,9 @@ impl Default for Heap {
             marked: 0,
             grown: 0,
             limit: trigger.min,
-            task_limit: trigger.min.saturating_add(trigger.slack),
+            task_limit: TASK_SAMPLE,
             trigger,
+            adaptive_task: true,
         }
     }
 }
@@ -281,11 +287,14 @@ impl Heap {
 
     /// Begin a collection: finish the sweep of the last cycle, so every mark bit is clear.
     pub fn start_mark(&mut self) {
+        let grown = self.grown;
         for c in 0..NCLASS {
             while let Some(b) = self.unswept[c].pop() {
                 self.sweep(b, c);
             }
         }
+        // These cells became available during collection, after the allocation sample ended.
+        self.grown = grown;
     }
 
     /// Mark the cell at `p`. True when it was not marked yet.
@@ -384,16 +393,27 @@ impl Heap {
             live
         });
         // SAFETY: each block of `live` is a large object of this heap.
-        self.marked = marked + live.iter().map(|b| unsafe { (*b.as_ptr()).len }).sum::<usize>();
+        let live_bytes = marked + live.iter().map(|b| unsafe { (*b.as_ptr()).len }).sum::<usize>();
+        let retained_growth = live_bytes.saturating_sub(self.marked);
+        self.marked = live_bytes;
         self.large = live;
         for b in dead {
             self.unmap(b);
         }
-        self.grown = 0;
         self.set_limits();
+        if self.adaptive_task {
+            // A growing live graph needs more headroom to avoid marking it again too soon.
+            // Refills count the free cells of a block, so short intervals can overstate growth.
+            self.task_limit = if self.grown != 0 && retained_growth >= self.grown.div_ceil(6) {
+                TASK_RETAINED_HEADROOM.max(live_bytes.saturating_mul(2))
+            } else {
+                TASK_MIN.saturating_sub(live_bytes).max(live_bytes / 4 * 3)
+            };
+        }
+        self.grown = 0;
     }
 
-    /// Set the limits from the live bytes of the last collection: a collection is due when live + grown passes the larger of
+    /// Set the idle and fixed task limits from the last live bytes. Idle collection is due when live + grown passes the larger of
     /// `trigger.min` and 1.75 times live.
     fn set_limits(&mut self) {
         let live = self.marked;
@@ -413,9 +433,10 @@ impl Heap {
         self.task_limit = limit;
     }
 
-    /// Change the trigger. The limits follow at once.
+    /// Use a fixed trigger. The limits follow at once.
     pub fn set_trigger(&mut self, t: Trigger) {
         self.trigger = t;
+        self.adaptive_task = false;
         self.set_limits();
     }
 
@@ -431,7 +452,7 @@ impl Heap {
         self.grown >= self.limit
     }
 
-    /// True when [`Heap::try_alloc`] refuses: the task has passed the trigger by the slack.
+    /// True when the heap has reached the in-task limit.
     #[inline]
     pub fn task_due(&self) -> bool {
         self.grown >= self.task_limit
@@ -461,3 +482,7 @@ impl Drop for Heap {
 #[cfg(test)]
 #[path = "heap_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "heap_adaptive_trigger_tests.rs"]
+mod adaptive_trigger_tests;
