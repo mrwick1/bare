@@ -633,7 +633,7 @@ pub const CF_GEN: u8 = 4;
 
 /// The code of one function. It holds no pointer to a realm's heap: its atoms are shared atoms, so all realms of a session can use it.
 #[derive(Debug)]
-pub struct Code {
+pub struct Code<A = Str> {
     pub words: Vec<u32>,
     /// The registers of a frame. Registers `0..nparams` hold the arguments at the entry; the others are not written.
     pub nregs: u16,
@@ -641,12 +641,12 @@ pub struct Code {
     /// The numbers that do not fit an immediate.
     pub numbers: Vec<f64>,
     /// The names and the string literals.
-    pub atoms: Vec<Str>,
+    pub atoms: Vec<A>,
     /// The child functions, as numbers of the script.
     pub funcs: Vec<u32>,
     pub recipes: Recipes,
     /// Constant trees for `NewDataLit`.
-    pub(crate) data: Vec<DataLiteral>,
+    pub(crate) data: Vec<DataLiteral<A>>,
     /// The jump tables of `SwitchI` and `SwitchA` (see the module comment for the layout).
     pub tables: Vec<u32>,
     /// The name of each site, as an index of `atoms`. Each site has exactly one instruction.
@@ -671,6 +671,52 @@ pub struct Code {
     pub gen_kind: u8,
     /// The length of the longest save list of the code: the number of registers that its record has room for.
     pub gen_regs: u16,
+}
+
+impl<A: Copy> Code<A> {
+    /// Copy the immutable tables and translate every source atom.
+    pub(crate) fn map_atoms<B>(&self, mut map: impl FnMut(A) -> B) -> Code<B> {
+        Code {
+            words: self.words.clone(),
+            nregs: self.nregs,
+            nparams: self.nparams,
+            numbers: self.numbers.clone(),
+            atoms: self.atoms.iter().copied().map(&mut map).collect(),
+            funcs: self.funcs.clone(),
+            recipes: self.recipes.clone(),
+            data: self.data.iter().map(|d| d.map_atoms(&mut map)).collect(),
+            tables: self.tables.clone(),
+            sites: self.sites.clone(),
+            loops: self.loops.clone(),
+            handlers: self.handlers.clone(),
+            roots: self.roots.clone(),
+            lines: self.lines.clone(),
+            flags: self.flags,
+            fn_name: self.fn_name,
+            fn_len: self.fn_len,
+            strict: self.strict,
+            noctor: self.noctor,
+            gen_kind: self.gen_kind,
+            gen_regs: self.gen_regs,
+        }
+    }
+
+    /// Memory charged to the cache, excluding the string table.
+    pub(crate) fn cache_bytes(&self) -> usize {
+        self.words.capacity() * size_of::<u32>()
+            + self.numbers.capacity() * size_of::<f64>()
+            + self.atoms.capacity() * size_of::<A>()
+            + self.funcs.capacity() * size_of::<u32>()
+            + (self.recipes.ends.capacity() + self.recipes.keys.capacity()) * size_of::<u32>()
+            + self.data.capacity() * size_of::<DataLiteral<A>>()
+            + self.data.iter().map(DataLiteral::bytes).sum::<usize>()
+            + self.tables.capacity() * size_of::<u32>()
+            + self.sites.capacity() * size_of::<u32>()
+            + self.loops.capacity() * size_of::<LoopHeader>()
+            + self.handlers.capacity() * size_of::<Handler>()
+            + self.roots.bytes()
+            + self.lines.capacity() * size_of::<(u32, u32)>()
+    }
 }
 
 /// `Code::gen_kind` of a function that has no suspension.
