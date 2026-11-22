@@ -66,6 +66,9 @@ use crate::lex::{self, Goal, Keyword as K, Kind, Lexer, Punct as P, TemplatePart
 use std::borrow::Cow;
 use std::collections::HashMap;
 
+#[path = "data_scan.rs"]
+pub(crate) mod data_scan;
+
 /// One name of an import or export list: the name, its span, whether it is a string, the local name and its span.
 type ImportItem = (Box<str>, Span, bool, Box<str>, Span);
 
@@ -3071,8 +3074,37 @@ impl<'a> Parser<'a> {
         Ok(inner)
     }
 
+    /// Keep large constant literals as checked spans in the compiler's syntax tree.
+    #[cold]
+    fn parse_data_span(&mut self, start: u32) -> R<Option<ExprId>> {
+        let source = &self.src[start as usize..];
+        if self.peeked.is_some() || source.len() < data_scan::MIN_BYTES as usize {
+            return Ok(None);
+        }
+        // Each child enters an assignment and a unary expression. A negative number
+        // also enters its operand. Leave the full parser to decide any near-limit case.
+        let depth = self.depth_soft.saturating_sub(self.depth + 1) / 2;
+        let Some((len, nodes)) = data_scan::scan_span(source, depth as usize, self.limits.max_list) else {
+            return Ok(None);
+        };
+        let Some(end) = start.checked_add(len) else { return Ok(None) };
+        if nodes > self.limits.max_nodes - self.used {
+            return Ok(None);
+        }
+        self.used += nodes - 1;
+        self.lex.seek(end);
+        self.tok.end = end;
+        self.advance()?;
+        self.mk_expr(ExprKind::Data, start).map(Some)
+    }
+
     fn parse_array(&mut self) -> R<ExprId> {
         let start = self.tok.start;
+        if self.src.len() >= data_scan::BULK_SOURCE_BYTES && self.mode == Mode::Lazy
+            && let Some(e) = self.parse_data_span(start)?
+        {
+            return Ok(e);
+        }
         self.advance()?;
         let base = self.lbegin();
         while !self.is(P::RBracket) {
@@ -3101,6 +3133,11 @@ impl<'a> Parser<'a> {
 
     fn parse_object(&mut self) -> R<ExprId> {
         let start = self.tok.start;
+        if self.src.len() >= data_scan::BULK_SOURCE_BYTES && self.mode == Mode::Lazy
+            && let Some(e) = self.parse_data_span(start)?
+        {
+            return Ok(e);
+        }
         self.advance()?;
         let base = self.lbegin();
         let mut protos = 0u32;
