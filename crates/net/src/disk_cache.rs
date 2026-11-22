@@ -377,17 +377,24 @@ fn remove(dir: &Path, size: &mut File, path: &Path) -> io::Result<()> {
 }
 
 fn count(dir: &Path, size: &mut File) -> io::Result<u64> {
-    let mut bytes = [0; 8];
-    if size.read_exact(&mut bytes).is_ok() && size.metadata()?.len() == 8 {
-        return Ok(u64::from_le_bytes(bytes));
+    let mut bytes = [0; 16];
+    if size.read_exact(&mut bytes).is_ok() && size.metadata()?.len() == 16 {
+        let total = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+        let inverse = u64::from_le_bytes(bytes[8..].try_into().unwrap());
+        if total <= CAP && total == !inverse {
+            return Ok(total);
+        }
     }
     scan(dir).map(|(total, _)| total)
 }
 
 fn save_count(size: &mut File, count: u64) -> io::Result<()> {
     use std::io::{Seek, SeekFrom};
+    let mut bytes = [0; 16];
+    bytes[..8].copy_from_slice(&count.to_le_bytes());
+    bytes[8..].copy_from_slice(&(!count).to_le_bytes());
     size.seek(SeekFrom::Start(0))?;
-    size.write_all(&count.to_le_bytes())
+    size.write_all(&bytes)
 }
 
 fn scan(dir: &Path) -> io::Result<(u64, Vec<(SystemTime, PathBuf, u64)>)> {

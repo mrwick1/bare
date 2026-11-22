@@ -241,6 +241,8 @@ fn evicts_the_least_recently_used_file_before_crossing_the_cap() {
     }
     let disk = Disk::new(dir.0.clone());
     assert!(disk.get("a").is_some());
+    // Damage the count before the write. Eviction must use the actual files.
+    fs::write(dir.0.join(".size"), [0; 16]).unwrap();
     commit(&dir.0, cap, &job("c", &[0; 128])).unwrap();
     assert!(disk.get("a").is_some());
     assert!(disk.get("b").is_none());
