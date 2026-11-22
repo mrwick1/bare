@@ -40,7 +40,7 @@ Measure elapsed time from `open` to the first passing assertion that `document.r
 | Rust-lang.org live | 123.5 [123.2–129.1] | 126.9 [121.1–127.4] | 8 (3 runs) / 8 (3 runs) |
 | Rust Book search live | 311.1 [292.2–315.0] | 304.2 [286.1–318.2] | 20 (3 runs) / 20 (3 runs) |
 
-Stop before opening a PR. On the DEV tape, each OLD gate run took longer than the slowest main run. All six runs reported 30 replies and 1,400,276 bytes. The timing ranges overlapped on the earlier `5540846b` baseline. The final result crosses the stop threshold. The cause is unverified under shared host load. An idle-host rerun was outside this check.
+The agent stopped before it opened a PR. The owner's session opened it: the OLD code path changes only by one `Option` check, and the OLD instruction ranges overlap on all four journeys. On the DEV tape, each OLD gate run took longer than the slowest main run. All six runs reported 30 replies and 1,400,276 bytes. The timing ranges overlapped on the earlier `5540846b` baseline. The final result crosses the stop threshold. The cause is unverified under shared host load. An idle-host rerun was outside this check. Item 7 of [Next work](../next-work.md) (time to ready on an idle machine) covers it.
 
 ## Cost matrix
 
