@@ -443,10 +443,20 @@ fn gen_resume(realm: &mut Realm, stack: &mut Vec<Value>, prog: &Codes, ci: usize
 }
 
 impl Vm {
-    pub fn new(mut prog: Program, shared: Arc<SharedAtoms>) -> Vm {
+    pub fn new(prog: Program, shared: Arc<SharedAtoms>) -> Vm {
+        Self::new_with_flags(prog, shared, true)
+    }
+
+    pub(crate) fn new_compiled(prog: Program, shared: Arc<SharedAtoms>) -> Vm {
+        Self::new_with_flags(prog, shared, false)
+    }
+
+    fn new_with_flags(mut prog: Program, shared: Arc<SharedAtoms>, scan: bool) -> Vm {
         let dctor = [prog.codes.len(), prog.codes.len() + 1];
         prog.codes.extend(default_ctors());
-        scan_flags(&mut prog.codes);
+        if scan {
+            scan_flags(&mut prog.codes);
+        }
         let fbs = prog.codes.iter().map(|_| Feedback::default()).collect();
         let mut realm = Realm::new(shared);
         (realm.prog, realm.dctor) = (Rc::new(prog.codes.into()), dctor);
@@ -2578,6 +2588,7 @@ fn default_ctors() -> [Code; 2] {
     }
     let asm = a.finish().expect("the default constructor assembles");
     let mut derived = Code::new(3, 1);
+    derived.flags = CF_ARGS | CF_LINK;
     derived.words = asm.words;
     derived.roots = RootMaps::new(3);
     derived.roots.add(asm.pcs[0], [0]);
@@ -2590,11 +2601,9 @@ fn default_ctors() -> [Code; 2] {
 pub fn code_flags(c: &Code) -> u8 {
     let (mut pc, mut f) = (0, 0);
     while let Ok((ins, n)) = decode(&c.words, pc) {
-        match ins.op {
-            Op::CreateArgs | Op::CreateRest => f |= CF_ARGS,
-            Op::Lazy if ins.a != 0 => f |= CF_ARGS,
-            Op::CallSuper | Op::CallSuperSpread | Op::GetSuper | Op::GetSuperElem | Op::GetSuperElemRef | Op::SetSuper | Op::SetSuperElem => f |= CF_LINK,
-            _ => {}
+        f |= ins.op.emitted_flags();
+        if ins.op == Op::Lazy && ins.a != 0 {
+            f |= CF_ARGS;
         }
         pc += n;
     }

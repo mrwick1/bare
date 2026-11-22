@@ -15,12 +15,12 @@
 use crate::ast::{ExprKind, StmtKind};
 use crate::atoms::SharedAtoms;
 use crate::string::Chars;
-use crate::bytecode::{CF_ARGS, CF_LINK, Code, Ins, Op};
+use crate::bytecode::{CF_ARGS, CF_GEN, CF_LINK, Code, Ins, Op};
 use crate::codes::Codes;
 use crate::code_cache::{self, Mode, UnitCode};
 use crate::compile::{Child, Compiled, Input, ModInfo, ScriptMode, compile_function, compile_module, compile_script, compile_script_mode};
 use crate::facts::{ARGS, EVAL, Facts, FnFacts, FnId, INNER_EVAL, SUPER};
-use crate::interp::{Exit, LazyCompile, Program, Vm, code_flags};
+use crate::interp::{Exit, LazyCompile, Program, Vm};
 use crate::interp_rt::Realm;
 use crate::parse::{Limits, parse_function, parse_module_lazy, parse_script_lazy};
 use crate::shapes::A_E;
@@ -55,6 +55,9 @@ fn stub(atoms: &SharedAtoms, f: &FnFacts, name: Option<&str>) -> Result<Code, St
         (c.gen_kind, c.noctor) = (crate::bytecode::GK_ASYNC, true);
     } else if f.mode == crate::ast::FuncMode::AsyncGen {
         (c.gen_kind, c.noctor) = (crate::bytecode::GK_ASYNCGEN, true);
+    }
+    if c.gen_kind != 0 {
+        c.flags |= CF_GEN;
     }
     if let Some(n) = name {
         let units: Vec<u16> = n.encode_utf16().collect();
@@ -139,12 +142,6 @@ impl LazyCompile for Lazy {
         l.children(&mut sub)?;
         let mut code = sub.code;
         code.noctor |= codes[ci].noctor;
-        // The flags of the new codes: the children come after their parent, so the last come first (a stub has no `super`).
-        let link = |new: &[Code], c: &Code| c.funcs.iter().any(|&k| k as usize >= base && new[k as usize - base].flags & CF_LINK != 0);
-        for i in (0..new.len()).rev() {
-            new[i].flags = code_flags(&new[i]) | if link(&new, &new[i]) { CF_LINK } else { 0 };
-        }
-        code.flags = code_flags(&code) | if link(&new, &code) { CF_LINK } else { 0 };
         debug_assert!(code.flags & CF_LINK == 0, "a lazy function must not use super");
         debug_assert_eq!(codes.len(), base, "nothing else adds codes during a compile");
         codes.push_all(new);
@@ -168,7 +165,6 @@ impl LazyCompile for Lazy {
         let mut code = stub(&self.atoms, self.units[u].facts.get(id), Some(name))?;
         // A built-in has no construct slot, even when its body is a function declaration in the prelude.
         code.noctor = true;
-        code.flags = code_flags(&code);
         let ci = codes.push_all(vec![code]);
         self.pending.push(Wait { ci, unit: u, child: Some(Child { id, chain: None, self_name: false, name: Some(name.into()), ready: None }) });
         Ok(ci)
@@ -232,11 +228,6 @@ pub(crate) fn compile_unit(src: &str, mode: Mode, limits: Limits, atoms: &Shared
     };
     let (mut codes, mut pending) = (Vec::new(), Vec::new());
     Loader { source: src, facts: &mut facts, atoms, limits, base: 0, codes: &mut codes, lazy: Some(&mut pending), scoped, pre: false }.add(top)?;
-    for i in (0..codes.len()).rev() {
-        let c = &codes[i];
-        let link = c.funcs.iter().any(|&k| codes[k as usize].flags & CF_LINK != 0);
-        codes[i].flags = code_flags(c) | if link { CF_LINK } else { 0 };
-    }
     Ok(UnitCode { codes, facts, pending, info })
 }
 
@@ -296,7 +287,9 @@ impl Loader<'_> {
                     compile_function(&p, fid, ch.id, self.facts, self.atoms, &Input { chain: ch.chain.clone(), self_name: ch.self_name, name: ch.name.clone(), scoped: self.scoped, pre: self.pre }).map_err(|e| format!("compile fn {}: {e:?}", ch.id))?
                 }
             };
-            c.code.funcs[i] = self.add(sub)? as u32;
+            let at = self.add(sub)?;
+            c.code.flags |= self.codes[at - self.base].flags & CF_LINK;
+            c.code.funcs[i] = at as u32;
         }
         Ok(())
     }
@@ -364,7 +357,7 @@ pub fn load_with(host: &str, source: &str) -> Result<Vm, String> {
     if !host.is_empty() {
         prog.codes = compile_after(prog.codes, host, &shared, Limits::default()).map_err(|e| format!("host script: {e}"))?;
     }
-    let mut vm = Vm::new(prog, shared);
+    let mut vm = Vm::new_compiled(prog, shared);
     vm.realm.lazy = Some(Box::new(lazy));
     if !host.is_empty()
         && let Err(e) = vm.run_main(at)

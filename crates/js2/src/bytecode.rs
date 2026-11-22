@@ -399,6 +399,14 @@ impl Op {
         (i < 4).then_some(i)
     }
 
+    pub(crate) fn emitted_flags(self) -> u8 {
+        match self {
+            Op::CreateArgs | Op::CreateRest => CF_ARGS,
+            Op::CallSuper | Op::CallSuperSpread | Op::GetSuper | Op::GetSuperElem | Op::GetSuperElemRef | Op::SetSuper | Op::SetSuperElem => CF_LINK,
+            _ => 0,
+        }
+    }
+
     /// Does control go on to the next instruction? (`Jmp`, `JmpBack`, the returns and the throws do not.)
     pub fn falls_through(self) -> bool {
         !matches!(self, Op::Jmp | Op::JmpBack | Op::Ret | Op::RetUndef | Op::RetGen | Op::RetAsync | Op::Throw | Op::ThrowConst | Op::RetDerived | Op::SwitchI | Op::SwitchA)

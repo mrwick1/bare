@@ -28,7 +28,7 @@
 //! `delete` of a global name. See [`Fc::unsup`] and the progress entry.
 use crate::ast::*;
 use crate::atoms::SharedAtoms;
-use crate::bytecode::{Asm, BcError, Code, GK_ASYNC, GK_ASYNCGEN, GK_GEN, Handler, Ins, Label, NO_NAME, Op, Recipes};
+use crate::bytecode::{Asm, BcError, CF_GEN, Code, GK_ASYNC, GK_ASYNCGEN, GK_GEN, Handler, Ins, Label, NO_NAME, Op, Recipes};
 use crate::data_lit::DataLiteral;
 use crate::facts::{self, Facts, FnId};
 use crate::roots::RootMaps;
@@ -306,9 +306,10 @@ pub(crate) struct Fc<'a> {
     pub live: Vec<u64>,
     pub is_var: Vec<u64>,
     pub overflow: Option<&'static str>,
-    // the position of each safepoint's map in `root_regs`
+    // The position of each safepoint's map in `root_bits`.
     pub root_at: Vec<(usize, usize)>,
-    pub root_regs: Vec<u16>,
+    pub root_bits: Vec<u64>,
+    pub emitted_flags: u8,
     pub lines: Vec<(usize, u32)>,
     pub handlers: Vec<HandlerRec>,
     pub cold: Vec<Cold>,
@@ -394,7 +395,8 @@ impl<'a> Fc<'a> {
             is_var: Vec::new(),
             overflow: None,
             root_at: Vec::new(),
-            root_regs: Vec::new(),
+            root_bits: Vec::new(),
+            emitted_flags: 0,
             lines: Vec::new(),
             handlers: Vec::new(),
             cold: Vec::new(),
@@ -607,15 +609,13 @@ impl<'a> Fc<'a> {
     }
 
     fn after(&mut self, idx: usize, op: Op) {
+        self.emitted_flags |= op.emitted_flags();
         if op.is_safepoint() {
-            self.root_at.push((idx, self.root_regs.len()));
-            for (w, &word) in self.live.iter().enumerate() {
-                let mut word = word;
-                while word != 0 {
-                    let b = word.trailing_zeros();
-                    word &= word - 1;
-                    self.root_regs.push((w as u32 * 64 + b) as u16);
-                }
+            self.root_at.push((idx, self.root_bits.len()));
+            if self.live.is_empty() {
+                self.root_bits.push(0);
+            } else {
+                self.root_bits.extend_from_slice(&self.live);
             }
         }
         if !op.falls_through() {
@@ -915,11 +915,18 @@ impl<'a> Fc<'a> {
         code.noctor = self.noctor;
         code.gen_kind = self.gen_kind;
         code.gen_regs = self.gen_regs;
-        let mut roots = RootMaps::new(nregs as usize);
-        for (k, &(idx, start)) in self.root_at.iter().enumerate() {
-            let end = self.root_at.get(k + 1).map_or(self.root_regs.len(), |n| n.1);
-            roots.add(asm.pcs[idx], self.root_regs[start..end].iter().map(|&r| r as usize));
-        }
+        code.flags = self.emitted_flags | if self.gen_kind != 0 { CF_GEN } else { 0 };
+        let roots = if nregs <= 64 {
+            let pcs = self.root_at.iter().map(|&(idx, _)| asm.pcs[idx]).collect();
+            RootMaps::single_word(nregs as usize, pcs, self.root_bits)
+        } else {
+            let mut roots = RootMaps::with_capacity(nregs as usize, self.root_at.len());
+            for (k, &(idx, start)) in self.root_at.iter().enumerate() {
+                let end = self.root_at.get(k + 1).map_or(self.root_bits.len(), |n| n.1);
+                roots.add_words(asm.pcs[idx], &self.root_bits[start..end]);
+            }
+            roots
+        };
         for h in &self.handlers {
             let (s, e) = (asm.pcs[h.start], asm.pcs[h.end]);
             if s < e {
@@ -1099,3 +1106,7 @@ mod stmt;
 #[cfg(test)]
 #[path = "compile_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "compile_emitted_metadata_tests.rs"]
+mod emitted_metadata_tests;
