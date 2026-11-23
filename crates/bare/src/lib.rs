@@ -299,6 +299,8 @@ mod browser_computed_tests;
 #[cfg(test)]
 mod browser_computed_chain_tests;
 #[cfg(test)]
+mod browser_computed_pseudo_tests;
+#[cfg(test)]
 mod browser_rule_share_tests;
 #[cfg(test)]
 mod browser_style_tests;

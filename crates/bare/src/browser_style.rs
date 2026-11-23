@@ -698,6 +698,8 @@ pub(crate) fn ensure<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
     props.extend(blk::WHOLE);
     // Legacy aliases have their own accessor names and share the canonical property.
     props.extend(["-webkit-user-select", "word-wrap"]);
+    // `content` is a picture property (not listed), but pages read it on `::before` and `::after`.
+    props.push("content");
     let mut nm = String::new();
     // One scope for the 500 functions: a scope for each of them cost more than the functions.
     bare_js_api::enter(it, |s| {

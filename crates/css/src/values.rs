@@ -220,6 +220,7 @@ properties! {
     MaskPositionX => "mask-position-x",
     MaskPositionY => "mask-position-y",
     MaskRepeat => "mask-repeat",
+    Content => "content",
 }
 
 impl Property {
@@ -548,6 +549,9 @@ fn parse_known(name: &str, value: &str, important: bool, side: &mut Side, out: &
     }
     if let Some(ok) = crate::motion::declaration(name, value, important, side, out) {
         return ok;
+    }
+    if name == "content" {
+        return crate::content::declaration(value, important, out);
     }
     let Some(parts) = Parts::read(value, side) else { return false };
     let start = out.len();
@@ -1690,7 +1694,8 @@ fn longhand(property: Property, part: Part) -> Option<Value> {
         BackgroundRepeat | MaskRepeat => one_of(part, &[K::Repeat, K::NoRepeat, K::RepeatX, K::RepeatY]),
         // These are read as text (`grid.rs`), and never come here.
         GridTemplateColumns | GridTemplateRows | GridTemplateAreas | GridAutoColumns | GridAutoRows | GridAutoFlow | GridRowStart | GridRowEnd | GridColumnStart | GridColumnEnd => Option::None,
-        // Read as text (`motion.rs`).
+        // Read as text (`motion.rs`, `content.rs`).
+        Content => Option::None,
         TransitionProperty | TransitionDuration | TransitionDelay | TransitionTimingFunction | AnimationName | AnimationDuration | AnimationDelay | AnimationIterationCount => Option::None,
         RowGap | ColumnGap => match part {
             Part::Keyword(K::Normal) => Some(Value::Keyword(K::Normal)),

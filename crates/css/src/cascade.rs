@@ -519,6 +519,9 @@ pub struct RuleSet {
     shadows: HashMap<u32, Shadowed, BuildHasherDefault<Fnv>>,
     /// The `::part()` rules of the document.
     parts: Vec<u32>,
+    /// The `::before` and `::after` rules of the document, by `selector::BEFORE` and `AFTER`, without their `Simple::Gen`. `None` when the
+    /// sheets have none: an element then pays one test for them.
+    generated: Option<Box<[Index; 2]>>,
     /// The user action state that some selector reads (`selector::USES_*`).
     user: u8,
     /// Where the selectors read each kind of state (`Scopes`).
@@ -819,7 +822,7 @@ impl RuleSet {
     }
 
     pub fn new(viewport: (f32, f32)) -> RuleSet {
-        RuleSet { viewport, entries: Vec::new(), bodies: Vec::new(), sources: Vec::new(), source: 0, decls: RefCell::default(), side: RefCell::default(), layers: vec![Layer { parent: 0 }], layer_by_name: HashMap::new(), customs: RefCell::default(), registered: HashMap::new(), index: Index::default(), shadows: HashMap::default(), parts: Vec::new(), user: 0, scopes: Scopes::default(), reach: std::cell::OnceCell::new(), tested: std::cell::Cell::new(0), styled: std::cell::Cell::new(0), logical: Cell::new(false), motion: Cell::new(false), pending: None, keyframes: std::collections::HashSet::new() }
+        RuleSet { viewport, entries: Vec::new(), bodies: Vec::new(), sources: Vec::new(), source: 0, decls: RefCell::default(), side: RefCell::default(), layers: vec![Layer { parent: 0 }], layer_by_name: HashMap::new(), customs: RefCell::default(), registered: HashMap::new(), index: Index::default(), shadows: HashMap::default(), parts: Vec::new(), generated: None, user: 0, scopes: Scopes::default(), reach: std::cell::OnceCell::new(), tested: std::cell::Cell::new(0), styled: std::cell::Cell::new(0), logical: Cell::new(false), motion: Cell::new(false), pending: None, keyframes: std::collections::HashSet::new() }
     }
 
     /// Which user action state (`:hover`, `:active`, the focus pseudo-classes) some rule reads: the bits `selector::USES_*`.
@@ -1200,15 +1203,32 @@ impl RuleSet {
         }
     }
 
-    fn push(&mut self, selector: Selector, body: u32, layer: u32, origin: Origin, scope: u32) {
+    fn push(&mut self, mut selector: Selector, body: u32, layer: u32, origin: Origin, scope: u32) {
         if selector.compounds.iter().any(|c| c.simples.contains(&Simple::Never)) {
             return;
             // `a:hover` never matches. Keep it out of the index: it only costs time.
+        }
+        let generated = match selector.compounds[0].simples.last() {
+            Some(&Simple::Gen(which)) => Some(which as usize),
+            _ => None,
+        };
+        if generated.is_some() {
+            // Only the rules of the document make boxes for now. A rule of a shadow tree, or one with `::part()`, stays out as before.
+            if scope != 0 || selector.pseudo.is_some() {
+                return;
+            }
+            selector.compounds[0].simples.pop();
         }
         self.user |= crate::selector::user_flags(&selector);
         self.scopes.add(&selector);
         self.reach.take();
         let index = self.entries.len() as u32;
+        if let Some(which) = generated {
+            self.generated.get_or_insert_with(Default::default)[which].push(index, &selector);
+            let ancestors = ancestor_hashes(&selector, false);
+            self.entries.push(Entry { selector, body, layer, origin, ancestors, ctx: OWN });
+            return;
+        }
         // A rule for the host, for a slotted node or for a part is not offered to the elements of its tree: the cascade looks for it where it applies.
         let host = scope != 0 && selector.compounds[0].simples.iter().any(|s| matches!(s, Simple::Host(_)));
         let mut ctx = match (selector.pseudo.as_deref(), host) {
@@ -1356,7 +1376,7 @@ impl RuleSet {
     #[inline(never)]
     fn walk<const WANT: bool, const PENDING: bool, const TRACK: bool>(&self, doc: &Document, want: Option<NodeId>, keep: bool) -> Styles {
         let mut way = Way { want, path: Vec::new(), sorted: Vec::new(), on: false, at: 0 };
-        let mut styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), grids: Vec::new(), customs: var::Sets::default(), spaced: false, wrapping: false, kept: None, partial: false };
+        let mut styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), grids: Vec::new(), customs: var::Sets::default(), spaced: false, wrapping: false, kept: None, partial: false, generated: HashMap::default() };
         // Style 0 is the starting style. It is the parent style of the `html` element.
         let mut cx = Cx { viewport: self.viewport, root_font_size: 16.0, layer_order: self.layer_order(), declared: &self.side, inline: RefCell::default(), computed: RefCell::default(), grids: RefCell::default(), customs: RefCell::new(self.sets()), merges: RefCell::default() };
         let style_atom = doc.find_atom("style");
@@ -1402,6 +1422,11 @@ impl RuleSet {
                     let id = self.style_of::<PENDING>(&mut styles, &mut memo, parent, &matched, (inline, hint.as_deref()), &cx, input);
                     styles.of_node[node.index()] = id;
                     let hidden = styles.styles[id as usize].get(Property::Display) == Value::Keyword(Keyword::None);
+                    if let Some(lists) = self.generated.as_deref()
+                        && !hidden
+                    {
+                        self.style_generated::<PENDING>(lists, doc, node, id, &mut styles, &mut memo, &cx, &filter);
+                    }
                     if hidden {
                         // No style for what is inside, and no filter work. `compute_for` goes on only to the node on the way to `want`.
                         if WANT {
@@ -1565,10 +1590,16 @@ impl RuleSet {
                     break 'roots;
                 }
                 let old = std::mem::replace(&mut styles.of_node[node.index()], id);
-                if old != id {
+                let hidden = styles.styles[id as usize].get(Property::Display) == Value::Keyword(Keyword::None);
+                let boxes = match self.generated.as_deref() {
+                    Some(lists) if !hidden => self.style_generated::<PENDING>(lists, doc, node, id, styles, &mut k.memo, &cx, &filter),
+                    _ => styles.generated.remove(&(node.index() as u32)).is_some(),
+                };
+                if old != id || boxes {
+                    // A new `::before` or `::after` box changes the layout of the element as a new style does.
                     changed.push((node, old));
                 }
-                if styles.styles[id as usize].get(Property::Display) == Value::Keyword(Keyword::None) {
+                if hidden {
                     // Nothing inside has a style now.
                     if old != NONE && styles.styles[old as usize].get(Property::Display) != Value::Keyword(Keyword::None) {
                         Self::unstyle(doc, styles, vec![node]);
@@ -1605,6 +1636,9 @@ impl RuleSet {
     fn unstyle(doc: &Document, styles: &mut Styles, mut nodes: Vec<NodeId>) {
         while let Some(n) = nodes.pop() {
             styles.of_node[n.index()] = NONE;
+            if !styles.generated.is_empty() {
+                styles.generated.remove(&(n.index() as u32));
+            }
             nodes.extend(doc.children(n));
             nodes.extend(doc.shadow_root(n).into_iter().flat_map(|r| doc.children(r)));
             nodes.extend(doc.assigned_nodes(n));
@@ -1890,6 +1924,69 @@ impl RuleSet {
         let lookups = self.index.collect_with::<TRACK>(doc, el, out, &self.entries, filter);
         self.tested.set(self.tested.get() + out.len() as u64 + lookups);
         self.styled.set(self.styled.get() + 1);
+    }
+
+    /// The styles of the `::before` and `::after` boxes of `node`, whose style is `id`, into `styles.generated`. Gives `true` when they
+    /// changed. A pseudo-element inherits from its element, and has no `style` attribute.
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn style_generated<const PENDING: bool>(&self, lists: &[Index; 2], doc: &Document, node: NodeId, id: u32, styles: &mut Styles, memo: &mut Memo, cx: &Cx<'_>, filter: &AncestorFilter) -> bool {
+        let mut matched = Vec::new();
+        let mut pair = [NONE; 2];
+        for (index, slot) in lists.iter().zip(&mut pair) {
+            if !self.match_generated(index, doc, node, filter, &mut matched) {
+                continue;
+            }
+            let s = self.style_of::<PENDING>(styles, memo, id, &matched, (None, None), cx, None);
+            let style = &styles.styles[s as usize];
+            if matches!(style.picture(Property::Content), Value::Number(_)) && style.get(Property::Display) != Value::Keyword(Keyword::None) {
+                *slot = s;
+            }
+        }
+        let key = node.index() as u32;
+        let old = if pair == [NONE; 2] { styles.generated.remove(&key) } else { styles.generated.insert(key, pair) };
+        old.unwrap_or([NONE; 2]) != pair
+    }
+
+    /// The rules of `index` (a list of `generated`) that match `node`, sorted, in `out`. Gives `false` when none does.
+    fn match_generated(&self, index: &Index, doc: &Document, node: NodeId, filter: &AncestorFilter, out: &mut Vec<u32>) -> bool {
+        let mut candidates = Vec::new();
+        index.collect(doc, node, &mut candidates, &self.entries, filter);
+        out.clear();
+        for i in candidates {
+            let e = &self.entries[i as usize];
+            if e.ancestors.iter().take_while(|&&h| h != 0).all(|&h| filter.may_contain(h)) && matches(doc, node, &e.selector) {
+                out.push(i);
+            }
+        }
+        out.sort_unstable();
+        !out.is_empty()
+    }
+
+    /// The style of the `::before` (`selector::BEFORE`) or `::after` (`AFTER`) of `el`, from `styles` of `compute_kept` (or `restyle`) of this
+    /// `doc`, also when it makes no box: what `getComputedStyle(el, '::before')` reads. A new style goes at the end of the list and no node
+    /// points to it, as in `style_hidden`. `None` when no rule matches it, `el` has no style in `styles`, or the styles keep no cache.
+    pub fn style_pseudo(&self, doc: &Document, styles: &mut Styles, el: NodeId, which: u8) -> Option<ComputedStyle> {
+        let index = self.generated.as_deref()?.get(which as usize)?;
+        let parent = *styles.of_node.get(el.index())?;
+        if parent == NONE {
+            return None;
+        }
+        let mut filter = AncestorFilter::new(self.tracks());
+        let mut up = doc.style_parent(el);
+        while let Some(a) = up.filter(|&a| a != doc.root()) {
+            filter.add_element(doc, a);
+            up = doc.style_parent(a);
+        }
+        let mut matched = Vec::new();
+        if !self.match_generated(index, doc, el, &filter, &mut matched) {
+            return None;
+        }
+        let mut k = styles.kept.take()?;
+        let cx = self.kept_cx(styles, &mut k);
+        let id = if self.pending.is_some() { self.style_of::<true>(styles, &mut k.memo, parent, &matched, (None, None), &cx, None) } else { self.style_of::<false>(styles, &mut k.memo, parent, &matched, (None, None), &cx, None) };
+        Self::put_back(cx, styles, k);
+        Some(styles.styles[id as usize].clone())
     }
 
     /// The number of the style of an element. It is found in the cache, or it is made.
@@ -2529,6 +2626,9 @@ pub struct Styles {
     kept: Option<Box<StyleKeep>>,
     /// Made by `RuleSet::style_chain`: only the elements that were asked for, and their ancestors, have a style. Layout needs the styles of a whole page.
     partial: bool,
+    /// The styles of the `::before` and `::after` boxes, by `NodeId::index` of the element: `[before, after]`, `NONE` for no box. Only an
+    /// element with a box is here (`RuleSet::style_generated`).
+    generated: HashMap<u32, [u32; 2], BuildHasherDefault<Fnv>>,
 }
 
 /// What `RuleSet::restyle` needs from the cascade that made the styles: the style cache and the indexes of the value lists, so
@@ -2562,7 +2662,7 @@ impl StyleChain {
     /// No element has a style yet. It is the size of `doc`: the document must not change while the chain is used.
     pub fn new(rules: &RuleSet, doc: &Document) -> StyleChain {
         let kept = StyleKeep { memo: Memo::default(), calcs: HashMap::default(), grids: grid::Kept::default(), rem: 16.0, base: 1 };
-        let styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), grids: Vec::new(), customs: rules.sets(), spaced: false, wrapping: false, kept: Some(Box::new(kept)), partial: true };
+        let styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), grids: Vec::new(), customs: rules.sets(), spaced: false, wrapping: false, kept: Some(Box::new(kept)), partial: true, generated: HashMap::default() };
         StyleChain {
             styles: Rc::new(styles),
             filter: AncestorFilter::new(rules.tracks()),
@@ -2605,6 +2705,16 @@ impl StyleMap {
 }
 
 impl Styles {
+    /// The style of the `::before` (`selector::BEFORE`) or `::after` (`AFTER`) box of `el`. `None` when it makes no box: no rule, a
+    /// `content` of `normal` or `none`, or `display: none`.
+    pub fn generated(&self, el: NodeId, which: u8) -> Option<&ComputedStyle> {
+        if self.generated.is_empty() {
+            return None;
+        }
+        let &s = self.generated.get(&(el.index() as u32))?.get(which as usize)?;
+        (s != NONE).then(|| &self.styles[s as usize])
+    }
+
     /// Copy the styles (`StyleMap`).
     pub fn map(&self) -> StyleMap {
         StyleMap { styles: self.styles.clone(), of_node: self.of_node.clone(), calcs: self.calcs.clone(), grids: self.grids.clone() }
@@ -3048,6 +3158,7 @@ fn initial(p: Property) -> Value {
         TextColor => Value::Color(Color::BLACK),
         BackgroundColor => Value::Color(Color::TRANSPARENT),
         BackgroundImage | MaskImage => Value::Keyword(K::None),
+        Content => Value::Keyword(K::Normal),
         BackgroundSizeX | BackgroundSizeY | MaskSizeX | MaskSizeY => Value::Keyword(K::Auto),
         BackgroundPositionX | BackgroundPositionY | MaskPositionX | MaskPositionY => Value::Length(Length::Percent(0.0)),
         BackgroundRepeat | MaskRepeat => Value::Keyword(K::Repeat),
@@ -3581,6 +3692,9 @@ fn walk(doc: &Document, shadows: bool, mut f: impl FnMut(NodeId)) {
 
 #[cfg(test)]
 mod index_tests;
+
+#[cfg(test)]
+mod generated_tests;
 
 #[cfg(test)]
 mod tests {
