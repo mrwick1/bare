@@ -294,6 +294,7 @@ def metrics(events):
         "sessions": sorted({e.get("session") for e in calls if e.get("session")}),
         "request_bytes": sum(e.get("bytes", 0) for e in reqs),
         "response_bytes": sum(e.get("bytes", 0) for e in resps),
+        "response_chars": sum(e["text_chars"] for e in resps if isinstance(e.get("text_chars"), int) and not isinstance(e.get("text_chars"), bool)),
         "elapsed_s": round(max(ts) - min(ts), 6) if ts else None,
     }
 
