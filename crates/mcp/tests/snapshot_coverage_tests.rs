@@ -92,8 +92,8 @@ fn missing(truth: &str, out: &str) -> Vec<String> {
     m
 }
 
-/// Hidden text that bare still shows (a coverage bug, not fixed here). Remove a word when bare stops showing it.
-const KNOWN_LEAKS: &[&str] = &["HIDDENVISIBILITY"];
+/// Hidden text that bare still shows. Remove a word when bare stops showing it.
+const KNOWN_LEAKS: &[&str] = &[];
 
 #[test]
 fn snapshot_all_keeps_the_text_chrome_shows() {

@@ -225,6 +225,35 @@ fn holds_control(cx: &Cx, n: NodeId) -> bool {
     false
 }
 
+fn vis_hidden(cx: &Cx, n: NodeId) -> bool {
+    matches!(cx.styles.style(n).map(|s| s.get(Property::Visibility)), Some(Css::Keyword(Keyword::Hidden | Keyword::Collapse)))
+}
+
+/// The most options that a select line lists: a country list has about 250, and `act select` takes any label.
+const OPTIONS: usize = 25;
+
+/// The option labels of a `<select>` (also those in an `<optgroup>`), as one flag: `options: "a" | "b"`. `act select` takes a label.
+/// The options have no box, so the walk does not show them.
+fn select_options(cx: &Cx, n: NodeId, f: &mut Vec<String>) {
+    let mut labels = Vec::new();
+    let mut count = 0;
+    for c in cx.doc.children(n) {
+        let group: Vec<NodeId> = if cx.tag(c) == "optgroup" { cx.doc.children(c).collect() } else { vec![c] };
+        for o in group.into_iter().filter(|&o| cx.tag(o) == "option") {
+            count += 1;
+            if labels.len() < OPTIONS {
+                let l = cx.attr(o, "label").map(norm).filter(|l| !l.is_empty()).unwrap_or_else(|| norm(&cx.text(o)));
+                labels.push(format!("{:?}", short(&l, 80)));
+            }
+        }
+    }
+    if labels.is_empty() {
+        return;
+    }
+    let more = if count > labels.len() { format!(" | … {} more", count - labels.len()) } else { String::new() };
+    f.push(format!("options: {}{more}", labels.join(" | ")));
+}
+
 fn pointer(cx: &Cx, n: NodeId) -> bool {
     cx.styles.style(n).is_some_and(|s| matches!(s.get(Property::Cursor), Css::Keyword(Keyword::Pointer)))
 }
@@ -295,7 +324,8 @@ fn walk(cx: &Cx, root: NodeId, mode: Mode, clicks: &HashSet<NodeId>, out: &mut V
         }
         match cx.doc.data(n) {
             NodeData::Text(span) => {
-                if mode == Mode::All {
+                // `visibility: hidden` inherits, and a child may set `visible` again: the parent's style says if the text shows.
+                if mode == Mode::All && !cx.doc.flat_parent(n).is_some_and(|p| vis_hidden(cx, p)) {
                     text.push_str(cx.doc.text(*span));
                     text.push(' ');
                 }
@@ -313,7 +343,7 @@ fn walk(cx: &Cx, root: NodeId, mode: Mode, clicks: &HashSet<NodeId>, out: &mut V
                 continue;
             }
         }
-        let shown = el && !matches!(cx.styles.style(n).map(|s| s.get(Property::Visibility)), Some(Css::Keyword(Keyword::Hidden | Keyword::Collapse)));
+        let shown = el && !vis_hidden(cx, n);
         let role = if shown { role_of(cx, n, clicks) } else { None };
         let keep = role.is_some_and(|r| CONTROLS.contains(&r) || MARKS.contains(&r) || (mode == Mode::All && !matches!(r, "list" | "generic")));
         let block = el && !inline(cx, n);
@@ -339,7 +369,11 @@ fn walk(cx: &Cx, root: NodeId, mode: Mode, clicks: &HashSet<NodeId>, out: &mut V
             let skip = matches!(r, "paragraph" | "listitem" | "row" | "group" | "article") && name.is_empty();
             if !skip {
                 // `links` has the href of each link: a line shows it only when the name cannot tell the link apart.
-                out.push(Item::El(Line { depth, node: n, role: r, name: short(&name, 200), flags: flags(cx, n, r, name.is_empty()), cells: Vec::new() }));
+                let mut f = flags(cx, n, r, name.is_empty());
+                if cx.tag(n) == "select" {
+                    select_options(cx, n, &mut f);
+                }
+                out.push(Item::El(Line { depth, node: n, role: r, name: short(&name, 200), flags: f, cells: Vec::new() }));
                 inner = depth + 1;
             }
             // A heading that holds a link (an issue title on GitHub) shows the link: the agent clicks it or takes its URL.

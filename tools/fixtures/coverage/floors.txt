@@ -1,4 +1,4 @@
-form 0.94
+form 1.00
 hidden 1.00
 iframe 1.00
 list 1.00
