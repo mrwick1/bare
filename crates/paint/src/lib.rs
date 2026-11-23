@@ -13,6 +13,8 @@ pub mod canvas;
 pub mod display;
 pub mod glyphs;
 pub mod hit;
+#[cfg(test)]
+mod hit_generated_tests;
 pub mod layer;
 pub mod png;
 pub mod svg;
@@ -140,6 +142,7 @@ impl Painter {
                 Item::Poly { at: from, n, color } => canvas.fill_poly_at(&list.points[from as usize..(from + n) as usize], off, color, clip),
                 Item::Image { r, at: k } => canvas.draw_image(at(r), clip, &list.images[k as usize]),
                 Item::Layer { r, at: k } => canvas.draw_layer(at(r), clip, off, &list.layers[k as usize], scaled),
+                Item::Backdrop { r, sigma } => canvas.blur(at(r).intersect(clip), sigma),
                 Item::PushLayer { r, alpha } => {
                     let r = at(r).intersect(clip).intersect(bounds);
                     layers.push((r, alpha, saved.len()));

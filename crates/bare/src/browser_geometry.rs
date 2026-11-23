@@ -296,6 +296,10 @@ impl<E: Eng> Dom<E> {
     pub(crate) fn layout_at(&self, it: &mut E::Vm, styles: &Styles, vp: (f32, f32), keep: Option<(Option<bare_layout::keep::Kept>, Option<&[bool]>)>) -> R<E, bare_layout::fragment::Layout> {
         let l = self.geometry.lim.get();
         let t0 = crate::force::start();
+        // The `::before` and `::after` nodes of `styles` (no change record: scripts do not see them).
+        if let Ok(mut doc) = self.doc.try_borrow_mut() {
+            bare_css::generated::sync(&mut doc, styles);
+        }
         let doc = self.doc.borrow();
         it.charge_o(doc.len() as u64)?;
         let incremental = keep.is_some();

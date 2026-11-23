@@ -115,7 +115,10 @@ fn hit(doc: &Document, styles: &Styles, layout: &Layout, scrolled: Option<(&Area
     let mut painted = Vec::with_capacity(8);
     h.context(0, 0, page, true, &mut painted, &mut Vec::new());
     let mut top_first: Vec<NodeId> = Vec::with_capacity(painted.len() + 1);
+    let pseudo = doc.has_pseudo();
     for &n in painted.iter().rev() {
+        // A `::before` or `::after` box hits its element, as in Chrome.
+        let n = if pseudo { doc.pseudo_host(n).map_or(n, |h| h.0) } else { n };
         if !top_first.contains(&n) {
             top_first.push(n);
         }
@@ -423,7 +426,8 @@ pub fn element_of(doc: &Document, n: NodeId) -> Option<NodeId> {
     let mut cur = Some(n);
     while let Some(c) = cur {
         if matches!(doc.data(c), NodeData::Element { .. }) {
-            return Some(c);
+            // The element of a `::before` or `::after` node is the element that owns it.
+            return Some(doc.pseudo_host(c).map_or(c, |h| h.0));
         }
         cur = doc.parent(c);
     }

@@ -191,6 +191,12 @@ impl<'a> Tree<'a> {
         Children { tree: self, next: self.doc.flat_children(block).next(), has_blocks }
     }
 
+    /// Does `node` have `scrollbar-width: none`? Its scroll container scrolls with no bar, and the bar takes no room.
+    pub fn no_bars(&self, node: NodeId) -> bool {
+        let s = self.style(node);
+        s.picture_set() != 0 && s.picture(Property::ScrollbarWidth) == Value::Keyword(Keyword::None)
+    }
+
     /// The `overflow-x` and `overflow-y` of a block, as layout uses them. The root element gives its values to the window,
     /// and so does the first `body` if the root has `visible` (CSS Overflow 3, 3.3). Those two are then `visible`
     /// themselves: `body { overflow: hidden }` stops the page from scrolling, and the body is not a scroll container.
