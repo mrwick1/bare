@@ -34,7 +34,9 @@ pub(crate) fn kind(e: &(dyn Error + 'static)) -> &'static str {
         io::ErrorKind::InvalidData => "protocol",
         _ => "io",
     };
-    if text.contains("too big") {
+    if e.is::<crate::blocklist::Blocked>() {
+        "blocked"
+    } else if text.contains("too big") {
         "body cap"
     } else if text.contains("GOAWAY") {
         "h2 goaway"

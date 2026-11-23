@@ -846,6 +846,9 @@ impl Client {
     }
 
     fn start(&mut self, url: &Url, plan: &Plan, conditions: &str) -> Result<(Response, Body, bool), Error> {
+        if crate::blocklist::blocked(&url.host) {
+            return Err(Box::new(crate::blocklist::Blocked));
+        }
         let begun = (bare_observe::process::tracing() && bare_observe::process::accepts("network")).then(Instant::now);
         let mut retried = false;
         let with_cookies;

@@ -1,5 +1,6 @@
 //! Networking: turn a URL into the bytes of a page.
 
+pub mod blocklist;
 pub mod cause;
 pub mod cookie;
 pub mod dns;
