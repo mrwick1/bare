@@ -367,12 +367,8 @@ pub struct Declared {
 /// A `calc()` that mixes units goes in `side.calcs`, and a value with `var()` goes in `side.deferred`: the value points to them.
 /// `name` must be in lowercase (the parser does it). A value with `env()` is read again with each `env()` replaced (`var::substitute_env`);
 /// this runs only after the value was not good, so a good declaration never pays for it.
-pub fn parse_declaration(name: &str, value: &str, important: bool, side: &mut Side, out: &mut Vec<Declared>) -> bool {
-    parse_prefixed(name, value, important, side, out)
-        || (var::has_env(value) && var::substitute_env(value).is_some_and(|text| parse_prefixed(name, &text, important, side, out)))
-}
-
-fn parse_prefixed(mut name: &str, value: &str, important: bool, side: &mut Side, out: &mut Vec<Declared>) -> bool {
+pub fn parse_declaration(mut name: &str, value: &str, important: bool, side: &mut Side, out: &mut Vec<Declared>) -> bool {
+    let written = name;
     // `-webkit-mask-image` is `mask-image`: the same property with the prefix taken off. The second round runs only after a name or a value
     // was not good, so a good declaration never pays for it. (One call of `parse_known`, so that it is inlined once.)
     loop {
@@ -381,9 +377,16 @@ fn parse_prefixed(mut name: &str, value: &str, important: bool, side: &mut Side,
         }
         match name.strip_prefix("-webkit-") {
             Some(n) if n.starts_with("mask") || n == "user-select" => name = n,
-            _ => return false,
+            _ => return with_env(written, value, important, side, out),
         }
     }
+}
+
+/// `parse_declaration` again, with each `env()` of the value replaced. The text it reads has no `env()`, so it calls this once at most.
+#[cold]
+#[inline(never)]
+fn with_env(name: &str, value: &str, important: bool, side: &mut Side, out: &mut Vec<Declared>) -> bool {
+    var::has_env(value) && var::substitute_env(value).is_some_and(|text| parse_declaration(name, &text, important, side, out))
 }
 
 /// `transform` and `translate`: the move of the box, as `TranslateX` and `TranslateY`. `Some(false)`: the value is not good.

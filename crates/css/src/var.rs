@@ -50,7 +50,8 @@ pub fn has_env(text: &str) -> bool {
     find_fn(text.as_bytes(), 0, b"env(").is_some()
 }
 
-/// The place of the next `func` (`var(` or `env(`) from `from`, outside of strings and comments.
+/// The place of the next `func` (`var(` or `env(`) from `from`, outside of strings and comments. Inlined: `func` stays a constant.
+#[inline(always)]
 fn find_fn(b: &[u8], from: usize, func: &[u8; 4]) -> Option<usize> {
     let mut i = from;
     while i < b.len() {
