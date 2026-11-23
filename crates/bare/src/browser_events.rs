@@ -98,8 +98,10 @@ impl<E: Eng> Dom<E> {
             e.ty.clone()
         };
         let prev = crate::browser_gaps::swap_event(self, Some(ev));
+        self.st.borrow_mut().hd.running.push(ev);
         let r = self.dispatch_inner(it, target, ev, &ty);
         let mut st = self.st.borrow_mut();
+        st.hd.running.pop();
         st.hd.event = prev;
         let e = st.events.get_mut(&ev).expect("event is registered");
         let not_canceled = !e.canceled;
