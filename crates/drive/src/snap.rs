@@ -166,6 +166,14 @@ struct Line {
     name: String,
     /// Attribute states, filled in the walk.
     flags: Vec<String>,
+    /// A table row of plain cells: the parts of each cell. Empty for other lines.
+    cells: Vec<Vec<Part>>,
+}
+
+/// A part of a cell: its text, or an element that has its own line (the cell shows its ref).
+enum Part {
+    Text(String),
+    El(NodeId),
 }
 
 enum Item {
@@ -327,10 +335,11 @@ fn walk(cx: &Cx, root: NodeId, mode: Mode, clicks: &HashSet<NodeId>, out: &mut V
                 name = short(&norm(&cx.text(n)), 200);
             }
             // A plain block with no name is noise: its text follows as text lines.
-            let skip = matches!(r, "paragraph" | "listitem" | "cell" | "row" | "group" | "article") && name.is_empty();
+            // An empty cell stays: a row line shows it, so the cells keep their columns.
+            let skip = matches!(r, "paragraph" | "listitem" | "row" | "group" | "article") && name.is_empty();
             if !skip {
                 // `links` has the href of each link: a line shows it only when the name cannot tell the link apart.
-                out.push(Item::El(Line { depth, node: n, role: r, name: short(&name, 200), flags: flags(cx, n, r, name.is_empty()) }));
+                out.push(Item::El(Line { depth, node: n, role: r, name: short(&name, 200), flags: flags(cx, n, r, name.is_empty()), cells: Vec::new() }));
                 inner = depth + 1;
             }
             // A heading that holds a link (an issue title on GitHub) shows the link: the agent clicks it or takes its URL.
@@ -352,19 +361,23 @@ fn walk(cx: &Cx, root: NodeId, mode: Mode, clicks: &HashSet<NodeId>, out: &mut V
         }
     }
     flush(&mut text, 0, out);
+    rows(out);
     // A custom control that holds other lines says what it holds in them: its own copy of their text only costs tokens.
     for i in 0..out.len().saturating_sub(1) {
         let d = match &out[i + 1] {
             Item::El(l) => l.depth,
             Item::Text(d, _) => *d,
         };
-        let inner = match &out[i + 1] {
-            Item::El(l) => l.name.clone(),
-            Item::Text(..) => String::new(),
+        let (inner, text) = match &out[i + 1] {
+            Item::El(l) => (l.name.clone(), None),
+            Item::Text(_, t) => (String::new(), Some(t.clone())),
         };
+        // A row or a cell takes its name from its text: the lines below it say that text. A name of `aria-label` stays. A cell that
+        // holds only its text keeps the name, and the text line goes (below).
+        let from_text = |l: &Line| matches!(l.role, "row" | "cell" | "columnheader" | "rowheader") && cx.attr(l.node, "aria-label").is_none() && cx.attr(l.node, "aria-labelledby").is_none() && text.as_ref() != Some(&l.name);
         if let Item::El(l) = &mut out[i]
             && d > l.depth
-            && (l.role == "clickable" || (l.role == "heading" && l.name == inner))
+            && (l.role == "clickable" || (l.role == "heading" && l.name == inner) || from_text(l))
         {
             l.name.clear();
         }
@@ -378,6 +391,66 @@ fn walk(cx: &Cx, root: NodeId, mode: Mode, clicks: &HashSet<NodeId>, out: &mut V
         let Item::Text(_, t) = it else { return true };
         ![k.wrapping_sub(1), k + 1].iter().any(|&j| names.get(j).and_then(|n| n.as_deref()) == Some(t.as_str()))
     });
+}
+
+/// Make each table row of plain cells one line: `row: "1" | [e3] | "$3.99"`. A cell shows its text and the refs of the elements in it;
+/// those elements follow on their own lines, one level up. The row and column relation stays, and the text of a cell is said once. A
+/// row that holds another row (a layout table) keeps its lines.
+fn rows(out: &mut Vec<Item>) {
+    let depth = |it: &Item| match it {
+        Item::El(l) => l.depth,
+        Item::Text(d, _) => *d,
+    };
+    let mut items = std::mem::take(out).into_iter().peekable();
+    while let Some(mut it) = items.next() {
+        let Item::El(row) = &mut it else {
+            out.push(it);
+            continue;
+        };
+        if row.role != "row" {
+            out.push(it);
+            continue;
+        }
+        let d = row.depth;
+        let mut sub = Vec::new();
+        while let Some(x) = items.next_if(|x| depth(x) > d) {
+            sub.push(x);
+        }
+        let cell = |x: &Item| matches!(x, Item::El(l) if l.depth == d + 1 && matches!(l.role, "cell" | "columnheader" | "rowheader"));
+        let plain = sub.first().is_some_and(cell) && sub.iter().all(|x| depth(x) > d + 1 || cell(x)) && !sub.iter().any(|x| matches!(x, Item::El(l) if l.role == "row"));
+        if !plain {
+            out.push(it);
+            out.extend(sub);
+            continue;
+        }
+        row.name.clear();
+        let (mut kept, mut fresh) = (Vec::new(), false);
+        for x in sub {
+            match x {
+                // The name of a cell stands for it until its first part: a cell with no line below it (a name of `aria-label`) shows its name.
+                Item::El(c) if c.depth == d + 1 => {
+                    row.cells.push(if c.name.is_empty() { Vec::new() } else { vec![Part::Text(c.name)] });
+                    fresh = true;
+                }
+                x => {
+                    let Some(parts) = row.cells.last_mut() else { continue };
+                    if std::mem::take(&mut fresh) {
+                        parts.clear();
+                    }
+                    match x {
+                        Item::Text(_, t) => parts.push(Part::Text(t)),
+                        Item::El(mut l) => {
+                            parts.push(Part::El(l.node));
+                            l.depth -= 1;
+                            kept.push(Item::El(l));
+                        }
+                    }
+                }
+            }
+        }
+        out.push(it);
+        out.extend(kept);
+    }
 }
 
 /// Settle the page before a read: the document loaded, and the tasks that are due now run. It returns as soon as the page is quiet: no
@@ -534,6 +607,15 @@ fn format(p: &mut Page, refs: &mut Refs, items: Vec<Item>, seen: Option<&Seen>) 
                 }
                 let mut s = String::with_capacity(48);
                 let _ = write!(s, "[e{r}] {}", l.role);
+                for (k, parts) in l.cells.iter().enumerate() {
+                    s.push_str(if k == 0 { ":" } else { " |" });
+                    for part in parts {
+                        let _ = match part {
+                            Part::Text(t) => write!(s, " {t:?}"),
+                            Part::El(n) => write!(s, " [e{}]", refs.mint(p, *n)),
+                        };
+                    }
+                }
                 if !l.name.is_empty() {
                     let _ = write!(s, " {:?}", l.name);
                 }
@@ -782,7 +864,7 @@ pub fn find(p: &mut Page, refs: &mut Refs, loc: &crate::locate::Locator, scope: 
                 n if n.is_empty() => norm(&cx.text(h.node)),
                 n => n,
             };
-            items.push(Item::El(Line { depth: 0, node: h.node, role, name: short(&name, 200), flags: flags(&cx, h.node, role, true) }));
+            items.push(Item::El(Line { depth: 0, node: h.node, role, name: short(&name, 200), flags: flags(&cx, h.node, role, true), cells: Vec::new() }));
         }
     });
     let n = items.len();
