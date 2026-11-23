@@ -16,6 +16,8 @@ pub mod rule_cache;
 mod scan;
 pub mod selector;
 #[cfg(test)]
+mod env_tests;
+#[cfg(test)]
 mod shadow_tests;
 pub mod tokenizer;
 pub mod transform;
