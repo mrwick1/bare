@@ -794,7 +794,7 @@ impl Client {
         {
             return Ok(Dialed::H2(conn.clone()));
         }
-        Ok(match open(url, &self.roots, proxy, rec)? {
+        Ok(match open(url, &self.roots, proxy, rec, false)? {
             Stream::Tls(tls) if tls.alpn_h2() => {
                 let conn = h2::Conn::start(*tls)?;
                 let mut sessions = self.sessions.lock().unwrap();
@@ -976,6 +976,24 @@ impl Client {
         }
     }
 
+    /// The opening handshake of a WebSocket (`ws.rs`): a GET on a new HTTP/1.1 connection, with the cookies of the jar and the identity of
+    /// this client. Gives the connection, the reply (no body) and the bytes that came after its head. A replay tape has no WebSocket.
+    pub(crate) fn upgrade(&self, url: &Url, headers: &[(&str, &str)]) -> Result<(Stream, Response, Vec<u8>), Error> {
+        if self.tape.as_ref().is_some_and(|t| t.reads()) {
+            return Err("replay: a WebSocket is not on the tape".into());
+        }
+        let proxy = proxy_config()?.filter(|_| !loopback(&url.host));
+        if proxy.is_some() && url.scheme == Scheme::Http {
+            return Err("a ws:// connection through an HTTP proxy is not supported".into());
+        }
+        let plan = Plan { cookies: Cookies::default(), method: Method::Get, headers: Cow::Borrowed(headers), body: &[], ident: self.identity.clone() };
+        let cookie = self.cookie_line(url, &plan).map(|line| format!("Cookie: {line}\r\n")).unwrap_or_default();
+        let mut stream = open(url, &self.roots, proxy, &mut None, true)?;
+        let (head, rest) = send(&mut stream, url, &plan, &cookie)?;
+        self.store_cookies(url, &plan, &head.response);
+        Ok((stream, head.response, rest))
+    }
+
     /// One try. A try that fails leaves a record with its cause (only when tracing is on): no body exists to carry it.
     fn attempt(&mut self, url: &Url, plan: &Plan, conditions: &str) -> Result<(Response, Body), Error> {
         let mut rec = trace::begin(|| format!("{}://{}:{}{}", url.scheme, url.host, url.port, url.path));
@@ -1127,7 +1145,8 @@ pub struct Streamed {
 /// Open a new connection to the server of this URL. The only place that makes a `Stream`.
 /// `https`: TCP, then a TLS 1.3 handshake with the host name checked against `roots` (loaded from the OS on first use).
 /// The handshake runs under the read and write time limits that `tcp::connect` sets.
-fn open(url: &Url, roots: &OnceLock<Result<(TrustStore, bool), String>>, proxy: Option<&'static Proxy>, rec: &mut Option<Box<trace::Rec>>) -> Result<Stream, Error> {
+/// `h1`: offer only HTTP/1.1 in ALPN (a WebSocket, `ws.rs`).
+fn open(url: &Url, roots: &OnceLock<Result<(TrustStore, bool), String>>, proxy: Option<&'static Proxy>, rec: &mut Option<Box<trace::Rec>>, h1: bool) -> Result<Stream, Error> {
     let dns_observe = bare_observe::process::span("network", "dns");
     let mut clock = trace::Clock::new();
     let (host, port) = proxy.map_or((url.host.as_str(), url.port), |p| (p.host.as_str(), p.port));
@@ -1154,7 +1173,7 @@ fn open(url: &Url, roots: &OnceLock<Result<(TrustStore, bool), String>>, proxy: 
     let (roots, from_os) = roots.get_or_init(|| trust_store::load_system().map(|r| (r.0, true)).map_err(|e| e.to_string())).as_ref().map_err(|e| e.clone())?;
     // OS roots: a root that the OS has not downloaded yet is fetched on a `NoIssuer` (see `client::connect_os`). Private roots: never.
     let _tls_observe = bare_observe::process::span("network", "tls");
-    let tls = match (*from_os, h1_only()) {
+    let tls = match (*from_os, h1 || h1_only()) {
         (true, h1) => client::connect_os(tcp, &url.host, roots, !h1)?,
         (false, true) => client::connect(tcp, &url.host, roots)?,
         (false, false) => client::connect_h2(tcp, &url.host, roots)?,
@@ -1166,7 +1185,7 @@ fn open(url: &Url, roots: &OnceLock<Result<(TrustStore, bool), String>>, proxy: 
 }
 
 /// A single immutable HTTP proxy. Do not derive Debug: credentials must not reach diagnostics.
-struct Proxy {
+pub(crate) struct Proxy {
     host: String,
     port: u16,
     auth: String,
@@ -1239,7 +1258,7 @@ impl Proxy {
     }
 }
 
-fn proxy_base64(input: &[u8]) -> String {
+pub(crate) fn proxy_base64(input: &[u8]) -> String {
     const DIGITS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     for c in input.chunks(3) {
@@ -1875,7 +1894,7 @@ impl Drop for Live {
 }
 
 /// A connection. In tests it can also be some bytes in memory: a reply that stops, or a reply that ends.
-enum Stream {
+pub(crate) enum Stream {
     Tcp(TcpStream),
     ProxyTcp(Box<(TcpStream, &'static Proxy)>),
     /// TCP under verified TLS. Boxed: the record layer holds big buffers. Reads and writes always go through the TLS
@@ -1918,6 +1937,31 @@ impl Write for Stream {
             Stream::ProxyTcp(proxy) => proxy.0.flush(),
             Stream::Tls(stream) => stream.flush(),
             _ => Err(ErrorKind::NotConnected.into()),
+        }
+    }
+}
+
+impl Stream {
+    /// The socket under the stream, for a reader that waits on it (`peek`) without a lock on the stream (`ws.rs`).
+    pub(crate) fn socket(&self) -> Option<&TcpStream> {
+        match self {
+            Stream::Tcp(s) => Some(s),
+            Stream::ProxyTcp(p) => Some(&p.0),
+            Stream::Tls(s) => Some(s.get_ref()),
+            _ => None,
+        }
+    }
+
+    /// True when a read gives bytes without a wait on the socket: TLS holds plaintext or a whole record.
+    pub(crate) fn has_buffered(&self) -> bool {
+        matches!(self, Stream::Tls(s) if s.has_buffered())
+    }
+
+    /// One read. `Ok(None)`: the TLS records that came held no data, and the next one is not all here (`ClientStream::read_ready`).
+    pub(crate) fn read_ready(&mut self, out: &mut [u8]) -> io::Result<Option<usize>> {
+        match self {
+            Stream::Tls(s) => s.read_ready(out),
+            s => s.read(out).map(Some),
         }
     }
 }

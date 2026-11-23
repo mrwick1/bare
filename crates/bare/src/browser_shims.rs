@@ -1,6 +1,6 @@
 //! Web APIs that are written in JavaScript and made at the first read of one of their names: `Element.prototype.animate` and `Animation`
 //! (`shims/animation.js`), `Path2D` (`shims/path2d.js`), `indexedDB` and the `IDB*` interfaces (`shims/idb.js`), `EventSource` (`shims/eventsource.js`),
-//! `WebSocket` and `CloseEvent` (`shims/websocket.js`, every connection fails), `FileReader` (`shims/filereader.js`),
+//! `WebSocket` and `CloseEvent` (`shims/websocket.js`, the network side in `browser_websocket.rs`), `FileReader` (`shims/filereader.js`),
 //! `speechSynthesis` and the `SpeechSynthesis*` interfaces (`shims/speech.js`, no voices),
 //! `WritableStream`, `TransformStream`, `TextDecoderStream`, `TextEncoderStream` and `ReadableStream.prototype.pipeTo` and `pipeThrough`
 //! (`shims/streams.js`), `CompressionStream` and `DecompressionStream` (`shims/compression.js`, with the native `codec` here).
@@ -47,6 +47,10 @@ pub(crate) fn define<E: Eng>(d: &Dom<E>, it: &mut E::Vm, name: &str) -> R<E, boo
         if sentinel == "CompressionStream" {
             // The source gives its install function. It takes the native codec.
             let f = d.add_fn_s_obj(it, codec, "codec", 3, HostFn::Method)?;
+            it.call_o(made, E::undef(), &[E::obj_raw(f)])?;
+        } else if sentinel == "WebSocket" {
+            // The source gives its install function. It takes the native of `browser_websocket.rs`.
+            let f = d.add_fn_s_obj(it, crate::browser_websocket::ws_host, "ws", 4, HostFn::Method)?;
             it.call_o(made, E::undef(), &[E::obj_raw(f)])?;
         }
     }

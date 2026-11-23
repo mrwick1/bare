@@ -574,13 +574,16 @@ pub(crate) struct Fetch<E: Eng> {
     /// Live (the window and the control interface): each request starts on a worker at once, and `run_network_tasks` takes only the
     /// replies that are in. Off: a request that is not in is waited for (a test or a headless run settles the page).
     pub(crate) live: Cell<bool>,
+    /// Open WebSockets (`browser_websocket.rs`), and the id of the next one.
+    pub(crate) sockets: RefCell<Vec<crate::browser_websocket::Socket>>,
+    pub(crate) next_socket: Cell<u32>,
 }
 
 impl<E: Eng> Default for Fetch<E> {
     fn default() -> Fetch<E> {
         let mut client = Client::new();
         client.set_identity(crate::browser_web::wire_identity());
-        Fetch { st: RefCell::default(), lim: Cell::new(FetchLimits::default()), client: RefCell::new(client), protos: OnceCell::new(), fixed: RefCell::default(), json_parse: OnceCell::new(), json_stringify: OnceCell::new(), drain: OnceCell::new(), live: Cell::new(false) }
+        Fetch { st: RefCell::default(), lim: Cell::new(FetchLimits::default()), client: RefCell::new(client), protos: OnceCell::new(), fixed: RefCell::default(), json_parse: OnceCell::new(), json_stringify: OnceCell::new(), drain: OnceCell::new(), live: Cell::new(false), sockets: RefCell::default(), next_socket: Cell::new(0) }
     }
 }
 
@@ -681,7 +684,7 @@ fn dup(u: &Url) -> Url {
 }
 
 /// `scheme://host:port`, no path and no query: safe for a diagnostic.
-fn origin(u: &Url) -> String {
+pub(crate) fn origin(u: &Url) -> String {
     let u = Url { scheme: u.scheme, host: u.host.clone(), port: u.port, path: String::new() };
     u.to_string()
 }
@@ -2837,6 +2840,9 @@ impl<E: Eng> Browser<E> {
         for s in &st.streams {
             out.push(crate::page::Waiting { kind: "stream", method: "GET", url: s.url.to_string(), age: s.since.elapsed(), holds: false, state: "" });
         }
+        for k in self.dom.fetch.sockets.borrow().iter() {
+            out.push(crate::page::Waiting { kind: "websocket", method: "GET", url: k.url.clone(), age: k.since.elapsed(), holds: false, state: "" });
+        }
     }
 
     /// Can a queued request settle now without a wait? `None`: none is queued. `Some(false)`: no reply is in yet.
@@ -2848,10 +2854,25 @@ impl<E: Eng> Browser<E> {
         Some(next_ready(&st.queue, self.dom.fetch.live.get()).is_some())
     }
 
-    /// Event streams: `Some(true)` when one has a message for the page, `Some(false)` when streams are open and none has, `None` when
-    /// none is open.
+    /// Event streams and WebSockets: `Some(true)` when one has a message for the page, `Some(false)` when some are open and none has,
+    /// `None` when none is open.
     pub(crate) fn streams_ready(&self) -> Option<bool> {
+        let mut socks = self.dom.fetch.sockets.borrow_mut();
+        if !socks.is_empty() {
+            let mut any = false;
+            for k in socks.iter_mut() {
+                any |= k.pull();
+            }
+            if any {
+                return Some(true);
+            }
+        }
+        let open = !socks.is_empty();
+        drop(socks);
         let mut st = self.dom.fetch.st.borrow_mut();
+        if open && st.streams.is_empty() {
+            return Some(false);
+        }
         if st.streams.is_empty() {
             // A detached long-poll is open and its reply is not in (one that came is back in `queue`).
             return (!st.detached.is_empty()).then_some(false);
@@ -2872,6 +2893,7 @@ impl<E: Eng> Browser<E> {
         if self.streams_ready() != Some(true) {
             return Ok(0);
         }
+        let sockets = if self.dom.fetch.sockets.borrow().is_empty() { 0 } else { crate::browser_websocket::run_sockets(&self.dom, &mut self.it)? };
         let dom = self.dom.clone();
         let lim = dom.fl();
         let msgs: Vec<((E::Obj, u64), StreamMsg)> = {
@@ -2909,7 +2931,7 @@ impl<E: Eng> Browser<E> {
             }
             self.xhr_stream_deliver(x, seq, m)?;
         }
-        Ok(n)
+        Ok(n + sockets)
     }
 
     /// Run up to `max` queued requests, oldest first (on a live page, the oldest whose reply is in). Each one does its blocking I/O, settles its promise and runs a microtask
