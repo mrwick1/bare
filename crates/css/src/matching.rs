@@ -181,7 +181,7 @@ fn simple_matches(doc: &Document, el: NodeId, simple: &Simple) -> bool {
         Simple::State(s) => doc.states(el).iter().any(|t| t == s),
         Simple::Form(f) => crate::form::matches(doc, el, *f),
         Simple::User(u) => user_matches(doc, el, *u),
-        Simple::Never => false,
+        Simple::Never | Simple::Gen(_) => false,
         // The cascade offers a rule with `:host` to the host of its own tree only, so here the host needs a shadow root.
         Simple::Host(h) => host_matches(doc, el, h),
         Simple::Is(args) => args.iter().any(|simples| compound_matches(doc, el, simples)),

@@ -171,7 +171,8 @@ const PSEUDO_PAGE: &str = "<!doctype html><html><head><style>#e { color: rgb(255
 fn a_pseudo_element_has_the_inherited_values_of_its_element_and_the_initial_rest() {
     let mut b = at(PSEUDO_PAGE);
     js(&mut b, "var e = document.getElementById('e');");
-    for p in ["::before", "::after", ":before", ":after", "::first-line", ":first-line", "::first-letter", ":first-letter", "::marker", "::placeholder", "::selection", "::BEFORE", "::backdrop", "::-webkit-scrollbar"] {
+    // `::before` has a rule here: `browser_computed_pseudo_tests.rs` reads it. The others have none.
+    for p in ["::after", ":after", "::first-line", ":first-line", "::first-letter", ":first-letter", "::marker", "::placeholder", "::selection", "::backdrop", "::-webkit-scrollbar"] {
         let src = format!("var cs = getComputedStyle(e, '{p}'); [cs.getPropertyValue('content'), cs.display, cs.color, cs.fontSize, cs.marginTop, cs.width, cs.borderTopWidth, cs.position].join('|')");
         assert_eq!(js(&mut b, &src), "normal|inline|rgb(255, 0, 0)|20px|0px|auto|0px|static", "{p}");
     }

@@ -5,6 +5,7 @@ pub mod calc;
 pub mod cascade;
 pub mod color;
 mod colors;
+pub mod content;
 pub mod modern_color;
 pub mod form;
 pub mod grid;
@@ -15,6 +16,8 @@ pub mod parser;
 pub mod rule_cache;
 mod scan;
 pub mod selector;
+#[cfg(test)]
+mod env_tests;
 #[cfg(test)]
 mod shadow_tests;
 pub mod tokenizer;

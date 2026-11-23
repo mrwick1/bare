@@ -69,16 +69,16 @@
 //! build. A full compute charges one step per node before the work, then its tested candidates (`RuleSet::tested_candidates`). A restyle charges `STEPS_PER_RESTYLED_ELEMENT` for each element that it styles (`RuleSet::styled_elements`), and its tested candidates; a read that finds the last styles right charges 1. Names that the sheets add to the document table are bounded by the sheet bytes and checked against
 //! `max_names` after the build.
 //!
-//! Pseudo-elements (`getComputedStyle(el, '::before')`): the engine has no pseudo-element cascade. A rule with a pseudo-element in a selector
-//! is dropped when the sheet is built (`cascade.rs`), and `content` is not a property. So a pseudo-element reads as one that no rule matches:
-//! the inherited properties (`bare_css::cascade::inherited`, and custom properties) are the element's, every other property is initial
-//! (`display` is `inline`, `width` is `auto`), and `content` is `normal`. Wrong in Chrome: a `::before { content: "x"; color: blue }` rule
-//! (Chrome gives `"x"` and `blue`). It throws nothing. Valid names: `::before`, `::after`, `::first-line`, `::first-letter` (and the old one-colon
-//! forms), `::marker`, `::placeholder`, `::selection`, `::backdrop`, `::file-selector-button`, `::-webkit-*`. Another string that starts with
+//! Pseudo-elements (`getComputedStyle(el, '::before')`): `::before` and `::after` (and the old one-colon forms) read the style that their
+//! rules give, with `content` (`RuleSet::style_pseudo`), also when they make no box. A pseudo-element with no rule, and the other ones,
+//! read as one that no rule matches: the inherited properties (`bare_css::cascade::inherited`, and custom properties) are the element's,
+//! every other property is initial (`display` is `inline`, `width` is `auto`), and `content` is `normal`. It throws nothing. Valid names:
+//! `::before`, `::after`, `::first-line`, `::first-letter` (and the old one-colon forms), `::marker`, `::placeholder`, `::selection`,
+//! `::backdrop`, `::file-selector-button`, `::-webkit-*`. Another string that starts with
 //! `:` is an empty declaration (CSSOM). The values are read live. No layout runs for a pseudo-element.
 //!
 //! Not done: `document.styleSheets` does not exist (when it does, a pending sheet must not be in it, as in Chrome), no cache of `Styles` between reads (each read costs one pass over the document), no rule-based `getComputedStyle` of a
-//! pseudo-element (see above), no `@container`, `@import` inside a supplied part (the embedder flattens), `<style disabled>`.
+//! pseudo-element other than `::before` and `::after` (see above), no `@container`, `@import` inside a supplied part (the embedder flattens), `<style disabled>`.
 
 use crate::eng::{Eng, Fault, Ops};
 use crate::browser_sources::Roots;
@@ -245,6 +245,8 @@ const STYLED_FROM: u64 = 1 << 20;
 const STEPS_PER_RESTYLED_ELEMENT: u64 = 32;
 const PSEUDO: u8 = 1;
 const EMPTY: u8 = 2;
+/// `::before` and `::after`: `GENERATED + selector::BEFORE` or `AFTER`. They read the style of their rules (`RuleSet::style_pseudo`).
+const GENERATED: u8 = 3;
 
 /// Is `s` (`pseudoElt`, starts with `:`) a pseudo-element selector? One colon is for the four old names only.
 fn pseudo_kind(s: &str) -> u8 {
@@ -256,7 +258,12 @@ fn pseudo_kind(s: &str) -> u8 {
     let old = matches!(name, "before" | "after" | "first-line" | "first-letter");
     let new = matches!(name, "marker" | "placeholder" | "selection" | "backdrop" | "file-selector-button")
         || name.strip_prefix("-webkit-").is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'));
-    if old || (double && new) { PSEUDO } else { EMPTY }
+    match name {
+        "before" => GENERATED + bare_css::selector::BEFORE,
+        "after" => GENERATED + bare_css::selector::AFTER,
+        _ if old || (double && new) => PSEUDO,
+        _ => EMPTY,
+    }
 }
 const NO_STYLE: &str = "an element that the style walk does not reach has no computed style in the engine (a light child of a shadow host that no slot takes)";
 const AUTO_DIR: &str = "direction depends on dir=auto or bdi (the text decides it)";
@@ -820,6 +827,24 @@ impl<E: Eng> Dom<E> {
         Ok(Some((styles.clone(), style)))
     }
 
+    /// The style of the `::before` or `::after` of `el` (`which`: `selector::BEFORE` or `AFTER`) in the cascade of the reads
+    /// (`RuleSet::style_pseudo`), as a snapshot with no box. `None` when no rule matches it, or when the cascade cannot give it (the
+    /// element is not connected or not styled): then it reads as a pseudo-element with no rule.
+    fn pseudo_snapshot(&self, it: &mut E::Vm, el: NodeId, which: u8) -> R<E, Option<Snap>> {
+        if !self.in_document(it, el)? {
+            return Ok(None);
+        }
+        drop(self.cascade_for(it, None)?);
+        let mut cache = self.computed.cache.borrow_mut();
+        let Some(built) = cache.as_mut().filter(|b| b.read.is_some()) else { return Ok(None) };
+        let Some((_, true, styles)) = built.last[0].as_mut() else { return Ok(None) };
+        let Some(st) = Rc::get_mut(styles) else { return Ok(None) };
+        let doc = self.doc.borrow();
+        let Some(style) = built.rules.style_pseudo(&doc, st, el, which) else { return Ok(None) };
+        let partial = st.partial();
+        Ok(Some(Snap { styles: styles.clone(), style, hidden: true, partial }))
+    }
+
     /// The style of `el` now, or `None` when the element is not connected (an empty declaration).
     pub(crate) fn snapshot(&self, it: &mut E::Vm, el: NodeId) -> R<E, Option<Snap>> {
         self.snapshot_with(it, el, false)
@@ -919,10 +944,19 @@ impl<E: Eng> Dom<E> {
         if kind == EMPTY {
             return Ok(String::new());
         }
+        // `::before` and `::after` with a rule read its style as the style of an element with no box. With no rule, they read as `PSEUDO`.
+        let generated = match kind {
+            GENERATED.. => self.pseudo_snapshot(it, el, kind - GENERATED)?,
+            _ => None,
+        };
+        let kind = if kind >= GENERATED { PSEUDO } else { kind };
         let is_custom = custom(name);
         let key = if is_custom { name.to_string() } else { name.to_ascii_lowercase() };
-        // `content` is not a property of this engine. A pseudo-element with no rule has `normal`.
-        if kind == PSEUDO && key == "content" {
+        if key == "content" && let Some(g) = &generated {
+            return Ok(bare_css::content::serialize(g.style.picture(Property::Content)));
+        }
+        // A pseudo-element with no rule has `normal`. An element has no `content` of its own here: `normal` too.
+        if key == "content" {
             return Ok("normal".into());
         }
         if key == "transform" || key == "-webkit-transform" {
@@ -937,7 +971,12 @@ impl<E: Eng> Dom<E> {
         }
         let longs = long.as_ref().map(std::slice::from_ref).or_else(|| shorthand_longhands(&key));
         // The chain of `el` has the styles of `el` and its ancestors. A value that layout decides needs those of the whole page.
-        let Some(mut s) = self.snapshot_with(it, el, true)? else { return Ok(String::new()) };
+        let ruled = generated.is_some();
+        let snap = match generated {
+            Some(g) => Some(g),
+            None => self.snapshot_with(it, el, true)?,
+        };
+        let Some(mut s) = snap else { return Ok(String::new()) };
         if s.partial && !is_custom && kind != PSEUDO && self.layout_wanted(&s, el, longs.expect("a longhand or a shorthand")).is_some() {
             s = self.snapshot(it, el)?.expect("in the document");
         }
@@ -947,7 +986,7 @@ impl<E: Eng> Dom<E> {
         let longs = longs.expect("a longhand or a shorthand");
         // A pseudo-element has no box here: no layout, and the computed values stay.
         let used = if kind == PSEUDO { None } else { self.used_for(it, &s, el, longs)? };
-        let init = (kind == PSEUDO).then(|| Snap { styles: s.styles.clone(), style: ComputedStyle::initial(), hidden: true, partial: s.partial });
+        let init = (kind == PSEUDO && !ruled).then(|| Snap { styles: s.styles.clone(), style: ComputedStyle::initial(), hidden: true, partial: s.partial });
         let pick = |p: Property| match &init {
             Some(i) if !inherited(p) => i,
             _ => &s,
