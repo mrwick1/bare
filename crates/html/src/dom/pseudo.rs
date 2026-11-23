@@ -41,6 +41,13 @@ impl Document {
         self.pseudo_hosts.get(&(n.index() as u32)).copied()
     }
 
+    /// `flat_parent` of a node with no parent: the element of a pseudo node.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn pseudo_parent(&self, n: NodeId) -> Option<NodeId> {
+        self.pseudo_host(n).map(|h| h.0)
+    }
+
     /// The pseudo node of `el` on side `which` that is shown now.
     pub fn pseudo(&self, el: NodeId, which: u8) -> Option<NodeId> {
         let g = (*self.pseudo_of.get(&(el.index() as u32))?.get(which as usize)?)?;
@@ -99,7 +106,8 @@ impl Document {
         let Some(pair) = self.pseudo_of.get(&(el.index() as u32)) else { return };
         let shown = |w: usize| pair[w].filter(|g| g.shown).map(|g| g.node);
         if let Some(before) = shown(0) {
-            out.then = Some(out.next);
+            out.then = (out.next, out.step);
+            out.step = Step::Then;
             out.next = Some(before);
         }
         out.after = shown(1);

@@ -900,11 +900,19 @@ impl Iterator for Children<'_> {
 pub struct FlatChildren<'a> {
     doc: &'a Document,
     next: Option<NodeId>,
-    shadow: bool,
-    /// After a `::before` node: the first child (`pseudo.rs`).
-    then: Option<Option<NodeId>>,
+    step: Step,
+    /// After a `::before` node (`Step::Then`): the first child, and the step after it (`pseudo.rs`).
+    then: (Option<NodeId>, Step),
     /// The `::after` node, after the last child.
     after: Option<NodeId>,
+}
+
+/// How `FlatChildren` finds the next node.
+#[derive(Clone, Copy, PartialEq)]
+enum Step {
+    Light,
+    Shadow,
+    Then,
 }
 
 impl Iterator for FlatChildren<'_> {
@@ -913,10 +921,13 @@ impl Iterator for FlatChildren<'_> {
     #[inline]
     fn next(&mut self) -> Option<NodeId> {
         let Some(id) = self.next else { return self.after.take() };
-        self.next = match self.then.take() {
-            Some(first) => first,
-            None if self.shadow => self.doc.shadowed_next(id),
-            None => self.doc.nodes[id.index()].next,
+        self.next = match self.step {
+            Step::Light => self.doc.nodes[id.index()].next,
+            Step::Shadow => self.doc.shadowed_next(id),
+            Step::Then => {
+                self.step = self.then.1;
+                self.then.0
+            }
         };
         Some(id)
     }
@@ -1519,7 +1530,7 @@ impl Document {
     /// takes it: it is not rendered. A page with no shadow root pays one `is_empty` check.
     #[inline]
     pub fn flat_parent(&self, id: NodeId) -> Option<NodeId> {
-        let Some(parent) = self.parent(id) else { return self.pseudo_host(id).map(|h| h.0) };
+        let Some(parent) = self.parent(id) else { return self.pseudo_parent(id) };
         if self.shadow_of.is_empty() {
             return Some(parent);
         }
@@ -1531,9 +1542,9 @@ impl Document {
     #[inline]
     pub fn flat_children(&self, id: NodeId) -> FlatChildren<'_> {
         let mut out = if self.shadow_of.is_empty() {
-            FlatChildren { doc: self, next: self.nodes[id.index()].first_child, shadow: false, then: None, after: None }
+            FlatChildren { doc: self, next: self.nodes[id.index()].first_child, step: Step::Light, then: (None, Step::Light), after: None }
         } else {
-            FlatChildren { doc: self, next: self.shadowed_first(id), shadow: true, then: None, after: None }
+            FlatChildren { doc: self, next: self.shadowed_first(id), step: Step::Shadow, then: (None, Step::Light), after: None }
         };
         if !self.pseudo_of.is_empty() {
             self.add_pseudo(id, &mut out);

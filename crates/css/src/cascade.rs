@@ -2778,18 +2778,22 @@ impl Styles {
 
     /// The style of an element. `None` for a node that is not an element, and for an element that is not shown
     /// (`display: none`, or inside one), unless it was asked for with `RuleSet::compute_for`.
+    #[inline]
     pub fn style(&self, node: NodeId) -> Option<&ComputedStyle> {
         match self.of_node.get(node.index()) {
             Some(&NONE) => None,
             Some(&i) => Some(&self.styles[i as usize]),
-            None if self.generated.is_empty() => None,
             None => self.pseudo_style(node),
         }
     }
 
     /// The style of a `::before` or `::after` node (`generated::sync`).
     #[cold]
+    #[inline(never)]
     fn pseudo_style(&self, node: NodeId) -> Option<&ComputedStyle> {
+        if self.generated.is_empty() {
+            return None;
+        }
         let i = *self.pseudo_nodes.borrow().get(&(node.index() as u32))?;
         self.styles.get(i as usize)
     }
