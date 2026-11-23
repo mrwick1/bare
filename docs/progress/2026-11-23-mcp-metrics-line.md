@@ -4,7 +4,7 @@
 - `crates/mcp/src/metrics.rs` appends one JSON line per finished tool call: `ts`, `tool`, `ms`, `out_chars`, `ok` and, on a failure, `code`.
 - The hook is in `Shared::finish`. `Job` has a new field `t0`. Internal jobs (no request id) and cancelled calls write no line.
 - A line holds no URL, page text, typed text or credential. A tool name that is not plain ASCII is written as `unknown`.
-- File: `BARE_MCP_METRICS=<path>`. Unset, it is `mcp-metrics.jsonl` in `bare_os::cache_dir()` (Linux `~/.cache/bare`, Windows `%LOCALAPPDATA%\bare\cache`). `off` or empty switches it off. An empty `BARE_CACHE_DIR` also switches it off.
+- File: `BARE_MCP_METRICS=<path>`. Logging is off unless this holds a path. Empty or `off` keeps it off.
 - Rotation: at 5 MiB the file moves to `<file>.1` (one old file) and a new file starts.
 - The file opens once, in append mode (mode 0600 on Unix). Each call does one `write`. An error is ignored.
 - `bare-mcp --stats [FILE]` prints per tool: calls, p50, p95, max ms (nearest rank) and the error share.

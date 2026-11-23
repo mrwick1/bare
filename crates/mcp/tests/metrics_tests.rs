@@ -60,9 +60,9 @@ fn one_line_per_call_without_page_text_or_query() {
 }
 
 #[test]
-fn off_switch_writes_nothing() {
+fn metrics_are_off_unless_a_path_is_set() {
     let d = dir("metrics-off");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_bare-mcp")).env("BARE_MCP_METRICS", "off").env("BARE_CACHE_DIR", &d)
+    let mut child = Command::new(env!("CARGO_BIN_EXE_bare-mcp")).env_remove("BARE_MCP_METRICS").env("BARE_CACHE_DIR", &d)
         .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
     let mut input = child.stdin.take().unwrap();
     writeln!(input, "{}", json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"nope","arguments":{}}})).unwrap();

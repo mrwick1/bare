@@ -1,6 +1,6 @@
 //! One JSON line per tool call, appended to a file: `ts` (unix seconds), `tool`, `ms`, `out_chars`, `ok` and, on a failure, `code`.
-//! A line holds no URL, page text, typed text or credential. `BARE_MCP_METRICS` is `off` (or empty) to switch it off, or a file path.
-//! Unset, the file is `mcp-metrics.jsonl` in the browser cache root (`bare_os::cache_dir`). Past `LIMIT` bytes the file is renamed to
+//! A line holds no URL, page text, typed text or credential. Logging is off unless `BARE_MCP_METRICS` holds a file path
+//! (empty or `off` keeps it off). Past `LIMIT` bytes the file is renamed to
 //! `<file>.1` (one old file is kept) and a new one starts. A logging error never fails a call.
 use serde_json::Value;
 use std::fs::File;
@@ -17,7 +17,7 @@ fn path() -> Option<PathBuf> {
     match std::env::var_os("BARE_MCP_METRICS") {
         Some(v) if v.is_empty() || v == "off" => None,
         Some(v) => Some(v.into()),
-        None => bare_os::cache_dir().map(|d| d.join("mcp-metrics.jsonl")),
+        None => None,
     }
 }
 
@@ -71,7 +71,7 @@ pub fn record(params: &Value, took: Duration, result: &Value) {
 
 /// `bare-mcp --stats [FILE]`: per tool, the calls, the p50, p95 and max of the time in ms, and the share of failed calls.
 pub fn stats(file: Option<String>) {
-    let Some(p) = file.map(PathBuf::from).or_else(path) else { return eprintln!("no metrics file: pass one, or unset BARE_MCP_METRICS") };
+    let Some(p) = file.map(PathBuf::from).or_else(path) else { return eprintln!("no metrics file: pass one, or set BARE_MCP_METRICS") };
     let Ok(text) = std::fs::read_to_string(&p) else { return eprintln!("cannot read {}", p.display()) };
     let mut tools: std::collections::BTreeMap<String, (Vec<f64>, usize)> = Default::default();
     for v in text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()) {

@@ -206,7 +206,6 @@ dependencies = [
  "bare-drive",
  "bare-net",
  "bare-observe",
- "bare-os",
  "serde_json",
 ]
 
