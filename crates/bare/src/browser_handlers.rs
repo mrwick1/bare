@@ -152,6 +152,8 @@ pub(crate) struct Hd<E: Eng> {
     pub asked: Vec<&'static str>,
     /// `window.event`: the event of the dispatch that runs (`Dom::dispatch`).
     pub event: Option<<E as Eng>::Obj>,
+    /// The events that `Dom::dispatch` runs, outermost first. They are roots: a microtask between two listeners can collect.
+    pub running: Vec<<E as Eng>::Obj>,
     /// A window `error` event is running: an exception in it is not reported again.
     pub in_error: bool,
 }
@@ -166,6 +168,7 @@ pub(crate) struct Hh<E: Eng> {
 }
 
 pub(crate) fn roots<E: Eng>(d: &Dom<E>, out: &mut Roots<'_, '_, E>) {
+    out.extend(d.st.borrow().hd.running.iter().map(|&o| E::obj_raw(o)));
     for c in d.hh.body.iter().chain([&d.hh.err, &d.hh.rej]) {
         if let Some(o) = c.get() {
             out.extend(o.map(E::obj_raw));
