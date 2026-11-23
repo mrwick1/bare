@@ -144,20 +144,20 @@ impl Inflate {
         let mut out = Vec::with_capacity(data.len().saturating_mul(3).clamp(64, max.saturating_add(1)));
         let mut at = 0;
         loop {
-            let before = self.d.total_in();
+            let (before, made) = (self.d.total_in(), out.len());
             self.d.decompress_vec(&data[at..], &mut out, FlushDecompress::Sync).map_err(|_| Stop::Protocol(1002, "a compressed message does not inflate"))?;
             at += (self.d.total_in() - before) as usize;
             if out.len() > max {
                 return Err(Stop::Protocol(1009, "a message is bigger than the cap"));
             }
-            if out.len() < out.capacity() {
-                // Room was left, so the inflater took all that it could.
-                if at < data.len() {
-                    return Err(Stop::Protocol(1002, "a compressed message does not inflate"));
-                }
+            if out.len() == out.capacity() {
+                out.reserve(out.capacity().min(max + 1 - out.len()).max(1));
+            } else if at == data.len() {
                 break;
+            } else if self.d.total_in() == before && out.len() == made {
+                // Room and input are left, and the inflater took and gave nothing.
+                return Err(Stop::Protocol(1002, "a compressed message does not inflate"));
             }
-            out.reserve(out.capacity().min(max + 1 - out.len()).max(1));
         }
         if self.reset {
             self.d.reset(false);

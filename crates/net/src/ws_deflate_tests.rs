@@ -114,6 +114,19 @@ fn compressed_messages_with_a_shared_window_and_a_plain_one() {
 }
 
 #[test]
+fn a_long_message_that_compresses_well_inflates_whole() {
+    let big = format!("{{\"type\":\"echo\",\"text\":\"{}\"}}", "b".repeat(300_000));
+    let msg = big.clone();
+    let (port, h) = server("permessage-deflate", move |mut s| {
+        let mut c = Compress::new(Compression::default(), false);
+        s.write_all(&frame(true, true, TEXT, &deflate(&mut c, msg.as_bytes()))).unwrap();
+    });
+    let (mut r, _w, _, _) = open(port, 32 << 20).unwrap();
+    assert_eq!(r.recv().unwrap(), Message::Text(big));
+    h.join().unwrap();
+}
+
+#[test]
 fn no_context_takeover_of_the_server_resets_the_window() {
     let (port, h) = server("permessage-deflate; server_no_context_takeover; server_max_window_bits=10; client_max_window_bits=12", |mut s| {
         for _ in 0..2 {
