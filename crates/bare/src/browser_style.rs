@@ -12,7 +12,7 @@
 //!   Partial pending shorthands keep their source and surviving mask separately. Attribute spans invalidate this state.
 //! - `el.style` is one object for each element while the element wrapper lives (`SameObject`): the wrapper traces the
 //!   declaration and the declaration traces the wrapper. The setter forwards to `cssText` (`[PutForwards=cssText]`).
-//! - Supported properties are exactly the ones `bare_css` understands: `values::Property::ALL`, `values::SHORTHANDS` and `transform` (`blk::WHOLE`).
+//! - Supported properties are the ones `bare_css` understands (`values::Property::ALL`, `values::SHORTHANDS` and `transform`), and `stroke-dasharray` and `stroke-dashoffset`, which the SVG painter reads (`blk::WHOLE`).
 //!   For each one the prototype has camelCase and dashed accessors (and `cssFloat`; `-webkit-` names also get the
 //!   `webkitX` form), so `"x" in style` is true only for a property that really works. `transition`, `animation` and their
 //!   `transition-*` / `animation-*` longhands are supported (`bare_css::motion`; the events are in `browser_motion.rs`). `WebkitAnimation`,

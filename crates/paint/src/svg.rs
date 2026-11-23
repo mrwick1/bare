@@ -1,6 +1,6 @@
 //! The drawing of an inline `<svg>` (SVG 2): `path`, `line`, `polyline`, `polygon`, `rect`, `circle`, `ellipse` and `g`, with
-//! `fill` and `stroke` (colors, from the cascade) and `stroke-width`, `stroke-linecap`, `stroke-linejoin` and
-//! `stroke-miterlimit` (attributes, taken from the shape or the nearest element above it). The `viewBox` maps to the box of the
+//! `fill` and `stroke` (colors, from the cascade) and `stroke-width`, `stroke-linecap`, `stroke-linejoin`, `stroke-miterlimit`,
+//! `stroke-dasharray` and `stroke-dashoffset` (the `style` attribute or the attributes, taken from the shape or the nearest element above it). The `viewBox` maps to the box of the
 //! element with `preserveAspectRatio` at its default (`xMidYMid meet`). The `transform` attribute (`matrix`, `translate`, `scale`,
 //! `rotate`, `skewX`, `skewY`) applies to an element and all inside it. A stroke under a skew or an unequal scale keeps one width: the
 //! square root of the area scale.
@@ -12,9 +12,9 @@
 //!
 //! A shape becomes polygons in pixels, and `Canvas::fill_poly` fills them with the non-zero rule. A fill is the outline of the shape. A
 //! stroke is one quad for each segment, plus a join (a disc, a bevel or a miter) at each corner and a cap at each end, all with the same
-//! winding, so that the non-zero rule makes their union.
+//! winding, so that the non-zero rule makes their union. A dashed stroke is cut into open polylines first, and each one gets its caps.
 //!
-//! Not built: `fill-rule`, `stroke-dasharray`, `fill-opacity`, `stroke-opacity`, `opacity` on a shape, `transform` from a style sheet, `use`, `textPath`, a style on a `tspan`, `image`,
+//! Not built: `fill-rule`, `fill-opacity`, `stroke-opacity`, `opacity` on a shape, `transform` from a style sheet, `use`, `textPath`, a style on a `tspan`, `image`,
 //! paint servers (`url(#a)`), `preserveAspectRatio` other than the default, `stroke-width` from a style sheet, a unit other than `px` or none.
 
 use crate::display::argb;
@@ -810,20 +810,42 @@ fn arc<M: GeometryMath>(out: &mut Vec<(f32, f32)>, from: (f32, f32), (rx, ry, ro
 }
 
 /// The stroke of a shape: its width in pixels, the end of a line, the corner of two lines and the limit of a miter.
+/// `dash`: the lengths of the dashes and gaps in pixels (empty for a solid stroke), and `offset` the place on the path where they start.
 struct Stroke {
     half: f32,
     cap: u8,
     join: u8,
     miter: f32,
+    dash: Vec<f32>,
+    offset: f32,
+}
+
+/// The value of `name` in the `style` attribute of `node`: the last declaration of it, without `!important`.
+fn inline<'a>(doc: &'a Document, node: NodeId, name: &str) -> Option<&'a str> {
+    let decls = attr(doc, node, "style")?.split(';').filter_map(|d| d.split_once(':'));
+    decls.filter(|(n, _)| n.trim().eq_ignore_ascii_case(name)).last().map(|(_, v)| v.trim().trim_end_matches("!important").trim_end())
+}
+
+/// `stroke-dasharray` in user units: the list twice when its count is odd. Empty for `none`, a bad value, a negative length or a zero sum (SVG 2).
+fn dash_array(v: &str) -> Vec<f32> {
+    let parts: Option<Vec<f32>> = v.split(|c: char| c == ',' || c.is_whitespace()).filter(|t| !t.is_empty()).map(|t| num(t).filter(|n| *n >= 0.0)).collect();
+    let mut list = parts.unwrap_or_default();
+    if list.iter().sum::<f32>() <= 0.0 {
+        return Vec::new();
+    }
+    if list.len() % 2 == 1 {
+        list.extend_from_within(..);
+    }
+    list
 }
 
 impl Stroke {
-    /// Read the attributes of the shape, or of the nearest element above it that has them, up to the `<svg>`.
+    /// Read the `style` attribute or the attributes of the shape, or of the nearest element above it that has them, up to the `<svg>`.
     fn of(doc: &Document, root: NodeId, node: NodeId, s: f32) -> Stroke {
         let find = |name: &str| {
             let mut n = Some(node);
             while let Some(e) = n {
-                if let Some(v) = attr(doc, e, name) {
+                if let Some(v) = inline(doc, e, name).or_else(|| attr(doc, e, name)) {
                     return Some(v);
                 }
                 n = if e == root { None } else { doc.parent(e) };
@@ -836,6 +858,8 @@ impl Stroke {
             cap: word("stroke-linecap", &["butt", "round", "square"]),
             join: word("stroke-linejoin", &["miter", "round", "bevel"]),
             miter: find("stroke-miterlimit").and_then(num).filter(|m| *m >= 1.0).unwrap_or(4.0),
+            dash: find("stroke-dasharray").map(dash_array).unwrap_or_default().into_iter().map(|d| d * s).collect(),
+            offset: find("stroke-dashoffset").and_then(num).unwrap_or(0.0) * s,
         }
     }
 
@@ -855,6 +879,57 @@ impl Stroke {
         if sub.closed && p.len() > 1 && (p[0].0 - p[p.len() - 1].0).hypot(p[0].1 - p[p.len() - 1].1) <= 1e-4 {
             p.pop();
         }
+        if self.dash.is_empty() || p.len() < 2 {
+            self.line(&p, sub.closed, out);
+            return;
+        }
+        for mut piece in self.dashes(&p, sub.closed) {
+            piece.dedup_by(|b, a| (a.0 - b.0).hypot(a.1 - b.1) <= 1e-4);
+            self.line(&piece, false, out);
+        }
+    }
+
+    /// The dashes of a polyline in pixels: the open polylines that `dash` and `offset` keep, in order.
+    fn dashes(&self, p: &[(f32, f32)], closed: bool) -> Vec<Vec<(f32, f32)>> {
+        let total: f32 = self.dash.iter().sum();
+        let (mut pos, mut i) = (self.offset.rem_euclid(total), 0);
+        while pos >= self.dash[i] {
+            pos -= self.dash[i];
+            i = (i + 1) % self.dash.len();
+        }
+        let mut left = self.dash[i] - pos;
+        let (mut out, mut cur) = (Vec::new(), if i % 2 == 0 { vec![p[0]] } else { Vec::new() });
+        let n = p.len();
+        for k in 0..if closed { n } else { n - 1 } {
+            let (a, b) = (p[k], p[(k + 1) % n]);
+            let l = (b.0 - a.0).hypot(b.1 - a.1);
+            let mut t = 0.0;
+            while l - t > left {
+                t += left;
+                cur.push((a.0 + (b.0 - a.0) * t / l, a.1 + (b.1 - a.1) * t / l));
+                if i % 2 == 0 {
+                    out.push(std::mem::take(&mut cur));
+                }
+                i = (i + 1) % self.dash.len();
+                left = self.dash[i];
+            }
+            left -= l - t;
+            if i % 2 == 0 {
+                cur.push(b);
+            }
+        }
+        if !cur.is_empty() {
+            out.push(cur);
+        }
+        out
+    }
+
+    /// Add the polygons of one polyline in pixels, without repeated points.
+    fn line(&self, p: &[(f32, f32)], closed: bool, out: &mut Vec<(f32, f32)>) {
+        let hw = self.half;
+        if p.is_empty() {
+            return;
+        }
         if p.len() == 1 {
             // A point: a disc for a round cap, a square for a square one.
             match self.cap {
@@ -865,7 +940,7 @@ impl Stroke {
             return;
         }
         let n = p.len();
-        let segments = if sub.closed { n } else { n - 1 };
+        let segments = if closed { n } else { n - 1 };
         let dir = |i: usize| {
             let (a, b) = (p[i % n], p[(i + 1) % n]);
             let l = (b.0 - a.0).hypot(b.1 - a.1);
@@ -876,11 +951,11 @@ impl Stroke {
             let m = (-d.1 * hw, d.0 * hw);
             poly(out, &[(a.0 + m.0, a.1 + m.1), (b.0 + m.0, b.1 + m.1), (b.0 - m.0, b.1 - m.1), (a.0 - m.0, a.1 - m.1)]);
             // The corner with the next segment.
-            if i + 1 < segments || sub.closed {
+            if i + 1 < segments || closed {
                 self.corner(out, b, d, dir(i + 1));
             }
         }
-        if !sub.closed {
+        if !closed {
             for (end, d, sign) in [(p[0], dir(0), -1.0), (p[n - 1], dir(n - 2), 1.0)] {
                 match self.cap {
                     1 => disc(out, end, hw),
@@ -999,10 +1074,48 @@ mod tests {
         c.pixels.iter().map(|&p| (p & 0xff) as f32 / 255.0).sum()
     }
 
+    /// Is the pixel at (x, y) of an SVG file drawn?
+    fn inked(svg: &str, x: u32, y: u32) -> bool {
+        let (w, _, px) = bitmap(svg).expect("an svg");
+        px[(y * w + x) as usize] >> 24 > 128
+    }
+
+    #[test]
+    fn a_dash_array_cuts_the_stroke() {
+        let line = |a: &str| format!("<svg width=100 height=20><path d='M0 10 H100' stroke=red stroke-width=4 {a}/></svg>");
+        let solid = line("");
+        assert!(inked(&solid, 5, 10) && inked(&solid, 15, 10));
+        // The attribute and the inline style give the same dashes: 10 on, 10 off, from the start of the path.
+        for a in ["stroke-dasharray='10 10'", "stroke-dasharray='10,10'", "style='stroke-dasharray: 10px 10px'", "stroke-dasharray='10'", "stroke-dasharray='0 5' style='stroke-dasharray:10 10'"] {
+            let c = line(a);
+            assert!(inked(&c, 5, 10) && !inked(&c, 15, 10) && inked(&c, 25, 10), "{a}");
+        }
+        // The offset moves the dashes back along the path.
+        for a in ["stroke-dasharray='10 10' stroke-dashoffset='10'", "style='stroke-dasharray:10 10; stroke-dashoffset:10'", "stroke-dasharray='10 10' stroke-dashoffset='-10'"] {
+            let c = line(a);
+            assert!(!inked(&c, 5, 10) && inked(&c, 15, 10), "{a}");
+        }
+        // A negative length, a zero sum or `none` draws the whole line.
+        for a in ["stroke-dasharray='10 -1'", "stroke-dasharray='0 0'", "stroke-dasharray='none'", "stroke-dasharray='x'"] {
+            let c = line(a);
+            assert!(inked(&c, 5, 10) && inked(&c, 15, 10), "{a}");
+        }
+    }
+
+    #[test]
+    fn a_progress_ring_draws_only_its_arc() {
+        // A circle starts at its right point and goes clockwise: a quarter of the length is the bottom right quarter (Chrome draws the same).
+        for a in ["stroke-dasharray='251.3' stroke-dashoffset='188.5'", "style='stroke-dasharray:251.3;stroke-dashoffset:188.5'"] {
+            let c = format!("<svg width=100 height=100><circle cx=50 cy=50 r=40 fill=none stroke=red stroke-width=10 {a}/></svg>");
+            assert!(inked(&c, 78, 78), "{a}: the bottom right quarter");
+            assert!(!inked(&c, 22, 22) && !inked(&c, 78, 22) && !inked(&c, 22, 78), "{a}: the other quarters");
+        }
+    }
+
     #[test]
     fn a_stroke_is_the_union_of_its_pieces() {
         let line = Sub { pts: vec![(5.0, 10.0), (25.0, 10.0)], closed: false };
-        let st = |cap, join| Stroke { half: 2.0, cap, join, miter: 4.0 };
+        let st = |cap, join| Stroke { half: 2.0, cap, join, miter: 4.0, dash: Vec::new(), offset: 0.0 };
         // 20 long and 4 wide. A square cap adds 2 at each end, a round one adds half a disc (6.28) at each end.
         assert!((coverage(&st(0, 0), &line) - 80.0).abs() < 0.5);
         assert!((coverage(&st(2, 0), &line) - 96.0).abs() < 0.5);
