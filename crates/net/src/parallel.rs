@@ -16,7 +16,7 @@
 
 use crate::http::Client;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -168,22 +168,35 @@ impl<R> Finish<R> {
 
 type Hook = Arc<dyn Fn() + Send + Sync>;
 
-static ON_END: Mutex<Option<Hook>> = Mutex::new(None);
+/// The hooks of `on_end`, with the id of each. One for each page loop that sleeps until a wake.
+static ON_END: Mutex<Vec<(u64, Hook)>> = Mutex::new(Vec::new());
+static NEXT_HOOK: AtomicU64 = AtomicU64::new(0);
 
-/// Call `f` from the worker thread each time a task ends (with a result, or lost). A window uses it to wake its loop, so that it
-/// need not poll `Task::done`. It replaces the hook of an earlier call. `f` must not block.
-pub fn on_end(f: impl Fn() + Send + Sync + 'static) {
-    *ON_END.lock().unwrap() = Some(Arc::new(f));
+/// A hook of `on_end`. Dropping it removes the hook.
+pub struct EndHook(u64);
+
+impl Drop for EndHook {
+    fn drop(&mut self) {
+        ON_END.lock().unwrap().retain(|(id, _)| *id != self.0);
+    }
 }
 
-/// Call the hook of `on_end` from a thread that is not a worker: a WebSocket reader that has a message for the page.
+/// Call `f` from the worker thread each time a task ends (with a result, or lost), and at each `wake`. A page loop uses it to wake,
+/// so that it need not poll `Task::done`. Each loop has its own hook; it lives as long as the handle. `f` must not block.
+pub fn on_end(f: impl Fn() + Send + Sync + 'static) -> EndHook {
+    let id = NEXT_HOOK.fetch_add(1, Ordering::Relaxed);
+    ON_END.lock().unwrap().push((id, Arc::new(f)));
+    EndHook(id)
+}
+
+/// Call the hooks of `on_end` from a thread that is not a worker: a WebSocket reader that has a message for the page.
 pub fn wake() {
     ended();
 }
 
 fn ended() {
-    let hook = ON_END.lock().unwrap().clone();
-    if let Some(f) = hook {
+    let hooks: Vec<Hook> = ON_END.lock().unwrap().iter().map(|(_, f)| f.clone()).collect();
+    for f in hooks {
         f();
     }
 }

@@ -125,10 +125,13 @@ enum Host {
     Window(Remote),
 }
 
+/// A wake of a caller's loop (`Session::wake_on_done`).
+type Wake = Arc<dyn Fn() + Send + Sync>;
+
 impl Host {
     /// An `open` is a new tab of one browser, in a window too: empty storage, and the connections and the HTTP cache of `net`.
     /// `state`: the saved session to start from (`None`: empty storage).
-    fn open(&mut self, url: &str, size: (u32, u32), window: bool, net: &bare_net::http::Client, state: Option<StorageState>, downloads: Option<bare::Downloads>) -> Result<(), String> {
+    fn open(&mut self, url: &str, size: (u32, u32), window: bool, net: &bare_net::http::Client, state: Option<StorageState>, downloads: Option<bare::Downloads>, wake: Option<Wake>) -> Result<(), String> {
         match self {
             // The new page takes the size of the window, not `size`: the compositor can have resized the window, and the window loop
             // calls `resize` only when the window size changes.
@@ -145,6 +148,9 @@ impl Host {
                 *self = Host::None;
                 let mut p = Page::open_in_with(url, size, net, state.as_ref(), downloads)?;
                 p.quiet = true;
+                if let Some(w) = wake {
+                    p.wake_on_done(move || w());
+                }
                 *self = Host::Local(Box::new(p));
                 Ok(())
             }
@@ -285,6 +291,8 @@ pub struct Session {
     pub hist: crate::diag::History,
     /// Where this session saves downloads (`set_downloads`).
     downloads: Option<bare::Downloads>,
+    /// The wake of the caller's loop, for each page that `open` makes here (`wake_on_done`).
+    wake: Option<Wake>,
     /// An `open`, `goto` or `reload` ends when the page is ready (or at the time limit), not at once. Off for a step file: its next step waits.
     pub ready_wait: bool,
     pub rep: Report,
@@ -301,7 +309,18 @@ impl Session {
         bare_net::trace::enable();
         let _ = bare_net::trace::take();
         let rep = Report { ok: true, steps: Vec::new(), failure: None, logs: Vec::new(), net: Vec::new(), ms: 0.0, window: opt.window, ticks: Ticks::default(), cookies: Vec::new() };
-        Session { observe_id: bare_observe::process::next_id(), observe_step: 0, host: Host::None, net, memo: Memo::default(), timeout: opt.timeout, window_cpu: 0, nav_first: 0, start: Instant::now(), preload: None, hist: Default::default(), downloads: None, ready_wait: false, rep }
+        Session { observe_id: bare_observe::process::next_id(), observe_step: 0, host: Host::None, net, memo: Memo::default(), timeout: opt.timeout, window_cpu: 0, nav_first: 0, start: Instant::now(), preload: None, hist: Default::default(), downloads: None, wake: None, ready_wait: false, rep }
+    }
+
+    /// The caller's loop sleeps until `wake` is called (`Page::wake_on_done`): then `tick` asks for a call each second, not every 4 ms,
+    /// while a reply or an open WebSocket waits. It applies to the page of this session that is not in a window, now and after each `open`.
+    pub fn wake_on_done(&mut self, wake: impl Fn() + Send + Sync + 'static) {
+        let wake: Wake = Arc::new(wake);
+        if let Host::Local(p) = &mut self.host {
+            let w = wake.clone();
+            p.wake_on_done(move || w());
+        }
+        self.wake = Some(wake);
     }
 
     /// Set the time limit of the next steps; a `timeout` step changes it again.
@@ -542,7 +561,7 @@ impl Session {
         let _context = bare_observe::process::enter(bare_observe::Ids { session: self.observe_id, step: Some(self.observe_step), ..Default::default() });
         let _observe = bare_observe::process::span("driver", "step");
         self.settle_pictures();
-        let Session { host, net, memo, timeout, window_cpu, nav_first, rep, preload, hist, downloads, ready_wait, .. } = self;
+        let Session { host, net, memo, timeout, window_cpu, nav_first, rep, preload, hist, downloads, wake, ready_wait, .. } = self;
     let t0 = Instant::now();
     // The limits of the step are on the benchmark clock when it is on (`bare_net::vclock`): a step ends at the same point of the page in every run.
     let deadline = bare_net::vclock::instant() + *timeout;
@@ -627,7 +646,7 @@ impl Session {
             Action::Open(url, file) => {
                 memo.seen.clear();
                 let from = file.as_deref().map(crate::state::read).transpose().map(|st| st.or_else(|| preload.take()));
-                let opened = from.and_then(|st| host.open(url, opt.size, opt.window, net, st, downloads.clone())).and_then(|_| host.run(|p| p.take_logs()));
+                let opened = from.and_then(|st| host.open(url, opt.size, opt.window, net, st, downloads.clone(), wake.clone())).and_then(|_| host.run(|p| p.take_logs()));
                 let d = t.elapsed();
                 busy += d;
                 if !opt.window {

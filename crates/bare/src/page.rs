@@ -137,8 +137,8 @@ pub struct Page {
     pub errors: Vec<String>,
     /// Print nothing (a test driver: it reports the errors itself, through its redacting filter).
     pub quiet: bool,
-    /// Does a wake (`wake_on_done`) tell the loop that a job ended?
-    woken: bool,
+    /// The hook of `wake_on_done`: a wake tells the loop that a job ended.
+    woken: Option<bare_net::parallel::EndHook>,
     pub(crate) started: Instant,
     pub first_frame: Option<Duration>,
     /// The rounds of the window loop that hosts this page for a driver (`control::Remote`), since a job last took them.
@@ -329,7 +329,7 @@ impl Page {
             inputs: Vec::new(),
             errors: Vec::new(),
             quiet: false,
-            woken: false,
+            woken: None,
             started: bare_net::vclock::instant(),
             first_frame: None,
             ticks: Default::default(),
@@ -390,7 +390,7 @@ impl Page {
         }
         let s = Page::live_session(cfg, self.viewport())?;
         let canvas = std::mem::replace(&mut self.canvas, Canvas::new(0, 0));
-        let (ticks, woken, quiet, windowed) = (self.ticks, self.woken, self.quiet, self.windowed);
+        let (ticks, woken, quiet, windowed) = (self.ticks, self.woken.take(), self.quiet, self.windowed);
         *self = Page::with_canvas(Source::Session(Box::new(s)), self.size, canvas);
         (self.ticks, self.woken, self.quiet, self.windowed) = (ticks, woken, quiet, windowed);
         Ok(())
@@ -656,10 +656,9 @@ impl Page {
 
     /// The loop of this page sleeps until `wake` is called from another thread. Then a reply or a next document in flight does not make
     /// `tick` ask for a call every 4 ms: the worker that ends the job calls `wake` (`bare_net::parallel::on_end`). `tick` then asks
-    /// for a call each second only, in case a wake was lost. One hook for the process: the last call wins.
+    /// for a call each second only, in case a wake was lost. Each page has its own hook, until the page drops or the next call.
     pub fn wake_on_done(&mut self, wake: impl Fn() + Send + Sync + 'static) {
-        bare_net::parallel::on_end(wake);
-        self.woken = true;
+        self.woken = Some(bare_net::parallel::on_end(wake));
     }
 
     /// The page is about to close: fire its hide events (`Browser::hide`), then run it until the requests that its handlers queued
@@ -717,7 +716,7 @@ impl Page {
 
     /// Can a tick do something now, and when is the next task due (or the next look at the network)?
     fn work(&mut self) -> (bool, Option<Instant>) {
-        let poll = if self.woken { Duration::from_secs(1) } else { Duration::from_millis(4) };
+        let poll = if self.woken.is_some() { Duration::from_secs(1) } else { Duration::from_millis(4) };
         let (stopped, loading) = match &self.source {
             Source::Session(s) => (s.ended().is_some(), s.loading()),
             Source::Browser(b) => (b.sched_stats().halted, None),
