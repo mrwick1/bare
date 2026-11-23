@@ -146,6 +146,7 @@ fwd! {
     (&) fn navigation_stats() -> crate::browser_navigation::NavigationStats;
     (&) fn listened(types: &[&str]) -> std::collections::HashSet<NodeId>;
     (&) fn sched_stats() -> crate::browser_scheduler::SchedStats;
+    (&) fn stats() -> crate::browser::BrowserStats;
     (&) fn describe(node: NodeId) -> String;
     (&mut) fn inline_rects(node: NodeId) -> Vec<Rect>;
     (&) fn input_checked(n: NodeId) -> bool;

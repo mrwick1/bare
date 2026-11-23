@@ -187,6 +187,8 @@ pub mod browser_session;
 pub mod downloads;
 pub use downloads::{Download, DownloadState, Downloads};
 #[cfg(test)]
+mod browser_any_stats_tests;
+#[cfg(test)]
 mod browser_session_tests;
 #[cfg(test)]
 mod browser_stream_tests;
