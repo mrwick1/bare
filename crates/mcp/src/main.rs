@@ -30,7 +30,7 @@ use std::io::{BufRead, Write};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -62,6 +62,8 @@ struct Server {
     shared: Arc<Shared>,
     /// A session worker holds its one session here, by name (`session`, default `main`).
     live: HashMap<String, Live>,
+    /// The queue of this worker, for the wake of its pages (`Session::wake_on_done`). Weak, so that the worker still ends when its slot goes.
+    queue: Weak<SyncSender<Job>>,
 }
 
 /// What every thread shares. No lock is held while a page runs: each lock guards a short read or write of a map.
@@ -107,11 +109,14 @@ struct Job {
     /// When the request arrived, for the metrics line.
     t0: Instant,
     done: Box<dyn FnOnce(Value) + Send>,
+    /// Not a call: a page of the worker has news (a reply, a WebSocket message). The worker only runs its pages, and clears the flag,
+    /// which keeps a second wake out of the queue until then.
+    wake: Option<Arc<AtomicBool>>,
 }
 
 /// The queue of a session worker. `busy` counts its queued and running jobs; `url` is its last published address or failed-load diagnostic.
 struct Slot {
-    tx: SyncSender<Job>,
+    tx: Arc<SyncSender<Job>>,
     url: Arc<Mutex<String>>,
     busy: Arc<AtomicUsize>,
 }
@@ -242,7 +247,7 @@ impl Shared {
         lock(&self.inflight).insert(key.clone(), cancel.clone());
         let sh = self.clone();
         let done = Box::new(move |v: Value| sh.send(json!({"jsonrpc": "2.0", "id": id, "result": v})));
-        let job = Job { key: Some(key), params, cancel, started: false, t0: Instant::now(), done };
+        let job = Job { key: Some(key), params, cancel, started: false, t0: Instant::now(), done, wake: None };
         if !tool_list().as_array().is_some_and(|t| t.iter().any(|t| t["name"] == tool.as_str())) {
             let failure = Failure::unknown_tool(&tool);
             let result = json!({"content": [{"type": "text", "text": failure.text}], "isError": true,
@@ -317,13 +322,14 @@ impl Shared {
         }
         if !creates {
             drop(map);
-            let result = Server { shared: self.clone(), live: HashMap::new() }.call(&job.params);
+            let result = Server { shared: self.clone(), live: HashMap::new(), queue: Weak::new() }.call(&job.params);
             return self.finish(job, result);
         }
         let (tx, rx) = mpsc::sync_channel(QUEUE);
+        let tx = Arc::new(tx);
         let (url, busy) = (Arc::new(Mutex::new(String::new())), Arc::new(AtomicUsize::new(1)));
-        let (sh, n, u, b) = (self.clone(), name.clone(), url.clone(), busy.clone());
-        match std::thread::Builder::new().name(format!("bare-mcp {name}")).spawn(move || worker(sh, n, rx, u, b, None)) {
+        let (sh, n, u, b, q) = (self.clone(), name.clone(), url.clone(), busy.clone(), Arc::downgrade(&tx));
+        match std::thread::Builder::new().name(format!("bare-mcp {name}")).spawn(move || worker(sh, n, rx, q, u, b, None)) {
             Ok(h) => {
                 self.keep(h);
                 let _ = tx.try_send(job);
@@ -349,7 +355,7 @@ impl Shared {
         let moved = slot.clone();
         match std::thread::Builder::new().name("bare-mcp call".into()).spawn(move || {
             if let Some(job) = lock(&moved).take() {
-                Server { shared: sh, live: HashMap::new() }.run_job(job, None);
+                Server { shared: sh, live: HashMap::new(), queue: Weak::new() }.run_job(job, None);
             }
         }) {
             Ok(h) => self.keep(h),
@@ -386,7 +392,7 @@ impl Shared {
             let _ = tx.send(if v["isError"] == true { Err(text) } else { Ok(text) });
         });
         let params = json!({"name": tool, "arguments": {"session": name}});
-        self.route(Job { key: None, params, cancel: Arc::new(AtomicBool::new(false)), started: false, t0: Instant::now(), done });
+        self.route(Job { key: None, params, cancel: Arc::new(AtomicBool::new(false)), started: false, t0: Instant::now(), done, wake: None });
         // A busy worker is not asked (`sessions`), so this returns when one call ends; a cancellation of the caller stops the wait.
         loop {
             match rx.recv_timeout(Duration::from_millis(25)) {
@@ -405,9 +411,10 @@ impl Shared {
         let mut map = lock(&self.sessions);
         let name = (2..).map(|n| format!("{base}~{n}")).find(|n| !map.contains_key(n)).expect("a free name");
         let (tx, rx) = mpsc::sync_channel(QUEUE);
+        let tx = Arc::new(tx);
         let (url, busy) = (Arc::new(Mutex::new(String::new())), Arc::new(AtomicUsize::new(1)));
-        let (sh, n, u, b) = (self.clone(), name.clone(), url.clone(), busy.clone());
-        let h = std::thread::Builder::new().name(format!("bare-mcp {name}")).spawn(move || worker(sh, n, rx, u, b, Some(tab))).map_err(|e| format!("cannot start a thread: {e}"))?;
+        let (sh, n, u, b, q) = (self.clone(), name.clone(), url.clone(), busy.clone(), Arc::downgrade(&tx));
+        let h = std::thread::Builder::new().name(format!("bare-mcp {name}")).spawn(move || worker(sh, n, rx, q, u, b, Some(tab))).map_err(|e| format!("cannot start a thread: {e}"))?;
         self.keep(h);
         map.insert(name.clone(), Slot { tx, url, busy });
         Ok(name)
@@ -438,8 +445,8 @@ impl Shared {
 
 /// The thread of one live session: it runs the calls of its queue in order, and the page between calls. It ends when its session is gone
 /// (`close`, or a failed open) or when the queue closes. A tab starts with `tab`: it opens its page first and reports to its opener.
-fn worker(shared: Arc<Shared>, name: String, rx: Receiver<Job>, url: Arc<Mutex<String>>, busy: Arc<AtomicUsize>, tab: Option<Tab>) {
-    let mut server = Server { shared: shared.clone(), live: HashMap::new() };
+fn worker(shared: Arc<Shared>, name: String, rx: Receiver<Job>, queue: Weak<SyncSender<Job>>, url: Arc<Mutex<String>>, busy: Arc<AtomicUsize>, tab: Option<Tab>) {
+    let mut server = Server { shared: shared.clone(), live: HashMap::new(), queue };
     if let Some(t) = tab {
         server.begin_tab(&name, t);
         server.publish(&name, &url);
@@ -464,6 +471,10 @@ fn worker(shared: Arc<Shared>, name: String, rx: Receiver<Job>, url: Arc<Mutex<S
                 },
             }
         };
+        if let Some(pending) = &job.wake {
+            pending.store(false, Ordering::SeqCst);
+            continue;
+        }
         server.run_job(job, Some(&busy));
         server.publish(&name, &url);
     }
@@ -480,6 +491,24 @@ struct Tab {
 }
 
 impl Server {
+    /// The pages of `session` wake this worker when they have news: a reply, or a WebSocket message. Then `tick_live` asks for a tick
+    /// each second, not every 4 ms. At most one wake waits in the queue, so wakes never fill it. A full queue drops the wake: the worker has calls to run, and it
+    /// ticks its pages after them.
+    fn wake_on_done(&self, session: &mut Session) {
+        let (queue, pending) = (self.queue.clone(), Arc::new(AtomicBool::new(false)));
+        session.wake_on_done(move || {
+            let Some(tx) = queue.upgrade() else { return };
+            if pending.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            let done: Box<dyn FnOnce(Value) + Send> = Box::new(|_| {});
+            let job = Job { key: None, params: Value::Null, cancel: Arc::new(AtomicBool::new(true)), started: false, t0: Instant::now(), done, wake: Some(pending.clone()) };
+            if tx.try_send(job).is_err() {
+                pending.store(false, Ordering::SeqCst);
+            }
+        });
+    }
+
     /// One slice of work for each live page. Gives when the next task of a page is due.
     fn tick_live(&mut self) -> Option<Instant> {
         self.live.values_mut().filter_map(|l| l.session.tick()).min()
@@ -670,6 +699,7 @@ impl Server {
         let net = if args.get("fresh").and_then(Value::as_bool) == Some(true) { bare_net::http::Client::new() } else { lock(&self.shared.net).fork() };
         let mut session = Session::with_client(&opt, net);
         session.ready_wait = true;
+        self.wake_on_done(&mut session);
         let dir = args.get("downloads_dir").and_then(Value::as_str).map_or_else(|| std::env::temp_dir().join(format!("bare-mcp-{}-downloads", std::process::id())), std::path::PathBuf::from);
         let dl = Downloads::new(dir);
         session.set_downloads(dl.clone());
@@ -1276,6 +1306,7 @@ impl Server {
             session.preload(st);
         }
         session.ready_wait = true;
+        self.wake_on_done(&mut session);
         let dl = Downloads::new(std::env::temp_dir().join(format!("bare-mcp-{}-downloads", std::process::id())));
         session.set_downloads(dl.clone());
         self.live.insert(name.to_string(), Live { session, opt, red, vars, lines: 0, dl, told: Default::default() });
@@ -1768,10 +1799,13 @@ mod instructions_tests {
 }
 
 #[cfg(test)]
+mod wake_tests;
+
+#[cfg(test)]
 mod dispatch_tests {
     use super::*;
 
-    fn test_shared() -> Arc<Shared> {
+    pub(super) fn test_shared() -> Arc<Shared> {
         let (out, _output) = mpsc::channel();
         Arc::new(Shared {
             saved: Mutex::new(HashMap::new()), runs: AtomicU32::new(0),
@@ -1788,7 +1822,7 @@ mod dispatch_tests {
         let job = Job {
             key: None, params: json!({"name":"act","arguments":{"expect":"expect title=\"Saved\""}}),
             cancel: Arc::new(AtomicBool::new(false)), started: true, t0: Instant::now(),
-            done: Box::new(move |result| { let _ = tx.send(result); }),
+            done: Box::new(move |result| { let _ = tx.send(result); }), wake: None,
         };
         shared.finish(job, error_result("internal error: the call panicked"));
         let result = rx.recv().unwrap();
@@ -1802,10 +1836,10 @@ mod dispatch_tests {
         let shared = test_shared();
         let (tx, _rx) = mpsc::sync_channel(QUEUE);
         lock(&shared.sessions).insert("a".into(), Slot {
-            tx, url: Arc::new(Mutex::new("(no document: load failed at #target)".into())),
+            tx: Arc::new(tx), url: Arc::new(Mutex::new("(no document: load failed at #target)".into())),
             busy: Arc::new(AtomicUsize::new(1)),
         });
-        let mut server = Server { shared, live: HashMap::new() };
+        let mut server = Server { shared, live: HashMap::new(), queue: Weak::new() };
         assert!(server.sessions().contains("#target"), "a diagnostic was treated as a URL");
     }
 
@@ -1815,7 +1849,7 @@ mod dispatch_tests {
         let session = Session::new(&opt);
         let dl = Downloads::new(std::env::temp_dir().join(format!("bare-cancel-unit-{}", std::process::id())));
         let live = Live { session, opt, dl, red: Redactor::default(), vars: HashMap::new(), lines: 0, told: Default::default() };
-        let mut server = Server { shared: test_shared(), live: HashMap::from([("main".into(), live)]) };
+        let mut server = Server { shared: test_shared(), live: HashMap::from([("main".into(), live)]), queue: Weak::new() };
         set_cancel(Some(Arc::new(AtomicBool::new(true))));
         let result = server.run_live_typed(&json!({}), "cookie set should_not_run yes");
         set_cancel(None);
@@ -1830,10 +1864,10 @@ mod dispatch_tests {
         tx.send(Job {
             key: None, params: json!({"name": "snapshot", "arguments": {"session": "a"}}),
             cancel: Arc::new(AtomicBool::new(false)), started: false, t0: Instant::now(),
-            done: Box::new(move |_| { let _ = done_tx.send(()); }),
+            done: Box::new(move |_| { let _ = done_tx.send(()); }), wake: None,
         }).unwrap();
         lock(&shared.sessions).insert("a".into(), Slot {
-            tx, url: Arc::new(Mutex::new(String::new())), busy: Arc::new(AtomicUsize::new(1)),
+            tx: Arc::new(tx), url: Arc::new(Mutex::new(String::new())), busy: Arc::new(AtomicUsize::new(1)),
         });
         // A pending call must stay with this owner, rather than being dispatched through a newly freed name.
         let _ = shared.retire("a", &rx);

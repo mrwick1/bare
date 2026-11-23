@@ -10,6 +10,8 @@ mod h2;
 mod hpack;
 pub mod http;
 pub mod parallel;
+#[cfg(test)]
+mod parallel_wake_tests;
 pub mod replay;
 pub mod tcp;
 pub mod trace;
