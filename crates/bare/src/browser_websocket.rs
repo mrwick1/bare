@@ -13,7 +13,7 @@
 //!
 //! Gates: no `permessage-deflate`; no `ws:` through an HTTP proxy; a message is at most `MAX_MESSAGE` bytes (close 1009).
 
-use crate::browser::{Browser, Dom, R};
+use crate::browser::{Dom, R};
 use crate::browser_scoped::*;
 use crate::eng::{Eng, Ops};
 use bare_js_api::{Args, Engine, Local, Persistent, Type};
@@ -199,53 +199,51 @@ fn socket_thread(client: Client, url: Url, protocols: Vec<String>, origin: Optio
     }
 }
 
-impl<E: Eng> Browser<E> {
-    /// Give the page what the sockets received: one task for each event, with a microtask checkpoint. A socket that closed is dropped.
-    pub(crate) fn run_sockets(&mut self) -> R<E, usize> {
-        let dom = self.dom.clone();
-        let evs: Vec<(E::Raw, String, Event)> = {
-            let mut socks = dom.fetch.sockets.borrow_mut();
-            let mut evs = Vec::new();
-            socks.retain_mut(|k| {
-                k.pull();
-                let mut open = true;
-                for e in k.got.drain(..) {
-                    open &= !matches!(e, Event::Closed(..) | Event::Failed(_));
-                    evs.push((self.it.persistent_value(&k.cb), k.url.clone(), e));
-                }
-                open
-            });
-            evs
-        };
-        let n = evs.len();
-        for (cb, url, e) in evs {
-            if let Event::Failed(why) = &e {
-                let text = format!("WebSocket connection to '{url}' failed: {why}");
-                crate::browser_console::push_text(&dom, &mut self.it, crate::browser_console::ConsoleLevel::Error, &text);
+/// Give the page what the sockets received: one task for each event, with a microtask checkpoint. A socket that closed is dropped.
+/// `Browser::run_streams` calls it with its engine.
+pub(crate) fn run_sockets<E: Eng>(dom: &Dom<E>, it: &mut E::Vm) -> R<E, usize> {
+    let evs: Vec<(E::Raw, String, Event)> = {
+        let mut socks = dom.fetch.sockets.borrow_mut();
+        let mut evs = Vec::new();
+        socks.retain_mut(|k| {
+            k.pull();
+            let mut open = true;
+            for e in k.got.drain(..) {
+                open &= !matches!(e, Event::Closed(..) | Event::Failed(_));
+                evs.push((it.persistent_value(&k.cb), k.url.clone(), e));
             }
-            self.it.host_scope_o(|it| {
-                run::<E, ()>(it, |s| {
-                    let f = s.engine().raw_local(&cb);
-                    let args = match e {
-                        Event::Open(p) => vec![s.number(0.0), s.string(&p)?],
-                        Event::Text(t) => {
-                            s.charge((t.len() / 64) as u64)?;
-                            vec![s.number(1.0), s.string(&t)?]
-                        }
-                        Event::Binary(b) => {
-                            s.charge((b.len() / 64) as u64)?;
-                            vec![s.number(2.0), s.new_array_buffer(b)?]
-                        }
-                        Event::Closed(code, reason, clean) => vec![s.number(3.0), s.number(f64::from(code)), s.string(&reason)?, s.boolean(clean)],
-                        Event::Failed(why) => vec![s.number(4.0), s.string(&why)?],
-                    };
-                    let undef = s.undefined();
-                    s.call(f, undef, &args)?;
-                    Ok(())
-                })?;
-                it.host_checkpoint().map(|_| ())
-            })?;
+            open
+        });
+        evs
+    };
+    let n = evs.len();
+    for (cb, url, e) in evs {
+        if let Event::Failed(why) = &e {
+            let text = format!("WebSocket connection to '{url}' failed: {why}");
+            crate::browser_console::push_text(dom, it, crate::browser_console::ConsoleLevel::Error, &text);
         }
-        Ok(n)
+        it.host_scope_o(|it| {
+            run::<E, ()>(it, |s| {
+                let f = s.engine().raw_local(&cb);
+                let args = match e {
+                    Event::Open(p) => vec![s.number(0.0), s.string(&p)?],
+                    Event::Text(t) => {
+                        s.charge((t.len() / 64) as u64)?;
+                        vec![s.number(1.0), s.string(&t)?]
+                    }
+                    Event::Binary(b) => {
+                        s.charge((b.len() / 64) as u64)?;
+                        vec![s.number(2.0), s.new_array_buffer(b)?]
+                    }
+                    Event::Closed(code, reason, clean) => vec![s.number(3.0), s.number(f64::from(code)), s.string(&reason)?, s.boolean(clean)],
+                    Event::Failed(why) => vec![s.number(4.0), s.string(&why)?],
+                };
+                let undef = s.undefined();
+                s.call(f, undef, &args)?;
+                Ok(())
+            })?;
+            it.host_checkpoint().map(|_| ())
+        })?;
     }
+    Ok(n)
 }

@@ -2893,7 +2893,7 @@ impl<E: Eng> Browser<E> {
         if self.streams_ready() != Some(true) {
             return Ok(0);
         }
-        let sockets = if self.dom.fetch.sockets.borrow().is_empty() { 0 } else { self.run_sockets()? };
+        let sockets = if self.dom.fetch.sockets.borrow().is_empty() { 0 } else { crate::browser_websocket::run_sockets(&self.dom, &mut self.it)? };
         let dom = self.dom.clone();
         let lim = dom.fl();
         let msgs: Vec<((E::Obj, u64), StreamMsg)> = {
