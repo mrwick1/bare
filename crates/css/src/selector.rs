@@ -36,9 +36,9 @@
 //! - `:has()`, the `of S` part of `:nth-child()`, and `:only-of-type`. A rule that
 //!   uses them is thrown away, like an unknown pseudo-class. (Chrome also throws away `:-moz-placeholder` and
 //!   the other prefixed ones that it does not know. So do we.)
-//! - Pseudo-elements (`::before`, and the old `:before` and `:after`) style a part that is not in the DOM. They are valid at
-//!   the end of a selector, but they never match, so `li::before, p` styles only `p` (as in Chrome). Module 4 may bring back
-//!   `::before` and `::after`, which make boxes.
+//! - Pseudo-elements style a part that is not in the DOM. They are valid at the end of a selector, but they match no element, so
+//!   `li::before, p` styles only `p` (as in Chrome). `::before` and `::after` (and the old `:before` and `:after`) become `Simple::Gen`:
+//!   the cascade uses those rules for the boxes that they make. The others never match.
 //! - Namespaces (`svg|a`).
 //! - The form pseudo-classes (`:disabled`, `:checked`, ...) are in `form.rs`.
 //! - `:visited`, `:target`, `:valid` and `:invalid` are valid, but they never match. The user action pseudo-classes (`:hover`,
@@ -105,6 +105,10 @@ fn simple_bytes(s: &Simple) -> usize {
         _ => 0,
     }
 }
+
+/// `Simple::Gen` of `::before`, and of `::after`.
+pub const BEFORE: u8 = 0;
+pub const AFTER: u8 = 1;
 
 /// The two pseudo-elements that reach into a shadow tree (CSS Scoping).
 #[derive(Debug, PartialEq)]
@@ -178,6 +182,9 @@ pub enum Simple {
     Form(crate::form::Form),
     /// `:visited` and friends. Never true.
     Never,
+    /// `::before` (`BEFORE`) or `::after` (`AFTER`) at the end of the selector. It matches no element (`querySelector` finds none). The
+    /// cascade takes it out of the rule and offers the rule for the box that the element makes (`cascade.rs`, `Styles::generated`).
+    Gen(u8),
     /// `:hover` and the other user action pseudo-classes. One variant: an arm for each in `simple_matches` slows every other test.
     User(User),
     /// `:not(.a, b)`: true when none of the compounds match. Each one is a list of simple selectors.
@@ -322,6 +329,8 @@ enum Pe {
     No,
     /// One that never matches.
     Never,
+    /// `::before` or `::after`: `Simple::Gen`.
+    Gen(u8),
     /// `::slotted()` or `::part()`: kept in `Parser::pseudo`.
     Taken,
 }
@@ -485,6 +494,10 @@ impl Parser<'_, '_> {
                     self.tokens.next();
                     match self.pseudo_element(depth, counts)? {
                         Pe::Never => self.simples.push(Simple::Never),
+                        Pe::Gen(which) => {
+                            self.simples.push(Simple::Gen(which));
+                            counts[2] += 1;
+                        }
                         Pe::Taken => taken = Some(self.simples.len() - base),
                         Pe::No => {
                             let simple = self.pseudo(depth, counts)?;
@@ -532,7 +545,8 @@ impl Parser<'_, '_> {
         let known = KNOWN.iter().any(|k| name.eq_ignore_ascii_case(k)) || name.starts_with("-webkit-");
         self.skip_space();
         let end = matches!(self.tokens.peek(), None | Some(Token::Comma));
-        (known && end && depth == 0).then_some(Pe::Never)
+        let generated = [BEFORE, AFTER].into_iter().find(|&w| name.eq_ignore_ascii_case(OLD[w as usize]));
+        (known && end && depth == 0).then_some(generated.map_or(Pe::Never, Pe::Gen))
     }
 
     /// After `::slotted(` or `::part(`: the argument and the `)`. `::part()` may have pseudo-classes after it. Only a sheet that can use the
@@ -1051,7 +1065,11 @@ mod tests {
             assert!(parse(text).is_some(), "{text:?} should parse");
         }
         assert_eq!(parse("li::before, p").unwrap().len(), 2);
-        assert_eq!(parse("a::after").unwrap()[0].compounds[0].simples.last(), Some(&Simple::Never));
+        assert_eq!(parse("a::after").unwrap()[0].compounds[0].simples.last(), Some(&Simple::Gen(AFTER)));
+        assert_eq!(parse("li:BEFORE").unwrap()[0].compounds[0].simples.last(), Some(&Simple::Gen(BEFORE)));
+        assert_eq!(parse("p::first-line").unwrap()[0].compounds[0].simples.last(), Some(&Simple::Never));
+        // A pseudo-element counts like a tag.
+        assert_eq!(parse("a::before").unwrap()[0].specificity, 2);
     }
 
     #[test]

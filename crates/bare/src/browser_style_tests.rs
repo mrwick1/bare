@@ -882,5 +882,5 @@ fn prototype_key_order() {
     assert_eq!(l.len(), EXPECTED_NAMES, "{names}");
     assert_eq!(js(&mut b, "Object.getOwnPropertyNames(Object.getPrototypeOf(getComputedStyle(document.body))).length"), COMPUTED_NAMES.to_string());
 }
-const EXPECTED_NAMES: usize = 264;
-const COMPUTED_NAMES: usize = 266;
+const EXPECTED_NAMES: usize = 265;
+const COMPUTED_NAMES: usize = 267;
