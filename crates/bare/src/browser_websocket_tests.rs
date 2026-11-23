@@ -1,4 +1,4 @@
-//! Tests of `WebSocket` (`shims/websocket.js`): the connection always fails, as against a server that refuses it.
+//! Tests of `WebSocket` (`shims/websocket.js`): a connection that the server refuses fails with `error`, then `close`.
 
 use crate::browser_fetch_tests::{reply, serve};
 use crate::browser_xhr_tests::{browser, js, settle};

@@ -14,3 +14,6 @@ pub mod replay;
 pub mod tcp;
 pub mod trace;
 pub mod vclock;
+pub mod ws;
+#[cfg(test)]
+mod ws_tests;
