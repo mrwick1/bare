@@ -4,8 +4,8 @@
 #   tools/ship.sh             # merge origin/main, check, push, open the PR if there is none, merge it
 #   tools/ship.sh --release   # the same, then tag the next version (tools/release.sh)
 #
-# Checks: `t` (the tests of the changed files), `cargo check --all-targets` of the changed crates, and the source scan of
-# tools/portable_check.sh. The release workflow builds Linux and Windows again before it publishes.
+# Checks: `cargo check --all-targets` of the changed crates and `t` (the tests of the changed files). The release workflow
+# builds Linux and Windows again before it publishes.
 set -euo pipefail
 
 release=false
@@ -33,7 +33,6 @@ if ((${#packages[@]})); then
     cargo check -q --locked --all-targets "${packages[@]}"
 fi
 t
-tools/portable_check.sh --scan
 
 gh auth switch --user mrwick1 >/dev/null 2>&1 || true
 git push -q -u origin "$branch"

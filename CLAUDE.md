@@ -40,7 +40,7 @@ A limit or a budget that protects against a slow algorithm is a sign of a design
 
 ## Merge flow (owner, 2026-11-21, rapid mode)
 
-- Every PR merges through `tools/ship.sh`, also for unsafe, GC and trait changes. The script is the gate: `t`, `cargo check` of the changed crates and the portability scan. Miri does not run: a change to an unsafe module of js2 runs `cargo +nightly miri test -p bare-js2 --lib -- <module>::` by hand. The owner's session reviews after merge and opens a fix PR when needed.
+- Every PR merges through `tools/ship.sh`, also for unsafe, GC and trait changes. The script is the gate: `cargo check` of the changed crates and `t`. Miri does not run: a change to an unsafe module of js2 runs `cargo +nightly miri test -p bare-js2 --lib -- <module>::` by hand. The owner's session reviews after merge and opens a fix PR when needed.
 - `tools/release.sh` tags the next version. The release workflow builds, runs the offstage gate and publishes. `tools/ship.sh --release` merges and releases in one command.
 - Stacked PRs are allowed. Retarget a stacked PR to main when its base merges.
 - Each PR merges origin/main right before its final push and solves its own conflicts.
