@@ -1,7 +1,7 @@
-//! `crypto`, `navigator`, `Blob`, `File`, `FormData` and `SubtleCrypto`.
+//! `crypto`, `navigator`, `Blob`, `File`, `FormData`, `SubtleCrypto` and `FileList`.
 //!
-//! Lazy: the six globals are accessors until a script first reads or writes one (the way `Intl` and `BigInt` work in the
-//! engine). A page that uses none of them pays for six functions. The first read makes every object of this file
+//! Lazy: the seven globals are accessors until a script first reads or writes one (the way `Intl` and `BigInt` work in the
+//! engine). A page that uses none of them pays for seven functions. The first read makes every object of this file
 //! once (`made`) and replaces its own accessor with a data property. A write replaces the accessor with the written value.
 //!
 //! `crypto` (Web Crypto): `getRandomValues(array)` and `randomUUID()`. The bytes come from `bare_tls::random::fill`, the
@@ -74,7 +74,7 @@ const MAX_ENTRIES: usize = 1 << 16;
 const MAX_URLS: usize = 1 << 12;
 const MAX_RANDOM: usize = 65536;
 
-const NAMES: [&str; 6] = ["crypto", "navigator", "Blob", "File", "FormData", "SubtleCrypto"];
+const NAMES: [&str; 7] = ["crypto", "navigator", "Blob", "File", "FormData", "SubtleCrypto", "FileList"];
 
 struct BlobData {
     bytes: Vec<u8>,
@@ -104,8 +104,8 @@ struct IterObj<E: Eng> {
 /// Every object made on the first use. All are roots.
 #[derive(Clone, Copy)]
 struct Made<E: Eng> {
-    /// `crypto`, `navigator`, `Blob`, `File`, `FormData`, `SubtleCrypto` (the order of `NAMES`).
-    glob: [E::Obj; 6],
+    /// `crypto`, `navigator`, `Blob`, `File`, `FormData`, `SubtleCrypto`, `FileList` (the order of `NAMES`).
+    glob: [E::Obj; 7],
     /// The one `crypto.subtle` object.
     subtle: E::Obj,
     langs: E::Obj,
@@ -282,11 +282,11 @@ fn text(out: &mut Vec<u8>, s: &str, norm: bool, esc: bool) {
 macro_rules! lazy {
     ($($f:ident $i:literal),*) => { $(fn $f<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> { lazy(d, s, $i, a) })* };
 }
-lazy!(lazy0 0, lazy1 1, lazy2 2, lazy3 3, lazy4 4, lazy5 5);
+lazy!(lazy0 0, lazy1 1, lazy2 2, lazy3 3, lazy4 4, lazy5 5, lazy6 6);
 
 pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
     let g = s.global();
-    for (i, h) in [lazy0 as HS<E>, lazy1, lazy2, lazy3, lazy4, lazy5].into_iter().enumerate() {
+    for (i, h) in [lazy0 as HS<E>, lazy1, lazy2, lazy3, lazy4, lazy5, lazy6].into_iter().enumerate() {
         let f = d.add_fn_s(s, h, NAMES[i], 0, HostFn::Method)?;
         s.define_accessor_str(g, NAMES[i], Some(f), Some(f), Attrs { writable: false, enumerable: i < 2, configurable: true })?;
     }
@@ -436,6 +436,9 @@ fn make<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, Made<E>> {
     s.set_prototype_of(file, Some(blob))?;
     getter(d, s, fp, "name", file_name_get)?;
     getter(d, s, fp, "lastModified", file_modified)?;
+    // FileList: the interface only, so that `x instanceof FileList` works. `input.files` is an array, so no FileList is made.
+    let flp = proto(d, s, op_, "FileList")?;
+    let file_list = iface(d, s, "FileList", 0, subtle_illegal, flp)?;
 
     // FormData and its iterator
     let fo = proto(d, s, op_, "FormData")?;
@@ -451,8 +454,8 @@ fn make<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, Made<E>> {
     let ip = plain(d, s, ip)?;
     op(d, s, ip, "next", 0, iter_next)?;
 
-    let [crypto, navigator, blob, file, form, subtle_ctor, subtle, langs, uad, brands, bp, fp, fo, ip] = [crypto, navigator, blob, file, form, subtle_ctor, subtle, langs, uad, brands, bp, fp, fo, ip].map(|l| lid::<E>(s, l));
-    Ok(Made { glob: [crypto, navigator, blob, file, form, subtle_ctor], subtle, langs, uad, brands, blob_p: bp, file_p: fp, form_p: fo, iter_p: ip })
+    let [crypto, navigator, blob, file, form, subtle_ctor, file_list, subtle, langs, uad, brands, bp, fp, fo, ip] = [crypto, navigator, blob, file, form, subtle_ctor, file_list, subtle, langs, uad, brands, bp, fp, fo, ip].map(|l| lid::<E>(s, l));
+    Ok(Made { glob: [crypto, navigator, blob, file, form, subtle_ctor, file_list], subtle, langs, uad, brands, blob_p: bp, file_p: fp, form_p: fo, iter_p: ip })
 }
 
 fn need<'s, E: Eng>(s: &mut Sc<'s, E>, a: Args<'s>, n: usize, what: &str) -> Res<'s, ()> {
