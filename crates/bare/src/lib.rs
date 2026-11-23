@@ -186,6 +186,8 @@ mod browser_stream_tests;
 #[cfg(test)]
 mod browser_loader_tests;
 #[cfg(test)]
+mod browser_loader_trackers_tests;
+#[cfg(test)]
 mod browser_current_script_tests;
 #[cfg(test)]
 mod browser_canvas_tests;

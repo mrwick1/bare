@@ -381,6 +381,8 @@ pub struct Resource {
 pub enum LoadError {
     /// The request failed: DNS, connect, TLS validation, or a bad reply.
     Network(String),
+    /// The host is on the tracker list (`bare_net::blocklist`): no request was made.
+    Blocked,
     /// A redirect is invalid, too deep, or would downgrade HTTPS.
     Redirect,
     Status(u16),
@@ -403,6 +405,7 @@ impl fmt::Display for LoadError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             LoadError::Network(e) => write!(f, "request failed: {e}"),
+            LoadError::Blocked => write!(f, "blocked: tracker host"),
             LoadError::Redirect => write!(f, "resource redirect refused"),
             LoadError::Status(s) => write!(f, "status {s}"),
             LoadError::Mime(Some(m)) => write!(f, "content type {m:?} is not allowed here"),
@@ -475,7 +478,7 @@ pub fn fetch(client: &mut http::Client, target: &Target, limits: &Limits, deadli
     let mut redirects = 0;
     let mut streamed = loop {
         if Instant::now() >= deadline { return Err(LoadError::TimedOut); }
-        let streamed = client.send_stream_cached(&http::Request::get(&current)).map_err(|e| LoadError::Network(e.to_string()))?;
+        let streamed = client.send_stream_cached(&http::Request::get(&current)).map_err(|e| if e.is::<bare_net::blocklist::Blocked>() { LoadError::Blocked } else { LoadError::Network(e.to_string()) })?;
         if !matches!(streamed.response.status, 301 | 302 | 303 | 307 | 308) { break streamed; }
         if redirects == 20 { return Err(LoadError::Redirect); }
         let Some(location) = streamed.response.header("location") else { break streamed };
