@@ -1,12 +1,16 @@
 //! WebSocket client (RFC 6455) on a new HTTP/1.1 connection of `http.rs`.
 //!
 //! - `connect` sends the opening handshake: the cookies of the jar, the identity of the client, `Origin`, a random key and the
-//!   subprotocols. The reply must be `101` with the right `Sec-WebSocket-Accept`. No extension is offered, so one in the reply fails.
+//!   subprotocols. The reply must be `101` with the right `Sec-WebSocket-Accept`.
+//! - It offers `permessage-deflate` (RFC 7692) as Chrome does. When the server takes it, a message of the server with RSV1 is
+//!   compressed: the reader inflates it, up to the cap of the caller. The window stays from one message to the next, unless the
+//!   server sends `server_no_context_takeover`. The client sends its own messages without compression, as the RFC allows: no
+//!   compressor state, and no CPU for it. Another extension or setting in the reply fails the handshake.
 //! - The connection is split in a `Reader` and a `Writer`, as the HTTP/2 client does (`h2.rs`). The reader waits on the socket
 //!   (`peek`), then takes the stream for one read only. So a writer never waits behind a reader that waits for the peer, and no
 //!   thread polls. A writer takes the stream for one frame.
 //! - The reader puts fragments together, answers a ping with a pong and a close with a close. It checks each frame: a masked
-//!   frame, a set RSV bit, an unknown opcode or a bad control frame is a protocol error (1002), a text that is not UTF-8 is 1007,
+//!   frame, an RSV bit that no extension set, an unknown opcode or a bad control frame is a protocol error (1002), a text that is not UTF-8 is 1007,
 //!   and a message over the cap of the caller is 1009. The reader then sends a close with that code and stops.
 //! - Each frame of the client is masked with 4 bytes from the OS random source. A `Writer` takes them 64 at a time.
 
@@ -16,6 +20,7 @@ use std::io::{self, ErrorKind, Write};
 use std::net::{Shutdown, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use flate2::{Decompress, FlushDecompress};
 
 type Error = Box<dyn std::error::Error>;
 
@@ -56,14 +61,14 @@ fn lock(m: &Mutex<Stream>) -> MutexGuard<'_, Stream> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Open a WebSocket. `url` has the scheme `http` or `https` (for `ws` and `wss`). Gives the reader, the writer and the subprotocol
-/// that the server chose (empty when none).
-pub fn connect(client: &Client, url: &Url, protocols: &[String], origin: Option<&str>, max: usize) -> Result<(Reader, Writer, String), Error> {
+/// Open a WebSocket. `url` has the scheme `http` or `https` (for `ws` and `wss`). Gives the reader, the writer, the subprotocol
+/// that the server chose and the extensions that it took (empty when none).
+pub fn connect(client: &Client, url: &Url, protocols: &[String], origin: Option<&str>, max: usize) -> Result<(Reader, Writer, String, String), Error> {
     let mut key = [0u8; 16];
     bare_os::random::fill(&mut key)?;
     let key = proxy_base64(&key);
     let offer = protocols.join(", ");
-    let mut headers = vec![("Pragma", "no-cache"), ("Cache-Control", "no-cache"), ("Upgrade", "websocket"), ("Connection", "Upgrade"), ("Sec-WebSocket-Key", key.as_str()), ("Sec-WebSocket-Version", "13")];
+    let mut headers = vec![("Pragma", "no-cache"), ("Cache-Control", "no-cache"), ("Upgrade", "websocket"), ("Connection", "Upgrade"), ("Sec-WebSocket-Key", key.as_str()), ("Sec-WebSocket-Version", "13"), ("Sec-WebSocket-Extensions", "permessage-deflate; client_max_window_bits")];
     if let Some(o) = origin {
         headers.push(("Origin", o));
     }
@@ -85,9 +90,8 @@ pub fn connect(client: &Client, url: &Url, protocols: &[String], origin: Option<
     if reply.header("sec-websocket-accept") != Some(proxy_base64(&bare_tls::sha1::sha1(&seed)).as_str()) {
         return Err("Error during WebSocket handshake: Incorrect 'Sec-WebSocket-Accept' header value".into());
     }
-    if reply.header("sec-websocket-extensions").is_some_and(|v| !v.trim().is_empty()) {
-        return Err("Error during WebSocket handshake: Received an extension that was not offered".into());
-    }
+    let extensions = reply.headers.iter().filter(|(n, _)| n == "sec-websocket-extensions").map(|(_, v)| v.trim()).filter(|v| !v.is_empty()).collect::<Vec<_>>().join(", ");
+    let inflate = if extensions.is_empty() { None } else { Some(Inflate::of(&extensions)?) };
     let protocol = reply.header("sec-websocket-protocol").unwrap_or("").trim().to_string();
     if !protocol.is_empty() && !protocols.contains(&protocol) {
         return Err("Error during WebSocket handshake: 'Sec-WebSocket-Protocol' header value is not one that was offered".into());
@@ -95,7 +99,71 @@ pub fn connect(client: &Client, url: &Url, protocols: &[String], origin: Option<
     let sock = stream.socket().ok_or("no socket")?.try_clone()?;
     let sh = Arc::new(Shared { io: Mutex::new(stream), sock, closed: AtomicBool::new(false) });
     let w = Writer::new(sh.clone());
-    Ok((Reader { sh, buf: rest, frag: None, w: w.clone(), max }, w, protocol))
+    Ok((Reader { sh, buf: rest, frag: None, w: w.clone(), max, inflate }, w, protocol, extensions))
+}
+
+/// The inflate side of `permessage-deflate`.
+struct Inflate {
+    d: Decompress,
+    /// `server_no_context_takeover`: each message starts with an empty window.
+    reset: bool,
+}
+
+impl Inflate {
+    /// Read the reply of the server. Only `permessage-deflate` with the settings of RFC 7692, each once. `client_max_window_bits`
+    /// is taken and has no effect: the client does not compress.
+    fn of(value: &str) -> Result<Inflate, Error> {
+        let bad = || -> Error { format!("Error during WebSocket handshake: 'Sec-WebSocket-Extensions' header value has an extension that was not offered: {value}").into() };
+        let mut parts = value.split(';').map(str::trim);
+        if value.contains(',') || parts.next() != Some("permessage-deflate") {
+            return Err(bad());
+        }
+        let (mut seen, mut reset) = (Vec::new(), false);
+        for p in parts {
+            let (name, v) = p.split_once('=').map_or((p, None), |(n, v)| (n.trim(), Some(v.trim().trim_matches('"'))));
+            let bits = || v.is_some_and(|v| v.len() <= 2 && v.parse::<u8>().is_ok_and(|b| (8..=15).contains(&b)));
+            let ok = match name {
+                "server_no_context_takeover" => v.is_none(),
+                "client_no_context_takeover" => v.is_none(),
+                "server_max_window_bits" | "client_max_window_bits" => bits(),
+                _ => false,
+            };
+            if !ok || seen.contains(&name) {
+                return Err(bad());
+            }
+            seen.push(name);
+            reset |= name == "server_no_context_takeover";
+        }
+        // A window of 2^15 also reads a stream that was made with a smaller one.
+        Ok(Inflate { d: Decompress::new(false), reset })
+    }
+
+    /// Inflate one message: its data, then the 4 bytes that the server took off its end. More than `max` bytes is 1009.
+    fn message(&mut self, mut data: Vec<u8>, max: usize) -> Result<Vec<u8>, Stop> {
+        data.extend_from_slice(&[0, 0, 0xff, 0xff]);
+        let mut out = Vec::with_capacity(data.len().saturating_mul(3).clamp(64, max.saturating_add(1)));
+        let mut at = 0;
+        loop {
+            let before = self.d.total_in();
+            self.d.decompress_vec(&data[at..], &mut out, FlushDecompress::Sync).map_err(|_| Stop::Protocol(1002, "a compressed message does not inflate"))?;
+            at += (self.d.total_in() - before) as usize;
+            if out.len() > max {
+                return Err(Stop::Protocol(1009, "a message is bigger than the cap"));
+            }
+            if out.len() < out.capacity() {
+                // Room was left, so the inflater took all that it could.
+                if at < data.len() {
+                    return Err(Stop::Protocol(1002, "a compressed message does not inflate"));
+                }
+                break;
+            }
+            out.reserve(out.capacity().min(max + 1 - out.len()).max(1));
+        }
+        if self.reset {
+            self.d.reset(false);
+        }
+        Ok(out)
+    }
 }
 
 /// Sends frames. A clone shares the connection.
@@ -187,10 +255,12 @@ fn mask(data: &mut [u8], key: [u8; 4]) {
 pub struct Reader {
     sh: Arc<Shared>,
     buf: Vec<u8>,
-    /// The opcode and the bytes of a message in fragments.
-    frag: Option<(u8, Vec<u8>)>,
+    /// The opcode, the bytes and the RSV1 bit (compressed) of a message in fragments.
+    frag: Option<(u8, Vec<u8>, bool)>,
     w: Writer,
     max: usize,
+    /// `permessage-deflate`, when the server took it.
+    inflate: Option<Inflate>,
 }
 
 impl Reader {
@@ -211,7 +281,9 @@ impl Reader {
             self.fill(2)?;
             let (b0, b1) = (self.buf[0], self.buf[1]);
             let (fin, op) = (b0 & 0x80 != 0, b0 & 0x0f);
-            if b0 & 0x70 != 0 {
+            // RSV1 marks the first frame of a compressed message, and only with `permessage-deflate`.
+            let rsv1 = b0 & 0x40 != 0;
+            if b0 & 0x30 != 0 || rsv1 && (self.inflate.is_none() || !matches!(op, TEXT | BINARY)) {
                 return Err(Stop::Protocol(1002, "a frame has an RSV bit set"));
             }
             if b1 & 0x80 != 0 {
@@ -233,6 +305,7 @@ impl Reader {
                 return Err(Stop::Protocol(1002, "a control frame is too long or in fragments"));
             }
             let have = self.frag.as_ref().map_or(0, |f| f.1.len()) as u64;
+            // A compressed message is checked against the cap again when it is inflated.
             if len.saturating_add(have) > self.max as u64 {
                 return Err(Stop::Protocol(1009, "a message is bigger than the cap"));
             }
@@ -244,17 +317,17 @@ impl Reader {
                 PONG => {}
                 CLOSE => return self.on_close(&payload),
                 TEXT | BINARY if self.frag.is_some() => return Err(Stop::Protocol(1002, "a new message started inside a message in fragments")),
-                TEXT | BINARY if !fin => self.frag = Some((op, payload)),
-                TEXT | BINARY => return message(op, payload),
+                TEXT | BINARY if !fin => self.frag = Some((op, payload, rsv1)),
+                TEXT | BINARY => return self.message(op, payload, rsv1),
                 CONT => {
-                    let Some((first, mut data)) = self.frag.take() else {
+                    let Some((first, mut data, z)) = self.frag.take() else {
                         return Err(Stop::Protocol(1002, "a continuation frame has no message to continue"));
                     };
                     data.extend_from_slice(&payload);
                     if fin {
-                        return message(first, data);
+                        return self.message(first, data, z);
                     }
-                    self.frag = Some((first, data));
+                    self.frag = Some((first, data, z));
                 }
                 _ => return Err(Stop::Protocol(1002, "a frame has an unknown opcode")),
             }
@@ -303,6 +376,16 @@ impl Reader {
             }
         }
         Ok(())
+    }
+}
+
+impl Reader {
+    fn message(&mut self, op: u8, data: Vec<u8>, compressed: bool) -> Result<Message, Stop> {
+        let data = match (&mut self.inflate, compressed) {
+            (Some(z), true) => z.message(data, self.max)?,
+            _ => data,
+        };
+        message(op, data)
     }
 }
 
