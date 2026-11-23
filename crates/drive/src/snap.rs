@@ -416,18 +416,27 @@ fn walk(cx: &Cx, root: NodeId, mode: Mode, clicks: &HashSet<NodeId>, out: &mut V
             l.name.clear();
         }
     }
+    // A `clickable` with no name, no state and no line below it tells the agent nothing.
+    let at = |i: usize| match &out[i] {
+        Item::El(l) => l.depth,
+        Item::Text(d, _) => *d,
+    };
+    let blank: Vec<bool> = (0..out.len()).map(|i| matches!(&out[i], Item::El(l) if l.role == "clickable" && l.name.is_empty() && l.flags.is_empty() && (i + 1 == out.len() || at(i + 1) <= l.depth))).collect();
     // A text run that only repeats the name of the element next to it (the text of a `<label>`) adds nothing.
     let names: Vec<Option<String>> = out.iter().map(|i| if let Item::El(l) = i { Some(l.name.clone()) } else { None }).collect();
     let mut i = 0;
     out.retain(|it| {
         let k: usize = i;
         i += 1;
+        if blank[k] {
+            return false;
+        }
         let Item::Text(_, t) = it else { return true };
         ![k.wrapping_sub(1), k + 1].iter().any(|&j| names.get(j).and_then(|n| n.as_deref()) == Some(t.as_str()))
     });
 }
 
-/// Make each table row of plain cells one line: `row: "1" | [e3] | "$3.99"`. A cell shows its text and the refs of the elements in it;
+/// Make each table row of plain cells one line: `row: 1 | [e3] | $3.99`. A cell shows its text and the refs of the elements in it;
 /// those elements follow on their own lines, one level up. The row and column relation stays, and the text of a cell is said once. A
 /// row that holds another row (a layout table) keeps its lines.
 fn rows(out: &mut Vec<Item>) {
@@ -624,7 +633,8 @@ impl Row {
 /// `seen`: what the last snapshot showed. Text runs are never marked; `diff` keeps them if they are new.
 fn format(p: &mut Page, refs: &mut Refs, items: Vec<Item>, seen: Option<&Seen>) -> Vec<Row> {
     let doc = p.generation();
-    let controls: Vec<NodeId> = items.iter().filter_map(|i| if let Item::El(l) = i { Some(l).filter(|l| CONTROLS.contains(&l.role)).map(|l| l.node) } else { None }).collect();
+    let controls: Vec<NodeId> = items.iter().filter_map(|i| if let Item::El(l) = i { Some(l).filter(|l| CONTROLS.contains(&l.role) && l.role != "link").map(|l| l.node) } else { None }).collect();
+    // A link below the fold needs no state: `act` scrolls to it, and a page has many such links (85 on github.com, 12 % of its outline).
     let off = p.offscreen(&controls);
     let mut rows = Vec::with_capacity(items.len());
     for it in items {
@@ -635,19 +645,22 @@ fn format(p: &mut Page, refs: &mut Refs, items: Vec<Item>, seen: Option<&Seen>) 
                 rows.push(Row { depth, text, changed, node: None });
             }
             Item::El(mut l) => {
-                let r = refs.mint(p, l.node);
                 let h = Handle { doc, node: l.node };
                 let value = live(p, h, l.role, &mut l.flags);
                 if off.contains(&l.node) {
                     l.flags.push("offscreen".into());
                 }
                 let mut s = String::with_capacity(48);
-                let _ = write!(s, "[e{r}] {}", l.role);
+                // A plain table row has no ref: an agent acts on its cells' elements, which have their own.
+                if l.cells.is_empty() {
+                    let _ = write!(s, "[e{}] ", refs.mint(p, l.node));
+                }
+                s.push_str(l.role);
                 for (k, parts) in l.cells.iter().enumerate() {
                     s.push_str(if k == 0 { ":" } else { " |" });
                     for part in parts {
                         let _ = match part {
-                            Part::Text(t) => write!(s, " {t:?}"),
+                            Part::Text(t) => cell_text(&mut s, t),
                             Part::El(n) => write!(s, " [e{}]", refs.mint(p, *n)),
                         };
                     }
@@ -694,10 +707,16 @@ fn diff(rows: &[Row]) -> (Vec<usize>, Vec<String>) {
 /// A changed element that the last snapshot showed is always listed.
 const RUN: usize = 10;
 
-/// The role word of a row: `option` in `[e4] option "x"`.
+/// The text of a table cell, bare: `| $3.99 |`. Text that could read as a cell border, a ref or a quote, or that is empty, is quoted.
+fn cell_text(s: &mut String, t: &str) -> std::fmt::Result {
+    if t.is_empty() || t.contains(['|', '[', '"', '\\']) || t.trim() != t || t.chars().any(char::is_control) { write!(s, " {t:?}") } else { write!(s, " {t}") }
+}
+
+/// The role word of a row: `option` in `[e4] option "x"`, `row` in `row: 1 | 2`.
 fn row_role(r: &Row) -> Option<&str> {
     r.node?;
-    r.text.split_once("] ").map(|(_, t)| t.split(' ').next().unwrap_or(""))
+    let t = if r.text.starts_with("[e") { r.text.split_once("] ")?.1 } else { r.text.as_str() };
+    t.split([' ', ':']).next()
 }
 
 /// Cut each run of more than `RUN` new sibling rows with the same role (the options of a dropdown that opened) to its first `RUN`
@@ -721,10 +740,12 @@ fn collapse(rows: &[Row], idx: Vec<usize>, lines: Vec<String>, new: impl Fn(&Row
         }
         if keep < end {
             let rest: Vec<usize> = idx[keep..end].to_vec();
-            let span = |i: usize| rows[i].text.split_once(']').map_or("", |(a, _)| a).trim_start_matches('[').to_string();
+            // A plain table row has no ref, so a run of them has no span.
+            let span = |i: usize| rows[i].text.strip_prefix('[').and_then(|t| t.split_once(']')).map(|(a, _)| a.to_string());
+            let range = span(rest[0]).zip(span(rest[rest.len() - 1])).map_or(String::new(), |(a, b)| format!(" ({a}–{b})"));
             let parent = out.iter().rev().find(|l| l.len() - l.trim_start().len() < first.depth).and_then(|l| l.split_once("[e")).map(|(_, t)| t.split(']').next().unwrap_or(""));
             let how = parent.map_or("use find".to_string(), |e| format!("use find, or snapshot with root=e{e}"));
-            out.push(format!("{} … {} more {} rows ({}–{}); {how}", indent(first.depth), rest.len(), row_role(first).unwrap_or(""), span(rest[0]), span(rest[rest.len() - 1])));
+            out.push(format!("{} … {} more {} rows{range}; {how}", indent(first.depth), rest.len(), row_role(first).unwrap_or("")));
             groups.push(rest);
         }
         k = end;
