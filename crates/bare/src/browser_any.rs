@@ -132,6 +132,8 @@ macro_rules! fwd_try {
 }
 
 fwd! {
+    (&) fn blocks_settle(limit: f64) -> bool;
+    (&) fn settle_blocker(limit: f64) -> Option<(String, f64)>;
     (&) fn document() -> Rc<RefCell<Document>>;
     (&) fn document_url() -> Option<String>;
     (&) fn fetches_since(t: std::time::Instant) -> usize;

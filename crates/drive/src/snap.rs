@@ -390,8 +390,10 @@ pub fn settle(p: &mut Page) {
     loop {
         let (more, next) = p.tick();
         let now = std::time::Instant::now();
-        let (fetching, due) = p.browser().map_or((false, false), |b| (b.pending_fetches() > 0, b.next_scheduled_due().is_some_and(|d| d - b.now() <= 20.0)));
-        if (!more && !fetching && !due) || crate::run::cancelled() || now.duration_since(start) > std::time::Duration::from_millis(if fetching { 2000 } else { 300 }) {
+        // Loader work that can run now, or a task due within 20 ms, holds the settle. A quiet loop (an animation frame loop or an
+        // interval that changes nothing) does not: the engine's settle rule skips it, so a tick that ran it is no reason to go on.
+        let (fetching, due) = p.browser().map_or((false, more), |b| (b.pending_fetches() > 0, b.live_work() == Some(true) || b.blocks_settle(b.now() + 20.0)));
+        if (!fetching && !due) || crate::run::cancelled() || now.duration_since(start) > std::time::Duration::from_millis(if fetching { 2000 } else { 300 }) {
             break;
         }
         // No next time: the page stopped, but a `fetch` is still open (or a timer is due). Wait 5 ms, so the loop does not spin.
