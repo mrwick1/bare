@@ -10,8 +10,8 @@ The design process below is for performance work. A bug fix or a small change sk
 
 1. Write a failing test for the bug.
 2. Make the shortest fix.
-3. Run `t`. It runs the tests that cover the changed files (`t --for <file>` lists them). Without `t`, run `cargo test --locked -p <crate> <module>::`. CI runs `cargo test --workspace`.
-4. Open the PR and run `gh pr merge --auto --merge`. GitHub merges it when the checks pass. Do not wait for CI in the session.
+3. Run `t`. It runs the tests that cover the changed files (`t --for <file>` lists them). Without `t`, run `cargo test --locked -p <crate> <module>::`.
+4. Commit, write the PR description, then run `tools/ship.sh`. It checks, pushes and merges. There is no CI (owner, 2026-11-23).
 ## How to improve a part
 
 Do not patch hot spots one by one. A 10% gain on one benchmark row is not the goal. Look for a change in design that removes a whole kind of work.
@@ -40,7 +40,8 @@ A limit or a budget that protects against a slow algorithm is a sign of a design
 
 ## Merge flow (owner, 2026-11-21, rapid mode)
 
-- Every PR enables `gh pr merge --auto --merge`, also for unsafe, GC and trait changes. CI (check, windows, miri on the unsafe modules) is the gate. The owner's session reviews after merge and opens a fix PR when needed.
+- Every PR merges through `tools/ship.sh`, also for unsafe, GC and trait changes. The script is the gate: `cargo check` of the changed crates and `t`. Miri does not run: a change to an unsafe module of js2 runs `cargo +nightly miri test -p bare-js2 --lib -- <module>::` by hand. The owner's session reviews after merge and opens a fix PR when needed.
+- `tools/release.sh` tags the next version. The release workflow builds, runs the offstage gate and publishes. `tools/ship.sh --release` merges and releases in one command.
 - Stacked PRs are allowed. Retarget a stacked PR to main when its base merges.
 - Each PR merges origin/main right before its final push and solves its own conflicts.
 - A PR does not change `tools/fixtures/js/test262-js2-baseline.txt`. It gives its test262 counts in its progress file. The owner's session writes the baseline on main together with the full cost matrix.
