@@ -1376,7 +1376,7 @@ impl RuleSet {
     #[inline(never)]
     fn walk<const WANT: bool, const PENDING: bool, const TRACK: bool>(&self, doc: &Document, want: Option<NodeId>, keep: bool) -> Styles {
         let mut way = Way { want, path: Vec::new(), sorted: Vec::new(), on: false, at: 0 };
-        let mut styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), grids: Vec::new(), customs: var::Sets::default(), spaced: false, wrapping: false, kept: None, partial: false, generated: HashMap::default() };
+        let mut styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), grids: Vec::new(), customs: var::Sets::default(), spaced: false, wrapping: false, kept: None, partial: false, generated: HashMap::default(), pseudo_nodes: RefCell::default() };
         // Style 0 is the starting style. It is the parent style of the `html` element.
         let mut cx = Cx { viewport: self.viewport, root_font_size: 16.0, layer_order: self.layer_order(), declared: &self.side, inline: RefCell::default(), computed: RefCell::default(), grids: RefCell::default(), customs: RefCell::new(self.sets()), merges: RefCell::default() };
         let style_atom = doc.find_atom("style");
@@ -2629,6 +2629,9 @@ pub struct Styles {
     /// The styles of the `::before` and `::after` boxes, by `NodeId::index` of the element: `[before, after]`, `NONE` for no box. Only an
     /// element with a box is here (`RuleSet::style_generated`).
     generated: HashMap<u32, [u32; 2], BuildHasherDefault<Fnv>>,
+    /// The style of each `::before` and `::after` node of the document, by `NodeId::index`. `generated::sync` fills it before a layout:
+    /// the nodes are made after the cascade, and the styles may be shared then.
+    pseudo_nodes: RefCell<HashMap<u32, u32, BuildHasherDefault<Fnv>>>,
 }
 
 /// What `RuleSet::restyle` needs from the cascade that made the styles: the style cache and the indexes of the value lists, so
@@ -2662,7 +2665,7 @@ impl StyleChain {
     /// No element has a style yet. It is the size of `doc`: the document must not change while the chain is used.
     pub fn new(rules: &RuleSet, doc: &Document) -> StyleChain {
         let kept = StyleKeep { memo: Memo::default(), calcs: HashMap::default(), grids: grid::Kept::default(), rem: 16.0, base: 1 };
-        let styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), grids: Vec::new(), customs: rules.sets(), spaced: false, wrapping: false, kept: Some(Box::new(kept)), partial: true, generated: HashMap::default() };
+        let styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), grids: Vec::new(), customs: rules.sets(), spaced: false, wrapping: false, kept: Some(Box::new(kept)), partial: true, generated: HashMap::default(), pseudo_nodes: RefCell::default() };
         StyleChain {
             styles: Rc::new(styles),
             filter: AncestorFilter::new(rules.tracks()),
@@ -2776,11 +2779,44 @@ impl Styles {
     /// The style of an element. `None` for a node that is not an element, and for an element that is not shown
     /// (`display: none`, or inside one), unless it was asked for with `RuleSet::compute_for`.
     pub fn style(&self, node: NodeId) -> Option<&ComputedStyle> {
-        match self.of_node[node.index()] {
-            NONE => None,
-            i => Some(&self.styles[i as usize]),
+        match self.of_node.get(node.index()) {
+            Some(&NONE) => None,
+            Some(&i) => Some(&self.styles[i as usize]),
+            None if self.generated.is_empty() => None,
+            None => self.pseudo_style(node),
         }
     }
+
+    /// The style of a `::before` or `::after` node (`generated::sync`).
+    #[cold]
+    fn pseudo_style(&self, node: NodeId) -> Option<&ComputedStyle> {
+        let i = *self.pseudo_nodes.borrow().get(&(node.index() as u32))?;
+        self.styles.get(i as usize)
+    }
+
+    /// Say the styles of the `::before` and `::after` nodes: node and style, for each element and side of `generated_pairs`.
+    pub fn set_pseudo_nodes(&self, nodes: impl IntoIterator<Item = (NodeId, NodeId, u8)>) {
+        let mut map = self.pseudo_nodes.borrow_mut();
+        map.clear();
+        for (node, el, which) in nodes {
+            if let Some(&s) = self.generated.get(&(el.index() as u32)).and_then(|p| p.get(which as usize)).filter(|&&s| s != NONE) {
+                map.insert(node.index() as u32, s);
+            }
+        }
+    }
+
+    /// Does any element have a `::before` or `::after` box?
+    pub fn has_generated(&self) -> bool {
+        !self.generated.is_empty()
+    }
+
+    /// The elements and sides that have a `::before` or `::after` box, by `NodeId::index` of the element.
+    pub fn generated_pairs(&self) -> Vec<(u32, u8)> {
+        let mut out: Vec<(u32, u8)> = self.generated.iter().flat_map(|(&el, p)| (0..2u8).filter(|&w| p[w as usize] != NONE).map(move |w| (el, w))).collect();
+        out.sort_unstable();
+        out
+    }
+
 
     /// The different styles, without the order of the nodes. A question about the whole page ("does any style use
     /// `z-index`?") costs one look at each style, not one at each node.

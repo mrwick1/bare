@@ -193,10 +193,10 @@ impl Document {
         for id in live.iter().copied().chain(user.into_iter().flatten()).chain(watched).chain(removed) {
             keep.insert(self.tree_top(id).index());
         }
-        // A host and its shadow root, and a template and its contents, live and die together.
+        // A host and its shadow root, a template and its contents, and an element and its pseudo nodes live and die together.
         loop {
             let mut grew = false;
-            let links = self.shadow_of.iter().map(|(&h, &r)| (NodeId::from_index(h as usize), r)).chain(self.template_content.iter().map(|(&t, &c)| (NodeId::from_index(t as usize), c)));
+            let links = self.shadow_of.iter().map(|(&h, &r)| (NodeId::from_index(h as usize), r)).chain(self.template_content.iter().map(|(&t, &c)| (NodeId::from_index(t as usize), c))).chain(self.pseudo_links());
             for (a, b) in links.collect::<Vec<_>>() {
                 let (a, b) = (self.tree_top(a).index(), self.tree_top(b).index());
                 match (keep.contains(a), keep.contains(b)) {
@@ -241,6 +241,7 @@ impl Document {
         self.class_sets.get_mut().retain(|&k, _| !gone(k as u32));
         self.template_content.retain(|&k, _| !gone(k));
         self.shadow_of.retain(|&k, _| !gone(k));
+        pseudo::retain(&mut self.pseudo_of, &mut self.pseudo_hosts, &mut gone);
         self.shadow_host.retain(|&k, _| !gone(k));
         self.shadow_flags.retain(|&k, _| !gone(k));
         self.custom.retain(|&k, _| !gone(k));

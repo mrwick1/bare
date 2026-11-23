@@ -8,6 +8,7 @@ mod colors;
 pub mod content;
 pub mod modern_color;
 pub mod form;
+pub mod generated;
 pub mod grid;
 pub mod hints;
 pub mod matching;

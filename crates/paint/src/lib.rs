@@ -13,6 +13,8 @@ pub mod canvas;
 pub mod display;
 pub mod glyphs;
 pub mod hit;
+#[cfg(test)]
+mod hit_generated_tests;
 pub mod layer;
 pub mod png;
 pub mod svg;

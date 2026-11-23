@@ -936,6 +936,8 @@ pub(crate) mod tests {
         rules.add(&mut doc, ua, Origin::UserAgent);
         rules.add(&mut doc, css, Origin::Author);
         let styles = rules.compute(&doc);
+        // As the host does before a layout: the `::before` and `::after` nodes.
+        bare_css::generated::sync(&mut doc, &styles);
         let layout = crate::layout(&doc, &styles, (800.0, 600.0));
         (doc, layout)
     }
