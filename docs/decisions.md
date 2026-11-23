@@ -2470,3 +2470,9 @@ Phase 1 of `docs/design-agent-interface.md`. A standalone browser must not know 
 - `BARE_MCP_REPORT` is removed. `offstage` sets it; the variable now has no effect.
 - `--workspace N` and the `hyprctl` window rule are removed. `bare-mcp` takes no arguments. A host places a window through `WAYLAND_DISPLAY`. `offstage` does this with its own screens.
 - Breaking change: a client that starts `bare-mcp --workspace N` gets a usage error. Remove the argument.
+
+## The snapshot drops lines and marks that an agent does not use (2026-11-23)
+- A link outside the window has no `(offscreen)` state. Other controls keep it. `act` scrolls a link into view, and the mark was 12 % of the github.com outline (85 links). This changes the entry of 2026-11-12.
+- A plain table row has no ref. Its cells' elements keep their refs. A diff that counts a run of new rows gives no ref range for them.
+- The text of a table cell has no quotes. Text that is empty, has `|`, `[`, `"` or `\`, or starts or ends with a space keeps them.
+- A `clickable` with no name, no state and no line below it does not show.
