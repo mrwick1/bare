@@ -1,0 +1,31 @@
+# The Socket.IO chat (server.mjs on port ${PORT}, default 8790): join, the upgrade to WebSocket, messages with acks, the bot,
+# typing, an image both ways, a long message, a dropped connection and the reconnect.
+open http://127.0.0.1:${PORT}/
+timeout 15000
+fill css="#name" "alice"
+click css="#join"
+expect css="#status" text="online"
+expect title="chat alice"
+expect js "document.getElementById('users').textContent.includes('alice')"
+expect css="#transport" text="websocket"
+fill css="#text" "echo hi bare"
+press css="#text" Enter
+expect js "chat.acks.includes('1:ok')"
+expect js "[...document.querySelectorAll('#list li')].some(li => li.textContent === 'bothi bare')"
+type css="#text" "x"
+fill css="#text" ""
+click css="#image"
+expect js "chat.acks.includes('image:6')"
+fill css="#text" "image"
+press css="#text" Enter
+expect js "document.getElementById('images').textContent.includes('bot: 4 bytes [137.80.78.71]')"
+fill css="#text" "big 200000"
+press css="#text" Enter
+expect js "document.getElementById('list').textContent.includes('text of 200000 chars')"
+click css="#drop"
+expect css="#reconnects" text="reconnects 1"
+expect css="#transport" text="websocket"
+fill css="#text" "echo again"
+press css="#text" Enter
+expect js "[...document.querySelectorAll('#list li')].some(li => li.textContent === 'botagain')"
+expect js "chat.errors.length === 0"

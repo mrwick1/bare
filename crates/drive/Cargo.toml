@@ -19,3 +19,4 @@ serde_json = "1"
 [dev-dependencies]
 png = "0.18"
 bare-window = { path = "../window" }
+bare-tls = { path = "../tls" }

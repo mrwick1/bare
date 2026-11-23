@@ -1,0 +1,29 @@
+# The native WebSocket chat (`plain.html`, `/ws` of server.mjs on port ${PORT}, default 8790): the subprotocol, text and binary
+# echo, a long message, the pings of the server, a dropped connection and the reconnect, and a close of the server.
+open http://127.0.0.1:${PORT}/plain.html
+timeout 15000
+click css="#connect"
+expect css="#status" text="online"
+expect css="#proto" text="chat.v1"
+expect js "plain.events.includes('hello chat.v1')"
+fill css="#text" "echo hello plain"
+press css="#text" Enter
+expect js "[...document.querySelectorAll('#list li')].some(li => li.textContent === 'hello plain')"
+click css="#binary"
+expect js "document.getElementById('list').textContent.includes('bytes [1.2.3.255]')"
+fill css="#text" "big 300000"
+press css="#text" Enter
+expect js "document.getElementById('list').textContent.includes('text of 300000 chars')"
+# Stay open across two pings of the server (PING_MS, 5000 by default): a socket that does not answer them is dropped.
+expect js "(window.t0 = window.t0 || Date.now()) && Date.now() - window.t0 > 11000"
+expect css="#status" text="online"
+fill css="#text" "drop"
+press css="#text" Enter
+expect js "plain.events.includes('close 1006  false')"
+expect css="#reconnects" text="reconnects 1"
+expect css="#status" text="online"
+fill css="#text" "kick"
+press css="#text" Enter
+expect js "plain.events.includes('close 4000 kicked true')"
+expect css="#status" text="offline"
+expect js "!plain.events.includes('error')"

@@ -1,0 +1,13 @@
+# A socket that needs the HttpOnly cookie of a login (`/login`, then `/ws?auth=1` of server.mjs on port ${PORT}, default 8790).
+open http://127.0.0.1:${PORT}/plain.html?auth=1
+click css="#connect"
+expect js "plain.events.includes('close 1006  false')"
+expect js "document.cookie === ''"
+goto http://127.0.0.1:${PORT}/login
+expect url~"plain.html?auth=1"
+click css="#connect"
+expect css="#status" text="online"
+expect js "document.cookie === ''"
+fill css="#text" "echo signed in"
+press css="#text" Enter
+expect js "[...document.querySelectorAll('#list li')].some(li => li.textContent === 'signed in')"

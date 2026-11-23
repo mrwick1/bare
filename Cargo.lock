@@ -102,6 +102,7 @@ dependencies = [
  "bare-net",
  "bare-observe",
  "bare-paint",
+ "bare-tls",
  "bare-url",
  "bare-window",
  "png",

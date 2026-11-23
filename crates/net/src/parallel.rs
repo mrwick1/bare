@@ -176,6 +176,11 @@ pub fn on_end(f: impl Fn() + Send + Sync + 'static) {
     *ON_END.lock().unwrap() = Some(Arc::new(f));
 }
 
+/// Call the hook of `on_end` from a thread that is not a worker: a WebSocket reader that has a message for the page.
+pub fn wake() {
+    ended();
+}
+
 fn ended() {
     let hook = ON_END.lock().unwrap().clone();
     if let Some(f) = hook {
