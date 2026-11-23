@@ -8,8 +8,8 @@
 //!   `cb(kind, ...)` for each one, in its own task: 0 open (protocol), 1 text, 2 binary (an `ArrayBuffer`), 3 close (code, reason,
 //!   clean), 4 failed (why). The shim fires the events.
 //! - An open socket does not hold the page idle (`live_work_of(false)`), as an event stream does. `cb` is a persistent handle until the
-//!   close, so the `WebSocket` object stays alive while it is open. When the page goes away, the channels drop: the writer ends the
-//!   connection and the reader stops.
+//!   close, so the `WebSocket` object stays alive while it is open. When the page goes away, the channels drop: the writer sends a
+//!   close with 1001, as Chrome does, and ends the connection. The reader stops.
 //!
 //! Gates: no `permessage-deflate`; no `ws:` through an HTTP proxy; a message is at most `MAX_MESSAGE` bytes (close 1009).
 
@@ -143,15 +143,19 @@ fn socket_thread(client: Client, url: Url, protocols: Vec<String>, origin: Optio
         Ok(c) => c,
         Err(e) => {
             let _ = tx.send(Event::Failed(e.to_string()));
+            bare_net::parallel::wake();
             return;
         }
     };
-    if tx.send(Event::Open(protocol)).is_err() {
+    let gone = tx.send(Event::Open(protocol)).is_err();
+    bare_net::parallel::wake();
+    if gone {
         w.shutdown();
         return;
     }
     let stop = w.clone();
     let writer = std::thread::Builder::new().name("bare-websocket-write".into()).spawn(move || {
+        let mut ok = true;
         for m in out {
             let r = match m {
                 Out::Data(op, data) => {
@@ -162,10 +166,15 @@ fn socket_thread(client: Client, url: Url, protocols: Vec<String>, origin: Optio
                 Out::Close(code, reason) => w.close(code, &reason),
             };
             if r.is_err() {
+                ok = false;
                 break;
             }
         }
-        // The page went away, or a write failed: end the connection, so the reader stops too.
+        // The page went away (1001, as Chrome sends), or a write failed: end the connection, so the reader stops too. A socket that
+        // sent its close already sends nothing more.
+        if ok {
+            let _ = w.close(Some(1001), "");
+        }
         w.shutdown();
     });
     if writer.is_err() {
@@ -180,7 +189,10 @@ fn socket_thread(client: Client, url: Url, protocols: Vec<String>, origin: Optio
             Err(Stop::Io(_)) => Event::Closed(1006, String::new(), false),
         };
         let end = matches!(ev, Event::Closed(..) | Event::Failed(_));
-        if tx.send(ev).is_err() || end {
+        let gone = tx.send(ev).is_err();
+        // A window sleeps until a wake (`Page::wake_on_done`): without one, the message waits for the next tick.
+        bare_net::parallel::wake();
+        if gone || end {
             stop.shutdown();
             return;
         }

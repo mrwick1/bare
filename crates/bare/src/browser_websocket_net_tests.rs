@@ -158,3 +158,18 @@ fn bad_subprotocols_and_mixed_content_throw() {
         finished = true");
     assert_eq!(got, "SyntaxError|SyntaxError|SyntaxError|SyntaxError");
 }
+
+#[test]
+fn a_page_that_goes_away_closes_its_socket_with_1001() {
+    let (port, h) = server(|s| {
+        s.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        assert_eq!(read_frame(s), (8, 1001u16.to_be_bytes().to_vec()));
+    });
+    let mut b = browser(port);
+    b.set_document_url(&format!("http://127.0.0.1:{port}/page.html")).unwrap();
+    js(&mut b, "var finished = false, ws = new WebSocket('/'); ws.onopen = function () { finished = true; };");
+    settle(&mut b);
+    assert_eq!(js(&mut b, "ws.readyState"), "1");
+    drop(b);
+    h.join().unwrap();
+}

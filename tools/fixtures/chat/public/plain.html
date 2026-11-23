@@ -1,0 +1,63 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>plain</title><link rel="stylesheet" href="style.css"></head>
+<body>
+<header>
+  <button id="connect">Connect</button>
+  <span id="status" class="status off">offline</span>
+  <span id="reconnects" class="status">reconnects 0</span>
+  <span id="proto" class="status"></span>
+</header>
+<main>
+  <ul id="list" aria-label="Messages"></ul>
+  <form id="form">
+    <input id="text" aria-label="Message" placeholder="echo text, big N, kick, drop" autocomplete="off">
+    <button id="send">Send</button>
+    <button id="binary" type="button">Send bytes</button>
+  </form>
+</main>
+<aside><h3>Log</h3><ul id="log"></ul></aside>
+<script>
+// A chat client on the native WebSocket: JSON messages, binary echo, reconnect with backoff after an unclean close.
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var ws = null, tries = 0, reconnects = 0, wanted = false;
+  window.plain = { events: [] };
+  function log(t) { window.plain.events.push(t); var li = document.createElement('li'); li.textContent = t; $('log').appendChild(li); }
+  function add(t) { var li = document.createElement('li'); li.textContent = t; $('list').appendChild(li); }
+  function set(on) { $('status').textContent = on ? 'online' : 'offline'; $('status').className = 'status ' + (on ? 'on' : 'off'); }
+  function connect() {
+    wanted = true;
+    ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws' + (location.search.includes('auth') ? '?auth=1' : ''), ['chat.v1', 'chat.v0']);
+    ws.binaryType = 'arraybuffer';
+    ws.onopen = function () {
+      if (tries > 0) { reconnects++; $('reconnects').textContent = 'reconnects ' + reconnects; }
+      tries = 0;
+      set(true);
+      $('proto').textContent = ws.protocol + (ws.extensions ? ' ' + ws.extensions : '');
+      log('open ' + ws.protocol);
+    };
+    ws.onmessage = function (e) {
+      if (typeof e.data !== 'string') return add('bytes [' + Array.prototype.join.call(new Uint8Array(e.data), '.') + ']');
+      var m = JSON.parse(e.data);
+      if (m.type === 'hello') log('hello ' + m.protocol);
+      else add(m.text.length > 80 ? 'text of ' + m.text.length + ' chars' : m.text);
+    };
+    ws.onerror = function () { log('error'); };
+    ws.onclose = function (e) {
+      set(false);
+      log('close ' + e.code + ' ' + e.reason + ' ' + e.wasClean);
+      if (wanted && e.code !== 4000) setTimeout(connect, Math.min(1000, 100 * Math.pow(2, tries++)));
+    };
+  }
+  $('connect').onclick = connect;
+  $('form').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var t = $('text').value;
+    $('text').value = '';
+    var m = t.split(' ');
+    ws.send(JSON.stringify(m[0] === 'big' ? { type: 'big', n: Number(m[1]) } : m[0] === 'kick' || m[0] === 'drop' ? { type: m[0] } : { type: 'echo', text: t.replace(/^echo /, '') }));
+  });
+  $('binary').onclick = function () { ws.send(new Uint8Array([1, 2, 3, 255])); };
+})();
+</script>
+</body></html>

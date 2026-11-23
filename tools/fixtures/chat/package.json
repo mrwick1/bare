@@ -1,0 +1,10 @@
+{
+  "name": "bare-chat-fixture",
+  "private": true,
+  "description": "A small chat app on Socket.IO and on plain ws, to run bare against a real WebSocket stack. See run.sh.",
+  "type": "module",
+  "dependencies": {
+    "socket.io": "4.8.4",
+    "ws": "8.23.0"
+  }
+}

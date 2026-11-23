@@ -1,0 +1,25 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>chat</title><link rel="stylesheet" href="style.css"></head>
+<body>
+<header>
+  <label>Name <input id="name" value="alice"></label>
+  <label>Room <input id="room" value="lobby"></label>
+  <button id="join">Join</button>
+  <span id="status" class="status off">offline</span>
+  <span id="transport" class="status"></span>
+  <span id="reconnects" class="status">reconnects 0</span>
+  <button id="drop">Drop connection</button>
+</header>
+<main>
+  <ul id="list" aria-label="Messages"></ul>
+  <div id="typing"></div>
+  <form id="form">
+    <input id="text" aria-label="Message" placeholder="Message" autocomplete="off">
+    <button id="send">Send</button>
+    <button id="image" type="button">Send image</button>
+  </form>
+</main>
+<aside><h3>Online</h3><ul id="users" aria-label="Online"></ul><h3>Images</h3><ul id="images"></ul></aside>
+<script src="/socket.io/socket.io.js"></script>
+<script src="app.js"></script>
+</body></html>
