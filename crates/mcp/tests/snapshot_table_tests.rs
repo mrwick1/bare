@@ -76,10 +76,10 @@ fn a_table_row_of_plain_cells_is_one_line() {
     s.tool("open", json!({"session": "t", "url": url, "snapshot": false, "timeout_ms": 30000}));
     let snap = s.tool("snapshot", json!({"session": "t", "mode": "all"}));
     let link = ref_of(&snap, "link \"Buy one\"");
-    assert!(snap.contains("row: \"#\" | \"Price\" | \"Action\""), "{snap}");
-    assert!(snap.contains(&format!("row: \"1\" | \"$1.99\" | [{link}]\n")), "{snap}");
+    assert!(snap.contains("row: # | Price | Action"), "{snap}");
+    assert!(snap.contains(&format!("row: 1 | $1.99 | [{link}]\n")), "{snap}");
     // An empty cell keeps its column.
-    assert!(snap.contains("row: \"2\" | | \"Sold\""), "{snap}");
+    assert!(snap.contains("row: 2 | | Sold"), "{snap}");
     // Each text is said once, and the link keeps its line.
     assert_eq!(snap.matches("$1.99").count(), 1, "{snap}");
     assert_eq!(snap.matches("Buy one").count(), 1, "{snap}");

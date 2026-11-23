@@ -25,7 +25,7 @@
 //! - Names and keywords are not case sensitive.
 //!
 //! Left out:
-//! - `env()`, `min()`, `max()`, `clamp()`. A declaration with one is dropped. (`calc()` is in `calc.rs`, and `var()` in `var.rs`.)
+//! - `min()`, `max()` and `clamp()` are in `calc.rs`, `var()` and `env()` in `var.rs`.
 //! - `!important` is kept as a flag. The cascade uses it.
 //! - Properties that we do not know. They are dropped. The list is what layout and paint will need in module 4 and 5.
 //!   To add one, add a line in `properties!` and a case in `longhand`.
@@ -366,8 +366,10 @@ pub struct Declared {
 /// Read one declaration, and add what it means to `out`: one item for a longhand, more for a shorthand.
 /// Gives `false`, and adds nothing, when the name is not known or the value is not good.
 /// A `calc()` that mixes units goes in `side.calcs`, and a value with `var()` goes in `side.deferred`: the value points to them.
-/// `name` must be in lowercase (the parser does it).
+/// `name` must be in lowercase (the parser does it). A value with `env()` is read again with each `env()` replaced (`var::substitute_env`);
+/// this runs only after the value was not good, so a good declaration never pays for it.
 pub fn parse_declaration(mut name: &str, value: &str, important: bool, side: &mut Side, out: &mut Vec<Declared>) -> bool {
+    let written = name;
     // `-webkit-mask-image` is `mask-image`: the same property with the prefix taken off. The second round runs only after a name or a value
     // was not good, so a good declaration never pays for it. (One call of `parse_known`, so that it is inlined once.)
     loop {
@@ -376,9 +378,16 @@ pub fn parse_declaration(mut name: &str, value: &str, important: bool, side: &mu
         }
         match name.strip_prefix("-webkit-") {
             Some(n) if n.starts_with("mask") || n == "user-select" => name = n,
-            _ => return false,
+            _ => return with_env(written, value, important, side, out),
         }
     }
+}
+
+/// `parse_declaration` again, with each `env()` of the value replaced. The text it reads has no `env()`, so it calls this once at most.
+#[cold]
+#[inline(never)]
+fn with_env(name: &str, value: &str, important: bool, side: &mut Side, out: &mut Vec<Declared>) -> bool {
+    var::has_env(value) && var::substitute_env(value).is_some_and(|text| parse_declaration(name, &text, important, side, out))
 }
 
 /// `transform` and `translate`: the move of the box, as `TranslateX` and `TranslateY`. `Some(false)`: the value is not good.
