@@ -30,7 +30,7 @@ Recommendation: **defer #963.** Do not build iframe content in the outline until
 
 | Journey | Iframe in the page? | Origin | Needed element in the iframe? |
 | --- | --- | --- | --- |
-| 36 of the 38 public URLs (archlinux, blog.rust-lang, curl, MDN, docs.github, docs.python (3 journeys), docs.rs, wikipedia (6 journeys), example.com, go.dev, httpbin (3), HN (3), lobste.rs (2), next.js, nginx, node.js, NPR, react.dev, python.org (2), sqlite, substack, kernel.org, debian, paulgraham, w3.org, wiktionary, rust-lang.org) | No `<iframe>` in the served HTML | n/a | n/a |
+| 31 of the 38 public URLs (archlinux, blog.rust-lang, curl, MDN, docs.github, docs.python (2 URLs), docs.rs, wikipedia (3 URLs), example.com, go.dev, httpbin (2 URLs), HN, lobste.rs, next.js, nginx, node.js, NPR, react.dev, python.org, sqlite, substack, kernel.org, debian, paulgraham, w3.org, wiktionary, rust-lang.org) | No `<iframe>` in the served HTML | n/a | n/a |
 | duckduckgo-html-search | No (HTTP 202 to curl: the body was not the result page; to verify with a real run) | unknown | unknown |
 | crates-io-home | No (HTTP 404 to curl: the SPA route needs JS; to verify with a real run) | unknown | unknown |
 | rust-book-sidebar, rust-book-chapters, rust-book-search | Yes: `<iframe class="sidebar-iframe-outer" src="toc.html">` | Same origin | No. The iframe is inside `<noscript>`. With JS on, `toc.js` fills `<mdbook-sidebar-scrollbox>` in the main document. The steps read `ol.chapter a` in the main document |
@@ -42,7 +42,7 @@ Recommendation: **defer #963.** Do not build iframe content in the outline until
 | Gmail journey (`docs/design-gmail-frames.md`, 6 steps) | Yes: Chrome shows 9 to 10 frames. Step 5, the account menu, lives in `ogs.google.com/u/0/widget/account` | Cross-origin | **Yes**, the account menu. Before child pages it failed 0/3 for a different reason (a port in the transfer list). Since steps 3a to 3c it is not measured again. To verify: run step 5 on a build with child pages, and read the frame with a script |
 | Other login pages with a captcha or a payment frame (the case in the issue text) | No journey and no recorded login gate holds one. NYTimes (`docs/progress.md:5118`) stops at a captcha-delivery.com challenge with HTTP 403, before any page | n/a | Not applicable: the gate is the 403 |
 
-Result: 0 of 38 public URLs and 0 of the local fixtures need iframe content. 1 journey (Gmail step 5) probably does. 3 rows are unknown (two public pages that curl did not see correctly, and the live staging site).
+Result: of the 36 public URLs that curl read, 0 need iframe content (5 have an iframe tag; none is needed). The local fixtures have none. 1 journey (Gmail step 5) probably needs one. 3 rows are unknown: two public URLs that curl did not read correctly, and the live staging site.
 
 Note on the sidebar of the Rust book: it is the only same-origin iframe with real content in the public set. A `noscript` iframe is never made when scripts run, so it does not count.
 
@@ -176,7 +176,7 @@ The engine part E is the bulk of the work in every option. The option is a choic
 
 ## 7. Recommendation
 
-1. **Defer #963.** The evidence has 0 needed frames in 38 public URLs and the local fixtures, and one probable case (Gmail account menu) that is not re-measured since the child pages exist. Part E is a change in `Handle`, `Refs`, `Page` and the hit test, in the hot path of `act`. The cost gate would apply to it.
+1. **Defer #963.** The evidence has 0 needed frames in the 36 public URLs that were read and the local fixtures, and one probable case (Gmail account menu) that is not re-measured since the child pages exist. Part E is a change in `Handle`, `Refs`, `Page` and the hit test, in the hot path of `act`. The cost gate would apply to it.
 2. Do the text fix now (option E0): the tool description and `decisions.md:1253` say "its content is not loaded", which is wrong since 2026-11-18. This is a small change that needs no design, in its own PR.
 3. Trigger to build: a journey that fails because a needed element is in a frame, or the Gmail step 5 run (below) showing that the menu is a frame that an agent must act on. Then build **option C**: E first, behind `frame=`, then `frames=`.
 

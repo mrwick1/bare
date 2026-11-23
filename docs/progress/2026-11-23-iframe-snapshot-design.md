@@ -4,7 +4,7 @@ Design only. No code changed. Document: `docs/iframe-snapshot.md`.
 
 ## Result
 
-- No public journey and no local fixture needs iframe content. Method: `curl` of 38 distinct public URLs of `tools/drive/public/*.steps`, count of `<iframe` tags; `grep` of the local fixtures (0 iframes).
+- No public journey and no local fixture needs iframe content. Method: `curl` of 38 distinct public URLs (36 read) of `tools/drive/public/*.steps`, count of `<iframe` tags; `grep` of the local fixtures (0 iframes).
 - Iframes found: the Rust book (`noscript`, same-origin, not used), dev.to (4 YouTube embeds, not used), craigslist (hidden helper, not used), CNN lite (template text only).
 - Probable need: the Gmail account menu (cross-origin frame). Not measured since child pages exist.
 - Unknown: the live staging site, `html.duckduckgo.com` and `crates.io` (curl got HTTP 202 and 404).
