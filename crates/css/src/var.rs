@@ -11,7 +11,10 @@
 //!   `var()` with no value and no fallback, makes the property not set. A normal property in that case is `unset`.
 //! - The set of custom properties of an element is kept once for all the elements that have the same one (`Sets`).
 //!
-//! `@property` gives an `initial-value` and `inherits: false` (the registry of `RuleSet`, read by `Sets::text`); its types are not checked. Left out: `var()` inside `env()` and the like.
+//! `@property` gives an `initial-value` and `inherits: false` (the registry of `RuleSet`, read by `Sets::text`); its types are not checked. 
+//! `env()` (`substitute_env`) is cut and pasted the same way, when the value would be dropped without it: `env(safe-area-inset-left, 0px)`.
+//! A window has no notch and no on-screen keyboard, so the insets are `0px`. Another name takes the fallback, and with no fallback the
+//! declaration is dropped (Chrome makes it `unset`).
 //! The text is cut and pasted, not split in tokens, so `var(--a)px` with `--a: 1` gives `1px` here, and Chrome does not accept it.
 //! JS: like a template string, where `${}` is replaced and the result is read again.
 
@@ -39,11 +42,16 @@ const MAX_DEPTH: usize = 32;
 
 /// Is there a `var(` in the text? Not one that is part of a longer name (`--my-var(`), and not one in a string.
 pub fn has_var(text: &str) -> bool {
-    find_var(text.as_bytes(), 0).is_some()
+    find_fn(text.as_bytes(), 0, b"var(").is_some()
 }
 
-/// The place of the next `var(` from `from`, outside of strings and comments.
-fn find_var(b: &[u8], from: usize) -> Option<usize> {
+/// Is there an `env(` in the text? The same rules as `has_var`.
+pub fn has_env(text: &str) -> bool {
+    find_fn(text.as_bytes(), 0, b"env(").is_some()
+}
+
+/// The place of the next `func` (`var(` or `env(`) from `from`, outside of strings and comments.
+fn find_fn(b: &[u8], from: usize, func: &[u8; 4]) -> Option<usize> {
     let mut i = from;
     while i < b.len() {
         match b[i] {
@@ -51,8 +59,8 @@ fn find_var(b: &[u8], from: usize) -> Option<usize> {
             b'/' if b.get(i + 1) == Some(&b'*') => {
                 i = b[i + 2..].windows(2).position(|w| w == b"*/").map_or(b.len(), |p| i + 2 + p + 2);
             }
-            c if (c == b'v' || c == b'V')
-                && b.get(i..i + 4).is_some_and(|w| w.eq_ignore_ascii_case(b"var("))
+            c if c.eq_ignore_ascii_case(&func[0])
+                && b.get(i..i + 4).is_some_and(|w| w.eq_ignore_ascii_case(func))
                 && (i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'-' || b[i - 1] == b'_')) =>
             {
                 return Some(i);
@@ -98,17 +106,30 @@ fn close_paren(b: &[u8], from: usize) -> Option<usize> {
 /// Replace each `var()` in `text`. `lookup` gives the text of a custom property, or `None` when it is not set.
 /// `None` when a `var()` has no value and no fallback, when it is not written well, or when the result is too long.
 pub fn substitute(text: &str, lookup: &mut dyn FnMut(&str) -> Option<String>) -> Option<String> {
-    substitute_at(text, lookup, 0)
+    substitute_at(text, b"var(", lookup, 0)
 }
 
-fn substitute_at(text: &str, lookup: &mut dyn FnMut(&str) -> Option<String>, depth: usize) -> Option<String> {
+/// Replace each `env()` in `text` with the value of the browser, or with its fallback. `None` like `substitute`.
+pub fn substitute_env(text: &str) -> Option<String> {
+    substitute_at(text, b"env(", &mut |name| env_value(name).map(str::to_string), 0)
+}
+
+/// The value of an `env()` name. The insets are 0: a window has no notch, no rounded screen and no on-screen keyboard.
+fn env_value(name: &str) -> Option<&'static str> {
+    let side = name.strip_prefix("safe-area-inset-").or_else(|| name.strip_prefix("safe-area-max-inset-"));
+    let zero = side.is_some_and(|s| matches!(s, "top" | "right" | "bottom" | "left"))
+        || name.strip_prefix("keyboard-inset-").is_some_and(|s| matches!(s, "top" | "right" | "bottom" | "left" | "width" | "height"));
+    zero.then_some("0px")
+}
+
+fn substitute_at(text: &str, func: &[u8; 4], lookup: &mut dyn FnMut(&str) -> Option<String>, depth: usize) -> Option<String> {
     if depth >= MAX_DEPTH {
         return None;
     }
     let b = text.as_bytes();
     let mut out = String::new();
     let mut at = 0;
-    while let Some(start) = find_var(b, at) {
+    while let Some(start) = find_fn(b, at, func) {
         out.push_str(&text[at..start]);
         let inner_start = start + 4;
         let end = close_paren(b, inner_start)?;
@@ -134,12 +155,12 @@ fn substitute_at(text: &str, lookup: &mut dyn FnMut(&str) -> Option<String>, dep
             Some(c) => (inner[..c].trim(), Some(&inner[c + 1..])),
             None => (inner.trim(), None),
         };
-        if !name.starts_with("--") || name.len() == 2 {
+        if if func == b"var(" { !name.starts_with("--") || name.len() == 2 } else { name.is_empty() } {
             return None;
         }
         let value = match lookup(name) {
             Some(v) => v,
-            None => substitute_at(fallback?.trim(), lookup, depth + 1)?,
+            None => substitute_at(fallback?.trim(), func, lookup, depth + 1)?,
         };
         out.push_str(&value);
         if out.len() > MAX_LEN {
