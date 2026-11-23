@@ -1,0 +1,9 @@
+form 0.94
+hidden 1.00
+iframe 1.00
+list 1.00
+repeated 1.00
+shadow 1.00
+table 1.00
+unicode 1.00
+wrappers 1.00
