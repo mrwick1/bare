@@ -300,6 +300,8 @@ mod browser_rule_share_tests;
 #[cfg(test)]
 mod browser_style_tests;
 #[cfg(test)]
+mod browser_style_svg_tests;
+#[cfg(test)]
 mod browser_resume_tests;
 #[cfg(test)]
 mod browser_survive_tests;

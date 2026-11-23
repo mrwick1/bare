@@ -97,8 +97,21 @@ pub(crate) fn supported(name: &str) -> bool {
     Property::from_name(name).is_some() || SHORTHANDS.contains(&name) || WHOLE.contains(&name)
 }
 
-/// The supported names of `Kind::Whole`.
-pub(crate) const WHOLE: [&str; 1] = ["transform"];
+/// The supported names of `Kind::Whole`. `bare_css` does not know the `stroke-dash*` ones: the SVG painter reads their text (`dash_ok`).
+pub(crate) const WHOLE: [&str; 3] = ["transform", "stroke-dasharray", "stroke-dashoffset"];
+
+/// A value of `stroke-dashoffset` (one length) or `stroke-dasharray` (`none`, or lengths of 0 or more apart by commas or spaces).
+fn dash_ok(name: &str, value: &str) -> bool {
+    let len = |t: &str| {
+        let n = t.trim_end_matches(|c: char| c.is_ascii_alphabetic() || c == '%');
+        !n.is_empty() && n.parse::<f32>().is_ok_and(|n| n.is_finite() && (n >= 0.0 || name == "stroke-dashoffset"))
+    };
+    if name == "stroke-dashoffset" {
+        return len(value);
+    }
+    let mut parts = value.split(|c: char| c == ',' || c.is_whitespace()).filter(|t| !t.is_empty()).peekable();
+    value.eq_ignore_ascii_case("none") || parts.peek().is_some() && parts.all(len)
+}
 
 /// A name that one declaration owns as a whole: a custom property, or one of `WHOLE`.
 fn by_name(name: &str) -> bool {
@@ -248,6 +261,9 @@ fn classify(name: &str, value: &str, important: bool) -> Decl {
         return mk(own(), Kind::Custom, 0);
     }
     if let Some(&w) = WHOLE.iter().find(|&&w| w == name) {
+        if w != "transform" {
+            return if dash_ok(w, value) { mk(Cow::Borrowed(w), Kind::Whole, 0) } else { mk(own(), Kind::Opaque, 0) };
+        }
         let mut side = Side::default();
         return match SCRATCH.with_borrow_mut(|out| {
             out.clear();
