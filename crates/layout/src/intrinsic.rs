@@ -49,7 +49,7 @@ pub fn sizes(cx: &mut Cx, node: NodeId) -> (f32, f32) {
     cx.depth -= 1;
     cx.measuring -= 1;
     // A scrollbar that is always there takes room in the content box. An `auto` one is not known yet: layout adds it.
-    if tree.overflow(node).1 == Keyword::Scroll {
+    if tree.overflow(node).1 == Keyword::Scroll && !tree.no_bars(node) {
         min += crate::block::SCROLLBAR;
         max += crate::block::SCROLLBAR;
     }

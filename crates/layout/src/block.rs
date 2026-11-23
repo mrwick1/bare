@@ -330,8 +330,10 @@ pub(crate) fn sized_with(cx: &mut Cx, node: NodeId, space: Space, forced: Option
     // The scrollbars: (right, bottom). They take room inside the content box. `scroll` always has one. `auto` has one
     // only if the content does not fit, so the layout below runs again when it does not. In a layout that runs again,
     // the boxes inside keep what they found the first time: else each level of `auto` boxes would double the work.
-    let auto = (oy == Keyword::Auto, ox == Keyword::Auto);
-    let mut bars = (oy == Keyword::Scroll, ox == Keyword::Scroll);
+    // `scrollbar-width: none`: the box scrolls with no bar, so no side ever gets one.
+    let shown = !(matches!(ox, Keyword::Auto | Keyword::Scroll) || matches!(oy, Keyword::Auto | Keyword::Scroll)) || !cx.tree.no_bars(node);
+    let auto = (shown && oy == Keyword::Auto, shown && ox == Keyword::Auto);
+    let mut bars = (shown && oy == Keyword::Scroll, shown && ox == Keyword::Scroll);
     // Chrome reserves the scrollbar of a `<textarea>` that scrolls, whether it is there or not: the text wraps at `cols`.
     let reserve = control == Some(crate::controls::Control::TextArea) && auto.0;
     bars.0 |= reserve;
@@ -936,6 +938,8 @@ pub(crate) mod tests {
         rules.add(&mut doc, ua, Origin::UserAgent);
         rules.add(&mut doc, css, Origin::Author);
         let styles = rules.compute(&doc);
+        // As the host does before a layout: the `::before` and `::after` nodes.
+        bare_css::generated::sync(&mut doc, &styles);
         let layout = crate::layout(&doc, &styles, (800.0, 600.0));
         (doc, layout)
     }

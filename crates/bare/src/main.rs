@@ -240,7 +240,9 @@ fn computed_styles(doc: &mut bare_html::dom::Document, page: Option<&Url>, viewp
             }
         }
     }
-    rules.compute(doc)
+    let styles = rules.compute(doc);
+    bare_css::generated::sync(doc, &styles);
+    styles
 }
 
 /// Load a page for `--paint` and `--window`: a local file, read with no network (its `<link>` style sheets are not

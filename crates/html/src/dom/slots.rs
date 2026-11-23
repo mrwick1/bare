@@ -164,10 +164,11 @@ impl Document {
     /// of its own siblings. A page without shadow roots pays one check.
     #[inline]
     pub fn flat_next(&self, id: NodeId) -> Option<NodeId> {
-        if self.shadow_of.is_empty() {
-            return self.next_sibling(id);
+        let next = if self.shadow_of.is_empty() { self.next_sibling(id) } else { self.shadowed_next(id) };
+        if self.pseudo_of.is_empty() {
+            return next;
         }
-        self.shadowed_next(id)
+        self.pseudo_next(id, next)
     }
 
     #[inline(never)]

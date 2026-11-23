@@ -44,6 +44,9 @@
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
 
+mod pseudo;
+#[cfg(test)]
+mod pseudo_tests;
 mod reclaim;
 pub use reclaim::Free;
 mod slots;
@@ -446,6 +449,10 @@ pub struct Document {
     slots: RefCell<Option<slots::Slots>>,
     // The slot assignment, made when it is read (`Document::assigned_nodes`) and dropped when `revision` moves.
     template_content: HashMap<u32, NodeId, BuildHasherDefault<Fnv>>,
+    // The `::before` and `::after` nodes of each element that has one, by `NodeId::index` of the element (`pseudo.rs`).
+    pseudo_of: HashMap<u32, [Option<pseudo::Gen>; 2], BuildHasherDefault<Fnv>>,
+    // The way back: the element and the side (`0` before, `1` after) of each `::before` and `::after` node.
+    pseudo_hosts: HashMap<u32, (NodeId, u8), BuildHasherDefault<Fnv>>,
     // The contents of each HTML `template` that has any, by `NodeId::index` of the template: a fragment node that is not a child of the template.
     watcher: Option<Box<Hooks>>,
     // The host function that is told of each change (see `set_watcher`), and the log of the changes (see `track_damage`). A page
@@ -893,7 +900,19 @@ impl Iterator for Children<'_> {
 pub struct FlatChildren<'a> {
     doc: &'a Document,
     next: Option<NodeId>,
-    shadow: bool,
+    step: Step,
+    /// After a `::before` node (`Step::Then`): the first child, and the step after it (`pseudo.rs`).
+    then: (Option<NodeId>, Step),
+    /// The `::after` node, after the last child.
+    after: Option<NodeId>,
+}
+
+/// How `FlatChildren` finds the next node.
+#[derive(Clone, Copy, PartialEq)]
+enum Step {
+    Light,
+    Shadow,
+    Then,
 }
 
 impl Iterator for FlatChildren<'_> {
@@ -901,8 +920,15 @@ impl Iterator for FlatChildren<'_> {
 
     #[inline]
     fn next(&mut self) -> Option<NodeId> {
-        let id = self.next?;
-        self.next = if self.shadow { self.doc.shadowed_next(id) } else { self.doc.nodes[id.index()].next };
+        let Some(id) = self.next else { return self.after.take() };
+        self.next = match self.step {
+            Step::Light => self.doc.nodes[id.index()].next,
+            Step::Shadow => self.doc.shadowed_next(id),
+            Step::Then => {
+                self.step = self.then.1;
+                self.then.0
+            }
+        };
         Some(id)
     }
 }
@@ -935,6 +961,8 @@ impl Document {
             shadow_flags: HashMap::default(),
             slots: RefCell::new(None),
             template_content: HashMap::default(),
+            pseudo_of: HashMap::default(),
+            pseudo_hosts: HashMap::default(),
             watcher: None,
             custom: HashMap::default(),
             states: HashMap::default(),
@@ -1502,7 +1530,7 @@ impl Document {
     /// takes it: it is not rendered. A page with no shadow root pays one `is_empty` check.
     #[inline]
     pub fn flat_parent(&self, id: NodeId) -> Option<NodeId> {
-        let parent = self.parent(id)?;
+        let Some(parent) = self.parent(id) else { return self.pseudo_parent(id) };
         if self.shadow_of.is_empty() {
             return Some(parent);
         }
@@ -1513,10 +1541,15 @@ impl Document {
     /// the nodes that it takes, or by its fallback children when it takes none (see `flat_next`).
     #[inline]
     pub fn flat_children(&self, id: NodeId) -> FlatChildren<'_> {
-        if self.shadow_of.is_empty() {
-            return FlatChildren { doc: self, next: self.nodes[id.index()].first_child, shadow: false };
+        let mut out = if self.shadow_of.is_empty() {
+            FlatChildren { doc: self, next: self.nodes[id.index()].first_child, step: Step::Light, then: (None, Step::Light), after: None }
+        } else {
+            FlatChildren { doc: self, next: self.shadowed_first(id), step: Step::Shadow, then: (None, Step::Light), after: None }
+        };
+        if !self.pseudo_of.is_empty() {
+            self.add_pseudo(id, &mut out);
         }
-        FlatChildren { doc: self, next: self.shadowed_first(id), shadow: true }
+        out
     }
 
     /// The children of this node, in order.
