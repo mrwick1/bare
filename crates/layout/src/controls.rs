@@ -200,7 +200,7 @@ pub fn size(tree: &Tree, node: NodeId, control: Control) -> Option<(f32, f32)> {
         }
         Control::TextArea => {
             let (cols, rows) = (count(tree, node, tree.controls.cols, 20) as f32, count(tree, node, tree.controls.rows, 2) as f32);
-            let bar = if matches!(tree.overflow(node).1, Keyword::Auto | Keyword::Scroll) { SCROLLBAR } else { 0.0 };
+            let bar = if matches!(tree.overflow(node).1, Keyword::Auto | Keyword::Scroll) && !tree.no_bars(node) { SCROLLBAR } else { 0.0 };
             Some((cols * avg_width(m.size) + bar, rows * line))
         }
         Control::Check { .. } | Control::Button => None,
