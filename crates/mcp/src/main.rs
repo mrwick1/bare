@@ -15,6 +15,7 @@
 //! lines from `process.stdin` and writes `JSON.stringify(reply)` lines to `process.stdout`.
 #![recursion_limit = "256"]
 
+mod metrics;
 mod recovery;
 
 use bare_drive::{DownloadState, Downloads};
@@ -103,6 +104,8 @@ struct Job {
     cancel: Arc<AtomicBool>,
     /// Whether an owner started this call. Transport refusals cannot have sent input; panics after this point are unknown.
     started: bool,
+    /// When the request arrived, for the metrics line.
+    t0: Instant,
     done: Box<dyn FnOnce(Value) + Send>,
 }
 
@@ -128,8 +131,11 @@ fn error_result(text: impl Into<String>) -> Value {
 
 fn main() {
     let _monitor = bare_observe::process::Process::from_env(false).unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(2) });
+    if std::env::args().nth(1).as_deref() == Some("--stats") {
+        return metrics::stats(std::env::args().nth(2));
+    }
     if std::env::args().len() > 1 {
-        return eprintln!("usage: bare-mcp");
+        return eprintln!("usage: bare-mcp [--stats [FILE]]");
     }
     bare_net::parallel::limit_malloc_arenas(false);
     // This thread only reads requests and routes them (`Shared::handle_line`), so `ping`, `tools/list` and `notifications/cancelled` are
@@ -236,7 +242,7 @@ impl Shared {
         lock(&self.inflight).insert(key.clone(), cancel.clone());
         let sh = self.clone();
         let done = Box::new(move |v: Value| sh.send(json!({"jsonrpc": "2.0", "id": id, "result": v})));
-        let job = Job { key: Some(key), params, cancel, started: false, done };
+        let job = Job { key: Some(key), params, cancel, started: false, t0: Instant::now(), done };
         if !tool_list().as_array().is_some_and(|t| t.iter().any(|t| t["name"] == tool.as_str())) {
             let failure = Failure::unknown_tool(&tool);
             let result = json!({"content": [{"type": "text", "text": failure.text}], "isError": true,
@@ -276,6 +282,9 @@ impl Shared {
                 let text = status.to_string();
                 result["content"].as_array_mut().expect("tool content").push(json!({"type": "text", "text": text}));
             }
+        }
+        if job.key.is_some() {
+            metrics::record(&job.params, job.t0.elapsed(), &result);
         }
         (job.done)(result);
     }
@@ -377,7 +386,7 @@ impl Shared {
             let _ = tx.send(if v["isError"] == true { Err(text) } else { Ok(text) });
         });
         let params = json!({"name": tool, "arguments": {"session": name}});
-        self.route(Job { key: None, params, cancel: Arc::new(AtomicBool::new(false)), started: false, done });
+        self.route(Job { key: None, params, cancel: Arc::new(AtomicBool::new(false)), started: false, t0: Instant::now(), done });
         // A busy worker is not asked (`sessions`), so this returns when one call ends; a cancellation of the caller stops the wait.
         loop {
             match rx.recv_timeout(Duration::from_millis(25)) {
@@ -1778,7 +1787,7 @@ mod dispatch_tests {
         let (tx, rx) = mpsc::channel();
         let job = Job {
             key: None, params: json!({"name":"act","arguments":{"expect":"expect title=\"Saved\""}}),
-            cancel: Arc::new(AtomicBool::new(false)), started: true,
+            cancel: Arc::new(AtomicBool::new(false)), started: true, t0: Instant::now(),
             done: Box::new(move |result| { let _ = tx.send(result); }),
         };
         shared.finish(job, error_result("internal error: the call panicked"));
@@ -1820,7 +1829,7 @@ mod dispatch_tests {
         let (done_tx, done_rx) = mpsc::channel();
         tx.send(Job {
             key: None, params: json!({"name": "snapshot", "arguments": {"session": "a"}}),
-            cancel: Arc::new(AtomicBool::new(false)), started: false,
+            cancel: Arc::new(AtomicBool::new(false)), started: false, t0: Instant::now(),
             done: Box::new(move |_| { let _ = done_tx.send(()); }),
         }).unwrap();
         lock(&shared.sessions).insert("a".into(), Slot {
