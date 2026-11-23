@@ -7,7 +7,7 @@ Commands (details: docs/agent-evaluation.md):
   fixture --task T --out DIR        start the loopback fixture for an external agent run, write the prompt and inputs, stop at the deadline or on SIGINT/SIGTERM
                                     and write the fixture record (state.json)
   score  --task T --transcript F --state F --out DIR    grade an externally supplied transcript against the fixture record
-  report DIR                        aggregate the result.json files under DIR into summary.json and print it
+  report DIR                        aggregate the result.json files under DIR: JSON on stdout, a task x arm table (success, median turns, median tokens) on stderr
 
 Exit status: 0 all requested tasks passed, 1 a task failed, 2 bad usage or an invalid input.
 """
@@ -30,6 +30,11 @@ import tasks as tk  # noqa: E402
 import transcript as tr  # noqa: E402
 
 SCHEMA = 1
+ARMS = ("interactive", "all")  # the snapshot mode that bare-mcp uses when a call gives none (BARE_MCP_SNAPSHOT_MODE)
+
+
+def mcp_env(arm):
+    return {"BARE_MCP_SNAPSHOT_MODE": arm}
 
 
 def write_new(path, obj):
@@ -52,13 +57,14 @@ def git_head():
         return None
 
 
-def manifest(task, seed, rid, kind, args, binary=None, base=None):
+def manifest(task, seed, rid, kind, args, binary=None, base=None, arm=None):
     m = {
         "v": SCHEMA,
         "run_id": rid,
         "task": {"id": task.id, "version": tk.VERSION, "title": task.title},
         "fixture": {"seed": seed, "base_url": base, "note": "loopback port differs per run; the data depends on the seed only"},
         "browser": None,
+        "arm": arm,
         "runner": {"kind": kind},
         "viewport": {"width": args.width, "height": args.height},
         "timeouts": {"call_s": getattr(args, "call_timeout", None), "run_deadline_s": args.deadline},
@@ -135,10 +141,10 @@ def grade(task, ctx, events, problems):
     return checks, dups
 
 
-def result_of(task, rid, kind, checks, dups, events, problems, res, tokens, state):
+def result_of(task, rid, kind, checks, dups, events, problems, res, tokens, state, arm=None):
     failed = [c for c in checks if not c["ok"]]
     return {
-        "v": SCHEMA, "run_id": rid, "task": task.id, "task_version": tk.VERSION, "runner_kind": kind,
+        "v": SCHEMA, "run_id": rid, "task": task.id, "task_version": tk.VERSION, "runner_kind": kind, "arm": arm,
         "completed": not failed, "checks": checks, "failed_assertions": len(failed),
         "duplicate_actions": dups, "duplicate_submissions": sum(dups.values()),
         "transcript_problems": problems, "metrics": tr.metrics(events), "resources": res, "tokens": tokens,
@@ -173,7 +179,7 @@ def smoke_task(task, seed, args, out):
     ctx.upload_path = os.path.join(ctx.inputs_dir, f.world["upload_name"])
     with open(ctx.upload_path, "wb") as fh:
         fh.write(f.world["upload"])
-    man = manifest(task, seed, rid, "scripted", args, args.bare_mcp, f.base)
+    man = manifest(task, seed, rid, "scripted", args, args.bare_mcp, f.base, args.arm)
     write_new(os.path.join(tdir, "manifest.json"), man)
     rec = tr.Recorder(os.path.join(tdir, "transcript.jsonl"), tr.Redactor(f.secrets))
     home = os.path.join(tdir, "home")
@@ -183,7 +189,7 @@ def smoke_task(task, seed, args, out):
     if args.perf:
         perf_out = os.path.join(tdir, "perf.txt")
         argv = ["perf", "stat", "-x,", "-e", "instructions:u", "-o", perf_out] + argv
-    env = {"PATH": os.environ.get("PATH", ""), "HOME": home, "BARE_SEED": "1"}
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": home, "BARE_SEED": "1", **mcp_env(args.arm)}
     client = tr.McpClient(argv, rec, env=env, deadline=deadline)
     runner_error = None
 
@@ -217,7 +223,7 @@ def smoke_task(task, seed, args, out):
     if runner_error:
         checks.append(tk.check("run_finished", False, runner_error))
     f.stop()
-    result = result_of(task, rid, "scripted", checks, dups, events, problems, res, tokens_record(None), ctx.state)
+    result = result_of(task, rid, "scripted", checks, dups, events, problems, res, tokens_record(None), ctx.state, args.arm)
     result["tokens"]["reason"] = "scripted run: no model"
     result["metrics"]["elapsed_s"] = round(time.monotonic() - start, 3) if result["metrics"]["elapsed_s"] is None else result["metrics"]["elapsed_s"]
     write_new(os.path.join(tdir, "result.json"), result)
@@ -256,17 +262,17 @@ def cmd_fixture(args):
     with open(ctx.upload_path, "wb") as fh:
         fh.write(f.world["upload"])
     rid = run_id(task.id, args.seed)
-    write_new(os.path.join(tdir, "manifest.json"), manifest(task, args.seed, rid, "external", args, args.bare_mcp, f.base))
+    write_new(os.path.join(tdir, "manifest.json"), manifest(task, args.seed, rid, "external", args, args.bare_mcp, f.base, args.arm))
     prompt = task.prompt(ctx)
     with open(os.path.join(tdir, "prompt.txt"), "x") as fh:
         fh.write(prompt + "\n")
-    info = {"task": task.id, "base_url": f.base, "prompt": prompt, "downloads_dir": ctx.downloads_dir, "task_dir": os.path.abspath(tdir), "sessions": list(task.sessions)}
+    info = {"task": task.id, "base_url": f.base, "prompt": prompt, "downloads_dir": ctx.downloads_dir, "task_dir": os.path.abspath(tdir), "sessions": list(task.sessions), "arm": args.arm, "mcp_env": mcp_env(args.arm)}
     print(json.dumps(info), flush=True)
     stop = threading.Event()
     for s in (signal.SIGINT, signal.SIGTERM):
         signal.signal(s, lambda *_: stop.set())
     stop.wait(args.deadline)
-    write_new(os.path.join(tdir, "state.json"), f.state())
+    write_new(os.path.join(tdir, "state.json"), {**f.state(), "arm": args.arm})
     f.stop()
     print(f"fixture record written to {os.path.join(tdir, 'state.json')}", file=sys.stderr)
     return 0
@@ -292,9 +298,10 @@ def cmd_score(args):
     rid = run_id(task.id, state["seed"])
     tdir = os.path.join(args.out, task.id)
     os.makedirs(tdir, exist_ok=True)
-    man = manifest(task, state["seed"], rid, "external", args, args.bare_mcp)
+    arm = state.get("arm")
+    man = manifest(task, state["seed"], rid, "external", args, args.bare_mcp, arm=arm)
     res = {"scope": "not collected by this command", "cpu_ms": None, "peak_rss_kib": None, "instructions": None, "reason": "an external run: the runner of the agent owns the process; supply its own measurements outside this record"}
-    result = result_of(task, rid, "external", checks, dups, events, problems, res, tokens, state)
+    result = result_of(task, rid, "external", checks, dups, events, problems, res, tokens, state, arm)
     result["agent_recorded"] = man["runner"]["recorded"]
     if not man["runner"]["recorded"]:
         result["note"] = man["runner"]["note"]
@@ -328,6 +335,45 @@ def summarize(results):
     }
 
 
+def median(xs):
+    xs = sorted(xs)
+    n = len(xs)
+    return None if not n else xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2
+
+
+def total_tokens(r):
+    """Total tokens of a run: the caller's count when given, else tool-output characters / 4 (an estimate)."""
+    t = r["tokens"]
+    if t.get("available"):
+        return t["input_tokens"] + t["output_tokens"], "reported"
+    return round(r["metrics"].get("response_chars", 0) / 4), "estimate: tool-output characters / 4"
+
+
+def by_arm(results):
+    """One row per task and arm: success rate, median turns (tool calls), median total tokens. A run with no arm is `none`."""
+    groups = {}
+    for r in results:
+        groups.setdefault((r["task"], r.get("arm") or "none"), []).append(r)
+    rows = []
+    for (task, arm), rs in sorted(groups.items()):
+        toks = [total_tokens(r) for r in rs]
+        sources = sorted({s for _, s in toks})
+        rows.append({
+            "task": task, "arm": arm, "runs": len(rs), "completed": sum(r["completed"] for r in rs),
+            "success_rate": round(sum(r["completed"] for r in rs) / len(rs), 3),
+            "median_turns": median([r["metrics"]["tool_calls"] for r in rs]),
+            "median_total_tokens": median([t for t, _ in toks]), "tokens_source": sources[0] if len(sources) == 1 else "mixed: " + "; ".join(sources),
+        })
+    return rows
+
+
+def print_by_arm(results):
+    """The table goes to stderr so that stdout stays one JSON document."""
+    print(f"{'task':17} {'arm':12} runs success  turns  tokens  source", file=sys.stderr)
+    for r in by_arm(results):
+        print(f"{r['task']:17} {r['arm']:12} {r['runs']:4} {r['completed']}/{r['runs']}={r['success_rate']:.2f} {r['median_turns']:6} {r['median_total_tokens']:7}  {r['tokens_source']}", file=sys.stderr)
+
+
 def finish(out, results):
     for r in results:
         mark = "PASS" if r["completed"] else "FAIL"
@@ -355,7 +401,10 @@ def cmd_report(args):
             results.append(json.load(open(os.path.join(root, "result.json"))))
     if not results:
         return die(f"no result.json under {args.dir}")
-    print(json.dumps(summarize(results), indent=2, sort_keys=True))
+    out = summarize(results)
+    out["by_arm"] = by_arm(results)
+    print_by_arm(results)
+    print(json.dumps(out, indent=2, sort_keys=True))
     return 0 if all(r["completed"] for r in results) else 1
 
 
@@ -398,6 +447,7 @@ def parser():
     s.add_argument("--out", required=True)
     s.add_argument("--task", action="append")
     s.add_argument("--call-timeout", type=int, default=20, help="seconds for one tool call")
+    s.add_argument("--arm", choices=ARMS, default="interactive", help="snapshot mode that bare-mcp uses by default (BARE_MCP_SNAPSHOT_MODE)")
     s.add_argument("--perf", action="store_true", help="count user instructions with perf stat")
     s.set_defaults(fn=cmd_smoke)
     s = sub.add_parser("fixture", help="start the fixture for an external agent")
@@ -406,6 +456,7 @@ def parser():
     s.add_argument("--task", required=True)
     s.add_argument("--out", required=True)
     s.add_argument("--bare-mcp", help="binary the agent will use (recorded in the manifest)")
+    s.add_argument("--arm", choices=ARMS, default="interactive", help="snapshot mode for the run: start bare-mcp with the mcp_env that this command prints")
     s.set_defaults(fn=cmd_fixture)
     s = sub.add_parser("score", help="score an external transcript")
     common(s)

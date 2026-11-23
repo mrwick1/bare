@@ -32,6 +32,31 @@ One example for each task (`--task` values): `login_restore`, `search_extract`, 
 
 Exit status: 0 when all requested tasks pass, 1 when a task fails, 2 for bad usage or an unreadable input. A tool never overwrites a transcript or a result: every file is created exclusively, and a used `--out` is refused.
 
+## Arms
+
+An arm is the snapshot mode that `bare-mcp` uses when a call gives no `mode`. The question: does a smaller outline change agent success? Two arms exist: `interactive` (the default) and `all` (the outline with the text between the controls). A `mode` in a call always wins over the arm.
+
+`bare-mcp` reads the arm from `BARE_MCP_SNAPSHOT_MODE` (`interactive` or `all`) once at start. Any other value means `interactive`. The agent is not told the arm.
+
+For each task and each arm, run the same agent and model at least 3 times (seeds 1, 2 and 3). Use the same prompt and tool setup in every run. `fixture` prints `mcp_env`. Start `bare-mcp` for the agent with that environment.
+
+```sh
+for arm in interactive all; do for seed in 1 2 3; do
+  python3 tools/agent-eval/run.py fixture --task upload --arm $arm --seed $seed --out /tmp/eval-arms/$arm-$seed \
+      --bare-mcp target/release/bare-mcp --runner-name NAME --model MODEL --prompt-file PROMPT --tool-setup "TEXT"
+  #   The agent runs against base_url. Its bare-mcp runs with the mcp_env line, for example BARE_MCP_SNAPSHOT_MODE=all.
+  python3 tools/agent-eval/run.py score --task upload --transcript T.jsonl --state /tmp/eval-arms/$arm-$seed/upload/state.json \
+      --out /tmp/eval-arms-score/$arm-$seed [--tokens-json F]
+done; done
+python3 tools/agent-eval/run.py report /tmp/eval-arms-score
+```
+
+`score` takes the arm from `state.json`. `smoke --arm NAME` runs the scripted sequences with an arm. Put each arm in its own `--out` folder.
+
+`report` prints a table on stderr and `by_arm` in the JSON on stdout. Each row is one task and one arm: runs, success rate, median turns (tool calls) and median total tokens. Tokens come from `--tokens-json` (input plus output). Without it, the tool uses tool-output characters / 4. The row says `estimate` then. A row that mixes both says `mixed`.
+
+A smaller outline is adopted only when its success rate does not fall below the `interactive` arm on the same tasks. A scripted smoke run knows the page. It shows the plumbing and not the effect of an arm.
+
 ## Tasks
 
 Each task has a prompt, a fixture page set, an independent grader and a scripted sequence (`tools/agent-eval/tasks.py`). The task corpus version is `tasks.VERSION` (now 2). A change to a prompt, fixture or grader must raise it.

@@ -890,9 +890,14 @@ impl Server {
     /// With `diff`: only what changed since the last snapshot, and its parents.
     fn snapshot_diff(&mut self, args: &Value, diff: bool) -> Result<String, String> {
         if cancelled() { return Err("cancelled".into()); }
+        // A `mode` in the call wins; else BARE_MCP_SNAPSHOT_MODE (read once) sets the default for the run.
+        static DEFAULT_MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let all = *DEFAULT_MODE.get_or_init(|| std::env::var("BARE_MCP_SNAPSHOT_MODE").is_ok_and(|v| v == "all"));
         let mode = match args.get("mode").and_then(Value::as_str) {
             Some("all") => Mode::All,
-            _ => Mode::Interactive,
+            Some(_) => Mode::Interactive,
+            None if all => Mode::All,
+            None => Mode::Interactive,
         };
         let root = ref_arg(args, "root")?;
         let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
