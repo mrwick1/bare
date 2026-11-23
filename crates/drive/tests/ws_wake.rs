@@ -61,7 +61,7 @@ fn serve(delay: Option<Duration>) -> String {
     format!("http://127.0.0.1:{port}/")
 }
 
-/// The wake hook is one for the process: the tests run one at a time.
+/// The tests run one at a time, so that their timings do not mix.
 static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn open(url: &str) -> (Page, mpsc::Receiver<()>) {
