@@ -9,6 +9,8 @@ pub mod boxes;
 mod breaks;
 pub mod controls;
 pub mod flex;
+#[cfg(test)]
+mod generated_tests;
 pub mod floats;
 // `pub mod` makes the module visible to other crates: `bare_layout::boxes`.
 pub mod font;
