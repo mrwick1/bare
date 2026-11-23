@@ -231,7 +231,7 @@ impl Property {
     /// instructions for each page. The two last core properties (`TranslateX`, `TranslateY`, the parts of `transform` and `translate`) are not listed:
     /// the page has no accessor for them. `from_name` still knows them, so `setProperty` and `getPropertyValue` work for them.
     pub const LISTED: &'static [Property] = Property::ALL.split_at(Property::CORE - 2).0;
-    /// The number of properties before the picture properties (`background-image`, `mask-image` and their size, position and repeat, `backdrop-filter`, `scrollbar-width`). A
+    /// The number of properties before the picture properties (`background-image`, `mask-image` and their size, position and repeat, `content`, `backdrop-filter`, `scrollbar-width`). A
     /// computed style has one slot for each of these. The others (`COUNT - CORE`) are one set that most elements share: it is one number
     /// in the style (`cascade::ComputedStyle::picture`). A declaration of one is kept apart from the others (`cascade::Entry::pics`).
     pub const CORE: usize = Property::BackgroundImage as usize;
