@@ -68,6 +68,8 @@ pub enum Item {
     /// Draw nothing outside `IRect` (and outside the clips before it) until the matching `PopClip`.
     PushClip(IRect),
     PopClip,
+    /// Blur what is drawn already inside `r` (`backdrop-filter: blur()`), with this standard deviation in pixels.
+    Backdrop { r: IRect, sigma: f32 },
     /// Everything up to the matching `PopLayer` shows with `alpha` (0 to 255) of its strength, inside `IRect`.
     PushLayer { r: IRect, alpha: u8 },
     PopLayer,
@@ -255,7 +257,7 @@ impl DisplayList {
         }
         let mut page = Page { controls: [tree.controls.input, tree.controls.select, tree.controls.textarea, tree.controls.button].iter().any(Option::is_some), ..Page::default() };
         for style in styles.each() {
-            page.stack |= matches!(style.get(Property::Opacity), Value::Number(o) if o < 1.0) || matches!(style.get(Property::ZIndex), Value::Number(_)) || style.get(Property::Position) == Value::Keyword(Keyword::Sticky);
+            page.stack |= matches!(style.get(Property::Opacity), Value::Number(o) if o < 1.0) || matches!(style.get(Property::ZIndex), Value::Number(_)) || style.get(Property::Position) == Value::Keyword(Keyword::Sticky) || backdrop(style) > 0.0;
             page.layers |= style.picture_set() != 0;
             page.flex |= matches!(style.get(Property::Display), Value::Keyword(Keyword::Flex | Keyword::InlineFlex | Keyword::Grid | Keyword::InlineGrid));
         }
@@ -449,6 +451,8 @@ impl Builder<'_> {
         };
         match style.get(Property::Opacity) {
             Value::Number(o) if o < 1.0 => Some(z.unwrap_or(0)),
+            // A backdrop filter makes a stacking context too: the box paints as one unit over what is behind it.
+            _ if backdrop(style) > 0.0 => Some(z.unwrap_or(0)),
             _ => z,
         }
     }
@@ -560,6 +564,10 @@ impl Builder<'_> {
             }
         }
         let clip = if i > 0 && clips(&self.tree, f.node) { Some(padding_box(&f, style)) } else { None };
+        let sigma = if i > 0 { backdrop(style) } else { 0.0 };
+        if sigma > 0.0 {
+            self.list.items.push(Item::Backdrop { r: border_box(&f), sigma });
+        }
         self.decor(&f, style, false);
         if self.svg.is_some() {
             self.svg_of(&f, style, i);
@@ -1335,6 +1343,17 @@ fn sample(path: &[[f32; 5]], s: f32) -> [f32; 5] {
     let (a, b) = (path[i - 1], path[i]);
     let t = if b[4] > a[4] { ((s - a[4]) / (b[4] - a[4])).clamp(0.0, 1.0) } else { 0.0 };
     [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t, a[3] + (b[3] - a[3]) * t, s]
+}
+
+/// The blur of `backdrop-filter`, in pixels: 0 for none. Round corners do not cut it (a gap).
+fn backdrop(style: &ComputedStyle) -> f32 {
+    match style.picture_set() {
+        0 => 0.0,
+        _ => match style.picture(Property::BackdropFilter) {
+            Value::Length(Length::Px(s)) => s,
+            _ => 0.0,
+        },
+    }
 }
 
 fn border_box(f: &Fragment) -> IRect {

@@ -220,6 +220,8 @@ properties! {
     MaskPositionX => "mask-position-x",
     MaskPositionY => "mask-position-y",
     MaskRepeat => "mask-repeat",
+    BackdropFilter => "backdrop-filter",
+    ScrollbarWidth => "scrollbar-width",
 }
 
 impl Property {
@@ -228,7 +230,7 @@ impl Property {
     /// instructions for each page. The two last core properties (`TranslateX`, `TranslateY`, the parts of `transform` and `translate`) are not listed:
     /// the page has no accessor for them. `from_name` still knows them, so `setProperty` and `getPropertyValue` work for them.
     pub const LISTED: &'static [Property] = Property::ALL.split_at(Property::CORE - 2).0;
-    /// The number of properties before the picture properties (`background-image`, `mask-image` and their size, position and repeat). A
+    /// The number of properties before the picture properties (`background-image`, `mask-image` and their size, position and repeat, `backdrop-filter`, `scrollbar-width`). A
     /// computed style has one slot for each of these. The others (`COUNT - CORE`) are one set that most elements share: it is one number
     /// in the style (`cascade::ComputedStyle::picture`). A declaration of one is kept apart from the others (`cascade::Entry::pics`).
     pub const CORE: usize = Property::BackgroundImage as usize;
@@ -374,7 +376,7 @@ pub fn parse_declaration(mut name: &str, value: &str, important: bool, side: &mu
             return true;
         }
         match name.strip_prefix("-webkit-") {
-            Some(n) if n.starts_with("mask") || n == "user-select" => name = n,
+            Some(n) if n.starts_with("mask") || n == "user-select" || n == "backdrop-filter" => name = n,
             _ => return false,
         }
     }
@@ -534,6 +536,9 @@ fn parse_known(name: &str, value: &str, important: bool, side: &mut Side, out: &
     if (name == "transform" || name == "translate") && let Some(ok) = transform_declaration(name, value, important, side, out) {
         return ok;
     }
+    if name == "backdrop-filter" && let Some(ok) = filter_declaration(value, important, side, out) {
+        return ok;
+    }
     if let Some(ok) = crate::grid::declaration(name, value, important, side, out) {
         return ok;
     }
@@ -550,6 +555,47 @@ fn parse_known(name: &str, value: &str, important: bool, side: &mut Side, out: &
         // A shorthand may have added some items before it found the mistake. Take them back.
     }
     ok
+}
+
+/// `backdrop-filter` with a list of filter functions. `None`: the value is one word (`none`, `inherit`), for the usual path. Only the blur
+/// counts: the value is the radius of all `blur()` together (`sqrt` of the sum of the squares, as blurs in a row add up), in `px`, or `none`
+/// when there is no blur. The other functions (`saturate()`, `brightness()`, `drop-shadow()`, `url()`, ...) are good values that do nothing
+/// (a gap). A blur radius in another unit than `px` is good and draws no blur (a gap).
+fn filter_declaration(value: &str, important: bool, side: &mut Side, out: &mut Vec<Declared>) -> Option<bool> {
+    const KNOWN: [&str; 11] = ["blur", "brightness", "contrast", "drop-shadow", "grayscale", "hue-rotate", "invert", "opacity", "saturate", "sepia", "url"];
+    let mut rest = value.trim();
+    if !rest.contains('(') {
+        return None;
+    }
+    let mut square = 0.0f32;
+    while !rest.is_empty() {
+        let Some(open) = rest.find('(') else { return Some(false) };
+        let func = rest[..open].trim().to_ascii_lowercase();
+        let mut depth = 0;
+        let Some(close) = rest[open..].char_indices().find_map(|(i, c)| {
+            depth += match c { '(' => 1, ')' => -1, _ => 0 };
+            (depth == 0).then_some(open + i)
+        }) else { return Some(false) };
+        let arg = rest[open + 1..close].trim();
+        rest = rest[close + 1..].trim_start();
+        if !KNOWN.contains(&func.as_str()) {
+            return Some(false);
+        }
+        if func == "url" || arg.is_empty() {
+            continue;
+        }
+        let Some(parts) = Parts::read(arg, side) else { return Some(false) };
+        match (func.as_str(), parts.as_slice()) {
+            ("blur", [Part::Length(Length::Px(r))]) if *r >= 0.0 => square += r * r,
+            ("blur", [Part::Length(_)] | [Part::Number { value: 0.0, .. }]) => {}
+            ("blur", _) => return Some(false),
+            (_, p) if p.iter().any(|p| matches!(p, Part::Bad | Part::Wide(_))) => return Some(false),
+            _ => {}
+        }
+    }
+    let value = if square > 0.0 { Value::Length(Length::Px(square.sqrt())) } else { Value::Keyword(Keyword::None) };
+    out.push(Declared { property: Property::BackdropFilter, value, important, mirror: false });
+    Some(true)
 }
 
 /// A typed deferred entry. Variable declarations and currentColor expressions share
@@ -1056,7 +1102,7 @@ fn logical(name: &str) -> Option<&'static [Property]> {
 #[inline(never)]
 fn picture_expand(name: &str, parts: &Parts, emit: &mut dyn FnMut(Property, Value)) -> Option<bool> {
     use Property::*;
-    if !matches!(name.as_bytes().first(), Some(b'b' | b'm')) {
+    if !matches!(name.as_bytes().first(), Some(b'b' | b'm' | b's')) {
         return None;
     }
     let slice = parts.first_layer();
@@ -1069,7 +1115,7 @@ fn picture_expand(name: &str, parts: &Parts, emit: &mut dyn FnMut(Property, Valu
         "mask-position" => position(slice, [MaskPositionX, MaskPositionY], emit),
         "background-repeat" => repeat(slice, BackgroundRepeat, emit),
         "mask-repeat" => repeat(slice, MaskRepeat, emit),
-        "background-image" | "mask-image" | "background-position-x" | "background-position-y" | "mask-position-x" | "mask-position-y" => {
+        "background-image" | "mask-image" | "background-position-x" | "background-position-y" | "mask-position-x" | "mask-position-y" | "backdrop-filter" | "scrollbar-width" => {
             let ([one], Some(p)) = (slice, Property::from_name(name)) else { return Some(false) };
             return Some(longhand(p, *one).map(|v| emit(p, v)).is_some());
         }
@@ -1716,6 +1762,10 @@ fn longhand(property: Property, part: Part) -> Option<Value> {
         BorderTopLeftRadius | BorderTopRightRadius | BorderBottomRightRadius | BorderBottomLeftRadius => positive(part).map(Value::Length),
         Appearance => one_of(part, &[K::None, K::Auto, K::Button, K::Checkbox, K::Radio, K::Textfield, K::Textarea, K::Menulist]),
         Cursor => one_of(part, &[K::Auto, K::Default, K::Pointer]),
+        // `thin` draws as `auto` (a gap). `none`: the box still scrolls, with no bar.
+        ScrollbarWidth => one_of(part, &[K::Auto, K::Thin, K::None]),
+        // A list of functions is read by `filter_declaration`.
+        BackdropFilter => one_of(part, &[K::None]),
         // A list, read by `family` from the text of the value. It is no one part.
         FontFamily => Option::None,
         UserSelect => one_of(part, &[K::Auto, K::Text, K::None, K::Contain, K::All]),

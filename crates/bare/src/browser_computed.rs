@@ -348,6 +348,7 @@ impl Snap {
             Cv::Number(n) if p == Property::GridAutoFlow => flow_text(n).to_string(),
             Cv::Number(n) if matches!(p, Property::BackgroundImage | Property::MaskImage) => bare_css::urls::get(n as u32).map_or("none".to_string(), |u| format!("url(\"{u}\")")),
             Cv::Number(n) => num(n),
+            Cv::Length(Length::Px(x)) if p == Property::BackdropFilter => format!("blur({}px)", num(x)),
             Cv::Length(Length::Px(x)) => format!("{}px", num(x)),
             Cv::Length(Length::Percent(x)) => format!("{}%", num(x)),
             Cv::Length(Length::Calc(i)) if p.is_picture() => calc_of(bare_css::cascade::picture_calc(i)),

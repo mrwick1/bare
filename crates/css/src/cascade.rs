@@ -2733,8 +2733,13 @@ impl Styles {
     #[inline(always)]
     fn differ(&self, a: u32, new: &Styles, b: u32) -> Change {
         let (x, y) = (&self.styles[a as usize].0, &new.styles[b as usize].0);
-        // The picture properties are all paint only, and a set has the same number when its values are equal.
-        let mut out = if self.styles[a as usize].2 == new.styles[b as usize].2 { Change::Same } else { Change::Paint };
+        let (p, q) = (self.styles[a as usize].2, new.styles[b as usize].2);
+        if p != q && picture_value(p, Property::ScrollbarWidth) != picture_value(q, Property::ScrollbarWidth) {
+            // The one picture property that layout reads: a bar takes room.
+            return Change::Layout;
+        }
+        // The other picture properties are paint only, and a set has the same number when its values are equal.
+        let mut out = if p == q { Change::Same } else { Change::Paint };
         for (i, &p) in Property::ALL[..Property::CORE].iter().enumerate() {
             let (u, v) = (x[i], y[i]);
             let same = match (u, v) {
@@ -2866,7 +2871,7 @@ impl ComputedStyle {
         picture_value(self.2, property)
     }
 
-    /// The 12 picture values at once, in the order of `Property::ALL[CORE..]`: one lookup, for the code that reads many of them (paint).
+    /// The 14 picture values at once, in the order of `Property::ALL[CORE..]`: one lookup, for the code that reads many of them (paint).
     pub fn pictures(&self) -> Pictures {
         picture_values(self.2)
     }
@@ -3047,7 +3052,7 @@ fn initial(p: Property) -> Value {
         BoxSizing => Value::Keyword(K::ContentBox),
         TextColor => Value::Color(Color::BLACK),
         BackgroundColor => Value::Color(Color::TRANSPARENT),
-        BackgroundImage | MaskImage => Value::Keyword(K::None),
+        BackgroundImage | MaskImage | BackdropFilter => Value::Keyword(K::None),
         BackgroundSizeX | BackgroundSizeY | MaskSizeX | MaskSizeY => Value::Keyword(K::Auto),
         BackgroundPositionX | BackgroundPositionY | MaskPositionX | MaskPositionY => Value::Length(Length::Percent(0.0)),
         BackgroundRepeat | MaskRepeat => Value::Keyword(K::Repeat),
@@ -3077,7 +3082,7 @@ fn initial(p: Property) -> Value {
         Stroke => Value::Keyword(K::None),
         Opacity => Value::Number(1.0),
         Appearance => Value::Keyword(K::None),
-        PointerEvents | Cursor | UserSelect => Value::Keyword(K::Auto),
+        PointerEvents | Cursor | UserSelect | ScrollbarWidth => Value::Keyword(K::Auto),
         BorderTopLeftRadius | BorderTopRightRadius | BorderBottomRightRadius | BorderBottomLeftRadius => px(0.0),
         BorderSpacingH | BorderSpacingV => px(0.0),
         TranslateX | TranslateY => px(0.0),

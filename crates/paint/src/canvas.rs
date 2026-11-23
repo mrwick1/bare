@@ -178,6 +178,32 @@ fn mix(src: u32, dst: u32, a: u32) -> u32 {
 
 /// `color` (`0xAARRGGBB`, not premultiplied) over the opaque pixel `d`.
 #[inline]
+/// Three box blurs of radius `h` over `line`, in place. `out` is a buffer for the result of each one.
+fn box3(line: &mut Vec<u32>, out: &mut Vec<u32>, h: usize) {
+    let n = line.len();
+    let width = (2 * h + 1) as u32;
+    for _ in 0..3 {
+        out.clear();
+        let get = |i: isize| line[i.clamp(0, n as isize - 1) as usize];
+        let mut sum = [0u32; 4];
+        let add = |sum: &mut [u32; 4], p: u32, sign: bool| {
+            for (k, s) in sum.iter_mut().enumerate() {
+                let c = (p >> (8 * k)) & 0xff;
+                *s = if sign { *s + c } else { *s - c };
+            }
+        };
+        for i in -(h as isize)..=h as isize {
+            add(&mut sum, get(i), true);
+        }
+        for i in 0..n as isize {
+            out.push((0..4).fold(0, |p, k| p | ((sum[k] + width / 2) / width) << (8 * k)));
+            add(&mut sum, get(i + h as isize + 1), true);
+            add(&mut sum, get(i - h as isize), false);
+        }
+        std::mem::swap(line, out);
+    }
+}
+
 pub fn blend(color: u32, d: u32, a: u32) -> u32 {
     let r = mix(color >> 16 & 255, d >> 16 & 255, a);
     let g = mix(color >> 8 & 255, d >> 8 & 255, a);
@@ -454,6 +480,35 @@ impl<'a> Canvas<'a> {
                 if *p != s {
                     *p = blend(*p, s, alpha as u32);
                 }
+            }
+        }
+    }
+
+    /// Blur the pixels of `r` with a Gaussian of standard deviation `sigma`: three box blurs across and three down, each a running
+    /// sum, so the cost is the area times six whatever `sigma` is. The pixels past the edge of `r` count as the edge pixel.
+    pub fn blur(&mut self, r: IRect, sigma: f32) {
+        let r = r.intersect(self.bounds());
+        // Three boxes of radius `h` have the variance 3 * h * (h + 1) / 3 = sigma squared.
+        let h = ((((1.0 + 4.0 * sigma * sigma).sqrt() - 1.0) / 2.0).round() as usize).min(1 << 16);
+        if r.is_empty() || h == 0 {
+            return;
+        }
+        let (w, stride) = ((r.x1 - r.x0) as usize, self.width as usize);
+        let mut line = Vec::new();
+        let mut out = Vec::new();
+        for y in r.y0..r.y1 {
+            let at = y as usize * stride + r.x0 as usize;
+            line.clear();
+            line.extend_from_slice(&self.pixels[at..at + w]);
+            box3(&mut line, &mut out, h);
+            self.pixels[at..at + w].copy_from_slice(&line);
+        }
+        for x in r.x0..r.x1 {
+            line.clear();
+            line.extend((r.y0..r.y1).map(|y| self.pixels[y as usize * stride + x as usize]));
+            box3(&mut line, &mut out, h);
+            for (y, &p) in (r.y0..r.y1).zip(&line) {
+                self.pixels[y as usize * stride + x as usize] = p;
             }
         }
     }
