@@ -35,6 +35,7 @@
           if (s.rt !== 0) return;
           s.rt = 1;
           s.proto = a;
+          s.ext = b;
           o.dispatchEvent(new Event('open'));
         } else if (kind === 1 || kind === 2) {
           if (s.rt !== 1) return;
@@ -70,14 +71,14 @@
         if (u.protocol === 'ws:' && location.protocol === 'https:' && !local) {
           throw new DOMException("Failed to construct 'WebSocket': An insecure WebSocket connection may not be initiated from a page loaded over HTTPS.", 'SecurityError');
         }
-        var s = { url: u.href, origin: u.protocol + '//' + u.host, rt: 0, bt: 'blob', on: {}, proto: '', id: -1, q: null, pend: 0, late: 0 };
+        var s = { url: u.href, origin: u.protocol + '//' + u.host, rt: 0, bt: 'blob', on: {}, proto: '', ext: '', id: -1, q: null, pend: 0, late: 0 };
         S.set(this, s);
         s.id = ws(0, s.url, list.join(','), on(this, s));
       }
       get url() { return st(this).url; }
       get readyState() { return st(this).rt; }
       get bufferedAmount() { var s = st(this); return ws(3, s.id) + s.pend + s.late; }
-      get extensions() { st(this); return ''; }
+      get extensions() { return st(this).ext; }
       get protocol() { return st(this).proto; }
       get binaryType() { return st(this).bt; }
       set binaryType(v) { if (v === 'blob' || v === 'arraybuffer') st(this).bt = v; }

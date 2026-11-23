@@ -86,7 +86,7 @@ fn read_frame(s: &mut TcpStream) -> (u8, Vec<u8>) {
 fn open(port: u16, protocols: &[&str], max: usize) -> Result<(ws::Reader, ws::Writer, String), String> {
     let url = Url::parse(&format!("http://127.0.0.1:{port}/chat?room=1")).unwrap();
     let protocols: Vec<String> = protocols.iter().map(|p| p.to_string()).collect();
-    ws::connect(&Client::new(), &url, &protocols, Some("http://127.0.0.1:9"), max).map_err(|e| e.to_string())
+    ws::connect(&Client::new(), &url, &protocols, Some("http://127.0.0.1:9"), max).map(|(r, w, p, _)| (r, w, p)).map_err(|e| e.to_string())
 }
 
 #[test]
@@ -165,7 +165,7 @@ fn a_bad_handshake_fails() {
     assert!(open(port, &[], 1 << 20).err().unwrap().contains("Unexpected response code: 200"));
     let (port, _h) = server(|head| ok(head).replace(&accept_of(head), "AAAA"), |_| {});
     assert!(open(port, &[], 1 << 20).err().unwrap().contains("Sec-WebSocket-Accept"));
-    let (port, _h) = server(|head| ok(head).replace("\r\n\r\n", "\r\nSec-WebSocket-Extensions: permessage-deflate\r\n\r\n"), |_| {});
+    let (port, _h) = server(|head| ok(head).replace("\r\n\r\n", "\r\nSec-WebSocket-Extensions: x-webkit-deflate-frame\r\n\r\n"), |_| {});
     assert!(open(port, &[], 1 << 20).err().unwrap().contains("extension"));
 }
 

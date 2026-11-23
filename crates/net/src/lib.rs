@@ -19,3 +19,5 @@ pub mod vclock;
 pub mod ws;
 #[cfg(test)]
 mod ws_tests;
+#[cfg(test)]
+mod ws_deflate_tests;

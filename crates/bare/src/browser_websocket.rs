@@ -5,13 +5,13 @@
 //! - `ws(1, id, data)` sends a string as text, or bytes as binary. `ws(2, id, code, reason)` closes (`code` -1: none).
 //!   `ws(3, id)` gives the bytes that are sent but not written yet (`bufferedAmount`).
 //! - The reader thread sends each event to the page. `Browser::run_streams` takes them with the chunks of the event streams and calls
-//!   `cb(kind, ...)` for each one, in its own task: 0 open (protocol), 1 text, 2 binary (an `ArrayBuffer`), 3 close (code, reason,
+//!   `cb(kind, ...)` for each one, in its own task: 0 open (protocol, extensions), 1 text, 2 binary (an `ArrayBuffer`), 3 close (code, reason,
 //!   clean), 4 failed (why). The shim fires the events.
 //! - An open socket does not hold the page idle (`live_work_of(false)`), as an event stream does. `cb` is a persistent handle until the
 //!   close, so the `WebSocket` object stays alive while it is open. When the page goes away, the channels drop: the writer sends a
 //!   close with 1001, as Chrome does, and ends the connection. The reader stops.
 //!
-//! Gates: no `permessage-deflate`; no `ws:` through an HTTP proxy; a message is at most `MAX_MESSAGE` bytes (close 1009).
+//! Gates: no `ws:` through an HTTP proxy; a message is at most `MAX_MESSAGE` bytes (close 1009).
 
 use crate::browser::{Dom, R};
 use crate::browser_scoped::*;
@@ -32,7 +32,7 @@ const MAX_MESSAGE: usize = 32 << 20;
 
 /// What the reader thread sends to the page.
 pub(crate) enum Event {
-    Open(String),
+    Open(String, String),
     Text(String),
     Binary(Vec<u8>),
     Closed(u16, String, bool),
@@ -139,7 +139,7 @@ fn open<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, a: Args<'s>) -> Res<'s, Local
 
 /// The reader thread: connect, start the writer, then send each message to the page.
 fn socket_thread(client: Client, url: Url, protocols: Vec<String>, origin: Option<String>, tx: Sender<Event>, out: Receiver<Out>, buffered: Arc<AtomicUsize>) {
-    let (mut r, mut w, protocol) = match ws::connect(&client, &url, &protocols, origin.as_deref(), MAX_MESSAGE) {
+    let (mut r, mut w, protocol, extensions) = match ws::connect(&client, &url, &protocols, origin.as_deref(), MAX_MESSAGE) {
         Ok(c) => c,
         Err(e) => {
             let _ = tx.send(Event::Failed(e.to_string()));
@@ -147,7 +147,7 @@ fn socket_thread(client: Client, url: Url, protocols: Vec<String>, origin: Optio
             return;
         }
     };
-    let gone = tx.send(Event::Open(protocol)).is_err();
+    let gone = tx.send(Event::Open(protocol, extensions)).is_err();
     bare_net::parallel::wake();
     if gone {
         w.shutdown();
@@ -226,7 +226,7 @@ pub(crate) fn run_sockets<E: Eng>(dom: &Dom<E>, it: &mut E::Vm) -> R<E, usize> {
             run::<E, ()>(it, |s| {
                 let f = s.engine().raw_local(&cb);
                 let args = match e {
-                    Event::Open(p) => vec![s.number(0.0), s.string(&p)?],
+                    Event::Open(p, x) => vec![s.number(0.0), s.string(&p)?, s.string(&x)?],
                     Event::Text(t) => {
                         s.charge((t.len() / 64) as u64)?;
                         vec![s.number(1.0), s.string(&t)?]

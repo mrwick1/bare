@@ -112,6 +112,8 @@ mod browser_websocket_tests;
 #[cfg(test)]
 mod browser_websocket_net_tests;
 #[cfg(test)]
+mod browser_websocket_deflate_tests;
+#[cfg(test)]
 mod browser_speech_tests;
 #[cfg(test)]
 mod browser_filereader_tests;
