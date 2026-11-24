@@ -1,9 +1,8 @@
 #!/bin/sh
-# Compare bare-js tokens with Acorn on every .js file in DIR (read only, nothing is run).
+# Compare Vex tokens with Acorn on every .js file in DIR (read only, nothing is run).
 #   ACORN=file:///path/to/acorn.mjs tools/js_lex_check.sh DIR
 set -eu
-# LEX_PKG=bare-vex runs the lexer of the new engine (crates/vex/examples).
-pkg=${LEX_PKG:-bare-js}
+pkg=bare-vex
 dir=${1:?usage: js_lex_check.sh DIR}
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
