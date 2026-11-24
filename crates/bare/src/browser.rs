@@ -890,6 +890,7 @@ pub struct Dom<E: Eng = Old> {
     pub(crate) geom: crate::browser_geom::Geom<E>,
     /// `Worker` (`browser_worker.rs`).
     pub(crate) worker: crate::browser_worker::WorkerHost<E>,
+    pub(crate) broadcast: crate::browser_broadcast::BroadcastHost<E>,
     /// Freeing the nodes of dead trees (`browser_reclaim.rs`).
     pub(crate) reclaim: crate::browser_reclaim::Reclaim,
 }
@@ -926,6 +927,7 @@ impl<E: Eng> Dom<E> {
         self.ce_roots(out);
         crate::browser_geom::roots(self, out);
         crate::browser_worker::roots(self, out);
+        crate::browser_broadcast::roots(self, out);
     }
 }
 
@@ -1035,6 +1037,7 @@ impl<'p, E: Eng> bare_js_api::Host<E::Vm> for Dom<E> {
                 Some(Owner::Xhr(o)) => crate::browser_xhr::forget(self, o),
                 Some(Owner::Port(o)) => {
                     self.sched_forget_port(o);
+                    crate::browser_broadcast::forget(self, o);
                     ports_died = true;
                 }
                 Some(Owner::Worker(o)) => crate::browser_worker::forget(self, o),
@@ -1716,6 +1719,7 @@ impl<E: Eng> Dom<E> {
         crate::browser_abort::install(self, s)?;
         crate::browser_editing::install(self, s)?;
         crate::browser_worker::install(self, s)?;
+        crate::browser_broadcast::install(self, s)?;
         crate::browser_xhr::install(self, s)?;
         crate::browser_encoding::install(self, s)?;
         crate::browser_web::install(self, s)?;
@@ -2138,6 +2142,7 @@ impl<E: Eng> Browser<E> {
             ce: Default::default(),
             geom: Default::default(),
             worker: Default::default(),
+            broadcast: Default::default(),
             reclaim: Default::default(),
         });
         E::install_dom(&mut it, &dom)?;
