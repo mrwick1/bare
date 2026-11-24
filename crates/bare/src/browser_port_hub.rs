@@ -14,18 +14,24 @@
 //! Cost. A page that never moves a port to another page never makes an end. The counters `wires` and `bytes` are the only state that
 //! the drivers read for each round.
 //!
+//! Broadcast. A `BroadcastChannel` of a page with a hub also has an end, listed under its origin and name (`join`). A message goes as one wire
+//! to each listed end of another page (`peers`); the wire carries the origin of the sender. The list drops ends that are gone when it is read.
+//!
 //! Removal. An end goes when its port closes, when the GC drops its port, when its owner page ends, and when a message that carried it is
 //! dropped (`release`). A send to a missing end is dropped with no error.
 use crate::browser_navigation_state::Transfer;
 use bare_js_api::{Cloned, Moved};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
+use std::rc::Rc;
 
 /// A message for an end, as data.
 pub(crate) struct Wire {
     pub cloned: Cloned,
     /// The byte cost in the queue of a port (`16 + cloned.cost()`).
     pub bytes: usize,
+    /// The origin of the sender of a `BroadcastChannel` message. `None` for a port.
+    pub origin: Option<Rc<str>>,
 }
 
 struct End {
@@ -47,6 +53,8 @@ pub(crate) struct PortHub {
     wires: Cell<usize>,
     bytes: Cell<usize>,
     st: RefCell<Ends>,
+    /// The ends of the `BroadcastChannel`s, by origin, a newline and the name.
+    chans: RefCell<HashMap<Box<str>, Vec<u64>>>,
 }
 
 fn ends_of(xf: &[Moved]) -> impl Iterator<Item = u64> + '_ {
@@ -150,6 +158,25 @@ impl PortHub {
             let mut s = self.st.borrow_mut();
             self.remove_all(&mut s, ends_of(xf).collect());
         }
+    }
+
+    /// List the end of a `BroadcastChannel`.
+    pub(crate) fn join(&self, origin: &str, name: &str, end: u64) {
+        self.chans.borrow_mut().entry(format!("{origin}\n{name}").into()).or_default().push(end);
+    }
+
+    /// The live ends of the channels `origin` and `name` in pages other than `page`, oldest first.
+    pub(crate) fn peers(&self, origin: &str, name: &str, page: u32) -> Vec<u64> {
+        let mut chans = self.chans.borrow_mut();
+        let key = format!("{origin}\n{name}");
+        let Some(list) = chans.get_mut(key.as_str()) else { return Vec::new() };
+        let s = self.st.borrow();
+        list.retain(|e| s.ends.contains_key(e));
+        let out = list.iter().copied().filter(|e| s.ends[e].owner != Some(page)).collect();
+        if list.is_empty() {
+            chans.remove(key.as_str());
+        }
+        out
     }
 
     /// A page ends: its ends go.
