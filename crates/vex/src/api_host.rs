@@ -402,6 +402,7 @@ impl Realm {
         }
         let mut open: Vec<(Obj, u32)> = Vec::new();
         let mut c = Some(o);
+        let mut again = true;
         while let Some(x) = c {
             if x.is_kind(K_PROXY) {
                 return if want {
@@ -436,6 +437,13 @@ impl Realm {
             let mut p = self.hs_plain(x, key);
             if p.is_none() && x.has_flag(F_LAZYM) && self.hs_lazy(x, Some(key))? {
                 p = self.hs_plain(x, key);
+                // The host may put the member on an object nearer in the chain (an interface prototype, asked from the end of the
+                // chain). Read the chain again, once: the objects before `x` were asked already, so they are not asked twice.
+                if p.is_none() && x != o && std::mem::take(&mut again) {
+                    open.clear();
+                    c = Some(o);
+                    continue;
+                }
             }
             if p.is_some() {
                 return self.got(p, key, o.value()).map(Walk::Hit);
