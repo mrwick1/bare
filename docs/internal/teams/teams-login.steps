@@ -1,0 +1,15 @@
+timeout 45000
+open https://teams.microsoft.com/v2/
+expect css="input[name=loginfmt]" visible
+fill css="input[name=loginfmt]" "arjun@qilinlab.com"
+click css="#idSIButton9"
+timeout 20000
+expect css="input[name=passwd]" visible
+fill css="input[name=passwd]" "${PW}"
+click css="#idSIButton9"
+timeout 30000
+expect css="#idSIButton9" visible
+click css="#idSIButton9"
+timeout 90000
+expect css="[data-tid='app-layout-area--main']" visible
+shot teams-authed
