@@ -2226,7 +2226,10 @@ impl<E: Eng> Browser<E> {
     /// a page that replaces its lists makes dead nodes and little script heap, and only a collect and reclaim free them.
     pub fn collect_due(&self) -> bool {
         let live = self.it.external_live();
-        self.it.gc_due() || self.dom.doc.try_borrow().is_ok_and(|d| d.arena_bytes() > live + (2usize << 20).max(live / 4))
+        // Events are small in the heap, so their cap can fill before the heap asks: half the cap asks too.
+        self.it.gc_due()
+            || self.dom.st.borrow().events.len() > self.dom.lim.max_events / 2
+            || self.dom.doc.try_borrow().is_ok_and(|d| d.arena_bytes() > live + (2usize << 20).max(live / 4))
     }
 
     /// Collect the heap. Attached wrappers and their listeners live. `extra` are values the caller still holds.

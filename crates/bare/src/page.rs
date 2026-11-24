@@ -396,7 +396,7 @@ impl Page {
         Ok(())
     }
 
-    fn open_cfg(cfg: SessionConfig, viewport: (u32, u32)) -> Result<Page, String> {
+    pub(crate) fn open_cfg(cfg: SessionConfig, viewport: (u32, u32)) -> Result<Page, String> {
         Ok(Page::new(Source::Session(Box::new(Page::live_session(cfg, viewport)?)), viewport))
     }
 
