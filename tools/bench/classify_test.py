@@ -1,4 +1,4 @@
-"""js2 frames in the subsystem profile: python3 -I tools/bench/classify_test.py."""
+"""Vex frames in the subsystem profile: python3 -I tools/bench/classify_test.py."""
 import importlib.util
 from pathlib import Path
 import tempfile

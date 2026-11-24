@@ -1,4 +1,4 @@
-//! A runaway script on js2 (the default engine) ends at the step budget of `EvalLimits::max_steps`, and the page keeps running.
+//! A runaway script on Vex (the default engine) ends at the step budget of `EvalLimits::max_steps`, and the page keeps running.
 
 use crate::browser_loader::*;
 use crate::browser_session::*;

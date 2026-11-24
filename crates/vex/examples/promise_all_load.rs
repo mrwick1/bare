@@ -1,4 +1,4 @@
-//! Load test for `Promise.all`, `allSettled`, `race` and `any` on js2 (plan step P3): the same programs as `crates/js/examples/promise_all_load.rs`,
+//! Load test for `Promise.all`, `allSettled`, `race` and `any` on Vex (plan step P3): the same programs as `crates/js/examples/promise_all_load.rs`,
 //! so `tools/js/instr.sh` gives the counts of both engines for the same work. One case at one scale for each process.
 //!
 //!   promise_all_load CASE SCALE    CASE: all | settled | race | any | anyerr | many | thenable    SCALE: 1, 10, 100

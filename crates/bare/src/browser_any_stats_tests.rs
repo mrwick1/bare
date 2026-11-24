@@ -1,4 +1,4 @@
-//! `AnyBrowser::stats` on js2. The session_load example reads it after a run with `BARE_JS_EXEC=new`.
+//! `AnyBrowser::stats` on Vex. The session_load example reads it after a run with `BARE_JS_EXEC=new`.
 
 use crate::browser::*;
 use crate::browser_any::AnyBrowser;

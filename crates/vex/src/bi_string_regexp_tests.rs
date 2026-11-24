@@ -1,5 +1,5 @@
 // The `RegExp` forms of `match`, `matchAll`, `search`, `replace`, `replaceAll` and `split` (`bi_string_regexp.rs`), each run normally and
-// under constant collection. The patterns are those of the three journeys that failed on js2 (`rust-book-search`: the elasticlunr
+// under constant collection. The patterns are those of the three journeys that failed on Vex (`rust-book-search`: the elasticlunr
 // tokenizer and Porter stemmer; `python-docs-search-results` and `python-org-docs-link`: searchtools.js).
 use super::tests::check;
 

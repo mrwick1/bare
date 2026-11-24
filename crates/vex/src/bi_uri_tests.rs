@@ -1,5 +1,5 @@
 // `encodeURI`, `encodeURIComponent`, `decodeURI` and `decodeURIComponent` (`bi_uri.rs`), run normally and under constant collection.
-// `encodeURIComponent` is what the search of the Rust book calls on js2 (`searcher.js`: `encodeURIComponent(terms.join(' '))`).
+// `encodeURIComponent` is what the search of the Rust book calls on Vex (`searcher.js`: `encodeURIComponent(terms.join(' '))`).
 use super::tests::check;
 
 #[test]

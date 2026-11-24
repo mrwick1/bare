@@ -1,4 +1,4 @@
-//! Run a JavaScript file through js2 (lexer, parser, compiler, interpreter).
+//! Run a JavaScript file through Vex (lexer, parser, compiler, interpreter).
 //!
 //!   script_run FILE [NAME...]        print each named global (default `result`)
 //!   script_run --eval FILE EXPECTED  an `eval_load` program: the last expression after the last `;` is its result; compare it with

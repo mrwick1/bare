@@ -1,4 +1,4 @@
-//! A GC in a listener must not free the event that the host dispatches (js2).
+//! A GC in a listener must not free the event that the host dispatches (Vex).
 
 use crate::browser::*;
 use crate::eng::Ops;

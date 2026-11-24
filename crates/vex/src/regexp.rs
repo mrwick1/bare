@@ -1,4 +1,4 @@
-//! JavaScript regular expressions for js2 (ECMA-262 `RegExp` pattern matching, with and without `u`): the backtracking side of
+//! JavaScript regular expressions for Vex (ECMA-262 `RegExp` pattern matching, with and without `u`): the backtracking side of
 //! `docs/design-js2-regexp.md` (step R1). It is the matcher of the old engine (`crates/js/src/regexp.rs`), ported to a flat program.
 //!
 //! Safe code: this file holds no `unsafe`. It uses no JS value, no heap and no realm. It works on `&[u8]` (a Latin-1 string) or `&[u16]`.

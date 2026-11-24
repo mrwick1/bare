@@ -1,6 +1,6 @@
 //! The new engine (`bare-vex`) as an engine for the host (S0.4 PR 6c-2). Every object, string, symbol and key of the host is a
-//! `Value` of js2 in a wrapper that has `Hash`. The operations go through `Engine` (with a handle that lasts for one operation) and
-//! through the raw helpers of `api_raw.rs`. What js2 cannot do yet answers `Fault::Unsupported` with the name `js2: ...`: these
+//! `Value` of Vex in a wrapper that has `Hash`. The operations go through `Engine` (with a handle that lasts for one operation) and
+//! through the raw helpers of `api_raw.rs`. What Vex cannot do yet answers `Fault::Unsupported` with the name `Vex: ...`: these
 //! are the lines of the phase 2 queue (`docs/progress/2026-11-21-s04-pr6c2-js2-browser.md`).
 
 use crate::eng::{Collected, Desc, Eng, Fault, Got, HeapStats, KeyKind, Ops, PState, Prop, Val, WallClock};
@@ -14,7 +14,7 @@ use std::borrow::Cow;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct New;
 
-/// A `Value` of js2 that is an object, a string, a symbol or a key. It hashes by its bits: js2 never moves a cell.
+/// A `Value` of Vex that is an object, a string, a symbol or a key. It hashes by its bits: Vex never moves a cell.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct NV(pub Value);
 
@@ -29,7 +29,7 @@ impl std::hash::Hash for NV {
     }
 }
 
-/// The neutral error of js2, for the tests that name it.
+/// The neutral error of Vex, for the tests that name it.
 pub type NewFault = Fault<New>;
 
 /// The index that a string key names, if it is a canonical array index.
@@ -596,7 +596,7 @@ impl Ops<New> for Realm {
         fault(self, e)
     }
     fn bytes_of(&self, _v: Value) -> Option<&[u8]> {
-        // js2 has no ArrayBuffer, TypedArray or DataView cells yet.
+        // Vex has no ArrayBuffer, TypedArray or DataView cells yet.
         None
     }
     fn set_wall_clock(&mut self, c: WallClock) -> Result<(), Fault<New>> {
@@ -652,7 +652,7 @@ impl Ops<New> for Realm {
         Ok(Collected { objects: count.objects, strings: count.strings, symbols: count.symbols })
     }
     fn set_sources(&mut self, dom: std::rc::Rc<crate::browser::Dom<New>>) {
-        // js2 uses the same host for source reads, calls and owner tracing.
+        // Vex uses the same host for source reads, calls and owner tracing.
         Engine::set_host(self, dom);
     }
     fn module_parse_o(&mut self, source: &str, url: &str) -> Result<u32, Fault<New>> {
