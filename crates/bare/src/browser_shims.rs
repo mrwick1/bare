@@ -19,7 +19,7 @@ use crate::browser_scoped::*;
 use bare_js_api::{Args, HostFn, Local, Type};
 
 /// `(names that ask for it, the global that the source defines first, source)`.
-const SHIMS: [(&[&str], &str, &str); 9] = [
+const SHIMS: [(&[&str], &str, &str); 10] = [
     (&["animate", "Animation"], "Animation", include_str!("shims/animation.js")),
     (&["Path2D"], "Path2D", include_str!("shims/path2d.js")),
     (&["EventSource"], "EventSource", include_str!("shims/eventsource.js")),
@@ -29,6 +29,7 @@ const SHIMS: [(&[&str], &str, &str); 9] = [
     (&["indexedDB"], "indexedDB", include_str!("shims/idb.js")),
     (&STREAM_NAMES, "WritableStream", include_str!("shims/streams.js")),
     (&["CompressionStream", "DecompressionStream"], "CompressionStream", include_str!("shims/compression.js")),
+    (&["caches", "CacheStorage", "Cache"], "caches", include_str!("shims/caches.js")),
 ];
 
 /// The globals of `shims/streams.js`. `crates/js/src/heap.rs` (`browser_name`) lists the same names.
