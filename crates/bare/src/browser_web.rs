@@ -119,9 +119,22 @@ struct Made<E: Eng> {
     key_p: E::Obj,
 }
 
+/// `navigator.serviceWorker` and its interfaces, made on the first use of any of them. As in Ladybird, no service worker runs: the
+/// container has no registration, `register` rejects and `ready` never settles.
+#[derive(Clone, Copy)]
+struct Sw<E: Eng> {
+    /// `ServiceWorkerContainer`, `ServiceWorkerRegistration`, `ServiceWorker` (the order of `SW_NAMES`).
+    glob: [E::Obj; 3],
+    /// The one container of the realm.
+    inst: E::Obj,
+    /// The promise of `ready`.
+    ready: E::Obj,
+}
+
 #[derive(Default)]
 struct WState<E: Eng> {
     made: Option<Made<E>>,
+    sw: Option<Sw<E>>,
     blobs: IdMap<<E as Eng>::Obj, BlobData>,
     forms: IdMap<<E as Eng>::Obj, Form<E>>,
     iters: IdMap<<E as Eng>::Obj, IterObj<E>>,
@@ -149,6 +162,9 @@ pub(crate) fn roots<E: Eng>(d: &Dom<E>, out: &mut Roots<'_, '_, E>) {
     out.extend(s.urls.values().map(|&o| E::obj_raw(o)));
     if let Some(m) = s.made {
         out.extend(m.glob.into_iter().chain([m.subtle, m.langs, m.uad, m.brands, m.blob_p, m.file_p, m.form_p, m.iter_p, m.key_p]).map(E::obj_raw));
+    }
+    if let Some(w) = s.sw {
+        out.extend(w.glob.into_iter().chain([w.inst, w.ready]).map(E::obj_raw));
     }
 }
 
@@ -294,6 +310,8 @@ macro_rules! lazy {
 }
 lazy!(lazy0 0, lazy1 1, lazy2 2, lazy3 3, lazy4 4, lazy5 5, lazy6 6);
 
+const SW_NAMES: [&str; 3] = ["ServiceWorkerContainer", "ServiceWorkerRegistration", "ServiceWorker"];
+
 pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
     let g = s.global();
     for (i, h) in [lazy0 as HS<E>, lazy1, lazy2, lazy3, lazy4, lazy5, lazy6].into_iter().enumerate() {
@@ -301,6 +319,25 @@ pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> 
         s.define_accessor_str(g, NAMES[i], Some(f), Some(f), Attrs { writable: false, enumerable: i < 2, configurable: true })?;
     }
     Ok(())
+}
+
+/// Define the globals of `SW_NAMES` at the first read of one of them (`browser_handlers::lazy_key`): no realm pays for them at install.
+/// Gives whether `name` is one of them.
+#[cold]
+pub(crate) fn define_sw<E: Eng>(d: &Dom<E>, it: &mut E::Vm, name: &str) -> R<E, bool> {
+    if !SW_NAMES.contains(&name) {
+        return Ok(false);
+    }
+    run::<E, _>(it, |s| {
+        let w = sw_made(d, s)?;
+        let g = s.global();
+        for (n, o) in SW_NAMES.into_iter().zip(w.glob) {
+            let v = d.obj_local(s, o);
+            s.define_str(g, n, v, Attrs { writable: true, enumerable: false, configurable: true })?;
+        }
+        Ok(())
+    })?;
+    Ok(true)
 }
 
 /// The getter (no argument) and the setter (the new value) of global `NAMES[i]`.
@@ -408,7 +445,7 @@ fn make<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, Made<E>> {
 
     // navigator
     let np = proto(d, s, op_, "Navigator")?;
-    let getters: [(&str, HS<E>); 8] = [
+    let getters: [(&str, HS<E>); 9] = [
         ("userAgent", nav_user_agent),
         ("userAgentData", nav_uad),
         ("language", nav_language),
@@ -417,6 +454,7 @@ fn make<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, Made<E>> {
         ("onLine", nav_on_line),
         ("cookieEnabled", nav_cookie_enabled),
         ("hardwareConcurrency", nav_cores),
+        ("serviceWorker", nav_sw),
     ];
     for (name, h) in getters {
         getter(d, s, np, name, h)?;
@@ -719,6 +757,12 @@ fn nav_on_line<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Ar
 fn nav_cookie_enabled<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     nav(d, s, this)?;
     Ok(s.boolean(true))
+}
+
+fn nav_sw<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    nav(d, s, this)?;
+    let w = sw_made(d, s)?;
+    Ok(d.obj_local(s, w.inst))
 }
 
 fn nav_cores<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
@@ -1476,4 +1520,87 @@ fn iter_next<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args
         }
     };
     iter_result_s::<E>(s, value, done)
+}
+
+// ------------------------------------------------------------------------------------------ ServiceWorkerContainer
+
+fn sw_made<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, Sw<E>> {
+    if let Some(w) = d.web.s.borrow().sw {
+        return Ok(w);
+    }
+    let et = d.p().et;
+    let et = d.obj_local(s, et);
+    let tag = s.intrinsic(Intrinsic::SymbolToStringTag);
+    let mut glob = Vec::with_capacity(3);
+    let mut cp = et;
+    for (i, name) in SW_NAMES.into_iter().enumerate() {
+        let po = lid::<E>(s, et);
+        let p = d.obj_s(s, po)?;
+        let p = d.obj_local(s, p);
+        let n = s.string(name)?;
+        s.define(p, tag, n, Attrs { writable: false, enumerable: false, configurable: true })?;
+        glob.push(iface(d, s, name, 0, subtle_illegal, p)?);
+        if i == 0 {
+            cp = p;
+        }
+    }
+    for (name, len, h) in [("getRegistration", 0, sw_get_registration as HS<E>), ("getRegistrations", 0, sw_get_registrations), ("register", 1, sw_register), ("startMessages", 0, sw_start_messages)] {
+        op(d, s, cp, name, len, h)?;
+    }
+    getter(d, s, cp, "controller", sw_controller)?;
+    getter(d, s, cp, "ready", sw_ready)?;
+    let po = lid::<E>(s, cp);
+    let inst = d.obj_s(s, po)?;
+    // An EventTarget, as `new EventTarget()` makes one (`browser_events.rs`), so that `message` listeners can be added.
+    d.st.borrow_mut().add_target(s.engine(), inst, crate::browser::Owner::Target(crate::browser::Target::Obj(inst)));
+    let ready = s.new_promise()?;
+    let w = Sw { glob: [lid::<E>(s, glob[0]), lid::<E>(s, glob[1]), lid::<E>(s, glob[2])], inst, ready: lid::<E>(s, ready) };
+    d.web.s.borrow_mut().sw = Some(w);
+    Ok(w)
+}
+
+fn sw_this<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, Sw<E>> {
+    match (obj_id::<E>(s, this), d.web.s.borrow().sw) {
+        (Some(o), Some(w)) if o == w.inst => Ok(w),
+        _ => Err(illegal::<E>(s)),
+    }
+}
+
+/// A promise of `r`, made in the realm: a thrown error rejects it.
+fn sw_promise<'s, E: Eng>(s: &mut Sc<'s, E>, r: Res<'s, Local<'s>>) -> Res<'s, Local<'s>> {
+    let p = s.new_promise()?;
+    settle::<E>(s, p, r)
+}
+
+fn sw_get_registration<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let r = sw_this(d, s, this).map(|_| s.undefined());
+    sw_promise::<E>(s, r)
+}
+
+fn sw_get_registrations<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let r = sw_this(d, s, this).and_then(|_| s.new_array(&[]));
+    sw_promise::<E>(s, r)
+}
+
+/// Ladybird rejects `register` too: it does not run service worker scripts.
+fn sw_register<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let r = sw_this(d, s, this).and_then(|_| need::<E>(s, a, 1, "ServiceWorkerContainer.register")).and_then(|_| {
+        Err(d.dom_err_s(s, "NotSupportedError", "Failed to register a ServiceWorker: service workers are not supported."))
+    });
+    sw_promise::<E>(s, r)
+}
+
+fn sw_start_messages<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    sw_this(d, s, this)?;
+    Ok(s.undefined())
+}
+
+fn sw_controller<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    sw_this(d, s, this)?;
+    Ok(s.null())
+}
+
+fn sw_ready<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let w = sw_this(d, s, this)?;
+    Ok(d.obj_local(s, w.ready))
 }
