@@ -1411,7 +1411,7 @@ fn repeat(slice: &[Part], to: Property, emit: &mut dyn FnMut(Property, Value)) -
 /// `background: ...` and `mask: ...`: an image, a position with a size after a `/`, a repeat, and for `background` a color. The words that
 /// we do not use (the attachment, the boxes, the mask mode and compositing) are checked a little and ignored.
 /// The check: no bad part, no word of another property (`bold`), no number with no unit (but `0`).
-/// This is not the whole grammar, and so some wrong values pass. We checked 2,600 values against Chrome: see `docs/progress.md`.
+/// This is not the whole grammar, and so some wrong values pass. We checked 2,600 values against Chrome: see `docs/internal/progress.md`.
 /// All the longhands are set, so that `background: red` takes an image, a size, a position and a repeat away.
 /// `slice` is the first layer. `later` is what follows it (`, ...`): the color of `background` is the one of the last layer.
 fn layer_shorthand(slice: &[Part], later: &[Part], l: &Layer, emit: &mut dyn FnMut(Property, Value)) -> bool {

@@ -1,5 +1,5 @@
 //! Structured clone: `structuredClone(v)` and the `history` state, the page's side. The engine walks the graph and writes a record
-//! (`Engine::clone_out`, `docs/design-host-clone.md`), and builds a new graph from it (`Engine::clone_in`). This file gives the engine
+//! (`Engine::clone_out`, `docs/internal/design-host-clone.md`), and builds a new graph from it (`Engine::clone_in`). This file gives the engine
 //! what it asks of the page ([`CloneHost`]): which objects are host objects, how a `MessagePort` of the transfer list moves, and the
 //! `DataCloneError`. It also sets the limits. `pushState(data)` keeps the record (`Cloned`) and `history.state` builds the graph once per
 //! entry (cached, so `history.state === history.state`). `structuredClone` runs both at once. It is not JSON: cycles, shared

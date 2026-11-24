@@ -1,4 +1,4 @@
-//! The new JavaScript engine of bare (`docs/design-engine-rewrite.md`). Stage S1 builds values, the heap and objects here; stage S2
+//! The new JavaScript engine of bare (`docs/internal/design-engine-rewrite.md`). Stage S1 builds values, the heap and objects here; stage S2
 //! adds the compiler and the interpreter. [`script::run`] runs a script end to end with the core built-ins (`builtins.rs`, S2.7), and the engine
 //! is the default of the browser (`BARE_JS_EXEC=tree`, `auto` or `byte` pick the old engine). [`NOT_READY`] is not used any more.
 //!

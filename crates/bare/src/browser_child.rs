@@ -1,4 +1,4 @@
-//! Child pages: an iframe with an http(s) `src` loads and runs as its own page (step 3a of `docs/design-gmail-frames.md`, rule D1).
+//! Child pages: an iframe with an http(s) `src` loads and runs as its own page (step 3a of `docs/internal/design-gmail-frames.md`, rule D1).
 //!
 //! One child page = one `Browser`: its own heap, DOM, timers and `fetch` queue, on the same thread as its parent. The parent holds it,
 //! keyed by the iframe node. There is no object that both pages share. `RemoteWindow` (`browser_remote_window.rs`) is the only link a

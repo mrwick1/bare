@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The portability gate (docs/decisions.md, "Platforms"). Run it before each merge.
+# The portability gate (docs/internal/decisions.md, "Platforms"). Run it before each merge.
 #
 #   tools/portable_check.sh          # the source scan, then `cargo check` for Windows and macOS
 #   tools/portable_check.sh --scan   # the source scan only

@@ -1,4 +1,4 @@
-//! Cost of a suspended frame (`docs/design-js2-async.md` 5.1 and G0), written as bytecode by hand (there is no compiler for `function*`
+//! Cost of a suspended frame (`docs/internal/design-js2-async.md` 5.1 and G0), written as bytecode by hand (there is no compiler for `function*`
 //! yet). A generator keeps 5 live registers across each `yield`. Each case checks its result and exits with status 1 on a mismatch.
 //!   js2_gen_load CASE N        CASE: next | call | host        N: turns
 //! - `next`: a loop that calls `g.next()` and reads `.value` (one native call, one resume, one `Yield`, one result object).

@@ -1,5 +1,5 @@
 //! JavaScript regular expressions for Vex (ECMA-262 `RegExp` pattern matching, with and without `u`): the backtracking side of
-//! `docs/design-js2-regexp.md` (step R1). It is the matcher of the old engine (`crates/js/src/regexp.rs`), ported to a flat program.
+//! `docs/internal/design-js2-regexp.md` (step R1). It is the matcher of the old engine (`crates/js/src/regexp.rs`), ported to a flat program.
 //!
 //! Safe code: this file holds no `unsafe`. It uses no JS value, no heap and no realm. It works on `&[u8]` (a Latin-1 string) or `&[u16]`.
 //!
@@ -67,7 +67,7 @@ pub const MAX_INPUT_UNITS: usize = 1 << 24;
 /// The most frames of the backtrack stack.
 const MAX_FRAMES: usize = 1 << 22;
 /// The units of fuel that one block of 256 steps costs. A step is about the cost of one op of the interpreter, and a back edge costs
-/// 1 unit, so 256 steps cost as much as 16 loop turns of 8 ops (set by measurement, `docs/progress.md`).
+/// 1 unit, so 256 steps cost as much as 16 loop turns of 8 ops (set by measurement, `docs/internal/progress.md`).
 pub const FUEL_PER_BLOCK: u64 = 16;
 
 // ---------------------------------------------------------------------------------------------

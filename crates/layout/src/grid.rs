@@ -18,7 +18,7 @@
 //!   ranges are copied to the page. A stretched item with no box inside only gets a taller fragment.
 //! - The intrinsic widths of an item are measured only if it is in a track that needs them.
 //!
-//! Known gaps (see `docs/decisions.md`):
+//! Known gaps (see `docs/internal/decisions.md`):
 //! - Baseline alignment on the block axis shares a baseline for each row (`join`). On the inline axis, `baseline` is `start` and `last baseline`
 //!   is `end`. A `percent` height that lays an item out again does not change its group. There is no subgrid and no masonry.
 //! - Names of lines work in the track lists and in the areas. `span name` counts as `span 1` if the name is not found, and

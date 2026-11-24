@@ -1,5 +1,5 @@
 //! Shape census of `bare-vex` on a synthetic React-like trace (plan step S1.8). `tools/js/shape_trace.js` is the same trace as a script: run it
-//! in the old engine with `BARE_JS_STATS=1` (`tools/js/layout_census.sh`, `docs/progress.md` S1.8) to compare. The two must make the same objects
+//! in the old engine with `BARE_JS_STATS=1` (`tools/js/layout_census.sh`, `docs/internal/progress.md` S1.8) to compare. The two must make the same objects
 //! with the same keys in the same order; both use xorshift32 from the same seed, and the order of the calls to it is the same.
 //!
 //!   shape_census [SCALE]      SCALE (default 1) multiplies the number of objects: 8,000 x SCALE elements and props objects, 2,000 fibers, 4,000 hooks

@@ -1,8 +1,8 @@
 #!/bin/sh
-# Instructions in user mode of one command: the minimum of 3 runs. The cost rows of docs/resources.md use it.
+# Instructions in user mode of one command: the minimum of 3 runs. The cost rows of docs/internal/resources.md use it.
 #   tools/js/instr.sh COMMAND [ARGS...]
 # The glibc thread cache holds 7 freed blocks for each size by default. More frees go to slower paths whose cost
-# depends on what the heap held before, so an unrelated change at start moves a row by up to 2% (docs/resources.md).
+# depends on what the heap held before, so an unrelated change at start moves a row by up to 2% (docs/internal/resources.md).
 # A large cache removes that. It also raises the peak RSS, so use this script for instructions only, never for memory.
 export GLIBC_TUNABLES=glibc.malloc.tcache_count=65535
 min=

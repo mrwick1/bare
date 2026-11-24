@@ -1,4 +1,4 @@
-//! Shapes: the hidden classes of objects (`docs/design-engine-rewrite.md` 6.4, 6.11 items 12 and 15, plan step S1.8).
+//! Shapes: the hidden classes of objects (`docs/internal/design-engine-rewrite.md` 6.4, 6.11 items 12 and 15, plan step S1.8).
 //!
 //! An object cell holds a 32-bit shape id in its header (`cell.rs`). The shape says which keys the object has, in which slot each
 //! value is, which prototype it has and how many slots are inline. Two objects made by `{a: 1, b: 2}` share one shape. In JS terms:

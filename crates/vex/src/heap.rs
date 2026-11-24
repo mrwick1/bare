@@ -1,4 +1,4 @@
-//! The allocator of the heap: size-class blocks with lazy sweep (`docs/design-engine-rewrite.md` 6.10 item 15, plan step S1.3).
+//! The allocator of the heap: size-class blocks with lazy sweep (`docs/internal/design-engine-rewrite.md` 6.10 item 15, plan step S1.3).
 //!
 //! - A block is [`BLOCK`] bytes from the OS (`bare_os::pages`), aligned to its size. Its header holds the cell size and one mark
 //!   bit per cell; the cells follow. A cell address with the low bits cleared is its block, so marking needs no table.

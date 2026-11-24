@@ -3,7 +3,7 @@
 //! A hash changes when any pixel changes. If a change is on purpose, look at the picture (`bare --paint=out.png file.html`)
 //! and then copy the new hash from the failure message. The pixel checks tell you what moved.
 //!
-//! The fixtures were also drawn in Chrome (`docs/resources.md`, "Paint and pixel capture"). `backgrounds` is the same as
+//! The fixtures were also drawn in Chrome (`docs/internal/resources.md`, "Paint and pixel capture"). `backgrounds` is the same as
 //! Chrome in every pixel. In the other fixtures the boxes and the borders are the same and the text is not.
 
 use bare_css::cascade::{Origin, RuleSet, Source, UA_CSS};

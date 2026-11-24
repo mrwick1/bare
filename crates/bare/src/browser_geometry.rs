@@ -40,7 +40,7 @@
 //!   result is thrown away, and the read stops the page. What layout did is then charged as steps. There is no limit on how deep
 //!   boxes that run again are nested: a flex or grid item that stretches is laid out again, but layout keeps the result of each box
 //!   for each space it was laid out in (`layout/src/memo.rs`), so the work is about one layout for each box for each distinct height
-//!   that reaches it (measured in `docs/resources.md`, "Layout work of geometry reads"), not a factor for each level of nesting.
+//!   that reaches it (measured in `docs/internal/resources.md`, "Layout work of geometry reads"), not a factor for each level of nesting.
 //!   Only boxes inside a scroll container that needs a scrollbar can still grow by a factor for each level; `max_work` stops those.
 //!
 //! Not done: `getBoundingClientRect`, `offsetParent`, `offsetLeft`, `offsetTop`, `ResizeObserver`, a cache, transformed geometry.

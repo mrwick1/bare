@@ -1,4 +1,4 @@
-//! The bytecode format of the new engine (`docs/design-engine-rewrite.md` 6.10 items 1, 7 and 8, 6.11 items 8 and 19; plan step S2.4).
+//! The bytecode format of the new engine (`docs/internal/design-engine-rewrite.md` 6.10 items 1, 7 and 8, 6.11 items 8 and 19; plan step S2.4).
 //! Nothing here runs code. The compiler (S2.5) writes this format through [`Asm`], the interpreter (S2.6) reads it, and
 //! [`crate::verify::verify`] checks a [`Code`] before the interpreter may trust it. The numbers of the opcodes are not stable until S2.6.
 //!
@@ -17,7 +17,7 @@
 //! An operand that does not fit uses the wide form: the prefix word `[Wide][op][a:16]`, then the other operands at 16 bits (`Abc`:
 //! `[b:16][c:16]`) or 32 bits (`Abx`, `AsBx`: one word), then `x` if the form has it. This is the `Wide` prefix of V8's Ignition,
 //! with words in place of bytes; [`encode`] picks the narrow form when every operand fits, so the compiler never names a width.
-//! Section "Compared" of the PR text and `docs/progress.md` (S2.4) compare it with QuickJS and Ignition.
+//! Section "Compared" of the PR text and `docs/internal/progress.md` (S2.4) compare it with QuickJS and Ignition.
 //!
 //! **Constants.** Each kind has its own place, and a constant that fits in the word is not in a table:
 //! - Integers: an immediate. `LoadI` (16 bits), the `...I` ops (8 bits), and the compare-jumps `J..I` (a 32-bit `x`).
@@ -44,7 +44,7 @@
 //! `mask + 1` slots of `hash`, `atom`, `target`, probed linearly from `hash & mask`; a slot with `atom == u32::MAX` is empty and ends a
 //! probe. Both ops end the basic block: they do not fall through.
 //!
-//! **Suspension.** `GenInit` and `Yield` leave the frame and keep it in the heap (`generator.rs`, `docs/design-js2-async.md` 5.1). Each names a *save
+//! **Suspension.** `GenInit` and `Yield` leave the frame and keep it in the heap (`generator.rs`, `docs/internal/design-js2-async.md` 5.1). Each names a *save
 //! list* in [`Code::tables`]: `sent`, `mode`, `len` and then `len` registers (see [`SaveList`]). The registers of the list are copied into the
 //! record of the generator and copied back at a resume, and no other register survives it. So after a suspension a register is written only
 //! if it is in the list, or it is `sent` or `mode` (the resume writes the value that was sent and the mode of the resume: 0 `next`,

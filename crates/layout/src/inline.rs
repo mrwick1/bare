@@ -967,7 +967,7 @@ impl<const WRAPS: bool> Breaker<'_, '_, WRAPS> {
                 Keyword::Right => free,
                 Keyword::Center => free / 2.0,
                 _ => 0.0,
-                // `left` and `justify` (not built: see `docs/progress.md`).
+                // `left` and `justify` (not built: see `docs/internal/progress.md`).
             };
 
         for &i in &self.line_statics {

@@ -1,5 +1,5 @@
 //! Small DOM and web API gaps that stopped real sites in `bare-drive`. They live in their own module so that the hot modules keep their
-//! code, and so their inlining, unchanged (the cost rows move with the inlining of unrelated code: see `docs/progress.md`).
+//! code, and so their inlining, unchanged (the cost rows move with the inlining of unrelated code: see `docs/internal/progress.md`).
 //!
 //! - `HTMLScriptElement.prototype.noModule`: a reflected boolean for `nomodule`.
 //! - `document.hasFocus()`: always `true`. The page always has system focus (`browser_focus.rs`).

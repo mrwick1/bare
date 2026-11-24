@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write the standard suite of 40 tests (docs/design-suite.md, section 5.2) into DIR.
+"""Write the standard suite of 40 tests (docs/internal/design-suite.md, section 5.2) into DIR.
 
 usage: gen_suite.py DIR [PAGES]   (PAGES: pages that a read test visits after the start; default 5)
 

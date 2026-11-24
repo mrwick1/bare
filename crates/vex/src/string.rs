@@ -1,4 +1,4 @@
-//! JavaScript strings in heap cells (`docs/design-engine-rewrite.md` 6.10 items 13 and 14, plan step S1.7).
+//! JavaScript strings in heap cells (`docs/internal/design-engine-rewrite.md` 6.10 items 13 and 14, plan step S1.7).
 //!
 //! A string is a cell of the allocator in `heap.rs` that starts with a [`CellHeader`] and a prefix of two words: the length in
 //! code units and a cached hash (0 until it is computed). The header layout says what follows:

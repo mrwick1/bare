@@ -7,7 +7,7 @@
 //!   pass (`feed_if_ran`). So a link that a script inserted, or whose `href`/`media`/`rel` it changed, or a `<base>` it changed,
 //!   is loaded before the next script or timer. The engine does no network call in a script.
 //!
-//! A read before the pass: pending sheets (as Chrome shows, `docs/resources.md#pending-style-sheets`)
+//! A read before the pass: pending sheets (as Chrome shows, `docs/internal/resources.md#pending-style-sheets`)
 //! - The first pass that ends `Ready` has every sheet of the parsed document. The driver then calls `Browser::set_pending_sheets(true)`.
 //!   Chrome blocks a script on a parser-inserted sheet, and a pre-parsed document has them all before the first script, so that case needs
 //!   no rule. Before that call a missing sheet still stops the page (`Fatal::Unsupported`).

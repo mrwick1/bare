@@ -1,4 +1,4 @@
-//! The compiler of the new engine (`docs/design-engine-rewrite.md` 6.5, 6.10 items 1 to 7 and 6.11 items 5 to 7; plan step S2.5).
+//! The compiler of the new engine (`docs/internal/design-engine-rewrite.md` 6.5, 6.10 items 1 to 7 and 6.11 items 5 to 7; plan step S2.5).
 //!
 //! It turns the tree of **one function** (`parse_function`) into a [`Code`]. The tree is dropped by the caller after the compile. Inner
 //! functions are not compiled here: each one is a [`Child`] (a number of the facts) that the caller compiles when it first runs.
@@ -73,7 +73,7 @@ pub struct LevelVar {
     pub konst: bool,
     /// The name of a named function expression, inside the function: an assignment throws in strict code and does nothing in sloppy code.
     pub callee: bool,
-    /// A module binding that lives in a property of an environment object (`docs/design-js2-host-api.md` section 12): the slot holds the
+    /// A module binding that lives in a property of an environment object (`docs/internal/design-js2-host-api.md` section 12): the slot holds the
     /// object and this is the name of the property. Only the `Level` of a module has such a variable.
     pub env: Option<Box<str>>,
 }

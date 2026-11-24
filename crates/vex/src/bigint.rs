@@ -18,7 +18,7 @@
 
 use std::cmp::Ordering;
 
-/// Limbs at which multiplication switches from schoolbook to Karatsuba. Measured in `docs/resources.md`.
+/// Limbs at which multiplication switches from schoolbook to Karatsuba. Measured in `docs/internal/resources.md`.
 pub const KARATSUBA: usize = 32;
 
 /// An owned signed integer. `mag` has no zero at the top. Zero has an empty `mag` and `neg == false`.

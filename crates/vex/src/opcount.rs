@@ -1,4 +1,4 @@
-//! Executed op counts, behind the cargo feature `op-count` (plan step S2.9, `docs/design-js2-superinstructions.md`). With the feature off
+//! Executed op counts, behind the cargo feature `op-count` (plan step S2.9, `docs/internal/design-js2-superinstructions.md`). With the feature off
 //! this module does not exist and `Vm::run` has no call into it, so the normal build is the same code as before.
 //!
 //! `tick` runs once for each dispatch. It counts the op, the pair (the op before it and this op, any control flow) and two fusable

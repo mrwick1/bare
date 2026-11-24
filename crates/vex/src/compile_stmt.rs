@@ -6,7 +6,7 @@ use crate::bytecode::STR_EMPTY;
 use std::collections::HashSet;
 
 /// The fewest distinct integer cases for a jump table, and the largest `max - min + 1` for each case (V8 allows 3 for each clause and
-/// needs 6 cases; JSC needs 3 cases). The numbers are measured in `docs/progress.md`.
+/// needs 6 cases; JSC needs 3 cases). The numbers are measured in `docs/internal/progress.md`.
 const MIN_INT_CASES: usize = 3;
 const INT_SPAN: i64 = 3;
 /// The fewest distinct string cases for a hash table.

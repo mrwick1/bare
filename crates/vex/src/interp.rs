@@ -1,4 +1,4 @@
-//! The interpreter (`docs/design-engine-rewrite.md` 6.10 items 3, 8 and 9, 6.11 item 11; plan step S2.6). It runs the bytecode of
+//! The interpreter (`docs/internal/design-engine-rewrite.md` 6.10 items 3, 8 and 9, 6.11 item 11; plan step S2.6). It runs the bytecode of
 //! `bytecode.rs` after `verify::verify` accepted it, and reads operands with no check that the verifier proved.
 //!
 //! **The loop.** One `loop` and one `match` on the op. The hot state is in locals: `pc`, `fp` (the index of register 0 in the stack),
@@ -53,7 +53,7 @@
 //! and on the stack size that a call makes. (4) The cache hit and the element read turn a `Value` into a cell (`Obj::from_value_shape`,
 //! `read_loc`, `write_loc`, `set_shape_id`, `Obj::from_value`) and (5) the helpers of `interp_rt.rs` do the same: they rest on the
 //! invariant that every pointer in a register or a cell is live (the roots above keep it). The gains of (1) to (3) are measured with the
-//! safe form of each, in `docs/progress.md` (S2.6): (1) and (2) together save 8 to 18% of the instructions of a micro loop, (3) another 6 to 9%.
+//! safe form of each, in `docs/internal/progress.md` (S2.6): (1) and (2) together save 8 to 18% of the instructions of a micro loop, (3) another 6 to 9%.
 use crate::atoms::SharedAtoms;
 use crate::builtins::Outcome;
 use crate::bytecode::{Asm, CF_ARGS, CF_GEN, CF_LINK, Code, ITER_REGS, Ins, Op, STR_EMPTY, STR_SLOT, decode};
@@ -600,7 +600,7 @@ impl Vm {
     /// `cold_ops!`, by default. The hot `match` keeps the ops that run in a loop in the micro rows (`interp_load`: `loopfn`, `calls`,
     /// `fib`, `closures`, `objects`) and in the programs of the op counts (`--features op-count`, example `op_count`: `bundle_like.js` and
     /// the `eval_*.js` files). Rule of the split: the call costs about 110 to 125 instructions (measured on one cold op in a loop,
-    /// `docs/progress.md`, "Cold arms of `Vm::run`"), and the hot `match` gains about 0.5 to 2 instructions on each dispatch of any op. So an
+    /// `docs/internal/progress.md`, "Cold arms of `Vm::run`"), and the hot `match` gains about 0.5 to 2 instructions on each dispatch of any op. So an
     /// op that is 1 dispatch in 100 or more in one of those programs stays hot, with `cold_path()` as its first statement: `In`,
     /// `InstanceOf`, `ForInOpen`, `CreateArgs` and `Throw` (0.7% to 1.8%). An op that runs once for each function, class or declaration
     /// (`Lazy`, `DeclGlobal`, `SetFnName`, `MakeClass`, ...), a spread, a private name, `super` and an error path go cold.
@@ -1212,7 +1212,7 @@ impl Vm {
                 // SAFETY: `verify` accepted the code, and it rejects a byte that is no opcode; the loop reaches only the first word of
                 // an instruction (the start of the code, or a verified jump target, or the word after an instruction).
                 let opv: Op = unsafe { std::mem::transmute::<u8, Op>($op) };
-                // Cost rule (docs/progress.md, "Stable code of the hot loop"): LLVM weighs every arm of this match the same, so the
+                // Cost rule (docs/internal/progress.md, "Stable code of the hot loop"): LLVM weighs every arm of this match the same, so the
                 // spills and reloads that a call in a rare arm needs also hit the loop state (`pc`, `fp`, `words`, the stack base) of the hot
                 // arms. An arm of a rare op starts with `cold_path()`, as do the `throw!` and `gate!` slow paths. Then an edit in such an arm
                 // does not move the hot rows. Put `cold_path()` first in each new arm of a rare op, and measure `objects` after a change here.

@@ -1,4 +1,4 @@
-//! Structured clone: the record format, the cost model and the host trait (`docs/design-host-clone.md`, plan step 2).
+//! Structured clone: the record format, the cost model and the host trait (`docs/internal/design-host-clone.md`, plan step 2).
 //!
 //! An engine walks plain data itself and writes a [`Cloned`] with a [`RecordWriter`]. It reads one back with a [`RecordReader`] and
 //! builds the objects. The host sees only host objects, the transfer list and the error ([`CloneHost`]). Both engines share this

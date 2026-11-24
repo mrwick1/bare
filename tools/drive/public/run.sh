@@ -3,7 +3,7 @@
 #   tools/drive/public/run.sh [--repeat N] [--out DIR] [--only TEXT] BARE_DRIVE_BINARY
 # Each journey gives OUT/<name>.json (the last attempt). The URL of a journey is its `--var URL=...` in the comment at the top of the file.
 # A failed journey runs once more (network flake); two failures in a row are a failure. A journey marked `# needs-rsa` is skipped, not failed,
-# when it fails with a TLS error. A journey marked `# known-bug: TEXT` that fails is `known`, not a failure (the text names the bare bug; docs/progress.md has the details); when it passes, it is a pass. Exit code 0 only when no journey failed. --repeat N runs the steps N times in one process (leaks: see the RSS).
+# when it fails with a TLS error. A journey marked `# known-bug: TEXT` that fails is `known`, not a failure (the text names the bare bug; docs/internal/progress.md has the details); when it passes, it is a pass. Exit code 0 only when no journey failed. --repeat N runs the steps N times in one process (leaks: see the RSS).
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 repeat=1 out="" only=""

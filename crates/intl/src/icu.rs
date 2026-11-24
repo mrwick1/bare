@@ -8,7 +8,7 @@
 //! - Rounding is ECMA-402 `FormatNumericToString`, done on the shortest decimal digits of the double, as ICU does (1.005 is
 //!   "1.01"). A string argument keeps its exact decimal digits.
 //! - Collation: the root collation (the English tailoring is empty).
-//! - Data: ICU4X compiled data. The choice and its measurements are in `docs/resources.md`.
+//! - Data: ICU4X compiled data. The choice and its measurements are in `docs/internal/resources.md`.
 
 use crate::intl_data::LOCALES;
 use crate::intl_num_data::{DIGITS, NARROW, SYMBOLS, SYMBOLS_LOCALE};

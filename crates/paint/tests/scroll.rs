@@ -108,7 +108,7 @@ fn a_box_with_z_index_in_a_scroll_container_scrolls_with_it() {
     assert_eq!(px(&c, 10, 50), 0xffffff);
 }
 
-/// The column of the page scrollbar, as the runs `(y, red)` of Chrome 15x show them (`docs/resources.md`, "Scrolling").
+/// The column of the page scrollbar, as the runs `(y, red)` of Chrome 15x show them (`docs/internal/resources.md`, "Scrolling").
 fn column(c: &Canvas, x: u32) -> Vec<(u32, u32)> {
     let mut runs: Vec<(u32, u32)> = Vec::new();
     for y in 0..c.height {

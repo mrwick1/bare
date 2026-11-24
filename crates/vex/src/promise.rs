@@ -1,4 +1,4 @@
-//! `Promise`, the microtask queue and the tracking of rejections (`docs/design-js2-async.md` 7.1 to 7.4, plan step P1). Safe code over
+//! `Promise`, the microtask queue and the tracking of rejections (`docs/internal/design-js2-async.md` 7.1 to 7.4, plan step P1). Safe code over
 //! [`Realm`]; the one place that runs script is [`Realm::drain_jobs`].
 //!
 //! **A promise** is an `Object` cell with the flag `F_PROMISE` and two hidden slots, 32 bytes in all. Slot 0 is the state: an int, the

@@ -2,7 +2,7 @@
 //!
 //! bare has one realm and cannot run a worker script. `new Worker(url)` does what a browser does when the worker script cannot load:
 //! it returns the object, and a task after the current one fires a simple `error` event at it. A page that handles that event goes on.
-//! A page that waits for a message waits for ever, as it would for a worker that never answers. See `docs/decisions.md`.
+//! A page that waits for a message waits for ever, as it would for a worker that never answers. See `docs/internal/decisions.md`.
 //!
 //! - The constructor reads its arguments in the WebIDL order: the URL (a string; `new URL(..)` works), then the options (`type` is
 //!   `classic` or `module`, else `TypeError`; `name` and `credentials` are ignored). Then it parses the URL against the document: a

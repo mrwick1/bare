@@ -1,7 +1,7 @@
 //! Text selection of `<input>` and `<textarea>`: `selectionStart`, `selectionEnd`, `selectionDirection`, `setSelectionRange`, `select`,
 //! `setRangeText`, and the `select` and `selectionchange` events.
 //! Source: HTML Standard, "APIs for the text control selections", then compared with headless Chrome 155 (the platform rule of the
-//! standard lets a browser without directionless selections use `forward`, so the behavior is Chrome's, see `docs/decisions.md`).
+//! standard lets a browser without directionless selections use `forward`, so the behavior is Chrome's, see `docs/internal/decisions.md`).
 //! Chrome files: `tools/fixtures/ui/setrange-cases.txt`, `selmodel-cases.txt` (topic cases) and `sel-steps.txt` (events and mouse, on `sel.html`).
 //!
 //! Model
@@ -69,7 +69,7 @@ use bare_html::dom::{Document, NodeData, NodeId};
 use crate::js_num::to_uint32;
 use bare_js_api::{Args, Local, Type};
 
-/// `none` is read and stored as `forward`: Chrome on Linux has no directionless selection (`docs/decisions.md`).
+/// `none` is read and stored as `forward`: Chrome on Linux has no directionless selection (`docs/internal/decisions.md`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(crate) enum Dir {
     #[default]

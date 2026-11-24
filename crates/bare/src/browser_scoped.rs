@@ -1,4 +1,4 @@
-//! Host functions on the interface (`docs/design-host-handlers.md`, step H0). A host function is a handler of the form `HS` (`Scope`,
+//! Host functions on the interface (`docs/internal/design-host-handlers.md`, step H0). A host function is a handler of the form `HS` (`Scope`,
 //! `Local`). It is in `Dom::scoped` and runs through the interface `Host::call` (`Dom::call_scoped`). `Dom::call_scoped` spells the hooks
 //! out with no closure, because it is the hot path.
 
@@ -711,7 +711,7 @@ pub enum Failed {
 }
 
 /// The facade of `Browser` for tests, examples and drivers: they hold values as [`Persistent`] and need not name `Interp`, `Value` or
-/// `ObjId` (`docs/design-host-handlers.md`, question 5). Their text goes through `Interp::display`, as the old tests did.
+/// `ObjId` (`docs/internal/design-host-handlers.md`, question 5). Their text goes through `Interp::display`, as the old tests did.
 impl<E: Eng> Browser<E> {
     /// Run `f` in a handle scope of the engine.
     pub fn with_scope<R>(&mut self, f: impl for<'s> FnOnce(&mut Sc<'s, E>) -> R) -> R {

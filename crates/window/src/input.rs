@@ -46,7 +46,7 @@ pub enum Cursor {
     Text,
 }
 
-/// CSS pixels for one notch of a mouse wheel (`value120` of 120). To verify against Chrome on a real wheel: see `docs/resources.md`,
+/// CSS pixels for one notch of a mouse wheel (`value120` of 120). To verify against Chrome on a real wheel: see `docs/internal/resources.md`,
 /// "Scrolling".
 pub const WHEEL_TICK_PX: f64 = 53.0;
 

@@ -7,7 +7,7 @@
 //! window and the script API clamp it with the numbers found here.
 //!
 //! Chrome gives the same answer from its `LayoutBox::ScrollableOverflowRect`. Differences are listed in
-//! `docs/resources.md`, "Scrolling".
+//! `docs/internal/resources.md`, "Scrolling".
 //!
 //! Rules:
 //! - A `position: fixed` box and everything in it does not scroll with the page and does not make the page longer. A

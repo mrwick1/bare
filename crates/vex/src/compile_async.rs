@@ -1,4 +1,4 @@
-//! Async functions in the compiler (`docs/design-js2-async.md` 5.2 and 6.3; plan step A1). The runtime side is `generator.rs`.
+//! Async functions in the compiler (`docs/internal/design-js2-async.md` 5.2 and 6.3; plan step A1). The runtime side is `generator.rs`.
 //!
 //! **Entry.** `AsyncInit` is the first instruction. It makes the activation and the result promise, and the function runs on in the frame
 //! of its caller, synchronously, until the first `await`. A throw before that (in a default of a parameter, say) rejects the promise: the

@@ -1,4 +1,4 @@
-//! Cost rows of `Promise` (plan step P0/P1, `docs/design-js2-async.md` 8 and 9). One case for each process, so
+//! Cost rows of `Promise` (plan step P0/P1, `docs/internal/design-js2-async.md` 8 and 9). One case for each process, so
 //! `perf stat -e instructions:u` (or `tools/js/instr.sh`) counts it: the cost of one step is the difference of two scales divided by the
 //! difference of the scales. The script runs, then the host drains the jobs.
 //!   js2_promise_load CASE N          CASE: then | then_hit | thenable | new | microtask | empty | mem | await_prim | await_prom | async_noawait

@@ -1,4 +1,4 @@
-//! The statics of `Promise` and `Promise.prototype.finally` (`docs/design-js2-async.md`, plan step P3), in Rust: `all`, `allSettled`,
+//! The statics of `Promise` and `Promise.prototype.finally` (`docs/internal/design-js2-async.md`, plan step P3), in Rust: `all`, `allSettled`,
 //! `any`, `race`, `withResolvers`, `try`, `Promise[Symbol.species]`, `AggregateError`, and `SpeciesConstructor` for `then`.
 //!
 //! **Capability.** [`Cap`] is `[promise, resolve, reject]` as three values. For `%Promise%` the promise is a native promise and the

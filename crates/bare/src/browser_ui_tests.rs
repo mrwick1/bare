@@ -585,7 +585,7 @@ fn rss_kib() -> u64 {
     s.split_whitespace().nth(1).unwrap().parse::<u64>().unwrap() * 4
 }
 
-/// `cargo test --release -p bare --lib measure_input -- --ignored --nocapture`: the numbers of `docs/resources.md`.
+/// `cargo test --release -p bare --lib measure_input -- --ignored --nocapture`: the numbers of `docs/internal/resources.md`.
 #[test]
 #[ignore]
 fn measure_input() {

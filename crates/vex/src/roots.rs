@@ -1,4 +1,4 @@
-//! Collection inside a task (`docs/design-engine-rewrite.md` 6.8, 6.11 item 1 and section 10 Q11, plan step S1.6): root maps, the
+//! Collection inside a task (`docs/internal/design-engine-rewrite.md` 6.8, 6.11 item 1 and section 10 Q11, plan step S1.6): root maps, the
 //! frame stack that they describe, and the allocation that collects.
 //!
 //! **Trigger.** `heap.rs` counts the bytes of cells that the allocator took since the last collection, on its slow path only. The fast

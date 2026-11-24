@@ -1,4 +1,4 @@
-//! Owners, host-filled objects and lazy members of the interface (`docs/design-js2-host-api.md`, section 12).
+//! Owners, host-filled objects and lazy members of the interface (`docs/internal/design-js2-host-api.md`, section 12).
 //!
 //! **Owners.** `Engine::set_host_owner` puts the cell of an object in [`HostState::owners`] with its host key. The
 //! marker (`gc.rs`) has no test for owners. After the mark loop, `collect` asks [`crate::api::ApiState::trace_owners`] in rounds: each

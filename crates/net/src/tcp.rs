@@ -6,7 +6,7 @@
 //! start the next one too, without stopping the first. The first to connect wins.
 //!
 //! A lost SYN needs the same help. The kernel sends a SYN again only after 1 s, and a busy server side drops some SYN packets
-//! (3 of 90 connections to staging, see `docs/resources.md`). So when every address has had its turn and no try has
+//! (3 of 90 connections to staging, see `docs/internal/resources.md`). So when every address has had its turn and no try has
 //! finished after `NEXT_TRY_DELAY` more, the first address gets one more try: a new socket, a new SYN. Chrome does the same
 //! (its "backup connect job", also 250 ms). A try that fails does not start it: a refused port is not retried.
 

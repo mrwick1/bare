@@ -123,7 +123,7 @@ pub struct SessionConfig {
     /// reply (`fetch`, XHR and dynamic scripts start on workers and settle in a later turn when they are in), stops after a slice of
     /// work once the page has loaded, and a navigation that the page asks for downloads the next document on a worker while the old
     /// one stays. `run` and `navigate` also return at once: the document downloads on a worker, and the turns of `resume` load it.
-    /// See `docs/decisions.md` ("Input that does not wait").
+    /// See `docs/internal/decisions.md` ("Input that does not wait").
     pub live: bool,
     /// Where downloads go (see `downloads.rs`). `None`: a response that the page cannot show is a failed load.
     pub downloads: Option<downloads::Downloads>,

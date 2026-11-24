@@ -1,4 +1,4 @@
-// Tests of the prototype entries of the feedback records (`interp_rt.rs`, `docs/design-js2-proto-ic.md`): a read of a data property that a
+// Tests of the prototype entries of the feedback records (`interp_rt.rs`, `docs/internal/design-js2-proto-ic.md`): a read of a data property that a
 // prototype holds. Each case warms a read site, changes the chain in one way, and reads again. `check` runs each case normally and
 // under constant collection, so a stale holder would show as a wrong value or a crash.
 use super::*;

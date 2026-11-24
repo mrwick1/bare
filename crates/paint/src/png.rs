@@ -1,6 +1,6 @@
 //! Pixel capture: write a `Canvas` as a PNG.
 //!
-//! The `png` crate does the encoding. Measured on a 1280 by 800 page-like picture (`docs/resources.md`): 1.5 ms and
+//! The `png` crate does the encoding. Measured on a 1280 by 800 page-like picture (`docs/internal/resources.md`): 1.5 ms and
 //! 261 KB with `Compression::Fast` and the `Sub` filter, against 4.1 MB for a writer with no compression. The
 //! picture is RGB with no alpha channel, because a canvas is opaque. Rows go to the encoder one at a time, so the capture needs
 //! no copy of the whole picture. The same canvas always gives the same bytes.
