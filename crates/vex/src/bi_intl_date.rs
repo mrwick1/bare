@@ -1,4 +1,4 @@
-use super::{CYCLES, Format, Reader, arg, format as data, intl, owner, properties, property, range};
+use super::{CYCLES, Format, Reader, arg, format as data, intl, owner, parts_array, properties, property, range};
 use crate::bi_date::{self, Local};
 use crate::bi_date_calc::{fields, time_clip};
 use crate::interp_rt::{R, Realm};
@@ -91,21 +91,31 @@ pub(super) fn new(o: &mut Reader<'_>, loc: u8, tags: &[String]) -> R<Formatter> 
 }
 
 pub(super) fn format(rt: &mut Realm, _: Value, args: &[Value]) -> R<Value> {
-    let Some(Format::Date(f)) = data(rt, owner(rt)) else { return rt.type_error("incompatible Intl.DateTimeFormat receiver") };
+    let text = render(rt, owner(rt), arg(args, 0), None)?;
+    Ok(rt.string(&text))
+}
+
+pub(super) fn format_to_parts(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+    let mut parts = Vec::new();
+    let text = render(rt, this, arg(args, 0), Some(&mut parts))?;
+    Ok(parts_array(rt, &text, parts.into_iter().map(|(p, end)| (intl::PART_NAMES[p as usize], end))))
+}
+
+fn render(rt: &mut Realm, this: Value, value: Value, mut parts: Option<&mut Vec<(intl::Part, usize)>>) -> R<String> {
+    let Some(Format::Date(f)) = data(rt, this) else { return rt.type_error("incompatible Intl.DateTimeFormat receiver") };
     let f = Rc::clone(f);
-    let value = arg(args, 0);
     let t = time_clip(if value.is_undefined() { rt.clock_now_ms() } else { rt.to_number(value)? });
     let offset = f.zone.zone.offset((t / 1000.0).floor() as i64);
     let local = fields(t + offset as f64 * 1000.0).ok_or_else(|| range(rt, "Invalid time value"))?;
     let mut text = String::new();
     let zone = if f.zone_kind == 0 { String::new() } else { tz_names::name(&f.zone.name, offset, f.zone_kind - 1, f.loc) };
     let extras = intl::Extras { zone: &zone, fsd: f.fraction };
-    intl::format(f.loc, f.pattern, &local, &extras, &mut text, None)
+    intl::format(f.loc, f.pattern, &local, &extras, &mut text, parts.as_deref_mut())
         .map_err(|_| range(rt, "Unsupported date and time fields"))?;
     if f.pattern.has_zone() {
-        intl::zone_tail(f.pattern, &zone, &mut text, None);
+        intl::zone_tail(f.pattern, &zone, &mut text, parts);
     }
-    Ok(rt.string(&text))
+    Ok(text)
 }
 
 pub(super) fn resolved(rt: &mut Realm, this: Value, _: &[Value]) -> R<Value> {

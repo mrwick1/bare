@@ -19,6 +19,9 @@ mod date;
 #[cfg(test)]
 #[path = "bi_intl_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "bi_intl_parts_tests.rs"]
+mod parts_tests;
 
 pub(crate) static GLOBALS: &[Ent] = &[factory("Intl", namespace)];
 
@@ -102,9 +105,9 @@ fn constructor<const K: usize>(rt: &mut Realm) -> Value {
     }
     let methods: &[Ent] = match K {
         COLL => late_table![getter("compare", "get compare", compare_get)],
-        DATE => late_table![getter("format", "get format", date_get), m("resolvedOptions", 0, date::resolved)],
+        DATE => late_table![getter("format", "get format", date_get), m("formatToParts", 1, date::format_to_parts), m("resolvedOptions", 0, date::resolved)],
         NAMES => late_table![m("of", 1, name_of)],
-        NUMBER => late_table![getter("format", "get format", number_get)],
+        NUMBER => late_table![getter("format", "get format", number_get), m("formatToParts", 1, number_parts)],
         LOCALE => {
             rt.intl_state().locale_proto = Some(proto);
             late_table![
@@ -436,8 +439,20 @@ fn name_of(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
 }
 
 fn number_call(rt: &mut Realm, _: Value, args: &[Value]) -> R<Value> {
-    let Some(&Format::Number(f)) = format(rt, owner(rt)) else { return rt.type_error("incompatible Intl.NumberFormat receiver") };
-    let value = rt.to_primitive(arg(args, 0), Hint::Number)?;
+    let mut s = String::new();
+    number_text(rt, owner(rt), arg(args, 0), &mut s, None)?;
+    Ok(rt.string(&s))
+}
+
+fn number_parts(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+    let (mut s, mut parts) = (String::new(), Vec::new());
+    number_text(rt, this, arg(args, 0), &mut s, Some(&mut parts))?;
+    Ok(parts_array(rt, &s, parts.into_iter()))
+}
+
+fn number_text(rt: &mut Realm, this: Value, value: Value, s: &mut String, parts: Option<&mut Vec<(&'static str, usize)>>) -> R<()> {
+    let Some(&Format::Number(f)) = format(rt, this) else { return rt.type_error("incompatible Intl.NumberFormat receiver") };
+    let value = rt.to_primitive(value, Hint::Number)?;
     let exact = if Realm::str_of(value).is_some() || value.is_bigint() {
         let s = string(rt, value)?;
         icu::num_from_decimal_str(s.trim_matches(|c| u16::try_from(c as u32).is_ok_and(crate::bi_string::is_space)))
@@ -445,9 +460,19 @@ fn number_call(rt: &mut Realm, _: Value, args: &[Value]) -> R<Value> {
         None
     };
     let n = match exact { Some(n) => n, None => icu::num_from_f64(rt.to_number(value)?) };
-    let mut s = String::new();
-    rt.intl_state().icu.format(&f, n, icu::Out { s: &mut s, parts: None });
-    Ok(rt.string(&s))
+    rt.intl_state().icu.format(&f, n, icu::Out { s, parts });
+    Ok(())
+}
+
+/// The `formatToParts` array: one `{type, value}` object per part. `parts` gives the type and the end of each part in `text`.
+fn parts_array(rt: &mut Realm, text: &str, parts: impl Iterator<Item = (&'static str, usize)>) -> Value {
+    let mut start = 0;
+    let objects: Vec<Value> = parts.map(|(ty, end)| {
+        let object = properties(rt, &[("type", ty), ("value", &text[start..end])]);
+        start = end;
+        object.value()
+    }).collect();
+    rt.new_array(&objects)
 }
 
 fn locale_options(opts: &mut Reader<'_>, tag: String) -> R<String> {
