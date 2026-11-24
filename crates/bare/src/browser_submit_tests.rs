@@ -53,8 +53,7 @@ fn click_at(p: &mut Page, x: f64, y: f64) {
 
 fn eval(p: &mut Page, src: &str) -> String {
     let b = p.browser().expect("browser");
-    let v = b.run_script(src).unwrap_or_else(|e| panic!("{src}: {e:?}"));
-    b.it.display(v)
+    b.script_text(src).unwrap_or_else(|_| panic!("{src}: script error")).1
 }
 
 /// Run the page until nothing is queued: a navigation that an input starts loads its document in later ticks (`SessionConfig::live`).
