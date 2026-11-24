@@ -728,9 +728,16 @@ fn cut_data<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, m: Mode, frag: NodeId, n:
     Ok(())
 }
 
-/// A partly selected node of `cut`: its shallow clone goes to `frag`, and what the range holds of it goes into the clone.
-#[allow(clippy::too_many_arguments)]
-fn cut_partial<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, m: Mode, who: &str, frag: NodeId, depth: u32, n: NodeId, sub: Rng) -> Res<'s, ()> {
+/// A step of `cut` that waits on its work stack.
+enum Work {
+    /// The steps of the standard for the points `r`, into `frag`, at this depth.
+    Cut(Rng, NodeId, u32),
+    /// What follows the partly selected first node: the contained nodes, then the partly selected last node.
+    Tail { contained: Vec<NodeId>, last: Option<NodeId>, ec: NodeId, eo: u32, frag: NodeId, depth: u32 },
+}
+
+/// A partly selected node of `cut`: its shallow clone goes to `frag`, and what the range holds of it goes into the clone (`Work::Cut`).
+fn cut_partial<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, m: Mode, frag: NodeId, depth: u32, n: NodeId, sub: Rng, work: &mut Vec<Work>) -> Res<'s, ()> {
     let into = if m == Mode::Delete {
         frag
     } else {
@@ -738,12 +745,49 @@ fn cut_partial<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, m: Mode, who: &str, fr
         d.doc.borrow_mut().move_to(c, frag, None);
         c
     };
-    cut(d, s, m, who, sub, into, depth + 1).map(drop)
+    work.push(Work::Cut(sub, into, depth + 1));
+    Ok(())
 }
 
 /// The steps "extract a live range" and "clone the contents" of the standard, for the points `r`, into `frag`. `Delete` makes no clones. Gives the
-/// point that the range gets when it is done. The order of the changes is the standard's, and so the order of the records.
+/// point that the range gets when it is done. The order of the changes is the standard's, and so the order of the records. A partly selected
+/// node is a step on a work stack, not a call: the depth of the tree does not use the Rust stack.
 fn cut<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, m: Mode, who: &str, r: Rng, frag: NodeId, depth: u32) -> Res<'s, (NodeId, u32)> {
+    let mut out = None;
+    let mut work = vec![Work::Cut(r, frag, depth)];
+    while let Some(w) = work.pop() {
+        match w {
+            Work::Cut(r, frag, depth) => {
+                let p = cut_head(d, s, m, who, r, frag, depth, &mut work)?;
+                out.get_or_insert(p);
+            }
+            Work::Tail { contained, last, ec, eo, frag, depth } => {
+                for c in contained {
+                    match m {
+                        Mode::Delete => d.doc.borrow_mut().detach(c),
+                        Mode::Extract => d.doc.borrow_mut().move_to(c, frag, None),
+                        Mode::Clone => {
+                            let cc = clone_tree_s(d, s, c, true, false)?;
+                            d.doc.borrow_mut().move_to(cc, frag, None);
+                        }
+                    }
+                }
+                if let Some(l) = last {
+                    let t = text_of(&d.doc.borrow(), l);
+                    match t {
+                        Some(t) => cut_data(d, s, m, frag, l, &t, 0, eo)?,
+                        None => cut_partial(d, s, m, frag, depth, l, Rng { sc: l, so: 0, ec, eo }, &mut work)?,
+                    }
+                }
+            }
+        }
+    }
+    Ok(out.expect("the first step runs"))
+}
+
+/// The first part of `cut` for `r`: the checks, the first node, and the point of the range. The rest waits on `work`, the first node on top.
+#[allow(clippy::too_many_arguments)]
+fn cut_head<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, m: Mode, who: &str, r: Rng, frag: NodeId, depth: u32, work: &mut Vec<Work>) -> Res<'s, (NodeId, u32)> {
     s.charge(1)?;
     if depth > MAX_CUT_DEPTH {
         return Err(d.lim_s(s, "dom-depth"));
@@ -782,31 +826,15 @@ fn cut<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, m: Mode, who: &str, r: Rng, fr
         };
         return Err(d.dom_err_s(s, "HierarchyRequestError", &msg));
     }
+    work.push(Work::Tail { contained, last, ec, eo, frag, depth });
     if let Some(f) = first {
         let t = text_of(&d.doc.borrow(), f);
         match t {
             Some(t) => cut_data(d, s, m, frag, f, &t, so, utf16_len(&t))?,
             None => {
                 let eo = length(&d.doc.borrow(), f);
-                cut_partial(d, s, m, who, frag, depth, f, Rng { sc, so, ec: f, eo })?
+                cut_partial(d, s, m, frag, depth, f, Rng { sc, so, ec: f, eo }, work)?
             }
-        }
-    }
-    for c in contained {
-        match m {
-            Mode::Delete => d.doc.borrow_mut().detach(c),
-            Mode::Extract => d.doc.borrow_mut().move_to(c, frag, None),
-            Mode::Clone => {
-                let cc = clone_tree_s(d, s, c, true, false)?;
-                d.doc.borrow_mut().move_to(cc, frag, None);
-            }
-        }
-    }
-    if let Some(l) = last {
-        let t = text_of(&d.doc.borrow(), l);
-        match t {
-            Some(t) => cut_data(d, s, m, frag, l, &t, 0, eo)?,
-            None => cut_partial(d, s, m, who, frag, depth, l, Rng { sc: l, so: 0, ec, eo })?,
         }
     }
     Ok(new)

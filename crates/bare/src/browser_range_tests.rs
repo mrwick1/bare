@@ -270,7 +270,6 @@ fn the_range_methods_never_leave_a_stale_state_after_an_error() {
 }
 
 #[test]
-#[ignore = "vex: stack overflow (process abort)"]
 fn a_range_cut_in_a_very_deep_tree_is_a_limit_not_a_stack_overflow() {
     let n = 6000;
     let page = format!("<!doctype html><body><div id=top>{}x{}</div>", "<div>".repeat(n), "</div>".repeat(n));
