@@ -3,6 +3,7 @@
 
 mod common;
 
+use bare::eng_new::Peek;
 use bare::page::Page;
 use std::time::{Duration, Instant};
 

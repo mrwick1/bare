@@ -340,7 +340,7 @@ fn a_style_preload_link_in_the_first_piece_starts_the_sheet_that_a_later_link_ad
     });
 }
 
-/// A script of about 40 KB (more than `bare_js::parse_ahead::MIN_AHEAD`) that ends with `tail`.
+/// A script of about 40 KB that ends with `tail`.
 fn long_script(tail: &str) -> &'static str {
     Box::leak(format!("/*{}*/\n{tail}", "x".repeat(40_000)).into_boxed_str())
 }
@@ -355,7 +355,7 @@ fn a_syntax_error_of_a_long_script_is_reported_when_the_script_runs_and_the_next
         let srv = slow(plan);
         let (s, stop) = load(Session::new(cfg(srv.port, true)));
         assert_eq!(stop, SessionStop::Page(crate::Stop::Settled));
-        let want = bare_js::parse::parse_script(bad, Default::default()).err().unwrap().msg;
+        let want = bare_vex::parse::parse_script(bad, Default::default()).err().unwrap().msg;
         let err = item(&s, srv.port, "err").unwrap_or_default();
         assert!(err.contains(want), "{err:?} does not hold {want:?}");
         assert_eq!(item(&s, srv.port, "first").as_deref(), Some("ran"));

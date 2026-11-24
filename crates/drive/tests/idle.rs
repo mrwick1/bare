@@ -2,6 +2,7 @@
 //! gets the reply wakes the loop. The tests run the loop of the window on a channel (the wake pipe) and count the ticks and the CPU.
 //! A loopback server holds `/hang` for the time in `HANG`.
 
+use bare::eng_new::Peek;
 use bare::page::Page;
 use std::io::{Read, Write};
 use std::net::TcpListener;

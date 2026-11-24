@@ -2,6 +2,7 @@
 //! parse goes on, and the order of the scripts and events is the same as in a one-step parse. A loopback server answers each `/js` file
 //! after 300 ms. `/big` is about 2 MB of HTML.
 
+use bare::eng_new::Peek;
 use bare::browser_session::{Session, SessionConfig, SessionStop};
 use bare::page::Page;
 use std::io::{Read, Write};
@@ -180,7 +181,7 @@ fn a_chunked_parse_gives_the_order_and_the_dom_of_a_one_step_parse() {
         (text(&mut p, "log"), dom)
     });
     let (head_log, head_dom) = run_big(move || {
-        let mut cfg = SessionConfig::new(&format!("{origin}/big"));
+        let cfg = SessionConfig::new(&format!("{origin}/big"));
         let mut s = Session::new(cfg);
         let r = s.run();
         assert!(matches!(r.stop, SessionStop::Page(bare::Stop::Settled)), "{:?}", r.stop);

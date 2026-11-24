@@ -1,6 +1,7 @@
 //! A live page gives one task far more than the 100M steps of `EvalLimits::default()`. A large app (Gmail) runs its first render
 //! in one task. With the small budget bare aborted that task and the app never showed. Issue #454.
 
+use bare::eng_new::Peek;
 use bare::page::Page;
 use std::io::{Read, Write};
 use std::net::TcpListener;

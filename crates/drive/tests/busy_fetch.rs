@@ -1,6 +1,7 @@
 //! A live page queues a `fetch` and then keeps its thread busy for 2 s in five script tasks. The request must reach the server at
 //! once, not at the next network turn of the page. The reply may wait for a turn. The loopback server notes when each request came.
 
+use bare::eng_new::Peek;
 use bare::page::Page;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};

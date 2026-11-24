@@ -1,6 +1,7 @@
 //! Input does not wait for the network: an action returns after its listeners, its microtasks and the tasks that are due, and the
 //! replies, the timers and a navigation go on in `Page::tick`. A loopback server answers `/slow` after 500 ms.
 
+use bare::eng_new::Peek;
 use bare::control::Handle;
 use bare::page::Page;
 use bare_drive::run::{Options, Redactor, run};

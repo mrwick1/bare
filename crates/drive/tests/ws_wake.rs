@@ -2,6 +2,7 @@
 //! (`Page::wake_on_done`). An idle open socket does not make the loop tick.
 //! A loopback server serves the page, then takes the upgrade of `/ws` and sends `late` after `DELAY`.
 
+use bare::eng_new::Peek;
 use bare::page::Page;
 use std::io::{Read, Write};
 use std::net::TcpListener;
