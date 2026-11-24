@@ -11,7 +11,7 @@
 
 ## Check
 
-- A synthetic `perf script` file with 3 js2 samples under `bare::browser_fetch` frames (run, `gc::collect`, `parse::Parser`).
+- `tools/bench/classify_test.py` (2 tests) fails on main and passes here. It uses a synthetic `perf script` file with 3 js2 samples under `bare::browser_fetch` frames (run, `gc::collect`, `parse::Parser`).
   - Before: classify.py gave 100% "Network + TLS + HTTP"; jscat.py gave no collector row.
   - After: classify.py gave 33.3% each to JS run, parsing and collector; jscat.py gave 33.3% collector.
 - The OLD substack-home profile (`/data/bare-tmp/i10/prof-substack-home-auto/run1.txt`) gives the same output on main and on this branch.
