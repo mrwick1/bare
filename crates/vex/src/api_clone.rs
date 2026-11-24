@@ -19,6 +19,10 @@ struct Walk<'a> {
     seen: cl::IdMap,
     transfer: cl::IdMap,
     host: &'a mut dyn CloneHost<Realm>,
+    /// The listed items: a serializable host object is the item after them.
+    listed: u32,
+    /// What `write_host_object` gave, in walk order.
+    data: Vec<Box<dyn std::any::Any>>,
 }
 
 fn id(o: Obj) -> u64 {
@@ -87,6 +91,16 @@ impl Walk<'_> {
             return Err(self.refuse(rt, Refused::Function));
         }
         let kind = o.kind();
+        // A platform object with data (a `Blob`, a `CryptoKey`) has a host owner. A plain object has none, so it costs one lookup.
+        if kind == K_NONE && rt.api.hs.owners.contains_key(&o.cell()) {
+            if let Some((data, bytes)) = self.host.write_host_object(&v) {
+                self.charge(rt, |m| m.moved(bytes))?;
+                let i = self.listed + self.data.len() as u32;
+                self.data.push(data);
+                self.seen.insert(key, self.out.moved(i));
+                return Ok(());
+            }
+        }
         if o.has_flag(F_HOST) || self.host.is_host_object(&v)
             || !matches!(kind, K_NONE | K_DATE | K_REGEXP | K_MAP | K_SET | K_WRAP | K_BUFFER | K_TYPED | K_DATA_VIEW)
             || (kind == K_WRAP && rt.prim_of(v).is_none_or(|p| Realm::sym_of(p).is_some()))
@@ -213,7 +227,7 @@ impl Walk<'_> {
 
 pub(super) fn write<'s>(rt: &mut Realm, root: Value, opts: &CloneOpts<'_, '_>, host: &mut dyn CloneHost<Realm>) -> R<'s, Cloned> {
     let list: Vec<_> = opts.transfer.iter().filter_map(|&l| Realm::obj(rt.a_at(l))).collect();
-    let mut walk = Walk { out: cl::RecordWriter::new(), meter: cl::Meter::new(opts.limits), seen: cl::IdMap::default(), transfer: cl::IdMap::default(), host };
+    let mut walk = Walk { out: cl::RecordWriter::new(), meter: cl::Meter::new(opts.limits), seen: cl::IdMap::default(), transfer: cl::IdMap::default(), host, listed: list.len() as u32, data: Vec::new() };
     for (i, &o) in list.iter().enumerate() {
         walk.transfer.insert(id(o), i as u32);
     }
@@ -230,13 +244,14 @@ pub(super) fn write<'s>(rt: &mut Realm, root: Value, opts: &CloneOpts<'_, '_>, h
             return Err(walk.refuse(rt, Refused::DetachedTransfer));
         }
     }
-    let moved = list.into_iter().map(|o| {
+    let mut moved: Vec<Moved> = list.into_iter().map(|o| {
         if o.is_kind(K_BUFFER) {
             Moved::Buffer(rt.clone_detach_buffer(o))
         } else {
             Moved::Host(walk.host.transfer_out(&o.value()))
         }
     }).collect();
+    moved.extend(walk.data.into_iter().map(Moved::Data));
     Ok(Cloned::new(walk.out.finish(), moved, walk.meter.bytes()))
 }
 
@@ -438,10 +453,34 @@ impl Read<'_> {
 
 pub(super) fn load<'s>(rt: &mut Realm, c: &mut Cloned, host: &mut dyn CloneHost<Realm>) -> R<'s, CloneIn<'s>> {
     let mut payloads = Vec::new();
+    let mut data = Vec::new();
     let slots: Vec<_> = c.take_moved().into_iter().map(|item| match item {
-        Moved::Buffer(b) => Some(b),
+        Moved::Buffer(b) => Some(Ok(b)),
         Moved::Host(h) => { payloads.push(h); None }
+        Moved::Data(d) => { data.push(d); Some(Err(data.len() - 1)) }
     }).collect();
+    // The serializable host objects, made before the walk: the host may run script, the walk may not.
+    let made = if data.is_empty() {
+        Vec::new()
+    } else {
+        enter(rt, |s| {
+            let mut out = Vec::with_capacity(data.len());
+            for d in &data {
+                match host.read_host_object(s, &**d) {
+                    Ok(l) => out.push(s.engine().a_at(l)),
+                    Err(Error::Throw(l)) => return Err(Ok(s.engine().a_at(l))),
+                    Err(Error::Abort(a)) => return Err(Err(a)),
+                }
+            }
+            Ok(out)
+        }).map_err(|e| match e {
+            Ok(v) => Error::Throw(rt.a_push(v)),
+            Err(a) => Error::Abort(a),
+        })?
+    };
+    for &v in &made {
+        rt.a_push(v);
+    }
     let hosts = if payloads.is_empty() {
         Vec::new()
     } else {
@@ -456,7 +495,8 @@ pub(super) fn load<'s>(rt: &mut Realm, c: &mut Cloned, host: &mut dyn CloneHost<
     };
     let mut next = hosts.iter().copied();
     let items: Vec<_> = slots.into_iter().map(|slot| match slot {
-        Some(b) => Ok(Item::Buffer(b)),
+        Some(Ok(b)) => Ok(Item::Buffer(b)),
+        Some(Err(i)) => Ok(Item::Host(made[i])),
         None => next.next().map(Item::Host).ok_or_else(damaged),
     }).collect::<Result<_, _>>()?;
     let mut rd = Read { input: cl::RecordReader::new(c.bytes()), objects: Vec::new(), keys: Vec::new(), items };

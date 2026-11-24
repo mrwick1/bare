@@ -68,6 +68,18 @@ impl<'q, E: Eng> CloneHost<E::Vm> for &Dom<E> {
         };
         self.dom_err_s(s, "DataCloneError", &format!("{what} could not be cloned."))
     }
+
+    fn write_host_object(&mut self, o: &E::Raw) -> Option<(Box<dyn Any>, usize)> {
+        let Val::Object(o) = E::kind(*o) else { return None };
+        crate::browser_web::clone_out(self, o)
+    }
+
+    fn read_host_object<'s>(&mut self, s: &mut Scope<'s, E::Vm>, data: &dyn Any) -> Result<Local<'s>, bare_js_api::Error<'s>> {
+        match data.downcast_ref::<crate::browser_web::WebClone>() {
+            Some(w) => crate::browser_web::clone_in(self, s, w),
+            None => Err(self.data_clone_error(s, Refused::Object)),
+        }
+    }
 }
 
 /// The new ports of the host items of a record, in list order.
