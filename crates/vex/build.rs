@@ -6,6 +6,8 @@
 mod ast;
 #[path = "src/facts.rs"]
 mod facts;
+#[path = "src/fx.rs"]
+mod fx;
 #[path = "src/lex.rs"]
 mod lex;
 #[path = "src/parse.rs"]

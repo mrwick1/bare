@@ -61,7 +61,7 @@ pub fn compile_module(prog: &Program, facts: &Facts, atoms: &SharedAtoms) -> CR<
     c.hoist_list(prog.body, true, &mut h);
     let mut info = ModInfo { requests: mi.requests.to_vec(), stars: mi.stars.clone(), has_tla: mi.has_tla, ..Default::default() };
     // The export names of each local binding. The first one names the property of the environment object.
-    let mut keys: HashMap<Box<str>, Box<str>> = HashMap::new();
+    let mut keys: HashMap<Box<str>, Box<str>> = HashMap::default();
     let mut has_default = false;
     for e in &mi.exports {
         let src = match &e.source {
@@ -95,7 +95,7 @@ pub fn compile_module(prog: &Program, facts: &Facts, atoms: &SharedAtoms) -> CR<
         }
         info.imports.push(Imp { req: i.request, name: import_name(&i.name), slot });
     }
-    let mut seen: HashMap<Cow<str>, ()> = HashMap::new();
+    let mut seen: HashMap<Cow<str>, ()> = HashMap::default();
     let local = |vars: &mut Vec<LevelVar>, info: &mut ModInfo, name: &str, kind: VK, next: &mut u32| {
         let (tdz, konst) = (matches!(kind, VK::Let | VK::Const | VK::Class), kind == VK::Const);
         if let Some(key) = keys.get(name) {

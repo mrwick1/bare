@@ -64,7 +64,7 @@ use crate::ast::*;
 use crate::facts::{self, Facts, FnFacts, FnId};
 use crate::lex::{self, Goal, Keyword as K, Kind, Lexer, Punct as P, TemplatePart, Token};
 use std::borrow::Cow;
-use std::collections::HashMap;
+use crate::fx::FxMap as HashMap;
 
 #[path = "data_scan.rs"]
 pub(crate) mod data_scan;
