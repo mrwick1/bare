@@ -1,5 +1,5 @@
 # JavaScript: the interface between the browser and an engine (docs/design-host-interface.md, plan step S0.2).
-# Traits and handle types only; no engine code. `bare-js` and `bare-js2` implement `Engine`.
+# Traits and handle types only; no engine code. `bare-js` and `bare-vex` implement `Engine`.
 [package]
 name = "bare-js-api"
 version.workspace = true
@@ -7,9 +7,9 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-# `suite`: the tests that every engine must pass (`src/suite.rs`). `crates/js-api/tests/engines.rs` runs them on `bare-js` and `bare-js2`.
+# `suite`: the tests that every engine must pass (`src/suite.rs`). `crates/js-api/tests/engines.rs` runs them on `bare-js` and `bare-vex`.
 suite = []
 
 [dev-dependencies]
 bare-js = { path = "../js" }
-bare-js2 = { path = "../js2" }
+bare-vex = { path = "../vex" }

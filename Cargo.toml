@@ -16,7 +16,7 @@ license = "MIT OR Apache-2.0"
 strip = true
 
 # Keep the interpreter in one codegen unit to reduce changes in its hot loop between builds.
-[profile.release.package.bare-js2]
+[profile.release.package.bare-vex]
 codegen-units = 1
 
 [profile.profiling]

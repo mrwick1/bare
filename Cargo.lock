@@ -57,7 +57,6 @@ dependencies = [
  "bare-image",
  "bare-js",
  "bare-js-api",
- "bare-js2",
  "bare-layout",
  "bare-net",
  "bare-observe",
@@ -65,6 +64,7 @@ dependencies = [
  "bare-paint",
  "bare-tls",
  "bare-url",
+ "bare-vex",
  "bare-window",
  "crc32fast",
  "miniz_oxide 0.9.1",
@@ -164,7 +164,7 @@ name = "bare-js-api"
 version = "0.1.0"
 dependencies = [
  "bare-js",
- "bare-js2",
+ "bare-vex",
 ]
 
 [[package]]
@@ -173,20 +173,7 @@ version = "0.1.0"
 dependencies = [
  "bare-js",
  "bare-js-api",
- "bare-js2",
-]
-
-[[package]]
-name = "bare-js2"
-version = "0.1.0"
-dependencies = [
- "bare-intl",
- "bare-js-api",
- "bare-os",
- "bare-tzdata",
- "bare-unicode",
- "icu_properties",
- "stacker",
+ "bare-vex",
 ]
 
 [[package]]
@@ -283,6 +270,19 @@ name = "bare-url"
 version = "0.1.0"
 dependencies = [
  "bare-unicode",
+]
+
+[[package]]
+name = "bare-vex"
+version = "0.1.0"
+dependencies = [
+ "bare-intl",
+ "bare-js-api",
+ "bare-os",
+ "bare-tzdata",
+ "bare-unicode",
+ "icu_properties",
+ "stacker",
 ]
 
 [[package]]
