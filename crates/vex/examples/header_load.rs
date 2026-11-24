@@ -5,11 +5,11 @@
 //!   header_load miss N S      N property reads whose cell has one of S shapes, so the check fails and the shape is read
 //!   header_load flags N       N flag changes on string cells (read the flags, set a bit, write the header back), as `Str::mark_atom` does
 //! Count with `tools/js/instr.sh` and subtract the row with N = 0 (or R = 0). The two forms of the header were compared at commit f6d06f8e (`docs/progress.md`, S1.4); only the winner is in `cell.rs` now.
-use bare_js2::atoms::{Atoms, SharedAtoms};
-use bare_js2::cell::{CellHeader, Layout};
-use bare_js2::heap::Heap;
-use bare_js2::shapes::Shapes;
-use bare_js2::string::Chars;
+use bare_vex::atoms::{Atoms, SharedAtoms};
+use bare_vex::cell::{CellHeader, Layout};
+use bare_vex::heap::Heap;
+use bare_vex::shapes::Shapes;
+use bare_vex::string::Chars;
 use std::hint::black_box;
 use std::ptr::NonNull;
 

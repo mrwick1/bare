@@ -1,13 +1,13 @@
 //! Executed ops, pairs and triples of a script (plan step S2.9). Needs the feature `op-count`:
-//!   cargo run --release -p bare-js2 --features op-count --example op_count -- [--top N] FILE...
+//!   cargo run --release -p bare-vex --features op-count --example op_count -- [--top N] FILE...
 //! FILE is an `eval_load` program as `eval_load CASE SCALE --source` prints it (the expected result on the first line, then the source),
 //! or a script whose first line is `//= RESULT` (`examples/data/bundle_like.js`).
 //! The result is checked. The prelude and the compile are not counted: the counters start when the main code of the script starts.
 //! For each file it prints the dispatches, the most frequent ops, the most frequent pairs (any control flow), the most frequent
 //! fusable pairs and triples (the second and third op follow the first in the code and no jump lands on them), and the dispatches that
 //! greedy fusion of the top pairs and triples would remove, measured on the recorded run.
-use bare_js2::opcount::{self, Counts};
-use bare_js2::script;
+use bare_vex::opcount::{self, Counts};
+use bare_vex::script;
 use std::collections::HashSet;
 
 /// Dispatches that fusing `pairs` and `triples` would remove from `trace`: left to right, a triple first, then a pair.

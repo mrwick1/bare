@@ -1,8 +1,8 @@
 //! The differential runner: the same script on both engines, and a comparison of what each one printed and the value it left in a
 //! global. It exits non-zero on a difference (`examples/diff_run.rs`, `tests/diff.rs`).
 //!
-//! The corpus has three parts: the `eval_load` programs (`crates/js2/examples/data/eval_*.js`, the same text as the old engine's
-//! `eval_load`), the programs of `crates/js2/src/script_tests.rs` (the cases that fit on one line: `("source", "global", "expected")`),
+//! The corpus has three parts: the `eval_load` programs (`crates/vex/examples/data/eval_*.js`, the same text as the old engine's
+//! `eval_load`), the programs of `crates/vex/src/script_tests.rs` (the cases that fit on one line: `("source", "global", "expected")`),
 //! and the files of `tools/fixtures/js/diff/`. The expected texts of the script tests are not used: the old engine is the reference.
 use crate::{Engine, Out, run};
 use std::path::{Path, PathBuf};
@@ -105,13 +105,13 @@ pub fn script_tests(text: &str) -> Vec<Case> {
 /// All the cases, in a fixed order.
 pub fn corpus(root: &Path) -> Vec<Case> {
     let mut v = Vec::new();
-    let mut files: Vec<PathBuf> = std::fs::read_dir(root.join("crates/js2/examples/data")).expect("eval_load data").map(|e| e.unwrap().path()).collect();
+    let mut files: Vec<PathBuf> = std::fs::read_dir(root.join("crates/vex/examples/data")).expect("eval_load data").map(|e| e.unwrap().path()).collect();
     files.sort();
     for f in files.iter().filter(|f| f.file_name().unwrap().to_string_lossy().starts_with("eval_")) {
-        let src = bare_js2::script::eval_program(&std::fs::read_to_string(f).unwrap());
+        let src = bare_vex::script::eval_program(&std::fs::read_to_string(f).unwrap());
         v.push(Case { name: format!("eval_load:{}", f.file_stem().unwrap().to_string_lossy().trim_start_matches("eval_")), src, global: "__result".into() });
     }
-    v.extend(script_tests(&std::fs::read_to_string(root.join("crates/js2/src/script_tests.rs")).expect("script_tests.rs")));
+    v.extend(script_tests(&std::fs::read_to_string(root.join("crates/vex/src/script_tests.rs")).expect("script_tests.rs")));
     let mut files: Vec<PathBuf> = std::fs::read_dir(root.join("tools/fixtures/js/diff")).expect("corpus").map(|e| e.unwrap().path()).collect();
     files.sort();
     for f in files.iter().filter(|f| f.extension().is_some_and(|e| e == "js")) {

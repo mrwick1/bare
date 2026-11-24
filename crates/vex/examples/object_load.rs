@@ -6,13 +6,13 @@
 //!   object_load loop N     the loop of `slot`, `over` and `get` with no object (subtract it from them)
 //!   object_load push N     N pushes to one array (growth included)
 //!   object_load get N      N reads of an element of a dense array of 1,000
-use bare_js2::atoms::{Atoms, SharedAtoms};
-use bare_js2::cell::Layout;
-use bare_js2::heap::Heap;
-use bare_js2::object::Obj;
-use bare_js2::shapes::{A_C, A_E, A_W, Shapes};
-use bare_js2::string::Chars;
-use bare_js2::value::Value;
+use bare_vex::atoms::{Atoms, SharedAtoms};
+use bare_vex::cell::Layout;
+use bare_vex::heap::Heap;
+use bare_vex::object::Obj;
+use bare_vex::shapes::{A_C, A_E, A_W, Shapes};
+use bare_vex::string::Chars;
+use bare_vex::value::Value;
 use std::hint::black_box;
 use std::sync::Arc;
 

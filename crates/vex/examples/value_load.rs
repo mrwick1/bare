@@ -1,7 +1,7 @@
 //! Micro row for `Value` (plan step S1.2): encode and decode N values of mixed kinds (double, integer, boolean, pointer) and
 //! print a checksum. Count with `tools/js/instr.sh`; subtract the run with N = 0 for the cost per value.
 //!   value_load N
-use bare_js2::value::{Kind, Value};
+use bare_vex::value::{Kind, Value};
 use std::hint::black_box;
 use std::ptr::NonNull;
 

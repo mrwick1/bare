@@ -1,13 +1,13 @@
-//! The new engine (`bare-js2`) as an engine for the host (S0.4 PR 6c-2). Every object, string, symbol and key of the host is a
+//! The new engine (`bare-vex`) as an engine for the host (S0.4 PR 6c-2). Every object, string, symbol and key of the host is a
 //! `Value` of js2 in a wrapper that has `Hash`. The operations go through `Engine` (with a handle that lasts for one operation) and
 //! through the raw helpers of `api_raw.rs`. What js2 cannot do yet answers `Fault::Unsupported` with the name `js2: ...`: these
 //! are the lines of the phase 2 queue (`docs/progress/2026-11-21-s04-pr6c2-js2-browser.md`).
 
 use crate::eng::{Collected, Desc, Eng, Fault, Got, HeapStats, KeyKind, Ops, PState, Prop, Val, WallClock};
 use bare_js::eval::LimitKind;
-use bare_js2::api::Clock;
-use bare_js2::interp_rt::Realm;
-use bare_js2::value::{Kind, Value};
+use bare_vex::api::Clock;
+use bare_vex::interp_rt::Realm;
+use bare_vex::value::{Kind, Value};
 use bare_js_api::{Abort, Args, Attrs, Engine, Error, Intrinsic, Iter, Local, Persistent, Traced};
 use std::borrow::Cow;
 
@@ -57,7 +57,7 @@ impl Eng for New {
     type Key = NV;
 
     fn realm(eval: bare_js::eval::EvalLimits, _heap: bare_js::heap::HeapLimits) -> Result<Realm, Fault<New>> {
-        bare_js2::script::load("").map(|mut vm| {
+        bare_vex::script::load("").map(|mut vm| {
             vm.realm.init_host_intrinsics();
             // A task stops after `max_steps` back edges, so a runaway script ends only its own task.
             vm.realm.set_budget(eval.max_steps);
@@ -514,7 +514,7 @@ impl Ops<New> for Realm {
         Ok(k.0)
     }
     fn h_get_own(&mut self, o: NV, key: NV) -> Result<Option<Prop<New>>, Fault<New>> {
-        use bare_js2::api::RawOwn;
+        use bare_vex::api::RawOwn;
         run(self, |r| {
             Ok(r.raw_own(o.0, key.0)?.map(|p| match p {
                 RawOwn::Data { value, writable, enumerable, configurable } => Prop::Data { value, writable, enumerable, configurable },

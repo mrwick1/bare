@@ -7,11 +7,11 @@
 //! program exits with 1. `-v` also prints the disassembly. The old engine's counts (`tools/js/bc_hist.sh` counts executed ops; the old
 //! compiler dumps are static) are in `docs/progress.md`.
 
-use bare_js2::atoms::SharedAtoms;
-use bare_js2::bytecode::decode;
-use bare_js2::compile::{Compiled, compile_all};
-use bare_js2::parse::Limits;
-use bare_js2::verify::verify;
+use bare_vex::atoms::SharedAtoms;
+use bare_vex::bytecode::decode;
+use bare_vex::compile::{Compiled, compile_all};
+use bare_vex::parse::Limits;
+use bare_vex::verify::verify;
 use std::collections::BTreeMap;
 use std::time::Instant;
 

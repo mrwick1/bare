@@ -295,7 +295,7 @@ mod browser_owners_tests;
 #[cfg(test)]
 mod old_engine_gate_tests;
 #[cfg(test)]
-mod browser_session_js2_default_tests;
+mod browser_session_vex_default_tests;
 #[cfg(test)]
 mod browser_reclaim_tests;
 #[cfg(test)]
@@ -325,7 +325,7 @@ mod browser_resume_tests;
 #[cfg(test)]
 mod browser_survive_tests;
 #[cfg(test)]
-mod browser_survive_js2_tests;
+mod browser_survive_vex_tests;
 #[cfg(test)]
 mod browser_settle_tests;
 

@@ -15,7 +15,7 @@
 //! - `await_prim`: one async function that does `s += await i` N times (a number: one job and no promise kept). `await_prom`: the same with `await p`,
 //!   `p` a settled native promise. `async_noawait`: N calls of an async function that returns at once.
 //! - `mem`: N pending promises in an array: prints the bytes of live heap that a promise costs (after a collection).
-use bare_js2::script::load;
+use bare_vex::script::load;
 
 fn main() {
     let mut a = std::env::args().skip(1);

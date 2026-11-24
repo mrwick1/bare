@@ -15,7 +15,7 @@ def load(name):
 
 
 SAMPLES = ''.join(f'bare-drive 1 1:\n\t1 {leaf}+0x10 (bare)\n\t2 bare::browser_fetch::run_streams+0x10 (bare)\n\n' for leaf in (
-    'bare_js2::interp::run', 'bare_js2::gc::collect', 'bare_js2::parse::Parser::expr'))
+    'bare_vex::interp::run', 'bare_vex::gc::collect', 'bare_vex::parse::Parser::expr'))
 
 
 class Js2Frames(unittest.TestCase):

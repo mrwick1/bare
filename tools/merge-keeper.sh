@@ -9,7 +9,7 @@ case "${1-}:$#" in
 esac
 
 repo=mrwick1/bare
-prelude=crates/js2/src/prelude_facts.rs
+prelude=crates/vex/src/prelude_facts.rs
 baseline=tools/fixtures/js/test262-js2-baseline.txt
 debt=docs/progress/cost-debt.md
 fields=number,autoMergeRequest,mergeStateStatus,headRefOid,headRefName,isCrossRepository,baseRefName
@@ -110,10 +110,10 @@ repair() (
     fi
     # New builds generate this file in OUT_DIR. Older builds still track it.
     if git ls-files --error-unmatch -- "$prelude" >/dev/null 2>&1; then
-        BLESS_PRELUDE_FACTS=1 cargo test --locked -p bare-js2 --lib prelude_facts &&
+        BLESS_PRELUDE_FACTS=1 cargo test --locked -p bare-vex --lib prelude_facts &&
             git add -- "$prelude" || return 1
     fi
-    cargo check --locked -p bare-js2 -p bare --tests || return 1
+    cargo check --locked -p bare-vex -p bare --tests || return 1
     git commit --no-edit || return 1
     current=$(gh pr view "$number" --repo "$repo" --json "$fields,state" \
         --jq "$eligible | select(.state == \"OPEN\" and .isCrossRepository == false) | .headRefOid") || return 1

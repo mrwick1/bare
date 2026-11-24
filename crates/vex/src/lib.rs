@@ -6,7 +6,7 @@
 #![deny(unsafe_code)]
 
 /// Not used any more: the error of `BARE_JS_EXEC=new` before the new engine ran scripts.
-pub const NOT_READY: &str = "the new JavaScript engine (bare-js2) cannot run scripts yet; use BARE_JS_EXEC=tree, auto or byte";
+pub const NOT_READY: &str = "the new JavaScript engine (bare-vex) cannot run scripts yet; use BARE_JS_EXEC=tree, auto or byte";
 
 
 pub mod value;

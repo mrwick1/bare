@@ -3,10 +3,10 @@
 # a 120 s time limit and a 1 GiB address-space limit. See crates/js/examples/lex_load.rs.
 #   tools/js_lex_load.sh [runs]
 set -eu
-# LEX_PKG=bare-js2 runs the lexer of the new engine (crates/js2/examples).
+# LEX_PKG=bare-vex runs the lexer of the new engine (crates/vex/examples).
 pkg=${LEX_PKG:-bare-js}
 example=lex_load
-[ "$pkg" != bare-js2 ] || example=js2_lex_load
+[ "$pkg" != bare-vex ] || example=js2_lex_load
 runs=${1:-5}
 cargo build --release -q -p "$pkg" --example "$example"
 bin=${CARGO_TARGET_DIR:-target}/release/examples/$example

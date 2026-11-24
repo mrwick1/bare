@@ -1,4 +1,4 @@
-//! The differential runner: the same script on the old engine and on the new one (`bare-js2`); exit status 1 on a difference.
+//! The differential runner: the same script on the old engine and on the new one (`bare-vex`); exit status 1 on a difference.
 //!
 //!   diff_run [-v] [FILE...]   with no file: the whole corpus (see `src/diff.rs`); with files: each file is a program, and what it
 //!                             `print`s is compared (a file name is its case name)

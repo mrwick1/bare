@@ -6,9 +6,9 @@
 //! - `atom`: N interns of one of 1,000 names that the realm already has (a table hit; no allocation).
 //!
 //! The same JS programs run on QuickJS in `docs/progress.md` (entry S1.7).
-use bare_js2::atoms::{Atoms, SharedAtoms};
-use bare_js2::heap::Heap;
-use bare_js2::string::{Chars, Str};
+use bare_vex::atoms::{Atoms, SharedAtoms};
+use bare_vex::heap::Heap;
+use bare_vex::string::{Chars, Str};
 use std::hint::black_box;
 use std::sync::Arc;
 

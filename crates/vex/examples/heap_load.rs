@@ -5,12 +5,12 @@
 //! 2 slots with `alloc_in_task`, keeps the last 1,000 in a native frame, and lets the trigger collect (no manual collection).
 //! Count with `tools/js/instr.sh`; subtract N = 0 for the cost per allocation.
 //!   heap_load heap|try|task|malloc N
-use bare_js2::atoms::{Atoms, SharedAtoms};
-use bare_js2::cell::{CellHeader, Layout, Shapes};
-use bare_js2::gc::Marker;
-use bare_js2::heap::{Heap, Trigger};
-use bare_js2::roots::{Frames, RootMaps, alloc_in_task};
-use bare_js2::value::{Kind, Value};
+use bare_vex::atoms::{Atoms, SharedAtoms};
+use bare_vex::cell::{CellHeader, Layout, Shapes};
+use bare_vex::gc::Marker;
+use bare_vex::heap::{Heap, Trigger};
+use bare_vex::roots::{Frames, RootMaps, alloc_in_task};
+use bare_vex::value::{Kind, Value};
 use std::hint::black_box;
 use std::sync::Arc;
 

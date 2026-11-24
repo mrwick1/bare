@@ -1,6 +1,6 @@
 //! Load harness for the lexer (S2). One case per process, in release mode:
 //!
-//!   cargo run --release -p bare-js2 --example js2_lex_load -- <case> <scale> [runs] [decode]
+//!   cargo run --release -p bare-vex --example js2_lex_load -- <case> <scale> [runs] [decode]
 //!
 //! Cases (scale 1, 10 or 100; the source is scale x 512 KiB, so 100x is 50 MiB, under the 64 MiB cap):
 //!   small      many short tokens: names, operators, numbers, strings, `?.`
@@ -15,7 +15,7 @@
 //! allocate: the harness checks that the timed loop makes 0 allocations (with `decode`, only the one reused buffer grows).
 //! The last line is `key=value`. RSS is `VmHWM` of the whole process, source included.
 
-use bare_js2::lex::*;
+use bare_vex::lex::*;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::time::Instant;

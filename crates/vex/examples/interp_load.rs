@@ -7,19 +7,19 @@
 //! `tools/js/instr.sh` on both sides. Count with `tools/js/instr.sh`; run N = 0 for the setup, and subtract it.
 #![allow(dead_code)]
 mod prelude {
-    pub use bare_js2::atoms::SharedAtoms;
-    pub use bare_js2::bytecode::{Asm, Code, GK_GEN, Handler, Ins, Label, NO_REG, Op, Recipes, decode};
-    pub use bare_js2::roots::RootMaps;
-    pub use bare_js2::string::{Chars, Str};
-    pub use bare_js2::verify::verify;
+    pub use bare_vex::atoms::SharedAtoms;
+    pub use bare_vex::bytecode::{Asm, Code, GK_GEN, Handler, Ins, Label, NO_REG, Op, Recipes, decode};
+    pub use bare_vex::roots::RootMaps;
+    pub use bare_vex::string::{Chars, Str};
+    pub use bare_vex::verify::verify;
     pub use std::collections::BTreeSet;
     pub use std::sync::Arc;
 }
 #[path = "../src/asm_util.rs"]
 mod asm_util;
 use asm_util::F;
-use bare_js2::interp::{Program, Vm};
-use bare_js2::value::Value;
+use bare_vex::interp::{Program, Vm};
+use bare_vex::value::Value;
 use prelude::*;
 use std::time::Instant;
 

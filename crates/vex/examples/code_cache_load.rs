@@ -1,6 +1,6 @@
 //! Measure one source compiled in multiple fresh realms. Pass `cold` to clear the cache before each realm.
 //! Usage: code_cache_load FILE REALMS [cold]
-use bare_js2::{code_cache, script};
+use bare_vex::{code_cache, script};
 use std::time::Instant;
 
 fn main() {

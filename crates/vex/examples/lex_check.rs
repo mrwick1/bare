@@ -1,13 +1,13 @@
 //! Compare the lexer with the Acorn token oracle on one file (S2). Scanning only: nothing is run.
 //!
 //!   node tools/js_lex_oracle.mjs FILE > FILE.tokens
-//!   cargo run --release -p bare-js2 --example lex_check -- FILE FILE.tokens
+//!   cargo run --release -p bare-vex --example lex_check -- FILE FILE.tokens
 //!
 //! The oracle line gives the lexical goal for each token (the job of the parser). The lexer must then
 //! find the same class, byte span and `newline_before`. Every string, template, number, name and regexp
 //! is also decoded. Any difference exits with 1. The last line is `key=value`.
 
-use bare_js2::lex::*;
+use bare_vex::lex::*;
 use std::process::exit;
 
 fn fail(msg: String) -> ! {

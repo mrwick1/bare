@@ -10,8 +10,8 @@
 //! rows compare with the old parser. Instructions come from `perf stat` around the whole process (`tools/js/instr.sh`); this
 //! program prints the allocations, the peak of live heap bytes during the parse and the VmHWM. A parse that fails exits with 1.
 
-use bare_js2::facts::{self, Facts};
-use bare_js2::parse::*;
+use bare_vex::facts::{self, Facts};
+use bare_vex::parse::*;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 

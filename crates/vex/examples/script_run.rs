@@ -4,7 +4,7 @@
 //!   script_run --eval FILE EXPECTED  an `eval_load` program: the last expression after the last `;` is its result; compare it with
 //!                                    EXPECTED. Prints `ok` or the reason, exit status 1 on a failure.
 //!   DIS=1 prints the bytecode and the root maps first.
-use bare_js2::script;
+use bare_vex::script;
 
 fn main() {
     let mut a = std::env::args().skip(1).peekable();
@@ -20,7 +20,7 @@ fn main() {
         names.push("result".into());
     }
     if std::env::var_os("DIS").is_some() {
-        match script::compile(&src, &bare_js2::atoms::SharedAtoms::default(), Default::default()) {
+        match script::compile(&src, &bare_vex::atoms::SharedAtoms::default(), Default::default()) {
             Ok(p) => p.codes.iter().for_each(|c| {
                 println!("{}", c.disassemble());
                 for &pc in c.roots.pcs() {

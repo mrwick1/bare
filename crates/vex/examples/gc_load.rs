@@ -3,14 +3,14 @@
 //! and 1 link to the children of a binary tree, slots 2 and 3 are integers. Prints the peak scratch of the collection.
 //! Count with `tools/js/instr.sh`; subtract R = 0 for the cost of R collections.
 //!   gc_load chain|tree N R
-use bare_js2::atoms::{Atoms, SharedAtoms};
-use bare_js2::cell::{Layout, Shapes};
-use bare_js2::shapes::{A_C, A_E, A_W};
-use bare_js2::string::Chars;
-use bare_js2::gc::{Marker, collect};
-use bare_js2::heap::Heap;
-use bare_js2::object::Obj;
-use bare_js2::value::Value;
+use bare_vex::atoms::{Atoms, SharedAtoms};
+use bare_vex::cell::{Layout, Shapes};
+use bare_vex::shapes::{A_C, A_E, A_W};
+use bare_vex::string::Chars;
+use bare_vex::gc::{Marker, collect};
+use bare_vex::heap::Heap;
+use bare_vex::object::Obj;
+use bare_vex::value::Value;
 use std::sync::Arc;
 
 fn main() {

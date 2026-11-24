@@ -8,9 +8,9 @@ for the leaf alone). Other kinds: the first of the first 6 frames from the leaf 
 """
 import collections, re, sys
 
-COLLECT = re.compile(r'^<?bare_js::\w+::(Interp|Heap)::collect$|^<?bare_js2::gc::collect\b')
+COLLECT = re.compile(r'^<?bare_js::\w+::(Interp|Heap)::collect$|^<?bare_vex::gc::collect\b')
 KINDS = [
-    ('Parse and compile', r'bare_js2?::(lex|parse|ast|parse_cache|parse_ahead)|bare_js2::compile|bc_gen|bc_scope|compile|lazy_function|Lexer|Parser|walk_program'),
+    ('Parse and compile', r'bare_(?:js|vex)::(lex|parse|ast|parse_cache|parse_ahead)|bare_vex::compile|bc_gen|bc_scope|compile|lazy_function|Lexer|Parser|walk_program'),
     ('Calls (frames, arguments, bind)', r'call_fn|bind_call|call_script|Callee|bc_enter|new_env|env_declare|construct|call_native|select|frame'),
     ('Property get and set (shapes, caches, lookup)', r'ic_|get_prop|set_prop|find|shape|Shape|PropMap|lookup|get<bare_js::heap::Object>|own_|proto|define|get_field|set_field|keyed|slot'),
     ('Variable lookup', r'Binding|binding|resolve|get_name|set_name|scope|Env|hops'),
@@ -48,7 +48,7 @@ def split(path):
             c['Collector (any frame on the stack)'] += 1
             continue
         first = next((f for f in fr if re.match(r'^<?bare', f)), None)
-        if first is None or 'bare_js' not in first:
+        if first is None or not first.lstrip('<').startswith(('bare_js', 'bare_vex')):
             continue
         js += 1
         c[next((n for f in fr[:6] for n, r in RX if r.search(f)), 'Other JS')] += 1

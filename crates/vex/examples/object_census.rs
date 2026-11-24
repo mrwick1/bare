@@ -1,4 +1,4 @@
-//! Layout census of `bare-js2` objects (plan step S1.9, M3 style): bytes of real objects by kind, on the synthetic workloads that the old
+//! Layout census of `bare-vex` objects (plan step S1.9, M3 style): bytes of real objects by kind, on the synthetic workloads that the old
 //! engine counts with `BARE_JS_STATS=1` (`tools/js/layout_census.sh`; `tools/js/shape_trace.js` and `tools/js/array_trace.js` are the same
 //! workloads as scripts).
 //!
@@ -10,14 +10,14 @@
 //! rooted checks the sum: its live bytes minus the live bytes before the first object (the keys and the prototype) equal the sum
 //! of the kinds and `keep`, and the example stops if they differ. Garbage from growth (the records that an object outgrew) is freed by
 //! that collection and is not counted.
-use bare_js2::atoms::{Atoms, SharedAtoms};
-use bare_js2::cell::Layout;
-use bare_js2::gc::{Marker, Stats, collect};
-use bare_js2::heap::Heap;
-use bare_js2::object::{Obj, cell_bytes};
-use bare_js2::shapes::{A_C, A_E, A_W, Shapes, Site};
-use bare_js2::string::{Chars, Str};
-use bare_js2::value::Value;
+use bare_vex::atoms::{Atoms, SharedAtoms};
+use bare_vex::cell::Layout;
+use bare_vex::gc::{Marker, Stats, collect};
+use bare_vex::heap::Heap;
+use bare_vex::object::{Obj, cell_bytes};
+use bare_vex::shapes::{A_C, A_E, A_W, Shapes, Site};
+use bare_vex::string::{Chars, Str};
+use bare_vex::value::Value;
 use std::sync::Arc;
 
 const WRITE: u8 = A_W | A_E | A_C;
@@ -225,7 +225,7 @@ fn array(n: usize) {
         objs.set_element(&mut w.heap, i as u32, o.value()).expect("memory");
     }
     let s = w.collect(&[objs.value()]);
-    println!("array_of_objects n={n} live_bytes={} marked={} work_bytes={} slice={} (a push of every element at once needs {} bytes)", s.live_bytes - base, s.marked, s.work_bytes, bare_js2::gc::SLICE, n * 8);
+    println!("array_of_objects n={n} live_bytes={} marked={} work_bytes={} slice={} (a push of every element at once needs {} bytes)", s.live_bytes - base, s.marked, s.work_bytes, bare_vex::gc::SLICE, n * 8);
 }
 
 fn main() {

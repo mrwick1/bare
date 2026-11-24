@@ -129,7 +129,7 @@ pub struct SessionConfig {
     pub live: bool,
     /// Where downloads go (see `downloads.rs`). `None`: a response that the page cannot show is a failed load.
     pub downloads: Option<downloads::Downloads>,
-    /// Run the pages on js2 (`bare-js2`, the default) and not on the old engine (`BARE_JS_EXEC=tree`, `auto` or `byte`).
+    /// Run the pages on js2 (`bare-vex`, the default) and not on the old engine (`BARE_JS_EXEC=tree`, `auto` or `byte`).
     pub js2: bool,
 }
 

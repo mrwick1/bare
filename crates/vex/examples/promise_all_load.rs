@@ -6,8 +6,8 @@
 //!
 //! One scale step is 1000 items. The script runs, the host drains the jobs, and the sum that the script made is checked against the same
 //! computation in Rust. A wrong sum exits with status 1.
-use bare_js2::interp_rt::Realm;
-use bare_js2::script::load;
+use bare_vex::interp_rt::Realm;
+use bare_vex::script::load;
 
 fn die(msg: String) -> ! {
     eprintln!("FAIL: {msg}");

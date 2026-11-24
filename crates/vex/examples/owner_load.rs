@@ -2,9 +2,9 @@
 //! owners that hold nothing, then R forced collections. The cost of the owners is the difference with K = 0, and it must not grow with H.
 //! Count with `tools/js/instr.sh`.
 //!   owner_load H K R
-use bare_js2::script;
+use bare_vex::script;
 use bare_js_api::{Args, Engine, Error, Host, HostFn, Local, Scope, Attrs, enter};
-use bare_js2::interp_rt::Realm;
+use bare_vex::interp_rt::Realm;
 use std::rc::Rc;
 
 struct Own;

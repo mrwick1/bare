@@ -4,11 +4,11 @@
 //!   shape_load loop N S     the loop of `find` with no lookup
 //!   shape_load literal N S  N calls of `literal` with S keys (a root lookup, then S transitions)
 //! Count with `tools/js/instr.sh` and subtract the row with N = 0.
-use bare_js2::atoms::{Atoms, SharedAtoms};
-use bare_js2::cell::Layout;
-use bare_js2::heap::Heap;
-use bare_js2::shapes::{Shapes, A_C, A_E, A_W};
-use bare_js2::string::Chars;
+use bare_vex::atoms::{Atoms, SharedAtoms};
+use bare_vex::cell::Layout;
+use bare_vex::heap::Heap;
+use bare_vex::shapes::{Shapes, A_C, A_E, A_W};
+use bare_vex::string::Chars;
 use std::hint::black_box;
 use std::sync::Arc;
 

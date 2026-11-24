@@ -42,7 +42,7 @@
 //!
 //! Nothing is rejected as unsupported now ([`ErrorKind::Unsupported`] is kept for callers). The tested corpus and observed staging
 //! syntax are covered; this is not a claim of complete ES2022 compatibility.
-//! Not done here: the compile or the check of a regexp pattern (the lexer checks the flags; `crates/js2` has no regexp engine yet).
+//! Not done here: the compile or the check of a regexp pattern (the lexer checks the flags; `crates/vex` has no regexp engine yet).
 //!
 //! Specification sections used for the subtle rules (ECMA-262, 2022):
 //! - 12.9.4 / B.1.2: legacy octal numbers and string escapes are errors in strict code.

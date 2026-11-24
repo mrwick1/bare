@@ -1,4 +1,4 @@
-//! `bare-js2` behind `bare-js-api` (plan step S2.8, `docs/design-js2-host-api.md`): `Realm` is the engine, so a host function, which is a
+//! `bare-vex` behind `bare-js-api` (plan step S2.8, `docs/design-js2-host-api.md`): `Realm` is the engine, so a host function, which is a
 //! native and has only `&mut Realm`, reaches the engine type. The state of the interface is one field of the realm, [`ApiState`].
 //!
 //! **Handles.** A `Local` is a slot number. A pushed value is a slot of `ApiState::stack` (above four shared seeds: `undefined`, `null`,

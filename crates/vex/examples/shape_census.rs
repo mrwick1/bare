@@ -1,4 +1,4 @@
-//! Shape census of `bare-js2` on a synthetic React-like trace (plan step S1.8). `tools/js/shape_trace.js` is the same trace as a script: run it
+//! Shape census of `bare-vex` on a synthetic React-like trace (plan step S1.8). `tools/js/shape_trace.js` is the same trace as a script: run it
 //! in the old engine with `BARE_JS_STATS=1` (`tools/js/layout_census.sh`, `docs/progress.md` S1.8) to compare. The two must make the same objects
 //! with the same keys in the same order; both use xorshift32 from the same seed, and the order of the calls to it is the same.
 //!
@@ -11,11 +11,11 @@
 //! Object cells are made for real, but there is no object module yet (S1.9): a cell is the 8-byte header, the inline slots of its shape and, in an
 //! object that has more slots than that, a pointer word to an overflow record (an 8-byte header and the extra slots). The census prints two
 //! layouts: A, the pointer word exists only in an object that overflows; B, every object has the pointer word.
-use bare_js2::atoms::{Atoms, SharedAtoms};
-use bare_js2::cell::Layout;
-use bare_js2::heap::Heap;
-use bare_js2::shapes::{Shapes, ShapeId, Site, A_C, A_E, A_W};
-use bare_js2::string::{Chars, Str};
+use bare_vex::atoms::{Atoms, SharedAtoms};
+use bare_vex::cell::Layout;
+use bare_vex::heap::Heap;
+use bare_vex::shapes::{Shapes, ShapeId, Site, A_C, A_E, A_W};
+use bare_vex::string::{Chars, Str};
 use std::ptr::NonNull;
 use std::sync::Arc;
 
@@ -68,7 +68,7 @@ impl Census {
         let over = slots.saturating_sub(inline);
         let cell = self.heap.alloc(8 + 8 * inline + if over > 0 { 8 } else { 0 }).expect("memory");
         // SAFETY: a cell of at least 8 bytes: the header.
-        unsafe { cell.as_ptr().cast::<bare_js2::cell::CellHeader>().write(self.shapes.header(s)) };
+        unsafe { cell.as_ptr().cast::<bare_vex::cell::CellHeader>().write(self.shapes.header(s)) };
         if over > 0 {
             self.heap.alloc(8 + 8 * over).expect("memory");
         }
