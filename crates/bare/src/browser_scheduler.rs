@@ -426,6 +426,17 @@ impl<E: Eng> Dom<E> {
         // A port with a peer in another page that listens is a root: a message can come at any time.
         out.extend(s.ports.iter().filter(|(_, p)| !p.keys.is_empty() || p.remote.is_some() && p.enabled).map(|(&o, _)| E::obj_raw(o)));
         out.extend(s.tasks.values().filter_map(|t| if let Task::AbortTimeout(o) | Task::Worker(o) = t { Some(E::obj_raw(*o)) } else { None }));
+        // The window is a port too (`queue_window`), but its wrapper has no `Owner::Port`, so `Dom::trace` never reaches
+        // `sched_trace_port` for it. Trace its queue here, so a queued `message` keeps its data (a rope, say) through a collection.
+        if let Some(&g) = self.global.get()
+            && let Some(p) = s.ports.get(&g)
+        {
+            for m in &p.inbox {
+                out.push(m.data);
+                out.extend(m.ports.iter().map(|&o| E::obj_raw(o)));
+                out.extend(m.from.iter().filter_map(|f| f.source).map(E::obj_raw));
+            }
+        }
     }
 
     /// The references of the port `o`: its peer, and the data, ports and senders of its queued messages.
