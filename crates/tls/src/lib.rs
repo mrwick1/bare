@@ -1,11 +1,12 @@
 //! TLS and its crypto, written by hand.
 //!
-//! Crypto foundations: SHA-1, SHA-256, SHA-384, SHA-512, HMAC-SHA256, HKDF-SHA256 and AES-128-GCM.
+//! Crypto foundations: SHA-1, SHA-256, SHA-384, SHA-512, HMAC-SHA256, HKDF-SHA256, AES-128-GCM (TLS) and AES-128/192/256 GCM and CBC (`aes`, for Web Crypto).
 //! X25519 provides key exchange with OS random input. X.509 path validation uses independent roots. `client::connect` runs a TLS 1.3 client handshake with validated chains.
 //!
 //! WARNING: this code is hand-written. Nobody has audited it. It has known-answer and independent-oracle checks. It does not promise constant-time behavior. Do not use it to protect
 //! real secrets.
 
+pub mod aes;
 pub mod aes_gcm;
 pub mod bigint;
 pub mod client;
