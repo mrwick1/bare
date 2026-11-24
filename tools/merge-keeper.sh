@@ -11,7 +11,7 @@ esac
 repo=mrwick1/bare
 prelude=crates/js2/src/prelude_facts.rs
 baseline=tools/fixtures/js/test262-js2-baseline.txt
-debt=docs/progress/cost-debt.md
+debt=docs/internal/progress/cost-debt.md
 fields=number,autoMergeRequest,mergeStateStatus,headRefOid,headRefName,isCrossRepository,baseRefName
 eligible='select(.autoMergeRequest != null and .mergeStateStatus == "DIRTY" and .baseRefName == "main")'
 scratch_root=${TMPDIR:-/tmp}

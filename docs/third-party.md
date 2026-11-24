@@ -9,7 +9,7 @@ This file lists the third-party components that `bare` uses, adapts or ships as 
 | Component | Where it is used | License | Link |
 | --- | --- | --- | --- |
 | ICU4X: `icu_collator`, `icu_collections`, `icu_decimal`, `icu_locale_core`, `icu_locale_fallback`, `icu_normalizer`, `icu_plurals`, `icu_provider`, `icu_segmenter`, `fixed_decimal` | `crates/intl`: `Intl.NumberFormat`, `Intl.Collator`, `Intl.PluralRules`, `Intl.Segmenter`, `toLocaleString`, `localeCompare`. Baked data of 5 English locales is in `crates/intl/src/icu_data`. | Unicode-3.0 | [ICU4X](https://github.com/unicode-org/icu4x) |
-| ICU4X `icu_properties` (compiled data) | `crates/js2` (the Vex engine) | Unicode-3.0 | [ICU4X](https://github.com/unicode-org/icu4x) |
+| ICU4X `icu_properties` (compiled data) | `crates/vex` (the Vex engine) | Unicode-3.0 | [ICU4X](https://github.com/unicode-org/icu4x) |
 | ICU4X `icu_segmenter` (compiled data) | `crates/layout`: grapheme boundaries. Layout copies no ICU code or data file. | Unicode-3.0 | [ICU4X](https://github.com/unicode-org/icu4x) |
 | `color` 0.3.3 (feature `libm`) | `crates/css`: color-space conversion and modern color parsing | Apache-2.0 OR MIT | [crates.io](https://crates.io/crates/color/0.3.3) |
 | `libm` 0.2.16 | Math backend of `color` | MIT | [crates.io](https://crates.io/crates/libm/0.2.16) |
@@ -26,7 +26,7 @@ This file lists the third-party components that `bare` uses, adapts or ships as 
 | `miniz_oxide` 0.9 and `crc32fast` 1 | `crates/net` and `crates/bare`: inflate, gzip CRC and the disk cache | MIT OR Zlib OR Apache-2.0 (`miniz_oxide`), MIT OR Apache-2.0 (`crc32fast`) | [miniz_oxide](https://github.com/Frommi/miniz_oxide) |
 | `memmap2` 0.9 | `crates/window`: shared-memory buffers | MIT OR Apache-2.0 | [memmap2-rs](https://github.com/RazrFalcon/memmap2-rs) |
 | `serde_json` 1 | `crates/bare`, `crates/drive`, `crates/mcp`, `crates/net` and `crates/observe`: JSON for the agent interface and traces | MIT OR Apache-2.0 | [serde-rs/json](https://github.com/serde-rs/json) |
-| `stacker` 0.1 | `crates/js2` (Vex): stack growth in the parser and in JSON | MIT OR Apache-2.0 | [stacker](https://github.com/rust-lang/stacker) |
+| `stacker` 0.1 | `crates/vex` (Vex): stack growth in the parser and in JSON | MIT OR Apache-2.0 | [stacker](https://github.com/rust-lang/stacker) |
 | `zerovec` 0.11 and `writeable` 0.6 | `crates/intl` | Unicode-3.0 | [ICU4X](https://github.com/unicode-org/icu4x) |
 | `wayland-server` 0.31 (dev-dependency) | `crates/window/tests`: the fake compositor | MIT | [wayland-rs](https://github.com/Smithay/wayland-rs) |
 
