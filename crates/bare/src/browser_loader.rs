@@ -129,8 +129,8 @@ pub struct PageLimits {
     pub batch: usize,
     /// Stop when nothing is queued and the next timer is further away than this.
     pub quiet: Duration,
-    /// Dynamic scripts that wait to run, and the bytes of their inline text.
-    pub max_pending_scripts: usize,
+    /// The bytes of the inline text of the dynamic scripts that wait to run. Their count needs no cap: each script element waits once,
+    /// and the DOM caps the elements.
     pub max_pending_script_bytes: usize,
     /// Collect the heap every this many rounds.
     pub collect_every: usize,
@@ -149,7 +149,6 @@ impl Default for PageLimits {
             max_time: Duration::from_secs(60),
             batch: 8,
             quiet: Duration::from_secs(1),
-            max_pending_scripts: 256,
             max_pending_script_bytes: 8 << 20,
             collect_every: 32,
             max_diagnostics: 64,
@@ -309,8 +308,8 @@ pub(crate) struct Scripts<E: Eng> {
     inline: RefCell<VecDeque<(NodeId, String)>>,
     external: RefCell<VecDeque<Ext>>,
     pending_bytes: Cell<usize>,
-    /// (max pending scripts, max pending inline bytes)
-    caps: Cell<(usize, usize)>,
+    /// The most bytes of pending inline text (`PageLimits::max_pending_script_bytes`).
+    caps: Cell<usize>,
     /// `(element, is_error)` to the id of its `onload` / `onerror` listener.
     handlers: RefCell<HashMap<(NodeId, bool), u64>>,
     fatal: RefCell<Option<Fatal>>,
@@ -488,10 +487,7 @@ impl<E: Eng> Dom<E> {
         if is_module {
             s.modules.borrow_mut().nodes.insert(el);
         }
-        let (max_scripts, max_bytes) = s.caps.get();
-        if s.inline.borrow().len() + s.external.borrow().len() >= max_scripts {
-            return Err(self.lim("pending-scripts"));
-        }
+        let max_bytes = s.caps.get();
         match src {
             Some(src) => {
                 s.started.borrow_mut().insert(el);
@@ -817,7 +813,7 @@ impl<E: Eng> Browser<E> {
         self.scan_frames();
         let s = &dom.scripts;
         *s.base.borrow_mut() = Some(disc.base.clone());
-        s.caps.set((cfg.limits.max_pending_scripts, cfg.limits.max_pending_script_bytes));
+        s.caps.set(cfg.limits.max_pending_script_bytes);
         s.started.borrow_mut().extend(disc.items.iter().map(|i| i.node));
         // The loader runs these scripts across collections: a script that another one removed must not give its slot away.
         disc.items.iter().for_each(|i| dom.pin(i.node));

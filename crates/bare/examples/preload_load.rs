@@ -92,7 +92,6 @@ fn main() {
         max_rounds: 10_000_000,
         max_time: Duration::from_secs(40),
         quiet: Duration::from_millis(50),
-        max_pending_scripts: 4096,
         resources: bare::resources::Limits { max_fetches: 4096, max_references: 1 << 16, ..Default::default() },
         ..Default::default()
     };
