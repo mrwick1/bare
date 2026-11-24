@@ -77,8 +77,9 @@ pub(crate) fn forget<E: Eng>(d: &Dom<E>, o: E::Obj) {
     d.sched_forget_port(o);
 }
 
-/// The global of a worker page: `postMessage(message, transfer)` sends to the `Worker` object, and `close()` ends the page. The rest of
-/// the worker global (no window names, `importScripts`, the worker prototype chain) is a later step of `design-workers.md`.
+/// The global of a worker page: `postMessage(message, transfer)` sends to the `Worker` object, `close()` ends the page, and
+/// `importScripts(urls…)` runs scripts. The rest of the worker global (no window names, the worker prototype chain) is a later step
+/// of `design-workers.md`.
 pub(crate) fn install_scope<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
     run::<E, _>(it, |s| {
         let g = s.global();
@@ -87,6 +88,8 @@ pub(crate) fn install_scope<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
         s.define_str(g, "postMessage", post, attrs)?;
         let close = d.add_fn_s(s, scope_close, "close", 0, HostFn::Method)?;
         s.define_str(g, "close", close, attrs)?;
+        let import = d.add_fn_s(s, scope_import, "importScripts", 0, HostFn::Method)?;
+        s.define_str(g, "importScripts", import, attrs)?;
         Ok(())
     })
 }
@@ -110,6 +113,45 @@ fn send<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, a: Args<'s>, to: Side, who: &
 fn scope_post<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     send(d, s, a, Side::Parent, "DedicatedWorkerGlobalScope")?;
     Ok(s.undefined())
+}
+
+/// `importScripts(urls…)` (HTML, "importScripts"): parse all the URLs against the worker URL first (a bad one is a `SyntaxError`). Then,
+/// in order, download each one and run it in the worker global. The download blocks the turn of the worker, as the spec makes the
+/// call synchronous. It follows the rules of a classic script element (`resources::fetch`: redirects, 2xx, a JavaScript type, the
+/// size cap) with the client of the worker page. A `data:` URL is decoded. A failed download is a `NetworkError`. A script that throws
+/// stops the call with its exception.
+fn scope_import<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    const CTX: &str = "Failed to execute 'importScripts' on 'WorkerGlobalScope'";
+    let cur = d.cur_rec().ok();
+    let mut urls = Vec::with_capacity(a.len());
+    for i in 0..a.len() {
+        let v = arg_s::<E>(s, a, i);
+        let u = d.string_arg_s(s, v)?;
+        match nu::parse_any(&u, cur.as_ref()) {
+            Ok(r) => urls.push(r.href()),
+            Err(_) => return Err(d.dom_err_s(s, "SyntaxError", &format!("{CTX}: The URL '{u}' is invalid."))),
+        }
+    }
+    for href in urls {
+        let Some(text) = import_text(d, &href) else {
+            return Err(d.dom_err_s(s, "NetworkError", &format!("{CTX}: The script at '{href}' failed to load.")));
+        };
+        s.run_script(&text)?;
+    }
+    Ok(s.undefined())
+}
+
+/// The text of the script at `href` for `importScripts`, or `None` when it does not load.
+fn import_text<E: Eng>(d: &Dom<E>, href: &str) -> Option<String> {
+    if href.starts_with("data:") {
+        return crate::images::data_url(href).map(|b| String::from_utf8_lossy(&b).into_owned());
+    }
+    let url = bare_url::Url::parse(href.split('#').next().unwrap_or("")).ok()?;
+    let limits = crate::resources::Limits::default();
+    let deadline = std::time::Instant::now() + limits.max_time;
+    let target = crate::resources::Target { expect: crate::resources::Expect::Script, url };
+    let mut client = d.fetch.client.borrow().fork();
+    crate::resources::fetch(&mut client, &target, &limits, deadline, 0).ok().map(|r| r.text)
 }
 
 fn scope_close<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
