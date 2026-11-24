@@ -28,6 +28,10 @@ const MISSES: u32 = 4;
 pub(crate) struct Reclaim {
     /// A collection ran since the last reclaim: wrappers died.
     due: Cell<bool>,
+    /// The text list holds more than the cap: much of it is dead text that waits for a rebuild (`Dom::room`).
+    compact: Cell<bool>,
+    /// The length of the text list after the last walk that `compact` asked for.
+    compact_mark: Cell<usize>,
     /// Test mode: reclaim after every task, even when no collection ran.
     always: Cell<bool>,
     /// Test mode: collect after each `run_script` (`BARE_RECLAIM_STRESS`).
@@ -74,6 +78,15 @@ impl<E: Eng> Dom<E> {
         self.reclaim.pins.borrow_mut().insert(n);
     }
 
+    /// The text list is over the cap: rebuild it after this task, also when no wrapper died. A walk costs time in the nodes in use, so
+    /// the next one waits until a fourth of the cap was written since the last one.
+    pub(crate) fn compact_wanted(&self, len: usize) {
+        let r = &self.reclaim;
+        if len >= r.compact_mark.get().saturating_add(self.lim.max_text_bytes / 4) {
+            r.compact.set(true);
+        }
+    }
+
     /// Wrappers died: the nodes of their trees may be free.
     pub(crate) fn reclaim_wanted(&self) {
         self.reclaim.due.set(true);
@@ -85,7 +98,7 @@ impl<E: Eng> Dom<E> {
     #[inline]
     pub(crate) fn reclaim(&self, collect: bool) -> usize {
         let r = &self.reclaim;
-        if !(r.due.get() || r.always.get()) {
+        if !(r.due.get() || r.always.get() || r.compact.get()) {
             return 0;
         }
         self.reclaim_walk(collect)
@@ -94,7 +107,7 @@ impl<E: Eng> Dom<E> {
     #[inline]
     fn reclaim_walk(&self, collect: bool) -> usize {
         let r = &self.reclaim;
-        if !r.always.get() {
+        if !(r.always.get() || r.compact.get()) {
             let base = r.base.get();
             let floor = if cfg!(test) { r.floor.get() } else { FLOOR };
             // `due` stays set: the walk comes when enough nodes were made. A busy document borrow (`try_borrow`) means a walk now is not safe either.
@@ -110,6 +123,7 @@ impl<E: Eng> Dom<E> {
     fn reclaim_run(&self, collect: bool) -> usize {
         let r = &self.reclaim;
         r.due.set(false);
+        r.compact.set(false);
         let mut live = Vec::new();
         {
             let st = self.st.borrow();
@@ -147,7 +161,7 @@ impl<E: Eng> Dom<E> {
         };
         // A tree that waits counts as in use, so a page near a cap frees them now: the caps count nodes in use.
         let lim = &self.lim;
-        let free = if doc.live_len() > lim.max_nodes / 2 || doc.live_text_bytes() > lim.max_text_bytes / 2 || doc.live_attr_slots() > lim.max_attr_slots / 2 {
+        let free = if doc.live_len() > lim.max_nodes / 2 || doc.live_text_bytes() > lim.max_text_bytes / 2 || doc.text_bytes() > lim.max_text_bytes || doc.live_attr_slots() > lim.max_attr_slots / 2 {
             Free::Now
         } else if collect {
             Free::Collect
@@ -164,6 +178,7 @@ impl<E: Eng> Dom<E> {
             free,
         );
         r.base.set(doc.arena_bytes());
+        r.compact_mark.set(doc.text_bytes());
         if freed == 0 {
             r.misses.set((r.misses.get() + 1).min(MISSES));
             return 0;

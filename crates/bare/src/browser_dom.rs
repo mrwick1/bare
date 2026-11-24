@@ -147,9 +147,23 @@ impl<E: Eng> Dom<E> {
         if doc.live_len() + nodes > self.lim.max_nodes {
             return Err(self.lim("dom-nodes"));
         }
-        if doc.live_text_bytes().saturating_add(text) > self.lim.max_text_bytes {
+        // The list holds the live text and the dead text, so a list under the cap is one test.
+        let all = doc.text_bytes().saturating_add(text);
+        if all > self.lim.max_text_bytes {
+            return self.text_room(doc, text, all);
+        }
+        Ok(())
+    }
+
+    /// The text list is over the cap. Replaced text stays in the list as dead text until a rebuild between two tasks: the list may hold as much
+    /// dead text as the cap, and asks for a rebuild.
+    #[cold]
+    #[inline(never)]
+    fn text_room(&self, doc: &Document, text: usize, all: usize) -> R<E, ()> {
+        if doc.live_text_bytes().saturating_add(text) > self.lim.max_text_bytes || all > self.lim.max_text_bytes.saturating_mul(2) {
             return Err(self.lim("dom-text"));
         }
+        self.compact_wanted(all);
         Ok(())
     }
 
