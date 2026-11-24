@@ -2295,6 +2295,7 @@ impl Document {
         let (start, len) = if attrs.len == 0 { (self.attrs.len(), 0) } else { (attrs.start as usize, attrs.len as usize) };
         if let Some(a) = self.attrs[start..start + len].iter_mut().find(|a| a.name == name) {
             let old = std::mem::replace(&mut a.value, span);
+            self.dead_text += old.len as usize;
             if self.watcher.is_some() {
                 self.notify(Change::Attr { el, name, old: Some(old), new: Some(span) });
             }
@@ -2341,6 +2342,8 @@ impl Document {
         // A watched attribute is logged once: it leaves the watch set here, so the log cannot grow without a new `watch_attr`.
         if !self.watched.is_empty() && self.watched.remove(&(el.index() as u32, name.0)) {
             self.removed.push(RemovedAttr { el, name, value });
+        } else {
+            self.dead_text += value.len as usize;
         }
         self.attrs.copy_within(start + at + 1..start + len, start + at);
         if start + len == self.attrs.len() {
@@ -2434,10 +2437,20 @@ impl Document {
         {
             self.notify(Change::Text { node, old });
         }
+        // The old bytes stay in the buffer until a rebuild: they count as dead now (`live_text_bytes`, `reclaim`).
         match self.nodes[node.index()].data {
-            NodeData::Text(_) => self.nodes[node.index()].data = NodeData::Text(self.push_text(text)),
-            NodeData::Comment(_) => self.nodes[node.index()].data = NodeData::Comment(self.push_text(text)),
-            NodeData::Doctype(_) => self.nodes[node.index()].data = NodeData::Doctype(self.push_text(text)),
+            NodeData::Text(old) => {
+                self.dead_text += old.len as usize;
+                self.nodes[node.index()].data = NodeData::Text(self.push_text(text));
+            }
+            NodeData::Comment(old) => {
+                self.dead_text += old.len as usize;
+                self.nodes[node.index()].data = NodeData::Comment(self.push_text(text));
+            }
+            NodeData::Doctype(old) => {
+                self.dead_text += old.len as usize;
+                self.nodes[node.index()].data = NodeData::Doctype(self.push_text(text));
+            }
             _ => {}
         }
     }

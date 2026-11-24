@@ -405,6 +405,10 @@ fn dead_in(nodes: &[Node], k: u32) -> bool {
 }
 
 #[cfg(test)]
+#[path = "reclaim_text_tests.rs"]
+mod text_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
