@@ -117,4 +117,4 @@ A client can send `notifications/cancelled` with `params.requestId`. The cancell
 
 ## Task evaluation
 
-[Browser task evaluation](agent-evaluation.md) supplies eight seeded local tasks, transcript collection and independent graders. Scripted smoke runs test the protocol and fixtures. They are not evidence of real-agent success.
+[Browser task evaluation](internal/agent-evaluation.md) supplies eight seeded local tasks, transcript collection and independent graders. Scripted smoke runs test the protocol and fixtures. They are not evidence of real-agent success.

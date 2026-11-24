@@ -1,34 +1,41 @@
 # bare
 
-`bare` is a web browser written from scratch in Rust. It is the only browser of two projects, `deck` and `offstage`. It is also a project to learn how the core parts of a browser work.
+`bare` is a web browser written from scratch in Rust. It has its own networking, TLS 1.3 and 1.2 with its own crypto, URL, HTML, CSS, layout, paint and image code, a Wayland window, and its own JavaScript engine, Vex. It is built for speed and low resource use: CPU instructions, peak memory and time to ready. It is the only browser of two projects, `deck` and `offstage`, which give it to AI agents.
 
-The first parts were written by hand: URL parsing, DNS, HTTP, TLS, HTML, CSS, layout and JavaScript. Since 2026-11-05, `bare` also uses or copies open-source parts that are already fast and tested. See [docs/open-source.md](docs/open-source.md).
+## What works today
 
-## Who uses bare
+- **Network.** DNS with its own client. HTTP/1.1 and HTTP/2 with HPACK. TLS 1.3 and 1.2. Redirects, a cookie jar, `gzip`, `deflate` and Brotli bodies, an RFC 9111 reply cache and a disk cache. WebSocket with `permessage-deflate`. Downloads with resume, retry, parallel ranges and a queue. Session import and export (cookies, `localStorage`, `sessionStorage`).
+- **HTML and CSS.** The HTML tokenizer and tree builder, with encoding detection. A CSS parser and cascade with selectors, `calc()`, custom properties, `@media`, `@supports`, `@font-face`, `@keyframes`, transitions, transforms and modern color spaces.
+- **Layout and paint.** Block, inline, float, flex, grid and table layout, positioning, scrolling and form controls. Text from built-in Noto fonts. Inline SVG, `<canvas>`, and PNG, JPEG, WebP and GIF images.
+- **Window.** A Wayland window with pointer and keyboard input. A page can also paint to a PNG with no window.
+- **Vex.** A JavaScript engine with a bytecode interpreter, shapes and inline caches, a non-moving garbage collector, promises, generators, `async` functions, modules, regular expressions and `Intl`. It passes 29,217 test262 tests.
+- **Agents.** `bare-drive` runs user journeys through the real input path. `bare-mcp` is an MCP server on top of it. 48 public-site journeys run on `bare`.
 
-| User | How it uses `bare` | Version | Where its `bare` problems go |
-| --- | --- | --- | --- |
-| [`deck`](https://github.com/mrwick1/deck), a self-hosted AI agent in a web app | Starts `bare-mcp` from `PATH`, or from `bare.command` in `deck.toml`, at the first browser tool call. `bare` is its only browser. | The `bare-mcp` that is on `PATH` | As `deck` tells its agent |
-| [`offstage`](https://github.com/mrwick1/offstage), a caged desktop for AI agents | Installs `bare-mcp` and `bare-drive` from a release. It starts one `bare-mcp` for each browser session and gives its tools as `browser_*`. `bare` is its only browser. | The newest release (`OFFSTAGE_BARE_VERSION` in `install.sh` overrides it) | `offstage` `report_issue`, area `bare` |
-| Learning | Each part is a study of how real engines work. Design documents in `docs/` compare `bare` with Chrome, Firefox, Servo, WebKit and Ladybird. | `main` | — |
+`bare` is not hardened like a mainstream browser, and its TLS code has had no outside audit. Do not use it as your everyday browser. `deck` and `offstage` run it for agents.
 
-A lean browser for a small, focused group of users is a possible later goal. No work on it has started.
+## Vex
 
-The plan: `offstage` becomes the only way an agent reaches `bare`, `deck` included, and `bare` gets WebDriver BiDi as its public interface. See [docs/design-agent-interface.md](docs/design-agent-interface.md).
+Vex is the JavaScript engine in `crates/vex`. A value is 64 bits (NaN-boxing). Objects share shapes, and property reads hit inline caches. The compiler goes from the parse to register bytecode, and a function compiles at its first call. Built-ins are built when a script first touches them, so startup does not grow with the number of built-ins. An empty script costs 0.70 M instructions and 5.95 MiB of peak memory. See [docs/vex.md](docs/vex.md).
 
-### Change bare-mcp with both users in mind
+## Agents and MCP
 
-- A change to a `bare-mcp` tool, its arguments or its results reaches `deck` at once, and reaches `offstage` at the next `bare` release. Check both before you merge.
-- `offstage` installs the newest release. A release reaches every `offstage` user at the next install or update. The `gate` job of `release.yml` runs the offstage browser test (`TestBareBrowser`, offstage `beta`) against the new Linux amd64 binaries. The release is published only when it passes.
-- `bare-mcp` has no issue route and no host-specific option. The host (`offstage` or `deck`) gives its agent the rule for where to report problems, and places any window through `WAYLAND_DISPLAY`.
+`deck` (a self-hosted AI agent in a web app) and `offstage` (a caged desktop for AI agents) use `bare-mcp` and `bare-drive` as their only browser. Each release ships both programs for Linux amd64, Linux arm64 and Windows amd64.
 
-## Status
+For agent interaction, use `open`, `snapshot` or `find`, then `act` with an element ref.
+`act` keeps its text receipt and also returns `action_status`, `page_status` and `verification` in `structuredContent`.
+A completed action does not prove that its business result succeeded.
+Add an `expect` string to check the result, for example:
 
-`bare` loads pages over HTTP/1.1, HTTP/2 and HTTPS (TLS 1.3 and 1.2). It parses HTML and CSS, runs JavaScript in a tree-walking interpreter, lays out and paints the page, and shows it in a Wayland window with pointer and keyboard input. A test driver (`bare-drive`) runs user journeys through the same input path. On 2026-11-07 it passed the 8-step staging login journey. On 2026-11-10 it passed 48 public-site journeys.
+```json
+{"op":"click","loc":"role=button name=\"Save\"","expect":"expect text=\"Saved\" visible"}
+```
 
-What is done, what comes next and what is missing: [docs/progress.md](docs/progress.md).
+Assertions use the driver's `expect` syntax. JavaScript assertions are not accepted here.
+If verification fails after a completed action, inspect the page before retrying.
+`page_status: ready` means a layout exists and document loading ended. Application data can still be pending.
+See [Agent action outcomes](docs/design-agent-outcomes.md) for the contract, [docs/agent-browser-guide.md](docs/agent-browser-guide.md) for the open, inspect, act, verify and recover loop, and [docs/agents.md](docs/agents.md) for the tools.
 
-`bare` is not hardened like a mainstream browser. Do not use it as your everyday browser. `deck` and `offstage` run it for agents.
+Agents that use `bare-mcp` must report each problem with it. The host gives the route: `offstage` agents use `report_issue`, area `bare`. Others file a GitHub issue on `mrwick1/bare` with the label `bare-mcp`. Give the tool call, the result and the expected result.
 
 ## Build and run
 
@@ -43,67 +50,42 @@ cargo run -p bare -- http://example.com --resources # download and list the scri
 cargo run -p bare -- http://example.com --run      # load the page, run its scripts, timers and fetch calls, print a short status
 cargo run -p bare -- --paint=out.png page.html     # paint a local file into a PNG, with no network
 cargo run -p bare -- --window page.html            # open a Wayland window that shows the painted page (a local file or an http(s) URL)
-cargo run -p bare-drive -- STEPS           # run a step file (a user journey); --window shows it
-cargo run -p bare-mcp                      # an MCP server over stdio: agents run journeys (headless, or a window on WAYLAND_DISPLAY)
+cargo run -p bare-drive -- STEPS                   # run a step file (a user journey); --window shows it
+cargo run -p bare-mcp                              # an MCP server over stdio: agents run journeys (headless, or a window on WAYLAND_DISPLAY)
 cargo test --workspace
 ```
 
-For agent interaction, use `open`, `snapshot` or `find`, then `act` with an element ref.
-`act` keeps its text receipt and also returns `action_status`, `page_status` and `verification` in `structuredContent`.
-A completed action does not prove that its business result succeeded.
-Add an `expect` string to check the result, for example:
+## Platforms
 
-```json
-{"op":"click","loc":"role=button name=\"Save\"","expect":"expect text=\"Saved\" visible"}
-```
-
-Assertions use the driver's `expect` syntax. JavaScript assertions are not accepted here.
-If verification fails after a completed action, inspect the page before retrying.
-`page_status: ready` means a layout exists and document loading ended. Application data can still be pending.
-See [Agent action outcomes](docs/design-agent-outcomes.md) for the contract.
-
-Each release carries prebuilt `bare-mcp` and `bare-drive` binaries for Linux amd64, Linux arm64 and Windows amd64.
-
-Agents: read [docs/agent-browser-guide.md](docs/agent-browser-guide.md) for the open, inspect, act, verify and recover loop.
-
-Agents that use `bare-mcp` must report each problem with it. The host gives the route: `offstage` agents use `report_issue`, area `bare`. Others file a GitHub issue on `mrwick1/bare` with the label `bare-mcp`. Give the tool call, the result and the expected result. The owner's agents can file in the private Plane project "bare MCP" (`BMCP`) instead. Its API key is in the owner's vault as `bare/plane`.
-
-Linux is the first target. The core must also build and run on Windows and macOS (see "Cross-platform core" in [docs/decisions.md](docs/decisions.md)). Today the code builds for both, and only Linux has a window. `tools/portable_check.sh` checks this.
+Linux is the first target, and only Linux has a window today. The core also builds and runs on Windows and macOS. `tools/portable_check.sh` checks that the core does not depend on one OS.
 
 ## Layout
 
-| Folder              | Contents                                            |
-| ------------------- | --------------------------------------------------- |
-| `crates/bare/`      | The app                                             |
-| `crates/net/`       | DNS, TCP, HTTP/1.1 and HTTP/2                       |
-| `crates/tls/`       | TLS 1.3 and 1.2 and their crypto, by hand           |
-| `crates/url/`       | URL parser and IDNA                                 |
-| `crates/html/`      | HTML: encoding, tokenizer, DOM tree, tree builder   |
-| `crates/css/`       | CSS: tokenizer, parser, selectors, style cascade    |
-| `crates/layout/`    | Layout: box tree, text, block and inline layout     |
-| `crates/js/`        | JavaScript: parser, heap, tree-walking interpreter  |
-| `crates/js-diff/`   | test262 and differential runners for both engines   |
-| `crates/image/`     | PNG, JPEG and WebP decoders                         |
-| `crates/paint/`     | Display list, pixel buffer, PNG output              |
-| `crates/window/`    | Wayland window and input                            |
-| `crates/unicode/`   | NFC and Unicode data tables                         |
-| `crates/drive/`     | `bare-drive`, the test driver for user journeys     |
-| `crates/mcp/`       | `bare-mcp`, an MCP server for end-to-end tests      |
-| `crates/bench/`     | Time and memory benchmarks for each module          |
-| `crates/stress/`    | `bare-stress`, load tests in separate processes     |
-| `crates/tzdata/`    | IANA time zone data in the binary                   |
-| `data/unicode/`     | Unicode data files and their license                |
-| `data/tz/`          | tzdata and CLDR Windows zone sources                |
-| `data/html/`        | The WHATWG entity list and its license              |
-| `data/css/`         | The CSS color names and their license               |
-| `data/fonts/`       | Noto font subsets and their licenses                |
-| `data/crypto/`      | ECDSA test vectors and their license                |
-| `tools/`            | Code generators, test fixtures and check scripts    |
-| `docs/engine-plan.md` | The JavaScript engine plan and its result         |
-| `docs/open-source.md` | Open-source parts that `bare` uses or copies      |
-| `docs/resources.md` | Time and memory measurements                        |
-| `docs/decisions.md` | Design decisions and their reasons                  |
-| `docs/progress.md`  | The module plan, what is done, and known gaps       |
+| Folder              | Contents                                                     |
+| ------------------- | ------------------------------------------------------------ |
+| `crates/bare/`      | The app: DOM and engine bridge, page loader, sessions, CLI   |
+| `crates/net/`       | DNS, TCP, HTTP/1.1, HTTP/2, WebSocket, caches, downloads     |
+| `crates/tls/`       | TLS 1.3 and 1.2 and their crypto                             |
+| `crates/url/`       | URL parser and IDNA                                          |
+| `crates/html/`      | HTML: encoding, tokenizer, DOM tree, tree builder            |
+| `crates/css/`       | CSS: tokenizer, parser, selectors, style cascade             |
+| `crates/layout/`    | Layout: box tree, text, block, inline, flex, grid, table     |
+| `crates/vex/`       | Vex, the JavaScript engine: parser, compiler, interpreter, heap |
+| `crates/intl/`      | `Intl` data and formatting                                   |
+| `crates/image/`     | PNG, JPEG, WebP and GIF decoders                             |
+| `crates/paint/`     | Display list, pixel buffer, PNG output                       |
+| `crates/window/`    | Wayland window and input                                     |
+| `crates/unicode/`   | NFC and Unicode data tables                                  |
+| `crates/tzdata/`    | IANA time zone data in the binary                            |
+| `crates/os/`        | OS services: DNS, files, random numbers, trust roots, memory |
+| `crates/observe/`   | Opt-in JSONL observations of a process                       |
+| `crates/drive/`     | `bare-drive`, the driver for user journeys                   |
+| `crates/mcp/`       | `bare-mcp`, an MCP server for agents                         |
+| `crates/bench/`     | Time and memory benchmarks for each module                   |
+| `crates/stress/`    | `bare-stress`, load tests in separate processes              |
+| `data/`             | Unicode, time zone, HTML entity, CSS color, font and crypto test data, with their licenses |
+| `tools/`            | Code generators, test fixtures and check scripts             |
+| `docs/`             | Documentation: see [docs/README.md](docs/README.md)          |
 
 ## License
 
@@ -114,4 +96,4 @@ Licensed under either of these, at your option:
 
 The files in `data/unicode/` and `data/tz/windowsZones.xml` are under the Unicode License v3 ([data/unicode/LICENSE.txt](data/unicode/LICENSE.txt)). `data/tz/tzdata.zi` is public domain. The file in `data/html/` is under CC BY 4.0 ([data/html/LICENSE.txt](data/html/LICENSE.txt)). The file in `data/css/` is under the MIT License ([data/css/LICENSE.txt](data/css/LICENSE.txt)). The fonts in `data/fonts/` are under the SIL Open Font License ([OFL.txt](data/fonts/OFL.txt), [OFL-Arabic.txt](data/fonts/OFL-Arabic.txt), [OFL-Symbols2.txt](data/fonts/OFL-Symbols2.txt)). The Wycheproof vectors in `data/crypto/ecdsa/` are under the Apache License 2.0 ([LICENSE-wycheproof-APACHE-2.0](data/crypto/ecdsa/LICENSE-wycheproof-APACHE-2.0)).
 
-Engine monitoring is under integration. See [monitoring status and controls](docs/monitoring.md).
+Third-party components and their notices: [docs/third-party.md](docs/third-party.md). Engine monitoring: [status and controls](docs/monitoring.md).
