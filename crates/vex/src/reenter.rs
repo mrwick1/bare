@@ -50,7 +50,7 @@ impl Realm {
     /// while the native goes on. Call it only from code that the loop called (a native, or an operator that the loop runs).
     pub fn call_function(&mut self, f: Value, this: Value, args: &[Value]) -> R<Value> {
         if self.nest >= MAX_NEST {
-            return Err(self.nest_limit());
+            return Err(self.error(ErrKind::Range, "maximum call stack size exceeded"));
         }
         let saved = (self.callee, self.nt, self.tail.take(), std::mem::take(&mut self.tail_args));
         self.nest += 1;
@@ -62,15 +62,19 @@ impl Realm {
         r
     }
 
-    /// A native chain that nests too deep ends the run with an abort that a script cannot catch (the host reports `CallDepth`).
+    /// Indirect eval that nests too deep ends the run with an abort that a script cannot catch (the host reports `CallDepth`).
     #[cold]
-    fn nest_limit(&mut self) -> Value {
+    pub(crate) fn nest_limit(&mut self) -> Value {
         self.api.set_abort(bare_js_api::Abort::Limit("the call depth"));
         STOP
     }
 
     /// Run `f` with room on the Rust stack for one more nested call: each level of `MAX_NEST` is a frame of `Vm::run`, which is big, and the
     /// thread may be small. Below the first few levels, the stack grows on the heap when less than `RED_ZONE` is left.
+    pub(crate) fn nested_too_deep(&self) -> bool {
+        self.nest >= MAX_NEST
+    }
+
     fn grow<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
         if self.nest < 4 {
             return f(self);
@@ -98,7 +102,7 @@ impl Realm {
     /// machine when the generator has to run. Gives the value and whether the generator is done. Called like [`Realm::call_function`].
     pub(crate) fn gen_nested(&mut self, g: Value, mode: i32, v: Value) -> R<(Value, bool)> {
         if self.nest >= MAX_NEST {
-            return Err(self.nest_limit());
+            return Err(self.error(ErrKind::Range, "maximum call stack size exceeded"));
         }
         match self.gen_request(g, mode, v)? {
             crate::generator::Step::Result(v, done) => Ok((v, done)),
@@ -189,7 +193,7 @@ impl Realm {
             return self.type_error("not a constructor");
         }
         if self.nest >= MAX_NEST {
-            return Err(self.nest_limit());
+            return Err(self.error(ErrKind::Range, "maximum call stack size exceeded"));
         }
         let saved = (self.callee, self.nt, self.tail.take(), std::mem::take(&mut self.tail_args));
         self.nest += 1;
