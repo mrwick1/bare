@@ -51,7 +51,7 @@ fn a_long_poll_does_not_keep_the_page_from_settling_or_block_later_requests() {
     std::thread::Builder::new()
         .stack_size(64 << 20)
         .spawn(move || {
-            let mut p = Page::open(&format!("{origin}/"), (800, 600)).unwrap();
+            let mut p = Page::open_old(&format!("{origin}/"), (800, 600)).unwrap();
             p.quiet = true;
             let settled = tick_until(&mut p, Duration::from_secs(6), |p| p.idle().is_ok());
             assert!(settled.is_some_and(|t| t < Duration::from_secs(5)), "the page did not settle in 6 s: {:?}", p.pending().iter().map(|w| w.url.clone()).collect::<Vec<_>>());

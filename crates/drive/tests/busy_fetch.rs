@@ -67,7 +67,7 @@ fn a_queued_fetch_reaches_the_server_while_scripts_keep_the_page_busy() {
     let (out, took) = std::thread::Builder::new()
         .stack_size(64 << 20)
         .spawn(move || {
-            let mut p = Page::open(&format!("{origin}/"), (800, 600)).unwrap();
+            let mut p = Page::open_old(&format!("{origin}/"), (800, 600)).unwrap();
             p.quiet = true;
             let t = Instant::now();
             loop {
