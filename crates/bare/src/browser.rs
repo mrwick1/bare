@@ -826,7 +826,7 @@ pub struct Dom<E: Eng = New> {
     /// The `mark` and `measure` entries of `performance` (`browser_perf.rs`).
     pub(crate) frames: crate::browser_frames::Frames<E>,
     pub(crate) kids: crate::browser_child::Kids<E>,
-    pub(crate) perf_entries: RefCell<Vec<crate::browser_perf::Entry>>,
+    pub(crate) perf_entries: RefCell<Vec<crate::browser_perf::Entry<E::Obj>>>,
     /// The times of the load of this document, for its navigation entry (`browser_perf.rs`).
     pub(crate) load_times: RefCell<crate::browser_perf::LoadTimes>,
     /// The prototype and constructor of each interface of `browser_html.rs`, once made.
@@ -908,6 +908,7 @@ impl<E: Eng> Dom<E> {
         crate::browser_nodelist::roots(self, out);
         crate::browser_dataset::roots(self, out);
         crate::browser_web::roots(self, out);
+        crate::browser_perf::roots(self, out);
         crate::browser_elements::roots(self, out);
         crate::browser_media::roots(self, out);
         crate::browser_img::roots(self, out);

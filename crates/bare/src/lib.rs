@@ -191,6 +191,8 @@ mod browser_caches_tests;
 #[cfg(test)]
 mod browser_sw_tests;
 #[cfg(test)]
+mod browser_perf_detail_tests;
+#[cfg(test)]
 mod browser_clone_host_tests;
 #[cfg(test)]
 mod browser_idb_tx_tests;
