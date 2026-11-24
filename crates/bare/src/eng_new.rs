@@ -147,6 +147,7 @@ fn fault(r: &mut Realm, e: Error<'_>) -> Fault<New> {
         Error::Abort(_) if host.is_some() => host.unwrap(),
         // Vex found the host borrowed (a script ran while Rust held the document).
         Error::Abort(Abort::Limit("the host is busy")) => Fault::Heap("HostUnavailable"),
+        Error::Abort(Abort::Limit("the call depth")) => Fault::Limit(LimitKind::CallDepth),
         Error::Abort(Abort::Limit(_)) => Fault::Limit(LimitKind::Steps),
         Error::Abort(Abort::Unsupported(w)) => Fault::Unsupported(w),
     }
