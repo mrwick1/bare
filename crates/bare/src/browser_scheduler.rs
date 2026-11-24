@@ -943,6 +943,11 @@ impl<E: Eng> Dom<E> {
         self.sched.borrow().limits.max_queued_messages
     }
 
+    /// The most bytes that the queued messages of a page hold (also the bound of the port hub).
+    pub(crate) fn sched_max_message_bytes(&self) -> usize {
+        self.sched.borrow().limits.max_queued_message_bytes
+    }
+
     /// `post_window` with the byte cost, and the sender when the message comes from another page.
     pub(crate) fn queue_window(&self, data: E::Raw, ports: Box<[E::Obj]>, cost: usize, from: Option<Box<Sender<E>>>) -> R<E, ()> {
         let g = *self.global.get().expect("installed");
@@ -1336,7 +1341,7 @@ impl<E: Eng> Dom<E> {
                 let data = s.engine().raw_local(&m.data);
                 let cloned = crate::browser_navigation_state::clone_state_with(self, s, data, &[])?;
                 s.engine().stack_truncate(base);
-                ws.push(Wire { cloned, bytes: m.bytes });
+                ws.push(Wire { cloned, bytes: m.bytes, origin: None });
             }
             waiting.push(ws);
         }
@@ -1449,7 +1454,8 @@ impl<E: Eng> Dom<E> {
             s.queued += 1;
             s.queued_bytes += bytes;
             if let Some(p) = s.ports.get_mut(&obj) {
-                p.inbox.push_back(Msg { data, bytes, ports: ports.into_boxed_slice(), from: None });
+                let from = w.origin.take().map(|o| Box::new(Sender { origin: o.to_string(), source: None }));
+                p.inbox.push_back(Msg { data, bytes, ports: ports.into_boxed_slice(), from });
                 p.keys.extend(key);
             }
         }
@@ -1471,13 +1477,21 @@ impl<E: Eng> Dom<E> {
         Ok(p)
     }
 
-    /// Make `o` an enabled port with no peer: a `BroadcastChannel` takes its messages through the port queue.
-    pub(crate) fn add_broadcast_port(&self, o: E::Obj) -> R<E, ()> {
+    /// Make `o` an enabled port with no peer: a `BroadcastChannel` takes its messages through the port queue. With a port hub, the
+    /// channel also gets an end there, listed under `origin` and `name`, so the other pages of this top page reach it.
+    pub(crate) fn add_broadcast_port(&self, o: E::Obj, origin: &str, name: &str) -> R<E, ()> {
         let mut s = self.sched.borrow_mut();
         if s.ports.len() >= s.limits.max_ports {
             return Err(self.lim("message-ports"));
         }
-        s.ports.insert(o, Port::new(None, true));
+        let mut p = Port::new(None, true);
+        if let Some(hub) = self.kids.hub() {
+            let end = hub.new_end(Some(self.kids.page.get()));
+            hub.join(origin, name, end);
+            p.me = Some(end);
+            s.ends.insert(end, o);
+        }
+        s.ports.insert(o, p);
         Ok(())
     }
 }
@@ -1532,7 +1546,7 @@ fn post_remote<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>, list: &[
     if hub.bytes().saturating_add(bytes) > d.sched.borrow().limits.max_queued_message_bytes {
         return Err(d.lim_s(s, "message-bytes"));
     }
-    if let Err(w) = hub.push(end, Wire { cloned, bytes }) {
+    if let Err(w) = hub.push(end, Wire { cloned, bytes, origin: None }) {
         hub.release(w.cloned.moved());
     }
     Ok(())

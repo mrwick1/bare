@@ -10,7 +10,11 @@
 //!   `InvalidStateError`. A second `close()` does nothing.
 //! - An open channel with a listener is a root: a message can come to it without a reference from the page.
 //! - `BroadcastChannel` is an accessor of the global until the first read, as `Worker` is (`browser_worker.rs`).
-//! - Not here: channels of other pages and workers, `messageerror` (a clone in one heap does not fail on the receiver side).
+//! - Other pages: the frames and workers of one top page share its port hub (`browser_port_hub.rs`). A channel has an end there, listed
+//!   under the origin of its page and its name. `postMessage` also sends one wire to each listed end of another page. The driver moves
+//!   it into that channel as a `message` with the origin of the sender (`Dom::take_wires`). Microsoft Teams signs in this way: the
+//!   redirect page in a hidden frame posts the reply on a channel of the top page.
+//! - Not here: `messageerror` (a clone in one heap does not fail on the receiver side).
 
 use crate::browser::*;
 use crate::browser_handlers::{handler_get, handler_set};
@@ -111,9 +115,10 @@ fn ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) ->
     if d.st.borrow().by_obj.len() >= d.lim.max_wrappers {
         return Err(d.lim_s(s, "dom-wrappers"));
     }
+    let origin = d.cur_rec().ok().map_or_else(|| "null".to_string(), |c| c.origin());
     old_v::<E>(s, |it| {
         let o = d.obj(it, proto)?;
-        d.add_broadcast_port(o)?;
+        d.add_broadcast_port(o, &origin, &name)?;
         d.st.borrow_mut().add_target(it, o, Owner::Port(o));
         d.broadcast.names.borrow_mut().insert(o, name);
         d.broadcast.open.borrow_mut().push(o);
@@ -148,11 +153,27 @@ fn post_message<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: A
         let names = d.broadcast.names.borrow();
         d.broadcast.open.borrow().iter().copied().filter(|&o| o != me && names.get(&o).is_some_and(|m| **m == *n)).collect()
     };
-    if to.is_empty() {
+    let origin = d.cur_rec().ok().map_or_else(|| "null".to_string(), |c| c.origin());
+    let hub = d.kids.hub();
+    let far = hub.as_ref().map_or_else(Vec::new, |h| h.peers(&origin, &n, d.kids.page.get()));
+    if to.is_empty() && far.is_empty() {
         d.clone_payload(s, v, &[])?;
         return Ok(s.undefined());
     }
-    let origin = d.cur_rec().ok().map_or_else(|| "null".to_string(), |c| c.origin());
+    if let Some(hub) = hub {
+        let from: Rc<str> = origin.as_str().into();
+        for end in far {
+            if hub.wires() >= d.max_messages() {
+                return Err(d.lim_s(s, "messages"));
+            }
+            let cloned = crate::browser_navigation_state::clone_state_with(d, s, v, &[])?;
+            let bytes = 16usize.saturating_add(cloned.cost());
+            if hub.bytes().saturating_add(bytes) > d.sched_max_message_bytes() {
+                return Err(d.lim_s(s, "message-bytes"));
+            }
+            let _ = hub.push(end, crate::browser_port_hub::Wire { cloned, bytes, origin: Some(from.clone()) });
+        }
+    }
     for o in to {
         let (data, bytes, _) = d.clone_payload(s, v, &[])?;
         let data = s.engine().raw(data);
