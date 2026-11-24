@@ -5,7 +5,8 @@
 //! - version TLS 1.3 only (`supported_versions` = 0x0304; legacy_version 0x0303);
 //! - cipher suite `TLS_AES_128_GCM_SHA256` (0x1301);
 //! - groups X25519 (0x001d) and secp256r1 (0x0017), with one key share, for X25519. secp256r1 serves TLS 1.2 only;
-//!   a TLS 1.3 server that insists on it answers with a HelloRetryRequest, which we reject;
+//!   a TLS 1.3 server that insists on it answers with a HelloRetryRequest. The second ClientHello
+//!   (`encode_retry_hello`) then carries one secp256r1 key share and the server's cookie;
 //! - `signature_algorithms` = `ecdsa_secp256r1_sha256` (0x0403), `ecdsa_secp384r1_sha384` (0x0503),
 //!   `rsa_pss_rsae_sha256` (0x0804) and `rsa_pss_rsae_sha384` (0x0805). This limits only the server's
 //!   `CertificateVerify` (P-256 and P-384 leaf keys use ECDSA; RSA leaf keys of 2048 to 4096 bits use the PSS schemes);
@@ -23,9 +24,9 @@
 //! `is_tls12_server_hello` tells the two apart and `parse_server_hello12` reads the 1.2 one.
 //!
 //! No PSK, no early data, no compression, no renegotiation, no session resumption.
-//! `HelloRetryRequest` is detected and rejected with `HelloError::HelloRetryRequest`.
-//! The caller must then abort. Continuing would need a different transcript (RFC 8446 §4.4.1)
-//! and a second ClientHello. This code does neither.
+//! `is_hello_retry_request` detects a HelloRetryRequest and `parse_hello_retry_request` reads it (RFC 8446 §4.1.4).
+//! The caller restarts the transcript with `message_hash` (§4.4.1). `parse_server_hello` rejects a HelloRetryRequest
+//! with `HelloError::HelloRetryRequest`: a second one is fatal.
 
 use std::fmt;
 use std::net::IpAddr;
@@ -61,6 +62,10 @@ pub const MAX_SESSION_ID_LEN: usize = 32;
 pub const MAX_SERVER_NAME_LEN: usize = 253;
 /// Size of the longest ClientHello we can write (32-byte session ID, 253-byte name).
 pub const MAX_CLIENT_HELLO_LEN: usize = 465;
+/// The largest cookie we echo. A larger one is `HelloError::TooLarge`.
+pub const MAX_COOKIE_LEN: usize = 512;
+/// Size of the longest second ClientHello: a 65-byte P-256 share in place of 32 bytes, plus the cookie extension.
+pub const MAX_RETRY_HELLO_LEN: usize = MAX_CLIENT_HELLO_LEN + 33 + 6 + MAX_COOKIE_LEN;
 
 /// SHA-256("HelloRetryRequest"). A ServerHello with this random is a HelloRetryRequest.
 pub const HELLO_RETRY_REQUEST_RANDOM: [u8; 32] = [
@@ -80,6 +85,7 @@ const EXT_ALPN: u16 = 16;
 const EXT_SIGNATURE_ALGORITHMS: u16 = 13;
 const EXT_SUPPORTED_VERSIONS: u16 = 43;
 const EXT_KEY_SHARE: u16 = 51;
+const EXT_COOKIE: u16 = 44;
 const EXT_SIGNATURE_ALGORITHMS_CERT: u16 = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,7 +103,7 @@ pub enum HelloError {
     /// The message type is not the expected one.
     BadMessageType,
     BadLegacyVersion,
-    /// The server sent a HelloRetryRequest. Not supported. Abort the handshake.
+    /// The server sent a HelloRetryRequest where a ServerHello must come (after our second ClientHello). Abort.
     HelloRetryRequest,
     SessionIdMismatch,
     /// The server chose a cipher suite we did not offer.
@@ -134,12 +140,12 @@ impl fmt::Display for HelloError {
                 HelloError::BadInput => "bad ClientHello input",
                 HelloError::BadMessageType => "unexpected handshake message type",
                 HelloError::BadLegacyVersion => "legacy_version is not 0x0303",
-                HelloError::HelloRetryRequest => "HelloRetryRequest is not supported",
+                HelloError::HelloRetryRequest => "a second HelloRetryRequest",
                 HelloError::SessionIdMismatch => "ServerHello session ID does not match",
                 HelloError::UnsupportedCipher => "server chose a cipher suite we did not offer",
                 HelloError::BadCompression => "compression method is not null",
                 HelloError::UnsupportedVersion => "server did not select TLS 1.3",
-                HelloError::BadKeyShare => "key share is not a 32-byte X25519 share",
+                HelloError::BadKeyShare => "key share is not of the group we offered or has the wrong size",
                 HelloError::Downgrade => "TLS 1.2 ServerHello carries the downgrade marker",
                 HelloError::Resumption => "TLS 1.2 ServerHello resumes a session we never offered",
                 _ => unreachable!(),
@@ -270,7 +276,18 @@ fn valid_server_name(n: &[u8]) -> bool {
 /// Returns its length. These bytes go into the transcript and onto the wire unchanged.
 /// A buffer of `MAX_CLIENT_HELLO_LEN` bytes always suffices.
 pub fn encode_client_hello(p: &ClientHelloParams, out: &mut [u8]) -> Result<usize, HelloError> {
-    if p.session_id.len() > MAX_SESSION_ID_LEN || !valid_server_name(p.server_name) {
+    encode_hello(p, (GROUP_X25519, p.x25519_public), &[], out)
+}
+
+/// The second ClientHello after a HelloRetryRequest (RFC 8446 §4.1.2): the first one with one secp256r1 key share
+/// (`04 || X || Y`) and the server's `cookie`, when it sent one. `p.x25519_public` is not used.
+/// A buffer of `MAX_RETRY_HELLO_LEN` bytes always suffices.
+pub fn encode_retry_hello(p: &ClientHelloParams, p256_public: &[u8; 65], cookie: &[u8], out: &mut [u8]) -> Result<usize, HelloError> {
+    encode_hello(p, (GROUP_SECP256R1, p256_public), cookie, out)
+}
+
+fn encode_hello(p: &ClientHelloParams, share: (u16, &[u8]), cookie: &[u8], out: &mut [u8]) -> Result<usize, HelloError> {
+    if p.session_id.len() > MAX_SESSION_ID_LEN || !valid_server_name(p.server_name) || cookie.len() > MAX_COOKIE_LEN {
         return Err(HelloError::BadInput);
     }
     let mut w = Writer { buf: out, n: 0 };
@@ -321,11 +338,17 @@ pub fn encode_client_hello(p: &ClientHelloParams, out: &mut [u8]) -> Result<usiz
     })?;
     w.ext(EXT_KEY_SHARE, |w| {
         let list = w.open(2)?;
-        w.u16(GROUP_X25519)?;
-        w.u16(32)?;
-        w.put(p.x25519_public)?;
+        w.u16(share.0)?;
+        w.u16(share.1.len() as u16)?;
+        w.put(share.1)?;
         w.close(list, 2)
     })?;
+    if !cookie.is_empty() {
+        w.ext(EXT_COOKIE, |w| {
+            w.u16(cookie.len() as u16)?;
+            w.put(cookie)
+        })?;
+    }
     w.ext(EXT_ALPN, |w| {
         let list = w.open(2)?;
         if p.alpn_h2 {
@@ -381,6 +404,70 @@ impl<'a> Reader<'a> {
 /// (X25519, 32 bytes), each once. Everything else is an error. A HelloRetryRequest random gives
 /// `HelloError::HelloRetryRequest` before any extension is read.
 pub fn parse_server_hello(msg: &[u8], offered_session_id: &[u8]) -> Result<ServerHello, HelloError> {
+    let share = parse_tls13_hello(msg, offered_session_id, GROUP_X25519)?;
+    Ok(ServerHello { x25519_public: share.try_into().map_err(|_| HelloError::BadKeyShare)? })
+}
+
+/// `parse_server_hello` for the ServerHello that answers our second ClientHello: the key share is secp256r1.
+/// Returns the server's `04 || X || Y`. `ecc::p256_shared` checks that the point is on the curve.
+pub fn parse_server_hello_p256(msg: &[u8], offered_session_id: &[u8]) -> Result<[u8; 65], HelloError> {
+    parse_tls13_hello(msg, offered_session_id, GROUP_SECP256R1)?.try_into().map_err(|_| HelloError::BadKeyShare)
+}
+
+/// True when `msg` (a whole ServerHello) carries the HelloRetryRequest random.
+pub fn is_hello_retry_request(msg: &[u8]) -> bool {
+    msg.get(HANDSHAKE_HEADER_LEN + 2..HANDSHAKE_HEADER_LEN + 34) == Some(&HELLO_RETRY_REQUEST_RANDOM[..])
+}
+
+/// Validate a HelloRetryRequest (RFC 8446 §4.1.4) against our first offer. It must select TLS 1.3, cipher 0x1301 and
+/// group secp256r1: we sent only an X25519 share, and secp256r1 is our only other group. Returns the cookie, empty
+/// when the server sent none. Any other extension is an error.
+pub fn parse_hello_retry_request<'a>(msg: &'a [u8], offered_session_id: &[u8]) -> Result<&'a [u8], HelloError> {
+    let mut r = hello_prefix(msg, offered_session_id, true)?;
+    let (mut version_seen, mut group_seen, mut cookie) = (false, false, None);
+    while !r.0.is_empty() {
+        let ty = r.u16()?;
+        let len = r.u16()? as usize;
+        let mut d = Reader(r.take(len)?);
+        let seen = match ty {
+            EXT_SUPPORTED_VERSIONS => std::mem::replace(&mut version_seen, true),
+            EXT_KEY_SHARE => std::mem::replace(&mut group_seen, true),
+            EXT_COOKIE => cookie.is_some(),
+            _ => return Err(HelloError::UnsolicitedExtension(ty)),
+        };
+        if seen {
+            return Err(HelloError::DuplicateExtension(ty));
+        }
+        match ty {
+            EXT_SUPPORTED_VERSIONS if len != 2 => return Err(HelloError::BadLength),
+            EXT_SUPPORTED_VERSIONS if d.u16()? != TLS13 => return Err(HelloError::UnsupportedVersion),
+            EXT_KEY_SHARE if len != 2 => return Err(HelloError::BadLength),
+            EXT_KEY_SHARE if d.u16()? != GROUP_SECP256R1 => return Err(HelloError::BadKeyShare),
+            EXT_COOKIE => {
+                let n = d.u16()? as usize;
+                if n == 0 || d.0.len() != n {
+                    return Err(HelloError::BadLength);
+                }
+                if n > MAX_COOKIE_LEN {
+                    return Err(HelloError::TooLarge);
+                }
+                cookie = Some(d.0);
+            }
+            _ => {}
+        }
+    }
+    if !version_seen {
+        return Err(HelloError::MissingExtension(EXT_SUPPORTED_VERSIONS));
+    }
+    if !group_seen {
+        return Err(HelloError::MissingExtension(EXT_KEY_SHARE));
+    }
+    Ok(cookie.unwrap_or(&[]))
+}
+
+/// The fields before the extensions, the same in a ServerHello and a HelloRetryRequest. Returns the extension block.
+/// `retry` says which of the two the random must name.
+fn hello_prefix<'a>(msg: &'a [u8], offered_session_id: &[u8], retry: bool) -> Result<Reader<'a>, HelloError> {
     let h = parse_header(msg)?;
     if h.msg_type != SERVER_HELLO {
         return Err(HelloError::BadMessageType);
@@ -396,8 +483,8 @@ pub fn parse_server_hello(msg: &[u8], offered_session_id: &[u8]) -> Result<Serve
     if r.u16()? != LEGACY_VERSION {
         return Err(HelloError::BadLegacyVersion);
     }
-    if r.take(32)? == HELLO_RETRY_REQUEST_RANDOM {
-        return Err(HelloError::HelloRetryRequest);
+    if (r.take(32)? == HELLO_RETRY_REQUEST_RANDOM) != retry {
+        return Err(if retry { HelloError::BadMessageType } else { HelloError::HelloRetryRequest });
     }
     let sid_len = r.u8()? as usize;
     if sid_len > MAX_SESSION_ID_LEN {
@@ -416,6 +503,12 @@ pub fn parse_server_hello(msg: &[u8], offered_session_id: &[u8]) -> Result<Serve
     if r.0.len() != ext_len {
         return Err(if r.0.len() < ext_len { HelloError::Truncated } else { HelloError::BadLength });
     }
+    Ok(r)
+}
+
+/// A TLS 1.3 ServerHello whose key share is of `group`. Returns the share.
+fn parse_tls13_hello<'a>(msg: &'a [u8], offered_session_id: &[u8], group: u16) -> Result<&'a [u8], HelloError> {
+    let mut r = hello_prefix(msg, offered_session_id, false)?;
     let (mut version_seen, mut share) = (false, None);
     while !r.0.is_empty() {
         let ty = r.u16()?;
@@ -437,14 +530,14 @@ pub fn parse_server_hello(msg: &[u8], offered_session_id: &[u8]) -> Result<Serve
                 if share.is_some() {
                     return Err(HelloError::DuplicateExtension(ty));
                 }
-                if d.u16()? != GROUP_X25519 {
+                if d.u16()? != group {
                     return Err(HelloError::BadKeyShare);
                 }
                 let klen = d.u16()? as usize;
-                if klen != 32 || d.0.len() != 32 {
+                if klen != if group == GROUP_X25519 { 32 } else { 65 } || d.0.len() != klen {
                     return Err(HelloError::BadKeyShare);
                 }
-                share = Some(<[u8; 32]>::try_from(d.0).unwrap());
+                share = Some(d.0);
             }
             _ => return Err(HelloError::UnsolicitedExtension(ty)),
         }
@@ -452,7 +545,7 @@ pub fn parse_server_hello(msg: &[u8], offered_session_id: &[u8]) -> Result<Serve
     if !version_seen {
         return Err(HelloError::MissingExtension(EXT_SUPPORTED_VERSIONS));
     }
-    Ok(ServerHello { x25519_public: share.ok_or(HelloError::MissingExtension(EXT_KEY_SHARE))? })
+    share.ok_or(HelloError::MissingExtension(EXT_KEY_SHARE))
 }
 
 /// True when `msg` (a whole ServerHello) answers with TLS 1.2: no `supported_versions` extension and no HelloRetryRequest
@@ -588,6 +681,10 @@ pub fn parse_server_hello12<'a>(msg: &'a [u8], offered_session_id: &[u8]) -> Res
     }
     Ok(ServerHello12 { random, suite, ems, alpn })
 }
+
+#[cfg(test)]
+#[path = "hello_retry_tests.rs"]
+mod retry_tests;
 
 #[cfg(test)]
 mod tests {

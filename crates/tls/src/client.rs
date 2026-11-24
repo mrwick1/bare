@@ -5,6 +5,9 @@
 //! (X25519), CertificateVerify schemes 0x0403 (ecdsa_secp256r1_sha256), 0x0804 and 0x0805 (rsa_pss_rsae_sha256 and sha384)
 //! and ALPN `h2` and `http/1.1` (`h2` only when the caller offers it).
 //!
+//! A server that wants secp256r1 answers with a HelloRetryRequest. The client then sends a second ClientHello with
+//! one P-256 key share and the server's cookie (RFC 8446 §4.1.4). Servers that take X25519 pay nothing for this.
+//!
 //! A server that answers with TLS 1.2 gets the handshake in `tls12.rs` (suites 0xC02B and 0xC02F, X25519). The chain,
 //! host name and trust store checks are the same for both versions.
 //!
@@ -51,6 +54,8 @@ pub const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(30);
 /// Bytes read from the transport during the handshake, ignored records included.
 pub const HANDSHAKE_WIRE_BUDGET: usize = 128 * 1024;
 const MAX_SERVER_HELLO: usize = 1024;
+/// The handshake type of the synthetic message that replaces the first ClientHello after a HelloRetryRequest (RFC 8446 §4.4.1).
+const MESSAGE_HASH: u8 = 254;
 const MAX_ENCRYPTED_EXTENSIONS: usize = 4096;
 /// Body of the Certificate message.
 const MAX_CERTIFICATE: usize = 64 * 1024;
@@ -666,30 +671,60 @@ impl<T: Read + Write> ClientStream<T> {
 
         // ClientHello. The compatibility CCS goes out right after it (appendix D.4).
         let public = x25519::public_key(scalar);
+        let params = ClientHelloParams { random: client_random, session_id, x25519_public: &public, server_name: host.as_bytes(), alpn_h2: offer_h2 };
         let mut ch = [0u8; hello::MAX_CLIENT_HELLO_LEN];
-        let n = hello::encode_client_hello(
-            &ClientHelloParams { random: client_random, session_id, x25519_public: &public, server_name: host.as_bytes(), alpn_h2: offer_h2 },
-            &mut ch,
-        )?;
+        let ch_len = hello::encode_client_hello(&params, &mut ch)?;
+        let ch = &ch[..ch_len];
         let mut t = Transcript::new();
-        t.update(&ch[..n]);
-        self.rl.write_handshake(&ch[..n])?;
+        t.update(ch);
+        self.rl.write_handshake(ch)?;
         self.rl.get_mut().flush().map_err(|e| Error::Io(e.kind()))?;
 
         // ServerHello. Keys change here, so nothing may follow it in its record.
-        let n = self.read_message(hello::SERVER_HELLO, MAX_SERVER_HELLO)?;
+        let mut n = self.read_message(hello::SERVER_HELLO, MAX_SERVER_HELLO)?;
         let msg = &self.hs[self.hs_pos..self.hs_pos + n];
         if hello::is_tls12_server_hello(msg) {
             return self.handshake12(host, verifier, now, rnd, &public, offer_h2, t, n);
         }
         // TLS 1.3. The compatibility CCS goes out before our second flight (appendix D.4): a TLS 1.2 server must not see it.
+        // After a HelloRetryRequest it goes out before the second ClientHello, which D.4 also allows.
         self.rl.allow_compat_ccs(true);
         self.rl.write_compat_ccs()?;
-        let sh = hello::parse_server_hello(msg, session_id)?;
+        let mut p256_secret = None;
+        if hello::is_hello_retry_request(msg) {
+            // The server wants secp256r1 (section 4.1.4). The transcript starts again with the hash of our first
+            // ClientHello in a message_hash message (section 4.4.1), then the HelloRetryRequest.
+            let cookie = hello::parse_hello_retry_request(msg, session_id)?;
+            let mut secret = [0u8; 32];
+            random::fill(&mut secret).map_err(|_| Error::Random)?;
+            let mine = ecc::p256_public(&secret).ok_or(Error::KeyExchange)?;
+            let mut ch2 = [0u8; hello::MAX_RETRY_HELLO_LEN];
+            let n2 = hello::encode_retry_hello(&params, &mine, cookie, &mut ch2)?;
+            t = Transcript::new();
+            t.update(&[MESSAGE_HASH, 0, 0, 32]);
+            t.update(&sha256(ch));
+            t.update(msg);
+            t.update(&ch2[..n2]);
+            self.consume(n);
+            self.require_boundary()?;
+            self.rl.write_handshake(&ch2[..n2])?;
+            self.rl.get_mut().flush().map_err(|e| Error::Io(e.kind()))?;
+            p256_secret = Some(secret);
+            n = self.read_message(hello::SERVER_HELLO, MAX_SERVER_HELLO)?;
+        }
+        let msg = &self.hs[self.hs_pos..self.hs_pos + n];
+        let mut shared = match &mut p256_secret {
+            None => x25519::shared_secret(scalar, &hello::parse_server_hello(msg, session_id)?.x25519_public).map_err(|_| Error::KeyExchange)?,
+            Some(secret) => {
+                let peer = hello::parse_server_hello_p256(msg, session_id);
+                let r = peer.map_err(Error::from).and_then(|peer| ecc::p256_shared(secret, &peer).map_err(|_| Error::KeyExchange));
+                wipe(secret);
+                r?
+            }
+        };
         t.update(msg);
         self.consume(n);
         self.require_boundary()?;
-        let mut shared = x25519::shared_secret(scalar, &sh.x25519_public).map_err(|_| Error::KeyExchange)?;
         let hs_secret = HandshakeSecret::from_ecdhe(&shared);
         wipe(&mut shared);
         let hello_hash = t.hash();
@@ -1256,7 +1291,8 @@ mod tests {
         };
         let good_key = x25519::public_key(&[5; 32]);
         let cases: Vec<(Vec<u8>, Error, u8)> = vec![
-            (sh(hello::HELLO_RETRY_REQUEST_RANDOM, &sid, 0x1301, good_key), Error::Hello(HelloError::HelloRetryRequest), 47),
+            // A retry must name only a group: a whole key share in it is malformed.
+            (sh(hello::HELLO_RETRY_REQUEST_RANDOM, &sid, 0x1301, good_key), Error::Hello(HelloError::BadLength), 47),
             (sh([1; 32], &[9; 32], 0x1301, good_key), Error::Hello(HelloError::SessionIdMismatch), 47),
             (sh([1; 32], &sid, 0x1302, good_key), Error::Hello(HelloError::UnsupportedCipher), 47),
             (sh([1; 32], &sid, 0x1301, [0; 32]), Error::KeyExchange, 47),
