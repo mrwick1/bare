@@ -589,6 +589,7 @@ pub(crate) fn lazy_key<E: Eng>(d: &Dom<E>, it: &mut E::Vm, owner: E::Obj, key: &
     crate::browser_basics::define(d, it, key)?;
     if crate::browser::define_window(d,it,key)? || crate::browser_cssom::define(d,it,key)? { return Ok(()); }
     if crate::browser_svg::define(d,it,key)? || crate::browser_shims::define(d,it,key)? { return Ok(()); }
+    if crate::browser_web::define_sw(d,it,key)? { return Ok(()); }
     match key {
         "write" => {d.def_method_s(it,d.p().document,"write",1,crate::browser_loader::document_write)?; return Ok(());},
         "writeln" => {d.def_method_s(it,d.p().document,"writeln",1,crate::browser_loader::document_writeln)?; return Ok(());},
