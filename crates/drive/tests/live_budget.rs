@@ -14,7 +14,6 @@ fn route(_: &str, _: &str, _: &str, _: Option<&str>) -> (u16, &'static str, Vec<
 }
 
 #[test]
-#[ignore = "vex: the page stops at 20740 tasks on Limit(Host(dom-events))"]
 fn a_live_page_runs_more_tasks_than_one_page_load_may() {
     let origin = common::serve_route(route);
     let (n, stopped) = std::thread::Builder::new()
