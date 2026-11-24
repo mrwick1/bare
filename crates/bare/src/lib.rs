@@ -345,6 +345,8 @@ mod browser_steps_tests;
 
 #[cfg(test)]
 mod browser_basics_tests;
+#[cfg(test)]
+mod browser_window_close_tests;
 
 #[cfg(test)] mod browser_domexception_tests;
 
