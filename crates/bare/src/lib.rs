@@ -161,6 +161,7 @@ mod browser_platform_class;
 mod browser_platform_query;
 mod browser_scheduler;
 mod browser_worker;
+mod browser_broadcast;
 mod browser_perf;
 mod browser_html;
 mod browser_html_members;
@@ -347,6 +348,8 @@ mod browser_steps_tests;
 mod browser_basics_tests;
 #[cfg(test)]
 mod browser_window_close_tests;
+#[cfg(test)]
+mod browser_broadcast_tests;
 
 #[cfg(test)] mod browser_domexception_tests;
 
