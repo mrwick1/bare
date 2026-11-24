@@ -750,12 +750,28 @@ impl Realm {
         Str::from_str(&mut self.heap, s).expect("memory").value()
     }
 
-    /// The text of a string (a rope is flattened).
+    /// The text of a string. A rope is read in place.
     pub fn text(&self, s: Str) -> String {
         match s.resolve().chars() {
             Some(Chars::One(b)) => b.iter().map(|&c| c as char).collect(),
             Some(Chars::Two(u)) => String::from_utf16_lossy(u),
-            None => "<rope>".into(),
+            // A rope that is not flattened: read its leaves left to right. The heap does not change.
+            None => {
+                let mut units: Vec<u16> = Vec::with_capacity(s.len());
+                let mut stack = vec![s];
+                while let Some(n) = stack.pop() {
+                    let n = n.resolve();
+                    match n.chars() {
+                        Some(c) => units.extend(c.units()),
+                        None => {
+                            let [l, r] = n.children();
+                            stack.extend(r);
+                            stack.extend(l);
+                        }
+                    }
+                }
+                String::from_utf16_lossy(&units)
+            }
         }
     }
 
