@@ -1,6 +1,7 @@
 //! `::before` and `::after` boxes as scripts see them: they size their element, a point on them hits the element, and the DOM and
 //! `innerText` do not hold them.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use bare_html::tree;
 use crate::js_limits::EvalLimits;

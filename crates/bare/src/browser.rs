@@ -176,11 +176,6 @@ impl<K: SlotKey, V> IdTab<K, V> {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
-    /// The length of the directory and the number of pages that exist.
-    #[cfg(test)]
-    pub fn size(&self) -> (usize, usize) {
-        (self.pages.len(), self.pages.iter().flatten().count())
-    }
     pub fn get(&self, k: &K) -> Option<&V> {
         if !K::DENSE {
             return self.sparse.get(k);

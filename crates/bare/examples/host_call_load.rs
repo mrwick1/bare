@@ -1,8 +1,9 @@
 //! Scratch: the cost of one host call. `host_call_load MODE N`, MODE: nop, get, has, match, hcn, isc, dom (getAttribute on a fresh element's `parentNode`).
+use bare::eng_new::Peek;
 use bare::browser::*;
 use bare_html::tree;
-use bare_js::eval::*;
-use bare_js::heap::HeapLimits;
+use bare::js_limits::*;
+use bare::js_limits::HeapLimits;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

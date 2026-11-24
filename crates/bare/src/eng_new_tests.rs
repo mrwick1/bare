@@ -100,28 +100,6 @@ fn supplies_host_filled_properties() {
 }
 
 #[test]
-fn uses_the_same_element_tags_as_the_old_engine() {
-    with_browser(|b| {
-        use crate::eng_old::Old;
-        let mut old = Browser::<Old>::make(
-            bare_html::tree::parse("<!doctype html>"),
-            BrowserLimits::default(),
-            Default::default(),
-            Default::default(),
-        ).unwrap();
-        for (source, expected) in [
-            ("String(document.createElement('div'))", "[object HTMLElement]"),
-            ("HTMLDivElement; String(document.createElement('div'))", "[object HTMLDivElement]"),
-        ] {
-            let old_value = old.run_script(source).unwrap();
-            assert_eq!(old.it.display_o(old_value), expected);
-            let new_value = js(b, source);
-            assert_eq!(b.it.display_o(new_value), expected);
-        }
-    });
-}
-
-#[test]
 fn counts_reclaimed_cells_and_honors_extra_roots() {
     with_browser(|b| {
         b.collect(&[]).unwrap();
@@ -182,7 +160,6 @@ fn a_virtual_session_uses_its_clock_for_date_without_replay() {
             </script>
         "#));
         let mut cfg = SessionConfig::new(&server.url("/"));
-        cfg.vex = true;
         cfg.virtual_clock = true;
         cfg.page.quiet = std::time::Duration::from_millis(100);
         let mut session = Session::new(cfg);

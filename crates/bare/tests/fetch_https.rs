@@ -9,9 +9,10 @@ mod harness;
 
 use bare::browser::*;
 use bare::browser_fetch::*;
+use bare::eng_new::Peek;
 use bare_html::tree;
-use bare_js::eval::EvalLimits;
-use bare_js::heap::HeapLimits;
+use bare::js_limits::EvalLimits;
+use bare::js_limits::HeapLimits;
 use bare_net::http::Client;
 use bare_tls::trust_store;
 use harness::{Pki, Server, openssl_available};

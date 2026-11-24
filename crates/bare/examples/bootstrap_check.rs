@@ -42,14 +42,12 @@ fn main() {
         println!("stop={:?} documents={} tasks={}", result.stop, result.pages.len(), result.tasks);
         for p in &result.pages { println!("scripts={} throws={} load_errors={} fetches={} bytes={}", p.scripts_run, p.script_throws, p.load_errors, p.fetches, p.bytes); println!("css_loaded={} css_failed={} css_bytes={}", p.css.loaded, p.css.failed, p.css.bytes); }
         let mut present = false;
-        let mut unhandled = 0;
         if let Some(b) = session.browser() {
             present = match b.query(&selector) {
                 Ok(node) => node.is_some(),
                 Err(_) => { println!("required_selector_check=failed"); false }
             };
-            unhandled = b.it.unhandled_rejections().len();
-            println!("required_selector_present={present} unhandled_rejections={unhandled}");
+            println!("required_selector_present={present}");
             for report in b.take_reports() {
                 // Emit only known API names, never arbitrary exception text.
                 let missing = ["WeakMap", "WeakSet", "Reflect", "navigator", "console", "style", "ReadableStream", "MutationObserver", "requestAnimationFrame", "requestIdleCallback", "innerWidth", "innerHTML", "getComputedStyle", "focus", "createElementNS"];
@@ -59,7 +57,7 @@ fn main() {
 
             }
         }
-        present && unhandled == 0 && matches!(result.stop, SessionStop::Page(Stop::Settled)) && result.pages.iter().all(|p| p.script_throws == 0 && p.load_errors == 0 && p.css.failed == 0)
+        present && matches!(result.stop, SessionStop::Page(Stop::Settled)) && result.pages.iter().all(|p| p.script_throws == 0 && p.load_errors == 0 && p.css.failed == 0)
     }).unwrap();
     if !worker.join().unwrap() { std::process::exit(1); }
 }

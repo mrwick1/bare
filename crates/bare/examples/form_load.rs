@@ -15,10 +15,11 @@
 //! canceled (one event, one navigation request) and at one whose submit is canceled (no request). Counts are checked, and
 //! the realm stays usable. Prints time, CPU, peak RSS and what the realm holds. `tools/js/form_load.sh` runs the matrix.
 
+use bare::eng_new::Peek;
 use bare::browser::*;
 use bare_html::tree;
-use bare_js::eval::*;
-use bare_js::heap::HeapLimits;
+use bare::js_limits::*;
+use bare::js_limits::HeapLimits;
 use std::time::Instant;
 
 fn die(msg: String) -> ! {
@@ -77,7 +78,7 @@ fn kind(blk: usize, k: usize) -> Kind {
 fn exec(name: &str, scale: usize) {
     let forms: String = (0..FORMS).map(|i| format!("<form id=f{i} novalidate><button id=b{i}>x</button></form>")).collect();
     let doc = tree::parse(&format!("<body>{forms}<div id=w></div></body>"));
-    let eval = EvalLimits { max_steps: u64::MAX / 2, max_scripts: 1 << 14, max_envs: 1 << 22, max_functions: 1 << 22, ..Default::default() };
+    let eval = EvalLimits { max_steps: u64::MAX / 2, ..Default::default() };
     let mut b = Browser::new(doc, BrowserLimits::default(), eval, HeapLimits::default()).unwrap_or_else(|e| die(format!("browser: {e:?}")));
     b.set_document_url("http://form.test/p").unwrap_or_else(|e| die(format!("url: {e:?}")));
     let cpu0 = cpu_ms();

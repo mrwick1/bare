@@ -13,10 +13,11 @@
 //! result against the same computation in Rust. Prints time, CPU, peak RSS, allocations and what the realm holds.
 //! `tools/js/browser_load.sh` runs the matrix under caps.
 
+use bare::eng_new::Peek;
 use bare::browser::*;
 use bare_html::tree;
-use bare_js::eval::*;
-use bare_js::heap::HeapLimits;
+use bare::js_limits::*;
+use bare::js_limits::HeapLimits;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::time::Instant;
@@ -111,7 +112,7 @@ fn page(name: &str, scale: usize) -> String {
 }
 
 fn exec(name: &str, scale: usize) {
-    let eval = EvalLimits { max_steps: u64::MAX / 2, max_scripts: 1 << 14, max_envs: 1 << 22, max_functions: 1 << 22, ..Default::default() };
+    let eval = EvalLimits { max_steps: u64::MAX / 2, ..Default::default() };
     let tp = Instant::now();
     let doc = tree::parse(&page(name, scale));
     let parse_ms = tp.elapsed().as_secs_f64() * 1e3;
@@ -298,9 +299,8 @@ fn exec(name: &str, scale: usize) {
     let cpu = cpu_ms() - cpu0;
     let (allocs, abytes, peak_live) = (ALLOCS.load(Relaxed) - a0, BYTES.load(Relaxed) - b0, PEAK.load(Relaxed));
     let st = b.stats();
-    let code = b.it.stats();
     println!(
-        "{name:8} x{scale:<3} checksum=ok parse={parse_ms:.1}ms run={run_ms:9.1}ms cpu={cpu}ms peak_rss={:.1}MiB peak_live={:.1}MiB live_after={:.1}MiB allocs={allocs} alloc={:.1}MiB | wrappers={} listeners={} events={} nodes={} text={:.2}MiB | gc={gc_ms:.1}ms freed_objs={freed_objs} scripts={} source_bytes={} code_nodes={}",
+        "{name:8} x{scale:<3} checksum=ok parse={parse_ms:.1}ms run={run_ms:9.1}ms cpu={cpu}ms peak_rss={:.1}MiB peak_live={:.1}MiB live_after={:.1}MiB allocs={allocs} alloc={:.1}MiB | wrappers={} listeners={} events={} nodes={} text={:.2}MiB | gc={gc_ms:.1}ms freed_objs={freed_objs}",
         status_kib("VmHWM:") as f64 / 1024.0,
         peak_live as f64 / 1048576.0,
         LIVE.load(Relaxed) as f64 / 1048576.0,
@@ -310,9 +310,6 @@ fn exec(name: &str, scale: usize) {
         st.events,
         st.nodes,
         st.text_bytes as f64 / 1048576.0,
-        code.scripts,
-        code.script_source,
-        code.script_nodes,
     );
 }
 

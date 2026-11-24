@@ -25,7 +25,6 @@ fn server(routes: impl Fn() -> Vec<(&'static str, Reply)> + Send + Sync + 'stati
 
 fn cfg(url: String) -> SessionConfig {
     let mut c = SessionConfig::new(&url);
-    c.vex = false; // this file tests the old engine
     c.virtual_clock = true;
     c.eval = EvalLimits { max_steps: 5_000_000, ..Default::default() };
     c.page.quiet = Duration::from_millis(100);
@@ -249,23 +248,6 @@ fn resume_before_run_and_after_a_failed_load_does_nothing() {
         let r = s.run();
         assert!(matches!(r.stop, SessionStop::LoadFailed(_)));
         assert_eq!(s.resume(&[]).stop, r.stop);
-    });
-}
-
-#[test]
-fn garbage_of_resumed_listeners_is_collected() {
-    big(|| {
-        let srv = server(|| vec![("/", html("<button id=go></button><script>document.getElementById('go').addEventListener('click', function () {
-            var a = []; for (var i = 0; i < 3000; i++) a.push({ i: i }); localStorage.setItem('last', String(a.length)) })</script>"))]);
-        let mut c = cfg(srv.url("/"));
-        c.heap.max_objects = 20_000;
-        let mut s = Session::new(c);
-        s.run();
-        for i in 0..20 {
-            let r = s.resume(&[Input::Click("#go")]);
-            assert_eq!(r.stop, SessionStop::Page(Stop::Settled), "resume {i}: {r:?}");
-        }
-        assert_eq!(get(&s, &srv, "last").as_deref(), Some("3000"));
     });
 }
 

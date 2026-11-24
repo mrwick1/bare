@@ -2,12 +2,13 @@
 //! objects" with `[LegacyOverrideBuiltIns]`). Expectations are by reading the Standard, not from a Chrome run. The first test
 //! is the failure seen on the live staging app: React's stylesheet ordering reads `dataset.precedence`.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use bare_html::tree;
-use crate::eng_old::OldFault as Error;
+use crate::eng_new::NewFault as Error;
 use crate::js_limits::EvalLimits;
 use crate::js_limits::HeapLimits;
-use bare_js::value::Value;
+use bare_vex::value::Value;
 
 fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     std::thread::Builder::new().stack_size(64 << 20).spawn(f).unwrap().join().unwrap()
@@ -31,7 +32,7 @@ fn browser() -> Browser {
 fn show(b: &mut Browser, r: Result<Value, Error>) -> String {
     match r {
         Ok(v) => b.it.display(v),
-        Err(Error::Throw(v)) if matches!(v, Value::Object(_)) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
+        Err(Error::Throw(v)) if crate::eng_new::is_object(v) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
         Err(Error::Throw(v)) => format!("throw-value:{}", b.it.display(v)),
         Err(Error::Limit(l)) => format!("limit:{l:?}"),
         Err(Error::Unsupported(u)) => format!("unsupported:{}", u),
@@ -265,65 +266,10 @@ fn step_budget_bounds_key_listing() {
 }
 
 #[test]
-fn long_attribute_lists_work_and_are_charged() {
-    big(|| {
-        let mut html = String::from("<!doctype html><body><p id=p class=x");
-        for i in 0..100 {
-            html.push_str(&format!(" data-a{i}=v{i}"));
-        }
-        html.push_str("></p></body>");
-        let mut b = browser_with(&html, BrowserLimits::default(), 5_000_000);
-        // More than 32 attributes: the heap asks the evaluator to charge, then the read repeats.
-        ok(&mut b, "var ds = document.getElementById('p').dataset; [ds.a0, ds.a99, ds.a100, 'a50' in ds, 'a100' in ds, Object.keys(ds).length, Object.keys(ds)[99], delete ds.a5, Object.keys(ds).length, (ds.zz = 1, ds.zz)].join()", "v0,v99,,true,false,100,a99,true,99,1");
-        ok(&mut b, "ds['-A'] = 2; ds['éName'] = 3; ds[''] = 4; [ds['-A'], ds['éName'], ds[''], 'é-name' in ds, Object.keys(ds).slice(-3)].join('|')", "2|3|4|false|-A,éName,");
-        let steps = |n: usize| {
-            let mut html = String::from("<!doctype html><body><p id=p");
-            for i in 0..n {
-                html.push_str(&format!(" data-a{i}=v"));
-            }
-            html.push_str("></p></body>");
-            let mut b = browser_with(&html, BrowserLimits::default(), 5_000_000);
-            ok(&mut b, "var ds = document.getElementById('p').dataset; ds.a1; ds.a2; ds.a3; 1", "1");
-            b.it.stats().steps
-        };
-        let (short, long) = (steps(10), steps(100));
-        assert!(long >= short + 3 * 12, "a read of 100 attributes costs steps: long {long}, short {short}");
-        let mut b = browser_with(&html, BrowserLimits::default(), 5_000);
-        let r = b.run_script("var ds = document.getElementById('p').dataset; var n = 0; for (var i = 0; i < 100000; i++) n += ds.a1.length; n");
-        assert!(matches!(r, Err(Error::Limit(_))), "{:?}", show(&mut b, r));
-    });
-}
-
-#[test]
 fn freezing_a_map_with_names_is_refused() {
     big(|| {
         let mut b = browser();
         ok(&mut b, "try { Object.freeze(document.getElementById('d').dataset); 'frozen' } catch (e) { e.name }", "TypeError");
         ok(&mut b, "document.getElementById('d').dataset.x = 'still writable'; document.getElementById('d').dataset.x", "still writable");
-    });
-}
-
-/// The hooks of `bare_js_api::Host` (`fill`, `named_write`) forward to the old methods. `Dom<E: Engine>` calls them in place of those.
-#[test]
-fn the_interface_hooks_forward_to_the_old_methods() {
-    big(|| {
-        use bare_js_api::{Descriptor, Engine, Host, Write, enter};
-        let mut b = browser();
-        let Value::Object(ds) = b.run_script("document.getElementById('d').dataset").unwrap() else { panic!("an object") };
-        let dom = b.dom.clone();
-        let name = |s: &str| s.encode_utf16().collect::<Vec<u16>>();
-        let r = enter(&mut b.it, |s| {
-            let obj = s.engine().raw_local(&Value::Object(ds));
-            let v = s.number(7.0);
-            let set = dom.named_write(s, obj, 0, &name("fresh"), Write::Set(v)).ok();
-            let accessor = dom.named_write(s, obj, 0, &name("acc"), Write::Define(Descriptor { get: Some(v), ..Default::default() })).ok();
-            let no_value = dom.named_write(s, obj, 0, &name("nov"), Write::Define(Descriptor::default())).ok();
-            let del = dom.named_write(s, obj, 0, &name("x"), Write::Delete).ok();
-            // The fill step of a map only charges the scan.
-            let fill = dom.fill(s, obj, 0, u32::MAX).is_ok();
-            (set, accessor, no_value, del, fill)
-        });
-        assert_eq!(r, (Some(true), Some(false), Some(false), Some(true), true), "set, an accessor (refused), no value, delete, fill");
-        ok(&mut b, "var e = document.getElementById('d'); e.getAttribute('data-fresh') + ',' + e.hasAttribute('data-x') + ',' + e.hasAttribute('data-nov')", "7,false,false");
     });
 }

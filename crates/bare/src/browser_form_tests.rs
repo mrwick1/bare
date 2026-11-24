@@ -2,15 +2,16 @@
 //! activation and `SubmitEvent`. Real scripts run in a real realm over a real `Document`. Expectations are written by hand
 //! from the HTML and DOM Standards (no Node DOM oracle, nothing compared with Chrome). Each test runs on a big stack.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use crate::browser_loader::{Input, Stop};
 use crate::browser_session::*;
 use crate::resources::test_server::{Reply, serve};
 use bare_html::tree;
-use crate::eng_old::OldFault as Error;
+use crate::eng_new::NewFault as Error;
 use crate::js_limits::{EvalLimits, LimitKind};
 use crate::js_limits::HeapLimits;
-use bare_js::value::Value;
+use bare_vex::value::Value;
 use std::time::Duration;
 
 fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
@@ -29,7 +30,7 @@ fn page(body: &str) -> Browser {
 fn show(b: &mut Browser, r: Result<Value, Error>) -> String {
     match r {
         Ok(v) => b.it.display(v),
-        Err(Error::Throw(v)) if matches!(v, Value::Object(_)) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
+        Err(Error::Throw(v)) if crate::eng_new::is_object(v) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
         Err(Error::Throw(v)) => format!("throw-value:{}", b.it.display(v)),
         Err(Error::Limit(l)) => format!("limit:{l:?}"),
         Err(Error::Unsupported(u)) => format!("unsupported:{}", u),

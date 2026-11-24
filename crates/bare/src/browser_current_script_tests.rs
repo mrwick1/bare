@@ -2,6 +2,7 @@
 //! running script"): promise jobs that a classic script queued see the script element. A module script, a timer and a
 //! later task see `null`.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use crate::browser_fetch::{FetchConfig, FetchLimits};
 use crate::browser_loader::*;

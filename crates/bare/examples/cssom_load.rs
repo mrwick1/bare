@@ -12,10 +12,11 @@
 //! checksum is a sum that the script and a model in Rust compute separately (a model written from the CSSOM rules, not a copy
 //! of the engine). Prints time, CPU, peak RSS and what the realm holds.
 
+use bare::eng_new::Peek;
 use bare::browser::*;
 use bare_html::tree;
-use bare_js::eval::*;
-use bare_js::heap::HeapLimits;
+use bare::js_limits::*;
+use bare::js_limits::HeapLimits;
 use std::time::Instant;
 
 fn die(msg: String) -> ! {
@@ -58,7 +59,7 @@ fn page() -> String {
 }
 
 fn exec(name: &str, scale: usize) {
-    let eval = EvalLimits { max_steps: u64::MAX / 2, max_scripts: 1 << 14, max_envs: 1 << 22, max_functions: 1 << 22, ..Default::default() };
+    let eval = EvalLimits { max_steps: u64::MAX / 2, ..Default::default() };
     let mut b = Browser::new(tree::parse(&page()), BrowserLimits::default(), eval, HeapLimits::default()).unwrap_or_else(|e| die(format!("browser: {e:?}")));
     let (mut gc_ms, mut freed) = (0.0, 0);
     let mut collect = |b: &mut Browser| {

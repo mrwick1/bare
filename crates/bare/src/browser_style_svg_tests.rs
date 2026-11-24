@@ -1,6 +1,7 @@
 //! Tests of the SVG stroke dash properties on `style` (`stroke-dasharray`, `stroke-dashoffset`): React sets them with
 //! `el.style.strokeDasharray = ...`, and the painter reads them from the `style` attribute (`bare_paint::svg`).
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use bare_html::tree;
 use crate::js_limits::EvalLimits;

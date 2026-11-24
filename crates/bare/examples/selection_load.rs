@@ -12,10 +12,11 @@
 //! which is compared with `Browser::input_selection` after every batch (no JS read). Batches of 500 run through
 //! a pump of at most 256 tasks and a `collect`. At the end no task, event or wrapper of a batch is left.
 
+use bare::eng_new::Peek;
 use bare::browser::*;
 use bare_html::tree;
-use bare_js::eval::*;
-use bare_js::heap::HeapLimits;
+use bare::js_limits::*;
+use bare::js_limits::HeapLimits;
 use std::time::Instant;
 
 fn die(msg: String) -> ! {
@@ -122,7 +123,7 @@ fn exec(name: &str, scale: usize) {
         js_vals.push(format!("'{}'", lit.repeat(reps)));
         lens.push(n1 * reps as u32);
     }
-    let eval = EvalLimits { max_steps: u64::MAX / 2, max_scripts: 1 << 14, max_envs: 1 << 22, max_functions: 1 << 22, ..Default::default() };
+    let eval = EvalLimits { max_steps: u64::MAX / 2, ..Default::default() };
     let mut b = Browser::new(tree::parse("<body></body>"), BrowserLimits::default(), eval, HeapLimits::default()).unwrap_or_else(|e| die(format!("browser: {e:?}")));
     b.use_virtual_clock();
     run(

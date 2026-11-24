@@ -11,10 +11,11 @@
 //! that the queues and the port and event metadata are empty after the last collect. Prints time, CPU, peak RSS,
 //! allocations and the realm counters. `tools/js/scheduler_load.sh` runs the matrix under caps.
 
+use bare::eng_new::Peek;
 use bare::browser::*;
 use bare_html::tree;
-use bare_js::eval::*;
-use bare_js::heap::HeapLimits;
+use bare::js_limits::*;
+use bare::js_limits::HeapLimits;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::time::Instant;
@@ -95,7 +96,7 @@ const BATCH: usize = 500;
 const PUMP: usize = 256;
 
 fn exec(name: &str, scale: usize) {
-    let eval = EvalLimits { max_steps: u64::MAX / 2, max_scripts: 1 << 14, max_envs: 1 << 22, max_functions: 1 << 22, ..Default::default() };
+    let eval = EvalLimits { max_steps: u64::MAX / 2, ..Default::default() };
     let mut b = Browser::new(tree::parse("<body></body>"), BrowserLimits::default(), eval, HeapLimits::default()).unwrap_or_else(|e| die(format!("browser: {e:?}")));
     b.use_virtual_clock();
     let (a0, b0, cpu0) = (ALLOCS.load(Relaxed), BYTES.load(Relaxed), cpu_ms());

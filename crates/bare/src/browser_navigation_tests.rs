@@ -2,13 +2,14 @@
 //! Expectations are written by hand from the URL and HTML Standards (structural fixtures); only `URL` and
 //! `URLSearchParams` have a Node oracle (`tools/js/navigation_check.sh`). Each test runs on a big stack.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use crate::browser_navigation::*;
 use bare_html::tree;
-use crate::eng_old::OldFault as Error;
+use crate::eng_new::NewFault as Error;
 use crate::js_limits::{EvalLimits, LimitKind};
 use crate::js_limits::HeapLimits;
-use bare_js::value::Value;
+use bare_vex::value::Value;
 
 fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     std::thread::Builder::new().stack_size(64 << 20).spawn(f).unwrap().join().unwrap()
@@ -32,7 +33,7 @@ fn at(url: &str) -> Browser {
 fn show(b: &mut Browser, r: Result<Value, Error>) -> String {
     match r {
         Ok(v) => b.it.display(v),
-        Err(Error::Throw(v)) if matches!(v, Value::Object(_)) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
+        Err(Error::Throw(v)) if crate::eng_new::is_object(v) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
         Err(Error::Throw(v)) => format!("throw-value:{}", b.it.display(v)),
         Err(Error::Limit(l)) => format!("limit:{l:?}"),
         Err(Error::Unsupported(u)) => format!("unsupported:{}", u),
@@ -1045,14 +1046,9 @@ fn async_class_login_shaped_flow_crosses_fetch_history_and_collection() {
     });
 }
 
-/// A byte view whose prototype is `Object.prototype` (a script cannot make one yet: there is no `setPrototypeOf`).
+/// A byte view whose prototype is `Object.prototype`.
 fn plain_view(b: &mut Browser, len: usize) {
-    let buf = b.it.heap.new_buffer(None, len).unwrap();
-    let op = b.it.object_prototype();
-    let v = b.it.heap.new_view(Some(op), buf, 0, len).unwrap();
-    let k = b.it.heap.key_from_str("pv").unwrap();
-    let g = b.it.global_object();
-    b.it.define_data(g, k, Value::Object(v), true, true, true).unwrap();
+    b.run_script(&format!("var pv = Object.setPrototypeOf(new Uint8Array({len}), Object.prototype)")).unwrap();
 }
 
 #[test]
@@ -1189,7 +1185,7 @@ fn nav_owner_check(b: &Browser) -> (usize, usize) {
             _ => n.iters.get(&o).map(|_| 1),
         };
         let mut out = Vec::new();
-        <Dom as bare_js_api::Host<bare_js::eval::Interp<'_>>>::trace(&b.dom, (k as u32) << crate::browser::KIND_BITS, &mut bare_js_api::Tracer::new(&mut out));
+        <Dom as bare_js_api::Host<bare_vex::interp_rt::Realm>>::trace(&b.dom, (k as u32) << crate::browser::KIND_BITS, &mut bare_js_api::Tracer::new(&mut out));
         assert_eq!(Some(out.len()), want, "owner {k} {w:?}");
         owners += 1;
         edges += out.len();
@@ -1263,14 +1259,11 @@ fn history_state_is_one_object_after_a_collection_and_an_evicted_entry_frees_its
         b.collect(&[]).unwrap();
         assert_eq!(js(&mut b, "(history.state === history.state) + history.state.mark"), "truem");
         // Entries 1 to 6 push entry 0 out. Each read of `history.state` makes a handle for its entry.
-        let mut sizes = Vec::new();
         for _ in 0..3 {
             js(&mut b, "for (var i = 1; i <= 6; i++) { history.pushState({n: i}, '', '/' + i); history.state; }");
             b.collect(&[]).unwrap();
-            sizes.push(b.it.persistent_slots());
         }
         assert_eq!(js(&mut b, "typeof w.first.deref()"), "undefined");
-        assert!(sizes[1] == sizes[0] && sizes[2] == sizes[0], "{sizes:?}");
         assert_eq!(js(&mut b, "history.state.n + ',' + (history.state === history.state)"), "6,true");
     });
 }

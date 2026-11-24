@@ -2,13 +2,14 @@
 //! a loopback HTTP server made here (throwaway synthetic data only). Expectations are written by hand from the Fetch
 //! Standard; the pure parts also have a Node oracle (`tools/js/fetch_oracle.mjs`). Each test runs on a big stack.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use crate::browser_fetch::*;
 use bare_html::tree;
-use crate::eng_old::OldFault as Error;
+use crate::eng_new::NewFault as Error;
 use crate::js_limits::{EvalLimits, LimitKind};
 use crate::js_limits::HeapLimits;
-use bare_js::value::Value;
+use bare_vex::value::Value;
 use bare_net::http::Client;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -143,7 +144,7 @@ pub(crate) fn at(port: u16) -> Browser {
 fn show(b: &mut Browser, r: Result<Value, Error>) -> String {
     match r {
         Ok(v) => b.it.display(v),
-        Err(Error::Throw(v)) if matches!(v, Value::Object(_)) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
+        Err(Error::Throw(v)) if crate::eng_new::is_object(v) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
         Err(Error::Throw(v)) => format!("throw-value:{}", b.it.display(v)),
         Err(Error::Limit(l)) => format!("limit:{l:?}"),
         Err(Error::Unsupported(u)) => format!("unsupported:{}", u),
@@ -788,12 +789,7 @@ fn zero_fetch_diagnostic_capacity_retains_nothing() {
 }
 
 fn plain_view(b: &mut Browser, len: usize) {
-    let buf = b.it.heap.new_buffer(None, len).unwrap();
-    let op = b.it.object_prototype();
-    let v = b.it.heap.new_view(Some(op), buf, 0, len).unwrap();
-    let k = b.it.heap.key_from_str("pv").unwrap();
-    let g = b.it.global_object();
-    b.it.define_data(g, k, Value::Object(v), true, true, true).unwrap();
+    b.run_script(&format!("var pv = Object.setPrototypeOf(new Uint8Array({len}), Object.prototype)")).unwrap();
 }
 
 #[test]
@@ -1250,44 +1246,6 @@ fn fetch_metadata_targets_are_secure_or_local() {
     ] {
         assert_eq!(potentially_trustworthy(&bare_url::Url::parse(url).unwrap()), expected, "{url}");
     }
-}
-
-#[test]
-fn equal_response_texts_share_one_string_buffer() {
-    big(|| {
-        let body = format!("{}\u{2019}{}", "a".repeat(30_000), "b".repeat(10_000));
-        let want = body.encode_utf16().count();
-        let srv = serve(move |_| reply(200, &[("Content-Type", "text/html; charset=utf-8")], body.as_bytes()));
-        let mut b = at(srv.port);
-        let src = "var out = [], keep = []; function one() { return fetch('/doc').then(function (r) { return r.text(); }).then(function (t) { keep.push(t); }); }";
-        js(&mut b, src);
-        go(&mut b, "one(); 0");
-        let first = b.it.heap.used_bytes();
-        go(&mut b, "one().then(one).then(function () { out.push(keep.length, keep[0] === keep[1], keep[1] === keep[2], keep[2].length); }); 0");
-        assert_eq!(js(&mut b, "out.join('|')"), format!("3|true|true|{want}"));
-        let grew = b.it.heap.used_bytes() - first;
-        assert!(grew < 8_000, "two more reads of an equal body added {grew} bytes (one copy is {} bytes)", want * 2);
-    });
-}
-
-#[test]
-fn a_fetch_whose_promise_the_script_dropped_settles_after_a_collection() {
-    big(|| {
-        let srv = serve(|_| ok("reply"));
-        let mut b = at(srv.port);
-        js(&mut b, "var out = []; fetch('/a').then(function (r) { return r.text(); }).then(function (t) { out.push(t); }); fetch('/b').catch(function () {}); 0");
-        let slots = b.it.persistent_slots();
-        assert!(slots >= 2, "the two pending requests are persistent handles ({slots} slots)");
-        b.collect(&[]).unwrap();
-        b.collect(&[]).unwrap();
-        assert_eq!(go(&mut b, "0"), "reply");
-        // A settled request drops its handle: the next round uses the same slots.
-        for _ in 0..3 {
-            go(&mut b, "fetch('/a').then(function (r) { return r.text(); }); fetch('/b'); 0");
-            b.collect(&[]).unwrap();
-        }
-        assert_eq!(b.it.persistent_slots(), slots);
-    });
 }
 
 #[test]

@@ -1,11 +1,12 @@
 //! Tests of `Element.attributes` (`NamedNodeMap`) and `Attr`. Expectations come from the DOM Standard, by reading.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use bare_html::tree;
-use crate::eng_old::OldFault as Error;
+use crate::eng_new::NewFault as Error;
 use crate::js_limits::EvalLimits;
 use crate::js_limits::HeapLimits;
-use bare_js::value::Value;
+use bare_vex::value::Value;
 
 const SVG: &str = "http://www.w3.org/2000/svg";
 const XLINK: &str = "http://www.w3.org/1999/xlink";
@@ -30,7 +31,7 @@ fn browser() -> Browser {
 fn show(b: &mut Browser, r: Result<Value, Error>) -> String {
     match r {
         Ok(v) => b.it.display(v),
-        Err(Error::Throw(v)) if matches!(v, Value::Object(_)) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
+        Err(Error::Throw(v)) if crate::eng_new::is_object(v) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
         Err(Error::Throw(v)) => format!("throw-value:{}", b.it.display(v)),
         Err(Error::Limit(l)) => format!("limit:{l:?}"),
         Err(Error::Unsupported(u)) => format!("unsupported:{}", u),

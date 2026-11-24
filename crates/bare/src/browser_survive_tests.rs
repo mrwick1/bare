@@ -2,6 +2,7 @@
 //! the DOM stays, one console error says what happened, and later tasks and input still run. A page budget bounds the aborts.
 //! Each test runs on a big stack. The fixtures are loopback pages; the probe is `localStorage`.
 
+use crate::eng_new::Peek;
 use crate::browser_console::ConsoleLevel;
 use crate::browser_loader::*;
 use crate::browser_session::*;
@@ -19,7 +20,6 @@ fn page(body: &'static str) -> Server {
 
 fn cfg(srv: &Server) -> SessionConfig {
     let mut c = SessionConfig::new(&srv.url("/"));
-    c.vex = false; // this file tests the old engine
     c.virtual_clock = true;
     c.eval = EvalLimits { max_steps: 2_000_000, ..Default::default() };
     c.page.quiet = Duration::from_millis(100);

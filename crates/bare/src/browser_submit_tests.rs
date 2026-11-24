@@ -1,6 +1,7 @@
 //! Tests of form submission, constraint validation, `maxlength` and the history of documents (`browser_submit.rs`,
 //! `browser_session.rs`, `page.rs`). Expectations come from the HTML Standard. The `GET` and `POST` loads run over a loopback server.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use bare_html::tree;
 use crate::js_limits::EvalLimits;

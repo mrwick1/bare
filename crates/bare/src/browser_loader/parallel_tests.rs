@@ -4,6 +4,7 @@
 //! The tests do not measure time. A wall-clock bound fails on a loaded machine. The server holds a request until the others have come in
 //! (`Meet`), so a loader that sends them one at a time waits for the deadline and the test fails, and a correct loader passes at any speed.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use crate::browser_fetch::FetchLimits;
 use crate::browser_loader::*;

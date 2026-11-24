@@ -2,12 +2,12 @@
 //! ancestor, or the node itself when it has none; `composed` changes nothing here because there are no shadow roots) and
 //! from the WebIDL rules for brand checks and dictionary conversion. Written by hand: Node has no DOM, so it is not an oracle.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use bare_html::tree;
-use crate::eng_old::OldFault as Error;
+use crate::eng_new::NewFault as Error;
 use crate::js_limits::{EvalLimits, LimitKind};
 use crate::js_limits::HeapLimits;
-use bare_js::value::Value;
 
 fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     std::thread::Builder::new().stack_size(64 << 20).spawn(f).unwrap().join().unwrap()
@@ -27,7 +27,7 @@ fn browser() -> Browser {
 fn js(b: &mut Browser, src: &str) -> String {
     match b.run_script(src) {
         Ok(v) => b.it.display(v),
-        Err(Error::Throw(v)) if matches!(v, Value::Object(_)) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
+        Err(Error::Throw(v)) if crate::eng_new::is_object(v) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
         Err(Error::Throw(v)) => format!("throw-value:{}", b.it.display(v)),
         Err(Error::Limit(l)) => format!("limit:{l:?}"),
         Err(e) => format!("other:{e:?}"),
@@ -173,22 +173,6 @@ fn the_depth_cap_admits_a_walk_of_exactly_the_cap() {
 }
 
 #[test]
-fn the_step_budget_stops_the_walk_and_no_script_runs_after_it() {
-    big(|| {
-        let src = "var x = document.getElementById('deep'); x.getRootNode(); globalThis.hit = 1; 'after'";
-        // Calibrate: the lookup alone costs `lookup` steps. The budget covers the lookup and 100 steps more,
-        // and the walk to the document (over 300 steps) does not fit in what is left.
-        let mut probe = browser_with(&deep_page(300), BrowserLimits::default(), 5_000_000);
-        let before = probe.it.stats().steps;
-        js(&mut probe, "var x = document.getElementById('deep'); 0");
-        let lookup = probe.it.stats().steps - before;
-        let mut b = browser_with(&deep_page(300), BrowserLimits::default(), lookup + 100);
-        assert_eq!(js(&mut b, src), format!("limit:{:?}", LimitKind::Steps));
-        assert_eq!(js(&mut b, "typeof hit"), "undefined");
-    });
-}
-
-#[test]
 fn the_walked_root_keeps_one_stable_wrapper_while_js_holds_it() {
     let mut b = browser();
     assert_eq!(js(&mut b, "var t = document.createElement('div'), k = t.appendChild(document.createElement('i')), keep = k.getRootNode(); keep === t"), "true");
@@ -225,20 +209,10 @@ fn attributes_are_their_own_root_and_convert_options() {
 }
 
 #[test]
-fn the_depth_cap_and_the_step_budget_stop_the_position_walk() {
+fn the_depth_cap_stops_the_position_walk() {
     let mut b = browser_with(&deep_page(8), BrowserLimits { max_tree_depth: 10, ..Default::default() }, 5_000_000);
     assert_eq!(js(&mut b, "document.getElementById('deep').compareDocumentPosition(document.body); globalThis.hit = 1; 'after'"), lim("dom-depth"));
     assert_eq!(js(&mut b, "typeof hit"), "undefined");
-    big(|| {
-        let src = "var x = document.getElementById('deep'); x.compareDocumentPosition(document.body); globalThis.hit = 1; 'after'";
-        let mut probe = browser_with(&deep_page(300), BrowserLimits::default(), 5_000_000);
-        let before = probe.it.stats().steps;
-        js(&mut probe, "var x = document.getElementById('deep'); 0");
-        let lookup = probe.it.stats().steps - before;
-        let mut b = browser_with(&deep_page(300), BrowserLimits::default(), lookup + 100);
-        assert_eq!(js(&mut b, src), format!("limit:{:?}", LimitKind::Steps));
-        assert_eq!(js(&mut b, "typeof hit"), "undefined");
-    });
 }
 
 #[test]

@@ -9,6 +9,7 @@
 //! between the key events depends on task timing (Chrome itself puts `selectionchange` before `keyup` in one scenario and after
 //! it in another). Their own tests are in `browser_selection_tests.rs`.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use crate::browser_ui::Mods;
 use crate::page::{Page, Source};

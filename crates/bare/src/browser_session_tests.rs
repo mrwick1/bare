@@ -3,6 +3,7 @@
 //! `fetch`, storage): no test calls a host handler. Each test runs on a big stack. Expectations come from the HTML
 //! Standard where the session follows it, and from the module comment where it does not.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use crate::browser_loader::*;
 use crate::browser_session::*;
@@ -34,7 +35,6 @@ fn server(routes: impl Fn() -> Vec<Route> + Send + Sync + 'static) -> Server {
 
 fn cfg(url: String) -> SessionConfig {
     let mut c = SessionConfig::new(&url);
-    c.vex = false; // this file tests the old engine
     c.virtual_clock = true;
     c.eval = EvalLimits { max_steps: 5_000_000, ..Default::default() };
     c.page.quiet = Duration::from_millis(100);
@@ -494,7 +494,6 @@ fn a_finite_forty_level_walk_completes_in_the_default_session() {
     big(|| {
         let srv = server(|| vec![("/", html(FIBER_WALK))]);
         let mut c = SessionConfig::new(&srv.url("/"));
-        c.vex = false; // this file tests the old engine
         c.virtual_clock = true;
         c.page.quiet = Duration::from_millis(100);
         let mut s = Session::new(c);
@@ -535,7 +534,6 @@ fn a_react_commit_walk_2000_levels_deep_runs_under_the_default_session_limits() 
             </script>";
         let srv = server(move || vec![("/", html(page))]);
         let mut c = SessionConfig::new(&srv.url("/"));
-        c.vex = false; // this file tests the old engine
         c.virtual_clock = true;
         c.page.quiet = Duration::from_millis(100);
         c.eval.max_steps = 50_000_000;

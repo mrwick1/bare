@@ -1,6 +1,7 @@
 //! Tests of the `FileList` global (`browser_web.rs`). Page bundles read `FileList` (for example `x instanceof FileList`) and throw a
 //! `ReferenceError` when it is absent.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use bare_html::tree;
 use crate::js_limits::EvalLimits;

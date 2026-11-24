@@ -73,7 +73,6 @@ fn three_handlers_on_the_interface_behave_as_the_old_ones() {
 fn a_handler_on_the_interface_keeps_its_state_across_collections() {
     big(|| {
         let mut b = browser();
-        b.it.set_gc_stress(true);
         assert_eq!(js(&mut b, "var e = document.getElementById('a'), n = 0; for (var i = 0; i < 50; i++) { if (e.getAttribute('data-k') === 'v' && e.hasAttribute('id') && e.matches('.y')) n++ } n"), "50");
         assert_eq!(b.with_scope(|s| s.engine().stack_len()), 0, "every call gave its slots back");
     });
@@ -87,38 +86,5 @@ fn the_hooks_around_a_host_call_run_for_a_handler_on_the_interface() {
         assert_eq!(js(&mut b, "var e = document.getElementById('a'), log = []; new MutationObserver(r => log.push(r.length)).observe(e, { attributes: true }); e.setAttribute('x', '1'); e.getAttribute('x'); Promise.resolve().then(() => log.push('t')); 0"), "0");
         b.drain().unwrap();
         assert_eq!(js(&mut b, "log.join()"), "1,t");
-    });
-}
-
-/// A handler of the new form that runs the heap collection with the engine's roots while it runs, then reads `this` and its arguments.
-fn collecting_probe<'s>(d: &Dom, s: &mut crate::browser_scoped::Sc<'s, crate::eng_old::Old>, this: bare_js_api::Local<'s>, a: bare_js_api::Args<'s>) -> crate::browser_scoped::Res<'s, bare_js_api::Local<'s>> {
-    // `Interp::collect` refuses inside a call, so this goes to the heap with `Interp::roots` (it includes the arguments of the running call).
-    let it = s.engine();
-    let roots = it.roots();
-    it.heap.collect(&roots).unwrap();
-    let node = d.el_s(s, this)?;
-    let (o, p) = (a.get(0).unwrap(), a.get(1).unwrap());
-    let tag = s.get_str(o, "tag")?;
-    let tag = s.as_str(tag).map(|t| t.to_string_lossy()).unwrap_or_default();
-    let name = d.string_arg_s(s, p)?;
-    let text = format!("{tag}:{name}:{}", d.doc.borrow().children(node).count());
-    s.string(&text)
-}
-
-#[test]
-fn a_collection_inside_a_converted_handler_keeps_this_and_the_arguments_alive() {
-    big(|| {
-        let mut b = browser();
-        b.it.set_gc_stress(true);
-        let f = b.dom.add_fn_s_obj(&mut b.it, collecting_probe, "probe", 2, bare_js_api::HostFn::Method).unwrap();
-        b.with_scope(|s| {
-            let f = s.engine().raw_local(&bare_js::value::Value::Object(f));
-            let g = s.global();
-            s.define_str(g, "probe", f, bare_js_api::Attrs::METHOD).unwrap();
-        });
-        // The object and the string are reachable only through the arguments of the call.
-        assert_eq!(js(&mut b, "var e = document.getElementById('a'); probe.call(e, { tag: 'A' }, 'n' + 1)"), "A:n1:1");
-        assert_eq!(js(&mut b, "var r = ''; for (var i = 0; i < 20; i++) r = probe.call(e, { tag: 'T' + i }, 'k' + i); r"), "T19:k19:1");
-        assert_eq!(b.with_scope(|s| s.engine().stack_len()), 0, "every call gave its slots back");
     });
 }

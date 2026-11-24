@@ -11,11 +11,12 @@
 //! rects: 10 x SCALE boxes, each read twice through `getBoundingClientRect` and `getClientRects` (one rectangle object for each read; every read lays out the page again).
 //! Prints the cascade, layout and read times, the work of layout in units, the fragments, the peak RSS and the allocations.
 
+use bare::eng_new::Peek;
 use bare::browser::*;
 use bare_css::cascade::{self, Origin, RuleSet};
 use bare_html::tree;
-use bare_js::eval::*;
-use bare_js::heap::HeapLimits;
+use bare::js_limits::*;
+use bare::js_limits::HeapLimits;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::time::Instant;

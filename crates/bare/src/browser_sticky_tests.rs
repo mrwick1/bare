@@ -1,6 +1,7 @@
 //! Tests of `position: sticky` (`bare_layout::sticky`, read through `getBoundingClientRect`, `offsetTop` and `IntersectionObserver`). The Chrome cases
 //! first (52 of them, `tools/fixtures/ui/sticky-cases.txt`), then what Chrome cannot show here.
 
+use crate::eng_new::Peek;
 use crate::browser_topic_tests::topic_test;
 
 topic_test!(chrome_cases, "sticky", 52);
@@ -8,7 +9,7 @@ topic_test!(chrome_cases, "sticky", 52);
 use crate::browser::*;
 use crate::page::{Page, Source};
 use bare_html::tree;
-use crate::eng_old::OldFault as Error;
+use crate::eng_new::NewFault as Error;
 use crate::js_limits::EvalLimits;
 use crate::js_limits::HeapLimits;
 

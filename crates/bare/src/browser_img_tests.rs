@@ -1,12 +1,12 @@
 //! Tests of `browser_img.rs` (`Image`, `decode()`, the events). The page that downloads the
 //! pictures is not here: `crates/drive/tests/images.rs` runs the whole path. These tests call `img_requests` and `img_settled` as the page does.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use bare_html::tree;
-use crate::eng_old::OldFault as Error;
+use crate::eng_new::NewFault as Error;
 use crate::js_limits::EvalLimits;
 use crate::js_limits::HeapLimits;
-use bare_js::value::Value;
 
 fn browser(body: &str) -> Browser {
     let mut b = Browser::new(tree::parse(&format!("<!doctype html><html><head></head><body>{body}</body></html>")), BrowserLimits::default(), EvalLimits { max_steps: 50_000_000, ..Default::default() }, HeapLimits::default()).expect("browser");
@@ -17,7 +17,7 @@ fn browser(body: &str) -> Browser {
 fn js(b: &mut Browser, src: &str) -> String {
     match b.run_script(src) {
         Ok(v) => b.it.display(v),
-        Err(Error::Throw(v)) if matches!(v, Value::Object(_)) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
+        Err(Error::Throw(v)) if crate::eng_new::is_object(v) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
         Err(e) => format!("other:{e:?}"),
     }
 }

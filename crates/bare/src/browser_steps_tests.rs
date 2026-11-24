@@ -1,4 +1,5 @@
 //! Indexed style computations charge the work they perform.
+use crate::eng_new::Peek;
 use crate::browser::{Browser, BrowserLimits};
 use crate::js_limits::{EvalLimits, HeapLimits};
 

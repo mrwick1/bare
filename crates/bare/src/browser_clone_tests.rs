@@ -1,8 +1,9 @@
 //! Structured clone: every class that the walk knows, the errors it throws, the transfer list and the caps (`docs/design-host-clone.md`). Each case prints the clone as text (`dump`). The expected text is the output of the old browser walk, frozen at `55594ea6`.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use bare_html::tree;
-use crate::eng_old::OldFault as Error;
+use crate::eng_new::NewFault as Error;
 use crate::js_limits::EvalLimits;
 use crate::js_limits::HeapLimits;
 

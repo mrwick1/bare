@@ -11,8 +11,8 @@
 use bare::browser::*;
 use bare::page::{Page, Source};
 use bare_html::tree;
-use bare_js::eval::EvalLimits;
-use bare_js::heap::HeapLimits;
+use bare::js_limits::EvalLimits;
+use bare::js_limits::HeapLimits;
 use bare_window::{Event, Mods};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};

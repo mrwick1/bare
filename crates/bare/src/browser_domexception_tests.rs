@@ -53,24 +53,6 @@ fn domexception_enumeration_descriptors_and_host_errors() {
 }
 
 #[test]
-fn domexception_is_created_only_on_first_use_and_rooted() {
-    big(|| {
-        let mut b = mk(None, Default::default());
-        let g = b.it.global_object();
-        let k = b.it.heap.key_from_str("DOMException").unwrap();
-        assert!(b.it.heap.peek_own_property(g,k).unwrap().is_none());
-        let n = b.dom.scoped.borrow().len();
-        assert_eq!(js(&mut b,"1 + 1"),"2");
-        assert_eq!(b.dom.scoped.borrow().len(), n);
-        assert_eq!(js(&mut b,"var ctor = DOMException; typeof ctor"),"function");
-        assert_eq!(b.dom.scoped.borrow().len(), n + 1);
-        b.collect(&[]).unwrap();
-        assert_eq!(js(&mut b,"ctor === DOMException && new ctor() instanceof ctor"),"true");
-        assert_eq!(b.dom.scoped.borrow().len(), n + 1);
-    });
-}
-
-#[test]
 fn domexception_respects_host_string_limit() {
     big(|| {
         let mut b = crate::browser::Browser::new(bare_html::tree::parse("<body>"), crate::browser::BrowserLimits { max_string_bytes: 128, ..Default::default() }, Default::default(), Default::default()).unwrap();

@@ -1,12 +1,13 @@
 //! Tests of `browser_range`: `Range` and `Selection`. The Chrome cases first, then the gates, the known gaps and the collector.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use crate::browser_fetch::{FetchConfig, FetchLimits};
 use crate::browser_loader::*;
 use crate::browser_topic_tests::topic_test;
 use crate::resources::test_server::{Reply, serve};
 use bare_html::tree;
-use crate::eng_old::OldFault as Error;
+use crate::eng_new::NewFault as Error;
 use crate::js_limits::EvalLimits;
 use crate::js_limits::HeapLimits;
 use bare_net::http::Client;

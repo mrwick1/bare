@@ -2,12 +2,12 @@
 //! and `initMouseEvent` (`browser_mouse_legacy.rs`). The values come from UI Events, CSSOM View and Chrome's legacy members. Nothing here
 //! was compared with a real browser.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use bare_html::tree;
-use crate::eng_old::OldFault as Error;
+use crate::eng_new::NewFault as Error;
 use crate::js_limits::EvalLimits;
 use crate::js_limits::HeapLimits;
-use bare_js::value::Value;
 
 const PAGE: &str = "<!doctype html><html><head></head><body style='margin:0'><div id=a style='position:relative;margin-left:30px;margin-top:20px;width:100px;height:100px'>\
 <div id=b style='width:50px;height:50px'></div></div><div id=c>c</div></body></html>";
@@ -19,7 +19,7 @@ fn browser() -> Browser {
 fn js(b: &mut Browser, src: &str) -> String {
     match b.run_script(&format!("var $ = function (s) {{ return document.getElementById(s); }};{src}")) {
         Ok(v) => b.it.display(v),
-        Err(Error::Throw(v)) if matches!(v, Value::Object(_)) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
+        Err(Error::Throw(v)) if crate::eng_new::is_object(v) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
         Err(e) => format!("other:{e:?}"),
     }
 }

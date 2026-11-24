@@ -3,6 +3,7 @@
 //! an unlayered rule beats a layered one, a rule of a layer beats the rules of its sub-layers). `direction` is the property
 //! that the tests read: it is inherited, native, and the browser sheet sets it from the `dir` attribute.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use crate::browser_fetch::FetchLimits;
 use crate::browser_loader::*;
@@ -505,7 +506,6 @@ fn a_session_gives_each_document_a_fresh_realm_and_a_resume_keeps_the_budget() {
             _ => Reply::new(404, Some("text/plain"), "no"),
         });
         let mut cfg = SessionConfig::new(&srv.url("/p1.html"));
-        cfg.vex = false; // this file tests the old engine
         cfg.virtual_clock = true;
         cfg.page.quiet = Duration::from_millis(100);
         cfg.page.resources.max_fetches = 2;
@@ -559,7 +559,6 @@ fn a_navigation_makes_a_fresh_cache_and_fresh_counters() {
             _ => Reply::new(404, Some("text/plain"), "no"),
         });
         let mut cfg = SessionConfig::new(&srv.url("/p1.html"));
-        cfg.vex = false; // this file tests the old engine
         cfg.virtual_clock = true;
         cfg.page.resources.max_fetches = 1;
         let mut s = Session::new(cfg);
@@ -584,7 +583,6 @@ fn a_resume_cannot_reset_the_fetch_budget() {
             _ => Reply::new(404, Some("text/plain"), "no"),
         });
         let mut cfg = SessionConfig::new(&srv.url("/p.html"));
-        cfg.vex = false; // this file tests the old engine
         cfg.virtual_clock = true;
         cfg.page.resources.max_fetches = 1;
         let mut s = Session::new(cfg);

@@ -1,5 +1,6 @@
 //! `getComputedStyle(el, '::before')` and `'::after'` read the style that the rules of the pseudo-element give (`RuleSet::style_pseudo`).
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use bare_html::tree;
 use crate::js_limits::EvalLimits;

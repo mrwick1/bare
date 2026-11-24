@@ -1,10 +1,11 @@
 //! Tests of `browser_walker`: `TreeWalker`, `NodeFilter`, `document.createTreeWalker`. The Chrome cases first (46 of them), then the cost of a page that
 //! does not use them, the bound and the garbage collector.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use crate::browser_topic_tests::topic_test;
 use bare_html::tree;
-use crate::eng_old::OldFault as Error;
+use crate::eng_new::NewFault as Error;
 use crate::js_limits::EvalLimits;
 use crate::js_limits::HeapLimits;
 

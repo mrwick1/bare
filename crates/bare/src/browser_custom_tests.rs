@@ -2,14 +2,15 @@
 //! `custom-page-cases.txt`, 15 cases whose scripts run while the page loads), then what Chrome cannot show here: the cost of a page that
 //! defines nothing, exceptions of callbacks, failed constructors and the collector.
 
+use crate::eng::Ops;
+use crate::eng_new::Peek;
 use crate::browser::*;
 use crate::browser_loader::*;
 use crate::browser_topic_tests::{parse, topic_test};
 use bare_html::tree;
-use crate::eng_old::OldFault as Error;
+use crate::eng_new::NewFault as Error;
 use crate::js_limits::EvalLimits;
 use crate::js_limits::HeapLimits;
-use bare_js::value::Value;
 use bare_net::http::Client;
 
 topic_test!(chrome_cases, "custom", 49);
@@ -28,7 +29,7 @@ fn page(body: &str) -> Browser {
 fn js(b: &mut Browser, src: &str) -> String {
     match b.run_script(src) {
         Ok(v) => b.it.display(v),
-        Err(Error::Throw(v)) if matches!(v, Value::Object(_)) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
+        Err(Error::Throw(v)) if crate::eng_new::is_object(v) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
         Err(Error::Limit(k)) => format!("limit:{k:?}"),
         Err(Error::Unsupported(u)) => format!("unsupported:{}", u),
         Err(e) => format!("other:{e:?}"),
@@ -43,7 +44,7 @@ fn run_loaded(k: &crate::browser_topic_tests::Case) -> String {
     let r = b.run_page(PageConfig { url: "http://example.test/p".into(), client: Client::new(), limits: PageLimits::default(), fetch: None });
     assert_eq!(r.stop, Stop::Settled, "{r:?}");
     let reader = b.run_script(&k.script).unwrap();
-    let v = b.it.call(reader, Value::Undefined, &[]).unwrap();
+    let v = b.it.call_o(reader, <crate::eng_new::New as crate::eng::Eng>::undef(), &[]).unwrap();
     b.it.display(v).replace('\n', "\\n")
 }
 

@@ -1,13 +1,13 @@
 //! Tests of `browser_idle`, `checkVisibility` and `draggable`. The Chrome cases first, then what Chrome cannot show (the virtual clock,
 //! the deadline, the timeout task, the gates, the bounds).
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use crate::browser_topic_tests::topic_test;
 use bare_html::tree;
-use crate::eng_old::OldFault as Error;
+use crate::eng_new::NewFault as Error;
 use crate::js_limits::EvalLimits;
 use crate::js_limits::HeapLimits;
-use bare_js::value::Value;
 
 topic_test!(chrome_idle_cases, "idle", 30);
 topic_test!(chrome_visibility_cases, "visibility", 28);
@@ -22,7 +22,7 @@ fn page(body: &str) -> Browser {
 fn js(b: &mut Browser, src: &str) -> String {
     match b.run_script(src) {
         Ok(v) => b.it.display(v),
-        Err(Error::Throw(v)) if matches!(v, Value::Object(_)) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
+        Err(Error::Throw(v)) if crate::eng_new::is_object(v) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
         Err(Error::Limit(k)) => format!("limit:{k:?}"),
         Err(Error::Unsupported(u)) => format!("unsupported:{}", u),
         Err(e) => format!("other:{e:?}"),

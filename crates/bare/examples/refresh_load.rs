@@ -7,11 +7,12 @@
 //! frame. It prints the p50 and the max of each change, its allocations and bytes, and the layouts that it ran, then the RSS and the
 //! CPU of 3 s of idle (must be 0 ticks). `crates/bare/src/page_tests.rs` has the checks. The stack of the VM thread is 64 MiB.
 
+use bare::eng_new::Peek;
 use bare::browser::*;
 use bare::page::{Page, Source};
 use bare_html::tree;
-use bare_js::eval::EvalLimits;
-use bare_js::heap::HeapLimits;
+use bare::js_limits::EvalLimits;
+use bare::js_limits::HeapLimits;
 use bare_window::{App, Event, Mods};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};

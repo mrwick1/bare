@@ -728,3 +728,33 @@ impl From<Value> for Val<New> {
 #[cfg(test)]
 #[path = "eng_new_tests.rs"]
 mod browser_new_adapter_tests;
+
+/// What the tests and the examples read of a script value: its text, and a property as text.
+#[doc(hidden)]
+pub trait Peek {
+    /// The text of `v` (`Ops::display_o`).
+    fn display(&self, v: Value) -> String;
+    /// `String(v[name])`, or `?` when it fails.
+    fn get_str(&mut self, v: Value, name: &str) -> String;
+}
+
+impl Peek for Realm {
+    fn display(&self, v: Value) -> String {
+        self.display_o(v)
+    }
+    fn get_str(&mut self, v: Value, name: &str) -> String {
+        let r = (|| {
+            let key = self.h_key(name)?;
+            let x = self.get_value(v, key)?;
+            let s = self.to_js_string(x)?;
+            Ok::<_, Fault<New>>(self.display_o(s.0))
+        })();
+        r.unwrap_or_else(|_| "?".into())
+    }
+}
+
+/// Is `v` an object?
+#[doc(hidden)]
+pub fn is_object(v: Value) -> bool {
+    matches!(New::kind(v), Val::Object(_))
+}

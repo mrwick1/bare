@@ -4,12 +4,13 @@
 //! getter without a setter; an interface with a value iterator and an indexed getter gets the `Array.prototype` iteration
 //! methods). Those expectations are manual and labelled as such.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use bare_html::tree;
-use crate::eng_old::OldFault as Error;
+use crate::eng_new::NewFault as Error;
 use crate::js_limits::EvalLimits;
 use crate::js_limits::HeapLimits;
-use bare_js::value::Value;
+use bare_vex::value::Value;
 
 fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     std::thread::Builder::new().stack_size(64 << 20).spawn(f).unwrap().join().unwrap()
@@ -32,7 +33,7 @@ fn browser() -> Browser {
 fn show(b: &mut Browser, r: Result<Value, Error>) -> String {
     match r {
         Ok(v) => b.it.display(v),
-        Err(Error::Throw(v)) if matches!(v, Value::Object(_)) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
+        Err(Error::Throw(v)) if crate::eng_new::is_object(v) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
         Err(Error::Throw(v)) => format!("throw-value:{}", b.it.display(v)),
         Err(Error::Limit(l)) => format!("limit:{l:?}"),
         Err(Error::Unsupported(u)) => format!("unsupported:{}", u),
@@ -366,53 +367,6 @@ fn pending_promise_job_that_hits_a_limit_is_not_replayed() {
 
 // ---- part 2: tests that use the stats API and the heap callbacks directly (they need `nodelist_stats`) ----
 
-
-fn list_obj(b: &Browser, v: &str) -> bare_js::value::ObjId {
-    let _ = v;
-    let t = b.dom.nl.s.borrow();
-    *t.lists.keys().next().expect("one list")
-}
-
-#[test]
-fn heap_callbacks_never_scan_and_answer_needs_host_when_stale() {
-    use bare_js_api::{Host, Item, Pending};
-    big(|| {
-        let mut b = browser();
-        ok(&mut b, "var L = document.getElementsByName('x'); 1", "1");
-        let o = list_obj(&b, "L");
-        let key = b.it.heap.host_key(o).expect("a list has a host key");
-        let lv = Value::Object(o);
-        let h: &dyn Host<bare_js::eval::Interp<'static>> = &*b.dom;
-        // never built: stale. Both callbacks ask for the host and the document is not scanned (no step is charged: no Interp).
-        assert_eq!(h.indexed_len(&lv, key), Err(Pending::Fill(0)));
-        assert!(matches!(h.indexed_item(&lv, key, 3), Err(Pending::Fill(3))));
-        ok(&mut b, "L.length", "5");
-        let h: &dyn Host<bare_js::eval::Interp<'static>> = &*b.dom;
-        assert_eq!(h.indexed_len(&lv, key), Ok(5));
-        assert!(matches!(h.indexed_item(&lv, key, 7), Ok(Item::Absent)));
-        // index 0 has no wrapper until it is read: `Missing`, then a value
-        assert!(matches!(h.indexed_item(&lv, key, 0), Ok(Item::Missing | Item::Value(_))));
-        ok(&mut b, "L[0].id", "d1");
-        let h: &dyn Host<bare_js::eval::Interp<'static>> = &*b.dom;
-        assert!(matches!(h.indexed_item(&lv, key, 0), Ok(Item::Value(Value::Object(_)))));
-        // a native change makes it stale again, with no JS running
-        let doc = b.document();
-        let n = doc.borrow_mut().create_element("u");
-        let body = {
-            let d = doc.borrow();
-            d.children(d.children(d.root()).last().unwrap()).last().unwrap()
-        };
-        doc.borrow_mut().move_to(n, body, None);
-        assert_eq!(h.indexed_len(&lv, key), Err(Pending::Fill(0)));
-        // a borrowed document is an error, never a short answer
-        let g = doc.borrow_mut();
-        assert_eq!(h.indexed_len(&lv, key), Err(Pending::Busy));
-        assert!(matches!(h.indexed_item(&lv, key, 0), Err(Pending::Busy)));
-        drop(g);
-        // an object that is not a list is not answered by this module
-        assert!(crate::browser_nodelist::len(&b.dom, o).is_some());
-    });
-}
 
 #[test]
 fn stale_list_works_with_has_property_keys_and_for_in_without_a_prior_length_read() {

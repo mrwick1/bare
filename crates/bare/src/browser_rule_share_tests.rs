@@ -1,11 +1,12 @@
 //! The rule set is shared between documents of one thread (`bare_css::rule_cache`). Each test reads the styles that a document gives with
 //! a shared set, and with a set of its own, and checks that a change in one document reaches no other.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use crate::browser_computed::SheetPart;
 use bare_css::rule_cache;
 use bare_html::tree;
-use crate::eng_old::OldFault as Error;
+use crate::eng_new::NewFault as Error;
 use crate::js_limits::EvalLimits;
 use crate::js_limits::HeapLimits;
 
@@ -24,7 +25,7 @@ fn at(page: &str) -> Browser {
 fn js(b: &mut Browser, src: &str) -> String {
     match b.run_script(src) {
         Ok(v) => b.it.display(v),
-        Err(Error::Throw(v)) if matches!(v, bare_js::value::Value::Object(_)) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
+        Err(Error::Throw(v)) if crate::eng_new::is_object(v) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
         Err(e) => format!("error:{e:?}"),
     }
 }

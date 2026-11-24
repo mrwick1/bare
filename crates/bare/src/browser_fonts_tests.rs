@@ -52,24 +52,6 @@ fn fonts_validate_members_receivers_and_conversions() {
     });
 }
 #[test]
-fn font_state_is_absent_until_used_and_obeys_collection_limits() {
-    big(|| {
-        let mut b=mk(None,FetchLimits::default());
-        let d=b.dom.clone();
-        let fonts=d.key(&mut b.it,"fonts").unwrap();
-        let face=d.key(&mut b.it,"FontFace").unwrap();
-        assert!(b.it.heap.peek_own_property(d.p().document,fonts).unwrap().is_none());
-        assert!(b.it.heap.peek_own_property(b.it.global_object(),face).unwrap().is_none());
-        js(&mut b,"document.body;document.title");
-        assert!(b.it.heap.peek_own_property(d.p().document,fonts).unwrap().is_none());
-        assert!(b.it.heap.peek_own_property(b.it.global_object(),face).unwrap().is_none());
-        assert_eq!(js(&mut b,"var s=document.fonts,f=new FontFace('One','local(One)'),g=new FontFace('Two','local(Two)');s.add(f);s.size"),"1");
-        b.it.set_sc_limits(bare_js::eval::ScLimits {max_entries:1,..Default::default()});
-        assert!(js(&mut b,"s.add(g)").starts_with("limit:"));
-        assert_eq!(js(&mut b,"s.has(g)+','+s.size"),"false,1");
-    });
-}
-#[test]
 fn fonts_keep_private_brands_when_collection_prototypes_change() {
     big(|| {
         let mut b=mk(None,FetchLimits::default());

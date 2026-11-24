@@ -10,10 +10,11 @@
 //! with a VM collect between them, and checks its result against the same computation in Rust. Prints time, CPU, peak
 //! RSS, allocations and what the realm holds. `tools/js/navigation_load.sh` runs the matrix under caps.
 
+use bare::eng_new::Peek;
 use bare::browser::*;
 use bare_html::tree;
-use bare_js::eval::*;
-use bare_js::heap::HeapLimits;
+use bare::js_limits::*;
+use bare::js_limits::HeapLimits;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::time::Instant;
@@ -98,7 +99,7 @@ fn digits(n: usize) -> usize {
 }
 
 fn exec(name: &str, scale: usize) {
-    let eval = EvalLimits { max_steps: u64::MAX / 2, max_scripts: 1 << 14, max_envs: 1 << 22, max_functions: 1 << 22, ..Default::default() };
+    let eval = EvalLimits { max_steps: u64::MAX / 2, ..Default::default() };
     let mut b = Browser::new(tree::parse(PAGE), BrowserLimits::default(), eval, HeapLimits::default()).unwrap_or_else(|e| die(format!("browser: {e:?}")));
     let url0 = if name == "route" { "https://staging.example.test:8443/a/b?x=1" } else { "https://h.test:8443/start" };
     b.set_document_url(url0).unwrap_or_else(|e| die(e));
@@ -366,9 +367,8 @@ fn exec(name: &str, scale: usize) {
     let (allocs, abytes, peak_live) = (ALLOCS.load(Relaxed) - a0, BYTES.load(Relaxed) - b0, PEAK.load(Relaxed));
     let st = b.stats();
     let nv = b.navigation_stats();
-    let code = b.it.stats();
     println!(
-        "{name:8} x{scale:<3} checksum=ok run={run_ms:9.1}ms cpu={cpu}ms peak_rss={:.1}MiB peak_live={:.1}MiB live_after={:.1}MiB allocs={allocs} alloc={:.1}MiB | history={}/{} state_bytes={} urls={} params={} iters={} param_bytes={} wrappers={} events={} gen={} | gc={gc_ms:.1}ms freed_objs={freed_objs} scripts={} source_bytes={}",
+        "{name:8} x{scale:<3} checksum=ok run={run_ms:9.1}ms cpu={cpu}ms peak_rss={:.1}MiB peak_live={:.1}MiB live_after={:.1}MiB allocs={allocs} alloc={:.1}MiB | history={}/{} state_bytes={} urls={} params={} iters={} param_bytes={} wrappers={} events={} gen={} | gc={gc_ms:.1}ms freed_objs={freed_objs}",
         status_kib("VmHWM:") as f64 / 1024.0,
         peak_live as f64 / 1048576.0,
         LIVE.load(Relaxed) as f64 / 1048576.0,
@@ -383,8 +383,6 @@ fn exec(name: &str, scale: usize) {
         st.wrappers,
         st.events,
         nv.url_generation,
-        code.scripts,
-        code.script_source,
     );
 }
 

@@ -1,14 +1,15 @@
 //! Tests of `browser_computed`: `window.getComputedStyle` over the native cascade. Expectations come from CSSOM, CSS
 //! Cascade and the HTML rendering section, read by hand. Node has no DOM, so it is not an oracle here.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use crate::browser_topic_tests::topic_test;
 use crate::browser_computed::ComputedLimits;
 use bare_html::tree;
-use crate::eng_old::OldFault as Error;
+use crate::eng_new::NewFault as Error;
 use crate::js_limits::{EvalLimits, LimitKind};
 use crate::js_limits::HeapLimits;
-use bare_js::value::Value;
+use bare_vex::value::Value;
 
 topic_test!(chrome_cases, "computed", 107);
 
@@ -21,7 +22,7 @@ fn at(page: &str) -> Browser {
 fn show(b: &mut Browser, r: Result<Value, Error>) -> String {
     match r {
         Ok(v) => b.it.display(v),
-        Err(Error::Throw(v)) if matches!(v, Value::Object(_)) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
+        Err(Error::Throw(v)) if crate::eng_new::is_object(v) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
         Err(Error::Throw(v)) => format!("throw-value:{}", b.it.display(v)),
         Err(Error::Limit(l)) => format!("limit:{l:?}"),
         Err(Error::Unsupported(u)) => format!("unsupported:{}", u),

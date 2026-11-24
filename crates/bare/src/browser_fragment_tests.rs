@@ -3,15 +3,15 @@
 //! ToString order). Node has no DOM, so none of this is an oracle, and nothing here was compared with Chrome.
 //! The last tests run real pages through the loader to show that fragment scripts stay inert.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use crate::browser_fetch::{FetchConfig, FetchLimits};
 use crate::browser_loader::*;
 use crate::resources::test_server::{Reply, Server, serve};
 use bare_html::tree;
-use crate::eng_old::OldFault as Error;
+use crate::eng_new::NewFault as Error;
 use crate::js_limits::{EvalLimits, LimitKind};
 use crate::js_limits::HeapLimits;
-use bare_js::value::Value;
 use bare_net::http::Client;
 use std::time::Duration;
 
@@ -36,7 +36,7 @@ fn browser() -> Browser {
 fn js(b: &mut Browser, src: &str) -> String {
     match b.run_script(src) {
         Ok(v) => b.it.display(v),
-        Err(Error::Throw(v)) if matches!(v, Value::Object(_)) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
+        Err(Error::Throw(v)) if crate::eng_new::is_object(v) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
         Err(Error::Throw(v)) => format!("throw-value:{}", b.it.display(v)),
         Err(Error::Limit(l)) => format!("limit:{l:?}"),
         Err(e) => format!("other:{e:?}"),

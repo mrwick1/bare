@@ -6,6 +6,7 @@
 #[path = "../../../net/tests/common/quirky.rs"]
 mod quirky;
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use crate::browser_fetch::FetchLimits;
 use crate::browser_loader::*;

@@ -8,11 +8,12 @@
 //! max of the steps, layouts counted by the browser (must not grow), and the RSS and the peak RSS. `tools/js/sticky_load.sh` runs the three scales.
 //! The stack of the VM thread is 64 MiB.
 
+use bare::eng_new::Peek;
 use bare::browser::*;
 use bare::page::{Page, Source};
 use bare_html::tree;
-use bare_js::eval::EvalLimits;
-use bare_js::heap::HeapLimits;
+use bare::js_limits::EvalLimits;
+use bare::js_limits::HeapLimits;
 use bare_window::{Event, Mods};
 use std::time::Instant;
 

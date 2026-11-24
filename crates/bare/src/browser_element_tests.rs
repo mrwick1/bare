@@ -1,13 +1,13 @@
 //! Tests of `browser_element`: `hidden`, `inert`, `tabIndex`, `click()`, `offsetParent`, `offsetTop`, `offsetLeft` and `innerText`. The Chrome cases
 //! first (46 of them), then the gates, which Chrome has no need of.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use crate::browser_topic_tests::topic_test;
 use bare_html::tree;
-use crate::eng_old::OldFault as Error;
+use crate::eng_new::NewFault as Error;
 use crate::js_limits::EvalLimits;
 use crate::js_limits::HeapLimits;
-use bare_js::value::Value;
 
 topic_test!(chrome_cases, "element", 46);
 
@@ -35,7 +35,8 @@ fn click_gate_comes_before_any_event() {
     let mut b = page("<input id=x type=checkbox>");
     b.run_script("var n = 0; document.addEventListener('click', function () { n++ })").unwrap();
     assert!(matches!(b.run_script("document.getElementById('x').click()"), Err(Error::Unsupported(_))));
-    assert!(matches!(b.run_script("n"), Ok(Value::Number(n)) if n == 0.0));
+    let n = b.run_script("n").unwrap();
+    assert_eq!(b.it.display(n), "0");
 }
 
 #[test]

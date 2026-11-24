@@ -13,11 +13,12 @@
 //! zero retained entries. Prints time, CPU, peak RSS, allocations and what the fetch layer holds.
 //! `tools/js/fetch_load.sh` runs the matrix under caps. Only throwaway synthetic data. No external network.
 
+use bare::eng_new::Peek;
 use bare::browser::*;
 use bare::browser_fetch::*;
 use bare_html::tree;
-use bare_js::eval::*;
-use bare_js::heap::HeapLimits;
+use bare::js_limits::*;
+use bare::js_limits::HeapLimits;
 use bare_net::http::Client;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::io::{Read, Write};
@@ -179,7 +180,7 @@ fn drive(b: &mut Browser) {
 fn exec(name: &str, scale: usize) {
     let port = server();
     MINE.with(|m| m.set(true));
-    let eval = EvalLimits { max_steps: u64::MAX / 2, max_scripts: 1 << 14, max_envs: 1 << 22, max_functions: 1 << 22, ..Default::default() };
+    let eval = EvalLimits { max_steps: u64::MAX / 2, ..Default::default() };
     let mut b = Browser::new(tree::parse("<body></body>"), BrowserLimits::default(), eval, HeapLimits::default()).unwrap_or_else(|e| die(format!("browser: {e:?}")));
     b.configure_fetch(FetchConfig { base_url: Some(format!("http://127.0.0.1:{port}/app")), client: Client::new(), limits: if name == "upload" { FetchLimits { max_request_body: 64 << 20, max_retained: 64 << 20, ..Default::default() } } else { FetchLimits::default() } }).unwrap();
     let (a0, b0, cpu0) = (ALLOCS.load(Relaxed), BYTES.load(Relaxed), cpu_ms());

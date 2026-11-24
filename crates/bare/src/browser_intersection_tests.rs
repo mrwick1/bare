@@ -1,10 +1,11 @@
 //! Tests of `browser_intersection`: `IntersectionObserver`. The Chrome cases first (48 of them), then what Chrome cannot show here: the cost of a page
 //! with no observer, the gates, a margin that reaches outside the window (Chrome ran in an iframe), the bounds and the garbage collector.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use crate::browser_topic_tests::topic_test;
 use bare_html::tree;
-use crate::eng_old::OldFault as Error;
+use crate::eng_new::NewFault as Error;
 use crate::js_limits::EvalLimits;
 use crate::js_limits::HeapLimits;
 

@@ -10,10 +10,11 @@
 //! `matchAll` over digit runs and capture groups. After the last collect the live object count must be back to the baseline
 //! (nothing leaks). Prints time, CPU, peak RSS and allocations. `tools/js/web_apis_load.sh` runs the matrix under caps.
 
+use bare::eng_new::Peek;
 use bare::browser::*;
 use bare_html::tree;
-use bare_js::eval::*;
-use bare_js::heap::HeapLimits;
+use bare::js_limits::*;
+use bare::js_limits::HeapLimits;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::time::Instant;
@@ -163,7 +164,7 @@ fn program(name: &str) -> (&'static str, fn(usize) -> usize) {
 }
 
 fn exec(name: &str, scale: usize) {
-    let eval = EvalLimits { max_steps: u64::MAX / 2, max_scripts: 1 << 14, max_envs: 1 << 22, max_functions: 1 << 22, ..Default::default() };
+    let eval = EvalLimits { max_steps: u64::MAX / 2, ..Default::default() };
     let mut b = Browser::new(tree::parse("<body></body>"), BrowserLimits::default(), eval, HeapLimits::default()).unwrap_or_else(|e| die(format!("browser: {e:?}")));
     b.set_document_url("https://h.test:8443/start").unwrap_or_else(|e| die(e));
     let (prog, round) = program(name);
@@ -171,7 +172,7 @@ fn exec(name: &str, scale: usize) {
     // one round first: the lazy globals and `Intl` are made here, so they are not counted as growth
     run(&mut b, "chunk(0, 1)");
     b.collect(&[]).unwrap_or_else(|e| die(format!("collect: {e:?}")));
-    let base_live = b.it.heap.stats().live_objects;
+    let base_live = bare::eng::Ops::h_stats(&b.it).live_objects;
     let (a0, b0, cpu0) = (ALLOCS.load(Relaxed), BYTES.load(Relaxed), cpu_ms());
     PEAK.store(LIVE.load(Relaxed), Relaxed);
     let t = Instant::now();
@@ -189,7 +190,7 @@ fn exec(name: &str, scale: usize) {
         gc_ms += t.elapsed().as_secs_f64() * 1e3;
     }
     expect(name, got.to_string(), want.to_string());
-    let live = b.it.heap.stats().live_objects;
+    let live = bare::eng::Ops::h_stats(&b.it).live_objects;
     if live > base_live + 8 {
         die(format!("{name}: {live} live objects after the last collect, {base_live} at the start"));
     }

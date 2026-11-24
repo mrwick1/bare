@@ -3,13 +3,13 @@
 //! HTML Standard (valid shadow host names). No browser and no Node DOM was used: nothing here is browser-verified. The `announcer`
 //! test copies the SHAPE of the Next.js `AppRouterAnnouncer` code that was read in a saved bundle (read, never run).
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use bare_html::dom::NodeData;
 use bare_html::tree;
-use crate::eng_old::OldFault as Error;
+use crate::eng_new::NewFault as Error;
 use crate::js_limits::{EvalLimits, LimitKind};
 use crate::js_limits::HeapLimits;
-use bare_js::value::Value;
 
 const PAGE: &str = "<!doctype html><html><head></head><body><div id=a><p id=lp>light</p></div></body></html>";
 
@@ -25,7 +25,7 @@ fn browser() -> Browser {
 fn js(b: &mut Browser, src: &str) -> String {
     match b.run_script(src) {
         Ok(v) => b.it.display(v),
-        Err(Error::Throw(v)) if matches!(v, Value::Object(_)) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
+        Err(Error::Throw(v)) if crate::eng_new::is_object(v) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
         Err(Error::Throw(v)) => format!("throw-value:{}", b.it.display(v)),
         Err(Error::Limit(l)) => format!("limit:{l:?}"),
         Err(Error::Unsupported(_)) => "unsupported".to_string(),
@@ -850,8 +850,7 @@ fn existing_light_tree_fragment_behaviour_is_unchanged() {
 #[test]
 fn shadow_load_model() {
     let Some(n) = std::env::var("BARE_SHADOW_N").ok().and_then(|v| v.parse::<usize>().ok()) else { return };
-    let vm = if cfg!(debug_assertions) { 64 << 20 } else { 8 << 20 };
-    let heap = HeapLimits { max_bytes: vm, ..Default::default() };
+    let heap = HeapLimits::default();
     let mut b = Browser::new(tree::parse(PAGE), BrowserLimits::default(), EvalLimits { max_steps: u64::MAX / 4, ..Default::default() }, heap).expect("browser");
     b.collect(&[]).unwrap();
     let base = b.stats();

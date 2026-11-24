@@ -1072,7 +1072,7 @@ mod tests {
 
     fn parsing(html: String, feed: Option<Arc<Feed>>) -> Parsing {
         let lim = crate::resources::Limits { max_fetches: 0, ..Default::default() };
-        let scan = Scan::new(Client::new(), Url::parse("http://127.0.0.1:1/").unwrap(), lim, Instant::now(), false);
+        let scan = Scan::new(Client::new(), Url::parse("http://127.0.0.1:1/").unwrap(), lim, Instant::now());
         let next = Next { from: None, url: String::new(), body: None, how: How::Push };
         let ended = feed.is_none();
         Parsing { next, url: String::new(), html, at: 0, parser: tree::Parser::new(), scan, feed, ended }

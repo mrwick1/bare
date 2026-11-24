@@ -2,6 +2,7 @@
 //! and those of headless Chrome where the page has no text (`tools/ui/chrome_refresh_pixels.mjs`). A frame whose render key did not
 //! move must not lay the page out again.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use crate::page::{Page, Source};
 use bare_css::cascade::{self, Origin, RuleSet};

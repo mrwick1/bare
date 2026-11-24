@@ -2,6 +2,7 @@
 //! that waits for its `load`, then a style sheet link that waits for its own `load`). Real pages, a real realm and a
 //! loopback server with synthetic bodies. The expected values come from the HTML Standard ("link type preload").
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use crate::browser_fetch::FetchLimits;
 use crate::browser_loader::*;

@@ -2,14 +2,14 @@
 //! loopback server that answers like `tools/ui/chrome_xhr.mjs`. Each result must equal the line headless Chrome gave
 //! (`tools/fixtures/ui/xhr-expected.txt`). The other tests pin the gates, the limits and the GC.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use crate::browser_fetch::*;
 use crate::browser_fetch_tests::{Rec, Reply, Srv, reply, serve};
 use bare_html::tree;
-use crate::eng_old::OldFault as Error;
+use crate::eng_new::NewFault as Error;
 use crate::js_limits::EvalLimits;
 use crate::js_limits::HeapLimits;
-use bare_js::value::Value;
 use bare_net::http::Client;
 use std::time::{Duration, Instant};
 
@@ -71,7 +71,7 @@ pub fn browser(port: u16) -> Browser {
 pub fn js(b: &mut Browser, src: &str) -> String {
     match b.run_script(src) {
         Ok(v) => b.it.display(v),
-        Err(Error::Throw(v)) if matches!(v, Value::Object(_)) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
+        Err(Error::Throw(v)) if crate::eng_new::is_object(v) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
         Err(Error::Limit(l)) => format!("limit:{l:?}"),
         Err(Error::Unsupported(u)) => format!("unsupported:{}", u),
         Err(e) => format!("other:{e:?}"),

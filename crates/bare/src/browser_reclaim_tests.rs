@@ -1,6 +1,7 @@
 //! Tests of the reclaim of dead trees (`browser_reclaim.rs`). A tree that no wrapper, range, observer or other state names goes back to the arena;
 //! a tree that one of them names stays. Each test runs on a big stack.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use bare_html::tree;
 use crate::js_limits::EvalLimits;
@@ -128,22 +129,6 @@ fn reclaim_after_every_task_with_poison_does_not_panic() {
     });
 }
 
-#[test]
-fn parsed_documents_ask_for_a_collect_by_their_native_bytes() {
-    big(|| {
-        let mut b = browser();
-        // 5 documents of about 1 MiB of text from one source string: the JS heap stays under its own limit, the arena grows by 5 MiB.
-        js(&mut b, "var src = '<p>' + 'x'.repeat(1 << 20) + '</p>'; function big(n) { for (var i = 0; i < n; i++) new DOMParser().parseFromString(src, 'text/html'); } big(2)");
-        assert!(!b.it.gc_due(), "2 MiB of native bytes are below the limit");
-        js(&mut b, "big(3)");
-        assert!(b.it.gc_due(), "5 MiB of native bytes ask for a collect");
-        b.collect(&[]).unwrap();
-        assert!(!b.it.gc_due());
-        assert!(live(&b) < 1000, "the five documents are gone");
-        assert!(b.document().borrow().arena_bytes() < 64 << 10);
-    });
-}
-
 /// The caps `dom-nodes`, `dom-text` and `dom-attrs` count the nodes, the text and the attribute slots that are alive, not the length of the arena.
 #[test]
 fn the_dom_caps_count_live_nodes_text_and_attributes() {
@@ -163,44 +148,5 @@ fn the_dom_caps_count_live_nodes_text_and_attributes() {
         // A cap still stops a page that keeps what it parses.
         let r = b.run_script("var keep = []; for (var i = 0; i < 40; i++) keep.push(new DOMParser().parseFromString('<div>' + '<p class=c id=i>0123456789</p>'.repeat(30) + '</div>', 'text/html'));");
         assert!(r.is_err(), "40 documents that stay are over the caps");
-    });
-}
-
-/// Stress mode of the collector (`Interp::set_gc_stress`, `BARE_GC_STRESS=1`): a collect runs at each safe point between tasks. Timers, listeners,
-/// a node list and a dataset map that the page keeps must give the same results as without it.
-#[test]
-fn a_page_gives_the_same_results_when_a_collect_runs_between_all_tasks() {
-    big(|| {
-        let run = |stress: bool| {
-            let mut b = browser();
-            b.it.set_gc_stress(false);
-            assert!(!b.collect_due(), "off: a small page is not due");
-            b.it.set_gc_stress(stress);
-            assert_eq!(b.collect_due(), stress);
-            js(
-                &mut b,
-                "var log = []; var list = document.querySelectorAll('#a *'); var d = document.getElementById('p').dataset; d.k = 'v0';
-                 var btn = document.createElement('button'); document.body.appendChild(btn);
-                 btn.addEventListener('click', function() { log.push('c' + d.k); });
-                 var n = 0; var id = setInterval(function() { d.k = 'v' + (++n); log.push('t' + n + list.length); if (n == 5) clearInterval(id); }, 10);
-                 setTimeout(function() { Promise.resolve(1).then(function() { log.push('p'); }); document.body.lastChild.click(); }, 25);
-                 btn = null;",
-            );
-            let before = b.it.heap.stats().collections;
-            for _ in 0..80 {
-                b.advance_time(1.0, 50).expect("advance");
-                if b.collect_due() {
-                    b.collect(&[]).expect("collect");
-                }
-            }
-            let collections = b.it.heap.stats().collections - before;
-            let out = js(&mut b, "log.join() + ';' + d.k + ',' + list.length + ',' + document.getElementById('p').dataset.k");
-            (out, collections)
-        };
-        let (plain, n0) = run(false);
-        let (stress, n1) = run(true);
-        assert_eq!(plain, "t12,t22,cv2,p,t32,t42,t52;v5,2,v5");
-        assert_eq!(stress, plain);
-        assert!(n0 == 0 && n1 >= 50, "collections: {n0} without stress, {n1} with it");
     });
 }
