@@ -1051,17 +1051,23 @@ impl<'a> Fc<'a> {
                 self.effect(index)?;
                 self.op(Op::ThrowSuperDelete, 0, 0, 0);
             }
-            ExprKind::Member { obj, name, .. } => {
+            ExprKind::Member { obj, name, optional } => {
                 let nm = self.name_of(name);
                 let o = self.any(obj)?;
+                if optional {
+                    self.short(o);
+                }
                 let k = self.alloc();
                 let at = self.atom(&nm)?;
                 self.op(Op::LoadAtom, k, at, 0);
                 self.set_live(k);
                 self.op(Op::Delete, dst, o, k);
             }
-            ExprKind::Index { obj, index, .. } => {
+            ExprKind::Index { obj, index, optional } => {
                 let o = self.any_before(obj, index)?;
+                if optional {
+                    self.short(o);
+                }
                 let k = self.any(index)?;
                 self.op(Op::Delete, dst, o, k);
             }
@@ -1086,9 +1092,16 @@ impl<'a> Fc<'a> {
                     Ok(())
                 })?;
             }
-            ExprKind::Chain(_) => {
-                self.unsup("delete of an optional chain");
+            ExprKind::Chain(inner) => {
+                // `delete a?.b`: a nullish link ends the chain, and the result is `true`.
+                let (short, done) = (self.label(), self.label());
+                let saved = self.chain_short.replace(short);
+                self.delete(inner, dst)?;
+                self.chain_short = saved;
+                self.jmp(done);
+                self.bind(short);
                 self.op(Op::LoadTrue, dst, 0, 0);
+                self.bind(done);
             }
             _ => {
                 self.effect(arg)?;
