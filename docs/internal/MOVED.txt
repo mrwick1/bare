@@ -235,3 +235,4 @@ docs/research-v8-reference.md	docs/internal/research-v8-reference.md
 docs/resources.md	docs/internal/resources.md
 docs/staging-js-requirements.md	docs/internal/staging-js-requirements.md
 docs/staging-network.md	docs/internal/staging-network.md
+docs/open-source.md	docs/internal/open-source.md
