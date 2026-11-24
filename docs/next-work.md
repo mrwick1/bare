@@ -2,7 +2,7 @@
 
 Source: [final benchmark](progress/2026-11-23-final-engine-benchmark.md) (#957) on frozen main `f3b30305`. Earlier sources: [benchmark rerun](progress/2026-11-22-engine-benchmark-rerun.md) (#923) and [browser rerun](progress/2026-11-22-browser-rerun-after-fixes.md) (#942).
 The owner's session keeps this list current. Each item gives the problem, the numbers and the next step.
-Work is paused on 2026-11-23 at this checkpoint. No agents run.
+Work resumed on 2026-11-23 evening with items 9 to 12. Status 2026-11-24 below each item.
 
 ## State
 
@@ -33,6 +33,8 @@ Work is paused on 2026-11-23 at this checkpoint. No agents run.
    Done 2026-11-22: #942 reran the full cohort. Round 2 (#943 to #954) fixed the next losers. #957 is the current state.
    New worst clean rows (#957, js2/OLD instructions): `mdn-reference` 1.73x (OLD samples span 2,674 to 5,809 M, so the OLD minimum can be a short run), `crates-io-home` 1.55x (confirmed), `nodejs-org-home` 1.05x, `python-org-docs-link` 1.02x.
    Next step: profile `react-docs` and `substack-home` (item 10), `crates-io-home` and `mdn-reference` on tapes.
+   Done 2026-11-24 ([profile](progress/2026-11-24-js2-crates-mdn-profile.md), #993): `mdn-reference` is not a loser (js2/OLD 0.81x to 0.85x in all modes). `crates-io-home` is not settled: 2.10x on the virtual-clock tape, 1.03x on the real-clock tape. The journey stops at `body` visible, and the app does not mount on either engine (known bug in the steps file).
+   Next step: make the crates.io app mount, then give the journey a fixed stop point and measure again.
 2. **React typing.** js2 uses 7.66 G and OLD uses 6.38 G (1.20x). The decision benchmark gave OLD 14.4 G on the same frozen OLD commit.
    Done 2026-11-22. The 14.4 G count was OLD `tree` mode (#926). #930 reads `for...in` keys from the shape: js2 5.71 G, 0.896x OLD `auto`. After #940: 5.68 G.
 3. **Startup memory.** An empty js2 process uses 5.6 MiB. QuickJS uses 3.0 MiB. This base is most of the per-program RSS gap.
@@ -50,6 +52,10 @@ Work is paused on 2026-11-23 at this checkpoint. No agents run.
 7. **Time to ready.** The rerun ran on a shared machine (load 0.09 to 5.14). Measure ready time again on an idle machine.
 8. **Phase 3.** Make js2 the default engine. Test it on the Windows VM.
 9. **js2 session example.** The `session_load` example fails with `BARE_JS_EXEC=new` on an old-engine dereference (#931). The virtual session test covers the js2 session path. Fix it before js2 becomes the default.
+   Done 2026-11-24 (#989): `AnyBrowser` forwards `stats`. `session_load chain 10` and `heavy 10` pass on both engines.
 10. **New js2 losers after the clone fix.** `react-docs` now runs to the end on js2. js2 uses 1.74x the OLD instructions (2.32x in the recheck), and the reply counts differ. `substack-home` rose from 1,657 M to 6,992 M on js2. js2 now gets 142 replies against 22 for OLD, so js2 loads more of the page. Hypothesis: the clone and Intl work let js2 run code that it skipped before. Next step: profile both journeys by subsystem.
+    Done 2026-11-24 ([profile](progress/2026-11-24-js2-react-substack-profile.md), #991): not a js2 regression. js2/OLD is 0.76x to 0.92x on react-docs and 0.80x to 0.81x on substack-home in every mode. The reply count depends on when the journey stops. #990 fixed a js2 panic on the react-docs replay (an event was collected during dispatch). #992 made the profile classifier count `bare_js2::` frames.
 11. **Reply-count differences.** 11 public journeys give different reply counts on OLD and js2: `blog-rust-lang-home`, `hn-new-past`, `paulgraham-home`, `python-docs-search-results`, `python-org-docs-link`, `react-docs`, `rust-book-chapters`, `rust-book-sidebar`, `sqlite-org-home`, `substack-home`, `wikipedia-article`. Next step: record tapes and compare the requests, to separate live-site noise from engine differences.
+    Done 2026-11-24 ([tapes](progress/2026-11-23-js2-reply-diffs-and-tapes.md), #988): 10 journeys give equal counts in one live run. The other differences are site noise, except the react-docs panic (fixed in #990) and 2 extra `substackcdn.com` images that js2 fetches on substack-home (open).
 12. **Two-level noise.** `craigslist-home`, `devto-home`, `sqlite-org-home` and `wikipedia-toc-languages` give samples at two levels. `go-dev-home` spreads from 989 M to 5,919 M. `github-docs-home` gave HTTP 429. Next step: measure these rows on tapes only.
+    Done 2026-11-24 (#988): on tapes the spread is at most 0.3% over 3 runs. Open: the craigslist-home replay fails at its first `302` on both engines; go-dev-home misses 30 requests on its tape; the wikipedia-toc-languages replay costs 2x the live run (cause not found).
