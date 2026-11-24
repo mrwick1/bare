@@ -57,6 +57,9 @@ pub enum Moved {
     Buffer(Vec<u8>),
     /// What [`CloneHost::transfer_out`] gave. The engine never looks inside.
     Host(Box<dyn Any>),
+    /// A copy of a serializable platform object (a `Blob`, a `CryptoKey`) that [`CloneHost::write_host_object`] gave. It is not in the
+    /// transfer list: it follows the listed items. The engine never looks inside.
+    Data(Box<dyn Any>),
 }
 
 /// A structured clone as data. It holds no engine value, so it can wait in a history entry or cross to another heap.
@@ -123,6 +126,15 @@ pub trait CloneHost<E: Engine> {
     fn transfer_in<'s>(&mut self, s: &mut Scope<'s, E>, items: Vec<Box<dyn Any>>) -> Result<Vec<Local<'s>>, Error<'s>>;
     /// The error to throw for a refused value (`DataCloneError`).
     fn data_clone_error<'s>(&mut self, s: &mut Scope<'s, E>, what: Refused) -> Error<'s>;
+    /// HTML "serialization steps" of a host object that is not in the transfer list: its data, and its byte cost for [`Meter`]. `None`
+    /// refuses it. The data must hold no JS object. V8 has the same hook (`ValueSerializer::Delegate::WriteHostObject`).
+    fn write_host_object(&mut self, _o: &E::Raw) -> Option<(Box<dyn Any>, usize)> {
+        None
+    }
+    /// HTML "deserialization steps": a new object from what [`CloneHost::write_host_object`] gave.
+    fn read_host_object<'s>(&mut self, s: &mut Scope<'s, E>, _data: &dyn Any) -> Result<Local<'s>, Error<'s>> {
+        Err(self.data_clone_error(s, Refused::Object))
+    }
 }
 
 // ---------- cost model ----------

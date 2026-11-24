@@ -63,7 +63,7 @@ fn ends_of(xf: &[Moved]) -> impl Iterator<Item = u64> + '_ {
             Some(Transfer::End { me, .. }) => Some(*me),
             _ => None,
         },
-        Moved::Buffer(_) => None,
+        Moved::Buffer(_) | Moved::Data(_) => None,
     })
 }
 

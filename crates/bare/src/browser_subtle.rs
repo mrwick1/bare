@@ -34,6 +34,7 @@ impl Alg {
 }
 
 /// The data of one `CryptoKey`. The bytes are zeroed on drop.
+#[derive(Clone)]
 pub(crate) struct Key {
     alg: Alg,
     bytes: Vec<u8>,
@@ -149,7 +150,12 @@ fn check_uses<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, uses: u8, allowed: u8) 
     Ok(())
 }
 
-fn new_key<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, k: Key) -> Res<'s, Local<'s>> {
+/// The data of the key `o`, for a structured clone (WebCrypto "CryptoKey" serialization steps: all internal slots).
+pub(crate) fn key_data<E: Eng>(d: &Dom<E>, o: E::Obj) -> Option<Key> {
+    d.web.keys.borrow().get(&o).cloned()
+}
+
+pub(crate) fn new_key<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, k: Key) -> Res<'s, Local<'s>> {
     if d.web.keys.borrow().len() >= MAX_KEYS {
         return Err(d.lim_s(s, "crypto-keys"));
     }

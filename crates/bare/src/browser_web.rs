@@ -77,7 +77,8 @@ const MAX_RANDOM: usize = 65536;
 const NAMES: [&str; 7] = ["crypto", "navigator", "Blob", "File", "FormData", "SubtleCrypto", "FileList"];
 
 struct BlobData {
-    bytes: Vec<u8>,
+    /// Shared: a Blob never changes, so a clone (`structuredClone`, `postMessage`, `indexedDB`) shares the bytes.
+    bytes: std::rc::Rc<[u8]>,
     ty: String,
     /// `Some((name, lastModified))` for a File.
     file: Option<(String, f64)>,
@@ -223,7 +224,7 @@ impl<E: Eng> Dom<E> {
         let s = self.web.s.borrow();
         if let Some(b) = s.blobs.get(&o) {
             it.charge_o((b.bytes.len() / 64) as u64)?;
-            return Ok((b.bytes.clone(), Some(b.ty.clone()).filter(|t| !t.is_empty())));
+            return Ok((b.bytes.to_vec(), Some(b.ty.clone()).filter(|t| !t.is_empty())));
         }
         let f = &s.forms[&o];
         let boundary = self.boundary(it)?;
@@ -903,7 +904,7 @@ pub(crate) fn is_blob_url(s: &str) -> bool {
 pub(crate) fn blob_url_read<E: Eng>(d: &Dom<E>, url: &str) -> Option<(Vec<u8>, String)> {
     let s = d.web.s.borrow();
     let b = s.blobs.get(s.urls.get(url.trim_matches(|c: char| c <= ' ').split('#').next()?)?)?;
-    Some((b.bytes.clone(), b.ty.clone()))
+    Some((b.bytes.to_vec(), b.ty.clone()))
 }
 
 // ------------------------------------------------------------------------------------------ Blob and File
@@ -937,7 +938,7 @@ fn new_blob<E: Eng>(d: &Dom<E>, it: &mut E::Vm, proto: E::Obj, b: BlobData) -> V
 /// A new Blob with these bytes and type (the `response` of an `XMLHttpRequest` with `responseType = "blob"`).
 pub(crate) fn blob_from_bytes<E: Eng>(d: &Dom<E>, it: &mut E::Vm, bytes: Vec<u8>, ty: String) -> V<E> {
     let m = made(d, it)?;
-    new_blob(d, it, m.blob_p, BlobData { bytes, ty: blob_type(ty), file: None })
+    new_blob(d, it, m.blob_p, BlobData { bytes: bytes.into(), ty: blob_type(ty), file: None })
 }
 
 /// The value of `key="..."` in a header line value.
@@ -1009,7 +1010,7 @@ pub(crate) fn form_from<E: Eng>(d: &Dom<E>, it: &mut E::Vm, bytes: &[u8], ct: &s
             None => Ent::S(String::from_utf8_lossy(&data).into_owned()),
             Some((name, ty)) => {
                 let mtime = it.wall_now_ms();
-                let Val::Object(f) = E::kind(new_blob(d, it, m.file_p, BlobData { bytes: data, ty: blob_type(ty), file: Some((name, mtime)) })?) else { unreachable!() };
+                let Val::Object(f) = E::kind(new_blob(d, it, m.file_p, BlobData { bytes: data.into(), ty: blob_type(ty), file: Some((name, mtime)) })?) else { unreachable!() };
                 Ent::B(f)
             }
         };
@@ -1110,7 +1111,7 @@ fn blob_ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s
     let bytes = if s.type_of(v) == Type::Undefined { Vec::new() } else { parts(d, s, v, "Blob")? };
     let o = arg_s::<E>(s, a, 1);
     let (ty, _) = options(d, s, o, "Blob", false)?;
-    new_blob_s(d, s, proto, BlobData { bytes, ty, file: None })
+    new_blob_s(d, s, proto, BlobData { bytes: bytes.into(), ty, file: None })
 }
 
 fn file_ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
@@ -1124,7 +1125,7 @@ fn file_ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s
     let name = usv(d, s, n)?;
     let (ty, modified) = options(d, s, o, "File", true)?;
     let modified = modified.unwrap_or_else(|| s.wall_now_ms());
-    new_blob_s(d, s, proto, BlobData { bytes, ty, file: Some((name, modified)) })
+    new_blob_s(d, s, proto, BlobData { bytes: bytes.into(), ty, file: Some((name, modified)) })
 }
 
 fn offset<'s, E: Eng>(s: &mut Sc<'s, E>, v: Local<'s>, size: usize, default: usize) -> Res<'s, usize> {
@@ -1145,7 +1146,7 @@ fn blob_slice<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Arg
     let ty = if s.type_of(x2) == Type::Undefined { String::new() } else { blob_type(usv(d, s, x2)?) };
     let bytes = d.web.s.borrow().blobs[&o].bytes.get(start..end.max(start)).unwrap_or_default().to_vec();
     let proto = d.web.s.borrow().made.expect("made").blob_p;
-    new_blob_s(d, s, proto, BlobData { bytes, ty, file: None })
+    new_blob_s(d, s, proto, BlobData { bytes: bytes.into(), ty, file: None })
 }
 
 fn blob_text<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
@@ -1167,7 +1168,7 @@ fn blob_array_buffer<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>,
     let p = s.new_promise()?;
     let r = (|| -> Res<'s, Local<'s>> {
         let o = blob_of(d, s, this)?;
-        let bytes = d.web.s.borrow().blobs[&o].bytes.clone();
+        let bytes = d.web.s.borrow().blobs[&o].bytes.to_vec();
         s.charge((bytes.len() / 64) as u64)?;
         s.new_array_buffer(bytes)
     })();
@@ -1176,7 +1177,7 @@ fn blob_array_buffer<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>,
 
 fn blob_stream<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let o = blob_of(d, s, this)?;
-    let bytes = d.web.s.borrow().blobs[&o].bytes.clone();
+    let bytes = d.web.s.borrow().blobs[&o].bytes.to_vec();
     old_v::<E>(s, |it| crate::browser_fetch::bytes_stream(d, it, bytes))
 }
 
@@ -1247,7 +1248,7 @@ fn fill_form<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, proto: E::Obj, list: Vec
             None => {
                 let fp = d.web.s.borrow().made.expect("made").file_p;
                 let now = s.wall_now_ms();
-                let f = new_blob_s(d, s, fp, BlobData { bytes: Vec::new(), ty: "application/octet-stream".into(), file: Some((String::new(), now)) })?;
+                let f = new_blob_s(d, s, fp, BlobData { bytes: std::rc::Rc::from([]), ty: "application/octet-stream".into(), file: Some((String::new(), now)) })?;
                 Ent::B(lid::<E>(s, f))
             }
         };
@@ -1287,7 +1288,7 @@ pub(crate) fn file_from_ref<E: Eng>(d: &Dom<E>, it: &mut E::Vm, f: &crate::brows
         return Err(bad(d, it, format!("{len} bytes is over the {} MiB limit", MAX_UPLOAD >> 20)));
     }
     let bytes = std::fs::read(&f.path).map_err(|e| bad(d, it, e.to_string()))?;
-    new_blob(d, it, m.file_p, BlobData { bytes, ty: mime_of(&f.name).into(), file: Some((f.name.clone(), f.modified_ms)) })
+    new_blob(d, it, m.file_p, BlobData { bytes: bytes.into(), ty: mime_of(&f.name).into(), file: Some((f.name.clone(), f.modified_ms)) })
 }
 
 /// The entries of the FormData object `v`, a copy. `None` when `v` is not a FormData.
@@ -1603,4 +1604,35 @@ fn sw_controller<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: 
 fn sw_ready<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let w = sw_this(d, s, this)?;
     Ok(d.obj_local(s, w.ready))
+}
+
+// ------------------------------------------------------------------------------------------ structured clone
+
+/// A serializable platform object of this file, as data: what a structured clone carries (HTML "serialization steps").
+pub(crate) enum WebClone {
+    /// A `Blob` or a `File`: the bytes are shared, not copied.
+    Blob { bytes: std::rc::Rc<[u8]>, ty: String, file: Option<(String, f64)> },
+    Key(crate::browser_subtle::Key),
+}
+
+/// The data of `o` if it is a `Blob`, a `File` or a `CryptoKey`, with its byte cost.
+pub(crate) fn clone_out<E: Eng>(d: &Dom<E>, o: E::Obj) -> Option<(Box<dyn std::any::Any>, usize)> {
+    if let Some(b) = d.web.s.borrow().blobs.get(&o) {
+        let n = b.bytes.len() + b.ty.len() + b.file.as_ref().map_or(0, |f| f.0.len());
+        return Some((Box::new(WebClone::Blob { bytes: b.bytes.clone(), ty: b.ty.clone(), file: b.file.clone() }), n));
+    }
+    let k = crate::browser_subtle::key_data(d, o)?;
+    Some((Box::new(WebClone::Key(k)), 64))
+}
+
+/// A new object from what `clone_out` gave (HTML "deserialization steps").
+pub(crate) fn clone_in<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, data: &WebClone) -> Res<'s, Local<'s>> {
+    match data {
+        WebClone::Blob { bytes, ty, file } => {
+            let m = made_s(d, s)?;
+            let proto = if file.is_some() { m.file_p } else { m.blob_p };
+            new_blob_s(d, s, proto, BlobData { bytes: bytes.clone(), ty: ty.clone(), file: file.clone() })
+        }
+        WebClone::Key(k) => crate::browser_subtle::new_key(d, s, k.clone()),
+    }
 }

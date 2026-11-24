@@ -1316,7 +1316,7 @@ impl<E: Eng> Dom<E> {
                 Some(Transfer::Port(k)) => Some(*k),
                 _ => None,
             },
-            bare_js_api::Moved::Buffer(_) => None,
+            bare_js_api::Moved::Buffer(_) | bare_js_api::Moved::Data(_) => None,
         };
         if !xf.iter().any(|m| port_key(m).is_some()) {
             return Ok(());
