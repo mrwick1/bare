@@ -69,12 +69,13 @@ impl Realm {
         STOP
     }
 
-    /// Run `f` with room on the Rust stack for one more nested call: each level of `MAX_NEST` is a frame of `Vm::run`, which is big, and the
-    /// thread may be small. Below the first few levels, the stack grows on the heap when less than `RED_ZONE` is left.
+    /// The nested calls reached `MAX_NEST`.
     pub(crate) fn nested_too_deep(&self) -> bool {
         self.nest >= MAX_NEST
     }
 
+    /// Run `f` with room on the Rust stack for one more nested call: each level of `MAX_NEST` is a frame of `Vm::run`, which is big, and the
+    /// thread may be small. Below the first few levels, the stack grows on the heap when less than `RED_ZONE` is left.
     fn grow<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
         if self.nest < 4 {
             return f(self);
