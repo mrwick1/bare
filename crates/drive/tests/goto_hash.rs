@@ -42,7 +42,7 @@ fn goto_with_another_fragment_stays_in_the_document() {
     std::thread::Builder::new()
         .stack_size(64 << 20)
         .spawn(move || {
-            let mut p = Page::open_old(&format!("{origin}/app#inbox"), (800, 600)).unwrap();
+            let mut p = Page::open(&format!("{origin}/app#inbox"), (800, 600)).unwrap();
             p.quiet = true;
             assert!(tick_until(&mut p, Duration::from_secs(5), |p| p.idle().is_ok()), "the page did not settle");
             js(&mut p, "kept = 'changed in this document'");

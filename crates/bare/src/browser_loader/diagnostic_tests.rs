@@ -2,7 +2,7 @@
 use super::*;
 use crate::eng_old::Old;
 use bare_js::heap::{HeapError, HeapLimits};
-use bare_js::eval::EvalLimits;
+use crate::js_limits::EvalLimits;
 use std::mem::size_of;
 
 #[test]

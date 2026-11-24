@@ -10,7 +10,7 @@ bare-observe = { path = "../observe" }
 bare = { path = "../bare" }
 bare-css = { path = "../css" }
 bare-html = { path = "../html" }
-bare-js = { path = "../js" }
+bare-vex = { path = "../vex" }
 bare-net = { path = "../net" }
 bare-paint = { path = "../paint" }
 bare-url = { path = "../url" }

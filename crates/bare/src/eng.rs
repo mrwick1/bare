@@ -40,7 +40,7 @@ pub trait Eng: Copy + Default + Debug + PartialEq + Eq + Hash + 'static {
     /// A property key.
     type Key: Copy + Debug + Eq + Hash + 'static;
     /// A new engine with its realm, for a page or a child frame.
-    fn realm(eval: bare_js::eval::EvalLimits, heap: bare_js::heap::HeapLimits) -> Result<Self::Vm, Fault<Self>>;
+    fn realm(eval: crate::js_limits::EvalLimits, heap: crate::js_limits::HeapLimits) -> Result<Self::Vm, Fault<Self>>;
     /// Attach the DOM and install its interfaces in the realm.
     fn install_dom(vm: &mut Self::Vm, dom: &std::rc::Rc<crate::browser::Dom<Self>>) -> Result<(), Fault<Self>> {
         dom.install_on(vm)
@@ -68,7 +68,7 @@ pub enum KeyKind<E: Eng> {
 pub enum Fault<E: Eng> {
     Throw(E::Raw),
     Unsupported(&'static str),
-    Limit(bare_js::eval::LimitKind),
+    Limit(crate::js_limits::LimitKind),
     /// A heap error that no script can see: the name of the error.
     Heap(&'static str),
 }
@@ -135,8 +135,8 @@ pub enum PState<E: Eng> {
     Rejected(E::Raw),
 }
 
-pub use bare_js::eval::WallClock;
-pub use bare_js::heap::Collected;
+pub use crate::js_limits::WallClock;
+pub use crate::js_limits::Collected;
 
 /// A write to a named property of a host object.
 pub enum NamedOp<E: Eng> {

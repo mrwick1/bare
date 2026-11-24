@@ -9,8 +9,8 @@ use crate::browser::*;
 use crate::control::Refusal;
 use crate::page::{Page, Source};
 use bare_html::tree;
-use bare_js::eval::EvalLimits;
-use bare_js::heap::HeapLimits;
+use crate::js_limits::EvalLimits;
+use crate::js_limits::HeapLimits;
 
 /// A d3 tree page. Chrome 155 (headless, `getBoundingClientRect` and `getBBox`) gives for it: r1 60,80,80,30; n1 60,80,80,30; r2 190,115,60,30;
 /// c2 212,122,16,16; p1 250,70,40,50; bbox of r1 0,0,80,30, of n2 -10,-5,60,30, of c2 12,2,16,16, of p1 0,0,40,50.

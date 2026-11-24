@@ -3,8 +3,8 @@
 use crate::browser::*;
 use bare_html::tree;
 use crate::eng_old::OldFault as Error;
-use bare_js::eval::{EvalLimits};
-use bare_js::heap::HeapLimits;
+use crate::js_limits::EvalLimits;
+use crate::js_limits::HeapLimits;
 
 fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     std::thread::Builder::new().stack_size(64 << 20).spawn(f).unwrap().join().unwrap()

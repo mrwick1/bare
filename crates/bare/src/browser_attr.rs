@@ -3,7 +3,7 @@
 //! The native `Document` is the one source of truth. There is no second list of attributes.
 //! - `attributes` is one `NamedNodeMap` object for each element while the element wrapper lives (`SameObject`). It stores only
 //!   its element. Its `length` and every index are read from the native attribute list when JavaScript asks (the heap calls
-//!   `Dom::indexed_len` and `Dom::indexed_item`, see `bare_js::heap::IndexedSource`). So it stays live after every mutation
+//!   `Dom::indexed_len` and `Dom::indexed_item`, see the indexed-source interface of the engine). So it stays live after every mutation
 //!   path: `setAttribute`, `removeAttribute`, the `*NS` methods, `style`, `classList`, `className`, the driver. Nothing caches
 //!   the length or the elements.
 //! - An `Attr` object is one object for each *attached* attribute while it is held: the key is (element, native name atom).

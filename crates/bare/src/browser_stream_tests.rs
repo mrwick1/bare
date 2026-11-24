@@ -3,7 +3,7 @@
 //! pieces, so a test controls when each piece leaves.
 
 use crate::browser_session::*;
-use bare_js::eval::EvalLimits;
+use crate::js_limits::EvalLimits;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};

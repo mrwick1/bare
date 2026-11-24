@@ -1,6 +1,6 @@
 //! Indexed style computations charge the work they perform.
 use crate::browser::{Browser, BrowserLimits};
-use bare_js::{eval::EvalLimits, heap::HeapLimits};
+use crate::js_limits::{EvalLimits, HeapLimits};
 
 #[test]
 fn indexed_style_reads_charge_the_candidates_they_test() {

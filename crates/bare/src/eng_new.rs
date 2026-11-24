@@ -4,7 +4,7 @@
 //! are the lines of the phase 2 queue (`docs/progress/2026-11-21-s04-pr6c2-js2-browser.md`).
 
 use crate::eng::{Collected, Desc, Eng, Fault, Got, HeapStats, KeyKind, Ops, PState, Prop, Val, WallClock};
-use bare_js::eval::LimitKind;
+use crate::js_limits::LimitKind;
 use bare_vex::api::Clock;
 use bare_vex::interp_rt::Realm;
 use bare_vex::value::{Kind, Value};
@@ -56,7 +56,7 @@ impl Eng for New {
     type Sym = NV;
     type Key = NV;
 
-    fn realm(eval: bare_js::eval::EvalLimits, _heap: bare_js::heap::HeapLimits) -> Result<Realm, Fault<New>> {
+    fn realm(eval: crate::js_limits::EvalLimits, _heap: crate::js_limits::HeapLimits) -> Result<Realm, Fault<New>> {
         bare_vex::script::load("").map(|mut vm| {
             vm.realm.init_host_intrinsics();
             // A task stops after `max_steps` back edges, so a runaway script ends only its own task.

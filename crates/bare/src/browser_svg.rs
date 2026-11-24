@@ -392,19 +392,19 @@ fn enable_classes<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
 struct SoftwareMath;
 impl bare_paint::svg::GeometryMath for SoftwareMath {
     fn sin(x: f32) -> f32 {
-        bare_js::sin(x as f64) as f32
+        (x as f64).sin() as f32
     }
     fn cos(x: f32) -> f32 {
-        bare_js::cos(x as f64) as f32
+        (x as f64).cos() as f32
     }
     fn sin_cos(x: f32) -> (f32, f32) {
         (Self::sin(x), Self::cos(x))
     }
     fn atan2(y: f32, x: f32) -> f32 {
-        bare_js::atan2(y as f64, x as f64) as f32
+        (y as f64).atan2(x as f64) as f32
     }
     fn acos(x: f32) -> f32 {
-        bare_js::acos(x as f64) as f32
+        (x as f64).acos() as f32
     }
     fn hypot(x: f32, y: f32) -> f32 {
         ((x as f64).powi(2) + (y as f64).powi(2)).sqrt() as f32

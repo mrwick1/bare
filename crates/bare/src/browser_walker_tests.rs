@@ -5,8 +5,8 @@ use crate::browser::*;
 use crate::browser_topic_tests::topic_test;
 use bare_html::tree;
 use crate::eng_old::OldFault as Error;
-use bare_js::eval::{EvalLimits};
-use bare_js::heap::HeapLimits;
+use crate::js_limits::EvalLimits;
+use crate::js_limits::HeapLimits;
 
 topic_test!(chrome_cases, "walker", 46);
 topic_test!(iterator_cases, "iterator", 54);

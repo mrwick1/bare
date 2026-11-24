@@ -7,8 +7,8 @@ use crate::browser_loader::*;
 use crate::browser_topic_tests::topic_test;
 use bare_html::tree;
 use crate::eng_old::OldFault as Error;
-use bare_js::eval::{EvalLimits, LimitKind};
-use bare_js::heap::HeapLimits;
+use crate::js_limits::{EvalLimits, LimitKind};
+use crate::js_limits::HeapLimits;
 use bare_js::value::Value;
 use bare_net::http::Client;
 

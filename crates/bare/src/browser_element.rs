@@ -39,7 +39,7 @@ use bare_js_api::{Args, Local, Type};
 use crate::browser_dom as nd;
 use bare_css::values::{Keyword, Property, Value as Cv};
 use bare_html::dom::{Document, NodeData, NodeId};
-use bare_js::value::to_int32;
+use crate::js_num::to_int32;
 
 /// The local name of an element of any namespace, `""` for other nodes.
 fn name(doc: &Document, n: NodeId) -> &str {

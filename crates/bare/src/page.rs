@@ -343,14 +343,6 @@ impl Page {
         Page::open_with(url, viewport, None)
     }
 
-    /// `open` on the old engine, for the tests that read `Page::browser` as the old browser (`AnyBrowser` derefs to it).
-    #[doc(hidden)]
-    pub fn open_old(url: &str, viewport: (u32, u32)) -> Result<Page, String> {
-        let mut cfg = SessionConfig::new(url);
-        cfg.vex = false;
-        Page::open_cfg(cfg, viewport)
-    }
-
     /// `open` with the storage of an earlier session (`None`: empty storage, a new profile).
     pub fn open_with(url: &str, viewport: (u32, u32), storage: Option<crate::browser_navigation::WebStorage>) -> Result<Page, String> {
         let mut cfg = SessionConfig::new(url);

@@ -28,7 +28,7 @@ use crate::eng::{Eng, Fault, Ops};
 use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_scoped::*;
-use bare_js::value::to_uint32;
+use crate::js_num::to_uint32;
 use bare_js_api::{Args, Attrs, Engine, HostFn, Local};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;

@@ -408,13 +408,15 @@ fn tag_of(doc: &Document, n: NodeId) -> Option<&'static str> {
 
 /// The pattern `p` matches all of `value`. A pattern that does not compile matches.
 fn pattern_ok<E: Eng>(it: &mut E::Vm, p: &str, value: &str) -> R<E, bool> {
-    use bare_js::regexp::{Limits, Regex, Scratch};
-    let Ok(re) = Regex::from_str(&format!("^(?:{p})$"), "u") else { return Ok(true) };
+    use bare_vex::regexp::{Scratch, compile, exec, image_groups};
+    let pattern: Vec<u16> = format!("^(?:{p})$").encode_utf16().collect();
+    let Ok(img) = compile(&pattern, "u") else { return Ok(true) };
     let units: Vec<u16> = value.encode_utf16().collect();
-    let mut sc = Scratch::new();
-    let r = re.exec(&units, 0, &Limits::default(), None, &mut sc);
+    let (mut sc, mut out) = (Scratch::new(), vec![0u32; 2 * (image_groups(&img) + 1)]);
+    let mut fuel = u64::MAX;
+    let r = exec(&img, &units, 0, &mut sc, &mut fuel, &mut out);
     it.charge_o(sc.steps / 16 + 1)?;
-    Ok(!matches!(r, Ok(None)))
+    Ok(!matches!(r, Ok(false)))
 }
 
 const TEXTY: [&str; 11] = ["text", "search", "tel", "url", "email", "password", "number", "date", "month", "week", "time"];

@@ -22,9 +22,13 @@ use crate::browser_geom::{Iface, Slot, finish_s, illegal_s, make_s, method_s, ne
 use crate::browser_lazy::lazy_global;
 use crate::browser_scoped::*;
 use bare_js_api::{Args, Elem, HostFn, Local, Type};
-use bare_js::{atan2, cos, sin, tan};
-use bare_js::value::number_to_string;
+use crate::js_num::number_to_string;
 use std::f64::consts::PI;
+
+fn sin(x: f64) -> f64 { x.sin() }
+fn cos(x: f64) -> f64 { x.cos() }
+fn tan(x: f64) -> f64 { x.tan() }
+fn atan2(y: f64, x: f64) -> f64 { y.atan2(x) }
 
 #[derive(Clone, Copy)]
 pub(crate) struct Mat {

@@ -133,7 +133,7 @@ fn image_ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'
     for (i, size) in sizes.iter_mut().enumerate() {
         let v = arg_s::<E>(s, a, i);
         if s.type_of(v) != Type::Undefined {
-            *size = Some(bare_js::value::to_uint32(s.to_number(v)?));
+            *size = Some(crate::js_num::to_uint32(s.to_number(v)?));
         }
     }
     let n = {

@@ -59,7 +59,7 @@ use crate::browser_sources::Roots;
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_js_api::{Args, Attrs, Local};
-use bare_js::value::{is_js_space, number_to_string, string_to_number};
+use crate::js_num::{is_js_space, number_to_string};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -620,7 +620,8 @@ fn numeric_prefix(units: &[u16], float: bool) -> f64 {
         while matches!(t.get(j), Some(48..=57)) { j += 1; }
         i = if j > e0 { j } else { mantissa_end };
     }
-    string_to_number(&t[..i])
+    // The prefix is ASCII digits, a sign, a point and an exponent, so Rust parses it to the nearest double.
+    t[..i].iter().map(|&u| u as u8 as char).collect::<String>().parse().unwrap_or(f64::NAN)
 }
 
 /// Numeric formatting stays data-only. Scan borrowed strings within the format-input and step caps.

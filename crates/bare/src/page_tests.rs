@@ -6,8 +6,8 @@ use crate::browser::*;
 use crate::page::{Page, Source};
 use bare_css::cascade::{self, Origin, RuleSet};
 use bare_html::tree;
-use bare_js::eval::EvalLimits;
-use bare_js::heap::HeapLimits;
+use crate::js_limits::EvalLimits;
+use crate::js_limits::HeapLimits;
 use bare_window::{App, Event, Mods};
 
 const NO: Mods = Mods { shift: false, ctrl: false, alt: false, meta: false };

@@ -506,7 +506,7 @@ fn video_size<'s, const I: usize, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: L
 fn set_video_size<'s, const I: usize, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let n = media_el(d, s, this, Some("video"))?;
     let a0 = arg_s::<E>(s, a, 0);
-    let v = bare_js::value::to_uint32(s.to_number(a0)?);
+    let v = crate::js_num::to_uint32(s.to_number(a0)?);
     attr_set_s(d, s, n, ["width", "height"][I], &(if v > MAX_UNSIGNED { 0 } else { v }).to_string())?;
     Ok(s.undefined())
 }
@@ -731,7 +731,7 @@ fn range_at<'s, const END: bool, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Lo
     let Some(a0) = a.get(0) else {
         return Err(s.type_error(&format!("Failed to execute '{name}' on 'TimeRanges': 1 argument required, but only 0 present.")));
     };
-    let i = bare_js::value::to_uint32(s.to_number(a0)?);
+    let i = crate::js_num::to_uint32(s.to_number(a0)?);
     Err(d.dom_err_s(s, "IndexSizeError", &format!("Failed to execute '{name}' on 'TimeRanges': The index provided ({i}) is greater than {}the maximum bound (0).", if i == 0 { "or equal to " } else { "" })))
 }
 

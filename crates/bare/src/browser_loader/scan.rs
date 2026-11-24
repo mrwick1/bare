@@ -32,8 +32,8 @@ pub(crate) struct Scan {
 }
 
 impl Scan {
-    pub(crate) fn new(client: Client, page: Url, lim: Limits, deadline: Instant, vex: bool) -> Scan {
-        Scan { net: Net::new(client, vex), mark: Mark::default(), done: false, page, base: None, lim, deadline, skip: 0, retry_at: 0 }
+    pub(crate) fn new(client: Client, page: Url, lim: Limits, deadline: Instant) -> Scan {
+        Scan { net: Net::new(client), mark: Mark::default(), done: false, page, base: None, lim, deadline, skip: 0, retry_at: 0 }
     }
 
     /// Read `html` from where the last call stopped, until `end`. `more`: the document is still on its way, so `html` may stop in the
@@ -109,8 +109,7 @@ impl Scan {
         }
         let key = Net::key(expect, &url);
         let new = !self.net.started.contains_key(&key);
-        // A scanned script is classic (a module has `type=module`), and so is a preload hint of `as=script`.
-        self.net.start_with(expect, &url, &lim, self.deadline, 0, expect == Expect::Script);
+        self.net.start_with(expect, &url, &lim, self.deadline, 0);
         // An element of the document with the URL of a hint is a real reference: from then on it holds the page like any other.
         if !hint {
             self.net.hints.remove(&key);

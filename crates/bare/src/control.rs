@@ -242,7 +242,7 @@ impl Page {
         let b = self.browser().expect("checked");
         match b.query_all(selector) {
             Ok(list) => Ok(list.into_iter().map(|node| Handle { doc, node }).collect()),
-            Err(AnyFault::Old(Fault::Throw(_)) | AnyFault::New(Fault::Throw(_))) => Err(format!("the selector is not valid: {selector}")),
+            Err(AnyFault::New(Fault::Throw(_))) => Err(format!("the selector is not valid: {selector}")),
             Err(e) => Err(format!("the query failed: {e:?}")),
         }
     }

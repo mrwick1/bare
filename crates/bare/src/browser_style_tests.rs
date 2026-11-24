@@ -5,8 +5,8 @@ use crate::browser::*;
 use crate::browser_style::StyleLimits;
 use bare_html::tree;
 use crate::eng_old::OldFault as Error;
-use bare_js::eval::{EvalLimits};
-use bare_js::heap::HeapLimits;
+use crate::js_limits::EvalLimits;
+use crate::js_limits::HeapLimits;
 use bare_js::value::Value;
 
 const PAGE: &str = "<!doctype html><html><head></head><body><div id=a style='color: red; margin: 0'></div><p id=b></p></body></html>";
@@ -40,7 +40,7 @@ fn react_prefix_probe_shape() {
 }
 
 fn lim(name: &'static str) -> String {
-    format!("limit:{:?}", bare_js::eval::LimitKind::Host(name))
+    format!("limit:{:?}", crate::js_limits::LimitKind::Host(name))
 }
 
 fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {

@@ -86,7 +86,7 @@ use crate::browser::{Browser, Dom, IdMap, Owner, R};
 use crate::browser_scoped::*;
 use crate::browser_navigation_url::form_serialize;
 use crate::browser_streams as streams;
-use bare_js::eval::LimitKind;
+use crate::js_limits::LimitKind;
 use bare_js_api::{Args, Engine, Error as AErr, HostFn, Local, Persistent, Traced, Type};
 use bare_net::http::{Client, Cookies, Ctx, Method, Request as NetRequest};
 use bare_net::parallel::Task;

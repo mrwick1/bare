@@ -3,8 +3,8 @@
 
 use crate::browser::*;
 use bare_html::tree;
-use bare_js::eval::EvalLimits;
-use bare_js::heap::HeapLimits;
+use crate::js_limits::EvalLimits;
+use crate::js_limits::HeapLimits;
 use crate::page::{Page, Source};
 use crate::resources::test_server::{Reply, serve};
 use bare_window::{Event, Mods};

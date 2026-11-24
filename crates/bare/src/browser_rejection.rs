@@ -11,7 +11,7 @@ use crate::browser::*;
 use crate::browser_console::{push_text, ConsoleLevel};
 use crate::browser_scoped::*;
 use bare_js_api::{Args, HostFn, Local};
-use bare_js::eval::MAX_PENDING_REJECTIONS;
+use bare_js_api::MAX_PENDING_REJECTIONS;
 
 #[cold]
 #[inline(never)]

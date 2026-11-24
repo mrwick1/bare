@@ -46,7 +46,7 @@ use crate::browser_lazy::lazy_global;
 use crate::browser_nodelist::{self as nl, Src};
 use crate::browser_scoped::*;
 use bare_html::dom::{Atom, Document, NodeData, NodeId};
-use bare_js::value::{to_int32, to_uint32};
+use crate::js_num::{to_int32, to_uint32};
 use bare_js_api::{Args, HostFn, Local, Type};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashSet;

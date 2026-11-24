@@ -65,7 +65,7 @@ fn serve(delay: Option<Duration>) -> String {
 static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn open(url: &str) -> (Page, mpsc::Receiver<()>) {
-    let mut p = Page::open_old(url, (800, 600)).unwrap();
+    let mut p = Page::open(url, (800, 600)).unwrap();
     p.wait_load(Duration::from_secs(10)).unwrap();
     p.quiet = true;
     let (tx, rx) = mpsc::channel();

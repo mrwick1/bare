@@ -694,7 +694,7 @@ mod modern_colors {
     #[test]
     fn a_shorthand_keeps_its_deferred_color_when_another_longhand_changes() {
         let limits = Lim { bytes:10000, decls:100 };
-        let mut charge = |_| Ok::<(), crate::eng::Fault<crate::eng_old::Old>>(());
+        let mut charge = |_| Ok::<(), crate::eng::Fault<crate::eng_new::New>>(());
         let mut list = parse("background: color-mix(in srgb, currentColor, blue)", limits, &mut charge).ok().unwrap();
         let mut output = String::new();
         set(&mut list, "background-image", "none", false, limits, &mut output, &mut charge).ok().unwrap();

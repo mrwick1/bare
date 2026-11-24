@@ -3,7 +3,7 @@
 use crate::browser_loader::*;
 use crate::browser_session::*;
 use crate::resources::test_server::{Reply, Server, serve};
-use bare_js::eval::EvalLimits;
+use crate::js_limits::EvalLimits;
 use std::time::Duration;
 
 #[test]

@@ -5,8 +5,8 @@
 use crate::browser::*;
 use bare_html::tree;
 use crate::eng_old::OldFault as Error;
-use bare_js::eval::{EvalLimits, LimitKind};
-use bare_js::heap::HeapLimits;
+use crate::js_limits::{EvalLimits, LimitKind};
+use crate::js_limits::HeapLimits;
 use bare_js::value::Value;
 
 const SVG: &str = "http://www.w3.org/2000/svg";

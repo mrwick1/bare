@@ -4,9 +4,9 @@
 use crate::browser::*;
 use bare_html::tree;
 use crate::eng_old::OldFault as Error;
-use bare_js::eval::{EvalLimits, LimitKind};
+use crate::js_limits::{EvalLimits, LimitKind};
 use crate::browser_resize::ResizeLimits;
-use bare_js::heap::HeapLimits;
+use crate::js_limits::HeapLimits;
 use bare_js::value::Value;
 
 fn page(css: &str, body: &str) -> Browser {

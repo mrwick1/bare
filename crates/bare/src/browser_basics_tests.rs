@@ -5,8 +5,8 @@ use crate::browser::*;
 use crate::browser_fetch::{FetchConfig, FetchLimits};
 use crate::browser_fetch_tests::{at, big, js, mk, ok, serve};
 use bare_html::tree;
-use bare_js::eval::EvalLimits;
-use bare_js::heap::HeapLimits;
+use crate::js_limits::EvalLimits;
+use crate::js_limits::HeapLimits;
 use bare_net::http::Client;
 
 fn page(html: &str, base: &str) -> Browser {

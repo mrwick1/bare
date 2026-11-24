@@ -417,7 +417,7 @@ impl Session {
             let wait = has_await(&code);
             let forms = if wait { [expr, body] } else { [block, body] };
             // Parse again only after a failure: the engine's error value has no line. A runtime error parses, so it gives `None`.
-            let syntax = |src: &str| bare_js::parse::parse_script(src, Default::default()).err();
+            let syntax = |src: &str| bare_vex::parse::parse_script(src, Default::default()).err();
             let mut src = &forms[0];
             let mut r = b.script(src);
             // The expression form fails to parse for statements with `await`: that needs no second look.

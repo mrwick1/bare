@@ -89,7 +89,7 @@ fn on_big_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T 
 
 fn open(url: &str) -> Page {
     // Pinned to the old engine: on Vex the heavy page after a wide page peaks 4 MB higher (docs/progress/2026-11-24-js2-default.md).
-    let mut p = Page::open_old(url, SIZE).unwrap();
+    let mut p = Page::open(url, SIZE).unwrap();
     p.wait_load(Duration::from_secs(20)).unwrap();
     p.quiet = true;
     p

@@ -8,7 +8,7 @@ use crate::browser_topic_tests::topic_test;
 use bare_html::tree;
 use crate::eng_old::OldFault as Error;
 use bare_js::eval::{EvalLimits, LimitKind, PromiseLimits};
-use bare_js::heap::HeapLimits;
+use crate::js_limits::HeapLimits;
 use bare_js::value::Value;
 
 // Chrome 155 answers for `class X extends` a host constructor (Headers, Request, Response, URL, Blob, File, FormData, AbortController, AbortSignal).

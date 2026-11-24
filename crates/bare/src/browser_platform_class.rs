@@ -300,7 +300,7 @@ fn item<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>)
     let (_, el) = list_of(d, s, this)?;
     required::<E>(s, a, 1, "item")?;
     let v = arg_s::<E>(s, a, 0);
-    let i = bare_js::value::to_uint32(s.to_number(v)?) as usize;
+    let i = crate::js_num::to_uint32(s.to_number(v)?) as usize;
     match tokens(d, s, el)?.get(i) {
         Some(t) => d.js_str_s(s, t),
         None => Ok(s.null()),

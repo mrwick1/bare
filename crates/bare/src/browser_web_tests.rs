@@ -8,8 +8,8 @@ use crate::browser_fetch::FetchLimits;
 use crate::browser_fetch_tests::{go, mk};
 use bare_html::tree;
 use crate::eng_old::OldFault as Error;
-use bare_js::eval::{EvalLimits};
-use bare_js::heap::HeapLimits;
+use crate::js_limits::EvalLimits;
+use crate::js_limits::HeapLimits;
 use bare_js::value::Value;
 
 fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {

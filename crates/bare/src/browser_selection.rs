@@ -66,7 +66,7 @@ use crate::browser::*;
 use crate::browser_dom::{attr_set, input_kind};
 use crate::browser_scoped::*;
 use bare_html::dom::{Document, NodeData, NodeId};
-use bare_js::value::to_uint32;
+use crate::js_num::to_uint32;
 use bare_js_api::{Args, Local, Type};
 
 /// `none` is read and stored as `forward`: Chrome on Linux has no directionless selection (`docs/decisions.md`).

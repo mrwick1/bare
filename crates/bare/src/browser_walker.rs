@@ -433,7 +433,7 @@ fn create<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s
         return Err(s.type_error(&format!("Failed to execute '{who}' on 'Document': parameter 1 is not of type 'Node'.")));
     };
     let what = match a.get(1) {
-        Some(v) if s.type_of(v) != Type::Undefined => bare_js::value::to_uint32(s.to_number(v)?),
+        Some(v) if s.type_of(v) != Type::Undefined => crate::js_num::to_uint32(s.to_number(v)?),
         _ => 0xFFFF_FFFF,
     };
     let filter = match a.get(2) {

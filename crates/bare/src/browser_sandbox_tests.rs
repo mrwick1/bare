@@ -1,7 +1,8 @@
 use crate::browser::*;
 use bare_html::tree;
 use crate::eng_old::OldFault as Error;
-use bare_js::{eval::{EvalLimits}, heap::HeapLimits, value::Value};
+use crate::js_limits::{EvalLimits, HeapLimits};
+use bare_js::value::Value;
 const ORIGIN: &str = "https://redis.io";
 
 fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {

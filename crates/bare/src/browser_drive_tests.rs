@@ -8,8 +8,8 @@ use crate::browser_loader::{Fatal, Input, Stop};
 use crate::browser_session::*;
 use crate::resources::test_server::{Reply, serve};
 use bare_html::tree;
-use bare_js::eval::EvalLimits;
-use bare_js::heap::HeapLimits;
+use crate::js_limits::EvalLimits;
+use crate::js_limits::HeapLimits;
 use std::time::Duration;
 
 const PAGE: &str = include_str!("../../../tools/fixtures/ui/drive.html");

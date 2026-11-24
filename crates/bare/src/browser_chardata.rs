@@ -12,7 +12,7 @@ use crate::browser_scoped::*;
 use bare_js_api::{Args, Local};
 use crate::browser_range::utf16_len;
 use bare_html::dom::NodeData;
-use bare_js::value::to_uint32;
+use crate::js_num::to_uint32;
 
 type V<E: Eng> = R<E, E::Raw>;
 

@@ -1,6 +1,6 @@
 //! The browser app as a library, so that its parts can be tested. `main.rs` is the command line on top.
 //!
-//! `browser` joins the DOM (`bare_html::dom::Document`) to the JavaScript evaluator (`bare_js`): `window`,
+//! `browser` joins the DOM (`bare_html::dom::Document`) to the JavaScript engine (`bare_vex`): `window`,
 //! `document`, nodes, events. Read its header for what works and what is gated.
 
 #![allow(type_alias_bounds)]
@@ -9,7 +9,8 @@ pub mod browser;
 pub mod eng;
 pub mod browser_any;
 pub mod eng_new;
-pub mod eng_old;
+pub mod js_limits;
+pub mod js_num;
 mod browser_dom;
 mod browser_dom_old;
 mod browser_fragment;
@@ -293,7 +294,6 @@ mod browser_range_tests;
 #[cfg(test)]
 mod browser_owners_tests;
 #[cfg(test)]
-mod old_engine_gate_tests;
 #[cfg(test)]
 mod browser_session_vex_default_tests;
 #[cfg(test)]

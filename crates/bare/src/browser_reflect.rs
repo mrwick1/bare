@@ -145,7 +145,7 @@ pub(crate) fn set<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a:
             return Ok(s.undefined());
         }
         Kind::Long(_, lo) => {
-            let x = bare_js::value::to_int32(s.to_number(v)?);
+            let x = crate::js_num::to_int32(s.to_number(v)?);
             if lo >= 0 && x < lo {
                 let tag = d.doc.borrow().element_name(n).to_string();
                 let why = if lo == 0 { format!("The value provided ({x}) is negative.") } else { format!("The value provided ({x}) is not positive.") };
@@ -153,7 +153,7 @@ pub(crate) fn set<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a:
             }
             x.to_string()
         }
-        Kind::Clamp(..) => bare_js::value::to_uint32(s.to_number(v)?).to_string(),
+        Kind::Clamp(..) => crate::js_num::to_uint32(s.to_number(v)?).to_string(),
         _ => d.string_arg_s(s, v)?,
     };
     crate::browser_dom::attr_set_s(d, s, n, attr, &st)?;

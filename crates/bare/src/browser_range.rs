@@ -48,7 +48,7 @@ use crate::browser_dom::{clone_tree_s, name_of, new_fragment_s, Op};
 use crate::browser_lazy::lazy_global;
 use bare_html::dom::{Change, Document, NodeData, NodeId};
 use crate::browser_scoped::*;
-use bare_js::value::to_uint32;
+use crate::js_num::to_uint32;
 use bare_js_api::{Args, HostFn, Local};
 use std::cell::{OnceCell, RefCell};
 use std::cmp::Ordering;
