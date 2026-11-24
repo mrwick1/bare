@@ -28,7 +28,7 @@ fn server(routes: impl Fn() -> Vec<Route> + Send + Sync + 'static) -> Server {
 
 fn cfg(url: String) -> SessionConfig {
     let mut c = SessionConfig::new(&url);
-    c.js2 = false; // this file tests the old engine
+    c.vex = false; // this file tests the old engine
     c.virtual_clock = true;
     c.eval = EvalLimits { max_steps: 5_000_000, ..Default::default() };
     c.page.quiet = Duration::from_millis(100);

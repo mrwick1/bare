@@ -354,7 +354,7 @@ fn a_long_script_that_the_scan_started_runs_from_the_tree_that_the_worker_parsed
         let before = bare_js::parse_ahead::taken_here();
         // The parse-ahead tree is a feature of the old engine.
         let mut c = cfg(srv.port, true);
-        c.js2 = false;
+        c.vex = false;
         let (s, stop) = load(Session::new(c));
         assert_eq!(stop, SessionStop::Page(crate::Stop::Settled));
         assert_eq!(item(&s, srv.port, "a").as_deref(), Some("ran"));

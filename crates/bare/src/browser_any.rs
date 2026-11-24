@@ -345,7 +345,7 @@ impl std::ops::Deref for AnyBrowser {
     fn deref(&self) -> &Browser<Old> {
         match self {
             AnyBrowser::Old(b) => b,
-            AnyBrowser::New(_) => panic!("this browser runs on js2"),
+            AnyBrowser::New(_) => panic!("this browser runs on Vex"),
         }
     }
 }
@@ -355,7 +355,7 @@ impl std::ops::DerefMut for AnyBrowser {
     fn deref_mut(&mut self) -> &mut Browser<Old> {
         match self {
             AnyBrowser::Old(b) => b,
-            AnyBrowser::New(_) => panic!("this browser runs on js2"),
+            AnyBrowser::New(_) => panic!("this browser runs on Vex"),
         }
     }
 }

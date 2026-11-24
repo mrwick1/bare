@@ -347,7 +347,7 @@ impl Page {
     #[doc(hidden)]
     pub fn open_old(url: &str, viewport: (u32, u32)) -> Result<Page, String> {
         let mut cfg = SessionConfig::new(url);
-        cfg.js2 = false;
+        cfg.vex = false;
         Page::open_cfg(cfg, viewport)
     }
 

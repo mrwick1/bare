@@ -14,7 +14,7 @@ fn a_runaway_script_on_js2_ends_at_the_step_budget() {
             let body = "<script>localStorage.setItem('a', '1')</script><script>while (true) {}</script><script>localStorage.setItem('c', '1')</script>";
             let srv: Server = serve(move |path| if path == "/" { Reply::new(200, Some("text/html; charset=utf-8"), body) } else { Reply::new(404, Some("text/plain"), "no") });
             let mut c = SessionConfig::new(&srv.url("/"));
-            c.js2 = true;
+            c.vex = true;
             c.virtual_clock = true;
             c.eval = EvalLimits { max_steps: 2_000_000, ..Default::default() };
             c.page.quiet = Duration::from_millis(100);

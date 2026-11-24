@@ -7,15 +7,15 @@ use crate::resources::test_server::{Reply, serve};
 #[test]
 fn live_sessions_queue_classic_parses_only_for_old() {
     std::thread::Builder::new().stack_size(64 << 20).spawn(|| {
-        for js2 in [false, true] {
-            let body = format!("/* {} */\nvar speculativeParse = {js2};", "x".repeat(bare_js::parse_ahead::MIN_AHEAD));
+        for vex in [false, true] {
+            let body = format!("/* {} */\nvar speculativeParse = {vex};", "x".repeat(bare_js::parse_ahead::MIN_AHEAD));
             let server = serve(move |path| match path {
                 "/" => Reply::new(200, Some("text/html"), "<link rel=preload as=script href=/classic.js><p>Page</p>"),
                 "/classic.js" => Reply::js(body.clone()),
                 _ => Reply::new(404, None, ""),
             });
             let mut cfg = SessionConfig::new(&server.url("/"));
-            cfg.js2 = js2;
+            cfg.vex = vex;
             cfg.live = true;
             let mut session = Session::new(cfg);
             session.run();
@@ -33,7 +33,7 @@ fn live_sessions_queue_classic_parses_only_for_old() {
             let script = net.fetch(&resources::Target { expect, url }, &Limits::default(), deadline_after(Duration::from_secs(5)), 0).unwrap();
             assert!(script.text.contains("var speculativeParse"));
             let ahead = net.ahead.as_ref();
-            assert_eq!(ahead.is_some_and(|a| a.running() || a.began() > 0), !js2, "js2={js2}");
+            assert_eq!(ahead.is_some_and(|a| a.running() || a.began() > 0), !vex, "vex={vex}");
         }
     }).unwrap().join().unwrap();
 }
