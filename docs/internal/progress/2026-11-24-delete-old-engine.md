@@ -23,7 +23,7 @@ Date: 2026-11-24. Base: main 11f6a9b8 (after the rename to Vex, #998).
 ## Tests
 
 - `t` on the change: 1477 passed, 97 failed before the ignore marks; 2 more modules aborted on a stack overflow, which hid 3 more failures (run on archMachine, one run).
-- 100 tests that ran only on the old engine fail on Vex. Each one has `#[ignore = "vex: <first failure line>"]`. Vex is the default since v0.1.19, so users already see these gaps. The list follows.
+- 101 tests that ran only on the old engine fail on Vex. Each one has `#[ignore = "vex: <first failure line>"]`. Vex is the default since v0.1.19, so users already see these gaps. The list follows.
 - `cargo clippy -p bare -p bare-drive -p bare-js-api --all-targets`: no warnings in these crates.
 
 ### Ignored tests (Vex gaps)
@@ -33,6 +33,7 @@ Date: 2026-11-24. Base: main 11f6a9b8 (after the rename to Vex, #998).
 | `browser_elements_tests::indirect_eval_keeps_the_call_budget_surface` | stack overflow: the process aborts. Follow-up: high priority, a page can crash the browser. |
 | `browser_range_tests::a_range_cut_in_a_very_deep_tree_is_a_limit_not_a_stack_overflow` | stack overflow: the process aborts. Follow-up: high priority. |
 | `browser_range_tests::chrome_cases` | 1 of 79 cases differ |
+| `live_budget::a_live_page_runs_more_tasks_than_one_page_load_may` (crates/drive) | A MessageChannel loop stops at 20740 tasks on `Limit(Host("dom-events"))`. Follow-up: high priority, a long-lived page (Gmail) stops. Hypothesis: Vex does not free event objects. |
 | `a_link_does_not_keep_the_frame_of_the_old_document` | after a small page the heavy page peaks at 4359241 B, after the wide page at 8519683 B |
 | `a_navigation_does_not_keep_the_frame_of_the_old_document` | after a small page the heavy page peaks at 4286690 B, after the wide page at 8336166 B |
 | `browser_abort_tests::structured_clone_gates_and_limits` | left: 'limit:Steps' |
