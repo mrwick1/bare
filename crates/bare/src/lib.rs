@@ -321,6 +321,8 @@ mod browser_session_vex_default_tests;
 #[cfg(test)]
 mod browser_reclaim_tests;
 #[cfg(test)]
+mod browser_reclaim_custom_tests;
+#[cfg(test)]
 mod browser_dom_text_bound_tests;
 #[cfg(test)]
 mod browser_resize_tests;

@@ -9,7 +9,6 @@
 //!
 //! A wrapper is a root through `by_node`. An object that names a node (an `Attr`, a `CSSStyleDeclaration`) keeps the wrapper of the node alive
 //! (`trace`), and its module gives the node as well (`held`).
-//! Not supported, so no node is freed while it is on: custom elements (their holders are not listed).
 
 use crate::eng::Eng;
 use crate::browser::*;
@@ -108,9 +107,6 @@ impl<E: Eng> Dom<E> {
     #[inline]
     fn reclaim_walk(&self, collect: bool) -> usize {
         let r = &self.reclaim;
-        if self.ce.on.get() {
-            return 0;
-        }
         if !(r.always.get() || r.compact.get()) {
             let base = r.base.get();
             let floor = if cfg!(test) { r.floor.get() } else { FLOOR };
@@ -143,6 +139,7 @@ impl<E: Eng> Dom<E> {
         crate::browser_attr::held(self, &mut live);
         crate::browser_computed::held(self, &mut live);
         crate::browser_controls::held(self, &mut live);
+        crate::browser_custom::held(self, &mut live);
         crate::browser_cssom::held(self, &mut live);
         crate::browser_frames::held(self, &mut live);
         self.kids.held(&mut live);
@@ -197,6 +194,7 @@ impl<E: Eng> Dom<E> {
         self.dialogs.borrow_mut().retain(|&n, _| !gone(n));
         crate::browser_computed::forget(self, &gone);
         crate::browser_controls::forget(self, &gone);
+        crate::browser_custom::forget(self, doc, &gone);
         crate::browser_loader::forget(self, &gone);
         crate::browser_select::forget(self, &gone);
         r.runs.set(r.runs.get() + 1);

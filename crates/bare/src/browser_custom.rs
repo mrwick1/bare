@@ -234,6 +234,31 @@ pub(crate) fn st<E: Eng>(d: &Dom<E>) -> &Rc<RefCell<CeSt<E>>> {
     d.ce.st.get_or_init(Default::default)
 }
 
+/// The nodes that custom elements keep for the reclaim (`browser_reclaim.rs`): the elements of the construction stacks, of the element queues and
+/// of the reaction queues, the elements that wait for the parser, the form owners, the elements of `ElementInternals`, the inert document and the running script.
+pub(crate) fn held<E: Eng>(d: &Dom<E>, out: &mut Vec<NodeId>) {
+    out.extend(d.ce.tpl.get().into_iter().chain(d.ce.parsing.get()));
+    let Some(s) = d.ce.st.get() else { return };
+    let s = s.borrow();
+    out.extend(s.defs.iter().flat_map(|def| def.stack.iter().flatten().copied()));
+    out.extend(s.stack.iter().flatten().chain(&s.backup).chain(&s.held).copied());
+    let doc = d.doc.borrow();
+    out.extend(s.queues.keys().filter_map(|&i| doc.node_at(i as usize)));
+    out.extend(s.face.values().filter_map(|f| f.owner));
+    out.extend(s.ints.values().map(|&(n, _)| n));
+}
+
+/// Drop what custom elements know about the nodes that the reclaim freed.
+pub(crate) fn forget<E: Eng>(d: &Dom<E>, doc: &Document, gone: &dyn Fn(NodeId) -> bool) {
+    let Some(s) = d.ce.st.get() else { return };
+    let mut s = s.borrow_mut();
+    let gone = |&i: &u32| doc.node_at(i as usize).is_none_or(gone);
+    s.is.retain(|i, _| !gone(i));
+    s.unk.retain(|i| !gone(i));
+    s.inert.retain(|i| !gone(i));
+    s.face.retain(|i, _| !gone(i));
+}
+
 /// Is `n` in the document, also through shadow hosts?
 fn connected(doc: &Document, n: NodeId) -> bool {
     let mut cur = n;
