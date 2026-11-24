@@ -11,8 +11,8 @@
 //! `crypto.subtle` is a `SubtleCrypto` in a secure context (`browser_basics::secure`) and `undefined` otherwise. Its
 //! `digest(algorithm, data)` hashes with SHA-1, SHA-256, SHA-384 or SHA-512 (`bare_tls`), a name or `{name}`, ASCII
 //! case-insensitive. It copies the bytes of an ArrayBuffer, a typed array or a DataView when it is called, and resolves
-//! with a new ArrayBuffer. An unknown name rejects with `NotSupportedError`; bad data rejects with `TypeError`. The other
-//! methods reject with `NotSupportedError` until they are built.
+//! with a new ArrayBuffer. An unknown name rejects with `NotSupportedError`; bad data rejects with `TypeError`. AES-GCM, AES-CBC
+//! and HKDF keys are in `browser_subtle.rs`. `sign`, `verify`, `wrapKey` and `unwrapKey` reject with `NotSupportedError`.
 //!
 //! `navigator`: getters on `Navigator.prototype` with fixed values (`USER_AGENT` is the one place of the string).
 //! `userAgentData` (WICG UA Client Hints) has `brands` (a frozen array), `mobile` and `platform`, `toJSON()` of these three, and
@@ -115,6 +115,8 @@ struct Made<E: Eng> {
     file_p: E::Obj,
     form_p: E::Obj,
     iter_p: E::Obj,
+    /// `CryptoKey.prototype` (`browser_subtle.rs`).
+    key_p: E::Obj,
 }
 
 #[derive(Default)]
@@ -135,6 +137,8 @@ pub(crate) struct WebHost<E: Eng> {
     /// A form or an iterator was made and has not been pruned. `Dom::trace` runs for every object of a collect, so it skips
     /// `trace` below, with no borrow, while this is false.
     pub(crate) active: Cell<bool>,
+    /// The data of each `CryptoKey` (`browser_subtle.rs`). A key is an `Owner::Web` object.
+    pub(crate) keys: RefCell<IdMap<<E as Eng>::Obj, crate::browser_subtle::Key>>,
     /// Tests set this to get a fixed multipart boundary.
     #[cfg(test)]
     pub(crate) boundary: RefCell<Option<String>>,
@@ -144,7 +148,7 @@ pub(crate) fn roots<E: Eng>(d: &Dom<E>, out: &mut Roots<'_, '_, E>) {
     let s = d.web.s.borrow();
     out.extend(s.urls.values().map(|&o| E::obj_raw(o)));
     if let Some(m) = s.made {
-        out.extend(m.glob.into_iter().chain([m.subtle, m.langs, m.uad, m.brands, m.blob_p, m.file_p, m.form_p, m.iter_p]).map(E::obj_raw));
+        out.extend(m.glob.into_iter().chain([m.subtle, m.langs, m.uad, m.brands, m.blob_p, m.file_p, m.form_p, m.iter_p, m.key_p]).map(E::obj_raw));
     }
 }
 
@@ -172,6 +176,12 @@ pub(crate) fn forget<E: Eng>(d: &Dom<E>, dead: &[E::Obj]) {
         s.blobs.remove(o);
         s.forms.remove(o);
         s.iters.remove(o);
+    }
+    if !d.web.keys.borrow().is_empty() {
+        let mut k = d.web.keys.borrow_mut();
+        for o in dead {
+            k.remove(o);
+        }
     }
     d.web.active.set(!s.forms.is_empty() || !s.iters.is_empty());
     s.bytes = s.blobs.values().map(|b| b.bytes.len()).sum::<usize>() + s.forms.values().map(|f| f.bytes).sum::<usize>();
@@ -317,6 +327,11 @@ fn made_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, Made<E>> {
     Ok(m)
 }
 
+/// `CryptoKey.prototype`, made on the first use (`browser_subtle.rs`).
+pub(crate) fn web_made_key_proto<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, E::Obj> {
+    Ok(made_s(d, s)?.key_p)
+}
+
 fn made<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, Made<E>> {
     run::<E, _>(it, |s| made_s(d, s))
 }
@@ -371,11 +386,22 @@ fn make<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, Made<E>> {
     getter(d, s, cp, "subtle", subtle_attr)?;
     let crypto = plain(d, s, cp)?;
 
-    // SubtleCrypto: `digest` hashes; the other methods reject until they are built.
+    // SubtleCrypto: `digest` hashes here; AES and HKDF are in `browser_subtle.rs`; the other methods reject until they are built.
     let sp = proto(d, s, op_, "SubtleCrypto")?;
     op(d, s, sp, "digest", 2, subtle_digest)?;
-    for (name, len) in [("encrypt", 3), ("decrypt", 3), ("sign", 3), ("verify", 4), ("generateKey", 3), ("importKey", 5), ("exportKey", 2), ("deriveKey", 5), ("deriveBits", 2), ("wrapKey", 4), ("unwrapKey", 7)] {
+    {
+        use crate::browser_subtle as k;
+        let ops: [(&str, u32, HS<E>); 7] = [("encrypt", 3, k::encrypt), ("decrypt", 3, k::decrypt), ("generateKey", 3, k::generate_key), ("importKey", 5, k::import_key), ("exportKey", 2, k::export_key), ("deriveKey", 5, k::derive_key), ("deriveBits", 2, k::derive_bits)];
+        for (name, len, h) in ops {
+            op(d, s, sp, name, len, h)?;
+        }
+    }
+    for (name, len) in [("sign", 3), ("verify", 4), ("wrapKey", 4), ("unwrapKey", 7)] {
         op(d, s, sp, name, len, subtle_unsupported)?;
+    }
+    let kp = proto(d, s, op_, "CryptoKey")?;
+    for (name, h) in [("type", crate::browser_subtle::key_type as HS<E>), ("extractable", crate::browser_subtle::key_extractable), ("algorithm", crate::browser_subtle::key_algorithm), ("usages", crate::browser_subtle::key_usages)] {
+        getter(d, s, kp, name, h)?;
     }
     let subtle = plain(d, s, sp)?;
     let subtle_ctor = iface(d, s, "SubtleCrypto", 0, subtle_illegal, sp)?;
@@ -454,11 +480,11 @@ fn make<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, Made<E>> {
     let ip = plain(d, s, ip)?;
     op(d, s, ip, "next", 0, iter_next)?;
 
-    let [crypto, navigator, blob, file, form, subtle_ctor, file_list, subtle, langs, uad, brands, bp, fp, fo, ip] = [crypto, navigator, blob, file, form, subtle_ctor, file_list, subtle, langs, uad, brands, bp, fp, fo, ip].map(|l| lid::<E>(s, l));
-    Ok(Made { glob: [crypto, navigator, blob, file, form, subtle_ctor, file_list], subtle, langs, uad, brands, blob_p: bp, file_p: fp, form_p: fo, iter_p: ip })
+    let [crypto, navigator, blob, file, form, subtle_ctor, file_list, subtle, langs, uad, brands, bp, fp, fo, ip, kp] = [crypto, navigator, blob, file, form, subtle_ctor, file_list, subtle, langs, uad, brands, bp, fp, fo, ip, kp].map(|l| lid::<E>(s, l));
+    Ok(Made { glob: [crypto, navigator, blob, file, form, subtle_ctor, file_list], subtle, langs, uad, brands, blob_p: bp, file_p: fp, form_p: fo, iter_p: ip, key_p: kp })
 }
 
-fn need<'s, E: Eng>(s: &mut Sc<'s, E>, a: Args<'s>, n: usize, what: &str) -> Res<'s, ()> {
+pub(crate) fn need<'s, E: Eng>(s: &mut Sc<'s, E>, a: Args<'s>, n: usize, what: &str) -> Res<'s, ()> {
     if a.len() < n {
         return Err(s.type_error(&format!("Failed to execute '{what}': {n} argument{} required, but only {} present.", if n == 1 { "" } else { "s" }, a.len())));
     }
@@ -466,7 +492,7 @@ fn need<'s, E: Eng>(s: &mut Sc<'s, E>, a: Args<'s>, n: usize, what: &str) -> Res
 }
 
 /// `ToString(v)` as a USVString: a lone surrogate becomes U+FFFD.
-fn usv<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>) -> Res<'s, String> {
+pub(crate) fn usv<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>) -> Res<'s, String> {
     let l = s.to_string(v)?;
     let (len, text) = {
         let t = s.as_str(l).expect("a string");
@@ -520,7 +546,7 @@ fn get_random_values<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>,
 
 /// Random bytes for page code (`crypto`, multipart boundaries): from the OS. With `BARE_SEED=<number>` in the environment they are one fixed
 /// stream instead, so that a benchmark that replays recorded replies makes the same URLs and bodies in every run. The TLS code does not use it.
-fn page_random(buf: &mut [u8]) -> Result<(), bare_tls::random::RandomError> {
+pub(crate) fn page_random(buf: &mut [u8]) -> Result<(), bare_tls::random::RandomError> {
     use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
     static SEED: std::sync::OnceLock<Option<AtomicU64>> = std::sync::OnceLock::new();
     let Some(state) = SEED.get_or_init(|| std::env::var("BARE_SEED").ok().and_then(|v| v.parse().ok()).map(AtomicU64::new)) else { return bare_tls::random::fill(buf) };
@@ -567,7 +593,7 @@ fn subtle_attr<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Ar
 }
 
 /// Settle `p` with the outcome of `r`: a value fulfills, a thrown value rejects, any other error is the result.
-fn settle<'s, E: Eng>(s: &mut Sc<'s, E>, p: Local<'s>, r: Res<'s, Local<'s>>) -> Res<'s, Local<'s>> {
+pub(crate) fn settle<'s, E: Eng>(s: &mut Sc<'s, E>, p: Local<'s>, r: Res<'s, Local<'s>>) -> Res<'s, Local<'s>> {
     match r {
         Ok(v) => s.resolve_promise(p, v)?,
         Err(AErr::Throw(v)) => s.reject_promise(p, v)?,
@@ -578,7 +604,7 @@ fn settle<'s, E: Eng>(s: &mut Sc<'s, E>, p: Local<'s>, r: Res<'s, Local<'s>>) ->
 
 // ------------------------------------------------------------------------------------------ SubtleCrypto
 
-fn subtle_this<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, ()> {
+pub(crate) fn subtle_this<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, ()> {
     match (obj_id::<E>(s, this), d.web.s.borrow().made) {
         (Some(o), Some(m)) if o == m.subtle => Ok(()),
         _ => Err(illegal::<E>(s)),
