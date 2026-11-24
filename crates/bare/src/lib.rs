@@ -344,6 +344,8 @@ mod browser_child_tests;
 mod browser_worker_run_tests;
 #[cfg(test)]
 mod browser_worker_import_tests;
+#[cfg(test)]
+mod browser_worker_gc_tests;
 mod browser_remote_window;
 mod browser_port_hub;
 

@@ -970,7 +970,7 @@ impl<'p, E: Eng> bare_js_api::Host<E::Vm> for Dom<E> {
                 match owner {
                     Owner::Xhr(o) => crate::browser_xhr::trace(self, o, t),
                     Owner::Abort(o) => crate::browser_abort::trace(self, o, t),
-                    Owner::Port(o) => self.sched_trace_port(o, t),
+                    Owner::Port(o) | Owner::Worker(o) => self.sched_trace_port(o, t),
                     _ => {}
                 }
             }
