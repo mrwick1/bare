@@ -190,6 +190,8 @@ mod browser_gaps_tests;
 mod browser_caches_tests;
 #[cfg(test)]
 mod browser_idb_tx_tests;
+#[cfg(test)]
+mod browser_idb_cursor_tests;
 pub mod resources;
 mod browser_loader;
 mod browser_shims;
