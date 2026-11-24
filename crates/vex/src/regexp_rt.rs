@@ -728,3 +728,7 @@ mod setup_reuse_tests;
 #[cfg(test)]
 #[path = "regexp_one_pass_tests.rs"]
 mod one_pass_tests;
+
+#[cfg(test)]
+#[path = "regexp_long_source_tests.rs"]
+mod long_source_tests;

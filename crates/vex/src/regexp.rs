@@ -51,11 +51,11 @@ thread_local! {
 }
 
 /// The longest pattern, in UTF-16 code units.
-pub const MAX_PATTERN_UNITS: usize = 1 << 16;
+pub const MAX_PATTERN_UNITS: usize = 1 << 20;
 /// The deepest group nesting. It bounds recursion in the parser and the compiler.
 pub const MAX_DEPTH: usize = 128;
 /// The most instructions in a compiled program. `a{1000}` costs 1000, so repeats are bounded.
-pub const MAX_PROGRAM: usize = 1 << 17;
+pub const MAX_PROGRAM: usize = 1 << 21;
 /// The most capture groups.
 pub const MAX_GROUPS: usize = 1 << 12;
 /// The most code units a class may expand under `i` in one pattern (compile-time work bound).
