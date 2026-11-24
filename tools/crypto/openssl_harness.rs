@@ -112,7 +112,7 @@ impl Pki {
         pki.run(keygen);
         pki.run(&[
             "req", "-x509", "-new", "-key", "root.key", "-sha256", "-days", "2", "-subj", "/CN=Bare Test Root", "-addext",
-            "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign", "-out", "root.pem",
+            "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign", "-addext", "authorityKeyIdentifier=keyid", "-out", "root.pem",
         ]);
         pki
     }
@@ -143,7 +143,7 @@ impl Pki {
         let (key, csr, pem, ext) = (format!("{name}.key"), format!("{name}.csr"), format!("{name}.pem"), format!("{name}.ext"));
         std::fs::write(
             self.dir.join(&ext),
-            format!("subjectAltName=DNS:{san}\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n"),
+            format!("subjectAltName=DNS:{san}\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nauthorityKeyIdentifier=keyid\n"),
         )
         .unwrap();
         let mut args = keygen.to_vec();
