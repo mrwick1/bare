@@ -21,7 +21,8 @@ Vex did not compile `delete a?.b`. The compile failed with "not supported yet: d
 ## Tests
 
 - New: `compile_delete_chain_tests.rs` (2 tests): results and side effects for a present base, a nullish base, a longer chain and a frozen property; a strict-mode `TypeError` on a frozen property.
-- `t`: 3 passed.
+- Changed: 2 tests in `script_tests.rs` used `delete ({})?.x` as their unbuilt construct. They now check that it compiles. No construct that source code can reach gives "not supported yet" now, so the unbuilt path has no source-level test case. Hypothesis: the internal cases (a function that the pre-parser did not read, an assignment to a prelude slot) still use it.
+- `cargo test -p bare-vex`: all pass.
 
 ## Not tested
 
