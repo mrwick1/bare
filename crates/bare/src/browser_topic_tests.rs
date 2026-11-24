@@ -92,8 +92,9 @@ pub(crate) fn check(topic: &str, cases: &str, chrome: &str) -> usize {
 }
 
 macro_rules! topic_test {
-    ($fn:ident, $topic:literal, $n:expr) => {
+    ($(#[$m:meta])* $fn:ident, $topic:literal, $n:expr) => {
         #[test]
+        $(#[$m])*
         fn $fn() {
             let n = $crate::browser_topic_tests::check(
                 $topic,

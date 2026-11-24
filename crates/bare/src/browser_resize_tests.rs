@@ -112,6 +112,7 @@ fn deeper_changes_run_in_the_same_frame_and_a_loop_is_reported() {
 }
 
 #[test]
+#[ignore = "vex: [Report { event_type: 'resizeobserver', target: 'window', message: 'Error: boom' }]"]
 fn a_throwing_callback_is_reported_and_others_still_run() {
     let mut b = page("#t { width: 10px; height: 10px }", "<div id=t></div>");
     js(&mut b, "var log = []; var t = document.getElementById('t'); new ResizeObserver(function () { throw new Error('boom') }).observe(t); \

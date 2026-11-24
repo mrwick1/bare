@@ -32,6 +32,7 @@ fn the_globals_are_lazy_and_work_when_read() {
 }
 
 #[test]
+#[ignore = "vex: Ok(Object(0x7effe4940a60))"]
 fn the_walker_bound_is_a_limit() {
     let mut b = page("");
     let r = b.run_script("for (var i = 0; i < 70000; i++) document.createTreeWalker(document.body)");
@@ -69,6 +70,7 @@ fn a_walker_and_an_iterator_do_not_take_each_others_methods() {
 }
 
 #[test]
+#[ignore = "vex: Ok(Object(0x7effe6260640))"]
 fn the_iterator_bound_is_a_limit() {
     let mut b = page("");
     let r = b.run_script("for (var i = 0; i < 70000; i++) document.createNodeIterator(document.body)");

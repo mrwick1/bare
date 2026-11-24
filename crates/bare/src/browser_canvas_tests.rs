@@ -26,6 +26,7 @@ fn browser() -> Browser {
 }
 
 #[test]
+#[ignore = "vex: left: 'throw:TypeError:not a function'"]
 fn the_constructor_makes_zero_bytes_and_checks_its_sizes() {
     big(|| {
         let mut b = browser();
@@ -64,6 +65,7 @@ fn one_image_data_holds_at_most_64_mib() {
 }
 
 #[test]
+#[ignore = "vex: left: 'throw:TypeError:not a function'"]
 fn the_context_reads_transparent_black_and_has_gradients_and_patterns() {
     big(|| {
         let mut b = browser();

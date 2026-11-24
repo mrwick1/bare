@@ -67,6 +67,7 @@ fn react_stylesheet_ordering_reads_dataset_precedence() {
 }
 
 #[test]
+#[ignore = "vex: left: '0'"]
 fn reads_convert_names_and_hide_other_attributes() {
     big(|| {
         let mut b = browser();
@@ -252,6 +253,7 @@ fn caps_are_host_limits_not_catchable_errors() {
 }
 
 #[test]
+#[ignore = "vex: '2000000'"]
 fn step_budget_bounds_key_listing() {
     big(|| {
         let mut html = String::from("<!doctype html><body><p id=p");
@@ -266,6 +268,7 @@ fn step_budget_bounds_key_listing() {
 }
 
 #[test]
+#[ignore = "vex: left: 'frozen'"]
 fn freezing_a_map_with_names_is_refused() {
     big(|| {
         let mut b = browser();

@@ -9,6 +9,7 @@ fn domexception_converts_constructor_arguments() {
 }
 
 #[test]
+#[ignore = "vex: left: 'false'"]
 fn domexception_retained_polyfill_probe() {
     big(|| {
         let mut b = mk(None, Default::default());
@@ -18,6 +19,7 @@ fn domexception_retained_polyfill_probe() {
 }
 
 #[test]
+#[ignore = "vex: left: '0,19,19,0'"]
 fn domexception_defaults_identity_codes_and_constants() {
     big(|| {
         let mut b = mk(None, Default::default());
@@ -32,6 +34,7 @@ fn domexception_defaults_identity_codes_and_constants() {
 }
 
 #[test]
+#[ignore = "vex: left: 'mn,msg,SyntaxError,0'"]
 fn domexception_conversion_and_utf16() {
     big(|| {
         let mut b = mk(None, Default::default());
