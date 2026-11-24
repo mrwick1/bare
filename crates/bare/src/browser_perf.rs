@@ -5,9 +5,8 @@
 //! method threw `TypeError` and stopped the script.
 //!
 //! - `mark` and `measure` entries exist, and one `navigation` entry per document. `resource`, `paint` and every other type give an empty array.
-//! - An entry is plain Rust data. Each read makes new plain objects with `name`, `entryType`, `startTime`, `duration` and `detail`, so
-//!   two reads of one entry are not `===`, and there is nothing to root. The object that `mark` or `measure` returns carries the `detail`
-//!   of its options; a later read has `detail: null`.
+//! - The timeline keeps the object that `mark` or `measure` returns (User Timing L3), as Chrome and Firefox do. A read gives the same
+//!   objects and makes no new ones. `detail` is a structured clone of the `detail` option, made once. The list roots the kept objects.
 //! - The interfaces `PerformanceEntry`, `PerformanceResourceTiming`, `PerformanceNavigationTiming`, `PerformanceMark` and `PerformanceMeasure`
 //!   are lazy globals (`install_interfaces`). Each is an illegal constructor. A mark or a measure is an instance of its interface, and
 //!   `toJSON` gives the plain copy. A resource entry is never made. Gap: `new PerformanceMark(name)` throws.
@@ -20,6 +19,7 @@
 use crate::eng::{Eng, Ops};
 use crate::browser::*;
 use crate::browser_geom::Iface;
+use crate::browser_sources::Roots;
 use crate::browser_scoped::*;
 use bare_js_api::{Args, Attrs, HostFn, Local, Type};
 
@@ -98,11 +98,16 @@ fn json<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, detail: bool
     Ok(o)
 }
 
-pub(crate) struct Entry {
+/// One kept entry. `obj` is its `PerformanceMark` or `PerformanceMeasure`; the other fields serve the lookups without a property read.
+pub(crate) struct Entry<O> {
     name: String,
     measure: bool,
     start: f64,
-    dur: f64,
+    obj: O,
+}
+
+pub(crate) fn roots<E: Eng>(d: &Dom<E>, out: &mut Roots<'_, '_, E>) {
+    out.extend(d.perf_entries.borrow().iter().map(|e| E::obj_raw(e.obj)));
 }
 
 /// The times of the load of one document, in ms since the origin. The loader stamps them (`browser_loader.rs`). `0` is a phase not reached.
@@ -159,25 +164,29 @@ fn present<E: Eng>(s: &Sc<'_, E>, v: Local<'_>) -> bool {
     s.type_of(v) != Type::Undefined
 }
 
-/// The object of an entry: an instance of `PerformanceMark` or `PerformanceMeasure`.
-fn make<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, e: &Entry, detail: Local<'s>) -> Res<'s, Local<'s>> {
+/// Make the object of an entry (an instance of `PerformanceMark` or `PerformanceMeasure`) and keep it in the timeline.
+/// `detail` is the option value; the entry gets a structured clone of it, or `null` when it is absent.
+fn make<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, name: String, measure: bool, start: f64, dur: f64, detail: Local<'s>) -> Res<'s, Local<'s>> {
+    let detail = if present::<E>(s, detail) { crate::browser_navigation_state::clone_with(d, s, detail, &[])?.0 } else { s.null() };
     let i = old::<E, _>(s, |it| ensure(d, it))?;
-    let (name, ty) = (d.js_str_s(s, &e.name)?, d.js_str_s(s, if e.measure { "measure" } else { "mark" })?);
-    let (start, dur) = (s.number(e.start), s.number(e.dur));
-    object(d, s, if e.measure { i.measure.proto } else { i.mark.proto }, &[("name", name), ("entryType", ty), ("startTime", start), ("duration", dur), ("detail", detail)])
-}
-
-fn keep<E: Eng>(d: &Dom<E>, e: Entry) {
+    let (n, ty) = (d.js_str_s(s, &name)?, d.js_str_s(s, if measure { "measure" } else { "mark" })?);
+    let (st, du) = (s.number(start), s.number(dur));
+    let obj = d.obj_s(s, if measure { i.measure.proto } else { i.mark.proto })?;
+    let v = d.obj_local(s, obj);
+    for (k, x) in [("name", n), ("entryType", ty), ("startTime", st), ("duration", du), ("detail", detail)] {
+        s.define_str(v, k, x, Attrs::ALL)?;
+    }
     let mut l = d.perf_entries.borrow_mut();
     if l.len() < MAX_ENTRIES {
-        l.push(e);
+        l.push(Entry { name, measure, start, obj });
     }
+    Ok(v)
 }
 
 fn mark<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     need::<E>(s, a, "mark")?;
     let name = d.arg_str_s(s, a, 0)?;
-    let (mut start, mut detail) = (d.now_ms(), s.null());
+    let (mut start, mut detail) = (d.now_ms(), s.undefined());
     let o = arg_s::<E>(s, a, 1);
     if is_object::<E>(s, o) {
         let v = s.get_str(o, "startTime")?;
@@ -187,15 +196,9 @@ fn mark<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) ->
                 return Err(s.type_error("Failed to execute 'mark' on 'Performance': 'startTime' must be a non-negative finite number."));
             }
         }
-        let v = s.get_str(o, "detail")?;
-        if present::<E>(s, v) {
-            detail = v;
-        }
+        detail = s.get_str(o, "detail")?;
     }
-    let e = Entry { name, measure: false, start, dur: 0.0 };
-    let v = make(d, s, &e, detail)?;
-    keep(d, e);
-    Ok(v)
+    make(d, s, name, false, start, 0.0, detail)
 }
 
 /// A time of `measure`: a number, or the name of a mark. `None` for `undefined`.
@@ -221,7 +224,7 @@ fn measure<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>)
     need::<E>(s, a, "measure")?;
     let name = d.arg_str_s(s, a, 0)?;
     let (start, end);
-    let (mut dur, mut detail) = (None, s.null());
+    let (mut dur, mut detail) = (None, s.undefined());
     let (a1, a2) = (arg_s::<E>(s, a, 1), arg_s::<E>(s, a, 2));
     if is_object::<E>(s, a1) {
         let (st, e, du, de) = (s.get_str(a1, "start")?, s.get_str(a1, "end")?, s.get_str(a1, "duration")?, s.get_str(a1, "detail")?);
@@ -239,9 +242,7 @@ fn measure<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>)
         if present::<E>(s, du) {
             dur = Some(s.to_number(du)?);
         }
-        if present::<E>(s, de) {
-            detail = de;
-        }
+        detail = de;
     } else {
         (start, end) = (time(d, s, a1)?, time(d, s, a2)?);
     }
@@ -251,10 +252,7 @@ fn measure<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>)
         (None, Some(e), Some(du)) => (e - du, e),
         (st, e, _) => (st.unwrap_or(0.0), e.unwrap_or(now)),
     };
-    let en = Entry { name, measure: true, start: st, dur: e - st };
-    let v = make(d, s, &en, detail)?;
-    keep(d, en);
-    Ok(v)
+    make(d, s, name, true, st, e - st, detail)
 }
 
 fn list<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, ty: Option<&str>, name: Option<&str>) -> Res<'s, Local<'s>> {
@@ -275,12 +273,8 @@ fn list<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, ty: Option<&str>, name: Optio
         l[x].start.total_cmp(&l[y].start)
     });
     for i in idx {
-        let e = {
-            let l = d.perf_entries.borrow();
-            Entry { name: l[i].name.clone(), measure: l[i].measure, start: l[i].start, dur: l[i].dur }
-        };
-        let null = s.null();
-        out.push(make(d, s, &e, null)?);
+        let o = d.perf_entries.borrow()[i].obj;
+        out.push(d.obj_local(s, o));
     }
     s.new_array(&out)
 }
