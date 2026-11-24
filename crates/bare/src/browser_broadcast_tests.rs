@@ -3,7 +3,7 @@
 
 use crate::browser::*;
 use crate::eng::Ops;
-use crate::eng_new::New;
+use crate::eng_new::{New, Peek};
 use bare_html::tree;
 
 fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
