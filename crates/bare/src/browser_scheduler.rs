@@ -946,6 +946,11 @@ impl<E: Eng> Dom<E> {
     /// `post_window` with the byte cost, and the sender when the message comes from another page.
     pub(crate) fn queue_window(&self, data: E::Raw, ports: Box<[E::Obj]>, cost: usize, from: Option<Box<Sender<E>>>) -> R<E, ()> {
         let g = *self.global.get().expect("installed");
+        self.queue_port(g, data, ports, cost, from)
+    }
+
+    /// Queue a message at the port `g`, which has no peer: the window or a `BroadcastChannel` (`browser_broadcast.rs`).
+    pub(crate) fn queue_port(&self, g: E::Obj, data: E::Raw, ports: Box<[E::Obj]>, cost: usize, from: Option<Box<Sender<E>>>) -> R<E, ()> {
         {
             let s = self.sched.borrow();
             if s.queued >= s.limits.max_queued_messages {
@@ -1464,6 +1469,16 @@ impl<E: Eng> Dom<E> {
         self.st.borrow_mut().add_target(it, p, Owner::Port(p));
         self.sched.borrow_mut().ports.insert(p, Port::new(None, false));
         Ok(p)
+    }
+
+    /// Make `o` an enabled port with no peer: a `BroadcastChannel` takes its messages through the port queue.
+    pub(crate) fn add_broadcast_port(&self, o: E::Obj) -> R<E, ()> {
+        let mut s = self.sched.borrow_mut();
+        if s.ports.len() >= s.limits.max_ports {
+            return Err(self.lim("message-ports"));
+        }
+        s.ports.insert(o, Port::new(None, true));
+        Ok(())
     }
 }
 
