@@ -135,15 +135,27 @@ fn lc(r: &mut Realm, v: Value) -> Local<'static> {
     r.raw_local(&v)
 }
 
+thread_local! {
+    /// The host fault that `error` turned into an abort. Vex carries only a text, so `fault` takes the kind back from here.
+    static HOST_FAULT: std::cell::Cell<Option<Fault<New>>> = const { std::cell::Cell::new(None) };
+}
+
 fn fault(r: &mut Realm, e: Error<'_>) -> Fault<New> {
+    let host = HOST_FAULT.take();
     match e {
         Error::Throw(l) => Fault::Throw(r.raw(l)),
+        Error::Abort(_) if host.is_some() => host.unwrap(),
+        // Vex found the host borrowed (a script ran while Rust held the document).
+        Error::Abort(Abort::Limit("the host is busy")) => Fault::Heap("HostUnavailable"),
         Error::Abort(Abort::Limit(_)) => Fault::Limit(LimitKind::Steps),
         Error::Abort(Abort::Unsupported(w)) => Fault::Unsupported(w),
     }
 }
 
 fn error<'s>(r: &mut Realm, f: Fault<New>) -> Error<'s> {
+    if !matches!(f, Fault::Throw(_)) {
+        HOST_FAULT.set(Some(f));
+    }
     match f {
         Fault::Throw(v) => Error::Throw(r.raw_local(&v)),
         Fault::Limit(_) => Error::Abort(Abort::Limit("a limit of the host")),
