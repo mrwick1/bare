@@ -195,12 +195,24 @@
     if (t.on) return;
     t.on = true;
     later(function step() {
-      if (t.dead) return;
+      if (t.dead) { t.on = false; return; }
       var o = t.q.shift();
       if (!o) {
-        t.dead = true;
-        tx.dispatchEvent(new Event('complete'));
-        if (t.after) t.after();
+        // Queue momentarily empty. A spec transaction commits only when control returns to the event
+        // loop with no request pending, not on the first empty microtask. The `idb` wrapper and
+        // `await` enqueue the next request several microtask hops later, inside this same task, so we
+        // wait for the next task boundary and commit only if the queue is still empty then.
+        t.on = false;
+        if (t.graceOn) return;
+        t.graceOn = true;
+        setTimeout(function () {
+          t.graceOn = false;
+          if (t.dead || t.on) return;
+          if (t.q.length) { kick(tx); return; }
+          t.dead = true;
+          tx.dispatchEvent(new Event('complete'));
+          if (t.after) t.after();
+        }, 0);
         return;
       }
       var v;
@@ -213,7 +225,7 @@
     var tx = new IDBTransaction(), data = D.get(db).data;
     tx.db = db; tx.mode = mode; tx.error = null; tx.durability = 'default';
     Object.defineProperty(tx, 'objectStoreNames', { get: function () { return names(mode === 'versionchange' ? Object.keys(data.stores) : list); }, enumerable: true, configurable: true });
-    TS.set(tx, { q: [], on: false, dead: false, undo: [], snap: new Set(), os: {}, open: null, after: null, data: data, list: list });
+    TS.set(tx, { q: [], on: false, dead: false, undo: [], snap: new Set(), os: {}, open: null, after: null, graceOn: false, data: data, list: list });
     return tx;
   }
   function live(tx) {
