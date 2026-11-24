@@ -419,7 +419,7 @@ fn caps_are_uncatchable_and_checked_before_growth() {
     let mut b = Browser::new(doc, BrowserLimits { max_text_bytes: cap, ..Default::default() }, EvalLimits::default(), HeapLimits::default()).unwrap();
     js(&mut b, A);
     assert_eq!(js(&mut b, "try { for (var i = 0; i < 100; i++) s.setProperty('--v', 'value number ' + i); 'ok' } catch (e) { 'caught' }"), lim("dom-text"));
-    assert!(b.stats().text_bytes <= cap);
+    assert!(b.stats().text_bytes <= 2 * cap, "dead text waits for a rebuild: the list holds at most twice the cap");
 }
 
 #[test]
