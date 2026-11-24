@@ -12,7 +12,17 @@ Date: 2026-11-25. Base: main 04d0b87c.
 ## Cost
 
 - The new code runs only after the host answered a lazy ask: once per object and name until the next collection.
-- Vex rows `interp_load`: see the table below.
+- Vex rows `interp_load`, base 04d0b87c, on arjun-e16, glibc, `tools/js/instr.sh` (minimum of 3 runs of `instructions:u`):
+
+| Row | base | new | change |
+|---|---|---|---|
+| `interp_load loopfn 3000000` | 800286154 | 800286969 | +0.000% |
+| `interp_load calls 1000000` | 556325871 | 556326243 | +0.000% |
+| `interp_load fib 27` | 241968755 | 241969039 | +0.000% |
+| `interp_load closures 1000000` | 1740264973 | 1740265260 | +0.000% |
+| `interp_load objects 1000000` | 699671723 | 699671736 | +0.000% |
+
+- jemalloc was not run: no row is over the rule under glibc.
 
 ## Tests
 
