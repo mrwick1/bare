@@ -19,6 +19,7 @@ fn page(body: &'static str) -> Server {
 
 fn cfg(srv: &Server) -> SessionConfig {
     let mut c = SessionConfig::new(&srv.url("/"));
+    c.js2 = false; // this file tests the old engine
     c.virtual_clock = true;
     c.eval = EvalLimits { max_steps: 2_000_000, ..Default::default() };
     c.page.quiet = Duration::from_millis(100);

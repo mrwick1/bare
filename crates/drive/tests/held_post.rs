@@ -49,7 +49,7 @@ fn after_a_hang(hold: &'static str, after: &'static str, want: &'static str) -> 
     std::thread::Builder::new()
         .stack_size(64 << 20)
         .spawn(move || {
-            let mut p = Page::open(&format!("{origin}/"), (800, 600)).unwrap();
+            let mut p = Page::open_old(&format!("{origin}/"), (800, 600)).unwrap();
             p.quiet = true;
             assert!(tick_until(&mut p, Duration::from_secs(5), |p| p.idle().is_ok()).is_some(), "the page did not settle");
             p.browser().unwrap().run_script(hold).unwrap();

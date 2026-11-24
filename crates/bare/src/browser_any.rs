@@ -1,5 +1,5 @@
-//! A browser on either engine. `BARE_JS_EXEC=new` makes the pages of a session on js2 (`Browser<New>`), every other value on the old
-//! engine (`Browser<Old>`). The layers above the DOM host (`Session`, `Page`, the driver) hold this enum and call the methods that
+//! A browser on either engine. The pages of a session run on js2 (`Browser<New>`) unless `BARE_JS_EXEC` is `tree`, `auto` or `byte`: these
+//! pick the old engine (`Browser<Old>`). The layers above the DOM host (`Session`, `Page`, the driver) hold this enum and call the methods that
 //! they need. A method forwards to the browser of the variant. Its result has no type of the engine in it: a fault is an `AnyFault`.
 
 use crate::browser::{Browser, FileRef, Report, Survive};

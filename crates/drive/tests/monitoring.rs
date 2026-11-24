@@ -29,7 +29,7 @@ fn local_journey_modes_and_secrets() {
     for mode in ["off", "metrics", "trace"] {
         let capture = dir.join(mode);
         let out = std::process::Command::new(env!("CARGO_BIN_EXE_bare-drive"))
-            .args(["--quiet", "--repeat", "2"]).arg(&steps).env("BARE_OBSERVE", mode).env("BARE_OBSERVE_FILE", &capture)
+            .args(["--quiet", "--repeat", "2"]).arg(&steps).env("BARE_JS_EXEC", "auto").env("BARE_OBSERVE", mode).env("BARE_OBSERVE_FILE", &capture)
             .env("BARE_OBSERVE_INTERVAL_MS", "2").output().unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         let _: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();

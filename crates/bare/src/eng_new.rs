@@ -56,9 +56,11 @@ impl Eng for New {
     type Sym = NV;
     type Key = NV;
 
-    fn realm(_eval: bare_js::eval::EvalLimits, _heap: bare_js::heap::HeapLimits) -> Result<Realm, Fault<New>> {
+    fn realm(eval: bare_js::eval::EvalLimits, _heap: bare_js::heap::HeapLimits) -> Result<Realm, Fault<New>> {
         bare_js2::script::load("").map(|mut vm| {
             vm.realm.init_host_intrinsics();
+            // A task stops after `max_steps` back edges, so a runaway script ends only its own task.
+            vm.realm.set_budget(eval.max_steps);
             vm.realm
         }).map_err(|_| Fault::Heap("the realm could not be made"))
     }

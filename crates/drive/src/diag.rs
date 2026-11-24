@@ -230,5 +230,5 @@ pub fn uncaught(l: &Log) -> bool {
 /// Does the text say that the engine lacks an API or a feature?
 fn gap(t: &str) -> bool {
     let t = t.to_ascii_lowercase();
-    ["is not a function", "is not defined", "not supported", "unsupported", "not implemented", "is not a constructor"].iter().any(|k| t.contains(k))
+    ["not a function", "is not defined", "not supported", "unsupported", "not implemented", "is not a constructor"].iter().any(|k| t.contains(k))
 }

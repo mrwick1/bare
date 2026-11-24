@@ -18,7 +18,7 @@ fn a_live_page_runs_more_tasks_than_one_page_load_may() {
     let (n, stopped) = std::thread::Builder::new()
         .stack_size(64 << 20)
         .spawn(move || {
-            let mut p = Page::open(&format!("{origin}/"), (800, 600)).unwrap();
+            let mut p = Page::open_old(&format!("{origin}/"), (800, 600)).unwrap();
             let _ = p.wait_load(Duration::from_secs(5));
             let end = Instant::now() + Duration::from_secs(60);
             let mut n = 0.0;

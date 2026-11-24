@@ -352,7 +352,10 @@ fn a_long_script_that_the_scan_started_runs_from_the_tree_that_the_worker_parsed
         plan.files = vec![("/a.js", long_script("localStorage.setItem('a', 'ran')"))];
         let srv = slow(plan);
         let before = bare_js::parse_ahead::taken_here();
-        let (s, stop) = load(Session::new(cfg(srv.port, true)));
+        // The parse-ahead tree is a feature of the old engine.
+        let mut c = cfg(srv.port, true);
+        c.js2 = false;
+        let (s, stop) = load(Session::new(c));
         assert_eq!(stop, SessionStop::Page(crate::Stop::Settled));
         assert_eq!(item(&s, srv.port, "a").as_deref(), Some("ran"));
         assert_eq!(bare_js::parse_ahead::taken_here() - before.min(bare_js::parse_ahead::taken_here()), 1, "the page thread did not take the tree of the worker");

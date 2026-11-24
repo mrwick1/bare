@@ -129,13 +129,18 @@ pub struct SessionConfig {
     pub live: bool,
     /// Where downloads go (see `downloads.rs`). `None`: a response that the page cannot show is a failed load.
     pub downloads: Option<downloads::Downloads>,
-    /// Run the pages on js2 (`bare-js2`, `BARE_JS_EXEC=new`) and not on the old engine.
+    /// Run the pages on js2 (`bare-js2`, the default) and not on the old engine (`BARE_JS_EXEC=tree`, `auto` or `byte`).
     pub js2: bool,
 }
 
-/// The engine mode of `BARE_JS_EXEC`: `tree`, `auto` or `byte` for `bare-js`; other values give the default.
+/// The engine mode of `BARE_JS_EXEC`: `tree`, `auto` or `byte` for `bare-js`; other values give the default mode (the old engine runs only for these three names, see `js2_from`).
 fn exec_from(v: &str) -> Exec {
     Exec::from_name(v).unwrap_or_default()
+}
+
+/// The engine of `BARE_JS_EXEC`: the old engine for `tree`, `auto` and `byte`, js2 for every other value (also unset and `new`).
+pub(crate) fn js2_from(v: &str) -> bool {
+    !matches!(v, "tree" | "auto" | "byte")
 }
 
 impl SessionConfig {
@@ -157,7 +162,7 @@ impl SessionConfig {
             storage: None,
             live: false,
             downloads: None,
-            js2: std::env::var("BARE_JS_EXEC").is_ok_and(|v| v == "new"),
+            js2: js2_from(&std::env::var("BARE_JS_EXEC").unwrap_or_default()),
         }
     }
 }
