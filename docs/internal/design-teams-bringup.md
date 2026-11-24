@@ -68,54 +68,48 @@ Live effect of the two fixes, same journey, before vs after:
   registered in `crates/bare/src/browser_shims.rs`, tests in `crates/bare/src/browser_caches_tests.rs`.
   This is not the shell blocker (ExpLoader catches the failure), but Teams needs the API.
 
-## Open blocker: telemetry worker infinite recursion
+## Telemetry worker recursion: cause and fix
 
-The authenticated shell (`[data-tid='app-layout-area--main']`) still does not render. After the two
-merged fixes, the dominant hard error is, 3× per run:
+The telemetry web worker's `message` listener threw, 3 times per authenticated run:
 
 ```
 listener of message: https://teams.microsoft.com:443/v2/worker/precompiled-telemetry-web-worker-204d4be5a2e88732.js: RangeError: maximum call stack size exceeded
 ```
 
-The telemetry web worker's `message` listener overflows the JS stack. The 14× `Unhandled error/rejection {}`
-lines are Teams' own catch-all logging the resulting `Error` (an `Error` serializes to `{}` under
-`JSON.stringify`); they are downstream of this, not separate bugs.
+It also fires on the logged-out page, once per run. That page needs no password, so use it to test.
 
-**It is genuine infinite recursion, not a limit that is set too low.** Proof: raising the interpreter
-value-stack cap `MAX_STACK` in `crates/vex/src/interp.rs` from `1 << 19` to `1 << 22` (8×) and re-running
-the journey left the `maximum call stack` count unchanged at 3. A finite-but-deep recursion would have
-cleared; an unbounded one overflows at any cap.
+Cause. `Function.prototype.toString` gave `function () { [native code] }` for every function. The worker
+bundles the 1DS SDK. Its `isPlainObject` compares `Function.prototype.toString.call(proto.constructor)`
+with the text for `Object`. Because every text was the same, every class instance passed as a plain
+object. The SDK deep copy (`function e(t) { ... n[k] = e(v) ... }`) then walked class instances,
+followed a cycle and did not stop. The guard that fired was `MAX_STACK` (`crates/vex/src/interp.rs`).
+A frame dump at that guard named the cycle.
 
-Reference numbers (measured 2026-11-24, `bare-drive` on an HTML probe):
+Fix. `Function.prototype.toString` now gives `function NAME() { [native code] }`, with the `name` of the
+function (`crates/vex/src/builtins.rs`, `fn_to_string`). A bound function keeps `function () { ... }`,
+as Chrome does. Test: `to_primitive` in `crates/vex/src/script_tests.rs`.
 
-- Native-callback recursion (`[0].forEach(cb)` calling back into JS each level) reaches depth ~1022
-  before `RangeError`. Bound by `MAX_STACK` and the frame size, not by `MAX_NEST`.
-- `MAX_STACK = 1 << 19` words (`crates/vex/src/interp.rs:83`).
-- `MAX_NEST = 100` native↔JS re-entries (`crates/vex/src/reenter.rs:42`). Not the binding limit here.
-- Chrome allows ~10920 frames for a trivial function. `bare`'s per-frame word cost is far higher than
-  V8's, so the same memory buys fewer frames — but that is not the cause here, since the recursion is
-  unbounded.
+Live effect on the logged-out page, 3 runs each:
 
-Worker messages are NOT delivered re-entrantly: each `postMessage` queues a `Task::Deliver`
-(`crates/bare/src/browser_scheduler.rs`), so this is not synchronous re-dispatch recursion. The loop is
-inside the worker's own JS, triggered by some value `bare` returns that Chrome does not.
+| console line                   | before | after |
+| ------------------------------ | ------ | ----- |
+| `maximum call stack` (worker)  | 1      | 0     |
+| `Unhandled error/rejection {}` | 2      | 2     |
 
-### Hypotheses to test next
+The 2 `Unhandled error/rejection {}` lines stay, so this recursion does not cause them. Their cause is
+not known. The authenticated journey was not run after the fix: the vault item `qilin/microsoft` has
+no password.
 
-1. A self-referential object the telemetry serializer walks. Some global or error property in `bare`
-   points back at itself (e.g. `err.cause === err`, a getter that returns its receiver, a `self`-chain),
-   so a recursive descent never ends. Chrome's equivalent object is not self-referential.
-2. `structuredClone` of the posted message hitting a cycle `bare` does not break, if the worker clones
-   before serializing.
-3. A feature-detect in the telemetry bundle that recurses on a wrong answer from a missing/odd API.
+Remaining gap: a script function still gives no source text. Chrome gives the source.
 
-The worker is minified. The URL is public and needs no auth:
-`https://teams.cloud.microsoft/v2/worker/precompiled-telemetry-web-worker-204d4be5a2e88732.js` (the hash
-changes between deploys — read the current one from the journey's network log). Fetch it with a generic
-client (no personal headers), beautify, and find the recursive function on the `onmessage` path. A
-faster route: add a temporary host-side capture of the worker `RangeError`'s JS stack (the console entry
-currently carries only `level`, `line`, `text`; no stack), or instrument the worker's `onmessage` to log
-the deepest repeated frame, to name the exact recursion.
+### Other finding: native re-entry cap
+
+`MAX_NEST = 100` (`crates/vex/src/reenter.rs`) stops some native-to-JS call chains at depth 100.
+Measured with a probe test (2026-11-24): a Promise executor, `toJSON`, a `JSON.parse` reviver, a
+`replace` callback, an `Array.from` map function, a Proxy trap, a custom `for-of` iterator and nested
+`yield*`. Plain calls, `apply`, `call`, `bind`, `forEach`, `map`, getters and `new` reach 5000. Chrome
+allows thousands on all of these paths. This cap was not the Teams cause. Each nested level costs about
+4.8 KB in a release build: peak RSS 7.7 MB at cap 100 and 55 MB at cap 10000 (3 runs each, archMachine).
 
 ## Key files
 

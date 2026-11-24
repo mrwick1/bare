@@ -617,7 +617,11 @@ fn bound_call(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
 
 fn fn_to_string(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
     callable_this(rt, this, "toString")?;
-    Ok(rt.string("function () { [native code] }"))
+    // The name tells functions apart: libraries compare this text with that of `Object` to find plain objects. A bound function has none.
+    let bound = rt.native_id(this) == Some(rt.bound_id as usize);
+    let name = if bound { None } else { rt.get_named(this, "name").ok().and_then(Realm::str_of) };
+    let name = name.map(|s| rt.text(s)).unwrap_or_default();
+    Ok(rt.string(&format!("function {name}() {{ [native code] }}")))
 }
 
 // ---- Error ----
