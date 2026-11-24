@@ -6,7 +6,7 @@ use crate::eng_new::New;
 use bare_html::tree;
 
 #[test]
-fn stats_work_on_a_js2_browser() {
+fn stats_work_on_a_vex_browser() {
     std::thread::Builder::new()
         .stack_size(64 << 20)
         .spawn(|| {

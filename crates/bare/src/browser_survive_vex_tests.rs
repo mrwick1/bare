@@ -7,7 +7,7 @@ use bare_js::eval::EvalLimits;
 use std::time::Duration;
 
 #[test]
-fn a_runaway_script_on_js2_ends_at_the_step_budget() {
+fn a_runaway_script_on_vex_ends_at_the_step_budget() {
     std::thread::Builder::new()
         .stack_size(64 << 20)
         .spawn(|| {
