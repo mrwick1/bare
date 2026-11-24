@@ -101,3 +101,6 @@ mod prelude_facts_tests;
 #[cfg(test)]
 #[path = "builtins_more_tests.rs"]
 mod builtins_more_tests;
+#[cfg(test)]
+#[path = "compile_delete_chain_tests.rs"]
+mod compile_delete_chain_tests;
