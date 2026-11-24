@@ -64,7 +64,7 @@ pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> 
 
 /// The names of `window` and of `Document.prototype` made here. The heap asks the host for them on the first miss (`Heap::browser_name`),
 /// so a realm that never reads one pays nothing.
-const WINDOW: [&str; 20] = ["DOMException", "FontFace", "devicePixelRatio", "screenX", "screenY", "crossOriginIsolated", "closed", "opener", "frameElement", "postMessage", "alert", "print", "focus", "blur", "confirm", "prompt", "open", "isSecureContext", "outerWidth", "outerHeight"];
+const WINDOW: [&str; 21] = ["DOMException", "FontFace", "devicePixelRatio", "screenX", "screenY", "crossOriginIsolated", "closed", "opener", "frameElement", "postMessage", "alert", "print", "focus", "blur", "close", "confirm", "prompt", "open", "isSecureContext", "outerWidth", "outerHeight"];
 const DOCUMENT: [&str; 12] = ["hidden", "referrer", "visibilityState", "contentType", "compatMode", "characterSet", "charset", "inputEncoding", "lastModified", "designMode", "dir", "fonts"];
 
 /// The ask of the heap for `key` (`browser_handlers::lazy_key`): define it when it is one of the names above. The name `open` is also a
@@ -88,7 +88,8 @@ pub(crate) fn define<E: Eng>(d: &Dom<E>, it: &mut E::Vm, key: &str) -> R<E, ()> 
         "crossOriginIsolated" | "closed" => data(it, g, E::bool_raw(false)),
         "opener" | "frameElement" => data(it, g, E::null()),
         "postMessage" => d.def_method_s(it, g, "postMessage", 1, post_message).map(|_| ()),
-        "print" | "focus" | "blur" => hidden(it, nothing),
+        // `close`: a page that no script opened stays open (Chrome ignores the call). Teams binds it while it builds its window wrapper.
+        "print" | "focus" | "blur" | "close" => hidden(it, nothing),
         "alert" => hidden(it, alert),
         "confirm" => hidden(it, confirm),
         "prompt" => hidden(it, prompt),
