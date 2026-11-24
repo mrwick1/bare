@@ -6,7 +6,7 @@
 # STEPS is a steps file, or the name of a journey in tools/drive/public (its `--var URL=` comment gives URL). Each run is a new process.
 # --secrets FILE goes to bare-drive as it is (EMAIL=, PASSWORD=): make it in /dev/shm and delete it after, this script never reads a vault.
 # --replay DIR sets BARE_NET_REPLAY=DIR and BARE_SEED=1 (a journey recorded by journeys.sh: DIR is CORPUS/<journey>), so the network input is the same in each run.
-# BARE_* variables of the caller (BARE_JS_EXEC, BARE_CLOCK, ...) reach bare-drive. A run that does not pass is an error: its shares do not count.
+# BARE_* variables of the caller (BARE_CLOCK, ...) reach bare-drive. A run that does not pass is an error: its shares do not count.
 # perf runs as `sudo -n perf record`, and the journey runs as you (`setpriv`). With perf_event_paranoid=2 (archMachine) `perf record --call-graph fp` fails for a user.
 # --no-sudo runs perf as you, for a machine with perf_event_paranoid of 1 or less.
 # --keep keeps OUT/runN.data (perf.data) and OUT/runN.txt (perf script, 100 to 500 MB) after the tables. Tables: OUT/report.txt.

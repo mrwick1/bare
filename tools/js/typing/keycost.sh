@@ -7,7 +7,6 @@
 # (tools/js/instr.sh, glibc with the tcache tunable), for the textarea `#a1` and the first input `#f0`. The run with 0 keys
 # is the load and the mount of the page; it is printed too.
 # Peak RSS: the maximum resident set of a run of `#a1` with 20 keys and with 50 keys. It uses no tunable and no MEM=1.
-# The environment passes through to the program, so BARE_JS_EXEC=tree|auto|byte=... works once the engine reads it.
 # Needs perf and python3. Budget: RSS 40 MiB at 50 keys.
 # BARE_TMP (default /data/bare-tmp, else ~/bare-tmp) holds `bin/heavy`; the cargo build and each measured run wait in it for
 # a free machine slot.
@@ -22,7 +21,7 @@ out=$(realpath -m "$1")
 [ -f "$out/index.html" ] || "$here/build.sh" "$out"
 $heavy cargo build --release -q -p bare --example type_load
 bin=${CARGO_TARGET_DIR:-target}/release/examples/type_load
-echo "page $out, ${BARE_JS_EXEC:+BARE_JS_EXEC=$BARE_JS_EXEC, }$(git -C "$here" rev-parse --short HEAD 2>/dev/null || echo no-git)"
+echo "page $out, $(git -C "$here" rev-parse --short HEAD 2>/dev/null || echo no-git)"
 for sel in '#a1' '#f0'; do
   k0=$($heavy "$here/../instr.sh" "$bin" "$out" "$sel" 0)
   k50=$($heavy "$here/../instr.sh" "$bin" "$out" "$sel" 50)

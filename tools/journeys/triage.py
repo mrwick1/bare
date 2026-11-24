@@ -136,7 +136,6 @@ def one(w, env, timeout):
 
 def main():
     ap = argparse.ArgumentParser(add_help=False)
-    ap.add_argument("-e", dest="engine", default="auto")
     ap.add_argument("-j", dest="jobs", type=int, default=1)
     ap.add_argument("-o", dest="out", default="triage.tsv")
     ap.add_argument("-g", dest="grep")
@@ -156,7 +155,7 @@ def main():
         sys.stderr.write("building the typing page into %s\n" % TYPING_DIR)
         if subprocess.run([TYPING_BUILD, TYPING_DIR, "60"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
             rows = [(n, k, None, "the typing page could not be built (tools/js/typing/build.sh needs npm)") if n == "typing" else (n, k, c, s) for n, k, c, s in rows]
-    env = dict(os.environ, BARE_JS_EXEC=args.engine)
+    env = dict(os.environ)
     results = {}
     with cf.ThreadPoolExecutor(max(1, args.jobs)) as pool:
         for name, r in pool.map(lambda w: one(w, env, args.timeout), rows):
@@ -176,7 +175,7 @@ def main():
         for cause, names in sorted(queue.items(), key=lambda kv: (-len(kv[1]), kv[0])):
             f.write("%s\t%d\t%s\n" % (cause, len(names), ",".join(names)))
     c = lambda s: sum(r[0] == s for r in results.values())
-    print("engine %s  pass %d  fail %d  skip %d  causes %d  -> %s, %s" % (args.engine, c("pass"), c("fail"), c("skip"), len(queue), args.out, qpath))
+    print("pass %d  fail %d  skip %d  causes %d  -> %s, %s" % (c("pass"), c("fail"), c("skip"), len(queue), args.out, qpath))
     return 1 if c("fail") else 0
 
 
