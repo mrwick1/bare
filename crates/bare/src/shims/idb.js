@@ -275,26 +275,34 @@
     });
   });
   def(proto, 'clear', function () { return op(this, true, function (st, t) { touch(t, st); st.rows = []; }); });
-  def(proto, 'openCursor', function (q, dir) {
-    q = rng(q);
-    var os = this, c = new IDBCursor(), s = { i: -1, list: null, os: os, r: null };
+  // A cursor over rows [key, primaryKey, value] that `rows(st)` gives in key order. A key cursor has no value.
+  function cursor(os, src, rows, dir, keys) {
+    var c = new IDBCursor(), s = { i: -1, list: null, os: os, r: null, keys: keys };
     dir = dir === undefined ? 'next' : String(dir);
+    if (['next', 'nextunique', 'prev', 'prevunique'].indexOf(dir) < 0) throw new TypeError('Invalid cursor direction');
     var r = op(os, false, function (st) {
-      s.list = pick(st, q);
-      if (dir.indexOf('prev') === 0) s.list.reverse();
+      var list = rows(st);
+      if (dir.indexOf('unique') > 0) list = list.filter(function (row, i) { return i === 0 || cmp(list[i - 1][0], row[0]) !== 0; });
+      if (dir.indexOf('prev') === 0) list.reverse();
+      s.list = list;
       return move(c, s, 1);
     });
     s.r = r;
     CS.set(c, s);
-    c.source = os; c.direction = dir; c.request = r;
+    c.source = src; c.direction = dir; c.request = r;
+    r.source = src;
     return r;
-  });
+  }
+  function storeRows(q) { return function (st) { return pick(st, q).map(function (row) { return [row[0], row[0], row[1]]; }); }; }
+  def(proto, 'openCursor', function (q, dir) { return cursor(this, this, storeRows(rng(q)), dir, false); });
+  def(proto, 'openKeyCursor', function (q, dir) { return cursor(this, this, storeRows(rng(q)), dir, true); });
   function move(c, s, n) {
     s.i += n;
     var row = s.list[s.i];
     if (!row) return null;
-    c.key = c.primaryKey = row[0];
-    c.value = clone(row[1]);
+    c.key = row[0];
+    c.primaryKey = row[1];
+    if (!s.keys) c.value = clone(row[2]);
     return c;
   }
   function step(c, n) {
@@ -413,6 +421,14 @@
   }
   def(IDBIndex.prototype, 'get', function (q) { ixState(this); if (q == null) throw err('A key is required.', 'DataError'); return ixOp(this, q, function (rows) { return rows.length ? clone(rows[0][2]) : undefined; }); });
   def(IDBIndex.prototype, 'getKey', function (q) { ixState(this); if (q == null) throw err('A key is required.', 'DataError'); return ixOp(this, q, function (rows) { return rows.length ? clone(rows[0][1]) : undefined; }); });
+  ['openCursor', 'openKeyCursor'].forEach(function (method) {
+    def(IDBIndex.prototype, method, function (q, dir) {
+      var x = ixState(this), ix = x.ix;
+      if (osState(x.os).st.indexes[ix.name] !== ix) throw err('The index was deleted.', 'InvalidStateError');
+      q = rng(q);
+      return cursor(x.os, this, function (st) { return ixRows(st, ix, q); }, dir, method === 'openKeyCursor');
+    });
+  });
   ['getAll', 'getAllKeys', 'count'].forEach(function (method) {
     def(IDBIndex.prototype, method, function (q, n) {
       ixState(this);

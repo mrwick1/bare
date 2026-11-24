@@ -189,7 +189,7 @@ fn indexeddb_index_interface() {
         assert_eq!(js(&mut b, "var C = IDBIndex, p = C.prototype; [C === IDBIndex, p === IDBIndex.prototype, p.constructor === C, Object.prototype.toString.call(p)].join()"), "true,true,true,[object IDBIndex]");
         assert_eq!(js(&mut b, "var d = Object.getOwnPropertyDescriptor(globalThis, 'IDBIndex'); [d.value === C, d.writable, d.enumerable, d.configurable].join()"), "true,true,false,true");
         assert_eq!(js(&mut b, "var d = Object.getOwnPropertyDescriptor(p, Symbol.toStringTag); [d.value, d.writable, d.enumerable, d.configurable].join()"), "IDBIndex,false,false,true");
-        assert_eq!(js(&mut b, "[typeof p.get, typeof p.openCursor, typeof IDBObjectStore.prototype.createIndex, typeof IDBObjectStore.prototype.index].join()"), "function,undefined,function,function");
+        assert_eq!(js(&mut b, "[typeof p.get, typeof p.openCursor, typeof IDBObjectStore.prototype.createIndex, typeof IDBObjectStore.prototype.index].join()"), "function,function,function,function");
     });
 }
 
