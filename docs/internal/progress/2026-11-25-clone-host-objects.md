@@ -14,7 +14,14 @@ Date: 2026-11-25. Base: main e621b666.
 
 ## Cost
 
-- Row `web_apis_load clone`: see the table below.
+- `tools/js/cost_matrix.sh -J -g 'web_apis_load clone'`, base e621b666, on arjun-e16. Each count is the minimum of 3 runs of `instructions:u`.
+
+| Row | glibc base | glibc new | change | jemalloc base | jemalloc new | change |
+|---|---|---|---|---|---|---|
+| `web_apis_load clone 1` | 140209614 | 140498739 | +0.206% | 141858464 | 142085552 | +0.160% |
+| `web_apis_load clone 10` | 1358110349 | 1360869664 | +0.203% | 1363800065 | 1366389668 | +0.190% |
+
+- Both rows are inside the +0.5% rule. Hypothesis: the growth is the owner lookup per plain object.
 - A `Blob` clone does not copy the bytes. Before, the clone was wrong and had no bytes.
 
 ## Tests
