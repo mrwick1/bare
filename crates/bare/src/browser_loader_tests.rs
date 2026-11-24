@@ -14,14 +14,14 @@ use crate::js_limits::HeapLimits;
 use bare_net::http::Client;
 use std::time::Duration;
 
-fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+pub(crate) fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     std::thread::Builder::new().stack_size(64 << 20).spawn(f).unwrap().join().unwrap()
 }
 
 /// `(path, status, content type, body, extra headers)`
-type Route = (&'static str, u16, Option<&'static str>, String, Vec<(&'static str, &'static str)>);
+pub(crate) type Route = (&'static str, u16, Option<&'static str>, String, Vec<(&'static str, &'static str)>);
 
-fn js(path: &'static str, body: &str) -> Route {
+pub(crate) fn js(path: &'static str, body: &str) -> Route {
     (path, 200, Some("application/javascript"), body.to_string(), vec![])
 }
 
@@ -38,7 +38,7 @@ fn server(routes: Vec<Route>) -> Server {
     })
 }
 
-const PRE: &str = "<script>var log = []; function L(x) { log.push(x + ':' + document.readyState) }</script>";
+pub(crate) const PRE: &str = "<script>var log = []; function L(x) { log.push(x + ':' + document.readyState) }</script>";
 
 fn make(html: &str, srv: &Server, steps: u64, virtual_clock: bool) -> Browser {
     let mut b = Browser::new(tree::parse(html), BrowserLimits::default(), EvalLimits { max_steps: steps, ..Default::default() }, HeapLimits::default()).expect("browser");
@@ -53,12 +53,12 @@ fn load(b: &mut Browser, srv: &Server, limits: PageLimits) -> PageResult {
     b.run_page(PageConfig { url: srv.url("/page.html"), client: Client::new(), limits, fetch: None })
 }
 
-fn quick() -> PageLimits {
+pub(crate) fn quick() -> PageLimits {
     PageLimits { quiet: Duration::from_millis(100), ..Default::default() }
 }
 
 /// Run a page and give `log.join('|')`, the result and the server.
-fn page(html: &str, routes: Vec<Route>, limits: PageLimits) -> (String, PageResult, Server) {
+pub(crate) fn page(html: &str, routes: Vec<Route>, limits: PageLimits) -> (String, PageResult, Server) {
     let srv = server(routes);
     let mut b = make(html, &srv, 5_000_000, true);
     let r = load(&mut b, &srv, limits);
@@ -318,8 +318,6 @@ fn resource_caps_are_checked_before_scripts_run() {
 
         // pending dynamic scripts
         let html = format!("{PRE}<script>for (var i = 0; i < 3; i++) {{ var s = document.createElement('script'); s.textContent = 'log.push(1)'; document.body.appendChild(s) }}</script>");
-        let (_, r, _) = page(&html, vec![], PageLimits { max_pending_scripts: 2, ..quick() });
-        assert!(matches!(&r.stop, Stop::Fatal(Fatal::Limit(l)) if l.contains("pending-scripts")), "{r:?}");
         let (_, r, _) = page(&html, vec![], PageLimits { max_pending_script_bytes: 20, ..quick() });
         assert!(matches!(&r.stop, Stop::Fatal(Fatal::Limit(l)) if l.contains("pending-script-bytes")), "{r:?}");
     });
