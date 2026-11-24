@@ -11,12 +11,14 @@ fn two_realms_run_the_same_code_with_distinct_bindings() {
     );
     let mut a = load("var first = 0; function firstFn() {}").unwrap();
     let mut b = load("var other = 0; function a() {} function b() {}").unwrap();
-    for vm in [&mut a, &mut b] {
+    // The first sight is not kept (admission on the second sight), so a third realm compiles it first.
+    let mut seed = load("").unwrap();
+    for vm in [&mut seed, &mut a, &mut b] {
         let code = vm.realm.script_code(&source, ScriptMode::default()).unwrap();
         vm.realm.run_code(code, false).unwrap();
         assert_eq!(vm.global_text("output"), "base雪");
     }
-    assert_eq!((counts().misses, counts().hits), (1, 1));
+    assert_eq!((counts().misses, counts().hits), (2, 1));
     b.realm.raw_collect(&[]);
     clear();
     drop(b);
@@ -47,7 +49,7 @@ fn cached_classic_and_module_code_use_separate_entries() {
 
     clear();
     let source = format!("/*{}*/globalThis.output = typeof this;", " ".repeat(MIN_SOURCE));
-    for i in 0..2 {
+    for i in 0..3 {
         let mut vm = load("").unwrap();
         let code = vm.realm.script_code(&source, ScriptMode::default()).unwrap();
         vm.realm.run_code(code, false).unwrap();
@@ -57,7 +59,7 @@ fn cached_classic_and_module_code_use_separate_entries() {
         Engine::module_evaluate(&mut vm.realm, id).unwrap();
         assert_eq!(vm.global_text("output"), "undefined");
     }
-    assert_eq!((counts().misses, counts().hits, counts().entries), (2, 2, 2));
+    assert_eq!((counts().misses, counts().hits, counts().entries), (4, 2, 2));
 }
 
 #[test]
@@ -73,13 +75,13 @@ fn a_hit_rebinds_strings_in_constant_trees() {
     let atoms = SharedAtoms::default();
     let baseline = compile_unit(&source, Mode::Script(mode), Limits::default(), &atoms).unwrap();
     assert!(!baseline.codes[0].data.is_empty());
-    for _ in 0..2 {
+    for _ in 0..3 {
         let mut vm = load("").unwrap();
         let code = vm.realm.script_code(&source, mode).unwrap();
         vm.realm.run_code(code, false).unwrap();
         assert_eq!(vm.global_text("checked"), "55296");
     }
-    assert_eq!((counts().misses, counts().hits), (1, 1));
+    assert_eq!((counts().misses, counts().hits), (2, 1));
 }
 
 #[test]

@@ -33,7 +33,7 @@ use crate::facts::{self, Facts, FnId};
 use crate::roots::RootMaps;
 use crate::string::{Chars, Str};
 use std::borrow::Cow;
-use std::collections::HashMap;
+use crate::fx::FxMap as HashMap;
 use std::rc::Rc;
 
 #[derive(Debug)]
@@ -80,7 +80,7 @@ pub struct LevelVar {
 
 impl Level {
     pub fn new(parent: Option<Rc<Level>>, vars: Vec<LevelVar>) -> Level {
-        let index = if vars.len() > INDEX_MIN { vars.iter().enumerate().map(|(i, v)| (v.name.clone(), i as u32)).collect() } else { HashMap::new() };
+        let index = if vars.len() > INDEX_MIN { vars.iter().enumerate().map(|(i, v)| (v.name.clone(), i as u32)).collect() } else { HashMap::default() };
         let dynamic = vars.first().is_some_and(|v| v.name.starts_with("%scope:")) || parent.as_ref().is_some_and(|l| l.dynamic);
         Level { parent, vars, index, dynamic }
     }
@@ -380,10 +380,10 @@ impl<'a> Fc<'a> {
             labels: Vec::new(),
             dead: false,
             atom_tab: Vec::new(),
-            atom_ix: HashMap::new(),
+            atom_ix: HashMap::default(),
             sites: Vec::new(),
             numbers: Vec::new(),
-            num_ix: HashMap::new(),
+            num_ix: HashMap::default(),
             funcs: Vec::new(),
             children: Vec::new(),
             inline: Vec::new(),
@@ -408,7 +408,7 @@ impl<'a> Fc<'a> {
             outer: input.chain.clone(),
             cur_ctx: input.chain.clone(),
             depth: 0,
-            cap: HashMap::new(),
+            cap: HashMap::default(),
             force_ctx: false,
             strict: false,
             is_script: false,
@@ -715,7 +715,7 @@ impl<'a> Fc<'a> {
     pub(crate) fn enter(&mut self, span: Span, decls: &[Decl<'a>], switch: bool) -> CR<ScopeMark> {
         let mark = ScopeMark { reg: self.next, scopes: self.scopes.len(), ctx: self.depth, cur: self.cur_ctx.clone() };
         let mut vars: Vec<Var<'a>> = Vec::with_capacity(decls.len());
-        let mut index: HashMap<Cow<'a, str>, u32> = HashMap::new();
+        let mut index: HashMap<Cow<'a, str>, u32> = HashMap::default();
         let indexed = decls.len() > INDEX_MIN;
         let mut slots: Vec<LevelVar> = Vec::new();
         let level = self.depth + 1;

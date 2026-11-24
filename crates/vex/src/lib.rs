@@ -34,6 +34,7 @@ pub mod weaktab;
 pub mod roots;
 pub mod parse_ahead;
 pub mod lex;
+mod fx;
 pub mod regexp;
 mod regexp_rt;
 pub mod regexp_check;

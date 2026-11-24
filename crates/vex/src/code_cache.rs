@@ -15,6 +15,8 @@ use std::rc::Rc;
 pub const MAX_BYTES: usize = 32 << 20;
 const MIN_SOURCE: usize = 512;
 const MAX_IDLE: u64 = 2;
+/// The most identities that the cache keeps as seen once. At the cap the set starts again (about 40 bytes for each key).
+const MAX_SEEN: usize = 1 << 14;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Mode {
@@ -184,12 +186,27 @@ struct Entry {
 struct Cache {
     entries: HashMap<Key, Entry>,
     order: BTreeMap<Age, Key>,
+    /// Scripts compiled once and not kept. The second compile of one keeps its unit (admission on the second sight): most scripts
+    /// load once, and a unit costs about 1.4 times its source (design-parse-cost.md, F1).
+    seen: HashSet<Key>,
     counts: Counts,
     realm: u64,
     serial: u64,
 }
 
 impl Cache {
+    /// True when `key` was compiled before and its unit must be kept now. Else `key` is marked as seen.
+    fn admit(&mut self, key: Key) -> bool {
+        if self.seen.remove(&key) {
+            return true;
+        }
+        if self.seen.len() >= MAX_SEEN {
+            self.seen.clear();
+        }
+        self.seen.insert(key);
+        false
+    }
+
     fn age(&mut self) -> Age {
         self.serial += 1;
         (self.realm, self.serial)
@@ -285,6 +302,9 @@ pub(crate) fn get_or_compile(
 fn compile_on_miss(key: Key, source: &str, compile: impl FnOnce() -> Result<UnitCode, String>) -> Result<(Rc<str>, UnitCode), String> {
     let code = compile()?;
     let source: Rc<str> = source.into();
+    if !CACHE.with_borrow_mut(|c| c.admit(key)) {
+        return Ok((source, code));
+    }
     let unit = Rc::new(PortableUnit::capture(source.clone(), &code));
     let bytes = unit.bytes();
     CACHE.with_borrow_mut(|c| c.insert(key, unit, bytes, MAX_BYTES));
@@ -294,3 +314,7 @@ fn compile_on_miss(key: Key, source: &str, compile: impl FnOnce() -> Result<Unit
 #[cfg(test)]
 #[path = "code_cache_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "code_cache_admit_tests.rs"]
+mod admit_tests;
