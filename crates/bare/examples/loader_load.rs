@@ -15,12 +15,13 @@
 #[path = "../src/test_server.rs"]
 mod test_server;
 
+use bare::eng_new::Peek;
 use bare::browser::*;
 use bare::browser_fetch::{FetchConfig, FetchLimits};
 use bare::{PageConfig, PageLimits, Stop};
 use bare_html::tree;
-use bare_js::eval::*;
-use bare_js::heap::HeapLimits;
+use bare::js_limits::*;
+use bare::js_limits::HeapLimits;
 use bare_net::http::Client;
 use std::time::{Duration, Instant};
 use test_server::{Reply, serve};
@@ -104,7 +105,7 @@ fn exec(name: &str, scale: usize) {
             ),
         }
     });
-    let eval = EvalLimits { max_steps: u64::MAX / 2, max_scripts: 1 << 14, max_envs: 1 << 22, max_functions: 1 << 22, ..Default::default() };
+    let eval = EvalLimits { max_steps: u64::MAX / 2, ..Default::default() };
     let mut b = Browser::new(tree::parse(&html), BrowserLimits::default(), eval, HeapLimits::default()).unwrap_or_else(|e| die(format!("browser: {e:?}")));
     b.use_virtual_clock();
     let url = server.url("/page.html");

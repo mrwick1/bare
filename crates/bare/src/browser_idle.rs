@@ -30,7 +30,7 @@ use crate::browser::*;
 use crate::browser_frame::window_this;
 use crate::browser_scheduler::{Key, Task};
 use crate::browser_scoped::*;
-use bare_js::value::to_uint32;
+use crate::js_num::to_uint32;
 use bare_js_api::{Args, Attrs, Engine, HostFn, Local, Type};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};

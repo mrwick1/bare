@@ -1,7 +1,7 @@
 //! Module scripts for a page session. Child of `browser_loader`: it is part of `Run`.
 //!
 //! What runs: `<script type=module>` (inline or `src`, from the parsed page or added by a script) and `import()` (in classic scripts and
-//! modules). The engine links and evaluates (`bare_js` `Interp::module_*`); this file fetches, resolves and caches.
+//! modules). The engine links and evaluates (`Engine::module_parse` and the calls after it); this file fetches, resolves and caches.
 //!
 //! Timing (`resources::discover` decides): a module script is deferred (it runs after the page is parsed, in document order with
 //! the `defer` scripts, before `DOMContentLoaded`), or `async` (it runs in the async stage). `nomodule` does nothing on a module.

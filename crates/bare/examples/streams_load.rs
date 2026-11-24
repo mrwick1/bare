@@ -10,10 +10,11 @@
 //! A collection runs between batches. Prints time, CPU, peak RSS and what the stream layer holds. Only throwaway
 //! synthetic data. No network. `tools/js/streams_load.sh` runs the matrix under caps.
 
+use bare::eng_new::Peek;
 use bare::browser::*;
 use bare_html::tree;
-use bare_js::eval::*;
-use bare_js::heap::HeapLimits;
+use bare::js_limits::*;
+use bare::js_limits::HeapLimits;
 use std::time::Instant;
 
 fn die(msg: String) -> ! {

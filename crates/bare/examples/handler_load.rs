@@ -9,10 +9,11 @@
 //! the expected value of every property. Both are compared after every batch of 500 operations, then the heap is collected
 //! and the number of live listener slots must equal the model's. No report may appear.
 
+use bare::eng_new::Peek;
 use bare::browser::*;
 use bare_html::tree;
-use bare_js::eval::*;
-use bare_js::heap::HeapLimits;
+use bare::js_limits::*;
+use bare::js_limits::HeapLimits;
 use std::time::Instant;
 
 fn die(msg: String) -> ! {

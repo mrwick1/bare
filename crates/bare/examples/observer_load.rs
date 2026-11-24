@@ -9,10 +9,11 @@
 //! clock moves frame by frame. The count of callbacks and the sum of the frame numbers are checked.
 //! Prints time, CPU, peak RSS and allocations. `tools/js/observer_load.sh` runs the matrix under caps.
 
+use bare::eng_new::Peek;
 use bare::browser::*;
 use bare_html::tree;
-use bare_js::eval::*;
-use bare_js::heap::HeapLimits;
+use bare::js_limits::*;
+use bare::js_limits::HeapLimits;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::time::Instant;
@@ -92,7 +93,7 @@ fn expect(what: &str, got: String, want: String) {
 const CHUNK: usize = 100;
 
 fn exec(name: &str, scale: usize) {
-    let eval = EvalLimits { max_steps: u64::MAX / 2, max_scripts: 1 << 14, max_envs: 1 << 22, max_functions: 1 << 22, ..Default::default() };
+    let eval = EvalLimits { max_steps: u64::MAX / 2, ..Default::default() };
     let doc = tree::parse("<!doctype html><body><ul id=l></ul><div id=s></div></body>");
     let mut b = Browser::new(doc, BrowserLimits::default(), eval, HeapLimits::default()).unwrap_or_else(|e| die(format!("browser: {e:?}")));
     b.use_virtual_clock_at(1000.0).unwrap_or_else(|e| die(format!("clock {e:?}")));

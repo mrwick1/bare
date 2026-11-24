@@ -74,7 +74,7 @@ fn index<'s, E: Eng>(s: &mut Sc<'s, E>, a: Args<'s>) -> Res<'s, i32> {
     let v = arg_s::<E>(s, a, 0);
     match s.type_of(v) {
         Type::Undefined => Ok(-1),
-        _ => Ok(bare_js::value::to_int32(s.to_number(v)?)),
+        _ => Ok(crate::js_num::to_int32(s.to_number(v)?)),
     }
 }
 

@@ -3,13 +3,13 @@
 //! The tests below cover what Chrome cannot show: the deliberate differences (`canPlayType`, no download), the lazy globals, the parser, the collector
 //! and the limits.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use crate::browser_topic_tests::topic_test;
 use bare_html::tree;
-use crate::eng_old::OldFault as Error;
-use bare_js::eval::{EvalLimits};
-use bare_js::heap::HeapLimits;
-use bare_js::value::Value;
+use crate::eng_new::NewFault as Error;
+use crate::js_limits::EvalLimits;
+use crate::js_limits::HeapLimits;
 
 topic_test!(media_cases, "media", 77);
 
@@ -22,7 +22,7 @@ fn browser(body: &str) -> Browser {
 fn js(b: &mut Browser, src: &str) -> String {
     match b.run_script(src) {
         Ok(v) => b.it.display(v),
-        Err(Error::Throw(v)) if matches!(v, Value::Object(_)) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
+        Err(Error::Throw(v)) if crate::eng_new::is_object(v) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
         Err(Error::Limit(l)) => format!("limit:{l:?}"),
         Err(Error::Unsupported(u)) => format!("unsupported:{}", u),
         Err(e) => format!("other:{e:?}"),

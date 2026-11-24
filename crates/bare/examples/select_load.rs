@@ -9,10 +9,11 @@
 //! after each round. The realm must keep no `Opt` state of dropped selects in its wrappers. Prints time, CPU and peak RSS.
 //! `tools/js/select_load.sh` runs the matrix.
 
+use bare::eng_new::Peek;
 use bare::browser::*;
 use bare_html::tree;
-use bare_js::eval::*;
-use bare_js::heap::HeapLimits;
+use bare::js_limits::*;
+use bare::js_limits::HeapLimits;
 use std::time::Instant;
 
 fn die(msg: String) -> ! {
@@ -48,7 +49,7 @@ fn expect(what: &str, got: String, want: &str) {
 fn exec(name: &str, n: usize) {
     let opts: String = (0..n).map(|i| format!("<option value=v{i}>Option {i}</option>")).collect();
     let doc = tree::parse(&format!("<body><select id=s>{opts}</select><select id=m multiple>{opts}</select></body>"));
-    let eval = EvalLimits { max_steps: u64::MAX / 2, max_envs: 1 << 22, max_functions: 1 << 22, ..Default::default() };
+    let eval = EvalLimits { max_steps: u64::MAX / 2, ..Default::default() };
     let limits = BrowserLimits { max_results: 1 << 20, max_nodes: 1 << 22, ..Default::default() };
     let mut b = Browser::new(doc, limits, eval, HeapLimits::default()).unwrap_or_else(|e| die(format!("browser: {e:?}")));
     let (cpu0, t) = (cpu_ms(), Instant::now());

@@ -4,12 +4,12 @@
 //!
 //!   fetch_check CASES_FILE
 
+use bare::eng_new::Peek;
 use bare::browser::*;
 use bare_html::tree;
-use bare_js::eval::*;
-use bare::eng_old::OldFault as Error;
-use bare_js::heap::HeapLimits;
-use bare_js::value::Value;
+use bare::js_limits::*;
+use bare::eng_new::NewFault as Error;
+use bare::js_limits::HeapLimits;
 
 fn esc(s: &str) -> String {
     s.replace('\\', "\\\\").replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t")
@@ -27,7 +27,7 @@ fn run(src: &str) -> String {
     if let Err(e) = b.drain() {
         return fail(&mut b, e);
     }
-    match bare::eng::Ops::call_o(&mut b.it, reader, Value::Undefined, &[]) {
+    match bare::eng::Ops::call_o(&mut b.it, reader, <bare::eng_new::New as bare::eng::Eng>::undef(), &[]) {
         Ok(v) => esc(&b.it.display(v)),
         Err(e) => fail(&mut b, e),
     }
@@ -35,7 +35,7 @@ fn run(src: &str) -> String {
 
 fn fail(b: &mut Browser, e: Error) -> String {
     match e {
-        Error::Throw(v) if matches!(v, Value::Object(_)) => format!("throw:{}", esc(&b.it.get_str(v, "name"))),
+        Error::Throw(v) if bare::eng_new::is_object(v) => format!("throw:{}", esc(&b.it.get_str(v, "name"))),
         Error::Throw(v) => format!("throw-value:{}", esc(&b.it.display(v))),
         Error::Unsupported(u) => format!("unsupported:{}", u),
         Error::Limit(_) => "limit".into(),

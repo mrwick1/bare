@@ -35,14 +35,11 @@ This file lists the third-party components that `bare` uses, adapts or ships as 
 | Component | Where it is used | License | Link |
 | --- | --- | --- | --- |
 | HPACK Huffman table (RFC 7541, appendix B, 257 entries) from the `h2` crate | `crates/net/src/hpack.rs`. The rest of HTTP/2 is our own code. | MIT | [hyperium/h2](https://github.com/hyperium/h2) |
-| `fdlibm` math functions, adapted. Copyright (C) 1993 by Sun Microsystems, Inc. | `crates/js/src/ieee754.rs` | The fdlibm permission notice in the file header | [netlib fdlibm](http://www.netlib.org/fdlibm) |
-| V8 12.4.254 `DoubleToRadixCString` from `src/numbers/conversions.cc`, ported. Copyright 2011 the V8 project authors. | `crates/js/src/eval_numeric.rs` | BSD-3-Clause (`crates/js/LICENSE-V8`) | [v8/v8](https://github.com/v8/v8/blob/12.4.254/src/numbers/conversions.cc) |
 | Ladybird `Libraries/LibWeb/Editing/` (commit 2e2af354), in the shape of its code: `execCommand`, `queryCommand*` and the editing actions | `crates/bare/src/browser_editing.rs` | BSD-2-Clause (`crates/bare/LICENSE-LADYBIRD`) | [LadybirdBrowser/ladybird](https://github.com/LadybirdBrowser/ladybird) |
 | Ladybird `Libraries/LibWeb/Selection/Selection.cpp`: the steps of `setBaseAndExtent`, `extend` and `containsNode` | `crates/bare/src/browser_range.rs` | BSD-2-Clause (`crates/bare/LICENSE-LADYBIRD`) | [LadybirdBrowser/ladybird](https://github.com/LadybirdBrowser/ladybird) |
 | html5ever `tree_builder/rules.rs` (InSelect) and Ladybird `HTMLParser::handle_in_select`: the rules of HTML 13.2.6.4.16, in our own code | `crates/html/src/tree.rs` (`in_select`) | MIT OR Apache-2.0 (html5ever), BSD-2-Clause (Ladybird) | [servo/html5ever](https://github.com/servo/html5ever) |
 | Boa `core/runtime/src/abort`: the shape of `AbortController` and `AbortSignal` | `crates/bare/src/browser_abort.rs` | MIT OR Unlicense | [boa-dev/boa](https://github.com/boa-dev/boa) |
 | Boa `core/wintertc/src/base64`: the shape of `btoa` and `atob` | `crates/bare/src/browser_encoding.rs` | MIT OR Unlicense | [boa-dev/boa](https://github.com/boa-dev/boa) |
-| Boa `core/engine/src/builtins/intl/segmenter`: the shape of `Intl.Segmenter`. The break rules are ICU4X. | `crates/js/src/eval_intl_segmenter.rs` | MIT OR Unlicense | [boa-dev/boa](https://github.com/boa-dev/boa) |
 
 The files of the Ladybird and Boa rows are our own code in the shape of the source. No source file is copied whole. Each file header names the source path.
 
@@ -54,7 +51,7 @@ The CSS Color 4 gamut mapping follows the [local-MINDE algorithm](https://www.w3
 | --- | --- | --- | --- |
 | Unicode data files (`data/unicode/`) and `windowsZones.xml` (`data/tz/`) | `crates/unicode`, `crates/tzdata` | Unicode License v3 (`data/unicode/LICENSE.txt`) | [Unicode](https://www.unicode.org/license.txt) |
 | IANA `tzdata.zi` (`data/tz/`) | `crates/tzdata` | Public domain | [IANA tz](https://www.iana.org/time-zones) |
-| CLDR and ICU data (`crates/intl/src/icu_data`, `crates/js/src/intl_num_data.rs`) | `Intl` formatting | Unicode-3.0 (`crates/js/LICENSE-UNICODE`, `crates/intl/LICENSE-UNICODE`) | [CLDR](https://cldr.unicode.org) |
+| CLDR and ICU data (`crates/intl/src/icu_data`) | `Intl` formatting | Unicode-3.0 (`crates/intl/LICENSE-UNICODE`) | [CLDR](https://cldr.unicode.org) |
 | WHATWG entity list (`data/html/`) | `crates/html` | CC BY 4.0 (`data/html/LICENSE.txt`) | [WHATWG](https://html.spec.whatwg.org/entities.json) |
 | CSS color names (`data/css/`) | `crates/css` | MIT (`data/css/LICENSE.txt`) | [W3C CSS Color](https://www.w3.org/TR/css-color-4/) |
 | Noto Sans Mono Regular and Bold, Noto Serif Regular and Bold, Noto Sans Symbols2: subsets cut with `pyftsubset` (`data/fonts/`) | `crates/paint`, built into the binary | SIL OFL 1.1 (`data/fonts/OFL.txt`, `data/fonts/OFL-Symbols2.txt`, `data/fonts/OFL-Arabic.txt`) | [Noto fonts](https://github.com/notofonts) |

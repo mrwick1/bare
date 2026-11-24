@@ -3,7 +3,7 @@
 //! pieces, so a test controls when each piece leaves.
 
 use crate::browser_session::*;
-use bare_js::eval::EvalLimits;
+use crate::js_limits::EvalLimits;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
@@ -304,7 +304,7 @@ fn held_by(html: &str) -> Vec<(String, bool)> {
     plan.files = vec![("/a.js", "1")];
     let srv = slow(plan);
     let page = bare_url::Url::parse(&format!("http://127.0.0.1:{}/", srv.port)).unwrap();
-    let mut scan = crate::browser_loader::Scan::new(bare_net::http::Client::new(), page, crate::resources::Limits::default(), Instant::now() + Duration::from_secs(20), false);
+    let mut scan = crate::browser_loader::Scan::new(bare_net::http::Client::new(), page, crate::resources::Limits::default(), Instant::now() + Duration::from_secs(20));
     scan.step(html, Instant::now() + Duration::from_secs(1), false);
     let b = crate::browser::Browser::new(bare_html::tree::parse("<p>"), Default::default(), Default::default(), Default::default()).unwrap();
     b.adopt_scan(scan);
@@ -340,26 +340,9 @@ fn a_style_preload_link_in_the_first_piece_starts_the_sheet_that_a_later_link_ad
     });
 }
 
-/// A script of about 40 KB (more than `bare_js::parse_ahead::MIN_AHEAD`) that ends with `tail`.
+/// A script of about 40 KB that ends with `tail`.
 fn long_script(tail: &str) -> &'static str {
     Box::leak(format!("/*{}*/\n{tail}", "x".repeat(40_000)).into_boxed_str())
-}
-
-#[test]
-fn a_long_script_that_the_scan_started_runs_from_the_tree_that_the_worker_parsed() {
-    big(|| {
-        let mut plan = preload_page("<link rel=preload as=script href=/a.js>", ADD_SCRIPT);
-        plan.files = vec![("/a.js", long_script("localStorage.setItem('a', 'ran')"))];
-        let srv = slow(plan);
-        let before = bare_js::parse_ahead::taken_here();
-        // The parse-ahead tree is a feature of the old engine.
-        let mut c = cfg(srv.port, true);
-        c.vex = false;
-        let (s, stop) = load(Session::new(c));
-        assert_eq!(stop, SessionStop::Page(crate::Stop::Settled));
-        assert_eq!(item(&s, srv.port, "a").as_deref(), Some("ran"));
-        assert_eq!(bare_js::parse_ahead::taken_here() - before.min(bare_js::parse_ahead::taken_here()), 1, "the page thread did not take the tree of the worker");
-    });
 }
 
 #[test]
@@ -372,7 +355,7 @@ fn a_syntax_error_of_a_long_script_is_reported_when_the_script_runs_and_the_next
         let srv = slow(plan);
         let (s, stop) = load(Session::new(cfg(srv.port, true)));
         assert_eq!(stop, SessionStop::Page(crate::Stop::Settled));
-        let want = bare_js::parse::parse_script(bad, Default::default()).err().unwrap().msg;
+        let want = bare_vex::parse::parse_script(bad, Default::default()).err().unwrap().msg;
         let err = item(&s, srv.port, "err").unwrap_or_default();
         assert!(err.contains(want), "{err:?} does not hold {want:?}");
         assert_eq!(item(&s, srv.port, "first").as_deref(), Some("ran"));

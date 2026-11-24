@@ -11,10 +11,11 @@
 //!
 //! A collection runs every 10000 operations. Prints time, CPU, peak RSS and allocation counts. `tools/js/dataset_load.sh` runs the matrix under caps.
 
+use bare::eng_new::Peek;
 use bare::browser::*;
 use bare_html::tree;
-use bare_js::eval::*;
-use bare_js::heap::HeapLimits;
+use bare::js_limits::*;
+use bare::js_limits::HeapLimits;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::time::Instant;
@@ -94,7 +95,7 @@ fn expect(what: &str, got: String, want: String) {
 const PAGE: &str = "<!doctype html><html><head></head><body></body></html>";
 
 fn exec(name: &str, ops: usize, attrs: usize) {
-    let eval = EvalLimits { max_steps: u64::MAX / 2, max_scripts: 1 << 14, max_envs: 1 << 22, max_functions: 1 << 22, ..Default::default() };
+    let eval = EvalLimits { max_steps: u64::MAX / 2, ..Default::default() };
     let mut b = Browser::new(tree::parse(PAGE), BrowserLimits::default(), eval, HeapLimits::default()).unwrap_or_else(|e| die(format!("browser: {e:?}")));
     run(&mut b, &format!(
         "var els = []; for (var i = 0; i < 20; i++) {{ var e = document.createElement('div'); e.id = 'e' + i; for (var j = 0; j < {attrs}; j++) e.setAttribute('data-k-x' + j, 'v' + j); document.body.appendChild(e); els.push(e); }} var e = null; var sum = 0;

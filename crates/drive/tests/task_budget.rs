@@ -1,6 +1,7 @@
 //! A live page gives one task far more than the 100M steps of `EvalLimits::default()`. A large app (Gmail) runs its first render
 //! in one task. With the small budget bare aborted that task and the app never showed. Issue #454.
 
+use bare::eng_new::Peek;
 use bare::page::Page;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -32,7 +33,7 @@ fn a_live_page_task_may_run_more_than_100m_steps() {
     let out = std::thread::Builder::new()
         .stack_size(64 << 20)
         .spawn(move || {
-            let mut p = Page::open_old(&origin, (800, 600)).unwrap();
+            let mut p = Page::open(&origin, (800, 600)).unwrap();
             p.wait_load(Duration::from_secs(120)).unwrap();
             let b = p.browser().unwrap();
             let v = b.run_script("document.getElementById('out').textContent").unwrap();

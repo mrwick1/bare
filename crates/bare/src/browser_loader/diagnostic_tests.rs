@@ -1,29 +1,11 @@
 //! Heap stop labels omit payloads and remain sticky across loader runs.
+use crate::eng_new::Peek;
 use super::*;
-use crate::eng_old::Old;
-use bare_js::heap::{HeapError, HeapLimits};
-use bare_js::eval::EvalLimits;
+use crate::eng::Fault;
+use crate::eng_new::New;
+use crate::js_limits::HeapLimits;
+use crate::js_limits::EvalLimits;
 use std::mem::size_of;
-
-#[test]
-fn heap_variant_labels_and_public_stop_text() {
-    use HeapError::*;
-    let owner = bare_js::heap::Heap::default().new_object(None).unwrap();
-    let cases = [
-        (Stale, "Stale"), (Limit(bare_js::heap::Limit::Objects), "Limit"),
-        (InvalidKey, "InvalidKey"), (InvalidDescriptor, "InvalidDescriptor"),
-        (InvalidArrayLength, "InvalidArrayLength"), (SymbolConversion, "SymbolConversion"),
-        (SymbolToNumber, "SymbolToNumber"), (BigIntToNumber, "BigIntToNumber"),
-        (NeedsExecution("private source"), "NeedsExecution"), (NeedsBigInt, "NeedsBigInt"),
-        (BigUnsigned(u64::MAX), "BigUnsigned"), (BigElement, "BigElement"),
-        (NeedsHost { owner, index: 987654 }, "NeedsHost"), (HostUnavailable, "HostUnavailable"),
-        (NeedsNamed, "NeedsNamed"), (Proxy(owner), "Proxy"),
-    ];
-    for (error, name) in cases {
-        let Stop::Fatal(fatal) = fatal_of::<Old>(bare_js::eval::Error::Heap(error).into()) else { panic!("expected fatal") };
-        assert_eq!(format!("page stopped: {fatal:?}"), format!("page stopped: Heap({name:?})"));
-    }
-}
 
 #[test]
 fn constructed_heap_stop_starts_no_more_js_or_io() {
@@ -34,9 +16,7 @@ fn constructed_heap_stop_starts_no_more_js_or_io() {
             bare_html::tree::parse("<script>var ran = true; fetch('/io')</script><script src='/later.js'></script>"),
             Default::default(), EvalLimits::default(), HeapLimits::default(),
         ).unwrap();
-        let Stop::Fatal(fatal) = fatal_of::<Old>(bare_js::eval::Error::Heap(HeapError::NeedsHost {
-            owner: bare_js::heap::Heap::default().new_object(None).unwrap(), index: 987654,
-        }).into()) else { panic!("expected fatal") };
+        let Stop::Fatal(fatal) = fatal_of::<New>(Fault::Heap("NeedsHost")) else { panic!("expected fatal") };
         *b.dom.scripts.fatal.borrow_mut() = Some(fatal.clone());
         for _ in 0..3 {
             let r = b.run_page(PageConfig {
@@ -54,7 +34,7 @@ fn constructed_heap_stop_starts_no_more_js_or_io() {
 
 #[test]
 fn diagnostic_type_sizes() {
-    eprintln!("Fatal={} Stop={} Scripts={} PageResult={}", size_of::<Fatal>(), size_of::<Stop>(), size_of::<Scripts<Old>>(), size_of::<PageResult>());
+    eprintln!("Fatal={} Stop={} Scripts={} PageResult={}", size_of::<Fatal>(), size_of::<Stop>(), size_of::<Scripts<New>>(), size_of::<PageResult>());
 }
 
 #[test]
@@ -64,11 +44,10 @@ fn public_page_exposes_heap_stop_label() {
         use crate::page::{Page, Source};
         use crate::resources::test_server::{serve, Reply};
         let srv = serve(|_| Reply::new(200, Some("text/html"), "<p>ok</p>"));
-        let mut cfg = SessionConfig::new(&srv.url("/"));
-        cfg.vex = false; // this test reads the old engine
+        let cfg = SessionConfig::new(&srv.url("/"));
         let mut session = Session::new(cfg);
         session.run();
-        let Stop::Fatal(fatal) = fatal_of::<Old>(bare_js::eval::Error::Heap(HeapError::Stale).into()) else { panic!("expected fatal") };
+        let Stop::Fatal(fatal) = fatal_of::<New>(Fault::Heap("Stale")) else { panic!("expected fatal") };
         *session.browser().unwrap().dom.scripts.fatal.borrow_mut() = Some(fatal);
         session.resume(&[]);
         let page = Page::new(Source::Session(Box::new(session)), (800, 600));

@@ -1,10 +1,11 @@
 //! Tests of `backdrop-filter` and `scrollbar-width` (OFS-51): pages test them with `CSS.supports`, read them with
 //! `getComputedStyle`, and a row with `scrollbar-width: none` must not give room to a scrollbar.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use bare_html::tree;
-use bare_js::eval::EvalLimits;
-use bare_js::heap::HeapLimits;
+use crate::js_limits::EvalLimits;
+use crate::js_limits::HeapLimits;
 
 fn js(b: &mut Browser, src: &str) -> String {
     let v = b.run_script(src).expect("script");

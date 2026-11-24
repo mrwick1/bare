@@ -9,10 +9,11 @@
 //! moves back each time); a second one walks the list backwards, then `textContent` clears the list under it. The counts are checked.
 //! Prints time, CPU, peak RSS and what the realm holds. `tools/js/range_load.sh` runs the matrix under caps.
 
+use bare::eng_new::Peek;
 use bare::browser::*;
 use bare_html::tree;
-use bare_js::eval::*;
-use bare_js::heap::HeapLimits;
+use bare::js_limits::*;
+use bare::js_limits::HeapLimits;
 use std::time::Instant;
 
 fn die(msg: String) -> ! {
@@ -93,7 +94,7 @@ fn main() {
 }
 
 fn exec(name: &str, scale: usize) {
-    let eval = EvalLimits { max_steps: u64::MAX / 2, max_scripts: 1 << 14, max_envs: 1 << 22, max_functions: 1 << 22, ..Default::default() };
+    let eval = EvalLimits { max_steps: u64::MAX / 2, ..Default::default() };
     let mut b = Browser::new(tree::parse("<body><ul id=u></ul><p id=x></p></body>"), BrowserLimits::default(), eval, HeapLimits::default()).unwrap_or_else(|e| die(format!("browser: {e:?}")));
     b.use_virtual_clock();
     let (t, cpu0) = (Instant::now(), cpu_ms());

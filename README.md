@@ -72,6 +72,7 @@ Linux is the first target, and only Linux has a window today. The core also buil
 | `crates/layout/`    | Layout: box tree, text, block, inline, flex, grid, table     |
 | `crates/vex/`       | Vex, the JavaScript engine: parser, compiler, interpreter, heap |
 | `crates/intl/`      | `Intl` data and formatting                                   |
+| `crates/js-api/`    | Host interface between the browser and Vex                   |
 | `crates/image/`     | PNG, JPEG, WebP and GIF decoders                             |
 | `crates/paint/`     | Display list, pixel buffer, PNG output                       |
 | `crates/window/`    | Wayland window and input                                     |

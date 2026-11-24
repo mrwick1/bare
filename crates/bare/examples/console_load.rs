@@ -10,12 +10,13 @@
 //! The checks use sums and strings computed in Rust, not by the script. Nothing logged is ever printed. Throwaway
 //! synthetic data only. No network. `tools/js/console_load.sh` runs the matrix under caps.
 
+use bare::eng_new::Peek;
 use bare::browser::*;
 use bare::browser_console::*;
 use bare_html::tree;
-use bare_js::eval::*;
-use bare_js::heap::HeapLimits;
-use bare_js::value::Value;
+use bare::js_limits::*;
+use bare::js_limits::HeapLimits;
+use bare_vex::value::Value;
 use std::time::Instant;
 
 fn die(msg: String) -> ! {
@@ -57,8 +58,8 @@ fn expect(what: &str, got: String, want: String) {
 }
 
 fn num(v: Value) -> f64 {
-    match v {
-        Value::Number(n) => n,
+    match v.as_f64() {
+        Some(n) => n,
         _ => die("not a number".into()),
     }
 }

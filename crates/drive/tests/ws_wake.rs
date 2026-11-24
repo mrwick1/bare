@@ -2,6 +2,7 @@
 //! (`Page::wake_on_done`). An idle open socket does not make the loop tick.
 //! A loopback server serves the page, then takes the upgrade of `/ws` and sends `late` after `DELAY`.
 
+use bare::eng_new::Peek;
 use bare::page::Page;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -65,7 +66,7 @@ fn serve(delay: Option<Duration>) -> String {
 static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn open(url: &str) -> (Page, mpsc::Receiver<()>) {
-    let mut p = Page::open_old(url, (800, 600)).unwrap();
+    let mut p = Page::open(url, (800, 600)).unwrap();
     p.wait_load(Duration::from_secs(10)).unwrap();
     p.quiet = true;
     let (tx, rx) = mpsc::channel();

@@ -4,8 +4,8 @@
 use crate::browser::*;
 use crate::page::{Page, Source};
 use bare_html::tree;
-use bare_js::eval::EvalLimits;
-use bare_js::heap::HeapLimits;
+use crate::js_limits::EvalLimits;
+use crate::js_limits::HeapLimits;
 use bare_observe::{process as p, Ids};
 
 const FIXTURE: &str = "paint_trace_tests::window_paint_fixture";

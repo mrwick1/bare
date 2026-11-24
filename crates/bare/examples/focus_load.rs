@@ -7,10 +7,11 @@
 //! not move focus. gc: SCALE*1000 rounds of create, append, focus, remove with a VM collect between blocks; the realm must
 //! not keep the removed nodes. Prints time, CPU, peak RSS and what the realm holds. `tools/js/focus_load.sh` runs the matrix.
 
+use bare::eng_new::Peek;
 use bare::browser::*;
 use bare_html::tree;
-use bare_js::eval::*;
-use bare_js::heap::HeapLimits;
+use bare::js_limits::*;
+use bare::js_limits::HeapLimits;
 use std::time::Instant;
 
 fn die(msg: String) -> ! {
@@ -49,7 +50,7 @@ const CHUNK: usize = 100;
 fn exec(name: &str, scale: usize) {
     let buttons: String = (0..20).map(|i| format!("<button id=b{i}>x</button>")).collect();
     let doc = tree::parse(&format!("<body><div id=w>{buttons}</div></body>"));
-    let eval = EvalLimits { max_steps: u64::MAX / 2, max_scripts: 1 << 14, max_envs: 1 << 22, max_functions: 1 << 22, ..Default::default() };
+    let eval = EvalLimits { max_steps: u64::MAX / 2, ..Default::default() };
     let mut b = Browser::new(doc, BrowserLimits::default(), eval, HeapLimits::default()).unwrap_or_else(|e| die(format!("browser: {e:?}")));
     let cpu0 = cpu_ms();
     let t = Instant::now();

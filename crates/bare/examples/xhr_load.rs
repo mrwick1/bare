@@ -7,11 +7,12 @@
 //! baseline taken after the first read of the globals. Prints time, CPU, peak RSS and those counts.
 //! `tools/js/xhr_load.sh` runs the rows. Only throwaway synthetic data. No external network.
 
+use bare::eng_new::Peek;
 use bare::browser::*;
 use bare::browser_fetch::*;
 use bare_html::tree;
-use bare_js::eval::*;
-use bare_js::heap::HeapLimits;
+use bare::js_limits::*;
+use bare::js_limits::HeapLimits;
 use bare_net::http::Client;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};

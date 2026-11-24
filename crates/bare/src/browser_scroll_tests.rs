@@ -4,11 +4,12 @@
 //! one that headless Chrome gave (`tools/fixtures/ui/chrome-scroll.txt`, made by `tools/ui/chrome_scroll.mjs`): sizes, positions, rectangles,
 //! the count of `scroll` events and the keys. Chrome is the oracle. The other tests use the window boundary (`Page::handle`).
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use crate::page::{Page, Source};
 use bare_html::tree;
-use bare_js::eval::EvalLimits;
-use bare_js::heap::HeapLimits;
+use crate::js_limits::EvalLimits;
+use crate::js_limits::HeapLimits;
 use bare_window::{Event, Mods};
 
 const FIXTURE: &str = include_str!("../../../tools/fixtures/ui/scroll.html");

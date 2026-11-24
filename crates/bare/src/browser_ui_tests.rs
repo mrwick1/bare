@@ -9,12 +9,13 @@
 //! between the key events depends on task timing (Chrome itself puts `selectionchange` before `keyup` in one scenario and after
 //! it in another). Their own tests are in `browser_selection_tests.rs`.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use crate::browser_ui::Mods;
 use crate::page::{Page, Source};
 use bare_html::tree;
-use bare_js::eval::EvalLimits;
-use bare_js::heap::HeapLimits;
+use crate::js_limits::EvalLimits;
+use crate::js_limits::HeapLimits;
 use bare_window::Event;
 use bare_window::Mods as WMods;
 use std::collections::BTreeMap;

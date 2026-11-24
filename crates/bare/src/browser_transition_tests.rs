@@ -1,12 +1,12 @@
 //! Tests of `browser_motion`: `transitionrun/start/end/cancel` and `animationstart/iteration/end/cancel`, timed by the virtual clock.
 //! A style change is seen by the next rendering step, so an event is checked with a margin of one frame (`FRAME`).
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use bare_html::tree;
-use crate::eng_old::OldFault as Error;
-use bare_js::eval::{EvalLimits};
-use bare_js::heap::HeapLimits;
-use bare_js::value::Value;
+use crate::eng_new::NewFault as Error;
+use crate::js_limits::EvalLimits;
+use crate::js_limits::HeapLimits;
 
 const FRAME: f64 = 17.0;
 
@@ -20,7 +20,7 @@ fn page(css: &str, body: &str) -> Browser {
 fn js(b: &mut Browser, src: &str) -> String {
     match b.run_script(src) {
         Ok(v) => b.it.display(v),
-        Err(Error::Throw(v)) if matches!(v, Value::Object(_)) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
+        Err(Error::Throw(v)) if crate::eng_new::is_object(v) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
         Err(Error::Unsupported(u)) => format!("unsupported:{}", u),
         Err(Error::Limit(k)) => format!("limit:{k:?}"),
         Err(e) => format!("other:{e:?}"),

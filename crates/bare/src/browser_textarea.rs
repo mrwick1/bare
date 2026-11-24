@@ -109,7 +109,7 @@ fn limited<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, name: &st
 fn set_limited<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>, name: &str, fallback: u32) -> Res<'s, Local<'s>> {
     let n = this_el(d, s, this)?;
     let x = arg_s::<E>(s, a, 0);
-    let v = bare_js::value::to_uint32(s.to_number(x)?);
+    let v = crate::js_num::to_uint32(s.to_number(x)?);
     let v = if v == 0 || v > i32::MAX as u32 { fallback } else { v };
     crate::browser_dom::attr_set_s(d, s, n, name, &v.to_string())?;
     Ok(s.undefined())
@@ -158,7 +158,7 @@ fn min_length<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Arg
 fn set_length<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>, is_max: bool) -> Res<'s, Local<'s>> {
     let n = this_el(d, s, this)?;
     let x = arg_s::<E>(s, a, 0);
-    let v = bare_js::value::to_int32(s.to_number(x)?) as i64;
+    let v = crate::js_num::to_int32(s.to_number(x)?) as i64;
     let (name, other) = if is_max { ("maxLength", "minlength") } else { ("minLength", "maxlength") };
     let o = length_of(&d.doc.borrow(), n, other);
     let mut fail = |m: String| d.dom_err_s(s, "IndexSizeError", &format!("Failed to set the '{name}' property on 'HTMLTextAreaElement': {m}"));

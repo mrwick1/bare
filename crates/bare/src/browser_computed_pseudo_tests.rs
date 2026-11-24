@@ -1,9 +1,10 @@
 //! `getComputedStyle(el, '::before')` and `'::after'` read the style that the rules of the pseudo-element give (`RuleSet::style_pseudo`).
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use bare_html::tree;
-use bare_js::eval::EvalLimits;
-use bare_js::heap::HeapLimits;
+use crate::js_limits::EvalLimits;
+use crate::js_limits::HeapLimits;
 
 fn js(b: &mut Browser, src: &str) -> String {
     match b.run_script(src) {

@@ -55,7 +55,6 @@ dependencies = [
  "bare-css",
  "bare-html",
  "bare-image",
- "bare-js",
  "bare-js-api",
  "bare-layout",
  "bare-net",
@@ -98,12 +97,12 @@ dependencies = [
  "bare",
  "bare-css",
  "bare-html",
- "bare-js",
  "bare-net",
  "bare-observe",
  "bare-paint",
  "bare-tls",
  "bare-url",
+ "bare-vex",
  "bare-window",
  "png",
  "serde_json",
@@ -145,34 +144,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "bare-js"
-version = "0.1.0"
-dependencies = [
- "bare-intl",
- "bare-js-api",
- "bare-observe",
- "bare-os",
- "bare-tzdata",
- "bare-unicode",
- "fixed_decimal",
- "icu_properties",
- "stacker",
-]
-
-[[package]]
 name = "bare-js-api"
 version = "0.1.0"
 dependencies = [
- "bare-js",
- "bare-vex",
-]
-
-[[package]]
-name = "bare-js-diff"
-version = "0.1.0"
-dependencies = [
- "bare-js",
- "bare-js-api",
  "bare-vex",
 ]
 

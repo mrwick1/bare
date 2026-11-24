@@ -2,15 +2,15 @@
 //! the DOM Standard (clone, namespaces). Nothing here was compared with Chrome, and Node has no DOM. The `su` function is a
 //! reduced copy, made by reading the cached staging bundle (chunk fd9d); the bundle is not run.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use crate::browser_fetch::{FetchConfig, FetchLimits};
 use crate::browser_loader::*;
 use crate::resources::test_server::{Reply, serve};
 use bare_html::tree;
-use crate::eng_old::OldFault as Error;
-use bare_js::eval::{EvalLimits};
-use bare_js::heap::HeapLimits;
-use bare_js::value::Value;
+use crate::eng_new::NewFault as Error;
+use crate::js_limits::EvalLimits;
+use crate::js_limits::HeapLimits;
 use bare_net::http::Client;
 use std::time::Duration;
 
@@ -28,7 +28,7 @@ fn browser(html: &str) -> Browser {
 fn js(b: &mut Browser, src: &str) -> String {
     match b.run_script(src) {
         Ok(v) => b.it.display(v),
-        Err(Error::Throw(v)) if matches!(v, Value::Object(_)) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
+        Err(Error::Throw(v)) if crate::eng_new::is_object(v) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
         Err(e) => format!("other:{e:?}"),
     }
 }

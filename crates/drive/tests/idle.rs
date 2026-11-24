@@ -2,6 +2,7 @@
 //! gets the reply wakes the loop. The tests run the loop of the window on a channel (the wake pipe) and count the ticks and the CPU.
 //! A loopback server holds `/hang` for the time in `HANG`.
 
+use bare::eng_new::Peek;
 use bare::page::Page;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -81,7 +82,7 @@ fn open(origin: &str) -> (Page, mpsc::Receiver<()>) {
 }
 
 fn open_at(origin: &str, path: &str) -> (Page, mpsc::Receiver<()>) {
-    let mut p = Page::open_old(&format!("{origin}{path}"), (800, 600)).unwrap();
+    let mut p = Page::open(&format!("{origin}{path}"), (800, 600)).unwrap();
     p.wait_load(std::time::Duration::from_secs(10)).unwrap();
     p.quiet = true;
     let (tx, rx) = mpsc::channel();
@@ -129,7 +130,7 @@ fn a_window_with_a_10_s_request_in_flight_uses_almost_no_cpu() {
 fn a_script_added_by_code_does_not_wake_the_loop_while_it_downloads() {
     let origin = serve(Duration::from_millis(1500));
     big(move || {
-        let mut p = Page::open_old(&format!("{origin}/dynamic"), (800, 600)).unwrap();
+        let mut p = Page::open(&format!("{origin}/dynamic"), (800, 600)).unwrap();
         p.quiet = true;
         let (tx, rx) = mpsc::channel();
         let tx = std::sync::Mutex::new(tx);

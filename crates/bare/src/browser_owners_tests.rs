@@ -1,10 +1,11 @@
 //! Tests of the owners of the browser tables (S0.4 PR 5). An object that the page made, and no script holds, frees its table entry at the next
 //! collection (`Host::prune` gets its key). An object that a script holds keeps its entry and its references. Each test runs on a big stack.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use bare_html::tree;
-use bare_js::eval::EvalLimits;
-use bare_js::heap::HeapLimits;
+use crate::js_limits::EvalLimits;
+use crate::js_limits::HeapLimits;
 
 fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     std::thread::Builder::new().stack_size(64 << 20).spawn(f).unwrap().join().unwrap()

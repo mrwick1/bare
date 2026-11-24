@@ -2,7 +2,7 @@
 # The cost rule (gate G3): run every row of cost_rows.txt on two built trees and list the rows that grew.
 #   tools/js/cost_matrix.sh [-j JOBS] [-g REGEX] [-t PERCENT] [-a] [-J] [-o RAWFILE] BASE_DIR NEW_DIR
 # BASE_DIR and NEW_DIR are CARGO_TARGET_DIR directories that hold `release/examples/*` and `release/bare-stress`.
-# Build each tree with: cargo build --release --examples -p bare-js -p bare && cargo build --release -p bare-stress
+# Build each tree with: cargo build --release --examples -p bare-vex -p bare && cargo build --release -p bare-stress
 # Build the Vex rows with: cargo build --release --examples -p bare-vex
 # Each row runs 3 times with tools/js/instr.sh (minimum of `perf stat -e instructions:u`) on both trees under glibc (with the
 # tcache tunable that instr.sh sets). The jemalloc runs (LD_PRELOAD=/usr/lib/libjemalloc.so.2) occur only for a row that is

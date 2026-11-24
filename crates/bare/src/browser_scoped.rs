@@ -141,11 +141,11 @@ macro_rules! table {
             #[allow(unused_imports)]
             use super::*;
             #[allow(dead_code)]
-            type E = $crate::eng_old::Old;
+            type E = $crate::eng_new::New;
             use $crate::browser_scoped::{handlers, Table};
             /// How many rows and handlers: they do not depend on the engine, so the old engine's rows count them.
             const N: usize = [$(stringify!($row)),*].len();
-            const H: usize = handlers::<$crate::eng_old::Old>(&[$($row),*]);
+            const H: usize = handlers::<$crate::eng_new::New>(&[$($row),*]);
             /// The table for the engine `E`: `&name::T::<E>::V`.
             pub(super) struct T<E: $crate::eng::Eng>(std::marker::PhantomData<E>);
             impl<E: $crate::eng::Eng> T<E> {

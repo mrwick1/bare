@@ -5,7 +5,7 @@
 # Build the binary with symbols first: CARGO_PROFILE_RELEASE_STRIP=false CARGO_PROFILE_RELEASE_DEBUG=1 cargo build --release ...
 # --host-parse: the program keeps its own copy of the syntax tree (the examples do), so massif_engine.py leaves that copy out.
 # The census counts the bytes that the engine asks of the allocator (no malloc headers), as massif's useful heap does.
-# Set BARE_JS_EXEC (tree, auto, new) as for the example. It takes minutes for a big run: massif is 20 to 50 times slower.
+# It takes minutes for a big run: massif is 20 to 50 times slower.
 set -eu
 here=$(dirname "$0")
 flag=

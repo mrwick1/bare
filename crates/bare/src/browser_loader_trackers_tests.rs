@@ -1,13 +1,14 @@
 //! A script from a tracker host (`bare_net::blocklist`) is refused before any request, and the page still loads. A tape holds a reply
 //! for the script: if the request were made, the script would run.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use crate::browser_fetch::{FetchConfig, FetchLimits};
 use crate::browser_loader::*;
 use crate::resources::test_server::{Reply, serve};
 use bare_html::tree;
-use bare_js::eval::EvalLimits;
-use bare_js::heap::HeapLimits;
+use crate::js_limits::EvalLimits;
+use crate::js_limits::HeapLimits;
 use bare_net::http::Client;
 use bare_net::replay::{Entry, Tape};
 use std::time::Duration;

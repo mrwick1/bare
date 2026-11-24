@@ -1,4 +1,4 @@
-// Token oracle for crates/js (S2). Reads one JS file, parses it with the installed Acorn
+// Token oracle for crates/vex. Reads one JS file, parses it with the installed Acorn
 // (ecma2022, script), and prints one line per token at the granularity of bare-js:
 //   <class> <goal> <start> <end> <newline_before>      offsets are UTF-8 BYTE offsets
 // class: i name/keyword, p #private, n number, s string, r regexp, t template piece, x punctuator

@@ -4,7 +4,7 @@
 //! are the lines of the phase 2 queue (`docs/progress/2026-11-21-s04-pr6c2-js2-browser.md`).
 
 use crate::eng::{Collected, Desc, Eng, Fault, Got, HeapStats, KeyKind, Ops, PState, Prop, Val, WallClock};
-use bare_js::eval::LimitKind;
+use crate::js_limits::LimitKind;
 use bare_vex::api::Clock;
 use bare_vex::interp_rt::Realm;
 use bare_vex::value::{Kind, Value};
@@ -56,7 +56,7 @@ impl Eng for New {
     type Sym = NV;
     type Key = NV;
 
-    fn realm(eval: bare_js::eval::EvalLimits, _heap: bare_js::heap::HeapLimits) -> Result<Realm, Fault<New>> {
+    fn realm(eval: crate::js_limits::EvalLimits, _heap: crate::js_limits::HeapLimits) -> Result<Realm, Fault<New>> {
         bare_vex::script::load("").map(|mut vm| {
             vm.realm.init_host_intrinsics();
             // A task stops after `max_steps` back edges, so a runaway script ends only its own task.
@@ -135,15 +135,27 @@ fn lc(r: &mut Realm, v: Value) -> Local<'static> {
     r.raw_local(&v)
 }
 
+thread_local! {
+    /// The host fault that `error` turned into an abort. Vex carries only a text, so `fault` takes the kind back from here.
+    static HOST_FAULT: std::cell::Cell<Option<Fault<New>>> = const { std::cell::Cell::new(None) };
+}
+
 fn fault(r: &mut Realm, e: Error<'_>) -> Fault<New> {
+    let host = HOST_FAULT.take();
     match e {
         Error::Throw(l) => Fault::Throw(r.raw(l)),
+        Error::Abort(_) if host.is_some() => host.unwrap(),
+        // Vex found the host borrowed (a script ran while Rust held the document).
+        Error::Abort(Abort::Limit("the host is busy")) => Fault::Heap("HostUnavailable"),
         Error::Abort(Abort::Limit(_)) => Fault::Limit(LimitKind::Steps),
         Error::Abort(Abort::Unsupported(w)) => Fault::Unsupported(w),
     }
 }
 
 fn error<'s>(r: &mut Realm, f: Fault<New>) -> Error<'s> {
+    if !matches!(f, Fault::Throw(_)) {
+        HOST_FAULT.set(Some(f));
+    }
     match f {
         Fault::Throw(v) => Error::Throw(r.raw_local(&v)),
         Fault::Limit(_) => Error::Abort(Abort::Limit("a limit of the host")),
@@ -728,3 +740,33 @@ impl From<Value> for Val<New> {
 #[cfg(test)]
 #[path = "eng_new_tests.rs"]
 mod browser_new_adapter_tests;
+
+/// What the tests and the examples read of a script value: its text, and a property as text.
+#[doc(hidden)]
+pub trait Peek {
+    /// The text of `v` (`Ops::display_o`).
+    fn display(&self, v: Value) -> String;
+    /// `String(v[name])`, or `?` when it fails.
+    fn get_str(&mut self, v: Value, name: &str) -> String;
+}
+
+impl Peek for Realm {
+    fn display(&self, v: Value) -> String {
+        self.display_o(v)
+    }
+    fn get_str(&mut self, v: Value, name: &str) -> String {
+        let r = (|| {
+            let key = self.h_key(name)?;
+            let x = self.get_value(v, key)?;
+            let s = self.to_js_string(x)?;
+            Ok::<_, Fault<New>>(self.display_o(s.0))
+        })();
+        r.unwrap_or_else(|_| "?".into())
+    }
+}
+
+/// Is `v` an object?
+#[doc(hidden)]
+pub fn is_object(v: Value) -> bool {
+    matches!(New::kind(v), Val::Object(_))
+}

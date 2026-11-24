@@ -62,14 +62,12 @@
 use crate::browser_any::AnyBrowser;
 use crate::eng::Eng;
 use crate::eng_new::New;
-use crate::eng_old::Old;
 use crate::browser::{Browser, BrowserLimits};
 use crate::browser_fetch::{FetchLimits, metadata_site, potentially_trustworthy};
 use crate::browser_loader::{Input, PageConfig, PageLimits, PageResult, SLICE, Scan, Stop, deadline_after, label};
 use crate::browser_navigation::{Body, NavLimits, NavigationKind, WebStorage};
 use bare_html::{encoding, tree};
-use bare_js::eval::{EvalLimits, Exec};
-use bare_js::heap::HeapLimits;
+use crate::js_limits::{EvalLimits, HeapLimits};
 use crate::downloads::{self, DownloadRequest, Grab};
 use bare_net::http::{self as bnet, Client, Cookies, Ctx, Request, Response, Streamed};
 use bare_net::parallel::Task;
@@ -129,18 +127,6 @@ pub struct SessionConfig {
     pub live: bool,
     /// Where downloads go (see `downloads.rs`). `None`: a response that the page cannot show is a failed load.
     pub downloads: Option<downloads::Downloads>,
-    /// Run the pages on Vex (`bare-vex`, the default) and not on the old engine (`BARE_JS_EXEC=tree`, `auto` or `byte`).
-    pub vex: bool,
-}
-
-/// The engine mode of `BARE_JS_EXEC`: `tree`, `auto` or `byte` for `bare-js`; other values give the default mode (the old engine runs only for these three names, see `vex_from`).
-fn exec_from(v: &str) -> Exec {
-    Exec::from_name(v).unwrap_or_default()
-}
-
-/// The engine of `BARE_JS_EXEC`: the old engine for `tree`, `auto` and `byte`, Vex for every other value (also unset, `vex` and `new`, the old name).
-pub(crate) fn vex_from(v: &str) -> bool {
-    !matches!(v, "tree" | "auto" | "byte")
 }
 
 impl SessionConfig {
@@ -152,17 +138,13 @@ impl SessionConfig {
             fetch: FetchLimits::default(),
             limits: SessionLimits::default(),
             browser: BrowserLimits::default(),
-            eval: EvalLimits {
-                exec: exec_from(&std::env::var("BARE_JS_EXEC").unwrap_or_default()),
-                ..EvalLimits::session()
-            },
+            eval: EvalLimits::session(),
             heap: HeapLimits::default(),
             viewport: None,
             virtual_clock: bare_net::vclock::on(),
             storage: None,
             live: false,
             downloads: None,
-            vex: vex_from(&std::env::var("BARE_JS_EXEC").unwrap_or_default()),
         }
     }
 }
@@ -914,7 +896,7 @@ impl Session {
                     let scan = Url::parse(url.split('#').next().unwrap_or("")).map(|page| {
                         let mut c = self.fork();
                         c.set_site(Some(bare_net::cookie::site_of(&page)));
-                        Scan::new(c, page, self.cfg.page.resources.clone(), deadline, self.cfg.vex)
+                        Scan::new(c, page, self.cfg.page.resources.clone(), deadline)
                     });
                     let Ok(scan) = scan else { return SessionStop::LoadFailed("the URL is not an http(s) URL".into()) };
                     let ended = feed.is_none();
@@ -1008,16 +990,9 @@ impl Session {
                         }
                     };
                     let (bl, ev, hp) = (self.cfg.browser, self.cfg.eval, self.cfg.heap);
-                    let started = if self.cfg.vex {
-                        match Browser::<New>::make(dom, bl, ev, hp) {
-                            Ok(b) => self.load(b.with_session_wall_clock(self.cfg.virtual_clock), AnyBrowser::New, url, scroll, &mut base, &page, &lim, &mut scan),
-                            Err(_) => Err(SessionStop::LoadFailed("the realm could not be made".into())),
-                        }
-                    } else {
-                        match Browser::<Old>::make(dom, bl, ev, hp) {
-                            Ok(b) => self.load(b, AnyBrowser::Old, url, scroll, &mut base, &page, &lim, &mut scan),
-                            Err(_) => Err(SessionStop::LoadFailed("the realm could not be made".into())),
-                        }
+                    let started = match Browser::<New>::make(dom, bl, ev, hp) {
+                        Ok(b) => self.load(b.with_session_wall_clock(self.cfg.virtual_clock), AnyBrowser::New, url, scroll, &mut base, &page, &lim, &mut scan),
+                        Err(_) => Err(SessionStop::LoadFailed("the realm could not be made".into())),
                     };
                     match started {
                         Ok(x) => x,
@@ -1077,13 +1052,6 @@ impl Session {
 mod tests {
     use super::*;
 
-    #[test]
-    fn bare_js_exec_names_the_mode_of_the_old_engine() {
-        assert_eq!(exec_from("byte"), Exec::Byte);
-        assert_eq!(exec_from("new"), Exec::default());
-        assert_eq!(exec_from(""), Exec::default());
-    }
-
     fn saved_pages() -> Vec<String> {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         if !root.join("tools/fixtures").is_dir() {
@@ -1104,7 +1072,7 @@ mod tests {
 
     fn parsing(html: String, feed: Option<Arc<Feed>>) -> Parsing {
         let lim = crate::resources::Limits { max_fetches: 0, ..Default::default() };
-        let scan = Scan::new(Client::new(), Url::parse("http://127.0.0.1:1/").unwrap(), lim, Instant::now(), false);
+        let scan = Scan::new(Client::new(), Url::parse("http://127.0.0.1:1/").unwrap(), lim, Instant::now());
         let next = Next { from: None, url: String::new(), body: None, how: How::Push };
         let ended = feed.is_none();
         Parsing { next, url: String::new(), html, at: 0, parser: tree::Parser::new(), scan, feed, ended }

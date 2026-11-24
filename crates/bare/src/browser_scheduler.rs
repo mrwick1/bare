@@ -83,7 +83,7 @@ use crate::browser_navigation_state::Transfer;
 use crate::browser_port_hub::Wire;
 use crate::browser_scoped::*;
 use bare_html::dom::NodeId;
-use bare_js::eval::WallClock;
+use crate::js_limits::WallClock;
 use bare_js_api::{Args, Attrs, Engine, HostFn, Iter, Local, Type};
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -1687,10 +1687,6 @@ impl<E: Eng> Browser<E> {
         self.dom.sched.borrow_mut().virtual_now = Some(now);
         // The benchmark clock (`bare_net::vclock`) is one for the process: `Date.now()` reads it too, and a read takes a little time.
         if bare_net::vclock::on() {
-            bare_js::eval::set_host_wall_clock(|| {
-                bare_net::vclock::advance_by(bare_net::vclock::READ_MS);
-                bare_net::vclock::epoch_ms()
-            });
             let _ = self.it.set_wall_clock(WallClock::Host);
         }
     }

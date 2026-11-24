@@ -3,12 +3,13 @@
 //! `@css` lines, then a script (lines before the first case are a prelude of every script) whose last expression is a reader function. The host runs the script in a 400 x 300 window, moves the
 //! virtual clock 400 ms (as Chrome waits 400 ms), calls the reader and compares its string with the one of Chrome.
 
+use crate::eng::Ops;
+use crate::eng_new::Peek;
 use crate::browser::*;
 use bare_html::tree;
-use crate::eng_old::OldFault as Error;
-use bare_js::eval::{EvalLimits};
-use bare_js::heap::HeapLimits;
-use bare_js::value::Value;
+use crate::eng_new::NewFault as Error;
+use crate::js_limits::EvalLimits;
+use crate::js_limits::HeapLimits;
 
 pub(crate) struct Case {
     pub name: String,
@@ -63,12 +64,12 @@ pub(crate) fn run(k: &Case) -> String {
     let out = (|| -> Result<String, Error> {
         let reader = b.run_script(&k.script)?;
         b.advance_time(400.0, 10_000)?;
-        let v = b.it.call(reader, Value::Undefined, &[])?;
+        let v = b.it.call_o(reader, <crate::eng_new::New as crate::eng::Eng>::undef(), &[])?;
         Ok(b.it.display(v))
     })();
     esc(&match out {
         Ok(s) => s,
-        Err(Error::Throw(v)) if matches!(v, Value::Object(_)) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
+        Err(Error::Throw(v)) if crate::eng_new::is_object(v) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
         Err(Error::Unsupported(u)) => format!("unsupported:{}", u),
         Err(e) => format!("other:{e:?}"),
     })
@@ -91,8 +92,9 @@ pub(crate) fn check(topic: &str, cases: &str, chrome: &str) -> usize {
 }
 
 macro_rules! topic_test {
-    ($fn:ident, $topic:literal, $n:expr) => {
+    ($(#[$m:meta])* $fn:ident, $topic:literal, $n:expr) => {
         #[test]
+        $(#[$m])*
         fn $fn() {
             let n = $crate::browser_topic_tests::check(
                 $topic,

@@ -2,6 +2,7 @@
 //! parse goes on, and the order of the scripts and events is the same as in a one-step parse. A loopback server answers each `/js` file
 //! after 300 ms. `/big` is about 2 MB of HTML.
 
+use bare::eng_new::Peek;
 use bare::browser_session::{Session, SessionConfig, SessionStop};
 use bare::page::Page;
 use std::io::{Read, Write};
@@ -127,7 +128,7 @@ fn tick(p: &mut Page, worst: &mut Duration) -> bool {
 fn a_big_document_parses_across_ticks_and_takes_input_during_the_parse() {
     let (origin, seen) = serve();
     let (worst, parse_ticks, clicked, log, js2_before_up) = run_big(move || {
-        let mut p = Page::open_old(&format!("{origin}/"), (800, 600)).unwrap();
+        let mut p = Page::open(&format!("{origin}/"), (800, 600)).unwrap();
         p.wait_load(std::time::Duration::from_secs(10)).unwrap();
         p.quiet = true;
         let doc = p.generation();
@@ -167,7 +168,7 @@ fn a_chunked_parse_gives_the_order_and_the_dom_of_a_one_step_parse() {
     let (origin, _) = serve();
     let o2 = origin.clone();
     let (live_log, live_dom) = run_big(move || {
-        let mut p = Page::open_old(&format!("{o2}/"), (800, 600)).unwrap();
+        let mut p = Page::open(&format!("{o2}/"), (800, 600)).unwrap();
         p.wait_load(std::time::Duration::from_secs(10)).unwrap();
         p.quiet = true;
         click(&mut p, "#big");
@@ -180,8 +181,7 @@ fn a_chunked_parse_gives_the_order_and_the_dom_of_a_one_step_parse() {
         (text(&mut p, "log"), dom)
     });
     let (head_log, head_dom) = run_big(move || {
-        let mut cfg = SessionConfig::new(&format!("{origin}/big"));
-        cfg.vex = false; // the test dumps the DOM of the old browser
+        let cfg = SessionConfig::new(&format!("{origin}/big"));
         let mut s = Session::new(cfg);
         let r = s.run();
         assert!(matches!(r.stop, SessionStop::Page(bare::Stop::Settled)), "{:?}", r.stop);

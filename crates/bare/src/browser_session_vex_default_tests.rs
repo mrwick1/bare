@@ -1,18 +1,17 @@
-//! The engine that `BARE_JS_EXEC` picks: Vex unless the value names the old engine.
+//! A session runs its pages on Vex. `BARE_JS_EXEC` picks nothing: the old names `tree`, `auto` and `byte` are ignored.
 
-use crate::browser_session::vex_from;
-
-#[test]
-fn vex_is_the_default() {
-    assert!(vex_from(""));
-    assert!(vex_from("vex"));
-    assert!(vex_from("new"));
-    assert!(vex_from("unknown"));
-}
+use crate::browser_any::AnyBrowser;
+use crate::browser_session::{Session, SessionConfig};
+use crate::resources::test_server::{Reply, serve};
 
 #[test]
-fn the_old_engine_names_pick_the_old_engine() {
-    for v in ["tree", "auto", "byte"] {
-        assert!(!vex_from(v), "{v}");
-    }
+fn a_session_runs_its_page_on_vex() {
+    std::thread::Builder::new().stack_size(64 << 20).spawn(|| {
+        let server = serve(|_| Reply::new(200, Some("text/html"), "<p>x</p>"));
+        let mut session = Session::new(SessionConfig::new(&server.url("/")));
+        session.run();
+        let browser = session.browser().expect("a browser");
+        let AnyBrowser::New(_) = browser;
+        assert_eq!(browser.script_text("6 * 7").unwrap(), (false, "42".to_string()));
+    }).unwrap().join().unwrap();
 }

@@ -1,12 +1,13 @@
 //! The size caps of a `history` state: one state, and all states of a document. A state over a cap is a `DataCloneError` that the page can catch
 //! (a page-controlled size never stops the page). The numbers are in `NavLimits` and `docs/decisions.md`.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use crate::browser_navigation::NavLimits;
 use bare_html::tree;
-use crate::eng_old::OldFault as Error;
-use bare_js::eval::{EvalLimits};
-use bare_js::heap::HeapLimits;
+use crate::eng_new::NewFault as Error;
+use crate::js_limits::EvalLimits;
+use crate::js_limits::HeapLimits;
 
 fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     std::thread::Builder::new().stack_size(64 << 20).spawn(f).unwrap().join().unwrap()

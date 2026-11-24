@@ -1,6 +1,7 @@
 //! Input does not wait for the network: an action returns after its listeners, its microtasks and the tasks that are due, and the
 //! replies, the timers and a navigation go on in `Page::tick`. A loopback server answers `/slow` after 500 ms.
 
+use bare::eng_new::Peek;
 use bare::control::Handle;
 use bare::page::Page;
 use bare_drive::run::{Options, Redactor, run};
@@ -178,7 +179,7 @@ fn until(p: &mut Page, mut done: impl FnMut(&mut Page) -> bool) -> Duration {
 fn a_click_that_starts_a_slow_fetch_returns_at_once() {
     let origin = serve();
     big(move || {
-        let mut p = Page::open_old(&format!("{origin}/"), (800, 600)).unwrap();
+        let mut p = Page::open(&format!("{origin}/"), (800, 600)).unwrap();
         p.wait_load(std::time::Duration::from_secs(10)).unwrap();
         p.quiet = true;
         let (load, count) = (one(&mut p, "#load"), one(&mut p, "#count"));
@@ -201,7 +202,7 @@ fn a_click_that_starts_a_slow_fetch_returns_at_once() {
 fn typing_does_not_wait_for_the_fetch_of_each_key() {
     let origin = serve();
     big(move || {
-        let mut p = Page::open_old(&format!("{origin}/"), (800, 600)).unwrap();
+        let mut p = Page::open(&format!("{origin}/"), (800, 600)).unwrap();
         p.wait_load(std::time::Duration::from_secs(10)).unwrap();
         p.quiet = true;
         let q = one(&mut p, "#q");
@@ -218,7 +219,7 @@ fn typing_does_not_wait_for_the_fetch_of_each_key() {
 fn a_link_loads_the_next_document_in_the_background() {
     let origin = serve();
     big(move || {
-        let mut p = Page::open_old(&format!("{origin}/"), (800, 600)).unwrap();
+        let mut p = Page::open(&format!("{origin}/"), (800, 600)).unwrap();
         p.wait_load(std::time::Duration::from_secs(10)).unwrap();
         p.quiet = true;
         let (go, doc) = (one(&mut p, "#go"), p.generation());
@@ -261,7 +262,7 @@ fn color(p: &mut Page, id: &str) -> String {
 fn a_style_sheet_added_after_load_does_not_block_the_turn() {
     let origin = serve();
     big(move || {
-        let mut p = Page::open_old(&format!("{origin}/"), (800, 600)).unwrap();
+        let mut p = Page::open(&format!("{origin}/"), (800, 600)).unwrap();
         p.wait_load(std::time::Duration::from_secs(10)).unwrap();
         p.quiet = true;
         let (sheet, count) = (one(&mut p, "#sheet"), one(&mut p, "#count"));
@@ -286,7 +287,7 @@ fn a_style_sheet_added_after_load_does_not_block_the_turn() {
 fn a_new_document_runs_its_slow_scripts_across_ticks_and_takes_input_between_them() {
     let origin = serve();
     big(move || {
-        let mut p = Page::open_old(&format!("{origin}/"), (800, 600)).unwrap();
+        let mut p = Page::open(&format!("{origin}/"), (800, 600)).unwrap();
         p.wait_load(std::time::Duration::from_secs(10)).unwrap();
         p.quiet = true;
         let (go, doc) = (one(&mut p, "#scripts"), p.generation());
@@ -319,7 +320,7 @@ fn a_new_document_runs_its_slow_scripts_across_ticks_and_takes_input_between_the
 fn a_due_timer_does_not_turn_the_page_while_the_parser_waits_for_a_script() {
     let origin = serve();
     big(move || {
-        let mut p = Page::open_old(&format!("{origin}/"), (800, 600)).unwrap();
+        let mut p = Page::open(&format!("{origin}/"), (800, 600)).unwrap();
         p.wait_load(std::time::Duration::from_secs(10)).unwrap();
         p.quiet = true;
         // A document that a navigation loads runs its scripts in turns (a split document).
@@ -357,7 +358,7 @@ fn a_headless_run_keeps_the_script_order() {
 fn a_preload_added_after_load_does_not_block_the_turn() {
     let origin = serve();
     big(move || {
-        let mut p = Page::open_old(&format!("{origin}/"), (800, 600)).unwrap();
+        let mut p = Page::open(&format!("{origin}/"), (800, 600)).unwrap();
         p.wait_load(std::time::Duration::from_secs(10)).unwrap();
         p.quiet = true;
         let pre = one(&mut p, "#pre");
@@ -377,7 +378,7 @@ fn a_sheet_and_a_preload_added_before_load_download_with_the_scripts() {
     let origin = serve();
     big(move || {
         let t = Instant::now();
-        let mut p = Page::open_old(&format!("{origin}/early"), (800, 600)).unwrap();
+        let mut p = Page::open(&format!("{origin}/early"), (800, 600)).unwrap();
         p.wait_load(std::time::Duration::from_secs(10)).unwrap();
         let took = t.elapsed();
         p.quiet = true;
@@ -464,7 +465,7 @@ fn the_window_keeps_the_old_frame_until_the_next_document_is_in() {
     big(move || {
         let (red, white) = (0xFFFF_0000u32, 0xFFFF_FFFFu32);
         let px = |p: &mut Page| p.capture().pixels[(10 * W + 10) as usize];
-        let mut p = Page::open_old(&format!("{origin}/red"), (W, H)).unwrap();
+        let mut p = Page::open(&format!("{origin}/red"), (W, H)).unwrap();
         p.wait_load(std::time::Duration::from_secs(10)).unwrap();
         p.quiet = true;
         until(&mut p, |p| p.browser().is_some());

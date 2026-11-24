@@ -3,14 +3,15 @@
 //! monospace font of the engine (`layout/src/font.rs`: a letter is 0.6 em wide, a line of a 10px font is 11 + 3 = 14px high).
 //! Native layout is never its own oracle, and Node has no layout, so it is not an oracle either. No browser fidelity is claimed.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use crate::browser_computed::SheetPart;
 use crate::browser_geometry::GeometryLimits;
 use bare_html::tree;
-use crate::eng_old::OldFault as Error;
-use bare_js::eval::{EvalLimits, LimitKind};
-use bare_js::heap::HeapLimits;
-use bare_js::value::Value;
+use crate::eng_new::NewFault as Error;
+use crate::js_limits::{EvalLimits, LimitKind};
+use crate::js_limits::HeapLimits;
+use bare_vex::value::Value;
 
 fn at(page: &str) -> Browser {
     Browser::new(tree::parse(page), BrowserLimits::default(), EvalLimits { max_steps: 50_000_000, ..Default::default() }, HeapLimits::default()).expect("browser")
@@ -19,7 +20,7 @@ fn at(page: &str) -> Browser {
 fn show(b: &mut Browser, r: Result<Value, Error>) -> String {
     match r {
         Ok(v) => b.it.display(v),
-        Err(Error::Throw(v)) if matches!(v, Value::Object(_)) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
+        Err(Error::Throw(v)) if crate::eng_new::is_object(v) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
         Err(Error::Throw(v)) => format!("throw-value:{}", b.it.display(v)),
         Err(Error::Limit(l)) => format!("limit:{l:?}"),
         Err(Error::Unsupported(u)) => format!("unsupported:{}", u),

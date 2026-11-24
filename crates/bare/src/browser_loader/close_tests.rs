@@ -6,12 +6,13 @@
 #[path = "../../../net/tests/common/quirky.rs"]
 mod quirky;
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use crate::browser_fetch::FetchLimits;
 use crate::browser_loader::*;
 use bare_html::tree;
-use bare_js::eval::EvalLimits;
-use bare_js::heap::HeapLimits;
+use crate::js_limits::EvalLimits;
+use crate::js_limits::HeapLimits;
 use bare_net::http::Client;
 use quirky::{Config, Limit, Server, Style, start};
 use std::sync::atomic::Ordering;

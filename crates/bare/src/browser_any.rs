@@ -1,5 +1,4 @@
-//! A browser on either engine. The pages of a session run on Vex (`Browser<New>`) unless `BARE_JS_EXEC` is `tree`, `auto` or `byte`: these
-//! pick the old engine (`Browser<Old>`). The layers above the DOM host (`Session`, `Page`, the driver) hold this enum and call the methods that
+//! A browser on Vex (`Browser<New>`). The layers above the DOM host (`Session`, `Page`, the driver) hold this enum and call the methods that
 //! they need. A method forwards to the browser of the variant. Its result has no type of the engine in it: a fault is an `AnyFault`.
 
 use crate::browser::{Browser, FileRef, Report, Survive};
@@ -13,7 +12,6 @@ use crate::downloads::DownloadRequest;
 use crate::eng::{Eng, Fault, Ops, PState, Val};
 use bare_js_api::Persistent;
 use crate::eng_new::New;
-use crate::eng_old::Old;
 use bare_css::cascade::{Change, Styles};
 use bare_html::dom::{Document, NodeId};
 use bare_layout::fragment::Rect;
@@ -23,14 +21,12 @@ use std::cell::{Ref, RefCell};
 use std::rc::Rc;
 
 pub enum AnyBrowser {
-    Old(Browser<Old>),
     New(Browser<New>),
 }
 
 /// A fault of either engine.
 #[derive(Clone, Copy, Debug)]
 pub enum AnyFault {
-    Old(Fault<Old>),
     New(Fault<New>),
 }
 
@@ -40,7 +36,6 @@ impl AnyFault {
     /// A style sheet that is not supplied yet (`browser_computed::is_missing_sheet`).
     pub fn is_missing_sheet(&self) -> bool {
         match self {
-            AnyFault::Old(e) => crate::browser_computed::is_missing_sheet::<Old>(e),
             AnyFault::New(e) => crate::browser_computed::is_missing_sheet::<New>(e),
         }
     }
@@ -114,7 +109,7 @@ macro_rules! fwd {
     ($( ($($rcv:tt)+) fn $n:ident($($a:ident: $t:ty),*) $(-> $r:ty)?; )*) => {
         impl AnyBrowser {
             $( pub fn $n($($rcv)+ self $(, $a: $t)*) $(-> $r)? {
-                match self { AnyBrowser::Old(b) => b.$n($($a),*), AnyBrowser::New(b) => b.$n($($a),*) }
+                match self { AnyBrowser::New(b) => b.$n($($a),*) }
             } )*
         }
     };
@@ -125,7 +120,7 @@ macro_rules! fwd_try {
     ($( ($($rcv:tt)+) fn $n:ident($($a:ident: $t:ty),*) -> $r:ty; )*) => {
         impl AnyBrowser {
             $( pub fn $n($($rcv)+ self $(, $a: $t)*) -> AR<$r> {
-                match self { AnyBrowser::Old(b) => b.$n($($a),*).map_err(AnyFault::Old), AnyBrowser::New(b) => b.$n($($a),*).map_err(AnyFault::New) }
+                match self { AnyBrowser::New(b) => b.$n($($a),*).map_err(AnyFault::New) }
             } )*
         }
     };
@@ -210,14 +205,12 @@ fwd_try! {
 impl AnyBrowser {
     pub(crate) fn drive_files(&mut self, node: NodeId, files: Vec<FileRef>) -> AR<UiOutcome> {
         match self {
-            AnyBrowser::Old(b) => b.drive_files(node, files).map_err(AnyFault::Old),
             AnyBrowser::New(b) => b.drive_files(node, files).map_err(AnyFault::New),
         }
     }
 
     pub fn scroll(&self) -> Ref<'_, Scroll> {
         match self {
-            AnyBrowser::Old(b) => b.scroll(),
             AnyBrowser::New(b) => b.scroll(),
         }
     }
@@ -225,16 +218,13 @@ impl AnyBrowser {
     /// Does a script budget end only the task (`Browser::survive`)? `e` is a fault of this browser.
     pub fn survive(&mut self, e: AnyFault, what: &str) -> Survive {
         match (self, e) {
-            (AnyBrowser::Old(b), AnyFault::Old(e)) => b.survive(e, what),
             (AnyBrowser::New(b), AnyFault::New(e)) => b.survive(e, what),
-            _ => Survive::Fatal,
         }
     }
 
     /// The console calls since the last call, as a level and the text.
     pub fn take_console(&mut self) -> Vec<(&'static str, String)> {
         match self {
-            AnyBrowser::Old(b) => console(b),
             AnyBrowser::New(b) => console(b),
         }
     }
@@ -242,7 +232,6 @@ impl AnyBrowser {
     /// Run the queued work of a bare browser (a test, no session): the microtasks, the navigation tasks and the timers.
     pub fn run_tasks(&mut self) -> AR<()> {
         match self {
-            AnyBrowser::Old(b) => b.drain().and_then(|_| b.run_navigation_tasks()).and_then(|_| b.run_scheduled_tasks(1000)).map(|_| ()).map_err(AnyFault::Old),
             AnyBrowser::New(b) => b.drain().and_then(|_| b.run_navigation_tasks()).and_then(|_| b.run_scheduled_tasks(1000)).map(|_| ()).map_err(AnyFault::New),
         }
     }
@@ -254,7 +243,6 @@ impl AnyBrowser {
             b.it.host_scope_o(|it| dom.is_disabled_control(it, node)).unwrap_or(false)
         }
         match self {
-            AnyBrowser::Old(b) => go(b, node),
             AnyBrowser::New(b) => go(b, node),
         }
     }
@@ -262,7 +250,6 @@ impl AnyBrowser {
     /// Forget the last pointer target of the interface (`ui.last`).
     pub fn forget_pointer(&mut self) {
         match self {
-            AnyBrowser::Old(b) => b.dom.st.borrow_mut().ui.last = None,
             AnyBrowser::New(b) => b.dom.st.borrow_mut().ui.last = None,
         }
     }
@@ -271,7 +258,6 @@ impl AnyBrowser {
     /// (`fault_text`).
     pub fn script(&mut self, source: &str) -> AR<Persistent> {
         match self {
-            AnyBrowser::Old(b) => b.run_script(source).map(|v| b.it.persist_value(v)).map_err(AnyFault::Old),
             AnyBrowser::New(b) => b.run_script(source).map(|v| b.it.persist_value(v)).map_err(AnyFault::New),
         }
     }
@@ -283,7 +269,6 @@ impl AnyBrowser {
             Ok((matches!(E::kind(v), Val::String(_)), b.it.display_o(v)))
         }
         match self {
-            AnyBrowser::Old(b) => go(b, source).map_err(AnyFault::Old),
             AnyBrowser::New(b) => go(b, source).map_err(AnyFault::New),
         }
     }
@@ -295,7 +280,6 @@ impl AnyBrowser {
             Ok(matches!(E::kind(v), Val::Bool(true)))
         }
         match self {
-            AnyBrowser::Old(b) => go(b, source).map_err(AnyFault::Old),
             AnyBrowser::New(b) => go(b, source).map_err(AnyFault::New),
         }
     }
@@ -303,16 +287,13 @@ impl AnyBrowser {
     /// A fault of this browser as text: `Name: message` for a thrown error object.
     pub fn fault_text(&mut self, e: &AnyFault) -> String {
         match (self, e) {
-            (AnyBrowser::Old(b), AnyFault::Old(e)) => thrown(b, e),
             (AnyBrowser::New(b), AnyFault::New(e)) => thrown(b, e),
-            _ => format!("{e:?}"),
         }
     }
 
     /// Look at a script value once: its text, the value of a fulfilled promise, a rejection, or a promise that is pending.
     pub fn promise_step(&mut self, v: &Persistent, cap: usize) -> Step {
         match self {
-            AnyBrowser::Old(b) => step(b, v, cap),
             AnyBrowser::New(b) => step(b, v, cap),
         }
     }
@@ -320,7 +301,6 @@ impl AnyBrowser {
     /// The jobs of the microtask queue that wait.
     pub fn pending_jobs(&self) -> usize {
         match self {
-            AnyBrowser::Old(b) => b.it.pending_jobs(),
             AnyBrowser::New(b) => b.it.pending_jobs(),
         }
     }
@@ -331,38 +311,28 @@ impl AnyBrowser {
 macro_rules! any {
     ($b:expr, $x:ident => $e:expr) => {
         match $b {
-            $crate::browser_any::AnyBrowser::Old($x) => $e,
             $crate::browser_any::AnyBrowser::New($x) => $e,
         }
     };
 }
 
-/// The old-engine view of a browser, for the tests and the examples, which run on the old engine. It panics on Vex. The code of the
-/// product calls the methods of `AnyBrowser`.
+/// The browser itself, for the tests and the examples. The code of the product calls the methods of `AnyBrowser`.
 #[doc(hidden)]
 impl std::ops::Deref for AnyBrowser {
-    type Target = Browser<Old>;
-    fn deref(&self) -> &Browser<Old> {
+    type Target = Browser<New>;
+    fn deref(&self) -> &Browser<New> {
         match self {
-            AnyBrowser::Old(b) => b,
-            AnyBrowser::New(_) => panic!("this browser runs on Vex"),
+            AnyBrowser::New(b) => b,
         }
     }
 }
 
 #[doc(hidden)]
 impl std::ops::DerefMut for AnyBrowser {
-    fn deref_mut(&mut self) -> &mut Browser<Old> {
+    fn deref_mut(&mut self) -> &mut Browser<New> {
         match self {
-            AnyBrowser::Old(b) => b,
-            AnyBrowser::New(_) => panic!("this browser runs on Vex"),
+            AnyBrowser::New(b) => b,
         }
-    }
-}
-
-impl From<Browser<Old>> for AnyBrowser {
-    fn from(b: Browser<Old>) -> Self {
-        AnyBrowser::Old(b)
     }
 }
 

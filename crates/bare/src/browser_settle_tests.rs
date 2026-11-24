@@ -5,7 +5,7 @@
 use crate::browser_loader::*;
 use crate::browser_session::*;
 use crate::resources::test_server::{Reply, Server, serve};
-use bare_js::eval::EvalLimits;
+use crate::js_limits::EvalLimits;
 use std::time::{Duration, Instant};
 
 fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {

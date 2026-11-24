@@ -1,7 +1,9 @@
+use crate::eng_new::Peek;
 use crate::browser::*;
 use bare_html::tree;
-use crate::eng_old::OldFault as Error;
-use bare_js::{eval::{EvalLimits}, heap::HeapLimits, value::Value};
+use crate::eng_new::NewFault as Error;
+use crate::js_limits::{EvalLimits, HeapLimits};
+use bare_vex::value::Value;
 const ORIGIN: &str = "https://redis.io";
 
 fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
@@ -21,7 +23,7 @@ fn at(page: &str) -> Browser {
 fn show(b: &mut Browser, r: Result<Value, Error>) -> String {
     match r {
         Ok(v) => b.it.display(v),
-        Err(Error::Throw(v)) if matches!(v, Value::Object(_)) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
+        Err(Error::Throw(v)) if crate::eng_new::is_object(v) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
         Err(Error::Throw(v)) => format!("throw-value:{}", b.it.display(v)),
         Err(Error::Limit(l)) => format!("limit:{l:?}"),
         Err(Error::Unsupported(u)) => format!("unsupported:{}", u),

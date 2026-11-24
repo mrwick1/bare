@@ -2,13 +2,13 @@
 //! ancestors, and not the page. The oracle is the full cascade: a second browser that read layout first (`offsetWidth`), so that it
 //! keeps the cascade of the whole page and answers from it.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use crate::browser_computed::ComputedLimits;
 use bare_html::tree;
-use crate::eng_old::OldFault as Error;
-use bare_js::eval::{EvalLimits, LimitKind};
-use bare_js::heap::HeapLimits;
-use bare_js::value::Value;
+use crate::eng_new::NewFault as Error;
+use crate::js_limits::{EvalLimits, LimitKind};
+use crate::js_limits::HeapLimits;
 
 fn at(page: &str) -> Browser {
     Browser::new(tree::parse(page), BrowserLimits::default(), EvalLimits { max_steps: 200_000_000, ..Default::default() }, HeapLimits::default()).expect("browser")
@@ -17,7 +17,7 @@ fn at(page: &str) -> Browser {
 fn js(b: &mut Browser, src: &str) -> String {
     match b.run_script(src) {
         Ok(v) => b.it.display(v),
-        Err(Error::Throw(v)) if matches!(v, Value::Object(_)) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
+        Err(Error::Throw(v)) if crate::eng_new::is_object(v) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
         Err(e) => format!("error:{e:?}"),
     }
 }

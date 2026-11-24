@@ -1,49 +1,11 @@
-//! The shared suite (`src/suite.rs`) on both engines: `cargo test -p bare-js-api --features suite`.
+//! The shared suite (`src/suite.rs`) on Vex: `cargo test -p bare-js-api --features suite`.
 #![cfg(feature = "suite")]
 
-use bare_js::eval::{Error, EvalLimits, Interp};
-use bare_js::heap::Heap;
 use bare_js_api::suite::Harness;
 use bare_js_api::Error as ApiError;
 use bare_vex::heap::Trigger;
 use bare_vex::interp::Vm;
 use bare_vex::script;
-
-struct Old(Interp<'static>, bool);
-
-impl Harness for Old {
-    type E = Interp<'static>;
-
-    fn new(stress: bool) -> Self {
-        Old(Interp::realm(Heap::default(), EvalLimits { max_steps: 1_000_000, ..Default::default() }).unwrap(), stress)
-    }
-
-    fn engine(&mut self) -> &mut Self::E {
-        &mut self.0
-    }
-
-    fn eval(&mut self, src: &str) -> String {
-        let r = match self.0.run_script(src) {
-            Ok(v) => self.0.display(v),
-            Err(Error::Throw(v)) => format!("throw:{}", self.0.display(v)),
-            Err(Error::Limit(_)) => "limit".into(),
-            Err(Error::Unsupported(u)) => format!("unsupported:{}", u.what),
-            Err(e) => format!("other:{e:?}"),
-        };
-        if self.1 {
-            self.collect();
-        }
-        r
-    }
-
-    fn collect(&mut self) {
-        self.0.collect(&[]).unwrap();
-    }
-
-    fn attach(&mut self, host: &std::rc::Rc<bare_js_api::suite::Fill<bare_js::value::Value>>) {
-        self.0.set_api_sources(host.clone());
-    }
-}
 
 struct New(Vm);
 
@@ -84,8 +46,7 @@ impl Harness for New {
     }
 }
 
-/// One `#[test]` for each test of the suite, for a harness and a stress setting. The tests run on a thread with a large stack: the old
-/// engine recurses on the native stack.
+/// One `#[test]` for each test of the suite, for a harness and a stress setting. The tests run on a thread with a large stack.
 macro_rules! suite {
     ($m:ident, $h:ty, $stress:expr, [$($t:ident),* $(,)?]) => {
         mod $m {
@@ -100,16 +61,14 @@ macro_rules! suite {
     };
 }
 
-macro_rules! both {
+macro_rules! vex {
     ($($t:ident),* $(,)?) => {
-        suite!(old, Old, false, [$($t),*]);
-        suite!(old_stress, Old, true, [$($t),*]);
         suite!(new, New, false, [$($t),*]);
         suite!(new_stress, New, true, [$($t),*]);
     };
 }
 
-both!(
+vex!(
     host_functions_run_in_scripts,
     an_engine_error_crosses_the_host_unchanged,
     a_persistent_handle_keeps_its_value_through_a_collection,

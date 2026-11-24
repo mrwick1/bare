@@ -715,7 +715,7 @@ fn push_replace<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: A
 }
 
 fn go<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, delta: f64) -> Res<'s, Local<'s>> {
-    let delta = bare_js::value::to_int32(delta);
+    let delta = crate::js_num::to_int32(delta);
     if delta == 0 {
         lift::<E, _>(s, d.reload_request())?;
         return Ok(s.undefined());

@@ -3,12 +3,13 @@
 //! Chrome 155 logged for real mouse and key input (`tools/fixtures/ui/chrome-control.txt`, made by `tools/ui/chrome_drive.mjs`). The
 //! refusals, the waits and the locators are tested with the fixture app in `crates/drive/tests`.
 
+use crate::eng_new::Peek;
 use crate::browser::*;
 use crate::control::{Handle, Refusal, key_events};
 use crate::page::{Page, Source};
 use bare_html::tree;
-use bare_js::eval::EvalLimits;
-use bare_js::heap::HeapLimits;
+use crate::js_limits::EvalLimits;
+use crate::js_limits::HeapLimits;
 use bare_window::Event;
 
 const PAGE: &str = include_str!("../../../tools/fixtures/ui/drive.html");

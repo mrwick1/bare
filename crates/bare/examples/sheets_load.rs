@@ -14,12 +14,13 @@
 #[path = "../src/test_server.rs"]
 mod test_server;
 
+use bare::eng_new::Peek;
 use bare::browser::*;
 use bare::browser_computed::ComputedLimits;
 use bare::{PageConfig, PageLimits, Stop};
 use bare_html::tree;
-use bare_js::eval::*;
-use bare_js::heap::HeapLimits;
+use bare::js_limits::*;
+use bare::js_limits::HeapLimits;
 use bare_net::http::Client;
 use std::time::{Duration, Instant};
 use test_server::{Reply, serve};

@@ -14,7 +14,7 @@ bare-tzdata = { path = "../tzdata" }
 bare-js-api = { path = "../js-api" }
 # NFC and NFD for `String.prototype.normalize`; case folding and the property sets of `\p{}` for the RegExp engine (`regexp.rs`)
 bare-unicode = { path = "../unicode" }
-# ID_Start and ID_Continue for the lexer (`lex.rs`); the compiled data of the property sets, as in `bare-js`
+# ID_Start and ID_Continue for the lexer (`lex.rs`); the compiled data of the property sets
 icu_properties = { version = "2.4.0", default-features = false, features = ["compiled_data"] }
 stacker = "0.1.25"
 

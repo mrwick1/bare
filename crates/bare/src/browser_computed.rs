@@ -94,7 +94,7 @@ use bare_css::cascade::{self, ComputedStyle, Origin, RuleSet, Scopes, Source, St
 use bare_css::rule_cache::{self, Part};
 use bare_css::values::{Keyword, Length, Property, SHORTHANDS, Value as Cv, shorthand_longhands};
 use bare_html::dom::{DAMAGE_STYLE, Mark, NodeData, NodeId};
-use bare_js::eval::LimitKind;
+use crate::js_limits::LimitKind;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::rc::Rc;
 use std::collections::HashMap;

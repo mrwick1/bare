@@ -28,16 +28,15 @@
 //!   without asking the host. So `document.createElement` and `window.addEventListener` never wait for a list. This differs from the
 //!   standard (`[LegacyOverrideBuiltIns]` on `Document`, `WindowProperties` before `EventTarget.prototype`): a page cannot hide the
 //!   DOM API with an element name.
-//! - A name that the host defines lazily on a miss (`Heap::lazy_chain_name`: `name`, `top`, `open`, `on*`) wins too: the host
+//! - A name that the host defines lazily on a miss (`lazy_chain_name`: `name`, `top`, `open`, `on*`) wins too: the host
 //!   defines it before the element can answer.
 //! - The list and the walk follow `Document::name_revision`, which moves only for changes of named elements. A miss after other
 //!   changes (a text edit, a bare element added) costs no walk.
-use crate::eng_old::Old;
+use crate::eng_new::New;
 use crate::eng::{Eng, Fault, Ops, Val};
 use crate::browser::*;
 use crate::browser_scoped::*;
 use bare_html::dom::{Atom, NodeData, NodeId};
-use bare_js::heap::Heap;
 use bare_js_api::Pending;
 use bare_js_api::{Args, Local, Type};
 use std::cell::{Cell, OnceCell, Ref, RefCell, RefMut};
@@ -48,7 +47,7 @@ pub(crate) const FILL: u32 = u32::MAX - 8;
 const WALKS: u32 = 16;
 #[derive(Default)]
 pub(crate) struct Frames<E: Eng>(OnceCell<Box<RefCell<State<E>>>>);
-const _: () = assert!(std::mem::size_of::<Frames<Old>>() == std::mem::size_of::<usize>());
+const _: () = assert!(std::mem::size_of::<Frames<New>>() == std::mem::size_of::<usize>());
 impl<E: Eng> Frames<E> {
     #[inline]
     pub(crate) fn active(&self) -> bool {
@@ -90,7 +89,7 @@ struct State<E: Eng> {
     rev: u64,
     full: u64,
     /// The name of the query that found the list out of date: its fill builds the list and makes the wrapper of that name, so
-    /// one property operation asks at most once here (see `hx!` in `bare_js::eval`).
+    /// one property operation asks at most once here (see `hx!` in the engine).
     want: RefCell<Vec<u16>>,
     /// The next fill gives the lazy window name `want` its chance first (`lazy_tried` then holds it).
     lazy: Cell<bool>,
@@ -367,7 +366,7 @@ pub(crate) fn has<E: Eng>(d: &Dom<E>, owner: E::Obj, key: &[u16]) -> Result<Opti
         return Ok(Some(false));
     };
     drop(doc);
-    if !window && Heap::lazy_chain_name(key) && !s.lazy_tried.borrow().contains(key) {
+    if !window && lazy_chain_name(key) && !s.lazy_tried.borrow().contains(key) {
         *s.want.borrow_mut() = key.to_vec();
         s.lazy.set(true);
         return Err(Pending::Fill(FILL));
@@ -672,4 +671,49 @@ pub(crate) fn held<E: Eng>(d: &Dom<E>, out: &mut Vec<NodeId>) {
     out.extend(s.contexts.keys().copied());
     out.extend(s.docs.keys().copied());
     out.extend(s.owned.iter().flat_map(|(&a, &b)| [a, b]));
+}
+
+/// Does a miss of the string key `u` ask the host? A host named object in front of the lazy chain uses it to let the lazy names win over its own names.
+fn lazy_chain_name(u: &[u16]) -> bool {
+    u.len() >= 3 && u[0] == b'o' as u16 && u[1] == b'n' as u16
+        || u.len() > 11 && u[0] == b'H' as u16 && u[1] == b'T' as u16 && u[2] == b'M' as u16 && u[3] == b'L' as u16 && u.ends_with(&[b'E', b'l', b'e', b'm', b'e', b'n', b't'].map(u16::from))
+        || browser_name(u)
+}
+
+#[cold]
+#[inline(never)]
+fn browser_name(u: &[u16]) -> bool {
+    macro_rules! named { ($name:literal) => { u.iter().copied().eq($name.bytes().map(u16::from)) }; }
+    match u.first().copied() {
+        Some(102) => named!("frames") || named!("frameElement") || named!("focus") || named!("fonts"),
+        Some(101) => named!("eval") || named!("event"),
+        Some(97) => named!("animate") || named!("alert") || named!("adoptedStyleSheets"),
+        Some(105) => named!("indexedDB") || named!("isSecureContext") || named!("inputEncoding"),
+        Some(65) => named!("Animation"),
+        Some(73) => u.starts_with(&[73, 68, 66]),
+        Some(80) => named!("Path2D"),
+        Some(112) => named!("parent") || named!("postMessage") || named!("print") || named!("prompt"),
+        Some(116) => named!("top") || named!("toDataURL") || named!("transform"),
+        Some(103) => named!("getContext") || named!("getBBox") || named!("getCTM") || named!("getScreenCTM") || named!("getTotalLength") || named!("getPointAtLength") || named!("getComputedTextLength") || named!("getSubStringLength"),
+        Some(119) => named!("width") || named!("write") || named!("writeln"),
+        Some(104) => named!("height") || named!("hasFocus") || named!("hidden"),
+        Some(118) => named!("viewBox") || named!("visibilityState"),
+        Some(111) => named!("open") || named!("opener") || named!("outerWidth") || named!("outerHeight"),
+        Some(99) => named!("close") || named!("closed") || named!("confirm") || named!("contentType") || named!("compatMode") || named!("characterSet") || named!("charset") || named!("crossOriginIsolated"),
+        Some(108) => named!("length") || named!("lastModified"),
+        Some(110) => named!("name"),
+        Some(115) => named!("speechSynthesis") || named!("screen") || named!("sheet") || named!("styleSheets") || named!("screenX") || named!("screenY"),
+        Some(67) => named!("CompressionStream") || named!("CloseEvent") || named!("CSSStyleSheet") || named!("CSSGroupingRule") || named!("CSSImportRule") || named!("CSSFontFaceRule") || named!("CSSKeyframesRule") || named!("CSSKeyframeRule") || named!("CSSConditionRule") || named!("CSSMediaRule") || named!("CSSSupportsRule") || named!("CSSRule") || named!("CSSStyleRule") || named!("CSSRuleList"),
+        Some(77) => named!("MediaList"),
+        Some(83) => named!("StyleSheetList") || named!("SpeechSynthesis") || named!("SpeechSynthesisUtterance") || named!("SpeechSynthesisEvent") || named!("SpeechSynthesisErrorEvent") || named!("SVGAnimatedString") || (u.starts_with(&[83,86,71]) && u.ends_with(&[69,108,101,109,101,110,116])),
+        Some(68) => named!("DocumentType") || named!("DOMException") || named!("DecompressionStream"),
+        Some(100) => named!("devicePixelRatio") || named!("designMode") || named!("dir"),
+        Some(98) => named!("blur"),
+        Some(69) => named!("EventSource"),
+        Some(70) => named!("FontFace") || named!("FileReader"),
+        Some(84) => named!("TransformStream") || named!("TransformStreamDefaultController") || named!("TextDecoderStream") || named!("TextEncoderStream"),
+        Some(87) => named!("WebSocket") || named!("WritableStream") || named!("WritableStreamDefaultWriter") || named!("WritableStreamDefaultController"),
+        Some(114) => named!("referrer"),
+        _ => false,
+    }
 }

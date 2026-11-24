@@ -33,7 +33,7 @@
 //! - CharacterData: `data length`. Document: `createElement createElementNS createTextNode createComment getElementById
 //!   documentElement head body doctype defaultView querySelector(All)`.
 //! - `HTMLElement.dataset` and `SVGElement.dataset` (`DOMStringMap`, `browser_dataset.rs`): live `data-*` attributes with the name conversion, named
-//!   properties through the host named-property hook of `bare_js::heap` (`heap_named.rs`). MathML elements have no `dataset` (no `MathMLElement` brand).
+//!   properties through the host named-property hook of the engine. MathML elements have no `dataset` (no `MathMLElement` brand).
 //! - `<input>`: `value checked type defaultValue defaultChecked` with native state (dirty value, checkedness).
 //! - `Element.innerHTML` and `outerHTML` (`browser_fragment.rs`): native fragment parsing and serialization with explicit gates (table, select, template, html, frameset and
 //!   foreign contexts are `Unsupported`). Fragment scripts are never run.
@@ -77,7 +77,7 @@
 //! is tested against structural expectations written by hand. Only plain `EventTarget`/`Event` semantics have a Node
 //! oracle (`tools/js/browser_oracle.mjs`).
 
-use crate::eng_old::Old;
+use crate::eng_new::New;
 use crate::eng::{Desc, Eng, Fault, NamedOp, Ops, Val};
 use crate::browser_sources::Roots;
 use crate::browser_dom as nd;
@@ -93,8 +93,8 @@ use crate::browser_custom as ce;
 pub use crate::browser_scheduler::{Pump, SchedLimits, SchedStats};
 use bare_css::selector::Selector;
 use bare_html::dom::{Document, NodeData, NodeId, Ns};
-use bare_js::eval::{EvalLimits, LimitKind};
-use bare_js::heap::HeapLimits;
+use crate::js_limits::{EvalLimits, LimitKind};
+use crate::js_limits::HeapLimits;
 use bare_js_api::HostFn;
 use crate::browser_scoped::{obj_id, run, table, Attrs, Intrinsic, Res, Row, Sc, HS};
 use std::cell::{Cell, OnceCell, RefCell};
@@ -175,11 +175,6 @@ impl<K: SlotKey, V> IdTab<K, V> {
     }
     pub fn is_empty(&self) -> bool {
         self.len() == 0
-    }
-    /// The length of the directory and the number of pages that exist.
-    #[cfg(test)]
-    pub fn size(&self) -> (usize, usize) {
-        (self.pages.len(), self.pages.iter().flatten().count())
     }
     pub fn get(&self, k: &K) -> Option<&V> {
         if !K::DENSE {
@@ -778,7 +773,7 @@ pub(crate) enum P {
 }
 
 /// The DOM host of one realm.
-pub struct Dom<E: Eng = Old> {
+pub struct Dom<E: Eng = New> {
     pub(crate) doc: Rc<RefCell<Document>>,
     pub(crate) st: RefCell<State<E>>,
     pub(crate) lim: BrowserLimits,
@@ -2025,7 +2020,7 @@ table!(defs = [
 // ---------------------------------------------------------------------------------------------- Browser
 
 /// One realm with a DOM. This is the type tests and tools use.
-pub struct Browser<E: Eng = Old> {
+pub struct Browser<E: Eng = New> {
     pub(crate) observe_document: Option<u64>,
     pub it: E::Vm,
     pub(crate) dom: Rc<Dom<E>>,
@@ -2053,9 +2048,9 @@ pub struct BrowserStats {
     pub attr_slots: usize,
 }
 
-impl Browser<Old> {
+impl Browser<New> {
     /// A realm over `doc` with `window`, `document` and the DOM interfaces installed.
-    pub fn new(doc: Document, limits: BrowserLimits, eval: EvalLimits, heap: HeapLimits) -> R<Old, Browser<Old>> {
+    pub fn new(doc: Document, limits: BrowserLimits, eval: EvalLimits, heap: HeapLimits) -> R<New, Browser<New>> {
         Browser::make(doc, limits, eval, heap)
     }
 }
@@ -2235,7 +2230,7 @@ impl<E: Eng> Browser<E> {
     }
 
     /// Collect the heap. Attached wrappers and their listeners live. `extra` are values the caller still holds.
-    pub fn collect(&mut self, extra: &[E::Raw]) -> R<E, bare_js::heap::Collected> {
+    pub fn collect(&mut self, extra: &[E::Raw]) -> R<E, crate::js_limits::Collected> {
         let mut ids = bare_observe::process::context();
         ids.document = self.observe_document;
         let _context = bare_observe::process::enter(ids);

@@ -1,4 +1,4 @@
-// Oracle cases for crates/js/src/regexp.rs (S2). Node runs each case; Rust compares every span.
+// Oracle cases for the Vex regexp engine (crates/vex/src/regexp_tests.rs). Node runs each case; Rust compares every span.
 //   node tools/js/regexp_oracle.mjs [seed] [fuzz_count] > cases.tsv
 //   node tools/js/regexp_oracle.mjs --target tools/js/regexp_inventory.jsonl > target.tsv
 //     (every literal found in the 15 public bundles, each on ~50 controlled inputs, as g/d runs)
