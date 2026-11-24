@@ -41,7 +41,7 @@ pub enum Free {
     Wait,
     /// A collect: queue them, free the queue when the lists have grown by `DRAIN_BYTES` since the last time, and rebuild the lists if they are mostly dead.
     Collect,
-    /// Queue them and free the queue now, so that `live_len` and the caps count nodes in use only.
+    /// Queue them and free the queue now, so that `live_len` and the caps count nodes in use only. Rebuild the lists if a fourth of them is dead.
     Now,
 }
 
@@ -173,8 +173,9 @@ impl Document {
                 self.drain();
                 self.list_mark = list;
             }
+            // A host near a cap (`Now`) rebuilds below `REBUILD_BYTES` too: the caps count the length of the text list.
             let bytes = self.dead_text + self.dead_attrs * ATTR_BYTES;
-            if bytes >= REBUILD_BYTES && bytes * 4 >= list {
+            if (bytes >= REBUILD_BYTES || free == Free::Now) && bytes * 4 >= list {
                 self.rebuild_lists(pins);
                 self.list_mark = self.text.len() + self.attrs.len() * ATTR_BYTES;
             }
