@@ -10,7 +10,7 @@
 # row and the binary's mtime, so a second run against the same base measures only NEW_DIR.
 # A row breaks the rule when it is over PERCENT (default 0.5) under BOTH allocators. The exit status is 1 then, and also
 # when a row fails to run. Rows over the limit under one allocator only are listed as noise candidates.
-#   -j JOBS   rows in parallel (default 4). Instruction counts do not depend on it (docs/progress.md, "Gates and baselines").
+#   -j JOBS   rows in parallel (default 4). Instruction counts do not depend on it (docs/internal/progress.md, "Gates and baselines").
 #   -g REGEX  run only the rows that match (grep -E), for example 'eval_load|fib'
 #   -a        print the whole table, not only the summary and the flagged rows
 #   -J        run jemalloc on every row

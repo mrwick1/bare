@@ -50,7 +50,7 @@
 //!   a percent padding or margin of a grid item, an auto margin of a grid item or of an item of a wrapping flex container, and a box whose containing block is an inline box.
 //! - Page-level or per-read? A gate stays a page-level `Unsupported` (fatal), not an empty string or a throw: this module and the other
 //!   host modules say that a gate is never faked, and an empty string or a throw would let a script go on with a value that Chrome
-//!   does not give. `docs/decisions.md` has no rule that says otherwise.
+//!   does not give. `docs/internal/decisions.md` has no rule that says otherwise.
 //! - A light child of a shadow host that no slot takes has no style (it is not rendered; `RuleSet::compute_for` does not reach it).
 //! - Values that the engine keeps only loosely: `align-*` and `justify-*` lose `safe`/`unsafe`, and `text-decoration` keeps only the line
 //!   (the style, the color and the thickness are dropped, so `underline dotted` reads as `underline`). Those read as the text that the
@@ -241,7 +241,7 @@ pub(crate) fn is_missing_sheet<E: Eng>(e: &Fault<E>) -> bool {
 const STYLED_FROM: u64 = 1 << 20;
 /// Steps for each element that a restyle styles, over its candidate rules (one step each). Measured on 2026-11-13: a step is about 200 instructions, and a
 /// restyle costs 6,500 to 7,200 instructions for each element with 8 candidates (`rest_13`, `compm_22000`), so about 33 to 36 steps for each element,
-/// candidates included. See `docs/decisions.md`.
+/// candidates included. See `docs/internal/decisions.md`.
 const STEPS_PER_RESTYLED_ELEMENT: u64 = 32;
 const PSEUDO: u8 = 1;
 const EMPTY: u8 = 2;

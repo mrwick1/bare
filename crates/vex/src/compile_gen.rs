@@ -1,4 +1,4 @@
-//! Generators in the compiler (`docs/design-js2-async.md` 5.1, 6.1 and 6.2; plan step G2). The runtime side is `generator.rs`.
+//! Generators in the compiler (`docs/internal/design-js2-async.md` 5.1, 6.1 and 6.2; plan step G2). The runtime side is `generator.rs`.
 //!
 //! **Entry.** A generator binds its parameters and evaluates their defaults at the call, as any function does. Then `GenInit` makes the
 //! generator object and returns it to the caller; the first `next()` goes on after it ([`Fc::gen_init`]).

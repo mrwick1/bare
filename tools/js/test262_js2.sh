@@ -1,5 +1,5 @@
 #!/bin/sh
-# Gate S2 (docs/plan-engine-rewrite.md): test262 for the core census features and the S2.7 built-ins, on the new engine (bare-vex) and on
+# Gate S2 (docs/internal/plan-engine-rewrite.md): test262 for the core census features and the S2.7 built-ins, on the new engine (bare-vex) and on
 # the old one (bare-js), the same tests and the same rules. It reports pass and fail for each directory on both engines, and lists each
 # test that passes on the old engine and fails on the new one, grouped by the cause of the failure.
 #   tools/js/test262_js2.sh [-j JOBS] [-g REGEX] [-o OUTDIR]

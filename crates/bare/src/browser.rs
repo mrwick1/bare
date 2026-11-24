@@ -401,7 +401,7 @@ impl<E: Eng> Owner<E> {
     }
 }
 
-/// The owners of traced values, by host key (`docs/design-host-tracing.md`). A key is a slot index above `KIND_BITS` bits. The low bits
+/// The owners of traced values, by host key (`docs/internal/design-host-tracing.md`). A key is a slot index above `KIND_BITS` bits. The low bits
 /// are the kind of a host-filled object (`browser_sources::Source`), and 0 for any other owner. A free slot holds `None`.
 #[derive(Default)]
 pub(crate) struct Owners<E: Eng> {
@@ -927,7 +927,7 @@ impl<E: Eng> Dom<E> {
 }
 
 /// The host of `bare-js-api`: the host functions, the references that owners keep and the entries that dead owners free
-/// (`docs/design-host-tracing.md`). The old `Host` below only fills host-indexed objects and writes host-named ones: the interface has no
+/// (`docs/internal/design-host-tracing.md`). The old `Host` below only fills host-indexed objects and writes host-named ones: the interface has no
 /// method for these two yet.
 impl<'p, E: Eng> bare_js_api::Host<E::Vm> for Dom<E> {
     #[inline]

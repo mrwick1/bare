@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The suite benchmark (docs/design-suite.md, section 5.3; success criterion 7 of docs/perf-goal.md).
+"""The suite benchmark (docs/internal/design-suite.md, section 5.3; success criterion 7 of docs/internal/perf-goal.md).
 
 usage: run.py BARE_DRIVE [--suite DIR] [--variants V0,V1,V2,V3,V4] [--k 2,4,8,12] [--runs 3] [--login-ms N] [--js-kb N] [--css-kb N]
               [--keep DIR] [--only TEXT] [--v0-binary PATH]

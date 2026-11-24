@@ -1,4 +1,4 @@
-//! The facade of `Browser` and the handlers on the interface (`docs/design-host-handlers.md`, step H0).
+//! The facade of `Browser` and the handlers on the interface (`docs/internal/design-host-handlers.md`, step H0).
 
 use crate::browser::*;
 use crate::browser_scoped::Failed;

@@ -1,4 +1,4 @@
-//! Structured clone: every class that the walk knows, the errors it throws, the transfer list and the caps (`docs/design-host-clone.md`). Each case prints the clone as text (`dump`). The expected text is the output of the old browser walk, frozen at `55594ea6`.
+//! Structured clone: every class that the walk knows, the errors it throws, the transfer list and the caps (`docs/internal/design-host-clone.md`). Each case prints the clone as text (`dump`). The expected text is the output of the old browser walk, frozen at `55594ea6`.
 
 use crate::eng_new::Peek;
 use crate::browser::*;

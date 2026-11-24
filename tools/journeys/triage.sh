@@ -2,7 +2,7 @@
 # Run every daily journey on Vex and write a failure queue.
 #   tools/journeys/triage.sh [-j N] [-o OUT.tsv] [-g REGEX] [-b BIN_DIR] [-T SECS]
 #
-# Workloads (the 50 of the feature census, docs/census/2026-11-18.tsv, plus an optional staging row):
+# Workloads (the 50 of the feature census, docs/internal/census/2026-11-18.tsv, plus an optional staging row):
 #   public:<name>  the 48 steps files of tools/drive/public, run with bare-drive on the live sites (needs the network).
 #   typing         `type_load DIR '#a1' 50` (crates/bare/examples/type_load.rs) on the React typing page of tools/js/typing/build.sh.
 #                  DIR is $TRIAGE_TYPING_DIR (default /data/bare-tmp/triage/typing-page); it is built there when it is missing.

@@ -1,4 +1,4 @@
-//! Modules of the realm (`docs/design-js2-host-api.md` section 12): the table of module records, link, evaluate, namespace objects and
+//! Modules of the realm (`docs/internal/design-js2-host-api.md` section 12): the table of module records, link, evaluate, namespace objects and
 //! the native behind `import()`. The compiler is `compile_module.rs`; the methods of the host interface are `api_module.rs`.
 //!
 //! Every value that a record holds is reachable from `func` (the function cell, which holds the context, which holds the environment

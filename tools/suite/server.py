@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The fixture app of the suite benchmark (docs/design-suite.md, section 5.1). Python standard library, loopback only.
+"""The fixture app of the suite benchmark (docs/internal/design-suite.md, section 5.1). Python standard library, loopback only.
 
 usage: server.py [--port N] [--login-ms N] [--js-kb N] [--css-kb N]
   --port 0 (the default) takes a free port. The first line on stdout is `listening PORT`.

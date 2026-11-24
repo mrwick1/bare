@@ -1,4 +1,4 @@
-//! Compare two PNG pictures, for the Chrome checks of `docs/resources.md`:
+//! Compare two PNG pictures, for the Chrome checks of `docs/internal/resources.md`:
 //!
 //! - `diff A.png B.png [OUT.png]`: how many pixels differ, how many by more than 64 levels in a channel, the box that
 //!   holds them, and (with OUT) a picture: the pixels of A, in red where they differ.

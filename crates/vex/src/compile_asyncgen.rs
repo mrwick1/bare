@@ -1,4 +1,4 @@
-//! Async generators and `for await` in the compiler (`docs/design-js2-async.md` 6.4; plan step A2). The runtime side is `asyncgen.rs`.
+//! Async generators and `for await` in the compiler (`docs/internal/design-js2-async.md` 6.4; plan step A2). The runtime side is `asyncgen.rs`.
 //!
 //! **Entry.** As a generator (`GenInit` after the parameters), and as an async function the body is in the range of a catch-all handler
 //! that ends in `RetGen ex, 1` (a throw rejects the request that waits, `compile_async.rs`).

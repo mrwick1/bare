@@ -1,4 +1,4 @@
-// The built-ins that call a script function (plan step S2.7), design D2 of `docs/design-js2-lazy-builtins.md`. This text is never run as a whole:
+// The built-ins that call a script function (plan step S2.7), design D2 of `docs/internal/design-js2-lazy-builtins.md`. This text is never run as a whole:
 // each top-level function is compiled at its first call (`script.rs`, `Lazy::prelude_fn`). A name that a function reads and no scope in it
 // declares is a slot of the realm (`GetPre`, `prelude_pre.rs`) when it is the name of a top-level function here, of a native or of a state
 // variable in `prelude_pre.rs`. The public names (`Array.prototype.forEach`) are lazy table entries of kind `Pre` (`lazy.rs`).

@@ -1,4 +1,4 @@
-//! Atoms: one cell for each distinct string that is used as a name (`docs/design-engine-rewrite.md` 6.10 item 14, plan step S1.7).
+//! Atoms: one cell for each distinct string that is used as a name (`docs/internal/design-engine-rewrite.md` 6.10 item 14, plan step S1.7).
 //!
 //! Two tables:
 //!

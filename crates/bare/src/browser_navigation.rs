@@ -34,7 +34,7 @@
 //! `tools/js/navigation_check.sh`): history, location and storage are checked against hand-written structural expectations.
 //!
 //! GC: URL wrappers, params wrappers and iterators are owners (`Owner::Url`, `Params`, `Iter`). Each keeps its edges in `Traced`
-//! fields, `trace_owner` visits them and `prune_owner` drops the entries of dead ones (`docs/design-host-tracing.md`).
+//! fields, `trace_owner` visits them and `prune_owner` drops the entries of dead ones (`docs/internal/design-host-tracing.md`).
 //! The permanent objects (`location`, `history`, `localStorage`, `sessionStorage`, their prototypes) are held by persistent handles.
 //! The cloned state of an entry is native data; its materialized object is cached in a persistent handle that the entry owns,
 //! so it is a root exactly while the entry lives.

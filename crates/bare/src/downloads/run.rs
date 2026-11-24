@@ -1,4 +1,4 @@
-//! The engine of one download: resume, retry and parallel byte ranges (`docs/design-downloads.md`, section 5).
+//! The engine of one download: resume, retry and parallel byte ranges (`docs/internal/design-downloads.md`, section 5).
 //!
 //! How it works
 //! - The first reply streams into segment 0, as before. When the server can serve ranges (`Accept-Ranges: bytes`, a known size, a

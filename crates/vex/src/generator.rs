@@ -1,4 +1,4 @@
-//! Generators: the suspended frame (`docs/design-js2-async.md` 5.1 and 6, plan step G1). Safe code over [`Realm`]; the loop of `interp.rs`
+//! Generators: the suspended frame (`docs/internal/design-js2-async.md` 5.1 and 6, plan step G1). Safe code over [`Realm`]; the loop of `interp.rs`
 //! calls it from its cold arms.
 //!
 //! **The generator object** (the *activation*) is an object of the kind `K_GEN` and four hidden slots (names that start with `\0`, so

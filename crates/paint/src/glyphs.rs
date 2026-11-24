@@ -11,7 +11,7 @@
 //! (4 KB: check marks, crosses, stars, the menu and warning signs), draws the characters that the other faces lack: it is
 //! the last fallback. A fourth face, a subset of Noto Sans Arabic (86 KB, the Arabic blocks), draws Arabic letters; it is
 //! read on the first Arabic letter. No system font is read. The licenses are `data/fonts/OFL*.txt`.
-//! A letter that none of the faces has (Chinese, Japanese, Korean, emoji) is not drawn (a gap in `docs/resources.md`).
+//! A letter that none of the faces has (Chinese, Japanese, Korean, emoji) is not drawn (a gap in `docs/internal/resources.md`).
 //!
 //! Why a cache: filling an outline is the costly part of text. A page repeats the same letters at the same size, so
 //! each (glyph, size, quarter pixel) is filled once into a coverage mask, and every use is a blit of the mask.

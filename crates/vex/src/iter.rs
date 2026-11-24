@@ -1,4 +1,4 @@
-//! The iterator protocol of the loop (`docs/design-js2-async.md` 6.3, plan step G3). Cold helpers of `IterOpen`, `IterNext`, `IterClose` and
+//! The iterator protocol of the loop (`docs/internal/design-js2-async.md` 6.3, plan step G3). Cold helpers of `IterOpen`, `IterNext`, `IterClose` and
 //! `YieldStarStep`; the loop of `interp.rs` keeps the array path (an index) inline.
 //!
 //! **The record** of an iteration is 3 registers: the iterator, the *kind* and a flag for early close of a fast array.

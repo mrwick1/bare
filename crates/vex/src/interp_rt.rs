@@ -27,7 +27,7 @@
 //! That entry is made only when the new slot is inline, so no allocation is needed. A cache guarded by shape ID does not take
 //! dictionary shapes (`Shapes::cacheable`). Global sites instead guard the address of an own data slot with the global mutation tag.
 //!
-//! **Prototype entries** (`docs/design-js2-proto-ic.md`). A read that finds a data property on the prototype chain makes an entry too.
+//! **Prototype entries** (`docs/internal/design-js2-proto-ic.md`). A read that finds a data property on the prototype chain makes an entry too.
 //! The record keeps `shape` 0 (the own-property hit never matches), the shape of the receiver in `to` (a shape id is never 0), and the
 //! index of a [`ProtoHit`] in `Feedback::protos` in `loc`. The hit compares the shape of the receiver, then the entry's epoch with
 //! `Shapes::proto_epoch`, then reads the slot of the holder. The shape of the receiver fixes its prototype, so the chain below the

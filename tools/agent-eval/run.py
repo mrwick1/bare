@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Reproducible browser task evaluation for `bare-mcp`. Python stdlib only; no model client, no credential lookup, no paid run.
 
-Commands (details: docs/agent-evaluation.md):
+Commands (details: docs/internal/agent-evaluation.md):
   list                              the tasks and their prompts
   smoke  --bare-mcp BIN --out DIR   run scripted tool sequences through real stdio MCP and grade them. A SCRIPTED run is a protocol and grader check, not an agent result.
   fixture --task T --out DIR        start the loopback fixture for an external agent run, write the prompt and inputs, stop at the deadline or on SIGINT/SIGTERM

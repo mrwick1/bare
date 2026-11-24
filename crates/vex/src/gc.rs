@@ -1,4 +1,4 @@
-//! The collector (`docs/design-engine-rewrite.md` 6.9 item 3 and 6.11 item 3, plan step S1.5): a non-moving mark phase over the
+//! The collector (`docs/internal/design-engine-rewrite.md` 6.9 item 3 and 6.11 item 3, plan step S1.5): a non-moving mark phase over the
 //! heap of `heap.rs`, then the weak tables, then the lazy sweep of the heap.
 //!
 //! One walk. [`collect`] runs these steps, in this order:

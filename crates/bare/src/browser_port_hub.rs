@@ -1,4 +1,4 @@
-//! The port hub: where a `MessagePort` pair that is split across pages keeps its messages (step 3c of `docs/design-gmail-frames.md`).
+//! The port hub: where a `MessagePort` pair that is split across pages keeps its messages (step 3c of `docs/internal/design-gmail-frames.md`).
 //!
 //! One hub is shared by all the pages of one top page (`Cfg::hub` in `browser_child.rs`). It holds data only: no JS object, no `ObjId`.
 //! A page has its own heap, so a message to a port of another page cannot be queued in that port. It waits here until the owner page takes it.

@@ -1,7 +1,7 @@
 //! The new engine (`bare-vex`) as an engine for the host (S0.4 PR 6c-2). Every object, string, symbol and key of the host is a
 //! `Value` of Vex in a wrapper that has `Hash`. The operations go through `Engine` (with a handle that lasts for one operation) and
 //! through the raw helpers of `api_raw.rs`. What Vex cannot do yet answers `Fault::Unsupported` with the name `Vex: ...`: these
-//! are the lines of the phase 2 queue (`docs/progress/2026-11-21-s04-pr6c2-js2-browser.md`).
+//! are the lines of the phase 2 queue (`docs/internal/progress/2026-11-21-s04-pr6c2-js2-browser.md`).
 
 use crate::eng::{Collected, Desc, Eng, Fault, Got, HeapStats, KeyKind, Ops, PState, Prop, Val, WallClock};
 use crate::js_limits::LimitKind;

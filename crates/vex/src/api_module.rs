@@ -1,4 +1,4 @@
-//! The module methods of `Engine` for `Realm` (`docs/design-js2-host-api.md` section 12). A child of `api`: it reads the private state of
+//! The module methods of `Engine` for `Realm` (`docs/internal/design-js2-host-api.md` section 12). A child of `api`: it reads the private state of
 //! the interface. The work is in `module.rs`.
 use super::*;
 use bare_js_api::{ImportRequest, Persistent};

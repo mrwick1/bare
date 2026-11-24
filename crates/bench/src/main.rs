@@ -4,7 +4,7 @@
 //! that are alive. "peak" is the most bytes alive at once during the step, above the start.
 //! "kept" is what is still alive when the step returns its result (for example the DOM).
 //! This counts heap bytes that the program asked for. It does not count the kernel's pages,
-//! so it is lower than the RSS that `top` shows. Chrome numbers in docs/resources.md are RSS.
+//! so it is lower than the RSS that `top` shows. Chrome numbers in docs/internal/resources.md are RSS.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};

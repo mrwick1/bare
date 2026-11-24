@@ -18,7 +18,7 @@
 //! Timers (S5): `App::tick` runs the work that is due and gives the time of the next work. The loop sleeps in `poll` until that
 //! time at the latest, so page timers and `fetch` tasks run between input events. With no work due, the timeout is none.
 //!
-//! Not here yet: a fractional or integer HiDPI scale (paint draws one pixel for each CSS pixel, see `docs/resources.md`,
+//! Not here yet: a fractional or integer HiDPI scale (paint draws one pixel for each CSS pixel, see `docs/internal/resources.md`,
 //! "Wayland window"), scroll events, touch, a text input method (IME) and the clipboard.
 
 pub mod input;

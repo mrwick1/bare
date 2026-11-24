@@ -1,4 +1,4 @@
-//! The slots of the prelude (`docs/design-js2-lazy-builtins.md`, design D2).
+//! The slots of the prelude (`docs/internal/design-js2-lazy-builtins.md`, design D2).
 //!
 //! `prelude.js` is a flat text. It has no wrapper function and it never runs as a whole. A name that a prelude function reads and no scope
 //! of that function declares is one of the names in [`PRE`]: the compiler reads it with `GetPre slot` (`compile_expr.rs`). The slots are in

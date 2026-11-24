@@ -5,7 +5,7 @@
 //! - `short`: `t = 'ab' + 'cd'` N times, a copy of 4 units each time. After each round of 100,000 a collection frees them all.
 //! - `atom`: N interns of one of 1,000 names that the realm already has (a table hit; no allocation).
 //!
-//! The same JS programs run on QuickJS in `docs/progress.md` (entry S1.7).
+//! The same JS programs run on QuickJS in `docs/internal/progress.md` (entry S1.7).
 use bare_vex::atoms::{Atoms, SharedAtoms};
 use bare_vex::heap::Heap;
 use bare_vex::string::{Chars, Str};

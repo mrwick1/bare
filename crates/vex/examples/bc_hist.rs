@@ -5,7 +5,7 @@
 //! With no path it compiles the sources of the `eval_load` cases (`examples/data/eval_*.js`, the same text as the old engine's
 //! `eval_load CASE 1 --source`). With paths it compiles those files. Every complete function (one with no unbuilt construct) must pass the verifier, or the
 //! program exits with 1. `-v` also prints the disassembly. The old engine's counts (`tools/js/bc_hist.sh` counts executed ops; the old
-//! compiler dumps are static) are in `docs/progress.md`.
+//! compiler dumps are static) are in `docs/internal/progress.md`.
 
 use bare_vex::atoms::SharedAtoms;
 use bare_vex::bytecode::decode;

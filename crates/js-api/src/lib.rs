@@ -1,4 +1,4 @@
-//! The interface between the browser and a JavaScript engine (plan step S0.2, design 6.8 of `docs/design-engine-rewrite.md`).
+//! The interface between the browser and a JavaScript engine (plan step S0.2, design 6.8 of `docs/internal/design-engine-rewrite.md`).
 //!
 //! The browser is generic over [`Engine`]. It is compiled once for each engine, and a session picks one when it starts
 //! (`BARE_JS_EXEC`). So an engine call costs what a direct call costs.
@@ -18,7 +18,7 @@
 //! in a [`Traced`] and registers the object as an owner with a host key ([`Scope::set_host_owner`]). When the collector reaches the
 //! owner, it calls [`Host::trace`] with the key, and the host visits the owner's references. After the collection, [`Host::prune`]
 //! gets the keys of dead owners. So a detached cycle of node, wrapper, listener and closure is collected
-//! (`docs/design-host-tracing.md`).
+//! (`docs/internal/design-host-tracing.md`).
 //!
 //! The collector may run in any method that takes `&mut Scope` (an allocation, a call into script, [`Scope::safepoint`]). A method
 //! that takes `&Scope` never collects. A borrow of engine memory ([`Scope::as_str`]) is tied to `&Scope`, so it cannot be held across
@@ -866,7 +866,7 @@ pub trait Engine: Sized {
     /// A point where the collector may run.
     fn safepoint(&mut self);
 
-    // The base set of handler methods (plan step S0.4; `docs/design-host-forms.md`, `design-host-cssom.md`,
+    // The base set of handler methods (plan step S0.4; `docs/internal/design-host-forms.md`, `design-host-cssom.md`,
     // `design-host-navigation.md`). Each method that can run script or allocate takes `&mut self`.
 
     /// A `TypeError` object with this message. The caller returns it as `Err`.
@@ -912,7 +912,7 @@ pub trait Engine: Sized {
     /// The engine traces both. `target` is a function, or a `TypeError`.
     fn bind<'s>(&mut self, target: Local<'_>, this: Local<'_>) -> Result<Local<'s>, Error<'s>>;
 
-    // Handler bodies of the browser (`docs/design-host-handlers.md`, section 2). The default bodies say that the engine has no such
+    // Handler bodies of the browser (`docs/internal/design-host-handlers.md`, section 2). The default bodies say that the engine has no such
     // method yet; an engine that has it overrides them.
 
     /// The host key of a host-filled object (`new_host_indexed`, `new_host_named`). `None` for any other object, also for an object
@@ -1026,7 +1026,7 @@ pub trait Engine: Sized {
         Err(Error::Abort(Abort::Unsupported("new_error")))
     }
 
-    // Structured clone (`docs/design-host-clone.md`). The engine walks plain data itself and writes a record (`clone`). It asks the
+    // Structured clone (`docs/internal/design-host-clone.md`). The engine walks plain data itself and writes a record (`clone`). It asks the
     // host only for host objects, the transfer list and the error. The default bodies say that the engine has no clone yet.
 
     /// Serialize `v` into a record, with the limits and the transfer list of `o`. The engine detaches the listed buffers and calls
@@ -1407,7 +1407,7 @@ impl<'s, E: Engine> Scope<'s, E> {
     }
 }
 
-/// The methods for the handler bodies (`docs/design-host-handlers.md`). See [`Engine`] for each one.
+/// The methods for the handler bodies (`docs/internal/design-host-handlers.md`). See [`Engine`] for each one.
 impl<'s, E: Engine> Scope<'s, E> {
     pub fn host_key(&self, obj: Local<'_>) -> Option<u32> {
         self.e.host_key(obj)

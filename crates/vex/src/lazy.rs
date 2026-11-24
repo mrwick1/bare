@@ -1,4 +1,4 @@
-//! Lazy tables for the properties of built-in objects (`docs/design-js2-lazy-builtins.md`, design B).
+//! Lazy tables for the properties of built-in objects (`docs/internal/design-js2-lazy-builtins.md`, design B).
 //!
 //! The methods, the statics and the constants of a built-in object are a `static` table of [`Ent`]. [`Realm::lazy_table`] only
 //! records the table; a property is made at the first lookup that needs it, with the same attributes, the same native and the same lazy

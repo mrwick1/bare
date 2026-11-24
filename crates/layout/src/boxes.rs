@@ -18,7 +18,7 @@
 //! - Servo (layout 2020) and Ladybird: a box tree built in a first pass, then a fragment tree.
 //!
 //! All of them store the box tree. It costs memory: Chrome uses about 1.6 KB for each element for style and layout
-//! (`docs/resources.md`), and the layout objects are most of it.
+//! (`docs/internal/resources.md`), and the layout objects are most of it.
 //!
 //! Our choice: we do not store a box tree at all. The rules above are functions that layout calls while it walks the
 //! DOM: `kind` says what box a node makes, and `children` gives the child boxes of a block, with the anonymous blocks

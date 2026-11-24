@@ -6,7 +6,7 @@
 //! a plain `[u32]`: a `Vec<u32>` of its own, or the buffer of a window, which paint draws into directly. `png.rs` is the capture for tests and for
 //! `bare --paint`.
 //!
-//! The design, the measurements behind the crates, and the gaps are in `docs/resources.md`, "Paint and pixel capture".
+//! The design, the measurements behind the crates, and the gaps are in `docs/internal/resources.md`, "Paint and pixel capture".
 
 pub mod bars;
 pub mod canvas;

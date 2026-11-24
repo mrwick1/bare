@@ -1,5 +1,5 @@
 # The OS layer for services other than the window: random bytes, DNS servers, trust roots and the local time zone.
-# `docs/decisions.md`, "Cross-platform core", asks for this crate. Only this crate and `bare-window` call the OS.
+# `docs/internal/decisions.md`, "Cross-platform core", asks for this crate. Only this crate and `bare-window` call the OS.
 [package]
 name = "bare-os"
 version.workspace = true

@@ -1,4 +1,4 @@
-//! The script and iterator methods of `Engine for Realm` (`api.rs`; `docs/design-js2-host-api.md` 3.8 and 10).
+//! The script and iterator methods of `Engine for Realm` (`api.rs`; `docs/internal/design-js2-host-api.md` 3.8 and 10).
 //!
 //! **A script with a value.** `run_script` and `eval_global` compile the text with `ScriptMode::value`: the top level keeps a completion
 //! register and returns it (see `compile_stmt.rs`: the value of the last expression statement that ran, reset to `undefined` by a

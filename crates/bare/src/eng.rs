@@ -1,4 +1,4 @@
-//! The engine behind the DOM host (`docs/design-js2-host-api.md`, S0.4 PR 6c). `Dom<E>` and every type that holds an object or a
+//! The engine behind the DOM host (`docs/internal/design-js2-host-api.md`, S0.4 PR 6c). `Dom<E>` and every type that holds an object or a
 //! value of the engine are generic over a marker `E: Eng`. The marker is a plain zero-sized type, so the derives of these types
 //! (`Default`, `Clone`, `Copy`) need nothing of the engine itself. `E::Vm` is the engine, `E::Obj` an object id that is `Copy`, `E::Raw` a
 //! value that is `Copy`. Both stay valid while the object or the value is a root or is traced by an owner.

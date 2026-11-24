@@ -1,5 +1,5 @@
 //! The size caps of a `history` state: one state, and all states of a document. A state over a cap is a `DataCloneError` that the page can catch
-//! (a page-controlled size never stops the page). The numbers are in `NavLimits` and `docs/decisions.md`.
+//! (a page-controlled size never stops the page). The numbers are in `NavLimits` and `docs/internal/decisions.md`.
 
 use crate::eng_new::Peek;
 use crate::browser::*;

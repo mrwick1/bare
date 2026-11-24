@@ -24,7 +24,7 @@
 //! is `l..r`. A question is a binary search and a look at the steps that the box covers. A new float splits at most
 //! two steps and narrows the steps that it covers. A float never goes higher than the one before it, so the splits are
 //! near the end of the list, and the copy that an insert in a `Vec` makes is short. 200,000 floats with a paragraph each:
-//! 213 ms (`docs/resources.md`).
+//! 213 ms (`docs/internal/resources.md`).
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
 

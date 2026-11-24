@@ -1,4 +1,4 @@
-//! A JavaScript value in 64 bits (NaN-boxing, `docs/design-engine-rewrite.md` 6.1).
+//! A JavaScript value in 64 bits (NaN-boxing, `docs/internal/design-engine-rewrite.md` 6.1).
 //!
 //! A double is stored as it is. Every other value has a tag in the top 16 bits, in the NaN space from `0xFFF9`:
 //!

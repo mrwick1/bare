@@ -1,4 +1,4 @@
-# JavaScript: the interface between the browser and an engine (docs/design-host-interface.md, plan step S0.2).
+# JavaScript: the interface between the browser and an engine (docs/internal/design-host-interface.md, plan step S0.2).
 # Traits and handle types only; no engine code. `bare-vex` implements `Engine`.
 [package]
 name = "bare-js-api"

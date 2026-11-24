@@ -1,4 +1,4 @@
-//! Objects (`docs/design-engine-rewrite.md` 6.4, 6.9 items 5 and 8, 6.11 item 14; plan step S1.9).
+//! Objects (`docs/internal/design-engine-rewrite.md` 6.4, 6.9 items 5 and 8, 6.11 item 14; plan step S1.9).
 //!
 //! An object is one cell: the header of `cell.rs` (a 32-bit shape id and the layout code), then inline value slots. The shape says
 //! which key is in which slot (`shapes.rs`); the object holds only the values. In JS terms: `{a: 1, b: 2}` is a header and two words.

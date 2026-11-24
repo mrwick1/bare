@@ -1,4 +1,4 @@
-//! Structured failures of `bare-mcp` (`docs/plan-agent-recovery.md`): a stable code from the source of the failure, redacted evidence and
+//! Structured failures of `bare-mcp` (`docs/internal/plan-agent-recovery.md`): a stable code from the source of the failure, redacted evidence and
 //! a conservative `next_action`, in `structuredContent.failure`. Offline and headless, against a loopback page of this test.
 
 #[path = "../../drive/tests/common/mod.rs"]

@@ -3,7 +3,7 @@
 //!
 //! Cost rule: a realm that never reads a name pays almost nothing. Constants are data properties (no function object). A value that
 //! depends on the document is a getter. `navigator` is lazy as a whole (`browser_web.rs`), so its names cost a page that never reads
-//! `navigator` nothing. Values are Chrome 155 on Linux where the HTML Standard leaves a choice (`docs/decisions.md` lists each one).
+//! `navigator` nothing. Values are Chrome 155 on Linux where the HTML Standard leaves a choice (`docs/internal/decisions.md` lists each one).
 //!
 //! `document`: `visibilityState` "visible" and `hidden` false (getters: "hidden" and true once the page closes, `Browser::hide`),
 //! `referrer` "" (bare sends no `Referer`), `designMode` "off" (data properties: a write only stores the value, the page has no design

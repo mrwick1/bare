@@ -1,4 +1,4 @@
-//! Async generators, `for await` and the async-from-sync iterator (`docs/design-js2-async.md` 6.4; plan step A2). Safe code over
+//! Async generators, `for await` and the async-from-sync iterator (`docs/internal/design-js2-async.md` 6.4; plan step A2). Safe code over
 //! [`Realm`], as `generator.rs` is. The compiler side is `compile_asyncgen.rs`.
 //!
 //! **The object** is an *activation* like that of a generator, of the kind `K_AGEN` (and not `K_GEN`: no `for-of` steps it, and

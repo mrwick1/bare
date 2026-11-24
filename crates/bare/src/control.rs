@@ -22,7 +22,7 @@
 //!
 //! Transport: the API is in-process. A driver that runs headless owns the `Page` and calls it on its thread (a thread with a big stack:
 //! the VM recurses). A driver that wants a real Wayland surface uses [`Remote`]: the page and its window run on their own thread, and
-//! each call is a job that the window loop runs in `App::tick`, between input events. `docs/decisions.md` ("S5 control interface")
+//! each call is a job that the window loop runs in `App::tick`, between input events. `docs/internal/decisions.md` ("S5 control interface")
 //! has the reasons.
 //!
 //! Gaps: no drag, no right button, no modifier keys on a click; `type_text` sends one key for each character (no IME, no

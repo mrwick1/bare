@@ -1,11 +1,11 @@
-//! Host-filled properties by host key (`docs/design-lazy-properties.md`, option A).
+//! Host-filled properties by host key (`docs/internal/design-lazy-properties.md`, option A).
 //!
 //! An indexed or named object (`NodeList`, `DOMTokenList`, `CSSStyleDeclaration`, `NamedNodeMap`, `TextTrackList`, `CSSRuleList`,
 //! `DOMStringMap`, `Storage`, the named properties of the window and the document) gets a host key when it is made (`Dom::new_source`).
 //! The key is its kind in the low `KIND_BITS` bits, and the engine gives the object with the key, as V8 gives the receiver to an
 //! interceptor. So a read goes to its subsystem with one jump, and the subsystem finds its state by the object.
 //!
-//! The objects that hold references or table entries are owners for the collector (`docs/design-host-tracing.md`). Their key has an
+//! The objects that hold references or table entries are owners for the collector (`docs/internal/design-host-tracing.md`). Their key has an
 //! owner slot (`Owners`) in the bits above the kind. The collector calls `Host::trace(key)` for a reached owner and `Host::prune`
 //! with the keys of dead ones. The kind in the key picks the subsystem, so no other subsystem is asked. `Captions`, `Storage` and
 //! `Frames` are not owners: they hold no reference and no entry that a collection frees (the page keeps them for its whole life).

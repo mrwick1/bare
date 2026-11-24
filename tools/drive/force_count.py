@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Count who forces style and layout (docs/progress.md, "Who forces style and layout"; docs/design-suite.md, section 3.5).
+"""Count who forces style and layout (docs/internal/progress.md, "Who forces style and layout"; docs/internal/design-suite.md, section 3.5).
 
 usage: force_count.py BARE_DRIVE [--only TEXT] [--corpus DIR | --suite DIR]
 

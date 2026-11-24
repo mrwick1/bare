@@ -1,5 +1,5 @@
 //! Scrollbars, in the classic look of Chrome on Linux (no overlay): a 15 px track of `#fcfcfc`, an arrow button at each end,
-//! and a thumb with round ends. The numbers come from pixels of headless Chrome 15x scroll positions (`docs/resources.md`,
+//! and a thumb with round ends. The numbers come from pixels of headless Chrome 15x scroll positions (`docs/internal/resources.md`,
 //! "Scrolling"): the arrows are triangles of 5 rows and 9 px, `#8b8b8b`, and the thumb is `#8b8b8b`, 9 px thick, 3 px in from
 //! the track edge and from the buttons. A bar draws nothing for the part of the track that a button or a thumb covers
 //! twice. Gaps: no hover or pressed colors, no dragging, no button repeat.

@@ -1,4 +1,4 @@
-//! A suite of related tests that share a login, run by K warm worker processes (`docs/design-suite.md`, step 7).
+//! A suite of related tests that share a login, run by K warm worker processes (`docs/internal/design-suite.md`, step 7).
 //!
 //! `bare-drive --suite DIR [--workers K|auto]`. DIR holds `setup.steps` (the login; its last step is `save-state "${STATE}"`) and one
 //! `NAME.steps` for each test. A shared test starts with `open URL state="${STATE}"`: it starts from the session that the setup saved.

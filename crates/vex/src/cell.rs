@@ -1,6 +1,6 @@
-//! The header at the start of every heap cell (`docs/design-engine-rewrite.md` 6.11 item 12), 8 bytes.
+//! The header at the start of every heap cell (`docs/internal/design-engine-rewrite.md` 6.11 item 12), 8 bytes.
 //!
-//! The header is two 32-bit words (plan step S1.4 chose this form over a raw 8-byte shape pointer; `docs/progress.md`, 2026-11-20):
+//! The header is two 32-bit words (plan step S1.4 chose this form over a raw 8-byte shape pointer; `docs/internal/progress.md`, 2026-11-20):
 //! - `shape`: the id of the shape of an object, an index into [`crate::shapes::Shapes`]. A string has shape 0. A record of
 //!   `object.rs` (`Slots`, `Elements`) has no shape: the word holds its capacity.
 //! - `bits`: the layout code in the low 8 bits and 24 flag bits above it. A cell can change its flags (an atom mark, a rope that

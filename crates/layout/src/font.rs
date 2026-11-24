@@ -5,7 +5,7 @@
 //! word widths. Shaping is the slow part of layout: it turns letters into glyphs, with kerning (`AV` closer together)
 //! and ligatures (`fi` as one glyph).
 //!
-//! `bare` has no shaping and no cache (`docs/decisions.md`, "Fonts"). The width of a letter comes from the advance width
+//! `bare` has no shaping and no cache (`docs/internal/decisions.md`, "Fonts"). The width of a letter comes from the advance width
 //! of the face (`hmtx`): Noto Sans Regular and Bold for proportional text, and Noto Sans Mono for `monospace`. In Noto Sans
 //! Mono every letter is 0.6 em. In Noto Sans each letter has its own width, and the tables are in `advances.rs`. A test page
 //! in Chrome with the same font gives the same layout. The width of a word is the sum of the widths of its letters. There is

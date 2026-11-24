@@ -1,5 +1,5 @@
 #!/bin/sh
-# Compare `bare --paint` with headless Chrome for one fixture (docs/resources.md, "Paint and pixel capture").
+# Compare `bare --paint` with headless Chrome for one fixture (docs/internal/resources.md, "Paint and pixel capture").
 # Usage: tools/paint_diff.sh FIXTURE.html OUT_DIR [WIDTH [HEIGHT]]
 # Writes OUT_DIR/NAME.chrome.png, NAME.bare.png and NAME.diff.png, and prints the pixel difference.
 # Chrome gets `* { font-family: 'Noto Sans Mono' !important }` after the doctype: the font that layout measures.

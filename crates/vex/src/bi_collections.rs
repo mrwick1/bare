@@ -1,5 +1,5 @@
-//! `Map`, `Set`, `WeakMap` and `WeakSet` (the census group `Sc`, `docs/census/2026-11-18.tsv`). Safe code over [`Realm`]; the storage of
-//! the weak ones is `weaktab.rs`. They are installed with the other built-ins (the lazy form of `docs/design-js2-lazy-builtins.md`
+//! `Map`, `Set`, `WeakMap` and `WeakSet` (the census group `Sc`, `docs/internal/census/2026-11-18.tsv`). Safe code over [`Realm`]; the storage of
+//! the weak ones is `weaktab.rs`. They are installed with the other built-ins (the lazy form of `docs/internal/design-js2-lazy-builtins.md`
 //! is not built yet).
 //!
 //! **The object.** A plain `Object` cell with one hidden slot, `\0cs` (not writable, not configurable, so a script cannot move it), and

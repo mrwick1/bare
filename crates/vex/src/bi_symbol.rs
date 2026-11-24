@@ -1,4 +1,4 @@
-//! `Symbol` (a step before the iterator protocol and the promise combinators, `docs/design-js2-async.md` decision 2).
+//! `Symbol` (a step before the iterator protocol and the promise combinators, `docs/internal/design-js2-async.md` decision 2).
 //!
 //! **A symbol** is a cell of the layout of a flat string with the flag `FLAG_SYMBOL` (`string.rs`). The units of the cell are the
 //! description; `FLAG_NO_DESC` marks `Symbol()` (its `description` is `undefined`). A value of kind `Kind::Symbol` points to it. The

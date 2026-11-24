@@ -1,4 +1,4 @@
-//! Modules in the compiler (`docs/design-js2-host-api.md` section 12). [`compile_module`] turns the code of a module into one function
+//! Modules in the compiler (`docs/internal/design-js2-host-api.md` section 12). [`compile_module`] turns the code of a module into one function
 //! with one parameter, `phase`: 0 runs the body, 1 makes the function declarations (so the host can do it at link time, before any
 //! module runs). Every binding of the top level has a slot of the module context, which the host makes and gives to the function as
 //! its closure context: the compiler builds the [`Level`] of that context and compiles the function as a child of it. A binding that is
