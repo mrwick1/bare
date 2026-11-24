@@ -33,6 +33,8 @@ use crate::browser_console::ConsoleLevel;
 use crate::browser_handlers::{handler_get, handler_set};
 use crate::browser_navigation_url as nu;
 use crate::browser_scoped::*;
+use crate::browser_child::Out;
+use crate::browser_remote_window::Side;
 use bare_js_api::{Args, Attrs, HostFn, Intrinsic, Local, Type};
 use std::cell::{Cell, RefCell};
 
@@ -61,6 +63,9 @@ pub(crate) fn roots<E: Eng>(d: &Dom<E>, out: &mut Roots<'_, '_, E>) {
     for m in [d.worker.made.get(), d.worker.made_shared.get()].into_iter().flatten() {
         out.extend(m.map(E::obj_raw));
     }
+    let mut live = Vec::new();
+    d.kids.workers(&mut live);
+    out.extend(live.into_iter().map(E::obj_raw));
     out.extend(d.worker.ports.borrow().values().map(|&p| E::obj_raw(p)));
 }
 
@@ -68,6 +73,48 @@ pub(crate) fn roots<E: Eng>(d: &Dom<E>, out: &mut Roots<'_, '_, E>) {
 pub(crate) fn forget<E: Eng>(d: &Dom<E>, o: E::Obj) {
     d.worker.objs.borrow_mut().remove(&o);
     d.worker.ports.borrow_mut().remove(&o);
+    // The messages that a worker page queued at its object.
+    d.sched_forget_port(o);
+}
+
+/// The global of a worker page: `postMessage(message, transfer)` sends to the `Worker` object, and `close()` ends the page. The rest of
+/// the worker global (no window names, `importScripts`, the worker prototype chain) is a later step of `design-workers.md`.
+pub(crate) fn install_scope<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
+    run::<E, _>(it, |s| {
+        let g = s.global();
+        let attrs = Attrs { writable: true, enumerable: true, configurable: true };
+        let post = d.add_fn_s(s, scope_post, "postMessage", 1, HostFn::Method)?;
+        s.define_str(g, "postMessage", post, attrs)?;
+        let close = d.add_fn_s(s, scope_close, "close", 0, HostFn::Method)?;
+        s.define_str(g, "close", close, attrs)?;
+        Ok(())
+    })
+}
+
+/// Clone `a[0]` with the transfer list `a[1]` (a list, or an object with `transfer`) into the outbox, for `to`.
+fn send<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, a: Args<'s>, to: Side, who: &str) -> Res<'s, ()> {
+    let Some(msg) = a.get(0) else {
+        return Err(s.type_error(&format!("Failed to execute 'postMessage' on '{who}': 1 argument required, but only 0 present.")));
+    };
+    let t = arg_s::<E>(s, a, 1);
+    let list = d.transfer_arg(s, t, None)?;
+    if d.kids.outbox_len() >= d.max_messages() {
+        return Err(d.lim_s(s, "messages"));
+    }
+    let mut cloned = crate::browser_navigation_state::clone_state_with(d, s, msg, &list)?;
+    d.export_ports(s, &mut cloned)?;
+    d.kids.send(Out { to, target_origin: "*".into(), origin: String::new(), cloned });
+    Ok(())
+}
+
+fn scope_post<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    send(d, s, a, Side::Parent, "DedicatedWorkerGlobalScope")?;
+    Ok(s.undefined())
+}
+
+fn scope_close<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    d.kids.closed.set(true);
+    Ok(s.undefined())
 }
 
 fn lazy_dedicated<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
@@ -155,6 +202,14 @@ impl<E: Eng> Dom<E> {
         Ok(o)
     }
 
+    /// The script of the worker page of `o` did not load: queue `error` at `o`, as for a worker that cannot run.
+    pub(crate) fn worker_error(&self, it: &mut E::Vm, o: E::Obj) -> R<E, ()> {
+        let _ = it;
+        self.worker.objs.borrow_mut().insert(o, true);
+        self.schedule(self.now_ms(), crate::browser_scheduler::Task::Worker(o))?;
+        Ok(())
+    }
+
     /// The task after `new Worker`: fire `error` unless the worker was terminated.
     pub(crate) fn worker_failed(&self, it: &mut E::Vm, o: E::Obj) -> R<E, ()> {
         match self.worker.objs.borrow_mut().get_mut(&o) {
@@ -196,11 +251,16 @@ fn check_url<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, who: &str, url: &str) ->
     Ok(href)
 }
 
-/// Make the object, queue its `error` and log the first warning of its kind.
-fn start<E: Eng>(d: &Dom<E>, it: &mut E::Vm, proto: E::Obj, href: &str, shared: bool) -> R<E, E::Raw> {
+/// Make the object. A dedicated worker in a page with a driver gets a worker page (`browser_child.rs`). Else queue its `error` and
+/// log the first warning of its kind.
+fn start<E: Eng>(d: &Dom<E>, it: &mut E::Vm, proto: E::Obj, href: &str, shared: bool, module: bool) -> R<E, E::Raw> {
     let port = if shared { Some(d.new_port(it)?) } else { None };
     let o = d.obj(it, proto)?;
     d.st.borrow_mut().add_target(it, o, crate::browser::Owner::Worker(o));
+    if !shared && d.kids.add_worker(o, href.to_string(), module).is_some() {
+        d.worker.objs.borrow_mut().insert(o, false);
+        return Ok(E::obj_raw(o));
+    }
     d.schedule(d.now_ms(), crate::browser_scheduler::Task::Worker(o))?;
     d.worker.objs.borrow_mut().insert(o, true);
     if let Some(p) = port {
@@ -215,16 +275,17 @@ fn start<E: Eng>(d: &Dom<E>, it: &mut E::Vm, proto: E::Obj, href: &str, shared: 
     Ok(E::obj_raw(o))
 }
 
-/// `WorkerOptions.type` is `classic` or `module`; `name` and `credentials` are ignored.
-fn check_type<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, who: &str, opts: Local<'s>) -> Res<'s, ()> {
+/// `WorkerOptions.type` is `classic` or `module` (true); `name` and `credentials` are ignored.
+fn check_type<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, who: &str, opts: Local<'s>) -> Res<'s, bool> {
     let t = s.get_str(opts, "type")?;
     if s.type_of(t) != Type::Undefined {
         let t = d.string_arg_s(s, t)?;
         if t != "classic" && t != "module" {
             return Err(s.type_error(&format!("Failed to construct '{who}': The provided value '{t}' is not a valid enum value of type WorkerType.")));
         }
+        return Ok(t == "module");
     }
-    Ok(())
+    Ok(false)
 }
 
 fn worker_ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
@@ -237,13 +298,13 @@ fn worker_ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<
     };
     let url = d.string_arg_s(s, a0)?;
     let a1 = arg_s::<E>(s, a, 1);
-    match s.type_of(a1) {
-        Type::Undefined | Type::Null => {}
+    let module = match s.type_of(a1) {
+        Type::Undefined | Type::Null => false,
         Type::Object | Type::Function => check_type(d, s, "Worker", a1)?,
         _ => return Err(s.type_error("Failed to construct 'Worker': parameter 2 is not of type 'WorkerOptions'.")),
-    }
+    };
     let href = check_url(d, s, "Worker", &url)?;
-    old_v::<E>(s, |it| start(d, it, proto, &href, false))
+    old_v::<E>(s, |it| start(d, it, proto, &href, false, module))
 }
 
 /// `SharedWorker(url, name or options)`: the second argument is an options object, or else a string (the name).
@@ -259,17 +320,23 @@ fn shared_worker_ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a
     let a1 = arg_s::<E>(s, a, 1);
     match s.type_of(a1) {
         Type::Undefined | Type::Null => {}
-        Type::Object | Type::Function => check_type(d, s, "SharedWorker", a1)?,
+        Type::Object | Type::Function => {
+            check_type(d, s, "SharedWorker", a1)?;
+        }
         _ => {
             d.string_arg_s(s, a1)?;
         }
     }
     let href = check_url(d, s, "SharedWorker", &url)?;
-    old_v::<E>(s, |it| start(d, it, proto, &href, true))
+    old_v::<E>(s, |it| start(d, it, proto, &href, true, false))
 }
 
 fn post_message<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
-    d.dedicated_of(s, this)?;
+    let o = d.dedicated_of(s, this)?;
+    if let Some(id) = d.kids.worker_id(o) {
+        send(d, s, a, Side::Child(id), "Worker")?;
+        return Ok(s.undefined());
+    }
     let Some(m) = a.get(0) else {
         return Err(s.type_error("Failed to execute 'postMessage' on 'Worker': 1 argument required, but only 0 present."));
     };
@@ -283,6 +350,9 @@ fn post_message<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: A
 fn terminate<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let o = d.dedicated_of(s, this)?;
     d.worker.objs.borrow_mut().insert(o, false);
+    if let Some(id) = d.kids.worker_id(o) {
+        d.kids.end(id);
+    }
     Ok(s.undefined())
 }
 

@@ -1033,7 +1033,7 @@ impl<E: Eng> Dom<E> {
     }
 
     /// The transfer argument of `MessagePort.postMessage`: a sequence, or a `{ transfer }` dictionary.
-    fn transfer_arg<'s>(&self, s: &mut Sc<'s, E>, v: Local<'s>, own: Option<E::Obj>) -> Res<'s, Vec<E::Obj>> {
+    pub(crate) fn transfer_arg<'s>(&self, s: &mut Sc<'s, E>, v: Local<'s>, own: Option<E::Obj>) -> Res<'s, Vec<E::Obj>> {
         const CTX: &str = "Failed to execute 'postMessage' on 'MessagePort'";
         match s.type_of(v) {
             Type::Undefined | Type::Null => Ok(Vec::new()),

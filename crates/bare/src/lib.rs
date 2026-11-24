@@ -340,6 +340,8 @@ mod browser_frames;
 mod browser_child;
 #[cfg(test)]
 mod browser_child_tests;
+#[cfg(test)]
+mod browser_worker_run_tests;
 mod browser_remote_window;
 mod browser_port_hub;
 
