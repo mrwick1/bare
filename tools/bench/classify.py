@@ -14,7 +14,7 @@ A sample counts once. The first matching rule from the leaf gives its owner (RUL
 import collections, functools, re, sys
 
 RULES = [  # (subsystem, regex on the symbol): the first match wins
-    ('JS engine', r'^<?bare_js::'),
+    ('JS engine', r'^<?bare_js2?::'),
     ('DOM + Web APIs (bindings)', r'^<?bare::browser_(?!style|computed|used|fonts|face|fontface|img|fetch|xhr|loader|cookie)|^<?bare::(page|agent|control|force|shims)'),
     ('Style (CSS parse, match, cascade)', r'^<?bare_css::|^<?bare::browser_(style|computed|used|cssom|css_ns)'),
     ('Layout + text', r'^<?bare_layout::|^<?bare_unicode::|^<?bare::browser_(fonts|face|fontface)|rustybuzz|ttf_parser|swash|harfrust|skrifa|read_fonts'),
@@ -25,8 +25,8 @@ RULES = [  # (subsystem, regex on the symbol): the first match wins
     ('Driver (bare-drive)', r'^<?bare_drive::|^<?bare_observe::'),
 ]
 RX = [(n, re.compile(p)) for n, p in RULES]
-COLLECT = re.compile(r'^<?bare_js::\w+::(Interp|Heap)::collect$')
-JS_PARSE = re.compile(r'bare_js::(parse|lex|ast|parse_cache|parse_ahead|bc_gen)')
+COLLECT = re.compile(r'^<?bare_js::\w+::(Interp|Heap)::collect$|^<?bare_js2::gc::collect\b')
+JS_PARSE = re.compile(r'bare_js::(parse|lex|ast|parse_cache|parse_ahead|bc_gen)|bare_js2::(parse|lex|ast|parse_ahead|compile)')
 JS_GC = re.compile(r'(collect|gc_|mark|sweep|trace_)')
 SUBSYSTEM_OF = {  # owner to row of the SUBSYSTEMS table
     'Network + TLS + HTTP': 'Network + TLS + HTTP', 'HTML parse': 'Parsing (HTML, JS parse and compile)',
