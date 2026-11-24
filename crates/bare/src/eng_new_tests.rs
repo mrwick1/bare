@@ -182,13 +182,13 @@ fn a_virtual_session_uses_its_clock_for_date_without_replay() {
             </script>
         "#));
         let mut cfg = SessionConfig::new(&server.url("/"));
-        cfg.js2 = true;
+        cfg.vex = true;
         cfg.virtual_clock = true;
         cfg.page.quiet = std::time::Duration::from_millis(100);
         let mut session = Session::new(cfg);
         let result = session.run();
         assert_eq!(result.stop, SessionStop::Page(Stop::Settled), "{result:?}");
-        let Some(AnyBrowser::New(b)) = session.browser() else { panic!("js2 session") };
+        let Some(AnyBrowser::New(b)) = session.browser() else { panic!("Vex session") };
         let v = js(b, "elapsed");
         assert_eq!(b.it.display_o(v), "25,true,true");
     });

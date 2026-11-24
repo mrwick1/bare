@@ -34,17 +34,17 @@ A limit or a budget that protects against a slow algorithm is a sign of a design
 
 ## Cost gate (owner, 2026-11-21)
 
-- A PR runs only the rows of the code it changes: the js2 micro rows (`interp_load`) for a js2 change, and the `cost_rows.txt` rows of the touched subsystem (`cost_matrix.sh -g`). The rule per row stays: +0.5% under both allocators, or within +0.5% at `codegen-units=1`.
+- A PR runs only the rows of the code it changes: the Vex micro rows (`interp_load`) for a Vex change, and the `cost_rows.txt` rows of the touched subsystem (`cost_matrix.sh -g`). The rule per row stays: +0.5% under both allocators, or within +0.5% at `codegen-units=1`.
 - The full matrix runs on main after about every 6 merged PRs. A row that grew there is bisected to its PR, and a fix PR follows at once.
 - Rapid mode (owner, 2026-11-21): a row over the rule does not block the merge. The PR records the row in its progress file and in `docs/internal/progress/cost-debt.md`. A fix PR follows the same day.
 
 ## Merge flow (owner, 2026-11-21, rapid mode)
 
-- Every PR merges through `tools/ship.sh`, also for unsafe, GC and trait changes. The script is the gate: `cargo check` of the changed crates and `t`. Miri does not run: a change to an unsafe module of js2 runs `cargo +nightly miri test -p bare-js2 --lib -- <module>::` by hand. The owner's session reviews after merge and opens a fix PR when needed.
+- Every PR merges through `tools/ship.sh`, also for unsafe, GC and trait changes. The script is the gate: `cargo check` of the changed crates and `t`. Miri does not run: a change to an unsafe module of Vex runs `cargo +nightly miri test -p bare-vex --lib -- <module>::` by hand. The owner's session reviews after merge and opens a fix PR when needed.
 - `tools/release.sh` tags the next version. The release workflow builds, runs the offstage gate and publishes. `tools/ship.sh --release` merges and releases in one command.
 - Stacked PRs are allowed. Retarget a stacked PR to main when its base merges.
 - Each PR merges origin/main right before its final push and solves its own conflicts.
 - A PR does not change `tools/fixtures/js/test262-js2-baseline.txt`. It gives its test262 counts in its progress file. The owner's session writes the baseline on main together with the full cost matrix.
 - A PR puts new tests in a new test file per topic (`<module>_<topic>_tests.rs`). It does not append to a shared test file.
 - A PR does not change `docs/internal/progress/cost-debt.md`. It gives its over-rule rows in its progress file. The owner's session copies them into the debt list.
-- On a conflict in a generated file (`crates/js2/src/prelude_facts.rs`), take main's version and generate the file again. Do not merge it by hand.
+- On a conflict in a generated file (`crates/vex/src/prelude_facts.rs`), take main's version and generate the file again. Do not merge it by hand.

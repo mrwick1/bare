@@ -181,7 +181,7 @@ fn a_chunked_parse_gives_the_order_and_the_dom_of_a_one_step_parse() {
     });
     let (head_log, head_dom) = run_big(move || {
         let mut cfg = SessionConfig::new(&format!("{origin}/big"));
-        cfg.js2 = false; // the test dumps the DOM of the old browser
+        cfg.vex = false; // the test dumps the DOM of the old browser
         let mut s = Session::new(cfg);
         let r = s.run();
         assert!(matches!(r.stop, SessionStop::Page(bare::Stop::Settled)), "{:?}", r.stop);

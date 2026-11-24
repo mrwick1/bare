@@ -1,4 +1,4 @@
-"""js2 frames in the subsystem profile: python3 -I tools/bench/classify_test.py."""
+"""Vex frames in the subsystem profile: python3 -I tools/bench/classify_test.py."""
 import importlib.util
 from pathlib import Path
 import tempfile
@@ -15,10 +15,10 @@ def load(name):
 
 
 SAMPLES = ''.join(f'bare-drive 1 1:\n\t1 {leaf}+0x10 (bare)\n\t2 bare::browser_fetch::run_streams+0x10 (bare)\n\n' for leaf in (
-    'bare_js2::interp::run', 'bare_js2::gc::collect', 'bare_js2::parse::Parser::expr'))
+    'bare_vex::interp::run', 'bare_vex::gc::collect', 'bare_vex::parse::Parser::expr'))
 
 
-class Js2Frames(unittest.TestCase):
+class VexFrames(unittest.TestCase):
     def setUp(self):
         f = tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False)
         f.write(SAMPLES)
@@ -26,13 +26,13 @@ class Js2Frames(unittest.TestCase):
         self.path = f.name
         self.addCleanup(Path(f.name).unlink)
 
-    def test_classify_puts_js2_in_js_rows_not_network(self):
+    def test_classify_puts_vex_in_js_rows_not_network(self):
         sub = load('classify').split(self.path)[0]['SUBSYSTEMS']
         self.assertNotIn('Network + TLS + HTTP', sub)
         for row in ('JS engine (run, without parse and collector)', 'Parsing (HTML, JS parse and compile)', 'Collector (any frame on the stack)'):
             self.assertAlmostEqual(sub[row], 100 / 3, places=3)
 
-    def test_jscat_sees_the_js2_collector_and_parser(self):
+    def test_jscat_sees_the_vex_collector_and_parser(self):
         out = load('jscat').split(self.path)[0]
         self.assertAlmostEqual(out['Collector (any frame on the stack)'], 100 / 3, places=3)
         self.assertAlmostEqual(out['Parse and compile'], 100 / 3, places=3)

@@ -1,4 +1,4 @@
-//! test262 modules and `import()` on the old engine or on the new one (`bare-js2`). The module methods are the ones of `bare-js-api`
+//! test262 modules and `import()` on the old engine or on the new one (`bare-vex`). The module methods are the ones of `bare-js-api`
 //! (`Engine`), so the same code loads a graph on both. Only the start of a realm, the jobs and the state of a promise are per engine.
 //!
 //!   test262_modules ENGINE ROOT SKIPFILE LISTFILE [STEPS]
@@ -8,8 +8,8 @@
 use bare_js::eval::{Error as OldError, EvalLimits, Exec, Interp};
 use bare_js::heap::Heap;
 use bare_js::value::Value as OldValue;
-use bare_js2::interp::{Exit, Vm};
-use bare_js2::value::Value as NewValue;
+use bare_vex::interp::{Exit, Vm};
+use bare_vex::value::Value as NewValue;
 use bare_js_api::{Abort, Engine, Error};
 use bare_js_diff::HOST;
 use std::collections::HashMap;
@@ -187,10 +187,10 @@ fn new_describe(vm: &mut Vm, v: NewValue) -> Fail {
 }
 
 impl Rt for New {
-    type E = bare_js2::interp_rt::Realm;
+    type E = bare_vex::interp_rt::Realm;
 
     fn start(code: &str, steps: u64) -> Result<Self, Fail> {
-        let mut vm = bare_js2::script::load_with(&format!("{HOST}\nvar __engine = 'new';"), code).map_err(|e| match e.strip_prefix("SyntaxError: ") {
+        let mut vm = bare_vex::script::load_with(&format!("{HOST}\nvar __engine = 'new';"), code).map_err(|e| match e.strip_prefix("SyntaxError: ") {
             Some(m) => Fail::Throw("SyntaxError".into(), m.into()),
             None => Fail::Other(e),
         })?;
@@ -214,7 +214,7 @@ impl Rt for New {
     }
 
     fn status(&mut self, p: &NewValue) -> Status {
-        match bare_js2::interp_rt::Realm::promise_status(&self.0.realm, *p) {
+        match bare_vex::interp_rt::Realm::promise_status(&self.0.realm, *p) {
             Some((2, v)) => Status::Rejected(new_describe(&mut self.0, v)),
             Some((0, _)) => Status::Pending,
             _ => Status::Done,

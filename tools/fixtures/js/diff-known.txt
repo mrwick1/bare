@@ -1,6 +1,6 @@
 # Known differences of the differential runner (crates/js-diff/src/diff.rs): NAME<TAB>reason. A program here does not fail the run.
 # A program that is listed and no longer differs fails the run: remove its line. Later tasks take these (docs/progress.md).
-# script_tests:N is line N of crates/js2/src/script_tests.rs.
+# script_tests:N is line N of crates/vex/src/script_tests.rs.
 script_tests:144	error message text differs ("Cannot read" against "cannot read")
 script_tests:146	error message text differs (js2 has no name of the callee)
 script_tests:149	old engine stops at its call-depth limit; js2 throws RangeError

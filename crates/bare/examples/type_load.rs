@@ -125,7 +125,7 @@ fn run(dir: &str, sel: &str, n: usize, virt: bool) {
     let mut cfg = SessionConfig::new(&server.url("/"));
     cfg.virtual_clock = virt;
     cfg.eval.max_steps = u64::MAX / 2;
-    if !cfg.js2 {
+    if !cfg.vex {
         cfg.eval.exec = exec::mode();
     }
     let t = Instant::now();

@@ -1,7 +1,7 @@
 //! The tests that every engine must pass (`docs/design-js2-host-api.md`, section 5). Feature `suite`.
 //!
 //! An engine makes a [`Harness`]: a realm, a way to run script text and a way to collect. Each function below is one test. It uses
-//! only the interface, so the same function runs on `bare-js` and on `bare-js2` (`tests/engines.rs`). A test that needs an engine
+//! only the interface, so the same function runs on `bare-js` and on `bare-vex` (`tests/engines.rs`). A test that needs an engine
 //! detail stays in the crate of that engine.
 //!
 //! Scripts are written so that the value of the last statement is an expression.

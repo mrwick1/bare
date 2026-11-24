@@ -1,4 +1,4 @@
-//! The regex cost rows (design-js2-regexp, step R0): the engine alone, on the old engine (`bare-js`) and on the new one (`bare-js2`),
+//! The regex cost rows (design-js2-regexp, step R0): the engine alone, on the old engine (`bare-js`) and on the new one (`bare-vex`),
 //! with the same patterns and inputs. A pattern that one engine refuses is left out of both rows.
 //!   regexp_row ENGINE WORK REPS      ENGINE: old | new      WORK: staging | porter | compile | size | bad
 //! `staging`: 47 patterns of the staging pages on 20 short inputs. `porter`: 19 rules of the Porter stemmer on 2,000 words. Each is one
@@ -31,13 +31,13 @@ fn build(eng: &str, pat: &str, flags: &str) -> Option<Eng> {
     if eng == "old" {
         bare_js::regexp::Regex::from_str(pat, flags).ok().map(Eng::Old)
     } else {
-        bare_js2::regexp::compile(&u16s(pat), flags).ok().map(Eng::New)
+        bare_vex::regexp::compile(&u16s(pat), flags).ok().map(Eng::New)
     }
 }
 
 struct Run {
     old: bare_js::regexp::Scratch,
-    new: bare_js2::regexp::Scratch,
+    new: bare_vex::regexp::Scratch,
     out: Vec<u32>,
 }
 
@@ -51,12 +51,12 @@ fn run(e: &Eng, input: &[u16], s: &mut Run) -> u64 {
         },
         Eng::New(img) => {
             // `exec` writes all the spans of a match, so a buffer that is long enough needs no reset.
-            let n = 2 * (bare_js2::regexp::image_groups(img) + 1);
+            let n = 2 * (bare_vex::regexp::image_groups(img) + 1);
             if s.out.len() < n {
                 s.out.resize(n, u32::MAX);
             }
             let mut fuel = u64::MAX;
-            match bare_js2::regexp::exec(img, input, 0, &mut s.new, &mut fuel, &mut s.out) {
+            match bare_vex::regexp::exec(img, input, 0, &mut s.new, &mut fuel, &mut s.out) {
                 Ok(true) => s.out[..n].chunks(2).fold(1, |h, p| mix(h, (p[0] != u32::MAX).then(|| (p[0] as usize, p[1] as usize)))),
                 Ok(false) => 0,
                 Err(_) => 7,
@@ -74,7 +74,7 @@ fn main() {
         // The patterns that both engines accept.
         set.iter().filter(|(f, p)| build("old", p, f).is_some() && build("new", p, f).is_some()).filter_map(|(f, p)| build(eng, p, f)).collect()
     };
-    let mut s = Run { old: bare_js::regexp::Scratch::new(), new: bare_js2::regexp::Scratch::new(), out: Vec::new() };
+    let mut s = Run { old: bare_js::regexp::Scratch::new(), new: bare_vex::regexp::Scratch::new(), out: Vec::new() };
     let (mut sum, mut runs) = (0u64, 0u64);
     match work {
         "compile" => {
@@ -99,7 +99,7 @@ fn main() {
         }
         "size" => {
             // The bytes of the images of the new engine: a blob cell is 8 bytes of header and the words, rounded up to 16.
-            let imgs: Vec<usize> = staging.iter().chain(porter.iter()).filter_map(|(f, p)| bare_js2::regexp::compile(&u16s(p), f).ok()).map(|w| (8 + 8 * w.len()).next_multiple_of(16)).collect();
+            let imgs: Vec<usize> = staging.iter().chain(porter.iter()).filter_map(|(f, p)| bare_vex::regexp::compile(&u16s(p), f).ok()).map(|w| (8 + 8 * w.len()).next_multiple_of(16)).collect();
             println!("new size patterns={} bytes={} per_pattern={}", imgs.len(), imgs.iter().sum::<usize>(), imgs.iter().sum::<usize>() / imgs.len());
             return;
         }

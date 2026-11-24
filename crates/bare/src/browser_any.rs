@@ -1,4 +1,4 @@
-//! A browser on either engine. The pages of a session run on js2 (`Browser<New>`) unless `BARE_JS_EXEC` is `tree`, `auto` or `byte`: these
+//! A browser on either engine. The pages of a session run on Vex (`Browser<New>`) unless `BARE_JS_EXEC` is `tree`, `auto` or `byte`: these
 //! pick the old engine (`Browser<Old>`). The layers above the DOM host (`Session`, `Page`, the driver) hold this enum and call the methods that
 //! they need. A method forwards to the browser of the variant. Its result has no type of the engine in it: a fault is an `AnyFault`.
 
@@ -337,7 +337,7 @@ macro_rules! any {
     };
 }
 
-/// The old-engine view of a browser, for the tests and the examples, which run on the old engine. It panics on js2. The code of the
+/// The old-engine view of a browser, for the tests and the examples, which run on the old engine. It panics on Vex. The code of the
 /// product calls the methods of `AnyBrowser`.
 #[doc(hidden)]
 impl std::ops::Deref for AnyBrowser {
@@ -345,7 +345,7 @@ impl std::ops::Deref for AnyBrowser {
     fn deref(&self) -> &Browser<Old> {
         match self {
             AnyBrowser::Old(b) => b,
-            AnyBrowser::New(_) => panic!("this browser runs on js2"),
+            AnyBrowser::New(_) => panic!("this browser runs on Vex"),
         }
     }
 }
@@ -355,7 +355,7 @@ impl std::ops::DerefMut for AnyBrowser {
     fn deref_mut(&mut self) -> &mut Browser<Old> {
         match self {
             AnyBrowser::Old(b) => b,
-            AnyBrowser::New(_) => panic!("this browser runs on js2"),
+            AnyBrowser::New(_) => panic!("this browser runs on Vex"),
         }
     }
 }

@@ -65,7 +65,7 @@ fn public_page_exposes_heap_stop_label() {
         use crate::resources::test_server::{serve, Reply};
         let srv = serve(|_| Reply::new(200, Some("text/html"), "<p>ok</p>"));
         let mut cfg = SessionConfig::new(&srv.url("/"));
-        cfg.js2 = false; // this test reads the old engine
+        cfg.vex = false; // this test reads the old engine
         let mut session = Session::new(cfg);
         session.run();
         let Stop::Fatal(fatal) = fatal_of::<Old>(bare_js::eval::Error::Heap(HeapError::Stale).into()) else { panic!("expected fatal") };

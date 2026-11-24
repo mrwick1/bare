@@ -1,4 +1,4 @@
-// The synthetic React-like trace of `crates/js2/examples/shape_census.rs` (plan step S1.8), as a script for the old engine.
+// The synthetic React-like trace of `crates/vex/examples/shape_census.rs` (plan step S1.8), as a script for the old engine.
 // Prefix it with `var SCALE = N;` (N = 1 is the census; N = 0 makes the empty baseline). The two programs make the same objects with the
 // same keys in the same order: xorshift32 from one seed, called in the same order.
 var S = SCALE;

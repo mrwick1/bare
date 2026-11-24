@@ -129,17 +129,17 @@ pub struct SessionConfig {
     pub live: bool,
     /// Where downloads go (see `downloads.rs`). `None`: a response that the page cannot show is a failed load.
     pub downloads: Option<downloads::Downloads>,
-    /// Run the pages on js2 (`bare-js2`, the default) and not on the old engine (`BARE_JS_EXEC=tree`, `auto` or `byte`).
-    pub js2: bool,
+    /// Run the pages on Vex (`bare-vex`, the default) and not on the old engine (`BARE_JS_EXEC=tree`, `auto` or `byte`).
+    pub vex: bool,
 }
 
-/// The engine mode of `BARE_JS_EXEC`: `tree`, `auto` or `byte` for `bare-js`; other values give the default mode (the old engine runs only for these three names, see `js2_from`).
+/// The engine mode of `BARE_JS_EXEC`: `tree`, `auto` or `byte` for `bare-js`; other values give the default mode (the old engine runs only for these three names, see `vex_from`).
 fn exec_from(v: &str) -> Exec {
     Exec::from_name(v).unwrap_or_default()
 }
 
-/// The engine of `BARE_JS_EXEC`: the old engine for `tree`, `auto` and `byte`, js2 for every other value (also unset and `new`).
-pub(crate) fn js2_from(v: &str) -> bool {
+/// The engine of `BARE_JS_EXEC`: the old engine for `tree`, `auto` and `byte`, Vex for every other value (also unset, `vex` and `new`, the old name).
+pub(crate) fn vex_from(v: &str) -> bool {
     !matches!(v, "tree" | "auto" | "byte")
 }
 
@@ -162,7 +162,7 @@ impl SessionConfig {
             storage: None,
             live: false,
             downloads: None,
-            js2: js2_from(&std::env::var("BARE_JS_EXEC").unwrap_or_default()),
+            vex: vex_from(&std::env::var("BARE_JS_EXEC").unwrap_or_default()),
         }
     }
 }
@@ -914,7 +914,7 @@ impl Session {
                     let scan = Url::parse(url.split('#').next().unwrap_or("")).map(|page| {
                         let mut c = self.fork();
                         c.set_site(Some(bare_net::cookie::site_of(&page)));
-                        Scan::new(c, page, self.cfg.page.resources.clone(), deadline, self.cfg.js2)
+                        Scan::new(c, page, self.cfg.page.resources.clone(), deadline, self.cfg.vex)
                     });
                     let Ok(scan) = scan else { return SessionStop::LoadFailed("the URL is not an http(s) URL".into()) };
                     let ended = feed.is_none();
@@ -1008,7 +1008,7 @@ impl Session {
                         }
                     };
                     let (bl, ev, hp) = (self.cfg.browser, self.cfg.eval, self.cfg.heap);
-                    let started = if self.cfg.js2 {
+                    let started = if self.cfg.vex {
                         match Browser::<New>::make(dom, bl, ev, hp) {
                             Ok(b) => self.load(b.with_session_wall_clock(self.cfg.virtual_clock), AnyBrowser::New, url, scroll, &mut base, &page, &lim, &mut scan),
                             Err(_) => Err(SessionStop::LoadFailed("the realm could not be made".into())),

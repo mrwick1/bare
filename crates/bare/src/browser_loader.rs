@@ -1118,8 +1118,8 @@ struct Net {
 const WINDOW: usize = bare_net::parallel::MAX_WORKERS;
 
 impl Net {
-    fn new(client: Client, js2: bool) -> Net {
-        Net { client, started: HashMap::new(), direct: HashSet::default(), done: Arc::default(), waits: Vec::new(), born: HashMap::new(), hints: HashSet::new(), ahead: (!js2).then(Ahead::new) }
+    fn new(client: Client, vex: bool) -> Net {
+        Net { client, started: HashMap::new(), direct: HashSet::default(), done: Arc::default(), waits: Vec::new(), born: HashMap::new(), hints: HashSet::new(), ahead: (!vex).then(Ahead::new) }
     }
 
     fn tag(expect: Expect, url: &Url) -> u64 {

@@ -1,4 +1,4 @@
-//! Run test262 tests on the old engine or on the new one (`bare-js2`). The same tests, harness, includes, metadata and checks as
+//! Run test262 tests on the old engine or on the new one (`bare-vex`). The same tests, harness, includes, metadata and checks as
 //! `crates/js/examples/test262_run.rs`; `tools/js/test262_js2.sh` runs it for both engines and compares them.
 //!
 //!   test262_run ENGINE ROOT SKIPFILE LISTFILE [STEPS]

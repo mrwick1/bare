@@ -1,5 +1,5 @@
 # test262 counts of tools/js/test262_js2.sh for each directory: directory, old pass, old fail, old skip, new pass, new fail, new skip.
-# old = bare-js, new = bare-js2. Commit: e4fbf57745c6aae3d1f12f181ecef78b1665d812. Generated from tools/js/test262_js2.sh counts.txt. Do not edit by hand.
+# old = bare-js, new = bare-vex. Commit: e4fbf57745c6aae3d1f12f181ecef78b1665d812. Generated from tools/js/test262_js2.sh counts.txt. Do not edit by hand.
 annexB/built-ins/RegExp 8 2 0 8 2 0
 annexB/built-ins/RegExp/legacy-accessors/index 0 0 4 0 0 4
 annexB/built-ins/RegExp/legacy-accessors/input 0 0 4 0 0 4

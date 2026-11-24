@@ -1,5 +1,5 @@
 #!/bin/sh
-# Gate S2 (docs/plan-engine-rewrite.md): test262 for the core census features and the S2.7 built-ins, on the new engine (bare-js2) and on
+# Gate S2 (docs/plan-engine-rewrite.md): test262 for the core census features and the S2.7 built-ins, on the new engine (bare-vex) and on
 # the old one (bare-js), the same tests and the same rules. It reports pass and fail for each directory on both engines, and lists each
 # test that passes on the old engine and fails on the new one, grouped by the cause of the failure.
 #   tools/js/test262_js2.sh [-j JOBS] [-g REGEX] [-o OUTDIR]
@@ -87,7 +87,7 @@ count "$outdir/old.txt" > "$outdir/old-counts.txt"
 count "$outdir/new.txt" > "$outdir/new-counts.txt"
 LC_ALL=C join "$outdir/old-counts.txt" "$outdir/new-counts.txt" > "$outdir/counts.txt"
 # Columns: directory, old pass, old fail, old skip, new pass, new fail, new skip.
-echo "per top directory (old = bare-js, new = bare-js2):"
+echo "per top directory (old = bare-js, new = bare-vex):"
 awk '{ split($1, a, "/"); k = (a[1] == "language") ? a[1] "/" a[2] : a[1] "/" a[2]; op[k] += $2; of[k] += $3; np[k] += $5; nf[k] += $6; sk[k] += $4
        P += $2; F += $3; NP += $5; NFL += $6; S += $4 }
   END { printf "  %-34s %6s %6s   %6s %6s\n", "directory", "old ok", "old no", "new ok", "new no"
@@ -133,7 +133,7 @@ if [ -n "$update" ]; then
   awk -v o="$outdir/baseline" -v pin="$pin" '{ split($1, a, "/"); f = o "/" a[1] "/" a[2] ".txt"
     if (!(f in seen)) { seen[f] = 1; system("mkdir -p " o "/" a[1])
       print "# test262 counts of tools/js/test262_js2.sh for each directory: directory, old pass, old fail, old skip, new pass, new fail, new skip." > f
-      print "# old = bare-js, new = bare-js2. Commit: " pin ". Written by tools/js/test262_js2.sh -u. Do not edit by hand." > f }
+      print "# old = bare-js, new = bare-vex. Commit: " pin ". Written by tools/js/test262_js2.sh -u. Do not edit by hand." > f }
     print > f }' "$outdir/counts.txt"
   mkdir -p "$base"
   (cd "$outdir/baseline" && find . -name '*.txt' | sort) > "$outdir/baseline.list"

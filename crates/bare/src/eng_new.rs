@@ -1,20 +1,20 @@
-//! The new engine (`bare-js2`) as an engine for the host (S0.4 PR 6c-2). Every object, string, symbol and key of the host is a
-//! `Value` of js2 in a wrapper that has `Hash`. The operations go through `Engine` (with a handle that lasts for one operation) and
-//! through the raw helpers of `api_raw.rs`. What js2 cannot do yet answers `Fault::Unsupported` with the name `js2: ...`: these
+//! The new engine (`bare-vex`) as an engine for the host (S0.4 PR 6c-2). Every object, string, symbol and key of the host is a
+//! `Value` of Vex in a wrapper that has `Hash`. The operations go through `Engine` (with a handle that lasts for one operation) and
+//! through the raw helpers of `api_raw.rs`. What Vex cannot do yet answers `Fault::Unsupported` with the name `Vex: ...`: these
 //! are the lines of the phase 2 queue (`docs/progress/2026-11-21-s04-pr6c2-js2-browser.md`).
 
 use crate::eng::{Collected, Desc, Eng, Fault, Got, HeapStats, KeyKind, Ops, PState, Prop, Val, WallClock};
 use bare_js::eval::LimitKind;
-use bare_js2::api::Clock;
-use bare_js2::interp_rt::Realm;
-use bare_js2::value::{Kind, Value};
+use bare_vex::api::Clock;
+use bare_vex::interp_rt::Realm;
+use bare_vex::value::{Kind, Value};
 use bare_js_api::{Abort, Args, Attrs, Engine, Error, Intrinsic, Iter, Local, Persistent, Traced};
 use std::borrow::Cow;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct New;
 
-/// A `Value` of js2 that is an object, a string, a symbol or a key. It hashes by its bits: js2 never moves a cell.
+/// A `Value` of Vex that is an object, a string, a symbol or a key. It hashes by its bits: Vex never moves a cell.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct NV(pub Value);
 
@@ -29,7 +29,7 @@ impl std::hash::Hash for NV {
     }
 }
 
-/// The neutral error of js2, for the tests that name it.
+/// The neutral error of Vex, for the tests that name it.
 pub type NewFault = Fault<New>;
 
 /// The index that a string key names, if it is a canonical array index.
@@ -57,7 +57,7 @@ impl Eng for New {
     type Key = NV;
 
     fn realm(eval: bare_js::eval::EvalLimits, _heap: bare_js::heap::HeapLimits) -> Result<Realm, Fault<New>> {
-        bare_js2::script::load("").map(|mut vm| {
+        bare_vex::script::load("").map(|mut vm| {
             vm.realm.init_host_intrinsics();
             // A task stops after `max_steps` back edges, so a runaway script ends only its own task.
             vm.realm.set_budget(eval.max_steps);
@@ -514,7 +514,7 @@ impl Ops<New> for Realm {
         Ok(k.0)
     }
     fn h_get_own(&mut self, o: NV, key: NV) -> Result<Option<Prop<New>>, Fault<New>> {
-        use bare_js2::api::RawOwn;
+        use bare_vex::api::RawOwn;
         run(self, |r| {
             Ok(r.raw_own(o.0, key.0)?.map(|p| match p {
                 RawOwn::Data { value, writable, enumerable, configurable } => Prop::Data { value, writable, enumerable, configurable },
@@ -596,7 +596,7 @@ impl Ops<New> for Realm {
         fault(self, e)
     }
     fn bytes_of(&self, _v: Value) -> Option<&[u8]> {
-        // js2 has no ArrayBuffer, TypedArray or DataView cells yet.
+        // Vex has no ArrayBuffer, TypedArray or DataView cells yet.
         None
     }
     fn set_wall_clock(&mut self, c: WallClock) -> Result<(), Fault<New>> {
@@ -652,7 +652,7 @@ impl Ops<New> for Realm {
         Ok(Collected { objects: count.objects, strings: count.strings, symbols: count.symbols })
     }
     fn set_sources(&mut self, dom: std::rc::Rc<crate::browser::Dom<New>>) {
-        // js2 uses the same host for source reads, calls and owner tracing.
+        // Vex uses the same host for source reads, calls and owner tracing.
         Engine::set_host(self, dom);
     }
     fn module_parse_o(&mut self, source: &str, url: &str) -> Result<u32, Fault<New>> {

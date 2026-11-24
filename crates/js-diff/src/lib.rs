@@ -1,12 +1,12 @@
-//! Run one script on the old engine (`bare-js`) or on the new one (`bare-js2`) and give the same kind of result. The test262 runner
+//! Run one script on the old engine (`bare-js`) or on the new one (`bare-vex`) and give the same kind of result. The test262 runner
 //! (`examples/test262_run.rs`) and the differential runner (`examples/diff_run.rs`, `diff.rs`) are built on [`run`].
 pub mod diff;
 
 use bare_js::eval::{Error, EvalLimits, Exec, Interp};
 use bare_js::heap::Heap;
 use bare_js::value::Value as OldValue;
-use bare_js2::interp::Exit;
-use bare_js2::value::Value as NewValue;
+use bare_vex::interp::Exit;
+use bare_vex::value::Value as NewValue;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 /// The host script (`host.js`).
@@ -88,14 +88,14 @@ fn run_old(code: &str, steps: u64) -> Out {
 
 fn run_new(code: &str, steps: u64) -> Out {
     let host = format!("{HOST}\nvar __engine = 'new';");
-    let mut vm = match bare_js2::script::load_with(&host, code) {
+    let mut vm = match bare_vex::script::load_with(&host, code) {
         Ok(vm) => vm,
         Err(e) if e.starts_with("not supported yet") => return Out::Unsupported(e),
         Err(e) if e.starts_with("SyntaxError: ") => return Out::Threw { name: "SyntaxError".into(), message: e["SyntaxError: ".len()..].into() },
         Err(e) => return Out::Internal(e),
     };
     vm.fuel = steps;
-    let end = |vm: &mut bare_js2::interp::Vm, name: &str, args: &[NewValue]| -> Result<String, String> {
+    let end = |vm: &mut bare_vex::interp::Vm, name: &str, args: &[NewValue]| -> Result<String, String> {
         let f = vm.global(name);
         let v = vm.call(f, NewValue::UNDEFINED, args).map_err(|e| format!("{name} {}", if matches!(e, Exit::Fuel) { "ran out of budget" } else { "threw" }))?;
         Ok(vm.display(v, false))

@@ -46,7 +46,7 @@ fn run(engine: &str, src: &str) {
             it.run_script(src).unwrap();
         }
         "new" => {
-            let mut vm = bare_js2::script::load("").unwrap();
+            let mut vm = bare_vex::script::load("").unwrap();
             install(&mut vm.realm);
             vm.realm.run_text(src).unwrap();
         }

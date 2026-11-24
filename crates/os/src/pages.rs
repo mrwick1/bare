@@ -1,4 +1,4 @@
-//! Memory pages straight from the OS, for the heap of the JavaScript engine (`bare-js2`).
+//! Memory pages straight from the OS, for the heap of the JavaScript engine (`bare-vex`).
 //!
 //! [`map`] gives `len` bytes of zeroed, read-write memory at an address aligned to [`GRANULE`]. [`unmap`] gives the whole region back
 //! to the OS at once. The malloc of the C library keeps freed memory for later, so a heap that must return pages after churn maps its

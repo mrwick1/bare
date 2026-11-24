@@ -1,4 +1,4 @@
-//! The cost rows of `Map`, `Set`, `WeakMap` and `WeakSet` on the old engine (`bare-js`) and on the new one (`bare-js2`): the same program on
+//! The cost rows of `Map`, `Set`, `WeakMap` and `WeakSet` on the old engine (`bare-js`) and on the new one (`bare-vex`): the same program on
 //! each, with the result checked between the two. A row that one engine cannot run is reported, not left out.
 //!   collection_load ENGINE WORK N      ENGINE: old | new      WORK: map | mapstr | set | setdel | weak | iter | build
 //! `map`: N `set` calls of integer keys, then N `get` calls. `mapstr`: the same with string keys (`'k' + i`). `set`: N `add` calls, N

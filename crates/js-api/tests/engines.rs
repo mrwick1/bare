@@ -5,9 +5,9 @@ use bare_js::eval::{Error, EvalLimits, Interp};
 use bare_js::heap::Heap;
 use bare_js_api::suite::Harness;
 use bare_js_api::Error as ApiError;
-use bare_js2::heap::Trigger;
-use bare_js2::interp::Vm;
-use bare_js2::script;
+use bare_vex::heap::Trigger;
+use bare_vex::interp::Vm;
+use bare_vex::script;
 
 struct Old(Interp<'static>, bool);
 
@@ -48,7 +48,7 @@ impl Harness for Old {
 struct New(Vm);
 
 impl Harness for New {
-    type E = bare_js2::interp_rt::Realm;
+    type E = bare_vex::interp_rt::Realm;
 
     fn new(stress: bool) -> Self {
         let mut vm = script::load("").unwrap();

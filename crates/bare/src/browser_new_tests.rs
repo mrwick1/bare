@@ -1,4 +1,4 @@
-//! The DOM bridge on js2 (`Browser<New>`, S0.4 PR 6c-2). A failing case here is a line of the phase 2 queue.
+//! The DOM bridge on Vex (`Browser<New>`, S0.4 PR 6c-2). A failing case here is a line of the phase 2 queue.
 
 use crate::browser::*;
 use crate::eng::Ops;
