@@ -51,6 +51,10 @@ mod control_tests;
 #[cfg(test)]
 mod page_tests;
 #[cfg(test)]
+mod page_pseudo_style_tests;
+#[cfg(test)]
+mod browser_rects_pseudo_tests;
+#[cfg(test)]
 mod page_live_events_tests;
 #[cfg(test)]
 mod page_live_iframe_tests;
