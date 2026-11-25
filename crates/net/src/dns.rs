@@ -25,7 +25,8 @@ const TYPE_A: u16 = 1; // an IPv4 address
 const TYPE_CNAME: u16 = 5; // an alias: "this name is really that name"
 const TYPE_AAAA: u16 = 28; // an IPv6 address
 const CLASS_IN: u16 = 1; // "Internet". DNS was designed for other networks too.
-const TIMEOUT: Duration = Duration::from_secs(2);
+// glibc waits 5 s for each try (`RES_TIMEOUT`). A local resolver can take more than 2 s on a cold name.
+const TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_ALIASES: usize = 8; // stop alias chains that never end
 
 /// The answer to one question.
@@ -340,12 +341,16 @@ fn hosts_lookup(text: &str, name: &str) -> Vec<IpAddr> {
 }
 
 #[cfg(test)]
+#[path = "dns_slow_tests.rs"]
+mod slow_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::net::TcpListener;
 
     /// Build an answer to `question` with the given records, like a server would.
-    fn reply(question: &[u8], flags: u8, records: &[u8], count: u16) -> Vec<u8> {
+    pub(super) fn reply(question: &[u8], flags: u8, records: &[u8], count: u16) -> Vec<u8> {
         let mut r = question.to_vec();
         r[2] |= 0x80 | flags; // mark it as an answer, plus any extra flags
         r[6..8].copy_from_slice(&count.to_be_bytes()); // the answer count
@@ -354,7 +359,7 @@ mod tests {
     }
 
     /// One record. A name of `0xC0, 12` means "the name at position 12": the question's name.
-    fn record(name: &[u8], rtype: u16, ttl: u32, data: &[u8]) -> Vec<u8> {
+    pub(super) fn record(name: &[u8], rtype: u16, ttl: u32, data: &[u8]) -> Vec<u8> {
         let mut r = name.to_vec();
         r.extend(rtype.to_be_bytes());
         r.extend(CLASS_IN.to_be_bytes());
