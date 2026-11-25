@@ -9,6 +9,7 @@
 pub const NOT_READY: &str = "the new JavaScript engine (bare-vex) cannot run scripts yet; use BARE_JS_EXEC=tree, auto or byte";
 
 
+mod error_names;
 pub mod value;
 #[allow(unsafe_code)]
 pub mod cell;
@@ -107,3 +108,6 @@ mod compile_delete_chain_tests;
 #[cfg(test)]
 #[path = "builtins_function_ctor_tests.rs"]
 mod builtins_function_ctor_tests;
+#[cfg(test)]
+#[path = "error_names_tests.rs"]
+mod error_names_tests;

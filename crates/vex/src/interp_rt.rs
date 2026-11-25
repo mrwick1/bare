@@ -1217,7 +1217,7 @@ impl Realm {
 
     fn undefined_read<T>(&mut self, recv: Value, name: &str) -> R<T> {
         let what = if recv.is_null() { "null" } else { "undefined" };
-        self.type_error(&format!("cannot read properties of {what} (reading '{name}')"))
+        self.type_error(&format!("Cannot read properties of {what} (reading '{name}')"))
     }
 
     /// `recv[key]`; an accessor with a getter gives [`Got::Get`].
@@ -1331,7 +1331,12 @@ impl Realm {
     pub fn set_prop_g(&mut self, recv: Value, key: Key, v: Value) -> R<Put> {
         let Some(o) = Realm::obj(recv) else {
             if recv.is_undefined() || recv.is_null() {
-                return self.type_error("cannot set properties of undefined or null");
+                let name = match key {
+                    Key::Idx(i) => i.to_string(),
+                    Key::Name(k) => self.text(k),
+                };
+                let what = if recv.is_null() { "null" } else { "undefined" };
+                return self.type_error(&format!("Cannot set properties of {what} (setting '{name}')"));
             }
             return Ok(Put::Fail);
         };

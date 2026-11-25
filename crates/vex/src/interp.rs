@@ -1025,6 +1025,14 @@ impl Vm {
                     err!(ErrKind::Type, "not a function")
                 }
             }};
+            ($callee:expr, $reg:expr) => {{
+                if realm.function_new($callee).is_some() {
+                    err!(ErrKind::Type, "class constructor cannot be invoked without 'new'")
+                } else {
+                    let e = realm.named_error(code, pc, $reg as usize, "is not a function");
+                    throw!(e)
+                }
+            }};
         }
         // Call the native function `$callee` (`builtins.rs`) with the `$argc` arguments at the stack index `$ab`; the result goes to
         // register `$dst`. A native may ask for a call (`Outcome::Enter`), which is a frame as for any call. Ends with `continue`.
@@ -1080,7 +1088,7 @@ impl Vm {
                     if realm.native_id(callee).is_some() {
                         native_call!(callee, $this, fp + $argbase as usize, $argc, $a, $next)
                     }
-                    call_err!(callee)
+                    call_err!(callee, $b)
                 };
                 enter!(callee, ni, cctx, $this, undef, $a as i32, pc, $next, fp + $argbase as usize, $argc);
                 pc = 0;
@@ -1094,6 +1102,18 @@ impl Vm {
                 if prog[$ni].noctor {
                     err!(ErrKind::Type, "not a constructor")
                 }
+                construct!(@go callee, $ni, $cctx, $nt, $dst, $next, $ab, $argc, $flag)
+            }};
+            ($reg:expr; $callee:expr, $ni:expr, $cctx:expr, $nt:expr, $dst:expr, $next:expr, $ab:expr, $argc:expr, $flag:expr) => {{
+                let callee: Value = $callee;
+                if prog[$ni].noctor {
+                    let e = realm.named_error(code, pc, $reg as usize, "is not a constructor");
+                    throw!(e)
+                }
+                construct!(@go callee, $ni, $cctx, $nt, $dst, $next, $ab, $argc, $flag)
+            }};
+            (@go $callee:expr, $ni:expr, $cctx:expr, $nt:expr, $dst:expr, $next:expr, $ab:expr, $argc:expr, $flag:expr) => {{
+                let callee: Value = $callee;
                 let derived = Realm::obj(callee).is_some_and(|f| f.has_flag(F_DERIVED));
                 let this = if derived { undef } else { tri!(realm.new_this($nt)) };
                 enter!(callee, $ni, $cctx, this, $nt, ($dst as i32) | CONSTRUCT | $flag, pc, $next, $ab, $argc);
@@ -1479,7 +1499,11 @@ impl Vm {
                             } else {
                                 std::hint::cold_path();
                                 gate!();
-                                let (i, k) = tri!(realm.iter_open_generic(it));
+                                let Some(m) = tri!(realm.iter_method(it)) else {
+                                    let e = realm.named_error(code, pc, b!() as usize, "is not iterable");
+                                    throw!(e)
+                                };
+                                let (i, k) = tri!(realm.iter_open_method(it, m));
                                 it = i;
                                 k
                             };
@@ -1666,7 +1690,7 @@ impl Vm {
                                     let (nf, len) = stage_array!(r!(b!() + 2));
                                     native_call!(callee, r!(b!() + 1), nf, len, a!(), next)
                                 }
-                                call_err!(callee)
+                                call_err!(callee, b!())
                             };
                             let (nf, len) = stage_array!(r!(b!() + 2));
                             enter!(callee, ni, cctx, r!(b!() + 1), undef, a!() as i32, pc, next, nf, len);
@@ -1684,10 +1708,11 @@ impl Vm {
                                     pc = next;
                                     continue;
                                 }
-                                err!(ErrKind::Type, "not a constructor")
+                                let e = realm.named_error(code, pc, b!() as usize, "is not a constructor");
+                                throw!(e)
                             };
                             let (nf, len) = stage_array!(r!(b!() + 1));
-                            construct!(callee, ni, cctx, callee, a!(), next, nf, len, 0)
+                            construct!(b!(); callee, ni, cctx, callee, a!(), next, nf, len, 0)
                         }
                         Op::CopyProps => {
                             std::hint::cold_path();
@@ -2148,7 +2173,8 @@ impl Vm {
                         gate!();
                         // The base is checked before the key is converted: a script `toString` of the key must not run first.
                         if recv.is_undefined() || recv.is_null() {
-                            err!(ErrKind::Type, "cannot read properties of undefined or null")
+                            let e = realm.key_error(recv, key, "read", "reading");
+                            throw!(e)
                         }
                         let k = tri!(realm.key_of(key));
                         if opv == Op::GetElemRef {
@@ -2166,7 +2192,8 @@ impl Vm {
                         gate!();
                         let (recv, key, v) = (r!(a!()), r!(b!()), r!(c!()));
                         if recv.is_undefined() || recv.is_null() {
-                            err!(ErrKind::Type, "cannot set properties of undefined or null")
+                            let e = realm.key_error(recv, key, "set", "setting");
+                            throw!(e)
                         }
                         let k = tri!(realm.key_of(key));
                         match tri!(realm.set_prop_g(recv, k, v)) {
@@ -2222,7 +2249,8 @@ impl Vm {
                         gate!();
                         let recv = r!(b!());
                         if recv.is_undefined() || recv.is_null() {
-                            err!(ErrKind::Type, "cannot read properties of undefined or null")
+                            let e = realm.key_error(recv, r!(c!()), "read", "reading");
+                            throw!(e)
                         }
                         r!(a!()) = tri!(realm.key_of(r!(c!()))).as_value();
                         pc = next;
@@ -2312,9 +2340,10 @@ impl Vm {
                                 pc = next;
                                 continue;
                             }
-                            err!(ErrKind::Type, "not a constructor")
+                            let e = realm.named_error(code, pc, b!() as usize, "is not a constructor");
+                            throw!(e)
                         };
-                        construct!(callee, ni, cctx, callee, a!(), next, fp + b!() + 1, c!(), 0)
+                        construct!(b!(); callee, ni, cctx, callee, a!(), next, fp + b!() + 1, c!(), 0)
                     }
                     Op::Add | Op::AddI => {
                         let y = if opv == Op::AddI { Value::int(sc!()) } else { r!(c!()) };
