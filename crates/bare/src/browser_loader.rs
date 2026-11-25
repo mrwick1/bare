@@ -1475,6 +1475,12 @@ impl<E: Eng> Run<'_, E> {
                 self.run_one(p.node, &text, &format!("inline script #{}", p.n))?;
                 self.after_js()
             }
+            Source::Data => {
+                // Fetch's "data: URL processor": the body as UTF-8. A classic script does not check the MIME type here.
+                let src = { let doc = self.dom.doc.borrow(); doc.find_atom("src").and_then(|a| doc.attr(p.node, a)).unwrap_or_default().trim_matches(|c: char| c.is_ascii_whitespace()).to_string() };
+                let text = crate::images::data_url(&src).map(|b| String::from_utf8_lossy(&b).into_owned()).ok_or_else(|| "a data: URL that does not decode".to_string());
+                self.finish_external(p.node, &format!("data: script #{}", p.n), text)
+            }
             Source::External(t) => {
                 let what = label(&self.disc.targets[t].url);
                 let text = match self.cache[t].take() {

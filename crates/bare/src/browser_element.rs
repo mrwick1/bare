@@ -1,4 +1,4 @@
-//! `HTMLElement` members: `hidden`, `inert`, `tabIndex` (also on `SVGElement`), `click()`, `offsetParent`, `offsetTop`, `offsetLeft` and `innerText`.
+//! `HTMLElement` members: `hidden`, `inert`, `tabIndex` and `nonce` (both also on `SVGElement`), `click()`, `offsetParent`, `offsetTop`, `offsetLeft` and `innerText`.
 //! Sources: HTML Standard ("The hidden attribute", "inert", "tabindex", "innerText", "rendered text collection steps", `click()`), CSSOM View
 //! (`offsetParent`, `offsetTop`, `offsetLeft`). Read by hand, then compared with headless Chrome: `tools/fixtures/ui/element-cases.txt`.
 //!
@@ -8,6 +8,8 @@
 //! - `tabIndex`: the attribute as a "valid integer" (leading white space, a sign, digits; the rest is ignored; out of `i32` is the default).
 //!   The default is 0 for `a area button input select textarea iframe object video audio`, the first `summary` of a `details`, and an SVG `a`;
 //!   else -1 (like Chrome: `contenteditable` is -1, not 0). The setter writes `ToInt32` in decimal.
+//! - `nonce`: reflects the `nonce` attribute, else `""`. The Standard keeps the value in an internal slot and hides the attribute when the
+//!   page has a CSP header; bare enforces no CSP, so the attribute is the value.
 //! - `click()`: `HTMLElement` only. A disabled control does nothing. A click that is running on the same element is ignored. Else one `click`
 //!   event (`isTrusted` false, bubbles, cancelable, composed) goes to the element, and a submit button submits its form (`browser_form.rs`).
 //! - `offsetParent`, `offsetTop`, `offsetLeft`: from native layout (the same path as `offsetWidth`, see `browser_geometry.rs`). No box (detached,
@@ -140,6 +142,20 @@ fn set_tab_index<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: 
     let arg0 = arg_s::<E>(s, a, 0);
     let v = to_int32(s.to_number(arg0)?);
     nd::attr_set_s(d, s, n, "tabindex", &v.to_string())?;
+    Ok(s.undefined())
+}
+
+fn nonce<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.el_s(s, this)?;
+    let v = attr(&d.doc.borrow(), n, "nonce").unwrap_or_default().to_string();
+    d.js_str_s(s, &v)
+}
+
+fn set_nonce<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let n = d.el_s(s, this)?;
+    let arg0 = arg_s::<E>(s, a, 0);
+    let v = d.string_arg_s(s, arg0)?;
+    nd::attr_set_s(d, s, n, "nonce", &v)?;
     Ok(s.undefined())
 }
 
@@ -750,6 +766,7 @@ pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> 
     d.install_rows(s, &targets, &rows1::T::<E>::V)?;
     for proto in [html, svg] {
         d.def_get_at(s, proto, "tabIndex", tab_index, Some(set_tab_index))?;
+        d.def_get_at(s, proto, "nonce", nonce, Some(set_nonce))?;
     }
     Ok(())
 }
