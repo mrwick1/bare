@@ -1,6 +1,6 @@
 # Design: one IndexedDB store per origin
 
-Status: draft for owner review (2026-11-25). No code is built yet.
+Status: approved (owner, 2026-11-25): build option A, one PR per step. Steps 1 and 2 are built (one PR, see section 7).
 
 ## 1. Problem
 
@@ -100,6 +100,9 @@ Option A. It removes a whole kind of loss (data that dies with a realm) and keep
 1. `IdbStore`, the key coder and the host functions. `idb.js` uses them in one realm. Tests: the existing IndexedDB tests
    pass, plus key order tests.
 2. Share the store in a session: a navigation and a frame see the same data. Test: put, navigate, get.
+
+Built: steps 1 and 2 went in one PR. The store has to live somewhere outside the realm, and the session `WebStorage` was the
+shortest place. Progress: `progress/2026-11-25-indexeddb-host-store.md`.
 3. Workers: a thread worker gets the store of its origin. Test: the page puts, a worker gets.
 4. Locks between connections, `versionchange` and `blocked` events. Tests from the standard's examples.
 5. Session export and import of the store (`browser_save_state`), so a saved login survives a restart.
