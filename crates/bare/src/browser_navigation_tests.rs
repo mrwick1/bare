@@ -50,7 +50,7 @@ fn lim(name: &'static str) -> String {
     format!("limit:{:?}", LimitKind::Host(name))
 }
 
-const NOURL: &str = "unsupported:document URL is not configured (call Browser::set_document_url)";
+const NOURL: &str = "throw:NotSupportedError:document URL is not configured (call Browser::set_document_url)";
 
 
 fn drain_requests(b: &mut Browser) -> Vec<NavigationRequest> {
@@ -180,11 +180,11 @@ fn replace_is_a_replace_request_and_errors_are_precise() {
         assert_eq!(drain_requests(&mut b)[0].kind, NavigationKind::Replace);
         assert_eq!(js(&mut b, "try { location.assign('http://') } catch (e) { e.name + ':' + e.code }"), "SyntaxError:12");
         assert_eq!(js(&mut b, "try { location.href = 'http://a b/' } catch (e) { e.name }"), "SyntaxError");
-        assert_eq!(js(&mut b, "location.assign('javascript:void(0)')"), "unsupported:URL scheme other than http and https");
-        assert_eq!(js(&mut b, "location.assign('mailto:a@b.c')"), "unsupported:URL scheme other than http and https");
+        assert_eq!(js(&mut b, "location.assign('javascript:void(0)')"), "throw:NotSupportedError:URL scheme other than http and https");
+        assert_eq!(js(&mut b, "location.assign('mailto:a@b.c')"), "throw:NotSupportedError:URL scheme other than http and https");
         assert_eq!(js(&mut b, "location.assign('http://u:p@a.com/')"), "undefined");
         assert_eq!(drain_requests(&mut b)[0].url, "http://u:p@a.com/");
-        assert_eq!(js(&mut b, "location.protocol = 'ftp'"), "unsupported:URL scheme other than http and https");
+        assert_eq!(js(&mut b, "location.protocol = 'ftp'"), "throw:NotSupportedError:URL scheme other than http and https");
         assert_eq!(js(&mut b, "location.protocol = 'mailto'; 1"), "1");
         assert_eq!(js(&mut b, "location.port = 'x'; location.hostname = ''; location.host = 'a b'; 1"), "1");
         assert!(drain_requests(&mut b).is_empty(), "failed or ignored sets queue nothing");
@@ -455,7 +455,7 @@ fn cross_origin_history_updates_fail_before_anything_commits() {
         assert!(drain_requests(&mut b).is_empty(), "no navigation request, no network side effect");
         // a gated form that a browser accepts is Unsupported, never a quiet other URL
         assert_eq!(js(&mut b, "try { history.pushState(1, '', 'http://u:p@staging.example.test:8443/x') } catch(e) { e.name }"), "SecurityError");
-        assert_eq!(js(&mut b, "history.pushState(1, '', 'http:\\\\\\\\x')"), "unsupported:backslash in a URL");
+        assert_eq!(js(&mut b, "history.pushState(1, '', 'http:\\\\\\\\x')"), "throw:NotSupportedError:backslash in a URL");
         assert_eq!(b.navigation_stats().history_len, before.history_len);
     });
 }

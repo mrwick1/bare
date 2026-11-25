@@ -26,6 +26,7 @@ fn js(b: &mut Browser, src: &str) -> String {
     match b.run_script(src) {
         Ok(v) => b.it.display(v),
         Err(Error::Unsupported(u)) => format!("unsupported:{}", u),
+        Err(Error::Throw(v)) if crate::eng_new::is_object(v) && b.it.get_str(v, "name") == "NotSupportedError" => format!("throw:NotSupportedError:{}", b.it.get_str(v, "message")),
         Err(e) => format!("{e:?}"),
     }
 }
@@ -102,7 +103,7 @@ fn the_selection_method_that_is_left_is_a_gate() {
     js(&mut b, "var r = document.createRange(); r.selectNodeContents(document.getElementById('p'))");
     {
         let (m, what) = ("deleteFromDocument()", "Selection.deleteFromDocument");
-        assert_eq!(js(&mut b, &format!("getSelection().{m}")), format!("unsupported:{what}"));
+        assert_eq!(js(&mut b, &format!("getSelection().{m}")), format!("throw:NotSupportedError:{what}"));
     }
     // A gate on the wrong receiver is still an illegal invocation, as for the other methods.
     assert_eq!(js(&mut b, "try { Range.prototype.deleteContents.call({}) } catch (e) { e.name + ':' + e.message }"), "TypeError:Illegal invocation");
@@ -315,13 +316,13 @@ fn rectangles_of_detached_nodes_and_ranges_are_empty() {
 #[test]
 fn rectangles_of_mathml_ranges_over_svg_and_columns_are_gates() {
     let mut b = laid("<svg id=v><rect id=r width=10 height=10></rect></svg><math id=m><mi>x</mi></math><table><colgroup id=cg><col id=co></colgroup><tr><td>a</td></tr></table><p id=ok>x</p>");
-    const GATE: &str = "unsupported:getClientRects of a MathML element, or of a range that holds an SVG or MathML element (no layout for it)";
+    const GATE: &str = "throw:NotSupportedError:getClientRects of a MathML element, or of a range that holds an SVG or MathML element (no layout for it)";
     assert_eq!(js(&mut b, "var r = document.getElementById('v').getBoundingClientRect(); [r.width, r.height].join()"), "300,150");
     assert_eq!(js(&mut b, "var r = document.getElementById('r').getBoundingClientRect(); [r.x, r.y, r.width, r.height].join()"), "8,8,10,10");
     assert_eq!(js(&mut b, "document.getElementById('r').getClientRects().length"), "1");
     assert_eq!(js(&mut b, "document.getElementById('m').getClientRects()"), GATE);
-    assert_eq!(js(&mut b, "document.getElementById('co').getClientRects()"), "unsupported:getClientRects of a col or colgroup (layout makes no box for a column)");
-    assert_eq!(js(&mut b, "document.getElementById('cg').getClientRects()"), "unsupported:getClientRects of a col or colgroup (layout makes no box for a column)");
+    assert_eq!(js(&mut b, "document.getElementById('co').getClientRects()"), "throw:NotSupportedError:getClientRects of a col or colgroup (layout makes no box for a column)");
+    assert_eq!(js(&mut b, "document.getElementById('cg').getClientRects()"), "throw:NotSupportedError:getClientRects of a col or colgroup (layout makes no box for a column)");
     assert_eq!(js(&mut b, "var r = document.createRange(); r.selectNode(document.getElementById('v')); r.getClientRects()"), GATE);
     // The gate leaves nothing behind: the next read is a normal one, and the layout flag is off.
     assert!(!b.dom.geometry.uncull.get());

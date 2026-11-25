@@ -118,6 +118,8 @@ pub mod browser_fetch;
 pub mod browser_console;
 #[cfg(test)]
 mod browser_console_tests;
+#[cfg(test)]
+mod browser_unsupported_throws_tests;
 mod browser_css_ns;
 #[cfg(test)]
 mod browser_css_ns_tests;
