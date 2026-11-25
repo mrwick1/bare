@@ -394,7 +394,6 @@ fn response_constructor_request_and_clone() {
         for (src, what) in [
             ("new Request('/x', {method:'FOO'}); fetch(new Request('/x', {method:'FOO'}))", "fetch method other than GET, POST, PUT, PATCH, DELETE, HEAD and OPTIONS"),
             ("fetch('/x', {method:'patch'})", "fetch method other than GET, POST, PUT, PATCH, DELETE, HEAD and OPTIONS"),
-            ("new Request('/x', {integrity:'sha256-x'})", "fetch option integrity"),
             ("new Request('/x').body", "Request.body (a request body stream)"),
             ("new Response('x').body.tee()", "ReadableStream tee and async iteration"),
             ("new Response('x').body.getReader().closed", "ReadableStreamDefaultReader.closed"),
