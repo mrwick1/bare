@@ -6,7 +6,7 @@
 //!
 //! `crypto` (Web Crypto): `getRandomValues(array)` and `randomUUID()`. The bytes come from `bare_tls::random::fill`, the
 //! OS source, with no fallback: if it fails, the call throws an `OperationError`. `getRandomValues` takes an integer typed
-//! array (not `Float32Array`, `Float64Array`, `DataView` or `ArrayBuffer`: `TypeMismatchError`), at most 65,536 bytes
+//! array (float arrays, `DataView` and `ArrayBuffer` throw `TypeMismatchError`), at most 65,536 bytes
 //! (`QuotaExceededError`), fills it in place and returns it. `randomUUID` is RFC 9562 version 4, in lower case.
 //! `crypto.subtle` is a `SubtleCrypto` in a secure context (`browser_basics::secure`) and `undefined` otherwise. Its
 //! `digest(algorithm, data)` hashes with SHA-1, SHA-256, SHA-384 or SHA-512 (`bare_tls`), a name or `{name}`, ASCII
@@ -568,7 +568,7 @@ fn get_random_values<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>,
     crypto_this(d, s, this)?;
     need::<E>(s, a, 1, "getRandomValues' on 'Crypto")?;
     let x = arg_s::<E>(s, a, 0);
-    let integer = s.view(x).is_some_and(|v| v.elem != Elem::Data && !matches!(v.elem, Elem::F32 | Elem::F64));
+    let integer = s.view(x).is_some_and(|v| v.elem != Elem::Data && !matches!(v.elem, Elem::F16 | Elem::F32 | Elem::F64));
     if !integer {
         return Err(d.dom_err_s(s, "TypeMismatchError", "The data argument must be an integer-type TypedArray."));
     }

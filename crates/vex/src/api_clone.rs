@@ -362,6 +362,7 @@ impl Read<'_> {
                 let elem = match ty {
                     0..=10 => Some(Element::from_id(ty.into())),
                     11 => None,
+                    12 => Some(Element::F16),
                     _ => return Err(damaged()),
                 };
                 let buf = self.value(rt, depth + 1)?;
