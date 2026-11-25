@@ -16,6 +16,8 @@
 # The defaults, 4 kHz `cpu-clock`, are the method of 2026-11-18. A journey of one second gives about 4,000 samples, so the shares are rough (about 1 point at 4,000 samples, more at fewer):
 # use more runs, or look at instruction counts (tools/bench/journeys.sh run) for a change of cost. Shares hold under load, wall times do not.
 set -eu
+# A benchmark run starts from an empty session: no profile on disk (bare::profile).
+export BARE_DATA_DIR=
 here=$(cd "$(dirname "$0")" && pwd)
 
 report() {

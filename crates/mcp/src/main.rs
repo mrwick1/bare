@@ -6,7 +6,8 @@
 //! - `run_steps`: run a whole step file and give its report.
 //! - `run_suite`: run a directory of step files with one shared login in K worker processes (`bare-drive --suite`) and give a short summary.
 //! - `ensure_session`, `save_state`: a logged-in live page from a saved session (in memory by default), or a new login when it is no longer valid.
-//! - `open`, `step`, `close`: a live session. `open` loads a page, each `step` call runs more step lines on the same page, and `close`
+//! - `open`, `step`, `close`: a live session. `open profile=NAME` keeps its cookies and `localStorage` on disk (`bare::profile`); the
+//!   default is the profile `default`, or memory when another process holds it. `open` loads a page, each `step` call runs more step lines on the same page, and `close`
 //!   ends it. Each call gives the report of its own steps only, so the server keeps no old records.
 //!
 //! Headless by default. With `window: true` the page shows in a Wayland window on the display that `WAYLAND_DISPLAY` names.
@@ -694,6 +695,8 @@ impl Server {
         let name = session_name(args);
         let _ = self.close(args);
         let (opt, red, vars) = self.options(args)?;
+        // The old session of this name ended above, so its profile is free again.
+        let (profile, note) = bare_drive::profile::Profile::choose(args.get("profile").and_then(Value::as_str))?;
         // One client for the server: a script or a style sheet that an earlier `open` loaded is in its reply cache, and its connections stay
         // open. `fresh` gives this open a clean client. Cookies and storage are the document's own either way.
         let net = if args.get("fresh").and_then(Value::as_bool) == Some(true) { bare_net::http::Client::new() } else { lock(&self.shared.net).fork() };
@@ -706,6 +709,9 @@ impl Server {
         if let Some(st) = state {
             session.preload(st);
         }
+        if let Some(p) = profile {
+            session.use_profile(p);
+        }
         self.live.insert(name, Live { session, opt, red, vars, lines: 0, dl, told: Default::default() });
         let (mut rep, ok) = self.run_live(args, &format!("open {url}"))?;
         // A redirect to another address: the agent must see where the page really is.
@@ -717,6 +723,13 @@ impl Server {
                 rep.push_str(&format!("\nredirected: {to}"));
             } else {
                 rep.insert_str(rep.len() - 1, &format!(",\"redirected\":{}", json!(to)));
+            }
+        }
+        if !note.is_empty() {
+            if args.get("compact").and_then(Value::as_bool) == Some(true) {
+                rep.push_str(&format!("\n{note}"));
+            } else {
+                rep.insert_str(rep.len() - 1, &format!(",\"profile\":{}", json!(note)));
             }
         }
         Ok((rep, ok))
@@ -1683,7 +1696,7 @@ fn tools() -> Value {
         {
             "name": "open",
             "description": "Start a live session: load URL in the bare browser. A new open ends the old session; it keeps the HTTP cache and the connections of the earlier opens unless fresh is true. Returns a short receipt: ok or the failure, the time, a redirect, not ready, script errors and failed requests.",
-            "inputSchema": with(json!({"url": {"type": "string"}, "state": {"type": "string", "description": "Start from the session that save_state or ensure_session saved under this name, in this server."}, "file": {"type": "string", "description": "With state: read the session from this file when it is not in memory. It holds live credentials."}, "snapshot": {"type": "boolean", "description": "Add the page snapshot after the receipt."}, "report": {"type": "boolean", "description": "Return the full JSON report of the open step (steps, console, network) instead of the receipt. It can be large."}, "fresh": {"type": "boolean", "description": "Use a clean network client for this open: no cached replies and no open connections from earlier opens. The default shares one client between opens, so a script or style sheet that an earlier open loaded (with a fresh Cache-Control) is not fetched again. Cookies and storage are always the page's own."}}), &["url"]),
+            "inputSchema": with(json!({"url": {"type": "string"}, "profile": {"type": "string", "description": "The profile on disk that keeps the cookies and localStorage between processes: a name, or a path. Default: the profile default; when another process holds it, the session is in memory and the receipt says so. With state, the saved session wins for this open; the page then saves to the profile."}, "state": {"type": "string", "description": "Start from the session that save_state or ensure_session saved under this name, in this server."}, "file": {"type": "string", "description": "With state: read the session from this file when it is not in memory. It holds live credentials."}, "snapshot": {"type": "boolean", "description": "Add the page snapshot after the receipt."}, "report": {"type": "boolean", "description": "Return the full JSON report of the open step (steps, console, network) instead of the receipt. It can be large."}, "fresh": {"type": "boolean", "description": "Use a clean network client for this open: no cached replies and no open connections from earlier opens. The default shares one client between opens, so a script or style sheet that an earlier open loaded (with a fresh Cache-Control) is not fetched again. Cookies and storage are always the page's own."}}), &["url"]),
         },
         {
             "name": "step",

@@ -30,3 +30,23 @@ pub fn cache_dir() -> Option<std::path::PathBuf> {
         None
     }
 }
+
+/// The root of the data that the browser keeps (the profiles). An empty BARE_DATA_DIR turns it off: no profile is saved.
+pub fn data_dir() -> Option<std::path::PathBuf> {
+    use std::{env, path::PathBuf};
+
+    if let Some(dir) = env::var_os("BARE_DATA_DIR") {
+        return (!dir.is_empty()).then(|| PathBuf::from(dir));
+    }
+    let path = |name| env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+    if cfg!(target_os = "windows") {
+        path("LOCALAPPDATA").map(|dir| dir.join("bare"))
+    } else if cfg!(target_os = "macos") {
+        path("HOME").map(|dir| dir.join("Library").join("Application Support").join("bare"))
+    } else if cfg!(target_os = "linux") {
+        path("XDG_DATA_HOME")
+            .or_else(|| path("HOME").map(|dir| dir.join(".local").join("share"))).map(|dir| dir.join("bare"))
+    } else {
+        None
+    }
+}

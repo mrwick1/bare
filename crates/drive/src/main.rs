@@ -1,4 +1,4 @@
-//! `bare-drive [--out DIR] [--secrets FILE] [--var NAME=VALUE]... [--size WxH] [--timeout MS] [--repeat N] [--window] [--quiet] STEPS`
+//! `bare-drive [--out DIR] [--secrets FILE] [--var NAME=VALUE]... [--size WxH] [--timeout MS] [--repeat N] [--window] [--quiet] [--profile NAME] STEPS`
 //!
 //! Runs the steps of the file STEPS (`steps.rs`) and prints the result as JSON on stdout (also `DIR/result.json`). A line for each step
 //! goes to stderr unless `--quiet`. Exit code: 0 all the steps passed, 1 a step failed, 2 a bad argument or step file.
@@ -16,8 +16,13 @@
 //!
 //! `--secrets FILE`: `NAME=value` lines. A step uses a value as `${NAME}`; the value never appears in the output. `--var` gives a value
 //! that is not secret. `--window` shows the page in a Wayland window; the default is headless.
+//!
+//! `--profile NAME`: each `open` starts from the cookies and `localStorage` of the profile NAME (a value with a path separator is a
+//! path), and the run saves them there (`bare::profile`). With no `--profile` the run uses the profile `default`; when another
+//! process holds it, the run goes on in memory and says so on stderr. An empty `BARE_DATA_DIR` turns the default off. A suite does
+//! not use a profile: its tests share a login through its state file.
 
-use bare_drive::run::{Options, Redactor, run};
+use bare_drive::run::{Options, Redactor, run_in};
 use bare_drive::suite;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -32,7 +37,7 @@ fn main() {
 }
 
 fn usage(e: &str) -> i32 {
-    eprintln!("bare-drive: {e}\nusage: bare-drive [--out DIR] [--secrets FILE] [--var NAME=VALUE]... [--size WxH] [--timeout MS] [--repeat N] [--window] [--quiet] STEPS\n       bare-drive --suite DIR [--workers K|auto] [--test-timeout MS] [--login-each] [--only TEXT] [--perf] [--list] [--cold OUTDIR] [same options]");
+    eprintln!("bare-drive: {e}\nusage: bare-drive [--out DIR] [--secrets FILE] [--var NAME=VALUE]... [--size WxH] [--timeout MS] [--repeat N] [--window] [--quiet] [--profile NAME] STEPS\n       bare-drive --suite DIR [--workers K|auto] [--test-timeout MS] [--login-each] [--only TEXT] [--perf] [--list] [--cold OUTDIR] [same options]");
     2
 }
 
@@ -43,6 +48,7 @@ fn drive() -> i32 {
     let (mut suite_dir, mut worker, mut workers, mut limit, mut only, mut cold) = (None::<String>, false, None::<usize>, Duration::from_secs(60), None::<String>, None::<String>);
     let (mut perf, mut login_each, mut list) = (false, false, false);
     let mut pass: Vec<String> = Vec::new();
+    let mut profile = None::<String>;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut val = || args.next().ok_or(format!("{a} needs a value"));
@@ -65,6 +71,7 @@ fn drive() -> i32 {
                 "--out" => opt.out = Some(val()?.into()),
                 "--window" => opt.window = true,
                 "--quiet" => opt.progress = false,
+                "--profile" => profile = Some(val()?),
                 "--repeat" => repeat = val()?.parse().ok().filter(|&n| n > 0).ok_or("--repeat N, N > 0")?,
                 "--timeout" => {
                     let v = val()?;
@@ -159,10 +166,19 @@ fn drive() -> i32 {
     {
         return usage(&format!("{}: {e}", dir.display()));
     }
+    let profile = match bare::profile::Profile::choose(profile.as_deref()) {
+        Ok((p, note)) => {
+            if !note.is_empty() && (opt.progress || p.is_none()) {
+                eprintln!("bare-drive: {note}");
+            }
+            p
+        }
+        Err(e) => return usage(&e),
+    };
     // One fixed record for each run, allocated before the first: the list itself does not grow the heap between runs.
     let mut runs = Vec::with_capacity(repeat as usize);
     let report = loop {
-        let report = run(&steps, &opt, &mut red);
+        let report = run_in(&steps, &opt, &mut red, profile.clone());
         let (heap, rss, peak) = (heap_kib(), status_kib("VmRSS:"), status_kib("VmHWM:"));
         runs.push((report.ok, report.ms, rss, peak, heap));
         if opt.progress && repeat > 1 {

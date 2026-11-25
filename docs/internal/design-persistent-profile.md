@@ -96,6 +96,23 @@ each one gets a tag and its fields:
 - `profile.lock` with the process id. A second open of the profile fails with a clear error.
 - Not saved: `sessionStorage` (as in all browsers), the HTTP cache (it has its own disk tier).
 
+### 8.1 As built in step 2 (2026-11-25)
+
+- Files: `cookies.bin` and one `local.bin` for the `localStorage` of all origins, not one file per origin. Each file has a
+  magic number, the payload and a CRC-32. A profile holds few origins, and `localStorage` is at most 5M UTF-16 units per origin,
+  so a whole write once a second is cheap. Revisit one file per origin when a profile with a large `localStorage` shows up.
+- Session cookies (no expiry) are saved too, as Chrome keeps them for a session restore.
+- A lone UTF-16 surrogate in a `localStorage` key or value becomes U+FFFD on disk (`StorageState` is text).
+- The lock is an OS lock on `profile.lock` (`File::try_lock`). The OS frees it when the holder ends, also after a crash, so a
+  stale file is taken over. The file holds the process id for the error message. A second holder in the same process is refused too.
+- A write happens when the revision of the jar or of `localStorage` moved: at most once per second from `Page::tick`, and when the
+  page drops or opens another URL. No write when nothing changed. The writer compares two counters, never the data.
+- `open state=` (bare-mcp) and a `state=` file of an `open` step (bare-drive) win over the profile for that open. The page then
+  saves to the profile.
+- An empty `BARE_DATA_DIR` turns profiles off (the default is then memory). `.cargo/config.toml` sets it for tests and `cargo run`.
+  The benchmark and journey scripts set it too, so a run starts from an empty session.
+- A suite of bare-drive (`--suite`) and a tab that a page opens (`NAME~2` in bare-mcp) use no profile.
+
 ## 9. Steps, one PR each
 
 1. Record coder for platform objects (`Blob`, `File`, `CryptoKey`). Test: a round trip of each.
