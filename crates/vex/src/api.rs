@@ -1225,6 +1225,7 @@ impl Engine for Realm {
         let p = self.a_obj(proto)?;
         let m = self.string(msg);
         let e = self.make_error(p, Some(m));
+        self.capture_here(e, None, false, true);
         Ok(self.a_push(e))
     }
 }
@@ -1250,3 +1251,7 @@ mod tests;
 #[cfg(test)]
 #[path = "api_clone_tests.rs"]
 mod clone_tests;
+
+#[cfg(test)]
+#[path = "api_error_stack_tests.rs"]
+mod error_stack_tests;
