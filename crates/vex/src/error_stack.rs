@@ -76,6 +76,10 @@ impl Realm {
             return k;
         }
         let k = (self.intern("stackTraceLimit"), self.intern("\0stk"), self.intern("stack"));
+        // Roots: the collector frees an atom that nothing refers to, and `ErrStack` is not traced.
+        for s in [k.0, k.1, k.2] {
+            self.keep(s.value());
+        }
         self.es.keys = Some(k);
         k
     }
@@ -252,3 +256,7 @@ pub(crate) fn capture_stack_trace(rt: &mut Realm, _this: Value, args: &[Value]) 
     rt.capture_here(o, args.get(1).copied().filter(|f| !f.is_undefined()), true, false);
     Ok(Value::UNDEFINED)
 }
+
+#[cfg(test)]
+#[path = "error_stack_gc_tests.rs"]
+mod gc_tests;
