@@ -74,7 +74,7 @@ const MAX_ENTRIES: usize = 1 << 16;
 const MAX_URLS: usize = 1 << 12;
 const MAX_RANDOM: usize = 65536;
 
-const NAMES: [&str; 7] = ["crypto", "navigator", "Blob", "File", "FormData", "SubtleCrypto", "FileList"];
+const NAMES: [&str; 8] = ["crypto", "navigator", "Blob", "File", "FormData", "SubtleCrypto", "FileList", "Navigator"];
 
 struct BlobData {
     /// Shared: a Blob never changes, so a clone (`structuredClone`, `postMessage`, `indexedDB`) shares the bytes.
@@ -106,7 +106,7 @@ struct IterObj<E: Eng> {
 #[derive(Clone, Copy)]
 struct Made<E: Eng> {
     /// `crypto`, `navigator`, `Blob`, `File`, `FormData`, `SubtleCrypto`, `FileList` (the order of `NAMES`).
-    glob: [E::Obj; 7],
+    glob: [E::Obj; 8],
     /// The one `crypto.subtle` object.
     subtle: E::Obj,
     langs: E::Obj,
@@ -309,13 +309,13 @@ fn text(out: &mut Vec<u8>, s: &str, norm: bool, esc: bool) {
 macro_rules! lazy {
     ($($f:ident $i:literal),*) => { $(fn $f<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> { lazy(d, s, $i, a) })* };
 }
-lazy!(lazy0 0, lazy1 1, lazy2 2, lazy3 3, lazy4 4, lazy5 5, lazy6 6);
+lazy!(lazy0 0, lazy1 1, lazy2 2, lazy3 3, lazy4 4, lazy5 5, lazy6 6, lazy7 7);
 
 const SW_NAMES: [&str; 3] = ["ServiceWorkerContainer", "ServiceWorkerRegistration", "ServiceWorker"];
 
 pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
     let g = s.global();
-    for (i, h) in [lazy0 as HS<E>, lazy1, lazy2, lazy3, lazy4, lazy5, lazy6].into_iter().enumerate() {
+    for (i, h) in [lazy0 as HS<E>, lazy1, lazy2, lazy3, lazy4, lazy5, lazy6, lazy7].into_iter().enumerate() {
         let f = d.add_fn_s(s, h, NAMES[i], 0, HostFn::Method)?;
         s.define_accessor_str(g, NAMES[i], Some(f), Some(f), Attrs { writable: false, enumerable: i < 2, configurable: true })?;
     }
@@ -463,6 +463,7 @@ fn make<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, Made<E>> {
     let np_id = lid::<E>(s, np);
     old::<E, _>(s, |it| crate::browser_basics::navigator(d, it, np_id))?;
     let navigator = plain(d, s, np)?;
+    let nav_ctor = iface(d, s, "Navigator", 0, subtle_illegal, np)?;
     let en = [d.js_str_s(s, "en-US")?, d.js_str_s(s, "en")?];
     let langs = s.new_array(&en)?;
     s.set_integrity(langs, true)?;
@@ -519,8 +520,8 @@ fn make<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, Made<E>> {
     let ip = plain(d, s, ip)?;
     op(d, s, ip, "next", 0, iter_next)?;
 
-    let [crypto, navigator, blob, file, form, subtle_ctor, file_list, subtle, langs, uad, brands, bp, fp, fo, ip, kp] = [crypto, navigator, blob, file, form, subtle_ctor, file_list, subtle, langs, uad, brands, bp, fp, fo, ip, kp].map(|l| lid::<E>(s, l));
-    Ok(Made { glob: [crypto, navigator, blob, file, form, subtle_ctor, file_list], subtle, langs, uad, brands, blob_p: bp, file_p: fp, form_p: fo, iter_p: ip, key_p: kp })
+    let [crypto, navigator, blob, file, form, subtle_ctor, file_list, nav_ctor, subtle, langs, uad, brands, bp, fp, fo, ip, kp] = [crypto, navigator, blob, file, form, subtle_ctor, file_list, nav_ctor, subtle, langs, uad, brands, bp, fp, fo, ip, kp].map(|l| lid::<E>(s, l));
+    Ok(Made { glob: [crypto, navigator, blob, file, form, subtle_ctor, file_list, nav_ctor], subtle, langs, uad, brands, blob_p: bp, file_p: fp, form_p: fo, iter_p: ip, key_p: kp })
 }
 
 pub(crate) fn need<'s, E: Eng>(s: &mut Sc<'s, E>, a: Args<'s>, n: usize, what: &str) -> Res<'s, ()> {
