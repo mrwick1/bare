@@ -526,10 +526,10 @@ pub(crate) fn describe<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, o: Local<'s>, 
     };
     match k.alg {
         Alg::Hmac => {
-            let l = s.number((k.bytes.len() * 8) as f64);
-            s.define_str(o, "length", l, Attrs::ALL)?;
             let h = hash(d, s)?;
-            s.define_str(o, "hash", h, Attrs::ALL)
+            s.define_str(o, "hash", h, Attrs::ALL)?;
+            let l = s.number((k.bytes.len() * 8) as f64);
+            s.define_str(o, "length", l, Attrs::ALL)
         }
         Alg::Rsa => {
             let l = s.number(k.param as f64);

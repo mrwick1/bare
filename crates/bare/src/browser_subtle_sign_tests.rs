@@ -109,7 +109,7 @@ fn hmac_equals_node() {
 "#);
     assert_eq!(
         got,
-        ["256:true", "verify:true:false", "512:true", r#"alg:{"name":"HMAC","length":800,"hash":{"name":"SHA-512"}}:secret"#, "gen:512:64:20", "jwk:oct:HS256:AAECAwQFBgcICQoLDA0ODxAREhM", "jwk-same:true"]
+        ["256:true", "verify:true:false", "512:true", r#"alg:{"name":"HMAC","hash":{"name":"SHA-512"},"length":800}:secret"#, "gen:512:64:20", "jwk:oct:HS256:AAECAwQFBgcICQoLDA0ODxAREhM", "jwk-same:true"]
     );
 }
 
