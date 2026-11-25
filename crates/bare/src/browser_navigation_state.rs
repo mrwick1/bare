@@ -127,6 +127,11 @@ pub(crate) fn serialize<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>)
     }
 }
 
+/// The record of an `indexedDB` value: `structuredClone` limits, no transfer.
+pub(crate) fn serialize_storage<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>) -> Res<'s, Cloned> {
+    out(d, s, v, clone_limits(), &[], true)
+}
+
 /// The limits of `structuredClone` and of a message.
 fn clone_limits() -> CloneLimits {
     CloneLimits { bytes: 64 << 20, depth: 256, nodes: 1 << 20, names: ["clone-bytes", "clone-depth", "clone-nodes"] }

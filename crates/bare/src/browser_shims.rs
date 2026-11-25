@@ -10,8 +10,8 @@
 //! function, no script. The source of a shim defines its own sentinel global, so it runs once.
 //!
 //! Gates: none of them has a timeline, a layout or a store on disk. `animate` ends the animation at once (one timer). `Path2D` records
-//! nothing. `indexedDB` keeps its data in the realm only and runs the requests of a transaction one after another in
-//! microtasks. Not compared with a real browser.
+//! nothing. `indexedDB` keeps its data in the session store of the origin (`browser_idb.rs`) and runs the requests of a transaction
+//! one after another in microtasks. Not compared with a real browser.
 
 use crate::eng::{Eng, Ops};
 use crate::browser::*;
@@ -52,6 +52,10 @@ pub(crate) fn define<E: Eng>(d: &Dom<E>, it: &mut E::Vm, name: &str) -> R<E, boo
         } else if sentinel == "WebSocket" {
             // The source gives its install function. It takes the native of `browser_websocket.rs`.
             let f = d.add_fn_s_obj(it, crate::browser_websocket::ws_host, "ws", 4, HostFn::Method)?;
+            it.call_o(made, E::undef(), &[E::obj_raw(f)])?;
+        } else if sentinel == "indexedDB" {
+            // The source gives its install function. It takes the store of `browser_idb.rs`.
+            let f = d.add_fn_s_obj(it, crate::browser_idb::idb_host, "idb", 1, HostFn::Method)?;
             it.call_o(made, E::undef(), &[E::obj_raw(f)])?;
         }
     }

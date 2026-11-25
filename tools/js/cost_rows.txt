@@ -136,6 +136,8 @@ examples/web_apis_load segmenter 1
 examples/web_apis_load segmenter 10
 examples/web_apis_load matchall 1
 examples/web_apis_load matchall 10
+examples/idb_load 1
+examples/idb_load 10
 examples/promise_all_load all 1
 examples/promise_all_load all 10
 examples/promise_all_load settled 1

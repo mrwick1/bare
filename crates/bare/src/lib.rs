@@ -14,6 +14,7 @@ pub mod js_num;
 mod browser_dom;
 mod browser_dom_old;
 mod browser_fragment;
+mod browser_idb;
 mod browser_shadow;
 mod browser_events;
 mod browser_error_event;
@@ -227,6 +228,8 @@ mod browser_clone_host_tests;
 mod browser_idb_tx_tests;
 #[cfg(test)]
 mod browser_idb_cursor_tests;
+#[cfg(test)]
+mod browser_idb_store_tests;
 pub mod resources;
 mod browser_loader;
 mod browser_shims;

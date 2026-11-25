@@ -1,8 +1,9 @@
-// A minimal in-memory `indexedDB` (no persistence, no key generators beyond `autoIncrement`). Requests run one after another
-// in a microtask; a transaction that has no request left completes. Made at the first read of `indexedDB` or an `IDB*` name (`browser_shims.rs`).
-(function () {
+// `indexedDB`: the API objects, the events and the request order. Requests run one after another in a microtask; a transaction
+// that has no request left completes. Made at the first read of `indexedDB` or an `IDB*` name (`browser_shims.rs`). The source gives
+// a function; the host calls it with `idb(op, ...)`, the session store of the origin (`browser_idb.rs`), which holds the data.
+(function (idb) {
   'use strict';
-  var P = Promise, dbs = {}, H = new WeakMap(), D = new WeakMap(), TS = new WeakMap(), OS = new WeakMap(), CS = new WeakMap(), IX = new WeakMap();
+  var P = Promise, H = new WeakMap(), D = new WeakMap(), TS = new WeakMap(), OS = new WeakMap(), CS = new WeakMap(), IX = new WeakMap();
   var clone = typeof structuredClone === 'function' ? structuredClone : function (v) { return v; };
   // `new DOMException(...)` is not a constructor here, so the error inherits from the prototype.
   var codes = { AbortError: 20, NotFoundError: 8, InvalidStateError: 11, InvalidAccessError: 15 };
@@ -57,6 +58,10 @@
     if (x === 2) { a = +a; b = +b; }
     return a < b ? -1 : a > b ? 1 : 0;
   }
+  // The key as the host takes it: a `Date` is `{ t: time }`.
+  function hk(k) { return k instanceof Date ? { t: +k } : Array.isArray(k) ? k.map(hk) : k; }
+  function lo(q) { return q.lower === undefined ? undefined : hk(q.lower); }
+  function up(q) { return q.upper === undefined ? undefined : hk(q.upper); }
   function IDBKeyRange() { throw new TypeError('Illegal constructor'); }
   function range(lo, up, lop, uop) {
     var r = Object.create(IDBKeyRange.prototype);
@@ -81,24 +86,7 @@
   });
   def(IDBKeyRange.prototype, 'includes', function (k) { return inr(this, key(k)); });
 
-  // ---- rows: one sorted array of [key, value] for each store
-  function at(rows, k) {
-    var lo = 0, hi = rows.length;
-    while (lo < hi) {
-      var m = (lo + hi) >> 1;
-      if (cmp(rows[m][0], k) < 0) lo = m + 1; else hi = m;
-    }
-    return lo;
-  }
-  function pick(st, q) {
-    var out = [];
-    for (var i = q.lower === undefined ? 0 : at(st.rows, q.lower); i < st.rows.length; i++) {
-      var k = st.rows[i][0];
-      if (q.upper !== undefined && cmp(k, q.upper) > 0) break;
-      if (inr(q, k)) out.push(st.rows[i]);
-    }
-    return out;
-  }
+  // ---- rows: in the host store
   function extract(v, kp) {
     if (Array.isArray(kp)) return kp.map(function (p) { return extract(v, p); });
     if (kp === '') return v;
@@ -114,34 +102,21 @@
     for (var i = 0; i < p.length - 1; i++) v = v[p[i]] || (v[p[i]] = {});
     v[p[p.length - 1]] = k;
   }
-  function touch(t, st) {
-    if (t.snap.has(st)) return;
-    t.snap.add(st);
-    var rows = st.rows.slice(), next = st.next;
-    t.undo.push(function () { st.rows = rows; st.next = next; });
-  }
   function store(t, st, v, k, add) {
-    touch(t, st);
     if (st.kp !== null) {
       if (k !== undefined) throw err('The object store uses in-line keys and the key parameter was provided.', 'DataError');
       k = extract(v, st.kp);
     }
     if (k === undefined) {
       if (!st.auto) throw err('The object store uses out-of-line keys and has no key generator and the key parameter was not provided.', 'DataError');
-      k = st.next;
+      k = idb(12, t.name, st.name);
       if (st.kp !== null) inject(v, st.kp, k);
     } else {
       key(k);
     }
-    Object.keys(st.indexes).forEach(function (name) { unique(st, st.indexes[name], v, k); });
-    if (st.auto && typeof k === 'number' && k >= st.next) st.next = Math.floor(k) + 1;
-    var i = at(st.rows, k);
-    if (i < st.rows.length && cmp(st.rows[i][0], k) === 0) {
-      if (add) throw err('Unable to add key to index. A record with this key already exists.', 'ConstraintError');
-      st.rows[i] = [k, v];
-    } else {
-      st.rows.splice(i, 0, [k, v]);
-    }
+    var ix = [];
+    for (var n in st.indexes) ix.push([n, ixKeys(st.indexes[n], v).map(hk)]);
+    idb(13, t.id, t.name, st.name, hk(k), v, add, ix);
     return k;
   }
 
@@ -172,6 +147,7 @@
     if (t.dead) return;
     t.dead = true;
     t.q.length = 0;
+    if (t.id) idb(5, t.id);
     for (var i = t.undo.length; i--;) t.undo[i]();
     tx.error = e;
     later(function () {
@@ -210,6 +186,7 @@
           if (t.dead || t.on) return;
           if (t.q.length) { kick(tx); return; }
           t.dead = true;
+          if (t.id) idb(4, t.id);
           tx.dispatchEvent(new Event('complete'));
           if (t.after) t.after();
         }, 0);
@@ -225,7 +202,8 @@
     var tx = new IDBTransaction(), data = D.get(db).data;
     tx.db = db; tx.mode = mode; tx.error = null; tx.durability = 'default';
     Object.defineProperty(tx, 'objectStoreNames', { get: function () { return names(mode === 'versionchange' ? Object.keys(data.stores) : list); }, enumerable: true, configurable: true });
-    TS.set(tx, { q: [], on: false, dead: false, undo: [], snap: new Set(), os: {}, open: null, after: null, graceOn: false, data: data, list: list });
+    // A read-only transaction changes nothing, so it has no undo list in the host (id 0).
+    TS.set(tx, { q: [], on: false, dead: false, undo: [], os: {}, open: null, after: null, graceOn: false, data: data, list: list, name: D.get(db).name, id: mode === 'readonly' ? 0 : idb(3) });
     return tx;
   }
   function live(tx) {
@@ -262,52 +240,45 @@
   var proto = IDBObjectStore.prototype;
   def(proto, 'put', function (v, k) { v = clone(v); return op(this, true, function (st, t) { return store(t, st, v, k, false); }); });
   def(proto, 'add', function (v, k) { v = clone(v); return op(this, true, function (st, t) { return store(t, st, v, k, true); }); });
-  def(proto, 'get', function (q) { return op(this, false, function (st) { var r = pick(st, rng(q)); return r.length ? clone(r[0][1]) : undefined; }); });
-  def(proto, 'getKey', function (q) { return op(this, false, function (st) { var r = pick(st, rng(q)); return r.length ? r[0][0] : undefined; }); });
-  def(proto, 'getAll', function (q, n) { return op(this, false, function (st) { return pick(st, rng(q)).slice(0, n || undefined).map(function (r) { return clone(r[1]); }); }); });
-  def(proto, 'getAllKeys', function (q, n) { return op(this, false, function (st) { return pick(st, rng(q)).slice(0, n || undefined).map(function (r) { return r[0]; }); }); });
-  def(proto, 'count', function (q) { return op(this, false, function (st) { return pick(st, rng(q)).length; }); });
+  // `what`: 0 the first value, 1 the first key, 2 values, 3 keys, 4 the count. `ix` is the index name or null.
+  function query(t, st, ix, q, what, n) { return idb(14, t.name, st.name, ix, lo(q), up(q), q.lowerOpen, q.upperOpen, what, n); }
+  ['get', 'getKey', 'getAll', 'getAllKeys', 'count'].forEach(function (m, what) {
+    def(proto, m, function (q, n) { q = rng(q); return op(this, false, function (st, t) { return query(t, st, null, q, what, n); }); });
+  });
   def(proto, 'delete', function (q) {
     q = rng(q);
-    return op(this, true, function (st, t) {
-      touch(t, st);
-      st.rows = st.rows.filter(function (r) { return !inr(q, r[0]); });
-    });
+    return op(this, true, function (st, t) { idb(15, t.id, t.name, st.name, lo(q), up(q), q.lowerOpen, q.upperOpen); });
   });
-  def(proto, 'clear', function () { return op(this, true, function (st, t) { touch(t, st); st.rows = []; }); });
-  // A cursor over rows [key, primaryKey, value] that `rows(st)` gives in key order. A key cursor has no value.
-  function cursor(os, src, rows, dir, keys) {
-    var c = new IDBCursor(), s = { i: -1, list: null, os: os, r: null, keys: keys };
+  def(proto, 'clear', function () { return op(this, true, function (st, t) { idb(16, t.id, t.name, st.name); }); });
+  // A cursor over the store rows or the entries of index `ix` (a name or null) in range `q`. The host walks from the position of
+  // the last hit (its key bytes). A key cursor has no value.
+  var DIRS = ['next', 'nextunique', 'prev', 'prevunique'];
+  function cursor(os, src, ix, q, dir, keys) {
+    var c = new IDBCursor(), s = { os: os, r: null, ix: ix, q: q, dir: 0, keys: keys, pk: null, pp: null };
     dir = dir === undefined ? 'next' : String(dir);
-    if (['next', 'nextunique', 'prev', 'prevunique'].indexOf(dir) < 0) throw new TypeError('Invalid cursor direction');
-    var r = op(os, false, function (st) {
-      var list = rows(st);
-      if (dir.indexOf('unique') > 0) list = list.filter(function (row, i) { return i === 0 || cmp(list[i - 1][0], row[0]) !== 0; });
-      if (dir.indexOf('prev') === 0) list.reverse();
-      s.list = list;
-      return move(c, s, 1);
-    });
+    s.dir = DIRS.indexOf(dir);
+    if (s.dir < 0) throw new TypeError('Invalid cursor direction');
+    var r = op(os, false, function (st, t) { return move(c, s, st, t, 1); });
     s.r = r;
     CS.set(c, s);
     c.source = src; c.direction = dir; c.request = r;
     r.source = src;
     return r;
   }
-  function storeRows(q) { return function (st) { return pick(st, q).map(function (row) { return [row[0], row[0], row[1]]; }); }; }
-  def(proto, 'openCursor', function (q, dir) { return cursor(this, this, storeRows(rng(q)), dir, false); });
-  def(proto, 'openKeyCursor', function (q, dir) { return cursor(this, this, storeRows(rng(q)), dir, true); });
-  function move(c, s, n) {
-    s.i += n;
-    var row = s.list[s.i];
-    if (!row) return null;
-    c.key = row[0];
-    c.primaryKey = row[1];
-    if (!s.keys) c.value = clone(row[2]);
+  def(proto, 'openCursor', function (q, dir) { return cursor(this, this, null, rng(q), dir, false); });
+  def(proto, 'openKeyCursor', function (q, dir) { return cursor(this, this, null, rng(q), dir, true); });
+  function move(c, s, st, t, n) {
+    var q = s.q, hit = idb(17, t.name, st.name, s.ix, lo(q), up(q), q.lowerOpen, q.upperOpen, s.dir, s.pk, s.pp, n, s.keys);
+    if (!hit) return null;
+    c.key = hit[0];
+    c.primaryKey = hit[1];
+    if (!s.keys) c.value = hit[2];
+    s.pk = hit[3]; s.pp = hit[4];
     return c;
   }
   function step(c, n) {
-    var s = CS.get(c), o = OS.get(s.os);
-    live(o.tx).q.push([function () { return move(c, s, n); }, s.r]);
+    var s = CS.get(c), o = osState(s.os), t = live(o.tx);
+    t.q.push([function () { return move(c, s, o.st, t, n); }, s.r]);
     kick(o.tx);
   }
   def(IDBCursor.prototype, 'continue', function () { step(this, 1); });
@@ -319,11 +290,10 @@
   });
   def(IDBCursor.prototype, 'delete', function () {
     var k = this.primaryKey;
-    return op(CS.get(this).os, true, function (st, t) { touch(t, st); st.rows = st.rows.filter(function (r) { return cmp(r[0], k) !== 0; }); });
+    return op(CS.get(this).os, true, function (st, t) { var h = hk(k); idb(15, t.id, t.name, st.name, h, h, false, false); });
   });
 
-  // Index entries are derived from the transaction's current store rows. This keeps
-  // writes, deletes and rollback on the same source of truth.
+  // The keys of `value` in index `ix`: valid keys only, no duplicates.
   function ixKeys(ix, value) {
     var k = extract(value, ix.kp), out = [];
     var ks = ix.multi && Array.isArray(k) ? k : [k];
@@ -331,24 +301,6 @@
       if (valid(v) && !out.some(function (x) { return cmp(x, v) === 0; })) out.push(v);
     });
     return out;
-  }
-  function ixRows(st, ix, q) {
-    var rows = [];
-    st.rows.forEach(function (row) {
-      ixKeys(ix, row[1]).forEach(function (k) { if (inr(q, k)) rows.push([k, row[0], row[1]]); });
-    });
-    rows.sort(function (a, b) { return cmp(a[0], b[0]) || cmp(a[1], b[1]); });
-    return rows;
-  }
-  function unique(st, ix, value, primary) {
-    if (!ix.unique) return;
-    var ks = ixKeys(ix, value);
-    st.rows.forEach(function (row) {
-      if (cmp(row[0], primary) === 0) return;
-      ixKeys(ix, row[1]).forEach(function (k) {
-        if (ks.some(function (v) { return cmp(v, k) === 0; })) throw err('An index key already exists.', 'ConstraintError');
-      });
-    });
   }
   function osState(os) {
     var s = OS.get(os);
@@ -391,9 +343,13 @@
     if (!(Array.isArray(kp) ? kp.every(path) : path(kp))) throw err('Invalid key path.', 'SyntaxError');
     var ix = { name: name, kp: kp, unique: !!(opts && opts.unique), multi: !!(opts && opts.multiEntry) };
     if (ix.multi && Array.isArray(kp)) throw err('Compound multiEntry index.', 'InvalidAccessError');
+    idb(10, t.id, t.name, s.st.name, name, kp, ix.unique, ix.multi);
     s.st.indexes[name] = ix;
     t.undo.push(function () { delete s.st.indexes[name]; });
-    op(os, false, function (st) { st.rows.forEach(function (row) { unique(st, ix, row[1], row[0]); }); });
+    op(os, false, function (st, t) {
+      var rows = idb(18, t.name, st.name);
+      idb(19, t.id, t.name, st.name, name, rows.map(function (row) { return [hk(row[0]), ixKeys(ix, row[1]).map(hk)]; }));
+    });
     return ixObj(os, ix);
   });
   def(proto, 'deleteIndex', function (name) {
@@ -401,6 +357,7 @@
     name = String(name);
     var ix = s.st.indexes[name];
     if (!ix) throw err('The index was not found.', 'NotFoundError');
+    idb(11, t.id, t.name, s.st.name, name);
     delete s.st.indexes[name];
     t.undo.push(function () { s.st.indexes[name] = ix; });
   });
@@ -410,33 +367,26 @@
     if (!ix) throw err('The index was not found.', 'NotFoundError');
     return ixObj(this, ix);
   });
-  function ixOp(obj, q, f) {
+  function ixLive(obj) {
     var s = ixState(obj);
-    var st = osState(s.os).st;
-    if (st.indexes[s.ix.name] !== s.ix) throw err('The index was deleted.', 'InvalidStateError');
-    q = rng(q);
-    var r = op(s.os, false, function (st) { return f(ixRows(st, s.ix, q)); });
-    r.source = obj;
-    return r;
+    if (osState(s.os).st.indexes[s.ix.name] !== s.ix) throw err('The index was deleted.', 'InvalidStateError');
+    return s;
   }
-  def(IDBIndex.prototype, 'get', function (q) { ixState(this); if (q == null) throw err('A key is required.', 'DataError'); return ixOp(this, q, function (rows) { return rows.length ? clone(rows[0][2]) : undefined; }); });
-  def(IDBIndex.prototype, 'getKey', function (q) { ixState(this); if (q == null) throw err('A key is required.', 'DataError'); return ixOp(this, q, function (rows) { return rows.length ? clone(rows[0][1]) : undefined; }); });
-  ['openCursor', 'openKeyCursor'].forEach(function (method) {
-    def(IDBIndex.prototype, method, function (q, dir) {
-      var x = ixState(this), ix = x.ix;
-      if (osState(x.os).st.indexes[ix.name] !== ix) throw err('The index was deleted.', 'InvalidStateError');
+  ['get', 'getKey', 'getAll', 'getAllKeys', 'count'].forEach(function (method, what) {
+    def(IDBIndex.prototype, method, function (q, n) {
+      var s = ixLive(this);
+      if (what < 2 && q == null) throw err('A key is required.', 'DataError');
+      if (n !== undefined && (!Number.isFinite(Number(n)) || Number(n) < 0 || Number(n) > 4294967295)) throw new TypeError('Invalid count');
       q = rng(q);
-      return cursor(x.os, this, function (st) { return ixRows(st, ix, q); }, dir, method === 'openKeyCursor');
+      var r = op(s.os, false, function (st, t) { return query(t, st, s.ix.name, q, what, n); });
+      r.source = this;
+      return r;
     });
   });
-  ['getAll', 'getAllKeys', 'count'].forEach(function (method) {
-    def(IDBIndex.prototype, method, function (q, n) {
-      ixState(this);
-      if (n !== undefined && (!Number.isFinite(Number(n)) || Number(n) < 0 || Number(n) > 4294967295)) throw new TypeError('Invalid count');
-      return ixOp(this, q, function (rows) {
-        if (method === 'count') return rows.length;
-        return rows.slice(0, n ? Math.floor(n) : undefined).map(function (r) { return clone(r[method === 'getAll' ? 2 : 1]); });
-      });
+  ['openCursor', 'openKeyCursor'].forEach(function (method) {
+    def(IDBIndex.prototype, method, function (q, dir) {
+      var x = ixLive(this);
+      return cursor(x.os, this, x.ix.name, rng(q), dir, method === 'openKeyCursor');
     });
   });
 
@@ -448,7 +398,8 @@
     if (!t || t.dead) throw err('The database is not running a version change transaction.', 'InvalidStateError');
     name = String(name);
     if (d.data.stores[name]) throw err('An object store with the specified name already exists.', 'ConstraintError');
-    var st = { name: name, kp: opts && opts.keyPath != null ? opts.keyPath : null, auto: !!(opts && opts.autoIncrement), next: 1, rows: [], indexes: Object.create(null) };
+    var st = { name: name, kp: opts && opts.keyPath != null ? opts.keyPath : null, auto: !!(opts && opts.autoIncrement), indexes: Object.create(null) };
+    idb(8, t.id, d.name, name, st.kp, st.auto);
     d.data.stores[name] = st;
     t.undo.push(function () { delete d.data.stores[name]; });
     return t.os[name] = osObj(d.vtx, st);
@@ -459,6 +410,7 @@
     name = String(name);
     var st = d.data.stores[name];
     if (!st) throw err('The specified object store was not found.', 'NotFoundError');
+    idb(9, t.id, d.name, name);
     delete d.data.stores[name];
     delete t.os[name];
     t.undo.push(function () { d.data.stores[name] = st; });
@@ -477,8 +429,17 @@
   function conn(name, data) {
     var db = new IDBDatabase();
     db.name = name; db.version = data.version;
-    D.set(db, { data: data, closed: false, vtx: null });
+    D.set(db, { name: name, data: data, closed: false, vtx: null });
     return db;
+  }
+  // The schema of database `name` from the host: `{ version, stores: { name: { name, kp, auto, indexes } } }`.
+  function load(name, version) {
+    var data = { version: version, stores: {} };
+    idb(7, name).forEach(function (s) {
+      var st = data.stores[s[0]] = { name: s[0], kp: s[1], auto: s[2], indexes: Object.create(null) };
+      s[3].forEach(function (x) { st.indexes[x[0]] = { name: x[0], kp: x[1], unique: x[2], multi: x[3] }; });
+    });
+    return data;
   }
   function open(name, version) {
     name = String(name);
@@ -487,16 +448,17 @@
       if (!(version >= 1 && version <= 9007199254740991)) throw new TypeError("Failed to execute 'open' on 'IDBFactory': The version provided must be a positive integer.");
       version = Math.floor(version);
     }
+    idb(20);
     var r = req(null, null, IDBOpenDBRequest);
     later(function () {
-      var cur = dbs[name], old = cur ? cur.version : 0, v = version === undefined ? (old || 1) : version;
+      var old = idb(0, name), v = version === undefined ? (old || 1) : version;
       r.readyState = 'done';
       if (v < old) {
         r.error = err('The requested version (' + v + ') is less than the existing version (' + old + ').', 'VersionError');
         r.dispatchEvent(new Event('error', { bubbles: true, cancelable: true }));
         return;
       }
-      var data = cur || (dbs[name] = { version: 0, stores: {} }), db = conn(name, data);
+      var data = load(name, old), db = conn(name, data);
       r.result = db;
       if (v === old) {
         r.dispatchEvent(new Event('success'));
@@ -504,7 +466,8 @@
       }
       var tx = newTx(db, 'versionchange', []), t = TS.get(tx), d = D.get(db), e = new Event('upgradeneeded');
       d.vtx = tx; t.open = r; r.transaction = tx;
-      t.undo.push(function () { data.version = old; if (!old) delete dbs[name]; });
+      t.undo.push(function () { data.version = old; });
+      idb(6, t.id, name, v);
       data.version = db.version = v;
       t.after = function () {
         d.vtx = null; r.transaction = null;
@@ -518,10 +481,10 @@
   }
   function deleteDatabase(name) {
     name = String(name);
+    idb(20);
     var r = req(null, null, IDBOpenDBRequest);
     later(function () {
-      var old = dbs[name] ? dbs[name].version : 0, e = new Event('success');
-      delete dbs[name];
+      var old = idb(2, name), e = new Event('success');
       r.readyState = 'done';
       e.oldVersion = old; e.newVersion = null;
       r.dispatchEvent(e);
@@ -531,11 +494,11 @@
   def(IDBFactory.prototype, 'open', open);
   def(IDBFactory.prototype, 'deleteDatabase', deleteDatabase);
   def(IDBFactory.prototype, 'cmp', function (a, b) { return cmp(key(a), key(b)); });
-  def(IDBFactory.prototype, 'databases', function () { return P.resolve(Object.keys(dbs).map(function (n) { return { name: n, version: dbs[n].version }; })); });
+  def(IDBFactory.prototype, 'databases', function () { return P.resolve().then(function () { return idb(1); }).then(function (l) { return l.map(function (x) { return { name: x[0], version: x[1] }; }); }); });
   var all = { IDBRequest: IDBRequest, IDBOpenDBRequest: IDBOpenDBRequest, IDBDatabase: IDBDatabase, IDBTransaction: IDBTransaction, IDBObjectStore: IDBObjectStore, IDBIndex: IDBIndex, IDBCursor: IDBCursor, IDBFactory: IDBFactory, IDBKeyRange: IDBKeyRange };
   Object.keys(all).forEach(function (n) {
     Object.defineProperty(all[n].prototype, Symbol.toStringTag, { value: n, configurable: true });
     def(globalThis, n, all[n]);
   });
   def(globalThis, 'indexedDB', new IDBFactory());
-})();
+})

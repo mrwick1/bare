@@ -98,6 +98,8 @@ pub struct WebStorage {
     /// The cookie jar: the one of the network client (`Client::jar`) and of `document.cookie` (`browser_cookie.rs`). A new tab shares it, as it
     /// shares `localStorage`. It is in memory only.
     cookies: Arc<Mutex<bare_net::cookie::Jar>>,
+    /// The `indexedDB` data of each origin (`browser_idb.rs`). A new tab shares it, as it shares `localStorage`.
+    idb: Arc<Mutex<HashMap<String, crate::browser_idb::Shared>>>,
     lim: StorageLimits,
 }
 
@@ -109,12 +111,17 @@ impl Default for WebStorage {
 
 impl WebStorage {
     pub fn new(lim: StorageLimits) -> WebStorage {
-        WebStorage { local: Default::default(), session: Default::default(), cookies: Default::default(), lim }
+        WebStorage { local: Default::default(), session: Default::default(), cookies: Default::default(), idb: Default::default(), lim }
     }
 
     /// The same `localStorage` data with a new, empty `sessionStorage` (a new tab).
     pub fn new_session(&self) -> WebStorage {
-        WebStorage { local: self.local.clone(), session: Default::default(), cookies: self.cookies.clone(), lim: self.lim }
+        WebStorage { local: self.local.clone(), session: Default::default(), cookies: self.cookies.clone(), idb: self.idb.clone(), lim: self.lim }
+    }
+
+    /// The `indexedDB` store of `origin`, made when it is new.
+    pub(crate) fn idb(&self, origin: &str) -> crate::browser_idb::Shared {
+        self.idb.lock().unwrap_or_else(|e| e.into_inner()).entry(origin.into()).or_default().clone()
     }
 
     pub fn jar(&self) -> Arc<Mutex<bare_net::cookie::Jar>> {
