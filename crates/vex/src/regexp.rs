@@ -1062,6 +1062,62 @@ pub fn canon(c: u16) -> u16 {
     }
 }
 
+#[path = "regexp_canon_table.rs"]
+mod canon_table;
+use canon_table::CANON_MOVES;
+
+/// `{canon(c) : c in ranges}` as sorted ranges, for a class with `i` and without `u`. A member that `canon` keeps stays where
+/// it is; only the members in `CANON_MOVES` move. The cost depends on the number of ranges and of the moves in them, not on
+/// the size of the ranges.
+pub(crate) fn canon_class(ranges: &[(u32, u32)]) -> Vec<(u32, u32)> {
+    let mut bits = vec![0u64; 1024];
+    let moves = CANON_MOVES;
+    let mut to = Vec::new();
+    for &(lo, hi) in ranges {
+        let (lo, hi) = (lo as usize, (hi as usize).min(0xFFFF));
+        if lo > hi {
+            continue;
+        }
+        for w in lo >> 6..=hi >> 6 {
+            let a = if w == lo >> 6 { lo & 63 } else { 0 };
+            let b = if w == hi >> 6 { hi & 63 } else { 63 };
+            bits[w] |= (!0u64 >> (63 - b)) & (!0u64 << a);
+        }
+        let first = moves.partition_point(|m| (m.0 as usize) < lo);
+        for &(c, k) in moves[first..].iter().take_while(|m| m.0 as usize <= hi) {
+            bits[c as usize >> 6] &= !(1 << (c & 63));
+            to.push(k);
+        }
+    }
+    for k in to {
+        bits[k as usize >> 6] |= 1 << (k & 63);
+    }
+    // Runs of set bits, a word at a time.
+    let mut out = Vec::new();
+    let mut c = 0usize;
+    while c < 65536 {
+        let w = bits[c >> 6] >> (c & 63);
+        if w == 0 {
+            c = (c | 63) + 1;
+            continue;
+        }
+        let s = c + w.trailing_zeros() as usize;
+        let mut e = s;
+        while e < 65536 {
+            let gap = !bits[e >> 6] >> (e & 63);
+            if gap == 0 {
+                e = (e | 63) + 1;
+            } else {
+                e += gap.trailing_zeros() as usize;
+                break;
+            }
+        }
+        out.push((s as u32, e as u32 - 1));
+        c = e;
+    }
+    out
+}
+
 const DIGIT: &[(u32, u32)] = &[(0x30, 0x39)];
 const WORD: &[(u32, u32)] = &[(0x30, 0x39), (0x41, 0x5A), (0x5F, 0x5F), (0x61, 0x7A)];
 /// With `i` and `u`, WordCharacters also holds the characters that fold into it: U+017F and U+212A.
@@ -2029,30 +2085,13 @@ impl<'a> Parser<'a> {
         } else if self.flags.ignore_case {
             // Replace the members by their canonical forms: `canon(ch)` in set <=> some member
             // has the same canonical form as `ch`. Exact, and fast at match time.
-            let mut bits = vec![0u64; 1024];
             for &(lo, hi) in &ranges {
                 self.class_work += (hi - lo) as u64 + 1;
-                // Without `u` every member is a code unit, so `canon` sees all of them.
                 if self.class_work > MAX_CLASS_WORK {
                     return Err(CompileError::Limit("character class folding too large"));
                 }
-                for c in lo..=hi {
-                    let k = canon(c as u16) as usize;
-                    bits[k >> 6] |= 1 << (k & 63);
-                }
             }
-            ranges.clear();
-            let mut c = 0usize;
-            while c < 65536 {
-                if bits[c >> 6] >> (c & 63) & 1 == 1 {
-                    let s = c;
-                    while c + 1 < 65536 && bits[(c + 1) >> 6] >> ((c + 1) & 63) & 1 == 1 {
-                        c += 1;
-                    }
-                    ranges.push((s as u32, c as u32));
-                }
-                c += 1;
-            }
+            ranges = canon_class(&ranges);
         }
         self.classes.push(ClassSet { ranges, neg });
         Ok(Node::Class(self.classes.len() as u32 - 1))
@@ -2430,3 +2469,7 @@ impl Emitter {
 #[cfg(test)]
 #[path = "regexp_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "regexp_canon_class_tests.rs"]
+mod canon_class_tests;
