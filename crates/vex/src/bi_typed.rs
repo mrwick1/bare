@@ -195,7 +195,10 @@ pub(crate) fn intrinsic(rt: &mut Realm) -> (Obj, Obj) {
             m("map", 1, map),
             m("filter", 1, filter),
             m("forEach", 1, for_each),
-            m("reduce", 1, reduce),
+            m("every", 1, test_predicate::<false>),
+            m("some", 1, test_predicate::<true>),
+            m("reduce", 1, reduce::<false>),
+            m("reduceRight", 1, reduce::<true>),
             m("sort", 1, sort),
             m("at", 1, at),
             indexed("keys", 0, iterator, 0),
@@ -733,16 +736,33 @@ fn for_each(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     Ok(Value::UNDEFINED)
 }
 
-fn reduce(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+fn test_predicate<const STOP_ON: bool>(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let (src, len) = validated(rt, this)?;
     let cb = arg(args, 0);
     callback(rt, cb)?;
+    let this_arg = arg(args, 1);
+    for i in 0..len {
+        let element = item(rt, src, i)?;
+        let result = rt.call_function(cb, this_arg, &[element, Realm::num(i as f64), this])?;
+        if Realm::truthy(result) == STOP_ON {
+            return Ok(Value::bool(STOP_ON));
+        }
+    }
+    Ok(Value::bool(!STOP_ON))
+}
+
+fn reduce<const REVERSE: bool>(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+    let (src, len) = validated(rt, this)?;
+    let cb = arg(args, 0);
+    callback(rt, cb)?;
+    let index = |offset| if REVERSE { len - 1 - offset } else { offset };
     let (mut acc, start) = match args.get(1) {
         Some(&x) => (x, 0),
-        None if len != 0 => (item(rt, src, 0)?, 1),
+        None if len != 0 => (item(rt, src, index(0))?, 1),
         None => return rt.type_error("reduce of an empty typed array with no initial value"),
     };
-    for i in start..len {
+    for offset in start..len {
+        let i = index(offset);
         let element = item(rt, src, i)?;
         acc = rt.call_function(cb, Value::UNDEFINED, &[acc, element, Realm::num(i as f64), this])?;
     }
@@ -884,3 +904,11 @@ mod filter_tests;
 #[cfg(test)]
 #[path = "bi_typed_copy_within_tests.rs"]
 mod copy_within_tests;
+
+#[cfg(test)]
+#[path = "bi_typed_reduce_right_tests.rs"]
+mod reduce_right_tests;
+
+#[cfg(test)]
+#[path = "bi_typed_every_some_tests.rs"]
+mod every_some_tests;
