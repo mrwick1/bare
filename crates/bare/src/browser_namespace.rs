@@ -124,14 +124,20 @@ pub(crate) fn create_element_ns<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this:
     let arg0 = arg_s::<E>(s, a, 0);
     let ns = ns_arg(d, s, arg0)?;
     let qname = d.arg_str_s(s, a, 1)?;
-    let (prefix, local) = extract(d, s, ns.as_deref(), &qname)?;
+    let opts = (a.len() > 2).then(|| arg_s::<E>(s, a, 2));
+    element_ns(d, s, ns, &qname, opts)
+}
+
+/// "Create an element" for `createElementNS` and `implementation.createDocument`. `opts` is the third argument of `createElementNS`.
+pub(crate) fn element_ns<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, ns: Option<String>, qname: &str, opts: Option<Local<'s>>) -> Res<'s, Local<'s>> {
+    let (prefix, local) = extract(d, s, ns.as_deref(), qname)?;
     match ns.as_deref().map(Ns::from_uri) {
         None => Err(unsupp("createElementNS with a null namespace")),
         Some(Some(Ns::Html)) => {
             if prefix.is_some() || qname.bytes().any(|b| b.is_ascii_uppercase()) {
                 return Err(unsupp("createElementNS in the HTML namespace with a prefix or capital letters (names are lowercase in the native document)"));
             }
-            if d.ce.on.get() || a.len() > 2 { { let o = arg_s::<E>(s, a, 2); crate::browser_custom::create_s(d, s, &qname, o) } } else { crate::browser_dom::make_element_s(d, s, &qname) }
+            if d.ce.on.get() || opts.is_some() { let o = opts.unwrap_or_else(|| s.undefined()); crate::browser_custom::create_s(d, s, qname, o) } else { crate::browser_dom::make_element_s(d, s, qname) }
         }
         Some(Some(ns @ (Ns::Svg | Ns::MathMl))) => {
             let node = {

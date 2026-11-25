@@ -426,6 +426,8 @@ mod browser_cssom_owned_tests;
 mod browser_domparser_move_tests;
 #[cfg(test)]
 mod browser_domparser_xhtml_tests;
+#[cfg(test)]
+mod browser_create_document_tests;
 
 mod browser_frames;
 mod browser_child;
