@@ -121,13 +121,8 @@ impl Realm {
         self.is_array(o).then(|| if o.has_flag(F_LEN_RO) { 0 } else { A_W })
     }
 
-    /// The own property `key` of `o`.
+    /// The ordinary own property `key` of `o`. Use `get_own_h` for typed array indices.
     pub(crate) fn get_own(&mut self, o: Obj, key: Key) -> Option<Own> {
-        if o.is_kind(crate::object::K_TYPED)
-            && let Some(i) = crate::bi_typed::numeric_key(key)
-        {
-            return self.typed_get(o, i?).map(|v| Own::Data(v, A_W | A_E | A_C));
-        }
         if let Some(s) = self.string_wrapper(o)
             && let Some(v) = self.string_own(s, key)
         {
@@ -787,6 +782,7 @@ impl Realm {
                 None => continue,
                 Some(Slot::Data(v)) => v,
                 Some(Slot::Acc(..)) => return Ok(None),
+                Some(Slot::Typed(..)) => continue, // No descriptor field is a numeric index.
                 Some(Slot::Proxy(_)) => return crate::bi_reflect::to_desc(self, d).map(Some),
             };
             match slot {
@@ -1319,6 +1315,11 @@ fn lookup_accessor(rt: &mut Realm, this: Value, args: &[Value], setter: bool) ->
     let key = rt.key_of(arg(args, 0))?;
     let mut c = Realm::obj(v);
     while let Some(o) = c {
+        if o.is_kind(crate::object::K_TYPED) && let Some(i) = crate::bi_typed::numeric_key(key)
+            && i.is_some_and(|i| i < rt.typed_len(o))
+        {
+            return Ok(Value::UNDEFINED);
+        }
         match rt.get_own(o, key) {
             Some(Own::Acc(g, s, _)) => return Ok(if setter { s } else { g }),
             Some(Own::Data(..)) => return Ok(Value::UNDEFINED),

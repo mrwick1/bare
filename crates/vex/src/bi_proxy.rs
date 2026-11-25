@@ -95,7 +95,10 @@ impl Realm {
                 return self.proxy_get(target, key, receiver);
             }
             if target.is_kind(K_TYPED) && let Some(i) = numeric_key(key) {
-                return Ok(i.and_then(|i| self.typed_get(target, i)).unwrap_or(Value::UNDEFINED));
+                return match i {
+                    Some(i) => Ok(self.typed_get(target, i)?.unwrap_or(Value::UNDEFINED)),
+                    None => Ok(Value::UNDEFINED),
+                };
             }
             match self.get_own_h(target, key)? {
                 Some(Own::Data(v, _)) => return Ok(v),

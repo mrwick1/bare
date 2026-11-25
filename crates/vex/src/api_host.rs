@@ -412,10 +412,9 @@ impl Realm {
                 };
             }
             if x.is_kind(K_TYPED) && let Some(i) = crate::bi_typed::numeric_key(key) {
-                return Ok(match i.and_then(|i| self.typed_get(x, i)) {
-                    Some(v) => Walk::Hit(Got::Val(v)),
-                    None => Walk::Miss,
-                });
+                let Some(i) = i.filter(|&i| i < self.typed_len(x)) else { return Ok(Walk::Miss) };
+                let v = if want { self.typed_get(x, i)?.unwrap_or(Value::UNDEFINED) } else { Value::UNDEFINED };
+                return Ok(Walk::Hit(Got::Val(v)));
             }
             self.fn_props(x);
             if let Some((kind, hk)) = self.hs_info(x) {
@@ -479,6 +478,10 @@ impl Realm {
     pub(crate) fn get_own_h(&mut self, o: Obj, key: Key) -> R<Option<Own>> {
         if o.is_kind(K_PROXY) {
             return self.proxy_descriptor(o, key);
+        }
+        if o.is_kind(K_TYPED) && let Some(i) = crate::bi_typed::numeric_key(key) {
+            let Some(i) = i else { return Ok(None) };
+            return Ok(self.typed_get(o, i)?.map(|v| Own::Data(v, A_W | A_E | A_C)));
         }
         self.prepare_own_prototype(o, key)?;
         if !self.api.hs.active || !o.has_flag(F_HOST | F_LAZYM) {
