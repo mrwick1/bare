@@ -185,3 +185,14 @@ and no Dexie error. The download ran for minutes. Then syncd failed 40 times wit
 logged the device out.
 
 Fix: HMAC takes SHA-1, SHA-384 and SHA-512.
+
+## Link attempt 12 (2026-11-25)
+
+Build: main with #1101, #1102 and #1104, profile `whatsapp`. The link held. No HMAC error. During the download,
+`message.bulkAdd` failed 17 times with `ConstraintError`. Then Dexie transactions failed with `TransactionInactiveError`, and
+syncd logged "Calling runInTransaction recursively".
+
+Cause: the shim started every transaction at once. WhatsApp reads a row and adds it when it is missing, so two transactions at
+the same time added the same key. Chrome runs overlapping write transactions one after the other.
+
+Fix: the shim orders transactions as the standard says.

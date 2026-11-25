@@ -42,13 +42,14 @@ pub(crate) struct Images {
     rescanned: bool,
     /// The elements that were asked for already.
     known: std::collections::HashSet<NodeId>,
-    queue: VecDeque<(String, Vec<NodeId>)>,
+    /// The pictures that wait for a worker: the URL, the elements and when they were queued (the queue wait of the trace).
+    queue: VecDeque<(String, Vec<NodeId>, std::time::Instant)>,
     /// The pictures on their way: the elements, the job, and the URL and the start (for `Page::pending`).
     #[allow(clippy::type_complexity)] // A one-off tuple: a named alias would add nothing.
     jobs: Vec<(Vec<NodeId>, Task<Option<Bitmap>>, String, std::time::Instant)>,
     /// The CSS pictures: the numbers that were asked for, the ones that wait for a worker, and the ones on their way.
     css_seen: std::collections::HashSet<u32>,
-    css_queue: VecDeque<(u32, String)>,
+    css_queue: VecDeque<(u32, String, std::time::Instant)>,
     css_jobs: Vec<(u32, Task<Option<Bitmap>>, String, std::time::Instant)>,
     /// The styles that were read last (the address of the `Styles` and its number of styles).
     css_read: (usize, usize, u64),
@@ -222,7 +223,7 @@ fn want(images: &mut Images, b: &crate::browser_any::AnyBrowser, doc: &Document,
         Some(&k) => images.queue[k].1.push(n),
         None if by_url.len() < MAX_PICTURES => {
             by_url.insert(url.clone(), images.queue.len());
-            images.queue.push_back((url, vec![n]));
+            images.queue.push_back((url, vec![n], std::time::Instant::now()));
         }
         None => return false,
     }
@@ -357,7 +358,7 @@ impl Page {
         let doc = self.source.browser().and_then(|b| b.document_url());
         while self.images.jobs.len() + self.images.css_jobs.len() < INFLIGHT {
             // The pictures of the tree first, then the ones of the styles (`id` is 0 for the first kind).
-            let Some((url, nodes, id)) = self.images.queue.pop_front().map(|(u, n)| (u, n, 0)).or_else(|| self.images.css_queue.pop_front().map(|(i, u)| (u, Vec::new(), i))) else { break };
+            let Some((url, nodes, id, queued)) = self.images.queue.pop_front().map(|(u, n, t)| (u, n, 0, t)).or_else(|| self.images.css_queue.pop_front().map(|(i, u, t)| (u, Vec::new(), i, t))) else { break };
             let used = self.images.used.clone();
             let client = match &mut self.source {
                 Source::Session(s) => s.resource_client(),
@@ -365,7 +366,10 @@ impl Page {
             };
             let (shown, now) = (url.clone(), std::time::Instant::now());
             let doc = doc.clone();
-            let task = client.spawn(move |c| load(c, &url, &used, doc.as_deref().and_then(|d| Url::parse(d).ok()).as_ref()));
+            let task = client.spawn(move |c| {
+                bare_net::trace::wanted(queued);
+                load(c, &url, &used, doc.as_deref().and_then(|d| Url::parse(d).ok()).as_ref())
+            });
             if id == 0 {
                 self.images.jobs.push((nodes, task, shown, now));
             } else {
@@ -457,7 +461,7 @@ impl Page {
             let Some(raw) = bare_css::urls::get(id) else { continue };
             let url = if raw.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("data:")) { Ok(raw.to_string()) } else { b.resolve_url(&raw) };
             if let Ok(url) = url {
-                self.images.css_queue.push_back((id, url));
+                self.images.css_queue.push_back((id, url, std::time::Instant::now()));
             }
         }
     }
