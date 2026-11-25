@@ -140,6 +140,8 @@ mod browser_cors_tests;
 mod browser_fetch_origin_tests;
 #[cfg(test)]
 mod browser_referer_tests;
+#[cfg(test)]
+mod browser_fetch_integrity_tests;
 pub mod browser_navigation;
 mod browser_navigation_params;
 mod browser_navigation_state;
@@ -236,6 +238,8 @@ mod browser_perf_detail_tests;
 mod browser_clone_host_tests;
 #[cfg(test)]
 mod browser_idb_tx_tests;
+#[cfg(test)]
+mod browser_idb_binary_key_tests;
 #[cfg(test)]
 mod browser_idb_cursor_tests;
 #[cfg(test)]
