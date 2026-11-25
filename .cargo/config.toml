@@ -2,3 +2,7 @@
 # vcruntime140.dll, and without it bare-mcp.exe does not start.
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# Tests and `cargo run` never use the profile `default` of the machine (`bare::profile`): an empty value turns profiles off.
+[env]
+BARE_DATA_DIR = ""

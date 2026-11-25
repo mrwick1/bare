@@ -11,3 +11,4 @@ pub mod state;
 pub mod steps;
 pub mod suite;
 pub use bare::{DownloadState, Downloads};
+pub use bare::profile;

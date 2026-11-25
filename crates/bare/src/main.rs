@@ -11,6 +11,8 @@
 //! `--window page.html` opens a Wayland window that shows the painted page (see `show_window`). `--window http://...` opens an
 //! interactive one: scripts run, and the pointer and the keyboard work (see `page.rs`).
 //! `--width=900` sets the width of the window (1280 if not given).
+//! `--profile NAME` (or a path): the interactive window keeps its cookies and `localStorage` in that profile (`profile.rs`). The
+//! default is the profile `default`; when another process holds it, the window runs in memory and says so on stderr.
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
 
@@ -54,7 +56,9 @@ fn run_main() -> i32 {
     let viewport = (width.unwrap_or(VIEWPORT.0), VIEWPORT.1);
     let paint = args.iter().find_map(|a| a.strip_prefix("--paint="));
     let window = args.iter().any(|a| a == "--window");
-    let arg = match args.iter().find(|a| !a.starts_with("--")) {
+    let profile_at = args.iter().position(|a| a == "--profile").map(|i| i + 1);
+    let profile = profile_at.and_then(|i| args.get(i)).map(String::as_str).or_else(|| args.iter().find_map(|a| a.strip_prefix("--profile=")));
+    let arg = match args.iter().enumerate().find(|&(i, a)| !a.starts_with("--") && Some(i) != profile_at).map(|(_, a)| a) {
         // Get the first word that is not a flag: the URL.
         // It may be missing. Rust makes us handle that case.
         // `match` is like `switch`, but it must handle every case.
@@ -74,7 +78,7 @@ fn run_main() -> i32 {
         return paint_file(arg, out, viewport);
     }
     if window {
-        return show_window(arg, viewport);
+        return show_window(arg, viewport, profile);
     }
     if run {
         // The session loads the first document itself (one verified path for every document).
@@ -323,9 +327,9 @@ impl bare_window::App for Page {
 
 /// `--window PAGE`: open a window that shows the page, and run until it closes. With `BARE_WINDOW_STATS` set, print
 /// the frame, buffer and wake-up counts and the time of the first frame to stderr when the window closes.
-fn show_window(arg: &str, viewport: (f32, f32)) -> i32 {
+fn show_window(arg: &str, viewport: (f32, f32), profile: Option<&str>) -> i32 {
     if arg.starts_with("http://") || arg.starts_with("https://") {
-        return show_interactive(arg, viewport);
+        return show_interactive(arg, viewport, profile);
     }
     let started = std::time::Instant::now();
     let (doc, styles) = match load_page(arg, viewport) {
@@ -354,12 +358,31 @@ fn show_window(arg: &str, viewport: (f32, f32)) -> i32 {
 
 /// `--window URL`: the page runs in a session (scripts, `fetch`, navigation), and the window sends pointer and keyboard
 /// input to it (see `page.rs`). The VM needs a big stack, as for `--run`. With `BARE_WINDOW_STATS` set, print the counts.
-fn show_interactive(url: &str, viewport: (f32, f32)) -> i32 {
+fn show_interactive(url: &str, viewport: (f32, f32), profile: Option<&str>) -> i32 {
     let url = url.to_string();
+    let profile = match bare::profile::Profile::choose(profile) {
+        Ok((p, note)) => {
+            if !note.is_empty() {
+                eprintln!("bare: {note}");
+            }
+            p
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 2;
+        }
+    };
     let stack = if cfg!(debug_assertions) { 64 << 20 } else { 8 << 20 };
     let worker = std::thread::Builder::new().stack_size(stack).spawn(move || {
         let size = (viewport.0 as u32, viewport.1 as u32);
-        let mut page = match bare::page::Page::open_in(&url, size, &session_client()) {
+        let state = match profile.as_ref().map(|p| p.load()).transpose() {
+            Ok(st) => st,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return 1;
+            }
+        };
+        let mut page = match bare::page::Page::open_in_with(&url, size, &session_client(), state.as_ref(), None, profile) {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("error: {e}");
