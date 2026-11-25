@@ -686,6 +686,9 @@ pub struct Code<A = Str> {
     /// default or rest parameter). The realm defines both properties of a function cell at the first look at its own properties.
     pub fn_name: u32,
     pub fn_len: u16,
+    /// The bytes `start..end` of the function in its source text, for `Function.prototype.toString`. `(0, 0)`: not known (a top level,
+    /// a synthesized constructor).
+    pub span: (u32, u32),
     /// The function is strict code: a write that fails (a read-only property, a primitive, `delete` of a fixed property) throws.
     pub strict: bool,
     /// The function is an arrow, a method, a getter or a setter: `new` on it throws a `TypeError`.
@@ -718,6 +721,7 @@ impl<A: Copy> Code<A> {
             flags: self.flags,
             fn_name: self.fn_name,
             fn_len: self.fn_len,
+            span: self.span,
             strict: self.strict,
             noctor: self.noctor,
             gen_kind: self.gen_kind,
@@ -787,6 +791,7 @@ impl Code {
             flags: 0,
             fn_name: NO_NAME,
             fn_len: 0,
+            span: (0, 0),
             strict: false,
             noctor: false,
             gen_kind: GK_NONE,
