@@ -125,6 +125,8 @@ mod browser_fetch_tests;
 #[cfg(test)]
 mod browser_xhr_tests;
 #[cfg(test)]
+mod browser_xhr_charset_tests;
+#[cfg(test)]
 mod browser_eventsource_tests;
 #[cfg(test)]
 mod browser_websocket_tests;
