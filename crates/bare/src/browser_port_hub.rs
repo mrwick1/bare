@@ -21,17 +21,17 @@
 //! dropped (`release`). A send to a missing end is dropped with no error.
 use crate::browser_navigation_state::Transfer;
 use bare_js_api::{Cloned, Moved};
-use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
-use std::rc::Rc;
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed}};
 
 /// A message for an end, as data.
 pub(crate) struct Wire {
     pub cloned: Cloned,
+    pub error: bool,
     /// The byte cost in the queue of a port (`16 + cloned.cost()`).
     pub bytes: usize,
     /// The origin of the sender of a `BroadcastChannel` message. `None` for a port.
-    pub origin: Option<Rc<str>>,
+    pub origin: Option<Arc<str>>,
 }
 
 struct End {
@@ -49,12 +49,13 @@ struct Ends {
 
 #[derive(Default)]
 pub(crate) struct PortHub {
+    threaded: AtomicBool,
     /// The wires that wait in all the ends.
-    wires: Cell<usize>,
-    bytes: Cell<usize>,
-    st: RefCell<Ends>,
+    wires: AtomicUsize,
+    bytes: AtomicUsize,
+    st: Mutex<Ends>,
     /// The ends of the `BroadcastChannel`s, by origin, a newline and the name.
-    chans: RefCell<HashMap<Box<str>, Vec<u64>>>,
+    chans: Mutex<HashMap<Box<str>, Vec<u64>>>,
 }
 
 fn ends_of(xf: &[Moved]) -> impl Iterator<Item = u64> + '_ {
@@ -68,29 +69,37 @@ fn ends_of(xf: &[Moved]) -> impl Iterator<Item = u64> + '_ {
 }
 
 impl PortHub {
+    pub(crate) fn enable_thread_wake(&self) {
+        self.threaded.store(true, Relaxed);
+    }
+
+    pub(crate) fn has_pending_for(&self, page: u32) -> bool {
+        self.st.lock().unwrap().ends.values().any(|end| end.owner == Some(page) && !end.queue.is_empty())
+    }
+
     /// Does a wire wait?
     #[inline]
     pub(crate) fn busy(&self) -> bool {
-        self.wires.get() > 0
+        self.wires.load(Relaxed) > 0
     }
 
     pub(crate) fn wires(&self) -> usize {
-        self.wires.get()
+        self.wires.load(Relaxed)
     }
 
     pub(crate) fn bytes(&self) -> usize {
-        self.bytes.get()
+        self.bytes.load(Relaxed)
     }
 
     /// A number for a new page. The top page is 0 and never asks.
     pub(crate) fn new_page(&self) -> u32 {
-        let mut s = self.st.borrow_mut();
+        let mut s = self.st.lock().unwrap();
         s.pages += 1;
         s.pages
     }
 
     pub(crate) fn new_end(&self, owner: Option<u32>) -> u64 {
-        let mut s = self.st.borrow_mut();
+        let mut s = self.st.lock().unwrap();
         s.next += 1;
         let id = s.next;
         s.ends.insert(id, End { owner, queue: VecDeque::new() });
@@ -98,40 +107,51 @@ impl PortHub {
     }
 
     pub(crate) fn has(&self, end: u64) -> bool {
-        self.st.borrow().ends.contains_key(&end)
+        self.st.lock().unwrap().ends.contains_key(&end)
     }
 
     pub(crate) fn set_owner(&self, end: u64, owner: Option<u32>) {
-        if let Some(e) = self.st.borrow_mut().ends.get_mut(&end) {
+        if let Some(e) = self.st.lock().unwrap().ends.get_mut(&end) {
             e.owner = owner;
         }
     }
 
-    /// Queue a wire. A missing end gives the wire back.
-    pub(crate) fn push(&self, end: u64, w: Wire) -> Result<(), Wire> {
-        let mut s = self.st.borrow_mut();
-        let Some(e) = s.ends.get_mut(&end) else { return Err(w) };
-        self.wires.set(self.wires.get() + 1);
-        self.bytes.set(self.bytes.get() + w.bytes);
+    /// Check limits and queue under one lock. A dropped message gives back its moved items.
+    pub(crate) fn push(&self, end: u64, w: Wire, max_messages: usize, max_bytes: usize) -> Result<(), (Wire, Option<&'static str>)> {
+        let mut s = self.st.lock().unwrap();
+        let Some(e) = s.ends.get_mut(&end) else { return Err((w, None)) };
+        if self.wires() >= max_messages {
+            return Err((w, Some("messages")));
+        }
+        if self.bytes().saturating_add(w.bytes) > max_bytes {
+            return Err((w, Some("message-bytes")));
+        }
+        self.wires.fetch_add(1, Relaxed);
+        self.bytes.fetch_add(w.bytes, Relaxed);
         e.queue.push_back(w);
+        drop(s);
+        if self.threaded.load(Relaxed) {
+            bare_net::parallel::wake();
+        }
         Ok(())
     }
 
     /// Put wires back in front of the queue, in their order (the undelivered messages of a port that moves).
     pub(crate) fn prepend(&self, end: u64, ws: Vec<Wire>) {
-        let mut s = self.st.borrow_mut();
+        let mut s = self.st.lock().unwrap();
         let Some(e) = s.ends.get_mut(&end) else { return };
         for w in ws.into_iter().rev() {
-            self.wires.set(self.wires.get() + 1);
-            self.bytes.set(self.bytes.get() + w.bytes);
+            self.wires.fetch_add(1, Relaxed);
+            self.bytes.fetch_add(w.bytes, Relaxed);
             e.queue.push_front(w);
         }
     }
 
     pub(crate) fn pop(&self, end: u64) -> Option<Wire> {
-        let w = self.st.borrow_mut().ends.get_mut(&end)?.queue.pop_front()?;
-        self.wires.set(self.wires.get() - 1);
-        self.bytes.set(self.bytes.get() - w.bytes);
+        let mut state = self.st.lock().unwrap();
+        let w = state.ends.get_mut(&end)?.queue.pop_front()?;
+        self.wires.fetch_sub(1, Relaxed);
+        self.bytes.fetch_sub(w.bytes, Relaxed);
         Some(w)
     }
 
@@ -140,37 +160,37 @@ impl PortHub {
         while let Some(id) = todo.pop() {
             let Some(e) = s.ends.remove(&id) else { continue };
             for w in e.queue {
-                self.wires.set(self.wires.get() - 1);
-                self.bytes.set(self.bytes.get() - w.bytes);
+                self.wires.fetch_sub(1, Relaxed);
+                self.bytes.fetch_sub(w.bytes, Relaxed);
                 todo.extend(ends_of(w.cloned.moved()));
             }
         }
     }
 
     pub(crate) fn remove_end(&self, end: u64) {
-        let mut s = self.st.borrow_mut();
+        let mut s = self.st.lock().unwrap();
         self.remove_all(&mut s, vec![end]);
     }
 
     /// The ports of a message that is dropped never arrive: their ends go.
     pub(crate) fn release(&self, xf: &[Moved]) {
         if ends_of(xf).next().is_some() {
-            let mut s = self.st.borrow_mut();
+            let mut s = self.st.lock().unwrap();
             self.remove_all(&mut s, ends_of(xf).collect());
         }
     }
 
     /// List the end of a `BroadcastChannel`.
     pub(crate) fn join(&self, origin: &str, name: &str, end: u64) {
-        self.chans.borrow_mut().entry(format!("{origin}\n{name}").into()).or_default().push(end);
+        self.chans.lock().unwrap().entry(format!("{origin}\n{name}").into()).or_default().push(end);
     }
 
     /// The live ends of the channels `origin` and `name` in pages other than `page`, oldest first.
     pub(crate) fn peers(&self, origin: &str, name: &str, page: u32) -> Vec<u64> {
-        let mut chans = self.chans.borrow_mut();
+        let mut chans = self.chans.lock().unwrap();
         let key = format!("{origin}\n{name}");
         let Some(list) = chans.get_mut(key.as_str()) else { return Vec::new() };
-        let s = self.st.borrow();
+        let s = self.st.lock().unwrap();
         list.retain(|e| s.ends.contains_key(e));
         let out = list.iter().copied().filter(|e| s.ends[e].owner != Some(page)).collect();
         if list.is_empty() {
@@ -181,7 +201,7 @@ impl PortHub {
 
     /// A page ends: its ends go.
     pub(crate) fn drop_page(&self, page: u32) {
-        let mut s = self.st.borrow_mut();
+        let mut s = self.st.lock().unwrap();
         if s.ends.is_empty() {
             return;
         }
@@ -189,3 +209,8 @@ impl PortHub {
         self.remove_all(&mut s, gone);
     }
 }
+
+
+#[cfg(test)]
+#[path = "browser_port_hub_thread_tests.rs"]
+mod thread_tests;

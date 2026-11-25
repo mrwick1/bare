@@ -290,6 +290,16 @@ impl Ops<New> for Realm {
         self.stack_truncate(n);
         out
     }
+    fn start_shared_worker(&mut self, control: bare_vex::shared_memory::Test262AgentControl) {
+        self.install_shared_memory(true, Some(bare_net::parallel::wake));
+        self.set_test262_agent_control(control);
+    }
+    fn shared_wait_delay(&self) -> Option<std::time::Duration> {
+        Realm::shared_wait_delay(self)
+    }
+    fn deliver_shared_wait(&mut self) -> Result<bool, Fault<New>> {
+        Realm::deliver_shared_wait(self, std::time::Duration::ZERO).map_err(Fault::Throw)
+    }
     fn host_checkpoint(&mut self) -> Result<usize, Fault<New>> {
         run(self, |r| r.checkpoint())
     }

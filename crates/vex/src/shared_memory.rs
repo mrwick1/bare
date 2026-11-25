@@ -75,7 +75,7 @@ impl SharedBuffer {
         state.waiters.entry(offset).or_default().push_back(ticket.clone());
         let start = Instant::now();
         let result = loop {
-            if control.is_some_and(Test262AgentControl::stopped) { break None; }
+            if control.is_some_and(Test262AgentControl::is_stopped) { break None; }
             if ticket.ready.load(Ordering::Relaxed) { break Some("ok"); }
             if let Some(timeout) = timeout {
                 let Some(left) = timeout.checked_sub(start.elapsed()) else { break Some("timed-out") };
@@ -93,13 +93,23 @@ impl SharedBuffer {
         let mut state = self.0.state.lock().unwrap();
         let Some(queue) = state.waiters.get_mut(&offset) else { return 0 };
         let n = count.min(queue.len());
+        let mut wake_hosts: Vec<fn()> = Vec::new();
         for ticket in queue.drain(..n) {
-            ticket.ready.store(true, Ordering::Relaxed);
-            if let Some(signal) = &ticket.signal { signal.wake(); }
+            ticket.ready.store(true, Ordering::Release);
+            if let Some(signal) = &ticket.signal {
+                signal.wake();
+                if let Some(wake) = signal.wake_host
+                    && !wake_hosts.iter().any(|&other| std::ptr::fn_addr_eq(wake, other))
+                {
+                    wake_hosts.push(wake);
+                }
+            }
             on_notify(&ticket);
         }
         if queue.is_empty() { state.waiters.remove(&offset); }
         if n != 0 { self.0.changed.notify_all(); }
+        drop(state);
+        for wake in wake_hosts { wake(); }
         n
     }
 }
@@ -123,7 +133,7 @@ impl Test262AgentControl {
         }
     }
 
-    fn stopped(&self) -> bool {
+    pub fn is_stopped(&self) -> bool {
         self.0.stopped.load(Ordering::Acquire)
     }
 }
@@ -135,6 +145,7 @@ struct Ticket {
 
 #[derive(Default)]
 struct Signal {
+    wake_host: Option<fn()>,
     version: Mutex<u64>,
     changed: Condvar,
 }
@@ -207,8 +218,9 @@ impl Realm {
             drop(state);
             (false, self.string(immediate))
         } else {
-            let waits = self.shared_memory.as_mut().unwrap().waits.get_or_insert_with(|| AsyncWaits {
-                signal: Arc::new(Signal::default()),
+            let shared = self.shared_memory.as_mut().unwrap();
+            let waits = shared.waits.get_or_insert_with(|| AsyncWaits {
+                signal: Arc::new(Signal { wake_host: shared.wake_host, ..Default::default() }),
                 pending: Vec::new(),
             });
             let ticket = Arc::new(Ticket { ready: AtomicBool::new(false), signal: Some(waits.signal.clone()) });
@@ -226,8 +238,20 @@ impl Realm {
         Ok(result.value())
     }
 
-    /// Deliver one event from the test host's event loop. JS values stay on this agent.
-    pub fn deliver_test262_wait(&mut self, budget: Duration) -> R<bool> {
+    /// Time until a pending async wait is ready, or None if there is no deadline.
+    pub fn shared_wait_delay(&self) -> Option<Duration> {
+        let waits = self.shared_memory.as_ref()?.waits.as_ref()?;
+        waits.pending.iter().filter_map(|p| {
+            if p.ticket.ready.load(Ordering::Acquire) {
+                Some(Duration::ZERO)
+            } else {
+                p.timeout.map(|timeout| timeout.saturating_sub(p.started.elapsed()))
+            }
+        }).min()
+    }
+
+    /// Deliver one event on the owning agent. Call with zero budget to avoid blocking.
+    pub fn deliver_shared_wait(&mut self, budget: Duration) -> R<bool> {
         let Some(waits) = self.shared_memory.as_mut().and_then(|shared| shared.waits.as_mut()) else {
             return Ok(false);
         };
@@ -287,6 +311,7 @@ pub(crate) struct SharedMemory {
     pub(crate) waits: Option<AsyncWaits>,
     pub(crate) can_block: bool,
     pub(crate) control: Option<Test262AgentControl>,
+    wake_host: Option<fn()>,
 }
 
 pub(crate) fn is_shared(object: Obj) -> bool {
@@ -295,8 +320,16 @@ pub(crate) fn is_shared(object: Obj) -> bool {
 
 impl Realm {
     pub fn install_test262_shared_memory(&mut self, can_block: bool) {
-        self.shared_memory.get_or_insert_with(Default::default).can_block = can_block;
-        self.install_shared_globals();
+        self.install_shared_memory(can_block, None);
+    }
+
+    /// Enable shared memory for an agent the host has authorized. The wake hook
+    /// runs outside the backing lock and must only signal the host event loop.
+    pub fn install_shared_memory(&mut self, can_block: bool, wake_host: Option<fn()>) {
+        if self.shared_memory.is_none() {
+            self.shared_memory = Some(Box::new(SharedMemory { can_block, wake_host, ..Default::default() }));
+            self.install_shared_globals();
+        }
     }
 
     pub(crate) fn install_shared_globals(&mut self) {

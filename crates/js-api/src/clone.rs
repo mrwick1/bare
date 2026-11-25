@@ -24,6 +24,7 @@ use crate::{Abort, Engine, Error, Local, Scope};
 use std::any::Any;
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
+use std::sync::Arc;
 
 /// Limits of one walk, and the names of their [`Abort::Limit`] errors. The engine counts nodes, depth and bytes with [`Meter`].
 #[derive(Clone, Copy, Debug)]
@@ -56,10 +57,10 @@ pub enum Moved {
     /// The bytes of an `ArrayBuffer`. The engine detached the source.
     Buffer(Vec<u8>),
     /// What [`CloneHost::transfer_out`] gave. The engine never looks inside.
-    Host(Box<dyn Any>),
+    Host(Box<dyn Any + Send>),
     /// A copy of a serializable platform object (a `Blob`, a `CryptoKey`) that [`CloneHost::write_host_object`] gave. It is not in the
     /// transfer list: it follows the listed items. The engine never looks inside.
-    Data(Box<dyn Any>),
+    Data(Box<dyn Any + Send>),
 }
 
 /// A structured clone as data. It holds no engine value, so it can wait in a history entry or cross to another heap.
@@ -111,9 +112,27 @@ pub struct CloneIn<'s> {
     pub hosts: Vec<Local<'s>>,
 }
 
+/// An opaque identity issued by the host for one agent cluster.
+#[derive(Clone, Default)]
+pub struct AgentCluster(Arc<()>);
+
+impl PartialEq for AgentCluster {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for AgentCluster {}
+
 /// What the engine asks of the page during a clone. The engine calls it only for a host object, a transfer item or an error, never for
 /// plain data.
 pub trait CloneHost<E: Engine> {
+    /// The cluster of an eligible messaging or in-memory clone endpoint.
+    /// Storage and endpoints without cross-origin isolation return None.
+    fn shared_buffer_cluster(&self) -> Option<&AgentCluster> {
+        None
+    }
+
     /// Is `o` an object that the host owns (a wrapper, an event, a `URL`, a platform object)? The engine refuses it, unless the
     /// transfer list holds it.
     fn is_host_object(&self, o: &E::Raw) -> bool;
@@ -121,14 +140,14 @@ pub trait CloneHost<E: Engine> {
     fn can_transfer(&self, o: &E::Raw) -> bool;
     /// Move `o` out of this page. The engine calls it after the walk succeeded and the checks passed, once for each such item, in list
     /// order.
-    fn transfer_out(&mut self, o: &E::Raw) -> Box<dyn Any>;
+    fn transfer_out(&mut self, o: &E::Raw) -> Box<dyn Any + Send>;
     /// New objects for the moved host items, in list order.
-    fn transfer_in<'s>(&mut self, s: &mut Scope<'s, E>, items: Vec<Box<dyn Any>>) -> Result<Vec<Local<'s>>, Error<'s>>;
+    fn transfer_in<'s>(&mut self, s: &mut Scope<'s, E>, items: Vec<Box<dyn Any + Send>>) -> Result<Vec<Local<'s>>, Error<'s>>;
     /// The error to throw for a refused value (`DataCloneError`).
     fn data_clone_error<'s>(&mut self, s: &mut Scope<'s, E>, what: Refused) -> Error<'s>;
     /// HTML "serialization steps" of a host object that is not in the transfer list: its data, and its byte cost for [`Meter`]. `None`
     /// refuses it. The data must hold no JS object. V8 has the same hook (`ValueSerializer::Delegate::WriteHostObject`).
-    fn write_host_object(&mut self, _o: &E::Raw) -> Option<(Box<dyn Any>, usize)> {
+    fn write_host_object(&mut self, _o: &E::Raw) -> Option<(Box<dyn Any + Send>, usize)> {
         None
     }
     /// HTML "deserialization steps": a new object from what [`CloneHost::write_host_object`] gave.

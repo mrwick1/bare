@@ -181,6 +181,9 @@ pub trait Ops<E: Eng>: Sized {
     fn call_scoped_o(&mut self, f: E::Raw, this: E::Raw, args: &[E::Raw], scope: &[E::Obj]) -> Result<E::Raw, Fault<E>>;
     fn queue_microtask_o(&mut self, cb: E::Raw) -> Result<(), Fault<E>>;
     fn host_scope_o<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T, Fault<E>>) -> Result<T, Fault<E>>;
+    fn start_shared_worker(&mut self, _: bare_vex::shared_memory::Test262AgentControl) {}
+    fn shared_wait_delay(&self) -> Option<std::time::Duration> { None }
+    fn deliver_shared_wait(&mut self) -> Result<bool, Fault<E>> { Ok(false) }
     fn host_checkpoint(&mut self) -> Result<usize, Fault<E>>;
     fn object_prototype(& self) -> E::Obj;
     fn array_prototype(& self) -> E::Obj;
