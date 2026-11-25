@@ -113,9 +113,6 @@ fn ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) ->
         Type::Object | Type::Function => (text_member(d, s, opts, "body")?, text_member(d, s, opts, "tag")?),
         _ => return Err(s.type_error("Failed to construct 'Notification': parameter 2 is not of type 'NotificationOptions'.")),
     };
-    if d.st.borrow().by_obj.len() >= d.lim.max_wrappers {
-        return Err(d.lim_s(s, "dom-wrappers"));
-    }
     old_v::<E>(s, |it| {
         let o = d.obj(it, proto)?;
         d.st.borrow_mut().add_target(it, o, Owner::Notification(o));

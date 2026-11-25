@@ -38,7 +38,7 @@ fn create_document<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a
     let el = if qname.is_empty() { None } else { Some(crate::browser_namespace::element_ns(d, s, ns, &qname, None)?) };
     let n = {
         let mut doc = d.doc.borrow_mut();
-        d.room_s(s, &doc, 1, 0)?;
+        d.room_s(s, &doc, 0)?;
         doc.create_document()
     };
     if let Some(el) = el {

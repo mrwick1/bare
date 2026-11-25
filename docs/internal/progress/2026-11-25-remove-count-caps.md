@@ -28,7 +28,11 @@ Owner order (2026-11-25): remove every cap that stops a real page. This PR adds 
   - link 9, namespace 16, nodelist 22, platform 22, range 27, reclaim 7, scheduler 37, select 9;
   - shadow 53, browser_tests 58, count_caps 5, survive 5, child 35, xhr 11, events_gc 1;
   - html fragment 13, html5lib 5, context 17, pseudo 2.
-- `browser_style_tests::prototype_key_order` fails (left 267, right 265). It fails in the same way on the base `1a5690b6`. This PR does not cause it.
+- `browser_style_tests::prototype_key_order` failed on main. Main added `clip` (8531c977) and `grid-template` (2974af73) to the style prototype but kept the old counts. The test now expects 268 names on `CSSStyleDeclaration.prototype` (was 265) and 270 on the computed prototype (was 267). Chrome has all three names.
+
+## Merge of origin/main
+
+- Main added two uses of removed caps. `Notification` checked `max_wrappers`: the check is removed. `DOMImplementation.createDocument` passed a node count to `room_s`: the count is removed.
 
 ## Cost rows
 
