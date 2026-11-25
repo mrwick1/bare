@@ -44,7 +44,7 @@ fn interfaces_and_argument_checks() {
     assert_eq!(js(&mut b, "new ResizeObserverEntry()"), "throw:TypeError:Illegal constructor");
     assert_eq!(js(&mut b, "var o = new ResizeObserver(function () {}); o.observe(document)"), "throw:TypeError:Failed to execute 'observe' on 'ResizeObserver': parameter 1 is not of type 'Element'.");
     assert_eq!(js(&mut b, "o.observe(document.getElementById('t'), { box: 'margin-box' })"), "throw:TypeError:Failed to execute 'observe' on 'ResizeObserver': The provided value 'margin-box' is not a valid enum value of type ResizeObserverBoxOptions.");
-    assert_eq!(js(&mut b, "o.observe(document.getElementById('t'), { box: 'device-pixel-content-box' })"), "unsupported:ResizeObserver device-pixel-content-box (the device pixel ratio is not modelled)");
+    assert_eq!(js(&mut b, "o.observe(document.getElementById('t'), { box: 'device-pixel-content-box' })"), "undefined");
     assert_eq!(js(&mut b, "ResizeObserver.prototype.observe.call({}, document.body)"), "throw:TypeError:Illegal invocation");
 }
 

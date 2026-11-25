@@ -404,6 +404,8 @@ mod browser_count_caps_tests;
 #[cfg(test)]
 mod browser_resize_tests;
 #[cfg(test)]
+mod browser_resize_device_box_tests;
+#[cfg(test)]
 mod browser_geometry_tests;
 #[cfg(test)]
 mod browser_geom_tests;
