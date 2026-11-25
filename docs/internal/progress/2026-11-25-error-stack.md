@@ -1,6 +1,6 @@
-# Error.prototype.stack, version 2 (not shipped: cost gate)
+# Error.prototype.stack, version 2
 
-Status: built and tested, **not merged**. The cost rows are over the rule. Version 1 is in `/data/bare-tmp/teams-outlook-2026-11-25/error-stack-v1.diff`.
+Status: ships as cost debt under rapid mode (owner, 2026-11-25). The cost rows are over the rule. Version 1 is in `/data/bare-tmp/teams-outlook-2026-11-25/error-stack-v1.diff`.
 
 ## Design
 
@@ -18,25 +18,29 @@ Status: built and tested, **not merged**. The cost rows are over the rule. Versi
 - `tools/fixtures/js/test262-js2-baseline.txt` is not changed.
 - Miri not run (one `unsafe` in `capture_here`: the read of `es.stk`).
 
+## Over-rule rows (cost debt)
+
+The owner session copies these rows into `cost-debt.md`. Every row below +0.5% is fine. Rows over +0.5% under both allocators: fib, objects, gen `next`, promise `then`, native-call loop, `new Map`, `forEach`, and the three error rows. A follow-up PR owns the fix.
+
 ## Cost (archMachine, `perf stat -e instructions:u`, minimum of 3, base = origin/main bd47d563)
 
 Rows from `interp_load` and `script_run` on small JS files (`/data/claude-tmp/.../scratchpad/js`). The tree already builds the same at `-C codegen-units=1` (the counts are equal), so the cgu=1 exception does not apply.
 
-| Row | glibc base | glibc new | Δ | jemalloc Δ |
-| --- | --- | --- | --- | --- |
-| loopfn 3000000 | 776,506,257 | 779,511,310 | +0.387% | +0.385% |
-| calls 1000000 | 550,555,661 | 547,561,294 | -0.544% | -0.540% |
-| fib 27 | 240,928,439 | 243,158,009 | +0.925% | +0.913% |
-| closures 1000000 | 1,742,906,695 | 1,740,914,275 | -0.114% | -0.114% |
-| objects 1000000 | 700,840,464 | 707,859,912 | +1.002% | +1.001% |
-| js2_gen_load next 100000 | 168,517,461 | 169,625,897 | +0.658% | +0.644% |
-| js2_promise_load then 100000 | 151,796,151 | 153,602,389 | +1.190% | +1.164% |
-| 1M `Math.abs` native calls | 720,476,095 | 737,484,686 | +2.361% | +2.354% |
-| 100k `new Map()` | 259,804,534 | 262,218,374 | +0.929% | +0.930% |
-| 100k `forEach` with a callback | 326,956,678 | 329,866,511 | +0.890% | +0.880% |
-| 100k `try { throw new Error }` | 145,675,257 | 210,839,354 | +44.7% | +43.9% |
-| 100k `new Error` (no throw) | 132,489,026 | 186,223,516 | +40.6% | +39.7% |
-| 100k `try { undefined() }` | 482,525,667 | 549,332,621 | +13.8% | +11.7% |
+| Row | glibc base | glibc new | glibc Δ | jemalloc base | jemalloc new | jemalloc Δ |
+| --- | --- | --- | --- | --- | --- | --- |
+| interp_load loopfn 3000000 | 776,506,257 | 779,511,310 | +0.387% | 779,911,792 | 782,916,996 | +0.385% |
+| interp_load calls 1000000 | 550,555,661 | 547,561,294 | -0.544% | 553,929,031 | 550,935,335 | -0.540% |
+| interp_load fib 27 | 240,928,439 | 243,158,009 | +0.925% | 244,332,483 | 246,562,805 | +0.913% |
+| interp_load closures 1000000 | 1,742,906,695 | 1,740,914,275 | -0.114% | 1,746,266,199 | 1,744,273,833 | -0.114% |
+| interp_load objects 1000000 | 700,840,464 | 707,859,912 | +1.002% | 704,214,009 | 711,265,308 | +1.001% |
+| 100k `try { throw new Error }` | 145,675,257 | 210,839,354 | +44.732% | 149,051,916 | 214,472,346 | +43.891% |
+| 100k `new Error` (no throw) | 132,489,026 | 186,223,516 | +40.558% | 135,869,028 | 189,816,318 | +39.705% |
+| 100k `try { undefined() }` | 482,525,667 | 549,332,621 | +13.845% | 543,954,121 | 607,713,325 | +11.721% |
+| 100k `new Map()` | 259,804,534 | 262,218,374 | +0.929% | 263,181,418 | 265,627,941 | +0.930% |
+| 1M `Math.abs` native calls | 720,476,095 | 737,484,686 | +2.361% | 723,854,023 | 740,896,824 | +2.354% |
+| 100k `forEach` with a callback | 326,956,678 | 329,866,511 | +0.890% | 330,337,421 | 333,245,487 | +0.880% |
+| js2_gen_load next 100000 | 168,517,461 | 169,625,897 | +0.658% | 171,894,223 | 173,001,918 | +0.644% |
+| js2_promise_load then 100000 | 151,796,151 | 153,602,389 | +1.190% | 155,163,194 | 156,969,889 | +1.164% |
 
 ## Where the cost comes from
 
