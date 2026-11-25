@@ -452,7 +452,7 @@ impl Realm {
             self.tail_args.extend_from_slice(keys);
             return Ok(None);
         };
-        let o = Obj::new(&mut self.heap, &self.shapes, self.s_object).expect("memory");
+        let o = Obj::new(&mut self.heap, &self.shapes, self.state.s_object).expect("memory");
         for (k, v) in props {
             self.define(o, k, v)?;
         }
@@ -461,8 +461,8 @@ impl Realm {
 
     /// The template object of a tagged template: the array of the cooked strings with the array of the raw strings as `raw`.
     pub fn make_template(&mut self, cooked: &[Value], raw: &[Value]) -> R<Value> {
-        let r = Obj::array(&mut self.heap, &self.shapes, self.s_array, raw).expect("memory");
-        let a = Obj::array(&mut self.heap, &self.shapes, self.s_array, cooked).expect("memory");
+        let r = Obj::array(&mut self.heap, &self.shapes, self.state.s_array, raw).expect("memory");
+        let a = Obj::array(&mut self.heap, &self.shapes, self.state.s_array, cooked).expect("memory");
         self.lock(r, true)?;
         self.define_attrs(a, Key::Name(self.k_raw), 0, r.value())?;
         self.lock(a, true)?;

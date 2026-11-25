@@ -68,7 +68,7 @@ impl Realm {
         let q = match Realm::obj(a.inline_slot(4)) {
             Some(q) => q,
             None => {
-                let q = Obj::array(&mut self.heap, &self.shapes, self.s_array, &[]).expect("memory");
+                let q = Obj::array(&mut self.heap, &self.shapes, self.state.s_array, &[]).expect("memory");
                 a.set_inline_slot(4, q.value());
                 q
             }
@@ -251,7 +251,7 @@ impl Realm {
     #[cold]
     fn make_ag_protos(&mut self) {
         // `%AsyncIteratorPrototype%` holds `[Symbol.asyncIterator]() { return this }`.
-        let ai = Obj::new(&mut self.heap, &self.shapes, self.s_object).expect("memory");
+        let ai = Obj::new(&mut self.heap, &self.shapes, self.state.s_object).expect("memory");
         let f = self.new_native(this_fn, false, 0, "[Symbol.asyncIterator]");
         self.define_attrs(ai, Key::Name(self.wk[crate::bi_symbol::ASYNC_ITERATOR]), HIDDEN, f.value()).expect("define");
         let shape = self.shapes.root(crate::cell::Layout::Object, Some(ai.cell()), 4);
@@ -390,7 +390,7 @@ impl Realm {
         }
         let next = self.get_named(p.value(), "next").expect("next");
         let mut s = self.shapes.root(crate::cell::Layout::Object, Some(p.cell()), 2);
-        for k in self.genr.keys[..2].iter().copied() {
+        for k in self.state.genr.keys[..2].iter().copied() {
             s = self.shapes.add(s, k, 0).expect("shape");
         }
         self.pins.push(s);

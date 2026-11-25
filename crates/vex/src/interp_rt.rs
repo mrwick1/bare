@@ -296,35 +296,16 @@ pub enum ErrKind {
     Plain,
 }
 
-/// The realm: heap, tables, global object and prototypes.
+/// The execution state and heap for the active ECMAScript realm.
 pub struct Realm {
     pub heap: Heap,
     pub shapes: Shapes,
     pub atoms: Atoms,
-    pub global: Obj,
-    pub object_proto: Obj,
-    pub function_proto: Obj,
-    pub array_proto: Obj,
-    /// The prototype epoch and the proof that the stock array chain has no named indices.
-    array_push_proof: (u64, bool),
-    pub(crate) array_ctor: Value,
-    pub error_proto: Obj,
-    pub s_object: ShapeId,
-    pub s_array: ShapeId,
-    pub s_func: ShapeId,
-    /// The shape of an arguments object: an array with the prototype of `Object`.
-    s_args: Option<ShapeId>,
-    /// `%Array.prototype.values%`, the value of `Symbol.iterator` of each arguments object; made at the first one (`Realm::new_args`).
-    pub(crate) args_iter: Value,
+    pub(crate) state: RealmState,
     pub k_constructor: Str,
     pub k_raw: Str,
     /// Counter of the private names (`NewPrivateName`).
     pub private_n: u32,
-    /// The raw id of `s_func` and the places of its two hidden slots (the code index and the context): the call reads them with no
-    /// shape lookup.
-    func_shape: u32,
-    loc_code: u32,
-    loc_ctx: u32,
     pub k_prototype: Str,
     /// The hidden property that holds the `[[PrimitiveValue]]` of a wrapper object (`bi_wrap.rs`).
     pub k_prim: Str,
@@ -337,38 +318,17 @@ pub struct Realm {
     pub(crate) pr: crate::promise::Promises,
     /// The module records and the `import()` calls that wait for the host (`module.rs`).
     pub(crate) md: crate::module::Modules,
-    pub string_proto: Obj,
-    pub number_proto: Obj,
-    pub boolean_proto: Obj,
-    /// `Symbol.prototype`, and the well-known symbols in the order of `bi_symbol::WK` (`bi_symbol.rs`). The members of `Symbol` and of
-    /// the prototype are made at the first use of either (`Realm::fn_props`).
-    pub symbol_proto: Obj,
-    pub(crate) bigint_intrinsics: Option<(Obj, Obj)>,
-    pub symbol_ctor: Option<Obj>,
-    /// The lazy tables of the built-in objects (`lazy.rs`).
-    pub(crate) ltab: crate::lazy::Lazy,
     pub(crate) wk: [Str; crate::bi_symbol::WK],
-    pub(crate) unscopables: Option<Str>,
     /// The registry of `Symbol.for`: an object with no prototype, made at the first call. It is a root.
     pub(crate) registry: Option<Obj>,
-    /// `TypeError.prototype` and the others, by `ErrKind`.
-    pub error_protos: [Obj; 7],
-    pub(crate) date_proto: Obj,
-    /// The shape of a built-in function cell: slot 0 is the index in `natives`, slots 1 to 3 are free for the function (a bound function).
-    pub s_native: ShapeId,
     pub(crate) proxy_natives: Option<usize>,
     pub(crate) proxy_depth: u32,
     /// The built-ins written in Rust (`builtins.rs`).
     pub natives: Vec<Native>,
     /// The shared atom of the `name` and the `length` of each code (`Code::fn_name`, `Code::fn_len`), for `Realm::fn_props`.
     pub fn_info: Vec<(Option<Str>, u16)>,
-    /// The generator prototype, the shape of an iterator result and the names of the hidden slots of a generator (`gen.rs`).
-    pub(crate) genr: crate::generator::GenRealm,
     /// The index of the native that runs a bound function.
     pub(crate) bound_id: i32,
-    /// The slots of the prelude (`prelude_pre.rs`): `undefined` until the first read. The first slots are the helpers that natives call
-    /// through the tail channel (`bi_object.rs`).
-    pub(crate) pre: [Value; crate::prelude_pre::NPRE],
     /// While a native runs: the function cell that was called, and `new.target` (`undefined` for a plain call).
     pub callee: Value,
     pub nt: Value,
@@ -384,9 +344,6 @@ pub struct Realm {
     tnames: [Str; 8],
     /// Every value that the realm keeps and the collector must mark.
     pub(crate) consts: Vec<Value>,
-    /// The global lexical environment: the top-level `let`, `const` and `class` names of the scripts that ran, each with its context
-    /// and slot (`DeclLex`). A global read that the global object does not answer looks here. The collector marks the names and contexts.
-    pub(crate) lex: HashMap<u64, (Str, Value, u32, bool)>,
     /// Shapes that no object may have yet.
     pub(crate) pins: Vec<ShapeId>,
     /// The top frame when a collection runs: code index, frame pointer, `pc` of the safepoint.
@@ -419,6 +376,68 @@ pub struct Realm {
     /// `Map`, `Set`, `WeakMap` and `WeakSet` (`bi_collections.rs`).
     pub(crate) coll: Option<Box<crate::bi_collections::Colls>>,
     pub(crate) intl: Option<Box<crate::bi_intl::State>>,
+}
+
+/// The global environment and intrinsic state of one realm.
+pub struct RealmState {
+    pub global: Obj,
+    pub object_proto: Obj,
+    pub function_proto: Obj,
+    pub array_proto: Obj,
+    /// The prototype epoch and the proof that the stock array chain has no named indices.
+    array_push_proof: (u64, bool),
+    pub(crate) array_ctor: Value,
+    pub error_proto: Obj,
+    pub s_object: ShapeId,
+    pub s_array: ShapeId,
+    pub s_func: ShapeId,
+    /// The shape of an arguments object: an array with the prototype of `Object`.
+    s_args: Option<ShapeId>,
+    /// `%Array.prototype.values%`, the value of `Symbol.iterator` of each arguments object; made at the first one (`Realm::new_args`).
+    pub(crate) args_iter: Value,
+    /// The raw id of `s_func` and the places of its two hidden slots (the code index and the context): the call reads them with no
+    /// shape lookup.
+    func_shape: u32,
+    loc_code: u32,
+    loc_ctx: u32,
+    pub string_proto: Obj,
+    pub number_proto: Obj,
+    pub boolean_proto: Obj,
+    /// `Symbol.prototype`, and the well-known symbols in the order of `bi_symbol::WK` (`bi_symbol.rs`). The members of `Symbol` and of
+    /// the prototype are made at the first use of either (`Realm::fn_props`).
+    pub symbol_proto: Obj,
+    pub(crate) bigint_intrinsics: Option<(Obj, Obj)>,
+    pub symbol_ctor: Option<Obj>,
+    /// The lazy tables of the built-in objects (`lazy.rs`).
+    pub(crate) ltab: crate::lazy::Lazy,
+    pub(crate) unscopables: Option<Str>,
+    /// `TypeError.prototype` and the others, by `ErrKind`.
+    pub error_protos: [Obj; 7],
+    pub(crate) date_proto: Obj,
+    /// The shape of a built-in function cell: slot 0 is the index in `natives`, slots 1 to 3 are free for the function (a bound function).
+    pub s_native: ShapeId,
+    /// The generator prototype, the shape of an iterator result and the names of the hidden slots of a generator (`gen.rs`).
+    pub(crate) genr: crate::generator::GenRealm,
+    /// The slots of the prelude (`prelude_pre.rs`): `undefined` until the first read. The first slots are the helpers that natives call
+    /// through the tail channel (`bi_object.rs`).
+    pub(crate) pre: [Value; crate::prelude_pre::NPRE],
+    /// The global lexical environment: the top-level `let`, `const` and `class` names of the scripts that ran, each with its context
+    /// and slot (`DeclLex`). A global read that the global object does not answer looks here. The collector marks the names and contexts.
+    pub(crate) lex: HashMap<u64, (Str, Value, u32, bool)>,
+}
+
+impl std::ops::Deref for Realm {
+    type Target = RealmState;
+
+    fn deref(&self) -> &RealmState {
+        &self.state
+    }
+}
+
+impl std::ops::DerefMut for Realm {
+    fn deref_mut(&mut self) -> &mut RealmState {
+        &mut self.state
+    }
 }
 
 const TYPEOF: [&str; 8] = ["undefined", "object", "boolean", "number", "string", "function", "symbol", "bigint"];
@@ -520,24 +539,40 @@ impl Realm {
             heap,
             shapes,
             atoms,
-            global,
-            object_proto,
-            function_proto,
-            array_proto,
-            array_push_proof: (0, false),
-            array_ctor: Value::UNDEFINED,
-            error_proto,
-            s_object,
-            s_array,
-            s_func,
-            s_args: None,
-            args_iter: Value::UNDEFINED,
+            state: RealmState {
+                global,
+                object_proto,
+                function_proto,
+                array_proto,
+                array_push_proof: (0, false),
+                array_ctor: Value::UNDEFINED,
+                error_proto,
+                s_object,
+                s_array,
+                s_func,
+                s_args: None,
+                args_iter: Value::UNDEFINED,
+                func_shape,
+                loc_code,
+                loc_ctx,
+                string_proto,
+                number_proto,
+                boolean_proto,
+                symbol_proto,
+                bigint_intrinsics: None,
+                symbol_ctor: None,
+                ltab: Default::default(),
+                unscopables: None,
+                error_protos,
+                date_proto: object_proto,
+                s_native,
+                genr: crate::generator::GenRealm { proto: gen_proto, s_iter, keys: gkeys, func_proto: None, async_proto: None, async_shape: None, ag: Default::default() },
+                pre: [Value::UNDEFINED; crate::prelude_pre::NPRE],
+                lex: HashMap::new(),
+            },
             k_constructor,
             k_raw,
             private_n: 0,
-            func_shape,
-            loc_code,
-            loc_ctx,
             k_prototype,
             k_prim,
             k_length,
@@ -547,26 +582,13 @@ impl Realm {
             k_to_string,
             pr,
             md: Default::default(),
-            string_proto,
-            number_proto,
-            boolean_proto,
-            symbol_proto,
-            bigint_intrinsics: None,
-            symbol_ctor: None,
-            ltab: Default::default(),
             wk,
-            unscopables: None,
             registry: None,
-            error_protos,
-            date_proto: object_proto,
-            s_native,
             proxy_natives: None,
             proxy_depth: 0,
-            genr: crate::generator::GenRealm { proto: gen_proto, s_iter, keys: gkeys, func_proto: None, async_proto: None, async_shape: None, ag: Default::default() },
             natives: Vec::new(),
             fn_info: Vec::new(),
             bound_id: 0,
-            pre: [Value::UNDEFINED; crate::prelude_pre::NPRE],
             callee: Value::UNDEFINED,
             nt: Value::UNDEFINED,
             tail: None,
@@ -575,7 +597,6 @@ impl Realm {
             rng: 0,
             tnames,
             consts,
-            lex: HashMap::new(),
             pins,
             cur: (0, 0, 0),
             es: Default::default(),
@@ -609,7 +630,7 @@ impl Realm {
     pub fn collect(&mut self, fbs: &mut [Feedback], walk_frames: impl FnOnce(&mut Marker)) {
         // A nested call holds the collector (`Realm::call_function`), so no machine is in use now: the idle ones keep their feedback.
         debug_assert!(self.nest == 0, "a collection inside a nested call");
-        let Realm { heap, shapes, atoms, consts, pins, lex, pool, pr, api, rx, intl, .. } = self;
+        let Realm { heap, shapes, atoms, consts, pins, state, pool, pr, api, rx, intl, .. } = self;
         let mut walk_frames = Some(walk_frames);
         let stats = {
             // The promise state is marked in the walk; its weak list is cleared after the marking.
@@ -636,7 +657,7 @@ impl Realm {
             }
             let roots = |m: &mut Marker| {
                 consts.iter().for_each(|v| m.value(*v));
-                lex.values().for_each(|(k, c, _, _)| {
+                state.lex.values().for_each(|(k, c, _, _)| {
                     m.value(k.value());
                     m.value(*c);
                 });
@@ -2009,14 +2030,14 @@ impl Realm {
             // `for (k in undefined)` has no keys.
             Vec::new()
         };
-        Ok(Obj::array(&mut self.heap, &self.shapes, self.s_array, &keys).expect("memory").value())
+        Ok(Obj::array(&mut self.heap, &self.shapes, self.state.s_array, &keys).expect("memory").value())
     }
 
     // ---- function cells ----
 
     /// A function cell for code `code` in context `ctx` (`undefined` for none).
     pub fn new_function(&mut self, code: usize, ctx: Value) -> Value {
-        let f = Obj::new(&mut self.heap, &self.shapes, self.s_func).expect("memory");
+        let f = Obj::new(&mut self.heap, &self.shapes, self.state.s_func).expect("memory");
         f.set_slot(&self.shapes, 0, Value::int(code as i32));
         f.set_slot(&self.shapes, 1, ctx);
         f.set_callable();

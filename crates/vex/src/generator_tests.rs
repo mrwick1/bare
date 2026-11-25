@@ -272,7 +272,7 @@ fn next_on_something_that_is_not_a_generator_throws() {
     let sh = shared();
     let (mut vm, g) = host(vec![make(&sh, 1), gen_acc(&sh)], &sh);
     let next = prop(&mut vm, g, "next");
-    let o = Obj::new(&mut vm.realm.heap, &vm.realm.shapes, vm.realm.s_object).unwrap().value();
+    let o = Obj::new(&mut vm.realm.heap, &vm.realm.shapes, vm.realm.state.s_object).unwrap().value();
     for this in [Value::UNDEFINED, n(1), o] {
         let e = vm.realm.call_function(next, this, &[]).expect_err("a TypeError");
         assert!(vm.realm.error_text(e).starts_with("TypeError"), "{}", vm.realm.error_text(e));

@@ -774,7 +774,7 @@ impl Realm {
     pub(crate) fn install_collections(&mut self) {
         let keys = ["\0cs", "\0ct", "\0ci"].map(|n| self.intern(n));
         keys.iter().for_each(|k| self.keep(k.value()));
-        let protos: [Obj; 6] = std::array::from_fn(|_| Obj::new(&mut self.heap, &self.shapes, self.s_object).expect("memory"));
+        let protos: [Obj; 6] = std::array::from_fn(|_| Obj::new(&mut self.heap, &self.shapes, self.state.s_object).expect("memory"));
         protos.iter().for_each(|p| self.keep(p.value()));
         let shapes: [ShapeId; 6] = std::array::from_fn(|i| self.coll_shape(protos[i], i as u32 + 1, keys));
         self.pins.extend(shapes);

@@ -378,7 +378,10 @@ impl Default for Shapes {
 impl Shapes {
     /// Watch the object at `addr` (the global object). One object at a time.
     pub fn watch(&mut self, addr: usize) {
-        self.watch = addr;
+        if self.watch != addr {
+            self.watch = addr;
+            self.changed(addr);
+        }
     }
 
     /// The global mutation tag. An add, deletion, attribute change or prototype change calls `Obj::set_shape`, which bumps the
@@ -983,3 +986,7 @@ mod tests;
 #[cfg(test)]
 #[path = "shapes_dict_churn_tests.rs"]
 mod dict_churn_tests;
+
+#[cfg(test)]
+#[path = "shapes_global_watch_tests.rs"]
+mod global_watch_tests;

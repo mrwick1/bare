@@ -168,7 +168,7 @@ fn set_prototype_of(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
 
 impl Realm {
     pub(crate) fn install_reflect(&mut self) {
-        let r = Obj::new(&mut self.heap, &self.shapes, self.s_object).expect("memory");
+        let r = Obj::new(&mut self.heap, &self.shapes, self.state.s_object).expect("memory");
         static REFLECT: &[Ent] = &[
             m("apply", 3, apply),
             m("construct", 2, construct),

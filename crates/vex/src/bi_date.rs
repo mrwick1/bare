@@ -412,8 +412,8 @@ const fn date_table() -> [Ent; OPS.len() + 1] {
 
 impl Realm {
     pub(crate) fn install_date(&mut self) {
-        let proto = Obj::new(&mut self.heap, &self.shapes, self.s_object).expect("memory");
-        self.date_proto = proto;
+        let proto = Obj::new(&mut self.heap, &self.shapes, self.state.s_object).expect("memory");
+        self.state.date_proto = proto;
         self.keep(proto.value());
         let c = self.ctor("Date", 7, date_ctor, proto);
         static DATE_STATICS: &[Ent] = &[m("now", 0, date_now), m("parse", 1, date_parse), m("UTC", 7, date_utc)];

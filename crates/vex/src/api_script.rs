@@ -221,7 +221,7 @@ impl Realm {
     /// `%IteratorPrototype%`: an object with `[Symbol.iterator]() { return this }`, made at the first ask.
     pub(crate) fn iterator_prototype(&mut self) -> Value {
         if self.api.iter_proto.is_undefined() {
-            let o = Obj::new(&mut self.heap, &self.shapes, self.s_object).expect("memory");
+            let o = Obj::new(&mut self.heap, &self.shapes, self.state.s_object).expect("memory");
             let f = self.new_native(this_fn, false, 0, "[Symbol.iterator]");
             let k = Key::Name(self.wk[ITERATOR]);
             self.define_attrs(o, k, HIDDEN, f.value()).expect("define");

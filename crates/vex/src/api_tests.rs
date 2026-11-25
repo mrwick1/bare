@@ -48,10 +48,10 @@ fn the_window_of_a_host_call_is_a_root_of_a_collection() {
     });
     let before = r.collections;
     let (this, a, b) = {
-        let o = Obj::new(&mut r.heap, &r.shapes, r.s_object).unwrap();
+        let o = Obj::new(&mut r.heap, &r.shapes, r.state.s_object).unwrap();
         let t = r.string("this-tag");
         r.set_own(o, "tag", t);
-        let b = Obj::new(&mut r.heap, &r.shapes, r.s_object).unwrap();
+        let b = Obj::new(&mut r.heap, &r.shapes, r.state.s_object).unwrap();
         r.set_own(b, "n", Value::int(7));
         (o.value(), r.string(&format!("argument {}", "one")), b.value())
     };

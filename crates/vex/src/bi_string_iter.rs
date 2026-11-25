@@ -23,7 +23,7 @@ impl Realm {
             return (s.proto, s.shape);
         }
         let ip = Realm::obj(self.iterator_prototype()).expect("an object");
-        let proto = Obj::new(&mut self.heap, &self.shapes, self.s_object).expect("memory");
+        let proto = Obj::new(&mut self.heap, &self.shapes, self.state.s_object).expect("memory");
         proto.set_proto(&mut self.shapes, Some(ip.cell()));
         self.method(proto, "next", 0, string_iterator_next);
         let tag = self.string("String Iterator");
