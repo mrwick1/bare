@@ -1155,10 +1155,11 @@ fn media_and_supports_rules_expose_nested_rules() {
         assert_eq!(js(&mut b, "[m instanceof CSSMediaRule, m instanceof CSSConditionRule, m instanceof CSSGroupingRule, m instanceof CSSRule, r[1] instanceof CSSSupportsRule, r[1] instanceof CSSConditionRule, m.type, r[1].type, m.parentRule, m.parentStyleSheet === s.sheet].join('|')"), "true|true|true|true|true|true|4|12||true");
         assert_eq!(js(&mut b, "Object.getPrototypeOf(CSSMediaRule) === CSSConditionRule && Object.getPrototypeOf(CSSConditionRule) === CSSGroupingRule && Object.getPrototypeOf(CSSGroupingRule) === CSSRule"), "true");
         assert_eq!(js(&mut b, "var list = m.cssRules; m.insertRule('i { color: pink }', 1); [list === m.cssRules, list.length, list[1].selectorText, list[1].parentRule === m].join('|')"), "true|3|i|true");
-        assert!(js(&mut b, "s.textContent").contains("@media screen { a { color: red; } i { color: pink; } b { color: blue; } }"));
+        // A CSSOM edit changes the rules of the sheet, not the element text (`browser_cssom_owned_tests.rs`).
+        assert!(js(&mut b, "m.cssText").contains("@media screen { a { color: red; } i { color: pink; } b { color: blue; } }"));
         assert_eq!(js(&mut b, "var gone = list[0]; m.deleteRule(0); [list.length, list[0].selectorText, gone.parentRule, gone.parentStyleSheet].join('|')"), "2|i||");
-        assert!(!js(&mut b, "s.textContent").contains("color: red"));
-        assert_eq!(js(&mut b, "list[0].style.color = 'teal'; s.textContent.includes('i { color: teal; }')"), "true");
+        assert!(!js(&mut b, "m.cssText").contains("color: red"));
+        assert_eq!(js(&mut b, "list[0].style.color = 'teal'; m.cssText.includes('i { color: teal; }')"), "true");
         assert_eq!(js(&mut b, "try { m.deleteRule(9) } catch (e) { e.name }"), "IndexSizeError");
         assert_eq!(js(&mut b, "try { m.insertRule('@@ {', 0) } catch (e) { e.name }"), "SyntaxError");
     });
@@ -1172,7 +1173,7 @@ fn keyframes_font_face_and_import_rules_have_interfaces() {
         assert_eq!(js(&mut b, "[r[0].constructor.name, r[0].type, r[0].media.mediaText, r[0].href, r[0].styleSheet].join('|')"), "CSSImportRule|3|screen|a.css|");
         assert_eq!(js(&mut b, "[r[1].constructor.name, r[1].type, r[1].style.cssText.includes('src: url(f.woff2)'), r[1] instanceof CSSRule, r[1].parentStyleSheet === document.styleSheets[0]].join('|')"), "CSSFontFaceRule|5|true|true|true");
         assert_eq!(js(&mut b, "var k = r[2]; [k.constructor.name, k.type, k.name, k.cssRules.length, Array.from(k.cssRules).map(x => [x.constructor.name, x.type, x.keyText, x.style.opacity, x.parentRule === k].join(':')).join(',')].join('|')"), "CSSKeyframesRule|7|k|3|CSSKeyframeRule:8:from:0:true,CSSKeyframeRule:8:50%:.5:true,CSSKeyframeRule:8:to:1:true");
-        assert_eq!(js(&mut b, "k.cssRules[0].style.opacity = '0.2'; document.querySelector('style').textContent.includes('from { opacity: 0.2; }')"), "true");
+        assert_eq!(js(&mut b, "k.cssRules[0].style.opacity = '0.2'; k.cssText.includes('from { opacity: 0.2; }')"), "true");
         assert_eq!(js(&mut b, "document.styleSheets[0].cssRules[1].cssText.includes('font-family')"), "true");
     });
 }

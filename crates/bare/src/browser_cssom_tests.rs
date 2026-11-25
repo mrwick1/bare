@@ -127,8 +127,8 @@ fn a_rule_declaration_is_made_when_a_script_needs_it() {
         assert_eq!(b.style_stats().objects, 1);
         assert_eq!(js(&mut b, "r[1].cssText"), ".c1 { color: red; margin: 1px; }");
         assert_eq!(b.style_stats().objects, 2);
-        // A rule whose declaration was never read keeps its text when the sheet is published.
-        assert_eq!(js(&mut b, "var st = document.querySelector('style'); r[2].selectorText; r[5].style.color = 'blue'; st.textContent.includes('.c2 { color: red; margin: 2px; }') && st.textContent.includes('.c5 { color: blue; margin: 5px; }')"), "true");
+        // A rule whose declaration was never read keeps its text when the sheet is published. The element text stays (`browser_cssom_owned_tests.rs`).
+        assert_eq!(js(&mut b, "var st = document.querySelector('style'), t = st.textContent; r[2].selectorText; r[5].style.color = 'blue'; var c2 = document.createElement('i'), c5 = document.createElement('i'); c2.className = 'c2'; c5.className = 'c5'; document.body.append(c2, c5); [getComputedStyle(c2).color, getComputedStyle(c2).marginTop, getComputedStyle(c5).color, getComputedStyle(c5).marginTop, st.textContent === t].join()"), "rgb(255, 0, 0),2px,rgb(0, 0, 255),5px,true");
     });
 }
 
@@ -201,7 +201,8 @@ fn a_style_read_during_serialization_keeps_pending_rule_spans_valid() {
             sh.insertRule('.other{top:1px}', 1);
             [reads, r[0] === blue, r[1].selectorText, getComputedStyle(p).color].join('|')
         "#);
-        assert_eq!(result, "1|true|.other|rgb(255, 0, 0)");
+        // The insert serializes no rule, so the getter of the page does not run in it (as in Chrome).
+        assert_eq!(result, "0|true|.other|rgb(255, 0, 0)");
     });
 }
 
