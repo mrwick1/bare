@@ -185,6 +185,7 @@ pub(crate) fn intrinsic(rt: &mut Realm) -> (Obj, Obj) {
             getter("byteOffset", "get byteOffset", byte_offset),
             sym_getter(TO_STRING_TAG, "get [Symbol.toStringTag]", class_name),
             m("set", 1, set),
+            m("copyWithin", 2, copy_within),
             m("subarray", 2, subarray),
             m("slice", 2, slice),
             m("fill", 1, fill),
@@ -517,6 +518,28 @@ fn set(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
         }
     }
     Ok(Value::UNDEFINED)
+}
+
+fn copy_within(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+    let (view, len) = validated(rt, this)?;
+    let to = relative(rt, arg(args, 0), len, 0)?;
+    let from = relative(rt, arg(args, 1), len, 0)?;
+    let end = relative(rt, arg(args, 2), len, len)?;
+    let count = end.saturating_sub(from).min(len - to);
+    if count == 0 {
+        return Ok(this);
+    }
+
+    // Argument conversion can resize or detach the buffer.
+    let (_, len) = validated(rt, this)?;
+    let count = count.min(len.saturating_sub(from.max(to)));
+    if count != 0 {
+        let width = view.width();
+        let src = view.offset + from * width;
+        let dst = view.offset + to * width;
+        rt.copy_buffer_bytes(view.buffer, src, view.buffer, dst, count * width);
+    }
+    Ok(this)
 }
 
 fn subarray(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
@@ -857,3 +880,7 @@ mod bigint_tests;
 #[cfg(test)]
 #[path = "bi_typed_filter_tests.rs"]
 mod filter_tests;
+
+#[cfg(test)]
+#[path = "bi_typed_copy_within_tests.rs"]
+mod copy_within_tests;
