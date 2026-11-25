@@ -304,12 +304,13 @@ fn platform_objects_are_not_plain_data_for_clone() {
     big(|| {
         let mut b = at(PAGE);
         for (src, what) in [
-            ("history.pushState(matchMedia('all'), '')", "mql"),
-            ("history.pushState(document.body.classList, '')", "list"),
-            ("history.pushState(document.body.classList.values(), '')", "iterator"),
-            ("history.pushState({a: matchMedia('all')}, '')", "nested"),
+            ("history.pushState(matchMedia('all'), '')", "MediaQueryList object"),
+            ("history.pushState(document.body.classList, '')", "DOMTokenList object"),
+            // Chrome says `[object Array Iterator]`: its `Iterator.prototype.constructor` is an accessor. Vex has no `Iterator` yet.
+            ("history.pushState(document.body.classList.values(), '')", "#<Object>"),
+            ("history.pushState({a: matchMedia('all')}, '')", "MediaQueryList object"),
         ] {
-            assert_eq!(js(&mut b, src), "throw:DataCloneError:An object could not be cloned.", "{what}");
+            assert_eq!(js(&mut b, src), format!("throw:DataCloneError:{what} could not be cloned."), "{src}");
         }
     });
 }

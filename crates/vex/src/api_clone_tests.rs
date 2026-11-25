@@ -63,7 +63,7 @@ fn clone_preserves_graph_and_internal_slots() {
 fn clone_limits_and_refusals() {
     let mut realm = crate::script::load("").unwrap().realm;
     task(&mut realm, |s| {
-        for (src, why) in [("() => 1", "Function"), ("Symbol()", "Symbol"), ("new Proxy({}, {})", "Object")] {
+        for (src, why) in [("() => 1", "Function"), ("Symbol()", "Symbol"), ("new Proxy({}, {})", "Named(\"#<Object>\")")] {
             let v = s.run_script(src).unwrap();
             let Err(Error::Throw(e)) = s.engine().clone_copy(v, &LIMITS, &mut CloneFixture) else { panic!("{src} was not refused") };
             let reason = s.get_str(e, "message").unwrap();

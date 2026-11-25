@@ -5,7 +5,7 @@ use crate::bi_typed::Element;
 use crate::bigint::Sv;
 use crate::blob::Blob;
 use crate::interp_rt::{Key, Realm};
-use crate::object::{F_HOST, K_BUFFER, K_DATA_VIEW, K_DATE, K_MAP, K_NONE, K_REGEXP, K_SET, K_TYPED, K_WRAP, Obj};
+use crate::object::{F_HOST, K_BUFFER, K_DATA_VIEW, K_DATE, K_MAP, K_NONE, K_PROXY, K_REGEXP, K_SET, K_TYPED, K_WRAP, Obj};
 use crate::shapes::{A_C, A_E, A_W};
 use crate::shared_memory::SharedBuffer;
 use crate::value::Value;
@@ -114,7 +114,8 @@ impl Walk<'_> {
             || !matches!(kind, K_NONE | K_DATE | K_REGEXP | K_MAP | K_SET | K_WRAP | K_BUFFER | K_TYPED | K_DATA_VIEW)
             || (kind == K_WRAP && rt.prim_of(v).is_none_or(|p| Realm::sym_of(p).is_some()))
         {
-            return Err(self.refuse(rt, Refused::Object));
+            let name = clone_name(rt, o, o.has_flag(F_HOST) || self.host.is_host_object(&v));
+            return Err(self.refuse(rt, Refused::Named(name)));
         }
         self.charge(rt, |m| m.node(depth))?;
         // A later getter may unlink an object or allocate another cell at its address.
@@ -252,6 +253,62 @@ impl Walk<'_> {
         }
         self.out.end();
         Ok(())
+    }
+}
+
+/// Chrome's name of an object that does not clone. Blink names a platform object `<Interface> object`. V8 names a script object as
+/// `Object::NoSideEffectsToString` does: `#<Ctor>` when `toString` is `Object.prototype.toString`, else `[object Tag]`. Only data
+/// properties are read, so no script runs.
+fn clone_name(rt: &mut Realm, mut o: Obj, host: bool) -> String {
+    while o.is_kind(K_PROXY) {
+        let Some(target) = rt.proxy_target_raw(o) else { return "#<Object>".into() };
+        o = target;
+    }
+    let ctor = data_prop(rt, o, rt.k_constructor).and_then(Realm::obj).filter(|c| c.is_callable());
+    let name = ctor.and_then(|c| match rt.get_own(c, Key::Name(rt.k_name)) {
+        Some(Own::Data(n, _)) => Realm::str_of(n).map(|n| rt.text(n)).filter(|n| !n.is_empty()),
+        _ => None,
+    });
+    // A host object without its own interface (an iterator) finds `Object` on the chain. It takes V8's text.
+    if host && let Some(name) = name.as_ref().filter(|n| *n != "Object") {
+        return format!("{name} object");
+    }
+    let object_to_string = match rt.get_own(rt.object_proto, Key::Name(rt.k_to_string)) {
+        Some(Own::Data(f, _)) => Some(f),
+        _ => None,
+    };
+    if let Some(name) = name
+        && data_prop(rt, o, rt.k_to_string) == object_to_string
+    {
+        return format!("#<{name}>");
+    }
+    let tag = data_prop(rt, o, rt.wk[crate::bi_symbol::TO_STRING_TAG]).and_then(Realm::str_of).map(|t| rt.text(t));
+    let tag = tag.unwrap_or_else(|| {
+        if o.is_callable() {
+            "Function"
+        } else if Realm::is_array(rt, o) {
+            "Array"
+        } else if rt.is_error(o.value()) {
+            "Error"
+        } else {
+            "Object"
+        }
+        .into()
+    });
+    format!("[object {tag}]")
+}
+
+/// V8's `GetDataProperty`: the value of the data property `key` on the prototype chain of `o`. An accessor or a proxy gives `None`.
+fn data_prop(rt: &mut Realm, mut o: Obj, key: crate::string::Str) -> Option<Value> {
+    loop {
+        if o.is_kind(K_PROXY) {
+            return None;
+        }
+        match rt.get_own_h(o, Key::Name(key)) {
+            Ok(Some(Own::Data(v, _))) => return Some(v),
+            Ok(None) => o = rt.proto_of(o)?,
+            _ => return None,
+        }
     }
 }
 
