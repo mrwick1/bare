@@ -124,17 +124,18 @@ fn check_visibility_gates_what_the_engine_does_not_model() {
     // A box that is certainly absent is false without a guess.
     assert_eq!(js(&mut b, "document.getElementById('h').checkVisibility()"), "false");
     let mut b = page("<div id=a style='display: contents'>a</div>");
-    assert!(js(&mut b, "document.getElementById('a').checkVisibility()").starts_with("unsupported:"));
+    // `display: contents`: no box, so false (CSSOM View, `checkVisibility`, step 1).
+    assert_eq!(js(&mut b, "document.getElementById('a').checkVisibility()"), "false");
     let mut b = page("<svg id=s></svg><select><option id=o></option></select>");
-    assert!(js(&mut b, "document.getElementById('s').checkVisibility()").starts_with("unsupported:"));
-    assert!(js(&mut b, "document.getElementById('o').checkVisibility()").starts_with("unsupported:"));
+    assert!(js(&mut b, "document.getElementById('s').checkVisibility()").starts_with("throw:NotSupportedError:"));
+    assert!(js(&mut b, "document.getElementById('o').checkVisibility()").starts_with("throw:NotSupportedError:"));
 }
 
 #[test]
 fn check_visibility_ignores_auto_unless_requested() {
     let mut b = page("<div style='content-visibility: auto'><div id=a>visible</div></div>");
     assert_eq!(js(&mut b, "document.getElementById('a').checkVisibility()"), "true");
-    assert!(js(&mut b, "document.getElementById('a').checkVisibility({contentVisibilityAuto: true})").starts_with("unsupported:"));
+    assert!(js(&mut b, "document.getElementById('a').checkVisibility({contentVisibilityAuto: true})").starts_with("throw:NotSupportedError:"));
 }
 
 #[test]
@@ -147,10 +148,10 @@ fn check_visibility_gates_only_elements_that_an_unmodelled_rule_matches() {
     assert_eq!(js(&mut b, "document.getElementById('in').checkVisibility()"), "true");
     // `content-visibility: hidden` hides the content, not the element itself.
     assert_eq!(js(&mut b, "document.getElementById('hk').checkVisibility()"), "true");
-    assert!(js(&mut b, "document.getElementById('c').checkVisibility()").starts_with("unsupported:"));
-    assert!(js(&mut b, "document.getElementById('under').checkVisibility()").starts_with("unsupported:"));
-    assert!(js(&mut b, "document.getElementById('m').checkVisibility()").starts_with("unsupported:"));
-    // A selector the engine cannot parse may match anything.
+    assert_eq!(js(&mut b, "document.getElementById('c').checkVisibility()"), "false");
+    assert!(js(&mut b, "document.getElementById('under').checkVisibility()").starts_with("throw:NotSupportedError:"));
+    assert_eq!(js(&mut b, "document.getElementById('m').checkVisibility()"), "false");
+    // A rule with a selector that does not parse is dropped (CSS Syntax), so it matches nothing.
     let mut b = page("<style>:unknown-thing { display: contents }</style><div id=a>a</div>");
-    assert!(js(&mut b, "document.getElementById('a').checkVisibility()").starts_with("unsupported:"));
+    assert_eq!(js(&mut b, "document.getElementById('a').checkVisibility()"), "true");
 }

@@ -48,9 +48,8 @@
 //!   (in px). The read runs the geometry layout, so `GeometryLimits` apply (`geometry-*`, never catchable). A value that needs no
 //!   layout (a px length, an element that is not rendered, a non-atomic inline box) is the computed value and costs no layout. Gated:
 //!   a percent padding or margin of a grid item, an auto margin of a grid item or of an item of a wrapping flex container, and a box whose containing block is an inline box.
-//! - Page-level or per-read? A gate stays a page-level `Unsupported` (fatal), not an empty string or a throw: this module and the other
-//!   host modules say that a gate is never faked, and an empty string or a throw would let a script go on with a value that Chrome
-//!   does not give. `docs/internal/decisions.md` has no rule that says otherwise.
+//! - Page-level or per-read? A gate is never an empty string: that would fake a value that Chrome does not give. A script that reaches a
+//!   gate gets a `NotSupportedError` and the page goes on (owner decision 2026-11-25, `docs/internal/design-unsupported-throws.md`).
 //! - A light child of a shadow host that no slot takes has no style (it is not rendered; `RuleSet::compute_for` does not reach it).
 //! - Values that the engine keeps only loosely: `align-*` and `justify-*` lose `safe`/`unsafe`, and `text-decoration` keeps only the line
 //!   (the style, the color and the thickness are dropped, so `underline dotted` reads as `underline`). Those read as the text that the

@@ -162,11 +162,11 @@ fn what_is_not_supported_is_refused_before_anything_changes() {
             ("x.open('GET', '/text', true, 'u')", "XMLHttpRequest.open with a user name or a password"),
             ("x.responseType = 'document'", "XMLHttpRequest responseType document"),
         ] {
-            assert_eq!(js(&mut b, src), format!("unsupported:{what}"), "{src}");
+            assert_eq!(js(&mut b, src), format!("throw:NotSupportedError:{what}"), "{src}");
         }
         assert_eq!(js(&mut b, "x.readyState"), "0");
-        assert!(js(&mut b, "x.open('FOO', '/echo'); x.send('a')").starts_with("unsupported:"));
-        assert!(js(&mut b, "x = new XMLHttpRequest(); x.open('POST', '/echo'); x.send(document)").starts_with("unsupported:"));
+        assert!(js(&mut b, "x.open('FOO', '/echo'); x.send('a')").starts_with("throw:NotSupportedError:"));
+        assert!(js(&mut b, "x = new XMLHttpRequest(); x.open('POST', '/echo'); x.send(document)").starts_with("throw:NotSupportedError:"));
         assert_eq!(b.pending_fetches(), 0);
         assert!(srv.recs().is_empty());
     });

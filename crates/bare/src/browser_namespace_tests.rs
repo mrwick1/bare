@@ -133,22 +133,22 @@ fn namespaces_outside_the_scope_are_refused_by_name() {
         let mut b = browser();
         let before = b.stats();
         let names = b.document().borrow().name_count();
-        let other = "unsupported:createElementNS with a namespace other than HTML, SVG or MathML";
+        let other = "throw:NotSupportedError:createElementNS with a namespace other than HTML, SVG or MathML";
         assert_eq!(js(&mut b, "document.createElementNS('http://example.com/x', 'a')"), other);
         assert_eq!(js(&mut b, "document.createElementNS('http://example.com/x', 'p:a')"), other);
         assert_eq!(js(&mut b, &format!("document.createElementNS('{XLINK}', 'a')")), other);
-        assert_eq!(js(&mut b, "document.createElementNS(null, 'x')"), "unsupported:createElementNS with a null namespace");
-        assert_eq!(js(&mut b, "document.createElementNS('', 'x')"), "unsupported:createElementNS with a null namespace");
-        assert_eq!(js(&mut b, "document.createElementNS(undefined, 'x')"), "unsupported:createElementNS with a null namespace");
+        assert_eq!(js(&mut b, "document.createElementNS(null, 'x')"), "throw:NotSupportedError:createElementNS with a null namespace");
+        assert_eq!(js(&mut b, "document.createElementNS('', 'x')"), "throw:NotSupportedError:createElementNS with a null namespace");
+        assert_eq!(js(&mut b, "document.createElementNS(undefined, 'x')"), "throw:NotSupportedError:createElementNS with a null namespace");
         // the HTML namespace keeps its lowercase-only gate: no prefix, no capital letters
-        assert_eq!(js(&mut b, &format!("document.createElementNS('{HTML}', 'x:y')")), "unsupported:createElementNS in the HTML namespace with a prefix or capital letters (names are lowercase in the native document)");
-        assert_eq!(js(&mut b, &format!("document.createElementNS('{HTML}', 'Div')")), "unsupported:createElementNS in the HTML namespace with a prefix or capital letters (names are lowercase in the native document)");
+        assert_eq!(js(&mut b, &format!("document.createElementNS('{HTML}', 'x:y')")), "throw:NotSupportedError:createElementNS in the HTML namespace with a prefix or capital letters (names are lowercase in the native document)");
+        assert_eq!(js(&mut b, &format!("document.createElementNS('{HTML}', 'Div')")), "throw:NotSupportedError:createElementNS in the HTML namespace with a prefix or capital letters (names are lowercase in the native document)");
         assert_eq!(b.stats().nodes, before.nodes);
         assert_eq!(b.document().borrow().name_count(), names);
         // attributes
         js(&mut b, &format!("var s = document.createElementNS('{SVG}', 'svg');"));
         let names = b.document().borrow().name_count();
-        let attr = "unsupported:setAttributeNS with a namespace other than none, XML, XMLNS or XLink";
+        let attr = "throw:NotSupportedError:setAttributeNS with a namespace other than none, XML, XMLNS or XLink";
         assert_eq!(js(&mut b, "s.setAttributeNS('http://example.com/x', 'p:a', 'v')"), attr);
         assert_eq!(js(&mut b, &format!("s.setAttributeNS('{SVG}', 'a', 'v')")), attr);
         assert_eq!(js(&mut b, "s.getAttributeNames().length"), "0");
@@ -236,7 +236,7 @@ fn attribute_namespace_errors_change_nothing() {
         assert_eq!(b.stats().attr_slots, slots);
         assert_eq!(b.document().borrow().name_count(), names);
         // a value that cannot be stored changes nothing either (a lone surrogate)
-        assert_eq!(js(&mut b, &format!("s.setAttributeNS('{XLINK}', 'xlink:href', '\\ud800')")), "unsupported:lone surrogate in a DOM string (the native document is UTF-8)");
+        assert_eq!(js(&mut b, &format!("s.setAttributeNS('{XLINK}', 'xlink:href', '\\ud800')")), "throw:NotSupportedError:lone surrogate in a DOM string (the native document is UTF-8)");
         assert_eq!(js(&mut b, "s.getAttributeNames().join()"), "keep");
         // the XML names of valid-looking qualified names are the ones the existing rules accept
         assert_eq!(js(&mut b, &format!("s.setAttributeNS('{XLINK}', 'xlink:href', 1); s.getAttributeNS('{XLINK}', 'href')")), "1");
