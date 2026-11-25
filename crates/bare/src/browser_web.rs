@@ -6,7 +6,7 @@
 //!
 //! `crypto` (Web Crypto): `getRandomValues(array)` and `randomUUID()`. The bytes come from `bare_tls::random::fill`, the
 //! OS source, with no fallback: if it fails, the call throws an `OperationError`. `getRandomValues` takes an integer typed
-//! array (not `Float32Array`, `Float64Array`, `DataView` or `ArrayBuffer`: `TypeMismatchError`), at most 65,536 bytes
+//! array (float arrays, `DataView` and `ArrayBuffer` throw `TypeMismatchError`), at most 65,536 bytes
 //! (`QuotaExceededError`), fills it in place and returns it. `randomUUID` is RFC 9562 version 4, in lower case.
 //! `crypto.subtle` is a `SubtleCrypto` in a secure context (`browser_basics::secure`) and `undefined` otherwise. Its
 //! `digest(algorithm, data)` hashes with SHA-1, SHA-256, SHA-384 or SHA-512 (`bare_tls`), a name or `{name}`, ASCII
@@ -424,17 +424,17 @@ fn make<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, Made<E>> {
     getter(d, s, cp, "subtle", subtle_attr)?;
     let crypto = plain(d, s, cp)?;
 
-    // SubtleCrypto: `digest` hashes here; AES and HKDF are in `browser_subtle.rs`; the other methods reject until they are built.
+    // SubtleCrypto: `digest` hashes here; AES, HMAC and HKDF are in `browser_subtle.rs`; the other methods reject until they are built.
     let sp = proto(d, s, op_, "SubtleCrypto")?;
     op(d, s, sp, "digest", 2, subtle_digest)?;
     {
         use crate::browser_subtle as k;
-        let ops: [(&str, u32, HS<E>); 7] = [("encrypt", 3, k::encrypt), ("decrypt", 3, k::decrypt), ("generateKey", 3, k::generate_key), ("importKey", 5, k::import_key), ("exportKey", 2, k::export_key), ("deriveKey", 5, k::derive_key), ("deriveBits", 2, k::derive_bits)];
+        let ops: [(&str, u32, HS<E>); 9] = [("encrypt", 3, k::encrypt), ("decrypt", 3, k::decrypt), ("sign", 3, k::sign), ("verify", 4, k::verify), ("generateKey", 3, k::generate_key), ("importKey", 5, k::import_key), ("exportKey", 2, k::export_key), ("deriveKey", 5, k::derive_key), ("deriveBits", 2, k::derive_bits)];
         for (name, len, h) in ops {
             op(d, s, sp, name, len, h)?;
         }
     }
-    for (name, len) in [("sign", 3), ("verify", 4), ("wrapKey", 4), ("unwrapKey", 7)] {
+    for (name, len) in [("wrapKey", 4), ("unwrapKey", 7)] {
         op(d, s, sp, name, len, subtle_unsupported)?;
     }
     let kp = proto(d, s, op_, "CryptoKey")?;
@@ -568,7 +568,7 @@ fn get_random_values<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>,
     crypto_this(d, s, this)?;
     need::<E>(s, a, 1, "getRandomValues' on 'Crypto")?;
     let x = arg_s::<E>(s, a, 0);
-    let integer = s.view(x).is_some_and(|v| v.elem != Elem::Data && !matches!(v.elem, Elem::F32 | Elem::F64));
+    let integer = s.view(x).is_some_and(|v| v.elem != Elem::Data && !matches!(v.elem, Elem::F16 | Elem::F32 | Elem::F64));
     if !integer {
         return Err(d.dom_err_s(s, "TypeMismatchError", "The data argument must be an integer-type TypedArray."));
     }

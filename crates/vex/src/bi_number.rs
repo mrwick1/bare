@@ -88,6 +88,7 @@ impl Realm {
             m("min", 2, min),
             m("hypot", 2, hypot),
             m("imul", 2, imul),
+            m("f16round", 1, f16round),
             m("fround", 1, fround),
             m("clz32", 1, clz32),
             m("sinh", 1, sinh),
@@ -515,6 +516,7 @@ unary!(tan, |x| x.tan());
 unary!(asin, |x| x.asin());
 unary!(acos, |x| x.acos());
 unary!(atan, |x| x.atan());
+unary!(f16round, |x| crate::bi_typed::decode_f16(crate::bi_typed::encode_f16(x)));
 unary!(fround, |x| x as f32 as f64);
 unary!(clz32, |x| Realm::to_int32(x).leading_zeros() as f64);
 unary!(sinh, |x| x.sinh());

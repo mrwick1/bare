@@ -407,6 +407,9 @@ pub struct Realm {
     pub(crate) api: crate::api::ApiState,
     /// The compiler of the stubs of the program, if it has any (`Op::Lazy`, in any run: `Realm::compile_stub`).
     pub lazy: Option<Box<dyn LazyCompile>>,
+    /// The code indexes of the functions that `Function` and its kin made (`dynamic_function`), with the length of their keyword.
+    /// `Function.prototype.toString` adds the name `anonymous` to their text, as the spec's source text has it.
+    pub(crate) dynamic_fns: HashMap<usize, usize>,
     epoch: u32,
     pub collections: u32,
     /// What the last collection counted.
@@ -584,6 +587,7 @@ impl Realm {
             grown: 0,
             api: Default::default(),
             lazy: None,
+            dynamic_fns: HashMap::new(),
             epoch,
             collections: 0,
             last_gc: Default::default(),
@@ -1378,6 +1382,9 @@ impl Realm {
             }
             Key::Idx(i) => {
                 if o.is_kind(crate::object::K_TYPED) {
+                    if self.typed_immutable(o) {
+                        return Ok(Put::Fail);
+                    }
                     self.typed_set(o, Some(i as usize), v)?;
                     return Ok(Put::Done);
                 }
@@ -1401,6 +1408,9 @@ impl Realm {
                 if o.is_kind(crate::object::K_TYPED)
                     && let Some(i) = crate::bi_typed::numeric_key(key)
                 {
+                    if self.typed_immutable(o) {
+                        return Ok(Put::Fail);
+                    }
                     self.typed_set(o, i, v)?;
                     return Ok(Put::Done);
                 }
@@ -1434,6 +1444,9 @@ impl Realm {
                 return self.proxy_set(p, key, v, o.value()).map(|ok| Some(if ok { Put::Done } else { Put::Fail }));
             }
             if p.is_kind(crate::object::K_TYPED) {
+                if self.typed_immutable(p) {
+                    return Ok(Some(Put::Fail));
+                }
                 return Ok((i as usize >= self.typed_len(p)).then_some(Put::Done));
             }
             match self.get_own(p, key) {
@@ -1464,6 +1477,9 @@ impl Realm {
             if p.is_kind(crate::object::K_TYPED)
                 && let Some(i) = crate::bi_typed::numeric_key(Key::Name(k))
             {
+                if self.typed_immutable(p) {
+                    return Ok(Some(Put::Fail));
+                }
                 return Ok((!i.is_some_and(|i| i < self.typed_len(p))).then_some(Put::Done));
             }
             if k == self.k_length {

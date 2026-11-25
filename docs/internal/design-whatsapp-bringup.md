@@ -33,6 +33,12 @@ To read page state, run `bare-mcp` (same build) and call `open`, then `eval`. Wh
 - **`nonce` on `HTMLElement` and `SVGElement`** (PR 1). It was `undefined`. WhatsApp reads `script.nonce` first, then
   `getAttribute('nonce')`, so this was not the blocker. It is a gap that other pages hit. Tests:
   `crates/bare/src/browser_element_nonce_tests.rs`.
+- **AES-CTR and HMAC in `crypto.subtle`** (PR 3). WhatsApp makes an AES-CTR key at boot and signs with HMAC SHA-256.
+  Both rejected with `NotSupportedError`. Fix: `crates/bare/src/browser_subtle.rs`. Tests:
+  `crates/bare/src/browser_subtle_ctr_hmac_tests.rs`.
+- **Source text in `Function.prototype.toString`** (PR 2). `WAWeb-curve25519-donna` reads the source of small functions
+  with `t.toString().match(d)`. Vex gave `[native code]`, the match was `null`, and the boot threw. Fix: `Code.span` and
+  `fn_to_string` (`crates/vex/src/builtins.rs`). Tests: `crates/vex/src/fn_source_tests.rs`.
 
 Live effect, same journey, before vs after PR 1 (archMachine, 1 run each):
 

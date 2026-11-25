@@ -154,7 +154,13 @@ impl Walk<'_> {
                 }
                 let len = rt.buffer_bytes(o).expect("buffer").len();
                 self.charge(rt, |m| m.buffer(len))?;
-                self.seen.insert(key, self.out.buffer(rt.buffer_bytes(o).expect("buffer")));
+                let bytes = rt.buffer_bytes(o).expect("buffer");
+                let index = if crate::bi_buffer::immutable_buffer(o) {
+                    self.out.immutable_buffer(bytes)
+                } else {
+                    self.out.buffer(bytes)
+                };
+                self.seen.insert(key, index);
             }
             K_TYPED | K_DATA_VIEW => {
                 let view = View::of(o).expect("view");
@@ -239,6 +245,9 @@ pub(super) fn write<'s>(rt: &mut Realm, root: Value, opts: &CloneOpts<'_, '_>, h
         }
     }
     for &o in &list {
+        if crate::bi_buffer::immutable_buffer(o) {
+            return Err(walk.refuse(rt, Refused::Object));
+        }
         let ok = if o.is_kind(K_BUFFER) { !rt.buffer_detached(o) } else { walk.host.can_transfer(&o.value()) };
         if !ok {
             return Err(walk.refuse(rt, Refused::DetachedTransfer));
@@ -353,15 +362,16 @@ impl Read<'_> {
                 let o = rt.to_object(p).map_err(|e| rt.a_err(e))?;
                 self.object(rt, o.value())?
             }
-            Tag::Buf => {
+            Tag::Buf | Tag::BufImm => {
                 let bytes = read!(self.input.buffer());
-                self.buffer(rt, bytes)?
+                self.buffer(rt, bytes, tag == Tag::BufImm)?
             }
             Tag::View => {
                 let (ty, offset, len) = read!(self.input.view());
                 let elem = match ty {
                     0..=10 => Some(Element::from_id(ty.into())),
                     11 => None,
+                    12 => Some(Element::F16),
                     _ => return Err(damaged()),
                 };
                 let buf = self.value(rt, depth + 1)?;
@@ -378,7 +388,7 @@ impl Read<'_> {
             Tag::Moved => {
                 let i = read!(self.input.moved()) as usize;
                 match std::mem::replace(self.items.get_mut(i).ok_or_else(damaged)?, Item::Used) {
-                    Item::Buffer(bytes) => self.buffer(rt, &bytes)?,
+                    Item::Buffer(bytes) => self.buffer(rt, &bytes, false)?,
                     Item::Host(v) => self.object(rt, v)?,
                     Item::Used => return Err(damaged()),
                 }
@@ -387,10 +397,13 @@ impl Read<'_> {
         })
     }
 
-    fn buffer<'s>(&mut self, rt: &mut Realm, bytes: &[u8]) -> R<'s, Value> {
+    fn buffer<'s>(&mut self, rt: &mut Realm, bytes: &[u8], immutable: bool) -> R<'s, Value> {
         let proto = rt.buffer_intrinsic("ArrayBuffer");
         let o = rt.new_buffer(proto, bytes.len(), None).map_err(|e| rt.a_err(e))?;
         rt.buffer_bytes_mut(o).expect("buffer").copy_from_slice(bytes);
+        if immutable {
+            rt.mark_buffer_immutable(o);
+        }
         self.object(rt, o.value())
     }
 

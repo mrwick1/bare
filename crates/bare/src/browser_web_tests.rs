@@ -214,7 +214,7 @@ fn subtle_has_every_method_and_an_illegal_constructor() {
     big(|| {
         let mut b = mk(Some("https://example.com/".into()), FetchLimits::default());
         let got = go(&mut b, "var out = []; var s = crypto.subtle; out.push(Object.prototype.toString.call(s), Object.getPrototypeOf(s) === SubtleCrypto.prototype, [s.digest.length, s.encrypt.length, s.sign.length, s.verify.length, s.generateKey.length, s.importKey.length, s.exportKey.length, s.deriveKey.length, s.deriveBits.length, s.wrapKey.length, s.unwrapKey.length].join()); ['encrypt', 'decrypt', 'sign', 'verify', 'generateKey', 'importKey', 'exportKey', 'deriveKey', 'deriveBits', 'wrapKey', 'unwrapKey'].forEach(function (k) { s[k]().catch(function (e) { out.push(k + ':' + e.name); }); }); try { new SubtleCrypto(); } catch (e) { out.push(e.name + ':' + e.message); } 1");
-        assert_eq!(got, "[object SubtleCrypto]|true|2,3,3,4,3,5,2,5,2,4,7|TypeError:Illegal constructor|encrypt:TypeError|decrypt:TypeError|sign:NotSupportedError|verify:NotSupportedError|generateKey:TypeError|importKey:TypeError|exportKey:TypeError|deriveKey:TypeError|deriveBits:TypeError|wrapKey:NotSupportedError|unwrapKey:NotSupportedError");
+        assert_eq!(got, "[object SubtleCrypto]|true|2,3,3,4,3,5,2,5,2,4,7|TypeError:Illegal constructor|encrypt:TypeError|decrypt:TypeError|sign:TypeError|verify:TypeError|generateKey:TypeError|importKey:TypeError|exportKey:TypeError|deriveKey:TypeError|deriveBits:TypeError|wrapKey:NotSupportedError|unwrapKey:NotSupportedError");
     });
 }
 
@@ -343,3 +343,9 @@ fn blobs_are_bounded_and_collected() {
         assert_eq!(js(&mut b, "JSON.stringify(itr.next().value)"), "[\"a\",\"b\"]");
     });
 }
+
+#[path = "browser_web_float16_tests.rs"]
+mod float16_tests;
+
+#[path = "browser_web_immutable_buffer_tests.rs"]
+mod immutable_buffer_tests;

@@ -92,6 +92,9 @@ fn encode_into(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
         return rt.type_error("the destination must be a Uint8Array");
     };
     let (buf, span) = rt.byte_range(dest).expect("Uint8Array byte range");
+    if crate::bi_buffer::immutable_buffer(buf) {
+        return rt.type_error("immutable ArrayBuffer");
+    }
     // Inspect at most one code point past the destination capacity.
     let count = src.len().min(span.len().saturating_add(2));
     work(rt, count)?;

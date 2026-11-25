@@ -26,12 +26,13 @@ pub(crate) enum Element {
     F64,
     BI64,
     BU64,
+    F16,
 }
 
 impl Element {
     pub(crate) fn from_id(id: i32) -> Self {
         use Element::*;
-        [I8, U8, U8C, I16, U16, I32, U32, F32, F64, BI64, BU64][id as usize]
+        [I8, U8, U8C, I16, U16, I32, U32, F32, F64, BI64, BU64, F16][id as usize]
     }
 
     pub(crate) fn name(self) -> &'static str {
@@ -43,6 +44,7 @@ impl Element {
             Self::U16 => "Uint16Array",
             Self::I32 => "Int32Array",
             Self::U32 => "Uint32Array",
+            Self::F16 => "Float16Array",
             Self::F32 => "Float32Array",
             Self::F64 => "Float64Array",
             Self::BI64 => "BigInt64Array",
@@ -53,7 +55,7 @@ impl Element {
     pub(crate) fn width(self) -> usize {
         match self {
             Self::I8 | Self::U8 | Self::U8C => 1,
-            Self::I16 | Self::U16 => 2,
+            Self::I16 | Self::U16 | Self::F16 => 2,
             Self::I32 | Self::U32 | Self::F32 => 4,
             Self::F64 | Self::BI64 | Self::BU64 => 8,
         }
@@ -107,6 +109,7 @@ impl Element {
             Self::I16 => bits as i16 as f64,
             Self::U16 | Self::U32 => bits as f64,
             Self::I32 => bits as i32 as f64,
+            Self::F16 => decode_f16(bits as u16),
             Self::F32 => f32::from_bits(bits as u32) as f64,
             Self::F64 | Self::BI64 | Self::BU64 => return bits,
         }.to_bits()
@@ -116,6 +119,7 @@ impl Element {
         let n = f64::from_bits(bits);
         let bits = match self {
             Self::U8C => n.clamp(0.0, 255.0).round_ties_even() as u64,
+            Self::F16 => encode_f16(n) as u64,
             Self::F32 => (n as f32).to_bits() as u64,
             Self::F64 | Self::BI64 | Self::BU64 => bits,
             _ => Realm::to_int32(n) as u64,
@@ -139,6 +143,7 @@ impl Element {
             Self::U16 => Elem::U16,
             Self::I32 => Elem::I32,
             Self::U32 => Elem::U32,
+            Self::F16 => Elem::F16,
             Self::F32 => Elem::F32,
             Self::F64 => Elem::F64,
             Self::BI64 => Elem::BI64,
@@ -156,6 +161,7 @@ impl Element {
             Elem::U16 => Self::U16,
             Elem::I32 => Self::I32,
             Elem::U32 => Self::U32,
+            Elem::F16 => Self::F16,
             Elem::F32 => Self::F32,
             Elem::F64 => Self::F64,
             Elem::BI64 => Self::BI64,
@@ -163,6 +169,36 @@ impl Element {
             Elem::Data => return None,
         })
     }
+}
+
+pub(crate) fn encode_f16(n: f64) -> u16 {
+    let sign = if n.is_sign_negative() { 0x8000 } else { 0 };
+    let magnitude = n.abs();
+    let bits = if magnitude.is_nan() {
+        0x7e00
+    } else if magnitude >= 65520.0 {
+        0x7c00
+    } else if magnitude < 1.0 / 16384.0 {
+        // A subnormal fraction counts units of 2^-24.
+        (magnitude * 16777216.0).round_ties_even() as u16
+    } else {
+        // Round away the low 42 fraction bits, then adjust the exponent bias.
+        let bits = magnitude.to_bits();
+        let rounded = bits + ((1 << 41) - 1) + ((bits >> 42) & 1);
+        ((rounded >> 42) - (1008 << 10)) as u16
+    };
+    sign | bits
+}
+
+pub(crate) fn decode_f16(bits: u16) -> f64 {
+    let magnitude = bits & 0x7fff;
+    let n = match magnitude {
+        0..=0x03ff => f64::from(magnitude) / 16777216.0,
+        0x7c00 => f64::INFINITY,
+        0x7c01.. => f64::NAN,
+        _ => f64::from_bits((u64::from(magnitude) + (1008 << 10)) << 42),
+    };
+    if bits & 0x8000 != 0 { -n } else { n }
 }
 
 pub(crate) fn intrinsic(rt: &mut Realm) -> (Obj, Obj) {
@@ -273,6 +309,10 @@ impl Realm {
             view.write(self, i, n);
         }
         Ok(())
+    }
+
+    pub(crate) fn typed_immutable(&self, o: Obj) -> bool {
+        View::of(o).is_some_and(View::immutable)
     }
 
     pub(crate) fn typed_len(&self, o: Obj) -> usize {
@@ -387,9 +427,17 @@ fn validated(rt: &mut Realm, this: Value) -> R<(View, usize)> {
     Ok((v, n))
 }
 
+fn writable(rt: &mut Realm, view: View) -> R<()> {
+    if view.immutable() {
+        return rt.type_error("immutable ArrayBuffer");
+    }
+    Ok(())
+}
+
 fn make_len(rt: &mut Realm, c: Value, len: usize) -> R<(Value, View)> {
     let v = construct(rt, c, &[Realm::num(len as f64)])?;
     let (view, actual) = validated(rt, v)?;
+    writable(rt, view)?;
     if actual < len {
         return rt.type_error("typed array result is too short");
     }
@@ -515,6 +563,7 @@ fn copy(rt: &mut Realm, src: View, start: usize, dst: View, at: usize, count: us
 
 fn set(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let dst = require(rt, this)?;
+    writable(rt, dst)?;
     let offset = integer(rt, arg(args, 1))?;
     if offset < 0.0 {
         return range(rt, "negative typed array offset");
@@ -543,6 +592,7 @@ fn set(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
 
 fn copy_within(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let (view, len) = validated(rt, this)?;
+    writable(rt, view)?;
     let to = relative(rt, arg(args, 0), len, 0)?;
     let from = relative(rt, arg(args, 1), len, 0)?;
     let end = relative(rt, arg(args, 2), len, len)?;
@@ -623,6 +673,7 @@ fn slice(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
 
 fn fill(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let (v, len) = validated(rt, this)?;
+    writable(rt, v)?;
     let n = v.elem.expect("element").convert(rt, arg(args, 0))?;
     let start = relative(rt, arg(args, 1), len, 0)?;
     let end = relative(rt, arg(args, 2), len, len)?;
@@ -885,6 +936,7 @@ fn reverse<const COPY: bool>(rt: &mut Realm, this: Value, _args: &[Value]) -> R<
         copy(rt, src, 0, dst, 0, len)?;
         (result, dst)
     } else {
+        writable(rt, src)?;
         (this, src)
     };
     if len > 1 {
@@ -908,7 +960,12 @@ fn sort<const COPY: bool>(rt: &mut Realm, this: Value, args: &[Value]) -> R<Valu
     }
     let (v, len) = validated(rt, this)?;
     let elem = v.elem.expect("element");
-    let (result, dst) = if COPY { same_type(rt, elem, len)? } else { (this, v) };
+    let (result, dst) = if COPY {
+        same_type(rt, elem, len)?
+    } else {
+        writable(rt, v)?;
+        (this, v)
+    };
     let mut values = Vec::new();
     if values.try_reserve_exact(len).is_err() {
         return range(rt, "out of memory");
@@ -1062,3 +1119,7 @@ mod locale_tests;
 #[cfg(test)]
 #[path = "bi_typed_ctor_order_tests.rs"]
 mod ctor_order_tests;
+
+#[cfg(test)]
+#[path = "bi_typed_float16_tests.rs"]
+mod float16_tests;

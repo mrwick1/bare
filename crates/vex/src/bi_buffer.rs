@@ -26,6 +26,7 @@ pub(crate) static GLOBALS: &[Ent] = &[
     buffer_ctor("Uint16Array", 3, Element::U16 as i32),
     buffer_ctor("Int32Array", 3, Element::I32 as i32),
     buffer_ctor("Uint32Array", 3, Element::U32 as i32),
+    buffer_ctor("Float16Array", 3, Element::F16 as i32),
     buffer_ctor("Float32Array", 3, Element::F32 as i32),
     buffer_ctor("Float64Array", 3, Element::F64 as i32),
     buffer_ctor("BigInt64Array", 3, Element::BI64 as i32),
@@ -54,6 +55,10 @@ impl View {
             len: buffer_slot(o, 2).as_int().map(|n| n as usize),
             elem,
         })
+    }
+
+    pub(crate) fn immutable(self) -> bool {
+        immutable_buffer(self.buffer)
     }
 
     pub(crate) fn width(self) -> usize {
@@ -92,6 +97,12 @@ impl View {
             elem.write(&mut b.bytes_mut(rt)[at..at + elem.width()], n, cfg!(target_endian = "little"));
         }
     }
+}
+
+// The max-length slot is an integer for resizable buffers and undefined for
+// ordinary fixed buffers. True marks an immutable fixed buffer.
+pub(crate) fn immutable_buffer(o: Obj) -> bool {
+    o.is_kind(K_BUFFER) && buffer_slot(o, 2) == Value::TRUE
 }
 
 #[derive(Clone, Copy)]
@@ -181,10 +192,13 @@ impl Realm {
                         getter("maxByteLength", "get maxByteLength", max_byte_length),
                         getter("resizable", "get resizable", resizable),
                         getter("detached", "get detached", detached),
-                        m("slice", 2, buffer_slice),
+                        getter("immutable", "get immutable", immutable),
+                        m("slice", 2, buffer_slice::<false>),
+                        m("sliceToImmutable", 2, buffer_slice::<true>),
                         m("resize", 1, resize),
                         indexed("transfer", 0, transfer, 0),
                         indexed("transferToFixedLength", 0, transfer, 1),
+                        indexed("transferToImmutable", 0, transfer, 2),
                     ],
                 );
                 self.lazy_table(
@@ -206,6 +220,7 @@ impl Realm {
                         indexed("getUint16", 1, data_get, Element::U16 as i32),
                         indexed("getInt32", 1, data_get, Element::I32 as i32),
                         indexed("getUint32", 1, data_get, Element::U32 as i32),
+                        indexed("getFloat16", 1, data_get, Element::F16 as i32),
                         indexed("getFloat32", 1, data_get, Element::F32 as i32),
                         indexed("getFloat64", 1, data_get, Element::F64 as i32),
                         indexed("getBigInt64", 1, data_get, Element::BI64 as i32),
@@ -216,6 +231,7 @@ impl Realm {
                         indexed("setUint16", 2, data_set, Element::U16 as i32),
                         indexed("setInt32", 2, data_set, Element::I32 as i32),
                         indexed("setUint32", 2, data_set, Element::U32 as i32),
+                        indexed("setFloat16", 2, data_set, Element::F16 as i32),
                         indexed("setFloat32", 2, data_set, Element::F32 as i32),
                         indexed("setFloat64", 2, data_set, Element::F64 as i32),
                         indexed("setBigInt64", 2, data_set, Element::BI64 as i32),
@@ -248,6 +264,10 @@ impl Realm {
         self.buffer_object(proto, K_BUFFER, &[blob.value(), Value::int(len as i32), stored_len(max)])
     }
 
+    pub(crate) fn mark_buffer_immutable(&mut self, o: Obj) {
+        o.set_slot(&self.shapes, 2, Value::TRUE);
+    }
+
     fn alloc_bytes(&mut self, len: usize) -> R<Blob> {
         if len > MAX_BYTES {
             return range(self, "invalid ArrayBuffer length");
@@ -271,7 +291,7 @@ impl Realm {
     }
 
     pub(crate) fn buffer_bytes_mut(&mut self, o: Obj) -> Option<&mut [u8]> {
-        o.is_kind(K_BUFFER).then(|| Buffer::of(o).bytes_mut(self))
+        (o.is_kind(K_BUFFER) && !immutable_buffer(o)).then(|| Buffer::of(o).bytes_mut(self))
     }
 
     pub(crate) fn byte_range(&self, o: Obj) -> Option<(Obj, std::ops::Range<usize>)> {
@@ -526,7 +546,11 @@ fn detached(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
     Ok(Value::bool(rt.buffer_detached(o)))
 }
 
-fn buffer_slice(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+fn immutable(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
+    Ok(Value::bool(immutable_buffer(require_buffer(rt, this)?)))
+}
+
+fn buffer_slice<const IMMUTABLE: bool>(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let source = require_buffer(rt, this)?;
     let b = Buffer::of(source);
     if b.blob.is_none() {
@@ -535,6 +559,22 @@ fn buffer_slice(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let start = relative(rt, arg(args, 0), b.len, 0)?;
     let end = relative(rt, arg(args, 1), b.len, b.len)?;
     let len = end.saturating_sub(start);
+    if IMMUTABLE {
+        let current = Buffer::of(source);
+        if current.blob.is_none() {
+            return rt.type_error("detached ArrayBuffer");
+        }
+        if end > current.len {
+            return range(rt, "slice exceeds current ArrayBuffer length");
+        }
+        let proto = rt.buffer_intrinsic("ArrayBuffer");
+        let result = rt.new_buffer(proto, len, None)?;
+        if len != 0 {
+            rt.copy_buffer_bytes(source, start, result, 0, len);
+        }
+        rt.mark_buffer_immutable(result);
+        return Ok(result.value());
+    }
     let c = species_ctor(rt, this)?;
     let result = if c.is_undefined() {
         let proto = rt.buffer_intrinsic("ArrayBuffer");
@@ -543,7 +583,7 @@ fn buffer_slice(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
         let v = construct(rt, c, &[Realm::num(len as f64)])?;
         let o = require_buffer(rt, v)?;
         let b = Buffer::of(o);
-        if o == source || b.blob.is_none() || b.len < len {
+        if o == source || b.blob.is_none() || immutable_buffer(o) || b.len < len {
             return rt.type_error("invalid ArrayBuffer species result");
         }
         o
@@ -583,7 +623,7 @@ fn resize(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
 }
 
 fn transfer(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
-    let fixed = native_param(rt) == 1;
+    let mode = native_param(rt);
     let o = require_buffer(rt, this)?;
     let a = arg(args, 0);
     let len = if a.is_undefined() {
@@ -595,7 +635,10 @@ fn transfer(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let Some(blob) = b.blob else {
         return rt.type_error("detached ArrayBuffer");
     };
-    let max = if fixed { None } else { b.max };
+    if immutable_buffer(o) {
+        return rt.type_error("immutable ArrayBuffer cannot be transferred");
+    }
+    let max = if mode == 0 { b.max } else { None };
     if max.is_some_and(|max| len > max) {
         return range(rt, "transfer exceeds maxByteLength");
     }
@@ -607,6 +650,9 @@ fn transfer(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
         rt.copy_buffer_bytes(o, 0, result, 0, len.min(b.len));
         result
     };
+    if mode == 2 {
+        rt.mark_buffer_immutable(result);
+    }
     rt.detach_buffer(o);
     Ok(result.value())
 }
@@ -695,6 +741,9 @@ fn data_get(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
 
 fn data_set(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let v = require_data(rt, this)?;
+    if v.immutable() {
+        return rt.type_error("immutable ArrayBuffer");
+    }
     let elem = Element::from_id(native_param(rt));
     let at = to_index(rt, arg(args, 0))?;
     let n = elem.convert(rt, arg(args, 1))?;
@@ -707,3 +756,7 @@ fn data_set(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
 #[cfg(test)]
 #[path = "bi_buffer_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "bi_buffer_immutable_tests.rs"]
+mod immutable_tests;

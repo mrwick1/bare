@@ -98,6 +98,11 @@ pub trait LazyCompile {
     fn source_of(&self, _ci: usize) -> Option<&str> {
         None
     }
+    /// The source text of the page that the code `ci` came from, for `Function.prototype.toString`. `None` for the prelude: its
+    /// functions are built-ins, and their text is `[native code]`.
+    fn page_source_of(&self, _ci: usize) -> Option<&str> {
+        None
+    }
     /// Compile `src` as a script and add it at the end of `codes`. Gives the index of its top level code: a function with no
     /// parameters (`api.rs`, `Realm::run_text`).
     fn script_in(
