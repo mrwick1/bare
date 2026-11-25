@@ -89,6 +89,8 @@ pub struct Tree<'a> {
     // A `&'a` is a reference that must not outlive `'a`: the `Tree` cannot live longer than the DOM and the styles.
     // JS has no such rule: the garbage collector keeps the objects alive.
     br: Option<Atom>,
+    /// `svg`: a replaced element is an atomic inline, also with `display: inline`.
+    svg: Option<Atom>,
     ol: Option<Atom>,
     start: Option<Atom>,
     value: Option<Atom>,
@@ -106,7 +108,7 @@ pub struct Tree<'a> {
 
 impl<'a> Tree<'a> {
     pub fn new(doc: &'a Document, styles: &'a Styles) -> Tree<'a> {
-        Tree { doc, styles, br: doc.find_atom("br"), ol: doc.find_atom("ol"), start: doc.find_atom("start"), value: doc.find_atom("value"), body: doc.find_atom("body"), details: doc.find_atom("details"), open: doc.find_atom("open"), summary: doc.find_atom("summary"), editable: doc.find_atom("contenteditable"), controls: crate::controls::Atoms::new(doc), contents: styles.contents() }
+        Tree { doc, styles, br: doc.find_atom("br"), svg: doc.find_atom("svg"), ol: doc.find_atom("ol"), start: doc.find_atom("start"), value: doc.find_atom("value"), body: doc.find_atom("body"), details: doc.find_atom("details"), open: doc.find_atom("open"), summary: doc.find_atom("summary"), editable: doc.find_atom("contenteditable"), controls: crate::controls::Atoms::new(doc), contents: styles.contents() }
     }
 
     /// The `html` element: the root of the boxes. `None` if it is not shown.
@@ -171,6 +173,8 @@ impl<'a> Tree<'a> {
                     _ if matches!(style.get(Property::Float), Value::Keyword(Keyword::Left | Keyword::Right)) => Kind::Float,
                     // A float is a block, whatever its `display`: a floated `<span>` too.
                     Keyword::Inline if Some(name) == self.br => Kind::Break,
+                    // Fluent icons are `svg` with `display: inline`. The width and height of the `svg` count (CSS 2.1, 10.3.2).
+                    Keyword::Inline if Some(name) == self.svg && !self.doc.is_foreign(self.doc.flat_parent(node).unwrap_or(node)) => Kind::Atomic,
                     Keyword::Inline => Kind::Inline,
                     Keyword::ListItem => Kind::ListItem,
                     Keyword::InlineBlock | Keyword::InlineFlex | Keyword::InlineGrid | Keyword::InlineTable => Kind::Atomic,

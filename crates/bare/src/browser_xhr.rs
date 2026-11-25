@@ -17,7 +17,7 @@
 //! Gates (`Error::Unsupported`, before anything changes): a synchronous request (`async = false`: the pump is the only place where
 //! the host blocks), `user` and `password` arguments, `responseType = "document"`, a `Document` body, and the methods `fetch` gates (a token method and a lower-case `patch`: `bare_net::http::Method` has seven). A request
 //! to another origin follows CORS (see `browser_fetch.rs`): `Origin`, a preflight for a non-simple request, the check of the reply, and only the safelisted and the exposed response headers. A refused request fires `error` (status 0). Cookies follow the jar of the client (see `browser_fetch.rs`): `withCredentials` sends them to another origin, and without it only the document origin gets them. A request that has an upload listener gets no preflight for that reason (the standard asks for one).
-//! A response text in a charset other than UTF-8 is `Unsupported` unless every byte is ASCII.
+//! A response text in a charset other than UTF-8 or x-user-defined is `Unsupported` unless every byte is ASCII.
 //!
 //! Deviations: `timeout` is checked when the reply is delivered (the blocking I/O cannot be stopped), against the time the reply came:
 //! a reply that came later than the timeout is a `timeout`, with no `load`. A reply that came in time but waited for a busy page is a
@@ -714,7 +714,14 @@ impl<E: Eng> Dom<E> {
 
     fn response_text_of<'s>(&self, s: &mut Sc<'s, E>, x: E::Obj) -> Res<'s, Local<'s>> {
         let Some(body) = self.xs(x, |x| if x.state == LOADING || x.state == DONE { x.resp.as_ref().map(|r| r.body.clone()) } else { None }) else { return self.js_str_s(s, "") };
-        if let Some(cs) = charset(&self.final_mime(x))
+        let cs = charset(&self.final_mime(x));
+        // x-user-defined (Encoding Standard): a byte below 0x80 is itself, a byte from 0x80 is U+F780 + (byte - 0x80). Pages read binary data with it.
+        if cs.as_deref() == Some("x-user-defined") {
+            s.charge((body.len() / 16) as u64)?;
+            let text: String = body.iter().map(|&b| if b < 0x80 { b as char } else { char::from_u32(0xF700 + b as u32).unwrap_or('\u{FFFD}') }).collect();
+            return self.js_str_s(s, &text);
+        }
+        if let Some(cs) = cs
             && !matches!(cs.as_str(), "utf-8" | "utf8" | "unicode-1-1-utf-8")
             && (cs.starts_with("utf-16") || !body.is_ascii())
         {

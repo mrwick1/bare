@@ -1,4 +1,5 @@
-//! Dedicated workers with isolated heaps. Only structured messages cross the thread boundary.
+//! Dedicated workers with isolated heaps. Structured messages cross the thread boundary, and the worker uses the `indexedDB` stores
+//! of its page (`IdbShare`): each host op locks the store of the origin (`browser_idb.rs`).
 use super::*;
 use bare_js_api::clone::AgentCluster;
 use bare_vex::shared_memory::Test262AgentControl;
@@ -77,6 +78,8 @@ impl ThreadWorker {
         let status = finished.clone();
         let stop = control.clone();
         let engine = crate::browser_wasm::engine(dom);
+        // The worker uses the `indexedDB` stores of its page, so a write on either thread is seen on the other one.
+        let idb = dom.nav.s.borrow().store.idb_share();
         let worker = thread::Builder::new().name("bare-worker".into()).stack_size(16 << 20).spawn(move || {
             struct Done(Arc<AtomicU8>, bool);
             impl Drop for Done {
@@ -86,7 +89,7 @@ impl ThreadWorker {
                 }
             }
             let mut done = Done(status, false);
-            done.1 = run_worker::<E>(cfg, url, html, inline, cluster, engine, stop, input, output);
+            done.1 = run_worker::<E>(cfg, url, html, inline, cluster, engine, idb, stop, input, output);
         }).map_err(|e| e.to_string())?;
         Ok(Self { control, thread: worker.thread().clone(), inbox, outbox, finished })
     }
@@ -132,11 +135,13 @@ fn run_worker<E: Eng>(
     inline: Option<String>,
     cluster: AgentCluster,
     engine: wasmi::Engine,
+    idb: crate::browser_navigation_storage::IdbShare,
     control: Test262AgentControl,
     inbox: std::sync::Weak<Mailbox>,
     output: Arc<Mailbox>,
 ) -> bool {
     let Ok(mut browser) = Browser::<E>::make(tree::parse(&html), cfg.browser, cfg.env.eval, cfg.env.heap) else { return false };
+    browser.attach_storage(idb.storage());
     if browser.set_document_url(&url).is_err() {
         return false;
     }

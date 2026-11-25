@@ -113,6 +113,19 @@ struct Idbs {
     disk: Option<Arc<crate::browser_idb::log::Disk>>,
 }
 
+/// The `indexedDB` stores of a session, sent to a worker thread (`WebStorage::idb_share`).
+pub(crate) struct IdbShare {
+    idb: Arc<Mutex<Idbs>>,
+    lim: StorageLimits,
+}
+
+impl IdbShare {
+    /// The storage of a worker thread: the `indexedDB` stores of the session, and its own empty `localStorage` and cookie jar.
+    pub(crate) fn storage(self) -> WebStorage {
+        WebStorage { idb: self.idb, ..WebStorage::new(self.lim) }
+    }
+}
+
 impl Default for WebStorage {
     fn default() -> Self {
         WebStorage::new(StorageLimits::default())
@@ -127,6 +140,11 @@ impl WebStorage {
     /// The same `localStorage` data with a new, empty `sessionStorage` (a new tab).
     pub fn new_session(&self) -> WebStorage {
         WebStorage { local: self.local.clone(), session: Default::default(), cookies: self.cookies.clone(), idb: self.idb.clone(), lim: self.lim }
+    }
+
+    /// The `indexedDB` stores of this session, for a worker on another thread (`WebStorage` is not `Send`).
+    pub(crate) fn idb_share(&self) -> IdbShare {
+        IdbShare { idb: self.idb.clone(), lim: self.lim }
     }
 
     /// The `indexedDB` store of `origin`, made when it is new.

@@ -185,3 +185,34 @@ and no Dexie error. The download ran for minutes. Then syncd failed 40 times wit
 logged the device out.
 
 Fix: HMAC takes SHA-1, SHA-384 and SHA-512.
+
+## Link attempt 12 (2026-11-25)
+
+Build: main with #1101, #1102 and #1104, profile `whatsapp`. The link held. No HMAC error. During the download,
+`message.bulkAdd` failed 17 times with `ConstraintError`. Then Dexie transactions failed with `TransactionInactiveError`, and
+syncd logged "Calling runInTransaction recursively".
+
+Cause: the shim started every transaction at once. WhatsApp reads a row and adds it when it is missing, so two transactions at
+the same time added the same key. Chrome runs overlapping write transactions one after the other.
+
+Fix: the shim orders transactions as the standard says.
+
+## Link attempt 13 (2026-11-25)
+
+Build: main with #1106, profile `wa3`. The chat list loaded. A search for a number found the chat, and the chat opened.
+Send cleared the composer, but no message came. `crypto.subtle.digest` gave a promise that never settled. No promise job,
+timer or message task ran after an agent `eval`.
+
+Cause: the page had stopped for good. `diagnose` gave the reason: `Unsupported("an XMLHttpRequest response text in a
+charset other than UTF-8")`. WhatsApp reads binary data with `overrideMimeType("text/plain; charset=x-user-defined")`.
+The shim rejected that charset with a fault, and a fault stops the page.
+
+Fix: `responseText` decodes x-user-defined as the Encoding Standard says.
+
+## Link attempt 14 (2026-11-25)
+
+Build: the x-user-defined fix, profile `wa3` from attempt 13. The page opened from the profile with no new QR scan. The chat
+list loaded. The chat opened. A text message sent and got two ticks (`ack` 2, delivered).
+
+Open: the worker error "Unrecognized algorithm name" from SubtleCrypto. Service workers are not supported (not fatal). A
+layout panic came once after the page stopped: "layout only asks for the style of a box" (`crates/layout/src/boxes.rs:132`).

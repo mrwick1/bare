@@ -1,6 +1,7 @@
 # Design: one IndexedDB store per origin
 
-Status: approved (owner, 2026-11-25): build option A, one PR per step. Steps 1 and 2 are built (one PR, see section 7).
+Status: approved (owner, 2026-11-25): build option A, one PR per step. Steps 1, 2 and 3 are built (see section 7). Section 10
+gives the concurrency model as built.
 
 ## 1. Problem
 
@@ -104,6 +105,11 @@ Option A. It removes a whole kind of loss (data that dies with a realm) and keep
 Built: steps 1 and 2 went in one PR. The store has to live somewhere outside the realm, and the session `WebStorage` was the
 shortest place. Progress: `progress/2026-11-25-indexeddb-host-store.md`.
 3. Workers: a thread worker gets the store of its origin. Test: the page puts, a worker gets.
+
+Built (step 3): a worker on the page thread already had the store, because `child_browser` gives it the `WebStorage` of its page.
+A worker on its own thread (an isolated agent, `browser_child_thread.rs`) had a new, empty store and no profile. Now it gets the
+stores of its page through `WebStorage::idb_share` (`IdbShare`, which is `Send`; `WebStorage` itself is not). There is no
+`SharedWorker` that runs in bare, so there is nothing to share for it. Progress: `progress/2026-11-25-indexeddb-workers.md`.
 4. Locks between connections, `versionchange` and `blocked` events. Tests from the standard's examples.
 5. Session export and import of the store (`browser_save_state`), so a saved login survives a restart.
 
@@ -119,3 +125,25 @@ behind the next blocker. The design is still needed for the chat list.
   and a cursor walk. Compare instruction counts with the shim before step 1.
 - Peak memory: a page that stores 10 MiB, with one and with two realms of the origin.
 - The WhatsApp journey: link, chat list, read a conversation.
+
+## 10. Concurrency model as built (step 3)
+
+- One `Mutex` per origin store. Each host op (`idb(op, ...)`) holds it for the whole op, so a put, a delete or a cursor step is
+  atomic. Two threads never see a half-made row or index entry.
+- A transaction is not isolated. The shim runs the requests of a transaction one after another, and the requests of other
+  transactions (also from another thread) can run between them. Each write transaction keeps its own undo list and its own log
+  buffer, so an abort and a commit of one transaction do not touch the undo list or the log of another.
+- Chrome, Firefox and WebKit serialize two `readwrite` transactions whose scopes overlap: the second one starts when the first
+  one ends. Bare does not do this yet. The lock table needs a queue of waiting transactions and a wake of the waiting realm on
+  another thread. That is step 4. Until then:
+  - Two write transactions on different keys give the correct result. The test writes 40 transactions of 10 rows from a page
+    and from a worker thread at once, with an abort in each fifth one: the rows, the index and the log after a restart agree.
+  - Two write transactions on the same key can lose an update. An abort of one can bring back a row that the other one wrote
+    after it. The log frames follow the commit order, so the disk can then differ from memory.
+- `versionchange` and `blocked`: an upgrade does not wait for the other connections, on any thread, and fires neither event. So
+  nothing can deadlock, but a worker can keep a connection to a database that the page upgraded. Step 4 builds the events.
+- The page thread writes the logs to disk (`Saver::tick`, at most once per second) while it holds the lock of a store. A worker
+  thread that calls a host op of that origin then waits for the write.
+- Hypothesis, not tested: a key getter or a key path getter in the page that calls `indexedDB` again while a host op holds the
+  lock would deadlock on the same thread. This is not new in step 3.
+

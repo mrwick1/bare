@@ -125,6 +125,8 @@ mod browser_fetch_tests;
 #[cfg(test)]
 mod browser_xhr_tests;
 #[cfg(test)]
+mod browser_xhr_charset_tests;
+#[cfg(test)]
 mod browser_eventsource_tests;
 #[cfg(test)]
 mod browser_websocket_tests;
@@ -188,6 +190,7 @@ mod browser_platform_class;
 mod browser_platform_query;
 mod browser_scheduler;
 mod browser_worker;
+mod browser_notification;
 mod browser_wasm;
 #[cfg(test)]
 mod browser_wasm_tests;
@@ -245,6 +248,8 @@ mod browser_idb_binary_key_tests;
 #[cfg(test)]
 mod browser_events_count_tests;
 #[cfg(test)]
+mod browser_idb_tx_order_tests;
+#[cfg(test)]
 mod browser_idb_cursor_tests;
 #[cfg(test)]
 mod browser_idb_store_tests;
@@ -256,6 +261,8 @@ mod browser_idb_many_requests_tests;
 mod browser_idb_reread_tests;
 #[cfg(test)]
 mod browser_idb_log_tests;
+#[cfg(test)]
+mod browser_idb_worker_tests;
 pub mod resources;
 mod browser_loader;
 mod browser_shims;
@@ -426,6 +433,10 @@ mod browser_cssom_owned_tests;
 mod browser_domparser_move_tests;
 #[cfg(test)]
 mod browser_domparser_xhtml_tests;
+#[cfg(test)]
+mod browser_notification_tests;
+#[cfg(test)]
+mod browser_create_document_tests;
 
 mod browser_frames;
 mod browser_child;
