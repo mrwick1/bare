@@ -74,7 +74,7 @@ downloading", then an error. The phone then showed no linked device for bare.
   worker, not a cause.
 - Not the cause: `WebAssembly`. WhatsApp uses it (liboqs, media worker), and a design for it is open for owner review.
 
-**Worker global scope** (PR 5). The worker global gets the interfaces `WorkerGlobalScope` and
+**Worker global scope** (PR 5, #1076). The worker global gets the interfaces `WorkerGlobalScope` and
 `DedicatedWorkerGlobalScope` (illegal constructors) and the chain `self -> DedicatedWorkerGlobalScope.prototype ->
 WorkerGlobalScope.prototype -> Window.prototype -> .. -> EventTarget.prototype`. Its tag is `DedicatedWorkerGlobalScope`.
 `Window.prototype` stays in the chain, because the functions of the global live there; the standard has no window names in
