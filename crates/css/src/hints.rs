@@ -4,7 +4,7 @@
 //! A hint is a declaration of the author origin with the lowest priority: any rule of the page beats it, and it beats
 //! the browser's sheet. `of` gives the declarations as text, like a `style=""` attribute, and the cascade reads them
 //! the same way. A cell reads `cellpadding` and `border` of the table around it (the table, and up to three levels
-//! above the cell: `td`, `tr`, `tbody`). `<img width height>` gives its size. Only elements of a page that has a `<table>` are looked at.
+//! above the cell: `td`, `tr`, `tbody`). `<img width height>` gives its size, and `<canvas width height>` the size of its box. Only elements of a page that has a `<table>` are looked at.
 //! An `<svg>` gives its size (`width`, `height`, `viewBox`), and the shapes of an SVG give `fill` and `stroke`: only elements of a page that has an `<svg>` are looked at.
 
 use bare_html::dom::{Atom, Document, NodeData, NodeId};
@@ -24,6 +24,7 @@ pub struct Hints {
     group: [Option<Atom>; 3],
     col: [Option<Atom>; 2],
     img: Option<Atom>,
+    canvas: Option<Atom>,
     width: Option<Atom>,
     height: Option<Atom>,
     border: Option<Atom>,
@@ -42,7 +43,8 @@ impl Hints {
         // A document that took its rules from the cache did not read that sheet: a name is in it only if a node uses it.
         let (table, svg) = (a("table"), if doc.has_foreign() { a("svg") } else { None });
         let (td, th, tr, group, col, img) = (a("td"), a("th"), a("tr"), [a("thead"), a("tbody"), a("tfoot")], [a("col"), a("colgroup")], a("img"));
-        if table.is_none() && svg.is_none() && img.is_none() && td.is_none() && th.is_none() && tr.is_none() && group.iter().chain(&col).all(Option::is_none) && !doc.has_images() {
+        let canvas = a("canvas");
+        if canvas.is_none() && table.is_none() && svg.is_none() && img.is_none() && td.is_none() && th.is_none() && tr.is_none() && group.iter().chain(&col).all(Option::is_none) && !doc.has_images() {
             return None;
         }
         Some(Hints {
@@ -59,6 +61,7 @@ impl Hints {
             group,
             col,
             img,
+            canvas,
             width: a("width"),
             height: a("height"),
             border: a("border"),
@@ -160,6 +163,12 @@ impl Hints {
                     _ => {}
                 }
             }
+        } else if Some(name) == self.canvas {
+            // The size of the bitmap is the size of the box (HTML, "the canvas element"): 300 by 150 by default. The height follows the
+            // ratio, so an author `width` keeps the shape.
+            let side = |n, def| attr(n, node).and_then(number).unwrap_or(def);
+            let (w, h) = (side(self.width, 300), side(self.height, 150));
+            out.push_str(&format!("width:{w}px;aspect-ratio:{w}/{h};"));
         }
         if hidden {
             out.push_str("display:none;");

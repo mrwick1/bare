@@ -143,6 +143,7 @@ fn image_data<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'
 pub(crate) fn members<E: Eng>(d: &Dom<E>, it: &mut E::Vm, p: E::Obj) -> R<E, ()> {
     d.def_method_s(it, p, "getContext", 1, context)?;
     d.def_method_s(it, p, "toDataURL", 0, data_url)?;
+    crate::browser_reflect::reflect!(d, it, p, &["canvas"], { "width" => "width": Long(300, 0), "height" => "height": Long(150, 0) });
     Ok(())
 }
 
