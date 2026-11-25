@@ -19,6 +19,7 @@ pub mod hello;
 pub mod key_schedule;
 pub mod record;
 pub mod rsa;
+pub mod rsa_key;
 pub mod hostname;
 pub mod trust_store;
 pub mod verify;

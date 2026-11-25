@@ -1,5 +1,5 @@
 //! Unsigned big integers for RSA public-key checks: Montgomery multiplication and modular
-//! exponentiation with a small public exponent.
+//! exponentiation with a small public exponent. `pow_big`, `mul_mod` and `sub_mod` serve the RSA private key code (`rsa_key.rs`).
 //!
 //! Numbers are little-endian `u64` limbs on the stack, up to [`MAX_BITS`] bits. Nothing
 //! allocates. This is for PUBLIC values only (signature, modulus, exponent), so it is NOT
@@ -140,6 +140,90 @@ impl Modulus {
         if t[k] != 0 || ge(&out[..k], &n[..k]) {
             sub_in_place(&mut out[..k], &n[..k]);
         }
+    }
+
+    /// `x mod n` for any big-endian `x` up to 4096 bits: one doubling and one add per bit of `x`.
+    fn reduce(&self, be: &[u8]) -> Option<[u64; MAX_LIMBS]> {
+        let (x, xk) = from_be(be)?;
+        let k = self.k;
+        let mut r = [0u64; MAX_LIMBS];
+        for i in (0..64 * xk).rev() {
+            self.double(&mut r);
+            if x[i / 64] >> (i % 64) & 1 == 1 {
+                let mut carry = true;
+                for l in &mut r[..k] {
+                    (*l, carry) = l.overflowing_add(carry as u64);
+                }
+                if carry || ge(&r[..k], &self.n[..k]) {
+                    sub_in_place(&mut r[..k], &self.n[..k]);
+                }
+            }
+        }
+        Some(r)
+    }
+
+    /// Limbs to big-endian bytes, as long as the modulus.
+    fn out(&self, x: &[u64; MAX_LIMBS]) -> Vec<u8> {
+        (0..self.bits().div_ceil(8)).rev().map(|i| (x[i / 8] >> (8 * (i % 8))) as u8).collect()
+    }
+
+    /// `base^e mod n` for a big exponent `exp_be` (big-endian), as bytes as long as the modulus. `base` may be any size up to 4096 bits.
+    /// Square and multiply: the work depends on the bits of the exponent, so this is NOT constant time.
+    pub fn pow_big(&self, base_be: &[u8], exp_be: &[u8]) -> Option<Vec<u8>> {
+        let a = self.reduce(base_be)?;
+        let mut am = [0u64; MAX_LIMBS];
+        self.mul(&a, &self.r2, &mut am);
+        let (e, ek) = from_be(exp_be)?;
+        let mut acc = [0u64; MAX_LIMBS];
+        let mut started = false;
+        for i in (0..64 * ek).rev() {
+            if started {
+                let t = acc;
+                self.mul(&t, &t, &mut acc);
+            }
+            if e[i / 64] >> (i % 64) & 1 == 1 {
+                if started {
+                    let t = acc;
+                    self.mul(&t, &am, &mut acc);
+                } else {
+                    acc = am;
+                    started = true;
+                }
+            }
+        }
+        if !started {
+            acc[0] = 1;
+            return Some(self.out(&acc));
+        }
+        let mut one = [0u64; MAX_LIMBS];
+        one[0] = 1;
+        let t = acc;
+        self.mul(&t, &one, &mut acc);
+        Some(self.out(&acc))
+    }
+
+    /// `a b mod n` for any `a`, `b` up to 4096 bits, as bytes as long as the modulus.
+    pub fn mul_mod(&self, a_be: &[u8], b_be: &[u8]) -> Option<Vec<u8>> {
+        let (a, b) = (self.reduce(a_be)?, self.reduce(b_be)?);
+        let (mut am, mut r) = ([0u64; MAX_LIMBS], [0u64; MAX_LIMBS]);
+        self.mul(&a, &self.r2, &mut am);
+        self.mul(&am, &b, &mut r);
+        Some(self.out(&r))
+    }
+
+    /// `a - b mod n`, as bytes as long as the modulus.
+    pub fn sub_mod(&self, a_be: &[u8], b_be: &[u8]) -> Option<Vec<u8>> {
+        let (mut a, b) = (self.reduce(a_be)?, self.reduce(b_be)?);
+        let k = self.k;
+        if sub_in_place(&mut a[..k], &b[..k]) {
+            let mut carry = false;
+            for (x, &y) in a[..k].iter_mut().zip(&self.n[..k]) {
+                let (v, c1) = x.overflowing_add(y);
+                let (v, c2) = v.overflowing_add(carry as u64);
+                (*x, carry) = (v, c1 | c2);
+            }
+        }
+        Some(self.out(&a))
     }
 
     /// `base^e mod n`, written big-endian into `out`, which must be exactly as long as the
