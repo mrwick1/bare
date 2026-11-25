@@ -9,6 +9,7 @@
 - Headless by default. `--window` shows the page in a Wayland window.
 - `--suite DIR` runs a suite of related tests that share one login in K warm worker processes. A worker keeps its network client and its parse caches between tests, and each test starts with clean storage.
 - `--repeat N` runs the steps N times in one process, to find leaks.
+- `--profile NAME` keeps the cookies and `localStorage` in a profile on disk, so the next run opens logged in. A value with a path separator is a path. The default is the profile `default` (`~/.local/share/bare/profiles/default` on Linux). When another process holds it, the run is in memory and says so on stderr. An empty `BARE_DATA_DIR` turns profiles off.
 - A **journey** is a step file that follows a real task, such as a login or a search. `tools/drive/public/` holds 48 journeys on public sites. `tools/drive/staging-journey.steps` is a login journey with create and delete steps.
 
 ## bare-mcp

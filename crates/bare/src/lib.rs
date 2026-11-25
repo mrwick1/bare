@@ -15,6 +15,9 @@ mod browser_dom;
 mod browser_dom_old;
 mod browser_fragment;
 mod browser_idb;
+pub mod profile;
+#[cfg(test)]
+mod profile_tests;
 mod profile_record;
 mod browser_shadow;
 mod browser_events;

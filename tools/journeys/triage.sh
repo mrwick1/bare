@@ -23,4 +23,6 @@
 # Queue columns: cause, blocks (workloads that fail with it), workloads. Sorted by blocks, largest first: this is the work queue.
 #   cause is the class plus the normalized first error line for syntax, type_error and other (digits and quoted text are removed).
 # Exit code: 0 when no workload failed, 1 otherwise (skips do not count).
+# A journey starts from an empty session: no profile on disk (bare::profile).
+export BARE_DATA_DIR=
 exec python3 -I "$(dirname "$(readlink -f "$0")")/triage.py" "$@"

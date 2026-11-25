@@ -20,6 +20,7 @@ use bare::control::{Handle, Log, Refusal, Remote, Ticks};
 pub use bare::agent::Event;
 pub use bare::page::StorageState;
 use bare::page::Page;
+use bare::profile::Profile;
 use bare_paint::canvas::Canvas;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -130,23 +131,24 @@ type Wake = Arc<dyn Fn() + Send + Sync>;
 
 impl Host {
     /// An `open` is a new tab of one browser, in a window too: empty storage, and the connections and the HTTP cache of `net`.
-    /// `state`: the saved session to start from (`None`: empty storage).
-    fn open(&mut self, url: &str, size: (u32, u32), window: bool, net: &bare_net::http::Client, state: Option<StorageState>, downloads: Option<bare::Downloads>, wake: Option<Wake>) -> Result<(), String> {
+    /// `state`: the saved session to start from (`None`: empty storage). `profile`: the page saves its storage there.
+    #[allow(clippy::too_many_arguments)]
+    fn open(&mut self, url: &str, size: (u32, u32), window: bool, net: &bare_net::http::Client, state: Option<StorageState>, downloads: Option<bare::Downloads>, wake: Option<Wake>, profile: Option<Profile>) -> Result<(), String> {
         match self {
             // The new page takes the size of the window, not `size`: the compositor can have resized the window, and the window loop
             // calls `resize` only when the window size changes.
             Host::Window(r) => {
                 let (url, net) = (url.to_string(), net.fork());
-                r.call(move |p| p.reopen_in_with(&url, &net, state.as_ref(), downloads))?
+                r.call(move |p| p.reopen_in_with(&url, &net, state.as_ref(), downloads, profile))?
             }
             _ if window => {
-                *self = Host::Window(Remote::open_with(url, size, net, state, downloads)?);
+                *self = Host::Window(Remote::open_with(url, size, net, state, downloads, profile)?);
                 Ok(())
             }
             _ => {
                 // The old page ends first, so the two pages do not share the peak of memory. A failed open leaves no page.
                 *self = Host::None;
-                let mut p = Page::open_in_with(url, size, net, state.as_ref(), downloads)?;
+                let mut p = Page::open_in_with(url, size, net, state.as_ref(), downloads, profile)?;
                 p.quiet = true;
                 if let Some(w) = wake {
                     p.wake_on_done(move || w());
@@ -287,6 +289,8 @@ pub struct Session {
     start: Instant,
     // A session for the next `open` that has no state file (see `preload`).
     preload: Option<StorageState>,
+    // The profile that each `open` starts from and saves to (`Session::use_profile`).
+    profile: Option<Profile>,
     /// The last console entries and network records, kept after `drain` (the `console`, `network` and `diagnose` tools read it).
     pub hist: crate::diag::History,
     /// Where this session saves downloads (`set_downloads`).
@@ -309,7 +313,7 @@ impl Session {
         bare_net::trace::enable();
         let _ = bare_net::trace::take();
         let rep = Report { ok: true, steps: Vec::new(), failure: None, logs: Vec::new(), net: Vec::new(), ms: 0.0, window: opt.window, ticks: Ticks::default(), cookies: Vec::new() };
-        Session { observe_id: bare_observe::process::next_id(), observe_step: 0, host: Host::None, net, memo: Memo::default(), timeout: opt.timeout, window_cpu: 0, nav_first: 0, start: Instant::now(), preload: None, hist: Default::default(), downloads: None, wake: None, ready_wait: false, rep }
+        Session { observe_id: bare_observe::process::next_id(), observe_step: 0, host: Host::None, net, memo: Memo::default(), timeout: opt.timeout, window_cpu: 0, nav_first: 0, start: Instant::now(), preload: None, profile: None, hist: Default::default(), downloads: None, wake: None, ready_wait: false, rep }
     }
 
     /// The caller's loop sleeps until `wake` is called (`Page::wake_on_done`): then `tick` asks for a call each second, not every 4 ms,
@@ -336,6 +340,12 @@ impl Session {
     /// Make the next `open` step that has no state file start from `st`.
     pub fn preload(&mut self, st: StorageState) {
         self.preload = Some(st);
+    }
+
+    /// Make each `open` step start from what `p` holds and save the cookies and `localStorage` there (`Page::open_in_with`). A state
+    /// file of the step, or a `preload`, wins for that open; the page then saves to the profile.
+    pub fn use_profile(&mut self, p: Profile) {
+        self.profile = Some(p);
     }
 
     /// Run `f` on the page with the refs of the session (`snap`): a read between steps.
@@ -561,7 +571,7 @@ impl Session {
         let _context = bare_observe::process::enter(bare_observe::Ids { session: self.observe_id, step: Some(self.observe_step), ..Default::default() });
         let _observe = bare_observe::process::span("driver", "step");
         self.settle_pictures();
-        let Session { host, net, memo, timeout, window_cpu, nav_first, rep, preload, hist, downloads, wake, ready_wait, .. } = self;
+        let Session { host, net, memo, timeout, window_cpu, nav_first, rep, preload, profile, hist, downloads, wake, ready_wait, .. } = self;
     let t0 = Instant::now();
     // The limits of the step are on the benchmark clock when it is on (`bare_net::vclock`): a step ends at the same point of the page in every run.
     let deadline = bare_net::vclock::instant() + *timeout;
@@ -646,7 +656,15 @@ impl Session {
             Action::Open(url, file) => {
                 memo.seen.clear();
                 let from = file.as_deref().map(crate::state::read).transpose().map(|st| st.or_else(|| preload.take()));
-                let opened = from.and_then(|st| host.open(url, opt.size, opt.window, net, st, downloads.clone(), wake.clone())).and_then(|_| host.run(|p| p.take_logs()));
+                // The profile: the page that ends first writes its last changes, then the new page reads them.
+                let from = from.and_then(|st| match (st, profile.as_ref()) {
+                    (None, Some(pr)) => {
+                        let _ = host.run(|p| p.save_profile());
+                        pr.load().map(Some)
+                    }
+                    (st, _) => Ok(st),
+                });
+                let opened = from.and_then(|st| host.open(url, opt.size, opt.window, net, st, downloads.clone(), wake.clone(), profile.clone())).and_then(|_| host.run(|p| p.take_logs()));
                 let d = t.elapsed();
                 busy += d;
                 if !opt.window {
@@ -839,7 +857,15 @@ impl Session {
 
 /// Run the steps in order until one fails. `red` gets the secrets that the steps type into password fields.
 pub fn run(steps: &[Step], opt: &Options, red: &mut Redactor) -> Report {
+    run_in(steps, opt, red, None)
+}
+
+/// `run` that starts from `profile` and saves to it (`Session::use_profile`).
+pub fn run_in(steps: &[Step], opt: &Options, red: &mut Redactor, profile: Option<Profile>) -> Report {
     let mut s = Session::new(opt);
+    if let Some(p) = profile {
+        s.use_profile(p);
+    }
     for step in steps {
         if !s.step(step, opt, red) {
             break;

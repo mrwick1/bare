@@ -2,7 +2,8 @@
 //!
 //! The data lives in a `WebStorage`, not in the browser. A test (or the future loader) can keep one `WebStorage` and
 //! attach it to a new `Browser` (`Browser::attach_storage`), so a "reload" keeps the same session. The store is only
-//! memory. It never writes a file. Nothing here is browser-restart persistence.
+//! memory. It never writes a file. A profile (`profile.rs`) saves the cookies and `localStorage` to disk; it reads `revisions`
+//! to see a change.
 //!
 //! Keys and values are UTF-16 (`Box<[u16]>`, lone surrogates included). Items keep insertion order, which is the order of
 //! `key(n)`. The origin is `scheme://host[:port]` of the document URL. Two origins never see each other's items.
@@ -67,6 +68,8 @@ struct Area {
 struct Areas {
     by_origin: HashMap<String, Area>,
     total: usize,
+    /// Moves at each change of an item (`WebStorage::revisions`).
+    rev: u64,
 }
 
 /// Why a write failed.
@@ -191,6 +194,7 @@ impl WebStorage {
         }
         a.units = a.units - old_units + new_units;
         areas.total = areas.total - old_units + new_units;
+        areas.rev += 1;
         Ok(())
     }
 
@@ -202,6 +206,7 @@ impl WebStorage {
         let (k, v) = a.items.remove(p);
         a.units -= k.len() + v.len();
         areas.total -= k.len() + v.len();
+        areas.rev += 1;
         if a.items.is_empty() {
             areas.by_origin.remove(origin);
         }
@@ -211,6 +216,7 @@ impl WebStorage {
         let mut areas = self.areas(session).borrow_mut();
         if let Some(a) = areas.by_origin.remove(origin) {
             areas.total -= a.units;
+            areas.rev += 1;
         }
     }
 
@@ -218,20 +224,31 @@ impl WebStorage {
 
     /// A copy of the cookies (an expired one is skipped) and of both storage areas. Origins are sorted.
     pub fn export(&self) -> StorageState {
+        StorageState { cookies: self.export_cookies(), local: self.export_area(false), session: self.export_area(true) }
+    }
+
+    /// The cookies of `export`.
+    pub(crate) fn export_cookies(&self) -> Vec<bare_net::cookie::Cookie> {
         let jar = self.cookies.lock().unwrap_or_else(|e| e.into_inner());
         let now = jar.now();
-        let cookies = jar.list().into_iter().filter(|c| c.expires.is_none_or(|e| e > now)).cloned().collect();
-        let area = |session: bool| -> OriginItems {
-            let a = self.areas(session).borrow();
-            let mut out: OriginItems = a
-                .by_origin
-                .iter()
-                .map(|(o, a)| (o.clone(), a.items.iter().map(|(k, v)| (String::from_utf16_lossy(k), String::from_utf16_lossy(v))).collect()))
-                .collect();
-            out.sort_by(|x, y| x.0.cmp(&y.0));
-            out
-        };
-        StorageState { cookies, local: area(false), session: area(true) }
+        jar.list().into_iter().filter(|c| c.expires.is_none_or(|e| e > now)).cloned().collect()
+    }
+
+    /// One storage area of `export`.
+    pub(crate) fn export_area(&self, session: bool) -> OriginItems {
+        let a = self.areas(session).borrow();
+        let mut out: OriginItems = a
+            .by_origin
+            .iter()
+            .map(|(o, a)| (o.clone(), a.items.iter().map(|(k, v)| (String::from_utf16_lossy(k), String::from_utf16_lossy(v))).collect()))
+            .collect();
+        out.sort_by(|x, y| x.0.cmp(&y.0));
+        out
+    }
+
+    /// The revisions of the cookie jar and of `localStorage`: each moves at a change. A profile saves a part when its number moved.
+    pub(crate) fn revisions(&self) -> (u64, u64) {
+        (self.cookies.lock().unwrap_or_else(|e| e.into_inner()).revision(), self.local.borrow().rev)
     }
 
     /// Add a saved state to this storage. Items go through `set`, so the limits hold; the first error stops the import (what was added stays).

@@ -110,6 +110,8 @@ pub struct Jar {
     /// The cookies by the site (registrable domain) of their domain, each list in order of creation.
     map: HashMap<String, Vec<Cookie>>,
     tick: u64,
+    /// Moves at each change of the stored cookies (`revision`).
+    rev: u64,
     /// Added to the clock of `now`. A test moves time with it.
     pub skew_ms: f64,
 }
@@ -117,7 +119,7 @@ pub struct Jar {
 impl Default for Jar {
     fn default() -> Jar {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        Jar { id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed), map: HashMap::new(), tick: 0, skew_ms: 0.0 }
+        Jar { id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed), map: HashMap::new(), tick: 0, rev: 0, skew_ms: 0.0 }
     }
 }
 
@@ -243,7 +245,14 @@ impl Jar {
         self.map.is_empty()
     }
 
+    /// A number that moves at each change of the stored cookies: a saver compares it and does not compare the cookies. A sweep of
+    /// expired cookies does not move it.
+    pub fn revision(&self) -> u64 {
+        self.rev
+    }
+
     pub fn clear(&mut self) {
+        self.rev += 1;
         self.map.clear();
     }
 
@@ -271,6 +280,7 @@ impl Jar {
         c.expires = c.expires.map(|e| e.min(now + MAX_AGE_MS));
         let total = self.len();
         self.tick += 1;
+        self.rev += 1;
         c.used = self.tick;
         let list = self.map.entry(site(&c.domain).to_string()).or_default();
         list.retain(|o| !o.same_key(&c));
@@ -370,6 +380,7 @@ impl Jar {
             }
             return;
         }
+        self.rev += 1;
         list.retain(|o| !o.same_key(&c));
         if expires.is_some_and(|e| e <= now) {
             if list.is_empty() {

@@ -32,6 +32,8 @@ the wall time holds only when the machine is idle (load1 near 0). The spread is 
 
 import glob, json, os, re, shutil, statistics, subprocess, sys, tempfile, time
 
+# A benchmark run starts from an empty session: no profile on disk (bare::profile).
+os.environ["BARE_DATA_DIR"] = ""
 HERE = os.path.dirname(os.path.abspath(__file__))
 STEPS = os.path.join(HERE, "..", "drive", "public")
 CORPUS = "/data/bare-tmp/corpus/main"
