@@ -52,14 +52,14 @@ fn a_simple_cross_origin_get_sends_origin_and_reads_when_it_is_allowed() {
 }
 
 #[test]
-fn a_same_origin_request_has_no_origin_no_preflight_and_a_basic_response() {
+fn a_same_origin_put_sends_origin_has_no_preflight_and_a_basic_response() {
     big(|| {
         let (page, other, mut b) = two(|_| ok("{}"));
         let src = "var out = []; fetch('/a', {method:'PUT', headers:{'X-Foo':'1', 'Content-Type':'application/json'}, body:'{}'}).then(function (r) { out.push(r.type, r.status); });";
         assert_eq!(go(&mut b, src), "basic|200");
         let recs = page.recs();
         assert_eq!(recs.len(), 1);
-        assert!(recs[0].header("origin").is_empty());
+        assert_eq!(recs[0].header("origin"), vec![format!("http://127.0.0.1:{}", page.port)], "a PUT sends Origin, also to the same origin");
         assert_eq!(other.recs().len(), 0);
     });
 }

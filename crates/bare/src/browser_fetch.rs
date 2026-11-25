@@ -2438,7 +2438,8 @@ fn run_hops(client: &mut Client, lim: &FetchLimits, first: Parts<'_>, diag: &mut
     let mut site = "same-origin";
     for hop in 0..=lim.max_redirects {
         site = metadata_site(doc, &url, site);
-        let origin_s = (taint == Taint::Cors || (taint == Taint::Opaque && !method.safe())).then(|| if null_origin { "null".to_string() } else { origin(doc) });
+        // Fetch Standard, "append a request `Origin` header": a CORS request, and every request that is not GET or HEAD, also to the same origin.
+        let origin_s = (taint == Taint::Cors || !method.safe()).then(|| if null_origin { "null".to_string() } else { origin(doc) });
         if taint == Taint::Cors && needs_preflight(method, &headers) {
             let o = origin_s.as_deref().unwrap_or("null");
             if let Err(out) = preflight(client, lim, &url, method, &headers, o, cors, doc) {

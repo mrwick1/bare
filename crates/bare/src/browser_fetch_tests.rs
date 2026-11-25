@@ -257,10 +257,12 @@ fn managed_and_sensitive_headers_cannot_be_set_by_script() {
                    fetch('/p', {method:'POST', body:'abc', headers:h});";
         assert_eq!(go(&mut b, src), "X-Ok,Authorization");
         let r = &srv.recs()[0];
-        for forbidden in ["cookie", "cookie2", "origin", "referer", "connection", "transfer-encoding", "accept-encoding", "upgrade", "te", "sec-foo", "proxy-authorization", "proxy-x", "via", "date", "set-cookie"] {
+        for forbidden in ["cookie", "cookie2", "referer", "connection", "transfer-encoding", "accept-encoding", "upgrade", "te", "sec-foo", "proxy-authorization", "proxy-x", "via", "date", "set-cookie"] {
             assert!(r.header(forbidden).is_empty(), "{forbidden} reached the server: {}", r.head);
         }
         assert_eq!(r.header("sec-fetch-mode"), vec!["cors".to_string()]);
+        // A POST sends the page origin, never the one of the script.
+        assert_eq!(r.header("origin"), vec![format!("http://127.0.0.1:{}", srv.port)]);
         assert_eq!(r.header("host"), vec![format!("127.0.0.1:{}", srv.port)]);
         assert_eq!(r.header("content-length"), vec!["3".to_string()]);
         assert_eq!((r.header("x-ok"), r.header("authorization")), (vec!["yes".to_string()], vec!["Bearer t".to_string()]));
