@@ -2,7 +2,9 @@
 //!
 //! The client is synchronous, so a `Conn` has one reader thread. The thread waits for bytes on the socket (`peek`), then takes the
 //! TLS stream for one `read`, so a writer never waits behind a reader that waits for the peer. Writers take the stream for one
-//! write each. The streams share the state in `State`; a thread that waits for a change sleeps on one `Condvar`.
+//! write each. The streams share the state in `State`. A thread that waits for its stream sleeps on the `Condvar` of that stream, and
+//! the reader wakes only that thread, and only when it sleeps (`Stream::waiting`). A thread that waits for a free stream slot sleeps
+//! on `Shared::cv`. A change of the whole connection (settings, its window, `GOAWAY`, its end) wakes every sleeper.
 //!
 //! Limits: a frame is at most 16 KiB (we never raise our setting); a header block at most `MAX_BLOCK` bytes in all its frames; a
 //! header list at most `MAX_HEADER_LIST`; we receive at most `STREAM_WINDOW` bytes for a stream, and `CONN_WINDOW` in all, that the
@@ -126,6 +128,9 @@ struct Stream {
     no_body: bool,
     /// `None`: not traced. `Some(None)`: traced, and no frame has come yet. `Some(Some(t))`: the reader parsed the first frame at `t`.
     first_frame: Option<Option<Instant>>,
+    /// The thread of this stream sleeps on `cv`. `waiting`: it sleeps now, so a change must wake it.
+    cv: Arc<Condvar>,
+    waiting: bool,
 }
 
 impl Stream {
@@ -169,6 +174,7 @@ struct Shared {
     /// The same socket: the reader waits on it, and `die` shuts it.
     sock: TcpStream,
     st: Mutex<State>,
+    /// The threads that wait for a free stream slot sleep here.
     cv: Condvar,
     /// The reader is in `linger`: only it may close the socket now (a close with unread bytes sends a reset).
     lingering: AtomicBool,
@@ -195,12 +201,43 @@ fn window_update(out: &mut Vec<u8>, id: u32, n: u32) {
 }
 
 impl Shared {
-    fn wait<'a>(&self, st: MutexGuard<'a, State>, until: Instant) -> io::Result<MutexGuard<'a, State>> {
+    fn wait<'a>(&self, cv: &Condvar, st: MutexGuard<'a, State>, until: Instant) -> io::Result<MutexGuard<'a, State>> {
         let left = until.saturating_duration_since(Instant::now());
         if left.is_zero() {
             return Err(io::Error::new(ErrorKind::TimedOut, "the server stopped answering"));
         }
-        Ok(self.cv.wait_timeout(st, left).unwrap_or_else(|e| e.into_inner()).0)
+        Ok(cv.wait_timeout(st, left).unwrap_or_else(|e| e.into_inner()).0)
+    }
+
+    /// Release the state after a change of stream `id`, then wake its thread if it sleeps. `active`: the open streams before the
+    /// change. A slot that the change freed wakes the threads that wait for one. The wake comes after the release, so the woken
+    /// thread does not block at once on the lock.
+    fn wake_stream(&self, mut st: MutexGuard<'_, State>, id: u32, active: usize) {
+        let freed = st.active < active;
+        let cv = st.streams.get_mut(&id).filter(|s| s.waiting).map(|s| {
+            s.waiting = false;
+            s.cv.clone()
+        });
+        drop(st);
+        if freed {
+            self.cv.notify_all();
+        }
+        if let Some(cv) = cv {
+            cv.notify_one();
+        }
+    }
+
+    /// Release the state after a change of the whole connection, then wake every thread that sleeps.
+    fn wake_all(&self, mut st: MutexGuard<'_, State>) {
+        let cvs: Vec<Arc<Condvar>> = st.streams.values_mut().filter(|s| s.waiting).map(|s| {
+            s.waiting = false;
+            s.cv.clone()
+        }).collect();
+        drop(st);
+        self.cv.notify_all();
+        for cv in cvs {
+            cv.notify_one();
+        }
     }
 
     /// Write whole frames. A failed write ends the connection.
@@ -226,8 +263,7 @@ impl Shared {
     fn fail(&self, kind: ErrorKind, why: &str) {
         let mut st = lock(&self.st);
         st.dead.get_or_insert((kind, why.to_string()));
-        drop(st);
-        self.cv.notify_all();
+        self.wake_all(st);
     }
 
     /// End after a `GOAWAY` for a connection error. Closing a socket that holds unread bytes sends a TCP reset, and the peer may drop the
@@ -342,11 +378,11 @@ impl Conn {
             Some(Unprocessed(why).into())
         };
         let timed = bare_observe::process::tracing() && bare_observe::process::accepts("network");
-        let id = loop {
+        let (id, cv) = loop {
             {
                 let mut st = lock(&sh.st);
                 while refusal(&st).is_none() && st.active >= st.max_streams as usize {
-                    st = sh.wait(st, deadline)?;
+                    st = sh.wait(&sh.cv, st, deadline)?;
                 }
                 if let Some(e) = refusal(&st) {
                     return Err(e);
@@ -365,6 +401,7 @@ impl Conn {
             st.next_id += 2;
             st.active += 1;
             let send = st.init_send;
+            let cv = Arc::new(Condvar::new());
             st.streams.insert(id, Stream {
                 head: None,
                 got_head: false,
@@ -380,6 +417,8 @@ impl Conn {
                 received: 0,
                 no_body: head_only,
                 first_frame: timed.then_some(None),
+                cv: cv.clone(),
+                waiting: false,
             });
             let max = st.max_frame;
             drop(st);
@@ -397,10 +436,10 @@ impl Conn {
                 sh.die(e.kind(), "the connection broke while writing");
                 return Err(e.into());
             }
-            break id;
+            break (id, cv);
         };
         // From here, dropping the `Body` cleans up the stream, on every way out.
-        let mut reply = Body { conn: self.clone(), id, declared: None, given: 0, max: max_body, start: Instant::now(), rec: None, observe: None };
+        let mut reply = Body { conn: self.clone(), id, cv: cv.clone(), declared: None, given: 0, max: max_body, start: Instant::now(), rec: None, observe: None };
         let mut sent = 0;
         while sent < body.len() {
             let take = {
@@ -419,7 +458,8 @@ impl Conn {
                         st.conn_send -= room;
                         break room as usize;
                     }
-                    st = sh.wait(st, deadline)?;
+                    st.streams.get_mut(&id).unwrap().waiting = true;
+                    st = sh.wait(&cv, st, deadline)?;
                 }
             };
             if take == 0 {
@@ -435,7 +475,11 @@ impl Conn {
             let mut st = lock(&sh.st);
             if sent == body.len() {
                 st.streams.get_mut(&id).expect("an open stream").local_done = true;
+                let active = st.active;
                 st.settle(id);
+                if st.active < active {
+                    sh.cv.notify_all();
+                }
             }
             loop {
                 let s = st.streams.get_mut(&id).expect("an open stream");
@@ -446,10 +490,11 @@ impl Conn {
                 if let Some(reset) = &s.reset {
                     return Err(reset.to_error());
                 }
+                s.waiting = true;
                 if let Some((kind, why)) = &st.dead {
                     return Err(io::Error::new(*kind, why.clone()).into());
                 }
-                st = sh.wait(st, deadline)?;
+                st = sh.wait(&cv, st, deadline)?;
             }
         };
         // On this thread, so the record carries the ids of the request.
@@ -479,6 +524,8 @@ impl Drop for Conn {
 pub struct Body {
     conn: Arc<Conn>,
     id: u32,
+    /// The `Condvar` of the stream.
+    cv: Arc<Condvar>,
     /// The `Content-Length` of the reply, when it has one.
     pub declared: Option<usize>,
     given: usize,
@@ -529,10 +576,11 @@ impl Read for Body {
             if s.remote_done {
                 return Ok(0);
             }
+            s.waiting = true;
             if let Some((kind, why)) = &st.dead {
                 return Err(io::Error::new(*kind, why.clone()));
             }
-            st = sh.wait(st, until)?;
+            st = sh.wait(&self.cv, st, until)?;
         }
     }
 }
@@ -555,12 +603,14 @@ impl Drop for Body {
         }
         let sh = &self.conn.sh;
         let mut out = Vec::new();
+        let mut freed = false;
         {
             let mut st = lock(&sh.st);
             if let Some(s) = st.streams.remove(&self.id) {
                 // What the caller never read still counts against the window of the connection.
                 st.conn_unacked += s.data.len() as u32;
                 if !s.closed {
+                    freed = true;
                     st.active -= 1;
                     if s.reset.is_none() {
                         frame(&mut out, RST_STREAM, 0, self.id, &CANCEL.to_be_bytes());
@@ -569,7 +619,9 @@ impl Drop for Body {
                 st.credit(&mut out);
             }
         }
-        sh.cv.notify_all();
+        if freed {
+            sh.cv.notify_all();
+        }
         if !out.is_empty() {
             let _ = sh.write(&out);
         }
@@ -701,8 +753,10 @@ impl Reader {
                 (_, 5) => Ok(()),
                 // A stream error (section 6.3). A stream we do not know needs no answer.
                 _ => {
-                    lock(&sh.st).reset_stream(id, FRAME_SIZE_ERROR, "PRIORITY is not 5 bytes", &mut out);
-                    sh.cv.notify_all();
+                    let mut st = lock(&sh.st);
+                    let active = st.active;
+                    st.reset_stream(id, FRAME_SIZE_ERROR, "PRIORITY is not 5 bytes", &mut out);
+                    sh.wake_stream(st, id, active);
                     Ok(())
                 }
             },
@@ -748,6 +802,7 @@ impl Reader {
         }
         let data = Self::unpad(flags, p)?;
         let mut st = lock(&sh.st);
+        let active = st.active;
         st.conn_recv -= p.len() as i64;
         if st.conn_recv < 0 {
             return conn_error(FLOW_CONTROL_ERROR, "the server sent more than the connection window");
@@ -790,8 +845,7 @@ impl Reader {
         }
         st.settle(id);
         st.credit(out);
-        drop(st);
-        sh.cv.notify_all();
+        sh.wake_stream(st, id, active);
         Ok(())
     }
 
@@ -862,6 +916,7 @@ impl Reader {
             })
             .map_err(|e| Stop::Conn(COMPRESSION_ERROR, e.0))?;
         let mut st = lock(&sh.st);
+        let active = st.active;
         if id >= st.next_id {
             return conn_error(PROTOCOL_ERROR, "HEADERS on a stream we did not open");
         }
@@ -910,8 +965,7 @@ impl Reader {
             }
             st.settle(id);
         }
-        drop(st);
-        sh.cv.notify_all();
+        sh.wake_stream(st, id, active);
         Ok(())
     }
 
@@ -921,6 +975,7 @@ impl Reader {
         }
         let code = u32::from_be_bytes(p.try_into().map_err(|_| Stop::Conn(FRAME_SIZE_ERROR, "RST_STREAM is not 4 bytes"))?);
         let mut st = lock(&sh.st);
+        let active = st.active;
         if id >= st.next_id {
             return conn_error(PROTOCOL_ERROR, "RST_STREAM on a stream we did not open");
         }
@@ -932,8 +987,7 @@ impl Reader {
             s.reset = Some(Reset::Peer(code));
             st.settle(id);
         }
-        drop(st);
-        sh.cv.notify_all();
+        sh.wake_stream(st, id, active);
         Ok(())
     }
 
@@ -977,8 +1031,7 @@ impl Reader {
             }
         }
         frame(out, SETTINGS, ACK, 0, &[]);
-        drop(st);
-        sh.cv.notify_all();
+        sh.wake_all(st);
         Ok(())
     }
 
@@ -1002,14 +1055,14 @@ impl Reader {
                 st.settle(i);
             }
         }
-        drop(st);
-        sh.cv.notify_all();
+        sh.wake_all(st);
         Ok(())
     }
 
     fn window_update(&mut self, sh: &Shared, id: u32, p: &[u8], out: &mut Vec<u8>) -> Result<(), Stop> {
         let add = u32::from_be_bytes(p.try_into().map_err(|_| Stop::Conn(FRAME_SIZE_ERROR, "WINDOW_UPDATE is not 4 bytes"))?) & 0x7fff_ffff;
         let mut st = lock(&sh.st);
+        let active = st.active;
         if id != 0 && id >= st.next_id {
             return conn_error(PROTOCOL_ERROR, "WINDOW_UPDATE on a stream we did not open");
         }
@@ -1029,8 +1082,11 @@ impl Reader {
                 st.reset_stream(id, FLOW_CONTROL_ERROR, "a stream window above 2^31-1", out);
             }
         }
-        drop(st);
-        sh.cv.notify_all();
+        if id == 0 {
+            sh.wake_all(st);
+        } else {
+            sh.wake_stream(st, id, active);
+        }
         Ok(())
     }
 }

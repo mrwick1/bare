@@ -7,6 +7,8 @@
 //!   ka    `200*scale` GETs and `100*scale` 1 KiB POSTs on ONE connection (a Python `ssl` server), plus redirects.
 //!   big   download `16*scale` MiB with `get_stream` (Content-Length), and the same chunked.
 //!   post  `scale` POSTs of 8 MiB from one slice; the server answers with the length and byte sum.
+//!   h2    `threads` workers (default 6, the page loader's pool) each GET `20*scale` replies of 256 KiB from Node's `http2` at once.
+//!         It also prints the context switches of this process: each wake of a thread is one.
 //! The synthetic CA and keys live in /dev/shm (mode 0700) and are deleted on exit. The only peer is
 //! 127.0.0.1. Wall time includes the server, which runs in another process. CPU is this process only.
 
@@ -52,6 +54,15 @@ fn cpu_secs() -> f64 {
     // SAFETY: CLOCK_PROCESS_CPUTIME_ID is 2 on Linux; `ts` is a valid timespec.
     unsafe { clock_gettime(2, &mut ts) };
     ts[0] as f64 + ts[1] as f64 * 1e-9
+}
+fn switches() -> (i64, i64) {
+    unsafe extern "C" {
+        fn getrusage(who: i32, usage: *mut [i64; 18]) -> i32;
+    }
+    let mut u = [0i64; 18];
+    // SAFETY: RUSAGE_SELF is 0; `u` has the size of `struct rusage` on 64-bit Linux. It counts every thread, the ended ones too.
+    unsafe { getrusage(0, &mut u) };
+    (u[16], u[17])
 }
 fn status_kib(key: &str) -> u64 {
     let s = std::fs::read_to_string("/proc/self/status").unwrap();
@@ -215,6 +226,50 @@ fn main() {
             }
             m.report(&format!("post {} MiB as {scale} POSTs of 8 MiB from a borrowed slice", 8 * scale), 8.0 * scale as f64, "MiB");
         }
-        _ => eprintln!("usage: https_load <hs|ka|big|post> <1|10|100>"),
+        "h2" => {
+            let threads: usize = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(6);
+            let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+            let script = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tools/net/h2_node_server.mjs");
+            let mut node = Py(Command::new("node").args([script, &port.to_string(), pki.dir.join("good.pem").to_str().unwrap(), pki.dir.join("good.key").to_str().unwrap()]).stdout(Stdio::piped()).spawn().expect("node"));
+            let mut line = String::new();
+            std::io::BufRead::read_line(&mut std::io::BufReader::new(node.0.stdout.as_mut().unwrap()), &mut line).unwrap();
+            assert_eq!(line.trim(), "listening");
+            const SIZE: usize = 256 << 10;
+            let n = 20 * scale;
+            // One request first, so every worker finds the connection.
+            assert_eq!(client.get(&url(port, "/bytes?n=1")).unwrap().status, 200);
+            let (vol, invol) = switches();
+            let m = Meter::start();
+            let workers: Vec<_> = (0..threads)
+                .map(|_| {
+                    let mut c = client.fork();
+                    std::thread::spawn(move || {
+                        let mut buf = vec![0u8; 64 * 1024];
+                        for _ in 0..n {
+                            let mut s = c.get_stream(&url(port, &format!("/bytes?n={SIZE}"))).unwrap();
+                            assert_eq!(s.response.status, 200);
+                            let mut total = 0;
+                            loop {
+                                let k = s.body.read(&mut buf).unwrap();
+                                if k == 0 {
+                                    break;
+                                }
+                                assert!(buf[..k].iter().enumerate().all(|(i, &b)| b as usize == (total + i) % 251));
+                                total += k;
+                            }
+                            assert_eq!(total, SIZE);
+                        }
+                    })
+                })
+                .collect();
+            for w in workers {
+                w.join().unwrap();
+            }
+            let (v2, i2) = switches();
+            m.report(&format!("h2 {threads} workers x {n} GETs of 256 KiB"), (threads * n) as f64, "req");
+            let conns = String::from_utf8_lossy(&client.get(&url(port, "/conns")).unwrap().body).into_owned();
+            println!("context switches: voluntary {} involuntary {} | server {conns}", v2 - vol, i2 - invol);
+        }
+        _ => eprintln!("usage: https_load <hs|ka|big|post|h2> <1|10|100> [threads]"),
     }
 }
