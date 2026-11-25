@@ -909,6 +909,10 @@ impl<'a> Parser<'a> {
                 s.add(name, N_FUNC);
             }
             Bind::Var => {
+                // A var can redeclare the implicit arguments binding. Keep the call's arguments for the lazy compiler.
+                if self.fn_depth > 0 && name == "arguments" {
+                    self.flags |= facts::ARGS;
+                }
                 for i in (0..=top).rev() {
                     let as_var = self.funcs_as_var(i);
                     let s = &mut self.scopes[i];
