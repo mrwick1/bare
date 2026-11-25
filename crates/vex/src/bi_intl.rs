@@ -22,6 +22,9 @@ mod tests;
 #[cfg(test)]
 #[path = "bi_intl_parts_tests.rs"]
 mod parts_tests;
+#[cfg(test)]
+#[path = "bi_intl_plural_tests.rs"]
+mod plural_tests;
 
 pub(crate) static GLOBALS: &[Ent] = &[factory("Intl", namespace)];
 
