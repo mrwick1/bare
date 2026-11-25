@@ -1,5 +1,6 @@
-//! ArrayBuffer and DataView. Each live buffer owns one byte cell. Views trace the buffer
-//! through a private slot and resolve its byte cell again after any script call.
+//! ArrayBuffer and DataView. An ordinary buffer owns a heap byte cell. A shared
+//! buffer wraps a shared backing block. Views trace the buffer through a private
+//! slot and resolve its backing storage after any script call.
 use crate::bi_symbol::{SPECIES, TO_STRING_TAG};
 use crate::bi_typed::{self, Element};
 use crate::blob::Blob;
@@ -7,6 +8,7 @@ use crate::builtins::{HIDDEN, NativeFn, arg};
 use crate::cell::Layout;
 use crate::interp_rt::{ErrKind, Key, R, Realm};
 use crate::lazy::{Ent, buffer_ctor, getter, indexed, late_table, m, sym_getter};
+use crate::shared_memory::{self, is_shared};
 use crate::object::{K_BUFFER, K_DATA_VIEW, K_TYPED, Obj};
 use crate::shapes::A_C;
 use crate::string::Str;
@@ -65,24 +67,31 @@ impl View {
         self.elem.map_or(1, Element::width)
     }
 
-    pub(crate) fn len(self) -> Option<usize> {
-        self.len_in(Buffer::of(self.buffer))
+    pub(crate) fn len(self, rt: &Realm) -> Option<usize> {
+        let buffer = Buffer::plain(self.buffer);
+        if buffer.blob.is_some() {
+            self.len_in(buffer.len)
+        } else {
+            self.shared_len(rt)
+        }
     }
 
-    fn len_in(self, buffer: Buffer) -> Option<usize> {
-        buffer.blob?;
-        let n = buffer.len.checked_sub(self.offset)? / self.width();
+    fn len_in(self, byte_len: usize) -> Option<usize> {
+        let n = byte_len.checked_sub(self.offset)? / self.width();
         self.len.map_or(Some(n), |l| (l <= n).then_some(l))
     }
 
     pub(crate) fn is_fixed(self) -> bool {
-        self.len.is_some() && Buffer::of(self.buffer).max.is_none()
+        self.len.is_some() && buffer_slot(self.buffer, 2).as_int().is_none()
     }
 
     pub(crate) fn read(self, rt: &Realm, i: usize) -> Option<u64> {
         let elem = self.elem?;
-        let b = Buffer::of(self.buffer);
-        if i >= self.len_in(b)? {
+        let b = Buffer::plain(self.buffer);
+        if b.blob.is_none() {
+            return self.read_shared(rt, i, elem);
+        }
+        if i >= self.len_in(b.len)? {
             return None;
         }
         let at = self.offset + i * elem.width();
@@ -91,10 +100,41 @@ impl View {
 
     pub(crate) fn write(self, rt: &mut Realm, i: usize, n: u64) {
         let elem = self.elem.expect("typed array");
-        let b = Buffer::of(self.buffer);
-        if self.len_in(b).is_some_and(|len| i < len) {
+        let b = Buffer::plain(self.buffer);
+        if b.blob.is_none() {
+            return self.write_shared(rt, i, n, elem);
+        }
+        if self.len_in(b.len).is_some_and(|len| i < len) {
             let at = self.offset + i * elem.width();
             elem.write(&mut b.bytes_mut(rt)[at..at + elem.width()], n, cfg!(target_endian = "little"));
+        }
+    }
+
+    #[cold]
+    fn shared_len(self, rt: &Realm) -> Option<usize> {
+        self.len_in(rt.shared_buffer(self.buffer)?.len())
+    }
+
+    #[cold]
+    fn read_shared(self, rt: &Realm, i: usize, elem: Element) -> Option<u64> {
+        rt.shared_buffer(self.buffer)?.read(|bytes| {
+            if i >= self.len_in(bytes.len())? {
+                return None;
+            }
+            let at = self.offset + i * elem.width();
+            Some(elem.read(&bytes[at..at + elem.width()], cfg!(target_endian = "little")))
+        })
+    }
+
+    #[cold]
+    fn write_shared(self, rt: &Realm, i: usize, n: u64, elem: Element) {
+        if let Some(buffer) = rt.shared_buffer(self.buffer) {
+            buffer.write(|bytes| {
+                if self.len_in(bytes.len()).is_some_and(|len| i < len) {
+                    let at = self.offset + i * elem.width();
+                    elem.write(&mut bytes[at..at + elem.width()], n, cfg!(target_endian = "little"));
+                }
+            });
         }
     }
 }
@@ -108,18 +148,29 @@ pub(crate) fn immutable_buffer(o: Obj) -> bool {
 #[derive(Clone, Copy)]
 struct Buffer {
     blob: Option<Blob>,
+    shared: bool,
     len: usize,
     max: Option<usize>,
 }
 
 impl Buffer {
-    fn of(o: Obj) -> Self {
+    fn plain(o: Obj) -> Self {
         debug_assert!(o.is_kind(K_BUFFER));
         Self {
             blob: Realm::blob_of(buffer_slot(o, 0)),
+            shared: false,
             len: buffer_slot(o, 1).as_int().expect("byte length") as usize,
             max: buffer_slot(o, 2).as_int().map(|n| n as usize),
         }
+    }
+
+    fn of(rt: &Realm, o: Obj) -> Self {
+        let mut info = Self::plain(o);
+        if info.blob.is_none() && let Some(buffer) = rt.shared_buffer(o) {
+            info.shared = true;
+            info.len = buffer.len();
+        }
+        info
     }
 
     fn bytes(self, rt: &Realm) -> &[u8] {
@@ -176,6 +227,7 @@ impl Realm {
     pub(crate) fn make_buffer_ctor(&mut self, name: &'static str, len: u8, id: i32) -> Value {
         let (f, parent): (NativeFn, Obj) = match id {
             ARRAY_BUFFER => (buffer_ctor_call, self.object_proto),
+            shared_memory::SHARED_BUFFER => (shared_memory::constructor, self.object_proto),
             DATA_VIEW => (data_ctor, self.object_proto),
             _ => (bi_typed::typed_ctor, bi_typed::intrinsic(self).1),
         };
@@ -205,6 +257,17 @@ impl Realm {
                     c,
                     late_table![m("isView", 1, is_view), sym_getter(SPECIES, "get [Symbol.species]", species),],
                 );
+            }
+            shared_memory::SHARED_BUFFER => {
+                tag(self, proto, name);
+                self.lazy_table(proto, late_table![
+                    getter("byteLength", "get byteLength", shared_memory::byte_length),
+                    getter("maxByteLength", "get maxByteLength", shared_memory::max_byte_length),
+                    getter("growable", "get growable", shared_memory::growable),
+                    m("grow", 1, shared_memory::grow),
+                    m("slice", 2, shared_memory::slice),
+                ]);
+                self.lazy_table(c, late_table![sym_getter(SPECIES, "get [Symbol.species]", species)]);
             }
             DATA_VIEW => {
                 tag(self, proto, name);
@@ -286,24 +349,40 @@ impl Realm {
         self.buffer_object(proto, kind, &slots)
     }
 
+    fn read_buffer<T>(&self, o: Obj, buffer: Buffer, read: impl FnOnce(&[u8]) -> T) -> T {
+        if buffer.shared {
+            self.shared_buffer(o).expect("shared backing").read(read)
+        } else {
+            read(buffer.bytes(self))
+        }
+    }
+
+    pub(crate) fn write_buffer<T>(&mut self, o: Obj, write: impl FnOnce(&mut [u8]) -> T) -> T {
+        if is_shared(o) {
+            self.shared_buffer(o).expect("shared backing").write(write)
+        } else {
+            write(self.buffer_bytes_mut(o).expect("writable buffer"))
+        }
+    }
+
     pub(crate) fn buffer_bytes(&self, o: Obj) -> Option<&[u8]> {
-        o.is_kind(K_BUFFER).then(|| Buffer::of(o).bytes(self))
+        (o.is_kind(K_BUFFER) && !is_shared(o)).then(|| Buffer::plain(o).bytes(self))
     }
 
     pub(crate) fn buffer_bytes_mut(&mut self, o: Obj) -> Option<&mut [u8]> {
-        (o.is_kind(K_BUFFER) && !immutable_buffer(o)).then(|| Buffer::of(o).bytes_mut(self))
+        (o.is_kind(K_BUFFER) && !is_shared(o) && !immutable_buffer(o)).then(|| Buffer::plain(o).bytes_mut(self))
     }
 
     pub(crate) fn byte_range(&self, o: Obj) -> Option<(Obj, std::ops::Range<usize>)> {
         if o.is_kind(K_BUFFER) {
-            return Some((o, 0..Buffer::of(o).len));
+            return Some((o, 0..Buffer::of(self, o).len));
         }
         let v = View::of(o)?;
-        Some((v.buffer, v.len().map_or(0..0, |n| v.offset..v.offset + n * v.width())))
+        Some((v.buffer, v.len(self).map_or(0..0, |n| v.offset..v.offset + n * v.width())))
     }
 
     pub(crate) fn clone_detach_buffer(&mut self, o: Obj) -> Vec<u8> {
-        let bytes = Buffer::of(o).bytes(self).to_vec();
+        let bytes = Buffer::of(self, o).bytes(self).to_vec();
         self.detach_buffer(o);
         bytes
     }
@@ -315,12 +394,29 @@ impl Realm {
 
     pub(crate) fn buffer_detached(&self, o: Obj) -> bool {
         let buffer = View::of(o).map_or(o, |v| v.buffer);
-        buffer.is_kind(K_BUFFER) && Buffer::of(buffer).blob.is_none()
+        buffer.is_kind(K_BUFFER) && !is_shared(buffer) && Buffer::of(self, buffer).blob.is_none()
+    }
+
+    pub(crate) fn same_buffer_storage(&self, from: Obj, to: Obj) -> bool {
+        from == to || (is_shared(from) && self.shared_buffer(from)
+            .zip(self.shared_buffer(to))
+            .is_some_and(|(from, to)| from.same_block(to)))
     }
 
     pub(crate) fn copy_buffer_bytes(&mut self, from: Obj, src: usize, to: Obj, dst: usize, len: usize) {
-        let from = Buffer::of(from);
-        let to = Buffer::of(to);
+        if len == 0 { return; }
+        match (self.shared_buffer(from).cloned(), self.shared_buffer(to).cloned()) {
+            (Some(src_block), Some(dst_block)) => return src_block.copy(src, &dst_block, dst, len),
+            (Some(src_block), None) => return src_block.read(|bytes| {
+                self.buffer_bytes_mut(to).expect("target buffer")[dst..dst + len].copy_from_slice(&bytes[src..src + len]);
+            }),
+            (None, Some(dst_block)) => return dst_block.write(|bytes| {
+                bytes[dst..dst + len].copy_from_slice(&self.buffer_bytes(from).expect("source buffer")[src..src + len]);
+            }),
+            (None, None) => {}
+        }
+        let from = Buffer::of(self, from);
+        let to = Buffer::of(self, to);
         assert!(src <= from.len && len <= from.len - src && dst <= to.len && len <= to.len - dst);
         if len != 0 {
             // SAFETY: both blobs are byte cells and the checked ranges fit their allocated lengths.
@@ -345,8 +441,8 @@ impl Realm {
         } else {
             Some(to_index(self, len_arg)?)
         };
-        let b = Buffer::of(buffer);
-        if b.blob.is_none() {
+        let b = Buffer::of(self, buffer);
+        if b.blob.is_none() && !b.shared {
             return self.type_error("detached ArrayBuffer");
         }
         if offset > b.len {
@@ -505,7 +601,7 @@ pub(crate) fn construct(rt: &mut Realm, c: Value, args: &[Value]) -> R<Value> {
 
 fn require_buffer(rt: &mut Realm, this: Value) -> R<Obj> {
     Realm::obj(this)
-        .filter(|o| o.is_kind(K_BUFFER))
+        .filter(|o| o.is_kind(K_BUFFER) && !is_shared(*o))
         .ok_or_else(|| rt.error(ErrKind::Type, "receiver is not an ArrayBuffer"))
 }
 
@@ -536,18 +632,18 @@ fn is_view(_rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
 
 fn byte_length(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
     let o = require_buffer(rt, this)?;
-    Ok(Realm::num(Buffer::of(o).len as f64))
+    Ok(Realm::num(Buffer::of(rt, o).len as f64))
 }
 
 fn max_byte_length(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
     let o = require_buffer(rt, this)?;
-    let b = Buffer::of(o);
+    let b = Buffer::of(rt, o);
     Ok(Realm::num(if b.blob.is_none() { 0 } else { b.max.unwrap_or(b.len) } as f64))
 }
 
 fn resizable(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
     let o = require_buffer(rt, this)?;
-    Ok(Value::bool(Buffer::of(o).max.is_some()))
+    Ok(Value::bool(Buffer::of(rt, o).max.is_some()))
 }
 
 fn detached(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
@@ -561,7 +657,7 @@ fn immutable(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
 
 fn buffer_slice<const IMMUTABLE: bool>(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let source = require_buffer(rt, this)?;
-    let b = Buffer::of(source);
+    let b = Buffer::of(rt, source);
     if b.blob.is_none() {
         return rt.type_error("detached ArrayBuffer");
     }
@@ -569,7 +665,7 @@ fn buffer_slice<const IMMUTABLE: bool>(rt: &mut Realm, this: Value, args: &[Valu
     let end = relative(rt, arg(args, 1), b.len, b.len)?;
     let len = end.saturating_sub(start);
     if IMMUTABLE {
-        let current = Buffer::of(source);
+        let current = Buffer::of(rt, source);
         if current.blob.is_none() {
             return rt.type_error("detached ArrayBuffer");
         }
@@ -591,13 +687,13 @@ fn buffer_slice<const IMMUTABLE: bool>(rt: &mut Realm, this: Value, args: &[Valu
     } else {
         let v = construct(rt, c, &[Realm::num(len as f64)])?;
         let o = require_buffer(rt, v)?;
-        let b = Buffer::of(o);
+        let b = Buffer::of(rt, o);
         if o == source || b.blob.is_none() || immutable_buffer(o) || b.len < len {
             return rt.type_error("invalid ArrayBuffer species result");
         }
         o
     };
-    let b = Buffer::of(source);
+    let b = Buffer::of(rt, source);
     if b.blob.is_none() {
         return rt.type_error("detached ArrayBuffer");
     }
@@ -610,11 +706,11 @@ fn buffer_slice<const IMMUTABLE: bool>(rt: &mut Realm, this: Value, args: &[Valu
 
 fn resize(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let o = require_buffer(rt, this)?;
-    let Some(max) = Buffer::of(o).max else {
+    let Some(max) = Buffer::of(rt, o).max else {
         return rt.type_error("ArrayBuffer is fixed-length");
     };
     let len = to_index(rt, arg(args, 0))?;
-    let b = Buffer::of(o);
+    let b = Buffer::of(rt, o);
     let Some(old) = b.blob else {
         return rt.type_error("detached ArrayBuffer");
     };
@@ -636,11 +732,11 @@ fn transfer(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let o = require_buffer(rt, this)?;
     let a = arg(args, 0);
     let len = if a.is_undefined() {
-        Buffer::of(o).len
+        Buffer::of(rt, o).len
     } else {
         to_index(rt, a)?
     };
-    let b = Buffer::of(o);
+    let b = Buffer::of(rt, o);
     let Some(blob) = b.blob else {
         return rt.type_error("detached ArrayBuffer");
     };
@@ -670,10 +766,12 @@ fn data_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     if rt.nt.is_undefined() {
         return rt.type_error("DataView requires new");
     }
-    let buffer = require_buffer(rt, arg(args, 0))?;
+    let Some(buffer) = Realm::obj(arg(args, 0)).filter(|o| o.is_kind(K_BUFFER)) else {
+        return rt.type_error("receiver is not a buffer");
+    };
     let offset = to_index(rt, arg(args, 1))?;
-    let b = Buffer::of(buffer);
-    if b.blob.is_none() {
+    let b = Buffer::of(rt, buffer);
+    if b.blob.is_none() && !b.shared {
         return rt.type_error("detached ArrayBuffer");
     }
     if offset > b.len {
@@ -690,8 +788,8 @@ fn data_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
         return range(rt, "view exceeds buffer");
     }
     let proto = instance_proto(rt)?;
-    let b = Buffer::of(buffer);
-    if b.blob.is_none() {
+    let b = Buffer::of(rt, buffer);
+    if b.blob.is_none() && !b.shared {
         return rt.type_error("detached ArrayBuffer");
     }
     if offset > b.len || (explicit && len.is_some_and(|n| n > b.len - offset)) {
@@ -719,16 +817,16 @@ fn data_buffer(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
 
 fn data_length(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
     let v = require_data(rt, this)?;
-    Ok(Realm::num(v.len().unwrap_or(0) as f64))
+    Ok(Realm::num(v.len(rt).unwrap_or(0) as f64))
 }
 
 fn data_offset(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
     let v = require_data(rt, this)?;
-    Ok(Realm::num(v.len().map_or(0, |_| v.offset) as f64))
+    Ok(Realm::num(v.len(rt).map_or(0, |_| v.offset) as f64))
 }
 
 fn data_range(rt: &mut Realm, v: View, offset: usize, width: usize) -> R<std::ops::Range<usize>> {
-    let Some(len) = v.len() else {
+    let Some(len) = v.len(rt) else {
         return rt.type_error("DataView is out of bounds");
     };
     if offset > len || width > len - offset {
@@ -744,7 +842,7 @@ fn data_get(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let at = to_index(rt, arg(args, 0))?;
     let at = data_range(rt, v, at, elem.width())?;
     let little = Realm::truthy(arg(args, 1));
-    let bits = elem.read(&rt.buffer_bytes(v.buffer).expect("buffer")[at], little);
+    let bits = rt.read_buffer(v.buffer, Buffer::of(rt, v.buffer), |bytes| elem.read(&bytes[at], little));
     elem.value(rt, bits)
 }
 
@@ -758,7 +856,7 @@ fn data_set(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let n = elem.convert(rt, arg(args, 1))?;
     let at = data_range(rt, v, at, elem.width())?;
     let little = Realm::truthy(arg(args, 2));
-    elem.write(&mut rt.buffer_bytes_mut(v.buffer).expect("buffer")[at], n, little);
+    rt.write_buffer(v.buffer, |bytes| elem.write(&mut bytes[at], n, little));
     Ok(Value::UNDEFINED)
 }
 

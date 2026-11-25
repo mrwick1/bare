@@ -133,6 +133,7 @@ impl Realm {
         self.in_realm(id, |rt| {
             rt.note_home(rt.symbol_proto);
             rt.install_builtins();
+            rt.install_shared_globals();
             rt.test262_eval(host)?;
             rt.install_realm_factory()?;
             rt.get_named(rt.global.value(), "$262")

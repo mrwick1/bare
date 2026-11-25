@@ -149,6 +149,9 @@ impl Walk<'_> {
                 self.value(rt, rt.prim_of(v).expect("wrapper"), depth + 1)?;
             }
             K_BUFFER => {
+                if crate::shared_memory::is_shared(o) {
+                    return Err(self.refuse(rt, Refused::Object));
+                }
                 if rt.buffer_detached(o) {
                     return Err(self.refuse(rt, Refused::DetachedBuffer));
                 }
@@ -164,7 +167,7 @@ impl Walk<'_> {
             }
             K_TYPED | K_DATA_VIEW => {
                 let view = View::of(o).expect("view");
-                let len = view.len().ok_or_else(|| self.refuse(rt, Refused::DetachedBuffer))?;
+                let len = view.len(rt).ok_or_else(|| self.refuse(rt, Refused::DetachedBuffer))?;
                 self.out.view(view.elem.map_or(11, |e| e.api() as u8), view.offset, len);
                 self.value(rt, view.buffer.value(), depth + 1)?;
                 self.seen.insert(key, self.out.view_done());
@@ -245,7 +248,7 @@ pub(super) fn write<'s>(rt: &mut Realm, root: Value, opts: &CloneOpts<'_, '_>, h
         }
     }
     for &o in &list {
-        if crate::bi_buffer::immutable_buffer(o) {
+        if crate::shared_memory::is_shared(o) || crate::bi_buffer::immutable_buffer(o) {
             return Err(walk.refuse(rt, Refused::Object));
         }
         let ok = if o.is_kind(K_BUFFER) { !rt.buffer_detached(o) } else { walk.host.can_transfer(&o.value()) };
@@ -377,7 +380,7 @@ impl Read<'_> {
                 let buf = self.value(rt, depth + 1)?;
                 let buffer = Realm::obj(buf).filter(|o| o.is_kind(K_BUFFER)).ok_or_else(damaged)?;
                 let view = View { buffer, offset, len: Some(len), elem };
-                if offset % view.width() != 0 || view.len().is_none() {
+                if offset % view.width() != 0 || view.len(rt).is_none() {
                     return Err(damaged());
                 }
                 self.input.view_done();

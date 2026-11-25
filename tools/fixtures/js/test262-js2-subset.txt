@@ -58,6 +58,8 @@ built-ins/BigInt
 
 # Buffer and view built-ins.
 built-ins/ArrayBuffer
+built-ins/SharedArrayBuffer
+built-ins/Atomics
 built-ins/TypedArray
 built-ins/TypedArrayConstructors
 built-ins/DataView

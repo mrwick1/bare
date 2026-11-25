@@ -1095,7 +1095,7 @@ impl Engine for Realm {
 
     fn view<'s>(&mut self, value: Local<'_>) -> Option<bare_js_api::View<'s>> {
         let v = crate::bi_buffer::View::of(Self::obj(self.a_at(value))?)?;
-        let len = v.len();
+        let len = v.len(self);
         Some(bare_js_api::View {
             buffer: self.a_push(v.buffer.value()),
             offset: len.map_or(0, |_| v.offset),
