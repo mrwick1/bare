@@ -311,6 +311,10 @@ impl Realm {
         Ok(())
     }
 
+    pub(crate) fn typed_immutable(&self, o: Obj) -> bool {
+        View::of(o).is_some_and(View::immutable)
+    }
+
     pub(crate) fn typed_len(&self, o: Obj) -> usize {
         View::of(o).and_then(|v| v.len()).unwrap_or(0)
     }
@@ -423,9 +427,17 @@ fn validated(rt: &mut Realm, this: Value) -> R<(View, usize)> {
     Ok((v, n))
 }
 
+fn writable(rt: &mut Realm, view: View) -> R<()> {
+    if view.immutable() {
+        return rt.type_error("immutable ArrayBuffer");
+    }
+    Ok(())
+}
+
 fn make_len(rt: &mut Realm, c: Value, len: usize) -> R<(Value, View)> {
     let v = construct(rt, c, &[Realm::num(len as f64)])?;
     let (view, actual) = validated(rt, v)?;
+    writable(rt, view)?;
     if actual < len {
         return rt.type_error("typed array result is too short");
     }
@@ -551,6 +563,7 @@ fn copy(rt: &mut Realm, src: View, start: usize, dst: View, at: usize, count: us
 
 fn set(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let dst = require(rt, this)?;
+    writable(rt, dst)?;
     let offset = integer(rt, arg(args, 1))?;
     if offset < 0.0 {
         return range(rt, "negative typed array offset");
@@ -579,6 +592,7 @@ fn set(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
 
 fn copy_within(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let (view, len) = validated(rt, this)?;
+    writable(rt, view)?;
     let to = relative(rt, arg(args, 0), len, 0)?;
     let from = relative(rt, arg(args, 1), len, 0)?;
     let end = relative(rt, arg(args, 2), len, len)?;
@@ -659,6 +673,7 @@ fn slice(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
 
 fn fill(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let (v, len) = validated(rt, this)?;
+    writable(rt, v)?;
     let n = v.elem.expect("element").convert(rt, arg(args, 0))?;
     let start = relative(rt, arg(args, 1), len, 0)?;
     let end = relative(rt, arg(args, 2), len, len)?;
@@ -921,6 +936,7 @@ fn reverse<const COPY: bool>(rt: &mut Realm, this: Value, _args: &[Value]) -> R<
         copy(rt, src, 0, dst, 0, len)?;
         (result, dst)
     } else {
+        writable(rt, src)?;
         (this, src)
     };
     if len > 1 {
@@ -944,7 +960,12 @@ fn sort<const COPY: bool>(rt: &mut Realm, this: Value, args: &[Value]) -> R<Valu
     }
     let (v, len) = validated(rt, this)?;
     let elem = v.elem.expect("element");
-    let (result, dst) = if COPY { same_type(rt, elem, len)? } else { (this, v) };
+    let (result, dst) = if COPY {
+        same_type(rt, elem, len)?
+    } else {
+        writable(rt, v)?;
+        (this, v)
+    };
     let mut values = Vec::new();
     if values.try_reserve_exact(len).is_err() {
         return range(rt, "out of memory");

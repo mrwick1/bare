@@ -459,7 +459,7 @@ impl Realm {
         if !self.prevent_extensions_internal(o)? {
             return self.type_error("cannot prevent extensions on a resizable typed array");
         }
-        if freeze && o.is_kind(crate::object::K_TYPED) && self.typed_len(o) != 0 {
+        if freeze && o.is_kind(crate::object::K_TYPED) && !self.typed_immutable(o) && self.typed_len(o) != 0 {
             return self.type_error("cannot freeze a typed array with elements");
         }
         if o.is_indexed() {
@@ -501,7 +501,7 @@ impl Realm {
             return false;
         }
         self.fn_prep_all(o);
-        if frozen && o.is_kind(crate::object::K_TYPED) && self.typed_len(o) != 0 {
+        if frozen && o.is_kind(crate::object::K_TYPED) && !self.typed_immutable(o) && self.typed_len(o) != 0 {
             return false;
         }
         if o.is_indexed() {
@@ -559,11 +559,24 @@ impl Realm {
         if o.is_kind(crate::object::K_TYPED)
             && let Some(i) = crate::bi_typed::numeric_key(key)
         {
-            if !i.is_some_and(|i| i < self.typed_len(o)) || d.is_accessor() || d.c == Some(false) || d.e == Some(false) || d.w == Some(false) {
+            let Some(i) = i.filter(|&i| i < self.typed_len(o)) else { return Ok(false) };
+            if self.typed_immutable(o) {
+                if d.is_accessor() || d.c == Some(true) || d.e == Some(false) || d.w == Some(true) {
+                    return Ok(false);
+                }
+                return Ok(match d.value {
+                    None => true,
+                    Some(value) => {
+                        let current = self.typed_get(o, i)?.expect("in-bounds typed array element");
+                        self.same_value(value, current)
+                    }
+                });
+            }
+            if d.is_accessor() || d.c == Some(false) || d.e == Some(false) || d.w == Some(false) {
                 return Ok(false);
             }
             if let Some(v) = d.value {
-                self.typed_set(o, i, v)?;
+                self.typed_set(o, Some(i), v)?;
             }
             return Ok(true);
         }

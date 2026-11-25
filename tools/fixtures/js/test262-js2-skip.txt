@@ -114,6 +114,7 @@ allow:ArrayBuffer
 allow:TypedArray
 allow:DataView
 allow:Float16Array
+allow:immutable-arraybuffer
 allow:Int8Array
 allow:Uint8Array
 allow:resizable-arraybuffer

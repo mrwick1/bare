@@ -481,7 +481,8 @@ impl Realm {
         }
         if o.is_kind(K_TYPED) && let Some(i) = crate::bi_typed::numeric_key(key) {
             let Some(i) = i else { return Ok(None) };
-            return Ok(self.typed_get(o, i)?.map(|v| Own::Data(v, A_W | A_E | A_C)));
+            let attrs = if self.typed_immutable(o) { A_E } else { A_W | A_E | A_C };
+            return Ok(self.typed_get(o, i)?.map(|v| Own::Data(v, attrs)));
         }
         self.prepare_own_prototype(o, key)?;
         if !self.api.hs.active || !o.has_flag(F_HOST | F_LAZYM) {

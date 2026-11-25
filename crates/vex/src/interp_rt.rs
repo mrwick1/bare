@@ -1378,6 +1378,9 @@ impl Realm {
             }
             Key::Idx(i) => {
                 if o.is_kind(crate::object::K_TYPED) {
+                    if self.typed_immutable(o) {
+                        return Ok(Put::Fail);
+                    }
                     self.typed_set(o, Some(i as usize), v)?;
                     return Ok(Put::Done);
                 }
@@ -1401,6 +1404,9 @@ impl Realm {
                 if o.is_kind(crate::object::K_TYPED)
                     && let Some(i) = crate::bi_typed::numeric_key(key)
                 {
+                    if self.typed_immutable(o) {
+                        return Ok(Put::Fail);
+                    }
                     self.typed_set(o, i, v)?;
                     return Ok(Put::Done);
                 }
@@ -1434,6 +1440,9 @@ impl Realm {
                 return self.proxy_set(p, key, v, o.value()).map(|ok| Some(if ok { Put::Done } else { Put::Fail }));
             }
             if p.is_kind(crate::object::K_TYPED) {
+                if self.typed_immutable(p) {
+                    return Ok(Some(Put::Fail));
+                }
                 return Ok((i as usize >= self.typed_len(p)).then_some(Put::Done));
             }
             match self.get_own(p, key) {
@@ -1464,6 +1473,9 @@ impl Realm {
             if p.is_kind(crate::object::K_TYPED)
                 && let Some(i) = crate::bi_typed::numeric_key(Key::Name(k))
             {
+                if self.typed_immutable(p) {
+                    return Ok(Some(Put::Fail));
+                }
                 return Ok((!i.is_some_and(|i| i < self.typed_len(p))).then_some(Put::Done));
             }
             if k == self.k_length {
