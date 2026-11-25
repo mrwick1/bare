@@ -124,15 +124,10 @@ pub trait Options {
     }
 }
 
-/// Resolve number options after the engine has selected the locale.
+/// The default decimal format of locale `loc`, before any option.
 #[inline]
-pub fn initialize<A: Options>(
-    options: &mut A,
-    who: &str,
-    loc: u8,
-    mut gate: Option<&'static str>,
-) -> Result<icu::NumFmt, A::Error> {
-    let mut f = icu::NumFmt {
+fn decimal(loc: u8) -> icu::NumFmt {
+    icu::NumFmt {
         loc,
         style: icu::Style::Decimal,
         currency: *b"USD",
@@ -146,7 +141,28 @@ pub fn initialize<A: Options>(
         sign: SignDisplay::Auto,
         mode: icu::HALF_EXPAND,
         unit: 255, per_unit: 255, unit_display: 0, notation: 0, compact_long: false, strip_zero: false,
-    };
+    }
+}
+
+/// The digit options alone, for `Intl.PluralRules` (SetNumberFormatDigitOptions on the decimal defaults).
+#[inline]
+pub fn digits_only<A: Options>(options: &mut A, who: &str, loc: u8) -> Result<icu::NumFmt, A::Error> {
+    let mut f = decimal(loc);
+    match options.digits(who, &mut f, (0, 3))? {
+        Some(g) => Err(options.unsupported(g)),
+        None => Ok(f),
+    }
+}
+
+/// Resolve number options after the engine has selected the locale.
+#[inline]
+pub fn initialize<A: Options>(
+    options: &mut A,
+    who: &str,
+    loc: u8,
+    mut gate: Option<&'static str>,
+) -> Result<icu::NumFmt, A::Error> {
+    let mut f = decimal(loc);
     // SetNumberFormatUnitOptions
     let style = options.choice(who, "style", &["decimal", "percent", "currency", "unit"])?.unwrap_or(0);
     match options.string_option("currency")? {

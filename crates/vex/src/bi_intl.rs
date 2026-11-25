@@ -22,6 +22,9 @@ mod tests;
 #[cfg(test)]
 #[path = "bi_intl_parts_tests.rs"]
 mod parts_tests;
+#[cfg(test)]
+#[path = "bi_intl_plural_tests.rs"]
+mod plural_tests;
 
 pub(crate) static GLOBALS: &[Ent] = &[factory("Intl", namespace)];
 
@@ -33,9 +36,10 @@ const LOCALE: usize = 4;
 const SEGMENTER: usize = 5;
 const RELATIVE: usize = 6;
 const LIST: usize = 7;
+const PLURAL: usize = 8;
 
-const NAMESPACES: [&str; 8] = ["Collator", "DateTimeFormat", "DisplayNames", "NumberFormat", "Locale", "Segmenter", "RelativeTimeFormat", "ListFormat"];
-const TAGS: [&str; 8] = ["Intl.Collator", "Intl.DateTimeFormat", "Intl.DisplayNames", "Intl.NumberFormat", "Intl.Locale", "Intl.Segmenter", "Intl.RelativeTimeFormat", "Intl.ListFormat"];
+const NAMESPACES: [&str; 9] = ["Collator", "DateTimeFormat", "DisplayNames", "NumberFormat", "Locale", "Segmenter", "RelativeTimeFormat", "ListFormat", "PluralRules"];
+const TAGS: [&str; 9] = ["Intl.Collator", "Intl.DateTimeFormat", "Intl.DisplayNames", "Intl.NumberFormat", "Intl.Locale", "Intl.Segmenter", "Intl.RelativeTimeFormat", "Intl.ListFormat", "Intl.PluralRules"];
 const STYLES: &[&str] = &["long", "short", "narrow"];
 const GRANULARITIES: &[&str] = &["grapheme", "word", "sentence"];
 const DN_TYPES: &[&str] = &["language", "region", "script", "currency", "calendar", "dateTimeField"];
@@ -53,6 +57,7 @@ enum Format {
     Segmenter(u8, u8),
     Relative(IntlRtf),
     List(u8, u8, u8),
+    Plural(icu::NumFmt, bool),
 }
 
 #[derive(Default)]
@@ -90,6 +95,7 @@ fn namespace(rt: &mut Realm) -> Value {
         factory("Segmenter", constructor::<SEGMENTER>),
         factory("RelativeTimeFormat", constructor::<RELATIVE>),
         factory("ListFormat", constructor::<LIST>),
+        factory("PluralRules", constructor::<PLURAL>),
     ]);
     object.value()
 }
@@ -127,6 +133,7 @@ fn constructor<const K: usize>(rt: &mut Realm) -> Value {
         SEGMENTER => late_table![m("resolvedOptions", 0, segmenter_resolved)],
         RELATIVE => late_table![m("format", 2, relative_format)],
         LIST => late_table![m("resolvedOptions", 0, list_resolved)],
+        PLURAL => late_table![m("select", 1, plural_select), m("resolvedOptions", 0, plural_resolved)],
         _ => unreachable!(),
     };
     rt.lazy_table(proto, methods);
@@ -286,6 +293,9 @@ fn collator(options: &mut Reader<'_>, tags: &[String]) -> R<icu::CollKey> {
 }
 
 fn construct<const K: usize>(rt: &mut Realm, _: Value, args: &[Value]) -> R<Value> {
+    if K == PLURAL && rt.nt.is_undefined() {
+        return rt.type_error("Constructor Intl.PluralRules requires 'new'");
+    }
     let proto = if rt.nt.is_undefined() && matches!(K, COLL | DATE | NUMBER) {
         ctor_proto(rt, Realm::obj(rt.callee).expect("Intl constructor"))
     } else {
@@ -342,6 +352,11 @@ fn construct<const K: usize>(rt: &mut Realm, _: Value, args: &[Value]) -> R<Valu
             opts.locale_matcher()?;
             let ty = opts.read("type", LF_TYPES)?.unwrap_or(0);
             Format::List(loc, ty, opts.read("style", STYLES)?.unwrap_or(0))
+        }
+        PLURAL => {
+            opts.locale_matcher()?;
+            let ordinal = opts.read("type", &["cardinal", "ordinal"])? == Some(1);
+            Format::Plural(number_options::digits_only(&mut opts, TAGS[K], loc)?, ordinal)
         }
         _ => unreachable!(),
     };
@@ -565,4 +580,39 @@ fn relative_format(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
 fn list_resolved(rt: &mut Realm, this: Value, _: &[Value]) -> R<Value> {
     let Some(&Format::List(loc, ty, style)) = format(rt, this) else { return rt.type_error("incompatible Intl.ListFormat receiver") };
     Ok(properties(rt, &[("locale", intl::locale_name(loc)), ("type", LF_TYPES[ty as usize]), ("style", STYLES[style as usize])]).value())
+}
+
+fn plural_select(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+    let Some(&Format::Plural(f, ordinal)) = format(rt, this) else { return rt.type_error("incompatible Intl.PluralRules receiver") };
+    let n = rt.to_number(arg(args, 0))?;
+    let category = rt.intl_state().icu.plural(&f, ordinal, icu::num_from_f64(n));
+    Ok(rt.string(category))
+}
+
+fn plural_resolved(rt: &mut Realm, this: Value, _: &[Value]) -> R<Value> {
+    let Some(&Format::Plural(f, ordinal)) = format(rt, this) else { return rt.type_error("incompatible Intl.PluralRules receiver") };
+    let object = properties(rt, &[("locale", intl::locale_name(f.loc)), ("type", if ordinal { "ordinal" } else { "cardinal" })]);
+    property(rt, object, "minimumIntegerDigits", Value::int(f.min_int as i32));
+    // V8 reports significant digits for every rounding type but the plain fraction one.
+    let digits = if matches!(f.rounding, icu::Rounding::Fraction) {
+        [("minimumFractionDigits", f.fd.0), ("maximumFractionDigits", f.fd.1)]
+    } else {
+        [("minimumSignificantDigits", f.sd.0), ("maximumSignificantDigits", f.sd.1)]
+    };
+    for (key, n) in digits {
+        property(rt, object, key, Value::int(n as i32));
+    }
+    let names: Vec<_> = rt.intl_state().icu.plural_categories(ordinal).into_iter().map(|c| rt.string(c)).collect();
+    let list = rt.new_array(&names);
+    property(rt, object, "pluralCategories", list);
+    property(rt, object, "roundingIncrement", Value::int(1));
+    for (key, value) in [
+        ("roundingMode", icu::ROUNDING_MODES[f.mode as usize]),
+        ("roundingPriority", match f.rounding { icu::Rounding::MorePrecision => "morePrecision", icu::Rounding::LessPrecision => "lessPrecision", _ => "auto" }),
+        ("trailingZeroDisplay", if f.strip_zero { "stripIfInteger" } else { "auto" }),
+    ] {
+        let value = rt.string(value);
+        property(rt, object, key, value);
+    }
+    Ok(object.value())
 }
