@@ -1169,7 +1169,7 @@ pub fn mirror(p: Property) -> Property {
 pub const SHORTHANDS: &[&str] = &[
     "margin", "padding", "inset", "flex", "flex-flow", "gap", "border-spacing", "border-width", "border-style", "border-color",
     "border", "border-top", "border-right", "border-bottom", "border-left", "background", "font", "list-style", "text-decoration",
-    "overflow", "border-radius", "grid-row", "grid-column", "grid-area", "place-items", "place-self", "place-content", "transition", "animation",
+    "overflow", "border-radius", "grid-row", "grid-column", "grid-area", "grid-template", "place-items", "place-self", "place-content", "transition", "animation",
 ];
 
 /// The longhands of a shorthand, for `inherit` and the like. `None` if `name` is not a shorthand.
