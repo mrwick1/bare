@@ -193,6 +193,73 @@ impl Kept {
     }
 }
 
+/// The CSS text of a track list or of areas, as specified. `None` for the other kinds and for `calc()`. The style object
+/// writes a longhand of `grid-template` with it, and checks that the text reads back to the same value.
+pub fn text(g: &Grid) -> Option<String> {
+    fn len(l: Length) -> Option<String> {
+        let (x, u) = match l {
+            Length::Px(x) => (x, "px"),
+            Length::Percent(x) => (x, "%"),
+            Length::Em(x) => (x, "em"),
+            Length::Rem(x) => (x, "rem"),
+            Length::Vw(x) => (x, "vw"),
+            Length::Vh(x) => (x, "vh"),
+            Length::Vmin(x) => (x, "vmin"),
+            Length::Vmax(x) => (x, "vmax"),
+            Length::Calc(_) => return None,
+        };
+        Some(format!("{x}{u}"))
+    }
+    fn bound(b: Bound) -> Option<String> {
+        Some(match b {
+            Bound::Auto => "auto".into(),
+            Bound::MinContent => "min-content".into(),
+            Bound::MaxContent => "max-content".into(),
+            Bound::Len(l) => len(l)?,
+            Bound::Fr(x) => format!("{x}fr"),
+            Bound::Fit(l) => format!("fit-content({})", len(l)?),
+        })
+    }
+    fn parts(list: &[Part]) -> Option<String> {
+        let mut out = Vec::with_capacity(list.len());
+        for p in list {
+            out.push(match p {
+                Part::Names(n) => format!("[{}]", n.join(" ")),
+                Part::Track(t) => match (t.min, t.max) {
+                    (a, b) if a == b => bound(a)?,
+                    (Bound::Auto, b @ (Bound::Fr(_) | Bound::Fit(_))) => bound(b)?,
+                    (a, b) => format!("minmax({}, {})", bound(a)?, bound(b)?),
+                },
+                Part::Repeat(c, inner) => {
+                    let c = match c {
+                        Count::Times(n) => n.to_string(),
+                        Count::Fill => "auto-fill".into(),
+                        Count::Fit => "auto-fit".into(),
+                    };
+                    format!("repeat({c}, {})", parts(inner)?)
+                }
+            });
+        }
+        Some(out.join(" "))
+    }
+    match g {
+        Grid::Tracks(list) => parts(list),
+        Grid::Areas(a) => {
+            let (rows, cols) = (a.rows as usize, a.columns as usize);
+            let mut cells = vec![vec!["."; cols]; rows];
+            for (name, [r0, r1, c0, c1]) in &a.names {
+                for row in cells.get_mut(*r0 as usize - 1..*r1 as usize - 1)? {
+                    for cell in row.get_mut(*c0 as usize - 1..*c1 as usize - 1)? {
+                        *cell = name;
+                    }
+                }
+            }
+            Some(cells.iter().map(|r| format!("\"{}\"", r.join(" "))).collect::<Vec<_>>().join(" "))
+        }
+        _ => None,
+    }
+}
+
 /// The longhands of the shorthands that this file reads. `None` for any other name.
 pub fn longhands(name: &str) -> Option<&'static [Property]> {
     use Property::*;

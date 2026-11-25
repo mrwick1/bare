@@ -854,3 +854,7 @@ pub(crate) fn pins<E: Eng>(d: &Dom<E>, f: &mut dyn FnMut(&mut bare_html::dom::Sp
         }
     }
 }
+
+#[cfg(test)]
+#[path = "browser_style_grid_template_tests.rs"]
+mod grid_template_tests;
