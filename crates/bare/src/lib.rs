@@ -51,6 +51,10 @@ mod control_tests;
 #[cfg(test)]
 mod page_tests;
 #[cfg(test)]
+mod page_pseudo_style_tests;
+#[cfg(test)]
+mod browser_rects_pseudo_tests;
+#[cfg(test)]
 mod page_live_events_tests;
 #[cfg(test)]
 mod page_live_iframe_tests;
@@ -92,6 +96,8 @@ mod browser_subtle_tests;
 mod browser_subtle_hmac_hash_tests;
 #[cfg(test)]
 mod browser_subtle_ctr_hmac_tests;
+#[cfg(test)]
+mod browser_subtle_hkdf_hmac_tests;
 #[cfg(test)]
 mod browser_web_tests;
 #[cfg(test)]
@@ -419,6 +425,8 @@ mod browser_style_effects_tests;
 mod browser_resume_tests;
 #[cfg(test)]
 mod browser_survive_tests;
+#[cfg(test)]
+mod browser_task_aborts_tests;
 #[cfg(test)]
 mod browser_survive_vex_tests;
 #[cfg(test)]

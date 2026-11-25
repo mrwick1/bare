@@ -7,7 +7,7 @@
 //! `usages` give a new object on each read (the spec caches one). There is no `CryptoKey` global and no structured clone of a key.
 //!
 //! Limits: key formats "raw" only ("jwk", "spki" and "pkcs8" reject with `NotSupportedError`). AES-GCM takes a 12-byte IV only
-//! (`NotSupportedError` for other lengths). HKDF takes SHA-256 only; HMAC takes SHA-1, SHA-256, SHA-384 and SHA-512. RSA, ECDSA, ECDH, `wrapKey` and `unwrapKey` reject
+//! (`NotSupportedError` for other lengths). HKDF takes SHA-256 only; `deriveKey` gives an AES-GCM, AES-CBC or HMAC key. HMAC takes SHA-1, SHA-256, SHA-384 and SHA-512. RSA, ECDSA, ECDH, `wrapKey` and `unwrapKey` reject
 //! with `NotSupportedError`. AES-CTR counts in the low `length` bits of the 16-byte counter block, as the spec says, and rejects
 //! data that would reuse a counter value. `verify` of HMAC compares in constant time.
 
@@ -549,13 +549,20 @@ pub(crate) fn derive_bits<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local
 pub(crate) fn derive_key<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     promise(d, s, this, a, 5, "deriveKey", |s, v| {
         let (_, obj) = alg(d, s, v[0], &[Alg::Hkdf])?;
-        let (to, to_obj) = alg(d, s, v[2], &[Alg::AesGcm, Alg::AesCbc])?;
+        let (mut to, to_obj) = alg(d, s, v[2], &[Alg::AesGcm, Alg::AesCbc, HMAC])?;
         let extractable = s.to_boolean(v[3]);
         let uses = usages(d, s, v[4])?;
-        let len = aes_len(d, s, to_obj)?;
+        // An HMAC key without `length` is one block of its hash long ("get key length" of HMAC).
+        let (len, allowed) = if to == HMAC {
+            let hash = hmac_hash(d, s, to_obj)?;
+            to = Alg::Hmac(hash);
+            (hmac_len(d, s, to_obj)?.unwrap_or(hash.block()), HMAC_USES)
+        } else {
+            (aes_len(d, s, to_obj)?, AES_USES)
+        };
         let key = use_key(d, s, v[1], Alg::Hkdf, DERIVE_KEY)?;
         let bytes = hkdf(d, s, obj, &key, (len * 8) as f64)?;
-        check_uses(d, s, uses, AES_USES)?;
+        check_uses(d, s, uses, allowed)?;
         new_key(d, s, Key { alg: to, bytes, extractable, usages: uses })
     })
 }
