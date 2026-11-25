@@ -254,6 +254,8 @@ mod profile_record_tests;
 mod browser_idb_many_requests_tests;
 #[cfg(test)]
 mod browser_idb_reread_tests;
+#[cfg(test)]
+mod browser_idb_log_tests;
 pub mod resources;
 mod browser_loader;
 mod browser_shims;

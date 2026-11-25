@@ -102,8 +102,15 @@ pub struct WebStorage {
     /// shares `localStorage`. It is in memory only.
     cookies: Arc<Mutex<bare_net::cookie::Jar>>,
     /// The `indexedDB` data of each origin (`browser_idb.rs`). A new tab shares it, as it shares `localStorage`.
-    idb: Arc<Mutex<HashMap<String, crate::browser_idb::Shared>>>,
+    idb: Arc<Mutex<Idbs>>,
     lim: StorageLimits,
+}
+
+/// The `indexedDB` stores of the origins that opened it, and the profile that saves them (`browser_idb_log.rs`).
+#[derive(Default)]
+struct Idbs {
+    stores: HashMap<String, crate::browser_idb::Shared>,
+    disk: Option<Arc<crate::browser_idb::log::Disk>>,
 }
 
 impl Default for WebStorage {
@@ -123,8 +130,30 @@ impl WebStorage {
     }
 
     /// The `indexedDB` store of `origin`, made when it is new.
+    /// With a profile, the first open of an origin in the process reads its log.
     pub(crate) fn idb(&self, origin: &str) -> crate::browser_idb::Shared {
-        self.idb.lock().unwrap_or_else(|e| e.into_inner()).entry(origin.into()).or_default().clone()
+        let mut g = self.idb.lock().unwrap_or_else(|e| e.into_inner());
+        let Idbs { stores, disk } = &mut *g;
+        stores
+            .entry(origin.into())
+            .or_insert_with(|| match disk {
+                Some(disk) if !origin.is_empty() => Arc::new(Mutex::new(crate::browser_idb::log::load(disk, origin))),
+                _ => Default::default(),
+            })
+            .clone()
+    }
+
+    /// Save the `indexedDB` stores of the origins opened from now on to `disk`.
+    pub(crate) fn use_idb_disk(&self, disk: Arc<crate::browser_idb::log::Disk>) {
+        self.idb.lock().unwrap_or_else(|e| e.into_inner()).disk = Some(disk);
+    }
+
+    /// Write the `indexedDB` logs (a profile only). `sync`: `fsync` too.
+    pub(crate) fn flush_idb(&self, sync: bool) {
+        let list: Vec<_> = self.idb.lock().unwrap_or_else(|e| e.into_inner()).stores.values().cloned().collect();
+        for st in list {
+            st.lock().unwrap_or_else(|e| e.into_inner()).flush(sync);
+        }
     }
 
     pub fn jar(&self) -> Arc<Mutex<bare_net::cookie::Jar>> {
