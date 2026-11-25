@@ -167,7 +167,7 @@ pub fn border_padding(cx: &Cx, style: &ComputedStyle, cb_width: f32) -> (Sides, 
 
 /// Does this block make its own block formatting context? Then the margins of its children do not collapse with its own.
 pub fn own_context(cx: &Cx, node: NodeId) -> bool {
-    if matches!(cx.tree.kind(node), Kind::Atomic | Kind::Float | Kind::OutOfFlow) || Some(node) == cx.tree.root() || cx.tree.is_flex_or_grid(cx.tree.doc.flat_parent(node)) {
+    if matches!(cx.tree.kind(node), Kind::Atomic | Kind::Float | Kind::OutOfFlow) || Some(node) == cx.tree.root() || cx.tree.is_flex_or_grid(cx.tree.box_parent(node)) {
         return true;
     }
     cx.tree.scrolls(node)
@@ -559,7 +559,7 @@ pub fn out_of_flow(cx: &mut Cx, at: usize, pad: Rect, fixed: bool, abs: bool) {
         // The nearest positioned inline box above it, inside `at`. Its containing block goes from the top-left of the
         // padding box of its first fragment to the bottom-right of the padding box of its last one (CSS 2.1, 10.1).
         let mut cb = pad;
-        let mut up = cx.tree.doc.flat_parent(node);
+        let mut up = cx.tree.box_parent(node);
         while !inlines.is_empty()
             && let Some(n) = up
             && n != top
@@ -570,7 +570,7 @@ pub fn out_of_flow(cx: &mut Cx, at: usize, pad: Rect, fixed: bool, abs: bool) {
                 cb = Rect { x: x0, y: y0, w: (last.x + last.w - border.right - x0).max(0.0), h: (last.y + last.h - border.bottom - y0).max(0.0) };
                 break;
             }
-            up = cx.tree.doc.flat_parent(n);
+            up = cx.tree.box_parent(n);
         }
         absolute(cx, node, sx + pad.x - cb.x, sy + pad.y - cb.y, cb);
     }

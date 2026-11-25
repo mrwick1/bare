@@ -145,7 +145,7 @@ fn children(cx: &Cx, node: NodeId, mut statics: impl FnMut(NodeId, NodeId)) -> V
                         Kind::OutOfFlow => oof = true,
                         _ => {}
                     }
-                    n = if c == last { None } else { tree.doc.flat_next(c) };
+                    n = if c == last { None } else { tree.box_next(c) };
                 }
                 if text {
                     out.push((first, Some(last)));

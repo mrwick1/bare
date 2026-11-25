@@ -81,8 +81,9 @@ impl<'t, 'a> Events<'t, 'a> {
     }
 
     /// The node after `node`: its next sibling, or nothing at the end of the run or of an inline box.
+    #[inline(always)]
     fn after(&self, node: NodeId) -> Option<NodeId> {
-        if self.open.is_empty() && node == self.last { None } else { self.tree.doc.flat_next(node) }
+        if self.open.is_empty() && node == self.last { None } else { self.tree.raw_next(node) }
     }
 }
 
@@ -103,16 +104,25 @@ impl Iterator for Events<'_, '_> {
                 self.next = self.tree.doc.flat_children(node).next();
                 return Some(Event::Open(node));
             }
-            self.next = self.after(node);
-            return Some(match kind {
+            let event = match kind {
                 Kind::Text => Event::Text(node),
                 Kind::Atomic => Event::Atomic(node),
                 Kind::Float => Event::Float(node),
                 Kind::OutOfFlow => Event::OutOfFlow(node),
                 Kind::Break => Event::Break(node),
                 Kind::Block | Kind::ListItem => Event::Block(node),
-                Kind::None | Kind::Inline => continue,
-            });
+                // Entered: its `after` would climb for nothing.
+                Kind::Contents => {
+                    self.next = self.tree.enter(node);
+                    continue;
+                }
+                Kind::None | Kind::Inline => {
+                    self.next = self.after(node);
+                    continue;
+                }
+            };
+            self.next = self.after(node);
+            return Some(event);
         }
     }
 }
@@ -340,7 +350,7 @@ fn align(cx: &Cx, node: NodeId, above: f32, below: f32) -> Align {
     if matches!(v, Value::Keyword(Keyword::Baseline)) {
         return Align::Shift(0.0);
     }
-    let parent = || Metrics::of(cx.tree.style(cx.tree.doc.flat_parent(node).expect("an inline box has a parent")));
+    let parent = || Metrics::of(cx.tree.style(cx.tree.box_parent(node).expect("an inline box has a parent")));
     let size = |m: &Metrics| (m.size * 64.0).floor() as i32;
     Align::Shift(match v {
         Value::Keyword(Keyword::Top) => return Align::Top,
@@ -366,7 +376,7 @@ fn inline_box(cx: &Cx, node: NodeId, width: f32) -> Inline {
     let m = Metrics::of(style);
     let line_height = m.line_height(style);
     let paint = style.color(Property::BackgroundColor).a != 0 || border.horizontal() + border.vertical() != 0.0;
-    let parent = cx.tree.doc.flat_parent(node).expect("an inline box has a parent");
+    let parent = cx.tree.box_parent(node).expect("an inline box has a parent");
     let parent_style = cx.tree.style(parent);
     let parent_metrics = Metrics::of(parent_style);
     // The same font and line height as the parent reach the same: no need to work out how far.
@@ -658,6 +668,24 @@ impl<const WRAPS: bool> Breaker<'_, '_, WRAPS> {
         self.opened += 1;
     }
 
+    /// Text in a `display: contents` element has a font that its parent box may not have. The line height of the parent
+    /// box applies to it. When that is `normal`, the text's own font counts (CSS Inline 3, "line-height: normal"): the text
+    /// reaches as far as its font with a `normal` line height. Its own `line-height` does not count (WPT
+    /// `display-contents-text-line-height.html`, `display-contents-line-height.html`).
+    #[cold]
+    fn reach_text(&mut self, node: NodeId) {
+        let tree = self.cx.tree;
+        if tree.doc.flat_parent(node).is_some_and(|p| tree.kind(p) == Kind::Contents)
+            && let Some(parent) = tree.box_parent(node)
+            && tree.style(parent).get(Property::LineHeight) == Value::Keyword(Keyword::Normal)
+        {
+            let m = Metrics::of(tree.style(node));
+            let (above, below) = reach_of(&m, m.normal_line_height());
+            let (shift, root) = self.open.last().map_or((0.0, NONE), |o| (o.shift, o.root));
+            self.reach_in(root, above, below, shift, true);
+        }
+    }
+
     /// An atomic inline goes on the line: where it sits, and how far it reaches.
     #[inline(never)]
     fn place_atomic(&mut self, a: &mut Atomic) {
@@ -812,8 +840,11 @@ impl<const WRAPS: bool> Breaker<'_, '_, WRAPS> {
                 Item::Atomic(ref mut a) => self.place_atomic(a),
                 Item::Place { .. } => {}
             }
-            if matches!(item, Item::Text { .. }) {
+            if let Item::Text { node, .. } = item {
                 self.mark();
+                if self.cx.tree.contents {
+                    self.reach_text(node);
+                }
             }
             self.line.push(item);
         }
@@ -994,7 +1025,7 @@ impl<const WRAPS: bool> Breaker<'_, '_, WRAPS> {
                 Item::Text { node, start, end, x, w } if end > start => {
                     let m = Metrics::of(tree.style(node));
                     let at = self.cx.out.len() as u32;
-                    let (rx, ry) = moved(self.cx, self.block, tree.doc.flat_parent(node).expect("a text node has a parent"));
+                    let (rx, ry) = moved(self.cx, self.block, tree.box_parent(node).expect("a text node has a parent"));
                     self.cx.out.push(Fragment {
                         rect: Rect { x: dx + x + rx, y: y + lift - m.ascent + ry, w, h: m.ascent + m.descent },
                         node,
@@ -1008,7 +1039,7 @@ impl<const WRAPS: bool> Breaker<'_, '_, WRAPS> {
                     for f in &mut fragments {
                         f.end += base;
                     }
-                    let (rx, ry) = moved(self.cx, self.block, tree.doc.flat_parent(fragments[0].node).expect("an inline-block has a parent"));
+                    let (rx, ry) = moved(self.cx, self.block, tree.box_parent(fragments[0].node).expect("an inline-block has a parent"));
                     fragments[0].rect.x = dx + x + margin_left + rx;
                     fragments[0].rect.y = y + at_root(root) - shift - b + margin_top + ry;
                     self.cx.out.append(&mut fragments);
@@ -1104,7 +1135,7 @@ fn moved(cx: &Cx, block: NodeId, mut node: NodeId) -> (f32, f32) {
             x += dx;
             y += dy;
         }
-        let Some(parent) = cx.tree.doc.flat_parent(node) else { break };
+        let Some(parent) = cx.tree.box_parent(node) else { break };
         node = parent;
     }
     (x, y)

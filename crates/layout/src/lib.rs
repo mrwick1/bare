@@ -6,6 +6,8 @@
 pub mod advances;
 pub mod block;
 pub mod boxes;
+#[cfg(test)]
+mod boxes_contents_tests;
 mod breaks;
 pub mod controls;
 pub mod flex;

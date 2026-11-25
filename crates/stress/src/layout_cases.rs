@@ -96,6 +96,9 @@ pub fn all() -> Vec<Case> {
         case("boxes-display-none", 20_000, |n| boxes("<div style=display:none><p>x</p></div>".repeat(n), "")),
         case("boxes-list-items", 20_000, |n| boxes(format!("<ol>{}</ol>", "<li>x".repeat(n)), "")),
         case("boxes-inline-blocks", 20_000, |n| boxes("<i>x</i>".repeat(n), "i { display: inline-block }")),
+        // `display: contents`: each element is skipped in the walk. Deep: the walk climbs through all of them at the end.
+        case("boxes-contents-wide", 20_000, |n| boxes(format!("<div>{}</div>", "<b><i>x</i></b>".repeat(n)), "b { display: contents }")),
+        case("boxes-contents-deep", 2_000, |n| boxes(format!("{}x", "<b>".repeat(n)), "b { display: contents }")),
         // Topic 2: text
         case("text-words", 100_000, |n| pieces("hello world ".repeat(n), NORMAL, Transform::None)),
         case("text-one-long-word", 1_000_000, |n| pieces("x".repeat(n), NORMAL, Transform::None)),

@@ -32,7 +32,7 @@
 //! Deviations (on purpose)
 //! - `click()` sends a plain `Event`, as the driver does (there is no `MouseEvent`, see `browser_form.rs`).
 //! - `innerText` does not know soft line wraps, so the space at the end of a wrapped line stays; `text-transform: capitalize` looks at one text node
-//!   at a time; `display:contents` is not modelled. An atomic inline (`img`, `inline-block`) counts as text on the line, so the white space around it stays.
+//!   at a time. An atomic inline (`img`, `inline-block`) counts as text on the line, so the white space around it stays.
 
 use crate::eng::Eng;
 use crate::browser::*;
@@ -578,28 +578,25 @@ fn set_draggable<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: 
     Ok(s.undefined())
 }
 
-/// How many times a style text uses what the engine does not parse: `content-visibility` (`auto` only with `auto`) or `display: contents`.
+/// How many times a style text uses what the engine does not parse: `content-visibility` (`auto` only with `auto`).
 fn unmodelled(t: &str, auto: bool) -> usize {
     use bare_css::tokenizer::{Token, tokenize};
     let mut tokens = tokenize(t).filter(|t| !matches!(t, Token::Whitespace));
     let mut n = 0;
     while let Some(t) = tokens.next() {
         let Token::Ident(name) = t else { continue };
-        if !name.eq_ignore_ascii_case("content-visibility") && !name.eq_ignore_ascii_case("display") { continue; }
+        if !name.eq_ignore_ascii_case("content-visibility") { continue; }
         if !matches!(tokens.next(), Some(Token::Colon)) { continue; }
         if let Some(Token::Ident(value)) = tokens.next()
-            && (name.eq_ignore_ascii_case("display") && value.eq_ignore_ascii_case("contents")
-                || name.eq_ignore_ascii_case("content-visibility") && (value.eq_ignore_ascii_case("hidden") || auto && value.eq_ignore_ascii_case("auto"))) { n += 1; }
+            && (value.eq_ignore_ascii_case("hidden") || auto && value.eq_ignore_ascii_case("auto")) { n += 1; }
     }
     n
 }
 
-/// A style rule with `display: contents` or `content-visibility` (the engine parses neither). `sels`: `None` when the engine cannot
+/// A style rule with `content-visibility` (the engine does not parse it). `sels`: `None` when the engine cannot
 /// parse the selector, so it may match any element.
 pub(crate) struct OddRule {
     sels: Option<Vec<bare_css::selector::Selector>>,
-    /// `display: contents`: the element itself has no box. Its children keep theirs.
-    contents: bool,
     /// `content-visibility: hidden`: the content is hidden, the element is not.
     hidden: bool,
     /// `content-visibility: auto`: the content may be hidden. Counts only with the `contentVisibilityAuto` option.
@@ -615,12 +612,10 @@ fn odd_rules(doc: &mut Document, key: &[(NodeId, Option<String>, String)]) -> Op
         for r in rules {
             match r {
                 Rule::Style(s) => {
-                    let (mut contents, mut hidden, mut auto) = (false, false, false);
+                    let (mut hidden, mut auto) = (false, false);
                     for d in s.declarations().iter() {
                         let v = d.value.trim();
-                        if d.name == "display" && v.eq_ignore_ascii_case("contents") {
-                            contents = true;
-                        } else if d.name == "content-visibility" && v.eq_ignore_ascii_case("hidden") {
+                        if d.name == "content-visibility" && v.eq_ignore_ascii_case("hidden") {
                             hidden = true;
                         } else if d.name == "content-visibility" && v.eq_ignore_ascii_case("auto") {
                             auto = true;
@@ -629,9 +624,9 @@ fn odd_rules(doc: &mut Document, key: &[(NodeId, Option<String>, String)]) -> Op
                         }
                         *found += 1;
                     }
-                    if contents || hidden || auto {
+                    if hidden || auto {
                         let sels = bare_css::selector::parse_selector_list_in(s.prelude, doc, bare_css::selector::Mode::Document);
-                        out.push(OddRule { sels, contents, hidden, auto });
+                        out.push(OddRule { sels, hidden, auto });
                     }
                 }
                 Rule::At(a) => {
@@ -692,7 +687,8 @@ fn check_visibility<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, 
         return Ok(s.boolean(false));
     }
     let Some(snap) = old::<E, _>(s, |it| d.snapshot(it, n))? else { return Ok(s.boolean(false)) };
-    if snap.hidden {
+    // An element with `display: contents` has no box (CSSOM View, `checkVisibility`, step 1).
+    if snap.hidden || snap.style.get(Property::Display) == Cv::Keyword(Keyword::Contents) {
         return Ok(s.boolean(false));
     }
     // The rules are found once for each rule set that is built: the sheet text is parsed again only then.
@@ -717,10 +713,10 @@ fn check_visibility<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, 
         steps += 1;
         if let NodeData::Element { .. } = doc.data(e) {
             if attr(&doc, e, "style").is_some_and(|t| unmodelled(t, opt[2]) > 0) {
-                return Err(lift_err::<E>(s, Dom::<E>::gate("checkVisibility with content-visibility or display: contents in a style attribute (not modelled)")));
+                return Err(lift_err::<E>(s, Dom::<E>::gate("checkVisibility with content-visibility in a style attribute (not modelled)")));
             }
-            // A rule that the engine cannot model may apply here: `display: contents` on the element, `content-visibility` above it.
-            let may = |r: &OddRule| if e == n { r.contents } else { r.hidden || r.auto && opt[2] };
+            // A rule that the engine cannot model may apply here: `content-visibility` above the element.
+            let may = |r: &OddRule| e != n && (r.hidden || r.auto && opt[2]);
             reach |= match odd {
                 None => true,
                 Some(rules) => rules.iter().filter(|r| may(r)).any(|r| r.sels.as_ref().is_none_or(|l| l.iter().any(|st| bare_css::matching::matches(&doc, e, st)))),
@@ -744,7 +740,7 @@ fn check_visibility<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, 
     s.charge(steps * per_step / 8 + 1)?;
     // A call that is false for another reason (opacity, a closed `details`) is answered above.
     if reach {
-        return Err(lift_err::<E>(s, Dom::<E>::gate("checkVisibility of an element that a style sheet rule with content-visibility or display: contents may reach (not modelled)")));
+        return Err(lift_err::<E>(s, Dom::<E>::gate("checkVisibility of an element that a style sheet rule with content-visibility may reach (not modelled)")));
     }
     Ok(s.boolean(true))
 }
@@ -770,3 +766,7 @@ pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> 
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "browser_element_contents_tests.rs"]
+mod contents_tests;

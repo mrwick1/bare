@@ -290,7 +290,7 @@ impl Builder<'_> {
             if n == last {
                 return true;
             }
-            match tree.doc.flat_next(n) {
+            match tree.box_next(n) {
                 Some(next) => n = next,
                 None => return true,
             }
@@ -574,11 +574,11 @@ impl Plan {
                 let end = v.find(|c: char| !c.is_ascii_digit()).unwrap_or(v.len());
                 v[..end].parse::<usize>().unwrap_or(1).clamp(1, MAX_COLSPAN as usize)
             };
-            for child in tree.doc.flat_children(table) {
+            for child in tree.box_children(table) {
                 match tree.styles.style(child).map(|s| s.get(Property::Display)) {
                     Some(Value::Keyword(Keyword::TableColumnGroup)) => {
                         let mut any = false;
-                        for c in tree.doc.flat_children(child) {
+                        for c in tree.box_children(child) {
                             if tree.styles.style(c).map(|s| s.get(Property::Display)) == Some(Value::Keyword(Keyword::TableColumn)) {
                                 any = true;
                                 give(&mut self.cols, c, span_of(c), &mut at);
@@ -813,7 +813,7 @@ fn run_sizes(cx: &mut Cx, _parent: NodeId, first: NodeId, last: NodeId) -> (f32,
         } else if kind.is_inline() {
             run = Some((run.map_or(c, |r| r.0), c));
         }
-        n = if c == last { None } else { tree.doc.flat_next(c) };
+        n = if c == last { None } else { tree.box_next(c) };
     }
     if let Some((a, b)) = run {
         each(cx, a, b, false);
@@ -856,7 +856,7 @@ fn run_layout(cx: &mut Cx, parent: NodeId, first: NodeId, last: NodeId, width: f
         } else if kind.is_inline() {
             run = Some((run.map_or(c, |r| r.0), c));
         }
-        n = if c == last { None } else { tree.doc.flat_next(c) };
+        n = if c == last { None } else { tree.box_next(c) };
     }
     if let Some((a, b)) = run {
         lines(cx, a, b, &mut y, &mut baseline);
