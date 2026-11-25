@@ -994,6 +994,8 @@ Document registration, basics and loading paths are excluded from Task 38. Task 
 
 Keep `WebAssembly` absent until a real runtime exists. Source search found no runtime in the inspected application or interpreter modules. Do not add an object whose validate, compile or instantiate methods report false success. A diagnostic must preserve catch and fallback behavior.
 
+Update 2026-11-25: the real runtime exists now (wasmi, `browser_wasm.rs`, `docs/internal/design-webassembly.md`). A part that bare does not support yet fails with a real error (a `LinkError` that names it), never with false success.
+
 Task 37 traced Redis's Rive factory to an explicit absent-global abort. Its abort helper then reads `WebAssembly.RuntimeError` and throws a ReferenceError. The later fallback URL is another WASM binary, not a JavaScript runtime. A separate widget source contains an unconditional EventSource constructor; the stackless live timeout cannot be mapped conclusively to it. The contains callbacks remain unattributed. Existing Node.contains is not evidence of a missing receiver's identity. Do not change a host API without the original callback, receiver and a failing reduction. See the appended Task 37 evidence in progress.md for decoded URLs, hashes, fresh runs and limits. No host implementation or matrix is part of this decision.
 
 ## Lazy DOMException construction and a catchable capability refusal (Task 39)
