@@ -158,10 +158,29 @@
     r.result = v; r.readyState = 'done'; r.error = null;
     r.dispatchEvent(new Event('success'));
   }
+  // Transactions that have not finished, in the order they were made. A transaction starts when no earlier one of its database
+  // overlaps its scope with a write on either side (the standard's transaction scheduling). Two readonly ones run together.
+  var running = [];
+  function blocked(t) {
+    for (var i = 0; i < running.length && running[i] !== t; i++) {
+      var o = running[i];
+      if (o.name !== t.name || (o.mode === 'readonly' && t.mode === 'readonly')) continue;
+      if (o.mode === 'versionchange' || t.mode === 'versionchange' || o.list.some(function (n) { return t.list.indexOf(n) >= 0; })) return true;
+    }
+    return false;
+  }
+  // `t` finished: start the waiting transactions that nothing blocks now, in order.
+  function done(t) {
+    var i = running.indexOf(t);
+    if (i < 0) return;
+    running.splice(i, 1);
+    running.filter(function (o) { return o.waiting && !blocked(o); }).forEach(function (o) { o.waiting = false; kick(o.tx); });
+  }
   function kill(tx, e) {
     var t = TS.get(tx);
     if (t.dead) return;
     t.dead = true;
+    done(t);
     t.q.length = 0;
     if (t.id) idb(5, t.id);
     for (var i = t.undo.length; i--;) t.undo[i]();
@@ -184,7 +203,11 @@
   }
   function kick(tx) {
     var t = TS.get(tx);
-    if (t.on) return;
+    if (t.on || t.waiting) return;
+    if (!t.started) {
+      if (blocked(t)) { t.waiting = true; return; }
+      t.started = true;
+    }
     t.on = true;
     var n = 0;
     later(function step() {
@@ -204,6 +227,7 @@
           if (t.q.length) { kick(tx); return; }
           t.dead = true;
           if (t.id) idb(4, t.id);
+          done(t);
           tx.dispatchEvent(new Event('complete'));
           if (t.after) t.after();
         }, 0);
@@ -221,7 +245,9 @@
     tx.db = db; tx.mode = mode; tx.error = null; tx.durability = 'default';
     Object.defineProperty(tx, 'objectStoreNames', { get: function () { return names(mode === 'versionchange' ? Object.keys(data.stores) : list); }, enumerable: true, configurable: true });
     // A read-only transaction changes nothing, so it has no undo list in the host (id 0).
-    TS.set(tx, { q: [], on: false, dead: false, undo: [], os: {}, open: null, after: null, graceOn: false, data: data, list: list, name: D.get(db).name, id: mode === 'readonly' ? 0 : idb(3) });
+    var t = { q: [], on: false, dead: false, undo: [], os: {}, open: null, after: null, graceOn: false, data: data, list: list, name: D.get(db).name, id: mode === 'readonly' ? 0 : idb(3), mode: mode, tx: tx, started: false, waiting: false };
+    TS.set(tx, t);
+    running.push(t);
     return tx;
   }
   function live(tx) {

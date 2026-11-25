@@ -246,6 +246,8 @@ mod browser_idb_binary_key_tests;
 #[cfg(test)]
 mod browser_events_count_tests;
 #[cfg(test)]
+mod browser_idb_tx_order_tests;
+#[cfg(test)]
 mod browser_idb_cursor_tests;
 #[cfg(test)]
 mod browser_idb_store_tests;
@@ -427,6 +429,8 @@ mod browser_domparser_move_tests;
 mod browser_domparser_xhtml_tests;
 #[cfg(test)]
 mod browser_notification_tests;
+#[cfg(test)]
+mod browser_create_document_tests;
 
 mod browser_frames;
 mod browser_child;
