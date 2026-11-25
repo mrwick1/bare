@@ -23,6 +23,8 @@ bare-window = { path = "../window" }
 crc32fast = "1"
 miniz_oxide = "0.9"
 psl = "=2.1.253"
+# `WebAssembly` (`browser_wasm.rs`, `docs/internal/design-webassembly.md`). No text format (`wat`).
+wasmi = { version = "2.0.3", default-features = false, features = ["std", "stable", "validate", "memory64", "auto-dispatch"] }
 
 [dev-dependencies]
 serde_json = "1"
