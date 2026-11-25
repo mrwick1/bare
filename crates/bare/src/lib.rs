@@ -140,6 +140,8 @@ mod browser_refresh;
 mod browser_navigation_storage;
 mod browser_navigation_url;
 #[cfg(test)]
+mod browser_navigation_url_colon_tests;
+#[cfg(test)]
 mod browser_navigation_tests;
 #[cfg(test)]
 mod browser_clone_tests;

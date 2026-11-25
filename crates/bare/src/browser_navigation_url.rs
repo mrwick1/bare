@@ -154,13 +154,14 @@ pub(crate) fn parse(input: &str, base: Option<&Rec>) -> Result<Rec, UErr> {
 /// `rest` (no scheme, no `//` and no fragment) against `base`.
 fn relative(rest: &str, base: Option<&Rec>) -> Result<Rec, UErr> {
     let b = base.ok_or(UErr::Invalid)?;
-    if rest.split(['/', '?']).next().unwrap_or("").contains(':') {
-        return Err(UErr::Gate("colon in the first relative path segment"));
-    }
     if dot_escape(rest) {
         return Err(UErr::Gate("percent-encoded dot segment"));
     }
-    Ok(Rec { u: b.u.join(rest).map_err(|_| UErr::Invalid)?, frag: None, userinfo: b.userinfo.clone() })
+    // `parse` already took a real scheme. A colon left in the first segment (`8:orgid:x`) is part of the path, so `./` keeps `join`
+    // from reading the segment as a scheme. WHATWG gives the same URL for both forms.
+    let colon = rest.split(['/', '?']).next().unwrap_or("").contains(':');
+    let u = if colon { b.u.join(&format!("./{rest}")) } else { b.u.join(rest) };
+    Ok(Rec { u: u.map_err(|_| UErr::Invalid)?, frag: None, userinfo: b.userinfo.clone() })
 }
 
 /// The path and query `p` (it starts with `/`) with the dot segments removed and the characters encoded, by the parser of `http` URLs.
