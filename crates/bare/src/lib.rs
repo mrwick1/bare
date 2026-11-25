@@ -171,6 +171,9 @@ mod browser_platform_class;
 mod browser_platform_query;
 mod browser_scheduler;
 mod browser_worker;
+mod browser_wasm;
+#[cfg(test)]
+mod browser_wasm_tests;
 mod browser_broadcast;
 mod browser_perf;
 mod browser_html;

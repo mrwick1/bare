@@ -388,6 +388,8 @@ pub(crate) enum Owner<E: Eng> {
     Geom(E::Obj),
     /// An `IdleDeadline` (`browser_idle.rs`). It keeps no reference.
     Idle(E::Obj),
+    /// A `WebAssembly.Module`, `Instance` or `Global` (`browser_wasm.rs`).
+    Wasm(E::Obj),
 }
 
 impl<E: Eng> Owner<E> {
@@ -396,7 +398,7 @@ impl<E: Eng> Owner<E> {
         match self {
             Owner::Target(t) => Some(t),
             Owner::Xhr(o) | Owner::Abort(o) | Owner::Port(o) | Owner::Worker(o) | Owner::Mql(o) | Owner::Frame(o) => Some(Target::Obj(o)),
-            Owner::Event(_) | Owner::TokIter(_) | Owner::Resize(_) | Owner::Mo(_) | Owner::Io(_) | Owner::Walk(_) | Owner::Range(_) | Owner::Sel(_) | Owner::Attr(_) | Owner::Web(_) | Owner::Geom(_) | Owner::Idle(_) | Owner::Ctl(_) | Owner::Computed(_) | Owner::Source(_) | Owner::Reserved | Owner::Url(_) | Owner::Params(_) | Owner::Iter(_) | Owner::Loc(_) | Owner::Fetch(_) | Owner::Stream(_) => None,
+            Owner::Event(_) | Owner::TokIter(_) | Owner::Resize(_) | Owner::Mo(_) | Owner::Io(_) | Owner::Walk(_) | Owner::Range(_) | Owner::Sel(_) | Owner::Attr(_) | Owner::Web(_) | Owner::Geom(_) | Owner::Idle(_) | Owner::Wasm(_) | Owner::Ctl(_) | Owner::Computed(_) | Owner::Source(_) | Owner::Reserved | Owner::Url(_) | Owner::Params(_) | Owner::Iter(_) | Owner::Loc(_) | Owner::Fetch(_) | Owner::Stream(_) => None,
         }
     }
 }
@@ -886,6 +888,7 @@ pub struct Dom<E: Eng = New> {
     pub(crate) ce: crate::browser_custom::Ce<E>,
     /// Rectangles, points, quads and matrices (`browser_geom.rs`, `browser_matrix.rs`).
     pub(crate) geom: crate::browser_geom::Geom<E>,
+    pub(crate) wasm: crate::browser_wasm::Wasm<E>,
     /// `Worker` (`browser_worker.rs`).
     pub(crate) worker: crate::browser_worker::WorkerHost<E>,
     pub(crate) broadcast: crate::browser_broadcast::BroadcastHost<E>,
@@ -1007,6 +1010,7 @@ impl<'p, E: Eng> bare_js_api::Host<E::Vm> for Dom<E> {
             }
             Some(Owner::Computed(o)) => crate::browser_computed::trace_owner(self, &st, o, t),
             Some(w @ (Owner::Url(_) | Owner::Params(_) | Owner::Iter(_))) => crate::browser_navigation::trace_owner(self, w, t),
+            Some(Owner::Wasm(o)) => crate::browser_wasm::trace(self, o, t),
             Some(Owner::Loc(_) | Owner::Reserved | Owner::Range(_) | Owner::Geom(_) | Owner::Idle(_)) | None => {}
         }
     }
@@ -1051,6 +1055,7 @@ impl<'p, E: Eng> bare_js_api::Host<E::Vm> for Dom<E> {
                 Some(Owner::Attr(o)) => attr.push(o),
                 Some(Owner::Web(o)) => web.push(o),
                 Some(Owner::Geom(o)) => crate::browser_geom::forget(self, o),
+                Some(Owner::Wasm(o)) => crate::browser_wasm::forget(self, o),
                 Some(Owner::Idle(o)) => self.idle_forget(o),
                 Some(Owner::Event(o)) => {
                     st.events.remove(&o);
@@ -1716,6 +1721,7 @@ impl<E: Eng> Dom<E> {
         crate::browser_nodelist::install(self, s)?;
         crate::browser_dataset::install(self, s)?;
         crate::browser_abort::install(self, s)?;
+        crate::browser_wasm::install(self, s)?;
         crate::browser_editing::install(self, s)?;
         crate::browser_worker::install(self, s)?;
         crate::browser_broadcast::install(self, s)?;
@@ -2150,6 +2156,7 @@ impl<E: Eng> Browser<E> {
             ctl: Default::default(),
             ce: Default::default(),
             geom: Default::default(),
+            wasm: Default::default(),
             worker: Default::default(),
             broadcast: Default::default(),
             reclaim: Default::default(),
