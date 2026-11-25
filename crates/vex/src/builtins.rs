@@ -396,6 +396,7 @@ impl Realm {
         self.install_symbol();
         self.lazy_table(g, crate::bi_intl::GLOBALS);
         self.lazy_table(g, crate::bi_text::GLOBALS);
+        self.lazy_table(g, crate::bi_weakref::GLOBALS);
     }
 
     fn install_function(&mut self) {

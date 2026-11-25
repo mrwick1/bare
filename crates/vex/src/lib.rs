@@ -77,6 +77,7 @@ mod bi_date_calc;
 mod bi_date_tz;
 mod bi_object;
 mod bi_number;
+mod bi_weakref;
 mod bi_wrap;
 mod bi_string;
 pub mod promise;

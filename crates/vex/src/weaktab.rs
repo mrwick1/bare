@@ -190,6 +190,11 @@ impl WeakTab {
         Some(t)
     }
 
+    /// The key of the first live entry (the only one of a `WeakRef`).
+    pub fn first_key(self) -> Option<Value> {
+        (0..self.cap()).map(|i| self.key(i)).find(|k| k.as_pointer().is_some())
+    }
+
     /// The number of live entries.
     pub fn len(self) -> usize {
         (0..self.cap()).filter(|&i| self.key(i).as_pointer().is_some()).count()
