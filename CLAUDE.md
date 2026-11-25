@@ -10,7 +10,7 @@ The design process below is for performance work. A bug fix or a small change sk
 
 1. Write a failing test for the bug.
 2. Make the shortest fix.
-3. Run `t`. It runs the tests that cover the changed files (`t --for <file>` lists them). Without `t`, run `cargo test --locked -p <crate> <module>::`.
+3. Run `t`. It runs the tests that cover the changed files (`t --for <file>` lists them). To run one test, use `t <file>::<test name>`.
 4. Commit, write the PR description, then run `tools/ship.sh`. It checks, pushes and merges. There is no CI (owner, 2026-11-23).
 ## How to improve a part
 

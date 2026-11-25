@@ -1,0 +1,2 @@
+[runner]
+rust = "cargo test --locked"
