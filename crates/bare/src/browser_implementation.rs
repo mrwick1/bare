@@ -9,7 +9,9 @@
 //! - Deviations: the new document has no doctype, `defaultView` and `location`, and a node made by its `createElement` has `ownerDocument`
 //!   `document`, not this one (the arena has one owner document, as for the contents of a `template`). The initial document of a blank
 //!   iframe is the exception: `browser_frames` records its window and its created nodes. Scripts in the new document never run.
-//!   `createDocument` and `createDocumentType` are absent.
+//!   `createDocumentType` is absent.
+//! - `createDocument(ns, qname, doctype)` makes the same kind of `Document` (no `XMLDocument`) and appends the element of `createElementNS(ns, qname)`.
+//!   It ignores `doctype` and `contentType` stays "text/html".
 
 use crate::eng::{Eng, Ops};
 use crate::browser::*;
@@ -23,6 +25,27 @@ fn create_html_document<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'
     let v = arg_s::<E>(s, a, 0);
     let title = if s.type_of(v) == Type::Undefined { None } else { Some(d.string_arg_s(s, v)?) };
     d.html_document(s, title)
+}
+
+/// `implementation.createDocument(namespace, qualifiedName, doctype)`. The result is a `Document` like the one of `createHTMLDocument`
+/// (no `XMLDocument`), with no `html`, `head` or `body`. `doctype` is ignored: there is no `createDocumentType`. `contentType` stays "text/html".
+fn create_document<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    receiver(d, s, this)?;
+    if a.len() < 2 { return Err(s.type_error("Failed to execute 'createDocument' on 'DOMImplementation': 2 arguments required")); }
+    let arg0 = arg_s::<E>(s, a, 0);
+    let ns = crate::browser_namespace::ns_arg(d, s, arg0)?;
+    let qname = d.arg_str_s(s, a, 1)?;
+    let el = if qname.is_empty() { None } else { Some(crate::browser_namespace::element_ns(d, s, ns, &qname, None)?) };
+    let n = {
+        let mut doc = d.doc.borrow_mut();
+        d.room_s(s, &doc, 1, 0)?;
+        doc.create_document()
+    };
+    if let Some(el) = el {
+        let e = d.el_s(s, el)?;
+        d.doc.borrow_mut().move_to(e, n, None);
+    }
+    d.wrap_s(s, n)
 }
 
 impl<E: Eng> Dom<E> {
@@ -72,6 +95,7 @@ fn implementation<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Ar
 fn make_implementation<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, E::Obj> {
     let proto = d.obj(it, it.object_prototype())?;
     d.def_method_s(it, proto, "createHTMLDocument", 0, create_html_document)?;
+    d.def_method_s(it, proto, "createDocument", 2, create_document)?;
     d.def_method_s(it, proto, "hasFeature", 0, has_feature)?;
     crate::browser_lazy::tag(d, it, proto, "DOMImplementation")?;
     let ctor = d.add_fn_s_obj(it, illegal_constructor, "DOMImplementation", 0, HostFn::Ctor)?;
@@ -120,7 +144,7 @@ pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> 
 fn parse_from_string<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let text = d.arg_str_s(s, a, 0)?;
     let mime = d.arg_str_s(s, a, 1)?;
-    if !["text/html", "text/xml", "application/xml", "image/svg+xml"].contains(&mime.as_str()) {
+    if !["text/html", "text/xml", "application/xml", "application/xhtml+xml", "image/svg+xml"].contains(&mime.as_str()) {
         return Err(s.type_error("Invalid MIME type for DOMParser.parseFromString"));
     }
     if text.len() > d.lim.max_string_bytes { return Err(d.lim_s(s, "dom-string")); }
