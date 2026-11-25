@@ -259,7 +259,7 @@ pub(super) fn write<'s>(rt: &mut Realm, root: Value, opts: &CloneOpts<'_, '_>, h
     let list: Vec<_> = opts.transfer.iter().filter_map(|&l| Realm::obj(rt.a_at(l))).collect();
     let mut walk = Walk { out: cl::RecordWriter::new(), meter: cl::Meter::new(opts.limits), seen: cl::IdMap::default(), transfer: cl::IdMap::default(), host, listed: list.len() as u32, data: Vec::new() };
     for (i, &o) in list.iter().enumerate() {
-        if crate::shared_memory::is_shared(o) {
+        if crate::shared_memory::is_shared(o) || crate::bi_buffer::external_buffer(o) {
             return Err(walk.refuse(rt, Refused::Object));
         }
         walk.transfer.insert(id(o), i as u32);

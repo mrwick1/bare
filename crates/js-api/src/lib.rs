@@ -955,6 +955,15 @@ pub trait Engine: Sized {
     fn new_array_buffer<'s>(&mut self, _bytes: Vec<u8>) -> Result<Local<'s>, Error<'s>> {
         Err(Error::Abort(Abort::Unsupported("new_array_buffer")))
     }
+    /// A fixed-length `ArrayBuffer` over bytes that the host owns (a WebAssembly memory), with no copy. Script cannot transfer it. A
+    /// host that makes the slice from bytes that can move or end detaches the buffer (`detach_buffer`) first.
+    fn new_external_buffer<'s>(&mut self, _bytes: &'static mut [u8]) -> Result<Local<'s>, Error<'s>> {
+        Err(Error::Abort(Abort::Unsupported("new_external_buffer")))
+    }
+    /// Detach an `ArrayBuffer`: its length becomes 0 and its views go out of bounds. `false` for another value.
+    fn detach_buffer(&mut self, _v: Local<'_>) -> bool {
+        false
+    }
     /// A typed array of type `elem` over a new buffer that owns `bytes`. `Elem::Data` is not a typed array.
     fn new_typed_array<'s>(&mut self, _elem: Elem, _bytes: Vec<u8>) -> Result<Local<'s>, Error<'s>> {
         Err(Error::Abort(Abort::Unsupported("new_typed_array")))
@@ -1440,6 +1449,14 @@ impl<'s, E: Engine> Scope<'s, E> {
 
     pub fn new_array_buffer(&mut self, bytes: Vec<u8>) -> Result<Local<'s>, Error<'s>> {
         self.e.new_array_buffer(bytes)
+    }
+
+    pub fn new_external_buffer(&mut self, bytes: &'static mut [u8]) -> Result<Local<'s>, Error<'s>> {
+        self.e.new_external_buffer(bytes)
+    }
+
+    pub fn detach_buffer(&mut self, v: Local<'_>) -> bool {
+        self.e.detach_buffer(v)
     }
 
     pub fn new_typed_array(&mut self, elem: Elem, bytes: Vec<u8>) -> Result<Local<'s>, Error<'s>> {
