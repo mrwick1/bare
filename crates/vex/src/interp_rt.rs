@@ -407,6 +407,9 @@ pub struct Realm {
     pub(crate) api: crate::api::ApiState,
     /// The compiler of the stubs of the program, if it has any (`Op::Lazy`, in any run: `Realm::compile_stub`).
     pub lazy: Option<Box<dyn LazyCompile>>,
+    /// The code indexes of the functions that `Function` and its kin made (`dynamic_function`), with the length of their keyword.
+    /// `Function.prototype.toString` adds the name `anonymous` to their text, as the spec's source text has it.
+    pub(crate) dynamic_fns: HashMap<usize, usize>,
     epoch: u32,
     pub collections: u32,
     /// What the last collection counted.
@@ -584,6 +587,7 @@ impl Realm {
             grown: 0,
             api: Default::default(),
             lazy: None,
+            dynamic_fns: HashMap::new(),
             epoch,
             collections: 0,
             last_gc: Default::default(),

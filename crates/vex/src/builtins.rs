@@ -540,6 +540,9 @@ fn dynamic_function(rt: &mut Realm, args: &[Value], keyword: &str) -> R<Value> {
             Realm::obj(f).expect("a function").set_proto(&mut rt.shapes, Some(proto.cell()));
         }
     }
+    if let Some((fci, _)) = rt.function_new(f) {
+        rt.dynamic_fns.insert(fci, keyword.len());
+    }
     let anonymous = rt.intern("anonymous");
     rt.name_function(f, Key::Name(anonymous), 0)?;
     Ok(f)
@@ -631,6 +634,17 @@ fn fn_to_string(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
     callable_this(rt, this, "toString")?;
     // The name tells functions apart: libraries compare this text with that of `Object` to find plain objects. A bound function has none.
     let bound = rt.native_id(this) == Some(rt.bound_id as usize);
+    // A script function gives its source text: the bytes of its span in the text that its code came from.
+    if let Some((ci, _)) = rt.function_new(this)
+        && let Some((start, end)) = rt.prog.get(ci).map(|c| c.span).filter(|&(s, e)| e > s)
+        && let Some(mut text) = rt.lazy.as_ref().and_then(|l| l.page_source_of(ci)).and_then(|s| s.get(start as usize..end as usize)).map(str::to_string)
+    {
+        // A dynamic function's text is `KEYWORD (`: the spec's source text names it `anonymous`.
+        if let Some(&k) = rt.dynamic_fns.get(&ci) {
+            text.replace_range(k..k + 1, " anonymous");
+        }
+        return Ok(rt.string(&text));
+    }
     let name = if bound { None } else { rt.get_named(this, "name").ok().and_then(Realm::str_of) };
     let name = name.map(|s| rt.text(s)).unwrap_or_default();
     Ok(rt.string(&format!("function {name}() {{ [native code] }}")))
