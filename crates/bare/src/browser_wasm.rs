@@ -11,8 +11,11 @@
 //! - The store is in a cell. A call into wasm takes it out and puts it back after. A JS import that runs during the call finds the
 //!   store through the wasmi `Caller` (`CUR`), so JS can call into wasm again.
 //! - `compile` and `instantiate` do the work in the call and settle the promise after it.
-//! - Not here: `Memory`, `Table`, `Tag`, `Exception`, `compileStreaming`, `instantiateStreaming`, a step limit in wasm code, SIMD.
-//!   A module that imports or exports a memory or a table fails with a `LinkError` that says so.
+//! - A `Memory` or a `Table` has one JS object for each wasmi handle (`St::objs`), kept for the life of the page like the store.
+//! - `Memory.buffer` is an external `ArrayBuffer` over the wasmi bytes, with no copy (`Engine::new_external_buffer`). A grow can move
+//!   the bytes, so the buffer is detached and made again ("refresh the memory buffer"): at once for `Memory.grow`, and for a grow in
+//!   wasm code before any JS runs again (`refresh`: before a JS import, after a call into wasm).
+//! - Not here: `Tag`, `Exception`, a shared memory, `compileStreaming`, `instantiateStreaming`, a step limit in wasm code, SIMD.
 
 use crate::browser::*;
 use crate::browser_scoped::*;
@@ -20,13 +23,15 @@ use crate::eng::Eng;
 use bare_js_api::{Abort, Args, Attrs, Error, HostFn, Intrinsic, Local, Persistent, Traced, Type};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use wasmi::{AsContext, AsContextMut, Caller, Extern, ExternRef, ExternType, Func, FuncType, Global, Module, Mutability, Nullable, Store, StoreContextMut, Val, ValType};
+use wasmi::{AsContext, AsContextMut, Caller, Extern, ExternRef, ExternType, Func, FuncType, Global, Memory, MemoryType, Module, Mutability, Nullable, Ref, RefType, Store, StoreContextMut, Table, TableType, Val, ValType};
 
 pub(crate) enum Item<E: Eng> {
     Module(Module),
     /// An instance keeps its exports object.
     Instance(Traced<E::Raw>),
     Global(Global),
+    Memory(Memory),
+    Table(Table),
 }
 
 /// What a JS import threw or why the engine stopped. The nearest call from JS into wasm gives it back.
@@ -46,6 +51,8 @@ const AS_INT_N: usize = 7;
 const FREEZE: usize = 8;
 const CALL: usize = 9;
 const NAMESPACE: usize = 10;
+const MEMORY: usize = 11;
+const TABLE: usize = 12;
 
 struct St<E: Eng> {
     engine: wasmi::Engine,
@@ -61,6 +68,16 @@ struct St<E: Eng> {
     func_objs: HashMap<[u8; FUNC_BYTES], Persistent>,
     /// The wasmi function of a JS function.
     of_obj: IdMap<E::Obj, Func>,
+    /// The JS object of a memory (kind 0) or a table (kind 1), by its handle bytes.
+    objs: HashMap<(u8, [u8; FUNC_BYTES]), Persistent>,
+    /// The buffer of each memory that has one, with the address and the length of the bytes when it was made.
+    bufs: Vec<Buf>,
+}
+
+struct Buf {
+    mem: Memory,
+    buffer: Persistent,
+    at: (usize, usize),
 }
 
 pub(crate) struct Wasm<E: Eng> {
@@ -80,8 +97,14 @@ const FUNC_BYTES: usize = size_of::<Func>();
 
 /// The bytes of a wasmi function handle: a store id and an index, so equal for the same function of the store.
 fn func_key(f: Func) -> [u8; FUNC_BYTES] {
-    // SAFETY: `Func` is a `Copy` handle of two integers with no padding (`func_handle_has_no_padding` in the tests checks the size).
-    unsafe { std::mem::transmute_copy(&f) }
+    handle_key(f)
+}
+
+/// The bytes of a wasmi handle (`Func`, `Memory`, `Table`): a store id and an index.
+fn handle_key<T: Copy>(h: T) -> [u8; FUNC_BYTES] {
+    assert_eq!(size_of::<T>(), FUNC_BYTES);
+    // SAFETY: each handle is a `Copy` pair of two integers with no padding, of the size checked above (`handles_have_no_padding`).
+    unsafe { std::mem::transmute_copy(&h) }
 }
 
 // ------------------------------------------------------------------------------------------ the store during a call
@@ -121,6 +144,7 @@ fn host_import<E: Eng>(mut caller: Caller<'_, ()>, idx: usize, params: &[Val], r
     // SAFETY: `enter` set both pointers for the call into wasm that runs this import, and they outlive it.
     let (d, s) = unsafe { (&*(dp as *const Dom<E>), &mut *(sp as *mut Sc<'static, E>)) };
     CUR.with(|c| c.set((dp, sp, &mut caller as *mut Caller<'_, ()> as *mut ())));
+    refresh(d, s);
     let r = run_import(d, s, idx, params, results);
     CUR.with(|c| c.set((dp, sp, old)));
     r.map_err(|e| {
@@ -376,13 +400,18 @@ fn instantiate<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, module: &Module, impor
                     }
                 }
             }
-            ExternType::Memory(_) | ExternType::Table(_) => return Err(link(s, "bare does not support imports of memories and tables yet")),
+            ExternType::Memory(_) => match item_of(d, s, v, |i| if let Item::Memory(m) = i { Some(*m) } else { None }) {
+                Some(m) => Extern::Memory(m),
+                None => return Err(link(s, "the value must be a WebAssembly.Memory")),
+            },
+            ExternType::Table(_) => match item_of(d, s, v, |i| if let Item::Table(t) = i { Some(*t) } else { None }) {
+                Some(t) => Extern::Table(t),
+                None => return Err(link(s, "the value must be a WebAssembly.Table")),
+            },
         });
     }
-    if let Some(e) = module.exports().find(|e| matches!(e.ty(), ExternType::Memory(_) | ExternType::Table(_))) {
-        return Err(make_error(d, s, LINK_ERROR, &format!("Export \"{}\": bare does not support exports of memories and tables yet", e.name())));
-    }
     let r = enter(d, s, || with_store(d, |mut c| wasmi::Instance::new(&mut c, module, &externs)));
+    refresh(d, s);
     let inst = r.map_err(|e| {
         if d.wasm.pend.borrow().is_some() || e.as_trap_code().is_some() {
             call_error(d, s, e)
@@ -398,7 +427,7 @@ fn instantiate<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, module: &Module, impor
         let v = match e {
             Extern::Func(f) => func_obj(d, s, f)?,
             Extern::Global(g) => new_item(d, s, gp, Item::Global(g))?,
-            Extern::Memory(_) | Extern::Table(_) => unreachable!("refused above"),
+            e @ (Extern::Memory(_) | Extern::Table(_)) => extern_obj(d, s, e)?,
         };
         s.define_str(exports, &name, v, Attrs { writable: false, enumerable: true, configurable: false })?;
     }
@@ -416,6 +445,213 @@ fn import_func<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, f: Local<'s>, ty: Func
         st.imports.len() - 1
     });
     with_store(d, |c| Func::new(c, ty, move |caller, params, results| host_import::<E>(caller, idx, params, results)))
+}
+
+// ------------------------------------------------------------------------------------------ memories and tables
+
+/// The entry of the object `v`, through `f`.
+fn item_of<'s, E: Eng, R>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>, f: impl FnOnce(&Item<E>) -> Option<R>) -> Option<R> {
+    let o = obj_id::<E>(s, v)?;
+    d.wasm.items.borrow().get(&o).and_then(f)
+}
+
+/// The JS object of a memory or a table: made at the first use, the same after.
+fn extern_obj<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, e: Extern) -> Res<'s, Local<'s>> {
+    let (key, class, item) = match e {
+        Extern::Memory(m) => ((0, handle_key(m)), MEMORY, Item::Memory(m)),
+        Extern::Table(t) => ((1, handle_key(t)), TABLE, Item::Table(t)),
+        Extern::Func(_) | Extern::Global(_) => unreachable!("a memory or a table"),
+    };
+    if let Some(o) = local(d, s, |st| st.objs.get(&key)) {
+        return Ok(o);
+    }
+    let proto = held(d, s, class);
+    new_handle(d, s, proto, key, item)
+}
+
+fn new_handle<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, proto: Local<'s>, key: (u8, [u8; FUNC_BYTES]), item: Item<E>) -> Res<'s, Local<'s>> {
+    let o = new_item(d, s, proto, item)?;
+    let p = s.persist(o);
+    st(d, |st| st.objs.insert(key, p));
+    Ok(o)
+}
+
+/// The address and the length of the bytes of `m`.
+fn bytes_at(m: Memory, c: impl AsContext) -> (usize, usize) {
+    (m.data_ptr(&c) as usize, m.data_size(&c))
+}
+
+/// Detach the buffer of each memory whose bytes moved or grew ("refresh the memory buffer"). Wasm code that grows a memory runs no
+/// JS, so a call of this before JS runs again keeps every buffer valid.
+fn refresh<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) {
+    let stale: Vec<Persistent> = {
+        let mut g = d.wasm.st.borrow_mut();
+        let Some(st) = g.as_mut().filter(|st| !st.bufs.is_empty()) else { return };
+        let (keep, stale): (Vec<Buf>, Vec<Buf>) = std::mem::take(&mut st.bufs).into_iter().partition(|b| with_store(d, |c| bytes_at(b.mem, c)) == b.at);
+        st.bufs = keep;
+        stale.into_iter().map(|b| b.buffer).collect()
+    };
+    for p in stale {
+        let b = s.local(&p);
+        s.detach_buffer(b);
+    }
+}
+
+/// Detach the buffer of `m` now, if it has one.
+fn detach_memory<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, m: Memory) {
+    let key = handle_key(m);
+    let stale = st(d, |st| st.bufs.iter().position(|b| handle_key(b.mem) == key).map(|i| st.bufs.swap_remove(i).buffer));
+    if let Some(p) = stale {
+        let b = s.local(&p);
+        s.detach_buffer(b);
+    }
+}
+
+/// A `[EnforceRange] unsigned long`.
+fn enforce_u32<'s, E: Eng>(s: &mut Sc<'s, E>, v: Option<Local<'s>>, what: &str) -> Res<'s, u32> {
+    let n = match v {
+        Some(v) => s.to_number(v)?,
+        None => f64::NAN,
+    };
+    if !n.is_finite() || n.trunc() < 0.0 || n.trunc() > u32::MAX as f64 {
+        return Err(s.type_error(&format!("The {what} is not a valid unsigned long")));
+    }
+    Ok(n.trunc() as u32)
+}
+
+/// The member `name` of a descriptor, as an `[EnforceRange] unsigned long`; `None` when it is undefined.
+fn desc_u32<'s, E: Eng>(s: &mut Sc<'s, E>, desc: Local<'s>, name: &str) -> Res<'s, Option<u32>> {
+    let v = s.get_str(desc, name)?;
+    if s.type_of(v) == Type::Undefined {
+        return Ok(None);
+    }
+    enforce_u32::<E>(s, Some(v), &format!("\"{name}\" member")).map(Some)
+}
+
+fn descriptor<'s, E: Eng>(s: &mut Sc<'s, E>, v: Option<Local<'s>>) -> Res<'s, Local<'s>> {
+    v.filter(|v| matches!(s.type_of(*v), Type::Object | Type::Function)).ok_or_else(|| s.type_error("The descriptor must be an object"))
+}
+
+fn memory_ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let desc = descriptor::<E>(s, a.get(0))?;
+    let Some(initial) = desc_u32::<E>(s, desc, "initial")? else { return Err(s.type_error("The descriptor needs an \"initial\" member")) };
+    let maximum = desc_u32::<E>(s, desc, "maximum")?;
+    let shared = s.get_str(desc, "shared")?;
+    if s.to_boolean(shared) {
+        return Err(s.type_error("bare does not support shared memories yet"));
+    }
+    if initial > 65536 || maximum.is_some_and(|m| m > 65536 || m < initial) {
+        return Err(s.range_error("The memory size is out of range"));
+    }
+    let mem = with_store(d, |c| Memory::new(c, MemoryType::new(initial, maximum))).map_err(|_| s.range_error("The memory cannot be made"))?;
+    let mp = held(d, s, MEMORY);
+    let proto = s.proto_from_new_target(mp)?;
+    new_handle(d, s, proto, (0, handle_key(mem)), Item::Memory(mem))
+}
+
+fn memory_of<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, Memory> {
+    item_of(d, s, this, |i| if let Item::Memory(m) = i { Some(*m) } else { None }).ok_or_else(|| s.type_error("Illegal invocation"))
+}
+
+fn memory_buffer<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let m = memory_of(d, s, this)?;
+    refresh(d, s);
+    let key = handle_key(m);
+    if let Some(b) = local(d, s, |st| st.bufs.iter().find(|b| handle_key(b.mem) == key).map(|b| &b.buffer)) {
+        return Ok(b);
+    }
+    let (at, len) = with_store(d, |c| bytes_at(m, c));
+    let data = if at == 0 { std::ptr::NonNull::<u8>::dangling().as_ptr() } else { at as *mut u8 };
+    // SAFETY: the wasmi bytes stay in place until the memory grows. `refresh` and `memory_grow` detach this buffer after a grow, before
+    // JS runs again. The store lives as long as the page, so as long as the realm that holds the buffer.
+    let bytes: &'static mut [u8] = unsafe { std::slice::from_raw_parts_mut(data, len) };
+    let b = s.new_external_buffer(bytes)?;
+    let p = s.persist(b);
+    st(d, |st| st.bufs.push(Buf { mem: m, buffer: p, at: (at, len) }));
+    Ok(b)
+}
+
+fn memory_grow<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let m = memory_of(d, s, this)?;
+    let delta = enforce_u32::<E>(s, a.get(0), "delta")?;
+    let old = with_store(d, |c| m.grow(c, u64::from(delta))).map_err(|_| s.range_error("The memory cannot grow by this many pages"))?;
+    detach_memory(d, s, m);
+    Ok(s.number(old as f64))
+}
+
+fn ref_type<'s, E: Eng>(s: &mut Sc<'s, E>, v: Local<'s>) -> Res<'s, RefType> {
+    let v = s.to_string(v)?;
+    let t = s.as_str(v).map(|t| t.to_string_lossy()).unwrap_or_default();
+    match t.as_str() {
+        "anyfunc" | "funcref" => Ok(RefType::Func),
+        "externref" => Ok(RefType::Extern),
+        _ => Err(s.type_error(&format!("\"{t}\" is not an element type of WebAssembly.Table"))),
+    }
+}
+
+/// A table element from JS: an absent value or `undefined` is the default (`null` for `funcref`, `undefined` for `externref`).
+fn ref_value<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Option<Local<'s>>, ty: RefType) -> Res<'s, Ref> {
+    let v = match v.filter(|v| s.type_of(*v) != Type::Undefined) {
+        Some(v) => v,
+        None if ty == RefType::Func => return Ok(Ref::Func(Nullable::Null)),
+        None => s.undefined(),
+    };
+    Ok(match to_wasm(d, s, v, if ty == RefType::Func { ValType::FuncRef } else { ValType::ExternRef })? {
+        Val::FuncRef(f) => Ref::Func(f),
+        Val::ExternRef(e) => Ref::Extern(e),
+        _ => unreachable!("a reference type"),
+    })
+}
+
+fn table_ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let desc = descriptor::<E>(s, a.get(0))?;
+    let elem = s.get_str(desc, "element")?;
+    let elem = ref_type::<E>(s, elem)?;
+    let Some(initial) = desc_u32::<E>(s, desc, "initial")? else { return Err(s.type_error("The descriptor needs an \"initial\" member")) };
+    let maximum = desc_u32::<E>(s, desc, "maximum")?;
+    if maximum.is_some_and(|m| m < initial) {
+        return Err(s.range_error("The table size is out of range"));
+    }
+    let init = ref_value(d, s, a.get(1), elem)?;
+    let t = with_store(d, |c| Table::new(c, TableType::new(elem, initial, maximum), init)).map_err(|_| s.range_error("The table cannot be made"))?;
+    let tp = held(d, s, TABLE);
+    let proto = s.proto_from_new_target(tp)?;
+    new_handle(d, s, proto, (1, handle_key(t)), Item::Table(t))
+}
+
+fn table_of<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, Table> {
+    item_of(d, s, this, |i| if let Item::Table(t) = i { Some(*t) } else { None }).ok_or_else(|| s.type_error("Illegal invocation"))
+}
+
+fn table_length<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let t = table_of(d, s, this)?;
+    let n = with_store(d, |c| t.size(c));
+    Ok(s.number(n as f64))
+}
+
+fn table_get<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let t = table_of(d, s, this)?;
+    let i = enforce_u32::<E>(s, a.get(0), "index")?;
+    let Some(r) = with_store(d, |c| t.get(c, u64::from(i))) else { return Err(s.range_error("The table index is out of range")) };
+    to_js(d, s, &Val::from(r))
+}
+
+fn table_set<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let t = table_of(d, s, this)?;
+    let i = enforce_u32::<E>(s, a.get(0), "index")?;
+    let ty = with_store(d, |c| t.ty(c).element());
+    let r = ref_value(d, s, a.get(1), ty)?;
+    with_store(d, |c| t.set(c, u64::from(i), r)).map_err(|_| s.range_error("The table index is out of range"))?;
+    Ok(s.undefined())
+}
+
+fn table_grow<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let t = table_of(d, s, this)?;
+    let delta = enforce_u32::<E>(s, a.get(0), "delta")?;
+    let ty = with_store(d, |c| t.ty(c).element());
+    let r = ref_value(d, s, a.get(1), ty)?;
+    let old = with_store(d, |c| t.grow(c, u64::from(delta), r)).map_err(|_| s.range_error("The table cannot grow by this many elements"))?;
+    Ok(s.number(old as f64))
 }
 
 // ------------------------------------------------------------------------------------------ handlers
@@ -610,6 +846,7 @@ fn call_export<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Ar
     }
     let mut out: Vec<Val> = ty.results().iter().map(|t| Val::default(*t)).collect();
     let r = enter(d, s, || with_store(d, |c| f.call(c, &args, &mut out)));
+    refresh(d, s);
     r.map_err(|e| call_error(d, s, e))?;
     match out.len() {
         0 => Ok(s.undefined()),
@@ -639,7 +876,8 @@ fn make<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, Local<'s>> {
     let t = s.string("WebAssembly")?;
     s.define(ns, tag, t, attrs)?;
     let mut held = Vec::new();
-    for (name, ctor, len) in [("Module", module_ctor as HS<E>, 1), ("Instance", instance_ctor as HS<E>, 1), ("Global", global_ctor as HS<E>, 1)] {
+    let classes = [("Module", module_ctor as HS<E>, 1), ("Instance", instance_ctor as HS<E>, 1), ("Global", global_ctor as HS<E>, 1), ("Memory", memory_ctor as HS<E>, 1), ("Table", table_ctor as HS<E>, 1)];
+    for (name, ctor, len) in classes {
         let f = d.add_fn_s(s, ctor, name, len, HostFn::CtorNewTarget)?;
         let p = s.new_object()?;
         s.define_str(f, "prototype", p, Attrs { writable: false, enumerable: false, configurable: false })?;
@@ -659,6 +897,15 @@ fn make<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, Local<'s>> {
     let (get, set) = (d.add_fn_s(s, global_get, "get value", 0, HostFn::Method)?, d.add_fn_s(s, global_value, "set value", 1, HostFn::Method)?);
     s.define_accessor_str(gp, "value", Some(get), Some(set), Attrs { writable: false, enumerable: true, configurable: true })?;
     d.def_method_l(s, gp, "valueOf", 0, global_get, true)?;
+    let (mp, tp) = (held[3].1, held[4].1);
+    let get = d.add_fn_s(s, memory_buffer, "get buffer", 0, HostFn::Method)?;
+    s.define_accessor_str(mp, "buffer", Some(get), None, Attrs { writable: false, enumerable: true, configurable: true })?;
+    d.def_method_l(s, mp, "grow", 1, memory_grow, true)?;
+    let get = d.add_fn_s(s, table_length, "get length", 0, HostFn::Method)?;
+    s.define_accessor_str(tp, "length", Some(get), None, Attrs { writable: false, enumerable: true, configurable: true })?;
+    for (name, h, len) in [("get", table_get as HS<E>, 1), ("set", table_set as HS<E>, 1), ("grow", table_grow as HS<E>, 1)] {
+        d.def_method_l(s, tp, name, len, h, true)?;
+    }
     for (name, h, len) in [("validate", validate as HS<E>, 1), ("compile", compile as HS<E>, 1), ("instantiate", instantiate_fn as HS<E>, 1)] {
         d.def_method_l(s, ns, name, len, h, true)?;
     }
@@ -676,7 +923,7 @@ fn make<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, Local<'s>> {
     let object = s.get_str(g, "Object")?;
     let freeze = s.get_str(object, "freeze")?;
     let call = d.add_fn_s(s, call_export, "", 0, HostFn::Method)?;
-    let list = [held[0].1, ip, gp, errs[0], errs[1], errs[2], bigint, as_int_n, freeze, call, ns];
+    let list = [held[0].1, ip, gp, errs[0], errs[1], errs[2], bigint, as_int_n, freeze, call, ns, mp, tp];
     let held: Vec<Persistent> = list.iter().map(|v| s.persist(*v)).collect();
     let engine = wasmi::Engine::default();
     *d.wasm.store.borrow_mut() = Some(Store::new(&engine, ()));
@@ -688,6 +935,8 @@ fn make<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, Local<'s>> {
         funcs: Vec::new(),
         func_objs: HashMap::new(),
         of_obj: IdMap::default(),
+        objs: HashMap::new(),
+        bufs: Vec::new(),
     }));
     Ok(ns)
 }

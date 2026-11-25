@@ -97,3 +97,17 @@ Changes from the plan:
 - A JS import can call into wasm again: the import keeps the wasmi `Caller` in a thread-local cell, and a nested call uses
   its store.
 - No step limit in wasm code yet. A wasm loop that never ends stops the page.
+
+### Step 5: PR 2, Memory and Table (2026-11-25)
+
+- Link attempt 2 of WhatsApp failed in `suspicious-host-checks-init`: a module there exports its memory, and PR 1 refused that.
+- Vex has a third buffer kind: external. Slot 0 of the buffer holds the address of the bytes as a number. The kind needs no side
+  table and no sweep, unlike a shared buffer. Every byte access already goes through `Buffer` in `bi_buffer.rs`, which now
+  resolves the address. Script cannot transfer an external buffer (`transfer`, a transfer list of `structuredClone`).
+- `bare-js-api` keeps `forbid(unsafe_code)`: `Engine::new_external_buffer` takes a `&'static mut [u8]`. bare makes that slice from
+  the wasmi bytes, and the unsafe code with its contract is there.
+- Refresh: wasmi has no grow callback, and `ResourceLimiter::memory_growing` runs before the bytes move. bare compares the address
+  and the length of each memory that has a buffer instead, at the points where JS can run again: before a JS import, after a
+  call into wasm and after `instantiate`. `Memory.grow` detaches at once. Cost: one compare for each memory with a buffer.
+- A `Memory` or a `Table` has one JS object for each wasmi handle, kept for the life of the page, like the store.
+- Not built: a shared memory (`shared: true` is a `TypeError`), `Tag`, `Exception`, `type()` of the JS type reflection proposal.

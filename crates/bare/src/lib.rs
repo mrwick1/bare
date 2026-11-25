@@ -174,6 +174,8 @@ mod browser_worker;
 mod browser_wasm;
 #[cfg(test)]
 mod browser_wasm_tests;
+#[cfg(test)]
+mod browser_wasm_memory_tests;
 mod browser_broadcast;
 mod browser_perf;
 mod browser_html;
