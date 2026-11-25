@@ -142,3 +142,15 @@ Cause: a read of a clone record takes the platform objects (a `Blob`, a `CryptoK
 read the same record twice, and the second read found it damaged. The error is fatal, so the page stopped.
 
 Fix: the store writes such a record again from the new copy after each read (`browser_idb.rs` `read`).
+
+## Link attempt 7 (2026-11-25)
+
+Build: main with #1092. The link held, and the phone showed the new device. During the message download the page stopped with
+`Limit(Host("dom-events"))`. Two worker scripts also threw `NotSupportedError: Unrecognized algorithm name` from
+`crypto.subtle` (not yet traced).
+
+Cause of the stop: every request of an IndexedDB transaction fires a `success` event, and the shim ran all requests of a
+transaction in one microtask chain. The host frees events only in a collect, and it collects only between tasks. The download
+queues thousands of requests, so the live event cap (16,384) filled.
+
+Fix: the shim yields to a task after each 64 requests (`MessageChannel`).
