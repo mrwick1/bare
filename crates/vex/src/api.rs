@@ -1109,7 +1109,11 @@ impl Engine for Realm {
     }
 
     fn view_get(&self, value: Local<'_>, i: usize) -> Option<f64> {
-        crate::bi_buffer::View::of(Self::obj(self.a_at(value))?)?.read(self, i)
+        let view = crate::bi_buffer::View::of(Self::obj(self.a_at(value))?)?;
+        if view.elem?.is_big() {
+            return None;
+        }
+        view.read(self, i).map(f64::from_bits)
     }
 
     fn proto_from_new_target<'s>(&mut self, default: Local<'_>) -> Result<Local<'s>, Error<'s>> {

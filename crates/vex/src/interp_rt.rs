@@ -264,6 +264,7 @@ pub enum Put {
 #[derive(Clone, Copy, Debug)]
 pub enum Slot {
     Proxy(Obj),
+    Typed(Obj, usize),
     Data(Value),
     Acc(Value, Value),
 }
@@ -1126,7 +1127,7 @@ impl Realm {
             if o.is_kind(crate::object::K_TYPED)
                 && let Some(i) = crate::bi_typed::numeric_key(Key::Name(key))
             {
-                return i.and_then(|i| self.typed_get(o, i)).map(Slot::Data);
+                return i.filter(|&i| i < self.typed_len(o)).map(|i| Slot::Typed(o, i));
             }
             self.lazy_prep(o, key);
             if let Some(s) = self.slot_at(o, key) {
@@ -1145,7 +1146,8 @@ impl Realm {
                 return Some(Slot::Proxy(o));
             }
             if o.is_kind(crate::object::K_TYPED) {
-                return self.typed_get(o, index as usize).map(Slot::Data);
+                let i = index as usize;
+                return (i < self.typed_len(o)).then_some(Slot::Typed(o, i));
             }
             if let Some(s) = self.slot_at(o, key) {
                 return Some(s);
@@ -1193,6 +1195,7 @@ impl Realm {
         self.fn_props(o);
         match self.lookup_g(o, key) {
             Some(Slot::Data(v)) => Ok(Some(v)),
+            Some(Slot::Typed(o, i)) => self.typed_get(o, i),
             Some(Slot::Acc(..)) => self.type_error("accessors are not supported here (the host needs a call)"),
             Some(Slot::Proxy(proxy)) => self.proxy_get(proxy, Key::Name(key), o.value()).map(Some),
             None if key == self.k_prototype && self.needs_prototype(o) => self.make_prototype(o).map(Some),
@@ -1203,6 +1206,7 @@ impl Realm {
     pub(crate) fn got(&mut self, s: Option<Slot>, key: Key, receiver: Value) -> R<Got> {
         Ok(match s {
             Some(Slot::Data(v)) => Got::Val(v),
+            Some(Slot::Typed(o, i)) => Got::Val(self.typed_get(o, i)?.unwrap_or(Value::UNDEFINED)),
             Some(Slot::Acc(g, _)) if !g.is_undefined() => Got::Get(g),
             Some(Slot::Proxy(proxy)) => Got::Val(self.proxy_get(proxy, key, receiver)?),
             _ => Got::Val(Value::UNDEFINED),
@@ -1245,7 +1249,7 @@ impl Realm {
             return match key {
                 Key::Idx(i) => {
                     if o.is_kind(crate::object::K_TYPED) {
-                        return Ok(Got::Val(self.typed_get(o, i as usize).unwrap_or(Value::UNDEFINED)));
+                        return Ok(Got::Val(self.typed_get(o, i as usize)?.unwrap_or(Value::UNDEFINED)));
                     }
                     if o.is_indexed()
                         && let Some(v) = o.get_element(i)

@@ -28,6 +28,8 @@ pub(crate) static GLOBALS: &[Ent] = &[
     buffer_ctor("Uint32Array", 3, Element::U32 as i32),
     buffer_ctor("Float32Array", 3, Element::F32 as i32),
     buffer_ctor("Float64Array", 3, Element::F64 as i32),
+    buffer_ctor("BigInt64Array", 3, Element::BI64 as i32),
+    buffer_ctor("BigUint64Array", 3, Element::BU64 as i32),
 ];
 
 /// Bounds of a view are fixed, or extend to the current end of its buffer.
@@ -72,7 +74,7 @@ impl View {
         self.len.is_some() && Buffer::of(self.buffer).max.is_none()
     }
 
-    pub(crate) fn read(self, rt: &Realm, i: usize) -> Option<f64> {
+    pub(crate) fn read(self, rt: &Realm, i: usize) -> Option<u64> {
         let elem = self.elem?;
         let b = Buffer::of(self.buffer);
         if i >= self.len_in(b)? {
@@ -82,7 +84,7 @@ impl View {
         Some(elem.read(&b.bytes(rt)[at..at + elem.width()], cfg!(target_endian = "little")))
     }
 
-    pub(crate) fn write(self, rt: &mut Realm, i: usize, n: f64) {
+    pub(crate) fn write(self, rt: &mut Realm, i: usize, n: u64) {
         let elem = self.elem.expect("typed array");
         let b = Buffer::of(self.buffer);
         if self.len_in(b).is_some_and(|len| i < len) {
@@ -206,6 +208,8 @@ impl Realm {
                         indexed("getUint32", 1, data_get, Element::U32 as i32),
                         indexed("getFloat32", 1, data_get, Element::F32 as i32),
                         indexed("getFloat64", 1, data_get, Element::F64 as i32),
+                        indexed("getBigInt64", 1, data_get, Element::BI64 as i32),
+                        indexed("getBigUint64", 1, data_get, Element::BU64 as i32),
                         indexed("setInt8", 2, data_set, Element::I8 as i32),
                         indexed("setUint8", 2, data_set, Element::U8 as i32),
                         indexed("setInt16", 2, data_set, Element::I16 as i32),
@@ -214,6 +218,8 @@ impl Realm {
                         indexed("setUint32", 2, data_set, Element::U32 as i32),
                         indexed("setFloat32", 2, data_set, Element::F32 as i32),
                         indexed("setFloat64", 2, data_set, Element::F64 as i32),
+                        indexed("setBigInt64", 2, data_set, Element::BI64 as i32),
+                        indexed("setBigUint64", 2, data_set, Element::BU64 as i32),
                     ],
                 );
             }
@@ -683,14 +689,15 @@ fn data_get(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let at = to_index(rt, arg(args, 0))?;
     let at = data_range(rt, v, at, elem.width())?;
     let little = Realm::truthy(arg(args, 1));
-    Ok(Realm::num(elem.read(&rt.buffer_bytes(v.buffer).expect("buffer")[at], little)))
+    let bits = elem.read(&rt.buffer_bytes(v.buffer).expect("buffer")[at], little);
+    elem.value(rt, bits)
 }
 
 fn data_set(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let v = require_data(rt, this)?;
     let elem = Element::from_id(native_param(rt));
     let at = to_index(rt, arg(args, 0))?;
-    let n = rt.to_number(arg(args, 1))?;
+    let n = elem.convert(rt, arg(args, 1))?;
     let at = data_range(rt, v, at, elem.width())?;
     let little = Realm::truthy(arg(args, 2));
     elem.write(&mut rt.buffer_bytes_mut(v.buffer).expect("buffer")[at], n, little);

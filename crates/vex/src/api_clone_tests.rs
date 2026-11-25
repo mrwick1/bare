@@ -25,7 +25,7 @@ fn clone_preserves_graph_and_internal_slots() {
             let buf = new ArrayBuffer(8), view = new Uint16Array(buf, 2, 2);
             view[0] = 42;
             let a = [, NaN, -0, "\ud800", 1n << 130n], x = {
-                a, view, buf, data: new DataView(buf, 1, 4), d: new Date(123),
+                a, view, buf, bigView: new BigUint64Array([18446744073709551615n]), data: new DataView(buf, 1, 4), d: new Date(123),
                 r: /a+/gi, m: new Map, set: new Set, w: Object(10n),
                 e: new TypeError("boom")
             };
@@ -50,6 +50,7 @@ fn clone_preserves_graph_and_internal_slots() {
             cp.m.get(cp) === cp.a && cp.set.has(cp.m) && cp.d.getTime() === 123 &&
             cp.view.buffer === cp.buf && cp.view.byteOffset === 2 && cp.view[0] === 42 &&
             cp.data.buffer === cp.buf && cp.data.byteOffset === 1 &&
+            cp.bigView instanceof BigUint64Array && cp.bigView[0] === 18446744073709551615n &&
             cp.r.source === "a+" && cp.r.flags === "gi" && cp.r.lastIndex === 0 &&
             cp.e instanceof TypeError && cp.e.message === "boom" && cp.e.cause === cp &&
             cp.w.valueOf() === 10n
