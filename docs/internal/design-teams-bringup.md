@@ -117,6 +117,10 @@ These do not stop the shell yet. Each needs a cause before a fix.
 
 Run cost (t18, profiling build): 106 s, longest task 23 s, peak RSS 1.37 GB.
 
+## OCDI redirect (2026-11-25)
+
+Teams calls `location.replace('https://teams.cloud.microsoft/?loginHint=...&ocdiRedirect=core-policy#&migratedSettings=...')` from `teams.microsoft.com/v2/`. bare commits it as a new top document (native print: `nav-request kind=Replace`, `start`, `commit how=replace`). The old document does not stay. The earlier note that `window.__probe` survived came from a probe that ran in the new document. The page is emptied by Teams code in the new document, about 1 s after its shell shows. Caller not known yet. Detail: `progress/2026-11-25-teams-ocdi-redirect.md`.
+
 ## Outlook
 
 The Outlook inbox renders and a mail can be selected (PR #1035). The next errors were `WeakRef`
