@@ -10,5 +10,15 @@
 
 - New test file `crates/vex/src/census_count_tests.rs`: the lines at the powers of 2, and get and has kept apart. It passes.
 - Teams offline replay with the census on (archMachine, 1 run): 0 misses on the tape. The census wrote 185,516 lines, and `chrome-has.mjs` found 45 names that Chrome has.
-- `interp_load` rows: see the PR.
+- `interp_load` rows (`tools/js/instr.sh`, minimum of 3, archMachine, glibc; base c9a63b27, which has the same Vex code as the branch base 96e3edd7):
+
+| row | base | new | change |
+| --- | --- | --- | --- |
+| `loopfn 1000000` | 261,291,794 | 261,291,526 | -0.0001% |
+| `calls 1000000` | 549,340,343 | 549,341,302 | +0.0002% |
+| `fib 30` | 1,020,973,706 | 1,020,973,659 | -0.0000% |
+| `closures 200000` | 358,802,916 | 358,802,636 | -0.0001% |
+| `objects 200000` | 142,397,736 | 142,397,785 | +0.0000% |
+
+These rows have no host objects, so the census path does not run in them.
 - Not tested: Windows; the census on a live run; Outlook.
