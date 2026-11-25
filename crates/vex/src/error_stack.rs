@@ -193,21 +193,38 @@ impl Realm {
     fn frame_line(&self, ci: usize, pc: u32) -> String {
         let Some(code) = self.prog.get(ci) else { return "    at <anonymous>".into() };
         let name = code.atoms.get(code.fn_name as usize).map(|&a| self.text(self.atoms.adopt(a))).filter(|n| !n.is_empty());
-        let at = match (self.lazy.as_ref().and_then(|l| l.source_of(ci)), code.source_at(pc)) {
-            (Some(src), Some(off)) => {
-                let off = (off as usize).min(src.len());
-                let head = src.as_bytes().get(..off).unwrap_or_default();
-                let line = head.iter().filter(|&&b| b == b'\n').count() + 1;
-                let start = head.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
-                let col = src.get(start..off).map_or(off - start, |s| s.encode_utf16().count()) + 1;
-                format!("<anonymous>:{line}:{col}")
-            }
-            _ => "<anonymous>".into(),
+        let at = match code.source_at(pc).and_then(|off| self.lazy.as_ref()?.line_col(ci, off as usize)) {
+            Some((line, col)) => format!("<anonymous>:{line}:{col}"),
+            None => "<anonymous>".into(),
         };
         match name {
             Some(n) => format!("    at {n} ({at})"),
             None => format!("    at {at}"),
         }
+    }
+}
+
+/// The starts of the lines of a source, made once for each script at its first stack text: a frame then finds its line by a binary search
+/// instead of a scan of the source up to it. A minified script is one long line, so the column of an ASCII source is a subtraction too.
+pub(crate) struct Lines {
+    starts: Box<[u32]>,
+    ascii: bool,
+}
+
+impl Lines {
+    pub(crate) fn new(src: &str) -> Lines {
+        let b = src.as_bytes();
+        let starts = std::iter::once(0).chain(b.iter().enumerate().filter(|&(_, &c)| c == b'\n').map(|(i, _)| i as u32 + 1)).collect();
+        Lines { starts, ascii: b.is_ascii() }
+    }
+
+    /// The line and the column (1-based, the column in UTF-16 units) of the byte `off` of `src`, the source that made `self`.
+    pub(crate) fn get(&self, src: &str, off: usize) -> (usize, usize) {
+        let off = off.min(src.len());
+        let line = self.starts.partition_point(|&s| s as usize <= off);
+        let start = self.starts[line - 1] as usize;
+        let col = if self.ascii { off - start } else { src.get(start..off).map_or(off - start, |s| s.encode_utf16().count()) };
+        (line, col + 1)
     }
 }
 

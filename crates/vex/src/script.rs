@@ -82,6 +82,8 @@ struct Unit {
     scoped: bool,
     /// The text is the prelude: its functions get `Input::pre`.
     pre: bool,
+    /// The line starts of the text, made at its first stack text (`error_stack::Lines`).
+    lines: std::cell::OnceCell<crate::error_stack::Lines>,
 }
 
 /// The functions that wait for their first call: their stubs in `codes`, and what compiles them. The loader makes a stub for a function
@@ -118,7 +120,7 @@ impl Lazy {
         let u = self.units.len();
         // The text of a new program: its codes start at 0.
         self.spans.push((0, u));
-        self.units.push(Unit { source: Some(source), facts, scoped: false, pre: false });
+        self.units.push(Unit { source: Some(source), facts, scoped: false, pre: false, lines: Default::default() });
         self.wait(u, pending);
     }
 
@@ -179,6 +181,12 @@ impl LazyCompile for Lazy {
         Some(self.units[u].source.as_deref().unwrap_or(PRELUDE))
     }
 
+    fn line_col(&self, ci: usize, off: usize) -> Option<(usize, usize)> {
+        let u = &self.units[self.unit_of(ci)?];
+        let src = u.source.as_deref().unwrap_or(PRELUDE);
+        Some(u.lines.get_or_init(|| crate::error_stack::Lines::new(src)).get(src, off))
+    }
+
     fn page_source_of(&self, ci: usize) -> Option<&str> {
         let u = &self.units[self.unit_of(ci)?];
         if u.pre { None } else { u.source.as_deref() }
@@ -190,7 +198,7 @@ impl LazyCompile for Lazy {
         let u = match self.pre {
             Some(u) => u,
             None => {
-                self.units.push(Unit { source: None, facts: crate::prelude_facts::facts(), scoped: false, pre: true });
+                self.units.push(Unit { source: None, facts: crate::prelude_facts::facts(), scoped: false, pre: true, lines: Default::default() });
                 self.pre = Some(self.units.len() - 1);
                 self.units.len() - 1
             }
@@ -259,7 +267,7 @@ fn bind_unit(lazy: &mut Lazy, codes: &Codes, source: Rc<str>, unit: UnitCode, sc
     codes.push_all(new);
     let u = lazy.units.len();
     lazy.spans.push((base, u));
-    lazy.units.push(Unit { source: Some(source), facts, scoped, pre: false });
+    lazy.units.push(Unit { source: Some(source), facts, scoped, pre: false, lines: Default::default() });
     lazy.wait(u, pending.into_iter().map(|(i, ch)| (base + i, ch)));
     Ok((base, info))
 }
