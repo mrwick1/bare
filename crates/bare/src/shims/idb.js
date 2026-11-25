@@ -15,7 +15,7 @@
   function later(f) { P.resolve().then(f); }
   // A new task. The standard runs each request in its own task; here a run of up to `BATCH` requests shares one microtask chain,
   // then the next one waits for a task. Between tasks the host can collect, so the events of a long transaction do not pile up
-  // (`BrowserLimits::max_events`). A `MessageChannel` message has no 4 ms clamp, unlike a nested `setTimeout`.
+  // (`Browser::collect_due`). A `MessageChannel` message has no 4 ms clamp, unlike a nested `setTimeout`.
   var BATCH = 64, mc = null, tasks = [];
   function task(f) {
     if (typeof MessageChannel !== 'function') { setTimeout(f, 0); return; }

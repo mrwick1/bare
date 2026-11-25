@@ -50,9 +50,6 @@ impl<E: Eng> Dom<E> {
             return Err(self.lim("dom-string"));
         }
         it.charge_o((ty.len() / 32) as u64)?;
-        if self.st.borrow().events.len() >= self.lim.max_events {
-            return Err(self.lim("dom-events"));
-        }
         let o = self.obj(it, proto)?;
         let e = EventState {
             err: false,

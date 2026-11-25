@@ -501,12 +501,6 @@ fn a_limit_in_the_click_stops_before_the_submit_and_a_limit_in_the_submit_stops_
         let got = outcome(click(&mut b, "#go"));
         assert!(got.starts_with("limit:"), "{got}");
         assert_eq!(js(&mut b, "log.join()"), "s1");
-        // The event cap: the submit event cannot be made, so no submit listener runs and no event is left behind.
-        let mut b = page_with(body, BrowserLimits { max_events: 1, ..BrowserLimits::default() }, 5_000_000);
-        js(&mut b, "var log = [], f = document.getElementById('f'); f.addEventListener('submit', function () { log.push('s') }); document.getElementById('go').addEventListener('click', function () { log.push('c') }); 'x'");
-        assert_eq!(outcome(click(&mut b, "#go")), lim("dom-events"));
-        assert_eq!(js(&mut b, "log.join()"), "c");
-        assert_eq!(b.stats().events, 1, "only the click event exists");
     });
 }
 

@@ -782,14 +782,12 @@ fn window_listeners_and_a_kept_event_survive_collect() {
 #[test]
 fn caps_return_distinct_limit_errors() {
     big(|| {
-        let l = BrowserLimits { max_nodes: 80, max_wrappers: 70, max_listeners: 5, max_events: 4, max_results: 6, max_text_bytes: 4096, max_tree_depth: 8, max_attr_slots: 60, max_names: 40, ..Default::default() };
+        let l = BrowserLimits { max_nodes: 80, max_wrappers: 70, max_listeners: 5, max_results: 6, max_text_bytes: 4096, max_tree_depth: 8, max_attr_slots: 60, max_names: 40, ..Default::default() };
         let mut b = browser_with(PAGE, l);
         // listeners
         js(&mut b, "var t = new EventTarget(); function f() {} function g() {} function h() {} function k() {}");
         assert_eq!(js(&mut b, "t.addEventListener('a', f); t.addEventListener('a', g); t.addEventListener('a', h); t.addEventListener('a', k)"), "undefined");
         assert_eq!(js(&mut b, "var u = new EventTarget(); u.addEventListener('a', f); u.addEventListener('a', g); u.addEventListener('b', f)"), lim("dom-listeners"));
-        // events
-        assert_eq!(js(&mut b, "var evs = []; for (var i = 0; i < 10; i++) evs.push(new Event('x'));"), lim("dom-events"));
         // depth
         assert_eq!(js(&mut b, "var d = document.createElement('div'); var treeTop = d; for (var i = 0; i < 20; i++) { var c = document.createElement('div'); c.appendChild(treeTop); treeTop = c; } 0"), lim("dom-depth"));
         // results: a flat list longer than the cap
