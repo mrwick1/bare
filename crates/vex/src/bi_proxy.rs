@@ -118,6 +118,9 @@ impl Realm {
                 return self.proxy_set(target, key, value, receiver);
             }
             if target.is_kind(K_TYPED) && let Some(i) = numeric_key(key) {
+                if self.typed_immutable(target) {
+                    return Ok(false);
+                }
                 if target.value() == receiver {
                     self.typed_set(target, i, value)?;
                     return Ok(true);

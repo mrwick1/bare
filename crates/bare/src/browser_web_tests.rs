@@ -346,3 +346,6 @@ fn blobs_are_bounded_and_collected() {
 
 #[path = "browser_web_float16_tests.rs"]
 mod float16_tests;
+
+#[path = "browser_web_immutable_buffer_tests.rs"]
+mod immutable_buffer_tests;

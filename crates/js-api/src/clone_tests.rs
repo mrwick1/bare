@@ -346,7 +346,7 @@ fn tag_values_are_stable_and_host_is_reserved() {
         let mut r = RecordReader::new(std::slice::from_ref(&b));
         match b {
             28 => assert_eq!(r.tag(), Err(ReadError::Reserved)),
-            0..=31 => assert_eq!(r.tag().map(|t| t as u8), Ok(b)),
+            0..=32 => assert_eq!(r.tag().map(|t| t as u8), Ok(b)),
             _ => assert_eq!(r.tag(), Err(ReadError::BadTag(b))),
         }
     }

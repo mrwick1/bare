@@ -320,11 +320,13 @@ pub enum Tag {
     ErrMessage = 29,
     ErrStack = 30,
     ErrCause = 31,
+    /// An immutable buffer. The payload is the same as Buf.
+    BufImm = 32,
 }
 
 impl Tag {
     fn from_byte(b: u8) -> Result<Tag, ReadError> {
-        const ALL: [Tag; 32] = [
+        const ALL: [Tag; 33] = [
             Tag::Undef,
             Tag::Null,
             Tag::True,
@@ -357,6 +359,7 @@ impl Tag {
             Tag::ErrMessage,
             Tag::ErrStack,
             Tag::ErrCause,
+            Tag::BufImm,
         ];
         match ALL.get(b as usize) {
             Some(Tag::Host) => Err(ReadError::Reserved),
@@ -367,7 +370,7 @@ impl Tag {
 
     /// Does a value with this tag take an id when the tag is read?
     fn takes_id(self) -> bool {
-        matches!(self, Tag::Obj | Tag::ArrD | Tag::Arr | Tag::Date | Tag::RegExp | Tag::Map | Tag::Set | Tag::Error | Tag::Wrapper | Tag::Buf | Tag::Moved)
+        matches!(self, Tag::Obj | Tag::ArrD | Tag::Arr | Tag::Date | Tag::RegExp | Tag::Map | Tag::Set | Tag::Error | Tag::Wrapper | Tag::Buf | Tag::BufImm | Tag::Moved)
     }
 }
 
@@ -686,7 +689,15 @@ impl RecordWriter {
     }
 
     pub fn buffer(&mut self, bytes: &[u8]) -> u32 {
-        let id = self.id(Tag::Buf);
+        self.buffer_with_tag(bytes, Tag::Buf)
+    }
+
+    pub fn immutable_buffer(&mut self, bytes: &[u8]) -> u32 {
+        self.buffer_with_tag(bytes, Tag::BufImm)
+    }
+
+    fn buffer_with_tag(&mut self, bytes: &[u8], tag: Tag) -> u32 {
+        let id = self.id(tag);
         self.varint(bytes.len() as u64);
         self.out.extend_from_slice(bytes);
         id
