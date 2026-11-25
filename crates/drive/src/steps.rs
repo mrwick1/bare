@@ -243,8 +243,14 @@ fn parse_line(line: &str, vars: &HashMap<String, String>) -> Result<Action, Stri
                 [Word::Quoted(t)] if verb == "fill" => Action::Fill(loc, expand(t, vars)?, false),
                 [Word::Quoted(t), Word::Pair(k, false, v)] if verb == "fill" && k == "keys" && v == "last" => Action::Fill(loc, expand(t, vars)?, true),
                 [Word::Quoted(t)] if verb == "type" => Action::Type(loc, expand(t, vars)?),
-                _ if verb == "fill" => return Err("fill LOC \"text\" [keys=last]".into()),
-                _ => return Err("type LOC \"text\"".into()),
+                rest => {
+                    let form = if verb == "fill" { "fill LOC \"text\" [keys=last]" } else { "type LOC \"text\"" };
+                    return Err(match rest.first() {
+                        None => format!("{form}: the text is missing"),
+                        Some(Word::Quoted(_)) => form.into(),
+                        Some(_) => format!("{form}: put the text in double quotes"),
+                    });
+                }
             }
         }
         "check" | "uncheck" | "hover" | "dblclick" => match locator(rest, vars)? {
@@ -398,7 +404,10 @@ fn check(w: &[Word], vars: &HashMap<String, String>) -> Result<Check, String> {
         [Word::Bare(c), Word::Bare(n)] if c == "count" => State::Count(n.parse().map_err(|_| format!("not a count: {n}"))?),
         [Word::Pair(k, op, v)] if k == "text" => State::Text(text_of(*op, expand(v, vars)?)),
         [Word::Pair(k, op, v)] if k == "value" => State::Value(text_of(*op, expand(v, vars)?)),
-        _ => return Err("expect LOC visible|hidden|enabled|disabled|checked|unchecked|focused|count N|text=\"x\"|value=\"x\"".into()),
+        rest => {
+            let form = "expect LOC visible|hidden|enabled|disabled|checked|unchecked|focused|count N|text=\"x\"|value=\"x\"";
+            return Err(if rest.is_empty() { format!("{form}: the state is missing") } else { form.into() });
+        }
     };
     Ok(Check::El(loc, state))
 }
@@ -420,7 +429,7 @@ mod tests {
         assert_eq!(p("type css=\"input[name=q]\" \"a\\\"b\\n\""), Ok(Action::Type(Locator::Css("input[name=q]".into()), "a\"b\n".into())));
         assert_eq!(p("fill label=\"Password\" \"${PASS}\""), Ok(Action::Fill(Locator::Label(Text::Is("Password".into())), "p\"w".into(), false)));
         assert_eq!(p("fill css=\"#q\" \"\""), Ok(Action::Fill(Locator::Css("#q".into()), "".into(), false)));
-        assert_eq!(p("fill css=\"#q\""), Err("fill LOC \"text\" [keys=last]".into()));
+        assert_eq!(p("fill css=\"#q\""), Err("fill LOC \"text\" [keys=last]: the text is missing".into()));
         assert_eq!(p("fill css=\"#q\" \"ab\" keys=last"), Ok(Action::Fill(Locator::Css("#q".into()), "ab".into(), true)));
         assert_eq!(p("fill css=\"#q\" \"ab\" keys=all"), Err("fill LOC \"text\" [keys=last]".into()));
         assert_eq!(p("select label=\"Country\" \"Kenya\""), Ok(Action::Select(Locator::Label(Text::Is("Country".into())), vec!["Kenya".into()])));

@@ -568,7 +568,7 @@ impl Server {
             "open" => self.open(&args).map_err(Failure::from),
             "step" => self.step(&args).map(|(t, f)| { step_failure = f; t }),
             "save_state" => self.save_state(&args).map_err(Failure::from),
-            "ensure_session" => self.ensure_session(&args).map_err(Failure::from),
+            "ensure_session" => self.ensure_session(&args),
             "close" => self.close(&args).map_err(Failure::from),
             "snapshot" => self.snapshot(&args).map_err(Failure::from),
             "find" => self.find(&args).map_err(Failure::from),
@@ -743,8 +743,8 @@ impl Server {
 
     /// Like `cy.session`: restore the saved session and run `check`; when there is none or the check fails, log in again with an empty
     /// profile, run `check` and save. The live session stays open on the checked page.
-    fn ensure_session(&mut self, args: &Value) -> Result<String, String> {
-        let get = |k: &str| args.get(k).and_then(Value::as_str).ok_or(format!("{k} is required"));
+    fn ensure_session(&mut self, args: &Value) -> Result<String, Failure> {
+        let get = |k: &str| args.get(k).and_then(Value::as_str).ok_or_else(|| Failure::args(format!("{k} is required")));
         let (name, url, login, check) = (get("name")?, get("url")?, get("login")?, get("check")?);
         let file = args.get("file").and_then(Value::as_str);
         let saved = lock(&self.shared.saved).get(name).cloned();
@@ -758,7 +758,7 @@ impl Server {
         let had = found.is_some();
         if found.is_some() {
             self.start(args, url, found)?;
-            let (rep, ok) = self.run_live(args, check)?;
+            let (rep, ok, _) = self.run_live_typed(args, check)?;
             if ok {
                 return Ok(with_session(rep, "restored"));
             }
@@ -766,13 +766,14 @@ impl Server {
         // The open of a profile with no state, then the login and the check; a failure gives the report of the failing step.
         let (r, ok) = self.start(args, url, None)?;
         if !ok {
-            return Err(r);
+            return Err(r.into());
         }
         let mut rep = String::new();
+        // The failure keeps its code: a bad step line is `invalid_arguments`, a failed step the kind of the driver.
         for src in [login, check] {
-            let (r, ok) = self.run_live(args, src)?;
-            if !ok {
-                return Err(r);
+            let (r, _, failure) = self.run_live_typed(args, src)?;
+            if let Some(f) = failure {
+                return Err(f);
             }
             rep = r;
         }
