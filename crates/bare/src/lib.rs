@@ -46,6 +46,8 @@ mod page_tests;
 #[cfg(test)]
 mod page_live_events_tests;
 #[cfg(test)]
+mod page_live_iframe_tests;
+#[cfg(test)]
 mod paint_trace_tests;
 #[cfg(test)]
 mod browser_ui_tests;

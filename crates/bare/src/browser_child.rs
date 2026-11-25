@@ -548,11 +548,17 @@ impl<E: Eng> Kids<E> {
 
     /// Live: can a turn do something for a child now (`Some(true)`), or does a child wait for the network (`Some(false)`)?
     pub(crate) fn live_work(&self, streams: bool) -> Option<bool> {
+        // A slot whose document is not requested yet, or a wire in the hub: the next turn starts the load or takes the wire.
+        if self.hub_busy() || self.slots.borrow().iter().flatten().any(|s| s.dirty) {
+            return Some(true);
+        }
         let mut out = None;
         for k in self.kids.borrow().iter().flatten() {
             let w = match &k.state {
                 State::Loading(t) => Some(t.done()),
                 State::Start => Some(true),
+                // A page that has not had its first turn: that turn runs its scripts.
+                State::Run(_) if !k.started => Some(true),
                 State::Run(b) => b.live_work_of(streams),
                 State::Empty => None,
             };
