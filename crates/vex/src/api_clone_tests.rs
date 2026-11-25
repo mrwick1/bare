@@ -10,8 +10,8 @@ struct CloneFixture;
 impl CloneHost<Realm> for CloneFixture {
     fn is_host_object(&self, _: &Value) -> bool { false }
     fn can_transfer(&self, _: &Value) -> bool { false }
-    fn transfer_out(&mut self, _: &Value) -> Box<dyn Any> { unreachable!() }
-    fn transfer_in<'s>(&mut self, _: &mut Scope<'s, Realm>, _: Vec<Box<dyn Any>>) -> Result<Vec<Local<'s>>, Error<'s>> { unreachable!() }
+    fn transfer_out(&mut self, _: &Value) -> Box<dyn Any + Send> { unreachable!() }
+    fn transfer_in<'s>(&mut self, _: &mut Scope<'s, Realm>, _: Vec<Box<dyn Any + Send>>) -> Result<Vec<Local<'s>>, Error<'s>> { unreachable!() }
     fn data_clone_error<'s>(&mut self, s: &mut Scope<'s, Realm>, why: Refused) -> Error<'s> {
         s.type_error(&format!("DataCloneError: {why:?}"))
     }

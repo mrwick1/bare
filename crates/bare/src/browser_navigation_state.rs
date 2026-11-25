@@ -48,12 +48,12 @@ impl<'q, E: Eng> CloneHost<E::Vm> for &Dom<E> {
         matches!(E::kind(*o), Val::Object(o) if self.port_movable(o))
     }
 
-    fn transfer_out(&mut self, o: &E::Raw) -> Box<dyn Any> {
+    fn transfer_out(&mut self, o: &E::Raw) -> Box<dyn Any + Send> {
         let Val::Object(o) = E::kind(*o) else { unreachable!("a listed object") };
         Box::new(Transfer::Port(self.park_port(o)))
     }
 
-    fn transfer_in<'s>(&mut self, s: &mut Scope<'s, E::Vm>, items: Vec<Box<dyn Any>>) -> Result<Vec<Local<'s>>, bare_js_api::Error<'s>> {
+    fn transfer_in<'s>(&mut self, s: &mut Scope<'s, E::Vm>, items: Vec<Box<dyn Any + Send>>) -> Result<Vec<Local<'s>>, bare_js_api::Error<'s>> {
         let os = make_hosts(self, s, items)?;
         Ok(os.into_iter().map(|o| self.obj_local(s, o)).collect())
     }
@@ -69,7 +69,7 @@ impl<'q, E: Eng> CloneHost<E::Vm> for &Dom<E> {
         self.dom_err_s(s, "DataCloneError", &format!("{what} could not be cloned."))
     }
 
-    fn write_host_object(&mut self, o: &E::Raw) -> Option<(Box<dyn Any>, usize)> {
+    fn write_host_object(&mut self, o: &E::Raw) -> Option<(Box<dyn Any + Send>, usize)> {
         let Val::Object(o) = E::kind(*o) else { return None };
         crate::browser_web::clone_out(self, o)
     }
@@ -83,7 +83,7 @@ impl<'q, E: Eng> CloneHost<E::Vm> for &Dom<E> {
 }
 
 /// The new ports of the host items of a record, in list order.
-fn make_hosts<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, items: Vec<Box<dyn Any>>) -> Res<'s, Vec<E::Obj>> {
+fn make_hosts<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, items: Vec<Box<dyn Any + Send>>) -> Res<'s, Vec<E::Obj>> {
     let xf: Vec<Transfer> = items.into_iter().map(|b| *b.downcast::<Transfer>().expect("a port")).collect();
     let keys: Vec<u64> = xf.iter().filter_map(|t| if let Transfer::Port(k) = t { Some(*k) } else { None }).collect();
     let ports = d.make_ports(s, &keys)?;
