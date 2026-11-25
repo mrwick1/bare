@@ -115,7 +115,7 @@ impl IdbStore {
             }
             st.rows.insert(key.into(), r);
         }
-        self.bytes = self.bytes - freed + added;
+        self.bytes = self.bytes.saturating_sub(freed) + added;
         old
     }
 
@@ -138,7 +138,7 @@ impl IdbStore {
             Undo::Version { db, old } => {
                 if old == 0.0 {
                     if let Some(gone) = self.dbs.remove(&db) {
-                        self.bytes -= gone.stores.values().flat_map(|s| s.rows.values()).map(|r| r.value.bytes().len()).sum::<usize>();
+                        self.bytes = self.bytes.saturating_sub(gone.stores.values().flat_map(|s| s.rows.values()).map(|r| r.value.bytes().len()).sum::<usize>());
                     }
                 } else if let Some(d) = self.dbs.get_mut(&db) {
                     d.version = old;
@@ -146,7 +146,7 @@ impl IdbStore {
             }
             Undo::StoreMade { db, store } => {
                 if let Some(st) = self.dbs.get_mut(&db).and_then(|d| d.stores.remove(&store)) {
-                    self.bytes -= st.rows.values().map(|r| r.value.bytes().len()).sum::<usize>();
+                    self.bytes = self.bytes.saturating_sub(st.rows.values().map(|r| r.value.bytes().len()).sum::<usize>());
                 }
             }
             Undo::StoreGone { db, store, st } => {
@@ -438,7 +438,7 @@ pub(crate) fn idb_host<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, 
         2 => {
             let name = text(s, 1)?;
             let old = st.dbs.remove(&name).map_or(0.0, |db| {
-                st.bytes -= db.stores.values().flat_map(|s| s.rows.values()).map(|r| r.value.bytes().len()).sum::<usize>();
+                st.bytes = st.bytes.saturating_sub(db.stores.values().flat_map(|s| s.rows.values()).map(|r| r.value.bytes().len()).sum::<usize>());
                 db.version
             });
             Ok(s.number(old))
@@ -506,7 +506,7 @@ pub(crate) fn idb_host<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, 
             let t = num::<E>(s, a, 1) as u32;
             let (db, store) = (text(s, 2)?, text(s, 3)?);
             let Some(gone) = st.dbs.get_mut(&db).and_then(|x| x.stores.remove(&store)) else { return Err(not_found(d, s)) };
-            st.bytes -= gone.rows.values().map(|r| r.value.bytes().len()).sum::<usize>();
+            st.bytes = st.bytes.saturating_sub(gone.rows.values().map(|r| r.value.bytes().len()).sum::<usize>());
             st.log(t, Undo::StoreGone { db, store, st: gone });
             Ok(s.undefined())
         }
@@ -565,7 +565,7 @@ pub(crate) fn idb_host<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, 
             let Some(so) = st.store(&db, &store) else { return Err(not_found(d, s)) };
             let mut out = Vec::with_capacity(so.rows.len());
             for (k, row) in so.rows.iter_mut() {
-                let pair = [key_value::<E>(s, k)?, crate::browser_navigation_state::materialize(d, s, &mut row.value)?];
+                let pair = [key_value::<E>(s, k)?, read(d, s, &mut row.value)?];
                 out.push(s.new_array(&pair)?);
             }
             s.new_array(&out)
@@ -657,7 +657,7 @@ fn put<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, a: Args<'s>, st: &mut IdbStore
         }
     }
     let old_size = so.rows.get(&k).map_or(0, |r| r.value.bytes().len());
-    if st.bytes - old_size + value.bytes().len() > MAX_BYTES {
+    if st.bytes.saturating_sub(old_size) + value.bytes().len() > MAX_BYTES {
         return Err(d.dom_err_s(s, "QuotaExceededError", "The quota has been exceeded."));
     }
     let so = st.store(&db, &store).expect("checked");
@@ -691,7 +691,18 @@ fn index<'s, 'a, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, a: Args<'s>, i: usize, s
 /// The value of the row at `pk`: a new copy in this realm.
 fn value<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, so: &mut Store, pk: &[u8]) -> Res<'s, Local<'s>> {
     let row = so.rows.get_mut(pk).expect("a row of the index");
-    crate::browser_navigation_state::materialize(d, s, &mut row.value)
+    read(d, s, &mut row.value)
+}
+
+/// A new copy of a stored record. Reading a record takes its platform objects (a `Blob`, a `CryptoKey`) out of it, so a record
+/// that has them is written again from the copy, before any script runs. A record without them is read as it is.
+fn read<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, c: &mut Cloned) -> Res<'s, Local<'s>> {
+    let objects = !c.moved().is_empty();
+    let v = crate::browser_navigation_state::materialize(d, s, c)?;
+    if objects {
+        *c = crate::browser_navigation_state::serialize_storage(d, s, v)?;
+    }
+    Ok(v)
 }
 
 fn query<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, a: Args<'s>, st: &mut IdbStore) -> Res<'s, Local<'s>> {

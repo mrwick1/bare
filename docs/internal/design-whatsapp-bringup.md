@@ -120,3 +120,25 @@ Cause, found with `curl` on new URLs (a new `__spin_t` value for each try, 2 tri
 - Attempt 3 got 200. Hypothesis: another request with the metadata (a `fetch` preload) reached that URL first.
 
 Fix: Fetch Metadata on subresource requests (`resources::fetch`).
+
+## Link attempt 5 (2026-11-25)
+
+Build: main with #1087 (Fetch Metadata on subresource requests). The backend worker loaded. After the link, the page went from
+`/login/` to `/` and showed "Logging out". The worker failed its `setup` step again and again with "globals: PN-less setup
+requires a LID device jid". Hypothesis: the new document found empty IndexedDB databases, because bare kept the data in the
+realm.
+
+Fix: one IndexedDB store per origin in the session (#1091, `design-indexeddb-store.md` steps 1 and 2).
+
+## Link attempt 6 (2026-11-25)
+
+Build: main with #1091. The link held: the page went to `/` and showed "Don't close this window. Your messages are
+downloading." The device JID was set (probe: set or null only). No "PN-less setup" error.
+
+Then the page stopped. `browser_diagnose`: `Unsupported("damaged clone record")`. Timers and `MessageChannel` messages did not
+run after that, so the download screen stayed.
+
+Cause: a read of a clone record takes the platform objects (a `Blob`, a `CryptoKey`) out of the record. The IndexedDB store
+read the same record twice, and the second read found it damaged. The error is fatal, so the page stopped.
+
+Fix: the store writes such a record again from the new copy after each read (`browser_idb.rs` `read`).
