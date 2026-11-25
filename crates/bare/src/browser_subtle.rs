@@ -7,7 +7,7 @@
 //! `usages` give a new object on each read (the spec caches one). There is no `CryptoKey` global and no structured clone of a key.
 //!
 //! Limits: key formats "raw" only ("jwk", "spki" and "pkcs8" reject with `NotSupportedError`). AES-GCM takes a 12-byte IV only
-//! (`NotSupportedError` for other lengths). HKDF and HMAC take SHA-256 only. RSA, ECDSA, ECDH, `wrapKey` and `unwrapKey` reject
+//! (`NotSupportedError` for other lengths). HKDF takes SHA-256 only; HMAC takes SHA-1, SHA-256, SHA-384 and SHA-512. RSA, ECDSA, ECDH, `wrapKey` and `unwrapKey` reject
 //! with `NotSupportedError`. AES-CTR counts in the low `length` bits of the 16-byte counter block, as the spec says, and rejects
 //! data that would reuse a counter value. `verify` of HMAC compares in constant time.
 
@@ -22,8 +22,60 @@ pub(crate) enum Alg {
     AesGcm,
     AesCbc,
     AesCtr,
-    Hmac,
+    /// HMAC with the hash of the key.
+    Hmac(Hash),
     Hkdf,
+}
+
+/// A hash of HMAC.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Hash {
+    Sha1,
+    Sha256,
+    Sha384,
+    Sha512,
+}
+
+impl Hash {
+    fn name(self) -> &'static str {
+        match self {
+            Hash::Sha1 => "SHA-1",
+            Hash::Sha256 => "SHA-256",
+            Hash::Sha384 => "SHA-384",
+            Hash::Sha512 => "SHA-512",
+        }
+    }
+
+    /// The block size in bytes: the HMAC key length, and the length of a generated key with no `length`.
+    fn block(self) -> usize {
+        match self {
+            Hash::Sha1 | Hash::Sha256 => 64,
+            Hash::Sha384 | Hash::Sha512 => 128,
+        }
+    }
+
+    fn of(self, data: &[u8]) -> Vec<u8> {
+        match self {
+            Hash::Sha1 => bare_tls::sha1::sha1(data).to_vec(),
+            Hash::Sha256 => bare_tls::sha256::sha256(data).to_vec(),
+            Hash::Sha384 => bare_tls::sha384::sha384(data).to_vec(),
+            Hash::Sha512 => bare_tls::sha512::sha512(data).to_vec(),
+        }
+    }
+
+    /// HMAC (RFC 2104) of `data` with `key`.
+    fn hmac(self, key: &[u8], data: &[u8]) -> Vec<u8> {
+        if self == Hash::Sha256 {
+            return bare_tls::hmac::hmac_sha256(key, data).to_vec();
+        }
+        let mut k = if key.len() > self.block() { self.of(key) } else { key.to_vec() };
+        k.resize(self.block(), 0);
+        let mut inner: Vec<u8> = k.iter().map(|b| b ^ 0x36).collect();
+        inner.extend_from_slice(data);
+        let mut outer: Vec<u8> = k.iter().map(|b| b ^ 0x5c).collect();
+        outer.extend(self.of(&inner));
+        self.of(&outer)
+    }
 }
 
 impl Alg {
@@ -32,7 +84,7 @@ impl Alg {
             Alg::AesGcm => "AES-GCM",
             Alg::AesCbc => "AES-CBC",
             Alg::AesCtr => "AES-CTR",
-            Alg::Hmac => "HMAC",
+            Alg::Hmac(_) => "HMAC",
             Alg::Hkdf => "HKDF",
         }
     }
@@ -58,7 +110,7 @@ impl Drop for Key {
 }
 
 /// The algorithms in their disk order (`profile_record.rs`). Append only: a profile on disk names an algorithm by its index.
-const DISK: [Alg; 5] = [Alg::AesGcm, Alg::AesCbc, Alg::AesCtr, Alg::Hmac, Alg::Hkdf];
+const DISK: [Alg; 8] = [Alg::AesGcm, Alg::AesCbc, Alg::AesCtr, Alg::Hmac(Hash::Sha256), Alg::Hkdf, Alg::Hmac(Hash::Sha1), Alg::Hmac(Hash::Sha384), Alg::Hmac(Hash::Sha512)];
 
 impl Key {
     /// The disk form: algorithm index, key bytes, extractable, usage bits.
@@ -83,8 +135,8 @@ const DERIVE_BITS: u8 = 32;
 const AES_USES: u8 = ENCRYPT | DECRYPT | 64 | 128;
 const HKDF_USES: u8 = DERIVE_KEY | DERIVE_BITS;
 const HMAC_USES: u8 = SIGN | VERIFY;
-/// The block size of SHA-256: the length of a generated HMAC key with no `length`.
-const HMAC_DEFAULT: usize = 64;
+/// HMAC in an `allowed` list of `alg`: the hash comes from the parameters (`hmac_hash`).
+const HMAC: Alg = Alg::Hmac(Hash::Sha256);
 
 /// The most keys of a page. An AES key holds at most 32 bytes; an HMAC key is as long as the page gives.
 const MAX_KEYS: usize = 100_000;
@@ -142,14 +194,14 @@ fn aes_len<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, obj: Option<Local<'s>>) ->
     }
 }
 
-/// The `hash` member of HMAC parameters: SHA-256 is built, another known hash is `NotSupportedError`.
-fn hmac_hash<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, obj: Option<Local<'s>>) -> Res<'s, ()> {
+/// The `hash` member of HMAC parameters. An unknown hash is `NotSupportedError`.
+fn hmac_hash<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, obj: Option<Local<'s>>) -> Res<'s, Hash> {
     let hash = member::<E>(s, obj, "hash")?;
     let hash = if is_object::<E>(s, hash) { member::<E>(s, Some(hash), "name")? } else { hash };
-    if usv(d, s, hash)?.eq_ignore_ascii_case("SHA-256") {
-        Ok(())
-    } else {
-        Err(err(d, s, "NotSupportedError", "HMAC takes SHA-256 only."))
+    let name = usv(d, s, hash)?;
+    match [Hash::Sha1, Hash::Sha256, Hash::Sha384, Hash::Sha512].into_iter().find(|h| h.name().eq_ignore_ascii_case(&name)) {
+        Some(h) => Ok(h),
+        None => Err(err(d, s, "NotSupportedError", "Unrecognized algorithm name.")),
     }
 }
 
@@ -220,10 +272,18 @@ pub(crate) fn new_key<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, k: Key) -> Res<
 fn use_key<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>, alg: Alg, usage: u8) -> Res<'s, Vec<u8>> {
     let got = obj_id::<E>(s, v).and_then(|o| d.web.keys.borrow().get(&o).map(|k| (k.alg, k.usages, k.bytes.clone())));
     let Some((a, uses, bytes)) = got else { return Err(s.type_error("The provided value is not of type 'CryptoKey'.")) };
-    if a != alg || uses & usage == 0 {
+    let same = a == alg || matches!((a, alg), (Alg::Hmac(_), Alg::Hmac(_)));
+    if !same || uses & usage == 0 {
         return Err(err(d, s, "InvalidAccessError", "The requested operation is not valid for the provided key."));
     }
     Ok(bytes)
+}
+
+/// The hash and the bytes of the HMAC key `v` with `usage` (`use_key`).
+fn hmac_key<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>, usage: u8) -> Res<'s, (Hash, Vec<u8>)> {
+    let bytes = use_key(d, s, v, HMAC, usage)?;
+    let hash = obj_id::<E>(s, v).and_then(|o| match d.web.keys.borrow().get(&o)?.alg { Alg::Hmac(h) => Some(h), _ => None });
+    Ok((hash.unwrap_or(Hash::Sha256), bytes))
 }
 
 fn key_this<'s, E: Eng, T>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, f: impl FnOnce(&Key) -> T) -> Res<'s, T> {
@@ -255,9 +315,9 @@ pub(crate) fn key_algorithm<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Loc
     let o = s.new_object()?;
     let n = d.js_str_s(s, alg.name())?;
     s.define_str(o, "name", n, Attrs::ALL)?;
-    if alg == Alg::Hmac {
+    if let Alg::Hmac(hash) = alg {
         let h = s.new_object()?;
-        let hn = d.js_str_s(s, "SHA-256")?;
+        let hn = d.js_str_s(s, hash.name())?;
         s.define_str(h, "name", hn, Attrs::ALL)?;
         s.define_str(o, "hash", h, Attrs::ALL)?;
     }
@@ -295,12 +355,13 @@ fn promise<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'
 
 pub(crate) fn generate_key<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     promise(d, s, this, a, 3, "generateKey", |s, v| {
-        let (alg, obj) = alg(d, s, v[0], &[Alg::AesGcm, Alg::AesCbc, Alg::AesCtr, Alg::Hmac])?;
+        let (mut alg, obj) = alg(d, s, v[0], &[Alg::AesGcm, Alg::AesCbc, Alg::AesCtr, HMAC])?;
         let extractable = s.to_boolean(v[1]);
         let uses = usages(d, s, v[2])?;
-        let len = if alg == Alg::Hmac {
-            hmac_hash(d, s, obj)?;
-            let len = hmac_len(d, s, obj)?.unwrap_or(HMAC_DEFAULT);
+        let len = if alg == HMAC {
+            let hash = hmac_hash(d, s, obj)?;
+            alg = Alg::Hmac(hash);
+            let len = hmac_len(d, s, obj)?.unwrap_or(hash.block());
             check_uses(d, s, uses, HMAC_USES)?;
             len
         } else {
@@ -329,11 +390,11 @@ pub(crate) fn import_key<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<
     promise(d, s, this, a, 5, "importKey", |s, v| {
         format(d, s, v[0])?;
         let bytes = buf::<E>(s, v[1], "keyData")?;
-        let (alg, obj) = alg(d, s, v[2], &[Alg::AesGcm, Alg::AesCbc, Alg::AesCtr, Alg::Hmac, Alg::Hkdf])?;
+        let (mut alg, obj) = alg(d, s, v[2], &[Alg::AesGcm, Alg::AesCbc, Alg::AesCtr, HMAC, Alg::Hkdf])?;
         let extractable = s.to_boolean(v[3]);
         let uses = usages(d, s, v[4])?;
-        if alg == Alg::Hmac {
-            hmac_hash(d, s, obj)?;
+        if alg == HMAC {
+            alg = Alg::Hmac(hmac_hash(d, s, obj)?);
             check_uses(d, s, uses, HMAC_USES)?;
             if bytes.is_empty() {
                 return Err(err(d, s, "DataError", "The HMAC key data must not be empty."));
@@ -499,24 +560,24 @@ pub(crate) fn derive_key<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<
     })
 }
 
-/// `sign` with HMAC SHA-256.
+/// `sign` with HMAC.
 pub(crate) fn sign<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     promise(d, s, this, a, 3, "sign", |s, v| {
-        alg(d, s, v[0], &[Alg::Hmac])?;
-        let key = use_key(d, s, v[1], Alg::Hmac, SIGN)?;
+        alg(d, s, v[0], &[HMAC])?;
+        let (hash, key) = hmac_key(d, s, v[1], SIGN)?;
         let data = buf::<E>(s, v[2], "data")?;
-        s.new_array_buffer(bare_tls::hmac::hmac_sha256(&key, &data).to_vec())
+        s.new_array_buffer(hash.hmac(&key, &data))
     })
 }
 
-/// `verify` with HMAC SHA-256: the MAC of the data against the signature, compared in constant time.
+/// `verify` with HMAC: the MAC of the data against the signature, compared in constant time.
 pub(crate) fn verify<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     promise(d, s, this, a, 4, "verify", |s, v| {
-        alg(d, s, v[0], &[Alg::Hmac])?;
-        let key = use_key(d, s, v[1], Alg::Hmac, VERIFY)?;
+        alg(d, s, v[0], &[HMAC])?;
+        let (hash, key) = hmac_key(d, s, v[1], VERIFY)?;
         let sig = buf::<E>(s, v[2], "signature")?;
         let data = buf::<E>(s, v[3], "data")?;
-        let mac = bare_tls::hmac::hmac_sha256(&key, &data);
+        let mac = hash.hmac(&key, &data);
         let same = sig.len() == mac.len() && sig.iter().zip(mac).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0;
         Ok(s.boolean(same))
     })
