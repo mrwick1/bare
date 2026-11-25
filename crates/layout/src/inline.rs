@@ -81,8 +81,9 @@ impl<'t, 'a> Events<'t, 'a> {
     }
 
     /// The node after `node`: its next sibling, or nothing at the end of the run or of an inline box.
+    #[inline(always)]
     fn after(&self, node: NodeId) -> Option<NodeId> {
-        if self.open.is_empty() && node == self.last { None } else { self.tree.box_next(node) }
+        if self.open.is_empty() && node == self.last { None } else { self.tree.raw_next(node) }
     }
 }
 
@@ -100,19 +101,28 @@ impl Iterator for Events<'_, '_> {
             let kind = self.tree.kind(node);
             if kind == Kind::Inline {
                 self.open.push(node);
-                self.next = self.tree.box_first(node);
+                self.next = self.tree.doc.flat_children(node).next();
                 return Some(Event::Open(node));
             }
-            self.next = self.after(node);
-            return Some(match kind {
+            let event = match kind {
                 Kind::Text => Event::Text(node),
                 Kind::Atomic => Event::Atomic(node),
                 Kind::Float => Event::Float(node),
                 Kind::OutOfFlow => Event::OutOfFlow(node),
                 Kind::Break => Event::Break(node),
                 Kind::Block | Kind::ListItem => Event::Block(node),
-                Kind::None | Kind::Inline | Kind::Contents => continue,
-            });
+                // Entered: its `after` would climb for nothing.
+                Kind::Contents => {
+                    self.next = self.tree.enter(node);
+                    continue;
+                }
+                Kind::None | Kind::Inline => {
+                    self.next = self.after(node);
+                    continue;
+                }
+            };
+            self.next = self.after(node);
+            return Some(event);
         }
     }
 }

@@ -1,6 +1,6 @@
 # `display: contents`
 
-Status: proposed 2026-11-25, for review by the owner. Phase 2 of the Teams plan (`docs/internal/teams/gap-census.md`, item 1).
+Status: option 1 approved by the owner on 2026-11-25 and built (`docs/internal/progress/2026-11-25-display-contents.md`). Phase 2 of the Teams plan (`docs/internal/teams/gap-census.md`, item 1).
 
 ## Problem
 
@@ -35,6 +35,7 @@ Status: proposed 2026-11-25, for review by the owner. Phase 2 of the Teams plan 
 - The walks above use these. `Child::Lines(first, last)` stays a pair of nodes: `last` comes after `first` in the order of `box_next`. `inline::Events` needs no stack change.
 - Style is unchanged: inheritance still uses `flat_parent`, so a child inherits from the contents element.
 - Fragments: a contents element makes none. `getBoundingClientRect` then gives an empty rectangle and `getClientRects` an empty list, as in Chrome. Hit tests find the child boxes. The event target is the DOM node of the box hit, and the event goes up through the contents element as a normal DOM parent.
+- Built: the 2 hot walks (`Children`, `inline::Events`) do not use `box_next`. A test of the flag at each step cost +1% to +2% on the layout rows. They enter a contents element when they meet it (`raw_next`, `enter`), and test for contents only at the end of a list of siblings. See the progress file, "Cost".
 - Complexity: the same O(children) walk, plus O(depth of nested contents elements) to climb. No memory.
 - Cost with the flag off: one predictable branch for each step of a walk. Pages without `display: contents` should not change (to measure: the layout rows).
 
