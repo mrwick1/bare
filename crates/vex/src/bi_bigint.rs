@@ -45,7 +45,7 @@ impl Realm {
         Ok(big::string_to_bigint(&units))
     }
 
-    pub(crate) fn to_bigint(&mut self, v: Value) -> R<Value> {
+    pub fn to_bigint(&mut self, v: Value) -> R<Value> {
         let p = self.to_primitive(v, Hint::Number)?;
         self.bigint_from_primitive(p, false)
     }

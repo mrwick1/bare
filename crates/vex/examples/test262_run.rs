@@ -1,5 +1,9 @@
 //! Run a list of classic Test262 tests through Vex. See tools/js/test262_js2.sh.
 
+mod test262_agent;
+
+use std::time::{Duration, Instant};
+
 use bare_vex::interp::Exit;
 use bare_vex::value::Value;
 use std::collections::HashMap;
@@ -26,14 +30,47 @@ fn threw(text: &str) -> Out {
     Out::Threw { name: name.into(), message: message.into() }
 }
 
-fn run(code: &str, steps: u64) -> Out {
+fn drain_agent(vm: &mut bare_vex::interp::Vm) -> Result<(), Exit> {
+    let started = Instant::now();
+    loop {
+        vm.drain_microtasks(&mut |_, _| {}).map_err(|_| Exit::Fuel)?;
+        if vm.realm.deliver_test262_wait(Duration::ZERO).map_err(Exit::Throw)? {
+            continue;
+        }
+        let budget = Duration::from_secs(10).saturating_sub(started.elapsed());
+        if budget.is_zero() {
+            return Err(Exit::Fuel);
+        }
+        let timer = vm.global("__runTimer");
+        let next = vm.call(timer, Value::UNDEFINED, &[])?;
+        if next == Value::TRUE {
+            continue;
+        }
+        let delay = next.as_f64().expect("test timer delay");
+        if delay < 0.0 {
+            if !vm.realm.deliver_test262_wait(budget).map_err(Exit::Throw)? {
+                return Ok(());
+            }
+        } else {
+            let wait = budget.min(Duration::from_secs_f64(delay / 1000.0));
+            let since = Instant::now();
+            if !vm.realm.deliver_test262_wait(wait).map_err(Exit::Throw)? {
+                std::thread::sleep(wait.saturating_sub(since.elapsed()));
+            }
+        }
+    }
+}
+
+fn run(code: &str, steps: u64, can_block: bool) -> Out {
+    let _agent = test262_agent::Session::begin();
     let mut vm = match bare_vex::script::load_with(include_str!("test262_host.inc.js"), code) {
         Ok(vm) => vm,
         Err(e) if e.starts_with("not supported yet") => return Out::Unsupported(e),
         Err(e) if e.starts_with("SyntaxError: ") => return Out::Threw { name: "SyntaxError".into(), message: e["SyntaxError: ".len()..].into() },
         Err(e) => return Out::Internal(e),
     };
-    if let Err(e) = vm.realm.install_test262_realms(include_str!("test262_host.inc.js")) {
+    if let Err(e) = test262_agent::install(&mut vm.realm, false, can_block)
+        .and_then(|()| vm.realm.install_test262_realms(include_str!("test262_host.inc.js"))) {
         return Out::Internal(format!("realm hook installation failed: {}", vm.display(e, false)));
     }
     vm.fuel = steps;
@@ -43,7 +80,7 @@ fn run(code: &str, steps: u64) -> Out {
         Ok(vm.display(v, false))
     };
     // The host runs the jobs when the script ends: the stack is empty.
-    match vm.run_main(0).and_then(|v| vm.drain_microtasks(&mut |_, _| {}).map(|_| v).map_err(|_| Exit::Fuel)) {
+    match vm.run_main(0).and_then(|v| drain_agent(&mut vm).map(|()| v)) {
         Ok(_) => end(&mut vm, "__finish", &[]).map_or_else(Out::Internal, Out::Done),
         // A function that holds an unbuilt construct fails at its first call (lazy compile): an Error of that text is "unsupported" too.
         Err(Exit::Throw(e)) => end(&mut vm, "__thrown", &[e]).map_or_else(Out::Internal, |t| match threw(&t) {
@@ -176,7 +213,8 @@ impl Ctx {
             }
         }
         code.push_str(src);
-        let thrown = match run(&code, self.steps) {
+        let can_block = !m.flags.iter().any(|f| f == "CanBlockIsFalse");
+        let thrown = match run(&code, self.steps, can_block) {
             Out::Done(log) if is_async && m.negative.is_none() => {
                 if let Some(i) = log.find("Test262:AsyncTestFailure:") {
                     return Err(log[i + "Test262:AsyncTestFailure:".len()..].lines().next().unwrap_or("").to_string());
