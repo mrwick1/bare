@@ -3218,7 +3218,7 @@ fn initial(p: Property) -> Value {
         FontWeight => Value::Number(400.0),
         FontFamily => Value::Keyword(K::SansSerif),
         // `min-width: auto` is 0, except on a flex item: there it is the "automatic minimum size" (`flex.rs`).
-        Width | Height | MinWidth | MinHeight | Top | Right | Bottom | Left | AspectRatio => Value::Keyword(K::Auto),
+        Width | Height | MinWidth | MinHeight | Top | Right | Bottom | Left | AspectRatio | Clip => Value::Keyword(K::Auto),
         Position => Value::Keyword(K::Static),
         FlexDirection => Value::Keyword(K::Row),
         FlexWrap => Value::Keyword(K::Nowrap),
@@ -4323,7 +4323,7 @@ mod tests {
 
     #[test]
     fn wrapping_slots_have_the_reviewed_style_memory_cost() {
-        assert_eq!(std::mem::size_of::<ComputedStyle>(), 880, "baseline 856 plus three eight-byte values (the third is `font-family`)");
+        assert_eq!(std::mem::size_of::<ComputedStyle>(), 888, "baseline 856 plus four eight-byte values (the third is `font-family`, the fourth is `clip`)");
     }
 
     #[test]

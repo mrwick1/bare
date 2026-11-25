@@ -545,6 +545,11 @@ impl Builder<'_> {
         let f = self.frags[i];
         let style = self.tree.style(f.node);
         let sc = i == 0 || self.stack(&f, style).is_some();
+        // `clip: rect()` with no area on an absolute or fixed box: nothing of the box paints (the hiding of screen reader text).
+        if i > 0 && matches!(style.get(Property::Clip), Value::Keyword(Keyword::None)) && matches!(style.get(Property::Position), Value::Keyword(Keyword::Absolute | Keyword::Fixed)) {
+            self.release(&mine);
+            return;
+        }
         let mut layer = false;
         if self.page.stack && i > 0 {
             let alpha = match style.get(Property::Opacity) {

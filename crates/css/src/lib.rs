@@ -21,6 +21,8 @@ pub mod selector;
 mod env_tests;
 #[cfg(test)]
 mod shadow_tests;
+#[cfg(test)]
+mod values_clip_tests;
 pub mod tokenizer;
 pub mod transform;
 pub mod urls;
