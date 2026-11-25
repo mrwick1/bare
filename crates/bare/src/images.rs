@@ -354,7 +354,7 @@ impl Page {
             let Some((url, nodes, id)) = self.images.queue.pop_front().map(|(u, n)| (u, n, 0)).or_else(|| self.images.css_queue.pop_front().map(|(i, u)| (u, Vec::new(), i))) else { break };
             let used = self.images.used.clone();
             let client = match &mut self.source {
-                Source::Session(s) => s.fork(),
+                Source::Session(s) => s.resource_client(),
                 Source::Browser(_) => Client::new(),
             };
             let (shown, now) = (url.clone(), std::time::Instant::now());

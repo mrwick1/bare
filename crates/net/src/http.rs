@@ -372,6 +372,8 @@ pub struct Client {
     // A download client (`allow_big`): a `Content-Length` over `MAX_REPLY` does not fail the request. A fork does not copy it.
     pub(crate) site: Option<Arc<str>>,
     // The site of the document that this client serves (`cookie::site_of`), for `SameSite`. `None`: every request is first-party.
+    pub(crate) require_corp: Option<Arc<Url>>,
+    pub(crate) worker_entry: Option<Arc<Url>>,
     identity: Option<Arc<Identity>>,
     // The identity that every request of this client sends (see `set_identity`). A fork shares it.
     tape: Option<Arc<replay::Tape>>,
@@ -454,7 +456,54 @@ impl Client {
 
     /// A second client that shares the connections, certificates, workers and reply cache.
     pub fn fork(&self) -> Client {
-        Client { idle: self.idle.clone(), sessions: self.sessions.clone(), slots: self.slots.clone(), cache: self.cache.clone(), disk: self.disk.clone(), roots: self.roots.clone(), workers: self.workers.clone(), jar: self.jar.clone(), site: self.site.clone(), identity: self.identity.clone(), tape: self.tape.clone(), big: false }
+        Client { idle: self.idle.clone(), sessions: self.sessions.clone(), slots: self.slots.clone(), cache: self.cache.clone(), disk: self.disk.clone(), roots: self.roots.clone(), workers: self.workers.clone(), jar: self.jar.clone(), site: self.site.clone(), require_corp: self.require_corp.clone(), worker_entry: self.worker_entry.clone(), identity: self.identity.clone(), tape: self.tape.clone(), big: false }
+    }
+
+    /// Restrict the resources fetched for an isolated document and its descendants.
+    pub fn require_corp(&mut self, document: Url) {
+        self.require_corp = Some(Arc::new(document));
+    }
+
+    pub fn has_embedder_policy(&self) -> bool {
+        self.require_corp.is_some()
+    }
+
+    /// Check the network response that supplies an isolated worker's entry script.
+    pub fn require_isolated_worker_entry(&mut self, entry: Url) {
+        self.worker_entry = Some(Arc::new(entry));
+    }
+
+    fn check_embedder_response(&self, url: &Url, plan: &Plan<'_>, response: &Response) -> Result<(), Error> {
+        let Some(document) = &self.require_corp else { return Ok(()) };
+        let metadata = |name: &str| plan.headers.iter().find(|(key, _)| key.eq_ignore_ascii_case(name)).map(|(_, value)| *value);
+        if self.worker_entry.as_ref().is_some_and(|entry| entry.as_ref() == url)
+            && (redirect_target(response).is_some()
+                || !matches!(response.single_header("cross-origin-embedder-policy"), Some("require-corp")))
+        {
+            return Err("the worker entry lacks a compatible cross-origin embedder policy".into());
+        }
+        if metadata("sec-fetch-dest") == Some("iframe") && redirect_target(response).is_none()
+            && !matches!(response.single_header("cross-origin-embedder-policy"), Some("require-corp" | "credentialless"))
+        {
+            return Err("the embedded document lacks a compatible cross-origin embedder policy".into());
+        }
+        if document.same_origin(url) {
+            return Ok(());
+        }
+        let cors = metadata("sec-fetch-mode") == Some("cors") || plan.method == Method::Options && metadata("access-control-request-method").is_some();
+        if cors && let (Some(origin), Some(allowed)) = (metadata("origin"), response.single_header("access-control-allow-origin")) {
+            let credentialed = plan.cookies.on || plan.headers.iter().any(|(key, _)| key.eq_ignore_ascii_case("authorization"));
+            if (allowed == origin || allowed == "*" && !credentialed)
+                && (!credentialed || response.single_header("access-control-allow-credentials") == Some("true"))
+            {
+                return Ok(());
+            }
+        }
+        match response.single_header("cross-origin-resource-policy") {
+            Some("cross-origin") => Ok(()),
+            Some("same-site") if cookie::same_site(&cookie::site_of(document), url) => Ok(()),
+            _ => Err("the resource is blocked by the cross-origin embedder policy".into()),
+        }
     }
 
     /// Let a reply declare more than `MAX_REPLY` bytes. The body still stops at `MAX_REPLY` and at `MAX_TIME` until the caller calls
@@ -527,6 +576,7 @@ impl Client {
         check_request(req)?;
         let plan = Plan { cookies: req.cookies, method: req.method, headers: Cow::Borrowed(req.headers), body: req.body, ident: self.identity.clone() };
         let (mut response, mut body, _) = self.start(req.url, &plan, "")?;
+        self.check_embedder_response(req.url, &plan, &response)?;
         if body.size_hint() > max_body {
             body.note(&io::Error::new(ErrorKind::InvalidData, "the reply is too big"));
             return Err("the reply is too big".into());
@@ -556,6 +606,7 @@ impl Client {
         check_request(req)?;
         let plan = Plan { cookies: req.cookies, method: req.method, headers: Cow::Borrowed(req.headers), body: req.body, ident: self.identity.clone() };
         let (response, body, _) = self.start(req.url, &plan, "")?;
+        self.check_embedder_response(req.url, &plan, &response)?;
         Ok(Streamed { response: Arc::new(response), body, cache: None })
     }
 
@@ -565,6 +616,7 @@ impl Client {
         check_request(req)?;
         let plan = Plan { cookies: req.cookies, method: req.method, headers: Cow::Borrowed(req.headers), body: req.body, ident: self.identity.clone() };
         let (response, body, cache) = self.hop_stream(req.url, &plan)?;
+        self.check_embedder_response(req.url, &plan, &response)?;
         let cache = cache.filter(|_| response.status == 200 && (response.header("cache-control").is_some() || has_validator(&response)));
         Ok(Streamed { response, body, cache: cache.map(|anonymous| (cache_key(req.url), anonymous)) })
     }
@@ -616,6 +668,7 @@ impl Client {
             } else {
                 (self.load(current, &plan)?, None)
             };
+            self.check_embedder_response(current, &plan, &response)?;
             let Some(location) = redirect_target(&response) else {
                 return Ok((response, body));
                 // Not a redirect: this is the page.
@@ -1549,6 +1602,12 @@ pub struct Response {
 }
 
 impl Response {
+    pub fn single_header(&self, name: &str) -> Option<&str> {
+        let mut found = self.headers.iter().filter(|(key, _)| key == name);
+        let (_, first) = found.next()?;
+        found.next().is_none().then(|| first.trim_ascii())
+    }
+
     // JS: like adding methods to a class.
     /// The first header with this name. Names are not case sensitive.
     pub fn header(&self, name: &str) -> Option<&str> {

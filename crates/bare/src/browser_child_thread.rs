@@ -60,7 +60,11 @@ impl ThreadWorker {
         let Of::Worker(_, module) = of else { return Err("the child is not a worker".into()) };
         let cluster = dom.agent_cluster.get().expect("isolated worker").clone();
         let (url, html, inline) = worker_doc(url, module, from)?;
-        let cfg = cfg.fork();
+        let mut cfg = cfg.fork();
+        if cfg.client.has_embedder_policy() && inline.is_none() {
+            let entry = Url::parse(&url).map_err(|_| "the worker entry URL is invalid")?;
+            cfg.client.require_isolated_worker_entry(entry);
+        }
         let max_messages = dom.max_messages();
         let max_bytes = dom.sched_max_message_bytes();
         cfg.hub.enable_thread_wake();
@@ -150,9 +154,12 @@ fn run_worker<E: Eng>(
     let current = thread::current();
     let _wake = bare_net::parallel::on_end(move || current.unpark());
     let was_inline = inline.is_some();
-    if let Some(text) = inline
-        && browser.run_script(&text).is_err() {
-        return false;
+    if let Some(text) = inline {
+        if browser.configure_fetch(crate::browser_fetch::FetchConfig {
+            client: cfg.client.fork(), base_url: Some(url.clone()), limits: cfg.fetch,
+        }).is_err() || browser.run_script(&text).is_err() {
+            return false;
+        }
     }
     let mut result = browser.run_page(PageConfig {
         url, client: cfg.client.fork(), limits: cfg.page.clone(), fetch: Some((cfg.client.fork(), cfg.fetch)),

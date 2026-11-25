@@ -251,6 +251,12 @@ fn requests_isolation(response: &Response, url: &Url, frame: bool) -> Option<Emb
         let (_, value) = values.next()?;
         values.next().is_none().then(|| value.trim_ascii())
     };
+    if response.headers.iter().any(|(k, v)| k == "permissions-policy"
+        && v.split(',').any(|part| part.trim().starts_with("cross-origin-isolated")
+            && part.trim() != "cross-origin-isolated=(self)"))
+    {
+        return None;
+    }
     // Accept the bare policy tokens. Report-only, duplicate and composite fields
     // do not qualify for the initial top-level isolation path.
     if single("cross-origin-opener-policy") != Some("same-origin") {
@@ -653,6 +659,11 @@ pub(crate) fn load_document(client: &mut Client, url: &str, from: Option<&str>, 
         if !(200..300).contains(&resp.status) && !keep_errors {
             return Err(format!("status {}", resp.status));
         }
+        if frame && client.has_embedder_policy()
+            && resp.single_header("cross-origin-embedder-policy") != Some("require-corp")
+        {
+            return Err("the embedded document lacks a compatible cross-origin embedder policy".into());
+        }
         let ct = resp.header("content-type");
         let html = is_html(ct);
         if resp.encoded() {
@@ -691,6 +702,17 @@ impl Session {
         }).fork();
         c.set_site(self.browser.as_ref().and_then(|b| b.document_url()).and_then(|u| Url::parse(u.split('#').next().unwrap_or("")).ok()).map(|u| bare_net::cookie::site_of(&u)));
         c
+    }
+
+    pub(crate) fn resource_client(&mut self) -> Client {
+        let mut client = self.fork();
+        if self.isolation_requested == Some(EmbedderPolicy::RequireCorp)
+            && let Some(url) = self.browser.as_ref().and_then(|b| b.document_url())
+                .and_then(|url| Url::parse(url.split('#').next().unwrap_or("")).ok())
+        {
+            client.require_corp(url);
+        }
+        client
     }
 
     /// The storage of the session: it lives through every document.
@@ -942,6 +964,9 @@ impl Session {
                     let scan = Url::parse(url.split('#').next().unwrap_or("")).map(|page| {
                         let mut c = self.fork();
                         c.set_site(Some(bare_net::cookie::site_of(&page)));
+                        if isolation_requested == Some(EmbedderPolicy::RequireCorp) {
+                            c.require_corp(Url::parse(url.split('#').next().unwrap_or("")).expect("parsed document URL"));
+                        }
                         Scan::new(c, page, self.cfg.page.resources.clone(), deadline)
                     });
                     let Ok(scan) = scan else { return SessionStop::LoadFailed("the URL is not an http(s) URL".into()) };
@@ -1000,8 +1025,9 @@ impl Session {
             let (b, r) = match next.take() {
                 None => {
                     // The settled document goes on: same realm, no load.
+                    let client = self.resource_client();
                     let mut b = self.browser.take().expect("resume checked the browser");
-                    let r = b.resume_page(self.fork(), page, steps);
+                    let r = b.resume_page(client, page, steps);
                     (b, r)
                 }
                 Some(Next { from, url, body, how }) => {
@@ -1038,7 +1064,18 @@ impl Session {
                     };
                     let (bl, ev, hp) = (self.cfg.browser, self.cfg.eval, self.cfg.heap);
                     let started = match Browser::<New>::make(dom, bl, ev, hp) {
-                        Ok(b) => self.load(b.with_session_wall_clock(self.cfg.virtual_clock), AnyBrowser::New, url, scroll, &mut base, &page, &lim, &mut scan),
+                        Ok(mut b) => {
+                            if isolation_requested == Some(EmbedderPolicy::RequireCorp) {
+                                let Ok(origin) = Url::parse(url.split('#').next().unwrap_or("")) else {
+                                    return SessionStop::LoadFailed("the isolated document URL is invalid".into());
+                                };
+                                base.require_corp(origin);
+                                if b.attach_isolated_agent(Default::default()).is_err() {
+                                    return SessionStop::LoadFailed("the isolated agent could not be made".into());
+                                }
+                            }
+                            self.load(b.with_session_wall_clock(self.cfg.virtual_clock), AnyBrowser::New, url, scroll, &mut base, &page, &lim, &mut scan)
+                        }
                         Err(_) => Err(SessionStop::LoadFailed("the realm could not be made".into())),
                     };
                     match started {

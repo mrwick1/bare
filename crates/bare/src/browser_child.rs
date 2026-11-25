@@ -79,7 +79,6 @@ use crate::browser_loader::{PageConfig, PageLimits, Stop, deadline_after, label}
 use crate::browser::R;
 use crate::browser_remote_window::{Common, Side, Win};
 use crate::browser_scoped::run;
-use bare_js_api::Engine as _;
 use crate::browser_port_hub::PortHub;
 use crate::browser_scheduler::Sender;
 use crate::browser_session::{SessionLimits, load_document};
@@ -654,7 +653,12 @@ impl<E: Eng> Browser<E> {
         }
         b.start_refresh();
         let depth = cfg.depth + 1;
-        let kid = Cfg { env: cfg.env.clone(), client: cfg.client.fork(), page: cfg.page.clone(), fetch: cfg.fetch, browser: cfg.browser, total: cfg.total.clone(), depth, top_site: cfg.top_site.clone(), hub: cfg.hub.clone() };
+        let mut kid = cfg.fork();
+        kid.depth = depth;
+        if kid.client.has_embedder_policy() && matches!(of, Of::Frame(_)) {
+            let origin = Url::parse(url.split('#').next().unwrap_or("")).map_err(|_| "the frame URL is invalid".to_string())?;
+            kid.client.require_corp(origin);
+        }
         *b.dom.kids.cfg.borrow_mut() = Some(Rc::new(kid));
         b.dom.kids.page.set(cfg.hub.new_page());
         b.dom.kids.poll.set(true);
@@ -787,13 +791,14 @@ impl<E: Eng> Browser<E> {
                         b.dom.kids.poll_to.set(Some(to));
                     }
                     let first = !ch.started;
+                    let child_cfg = b.dom.kids.cfg().expect("child is configured");
                     let r = if ch.started {
-                        let mut c = cfg.client.fork();
+                        let mut c = child_cfg.client.fork();
                         c.set_site(ch.site.clone());
                         b.resume_page(c, cfg.page.clone(), &[])
                     } else {
                         ch.started = true;
-                        let (c, f) = (cfg.client.fork(), cfg.client.fork());
+                        let (c, f) = (child_cfg.client.fork(), child_cfg.client.fork());
                         b.run_page(PageConfig { url, client: c, limits: cfg.page.clone(), fetch: Some((f, cfg.fetch)) })
                     };
                     t.tasks += r.tasks;
