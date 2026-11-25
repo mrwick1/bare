@@ -27,6 +27,8 @@ stacker = "0.1.25"
 [features]
 # Count the executed ops, pairs and triples (`src/opcount.rs`, example `op_count`). Off by default: the normal build has no call into it.
 op-count = []
+# Verify compiled bytecode in release conformance and fuzz builds.
+verify-compiled = []
 
 [[example]]
 name = "op_count"

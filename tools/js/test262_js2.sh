@@ -1,7 +1,8 @@
 #!/bin/sh
 # Run the pinned Test262 subset on Vex. Reports results without enforcing a baseline.
 # Usage: tools/js/test262_js2.sh [-j JOBS] [-g REGEX] [-o OUTDIR]
-# TEST262 overrides the checkout. TEST262_RUN overrides the runner binary.
+# The runner verifies compiled bytecode. TEST262_RUN overrides the runner binary.
+# TEST262 overrides the checkout.
 # T262_DIR_TIMEOUT sets the worker timeout in seconds (default 120).
 # OUTDIR contains new.txt (per-test results) and counts.txt (pass/fail/skip by directory).
 set -eu
@@ -49,7 +50,7 @@ pin=$(sed -n 's/^# commit //p' "$fix/test262-subset.txt" | head -n 1)
 have=$(git -C "$T262" rev-parse HEAD 2>/dev/null) || { echo "no test262 checkout at $T262 (see the header)" >&2; exit 2; }
 [ "$have" = "$pin" ] || { echo "test262 at $have, the subset pins $pin" >&2; exit 2; }
 if [ -z "${TEST262_RUN:-}" ]; then
-  cargo build --release -q -p bare-vex --example test262_run || exit 1
+  cargo build --release -q -p bare-vex --features verify-compiled --example test262_run || exit 1
 fi
 mkdir -p "$outdir"
 parts=$(mktemp -d "$outdir/parts.XXXXXX")

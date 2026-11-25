@@ -122,6 +122,9 @@ impl Lazy {
     }
 }
 
+// Keep verifier cost out of normal release builds. Conformance and fuzz builds can opt in.
+const VERIFY_COMPILED: bool = cfg!(any(debug_assertions, feature = "verify-compiled"));
+
 impl LazyCompile for Lazy {
     fn compile(&mut self, codes: &Codes, ci: usize) -> Result<(), String> {
         let at = self.pending.binary_search_by_key(&ci, |w| w.ci).map_err(|_| "no function waits at this code")?;
@@ -143,6 +146,13 @@ impl LazyCompile for Lazy {
         code.noctor |= codes[ci].noctor;
         debug_assert!(code.flags & CF_LINK == 0, "a lazy function must not use super");
         debug_assert_eq!(codes.len(), base, "nothing else adds codes during a compile");
+        if VERIFY_COMPILED {
+            let total = base + new.len();
+            for (offset, child) in new.iter().enumerate() {
+                crate::verify::verify_at(child, base + offset, total)?;
+            }
+            crate::verify::verify_at(&code, ci, total)?;
+        }
         codes.push_all(new);
         codes.set(ci, code);
         self.wait(u, pending);
@@ -164,6 +174,9 @@ impl LazyCompile for Lazy {
         let mut code = stub(&self.atoms, self.units[u].facts.get(id), Some(name))?;
         // A built-in has no construct slot, even when its body is a function declaration in the prelude.
         code.noctor = true;
+        if VERIFY_COMPILED {
+            crate::verify::verify_at(&code, codes.len(), codes.len() + 1)?;
+        }
         let ci = codes.push_all(vec![code]);
         self.pending.push(Wait { ci, unit: u, child: Some(Child { id, chain: None, self_name: false, name: Some(name.into()), ready: None }) });
         Ok(ci)
@@ -207,6 +220,9 @@ fn load_unit(lazy: &mut Lazy, codes: &Codes, src: &str, mode: Mode) -> Result<(u
 fn bind_unit(lazy: &mut Lazy, codes: &Codes, source: Rc<str>, unit: UnitCode, scoped: bool) -> Result<(usize, Option<ModInfo>), String> {
     let UnitCode { codes: mut new, facts, pending, info } = unit;
     let base = codes.len();
+    if VERIFY_COMPILED {
+        crate::verify::verify_program(&new)?;
+    }
     if base.checked_add(new.len() - 1).is_none_or(|last| last > u32::MAX as usize) {
         return Err("too many codes in the realm".into());
     }
@@ -377,6 +393,9 @@ pub fn load_with(host: &str, source: &str) -> Result<Vm, String> {
     let mut prog = Program { codes };
     if !host.is_empty() {
         prog.codes = compile_after(prog.codes, host, &shared, Limits::default()).map_err(|e| format!("host script: {e}"))?;
+    }
+    if VERIFY_COMPILED {
+        crate::verify::verify_program(&prog.codes)?;
     }
     let mut vm = Vm::new_compiled(prog, shared);
     vm.realm.lazy = Some(Box::new(lazy));

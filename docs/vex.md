@@ -25,7 +25,7 @@ An object holds a 32-bit shape ID in its header. The shape says which keys the o
 
 - A pre-parse reads the whole script and reports every early error at load. The top level is compiled at once. A function inside it is a stub that is parsed and compiled at its first call, so code that never runs costs only its pre-parse.
 - The compiler goes from the parse to register bytecode. Locals and arguments live in registers. A variable that an inner function captures lives in a small context object.
-- One instruction is one 32-bit word with three 8-bit operands, and sometimes one more word. The public VM constructor verifies supplied bytecode. Script loading and lazy compilation use the compiler output directly.
+- One instruction is one 32-bit word with three 8-bit operands, and sometimes one more word. The public VM constructor verifies supplied bytecode. Debug builds and builds with `verify-compiled` also verify compiled and cache-loaded code before installation.
 - The interpreter is one loop with one `match`. The hot state is in locals. One `Vec<Value>` holds the frames of all calls. Rare operations sit in cold arms, so the hot code stays small and stable. Vex has no JIT.
 - A compile result can be cached in a portable form and bound to a new realm.
 
