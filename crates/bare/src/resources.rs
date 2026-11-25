@@ -478,6 +478,21 @@ pub(crate) fn potentially_trustworthy(u: &Url) -> bool {
 }
 
 /// The least-trusted site relation in the URL list. A later redirect cannot make it safer.
+/// The `Referer` value of a request from the document `doc` to `target`, by Chrome's default referrer policy
+/// (`strict-origin-when-cross-origin`, Referrer Policy, "determine request's referrer"): the document URL to the same origin, its
+/// origin to another origin, and nothing from https to http. A document URL longer than 4096 bytes gives its origin. `Url` keeps no
+/// fragment and no user info. The policy of the page (`Referrer-Policy`, `<meta name=referrer>`) is not read.
+pub(crate) fn referrer(doc: &Url, target: &Url) -> Option<String> {
+    if potentially_trustworthy(doc) && !potentially_trustworthy(target) {
+        return None;
+    }
+    let full = doc.to_string();
+    if doc.same_origin(target) && full.len() <= 4096 {
+        return Some(full);
+    }
+    Some(Url { scheme: doc.scheme, host: doc.host.clone(), port: doc.port, path: "/".into() }.to_string())
+}
+
 pub(crate) fn metadata_site(doc: &Url, target: &Url, previous: &'static str) -> &'static str {
     if previous == "cross-site" {
         return previous;
@@ -515,7 +530,11 @@ pub fn fetch(client: &mut http::Client, target: &Target, limits: &Limits, deadli
         if Instant::now() >= deadline { return Err(LoadError::TimedOut); }
         let cors_origin = client.embedder_document().filter(|doc| target.expect == Expect::Module && !doc.same_origin(&current))
             .map(|doc| Url { scheme: doc.scheme, host: doc.host.clone(), port: doc.port, path: String::new() }.to_string());
-        let mut headers = Vec::with_capacity(4);
+        let referer = doc.and_then(|d| referrer(d, &current));
+        let mut headers = Vec::with_capacity(5);
+        if let Some(r) = &referer {
+            headers.push(("Referer", r.as_str()));
+        }
         if let Some(o) = &cors_origin {
             headers.push(("Origin", o.as_str()));
         }

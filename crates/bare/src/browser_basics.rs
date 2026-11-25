@@ -6,7 +6,7 @@
 //! `navigator` nothing. Values are Chrome 155 on Linux where the HTML Standard leaves a choice (`docs/internal/decisions.md` lists each one).
 //!
 //! `document`: `visibilityState` "visible" and `hidden` false (getters: "hidden" and true once the page closes, `Browser::hide`),
-//! `referrer` "" (bare sends no `Referer`), `designMode` "off" (data properties: a write only stores the value, the page has no design
+//! `referrer` "" (a navigation sends no `Referer`), `designMode` "off" (data properties: a write only stores the value, the page has no design
 //! mode); `characterSet`, `charset` and `inputEncoding` (one getter:
 //! the `<meta charset>` or `<meta http-equiv=content-type>` in `<head>` through `bare_html::encoding`'s labels, else "UTF-8"; the
 //! `Content-Type` header is not known to the document), `contentType` "text/html", `compatMode` ("CSS1Compat" with a doctype, else
