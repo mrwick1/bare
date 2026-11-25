@@ -25,7 +25,7 @@ An object holds a 32-bit shape ID in its header. The shape says which keys the o
 
 - A pre-parse reads the whole script and reports every early error at load. The top level is compiled at once. A function inside it is a stub that is parsed and compiled at its first call, so code that never runs costs only its pre-parse.
 - The compiler goes from the parse to register bytecode. Locals and arguments live in registers. A variable that an inner function captures lives in a small context object.
-- One instruction is one 32-bit word with three 8-bit operands, and sometimes one more word. A verifier checks the code before the interpreter trusts it.
+- One instruction is one 32-bit word with three 8-bit operands, and sometimes one more word. The public VM constructor verifies supplied bytecode. Debug builds and builds with `verify-compiled` also verify compiled and cache-loaded code before installation.
 - The interpreter is one loop with one `match`. The hot state is in locals. One `Vec<Value>` holds the frames of all calls. Rare operations sit in cold arms, so the hot code stays small and stable. Vex has no JIT.
 - A compile result can be cached in a portable form and bound to a new realm.
 
@@ -45,7 +45,7 @@ The engine knows nothing about the DOM. The host (`crates/bare`) gives it native
 
 ## Conformance
 
-On the test262 suite at pin `e4fbf57745c6aae3d1f12f181ecef78b1665d812`, Vex passes 29,217 tests, fails 1,619 and skips 8,537 (the skips are features the suite flags and Vex does not claim). The per-directory counts are in `tools/fixtures/js`. Source: [full cost matrix](internal/progress/2026-11-22-full-cost-matrix.md).
+On the test262 suite at pin `e4fbf57745c6aae3d1f12f181ecef78b1665d812`, Vex passes 29,217 tests, fails 1,619 and skips 8,537 (the skips are features the suite flags and Vex does not claim). Run a selected area with `tools/js/test262_js2.sh -g REGEX`. The runner writes per-test results and per-directory counts. The historical baseline is in `tools/fixtures/js`. Source: [full cost matrix](internal/progress/2026-11-22-full-cost-matrix.md).
 
 ## Speed and memory
 

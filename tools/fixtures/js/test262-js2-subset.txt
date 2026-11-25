@@ -1,4 +1,4 @@
-# The test262 directories (below test/) that tools/js/test262_js2.sh runs on both engines: the core census features and the built-ins of
+# The test262 directories (below test/) that tools/js/test262_js2.sh runs on Vex: the core census features and the built-ins of
 # plan step S2.7 (Object, Function, Array, Error and its subclasses). A line that starts with `-` leaves a directory out.
 # The commit is the one of tools/fixtures/js/test262-subset.txt (the same checkout).
 # Left out: modules, `eval` and `with` (the census has no `with` and no direct `eval`; plan section 8 builds `eval` only if the census shows it).

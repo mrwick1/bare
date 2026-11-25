@@ -79,12 +79,16 @@ fn window(ins: &Ins, recipes: &Recipes) -> Option<u32> {
 /// Check the code table after the loader has resolved child references.
 pub fn verify_program(codes: &[Code]) -> Result<(), String> {
     for (ci, code) in codes.iter().enumerate() {
-        if let Some(child) = code.funcs.iter().find(|&&child| child as usize >= codes.len()) {
-            return Err(format!("function {ci}: no child function {child} in the code table"));
-        }
-        verify(code).map_err(|err| format!("function {ci}: {err}"))?;
+        verify_at(code, ci, codes.len())?;
     }
     Ok(())
+}
+
+pub(crate) fn verify_at(code: &Code, index: usize, total: usize) -> Result<(), String> {
+    if let Some(child) = code.funcs.iter().find(|&&child| child as usize >= total) {
+        return Err(format!("function {index}: no child function {child} in the code table"));
+    }
+    verify(code).map_err(|err| format!("function {index}: {err}"))
 }
 
 /// Check `code`. Gives the first error. The function table and the lazy compiler's source data belong to the loader.
