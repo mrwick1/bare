@@ -235,6 +235,8 @@ mod browser_idb_cursor_tests;
 #[cfg(test)]
 mod browser_idb_store_tests;
 #[cfg(test)]
+mod browser_idb_many_requests_tests;
+#[cfg(test)]
 mod browser_idb_reread_tests;
 pub mod resources;
 mod browser_loader;
