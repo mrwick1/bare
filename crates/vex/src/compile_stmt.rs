@@ -195,8 +195,8 @@ impl<'a> Fc<'a> {
         }
         let uses_args = !self.is_arrow
             && (split_arguments || self.fn_flags & facts::ARGS != 0 || self.cap.contains_key("arguments") || self.force_ctx)
-            && !decls.iter().any(|d| d.name == "arguments");
-        if uses_args {
+            && !decls.iter().any(|d| d.name == "arguments" && d.kind != VK::Var);
+        if uses_args && !decls.iter().any(|d| d.name == "arguments") {
             decls.push(Decl { name: Cow::Borrowed("arguments"), kind: VK::Var, end: 0, reg: None });
         }
         // The name of a named function expression, when the text of the function uses it and nothing else binds it.
@@ -234,8 +234,8 @@ impl<'a> Fc<'a> {
             let Some(v) = self.find_var(&d.name) else { continue };
             let (home, kind) = (v.home, v.kind);
             match (kind, home, d.reg) {
-                // Written by `CreateArgs` below.
-                (VK::Var, _, None) if matches!(&*d.name, "arguments" | "new.target") => {}
+                // The implicit bindings are initialized below.
+                (VK::Var, _, None) if (uses_args && d.name == "arguments") || d.name == "new.target" => {}
                 (VK::Callee, Home::Reg(r), None) => {
                     self.op(Op::LoadCallee, r, 0, 0);
                     self.set_live(r);
