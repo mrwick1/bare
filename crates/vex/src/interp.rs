@@ -441,7 +441,13 @@ fn gen_resume(realm: &mut Realm, stack: &mut Vec<Value>, prog: &Codes, ci: usize
 }
 
 impl Vm {
+    /// Create a VM from caller-supplied bytecode.
+    ///
+    /// Panics if the bytecode fails verification.
     pub fn new(prog: Program, shared: Arc<SharedAtoms>) -> Vm {
+        if let Err(err) = crate::verify::verify_program(&prog.codes) {
+            panic!("invalid bytecode: {err}");
+        }
         Self::new_with_flags(prog, shared, true)
     }
 
@@ -2772,3 +2778,7 @@ mod tests;
 #[cfg(test)]
 #[path = "interp_global_site_tests.rs"]
 mod global_site_tests;
+
+#[cfg(test)]
+#[path = "interp_program_boundary_tests.rs"]
+mod program_boundary_tests;

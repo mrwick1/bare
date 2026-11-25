@@ -375,7 +375,7 @@ fn an_error_for_a_call_of_a_value_that_is_no_function() {
     f.e(Op::LoadUndef, 1, 0, 0);
     f.e(Op::Call, 2, 0, 0);
     f.e(Op::Ret, 2, 0, 0);
-    assert_eq!(run_err(&sh, vec![f.build()]), "TypeError: not a function");
+    assert_eq!(run_err(&sh, vec![f.build()]), "TypeError: 5 is not a function");
 }
 
 #[test]
