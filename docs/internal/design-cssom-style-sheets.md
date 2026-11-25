@@ -1,6 +1,6 @@
 # CSSOM edits of a `<style>` sheet without DOM text
 
-Date: 2026-11-25. Status: proposal, for review by the owner.
+Date: 2026-11-25. Status: option A approved by the owner on 2026-11-25.
 
 ## Problem
 
