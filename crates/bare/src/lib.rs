@@ -130,6 +130,8 @@ mod browser_speech_tests;
 mod browser_filereader_tests;
 #[cfg(test)]
 mod browser_cors_tests;
+#[cfg(test)]
+mod browser_fetch_origin_tests;
 pub mod browser_navigation;
 mod browser_navigation_params;
 mod browser_navigation_state;
